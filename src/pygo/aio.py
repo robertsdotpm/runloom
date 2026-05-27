@@ -108,18 +108,161 @@ class _TimerHandle(_Handle):
 
 
 # ====================================================================
+# PygoFuture -- pure-Python Future replacement with synchronous-fire
+# callbacks.  Not a subclass of asyncio.Future (the C class blocks real
+# method overrides); duck-types the future protocol asyncio uses.
+#
+# Why this exists: stock asyncio.Future.set_result schedules every
+# done_callback through loop.call_soon -- one goroutine spawn per
+# callback in our model.  At 10k concurrent tasks that's 30k+ goroutine
+# spawns, more than asyncio's tight C-deque path can be beaten by.
+#
+# In a goroutine model the defer is unnecessary -- the callbacks we
+# register are just "wake the parked goroutine" via try_send, which is
+# reentrant-safe.  Firing inline turns the bridge from ~5x slower than
+# asyncio (at high fan-out) into a real win.
+#
+# asyncio recognises us via the _asyncio_future_blocking duck-type
+# protocol (used by ensure_future / isfuture / Task.__step).  No
+# isinstance(asyncio.Future) checks rely on the class hierarchy in
+# code paths we exercise.
+# ====================================================================
+_PENDING   = 0
+_FINISHED  = 1
+_CANCELLED = 2
+
+
+class PygoFuture(object):
+    """Duck-typed Future with synchronous-callback dispatch.
+
+    Used by PygoEventLoop.create_future and as the base of PygoTask.
+    Intentionally no __slots__ -- asyncio.gather and friends set extra
+    attributes (_log_destroy_pending, _cancel_message, ...) on futures
+    they adopt, and we need to accept whatever they throw at us."""
+
+    def __init__(self, *, loop=None):
+        self._state    = _PENDING
+        self._result   = None
+        self._exception = None
+        self._callbacks = []
+        self._loop     = loop
+        # Required by asyncio's await protocol.  Task.__step sets this
+        # to False when it adopts the future; we re-arm to True in
+        # __await__ each time we suspend.
+        self._asyncio_future_blocking = False
+
+    # ---- query ----
+    def done(self):       return self._state != _PENDING
+    def cancelled(self):  return self._state == _CANCELLED
+    def get_loop(self):   return self._loop
+
+    def result(self):
+        if self._state == _PENDING:
+            raise asyncio.InvalidStateError("Future not done")
+        if self._state == _CANCELLED:
+            raise asyncio.CancelledError()
+        if self._exception is not None:
+            raise self._exception
+        return self._result
+
+    def exception(self):
+        if self._state == _PENDING:
+            raise asyncio.InvalidStateError("Future not done")
+        if self._state == _CANCELLED:
+            raise asyncio.CancelledError()
+        return self._exception
+
+    # ---- mutation ----
+    def set_result(self, result):
+        if self._state != _PENDING:
+            raise asyncio.InvalidStateError("Future already done")
+        self._result = result
+        self._state  = _FINISHED
+        self._fire_callbacks()
+
+    def set_exception(self, exception):
+        if self._state != _PENDING:
+            raise asyncio.InvalidStateError("Future already done")
+        if isinstance(exception, type):
+            exception = exception()
+        if isinstance(exception, StopIteration):
+            raise TypeError(
+                "StopIteration interacts badly with generators "
+                "and cannot be raised into a Future")
+        self._exception = exception
+        self._state     = _FINISHED
+        self._fire_callbacks()
+
+    def cancel(self, msg=None):
+        if self._state != _PENDING:
+            return False
+        self._state = _CANCELLED
+        self._fire_callbacks()
+        return True
+
+    # ---- callbacks ----
+    def add_done_callback(self, callback, *, context=None):
+        if self._state != _PENDING:
+            # Already resolved -- fire this one callback immediately,
+            # consistent with asyncio.Future's semantics for late
+            # add_done_callback.
+            try:
+                callback(self)
+            except BaseException as e:
+                self._report_exc(e)
+        else:
+            self._callbacks.append((callback, context))
+
+    def remove_done_callback(self, callback):
+        filtered = [(cb, ctx) for cb, ctx in self._callbacks if cb is not callback]
+        removed  = len(self._callbacks) - len(filtered)
+        self._callbacks = filtered
+        return removed
+
+    def _fire_callbacks(self):
+        cbs, self._callbacks = self._callbacks, []
+        for cb, ctx in cbs:
+            try:
+                if ctx is None:
+                    cb(self)
+                else:
+                    ctx.run(cb, self)
+            except BaseException as e:
+                self._report_exc(e)
+
+    def _report_exc(self, e):
+        if self._loop is not None:
+            self._loop.call_exception_handler({
+                "message": "exception in PygoFuture callback",
+                "exception": e,
+                "future": self,
+            })
+
+    # ---- await protocol ----
+    def __await__(self):
+        if self._state == _PENDING:
+            self._asyncio_future_blocking = True
+            yield self
+            assert self._state != _PENDING
+        return self.result()
+
+    # Generators implement __iter__; tasks expect that to exist for await.
+    __iter__ = __await__
+
+
+# ====================================================================
 # PygoTask -- the heart of the bridge.
 # ====================================================================
-class PygoTask(asyncio.Future):
-    """asyncio.Task replacement.  Each task owns a goroutine that
-    drives the coroutine; the Future side exposes the asyncio-visible
-    state so external code can `await task` etc.
+class PygoTask(PygoFuture):
+    """asyncio.Task replacement.  Each task owns a goroutine that drives
+    the coroutine; the Future side exposes the asyncio-visible state
+    so external code can `await task` etc.
 
-    Why subclass Future instead of Task?  asyncio.Task's __step is
-    tightly coupled to the loop's call_soon ring -- exactly the
-    dispatch tier we're trying to bypass.  By inheriting Future we
-    get done()/result()/exception()/add_done_callback() for free
-    while keeping the driver loop in our own goroutine.
+    Subclasses PygoFuture, not asyncio.Future -- the C Future class
+    forbids real method overrides and we need set_result/set_exception/
+    cancel to fire callbacks synchronously (otherwise our gather-in-
+    flight done-callback cascade goes through N call_soon -> N
+    goroutine spawns and the bridge ends up slower than asyncio).
     """
 
     def __init__(self, coro, *, loop=None, name=None):
@@ -323,7 +466,7 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
         return PygoTask(coro, loop=self, name=name)
 
     def create_future(self):
-        return asyncio.Future(loop=self)
+        return PygoFuture(loop=self)
 
     # ---- callback scheduling ----
     def call_soon(self, callback, *args, context=None):
@@ -409,7 +552,9 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
     def run_until_complete(self, future):
         if asyncio.iscoroutine(future):
             future = self.create_task(future)
-        elif not isinstance(future, asyncio.Future):
+        elif not (isinstance(future, asyncio.Future)
+                  or isinstance(future, PygoFuture)
+                  or asyncio.isfuture(future)):
             raise TypeError("argument must be a Future or coroutine")
 
         self._running = True
@@ -436,6 +581,20 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
     def stop(self):
         # Schedule a sentinel task that just exits, in case run_forever
         # is waiting.  In practice users should call cancel() on tasks.
+        pass
+
+    # asyncio.run() shutdown protocol -- minimal no-ops so user code
+    # written against asyncio.run works through `paio.install()`.
+    async def shutdown_asyncgens(self):
+        return None
+
+    async def shutdown_default_executor(self, timeout=None):
+        return None
+
+    def get_task_factory(self):
+        return None
+
+    def set_task_factory(self, factory):
         pass
 
     # ---- exception handling ----
