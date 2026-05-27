@@ -49,6 +49,20 @@ except Exception:
 SRC_C = "src/pygo_core"
 
 # --------------------------------------------------------------------
+# macOS universal-binary fix.  CPython on macOS is built universal2,
+# so by default it asks the compiler for `-arch arm64 -arch x86_64`
+# on every source file -- including our arch-specific .S, which only
+# parses as one of the two.  Pin to the current host arch so a single
+# .S compiles cleanly.  Honour any user-supplied ARCHFLAGS.
+# --------------------------------------------------------------------
+if sys.platform == "darwin" and "ARCHFLAGS" not in os.environ:
+    host_arch = platform.machine().lower()
+    if host_arch in ("arm64", "aarch64"):
+        os.environ["ARCHFLAGS"] = "-arch arm64"
+    elif host_arch in ("x86_64", "amd64"):
+        os.environ["ARCHFLAGS"] = "-arch x86_64"
+
+# --------------------------------------------------------------------
 # Platform / arch / compiler detection
 # --------------------------------------------------------------------
 PLAT = sys.platform
