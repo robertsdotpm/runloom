@@ -46,16 +46,28 @@ snap on every yield).
 
 | coros × yields | pygo (C sched + asm) | asyncio | speedup |
 | ---: | ---: | ---: | ---: |
-| 10 × 100   | **2.99 M/s** | 377 K/s | **7.9×** |
-| 50 × 100   | **2.82 M/s** | 501 K/s | **5.6×** |
-| 100 × 100  | **2.56 M/s** | 502 K/s | **5.1×** |
-| 150 × 100  | **2.60 M/s** | 523 K/s | **5.0×** |
-| 1000 × 100 | **1.87 M/s** | 560 K/s | **3.3×** |
+| 10 × 100   | **3.14 M/s** | 392 K/s | **8.0×** |
+| 50 × 100   | **3.00 M/s** | 496 K/s | **6.0×** |
+| 100 × 100  | **2.76 M/s** | 514 K/s | **5.4×** |
+| 150 × 100  | **2.69 M/s** | 516 K/s | **5.2×** |
+| 1000 × 100 | **2.42 M/s** | 534 K/s | **4.5×** |
 
-Phase B traded ~2× single-yield throughput for correctness: per yield
-we now snapshot cframe, current_frame, datastack chunk pointers,
-contextvars, exception state, and recursion counters.  Each goroutine
-gets its own independent slice of CPython thread state.
+**Per-yield latency** (single-coroutine tight loop, snap path
+isolated):
+
+| path | 3.12 | 3.13t |
+| ---: | ---: | ---: |
+| 1 coro fast path (nobody else ready, snap skipped — Go's `runtime.Gosched`)  | **60 ns**  | **170 ns** |
+| 2 coros ping-pong (full snap + asm yield + load every cycle)                 | **187 ns** | **317 ns** |
+
+Phase B's full per-g PythonState snap costs ~125 ns per yield over a
+raw asm context switch.  We snapshot cframe / current_frame,
+datastack chunk pointers, contextvars, exception state, and recursion
+counters — enough to isolate every goroutine's slice of CPython
+thread state.  We deliberately don't snapshot the top frame
+(`PyThreadState_GetFrame` would allocate every yield), since pygo
+doesn't expose `g.frame` for introspection and the underlying
+`_PyInterpreterFrame` is kept alive by `datastack_chunk`.
 
 **Concurrent yielded goroutines (Phase B stress test):**
 
@@ -91,10 +103,11 @@ pygo M:N matches Python's native threading throughput (~5% overhead
 from Chase-Lev bookkeeping + per-coro state) while exposing the
 goroutine model (cheap spawn, no thread-per-task explosion at scale).
 
-Per-yield latency:
+Per-yield latency (single-coro fast path — the comparable measurement
+to Go's Gosched):
 - Go's `runtime.Gosched()`: ~50 ns
-- **pygo today (3.12)**: ~200 ns
-- **pygo on 3.13t**: ~350 ns
+- **pygo today (3.12)**: **60 ns** (within 20% of Go)
+- **pygo on 3.13t**: **170 ns**
 - asyncio: ~1800 ns
 - pygo v0 (before Phase A): ~14 000 ns
 

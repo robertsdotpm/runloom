@@ -45,7 +45,6 @@ struct pygo_pystate_snap {
     _PyStackChunk *datastack_chunk;
     PyObject **datastack_top;
     PyObject **datastack_limit;
-    PyObject *top_frame;                     /* owned ref to PyFrameObject */
     _PyErr_StackItem *exc_info;
     _PyErr_StackItem exc_state;
 #endif
