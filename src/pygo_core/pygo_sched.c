@@ -1,13 +1,17 @@
-/* sched.c -- C-level cooperative scheduler.
+/* pygo_sched.c -- C-level cooperative scheduler.
  *
  * Cost model (target 50-100 ns per yield once everything compiles):
  *   - yield: 2 list ops + ptr swap + asm switch + tstate snap/restore.
  *   - resume: same in reverse.
  *
  * What's _not_ here (yet):
- *   - netpoll integration (parking on fds)
- *   - work-stealing across threads
- *   - free-threaded-Python coexistence
+ *   - work-stealing across threads (Phase C v1 is in mn_sched.c)
+ *
+ * Phase B: per-goroutine snapshot of CPython tstate.  Algorithm copied
+ * from greenlet (MIT) -- src/greenlet/TPythonState.cpp.  Each goroutine
+ * gets its own slice of cframe / current_frame / datastack_chunk / etc,
+ * so frames from different gs do not link into one shared C-stack chain.
+ * Lifts the ~200 concurrent yielded goroutine cliff.
  *
  * The Python side talks to us through a tiny Python type defined in
  * module.c (PygoG).  The user-visible API is `pygo.go / yield_ /
@@ -40,55 +44,182 @@ static double pygo_monotonic(void)
     return (double)time(NULL);
 }
 
-/* ---- tstate snapshot ---- */
-/* What we save/restore around each pygo_coro_resume:
- *   - py_recursion_remaining + c_recursion_remaining: prevent each
- *     yield from permanently consuming the OS thread's recursion
- *     budget across the C-stack switch.
+/* ---- tstate snapshot ----
  *
- * What we DON'T save/restore but probably need to (Phase B+ work,
- * see README "what's broken"):
- *   - tstate->cframe (3.12) / current_frame (3.13+): topmost Python
- *     frame.  Without per-g save/restore, frame chains link across
- *     goroutines.  Greenlet handles this in ~200 lines of CPython-
- *     version-specific C.  The crash threshold around 200 concurrent
- *     yielded goroutines is this issue.
- *   - tstate->exc_info: exception state chain.
+ * Save copies fields from tstate INTO snap and takes ownership of the
+ * owned-pointer fields (context, top_frame, delete_later).  Load copies
+ * fields from snap BACK INTO tstate and transfers ownership the other
+ * way.  After a load, the snap is empty.  Save/load must be balanced.
+ *
+ * Greenlet uses operator<< / operator>> for this; we use snap/load.
+ * The field set is the same as greenlet's PythonState + ExceptionState
+ * combined.  Each PY_VERSION_HEX gate matches greenlet's GREENLET_PY*
+ * branches.
  */
-/* Recursion-counter snapshot is known correct.  cframe + exc_info
- * snapshot was attempted (and is left in the struct for the future
- * Phase B work) but does NOT fully isolate the Python frame chain
- * across goroutines.  Greenlet's reference handles this in ~200 LoC
- * of CPython-version-specific C; that's the work for a future turn. */
-static void pygo_g_tstate_save(pygo_g_t *g)
+static void pygo_pystate_snap(pygo_pystate_snap_t *snap)
 {
     PyThreadState *ts = PyThreadState_GET();
+
+    memset(snap, 0, sizeof(*snap));
+
 #if PY_VERSION_HEX >= 0x030C0000
-    g->py_recursion_remaining = ts->py_recursion_remaining;
-    g->c_recursion_remaining = ts->c_recursion_remaining;
-#else
-    g->recursion_depth = ts->recursion_depth;
+    /* contextvars: steal a strong ref. */
+    Py_XINCREF(ts->context);
+    snap->context = ts->context;
+
+    snap->py_recursion_remaining = ts->py_recursion_remaining;
+    snap->c_recursion_remaining = ts->c_recursion_remaining;
+
+    snap->datastack_chunk = ts->datastack_chunk;
+    snap->datastack_top = ts->datastack_top;
+    snap->datastack_limit = ts->datastack_limit;
+
+    /* PyThreadState_GetFrame returns a NEW reference (or NULL).  That
+     * keeps the top frame alive while this g is suspended, even if the
+     * caller drops their reference. */
+    snap->top_frame = (PyObject *)PyThreadState_GetFrame(ts);
+
+    snap->exc_info = ts->exc_info;
+    snap->exc_state = ts->exc_state;
 #endif
-    g->snapshot_valid = 1;
+
+#if PY_VERSION_HEX >= 0x030C0000 && PY_VERSION_HEX < 0x030D0000
+    /* 3.12: cframe lives on the C stack, threaded through the linked
+     * list.  We save the pointer; it remains valid because g's C stack
+     * is preserved across the swap. */
+    snap->cframe = ts->cframe;
+    snap->trash_delete_nesting = ts->trash.delete_nesting;
+#endif
+
+#if PY_VERSION_HEX >= 0x030D0000
+    /* 3.13: cframe is gone; current_frame is directly on tstate. */
+    snap->current_frame = ts->current_frame;
+    Py_XINCREF(ts->delete_later);
+    snap->delete_later = ts->delete_later;
+#endif
+
+#if PY_VERSION_HEX < 0x030C0000
+    snap->recursion_depth = ts->recursion_depth;
+#endif
+
+    snap->valid = 1;
 }
 
-static void pygo_g_tstate_restore(const pygo_g_t *g)
+static void pygo_pystate_load(pygo_pystate_snap_t *snap)
 {
     PyThreadState *ts;
-    if (!g->snapshot_valid) return;
+
+    if (!snap->valid) {
+        return;
+    }
     ts = PyThreadState_GET();
+
 #if PY_VERSION_HEX >= 0x030C0000
-    ts->py_recursion_remaining = g->py_recursion_remaining;
-    ts->c_recursion_remaining = g->c_recursion_remaining;
-#else
-    ts->recursion_depth = g->recursion_depth;
+    {
+        PyObject *old = ts->context;
+        ts->context = snap->context;
+        snap->context = NULL;
+        Py_XDECREF(old);
+        /* Bump the cache version: contextvars caches are keyed by
+         * context_ver and must be invalidated on swap. */
+        ts->context_ver++;
+    }
+
+    ts->py_recursion_remaining = snap->py_recursion_remaining;
+    ts->c_recursion_remaining = snap->c_recursion_remaining;
+
+    ts->datastack_chunk = snap->datastack_chunk;
+    ts->datastack_top = snap->datastack_top;
+    ts->datastack_limit = snap->datastack_limit;
+
+    /* Drop our strong ref to the top frame.  The frame chain through
+     * datastack_chunk + cframe / current_frame keeps the frame alive
+     * while it's actually being executed; our extra ref was only to
+     * survive the suspension window. */
+    Py_XDECREF(snap->top_frame);
+    snap->top_frame = NULL;
+
+    ts->exc_state = snap->exc_state;
+    ts->exc_info = snap->exc_info ? snap->exc_info : &ts->exc_state;
+    snap->exc_info = NULL;
+    snap->exc_state.exc_value = NULL;
+    snap->exc_state.previous_item = NULL;
 #endif
+
+#if PY_VERSION_HEX >= 0x030C0000 && PY_VERSION_HEX < 0x030D0000
+    ts->cframe = snap->cframe;
+    ts->trash.delete_nesting = snap->trash_delete_nesting;
+#endif
+
+#if PY_VERSION_HEX >= 0x030D0000
+    ts->current_frame = snap->current_frame;
+    {
+        PyObject *old = ts->delete_later;
+        ts->delete_later = snap->delete_later;
+        snap->delete_later = NULL;
+        Py_XDECREF(old);
+    }
+#endif
+
+#if PY_VERSION_HEX < 0x030C0000
+    ts->recursion_depth = snap->recursion_depth;
+#endif
+
+    snap->valid = 0;
 }
 
-static void pygo_g_install_root_cframe(pygo_g_t *g)
+/* Clear a snap that we own but won't load (e.g., g died while suspended).
+ * Drops all owned refs. */
+static void pygo_pystate_snap_clear(pygo_pystate_snap_t *snap)
 {
-    (void)g;
+    if (!snap->valid) {
+        return;
+    }
+#if PY_VERSION_HEX >= 0x030C0000
+    Py_CLEAR(snap->context);
+    Py_CLEAR(snap->top_frame);
+    Py_CLEAR(snap->exc_state.exc_value);
+    snap->exc_info = NULL;
+#endif
+#if PY_VERSION_HEX >= 0x030D0000
+    Py_CLEAR(snap->delete_later);
+#endif
+    snap->valid = 0;
 }
+
+/* Install an initial root for the goroutine's Python frame chain.  Run
+ * inside pygo_g_entry, on the goroutine's own stack, BEFORE we call any
+ * user Python code.
+ *
+ * The point: when user code calls PyEval_EvalFrameDefault, the new
+ * interpreter frame's `previous` field is linked to whatever was at
+ * tstate's "top of chain" pointer.  If we don't sever the chain, that
+ * "top" is whoever ran most recently on this OS thread -- the
+ * scheduler, or worse, another goroutine.  Then traceback walks and
+ * recursion checks pull in every frame across every goroutine.
+ *
+ * On 3.12, we put a fresh _PyCFrame at the bottom of g's stack and
+ * point its previous to tstate->root_cframe (the per-thread sentinel).
+ * On 3.13, the cframe is gone; we just NULL out tstate->current_frame.
+ * In both cases the chain starts here and walks back to a terminator,
+ * not to the previous coroutine. */
+#if PY_VERSION_HEX >= 0x030C0000 && PY_VERSION_HEX < 0x030D0000
+static void pygo_install_initial_root_frame(_PyCFrame *frame_storage)
+{
+    PyThreadState *ts = PyThreadState_GET();
+    *frame_storage = *ts->cframe;            /* inherit current_frame, etc. */
+    frame_storage->previous = &ts->root_cframe;
+    ts->cframe = frame_storage;
+}
+#endif
+
+#if PY_VERSION_HEX >= 0x030D0000
+static void pygo_install_initial_root_frame(void)
+{
+    PyThreadState *ts = PyThreadState_GET();
+    ts->current_frame = NULL;
+}
+#endif
 
 /* ---- Ready FIFO ops (singly-linked, head=pop, tail=push) ---- */
 static void pygo_ready_push(pygo_sched_t *s, pygo_g_t *g)
@@ -205,11 +336,24 @@ pygo_sched_t *pygo_sched_get(void)
     return &pygo_global_sched;
 }
 
-/* ---- Coro entry shim ---- */
+/* ---- Coro entry shim ----
+ *
+ * Runs ON THE GOROUTINE'S STACK.  Local variables here live for the
+ * lifetime of g.  We exploit that by allocating the initial _PyCFrame
+ * here (3.12 only) so its address remains valid for as long as we
+ * might switch back to g. */
 static void pygo_g_entry(void *user)
 {
     pygo_g_t *g = (pygo_g_t *)user;
     PyObject *res;
+
+#if PY_VERSION_HEX >= 0x030C0000 && PY_VERSION_HEX < 0x030D0000
+    _PyCFrame root_cframe_storage;
+    pygo_install_initial_root_frame(&root_cframe_storage);
+#elif PY_VERSION_HEX >= 0x030D0000
+    pygo_install_initial_root_frame();
+#endif
+
     res = PyObject_CallNoArgs(g->callable);
     if (res == NULL) {
         PyObject *type, *value, *tb;
@@ -243,6 +387,7 @@ void pygo_g_decref(pygo_g_t *g)
     if (g == NULL) return;
     g->refcount--;
     if (g->refcount <= 0) {
+        pygo_pystate_snap_clear(&g->snap);
         if (g->coro != NULL) {
             pygo_coro_destroy(g->coro);
             g->coro = NULL;
@@ -283,12 +428,13 @@ void pygo_sched_yield(pygo_sched_t *s)
     pygo_g_t *g = s->current;
     if (g == NULL) return;
     pygo_ready_push(s, g);
-    /* Snapshot tstate before leaving the coroutine, so when the
-     * scheduler resumes a different g, that g's snapshot is restored
-     * cleanly. */
-    pygo_g_tstate_save(g);
+    /* Save tstate INTO g's snap.  The scheduler's snap (in drain's
+     * local frame) is untouched; drain will load it after the swap
+     * returns. */
+    pygo_pystate_snap(&g->snap);
     pygo_coro_yield();
-    /* On resume, our snapshot has been restored by the resumer. */
+    /* On resume, drain has loaded g's snap back into tstate; we resume
+     * exactly where we left off. */
 }
 
 /* Park current g without re-queueing (caller takes ownership and
@@ -298,7 +444,7 @@ void pygo_sched_park_current(void)
     pygo_sched_t *s = pygo_sched_get();
     pygo_g_t *g = s->current;
     if (g == NULL) return;
-    pygo_g_tstate_save(g);
+    pygo_pystate_snap(&g->snap);
     /* DO NOT push to ready; the parker (netpoll, channel, etc) owns
      * the g until it calls pygo_sched_wake. */
 }
@@ -318,7 +464,7 @@ void pygo_sched_sleep_until(pygo_sched_t *s, double wake_at)
     if (pygo_sleep_push(s, g) < 0) {
         return; /* leave g in current; caller will see exception */
     }
-    pygo_g_tstate_save(g);
+    pygo_pystate_snap(&g->snap);
     pygo_coro_yield();
 }
 
@@ -364,34 +510,63 @@ Py_ssize_t pygo_sched_drain(pygo_sched_t *s)
         }
         /* Pop a ready g and resume it.
          *
-         * Snapshot dance for tstate (CPython 3.12 recursion counters):
-         *   1. Save the SCHEDULER's tstate before we touch anything.
-         *   2. If g has a valid snapshot, restore it.  Otherwise the g
-         *      inherits the scheduler's tstate (first-run case).
+         * Snap dance (Phase B):
+         *   1. Save the SCHEDULER's tstate into a local snap on drain's
+         *      own stack.  This captures the scheduler's frame chain,
+         *      contextvars, recursion budget, etc.
+         *   2. If g has a valid saved snap, load it into tstate -- this
+         *      restores g's frame chain, contextvars, etc.  Otherwise
+         *      g is on its first run; the initial root cframe is
+         *      installed inside pygo_g_entry, on g's stack.
          *   3. Resume into g.  G runs Python code.  When it yields it
-         *      calls pygo_sched_yield which saves into g's snapshot.
-         *   4. After the swap returns, restore the SCHEDULER's tstate
-         *      so subsequent gs start from a clean baseline. */
+         *      calls pygo_sched_yield/park/sleep, all of which call
+         *      pygo_pystate_snap to capture g's tstate into g->snap.
+         *   4. After the swap returns, load the scheduler's snap back
+         *      so the next loop iteration starts from a clean baseline.
+         */
         {
             pygo_g_t *g = pygo_ready_pop(s);
             pygo_g_t *prev = s->current;
-            pygo_g_t sched_snap;   /* tiny stack-allocated bag for save */
-            sched_snap.snapshot_valid = 0;
-            pygo_g_tstate_save(&sched_snap);
+            pygo_pystate_snap_t sched_snap;
+
+            memset(&sched_snap, 0, sizeof(sched_snap));
+            pygo_pystate_snap(&sched_snap);
 
             s->current = g;
-            if (g->snapshot_valid) {
-                pygo_g_tstate_restore(g);
+            if (g->snap.valid) {
+                pygo_pystate_load(&g->snap);
             } else {
-                pygo_g_install_root_cframe(g);
+                /* First run for this g.  We must give it its own slice
+                 * of the per-thread interpreter state, otherwise:
+                 *   - g would allocate Python frame storage into the
+                 *     scheduler's datastack_chunk, then g2 would do the
+                 *     same starting from where the scheduler left off
+                 *     (the snap restored that position), overwriting
+                 *     g1's live frames -> segfault on g1 resume.
+                 *   - g would inherit current_frame from the scheduler,
+                 *     linking g's frame chain back into shared frames
+                 *     across all goroutines (the original cliff).
+                 *
+                 * NULL the datastack pointers so PyEval starts a fresh
+                 * root chunk owned by g.  For 3.13 also NULL
+                 * current_frame so g's first frame chains to nothing.
+                 * For 3.12, g_entry will install a root cframe on g's
+                 * own stack before any Python code runs. */
+                PyThreadState *ts = PyThreadState_GET();
+                ts->datastack_chunk = NULL;
+                ts->datastack_top = NULL;
+                ts->datastack_limit = NULL;
+#if PY_VERSION_HEX >= 0x030D0000
+                ts->current_frame = NULL;
+#endif
             }
+
             pygo_coro_resume(g->coro);
-            if (!pygo_coro_done(g->coro)) {
-                /* g yielded.  Capture its state for next time.  Then
-                 * restore the scheduler's. */
-                pygo_g_tstate_save(g);
-            }
-            pygo_g_tstate_restore(&sched_snap);
+
+            /* Back on the scheduler's C stack.  tstate now reflects
+             * whatever g left it as just before yielding.  Restore
+             * the scheduler's snap so the next iteration is clean. */
+            pygo_pystate_load(&sched_snap);
             s->current = prev;
 
             if (pygo_coro_done(g->coro)) {

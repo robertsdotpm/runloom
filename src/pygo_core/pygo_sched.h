@@ -1,4 +1,4 @@
-/* sched.h -- C-level cooperative scheduler.
+/* pygo_sched.h -- C-level cooperative scheduler.
  *
  * The Python-side `pygo.go(fn)` ultimately creates a goroutine here.
  * yield, sleep, run -- all do their bookkeeping in C, calling into
@@ -6,6 +6,10 @@
  *
  * Single OS thread per scheduler in v0.  Multi-thread is Phase C
  * (free-threaded Python with one scheduler per OS thread, work-stealing).
+ *
+ * Phase B (this file): per-goroutine snapshot of the CPython thread
+ * state fields that a raw C-stack swap doesn't preserve.  Algorithm
+ * copied from greenlet (MIT licensed; see TPythonState.cpp).
  */
 #ifndef PYGO_SCHED_H
 #define PYGO_SCHED_H
@@ -17,6 +21,49 @@
 
 typedef struct pygo_g pygo_g_t;
 typedef struct pygo_sched pygo_sched_t;
+typedef struct pygo_pystate_snap pygo_pystate_snap_t;
+
+/* Per-goroutine CPython thread state snapshot.
+ *
+ * Fields here are everything the interpreter keeps on PyThreadState that
+ * a raw asm stack switch cannot preserve on its own.  Each save copies
+ * them out of tstate into the snap; each load copies them back AND
+ * transfers ownership (context, top_frame, delete_later) so the snap is
+ * empty after a load.  Save and load must be balanced.
+ *
+ * Layout matches greenlet's PythonState/ExceptionState, transcribed to
+ * C99 with #if PY_VERSION_HEX gates for 3.12 vs 3.13 vs older.  See
+ * https://github.com/python-greenlet/greenlet src/greenlet/TPythonState.cpp.
+ */
+struct pygo_pystate_snap {
+    int valid;
+#if PY_VERSION_HEX >= 0x030C0000
+    /* 3.12+ common fields. */
+    PyObject *context;                       /* contextvars; owned ref */
+    int py_recursion_remaining;
+    int c_recursion_remaining;
+    _PyStackChunk *datastack_chunk;
+    PyObject **datastack_top;
+    PyObject **datastack_limit;
+    PyObject *top_frame;                     /* owned ref to PyFrameObject */
+    _PyErr_StackItem *exc_info;
+    _PyErr_StackItem exc_state;
+#endif
+#if PY_VERSION_HEX >= 0x030C0000 && PY_VERSION_HEX < 0x030D0000
+    /* 3.12-only fields. */
+    _PyCFrame *cframe;
+    int trash_delete_nesting;
+#endif
+#if PY_VERSION_HEX >= 0x030D0000
+    /* 3.13+ fields. */
+    struct _PyInterpreterFrame *current_frame;
+    PyObject *delete_later;                  /* owned ref */
+#endif
+#if PY_VERSION_HEX < 0x030C0000
+    /* Legacy: pre-3.12 stored recursion depth as a single counter. */
+    int recursion_depth;
+#endif
+};
 
 /* One goroutine (the "G" in Go's M:P:G nomenclature).
  *
@@ -30,19 +77,7 @@ struct pygo_g {
     PyObject *callable;
     PyObject *result;
     PyObject *error;
-#if PY_VERSION_HEX >= 0x030C0000 && PY_VERSION_HEX < 0x030D0000
-    /* CPython 3.12: split recursion counters. */
-    int py_recursion_remaining;
-    int c_recursion_remaining;
-#elif PY_VERSION_HEX >= 0x030D0000
-    /* CPython 3.13+: layout changed again.  We snapshot the public
-     * counter only. */
-    int py_recursion_remaining;
-    int c_recursion_remaining;
-#else
-    int recursion_depth;
-#endif
-    int snapshot_valid;
+    pygo_pystate_snap_t snap;     /* saved tstate; valid only when suspended */
     double wake_at;
     pygo_g_t *next;
     int done;

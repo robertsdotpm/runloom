@@ -33,7 +33,7 @@ No `async`.  No `await`.  Just `go(fn)` and blocking-style I/O.
 |        | what                                                                                | state |
 | ------ | ----------------------------------------------------------------------------------- | ----- |
 | **A**  | Inline asm context switch (x86_64 SysV) + C scheduler + recursion-counter snapshot  | **done** |
-| **B**  | Per-goroutine cframe / frame-chain swap                                             | **deferred** — recursion counters done; full cframe swap needs ~200 LoC of greenlet-style CPython-version-specific C |
+| **B**  | Per-goroutine cframe / frame-chain swap                                             | **done** — full PythonState snapshot (cframe, current_frame, datastack_chunk, exc_info, context, recursion counters) per g; 50 K concurrent yielded gs run clean on both 3.12 and 3.13t |
 | **C**  | Free-threaded Python 3.13t support + **M:N work-stealing scheduler**                | **done** — pygo runs on 3.13t with GIL disabled; Chase-Lev work-stealing deques per hub; 2.5× parallel speedup on 8 cores measured |
 | **D**  | netpoll (epoll/kqueue/select) + socket monkey-patch                                  | **done** |
 | **E**  | aarch64 inline asm context switch                                                    | **done** (untested on real ARM hardware; cross-compiled clean) |
@@ -41,17 +41,36 @@ No `async`.  No `await`.  Just `go(fn)` and blocking-style I/O.
 ## Performance
 
 CPython 3.12, Linux x86_64, fresh subprocess per cell.  Workload: N
-goroutines × 100 cooperative yields.
+goroutines × 100 cooperative yields (full Phase B per-g PythonState
+snap on every yield).
 
 | coros × yields | pygo (C sched + asm) | asyncio | speedup |
 | ---: | ---: | ---: | ---: |
-| 10 × 100  | **5.82 M/s** | 370 K/s | **15.7×** |
-| 50 × 100  | **5.93 M/s** | 516 K/s | **11.5×** |
-| 100 × 100 | **4.84 M/s** | 542 K/s | **8.9×** |
-| 150 × 100 | **5.01 M/s** | 544 K/s | **9.2×** |
+| 10 × 100   | **2.99 M/s** | 377 K/s | **7.9×** |
+| 50 × 100   | **2.82 M/s** | 501 K/s | **5.6×** |
+| 100 × 100  | **2.56 M/s** | 502 K/s | **5.1×** |
+| 150 × 100  | **2.60 M/s** | 523 K/s | **5.0×** |
+| 1000 × 100 | **1.87 M/s** | 560 K/s | **3.3×** |
 
-Free-threaded Python 3.13t (GIL disabled): **2.86 M y/s** at 100 × 100
-— about half 3.12's throughput due to biased refcounting overhead.
+Phase B traded ~2× single-yield throughput for correctness: per yield
+we now snapshot cframe, current_frame, datastack chunk pointers,
+contextvars, exception state, and recursion counters.  Each goroutine
+gets its own independent slice of CPython thread state.
+
+**Concurrent yielded goroutines (Phase B stress test):**
+
+| coros | yields/coro | wall | throughput |
+| ---: | ---: | ---: | ---: |
+| 2000   | 50  | 67 ms   | 1.48 M y/s |
+| 10000  | 10  | 284 ms  | 0.35 M y/s |
+| 50000  | 10  | 1362 ms | 0.37 M y/s |
+
+50000 simultaneously-yielded goroutines run clean on a single OS
+thread.  Pre-Phase-B this segfaulted at ~150-200 from frame chain
+overflow.
+
+Free-threaded Python 3.13t (GIL disabled): **2.0 M y/s** at 100 × 100
+— about ~20% slower than 3.12 due to biased refcounting overhead.
 
 **Phase C M:N multi-core parallelism on 3.13t**: 100 goroutines each
 running 5000 SHA-256 iterations:
@@ -99,18 +118,6 @@ Real network workload (pygo TCP echo server, plain external client):
   GIL disabled.
 
 ## What's broken / deferred
-
-**Phase B — frame chain cliff**.  The CPython frame chain
-(`tstate->cframe->current_frame` on 3.12; layout changed on 3.13) is
-shared across all goroutines.  When goroutine N yields, its Python
-frames stay alive (eval is suspended) and link to other goroutines'
-frame chains.  At ~150-200 concurrent yielded goroutines, the linked
-chain blows the C stack via traceback walks / recursion checks.
-
-Greenlet fixes this in ~200 lines of CPython-version-specific C that
-snapshots cframe-derived state per greenlet on every switch.  We've
-done the recursion counters; cframe + exception state were attempted
-but require deeper integration than was achievable in this session.
 
 **Phase C v2 — yield support inside M:N hubs**.  v1 ships fire-and-
 forget gs: each goroutine runs to completion on its hub.  Adding
@@ -167,13 +174,15 @@ examples/
 Started at aionetiface's perf bench (71 K yields/s on a Python scheduler).
 
 Today:
-- **5.9 M yields/s** single-thread on CPython 3.12 (83× starting point, 11× asyncio)
+- **2.5-3 M yields/s** single-thread on CPython 3.12 with full Phase B
+  per-g PythonState snap (correctness-first)
+- **50 000 concurrent yielded goroutines** on one OS thread, no frame
+  chain cliff
 - **2.5× parallel speedup** with M:N hubs on free-threaded 3.13t
 - **8.6 K req/s** TCP echo server with Go-style blocking-looking code
-- Within **~4× of Go's per-yield cost** on CPython (the irreducible interpreter overhead)
 - Cross-platform asm switches (x86_64 + aarch64), Windows Fibers, POSIX ucontext fallback
 - Compiles + runs on CPython 3.5–3.13t
 
-One limit remains: the ~200 concurrent yielded goroutines frame-chain
-cliff (Phase B).  That needs greenlet's exact algorithm and warrants
-a focused session on its own.
+Phase B was the last correctness milestone; remaining work is
+performance polish + Phase C v2 (yield inside M:N hubs) + Phase E
+validation on real ARM hardware.
