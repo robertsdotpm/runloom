@@ -1,8 +1,16 @@
 build/
+dist/
 *.so
+*.dylib
+*.dll
 *.o
+*.obj
 __pycache__/
 *.pyc
 *.egg-info/
+.pytest_cache/
 core.*
 .coverage
+*.swp
+*.swo
+.DS_Store
