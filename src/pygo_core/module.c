@@ -18,6 +18,7 @@
 
 #include "coro.h"
 #include "pygo_sched.h"
+#include "netpoll.h"
 
 /* ---- Per-coro Python object ---- */
 
@@ -407,6 +408,32 @@ static PyObject *m_run(PyObject *self, PyObject *unused)
     return PyLong_FromSsize_t(completed);
 }
 
+static PyObject *m_wait_fd(PyObject *self, PyObject *args)
+{
+    int fd, events;
+    long timeout_ms = -1;
+    int result;
+    (void)self;
+    if (!PyArg_ParseTuple(args, "ii|l", &fd, &events, &timeout_ms)) {
+        return NULL;
+    }
+    {
+        long long timeout_ns = timeout_ms < 0 ? -1LL :
+                               (long long)timeout_ms * 1000000LL;
+        result = pygo_netpoll_wait_fd(fd, events, timeout_ns);
+    }
+    if (result < 0) {
+        return PyErr_SetFromErrno(PyExc_OSError);
+    }
+    return PyLong_FromLong((long)result);
+}
+
+static PyObject *m_netpoll_backend(PyObject *self, PyObject *unused)
+{
+    (void)self; (void)unused;
+    return PyUnicode_FromString(pygo_netpoll_backend());
+}
+
 static PyMethodDef module_methods[] = {
     {"yield_",      m_yield,       METH_NOARGS,
      "Yield from inside a raw Coro (a no-op outside one)."},
@@ -425,6 +452,11 @@ static PyMethodDef module_methods[] = {
      "Sleep the current goroutine for N seconds (C scheduler aware)."},
     {"run",         m_run,         METH_NOARGS,
      "Drive the C scheduler until all goroutines finish.  Returns count."},
+    {"wait_fd",     m_wait_fd,     METH_VARARGS,
+     "wait_fd(fd, events, timeout_ms=-1): park the current goroutine "
+     "until fd is ready.  events is a bitmask: 1=read, 2=write."},
+    {"netpoll_backend", m_netpoll_backend, METH_NOARGS,
+     "Return active netpoll backend name (\"epoll\", \"kqueue\", \"select\")."},
     {NULL, NULL, 0, NULL}
 };
 

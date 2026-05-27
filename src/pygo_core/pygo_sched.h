@@ -33,6 +33,14 @@ struct pygo_g {
 #if PY_VERSION_HEX >= 0x030C0000
     int py_recursion_remaining;
     int c_recursion_remaining;
+    /* Per-g root cframe: the eval loop chains its stack cframes onto
+     * this, isolating g's Python frame chain from other goroutines'. */
+    _PyCFrame root_cframe;
+    _PyCFrame *cframe_snap;
+    /* Per-g exception-handling state.  Saved at yield, restored on
+     * resume so two gs don't see each other's tracebacks. */
+    _PyErr_StackItem exc_state;
+    _PyErr_StackItem *exc_info_snap;
 #else
     int recursion_depth;
 #endif
@@ -81,6 +89,13 @@ void pygo_sched_yield(pygo_sched_t *s);
 
 /* Park the current g until wake_at (monotonic seconds).  Swap back. */
 void pygo_sched_sleep_until(pygo_sched_t *s, double wake_at);
+
+/* Mark current g as parked (no ready_push); netpoll/sleep saves snap.
+ * Caller must then yield via pygo_coro_yield. */
+void pygo_sched_park_current(void);
+
+/* Re-queue a previously-parked g onto the ready list. */
+void pygo_sched_wake(pygo_g_t *g);
 
 /* Drive the scheduler until ready+sleep queues are empty.  Returns
  * the number of completed goroutines. */

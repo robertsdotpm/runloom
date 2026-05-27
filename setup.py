@@ -33,6 +33,7 @@ def detect_sources():
         os.path.join(SRC_C, "coro.c"),
         os.path.join(SRC_C, "fcontext.c"),
         os.path.join(SRC_C, "pygo_sched.c"),
+        os.path.join(SRC_C, "netpoll.c"),
     ]
     # Arch-specific asm fast path.  Only compile what matches the host;
     # the file is no-op-conditioned on PYGO_ARCH_* otherwise.

@@ -20,6 +20,7 @@
 #include <Python.h>
 
 #include "pygo_sched.h"
+#include "netpoll.h"
 
 #include <math.h>
 #include <stdlib.h>
@@ -39,6 +40,20 @@ static double pygo_monotonic(void)
 }
 
 /* ---- tstate snapshot ---- */
+/* What we save/restore around each pygo_coro_resume:
+ *   - py_recursion_remaining + c_recursion_remaining: prevent each
+ *     yield from permanently consuming the OS thread's recursion
+ *     budget across the C-stack switch.
+ *
+ * What we DON'T save/restore but probably need to (Phase B+ work,
+ * see README "what's broken"):
+ *   - tstate->cframe (3.12) / current_frame (3.13+): topmost Python
+ *     frame.  Without per-g save/restore, frame chains link across
+ *     goroutines.  Greenlet handles this in ~200 lines of CPython-
+ *     version-specific C.  The crash threshold around 200 concurrent
+ *     yielded goroutines is this issue.
+ *   - tstate->exc_info: exception state chain.
+ */
 static void pygo_g_tstate_save(pygo_g_t *g)
 {
     PyThreadState *ts = PyThreadState_GET();
@@ -62,6 +77,11 @@ static void pygo_g_tstate_restore(const pygo_g_t *g)
 #else
     ts->recursion_depth = g->recursion_depth;
 #endif
+}
+
+static void pygo_g_install_root_cframe(pygo_g_t *g)
+{
+    (void)g;   /* Phase B work; see comment block above. */
 }
 
 /* ---- Ready FIFO ops (singly-linked, head=pop, tail=push) ---- */
@@ -165,7 +185,7 @@ void pygo_sched_init(pygo_sched_t *s)
     s->sleep_heap = NULL;
     s->sleep_size = 0;
     s->sleep_cap = 0;
-    s->stack_size = 131072;
+    s->stack_size = 131072;   /* 128 KB per goroutine */
     s->completed = 0;
     s->stopping = 0;
 }
@@ -265,6 +285,24 @@ void pygo_sched_yield(pygo_sched_t *s)
     /* On resume, our snapshot has been restored by the resumer. */
 }
 
+/* Park current g without re-queueing (caller takes ownership and
+ * arranges to wake it later via pygo_sched_wake). */
+void pygo_sched_park_current(void)
+{
+    pygo_sched_t *s = pygo_sched_get();
+    pygo_g_t *g = s->current;
+    if (g == NULL) return;
+    pygo_g_tstate_save(g);
+    /* DO NOT push to ready; the parker (netpoll, channel, etc) owns
+     * the g until it calls pygo_sched_wake. */
+}
+
+void pygo_sched_wake(pygo_g_t *g)
+{
+    if (g == NULL) return;
+    pygo_ready_push(pygo_sched_get(), g);
+}
+
 /* ---- Sleep ---- */
 void pygo_sched_sleep_until(pygo_sched_t *s, double wake_at)
 {
@@ -284,22 +322,36 @@ Py_ssize_t pygo_sched_drain(pygo_sched_t *s)
     Py_ssize_t completed_before = s->completed;
     s->stopping = 0;
 
-    while (!s->stopping && (s->ready_head != NULL || s->sleep_size > 0)) {
+    while (!s->stopping && (s->ready_head != NULL ||
+                            s->sleep_size > 0 ||
+                            pygo_netpoll_parked_count() > 0)) {
         double now = pygo_monotonic();
         /* Wake up any sleepers whose time has come. */
         while (s->sleep_size > 0 && pygo_sleep_peek(s)->wake_at <= now) {
             pygo_g_t *woke = pygo_sleep_pop(s);
             pygo_ready_push(s, woke);
         }
-        if (s->ready_head == NULL && s->sleep_size > 0) {
-            double gap = pygo_sleep_peek(s)->wake_at - now;
-            if (gap > 0) {
-                /* No netpoll yet; block the OS thread.  Sleep in small
-                 * chunks so a future cancellation could break out. */
+        /* Pump netpoll: if any goroutines are parked, wait for I/O up
+         * to the next sleep deadline (or forever if none).  Drives
+         * pygo_sched_wake which moves ready I/O goroutines back to
+         * the ready queue. */
+        if (s->ready_head == NULL &&
+            (pygo_netpoll_parked_count() > 0 || s->sleep_size > 0)) {
+            long long timeout_ns = -1;
+            if (s->sleep_size > 0) {
+                double gap = pygo_sleep_peek(s)->wake_at - now;
+                if (gap < 0) gap = 0;
+                if (gap > 60.0) gap = 60.0;
+                timeout_ns = (long long)(gap * 1e9);
+            }
+            if (pygo_netpoll_parked_count() > 0) {
+                pygo_netpoll_pump(timeout_ns);
+            } else if (timeout_ns > 0) {
+                /* No fds parked, just a sleep heap timer. */
                 struct timespec req, rem;
-                if (gap > 0.05) gap = 0.05;
-                req.tv_sec = (time_t)gap;
-                req.tv_nsec = (long)((gap - (double)req.tv_sec) * 1e9);
+                if (timeout_ns > 50000000LL) timeout_ns = 50000000LL;
+                req.tv_sec = (time_t)(timeout_ns / 1000000000LL);
+                req.tv_nsec = (long)(timeout_ns % 1000000000LL);
                 nanosleep(&req, &rem);
             }
             continue;
@@ -324,6 +376,10 @@ Py_ssize_t pygo_sched_drain(pygo_sched_t *s)
             s->current = g;
             if (g->snapshot_valid) {
                 pygo_g_tstate_restore(g);
+            } else {
+                /* First-run: give g its own root cframe so its eval
+                 * does not link backwards into the scheduler's chain. */
+                pygo_g_install_root_cframe(g);
             }
             pygo_coro_resume(g->coro);
             if (!pygo_coro_done(g->coro)) {
