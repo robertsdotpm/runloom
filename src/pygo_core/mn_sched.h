@@ -60,4 +60,8 @@ void pygo_mn_fini(void);
  * and the caller should fall through to the single-thread sched path. */
 int pygo_mn_yield_current(void);
 
+/* Returns the number of M:N hubs currently running (0 if mn_init was
+ * never called or after mn_fini). */
+int pygo_mn_hub_count(void);
+
 #endif /* PYGO_MN_SCHED_H */

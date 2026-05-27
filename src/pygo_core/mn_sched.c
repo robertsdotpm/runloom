@@ -220,6 +220,11 @@ static void *pygo_hub_main(void *arg)
     return NULL;
 }
 
+int pygo_mn_hub_count(void)
+{
+    return pygo_hub_count;
+}
+
 int pygo_mn_yield_current(void)
 {
     pygo_hub_t *h = pygo_tls_hub;

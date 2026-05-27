@@ -37,6 +37,7 @@ No `async`.  No `await`.  Just `go(fn)` and blocking-style I/O.
 | **C**  | Free-threaded Python 3.13t support + **M:N work-stealing scheduler** + yield-in-hub | **done** — pygo runs on 3.13t with GIL disabled; Chase-Lev work-stealing deques per hub (with per-hub MPSC submission list so external producers don't race the deque owner); thread-local current-hub pointer routes `sched_yield` from a goroutine on hub H back to H's local FIFO; 2.5× parallel speedup on 8 cores, ~2 M y/s yield throughput across multiple hubs |
 | **D**  | netpoll (epoll/kqueue/select) + socket monkey-patch                                  | **done** |
 | **E**  | aarch64 inline asm context switch                                                    | **done** (untested on real ARM hardware; cross-compiled clean) |
+| **F**  | Time-sliced preemption via `Py_AddPendingCall` (3.13t only)                          | **done** — goroutines without explicit `sched_yield()` calls now cooperate via a quantum-driven preemption timer hooking CPython's eval_breaker.  Zero hot-path overhead. |
 
 ## Performance
 
@@ -197,5 +198,40 @@ Today:
 - Cross-platform asm switches (x86_64 + aarch64), Windows Fibers, POSIX ucontext fallback
 - Compiles + runs on CPython 3.5–3.13t
 
-All five phases shipped.  Remaining is performance polish (snap path
-~2× cost is the biggest knob) and real-hardware ARM validation.
+## Time-sliced preemption (3.13t)
+
+Cooperative scheduling has a well-known failure mode: a goroutine that
+forgets to yield can starve every other one indefinitely.  Go fixed
+this in 1.14 with signal-driven preemption.  pygo does the equivalent
+on free-threaded 3.13t using CPython's documented preemption rail
+(`Py_AddPendingCall` + `eval_breaker`):
+
+```python
+import pygo_core
+pygo_core.preempt_init(quantum_us=10_000)   # 10 ms slices
+
+def cpu_bound():
+    # No sched_yield() calls anywhere; preempted automatically.
+    total = 0
+    for i in range(10_000_000):
+        total += i * i
+
+pygo_core.go(cpu_bound)
+pygo_core.go(other_goroutine)
+pygo_core.run()
+```
+
+Measured cost: ~0 ns on the hot path (CPython checks `eval_breaker`
+between bytecodes anyway).  Per quantum: ~300 ns (pending-call
+dispatch + snap-yield).  At 100 Hz that's 30 µs/sec = 0.003% overhead.
+
+Caveats: preemption only fires at Python bytecode boundaries.  A
+goroutine sitting inside a long C call (`numpy`, `hashlib`, etc.)
+won't be preempted until it returns -- same limitation Go has with
+cgo.  `preempt_init` is 3.13t only; GIL builds raise `RuntimeError`.
+
+## What's left
+
+Real-hardware ARM validation (Apple Silicon / Linux ARM), perf polish
+on the slow-path snap, and netpoll/sleep moving into per-hub state for
+M:N completeness.

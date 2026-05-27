@@ -153,4 +153,20 @@ void pygo_pystate_snap_clear(pygo_pystate_snap_t *snap);
  * Exposed so mn_sched.c can reuse the same entry (Phase B correct). */
 void pygo_g_entry(void *user);
 
+/* Time-sliced cooperative preemption (3.13t only).
+ *
+ * Start a timer thread that posts a Py_AddPendingCall every quantum_us
+ * microseconds.  CPython's eval loop checks the pending queue at
+ * bytecode back-edges and function calls; when our pending call fires,
+ * it invokes pygo_sched_yield() on whichever goroutine is currently
+ * running.  Lets goroutines without explicit sched_yield() calls still
+ * cooperate -- the Go 1.14 model translated to CPython terms.
+ *
+ * Returns 0 on success, -1 on error (with a Python exception set).
+ * Calling init while already running just updates the quantum.
+ * Calling fini stops the timer and joins the thread.
+ * Idempotent. */
+int pygo_preempt_init(long quantum_us);
+void pygo_preempt_fini(void);
+
 #endif /* PYGO_SCHED_H */

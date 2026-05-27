@@ -28,6 +28,7 @@
 #include "netpoll.h"
 
 #include <math.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -623,4 +624,114 @@ Py_ssize_t pygo_sched_drain(pygo_sched_t *s)
         }
     }
     return s->completed - completed_before;
+}
+
+/* ---- Time-sliced preemption (3.13t only) ----
+ *
+ * A separate pthread sleeps for quantum_us microseconds, then schedules
+ * a pending call via Py_AddPendingCall.  CPython's eval loop checks
+ * its pending queue at bytecode back-edges and call instructions; when
+ * the call fires, pygo_preempt_yield_cb runs on whatever tstate the
+ * eval loop is in, sees a current goroutine (via the M:N TLS or the
+ * single-thread sched), and yields cooperatively through the existing
+ * snap + asm-yield path.
+ *
+ * Net effect: a goroutine that never calls sched_yield() still gets
+ * preempted every quantum_us, so it can't starve other gs.  This is
+ * Go's runtime preemption model (since 1.14) ported to CPython.  Zero
+ * hot-path overhead -- the eval_breaker bit is already checked by
+ * CPython on every back-edge.
+ *
+ * For M:N hubs we post `pygo_hub_count` pending calls per quantum so
+ * each hub eventually picks one up; whichever hub's eval loop dequeues
+ * a call runs the yield on its currently-running g. */
+
+static pthread_t pygo_preempt_thread;
+static volatile int pygo_preempt_running = 0;
+static volatile long pygo_preempt_quantum_us = 10000;
+
+extern int pygo_mn_hub_count(void);   /* defined in mn_sched.c */
+
+static int pygo_preempt_yield_cb(void *user)
+{
+    (void)user;
+    /* If we're in a hub, yield via M:N path.  Otherwise check the
+     * single-thread global scheduler.  Either way, this is a no-op
+     * when no goroutine is currently running on this tstate. */
+    if (pygo_mn_yield_current()) {
+        return 0;
+    }
+    {
+        pygo_sched_t *s = pygo_sched_get();
+        if (s->current != NULL) {
+            pygo_sched_yield(s);
+        }
+    }
+    return 0;
+}
+
+static void *pygo_preempt_main(void *arg)
+{
+    (void)arg;
+    while (pygo_preempt_running) {
+        long us = pygo_preempt_quantum_us;
+        struct timespec ts;
+        int posts, i;
+
+        if (us < 100) us = 100;        /* clamp lower bound */
+        ts.tv_sec  = us / 1000000L;
+        ts.tv_nsec = (us % 1000000L) * 1000L;
+        nanosleep(&ts, NULL);
+        if (!pygo_preempt_running) break;
+
+        /* Post one pending call per hub (or just one for single-thread)
+         * so each hub's eval loop has something to pick up.  The
+         * pending queue is shared per-interp; whichever hub drains
+         * fastest gets the next one. */
+        posts = pygo_mn_hub_count();
+        if (posts < 1) posts = 1;
+        for (i = 0; i < posts; i++) {
+            /* Py_AddPendingCall is documented to be callable from any
+             * thread without holding the GIL. */
+            Py_AddPendingCall(pygo_preempt_yield_cb, NULL);
+        }
+    }
+    return NULL;
+}
+
+int pygo_preempt_init(long quantum_us)
+{
+    if (quantum_us <= 0) {
+        PyErr_SetString(PyExc_ValueError, "quantum_us must be > 0");
+        return -1;
+    }
+    pygo_preempt_quantum_us = quantum_us;
+    if (pygo_preempt_running) {
+        /* Already running -- the timer loop reloads quantum on its
+         * next iteration. */
+        return 0;
+    }
+    pygo_preempt_running = 1;
+    if (pthread_create(&pygo_preempt_thread, NULL,
+                       pygo_preempt_main, NULL) != 0) {
+        pygo_preempt_running = 0;
+        PyErr_SetString(PyExc_OSError, "pygo preempt thread create failed");
+        return -1;
+    }
+    return 0;
+}
+
+void pygo_preempt_fini(void)
+{
+    if (!pygo_preempt_running) return;
+    pygo_preempt_running = 0;
+    /* Release the GIL so the timer thread's final pending-call post
+     * (if any) doesn't deadlock with our join.  The timer's nanosleep
+     * doesn't need the GIL but Py_AddPendingCall briefly touches
+     * shared state. */
+    {
+        PyThreadState *saved = PyEval_SaveThread();
+        pthread_join(pygo_preempt_thread, NULL);
+        PyEval_RestoreThread(saved);
+    }
 }
