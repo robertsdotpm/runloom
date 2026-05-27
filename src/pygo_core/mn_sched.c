@@ -114,7 +114,7 @@ static void *pygo_hub_main(void *arg)
     PyEval_RestoreThread(h->tstate);
     pygo_tls_hub = h;
 
-    while (!h->stopping) {
+    while (!__atomic_load_n(&h->stopping, __ATOMIC_ACQUIRE)) {
         pygo_g_t *g;
         /* Drain the submission list into the deque first.  Pushing to
          * the deque is owner-only, so we (the hub) move fresh gs from
@@ -309,9 +309,11 @@ int pygo_mn_init(int n_threads)
             /* Mark the unspawned hubs as already-stopping + join the
              * ones we did spawn before returning -1. */
             int j;
-            for (j = i; j < n_threads; j++) pygo_hubs[j].stopping = 1;
+            for (j = i; j < n_threads; j++) {
+                __atomic_store_n(&pygo_hubs[j].stopping, 1, __ATOMIC_RELEASE);
+            }
             for (j = 0; j < i; j++) {
-                pygo_hubs[j].stopping = 1;
+                __atomic_store_n(&pygo_hubs[j].stopping, 1, __ATOMIC_RELEASE);
                 pthread_join(pygo_hubs[j].thread, NULL);
             }
             PyEval_RestoreThread(saved);
@@ -336,7 +338,7 @@ void pygo_mn_fini(void)
     int i;
     if (pygo_hubs == NULL) return;
     for (i = 0; i < pygo_hub_count; i++) {
-        pygo_hubs[i].stopping = 1;
+        __atomic_store_n(&pygo_hubs[i].stopping, 1, __ATOMIC_RELEASE);
     }
     {
         PyThreadState *saved = PyEval_SaveThread();

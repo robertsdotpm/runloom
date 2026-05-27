@@ -448,21 +448,28 @@ void pygo_g_entry(void *user)
     } else {
         g->result = res;
     }
-    g->done = 1;
+    /* RELEASE store on g->done publishes the prior g->result/g->error
+     * writes; PygoG_done_get / PygoG_result_get load g->done with
+     * ACQUIRE and only read result/error if done. */
+    __atomic_store_n(&g->done, 1, __ATOMIC_RELEASE);
     /* Falls back through asm trampoline -> infinite swap to caller. */
 }
 
 /* ---- Refcount ---- */
 void pygo_g_incref(pygo_g_t *g)
 {
-    if (g) g->refcount++;
+    if (g) __atomic_add_fetch(&g->refcount, 1, __ATOMIC_RELAXED);
 }
 
 void pygo_g_decref(pygo_g_t *g)
 {
+    int new_count;
     if (g == NULL) return;
-    g->refcount--;
-    if (g->refcount <= 0) {
+    /* ACQ_REL: pairs with other threads' decrefs so all prior writes
+     * (including g->result / g->error / g->done done-flag updates)
+     * are observable on the last reference's owner before free. */
+    new_count = __atomic_sub_fetch(&g->refcount, 1, __ATOMIC_ACQ_REL);
+    if (new_count <= 0) {
         pygo_pystate_snap_clear(&g->snap);
         if (g->coro != NULL) {
             pygo_coro_destroy(g->coro);

@@ -313,16 +313,26 @@ static void PygoG_dealloc(PygoG *self)
 static PyObject *PygoG_done_get(PygoG *self, void *closure)
 {
     (void)closure;
-    if (self->g == NULL || self->g->done) Py_RETURN_TRUE;
+    if (self->g == NULL) Py_RETURN_TRUE;
+    /* ACQUIRE pairs with the RELEASE store in pygo_g_entry; ensures
+     * that if done is true, we also see the matching result/error
+     * stores even on free-threaded 3.13t reading from another thread. */
+    if (__atomic_load_n(&self->g->done, __ATOMIC_ACQUIRE)) Py_RETURN_TRUE;
     Py_RETURN_FALSE;
 }
 
 static PyObject *PygoG_result_get(PygoG *self, void *closure)
 {
+    PyObject *r;
     (void)closure;
-    if (self->g == NULL || self->g->result == NULL) Py_RETURN_NONE;
-    Py_INCREF(self->g->result);
-    return self->g->result;
+    if (self->g == NULL) Py_RETURN_NONE;
+    /* Same acquire pattern as PygoG_done_get -- gate the result read
+     * behind the done flag's release ordering. */
+    if (!__atomic_load_n(&self->g->done, __ATOMIC_ACQUIRE)) Py_RETURN_NONE;
+    r = self->g->result;
+    if (r == NULL) Py_RETURN_NONE;
+    Py_INCREF(r);
+    return r;
 }
 
 static PyGetSetDef PygoG_getset[] = {
