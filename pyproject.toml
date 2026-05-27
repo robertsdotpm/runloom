@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "pygo"
 version = "0.0.1"
 description = "Go-style coroutines in Python (stackful, transparent-blocking I/O via socket monkey-patch)."
-requires-python = ">=3.12"
+requires-python = ">=3.11"
 # Keep the table form for compatibility with setuptools < 77.
 # The newer SPDX-string `license = "MIT"` form requires setuptools 77+.
 license = {text = "MIT"}

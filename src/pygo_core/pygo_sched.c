@@ -110,9 +110,16 @@ void pygo_pystate_snap(pygo_pystate_snap_t *snap)
 #if PY_VERSION_HEX >= 0x030B0000 && PY_VERSION_HEX < 0x030D0000
     /* 3.11 and 3.12: cframe lives on the C stack, threaded through
      * the linked list.  We save the pointer; it remains valid
-     * because g's C stack is preserved across the swap. */
+     * because g's C stack is preserved across the swap.  The
+     * trashcan nesting depth lived directly on tstate in 3.11
+     * (trash_delete_nesting) and inside a nested `trash` struct in
+     * 3.12 (trash.delete_nesting). */
     snap->cframe = ts->cframe;
+#  if PY_VERSION_HEX >= 0x030C0000
     snap->trash_delete_nesting = ts->trash.delete_nesting;
+#  else
+    snap->trash_delete_nesting = ts->trash_delete_nesting;
+#  endif
 #endif
 
 #if PY_VERSION_HEX >= 0x030D0000
@@ -197,7 +204,11 @@ void pygo_pystate_load(pygo_pystate_snap_t *snap)
 
 #if PY_VERSION_HEX >= 0x030B0000 && PY_VERSION_HEX < 0x030D0000
     ts->cframe = snap->cframe;
+#  if PY_VERSION_HEX >= 0x030C0000
     ts->trash.delete_nesting = snap->trash_delete_nesting;
+#  else
+    ts->trash_delete_nesting = snap->trash_delete_nesting;
+#  endif
 #endif
 
 #if PY_VERSION_HEX >= 0x030D0000
@@ -526,7 +537,7 @@ void pygo_g_entry(void *user)
     pygo_g_t *g = (pygo_g_t *)user;
     PyObject *res;
 
-#if PY_VERSION_HEX >= 0x030C0000 && PY_VERSION_HEX < 0x030D0000
+#if PY_VERSION_HEX >= 0x030B0000 && PY_VERSION_HEX < 0x030D0000
     _PyCFrame root_cframe_storage;
     pygo_install_initial_root_frame(&root_cframe_storage);
 #elif PY_VERSION_HEX >= 0x030D0000

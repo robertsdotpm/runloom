@@ -155,7 +155,7 @@ On free-threaded Python 3.13t:
 
 | OS / arch | stack switch | netpoll | atomics | tested |
 | --- | --- | --- | --- | --- |
-| Linux x86_64 (Debian 13, Fedora 39) | fcontext-asm | epoll  | GCC builtins | yes (hw, 3.12 + 3.13t) |
+| Linux x86_64 (Debian 13, Fedora 39) | fcontext-asm | epoll  | GCC builtins | yes (hw, 3.11 + 3.12 + 3.13t) |
 | Linux aarch64       | fcontext-asm | epoll  | GCC builtins | qemu-aarch64 |
 | macOS Big Sur x86_64 | fcontext-asm | kqueue | GCC builtins | yes (hw, 3.12) |
 | macOS arm64 (Apple Silicon) | fcontext-asm | kqueue | GCC builtins | code review |
@@ -163,10 +163,12 @@ On free-threaded Python 3.13t:
 | GhostBSD (FreeBSD 14.1 base) | fcontext-asm | kqueue | GCC builtins | yes (hw, 3.12) |
 | OpenBSD / NetBSD / DragonFly | fcontext-asm | kqueue | GCC builtins | code review |
 | Solaris / illumos   | ucontext     | select | GCC builtins | code review |
-| Android (Termux)    | fcontext-asm | epoll  | GCC builtins | code review |
+| Android (Termux)    | fcontext-asm | epoll  | GCC builtins | code review (phone offline at test time) |
 | Windows 11 Pro x64 (MSVC 2022) | Fibers | WSAPoll | _Interlocked\* shim | yes (hw, 3.12) |
+| Windows 10 22H2 x64 (MSVC 2022) | Fibers | WSAPoll + select | _Interlocked\* shim | yes (hw, 3.12) |
+| Windows Server 2022 x64 (MSVC 2022) | Fibers | WSAPoll + select | _Interlocked\* shim | yes (hw, 3.12) |
 | Windows x64 (MinGW-w64 / clang) | Fibers | WSAPoll + select | GCC builtins | code review |
-| Older Windows (XP / Vista / 7 / 8 / 10 / Server 2019/2022) | Fibers | select (XP/2003) or WSAPoll | _Interlocked\* shim | code review |
+| Windows 8.1 / 7 / XP / Vista | Fibers | select (XP/2003) or WSAPoll | _Interlocked\* shim | not testable: VS 2022 rejects Win < 10, Python > 3.12 needs Win 10+ |
 
 The Linux 3.12 + 3.13t numbers, macOS 11.7, FreeBSD 14.3, GhostBSD,
 and Windows 11 rows above were validated end-to-end on real hardware:
@@ -183,12 +185,16 @@ across Windows Vista through Windows 11 / Server 2022.
 (Visual Studio 2019 16.0+), MinGW-w64, ICC 17+.  MSVC needs C11
 `_Generic` (default in `/std:c11` mode; setup.py sets it).
 
-**Python**: 3.12 or newer.  The Phase B per-goroutine PyThreadState
-snapshot relies on 3.12+ tstate fields (`cframe`, `datastack_chunk`,
-`py_recursion_remaining`); a compile-time `#error` in module.c
-catches the wrong version with a clear message.  Free-threaded 3.13t
-is also supported (M:N work-stealing scheduler + time-sliced
-preemption).
+**Python**: 3.11 or newer.  The Phase B per-goroutine PyThreadState
+snapshot relies on 3.11+ tstate fields (`cframe`, `datastack_chunk`,
+`exc_state`); 3.12 split the recursion counter into
+`py_recursion_remaining` + `c_recursion_remaining`, 3.11 had a single
+`recursion_remaining`, and the snap handles both.  A compile-time
+`#error` in module.c catches the wrong version with a clear message.
+Free-threaded 3.13t is also supported (M:N work-stealing scheduler +
+time-sliced preemption).  Pre-3.11 Python used a fundamentally
+different frame model (PyFrameObject linked list) that isn't
+covered.
 
 ## Layout
 
