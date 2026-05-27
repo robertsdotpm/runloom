@@ -84,6 +84,12 @@ pygo_g_t *pygo_mn_tls_current_g(void);
  * the local FIFO and the next iteration re-runs it -> busy loop. */
 void pygo_mn_tls_mark_parked(void);
 
+/* Return the pygo_sched_t owned by the hub running on this thread, or
+ * NULL if not in a hub.  Used by hub-aware sched primitives (e.g.,
+ * sleep_until) so they push to the hub's per-thread sleep heap rather
+ * than the global single-thread heap. */
+pygo_sched_t *pygo_mn_current_sched(void);
+
 /* Wake g back to its original hub (or to the global single-thread
  * sched if hub_opaque is NULL).  Thread-safe; can be called from any
  * thread (typically netpoll pump on whichever hub did epoll_wait).

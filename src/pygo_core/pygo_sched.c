@@ -35,7 +35,7 @@
 #include <time.h>
 
 /* ---- monotonic seconds ---- */
-static double pygo_monotonic(void)
+double pygo_sched_monotonic_seconds(void)
 {
     struct timespec ts;
 #if defined(CLOCK_MONOTONIC)
@@ -354,13 +354,13 @@ static int pygo_sleep_push(pygo_sched_t *s, pygo_g_t *g)
     return 0;
 }
 
-static pygo_g_t *pygo_sleep_peek(pygo_sched_t *s)
+pygo_g_t *pygo_sched_sleep_peek(pygo_sched_t *s)
 {
     if (s->sleep_size == 0) return NULL;
     return s->sleep_heap[1];
 }
 
-static pygo_g_t *pygo_sleep_pop(pygo_sched_t *s)
+pygo_g_t *pygo_sched_sleep_pop(pygo_sched_t *s)
 {
     pygo_g_t *top;
     pygo_g_t *last;
@@ -385,6 +385,9 @@ static pygo_g_t *pygo_sleep_pop(pygo_sched_t *s)
     s->sleep_heap[i] = last;
     return top;
 }
+
+#define pygo_sleep_peek pygo_sched_sleep_peek
+#define pygo_sleep_pop  pygo_sched_sleep_pop
 
 /* ---- Scheduler lifecycle ---- */
 static pygo_sched_t pygo_global_sched;
@@ -567,10 +570,29 @@ void pygo_sched_wake(pygo_g_t *g)
     pygo_ready_push(pygo_sched_get(), g);
 }
 
-/* ---- Sleep ---- */
+/* ---- Sleep ----
+ *
+ * Hub-aware: in an M:N hub the sleep heap belongs to the hub's
+ * pygo_sched_t (h->sched), not the global single-thread sched.  We
+ * also mark self_queued so hub_main doesn't re-push the g onto the
+ * local FIFO on return from pygo_coro_yield (same rationale as
+ * pygo_sched_park_current). */
 void pygo_sched_sleep_until(pygo_sched_t *s, double wake_at)
 {
-    pygo_g_t *g = s->current;
+    pygo_g_t *g;
+    pygo_sched_t *target = pygo_mn_current_sched();
+    if (target != NULL) {
+        g = pygo_mn_tls_current_g();
+        if (g == NULL) return;
+        g->wake_at = wake_at;
+        if (pygo_sleep_push(target, g) < 0) return;
+        pygo_pystate_snap(&g->snap);
+        pygo_mn_tls_mark_parked();
+        pygo_coro_yield();
+        return;
+    }
+    /* Single-thread path */
+    g = s->current;
     if (g == NULL) return;
     g->wake_at = wake_at;
     if (pygo_sleep_push(s, g) < 0) {
@@ -589,7 +611,7 @@ Py_ssize_t pygo_sched_drain(pygo_sched_t *s)
     while (!s->stopping && (s->ready_head != NULL ||
                             s->sleep_size > 0 ||
                             pygo_netpoll_parked_count() > 0)) {
-        double now = pygo_monotonic();
+        double now = pygo_sched_monotonic_seconds();
         /* Wake up any sleepers whose time has come. */
         while (s->sleep_size > 0 && pygo_sleep_peek(s)->wake_at <= now) {
             pygo_g_t *woke = pygo_sleep_pop(s);

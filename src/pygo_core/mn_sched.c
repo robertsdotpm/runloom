@@ -140,6 +140,17 @@ static void *pygo_hub_main(void *arg)
             }
         }
 
+        /* Wake any sleepers whose timers have expired and move them
+         * onto the local FIFO so the pop below picks them up. */
+        if (h->sched.sleep_size > 0) {
+            double now = pygo_sched_monotonic_seconds();
+            while (h->sched.sleep_size > 0 &&
+                   pygo_sched_sleep_peek(&h->sched)->wake_at <= now) {
+                pygo_g_t *woke = pygo_sched_sleep_pop(&h->sched);
+                pygo_sched_ready_push(&h->sched, woke);
+            }
+        }
+
         g = pygo_sched_ready_pop(&h->sched);     /* local yielded */
         if (g == NULL) {
             g = (pygo_g_t *)pygo_cldeque_pop(&h->deque);  /* own fresh */
@@ -161,25 +172,40 @@ static void *pygo_hub_main(void *arg)
                 int j;
                 PyThreadState *saved;
                 int parked;
+                long long idle_ns;
                 for (j = 0; j < pygo_hub_count; j++) {
                     total += __atomic_load_n(&pygo_hubs[j].pending,
                                              __ATOMIC_RELAXED);
                 }
-                /* If there are gs parked on I/O, drive epoll/kqueue
-                 * instead of just sleeping.  Whichever hub gets here
-                 * first runs pump; routed wakes go to the originating
-                 * hub's submission list, picked up by that hub on its
-                 * next iteration. */
+                /* Default idle wait (no work anywhere -> longer; some
+                 * work elsewhere -> shorter so we re-poll for steal). */
+                idle_ns = (total == 0) ? 500000LL : 100000LL;
+                /* Cap by the next-due sleeper on THIS hub so we don't
+                 * oversleep past a local timer.  (Other hubs' timers
+                 * are handled by those hubs.) */
+                if (h->sched.sleep_size > 0) {
+                    double now = pygo_sched_monotonic_seconds();
+                    double gap = pygo_sched_sleep_peek(&h->sched)->wake_at - now;
+                    long long gap_ns = (long long)(gap * 1e9);
+                    if (gap_ns < 0) gap_ns = 0;
+                    if (gap_ns < idle_ns) idle_ns = gap_ns;
+                }
                 parked = pygo_netpoll_parked_count();
                 saved = PyEval_SaveThread();
                 if (parked > 0) {
-                    /* Short timeout (~1 ms) so pumps stay responsive
-                     * to new local work appearing while we wait. */
-                    pygo_netpoll_pump(1000000LL);
+                    /* Cap pump timeout the same way -- if a local timer
+                     * is due sooner than the next I/O event, we want to
+                     * wake to handle it. */
+                    long long pump_ns = 1000000LL;
+                    if (h->sched.sleep_size > 0 && idle_ns < pump_ns) {
+                        pump_ns = idle_ns;
+                    }
+                    pygo_netpoll_pump(pump_ns);
                 } else {
                     struct timespec ts;
-                    ts.tv_sec = 0;
-                    ts.tv_nsec = (total == 0) ? 500000 : 100000;
+                    ts.tv_sec  = (time_t)(idle_ns / 1000000000LL);
+                    ts.tv_nsec = (long)(idle_ns % 1000000000LL);
+                    if (ts.tv_sec == 0 && ts.tv_nsec == 0) ts.tv_nsec = 1;
                     nanosleep(&ts, NULL);
                 }
                 PyEval_RestoreThread(saved);
@@ -268,6 +294,12 @@ pygo_g_t *pygo_mn_tls_current_g(void)
 void pygo_mn_tls_mark_parked(void)
 {
     pygo_tls_self_queued = 1;
+}
+
+pygo_sched_t *pygo_mn_current_sched(void)
+{
+    pygo_hub_t *h = pygo_tls_hub;
+    return h ? &h->sched : NULL;
 }
 
 /* Push g onto a hub's submission list.  Called by netpoll pump to

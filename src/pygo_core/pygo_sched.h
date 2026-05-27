@@ -159,6 +159,15 @@ void pygo_g_entry(void *user);
  * pointers and leak the g's allocation).  Matches greenlet's did_finish. */
 void pygo_drain_g_datastack(void);
 
+/* Sleep-heap helpers exposed for mn_sched.c's per-hub timer processing.
+ * Single-thread drain still uses them via #define aliases. */
+pygo_g_t *pygo_sched_sleep_peek(pygo_sched_t *s);
+pygo_g_t *pygo_sched_sleep_pop(pygo_sched_t *s);
+
+/* Monotonic clock used by the sleep heap.  Public so hub_main can
+ * decide when sleepers are due. */
+double pygo_sched_monotonic_seconds(void);
+
 /* Time-sliced cooperative preemption (3.13t only).
  *
  * Start a timer thread that posts a Py_AddPendingCall every quantum_us
