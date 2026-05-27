@@ -594,6 +594,24 @@ void pygo_g_entry(void *user)
     pygo_install_initial_root_frame();
 #endif
 
+    /* Each goroutine has its OWN C stack, so the per-thread recursion
+     * counters in tstate don't reflect physical C-stack usage at all.
+     * They're shared across every goroutine running on this OS thread
+     * and steadily deplete as goroutines spawn nested calls.  Reset to
+     * the configured limit at goroutine entry -- each g gets a fresh
+     * recursion budget for its own stack rather than inheriting
+     * whoever-spawned-us's depleted state. */
+    {
+        PyThreadState *ts = PyThreadState_GET();
+        int limit = Py_GetRecursionLimit();
+#if PY_VERSION_HEX >= 0x030C0000
+        ts->py_recursion_remaining = limit;
+        ts->c_recursion_remaining  = limit;
+#else
+        ts->recursion_remaining = limit;
+#endif
+    }
+
     res = PyObject_CallNoArgs(g->callable);
     if (res == NULL) {
         PyObject *type, *value, *tb;
