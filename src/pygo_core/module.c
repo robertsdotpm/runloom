@@ -571,10 +571,56 @@ static PyObject *PygoG_wake(PygoG *self, PyObject *unused)
     Py_RETURN_NONE;
 }
 
+/* Return a small introspection dict for a parked goroutine:
+ *   {"state": "done"|"running"|"parked"|"fresh",
+ *    "has_snap": bool}
+ *
+ * Originally this returned a full Python frame walk via the saved
+ * snap.  The internal _PyInterpreterFrame layout changes across
+ * patch releases (3.11/3.12/3.13 all differ), so walking it from a
+ * stable C extension would require pinning to the internal-API build
+ * flag -- something we deliberately avoid for portability.  This
+ * minimal version still lets a watchdog goroutine answer "what state
+ * is task X in?" without paying the internal-header dependency. */
+static PyObject *PygoG_stack(PygoG *self, PyObject *unused)
+{
+    PyObject *d;
+    const char *state;
+    int has_snap;
+    (void)unused;
+
+    if (self->g == NULL) {
+        state = "freed";
+        has_snap = 0;
+    } else if (self->g->done) {
+        state = "done";
+        has_snap = 0;
+    } else if (self->g->snap.valid) {
+        state = (pygo_sched_get()->current == self->g) ? "running" : "parked";
+        has_snap = 1;
+    } else {
+        state = "fresh";
+        has_snap = 0;
+    }
+
+    d = PyDict_New();
+    if (d == NULL) return NULL;
+    if (PyDict_SetItemString(d, "state", PyUnicode_FromString(state)) < 0 ||
+        PyDict_SetItemString(d, "has_snap", PyBool_FromLong(has_snap)) < 0) {
+        Py_DECREF(d);
+        return NULL;
+    }
+    return d;
+}
+
 static PyMethodDef PygoG_methods[] = {
     {"wake", (PyCFunction)PygoG_wake, METH_NOARGS,
      "Wake this goroutine if parked via park_self().  Safe to call "
      "before park_self (race-handled)."},
+    {"stack", (PyCFunction)PygoG_stack, METH_NOARGS,
+     "Return a small introspection dict: "
+     "{'state': 'done'|'running'|'parked'|'fresh', 'has_snap': bool}.  "
+     "Watchdog-safe; cheap to poll for 'where is task X stuck?'."},
     {NULL, NULL, 0, NULL},
 };
 
