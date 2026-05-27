@@ -153,6 +153,12 @@ void pygo_pystate_snap_clear(pygo_pystate_snap_t *snap);
  * Exposed so mn_sched.c can reuse the same entry (Phase B correct). */
 void pygo_g_entry(void *user);
 
+/* Free the datastack-chunk chain owned by the just-completed goroutine.
+ * Call AFTER pygo_coro_resume returns done=true and BEFORE loading any
+ * other snapshot back into tstate (which would overwrite the chunk
+ * pointers and leak the g's allocation).  Matches greenlet's did_finish. */
+void pygo_drain_g_datastack(void);
+
 /* Time-sliced cooperative preemption (3.13t only).
  *
  * Start a timer thread that posts a Py_AddPendingCall every quantum_us

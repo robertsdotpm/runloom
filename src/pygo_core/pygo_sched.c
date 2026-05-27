@@ -93,6 +93,11 @@ void pygo_pystate_snap(pygo_pystate_snap_t *snap)
     } else {
         snap->exc_info = ts->exc_info;
         snap->exc_state = ts->exc_state;
+        /* The struct copy borrowed a reference; take a real one so the
+         * exc_value can't be freed while g is suspended.  Matched by
+         * Py_XDECREF in pygo_pystate_load's old-value cleanup, and by
+         * Py_CLEAR in pygo_pystate_snap_clear. */
+        Py_XINCREF(snap->exc_state.exc_value);
     }
 #endif
 
@@ -162,10 +167,13 @@ void pygo_pystate_load(pygo_pystate_snap_t *snap)
             ts->exc_info = &ts->exc_state;
         }
     } else {
+        /* Drop ts's old exc_value before overwriting it with snap's
+         * (which we own a strong ref to from the matching snap call). */
+        Py_XDECREF(ts->exc_state.exc_value);
         ts->exc_state = snap->exc_state;
         ts->exc_info = snap->exc_info;
         snap->exc_info = NULL;
-        snap->exc_state.exc_value = NULL;
+        snap->exc_state.exc_value = NULL;       /* ownership transferred */
         snap->exc_state.previous_item = NULL;
     }
 #endif
@@ -208,6 +216,44 @@ void pygo_pystate_snap_clear(pygo_pystate_snap_t *snap)
     Py_CLEAR(snap->delete_later);
 #endif
     snap->valid = 0;
+}
+
+/* Drain (and free) the entire datastack-chunk chain currently attached
+ * to tstate, returning tstate's datastack pointers to NULL.
+ *
+ * Called after a goroutine completes, BEFORE we restore the scheduler
+ * or hub snapshot (which would overwrite tstate->datastack_chunk with
+ * the scheduler's saved value and leak g's chain).  On first run we
+ * NULL'd datastack so PyEval allocated a fresh root chunk owned by g;
+ * when g exits cleanly that root chunk plus any deeper chunks need to
+ * be returned to the arena allocator.
+ *
+ * Algorithm matches greenlet's PythonState::did_finish.
+ *
+ * (PyObject_GetArenaAllocator is the public API for the same arena
+ * that CPython's frame allocator uses internally on 3.11+.) */
+void pygo_drain_g_datastack(void)
+{
+#if PY_VERSION_HEX >= 0x030C0000
+    PyThreadState *ts = PyThreadState_GET();
+    _PyStackChunk *chunk = ts->datastack_chunk;
+    PyObjectArenaAllocator alloc;
+
+    if (chunk == NULL) return;
+
+    ts->datastack_chunk = NULL;
+    ts->datastack_top = NULL;
+    ts->datastack_limit = NULL;
+
+    PyObject_GetArenaAllocator(&alloc);
+    if (alloc.free == NULL) return;       /* arena torn down already */
+    while (chunk != NULL) {
+        _PyStackChunk *prev = chunk->previous;
+        chunk->previous = NULL;
+        alloc.free(alloc.ctx, chunk, chunk->size);
+        chunk = prev;
+    }
+#endif
 }
 
 /* Install an initial root for the goroutine's Python frame chain.  Run
@@ -610,6 +656,13 @@ Py_ssize_t pygo_sched_drain(pygo_sched_t *s)
             }
 
             pygo_coro_resume(g->coro);
+
+            /* If g completed, free its datastack chunks BEFORE we
+             * restore the scheduler's snap (which would overwrite
+             * tstate->datastack_chunk and leak the chain). */
+            if (pygo_coro_done(g->coro)) {
+                pygo_drain_g_datastack();
+            }
 
             /* Back on the scheduler's C stack.  tstate now reflects
              * whatever g left it as just before yielding.  Restore

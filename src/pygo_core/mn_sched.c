@@ -201,11 +201,24 @@ static void *pygo_hub_main(void *arg)
             pygo_tls_current_g = NULL;
             h->sched.current = NULL;
 
+            /* If g completed, free its datastack chunks BEFORE we load
+             * the hub's snap (which overwrites tstate->datastack_chunk
+             * and would leak the g's chain). */
+            if (pygo_coro_done(g->coro)) {
+                pygo_drain_g_datastack();
+            }
+
             pygo_pystate_load(&hub_snap);
 
             if (pygo_coro_done(g->coro)) {
-                __atomic_sub_fetch(&h->pending, 1, __ATOMIC_RELAXED);
-                __atomic_add_fetch(&h->sched.completed, 1, __ATOMIC_RELAXED);
+                /* Bump completed BEFORE decrementing pending, both with
+                 * release ordering, so a mn_run reader that observes
+                 * pending == 0 (via acquire) is also guaranteed to see
+                 * the matching completed++.  The previous (pending-,
+                 * then completed+) order let mn_run race the inc and
+                 * undercount. */
+                __atomic_add_fetch(&h->sched.completed, 1, __ATOMIC_RELEASE);
+                __atomic_sub_fetch(&h->pending, 1, __ATOMIC_RELEASE);
                 pygo_g_decref(g);
             } else if (!self_queued) {
                 /* Raw pygo_coro_yield() -- g didn't go through
@@ -271,14 +284,48 @@ int pygo_mn_init(int n_threads)
         h->sub_head = h->sub_tail = NULL;
         h->tstate = PyThreadState_New(interp);
         if (h->tstate == NULL) {
-            pygo_hub_count = i;   /* only init'd this many */
+            /* Clean up everything we've partially initialised so far
+             * (mutexes + earlier tstates) and reset module state.
+             * Without this, a later mn_fini would pthread_join(0) on
+             * the half-initialised hubs == undefined behaviour. */
+            int j;
+            pthread_mutex_destroy(&h->sub_lock);   /* this hub's mutex */
+            for (j = 0; j < i; j++) {
+                PyThreadState_Clear(pygo_hubs[j].tstate);
+                PyThreadState_Delete(pygo_hubs[j].tstate);
+                pthread_mutex_destroy(&pygo_hubs[j].sub_lock);
+            }
+            PyMem_Free(pygo_hubs);
+            pygo_hubs = NULL;
+            pygo_hub_count = 0;
+            PyErr_NoMemory();
             return -1;
         }
     }
     saved = PyEval_SaveThread();
     for (i = 0; i < n_threads; i++) {
-        pthread_create(&pygo_hubs[i].thread, NULL,
-                       pygo_hub_main, &pygo_hubs[i]);
+        if (pthread_create(&pygo_hubs[i].thread, NULL,
+                           pygo_hub_main, &pygo_hubs[i]) != 0) {
+            /* Mark the unspawned hubs as already-stopping + join the
+             * ones we did spawn before returning -1. */
+            int j;
+            for (j = i; j < n_threads; j++) pygo_hubs[j].stopping = 1;
+            for (j = 0; j < i; j++) {
+                pygo_hubs[j].stopping = 1;
+                pthread_join(pygo_hubs[j].thread, NULL);
+            }
+            PyEval_RestoreThread(saved);
+            for (j = 0; j < n_threads; j++) {
+                PyThreadState_Clear(pygo_hubs[j].tstate);
+                PyThreadState_Delete(pygo_hubs[j].tstate);
+                pthread_mutex_destroy(&pygo_hubs[j].sub_lock);
+            }
+            PyMem_Free(pygo_hubs);
+            pygo_hubs = NULL;
+            pygo_hub_count = 0;
+            PyErr_SetString(PyExc_OSError, "pthread_create failed");
+            return -1;
+        }
     }
     PyEval_RestoreThread(saved);
     return n_threads;
@@ -362,8 +409,11 @@ Py_ssize_t pygo_mn_run(void)
     for (;;) {
         long total = 0;
         for (i = 0; i < pygo_hub_count; i++) {
+            /* ACQUIRE pairs with the RELEASE stores hub_main does on
+             * pending dec and completed inc; once we see pending == 0
+             * we're guaranteed to see all corresponding completed++. */
             total += __atomic_load_n(&pygo_hubs[i].pending,
-                                     __ATOMIC_RELAXED);
+                                     __ATOMIC_ACQUIRE);
         }
         if (total == 0) break;
         {
@@ -373,7 +423,8 @@ Py_ssize_t pygo_mn_run(void)
     }
     PyEval_RestoreThread(saved);
     for (i = 0; i < pygo_hub_count; i++) {
-        total_completed += pygo_hubs[i].sched.completed;
+        total_completed += __atomic_load_n(&pygo_hubs[i].sched.completed,
+                                           __ATOMIC_ACQUIRE);
     }
     return total_completed;
 }
