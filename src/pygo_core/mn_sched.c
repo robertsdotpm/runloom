@@ -220,7 +220,8 @@ static void *pygo_hub_main(void *arg)
             pygo_pystate_snap_t hub_snap;
             int self_queued;
 
-            memset(&hub_snap, 0, sizeof(hub_snap));
+            /* snap() fills every field; the memset that was here was
+             * dead work on every hub iteration. */
             pygo_pystate_snap(&hub_snap);
 
             if (g->snap.valid) {
@@ -337,6 +338,23 @@ int pygo_mn_yield_current(void)
     pygo_g_t *g = pygo_tls_current_g;
     if (h == NULL || g == NULL) {
         return 0;
+    }
+    /* Trivial-switch fast path: if there's no other work for this hub
+     * -- no yielded g in local FIFO, no fresh g in our deque, no
+     * sleeper due, no parked I/O -- yielding would just snap, swap to
+     * hub_main, find an empty queue, swap back.  Skip it.
+     *
+     * We do NOT peek neighbours' deques here: a steal happens only when
+     * a hub goes idle (hub_main's main path), and idle implies the
+     * neighbour itself has nothing local to run.  Letting a g monopolise
+     * a hub while neighbours have work is fine -- the work-stealing
+     * scheduler is allowed to leave stealable items on a busy hub.
+     * This matches single-thread's pygo_sched_yield fast path. */
+    if (__builtin_expect(h->sched.ready_head == NULL
+                         && pygo_cldeque_size(&h->deque) == 0
+                         && h->sched.sleep_size == 0
+                         && pygo_netpoll_parked_count() == 0, 1)) {
+        return 1;
     }
     pygo_sched_ready_push(&h->sched, g);
     pygo_pystate_snap(&g->snap);

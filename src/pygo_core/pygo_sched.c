@@ -676,7 +676,9 @@ Py_ssize_t pygo_sched_drain(pygo_sched_t *s)
             pygo_g_t *prev = s->current;
             pygo_pystate_snap_t sched_snap;
 
-            memset(&sched_snap, 0, sizeof(sched_snap));
+            /* snap() unconditionally sets every field it reads, so the
+             * memset that used to live here is dead work on every
+             * iteration of the slow path. */
             pygo_pystate_snap(&sched_snap);
 
             s->current = g;
