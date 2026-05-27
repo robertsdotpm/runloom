@@ -422,6 +422,93 @@ static PyObject *m_tcp_send(PyObject *self, PyObject *args)
     return PyLong_FromSsize_t(sent);
 }
 
+/* Cooperative POSIX read(2) / write(2) for non-socket fds (pipes,
+ * tty, etc.).  Windows: file fds aren't pollable through Winsock so
+ * fd_read/write fall back to a synchronous _read/_write that blocks
+ * the OS thread.  This is the same trade-off monkey.py already takes
+ * via _blocking_call; exposing it here lets the C scheduler shortcut
+ * around the Python frame overhead. */
+static PyObject *m_fd_read(PyObject *self, PyObject *args)
+{
+    int fd;
+    Py_buffer buf;
+    Py_ssize_t n_bytes;
+    Py_ssize_t got = 0;
+    (void)self;
+
+    if (!PyArg_ParseTuple(args, "iw*n", &fd, &buf, &n_bytes)) return NULL;
+    if (n_bytes < 0 || n_bytes > buf.len) {
+        PyBuffer_Release(&buf);
+        PyErr_SetString(PyExc_ValueError, "n out of range for buffer");
+        return NULL;
+    }
+
+#if defined(PYGO_OS_WINDOWS)
+    /* No pollable file/pipe model on Win32 -- block the OS thread.
+     * Callers expecting cooperation here should route to monkey.py's
+     * thread-pool _blocking_call instead. */
+    {
+        int r = _read(fd, buf.buf, (unsigned)n_bytes);
+        PyBuffer_Release(&buf);
+        if (r < 0) return PyErr_SetFromErrno(PyExc_OSError);
+        return PyLong_FromLong(r);
+    }
+#else
+    while (1) {
+        ssize_t r = read(fd, buf.buf, (size_t)n_bytes);
+        if (r > 0)  { got = (Py_ssize_t)r; break; }
+        if (r == 0) { got = 0; break; }   /* EOF */
+        if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
+            PyBuffer_Release(&buf);
+            return PyErr_SetFromErrno(PyExc_OSError);
+        }
+        if (errno == EINTR) continue;
+        if (pygo_netpoll_wait_fd(fd, 1 /*READ*/, -1LL) < 0) {
+            PyBuffer_Release(&buf);
+            return PyErr_SetFromErrno(PyExc_OSError);
+        }
+    }
+    PyBuffer_Release(&buf);
+    return PyLong_FromSsize_t(got);
+#endif
+}
+
+static PyObject *m_fd_write(PyObject *self, PyObject *args)
+{
+    int fd;
+    Py_buffer buf;
+    Py_ssize_t written = 0;
+    (void)self;
+
+    if (!PyArg_ParseTuple(args, "iy*", &fd, &buf)) return NULL;
+
+#if defined(PYGO_OS_WINDOWS)
+    {
+        int r = _write(fd, buf.buf, (unsigned)buf.len);
+        PyBuffer_Release(&buf);
+        if (r < 0) return PyErr_SetFromErrno(PyExc_OSError);
+        return PyLong_FromLong(r);
+    }
+#else
+    while (written < buf.len) {
+        ssize_t r = write(fd, (const char *)buf.buf + written,
+                          (size_t)(buf.len - written));
+        if (r >= 0) { written += r; continue; }
+        if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
+            PyBuffer_Release(&buf);
+            return PyErr_SetFromErrno(PyExc_OSError);
+        }
+        if (errno == EINTR) continue;
+        if (pygo_netpoll_wait_fd(fd, 2 /*WRITE*/, -1LL) < 0) {
+            PyBuffer_Release(&buf);
+            return PyErr_SetFromErrno(PyExc_OSError);
+        }
+    }
+    PyBuffer_Release(&buf);
+    return PyLong_FromSsize_t(written);
+#endif
+}
+
 /* ---- Fast-path: C scheduler ----
  *
  * pygo_core.go(fn)       -> PygoG handle.  Schedules fn to run.
@@ -819,6 +906,53 @@ static PyObject *m_netpoll_backend(PyObject *self, PyObject *unused)
     return PyUnicode_FromString(pygo_netpoll_backend());
 }
 
+/* Production introspection: returns a dict of scheduler counters so a
+ * stuck deployment can be debugged without attaching a C debugger.
+ * Counts cover the single-thread scheduler; M:N hub stats arrive when
+ * Phase C grows its own introspection hooks. */
+static PyObject *m_stats(PyObject *self, PyObject *unused)
+{
+    pygo_sched_t *s = pygo_sched_get();
+    Py_ssize_t ready;
+    PyObject *d;
+    (void)self; (void)unused;
+
+    ready = (Py_ssize_t)((s->ready_tail - s->ready_head) & s->ready_mask);
+    d = PyDict_New();
+    if (d == NULL) return NULL;
+
+#define PYGO_STATS_SET(k, v) do {                                      \
+        PyObject *pv = PyLong_FromSsize_t((Py_ssize_t)(v));            \
+        if (pv == NULL || PyDict_SetItemString(d, (k), pv) < 0) {      \
+            Py_XDECREF(pv); Py_DECREF(d); return NULL;                 \
+        }                                                              \
+        Py_DECREF(pv);                                                 \
+    } while (0)
+
+    PYGO_STATS_SET("ready",     ready);
+    PYGO_STATS_SET("sleeping",  s->sleep_size);
+    PYGO_STATS_SET("netpoll_parked", pygo_netpoll_parked_count());
+    PYGO_STATS_SET("completed", s->completed);
+    PYGO_STATS_SET("running",   (s->current != NULL) ? 1 : 0);
+    PYGO_STATS_SET("stack_size_default", s->stack_size);
+    PYGO_STATS_SET("ready_capacity", (Py_ssize_t)s->ready_cap);
+
+#undef PYGO_STATS_SET
+    /* Strings: backends are useful in the same payload. */
+    {
+        PyObject *coro    = PyUnicode_FromString(pygo_coro_backend());
+        PyObject *netpoll = PyUnicode_FromString(pygo_netpoll_backend());
+        if (!coro || !netpoll ||
+            PyDict_SetItemString(d, "backend", coro) < 0 ||
+            PyDict_SetItemString(d, "netpoll", netpoll) < 0) {
+            Py_XDECREF(coro); Py_XDECREF(netpoll); Py_DECREF(d);
+            return NULL;
+        }
+        Py_DECREF(coro); Py_DECREF(netpoll);
+    }
+    return d;
+}
+
 /* ---- M:N scheduler bindings (Phase C) ---- */
 static PyObject *m_mn_init(PyObject *self, PyObject *args)
 {
@@ -1029,6 +1163,14 @@ static PyMethodDef module_methods[] = {
     {"tcp_send", m_tcp_send, METH_VARARGS,
      "tcp_send(fd, bytes_like) -> bytes_sent.  C-level sendall with "
      "cooperative blocking; loops until all bytes sent or error."},
+    {"fd_read", m_fd_read, METH_VARARGS,
+     "fd_read(fd, writable_buffer, n) -> bytes_read.  POSIX read(2) "
+     "with cooperative blocking via netpoll.  Works on pipes, ttys, "
+     "any pollable fd.  On Windows file fds aren't pollable: blocks "
+     "the OS thread (use the monkey.py thread-pool path instead)."},
+    {"fd_write", m_fd_write, METH_VARARGS,
+     "fd_write(fd, bytes_like) -> bytes_written.  POSIX write(2) "
+     "loop with cooperative blocking.  Same Windows caveat as fd_read."},
     /* C-scheduler fast path. */
     {"go",          m_go,          METH_O,
      "Spawn a goroutine via the C scheduler.  Returns a G handle."},
@@ -1051,6 +1193,10 @@ static PyMethodDef module_methods[] = {
      "until fd is ready.  events is a bitmask: 1=read, 2=write."},
     {"netpoll_backend", m_netpoll_backend, METH_NOARGS,
      "Return active netpoll backend name (\"epoll\", \"kqueue\", \"select\")."},
+    {"stats",       m_stats,       METH_NOARGS,
+     "Return a dict of scheduler counters: ready, sleeping, "
+     "netpoll_parked, completed, running, plus backend names.  "
+     "Cheap; safe to poll from a watchdog goroutine in production."},
     {"mn_init",     m_mn_init,     METH_VARARGS,
      "mn_init(n=cpus): start N hub threads.  Returns count."},
     {"mn_go",       m_mn_go,       METH_O,

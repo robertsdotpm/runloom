@@ -968,6 +968,15 @@ class CoLock(object):
             self._owner  = cur
             return True
         p = _Parker()
+        # _Parker() may yield during socketpair creation (Windows path).
+        # If the lock got freed while we yielded, claim it now instead
+        # of parking forever -- nobody will unpark us, because nobody
+        # saw us in self._waiters when they released.
+        if not self._locked:
+            self._locked = True
+            self._owner  = cur
+            p.release()
+            return True
         self._waiters.append(p)
         p.park()
         p.release()
@@ -1186,6 +1195,13 @@ class CoSemaphore(object):
             self._value -= 1
             return True
         p = _Parker()
+        # Same re-check as CoLock: _Parker() may yield during socketpair
+        # creation, and self._value can have transitioned to > 0 in the
+        # gap.  Claim the permit directly if so.
+        if self._value > 0:
+            self._value -= 1
+            p.release()
+            return True
         self._waiters.append(p)
         p.park()
         p.release()
