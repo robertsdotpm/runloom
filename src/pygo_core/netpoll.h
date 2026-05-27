@@ -39,6 +39,11 @@ int pygo_netpoll_pump(long long timeout_ns);
  * to decide whether to call pump or exit. */
 int pygo_netpoll_parked_count(void);
 
+/* Forcibly wake every parked goroutine with ready_mask=-1.  Used by
+ * sched_reset() on paio.run cleanup so leftover accept loops /
+ * tickers don't block the next pygo_core.run(). */
+int pygo_netpoll_drain_parked(void);
+
 /* One-time init / cleanup. */
 int pygo_netpoll_init(void);
 void pygo_netpoll_fini(void);

@@ -992,6 +992,45 @@ static PyObject *m_sched_stop(PyObject *self, PyObject *unused)
     Py_RETURN_NONE;
 }
 
+/* Forcibly drop everything from the scheduler: clears the ready queue,
+ * sleep heap, and (best-effort) any netpoll-parked goroutines.  Used
+ * by paio.run's cleanup after the main future completes, so leftover
+ * call_later runners / accept loops / ticker goroutines don't block
+ * the next pygo_core.run() with a sleep heap that won't drain for
+ * minutes.  Goroutines being dropped have their coros marked done +
+ * freed; any user-visible Python references (G handles) will report
+ * done=True. */
+static PyObject *m_sched_reset(PyObject *self, PyObject *unused)
+{
+    pygo_sched_t *s = pygo_sched_get();
+    int n_ready = 0, n_sleep = 0, n_parked;
+    (void)self; (void)unused;
+
+    /* Wake netpoll-parked goroutines with ready_mask=-1 first.  This
+     * pushes them back to ready; we then drain ready below. */
+    n_parked = pygo_netpoll_drain_parked();
+
+    /* Drain ready queue. */
+    while (!pygo_sched_ready_empty(s)) {
+        pygo_g_t *g = pygo_sched_ready_pop(s);
+        if (g != NULL) {
+            __atomic_store_n(&g->done, 1, __ATOMIC_RELEASE);
+            pygo_g_decref(g);
+            n_ready++;
+        }
+    }
+    /* Drain sleep heap. */
+    while (s->sleep_size > 0) {
+        pygo_g_t *g = pygo_sched_sleep_pop(s);
+        if (g != NULL) {
+            __atomic_store_n(&g->done, 1, __ATOMIC_RELEASE);
+            pygo_g_decref(g);
+            n_sleep++;
+        }
+    }
+    return Py_BuildValue("(iii)", n_ready, n_sleep, n_parked);
+}
+
 /* Park the current goroutine until G.wake() is called on it.
  * Race-safe: a wake that arrives before the park (sync callback firing
  * from add_done_callback) makes this a no-op.  Used by pygo.aio's
@@ -1414,6 +1453,11 @@ static PyMethodDef module_methods[] = {
      "point.  Background goroutines parked on netpoll/sleep/wake will "
      "be left in their parked state; cleanup happens when the wrapping "
      "Python objects are gc'd."},
+    {"sched_reset", m_sched_reset, METH_NOARGS,
+     "Drop everything from the scheduler (ready + sleep heap).  Used "
+     "by paio.run's cleanup so leftover background goroutines don't "
+     "block the next pygo_core.run() with a sleep heap that won't "
+     "drain for minutes.  Returns (n_ready_dropped, n_sleep_dropped)."},
     {"park_self",   m_park_self,   METH_NOARGS,
      "Park the current goroutine until G.wake() is called on its "
      "handle.  Race-safe: a wake that arrives before the park is "

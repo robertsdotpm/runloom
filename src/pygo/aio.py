@@ -198,9 +198,18 @@ class PygoFuture(object):
     def cancel(self, msg=None):
         if self._state != _PENDING:
             return False
+        self._cancel_message = msg
         self._state = _CANCELLED
         self._fire_callbacks()
         return True
+
+    def _make_cancelled_error(self):
+        """Build the CancelledError that asyncio internals (gather's
+        _done_callback, Task.__step's cancellation path) expect."""
+        msg = getattr(self, "_cancel_message", None)
+        if msg is None:
+            return asyncio.CancelledError()
+        return asyncio.CancelledError(msg)
 
     # ---- callbacks ----
     def add_done_callback(self, callback, *, context=None):
@@ -751,10 +760,45 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
         finally:
             self._running = False
             asyncio._set_running_loop(None)
+            # After the main future completes, cancel any outstanding
+            # background tasks.  Without this, paio.run-spawned tasks
+            # parked on park_self leak across runs -- their pygo_g_t
+            # stays alive, their snap holds Python references, and the
+            # next paio.run sees stale state.  Mirrors asyncio.run's
+            # _cancel_all_tasks.
+            self._cancel_outstanding_tasks()
 
         if not future.done():
             raise RuntimeError("event loop stopped before Future completed")
         return future.result()
+
+    def _cancel_outstanding_tasks(self):
+        """Cancel every PygoTask still alive on this loop and clear
+        the scheduler's leftover state.  Called from run_until_complete
+        after the main future resolves so background goroutines
+        (call_later runners, accept loops, ticker goroutines) don't
+        leak into the next paio.run.
+
+        Strategy: cancel all known tasks (best-effort -- not all are
+        interruptible), then sched_reset() the scheduler's ready+sleep
+        queues so the next pygo_core.run() sees a clean slate."""
+        if _ALL_TASKS is not None:
+            tasks = [t for t in list(_ALL_TASKS)
+                     if not t.done() and t._loop is self]
+            for t in tasks:
+                try:
+                    t.cancel()
+                except Exception:
+                    pass
+        # Forcibly drop anything still scheduled.  Goroutines parked on
+        # netpoll/wake/chan that aren't interrupted by cancel get
+        # abandoned; the underlying coro and snap are freed when the
+        # last Python reference drops.
+        try:
+            pygo_core.sched_reset()
+        except AttributeError:
+            # Older build without sched_reset; best-effort drain.
+            pass
 
     def run_forever(self):
         self._running = True
@@ -1112,14 +1156,14 @@ class _Server(object):
             reader = StreamReader(conn, limit=self._limit)
             writer = StreamWriter(conn, reader=reader)
 
-            # Spawn a goroutine per client.  The cb is an async fn, so
-            # we run it inside a PygoTask.
-            def handler(_r=reader, _w=writer):
-                coro = self._cb(_r, _w)
-                if asyncio.iscoroutine(coro):
-                    # Drive it as a task on the same loop.
-                    PygoTask(coro)
-            pygo_core.go(handler)
+            # Build the connection coroutine and drive it directly as
+            # a PygoTask.  We're already inside a non-task goroutine
+            # (the accept loop); creating PygoTask directly here -- the
+            # earlier "wrap in pygo_core.go then PygoTask inside" added
+            # a second goroutine spawn for no real benefit.
+            coro = self._cb(reader, writer)
+            if asyncio.iscoroutine(coro):
+                PygoTask(coro, loop=asyncio.get_event_loop())
 
     def is_serving(self):
         return not self._closed

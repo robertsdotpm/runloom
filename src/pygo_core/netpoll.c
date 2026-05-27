@@ -65,6 +65,12 @@ typedef struct pygo_parked {
     struct pygo_parked *next;
 } pygo_parked_t;
 
+/* Forcibly wake all parked goroutines with a cancelled marker.
+ * Returns count of waiters woken.  Used by sched_reset() so paio.run
+ * cleanup doesn't leave the next pygo_core.run() blocking on parked
+ * accept loops / tickers / etc. */
+int pygo_netpoll_drain_parked(void);
+
 /* Shared parked list + lock.  Under M:N multiple hubs concurrently
  * call wait_fd (park.add) and pump (park.remove); without the lock
  * the singly-linked list corrupts.  Single-thread sched takes the
@@ -249,6 +255,35 @@ static int pygo_netpoll_register(int fd, int events)
 int pygo_netpoll_parked_count(void)
 {
     return __atomic_load_n(&pygo_parked_total, __ATOMIC_ACQUIRE);
+}
+
+/* Forcibly wake every parked goroutine with ready_mask=-1 (cancelled).
+ * Each waiter's pygo_netpoll_wait_fd call returns -1; callers (server
+ * accept loops, etc.) see that and exit their loops.  Returns count
+ * woken. */
+int pygo_netpoll_drain_parked(void)
+{
+    int n = 0;
+    pygo_parked_t *p, *next;
+    pygo_mutex_lock(&pygo_parked_lock);
+    p = pygo_parked_head;
+    pygo_parked_head = NULL;
+    while (p != NULL) {
+        next = p->next;
+        if (p->ready_out != NULL) {
+            *p->ready_out = -1;   /* signal cancellation */
+        }
+        if (p->hub != NULL) {
+            pygo_mn_wake_g(p->hub, p->g);
+        } else {
+            pygo_sched_wake(p->g);
+        }
+        __atomic_sub_fetch(&pygo_parked_total, 1, __ATOMIC_RELEASE);
+        p = next;
+        n++;
+    }
+    pygo_mutex_unlock(&pygo_parked_lock);
+    return n;
 }
 
 /* ---- park / wake ---- */
