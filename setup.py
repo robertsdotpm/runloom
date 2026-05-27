@@ -36,13 +36,16 @@ def detect_sources():
         os.path.join(SRC_C, "netpoll.c"),
     ]
     # Arch-specific asm fast path.  Only compile what matches the host;
-    # the file is no-op-conditioned on PYGO_ARCH_* otherwise.
+    # other archs fall through to ucontext (POSIX) or Fibers (Windows).
     machine = platform.machine().lower()
-    if sys.platform in ("linux", "darwin") and machine in ("x86_64", "amd64"):
-        srcs.append(os.path.join(SRC_C, "arch", "swap_x86_64.S"))
-    elif sys.platform.startswith(("freebsd", "openbsd", "netbsd", "dragonfly")) \
-         and machine in ("x86_64", "amd64"):
-        srcs.append(os.path.join(SRC_C, "arch", "swap_x86_64.S"))
+    posix_unix = (sys.platform in ("linux", "darwin") or
+                  sys.platform.startswith(("freebsd", "openbsd", "netbsd",
+                                           "dragonfly", "android")))
+    if posix_unix:
+        if machine in ("x86_64", "amd64"):
+            srcs.append(os.path.join(SRC_C, "arch", "swap_x86_64.S"))
+        elif machine in ("aarch64", "arm64"):
+            srcs.append(os.path.join(SRC_C, "arch", "swap_aarch64.S"))
     return srcs
 
 

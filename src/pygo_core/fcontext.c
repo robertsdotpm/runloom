@@ -18,42 +18,20 @@ void pygo_asm_entry(pygo_asm_coro_t *c)
     }
 }
 
-/* Set up the initial stack frame so the first swap-in runs
- * trampoline().  The swap_x86_64.S pop sequence is:
- *   pop r15  pop r14  pop r13  pop r12  pop rbx  pop rbp  ret
- * Ret takes the next 8 bytes as the return address.  So the stack
- * we leave behind needs to look (top to high addresses) like:
- *
- *   sp ->  r15           (we don't care, init to 0)
- *          r14
- *          r13
- *          r12     <- coro pointer (trampoline reads this!)
- *          rbx
- *          rbp
- *          return_addr   <- pygo_asm_trampoline
- *
- * Stack grows down, so we start at stack_top and subtract.  The
- * System V ABI requires that at function entry the stack be aligned
- * to 16 bytes such that (rsp + 8) is a multiple of 16 (call instr
- * pushes 8 bytes).  We satisfy that by ensuring stack_top is
- * 16-aligned and our 7-word setup keeps it so. */
+#if defined(PYGO_ARCH_X86_64)
+
+/* x86_64 SysV: swap pops 6 regs (r15 r14 r13 r12 rbx rbp) then ret.
+ * Frame layout, low to high:
+ *   sp ->  r15  r14  r13  r12=coro  rbx  rbp  return_addr=trampoline
+ * Stack must be 16-aligned at trampoline's call instruction. */
 void pygo_asm_make_ctx(pygo_asm_coro_t *coro, void *stack_top)
 {
     uintptr_t sp = (uintptr_t)stack_top;
     uintptr_t *frame;
-
-    /* Align the top down to a 16-byte boundary. */
     sp &= ~(uintptr_t)15;
-
-    /* We need 7 words: 6 saved regs + return address.  Subtract 7*8.
-     * After the ret pops the return address, rsp is 16-aligned (as
-     * required by the trampoline's first call). */
-    sp -= 8;   /* deliberate misalign so after the call instr at the
-                * start of pygo_asm_trampoline (which pushes 8 bytes for
-                * the return address) we are 16-aligned for the next
-                * call. */
+    sp -= 8;                /* deliberate misalign: after callq pushes 8,
+                               we're 16-aligned at pygo_asm_entry entry. */
     sp -= 7 * 8;
-
     frame = (uintptr_t *)sp;
     frame[0] = 0;                              /* r15 */
     frame[1] = 0;                              /* r14 */
@@ -64,8 +42,41 @@ void pygo_asm_make_ctx(pygo_asm_coro_t *coro, void *stack_top)
     frame[6] = (uintptr_t)&pygo_asm_trampoline;
 
     coro->self.sp = (void *)sp;
-    coro->caller.sp = NULL;       /* set by first swap */
+    coro->caller.sp = NULL;
     coro->done = 0;
 }
+
+#elif defined(PYGO_ARCH_AARCH64)
+
+/* aarch64 AAPCS64: swap saves 12 GPRs (x19..x30) + 8 FPs (d8..d15)
+ *   = 160 bytes.  Layout, low to high:
+ *     [sp, #0..15]    x19, x20      <- x19 = coro pointer
+ *     [sp, #16..31]   x21, x22
+ *     [sp, #32..47]   x23, x24
+ *     [sp, #48..63]   x25, x26
+ *     [sp, #64..79]   x27, x28
+ *     [sp, #80..95]   x29, x30      <- x30 = lr = trampoline
+ *     [sp, #96..159]  d8..d15
+ * Trampoline reads x19; ret to x30. */
+void pygo_asm_make_ctx(pygo_asm_coro_t *coro, void *stack_top)
+{
+    uintptr_t sp = (uintptr_t)stack_top;
+    uintptr_t *frame;
+    sp &= ~(uintptr_t)15;       /* 16-align */
+    sp -= 160;
+    frame = (uintptr_t *)sp;
+    /* zero everything first */
+    for (size_t i = 0; i < 20; i++) frame[i] = 0;
+    frame[0] = (uintptr_t)coro;                  /* x19 */
+    frame[11] = (uintptr_t)&pygo_asm_trampoline; /* x30 (offset 88) */
+
+    coro->self.sp = (void *)sp;
+    coro->caller.sp = NULL;
+    coro->done = 0;
+}
+
+#else
+#  error "PYGO_HAVE_FCONTEXT set but no make_ctx implementation for this arch"
+#endif
 
 #endif /* PYGO_HAVE_FCONTEXT */

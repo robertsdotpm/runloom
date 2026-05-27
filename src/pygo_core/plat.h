@@ -79,8 +79,9 @@
  *      choice; available since Win95.
  *   3. ucontext (PYGO_HAVE_UCONTEXT)                       -- POSIX fallback.
  * Exactly one of these is defined per platform. */
-#if (defined(PYGO_OS_LINUX) || defined(PYGO_OS_MACOS) || defined(PYGO_OS_BSD)) \
-    && defined(PYGO_ARCH_X86_64)
+#if (defined(PYGO_OS_LINUX) || defined(PYGO_OS_MACOS) || defined(PYGO_OS_BSD) \
+     || defined(PYGO_OS_ANDROID)) \
+    && (defined(PYGO_ARCH_X86_64) || defined(PYGO_ARCH_AARCH64))
 #  define PYGO_HAVE_FCONTEXT 1
 #elif defined(PYGO_OS_WINDOWS)
 #  define PYGO_HAVE_FIBERS 1

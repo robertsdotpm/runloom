@@ -23,6 +23,7 @@
 #include "netpoll.h"
 
 #include <math.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -54,6 +55,11 @@ static double pygo_monotonic(void)
  *     yielded goroutines is this issue.
  *   - tstate->exc_info: exception state chain.
  */
+/* Recursion-counter snapshot is known correct.  cframe + exc_info
+ * snapshot was attempted (and is left in the struct for the future
+ * Phase B work) but does NOT fully isolate the Python frame chain
+ * across goroutines.  Greenlet's reference handles this in ~200 LoC
+ * of CPython-version-specific C; that's the work for a future turn. */
 static void pygo_g_tstate_save(pygo_g_t *g)
 {
     PyThreadState *ts = PyThreadState_GET();
@@ -81,7 +87,7 @@ static void pygo_g_tstate_restore(const pygo_g_t *g)
 
 static void pygo_g_install_root_cframe(pygo_g_t *g)
 {
-    (void)g;   /* Phase B work; see comment block above. */
+    (void)g;
 }
 
 /* ---- Ready FIFO ops (singly-linked, head=pop, tail=push) ---- */
@@ -377,8 +383,6 @@ Py_ssize_t pygo_sched_drain(pygo_sched_t *s)
             if (g->snapshot_valid) {
                 pygo_g_tstate_restore(g);
             } else {
-                /* First-run: give g its own root cframe so its eval
-                 * does not link backwards into the scheduler's chain. */
                 pygo_g_install_root_cframe(g);
             }
             pygo_coro_resume(g->coro);

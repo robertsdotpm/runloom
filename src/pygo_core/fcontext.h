@@ -24,8 +24,9 @@
 
 /* Enable the asm fast path on architectures we have an implementation
  * for and where the OS uses System V calling convention. */
-#if (defined(PYGO_OS_LINUX) || defined(PYGO_OS_MACOS) || defined(PYGO_OS_BSD)) \
-    && defined(PYGO_ARCH_X86_64)
+#if (defined(PYGO_OS_LINUX) || defined(PYGO_OS_MACOS) || defined(PYGO_OS_BSD) \
+     || defined(PYGO_OS_ANDROID)) \
+    && (defined(PYGO_ARCH_X86_64) || defined(PYGO_ARCH_AARCH64))
 #  define PYGO_HAVE_FCONTEXT 1
 #endif
 
