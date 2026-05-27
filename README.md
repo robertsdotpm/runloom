@@ -145,14 +145,34 @@ non-preemptible until it returns — same limitation Go has with cgo.
 pip install -e .
 ```
 
-C99 (`-std=gnu99 -D_GNU_SOURCE`), no build-isolation needed.  Compiler
-matrix: GCC 3+, Clang 3+, MSVC 2008+ (with shims), ICC, MinGW.
-
 On free-threaded Python 3.13t:
 
 ```bash
 ~/.pyenv/versions/3.13.13t/bin/python3.13t -m pip install -e .
 ```
+
+## Platform support
+
+| OS / arch | stack switch | netpoll | atomics | tested |
+| --- | --- | --- | --- | --- |
+| Linux x86_64        | fcontext-asm | epoll  | GCC builtins | yes |
+| Linux aarch64       | fcontext-asm | epoll  | GCC builtins | qemu only |
+| macOS x86_64        | fcontext-asm | kqueue | GCC builtins | code review |
+| macOS arm64         | fcontext-asm | kqueue | GCC builtins | code review |
+| FreeBSD / OpenBSD / NetBSD / DragonFly | fcontext-asm | kqueue | GCC builtins | code review |
+| Solaris / illumos   | ucontext     | select | GCC builtins | code review |
+| Android             | fcontext-asm | epoll  | GCC builtins | code review |
+| Windows x64 (MSVC)  | Fibers       | WSAPoll + select | _Interlocked\* shim | code review |
+| Windows x64 (MinGW-w64 / clang) | Fibers | WSAPoll + select | GCC builtins | code review |
+
+**Windows backend selection** is at runtime: `WSAPoll` is probed via
+`GetProcAddress` at first use, falling through to `select()` on hosts
+where it's missing (XP / Server 2003).  One binary works across
+Windows Vista through Windows 11 / Server 2022.
+
+**Compilers**: GCC 4.7+, Clang 3.5+ (including clang-cl), MSVC 19.20+
+(Visual Studio 2019 16.0+), MinGW-w64, ICC 17+.  MSVC needs C11
+`_Generic` (default in `/std:c11` mode; setup.py sets it).
 
 ## Layout
 
@@ -162,20 +182,25 @@ src/pygo_core/
     swap_x86_64.S       SysV x86_64 inline asm (~80 ns/switch)
     swap_aarch64.S      AAPCS64 inline asm (verified under qemu)
   plat.h                OS/arch/compiler detection
+  plat_compat.h         mutex/thread/clock/sleep/cpu-count shim
+  plat_atomic.h         __atomic_* shim for MSVC (no-op on GCC/Clang)
   compat.h              stdint/stdbool shims for old MSVC
   coro.{h,c}            stackful coro primitive (asm/fibers/ucontext)
   fcontext.{h,c}        asm trampoline + per-arch make_ctx
   pygo_sched.{h,c}      C scheduler + per-g PyThreadState snap/load
-  netpoll.{h,c}         epoll/kqueue/select backend (M:N-aware)
+  netpoll.{h,c}         epoll/kqueue/WSAPoll/select backend (M:N-aware)
   mn_sched.{h,c}        M:N work-stealing scheduler (3.13t)
   cldeque.{h,c}         Chase-Lev work-stealing deque
   module.c              Python type + module init + free-thread declaration
 src/pygo/
-  monkey.py             socket monkey-patch
+  monkey.py             stdlib monkey-patch (socket / time / select /
+                        stdio / ssl / subprocess / threading / queue /
+                        file / syscalls / dns) -- Windows-aware
   runtime.py            legacy Python scheduler (kept for tests)
 tests/
   run_tests.py          unit tests
   test_arm64.{c,sh}     aarch64 cross-compile + qemu run
+  test_monkey.py        monkey-patch behaviour + cross-OS shims
 examples/
   bench_c_scheduler.py  pygo vs asyncio yields/s
   bench_snap.py         snap-path microbench (fast + slow path)
@@ -193,10 +218,16 @@ examples/
 
 ## Known gaps
 
-- **aarch64 not validated on real hardware.**  Cross-compiles clean
-  with `aarch64-linux-gnu-gcc`, asm + `make_ctx` follow AAPCS64, and
-  `tests/test_arm64.sh` runs the full coro + yield + trampoline path
-  under `qemu-aarch64-static`.  An Apple Silicon Mac or Linux ARM
-  box would close it.
+- **aarch64 on hardware**: cross-compiles clean with
+  `aarch64-linux-gnu-gcc` and runs end-to-end under `qemu-aarch64-static`
+  (see `tests/test_arm64.sh`); not yet validated on real Apple Silicon
+  or Linux ARM hardware.
+- **Windows on hardware**: the C extension was added with the runtime
+  shim + WSAPoll backend; not yet validated on a Windows box.  All
+  POSIX-isms are gated behind `PYGO_OS_WINDOWS` and the atomic / mutex /
+  thread / clock / sleep primitives go through `plat_compat.h`.
 - **Preemption is 3.13t only.**  GIL builds raise `RuntimeError` on
   `preempt_init`.
+- **IOCP**: Windows uses WSAPoll (or select).  IOCP would be the more
+  efficient choice for many-socket workloads but adds substantial
+  code; deferred until WSAPoll proves a real bottleneck.

@@ -1,12 +1,12 @@
 /* cldeque.c -- Chase-Lev work-stealing deque.
  *
- * Atomic ops via GCC/Clang __atomic_* builtins; MSVC has _Interlocked*
- * which is sufficient but the syntax differs.  We stay in the GCC
- * intrinsic family for now (works on MinGW too).
+ * Atomic ops via GCC/Clang __atomic_* builtins.  On MSVC the same names
+ * are macro-shimmed onto _Interlocked* via plat_atomic.h (included
+ * through plat_compat.h), so the body below is portable as-is.  On
+ * MinGW-w64 / Clang-on-Windows the real GCC builtins are used.
  */
+#include "plat_compat.h"
 #include "cldeque.h"
-
-/* On Linux with -std=gnu99 + -D_GNU_SOURCE these atomics are fine. */
 
 void pygo_cldeque_init(pygo_cldeque_t *d)
 {

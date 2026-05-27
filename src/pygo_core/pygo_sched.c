@@ -18,32 +18,31 @@
  * sleep / run`.
  */
 
-#define _POSIX_C_SOURCE 200809L
+#if !defined(_WIN32)
+#  define _POSIX_C_SOURCE 200809L
+#endif
 
 #define PY_SSIZE_T_CLEAN
 #include <Python.h>
 
+#include "plat.h"
+#include "plat_compat.h"
 #include "pygo_sched.h"
 #include "mn_sched.h"
 #include "netpoll.h"
 
 #include <math.h>
-#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
 
-/* ---- monotonic seconds ---- */
+/* ---- monotonic seconds ----
+ * Shim-backed: plat_compat's pygo_monotonic_ns() picks
+ * QueryPerformanceCounter on Windows and clock_gettime(CLOCK_MONOTONIC)
+ * on POSIX (macOS/Linux/BSD).  Both have sub-microsecond resolution. */
 double pygo_sched_monotonic_seconds(void)
 {
-    struct timespec ts;
-#if defined(CLOCK_MONOTONIC)
-    if (clock_gettime(CLOCK_MONOTONIC, &ts) == 0) {
-        return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
-    }
-#endif
-    return (double)time(NULL);
+    return pygo_monotonic_seconds_compat();
 }
 
 /* ---- tstate snapshot ----
@@ -747,12 +746,11 @@ Py_ssize_t pygo_sched_drain(pygo_sched_t *s)
             if (pygo_netpoll_parked_count() > 0) {
                 pygo_netpoll_pump(timeout_ns);
             } else if (timeout_ns > 0) {
-                /* No fds parked, just a sleep heap timer. */
-                struct timespec req, rem;
+                /* No fds parked, just a sleep heap timer.  Cap at 50 ms
+                 * so an external caller (signal handler, debugger) can
+                 * unstick us quickly. */
                 if (timeout_ns > 50000000LL) timeout_ns = 50000000LL;
-                req.tv_sec = (time_t)(timeout_ns / 1000000000LL);
-                req.tv_nsec = (long)(timeout_ns % 1000000000LL);
-                nanosleep(&req, &rem);
+                pygo_sleep_ns(timeout_ns);
             }
             continue;
         }
@@ -860,7 +858,7 @@ Py_ssize_t pygo_sched_drain(pygo_sched_t *s)
  * each hub eventually picks one up; whichever hub's eval loop dequeues
  * a call runs the yield on its currently-running g. */
 
-static pthread_t pygo_preempt_thread;
+static pygo_thread_t pygo_preempt_thread;
 static volatile int pygo_preempt_running = 0;
 static volatile long pygo_preempt_quantum_us = 10000;
 
@@ -884,18 +882,15 @@ static int pygo_preempt_yield_cb(void *user)
     return 0;
 }
 
-static void *pygo_preempt_main(void *arg)
+static PYGO_THREAD_RET pygo_preempt_main(void *arg)
 {
     (void)arg;
     while (pygo_preempt_running) {
         long us = pygo_preempt_quantum_us;
-        struct timespec ts;
         int posts, i;
 
         if (us < 100) us = 100;        /* clamp lower bound */
-        ts.tv_sec  = us / 1000000L;
-        ts.tv_nsec = (us % 1000000L) * 1000L;
-        nanosleep(&ts, NULL);
+        pygo_sleep_ns((long long)us * 1000LL);
         if (!pygo_preempt_running) break;
 
         /* Post one pending call per hub (or just one for single-thread)
@@ -910,7 +905,7 @@ static void *pygo_preempt_main(void *arg)
             Py_AddPendingCall(pygo_preempt_yield_cb, NULL);
         }
     }
-    return NULL;
+    PYGO_THREAD_RETURN(NULL);
 }
 
 int pygo_preempt_init(long quantum_us)
@@ -926,8 +921,8 @@ int pygo_preempt_init(long quantum_us)
         return 0;
     }
     pygo_preempt_running = 1;
-    if (pthread_create(&pygo_preempt_thread, NULL,
-                       pygo_preempt_main, NULL) != 0) {
+    if (pygo_thread_create(&pygo_preempt_thread,
+                           pygo_preempt_main, NULL) != 0) {
         pygo_preempt_running = 0;
         PyErr_SetString(PyExc_OSError, "pygo preempt thread create failed");
         return -1;
@@ -940,12 +935,12 @@ void pygo_preempt_fini(void)
     if (!pygo_preempt_running) return;
     pygo_preempt_running = 0;
     /* Release the GIL so the timer thread's final pending-call post
-     * (if any) doesn't deadlock with our join.  The timer's nanosleep
+     * (if any) doesn't deadlock with our join.  The timer's sleep
      * doesn't need the GIL but Py_AddPendingCall briefly touches
      * shared state. */
     {
         PyThreadState *saved = PyEval_SaveThread();
-        pthread_join(pygo_preempt_thread, NULL);
+        pygo_thread_join(pygo_preempt_thread);
         PyEval_RestoreThread(saved);
     }
 }

@@ -16,6 +16,8 @@
 #define PY_SSIZE_T_CLEAN
 #include <Python.h>
 
+#include "plat.h"
+#include "plat_compat.h"
 #include "coro.h"
 #include "pygo_sched.h"
 #include "netpoll.h"
@@ -447,9 +449,7 @@ static PyObject *m_sched_sleep(PyObject *self, PyObject *arg)
     }
     s = pygo_sched_get();
     {
-        struct timespec ts;
-        clock_gettime(CLOCK_MONOTONIC, &ts);
-        double now = (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
+        double now = pygo_monotonic_seconds_compat();
         pygo_sched_sleep_until(s, now + secs);
     }
     Py_RETURN_NONE;

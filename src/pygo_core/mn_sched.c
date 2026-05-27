@@ -39,11 +39,17 @@
  *   - park-on-eventfd: today hubs busy-loop trying to steal when
  *     local is empty.  A real impl uses futex / eventfd to sleep.
  */
-#define _POSIX_C_SOURCE 200809L
-#define _GNU_SOURCE
+#if !defined(_WIN32)
+#  define _POSIX_C_SOURCE 200809L
+#  ifndef _GNU_SOURCE
+#    define _GNU_SOURCE
+#  endif
+#endif
 #define PY_SSIZE_T_CLEAN
 #include <Python.h>
 
+#include "plat.h"
+#include "plat_compat.h"
 #include "mn_sched.h"
 #include "pygo_sched.h"
 #include "netpoll.h"
@@ -51,15 +57,17 @@
 #include "cldeque.h"
 
 #include <errno.h>
-#include <pthread.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
-#include <unistd.h>
+
+#if !defined(PYGO_OS_WINDOWS)
+#  include <unistd.h>
+#endif
 
 typedef struct pygo_hub {
     int id;
-    pthread_t thread;
+    pygo_thread_t thread;
     pygo_sched_t sched;
     pygo_cldeque_t deque;
     PyThreadState *tstate;        /* per-hub tstate */
@@ -73,7 +81,7 @@ typedef struct pygo_hub {
      * push to this list under a lock; the hub (the single consumer)
      * drains the list into its own deque each iteration, so all
      * deque pushes are done by the deque's owner thread. */
-    pthread_mutex_t sub_lock;
+    pygo_mutex_t sub_lock;
     pygo_g_t *sub_head;
     pygo_g_t *sub_tail;
 } pygo_hub_t;
@@ -109,12 +117,17 @@ static __thread int pygo_tls_self_queued = 0;
  * Idle policy: when all hubs report pending=0 we still poll (the
  * caller may pygo_mn_go more work at any time).  Stop signal comes
  * from pygo_mn_fini setting h->stopping. */
-static void *pygo_hub_main(void *arg)
+static PYGO_THREAD_RET pygo_hub_main(void *arg)
 {
     pygo_hub_t *h = (pygo_hub_t *)arg;
     pygo_pystate_snap_t hub_snap;
 
     PyEval_RestoreThread(h->tstate);
+    /* Per-OS-thread coro-backend setup.  On Windows Fibers this calls
+     * ConvertThreadToFiber so SwitchToFiber works on this thread; on
+     * POSIX it's a no-op.  Must run BEFORE the first pygo_coro_resume
+     * (otherwise SwitchToFiber faults with "not a fiber"). */
+    pygo_coro_thread_init();
     pygo_tls_hub = h;
 
     /* hub_snap is loop-invariant for the same reason sched_snap is in
@@ -129,11 +142,11 @@ static void *pygo_hub_main(void *arg)
         /* Drain the submission list into the deque first.  Pushing to
          * the deque is owner-only, so we (the hub) move fresh gs from
          * external producers onto our deque before anyone else looks. */
-        pthread_mutex_lock(&h->sub_lock);
+        pygo_mutex_lock(&h->sub_lock);
         {
             pygo_g_t *sub = h->sub_head;
             h->sub_head = h->sub_tail = NULL;
-            pthread_mutex_unlock(&h->sub_lock);
+            pygo_mutex_unlock(&h->sub_lock);
             while (sub != NULL) {
                 pygo_g_t *next = sub->next;
                 sub->next = NULL;
@@ -211,11 +224,8 @@ static void *pygo_hub_main(void *arg)
                     }
                     pygo_netpoll_pump(pump_ns);
                 } else {
-                    struct timespec ts;
-                    ts.tv_sec  = (time_t)(idle_ns / 1000000000LL);
-                    ts.tv_nsec = (long)(idle_ns % 1000000000LL);
-                    if (ts.tv_sec == 0 && ts.tv_nsec == 0) ts.tv_nsec = 1;
-                    nanosleep(&ts, NULL);
+                    if (idle_ns <= 0) idle_ns = 1;
+                    pygo_sleep_ns(idle_ns);
                 }
                 PyEval_RestoreThread(saved);
                 continue;
@@ -282,8 +292,11 @@ static void *pygo_hub_main(void *arg)
     /* Restore hub's tstate before the thread exits. */
     pygo_pystate_load(&hub_snap);
     pygo_tls_hub = NULL;
+    /* Reverse pygo_coro_thread_init for clean exit on Windows
+     * (ConvertFiberToThread); no-op elsewhere. */
+    pygo_coro_thread_fini();
     PyEval_SaveThread();
-    return NULL;
+    PYGO_THREAD_RETURN(NULL);
 }
 
 int pygo_mn_hub_count(void)
@@ -319,7 +332,7 @@ pygo_sched_t *pygo_mn_current_sched(void)
  * or the local FIFO (if g has saved state -- the netpoll-wake case). */
 static void pygo_mn_hub_submit(pygo_hub_t *h, pygo_g_t *g)
 {
-    pthread_mutex_lock(&h->sub_lock);
+    pygo_mutex_lock(&h->sub_lock);
     g->next = NULL;
     if (h->sub_tail != NULL) {
         h->sub_tail->next = g;
@@ -327,7 +340,7 @@ static void pygo_mn_hub_submit(pygo_hub_t *h, pygo_g_t *g)
         h->sub_head = g;
     }
     h->sub_tail = g;
-    pthread_mutex_unlock(&h->sub_lock);
+    pygo_mutex_unlock(&h->sub_lock);
 }
 
 void pygo_mn_wake_g(void *hub_opaque, pygo_g_t *g)
@@ -383,7 +396,7 @@ int pygo_mn_init(int n_threads)
 
     if (pygo_hubs != NULL) return 0;  /* already inited */
     if (n_threads <= 0) {
-        n_threads = (int)sysconf(_SC_NPROCESSORS_ONLN);
+        n_threads = pygo_cpu_count();
         if (n_threads <= 0) n_threads = 4;
     }
     pygo_hubs = (pygo_hub_t *)PyMem_Calloc((size_t)n_threads, sizeof(pygo_hub_t));
@@ -400,20 +413,20 @@ int pygo_mn_init(int n_threads)
         h->id = i;
         pygo_sched_init(&h->sched);
         pygo_cldeque_init(&h->deque);
-        pthread_mutex_init(&h->sub_lock, NULL);
+        pygo_mutex_init(&h->sub_lock);
         h->sub_head = h->sub_tail = NULL;
         h->tstate = PyThreadState_New(interp);
         if (h->tstate == NULL) {
             /* Clean up everything we've partially initialised so far
              * (mutexes + earlier tstates) and reset module state.
-             * Without this, a later mn_fini would pthread_join(0) on
-             * the half-initialised hubs == undefined behaviour. */
+             * Without this, a later mn_fini would join an
+             * uninitialised thread handle = undefined behaviour. */
             int j;
-            pthread_mutex_destroy(&h->sub_lock);   /* this hub's mutex */
+            pygo_mutex_destroy(&h->sub_lock);   /* this hub's mutex */
             for (j = 0; j < i; j++) {
                 PyThreadState_Clear(pygo_hubs[j].tstate);
                 PyThreadState_Delete(pygo_hubs[j].tstate);
-                pthread_mutex_destroy(&pygo_hubs[j].sub_lock);
+                pygo_mutex_destroy(&pygo_hubs[j].sub_lock);
             }
             PyMem_Free(pygo_hubs);
             pygo_hubs = NULL;
@@ -424,8 +437,8 @@ int pygo_mn_init(int n_threads)
     }
     saved = PyEval_SaveThread();
     for (i = 0; i < n_threads; i++) {
-        if (pthread_create(&pygo_hubs[i].thread, NULL,
-                           pygo_hub_main, &pygo_hubs[i]) != 0) {
+        if (pygo_thread_create(&pygo_hubs[i].thread,
+                               pygo_hub_main, &pygo_hubs[i]) != 0) {
             /* Mark the unspawned hubs as already-stopping + join the
              * ones we did spawn before returning -1. */
             int j;
@@ -434,18 +447,18 @@ int pygo_mn_init(int n_threads)
             }
             for (j = 0; j < i; j++) {
                 __atomic_store_n(&pygo_hubs[j].stopping, 1, __ATOMIC_RELEASE);
-                pthread_join(pygo_hubs[j].thread, NULL);
+                pygo_thread_join(pygo_hubs[j].thread);
             }
             PyEval_RestoreThread(saved);
             for (j = 0; j < n_threads; j++) {
                 PyThreadState_Clear(pygo_hubs[j].tstate);
                 PyThreadState_Delete(pygo_hubs[j].tstate);
-                pthread_mutex_destroy(&pygo_hubs[j].sub_lock);
+                pygo_mutex_destroy(&pygo_hubs[j].sub_lock);
             }
             PyMem_Free(pygo_hubs);
             pygo_hubs = NULL;
             pygo_hub_count = 0;
-            PyErr_SetString(PyExc_OSError, "pthread_create failed");
+            PyErr_SetString(PyExc_OSError, "thread spawn failed");
             return -1;
         }
     }
@@ -463,14 +476,14 @@ void pygo_mn_fini(void)
     {
         PyThreadState *saved = PyEval_SaveThread();
         for (i = 0; i < pygo_hub_count; i++) {
-            pthread_join(pygo_hubs[i].thread, NULL);
+            pygo_thread_join(pygo_hubs[i].thread);
         }
         PyEval_RestoreThread(saved);
     }
     for (i = 0; i < pygo_hub_count; i++) {
         PyThreadState_Clear(pygo_hubs[i].tstate);
         PyThreadState_Delete(pygo_hubs[i].tstate);
-        pthread_mutex_destroy(&pygo_hubs[i].sub_lock);
+        pygo_mutex_destroy(&pygo_hubs[i].sub_lock);
     }
     PyMem_Free(pygo_hubs);
     pygo_hubs = NULL;
@@ -530,10 +543,7 @@ Py_ssize_t pygo_mn_run(void)
                                      __ATOMIC_ACQUIRE);
         }
         if (total == 0) break;
-        {
-            struct timespec ts = {0, 1000000};  /* 1ms poll */
-            nanosleep(&ts, NULL);
-        }
+        pygo_sleep_ns(1000000LL);   /* 1 ms poll */
     }
     PyEval_RestoreThread(saved);
     for (i = 0; i < pygo_hub_count; i++) {

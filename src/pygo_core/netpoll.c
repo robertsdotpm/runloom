@@ -1,9 +1,14 @@
 /* netpoll.c -- portable I/O multiplexing.
  *
- * Two layers:
- *   1. Backend (epoll / kqueue / select) — adds + removes fd registrations.
- *   2. Wait routine: park current goroutine on a (fd, events) pair,
- *      run the scheduler until netpoll wakes the goroutine.
+ * Backends, picked by plat.h:
+ *   Linux           -> epoll
+ *   macOS / *BSD    -> kqueue
+ *   Windows         -> WSAPoll (sockets) -- POSIX poll()-shaped Winsock API,
+ *                      Vista+, no FD_SETSIZE cap.  IOCP would be more
+ *                      efficient for the file-handle case but only sockets
+ *                      flow through wait_fd today (regular files go to the
+ *                      thread-pool backend in monkey.py).
+ *   else            -> select() POSIX fallback
  *
  * Park mechanics:
  *   - the current goroutine snapshot tstate, gets pushed onto an internal
@@ -13,20 +18,22 @@
  *     pygo_netpoll_pump(timeout) instead of sleeping the OS thread.
  *   - pump waits for I/O / timeout, wakes parked goroutines, returns.
  */
-#define _POSIX_C_SOURCE 200809L
+#if !defined(_WIN32)
+#  define _POSIX_C_SOURCE 200809L
+#endif
 #define PY_SSIZE_T_CLEAN
 #include <Python.h>
 
+#include "plat.h"
+#include "plat_compat.h"
 #include "netpoll.h"
 #include "coro.h"
 #include "pygo_sched.h"
 #include "mn_sched.h"
 
 #include <errno.h>
-#include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
 
 #if defined(PYGO_HAVE_EPOLL)
 #  include <sys/epoll.h>
@@ -35,6 +42,10 @@
 #  include <sys/event.h>
 #  include <sys/time.h>
 #  include <unistd.h>
+#elif defined(PYGO_OS_WINDOWS)
+   /* winsock2.h is pulled in via plat_compat.h above; need MSWSOCK for
+    * some advanced struct definitions, but WSAPoll is in winsock2. */
+#  include <mswsock.h>
 #else
 #  include <sys/select.h>
 #  include <unistd.h>
@@ -61,13 +72,60 @@ typedef struct pygo_parked {
 static pygo_parked_t *pygo_parked_head = NULL;
 static int pygo_parked_total = 0;       /* read with __atomic_load_n */
 static int pygo_netpoll_inited = 0;
-static pthread_mutex_t pygo_parked_lock = PTHREAD_MUTEX_INITIALIZER;
+static pygo_mutex_t pygo_parked_lock;
+static volatile long pygo_parked_lock_inited = 0;
 
 #if defined(PYGO_HAVE_EPOLL)
 static int pygo_epoll_fd = -1;
 #elif defined(PYGO_HAVE_KQUEUE)
 static int pygo_kqueue_fd = -1;
+#elif defined(PYGO_OS_WINDOWS)
+/* Runtime-selected Windows backend.  WSAPoll is the modern choice
+ * (Vista+, no FD_SETSIZE cap, microsecond accuracy); select() is the
+ * fallback for XP / Server 2003 and the rare 7-or-older host where
+ * WSAPoll has the known disconnected-socket-not-reported bug
+ * (https://learn.microsoft.com/en-us/windows/win32/api/winsock2/nf-winsock2-wsapoll).
+ *
+ * pygo_win_wsapoll == NULL means "use select fallback".  Set once by
+ * pygo_netpoll_init via GetProcAddress; never reread. */
+typedef int (WSAAPI *pygo_wsapoll_fn)(LPWSAPOLLFD, ULONG, INT);
+static pygo_wsapoll_fn pygo_win_wsapoll = NULL;
+static const char     *pygo_win_backend_name = "select";   /* updated by init */
 #endif
+
+/* Initialise the lock once, regardless of platform.  POSIX could use
+ * PTHREAD_MUTEX_INITIALIZER and skip this, but Windows CRITICAL_SECTION
+ * has no static-init form so the lazy-init pattern is uniform. */
+static void pygo_parked_lock_ensure_inited(void)
+{
+#if defined(PYGO_OS_WINDOWS)
+    /* InterlockedCompareExchange returns the prior value; only the
+     * first caller transitions 0 -> 1 and runs the init. */
+    if (InterlockedCompareExchange(&pygo_parked_lock_inited, 1, 0) == 0) {
+        pygo_mutex_init(&pygo_parked_lock);
+    } else {
+        /* Spin briefly while another thread finishes init.  In practice
+         * the init is one InitializeCriticalSection call (~100 ns), so
+         * any starvation here is bounded. */
+        while (pygo_parked_lock_inited != 2) { /* spin */ }
+        return;
+    }
+    pygo_parked_lock_inited = 2;
+#else
+    if (__atomic_load_n(&pygo_parked_lock_inited, __ATOMIC_ACQUIRE) == 2) {
+        return;
+    }
+    long expected = 0;
+    if (__atomic_compare_exchange_n(&pygo_parked_lock_inited, &expected, 1,
+                                    0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+        pygo_mutex_init(&pygo_parked_lock);
+        __atomic_store_n(&pygo_parked_lock_inited, 2, __ATOMIC_RELEASE);
+    } else {
+        while (__atomic_load_n(&pygo_parked_lock_inited, __ATOMIC_ACQUIRE) != 2)
+            { /* spin */ }
+    }
+#endif
+}
 
 const char *pygo_netpoll_backend(void)
 {
@@ -75,6 +133,8 @@ const char *pygo_netpoll_backend(void)
     return "epoll";
 #elif defined(PYGO_HAVE_KQUEUE)
     return "kqueue";
+#elif defined(PYGO_OS_WINDOWS)
+    return pygo_win_backend_name;
 #else
     return "select";
 #endif
@@ -83,12 +143,30 @@ const char *pygo_netpoll_backend(void)
 int pygo_netpoll_init(void)
 {
     if (pygo_netpoll_inited) return 0;
+    pygo_parked_lock_ensure_inited();
 #if defined(PYGO_HAVE_EPOLL)
     pygo_epoll_fd = epoll_create1(EPOLL_CLOEXEC);
     if (pygo_epoll_fd < 0) return -1;
 #elif defined(PYGO_HAVE_KQUEUE)
     pygo_kqueue_fd = kqueue();
     if (pygo_kqueue_fd < 0) return -1;
+#elif defined(PYGO_OS_WINDOWS)
+    /* Bring up Winsock once.  Idempotent via plat_compat's
+     * InterlockedCompareExchange guard. */
+    pygo_winsock_init();
+    /* Probe for WSAPoll at runtime.  Linking against ws2_32 statically
+     * would refuse to load on XP if WSAPoll isn't present, so we
+     * GetProcAddress instead.  ws2_32 is already loaded by Python's
+     * import of socket; we only need a handle. */
+    {
+        HMODULE ws2 = GetModuleHandleA("ws2_32.dll");
+        if (ws2 == NULL) ws2 = LoadLibraryA("ws2_32.dll");
+        if (ws2 != NULL) {
+            pygo_win_wsapoll = (pygo_wsapoll_fn)
+                (void *)GetProcAddress(ws2, "WSAPoll");
+        }
+    }
+    pygo_win_backend_name = (pygo_win_wsapoll != NULL) ? "wsapoll" : "select";
 #endif
     pygo_netpoll_inited = 1;
     return 0;
@@ -100,15 +178,16 @@ void pygo_netpoll_fini(void)
     if (pygo_epoll_fd >= 0) { close(pygo_epoll_fd); pygo_epoll_fd = -1; }
 #elif defined(PYGO_HAVE_KQUEUE)
     if (pygo_kqueue_fd >= 0) { close(pygo_kqueue_fd); pygo_kqueue_fd = -1; }
+#elif defined(PYGO_OS_WINDOWS)
+    /* Nothing to close: WSAPoll / select use stateless registration.
+     * Winsock itself is left up by design (see pygo_winsock_init). */
 #endif
     pygo_netpoll_inited = 0;
 }
 
 static long long monotonic_ns(void)
 {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (long long)ts.tv_sec * 1000000000LL + ts.tv_nsec;
+    return pygo_monotonic_ns();
 }
 
 /* ---- registration ---- */
@@ -181,11 +260,11 @@ int pygo_netpoll_wait_fd(int fd, int events, long long timeout_ns)
     park.g = current_g;
     park.hub = hub_opaque;
 
-    pthread_mutex_lock(&pygo_parked_lock);
+    pygo_mutex_lock(&pygo_parked_lock);
     park.next = pygo_parked_head;
     pygo_parked_head = &park;
     __atomic_add_fetch(&pygo_parked_total, 1, __ATOMIC_RELEASE);
-    pthread_mutex_unlock(&pygo_parked_lock);
+    pygo_mutex_unlock(&pygo_parked_lock);
 
     /* Snapshot tstate (same as pygo_sched_yield does) so the next
      * resume restores it.  Then yield WITHOUT re-queueing -- pump
@@ -210,7 +289,7 @@ int pygo_netpoll_pump(long long timeout_ns)
 
     /* Find earliest deadline among parked goroutines.  Held briefly
      * to walk the list. */
-    pthread_mutex_lock(&pygo_parked_lock);
+    pygo_mutex_lock(&pygo_parked_lock);
     {
         pygo_parked_t *p;
         for (p = pygo_parked_head; p != NULL; p = p->next) {
@@ -220,7 +299,7 @@ int pygo_netpoll_pump(long long timeout_ns)
             }
         }
     }
-    pthread_mutex_unlock(&pygo_parked_lock);
+    pygo_mutex_unlock(&pygo_parked_lock);
 
     now = monotonic_ns();
     if (min_deadline >= 0) {
@@ -243,7 +322,7 @@ int pygo_netpoll_pump(long long timeout_ns)
             /* Lock parked list for walk + remove.  Order: parked_lock
              * then hub->sub_lock (inside pygo_mn_wake_g).  Don't take
              * locks in the reverse order anywhere. */
-            pthread_mutex_lock(&pygo_parked_lock);
+            pygo_mutex_lock(&pygo_parked_lock);
             for (i = 0; i < n; i++) {
                 int fd = evs[i].data.fd;
                 int mask = 0;
@@ -265,7 +344,7 @@ int pygo_netpoll_pump(long long timeout_ns)
                     pp = &(*pp)->next;
                 }
             }
-            pthread_mutex_unlock(&pygo_parked_lock);
+            pygo_mutex_unlock(&pygo_parked_lock);
         }
     }
 #elif defined(PYGO_HAVE_KQUEUE)
@@ -284,7 +363,7 @@ int pygo_netpoll_pump(long long timeout_ns)
         Py_END_ALLOW_THREADS
         if (n > 0) {
             int i;
-            pthread_mutex_lock(&pygo_parked_lock);
+            pygo_mutex_lock(&pygo_parked_lock);
             for (i = 0; i < n; i++) {
                 int fd = (int)evs[i].ident;
                 int mask = (evs[i].filter == EVFILT_READ) ?
@@ -303,21 +382,148 @@ int pygo_netpoll_pump(long long timeout_ns)
                     pp = &(*pp)->next;
                 }
             }
-            pthread_mutex_unlock(&pygo_parked_lock);
+            pygo_mutex_unlock(&pygo_parked_lock);
         }
     }
+#elif defined(PYGO_OS_WINDOWS)
+    /* Windows backend.  Runtime-chosen between WSAPoll (Vista+) and
+     * select() (XP / older).  Both polish the same parked list under
+     * pygo_parked_lock; the lock is held across the blocking wait
+     * because the parked list is the source of truth for what fds we
+     * care about and which g to wake.
+     *
+     * Important: Windows fds passed in here MUST be SOCKET handles
+     * (returned by socket.socket.fileno()).  Pipe/file fds are NOT
+     * pollable through Winsock -- the monkey-patch layer routes those
+     * to the thread-pool backend in monkey.py. */
+    if (pygo_win_wsapoll != NULL) {
+        /* --- WSAPoll path --- */
+        WSAPOLLFD fds_stack[128];
+        WSAPOLLFD *fds = fds_stack;
+        ULONG fds_cap = 128;
+        ULONG n_fds = 0;
+        int ms = timeout_ns < 0 ? -1 :
+                 (timeout_ns > 1000000000LL ? 1000 :
+                  (int)(timeout_ns / 1000000LL));
+        int rc;
+        pygo_parked_t *p;
+
+        pygo_mutex_lock(&pygo_parked_lock);
+        /* Two passes: count, then fill (grows the heap buffer if the
+         * stack one isn't big enough).  Worst case we re-malloc once. */
+        {
+            ULONG need = 0;
+            for (p = pygo_parked_head; p != NULL; p = p->next) need++;
+            if (need > fds_cap) {
+                fds = (WSAPOLLFD *)malloc(sizeof(WSAPOLLFD) * need);
+                if (fds == NULL) {
+                    pygo_mutex_unlock(&pygo_parked_lock);
+                    goto post_wait;   /* skip wait; deadlines still get checked */
+                }
+                fds_cap = need;
+            }
+        }
+        for (p = pygo_parked_head; p != NULL; p = p->next) {
+            fds[n_fds].fd = (SOCKET)p->fd;
+            fds[n_fds].events = 0;
+            if (p->events & PYGO_NETPOLL_READ)  fds[n_fds].events |= POLLRDNORM;
+            if (p->events & PYGO_NETPOLL_WRITE) fds[n_fds].events |= POLLWRNORM;
+            fds[n_fds].revents = 0;
+            n_fds++;
+        }
+        if (n_fds > 0) {
+            Py_BEGIN_ALLOW_THREADS
+            rc = pygo_win_wsapoll(fds, n_fds, ms);
+            Py_END_ALLOW_THREADS
+            if (rc > 0) {
+                ULONG i;
+                for (i = 0; i < n_fds; i++) {
+                    int mask = 0;
+                    SHORT re = fds[i].revents;
+                    pygo_parked_t **pp;
+                    if (re & (POLLRDNORM | POLLIN | POLLHUP | POLLERR))
+                        mask |= PYGO_NETPOLL_READ;
+                    if (re & (POLLWRNORM | POLLOUT | POLLERR))
+                        mask |= PYGO_NETPOLL_WRITE;
+                    if (mask == 0) continue;
+                    pp = &pygo_parked_head;
+                    while (*pp != NULL) {
+                        if ((SOCKET)(*pp)->fd == fds[i].fd &&
+                            ((*pp)->events & mask)) {
+                            pygo_parked_t *hit = *pp;
+                            *(hit->ready_out) = mask & hit->events;
+                            *pp = hit->next;
+                            __atomic_sub_fetch(&pygo_parked_total, 1,
+                                               __ATOMIC_RELEASE);
+                            pygo_mn_wake_g(hit->hub, hit->g);
+                            woke++;
+                            break;
+                        }
+                        pp = &(*pp)->next;
+                    }
+                }
+            }
+        }
+        if (fds != fds_stack) free(fds);
+        pygo_mutex_unlock(&pygo_parked_lock);
+    } else {
+        /* --- select() fallback (XP / Server 2003 / no WSAPoll) ---
+         * Windows select() uses SOCKET handles directly; the first arg
+         * is ignored.  FD_SETSIZE is 64 by default but can be raised
+         * via build define (see setup.py).  This path is best-effort
+         * for legacy hosts; production usage assumes WSAPoll. */
+        fd_set rfds, wfds, efds;
+        pygo_parked_t *p;
+        int rc;
+        struct timeval tv, *tvp = NULL;
+
+        FD_ZERO(&rfds); FD_ZERO(&wfds); FD_ZERO(&efds);
+        pygo_mutex_lock(&pygo_parked_lock);
+        for (p = pygo_parked_head; p != NULL; p = p->next) {
+            if (p->events & PYGO_NETPOLL_READ)  FD_SET((SOCKET)p->fd, &rfds);
+            if (p->events & PYGO_NETPOLL_WRITE) FD_SET((SOCKET)p->fd, &wfds);
+            FD_SET((SOCKET)p->fd, &efds);
+        }
+        if (timeout_ns >= 0) {
+            tv.tv_sec  = (long)(timeout_ns / 1000000000LL);
+            tv.tv_usec = (long)((timeout_ns % 1000000000LL) / 1000LL);
+            tvp = &tv;
+        }
+        Py_BEGIN_ALLOW_THREADS
+        rc = select(0, &rfds, &wfds, &efds, tvp);
+        Py_END_ALLOW_THREADS
+        if (rc > 0) {
+            pygo_parked_t **pp = &pygo_parked_head;
+            while (*pp != NULL) {
+                int mask = 0;
+                if (FD_ISSET((SOCKET)(*pp)->fd, &rfds)) mask |= PYGO_NETPOLL_READ;
+                if (FD_ISSET((SOCKET)(*pp)->fd, &wfds)) mask |= PYGO_NETPOLL_WRITE;
+                if (FD_ISSET((SOCKET)(*pp)->fd, &efds))
+                    mask |= PYGO_NETPOLL_READ | PYGO_NETPOLL_WRITE;
+                if (mask & (*pp)->events) {
+                    pygo_parked_t *hit = *pp;
+                    *(hit->ready_out) = mask & hit->events;
+                    *pp = hit->next;
+                    __atomic_sub_fetch(&pygo_parked_total, 1, __ATOMIC_RELEASE);
+                    pygo_mn_wake_g(hit->hub, hit->g);
+                    woke++;
+                    continue;
+                }
+                pp = &(*pp)->next;
+            }
+        }
+        pygo_mutex_unlock(&pygo_parked_lock);
+    }
+post_wait:
+    ;
 #else
-    /* select() backend.  Build fd sets from parked entries.  We hold
-     * the lock across select() here because the fd_set is built from
-     * the list state -- holding through the blocking call serialises
-     * all hubs' pump calls under select, which is the fallback path
-     * and not a free-threaded target anyway. */
+    /* POSIX select() backend.  Same as kqueue/epoll absent platforms. */
     {
         fd_set rfds, wfds;
         int max_fd = -1;
         pygo_parked_t *p;
         FD_ZERO(&rfds); FD_ZERO(&wfds);
-        pthread_mutex_lock(&pygo_parked_lock);
+        pygo_mutex_lock(&pygo_parked_lock);
         for (p = pygo_parked_head; p != NULL; p = p->next) {
             if (p->fd > max_fd) max_fd = p->fd;
             if (p->events & PYGO_NETPOLL_READ)  FD_SET(p->fd, &rfds);
@@ -349,13 +555,13 @@ int pygo_netpoll_pump(long long timeout_ns)
                 }
             }
         }
-        pthread_mutex_unlock(&pygo_parked_lock);
+        pygo_mutex_unlock(&pygo_parked_lock);
     }
 #endif
 
     /* Handle timeouts: any park whose deadline has passed gets ready=0. */
     now = monotonic_ns();
-    pthread_mutex_lock(&pygo_parked_lock);
+    pygo_mutex_lock(&pygo_parked_lock);
     {
         pygo_parked_t **pp = &pygo_parked_head;
         while (*pp != NULL) {
@@ -371,6 +577,6 @@ int pygo_netpoll_pump(long long timeout_ns)
             pp = &(*pp)->next;
         }
     }
-    pthread_mutex_unlock(&pygo_parked_lock);
+    pygo_mutex_unlock(&pygo_parked_lock);
     return woke;
 }
