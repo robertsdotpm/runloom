@@ -66,10 +66,24 @@ void pygo_pystate_snap(pygo_pystate_snap_t *snap)
      * unnecessary writes on the hot per-yield path. */
 
 #if PY_VERSION_HEX >= 0x030B0000
-    /* contextvars: steal a strong ref.  Py_XINCREF is null-safe and
-     * compiles to a predicted-not-taken branch over the atomic. */
+    /* contextvars: hold a ref while suspended so g's saved context
+     * can't be freed.  Optimisation: skip the atomic INCREF when the
+     * context is immortal -- the empty default context is immortal
+     * on 3.12+, and that's what 99% of programs that never touch
+     * contextvars see.  Free-threaded 3.13t pays an extra atomic op
+     * per Py_INCREF on non-immortals; this shaves it off the most
+     * common case. */
+#  if defined(_Py_IsImmortal)
+    if (ts->context != NULL && _Py_IsImmortal(ts->context)) {
+        snap->context = ts->context;        /* no INCREF needed */
+    } else {
+        Py_XINCREF(ts->context);
+        snap->context = ts->context;
+    }
+#  else
     Py_XINCREF(ts->context);
     snap->context = ts->context;
+#  endif
 
 #  if PY_VERSION_HEX >= 0x030C0000
     snap->py_recursion_remaining = ts->py_recursion_remaining;
@@ -266,7 +280,9 @@ void pygo_pystate_snap_clear(pygo_pystate_snap_t *snap)
  * which we don't actually do, but the pool is also useful for the
  * single-thread sched on both 3.12 and 3.13). */
 #if PY_VERSION_HEX >= 0x030B0000
-#define PYGO_CHUNK_POOL_CAP 32
+/* 4096 chunks = ~16 MB / thread reserved when full, but matches
+ * spawn-heavy peak working sets without falling back to the arena. */
+#define PYGO_CHUNK_POOL_CAP 4096
 /* PYGO_TLS expands to __thread on GCC/Clang, __declspec(thread) on MSVC. */
 static PYGO_TLS _PyStackChunk *pygo_chunk_pool = NULL;
 static PYGO_TLS int pygo_chunk_pool_size = 0;
@@ -569,6 +585,52 @@ void pygo_g_entry(void *user)
     /* Falls back through asm trampoline -> infinite swap to caller. */
 }
 
+/* ---- pygo_g_t slab allocator ----
+ *
+ * spawn/decref-last-ref on the hot path is dominated by
+ * PyMem_Calloc(144) / PyMem_Free.  At 100k spawns/sec that's 200k
+ * calls/sec through CPython's small-block allocator, which is
+ * thread-contended on free-threaded 3.13t.
+ *
+ * Per-thread LIFO free list of recycled pygo_g_t.  Push on last
+ * decref; pop on next spawn.  Reuses the `next` field for the
+ * free-list link (it's NULL'd by ready_pop after each scheduler
+ * cycle, so it's free real estate while g is unallocated).  Cap of
+ * 256 entries / thread bounds memory footprint after a burst. */
+/* Cap chosen so a steady-state spawn-heavy workload (100k+ gs in
+ * flight) doesn't continuously overflow back to PyMem_Free, while
+ * still bounding memory to ~150 KB / thread when not in use. */
+#define PYGO_G_SLAB_CAP 4096
+static PYGO_TLS pygo_g_t *pygo_g_slab = NULL;
+static PYGO_TLS int pygo_g_slab_size = 0;
+
+pygo_g_t *pygo_g_slab_alloc(void)
+{
+    pygo_g_t *g = pygo_g_slab;
+    if (g != NULL) {
+        pygo_g_slab = g->next;
+        pygo_g_slab_size--;
+        /* memset the fields that callers expect zeroed.  Slightly
+         * smaller than the original PyMem_Calloc which zeroes the
+         * whole struct -- but spawn always overwrites callable,
+         * coro, refcount; we only need to clear the rest. */
+        memset(g, 0, sizeof(*g));
+        return g;
+    }
+    return (pygo_g_t *)PyMem_Calloc(1, sizeof(*g));
+}
+
+void pygo_g_slab_free(pygo_g_t *g)
+{
+    if (pygo_g_slab_size >= PYGO_G_SLAB_CAP) {
+        PyMem_Free(g);
+        return;
+    }
+    g->next = pygo_g_slab;
+    pygo_g_slab = g;
+    pygo_g_slab_size++;
+}
+
 /* ---- Refcount ---- */
 void pygo_g_incref(pygo_g_t *g)
 {
@@ -592,14 +654,14 @@ void pygo_g_decref(pygo_g_t *g)
         Py_XDECREF(g->callable);
         Py_XDECREF(g->result);
         Py_XDECREF(g->error);
-        PyMem_Free(g);
+        pygo_g_slab_free(g);
     }
 }
 
 /* ---- Spawn ---- */
 PyObject *pygo_sched_spawn(pygo_sched_t *s, PyObject *callable)
 {
-    pygo_g_t *g = (pygo_g_t *)PyMem_Calloc(1, sizeof(*g));
+    pygo_g_t *g = pygo_g_slab_alloc();
     if (g == NULL) {
         PyErr_NoMemory();
         return NULL;

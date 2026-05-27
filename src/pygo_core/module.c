@@ -461,6 +461,28 @@ static PyObject *PygoChan_close(PygoChan *self, PyObject *unused)
     Py_RETURN_NONE;
 }
 
+/* Iterator protocol: `for v in ch:` calls recv() repeatedly and stops
+ * on close.  Matches Go's `for v := range ch { ... }`. */
+static PyObject *PygoChan_iter(PygoChan *self)
+{
+    Py_INCREF(self);
+    return (PyObject *)self;
+}
+
+static PyObject *PygoChan_iternext(PygoChan *self)
+{
+    int ok;
+    PyObject *v = pygo_chan_recv(self->ch, &ok);
+    if (v == NULL) return NULL;            /* error */
+    if (!ok) {
+        /* Channel closed and empty -> end iteration. */
+        Py_DECREF(v);                       /* v was Py_None */
+        PyErr_SetNone(PyExc_StopIteration);
+        return NULL;
+    }
+    return v;                               /* new ref to caller */
+}
+
 static PyObject *PygoChan_closed_get(PygoChan *self, void *closure)
 {
     (void)closure;
@@ -514,6 +536,8 @@ static PyTypeObject PygoChanType = {
     .tp_as_sequence = &PygoChan_seq,
     .tp_flags = Py_TPFLAGS_DEFAULT,
     .tp_doc = "Go-style channel.  Chan(capacity=0).",
+    .tp_iter = (getiterfunc)PygoChan_iter,
+    .tp_iternext = (iternextfunc)PygoChan_iternext,
     .tp_methods = PygoChan_methods,
     .tp_getset = PygoChan_getset,
     .tp_init = (initproc)PygoChan_init,
@@ -714,7 +738,131 @@ static PyObject *m_preempt_fini(PyObject *self, PyObject *unused)
     Py_RETURN_NONE;
 }
 
+/* ============================================================ */
+/* select() -- multi-channel wait                               */
+/* ============================================================ */
+
+/* Python API:
+ *
+ *   r = pygo_core.select([
+ *       ("recv", ch1),
+ *       ("send", ch2, value),
+ *   ], default=False)
+ *
+ * Returns:
+ *   - If default=True and no case is ready: -1
+ *   - Otherwise: (index, recv_value_or_None) tuple
+ *     - For SEND cases, recv_value_or_None is None
+ *     - For RECV cases, it's (value, ok) like ch.recv()
+ */
+static PyObject *m_select(PyObject *self, PyObject *args, PyObject *kw)
+{
+    static char *kwlist[] = {"cases", "default", NULL};
+    PyObject *cases_list = NULL;
+    int default_flag = 0;
+    Py_ssize_t n_cases, i;
+    pygo_select_case_t *cs = NULL;
+    int fired;
+    PyObject *result = NULL;
+    (void)self;
+
+    if (!PyArg_ParseTupleAndKeywords(args, kw, "O|p", kwlist,
+                                     &cases_list, &default_flag)) {
+        return NULL;
+    }
+    if (!PyList_Check(cases_list) && !PyTuple_Check(cases_list)) {
+        PyErr_SetString(PyExc_TypeError, "select cases must be a list/tuple");
+        return NULL;
+    }
+    n_cases = PySequence_Size(cases_list);
+    if (n_cases <= 0) {
+        PyErr_SetString(PyExc_ValueError, "select needs at least 1 case");
+        return NULL;
+    }
+
+    cs = (pygo_select_case_t *)PyMem_Calloc((size_t)n_cases, sizeof(*cs));
+    if (cs == NULL) return PyErr_NoMemory();
+
+    for (i = 0; i < n_cases; i++) {
+        PyObject *item = PySequence_GetItem(cases_list, i);
+        const char *op_str;
+        PyObject *chan_obj;
+        if (item == NULL) goto err;
+        if (!PyTuple_Check(item) || PyTuple_GET_SIZE(item) < 2) {
+            Py_DECREF(item);
+            PyErr_SetString(PyExc_TypeError,
+                "each case must be ('recv', ch) or ('send', ch, value)");
+            goto err;
+        }
+        op_str = PyUnicode_AsUTF8(PyTuple_GET_ITEM(item, 0));
+        chan_obj = PyTuple_GET_ITEM(item, 1);
+        if (!PyObject_TypeCheck(chan_obj, &PygoChanType)) {
+            Py_DECREF(item);
+            PyErr_SetString(PyExc_TypeError, "case[1] must be a Chan");
+            goto err;
+        }
+        cs[i].ch = ((PygoChan *)chan_obj)->ch;
+        if (op_str && strcmp(op_str, "recv") == 0) {
+            cs[i].op = PYGO_SELECT_RECV;
+        } else if (op_str && strcmp(op_str, "send") == 0) {
+            if (PyTuple_GET_SIZE(item) != 3) {
+                Py_DECREF(item);
+                PyErr_SetString(PyExc_TypeError, "send case needs (op, ch, value)");
+                goto err;
+            }
+            cs[i].op = PYGO_SELECT_SEND;
+            cs[i].send_value = PyTuple_GET_ITEM(item, 2);   /* borrowed */
+        } else {
+            Py_DECREF(item);
+            PyErr_SetString(PyExc_ValueError, "op must be 'recv' or 'send'");
+            goto err;
+        }
+        Py_DECREF(item);
+    }
+
+    fired = pygo_chan_select(cs, (int)n_cases, default_flag);
+    if (fired == -2) goto err;        /* PyErr already set */
+    if (fired == -1) {
+        /* default-fired */
+        PyMem_Free(cs);
+        return PyLong_FromLong(-1);
+    }
+
+    /* Build result.  For RECV: (index, (value, ok)).
+     *               For SEND: (index, None). */
+    if (cs[fired].op == PYGO_SELECT_RECV) {
+        PyObject *vok = PyTuple_New(2);
+        if (vok == NULL) goto err;
+        /* recv_value is a new ref already. */
+        PyTuple_SET_ITEM(vok, 0, cs[fired].recv_value);
+        PyTuple_SET_ITEM(vok, 1, PyBool_FromLong(cs[fired].recv_ok));
+        result = Py_BuildValue("(iO)", fired, vok);
+        Py_DECREF(vok);
+    } else {
+        result = Py_BuildValue("(iO)", fired, Py_None);
+    }
+    PyMem_Free(cs);
+    return result;
+
+err:
+    /* Drop any RECV values we materialised (shouldn't be many). */
+    if (cs != NULL) {
+        for (i = 0; i < n_cases; i++) {
+            if (cs[i].op == PYGO_SELECT_RECV && cs[i].recv_value != NULL) {
+                Py_DECREF(cs[i].recv_value);
+            }
+        }
+        PyMem_Free(cs);
+    }
+    return NULL;
+}
+
 static PyMethodDef module_methods[] = {
+    {"select", (PyCFunction)m_select, METH_VARARGS | METH_KEYWORDS,
+     "select(cases, default=False): wait on multiple channels.  Each "
+     "case is ('recv', ch) or ('send', ch, value).  Returns "
+     "(index, (value, ok)) for recv or (index, None) for send.  With "
+     "default=True returns -1 if no case is immediately ready."},
     {"yield_",      m_yield,       METH_NOARGS,
      "Yield from inside a raw Coro (a no-op outside one)."},
     {"backend",     m_backend,     METH_NOARGS,

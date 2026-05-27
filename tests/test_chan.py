@@ -235,5 +235,115 @@ class TestPingPong(unittest.TestCase):
         self.assertEqual(sorted(out), sorted((i, j) for i in range(N) for j in range(3)))
 
 
+class TestIteration(unittest.TestCase):
+    """Channels support Go's `for v := range ch { ... }` via Python's
+    `for v in ch:` -- iteration ends when the channel is closed."""
+
+    def test_range_basic(self):
+        ch = pygo_core.Chan(8)
+        out = []
+
+        def producer():
+            for i in range(5):
+                ch.send(i * 11)
+            ch.close()
+
+        def consumer():
+            for v in ch:
+                out.append(v)
+
+        _run_in_sched(producer, consumer)
+        self.assertEqual(out, [0, 11, 22, 33, 44])
+
+    def test_range_empty_after_close(self):
+        ch = pygo_core.Chan()
+        out = []
+        def runner():
+            ch.close()
+            for v in ch:
+                out.append(v)
+            out.append("done")
+        _run_in_sched(runner)
+        self.assertEqual(out, ["done"])
+
+
+class TestSelect(unittest.TestCase):
+    def test_default_no_case_ready(self):
+        a = pygo_core.Chan()
+        b = pygo_core.Chan(1)
+        out = []
+        def runner():
+            r = pygo_core.select([
+                ("recv", a),
+                ("recv", b),
+            ], default=True)
+            out.append(r)
+        _run_in_sched(runner)
+        self.assertEqual(out, [-1])
+
+    def test_immediate_recv(self):
+        ch = pygo_core.Chan(1)
+        out = []
+        def runner():
+            ch.send("ready")
+            i, payload = pygo_core.select([("recv", ch)])
+            out.append((i, payload))
+        _run_in_sched(runner)
+        self.assertEqual(out, [(0, ("ready", True))])
+
+    def test_immediate_send_into_buffer(self):
+        ch = pygo_core.Chan(2)
+        out = []
+        def runner():
+            i, _ = pygo_core.select([("send", ch, 99)])
+            out.append(i)
+            v, ok = ch.recv()
+            out.append((v, ok))
+        _run_in_sched(runner)
+        self.assertEqual(out, [0, (99, True)])
+
+    def test_blocking_two_chans(self):
+        """One goroutine selects on two channels; another writes to
+        the second one.  The select should fire on case 1."""
+        a = pygo_core.Chan()
+        b = pygo_core.Chan()
+        log = []
+
+        def selector():
+            r = pygo_core.select([
+                ("recv", a),
+                ("recv", b),
+            ])
+            log.append(("fired", r[0], r[1]))
+
+        def writer_b():
+            pygo_core.sched_yield()       # let selector park first
+            b.send("from-b")
+
+        _run_in_sched(selector, writer_b)
+        self.assertEqual(log, [("fired", 1, ("from-b", True))])
+
+    def test_select_send_on_one_recv_on_other(self):
+        a = pygo_core.Chan()
+        b = pygo_core.Chan()
+        log = []
+
+        def selector():
+            r = pygo_core.select([
+                ("send", a, "to-a"),
+                ("recv", b),
+            ])
+            log.append(("fired", r[0]))
+
+        def take_a():
+            v, _ = a.recv()
+            log.append(("got-a", v))
+
+        _run_in_sched(selector, take_a)
+        # selector's SEND on a fires when take_a recvs.
+        self.assertIn(("fired", 0), log)
+        self.assertIn(("got-a", "to-a"), log)
+
+
 if __name__ == "__main__":
     unittest.main()

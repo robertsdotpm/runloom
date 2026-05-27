@@ -97,4 +97,30 @@ int  pygo_chan_is_closed(pygo_chan_t *ch);
 Py_ssize_t pygo_chan_len(pygo_chan_t *ch);
 Py_ssize_t pygo_chan_cap(pygo_chan_t *ch);
 
+/* ---- select() ---- */
+typedef enum {
+    PYGO_SELECT_RECV = 0,
+    PYGO_SELECT_SEND = 1,
+} pygo_select_op_t;
+
+typedef struct {
+    pygo_chan_t *ch;
+    pygo_select_op_t op;
+    PyObject *send_value;       /* for SEND: ref-borrowed from caller */
+    PyObject *recv_value;       /* for RECV: filled in (new ref) on hit */
+    int recv_ok;                /* for RECV: 0/1 ok flag */
+} pygo_select_case_t;
+
+/* Wait on N cases.  If `default_ready` is non-zero, behave like Go's
+ * `default:` branch -- if no case is immediately ready, return -1
+ * instead of parking.  Otherwise block until one fires.
+ *
+ * Returns the index of the case that fired (>= 0), or -1 if
+ * default-fired (no cases ready), or -2 on error (PyErr set).
+ *
+ * On a fired SEND case: the channel got an INCREF'd ref to send_value.
+ * On a fired RECV case: recv_value holds a new ref, recv_ok is set.
+ */
+int pygo_chan_select(pygo_select_case_t *cases, int n, int default_ready);
+
 #endif /* PYGO_CHAN_H */

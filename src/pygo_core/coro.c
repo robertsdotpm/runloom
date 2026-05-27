@@ -90,26 +90,57 @@ const char *pygo_coro_backend(void)
 /* ------------------------------------------------------------------ */
 
 #if defined(PYGO_HAVE_FCONTEXT) || defined(PYGO_HAVE_UCONTEXT)
-typedef struct pygo_stack_entry {
-    void *stack;
-    size_t size;
-    struct pygo_stack_entry *next;
-} pygo_stack_entry_t;
+/* Stack pool with the next-pointer embedded INSIDE the stack at offset 0.
+ *
+ * The previous design allocated a tiny linked-list node per stack via
+ * malloc/free on every acquire/release.  At 100k spawns/sec that's
+ * 100k mallocs + 100k frees per second of pure overhead.  We sidestep
+ * it by writing the "next" pointer directly into the first 16 bytes
+ * of the stack memory itself: the stack grows down from the high end,
+ * so the low bytes are unused while the stack is in the free pool.
+ *
+ * Layout when in pool:
+ *   stack[0 .. 7]   = next (pointer to next pooled stack)
+ *   stack[8 .. 15]  = size (so mismatched-size reuses fail safe)
+ *
+ * Layout when in use: whatever the coroutine's stack contents are
+ * (we overwrite the next/size header on first push).
+ *
+ * The pool is per-thread (TLS) so single-threaded benches see O(1)
+ * push/pop with zero allocator traffic.  Size mismatches (rare --
+ * users almost always use the default 128 KB stack) skip the pool
+ * and just munmap / mmap on the slow path. */
 
-static PYGO_TLS pygo_stack_entry_t *pygo_tls_stack_pool = NULL;
+#define PYGO_STACK_HDR_NEXT  0
+#define PYGO_STACK_HDR_SIZE  1
+
+static PYGO_TLS void **pygo_tls_stack_pool = NULL;
 
 static void *pygo_stack_acquire(size_t size)
 {
-    pygo_stack_entry_t **pp = &pygo_tls_stack_pool;
-    while (*pp != NULL) {
-        if ((*pp)->size == size) {
-            pygo_stack_entry_t *e = *pp;
-            void *s = e->stack;
-            *pp = e->next;
-            free(e);
-            return s;
+    void **head = pygo_tls_stack_pool;
+    if (head != NULL) {
+        size_t pooled_size = (size_t)head[PYGO_STACK_HDR_SIZE];
+        if (pooled_size == size) {
+            pygo_tls_stack_pool = (void **)head[PYGO_STACK_HDR_NEXT];
+            /* Caller will overwrite the header bytes as the stack
+             * grows; the new coroutine doesn't observe them. */
+            return (void *)head;
         }
-        pp = &(*pp)->next;
+        /* Size mismatch (different stack_size requested than what the
+         * pool has).  Don't walk -- just munmap pooled stacks until
+         * the head matches or pool is empty.  Bounded work in the
+         * pathological mixed-size case. */
+        while (head != NULL && (size_t)head[PYGO_STACK_HDR_SIZE] != size) {
+            void **next = (void **)head[PYGO_STACK_HDR_NEXT];
+            munmap((void *)head, (size_t)head[PYGO_STACK_HDR_SIZE]);
+            head = next;
+        }
+        pygo_tls_stack_pool = head;
+        if (head != NULL) {
+            pygo_tls_stack_pool = (void **)head[PYGO_STACK_HDR_NEXT];
+            return (void *)head;
+        }
     }
     {
         int flags = MAP_PRIVATE | MAP_ANONYMOUS;
@@ -126,14 +157,10 @@ static void *pygo_stack_acquire(size_t size)
 
 static void pygo_stack_release(void *stack, size_t size)
 {
-    pygo_stack_entry_t *e = (pygo_stack_entry_t *)malloc(sizeof(*e));
-    if (e == NULL) {
-        return;  /* leak the stack on alloc failure */
-    }
-    e->stack = stack;
-    e->size = size;
-    e->next = pygo_tls_stack_pool;
-    pygo_tls_stack_pool = e;
+    void **hdr = (void **)stack;
+    hdr[PYGO_STACK_HDR_NEXT] = (void *)pygo_tls_stack_pool;
+    hdr[PYGO_STACK_HDR_SIZE] = (void *)size;
+    pygo_tls_stack_pool = hdr;
 }
 
 static size_t pygo_round_to_page(size_t size)

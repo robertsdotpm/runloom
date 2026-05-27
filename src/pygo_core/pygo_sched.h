@@ -93,6 +93,13 @@ struct pygo_g {
 void pygo_g_incref(pygo_g_t *g);
 void pygo_g_decref(pygo_g_t *g);
 
+/* Slab allocator for pygo_g_t -- per-thread LIFO free list with cap.
+ * Exposed so mn_sched.c can share the same recycle pool as the
+ * single-thread spawn path.  alloc returns a zeroed g (or NULL +
+ * PyErr_NoMemory on OOM); free returns to the slab. */
+pygo_g_t *pygo_g_slab_alloc(void);
+void pygo_g_slab_free(pygo_g_t *g);
+
 /* Per-OS-thread scheduler. */
 struct pygo_sched {
     /* Ready FIFO: head pops, tail appends. */

@@ -504,7 +504,7 @@ PyObject *pygo_mn_go(PyObject *callable)
     n = __atomic_fetch_add(&pygo_mn_spawn_counter, 1, __ATOMIC_RELAXED);
     hub_idx = (int)(n % pygo_hub_count);
     h = &pygo_hubs[hub_idx];
-    g = (pygo_g_t *)PyMem_Calloc(1, sizeof(*g));
+    g = pygo_g_slab_alloc();
     if (g == NULL) {
         return PyErr_NoMemory();
     }
