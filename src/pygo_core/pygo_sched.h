@@ -102,9 +102,18 @@ void pygo_g_slab_free(pygo_g_t *g);
 
 /* Per-OS-thread scheduler. */
 struct pygo_sched {
-    /* Ready FIFO: head pops, tail appends. */
-    pygo_g_t *ready_head;
-    pygo_g_t *ready_tail;
+    /* Ready FIFO -- ring buffer of g pointers.  Previously a linked
+     * list threaded through g->next, which meant every pop dereffed
+     * a different (cache-cold) g struct just to read the next
+     * pointer.  At 100k gs in flight that was the bottleneck on
+     * spawn-heavy workloads.  Ring buffer keeps the queue itself in
+     * a contiguous array (hot in L1 if it fits) and saves one cache
+     * miss per push/pop. */
+    pygo_g_t **ready_ring;            /* power-of-2 sized array */
+    size_t    ready_cap;              /* power of 2 */
+    size_t    ready_mask;             /* ready_cap - 1 */
+    size_t    ready_head;             /* dequeue index (monotonic counter, mask to index) */
+    size_t    ready_tail;             /* enqueue index */
     /* Currently-running g (for yield). */
     pygo_g_t *current;
     /* Sleep heap -- min-heap by wake_at.  Stored as a growable array
@@ -119,6 +128,11 @@ struct pygo_sched {
     /* When set, sched_drain returns. */
     int stopping;
 };
+
+/* Is the ready queue empty?  Hot-path predicate; inline-friendly. */
+PYGO_INLINE int pygo_sched_ready_empty(const pygo_sched_t *s) {
+    return s->ready_head == s->ready_tail;
+}
 
 /* Module-level: one sched per OS thread once Phase C lands.  For now
  * a single global. */

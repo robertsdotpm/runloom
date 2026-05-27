@@ -372,7 +372,7 @@ int pygo_mn_yield_current(void)
      * a hub while neighbours have work is fine -- the work-stealing
      * scheduler is allowed to leave stealable items on a busy hub.
      * This matches single-thread's pygo_sched_yield fast path. */
-    if (__builtin_expect(h->sched.ready_head == NULL
+    if (__builtin_expect(pygo_sched_ready_empty(&h->sched)
                          && pygo_cldeque_size(&h->deque) == 0
                          && h->sched.sleep_size == 0
                          && pygo_netpoll_parked_count() == 0, 1)) {

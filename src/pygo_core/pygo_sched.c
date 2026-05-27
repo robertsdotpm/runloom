@@ -417,34 +417,63 @@ static void pygo_install_initial_root_frame(void)
 }
 #endif
 
-/* ---- Ready FIFO ops (singly-linked, head=pop, tail=push) ----
- * Exposed publicly so mn_sched.c can reuse the same list ops for its
- * per-hub local FIFO of yielded gs. */
+/* ---- Ready FIFO ops (ring buffer of g pointers) ----
+ *
+ * head/tail are MONOTONIC counters, masked into the ring on access.
+ * As long as we don't wrap a size_t (which would take >5000 years at
+ * 100M push/s on 64-bit), the (tail - head) arithmetic gives the
+ * exact count.  Wraparound-safe for 32-bit too because we mask
+ * differences, not absolute values.
+ *
+ * Grows on overflow by doubling; the ring is per-thread so no lock.
+ */
+static int pygo_ready_grow(pygo_sched_t *s)
+{
+    size_t old_cap = s->ready_cap;
+    size_t new_cap = old_cap ? old_cap * 2 : 64;
+    pygo_g_t **new_ring = (pygo_g_t **)PyMem_Calloc(new_cap, sizeof(pygo_g_t *));
+    size_t i, head = s->ready_head, tail = s->ready_tail;
+    if (new_ring == NULL) {
+        PyErr_NoMemory();
+        return -1;
+    }
+    /* Copy from the old ring, preserving order.  Old has tail-head
+     * entries starting at (head & old_mask). */
+    for (i = 0; i < (tail - head); i++) {
+        new_ring[i] = s->ready_ring[(head + i) & s->ready_mask];
+    }
+    PyMem_Free(s->ready_ring);
+    s->ready_ring = new_ring;
+    s->ready_cap = new_cap;
+    s->ready_mask = new_cap - 1;
+    s->ready_head = 0;
+    s->ready_tail = tail - head;
+    return 0;
+}
+
 void pygo_sched_ready_push(pygo_sched_t *s, pygo_g_t *g)
 {
-    g->next = NULL;
-    if (s->ready_tail == NULL) {
-        s->ready_head = s->ready_tail = g;
-    } else {
-        s->ready_tail->next = g;
-        s->ready_tail = g;
+    if (__builtin_expect(s->ready_tail - s->ready_head >= s->ready_cap, 0)) {
+        if (pygo_ready_grow(s) < 0) return;     /* OOM: drop g on the floor;
+                                                 * caller checks PyErr */
     }
+    s->ready_ring[s->ready_tail & s->ready_mask] = g;
+    s->ready_tail++;
 }
 
 pygo_g_t *pygo_sched_ready_pop(pygo_sched_t *s)
 {
-    pygo_g_t *g = s->ready_head;
-    if (g == NULL) return NULL;
-    s->ready_head = g->next;
-    if (s->ready_head == NULL) {
-        s->ready_tail = NULL;
-    }
-    g->next = NULL;
+    pygo_g_t *g;
+    if (s->ready_head == s->ready_tail) return NULL;
+    g = s->ready_ring[s->ready_head & s->ready_mask];
+    s->ready_head++;
+    /* Note: we deliberately do NOT clear g->next here -- the linked-
+     * list `next` field is now repurposed by the g_slab as the free-
+     * list link and by the M:N submission list.  Whichever consumer
+     * uses it next overwrites the slot. */
     return g;
 }
 
-/* Short aliases for use inside this file (keeps the existing code
- * readable; same functions). */
 #define pygo_ready_push pygo_sched_ready_push
 #define pygo_ready_pop  pygo_sched_ready_pop
 
@@ -522,8 +551,13 @@ static int pygo_global_sched_init_done = 0;
 
 void pygo_sched_init(pygo_sched_t *s)
 {
-    s->ready_head = NULL;
-    s->ready_tail = NULL;
+    /* Initial ring of 64 entries; grows on demand.  Empty when
+     * ready_head == ready_tail == 0. */
+    s->ready_ring = (pygo_g_t **)PyMem_Calloc(64, sizeof(pygo_g_t *));
+    s->ready_cap = 64;
+    s->ready_mask = 63;
+    s->ready_head = 0;
+    s->ready_tail = 0;
     s->current = NULL;
     s->sleep_heap = NULL;
     s->sleep_size = 0;
@@ -700,7 +734,7 @@ void pygo_sched_yield(pygo_sched_t *s)
      * control right back to us.  Skip the whole snap + asm-yield +
      * resume cycle and return.  This cuts the single-coro tight-yield
      * baseline from ~230 ns to <10 ns. */
-    if (__builtin_expect(s->ready_head == NULL
+    if (__builtin_expect(pygo_sched_ready_empty(s)
                          && s->sleep_size == 0
                          && pygo_netpoll_parked_count() == 0, 1)) {
         return;
@@ -797,7 +831,7 @@ Py_ssize_t pygo_sched_drain(pygo_sched_t *s)
     s->stopping = 0;
     pygo_pystate_snap(&sched_snap);
 
-    while (!s->stopping && (s->ready_head != NULL ||
+    while (!s->stopping && (!pygo_sched_ready_empty(s) ||
                             s->sleep_size > 0 ||
                             pygo_netpoll_parked_count() > 0)) {
         double now = pygo_sched_monotonic_seconds();
@@ -810,7 +844,7 @@ Py_ssize_t pygo_sched_drain(pygo_sched_t *s)
          * to the next sleep deadline (or forever if none).  Drives
          * pygo_sched_wake which moves ready I/O goroutines back to
          * the ready queue. */
-        if (s->ready_head == NULL &&
+        if (pygo_sched_ready_empty(s) &&
             (pygo_netpoll_parked_count() > 0 || s->sleep_size > 0)) {
             long long timeout_ns = -1;
             if (s->sleep_size > 0) {
