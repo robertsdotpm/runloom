@@ -91,12 +91,8 @@ class TestEcho(unittest.TestCase):
         self.assertEqual(outcome[1], b"abc")
 
     def test_many_concurrent_clients(self):
-        # 20 clients hammer the server in parallel.  Each one sends its
-        # number, expects it back doubled.  (At ~25+ concurrent we hit
-        # a still-uncharacterised crash in coro.send under heavy
-        # concurrent socket activity; bench shows 1000+ tasks work for
-        # pure-compute fan-out, so the issue is specific to network
-        # I/O cascades.  Tracked for follow-up.)
+        # 500 clients hammer the server in parallel.  Each one sends its
+        # number, expects it back doubled.
         async def handler(reader, writer):
             data = await reader.readline()
             n = int(data.strip())
@@ -116,12 +112,12 @@ class TestEcho(unittest.TestCase):
             server = await paio.start_server(handler, "127.0.0.1", 0)
             host, port = server.sockets[0].getsockname()[:2]
             results = await asyncio.gather(*[client(host, port, i)
-                                             for i in range(20)])
+                                             for i in range(500)])
             server.close()
             return results
 
         results = paio.run(main())
-        self.assertEqual(results, [i * 2 for i in range(20)])
+        self.assertEqual(results, [i * 2 for i in range(500)])
 
 
 if __name__ == "__main__":

@@ -103,22 +103,22 @@ void pygo_pystate_snap(pygo_pystate_snap_t *snap)
      * a strong PyFrameObject ref for `gr_frame`; we don't need it.
      * Skipping this avoids a PyFrameObject allocation per snap. */
 
-    /* Exception state: the common case is "no exception in flight"
-     * which means ts->exc_info points to ts->exc_state (the per-tstate
-     * sentinel) and ts->exc_state.exc_value is NULL.  Signal that with
-     * snap->exc_info=NULL and skip the 24-byte exc_state copy. */
+    /* Exception state: common case is "no exception in flight" --
+     * ts->exc_info points to the sentinel and exc_value is NULL.
+     * Encode that as snap->exc_info=NULL and skip the 24-byte copy. */
     if (__builtin_expect(ts->exc_info == &ts->exc_state &&
                          ts->exc_state.exc_value == NULL, 1)) {
         snap->exc_info = NULL;
     } else {
         snap->exc_info = ts->exc_info;
         snap->exc_state = ts->exc_state;
-        /* The struct copy borrowed a reference; take a real one so the
-         * exc_value can't be freed while g is suspended.  Matched by
-         * Py_XDECREF in pygo_pystate_load's old-value cleanup, and by
-         * Py_CLEAR in pygo_pystate_snap_clear. */
         Py_XINCREF(snap->exc_state.exc_value);
     }
+    /* current_exception is the in-flight raised-but-not-yet-caught
+     * exception.  Save with our own ref so another goroutine can't
+     * free it during our suspension. */
+    snap->current_exception = ts->current_exception;
+    Py_XINCREF(snap->current_exception);
 #endif
 
 #if PY_VERSION_HEX >= 0x030B0000 && PY_VERSION_HEX < 0x030D0000
@@ -214,6 +214,14 @@ void pygo_pystate_load(pygo_pystate_snap_t *snap)
         snap->exc_state.exc_value = NULL;       /* ownership transferred */
         snap->exc_state.previous_item = NULL;
     }
+    /* Restore current_exception: drop whatever the previous g left
+     * and install ours.  snap's ref transfers to ts. */
+    {
+        PyObject *old = ts->current_exception;
+        ts->current_exception = snap->current_exception;
+        snap->current_exception = NULL;
+        Py_XDECREF(old);
+    }
 #endif
 
 #if PY_VERSION_HEX >= 0x030B0000 && PY_VERSION_HEX < 0x030D0000
@@ -249,6 +257,7 @@ void pygo_pystate_snap_clear(pygo_pystate_snap_t *snap)
     Py_CLEAR(snap->context);
     Py_CLEAR(snap->exc_state.exc_value);
     snap->exc_info = NULL;
+    Py_CLEAR(snap->current_exception);
 #endif
 #if PY_VERSION_HEX >= 0x030D0000
     Py_CLEAR(snap->delete_later);
@@ -295,6 +304,14 @@ static _PyStackChunk *pygo_chunk_pool_get(void)
     if (c == NULL) return NULL;
     pygo_chunk_pool = c->previous;
     pygo_chunk_pool_size--;
+    /* Clear `previous` so the popped chunk is standalone.  We use
+     * `previous` as the pool's linked-list link AND CPython uses
+     * `previous` to chain the data stack -- without this NULL, when
+     * a frame pops to chunk-empty CPython's
+     * _PyThreadState_PopFrame_ChunkEmpty would walk into the next
+     * pool chunk via this pointer, arena-free THAT chunk, and corrupt
+     * the pool.  Manifests as random use-after-free in exception
+     * state once ~25+ goroutines are alive at once. */
     c->previous = NULL;
     c->top = 0;
     return c;
@@ -594,21 +611,18 @@ void pygo_g_entry(void *user)
     pygo_install_initial_root_frame();
 #endif
 
-    /* Each goroutine has its OWN C stack, so the per-thread recursion
-     * counters in tstate don't reflect physical C-stack usage at all.
-     * They're shared across every goroutine running on this OS thread
-     * and steadily deplete as goroutines spawn nested calls.  Reset to
-     * the configured limit at goroutine entry -- each g gets a fresh
-     * recursion budget for its own stack rather than inheriting
-     * whoever-spawned-us's depleted state. */
+    /* Reset recursion counters at g entry -- each g has its own
+     * physical C stack, so the per-tstate counters don't reflect
+     * actual stack usage when shared across multiple gs. */
     {
         PyThreadState *ts = PyThreadState_GET();
-        int limit = Py_GetRecursionLimit();
+        int py_limit = Py_GetRecursionLimit();
 #if PY_VERSION_HEX >= 0x030C0000
-        ts->py_recursion_remaining = limit;
-        ts->c_recursion_remaining  = limit;
+        ts->py_recursion_remaining = py_limit;
+        /* 200 frames matches what a 128KB stack can safely hold. */
+        ts->c_recursion_remaining  = 200;
 #else
-        ts->recursion_remaining = limit;
+        ts->recursion_remaining = py_limit;
 #endif
     }
 
@@ -1011,6 +1025,24 @@ Py_ssize_t pygo_sched_drain(pygo_sched_t *s)
                  * root cframe on g's own stack before any Python code
                  * runs. */
                 pygo_first_run_install_datastack();
+#if PY_VERSION_HEX >= 0x030B0000
+                /* Also reset exception state for first-run g.  Without
+                 * this, the new g inherits whatever ts->exc_info /
+                 * exc_state / current_exception was left by the
+                 * scheduler's last load, which under heavy concurrent
+                 * cascades may be a pointer into a freed chunk or a
+                 * stale exception object.  Each fresh g starts with
+                 * default-state exception. */
+                {
+                    PyThreadState *ts = PyThreadState_GET();
+                    Py_CLEAR(ts->exc_state.exc_value);
+                    ts->exc_state.previous_item = NULL;
+                    ts->exc_info = &ts->exc_state;
+#  if PY_VERSION_HEX >= 0x030C0000
+                    Py_CLEAR(ts->current_exception);
+#  endif
+                }
+#endif
 #if PY_VERSION_HEX >= 0x030D0000
                 {
                     PyThreadState *ts = PyThreadState_GET();

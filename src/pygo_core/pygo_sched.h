@@ -46,6 +46,16 @@ struct pygo_pystate_snap {
     PyObject **datastack_limit;
     _PyErr_StackItem *exc_info;
     _PyErr_StackItem exc_state;
+    /* The in-flight unraised exception (tstate->current_exception).
+     * Set when PyErr_SetObject is mid-call and an exception object has
+     * been associated with the tstate but not yet raised through the
+     * eval loop.  Critical to save/restore: at high concurrency,
+     * goroutines yield while their current_exception is non-NULL and
+     * other goroutines overwrite it, causing tstate to read a freed/
+     * stale object on resume.  Manifests as a segfault in
+     * _PyErr_SetObject during the next exception cascade (e.g., async
+     * function's StopIteration on return). */
+    PyObject *current_exception;
 #endif
 #if PY_VERSION_HEX >= 0x030B0000 && PY_VERSION_HEX < 0x030C0000
     /* 3.11: single recursion counter, named recursion_remaining. */

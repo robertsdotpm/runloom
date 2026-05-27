@@ -64,9 +64,6 @@ class TestTCP(unittest.TestCase):
         ps.run(main)
         self.assertEqual(result_holder, [b"hello-sync"])
 
-    @unittest.skip("Multi-client cascade exposes the same coro.send "
-                   "crash under concurrent socket activity as the "
-                   "test_aio_net 25+ case.  Single-client works.")
     def test_many_clients(self):
         results = []
 
@@ -93,7 +90,7 @@ class TestTCP(unittest.TestCase):
         def main():
             listen = ps.tcp_listen("127.0.0.1", 0)
             host, port = listen.getsockname()[:2]
-            N = 3
+            N = 50
             ps.go(server, listen, N)
             for i in range(N):
                 ps.go(client, host, port, ("msg-%d" % i).encode())
@@ -101,7 +98,7 @@ class TestTCP(unittest.TestCase):
         ps.run(main)
         self.assertEqual(sorted(results),
                          sorted(("msg-%d" % i).encode()[::-1]
-                                for i in range(3)))
+                                for i in range(50)))
 
 
 class TestUDP(unittest.TestCase):
