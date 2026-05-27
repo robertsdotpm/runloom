@@ -235,7 +235,9 @@ int pygo_netpoll_pump(long long timeout_ns)
         int n;
         int ms = timeout_ns < 0 ? -1 :
                  (timeout_ns > 1000000000LL ? 1000 : (int)(timeout_ns / 1000000LL));
+        Py_BEGIN_ALLOW_THREADS
         n = epoll_wait(pygo_epoll_fd, evs, 64, ms);
+        Py_END_ALLOW_THREADS
         if (n > 0) {
             int i;
             /* Lock parked list for walk + remove.  Order: parked_lock
@@ -277,7 +279,9 @@ int pygo_netpoll_pump(long long timeout_ns)
             ts.tv_nsec = (long)(timeout_ns % 1000000000LL);
             tsp = &ts;
         }
+        Py_BEGIN_ALLOW_THREADS
         n = kevent(pygo_kqueue_fd, NULL, 0, evs, 64, tsp);
+        Py_END_ALLOW_THREADS
         if (n > 0) {
             int i;
             pthread_mutex_lock(&pygo_parked_lock);
