@@ -54,4 +54,11 @@ const char *pygo_coro_backend(void);
 int pygo_coro_thread_init(void);
 void pygo_coro_thread_fini(void);
 
+/* Pre-warm the stack pool with n pre-mmaped stacks of the given
+ * size.  Eliminates the first-spawn mmap stall for servers that
+ * know they're about to spawn a known number of goroutines.
+ * No-op on the Fibers backend (CreateFiber handles its own pool).
+ * No-op if n <= 0.  Returns the number actually pre-allocated. */
+int pygo_coro_warmup(size_t stack_size, int n);
+
 #endif /* PYGO_CORO_H */

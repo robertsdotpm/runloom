@@ -163,6 +163,24 @@ static void pygo_stack_release(void *stack, size_t size)
     pygo_tls_stack_pool = hdr;
 }
 
+/* Pre-warm n stacks of the given size into the per-thread pool.
+ * Returns the number successfully pre-allocated (may be < n if
+ * mmap starts failing partway through). */
+static int pygo_stack_warmup_posix(size_t size, int n)
+{
+    int i;
+    for (i = 0; i < n; i++) {
+        int flags = MAP_PRIVATE | MAP_ANONYMOUS;
+#ifdef MAP_STACK
+        flags |= MAP_STACK;
+#endif
+        void *s = mmap(NULL, size, PROT_READ | PROT_WRITE, flags, -1, 0);
+        if (s == MAP_FAILED) return i;
+        pygo_stack_release(s, size);
+    }
+    return n;
+}
+
 static size_t pygo_round_to_page(size_t size)
 {
     long pagesize = sysconf(_SC_PAGESIZE);
@@ -197,6 +215,24 @@ void pygo_coro_thread_fini(void)
         pygo_tls_caller_fiber = NULL;
         pygo_tls_thread_was_fiber = 0;
     }
+#endif
+}
+
+int pygo_coro_warmup(size_t stack_size, int n)
+{
+    if (n <= 0) return 0;
+#if defined(PYGO_HAVE_FCONTEXT) || defined(PYGO_HAVE_UCONTEXT)
+    {
+        size_t rounded = pygo_round_to_page(
+            stack_size < 4096 ? 4096 : stack_size);
+        return pygo_stack_warmup_posix(rounded, n);
+    }
+#else
+    /* Windows Fibers: CreateFiber maintains its own pool; warmup
+     * would just round-trip Create+Delete which doesn't actually
+     * pre-warm anything. */
+    (void)stack_size;
+    return 0;
 #endif
 }
 

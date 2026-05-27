@@ -301,6 +301,127 @@ static PyObject *m_thread_fini(PyObject *self, PyObject *unused)
     Py_RETURN_NONE;
 }
 
+static PyObject *m_warmup(PyObject *self, PyObject *args)
+{
+    int n;
+    Py_ssize_t stack_size = 131072;
+    int actual;
+    (void)self;
+    if (!PyArg_ParseTuple(args, "i|n", &n, &stack_size)) return NULL;
+    actual = pygo_coro_warmup((size_t)stack_size, n);
+    return PyLong_FromLong(actual);
+}
+
+/* Native C TCP recv into a writable buffer.  Equivalent to
+ *   sock.recv_into(buf)  with cooperative blocking, but bypasses
+ *   the Python socket.recv_into method dispatch (saves ~3-5 us per
+ *   call on tight echo loops).
+ *
+ * Signature: pygo_core.tcp_recv(fd: int, buf: bytearray-like, n: int) -> int
+ *   Returns the number of bytes received; 0 = orderly shutdown.
+ *
+ * Implementation: loop recv(fd, buf, n, 0); on EAGAIN/EWOULDBLOCK
+ * park on the netpoll, retry.  The `buf` argument must be a
+ * writable buffer (bytearray, memoryview, ...) and pygo will fill
+ * its first n bytes. */
+#if defined(PYGO_OS_WINDOWS)
+#else
+#  include <sys/socket.h>
+#  include <unistd.h>
+#  include <errno.h>
+#endif
+
+static PyObject *m_tcp_recv(PyObject *self, PyObject *args)
+{
+    int fd;
+    Py_buffer buf;
+    Py_ssize_t n_bytes;
+    Py_ssize_t got = 0;
+    (void)self;
+
+    if (!PyArg_ParseTuple(args, "iw*n", &fd, &buf, &n_bytes)) return NULL;
+    if (n_bytes > buf.len) n_bytes = buf.len;
+    if (n_bytes <= 0) {
+        PyBuffer_Release(&buf);
+        return PyLong_FromLong(0);
+    }
+
+    while (1) {
+#if defined(PYGO_OS_WINDOWS)
+        int r = recv((SOCKET)fd, (char *)buf.buf, (int)n_bytes, 0);
+        if (r > 0) { got = r; break; }
+        if (r == 0) { got = 0; break; }         /* orderly shutdown */
+        {
+            int err = WSAGetLastError();
+            if (err != WSAEWOULDBLOCK) {
+                PyBuffer_Release(&buf);
+                PyErr_SetFromWindowsErr(err);
+                return NULL;
+            }
+        }
+#else
+        ssize_t r = recv(fd, (char *)buf.buf, (size_t)n_bytes, 0);
+        if (r > 0) { got = (Py_ssize_t)r; break; }
+        if (r == 0) { got = 0; break; }
+        if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
+            PyBuffer_Release(&buf);
+            return PyErr_SetFromErrno(PyExc_OSError);
+        }
+#endif
+        /* Park on read. */
+        if (pygo_netpoll_wait_fd(fd, /*PYGO_NETPOLL_READ*/ 1, -1LL) < 0) {
+            PyBuffer_Release(&buf);
+            return PyErr_SetFromErrno(PyExc_OSError);
+        }
+    }
+
+    PyBuffer_Release(&buf);
+    return PyLong_FromSsize_t(got);
+}
+
+/* Native C TCP send.  Equivalent to sock.sendall(buf) with
+ * cooperative blocking.  Loops until all bytes sent or error. */
+static PyObject *m_tcp_send(PyObject *self, PyObject *args)
+{
+    int fd;
+    Py_buffer buf;
+    Py_ssize_t sent = 0;
+    (void)self;
+
+    if (!PyArg_ParseTuple(args, "iy*", &fd, &buf)) return NULL;
+
+    while (sent < buf.len) {
+#if defined(PYGO_OS_WINDOWS)
+        int r = send((SOCKET)fd, (const char *)buf.buf + sent,
+                     (int)(buf.len - sent), 0);
+        if (r >= 0) { sent += r; continue; }
+        {
+            int err = WSAGetLastError();
+            if (err != WSAEWOULDBLOCK) {
+                PyBuffer_Release(&buf);
+                PyErr_SetFromWindowsErr(err);
+                return NULL;
+            }
+        }
+#else
+        ssize_t r = send(fd, (const char *)buf.buf + sent,
+                         (size_t)(buf.len - sent), 0);
+        if (r >= 0) { sent += r; continue; }
+        if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
+            PyBuffer_Release(&buf);
+            return PyErr_SetFromErrno(PyExc_OSError);
+        }
+#endif
+        if (pygo_netpoll_wait_fd(fd, /*PYGO_NETPOLL_WRITE*/ 2, -1LL) < 0) {
+            PyBuffer_Release(&buf);
+            return PyErr_SetFromErrno(PyExc_OSError);
+        }
+    }
+
+    PyBuffer_Release(&buf);
+    return PyLong_FromSsize_t(sent);
+}
+
 /* ---- Fast-path: C scheduler ----
  *
  * pygo_core.go(fn)       -> PygoG handle.  Schedules fn to run.
@@ -871,6 +992,18 @@ static PyMethodDef module_methods[] = {
      "Per-OS-thread setup; idempotent."},
     {"thread_fini", m_thread_fini, METH_NOARGS,
      "Per-OS-thread teardown."},
+    {"warmup", m_warmup, METH_VARARGS,
+     "warmup(n, stack_size=131072) -> int: pre-mmap n stacks of "
+     "stack_size bytes into the per-thread stack pool, eliminating "
+     "first-spawn mmap latency for servers that know they're about "
+     "to spawn N goroutines.  Returns the number actually allocated."},
+    {"tcp_recv", m_tcp_recv, METH_VARARGS,
+     "tcp_recv(fd, writable_buffer, n) -> bytes_received.  C-level "
+     "recv with cooperative blocking; bypasses socket.recv_into's "
+     "Python frame dispatch.  Buffer is filled in place."},
+    {"tcp_send", m_tcp_send, METH_VARARGS,
+     "tcp_send(fd, bytes_like) -> bytes_sent.  C-level sendall with "
+     "cooperative blocking; loops until all bytes sent or error."},
     /* C-scheduler fast path. */
     {"go",          m_go,          METH_O,
      "Spawn a goroutine via the C scheduler.  Returns a G handle."},
