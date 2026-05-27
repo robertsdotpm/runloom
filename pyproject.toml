@@ -1,0 +1,11 @@
+[build-system]
+requires = ["setuptools>=42", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pygo"
+version = "0.0.1"
+description = "Go-style coroutines in Python (stackful, transparent-blocking I/O via socket monkey-patch)."
+requires-python = ">=3.6"
+license = {text = "MIT"}
+authors = [{name = "Matthew Roberts", email = "matthew@roberts.pm"}]
