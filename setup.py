@@ -34,6 +34,8 @@ def detect_sources():
         os.path.join(SRC_C, "fcontext.c"),
         os.path.join(SRC_C, "pygo_sched.c"),
         os.path.join(SRC_C, "netpoll.c"),
+        os.path.join(SRC_C, "cldeque.c"),
+        os.path.join(SRC_C, "mn_sched.c"),
     ]
     # Arch-specific asm fast path.  Only compile what matches the host;
     # other archs fall through to ucontext (POSIX) or Fibers (Windows).

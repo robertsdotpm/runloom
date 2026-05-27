@@ -19,6 +19,7 @@
 #include "coro.h"
 #include "pygo_sched.h"
 #include "netpoll.h"
+#include "mn_sched.h"
 
 /* ---- Per-coro Python object ---- */
 
@@ -434,6 +435,44 @@ static PyObject *m_netpoll_backend(PyObject *self, PyObject *unused)
     return PyUnicode_FromString(pygo_netpoll_backend());
 }
 
+/* ---- M:N scheduler bindings (Phase C) ---- */
+static PyObject *m_mn_init(PyObject *self, PyObject *args)
+{
+    int n = 0;
+    (void)self;
+    if (!PyArg_ParseTuple(args, "|i", &n)) return NULL;
+    {
+        int got = pygo_mn_init(n);
+        if (got < 0) return NULL;
+        return PyLong_FromLong(got);
+    }
+}
+
+static PyObject *m_mn_go(PyObject *self, PyObject *callable)
+{
+    (void)self;
+    if (!PyCallable_Check(callable)) {
+        PyErr_SetString(PyExc_TypeError, "mn_go(): callable required");
+        return NULL;
+    }
+    return pygo_mn_go(callable);
+}
+
+static PyObject *m_mn_run(PyObject *self, PyObject *unused)
+{
+    Py_ssize_t completed;
+    (void)self; (void)unused;
+    completed = pygo_mn_run();
+    return PyLong_FromSsize_t(completed);
+}
+
+static PyObject *m_mn_fini(PyObject *self, PyObject *unused)
+{
+    (void)self; (void)unused;
+    pygo_mn_fini();
+    Py_RETURN_NONE;
+}
+
 static PyMethodDef module_methods[] = {
     {"yield_",      m_yield,       METH_NOARGS,
      "Yield from inside a raw Coro (a no-op outside one)."},
@@ -457,6 +496,15 @@ static PyMethodDef module_methods[] = {
      "until fd is ready.  events is a bitmask: 1=read, 2=write."},
     {"netpoll_backend", m_netpoll_backend, METH_NOARGS,
      "Return active netpoll backend name (\"epoll\", \"kqueue\", \"select\")."},
+    {"mn_init",     m_mn_init,     METH_VARARGS,
+     "mn_init(n=cpus): start N hub threads.  Returns count."},
+    {"mn_go",       m_mn_go,       METH_O,
+     "mn_go(callable): spawn a goroutine on a round-robin hub.  "
+     "v1 only supports run-to-completion gs (no yield)."},
+    {"mn_run",      m_mn_run,      METH_NOARGS,
+     "mn_run(): wait for all gs to complete.  Returns total completed."},
+    {"mn_fini",     m_mn_fini,     METH_NOARGS,
+     "mn_fini(): tear down the hub pool."},
     {NULL, NULL, 0, NULL}
 };
 
