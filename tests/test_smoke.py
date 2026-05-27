@@ -12,7 +12,7 @@ import pygo_core
 class TestCoreBackend(unittest.TestCase):
     def test_backend_name(self):
         b = pygo_core.backend()
-        self.assertIn(b, ("ucontext", "fibers"))
+        self.assertIn(b, ("ucontext", "fibers", "fcontext-asm"))
 
 
 class TestCoroPrimitive(unittest.TestCase):
