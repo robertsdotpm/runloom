@@ -83,27 +83,32 @@
    static __forceinline void pygo_atomic_store_l(volatile long      *p, long v)      { *p = v; }
    static __forceinline void pygo_atomic_store_ll(volatile long long *p, long long v) { *p = v; }
 
-   /* ---- typed add_fetch helpers (return new value, like GCC builtin) ---- */
-   static __forceinline int       pygo_atomic_add_i (volatile int       *p, int v)       { return (int)_InterlockedExchangeAdd((volatile long *)p, (long)v) + v; }
-   static __forceinline long      pygo_atomic_add_l (volatile long      *p, long v)      { return _InterlockedExchangeAdd(p, v) + v; }
-   static __forceinline long long pygo_atomic_add_ll(volatile long long *p, long long v) { return _InterlockedExchangeAdd64(p, v) + v; }
+   /* ---- typed add_fetch helpers (return new value, like GCC builtin)
+    *
+    * MSVC _Interlocked* signatures use LONG / __int64 (== long /
+    * long-long on Windows MSVC but distinct type identities), so we
+    * cast through (volatile LONG *) and (volatile __int64 *) at the
+    * call to keep the compiler happy without changing semantics. */
+   static __forceinline int       pygo_atomic_add_i (volatile int       *p, int v)       { return (int)_InterlockedExchangeAdd((volatile LONG *)p, (LONG)v) + v; }
+   static __forceinline long      pygo_atomic_add_l (volatile long      *p, long v)      { return (long)_InterlockedExchangeAdd((volatile LONG *)p, (LONG)v) + v; }
+   static __forceinline long long pygo_atomic_add_ll(volatile long long *p, long long v) { return (long long)_InterlockedExchangeAdd64((volatile __int64 *)p, (__int64)v) + v; }
 
    /* ---- typed sub_fetch helpers ---- */
-   static __forceinline int       pygo_atomic_sub_i (volatile int       *p, int v)       { return (int)_InterlockedExchangeAdd((volatile long *)p, -(long)v) - v; }
-   static __forceinline long      pygo_atomic_sub_l (volatile long      *p, long v)      { return _InterlockedExchangeAdd(p, -v) - v; }
-   static __forceinline long long pygo_atomic_sub_ll(volatile long long *p, long long v) { return _InterlockedExchangeAdd64(p, -v) - v; }
+   static __forceinline int       pygo_atomic_sub_i (volatile int       *p, int v)       { return (int)_InterlockedExchangeAdd((volatile LONG *)p, -(LONG)v) - v; }
+   static __forceinline long      pygo_atomic_sub_l (volatile long      *p, long v)      { return (long)_InterlockedExchangeAdd((volatile LONG *)p, -(LONG)v) - v; }
+   static __forceinline long long pygo_atomic_sub_ll(volatile long long *p, long long v) { return (long long)_InterlockedExchangeAdd64((volatile __int64 *)p, -(__int64)v) - v; }
 
    /* ---- typed CAS helpers (return 1 on success, 0 on mismatch + update *expected) ---- */
    static __forceinline int pygo_atomic_cas_l(volatile long *p, long *expected, long desired) {
-       long prev = _InterlockedCompareExchange(p, desired, *expected);
-       if (prev == *expected) return 1;
-       *expected = prev;
+       LONG prev = _InterlockedCompareExchange((volatile LONG *)p, (LONG)desired, (LONG)*expected);
+       if ((long)prev == *expected) return 1;
+       *expected = (long)prev;
        return 0;
    }
    static __forceinline int pygo_atomic_cas_ll(volatile long long *p, long long *expected, long long desired) {
-       long long prev = _InterlockedCompareExchange64(p, desired, *expected);
-       if (prev == *expected) return 1;
-       *expected = prev;
+       __int64 prev = _InterlockedCompareExchange64((volatile __int64 *)p, (__int64)desired, (__int64)*expected);
+       if ((long long)prev == *expected) return 1;
+       *expected = (long long)prev;
        return 0;
    }
 
@@ -144,6 +149,23 @@
            volatile long *: pygo_atomic_add_l,                        \
            long long *:           pygo_atomic_add_ll,                 \
            volatile long long *:  pygo_atomic_add_ll                  \
+       )((p), (v))
+
+   /* fetch_add (returns OLD value -- contrast with add_fetch which
+    * returns the post-increment value).  Used by pygo_mn_spawn_counter
+    * to give each spawned g a unique index. */
+   static __forceinline int       pygo_atomic_fetch_add_i (volatile int       *p, int v)       { return (int)_InterlockedExchangeAdd((volatile LONG *)p, (LONG)v); }
+   static __forceinline long      pygo_atomic_fetch_add_l (volatile long      *p, long v)      { return (long)_InterlockedExchangeAdd((volatile LONG *)p, (LONG)v); }
+   static __forceinline long long pygo_atomic_fetch_add_ll(volatile long long *p, long long v) { return (long long)_InterlockedExchangeAdd64((volatile __int64 *)p, (__int64)v); }
+
+#  define __atomic_fetch_add(p, v, ord)                               \
+       _Generic((p),                                                  \
+           int *:           pygo_atomic_fetch_add_i,                  \
+           volatile int *:  pygo_atomic_fetch_add_i,                  \
+           long *:          pygo_atomic_fetch_add_l,                  \
+           volatile long *: pygo_atomic_fetch_add_l,                  \
+           long long *:           pygo_atomic_fetch_add_ll,           \
+           volatile long long *:  pygo_atomic_fetch_add_ll            \
        )((p), (v))
 
 #  define __atomic_sub_fetch(p, v, ord)                               \

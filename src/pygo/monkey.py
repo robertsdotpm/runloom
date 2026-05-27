@@ -137,7 +137,26 @@ def _make_nonblocking(sock):
 
 
 def _fd_pollable(fd):
-    """epoll/kqueue can't poll regular files; only fifos/sockets/ttys/etc."""
+    """Is this fd pollable by the C-side netpoll?
+
+    POSIX (epoll/kqueue/select):
+        sockets, fifos/pipes, ttys, char/block devices  -> yes
+        regular files                                    -> no
+    Windows (WSAPoll/select):
+        SOCKET handles  -> yes (handled by the socket-layer patches,
+                           not by this function -- os.read/write
+                           callers never see SOCKET fds)
+        pipe / file / tty fds -> no.  Win32 select() refuses anything
+                                 except SOCKETs; pipe fds are kernel
+                                 HANDLEs wrapped by the CRT and are
+                                 not selectable.
+
+    On Windows we therefore always return False from this helper --
+    the os.read/write path can only ever see non-socket fds, which
+    must go through the thread-pool backend instead of wait_fd.
+    """
+    if _IS_WINDOWS:
+        return False
     try:
         st = os.fstat(fd)
     except OSError:
@@ -572,6 +591,23 @@ def _fd_of(x):
 def _patched_select(rlist, wlist, xlist, timeout=None):
     if not _in_goroutine():
         return _orig_select_select(rlist, wlist, xlist, timeout)
+
+    # On Windows, only SOCKET handles can be polled.  If any fd in the
+    # request isn't a socket, fall back to the OS select (which will
+    # itself reject non-sockets -- same behaviour as outside a
+    # goroutine, so the caller sees a consistent error path).  This
+    # avoids parking forever on wait_fd for a pipe/file fd that the
+    # netpoll backend can't drive.
+    if _IS_WINDOWS:
+        for fd_obj in list(rlist) + list(wlist) + list(xlist):
+            fd = _fd_of(fd_obj)
+            try:
+                os.fstat(fd)
+                # fstat on a socket fd raises on Windows; if it
+                # succeeds, the fd is NOT a socket.
+                return _orig_select_select(rlist, wlist, xlist, timeout)
+            except OSError:
+                pass  # likely a socket -- continue with wait_fd path
 
     n = len(rlist) + len(wlist)
     # Fast path: one fd, no xlist -> map to wait_fd directly.

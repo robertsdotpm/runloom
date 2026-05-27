@@ -137,4 +137,18 @@
 #  define PYGO_ATOMIC_BUILTIN_MSVC 1
 #endif
 
+/* ---- GCC-extension shims for MSVC ----
+ *
+ * MSVC has no `__attribute__((...))` and no `__builtin_expect`.  We use
+ * both in the hot paths (snap/load tagged "hot", branch hints around
+ * common-case fast paths).  Shim them to no-ops so the existing source
+ * compiles unchanged on MSVC; native compilers keep the real builtins.
+ *
+ * GCC/Clang/ICC/MinGW: skip -- their compilers handle these. */
+#if defined(PYGO_CC_MSVC) && !defined(__GNUC__) && !defined(__clang__)
+#  define __attribute__(x)               /* drop attribute decoration */
+#  define __builtin_expect(expr, val)    (expr)
+#  define __builtin_unreachable()        __assume(0)
+#endif
+
 #endif /* PYGO_PLAT_H */

@@ -91,6 +91,10 @@ def detect_compile_args():
         # /std:c11 enables _Generic (needed by plat_atomic.h).
         # /experimental:c11atomics not needed because we hand-roll the
         # shim, not stdatomic.h.
+        # FD_SETSIZE=1024 raises Winsock select()'s per-call socket cap
+        # from 64 (default) to 1024 -- WSAPoll is the primary path so
+        # this only matters on XP/Server 2003 where WSAPoll isn't
+        # available, but a 64-fd cap there is unusable in production.
         args += [
             "/O2", "/W3",
             "/std:c11",
@@ -98,6 +102,7 @@ def detect_compile_args():
             "/DWIN32_LEAN_AND_MEAN",
             "/DNOMINMAX",
             "/D_WIN32_WINNT=0x0600",   # Vista+: enables WSAPoll prototype
+            "/DFD_SETSIZE=1024",
         ]
     else:
         # GCC / Clang / MinGW / ICC.
@@ -133,6 +138,7 @@ def detect_compile_args():
                 "-DWIN32_LEAN_AND_MEAN",
                 "-DNOMINMAX",
                 "-D_WIN32_WINNT=0x0600",
+                "-DFD_SETSIZE=1024",
             ]
     return args
 

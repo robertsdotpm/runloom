@@ -43,9 +43,9 @@
 #  include <sys/time.h>
 #  include <unistd.h>
 #elif defined(PYGO_OS_WINDOWS)
-   /* winsock2.h is pulled in via plat_compat.h above; need MSWSOCK for
-    * some advanced struct definitions, but WSAPoll is in winsock2. */
-#  include <mswsock.h>
+   /* winsock2.h, ws2tcpip.h and windows.h are already pulled in via
+    * plat_compat.h.  WSAPoll + WSAPOLLFD live in winsock2.h, FD_SET /
+    * FD_ISSET likewise -- no extra header needed here. */
 #else
 #  include <sys/select.h>
 #  include <unistd.h>

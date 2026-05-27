@@ -93,14 +93,14 @@ static volatile long pygo_mn_spawn_counter = 0;
 /* TLS pointers set at hub_main entry.  pygo_mn_yield_current() and
  * pygo_mn_current_hub() read these to route per-g operations to the
  * right hub without each call site needing to look it up. */
-static __thread pygo_hub_t *pygo_tls_hub = NULL;
-static __thread pygo_g_t   *pygo_tls_current_g = NULL;
+static PYGO_TLS pygo_hub_t *pygo_tls_hub = NULL;
+static PYGO_TLS pygo_g_t   *pygo_tls_current_g = NULL;
 /* Set by pygo_mn_yield_current() before pygo_coro_yield(); read by
  * hub_main after pygo_coro_resume returns.  Tells hub_main "the g
  * has already put itself on a queue, you don't need to requeue".
  * Distinguishes scheduler-aware yield (sched_yield) from raw yield
  * (pygo_core.yield_() -> pygo_coro_yield directly). */
-static __thread int pygo_tls_self_queued = 0;
+static PYGO_TLS int pygo_tls_self_queued = 0;
 
 /* Hub thread main loop.  Phase C v2: runs the same snap/load dance
  * as pygo_sched_drain.  Each iteration:
@@ -531,7 +531,10 @@ PyObject *pygo_mn_go(PyObject *callable)
 Py_ssize_t pygo_mn_run(void)
 {
     int i;
-    long total_completed = 0;
+    /* Py_ssize_t to match the per-hub completed counter (which is
+     * Py_ssize_t -- long long on 64-bit Windows MSVC, long on
+     * 64-bit POSIX).  Using plain long would truncate on Windows. */
+    Py_ssize_t total_completed = 0;
     PyThreadState *saved = PyEval_SaveThread();
     for (;;) {
         long total = 0;

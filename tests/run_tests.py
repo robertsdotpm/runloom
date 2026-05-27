@@ -1,11 +1,14 @@
 """pygo plain-script test driver.
 
 We don't use unittest here.  CPython tracks frame chain + recursion
-counters in thread-state; our ucontext-based stack switch doesn't
-preserve those, and unittest's framework piles up enough frame state
-that the counters drift across switches.  Phase 3 (M:N + free-threaded
-Python) will need a proper thread-state swap in C; for v0 we keep tests
-as flat scripts so the only frames in play are the worker functions.
+counters in thread-state; the legacy `pygo.runtime` Python scheduler
+only swaps recursion counters (the C scheduler in `pygo_core.go`
+does the full Phase B snap).  Multi-goroutine tests therefore go
+through `pygo_core.*` directly so the production path is exercised.
+
+The two single-coro Coro tests still use `pygo_core.Coro` + the raw
+`pygo_core.yield_` since those primitives are the building blocks
+under both schedulers.
 """
 import sys
 import time
@@ -13,7 +16,6 @@ import traceback
 
 sys.path.insert(0, "src")
 
-import pygo
 import pygo_core
 
 
@@ -64,14 +66,16 @@ def test_exception_propagates():
 # ── Test 4: three goroutines interleave round-robin ────────────────
 def test_three_goroutines_interleave():
     log = []
-    def worker(name, n):
-        for i in range(n):
-            log.append((name, i))
-            pygo.yield_()
-    pygo.go(worker, "A", 3)
-    pygo.go(worker, "B", 3)
-    pygo.go(worker, "C", 3)
-    pygo.run()
+    def make_worker(name, n):
+        def w():
+            for i in range(n):
+                log.append((name, i))
+                pygo_core.sched_yield()
+        return w
+    pygo_core.go(make_worker("A", 3))
+    pygo_core.go(make_worker("B", 3))
+    pygo_core.go(make_worker("C", 3))
+    pygo_core.run()
     expected = [("A", 0), ("B", 0), ("C", 0),
                 ("A", 1), ("B", 1), ("C", 1),
                 ("A", 2), ("B", 2), ("C", 2)]
@@ -83,16 +87,16 @@ def test_sleep_lets_others_run():
     log = []
     def sleeper():
         log.append("s1-start")
-        pygo.sleep(0.05)
+        pygo_core.sched_sleep(0.05)
         log.append("s1-end")
     def burner():
         for i in range(3):
             log.append(("b", i))
-            pygo.yield_()
-    pygo.go(sleeper)
-    pygo.go(burner)
+            pygo_core.sched_yield()
+    pygo_core.go(sleeper)
+    pygo_core.go(burner)
     t0 = time.monotonic()
-    pygo.run()
+    pygo_core.run()
     elapsed = time.monotonic() - t0
     eq(log[:4], ["s1-start", ("b", 0), ("b", 1), ("b", 2)], "early order")
     eq(log[-1], "s1-end", "sleeper finished last")

@@ -254,8 +254,9 @@ void pygo_pystate_snap_clear(pygo_pystate_snap_t *snap)
  * single-thread sched on both 3.12 and 3.13). */
 #if PY_VERSION_HEX >= 0x030C0000
 #define PYGO_CHUNK_POOL_CAP 32
-static __thread _PyStackChunk *pygo_chunk_pool = NULL;
-static __thread int pygo_chunk_pool_size = 0;
+/* PYGO_TLS expands to __thread on GCC/Clang, __declspec(thread) on MSVC. */
+static PYGO_TLS _PyStackChunk *pygo_chunk_pool = NULL;
+static PYGO_TLS int pygo_chunk_pool_size = 0;
 
 /* Pop one chunk off the pool.  Returns NULL when empty; caller falls
  * back to letting PyEval arena-allocate. */

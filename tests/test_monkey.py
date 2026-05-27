@@ -4,12 +4,15 @@ These tests exercise the C scheduler (pygo_core.go / pygo_core.run)
 because that's the path the monkey-patches target.
 """
 import os
+import platform
 import queue
 import socket
 import sys
 import threading
 import time
 import unittest
+
+_IS_WINDOWS = platform.system() == "Windows"
 
 sys.path.insert(0, "src")
 
@@ -123,6 +126,9 @@ class TestQueue(unittest.TestCase):
 
 
 class TestOsReadWrite(unittest.TestCase):
+    @unittest.skipIf(_IS_WINDOWS,
+        "Windows pipes aren't pollable via Winsock select/WSAPoll; "
+        "this test exercises the POSIX pipe-cooperative path.")
     def test_pipe_round_trip(self):
         pygo.monkey.patch()
         r, w = os.pipe()
@@ -140,6 +146,9 @@ class TestOsReadWrite(unittest.TestCase):
         self.assertEqual(got[0], b"hello")
 
 
+@unittest.skipIf(_IS_WINDOWS,
+    "select.select on Windows only accepts SOCKET handles, not pipe "
+    "fds.  The pipe-based select integration is a POSIX-only path.")
 class TestSelect(unittest.TestCase):
     def test_select_single_fd(self):
         import select
