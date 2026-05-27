@@ -16,6 +16,14 @@
 #define PY_SSIZE_T_CLEAN
 #include <Python.h>
 
+#if PY_VERSION_HEX < 0x030C0000
+#  error "pygo requires CPython 3.12 or later -- the Phase B per-g \
+PyThreadState snapshot uses 3.12+ tstate fields (cframe / \
+datastack_chunk / py_recursion_remaining).  Older Python could be \
+supported by adding fallback snap fields, but that path isn't in \
+this build."
+#endif
+
 #include "plat.h"
 #include "plat_compat.h"
 #include "coro.h"

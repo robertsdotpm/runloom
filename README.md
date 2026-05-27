@@ -155,24 +155,40 @@ On free-threaded Python 3.13t:
 
 | OS / arch | stack switch | netpoll | atomics | tested |
 | --- | --- | --- | --- | --- |
-| Linux x86_64        | fcontext-asm | epoll  | GCC builtins | yes |
-| Linux aarch64       | fcontext-asm | epoll  | GCC builtins | qemu only |
-| macOS x86_64        | fcontext-asm | kqueue | GCC builtins | code review |
-| macOS arm64         | fcontext-asm | kqueue | GCC builtins | code review |
-| FreeBSD / OpenBSD / NetBSD / DragonFly | fcontext-asm | kqueue | GCC builtins | code review |
+| Linux x86_64 (Debian 13, Fedora 39) | fcontext-asm | epoll  | GCC builtins | yes (hw, 3.12 + 3.13t) |
+| Linux aarch64       | fcontext-asm | epoll  | GCC builtins | qemu-aarch64 |
+| macOS Big Sur x86_64 | fcontext-asm | kqueue | GCC builtins | yes (hw, 3.12) |
+| macOS arm64 (Apple Silicon) | fcontext-asm | kqueue | GCC builtins | code review |
+| FreeBSD 14.3 x86_64 | fcontext-asm | kqueue | GCC builtins | yes (hw, 3.12) |
+| GhostBSD (FreeBSD 14.1 base) | fcontext-asm | kqueue | GCC builtins | yes (hw, 3.12) |
+| OpenBSD / NetBSD / DragonFly | fcontext-asm | kqueue | GCC builtins | code review |
 | Solaris / illumos   | ucontext     | select | GCC builtins | code review |
-| Android             | fcontext-asm | epoll  | GCC builtins | code review |
-| Windows x64 (MSVC)  | Fibers       | WSAPoll + select | _Interlocked\* shim | code review |
+| Android (Termux)    | fcontext-asm | epoll  | GCC builtins | code review |
+| Windows 11 Pro x64 (MSVC 2022) | Fibers | WSAPoll | _Interlocked\* shim | yes (hw, 3.12) |
 | Windows x64 (MinGW-w64 / clang) | Fibers | WSAPoll + select | GCC builtins | code review |
+| Older Windows (XP / Vista / 7 / 8 / 10 / Server 2019/2022) | Fibers | select (XP/2003) or WSAPoll | _Interlocked\* shim | code review |
+
+The Linux 3.12 + 3.13t numbers, macOS 11.7, FreeBSD 14.3, GhostBSD,
+and Windows 11 rows above were validated end-to-end on real hardware:
+the C extension compiles, `tests/run_tests.py` is 5/5 green, and
+`tests/test_monkey.py` is 17/17 (14 on Windows -- the 3 POSIX-pipe-
+specific tests skip cleanly).
 
 **Windows backend selection** is at runtime: `WSAPoll` is probed via
-`GetProcAddress` at first use, falling through to `select()` on hosts
-where it's missing (XP / Server 2003).  One binary works across
-Windows Vista through Windows 11 / Server 2022.
+`GetProcAddress` at first netpoll init, falling through to `select()`
+on hosts where it's missing (XP / Server 2003).  One binary works
+across Windows Vista through Windows 11 / Server 2022.
 
 **Compilers**: GCC 4.7+, Clang 3.5+ (including clang-cl), MSVC 19.20+
 (Visual Studio 2019 16.0+), MinGW-w64, ICC 17+.  MSVC needs C11
 `_Generic` (default in `/std:c11` mode; setup.py sets it).
+
+**Python**: 3.12 or newer.  The Phase B per-goroutine PyThreadState
+snapshot relies on 3.12+ tstate fields (`cframe`, `datastack_chunk`,
+`py_recursion_remaining`); a compile-time `#error` in module.c
+catches the wrong version with a clear message.  Free-threaded 3.13t
+is also supported (M:N work-stealing scheduler + time-sliced
+preemption).
 
 ## Layout
 
