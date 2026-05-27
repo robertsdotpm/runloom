@@ -692,6 +692,31 @@ static PyObject *m_go(PyObject *self, PyObject *callable)
     return (PyObject *)handle;
 }
 
+static PyObject *m_go_noyield(PyObject *self, PyObject *callable)
+{
+    pygo_sched_t *s;
+    PygoG *handle;
+    pygo_g_t *g;
+    PyObject *cap;
+    (void)self;
+    if (!PyCallable_Check(callable)) {
+        PyErr_SetString(PyExc_TypeError, "go_noyield(): callable required");
+        return NULL;
+    }
+    s = pygo_sched_get();
+    cap = pygo_sched_spawn_noyield(s, callable);
+    if (cap == NULL) return NULL;
+    g = (pygo_g_t *)PyCapsule_GetPointer(cap, "pygo_g");
+    Py_DECREF(cap);
+    if (g == NULL) return NULL;
+
+    handle = PyObject_New(PygoG, &PygoGType);
+    if (handle == NULL) return NULL;
+    pygo_g_incref(g);
+    handle->g = g;
+    return (PyObject *)handle;
+}
+
 static PyObject *m_sched_yield(PyObject *self, PyObject *unused)
 {
     (void)self; (void)unused;
@@ -1007,6 +1032,13 @@ static PyMethodDef module_methods[] = {
     /* C-scheduler fast path. */
     {"go",          m_go,          METH_O,
      "Spawn a goroutine via the C scheduler.  Returns a G handle."},
+    {"go_noyield",  m_go_noyield,  METH_O,
+     "Spawn a goroutine that the caller promises will run to "
+     "completion without yielding.  Skips the per-g datastack/snap/"
+     "load-sched dance -- ~150-400 ns/g faster than go() for pure-"
+     "compute callables.  If the callable does yield (sched_yield, "
+     "sched_sleep, wait_fd, monkey-patched I/O), behaviour is "
+     "undefined.  Use only when you know the work is CPU-bound."},
     {"sched_yield_classic", m_sched_yield, METH_NOARGS,
      "Yield the current goroutine (METH_NOARGS PyCFunction form, kept "
      "for benchmarking against the vectorcall singleton)."},

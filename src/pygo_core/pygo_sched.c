@@ -693,7 +693,7 @@ void pygo_g_decref(pygo_g_t *g)
 }
 
 /* ---- Spawn ---- */
-PyObject *pygo_sched_spawn(pygo_sched_t *s, PyObject *callable)
+static PyObject *spawn_common(pygo_sched_t *s, PyObject *callable, int noyield)
 {
     pygo_g_t *g = pygo_g_slab_alloc();
     if (g == NULL) {
@@ -703,16 +703,27 @@ PyObject *pygo_sched_spawn(pygo_sched_t *s, PyObject *callable)
     Py_INCREF(callable);
     g->callable = callable;
     g->refcount = 1;   /* one ref for the scheduler queue */
+    g->noyield = noyield;
     g->coro = pygo_coro_new((size_t)s->stack_size,
                             pygo_g_entry, g);
     if (g->coro == NULL) {
         Py_DECREF(g->callable);
-        PyMem_Free(g);
+        pygo_g_slab_free(g);
         PyErr_SetString(PyExc_MemoryError, "pygo_coro_new failed");
         return NULL;
     }
     pygo_ready_push(s, g);
     return PyCapsule_New(g, "pygo_g", NULL);
+}
+
+PyObject *pygo_sched_spawn(pygo_sched_t *s, PyObject *callable)
+{
+    return spawn_common(s, callable, /*noyield*/0);
+}
+
+PyObject *pygo_sched_spawn_noyield(pygo_sched_t *s, PyObject *callable)
+{
+    return spawn_common(s, callable, /*noyield*/1);
 }
 
 /* ---- Yield ---- */
@@ -891,6 +902,29 @@ Py_ssize_t pygo_sched_drain(pygo_sched_t *s)
              * and the next iter's g->snap load. */
 
             s->current = g;
+
+            /* noyield short-circuit -- the caller has asserted g
+             * runs to completion without yielding.  We can share the
+             * scheduler's datastack chunk and current_frame across
+             * the resume: g's Python frames push onto the same chunk,
+             * run, pop, and tstate ends up exactly where it was.  No
+             * snap, no install, no drain, no load+resnap on
+             * completion. */
+            if (g->noyield) {
+                pygo_coro_resume(g->coro);
+                s->current = prev;
+                if (pygo_coro_done(g->coro)) {
+                    s->completed++;
+                    pygo_g_decref(g);
+                }
+                /* If a noyield g ACTUALLY yielded (caller broke its
+                 * promise) we'd land here with !done.  Carry on; the
+                 * snap dance never happened, so tstate is now in g's
+                 * uncommitted state and the next iter will see garbage.
+                 * Undefined behaviour per the noyield contract. */
+                continue;
+            }
+
             if (g->snap.valid) {
                 pygo_pystate_load(&g->snap);
             } else {

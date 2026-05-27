@@ -87,6 +87,19 @@ struct pygo_g {
     pygo_g_t *next;
     int done;
     int refcount;
+    /* Caller-asserted "this goroutine will never yield".  Spawned via
+     * pygo_sched_spawn_noyield (Python: pygo_core.go_noyield(fn)).
+     * When set, drain skips the per-g datastack install + drain +
+     * sched_snap load/resnap dance, because g runs to completion
+     * within one resume + uses the scheduler's existing Python state
+     * without leaving anything behind.  Saves ~150-400 ns per g
+     * lifetime depending on workload.
+     *
+     * If a noyield-marked g actually yields (calls sched_yield,
+     * sched_sleep, wait_fd, or any monkey-patched I/O), the result
+     * is undefined -- frames will alias across goroutines.  Use
+     * only for pure-compute callables. */
+    int noyield;
 };
 
 /* Lifetime helpers. */
@@ -141,6 +154,15 @@ pygo_sched_t *pygo_sched_get(void);
 /* Spawn a new goroutine.  Returns a NEW reference to a PygoG Python
  * object (the wrapper around pygo_g_t).  Stealing the callable. */
 PyObject *pygo_sched_spawn(pygo_sched_t *s, PyObject *callable);
+
+/* Spawn a goroutine marked as "noyield" -- caller asserts the
+ * callable will run to completion without calling sched_yield,
+ * sched_sleep, wait_fd, or any monkey-patched I/O.  The drain path
+ * skips the per-g datastack install / drain / sched_snap load+
+ * resnap dance, cutting ~150-400 ns / g lifetime depending on
+ * workload.  Useful for CPU-bound parallel fan-out where you know
+ * the handler is pure compute. */
+PyObject *pygo_sched_spawn_noyield(pygo_sched_t *s, PyObject *callable);
 
 /* Yield the current g.  Re-queues on the ready FIFO, swaps back to
  * the scheduler stack.  Must be called from inside a g. */
