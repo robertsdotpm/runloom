@@ -167,8 +167,9 @@ On free-threaded Python 3.13t:
 | Windows 11 Pro x64 (MSVC 2022) | Fibers | WSAPoll | _Interlocked\* shim | yes (hw, 3.12) |
 | Windows 10 22H2 x64 (MSVC 2022) | Fibers | WSAPoll + select | _Interlocked\* shim | yes (hw, 3.12) |
 | Windows Server 2022 x64 (MSVC 2022) | Fibers | WSAPoll + select | _Interlocked\* shim | yes (hw, 3.12) |
-| Windows x64 (MinGW-w64 / clang) | Fibers | WSAPoll + select | GCC builtins | code review |
-| Windows 8.1 / 7 / XP / Vista | Fibers | select (XP/2003) or WSAPoll | _Interlocked\* shim | not testable: VS 2022 rejects Win < 10, Python > 3.12 needs Win 10+ |
+| Windows 8.1 x64 (MinGW-w64 13.2.0 ucrt) | Fibers | select | GCC builtins | yes (hw, 3.12) |
+| Windows x64 (clang-cl) | Fibers | WSAPoll + select | GCC builtins | code review |
+| Windows 7 / XP / Vista | Fibers | select (XP/2003) | _Interlocked\* shim | code review only: Python 3.11+ won't launch on Win 7-, and pygo's frame snap requires Python 3.11 fields |
 
 The Linux 3.12 + 3.13t numbers, macOS 11.7, FreeBSD 14.3, GhostBSD,
 and Windows 11 rows above were validated end-to-end on real hardware:
@@ -183,7 +184,12 @@ across Windows Vista through Windows 11 / Server 2022.
 
 **Compilers**: GCC 4.7+, Clang 3.5+ (including clang-cl), MSVC 19.20+
 (Visual Studio 2019 16.0+), MinGW-w64, ICC 17+.  MSVC needs C11
-`_Generic` (default in `/std:c11` mode; setup.py sets it).
+`_Generic` (default in `/std:c11` mode; setup.py sets it).  When
+building on Windows with MinGW-w64 (the practical path for Win 8.1,
+since VS 2022 refuses to install on Windows < 10), setup.py adds
+`-static-libgcc -Wl,-Bstatic -lwinpthread` automatically -- the
+resulting .pyd has zero non-system DLL dependencies and runs without
+a MinGW install on the target host.
 
 **Python**: 3.11 or newer.  The Phase B per-goroutine PyThreadState
 snapshot relies on 3.11+ tstate fields (`cframe`, `datastack_chunk`,

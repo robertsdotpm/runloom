@@ -172,6 +172,23 @@ def detect_link_flags():
         # need it.  Modern toolchains do this automatically when -lpthread
         # appears in libraries=.
         pass
+    if IS_WINDOWS and _using_mingw():
+        # Static-link the GCC runtime so the resulting .pyd doesn't
+        # depend on libgcc_s_seh-1.dll / libwinpthread-1.dll being on
+        # PATH when imported.  Important on Windows targets where the
+        # user might not have MinGW installed (build host vs run host).
+        #
+        # Order matters: -Bstatic affects subsequent -l options.  We
+        # deliberately do NOT terminate with -Bdynamic -- gcc adds an
+        # implicit -lwinpthread at the very end of the link line from
+        # its specs file; without leaving us in -Bstatic mode there,
+        # that implicit pull would re-introduce the .dll dependency.
+        # System DLLs (kernel32, ws2_32, python312) were already
+        # resolved earlier in the command, so they stay dynamic.
+        flags += [
+            "-static-libgcc",
+            "-Wl,-Bstatic", "-lwinpthread",
+        ]
     return flags
 
 
