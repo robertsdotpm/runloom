@@ -37,19 +37,29 @@ typedef struct pygo_pystate_snap pygo_pystate_snap_t;
  */
 struct pygo_pystate_snap {
     int valid;
-#if PY_VERSION_HEX >= 0x030C0000
-    /* 3.12+ common fields. */
+#if PY_VERSION_HEX >= 0x030B0000
+    /* 3.11+ common fields.  All of: contextvars, datastack arena
+     * pointers, exc state, exist on 3.11/3.12/3.13. */
     PyObject *context;                       /* contextvars; owned ref */
-    int py_recursion_remaining;
-    int c_recursion_remaining;
     _PyStackChunk *datastack_chunk;
     PyObject **datastack_top;
     PyObject **datastack_limit;
     _PyErr_StackItem *exc_info;
     _PyErr_StackItem exc_state;
 #endif
-#if PY_VERSION_HEX >= 0x030C0000 && PY_VERSION_HEX < 0x030D0000
-    /* 3.12-only fields. */
+#if PY_VERSION_HEX >= 0x030B0000 && PY_VERSION_HEX < 0x030C0000
+    /* 3.11: single recursion counter, named recursion_remaining. */
+    int recursion_remaining;
+#endif
+#if PY_VERSION_HEX >= 0x030C0000
+    /* 3.12+: split into Python-level and C-level counters. */
+    int py_recursion_remaining;
+    int c_recursion_remaining;
+#endif
+#if PY_VERSION_HEX >= 0x030B0000 && PY_VERSION_HEX < 0x030D0000
+    /* 3.11 and 3.12: cframe lives on the C stack, threaded through
+     * the linked list.  3.13 removed cframe; current_frame lives
+     * directly on tstate instead. */
     _PyCFrame *cframe;
     int trash_delete_nesting;
 #endif
@@ -57,10 +67,6 @@ struct pygo_pystate_snap {
     /* 3.13+ fields. */
     struct _PyInterpreterFrame *current_frame;
     PyObject *delete_later;                  /* owned ref */
-#endif
-#if PY_VERSION_HEX < 0x030C0000
-    /* Legacy: pre-3.12 stored recursion depth as a single counter. */
-    int recursion_depth;
 #endif
 };
 

@@ -16,12 +16,12 @@
 #define PY_SSIZE_T_CLEAN
 #include <Python.h>
 
-#if PY_VERSION_HEX < 0x030C0000
-#  error "pygo requires CPython 3.12 or later -- the Phase B per-g \
-PyThreadState snapshot uses 3.12+ tstate fields (cframe / \
-datastack_chunk / py_recursion_remaining).  Older Python could be \
-supported by adding fallback snap fields, but that path isn't in \
-this build."
+#if PY_VERSION_HEX < 0x030B0000
+#  error "pygo requires CPython 3.11 or later -- the Phase B per-g \
+PyThreadState snapshot uses 3.11+ tstate fields (cframe, \
+datastack_chunk).  3.10 and earlier had a fundamentally different \
+frame model (PyFrameObject linked list) and would need separate \
+snap/load paths; not built today."
 #endif
 
 #include "plat.h"
@@ -45,6 +45,8 @@ typedef struct {
 #if PY_VERSION_HEX >= 0x030C0000
     int py_recursion_remaining;
     int c_recursion_remaining;
+#elif PY_VERSION_HEX >= 0x030B0000
+    int recursion_remaining;
 #else
     int recursion_depth;
 #endif
@@ -67,6 +69,8 @@ PYGO_INLINE void pygo_tstate_save(PygoTstateSnapshot *s)
 #if PY_VERSION_HEX >= 0x030C0000
     s->py_recursion_remaining = ts->py_recursion_remaining;
     s->c_recursion_remaining = ts->c_recursion_remaining;
+#elif PY_VERSION_HEX >= 0x030B0000
+    s->recursion_remaining = ts->recursion_remaining;
 #else
     s->recursion_depth = ts->recursion_depth;
 #endif
@@ -83,6 +87,8 @@ PYGO_INLINE void pygo_tstate_restore(const PygoTstateSnapshot *s)
 #if PY_VERSION_HEX >= 0x030C0000
     ts->py_recursion_remaining = s->py_recursion_remaining;
     ts->c_recursion_remaining = s->c_recursion_remaining;
+#elif PY_VERSION_HEX >= 0x030B0000
+    ts->recursion_remaining = s->recursion_remaining;
 #else
     ts->recursion_depth = s->recursion_depth;
 #endif

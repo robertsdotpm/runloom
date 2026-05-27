@@ -65,14 +65,19 @@ void pygo_pystate_snap(pygo_pystate_snap_t *snap)
     /* No memset: every field is assigned below.  Saves ~80B of
      * unnecessary writes on the hot per-yield path. */
 
-#if PY_VERSION_HEX >= 0x030C0000
+#if PY_VERSION_HEX >= 0x030B0000
     /* contextvars: steal a strong ref.  Py_XINCREF is null-safe and
      * compiles to a predicted-not-taken branch over the atomic. */
     Py_XINCREF(ts->context);
     snap->context = ts->context;
 
+#  if PY_VERSION_HEX >= 0x030C0000
     snap->py_recursion_remaining = ts->py_recursion_remaining;
     snap->c_recursion_remaining = ts->c_recursion_remaining;
+#  else
+    /* 3.11: single counter named recursion_remaining. */
+    snap->recursion_remaining = ts->recursion_remaining;
+#  endif
 
     snap->datastack_chunk = ts->datastack_chunk;
     snap->datastack_top = ts->datastack_top;
@@ -102,10 +107,10 @@ void pygo_pystate_snap(pygo_pystate_snap_t *snap)
     }
 #endif
 
-#if PY_VERSION_HEX >= 0x030C0000 && PY_VERSION_HEX < 0x030D0000
-    /* 3.12: cframe lives on the C stack, threaded through the linked
-     * list.  We save the pointer; it remains valid because g's C stack
-     * is preserved across the swap. */
+#if PY_VERSION_HEX >= 0x030B0000 && PY_VERSION_HEX < 0x030D0000
+    /* 3.11 and 3.12: cframe lives on the C stack, threaded through
+     * the linked list.  We save the pointer; it remains valid
+     * because g's C stack is preserved across the swap. */
     snap->cframe = ts->cframe;
     snap->trash_delete_nesting = ts->trash.delete_nesting;
 #endif
@@ -115,10 +120,6 @@ void pygo_pystate_snap(pygo_pystate_snap_t *snap)
     snap->current_frame = ts->current_frame;
     Py_XINCREF(ts->delete_later);
     snap->delete_later = ts->delete_later;
-#endif
-
-#if PY_VERSION_HEX < 0x030C0000
-    snap->recursion_depth = ts->recursion_depth;
 #endif
 
     snap->valid = 1;
@@ -134,7 +135,7 @@ void pygo_pystate_load(pygo_pystate_snap_t *snap)
     }
     ts = PyThreadState_GET();
 
-#if PY_VERSION_HEX >= 0x030C0000
+#if PY_VERSION_HEX >= 0x030B0000
     /* contextvars fast path: if g didn't touch ts->context, the snap's
      * pointer matches ts's.  Drop our extra ref and skip the swap +
      * context_ver bump.  The version stays stable because the content
@@ -150,8 +151,13 @@ void pygo_pystate_load(pygo_pystate_snap_t *snap)
         ts->context_ver++;
     }
 
+#  if PY_VERSION_HEX >= 0x030C0000
     ts->py_recursion_remaining = snap->py_recursion_remaining;
     ts->c_recursion_remaining = snap->c_recursion_remaining;
+#  else
+    /* 3.11: single counter. */
+    ts->recursion_remaining = snap->recursion_remaining;
+#  endif
 
     /* Datastack fast path: in tight loops that yield without pushing
      * Python frames, the chunk pointers are unchanged across the
@@ -189,7 +195,7 @@ void pygo_pystate_load(pygo_pystate_snap_t *snap)
     }
 #endif
 
-#if PY_VERSION_HEX >= 0x030C0000 && PY_VERSION_HEX < 0x030D0000
+#if PY_VERSION_HEX >= 0x030B0000 && PY_VERSION_HEX < 0x030D0000
     ts->cframe = snap->cframe;
     ts->trash.delete_nesting = snap->trash_delete_nesting;
 #endif
@@ -204,10 +210,6 @@ void pygo_pystate_load(pygo_pystate_snap_t *snap)
     }
 #endif
 
-#if PY_VERSION_HEX < 0x030C0000
-    ts->recursion_depth = snap->recursion_depth;
-#endif
-
     snap->valid = 0;
 }
 
@@ -218,7 +220,7 @@ void pygo_pystate_snap_clear(pygo_pystate_snap_t *snap)
     if (!snap->valid) {
         return;
     }
-#if PY_VERSION_HEX >= 0x030C0000
+#if PY_VERSION_HEX >= 0x030B0000
     Py_CLEAR(snap->context);
     Py_CLEAR(snap->exc_state.exc_value);
     snap->exc_info = NULL;
@@ -252,7 +254,7 @@ void pygo_pystate_snap_clear(pygo_pystate_snap_t *snap)
  * tstate, so the slot would be cold across hub-to-hub g migration --
  * which we don't actually do, but the pool is also useful for the
  * single-thread sched on both 3.12 and 3.13). */
-#if PY_VERSION_HEX >= 0x030C0000
+#if PY_VERSION_HEX >= 0x030B0000
 #define PYGO_CHUNK_POOL_CAP 32
 /* PYGO_TLS expands to __thread on GCC/Clang, __declspec(thread) on MSVC. */
 static PYGO_TLS _PyStackChunk *pygo_chunk_pool = NULL;
@@ -308,7 +310,7 @@ static int pygo_chunk_pool_install(PyThreadState *ts)
 
 void pygo_first_run_install_datastack(void)
 {
-#if PY_VERSION_HEX >= 0x030C0000
+#if PY_VERSION_HEX >= 0x030B0000
     PyThreadState *ts = PyThreadState_GET();
     if (!pygo_chunk_pool_install(ts)) {
         ts->datastack_chunk = NULL;
@@ -334,7 +336,7 @@ void pygo_first_run_install_datastack(void)
  * Algorithm matches greenlet's PythonState::did_finish, plus pool reuse. */
 void pygo_drain_g_datastack(void)
 {
-#if PY_VERSION_HEX >= 0x030C0000
+#if PY_VERSION_HEX >= 0x030B0000
     PyThreadState *ts = PyThreadState_GET();
     _PyStackChunk *chunk = ts->datastack_chunk;
     PyObjectArenaAllocator alloc;
@@ -370,7 +372,7 @@ void pygo_drain_g_datastack(void)
  * On 3.13, the cframe is gone; we just NULL out tstate->current_frame.
  * In both cases the chain starts here and walks back to a terminator,
  * not to the previous coroutine. */
-#if PY_VERSION_HEX >= 0x030C0000 && PY_VERSION_HEX < 0x030D0000
+#if PY_VERSION_HEX >= 0x030B0000 && PY_VERSION_HEX < 0x030D0000
 static void pygo_install_initial_root_frame(_PyCFrame *frame_storage)
 {
     PyThreadState *ts = PyThreadState_GET();
