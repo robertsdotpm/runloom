@@ -509,6 +509,110 @@ static PyObject *m_fd_write(PyObject *self, PyObject *args)
 #endif
 }
 
+/* io_uring file I/O.  On Linux >= 5.1 these submit the read/write
+ * to the kernel via io_uring and block (in the kernel) until done.
+ * Cheaper than the thread-pool path because no GIL release/reacquire
+ * or thread handoff -- one syscall per op.
+ *
+ * Falls back to a plain pread/pwrite on systems without io_uring. */
+#if defined(__linux__)
+#  include "io_uring.h"
+#endif
+
+static PyObject *m_iouring_available(PyObject *self, PyObject *unused)
+{
+    (void)self; (void)unused;
+#if defined(__linux__)
+    return PyBool_FromLong(pygo_iouring_available());
+#else
+    Py_RETURN_FALSE;
+#endif
+}
+
+static PyObject *m_file_read(PyObject *self, PyObject *args)
+{
+    int fd;
+    Py_buffer buf;
+    Py_ssize_t n_bytes;
+    long long offset = -1;   /* -1 = use current fd offset via pread */
+    Py_ssize_t r;
+    (void)self;
+
+    if (!PyArg_ParseTuple(args, "iw*n|L", &fd, &buf, &n_bytes, &offset)) {
+        return NULL;
+    }
+    if (n_bytes < 0 || n_bytes > buf.len) {
+        PyBuffer_Release(&buf);
+        PyErr_SetString(PyExc_ValueError, "n out of range for buffer");
+        return NULL;
+    }
+#if defined(__linux__)
+    if (pygo_iouring_available()) {
+        off_t off = (offset < 0) ? 0 : (off_t)offset;
+        r = pygo_iouring_pread(fd, buf.buf, (size_t)n_bytes, off);
+        if (r < 0) {
+            PyBuffer_Release(&buf);
+            return PyErr_SetFromErrno(PyExc_OSError);
+        }
+        PyBuffer_Release(&buf);
+        return PyLong_FromSsize_t((Py_ssize_t)r);
+    }
+#endif
+    /* Fallback: plain blocking read.  Caller routed cooperatively
+     * via monkey.py's thread-pool _blocking_call if needed. */
+#if defined(_WIN32)
+    {
+        int rr = _read(fd, buf.buf, (unsigned)n_bytes);
+        PyBuffer_Release(&buf);
+        if (rr < 0) return PyErr_SetFromErrno(PyExc_OSError);
+        return PyLong_FromLong(rr);
+    }
+#else
+    r = (offset < 0) ? read(fd, buf.buf, (size_t)n_bytes)
+                     : pread(fd, buf.buf, (size_t)n_bytes, (off_t)offset);
+    PyBuffer_Release(&buf);
+    if (r < 0) return PyErr_SetFromErrno(PyExc_OSError);
+    return PyLong_FromSsize_t((Py_ssize_t)r);
+#endif
+}
+
+static PyObject *m_file_write(PyObject *self, PyObject *args)
+{
+    int fd;
+    Py_buffer buf;
+    long long offset = -1;
+    Py_ssize_t r;
+    (void)self;
+
+    if (!PyArg_ParseTuple(args, "iy*|L", &fd, &buf, &offset)) return NULL;
+#if defined(__linux__)
+    if (pygo_iouring_available()) {
+        off_t off = (offset < 0) ? 0 : (off_t)offset;
+        r = pygo_iouring_pwrite(fd, buf.buf, (size_t)buf.len, off);
+        if (r < 0) {
+            PyBuffer_Release(&buf);
+            return PyErr_SetFromErrno(PyExc_OSError);
+        }
+        PyBuffer_Release(&buf);
+        return PyLong_FromSsize_t((Py_ssize_t)r);
+    }
+#endif
+#if defined(_WIN32)
+    {
+        int rr = _write(fd, buf.buf, (unsigned)buf.len);
+        PyBuffer_Release(&buf);
+        if (rr < 0) return PyErr_SetFromErrno(PyExc_OSError);
+        return PyLong_FromLong(rr);
+    }
+#else
+    r = (offset < 0) ? write(fd, buf.buf, (size_t)buf.len)
+                     : pwrite(fd, buf.buf, (size_t)buf.len, (off_t)offset);
+    PyBuffer_Release(&buf);
+    if (r < 0) return PyErr_SetFromErrno(PyExc_OSError);
+    return PyLong_FromSsize_t((Py_ssize_t)r);
+#endif
+}
+
 /* ---- Fast-path: C scheduler ----
  *
  * pygo_core.go(fn)       -> PygoG handle.  Schedules fn to run.
@@ -1280,6 +1384,16 @@ static PyMethodDef module_methods[] = {
     {"fd_write", m_fd_write, METH_VARARGS,
      "fd_write(fd, bytes_like) -> bytes_written.  POSIX write(2) "
      "loop with cooperative blocking.  Same Windows caveat as fd_read."},
+    {"file_read", m_file_read, METH_VARARGS,
+     "file_read(fd, writable_buffer, n, offset=-1) -> bytes_read.  "
+     "Uses io_uring on Linux >=5.1, falls back to pread/read.  "
+     "Cooperative-ish: avoids the thread-pool roundtrip the monkey-"
+     "patch path takes for regular files."},
+    {"file_write", m_file_write, METH_VARARGS,
+     "file_write(fd, bytes_like, offset=-1) -> bytes_written.  "
+     "io_uring on Linux, plain write/pwrite elsewhere."},
+    {"iouring_available", m_iouring_available, METH_NOARGS,
+     "True if the io_uring kernel interface is usable (Linux 5.1+)."},
     /* C-scheduler fast path. */
     {"go",          m_go,          METH_O,
      "Spawn a goroutine via the C scheduler.  Returns a G handle."},
