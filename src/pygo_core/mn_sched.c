@@ -46,6 +46,7 @@
 
 #include "mn_sched.h"
 #include "pygo_sched.h"
+#include "netpoll.h"
 #include "coro.h"
 #include "cldeque.h"
 
@@ -127,7 +128,14 @@ static void *pygo_hub_main(void *arg)
             while (sub != NULL) {
                 pygo_g_t *next = sub->next;
                 sub->next = NULL;
-                pygo_cldeque_push(&h->deque, sub);
+                /* Route by state: fresh (no snap) -> Chase-Lev deque
+                 * (stealable by other hubs); woken (snap.valid) ->
+                 * local FIFO (hub-pinned, the netpoll-wake path). */
+                if (sub->snap.valid) {
+                    pygo_sched_ready_push(&h->sched, sub);
+                } else {
+                    pygo_cldeque_push(&h->deque, sub);
+                }
                 sub = next;
             }
         }
@@ -152,19 +160,28 @@ static void *pygo_hub_main(void *arg)
                 long total = 0;
                 int j;
                 PyThreadState *saved;
-                struct timespec ts;
+                int parked;
                 for (j = 0; j < pygo_hub_count; j++) {
                     total += __atomic_load_n(&pygo_hubs[j].pending,
                                              __ATOMIC_RELAXED);
                 }
-                ts.tv_sec = 0;
-                ts.tv_nsec = (total == 0) ? 500000 : 100000;
-                /* Release the GIL across the nanosleep so the main
-                 * thread (waiting in mn_run / mn_fini to re-acquire)
-                 * isn't blocked.  On free-threaded 3.13t this is a
-                 * no-op but harmless; on GIL builds it's essential. */
+                /* If there are gs parked on I/O, drive epoll/kqueue
+                 * instead of just sleeping.  Whichever hub gets here
+                 * first runs pump; routed wakes go to the originating
+                 * hub's submission list, picked up by that hub on its
+                 * next iteration. */
+                parked = pygo_netpoll_parked_count();
                 saved = PyEval_SaveThread();
-                nanosleep(&ts, NULL);
+                if (parked > 0) {
+                    /* Short timeout (~1 ms) so pumps stay responsive
+                     * to new local work appearing while we wait. */
+                    pygo_netpoll_pump(1000000LL);
+                } else {
+                    struct timespec ts;
+                    ts.tv_sec = 0;
+                    ts.tv_nsec = (total == 0) ? 500000 : 100000;
+                    nanosleep(&ts, NULL);
+                }
                 PyEval_RestoreThread(saved);
                 continue;
             }
@@ -236,6 +253,50 @@ static void *pygo_hub_main(void *arg)
 int pygo_mn_hub_count(void)
 {
     return pygo_hub_count;
+}
+
+void *pygo_mn_current_hub_opaque(void)
+{
+    return (void *)pygo_tls_hub;
+}
+
+pygo_g_t *pygo_mn_tls_current_g(void)
+{
+    return pygo_tls_current_g;
+}
+
+void pygo_mn_tls_mark_parked(void)
+{
+    pygo_tls_self_queued = 1;
+}
+
+/* Push g onto a hub's submission list.  Called by netpoll pump to
+ * route an I/O-woken g back to whichever hub it was running on.
+ * (Also used internally by mn_go.)  Hub_main drains submissions every
+ * iteration and routes each entry to either the deque (if g is fresh)
+ * or the local FIFO (if g has saved state -- the netpoll-wake case). */
+static void pygo_mn_hub_submit(pygo_hub_t *h, pygo_g_t *g)
+{
+    pthread_mutex_lock(&h->sub_lock);
+    g->next = NULL;
+    if (h->sub_tail != NULL) {
+        h->sub_tail->next = g;
+    } else {
+        h->sub_head = g;
+    }
+    h->sub_tail = g;
+    pthread_mutex_unlock(&h->sub_lock);
+}
+
+void pygo_mn_wake_g(void *hub_opaque, pygo_g_t *g)
+{
+    if (hub_opaque == NULL) {
+        /* g belongs to the single-thread global scheduler (or netpoll
+         * was used outside any hub context). */
+        pygo_sched_ready_push(pygo_sched_get(), g);
+        return;
+    }
+    pygo_mn_hub_submit((pygo_hub_t *)hub_opaque, g);
 }
 
 int pygo_mn_yield_current(void)
@@ -386,19 +447,11 @@ PyObject *pygo_mn_go(PyObject *callable)
         PyErr_NoMemory();
         return NULL;
     }
-    /* Push to the hub's MPSC submission list; the hub thread (the
-     * deque's owner) will drain this onto its own deque next iter.
-     * Pushing the deque directly here would race with the hub's pop
-     * and corrupt the deque's bottom counter. */
-    pthread_mutex_lock(&h->sub_lock);
-    g->next = NULL;
-    if (h->sub_tail != NULL) {
-        h->sub_tail->next = g;
-    } else {
-        h->sub_head = g;
-    }
-    h->sub_tail = g;
-    pthread_mutex_unlock(&h->sub_lock);
+    /* Submit via the shared MPSC helper.  Hub_main drains submissions
+     * each iteration -- fresh gs (snap.valid==0) get pushed to the
+     * Chase-Lev deque (stealable); yielded-then-woken gs (snap.valid==1,
+     * the netpoll path) get pushed to the local FIFO (hub-pinned). */
+    pygo_mn_hub_submit(h, g);
     __atomic_add_fetch(&h->pending, 1, __ATOMIC_RELAXED);
     Py_RETURN_NONE;
 }

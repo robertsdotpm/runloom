@@ -539,15 +539,26 @@ void pygo_sched_yield(pygo_sched_t *s)
 }
 
 /* Park current g without re-queueing (caller takes ownership and
- * arranges to wake it later via pygo_sched_wake). */
+ * arranges to wake it later via pygo_sched_wake / pygo_mn_wake_g).
+ * Hub-aware: in an M:N hub the current g is in TLS, not in the
+ * global sched->current slot. */
 void pygo_sched_park_current(void)
 {
-    pygo_sched_t *s = pygo_sched_get();
-    pygo_g_t *g = s->current;
+    pygo_g_t *g;
+    if (pygo_mn_current_hub_opaque() != NULL) {
+        g = pygo_mn_tls_current_g();
+        /* Tell hub_main that this g has been taken off-queue by an
+         * external parker; don't re-push it on the local FIFO when
+         * pygo_coro_yield returns control to hub_main. */
+        pygo_mn_tls_mark_parked();
+    } else {
+        pygo_sched_t *s = pygo_sched_get();
+        g = s->current;
+    }
     if (g == NULL) return;
     pygo_pystate_snap(&g->snap);
     /* DO NOT push to ready; the parker (netpoll, channel, etc) owns
-     * the g until it calls pygo_sched_wake. */
+     * the g until it calls pygo_sched_wake / pygo_mn_wake_g. */
 }
 
 void pygo_sched_wake(pygo_g_t *g)

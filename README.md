@@ -34,7 +34,7 @@ No `async`.  No `await`.  Just `go(fn)` and blocking-style I/O.
 | ------ | ----------------------------------------------------------------------------------- | ----- |
 | **A**  | Inline asm context switch (x86_64 SysV) + C scheduler + recursion-counter snapshot  | **done** |
 | **B**  | Per-goroutine cframe / frame-chain swap                                             | **done** — full PythonState snapshot (cframe, current_frame, datastack_chunk, exc_info, context, recursion counters) per g; 50 K concurrent yielded gs run clean on both 3.12 and 3.13t |
-| **C**  | Free-threaded Python 3.13t support + **M:N work-stealing scheduler** + yield-in-hub | **done** — pygo runs on 3.13t with GIL disabled; Chase-Lev work-stealing deques per hub (with per-hub MPSC submission list so external producers don't race the deque owner); thread-local current-hub pointer routes `sched_yield` from a goroutine on hub H back to H's local FIFO; 2.5× parallel speedup on 8 cores, ~2 M y/s yield throughput across multiple hubs |
+| **C**  | Free-threaded Python 3.13t + **M:N work-stealing scheduler** + yield-in-hub + **netpoll-in-hub** | **done** — pygo runs on 3.13t with GIL disabled; Chase-Lev work-stealing deques per hub (with per-hub MPSC submission list so external producers don't race the deque owner); thread-local current-hub pointer routes `sched_yield` and `wait_fd` from a goroutine on hub H back to H's local FIFO; shared epoll fd with locked parked list, any hub drives `epoll_wait` when idle, wakes route through `pygo_mn_wake_g` to the originating hub's submission; 2.5× parallel speedup on 8 cores, ~2 M y/s yield throughput, M:N + I/O echo bench clean across hubs |
 | **D**  | netpoll (epoll/kqueue/select) + socket monkey-patch                                  | **done** |
 | **E**  | aarch64 inline asm context switch                                                    | **done** (untested on real ARM hardware; cross-compiled clean) |
 | **F**  | Time-sliced preemption via `Py_AddPendingCall` (3.13t only)                          | **done** — goroutines without explicit `sched_yield()` calls now cooperate via a quantum-driven preemption timer hooking CPython's eval_breaker.  Zero hot-path overhead. |
@@ -232,6 +232,6 @@ cgo.  `preempt_init` is 3.13t only; GIL builds raise `RuntimeError`.
 
 ## What's left
 
-Real-hardware ARM validation (Apple Silicon / Linux ARM), perf polish
-on the slow-path snap, and netpoll/sleep moving into per-hub state for
-M:N completeness.
+Real-hardware ARM validation (Apple Silicon / Linux ARM); sleep-heap
+is still single-thread-only (M:N hubs can't `pygo.sleep` independently
+yet); further perf polish on the slow-path snap.

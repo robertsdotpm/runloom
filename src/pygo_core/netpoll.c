@@ -20,8 +20,10 @@
 #include "netpoll.h"
 #include "coro.h"
 #include "pygo_sched.h"
+#include "mn_sched.h"
 
 #include <errno.h>
+#include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -48,12 +50,18 @@ typedef struct pygo_parked {
     long long deadline_ns;     /* -1 = forever */
     int *ready_out;            /* where to store the wakeup mask */
     pygo_g_t *g;
+    void *hub;                  /* M:N hub opaque; NULL = global sched */
     struct pygo_parked *next;
 } pygo_parked_t;
 
+/* Shared parked list + lock.  Under M:N multiple hubs concurrently
+ * call wait_fd (park.add) and pump (park.remove); without the lock
+ * the singly-linked list corrupts.  Single-thread sched takes the
+ * lock too but no contention. */
 static pygo_parked_t *pygo_parked_head = NULL;
-static int pygo_parked_total = 0;
+static int pygo_parked_total = 0;       /* read with __atomic_load_n */
 static int pygo_netpoll_inited = 0;
+static pthread_mutex_t pygo_parked_lock = PTHREAD_MUTEX_INITIALIZER;
 
 #if defined(PYGO_HAVE_EPOLL)
 static int pygo_epoll_fd = -1;
@@ -137,7 +145,7 @@ static int pygo_netpoll_register(int fd, int events)
 
 int pygo_netpoll_parked_count(void)
 {
-    return pygo_parked_total;
+    return __atomic_load_n(&pygo_parked_total, __ATOMIC_ACQUIRE);
 }
 
 /* ---- park / wake ---- */
@@ -146,24 +154,43 @@ int pygo_netpoll_wait_fd(int fd, int events, long long timeout_ns)
     pygo_parked_t park;
     pygo_sched_t *s;
     int ready_mask = 0;
+    void *hub_opaque;
+    pygo_g_t *current_g;
 
     if (pygo_netpoll_init() != 0) return -1;
     if (pygo_netpoll_register(fd, events) != 0) return -1;
 
+    /* Determine where this g lives so pump can route the wake.
+     * If we're inside an M:N hub, the hub TLS gives us the target;
+     * otherwise it's the global single-thread scheduler. */
+    hub_opaque = pygo_mn_current_hub_opaque();
     s = pygo_sched_get();
+    if (hub_opaque != NULL) {
+        /* Hub context: current g is in TLS (set by hub_main).  We
+         * don't read s->current because that's the single-thread
+         * sched's slot, not the hub's. */
+        current_g = pygo_mn_tls_current_g();
+    } else {
+        current_g = s->current;
+    }
+
     park.fd = fd;
     park.events = events;
     park.deadline_ns = timeout_ns < 0 ? -1 : monotonic_ns() + timeout_ns;
     park.ready_out = &ready_mask;
-    park.g = s->current;
+    park.g = current_g;
+    park.hub = hub_opaque;
+
+    pthread_mutex_lock(&pygo_parked_lock);
     park.next = pygo_parked_head;
     pygo_parked_head = &park;
-    pygo_parked_total++;
+    __atomic_add_fetch(&pygo_parked_total, 1, __ATOMIC_RELEASE);
+    pthread_mutex_unlock(&pygo_parked_lock);
 
     /* Snapshot tstate (same as pygo_sched_yield does) so the next
-     * resume restores it.  Then yield WITHOUT pushing to ready --
-     * netpoll pump pushes us back when the fd becomes ready. */
-    if (s->current != NULL) {
+     * resume restores it.  Then yield WITHOUT re-queueing -- pump
+     * pushes us back when the fd becomes ready. */
+    if (current_g != NULL) {
         pygo_sched_park_current();
     }
     pygo_coro_yield();
@@ -181,7 +208,9 @@ int pygo_netpoll_pump(long long timeout_ns)
         if (pygo_netpoll_init() != 0) return -1;
     }
 
-    /* Find earliest deadline among parked goroutines. */
+    /* Find earliest deadline among parked goroutines.  Held briefly
+     * to walk the list. */
+    pthread_mutex_lock(&pygo_parked_lock);
     {
         pygo_parked_t *p;
         for (p = pygo_parked_head; p != NULL; p = p->next) {
@@ -191,6 +220,8 @@ int pygo_netpoll_pump(long long timeout_ns)
             }
         }
     }
+    pthread_mutex_unlock(&pygo_parked_lock);
+
     now = monotonic_ns();
     if (min_deadline >= 0) {
         long long until = min_deadline - now;
@@ -207,28 +238,32 @@ int pygo_netpoll_pump(long long timeout_ns)
         n = epoll_wait(pygo_epoll_fd, evs, 64, ms);
         if (n > 0) {
             int i;
+            /* Lock parked list for walk + remove.  Order: parked_lock
+             * then hub->sub_lock (inside pygo_mn_wake_g).  Don't take
+             * locks in the reverse order anywhere. */
+            pthread_mutex_lock(&pygo_parked_lock);
             for (i = 0; i < n; i++) {
                 int fd = evs[i].data.fd;
                 int mask = 0;
+                pygo_parked_t **pp;
                 if (evs[i].events & EPOLLIN)  mask |= PYGO_NETPOLL_READ;
                 if (evs[i].events & EPOLLOUT) mask |= PYGO_NETPOLL_WRITE;
                 /* Find parked entry for this fd, mark ready. */
-                pygo_parked_t **pp = &pygo_parked_head;
+                pp = &pygo_parked_head;
                 while (*pp != NULL) {
                     if ((*pp)->fd == fd && ((*pp)->events & mask)) {
                         pygo_parked_t *hit = *pp;
                         *(hit->ready_out) = mask & hit->events;
                         *pp = hit->next;
-                        pygo_parked_total--;
-                        /* Re-queue g on the ready list so drain
-                         * resumes wait_fd. */
-                        pygo_sched_wake(hit->g);
+                        __atomic_sub_fetch(&pygo_parked_total, 1, __ATOMIC_RELEASE);
+                        pygo_mn_wake_g(hit->hub, hit->g);
                         woke++;
                         break;
                     }
                     pp = &(*pp)->next;
                 }
             }
+            pthread_mutex_unlock(&pygo_parked_lock);
         }
     }
 #elif defined(PYGO_HAVE_KQUEUE)
@@ -245,6 +280,7 @@ int pygo_netpoll_pump(long long timeout_ns)
         n = kevent(pygo_kqueue_fd, NULL, 0, evs, 64, tsp);
         if (n > 0) {
             int i;
+            pthread_mutex_lock(&pygo_parked_lock);
             for (i = 0; i < n; i++) {
                 int fd = (int)evs[i].ident;
                 int mask = (evs[i].filter == EVFILT_READ) ?
@@ -255,25 +291,29 @@ int pygo_netpoll_pump(long long timeout_ns)
                         pygo_parked_t *hit = *pp;
                         *(hit->ready_out) = mask & hit->events;
                         *pp = hit->next;
-                        pygo_parked_total--;
-                        /* Re-queue g on the ready list so drain
-                         * resumes wait_fd. */
-                        pygo_sched_wake(hit->g);
+                        __atomic_sub_fetch(&pygo_parked_total, 1, __ATOMIC_RELEASE);
+                        pygo_mn_wake_g(hit->hub, hit->g);
                         woke++;
                         break;
                     }
                     pp = &(*pp)->next;
                 }
             }
+            pthread_mutex_unlock(&pygo_parked_lock);
         }
     }
 #else
-    /* select() backend.  Build fd sets from parked entries. */
+    /* select() backend.  Build fd sets from parked entries.  We hold
+     * the lock across select() here because the fd_set is built from
+     * the list state -- holding through the blocking call serialises
+     * all hubs' pump calls under select, which is the fallback path
+     * and not a free-threaded target anyway. */
     {
         fd_set rfds, wfds;
         int max_fd = -1;
         pygo_parked_t *p;
         FD_ZERO(&rfds); FD_ZERO(&wfds);
+        pthread_mutex_lock(&pygo_parked_lock);
         for (p = pygo_parked_head; p != NULL; p = p->next) {
             if (p->fd > max_fd) max_fd = p->fd;
             if (p->events & PYGO_NETPOLL_READ)  FD_SET(p->fd, &rfds);
@@ -296,8 +336,8 @@ int pygo_netpoll_pump(long long timeout_ns)
                         pygo_parked_t *hit = *pp;
                         *(hit->ready_out) = mask & hit->events;
                         *pp = hit->next;
-                        pygo_parked_total--;
-                        pygo_sched_wake(hit->g);
+                        __atomic_sub_fetch(&pygo_parked_total, 1, __ATOMIC_RELEASE);
+                        pygo_mn_wake_g(hit->hub, hit->g);
                         woke++;
                         continue;
                     }
@@ -305,11 +345,13 @@ int pygo_netpoll_pump(long long timeout_ns)
                 }
             }
         }
+        pthread_mutex_unlock(&pygo_parked_lock);
     }
 #endif
 
     /* Handle timeouts: any park whose deadline has passed gets ready=0. */
     now = monotonic_ns();
+    pthread_mutex_lock(&pygo_parked_lock);
     {
         pygo_parked_t **pp = &pygo_parked_head;
         while (*pp != NULL) {
@@ -317,13 +359,14 @@ int pygo_netpoll_pump(long long timeout_ns)
                 pygo_parked_t *hit = *pp;
                 *(hit->ready_out) = 0;
                 *pp = hit->next;
-                pygo_parked_total--;
-                pygo_sched_wake(hit->g);
+                __atomic_sub_fetch(&pygo_parked_total, 1, __ATOMIC_RELEASE);
+                pygo_mn_wake_g(hit->hub, hit->g);
                 woke++;
                 continue;
             }
             pp = &(*pp)->next;
         }
     }
+    pthread_mutex_unlock(&pygo_parked_lock);
     return woke;
 }

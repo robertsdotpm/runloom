@@ -47,6 +47,8 @@
 #define PY_SSIZE_T_CLEAN
 #include <Python.h>
 
+#include "pygo_sched.h"   /* for pygo_g_t forward */
+
 int pygo_mn_init(int n_threads);
 PyObject *pygo_mn_go(PyObject *callable);
 Py_ssize_t pygo_mn_run(void);
@@ -63,5 +65,31 @@ int pygo_mn_yield_current(void);
 /* Returns the number of M:N hubs currently running (0 if mn_init was
  * never called or after mn_fini). */
 int pygo_mn_hub_count(void);
+
+/* Return an opaque handle to the hub running on this thread (or NULL
+ * if the calling thread isn't a hub).  Used by netpoll to record where
+ * to route a parked g when it becomes ready. */
+void *pygo_mn_current_hub_opaque(void);
+
+/* Return the goroutine currently running on this thread's hub (or
+ * NULL if not in a hub or no g is running).  Netpoll's wait_fd uses
+ * this -- it can't read pygo_sched_t::current because that's the
+ * single-thread sched's slot, not the per-hub slot. */
+pygo_g_t *pygo_mn_tls_current_g(void);
+
+/* Signal hub_main "don't requeue the current g on return" -- used by
+ * the park path (netpoll, channels) where the parker takes ownership
+ * and arranges its own wake.  Without this, hub_main's "g yielded but
+ * didn't self-queue, must be a raw yield" fallback re-pushes the g to
+ * the local FIFO and the next iteration re-runs it -> busy loop. */
+void pygo_mn_tls_mark_parked(void);
+
+/* Wake g back to its original hub (or to the global single-thread
+ * sched if hub_opaque is NULL).  Thread-safe; can be called from any
+ * thread (typically netpoll pump on whichever hub did epoll_wait).
+ * For hubs: pushes onto the target hub's submission list under
+ * sub_lock; hub_main drains submissions each iteration and dispatches
+ * routes them to the deque (if g is fresh) or local FIFO (if yielded). */
+void pygo_mn_wake_g(void *hub_opaque, pygo_g_t *g);
 
 #endif /* PYGO_MN_SCHED_H */
