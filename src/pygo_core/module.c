@@ -830,6 +830,18 @@ static PyObject *m_sched_yield(PyObject *self, PyObject *unused)
     Py_RETURN_NONE;
 }
 
+/* Signal the C scheduler to exit its drain loop at the next safe
+ * point.  Used by pygo.aio.PygoEventLoop.run_until_complete to bail
+ * out when the user-visible future is done, even if there are still
+ * background goroutines parked on I/O (accept loops, etc). */
+static PyObject *m_sched_stop(PyObject *self, PyObject *unused)
+{
+    pygo_sched_t *s = pygo_sched_get();
+    (void)self; (void)unused;
+    s->stopping = 1;
+    Py_RETURN_NONE;
+}
+
 /* Park the current goroutine until G.wake() is called on it.
  * Race-safe: a wake that arrives before the park (sync callback firing
  * from add_done_callback) makes this a no-op.  Used by pygo.aio's
@@ -1237,6 +1249,11 @@ static PyMethodDef module_methods[] = {
      "for benchmarking against the vectorcall singleton)."},
     {"sched_sleep", m_sched_sleep, METH_O,
      "Sleep the current goroutine for N seconds (C scheduler aware)."},
+    {"sched_stop",  m_sched_stop,  METH_NOARGS,
+     "Signal the C scheduler to exit its drain loop at the next safe "
+     "point.  Background goroutines parked on netpoll/sleep/wake will "
+     "be left in their parked state; cleanup happens when the wrapping "
+     "Python objects are gc'd."},
     {"park_self",   m_park_self,   METH_NOARGS,
      "Park the current goroutine until G.wake() is called on its "
      "handle.  Race-safe: a wake that arrives before the park is "

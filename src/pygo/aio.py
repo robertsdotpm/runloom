@@ -560,6 +560,14 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
                   or asyncio.isfuture(future)):
             raise TypeError("argument must be a Future or coroutine")
 
+        # When the user-visible future completes, kick the scheduler
+        # out of its drain loop so we don't block on background tasks
+        # (accept loops, ticker goroutines, etc.) the user didn't
+        # explicitly join.  Matches asyncio.run's semantics.
+        def _stop_on_done(_fut):
+            pygo_core.sched_stop()
+        future.add_done_callback(_stop_on_done)
+
         self._running = True
         asyncio._set_running_loop(self)
         try:
@@ -629,6 +637,388 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
 # ====================================================================
 # Policy + convenience entry points
 # ====================================================================
+# ====================================================================
+# Network: open_connection / start_server with StreamReader/Writer.
+#
+# We bypass asyncio's Transport/Protocol stack entirely.  Each connection
+# is a pygo goroutine doing cooperative socket I/O via wait_fd.  The
+# StreamReader/Writer classes we hand to user code present the standard
+# asyncio API surface (read / readline / readuntil / readexactly /
+# write / drain / close) so existing async TCP code Just Works.
+# ====================================================================
+import socket as _socket
+import errno as _errno
+
+
+class StreamReader(object):
+    """asyncio.StreamReader-compatible reader backed by cooperative
+    socket recv.  Implements: read, readline, readuntil, readexactly,
+    at_eof, feed_eof.  Buffers internally so readline / readuntil
+    don't have to issue per-byte recvs."""
+
+    def __init__(self, sock, *, limit=2**16, loop=None):
+        self._sock = sock
+        self._buf  = bytearray()
+        self._eof  = False
+        self._limit = limit
+        self._loop = loop
+
+    def at_eof(self):
+        return self._eof and not self._buf
+
+    def feed_eof(self):
+        self._eof = True
+
+    def _fill(self):
+        """Block (cooperatively) until at least one chunk arrives, or
+        the peer closes.  Returns True if data was read, False at EOF."""
+        if self._eof:
+            return False
+        while True:
+            try:
+                chunk = self._sock.recv(self._limit)
+            except (BlockingIOError, InterruptedError):
+                pygo_core.wait_fd(self._sock.fileno(), 1)
+                continue
+            except OSError as e:
+                if e.errno in (_errno.EAGAIN, _errno.EWOULDBLOCK, _errno.EINTR):
+                    pygo_core.wait_fd(self._sock.fileno(), 1)
+                    continue
+                raise
+            if not chunk:
+                self._eof = True
+                return False
+            self._buf.extend(chunk)
+            return True
+
+    async def read(self, n=-1):
+        """Read up to n bytes (-1 = until EOF)."""
+        if n == 0:
+            return b""
+        if n < 0:
+            # Read until EOF.
+            while not self._eof:
+                self._fill()
+            data, self._buf = bytes(self._buf), bytearray()
+            return data
+
+        # n > 0: ensure we have at least one byte, then return up to n.
+        while not self._buf and not self._eof:
+            self._fill()
+        if not self._buf:
+            return b""
+        take = min(n, len(self._buf))
+        data = bytes(self._buf[:take])
+        del self._buf[:take]
+        return data
+
+    async def readexactly(self, n):
+        """Read exactly n bytes, or raise asyncio.IncompleteReadError."""
+        while len(self._buf) < n:
+            if not self._fill():
+                # EOF -- partial data.
+                partial = bytes(self._buf)
+                self._buf.clear()
+                raise asyncio.IncompleteReadError(partial, n)
+        data = bytes(self._buf[:n])
+        del self._buf[:n]
+        return data
+
+    async def readuntil(self, separator=b"\n"):
+        """Read until separator (inclusive), or raise
+        asyncio.IncompleteReadError on EOF."""
+        seplen = len(separator)
+        while True:
+            idx = self._buf.find(separator)
+            if idx >= 0:
+                end = idx + seplen
+                data = bytes(self._buf[:end])
+                del self._buf[:end]
+                return data
+            if not self._fill():
+                partial = bytes(self._buf)
+                self._buf.clear()
+                raise asyncio.IncompleteReadError(partial, None)
+
+    async def readline(self):
+        try:
+            return await self.readuntil(b"\n")
+        except asyncio.IncompleteReadError as e:
+            return e.partial
+
+
+class StreamWriter(object):
+    """asyncio.StreamWriter-compatible writer backed by cooperative
+    socket sendall.  Implements: write, writelines, drain, close,
+    wait_closed, get_extra_info."""
+
+    def __init__(self, sock, reader=None, *, loop=None):
+        self._sock = sock
+        self._reader = reader
+        self._loop = loop
+        self._closed = False
+        # Buffer for write/drain semantics.  asyncio's StreamWriter
+        # buffers on writes and flushes on drain; we send immediately
+        # (cooperative blocking) so drain is a no-op but kept for API
+        # parity.
+        self._buf = bytearray()
+
+    def write(self, data):
+        if self._closed:
+            raise RuntimeError("write on closed StreamWriter")
+        self._buf.extend(data)
+        # Try a non-blocking flush so small writes don't accumulate
+        # in pathological cases.  If the socket would block, the next
+        # drain() will handle it.
+        self._try_flush()
+
+    def writelines(self, lines):
+        for line in lines:
+            self._buf.extend(line)
+        self._try_flush()
+
+    def _try_flush(self):
+        """Best-effort non-blocking flush.  Leaves residue in _buf."""
+        while self._buf:
+            try:
+                n = self._sock.send(self._buf)
+            except (BlockingIOError, InterruptedError):
+                return
+            except OSError as e:
+                if e.errno in (_errno.EAGAIN, _errno.EWOULDBLOCK):
+                    return
+                raise
+            if n <= 0:
+                return
+            del self._buf[:n]
+
+    async def drain(self):
+        """Block (cooperatively) until all buffered data is on the wire."""
+        while self._buf:
+            try:
+                n = self._sock.send(self._buf)
+                if n > 0:
+                    del self._buf[:n]
+                    continue
+            except (BlockingIOError, InterruptedError):
+                pass
+            except OSError as e:
+                if e.errno not in (_errno.EAGAIN, _errno.EWOULDBLOCK, _errno.EINTR):
+                    raise
+            pygo_core.wait_fd(self._sock.fileno(), 2)
+
+    def close(self):
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            self._sock.shutdown(_socket.SHUT_RDWR)
+        except OSError:
+            pass
+        try:
+            self._sock.close()
+        except OSError:
+            pass
+
+    def is_closing(self):
+        return self._closed
+
+    async def wait_closed(self):
+        # Our close is synchronous; nothing to wait on.  Yield once so
+        # callers using `await writer.wait_closed()` don't see surprise
+        # tight loops.
+        await asyncio.sleep(0)
+
+    def get_extra_info(self, name, default=None):
+        if name == "peername":
+            try:
+                return self._sock.getpeername()
+            except OSError:
+                return default
+        if name == "sockname":
+            try:
+                return self._sock.getsockname()
+            except OSError:
+                return default
+        if name == "socket":
+            return self._sock
+        return default
+
+    @property
+    def transport(self):
+        # asyncio code commonly does writer.transport.get_extra_info(...);
+        # forward to ourselves for compat.
+        return self
+
+
+async def open_connection(host=None, port=None, *, family=0, proto=0,
+                          flags=0, sock=None, local_addr=None,
+                          server_hostname=None, ssl=None,
+                          limit=2**16, **_ignored):
+    """Establish a TCP connection and return (reader, writer).
+
+    Mirrors asyncio.open_connection but bypasses Transport/Protocol --
+    our Stream classes talk to the socket directly via cooperative
+    wait_fd.  SSL not supported in this MVP.
+    """
+    if ssl is not None:
+        raise NotImplementedError("ssl= in pygo.aio.open_connection is not yet supported")
+
+    if sock is None:
+        if host is None or port is None:
+            raise ValueError("open_connection requires host+port or sock=")
+        # getaddrinfo + connect.  getaddrinfo blocks the OS thread; for
+        # now we accept that -- aionetiface's monkey patch makes it
+        # cooperative anyway.
+        infos = _socket.getaddrinfo(host, port,
+                                    family or _socket.AF_UNSPEC,
+                                    _socket.SOCK_STREAM,
+                                    proto, flags)
+        last_err = None
+        for fam, typ, prt, _canon, sa in infos:
+            try:
+                s = _socket.socket(fam, typ, prt)
+                s.setblocking(False)
+                if local_addr is not None:
+                    s.bind(local_addr)
+                try:
+                    s.connect(sa)
+                except BlockingIOError:
+                    pygo_core.wait_fd(s.fileno(), 2)
+                    err = s.getsockopt(_socket.SOL_SOCKET, _socket.SO_ERROR)
+                    if err != 0:
+                        raise OSError(err, "connect failed")
+                sock = s
+                break
+            except OSError as e:
+                last_err = e
+                try: s.close()
+                except OSError: pass
+        if sock is None:
+            raise last_err or OSError("could not connect")
+    else:
+        sock.setblocking(False)
+
+    reader = StreamReader(sock, limit=limit)
+    writer = StreamWriter(sock, reader=reader)
+    return reader, writer
+
+
+class _Server(object):
+    """asyncio.Server compatible: keeps the listening socket alive and
+    the accept-loop goroutine running until close() is called."""
+
+    def __init__(self, sock, client_connected_cb, *, limit=2**16):
+        self._sock = sock
+        self._cb   = client_connected_cb
+        self._limit = limit
+        self._closed = False
+        self._accept_g = pygo_core.go(self._accept_loop)
+
+    def _accept_loop(self):
+        while not self._closed:
+            try:
+                conn, _addr = self._sock.accept()
+            except (BlockingIOError, InterruptedError):
+                if self._closed:
+                    return
+                pygo_core.wait_fd(self._sock.fileno(), 1)
+                continue
+            except OSError as e:
+                # close() will close the listening socket; the next
+                # accept fails with EBADF / EINVAL.  Treat that as the
+                # signal to exit cleanly.
+                if self._closed:
+                    return
+                if e.errno in (_errno.EAGAIN, _errno.EWOULDBLOCK):
+                    pygo_core.wait_fd(self._sock.fileno(), 1)
+                    continue
+                # Real error -- record and exit.
+                self._closed = True
+                return
+            conn.setblocking(False)
+            reader = StreamReader(conn, limit=self._limit)
+            writer = StreamWriter(conn, reader=reader)
+
+            # Spawn a goroutine per client.  The cb is an async fn, so
+            # we run it inside a PygoTask.
+            def handler(_r=reader, _w=writer):
+                coro = self._cb(_r, _w)
+                if asyncio.iscoroutine(coro):
+                    # Drive it as a task on the same loop.
+                    PygoTask(coro)
+            pygo_core.go(handler)
+
+    def is_serving(self):
+        return not self._closed
+
+    def close(self):
+        if self._closed:
+            return
+        self._closed = True
+        # shutdown() before close() wakes any goroutine parked on this
+        # fd via wait_fd -- epoll/kqueue/IOCP all signal POLLIN+POLLHUP
+        # on the listen socket, which our netpoll routes back to the
+        # accept_loop's wait_fd call.  close() alone doesn't reliably
+        # wake parked pollers on Linux.
+        try:
+            self._sock.shutdown(_socket.SHUT_RDWR)
+        except OSError:
+            pass
+        try:
+            self._sock.close()
+        except OSError:
+            pass
+
+    async def wait_closed(self):
+        # Best-effort; we don't currently track outstanding client tasks.
+        await asyncio.sleep(0)
+
+    @property
+    def sockets(self):
+        return (self._sock,) if not self._closed else ()
+
+
+async def start_server(client_connected_cb, host=None, port=None, *,
+                       family=_socket.AF_UNSPEC, flags=_socket.AI_PASSIVE,
+                       sock=None, backlog=100, limit=2**16,
+                       reuse_address=None, reuse_port=None,
+                       ssl=None, **_ignored):
+    """Listen on host:port and call client_connected_cb(reader, writer)
+    per accepted connection.  Returns a _Server with .close() / .sockets.
+
+    Compared to asyncio.start_server, we skip Transport/Protocol and
+    the SSL-handshake plumbing.  Suitable for plain TCP services."""
+    if ssl is not None:
+        raise NotImplementedError("ssl= in pygo.aio.start_server is not yet supported")
+
+    if sock is None:
+        infos = _socket.getaddrinfo(host, port, family,
+                                    _socket.SOCK_STREAM, 0, flags)
+        last_err = None
+        for fam, typ, prt, _canon, sa in infos:
+            try:
+                sock = _socket.socket(fam, typ, prt)
+                if reuse_address is not False:
+                    sock.setsockopt(_socket.SOL_SOCKET,
+                                    _socket.SO_REUSEADDR, 1)
+                sock.setblocking(False)
+                sock.bind(sa)
+                sock.listen(backlog)
+                break
+            except OSError as e:
+                last_err = e
+                try: sock.close()
+                except OSError: pass
+                sock = None
+        if sock is None:
+            raise last_err or OSError("could not bind")
+    else:
+        sock.setblocking(False)
+
+    return _Server(sock, client_connected_cb, limit=limit)
+
+
 class PygoEventLoopPolicy(asyncio.AbstractEventLoopPolicy):
     def __init__(self):
         self._loop = None
