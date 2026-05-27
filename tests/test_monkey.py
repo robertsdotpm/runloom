@@ -287,6 +287,86 @@ class TestSyscalls(unittest.TestCase):
             shutil.rmtree(tmpdir)
 
 
+class TestSubprocessWait(unittest.TestCase):
+    """Cooperative Popen.wait must not block the scheduler."""
+
+    def test_wait_uses_cooperative_poll(self):
+        import subprocess as _sp
+        pygo.monkey.patch()
+        # Two child processes with overlapping sleeps; if wait() blocked
+        # the scheduler, total wall time would be 2x child sleep.  Pick
+        # a child duration long enough that Popen()'s ~30 ms spawn cost
+        # and the poll loop's ~32 ms tail latency don't swamp the
+        # parallel/sequential signal.
+        log = []
+        SLEEP = 0.2
+        def waiter(name):
+            log.append((name, "start"))
+            p = _sp.Popen([sys.executable, "-c",
+                           "import time; time.sleep({})".format(SLEEP)])
+            rc = p.wait()
+            log.append((name, "done", rc))
+        t0 = time.monotonic()
+        pygo_core.go(lambda: waiter("A"))
+        pygo_core.go(lambda: waiter("B"))
+        pygo_core.run()
+        elapsed = time.monotonic() - t0
+        # Sequential ~= 0.4 s (+ 2x spawn).  Cooperative ~= 0.2 s + 2x
+        # spawn + poll tail.  Allow generous headroom for slow CI boxes
+        # while still failing on a true sequential regression.
+        self.assertLess(elapsed, SLEEP * 2 - 0.05,
+                        "cooperative wait should overlap")
+        self.assertEqual([e[1] for e in log if e[1] == "start"],
+                         ["start", "start"])
+        for e in log:
+            if e[1] == "done":
+                self.assertEqual(e[2], 0)
+
+
+class TestParkerSocketpair(unittest.TestCase):
+    """Verify the socket-backed parker path works (used on Windows where
+    select() can only poll sockets, not pipe fds).  We force the path on
+    POSIX by toggling the module flag; socket.socketpair() returns
+    AF_UNIX sockets on POSIX and AF_INET on Windows, both fd-pollable."""
+
+    def _drain_parker_pool(self, M):
+        """Empty the parker pool, closing any socketpair sockets so
+        ResourceWarning doesn't fire."""
+        while M._Parker._pool:
+            entry = M._Parker._pool.pop()
+            socks = entry[2] if len(entry) > 2 else None
+            if socks is not None:
+                for s in socks:
+                    try: s.close()
+                    except OSError: pass
+
+    def test_socketpair_parker_round_trip(self):
+        import pygo.monkey as M
+        pygo.monkey.patch()
+        # Drain any pooled parkers so the next _Parker() actually
+        # constructs a fresh one through the forced path.
+        self._drain_parker_pool(M)
+        was_windows = M._IS_WINDOWS
+        M._IS_WINDOWS = True
+        try:
+            sequence = []
+            def coordinator():
+                p = M._Parker()
+                def signaller():
+                    sequence.append("signal")
+                    p.unpark()
+                pygo_core.go(signaller)
+                p.park()
+                sequence.append("woken")
+                p.release()
+            pygo_core.go(coordinator)
+            pygo_core.run()
+        finally:
+            M._IS_WINDOWS = was_windows
+            self._drain_parker_pool(M)
+        self.assertEqual(sequence, ["signal", "woken"])
+
+
 class TestSocketStillWorks(unittest.TestCase):
     """Regression: the original socket patches still work after refactor."""
     def test_echo(self):

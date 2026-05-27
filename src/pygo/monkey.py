@@ -43,12 +43,25 @@ Limitations:
       OS threads -- the single-thread cooperative model is the design target.
     * `queue.Queue` instances created before patch() keep the original
       sync primitives; patch() early.
+
+Platform notes:
+    * Linux, macOS, *BSD: fully supported by the C-side netpoll (epoll,
+      kqueue, select fallback).
+    * Windows: the Python monkey-patch layer is Windows-aware -- Parker
+      uses socket.socketpair() (the only thing Win select() will poll),
+      subprocess.Popen.wait uses portable Popen.poll(), DNS falls back
+      to libc getaddrinfo via the backend pool because Windows has no
+      /etc/resolv.conf, hosts file resolves to
+      %SystemRoot%\\System32\\drivers\\etc\\hosts.  The C extension itself
+      still needs Windows support (IOCP backend) before any of this is
+      usable end-to-end on Windows; that's separate from this module.
 """
 import _thread
 import builtins
 import collections
 import errno
 import os
+import platform as _platform
 import select as _select_mod
 import socket
 import ssl as _ssl_mod
@@ -57,6 +70,9 @@ import subprocess
 import sys
 import threading as _th
 import time
+
+_IS_WINDOWS = _platform.system() == "Windows"
+_IS_DARWIN  = _platform.system() == "Darwin"
 
 import pygo
 import pygo_core
@@ -70,6 +86,12 @@ WRITE = 2
 _raw_os_read  = os.read
 _raw_os_write = os.write
 _raw_time_sleep = time.sleep
+# Captured before _patch_socket installs the cooperative versions.  Parker
+# uses these to talk to its self-pipe / self-socketpair without going
+# through the cooperative wrappers (which would, for instance, park
+# forever on a non-blocking recv that returns BlockingIOError).
+_raw_sock_recv = socket.socket.recv
+_raw_sock_send = socket.socket.send
 
 
 # ---------- goroutine-context detection ----------
@@ -126,50 +148,96 @@ def _fd_pollable(fd):
 
 
 # ---------- self-pipe parker ----------
+#
+# Two implementations, chosen at import time:
+#   POSIX  -> os.pipe() + os.read/os.write.  Pipes are kernel-fd ints
+#             that wait_fd's epoll/kqueue/select backends can all poll.
+#   Windows -> socket.socketpair() + sock.recv/sock.send.  Windows
+#             select() refuses pipe fds (those are Python-side fakes
+#             over Win32 HANDLEs); it ONLY polls SOCKET handles.
+#             socket.socketpair() on Windows returns two AF_INET TCP
+#             sockets whose fileno() values are real SOCKET handles
+#             and therefore work with wait_fd's select backend.
+#
+# Either way, the Parker is single-thread cooperative -- the
+# unpark()-before-park() race is not handled because in cooperative
+# mode the parker can't be signalled until the parking goroutine has
+# yielded.
 class _Parker(object):
-    """Per-park self-pipe.  park() yields the goroutine; unpark() wakes it.
-
-    Pipes are pooled LIFO so contended primitives don't churn syscalls.
-    Single-thread cooperative use only -- the unpark()-before-park() race
-    is not handled because in cooperative mode it can't happen.
-    """
-    __slots__ = ("r", "w")
+    __slots__ = ("r", "w", "_sockets")
     _pool = []
 
     def __init__(self):
         if _Parker._pool:
-            self.r, self.w = _Parker._pool.pop()
+            self.r, self.w, self._sockets = _Parker._pool.pop()
+        elif _IS_WINDOWS:
+            s1, s2 = socket.socketpair()
+            s1.setblocking(False)
+            s2.setblocking(False)
+            self._sockets = (s1, s2)
+            self.r = s1.fileno()
+            self.w = s2.fileno()
         else:
-            self.r, self.w = os.pipe()
-            os.set_blocking(self.r, False)
-            os.set_blocking(self.w, False)
+            r, w = os.pipe()
+            os.set_blocking(r, False)
+            os.set_blocking(w, False)
+            self.r = r
+            self.w = w
+            self._sockets = None
 
     def park(self):
         pygo_core.wait_fd(self.r, READ)
-        try:
-            _raw_os_read(self.r, 64)
-        except (BlockingIOError, OSError):
-            pass
+        if self._sockets is not None:
+            try:
+                _raw_sock_recv(self._sockets[0], 64)
+            except (BlockingIOError, OSError):
+                pass
+        else:
+            try:
+                _raw_os_read(self.r, 64)
+            except (BlockingIOError, OSError):
+                pass
 
     def unpark(self):
-        try:
-            _raw_os_write(self.w, b"\x01")
-        except (BlockingIOError, BrokenPipeError, OSError):
-            pass
+        if self._sockets is not None:
+            try:
+                _raw_sock_send(self._sockets[1], b"\x01")
+            except (BlockingIOError, BrokenPipeError, OSError):
+                pass
+        else:
+            try:
+                _raw_os_write(self.w, b"\x01")
+            except (BlockingIOError, BrokenPipeError, OSError):
+                pass
 
     def release(self):
-        try:
-            while _raw_os_read(self.r, 64):
+        # Drain any stale wake bytes before returning to the pool.  Must
+        # use raw recv/read -- the patched versions would park forever
+        # on BlockingIOError instead of returning empty.
+        if self._sockets is not None:
+            try:
+                while _raw_sock_recv(self._sockets[0], 64):
+                    pass
+            except (BlockingIOError, OSError):
                 pass
-        except (BlockingIOError, OSError):
-            pass
-        if len(_Parker._pool) < 64:
-            _Parker._pool.append((self.r, self.w))
         else:
-            try: os.close(self.r)
-            except OSError: pass
-            try: os.close(self.w)
-            except OSError: pass
+            try:
+                while _raw_os_read(self.r, 64):
+                    pass
+            except (BlockingIOError, OSError):
+                pass
+        if len(_Parker._pool) < 64:
+            _Parker._pool.append((self.r, self.w, self._sockets))
+        else:
+            if self._sockets is not None:
+                for s in self._sockets:
+                    try: s.close()
+                    except OSError: pass
+            else:
+                try: os.close(self.r)
+                except OSError: pass
+                try: os.close(self.w)
+                except OSError: pass
 
 
 # ============================================================
@@ -752,21 +820,16 @@ _orig_popen_wait = None
 def _patched_popen_wait(self, timeout=None):
     if not _in_goroutine() or self.returncode is not None:
         return _orig_popen_wait(self, timeout)
+    # Popen.poll() is portable (Windows: WaitForSingleObject with 0ms;
+    # POSIX: waitpid(WNOHANG)) and updates self.returncode + the
+    # internal handle state atomically.  Calling it in a sleep loop is
+    # cooperatively safe -- _co_sleep yields to other goroutines.
     deadline = None if timeout is None else time.monotonic() + timeout
     step = 0.001
     while True:
-        try:
-            pid, sts = os.waitpid(self.pid, os.WNOHANG)
-        except ChildProcessError:
-            return self.returncode
-        if pid != 0:
-            # Some Pythons expose _handle_exitstatus; if not, fall back.
-            handler = getattr(self, "_handle_exitstatus", None)
-            if handler is not None:
-                handler(sts)
-            else:
-                self.returncode = sts
-            return self.returncode
+        rc = self.poll()
+        if rc is not None:
+            return rc
         if deadline is not None:
             now = time.monotonic()
             if now >= deadline:
@@ -1211,6 +1274,28 @@ _hosts_cache     = None
 _dns_result_cache = {}    # (lowername, qtype) -> (addrs, expire_ts)
 
 
+def _resolv_conf_paths():
+    """Candidate paths for resolver config, in order of preference.
+
+    POSIX: /etc/resolv.conf is universal.
+    Windows: no plain text equivalent (DNS settings live in the registry
+        via GetNetworkParams); we return empty here and let the caller
+        fall back to libc getaddrinfo via the backend pool.
+    """
+    if _IS_WINDOWS:
+        return ()
+    return ("/etc/resolv.conf",)
+
+
+def _hosts_file_paths():
+    """Candidate paths for the static hosts file."""
+    if _IS_WINDOWS:
+        # %SystemRoot% defaults to C:\Windows; SystemDrive is the C: part.
+        sysroot = os.environ.get("SystemRoot", r"C:\Windows")
+        return (os.path.join(sysroot, "System32", "drivers", "etc", "hosts"),)
+    return ("/etc/hosts",)
+
+
 def _read_small_file(path):
     """Read a config file without going through patched os.read."""
     try:
@@ -1234,30 +1319,39 @@ def _read_small_file(path):
 
 
 def _load_resolvers():
+    """Return list of nameserver IPs.  Empty list -> no usable config;
+    the resolver will fall back to libc getaddrinfo via the backend."""
     nss = []
-    for line in _read_small_file("/etc/resolv.conf").splitlines():
-        line = line.split("#", 1)[0].split(";", 1)[0].strip()
-        if line.startswith("nameserver"):
-            parts = line.split()
-            if len(parts) >= 2:
-                nss.append(parts[1])
-    if not nss:
-        nss = ["8.8.8.8", "1.1.1.1"]
+    for path in _resolv_conf_paths():
+        for line in _read_small_file(path).splitlines():
+            line = line.split("#", 1)[0].split(";", 1)[0].strip()
+            if line.startswith("nameserver"):
+                parts = line.split()
+                if len(parts) >= 2:
+                    nss.append(parts[1])
+        if nss:
+            break
     return nss
 
 
 def _load_hosts():
     hosts = {}
-    for line in _read_small_file("/etc/hosts").splitlines():
-        line = line.split("#", 1)[0].strip()
-        if not line:
+    for path in _hosts_file_paths():
+        text = _read_small_file(path)
+        if not text:
             continue
-        parts = line.split()
-        if len(parts) < 2:
-            continue
-        addr = parts[0]
-        for nm in parts[1:]:
-            hosts.setdefault(nm.lower(), []).append(addr)
+        for line in text.splitlines():
+            line = line.split("#", 1)[0].strip()
+            if not line:
+                continue
+            parts = line.split()
+            if len(parts) < 2:
+                continue
+            addr = parts[0]
+            for nm in parts[1:]:
+                hosts.setdefault(nm.lower(), []).append(addr)
+        if hosts:
+            break
     return hosts
 
 
@@ -1365,16 +1459,43 @@ def _query_nameserver(packet, txn, ns, timeout):
         s.close()
 
 
+def _resolve_via_libc(name, qtype):
+    """Fall back to the platform getaddrinfo, dispatched through the
+    blocking-call backend so other goroutines keep running while libc's
+    blocking resolver is in flight.  Used when we have no usable
+    /etc/resolv.conf (Windows; chrooted POSIX without DNS config)."""
+    af = socket.AF_INET if qtype == _QTYPE_A else socket.AF_INET6
+    try:
+        infos = _blocking_call(_orig_getaddrinfo, name, 0, af,
+                               socket.SOCK_STREAM, 0, 0)
+    except socket.gaierror:
+        return []
+    addrs = []
+    for info in infos:
+        sa = info[4]
+        addrs.append(sa[0])
+    return addrs
+
+
 def _resolve_qtype(name, qtype):
-    """Resolve one query type with cache + nameserver fall-through."""
+    """Resolve one query type with cache + nameserver fall-through.
+
+    Falls back to libc getaddrinfo (via backend pool) when no resolver
+    config is available -- the Windows case, where DNS settings live in
+    the registry rather than in /etc/resolv.conf."""
     key = (name.lower(), qtype)
     now = time.monotonic()
     cached = _dns_result_cache.get(key)
     if cached is not None and cached[1] > now:
         return cached[0]
+    resolvers = _get_resolvers()
+    if not resolvers:
+        addrs = _resolve_via_libc(name, qtype)
+        _dns_result_cache[key] = (addrs, now + _DNS_CACHE_TTL)
+        return addrs
     txn, packet = _build_query(name, qtype)
     last_err = None
-    for ns in _get_resolvers():
+    for ns in resolvers:
         try:
             addrs = _query_nameserver(packet, txn, ns, _DNS_TIMEOUT_S)
             _dns_result_cache[key] = (addrs, now + _DNS_CACHE_TTL)
@@ -1382,6 +1503,13 @@ def _resolve_qtype(name, qtype):
         except (OSError, socket.timeout) as e:
             last_err = e
             continue
+    # All configured nameservers failed -- try libc as a last resort
+    # rather than surfacing the per-server error, which is usually
+    # more confusing than just answering through the OS.
+    addrs = _resolve_via_libc(name, qtype)
+    if addrs:
+        _dns_result_cache[key] = (addrs, now + _DNS_CACHE_TTL)
+        return addrs
     if last_err is not None:
         raise last_err
     raise OSError("no DNS nameservers")
