@@ -160,20 +160,26 @@ int pygo_netpoll_init(void)
     /* Bring up Winsock once.  Idempotent via plat_compat's
      * InterlockedCompareExchange guard. */
     pygo_winsock_init();
-    /* Backend selection:
-     *   PYGO_NETPOLL=iocp  -> try IOCP+AFD (experimental, opt-in)
-     *   else               -> WSAPoll, then select() XP fallback
+    /* Backend selection on Windows.  IOCP+AFD is wired end-to-end and
+     * works for TCP listener/connect/recv flows (validated on Win 11),
+     * but the Parker-socketpair pattern that monkey.py uses for
+     * cooperative threading primitives surfaces an AFD edge case where
+     * an IRP submitted after the read end's data has already been
+     * deposited returns STATUS_PENDING and never fires.  Until that
+     * lifecycle quirk is characterised (probably wepoll-style re-arm
+     * after each completion), IOCP stays opt-in.
      *
-     * IOCP-AFD is wired up end-to-end (pygo_iocp_init / submit / wait
-     * in netpoll_iocp.c) but undocumented AFD_POLL_ACCEPT semantics
-     * make it unreliable for listener sockets in practice; gated until
-     * the remaining quirk is characterised against wepoll's lifecycle. */
+     *   PYGO_NETPOLL=iocp     -> opt-in IOCP+AFD
+     *   PYGO_NETPOLL=wsapoll  -> force WSAPoll (default on Vista+)
+     *   PYGO_NETPOLL=select   -> force select() (XP/2003 default) */
     {
         const char *env = getenv("PYGO_NETPOLL");
         if (env != NULL && strcmp(env, "iocp") == 0 &&
             pygo_iocp_init() == 0) {
             pygo_win_use_iocp = 1;
             pygo_win_backend_name = "iocp-afd";
+        } else if (env != NULL && strcmp(env, "select") == 0) {
+            pygo_win_backend_name = "select";
         } else {
             HMODULE ws2 = GetModuleHandleA("ws2_32.dll");
             if (ws2 == NULL) ws2 = LoadLibraryA("ws2_32.dll");

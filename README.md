@@ -151,6 +151,8 @@ non-preemptible until it returns — same limitation Go has with cgo.
 
 ## Building
 
+Plain `pip` works if you already have a C compiler:
+
 ```bash
 pip install -e .
 ```
@@ -160,6 +162,52 @@ On free-threaded Python 3.13t:
 ```bash
 ~/.pyenv/versions/3.13.13t/bin/python3.13t -m pip install -e .
 ```
+
+### No compiler? Use the bootstrap helpers
+
+For one-shot installs on a fresh box, the `scripts/` directory has
+detect-and-install wrappers:
+
+```bash
+# POSIX (Linux, macOS, BSDs, Solaris, Haiku)
+./scripts/install.sh                # detects distro, installs gcc/clang
+./scripts/install.sh --editable     # passes -e through to pip
+
+# Windows -- works from cmd or PowerShell
+scripts\install.bat                 # auto-detects MSVC, falls back to MinGW
+scripts\install.bat --editable
+```
+
+The orchestrator scripts check for a compiler on PATH and run
+`bootstrap_compiler.{sh,ps1,bat}` if missing.  The bootstrap installer
+knows: `apt-get`, `dnf/yum`, `pacman`, `zypper`, `apk`, `xbps`,
+`pkg(BSD)`, `pkgin`, `pkgman(Haiku)`, the macOS Command Line Tools,
+the MSVC Build Tools (via `vs_BuildTools.exe`), and MinGW-w64 (via
+the WinLibs zip).
+
+### Build-time environment knobs
+
+| Variable | Effect |
+| --- | --- |
+| `PYGO_BACKEND=ucontext` | force the ucontext stack-swap backend even on x86_64/aarch64 |
+| `PYGO_NO_ASM=1` | drop the `.S` source from the build (same effect as above) |
+| `PYGO_NO_IOCP=1` | omit the Windows IOCP-AFD backend (falls back to WSAPoll/select) |
+| `PYGO_DEBUG=1` | `-O0 -g` (POSIX) or `/Od /Zi` (MSVC) |
+| `PYGO_EXTRA_CFLAGS` | appended to the compile command line |
+| `PYGO_EXTRA_LDFLAGS` | appended to the link command line |
+| `CC` | usual setuptools override; controls compiler selection on Windows too |
+
+### Prebuilt wheels
+
+`pyproject.toml` ships a `[tool.cibuildwheel]` matrix covering CPython
+3.11–3.14 on:
+
+- Linux x86_64 + aarch64 (manylinux\_2\_28)
+- macOS universal2 (arm64 + x86_64)
+- Windows AMD64
+
+Run `cibuildwheel --output-dir wheels` from a CI runner (or locally
+with Docker) to populate `wheels/` for upload to PyPI.
 
 ## Platform support
 

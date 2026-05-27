@@ -326,16 +326,42 @@ void pygo_iocp_fini(void)
 /* ============================================================ */
 
 /* Winsock layers wrap the underlying AFD socket; AFD_POLL only works
- * against the base handle.  See wepoll / libuv for the same trick. */
+ * against the base handle.  See wepoll / libuv for the same trick.
+ *
+ * SIO_BASE_HANDLE has a Windows 11 regression where it can fail with
+ * WSAEFAULT against LSP-wrapped sockets; we fall back to the broader
+ * BSP poll/select handles, finally accepting the socket itself if all
+ * else fails.  Matches wepoll's ws_get_base_socket lookup chain. */
+#ifndef SIO_BSP_HANDLE_POLL
+#  define SIO_BSP_HANDLE_POLL    0x4800001D
+#endif
+#ifndef SIO_BSP_HANDLE_SELECT
+#  define SIO_BSP_HANDLE_SELECT  0x4800001C
+#endif
+#ifndef SIO_BSP_HANDLE
+#  define SIO_BSP_HANDLE         0x4800001B
+#endif
+
 static SOCKET pygo_iocp_base_socket(SOCKET s)
 {
+    static const DWORD ioctls[] = {
+        SIO_BASE_HANDLE, SIO_BSP_HANDLE_POLL,
+        SIO_BSP_HANDLE_SELECT, SIO_BSP_HANDLE,
+    };
     SOCKET base = INVALID_SOCKET;
     DWORD bytes = 0;
-    if (WSAIoctl(s, SIO_BASE_HANDLE, NULL, 0,
-                 &base, sizeof(base), &bytes, NULL, NULL) == SOCKET_ERROR) {
-        return INVALID_SOCKET;
+    size_t i;
+    for (i = 0; i < sizeof(ioctls)/sizeof(ioctls[0]); i++) {
+        if (WSAIoctl(s, ioctls[i], NULL, 0,
+                     &base, sizeof(base), &bytes,
+                     NULL, NULL) != SOCKET_ERROR) {
+            return base;
+        }
     }
-    return base;
+    /* No LSP base handle reachable; the socket likely IS the base
+     * (or the Microsoft TCP/IP provider has been hijacked but is
+     * forwarding poll IRPs correctly).  Try the original socket. */
+    return s;
 }
 
 int pygo_iocp_submit(int fd, int events, long long timeout_ns)
@@ -381,17 +407,10 @@ int pygo_iocp_submit(int fd, int events, long long timeout_ns)
         &ctx->poll_info,
         sizeof(ctx->poll_info));
 
-    if (st == STATUS_SUCCESS) {
-        /* The poll completed synchronously.  ctx->iosb already holds
-         * the result and ctx->poll_info has the readiness mask.  Force
-         * a completion onto our IOCP so the pump's drain loop picks it
-         * up uniformly with the async path. */
-        PostQueuedCompletionStatus(pygo_iocp_handle, 0,
-                                   (ULONG_PTR)ctx, &ctx->overlapped);
-        return 0;
-    }
-    if (st == STATUS_PENDING) {
-        /* Async path: the kernel will queue a completion when ready. */
+    if (st == STATUS_SUCCESS || st == STATUS_PENDING) {
+        /* Either case, the IOCP will deliver one completion -- the
+         * kernel auto-posts sync completions because we didn't pass
+         * FILE_SKIP_COMPLETION_PORT_ON_SUCCESS at init time. */
         return 0;
     }
     /* Hard error.  Drop the ctx -- caller's wait_fd will see no
@@ -428,12 +447,17 @@ int pygo_iocp_wait(long long timeout_ns,
         /* timeout */
         return 0;
     }
-    if (!ok) {
-        /* Operation failed but we have a completion -- still consume it. */
-    }
-
-    ctx = (pygo_poll_ctx_t *)key;
-    if (ctx == NULL) return -1;
+    /* The completion routes via the OVERLAPPED pointer.  For
+     * STATUS_PENDING -> async completion the kernel delivers our
+     * ApcContext (== ctx, since OVERLAPPED is the first field of
+     * pygo_poll_ctx_t).  Reading `key` would only work for the
+     * PostQueuedCompletionStatus path we use on STATUS_SUCCESS;
+     * the async kernel-driven path has key == 0 (our AFD
+     * association key). */
+    if (ov == NULL) return -1;
+    ctx = CONTAINING_RECORD(ov, pygo_poll_ctx_t, overlapped);
+    (void)key;
+    (void)bytes;
 
     *out_fd = ctx->fd;
     *out_events = pygo_from_afd_events(ctx->poll_info.Handles[0].Events);

@@ -5,9 +5,72 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "pygo"
 version = "0.0.1"
-description = "Go-style coroutines in Python (stackful, transparent-blocking I/O via socket monkey-patch)."
+description = "Go-style stackful coroutines in Python (transparent-blocking I/O via socket monkey-patch)."
 requires-python = ">=3.11"
 # Keep the table form for compatibility with setuptools < 77.
 # The newer SPDX-string `license = "MIT"` form requires setuptools 77+.
 license = {text = "MIT"}
 authors = [{name = "Matthew Roberts", email = "matthew@roberts.pm"}]
+readme = "README.md"
+keywords = ["coroutine", "goroutine", "scheduler", "io", "asyncio", "networking", "monkey-patch"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS :: MacOS X",
+    "Operating System :: POSIX :: BSD",
+    "Operating System :: POSIX :: SunOS/Solaris",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: Android",
+    "Programming Language :: C",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: System :: Networking",
+]
+
+[project.urls]
+Homepage = "https://github.com/robertsdotpm/pygo"
+Issues = "https://github.com/robertsdotpm/pygo/issues"
+Source = "https://github.com/robertsdotpm/pygo"
+
+# --------------------------------------------------------------------
+# cibuildwheel: build prebuilt wheels for the matrix of Python versions
+# x supported OSes.  Trigger from CI with `cibuildwheel --output-dir wheels`.
+# --------------------------------------------------------------------
+[tool.cibuildwheel]
+# CPython only (PyPy lacks the C-API surface we rely on).
+build = "cp311-* cp312-* cp313-* cp314-*"
+# Skip 32-bit and musl for now; the asm fcontext path needs musl-specific
+# testing that's not in CI yet.  Linux x86_64 + aarch64, glibc only.
+skip = ["*-win32", "*-manylinux_i686", "*-musllinux_*", "pp*"]
+# Sanity-check imports after the wheel is built.
+test-command = "python -c \"import pygo, pygo_core; print('OK', pygo_core.backend(), pygo_core.netpoll_backend())\""
+build-verbosity = 1
+
+[tool.cibuildwheel.linux]
+# manylinux_2_28 ships GCC 12 + a recent kernel/glibc combo (needed for
+# our __atomic_* and IO_uring-friendly syscalls).
+manylinux-x86_64-image  = "manylinux_2_28"
+manylinux-aarch64-image = "manylinux_2_28"
+archs = ["x86_64", "aarch64"]
+# Install build deps inside the manylinux container.
+before-all = "yum install -y gcc make || apt-get install -y gcc make || true"
+
+[tool.cibuildwheel.macos]
+# Universal2 (arm64 + x86_64) so one wheel covers Apple Silicon + Intel.
+archs = ["arm64", "x86_64"]
+# MACOSX_DEPLOYMENT_TARGET keeps us compatible with macOS 10.13+; older
+# than that and ucontext APIs aren't stable.
+environment = "MACOSX_DEPLOYMENT_TARGET=10.13"
+
+[tool.cibuildwheel.windows]
+# MSVC 2022 Build Tools come pre-installed on GitHub's windows-2022 runner.
+archs = ["AMD64"]
+# Verify both backends work.
+test-command = "python -c \"import pygo_core; assert pygo_core.netpoll_backend() in ('iocp-afd','wsapoll','select'); print(pygo_core.backend(), pygo_core.netpoll_backend())\""
