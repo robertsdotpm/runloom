@@ -156,8 +156,17 @@ void pygo_g_entry(void *user);
 /* Free the datastack-chunk chain owned by the just-completed goroutine.
  * Call AFTER pygo_coro_resume returns done=true and BEFORE loading any
  * other snapshot back into tstate (which would overwrite the chunk
- * pointers and leak the g's allocation).  Matches greenlet's did_finish. */
+ * pointers and leak the g's allocation).  Matches greenlet's did_finish.
+ *
+ * Returned chunks go to a per-thread pool (capped) so the next first-run
+ * g can pick one up via pygo_first_run_install_datastack instead of
+ * paying for an arena alloc. */
 void pygo_drain_g_datastack(void);
+
+/* Set up tstate->datastack_{chunk,top,limit} for a first-run g.  Pulls
+ * a chunk off the per-thread pool if available; otherwise leaves the
+ * fields NULL so PyEval will arena-allocate.  Either is correct. */
+void pygo_first_run_install_datastack(void);
 
 /* Sleep-heap helpers exposed for mn_sched.c's per-hub timer processing.
  * Single-thread drain still uses them via #define aliases. */

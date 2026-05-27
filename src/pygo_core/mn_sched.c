@@ -227,12 +227,12 @@ static void *pygo_hub_main(void *arg)
             if (g->snap.valid) {
                 pygo_pystate_load(&g->snap);
             } else {
-                PyThreadState *ts = PyThreadState_GET();
-                ts->datastack_chunk = NULL;
-                ts->datastack_top = NULL;
-                ts->datastack_limit = NULL;
+                pygo_first_run_install_datastack();
 #if PY_VERSION_HEX >= 0x030D0000
-                ts->current_frame = NULL;
+                {
+                    PyThreadState *ts = PyThreadState_GET();
+                    ts->current_frame = NULL;
+                }
 #endif
             }
 

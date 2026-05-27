@@ -230,20 +230,108 @@ void pygo_pystate_snap_clear(pygo_pystate_snap_t *snap)
     snap->valid = 0;
 }
 
-/* Drain (and free) the entire datastack-chunk chain currently attached
- * to tstate, returning tstate's datastack pointers to NULL.
+/* Per-OS-thread datastack chunk pool.
+ *
+ * Each goroutine starts with tstate->datastack_chunk = NULL so PyEval
+ * allocates a fresh chunk for it from the arena.  When the goroutine
+ * completes we used to arena-free that chunk; profiling on spawn-heavy
+ * workloads showed ~200 ns alloc + ~200 ns free per g lifetime spent
+ * round-tripping through the arena.
+ *
+ * The pool keeps recently-freed chunks on a per-thread (TLS) LIFO so
+ * the next g picks one up instead.  Cache-warm.  Capped to avoid
+ * hoarding memory after a burst of short-lived gs.
+ *
+ * Chunks are linked through their existing `previous` pointer, so the
+ * pool is zero-allocation -- we reuse the field for the free-list
+ * link.  Pool entries have top=0 (empty) which is the same state a
+ * freshly arena-allocated chunk would be in.
+ *
+ * 3.13t has tstate->datastack_cached_chunk, an in-tstate one-slot
+ * cache.  That helps when one thread runs many gs serially, but
+ * doesn't compose with our M:N hubs (each hub already has its own
+ * tstate, so the slot would be cold across hub-to-hub g migration --
+ * which we don't actually do, but the pool is also useful for the
+ * single-thread sched on both 3.12 and 3.13). */
+#if PY_VERSION_HEX >= 0x030C0000
+#define PYGO_CHUNK_POOL_CAP 32
+static __thread _PyStackChunk *pygo_chunk_pool = NULL;
+static __thread int pygo_chunk_pool_size = 0;
+
+/* Pop one chunk off the pool.  Returns NULL when empty; caller falls
+ * back to letting PyEval arena-allocate. */
+static _PyStackChunk *pygo_chunk_pool_get(void)
+{
+    _PyStackChunk *c = pygo_chunk_pool;
+    if (c == NULL) return NULL;
+    pygo_chunk_pool = c->previous;
+    pygo_chunk_pool_size--;
+    c->previous = NULL;
+    c->top = 0;
+    return c;
+}
+
+/* Push one chunk onto the pool.  At cap, arena-free instead. */
+static void pygo_chunk_pool_put(_PyStackChunk *c, PyObjectArenaAllocator *alloc)
+{
+    if (pygo_chunk_pool_size >= PYGO_CHUNK_POOL_CAP) {
+        if (alloc->free != NULL) {
+            alloc->free(alloc->ctx, c, c->size);
+        }
+        return;
+    }
+    c->previous = pygo_chunk_pool;
+    c->top = 0;
+    pygo_chunk_pool = c;
+    pygo_chunk_pool_size++;
+}
+
+/* Install a pooled chunk on tstate for a fresh g.  Returns 1 if the
+ * pool had a chunk and tstate is now wired to it; 0 if pool empty and
+ * caller should NULL the datastack so PyEval allocates fresh.
+ *
+ * datastack_top starts at &c->data[1] (NOT data[0]) -- this mirrors
+ * CPython's push_chunk root-chunk handling.  The data[0] slot is
+ * intentionally wasted so _PyThreadState_PopFrame's check
+ * `base == &chunk->data[0]` is never true for a frame in this chunk,
+ * keeping pop from arena-freeing a chunk we own. */
+static int pygo_chunk_pool_install(PyThreadState *ts)
+{
+    _PyStackChunk *c = pygo_chunk_pool_get();
+    if (c == NULL) return 0;
+    ts->datastack_chunk = c;
+    ts->datastack_top = &c->data[1];
+    ts->datastack_limit = (PyObject **)((char *)c + c->size);
+    return 1;
+}
+#endif
+
+void pygo_first_run_install_datastack(void)
+{
+#if PY_VERSION_HEX >= 0x030C0000
+    PyThreadState *ts = PyThreadState_GET();
+    if (!pygo_chunk_pool_install(ts)) {
+        ts->datastack_chunk = NULL;
+        ts->datastack_top = NULL;
+        ts->datastack_limit = NULL;
+    }
+#else
+    (void)0;
+#endif
+}
+
+/* Drain the datastack-chunk chain currently attached to tstate,
+ * returning tstate's datastack pointers to NULL.
  *
  * Called after a goroutine completes, BEFORE we restore the scheduler
  * or hub snapshot (which would overwrite tstate->datastack_chunk with
- * the scheduler's saved value and leak g's chain).  On first run we
- * NULL'd datastack so PyEval allocated a fresh root chunk owned by g;
- * when g exits cleanly that root chunk plus any deeper chunks need to
- * be returned to the arena allocator.
+ * the scheduler's saved value and leak g's chain).
  *
- * Algorithm matches greenlet's PythonState::did_finish.
+ * Reused chunks go to the per-thread pool (up to PYGO_CHUNK_POOL_CAP).
+ * Overflow goes back to the arena allocator that CPython's frame
+ * allocator pulls from.
  *
- * (PyObject_GetArenaAllocator is the public API for the same arena
- * that CPython's frame allocator uses internally on 3.11+.) */
+ * Algorithm matches greenlet's PythonState::did_finish, plus pool reuse. */
 void pygo_drain_g_datastack(void)
 {
 #if PY_VERSION_HEX >= 0x030C0000
@@ -258,11 +346,9 @@ void pygo_drain_g_datastack(void)
     ts->datastack_limit = NULL;
 
     PyObject_GetArenaAllocator(&alloc);
-    if (alloc.free == NULL) return;       /* arena torn down already */
     while (chunk != NULL) {
         _PyStackChunk *prev = chunk->previous;
-        chunk->previous = NULL;
-        alloc.free(alloc.ctx, chunk, chunk->size);
+        pygo_chunk_pool_put(chunk, &alloc);
         chunk = prev;
     }
 #endif
@@ -696,17 +782,18 @@ Py_ssize_t pygo_sched_drain(pygo_sched_t *s)
                  *     linking g's frame chain back into shared frames
                  *     across all goroutines (the original cliff).
                  *
-                 * NULL the datastack pointers so PyEval starts a fresh
-                 * root chunk owned by g.  For 3.13 also NULL
-                 * current_frame so g's first frame chains to nothing.
-                 * For 3.12, g_entry will install a root cframe on g's
-                 * own stack before any Python code runs. */
-                PyThreadState *ts = PyThreadState_GET();
-                ts->datastack_chunk = NULL;
-                ts->datastack_top = NULL;
-                ts->datastack_limit = NULL;
+                 * Install a chunk from the per-thread pool (or NULL the
+                 * datastack pointers so PyEval allocates fresh).  For
+                 * 3.13 also NULL current_frame so g's first frame
+                 * chains to nothing.  For 3.12, g_entry will install a
+                 * root cframe on g's own stack before any Python code
+                 * runs. */
+                pygo_first_run_install_datastack();
 #if PY_VERSION_HEX >= 0x030D0000
-                ts->current_frame = NULL;
+                {
+                    PyThreadState *ts = PyThreadState_GET();
+                    ts->current_frame = NULL;
+                }
 #endif
             }
 
