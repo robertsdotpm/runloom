@@ -71,6 +71,7 @@ def detect_sources():
         os.path.join(SRC_C, "netpoll.c"),
         os.path.join(SRC_C, "cldeque.c"),
         os.path.join(SRC_C, "mn_sched.c"),
+        os.path.join(SRC_C, "chan.c"),
     ]
     # Arch-specific asm fast path.  POSIX only -- Windows uses Fibers and
     # never needs the .S file.  Other archs (riscv, ppc, ...) fall through

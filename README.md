@@ -53,6 +53,11 @@ No `async`.  No `await`.  Just `go(fn)` and blocking-style I/O.
 - **Time-sliced preemption** (3.13t) via `Py_AddPendingCall` +
   `eval_breaker`.  Goroutines without explicit `sched_yield` calls
   cooperate automatically; zero hot-path overhead.
+- **Go-style channels** via `pygo_core.Chan(capacity=0)` --
+  send / recv / try_send / try_recv / close, blocking + buffered,
+  Go's `v, ok := <-ch` returned as a tuple.  Unbuffered ping-pong
+  costs ~560 ns/round-trip on Linux 3.12 -- within 7% of Go 1.22
+  `BenchmarkPingPong` on the same hardware.
 
 ## Performance
 
@@ -219,6 +224,7 @@ src/pygo_core/
   netpoll.{h,c}         epoll/kqueue/WSAPoll/select backend (M:N-aware)
   mn_sched.{h,c}        M:N work-stealing scheduler (3.13t)
   cldeque.{h,c}         Chase-Lev work-stealing deque
+  chan.{h,c}            Go-style channel (send/recv/close, buffered+unbuffered)
   module.c              Python type + module init + free-thread declaration
 src/pygo/
   monkey.py             stdlib monkey-patch (socket / time / select /

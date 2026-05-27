@@ -30,6 +30,7 @@ snap/load paths; not built today."
 #include "pygo_sched.h"
 #include "netpoll.h"
 #include "mn_sched.h"
+#include "chan.h"
 
 /* ---- Per-coro Python object ---- */
 
@@ -374,6 +375,151 @@ static PyTypeObject PygoGType = {
     PyType_GenericNew,
 };
 
+/* ============================================================ */
+/* PygoChan -- Go-style channel                                 */
+/* ============================================================ */
+typedef struct {
+    PyObject_HEAD
+    pygo_chan_t *ch;
+} PygoChan;
+
+static int PygoChan_init(PygoChan *self, PyObject *args, PyObject *kw)
+{
+    static char *kwlist[] = {"capacity", NULL};
+    Py_ssize_t cap = 0;
+    if (!PyArg_ParseTupleAndKeywords(args, kw, "|n", kwlist, &cap)) {
+        return -1;
+    }
+    self->ch = pygo_chan_new(cap);
+    if (self->ch == NULL) return -1;
+    return 0;
+}
+
+static void PygoChan_dealloc(PygoChan *self)
+{
+    if (self->ch != NULL) {
+        pygo_chan_decref(self->ch);
+        self->ch = NULL;
+    }
+    Py_TYPE(self)->tp_free((PyObject *)self);
+}
+
+static PyObject *PygoChan_send(PygoChan *self, PyObject *value)
+{
+    if (pygo_chan_send(self->ch, value) < 0) return NULL;
+    Py_RETURN_NONE;
+}
+
+static PyObject *PygoChan_try_send(PygoChan *self, PyObject *value)
+{
+    int r = pygo_chan_try_send(self->ch, value);
+    if (r < 0) return NULL;
+    if (r == 0) Py_RETURN_TRUE;
+    Py_RETURN_FALSE;
+}
+
+static PyObject *PygoChan_recv(PygoChan *self, PyObject *unused)
+{
+    int ok;
+    PyObject *v;
+    (void)unused;
+    v = pygo_chan_recv(self->ch, &ok);
+    if (v == NULL) return NULL;
+    /* Return (value, ok) matching Go's `v, ok := <-ch` idiom. */
+    {
+        PyObject *tup = PyTuple_New(2);
+        if (tup == NULL) { Py_DECREF(v); return NULL; }
+        PyTuple_SET_ITEM(tup, 0, v);                     /* steals ref */
+        PyTuple_SET_ITEM(tup, 1, PyBool_FromLong(ok));
+        return tup;
+    }
+}
+
+static PyObject *PygoChan_try_recv(PygoChan *self, PyObject *unused)
+{
+    int ok;
+    PyObject *v;
+    (void)unused;
+    if (pygo_chan_try_recv(self->ch, &v, &ok) < 0) return NULL;
+    if (v == NULL) {
+        /* Would-block. */
+        Py_RETURN_NONE;
+    }
+    {
+        PyObject *tup = PyTuple_New(2);
+        if (tup == NULL) { Py_DECREF(v); return NULL; }
+        PyTuple_SET_ITEM(tup, 0, v);
+        PyTuple_SET_ITEM(tup, 1, PyBool_FromLong(ok));
+        return tup;
+    }
+}
+
+static PyObject *PygoChan_close(PygoChan *self, PyObject *unused)
+{
+    (void)unused;
+    if (pygo_chan_close(self->ch) < 0) return NULL;
+    Py_RETURN_NONE;
+}
+
+static PyObject *PygoChan_closed_get(PygoChan *self, void *closure)
+{
+    (void)closure;
+    if (pygo_chan_is_closed(self->ch)) Py_RETURN_TRUE;
+    Py_RETURN_FALSE;
+}
+
+static PyObject *PygoChan_cap_get(PygoChan *self, void *closure)
+{
+    (void)closure;
+    return PyLong_FromSsize_t(pygo_chan_cap(self->ch));
+}
+
+static Py_ssize_t PygoChan_len(PygoChan *self)
+{
+    return pygo_chan_len(self->ch);
+}
+
+static PyMethodDef PygoChan_methods[] = {
+    {"send", (PyCFunction)PygoChan_send, METH_O,
+     "Send a value, blocking until delivered."},
+    {"try_send", (PyCFunction)PygoChan_try_send, METH_O,
+     "Try to send.  Returns True if delivered, False if would-block."},
+    {"recv", (PyCFunction)PygoChan_recv, METH_NOARGS,
+     "Receive (value, ok); blocks until a value or close.  ok=False "
+     "means the channel was closed and empty (Go's `v, ok := <-ch`)."},
+    {"try_recv", (PyCFunction)PygoChan_try_recv, METH_NOARGS,
+     "Try to receive.  Returns (value, ok) on success, None if "
+     "would-block."},
+    {"close", (PyCFunction)PygoChan_close, METH_NOARGS,
+     "Mark the channel closed.  Wakes all parked senders + receivers."},
+    {NULL, NULL, 0, NULL}
+};
+
+static PyGetSetDef PygoChan_getset[] = {
+    {"closed",   (getter)PygoChan_closed_get,   NULL, "True after close()", NULL},
+    {"capacity", (getter)PygoChan_cap_get,      NULL, "buffered capacity", NULL},
+    {NULL, NULL, NULL, NULL, NULL}
+};
+
+static PySequenceMethods PygoChan_seq = {
+    (lenfunc)PygoChan_len,            /* sq_length */
+    0, 0, 0, 0, 0, 0, 0, 0, 0,
+};
+
+static PyTypeObject PygoChanType = {
+    PyVarObject_HEAD_INIT(NULL, 0)
+    .tp_name = "pygo_core.Chan",
+    .tp_basicsize = sizeof(PygoChan),
+    .tp_dealloc = (destructor)PygoChan_dealloc,
+    .tp_as_sequence = &PygoChan_seq,
+    .tp_flags = Py_TPFLAGS_DEFAULT,
+    .tp_doc = "Go-style channel.  Chan(capacity=0).",
+    .tp_methods = PygoChan_methods,
+    .tp_getset = PygoChan_getset,
+    .tp_init = (initproc)PygoChan_init,
+    .tp_new = PyType_GenericNew,
+};
+
 static PyObject *m_go(PyObject *self, PyObject *callable)
 {
     pygo_sched_t *s;
@@ -646,6 +792,16 @@ PyMODINIT_FUNC PyInit_pygo_core(void)
     }
     if (PyModule_AddObject(m, "Coro", (PyObject *)&PygoCoroType) < 0) {
         Py_DECREF(&PygoCoroType);
+        Py_DECREF(m);
+        return NULL;
+    }
+    if (PyType_Ready(&PygoChanType) < 0) {
+        Py_DECREF(m);
+        return NULL;
+    }
+    Py_INCREF(&PygoChanType);
+    if (PyModule_AddObject(m, "Chan", (PyObject *)&PygoChanType) < 0) {
+        Py_DECREF(&PygoChanType);
         Py_DECREF(m);
         return NULL;
     }
