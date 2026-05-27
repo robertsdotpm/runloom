@@ -48,6 +48,8 @@ A user can also opt into the bridge per-call:
     loop.run_until_complete(main())
 """
 import asyncio
+import errno as _errno
+import socket as _socket
 import sys
 import time as _time
 
@@ -551,6 +553,180 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
             return True
         return False
 
+    # ---- Network: high-level loop APIs ----
+    async def create_datagram_endpoint(self, protocol_factory, **kw):
+        return await _create_datagram_endpoint(self, protocol_factory, **kw)
+
+    async def create_connection(self, protocol_factory, host=None, port=None, *,
+                                ssl=None, family=0, proto=0, flags=0, sock=None,
+                                local_addr=None, server_hostname=None, **_ignored):
+        """Lower-level create_connection.  Returns (transport, protocol).
+        Builds a TCP socket + thin Transport over our Stream classes;
+        protocol's connection_made / data_received / connection_lost
+        get fired."""
+        if ssl is not None:
+            raise NotImplementedError("ssl not supported in pygo.aio loop.create_connection")
+        if sock is None:
+            infos = _socket.getaddrinfo(host, port, family or _socket.AF_UNSPEC,
+                                        _socket.SOCK_STREAM, proto, flags)
+            last_err = None
+            for fam, typ, prt, _canon, sa in infos:
+                try:
+                    s = _socket.socket(fam, typ, prt)
+                    s.setblocking(False)
+                    if local_addr is not None:
+                        s.bind(local_addr)
+                    try:
+                        s.connect(sa)
+                    except BlockingIOError:
+                        pygo_core.wait_fd(s.fileno(), 2)
+                        err = s.getsockopt(_socket.SOL_SOCKET, _socket.SO_ERROR)
+                        if err != 0:
+                            raise OSError(err, "connect failed")
+                    sock = s
+                    break
+                except OSError as e:
+                    last_err = e
+                    try: s.close()
+                    except OSError: pass
+            if sock is None:
+                raise last_err or OSError("could not connect")
+        else:
+            sock.setblocking(False)
+        protocol = protocol_factory()
+        transport = _StreamTransport(sock, protocol, loop=self)
+        return transport, protocol
+
+    async def create_server(self, protocol_factory, host=None, port=None, *,
+                            family=_socket.AF_UNSPEC, flags=_socket.AI_PASSIVE,
+                            sock=None, backlog=100, ssl=None,
+                            reuse_address=None, reuse_port=None, **_ignored):
+        if ssl is not None:
+            raise NotImplementedError("ssl not supported in pygo.aio loop.create_server")
+        if sock is None:
+            infos = _socket.getaddrinfo(host, port, family,
+                                        _socket.SOCK_STREAM, 0, flags)
+            last_err = None
+            for fam, typ, prt, _canon, sa in infos:
+                try:
+                    sock = _socket.socket(fam, typ, prt)
+                    if reuse_address is not False:
+                        sock.setsockopt(_socket.SOL_SOCKET,
+                                        _socket.SO_REUSEADDR, 1)
+                    sock.setblocking(False)
+                    sock.bind(sa)
+                    sock.listen(backlog)
+                    break
+                except OSError as e:
+                    last_err = e
+                    try: sock.close()
+                    except OSError: pass
+                    sock = None
+            if sock is None:
+                raise last_err or OSError("could not bind")
+        else:
+            sock.setblocking(False)
+        # cb=None: caller wired up via protocol factory + Transport.
+        # We still need an accept loop that builds Transports per conn.
+        return _ProtocolServer(sock, protocol_factory, loop=self)
+
+    async def getaddrinfo(self, host, port, *, family=0, type=0, proto=0, flags=0):
+        # Blocking call -- runs in the OS thread.  monkey.py patches
+        # this to be cooperative if the user installs it.
+        return _socket.getaddrinfo(host, port, family, type, proto, flags)
+
+    async def getnameinfo(self, sockaddr, flags=0):
+        return _socket.getnameinfo(sockaddr, flags)
+
+    # ---- low-level socket ops (loop.sock_*) ----
+    async def sock_connect(self, sock, address):
+        sock.setblocking(False)
+        try:
+            sock.connect(address)
+        except BlockingIOError:
+            pygo_core.wait_fd(sock.fileno(), 2)
+            err = sock.getsockopt(_socket.SOL_SOCKET, _socket.SO_ERROR)
+            if err != 0:
+                raise OSError(err, "connect failed")
+
+    async def sock_accept(self, sock):
+        sock.setblocking(False)
+        while True:
+            try:
+                return sock.accept()
+            except (BlockingIOError, InterruptedError):
+                pygo_core.wait_fd(sock.fileno(), 1)
+
+    async def sock_recv(self, sock, nbytes):
+        sock.setblocking(False)
+        while True:
+            try:
+                return sock.recv(nbytes)
+            except (BlockingIOError, InterruptedError):
+                pygo_core.wait_fd(sock.fileno(), 1)
+
+    async def sock_recv_into(self, sock, buf):
+        sock.setblocking(False)
+        while True:
+            try:
+                return sock.recv_into(buf)
+            except (BlockingIOError, InterruptedError):
+                pygo_core.wait_fd(sock.fileno(), 1)
+
+    async def sock_recvfrom(self, sock, bufsize):
+        sock.setblocking(False)
+        while True:
+            try:
+                return sock.recvfrom(bufsize)
+            except (BlockingIOError, InterruptedError):
+                pygo_core.wait_fd(sock.fileno(), 1)
+
+    async def sock_sendall(self, sock, data):
+        sock.setblocking(False)
+        view = memoryview(data)
+        sent = 0
+        while sent < len(view):
+            try:
+                n = sock.send(view[sent:])
+                sent += n
+            except (BlockingIOError, InterruptedError):
+                pygo_core.wait_fd(sock.fileno(), 2)
+
+    async def sock_sendto(self, sock, data, address):
+        sock.setblocking(False)
+        while True:
+            try:
+                return sock.sendto(data, address)
+            except (BlockingIOError, InterruptedError):
+                pygo_core.wait_fd(sock.fileno(), 2)
+
+    # ---- executor (thread pool) ----
+    def run_in_executor(self, executor, func, *args):
+        """Run func(*args) on a thread pool.  Returns a PygoFuture
+        that resolves when the thread completes.  We hand out a real
+        threadpool via concurrent.futures."""
+        import concurrent.futures as _cf
+        if executor is None:
+            # Lazy-init default pool.
+            if not hasattr(self, "_default_executor"):
+                self._default_executor = _cf.ThreadPoolExecutor(max_workers=8)
+            executor = self._default_executor
+        fut = PygoFuture(loop=self)
+        cf_fut = executor.submit(func, *args)
+        def _on_thread_done(_cf_fut):
+            # Marshal the thread's result back into our PygoFuture.
+            # call_soon_threadsafe wakes the loop.
+            def _set():
+                if cf_fut.cancelled():
+                    fut.cancel()
+                elif cf_fut.exception() is not None:
+                    fut.set_exception(cf_fut.exception())
+                else:
+                    fut.set_result(cf_fut.result())
+            self.call_soon_threadsafe(_set)
+        cf_fut.add_done_callback(_on_thread_done)
+        return fut
+
     # ---- run loop ----
     def run_until_complete(self, future):
         if asyncio.iscoroutine(future):
@@ -646,10 +822,6 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
 # asyncio API surface (read / readline / readuntil / readexactly /
 # write / drain / close) so existing async TCP code Just Works.
 # ====================================================================
-import socket as _socket
-import errno as _errno
-
-
 class StreamReader(object):
     """asyncio.StreamReader-compatible reader backed by cooperative
     socket recv.  Implements: read, readline, readuntil, readexactly,
@@ -977,6 +1149,360 @@ class _Server(object):
     @property
     def sockets(self):
         return (self._sock,) if not self._closed else ()
+
+
+# ====================================================================
+# UDP: DatagramTransport + create_datagram_endpoint.
+#
+# Datagram socket goroutine: one g per endpoint runs the recv loop,
+# delivering each packet to the protocol's datagram_received().
+# send_to bypasses the loop entirely -- just non-blocking sendto with
+# wait_fd on EAGAIN.
+# ====================================================================
+# ====================================================================
+# _StreamTransport / _ProtocolServer: lower-level Transport+Protocol
+# pair used by loop.create_connection / loop.create_server.  Most user
+# code uses the StreamReader/Writer high-level path above; these exist
+# for libraries (like aionetiface) that consume the protocol API.
+# ====================================================================
+class _StreamTransport(object):
+    """Thin TCP transport over a socket.  Drives the protocol's
+    data_received via a recv goroutine; transports its write() through
+    cooperative sendall."""
+
+    def __init__(self, sock, protocol, *, loop=None):
+        self._sock = sock
+        self._protocol = protocol
+        self._loop = loop
+        self._closed = False
+        self._stopping = False
+        try:
+            protocol.connection_made(self)
+        except Exception as e:
+            self._report(e, "connection_made")
+        self._recv_g = pygo_core.go(self._recv_loop)
+
+    def _recv_loop(self):
+        sock = self._sock
+        while not self._stopping:
+            try:
+                data = sock.recv(65536)
+            except (BlockingIOError, InterruptedError):
+                if self._stopping: return
+                try:
+                    pygo_core.wait_fd(sock.fileno(), 1)
+                except Exception:
+                    return
+                continue
+            except OSError as e:
+                if self._stopping: return
+                if e.errno in (_errno.EAGAIN, _errno.EWOULDBLOCK):
+                    pygo_core.wait_fd(sock.fileno(), 1)
+                    continue
+                try:
+                    self._protocol.connection_lost(e)
+                except Exception as e2:
+                    self._report(e2, "connection_lost")
+                return
+            if not data:
+                # EOF
+                try:
+                    keep = self._protocol.eof_received()
+                except Exception as e:
+                    self._report(e, "eof_received")
+                    keep = False
+                if not keep:
+                    self.close()
+                    return
+                continue
+            try:
+                self._protocol.data_received(data)
+            except Exception as e:
+                self._report(e, "data_received")
+
+    def write(self, data):
+        if self._closed:
+            return
+        try:
+            n = self._sock.send(data)
+            if n < len(data):
+                # Spawn a goroutine to finish.  Rare on small writes
+                # to a healthy peer.
+                rest = bytes(data[n:])
+                def _flush(b=rest):
+                    while b:
+                        try:
+                            sent = self._sock.send(b)
+                            b = b[sent:]
+                        except (BlockingIOError, InterruptedError):
+                            try: pygo_core.wait_fd(self._sock.fileno(), 2)
+                            except Exception: return
+                        except OSError:
+                            return
+                pygo_core.go(_flush)
+        except (BlockingIOError, InterruptedError):
+            rest = bytes(data)
+            def _flush(b=rest):
+                while b:
+                    try:
+                        sent = self._sock.send(b)
+                        b = b[sent:]
+                    except (BlockingIOError, InterruptedError):
+                        try: pygo_core.wait_fd(self._sock.fileno(), 2)
+                        except Exception: return
+                    except OSError:
+                        return
+            pygo_core.go(_flush)
+        except OSError as e:
+            try:
+                self._protocol.connection_lost(e)
+            except Exception:
+                pass
+            self.close()
+
+    def writelines(self, lines):
+        for line in lines:
+            self.write(line)
+
+    def close(self):
+        if self._closed:
+            return
+        self._closed = True
+        self._stopping = True
+        try:
+            self._sock.shutdown(_socket.SHUT_RDWR)
+        except OSError:
+            pass
+        try:
+            self._sock.close()
+        except OSError:
+            pass
+        try:
+            self._protocol.connection_lost(None)
+        except Exception as e:
+            self._report(e, "connection_lost")
+
+    def is_closing(self):
+        return self._closed
+
+    def get_extra_info(self, name, default=None):
+        if name == "socket":
+            return self._sock
+        if name == "sockname":
+            try: return self._sock.getsockname()
+            except OSError: return default
+        if name == "peername":
+            try: return self._sock.getpeername()
+            except OSError: return default
+        return default
+
+    def get_protocol(self):
+        return self._protocol
+
+    def set_protocol(self, protocol):
+        self._protocol = protocol
+
+    def _report(self, exc, where):
+        if self._loop is not None:
+            self._loop.call_exception_handler({
+                "message": "StreamTransport " + where + " raised",
+                "exception": exc,
+            })
+
+
+class _ProtocolServer(object):
+    """Server compatible with asyncio.Server: per-accept builds a
+    _StreamTransport and a protocol via factory."""
+
+    def __init__(self, sock, protocol_factory, *, loop=None):
+        self._sock = sock
+        self._factory = protocol_factory
+        self._loop = loop
+        self._closed = False
+        self._accept_g = pygo_core.go(self._accept_loop)
+
+    def _accept_loop(self):
+        while not self._closed:
+            try:
+                conn, _addr = self._sock.accept()
+            except (BlockingIOError, InterruptedError):
+                if self._closed: return
+                pygo_core.wait_fd(self._sock.fileno(), 1)
+                continue
+            except OSError:
+                if self._closed: return
+                self._closed = True
+                return
+            conn.setblocking(False)
+            protocol = self._factory()
+            _StreamTransport(conn, protocol, loop=self._loop)
+
+    def is_serving(self):
+        return not self._closed
+
+    def close(self):
+        if self._closed: return
+        self._closed = True
+        try: self._sock.shutdown(_socket.SHUT_RDWR)
+        except OSError: pass
+        try: self._sock.close()
+        except OSError: pass
+
+    async def wait_closed(self):
+        await asyncio.sleep(0)
+
+    @property
+    def sockets(self):
+        return (self._sock,) if not self._closed else ()
+
+
+class DatagramTransport(object):
+    """asyncio.DatagramTransport-compatible transport.
+
+    Wires a UDP socket to a user-supplied DatagramProtocol.  The
+    protocol's datagram_received(data, addr) / error_received(exc) /
+    connection_lost(exc) methods are called from our recv goroutine.
+    """
+
+    def __init__(self, sock, protocol, *, loop=None):
+        self._sock = sock
+        self._protocol = protocol
+        self._loop = loop
+        self._closed = False
+        # Tells the recv loop to bail on next iteration.
+        self._stopping = False
+        # connection_made fires before any recv work.
+        try:
+            protocol.connection_made(self)
+        except Exception as e:
+            self._report(e, "connection_made")
+        # Spawn the recv loop.
+        self._recv_g = pygo_core.go(self._recv_loop)
+
+    def _recv_loop(self):
+        sock = self._sock
+        while not self._stopping:
+            try:
+                data, addr = sock.recvfrom(65536)
+            except (BlockingIOError, InterruptedError):
+                if self._stopping: return
+                try:
+                    pygo_core.wait_fd(sock.fileno(), 1)
+                except Exception:
+                    return
+                continue
+            except OSError as e:
+                if self._stopping: return
+                if e.errno in (_errno.EAGAIN, _errno.EWOULDBLOCK):
+                    pygo_core.wait_fd(sock.fileno(), 1)
+                    continue
+                # Error -- notify protocol and stop.
+                try:
+                    self._protocol.error_received(e)
+                except Exception as e2:
+                    self._report(e2, "error_received")
+                return
+            try:
+                self._protocol.datagram_received(data, addr)
+            except Exception as e:
+                self._report(e, "datagram_received")
+
+    def sendto(self, data, addr=None):
+        if self._closed:
+            return
+        try:
+            if addr is None:
+                self._sock.send(data)
+            else:
+                self._sock.sendto(data, addr)
+        except (BlockingIOError, InterruptedError):
+            # UDP send rarely blocks, but if it does we just drop.
+            # asyncio's selector loop does the same (best-effort).
+            pass
+        except OSError as e:
+            try:
+                self._protocol.error_received(e)
+            except Exception as e2:
+                self._report(e2, "error_received")
+
+    def close(self):
+        if self._closed:
+            return
+        self._closed = True
+        self._stopping = True
+        try:
+            self._sock.close()
+        except OSError:
+            pass
+        try:
+            self._protocol.connection_lost(None)
+        except Exception as e:
+            self._report(e, "connection_lost")
+
+    def is_closing(self):
+        return self._closed
+
+    def get_extra_info(self, name, default=None):
+        if name == "socket":
+            return self._sock
+        if name == "sockname":
+            try:
+                return self._sock.getsockname()
+            except OSError:
+                return default
+        if name == "peername":
+            try:
+                return self._sock.getpeername()
+            except OSError:
+                return default
+        return default
+
+    def get_protocol(self):
+        return self._protocol
+
+    def set_protocol(self, protocol):
+        self._protocol = protocol
+
+    def _report(self, exc, where):
+        if self._loop is not None:
+            self._loop.call_exception_handler({
+                "message": "Datagram " + where + " raised",
+                "exception": exc,
+            })
+
+
+async def _create_datagram_endpoint(loop, protocol_factory, local_addr=None,
+                                    remote_addr=None, family=0, proto=0,
+                                    flags=0, reuse_address=None,
+                                    reuse_port=None, allow_broadcast=None,
+                                    sock=None):
+    """Implementation of loop.create_datagram_endpoint."""
+    if sock is None:
+        if local_addr is None and remote_addr is None:
+            family = family or _socket.AF_INET
+        if family == 0:
+            family = _socket.AF_INET
+        sock = _socket.socket(family, _socket.SOCK_DGRAM, proto)
+        sock.setblocking(False)
+        if reuse_address:
+            sock.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+        if reuse_port and hasattr(_socket, "SO_REUSEPORT"):
+            sock.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEPORT, 1)
+        if allow_broadcast:
+            sock.setsockopt(_socket.SOL_SOCKET, _socket.SO_BROADCAST, 1)
+        if local_addr is not None:
+            sock.bind(local_addr)
+        if remote_addr is not None:
+            try:
+                sock.connect(remote_addr)
+            except BlockingIOError:
+                pygo_core.wait_fd(sock.fileno(), 2)
+    else:
+        sock.setblocking(False)
+
+    protocol = protocol_factory()
+    transport = DatagramTransport(sock, protocol, loop=loop)
+    return transport, protocol
 
 
 async def start_server(client_connected_cb, host=None, port=None, *,
