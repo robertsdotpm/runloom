@@ -58,6 +58,7 @@ double pygo_sched_monotonic_seconds(void)
  * combined.  Each PY_VERSION_HEX gate matches greenlet's GREENLET_PY*
  * branches.
  */
+__attribute__((hot))
 void pygo_pystate_snap(pygo_pystate_snap_t *snap)
 {
     PyThreadState *ts = PyThreadState_GET();
@@ -88,7 +89,8 @@ void pygo_pystate_snap(pygo_pystate_snap_t *snap)
      * which means ts->exc_info points to ts->exc_state (the per-tstate
      * sentinel) and ts->exc_state.exc_value is NULL.  Signal that with
      * snap->exc_info=NULL and skip the 24-byte exc_state copy. */
-    if (ts->exc_info == &ts->exc_state && ts->exc_state.exc_value == NULL) {
+    if (__builtin_expect(ts->exc_info == &ts->exc_state &&
+                         ts->exc_state.exc_value == NULL, 1)) {
         snap->exc_info = NULL;
     } else {
         snap->exc_info = ts->exc_info;
@@ -123,11 +125,12 @@ void pygo_pystate_snap(pygo_pystate_snap_t *snap)
     snap->valid = 1;
 }
 
+__attribute__((hot))
 void pygo_pystate_load(pygo_pystate_snap_t *snap)
 {
     PyThreadState *ts;
 
-    if (!snap->valid) {
+    if (__builtin_expect(!snap->valid, 0)) {
         return;
     }
     ts = PyThreadState_GET();
@@ -137,7 +140,7 @@ void pygo_pystate_load(pygo_pystate_snap_t *snap)
      * pointer matches ts's.  Drop our extra ref and skip the swap +
      * context_ver bump.  The version stays stable because the content
      * didn't change -- caches keyed by ver remain valid. */
-    if (ts->context == snap->context) {
+    if (__builtin_expect(ts->context == snap->context, 1)) {
         Py_XDECREF(snap->context);
         snap->context = NULL;
     } else {
@@ -151,16 +154,25 @@ void pygo_pystate_load(pygo_pystate_snap_t *snap)
     ts->py_recursion_remaining = snap->py_recursion_remaining;
     ts->c_recursion_remaining = snap->c_recursion_remaining;
 
-    ts->datastack_chunk = snap->datastack_chunk;
-    ts->datastack_top = snap->datastack_top;
-    ts->datastack_limit = snap->datastack_limit;
+    /* Datastack fast path: in tight loops that yield without pushing
+     * Python frames, the chunk pointers are unchanged across the
+     * yield.  Skip 3 stores when chunk matches -- top and limit are
+     * derived from chunk so they implicitly match too. */
+    if (__builtin_expect(ts->datastack_chunk != snap->datastack_chunk, 0)) {
+        ts->datastack_chunk = snap->datastack_chunk;
+        ts->datastack_top = snap->datastack_top;
+        ts->datastack_limit = snap->datastack_limit;
+    } else if (ts->datastack_top != snap->datastack_top) {
+        /* Same chunk but top moved (e.g., frames pushed within chunk). */
+        ts->datastack_top = snap->datastack_top;
+    }
 
     /* (No top_frame snap to drop -- see comment in pygo_pystate_snap.) */
 
     /* Exception state restore.  snap->exc_info==NULL is the
      * default-state sentinel (see snap path); reset ts to default only
      * if it has drifted.  Otherwise copy the saved chain back. */
-    if (snap->exc_info == NULL) {
+    if (__builtin_expect(snap->exc_info == NULL, 1)) {
         if (ts->exc_info != &ts->exc_state || ts->exc_state.exc_value != NULL) {
             Py_CLEAR(ts->exc_state.exc_value);
             ts->exc_state.previous_item = NULL;
@@ -509,26 +521,27 @@ PyObject *pygo_sched_spawn(pygo_sched_t *s, PyObject *callable)
 }
 
 /* ---- Yield ---- */
+__attribute__((hot))
 void pygo_sched_yield(pygo_sched_t *s)
 {
     pygo_g_t *g;
     /* M:N first.  If a hub claims this thread, it handles the requeue
      * + snap + asm-yield internally and we return through hub_main's
      * resume cycle. */
-    if (pygo_mn_yield_current()) {
+    if (__builtin_expect(pygo_mn_yield_current(), 0)) {
         return;
     }
     g = s->current;
-    if (g == NULL) return;
+    if (__builtin_expect(g == NULL, 0)) return;
     /* Fast path (Go's runtime.Gosched shortcut): if there's nobody
      * else to run -- no other ready gs, no sleepers due, no parked
      * I/O -- yielding is just expensive bookkeeping that hands
      * control right back to us.  Skip the whole snap + asm-yield +
      * resume cycle and return.  This cuts the single-coro tight-yield
      * baseline from ~230 ns to <10 ns. */
-    if (s->ready_head == NULL
-        && s->sleep_size == 0
-        && pygo_netpoll_parked_count() == 0) {
+    if (__builtin_expect(s->ready_head == NULL
+                         && s->sleep_size == 0
+                         && pygo_netpoll_parked_count() == 0, 1)) {
         return;
     }
     pygo_ready_push(s, g);

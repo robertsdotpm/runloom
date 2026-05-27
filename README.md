@@ -58,8 +58,8 @@ isolated):
 
 | path | 3.12 | 3.13t |
 | ---: | ---: | ---: |
-| 1 coro fast path (nobody else ready, snap skipped — Go's `runtime.Gosched`)  | **51 ns**  | **76 ns** |
-| 2 coros ping-pong (full snap + asm yield + load every cycle)                 | **178 ns** | **222 ns** |
+| 1 coro fast path (nobody else ready, snap skipped — Go's `runtime.Gosched`)  | **47 ns**  | **75 ns** |
+| 2 coros ping-pong (full snap + asm yield + load every cycle)                 | **182 ns** | **228 ns** |
 
 `sched_yield` is a vectorcall-enabled singleton, so calling it through
 a cached local (`y = pygo_core.sched_yield; y()`) is much faster than
