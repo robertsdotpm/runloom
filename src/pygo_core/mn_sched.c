@@ -112,8 +112,17 @@ static __thread int pygo_tls_self_queued = 0;
 static void *pygo_hub_main(void *arg)
 {
     pygo_hub_t *h = (pygo_hub_t *)arg;
+    pygo_pystate_snap_t hub_snap;
+
     PyEval_RestoreThread(h->tstate);
     pygo_tls_hub = h;
+
+    /* hub_snap is loop-invariant for the same reason sched_snap is in
+     * pygo_sched_drain: hub_main runs no Python work between
+     * iterations except via pygo_g_decref's tp_dealloc, where we
+     * explicitly restore + re-snap.  Hoisting the per-iter snap+load
+     * out of the loop is ~10 ns/yield on the M:N hot path. */
+    pygo_pystate_snap(&hub_snap);
 
     while (!__atomic_load_n(&h->stopping, __ATOMIC_ACQUIRE)) {
         pygo_g_t *g;
@@ -213,16 +222,12 @@ static void *pygo_hub_main(void *arg)
             }
         }
 
-        /* Phase B snap dance.  Save hub's tstate; load g's snap (or
-         * NULL the datastack on first run); resume; restore hub.
-         * pygo_pystate_snap_t is a few-dozen-byte stack-allocated bag. */
+        /* Phase B snap dance: load g's tstate slice; resume; if g
+         * completed, restore hub's tstate before any Python that
+         * might allocate frames.  hub_snap is hoisted out of the loop
+         * (see entry comment). */
         {
-            pygo_pystate_snap_t hub_snap;
             int self_queued;
-
-            /* snap() fills every field; the memset that was here was
-             * dead work on every hub iteration. */
-            pygo_pystate_snap(&hub_snap);
 
             if (g->snap.valid) {
                 pygo_pystate_load(&g->snap);
@@ -245,33 +250,37 @@ static void *pygo_hub_main(void *arg)
             pygo_tls_current_g = NULL;
             h->sched.current = NULL;
 
-            /* If g completed, free its datastack chunks BEFORE we load
-             * the hub's snap (which overwrites tstate->datastack_chunk
-             * and would leak the g's chain). */
             if (pygo_coro_done(g->coro)) {
+                /* Drain g's chunks, restore hub's tstate so the decref
+                 * (potentially calling Python tp_dealloc) allocates on
+                 * the hub's chunk -- not on a NULL datastack that
+                 * would otherwise leak when the next iter overwrites.
+                 * Re-snap so the next completion path / hub exit can
+                 * load again. */
                 pygo_drain_g_datastack();
-            }
-
-            pygo_pystate_load(&hub_snap);
-
-            if (pygo_coro_done(g->coro)) {
-                /* Bump completed BEFORE decrementing pending, both with
-                 * release ordering, so a mn_run reader that observes
-                 * pending == 0 (via acquire) is also guaranteed to see
-                 * the matching completed++.  The previous (pending-,
-                 * then completed+) order let mn_run race the inc and
-                 * undercount. */
+                pygo_pystate_load(&hub_snap);
+                /* Bump completed BEFORE decrementing pending, both
+                 * with release ordering, so a mn_run reader that
+                 * observes pending == 0 (via acquire) is also
+                 * guaranteed to see the matching completed++. */
                 __atomic_add_fetch(&h->sched.completed, 1, __ATOMIC_RELEASE);
                 __atomic_sub_fetch(&h->pending, 1, __ATOMIC_RELEASE);
                 pygo_g_decref(g);
+                pygo_pystate_snap(&hub_snap);
             } else if (!self_queued) {
                 /* Raw pygo_coro_yield() -- g didn't go through
                  * sched_yield to push itself.  Keep it alive on the
-                 * local FIFO. */
+                 * local FIFO.  tstate still has g's state from after
+                 * resume; that's fine -- next iter's g_next->snap
+                 * load overwrites. */
                 pygo_sched_ready_push(&h->sched, g);
             }
+            /* sched_yield path: g pushed itself, tstate has g's state,
+             * no work needed here. */
         }
     }
+    /* Restore hub's tstate before the thread exits. */
+    pygo_pystate_load(&hub_snap);
     pygo_tls_hub = NULL;
     PyEval_SaveThread();
     return NULL;

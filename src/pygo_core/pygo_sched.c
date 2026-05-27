@@ -701,11 +701,26 @@ void pygo_sched_sleep_until(pygo_sched_t *s, double wake_at)
     pygo_coro_yield();
 }
 
-/* ---- Drain (main loop) ---- */
+/* ---- Drain (main loop) ----
+ *
+ * sched_snap optimisation: the scheduler's tstate (the Python frame
+ * chain anchored at pygo_core.run()'s caller, plus context / exc state
+ * / recursion budgets at drain entry) is INVARIANT for the duration of
+ * drain.  Drain itself does no Python work between iterations -- the
+ * only places where it would are pygo_g_decref (may run tp_dealloc) and
+ * the loop's final return to Python.
+ *
+ * So instead of snap+load per iteration (which was costing ~10 ns of
+ * write traffic on the slow path), we snap once at entry and load only
+ * where Python may run -- before pygo_g_decref and at drain exit.  Re-
+ * snap after decref so the next completion-path load is still valid. */
 Py_ssize_t pygo_sched_drain(pygo_sched_t *s)
 {
     Py_ssize_t completed_before = s->completed;
+    pygo_pystate_snap_t sched_snap;
+
     s->stopping = 0;
+    pygo_pystate_snap(&sched_snap);
 
     while (!s->stopping && (s->ready_head != NULL ||
                             s->sleep_size > 0 ||
@@ -760,12 +775,12 @@ Py_ssize_t pygo_sched_drain(pygo_sched_t *s)
         {
             pygo_g_t *g = pygo_ready_pop(s);
             pygo_g_t *prev = s->current;
-            pygo_pystate_snap_t sched_snap;
 
-            /* snap() unconditionally sets every field it reads, so the
-             * memset that used to live here is dead work on every
-             * iteration of the slow path. */
-            pygo_pystate_snap(&sched_snap);
+            /* sched_snap is loop-invariant (taken at drain entry).  We
+             * deliberately do NOT snap or load it per-iter: drain runs
+             * no Python between iterations, so tstate can stay in g's
+             * state across the brief window between coro_resume return
+             * and the next iter's g->snap load. */
 
             s->current = g;
             if (g->snap.valid) {
@@ -799,25 +814,29 @@ Py_ssize_t pygo_sched_drain(pygo_sched_t *s)
 
             pygo_coro_resume(g->coro);
 
-            /* If g completed, free its datastack chunks BEFORE we
-             * restore the scheduler's snap (which would overwrite
-             * tstate->datastack_chunk and leak the chain). */
-            if (pygo_coro_done(g->coro)) {
-                pygo_drain_g_datastack();
-            }
-
-            /* Back on the scheduler's C stack.  tstate now reflects
-             * whatever g left it as just before yielding.  Restore
-             * the scheduler's snap so the next iteration is clean. */
-            pygo_pystate_load(&sched_snap);
             s->current = prev;
 
             if (pygo_coro_done(g->coro)) {
+                /* g done: pygo_g_decref below may run tp_dealloc, which
+                 * needs drain's tstate (frame chain + datastack chunk)
+                 * to be installed before allocating frames -- otherwise
+                 * tp_dealloc allocs a chunk on the wrong root and we
+                 * leak it on the next iter's g->snap load.  So free g's
+                 * chunks, restore drain's tstate, decref, then re-snap
+                 * so a subsequent completion (or drain exit) has a
+                 * valid sched_snap to load. */
+                pygo_drain_g_datastack();
+                pygo_pystate_load(&sched_snap);
                 s->completed++;
-                pygo_g_decref(g);   /* scheduler releases its ref */
+                pygo_g_decref(g);
+                pygo_pystate_snap(&sched_snap);
             }
+            /* Yielded gs: tstate stays in g's state.  Next iter's
+             * g_next->snap load (or first-run install) overwrites. */
         }
     }
+    /* Restore drain's tstate before returning to Python. */
+    pygo_pystate_load(&sched_snap);
     return s->completed - completed_before;
 }
 
