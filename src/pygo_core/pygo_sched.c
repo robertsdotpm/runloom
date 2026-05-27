@@ -807,6 +807,53 @@ void pygo_sched_wake(pygo_g_t *g)
     pygo_ready_push(pygo_sched_get(), g);
 }
 
+/* Race-safe park/wake.  Used by pygo.aio.PygoTask to replace its
+ * per-task Chan(1) wake mechanism.  Saves the Chan alloc + try_send/
+ * recv path -- about 5 us per parked goroutine at fan-out time.
+ *
+ * Race handling: if wake_safe is called before park_safe (callbacks
+ * fire synchronously for already-done futures), we just bump
+ * wake_pending and never enter the parked state.  park_safe sees the
+ * pending wake on entry and skips the yield.
+ *
+ * The push-to-ready in wake_safe is guarded by s->current != g so we
+ * don't double-queue the running goroutine.  Sync-wake while running
+ * is just a wake_pending bump; the goroutine eats it on the next
+ * park_safe call. */
+void pygo_sched_wake_safe(pygo_g_t *g)
+{
+    pygo_sched_t *s;
+    int prev;
+    if (g == NULL) return;
+    s = pygo_sched_get();
+    prev = __atomic_fetch_add(&g->wake_pending, 1, __ATOMIC_ACQ_REL);
+    if (prev == 0 && s->current != g) {
+        /* g is parked (not currently running) -- push to ready so the
+         * scheduler picks it up.  The current goroutine path skips
+         * the push and lets park_safe consume the pending wake. */
+        pygo_ready_push(s, g);
+    }
+}
+
+void pygo_sched_park_safe(void)
+{
+    pygo_sched_t *s = pygo_sched_get();
+    pygo_g_t *g = s->current;
+    if (g == NULL) return;
+
+    /* Was wake_safe already called?  If so, eat one count and return
+     * without yielding -- the future fired synchronously. */
+    if (__atomic_load_n(&g->wake_pending, __ATOMIC_ACQUIRE) > 0) {
+        __atomic_sub_fetch(&g->wake_pending, 1, __ATOMIC_ACQ_REL);
+        return;
+    }
+
+    pygo_pystate_snap(&g->snap);
+    pygo_coro_yield();
+    /* On resume, eat the wake count that brought us back. */
+    __atomic_sub_fetch(&g->wake_pending, 1, __ATOMIC_ACQ_REL);
+}
+
 /* ---- Sleep ----
  *
  * Hub-aware: in an M:N hub the sleep heap belongs to the hub's

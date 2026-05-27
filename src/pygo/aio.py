@@ -271,11 +271,11 @@ class PygoTask(PygoFuture):
         super().__init__(loop=loop)
         self._coro    = coro
         self._name    = name or "pygo-task"
-        # 1-buffered channel: every wake (done_callback OR cancel)
-        # try_sends one byte; the driver does a single blocking recv.
-        # try_send on full channel is a no-op, which matches the
-        # "level-triggered wake" we want for repeated cancel calls.
-        self._wake_ch = pygo_core.Chan(1)
+        # _self_g is captured by the driver on its first iteration.
+        # The driver-internal G handle is what done-callbacks wake.
+        # Cheaper than the previous Chan(1) approach -- saves a Chan
+        # alloc + try_send/recv per task at fan-out time.
+        self._self_g = None
         self._cancel_requested = False
         # cancelling()/uncancel() are required by asyncio.timeouts in
         # 3.11+.  Mirrors asyncio.Task: count of unresolved cancels.
@@ -305,7 +305,8 @@ class PygoTask(PygoFuture):
         self._cancel_requested = True
         self._num_cancels_requested += 1
         # Unblock the driver so it sees _cancel_requested on next iter.
-        self._wake_ch.try_send(None)
+        if self._self_g is not None:
+            self._self_g.wake()
         return True
 
     def cancelling(self):
@@ -325,6 +326,9 @@ class PygoTask(PygoFuture):
 
     # ---- driver: the per-task goroutine body ----
     def _driver(self):
+        # Capture our own G handle so cancel/done_callback can wake us.
+        self._self_g = pygo_core.current_g()
+
         coro       = self._coro
         send_value = None
         throw_exc  = None
@@ -405,10 +409,12 @@ class PygoTask(PygoFuture):
                 continue
 
             # Slow path: park the goroutine until the future fires.
-            # We register a done_callback that try_sends one byte;
-            # the recv below blocks the goroutine cooperatively.
+            # Register the wake callback FIRST then call park_self --
+            # the race where the future fires synchronously inside
+            # add_done_callback is handled by park_safe / wake_safe
+            # (wake_pending counter; park is a no-op if wake arrived).
             yielded.add_done_callback(self._wake_unpark)
-            self._wake_ch.recv()
+            pygo_core.park_self()
 
             # We're back.  Either the future is done, or we were
             # cancelled; figure out which.
@@ -432,11 +438,8 @@ class PygoTask(PygoFuture):
 
     def _wake_unpark(self, fut):
         # add_done_callback gives us the future; we don't need it.
-        try:
-            self._wake_ch.try_send(None)
-        except Exception:
-            # Channel closed -- task already cleaned up.  Drop.
-            pass
+        if self._self_g is not None:
+            self._self_g.wake()
 
 
 # ====================================================================

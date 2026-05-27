@@ -560,6 +560,24 @@ static PyObject *PygoG_result_get(PygoG *self, void *closure)
     return r;
 }
 
+/* Wake a goroutine that's parked via pygo_core.park_self().  Safe to
+ * call before the park (race-handled inside pygo_sched_wake_safe). */
+static PyObject *PygoG_wake(PygoG *self, PyObject *unused)
+{
+    (void)unused;
+    if (self->g != NULL) {
+        pygo_sched_wake_safe(self->g);
+    }
+    Py_RETURN_NONE;
+}
+
+static PyMethodDef PygoG_methods[] = {
+    {"wake", (PyCFunction)PygoG_wake, METH_NOARGS,
+     "Wake this goroutine if parked via park_self().  Safe to call "
+     "before park_self (race-handled)."},
+    {NULL, NULL, 0, NULL},
+};
+
 static PyGetSetDef PygoG_getset[] = {
     {"done",   (getter)PygoG_done_get,   NULL, "True after entry returns", NULL},
     {"result", (getter)PygoG_result_get, NULL, "Return value or None",     NULL},
@@ -576,7 +594,8 @@ static PyTypeObject PygoGType = {
     Py_TPFLAGS_DEFAULT,
     "Goroutine handle.",
     0, 0, 0, 0, 0, 0,
-    0, 0,
+    PygoG_methods,
+    0,
     PygoG_getset,
     0, 0, 0, 0, 0,
     0, 0,
@@ -809,6 +828,38 @@ static PyObject *m_sched_yield(PyObject *self, PyObject *unused)
     (void)self; (void)unused;
     pygo_sched_yield(pygo_sched_get());
     Py_RETURN_NONE;
+}
+
+/* Park the current goroutine until G.wake() is called on it.
+ * Race-safe: a wake that arrives before the park (sync callback firing
+ * from add_done_callback) makes this a no-op.  Used by pygo.aio's
+ * PygoTask to replace the per-task Chan(1) wake mechanism. */
+static PyObject *m_park_self(PyObject *self, PyObject *unused)
+{
+    (void)self; (void)unused;
+    pygo_sched_park_safe();
+    Py_RETURN_NONE;
+}
+
+/* Return a G handle to the currently-running goroutine, or None if
+ * called outside any goroutine.  Used by pygo.aio's PygoTask driver
+ * to capture its own handle for wake-from-callback. */
+static PyObject *m_current_g(PyObject *self, PyObject *unused)
+{
+    pygo_sched_t *s = pygo_sched_get();
+    pygo_g_t *g;
+    PygoG *handle;
+    (void)self; (void)unused;
+
+    g = s->current;
+    if (g == NULL) {
+        Py_RETURN_NONE;
+    }
+    handle = PyObject_New(PygoG, &PygoGType);
+    if (handle == NULL) return NULL;
+    pygo_g_incref(g);
+    handle->g = g;
+    return (PyObject *)handle;
 }
 
 /* Vectorcall fast-dispatch version of sched_yield.
@@ -1186,6 +1237,15 @@ static PyMethodDef module_methods[] = {
      "for benchmarking against the vectorcall singleton)."},
     {"sched_sleep", m_sched_sleep, METH_O,
      "Sleep the current goroutine for N seconds (C scheduler aware)."},
+    {"park_self",   m_park_self,   METH_NOARGS,
+     "Park the current goroutine until G.wake() is called on its "
+     "handle.  Race-safe: a wake that arrives before the park is "
+     "consumed and the park returns immediately."},
+    {"current_g",   m_current_g,   METH_NOARGS,
+     "Return a G handle to the currently-running goroutine, or None "
+     "if called outside one.  Used together with park_self/G.wake to "
+     "implement lightweight per-task wake primitives without the "
+     "overhead of a Chan."},
     {"run",         m_run,         METH_NOARGS,
      "Drive the C scheduler until all goroutines finish.  Returns count."},
     {"wait_fd",     m_wait_fd,     METH_VARARGS,

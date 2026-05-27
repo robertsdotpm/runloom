@@ -100,7 +100,24 @@ struct pygo_g {
      * is undefined -- frames will alias across goroutines.  Use
      * only for pure-compute callables. */
     int noyield;
+    /* Race-safe park/wake counter.  pygo_sched_park_safe decrements;
+     * if >0, the wake already arrived and we skip the yield.
+     * pygo_sched_wake_safe increments and (if g is currently parked)
+     * adds it back to ready.  Used by pygo.aio's PygoTask to replace
+     * the per-task Chan(1) wake channel with a much cheaper primitive
+     * -- saves ~5 us per task at fan-out time. */
+    int wake_pending;
 };
+
+/* Park current g until pygo_sched_wake_g(g) is called.  Race-safe:
+ * a wake that arrives BEFORE the park (because the future fires
+ * synchronously, e.g. add_done_callback on an already-done future)
+ * makes the park a no-op and the goroutine continues. */
+void pygo_sched_park_safe(void);
+
+/* Wake a goroutine previously parked via pygo_sched_park_safe.  Safe
+ * to call before park (wake_pending counter records the arrival). */
+void pygo_sched_wake_safe(pygo_g_t *g);
 
 /* Lifetime helpers. */
 void pygo_g_incref(pygo_g_t *g);
