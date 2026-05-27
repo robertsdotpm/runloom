@@ -99,6 +99,12 @@
    static __forceinline long long pygo_atomic_sub_ll(volatile long long *p, long long v) { return (long long)_InterlockedExchangeAdd64((volatile __int64 *)p, -(__int64)v) - v; }
 
    /* ---- typed CAS helpers (return 1 on success, 0 on mismatch + update *expected) ---- */
+   static __forceinline int pygo_atomic_cas_i(volatile int *p, int *expected, int desired) {
+       LONG prev = _InterlockedCompareExchange((volatile LONG *)p, (LONG)desired, (LONG)*expected);
+       if ((int)prev == *expected) return 1;
+       *expected = (int)prev;
+       return 0;
+   }
    static __forceinline int pygo_atomic_cas_l(volatile long *p, long *expected, long desired) {
        LONG prev = _InterlockedCompareExchange((volatile LONG *)p, (LONG)desired, (LONG)*expected);
        if ((long)prev == *expected) return 1;
@@ -180,6 +186,8 @@
 
 #  define __atomic_compare_exchange_n(p, expp, des, weak, sord, ford) \
        _Generic((p),                                                  \
+           int *:           pygo_atomic_cas_i,                        \
+           volatile int *:  pygo_atomic_cas_i,                        \
            long *:          pygo_atomic_cas_l,                        \
            volatile long *: pygo_atomic_cas_l,                        \
            long long *:           pygo_atomic_cas_ll,                 \

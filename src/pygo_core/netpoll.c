@@ -80,16 +80,18 @@ static int pygo_epoll_fd = -1;
 #elif defined(PYGO_HAVE_KQUEUE)
 static int pygo_kqueue_fd = -1;
 #elif defined(PYGO_OS_WINDOWS)
-/* Runtime-selected Windows backend.  WSAPoll is the modern choice
- * (Vista+, no FD_SETSIZE cap, microsecond accuracy); select() is the
- * fallback for XP / Server 2003 and the rare 7-or-older host where
- * WSAPoll has the known disconnected-socket-not-reported bug
- * (https://learn.microsoft.com/en-us/windows/win32/api/winsock2/nf-winsock2-wsapoll).
+#  include "netpoll_iocp.h"
+/* Runtime-selected Windows backend.  Tier order:
+ *   1. IOCP+AFD via \Device\Afd -- fastest at scale, O(1) per
+ *      ready socket.  Requires NtDeviceIoControlFile (NT 4.0+).
+ *   2. WSAPoll -- Vista+, no FD_SETSIZE cap, linear over fds.
+ *   3. select() -- XP / Server 2003 fallback.
  *
- * pygo_win_wsapoll == NULL means "use select fallback".  Set once by
- * pygo_netpoll_init via GetProcAddress; never reread. */
+ * Selection happens once in pygo_netpoll_init; backend_name is
+ * exported via pygo_core.netpoll_backend() for introspection. */
 typedef int (WSAAPI *pygo_wsapoll_fn)(LPWSAPOLLFD, ULONG, INT);
 static pygo_wsapoll_fn pygo_win_wsapoll = NULL;
+static int             pygo_win_use_iocp = 0;
 static const char     *pygo_win_backend_name = "select";   /* updated by init */
 #endif
 
@@ -134,6 +136,10 @@ const char *pygo_netpoll_backend(void)
 #elif defined(PYGO_HAVE_KQUEUE)
     return "kqueue";
 #elif defined(PYGO_OS_WINDOWS)
+    /* Force init so the IOCP/WSAPoll probe runs.  Without this the
+     * default string ("select") is returned even when IOCP would
+     * succeed -- the actual init only runs on first wait. */
+    if (!pygo_netpoll_inited) pygo_netpoll_init();
     return pygo_win_backend_name;
 #else
     return "select";
@@ -154,19 +160,30 @@ int pygo_netpoll_init(void)
     /* Bring up Winsock once.  Idempotent via plat_compat's
      * InterlockedCompareExchange guard. */
     pygo_winsock_init();
-    /* Probe for WSAPoll at runtime.  Linking against ws2_32 statically
-     * would refuse to load on XP if WSAPoll isn't present, so we
-     * GetProcAddress instead.  ws2_32 is already loaded by Python's
-     * import of socket; we only need a handle. */
+    /* Backend selection:
+     *   PYGO_NETPOLL=iocp  -> try IOCP+AFD (experimental, opt-in)
+     *   else               -> WSAPoll, then select() XP fallback
+     *
+     * IOCP-AFD is wired up end-to-end (pygo_iocp_init / submit / wait
+     * in netpoll_iocp.c) but undocumented AFD_POLL_ACCEPT semantics
+     * make it unreliable for listener sockets in practice; gated until
+     * the remaining quirk is characterised against wepoll's lifecycle. */
     {
-        HMODULE ws2 = GetModuleHandleA("ws2_32.dll");
-        if (ws2 == NULL) ws2 = LoadLibraryA("ws2_32.dll");
-        if (ws2 != NULL) {
-            pygo_win_wsapoll = (pygo_wsapoll_fn)
-                (void *)GetProcAddress(ws2, "WSAPoll");
+        const char *env = getenv("PYGO_NETPOLL");
+        if (env != NULL && strcmp(env, "iocp") == 0 &&
+            pygo_iocp_init() == 0) {
+            pygo_win_use_iocp = 1;
+            pygo_win_backend_name = "iocp-afd";
+        } else {
+            HMODULE ws2 = GetModuleHandleA("ws2_32.dll");
+            if (ws2 == NULL) ws2 = LoadLibraryA("ws2_32.dll");
+            if (ws2 != NULL) {
+                pygo_win_wsapoll = (pygo_wsapoll_fn)
+                    (void *)GetProcAddress(ws2, "WSAPoll");
+            }
+            pygo_win_backend_name = (pygo_win_wsapoll != NULL) ? "wsapoll" : "select";
         }
     }
-    pygo_win_backend_name = (pygo_win_wsapoll != NULL) ? "wsapoll" : "select";
 #endif
     pygo_netpoll_inited = 1;
     return 0;
@@ -179,7 +196,11 @@ void pygo_netpoll_fini(void)
 #elif defined(PYGO_HAVE_KQUEUE)
     if (pygo_kqueue_fd >= 0) { close(pygo_kqueue_fd); pygo_kqueue_fd = -1; }
 #elif defined(PYGO_OS_WINDOWS)
-    /* Nothing to close: WSAPoll / select use stateless registration.
+    if (pygo_win_use_iocp) {
+        pygo_iocp_fini();
+        pygo_win_use_iocp = 0;
+    }
+    /* WSAPoll / select are stateless; nothing else to close.
      * Winsock itself is left up by design (see pygo_winsock_init). */
 #endif
     pygo_netpoll_inited = 0;
@@ -237,7 +258,18 @@ int pygo_netpoll_wait_fd(int fd, int events, long long timeout_ns)
     pygo_g_t *current_g;
 
     if (pygo_netpoll_init() != 0) return -1;
+#if defined(PYGO_OS_WINDOWS)
+    /* IOCP-AFD: submit the poll request now; pump just drains
+     * completions.  Falls through to the no-op register for the
+     * WSAPoll / select paths. */
+    if (pygo_win_use_iocp) {
+        if (pygo_iocp_submit(fd, events, timeout_ns) != 0) return -1;
+    } else {
+        if (pygo_netpoll_register(fd, events) != 0) return -1;
+    }
+#else
     if (pygo_netpoll_register(fd, events) != 0) return -1;
+#endif
 
     /* Determine where this g lives so pump can route the wake.
      * If we're inside an M:N hub, the hub TLS gives us the target;
@@ -386,17 +418,58 @@ int pygo_netpoll_pump(long long timeout_ns)
         }
     }
 #elif defined(PYGO_OS_WINDOWS)
-    /* Windows backend.  Runtime-chosen between WSAPoll (Vista+) and
-     * select() (XP / older).  Both polish the same parked list under
-     * pygo_parked_lock; the lock is held across the blocking wait
-     * because the parked list is the source of truth for what fds we
-     * care about and which g to wake.
+    /* Windows backend.  Runtime-chosen between IOCP+AFD (NT 4.0+,
+     * O(1) per ready socket), WSAPoll (Vista+, no FD_SETSIZE cap)
+     * and select() (XP / older fallback).
      *
      * Important: Windows fds passed in here MUST be SOCKET handles
      * (returned by socket.socket.fileno()).  Pipe/file fds are NOT
      * pollable through Winsock -- the monkey-patch layer routes those
      * to the thread-pool backend in monkey.py. */
-    if (pygo_win_wsapoll != NULL) {
+    if (pygo_win_use_iocp) {
+        /* --- IOCP+AFD drain ---
+         *
+         * Every wait_fd call submitted its own AFD_POLL IRP at park
+         * time (see pygo_netpoll_wait_fd's Windows branch).  Pump
+         * just drains completions and wakes the matching gs.  No
+         * fd_set assembly, no linear walk over parked entries to
+         * test readiness -- the kernel only signals what's ready.
+         *
+         * Loop: pull as many completions as are immediately
+         * available, then return.  The hub_main outer loop calls
+         * pump again with a fresh timeout if it needs to wait. */
+        long long deadline = timeout_ns;
+        int local_woke = 0;
+        while (1) {
+            int fd, evs;
+            int rc;
+            long long step = (local_woke == 0) ? deadline : 0;
+            Py_BEGIN_ALLOW_THREADS
+            rc = pygo_iocp_wait(step, &fd, &evs);
+            Py_END_ALLOW_THREADS
+            if (rc <= 0) break;             /* 0 = timeout, -1 = error */
+            local_woke++;
+            /* Locate the matching parked entry and wake its g. */
+            pygo_mutex_lock(&pygo_parked_lock);
+            {
+                pygo_parked_t **pp = &pygo_parked_head;
+                while (*pp != NULL) {
+                    if ((*pp)->fd == fd && ((*pp)->events & evs)) {
+                        pygo_parked_t *hit = *pp;
+                        *(hit->ready_out) = evs & hit->events;
+                        *pp = hit->next;
+                        __atomic_sub_fetch(&pygo_parked_total, 1,
+                                           __ATOMIC_RELEASE);
+                        pygo_mn_wake_g(hit->hub, hit->g);
+                        woke++;
+                        break;
+                    }
+                    pp = &(*pp)->next;
+                }
+            }
+            pygo_mutex_unlock(&pygo_parked_lock);
+        }
+    } else if (pygo_win_wsapoll != NULL) {
         /* --- WSAPoll path --- */
         WSAPOLLFD fds_stack[128];
         WSAPOLLFD *fds = fds_stack;
