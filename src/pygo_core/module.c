@@ -382,6 +382,50 @@ static PyObject *m_sched_yield(PyObject *self, PyObject *unused)
     Py_RETURN_NONE;
 }
 
+/* Vectorcall fast-dispatch version of sched_yield.
+ *
+ * METH_NOARGS for a module-level function in CPython 3.12+ specializes
+ * the bytecode CALL to CALL_BUILTIN_O which is fast, but goes through
+ * PyCFunction_NewEx / etc. layers.  A type with tp_vectorcall_offset
+ * exposes its instances' vectorcallfunc directly, so the interpreter
+ * can branch straight to the C function pointer with zero argument-
+ * unpacking overhead.
+ *
+ * We expose a singleton instance as `pygo_core.sched_yield_fast` (and
+ * also assign it to `pygo_core.sched_yield` so existing call sites
+ * pick it up transparently).  The METH_NOARGS PyCFunction stays
+ * available under `sched_yield_classic` for benchmarking comparisons. */
+typedef struct {
+    PyObject_HEAD
+    vectorcallfunc vectorcall;
+} PygoYielder;
+
+static PyObject *yielder_vectorcall(PyObject *self,
+                                    PyObject *const *args,
+                                    size_t nargsf,
+                                    PyObject *kwnames)
+{
+    (void)self;
+    (void)args;
+    if (PyVectorcall_NARGS(nargsf) != 0 || kwnames != NULL) {
+        PyErr_SetString(PyExc_TypeError, "yielder takes no arguments");
+        return NULL;
+    }
+    pygo_sched_yield(pygo_sched_get());
+    Py_RETURN_NONE;
+}
+
+static PyTypeObject PygoYielderType = {
+    PyVarObject_HEAD_INIT(NULL, 0)
+    .tp_name = "pygo_core._Yielder",
+    .tp_basicsize = sizeof(PygoYielder),
+    .tp_vectorcall_offset = offsetof(PygoYielder, vectorcall),
+    .tp_call = PyVectorcall_Call,
+    .tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_VECTORCALL,
+    .tp_doc = "Singleton wrapper exposing sched_yield via vectorcall.",
+};
+
+
 static PyObject *m_sched_sleep(PyObject *self, PyObject *arg)
 {
     double secs;
@@ -485,8 +529,9 @@ static PyMethodDef module_methods[] = {
     /* C-scheduler fast path. */
     {"go",          m_go,          METH_O,
      "Spawn a goroutine via the C scheduler.  Returns a G handle."},
-    {"sched_yield", m_sched_yield, METH_NOARGS,
-     "Yield the current goroutine (C scheduler aware)."},
+    {"sched_yield_classic", m_sched_yield, METH_NOARGS,
+     "Yield the current goroutine (METH_NOARGS PyCFunction form, kept "
+     "for benchmarking against the vectorcall singleton)."},
     {"sched_sleep", m_sched_sleep, METH_O,
      "Sleep the current goroutine for N seconds (C scheduler aware)."},
     {"run",         m_run,         METH_NOARGS,
@@ -545,6 +590,27 @@ PyMODINIT_FUNC PyInit_pygo_core(void)
         Py_DECREF(&PygoCoroType);
         Py_DECREF(m);
         return NULL;
+    }
+    /* Set up the vectorcall singleton and expose it as `sched_yield`.
+     * The interpreter's CALL bytecode will specialize this to the
+     * vectorcall fast path, shaving Python-call-dispatch overhead off
+     * each yield site. */
+    if (PyType_Ready(&PygoYielderType) < 0) {
+        Py_DECREF(m);
+        return NULL;
+    }
+    {
+        PygoYielder *y = PyObject_New(PygoYielder, &PygoYielderType);
+        if (y == NULL) {
+            Py_DECREF(m);
+            return NULL;
+        }
+        y->vectorcall = yielder_vectorcall;
+        if (PyModule_AddObject(m, "sched_yield", (PyObject *)y) < 0) {
+            Py_DECREF(y);
+            Py_DECREF(m);
+            return NULL;
+        }
     }
 #ifdef Py_GIL_DISABLED
     /* Declare free-thread safety.  v0 scheduler is still single-OS-

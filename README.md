@@ -57,8 +57,13 @@ isolated):
 
 | path | 3.12 | 3.13t |
 | ---: | ---: | ---: |
-| 1 coro fast path (nobody else ready, snap skipped — Go's `runtime.Gosched`)  | **60 ns**  | **170 ns** |
-| 2 coros ping-pong (full snap + asm yield + load every cycle)                 | **187 ns** | **317 ns** |
+| 1 coro fast path (nobody else ready, snap skipped — Go's `runtime.Gosched`)  | **51 ns**  | **76 ns** |
+| 2 coros ping-pong (full snap + asm yield + load every cycle)                 | **178 ns** | **222 ns** |
+
+`sched_yield` is a vectorcall-enabled singleton, so calling it through
+a cached local (`y = pygo_core.sched_yield; y()`) is much faster than
+the module-attribute form (`pygo_core.sched_yield()`) on 3.13t where
+`LOAD_ATTR` costs ~100 ns/call.
 
 Phase B's full per-g PythonState snap costs ~125 ns per yield over a
 raw asm context switch.  We snapshot cframe / current_frame,
@@ -106,8 +111,8 @@ goroutine model (cheap spawn, no thread-per-task explosion at scale).
 Per-yield latency (single-coro fast path — the comparable measurement
 to Go's Gosched):
 - Go's `runtime.Gosched()`: ~50 ns
-- **pygo today (3.12)**: **60 ns** (within 20% of Go)
-- **pygo on 3.13t**: **170 ns**
+- **pygo today (3.12)**: **51 ns** (matches Go to within 1 ns)
+- **pygo on 3.13t**: **76 ns** (with `LOAD_FAST` cached call)
 - asyncio: ~1800 ns
 - pygo v0 (before Phase A): ~14 000 ns
 

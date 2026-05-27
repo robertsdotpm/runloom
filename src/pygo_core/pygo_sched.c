@@ -83,8 +83,16 @@ void pygo_pystate_snap(pygo_pystate_snap_t *snap)
      * a strong PyFrameObject ref for `gr_frame`; we don't need it.
      * Skipping this avoids a PyFrameObject allocation per snap. */
 
-    snap->exc_info = ts->exc_info;
-    snap->exc_state = ts->exc_state;
+    /* Exception state: the common case is "no exception in flight"
+     * which means ts->exc_info points to ts->exc_state (the per-tstate
+     * sentinel) and ts->exc_state.exc_value is NULL.  Signal that with
+     * snap->exc_info=NULL and skip the 24-byte exc_state copy. */
+    if (ts->exc_info == &ts->exc_state && ts->exc_state.exc_value == NULL) {
+        snap->exc_info = NULL;
+    } else {
+        snap->exc_info = ts->exc_info;
+        snap->exc_state = ts->exc_state;
+    }
 #endif
 
 #if PY_VERSION_HEX >= 0x030C0000 && PY_VERSION_HEX < 0x030D0000
@@ -119,13 +127,18 @@ void pygo_pystate_load(pygo_pystate_snap_t *snap)
     ts = PyThreadState_GET();
 
 #if PY_VERSION_HEX >= 0x030C0000
-    {
+    /* contextvars fast path: if g didn't touch ts->context, the snap's
+     * pointer matches ts's.  Drop our extra ref and skip the swap +
+     * context_ver bump.  The version stays stable because the content
+     * didn't change -- caches keyed by ver remain valid. */
+    if (ts->context == snap->context) {
+        Py_XDECREF(snap->context);
+        snap->context = NULL;
+    } else {
         PyObject *old = ts->context;
         ts->context = snap->context;
         snap->context = NULL;
         Py_XDECREF(old);
-        /* Bump the cache version: contextvars caches are keyed by
-         * context_ver and must be invalidated on swap. */
         ts->context_ver++;
     }
 
@@ -138,11 +151,22 @@ void pygo_pystate_load(pygo_pystate_snap_t *snap)
 
     /* (No top_frame snap to drop -- see comment in pygo_pystate_snap.) */
 
-    ts->exc_state = snap->exc_state;
-    ts->exc_info = snap->exc_info ? snap->exc_info : &ts->exc_state;
-    snap->exc_info = NULL;
-    snap->exc_state.exc_value = NULL;
-    snap->exc_state.previous_item = NULL;
+    /* Exception state restore.  snap->exc_info==NULL is the
+     * default-state sentinel (see snap path); reset ts to default only
+     * if it has drifted.  Otherwise copy the saved chain back. */
+    if (snap->exc_info == NULL) {
+        if (ts->exc_info != &ts->exc_state || ts->exc_state.exc_value != NULL) {
+            Py_CLEAR(ts->exc_state.exc_value);
+            ts->exc_state.previous_item = NULL;
+            ts->exc_info = &ts->exc_state;
+        }
+    } else {
+        ts->exc_state = snap->exc_state;
+        ts->exc_info = snap->exc_info;
+        snap->exc_info = NULL;
+        snap->exc_state.exc_value = NULL;
+        snap->exc_state.previous_item = NULL;
+    }
 #endif
 
 #if PY_VERSION_HEX >= 0x030C0000 && PY_VERSION_HEX < 0x030D0000
