@@ -469,6 +469,14 @@ static struct PyModuleDef pygo_core_module = {
     NULL, NULL, NULL, NULL
 };
 
+/* Declare the extension as safe under free-threaded Python (3.13t).
+ * Our single-OS-thread scheduler doesn't have multi-thread races
+ * today; the M:N work-stealing in Phase C will need actual atomic
+ * work-queue ops to keep this declaration honest. */
+#ifdef Py_GIL_DISABLED
+#  define PYGO_FT_OK 1
+#endif
+
 PyMODINIT_FUNC PyInit_pygo_core(void)
 {
     PyObject *m;
@@ -490,5 +498,11 @@ PyMODINIT_FUNC PyInit_pygo_core(void)
         Py_DECREF(m);
         return NULL;
     }
+#ifdef Py_GIL_DISABLED
+    /* Declare free-thread safety.  v0 scheduler is still single-OS-
+     * thread, so this is trivially safe.  Phase C M:N needs to maintain
+     * this when adding the work-stealing ring queue. */
+    PyUnstable_Module_SetGIL(m, Py_MOD_GIL_NOT_USED);
+#endif
     return m;
 }

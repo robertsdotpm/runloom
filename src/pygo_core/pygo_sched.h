@@ -30,17 +30,15 @@ struct pygo_g {
     PyObject *callable;
     PyObject *result;
     PyObject *error;
-#if PY_VERSION_HEX >= 0x030C0000
+#if PY_VERSION_HEX >= 0x030C0000 && PY_VERSION_HEX < 0x030D0000
+    /* CPython 3.12: split recursion counters. */
     int py_recursion_remaining;
     int c_recursion_remaining;
-    /* Per-g root cframe: the eval loop chains its stack cframes onto
-     * this, isolating g's Python frame chain from other goroutines'. */
-    _PyCFrame root_cframe;
-    _PyCFrame *cframe_snap;
-    /* Per-g exception-handling state.  Saved at yield, restored on
-     * resume so two gs don't see each other's tracebacks. */
-    _PyErr_StackItem exc_state;
-    _PyErr_StackItem *exc_info_snap;
+#elif PY_VERSION_HEX >= 0x030D0000
+    /* CPython 3.13+: layout changed again.  We snapshot the public
+     * counter only. */
+    int py_recursion_remaining;
+    int c_recursion_remaining;
 #else
     int recursion_depth;
 #endif
