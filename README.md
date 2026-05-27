@@ -34,7 +34,7 @@ No `async`.  No `await`.  Just `go(fn)` and blocking-style I/O.
 | ------ | ----------------------------------------------------------------------------------- | ----- |
 | **A**  | Inline asm context switch (x86_64 SysV) + C scheduler + recursion-counter snapshot  | **done** |
 | **B**  | Per-goroutine cframe / frame-chain swap                                             | **done** — full PythonState snapshot (cframe, current_frame, datastack_chunk, exc_info, context, recursion counters) per g; 50 K concurrent yielded gs run clean on both 3.12 and 3.13t |
-| **C**  | Free-threaded Python 3.13t support + **M:N work-stealing scheduler**                | **done** — pygo runs on 3.13t with GIL disabled; Chase-Lev work-stealing deques per hub; 2.5× parallel speedup on 8 cores measured |
+| **C**  | Free-threaded Python 3.13t support + **M:N work-stealing scheduler** + yield-in-hub | **done** — pygo runs on 3.13t with GIL disabled; Chase-Lev work-stealing deques per hub (with per-hub MPSC submission list so external producers don't race the deque owner); thread-local current-hub pointer routes `sched_yield` from a goroutine on hub H back to H's local FIFO; 2.5× parallel speedup on 8 cores, ~2 M y/s yield throughput across multiple hubs |
 | **D**  | netpoll (epoll/kqueue/select) + socket monkey-patch                                  | **done** |
 | **E**  | aarch64 inline asm context switch                                                    | **done** (untested on real ARM hardware; cross-compiled clean) |
 
@@ -119,15 +119,11 @@ Real network workload (pygo TCP echo server, plain external client):
 
 ## What's broken / deferred
 
-**Phase C v2 — yield support inside M:N hubs**.  v1 ships fire-and-
-forget gs: each goroutine runs to completion on its hub.  Adding
-`sched_yield` support inside a hub needs a thread-local "current hub"
-pointer so yield knows which deque to push back to; today yield
-operates on the single-threaded global scheduler.  ~100 LoC follow-up.
-
 **Phase E — aarch64 untested on real hardware**.  Cross-compiles clean
 with `aarch64-linux-gnu-gcc`; the asm + make_ctx code follows AAPCS64.
-Confirming on an Apple Silicon Mac or Linux ARM box would close this.
+Verified end-to-end under `qemu-aarch64` user-mode emulation (see
+`tests/test_arm64.sh`).  Real-hardware run on an Apple Silicon Mac or
+Linux ARM box would still be nice to confirm.
 
 ## Building
 
@@ -183,6 +179,5 @@ Today:
 - Cross-platform asm switches (x86_64 + aarch64), Windows Fibers, POSIX ucontext fallback
 - Compiles + runs on CPython 3.5–3.13t
 
-Phase B was the last correctness milestone; remaining work is
-performance polish + Phase C v2 (yield inside M:N hubs) + Phase E
-validation on real ARM hardware.
+All five phases shipped.  Remaining is performance polish (snap path
+~2× cost is the biggest knob) and real-hardware ARM validation.

@@ -47,12 +47,17 @@
 #define PY_SSIZE_T_CLEAN
 #include <Python.h>
 
-/* Phase C: not yet implemented.  Functions exist so Python-side code
- * can reference them; they currently fall back to single-thread sched. */
-
 int pygo_mn_init(int n_threads);
 PyObject *pygo_mn_go(PyObject *callable);
 Py_ssize_t pygo_mn_run(void);
 void pygo_mn_fini(void);
+
+/* Phase C v2 hook.  Called from pygo_sched_yield to give the M:N
+ * scheduler a chance to handle the yield in hub context.  Returns
+ * 1 if we're inside a hub and the yield was handled (g re-queued on
+ * the hub's local FIFO, state snapped, asm-yield done, control will
+ * return when hub re-resumes g).  Returns 0 if we're not in a hub
+ * and the caller should fall through to the single-thread sched path. */
+int pygo_mn_yield_current(void);
 
 #endif /* PYGO_MN_SCHED_H */

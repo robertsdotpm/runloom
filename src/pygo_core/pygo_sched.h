@@ -138,4 +138,20 @@ Py_ssize_t pygo_sched_drain(pygo_sched_t *s);
  * still referenced by Python). */
 void pygo_sched_init(pygo_sched_t *s);
 
+/* Internal FIFO ops, exposed for reuse from mn_sched.c (hub-local
+ * yielded-g queue piggybacks on the same singly-linked list). */
+void pygo_sched_ready_push(pygo_sched_t *s, pygo_g_t *g);
+pygo_g_t *pygo_sched_ready_pop(pygo_sched_t *s);
+
+/* Snap/load primitives, exposed for mn_sched.c so hub_main can do the
+ * same Phase B per-g state dance as the single-thread drain. */
+void pygo_pystate_snap(pygo_pystate_snap_t *snap);
+void pygo_pystate_load(pygo_pystate_snap_t *snap);
+void pygo_pystate_snap_clear(pygo_pystate_snap_t *snap);
+
+/* The user's callable trampoline for a goroutine; installs an initial
+ * root cframe / current_frame on g's own stack, then runs g->callable.
+ * Exposed so mn_sched.c can reuse the same entry (Phase B correct). */
+void pygo_g_entry(void *user);
+
 #endif /* PYGO_SCHED_H */

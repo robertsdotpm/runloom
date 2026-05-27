@@ -24,6 +24,7 @@
 #include <Python.h>
 
 #include "pygo_sched.h"
+#include "mn_sched.h"
 #include "netpoll.h"
 
 #include <math.h>
@@ -56,7 +57,7 @@ static double pygo_monotonic(void)
  * combined.  Each PY_VERSION_HEX gate matches greenlet's GREENLET_PY*
  * branches.
  */
-static void pygo_pystate_snap(pygo_pystate_snap_t *snap)
+void pygo_pystate_snap(pygo_pystate_snap_t *snap)
 {
     PyThreadState *ts = PyThreadState_GET();
 
@@ -105,7 +106,7 @@ static void pygo_pystate_snap(pygo_pystate_snap_t *snap)
     snap->valid = 1;
 }
 
-static void pygo_pystate_load(pygo_pystate_snap_t *snap)
+void pygo_pystate_load(pygo_pystate_snap_t *snap)
 {
     PyThreadState *ts;
 
@@ -170,7 +171,7 @@ static void pygo_pystate_load(pygo_pystate_snap_t *snap)
 
 /* Clear a snap that we own but won't load (e.g., g died while suspended).
  * Drops all owned refs. */
-static void pygo_pystate_snap_clear(pygo_pystate_snap_t *snap)
+void pygo_pystate_snap_clear(pygo_pystate_snap_t *snap)
 {
     if (!snap->valid) {
         return;
@@ -221,8 +222,10 @@ static void pygo_install_initial_root_frame(void)
 }
 #endif
 
-/* ---- Ready FIFO ops (singly-linked, head=pop, tail=push) ---- */
-static void pygo_ready_push(pygo_sched_t *s, pygo_g_t *g)
+/* ---- Ready FIFO ops (singly-linked, head=pop, tail=push) ----
+ * Exposed publicly so mn_sched.c can reuse the same list ops for its
+ * per-hub local FIFO of yielded gs. */
+void pygo_sched_ready_push(pygo_sched_t *s, pygo_g_t *g)
 {
     g->next = NULL;
     if (s->ready_tail == NULL) {
@@ -233,7 +236,7 @@ static void pygo_ready_push(pygo_sched_t *s, pygo_g_t *g)
     }
 }
 
-static pygo_g_t *pygo_ready_pop(pygo_sched_t *s)
+pygo_g_t *pygo_sched_ready_pop(pygo_sched_t *s)
 {
     pygo_g_t *g = s->ready_head;
     if (g == NULL) return NULL;
@@ -244,6 +247,11 @@ static pygo_g_t *pygo_ready_pop(pygo_sched_t *s)
     g->next = NULL;
     return g;
 }
+
+/* Short aliases for use inside this file (keeps the existing code
+ * readable; same functions). */
+#define pygo_ready_push pygo_sched_ready_push
+#define pygo_ready_pop  pygo_sched_ready_pop
 
 /* ---- Sleep heap (min-heap by wake_at) ---- */
 static int pygo_sleep_grow(pygo_sched_t *s)
@@ -342,7 +350,7 @@ pygo_sched_t *pygo_sched_get(void)
  * lifetime of g.  We exploit that by allocating the initial _PyCFrame
  * here (3.12 only) so its address remains valid for as long as we
  * might switch back to g. */
-static void pygo_g_entry(void *user)
+void pygo_g_entry(void *user)
 {
     pygo_g_t *g = (pygo_g_t *)user;
     PyObject *res;
@@ -425,7 +433,14 @@ PyObject *pygo_sched_spawn(pygo_sched_t *s, PyObject *callable)
 /* ---- Yield ---- */
 void pygo_sched_yield(pygo_sched_t *s)
 {
-    pygo_g_t *g = s->current;
+    pygo_g_t *g;
+    /* M:N first.  If a hub claims this thread, it handles the requeue
+     * + snap + asm-yield internally and we return through hub_main's
+     * resume cycle. */
+    if (pygo_mn_yield_current()) {
+        return;
+    }
+    g = s->current;
     if (g == NULL) return;
     pygo_ready_push(s, g);
     /* Save tstate INTO g's snap.  The scheduler's snap (in drain's
