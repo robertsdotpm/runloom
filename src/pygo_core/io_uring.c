@@ -243,6 +243,30 @@ static int pygo_iouring_lazy_init(void)
     int reg_arg;
 
     memset(&p, 0, sizeof(p));
+    /* Setup flags we DON'T pass and why:
+     *
+     *  IORING_SETUP_DEFER_TASKRUN (6.1+):
+     *    Defers completion task work until the user thread calls
+     *    io_uring_enter(GETEVENTS).  In our pump-on-eventfd model
+     *    the pump sleeps on epoll_wait(eventfd); the eventfd is
+     *    signalled only when a CQE is posted, but with DEFER_TASKRUN
+     *    the CQE isn't posted until we flush task work via
+     *    io_uring_enter -- so the pump would sleep forever waiting
+     *    for a notification that never comes.  Making it work would
+     *    require us to call io_uring_enter(GETEVENTS) periodically
+     *    (one extra syscall per drain), which negates the win.
+     *    Worth revisiting if/when we move to a dedicated drain thread.
+     *
+     *  IORING_SETUP_SINGLE_ISSUER (5.18+):
+     *    Asserts only the ring-creator thread submits SQEs.  Our M:N
+     *    hub threads also submit to the shared ring, so this would
+     *    fail on hub callers.  Could be enabled once per-hub rings
+     *    land.
+     *
+     *  IORING_SETUP_SQPOLL:
+     *    Dedicates a kernel thread to SQ polling.  Lower latency at
+     *    the cost of a busy CPU.  Future opt-in.
+     */
     fd = sys_io_uring_setup(64, &p);
     if (fd < 0) {
         pygo_iouring_state.initialised = -1;
