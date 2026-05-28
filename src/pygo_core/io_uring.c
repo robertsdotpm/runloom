@@ -138,14 +138,28 @@ static int sys_io_uring_register(int fd, unsigned opcode, void *arg,
     return (int)syscall(__NR_io_uring_register, fd, opcode, arg, nr_args);
 }
 
-/* Per-op record.  Lives on the submitter's C stack across the park.
- * user_data on the SQE is the address of this struct so drain can
- * route the completion back to the right waiter. */
+/* Per-op record.  user_data on the SQE points to one of these so
+ * drain can route the completion back to the right waiter.  For
+ * "single" ops the record lives on the submitter's C stack across
+ * the park; for "multishot" ops it lives as the first field of a
+ * pygo_iouring_ms_t handle (heap-allocated, longer-lived). */
+typedef enum {
+    PYGO_IOURING_OP_SINGLE    = 0,
+    PYGO_IOURING_OP_MULTISHOT = 1,
+    PYGO_IOURING_OP_CANCEL    = 2,    /* fire-and-forget */
+} pygo_iouring_op_type_t;
+
 typedef struct pygo_iouring_op {
-    pygo_g_t *g;             /* g to wake when this op completes */
+    int       type;          /* pygo_iouring_op_type_t */
+    pygo_g_t *g;             /* SINGLE: g to wake when this op completes */
     void     *hub;           /* opaque hub_t* or NULL for global sched */
-    int32_t   result;        /* CQE res field; valid after wake */
+    int32_t   result;        /* SINGLE: CQE res field; valid after wake */
 } pygo_iouring_op_t;
+
+/* Forward-declare for the drain handler. */
+typedef struct pygo_iouring_ms pygo_iouring_ms_t;
+static void pygo_iouring_ms_on_cqe(pygo_iouring_ms_t *h,
+                                   int32_t res, uint32_t flags);
 
 /* Per-process ring state.  Initialised lazily on first use; once set
  * up it lives for the process lifetime. */
@@ -527,26 +541,51 @@ void pygo_iouring_drain(void)
         unsigned ct   = __atomic_load_n(s->cq_tail, __ATOMIC_ACQUIRE);
         struct io_uring_cqe *cqe;
         pygo_iouring_op_t *op;
+        int32_t  res;
+        uint32_t flags;
+        int      type;
+        int      cqe_final;
         if (head == ct) return;
-        cqe = &s->cqes[head & s->cq_mask];
-        op  = (pygo_iouring_op_t *)(uintptr_t)cqe->user_data;
+        cqe   = &s->cqes[head & s->cq_mask];
+        res   = cqe->res;
+        flags = cqe->flags;
+        op    = (pygo_iouring_op_t *)(uintptr_t)cqe->user_data;
+        /* Final = multishot's "this SQE will produce no more CQEs".
+         * For SINGLE ops, every CQE is final.  For MULTISHOT ops, only
+         * the CQE that lacks IORING_CQE_F_MORE is final. */
+        type      = (op != NULL) ? op->type : PYGO_IOURING_OP_SINGLE;
+        cqe_final = (type != PYGO_IOURING_OP_MULTISHOT) ||
+                    !(flags & IORING_CQE_F_MORE);
+        __atomic_store_n(s->cq_head, head + 1, __ATOMIC_RELEASE);
+
         if (op != NULL) {
-            op->result = cqe->res;
-            if (op->hub != NULL) {
-                pygo_mn_wake_g(op->hub, op->g);
-            } else if (op->g != NULL) {
-                /* Global sched g.  wake_safe is race-safe: if the
-                 * submitter hasn't parked yet, it bumps wake_pending
-                 * and the next park_safe consumes the count without
-                 * yielding.  Single-thread sched can't actually race
-                 * here (drain runs from the pump which only runs
-                 * between gs), but the race-safe primitive is
-                 * cheap. */
-                pygo_sched_wake_safe(op->g);
+            switch (type) {
+            case PYGO_IOURING_OP_SINGLE:
+                op->result = res;
+                if (op->hub != NULL) {
+                    pygo_mn_wake_g(op->hub, op->g);
+                } else if (op->g != NULL) {
+                    /* wake_safe is race-safe: if the submitter hasn't
+                     * parked yet, it bumps wake_pending and the next
+                     * park_safe consumes the count without yielding. */
+                    pygo_sched_wake_safe(op->g);
+                }
+                break;
+            case PYGO_IOURING_OP_MULTISHOT:
+                pygo_iouring_ms_on_cqe((pygo_iouring_ms_t *)op, res, flags);
+                break;
+            case PYGO_IOURING_OP_CANCEL:
+                /* Fire-and-forget: the cancel op record is heap-
+                 * allocated by ms_close; once the CQE arrives the
+                 * record is no longer needed. */
+                free(op);
+                break;
             }
         }
-        __atomic_store_n(s->cq_head, head + 1, __ATOMIC_RELEASE);
-        __atomic_sub_fetch(&pygo_iouring_inflight_count, 1, __ATOMIC_ACQ_REL);
+        if (cqe_final) {
+            __atomic_sub_fetch(&pygo_iouring_inflight_count, 1,
+                               __ATOMIC_ACQ_REL);
+        }
     }
 }
 
@@ -563,9 +602,10 @@ static pygo_iouring_ssize_t pygo_iouring_do(struct io_uring_sqe sqe)
     }
 
     hub = pygo_mn_current_hub_opaque();
-    op.hub = hub;
-    op.g   = (hub != NULL) ? pygo_mn_tls_current_g()
-                           : pygo_sched_get()->current;
+    op.type   = PYGO_IOURING_OP_SINGLE;
+    op.hub    = hub;
+    op.g      = (hub != NULL) ? pygo_mn_tls_current_g()
+                              : pygo_sched_get()->current;
     op.result = INT32_MIN;        /* sentinel: not yet completed */
 
     if (pygo_iouring_submit_sqe(sqe, &op) != 0) return -1;
@@ -642,6 +682,322 @@ pygo_iouring_ssize_t pygo_iouring_pwrite(int fd, const void *buf, size_t n,
     return pygo_iouring_do(sqe);
 }
 
+/* ============================================================
+ * Multishot recv handle (Linux 6.0+ multishot + 5.19+ provided
+ * buffer ring).
+ *
+ * Per fd, one in-flight multishot SQE; the kernel produces a CQE
+ * each time data arrives, picking a buffer from the bgid=0 provided
+ * buffer ring.  The handle queues received-but-not-yet-consumed
+ * buffers and serves them to ms_recv calls.
+ * ============================================================ */
+
+typedef struct ms_entry {
+    uint16_t  bid;
+    uint16_t  len;
+    struct ms_entry *next;
+} ms_entry_t;
+
+struct pygo_iouring_ms {
+    pygo_iouring_op_t op;        /* must be first; SQE user_data */
+    int               fd;
+    int               closing;   /* ms_close called */
+    int               err;       /* sticky errno or 0 */
+    int               eof;       /* kernel signalled orderly EOF */
+    int               armed;     /* multishot SQE in-flight */
+
+    /* Ready buffer queue (head=oldest, tail=newest). */
+    ms_entry_t       *ready_head;
+    ms_entry_t       *ready_tail;
+
+    /* Partially-consumed buffer carried between ms_recv calls. */
+    int               inflight_bid;    /* -1 if none */
+    uint32_t          inflight_off;
+    uint32_t          inflight_len;
+
+    /* Single waiter (most TCPConns have one consumer goroutine). */
+    pygo_g_t         *waiter_g;
+    void             *waiter_hub;
+
+    pygo_mutex_t      lock;
+};
+
+/* Submit a multishot recv SQE for handle h.  Sets h->armed on
+ * success.  Caller must hold h->lock. */
+static int pygo_iouring_ms_submit(pygo_iouring_ms_t *h)
+{
+    struct io_uring_sqe sqe;
+    memset(&sqe, 0, sizeof(sqe));
+    sqe.opcode    = IORING_OP_RECV;
+    sqe.flags     = IOSQE_BUFFER_SELECT;
+    sqe.fd        = h->fd;
+    /* addr/len = 0 with BUFFER_SELECT means "kernel picks one from the
+     * provided-buffer ring at buf_group". */
+    sqe.ioprio    = IORING_RECV_MULTISHOT;
+    sqe.buf_group = PYGO_IOURING_PBUF_BGID;
+    if (pygo_iouring_submit_sqe(sqe, &h->op) != 0) return -1;
+    h->armed = 1;
+    return 0;
+}
+
+pygo_iouring_ms_t *pygo_iouring_ms_open(int fd)
+{
+    pygo_iouring_ms_t *h;
+    if (!pygo_iouring_pbuf_available()) return NULL;
+    h = (pygo_iouring_ms_t *)calloc(1, sizeof(*h));
+    if (h == NULL) return NULL;
+    h->op.type = PYGO_IOURING_OP_MULTISHOT;
+    h->fd      = fd;
+    h->inflight_bid = -1;
+    pygo_mutex_init(&h->lock);
+
+    pygo_mutex_lock(&h->lock);
+    if (pygo_iouring_ms_submit(h) != 0) {
+        pygo_mutex_unlock(&h->lock);
+        pygo_mutex_destroy(&h->lock);
+        free(h);
+        return NULL;
+    }
+    pygo_mutex_unlock(&h->lock);
+    return h;
+}
+
+/* Drain handler.  Called from pygo_iouring_drain when a CQE arrives
+ * with user_data pointing to a multishot handle.  Appends the
+ * delivered buffer to the handle's ready queue and wakes any
+ * parked consumer goroutine.  If the multishot ended (no F_MORE),
+ * clears the armed flag so the next recv re-submits. */
+static void pygo_iouring_ms_on_cqe(pygo_iouring_ms_t *h,
+                                   int32_t res, uint32_t flags)
+{
+    int has_buffer = (flags & IORING_CQE_F_BUFFER) != 0;
+    int more       = (flags & IORING_CQE_F_MORE) != 0;
+    pygo_g_t *wake_g  = NULL;
+    void     *wake_hub = NULL;
+    int       was_closing;
+
+    pygo_mutex_lock(&h->lock);
+
+    if (has_buffer && res > 0) {
+        ms_entry_t *e = (ms_entry_t *)malloc(sizeof(*e));
+        if (e != NULL) {
+            e->bid  = (uint16_t)(flags >> IORING_CQE_BUFFER_SHIFT);
+            e->len  = (uint16_t)res;
+            e->next = NULL;
+            if (h->ready_tail) h->ready_tail->next = e;
+            else               h->ready_head = e;
+            h->ready_tail = e;
+        } else {
+            /* OOM: data is lost; return the buffer so the kernel can
+             * reuse it.  Conn stays usable. */
+            uint16_t bid = (uint16_t)(flags >> IORING_CQE_BUFFER_SHIFT);
+            pygo_iouring_pbuf_return(bid);
+        }
+    } else if (res == 0 && !more) {
+        h->eof = 1;
+    } else if (res < 0) {
+        /* -ENOBUFS = kernel ran out of buffers; re-arm on next recv.
+         * -ECANCELED arrives in response to ms_close's cancel SQE. */
+        if (res != -ENOBUFS && res != -ECANCELED) {
+            h->err = -res;
+        }
+    }
+
+    if (!more) h->armed = 0;
+
+    /* Capture the waiter under the lock so we don't double-wake.
+     * Actual wake call goes outside the lock for latency. */
+    wake_g   = h->waiter_g;
+    wake_hub = h->waiter_hub;
+    h->waiter_g = NULL;
+
+    was_closing = h->closing;
+    pygo_mutex_unlock(&h->lock);
+
+    if (wake_g != NULL) {
+        if (wake_hub) pygo_mn_wake_g(wake_hub, wake_g);
+        else          pygo_sched_wake_safe(wake_g);
+    }
+
+    /* If the handle is closing AND the multishot has ended, this
+     * was the last CQE we'll ever see for it -- safe to free. */
+    if (was_closing && !more) {
+        ms_entry_t *e, *next;
+        e = h->ready_head;
+        while (e != NULL) {
+            next = e->next;
+            pygo_iouring_pbuf_return(e->bid);
+            free(e);
+            e = next;
+        }
+        if (h->inflight_bid >= 0)
+            pygo_iouring_pbuf_return((unsigned)h->inflight_bid);
+        pygo_mutex_destroy(&h->lock);
+        free(h);
+    }
+}
+
+pygo_iouring_ssize_t pygo_iouring_ms_recv(pygo_iouring_ms_t *h,
+                                          void *buf, size_t n)
+{
+    char *out = (char *)buf;
+    size_t out_off = 0;
+
+    if (h == NULL) { errno = EINVAL; return -1; }
+    if (n == 0)    return 0;
+
+    pygo_mutex_lock(&h->lock);
+    for (;;) {
+        /* 1. Drain any partially-consumed in-flight buffer first. */
+        if (h->inflight_bid >= 0) {
+            size_t avail = h->inflight_len - h->inflight_off;
+            size_t want  = n - out_off;
+            size_t take  = (avail < want) ? avail : want;
+            void *src = pygo_iouring_pbuf_addr((unsigned)h->inflight_bid);
+            if (src != NULL && take > 0) {
+                memcpy(out + out_off,
+                       (char *)src + h->inflight_off, take);
+                out_off += take;
+                h->inflight_off += (uint32_t)take;
+            }
+            if (h->inflight_off >= h->inflight_len) {
+                pygo_iouring_pbuf_return((unsigned)h->inflight_bid);
+                h->inflight_bid = -1;
+                h->inflight_off = 0;
+                h->inflight_len = 0;
+            }
+            if (out_off >= n) {
+                pygo_mutex_unlock(&h->lock);
+                return (pygo_iouring_ssize_t)out_off;
+            }
+            /* User wants more.  Loop to grab another buffer. */
+        }
+
+        /* 2. Move next ready buffer into the in-flight slot. */
+        if (h->ready_head != NULL) {
+            ms_entry_t *e = h->ready_head;
+            h->ready_head = e->next;
+            if (h->ready_head == NULL) h->ready_tail = NULL;
+            h->inflight_bid = e->bid;
+            h->inflight_off = 0;
+            h->inflight_len = e->len;
+            free(e);
+            continue;
+        }
+
+        /* 3. No data right now.  If we already copied some, return. */
+        if (out_off > 0) {
+            pygo_mutex_unlock(&h->lock);
+            return (pygo_iouring_ssize_t)out_off;
+        }
+
+        /* 4. EOF / sticky error. */
+        if (h->eof) {
+            pygo_mutex_unlock(&h->lock);
+            return 0;
+        }
+        if (h->err) {
+            int e = h->err;
+            pygo_mutex_unlock(&h->lock);
+            errno = e;
+            return -1;
+        }
+
+        /* 5. Re-arm if multishot ended (e.g. earlier -ENOBUFS). */
+        if (!h->armed) {
+            if (pygo_iouring_ms_submit(h) != 0) {
+                int e = errno;
+                pygo_mutex_unlock(&h->lock);
+                errno = e;
+                return -1;
+            }
+        }
+
+        /* 6. Park.  Capture our g under the lock, release, then yield. */
+        {
+            void *hub = pygo_mn_current_hub_opaque();
+            h->waiter_hub = hub;
+            h->waiter_g   = (hub != NULL) ? pygo_mn_tls_current_g()
+                                          : pygo_sched_get()->current;
+            pygo_mutex_unlock(&h->lock);
+            if (hub != NULL) {
+                /* Hub callers can't ride wake_pending (bound to the
+                 * global sched), so spin-drain via io_uring_enter. */
+                for (;;) {
+                    int n2;
+                    pygo_mutex_lock(&h->lock);
+                    if (h->ready_head || h->eof || h->err ||
+                        h->inflight_bid >= 0) {
+                        pygo_mutex_unlock(&h->lock);
+                        break;
+                    }
+                    pygo_mutex_unlock(&h->lock);
+                    n2 = sys_io_uring_enter(pygo_iouring_state.ring_fd,
+                                            0, 1,
+                                            IORING_ENTER_GETEVENTS,
+                                            NULL, 0);
+                    if (n2 < 0 && errno != EINTR) return -1;
+                    pygo_iouring_drain();
+                }
+            } else {
+                pygo_sched_park_safe();
+            }
+            pygo_mutex_lock(&h->lock);
+            /* Loop back to top to consume whatever drain delivered. */
+        }
+    }
+}
+
+void pygo_iouring_ms_close(pygo_iouring_ms_t *h)
+{
+    pygo_iouring_op_t *cancel_op;
+    struct io_uring_sqe sqe;
+    int armed_snapshot;
+
+    if (h == NULL) return;
+
+    pygo_mutex_lock(&h->lock);
+    h->closing = 1;
+    armed_snapshot = h->armed;
+    pygo_mutex_unlock(&h->lock);
+
+    if (!armed_snapshot) {
+        /* Multishot already terminated; safe to free immediately. */
+        ms_entry_t *e, *next;
+        e = h->ready_head;
+        while (e != NULL) {
+            next = e->next;
+            pygo_iouring_pbuf_return(e->bid);
+            free(e);
+            e = next;
+        }
+        if (h->inflight_bid >= 0)
+            pygo_iouring_pbuf_return((unsigned)h->inflight_bid);
+        pygo_mutex_destroy(&h->lock);
+        free(h);
+        return;
+    }
+
+    /* Fire-and-forget cancel.  drain frees the cancel op record when
+     * the cancel CQE arrives; the multishot's final CQE (with
+     * F_MORE clear) triggers the handle free in on_cqe. */
+    cancel_op = (pygo_iouring_op_t *)calloc(1, sizeof(*cancel_op));
+    if (cancel_op == NULL) {
+        /* OOM: leak the handle; the kernel will eventually deliver
+         * -ECANCELED when the fd closes, and on_cqe with closing=1
+         * will free.  Best-effort. */
+        return;
+    }
+    cancel_op->type = PYGO_IOURING_OP_CANCEL;
+    memset(&sqe, 0, sizeof(sqe));
+    sqe.opcode = IORING_OP_ASYNC_CANCEL;
+    sqe.addr   = (uintptr_t)&h->op;     /* match SQE by its user_data */
+    sqe.fd     = -1;
+    if (pygo_iouring_submit_sqe(sqe, cancel_op) != 0) {
+        free(cancel_op);
+    }
+}
+
 pygo_iouring_ssize_t pygo_iouring_recv(int fd, void *buf, size_t n, int flags)
 {
     struct io_uring_sqe sqe;
@@ -681,6 +1037,16 @@ unsigned pygo_iouring_pbuf_size(void) { return 0; }
 unsigned pygo_iouring_pbuf_count(void) { return 0; }
 void *pygo_iouring_pbuf_addr(unsigned bid) { (void)bid; return NULL; }
 void pygo_iouring_pbuf_return(unsigned bid) { (void)bid; }
+
+pygo_iouring_ms_t *pygo_iouring_ms_open(int fd) { (void)fd; return NULL; }
+pygo_iouring_ssize_t pygo_iouring_ms_recv(pygo_iouring_ms_t *h,
+                                          void *buf, size_t n)
+{
+    (void)h; (void)buf; (void)n;
+    errno = ENOSYS;
+    return -1;
+}
+void pygo_iouring_ms_close(pygo_iouring_ms_t *h) { (void)h; }
 
 pygo_iouring_ssize_t pygo_iouring_pread(int fd, void *buf, size_t n, pygo_iouring_off_t offset)
 {

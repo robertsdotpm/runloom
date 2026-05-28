@@ -91,6 +91,11 @@ typedef struct {
     int family;      /* AF_INET / AF_INET6 / etc */
     int is_listener; /* True after listen() succeeds */
     int closed;
+#if defined(__linux__)
+    /* Lazily-allocated multishot recv handle.  NULL until the first
+     * recv on this conn under PYGO_TCPCONN_IOURING=1; freed in close. */
+    pygo_iouring_ms_t *ms;
+#endif
 } PygoTCPConn;
 
 static PyTypeObject PygoTCPConnType;
@@ -218,6 +223,9 @@ static PyObject *PygoTCPConn_new(PyTypeObject *type, PyObject *args, PyObject *k
     self->family = 0;
     self->is_listener = 0;
     self->closed = 0;
+#if defined(__linux__)
+    self->ms = NULL;
+#endif
     return (PyObject *)self;
 }
 
@@ -249,6 +257,12 @@ static int PygoTCPConn_init(PygoTCPConn *self, PyObject *args, PyObject *kwds)
 static void PygoTCPConn_dealloc(PygoTCPConn *self)
 {
     if (!self->closed && self->fd >= 0) {
+#if defined(__linux__)
+        if (self->ms != NULL) {
+            pygo_iouring_ms_close(self->ms);
+            self->ms = NULL;
+        }
+#endif
         pygo_netpoll_unregister(self->fd);
         pygo_closesock((PYGO_SOCK_T)self->fd);
         self->fd = -1;
@@ -261,6 +275,12 @@ static PyObject *PygoTCPConn_close(PygoTCPConn *self, PyObject *unused)
 {
     (void)unused;
     if (!self->closed && self->fd >= 0) {
+#if defined(__linux__)
+        if (self->ms != NULL) {
+            pygo_iouring_ms_close(self->ms);
+            self->ms = NULL;
+        }
+#endif
         pygo_netpoll_unregister(self->fd);
         pygo_closesock((PYGO_SOCK_T)self->fd);
         self->fd = -1;
@@ -326,7 +346,28 @@ static PyObject *PygoTCPConn_recv(PygoTCPConn *self, PyObject *args)
 #if defined(__linux__)
     use_iouring = pygo_tcpconn_use_iouring();
     if (use_iouring) {
-        pygo_iouring_ssize_t r = pygo_iouring_recv(fd, out, (size_t)n_bytes, flags);
+        pygo_iouring_ssize_t r;
+        /* Multishot when available and the call carries no special
+         * MSG_* flags (multishot SQE is fire-and-forget without
+         * per-call flags). */
+        if (flags == 0 && pygo_iouring_pbuf_available()) {
+            if (self->ms == NULL) {
+                self->ms = pygo_iouring_ms_open(fd);
+            }
+            if (self->ms != NULL) {
+                r = pygo_iouring_ms_recv(self->ms, out, (size_t)n_bytes);
+                if (r < 0) {
+                    Py_DECREF(result);
+                    return PyErr_SetFromErrno(PyExc_OSError);
+                }
+                got = (Py_ssize_t)r;
+                if (got < n_bytes) {
+                    if (_PyBytes_Resize(&result, got) < 0) return NULL;
+                }
+                return result;
+            }
+        }
+        r = pygo_iouring_recv(fd, out, (size_t)n_bytes, flags);
         if (r < 0) {
             Py_DECREF(result);
             return PyErr_SetFromErrno(PyExc_OSError);
@@ -390,11 +431,21 @@ static PyObject *PygoTCPConn_recv_into(PygoTCPConn *self, PyObject *args)
 
 #if defined(__linux__)
     if (pygo_tcpconn_use_iouring()) {
-        /* Single-shot IORING_OP_RECV: kernel waits for data, posts CQE
-         * when ready.  Replaces the recv()-EAGAIN-then-park loop with
-         * one submit + park cycle. */
-        pygo_iouring_ssize_t r = pygo_iouring_recv(fd, buf.buf,
-                                                  (size_t)n_bytes, flags);
+        pygo_iouring_ssize_t r;
+        if (flags == 0 && pygo_iouring_pbuf_available()) {
+            if (self->ms == NULL) {
+                self->ms = pygo_iouring_ms_open(fd);
+            }
+            if (self->ms != NULL) {
+                r = pygo_iouring_ms_recv(self->ms, buf.buf, (size_t)n_bytes);
+                PyBuffer_Release(&buf);
+                if (r < 0) return PyErr_SetFromErrno(PyExc_OSError);
+                return PyLong_FromSsize_t((Py_ssize_t)r);
+            }
+        }
+        /* Single-shot IORING_OP_RECV fallback (kernel < 5.19, or
+         * non-zero flags). */
+        r = pygo_iouring_recv(fd, buf.buf, (size_t)n_bytes, flags);
         PyBuffer_Release(&buf);
         if (r < 0) return PyErr_SetFromErrno(PyExc_OSError);
         return PyLong_FromSsize_t((Py_ssize_t)r);

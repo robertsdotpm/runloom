@@ -97,4 +97,27 @@ void *pygo_iouring_pbuf_addr(unsigned bid);
  * to call concurrently. */
 void pygo_iouring_pbuf_return(unsigned bid);
 
+/* Opaque handle for a per-fd multishot recv stream. */
+typedef struct pygo_iouring_ms pygo_iouring_ms_t;
+
+/* Open a multishot recv handle on fd.  Submits one IORING_OP_RECV
+ * with IORING_RECV_MULTISHOT immediately.  Returns NULL if the
+ * kernel doesn't support multishot + provided buffer rings, or if
+ * submission fails (errno set).  Caller owns the handle and must
+ * call pygo_iouring_ms_close to release it. */
+pygo_iouring_ms_t *pygo_iouring_ms_open(int fd);
+
+/* Cooperatively read up to n bytes into buf.  Returns bytes read
+ * (0 on orderly EOF, -1 with errno on error).  Parks the calling
+ * goroutine until data arrives or EOF/error. */
+pygo_iouring_ssize_t pygo_iouring_ms_recv(pygo_iouring_ms_t *h,
+                                          void *buf, size_t n);
+
+/* Close the multishot handle.  Submits an ASYNC_CANCEL for the in-
+ * flight multishot SQE if it's still armed; the handle is freed
+ * asynchronously by drain once the kernel's final CQE arrives.  If
+ * the multishot already terminated the handle is freed inline.
+ * Returns immediately; do not touch h afterwards. */
+void pygo_iouring_ms_close(pygo_iouring_ms_t *h);
+
 #endif
