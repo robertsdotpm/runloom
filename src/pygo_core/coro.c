@@ -161,7 +161,27 @@ static void *pygo_stack_acquire(size_t size)
 
 static void pygo_stack_release(void *stack, size_t size)
 {
-    void **hdr = (void **)stack;
+    void **hdr;
+    /* Drop physical pages back to the OS *before* writing the header.
+     * MADV_DONTNEED keeps the VA reservation but lets the kernel reclaim
+     * the page frames; next touch re-faults a fresh zero page.  We have
+     * to skip the first page so the pool linkage survives -- the header
+     * lives in the first 16 bytes of the stack.
+     *
+     * Net effect: pool entries hold 4 KB resident each instead of the
+     * full stack_size.  At 4096 pool entries that's 16 MB instead of
+     * (4096 * stack_size).  Across pool churn, the deepest-used pages
+     * keep faulting fresh, so RSS scales with active gs, not capacity. */
+#if defined(MADV_DONTNEED)
+    {
+        long ps = sysconf(_SC_PAGESIZE);
+        size_t page = (ps > 0) ? (size_t)ps : (size_t)4096;
+        if (size > page) {
+            (void)madvise((char *)stack + page, size - page, MADV_DONTNEED);
+        }
+    }
+#endif
+    hdr = (void **)stack;
     hdr[PYGO_STACK_HDR_NEXT] = (void *)pygo_tls_stack_pool;
     hdr[PYGO_STACK_HDR_SIZE] = (void *)size;
     pygo_tls_stack_pool = hdr;
@@ -191,6 +211,55 @@ static size_t pygo_round_to_page(size_t size)
     if (pagesize <= 0) pagesize = 4096;
     return ((size + (size_t)pagesize - 1) /
             (size_t)pagesize) * (size_t)pagesize;
+}
+
+#endif
+
+/* ------------------------------------------------------------------ */
+/* Stack painting / high-water-mark scan                              */
+/* ------------------------------------------------------------------ */
+
+/* Sentinel value used to fill unused stack memory.  Picked so that
+ * the byte sequence is unlikely to appear naturally in compiler-
+ * emitted code or Python interpreter state.  The 8-byte alignment of
+ * the chunk lets the paint/scan loop run at memory bandwidth. */
+static const uint64_t PYGO_STACK_SENTINEL = 0x504AE6B7C9D1F2A3ULL;
+
+/* Global toggle.  Disabled after calibration finishes so steady-state
+ * spawns don't pay the paint cost. */
+static int pygo_stack_paint_on = 1;
+
+void pygo_coro_paint_set(int enabled) { pygo_stack_paint_on = enabled ? 1 : 0; }
+int  pygo_coro_paint_enabled(void)    { return pygo_stack_paint_on; }
+
+#if defined(PYGO_HAVE_FCONTEXT) || defined(PYGO_HAVE_UCONTEXT)
+/* Paint every 8-byte chunk of the stack body with the sentinel.
+ * Skip the first 16 bytes (reserved for the pool's free-list header)
+ * and the last 256 bytes (asm_make_ctx writes the initial register
+ * frame there; that area is rewritten by every resume so painting
+ * it just inflates the HWM scan). */
+static void pygo_stack_paint(void *stack, size_t size)
+{
+    uint64_t *p, *end;
+    if (!pygo_stack_paint_on) return;
+    p   = (uint64_t *)((uintptr_t)stack + 16);
+    end = (uint64_t *)((uintptr_t)stack + size - 256);
+    while (p < end) *p++ = PYGO_STACK_SENTINEL;
+}
+
+/* Scan low->high; the first non-sentinel word marks the deepest write.
+ * Stack grows DOWN, so deepest write == lowest address; reported HWM
+ * is (top - deepest_addr) bytes. */
+static size_t pygo_stack_hwm_scan(void *stack, size_t size)
+{
+    uint64_t *p, *end;
+    uintptr_t deepest;
+    p   = (uint64_t *)((uintptr_t)stack + 16);
+    end = (uint64_t *)((uintptr_t)stack + size - 256);
+    while (p < end && *p == PYGO_STACK_SENTINEL) p++;
+    if (p >= end) return 0;
+    deepest = (uintptr_t)p;
+    return (size_t)(((uintptr_t)stack + size) - deepest);
 }
 #endif
 
@@ -302,6 +371,7 @@ pygo_coro_t *pygo_coro_new(size_t stack_size,
         c->asm_coro.entry = pygo_fcontext_entry;
         c->asm_coro.user = c;
         c->asm_coro.done = 0;
+        pygo_stack_paint(c->stack, rounded);
         stack_top = (void *)((uintptr_t)c->stack + rounded);
         pygo_asm_make_ctx(&c->asm_coro, stack_top);
         return c;
@@ -314,6 +384,7 @@ pygo_coro_t *pygo_coro_new(size_t stack_size,
     c->stack = pygo_stack_acquire(rounded);
     if (c->stack == NULL) { free(c); return NULL; }
     c->stack_size = rounded;
+    pygo_stack_paint(c->stack, rounded);
 
     c->asm_coro.entry = pygo_fcontext_entry;
     c->asm_coro.user = c;
@@ -463,6 +534,7 @@ pygo_coro_t *pygo_coro_new(size_t stack_size,
     c->stack = pygo_stack_acquire(rounded);
     if (c->stack == NULL) { free(c); return NULL; }
     c->stack_size = rounded;
+    pygo_stack_paint(c->stack, rounded);
 
     if (getcontext(&c->ctx) != 0) {
         pygo_stack_release(c->stack, c->stack_size);
@@ -521,3 +593,19 @@ int pygo_coro_done(const pygo_coro_t *c)
 }
 
 #endif /* PYGO_HAVE_UCONTEXT */
+
+/* ------------------------------------------------------------------ */
+/* Public scan_hwm                                                    */
+/* ------------------------------------------------------------------ */
+
+size_t pygo_coro_scan_hwm(pygo_coro_t *c)
+{
+#if defined(PYGO_HAVE_FCONTEXT) || defined(PYGO_HAVE_UCONTEXT)
+    if (c == NULL || c->stack == NULL || !pygo_stack_paint_on) return 0;
+    return pygo_stack_hwm_scan(c->stack, c->stack_size);
+#else
+    /* Windows Fibers: no introspectable stack. */
+    (void)c;
+    return 0;
+#endif
+}

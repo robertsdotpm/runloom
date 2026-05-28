@@ -566,6 +566,85 @@ pygo_g_t *pygo_sched_sleep_pop(pygo_sched_t *s)
 static pygo_sched_t pygo_global_sched;
 static int pygo_global_sched_init_done = 0;
 
+/* ---- Stack calibration ----
+ *
+ * Default: 256 KB.  Generous enough that real Python programs fit
+ * without overflow; demand-paging means the unused tail consumes
+ * no physical RAM until touched.  After PYGO_CAL_TARGET completions
+ * we freeze to next_pow2(max_hwm * PYGO_CAL_SAFETY).
+ *
+ * Reads/writes are plain (single-threaded scheduler in v0); when
+ * Phase C arrives these will move under the scheduler lock. */
+#define PYGO_DEFAULT_STACK_SIZE   (256 * 1024)
+#define PYGO_MIN_STACK_SIZE       (16  * 1024)
+#define PYGO_MAX_STACK_SIZE       (8   * 1024 * 1024)
+#define PYGO_CAL_TARGET           1000     /* gs before freeze */
+#define PYGO_CAL_SAFETY           4        /* multiply HWM by this */
+
+static size_t    pygo_cal_default = PYGO_DEFAULT_STACK_SIZE;
+static size_t    pygo_cal_max_hwm = 0;
+static long long pygo_cal_completed = 0;
+static int       pygo_cal_frozen = 0;
+
+static size_t pygo_next_pow2(size_t v)
+{
+    size_t p = 1;
+    while (p < v && p < PYGO_MAX_STACK_SIZE) p <<= 1;
+    return p;
+}
+
+/* Called from drain after a g completes.  Scans the g's stack for
+ * HWM, updates the running max, and freezes the calibration window
+ * if we've collected enough samples. */
+static void pygo_cal_record(pygo_g_t *g)
+{
+    size_t hwm;
+    if (pygo_cal_frozen || !pygo_coro_paint_enabled()) return;
+    if (g == NULL || g->coro == NULL) return;
+    hwm = pygo_coro_scan_hwm(g->coro);
+    if (hwm > pygo_cal_max_hwm) pygo_cal_max_hwm = hwm;
+    pygo_cal_completed++;
+    if (pygo_cal_completed >= PYGO_CAL_TARGET) {
+        size_t bound = pygo_cal_max_hwm * PYGO_CAL_SAFETY;
+        size_t chosen = pygo_next_pow2(bound);
+        if (chosen < PYGO_MIN_STACK_SIZE) chosen = PYGO_MIN_STACK_SIZE;
+        if (chosen > PYGO_MAX_STACK_SIZE) chosen = PYGO_MAX_STACK_SIZE;
+        pygo_cal_default = chosen;
+        pygo_cal_frozen = 1;
+        pygo_coro_paint_set(0);
+        if (pygo_global_sched_init_done) {
+            pygo_global_sched.stack_size = (Py_ssize_t)chosen;
+        }
+    }
+}
+
+void pygo_sched_set_default_stack_size(size_t bytes)
+{
+    if (bytes < PYGO_MIN_STACK_SIZE) bytes = PYGO_MIN_STACK_SIZE;
+    if (bytes > PYGO_MAX_STACK_SIZE) bytes = PYGO_MAX_STACK_SIZE;
+    pygo_cal_default = bytes;
+    pygo_cal_frozen = 1;
+    pygo_coro_paint_set(0);
+    if (pygo_global_sched_init_done) {
+        pygo_global_sched.stack_size = (Py_ssize_t)bytes;
+    }
+}
+
+size_t pygo_sched_get_default_stack_size(void)
+{
+    return pygo_cal_default;
+}
+
+void pygo_sched_stack_stats(pygo_stack_stats_t *out)
+{
+    if (out == NULL) return;
+    out->default_size = pygo_cal_default;
+    out->max_hwm      = pygo_cal_max_hwm;
+    out->completed    = pygo_cal_completed;
+    out->calibrated   = pygo_cal_frozen;
+    out->painting     = pygo_coro_paint_enabled();
+}
+
 void pygo_sched_init(pygo_sched_t *s)
 {
     /* Initial ring of 64 entries; grows on demand.  Empty when
@@ -579,7 +658,7 @@ void pygo_sched_init(pygo_sched_t *s)
     s->sleep_heap = NULL;
     s->sleep_size = 0;
     s->sleep_cap = 0;
-    s->stack_size = 131072;   /* 128 KB per goroutine */
+    s->stack_size = (Py_ssize_t)pygo_cal_default;
     s->completed = 0;
     s->stopping = 0;
 }
@@ -725,7 +804,8 @@ void pygo_g_decref(pygo_g_t *g)
 }
 
 /* ---- Spawn ---- */
-static PyObject *spawn_common(pygo_sched_t *s, PyObject *callable, int noyield)
+static PyObject *spawn_common(pygo_sched_t *s, PyObject *callable,
+                              int noyield, size_t stack_size)
 {
     pygo_g_t *g = pygo_g_slab_alloc();
     if (g == NULL) {
@@ -736,8 +816,7 @@ static PyObject *spawn_common(pygo_sched_t *s, PyObject *callable, int noyield)
     g->callable = callable;
     g->refcount = 1;   /* one ref for the scheduler queue */
     g->noyield = noyield;
-    g->coro = pygo_coro_new((size_t)s->stack_size,
-                            pygo_g_entry, g);
+    g->coro = pygo_coro_new(stack_size, pygo_g_entry, g);
     if (g->coro == NULL) {
         Py_DECREF(g->callable);
         pygo_g_slab_free(g);
@@ -750,12 +829,20 @@ static PyObject *spawn_common(pygo_sched_t *s, PyObject *callable, int noyield)
 
 PyObject *pygo_sched_spawn(pygo_sched_t *s, PyObject *callable)
 {
-    return spawn_common(s, callable, /*noyield*/0);
+    return spawn_common(s, callable, /*noyield*/0, (size_t)s->stack_size);
 }
 
 PyObject *pygo_sched_spawn_noyield(pygo_sched_t *s, PyObject *callable)
 {
-    return spawn_common(s, callable, /*noyield*/1);
+    return spawn_common(s, callable, /*noyield*/1, (size_t)s->stack_size);
+}
+
+PyObject *pygo_sched_spawn_sized(pygo_sched_t *s, PyObject *callable,
+                                 size_t stack_size)
+{
+    if (stack_size < PYGO_MIN_STACK_SIZE) stack_size = PYGO_MIN_STACK_SIZE;
+    if (stack_size > PYGO_MAX_STACK_SIZE) stack_size = PYGO_MAX_STACK_SIZE;
+    return spawn_common(s, callable, /*noyield*/0, stack_size);
 }
 
 /* ---- Yield ---- */
@@ -994,6 +1081,7 @@ Py_ssize_t pygo_sched_drain(pygo_sched_t *s)
                 s->current = prev;
                 if (pygo_coro_done(g->coro)) {
                     s->completed++;
+                    pygo_cal_record(g);
                     pygo_g_decref(g);
                 }
                 /* If a noyield g ACTUALLY yielded (caller broke its
@@ -1067,6 +1155,7 @@ Py_ssize_t pygo_sched_drain(pygo_sched_t *s)
                 pygo_drain_g_datastack();
                 pygo_pystate_load(&sched_snap);
                 s->completed++;
+                pygo_cal_record(g);
                 pygo_g_decref(g);
                 pygo_pystate_snap(&sched_snap);
             }

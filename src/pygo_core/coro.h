@@ -61,4 +61,24 @@ void pygo_coro_thread_fini(void);
  * No-op if n <= 0.  Returns the number actually pre-allocated. */
 int pygo_coro_warmup(size_t stack_size, int n);
 
+/* ------------------------------------------------------------------ */
+/* Stack-usage measurement (used by sched calibration)                */
+/* ------------------------------------------------------------------ */
+
+/* When painting is enabled, every pygo_coro_new paints the stack body
+ * with a known sentinel pattern (8-byte chunks).  pygo_coro_scan_hwm
+ * then walks low->high and reports how many bytes were actually
+ * touched by the coroutine.
+ *
+ * Disable painting (e.g. after calibration) to drop the per-spawn
+ * paint cost (~few µs at 256 KB). */
+void pygo_coro_paint_set(int enabled);
+int  pygo_coro_paint_enabled(void);
+
+/* Returns the high-water mark in bytes (deepest write detected by
+ * scanning for the sentinel).  Returns 0 if painting was disabled or
+ * the coro hasn't been used.  Backend may return 0 on Fibers
+ * (no introspectable stack). */
+size_t pygo_coro_scan_hwm(pygo_coro_t *c);
+
 #endif /* PYGO_CORO_H */

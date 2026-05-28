@@ -191,6 +191,37 @@ PyObject *pygo_sched_spawn(pygo_sched_t *s, PyObject *callable);
  * the handler is pure compute. */
 PyObject *pygo_sched_spawn_noyield(pygo_sched_t *s, PyObject *callable);
 
+/* Spawn with an explicit per-g stack size override (bypasses calibration
+ * and the scheduler default).  Used for the rare g whose call depth
+ * exceeds the calibrated bound (deep recursion, heavy C extension). */
+PyObject *pygo_sched_spawn_sized(pygo_sched_t *s, PyObject *callable,
+                                 size_t stack_size);
+
+/* ---- Stack calibration ----
+ *
+ * During the warmup window, every g is painted with a sentinel and
+ * scanned on completion.  Once N completions have been observed (or T
+ * seconds have elapsed) we lock the scheduler-wide default to
+ * next_pow2(observed_max_hwm * SAFETY).  Painting is then disabled to
+ * remove the per-spawn overhead, and pool entries at the old size
+ * naturally drain.
+ *
+ * Override-on-set: pygo_sched_set_default_stack_size also freezes
+ * calibration; subsequent goroutines spawn at the requested size. */
+void   pygo_sched_set_default_stack_size(size_t bytes);
+size_t pygo_sched_get_default_stack_size(void);
+
+/* Snapshot of calibration state.  All fields are best-effort reads
+ * (no lock).  Used by pygo_core.stats(). */
+typedef struct pygo_stack_stats {
+    size_t  default_size;    /* current per-spawn default in bytes */
+    size_t  max_hwm;         /* highest HWM observed since start */
+    long long completed;     /* number of gs that have been scanned */
+    int     calibrated;      /* 0 = still calibrating, 1 = frozen */
+    int     painting;        /* current paint-on flag */
+} pygo_stack_stats_t;
+void pygo_sched_stack_stats(pygo_stack_stats_t *out);
+
 /* Yield the current g.  Re-queues on the ready FIFO, swaps back to
  * the scheduler stack.  Must be called from inside a g. */
 void pygo_sched_yield(pygo_sched_t *s);

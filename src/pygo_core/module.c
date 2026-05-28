@@ -921,19 +921,29 @@ static PyTypeObject PygoChanType = {
     .tp_new = PyType_GenericNew,
 };
 
-static PyObject *m_go(PyObject *self, PyObject *callable)
+static PyObject *m_go(PyObject *self, PyObject *args, PyObject *kw)
 {
+    static char *kwlist[] = {"fn", "stack_size", NULL};
     pygo_sched_t *s;
     PygoG *handle;
     pygo_g_t *g;
-    PyObject *cap;
+    PyObject *cap, *callable;
+    Py_ssize_t stack_size = -1;
     (void)self;
+    if (!PyArg_ParseTupleAndKeywords(args, kw, "O|n", kwlist,
+                                     &callable, &stack_size)) {
+        return NULL;
+    }
     if (!PyCallable_Check(callable)) {
         PyErr_SetString(PyExc_TypeError, "go(): callable required");
         return NULL;
     }
     s = pygo_sched_get();
-    cap = pygo_sched_spawn(s, callable);
+    if (stack_size > 0) {
+        cap = pygo_sched_spawn_sized(s, callable, (size_t)stack_size);
+    } else {
+        cap = pygo_sched_spawn(s, callable);
+    }
     if (cap == NULL) return NULL;
     g = (pygo_g_t *)PyCapsule_GetPointer(cap, "pygo_g");
     Py_DECREF(cap);
@@ -1189,6 +1199,15 @@ static PyObject *m_stats(PyObject *self, PyObject *unused)
     PYGO_STATS_SET("stack_size_default", s->stack_size);
     PYGO_STATS_SET("ready_capacity", (Py_ssize_t)s->ready_cap);
 
+    {
+        pygo_stack_stats_t st;
+        pygo_sched_stack_stats(&st);
+        PYGO_STATS_SET("stack_hwm",            (Py_ssize_t)st.max_hwm);
+        PYGO_STATS_SET("stack_completed",      (Py_ssize_t)st.completed);
+        PYGO_STATS_SET("stack_calibrated",     st.calibrated);
+        PYGO_STATS_SET("stack_painting",       st.painting);
+    }
+
 #undef PYGO_STATS_SET
     /* Strings: backends are useful in the same payload. */
     {
@@ -1203,6 +1222,27 @@ static PyObject *m_stats(PyObject *self, PyObject *unused)
         Py_DECREF(coro); Py_DECREF(netpoll);
     }
     return d;
+}
+
+static PyObject *m_set_stack_size(PyObject *self, PyObject *arg)
+{
+    Py_ssize_t bytes;
+    (void)self;
+    bytes = PyNumber_AsSsize_t(arg, PyExc_OverflowError);
+    if (bytes == -1 && PyErr_Occurred()) return NULL;
+    if (bytes <= 0) {
+        PyErr_SetString(PyExc_ValueError,
+                        "set_stack_size: bytes must be > 0");
+        return NULL;
+    }
+    pygo_sched_set_default_stack_size((size_t)bytes);
+    Py_RETURN_NONE;
+}
+
+static PyObject *m_get_stack_size(PyObject *self, PyObject *unused)
+{
+    (void)self; (void)unused;
+    return PyLong_FromSize_t(pygo_sched_get_default_stack_size());
 }
 
 /* ---- M:N scheduler bindings (Phase C) ---- */
@@ -1434,8 +1474,12 @@ static PyMethodDef module_methods[] = {
     {"iouring_available", m_iouring_available, METH_NOARGS,
      "True if the io_uring kernel interface is usable (Linux 5.1+)."},
     /* C-scheduler fast path. */
-    {"go",          m_go,          METH_O,
-     "Spawn a goroutine via the C scheduler.  Returns a G handle."},
+    {"go",          (PyCFunction)m_go, METH_VARARGS | METH_KEYWORDS,
+     "go(fn, stack_size=None): spawn a goroutine via the C scheduler.\n"
+     "Returns a G handle.  stack_size overrides the scheduler default\n"
+     "(post-calibration) for this one goroutine -- use when the entry\n"
+     "function is known to recurse deeply or call into a C extension\n"
+     "that consumes large amounts of C stack."},
     {"go_noyield",  m_go_noyield,  METH_O,
      "Spawn a goroutine that the caller promises will run to "
      "completion without yielding.  Skips the per-g datastack/snap/"
@@ -1478,6 +1522,12 @@ static PyMethodDef module_methods[] = {
      "Return a dict of scheduler counters: ready, sleeping, "
      "netpoll_parked, completed, running, plus backend names.  "
      "Cheap; safe to poll from a watchdog goroutine in production."},
+    {"set_stack_size", m_set_stack_size, METH_O,
+     "set_stack_size(bytes): override the per-goroutine default stack\n"
+     "size and freeze calibration.  Use to lock in a known-good size\n"
+     "before spawning, or to bump after seeing a near-overflow."},
+    {"get_stack_size", m_get_stack_size, METH_NOARGS,
+     "Return the current per-goroutine default stack size in bytes."},
     {"mn_init",     m_mn_init,     METH_VARARGS,
      "mn_init(n=cpus): start N hub threads.  Returns count."},
     {"mn_go",       m_mn_go,       METH_O,

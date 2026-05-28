@@ -1746,12 +1746,12 @@ _orig_pygo_core_go = None
 _orig_pygo_core_mn_go = None
 
 
-def _patched_pygo_core_go(fn):
-    return _orig_pygo_core_go(_wrap_goroutine_callable(fn))
+def _patched_pygo_core_go(fn, **kwargs):
+    return _orig_pygo_core_go(_wrap_goroutine_callable(fn), **kwargs)
 
 
-def _patched_pygo_core_mn_go(fn):
-    return _orig_pygo_core_mn_go(_wrap_goroutine_callable(fn))
+def _patched_pygo_core_mn_go(fn, **kwargs):
+    return _orig_pygo_core_mn_go(_wrap_goroutine_callable(fn), **kwargs)
 
 
 def _install_go_wrapper():
