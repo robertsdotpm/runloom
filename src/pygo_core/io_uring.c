@@ -93,8 +93,17 @@
 #endif
 
 /* Provided-buffer ring sizing.  Powers of two only; the ring uses
- * masking against (n - 1) to wrap indices. */
-#define PYGO_IOURING_PBUF_COUNT     128
+ * masking against (n - 1) to wrap indices.
+ *
+ * Sized to absorb the worst case: every armed multishot recv has one
+ * CQE in flight at once.  N=4096 conns × 1 buffer each = 4096 entries.
+ * At 2 KB/buffer that's 8 MB of pinned kernel-visible memory -- the
+ * trade is acceptable for the high-concurrency workloads that
+ * actually benefit from multishot.  Smaller pools risk -ENOBUFS
+ * storms where the kernel ends a multishot mid-stream, the conn's
+ * consumer goroutine has to re-arm, and another conn may grab the
+ * buffer first -- with enough conns this stalls progress entirely. */
+#define PYGO_IOURING_PBUF_COUNT    4096
 #define PYGO_IOURING_PBUF_SIZE     2048
 #define PYGO_IOURING_PBUF_BGID        0
 
