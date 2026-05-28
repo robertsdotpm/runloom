@@ -79,6 +79,12 @@ int pygo_mn_hub_count(void);
  * to route a parked g when it becomes ready. */
 void *pygo_mn_current_hub_opaque(void);
 
+/* Map a hub_opaque (as returned by pygo_mn_current_hub_opaque, or
+ * stashed on a parker/g) to the dense 0..hub_count-1 hub id.  Returns
+ * -1 for NULL (single-thread sched).  Used by netpoll's per-hub
+ * parker pool selector to look up the right pool. */
+int pygo_mn_hub_id_of(void *hub_opaque);
+
 /* Return the goroutine currently running on this thread's hub (or
  * NULL if not in a hub or no g is running).  Netpoll's wait_fd uses
  * this -- it can't read pygo_sched_t::current because that's the

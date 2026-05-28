@@ -487,6 +487,12 @@ void *pygo_mn_current_hub_opaque(void)
     return (void *)pygo_tls_hub;
 }
 
+int pygo_mn_hub_id_of(void *hub_opaque)
+{
+    if (hub_opaque == NULL) return -1;
+    return ((pygo_hub_t *)hub_opaque)->id;
+}
+
 pygo_g_t *pygo_mn_tls_current_g(void)
 {
     return pygo_tls_current_g;

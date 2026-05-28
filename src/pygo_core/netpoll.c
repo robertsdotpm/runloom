@@ -229,7 +229,58 @@ typedef struct pygo_parker_pool {
     int             dh_cap;
 } pygo_parker_pool_t;
 
-static pygo_parker_pool_t pygo_pool;
+/* One parker pool per M:N hub plus one for the single-thread sched.
+ * Capped at 64 hubs (matches PYGO_IOURING_RINGS_MAX) -- machines with
+ * more cores than that fall back to the default pool for the overflow
+ * hubs, which is correct but loses the per-hub locality benefit for
+ * those hubs.  PYGO_PARKER_POOL_DEFAULT is the index for parkers
+ * outside any hub (single-thread sched on main thread, M:N-disabled
+ * paths). */
+#define PYGO_PARKER_POOL_HUBS    64
+#define PYGO_PARKER_POOL_DEFAULT PYGO_PARKER_POOL_HUBS
+#define PYGO_PARKER_POOL_MAX     (PYGO_PARKER_POOL_HUBS + 1)
+static pygo_parker_pool_t pygo_pools[PYGO_PARKER_POOL_MAX];
+
+/* Convenience pointer to the default pool.  Used by paths that don't
+ * have a goroutine context handy (e.g., backend init, drain_parked
+ * iteration uses the array directly). */
+#define pygo_pool (pygo_pools[PYGO_PARKER_POOL_DEFAULT])
+
+/* Map a parker's hub field (or the current thread's hub) to a pool.
+ * Same dispatch lives in both forms because the choice happens once
+ * at park time (current thread's hub -> pool stored implicitly via
+ * by_fd/head ownership), and again at unlink/wake time (parker's
+ * recorded hub -> the same pool).
+ *
+ * Per-hub routing is gated on the kernel-backed by-fd backends
+ * (epoll, kqueue, Windows IOCP -- all driven through
+ * pygo_pump_dispatch_event which iterates every pool's by_fd).  The
+ * WSAPoll / select fallbacks still walk pool->head + pool->by_fd
+ * directly and would miss parkers in non-default pools; on those
+ * platforms we force every parker into the default pool so the old
+ * single-list semantics are preserved.  IOCP-availability on Windows
+ * is detected at runtime, so the gate runs at call time as well. */
+static pygo_parker_pool_t *pygo_parker_pool_for_hub(void *hub_opaque)
+{
+#if defined(PYGO_HAVE_EPOLL) || defined(PYGO_HAVE_KQUEUE)
+    if (hub_opaque != NULL) {
+        int id = pygo_mn_hub_id_of(hub_opaque);
+        if (id >= 0 && id < PYGO_PARKER_POOL_HUBS) {
+            return &pygo_pools[id];
+        }
+    }
+#else
+    /* Windows WSAPoll / select POSIX fallback walk pool->head and
+     * pool->by_fd[fd] directly to build the fdset, so a parker in a
+     * non-default pool would be invisible to them.  Route everything
+     * to the default pool on those backends.  IOCP on Windows uses
+     * pygo_pump_dispatch_event (which iterates pools) and would
+     * benefit from per-hub routing, but the gate is runtime-only
+     * (pygo_win_use_iocp), kept conservative here for now. */
+    (void)hub_opaque;
+#endif
+    return &pygo_pools[PYGO_PARKER_POOL_DEFAULT];
+}
 
 static int pygo_netpoll_inited = 0;
 
@@ -982,26 +1033,42 @@ void pygo_netpoll_unregister(int fd)
 
 int pygo_netpoll_parked_count(void)
 {
-    return __atomic_load_n(&pygo_pool.total, __ATOMIC_ACQUIRE);
+    int total = 0;
+    int i;
+    for (i = 0; i < PYGO_PARKER_POOL_MAX; i++) {
+        total += __atomic_load_n(&pygo_pools[i].total, __ATOMIC_ACQUIRE);
+    }
+    return total;
 }
 
 void pygo_netpoll_force_unlink_g_parker(pygo_g_t *g)
 {
     pygo_parked_t *p;
+    pygo_parker_pool_t *pool;
     if (g == NULL) return;
     /* Cheap path: no parker tracked, nothing to do. */
     if (g->netpoll_parker == NULL) return;
-    pygo_mutex_lock(&pygo_pool.lock);
+    p = (pygo_parked_t *)g->netpoll_parker;
+    /* Route via the parker's recorded hub -- pool ownership is set
+     * once at link time (wait_fd's pygo_parker_pool_for_hub) and the
+     * parker stays in that pool for its whole lifetime, so reading
+     * p->hub is sufficient to find the right lock here even though
+     * we're not in the parker's owning hub. */
+    pool = pygo_parker_pool_for_hub(p->hub);
+    pygo_mutex_lock(&pool->lock);
+    /* Re-read p inside the lock in case g->netpoll_parker was
+     * cleared by a concurrent unlink between the check above and
+     * the lock acquire. */
     p = (pygo_parked_t *)g->netpoll_parker;
     if (p != NULL) {
         /* pygo_parker_unlink is no-op if p is already clean (e.g.,
          * pump unlinked it between the cheap-path check and the lock
          * acquire) -- safe to call unconditionally. */
-        (void)pygo_parker_unlink(&pygo_pool, p);
+        (void)pygo_parker_unlink(pool, p);
         g->netpoll_parker = NULL;
         PYGO_EVT(PYGO_EVT_PARKER_FORCE, p, g, (long long)p->gen);
     }
-    pygo_mutex_unlock(&pygo_pool.lock);
+    pygo_mutex_unlock(&pool->lock);
     /* The g is completing and its wait_fd will never resume to call
      * pool_release, so we release here.  Safe: parker is unlinked
      * above so no other thread holds a reference. */
@@ -1154,41 +1221,46 @@ int pygo_netpoll_any_iouring_inflight(void)
 /* Forcibly wake every parked goroutine with ready_mask=-1 (cancelled).
  * Each waiter's pygo_netpoll_wait_fd call returns -1; callers (server
  * accept loops, etc.) see that and exit their loops.  Returns count
- * woken. */
+ * woken.  Iterates every per-hub pool plus the default pool. */
 int pygo_netpoll_drain_parked(void)
 {
     int n = 0;
+    int pi;
     pygo_parked_t *p, *next;
-    pygo_mutex_lock(&pygo_pool.lock);
-    p = pygo_pool.head;
-    pygo_pool.head = NULL;
-    /* Clear per-fd buckets too; everything is leaving the lists. */
-    if (pygo_pool.by_fd != NULL && pygo_pool.by_fd_cap > 0) {
-        memset(pygo_pool.by_fd, 0,
-               pygo_pool.by_fd_cap * sizeof(*pygo_pool.by_fd));
-    }
-    /* Drain the deadline heap too; everything is leaving. */
-    pygo_pool.dh_size = 0;
-    while (p != NULL) {
-        next = p->next;
-        if (p->ready_out != NULL) {
-            *p->ready_out = -1;   /* signal cancellation */
+    for (pi = 0; pi < PYGO_PARKER_POOL_MAX; pi++) {
+        pygo_parker_pool_t *pool = &pygo_pools[pi];
+        if (__atomic_load_n(&pool->lock_inited, __ATOMIC_ACQUIRE) != 2) continue;
+        pygo_mutex_lock(&pool->lock);
+        p = pool->head;
+        pool->head = NULL;
+        /* Clear per-fd buckets too; everything is leaving the lists. */
+        if (pool->by_fd != NULL && pool->by_fd_cap > 0) {
+            memset(pool->by_fd, 0,
+                   pool->by_fd_cap * sizeof(*pool->by_fd));
         }
-        p->next = NULL;
-        p->slot = NULL;
-        p->next_by_fd = NULL;
-        p->prev_by_fd = NULL;
-        p->heap_index = -1;
-        if (p->hub != NULL) {
-            pygo_mn_wake_g(p->hub, p->g);
-        } else {
-            pygo_sched_wake(p->g);
+        /* Drain the deadline heap too; everything is leaving. */
+        pool->dh_size = 0;
+        while (p != NULL) {
+            next = p->next;
+            if (p->ready_out != NULL) {
+                *p->ready_out = -1;   /* signal cancellation */
+            }
+            p->next = NULL;
+            p->slot = NULL;
+            p->next_by_fd = NULL;
+            p->prev_by_fd = NULL;
+            p->heap_index = -1;
+            if (p->hub != NULL) {
+                pygo_mn_wake_g(p->hub, p->g);
+            } else {
+                pygo_sched_wake(p->g);
+            }
+            __atomic_sub_fetch(&pool->total, 1, __ATOMIC_RELEASE);
+            p = next;
+            n++;
         }
-        __atomic_sub_fetch(&pygo_pool.total, 1, __ATOMIC_RELEASE);
-        p = next;
-        n++;
+        pygo_mutex_unlock(&pool->lock);
     }
-    pygo_mutex_unlock(&pygo_pool.lock);
     return n;
 }
 
@@ -1200,6 +1272,7 @@ int pygo_netpoll_wait_fd(int fd, int events, long long timeout_ns)
     int ready_mask = 0;
     void *hub_opaque;
     pygo_g_t *current_g;
+    pygo_parker_pool_t *pool;
 
     if (pygo_netpoll_init() != 0) return -1;
 
@@ -1219,6 +1292,14 @@ int pygo_netpoll_wait_fd(int fd, int events, long long timeout_ns)
     } else {
         current_g = s->current;
     }
+
+    /* Pick the parker pool by current hub.  Per-hub pools mean a
+     * goroutine parked on hub H links into pool[H].head + pool[H]
+     * .by_fd[fd] + pool[H].dh_arr; another hub's wait_fd contends
+     * only on its own pool's lock.  Single-thread sched + non-hub
+     * callers fall back to pool[DEFAULT]. */
+    pool = pygo_parker_pool_for_hub(hub_opaque);
+    pygo_parker_pool_lock_ensure_inited(pool);
 
     park->fd = fd;
     park->events = events;
@@ -1240,7 +1321,7 @@ int pygo_netpoll_wait_fd(int fd, int events, long long timeout_ns)
     /* ORDER MATTERS (M:N + free-threaded race fix):
      *
      *   1. Link the parker.  Now any pump that wakes on an event for
-     *      this fd can find it in pygo_pool.by_fd[fd].
+     *      this fd can find it in pool->by_fd[fd].
      *   2. Consume any wakeups that fired BEFORE we got here.  Under
      *      M:N another hub's pump may have observed an event between
      *      this g's previous unlink (on its last wake) and the link
@@ -1254,9 +1335,9 @@ int pygo_netpoll_wait_fd(int fd, int events, long long timeout_ns)
      * the parker was visible; (b) edges fired during the gap between
      * a previous parker being unlinked-on-wake and a new one being
      * linked. */
-    pygo_mutex_lock(&pygo_pool.lock);
-    pygo_parker_link(&pygo_pool, park);
-    pygo_mutex_unlock(&pygo_pool.lock);
+    pygo_mutex_lock(&pool->lock);
+    pygo_parker_link(pool, park);
+    pygo_mutex_unlock(&pool->lock);
     if (current_g != NULL) pygo_g_state_set(current_g, PYGO_GST_PARKED_NETPOLL);
 
     /* Drain any pre-existing pending-wake bits.  If something is
@@ -1266,9 +1347,9 @@ int pygo_netpoll_wait_fd(int fd, int events, long long timeout_ns)
     {
         int pending = pygo_fd_pending_wake_consume(fd, events);
         if (pending != 0) {
-            pygo_mutex_lock(&pygo_pool.lock);
-            pygo_parker_unlink(&pygo_pool, park);
-            pygo_mutex_unlock(&pygo_pool.lock);
+            pygo_mutex_lock(&pool->lock);
+            pygo_parker_unlink(pool, park);
+            pygo_mutex_unlock(&pool->lock);
             if (current_g != NULL) pygo_g_state_set(current_g, PYGO_GST_RUNNING);
             pygo_parker_pool_release(park);
             return pending;
@@ -1281,26 +1362,26 @@ int pygo_netpoll_wait_fd(int fd, int events, long long timeout_ns)
      * WSAPoll / select paths. */
     if (pygo_win_use_iocp) {
         if (pygo_iocp_submit(fd, events, timeout_ns) != 0) {
-            pygo_mutex_lock(&pygo_pool.lock);
-            pygo_parker_unlink(&pygo_pool, park);
-            pygo_mutex_unlock(&pygo_pool.lock);
+            pygo_mutex_lock(&pool->lock);
+            pygo_parker_unlink(pool, park);
+            pygo_mutex_unlock(&pool->lock);
             pygo_parker_pool_release(park);
             return -1;
         }
     } else {
         if (pygo_netpoll_register(fd, events) != 0) {
-            pygo_mutex_lock(&pygo_pool.lock);
-            pygo_parker_unlink(&pygo_pool, park);
-            pygo_mutex_unlock(&pygo_pool.lock);
+            pygo_mutex_lock(&pool->lock);
+            pygo_parker_unlink(pool, park);
+            pygo_mutex_unlock(&pool->lock);
             pygo_parker_pool_release(park);
             return -1;
         }
     }
 #else
     if (pygo_netpoll_register(fd, events) != 0) {
-        pygo_mutex_lock(&pygo_pool.lock);
-        pygo_parker_unlink(&pygo_pool, park);
-        pygo_mutex_unlock(&pygo_pool.lock);
+        pygo_mutex_lock(&pool->lock);
+        pygo_parker_unlink(pool, park);
+        pygo_mutex_unlock(&pool->lock);
         pygo_parker_pool_release(park);
         return -1;
     }
@@ -1314,9 +1395,9 @@ int pygo_netpoll_wait_fd(int fd, int events, long long timeout_ns)
     {
         int pending = pygo_fd_pending_wake_consume(fd, events);
         if (pending != 0) {
-            pygo_mutex_lock(&pygo_pool.lock);
-            pygo_parker_unlink(&pygo_pool, park);
-            pygo_mutex_unlock(&pygo_pool.lock);
+            pygo_mutex_lock(&pool->lock);
+            pygo_parker_unlink(pool, park);
+            pygo_mutex_unlock(&pool->lock);
             pygo_parker_pool_release(park);
             return pending;
         }
@@ -1334,8 +1415,8 @@ int pygo_netpoll_wait_fd(int fd, int events, long long timeout_ns)
      * routed the wake via a path that bypassed pygo_parker_unlink. */
     if (park->slot != NULL || park->prev_by_fd != NULL ||
         park->next_by_fd != NULL ||
-        (park->fd >= 0 && (size_t)park->fd < pygo_pool.by_fd_cap &&
-         pygo_pool.by_fd[park->fd] == park)) {
+        (park->fd >= 0 && (size_t)park->fd < pool->by_fd_cap &&
+         pool->by_fd[park->fd] == park)) {
 #ifdef PYGO_PARKER_DEBUG
         fprintf(stderr,
                 "[pygo] wait_fd resumed with parker still linked: "
@@ -1344,12 +1425,12 @@ int pygo_netpoll_wait_fd(int fd, int events, long long timeout_ns)
                 (void *)park, park->gen, park->fd, (void *)park->g,
                 (void *)park->slot, (void *)park->next,
                 (void *)park->next_by_fd, (void *)park->prev_by_fd,
-                (park->fd >= 0 && (size_t)park->fd < pygo_pool.by_fd_cap)
-                    ? (void *)pygo_pool.by_fd[park->fd] : NULL);
+                (park->fd >= 0 && (size_t)park->fd < pool->by_fd_cap)
+                    ? (void *)pool->by_fd[park->fd] : NULL);
 #endif
-        pygo_mutex_lock(&pygo_pool.lock);
-        pygo_parker_unlink(&pygo_pool, park);
-        pygo_mutex_unlock(&pygo_pool.lock);
+        pygo_mutex_lock(&pool->lock);
+        pygo_parker_unlink(pool, park);
+        pygo_mutex_unlock(&pool->lock);
     }
     /* Clear g->netpoll_parker before release so completion's force-
      * unlink cannot dereference a freelist entry. */
@@ -1358,6 +1439,99 @@ int pygo_netpoll_wait_fd(int fd, int events, long long timeout_ns)
     }
     pygo_parker_pool_release(park);
     return ready_mask;
+}
+
+/* Walk every parker pool looking for a parker matching (fd, mask).
+ * The first match's ready_out gets the mask, the parker is unlinked
+ * from its pool, and pygo_mn_wake_g routes the wake to its hub.
+ * Returns 1 if a parker was found+woken, 0 otherwise.
+ *
+ * Lock ordering: pool->lock then hub->sub_lock (inside pygo_mn_wake_g).
+ * We never hold pool[H1].lock while taking pool[H2].lock; the for
+ * loop drops each pool's lock before moving on.  Same ordering as
+ * pygo_pump_drain_expired below so the two are deadlock-free against
+ * each other. */
+static int pygo_pump_dispatch_event(int fd, int mask)
+{
+    int pi;
+    for (pi = 0; pi < PYGO_PARKER_POOL_MAX; pi++) {
+        pygo_parker_pool_t *pool = &pygo_pools[pi];
+        if (__atomic_load_n(&pool->lock_inited, __ATOMIC_ACQUIRE) != 2) continue;
+        pygo_mutex_lock(&pool->lock);
+        if ((size_t)fd < pool->by_fd_cap) {
+            pygo_parked_t *p = pool->by_fd[fd];
+            while (p != NULL) {
+                pygo_parked_t *next_p = p->next_by_fd;
+                if (p->events & mask) {
+                    *(p->ready_out) = mask & p->events;
+                    pygo_parker_unlink(pool, p);
+#ifdef PYGO_PARKER_DEBUG
+                    if (p->g != NULL &&
+                        __atomic_load_n(&p->g->done, __ATOMIC_ACQUIRE)) {
+                        fprintf(stderr,
+                            "[pygo] pump waking DEAD g: g=%p done=1 "
+                            "refcount=%d parker=%p fd=%d\n",
+                            (void *)p->g,
+                            (int)__atomic_load_n(&p->g->refcount,
+                                                 __ATOMIC_ACQUIRE),
+                            (void *)p, fd);
+                    }
+#endif
+                    pygo_mn_wake_g(p->hub, p->g);
+                    pygo_mutex_unlock(&pool->lock);
+                    return 1;
+                }
+                p = next_p;
+            }
+        }
+        pygo_mutex_unlock(&pool->lock);
+    }
+    return 0;
+}
+
+/* Drain expired-deadline parkers from every pool.  Returns count
+ * woken.  Each parker is unlinked, gets ready_out=0 (timeout), and
+ * its g is routed back via pygo_mn_wake_g / pygo_sched_wake.
+ * Wakes happen inside the pool lock; lock ordering matches
+ * pygo_pump_dispatch_event so the two are deadlock-free. */
+static int pygo_pump_drain_expired(long long now)
+{
+    int woke = 0;
+    int pi;
+    for (pi = 0; pi < PYGO_PARKER_POOL_MAX; pi++) {
+        pygo_parker_pool_t *pool = &pygo_pools[pi];
+        if (__atomic_load_n(&pool->lock_inited, __ATOMIC_ACQUIRE) != 2) continue;
+        pygo_mutex_lock(&pool->lock);
+        while (pool->dh_size > 0 && pool->dh_arr[0]->deadline_ns <= now) {
+            pygo_parked_t *p = pool->dh_arr[0];
+            if (p->ready_out != NULL) *p->ready_out = 0;
+            pygo_parker_unlink(pool, p);
+            if (p->hub != NULL) pygo_mn_wake_g(p->hub, p->g);
+            else                pygo_sched_wake(p->g);
+            woke++;
+            PYGO_EVT(PYGO_EVT_PARKER_TIMEOUT, p, p->g, (long long)p->fd);
+        }
+        pygo_mutex_unlock(&pool->lock);
+    }
+    return woke;
+}
+
+/* Min deadline across all pools.  Returns -1 if no pool has any
+ * timed parker.  Takes each pool's lock briefly. */
+static long long pygo_dh_peek_deadline_global(void)
+{
+    long long earliest = -1;
+    int pi;
+    for (pi = 0; pi < PYGO_PARKER_POOL_MAX; pi++) {
+        pygo_parker_pool_t *pool = &pygo_pools[pi];
+        long long d;
+        if (__atomic_load_n(&pool->lock_inited, __ATOMIC_ACQUIRE) != 2) continue;
+        pygo_mutex_lock(&pool->lock);
+        d = pygo_dh_peek_deadline(pool);
+        pygo_mutex_unlock(&pool->lock);
+        if (d >= 0 && (earliest < 0 || d < earliest)) earliest = d;
+    }
+    return earliest;
 }
 
 int pygo_netpoll_pump(long long timeout_ns)
@@ -1370,11 +1544,10 @@ int pygo_netpoll_pump(long long timeout_ns)
         if (pygo_netpoll_init() != 0) return -1;
     }
 
-    /* Earliest deadline -- O(1) heap peek (was O(N) walk of the
-     * global parked list). */
-    pygo_mutex_lock(&pygo_pool.lock);
-    min_deadline = pygo_dh_peek_deadline(&pygo_pool);
-    pygo_mutex_unlock(&pygo_pool.lock);
+    /* Earliest deadline across every pool.  O(pool_count) instead of
+     * the old O(1) global-heap peek -- pool_count is bounded at
+     * PYGO_PARKER_POOL_MAX and the per-pool peek is still O(1). */
+    min_deadline = pygo_dh_peek_deadline_global();
 
     now = monotonic_ns();
     if (min_deadline >= 0) {
@@ -1394,30 +1567,22 @@ int pygo_netpoll_pump(long long timeout_ns)
         Py_END_ALLOW_THREADS
         if (n > 0) {
             int i;
-            /* Lock parked list for walk + remove.  Order: parked_lock
-             * then hub->sub_lock (inside pygo_mn_wake_g).  Don't take
-             * locks in the reverse order anywhere. */
-            pygo_mutex_lock(&pygo_pool.lock);
             for (i = 0; i < n; i++) {
                 int fd = evs[i].data.fd;
                 int mask = 0;
-                pygo_parked_t *bucket, *p;
-                int handled_as_iouring = 0;
                 /* io_uring eventfd (global ring): drain its counter
                  * and walk the CQ ring to wake parked goroutines via
                  * their per-op record.  Not a normal fd-park entry;
-                 * skip the parked-list walk. */
+                 * skip the parker dispatch.  No pool lock needed --
+                 * iouring drain is independent of parker pools. */
                 if (pygo_iouring_eventfd_in_epoll >= 0 &&
                     fd == pygo_iouring_eventfd_in_epoll) {
-                    pygo_mutex_unlock(&pygo_pool.lock);
                     pygo_iouring_drain();
-                    pygo_mutex_lock(&pygo_pool.lock);
                     continue;
                 }
                 /* Per-hub iouring rings.  Dispatch to the matching
-                 * ring's drain; same lock-drop-then-relock as above so
-                 * drain can call pygo_mn_wake_g (which takes the
-                 * target hub's sub_lock; never under parked_lock). */
+                 * ring's drain.  Ring lookup is a tight scan over a
+                 * 64-entry array; cheap and lock-free for reads. */
                 {
                     int ri;
                     struct pygo_iouring_ring *match = NULL;
@@ -1428,60 +1593,30 @@ int pygo_netpoll_pump(long long timeout_ns)
                         }
                     }
                     if (match != NULL) {
-                        pygo_mutex_unlock(&pygo_pool.lock);
                         pygo_iouring_ring_drain(match);
-                        pygo_mutex_lock(&pygo_pool.lock);
-                        handled_as_iouring = 1;
+                        continue;
                     }
                 }
-                if (handled_as_iouring) continue;
                 if (evs[i].events & EPOLLIN)  mask |= PYGO_NETPOLL_READ;
                 if (evs[i].events & EPOLLOUT) mask |= PYGO_NETPOLL_WRITE;
-                /* O(1) bucket lookup; walk only the parkers on this fd
-                 * (usually 1 -- at most a read+write pair). */
-                {
-                    int matched = 0;
-                    if ((size_t)fd < pygo_pool.by_fd_cap) {
-                        bucket = pygo_pool.by_fd[fd];
-                        p = bucket;
-                        while (p != NULL) {
-                            pygo_parked_t *next_p = p->next_by_fd;
-                            if (p->events & mask) {
-                                *(p->ready_out) = mask & p->events;
-                                pygo_parker_unlink(&pygo_pool, p);
-#ifdef PYGO_PARKER_DEBUG
-                                if (p->g != NULL &&
-                                    __atomic_load_n(&p->g->done, __ATOMIC_ACQUIRE)) {
-                                    fprintf(stderr,
-                                        "[pygo] pump waking DEAD g: g=%p done=1 "
-                                        "refcount=%d parker=%p fd=%d\n",
-                                        (void *)p->g,
-                                        (int)__atomic_load_n(&p->g->refcount,
-                                                             __ATOMIC_ACQUIRE),
-                                        (void *)p, fd);
-                                }
-#endif
-                                pygo_mn_wake_g(p->hub, p->g);
-                                woke++;
-                                matched = 1;
-                                break;
-                            }
-                            p = next_p;
-                        }
-                    }
-                    if (!matched && mask != 0) {
-                        /* No parker for this fd (either not linked yet,
-                         * or already woken once and the goroutine
-                         * hasn't called wait_fd again).  Stash the
-                         * event mask in the per-fd pending bitmap so
-                         * the next wait_fd on this fd consumes it
-                         * instead of parking forever -- EPOLLET would
-                         * never refire for this transition. */
-                        pygo_fd_pending_wake_set(fd, mask);
-                    }
+                /* Walk every per-hub pool looking for the parker for
+                 * this fd.  Typically the parker lives in exactly one
+                 * pool (its owning hub's), so the loop short-circuits
+                 * on first match.  Sub-microsecond per event at
+                 * realistic hub counts. */
+                if (pygo_pump_dispatch_event(fd, mask)) {
+                    woke++;
+                } else if (mask != 0) {
+                    /* No parker for this fd (either not linked yet,
+                     * or already woken once and the goroutine
+                     * hasn't called wait_fd again).  Stash the
+                     * event mask in the per-fd pending bitmap so
+                     * the next wait_fd on this fd consumes it
+                     * instead of parking forever -- EPOLLET would
+                     * never refire for this transition. */
+                    pygo_fd_pending_wake_set(fd, mask);
                 }
             }
-            pygo_mutex_unlock(&pygo_pool.lock);
         }
     }
 #elif defined(PYGO_HAVE_KQUEUE)
@@ -1500,28 +1635,12 @@ int pygo_netpoll_pump(long long timeout_ns)
         Py_END_ALLOW_THREADS
         if (n > 0) {
             int i;
-            pygo_mutex_lock(&pygo_pool.lock);
             for (i = 0; i < n; i++) {
                 int fd = (int)evs[i].ident;
                 int mask = (evs[i].filter == EVFILT_READ) ?
                            PYGO_NETPOLL_READ : PYGO_NETPOLL_WRITE;
-                pygo_parked_t *p;
-                /* Per-fd bucket lookup: O(parkers-on-this-fd). */
-                if ((size_t)fd >= pygo_pool.by_fd_cap) continue;
-                p = pygo_pool.by_fd[fd];
-                while (p != NULL) {
-                    pygo_parked_t *next_p = p->next_by_fd;
-                    if (p->events & mask) {
-                        *(p->ready_out) = mask & p->events;
-                        pygo_parker_unlink(&pygo_pool, p);
-                        pygo_mn_wake_g(p->hub, p->g);
-                        woke++;
-                        break;
-                    }
-                    p = next_p;
-                }
+                if (pygo_pump_dispatch_event(fd, mask)) woke++;
             }
-            pygo_mutex_unlock(&pygo_pool.lock);
         }
     }
 #elif defined(PYGO_OS_WINDOWS)
@@ -1556,23 +1675,7 @@ int pygo_netpoll_pump(long long timeout_ns)
             Py_END_ALLOW_THREADS
             if (rc <= 0) break;             /* 0 = timeout, -1 = error */
             local_woke++;
-            /* Locate the matching parked entry and wake its g. */
-            pygo_mutex_lock(&pygo_pool.lock);
-            if ((size_t)fd < pygo_pool.by_fd_cap) {
-                pygo_parked_t *p = pygo_pool.by_fd[fd];
-                while (p != NULL) {
-                    pygo_parked_t *next_p = p->next_by_fd;
-                    if (p->events & evs) {
-                        *(p->ready_out) = evs & p->events;
-                        pygo_parker_unlink(&pygo_pool, p);
-                        pygo_mn_wake_g(p->hub, p->g);
-                        woke++;
-                        break;
-                    }
-                    p = next_p;
-                }
-            }
-            pygo_mutex_unlock(&pygo_pool.lock);
+            if (pygo_pump_dispatch_event(fd, evs)) woke++;
         }
     } else if (pygo_win_wsapoll != NULL) {
         /* --- WSAPoll path --- */
@@ -1732,20 +1835,10 @@ post_wait:
     }
 #endif
 
-    /* Handle timeouts: parkers whose deadline has passed get ready=0.
-     * Heap pop while top is <= now -- O(log N + K) instead of O(N). */
+    /* Handle timeouts across every pool: parkers whose deadline has
+     * passed get ready=0.  Heap pop per pool while top <= now;
+     * O(pool_count + K log K) where K is expired-this-pass. */
     now = monotonic_ns();
-    pygo_mutex_lock(&pygo_pool.lock);
-    while (pygo_pool.dh_size > 0 && pygo_pool.dh_arr[0]->deadline_ns <= now) {
-        pygo_parked_t *p = pygo_pool.dh_arr[0];
-        if (p->ready_out != NULL) *p->ready_out = 0;
-        /* Unlink also pops the heap (via heap_index check). */
-        pygo_parker_unlink(&pygo_pool, p);
-        if (p->hub != NULL) pygo_mn_wake_g(p->hub, p->g);
-        else                pygo_sched_wake(p->g);
-        woke++;
-        PYGO_EVT(PYGO_EVT_PARKER_TIMEOUT, p, p->g, (long long)p->fd);
-    }
-    pygo_mutex_unlock(&pygo_pool.lock);
+    woke += pygo_pump_drain_expired(now);
     return woke;
 }
