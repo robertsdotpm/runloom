@@ -141,6 +141,14 @@ struct pygo_g {
      * defense against missed unlink paths under M:N + free-threaded
      * that would otherwise have pump waking a freed g. */
     void *netpoll_parker;   /* really pygo_parked_t *, void* to avoid include cycle */
+    /* Observational lifecycle state.  See pygo_gstate.h for the enum.
+     * Independent of (but consistent with) the load-bearing
+     * coro/done/in_sub_queue/wake_pending fields above; set at every
+     * transition point so the diag ring records the trajectory and
+     * PYGO_G_ASSERT_NOT can flag invalid arrivals (e.g. submit on a
+     * g already in DONE).  Single atomic byte; cost is one store
+     * per transition. */
+    unsigned char state;
 };
 
 /* Park current g until pygo_sched_wake_g(g) is called.  Race-safe:

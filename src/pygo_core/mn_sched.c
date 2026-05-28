@@ -56,6 +56,8 @@
 #include "io_uring.h"
 #include "coro.h"
 #include "cldeque.h"
+#include "pygo_diag.h"
+#include "pygo_gstate.h"
 
 #include <errno.h>
 #include <stdlib.h>
@@ -370,6 +372,8 @@ static PYGO_THREAD_RET pygo_hub_main(void *arg)
              *
              * In both cases skipping does not lose work: the original
              * processing path owns the decrement. */
+            PYGO_G_ASSERT_NOT(g, PYGO_GST_BIT(PYGO_GST_FREED));
+            PYGO_EVT(PYGO_EVT_G_POP, g, h, 0);
             if (g->coro == NULL ||
                 __atomic_load_n(&g->done, __ATOMIC_ACQUIRE)) {
                 h->sched.current = NULL;
@@ -495,6 +499,10 @@ struct pygo_iouring_ring *pygo_mn_current_iouring_ring(void)
 static void pygo_mn_hub_submit(pygo_hub_t *h, pygo_g_t *g)
 {
     int expected = 0;
+    /* Defence-in-depth: a submitted g must not already be DONE/FREED.
+     * If this fires, the in_sub_queue CAS below would still no-op but
+     * the diag ring + abort give a precise place to look. */
+    PYGO_G_ASSERT_NOT(g, PYGO_GST_MASK_DEAD);
     if (!__atomic_compare_exchange_n(&g->in_sub_queue, &expected, 1,
                                      0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
         /* Already queued; no need to enqueue again.  The pending resume
@@ -510,6 +518,8 @@ static void pygo_mn_hub_submit(pygo_hub_t *h, pygo_g_t *g)
     }
     h->sub_tail = g;
     pygo_mutex_unlock(&h->sub_lock);
+    PYGO_EVT(PYGO_EVT_G_SUBMIT, g, h, 0);
+    pygo_g_state_set(g, PYGO_GST_SUBMITTED);
 }
 
 void pygo_mn_wake_g(void *hub_opaque, pygo_g_t *g)

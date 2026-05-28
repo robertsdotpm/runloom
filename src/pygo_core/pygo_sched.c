@@ -31,6 +31,8 @@
 #include "mn_sched.h"
 #include "netpoll.h"
 #include "io_uring.h"
+#include "pygo_diag.h"
+#include "pygo_gstate.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -690,6 +692,8 @@ void pygo_g_entry(void *user)
     if (g->c_entry != NULL) {
         g->c_entry(g->c_arg);
         __atomic_store_n(&g->done, 1, __ATOMIC_RELEASE);
+        pygo_g_state_set(g, PYGO_GST_DONE);
+        PYGO_EVT(PYGO_EVT_G_COMPLETE, g, NULL, 0);
         return;
     }
 
@@ -737,6 +741,8 @@ void pygo_g_entry(void *user)
      * writes; PygoG_done_get / PygoG_result_get load g->done with
      * ACQUIRE and only read result/error if done. */
     __atomic_store_n(&g->done, 1, __ATOMIC_RELEASE);
+    pygo_g_state_set(g, PYGO_GST_DONE);
+    PYGO_EVT(PYGO_EVT_G_COMPLETE, g, NULL, 0);
     /* Falls back through asm trampoline -> infinite swap to caller. */
 }
 
@@ -777,6 +783,7 @@ pygo_g_t *pygo_g_slab_alloc(void)
 
 void pygo_g_slab_free(pygo_g_t *g)
 {
+    pygo_g_state_set(g, PYGO_GST_FREED);
     if (pygo_g_slab_size >= PYGO_G_SLAB_CAP) {
         PyMem_Free(g);
         return;
@@ -796,6 +803,7 @@ void pygo_g_decref(pygo_g_t *g)
 {
     int new_count;
     if (g == NULL) return;
+    PYGO_EVT(PYGO_EVT_G_DECREF, g, NULL, (long long)g->refcount);
     /* ACQ_REL: pairs with other threads' decrefs so all prior writes
      * (including g->result / g->error / g->done done-flag updates)
      * are observable on the last reference's owner before free. */
@@ -833,6 +841,7 @@ static PyObject *spawn_common(pygo_sched_t *s, PyObject *callable,
         PyErr_SetString(PyExc_MemoryError, "pygo_coro_new failed");
         return NULL;
     }
+    pygo_g_state_set(g, PYGO_GST_RUNNABLE);
     pygo_ready_push(s, g);
     return PyCapsule_New(g, "pygo_g", NULL);
 }
@@ -915,6 +924,7 @@ void pygo_sched_park_current(void)
 void pygo_sched_wake(pygo_g_t *g)
 {
     if (g == NULL) return;
+    pygo_g_state_set(g, PYGO_GST_RUNNABLE);
     pygo_ready_push(pygo_sched_get(), g);
 }
 
@@ -960,9 +970,11 @@ void pygo_sched_park_safe(void)
     }
 
     pygo_pystate_snap(&g->snap);
+    pygo_g_state_set(g, PYGO_GST_PARKED_SAFE);
     pygo_coro_yield();
     /* On resume, eat the wake count that brought us back. */
     __atomic_sub_fetch(&g->wake_pending, 1, __ATOMIC_ACQ_REL);
+    pygo_g_state_set(g, PYGO_GST_RUNNING);
 }
 
 /* ---- Sleep ----

@@ -32,6 +32,7 @@
 #include "mn_sched.h"
 #include "io_uring.h"
 #include "pygo_diag.h"
+#include "pygo_gstate.h"
 
 #include <errno.h>
 #include <stdlib.h>
@@ -1014,6 +1015,7 @@ int pygo_netpoll_wait_fd(int fd, int events, long long timeout_ns)
     pygo_mutex_lock(&pygo_parked_lock);
     pygo_parker_link(&park);
     pygo_mutex_unlock(&pygo_parked_lock);
+    if (current_g != NULL) pygo_g_state_set(current_g, PYGO_GST_PARKED_NETPOLL);
 
     /* Drain any pre-existing pending-wake bits.  If something is
      * already there (from a pump that saw an event between our last
@@ -1025,6 +1027,7 @@ int pygo_netpoll_wait_fd(int fd, int events, long long timeout_ns)
             pygo_mutex_lock(&pygo_parked_lock);
             pygo_parker_unlink(&park);
             pygo_mutex_unlock(&pygo_parked_lock);
+            if (current_g != NULL) pygo_g_state_set(current_g, PYGO_GST_RUNNING);
             return pending;
         }
     }
