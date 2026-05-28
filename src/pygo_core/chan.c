@@ -40,6 +40,8 @@
 #include "pygo_sched.h"
 #include "mn_sched.h"
 #include "netpoll.h"
+#include "pygo_diag.h"
+#include "pygo_gstate.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -225,7 +227,14 @@ static PyObject *buf_pop(pygo_chan_t *ch)
  * called WITH the channel lock held; the lock is released BEFORE
  * yielding, then the goroutine yields via pygo_coro_yield.  Wake
  * happens via pygo_sched_wake / pygo_mn_wake_g from the producer/
- * consumer side. */
+ * consumer side.
+ *
+ * PyHandle pin: parked waiters hold an incref on the channel for
+ * the duration of the park.  Without this, the last Python reference
+ * to the channel can decref to 0 while we are yielded, freeing the
+ * channel (including pygo_mutex_destroy on a lock we may yet release
+ * from the wake path) and orphaning every waiter.  The decref after
+ * wake balances the incref taken here. */
 static void park_waiter(pygo_chan_t *ch,
                         pygo_chan_waiter_t **head,
                         pygo_chan_waiter_t **tail,
@@ -242,12 +251,18 @@ static void park_waiter(pygo_chan_t *ch,
     w->g = current_g;
     w->hub = hub;
 
+    /* Pin the channel.  Acquired before unlock so a concurrent
+     * decref-to-zero from another thread cannot race with our park. */
+    pygo_chan_incref(ch);
+
     waiter_push(head, tail, w);
 
     /* Snapshot tstate + take g off any ready list.  Same dance as
      * pygo_netpoll_wait_fd uses. */
     if (current_g != NULL) {
         pygo_sched_park_current();
+        pygo_g_state_set(current_g, PYGO_GST_PARKED_CHAN);
+        PYGO_EVT(PYGO_EVT_CHAN_PARK, ch, current_g, 0);
     }
 
     /* Critical: release the channel lock BEFORE yielding.  Otherwise
@@ -257,6 +272,16 @@ static void park_waiter(pygo_chan_t *ch,
     pygo_coro_yield();
     /* On wake, the producer has already filled w->value / w->ok /
      * w->send_result before unparking us. */
+    if (current_g != NULL) {
+        pygo_g_state_set(current_g, PYGO_GST_RUNNING);
+        PYGO_EVT(PYGO_EVT_CHAN_WAKE, ch, current_g, 0);
+    }
+
+    /* Drop the pin.  If we were the last reference (rare: caller code
+     * usually still holds a Python wrapper that outlives the park),
+     * the channel is freed here.  We only touch our own waiter struct
+     * after this point, never ch. */
+    pygo_chan_decref(ch);
 
     /* Re-acquire is NOT necessary on this side -- we read our own
      * waiter struct and return.  The caller does not need the lock. */
@@ -662,6 +687,22 @@ int pygo_chan_select(pygo_select_case_t *cases, int n, int default_ready)
         park.fired_value = NULL;
         park.fired_ok = 0;
 
+        /* PyHandle pin: every channel in cases[] must stay alive across
+         * the park + eviction phase.  Without this, a concurrent decref
+         * of the last Python reference would free the channel mid-park,
+         * and the eviction walk after wake would dereference freed
+         * memory.  Balance with a decref-loop before returning. */
+        for (i = 0; i < n; i++) {
+            if (cases[i].ch != NULL) pygo_chan_incref(cases[i].ch);
+        }
+        #define PYGO_SELECT_UNPIN()                                          \
+            do {                                                             \
+                int _i;                                                      \
+                for (_i = 0; _i < n; _i++) {                                 \
+                    if (cases[_i].ch != NULL) pygo_chan_decref(cases[_i].ch);\
+                }                                                            \
+            } while (0)
+
         /* Determine our hub + g once for all entries. */
         {
             void *hub = pygo_mn_current_hub_opaque();
@@ -721,6 +762,7 @@ int pygo_chan_select(pygo_select_case_t *cases, int n, int default_ready)
                     }
                     select_rc = select_try_each(cases, n);
                     PyMem_Free(waiters);
+                    PYGO_SELECT_UNPIN();
                     return select_rc;
                 }
                 waiter_push(&ch->senders, &ch->senders_tail, &waiters[i]);
@@ -748,6 +790,7 @@ int pygo_chan_select(pygo_select_case_t *cases, int n, int default_ready)
                     }
                     select_rc = select_try_each(cases, n);
                     PyMem_Free(waiters);
+                    PYGO_SELECT_UNPIN();
                     return select_rc;
                 }
                 waiter_push(&ch->receivers, &ch->receivers_tail, &waiters[i]);
@@ -768,6 +811,7 @@ int pygo_chan_select(pygo_select_case_t *cases, int n, int default_ready)
         if (fired < 0) {
             /* Shouldn't happen -- defensive. */
             PyMem_Free(waiters);
+            PYGO_SELECT_UNPIN();
             return -2;
         }
 
@@ -792,17 +836,21 @@ int pygo_chan_select(pygo_select_case_t *cases, int n, int default_ready)
             if (waiters[fired].send_result != 0) {
                 Py_DECREF(waiters[fired].value);  /* still ours */
                 PyMem_Free(waiters);
+                PYGO_SELECT_UNPIN();
                 PyErr_SetString(PyExc_ValueError, "select send on closed channel");
                 return -2;
             }
             /* Delivered.  The channel/receiver took our ref. */
             PyMem_Free(waiters);
+            PYGO_SELECT_UNPIN();
             return fired;
         }
         /* Fired RECV: waiters[fired].value + .ok hold the result. */
         cases[fired].recv_value = waiters[fired].value;
         cases[fired].recv_ok = (waiters[fired].ok == 1);
         PyMem_Free(waiters);
+        PYGO_SELECT_UNPIN();
         return fired;
+        #undef PYGO_SELECT_UNPIN
     }
 }
