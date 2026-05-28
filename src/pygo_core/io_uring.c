@@ -67,6 +67,57 @@
 #  define IORING_REGISTER_EVENTFD 4
 #endif
 
+/* Provided-buffer-ring opcodes/symbols (Linux 5.19+).  Older kernel
+ * headers don't define these; supply fallbacks so we can compile and
+ * just feature-detect at runtime. */
+#ifndef IORING_REGISTER_PBUF_RING
+#  define IORING_REGISTER_PBUF_RING   22
+#endif
+#ifndef IORING_UNREGISTER_PBUF_RING
+#  define IORING_UNREGISTER_PBUF_RING 23
+#endif
+#ifndef IOSQE_BUFFER_SELECT
+#  define IOSQE_BUFFER_SELECT (1U << 5)
+#endif
+#ifndef IORING_CQE_F_BUFFER
+#  define IORING_CQE_F_BUFFER 1U
+#endif
+#ifndef IORING_CQE_F_MORE
+#  define IORING_CQE_F_MORE 2U
+#endif
+#ifndef IORING_CQE_BUFFER_SHIFT
+#  define IORING_CQE_BUFFER_SHIFT 16
+#endif
+#ifndef IORING_RECV_MULTISHOT
+#  define IORING_RECV_MULTISHOT (1U << 1)
+#endif
+
+/* Provided-buffer ring sizing.  Powers of two only; the ring uses
+ * masking against (n - 1) to wrap indices. */
+#define PYGO_IOURING_PBUF_COUNT     128
+#define PYGO_IOURING_PBUF_SIZE     2048
+#define PYGO_IOURING_PBUF_BGID        0
+
+/* Minimal kernel-shared structs for the buffer ring.  We could rely
+ * on the libc UAPI header (linux/io_uring.h above), but it's been
+ * around long enough on 5.19+ kernels that we just feature-test the
+ * registration syscall at runtime and use these shadow declarations
+ * for source compatibility with older build hosts. */
+struct pygo_iouring_buf {
+    uint64_t addr;
+    uint32_t len;
+    uint16_t bid;
+    uint16_t resv;
+};
+
+struct pygo_iouring_buf_reg {
+    uint64_t ring_addr;
+    uint32_t ring_entries;
+    uint16_t bgid;
+    uint16_t flags;
+    uint64_t resv[3];
+};
+
 /* Wrapping macros for the raw syscalls -- glibc doesn't expose these
  * even on systems with io_uring kernel support. */
 static int sys_io_uring_setup(unsigned entries, struct io_uring_params *p)
@@ -120,6 +171,22 @@ typedef struct {
 
     /* Serialises SQE writes + io_uring_enter calls across threads. */
     pygo_mutex_t sub_lock;
+
+    /* Provided-buffer ring for multishot recv.  Registered with bgid=0
+     * once the ring is up + the kernel reports >= 5.19.  pool_base is
+     * a contiguous N_BUFS * BUF_SIZE allocation; the kernel writes
+     * incoming data into one of these buffers per CQE.  ring_mem
+     * holds the io_uring_buf_ring structure shared with the kernel.
+     * Zero pool_base means "buffer ring unavailable" (older kernel
+     * or registration failed); multishot callers fall back. */
+    void   *pool_base;
+    size_t  pool_total;            /* N_BUFS * BUF_SIZE */
+    unsigned pool_n;               /* number of buffers in the ring */
+    unsigned pool_buf_size;        /* per-buffer size */
+    void   *bring_mem;             /* io_uring_buf_ring + entries */
+    size_t  bring_size;
+    uint16_t bring_mask;           /* pool_n - 1, pool_n must be pow2 */
+    pygo_mutex_t bring_lock;       /* serialises producer-side tail writes */
 } pygo_iouring_state_t;
 
 static pygo_iouring_state_t pygo_iouring_state = {0};
@@ -227,6 +294,69 @@ static int pygo_iouring_lazy_init(void)
 
     pygo_iouring_state.initialised = 1;
 
+    /* Best-effort provided-buffer-ring setup for multishot recv.
+     * Linux 5.19+; older kernels just leave pool_base = NULL and
+     * callers fall back to single-shot recv.  Failure here is not a
+     * hard error -- only the multishot path is affected. */
+    {
+        struct pygo_iouring_buf_reg reg;
+        size_t pool_total = (size_t)PYGO_IOURING_PBUF_COUNT *
+                            PYGO_IOURING_PBUF_SIZE;
+        size_t bring_size = sizeof(struct pygo_iouring_buf) *
+                            PYGO_IOURING_PBUF_COUNT;
+        long page = sysconf(_SC_PAGESIZE);
+        void *pool = NULL, *bring = NULL;
+        if (page <= 0) page = 4096;
+        if (posix_memalign(&pool, (size_t)page, pool_total) != 0)
+            pool = NULL;
+        if (posix_memalign(&bring, (size_t)page, bring_size) != 0)
+            bring = NULL;
+        if (pool != NULL && bring != NULL) {
+            unsigned i;
+            struct pygo_iouring_buf *bufs;
+            memset(bring, 0, bring_size);
+            bufs = (struct pygo_iouring_buf *)bring;
+            memset(&reg, 0, sizeof(reg));
+            reg.ring_addr    = (uintptr_t)bring;
+            reg.ring_entries = PYGO_IOURING_PBUF_COUNT;
+            reg.bgid         = PYGO_IOURING_PBUF_BGID;
+            reg.flags        = 0;
+            if (sys_io_uring_register(fd, IORING_REGISTER_PBUF_RING,
+                                      &reg, 1) == 0) {
+                /* Populate the ring: each buffer at index i refers to
+                 * pool_base + i*BUF_SIZE with bid=i.  After we fill the
+                 * descriptors, bump the tail by N so the kernel sees N
+                 * usable buffers immediately. */
+                for (i = 0; i < PYGO_IOURING_PBUF_COUNT; i++) {
+                    bufs[i].addr = (uintptr_t)((char *)pool +
+                                   (size_t)i * PYGO_IOURING_PBUF_SIZE);
+                    bufs[i].len  = PYGO_IOURING_PBUF_SIZE;
+                    bufs[i].bid  = (uint16_t)i;
+                    bufs[i].resv = 0;
+                }
+                /* The kernel tail lives in bufs[0].resv (per the
+                 * io_uring_buf_ring union).  Atomic store-release so
+                 * the kernel observes a consistent view of all
+                 * descriptors before the new tail. */
+                __atomic_store_n(&bufs[0].resv,
+                                 (uint16_t)PYGO_IOURING_PBUF_COUNT,
+                                 __ATOMIC_RELEASE);
+                pygo_iouring_state.pool_base     = pool;
+                pygo_iouring_state.pool_total    = pool_total;
+                pygo_iouring_state.pool_n        = PYGO_IOURING_PBUF_COUNT;
+                pygo_iouring_state.pool_buf_size = PYGO_IOURING_PBUF_SIZE;
+                pygo_iouring_state.bring_mem     = bring;
+                pygo_iouring_state.bring_size    = bring_size;
+                pygo_iouring_state.bring_mask    = PYGO_IOURING_PBUF_COUNT - 1;
+                pygo_mutex_init(&pygo_iouring_state.bring_lock);
+            } else {
+                free(pool);  free(bring);
+            }
+        } else {
+            free(pool);  free(bring);
+        }
+    }
+
     /* Hook the eventfd into the netpoll pump so CQEs cause the pump
      * to wake up + drain.  If this fails (epoll not on this OS, or
      * netpoll init failed), callers running on the global scheduler
@@ -276,6 +406,60 @@ int pygo_iouring_eventfd(void)
 int pygo_iouring_inflight(void)
 {
     return __atomic_load_n(&pygo_iouring_inflight_count, __ATOMIC_ACQUIRE);
+}
+
+int pygo_iouring_pbuf_available(void)
+{
+    if (!pygo_iouring_available()) return 0;
+    return pygo_iouring_state.pool_base != NULL;
+}
+
+unsigned pygo_iouring_pbuf_size(void)
+{
+    return pygo_iouring_state.pool_buf_size;
+}
+
+unsigned pygo_iouring_pbuf_count(void)
+{
+    return pygo_iouring_state.pool_n;
+}
+
+void *pygo_iouring_pbuf_addr(unsigned bid)
+{
+    pygo_iouring_state_t *s = &pygo_iouring_state;
+    if (s->pool_base == NULL) return NULL;
+    if (bid >= s->pool_n) return NULL;
+    return (char *)s->pool_base + (size_t)bid * s->pool_buf_size;
+}
+
+void pygo_iouring_pbuf_return(unsigned bid)
+{
+    pygo_iouring_state_t *s = &pygo_iouring_state;
+    struct pygo_iouring_buf *bufs;
+    uint16_t tail, idx;
+    if (s->pool_base == NULL) return;
+    if (bid >= s->pool_n) return;
+    bufs = (struct pygo_iouring_buf *)s->bring_mem;
+
+    pygo_mutex_lock(&s->bring_lock);
+    /* The kernel's tail is overlaid on bufs[0].resv.  Load with
+     * acquire so we observe consumer-side advancement (the kernel
+     * advances head as it takes buffers, but tail is purely producer-
+     * side; we're the only producer, so the load is mostly for
+     * ordering against the store below). */
+    tail = __atomic_load_n(&bufs[0].resv, __ATOMIC_ACQUIRE);
+    idx  = tail & s->bring_mask;
+    bufs[idx].addr = (uintptr_t)((char *)s->pool_base +
+                     (size_t)bid * s->pool_buf_size);
+    bufs[idx].len  = s->pool_buf_size;
+    bufs[idx].bid  = (uint16_t)bid;
+    /* idx==0 means we just overwrote bufs[0].addr/len/bid; the resv
+     * field (kernel tail) is the same memory location as our local
+     * `tail` variable, but we're about to bump tail by 1 in the store
+     * below so the kernel sees the new entry. */
+    __atomic_store_n(&bufs[0].resv,
+                     (uint16_t)(tail + 1), __ATOMIC_RELEASE);
+    pygo_mutex_unlock(&s->bring_lock);
 }
 
 /* Submit one SQE.  Caller has filled sqe_template (opcode/fd/addr/len/
@@ -491,6 +675,12 @@ int pygo_iouring_available(void) { return 0; }
 int pygo_iouring_eventfd(void)   { return -1; }
 void pygo_iouring_drain(void)    { /* no-op */ }
 int pygo_iouring_inflight(void)  { return 0; }
+
+int pygo_iouring_pbuf_available(void) { return 0; }
+unsigned pygo_iouring_pbuf_size(void) { return 0; }
+unsigned pygo_iouring_pbuf_count(void) { return 0; }
+void *pygo_iouring_pbuf_addr(unsigned bid) { (void)bid; return NULL; }
+void pygo_iouring_pbuf_return(unsigned bid) { (void)bid; }
 
 pygo_iouring_ssize_t pygo_iouring_pread(int fd, void *buf, size_t n, pygo_iouring_off_t offset)
 {

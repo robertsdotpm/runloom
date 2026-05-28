@@ -69,4 +69,32 @@ pygo_iouring_ssize_t pygo_iouring_pwrite(int fd, const void *buf, size_t n,
 pygo_iouring_ssize_t pygo_iouring_recv(int fd, void *buf, size_t n, int flags);
 pygo_iouring_ssize_t pygo_iouring_send(int fd, const void *buf, size_t n, int flags);
 
+/* ============================================================
+ * Provided buffer ring (Linux 5.19+) + multishot recv (Linux 6.0+).
+ *
+ * The buffer ring is a process-global pool of fixed-size buffers
+ * pre-registered with the kernel.  Multishot recv ops submit once
+ * and produce a CQE per chunk of incoming data, each CQE referring
+ * to a buffer by bid (buffer ID).  Callers consume the data, then
+ * return the buffer to the ring for reuse.
+ * ============================================================ */
+
+/* 1 if the provided-buffer ring is set up (and multishot is usable),
+ * 0 otherwise.  Lazy-initialised alongside the main ring. */
+int pygo_iouring_pbuf_available(void);
+
+/* Per-buffer size and total count, for callers that want to know how
+ * much data a multishot CQE can deliver per buffer. */
+unsigned pygo_iouring_pbuf_size(void);
+unsigned pygo_iouring_pbuf_count(void);
+
+/* Map a CQE-delivered buffer id back to its kernel-shared memory
+ * address.  Returns NULL on invalid bid or no ring. */
+void *pygo_iouring_pbuf_addr(unsigned bid);
+
+/* Return a buffer to the ring so the kernel can reuse it for another
+ * multishot CQE.  Must be called after copying the data out.  Safe
+ * to call concurrently. */
+void pygo_iouring_pbuf_return(unsigned bid);
+
 #endif
