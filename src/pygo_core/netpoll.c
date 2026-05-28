@@ -89,6 +89,10 @@ typedef struct pygo_parked {
      * gen field is exposed via the diag ring so a missed-unlink can
      * be traced to the lifetime that left the dangling reference. */
     unsigned int gen;
+    /* Index into the deadline min-heap; -1 if not present (deadline
+     * < 0 or never linked).  Maintained by the heap ops so unlink
+     * can find and remove in O(log N). */
+    int heap_index;
     /* TLS pool freelist linkage.  When released, the parker is on
      * its owning thread's freelist; pool_next chains them.  Cleared
      * on acquire. */
@@ -138,6 +142,7 @@ static pygo_parked_t *pygo_parker_pool_acquire(void)
         p = (pygo_parked_t *)calloc(1, sizeof(*p));
         if (p == NULL) return NULL;
     }
+    p->heap_index = -1;
     /* Mint a fresh generation.  Wraparound after 2^32 is fine: the
      * gen is a diag aid, not a security token. */
     p->gen = __atomic_add_fetch(&pygo_parker_gen_next, 1, __ATOMIC_RELAXED);
@@ -159,6 +164,7 @@ static void pygo_parker_pool_release(pygo_parked_t *p)
     p->ready_out   = NULL;
     p->g           = NULL;
     p->hub         = NULL;
+    p->heap_index  = -1;
     if (pygo_parker_pool_size >= PYGO_PARKER_POOL_CAP) {
         free(p);
         return;
@@ -167,6 +173,120 @@ static void pygo_parker_pool_release(pygo_parked_t *p)
     pygo_parker_pool_head = p;
     pygo_parker_pool_size++;
 }
+
+
+/* ---- deadline min-heap ----
+ *
+ * Maintained alongside the global parker list, protected by the same
+ * pygo_parked_lock.  Used by pump to:
+ *   - O(1) peek the earliest deadline (instead of an O(N) walk of
+ *     the global list)
+ *   - O(log N + K) drain expired parkers (instead of O(N) per pump)
+ *
+ * Indexing: 0-based array; parent = (i-1)/2, children = 2i+1/2i+2.
+ * Each parker stores its own index in p->heap_index for O(log N)
+ * arbitrary remove via sift-up + sift-down.  Parkers with
+ * deadline_ns < 0 are never in the heap; heap_index stays -1. */
+static pygo_parked_t **pygo_dh_arr  = NULL;
+static int             pygo_dh_size = 0;
+static int             pygo_dh_cap  = 0;
+
+static int pygo_dh_grow(void)
+{
+    int newcap = pygo_dh_cap ? pygo_dh_cap * 2 : 64;
+    pygo_parked_t **na = (pygo_parked_t **)realloc(
+        pygo_dh_arr, (size_t)newcap * sizeof(*na));
+    if (na == NULL) return -1;
+    pygo_dh_arr = na;
+    pygo_dh_cap = newcap;
+    return 0;
+}
+
+static void pygo_dh_swap(int i, int j)
+{
+    pygo_parked_t *t = pygo_dh_arr[i];
+    pygo_dh_arr[i] = pygo_dh_arr[j];
+    pygo_dh_arr[j] = t;
+    pygo_dh_arr[i]->heap_index = i;
+    pygo_dh_arr[j]->heap_index = j;
+}
+
+static void pygo_dh_sift_up(int i)
+{
+    while (i > 0) {
+        int parent = (i - 1) / 2;
+        if (pygo_dh_arr[i]->deadline_ns >= pygo_dh_arr[parent]->deadline_ns)
+            break;
+        pygo_dh_swap(i, parent);
+        i = parent;
+    }
+}
+
+static void pygo_dh_sift_down(int i)
+{
+    int n = pygo_dh_size;
+    while (1) {
+        int l = 2 * i + 1, r = 2 * i + 2, best = i;
+        if (l < n && pygo_dh_arr[l]->deadline_ns < pygo_dh_arr[best]->deadline_ns)
+            best = l;
+        if (r < n && pygo_dh_arr[r]->deadline_ns < pygo_dh_arr[best]->deadline_ns)
+            best = r;
+        if (best == i) break;
+        pygo_dh_swap(i, best);
+        i = best;
+    }
+}
+
+/* Insert p into the heap.  Caller holds pygo_parked_lock.  No-op
+ * if p has no deadline (deadline_ns < 0) or is already in the heap. */
+static void pygo_dh_insert(pygo_parked_t *p)
+{
+    if (p->deadline_ns < 0 || p->heap_index >= 0) return;
+    if (pygo_dh_size >= pygo_dh_cap) {
+        if (pygo_dh_grow() != 0) return;   /* heap stays consistent; insert dropped */
+    }
+    pygo_dh_arr[pygo_dh_size] = p;
+    p->heap_index = pygo_dh_size;
+    pygo_dh_size++;
+    pygo_dh_sift_up(p->heap_index);
+}
+
+/* Remove p from the heap if present.  Caller holds the lock. */
+static void pygo_dh_remove(pygo_parked_t *p)
+{
+    int i = p->heap_index;
+    if (i < 0 || i >= pygo_dh_size) return;
+    p->heap_index = -1;
+    pygo_dh_size--;
+    if (i == pygo_dh_size) return;          /* removed the tail */
+    pygo_dh_arr[i] = pygo_dh_arr[pygo_dh_size];
+    pygo_dh_arr[i]->heap_index = i;
+    /* Could be either direction; try both. */
+    pygo_dh_sift_up(i);
+    pygo_dh_sift_down(i);
+}
+
+/* Peek earliest deadline; returns -1 if heap empty.  Caller holds
+ * the lock. */
+static long long pygo_dh_peek_deadline(void)
+{
+    if (pygo_dh_size == 0) return -1;
+    return pygo_dh_arr[0]->deadline_ns;
+}
+
+/* Pop the earliest parker (lowest deadline).  Returns NULL if empty.
+ * Caller holds the lock.  Currently unused; the timeout sweep peeks
+ * arr[0] directly and lets pygo_parker_unlink remove via heap_index. */
+#if 0
+static pygo_parked_t *pygo_dh_pop(void)
+{
+    pygo_parked_t *p;
+    if (pygo_dh_size == 0) return NULL;
+    p = pygo_dh_arr[0];
+    pygo_dh_remove(p);
+    return p;
+}
+#endif
 
 /* Shared parked list + lock.  Under M:N multiple hubs concurrently
  * call wait_fd (park.add) and pump (park.remove); without the lock
@@ -272,6 +392,10 @@ static void pygo_parker_link(pygo_parked_t *p)
         if (head != NULL) head->prev_by_fd = p;
         pygo_parked_by_fd[p->fd] = p;
     }
+    /* Deadline heap: insert if this parker has a finite deadline.
+     * Pump now reads min-deadline in O(1) instead of walking the
+     * global list. */
+    pygo_dh_insert(p);
     __atomic_add_fetch(&pygo_parked_total, 1, __ATOMIC_RELEASE);
     PYGO_EVT(PYGO_EVT_PARKER_LINK, p, p->g, (long long)p->fd);
 }
@@ -332,6 +456,13 @@ static int pygo_parker_unlink(pygo_parked_t *p)
     if (p->next_by_fd != NULL) p->next_by_fd->prev_by_fd = p->prev_by_fd;
     p->prev_by_fd = NULL;
     p->next_by_fd = NULL;
+    /* Heap remove is independent of list/bucket touch -- a parker
+     * can be in the heap even if its other linkages were already
+     * cleaned by a partial unlink. */
+    if (p->heap_index >= 0) {
+        pygo_dh_remove(p);
+        touched = 1;
+    }
     if (touched) {
         __atomic_sub_fetch(&pygo_parked_total, 1, __ATOMIC_RELEASE);
         /* Clear the per-g back-pointer so g completion's force-unlink
@@ -1013,6 +1144,8 @@ int pygo_netpoll_drain_parked(void)
         memset(pygo_parked_by_fd, 0,
                pygo_parked_by_fd_cap * sizeof(*pygo_parked_by_fd));
     }
+    /* Drain the deadline heap too; everything is leaving. */
+    pygo_dh_size = 0;
     while (p != NULL) {
         next = p->next;
         if (p->ready_out != NULL) {
@@ -1022,6 +1155,7 @@ int pygo_netpoll_drain_parked(void)
         p->slot = NULL;
         p->next_by_fd = NULL;
         p->prev_by_fd = NULL;
+        p->heap_index = -1;
         if (p->hub != NULL) {
             pygo_mn_wake_g(p->hub, p->g);
         } else {
@@ -1213,18 +1347,10 @@ int pygo_netpoll_pump(long long timeout_ns)
         if (pygo_netpoll_init() != 0) return -1;
     }
 
-    /* Find earliest deadline among parked goroutines.  Held briefly
-     * to walk the list. */
+    /* Earliest deadline -- O(1) heap peek (was O(N) walk of the
+     * global parked list). */
     pygo_mutex_lock(&pygo_parked_lock);
-    {
-        pygo_parked_t *p;
-        for (p = pygo_parked_head; p != NULL; p = p->next) {
-            if (p->deadline_ns < 0) continue;
-            if (min_deadline < 0 || p->deadline_ns < min_deadline) {
-                min_deadline = p->deadline_ns;
-            }
-        }
-    }
+    min_deadline = pygo_dh_peek_deadline();
     pygo_mutex_unlock(&pygo_parked_lock);
 
     now = monotonic_ns();
@@ -1583,21 +1709,19 @@ post_wait:
     }
 #endif
 
-    /* Handle timeouts: any park whose deadline has passed gets ready=0. */
+    /* Handle timeouts: parkers whose deadline has passed get ready=0.
+     * Heap pop while top is <= now -- O(log N + K) instead of O(N). */
     now = monotonic_ns();
     pygo_mutex_lock(&pygo_parked_lock);
-    {
-        pygo_parked_t *p = pygo_parked_head;
-        while (p != NULL) {
-            pygo_parked_t *next_p = p->next;
-            if (p->deadline_ns >= 0 && p->deadline_ns <= now) {
-                *(p->ready_out) = 0;
-                pygo_parker_unlink(p);
-                pygo_mn_wake_g(p->hub, p->g);
-                woke++;
-            }
-            p = next_p;
-        }
+    while (pygo_dh_size > 0 && pygo_dh_arr[0]->deadline_ns <= now) {
+        pygo_parked_t *p = pygo_dh_arr[0];
+        if (p->ready_out != NULL) *p->ready_out = 0;
+        /* Unlink also pops the heap (via heap_index check). */
+        pygo_parker_unlink(p);
+        if (p->hub != NULL) pygo_mn_wake_g(p->hub, p->g);
+        else                pygo_sched_wake(p->g);
+        woke++;
+        PYGO_EVT(PYGO_EVT_PARKER_TIMEOUT, p, p->g, (long long)p->fd);
     }
     pygo_mutex_unlock(&pygo_parked_lock);
     return woke;
