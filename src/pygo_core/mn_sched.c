@@ -114,6 +114,45 @@ static volatile long pygo_mn_spawn_counter = 0;
  * pairs with the completion release. */
 static volatile long pygo_mn_pending_global = 0;
 
+/* ---- co-located pending counters ----
+ *
+ * Every change to a hub's pending count either changes the global
+ * counter too (spawn, complete) or rebalances between two hubs (steal).
+ * Forwarding through these helpers ensures the per-hub and global
+ * counters always move atomically together and a future caller cannot
+ * accidentally update one without the other.  See the broader
+ * counter-co-location sweep in the diag/gstate session for context. */
+PYGO_INLINE void pygo_mn_pending_inc(pygo_hub_t *h)
+{
+    /* spawn: per-hub up, global up.  RELAXED on the per-hub side is
+     * fine (only the owning hub reads it for scheduling decisions);
+     * ACQ_REL on the global so the mn_run reader sees the spawn
+     * before any subsequent completion's release. */
+    __atomic_add_fetch(&h->pending, 1, __ATOMIC_RELAXED);
+    __atomic_add_fetch(&pygo_mn_pending_global, 1, __ATOMIC_ACQ_REL);
+}
+
+PYGO_INLINE void pygo_mn_pending_complete(pygo_hub_t *h)
+{
+    /* complete: per-hub completed up, per-hub pending down, global down.
+     * Order matters: bump completed BEFORE decrementing pending so a
+     * mn_run reader that observes pending == 0 (via acquire) is also
+     * guaranteed to see the matching completed++ already published. */
+    __atomic_add_fetch(&h->sched.completed, 1, __ATOMIC_RELEASE);
+    __atomic_sub_fetch(&h->pending, 1, __ATOMIC_RELEASE);
+    __atomic_sub_fetch(&pygo_mn_pending_global, 1, __ATOMIC_ACQ_REL);
+}
+
+PYGO_INLINE void pygo_mn_pending_steal(pygo_hub_t *victim,
+                                              pygo_hub_t *thief)
+{
+    /* steal: work moves between hubs, total work unchanged.  ACQ_REL
+     * on both so the stolen-g's data writes are visible to the
+     * destination hub before its later resume. */
+    __atomic_sub_fetch(&victim->pending, 1, __ATOMIC_ACQ_REL);
+    __atomic_add_fetch(&thief->pending,  1, __ATOMIC_ACQ_REL);
+}
+
 /* TLS pointers set at hub_main entry.  pygo_mn_yield_current() and
  * pygo_mn_current_hub() read these to route per-g operations to the
  * right hub without each call site needing to look it up. */
@@ -247,9 +286,7 @@ static PYGO_THREAD_RET pygo_hub_main(void *arg)
                      * stealer's later `h->pending` increment lacked
                      * a release pairing with reads in other hubs
                      * that might inspect this hub's queue. */
-                    __atomic_sub_fetch(&pygo_hubs[i].pending, 1,
-                                       __ATOMIC_ACQ_REL);
-                    __atomic_add_fetch(&h->pending, 1, __ATOMIC_ACQ_REL);
+                    pygo_mn_pending_steal(&pygo_hubs[i], h);
                     break;
                 }
             }
@@ -403,16 +440,7 @@ static PYGO_THREAD_RET pygo_hub_main(void *arg)
                  * resurrect this just-freed g via a future pump
                  * dispatch.  This call covers that gap. */
                 pygo_netpoll_force_unlink_g_parker(g);
-                /* Bump completed BEFORE decrementing pending, both
-                 * with release ordering, so a mn_run reader that
-                 * observes pending == 0 (via acquire) is also
-                 * guaranteed to see the matching completed++. */
-                __atomic_add_fetch(&h->sched.completed, 1, __ATOMIC_RELEASE);
-                __atomic_sub_fetch(&h->pending, 1, __ATOMIC_RELEASE);
-                /* Global counter -- only the dec on completion, matching
-                 * the inc in pygo_mn_go.  Steals don't touch this so
-                 * mn_run can't observe a transient 0 mid-steal. */
-                __atomic_sub_fetch(&pygo_mn_pending_global, 1, __ATOMIC_ACQ_REL);
+                pygo_mn_pending_complete(h);
                 pygo_g_decref(g);
                 pygo_pystate_snap(&hub_snap);
             } else if (!self_queued) {
@@ -721,8 +749,7 @@ static int pygo_mn_go_core(PyObject *callable, pygo_c_entry_fn c_fn,
         return -1;
     }
     pygo_mn_hub_submit(h, g);
-    __atomic_add_fetch(&h->pending, 1, __ATOMIC_RELAXED);
-    __atomic_add_fetch(&pygo_mn_pending_global, 1, __ATOMIC_ACQ_REL);
+    pygo_mn_pending_inc(h);
     return 0;
 }
 
