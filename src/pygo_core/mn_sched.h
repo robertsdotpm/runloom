@@ -49,6 +49,10 @@
 
 #include "pygo_sched.h"   /* for pygo_g_t forward */
 
+/* Forward-decl avoids pulling io_uring.h into every translation unit
+ * that includes mn_sched.h. */
+struct pygo_iouring_ring;
+
 int pygo_mn_init(int n_threads);
 PyObject *pygo_mn_go(PyObject *callable);
 Py_ssize_t pygo_mn_run(void);
@@ -97,5 +101,12 @@ pygo_sched_t *pygo_mn_current_sched(void);
  * sub_lock; hub_main drains submissions each iteration and dispatches
  * routes them to the deque (if g is fresh) or local FIFO (if yielded). */
 void pygo_mn_wake_g(void *hub_opaque, pygo_g_t *g);
+
+/* The current hub's per-thread io_uring ring (NULL if not in a hub,
+ * or the hub failed to create its ring at startup -- callers should
+ * fall back to the global ring path).  Used by pygo_iouring_recv /
+ * _send to dispatch to the hub's SINGLE_ISSUER ring instead of the
+ * global ring's mutex-protected submit + legacy spin-drain. */
+struct pygo_iouring_ring *pygo_mn_current_iouring_ring(void);
 
 #endif /* PYGO_MN_SCHED_H */

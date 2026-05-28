@@ -53,6 +53,7 @@
 #include "mn_sched.h"
 #include "pygo_sched.h"
 #include "netpoll.h"
+#include "io_uring.h"
 #include "coro.h"
 #include "cldeque.h"
 
@@ -84,6 +85,15 @@ typedef struct pygo_hub {
     pygo_mutex_t sub_lock;
     pygo_g_t *sub_head;
     pygo_g_t *sub_tail;
+    /* Per-hub io_uring ring.  Created at hub_main entry with
+     * IORING_SETUP_SINGLE_ISSUER (and DEFER_TASKRUN if the kernel
+     * supports it).  Eventfd registered with the shared netpoll pump.
+     * Used by hub-bound recv/send to bypass the global ring's
+     * submission mutex and the legacy spin-drain.  NULL if the
+     * kernel doesn't have io_uring (5.0 or older) or ring create
+     * failed -- callers fall back to the global ring path. */
+    pygo_iouring_ring_t *iouring_ring;
+    int                  iouring_eventfd;  /* cached for unregister at fini */
 } pygo_hub_t;
 
 static pygo_hub_t *pygo_hubs = NULL;
@@ -129,6 +139,29 @@ static PYGO_THREAD_RET pygo_hub_main(void *arg)
      * (otherwise SwitchToFiber faults with "not a fiber"). */
     pygo_coro_thread_init();
     pygo_tls_hub = h;
+
+    /* Create the hub's per-thread io_uring ring.  Try
+     * SINGLE_ISSUER (Linux 5.18+) + DEFER_TASKRUN (6.1+); the create
+     * call downgrades gracefully on older kernels.  With
+     * DEFER_TASKRUN the kernel only posts CQEs + fires the eventfd
+     * when this thread next calls io_uring_enter(GETEVENTS); the
+     * idle path below issues that call before pumping so the
+     * deferred work flushes in time. */
+    h->iouring_ring = pygo_iouring_ring_create(1 /*defer_taskrun*/);
+    if (h->iouring_ring != NULL) {
+        h->iouring_eventfd = pygo_iouring_ring_eventfd(h->iouring_ring);
+        if (pygo_netpoll_add_iouring_ring(h->iouring_eventfd,
+                                          h->iouring_ring) != 0) {
+            /* Registration failed (most likely no epoll backend, but
+             * this build path is Linux-only so it'd be unusual).
+             * Discard the ring; hub-bound iouring calls fall through. */
+            pygo_iouring_ring_destroy(h->iouring_ring);
+            h->iouring_ring     = NULL;
+            h->iouring_eventfd  = -1;
+        }
+    } else {
+        h->iouring_eventfd = -1;
+    }
 
     /* hub_snap is loop-invariant for the same reason sched_snap is in
      * pygo_sched_drain: hub_main runs no Python work between
@@ -213,21 +246,51 @@ static PYGO_THREAD_RET pygo_hub_main(void *arg)
                     if (gap_ns < idle_ns) idle_ns = gap_ns;
                 }
                 parked = pygo_netpoll_parked_count();
-                saved = PyEval_SaveThread();
-                if (parked > 0) {
-                    /* Cap pump timeout the same way -- if a local timer
-                     * is due sooner than the next I/O event, we want to
-                     * wake to handle it. */
-                    long long pump_ns = 1000000LL;
-                    if (h->sched.sleep_size > 0 && idle_ns < pump_ns) {
-                        pump_ns = idle_ns;
+                {
+                    /* Also drive the pump when ANY iouring ring (this
+                     * hub's, the global, or another hub's) has inflight
+                     * ops: the shared netpoll's epoll set holds every
+                     * registered iouring eventfd, so any hub's pump call
+                     * drains everyone's CQEs.  Without this, a hub that
+                     * parks all its gs on iouring would idle-sleep
+                     * while completions sit unread.
+                     *
+                     * GIL handling: pump internally does
+                     * Py_BEGIN_ALLOW_THREADS for the epoll_wait syscall,
+                     * so it must be called with the GIL HELD (matching
+                     * how single-thread pygo_sched_drain calls it).
+                     * Wrapping pump in our own PyEval_SaveThread would
+                     * drop the GIL twice and crash with
+                     * "must be called with GIL held".  pygo_sleep_ns is
+                     * a plain nanosleep that doesn't need the GIL, so
+                     * release the GIL around THAT alone. */
+                    int iouring_total = pygo_iouring_inflight();
+                    if (parked > 0 || iouring_total > 0) {
+                        long long pump_ns = 1000000LL;
+                        if (h->sched.sleep_size > 0 && idle_ns < pump_ns) {
+                            pump_ns = idle_ns;
+                        }
+                        /* DEFER_TASKRUN heartbeat: if this hub's ring
+                         * was created with that flag, completions on
+                         * its own SQEs are queued in the kernel but
+                         * NOT posted to the CQ (or the eventfd) until
+                         * THIS thread next calls
+                         * io_uring_enter(GETEVENTS).  Trigger that
+                         * flush now so the upcoming epoll_wait sees a
+                         * fresh eventfd hit if there's work pending.
+                         * No-op for non-DEFER rings.  We only do this
+                         * on OUR own ring -- under SINGLE_ISSUER each
+                         * ring's GETEVENTS must come from its owner. */
+                        pygo_iouring_ring_get_events(h->iouring_ring);
+                        pygo_netpoll_pump(pump_ns);
+                    } else {
+                        if (idle_ns <= 0) idle_ns = 1;
+                        saved = PyEval_SaveThread();
+                        pygo_sleep_ns(idle_ns);
+                        PyEval_RestoreThread(saved);
                     }
-                    pygo_netpoll_pump(pump_ns);
-                } else {
-                    if (idle_ns <= 0) idle_ns = 1;
-                    pygo_sleep_ns(idle_ns);
                 }
-                PyEval_RestoreThread(saved);
+                (void)saved;
                 continue;
             }
         }
@@ -292,6 +355,18 @@ static PYGO_THREAD_RET pygo_hub_main(void *arg)
     /* Restore hub's tstate before the thread exits. */
     pygo_pystate_load(&hub_snap);
     pygo_tls_hub = NULL;
+    /* Tear down the hub's iouring ring.  Unregister from netpoll FIRST
+     * so the pump can't dispatch a CQE to a freed ring; THEN destroy.
+     * Hubs only exit when the scheduler is shutting down + all gs have
+     * completed, so inflight==0 here is the expected case; if a ring
+     * still had inflight ops we'd leak the underlying CQEs (kernel
+     * frees them on close). */
+    if (h->iouring_ring != NULL) {
+        pygo_netpoll_remove_iouring_ring(h->iouring_eventfd);
+        pygo_iouring_ring_destroy(h->iouring_ring);
+        h->iouring_ring    = NULL;
+        h->iouring_eventfd = -1;
+    }
     /* Reverse pygo_coro_thread_init for clean exit on Windows
      * (ConvertFiberToThread); no-op elsewhere. */
     pygo_coro_thread_fini();
@@ -323,6 +398,12 @@ pygo_sched_t *pygo_mn_current_sched(void)
 {
     pygo_hub_t *h = pygo_tls_hub;
     return h ? &h->sched : NULL;
+}
+
+struct pygo_iouring_ring *pygo_mn_current_iouring_ring(void)
+{
+    pygo_hub_t *h = pygo_tls_hub;
+    return h ? h->iouring_ring : NULL;
 }
 
 /* Push g onto a hub's submission list.  Called by netpoll pump to

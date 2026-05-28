@@ -220,10 +220,23 @@ static void pygo_fd_bit_clear(int fd)
 
 #if defined(PYGO_HAVE_EPOLL)
 static int pygo_epoll_fd = -1;
-/* Eventfd registered by io_uring.c; events on this fd are dispatched
- * to pygo_iouring_drain() instead of the normal parked-list walk.
- * -1 = none registered. */
+/* Eventfd registered by io_uring.c for the GLOBAL ring; events on this
+ * fd are dispatched to pygo_iouring_drain().  -1 = none registered. */
 static int pygo_iouring_eventfd_in_epoll = -1;
+
+/* Per-hub iouring rings registered via pygo_netpoll_add_iouring_ring.
+ * The dispatch path matches epoll evs[i].data.fd against the eventfd
+ * column and calls pygo_iouring_ring_drain on the corresponding ring.
+ * Sized for typical CPU counts (one hub == one ring); 64 is comfortable
+ * for any host we run on.  Protected by pygo_parked_lock.
+ *
+ * Parallel arrays instead of array-of-struct: small (one cache line each
+ * at 64 entries) + lets us scan the fd column tightly.
+ */
+#define PYGO_IOURING_RINGS_MAX 64
+static int                       pygo_iouring_ring_efds[PYGO_IOURING_RINGS_MAX];
+static struct pygo_iouring_ring *pygo_iouring_ring_ptrs[PYGO_IOURING_RINGS_MAX];
+static int                       pygo_iouring_ring_count = 0;
 #elif defined(PYGO_HAVE_KQUEUE)
 static int pygo_kqueue_fd = -1;
 #elif defined(PYGO_OS_WINDOWS)
@@ -484,6 +497,110 @@ int pygo_netpoll_add_iouring_eventfd(int fd)
 #endif
 }
 
+int pygo_netpoll_add_iouring_ring(int eventfd_fd,
+                                  struct pygo_iouring_ring *ring)
+{
+#if defined(PYGO_HAVE_EPOLL)
+    struct epoll_event ev;
+    int i;
+    if (eventfd_fd < 0 || ring == NULL) return -1;
+    if (pygo_netpoll_init() != 0) return -1;
+    pygo_mutex_lock(&pygo_parked_lock);
+    /* Idempotent: re-registering the same eventfd just updates the
+     * ring pointer (cheap; the eventfd is already in epoll). */
+    for (i = 0; i < pygo_iouring_ring_count; i++) {
+        if (pygo_iouring_ring_efds[i] == eventfd_fd) {
+            pygo_iouring_ring_ptrs[i] = ring;
+            pygo_mutex_unlock(&pygo_parked_lock);
+            return 0;
+        }
+    }
+    if (pygo_iouring_ring_count >= PYGO_IOURING_RINGS_MAX) {
+        pygo_mutex_unlock(&pygo_parked_lock);
+        errno = ENOSPC;
+        return -1;
+    }
+    pygo_iouring_ring_efds[pygo_iouring_ring_count] = eventfd_fd;
+    pygo_iouring_ring_ptrs[pygo_iouring_ring_count] = ring;
+    pygo_iouring_ring_count++;
+    pygo_mutex_unlock(&pygo_parked_lock);
+
+    ev.events = EPOLLIN | EPOLLET;
+    ev.data.fd = eventfd_fd;
+    if (epoll_ctl(pygo_epoll_fd, EPOLL_CTL_ADD, eventfd_fd, &ev) < 0) {
+        if (errno != EEXIST) {
+            /* Undo the table insert. */
+            pygo_mutex_lock(&pygo_parked_lock);
+            for (i = 0; i < pygo_iouring_ring_count; i++) {
+                if (pygo_iouring_ring_efds[i] == eventfd_fd) {
+                    pygo_iouring_ring_efds[i] =
+                        pygo_iouring_ring_efds[pygo_iouring_ring_count - 1];
+                    pygo_iouring_ring_ptrs[i] =
+                        pygo_iouring_ring_ptrs[pygo_iouring_ring_count - 1];
+                    pygo_iouring_ring_count--;
+                    break;
+                }
+            }
+            pygo_mutex_unlock(&pygo_parked_lock);
+            return -1;
+        }
+    }
+    return 0;
+#else
+    (void)eventfd_fd; (void)ring;
+    return 0;
+#endif
+}
+
+void pygo_netpoll_remove_iouring_ring(int eventfd_fd)
+{
+#if defined(PYGO_HAVE_EPOLL)
+    int i;
+    if (eventfd_fd < 0) return;
+    pygo_mutex_lock(&pygo_parked_lock);
+    for (i = 0; i < pygo_iouring_ring_count; i++) {
+        if (pygo_iouring_ring_efds[i] == eventfd_fd) {
+            pygo_iouring_ring_efds[i] =
+                pygo_iouring_ring_efds[pygo_iouring_ring_count - 1];
+            pygo_iouring_ring_ptrs[i] =
+                pygo_iouring_ring_ptrs[pygo_iouring_ring_count - 1];
+            pygo_iouring_ring_count--;
+            break;
+        }
+    }
+    pygo_mutex_unlock(&pygo_parked_lock);
+    /* Caller is about to close the eventfd; epoll auto-removes when
+     * the last fd reference is closed, so no EPOLL_CTL_DEL syscall. */
+#else
+    (void)eventfd_fd;
+#endif
+}
+
+int pygo_netpoll_any_iouring_inflight(void)
+{
+#if defined(PYGO_HAVE_EPOLL)
+    int i, total;
+    /* Global ring inflight. */
+    total = pygo_iouring_inflight();
+    /* Per-hub rings.  Read snapshot under the lock (matching add/remove)
+     * but the inflight load itself is atomic so we don't hold the lock
+     * over the loop. */
+    pygo_mutex_lock(&pygo_parked_lock);
+    {
+        struct pygo_iouring_ring *snapshot[PYGO_IOURING_RINGS_MAX];
+        int n = pygo_iouring_ring_count;
+        for (i = 0; i < n; i++) snapshot[i] = pygo_iouring_ring_ptrs[i];
+        pygo_mutex_unlock(&pygo_parked_lock);
+        for (i = 0; i < n; i++) {
+            total += pygo_iouring_ring_inflight(snapshot[i]);
+        }
+    }
+    return total;
+#else
+    return 0;
+#endif
+}
+
 /* Forcibly wake every parked goroutine with ready_mask=-1 (cancelled).
  * Each waiter's pygo_netpoll_wait_fd call returns -1; callers (server
  * accept loops, etc.) see that and exit their loops.  Returns count
@@ -636,10 +753,11 @@ int pygo_netpoll_pump(long long timeout_ns)
                 int fd = evs[i].data.fd;
                 int mask = 0;
                 pygo_parked_t *bucket, *p;
-                /* io_uring eventfd: drain its counter and walk the CQ
-                 * ring to wake parked goroutines via their per-op
-                 * record.  Not a normal fd-park entry; skip the
-                 * parked-list walk. */
+                int handled_as_iouring = 0;
+                /* io_uring eventfd (global ring): drain its counter
+                 * and walk the CQ ring to wake parked goroutines via
+                 * their per-op record.  Not a normal fd-park entry;
+                 * skip the parked-list walk. */
                 if (pygo_iouring_eventfd_in_epoll >= 0 &&
                     fd == pygo_iouring_eventfd_in_epoll) {
                     pygo_mutex_unlock(&pygo_parked_lock);
@@ -647,6 +765,27 @@ int pygo_netpoll_pump(long long timeout_ns)
                     pygo_mutex_lock(&pygo_parked_lock);
                     continue;
                 }
+                /* Per-hub iouring rings.  Dispatch to the matching
+                 * ring's drain; same lock-drop-then-relock as above so
+                 * drain can call pygo_mn_wake_g (which takes the
+                 * target hub's sub_lock; never under parked_lock). */
+                {
+                    int ri;
+                    struct pygo_iouring_ring *match = NULL;
+                    for (ri = 0; ri < pygo_iouring_ring_count; ri++) {
+                        if (pygo_iouring_ring_efds[ri] == fd) {
+                            match = pygo_iouring_ring_ptrs[ri];
+                            break;
+                        }
+                    }
+                    if (match != NULL) {
+                        pygo_mutex_unlock(&pygo_parked_lock);
+                        pygo_iouring_ring_drain(match);
+                        pygo_mutex_lock(&pygo_parked_lock);
+                        handled_as_iouring = 1;
+                    }
+                }
+                if (handled_as_iouring) continue;
                 if (evs[i].events & EPOLLIN)  mask |= PYGO_NETPOLL_READ;
                 if (evs[i].events & EPOLLOUT) mask |= PYGO_NETPOLL_WRITE;
                 /* O(1) bucket lookup; walk only the parkers on this fd

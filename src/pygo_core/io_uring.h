@@ -120,4 +120,75 @@ pygo_iouring_ssize_t pygo_iouring_ms_recv(pygo_iouring_ms_t *h,
  * Returns immediately; do not touch h afterwards. */
 void pygo_iouring_ms_close(pygo_iouring_ms_t *h);
 
+/* ============================================================
+ * Per-hub rings (Linux 5.18+ for SINGLE_ISSUER, 6.1+ for DEFER_TASKRUN).
+ *
+ * The functions above operate on a single process-global ring shared
+ * by every thread.  Under M:N (each hub == one OS thread that owns its
+ * goroutines) each hub can additionally own a dedicated ring; that
+ * ring is the SINGLE issuer of SQEs (no submission lock needed) and
+ * eventually DEFER_TASKRUN can be turned on so completion task work
+ * is batched until the hub thread next enters io_uring_enter.
+ *
+ * Hub rings carry plain recv/send/read/write SQEs.  The multishot +
+ * provided-buffer-ring path stays on the global ring (one buffer pool
+ * for the process); a hub-context multishot ms_open still submits its
+ * SQE through the global ring, so per-hub rings do NOT regress
+ * multishot.
+ *
+ * Lifecycle: a hub creates its ring at hub_main entry and destroys it
+ * at hub exit.  The eventfd lives in the netpoll pump's shared epoll
+ * (registered via pygo_netpoll_add_iouring_ring); the pump dispatches
+ * CQE-pending events to the matching ring's drain function.
+ * ============================================================ */
+
+typedef struct pygo_iouring_ring pygo_iouring_ring_t;
+
+/* Create a per-hub ring.  Sets IORING_SETUP_SINGLE_ISSUER on 5.18+
+ * kernels (silently downgrades if unsupported).  If
+ * defer_taskrun != 0 AND the kernel reports support (6.1+), also
+ * sets IORING_SETUP_DEFER_TASKRUN -- in that case the OWNING thread
+ * must call pygo_iouring_ring_get_events(r) periodically to flush
+ * task work, since CQEs (and the eventfd) won't be posted until the
+ * kernel sees an io_uring_enter(GETEVENTS) call.
+ *
+ * Returns NULL with errno set on failure (e.g. ENOSYS on <5.1, or any
+ * mmap/eventfd failure). */
+pygo_iouring_ring_t *pygo_iouring_ring_create(int defer_taskrun);
+
+/* Tear down a ring.  Caller must ensure no in-flight ops remain
+ * (inflight() == 0).  Closes ring fd + eventfd. */
+void pygo_iouring_ring_destroy(pygo_iouring_ring_t *r);
+
+/* Eventfd used by the kernel to signal CQE posts on this ring.
+ * Caller registers it with the netpoll pump. */
+int pygo_iouring_ring_eventfd(const pygo_iouring_ring_t *r);
+
+/* In-flight SQE count on this ring.  Hub_main uses this in the idle
+ * decision: if > 0, pump (drains CQEs) instead of sleep. */
+int pygo_iouring_ring_inflight(const pygo_iouring_ring_t *r);
+
+/* Drain CQEs.  Called by the netpoll pump when the ring's eventfd
+ * fires.  Walks the CQ ring, writes results into op records, wakes
+ * parked goroutines.  Idempotent. */
+void pygo_iouring_ring_drain(pygo_iouring_ring_t *r);
+
+/* DEFER_TASKRUN heartbeat: call from the owner thread to flush kernel
+ * task work and post any pending CQEs to the eventfd.  No-op if the
+ * ring wasn't created with defer_taskrun=1.  Idempotent. */
+void pygo_iouring_ring_get_events(pygo_iouring_ring_t *r);
+
+/* Cooperative recv/send through a hub ring.  Must be called from a
+ * goroutine running on the hub that owns the ring (so SINGLE_ISSUER
+ * holds and the park can be woken via pygo_mn_wake_g from drain).
+ *
+ * Same return convention as recv()/send(): non-negative bytes on
+ * success, -1 with errno on failure. */
+pygo_iouring_ssize_t pygo_iouring_ring_recv(pygo_iouring_ring_t *r,
+                                            int fd, void *buf, size_t n,
+                                            int flags);
+pygo_iouring_ssize_t pygo_iouring_ring_send(pygo_iouring_ring_t *r,
+                                            int fd, const void *buf,
+                                            size_t n, int flags);
+
 #endif

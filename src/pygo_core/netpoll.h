@@ -65,4 +65,19 @@ const char *pygo_netpoll_backend(void);
  * ownership of the fd. */
 int pygo_netpoll_add_iouring_eventfd(int fd);
 
+/* Like above but registers a per-hub ring instead of the global ring.
+ * The pump dispatches the eventfd hit to pygo_iouring_ring_drain(ring).
+ * Up to PYGO_NETPOLL_MAX_IOURING_RINGS hub rings may be registered at
+ * once (sized for typical CPU counts).  Returns 0 on success, -1 on
+ * "too many registered" or non-epoll backend. */
+struct pygo_iouring_ring;
+int pygo_netpoll_add_iouring_ring(int eventfd_fd,
+                                  struct pygo_iouring_ring *ring);
+void pygo_netpoll_remove_iouring_ring(int eventfd_fd);
+
+/* Does any registered iouring source (global or per-hub) have an
+ * in-flight SQE?  Hub_main uses this to decide pump vs sleep when no
+ * fd-parks are active. */
+int pygo_netpoll_any_iouring_inflight(void);
+
 #endif /* PYGO_NETPOLL_H */
