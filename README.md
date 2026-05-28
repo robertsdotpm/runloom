@@ -28,6 +28,29 @@ pygo_core.run()
 
 No `async`.  No `await`.  Just `go(fn)` and blocking-style I/O.
 
+Already have `async def` code?  Run it on pygo's scheduler with
+`pygo.aio`:
+
+```python
+import asyncio
+import pygo.aio as paio
+
+async def handler(reader, writer):
+    line = await reader.readline()
+    writer.write(b"echo: " + line)
+    await writer.drain()
+    writer.close()
+
+async def main():
+    server = await paio.start_server(handler, "127.0.0.1", 9000)
+    async with server:
+        await server.serve_forever()
+
+paio.run(main())          # ~equivalent to asyncio.run, on pygo
+```
+
+See [Documentation](#documentation) below for the full guide.
+
 ## Features
 
 - **Hand-rolled asm context switch** on x86_64 SystemV and aarch64.
@@ -117,6 +140,45 @@ explosion).
 
 **TCP echo server** (external client, sequential round-trips):
 **8.6 K req/s, 116 µs/RT**.
+
+## Stack sizing & memory
+
+Each goroutine owns a private C stack.  pygo manages stack size with
+three mechanisms working together:
+
+1. **Auto-calibration** — every fresh stack is painted with a sentinel;
+   on completion pygo scans the high-water mark.  After 1 000
+   completions the scheduler-wide default is locked to
+   `next_pow2(max_hwm × 4)`, clamped to `[16 KB, 8 MB]`, and painting
+   shuts off.  Typical pure-Python workloads converge to **16 KB**;
+   C-recursion-heavy workloads (`json.dumps` of deeply nested objects)
+   converge to **64 KB**.
+
+2. **`MADV_DONTNEED` on pool release** — when a finished goroutine's
+   stack returns to the pool, all but the first page are released back
+   to the kernel.  A burst of 5 000 goroutines × 1 MB stacks lands at
+   **~21 MB resident**, not 5 GB.  Pages refault on reuse — no
+   correctness impact.
+
+3. **Per-call override** for the outlier goroutine:
+
+```python
+import pygo_core
+
+# Lock in a known-good size before any spawn (skips calibration):
+pygo_core.set_stack_size(64 * 1024)
+
+# Single goroutine that's known to recurse deeply:
+pygo_core.go(deep_handler, stack_size=512 * 1024)
+
+# Inspect what calibration measured:
+print(pygo_core.stats())
+# {'stack_size_default': 16384, 'stack_hwm': 768,
+#  'stack_calibrated': 1, 'stack_painting': 0, ...}
+```
+
+See [the stack sizing guide](docs/stack-sizing.md) for the full
+mechanism, including the safety margin and when to override.
 
 ## Time-sliced preemption (3.13t)
 
@@ -262,46 +324,32 @@ covered.
 
 ## Layout
 
-```
-src/pygo_core/
-  arch/
-    swap_x86_64.S       SysV x86_64 inline asm (~80 ns/switch)
-    swap_aarch64.S      AAPCS64 inline asm (verified under qemu)
-  plat.h                OS/arch/compiler detection
-  plat_compat.h         mutex/thread/clock/sleep/cpu-count shim
-  plat_atomic.h         __atomic_* shim for MSVC (no-op on GCC/Clang)
-  compat.h              stdint/stdbool shims for old MSVC
-  coro.{h,c}            stackful coro primitive (asm/fibers/ucontext)
-  fcontext.{h,c}        asm trampoline + per-arch make_ctx
-  pygo_sched.{h,c}      C scheduler + per-g PyThreadState snap/load
-  netpoll.{h,c}         epoll/kqueue/WSAPoll/select backend (M:N-aware)
-  mn_sched.{h,c}        M:N work-stealing scheduler (3.13t)
-  cldeque.{h,c}         Chase-Lev work-stealing deque
-  chan.{h,c}            Go-style channel (send/recv/close, buffered+unbuffered)
-  module.c              Python type + module init + free-thread declaration
-src/pygo/
-  monkey.py             stdlib monkey-patch (socket / time / select /
-                        stdio / ssl / subprocess / threading / queue /
-                        file / syscalls / dns) -- Windows-aware
-  runtime.py            legacy Python scheduler (kept for tests)
-tests/
-  run_tests.py          unit tests
-  test_arm64.{c,sh}     aarch64 cross-compile + qemu run
-  test_monkey.py        monkey-patch behaviour + cross-OS shims
-examples/
-  bench_c_scheduler.py  pygo vs asyncio yields/s
-  bench_snap.py         snap-path microbench (fast + slow path)
-  bench_spawn.py        steady-state spawn cost
-  bench_spawn_yield.py  raw spawn/yield throughput
-  bench_concurrent_yield.py   N concurrent yielded coros stress
-  bench_mn.py           M:N parallel sha256
-  bench_mn_yield.py     M:N yield-in-hub
-  bench_mn_sleep.py     M:N sleep-in-hub
-  bench_mn_netpoll.py   M:N echo server across hubs
-  bench_preempt.py      time-sliced preemption demo
-  echo_server.py        TCP echo (Go-style demo)
-  echo_client.py        parallel-goroutine client
-```
+| Directory | What's in it |
+| --- | --- |
+| `src/pygo_core/` | The C extension: scheduler, channels, netpoll, asm context-switch backends, M:N hubs. |
+| `src/pygo/` | Pure-Python layers: `aio` (asyncio bridge), `sync` (no-async-await facade), `monkey` (stdlib patches), `time` (Go-style Timer/Ticker), `runtime` (legacy Python scheduler kept for tests). |
+| `tests/` | Unit tests, stress/chaos/concurrency/edge/workload suites, monkey-patch behaviour tests. |
+| `examples/` | Microbenchmarks (`bench_*.py`) and small servers (`echo_server.py`, `echo_client.py`). |
+| `docs/` | Full user documentation — see below. |
+| `scripts/` | Bootstrap compiler + install helpers for fresh boxes. |
+
+## Documentation
+
+Full guide aimed at people building things on top of pygo lives in
+[docs/](docs/) and is also published via Read the Docs.  Highlights:
+
+- [Quickstart](docs/quickstart.md) — your first goroutine, channels, sleep
+- [Asyncio bridge (`pygo.aio`)](docs/asyncio.md) — run `async def` code on the pygo scheduler
+- [Sync API (`pygo.sync`)](docs/sync-api.md) — same scheduler, no `async`/`await`
+- [Channels](docs/channels.md) — buffered, unbuffered, `select`, `for v in ch`
+- [Stack sizing](docs/stack-sizing.md) — calibration, MADV_DONTNEED, per-call overrides
+- [Monkey-patching the stdlib](docs/monkey-patching.md) — drop-in cooperative `socket`, `time`, `ssl`
+- [Time-sliced preemption](docs/preemption.md) — 3.13t auto-yield
+- [M:N parallelism](docs/parallelism.md) — work-stealing across OS threads
+- [Cookbook](docs/cookbook.md) — worker pools, pipelines, fan-in/out, cancellation
+- [API reference](docs/api-reference.md) — every public symbol
+
+To build the docs locally: `pip install mkdocs mkdocs-material && mkdocs serve`.
 
 ## Known gaps
 

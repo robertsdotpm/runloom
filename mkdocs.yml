@@ -1,0 +1,69 @@
+site_name: pygo
+site_description: Go-style stackful coroutines for Python
+site_url: https://pygo.readthedocs.io/
+repo_url: https://github.com/robertsdotpm/pygo
+repo_name: robertsdotpm/pygo
+edit_uri: edit/main/docs/
+
+theme:
+  name: material
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.expand
+    - navigation.top
+    - search.highlight
+    - search.suggest
+    - content.code.copy
+    - content.code.annotate
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+
+nav:
+  - Home: index.md
+  - Getting started:
+      - Installation: installation.md
+      - Quickstart: quickstart.md
+  - Guide:
+      - Channels: channels.md
+      - Asyncio bridge: asyncio.md
+      - Sync API (no async/await): sync-api.md
+      - Monkey-patching the stdlib: monkey-patching.md
+      - Stack sizing & memory: stack-sizing.md
+      - Time-sliced preemption: preemption.md
+      - M:N parallelism: parallelism.md
+  - Reference:
+      - Cookbook: cookbook.md
+      - API reference: api-reference.md

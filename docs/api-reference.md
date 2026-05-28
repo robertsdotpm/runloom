@@ -1,0 +1,360 @@
+# API reference
+
+Every public symbol exported by pygo, organised by module.  This is
+a reference — start with the [guides](index.md) if you're learning
+your way around.
+
+## `pygo_core` (C extension)
+
+The low-level scheduler API.  Most user code calls `pygo_core.go` and
+`pygo_core.run`; everything else is for advanced use.
+
+### Scheduler control
+
+#### `go(fn, *, stack_size=None) → G`
+
+Spawn a goroutine running `fn`.  Returns a [`G`](#g) handle.
+
+- `fn` — a zero-arg callable.  Bind arguments with `lambda` or
+  `functools.partial`.
+- `stack_size` — optional per-call override (bytes).  Bypasses the
+  scheduler's calibrated default.  See [stack sizing](stack-sizing.md).
+
+#### `go_noyield(fn) → G`
+
+Like `go(fn)` but with a contract: `fn` promises not to yield, sleep,
+park, or do monkey-patched I/O.  The scheduler skips per-g datastack
+setup, saving 150–400 ns per spawn.  **Undefined behaviour if `fn`
+yields.**  Use only for pure-compute callables.
+
+#### `run() → int`
+
+Drive the scheduler until every goroutine has finished.  Returns the
+count of completed goroutines.
+
+#### `sched_yield()` / `sched_yield_classic()`
+
+Cooperatively yield.  `sched_yield` is a vectorcall fastpath
+singleton; `sched_yield_classic` is the equivalent PyCFunction (kept
+for benchmarking, otherwise identical).
+
+#### `sched_sleep(seconds)`
+
+Park the current goroutine until at least `seconds` have elapsed.
+Other goroutines run in the meantime.
+
+#### `sched_stop()`
+
+Signal the scheduler to exit its drain loop at the next safe point.
+Used internally by `pygo.aio` for early termination.
+
+#### `sched_reset() → (int, int, int)`
+
+Drop everything queued in the scheduler (ready FIFO, sleep heap,
+netpoll-parked).  Returns `(n_ready, n_sleep, n_parked)`.  Used by
+`paio.run` for cleanup between runs.
+
+#### `park_self()`
+
+Park the current goroutine until `g.wake()` is called on its handle.
+Race-safe — a wake that arrives before the park is consumed and the
+park returns immediately.  Use with `current_g()` to capture the
+handle before parking.
+
+#### `current_g() → G | None`
+
+Return a handle to the currently-running goroutine, or `None` if
+called from outside any goroutine.
+
+### Stack sizing
+
+#### `get_stack_size() → int`
+
+Current per-goroutine default stack size, in bytes.
+
+#### `set_stack_size(bytes)`
+
+Override the default and freeze calibration.  Clamped to
+`[16 KB, 8 MB]`.  Disables stack painting.
+
+### Channels
+
+#### `Chan(capacity)`
+
+Construct a channel of the given buffer capacity.  `Chan(0)` is
+unbuffered (rendezvous).  See [Channels](channels.md).
+
+Methods:
+
+- `send(value)` — block until the value fits, then enqueue.  Raises
+  `ValueError` on closed channel.
+- `recv() → (value, ok)` — block for a value.  Returns
+  `(None, False)` after the channel is closed and drained.
+- `try_send(value) → bool` — non-blocking send; `False` if the buffer
+  is full.
+- `try_recv() → (value, ok) | None` — non-blocking; `None` if buffer
+  empty.
+- `close()` — wake every parked sender (they raise) and receiver
+  (they get `(None, False)`).
+- `__iter__()` — yields values until the channel closes.
+
+#### `select(cases, default=False)`
+
+Multi-way wait.  Each case is `("recv", chan)` or `("send", chan, value)`.
+
+- Returns `(idx, payload)` for a fired case where `payload` is
+  `(value, ok)` for recv or `None` for send.
+- Returns `-1` (bare integer) if `default=True` and no case is ready.
+
+### Networking primitives
+
+#### `wait_fd(fd, events, timeout_ms=-1) → int`
+
+Park the current goroutine until `fd` is ready.  `events` is a
+bitmask: `1 = read`, `2 = write`.  Returns the ready bitmask.
+`timeout_ms=-1` for no timeout; 0 to poll without parking.
+
+#### `fd_read(fd, n) → bytes`, `fd_write(fd, data) → int`
+
+Cooperative read/write on an fd.  Park on `wait_fd` when EAGAIN.
+
+#### `tcp_recv(sock, n) → bytes`, `tcp_send(sock, data) → int`
+
+TCP-specific fastpaths.  `sock` is a Python `socket.socket` (or its
+fileno).
+
+#### `file_read(fd, n, offset=-1) → bytes`, `file_write(fd, data, offset=-1) → int`
+
+File I/O.  On Linux 5.1+ with `iouring_available()`, dispatched
+through io_uring.  Elsewhere dispatched through a worker thread.
+
+#### `iouring_available() → bool`
+
+True if the kernel supports io_uring (Linux 5.1+).
+
+### M:N parallelism (3.13t only)
+
+See [Parallelism](parallelism.md).
+
+- `mn_init(n=0)` — start `n` hub threads (defaults to `cpu_count`).
+- `mn_go(fn) → G` — spawn on a round-robin hub.
+- `mn_run() → int` — wait for all hubs to drain.
+- `mn_fini()` — tear down the pool.
+
+### Preemption (3.13t only)
+
+See [Preemption](preemption.md).
+
+- `preempt_init(quantum_us=10000)` — start the per-thread quantum timer.
+- `preempt_fini()` — stop the timer.
+
+### Pre-warming
+
+#### `warmup(n, stack_size=None)`
+
+Pre-allocate `n` goroutine stacks so the first `n` spawns skip mmap.
+
+### Diagnostics
+
+#### `backend() → str`
+
+Active context-switch backend: `"fcontext-asm"`, `"fibers"`, or
+`"ucontext"`.
+
+#### `netpoll_backend() → str`
+
+Active netpoll: `"epoll"`, `"kqueue"`, `"wsapoll"`, `"iocp"`, or
+`"select"`.
+
+#### `stats() → dict`
+
+Snapshot of scheduler counters.  Keys: `ready`, `sleeping`,
+`netpoll_parked`, `completed`, `running`, `stack_size_default`,
+`stack_hwm`, `stack_completed`, `stack_calibrated`, `stack_painting`,
+`backend`, `netpoll`.  Cheap; safe to poll periodically.
+
+### Thread setup
+
+#### `thread_init()` / `thread_fini()`
+
+Per-OS-thread setup/teardown.  Called automatically; only invoke
+manually if you're embedding pygo in a non-main thread.
+
+### Types
+
+#### `G`
+
+Goroutine handle.  Attributes:
+
+- `done` — `True` once the goroutine has returned.
+- `result` — return value (or `None` until done).
+- `error` — exception object if the goroutine raised, else `None`.
+- `wake()` — re-queue a parked goroutine; race-safe with
+  `park_self()`.
+- `stack(limit=None)` — return a list of `(filename, lineno, name)`
+  frames for the goroutine's current Python stack.
+
+#### `Coro`
+
+Lower-level coroutine handle.  Most users won't construct these
+directly; `G` wraps a `Coro` plus scheduler metadata.
+
+---
+
+## `pygo`
+
+Top-level package.  Re-exports a Go-style API from `pygo.runtime`
+(the original Python-only scheduler, kept for backward compatibility).
+
+```python
+import pygo
+
+pygo.go(fn)            # spawn (uses the C scheduler under the hood)
+pygo.yield_()          # cooperative yield
+pygo.sleep(seconds)    # cooperative sleep
+pygo.run(main_fn=None) # drive until idle
+pygo.current() → Goroutine
+pygo.backend() → str
+```
+
+For new code, prefer `pygo_core` (faster) or `pygo.sync` (richer API).
+
+---
+
+## `pygo.aio`
+
+Asyncio bridge.  See [pygo.aio](asyncio.md).
+
+```python
+pygo.aio.run(coro)                     # equivalent of asyncio.run
+pygo.aio.install()                     # set PygoEventLoopPolicy globally
+pygo.aio.open_connection(host, port)   # async (reader, writer)
+pygo.aio.start_server(cb, host, port)  # async server with serve_forever()
+```
+
+Classes:
+
+- `PygoEventLoop` — drop-in `asyncio.AbstractEventLoop` backed by
+  pygo's scheduler.
+- `PygoEventLoopPolicy` — sets `PygoEventLoop` as the default loop.
+- `PygoFuture` — duck-typed Future with synchronous done-callback
+  dispatch.
+- `PygoTask` — `asyncio.Task` replacement that drives the coroutine
+  inside a goroutine.
+- `StreamReader` / `StreamWriter` — asyncio-compatible stream
+  interface, backed by `wait_fd`.
+- `DatagramTransport` — UDP transport for
+  `loop.create_datagram_endpoint`.
+
+---
+
+## `pygo.sync`
+
+No-`async`/`await` facade.  See [Sync API](sync-api.md).
+
+```python
+pygo.sync.go(fn, *args, **kwargs)        # spawn with args
+pygo.sync.run(main_fn=None)              # drive scheduler
+pygo.sync.sleep(seconds)
+pygo.sync.yield_now()
+pygo.sync.current() → G
+
+pygo.sync.Chan                            # re-export of pygo_core.Chan
+pygo.sync.select                          # re-export of pygo_core.select
+pygo.sync.park / wake                     # park_self + wake helpers
+
+pygo.sync.tcp_connect(host, port) → Socket
+pygo.sync.tcp_listen(host, port, *, backlog=128) → Socket
+pygo.sync.udp_endpoint(local_addr=None, remote_addr=None) → Socket
+```
+
+Synchronisation primitives matching `asyncio.*`:
+
+- `pygo.sync.Lock` — cooperative mutex.
+- `pygo.sync.Event` — set/clear/wait.
+- `pygo.sync.Condition` — waiter + notifier on a lock.
+- `pygo.sync.Semaphore` — bounded counting semaphore.
+
+#### `Socket`
+
+Wrapper around `socket.socket` whose blocking methods (`connect`,
+`accept`, `recv`, `send`, `sendall`, `recv_into`, `recvfrom`, `sendto`)
+park cooperatively on `wait_fd`.  Standard `socket.socket` attributes
+(`setsockopt`, `fileno`, `getsockname`, `close`, etc.) pass through.
+
+---
+
+## `pygo.time`
+
+Go-style timers and tickers.
+
+#### `Sleep(seconds)`
+
+Cooperative sleep.  Alias for `pygo_core.sched_sleep`.
+
+#### `After(seconds) → Chan`
+
+Returns a channel that will receive the current time after `seconds`.
+Equivalent of Go's `time.After`.
+
+```python
+import pygo.time as t
+
+after = t.After(1.0)
+# ... do work ...
+after.recv()           # blocks until the timer fires
+```
+
+#### `NewTimer(seconds) → Timer`
+
+Single-shot timer.  Methods:
+
+- `Timer.C` — channel that fires once.
+- `Timer.Stop()` — cancel; returns `True` if cancelled before firing.
+- `Timer.Reset(seconds)` — rearm.
+
+#### `NewTicker(seconds) → Ticker`
+
+Recurring ticker.  Methods:
+
+- `Ticker.C` — channel that fires every `seconds`.
+- `Ticker.Stop()` — stop emitting.
+
+#### `Tick(seconds) → Chan`
+
+Shorthand for `NewTicker(seconds).C` when you don't need to stop it
+(the ticker leaks — only use for program-lifetime tickers).
+
+---
+
+## `pygo.monkey`
+
+Stdlib monkey-patching.  See [Monkey-patching](monkey-patching.md).
+
+#### `patch(**flags)`
+
+Apply patches.  Default: all categories enabled.  Opt out:
+
+```python
+pygo.monkey.patch(threading=False, dns=False)
+```
+
+Categories: `socket`, `time`, `os`, `select`, `stdio`, `ssl`,
+`subprocess`, `threading`, `queue`, `dns`.
+
+#### `unpatch(**flags)`
+
+Reverse patches.  Without args, reverses everything applied.
+
+#### Co-aware synchronisation primitives
+
+Available even without `patch()`:
+
+- `CoLock`, `CoRLock` — cooperative mutexes.
+- `CoEvent` — set/wait.
+- `CoCondition` — `wait` releases the lock cooperatively.
+- `CoSemaphore`, `CoBoundedSemaphore` — counting semaphores.
+
+These implement the `threading.*` interface but park goroutines
+instead of OS threads.  Useful when you want sync primitives but
+don't want to install the full monkey patch.
