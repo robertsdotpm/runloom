@@ -1122,7 +1122,19 @@ static PyObject *m_sched_stop(PyObject *self, PyObject *unused)
  * the next pygo_core.run() with a sleep heap that won't drain for
  * minutes.  Goroutines being dropped have their coros marked done +
  * freed; any user-visible Python references (G handles) will report
- * done=True. */
+ * done=True.
+ *
+ * NOTE: per-frame localsplus refs on the goroutines' datastack chunks
+ * are not unwound.  A correct unwind would either walk the frame
+ * chain and call _PyFrame_Clear on each (CPython internal API; layout
+ * changes per minor version), or inject SystemExit and resume the
+ * coro so the eval loop's exception cascade unwinds the frames
+ * naturally.  The latter was tried and runs user code in a
+ * destruction context where __exit__ / finally / done-callbacks have
+ * unpredictable side effects on subsequent paio.run cycles -- it left
+ * SystemExit visible in tests that ran later in the same process.
+ * Reviewer item 6 in HANDOFF.md; resolving it cleanly needs a
+ * frame-walker hardened across 3.11/3.12/3.13t. */
 static PyObject *m_sched_reset(PyObject *self, PyObject *unused)
 {
     pygo_sched_t *s = pygo_sched_get();
