@@ -34,24 +34,6 @@
 #include <stdlib.h>
 #include <stdint.h>
 
-/* TCPConn type struct, declared up front so the linux-only iouring
- * helpers below can read the iouring_choice field directly. */
-typedef struct pygo_tcpconn_s {
-    PyObject_HEAD
-    int fd;          /* underlying socket fd; -1 if closed */
-    int family;      /* AF_INET / AF_INET6 / etc */
-    int is_listener; /* True after listen() succeeds */
-    int closed;
-#if defined(__linux__)
-    /* Lazily-allocated multishot recv handle.  NULL until the first
-     * iouring recv on this conn; freed in close. */
-    pygo_iouring_ms_t *ms;
-    /* Per-conn backend decision, latched on first recv.  See
-     * pygo_tcpconn_use_iouring for the latching rationale. */
-    int iouring_choice;
-#endif
-} PygoTCPConn;
-
 #if defined(__linux__)
 /* PYGO_TCPCONN_IOURING controls TCPConn's recv/send backend:
  *   unset / "0" : epoll register-once + recv()/send() (default).
@@ -92,32 +74,18 @@ static void pygo_tcpconn_resolve_mode(void)
     }
 }
 
-/* Resolve the backend choice for this specific conn.  Sticky: once a
- * conn picks epoll, it stays on epoll for life (a mid-life flip to
- * iouring would leave a stale netpoll-epoll registration competing
- * with a fresh multishot SQE on the same fd).  Once a conn picks
- * iouring, it stays on iouring. */
-static int pygo_tcpconn_use_iouring(PygoTCPConn *self)
+static int pygo_tcpconn_use_iouring(void)
 {
     int mode;
-    if (self->iouring_choice >= 0) return self->iouring_choice;
     if (pygo_tcpconn_iouring_mode < 0) pygo_tcpconn_resolve_mode();
     mode = pygo_tcpconn_iouring_mode;
-    if (mode == PYGO_IOURING_MODE_OFF) {
-        self->iouring_choice = 0;
-    } else if (mode == PYGO_IOURING_MODE_ON) {
-        self->iouring_choice = pygo_iouring_available() ? 1 : 0;
-    } else {
-        /* auto */
-        if (pygo_iouring_available() &&
-            __atomic_load_n(&pygo_tcpconn_live_count, __ATOMIC_ACQUIRE)
-                >= pygo_tcpconn_iouring_threshold) {
-            self->iouring_choice = 1;
-        } else {
-            self->iouring_choice = 0;
-        }
-    }
-    return self->iouring_choice;
+    if (mode == PYGO_IOURING_MODE_OFF)  return 0;
+    if (mode == PYGO_IOURING_MODE_ON)   return pygo_iouring_available();
+    /* auto: only use iouring when many TCPConns are live. */
+    if (__atomic_load_n(&pygo_tcpconn_live_count, __ATOMIC_ACQUIRE)
+        >= pygo_tcpconn_iouring_threshold)
+        return pygo_iouring_available();
+    return 0;
 }
 #endif
 
@@ -146,8 +114,21 @@ static int pygo_tcpconn_use_iouring(PygoTCPConn *self)
 int pygo_netpoll_wait_fd(int fd, int events, long long timeout_ns);
 
 /* ============================================================
- * Type object  (struct definition is above the iouring helpers)
+ * Type object
  * ============================================================ */
+typedef struct {
+    PyObject_HEAD
+    int fd;          /* underlying socket fd; -1 if closed */
+    int family;      /* AF_INET / AF_INET6 / etc */
+    int is_listener; /* True after listen() succeeds */
+    int closed;
+#if defined(__linux__)
+    /* Lazily-allocated multishot recv handle.  NULL until the first
+     * recv on this conn under PYGO_TCPCONN_IOURING=1; freed in close. */
+    pygo_iouring_ms_t *ms;
+#endif
+} PygoTCPConn;
+
 static PyTypeObject PygoTCPConnType;
 
 /* ============================================================
@@ -278,7 +259,6 @@ static PygoTCPConn *PygoTCPConn_alloc(PyTypeObject *type)
     self->closed = 0;
 #if defined(__linux__)
     self->ms = NULL;
-    self->iouring_choice = -1;
     __atomic_add_fetch(&pygo_tcpconn_live_count, 1, __ATOMIC_RELEASE);
 #endif
     return self;
@@ -407,7 +387,7 @@ static PyObject *PygoTCPConn_recv(PygoTCPConn *self, PyObject *args)
     out = PyBytes_AS_STRING(result);
 
 #if defined(__linux__)
-    use_iouring = pygo_tcpconn_use_iouring(self);
+    use_iouring = pygo_tcpconn_use_iouring();
     if (use_iouring) {
         pygo_iouring_ssize_t r;
         /* Multishot when available and the call carries no special
@@ -493,7 +473,7 @@ static PyObject *PygoTCPConn_recv_into(PygoTCPConn *self, PyObject *args)
     fd = self->fd;
 
 #if defined(__linux__)
-    if (pygo_tcpconn_use_iouring(self)) {
+    if (pygo_tcpconn_use_iouring()) {
         pygo_iouring_ssize_t r;
         if (flags == 0 && pygo_iouring_pbuf_available()) {
             if (self->ms == NULL) {
@@ -555,7 +535,7 @@ static PyObject *PygoTCPConn_send(PygoTCPConn *self, PyObject *args)
     fd = self->fd;
 
 #if defined(__linux__)
-    if (pygo_tcpconn_use_iouring(self)) {
+    if (pygo_tcpconn_use_iouring()) {
         pygo_iouring_ssize_t r = pygo_iouring_send(fd, buf.buf,
                                                   (size_t)buf.len, flags);
         PyBuffer_Release(&buf);
@@ -607,7 +587,7 @@ static PyObject *PygoTCPConn_send_all(PygoTCPConn *self, PyObject *args)
     fd = self->fd;
 
 #if defined(__linux__)
-    use_iouring = pygo_tcpconn_use_iouring(self);
+    use_iouring = pygo_tcpconn_use_iouring();
     if (use_iouring) {
         /* IORING_OP_SEND already handles short writes inside the
          * kernel for stream sockets -- the kernel buffers what it
