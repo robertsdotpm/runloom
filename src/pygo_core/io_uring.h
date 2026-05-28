@@ -61,4 +61,12 @@ pygo_iouring_ssize_t pygo_iouring_pread(int fd, void *buf, size_t n,
 pygo_iouring_ssize_t pygo_iouring_pwrite(int fd, const void *buf, size_t n,
                                          pygo_iouring_off_t offset);
 
+/* Submit an IORING_OP_RECV / IORING_OP_SEND and park cooperatively
+ * until completion.  Same return convention as recv()/send():
+ * non-negative bytes on success, -1 with errno on failure.  flags is
+ * the recv/send flags arg (MSG_*).  Used in place of the recv()/send()
+ * + epoll-wait loop in the TCP hot path. */
+pygo_iouring_ssize_t pygo_iouring_recv(int fd, void *buf, size_t n, int flags);
+pygo_iouring_ssize_t pygo_iouring_send(int fd, const void *buf, size_t n, int flags);
+
 #endif

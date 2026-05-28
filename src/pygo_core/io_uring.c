@@ -386,6 +386,17 @@ static pygo_iouring_ssize_t pygo_iouring_do(struct io_uring_sqe sqe)
 
     if (pygo_iouring_submit_sqe(sqe, &op) != 0) return -1;
 
+    /* Inline drain after submit.  With IORING_FEAT_FAST_POLL (5.7+)
+     * the kernel completes inline when data is already ready, so the
+     * CQE is in the ring before io_uring_enter even returns.
+     * Draining here turns "submit + park + pump + drain + wake +
+     * resume" into "submit + drain + return" for the data-ready
+     * case, saving an entire scheduler round-trip per RT in the
+     * common echo workload.  The race-safe wake_pending counter
+     * (single-thread sched) absorbs the wake so park_safe just
+     * decrements and returns. */
+    pygo_iouring_drain();
+
     if (hub != NULL) {
         /* Hub path: spin-drain inline.  The hub's local pump doesn't
          * know about the io_uring eventfd, so we can't park
@@ -447,6 +458,30 @@ pygo_iouring_ssize_t pygo_iouring_pwrite(int fd, const void *buf, size_t n,
     return pygo_iouring_do(sqe);
 }
 
+pygo_iouring_ssize_t pygo_iouring_recv(int fd, void *buf, size_t n, int flags)
+{
+    struct io_uring_sqe sqe;
+    memset(&sqe, 0, sizeof(sqe));
+    sqe.opcode    = IORING_OP_RECV;
+    sqe.fd        = fd;
+    sqe.addr      = (uintptr_t)buf;
+    sqe.len       = (unsigned)n;
+    sqe.msg_flags = (uint32_t)flags;     /* MSG_* recv flags */
+    return pygo_iouring_do(sqe);
+}
+
+pygo_iouring_ssize_t pygo_iouring_send(int fd, const void *buf, size_t n, int flags)
+{
+    struct io_uring_sqe sqe;
+    memset(&sqe, 0, sizeof(sqe));
+    sqe.opcode   = IORING_OP_SEND;
+    sqe.fd       = fd;
+    sqe.addr     = (uintptr_t)buf;
+    sqe.len      = (unsigned)n;
+    sqe.msg_flags = (uint32_t)flags;
+    return pygo_iouring_do(sqe);
+}
+
 #else  /* !__linux__ */
 
 #include <errno.h>
@@ -455,6 +490,7 @@ pygo_iouring_ssize_t pygo_iouring_pwrite(int fd, const void *buf, size_t n,
 int pygo_iouring_available(void) { return 0; }
 int pygo_iouring_eventfd(void)   { return -1; }
 void pygo_iouring_drain(void)    { /* no-op */ }
+int pygo_iouring_inflight(void)  { return 0; }
 
 pygo_iouring_ssize_t pygo_iouring_pread(int fd, void *buf, size_t n, pygo_iouring_off_t offset)
 {
@@ -466,6 +502,20 @@ pygo_iouring_ssize_t pygo_iouring_pread(int fd, void *buf, size_t n, pygo_iourin
 pygo_iouring_ssize_t pygo_iouring_pwrite(int fd, const void *buf, size_t n, pygo_iouring_off_t offset)
 {
     (void)fd; (void)buf; (void)n; (void)offset;
+    errno = ENOSYS;
+    return -1;
+}
+
+pygo_iouring_ssize_t pygo_iouring_recv(int fd, void *buf, size_t n, int flags)
+{
+    (void)fd; (void)buf; (void)n; (void)flags;
+    errno = ENOSYS;
+    return -1;
+}
+
+pygo_iouring_ssize_t pygo_iouring_send(int fd, const void *buf, size_t n, int flags)
+{
+    (void)fd; (void)buf; (void)n; (void)flags;
     errno = ENOSYS;
     return -1;
 }

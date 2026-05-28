@@ -27,11 +27,36 @@
 #include "plat.h"
 #include "plat_compat.h"
 #include "netpoll.h"
+#include "io_uring.h"
 
 #include <errno.h>
 #include <string.h>
 #include <stdlib.h>
 #include <stdint.h>
+
+#if defined(__linux__)
+/* Opt-in: PYGO_TCPCONN_IOURING=1 routes TCPConn's recv/send through
+ * the io_uring backend instead of recv()/send()+epoll-wait.  Default
+ * off because single-shot SQE-per-op is currently a net regression
+ * versus the ET register-once path (one io_uring_enter per RT plus
+ * eventfd routing through the pump beats the kernel-level cost of
+ * non-blocking recv() + epoll_wait).  Flipping the default is
+ * deferred until multishot recv (step 4) + DEFER_TASKRUN (step 5)
+ * land and the combined path beats the legacy one.
+ *
+ * Probed once on first read; cache the answer to avoid getenv() in
+ * the hot path. */
+static int pygo_tcpconn_iouring_enabled = -1;
+static int pygo_tcpconn_use_iouring(void)
+{
+    if (pygo_tcpconn_iouring_enabled < 0) {
+        const char *e = getenv("PYGO_TCPCONN_IOURING");
+        pygo_tcpconn_iouring_enabled =
+            (e != NULL && e[0] == '1') ? 1 : 0;
+    }
+    return pygo_tcpconn_iouring_enabled && pygo_iouring_available();
+}
+#endif
 
 #if defined(PYGO_OS_WINDOWS)
    /* winsock2.h + ws2tcpip.h + windows.h pulled in by plat_compat.h. */
@@ -278,6 +303,9 @@ static PyObject *PygoTCPConn_recv(PygoTCPConn *self, PyObject *args)
     PyObject *result;
     char *out;
     int fd;
+#if defined(__linux__)
+    int use_iouring;
+#endif
 
     if (self->closed || self->fd < 0) {
         PyErr_SetString(PyExc_OSError, "TCPConn is closed");
@@ -294,6 +322,22 @@ static PyObject *PygoTCPConn_recv(PygoTCPConn *self, PyObject *args)
     result = PyBytes_FromStringAndSize(NULL, n_bytes);
     if (result == NULL) return NULL;
     out = PyBytes_AS_STRING(result);
+
+#if defined(__linux__)
+    use_iouring = pygo_tcpconn_use_iouring();
+    if (use_iouring) {
+        pygo_iouring_ssize_t r = pygo_iouring_recv(fd, out, (size_t)n_bytes, flags);
+        if (r < 0) {
+            Py_DECREF(result);
+            return PyErr_SetFromErrno(PyExc_OSError);
+        }
+        got = (Py_ssize_t)r;
+        if (got < n_bytes) {
+            if (_PyBytes_Resize(&result, got) < 0) return NULL;
+        }
+        return result;
+    }
+#endif
 
     while (1) {
 #if defined(PYGO_OS_WINDOWS)
@@ -344,6 +388,19 @@ static PyObject *PygoTCPConn_recv_into(PygoTCPConn *self, PyObject *args)
     }
     fd = self->fd;
 
+#if defined(__linux__)
+    if (pygo_tcpconn_use_iouring()) {
+        /* Single-shot IORING_OP_RECV: kernel waits for data, posts CQE
+         * when ready.  Replaces the recv()-EAGAIN-then-park loop with
+         * one submit + park cycle. */
+        pygo_iouring_ssize_t r = pygo_iouring_recv(fd, buf.buf,
+                                                  (size_t)n_bytes, flags);
+        PyBuffer_Release(&buf);
+        if (r < 0) return PyErr_SetFromErrno(PyExc_OSError);
+        return PyLong_FromSsize_t((Py_ssize_t)r);
+    }
+#endif
+
     while (1) {
 #if defined(PYGO_OS_WINDOWS)
         int r = recv((SOCKET)fd, (char *)buf.buf, (int)n_bytes, flags);
@@ -383,6 +440,16 @@ static PyObject *PygoTCPConn_send(PygoTCPConn *self, PyObject *args)
     if (!PyArg_ParseTuple(args, "y*|i", &buf, &flags)) return NULL;
     fd = self->fd;
 
+#if defined(__linux__)
+    if (pygo_tcpconn_use_iouring()) {
+        pygo_iouring_ssize_t r = pygo_iouring_send(fd, buf.buf,
+                                                  (size_t)buf.len, flags);
+        PyBuffer_Release(&buf);
+        if (r < 0) return PyErr_SetFromErrno(PyExc_OSError);
+        return PyLong_FromSsize_t((Py_ssize_t)r);
+    }
+#endif
+
     while (1) {
 #if defined(PYGO_OS_WINDOWS)
         int r = send((SOCKET)fd, (const char *)buf.buf, (int)buf.len, flags);
@@ -414,6 +481,9 @@ static PyObject *PygoTCPConn_send_all(PygoTCPConn *self, PyObject *args)
     int flags = 0;
     Py_ssize_t sent = 0;
     int fd;
+#if defined(__linux__)
+    int use_iouring;
+#endif
 
     if (self->closed || self->fd < 0) {
         PyErr_SetString(PyExc_OSError, "TCPConn is closed");
@@ -421,6 +491,30 @@ static PyObject *PygoTCPConn_send_all(PygoTCPConn *self, PyObject *args)
     }
     if (!PyArg_ParseTuple(args, "y*|i", &buf, &flags)) return NULL;
     fd = self->fd;
+
+#if defined(__linux__)
+    use_iouring = pygo_tcpconn_use_iouring();
+    if (use_iouring) {
+        /* IORING_OP_SEND already handles short writes inside the
+         * kernel for stream sockets -- the kernel buffers what it
+         * can.  We still loop here because a single SEND op returns
+         * what was accepted; if buf.len > SO_SNDBUF the kernel may
+         * return partial and we must resubmit the remainder. */
+        while (sent < buf.len) {
+            pygo_iouring_ssize_t r =
+                pygo_iouring_send(fd, (const char *)buf.buf + sent,
+                                  (size_t)(buf.len - sent), flags);
+            if (r < 0) {
+                PyBuffer_Release(&buf);
+                return PyErr_SetFromErrno(PyExc_OSError);
+            }
+            sent += (Py_ssize_t)r;
+            if (r == 0) break;     /* defensive: avoid infinite loop */
+        }
+        PyBuffer_Release(&buf);
+        return PyLong_FromSsize_t(sent);
+    }
+#endif
 
     while (sent < buf.len) {
 #if defined(PYGO_OS_WINDOWS)
