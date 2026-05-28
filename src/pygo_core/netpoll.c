@@ -31,6 +31,7 @@
 #include "pygo_sched.h"
 #include "mn_sched.h"
 #include "io_uring.h"
+#include "pygo_diag.h"
 
 #include <errno.h>
 #include <stdlib.h>
@@ -152,10 +153,14 @@ static void pygo_parker_link(pygo_parked_t *p)
     /* Stale-reference clears.  See header comment.  Cheap (two
      * compare-and-conditional-store); only fires when stack reuse hits
      * a parker address that an unlink missed. */
-    if (pygo_parked_head == p) pygo_parked_head = NULL;
+    if (pygo_parked_head == p) {
+        pygo_parked_head = NULL;
+        PYGO_EVT(PYGO_EVT_PARKER_GHOST, p, NULL, (long long)p->fd);
+    }
     if (p->fd >= 0 && (size_t)p->fd < pygo_parked_by_fd_cap &&
         pygo_parked_by_fd[p->fd] == p) {
         pygo_parked_by_fd[p->fd] = NULL;
+        PYGO_EVT(PYGO_EVT_PARKER_GHOST, p, (void *)(uintptr_t)1, (long long)p->fd);
     }
 #ifdef PYGO_PARKER_DEBUG
     /* Diagnostic: announce ghost references so we can pinpoint the
@@ -187,6 +192,7 @@ static void pygo_parker_link(pygo_parked_t *p)
         pygo_parked_by_fd[p->fd] = p;
     }
     __atomic_add_fetch(&pygo_parked_total, 1, __ATOMIC_RELEASE);
+    PYGO_EVT(PYGO_EVT_PARKER_LINK, p, p->g, (long long)p->fd);
 }
 
 /* Unlink p from both lists.  Caller holds pygo_parked_lock.  Returns 1
@@ -252,8 +258,114 @@ static int pygo_parker_unlink(pygo_parked_t *p)
         if (p->g != NULL && p->g->netpoll_parker == p) {
             p->g->netpoll_parker = NULL;
         }
+        PYGO_EVT(PYGO_EVT_PARKER_UNLINK, p, p->g, (long long)p->fd);
     }
     return touched;
+}
+
+static void pygo_parked_lock_ensure_inited(void);
+
+/* ---- self-check inspection hook ----
+ *
+ * Called by pygo_self_check() in pygo_diag.c.  Walks the global list
+ * (Floyd cycle detection) and every per-fd bucket, fills in the stats
+ * struct.  Takes pygo_parked_lock.
+ *
+ * The stats struct layout is declared in pygo_diag.c as a friend
+ * (extern struct, no shared header) -- this keeps pygo_diag.h free of
+ * netpoll-internal types. */
+struct pygo_self_check_stats;
+extern void pygo_self_check_stats_set(struct pygo_self_check_stats *out,
+                                      int global_list_count,
+                                      int global_list_cycle,
+                                      int parked_total_atomic,
+                                      int bucket_count_total,
+                                      int bucket_self_loops,
+                                      int bucket_unreachable);
+
+int pygo_netpoll_inspect_for_self_check(struct pygo_self_check_stats *out)
+{
+    int global_count = 0;
+    int global_cycle = 0;
+    int bucket_total = 0;
+    int bucket_self  = 0;
+    int bucket_unreach = 0;
+    int parked_atomic;
+    pygo_parked_t *slow, *fast;
+    size_t i;
+
+    if (!pygo_netpoll_inited) {
+        pygo_self_check_stats_set(out, 0, 0, 0, 0, 0, 0);
+        return 0;
+    }
+    pygo_parked_lock_ensure_inited();
+    pygo_mutex_lock(&pygo_parked_lock);
+
+    /* Floyd cycle detection on the global list, with a safety cap. */
+    slow = pygo_parked_head;
+    fast = pygo_parked_head;
+    {
+        int iters = 0;
+        const int CAP = 200000;
+        while (fast != NULL && iters < CAP) {
+            if (iters > 0) slow = slow ? slow->next : NULL;
+            fast = fast->next;
+            if (fast != NULL) fast = fast->next;
+            if (iters > 0 && slow != NULL && slow == fast) {
+                global_cycle = 1;
+                break;
+            }
+            iters++;
+        }
+    }
+    /* Linear walk for a count (after cycle check; if cycle present we
+     * cap at CAP to avoid spinning here). */
+    if (!global_cycle) {
+        pygo_parked_t *p = pygo_parked_head;
+        while (p != NULL && global_count < 200000) {
+            global_count++;
+            p = p->next;
+        }
+    } else {
+        /* On cycle, just report the count we walked to before detecting. */
+        pygo_parked_t *p = pygo_parked_head;
+        int iters = 0;
+        while (p != NULL && iters < 200000) {
+            global_count++;
+            p = p->next;
+            iters++;
+            if (iters > 100000) break;
+        }
+    }
+    parked_atomic = __atomic_load_n(&pygo_parked_total, __ATOMIC_ACQUIRE);
+
+    /* Walk every per-fd bucket. */
+    if (pygo_parked_by_fd != NULL) {
+        for (i = 0; i < pygo_parked_by_fd_cap; i++) {
+            pygo_parked_t *p = pygo_parked_by_fd[i];
+            int chain_iters = 0;
+            while (p != NULL && chain_iters < 10000) {
+                bucket_total++;
+                if (p->next_by_fd == p || p->prev_by_fd == p) {
+                    bucket_self++;
+                    break;          /* avoid infinite-loop */
+                }
+                /* Reachable-from-global check: walk global list,
+                 * O(N*M) but only if we actually want it.  Skip the
+                 * full check here; cheaper to assert via the link
+                 * invariants. */
+                (void)bucket_unreach;
+                p = p->next_by_fd;
+                chain_iters++;
+            }
+        }
+    }
+
+    pygo_mutex_unlock(&pygo_parked_lock);
+    pygo_self_check_stats_set(out, global_count, global_cycle,
+                              parked_atomic, bucket_total, bucket_self,
+                              bucket_unreach);
+    return 0;
 }
 
 /* ---- per-fd registration cache ----

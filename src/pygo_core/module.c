@@ -32,6 +32,7 @@ snap/load paths; not built today."
 #include "mn_sched.h"
 #include "chan.h"
 #include "pygo_tcp.h"
+#include "pygo_diag.h"
 
 /* ---- Per-coro Python object ---- */
 
@@ -1551,6 +1552,36 @@ err:
     return NULL;
 }
 
+
+/* ---- diagnostic wrappers ----
+ *
+ * Thin Python<->C bridges to pygo_diag.c.  Used by the C bench, the
+ * Python bench, and gdb scripts to observe invariants without having
+ * to hand-walk the C data structures. */
+static PyObject *m_self_check(PyObject *self, PyObject *args)
+{
+    int verbose = 0;
+    (void)self;
+    if (!PyArg_ParseTuple(args, "|i", &verbose)) return NULL;
+    return PyLong_FromLong((long)pygo_self_check(verbose));
+}
+
+static PyObject *m_diag_dump(PyObject *self, PyObject *args)
+{
+    int fd = 2;
+    (void)self;
+    if (!PyArg_ParseTuple(args, "|i", &fd)) return NULL;
+    pygo_diag_dump(fd);
+    Py_RETURN_NONE;
+}
+
+static PyObject *m_diag_flags(PyObject *self, PyObject *args)
+{
+    (void)self; (void)args;
+    return PyLong_FromUnsignedLong((unsigned long)pygo_debug_flags);
+}
+
+
 static PyMethodDef module_methods[] = {
     {"select", (PyCFunction)m_select, METH_VARARGS | METH_KEYWORDS,
      "select(cases, default=False): wait on multiple channels.  Each "
@@ -1677,6 +1708,16 @@ static PyMethodDef module_methods[] = {
      "Py_AddPendingCall hook into CPython's eval_breaker."},
     {"preempt_fini", m_preempt_fini, METH_NOARGS,
      "preempt_fini(): stop the preemption timer (if running)."},
+    {"_self_check", m_self_check, METH_VARARGS,
+     "_self_check(verbose=0) -> int.  Walk every live scheduler/netpoll "
+     "data structure and assert invariants (cycle-free lists, counters "
+     "match, no self-loops).  Returns the count of violations.  Cheap "
+     "(O(parked)); safe to call between bench iterations."},
+    {"_diag_dump", m_diag_dump, METH_VARARGS,
+     "_diag_dump(fd=2) -> None.  Dump every OS thread's lifecycle "
+     "event ring to fd (default stderr).  Newest-first."},
+    {"_diag_flags", m_diag_flags, METH_NOARGS,
+     "_diag_flags() -> int.  Current PYGO_DEBUG flag mask."},
     {NULL, NULL, 0, NULL}
 };
 
@@ -1700,6 +1741,7 @@ static struct PyModuleDef pygo_core_module = {
 PyMODINIT_FUNC PyInit_pygo_core(void)
 {
     PyObject *m;
+    pygo_diag_init();          /* parses PYGO_DEBUG once; cheap; idempotent */
     if (PyType_Ready(&PygoCoroType) < 0) return NULL;
     if (PyType_Ready(&PygoGType) < 0) return NULL;
     m = PyModule_Create(&pygo_core_module);
