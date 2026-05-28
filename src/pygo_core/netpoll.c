@@ -184,6 +184,70 @@ static void pygo_parker_unlink(pygo_parked_t *p)
 static unsigned char *pygo_fd_registered_bm = NULL;
 static size_t         pygo_fd_registered_cap_bytes = 0;
 
+/* ---- per-fd pending-wakeup bitmap ----
+ * Closes the M:N + free-threaded race where an epoll edge fires for
+ * an fd whose parker hasn't been linked yet (or whose previous
+ * parker was just unlinked by a wake but the goroutine hasn't
+ * called wait_fd again).  Without this, the pump finds an empty
+ * pygo_parked_by_fd[fd] bucket and silently drops the event; with
+ * EPOLLET the kernel won't refire and the goroutine waits forever.
+ *
+ * Each fd gets one byte holding a mask of PYGO_NETPOLL_READ /
+ * PYGO_NETPOLL_WRITE bits.  Pump sets bits when it can't find a
+ * matching parker; wait_fd consumes bits before parking and returns
+ * immediately if a pending bit covers the requested event.  Stored
+ * as a plain byte array; access via atomic fetch_or / fetch_and to
+ * make hub races safe without grabbing pygo_parked_lock.
+ *
+ * Memory ordering: the pump's fetch_or pairs with wait_fd's
+ * fetch_and via ACQ_REL on both, providing a clean happens-before
+ * for "kernel event happened" -> "next wait observes it". */
+static unsigned char *pygo_fd_pending_wake = NULL;
+static size_t         pygo_fd_pending_wake_cap = 0;
+
+static int pygo_fd_pending_wake_ensure(int fd)
+{
+    if (fd < 0) return -1;
+    if ((size_t)fd < pygo_fd_pending_wake_cap) return 0;
+    {
+        size_t newcap = pygo_fd_pending_wake_cap ? pygo_fd_pending_wake_cap * 2 : 256;
+        unsigned char *nb;
+        while (newcap <= (size_t)fd) newcap *= 2;
+        nb = (unsigned char *)realloc(pygo_fd_pending_wake, newcap);
+        if (nb == NULL) return -1;
+        memset(nb + pygo_fd_pending_wake_cap, 0,
+               newcap - pygo_fd_pending_wake_cap);
+        pygo_fd_pending_wake     = nb;
+        pygo_fd_pending_wake_cap = newcap;
+    }
+    return 0;
+}
+
+/* Pump-side: mark an event as observed-but-unrouted.  Caller holds
+ * pygo_parked_lock (we extend the array under it; the atomic op
+ * itself is fine outside the lock). */
+static void pygo_fd_pending_wake_set(int fd, int mask)
+{
+    if (fd < 0 || mask == 0) return;
+    if (pygo_fd_pending_wake_ensure(fd) != 0) return;
+    __atomic_fetch_or(&pygo_fd_pending_wake[fd],
+                      (unsigned char)mask, __ATOMIC_ACQ_REL);
+}
+
+/* wait_fd-side: claim any pending bits matching `events`.  Returns
+ * the bits that were pending AND in events (0 = nothing pending). */
+static int pygo_fd_pending_wake_consume(int fd, int events)
+{
+    if (fd < 0 || (size_t)fd >= pygo_fd_pending_wake_cap) return 0;
+    {
+        unsigned char take = (unsigned char)events;
+        unsigned char prev =
+            __atomic_fetch_and(&pygo_fd_pending_wake[fd],
+                               (unsigned char)~take, __ATOMIC_ACQ_REL);
+        return prev & events;
+    }
+}
+
 static int pygo_fd_bit_get(int fd)
 {
     if (fd < 0) return 0;
@@ -413,13 +477,28 @@ static int pygo_netpoll_register(int fd, int events)
 
     {
         struct epoll_event ev;
-        ev.events = EPOLLIN | EPOLLOUT | EPOLLET | EPOLLRDHUP;
+        /* EPOLLEXCLUSIVE (4.5+): with M:N hubs sharing one epoll fd,
+         * the kernel otherwise wakes ALL waiters on each event
+         * (thundering herd) and creates races where multiple hub
+         * threads race to find + unlink the same parker.  With
+         * EPOLLEXCLUSIVE exactly one waiter wakes per event.  On
+         * older kernels the flag is silently ignored on ADD; if the
+         * kernel rejects it explicitly (EINVAL) we retry without. */
+        ev.events = EPOLLIN | EPOLLOUT | EPOLLET | EPOLLRDHUP | EPOLLEXCLUSIVE;
         ev.data.fd = fd;
         if (epoll_ctl(pygo_epoll_fd, EPOLL_CTL_ADD, fd, &ev) == 0) return 0;
         /* Stale registration from before the bit was cleared (e.g.
-         * dup'd fd, or close-hook missed).  MOD into ET both-arms. */
+         * dup'd fd, or close-hook missed).  MOD into ET both-arms.
+         * Note: EPOLLEXCLUSIVE can't be used with EPOLL_CTL_MOD, so
+         * the MOD path drops it -- only matters for stale-fd recovery. */
         if (errno == EEXIST) {
+            ev.events = EPOLLIN | EPOLLOUT | EPOLLET | EPOLLRDHUP;
             if (epoll_ctl(pygo_epoll_fd, EPOLL_CTL_MOD, fd, &ev) == 0) return 0;
+        }
+        /* EINVAL = kernel too old or flag combo refused: retry without. */
+        if (errno == EINVAL) {
+            ev.events = EPOLLIN | EPOLLOUT | EPOLLET | EPOLLRDHUP;
+            if (epoll_ctl(pygo_epoll_fd, EPOLL_CTL_ADD, fd, &ev) == 0) return 0;
         }
     }
     /* Failed: drop the bit so a future caller can retry. */
@@ -484,10 +563,17 @@ int pygo_netpoll_add_iouring_eventfd(int fd)
      * epoll_ctl call.  io_uring.c only ever creates one eventfd per
      * process, so this matters only if init runs twice. */
     if (pygo_iouring_eventfd_in_epoll == fd) return 0;
-    ev.events = EPOLLIN | EPOLLET;
+    /* EPOLLEXCLUSIVE: see comment in pygo_netpoll_register. */
+    ev.events = EPOLLIN | EPOLLET | EPOLLEXCLUSIVE;
     ev.data.fd = fd;
     if (epoll_ctl(pygo_epoll_fd, EPOLL_CTL_ADD, fd, &ev) < 0) {
-        if (errno != EEXIST) return -1;
+        if (errno == EINVAL) {
+            ev.events = EPOLLIN | EPOLLET;
+            if (epoll_ctl(pygo_epoll_fd, EPOLL_CTL_ADD, fd, &ev) < 0
+                && errno != EEXIST) return -1;
+        } else if (errno != EEXIST) {
+            return -1;
+        }
     }
     pygo_iouring_eventfd_in_epoll = fd;
     return 0;
@@ -525,10 +611,19 @@ int pygo_netpoll_add_iouring_ring(int eventfd_fd,
     pygo_iouring_ring_count++;
     pygo_mutex_unlock(&pygo_parked_lock);
 
-    ev.events = EPOLLIN | EPOLLET;
-    ev.data.fd = eventfd_fd;
-    if (epoll_ctl(pygo_epoll_fd, EPOLL_CTL_ADD, eventfd_fd, &ev) < 0) {
-        if (errno != EEXIST) {
+    /* EPOLLEXCLUSIVE: see comment in pygo_netpoll_register.  Kernel
+     * wakes exactly one waiter per ring-eventfd hit instead of all
+     * hubs racing to drain the same CQ. */
+    {
+        int rc;
+        ev.events = EPOLLIN | EPOLLET | EPOLLEXCLUSIVE;
+        ev.data.fd = eventfd_fd;
+        rc = epoll_ctl(pygo_epoll_fd, EPOLL_CTL_ADD, eventfd_fd, &ev);
+        if (rc < 0 && errno == EINVAL) {
+            ev.events = EPOLLIN | EPOLLET;
+            rc = epoll_ctl(pygo_epoll_fd, EPOLL_CTL_ADD, eventfd_fd, &ev);
+        }
+        if (rc < 0 && errno != EEXIST) {
             /* Undo the table insert. */
             pygo_mutex_lock(&pygo_parked_lock);
             for (i = 0; i < pygo_iouring_ring_count; i++) {
@@ -649,18 +744,6 @@ int pygo_netpoll_wait_fd(int fd, int events, long long timeout_ns)
     pygo_g_t *current_g;
 
     if (pygo_netpoll_init() != 0) return -1;
-#if defined(PYGO_OS_WINDOWS)
-    /* IOCP-AFD: submit the poll request now; pump just drains
-     * completions.  Falls through to the no-op register for the
-     * WSAPoll / select paths. */
-    if (pygo_win_use_iocp) {
-        if (pygo_iocp_submit(fd, events, timeout_ns) != 0) return -1;
-    } else {
-        if (pygo_netpoll_register(fd, events) != 0) return -1;
-    }
-#else
-    if (pygo_netpoll_register(fd, events) != 0) return -1;
-#endif
 
     /* Determine where this g lives so pump can route the wake.
      * If we're inside an M:N hub, the hub TLS gives us the target;
@@ -687,10 +770,89 @@ int pygo_netpoll_wait_fd(int fd, int events, long long timeout_ns)
     park.next_by_fd = NULL;
     park.prev_by_fd = NULL;
 
+    /* ORDER MATTERS (M:N + free-threaded race fix):
+     *
+     *   1. Link the parker.  Now any pump that wakes on an event for
+     *      this fd can find it in pygo_parked_by_fd[fd].
+     *   2. Consume any wakeups that fired BEFORE we got here.  Under
+     *      M:N another hub's pump may have observed an event between
+     *      this g's previous unlink (on its last wake) and the link
+     *      above; the pending-wake bitmap captured it.
+     *   3. Only then call epoll_ctl ADD / IOCP submit.  If ADD
+     *      synthesizes an edge because the fd is already ready, the
+     *      parker is already visible -- the pump will route it.
+     *
+     * The PREVIOUS ordering (submit before link) lost wakes in two
+     * ways: (a) ADD-synthesized edges processed by another hub before
+     * the parker was visible; (b) edges fired during the gap between
+     * a previous parker being unlinked-on-wake and a new one being
+     * linked. */
     pygo_mutex_lock(&pygo_parked_lock);
     pygo_parker_link(&park);
     __atomic_add_fetch(&pygo_parked_total, 1, __ATOMIC_RELEASE);
     pygo_mutex_unlock(&pygo_parked_lock);
+
+    /* Drain any pre-existing pending-wake bits.  If something is
+     * already there (from a pump that saw an event between our last
+     * unlink and this link), wake ourselves immediately instead of
+     * parking. */
+    {
+        int pending = pygo_fd_pending_wake_consume(fd, events);
+        if (pending != 0) {
+            pygo_mutex_lock(&pygo_parked_lock);
+            pygo_parker_unlink(&park);
+            __atomic_sub_fetch(&pygo_parked_total, 1, __ATOMIC_RELEASE);
+            pygo_mutex_unlock(&pygo_parked_lock);
+            return pending;
+        }
+    }
+
+#if defined(PYGO_OS_WINDOWS)
+    /* IOCP-AFD: submit the poll request now; pump just drains
+     * completions.  Falls through to the no-op register for the
+     * WSAPoll / select paths. */
+    if (pygo_win_use_iocp) {
+        if (pygo_iocp_submit(fd, events, timeout_ns) != 0) {
+            pygo_mutex_lock(&pygo_parked_lock);
+            pygo_parker_unlink(&park);
+            __atomic_sub_fetch(&pygo_parked_total, 1, __ATOMIC_RELEASE);
+            pygo_mutex_unlock(&pygo_parked_lock);
+            return -1;
+        }
+    } else {
+        if (pygo_netpoll_register(fd, events) != 0) {
+            pygo_mutex_lock(&pygo_parked_lock);
+            pygo_parker_unlink(&park);
+            __atomic_sub_fetch(&pygo_parked_total, 1, __ATOMIC_RELEASE);
+            pygo_mutex_unlock(&pygo_parked_lock);
+            return -1;
+        }
+    }
+#else
+    if (pygo_netpoll_register(fd, events) != 0) {
+        pygo_mutex_lock(&pygo_parked_lock);
+        pygo_parker_unlink(&park);
+        __atomic_sub_fetch(&pygo_parked_total, 1, __ATOMIC_RELEASE);
+        pygo_mutex_unlock(&pygo_parked_lock);
+        return -1;
+    }
+#endif
+
+    /* Re-check pending bits after register: the ADD may have
+     * synthesized an edge that another hub's pump processed in the
+     * window between link and register; that pump's "no parker"
+     * fallback now sets the pending bit (because we re-arrange the
+     * pump path below to do that).  Drain again before yielding. */
+    {
+        int pending = pygo_fd_pending_wake_consume(fd, events);
+        if (pending != 0) {
+            pygo_mutex_lock(&pygo_parked_lock);
+            pygo_parker_unlink(&park);
+            __atomic_sub_fetch(&pygo_parked_total, 1, __ATOMIC_RELEASE);
+            pygo_mutex_unlock(&pygo_parked_lock);
+            return pending;
+        }
+    }
 
     /* Snapshot tstate (same as pygo_sched_yield does) so the next
      * resume restores it.  Then yield WITHOUT re-queueing -- pump
@@ -790,20 +952,35 @@ int pygo_netpoll_pump(long long timeout_ns)
                 if (evs[i].events & EPOLLOUT) mask |= PYGO_NETPOLL_WRITE;
                 /* O(1) bucket lookup; walk only the parkers on this fd
                  * (usually 1 -- at most a read+write pair). */
-                if ((size_t)fd >= pygo_parked_by_fd_cap) continue;
-                bucket = pygo_parked_by_fd[fd];
-                p = bucket;
-                while (p != NULL) {
-                    pygo_parked_t *next_p = p->next_by_fd;
-                    if (p->events & mask) {
-                        *(p->ready_out) = mask & p->events;
-                        pygo_parker_unlink(p);
-                        __atomic_sub_fetch(&pygo_parked_total, 1, __ATOMIC_RELEASE);
-                        pygo_mn_wake_g(p->hub, p->g);
-                        woke++;
-                        break;
+                {
+                    int matched = 0;
+                    if ((size_t)fd < pygo_parked_by_fd_cap) {
+                        bucket = pygo_parked_by_fd[fd];
+                        p = bucket;
+                        while (p != NULL) {
+                            pygo_parked_t *next_p = p->next_by_fd;
+                            if (p->events & mask) {
+                                *(p->ready_out) = mask & p->events;
+                                pygo_parker_unlink(p);
+                                __atomic_sub_fetch(&pygo_parked_total, 1, __ATOMIC_RELEASE);
+                                pygo_mn_wake_g(p->hub, p->g);
+                                woke++;
+                                matched = 1;
+                                break;
+                            }
+                            p = next_p;
+                        }
                     }
-                    p = next_p;
+                    if (!matched && mask != 0) {
+                        /* No parker for this fd (either not linked yet,
+                         * or already woken once and the goroutine
+                         * hasn't called wait_fd again).  Stash the
+                         * event mask in the per-fd pending bitmap so
+                         * the next wait_fd on this fd consumes it
+                         * instead of parking forever -- EPOLLET would
+                         * never refire for this transition. */
+                        pygo_fd_pending_wake_set(fd, mask);
+                    }
                 }
             }
             pygo_mutex_unlock(&pygo_parked_lock);

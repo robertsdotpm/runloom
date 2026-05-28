@@ -569,8 +569,23 @@ void pygo_iouring_drain(void)
             { /* drain */ }
     }
 
+    /* Multi-drainer safety: the netpoll pump (whichever hub goes idle)
+     * AND the inline drain after submit AND the hub spin-drain path
+     * all call this without any external mutex.  On free-threaded
+     * Python (3.13t) these can run truly in parallel; under the GIL
+     * they only serialise at Python-level boundaries which most of
+     * this function doesn't cross.  Without a CAS on cq_head two
+     * drainers could load the same head, process the same CQE
+     * (double-wake the goroutine, free a cancel record twice), and
+     * each blindly store head+1 -- a single CQE consumed twice with
+     * inflight decremented twice.  Pre-fix this manifested as
+     * gradual M:N hangs (the spurious wake left the g in a "ready
+     * twice" state that drove an unrelated parker into use-after-
+     * free).  The CAS turns the head advance into a per-CQE claim:
+     * exactly one drainer succeeds for each CQE; the loser re-loads
+     * and retries. */
     for (;;) {
-        unsigned head = __atomic_load_n(s->cq_head, __ATOMIC_RELAXED);
+        unsigned head = __atomic_load_n(s->cq_head, __ATOMIC_ACQUIRE);
         unsigned ct   = __atomic_load_n(s->cq_tail, __ATOMIC_ACQUIRE);
         struct io_uring_cqe *cqe;
         pygo_iouring_op_t *op;
@@ -578,18 +593,24 @@ void pygo_iouring_drain(void)
         uint32_t flags;
         int      type;
         int      cqe_final;
+        unsigned expected;
         if (head == ct) return;
         cqe   = &s->cqes[head & s->cq_mask];
         res   = cqe->res;
         flags = cqe->flags;
         op    = (pygo_iouring_op_t *)(uintptr_t)cqe->user_data;
-        /* Final = multishot's "this SQE will produce no more CQEs".
-         * For SINGLE ops, every CQE is final.  For MULTISHOT ops, only
-         * the CQE that lacks IORING_CQE_F_MORE is final. */
         type      = (op != NULL) ? op->type : PYGO_IOURING_OP_SINGLE;
         cqe_final = (type != PYGO_IOURING_OP_MULTISHOT) ||
                     !(flags & IORING_CQE_F_MORE);
-        __atomic_store_n(s->cq_head, head + 1, __ATOMIC_RELEASE);
+        /* Claim this CQE via CAS on cq_head.  On contention, the
+         * other drainer wins -- we re-load and try the next CQE.
+         * SEQ_CST so multi-thread observers see a coherent head. */
+        expected = head;
+        if (!__atomic_compare_exchange_n(s->cq_head, &expected, head + 1,
+                                         0, __ATOMIC_ACQ_REL,
+                                         __ATOMIC_ACQUIRE)) {
+            continue;   /* another drainer took it; reload */
+        }
 
         if (op != NULL) {
             switch (type) {
@@ -1274,17 +1295,30 @@ void pygo_iouring_ring_drain(pygo_iouring_ring_t *r)
                == (ssize_t)sizeof(scratch))
             { /* drain */ }
     }
+    /* CAS-claim per CQE: SINGLE_ISSUER only restricts SQE submission,
+     * not CQ drain.  The netpoll pump (running on whichever hub goes
+     * idle) can race with this ring's owning hub doing its own inline
+     * drain.  Without the CAS both would process the same CQE and
+     * pygo_mn_wake_g would push the goroutine onto the submission
+     * list twice -> a second resume after the first one already
+     * advanced the coro, corrupting the stack. */
     for (;;) {
-        unsigned head = __atomic_load_n(r->cq_head, __ATOMIC_RELAXED);
+        unsigned head = __atomic_load_n(r->cq_head, __ATOMIC_ACQUIRE);
         unsigned ct   = __atomic_load_n(r->cq_tail, __ATOMIC_ACQUIRE);
         struct io_uring_cqe *cqe;
         pygo_iouring_op_t *op;
         int32_t  res;
+        unsigned expected;
         if (head == ct) return;
         cqe = &r->cqes[head & r->cq_mask];
         res = cqe->res;
         op  = (pygo_iouring_op_t *)(uintptr_t)cqe->user_data;
-        __atomic_store_n(r->cq_head, head + 1, __ATOMIC_RELEASE);
+        expected = head;
+        if (!__atomic_compare_exchange_n(r->cq_head, &expected, head + 1,
+                                         0, __ATOMIC_ACQ_REL,
+                                         __ATOMIC_ACQUIRE)) {
+            continue;
+        }
         if (op != NULL) {
             /* Hub rings only carry SINGLE ops -- multishot stays on the
              * global ring.  The op's hub field routes the wake; nominally

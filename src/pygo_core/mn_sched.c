@@ -100,6 +100,18 @@ static pygo_hub_t *pygo_hubs = NULL;
 static int pygo_hub_count = 0;
 static volatile long pygo_mn_spawn_counter = 0;
 
+/* Global pending-g counter, replacing the per-hub `pending` field
+ * for purposes of "is there any work left in the M:N scheduler".
+ * Incremented in pygo_mn_go (spawn), decremented in hub_main when a
+ * g completes.  Steals do NOT touch this counter (the per-hub field
+ * is still updated for diagnostics / future scheduler heuristics,
+ * but the steal-time inc-then-dec across hubs created a
+ * sum-observed-as-N-1 window where pygo_mn_run could see total=0
+ * and exit while a stolen g was still running on the destination
+ * hub).  ACQ_REL on both inc and dec; ACQUIRE on the mn_run read
+ * pairs with the completion release. */
+static volatile long pygo_mn_pending_global = 0;
+
 /* TLS pointers set at hub_main entry.  pygo_mn_yield_current() and
  * pygo_mn_current_hub() read these to route per-g operations to the
  * right hub without each call site needing to look it up. */
@@ -216,9 +228,20 @@ static PYGO_THREAD_RET pygo_hub_main(void *arg)
                 if (i == h->id) continue;
                 g = (pygo_g_t *)pygo_cldeque_steal(&pygo_hubs[i].deque);
                 if (g != NULL) {
+                    /* ACQ_REL pair: mn_run's polling loop reads
+                     * hubs[*].pending with ACQUIRE; under
+                     * free-threaded Python the RELAXED pair we used
+                     * to have let a transient "victim already
+                     * decremented, stealer not yet incremented"
+                     * state become observable -- total could appear
+                     * 0 momentarily even with work in flight, which
+                     * is harmless on its own but ALSO meant the
+                     * stealer's later `h->pending` increment lacked
+                     * a release pairing with reads in other hubs
+                     * that might inspect this hub's queue. */
                     __atomic_sub_fetch(&pygo_hubs[i].pending, 1,
-                                       __ATOMIC_RELAXED);
-                    __atomic_add_fetch(&h->pending, 1, __ATOMIC_RELAXED);
+                                       __ATOMIC_ACQ_REL);
+                    __atomic_add_fetch(&h->pending, 1, __ATOMIC_ACQ_REL);
                     break;
                 }
             }
@@ -338,6 +361,10 @@ static PYGO_THREAD_RET pygo_hub_main(void *arg)
                  * guaranteed to see the matching completed++. */
                 __atomic_add_fetch(&h->sched.completed, 1, __ATOMIC_RELEASE);
                 __atomic_sub_fetch(&h->pending, 1, __ATOMIC_RELEASE);
+                /* Global counter -- only the dec on completion, matching
+                 * the inc in pygo_mn_go.  Steals don't touch this so
+                 * mn_run can't observe a transient 0 mid-steal. */
+                __atomic_sub_fetch(&pygo_mn_pending_global, 1, __ATOMIC_ACQ_REL);
                 pygo_g_decref(g);
                 pygo_pystate_snap(&hub_snap);
             } else if (!self_queued) {
@@ -569,6 +596,10 @@ void pygo_mn_fini(void)
     PyMem_Free(pygo_hubs);
     pygo_hubs = NULL;
     pygo_hub_count = 0;
+    /* Reset the global pending counter so the next mn_init starts at
+     * 0.  Any leaked g (incomplete at fini) leaves a non-zero residue
+     * otherwise. */
+    __atomic_store_n(&pygo_mn_pending_global, 0, __ATOMIC_RELEASE);
 }
 
 PyObject *pygo_mn_go(PyObject *callable)
@@ -606,6 +637,10 @@ PyObject *pygo_mn_go(PyObject *callable)
      * the netpoll path) get pushed to the local FIFO (hub-pinned). */
     pygo_mn_hub_submit(h, g);
     __atomic_add_fetch(&h->pending, 1, __ATOMIC_RELAXED);
+    /* Global counter -- decoupled from per-hub steal accounting.  See
+     * pygo_mn_pending_global comment for why this exists alongside
+     * the per-hub field. */
+    __atomic_add_fetch(&pygo_mn_pending_global, 1, __ATOMIC_ACQ_REL);
     Py_RETURN_NONE;
 }
 
@@ -618,17 +653,19 @@ Py_ssize_t pygo_mn_run(void)
     Py_ssize_t total_completed = 0;
     PyThreadState *saved = PyEval_SaveThread();
     for (;;) {
-        long total = 0;
-        for (i = 0; i < pygo_hub_count; i++) {
-            /* ACQUIRE pairs with the RELEASE stores hub_main does on
-             * pending dec and completed inc; once we see pending == 0
-             * we're guaranteed to see all corresponding completed++. */
-            total += __atomic_load_n(&pygo_hubs[i].pending,
+        /* Read the GLOBAL pending counter, not the per-hub fields.
+         * The per-hub fields race during work-stealing (source dec
+         * before dest inc); the global counter is only touched on
+         * spawn + completion, so it's monotonic across the lifecycle
+         * of each g and reliably reaches 0 iff all gs are done. */
+        long total = __atomic_load_n(&pygo_mn_pending_global,
                                      __ATOMIC_ACQUIRE);
-        }
         if (total == 0) break;
         pygo_sleep_ns(1000000LL);   /* 1 ms poll */
     }
+    /* Silence the unused-variable warning that the per-hub loop used
+     * to consume. */
+    (void)i;
     PyEval_RestoreThread(saved);
     for (i = 0; i < pygo_hub_count; i++) {
         total_completed += __atomic_load_n(&pygo_hubs[i].sched.completed,
