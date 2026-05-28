@@ -673,6 +673,41 @@ int pygo_mn_init(int n_threads)
     return n_threads;
 }
 
+/* Release any gs still parked in this hub's queues after the hub
+ * thread has exited.  Hub thread is already joined by the caller, so
+ * sub_head / deque / sched.ready / sched.sleep_heap are quiescent and
+ * safe to drain from a single thread regardless of which primitive
+ * they normally use for concurrent access.
+ *
+ * Each leaked g still holds: its Python callable ref, an fcontext
+ * stack, and a slab entry.  pygo_g_decref unwinds all three when its
+ * last reference drops.  The hub holds exactly one ref per g it
+ * accepted (taken at spawn in pygo_mn_go_core, dropped at completion
+ * in hub_main), so a single decref here mirrors the completion path. */
+static void pygo_mn_hub_drain_leftovers(pygo_hub_t *h)
+{
+    pygo_g_t *sub;
+    pygo_g_t *g;
+    sub = h->sub_head;
+    h->sub_head = h->sub_tail = NULL;
+    while (sub != NULL) {
+        pygo_g_t *next = sub->next;
+        sub->next = NULL;
+        pygo_g_decref(sub);
+        sub = next;
+    }
+    while ((g = pygo_sched_ready_pop(&h->sched)) != NULL) {
+        pygo_g_decref(g);
+    }
+    while ((g = (pygo_g_t *)pygo_cldeque_pop(&h->deque)) != NULL) {
+        pygo_g_decref(g);
+    }
+    while (h->sched.sleep_size > 0) {
+        g = pygo_sched_sleep_pop(&h->sched);
+        if (g != NULL) pygo_g_decref(g);
+    }
+}
+
 void pygo_mn_fini(void)
 {
     int i;
@@ -686,6 +721,15 @@ void pygo_mn_fini(void)
             pygo_thread_join(pygo_hubs[i].thread);
         }
         PyEval_RestoreThread(saved);
+    }
+    /* Drain leftover gs BEFORE tearing down per-hub tstates: g->snap
+     * may reference per-tstate state (exc_info, datastack chunks) that
+     * pystate_snap_clear needs to release while the tstate is still
+     * walkable.  pygo_g_decref also runs Py_XDECREF on callable /
+     * result / error, which needs the main thread's GIL -- already
+     * held here (we restored above). */
+    for (i = 0; i < pygo_hub_count; i++) {
+        pygo_mn_hub_drain_leftovers(&pygo_hubs[i]);
     }
     for (i = 0; i < pygo_hub_count; i++) {
         PyThreadState_Clear(pygo_hubs[i].tstate);
