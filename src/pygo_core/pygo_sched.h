@@ -117,6 +117,14 @@ struct pygo_g {
      * the per-task Chan(1) wake channel with a much cheaper primitive
      * -- saves ~5 us per task at fan-out time. */
     int wake_pending;
+    /* MPSC sub-queue membership flag.  Set with CAS by pygo_mn_hub_submit
+     * before linking g into the hub's sub_head chain; cleared by
+     * hub_main when it drains g out of the sub chain.  Prevents the
+     * same g from being submitted twice (e.g., a spurious wake_g after
+     * the legitimate one) -- the second submit becomes a no-op so g
+     * isn't enqueued and later popped twice, which would resume a
+     * freed coro on the second pop. */
+    int in_sub_queue;
 };
 
 /* Park current g until pygo_sched_wake_g(g) is called.  Race-safe:

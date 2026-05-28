@@ -197,7 +197,13 @@ static PYGO_THREAD_RET pygo_hub_main(void *arg)
                 sub->next = NULL;
                 /* Route by state: fresh (no snap) -> Chase-Lev deque
                  * (stealable by other hubs); woken (snap.valid) ->
-                 * local FIFO (hub-pinned, the netpoll-wake path). */
+                 * local FIFO (hub-pinned, the netpoll-wake path).
+                 *
+                 * Note: in_sub_queue stays 1 throughout drain ->
+                 * ready/deque -> pop -> resume.  hub_main clears it
+                 * just before the actual coro resume, gating duplicate
+                 * wake_gs against ANY queued state, not just the
+                 * sub list. */
                 if (sub->snap.valid) {
                     pygo_sched_ready_push(&h->sched, sub);
                 } else {
@@ -340,6 +346,36 @@ static PYGO_THREAD_RET pygo_hub_main(void *arg)
             h->sched.current = g;
             pygo_tls_current_g = g;
             pygo_tls_self_queued = 0;
+            /* Clear queued flag right before resume so a wake_g that
+             * fires during this g's execution (e.g., a netpoll pump
+             * processing an event for the parker g is about to link
+             * inside wait_fd) can enqueue g via submit. */
+            __atomic_store_n(&g->in_sub_queue, 0, __ATOMIC_RELEASE);
+            /* Defensive: pop a stale queue entry?  Two failure modes
+             * for the queue under M:N + free-threaded:
+             *
+             *   coro == NULL: g was already decref'd to 0; pygo_g_decref
+             *      already ran the pending_global decrement; just skip.
+             *
+             *   done == 1, coro != NULL: g_entry set done before the
+             *      asm trampoline returned to its original caller hub,
+             *      but THIS hub popped a duplicate queue entry for
+             *      the same g (stale wake_g raced with completion).
+             *      The original hub still owes the decrement -- it
+             *      will run completion when its coro_resume returns.
+             *      We must NOT decrement here (would double-count) and
+             *      must NOT re-resume (would re-run the asm trampoline
+             *      against a coro whose user frames already unwound).
+             *      Skip without decrementing.
+             *
+             * In both cases skipping does not lose work: the original
+             * processing path owns the decrement. */
+            if (g->coro == NULL ||
+                __atomic_load_n(&g->done, __ATOMIC_ACQUIRE)) {
+                h->sched.current = NULL;
+                pygo_tls_current_g = NULL;
+                continue;
+            }
             pygo_coro_resume(g->coro);
             self_queued = pygo_tls_self_queued;
             pygo_tls_self_queued = 0;
@@ -437,9 +473,26 @@ struct pygo_iouring_ring *pygo_mn_current_iouring_ring(void)
  * route an I/O-woken g back to whichever hub it was running on.
  * (Also used internally by mn_go.)  Hub_main drains submissions every
  * iteration and routes each entry to either the deque (if g is fresh)
- * or the local FIFO (if g has saved state -- the netpoll-wake case). */
+ * or the local FIFO (if g has saved state -- the netpoll-wake case).
+ *
+ * Idempotency: a CAS on g->in_sub_queue makes duplicate submissions
+ * no-ops.  Under M:N + free-threaded 3.13t a parker can legitimately
+ * be wake_g'd more than once (e.g., wake_g from a netpoll pump that
+ * unlinked it normally, followed by a stale wake from the safety
+ * unlink at the next wait_fd's yield-return).  Without the CAS the
+ * sub queue ends up with g twice, hub_main pops it twice, and the
+ * second resume hits a g whose coro was already destroyed by the
+ * decref that ran after the first run-to-completion -- segfault in
+ * pygo_asm_swap on *(NULL coro). */
 static void pygo_mn_hub_submit(pygo_hub_t *h, pygo_g_t *g)
 {
+    int expected = 0;
+    if (!__atomic_compare_exchange_n(&g->in_sub_queue, &expected, 1,
+                                     0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+        /* Already queued; no need to enqueue again.  The pending resume
+         * will pick up whatever state the g has when hub_main gets to it. */
+        return;
+    }
     pygo_mutex_lock(&h->sub_lock);
     g->next = NULL;
     if (h->sub_tail != NULL) {
