@@ -664,6 +664,30 @@ void pygo_sched_init(pygo_sched_t *s)
     s->stack_size = (Py_ssize_t)pygo_cal_default;
     s->completed = 0;
     s->stopping = 0;
+    pygo_mutex_init(&s->wake_list_lock);
+    s->wake_list_head = NULL;
+    s->wake_list_tail = NULL;
+}
+
+/* Pop the cross-thread wake list and push each entry onto the
+ * scheduler's lock-free ready ring.  Called by the sched owner thread
+ * once per drain iteration.  Holding the lock only for the swap (not
+ * the per-g ready_push) keeps wake_safe latency bounded even when the
+ * owner is doing a large fan-in. */
+static void pygo_sched_drain_wake_list(pygo_sched_t *s)
+{
+    pygo_g_t *head;
+    pygo_mutex_lock(&s->wake_list_lock);
+    head = s->wake_list_head;
+    s->wake_list_head = NULL;
+    s->wake_list_tail = NULL;
+    pygo_mutex_unlock(&s->wake_list_lock);
+    while (head != NULL) {
+        pygo_g_t *next = head->wake_next;
+        head->wake_next = NULL;
+        pygo_ready_push(s, head);
+        head = next;
+    }
 }
 
 pygo_sched_t *pygo_sched_get(void)
@@ -932,27 +956,61 @@ void pygo_sched_wake(pygo_g_t *g)
  * per-task Chan(1) wake mechanism.  Saves the Chan alloc + try_send/
  * recv path -- about 5 us per parked goroutine at fan-out time.
  *
- * Race handling: if wake_safe is called before park_safe (callbacks
- * fire synchronously for already-done futures), we just bump
- * wake_pending and never enter the parked state.  park_safe sees the
- * pending wake on entry and skips the yield.
+ * Cross-thread correctness: wake_safe may be called from a thread
+ * other than the sched owner (e.g., an iouring CQE callback running
+ * on a hub thread invokes a done-callback that resolves a future a
+ * main-thread goroutine is awaiting via park_safe).  The handoff is
+ * coordinated by an atomic parked_safe flag on g:
  *
- * The push-to-ready in wake_safe is guarded by s->current != g so we
- * don't double-queue the running goroutine.  Sync-wake while running
- * is just a wake_pending bump; the goroutine eats it on the next
- * park_safe call. */
+ *   park_safe (parker):                wake_safe (waker):
+ *     wake_pending == 0? early-out      atomic_add wake_pending (was 0)
+ *     parked_safe = 1 (release)         CAS parked_safe 1->0 (acquire)
+ *     wake_pending == 0?                 on success: enqueue to wake_list
+ *       no -> CAS parked_safe 1->0       on failure: nothing (parker
+ *             on success, abort yield                    will see the
+ *             on failure, yield (waker                   wake_pending
+ *             already queued g)                          and abort)
+ *
+ * The previous implementation used `s->current != g` as the "is g
+ * parked?" predicate, but s->current is updated by the sched owner's
+ * drain and reading it from a foreign thread races: the cross-thread
+ * waker could see s->current==g (drain hadn't restored prev yet) and
+ * skip the push, losing the wake.  The parked_safe CAS handoff is
+ * deterministic regardless of caller thread. */
 void pygo_sched_wake_safe(pygo_g_t *g)
 {
-    pygo_sched_t *s;
-    int prev;
     if (g == NULL) return;
-    s = pygo_sched_get();
-    prev = __atomic_fetch_add(&g->wake_pending, 1, __ATOMIC_ACQ_REL);
-    if (prev == 0 && s->current != g) {
-        /* g is parked (not currently running) -- push to ready so the
-         * scheduler picks it up.  The current goroutine path skips
-         * the push and lets park_safe consume the pending wake. */
-        pygo_ready_push(s, g);
+
+    /* Bump wake_pending FIRST so the parker's recheck after its
+     * parked_safe store observes our arrival.  ACQ_REL pairs with
+     * park_safe's load-acquire on wake_pending. */
+    __atomic_add_fetch(&g->wake_pending, 1, __ATOMIC_ACQ_REL);
+
+    /* Try to transition parked_safe 1->0.  On success, we own the
+     * wake and route g back to its home sched via the thread-safe
+     * wake_list (pygo_global_sched here -- park_safe is single-thread
+     * sched only; M:N hubs use pygo_mn_wake_g for an analogous race
+     * pattern). */
+    {
+        int expected = 1;
+        if (__atomic_compare_exchange_n(&g->parked_safe, &expected, 0,
+                                        0, __ATOMIC_ACQ_REL,
+                                        __ATOMIC_ACQUIRE)) {
+            pygo_sched_t *s = pygo_sched_get();
+            pygo_mutex_lock(&s->wake_list_lock);
+            g->wake_next = NULL;
+            if (s->wake_list_tail != NULL) {
+                s->wake_list_tail->wake_next = g;
+            } else {
+                s->wake_list_head = g;
+            }
+            s->wake_list_tail = g;
+            pygo_mutex_unlock(&s->wake_list_lock);
+        }
+        /* CAS failed: g was either running (parked_safe==0 already)
+         * or another wake_safe already claimed it.  Our wake_pending
+         * bump is still observable; the parker (or the prior claimer's
+         * subsequent park_safe) will consume it. */
     }
 }
 
@@ -969,10 +1027,43 @@ void pygo_sched_park_safe(void)
         return;
     }
 
+    /* Commit to parking.  Release order so wake_safe's acquire CAS
+     * on parked_safe sees a fully consistent g (in particular, any
+     * wake_next reset). */
+    g->wake_next = NULL;
+    __atomic_store_n(&g->parked_safe, 1, __ATOMIC_RELEASE);
+
+    /* Recheck wake_pending after the store.  Two outcomes pair with
+     * wake_safe's "bump pending, CAS parked_safe":
+     *   - wake_safe's bump happened before our store: we observe
+     *     wake_pending>0 here; its CAS failed (parked_safe was 0 then);
+     *     we CAS parked_safe back to 0 and return without yielding.
+     *   - wake_safe's bump happened after our store: its CAS sees
+     *     parked_safe==1 and succeeds, queueing g on wake_list; we
+     *     either observe wake_pending>0 and CAS-race lose (drain
+     *     will pick g up via wake_list) or observe wake_pending==0
+     *     (the bump hadn't landed) and proceed to yield (drain still
+     *     picks g up via wake_list -- the queueing happens-before the
+     *     wake_pending bump is irrelevant). */
+    if (__atomic_load_n(&g->wake_pending, __ATOMIC_ACQUIRE) > 0) {
+        int expected = 1;
+        if (__atomic_compare_exchange_n(&g->parked_safe, &expected, 0,
+                                        0, __ATOMIC_ACQ_REL,
+                                        __ATOMIC_ACQUIRE)) {
+            __atomic_sub_fetch(&g->wake_pending, 1, __ATOMIC_ACQ_REL);
+            return;
+        }
+        /* Lost the CAS -- wake_safe already claimed us and pushed g
+         * onto the wake_list.  Fall through to yield; drain will
+         * dequeue g on its next iteration. */
+    }
+
     pygo_pystate_snap(&g->snap);
     pygo_g_state_set(g, PYGO_GST_PARKED_SAFE);
     pygo_coro_yield();
-    /* On resume, eat the wake count that brought us back. */
+    /* On resume, parked_safe has already been cleared by wake_safe's
+     * CAS.  Eat one wake_pending count -- there is at least one (the
+     * wake that delivered us back to ready). */
     __atomic_sub_fetch(&g->wake_pending, 1, __ATOMIC_ACQ_REL);
     pygo_g_state_set(g, PYGO_GST_RUNNING);
 }
@@ -1033,8 +1124,18 @@ Py_ssize_t pygo_sched_drain(pygo_sched_t *s)
     while (!s->stopping && (!pygo_sched_ready_empty(s) ||
                             s->sleep_size > 0 ||
                             pygo_netpoll_parked_count() > 0 ||
-                            pygo_iouring_inflight() > 0)) {
+                            pygo_iouring_inflight() > 0 ||
+                            __atomic_load_n(&s->wake_list_head,
+                                            __ATOMIC_ACQUIRE) != NULL)) {
         double now = pygo_sched_monotonic_seconds();
+        /* Drain cross-thread wakes into the ready ring before any
+         * other work this iteration.  Empty in the common (same-
+         * thread wake_safe) case -- one atomic load on the head.
+         * Otherwise: a single lock acquire on wake_list_lock, then
+         * lock-free per-g pushes to ready. */
+        if (__atomic_load_n(&s->wake_list_head, __ATOMIC_ACQUIRE) != NULL) {
+            pygo_sched_drain_wake_list(s);
+        }
         /* Wake up any sleepers whose time has come. */
         while (s->sleep_size > 0 && pygo_sleep_peek(s)->wake_at <= now) {
             pygo_g_t *woke = pygo_sleep_pop(s);

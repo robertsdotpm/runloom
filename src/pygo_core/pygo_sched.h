@@ -18,6 +18,7 @@
 #include <Python.h>
 
 #include "coro.h"
+#include "plat_compat.h"   /* pygo_mutex_t for cross-thread wake list */
 
 typedef struct pygo_g pygo_g_t;
 typedef struct pygo_sched pygo_sched_t;
@@ -141,6 +142,23 @@ struct pygo_g {
      * defense against missed unlink paths under M:N + free-threaded
      * that would otherwise have pump waking a freed g. */
     void *netpoll_parker;   /* really pygo_parked_t *, void* to avoid include cycle */
+    /* park_safe / wake_safe lost-wake guard.  Set to 1 by park_safe
+     * just before pygo_coro_yield; CAS'd back to 0 by the first
+     * wake_safe to observe it.  Replaces the original s->current
+     * check, which read tstate state across threads -- a cross-thread
+     * wake_safe (e.g., from a hub thread processing an iouring CQE
+     * for a goroutine parked on the single-thread sched) could
+     * observe s->current==g (still set by drain) and skip the push,
+     * losing the wake.  The CAS-based handoff is independent of any
+     * tstate observation and gives wake_safe a deterministic "did we
+     * own the wake?" answer regardless of caller thread. */
+    int parked_safe;
+    /* MPSC link for the home sched's cross-thread wake list.  Used
+     * only while g is parked via park_safe AND a cross-thread wake
+     * is in flight (between wake_safe's enqueue and drain's
+     * drain_wake_list).  Kept separate from `next` so an M:N sub
+     * queue + wake list cannot collide on the same g. */
+    pygo_g_t *wake_next;
     /* Observational lifecycle state.  See pygo_gstate.h for the enum.
      * Independent of (but consistent with) the load-bearing
      * coro/done/in_sub_queue/wake_pending fields above; set at every
@@ -199,6 +217,15 @@ struct pygo_sched {
     Py_ssize_t completed;
     /* When set, sched_drain returns. */
     int stopping;
+    /* Cross-thread wake list -- MPSC linked through g->wake_next.
+     * Foreign-thread wake_safe pushes here under wake_list_lock; the
+     * drain owner consumes once per iteration via
+     * pygo_sched_drain_wake_list and copies into the lock-free ready
+     * ring.  Keeps wake_safe off the non-atomic ready_ring writes
+     * that would race with the owner's pop. */
+    pygo_mutex_t wake_list_lock;
+    pygo_g_t *wake_list_head;
+    pygo_g_t *wake_list_tail;
 };
 
 /* Is the ready queue empty?  Hot-path predicate; inline-friendly. */
