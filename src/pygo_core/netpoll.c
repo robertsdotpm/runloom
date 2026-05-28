@@ -247,6 +247,11 @@ static int pygo_parker_unlink(pygo_parked_t *p)
     p->next_by_fd = NULL;
     if (touched) {
         __atomic_sub_fetch(&pygo_parked_total, 1, __ATOMIC_RELEASE);
+        /* Clear the per-g back-pointer so g completion's force-unlink
+         * (in mn_sched.c hub_main) doesn't see a stale reference. */
+        if (p->g != NULL && p->g->netpoll_parker == p) {
+            p->g->netpoll_parker = NULL;
+        }
     }
     return touched;
 }
@@ -633,6 +638,24 @@ int pygo_netpoll_parked_count(void)
     return __atomic_load_n(&pygo_parked_total, __ATOMIC_ACQUIRE);
 }
 
+void pygo_netpoll_force_unlink_g_parker(pygo_g_t *g)
+{
+    pygo_parked_t *p;
+    if (g == NULL) return;
+    /* Cheap path: no parker tracked, nothing to do. */
+    if (g->netpoll_parker == NULL) return;
+    pygo_mutex_lock(&pygo_parked_lock);
+    p = (pygo_parked_t *)g->netpoll_parker;
+    if (p != NULL) {
+        /* pygo_parker_unlink is no-op if p is already clean (e.g.,
+         * pump unlinked it between the cheap-path check and the lock
+         * acquire) -- safe to call unconditionally. */
+        (void)pygo_parker_unlink(p);
+        g->netpoll_parker = NULL;
+    }
+    pygo_mutex_unlock(&pygo_parked_lock);
+}
+
 int pygo_netpoll_add_iouring_eventfd(int fd)
 {
 #if defined(PYGO_HAVE_EPOLL)
@@ -849,6 +872,15 @@ int pygo_netpoll_wait_fd(int fd, int events, long long timeout_ns)
     park.slot = NULL;
     park.next_by_fd = NULL;
     park.prev_by_fd = NULL;
+
+    /* Per-g parker tracking: each g has at most one parker active.
+     * Setting this lets hub_main's completion path detect+forcibly
+     * unlink any leaked parker before the g's stack is returned to
+     * the pool (which would otherwise let pump dereference freed
+     * memory via the stale parker pointer). */
+    if (current_g != NULL) {
+        current_g->netpoll_parker = &park;
+    }
 
     /* ORDER MATTERS (M:N + free-threaded race fix):
      *

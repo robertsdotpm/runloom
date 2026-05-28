@@ -391,6 +391,14 @@ static PYGO_THREAD_RET pygo_hub_main(void *arg)
                  * load again. */
                 pygo_drain_g_datastack();
                 pygo_pystate_load(&hub_snap);
+                /* Force-unlink any netpoll parker still referencing g.
+                 * If wait_fd's safety unlink missed (because a wake
+                 * path bypassed the netpoll dispatcher AND the safety
+                 * check's structural test couldn't see the leak), the
+                 * parker would survive into stack-pool reuse and
+                 * resurrect this just-freed g via a future pump
+                 * dispatch.  This call covers that gap. */
+                pygo_netpoll_force_unlink_g_parker(g);
                 /* Bump completed BEFORE decrementing pending, both
                  * with release ordering, so a mn_run reader that
                  * observes pending == 0 (via acquire) is also

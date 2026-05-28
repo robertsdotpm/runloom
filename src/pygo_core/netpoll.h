@@ -44,6 +44,13 @@ int pygo_netpoll_parked_count(void);
  * tickers don't block the next pygo_core.run(). */
 int pygo_netpoll_drain_parked(void);
 
+/* Force-unlink a g's pending parker, if any.  Called by the hub
+ * completion path before pygo_g_decref so a leaked parker (M:N race
+ * where some wake path bypassed pygo_parker_unlink) cannot survive
+ * into stack-pool reuse and resurrect the freed g via pump dispatch. */
+struct pygo_g;
+void pygo_netpoll_force_unlink_g_parker(struct pygo_g *g);
+
 /* Clear the "fd is registered in netpoll" cache bit.  Call from the
  * socket-close hook so a future fd reuse re-registers cleanly.  No
  * syscall; the kernel auto-clears its epoll/kqueue entry when the

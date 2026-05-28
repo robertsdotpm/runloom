@@ -125,6 +125,13 @@ struct pygo_g {
      * isn't enqueued and later popped twice, which would resume a
      * freed coro on the second pop. */
     int in_sub_queue;
+    /* Active netpoll parker, set by pygo_netpoll_wait_fd on link and
+     * cleared on unlink.  Each g has at most one parker in flight (a
+     * g calls wait_fd sequentially), so a single pointer suffices.
+     * Cleared force-unlinks any leaked parker at g completion -- the
+     * defense against missed unlink paths under M:N + free-threaded
+     * that would otherwise have pump waking a freed g. */
+    void *netpoll_parker;   /* really pygo_parked_t *, void* to avoid include cycle */
 };
 
 /* Park current g until pygo_sched_wake_g(g) is called.  Race-safe:
