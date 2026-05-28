@@ -48,6 +48,7 @@
 #include "../src/pygo_core/pygo_sched.h"
 #include "../src/pygo_core/mn_sched.h"
 #include "../src/pygo_core/netpoll.h"
+#include "../src/pygo_core/pygo_diag.h"
 
 #define PAYLOAD     "hellopyg"
 #define PAYLOAD_LEN 8
@@ -137,6 +138,23 @@ static int g_M;
 static volatile long g_done_count = 0;
 static pthread_mutex_t g_done_lock = PTHREAD_MUTEX_INITIALIZER;
 
+/* Seeded RNG for reproducible fuzzing.  Each client goroutine bumps a
+ * per-g local PRNG state derived from g_seed XOR g-index.  Used to
+ * inject jitter into the test (short sleeps between syscalls,
+ * occasional iterations skipped) -- a hang that reproduces under
+ * --seed=N then reproduces deterministically across runs. */
+static unsigned int g_seed = 0;
+static volatile long g_g_idx = 0;       /* monotonic g index for seeding */
+
+static unsigned int xs32(unsigned int *st) {
+    /* xorshift32 -- cheap, deterministic */
+    unsigned int x = *st;
+    x ^= x << 13; x ^= x >> 17; x ^= x << 5;
+    if (x == 0) x = 1;
+    *st = x;
+    return x;
+}
+
 static void set_nonblock(int fd)
 {
     int fl = fcntl(fd, F_GETFL, 0);
@@ -217,6 +235,17 @@ static void client_g(void *arg)
 {
     (void)arg;
     __atomic_fetch_add(&g_entered, 1, __ATOMIC_RELAXED);
+    /* Per-g PRNG state.  Seeded from the global seed and a monotonic
+     * g-index so a given (seed, g-idx) deterministically reproduces. */
+    unsigned int rng = g_seed ^ (unsigned int)__atomic_fetch_add(
+        &g_g_idx, 1, __ATOMIC_RELAXED);
+    if (rng == 0) rng = 0xc0ffee01u;
+    /* Optional jitter before connect to spread accepts. */
+    if (g_seed != 0 && (xs32(&rng) % 16) == 0) {
+        struct timespec ts = { 0, (long)(xs32(&rng) % 100000) };
+        nanosleep(&ts, NULL);
+    }
+
     int fd = connect_nonblock(g_port);
     if (fd < 0) return;
     __atomic_fetch_add(&g_connected, 1, __ATOMIC_RELAXED);
@@ -225,6 +254,12 @@ static void client_g(void *arg)
         if (send_all_nb(fd, PAYLOAD, PAYLOAD_LEN) < 0) break;
         if (i == 0) __atomic_fetch_add(&g_sent_once, 1, __ATOMIC_RELAXED);
         if (recv_all_nb(fd, buf, PAYLOAD_LEN) < 0) break;
+        /* Occasional micro-pause between iterations to perturb the
+         * schedule; only active under nonzero seed. */
+        if (g_seed != 0 && (xs32(&rng) % 32) == 0) {
+            struct timespec ts = { 0, 5000 };
+            nanosleep(&ts, NULL);
+        }
     }
     pygo_netpoll_unregister(fd);   /* clear registration bitmap so fd reuse re-registers */
     close(fd);
@@ -246,7 +281,13 @@ int main(int argc, char **argv)
     int N = (argc > 1) ? atoi(argv[1]) : 256;
     int H = (argc > 2) ? atoi(argv[2]) : 4;
     int M = (argc > 3) ? atoi(argv[3]) : 20;
+    /* Optional 4th arg: PRNG seed for the per-g jitter injector.
+     * --seed=0 (the default) disables jitter; any nonzero value
+     * enables deterministic timing perturbation.  Used by the
+     * seeded-fuzz driver to reproduce hangs. */
+    unsigned int seed = (argc > 4) ? (unsigned int)strtoul(argv[4], NULL, 0) : 0u;
     g_M = M;
+    g_seed = seed;
 
     /* Initialise CPython enough to satisfy pygo_core's internal calls
      * (slab allocator uses PyMem_*, tstate setup, etc.).  This is a
@@ -282,11 +323,26 @@ int main(int argc, char **argv)
     double dt = now_seconds() - t0;
     pygo_mn_fini();
 
-    printf("N=%d H=%d M=%d done=%ld/%d entered=%ld connected=%ld sent_once=%ld %.3fs %.1fK/s\n",
-           N, H, M, g_done_count, N, g_entered, g_connected, g_sent_once, dt,
+    printf("N=%d H=%d M=%d seed=%u done=%ld/%d entered=%ld connected=%ld sent_once=%ld %.3fs %.1fK/s\n",
+           N, H, M, g_seed, g_done_count, N, g_entered, g_connected, g_sent_once, dt,
            (double)N * M / dt / 1000.0);
     if (g_done_count != N) {
-        fprintf(stderr, "FAIL: %ld/%d completed\n", g_done_count, N);
+        fprintf(stderr, "FAIL: %ld/%d completed (seed=%u)\n",
+                g_done_count, N, g_seed);
+        /* Dump every thread's lifecycle event ring + run the self-
+         * check so a failing seed produces an immediately-readable
+         * diagnostic instead of just an exit code.  Cheap; only fires
+         * on the FAIL path. */
+        fprintf(stderr, "---- self_check ----\n");
+        (void)pygo_self_check(1);
+        if (pygo_debug_flags & PYGO_DBG_RING) {
+            fprintf(stderr, "---- diag_dump ----\n");
+            pygo_diag_dump(2);
+        } else {
+            fprintf(stderr,
+                "[hint] re-run with PYGO_DEBUG_DIAG=ring (or =all) to see "
+                "lifecycle events leading to the FAIL\n");
+        }
         return 1;
     }
     return 0;
