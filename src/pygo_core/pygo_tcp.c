@@ -35,26 +35,57 @@
 #include <stdint.h>
 
 #if defined(__linux__)
-/* Opt-in: PYGO_TCPCONN_IOURING=1 routes TCPConn's recv/send through
- * the io_uring backend instead of recv()/send()+epoll-wait.  Default
- * off because single-shot SQE-per-op is currently a net regression
- * versus the ET register-once path (one io_uring_enter per RT plus
- * eventfd routing through the pump beats the kernel-level cost of
- * non-blocking recv() + epoll_wait).  Flipping the default is
- * deferred until multishot recv (step 4) + DEFER_TASKRUN (step 5)
- * land and the combined path beats the legacy one.
+/* PYGO_TCPCONN_IOURING controls TCPConn's recv/send backend:
+ *   unset / "0" : epoll register-once + recv()/send() (default).
+ *                 Fastest for N <= ~1024 concurrent conns on current
+ *                 Linux after the netpoll O(1) parker-index fix.
+ *   "1"         : io_uring multishot recv unconditionally.  Slower at
+ *                 low N (~14% gap) but wins at very-high N.
+ *   "auto"      : start in epoll mode; switch this conn over to
+ *                 iouring multishot when the live TCPConn population
+ *                 crosses PYGO_TCPCONN_IOURING_THRESHOLD (default
+ *                 2048, the empirical crossover point on echo
+ *                 workloads).
  *
- * Probed once on first read; cache the answer to avoid getenv() in
- * the hot path. */
-static int pygo_tcpconn_iouring_enabled = -1;
+ * Mode is resolved once on first read.  Active-conn count is
+ * maintained atomically and consulted only when mode == auto. */
+enum {
+    PYGO_IOURING_MODE_OFF  = 0,
+    PYGO_IOURING_MODE_ON   = 1,
+    PYGO_IOURING_MODE_AUTO = 2,
+};
+static int pygo_tcpconn_iouring_mode = -1;
+static int pygo_tcpconn_iouring_threshold = 2048;
+static volatile int pygo_tcpconn_live_count = 0;
+
+static void pygo_tcpconn_resolve_mode(void)
+{
+    const char *e = getenv("PYGO_TCPCONN_IOURING");
+    const char *t = getenv("PYGO_TCPCONN_IOURING_THRESHOLD");
+    int mode = PYGO_IOURING_MODE_OFF;
+    if (e != NULL) {
+        if (e[0] == '1') mode = PYGO_IOURING_MODE_ON;
+        else if (strcmp(e, "auto") == 0) mode = PYGO_IOURING_MODE_AUTO;
+    }
+    pygo_tcpconn_iouring_mode = mode;
+    if (t != NULL) {
+        int v = atoi(t);
+        if (v > 0) pygo_tcpconn_iouring_threshold = v;
+    }
+}
+
 static int pygo_tcpconn_use_iouring(void)
 {
-    if (pygo_tcpconn_iouring_enabled < 0) {
-        const char *e = getenv("PYGO_TCPCONN_IOURING");
-        pygo_tcpconn_iouring_enabled =
-            (e != NULL && e[0] == '1') ? 1 : 0;
-    }
-    return pygo_tcpconn_iouring_enabled && pygo_iouring_available();
+    int mode;
+    if (pygo_tcpconn_iouring_mode < 0) pygo_tcpconn_resolve_mode();
+    mode = pygo_tcpconn_iouring_mode;
+    if (mode == PYGO_IOURING_MODE_OFF)  return 0;
+    if (mode == PYGO_IOURING_MODE_ON)   return pygo_iouring_available();
+    /* auto: only use iouring when many TCPConns are live. */
+    if (__atomic_load_n(&pygo_tcpconn_live_count, __ATOMIC_ACQUIRE)
+        >= pygo_tcpconn_iouring_threshold)
+        return pygo_iouring_available();
+    return 0;
 }
 #endif
 
@@ -215,7 +246,10 @@ static int pygo_resolve(const char *host, int port, int want_passive,
  * Construction / destruction
  * ============================================================ */
 
-static PyObject *PygoTCPConn_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
+/* Allocate + zero-init a TCPConn from a type.  Centralises the
+ * tp_alloc + ms/fd/closed defaults + live-count increment that
+ * listen/accept/connect would otherwise have to duplicate. */
+static PygoTCPConn *PygoTCPConn_alloc(PyTypeObject *type)
 {
     PygoTCPConn *self = (PygoTCPConn *)type->tp_alloc(type, 0);
     if (self == NULL) return NULL;
@@ -225,8 +259,14 @@ static PyObject *PygoTCPConn_new(PyTypeObject *type, PyObject *args, PyObject *k
     self->closed = 0;
 #if defined(__linux__)
     self->ms = NULL;
+    __atomic_add_fetch(&pygo_tcpconn_live_count, 1, __ATOMIC_RELEASE);
 #endif
-    return (PyObject *)self;
+    return self;
+}
+
+static PyObject *PygoTCPConn_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
+{
+    return (PyObject *)PygoTCPConn_alloc(type);
 }
 
 static int PygoTCPConn_init(PygoTCPConn *self, PyObject *args, PyObject *kwds)
@@ -268,6 +308,9 @@ static void PygoTCPConn_dealloc(PygoTCPConn *self)
         self->fd = -1;
         self->closed = 1;
     }
+#if defined(__linux__)
+    __atomic_sub_fetch(&pygo_tcpconn_live_count, 1, __ATOMIC_RELEASE);
+#endif
     Py_TYPE(self)->tp_free((PyObject *)self);
 }
 
@@ -649,7 +692,7 @@ static PyObject *PygoTCPConn_listen_cls(PyTypeObject *cls, PyObject *args, PyObj
 
     pygo_set_nonblock(fd);
 
-    result = (PygoTCPConn *)cls->tp_alloc(cls, 0);
+    result = PygoTCPConn_alloc(cls);
     if (result == NULL) {
         pygo_closesock((PYGO_SOCK_T)fd);
         return NULL;
@@ -698,7 +741,7 @@ static PyObject *PygoTCPConn_accept(PygoTCPConn *self, PyObject *unused)
     pygo_set_nonblock(new_fd);
     pygo_set_nodelay(new_fd, self->family);
 
-    result = (PygoTCPConn *)Py_TYPE(self)->tp_alloc(Py_TYPE(self), 0);
+    result = PygoTCPConn_alloc(Py_TYPE(self));
     if (result == NULL) {
         pygo_closesock((PYGO_SOCK_T)new_fd);
         return NULL;
@@ -800,7 +843,7 @@ static PyObject *PygoTCPConn_connect_cls(PyTypeObject *cls, PyObject *args, PyOb
 
     pygo_set_nodelay(fd, family);
 
-    result = (PygoTCPConn *)cls->tp_alloc(cls, 0);
+    result = PygoTCPConn_alloc(cls);
     if (result == NULL) {
         pygo_closesock((PYGO_SOCK_T)fd);
         return NULL;
