@@ -128,9 +128,46 @@ static int pygo_parker_fd_index_ensure(int fd)
 }
 
 /* Link p into both the global list and its per-fd bucket.  Caller
- * holds pygo_parked_lock. */
+ * holds pygo_parked_lock.
+ *
+ * Stack-pooling note: pygo_parked_t lives on the calling goroutine's
+ * coroutine stack (see pygo_netpoll_wait_fd).  Stacks are returned to
+ * a per-hub TLS pool when a g completes (pygo_stack_release) and
+ * re-issued to the next g spawned on that hub.  The new g's wait_fd
+ * places its parker at the SAME stack offset, so the parker address
+ * is byte-identical to a previous occupant's.  All four list-link
+ * fields are freshly zeroed before this call (in pygo_netpoll_wait_fd),
+ * but pygo_parked_head and pygo_parked_by_fd[fd] are globals and can
+ * still reference this address from a prior life if any unlink path
+ * for that previous occupant missed (a residual M:N + free-threaded
+ * race that is not yet fully isolated upstream).
+ *
+ * Detach any stale self-reference here before pushing.  Otherwise
+ * p->next = pygo_parked_head sets p->next = p (1-cycle in the global
+ * list), and head = bucket[p->fd] = p sets p->next_by_fd = p /
+ * p->prev_by_fd = p (self-cycle in the bucket).  Either form wedges
+ * the pump's list walks indefinitely. */
 static void pygo_parker_link(pygo_parked_t *p)
 {
+    /* Stale-reference clears.  See header comment.  Cheap (two
+     * compare-and-conditional-store); only fires when stack reuse hits
+     * a parker address that an unlink missed. */
+    if (pygo_parked_head == p) pygo_parked_head = NULL;
+    if (p->fd >= 0 && (size_t)p->fd < pygo_parked_by_fd_cap &&
+        pygo_parked_by_fd[p->fd] == p) {
+        pygo_parked_by_fd[p->fd] = NULL;
+    }
+#ifdef PYGO_PARKER_DEBUG
+    /* Diagnostic: announce ghost references so we can pinpoint the
+     * upstream missed-unlink path. */
+    if (p->slot != NULL || p->next != NULL) {
+        fprintf(stderr,
+                "[pygo] parker has nonnull slot/next at link entry: "
+                "parker=%p fd=%d g=%p slot=%p next=%p\n",
+                (void *)p, p->fd, (void *)p->g,
+                (void *)p->slot, (void *)p->next);
+    }
+#endif
     /* Global list: push at head, slot-pointer trick. */
     p->next = pygo_parked_head;
     if (p->next != NULL) p->next->slot = &p->next;
@@ -154,16 +191,40 @@ static void pygo_parker_link(pygo_parked_t *p)
 /* Unlink p from both lists.  Caller holds pygo_parked_lock. */
 static void pygo_parker_unlink(pygo_parked_t *p)
 {
+#ifdef PYGO_PARKER_DEBUG
+    if (p->prev_by_fd == p || p->next_by_fd == p) {
+        fprintf(stderr,
+                "[pygo] UNLINK on self-looped bucket entry parker=%p fd=%d "
+                "g=%p hub=%p prev_by_fd=%p next_by_fd=%p bucket=%p\n",
+                (void *)p, p->fd, (void *)p->g, p->hub,
+                (void *)p->prev_by_fd, (void *)p->next_by_fd,
+                (p->fd >= 0 && (size_t)p->fd < pygo_parked_by_fd_cap)
+                    ? (void *)pygo_parked_by_fd[p->fd] : NULL);
+        /* Force the breakpoint -- by the time the linker hardening
+         * ran, this should never be reachable; if it fires, the upstream
+         * unlink-miss bug hit a path we haven't hardened. */
+        p->prev_by_fd = NULL;
+        p->next_by_fd = NULL;
+    }
+#endif
     if (p->slot != NULL) {
         *p->slot = p->next;
         if (p->next != NULL) p->next->slot = p->slot;
         p->slot = NULL;
         p->next = NULL;
     }
+    /* Bucket cleanup.  Normally either prev_by_fd is set (we're in the
+     * middle/tail of the chain) OR bucket[fd] == p (we're the head) --
+     * never both.  We check both unconditionally so that if a prior
+     * link or stale-reference cleanup left the structure in an
+     * inconsistent state (e.g., bucket points to us but we also have a
+     * predecessor from a different chain), we still leave nothing
+     * behind that the pump's bucket walk could trip on. */
     if (p->prev_by_fd != NULL) {
         p->prev_by_fd->next_by_fd = p->next_by_fd;
-    } else if (p->fd >= 0 && (size_t)p->fd < pygo_parked_by_fd_cap &&
-               pygo_parked_by_fd[p->fd] == p) {
+    }
+    if (p->fd >= 0 && (size_t)p->fd < pygo_parked_by_fd_cap &&
+        pygo_parked_by_fd[p->fd] == p) {
         pygo_parked_by_fd[p->fd] = p->next_by_fd;
     }
     if (p->next_by_fd != NULL) p->next_by_fd->prev_by_fd = p->prev_by_fd;
