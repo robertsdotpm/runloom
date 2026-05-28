@@ -684,6 +684,15 @@ void pygo_g_entry(void *user)
     pygo_g_t *g = (pygo_g_t *)user;
     PyObject *res;
 
+    /* C-only entry: skip all Python-frame setup and just call the
+     * registered C function.  Used by the pure-C bench harness; no
+     * Python state to manage. */
+    if (g->c_entry != NULL) {
+        g->c_entry(g->c_arg);
+        __atomic_store_n(&g->done, 1, __ATOMIC_RELEASE);
+        return;
+    }
+
 #if PY_VERSION_HEX >= 0x030B0000 && PY_VERSION_HEX < 0x030D0000
     _PyCFrame root_cframe_storage;
     pygo_install_initial_root_frame(&root_cframe_storage);

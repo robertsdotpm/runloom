@@ -87,9 +87,18 @@ struct pygo_pystate_snap {
  *   - the PygoG Python wrapper, while the user holds it
  * Both decrement on release; the g is freed when both are gone.
  */
+/* C-only entry point.  Set on a g spawned via pygo_mn_go_c (no Python
+ * callable).  When set, pygo_g_entry calls c_entry(c_arg) instead of
+ * PyObject_CallNoArgs(callable).  Used by the C test harness in
+ * tests_c/ to exercise the M:N + netpoll core without the Python
+ * interpreter, so sanitizers / valgrind have a clean view. */
+typedef void (*pygo_c_entry_fn)(void *);
+
 struct pygo_g {
     pygo_coro_t *coro;
-    PyObject *callable;
+    PyObject *callable;     /* Python callable (NULL if c_entry set) */
+    pygo_c_entry_fn c_entry;
+    void *c_arg;
     PyObject *result;
     PyObject *error;
     pygo_pystate_snap_t snap;     /* saved tstate; valid only when suspended */

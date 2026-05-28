@@ -1,0 +1,63 @@
+# tests_c/Makefile -- pure-C bench harness for pygo_core
+#
+# Builds against the pygo_core .so already produced by `python3 setup.py
+# build_ext --inplace`.  We link against the .so so the test harness
+# exercises exactly the code path that Python sees.
+#
+# Targets:
+#   bench_mn         release build
+#   bench_mn-asan    AddressSanitizer (catches use-after-free, OOB)
+#   bench_mn-tsan    ThreadSanitizer  (catches data races)
+#   bench_mn-ubsan   UndefinedBehaviorSanitizer
+#   clean
+#
+# Default Python is 3.13t (free-threaded), since that's where the
+# residual M:N races reproduce.  Override with PYTHON= on the command
+# line for 3.12 etc.
+
+PYTHON ?= /home/x/.pyenv/versions/3.13.13t/bin/python3
+PY_VERSION  := $(shell $(PYTHON) -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
+PY_ABIFLAGS := $(shell $(PYTHON) -c 'import sys; print(sys.abiflags)')
+PY_INC      := $(shell $(PYTHON) -c 'import sysconfig; print(sysconfig.get_path("include"))')
+PY_LIBDIR   := $(shell $(PYTHON) -c 'import sysconfig; print(sysconfig.get_config_var("LIBDIR"))')
+PY_LIBNAME  := python$(PY_VERSION)$(PY_ABIFLAGS)
+
+# pygo_core .so suffix matches the Python build.
+PYGO_SO_NAME := pygo_core.cpython-$(subst .,,$(PY_VERSION))$(PY_ABIFLAGS)-x86_64-linux-gnu.so
+PYGO_SO      := $(abspath ../src/$(PYGO_SO_NAME))
+PYGO_SO_DIR  := $(abspath ../src)
+
+CFLAGS_BASE := -g -O2 -Wall -Wextra -Wno-unused-parameter \
+               -I$(PY_INC) -I../src/pygo_core
+# Link against the absolute path of the .so (so DT_NEEDED records the
+# absolute path; otherwise the loader looks for the relative path
+# verbatim from the program's CWD).  Plus an explicit RPATH for ldd.
+LDFLAGS_BASE := -L$(PY_LIBDIR) -Wl,-rpath,$(PY_LIBDIR) -l$(PY_LIBNAME) \
+                -pthread \
+                -Wl,-rpath,$(PYGO_SO_DIR) \
+                -Wl,--no-as-needed $(PYGO_SO)
+
+# Make sure the .so exists before we try to link.
+$(PYGO_SO):
+	$(PYTHON) -c 'import sys; sys.exit(0)'    # ensure interpreter usable
+	cd .. && $(PYTHON) setup.py build_ext --inplace
+
+bench_mn: bench_mn.c $(PYGO_SO)
+	$(CC) $(CFLAGS_BASE) bench_mn.c -o bench_mn $(LDFLAGS_BASE)
+
+bench_mn-asan: bench_mn.c $(PYGO_SO)
+	$(CC) $(CFLAGS_BASE) -fsanitize=address bench_mn.c -o bench_mn-asan \
+	    $(LDFLAGS_BASE) -fsanitize=address
+
+bench_mn-tsan: bench_mn.c $(PYGO_SO)
+	$(CC) $(CFLAGS_BASE) -fsanitize=thread bench_mn.c -o bench_mn-tsan \
+	    $(LDFLAGS_BASE) -fsanitize=thread
+
+bench_mn-ubsan: bench_mn.c $(PYGO_SO)
+	$(CC) $(CFLAGS_BASE) -fsanitize=undefined bench_mn.c -o bench_mn-ubsan \
+	    $(LDFLAGS_BASE) -fsanitize=undefined
+
+clean:
+	rm -f bench_mn bench_mn-asan bench_mn-tsan bench_mn-ubsan
+
+.PHONY: clean

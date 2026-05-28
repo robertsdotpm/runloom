@@ -55,6 +55,10 @@ struct pygo_iouring_ring;
 
 int pygo_mn_init(int n_threads);
 PyObject *pygo_mn_go(PyObject *callable);
+/* C-only spawn: no Python callable, just a function + arg.  Distributes
+ * goroutines across hubs round-robin (same as pygo_mn_go).  Returns 0 on
+ * success, -1 with errno on failure (ENOMEM, EINVAL). */
+int pygo_mn_go_c(pygo_c_entry_fn fn, void *arg);
 Py_ssize_t pygo_mn_run(void);
 void pygo_mn_fini(void);
 

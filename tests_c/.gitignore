@@ -1,0 +1,4 @@
+tests_c/bench_mn
+tests_c/bench_mn-asan
+tests_c/bench_mn-tsan
+tests_c/bench_mn-ubsan

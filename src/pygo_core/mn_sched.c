@@ -663,45 +663,70 @@ void pygo_mn_fini(void)
     __atomic_store_n(&pygo_mn_pending_global, 0, __ATOMIC_RELEASE);
 }
 
-PyObject *pygo_mn_go(PyObject *callable)
+/* Internal core: pick hub, alloc g, set up coro, submit, bump counters.
+ * Either callable (Python path) or c_fn+c_arg (C-only path) must be set,
+ * not both.  Returns 0 on success, -1 on failure (errno set).  Python
+ * error is also set on failure when callable != NULL. */
+static int pygo_mn_go_core(PyObject *callable, pygo_c_entry_fn c_fn,
+                           void *c_arg)
 {
     long n;
     int hub_idx;
     pygo_g_t *g;
     pygo_hub_t *h;
     if (pygo_hubs == NULL) {
-        PyErr_SetString(PyExc_RuntimeError,
-                        "pygo_mn_init() must be called first");
-        return NULL;
+        if (callable != NULL) {
+            PyErr_SetString(PyExc_RuntimeError,
+                            "pygo_mn_init() must be called first");
+        }
+        errno = EINVAL;
+        return -1;
     }
     n = __atomic_fetch_add(&pygo_mn_spawn_counter, 1, __ATOMIC_RELAXED);
     hub_idx = (int)(n % pygo_hub_count);
     h = &pygo_hubs[hub_idx];
     g = pygo_g_slab_alloc();
     if (g == NULL) {
-        return PyErr_NoMemory();
+        if (callable != NULL) PyErr_NoMemory();
+        errno = ENOMEM;
+        return -1;
     }
-    Py_INCREF(callable);
-    g->callable = callable;
+    if (callable != NULL) {
+        Py_INCREF(callable);
+        g->callable = callable;
+    } else {
+        g->c_entry = c_fn;
+        g->c_arg   = c_arg;
+    }
     g->refcount = 1;
     g->coro = pygo_coro_new((size_t)h->sched.stack_size,
                             pygo_g_entry, g);
     if (g->coro == NULL) {
-        Py_DECREF(callable);
+        if (callable != NULL) {
+            Py_DECREF(callable);
+            PyErr_NoMemory();
+        }
         PyMem_Free(g);
-        PyErr_NoMemory();
-        return NULL;
+        errno = ENOMEM;
+        return -1;
     }
-    /* Submit via the shared MPSC helper.  Hub_main drains submissions
-     * each iteration -- fresh gs (snap.valid==0) get pushed to the
-     * Chase-Lev deque (stealable); yielded-then-woken gs (snap.valid==1,
-     * the netpoll path) get pushed to the local FIFO (hub-pinned). */
     pygo_mn_hub_submit(h, g);
     __atomic_add_fetch(&h->pending, 1, __ATOMIC_RELAXED);
-    /* Global counter -- decoupled from per-hub steal accounting.  See
-     * pygo_mn_pending_global comment for why this exists alongside
-     * the per-hub field. */
     __atomic_add_fetch(&pygo_mn_pending_global, 1, __ATOMIC_ACQ_REL);
+    return 0;
+}
+
+int pygo_mn_go_c(pygo_c_entry_fn fn, void *arg)
+{
+    if (fn == NULL) { errno = EINVAL; return -1; }
+    return pygo_mn_go_core(NULL, fn, arg);
+}
+
+PyObject *pygo_mn_go(PyObject *callable)
+{
+    if (pygo_mn_go_core(callable, NULL, NULL) < 0) {
+        return NULL;
+    }
     Py_RETURN_NONE;
 }
 
