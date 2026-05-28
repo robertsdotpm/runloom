@@ -80,6 +80,19 @@ typedef struct pygo_parked {
     struct pygo_parked **slot;
     struct pygo_parked  *next_by_fd;
     struct pygo_parked  *prev_by_fd;
+    /* Monotonic acquire generation (bumped each pool acquire).  When
+     * the parker comes from the pool's freelist, the new gen
+     * disambiguates this lifetime from prior ones with the same
+     * heap address.  Pure defence-in-depth: pool acquire never
+     * returns a parker that is currently linked into any list, so
+     * the global / bucket pointers cannot alias a live entry.  The
+     * gen field is exposed via the diag ring so a missed-unlink can
+     * be traced to the lifetime that left the dangling reference. */
+    unsigned int gen;
+    /* TLS pool freelist linkage.  When released, the parker is on
+     * its owning thread's freelist; pool_next chains them.  Cleared
+     * on acquire. */
+    struct pygo_parked *pool_next;
 } pygo_parked_t;
 
 /* Forcibly wake all parked goroutines with a cancelled marker.
@@ -87,6 +100,73 @@ typedef struct pygo_parked {
  * cleanup doesn't leave the next pygo_core.run() blocking on parked
  * accept loops / tickers / etc. */
 int pygo_netpoll_drain_parked(void);
+
+/* ---- parker heap pool ----
+ *
+ * Replaces stack-allocated `pygo_parked_t park;` locals.  Each calling
+ * thread keeps a small LIFO freelist of released parkers; acquire pops
+ * from there or mallocs, release pushes back (capped, then free).
+ *
+ * Why heap, not stack: stack-allocated parkers shared the address
+ * space of the goroutine's coroutine stack.  Stacks are returned to
+ * a TLS pool on g completion and reissued to the next g, so a missed
+ * unlink path leaves the global / per-fd structures pointing at a
+ * byte-identical address the new occupant just claimed.  Heap-pool
+ * parkers cannot alias: when a parker is in the freelist, no global
+ * pointer references it; when it's in flight, it sits at a unique
+ * heap address.
+ *
+ * Generation: each acquire bumps p->gen.  Pure observability hook;
+ * lookup paths still walk by pointer.  Recorded in the diag ring so
+ * a future missed-unlink can be triangulated by gen mismatch. */
+#define PYGO_PARKER_POOL_CAP 64
+static PYGO_TLS pygo_parked_t *pygo_parker_pool_head = NULL;
+static PYGO_TLS int             pygo_parker_pool_size = 0;
+/* Monotonic generation source.  Atomic so cross-thread acquires
+ * (released-by-one-thread, acquired-by-another via pool transfer)
+ * still get a unique bump, though typical usage is hub-local. */
+static unsigned int pygo_parker_gen_next = 0;
+
+static pygo_parked_t *pygo_parker_pool_acquire(void)
+{
+    pygo_parked_t *p = pygo_parker_pool_head;
+    if (p != NULL) {
+        pygo_parker_pool_head = p->pool_next;
+        pygo_parker_pool_size--;
+        p->pool_next = NULL;
+    } else {
+        p = (pygo_parked_t *)calloc(1, sizeof(*p));
+        if (p == NULL) return NULL;
+    }
+    /* Mint a fresh generation.  Wraparound after 2^32 is fine: the
+     * gen is a diag aid, not a security token. */
+    p->gen = __atomic_add_fetch(&pygo_parker_gen_next, 1, __ATOMIC_RELAXED);
+    return p;
+}
+
+static void pygo_parker_pool_release(pygo_parked_t *p)
+{
+    if (p == NULL) return;
+    /* Defence-in-depth: scrub list-link fields so a stray ref into
+     * a freelist entry can't pivot through to other state. */
+    p->next        = NULL;
+    p->slot        = NULL;
+    p->next_by_fd  = NULL;
+    p->prev_by_fd  = NULL;
+    p->fd          = -1;
+    p->events      = 0;
+    p->deadline_ns = -1;
+    p->ready_out   = NULL;
+    p->g           = NULL;
+    p->hub         = NULL;
+    if (pygo_parker_pool_size >= PYGO_PARKER_POOL_CAP) {
+        free(p);
+        return;
+    }
+    p->pool_next = pygo_parker_pool_head;
+    pygo_parker_pool_head = p;
+    pygo_parker_pool_size++;
+}
 
 /* Shared parked list + lock.  Under M:N multiple hubs concurrently
  * call wait_fd (park.add) and pump (park.remove); without the lock
@@ -765,8 +845,13 @@ void pygo_netpoll_force_unlink_g_parker(pygo_g_t *g)
          * acquire) -- safe to call unconditionally. */
         (void)pygo_parker_unlink(p);
         g->netpoll_parker = NULL;
+        PYGO_EVT(PYGO_EVT_PARKER_FORCE, p, g, (long long)p->gen);
     }
     pygo_mutex_unlock(&pygo_parked_lock);
+    /* The g is completing and its wait_fd will never resume to call
+     * pool_release, so we release here.  Safe: parker is unlinked
+     * above so no other thread holds a reference. */
+    if (p != NULL) pygo_parker_pool_release(p);
 }
 
 int pygo_netpoll_add_iouring_eventfd(int fd)
@@ -953,13 +1038,16 @@ int pygo_netpoll_drain_parked(void)
 /* ---- park / wake ---- */
 int pygo_netpoll_wait_fd(int fd, int events, long long timeout_ns)
 {
-    pygo_parked_t park;
+    pygo_parked_t *park;
     pygo_sched_t *s;
     int ready_mask = 0;
     void *hub_opaque;
     pygo_g_t *current_g;
 
     if (pygo_netpoll_init() != 0) return -1;
+
+    park = pygo_parker_pool_acquire();
+    if (park == NULL) { errno = ENOMEM; return -1; }
 
     /* Determine where this g lives so pump can route the wake.
      * If we're inside an M:N hub, the hub TLS gives us the target;
@@ -975,16 +1063,13 @@ int pygo_netpoll_wait_fd(int fd, int events, long long timeout_ns)
         current_g = s->current;
     }
 
-    park.fd = fd;
-    park.events = events;
-    park.deadline_ns = timeout_ns < 0 ? -1 : monotonic_ns() + timeout_ns;
-    park.ready_out = &ready_mask;
-    park.g = current_g;
-    park.hub = hub_opaque;
-    park.next = NULL;
-    park.slot = NULL;
-    park.next_by_fd = NULL;
-    park.prev_by_fd = NULL;
+    park->fd = fd;
+    park->events = events;
+    park->deadline_ns = timeout_ns < 0 ? -1 : monotonic_ns() + timeout_ns;
+    park->ready_out = &ready_mask;
+    park->g = current_g;
+    park->hub = hub_opaque;
+    /* next/slot/next_by_fd/prev_by_fd are NULL from pool acquire. */
 
     /* Per-g parker tracking: each g has at most one parker active.
      * Setting this lets hub_main's completion path detect+forcibly
@@ -992,7 +1077,7 @@ int pygo_netpoll_wait_fd(int fd, int events, long long timeout_ns)
      * the pool (which would otherwise let pump dereference freed
      * memory via the stale parker pointer). */
     if (current_g != NULL) {
-        current_g->netpoll_parker = &park;
+        current_g->netpoll_parker = park;
     }
 
     /* ORDER MATTERS (M:N + free-threaded race fix):
@@ -1013,7 +1098,7 @@ int pygo_netpoll_wait_fd(int fd, int events, long long timeout_ns)
      * a previous parker being unlinked-on-wake and a new one being
      * linked. */
     pygo_mutex_lock(&pygo_parked_lock);
-    pygo_parker_link(&park);
+    pygo_parker_link(park);
     pygo_mutex_unlock(&pygo_parked_lock);
     if (current_g != NULL) pygo_g_state_set(current_g, PYGO_GST_PARKED_NETPOLL);
 
@@ -1025,9 +1110,10 @@ int pygo_netpoll_wait_fd(int fd, int events, long long timeout_ns)
         int pending = pygo_fd_pending_wake_consume(fd, events);
         if (pending != 0) {
             pygo_mutex_lock(&pygo_parked_lock);
-            pygo_parker_unlink(&park);
+            pygo_parker_unlink(park);
             pygo_mutex_unlock(&pygo_parked_lock);
             if (current_g != NULL) pygo_g_state_set(current_g, PYGO_GST_RUNNING);
+            pygo_parker_pool_release(park);
             return pending;
         }
     }
@@ -1039,23 +1125,26 @@ int pygo_netpoll_wait_fd(int fd, int events, long long timeout_ns)
     if (pygo_win_use_iocp) {
         if (pygo_iocp_submit(fd, events, timeout_ns) != 0) {
             pygo_mutex_lock(&pygo_parked_lock);
-            pygo_parker_unlink(&park);
+            pygo_parker_unlink(park);
             pygo_mutex_unlock(&pygo_parked_lock);
+            pygo_parker_pool_release(park);
             return -1;
         }
     } else {
         if (pygo_netpoll_register(fd, events) != 0) {
             pygo_mutex_lock(&pygo_parked_lock);
-            pygo_parker_unlink(&park);
+            pygo_parker_unlink(park);
             pygo_mutex_unlock(&pygo_parked_lock);
+            pygo_parker_pool_release(park);
             return -1;
         }
     }
 #else
     if (pygo_netpoll_register(fd, events) != 0) {
         pygo_mutex_lock(&pygo_parked_lock);
-        pygo_parker_unlink(&park);
+        pygo_parker_unlink(park);
         pygo_mutex_unlock(&pygo_parked_lock);
+        pygo_parker_pool_release(park);
         return -1;
     }
 #endif
@@ -1069,8 +1158,9 @@ int pygo_netpoll_wait_fd(int fd, int events, long long timeout_ns)
         int pending = pygo_fd_pending_wake_consume(fd, events);
         if (pending != 0) {
             pygo_mutex_lock(&pygo_parked_lock);
-            pygo_parker_unlink(&park);
+            pygo_parker_unlink(park);
             pygo_mutex_unlock(&pygo_parked_lock);
+            pygo_parker_pool_release(park);
             return pending;
         }
     }
@@ -1083,37 +1173,33 @@ int pygo_netpoll_wait_fd(int fd, int events, long long timeout_ns)
     }
     pygo_coro_yield();
     /* On wake: pump SHOULD have set ready_mask and removed us from the
-     * parked lists.  If anything still references this parker (slot
-     * set, bucket head, prev/next_by_fd set) the g was resumed by a
-     * wake path that bypassed pygo_parker_unlink -- without cleanup
-     * here the parker survives into g completion, the per-hub stack
-     * pool reissues the parker's stack address to a new g, and pump
-     * sees stale references that either form list cycles or wake the
-     * freed g (use-after-free).
-     *
-     * Counter accounting: pygo_parker_unlink internally decrements
-     * pygo_parked_total only when it actually removes p from at least
-     * one structure, so it's safe to call after a race where pump
-     * already unlinked us (no-op + no double-decrement). */
-    if (park.slot != NULL || park.prev_by_fd != NULL ||
-        park.next_by_fd != NULL ||
-        (park.fd >= 0 && (size_t)park.fd < pygo_parked_by_fd_cap &&
-         pygo_parked_by_fd[park.fd] == &park)) {
+     * parked lists.  Defensive unlink covers the case where pump
+     * routed the wake via a path that bypassed pygo_parker_unlink. */
+    if (park->slot != NULL || park->prev_by_fd != NULL ||
+        park->next_by_fd != NULL ||
+        (park->fd >= 0 && (size_t)park->fd < pygo_parked_by_fd_cap &&
+         pygo_parked_by_fd[park->fd] == park)) {
 #ifdef PYGO_PARKER_DEBUG
         fprintf(stderr,
                 "[pygo] wait_fd resumed with parker still linked: "
-                "parker=%p fd=%d g=%p slot=%p next=%p nbf=%p pbf=%p "
+                "parker=%p gen=%u fd=%d g=%p slot=%p next=%p nbf=%p pbf=%p "
                 "bucket=%p\n",
-                (void *)&park, park.fd, (void *)park.g,
-                (void *)park.slot, (void *)park.next,
-                (void *)park.next_by_fd, (void *)park.prev_by_fd,
-                (park.fd >= 0 && (size_t)park.fd < pygo_parked_by_fd_cap)
-                    ? (void *)pygo_parked_by_fd[park.fd] : NULL);
+                (void *)park, park->gen, park->fd, (void *)park->g,
+                (void *)park->slot, (void *)park->next,
+                (void *)park->next_by_fd, (void *)park->prev_by_fd,
+                (park->fd >= 0 && (size_t)park->fd < pygo_parked_by_fd_cap)
+                    ? (void *)pygo_parked_by_fd[park->fd] : NULL);
 #endif
         pygo_mutex_lock(&pygo_parked_lock);
-        pygo_parker_unlink(&park);
+        pygo_parker_unlink(park);
         pygo_mutex_unlock(&pygo_parked_lock);
     }
+    /* Clear g->netpoll_parker before release so completion's force-
+     * unlink cannot dereference a freelist entry. */
+    if (current_g != NULL && current_g->netpoll_parker == park) {
+        current_g->netpoll_parker = NULL;
+    }
+    pygo_parker_pool_release(park);
     return ready_mask;
 }
 
