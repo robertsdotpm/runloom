@@ -407,7 +407,11 @@ def _patched_recv(self, bufsize, flags=0):
     """Cooperative recv.  Routes to the C primitive when available
     (saves the BlockingIOError raise/catch on every EAGAIN plus the
     Python frame around _orig_recv), falls back to the old loop
-    otherwise."""
+    otherwise.  Outside a goroutine, falls through to the raw
+    blocking recv so non-goroutine threads (e.g. helper threads in
+    tests / fixtures) still work after monkey.patch()."""
+    if not _in_goroutine():
+        return _orig_recv(self, bufsize, flags)
     _make_nonblocking(self)
     if _tcp_recv_alloc is not None:
         return _tcp_recv_alloc(self.fileno(), bufsize, flags)
@@ -425,6 +429,8 @@ def _patched_recv_into(self, buffer, nbytes=0, flags=0):
     every call.  Callers that already own a buffer (high-throughput
     proxies, line readers, framing layers) save one heap allocation
     and one memcpy per recv -- typically 10-20 us / call at 4 KB."""
+    if not _in_goroutine():
+        return _orig_recv_into(self, buffer, nbytes, flags)
     _make_nonblocking(self)
     if _tcp_recv is not None:
         n = nbytes if nbytes else len(buffer)
@@ -439,6 +445,8 @@ def _patched_recv_into(self, buffer, nbytes=0, flags=0):
 
 
 def _patched_send(self, data, flags=0):
+    if not _in_goroutine():
+        return _orig_send(self, data, flags)
     _make_nonblocking(self)
     if _tcp_send_once is not None:
         return _tcp_send_once(self.fileno(), data, flags)
@@ -450,6 +458,8 @@ def _patched_send(self, data, flags=0):
 
 
 def _patched_sendall(self, data, flags=0):
+    if not _in_goroutine():
+        return _orig_sendall(self, data, flags)
     _make_nonblocking(self)
     if _tcp_send_all is not None:
         _tcp_send_all(self.fileno(), data, flags)
@@ -466,6 +476,8 @@ def _patched_sendall(self, data, flags=0):
 
 
 def _patched_accept(self):
+    if not _in_goroutine():
+        return _orig_accept(self)
     _make_nonblocking(self)
     while True:
         try:
@@ -475,6 +487,8 @@ def _patched_accept(self):
 
 
 def _patched_connect(self, address):
+    if not _in_goroutine():
+        return _orig_connect(self, address)
     _make_nonblocking(self)
     while True:
         try:
@@ -491,6 +505,8 @@ def _patched_connect(self, address):
 
 
 def _patched_recvfrom(self, bufsize, flags=0):
+    if not _in_goroutine():
+        return _orig_recvfrom(self, bufsize, flags)
     _make_nonblocking(self)
     while True:
         try:
@@ -500,6 +516,8 @@ def _patched_recvfrom(self, bufsize, flags=0):
 
 
 def _patched_sendto(self, data, *args):
+    if not _in_goroutine():
+        return _orig_sendto(self, data, *args)
     _make_nonblocking(self)
     while True:
         try:

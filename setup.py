@@ -163,6 +163,7 @@ def detect_sources():
     # because the whole file is wrapped in #if defined(PYGO_OS_WINDOWS).
     srcs.append(os.path.join(SRC_C, "netpoll_iocp.c"))
     srcs.append(os.path.join(SRC_C, "io_uring.c"))
+    srcs.append(os.path.join(SRC_C, "pygo_tcp.c"))
 
     # Arch-specific asm fast path.  POSIX only; Windows uses Fibers.
     # Other archs (riscv, ppc, ...) fall through to the ucontext POSIX

@@ -31,6 +31,7 @@ snap/load paths; not built today."
 #include "netpoll.h"
 #include "mn_sched.h"
 #include "chan.h"
+#include "pygo_tcp.h"
 
 /* ---- Per-coro Python object ---- */
 
@@ -1724,6 +1725,10 @@ PyMODINIT_FUNC PyInit_pygo_core(void)
     Py_INCREF(&PygoChanType);
     if (PyModule_AddObject(m, "Chan", (PyObject *)&PygoChanType) < 0) {
         Py_DECREF(&PygoChanType);
+        Py_DECREF(m);
+        return NULL;
+    }
+    if (pygo_tcpconn_register(m) < 0) {
         Py_DECREF(m);
         return NULL;
     }
