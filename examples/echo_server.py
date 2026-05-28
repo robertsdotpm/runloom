@@ -27,12 +27,14 @@ PORT = 9000
 
 def handle(conn, addr):
     print("conn from", addr)
+    buf = bytearray(4096)
+    view = memoryview(buf)
     try:
         while True:
-            data = conn.recv(4096)
-            if not data:
+            n = conn.recv_into(buf)
+            if not n:
                 break
-            conn.sendall(data)
+            conn.sendall(view[:n])
     finally:
         conn.close()
         print("closed", addr)

@@ -397,8 +397,20 @@ _orig_recvfrom = None
 _orig_sendto = None
 
 
+_tcp_recv_alloc = getattr(pygo_core, "tcp_recv_alloc", None)
+_tcp_recv       = getattr(pygo_core, "tcp_recv", None)
+_tcp_send_once  = getattr(pygo_core, "tcp_send_once", None)
+_tcp_send_all   = getattr(pygo_core, "tcp_send", None)
+
+
 def _patched_recv(self, bufsize, flags=0):
+    """Cooperative recv.  Routes to the C primitive when available
+    (saves the BlockingIOError raise/catch on every EAGAIN plus the
+    Python frame around _orig_recv), falls back to the old loop
+    otherwise."""
     _make_nonblocking(self)
+    if _tcp_recv_alloc is not None:
+        return _tcp_recv_alloc(self.fileno(), bufsize, flags)
     while True:
         try:
             return _orig_recv(self, bufsize, flags)
@@ -414,6 +426,9 @@ def _patched_recv_into(self, buffer, nbytes=0, flags=0):
     proxies, line readers, framing layers) save one heap allocation
     and one memcpy per recv -- typically 10-20 us / call at 4 KB."""
     _make_nonblocking(self)
+    if _tcp_recv is not None:
+        n = nbytes if nbytes else len(buffer)
+        return _tcp_recv(self.fileno(), buffer, n, flags)
     while True:
         try:
             return _orig_recv_into(self, buffer, nbytes, flags)
@@ -425,6 +440,8 @@ def _patched_recv_into(self, buffer, nbytes=0, flags=0):
 
 def _patched_send(self, data, flags=0):
     _make_nonblocking(self)
+    if _tcp_send_once is not None:
+        return _tcp_send_once(self.fileno(), data, flags)
     while True:
         try:
             return _orig_send(self, data, flags)
@@ -434,6 +451,9 @@ def _patched_send(self, data, flags=0):
 
 def _patched_sendall(self, data, flags=0):
     _make_nonblocking(self)
+    if _tcp_send_all is not None:
+        _tcp_send_all(self.fileno(), data, flags)
+        return None
     view = data if isinstance(data, memoryview) else memoryview(data)
     sent = 0
     while sent < len(view):
@@ -488,9 +508,39 @@ def _patched_sendto(self, data, *args):
             pygo_core.wait_fd(self.fileno(), WRITE)
 
 
+_orig_close   = None
+_orig_detach  = None
+_netpoll_unregister = getattr(pygo_core, "netpoll_unregister", None)
+
+
+def _patched_close(self):
+    """Clear the netpoll registration bit before closing so an fd
+    reuse re-registers cleanly under the ET register-once scheme."""
+    if _netpoll_unregister is not None:
+        try:
+            fd = self.fileno()
+            if fd >= 0:
+                _netpoll_unregister(fd)
+        except (OSError, ValueError):
+            pass
+    return _orig_close(self)
+
+
+def _patched_detach(self):
+    """Same bitmap clear as close: the fd is leaving our control."""
+    if _netpoll_unregister is not None:
+        try:
+            fd = self.fileno()
+            if fd >= 0:
+                _netpoll_unregister(fd)
+        except (OSError, ValueError):
+            pass
+    return _orig_detach(self)
+
+
 def _patch_socket():
     global _orig_recv, _orig_recv_into, _orig_send, _orig_sendall, _orig_accept
-    global _orig_connect, _orig_recvfrom, _orig_sendto
+    global _orig_connect, _orig_recvfrom, _orig_sendto, _orig_close, _orig_detach
     s = socket.socket
     _orig_recv      = s.recv
     _orig_recv_into = s.recv_into
@@ -500,6 +550,8 @@ def _patch_socket():
     _orig_connect   = s.connect
     _orig_recvfrom  = s.recvfrom
     _orig_sendto    = s.sendto
+    _orig_close     = s.close
+    _orig_detach    = s.detach
     s.recv      = _patched_recv
     s.recv_into = _patched_recv_into
     s.send      = _patched_send
@@ -508,6 +560,8 @@ def _patch_socket():
     s.connect   = _patched_connect
     s.recvfrom  = _patched_recvfrom
     s.sendto    = _patched_sendto
+    s.close     = _patched_close
+    s.detach    = _patched_detach
 
 
 def _unpatch_socket():
@@ -520,6 +574,8 @@ def _unpatch_socket():
     s.connect   = _orig_connect
     s.recvfrom  = _orig_recvfrom
     s.sendto    = _orig_sendto
+    s.close     = _orig_close
+    s.detach    = _orig_detach
 
 
 # ============================================================
@@ -599,17 +655,32 @@ def _patched_os_write(fd, data):
     return _blocking_call(_orig_os_write, fd, data)
 
 
+_orig_os_close = None
+
+
+def _patched_os_close(fd):
+    """Clear the netpoll registration bit for fd before closing so
+    that fd reuse re-registers cleanly under the ET register-once
+    scheme.  Pipes, sockets-via-fd, ttys all funnel through here."""
+    if _netpoll_unregister is not None and fd >= 0:
+        _netpoll_unregister(fd)
+    return _orig_os_close(fd)
+
+
 def _patch_os():
-    global _orig_os_read, _orig_os_write
+    global _orig_os_read, _orig_os_write, _orig_os_close
     _orig_os_read  = os.read
     _orig_os_write = os.write
+    _orig_os_close = os.close
     os.read  = _patched_os_read
     os.write = _patched_os_write
+    os.close = _patched_os_close
 
 
 def _unpatch_os():
     os.read  = _orig_os_read
     os.write = _orig_os_write
+    os.close = _orig_os_close
 
 
 # ============================================================

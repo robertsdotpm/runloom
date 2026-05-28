@@ -44,6 +44,13 @@ int pygo_netpoll_parked_count(void);
  * tickers don't block the next pygo_core.run(). */
 int pygo_netpoll_drain_parked(void);
 
+/* Clear the "fd is registered in netpoll" cache bit.  Call from the
+ * socket-close hook so a future fd reuse re-registers cleanly.  No
+ * syscall; the kernel auto-clears its epoll/kqueue entry when the
+ * last fd reference closes, so this just keeps our bitmap honest.
+ * Safe to call on unknown fds (no-op). */
+void pygo_netpoll_unregister(int fd);
+
 /* One-time init / cleanup. */
 int pygo_netpoll_init(void);
 void pygo_netpoll_fini(void);

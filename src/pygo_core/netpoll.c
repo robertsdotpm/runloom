@@ -81,6 +81,53 @@ static int pygo_netpoll_inited = 0;
 static pygo_mutex_t pygo_parked_lock;
 static volatile long pygo_parked_lock_inited = 0;
 
+/* ---- per-fd registration cache ----
+ * One bit per fd; set when we've already issued EPOLL_CTL_ADD (or
+ * the kqueue equivalent) for this fd as edge-triggered for both
+ * READ and WRITE.  Subsequent wait_fd calls then skip the
+ * epoll_ctl syscall entirely -- the kernel keeps reporting edges
+ * until the fd is closed (which auto-clears the registration).
+ *
+ * Protected by pygo_parked_lock for write; reads under the lock
+ * to keep the check + ADD atomic against concurrent registers
+ * for the same fd. */
+static unsigned char *pygo_fd_registered_bm = NULL;
+static size_t         pygo_fd_registered_cap_bytes = 0;
+
+static int pygo_fd_bit_get(int fd)
+{
+    if (fd < 0) return 0;
+    size_t byte = (size_t)fd >> 3;
+    if (byte >= pygo_fd_registered_cap_bytes) return 0;
+    return (pygo_fd_registered_bm[byte] >> (fd & 7)) & 1;
+}
+
+static int pygo_fd_bit_set(int fd)
+{
+    if (fd < 0) return -1;
+    size_t byte = (size_t)fd >> 3;
+    if (byte >= pygo_fd_registered_cap_bytes) {
+        size_t newcap = pygo_fd_registered_cap_bytes ? pygo_fd_registered_cap_bytes * 2 : 256;
+        while (newcap <= byte) newcap *= 2;
+        unsigned char *nb = (unsigned char *)realloc(pygo_fd_registered_bm, newcap);
+        if (nb == NULL) return -1;
+        memset(nb + pygo_fd_registered_cap_bytes, 0,
+               newcap - pygo_fd_registered_cap_bytes);
+        pygo_fd_registered_bm        = nb;
+        pygo_fd_registered_cap_bytes = newcap;
+    }
+    pygo_fd_registered_bm[byte] |= (unsigned char)(1u << (fd & 7));
+    return 0;
+}
+
+static void pygo_fd_bit_clear(int fd)
+{
+    if (fd < 0) return;
+    size_t byte = (size_t)fd >> 3;
+    if (byte >= pygo_fd_registered_cap_bytes) return;
+    pygo_fd_registered_bm[byte] &= (unsigned char)~(1u << (fd & 7));
+}
+
 #if defined(PYGO_HAVE_EPOLL)
 static int pygo_epoll_fd = -1;
 #elif defined(PYGO_HAVE_KQUEUE)
@@ -220,35 +267,98 @@ static long long monotonic_ns(void)
     return pygo_monotonic_ns();
 }
 
-/* ---- registration ---- */
+/* ---- registration ----
+ * Edge-triggered, register-once.  On epoll/kqueue the fd is ADDed
+ * exactly once with both READ and WRITE arms in ET mode.  All
+ * subsequent wait_fd calls just consult the bitmap and skip the
+ * epoll_ctl/kevent syscall -- the kernel keeps reporting edges
+ * until the fd closes.
+ *
+ * Safety: the caller MUST try the operation first and only call
+ * wait_fd after EAGAIN.  That serialises the "kernel observed not-
+ * ready" state with our parking, so the next not-ready->ready
+ * transition is guaranteed to deliver an edge.  This is the same
+ * pattern Go's netpoll uses.
+ *
+ * Stale-fd recovery: socket close auto-clears the kernel
+ * registration when the last fd reference goes away.  monkey.py's
+ * close hook calls pygo_netpoll_unregister so the bitmap stays in
+ * sync with the kernel for fd reuse. */
 static int pygo_netpoll_register(int fd, int events)
 {
+    (void)events;   /* both arms always registered; events filtered at wake */
 #if defined(PYGO_HAVE_EPOLL)
-    struct epoll_event ev;
-    ev.events = 0;
-    if (events & PYGO_NETPOLL_READ)  ev.events |= EPOLLIN;
-    if (events & PYGO_NETPOLL_WRITE) ev.events |= EPOLLOUT;
-    ev.events |= EPOLLONESHOT;
-    ev.data.fd = fd;
-    if (epoll_ctl(pygo_epoll_fd, EPOLL_CTL_ADD, fd, &ev) == 0) return 0;
-    /* If already registered, modify. */
-    if (errno == EEXIST) {
-        return epoll_ctl(pygo_epoll_fd, EPOLL_CTL_MOD, fd, &ev);
+    int need_register;
+
+    pygo_mutex_lock(&pygo_parked_lock);
+    if (pygo_fd_bit_get(fd)) {
+        pygo_mutex_unlock(&pygo_parked_lock);
+        return 0;
     }
+    if (pygo_fd_bit_set(fd) != 0) {
+        pygo_mutex_unlock(&pygo_parked_lock);
+        errno = ENOMEM;
+        return -1;
+    }
+    need_register = 1;
+    pygo_mutex_unlock(&pygo_parked_lock);
+    (void)need_register;
+
+    {
+        struct epoll_event ev;
+        ev.events = EPOLLIN | EPOLLOUT | EPOLLET | EPOLLRDHUP;
+        ev.data.fd = fd;
+        if (epoll_ctl(pygo_epoll_fd, EPOLL_CTL_ADD, fd, &ev) == 0) return 0;
+        /* Stale registration from before the bit was cleared (e.g.
+         * dup'd fd, or close-hook missed).  MOD into ET both-arms. */
+        if (errno == EEXIST) {
+            if (epoll_ctl(pygo_epoll_fd, EPOLL_CTL_MOD, fd, &ev) == 0) return 0;
+        }
+    }
+    /* Failed: drop the bit so a future caller can retry. */
+    pygo_mutex_lock(&pygo_parked_lock);
+    pygo_fd_bit_clear(fd);
+    pygo_mutex_unlock(&pygo_parked_lock);
     return -1;
 #elif defined(PYGO_HAVE_KQUEUE)
-    struct kevent kev[2];
-    int n = 0;
-    if (events & PYGO_NETPOLL_READ) {
-        EV_SET(&kev[n++], fd, EVFILT_READ,  EV_ADD | EV_ONESHOT, 0, 0, NULL);
+    pygo_mutex_lock(&pygo_parked_lock);
+    if (pygo_fd_bit_get(fd)) {
+        pygo_mutex_unlock(&pygo_parked_lock);
+        return 0;
     }
-    if (events & PYGO_NETPOLL_WRITE) {
-        EV_SET(&kev[n++], fd, EVFILT_WRITE, EV_ADD | EV_ONESHOT, 0, 0, NULL);
+    if (pygo_fd_bit_set(fd) != 0) {
+        pygo_mutex_unlock(&pygo_parked_lock);
+        errno = ENOMEM;
+        return -1;
     }
-    return kevent(pygo_kqueue_fd, kev, n, NULL, 0, NULL);
+    pygo_mutex_unlock(&pygo_parked_lock);
+    {
+        struct kevent kev[2];
+        EV_SET(&kev[0], fd, EVFILT_READ,  EV_ADD | EV_CLEAR, 0, 0, NULL);
+        EV_SET(&kev[1], fd, EVFILT_WRITE, EV_ADD | EV_CLEAR, 0, 0, NULL);
+        if (kevent(pygo_kqueue_fd, kev, 2, NULL, 0, NULL) == 0) return 0;
+    }
+    pygo_mutex_lock(&pygo_parked_lock);
+    pygo_fd_bit_clear(fd);
+    pygo_mutex_unlock(&pygo_parked_lock);
+    return -1;
 #else
-    (void)fd; (void)events;
+    (void)fd;
     return 0;  /* select doesn't need pre-registration */
+#endif
+}
+
+void pygo_netpoll_unregister(int fd)
+{
+#if defined(PYGO_HAVE_EPOLL) || defined(PYGO_HAVE_KQUEUE)
+    pygo_mutex_lock(&pygo_parked_lock);
+    pygo_fd_bit_clear(fd);
+    pygo_mutex_unlock(&pygo_parked_lock);
+    /* No kernel syscall: epoll/kqueue auto-remove the fd when the
+     * last reference closes.  Calling EPOLL_CTL_DEL after close
+     * would race with fd reuse anyway. */
+#else
+    (void)fd;
 #endif
 }
 

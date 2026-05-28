@@ -336,10 +336,11 @@ static PyObject *m_tcp_recv(PyObject *self, PyObject *args)
     int fd;
     Py_buffer buf;
     Py_ssize_t n_bytes;
+    int flags = 0;
     Py_ssize_t got = 0;
     (void)self;
 
-    if (!PyArg_ParseTuple(args, "iw*n", &fd, &buf, &n_bytes)) return NULL;
+    if (!PyArg_ParseTuple(args, "iw*n|i", &fd, &buf, &n_bytes, &flags)) return NULL;
     if (n_bytes > buf.len) n_bytes = buf.len;
     if (n_bytes <= 0) {
         PyBuffer_Release(&buf);
@@ -348,7 +349,7 @@ static PyObject *m_tcp_recv(PyObject *self, PyObject *args)
 
     while (1) {
 #if defined(PYGO_OS_WINDOWS)
-        int r = recv((SOCKET)fd, (char *)buf.buf, (int)n_bytes, 0);
+        int r = recv((SOCKET)fd, (char *)buf.buf, (int)n_bytes, flags);
         if (r > 0) { got = r; break; }
         if (r == 0) { got = 0; break; }         /* orderly shutdown */
         {
@@ -360,7 +361,7 @@ static PyObject *m_tcp_recv(PyObject *self, PyObject *args)
             }
         }
 #else
-        ssize_t r = recv(fd, (char *)buf.buf, (size_t)n_bytes, 0);
+        ssize_t r = recv(fd, (char *)buf.buf, (size_t)n_bytes, flags);
         if (r > 0) { got = (Py_ssize_t)r; break; }
         if (r == 0) { got = 0; break; }
         if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
@@ -379,21 +380,84 @@ static PyObject *m_tcp_recv(PyObject *self, PyObject *args)
     return PyLong_FromSsize_t(got);
 }
 
+/* Native C TCP recv that allocates and returns a bytes object.
+ * Equivalent to sock.recv(n[, flags]) with cooperative blocking,
+ * but bypasses Python frame dispatch and exception-on-EAGAIN cost
+ * of the monkey-patched socket.recv path.
+ *
+ * Signature: pygo_core.tcp_recv_alloc(fd, n, flags=0) -> bytes
+ *   Returns a bytes object of length <= n; b"" on orderly shutdown.
+ */
+static PyObject *m_tcp_recv_alloc(PyObject *self, PyObject *args)
+{
+    int fd;
+    Py_ssize_t n_bytes;
+    int flags = 0;
+    Py_ssize_t got = 0;
+    PyObject *result;
+    char *out;
+    (void)self;
+
+    if (!PyArg_ParseTuple(args, "in|i", &fd, &n_bytes, &flags)) return NULL;
+    if (n_bytes < 0) {
+        PyErr_SetString(PyExc_ValueError, "negative bufsize");
+        return NULL;
+    }
+    if (n_bytes == 0) {
+        return PyBytes_FromStringAndSize(NULL, 0);
+    }
+    result = PyBytes_FromStringAndSize(NULL, n_bytes);
+    if (result == NULL) return NULL;
+    out = PyBytes_AS_STRING(result);
+
+    while (1) {
+#if defined(PYGO_OS_WINDOWS)
+        int r = recv((SOCKET)fd, out, (int)n_bytes, flags);
+        if (r >= 0) { got = r; break; }
+        {
+            int err = WSAGetLastError();
+            if (err != WSAEWOULDBLOCK) {
+                Py_DECREF(result);
+                PyErr_SetFromWindowsErr(err);
+                return NULL;
+            }
+        }
+#else
+        ssize_t r = recv(fd, out, (size_t)n_bytes, flags);
+        if (r >= 0) { got = (Py_ssize_t)r; break; }
+        if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
+            Py_DECREF(result);
+            return PyErr_SetFromErrno(PyExc_OSError);
+        }
+#endif
+        if (pygo_netpoll_wait_fd(fd, /*PYGO_NETPOLL_READ*/ 1, -1LL) < 0) {
+            Py_DECREF(result);
+            return PyErr_SetFromErrno(PyExc_OSError);
+        }
+    }
+
+    if (got < n_bytes) {
+        if (_PyBytes_Resize(&result, got) < 0) return NULL;
+    }
+    return result;
+}
+
 /* Native C TCP send.  Equivalent to sock.sendall(buf) with
  * cooperative blocking.  Loops until all bytes sent or error. */
 static PyObject *m_tcp_send(PyObject *self, PyObject *args)
 {
     int fd;
     Py_buffer buf;
+    int flags = 0;
     Py_ssize_t sent = 0;
     (void)self;
 
-    if (!PyArg_ParseTuple(args, "iy*", &fd, &buf)) return NULL;
+    if (!PyArg_ParseTuple(args, "iy*|i", &fd, &buf, &flags)) return NULL;
 
     while (sent < buf.len) {
 #if defined(PYGO_OS_WINDOWS)
         int r = send((SOCKET)fd, (const char *)buf.buf + sent,
-                     (int)(buf.len - sent), 0);
+                     (int)(buf.len - sent), flags);
         if (r >= 0) { sent += r; continue; }
         {
             int err = WSAGetLastError();
@@ -405,8 +469,55 @@ static PyObject *m_tcp_send(PyObject *self, PyObject *args)
         }
 #else
         ssize_t r = send(fd, (const char *)buf.buf + sent,
-                         (size_t)(buf.len - sent), 0);
+                         (size_t)(buf.len - sent), flags);
         if (r >= 0) { sent += r; continue; }
+        if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
+            PyBuffer_Release(&buf);
+            return PyErr_SetFromErrno(PyExc_OSError);
+        }
+#endif
+        if (pygo_netpoll_wait_fd(fd, /*PYGO_NETPOLL_WRITE*/ 2, -1LL) < 0) {
+            PyBuffer_Release(&buf);
+            return PyErr_SetFromErrno(PyExc_OSError);
+        }
+    }
+
+    PyBuffer_Release(&buf);
+    return PyLong_FromSsize_t(sent);
+}
+
+/* Single send.  Equivalent to sock.send(buf, flags) with cooperative
+ * blocking on EAGAIN.  Returns bytes sent in one syscall; caller may
+ * call again with the unsent tail.
+ *
+ * Signature: pygo_core.tcp_send_once(fd, bytes_like, flags=0) -> int
+ */
+static PyObject *m_tcp_send_once(PyObject *self, PyObject *args)
+{
+    int fd;
+    Py_buffer buf;
+    int flags = 0;
+    Py_ssize_t sent = 0;
+    (void)self;
+
+    if (!PyArg_ParseTuple(args, "iy*|i", &fd, &buf, &flags)) return NULL;
+
+    while (1) {
+#if defined(PYGO_OS_WINDOWS)
+        int r = send((SOCKET)fd, (const char *)buf.buf,
+                     (int)buf.len, flags);
+        if (r >= 0) { sent = r; break; }
+        {
+            int err = WSAGetLastError();
+            if (err != WSAEWOULDBLOCK) {
+                PyBuffer_Release(&buf);
+                PyErr_SetFromWindowsErr(err);
+                return NULL;
+            }
+        }
+#else
+        ssize_t r = send(fd, (const char *)buf.buf, (size_t)buf.len, flags);
+        if (r >= 0) { sent = (Py_ssize_t)r; break; }
         if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
             PyBuffer_Release(&buf);
             return PyErr_SetFromErrno(PyExc_OSError);
@@ -1162,6 +1273,16 @@ static PyObject *m_wait_fd(PyObject *self, PyObject *args)
     return PyLong_FromLong((long)result);
 }
 
+static PyObject *m_netpoll_unregister(PyObject *self, PyObject *arg)
+{
+    long fd;
+    (void)self;
+    fd = PyLong_AsLong(arg);
+    if (fd == -1 && PyErr_Occurred()) return NULL;
+    pygo_netpoll_unregister((int)fd);
+    Py_RETURN_NONE;
+}
+
 static PyObject *m_netpoll_backend(PyObject *self, PyObject *unused)
 {
     (void)self; (void)unused;
@@ -1449,12 +1570,19 @@ static PyMethodDef module_methods[] = {
      "first-spawn mmap latency for servers that know they're about "
      "to spawn N goroutines.  Returns the number actually allocated."},
     {"tcp_recv", m_tcp_recv, METH_VARARGS,
-     "tcp_recv(fd, writable_buffer, n) -> bytes_received.  C-level "
-     "recv with cooperative blocking; bypasses socket.recv_into's "
-     "Python frame dispatch.  Buffer is filled in place."},
+     "tcp_recv(fd, writable_buffer, n, flags=0) -> bytes_received.  "
+     "C-level recv into a pre-allocated buffer with cooperative "
+     "blocking; bypasses socket.recv_into's Python frame dispatch "
+     "AND the BlockingIOError-on-EAGAIN raise/catch cost."},
+    {"tcp_recv_alloc", m_tcp_recv_alloc, METH_VARARGS,
+     "tcp_recv_alloc(fd, n, flags=0) -> bytes.  Like socket.recv but "
+     "loops in C on EAGAIN via netpoll; no BlockingIOError raise/catch."},
     {"tcp_send", m_tcp_send, METH_VARARGS,
-     "tcp_send(fd, bytes_like) -> bytes_sent.  C-level sendall with "
-     "cooperative blocking; loops until all bytes sent or error."},
+     "tcp_send(fd, bytes_like, flags=0) -> bytes_sent.  C-level "
+     "sendall with cooperative blocking; loops until all bytes sent."},
+    {"tcp_send_once", m_tcp_send_once, METH_VARARGS,
+     "tcp_send_once(fd, bytes_like, flags=0) -> int.  Single send "
+     "syscall (may return short); parks on EAGAIN until writable."},
     {"fd_read", m_fd_read, METH_VARARGS,
      "fd_read(fd, writable_buffer, n) -> bytes_read.  POSIX read(2) "
      "with cooperative blocking via netpoll.  Works on pipes, ttys, "
@@ -1518,6 +1646,10 @@ static PyMethodDef module_methods[] = {
      "until fd is ready.  events is a bitmask: 1=read, 2=write."},
     {"netpoll_backend", m_netpoll_backend, METH_NOARGS,
      "Return active netpoll backend name (\"epoll\", \"kqueue\", \"select\")."},
+    {"netpoll_unregister", m_netpoll_unregister, METH_O,
+     "netpoll_unregister(fd): clear the netpoll registration cache "
+     "bit for fd.  Call from socket close so fd reuse re-registers "
+     "cleanly under the edge-triggered register-once scheme."},
     {"stats",       m_stats,       METH_NOARGS,
      "Return a dict of scheduler counters: ready, sleeping, "
      "netpoll_parked, completed, running, plus backend names.  "
