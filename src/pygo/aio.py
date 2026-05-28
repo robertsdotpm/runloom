@@ -56,6 +56,27 @@ import time as _time
 import pygo_core
 
 
+def _close_sock(sock):
+    """Close a socket and tell the netpoll backend to forget about it.
+
+    Without the netpoll_unregister, the per-fd "already registered"
+    bitmap stays sticky for the closed fd.  When the OS later reuses
+    that fd number for a new socket, netpoll skips re-registering and
+    no edge ever fires -- the new socket's wait_fd parks forever.
+    Manifests as test-run hangs after fast socket churn. """
+    if sock is None:
+        return
+    try:
+        fd = sock.fileno()
+    except (OSError, ValueError):
+        fd = -1
+    if fd >= 0:
+        try: pygo_core.netpoll_unregister(fd)
+        except (AttributeError, OSError): pass
+    try: sock.close()
+    except OSError: pass
+
+
 # Python's per-thread C recursion counter is shared across all
 # goroutines on the OS thread.  Phase B saves/restores it per-g, but
 # the absolute limit is still global -- spawning thousands of tasks
@@ -628,8 +649,7 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
                     break
                 except OSError as e:
                     last_err = e
-                    try: sock.close()
-                    except OSError: pass
+                    _close_sock(sock)
                     sock = None
             if sock is None:
                 raise last_err or OSError("could not bind")
@@ -1031,10 +1051,7 @@ class StreamWriter(object):
             self._sock.shutdown(_socket.SHUT_RDWR)
         except OSError:
             pass
-        try:
-            self._sock.close()
-        except OSError:
-            pass
+        _close_sock(self._sock)
 
     def is_closing(self):
         return self._closed
@@ -1181,10 +1198,7 @@ class _Server(object):
             self._sock.shutdown(_socket.SHUT_RDWR)
         except OSError:
             pass
-        try:
-            self._sock.close()
-        except OSError:
-            pass
+        _close_sock(self._sock)
 
     async def wait_closed(self):
         # Best-effort; we don't currently track outstanding client tasks.
@@ -1317,10 +1331,7 @@ class _StreamTransport(object):
             self._sock.shutdown(_socket.SHUT_RDWR)
         except OSError:
             pass
-        try:
-            self._sock.close()
-        except OSError:
-            pass
+        _close_sock(self._sock)
         try:
             self._protocol.connection_lost(None)
         except Exception as e:
@@ -1389,8 +1400,7 @@ class _ProtocolServer(object):
         self._closed = True
         try: self._sock.shutdown(_socket.SHUT_RDWR)
         except OSError: pass
-        try: self._sock.close()
-        except OSError: pass
+        _close_sock(self._sock)
 
     async def wait_closed(self):
         await asyncio.sleep(0)
@@ -1474,10 +1484,7 @@ class DatagramTransport(object):
             return
         self._closed = True
         self._stopping = True
-        try:
-            self._sock.close()
-        except OSError:
-            pass
+        _close_sock(self._sock)
         try:
             self._protocol.connection_lost(None)
         except Exception as e:
@@ -1578,8 +1585,7 @@ async def start_server(client_connected_cb, host=None, port=None, *,
                 break
             except OSError as e:
                 last_err = e
-                try: sock.close()
-                except OSError: pass
+                _close_sock(sock)
                 sock = None
         if sock is None:
             raise last_err or OSError("could not bind")

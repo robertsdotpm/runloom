@@ -121,6 +121,12 @@ class Socket(object):
     def bind(self, addr):   return self._s.bind(addr)
     def listen(self, n=128): return self._s.listen(n)
     def close(self):
+        fd = -1
+        try: fd = self._s.fileno()
+        except (OSError, ValueError): pass
+        if fd >= 0:
+            try: pygo_core.netpoll_unregister(fd)
+            except (AttributeError, OSError): pass
         try: self._s.close()
         except OSError: pass
     def shutdown(self, how):
