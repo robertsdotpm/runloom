@@ -30,6 +30,7 @@
 #include "pygo_sched.h"
 #include "mn_sched.h"
 #include "netpoll.h"
+#include "io_uring.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -1010,7 +1011,8 @@ Py_ssize_t pygo_sched_drain(pygo_sched_t *s)
 
     while (!s->stopping && (!pygo_sched_ready_empty(s) ||
                             s->sleep_size > 0 ||
-                            pygo_netpoll_parked_count() > 0)) {
+                            pygo_netpoll_parked_count() > 0 ||
+                            pygo_iouring_inflight() > 0)) {
         double now = pygo_sched_monotonic_seconds();
         /* Wake up any sleepers whose time has come. */
         while (s->sleep_size > 0 && pygo_sleep_peek(s)->wake_at <= now) {
@@ -1022,7 +1024,8 @@ Py_ssize_t pygo_sched_drain(pygo_sched_t *s)
          * pygo_sched_wake which moves ready I/O goroutines back to
          * the ready queue. */
         if (pygo_sched_ready_empty(s) &&
-            (pygo_netpoll_parked_count() > 0 || s->sleep_size > 0)) {
+            (pygo_netpoll_parked_count() > 0 || s->sleep_size > 0 ||
+             pygo_iouring_inflight() > 0)) {
             long long timeout_ns = -1;
             if (s->sleep_size > 0) {
                 double gap = pygo_sleep_peek(s)->wake_at - now;
@@ -1030,7 +1033,11 @@ Py_ssize_t pygo_sched_drain(pygo_sched_t *s)
                 if (gap > 60.0) gap = 60.0;
                 timeout_ns = (long long)(gap * 1e9);
             }
-            if (pygo_netpoll_parked_count() > 0) {
+            /* iouring goroutines wake when the pump observes a CQE on
+             * the registered eventfd, so the pump call covers both
+             * netpoll parkers and iouring waiters in one syscall. */
+            if (pygo_netpoll_parked_count() > 0 ||
+                pygo_iouring_inflight() > 0) {
                 pygo_netpoll_pump(timeout_ns);
             } else if (timeout_ns > 0) {
                 /* No fds parked, just a sleep heap timer.  Cap at 50 ms

@@ -30,6 +30,7 @@
 #include "coro.h"
 #include "pygo_sched.h"
 #include "mn_sched.h"
+#include "io_uring.h"
 
 #include <errno.h>
 #include <stdlib.h>
@@ -130,6 +131,10 @@ static void pygo_fd_bit_clear(int fd)
 
 #if defined(PYGO_HAVE_EPOLL)
 static int pygo_epoll_fd = -1;
+/* Eventfd registered by io_uring.c; events on this fd are dispatched
+ * to pygo_iouring_drain() instead of the normal parked-list walk.
+ * -1 = none registered. */
+static int pygo_iouring_eventfd_in_epoll = -1;
 #elif defined(PYGO_HAVE_KQUEUE)
 static int pygo_kqueue_fd = -1;
 #elif defined(PYGO_OS_WINDOWS)
@@ -367,6 +372,29 @@ int pygo_netpoll_parked_count(void)
     return __atomic_load_n(&pygo_parked_total, __ATOMIC_ACQUIRE);
 }
 
+int pygo_netpoll_add_iouring_eventfd(int fd)
+{
+#if defined(PYGO_HAVE_EPOLL)
+    struct epoll_event ev;
+    if (fd < 0) return -1;
+    if (pygo_netpoll_init() != 0) return -1;
+    /* Idempotent: if the same fd is already registered, skip the
+     * epoll_ctl call.  io_uring.c only ever creates one eventfd per
+     * process, so this matters only if init runs twice. */
+    if (pygo_iouring_eventfd_in_epoll == fd) return 0;
+    ev.events = EPOLLIN | EPOLLET;
+    ev.data.fd = fd;
+    if (epoll_ctl(pygo_epoll_fd, EPOLL_CTL_ADD, fd, &ev) < 0) {
+        if (errno != EEXIST) return -1;
+    }
+    pygo_iouring_eventfd_in_epoll = fd;
+    return 0;
+#else
+    (void)fd;
+    return 0;     /* iouring is Linux-only; non-epoll backends never hit this */
+#endif
+}
+
 /* Forcibly wake every parked goroutine with ready_mask=-1 (cancelled).
  * Each waiter's pygo_netpoll_wait_fd call returns -1; callers (server
  * accept loops, etc.) see that and exit their loops.  Returns count
@@ -507,6 +535,17 @@ int pygo_netpoll_pump(long long timeout_ns)
                 int fd = evs[i].data.fd;
                 int mask = 0;
                 pygo_parked_t **pp;
+                /* io_uring eventfd: drain its counter and walk the CQ
+                 * ring to wake parked goroutines via their per-op
+                 * record.  Not a normal fd-park entry; skip the
+                 * parked-list walk. */
+                if (pygo_iouring_eventfd_in_epoll >= 0 &&
+                    fd == pygo_iouring_eventfd_in_epoll) {
+                    pygo_mutex_unlock(&pygo_parked_lock);
+                    pygo_iouring_drain();
+                    pygo_mutex_lock(&pygo_parked_lock);
+                    continue;
+                }
                 if (evs[i].events & EPOLLIN)  mask |= PYGO_NETPOLL_READ;
                 if (evs[i].events & EPOLLOUT) mask |= PYGO_NETPOLL_WRITE;
                 /* Find parked entry for this fd, mark ready. */

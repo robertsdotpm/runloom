@@ -58,4 +58,11 @@ void pygo_netpoll_fini(void);
 /* Backend name for diagnostics: "epoll" / "kqueue" / "select". */
 const char *pygo_netpoll_backend(void);
 
+/* Register an external eventfd so the pump treats EPOLLIN on that fd
+ * as a "drain io_uring CQEs" signal.  Only meaningful on the epoll
+ * backend (Linux); a no-op elsewhere.  Used by io_uring.c to hook
+ * its completion eventfd into the global pump.  Caller retains
+ * ownership of the fd. */
+int pygo_netpoll_add_iouring_eventfd(int fd);
+
 #endif /* PYGO_NETPOLL_H */

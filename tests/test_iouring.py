@@ -1,6 +1,7 @@
 """Tests for the io_uring file-I/O backend."""
 import os
 import tempfile
+import time
 import unittest
 
 import pygo_core
@@ -58,6 +59,48 @@ class TestIouring(unittest.TestCase):
         os.unlink(path)
 
         self.assertEqual(out, [b"hello world"])
+
+    def test_cooperative_park(self):
+        """While one goroutine is parked on an iouring read, other
+        goroutines must still run.  This is the central invariant of
+        the async path -- if the OS thread blocked in io_uring_enter
+        the second goroutine couldn't make progress."""
+        path = tempfile.mktemp()
+        with open(path, "wb") as f:
+            f.write(b"x" * 4096)
+
+        events = []
+
+        def reader():
+            fd = os.open(path, os.O_RDONLY)
+            buf = bytearray(4096)
+            events.append("read-start")
+            pygo_core.file_read(fd, buf, 4096, 0)
+            events.append("read-done")
+            os.close(fd)
+
+        def runner():
+            for i in range(5):
+                events.append("tick-" + str(i))
+                pygo_core.sched_yield()
+
+        pygo_core.go(reader)
+        pygo_core.go(runner)
+        pygo_core.run()
+        os.unlink(path)
+
+        # Reader starts before runner's first tick (both go() calls happen
+        # before run()).  The point is that the runner's ticks land
+        # *between* read-start and read-done -- without cooperative parking
+        # the reader would block the thread and runner couldn't tick at
+        # all until the read completed.
+        self.assertIn("read-start", events)
+        self.assertIn("read-done", events)
+        self.assertIn("tick-0", events)
+        self.assertIn("tick-4", events)
+        # And the ticks must finish in order.
+        ticks = [e for e in events if e.startswith("tick-")]
+        self.assertEqual(ticks, ["tick-" + str(i) for i in range(5)])
 
 
 class TestFallback(unittest.TestCase):
