@@ -175,162 +175,184 @@ static void pygo_parker_pool_release(pygo_parked_t *p)
 }
 
 
-/* ---- deadline min-heap ----
+/* ---- parker pool ----
  *
- * Maintained alongside the global parker list, protected by the same
- * pygo_parked_lock.  Used by pump to:
- *   - O(1) peek the earliest deadline (instead of an O(N) walk of
- *     the global list)
- *   - O(log N + K) drain expired parkers (instead of O(N) per pump)
+ * Groups every piece of state that protects parker lifetime under one
+ * lock + one cache-line-locality region.  Phase A (this commit) carves
+ * the state out of file-static globals into a single struct instance;
+ * call sites take a `pygo_parker_pool_t *pool` parameter that they
+ * thread through to the helpers.  Phase B will allocate N+1 instances
+ * (one per M:N hub plus one for the single-thread sched) and route by
+ * the parker's owning hub, dropping the contended global lock from
+ * the hot path.  All call sites that pass &pygo_pool today are the
+ * routing seams to update then.
+ *
+ * Members:
+ *   lock / lock_inited        - exclusive mutex over the rest; lazy init
+ *   head                      - global parker linked list (slot-pointer
+ *                               trick for O(1) unlink); used by self-
+ *                               check, drain_parked
+ *   total                     - atomic count of linked parkers; read by
+ *                               the sched/hub idle loops to gate pump
+ *   by_fd / by_fd_cap         - sparse array fd -> head-of-bucket; the
+ *                               hot path for epoll-event dispatch
+ *   dh_arr / dh_size / dh_cap - min-heap of parkers keyed by deadline;
+ *                               peek/remove in O(log N)
+ *
+ * State that stays GLOBAL (not in the pool, so all pools share one
+ * copy under Phase B):
+ *   pygo_fd_registered_bm        - the kernel epoll/kqueue ADD bit per
+ *                                  fd; process-wide truth, not parker-
+ *                                  owned
+ *   pygo_fd_pending_wake         - cross-thread "edge fired before any
+ *                                  parker was visible" bitmap; needs
+ *                                  to be readable by any pump
+ *   pygo_epoll_fd / pygo_kqueue  - single shared backend handle
+ *   pygo_iouring_ring_*          - per-ring eventfd routing in the
+ *                                  shared epoll
+ *
+ * The registration bitmap currently uses pygo_parked_lock for its
+ * read-then-set sequence; Phase B will give it its own lock once
+ * pygo_parker_pool_t::lock is split per-hub. */
+typedef struct pygo_parker_pool {
+    pygo_mutex_t lock;
+    volatile long lock_inited;          /* 0 = not yet, 1 = in flight, 2 = ready */
+
+    pygo_parked_t *head;
+    int total;                          /* read with __atomic_load_n */
+
+    pygo_parked_t **by_fd;
+    size_t          by_fd_cap;
+
+    pygo_parked_t **dh_arr;
+    int             dh_size;
+    int             dh_cap;
+} pygo_parker_pool_t;
+
+static pygo_parker_pool_t pygo_pool;
+
+static int pygo_netpoll_inited = 0;
+
+/* ---- deadline min-heap ----
  *
  * Indexing: 0-based array; parent = (i-1)/2, children = 2i+1/2i+2.
  * Each parker stores its own index in p->heap_index for O(log N)
  * arbitrary remove via sift-up + sift-down.  Parkers with
- * deadline_ns < 0 are never in the heap; heap_index stays -1. */
-static pygo_parked_t **pygo_dh_arr  = NULL;
-static int             pygo_dh_size = 0;
-static int             pygo_dh_cap  = 0;
-
-static int pygo_dh_grow(void)
+ * deadline_ns < 0 are never in the heap; heap_index stays -1.
+ * Caller holds pool->lock for all ops below. */
+static int pygo_dh_grow(pygo_parker_pool_t *pool)
 {
-    int newcap = pygo_dh_cap ? pygo_dh_cap * 2 : 64;
+    int newcap = pool->dh_cap ? pool->dh_cap * 2 : 64;
     pygo_parked_t **na = (pygo_parked_t **)realloc(
-        pygo_dh_arr, (size_t)newcap * sizeof(*na));
+        pool->dh_arr, (size_t)newcap * sizeof(*na));
     if (na == NULL) return -1;
-    pygo_dh_arr = na;
-    pygo_dh_cap = newcap;
+    pool->dh_arr = na;
+    pool->dh_cap = newcap;
     return 0;
 }
 
-static void pygo_dh_swap(int i, int j)
+static void pygo_dh_swap(pygo_parker_pool_t *pool, int i, int j)
 {
-    pygo_parked_t *t = pygo_dh_arr[i];
-    pygo_dh_arr[i] = pygo_dh_arr[j];
-    pygo_dh_arr[j] = t;
-    pygo_dh_arr[i]->heap_index = i;
-    pygo_dh_arr[j]->heap_index = j;
+    pygo_parked_t *t = pool->dh_arr[i];
+    pool->dh_arr[i] = pool->dh_arr[j];
+    pool->dh_arr[j] = t;
+    pool->dh_arr[i]->heap_index = i;
+    pool->dh_arr[j]->heap_index = j;
 }
 
-static void pygo_dh_sift_up(int i)
+static void pygo_dh_sift_up(pygo_parker_pool_t *pool, int i)
 {
     while (i > 0) {
         int parent = (i - 1) / 2;
-        if (pygo_dh_arr[i]->deadline_ns >= pygo_dh_arr[parent]->deadline_ns)
+        if (pool->dh_arr[i]->deadline_ns >= pool->dh_arr[parent]->deadline_ns)
             break;
-        pygo_dh_swap(i, parent);
+        pygo_dh_swap(pool, i, parent);
         i = parent;
     }
 }
 
-static void pygo_dh_sift_down(int i)
+static void pygo_dh_sift_down(pygo_parker_pool_t *pool, int i)
 {
-    int n = pygo_dh_size;
+    int n = pool->dh_size;
     while (1) {
         int l = 2 * i + 1, r = 2 * i + 2, best = i;
-        if (l < n && pygo_dh_arr[l]->deadline_ns < pygo_dh_arr[best]->deadline_ns)
+        if (l < n && pool->dh_arr[l]->deadline_ns < pool->dh_arr[best]->deadline_ns)
             best = l;
-        if (r < n && pygo_dh_arr[r]->deadline_ns < pygo_dh_arr[best]->deadline_ns)
+        if (r < n && pool->dh_arr[r]->deadline_ns < pool->dh_arr[best]->deadline_ns)
             best = r;
         if (best == i) break;
-        pygo_dh_swap(i, best);
+        pygo_dh_swap(pool, i, best);
         i = best;
     }
 }
 
-/* Insert p into the heap.  Caller holds pygo_parked_lock.  No-op
- * if p has no deadline (deadline_ns < 0) or is already in the heap. */
-static void pygo_dh_insert(pygo_parked_t *p)
+/* Insert p into pool's heap.  No-op if p has no deadline
+ * (deadline_ns < 0) or is already in the heap. */
+static void pygo_dh_insert(pygo_parker_pool_t *pool, pygo_parked_t *p)
 {
     if (p->deadline_ns < 0 || p->heap_index >= 0) return;
-    if (pygo_dh_size >= pygo_dh_cap) {
-        if (pygo_dh_grow() != 0) return;   /* heap stays consistent; insert dropped */
+    if (pool->dh_size >= pool->dh_cap) {
+        if (pygo_dh_grow(pool) != 0) return;   /* heap stays consistent; insert dropped */
     }
-    pygo_dh_arr[pygo_dh_size] = p;
-    p->heap_index = pygo_dh_size;
-    pygo_dh_size++;
-    pygo_dh_sift_up(p->heap_index);
+    pool->dh_arr[pool->dh_size] = p;
+    p->heap_index = pool->dh_size;
+    pool->dh_size++;
+    pygo_dh_sift_up(pool, p->heap_index);
 }
 
-/* Remove p from the heap if present.  Caller holds the lock. */
-static void pygo_dh_remove(pygo_parked_t *p)
+/* Remove p from pool's heap if present. */
+static void pygo_dh_remove(pygo_parker_pool_t *pool, pygo_parked_t *p)
 {
     int i = p->heap_index;
-    if (i < 0 || i >= pygo_dh_size) return;
+    if (i < 0 || i >= pool->dh_size) return;
     p->heap_index = -1;
-    pygo_dh_size--;
-    if (i == pygo_dh_size) return;          /* removed the tail */
-    pygo_dh_arr[i] = pygo_dh_arr[pygo_dh_size];
-    pygo_dh_arr[i]->heap_index = i;
+    pool->dh_size--;
+    if (i == pool->dh_size) return;          /* removed the tail */
+    pool->dh_arr[i] = pool->dh_arr[pool->dh_size];
+    pool->dh_arr[i]->heap_index = i;
     /* Could be either direction; try both. */
-    pygo_dh_sift_up(i);
-    pygo_dh_sift_down(i);
+    pygo_dh_sift_up(pool, i);
+    pygo_dh_sift_down(pool, i);
 }
 
-/* Peek earliest deadline; returns -1 if heap empty.  Caller holds
- * the lock. */
-static long long pygo_dh_peek_deadline(void)
+/* Peek earliest deadline; returns -1 if heap empty. */
+static long long pygo_dh_peek_deadline(pygo_parker_pool_t *pool)
 {
-    if (pygo_dh_size == 0) return -1;
-    return pygo_dh_arr[0]->deadline_ns;
+    if (pool->dh_size == 0) return -1;
+    return pool->dh_arr[0]->deadline_ns;
 }
-
-/* Pop the earliest parker (lowest deadline).  Returns NULL if empty.
- * Caller holds the lock.  Currently unused; the timeout sweep peeks
- * arr[0] directly and lets pygo_parker_unlink remove via heap_index. */
-#if 0
-static pygo_parked_t *pygo_dh_pop(void)
-{
-    pygo_parked_t *p;
-    if (pygo_dh_size == 0) return NULL;
-    p = pygo_dh_arr[0];
-    pygo_dh_remove(p);
-    return p;
-}
-#endif
-
-/* Shared parked list + lock.  Under M:N multiple hubs concurrently
- * call wait_fd (park.add) and pump (park.remove); without the lock
- * the singly-linked list corrupts.  Single-thread sched takes the
- * lock too but no contention. */
-static pygo_parked_t *pygo_parked_head = NULL;
-static int pygo_parked_total = 0;       /* read with __atomic_load_n */
-static int pygo_netpoll_inited = 0;
-static pygo_mutex_t pygo_parked_lock;
-static volatile long pygo_parked_lock_inited = 0;
 
 /* ---- per-fd parker index ----
- * Sparse array indexed by fd; each slot holds the head of a singly-
+ * Sparse array indexed by fd; each slot holds the head of a doubly-
  * linked list of parkers interested in events on that fd (usually 1,
  * occasionally 2 for read+write).  Replaces the prior O(N) walk of
- * pygo_parked_head on every epoll event with an O(1) bucket lookup
+ * pool->head on every epoll event with an O(1) bucket lookup
  * + O(parkers-on-this-fd) walk.  At N=1024 concurrent conns this
  * changes the pump from O(N*events) to O(events).
  *
- * Protected by pygo_parked_lock, same as the global list. */
-static pygo_parked_t **pygo_parked_by_fd = NULL;
-static size_t          pygo_parked_by_fd_cap = 0;
+ * Lives in the parker pool; protected by pool->lock. */
 
-static int pygo_parker_fd_index_ensure(int fd)
+static int pygo_parker_fd_index_ensure(pygo_parker_pool_t *pool, int fd)
 {
     if (fd < 0) return -1;
-    if ((size_t)fd < pygo_parked_by_fd_cap) return 0;
+    if ((size_t)fd < pool->by_fd_cap) return 0;
     {
-        size_t newcap = pygo_parked_by_fd_cap ? pygo_parked_by_fd_cap * 2 : 256;
+        size_t newcap = pool->by_fd_cap ? pool->by_fd_cap * 2 : 256;
         pygo_parked_t **nb;
         while (newcap <= (size_t)fd) newcap *= 2;
-        nb = (pygo_parked_t **)realloc(pygo_parked_by_fd,
+        nb = (pygo_parked_t **)realloc(pool->by_fd,
                                        newcap * sizeof(*nb));
         if (nb == NULL) return -1;
-        memset(nb + pygo_parked_by_fd_cap, 0,
-               (newcap - pygo_parked_by_fd_cap) * sizeof(*nb));
-        pygo_parked_by_fd     = nb;
-        pygo_parked_by_fd_cap = newcap;
+        memset(nb + pool->by_fd_cap, 0,
+               (newcap - pool->by_fd_cap) * sizeof(*nb));
+        pool->by_fd     = nb;
+        pool->by_fd_cap = newcap;
     }
     return 0;
 }
 
-/* Link p into both the global list and its per-fd bucket.  Caller
- * holds pygo_parked_lock.
+/* Link p into both pool->head and pool's per-fd bucket.  Caller
+ * holds pool->lock.
  *
  * Stack-pooling note: pygo_parked_t lives on the calling goroutine's
  * coroutine stack (see pygo_netpoll_wait_fd).  Stacks are returned to
@@ -339,28 +361,28 @@ static int pygo_parker_fd_index_ensure(int fd)
  * places its parker at the SAME stack offset, so the parker address
  * is byte-identical to a previous occupant's.  All four list-link
  * fields are freshly zeroed before this call (in pygo_netpoll_wait_fd),
- * but pygo_parked_head and pygo_parked_by_fd[fd] are globals and can
- * still reference this address from a prior life if any unlink path
- * for that previous occupant missed (a residual M:N + free-threaded
- * race that is not yet fully isolated upstream).
+ * but pool->head and pool->by_fd[fd] can still reference this address
+ * from a prior life if any unlink path for that previous occupant
+ * missed (a residual M:N + free-threaded race that is not yet fully
+ * isolated upstream).
  *
  * Detach any stale self-reference here before pushing.  Otherwise
- * p->next = pygo_parked_head sets p->next = p (1-cycle in the global
- * list), and head = bucket[p->fd] = p sets p->next_by_fd = p /
+ * p->next = pool->head sets p->next = p (1-cycle in the global
+ * list), and head = pool->by_fd[p->fd] = p sets p->next_by_fd = p /
  * p->prev_by_fd = p (self-cycle in the bucket).  Either form wedges
  * the pump's list walks indefinitely. */
-static void pygo_parker_link(pygo_parked_t *p)
+static void pygo_parker_link(pygo_parker_pool_t *pool, pygo_parked_t *p)
 {
     /* Stale-reference clears.  See header comment.  Cheap (two
      * compare-and-conditional-store); only fires when stack reuse hits
      * a parker address that an unlink missed. */
-    if (pygo_parked_head == p) {
-        pygo_parked_head = NULL;
+    if (pool->head == p) {
+        pool->head = NULL;
         PYGO_EVT(PYGO_EVT_PARKER_GHOST, p, NULL, (long long)p->fd);
     }
-    if (p->fd >= 0 && (size_t)p->fd < pygo_parked_by_fd_cap &&
-        pygo_parked_by_fd[p->fd] == p) {
-        pygo_parked_by_fd[p->fd] = NULL;
+    if (p->fd >= 0 && (size_t)p->fd < pool->by_fd_cap &&
+        pool->by_fd[p->fd] == p) {
+        pool->by_fd[p->fd] = NULL;
         PYGO_EVT(PYGO_EVT_PARKER_GHOST, p, (void *)(uintptr_t)1, (long long)p->fd);
     }
 #ifdef PYGO_PARKER_DEBUG
@@ -375,10 +397,10 @@ static void pygo_parker_link(pygo_parked_t *p)
     }
 #endif
     /* Global list: push at head, slot-pointer trick. */
-    p->next = pygo_parked_head;
+    p->next = pool->head;
     if (p->next != NULL) p->next->slot = &p->next;
-    pygo_parked_head = p;
-    p->slot = &pygo_parked_head;
+    pool->head = p;
+    p->slot = &pool->head;
 
     /* Per-fd bucket: push at head, doubly-linked.  If the realloc
      * failed we still keep the parker on the global list (slow path
@@ -386,17 +408,17 @@ static void pygo_parker_link(pygo_parked_t *p)
      * this fd just won't find it through the fast path. */
     p->prev_by_fd = NULL;
     p->next_by_fd = NULL;
-    if (p->fd >= 0 && pygo_parker_fd_index_ensure(p->fd) == 0) {
-        pygo_parked_t *head = pygo_parked_by_fd[p->fd];
+    if (p->fd >= 0 && pygo_parker_fd_index_ensure(pool, p->fd) == 0) {
+        pygo_parked_t *head = pool->by_fd[p->fd];
         p->next_by_fd = head;
         if (head != NULL) head->prev_by_fd = p;
-        pygo_parked_by_fd[p->fd] = p;
+        pool->by_fd[p->fd] = p;
     }
     /* Deadline heap: insert if this parker has a finite deadline.
      * Pump now reads min-deadline in O(1) instead of walking the
      * global list. */
-    pygo_dh_insert(p);
-    __atomic_add_fetch(&pygo_parked_total, 1, __ATOMIC_RELEASE);
+    pygo_dh_insert(pool, p);
+    __atomic_add_fetch(&pool->total, 1, __ATOMIC_RELEASE);
     PYGO_EVT(PYGO_EVT_PARKER_LINK, p, p->g, (long long)p->fd);
 }
 
@@ -414,7 +436,7 @@ static void pygo_parker_link(pygo_parked_t *p)
  * parker -- double-decrementing the counter and leaving the idle path
  * (which gates pump on parked_total > 0) sleeping while a real parker
  * sat in the list. */
-static int pygo_parker_unlink(pygo_parked_t *p)
+static int pygo_parker_unlink(pygo_parker_pool_t *pool, pygo_parked_t *p)
 {
     int touched = 0;
 #ifdef PYGO_PARKER_DEBUG
@@ -424,8 +446,8 @@ static int pygo_parker_unlink(pygo_parked_t *p)
                 "g=%p hub=%p prev_by_fd=%p next_by_fd=%p bucket=%p\n",
                 (void *)p, p->fd, (void *)p->g, p->hub,
                 (void *)p->prev_by_fd, (void *)p->next_by_fd,
-                (p->fd >= 0 && (size_t)p->fd < pygo_parked_by_fd_cap)
-                    ? (void *)pygo_parked_by_fd[p->fd] : NULL);
+                (p->fd >= 0 && (size_t)p->fd < pool->by_fd_cap)
+                    ? (void *)pool->by_fd[p->fd] : NULL);
         p->prev_by_fd = NULL;
         p->next_by_fd = NULL;
     }
@@ -448,9 +470,9 @@ static int pygo_parker_unlink(pygo_parked_t *p)
         p->prev_by_fd->next_by_fd = p->next_by_fd;
         touched = 1;
     }
-    if (p->fd >= 0 && (size_t)p->fd < pygo_parked_by_fd_cap &&
-        pygo_parked_by_fd[p->fd] == p) {
-        pygo_parked_by_fd[p->fd] = p->next_by_fd;
+    if (p->fd >= 0 && (size_t)p->fd < pool->by_fd_cap &&
+        pool->by_fd[p->fd] == p) {
+        pool->by_fd[p->fd] = p->next_by_fd;
         touched = 1;
     }
     if (p->next_by_fd != NULL) p->next_by_fd->prev_by_fd = p->prev_by_fd;
@@ -460,11 +482,11 @@ static int pygo_parker_unlink(pygo_parked_t *p)
      * can be in the heap even if its other linkages were already
      * cleaned by a partial unlink. */
     if (p->heap_index >= 0) {
-        pygo_dh_remove(p);
+        pygo_dh_remove(pool, p);
         touched = 1;
     }
     if (touched) {
-        __atomic_sub_fetch(&pygo_parked_total, 1, __ATOMIC_RELEASE);
+        __atomic_sub_fetch(&pool->total, 1, __ATOMIC_RELEASE);
         /* Clear the per-g back-pointer so g completion's force-unlink
          * (in mn_sched.c hub_main) doesn't see a stale reference. */
         if (p->g != NULL && p->g->netpoll_parker == p) {
@@ -475,13 +497,13 @@ static int pygo_parker_unlink(pygo_parked_t *p)
     return touched;
 }
 
-static void pygo_parked_lock_ensure_inited(void);
+static void pygo_parker_pool_lock_ensure_inited(pygo_parker_pool_t *pool);
 
 /* ---- self-check inspection hook ----
  *
- * Called by pygo_self_check() in pygo_diag.c.  Walks the global list
+ * Called by pygo_self_check() in pygo_diag.c.  Walks pool->head
  * (Floyd cycle detection) and every per-fd bucket, fills in the stats
- * struct.  Takes pygo_parked_lock.
+ * struct.  Takes pool->lock.
  *
  * The stats struct layout is declared in pygo_diag.c as a friend
  * (extern struct, no shared header) -- this keeps pygo_diag.h free of
@@ -497,6 +519,7 @@ extern void pygo_self_check_stats_set(struct pygo_self_check_stats *out,
 
 int pygo_netpoll_inspect_for_self_check(struct pygo_self_check_stats *out)
 {
+    pygo_parker_pool_t *pool = &pygo_pool;
     int global_count = 0;
     int global_cycle = 0;
     int bucket_total = 0;
@@ -510,12 +533,12 @@ int pygo_netpoll_inspect_for_self_check(struct pygo_self_check_stats *out)
         pygo_self_check_stats_set(out, 0, 0, 0, 0, 0, 0);
         return 0;
     }
-    pygo_parked_lock_ensure_inited();
-    pygo_mutex_lock(&pygo_parked_lock);
+    pygo_parker_pool_lock_ensure_inited(pool);
+    pygo_mutex_lock(&pool->lock);
 
     /* Floyd cycle detection on the global list, with a safety cap. */
-    slow = pygo_parked_head;
-    fast = pygo_parked_head;
+    slow = pool->head;
+    fast = pool->head;
     {
         int iters = 0;
         const int CAP = 200000;
@@ -533,14 +556,14 @@ int pygo_netpoll_inspect_for_self_check(struct pygo_self_check_stats *out)
     /* Linear walk for a count (after cycle check; if cycle present we
      * cap at CAP to avoid spinning here). */
     if (!global_cycle) {
-        pygo_parked_t *p = pygo_parked_head;
+        pygo_parked_t *p = pool->head;
         while (p != NULL && global_count < 200000) {
             global_count++;
             p = p->next;
         }
     } else {
         /* On cycle, just report the count we walked to before detecting. */
-        pygo_parked_t *p = pygo_parked_head;
+        pygo_parked_t *p = pool->head;
         int iters = 0;
         while (p != NULL && iters < 200000) {
             global_count++;
@@ -549,12 +572,12 @@ int pygo_netpoll_inspect_for_self_check(struct pygo_self_check_stats *out)
             if (iters > 100000) break;
         }
     }
-    parked_atomic = __atomic_load_n(&pygo_parked_total, __ATOMIC_ACQUIRE);
+    parked_atomic = __atomic_load_n(&pool->total, __ATOMIC_ACQUIRE);
 
     /* Walk every per-fd bucket. */
-    if (pygo_parked_by_fd != NULL) {
-        for (i = 0; i < pygo_parked_by_fd_cap; i++) {
-            pygo_parked_t *p = pygo_parked_by_fd[i];
+    if (pool->by_fd != NULL) {
+        for (i = 0; i < pool->by_fd_cap; i++) {
+            pygo_parked_t *p = pool->by_fd[i];
             int chain_iters = 0;
             while (p != NULL && chain_iters < 10000) {
                 bucket_total++;
@@ -573,7 +596,7 @@ int pygo_netpoll_inspect_for_self_check(struct pygo_self_check_stats *out)
         }
     }
 
-    pygo_mutex_unlock(&pygo_parked_lock);
+    pygo_mutex_unlock(&pool->lock);
     pygo_self_check_stats_set(out, global_count, global_cycle,
                               parked_atomic, bucket_total, bucket_self,
                               bucket_unreach);
@@ -598,7 +621,7 @@ static size_t         pygo_fd_registered_cap_bytes = 0;
  * an fd whose parker hasn't been linked yet (or whose previous
  * parker was just unlinked by a wake but the goroutine hasn't
  * called wait_fd again).  Without this, the pump finds an empty
- * pygo_parked_by_fd[fd] bucket and silently drops the event; with
+ * pygo_pool.by_fd[fd] bucket and silently drops the event; with
  * EPOLLET the kernel won't refire and the goroutine waits forever.
  *
  * Each fd gets one byte holding a mask of PYGO_NETPOLL_READ /
@@ -728,35 +751,35 @@ static int             pygo_win_use_iocp = 0;
 static const char     *pygo_win_backend_name = "select";   /* updated by init */
 #endif
 
-/* Initialise the lock once, regardless of platform.  POSIX could use
+/* Initialise pool->lock once, regardless of platform.  POSIX could use
  * PTHREAD_MUTEX_INITIALIZER and skip this, but Windows CRITICAL_SECTION
  * has no static-init form so the lazy-init pattern is uniform. */
-static void pygo_parked_lock_ensure_inited(void)
+static void pygo_parker_pool_lock_ensure_inited(pygo_parker_pool_t *pool)
 {
 #if defined(PYGO_OS_WINDOWS)
     /* InterlockedCompareExchange returns the prior value; only the
      * first caller transitions 0 -> 1 and runs the init. */
-    if (InterlockedCompareExchange(&pygo_parked_lock_inited, 1, 0) == 0) {
-        pygo_mutex_init(&pygo_parked_lock);
+    if (InterlockedCompareExchange(&pool->lock_inited, 1, 0) == 0) {
+        pygo_mutex_init(&pool->lock);
     } else {
         /* Spin briefly while another thread finishes init.  In practice
          * the init is one InitializeCriticalSection call (~100 ns), so
          * any starvation here is bounded. */
-        while (pygo_parked_lock_inited != 2) { /* spin */ }
+        while (pool->lock_inited != 2) { /* spin */ }
         return;
     }
-    pygo_parked_lock_inited = 2;
+    pool->lock_inited = 2;
 #else
-    if (__atomic_load_n(&pygo_parked_lock_inited, __ATOMIC_ACQUIRE) == 2) {
+    if (__atomic_load_n(&pool->lock_inited, __ATOMIC_ACQUIRE) == 2) {
         return;
     }
     long expected = 0;
-    if (__atomic_compare_exchange_n(&pygo_parked_lock_inited, &expected, 1,
+    if (__atomic_compare_exchange_n(&pool->lock_inited, &expected, 1,
                                     0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
-        pygo_mutex_init(&pygo_parked_lock);
-        __atomic_store_n(&pygo_parked_lock_inited, 2, __ATOMIC_RELEASE);
+        pygo_mutex_init(&pool->lock);
+        __atomic_store_n(&pool->lock_inited, 2, __ATOMIC_RELEASE);
     } else {
-        while (__atomic_load_n(&pygo_parked_lock_inited, __ATOMIC_ACQUIRE) != 2)
+        while (__atomic_load_n(&pool->lock_inited, __ATOMIC_ACQUIRE) != 2)
             { /* spin */ }
     }
 #endif
@@ -782,7 +805,7 @@ const char *pygo_netpoll_backend(void)
 int pygo_netpoll_init(void)
 {
     if (pygo_netpoll_inited) return 0;
-    pygo_parked_lock_ensure_inited();
+    pygo_parker_pool_lock_ensure_inited(&pygo_pool);
 #if defined(PYGO_HAVE_EPOLL)
     pygo_epoll_fd = epoll_create1(EPOLL_CLOEXEC);
     if (pygo_epoll_fd < 0) return -1;
@@ -870,18 +893,18 @@ static int pygo_netpoll_register(int fd, int events)
 #if defined(PYGO_HAVE_EPOLL)
     int need_register;
 
-    pygo_mutex_lock(&pygo_parked_lock);
+    pygo_mutex_lock(&pygo_pool.lock);
     if (pygo_fd_bit_get(fd)) {
-        pygo_mutex_unlock(&pygo_parked_lock);
+        pygo_mutex_unlock(&pygo_pool.lock);
         return 0;
     }
     if (pygo_fd_bit_set(fd) != 0) {
-        pygo_mutex_unlock(&pygo_parked_lock);
+        pygo_mutex_unlock(&pygo_pool.lock);
         errno = ENOMEM;
         return -1;
     }
     need_register = 1;
-    pygo_mutex_unlock(&pygo_parked_lock);
+    pygo_mutex_unlock(&pygo_pool.lock);
     (void)need_register;
 
     {
@@ -911,31 +934,31 @@ static int pygo_netpoll_register(int fd, int events)
         }
     }
     /* Failed: drop the bit so a future caller can retry. */
-    pygo_mutex_lock(&pygo_parked_lock);
+    pygo_mutex_lock(&pygo_pool.lock);
     pygo_fd_bit_clear(fd);
-    pygo_mutex_unlock(&pygo_parked_lock);
+    pygo_mutex_unlock(&pygo_pool.lock);
     return -1;
 #elif defined(PYGO_HAVE_KQUEUE)
-    pygo_mutex_lock(&pygo_parked_lock);
+    pygo_mutex_lock(&pygo_pool.lock);
     if (pygo_fd_bit_get(fd)) {
-        pygo_mutex_unlock(&pygo_parked_lock);
+        pygo_mutex_unlock(&pygo_pool.lock);
         return 0;
     }
     if (pygo_fd_bit_set(fd) != 0) {
-        pygo_mutex_unlock(&pygo_parked_lock);
+        pygo_mutex_unlock(&pygo_pool.lock);
         errno = ENOMEM;
         return -1;
     }
-    pygo_mutex_unlock(&pygo_parked_lock);
+    pygo_mutex_unlock(&pygo_pool.lock);
     {
         struct kevent kev[2];
         EV_SET(&kev[0], fd, EVFILT_READ,  EV_ADD | EV_CLEAR, 0, 0, NULL);
         EV_SET(&kev[1], fd, EVFILT_WRITE, EV_ADD | EV_CLEAR, 0, 0, NULL);
         if (kevent(pygo_kqueue_fd, kev, 2, NULL, 0, NULL) == 0) return 0;
     }
-    pygo_mutex_lock(&pygo_parked_lock);
+    pygo_mutex_lock(&pygo_pool.lock);
     pygo_fd_bit_clear(fd);
-    pygo_mutex_unlock(&pygo_parked_lock);
+    pygo_mutex_unlock(&pygo_pool.lock);
     return -1;
 #else
     (void)fd;
@@ -946,9 +969,9 @@ static int pygo_netpoll_register(int fd, int events)
 void pygo_netpoll_unregister(int fd)
 {
 #if defined(PYGO_HAVE_EPOLL) || defined(PYGO_HAVE_KQUEUE)
-    pygo_mutex_lock(&pygo_parked_lock);
+    pygo_mutex_lock(&pygo_pool.lock);
     pygo_fd_bit_clear(fd);
-    pygo_mutex_unlock(&pygo_parked_lock);
+    pygo_mutex_unlock(&pygo_pool.lock);
     /* No kernel syscall: epoll/kqueue auto-remove the fd when the
      * last reference closes.  Calling EPOLL_CTL_DEL after close
      * would race with fd reuse anyway. */
@@ -959,7 +982,7 @@ void pygo_netpoll_unregister(int fd)
 
 int pygo_netpoll_parked_count(void)
 {
-    return __atomic_load_n(&pygo_parked_total, __ATOMIC_ACQUIRE);
+    return __atomic_load_n(&pygo_pool.total, __ATOMIC_ACQUIRE);
 }
 
 void pygo_netpoll_force_unlink_g_parker(pygo_g_t *g)
@@ -968,17 +991,17 @@ void pygo_netpoll_force_unlink_g_parker(pygo_g_t *g)
     if (g == NULL) return;
     /* Cheap path: no parker tracked, nothing to do. */
     if (g->netpoll_parker == NULL) return;
-    pygo_mutex_lock(&pygo_parked_lock);
+    pygo_mutex_lock(&pygo_pool.lock);
     p = (pygo_parked_t *)g->netpoll_parker;
     if (p != NULL) {
         /* pygo_parker_unlink is no-op if p is already clean (e.g.,
          * pump unlinked it between the cheap-path check and the lock
          * acquire) -- safe to call unconditionally. */
-        (void)pygo_parker_unlink(p);
+        (void)pygo_parker_unlink(&pygo_pool, p);
         g->netpoll_parker = NULL;
         PYGO_EVT(PYGO_EVT_PARKER_FORCE, p, g, (long long)p->gen);
     }
-    pygo_mutex_unlock(&pygo_parked_lock);
+    pygo_mutex_unlock(&pygo_pool.lock);
     /* The g is completing and its wait_fd will never resume to call
      * pool_release, so we release here.  Safe: parker is unlinked
      * above so no other thread holds a reference. */
@@ -1023,25 +1046,25 @@ int pygo_netpoll_add_iouring_ring(int eventfd_fd,
     int i;
     if (eventfd_fd < 0 || ring == NULL) return -1;
     if (pygo_netpoll_init() != 0) return -1;
-    pygo_mutex_lock(&pygo_parked_lock);
+    pygo_mutex_lock(&pygo_pool.lock);
     /* Idempotent: re-registering the same eventfd just updates the
      * ring pointer (cheap; the eventfd is already in epoll). */
     for (i = 0; i < pygo_iouring_ring_count; i++) {
         if (pygo_iouring_ring_efds[i] == eventfd_fd) {
             pygo_iouring_ring_ptrs[i] = ring;
-            pygo_mutex_unlock(&pygo_parked_lock);
+            pygo_mutex_unlock(&pygo_pool.lock);
             return 0;
         }
     }
     if (pygo_iouring_ring_count >= PYGO_IOURING_RINGS_MAX) {
-        pygo_mutex_unlock(&pygo_parked_lock);
+        pygo_mutex_unlock(&pygo_pool.lock);
         errno = ENOSPC;
         return -1;
     }
     pygo_iouring_ring_efds[pygo_iouring_ring_count] = eventfd_fd;
     pygo_iouring_ring_ptrs[pygo_iouring_ring_count] = ring;
     pygo_iouring_ring_count++;
-    pygo_mutex_unlock(&pygo_parked_lock);
+    pygo_mutex_unlock(&pygo_pool.lock);
 
     /* EPOLLEXCLUSIVE: see comment in pygo_netpoll_register.  Kernel
      * wakes exactly one waiter per ring-eventfd hit instead of all
@@ -1057,7 +1080,7 @@ int pygo_netpoll_add_iouring_ring(int eventfd_fd,
         }
         if (rc < 0 && errno != EEXIST) {
             /* Undo the table insert. */
-            pygo_mutex_lock(&pygo_parked_lock);
+            pygo_mutex_lock(&pygo_pool.lock);
             for (i = 0; i < pygo_iouring_ring_count; i++) {
                 if (pygo_iouring_ring_efds[i] == eventfd_fd) {
                     pygo_iouring_ring_efds[i] =
@@ -1068,7 +1091,7 @@ int pygo_netpoll_add_iouring_ring(int eventfd_fd,
                     break;
                 }
             }
-            pygo_mutex_unlock(&pygo_parked_lock);
+            pygo_mutex_unlock(&pygo_pool.lock);
             return -1;
         }
     }
@@ -1084,7 +1107,7 @@ void pygo_netpoll_remove_iouring_ring(int eventfd_fd)
 #if defined(PYGO_HAVE_EPOLL)
     int i;
     if (eventfd_fd < 0) return;
-    pygo_mutex_lock(&pygo_parked_lock);
+    pygo_mutex_lock(&pygo_pool.lock);
     for (i = 0; i < pygo_iouring_ring_count; i++) {
         if (pygo_iouring_ring_efds[i] == eventfd_fd) {
             pygo_iouring_ring_efds[i] =
@@ -1095,7 +1118,7 @@ void pygo_netpoll_remove_iouring_ring(int eventfd_fd)
             break;
         }
     }
-    pygo_mutex_unlock(&pygo_parked_lock);
+    pygo_mutex_unlock(&pygo_pool.lock);
     /* Caller is about to close the eventfd; epoll auto-removes when
      * the last fd reference is closed, so no EPOLL_CTL_DEL syscall. */
 #else
@@ -1112,12 +1135,12 @@ int pygo_netpoll_any_iouring_inflight(void)
     /* Per-hub rings.  Read snapshot under the lock (matching add/remove)
      * but the inflight load itself is atomic so we don't hold the lock
      * over the loop. */
-    pygo_mutex_lock(&pygo_parked_lock);
+    pygo_mutex_lock(&pygo_pool.lock);
     {
         struct pygo_iouring_ring *snapshot[PYGO_IOURING_RINGS_MAX];
         int n = pygo_iouring_ring_count;
         for (i = 0; i < n; i++) snapshot[i] = pygo_iouring_ring_ptrs[i];
-        pygo_mutex_unlock(&pygo_parked_lock);
+        pygo_mutex_unlock(&pygo_pool.lock);
         for (i = 0; i < n; i++) {
             total += pygo_iouring_ring_inflight(snapshot[i]);
         }
@@ -1136,16 +1159,16 @@ int pygo_netpoll_drain_parked(void)
 {
     int n = 0;
     pygo_parked_t *p, *next;
-    pygo_mutex_lock(&pygo_parked_lock);
-    p = pygo_parked_head;
-    pygo_parked_head = NULL;
+    pygo_mutex_lock(&pygo_pool.lock);
+    p = pygo_pool.head;
+    pygo_pool.head = NULL;
     /* Clear per-fd buckets too; everything is leaving the lists. */
-    if (pygo_parked_by_fd != NULL && pygo_parked_by_fd_cap > 0) {
-        memset(pygo_parked_by_fd, 0,
-               pygo_parked_by_fd_cap * sizeof(*pygo_parked_by_fd));
+    if (pygo_pool.by_fd != NULL && pygo_pool.by_fd_cap > 0) {
+        memset(pygo_pool.by_fd, 0,
+               pygo_pool.by_fd_cap * sizeof(*pygo_pool.by_fd));
     }
     /* Drain the deadline heap too; everything is leaving. */
-    pygo_dh_size = 0;
+    pygo_pool.dh_size = 0;
     while (p != NULL) {
         next = p->next;
         if (p->ready_out != NULL) {
@@ -1161,11 +1184,11 @@ int pygo_netpoll_drain_parked(void)
         } else {
             pygo_sched_wake(p->g);
         }
-        __atomic_sub_fetch(&pygo_parked_total, 1, __ATOMIC_RELEASE);
+        __atomic_sub_fetch(&pygo_pool.total, 1, __ATOMIC_RELEASE);
         p = next;
         n++;
     }
-    pygo_mutex_unlock(&pygo_parked_lock);
+    pygo_mutex_unlock(&pygo_pool.lock);
     return n;
 }
 
@@ -1217,7 +1240,7 @@ int pygo_netpoll_wait_fd(int fd, int events, long long timeout_ns)
     /* ORDER MATTERS (M:N + free-threaded race fix):
      *
      *   1. Link the parker.  Now any pump that wakes on an event for
-     *      this fd can find it in pygo_parked_by_fd[fd].
+     *      this fd can find it in pygo_pool.by_fd[fd].
      *   2. Consume any wakeups that fired BEFORE we got here.  Under
      *      M:N another hub's pump may have observed an event between
      *      this g's previous unlink (on its last wake) and the link
@@ -1231,9 +1254,9 @@ int pygo_netpoll_wait_fd(int fd, int events, long long timeout_ns)
      * the parker was visible; (b) edges fired during the gap between
      * a previous parker being unlinked-on-wake and a new one being
      * linked. */
-    pygo_mutex_lock(&pygo_parked_lock);
-    pygo_parker_link(park);
-    pygo_mutex_unlock(&pygo_parked_lock);
+    pygo_mutex_lock(&pygo_pool.lock);
+    pygo_parker_link(&pygo_pool, park);
+    pygo_mutex_unlock(&pygo_pool.lock);
     if (current_g != NULL) pygo_g_state_set(current_g, PYGO_GST_PARKED_NETPOLL);
 
     /* Drain any pre-existing pending-wake bits.  If something is
@@ -1243,9 +1266,9 @@ int pygo_netpoll_wait_fd(int fd, int events, long long timeout_ns)
     {
         int pending = pygo_fd_pending_wake_consume(fd, events);
         if (pending != 0) {
-            pygo_mutex_lock(&pygo_parked_lock);
-            pygo_parker_unlink(park);
-            pygo_mutex_unlock(&pygo_parked_lock);
+            pygo_mutex_lock(&pygo_pool.lock);
+            pygo_parker_unlink(&pygo_pool, park);
+            pygo_mutex_unlock(&pygo_pool.lock);
             if (current_g != NULL) pygo_g_state_set(current_g, PYGO_GST_RUNNING);
             pygo_parker_pool_release(park);
             return pending;
@@ -1258,26 +1281,26 @@ int pygo_netpoll_wait_fd(int fd, int events, long long timeout_ns)
      * WSAPoll / select paths. */
     if (pygo_win_use_iocp) {
         if (pygo_iocp_submit(fd, events, timeout_ns) != 0) {
-            pygo_mutex_lock(&pygo_parked_lock);
-            pygo_parker_unlink(park);
-            pygo_mutex_unlock(&pygo_parked_lock);
+            pygo_mutex_lock(&pygo_pool.lock);
+            pygo_parker_unlink(&pygo_pool, park);
+            pygo_mutex_unlock(&pygo_pool.lock);
             pygo_parker_pool_release(park);
             return -1;
         }
     } else {
         if (pygo_netpoll_register(fd, events) != 0) {
-            pygo_mutex_lock(&pygo_parked_lock);
-            pygo_parker_unlink(park);
-            pygo_mutex_unlock(&pygo_parked_lock);
+            pygo_mutex_lock(&pygo_pool.lock);
+            pygo_parker_unlink(&pygo_pool, park);
+            pygo_mutex_unlock(&pygo_pool.lock);
             pygo_parker_pool_release(park);
             return -1;
         }
     }
 #else
     if (pygo_netpoll_register(fd, events) != 0) {
-        pygo_mutex_lock(&pygo_parked_lock);
-        pygo_parker_unlink(park);
-        pygo_mutex_unlock(&pygo_parked_lock);
+        pygo_mutex_lock(&pygo_pool.lock);
+        pygo_parker_unlink(&pygo_pool, park);
+        pygo_mutex_unlock(&pygo_pool.lock);
         pygo_parker_pool_release(park);
         return -1;
     }
@@ -1291,9 +1314,9 @@ int pygo_netpoll_wait_fd(int fd, int events, long long timeout_ns)
     {
         int pending = pygo_fd_pending_wake_consume(fd, events);
         if (pending != 0) {
-            pygo_mutex_lock(&pygo_parked_lock);
-            pygo_parker_unlink(park);
-            pygo_mutex_unlock(&pygo_parked_lock);
+            pygo_mutex_lock(&pygo_pool.lock);
+            pygo_parker_unlink(&pygo_pool, park);
+            pygo_mutex_unlock(&pygo_pool.lock);
             pygo_parker_pool_release(park);
             return pending;
         }
@@ -1311,8 +1334,8 @@ int pygo_netpoll_wait_fd(int fd, int events, long long timeout_ns)
      * routed the wake via a path that bypassed pygo_parker_unlink. */
     if (park->slot != NULL || park->prev_by_fd != NULL ||
         park->next_by_fd != NULL ||
-        (park->fd >= 0 && (size_t)park->fd < pygo_parked_by_fd_cap &&
-         pygo_parked_by_fd[park->fd] == park)) {
+        (park->fd >= 0 && (size_t)park->fd < pygo_pool.by_fd_cap &&
+         pygo_pool.by_fd[park->fd] == park)) {
 #ifdef PYGO_PARKER_DEBUG
         fprintf(stderr,
                 "[pygo] wait_fd resumed with parker still linked: "
@@ -1321,12 +1344,12 @@ int pygo_netpoll_wait_fd(int fd, int events, long long timeout_ns)
                 (void *)park, park->gen, park->fd, (void *)park->g,
                 (void *)park->slot, (void *)park->next,
                 (void *)park->next_by_fd, (void *)park->prev_by_fd,
-                (park->fd >= 0 && (size_t)park->fd < pygo_parked_by_fd_cap)
-                    ? (void *)pygo_parked_by_fd[park->fd] : NULL);
+                (park->fd >= 0 && (size_t)park->fd < pygo_pool.by_fd_cap)
+                    ? (void *)pygo_pool.by_fd[park->fd] : NULL);
 #endif
-        pygo_mutex_lock(&pygo_parked_lock);
-        pygo_parker_unlink(park);
-        pygo_mutex_unlock(&pygo_parked_lock);
+        pygo_mutex_lock(&pygo_pool.lock);
+        pygo_parker_unlink(&pygo_pool, park);
+        pygo_mutex_unlock(&pygo_pool.lock);
     }
     /* Clear g->netpoll_parker before release so completion's force-
      * unlink cannot dereference a freelist entry. */
@@ -1349,9 +1372,9 @@ int pygo_netpoll_pump(long long timeout_ns)
 
     /* Earliest deadline -- O(1) heap peek (was O(N) walk of the
      * global parked list). */
-    pygo_mutex_lock(&pygo_parked_lock);
-    min_deadline = pygo_dh_peek_deadline();
-    pygo_mutex_unlock(&pygo_parked_lock);
+    pygo_mutex_lock(&pygo_pool.lock);
+    min_deadline = pygo_dh_peek_deadline(&pygo_pool);
+    pygo_mutex_unlock(&pygo_pool.lock);
 
     now = monotonic_ns();
     if (min_deadline >= 0) {
@@ -1374,7 +1397,7 @@ int pygo_netpoll_pump(long long timeout_ns)
             /* Lock parked list for walk + remove.  Order: parked_lock
              * then hub->sub_lock (inside pygo_mn_wake_g).  Don't take
              * locks in the reverse order anywhere. */
-            pygo_mutex_lock(&pygo_parked_lock);
+            pygo_mutex_lock(&pygo_pool.lock);
             for (i = 0; i < n; i++) {
                 int fd = evs[i].data.fd;
                 int mask = 0;
@@ -1386,9 +1409,9 @@ int pygo_netpoll_pump(long long timeout_ns)
                  * skip the parked-list walk. */
                 if (pygo_iouring_eventfd_in_epoll >= 0 &&
                     fd == pygo_iouring_eventfd_in_epoll) {
-                    pygo_mutex_unlock(&pygo_parked_lock);
+                    pygo_mutex_unlock(&pygo_pool.lock);
                     pygo_iouring_drain();
-                    pygo_mutex_lock(&pygo_parked_lock);
+                    pygo_mutex_lock(&pygo_pool.lock);
                     continue;
                 }
                 /* Per-hub iouring rings.  Dispatch to the matching
@@ -1405,9 +1428,9 @@ int pygo_netpoll_pump(long long timeout_ns)
                         }
                     }
                     if (match != NULL) {
-                        pygo_mutex_unlock(&pygo_parked_lock);
+                        pygo_mutex_unlock(&pygo_pool.lock);
                         pygo_iouring_ring_drain(match);
-                        pygo_mutex_lock(&pygo_parked_lock);
+                        pygo_mutex_lock(&pygo_pool.lock);
                         handled_as_iouring = 1;
                     }
                 }
@@ -1418,14 +1441,14 @@ int pygo_netpoll_pump(long long timeout_ns)
                  * (usually 1 -- at most a read+write pair). */
                 {
                     int matched = 0;
-                    if ((size_t)fd < pygo_parked_by_fd_cap) {
-                        bucket = pygo_parked_by_fd[fd];
+                    if ((size_t)fd < pygo_pool.by_fd_cap) {
+                        bucket = pygo_pool.by_fd[fd];
                         p = bucket;
                         while (p != NULL) {
                             pygo_parked_t *next_p = p->next_by_fd;
                             if (p->events & mask) {
                                 *(p->ready_out) = mask & p->events;
-                                pygo_parker_unlink(p);
+                                pygo_parker_unlink(&pygo_pool, p);
 #ifdef PYGO_PARKER_DEBUG
                                 if (p->g != NULL &&
                                     __atomic_load_n(&p->g->done, __ATOMIC_ACQUIRE)) {
@@ -1458,7 +1481,7 @@ int pygo_netpoll_pump(long long timeout_ns)
                     }
                 }
             }
-            pygo_mutex_unlock(&pygo_parked_lock);
+            pygo_mutex_unlock(&pygo_pool.lock);
         }
     }
 #elif defined(PYGO_HAVE_KQUEUE)
@@ -1477,20 +1500,20 @@ int pygo_netpoll_pump(long long timeout_ns)
         Py_END_ALLOW_THREADS
         if (n > 0) {
             int i;
-            pygo_mutex_lock(&pygo_parked_lock);
+            pygo_mutex_lock(&pygo_pool.lock);
             for (i = 0; i < n; i++) {
                 int fd = (int)evs[i].ident;
                 int mask = (evs[i].filter == EVFILT_READ) ?
                            PYGO_NETPOLL_READ : PYGO_NETPOLL_WRITE;
                 pygo_parked_t *p;
                 /* Per-fd bucket lookup: O(parkers-on-this-fd). */
-                if ((size_t)fd >= pygo_parked_by_fd_cap) continue;
-                p = pygo_parked_by_fd[fd];
+                if ((size_t)fd >= pygo_pool.by_fd_cap) continue;
+                p = pygo_pool.by_fd[fd];
                 while (p != NULL) {
                     pygo_parked_t *next_p = p->next_by_fd;
                     if (p->events & mask) {
                         *(p->ready_out) = mask & p->events;
-                        pygo_parker_unlink(p);
+                        pygo_parker_unlink(&pygo_pool, p);
                         pygo_mn_wake_g(p->hub, p->g);
                         woke++;
                         break;
@@ -1498,7 +1521,7 @@ int pygo_netpoll_pump(long long timeout_ns)
                     p = next_p;
                 }
             }
-            pygo_mutex_unlock(&pygo_parked_lock);
+            pygo_mutex_unlock(&pygo_pool.lock);
         }
     }
 #elif defined(PYGO_OS_WINDOWS)
@@ -1534,14 +1557,14 @@ int pygo_netpoll_pump(long long timeout_ns)
             if (rc <= 0) break;             /* 0 = timeout, -1 = error */
             local_woke++;
             /* Locate the matching parked entry and wake its g. */
-            pygo_mutex_lock(&pygo_parked_lock);
-            if ((size_t)fd < pygo_parked_by_fd_cap) {
-                pygo_parked_t *p = pygo_parked_by_fd[fd];
+            pygo_mutex_lock(&pygo_pool.lock);
+            if ((size_t)fd < pygo_pool.by_fd_cap) {
+                pygo_parked_t *p = pygo_pool.by_fd[fd];
                 while (p != NULL) {
                     pygo_parked_t *next_p = p->next_by_fd;
                     if (p->events & evs) {
                         *(p->ready_out) = evs & p->events;
-                        pygo_parker_unlink(p);
+                        pygo_parker_unlink(&pygo_pool, p);
                         pygo_mn_wake_g(p->hub, p->g);
                         woke++;
                         break;
@@ -1549,7 +1572,7 @@ int pygo_netpoll_pump(long long timeout_ns)
                     p = next_p;
                 }
             }
-            pygo_mutex_unlock(&pygo_parked_lock);
+            pygo_mutex_unlock(&pygo_pool.lock);
         }
     } else if (pygo_win_wsapoll != NULL) {
         /* --- WSAPoll path --- */
@@ -1563,22 +1586,22 @@ int pygo_netpoll_pump(long long timeout_ns)
         int rc;
         pygo_parked_t *p;
 
-        pygo_mutex_lock(&pygo_parked_lock);
+        pygo_mutex_lock(&pygo_pool.lock);
         /* Two passes: count, then fill (grows the heap buffer if the
          * stack one isn't big enough).  Worst case we re-malloc once. */
         {
             ULONG need = 0;
-            for (p = pygo_parked_head; p != NULL; p = p->next) need++;
+            for (p = pygo_pool.head; p != NULL; p = p->next) need++;
             if (need > fds_cap) {
                 fds = (WSAPOLLFD *)malloc(sizeof(WSAPOLLFD) * need);
                 if (fds == NULL) {
-                    pygo_mutex_unlock(&pygo_parked_lock);
+                    pygo_mutex_unlock(&pygo_pool.lock);
                     goto post_wait;   /* skip wait; deadlines still get checked */
                 }
                 fds_cap = need;
             }
         }
-        for (p = pygo_parked_head; p != NULL; p = p->next) {
+        for (p = pygo_pool.head; p != NULL; p = p->next) {
             fds[n_fds].fd = (SOCKET)p->fd;
             fds[n_fds].events = 0;
             if (p->events & PYGO_NETPOLL_READ)  fds[n_fds].events |= POLLRDNORM;
@@ -1602,13 +1625,13 @@ int pygo_netpoll_pump(long long timeout_ns)
                     if (re & (POLLWRNORM | POLLOUT | POLLERR))
                         mask |= PYGO_NETPOLL_WRITE;
                     if (mask == 0) continue;
-                    if ((size_t)fdi >= pygo_parked_by_fd_cap) continue;
-                    p = pygo_parked_by_fd[fdi];
+                    if ((size_t)fdi >= pygo_pool.by_fd_cap) continue;
+                    p = pygo_pool.by_fd[fdi];
                     while (p != NULL) {
                         pygo_parked_t *next_p = p->next_by_fd;
                         if (p->events & mask) {
                             *(p->ready_out) = mask & p->events;
-                            pygo_parker_unlink(p);
+                            pygo_parker_unlink(&pygo_pool, p);
                             pygo_mn_wake_g(p->hub, p->g);
                             woke++;
                             break;
@@ -1619,7 +1642,7 @@ int pygo_netpoll_pump(long long timeout_ns)
             }
         }
         if (fds != fds_stack) free(fds);
-        pygo_mutex_unlock(&pygo_parked_lock);
+        pygo_mutex_unlock(&pygo_pool.lock);
     } else {
         /* --- select() fallback (XP / Server 2003 / no WSAPoll) ---
          * Windows select() uses SOCKET handles directly; the first arg
@@ -1632,8 +1655,8 @@ int pygo_netpoll_pump(long long timeout_ns)
         struct timeval tv, *tvp = NULL;
 
         FD_ZERO(&rfds); FD_ZERO(&wfds); FD_ZERO(&efds);
-        pygo_mutex_lock(&pygo_parked_lock);
-        for (p = pygo_parked_head; p != NULL; p = p->next) {
+        pygo_mutex_lock(&pygo_pool.lock);
+        for (p = pygo_pool.head; p != NULL; p = p->next) {
             if (p->events & PYGO_NETPOLL_READ)  FD_SET((SOCKET)p->fd, &rfds);
             if (p->events & PYGO_NETPOLL_WRITE) FD_SET((SOCKET)p->fd, &wfds);
             FD_SET((SOCKET)p->fd, &efds);
@@ -1647,7 +1670,7 @@ int pygo_netpoll_pump(long long timeout_ns)
         rc = select(0, &rfds, &wfds, &efds, tvp);
         Py_END_ALLOW_THREADS
         if (rc > 0) {
-            pygo_parked_t *p = pygo_parked_head;
+            pygo_parked_t *p = pygo_pool.head;
             while (p != NULL) {
                 pygo_parked_t *next_p = p->next;
                 int mask = 0;
@@ -1657,14 +1680,14 @@ int pygo_netpoll_pump(long long timeout_ns)
                     mask |= PYGO_NETPOLL_READ | PYGO_NETPOLL_WRITE;
                 if (mask & p->events) {
                     *(p->ready_out) = mask & p->events;
-                    pygo_parker_unlink(p);
+                    pygo_parker_unlink(&pygo_pool, p);
                     pygo_mn_wake_g(p->hub, p->g);
                     woke++;
                 }
                 p = next_p;
             }
         }
-        pygo_mutex_unlock(&pygo_parked_lock);
+        pygo_mutex_unlock(&pygo_pool.lock);
     }
 post_wait:
     ;
@@ -1675,8 +1698,8 @@ post_wait:
         int max_fd = -1;
         pygo_parked_t *p;
         FD_ZERO(&rfds); FD_ZERO(&wfds);
-        pygo_mutex_lock(&pygo_parked_lock);
-        for (p = pygo_parked_head; p != NULL; p = p->next) {
+        pygo_mutex_lock(&pygo_pool.lock);
+        for (p = pygo_pool.head; p != NULL; p = p->next) {
             if (p->fd > max_fd) max_fd = p->fd;
             if (p->events & PYGO_NETPOLL_READ)  FD_SET(p->fd, &rfds);
             if (p->events & PYGO_NETPOLL_WRITE) FD_SET(p->fd, &wfds);
@@ -1689,7 +1712,7 @@ post_wait:
                 tvp = &tv;
             }
             if (select(max_fd + 1, &rfds, &wfds, NULL, tvp) > 0) {
-                pygo_parked_t *p = pygo_parked_head;
+                pygo_parked_t *p = pygo_pool.head;
                 while (p != NULL) {
                     pygo_parked_t *next_p = p->next;
                     int mask = 0;
@@ -1697,7 +1720,7 @@ post_wait:
                     if (FD_ISSET(p->fd, &wfds)) mask |= PYGO_NETPOLL_WRITE;
                     if (mask & p->events) {
                         *(p->ready_out) = mask & p->events;
-                        pygo_parker_unlink(p);
+                        pygo_parker_unlink(&pygo_pool, p);
                         pygo_mn_wake_g(p->hub, p->g);
                         woke++;
                     }
@@ -1705,24 +1728,24 @@ post_wait:
                 }
             }
         }
-        pygo_mutex_unlock(&pygo_parked_lock);
+        pygo_mutex_unlock(&pygo_pool.lock);
     }
 #endif
 
     /* Handle timeouts: parkers whose deadline has passed get ready=0.
      * Heap pop while top is <= now -- O(log N + K) instead of O(N). */
     now = monotonic_ns();
-    pygo_mutex_lock(&pygo_parked_lock);
-    while (pygo_dh_size > 0 && pygo_dh_arr[0]->deadline_ns <= now) {
-        pygo_parked_t *p = pygo_dh_arr[0];
+    pygo_mutex_lock(&pygo_pool.lock);
+    while (pygo_pool.dh_size > 0 && pygo_pool.dh_arr[0]->deadline_ns <= now) {
+        pygo_parked_t *p = pygo_pool.dh_arr[0];
         if (p->ready_out != NULL) *p->ready_out = 0;
         /* Unlink also pops the heap (via heap_index check). */
-        pygo_parker_unlink(p);
+        pygo_parker_unlink(&pygo_pool, p);
         if (p->hub != NULL) pygo_mn_wake_g(p->hub, p->g);
         else                pygo_sched_wake(p->g);
         woke++;
         PYGO_EVT(PYGO_EVT_PARKER_TIMEOUT, p, p->g, (long long)p->fd);
     }
-    pygo_mutex_unlock(&pygo_parked_lock);
+    pygo_mutex_unlock(&pygo_pool.lock);
     return woke;
 }
