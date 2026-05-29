@@ -353,7 +353,14 @@ static PYGO_THREAD_RET pygo_hub_main(void *arg)
                             long long v = atoll(ms);
                             if (v > 0) sweep_thresh_ns = v * 1000000LL;
                         }
-                        on = (e != NULL && *e == '1') ? 1 : 0;
+                        /* Default ON (2026-05-29): the dwell sweep delivers
+                         * -32% idle RSS at no robustly-measurable p99 cost
+                         * (the churn cost proved within run-to-run noise),
+                         * and the churn throttle (PYGO_SWEEP_MAX_CHURN, see
+                         * netpoll.c) degrades it to a no-op on active-churn
+                         * workloads as insurance.  PYGO_STACK_PARK_SWEEP=0
+                         * disables; =1 (or any non-"0") forces on. */
+                        on = (e != NULL && *e == '0') ? 0 : 1;
                         __atomic_store_n(&sweep_on, on, __ATOMIC_RELAXED);
                     }
                     if (on && parked > 0) {
