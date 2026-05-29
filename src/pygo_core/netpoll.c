@@ -959,20 +959,42 @@ const char *pygo_netpoll_backend(void)
 int pygo_netpoll_init(void)
 {
     /* ACQUIRE pairs with the RELEASE store at the end: any thread that
-     * sees inited==1 here also sees the array publication below. */
+     * sees inited==1 here also sees the backend + array publication
+     * below.  This is only the fast-path early-out; the authoritative
+     * check is re-done under the lock (see below). */
     if (__atomic_load_n(&pygo_netpoll_inited, __ATOMIC_ACQUIRE)) return 0;
     pygo_parker_pool_lock_ensure_inited(&pygo_pool);
-    /* Preallocate the per-fd arrays under pygo_pool.lock (serialises
-     * against bit get/set/clear and a racing init). */
+    /* EVERYTHING that brings the backend up runs under pygo_pool.lock:
+     * the per-fd arrays AND the single shared epoll/kqueue/IOCP handle.
+     *
+     * The old code checked `inited` unlocked, then created the backend
+     * OUTSIDE the lock.  Under M:N every hub calls this concurrently at
+     * startup (each registers its io_uring eventfd via
+     * pygo_netpoll_add_iouring_ring -> pygo_netpoll_init), so N racing
+     * first-callers each ran epoll_create1 and stored pygo_epoll_fd.
+     * pygo_epoll_fd ended at the last writer's value and the others
+     * leaked -- but worse, while it churned, registers on other threads
+     * read intermediate pygo_epoll_fd values and EPOLL_CTL_ADD'd client
+     * sockets into the soon-orphaned epolls.  Those fds were armed
+     * correctly but lived in an epoll instance no hub ever epoll_wait'd
+     * on, so their readiness was never delivered: a parked g with data
+     * waiting (Recv-Q>0), forever.  That was the ~0.1% startup-window
+     * lost-wake residual.  Creating the handle exactly once, under the
+     * lock, with a re-checked `inited`, closes it. */
     pygo_mutex_lock(&pygo_pool.lock);
+    /* Re-check under the lock: a racing thread may have finished the
+     * whole init while we waited to acquire it. */
+    if (__atomic_load_n(&pygo_netpoll_inited, __ATOMIC_ACQUIRE)) {
+        pygo_mutex_unlock(&pygo_pool.lock);
+        return 0;
+    }
     pygo_fd_arrays_init();
-    pygo_mutex_unlock(&pygo_pool.lock);
 #if defined(PYGO_HAVE_EPOLL)
     pygo_epoll_fd = epoll_create1(EPOLL_CLOEXEC);
-    if (pygo_epoll_fd < 0) return -1;
+    if (pygo_epoll_fd < 0) { pygo_mutex_unlock(&pygo_pool.lock); return -1; }
 #elif defined(PYGO_HAVE_KQUEUE)
     pygo_kqueue_fd = kqueue();
-    if (pygo_kqueue_fd < 0) return -1;
+    if (pygo_kqueue_fd < 0) { pygo_mutex_unlock(&pygo_pool.lock); return -1; }
 #elif defined(PYGO_OS_WINDOWS)
     /* Bring up Winsock once.  Idempotent via plat_compat's
      * InterlockedCompareExchange guard. */
@@ -1005,9 +1027,13 @@ int pygo_netpoll_init(void)
         }
     }
 #endif
-    /* RELEASE: publish the array writes above to any thread that later
-     * observes inited==1 via the ACQUIRE load at the top. */
+    /* RELEASE: publish the backend handle + array writes above to any
+     * thread that later observes inited==1 via the ACQUIRE load (at the
+     * top here, or in pygo_netpoll_pump).  Still inside pygo_pool.lock
+     * so a racing init that lost the re-check above never observes a
+     * half-built backend. */
     __atomic_store_n(&pygo_netpoll_inited, 1, __ATOMIC_RELEASE);
+    pygo_mutex_unlock(&pygo_pool.lock);
     return 0;
 }
 
@@ -1802,8 +1828,25 @@ int pygo_netpoll_pump(long long timeout_ns)
                         continue;
                     }
                 }
-                if (evs[i].events & EPOLLIN)  mask |= PYGO_NETPOLL_READ;
-                if (evs[i].events & EPOLLOUT) mask |= PYGO_NETPOLL_WRITE;
+                /* Fold error/hangup conditions into BOTH directions.
+                 * EPOLLERR / EPOLLHUP / EPOLLRDHUP can be reported with
+                 * NO IN/OUT bit set (a bare RST, or a SHUT_WR half-close
+                 * after the read side already drained).  The old mapping
+                 * only looked at IN/OUT, so such an event produced
+                 * mask==0: pygo_pump_dispatch_event matched no parker
+                 * (p->events & 0), AND the `mask != 0` bitmap fallback
+                 * below was skipped -- the event was dropped outright,
+                 * and EPOLLONESHOT then left the fd disarmed forever
+                 * (parked g, never woken).  Waking BOTH directions on
+                 * error is correct (a dead fd makes every waiter
+                 * runnable so its next syscall sees the error) and
+                 * guarantees mask != 0 so the fallback also engages.
+                 * Mirrors the WSAPoll (POLLHUP|POLLERR) and select
+                 * (exception set) branches below, and Go's netpoll. */
+                if (evs[i].events & (EPOLLIN | EPOLLRDHUP | EPOLLERR | EPOLLHUP))
+                    mask |= PYGO_NETPOLL_READ;
+                if (evs[i].events & (EPOLLOUT | EPOLLERR | EPOLLHUP))
+                    mask |= PYGO_NETPOLL_WRITE;
                 /* Walk every per-hub pool looking for the parker for
                  * this fd.  Typically the parker lives in exactly one
                  * pool (its owning hub's), so the loop short-circuits
