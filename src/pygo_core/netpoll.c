@@ -1795,6 +1795,31 @@ int pygo_netpoll_wait_fd(int fd, int events, long long timeout_ns)
     return ready_mask;
 }
 
+/* Claim a parker for the pump: CAS its commit to WOKEN.  Returns the
+ * state we claimed FROM -- PYGO_PARK_PARKED (the g had committed to
+ * parking; caller must re-queue it via pygo_mn_wake_g) or
+ * PYGO_PARK_ARMED (g not yet parked; caller records readiness + unlinks
+ * but must NOT re-queue -- the g's own commit CAS will fail and it aborts
+ * the park, returning ready_mask itself) -- or PYGO_PARK_WOKEN if another
+ * waker already claimed it (caller must skip: don't touch ready_out,
+ * don't unlink, don't wake).  The g's ARMED->PARKED commit is the only
+ * competing writer, so the loop runs at most twice.  This is the single
+ * source of truth for the Go-netpollblockcommit protocol; every pump
+ * backend (epoll/kqueue dispatch, WSAPoll, select) routes through it so
+ * the exactly-one-of-{waker,g}-wins guarantee is identical everywhere. */
+static inline int pygo_pump_claim(pygo_parked_t *p)
+{
+    int cur;
+    for (;;) {
+        cur = __atomic_load_n(&p->commit, __ATOMIC_ACQUIRE);
+        if (cur == PYGO_PARK_WOKEN) break;            /* already claimed */
+        if (__atomic_compare_exchange_n(&p->commit, &cur, PYGO_PARK_WOKEN, 0,
+                                        __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+            break;
+    }
+    return cur;
+}
+
 /* Walk every parker pool looking for a parker matching (fd, mask).
  * The first match's ready_out gets the mask, the parker is unlinked
  * from its pool, and pygo_mn_wake_g routes the wake to its hub.
@@ -1817,20 +1842,8 @@ static int pygo_pump_dispatch_event(int fd, int mask)
             while (p != NULL) {
                 pygo_parked_t *next_p = p->next_by_fd;
                 if (p->events & mask) {
-                    /* Claim the parker: CAS commit away from its current
-                     * state to WOKEN.  The g's own commit CAS (ARMED->
-                     * PARKED) is the only competing writer, so the loop
-                     * runs at most twice.  `cur` ends as the state we
-                     * claimed FROM. */
-                    int cur;
-                    for (;;) {
-                        cur = __atomic_load_n(&p->commit, __ATOMIC_ACQUIRE);
-                        if (cur == PYGO_PARK_WOKEN) break;  /* already claimed */
-                        if (__atomic_compare_exchange_n(
-                                &p->commit, &cur, PYGO_PARK_WOKEN, 0,
-                                __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
-                            break;
-                    }
+                    /* Claim the parker (see pygo_pump_claim). */
+                    int cur = pygo_pump_claim(p);
                     if (cur == PYGO_PARK_WOKEN) { p = next_p; continue; }
                     *(p->ready_out) = mask & p->events;
                     pygo_parker_unlink(pool, p);
@@ -2143,9 +2156,15 @@ int pygo_netpoll_pump(long long timeout_ns)
                     while (p != NULL) {
                         pygo_parked_t *next_p = p->next_by_fd;
                         if (p->events & mask) {
+                            /* Claim before waking -- same exactly-one-of-
+                             * {waker,g}-wins protocol as the epoll/kqueue
+                             * dispatch path (see pygo_pump_claim). */
+                            int cur = pygo_pump_claim(p);
+                            if (cur == PYGO_PARK_WOKEN) { p = next_p; continue; }
                             *(p->ready_out) = mask & p->events;
                             pygo_parker_unlink(&pygo_pool, p);
-                            pygo_mn_wake_g(p->hub, p->g);
+                            if (cur == PYGO_PARK_PARKED)
+                                pygo_mn_wake_g(p->hub, p->g);
                             woke++;
                             break;
                         }
@@ -2192,10 +2211,15 @@ int pygo_netpoll_pump(long long timeout_ns)
                 if (FD_ISSET((SOCKET)p->fd, &efds))
                     mask |= PYGO_NETPOLL_READ | PYGO_NETPOLL_WRITE;
                 if (mask & p->events) {
-                    *(p->ready_out) = mask & p->events;
-                    pygo_parker_unlink(&pygo_pool, p);
-                    pygo_mn_wake_g(p->hub, p->g);
-                    woke++;
+                    /* Claim before waking (see pygo_pump_claim). */
+                    int cur = pygo_pump_claim(p);
+                    if (cur != PYGO_PARK_WOKEN) {
+                        *(p->ready_out) = mask & p->events;
+                        pygo_parker_unlink(&pygo_pool, p);
+                        if (cur == PYGO_PARK_PARKED)
+                            pygo_mn_wake_g(p->hub, p->g);
+                        woke++;
+                    }
                 }
                 p = next_p;
             }
@@ -2232,10 +2256,15 @@ post_wait:
                     if (FD_ISSET(p->fd, &rfds)) mask |= PYGO_NETPOLL_READ;
                     if (FD_ISSET(p->fd, &wfds)) mask |= PYGO_NETPOLL_WRITE;
                     if (mask & p->events) {
-                        *(p->ready_out) = mask & p->events;
-                        pygo_parker_unlink(&pygo_pool, p);
-                        pygo_mn_wake_g(p->hub, p->g);
-                        woke++;
+                        /* Claim before waking (see pygo_pump_claim). */
+                        int cur = pygo_pump_claim(p);
+                        if (cur != PYGO_PARK_WOKEN) {
+                            *(p->ready_out) = mask & p->events;
+                            pygo_parker_unlink(&pygo_pool, p);
+                            if (cur == PYGO_PARK_PARKED)
+                                pygo_mn_wake_g(p->hub, p->g);
+                            woke++;
+                        }
                     }
                     p = next_p;
                 }

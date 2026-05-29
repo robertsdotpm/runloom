@@ -699,7 +699,7 @@ pygo_g_t *pygo_sched_sleep_pop(pygo_sched_t *s)
 
 /* ---- Scheduler lifecycle ---- */
 static pygo_sched_t pygo_global_sched;
-static int pygo_global_sched_init_done = 0;
+static int pygo_global_sched_init_done = 0;  /* 0=uninit 1=initing 2=ready; atomics only */
 
 /* ---- Stack calibration ----
  *
@@ -753,7 +753,7 @@ static void pygo_cal_record(pygo_g_t *g)
         pygo_cal_default = chosen;
         pygo_cal_frozen = 1;
         pygo_coro_paint_set(0);
-        if (pygo_global_sched_init_done) {
+        if (__atomic_load_n(&pygo_global_sched_init_done, __ATOMIC_ACQUIRE) == 2) {
             pygo_global_sched.stack_size = (Py_ssize_t)chosen;
         }
     }
@@ -830,10 +830,32 @@ static void pygo_sched_drain_wake_list(pygo_sched_t *s)
 
 pygo_sched_t *pygo_sched_get(void)
 {
-    if (!pygo_global_sched_init_done) {
-        pygo_sched_init(&pygo_global_sched);
-        pygo_global_sched_init_done = 1;
+    /* Lock-free one-time init via a 0->1->2 state machine (mirrors the
+     * netpoll pool lock_inited pattern).  Without this, two hub threads
+     * hitting the first pygo_sched_get concurrently (e.g. both in
+     * pygo_netpoll_wait_fd at startup) each saw the plain !init_done flag
+     * and double-initialised pygo_global_sched -- leaking the first
+     * ready_ring, re-init'ing wake_list_lock, and racing every field
+     * write.  TSan caught this; it is the same class as the epoll
+     * double-init race fixed in 603fcd8. */
+    int st = __atomic_load_n(&pygo_global_sched_init_done, __ATOMIC_ACQUIRE);
+    if (st == 2) return &pygo_global_sched;
+    if (st == 0) {
+        int expected = 0;
+        if (__atomic_compare_exchange_n(&pygo_global_sched_init_done,
+                                        &expected, 1, 0,
+                                        __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+            /* We won the election: initialise, then publish state 2. */
+            pygo_sched_init(&pygo_global_sched);
+            __atomic_store_n(&pygo_global_sched_init_done, 2, __ATOMIC_RELEASE);
+            return &pygo_global_sched;
+        }
     }
+    /* Lost the election (or observed st==1): another thread is mid-init.
+     * Wait for it to publish 2.  init is a handful of instructions, so
+     * this spins only in the tiny startup window. */
+    while (__atomic_load_n(&pygo_global_sched_init_done, __ATOMIC_ACQUIRE) != 2)
+        ;
     return &pygo_global_sched;
 }
 
