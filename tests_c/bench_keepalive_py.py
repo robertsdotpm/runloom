@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""bench_keepalive_py.py -- realistic keepalive workload (T3.1 pygo target).
+"""bench_keepalive_py.py -- steady-state keepalive workload (T3.1 pygo target).
 
 Unlike bench_server_py.py (fire-and-close echo), this models the N=1M
 steady state honest-bench targets: many LONG-LIVED connections that each
@@ -10,25 +10,40 @@ one a per-coro predictor can't handle and the dwell-based sweep can, so
 it's the right load to answer the open question: does the sweep keep RSS
 low WITHOUT inflating tail latency (the wake-refault cost)?
 
-Each connection runs `cycles` of: send a request, the server sleeps a
-seeded "DB" latency then echoes a response, the client records the
-round-trip latency, then sleeps `think_ms`.  Per-request latencies are
-collected per-connection (distinct list per index -> lock-free under
-3.13t) and reduced to p50/p99/p99.9 after the run.  A sampler goroutine
-snapshots current RSS mid-run.
+STEADY-STATE WINDOW (the fix over the old fixed-`cycles` design).  The
+previous version ran a fixed number of cycles per connection and skipped
+only cycle 0, so the multi-second connection ramp polluted the tail: a
+late-establishing connection was still in its first cycles while an
+early one was already draining, and the population was NEVER uniformly
+in steady state during measurement.  This version drives three explicit
+wall-clock phases off a single t0:
+
+    ramp    [t0,            t0+ramp_s)              connections establish, staggered
+    warmup  [t0+ramp_s,     t0+ramp_s+warmup_s)     all up + cycling, NOT recorded
+    measure [measure_start, measure_start+measure_s) record round-trips here only
+
+Each connection runs a continuous request/think loop until measure_end,
+and a latency is recorded ONLY for a round-trip whose response lands
+inside [measure_start, measure_end).  Establishment (ramp) finishes
+before measure_start and connections are cut at measure_end, so neither
+the ramp nor the drain can pollute the percentiles -- the samples are a
+clean snapshot of the all-N-established steady state.  This is what lets
+us attribute (or dismiss) the sweep's N>=65K p99 residual.
 
     PYTHONPATH=src ~/.pyenv/versions/3.13.13t/bin/python3 \
-        tests_c/bench_keepalive_py.py 16384 8 10 100 5
+        tests_c/bench_keepalive_py.py 16384 8 1000 5 3 3 10
 
-Args: N [H] [cycles] [think_ms] [work_ms]
+Args: N [H] [think_ms] [work_ms] [ramp_s] [warmup_s] [measure_s]
   N         long-lived connections
   H         hubs
-  cycles    request/idle cycles per connection
   think_ms  idle gap between a connection's requests (its parked time)
   work_ms   median server-side "DB" latency per request
+  ramp_s    stagger establishment over this window
+  warmup_s  run-but-don't-record window after the ramp completes
+  measure_s steady-state window over which latencies + RSS are sampled
 
 Compare PYGO_STACK_PARK_SWEEP=1 vs unset to read off the RSS reclaim and
-its (expected ~0) tail-latency cost.
+its (expected ~0) tail-latency cost on a clean steady-state window.
 """
 import os
 import resource
@@ -54,15 +69,21 @@ HOST = "127.0.0.1"
 PORT = 0
 listen_sock = None
 N = 1024
-CYCLES = 10
-THINK_S = 0.100
+THINK_S = 1.000
 WORK_S = 0.005
-RAMP_S = 2.0
+RAMP_S = 3.0
+WARMUP_S = 3.0
+MEASURE_S = 10.0
 
-latencies = []          # latencies[idx] = list of per-request seconds
-succeeded = []          # succeeded[idx] = True if the connection ran all cycles
-ready = []              # connections that have established (sampler barrier)
-idle_rss_kib = -1
+# Absolute monotonic deadlines, set in main() once t0 is fixed.
+T0 = 0.0
+MEASURE_START_T = 0.0
+MEASURE_END_T = 0.0
+
+latencies = []          # latencies[idx] = list of in-window per-request seconds
+succeeded = []          # succeeded[idx] = ran to measure_end without error
+established = []         # 1 per connection that completed connect()
+steady_rss_kib = -1      # peak VmRSS sampled across the measure window
 
 
 def _rst_close(sock):
@@ -127,7 +148,7 @@ def _db_latency_s(seq):
 
 
 # ---- server-side per-connection handler ----
-def server_conn(conn):
+def server_conn(conn, idx):
     conn.setblocking(False)
     fd = conn.fileno()
     seq = 0
@@ -136,7 +157,7 @@ def server_conn(conn):
             req = _recv_exactly(conn, fd, REQ_LEN)
             if not req:
                 break
-            pygo_core.sched_sleep(_db_latency_s(fd * 131 + seq))   # "DB"
+            pygo_core.sched_sleep(_db_latency_s(idx * 131 + seq))   # "DB"
             seq += 1
             if not _send_all(conn, fd, RESP):
                 break
@@ -161,11 +182,15 @@ def server_conn(conn):
 def accept_loop():
     lfd = listen_sock.fileno()
     accepted = 0
-    while accepted < N:
+    # Bounded by measure_end so a client that fails to establish can't
+    # leave this loop waiting forever for the N-th accept (which would
+    # hang mn_run).  Finite (50 ms) wait => self-healing re-drain of the
+    # backlog regardless of any delayed listener-readiness edge.
+    while accepted < N and time.monotonic() < MEASURE_END_T:
         try:
             conn, _ = listen_sock.accept()
         except (BlockingIOError, InterruptedError):
-            pygo_core.wait_fd(lfd, READ)
+            pygo_core.wait_fd(lfd, READ, 50)
             continue
         except OSError:
             break
@@ -175,8 +200,9 @@ def accept_loop():
                 pygo_core.netpoll_unregister(conn.fileno())
             except (AttributeError, OSError):
                 pass
+            cidx = accepted
             accepted += 1
-            pygo_core.mn_go(lambda c=conn: server_conn(c))
+            pygo_core.mn_go(lambda c=conn, i=cidx: server_conn(c, i))
             if accepted >= N:
                 break
             try:
@@ -202,8 +228,9 @@ def _client_body(idx):
     except OSError:
         pass
     # Ramp: stagger connection establishment over RAMP_S so all N don't
-    # herd at t=0 (a cold-start burst that otherwise dominates the tail
-    # and hides the steady-state SLO).
+    # herd at t0 (a cold-start burst that otherwise dominates the tail).
+    # Establishment lands before MEASURE_START_T, so it can't pollute the
+    # measured window.
     if RAMP_S > 0.0 and N > 1:
         pygo_core.sched_sleep((idx / float(N)) * RAMP_S)
     fd = s.fileno()
@@ -218,9 +245,12 @@ def _client_body(idx):
         _rst_close(s)
         return False
 
-    ready.append(1)
+    established.append(1)
     mine = latencies[idx]
-    for c in range(CYCLES):
+    # Continuous request/think loop until the steady-state window closes.
+    # A round-trip is recorded ONLY if its response lands inside the
+    # measure window -- ramp-phase and drain-phase round-trips are not.
+    while time.monotonic() < MEASURE_END_T:
         t0 = time.monotonic()
         if not _send_all(s, fd, REQ):
             _rst_close(s)
@@ -228,9 +258,9 @@ def _client_body(idx):
         if _recv_exactly(s, fd, RESP_LEN) != RESP:
             _rst_close(s)
             return False
-        # Skip cycle 0 (warmup / ramp phase) from the SLO stats.
-        if c > 0:
-            mine.append(time.monotonic() - t0)
+        t1 = time.monotonic()
+        if MEASURE_START_T <= t1 < MEASURE_END_T:
+            mine.append(t1 - t0)
         pygo_core.sched_sleep(THINK_S)        # think-time: parked + idle
     _rst_close(s)
     return True
@@ -241,14 +271,17 @@ def client(idx):
 
 
 def sampler():
-    """Snapshot RSS once most connections are mid-run (steady state)."""
-    global idle_rss_kib
-    while len(ready) < N:
-        pygo_core.sched_sleep(0.01)
-    # Sample partway through the cycle loop -- connections established,
-    # most parked in think-time.
-    pygo_core.sched_sleep(min(1.0, THINK_S * CYCLES * 0.3))
-    idle_rss_kib = _cur_rss_kib()
+    """Track peak VmRSS across the steady-state window."""
+    global steady_rss_kib
+    while time.monotonic() < MEASURE_START_T:
+        pygo_core.sched_sleep(0.05)
+    peak = -1
+    while time.monotonic() < MEASURE_END_T:
+        cur = _cur_rss_kib()
+        if cur > peak:
+            peak = cur
+        pygo_core.sched_sleep(0.1)
+    steady_rss_kib = peak
 
 
 def _cur_rss_kib():
@@ -272,16 +305,19 @@ def _percentile(sorted_vals, q):
 
 
 def main(argv):
-    global N, CYCLES, THINK_S, WORK_S, RAMP_S, PORT, listen_sock
-    global latencies, succeeded
+    global N, THINK_S, WORK_S, RAMP_S, WARMUP_S, MEASURE_S, PORT, listen_sock
+    global latencies, succeeded, established
+    global T0, MEASURE_START_T, MEASURE_END_T
     N = int(argv[1]) if len(argv) > 1 else 1024
     H = int(argv[2]) if len(argv) > 2 else 8
-    CYCLES = int(argv[3]) if len(argv) > 3 else 10
-    THINK_S = (float(argv[4]) if len(argv) > 4 else 100.0) / 1000.0
-    WORK_S = (float(argv[5]) if len(argv) > 5 else 5.0) / 1000.0
-    RAMP_S = (float(argv[6]) if len(argv) > 6 else 2.0)
+    THINK_S = (float(argv[3]) if len(argv) > 3 else 1000.0) / 1000.0
+    WORK_S = (float(argv[4]) if len(argv) > 4 else 5.0) / 1000.0
+    RAMP_S = (float(argv[5]) if len(argv) > 5 else 3.0)
+    WARMUP_S = (float(argv[6]) if len(argv) > 6 else 3.0)
+    MEASURE_S = (float(argv[7]) if len(argv) > 7 else 10.0)
     latencies = [[] for _ in range(N)]
     succeeded = [False] * N
+    established = []
 
     try:
         resource.setrlimit(resource.RLIMIT_NOFILE, (1 << 20, 1 << 20))
@@ -300,13 +336,14 @@ def main(argv):
         sys.stderr.write("mn_init failed\n")
         return 2
 
-    t0 = time.monotonic()
+    T0 = time.monotonic()
+    MEASURE_START_T = T0 + RAMP_S + WARMUP_S
+    MEASURE_END_T = MEASURE_START_T + MEASURE_S
     pygo_core.mn_go(accept_loop)
     pygo_core.mn_go(sampler)
     for i in range(N):
         pygo_core.mn_go(lambda i=i: client(i))
     pygo_core.mn_run()
-    dt = time.monotonic() - t0
 
     peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     pygo_core.mn_fini()
@@ -318,17 +355,24 @@ def main(argv):
     allat.sort()
     nreq = len(allat)
     done = sum(1 for ok in succeeded if ok)
+    est = len(established)
     p50 = _percentile(allat, 0.50) * 1000.0
     p99 = _percentile(allat, 0.99) * 1000.0
     p999 = _percentile(allat, 0.999) * 1000.0
-    rps = nreq / dt if dt > 0 else 0.0
-    print("N=%d H=%d cycles=%d think_ms=%.0f work_ms=%.1f "
-          "done=%d/%d reqs=%d %.2fs %.0frps "
+    # In-window throughput: samples are confined to the measure window, so
+    # this is the steady-state rps (not diluted by ramp/drain).
+    win_rps = nreq / MEASURE_S if MEASURE_S > 0 else 0.0
+    # Effective steady-state concurrency (Little's law): rps * mean_latency.
+    mean_lat = (sum(allat) / nreq) if nreq else 0.0
+    eff_conc = win_rps * mean_lat
+    util = 100.0 * eff_conc / N if N else 0.0
+    print("N=%d H=%d think_ms=%.0f work_ms=%.1f ramp=%.0f warmup=%.0f measure=%.0f "
+          "established=%d done=%d/%d win_reqs=%d %.0frps util=%.0f%% "
           "p50=%.1fms p99=%.1fms p99.9=%.1fms "
-          "peak_rss_kib=%d idle_rss_kib=%d nofile=%d"
-          % (N, H, CYCLES, THINK_S * 1000, WORK_S * 1000,
-             done, N, nreq, dt, rps, p50, p99, p999,
-             peak, idle_rss_kib, nofile))
+          "peak_rss_kib=%d steady_rss_kib=%d nofile=%d"
+          % (N, H, THINK_S * 1000, WORK_S * 1000, RAMP_S, WARMUP_S, MEASURE_S,
+             est, done, N, nreq, win_rps, util, p50, p99, p999,
+             peak, steady_rss_kib, nofile))
     return 0 if done == N else 1
 
 
