@@ -53,6 +53,28 @@
 #define PAYLOAD     "hellopyg"
 #define PAYLOAD_LEN 8
 
+/* Fuzz-sustainability: short-lived loopback connections otherwise pile
+ * up TIME_WAIT (one 4-tuple per close, 60s each) until the ~64K
+ * ephemeral range is exhausted and connect() stalls -- which looks
+ * exactly like the lost-wake hang we're hunting (false positives that
+ * track run history, not the code).  Two defences:
+ *   1. RST close (SO_LINGER{1,0}) -> teardown skips TIME_WAIT entirely.
+ *   2. Increasing source IP per connection across 127.0.0.0/8 -> each
+ *      source IP has its own independent ephemeral port pool (the whole
+ *      127/8 is locally bindable on Linux without assigning addresses). */
+#define NUM_SRC_IPS 250
+static volatile long g_src_ctr = 0;
+
+/* Close with an immediate RST so the socket never enters TIME_WAIT. */
+static void rst_close(int fd)
+{
+    struct linger lg;
+    lg.l_onoff = 1;
+    lg.l_linger = 0;
+    setsockopt(fd, SOL_SOCKET, SO_LINGER, &lg, sizeof(lg));
+    close(fd);
+}
+
 /* ---- echo server (pure pthread, no pygo) ---- */
 typedef struct {
     int fd;
@@ -74,7 +96,7 @@ static void *echo_conn_thread(void *arg)
         }
         if (off < 0) break;
     }
-    close(c->fd);
+    rst_close(c->fd);
     free(c);
     return NULL;
 }
@@ -166,6 +188,21 @@ static int connect_nonblock(int port)
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) return -1;
     set_nonblock(fd);
+    /* Bind an increasing source IP (127.0.0.2 .. 127.0.0.251, wrapping)
+     * with an ephemeral port, so successive connections draw from
+     * independent per-source-IP port pools.  Best-effort: if the bind
+     * fails the kernel auto-picks 127.0.0.1 + an ephemeral port. */
+    {
+        int yes = 1;
+        long c = __atomic_fetch_add(&g_src_ctr, 1, __ATOMIC_RELAXED);
+        struct sockaddr_in src;
+        setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+        memset(&src, 0, sizeof(src));
+        src.sin_family = AF_INET;
+        src.sin_addr.s_addr = htonl(0x7f000002u + (unsigned)(c % NUM_SRC_IPS));
+        src.sin_port = 0;
+        (void)bind(fd, (struct sockaddr *)&src, sizeof(src));
+    }
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
@@ -262,7 +299,7 @@ static void client_g(void *arg)
         }
     }
     pygo_netpoll_unregister(fd);   /* clear registration bitmap so fd reuse re-registers */
-    close(fd);
+    rst_close(fd);                 /* RST close: no TIME_WAIT (see rst_close) */
     pthread_mutex_lock(&g_done_lock);
     g_done_count++;
     pthread_mutex_unlock(&g_done_lock);
