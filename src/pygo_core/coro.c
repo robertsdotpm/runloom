@@ -57,6 +57,7 @@ struct pygo_coro {
     pygo_asm_coro_t asm_coro;
     void *stack;
     size_t stack_size;
+    int grown;             /* 1 if copy-grow enlarged this stack */
 #elif defined(PYGO_HAVE_FIBERS)
     void *fiber;
 #elif defined(PYGO_HAVE_UCONTEXT)
@@ -428,8 +429,13 @@ void pygo_coro_destroy(pygo_coro_t *c)
 {
     if (c == NULL) return;
     /* Recycle if there's room.  Stack stays attached -- next
-     * pygo_coro_new pop reuses it without touching the stack pool. */
-    if (pygo_coro_pool_size < PYGO_CORO_POOL_CAP && c->stack != NULL) {
+     * pygo_coro_new pop reuses it without touching the stack pool.
+     * EXCEPT a copy-grown coro: its oversized stack won't match the
+     * default-size reuse check, so pooling it would just park a big
+     * stack at the head and defeat the pool for every later default
+     * spawn.  Release it instead so its pages go back promptly. */
+    if (!c->grown && pygo_coro_pool_size < PYGO_CORO_POOL_CAP
+        && c->stack != NULL) {
         c->pool_next = pygo_coro_pool;
         pygo_coro_pool = c;
         pygo_coro_pool_size++;
@@ -441,9 +447,108 @@ void pygo_coro_destroy(pygo_coro_t *c)
     free(c);
 }
 
+/* Copy-on-grow (Path A): grow a SUSPENDED coro's stack to new_usable
+ * bytes.  Called only from the resume path, where the coro is suspended
+ * at a swap boundary: its entire live state is the fcontext frame at
+ * self.sp plus the call chain above it, and self.sp is the lowest live
+ * address.  We are NOT in a signal handler -- there are no arbitrary
+ * volatile registers to fix up, only self.sp + the copied stack bytes
+ * (which include the saved callee-saved frame).  Stacks grow down, so
+ * we align the HIGH ends (every live byte keeps its offset-from-top)
+ * and add `delta` to any 8-byte word that points back into the old
+ * usable range.  Returns 0 on success (coro now on the bigger stack),
+ * -1 on failure (coro untouched, keeps its old stack + guard). */
+static int pygo_coro_grow(pygo_coro_t *c, size_t new_usable)
+{
+    size_t old_usable = c->stack_size;
+    uintptr_t old_lo, old_hi, sp, new_lo, new_hi;
+    intptr_t delta;
+    void *new_stack;
+    size_t live;
+
+    new_usable = pygo_round_to_page(new_usable);
+    if (new_usable <= old_usable) return 0;
+
+    old_lo = (uintptr_t)c->stack;
+    old_hi = old_lo + old_usable;
+    sp     = (uintptr_t)c->asm_coro.self.sp;
+    if (sp < old_lo || sp > old_hi) return -1;   /* sp out of range: bail */
+
+    new_stack = pygo_stack_map_guarded(new_usable);
+    if (new_stack == NULL) return -1;
+    new_lo = (uintptr_t)new_stack;
+    new_hi = new_lo + new_usable;
+    delta  = (intptr_t)(new_hi - old_hi);
+
+    /* Copy the live region [sp, old_hi) to [sp+delta, new_hi). */
+    live = (size_t)(old_hi - sp);
+    memcpy((void *)(sp + (uintptr_t)delta), (const void *)sp, live);
+
+    /* Rewrite interior stack pointers in the copied live region. */
+    {
+        uintptr_t *p   = (uintptr_t *)(sp + (uintptr_t)delta);
+        uintptr_t *end = (uintptr_t *)new_hi;
+        for (; p < end; p++) {
+            uintptr_t v = *p;
+            if (v >= old_lo && v < old_hi) {
+                *p = (uintptr_t)((intptr_t)v + delta);
+            }
+        }
+    }
+
+    /* Patch the saved SP, swap in the new region, drop the old. */
+    c->asm_coro.self.sp = (void *)((intptr_t)sp + delta);
+    {
+        void *old_stack = c->stack;
+        size_t old_sz   = c->stack_size;
+        c->stack      = new_stack;
+        c->stack_size = new_usable;
+        c->grown      = 1;
+        pygo_stack_unmap_guarded(old_stack, old_sz);
+    }
+    return 0;
+}
+
+/* Grow heuristic, checked at every resume.  If the suspended coro is
+ * using more than ~3/4 of its usable stack (little headroom below
+ * self.sp), double it (page-rounded, capped at PYGO_STACK_GROW_MAX).
+ * This is the Path-A safe-point grow: it grows goroutines that
+ * legitimately deepen ACROSS yields, which is what lets us ship a small
+ * default stack.  It cannot rescue a deep NON-yielding burst between
+ * two yields -- that overflows into the guard page (clean SIGSEGV, not
+ * silent corruption); such code must set a larger stack explicitly or
+ * (for known deep stdlib paths) be pre-warmed.  Env PYGO_STACK_GROW=0
+ * disables. */
+#define PYGO_STACK_GROW_MAX (8u << 20)   /* 8 MB ceiling (matches MAX_STACK) */
+static int pygo_coro_maybe_grow(pygo_coro_t *c)
+{
+    static int grow_on = -1;
+    int on = __atomic_load_n(&grow_on, __ATOMIC_RELAXED);
+    uintptr_t sp, lo, headroom, quarter;
+    if (on < 0) {
+        const char *e = getenv("PYGO_STACK_GROW");
+        on = (e != NULL && *e == '0') ? 0 : 1;     /* default ON */
+        __atomic_store_n(&grow_on, on, __ATOMIC_RELAXED);
+    }
+    if (!on || c == NULL || c->stack == NULL || c->done) return 0;
+    if (c->stack_size >= PYGO_STACK_GROW_MAX) return 0;
+    sp = (uintptr_t)c->asm_coro.self.sp;
+    lo = (uintptr_t)c->stack;
+    if (sp <= lo) return 0;            /* invalid/overflowed: guard owns it */
+    headroom = sp - lo;
+    quarter  = (uintptr_t)(c->stack_size >> 2);
+    if (headroom < quarter) {
+        size_t target = c->stack_size << 1;
+        if (target > PYGO_STACK_GROW_MAX) target = PYGO_STACK_GROW_MAX;
+        return pygo_coro_grow(c, target);
+    }
+    return 0;
+}
+
 void pygo_coro_resume(pygo_coro_t *c)
 {
     pygo_coro_t *prev = pygo_tls_current;
+    pygo_coro_maybe_grow(c);     /* Path-A copy-grow at the resume boundary */
     pygo_tls_current = c;
     pygo_asm_swap(&c->asm_coro.caller, &c->asm_coro.self);
     pygo_tls_current = prev;
