@@ -273,6 +273,18 @@ typedef struct pygo_parker_pool {
      * gen on resume so a unlinked/reused cursor falls back to head. */
     pygo_parked_t  *sweep_cursor;
     unsigned int    sweep_cursor_gen;
+
+    /* Churn throttle (PYGO_SWEEP_MAX_CHURN).  See pygo_netpoll_sweep_idle:
+     * the sweep skips its walk when this pool's recent arrival (link)
+     * rate is high, because perf showed the active-churn tail-latency
+     * cost is lock contention between the sweep walk and the wake path
+     * on pool->lock -- not refault -- and a fast-churning pool has little
+     * genuinely-long-idle to reclaim anyway.  link_count is bumped in
+     * pygo_parker_link; all three are touched only by the owning hub
+     * (link + that hub's sweep), always under pool->lock, so no atomics. */
+    unsigned long long link_count;        /* cumulative parker arrivals */
+    unsigned long long churn_last_links;  /* link_count at last churn eval */
+    long long          churn_last_ns;     /* monotonic ns at last churn eval */
 } pygo_parker_pool_t;
 
 /* One parker pool per M:N hub plus one for the single-thread sched.
@@ -516,6 +528,7 @@ static void pygo_parker_link(pygo_parker_pool_t *pool, pygo_parked_t *p)
      * global list. */
     pygo_dh_insert(pool, p);
     __atomic_add_fetch(&pool->total, 1, __ATOMIC_RELEASE);
+    pool->link_count++;       /* arrival counter for the sweep churn throttle */
     PYGO_EVT(PYGO_EVT_PARKER_LINK, p, p->g, (long long)p->fd);
 }
 
@@ -1226,6 +1239,20 @@ int pygo_netpoll_parked_count(void)
  * sweep takes the rest.  Returns the number of stacks reclaimed. */
 #define PYGO_SWEEP_BATCH 128       /* max stacks madvised per sweep call */
 #define PYGO_SWEEP_MAX_VISIT 1024  /* max parkers examined per sweep (lock-hold bound) */
+/* Churn throttle default: skip the sweep when this pool sees more than
+ * this many parker arrivals/sec (per hub).  Calibrated so a genuinely
+ * idle keepalive workload (the N=1M target: parkers dwelling seconds,
+ * low arrival rate) always sweeps and reclaims, while an active-churn
+ * workload (sub-second per-connection cycling, high arrival rate) skips
+ * -- degrading the sweep to a no-op rather than paying lock contention.
+ * Override with PYGO_SWEEP_MAX_CHURN (0 disables the throttle).
+ *
+ * 600 calibrated on the N=65K keepalive bench (H=16): the idle target
+ * (think=10s, ~250 arrivals/s/hub) sweeps FULLY at 600 -- RSS 3419 MB
+ * (full -32% win), p99 50 ms (the OFF floor, zero cost) -- while the
+ * active-churn case (think=2s, ~1200/s/hub) throttles (RSS 4929 ~= OFF,
+ * sweep degrades to a no-op).  600 sits cleanly between the two rates. */
+#define PYGO_SWEEP_DEFAULT_MAX_CHURN 600LL
 int pygo_netpoll_sweep_idle(void *hub_opaque, long long threshold_ns)
 {
     /* No backend #if here: the actual madvise lives in
@@ -1243,6 +1270,43 @@ int pygo_netpoll_sweep_idle(void *hub_opaque, long long threshold_ns)
     }
     now = monotonic_ns();
     pygo_mutex_lock(&pool->lock);
+    /* Churn throttle.  Compute this pool's arrival rate since the last
+     * sweep eval; if it exceeds PYGO_SWEEP_MAX_CHURN links/sec, skip the
+     * walk entirely.  Rationale (perf-confirmed): the active-churn tail
+     * cost is the sweep's lock-hold competing with the wake path on
+     * pool->lock, not refault; and a fast-churning pool's parkers aren't
+     * long-idle, so there's little to reclaim.  Skipping is always safe
+     * -- a not-yet-reclaimed stack just stays resident a bit longer.  We
+     * still update the churn baseline so the rate window stays recent. */
+    {
+        static long long max_churn = -1;     /* links/sec; -1 = read env once */
+        long long mc = __atomic_load_n(&max_churn, __ATOMIC_RELAXED);
+        if (mc < 0) {
+            const char *e = getenv("PYGO_SWEEP_MAX_CHURN");
+            mc = (e != NULL) ? atoll(e) : PYGO_SWEEP_DEFAULT_MAX_CHURN;
+            if (mc < 0) mc = 0;
+            __atomic_store_n(&max_churn, mc, __ATOMIC_RELAXED);
+        }
+        if (mc > 0) {
+            unsigned long long links = pool->link_count;
+            long long dt = now - pool->churn_last_ns;
+            int throttle = 0;
+            if (pool->churn_last_ns != 0 && dt > 0) {
+                unsigned long long arrivals = links - pool->churn_last_links;
+                /* arrivals/dt[s] >= mc  <=>  arrivals*1e9 >= mc*dt  (ns) */
+                if (arrivals * 1000000000ULL >=
+                    (unsigned long long)mc * (unsigned long long)dt) {
+                    throttle = 1;
+                }
+            }
+            pool->churn_last_links = links;
+            pool->churn_last_ns = now;
+            if (throttle) {
+                pygo_mutex_unlock(&pool->lock);
+                return 0;
+            }
+        }
+    }
     {
         /* Resume from the saved cursor; reset to head if it was unlinked
          * and its slot reused (gen changed) or we ran off the end last
