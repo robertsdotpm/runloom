@@ -15,6 +15,51 @@ import time
 import pygo_core
 
 
+_prewarmed = False
+
+
+def prewarm_stdlib():
+    """Resolve lazy, deep, *synchronous* stdlib imports on the main
+    thread's (large) stack once, before any goroutine runs on a small
+    stack.
+
+    The motivating case: ``socket.getaddrinfo``'s first call lazily
+    imports an ``encodings`` codec through the import machinery
+    (``encodings.__init__.search_function`` -> ``importlib._bootstrap``).
+    That is a deep, non-yielding C-stack burst -- and because it never
+    yields, the goroutine copy-grow path (which only grows at yield
+    points) cannot rescue it; a small-stack goroutine that hit it cold
+    would overflow into the guard page and die.  Resolving it here caches
+    the codec + bootstrap state process-wide, so the path a goroutine
+    later takes through ``getaddrinfo`` is shallow.
+
+    Idempotent and best-effort: never raises into the caller.  Called
+    from pygo.run() and the aio loop before the scheduler drives any
+    goroutine.  This is the enabler for small default goroutine stacks."""
+    global _prewarmed
+    if _prewarmed:
+        return
+    _prewarmed = True
+    try:
+        import codecs
+        # Hostname/text codecs getaddrinfo + str.encode reach for.
+        for _name in ("idna", "utf-8", "ascii", "latin-1", "utf-16"):
+            try:
+                codecs.lookup(_name)
+            except LookupError:
+                pass
+    except Exception:
+        pass
+    try:
+        # Exercise the actual deep path once so any remaining lazy
+        # imports it triggers are cached on the big stack.
+        import socket
+        socket.getaddrinfo("127.0.0.1", 0, socket.AF_UNSPEC,
+                           socket.SOCK_STREAM)
+    except Exception:
+        pass
+
+
 class Goroutine(object):
     """Public-facing handle for a spawned goroutine.
 
@@ -93,6 +138,7 @@ def run(main_fn=None):
     is the moral equivalent of Go's `func main()`.  If you've already
     called pygo.go(...) yourself, pass main_fn=None to just drain.
     """
+    prewarm_stdlib()
     if main_fn is not None:
         go(main_fn)
     return pygo_core.run()

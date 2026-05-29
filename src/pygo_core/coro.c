@@ -120,6 +120,49 @@ const char *pygo_coro_backend(void)
 
 static PYGO_TLS void **pygo_tls_stack_pool = NULL;
 
+/* Guard page below each coroutine stack.  A push past the low end of
+ * the usable region lands in this PROT_NONE page -> SIGSEGV, instead of
+ * silently corrupting the neighbouring allocation (plain mmap-per-g has
+ * no implicit guard).  IMPORTANT: the usable stack the rest of coro.c
+ * sees is still [stack, stack+size) with `stack` = lowest usable byte;
+ * the guard is one page BELOW `stack`, owned ONLY by acquire/release/
+ * warmup here.  region_base == (char *)stack - pygo_stack_guard().  So
+ * paint, HWM scan, asm_make_ctx, and the madvise sweep are unchanged --
+ * they all operate on the usable region. */
+static size_t pygo_stack_guard(void)
+{
+    long ps = sysconf(_SC_PAGESIZE);
+    return (ps > 0) ? (size_t)ps : (size_t)4096;
+}
+
+/* mmap a guarded stack [guard PROT_NONE | usable RW]; return the lowest
+ * USABLE byte (region_base + guard), or NULL on mmap failure.  If the
+ * mprotect fails the region is still usable (just unguarded) so we fall
+ * through rather than fail the spawn -- safety degrades, correctness
+ * does not. */
+static void *pygo_stack_map_guarded(size_t usable)
+{
+    size_t guard = pygo_stack_guard();
+    size_t total = guard + usable;
+    int flags = MAP_PRIVATE | MAP_ANONYMOUS;
+#ifdef MAP_STACK
+    flags |= MAP_STACK;
+#endif
+    {
+        void *base = mmap(NULL, total, PROT_READ | PROT_WRITE, flags, -1, 0);
+        if (base == MAP_FAILED) return NULL;
+        (void)mprotect(base, guard, PROT_NONE);
+        return (char *)base + guard;
+    }
+}
+
+/* Unmap a guarded stack given its usable base + usable size. */
+static void pygo_stack_unmap_guarded(void *usable, size_t usable_size)
+{
+    size_t guard = pygo_stack_guard();
+    munmap((char *)usable - guard, guard + usable_size);
+}
+
 static void *pygo_stack_acquire(size_t size)
 {
     void **head = pygo_tls_stack_pool;
@@ -137,7 +180,8 @@ static void *pygo_stack_acquire(size_t size)
          * pathological mixed-size case. */
         while (head != NULL && (size_t)head[PYGO_STACK_HDR_SIZE] != size) {
             void **next = (void **)head[PYGO_STACK_HDR_NEXT];
-            munmap((void *)head, (size_t)head[PYGO_STACK_HDR_SIZE]);
+            pygo_stack_unmap_guarded((void *)head,
+                                     (size_t)head[PYGO_STACK_HDR_SIZE]);
             head = next;
         }
         pygo_tls_stack_pool = head;
@@ -146,17 +190,7 @@ static void *pygo_stack_acquire(size_t size)
             return (void *)head;
         }
     }
-    {
-        int flags = MAP_PRIVATE | MAP_ANONYMOUS;
-#ifdef MAP_STACK
-        flags |= MAP_STACK;
-#endif
-        void *s = mmap(NULL, size, PROT_READ | PROT_WRITE, flags, -1, 0);
-        if (s == MAP_FAILED) {
-            return NULL;
-        }
-        return s;
-    }
+    return pygo_stack_map_guarded(size);
 }
 
 static void pygo_stack_release(void *stack, size_t size)
@@ -194,12 +228,8 @@ static int pygo_stack_warmup_posix(size_t size, int n)
 {
     int i;
     for (i = 0; i < n; i++) {
-        int flags = MAP_PRIVATE | MAP_ANONYMOUS;
-#ifdef MAP_STACK
-        flags |= MAP_STACK;
-#endif
-        void *s = mmap(NULL, size, PROT_READ | PROT_WRITE, flags, -1, 0);
-        if (s == MAP_FAILED) return i;
+        void *s = pygo_stack_map_guarded(size);
+        if (s == NULL) return i;
         pygo_stack_release(s, size);
     }
     return n;

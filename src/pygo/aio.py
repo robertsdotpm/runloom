@@ -54,6 +54,7 @@ import sys
 import time as _time
 
 import pygo_core
+from . import runtime as _runtime
 
 
 def _close_sock(sock):
@@ -773,6 +774,10 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
             pygo_core.sched_stop()
         future.add_done_callback(_stop_on_done)
 
+        # Resolve deep, non-yielding stdlib imports (e.g. getaddrinfo's
+        # first-call codec import) on the main thread before any driver
+        # goroutine runs them on a small stack -- see prewarm_stdlib.
+        _runtime.prewarm_stdlib()
         self._running = True
         asyncio._set_running_loop(self)
         try:
@@ -821,6 +826,10 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
             pass
 
     def run_forever(self):
+        # Resolve deep, non-yielding stdlib imports (e.g. getaddrinfo's
+        # first-call codec import) on the main thread before any driver
+        # goroutine runs them on a small stack -- see prewarm_stdlib.
+        _runtime.prewarm_stdlib()
         self._running = True
         asyncio._set_running_loop(self)
         try:
