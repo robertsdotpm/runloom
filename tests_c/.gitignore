@@ -1,4 +1,9 @@
-tests_c/bench_mn
-tests_c/bench_mn-asan
-tests_c/bench_mn-tsan
-tests_c/bench_mn-ubsan
+# Compiled bench/test binaries (paths are relative to this dir).
+bench_mn
+bench_mn-asan
+bench_mn-tsan
+bench_mn-ubsan
+bench_server_pygo
+bench_server_pygo-asan
+bench_server_pygo-tsan
+bench_server_pygo-ubsan
