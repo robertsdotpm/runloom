@@ -347,8 +347,9 @@ void pygo_first_run_install_datastack(void);
  * NULL), gs that never went deep enough to have a reclaimable tail, and
  * on pre-3.11 Pythons / platforms without MADV_DONTNEED.
  *
- * Gated by PYGO_DATASTACK_SWEEP (read once); the netpoll dwell sweep calls
- * this per batched parker right after the C-stack madvise. */
+ * Default-ON (PYGO_DATASTACK_SWEEP=0 opts out), mirroring the master
+ * PYGO_STACK_PARK_SWEEP switch that gates the dwell sweep this rides in;
+ * the sweep calls this per batched parker right after the C-stack madvise. */
 void pygo_sched_madvise_datastack_idle(pygo_g_t *g);
 
 /* Decompose instrumentation for the datastack sweep (PYGO_DATASTACK_DEBUG).
