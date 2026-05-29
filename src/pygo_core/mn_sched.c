@@ -450,9 +450,17 @@ static PYGO_THREAD_RET pygo_hub_main(void *arg)
                  * resume; that's fine -- next iter's g_next->snap
                  * load overwrites. */
                 pygo_sched_ready_push(&h->sched, g);
+            } else if (pygo_g_state_in(g, PYGO_GST_MASK_PARKED)) {
+                /* g parked on a waiter (netpoll/chan/sleep/park_safe)
+                 * and won't run again until woken: drop its now-idle
+                 * stack pages.  No-op unless PYGO_STACK_PARK_DONTNEED=1.
+                 * Gated on the PARKED states so a cooperative sched_yield
+                 * (also self_queued, but re-queued + resuming shortly)
+                 * doesn't pay an immediate re-fault. */
+                pygo_coro_park(g->coro);
             }
-            /* sched_yield path: g pushed itself, tstate has g's state,
-             * no work needed here. */
+            /* remaining sched_yield path: g pushed itself, tstate has
+             * g's state, no work needed here. */
         }
     }
     /* Restore hub's tstate before the thread exits. */

@@ -1287,6 +1287,13 @@ Py_ssize_t pygo_sched_drain(pygo_sched_t *s)
                 pygo_cal_record(g);
                 pygo_g_decref(g);
                 pygo_pystate_snap(&sched_snap);
+            } else if (pygo_g_state_in(g, PYGO_GST_MASK_PARKED)) {
+                /* Parked on a waiter (netpoll/chan/sleep/park_safe):
+                 * drop the g's now-idle stack pages until it's woken.
+                 * No-op unless PYGO_STACK_PARK_DONTNEED=1.  Cooperative
+                 * sched_yield gs are RUNNABLE (already re-queued), not
+                 * PARKED, so they skip this and avoid a re-fault. */
+                pygo_coro_park(g->coro);
             }
             /* Yielded gs: tstate stays in g's state.  Next iter's
              * g_next->snap load (or first-run install) overwrites. */

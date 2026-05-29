@@ -61,6 +61,16 @@ void pygo_coro_thread_fini(void);
  * No-op if n <= 0.  Returns the number actually pre-allocated. */
 int pygo_coro_warmup(size_t stack_size, int n);
 
+/* Drop the physical page frames of c's currently-idle (low) stack
+ * region without releasing the stack -- the coro stays bound to its
+ * goroutine.  The scheduler calls this when a g parks on a waiter
+ * (netpoll/chan/sleep/park_safe); the next resume re-faults the few
+ * touched pages (~one page fault).  MUST be called only while c is
+ * SUSPENDED (so its saved stack pointer is valid).  No-op unless
+ * PYGO_STACK_PARK_DONTNEED=1, and on backends without an inspectable
+ * saved SP (ucontext / Fibers). */
+void pygo_coro_park(pygo_coro_t *c);
+
 /* ------------------------------------------------------------------ */
 /* Stack-usage measurement (used by sched calibration)                */
 /* ------------------------------------------------------------------ */

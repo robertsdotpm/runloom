@@ -595,6 +595,45 @@ int pygo_coro_done(const pygo_coro_t *c)
 #endif /* PYGO_HAVE_UCONTEXT */
 
 /* ------------------------------------------------------------------ */
+/* Park: drop idle stack pages without releasing the coro             */
+/* ------------------------------------------------------------------ */
+
+void pygo_coro_park(pygo_coro_t *c)
+{
+#if defined(PYGO_HAVE_FCONTEXT) && defined(MADV_DONTNEED)
+    /* Opt-in, evaluated once.  getenv reads are safe to race here --
+     * every thread computes the same value. */
+    static int park_dontneed = -1;
+    int on = __atomic_load_n(&park_dontneed, __ATOMIC_RELAXED);
+    if (on < 0) {
+        const char *e = getenv("PYGO_STACK_PARK_DONTNEED");
+        on = (e != NULL && *e == '1') ? 1 : 0;
+        __atomic_store_n(&park_dontneed, on, __ATOMIC_RELAXED);
+    }
+    if (!on || c == NULL || c->stack == NULL) return;
+    {
+        long ps = sysconf(_SC_PAGESIZE);
+        size_t page = (ps > 0) ? (size_t)ps : (size_t)4096;
+        uintptr_t base = (uintptr_t)c->stack;
+        uintptr_t top  = base + c->stack_size;
+        /* Saved SP of the suspended coro = lowest live address; the
+         * live region is [sp, top).  We only ever drop pages strictly
+         * below sp, so no saved register or call frame is touched. */
+        uintptr_t sp   = (uintptr_t)c->asm_coro.self.sp;
+        uintptr_t lo, hi;
+        if (sp <= base || sp > top) return;     /* sanity: sp in range */
+        lo = base + page;                       /* keep first page (pool hdr) */
+        hi = sp & ~(uintptr_t)(page - 1);       /* page-align DOWN below sp */
+        if (hi > lo) {
+            (void)madvise((void *)lo, (size_t)(hi - lo), MADV_DONTNEED);
+        }
+    }
+#else
+    (void)c;
+#endif
+}
+
+/* ------------------------------------------------------------------ */
 /* Public scan_hwm                                                    */
 /* ------------------------------------------------------------------ */
 
