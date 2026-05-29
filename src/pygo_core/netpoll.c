@@ -38,6 +38,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+#if !defined(PYGO_OS_WINDOWS)
+#  include <sys/resource.h>   /* getrlimit(RLIMIT_NOFILE) for fd-array sizing */
+#endif
+
 #if defined(PYGO_HAVE_EPOLL)
 #  include <sys/epoll.h>
 #  include <unistd.h>
@@ -211,9 +215,11 @@ static void pygo_parker_pool_release(pygo_parked_t *p)
  *   pygo_iouring_ring_*          - per-ring eventfd routing in the
  *                                  shared epoll
  *
- * The registration bitmap currently uses pygo_parked_lock for its
- * read-then-set sequence; Phase B will give it its own lock once
- * pygo_parker_pool_t::lock is split per-hub. */
+ * The registration bitmap's read-then-set sequence runs under the
+ * default pool's lock (pygo_pool.lock); the pending-wake bitmap is
+ * lock-free.  Both arrays are preallocated once to the fd hard limit
+ * (pygo_fd_arrays_init) and never realloc'd, so their base pointers
+ * are stable for the process lifetime. */
 typedef struct pygo_parker_pool {
     pygo_mutex_t lock;
     volatile long lock_inited;          /* 0 = not yet, 1 = in flight, 2 = ready */
@@ -473,7 +479,7 @@ static void pygo_parker_link(pygo_parker_pool_t *pool, pygo_parked_t *p)
     PYGO_EVT(PYGO_EVT_PARKER_LINK, p, p->g, (long long)p->fd);
 }
 
-/* Unlink p from both lists.  Caller holds pygo_parked_lock.  Returns 1
+/* Unlink p from both lists.  Caller holds pool->lock.  Returns 1
  * if p was actually removed from either list (caller "owns" the wake);
  * 0 if p was already fully unlinked (no-op, e.g. pump and pending-bits
  * path both raced to clean us up).  The counter is decremented exactly
@@ -580,7 +586,7 @@ int pygo_netpoll_inspect_for_self_check(struct pygo_self_check_stats *out)
     pygo_parked_t *slow, *fast;
     size_t i;
 
-    if (!pygo_netpoll_inited) {
+    if (!__atomic_load_n(&pygo_netpoll_inited, __ATOMIC_ACQUIRE)) {
         pygo_self_check_stats_set(out, 0, 0, 0, 0, 0, 0);
         return 0;
     }
@@ -661,9 +667,10 @@ int pygo_netpoll_inspect_for_self_check(struct pygo_self_check_stats *out)
  * epoll_ctl syscall entirely -- the kernel keeps reporting edges
  * until the fd is closed (which auto-clears the registration).
  *
- * Protected by pygo_parked_lock for write; reads under the lock
- * to keep the check + ADD atomic against concurrent registers
- * for the same fd. */
+ * Every access (get/set/clear) is under pygo_pool.lock, keeping the
+ * check + ADD atomic against concurrent registers for the same fd.
+ * The backing array is preallocated once (pygo_fd_arrays_init) and
+ * never realloc'd, so the pointer is stable for the process lifetime. */
 static unsigned char *pygo_fd_registered_bm = NULL;
 static size_t         pygo_fd_registered_cap_bytes = 0;
 
@@ -677,55 +684,134 @@ static size_t         pygo_fd_registered_cap_bytes = 0;
  *
  * Each fd gets one byte holding a mask of PYGO_NETPOLL_READ /
  * PYGO_NETPOLL_WRITE bits.  Pump sets bits when it can't find a
- * matching parker; wait_fd consumes bits before parking and returns
- * immediately if a pending bit covers the requested event.  Stored
- * as a plain byte array; access via atomic fetch_or / fetch_and to
- * make hub races safe without grabbing pygo_parked_lock.
+ * matching parker (pygo_fd_pending_wake_set, called with NO lock and
+ * from any hub's pump concurrently); wait_fd consumes bits before
+ * parking (pygo_fd_pending_wake_consume, lock-free) and returns
+ * immediately if a pending bit covers the requested event.
  *
- * Memory ordering: the pump's fetch_or pairs with wait_fd's
- * fetch_and via ACQ_REL on both, providing a clean happens-before
- * for "kernel event happened" -> "next wait observes it". */
+ * The array is preallocated once to the fd hard limit and never
+ * realloc'd (see pygo_fd_arrays_init).  That is what makes concurrent
+ * lock-free set/consume safe: with no realloc the base pointer never
+ * moves, so there is no writer/writer or writer/reader UAF -- only
+ * per-byte atomic fetch_or / fetch_and on a stable buffer.
+ *
+ * Memory ordering: the pump's fetch_or pairs with wait_fd's fetch_and
+ * via ACQ_REL on both, providing a clean happens-before for "kernel
+ * event happened" -> "next wait observes it".  The init publish stores
+ * the base (RELEASE) before the cap (RELEASE); readers load the cap
+ * (ACQUIRE) before the base, so a non-zero cap implies a valid base. */
 static unsigned char *pygo_fd_pending_wake = NULL;
 static size_t         pygo_fd_pending_wake_cap = 0;
 
-static int pygo_fd_pending_wake_ensure(int fd)
+/* Upper/lower bounds on the preallocated fd capacity.  4M fds = 4MB
+ * pending-wake array + 512KB registration bitmap, worst case. */
+#define PYGO_FD_CAP_MIN   1024u
+#define PYGO_FD_CAP_MAX   (8u * 1024u * 1024u)
+
+/* Capacity to preallocate the per-fd arrays to.  An open fd is always
+ * < the RLIMIT_NOFILE soft limit, which can never exceed the hard
+ * limit without privilege; sizing to the hard limit guarantees no
+ * legal fd ever indexes past the array, so it is never realloc'd.
+ * PYGO_NETPOLL_MAXFD overrides for hosts whose hard limit is
+ * unlimited (then both rlimits read as RLIM_INFINITY). */
+static size_t pygo_fd_cap_target(void)
 {
-    if (fd < 0) return -1;
-    if ((size_t)fd < pygo_fd_pending_wake_cap) return 0;
-    {
-        size_t newcap = pygo_fd_pending_wake_cap ? pygo_fd_pending_wake_cap * 2 : 256;
-        unsigned char *nb;
-        while (newcap <= (size_t)fd) newcap *= 2;
-        nb = (unsigned char *)realloc(pygo_fd_pending_wake, newcap);
-        if (nb == NULL) return -1;
-        memset(nb + pygo_fd_pending_wake_cap, 0,
-               newcap - pygo_fd_pending_wake_cap);
-        pygo_fd_pending_wake     = nb;
-        pygo_fd_pending_wake_cap = newcap;
+    size_t target = 65536;
+    const char *env;
+#if !defined(PYGO_OS_WINDOWS)
+    struct rlimit r;
+    if (getrlimit(RLIMIT_NOFILE, &r) == 0) {
+        if (r.rlim_max != RLIM_INFINITY && r.rlim_max > 0)
+            target = (size_t)r.rlim_max;
+        else if (r.rlim_cur != RLIM_INFINITY && r.rlim_cur > 0)
+            target = (size_t)r.rlim_cur;
     }
-    return 0;
+#endif
+    env = getenv("PYGO_NETPOLL_MAXFD");
+    if (env != NULL && *env != '\0') {
+        char *end = NULL;
+        long v = strtol(env, &end, 10);
+        if (end != env && v > 0) target = (size_t)v;
+    }
+    if (target < PYGO_FD_CAP_MIN) target = PYGO_FD_CAP_MIN;
+    if (target > PYGO_FD_CAP_MAX) target = PYGO_FD_CAP_MAX;
+    return target;
 }
 
-/* Pump-side: mark an event as observed-but-unrouted.  Caller holds
- * pygo_parked_lock (we extend the array under it; the atomic op
- * itself is fine outside the lock). */
+/* One-time preallocation of both per-fd arrays.  Called from
+ * pygo_netpoll_init while holding pygo_pool.lock, which serialises it
+ * against bit get/set/clear (same lock) and against a racing init.
+ * Idempotent: a second call that finds the arrays already present
+ * (e.g. after fini/init) is a no-op. */
+static void pygo_fd_arrays_init(void)
+{
+    size_t cap_fds, bm_bytes;
+    unsigned char *pw, *bm;
+    if (pygo_fd_pending_wake != NULL) return;
+    cap_fds  = pygo_fd_cap_target();
+    bm_bytes = (cap_fds + 7u) >> 3;
+    pw = (unsigned char *)calloc(cap_fds, 1);
+    bm = (unsigned char *)calloc(bm_bytes, 1);
+    if (pw == NULL || bm == NULL) {
+        free(pw);
+        free(bm);
+        return;   /* caps stay 0; set/consume/bit_* bounds-check to no-ops */
+    }
+    pygo_fd_registered_bm        = bm;
+    pygo_fd_registered_cap_bytes = bm_bytes;
+    /* Publish base before cap so the lock-free consumer that loads cap
+     * (ACQUIRE) and sees it non-zero is guaranteed to see this base. */
+    __atomic_store_n(&pygo_fd_pending_wake, pw, __ATOMIC_RELEASE);
+    __atomic_store_n(&pygo_fd_pending_wake_cap, cap_fds, __ATOMIC_RELEASE);
+}
+
+/* Warn once when an fd exceeds the preallocated ceiling.  This cannot
+ * happen for an fd this process can legally hold (it would be >= the
+ * hard limit); the guard exists only so a privileged runtime
+ * limit-raise degrades to a dropped event + diagnostic, never a
+ * reintroduced realloc race. */
+static void pygo_fd_cap_warn_once(int fd)
+{
+    static int warned = 0;
+    int expected = 0;
+    if (__atomic_compare_exchange_n(&warned, &expected, 1, 0,
+                                    __ATOMIC_RELAXED, __ATOMIC_RELAXED)) {
+        fprintf(stderr,
+                "[pygo] fd %d exceeds preallocated netpoll capacity %zu; "
+                "raise PYGO_NETPOLL_MAXFD (event dropped)\n",
+                fd, pygo_fd_pending_wake_cap);
+    }
+}
+
+/* Pump-side: mark an event as observed-but-unrouted.  Lock-free and
+ * callable concurrently from any hub's pump -- safe because the array
+ * is preallocated and never moves. */
 static void pygo_fd_pending_wake_set(int fd, int mask)
 {
+    unsigned char *base;
+    size_t cap;
     if (fd < 0 || mask == 0) return;
-    if (pygo_fd_pending_wake_ensure(fd) != 0) return;
-    __atomic_fetch_or(&pygo_fd_pending_wake[fd],
-                      (unsigned char)mask, __ATOMIC_ACQ_REL);
+    cap = __atomic_load_n(&pygo_fd_pending_wake_cap, __ATOMIC_ACQUIRE);
+    if ((size_t)fd >= cap) { pygo_fd_cap_warn_once(fd); return; }
+    base = __atomic_load_n(&pygo_fd_pending_wake, __ATOMIC_ACQUIRE);
+    if (base == NULL) return;
+    __atomic_fetch_or(&base[fd], (unsigned char)mask, __ATOMIC_ACQ_REL);
 }
 
 /* wait_fd-side: claim any pending bits matching `events`.  Returns
- * the bits that were pending AND in events (0 = nothing pending). */
+ * the bits that were pending AND in events (0 = nothing pending).
+ * Lock-free. */
 static int pygo_fd_pending_wake_consume(int fd, int events)
 {
-    if (fd < 0 || (size_t)fd >= pygo_fd_pending_wake_cap) return 0;
+    unsigned char *base;
+    size_t cap = __atomic_load_n(&pygo_fd_pending_wake_cap, __ATOMIC_ACQUIRE);
+    if (fd < 0 || (size_t)fd >= cap) return 0;
+    base = __atomic_load_n(&pygo_fd_pending_wake, __ATOMIC_ACQUIRE);
+    if (base == NULL) return 0;
     {
         unsigned char take = (unsigned char)events;
         unsigned char prev =
-            __atomic_fetch_and(&pygo_fd_pending_wake[fd],
+            __atomic_fetch_and(&base[fd],
                                (unsigned char)~take, __ATOMIC_ACQ_REL);
         return prev & events;
     }
@@ -744,14 +830,10 @@ static int pygo_fd_bit_set(int fd)
     if (fd < 0) return -1;
     size_t byte = (size_t)fd >> 3;
     if (byte >= pygo_fd_registered_cap_bytes) {
-        size_t newcap = pygo_fd_registered_cap_bytes ? pygo_fd_registered_cap_bytes * 2 : 256;
-        while (newcap <= byte) newcap *= 2;
-        unsigned char *nb = (unsigned char *)realloc(pygo_fd_registered_bm, newcap);
-        if (nb == NULL) return -1;
-        memset(nb + pygo_fd_registered_cap_bytes, 0,
-               newcap - pygo_fd_registered_cap_bytes);
-        pygo_fd_registered_bm        = nb;
-        pygo_fd_registered_cap_bytes = newcap;
+        /* Beyond the preallocated hard-limit ceiling (pygo_fd_arrays_init);
+         * cannot happen for a legal fd.  Fail so the caller treats it as
+         * ENOMEM rather than silently registering nothing. */
+        return -1;
     }
     pygo_fd_registered_bm[byte] |= (unsigned char)(1u << (fd & 7));
     return 0;
@@ -775,7 +857,7 @@ static int pygo_iouring_eventfd_in_epoll = -1;
  * The dispatch path matches epoll evs[i].data.fd against the eventfd
  * column and calls pygo_iouring_ring_drain on the corresponding ring.
  * Sized for typical CPU counts (one hub == one ring); 64 is comfortable
- * for any host we run on.  Protected by pygo_parked_lock.
+ * for any host we run on.  Protected by pygo_pool.lock.
  *
  * Parallel arrays instead of array-of-struct: small (one cache line each
  * at 64 entries) + lets us scan the fd column tightly.
@@ -846,7 +928,7 @@ const char *pygo_netpoll_backend(void)
     /* Force init so the IOCP/WSAPoll probe runs.  Without this the
      * default string ("select") is returned even when IOCP would
      * succeed -- the actual init only runs on first wait. */
-    if (!pygo_netpoll_inited) pygo_netpoll_init();
+    if (!__atomic_load_n(&pygo_netpoll_inited, __ATOMIC_ACQUIRE)) pygo_netpoll_init();
     return pygo_win_backend_name;
 #else
     return "select";
@@ -855,8 +937,15 @@ const char *pygo_netpoll_backend(void)
 
 int pygo_netpoll_init(void)
 {
-    if (pygo_netpoll_inited) return 0;
+    /* ACQUIRE pairs with the RELEASE store at the end: any thread that
+     * sees inited==1 here also sees the array publication below. */
+    if (__atomic_load_n(&pygo_netpoll_inited, __ATOMIC_ACQUIRE)) return 0;
     pygo_parker_pool_lock_ensure_inited(&pygo_pool);
+    /* Preallocate the per-fd arrays under pygo_pool.lock (serialises
+     * against bit get/set/clear and a racing init). */
+    pygo_mutex_lock(&pygo_pool.lock);
+    pygo_fd_arrays_init();
+    pygo_mutex_unlock(&pygo_pool.lock);
 #if defined(PYGO_HAVE_EPOLL)
     pygo_epoll_fd = epoll_create1(EPOLL_CLOEXEC);
     if (pygo_epoll_fd < 0) return -1;
@@ -895,7 +984,9 @@ int pygo_netpoll_init(void)
         }
     }
 #endif
-    pygo_netpoll_inited = 1;
+    /* RELEASE: publish the array writes above to any thread that later
+     * observes inited==1 via the ACQUIRE load at the top. */
+    __atomic_store_n(&pygo_netpoll_inited, 1, __ATOMIC_RELEASE);
     return 0;
 }
 
@@ -913,7 +1004,7 @@ void pygo_netpoll_fini(void)
     /* WSAPoll / select are stateless; nothing else to close.
      * Winsock itself is left up by design (see pygo_winsock_init). */
 #endif
-    pygo_netpoll_inited = 0;
+    __atomic_store_n(&pygo_netpoll_inited, 0, __ATOMIC_RELEASE);
 }
 
 static long long monotonic_ns(void)
@@ -1540,7 +1631,7 @@ int pygo_netpoll_pump(long long timeout_ns)
     long long min_deadline = -1;
     int woke = 0;
 
-    if (!pygo_netpoll_inited) {
+    if (!__atomic_load_n(&pygo_netpoll_inited, __ATOMIC_ACQUIRE)) {
         if (pygo_netpoll_init() != 0) return -1;
     }
 
