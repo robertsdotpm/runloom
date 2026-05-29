@@ -60,6 +60,27 @@ listen_sock = None
 # only -- distinct-index stores + Bool singletons need no lock.
 results = []
 
+# Idle-hold phase (T3.1 shape).  When IDLE_S > 0 each connection, after its
+# round-trips, parks idle for IDLE_S before closing -- modelling the N=1M
+# steady state (95% of connections parked on netpoll holding a stack).  A
+# sampler goroutine reads current RSS mid-idle so we can see how much a
+# parked stack actually costs (and how much madvise-on-park would reclaim).
+IDLE_S = 0.0
+ready = []                  # list.append is thread-safe under 3.13t; len() O(1)
+idle_rss_kib = -1           # set by the sampler g; read by main after mn_run
+
+
+def _cur_rss_kib():
+    """Current resident set (VmRSS), not the peak."""
+    try:
+        with open("/proc/self/status") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1])
+    except (OSError, ValueError):
+        pass
+    return -1
+
 
 def _rst_close(sock):
     """Close with an immediate RST so the socket skips TIME_WAIT."""
@@ -212,6 +233,13 @@ def _client_body(idx):
         if _recv_exactly(s, fd, PAYLOAD_LEN) != PAYLOAD:
             _rst_close(s)
             return False
+    if IDLE_S > 0.0:
+        # Signal "reached idle", then park (sleep) so the connection sits
+        # idle -- both this client and its server handler are now parked
+        # holding a stack.  The server handler is parked on recv waiting
+        # for the close that comes after the idle window.
+        ready.append(1)
+        pygo_core.sched_sleep(IDLE_S)
     _rst_close(s)
     return True
 
@@ -219,6 +247,18 @@ def _client_body(idx):
 def client(idx):
     # Write only this client's own slot (no shared counter).
     results[idx] = _client_body(idx)
+
+
+def sampler():
+    """Spin-wait until every client is idle, settle, then snapshot RSS."""
+    global idle_rss_kib
+    # Wait for all connections to reach the idle phase.
+    while len(ready) < N:
+        pygo_core.sched_sleep(0.01)
+    # Let the scheduler quiesce (any in-flight parks complete / madvise
+    # runs at park time) before sampling.
+    pygo_core.sched_sleep(min(0.5, IDLE_S * 0.4))
+    idle_rss_kib = _cur_rss_kib()
 
 
 def _peak_rss_kib():
@@ -235,10 +275,11 @@ def _maps_count():
 
 
 def main(argv):
-    global N, M, PORT, listen_sock, results
+    global N, M, PORT, listen_sock, results, IDLE_S
     N = int(argv[1]) if len(argv) > 1 else 1024
     H = int(argv[2]) if len(argv) > 2 else 8
     M = int(argv[3]) if len(argv) > 3 else 5
+    IDLE_S = float(argv[4]) if len(argv) > 4 else 0.0   # idle-hold seconds
     results = [False] * N
 
     # Lift the fd limit to match the C bench.
@@ -261,6 +302,8 @@ def main(argv):
 
     t0 = time.monotonic()
     pygo_core.mn_go(accept_loop)
+    if IDLE_S > 0.0:
+        pygo_core.mn_go(sampler)
     for i in range(N):
         pygo_core.mn_go(lambda i=i: client(i))
     completed = pygo_core.mn_run()
@@ -272,14 +315,18 @@ def main(argv):
     listen_sock.close()
 
     done = sum(1 for r in results if r is True)
-    # Cross-check: every goroutine (1 accept + N echo + N client) drained.
-    if completed != 2 * N + 1:
+    # Cross-check: every goroutine (1 accept + N echo + N client [+ 1
+    # sampler when idle]) drained.
+    expect = 2 * N + 1 + (1 if IDLE_S > 0.0 else 0)
+    if completed != expect:
         sys.stderr.write("note: completed=%d expected=%d\n"
-                         % (completed, 2 * N + 1))
+                         % (completed, expect))
     thr = (N * M / dt / 1000.0) if dt > 0 else 0.0
+    idle_str = (" idle_s=%.2f idle_rss_kib=%d" % (IDLE_S, idle_rss_kib)
+                if IDLE_S > 0.0 else "")
     print("N=%d H=%d M=%d done=%d/%d %.3fs %.1fK/s "
-          "peak_rss_kib=%d maps=%d nofile=%d hubs=%d"
-          % (N, H, M, done, N, dt, thr, peak, maps, nofile, H))
+          "peak_rss_kib=%d maps=%d nofile=%d hubs=%d%s"
+          % (N, H, M, done, N, dt, thr, peak, maps, nofile, H, idle_str))
     if done != N:
         sys.stderr.write("FAIL: %d/%d completed\n" % (done, N))
         try:

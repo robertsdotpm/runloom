@@ -466,7 +466,13 @@ static PYGO_THREAD_RET pygo_hub_main(void *arg)
                  * stack pages.  No-op unless PYGO_STACK_PARK_DONTNEED=1.
                  * Gated on the PARKED states so a cooperative sched_yield
                  * (also self_queued, but re-queued + resuming shortly)
-                 * doesn't pay an immediate re-fault. */
+                 * doesn't pay an immediate re-fault.
+                 *
+                 * ⚠️ Racy under M:N: g is already wakeable (committed
+                 * PARKED inside wait_fd before its yield returned here),
+                 * so another hub may resume it onto this same stack while
+                 * we madvise below its SP.  Hence opt-in only -- see the
+                 * pygo_coro_park doc in coro.h. */
                 pygo_coro_park(g->coro);
             }
             /* remaining sched_yield path: g pushed itself, tstate has

@@ -68,7 +68,20 @@ int pygo_coro_warmup(size_t stack_size, int n);
  * touched pages (~one page fault).  MUST be called only while c is
  * SUSPENDED (so its saved stack pointer is valid).  No-op unless
  * PYGO_STACK_PARK_DONTNEED=1, and on backends without an inspectable
- * saved SP (ucontext / Fibers). */
+ * saved SP (ucontext / Fibers).
+ *
+ * ⚠️ M:N SAFETY: the current call site (mn_sched.c post-resume) is NOT
+ * race-free under multiple hubs.  A netpoll parker becomes wakeable the
+ * instant its commit CAS reaches PARKED (netpoll.c, inside wait_fd,
+ * BEFORE the yield returns control to this hub).  So between resume
+ * returning and this madvise, another hub's pump can claim+re-queue the
+ * g and a third hub can resume it -- running DOWN the very stack pages
+ * we are about to MADV_DONTNEED.  Window is narrow but real at scale.
+ * Therefore PYGO_STACK_PARK_DONTNEED is opt-in / measurement-only and
+ * MUST NOT be flipped default-ON until reclaim happens inside a window
+ * that excludes a concurrent resume (a RECLAIMING commit sub-state the
+ * waker respects), or stacks become small enough (copy-grow, T4.1) that
+ * reclaim isn't needed.  See HANDOFF "madvise-on-park" finding. */
 void pygo_coro_park(pygo_coro_t *c);
 
 /* ------------------------------------------------------------------ */
