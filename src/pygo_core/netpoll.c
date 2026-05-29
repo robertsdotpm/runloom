@@ -264,6 +264,15 @@ typedef struct pygo_parker_pool {
     pygo_parked_t **dh_arr;
     int             dh_size;
     int             dh_cap;
+
+    /* Stack-reclaim sweep cursor (PYGO_STACK_PARK_SWEEP).  Persists
+     * across sweeps so each sweep examines a bounded window of the
+     * (head-insert, newest-first) list instead of walking it whole
+     * under the lock; over successive sweeps the cursor covers the
+     * tail (oldest, most-reclaimable) too.  Validated by the parker's
+     * gen on resume so a unlinked/reused cursor falls back to head. */
+    pygo_parked_t  *sweep_cursor;
+    unsigned int    sweep_cursor_gen;
 } pygo_parker_pool_t;
 
 /* One parker pool per M:N hub plus one for the single-thread sched.
@@ -1215,7 +1224,8 @@ int pygo_netpoll_parked_count(void)
  * then madvise OUTSIDE the lock so the syscall doesn't stall pumps that
  * search this pool.  Bounded to PYGO_SWEEP_BATCH per call; the next idle
  * sweep takes the rest.  Returns the number of stacks reclaimed. */
-#define PYGO_SWEEP_BATCH 128
+#define PYGO_SWEEP_BATCH 128       /* max stacks madvised per sweep call */
+#define PYGO_SWEEP_MAX_VISIT 1024  /* max parkers examined per sweep (lock-hold bound) */
 int pygo_netpoll_sweep_idle(void *hub_opaque, long long threshold_ns)
 {
     /* No backend #if here: the actual madvise lives in
@@ -1225,7 +1235,7 @@ int pygo_netpoll_sweep_idle(void *hub_opaque, long long threshold_ns)
      * earlier draft did -- silently compiled the whole sweep away. */
     pygo_parker_pool_t *pool = pygo_parker_pool_for_hub(hub_opaque);
     pygo_g_t *batch[PYGO_SWEEP_BATCH];
-    int n = 0, i;
+    int n = 0, i, visited = 0;
     long long now;
     if (pool == NULL ||
         __atomic_load_n(&pool->lock_inited, __ATOMIC_ACQUIRE) != 2) {
@@ -1234,8 +1244,20 @@ int pygo_netpoll_sweep_idle(void *hub_opaque, long long threshold_ns)
     now = monotonic_ns();
     pygo_mutex_lock(&pool->lock);
     {
-        pygo_parked_t *p = pool->head;
-        while (p != NULL && n < PYGO_SWEEP_BATCH) {
+        /* Resume from the saved cursor; reset to head if it was unlinked
+         * and its slot reused (gen changed) or we ran off the end last
+         * time.  The whole walk runs under the lock, so the list is
+         * stable here; only between sweeps can the cursor go stale, which
+         * the gen check catches.  Walking off the live chain into pooled-
+         * but-unlinked parkers is memory-safe (parkers are pool-recycled,
+         * never freed) and action-safe (the commit==PARKED + dwell gate
+         * skips woken/young ones); MAX_VISIT bounds it either way. */
+        pygo_parked_t *p = pool->sweep_cursor;
+        if (p == NULL || p->gen != pool->sweep_cursor_gen) {
+            p = pool->head;
+        }
+        while (p != NULL && n < PYGO_SWEEP_BATCH &&
+               visited < PYGO_SWEEP_MAX_VISIT) {
             if (!p->reclaimed && p->park_ts != 0 &&
                 p->g != NULL && p->g->coro != NULL &&
                 __atomic_load_n(&p->commit, __ATOMIC_ACQUIRE)
@@ -1245,7 +1267,10 @@ int pygo_netpoll_sweep_idle(void *hub_opaque, long long threshold_ns)
                 batch[n++] = p->g;
             }
             p = p->next;
+            visited++;
         }
+        pool->sweep_cursor = p;                 /* NULL at end -> next resets to head */
+        pool->sweep_cursor_gen = (p != NULL) ? p->gen : 0;
     }
     pygo_mutex_unlock(&pool->lock);
     for (i = 0; i < n; i++) {
