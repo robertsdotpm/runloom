@@ -70,18 +70,19 @@ int pygo_coro_warmup(size_t stack_size, int n);
  * PYGO_STACK_PARK_DONTNEED=1, and on backends without an inspectable
  * saved SP (ucontext / Fibers).
  *
- * ⚠️ M:N SAFETY: the current call site (mn_sched.c post-resume) is NOT
- * race-free under multiple hubs.  A netpoll parker becomes wakeable the
- * instant its commit CAS reaches PARKED (netpoll.c, inside wait_fd,
- * BEFORE the yield returns control to this hub).  So between resume
- * returning and this madvise, another hub's pump can claim+re-queue the
- * g and a third hub can resume it -- running DOWN the very stack pages
- * we are about to MADV_DONTNEED.  Window is narrow but real at scale.
- * Therefore PYGO_STACK_PARK_DONTNEED is opt-in / measurement-only and
- * MUST NOT be flipped default-ON until reclaim happens inside a window
- * that excludes a concurrent resume (a RECLAIMING commit sub-state the
- * waker respects), or stacks become small enough (copy-grow, T4.1) that
- * reclaim isn't needed.  See HANDOFF "madvise-on-park" finding. */
+ * M:N SAFETY: race-free against a concurrent resume even though a netpoll
+ * parker is wakeable (commit==PARKED) before its yield returns control
+ * here.  A pump on another hub only *claims + re-queues* the g; it never
+ * resumes it.  The wake routes to the g's OWNING hub (netpoll.c:1693,
+ * pygo_mn_wake_g(p->hub, ...)), and a woken g (snap.valid) lands in that
+ * hub's LOCAL ready FIFO, which is never work-stolen (only the Chase-Lev
+ * deque is stealable -- mn_sched.c:248-286).  So the sole thread that
+ * resumes g is the same hub that runs this madvise at its post-resume
+ * site: madvise happens-before the next resume on one thread, and no
+ * other hub ever touches the stack.  PYGO_STACK_PARK_DONTNEED stays
+ * default-OFF only for the throughput cost (madvise+refault per park
+ * hurts short-park churn), not for safety; the path to default-ON is a
+ * long-park heuristic that skips short parks.  See HANDOFF. */
 void pygo_coro_park(pygo_coro_t *c);
 
 /* ------------------------------------------------------------------ */

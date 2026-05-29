@@ -468,11 +468,11 @@ static PYGO_THREAD_RET pygo_hub_main(void *arg)
                  * (also self_queued, but re-queued + resuming shortly)
                  * doesn't pay an immediate re-fault.
                  *
-                 * ⚠️ Racy under M:N: g is already wakeable (committed
-                 * PARKED inside wait_fd before its yield returned here),
-                 * so another hub may resume it onto this same stack while
-                 * we madvise below its SP.  Hence opt-in only -- see the
-                 * pygo_coro_park doc in coro.h. */
+                 * Safe under M:N: a woken g routes back to THIS (owning)
+                 * hub's non-stealable local FIFO, so this hub is the sole
+                 * resumer -- the madvise happens-before the next resume on
+                 * one thread.  Default-OFF is a throughput choice, not a
+                 * safety one (see pygo_coro_park doc in coro.h). */
                 pygo_coro_park(g->coro);
             }
             /* remaining sched_yield path: g pushed itself, tstate has
