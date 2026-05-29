@@ -571,15 +571,21 @@ static int pygo_global_sched_init_done = 0;
 
 /* ---- Stack calibration ----
  *
- * Default: 256 KB.  Generous enough that real Python programs fit
- * without overflow; demand-paging means the unused tail consumes
- * no physical RAM until touched.  After PYGO_CAL_TARGET completions
- * we freeze to next_pow2(max_hwm * PYGO_CAL_SAFETY).
+ * Default: 32 KB.  Empirically the test suite passes at 16 KB on
+ * CPython 3.13t and 8 KB on 3.12; the deepest path is
+ * socket.getaddrinfo, which lazy-loads the encodings codec on first
+ * call.  32 KB doubles the worst measured floor and keeps 1M gs at
+ * 32 GB VM (256 KB would be 256 GB).  Demand-paging means the unused
+ * tail consumes no physical RAM until touched.  Calibration adapts
+ * UP for stack-hungry programs: after PYGO_CAL_TARGET completions we
+ * freeze to next_pow2(max_hwm * PYGO_CAL_SAFETY).  Programs with deep
+ * frames in the first 1000 gs (before freeze) should call
+ * pygo_sched_set_default_stack_size() -- stacks have no guard page.
  *
  * Reads/writes are plain (single-threaded scheduler in v0); when
  * Phase C arrives these will move under the scheduler lock. */
-#define PYGO_DEFAULT_STACK_SIZE   (256 * 1024)
-#define PYGO_MIN_STACK_SIZE       (16  * 1024)
+#define PYGO_DEFAULT_STACK_SIZE   (32  * 1024)
+#define PYGO_MIN_STACK_SIZE       (16  * 1024)   /* 3.13t hard floor */
 #define PYGO_MAX_STACK_SIZE       (8   * 1024 * 1024)
 #define PYGO_CAL_TARGET           1000     /* gs before freeze */
 #define PYGO_CAL_SAFETY           4        /* multiply HWM by this */
