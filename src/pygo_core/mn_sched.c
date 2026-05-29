@@ -617,8 +617,15 @@ int pygo_mn_init(int n_threads)
 
     if (pygo_hubs != NULL) return 0;  /* already inited */
     if (n_threads <= 0) {
+        /* Auto: min(cores, 16).  Agent 6 measured pygo on 3.13t scaling
+         * linearly to H=16 (~1.17 M ops/sec) then REGRESSING past H=32
+         * for Python workloads -- atomic-refcount cache-line contention,
+         * the same ceiling threads/asyncio hit.  16 is the right default
+         * for Python; an explicit pygo_mn_init(H>16) is still honored
+         * (worthwhile only for pure-C goroutine workloads). */
         n_threads = pygo_cpu_count();
         if (n_threads <= 0) n_threads = 4;
+        if (n_threads > 16) n_threads = 16;
     }
     pygo_hubs = (pygo_hub_t *)PyMem_Calloc((size_t)n_threads, sizeof(pygo_hub_t));
     if (pygo_hubs == NULL) {
