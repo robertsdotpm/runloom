@@ -598,19 +598,14 @@ int pygo_coro_done(const pygo_coro_t *c)
 /* Park: drop idle stack pages without releasing the coro             */
 /* ------------------------------------------------------------------ */
 
-void pygo_coro_park(pygo_coro_t *c)
+/* Unconditional madvise of c's below-SP idle stack pages.  Caller owns
+ * the gating (the per-park env flag below, or the hub-idle sweep) and
+ * the M:N safety contract (only the owning hub may run this, and only
+ * while c is suspended -- see the pygo_coro_park doc in coro.h). */
+void pygo_coro_madvise_idle(pygo_coro_t *c)
 {
 #if defined(PYGO_HAVE_FCONTEXT) && defined(MADV_DONTNEED)
-    /* Opt-in, evaluated once.  getenv reads are safe to race here --
-     * every thread computes the same value. */
-    static int park_dontneed = -1;
-    int on = __atomic_load_n(&park_dontneed, __ATOMIC_RELAXED);
-    if (on < 0) {
-        const char *e = getenv("PYGO_STACK_PARK_DONTNEED");
-        on = (e != NULL && *e == '1') ? 1 : 0;
-        __atomic_store_n(&park_dontneed, on, __ATOMIC_RELAXED);
-    }
-    if (!on || c == NULL || c->stack == NULL) return;
+    if (c == NULL || c->stack == NULL) return;
     {
         long ps = sysconf(_SC_PAGESIZE);
         size_t page = (ps > 0) ? (size_t)ps : (size_t)4096;
@@ -628,6 +623,25 @@ void pygo_coro_park(pygo_coro_t *c)
             (void)madvise((void *)lo, (size_t)(hi - lo), MADV_DONTNEED);
         }
     }
+#else
+    (void)c;
+#endif
+}
+
+void pygo_coro_park(pygo_coro_t *c)
+{
+#if defined(PYGO_HAVE_FCONTEXT) && defined(MADV_DONTNEED)
+    /* Opt-in, evaluated once.  getenv reads are safe to race here --
+     * every thread computes the same value. */
+    static int park_dontneed = -1;
+    int on = __atomic_load_n(&park_dontneed, __ATOMIC_RELAXED);
+    if (on < 0) {
+        const char *e = getenv("PYGO_STACK_PARK_DONTNEED");
+        on = (e != NULL && *e == '1') ? 1 : 0;
+        __atomic_store_n(&park_dontneed, on, __ATOMIC_RELAXED);
+    }
+    if (!on) return;
+    pygo_coro_madvise_idle(c);
 #else
     (void)c;
 #endif

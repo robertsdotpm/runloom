@@ -85,6 +85,12 @@ int pygo_coro_warmup(size_t stack_size, int n);
  * long-park heuristic that skips short parks.  See HANDOFF. */
 void pygo_coro_park(pygo_coro_t *c);
 
+/* Unconditional variant: madvise c's below-SP idle pages with no env
+ * gate.  Used by the hub-idle dwell-based sweep (PYGO_STACK_PARK_SWEEP),
+ * which does its own gating + threshold.  Same SUSPENDED + owning-hub
+ * safety contract as pygo_coro_park. */
+void pygo_coro_madvise_idle(pygo_coro_t *c);
+
 /* ------------------------------------------------------------------ */
 /* Stack-usage measurement (used by sched calibration)                */
 /* ------------------------------------------------------------------ */

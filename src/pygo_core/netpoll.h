@@ -39,6 +39,12 @@ int pygo_netpoll_pump(long long timeout_ns);
  * to decide whether to call pump or exit. */
 int pygo_netpoll_parked_count(void);
 
+/* Hub-idle dwell-based stack reclaim (PYGO_STACK_PARK_SWEEP).  The
+ * calling hub madvises the idle stack pages of its OWN parkers whose
+ * park has exceeded threshold_ns.  Safe only when called by the owning
+ * hub while idle (see the netpoll.c definition).  Returns # reclaimed. */
+int pygo_netpoll_sweep_idle(void *hub_opaque, long long threshold_ns);
+
 /* Forcibly wake every parked goroutine with ready_mask=-1.  Used by
  * sched_reset() on paio.run cleanup so leftover accept loops /
  * tickers don't block the next pygo_core.run(). */

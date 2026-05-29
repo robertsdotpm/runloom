@@ -115,6 +115,14 @@ typedef struct pygo_parked {
      *            fails, so it aborts the park and returns ready_mask
      *            instead -- no lost wake, no double-resume. */
     int commit;
+    /* Dwell-based stack reclaim (PYGO_STACK_PARK_SWEEP).  park_ts is the
+     * monotonic time the g committed to parking; the hub-idle sweep
+     * madvises the stacks of its own parkers whose dwell exceeds a
+     * threshold.  reclaimed=1 means the sweep already dropped this
+     * park's idle pages, so re-sweeps skip it until the next park
+     * (pool acquire zeroes both). */
+    long long park_ts;
+    int reclaimed;
 } pygo_parked_t;
 
 #define PYGO_PARK_ARMED  0
@@ -165,6 +173,8 @@ static pygo_parked_t *pygo_parker_pool_acquire(void)
         if (p == NULL) return NULL;
     }
     p->heap_index = -1;
+    p->park_ts = 0;
+    p->reclaimed = 0;
     /* Fresh park: not yet committed, not yet woken.  Plain store is
      * safe -- the parker is not linked, so no pump can see it. */
     p->commit = PYGO_PARK_ARMED;
@@ -1190,6 +1200,60 @@ int pygo_netpoll_parked_count(void)
     return total;
 }
 
+/* Hub-idle dwell-based stack reclaim (PYGO_STACK_PARK_SWEEP).  Walk the
+ * CALLING hub's parker pool and madvise the below-SP idle stack pages of
+ * goroutines whose current park has already exceeded threshold_ns.
+ *
+ * SAFE under M:N: every parker in pool[hub] is owned by `hub` (wakes
+ * route to p->hub and land in that hub's non-stealable local FIFO, so
+ * `hub` is the sole resumer).  The caller IS that hub and is idle (not
+ * resuming) here, so nothing runs on the stacks we madvise; a concurrent
+ * pump on another hub may unlink+re-queue a parker but never touches its
+ * stack, and a re-queued g only waits in this hub's FIFO until this
+ * sweep returns -- it cannot run, complete, or be freed meanwhile.  We
+ * snapshot candidate g's under the pool lock (marking them reclaimed),
+ * then madvise OUTSIDE the lock so the syscall doesn't stall pumps that
+ * search this pool.  Bounded to PYGO_SWEEP_BATCH per call; the next idle
+ * sweep takes the rest.  Returns the number of stacks reclaimed. */
+#define PYGO_SWEEP_BATCH 128
+int pygo_netpoll_sweep_idle(void *hub_opaque, long long threshold_ns)
+{
+    /* No backend #if here: the actual madvise lives in
+     * pygo_coro_madvise_idle (coro.c), which no-ops on backends without
+     * an inspectable SP / MADV_DONTNEED.  netpoll.c does NOT define
+     * MADV_DONTNEED (no <sys/mman.h>), so gating this body on it -- as an
+     * earlier draft did -- silently compiled the whole sweep away. */
+    pygo_parker_pool_t *pool = pygo_parker_pool_for_hub(hub_opaque);
+    pygo_g_t *batch[PYGO_SWEEP_BATCH];
+    int n = 0, i;
+    long long now;
+    if (pool == NULL ||
+        __atomic_load_n(&pool->lock_inited, __ATOMIC_ACQUIRE) != 2) {
+        return 0;
+    }
+    now = monotonic_ns();
+    pygo_mutex_lock(&pool->lock);
+    {
+        pygo_parked_t *p = pool->head;
+        while (p != NULL && n < PYGO_SWEEP_BATCH) {
+            if (!p->reclaimed && p->park_ts != 0 &&
+                p->g != NULL && p->g->coro != NULL &&
+                __atomic_load_n(&p->commit, __ATOMIC_ACQUIRE)
+                    == PYGO_PARK_PARKED &&
+                (now - p->park_ts) >= threshold_ns) {
+                p->reclaimed = 1;
+                batch[n++] = p->g;
+            }
+            p = p->next;
+        }
+    }
+    pygo_mutex_unlock(&pool->lock);
+    for (i = 0; i < n; i++) {
+        pygo_coro_madvise_idle(batch[i]->coro);
+    }
+    return n;
+}
+
 void pygo_netpoll_force_unlink_g_parker(pygo_g_t *g)
 {
     pygo_parked_t *p;
@@ -1594,6 +1658,11 @@ int pygo_netpoll_wait_fd(int fd, int events, long long timeout_ns)
             return ready_mask;
         }
     }
+
+    /* Committed to parking: stamp the dwell clock for the hub-idle
+     * stack-reclaim sweep (PYGO_STACK_PARK_SWEEP).  Plain store -- only
+     * the sweep on this g's owning hub reads it, after this point. */
+    park->park_ts = monotonic_ns();
 
     /* Snapshot tstate (same as pygo_sched_yield does) so the next
      * resume restores it.  Then yield WITHOUT re-queueing -- pump

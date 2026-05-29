@@ -96,6 +96,10 @@ typedef struct pygo_hub {
      * failed -- callers fall back to the global ring path. */
     pygo_iouring_ring_t *iouring_ring;
     int                  iouring_eventfd;  /* cached for unregister at fini */
+    /* Last time this hub ran the idle stack-reclaim sweep (seconds, 0 at
+     * init -> first idle sweep fires immediately).  Rate-limits the
+     * O(parked) walk under PYGO_STACK_PARK_SWEEP. */
+    double               last_sweep_s;
 } pygo_hub_t;
 
 static pygo_hub_t *pygo_hubs = NULL;
@@ -324,6 +328,44 @@ static PYGO_THREAD_RET pygo_hub_main(void *arg)
                     if (gap_ns < idle_ns) idle_ns = gap_ns;
                 }
                 parked = pygo_netpoll_parked_count();
+                /* Hub-idle dwell-based stack reclaim (opt-in,
+                 * PYGO_STACK_PARK_SWEEP=1; threshold ms via
+                 * PYGO_STACK_PARK_SWEEP_MS, default 5).  This hub is idle
+                 * and is the sole resumer of its own parkers, so madvising
+                 * their long-idle stacks here is race-free (see
+                 * pygo_netpoll_sweep_idle).  Rate-limited to ~half the
+                 * threshold so the O(parked) walk stays cheap. */
+                {
+                    static int sweep_on = -1;
+                    /* 100 ms default: high enough that active round-trip
+                     * parks (ms-scale, even with some queuing) are left
+                     * alone, low enough to reclaim genuinely idle
+                     * keepalive parks (seconds).  A saturated all-active
+                     * bench inflates round-trip dwell, so it still pays
+                     * some cost there; the N=1M target (5% active) does
+                     * not.  Tunable via PYGO_STACK_PARK_SWEEP_MS. */
+                    static long long sweep_thresh_ns = 100000000LL;
+                    int on = __atomic_load_n(&sweep_on, __ATOMIC_RELAXED);
+                    if (on < 0) {
+                        const char *e = getenv("PYGO_STACK_PARK_SWEEP");
+                        const char *ms = getenv("PYGO_STACK_PARK_SWEEP_MS");
+                        if (ms != NULL) {
+                            long long v = atoll(ms);
+                            if (v > 0) sweep_thresh_ns = v * 1000000LL;
+                        }
+                        on = (e != NULL && *e == '1') ? 1 : 0;
+                        __atomic_store_n(&sweep_on, on, __ATOMIC_RELAXED);
+                    }
+                    if (on && parked > 0) {
+                        double now_s = pygo_sched_monotonic_seconds();
+                        double interval_s = (double)sweep_thresh_ns / 2e9;
+                        if (now_s - h->last_sweep_s >= interval_s) {
+                            pygo_netpoll_sweep_idle(
+                                pygo_mn_current_hub_opaque(), sweep_thresh_ns);
+                            h->last_sweep_s = now_s;
+                        }
+                    }
+                }
                 {
                     /* Also drive the pump when ANY iouring ring (this
                      * hub's, the global, or another hub's) has inflight
