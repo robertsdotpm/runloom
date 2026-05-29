@@ -1031,49 +1031,59 @@ static long long monotonic_ns(void)
  * sync with the kernel for fd reuse. */
 static int pygo_netpoll_register(int fd, int events)
 {
-    (void)events;   /* both arms always registered; events filtered at wake */
 #if defined(PYGO_HAVE_EPOLL)
     int need_register;
+    struct epoll_event ev;
+
+    /* T1.5 lost-wake fix: arm ONLY the requested direction,
+     * LEVEL-triggered + EPOLLONESHOT, re-arming on every park.
+     *
+     * The old scheme (register once, both arms, EPOLLET|EPOLLEXCLUSIVE,
+     * never re-armed) lost readiness wakeups under concurrency -- a g
+     * could sit parked on READ forever with its socket Recv-Q > 0
+     * (data waiting), all hubs idle.  Two mechanisms:
+     *   - EPOLLEXCLUSIVE + EPOLLET drops an edge whose single exclusive
+     *     wakeup lands on a hub not currently inside epoll_wait;
+     *   - EPOLLET never refires once an edge is missed, and register-once
+     *     never re-armed, so the parker was never woken.
+     * The cure, which is also the standard multi-threaded epoll pattern:
+     *   - LEVEL-triggered: EPOLL_CTL_MOD re-evaluates readiness and
+     *     reports an fd ready *now*, so data that arrived before the
+     *     parker linked is delivered (EPOLLET would NOT re-report it --
+     *     verified: EPOLLET+ONESHOT+re-arm hung 96/96);
+     *   - EPOLLONESHOT: exactly one delivery per arm, so no thundering
+     *     herd (EPOLLEXCLUSIVE unneeded) and the always-ready OUT side
+     *     can't busy-loop the pump;
+     *   - per-DIRECTION arming: with both IN+OUT one-shot, the always-
+     *     writable OUT would consume the single delivery before a READ
+     *     waiter's data arrived -- so arm exactly what this wait needs.
+     * Cost: one epoll_ctl per park (the bitmap now only distinguishes
+     * ADD from MOD).  Correctness over the saved syscall. */
+    ev.events = EPOLLONESHOT;
+    if (events & PYGO_NETPOLL_READ)  ev.events |= EPOLLIN | EPOLLRDHUP;
+    if (events & PYGO_NETPOLL_WRITE) ev.events |= EPOLLOUT;
+    ev.data.fd = fd;
 
     pygo_mutex_lock(&pygo_pool.lock);
-    if (pygo_fd_bit_get(fd)) {
-        pygo_mutex_unlock(&pygo_pool.lock);
-        return 0;
-    }
-    if (pygo_fd_bit_set(fd) != 0) {
+    need_register = !pygo_fd_bit_get(fd);
+    if (need_register && pygo_fd_bit_set(fd) != 0) {
         pygo_mutex_unlock(&pygo_pool.lock);
         errno = ENOMEM;
         return -1;
     }
-    need_register = 1;
     pygo_mutex_unlock(&pygo_pool.lock);
-    (void)need_register;
 
-    {
-        struct epoll_event ev;
-        /* EPOLLEXCLUSIVE (4.5+): with M:N hubs sharing one epoll fd,
-         * the kernel otherwise wakes ALL waiters on each event
-         * (thundering herd) and creates races where multiple hub
-         * threads race to find + unlink the same parker.  With
-         * EPOLLEXCLUSIVE exactly one waiter wakes per event.  On
-         * older kernels the flag is silently ignored on ADD; if the
-         * kernel rejects it explicitly (EINVAL) we retry without. */
-        ev.events = EPOLLIN | EPOLLOUT | EPOLLET | EPOLLRDHUP | EPOLLEXCLUSIVE;
-        ev.data.fd = fd;
+    if (need_register) {
         if (epoll_ctl(pygo_epoll_fd, EPOLL_CTL_ADD, fd, &ev) == 0) return 0;
-        /* Stale registration from before the bit was cleared (e.g.
-         * dup'd fd, or close-hook missed).  MOD into ET both-arms.
-         * Note: EPOLLEXCLUSIVE can't be used with EPOLL_CTL_MOD, so
-         * the MOD path drops it -- only matters for stale-fd recovery. */
-        if (errno == EEXIST) {
-            ev.events = EPOLLIN | EPOLLOUT | EPOLLET | EPOLLRDHUP;
-            if (epoll_ctl(pygo_epoll_fd, EPOLL_CTL_MOD, fd, &ev) == 0) return 0;
-        }
-        /* EINVAL = kernel too old or flag combo refused: retry without. */
-        if (errno == EINVAL) {
-            ev.events = EPOLLIN | EPOLLOUT | EPOLLET | EPOLLRDHUP;
-            if (epoll_ctl(pygo_epoll_fd, EPOLL_CTL_ADD, fd, &ev) == 0) return 0;
-        }
+        /* Stale registration (dup'd fd / missed close-hook): re-arm. */
+        if (errno == EEXIST &&
+            epoll_ctl(pygo_epoll_fd, EPOLL_CTL_MOD, fd, &ev) == 0) return 0;
+    } else {
+        /* Re-arm the one-shot for this park; MOD re-checks readiness. */
+        if (epoll_ctl(pygo_epoll_fd, EPOLL_CTL_MOD, fd, &ev) == 0) return 0;
+        /* ENOENT = fd dropped from epoll (close/reuse race); ADD. */
+        if (errno == ENOENT &&
+            epoll_ctl(pygo_epoll_fd, EPOLL_CTL_ADD, fd, &ev) == 0) return 0;
     }
     /* Failed: drop the bit so a future caller can retry. */
     pygo_mutex_lock(&pygo_pool.lock);
@@ -1081,6 +1091,7 @@ static int pygo_netpoll_register(int fd, int events)
     pygo_mutex_unlock(&pygo_pool.lock);
     return -1;
 #elif defined(PYGO_HAVE_KQUEUE)
+    (void)events;
     pygo_mutex_lock(&pygo_pool.lock);
     if (pygo_fd_bit_get(fd)) {
         pygo_mutex_unlock(&pygo_pool.lock);
