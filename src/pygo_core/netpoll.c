@@ -1339,6 +1339,10 @@ int pygo_netpoll_sweep_idle(void *hub_opaque, long long threshold_ns)
     pygo_mutex_unlock(&pool->lock);
     for (i = 0; i < n; i++) {
         pygo_coro_madvise_idle(batch[i]->coro);
+        /* Companion reclaim: drop the parked Python g's idle datastack-
+         * chunk tail too (the C-stack madvise above never touches it).
+         * Same owning-hub safety contract; gated by PYGO_DATASTACK_SWEEP. */
+        pygo_sched_madvise_datastack_idle(batch[i]);
     }
     return n;
 }

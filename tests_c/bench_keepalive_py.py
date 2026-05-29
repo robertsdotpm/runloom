@@ -147,6 +147,22 @@ def _db_latency_s(seq):
     return WORK_S
 
 
+# Deep-then-shallow knob: PYGO_BENCH_DEPTH makes the handler recurse this
+# many Python frames per request before parking again.  On 3.11+ a
+# Python->Python call grows the DATASTACK (not the C stack), so this
+# faults the handler's _PyStackChunk tail into resident RAM, then returns
+# to a shallow recv-park -- the exact "parse deep, then wait" shape that
+# leaves a reclaimable resident datastack tail.  Default 0 = flat handler.
+BENCH_DEPTH = int(os.environ.get("PYGO_BENCH_DEPTH", "0"))
+
+
+def _consume_datastack(n):
+    """Recurse n frames deep and return, faulting the datastack tail."""
+    if n <= 0:
+        return 0
+    return _consume_datastack(n - 1) + 1
+
+
 # ---- server-side per-connection handler ----
 def server_conn(conn, idx):
     conn.setblocking(False)
@@ -157,6 +173,8 @@ def server_conn(conn, idx):
             req = _recv_exactly(conn, fd, REQ_LEN)
             if not req:
                 break
+            if BENCH_DEPTH:
+                _consume_datastack(BENCH_DEPTH)         # parse-deep, then park shallow
             pygo_core.sched_sleep(_db_latency_s(idx * 131 + seq))   # "DB"
             seq += 1
             if not _send_all(conn, fd, RESP):
@@ -352,6 +370,14 @@ def main(argv):
     pygo_core.mn_run()
 
     peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    # Datastack-tail sweep decompose readout (nonzero only under
+    # PYGO_DATASTACK_DEBUG): total reclaimable tail bytes seen, how many
+    # were resident at madvise time (mincore), and chunk count.
+    ds_tail = ds_res = ds_chunks = 0
+    try:
+        ds_tail, ds_res, ds_chunks = pygo_core._datastack_sweep_stats()
+    except AttributeError:
+        pass
     pygo_core.mn_fini()
     listen_sock.close()
 
@@ -379,6 +405,11 @@ def main(argv):
           % (N, H, THINK_S * 1000, WORK_S * 1000, RAMP_S, WARMUP_S, MEASURE_S,
              est, done, N, nreq, win_rps, util, p50, p99, p999,
              peak, steady_rss_kib, nofile))
+    if ds_chunks:
+        print("  datastack_sweep: chunks=%d tail=%.1fMB resident=%.1fMB "
+              "(%.0f%% of tail was resident -> reclaimable RSS)"
+              % (ds_chunks, ds_tail / 1048576.0, ds_res / 1048576.0,
+                 100.0 * ds_res / ds_tail if ds_tail else 0.0))
     return 0 if done == N else 1
 
 

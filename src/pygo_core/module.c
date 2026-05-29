@@ -1593,6 +1593,16 @@ static PyObject *m_diag_flags(PyObject *self, PyObject *args)
     return PyLong_FromUnsignedLong((unsigned long)pygo_debug_flags);
 }
 
+/* (tail_bytes, resident_bytes, chunks) for the datastack-tail sweep.
+ * Only nonzero when PYGO_DATASTACK_DEBUG is set; the decompose readout. */
+static PyObject *m_datastack_sweep_stats(PyObject *self, PyObject *args)
+{
+    unsigned long long tail = 0, resident = 0, chunks = 0;
+    (void)self; (void)args;
+    pygo_sched_datastack_sweep_stats(&tail, &resident, &chunks);
+    return Py_BuildValue("(KKK)", tail, resident, chunks);
+}
+
 
 static PyMethodDef module_methods[] = {
     {"select", (PyCFunction)m_select, METH_VARARGS | METH_KEYWORDS,
@@ -1730,6 +1740,10 @@ static PyMethodDef module_methods[] = {
      "event ring to fd (default stderr).  Newest-first."},
     {"_diag_flags", m_diag_flags, METH_NOARGS,
      "_diag_flags() -> int.  Current PYGO_DEBUG flag mask."},
+    {"_datastack_sweep_stats", m_datastack_sweep_stats, METH_NOARGS,
+     "_datastack_sweep_stats() -> (tail_bytes, resident_bytes, chunks).  "
+     "Datastack-tail sweep decompose counters; nonzero only under "
+     "PYGO_DATASTACK_DEBUG."},
     {NULL, NULL, 0, NULL}
 };
 

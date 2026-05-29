@@ -39,6 +39,11 @@
 #include <stdlib.h>
 #include <string.h>
 
+#if !defined(_WIN32)
+#  include <sys/mman.h>          /* madvise / MADV_DONTNEED, mincore */
+#  include <unistd.h>            /* sysconf(_SC_PAGESIZE) */
+#endif
+
 /* ---- monotonic seconds ----
  * Shim-backed: plat_compat's pygo_monotonic_ns() picks
  * QueryPerformanceCounter on Windows and clock_gettime(CLOCK_MONOTONIC)
@@ -366,6 +371,125 @@ void pygo_first_run_install_datastack(void)
     }
 #else
     (void)0;
+#endif
+}
+
+/* ---- Datastack-tail idle reclaim (companion to the C-stack sweep) ----
+ *
+ * A Python goroutine parked deep in CPython (e.g. in recv inside the eval
+ * loop) holds a _PyStackChunk with its live frames in [chunk, datastack_top)
+ * and unpushed free space in [datastack_top, datastack_limit).  The dwell
+ * stack-sweep madvises the C stack below SP but NEVER this chunk, so the
+ * chunk's free tail stays resident on every parked Python g.  This drops it.
+ *
+ * Only the CURRENT (top) chunk has a reclaimable tail: chunk->previous
+ * chunks are full of live outer frames, so we touch only datastack_chunk.
+ * The chunk is an arena allocation (mmap, page-aligned base, size a multiple
+ * of the page), so datastack_limit is page-aligned and the geometry is clean.
+ * We keep the partial page holding the live frontier and drop whole pages
+ * strictly above it.  Refault on the next frame push is the (cheap, zero-
+ * filled) cost, identical to the C-stack sweep's contract. */
+#if PY_VERSION_HEX >= 0x030B0000 && !defined(_WIN32) && defined(MADV_DONTNEED)
+/* Decompose counters (PYGO_DATASTACK_DEBUG only). */
+static unsigned long long pygo_ds_sweep_tail_bytes = 0;
+static unsigned long long pygo_ds_sweep_resident_bytes = 0;
+static unsigned long long pygo_ds_sweep_chunks = 0;
+
+/* mincore the [lo,hi) range and return resident bytes.  Best-effort: on any
+ * error (e.g. mincore unsupported) returns 0 so accounting just under-counts
+ * rather than misleads. */
+static unsigned long long pygo_ds_resident_bytes(uintptr_t lo, uintptr_t hi,
+                                                 size_t page)
+{
+    unsigned char vec[64];           /* covers up to 64 pages == 256 KiB tail */
+    size_t npages = (size_t)((hi - lo) / page);
+    unsigned long long resident = 0;
+    size_t i;
+    if (npages == 0 || npages > sizeof(vec)) return 0;
+    if (mincore((void *)lo, (size_t)(hi - lo), vec) != 0) return 0;
+    for (i = 0; i < npages; i++) {
+        if (vec[i] & 1) resident += (unsigned long long)page;
+    }
+    return resident;
+}
+#endif
+
+void pygo_sched_madvise_datastack_idle(pygo_g_t *g)
+{
+#if PY_VERSION_HEX >= 0x030B0000 && !defined(_WIN32) && defined(MADV_DONTNEED)
+    static int on = -1;              /* read PYGO_DATASTACK_SWEEP once */
+    static int dbg = -1;             /* read PYGO_DATASTACK_DEBUG once */
+    pygo_pystate_snap_t *snap;
+    uintptr_t top, limit, lo, hi;
+    long ps;
+    size_t page;
+
+    {
+        int v = __atomic_load_n(&on, __ATOMIC_RELAXED);
+        if (v < 0) {
+            const char *e = getenv("PYGO_DATASTACK_SWEEP");
+            v = (e != NULL && e[0] != '0') ? 1 : 0;
+            __atomic_store_n(&on, v, __ATOMIC_RELAXED);
+        }
+        if (!v) return;
+    }
+
+    if (g == NULL) return;
+    snap = &g->snap;
+    if (!snap->valid || snap->datastack_chunk == NULL ||
+        snap->datastack_top == NULL || snap->datastack_limit == NULL) {
+        return;                      /* C-only g, or no chunk installed */
+    }
+
+    ps = sysconf(_SC_PAGESIZE);
+    page = (ps > 0) ? (size_t)ps : (size_t)4096;
+    top   = (uintptr_t)snap->datastack_top;
+    limit = (uintptr_t)snap->datastack_limit;
+    if (limit <= top) return;
+    lo = (top + page - 1) & ~(uintptr_t)(page - 1);   /* align UP past frontier */
+    hi = limit & ~(uintptr_t)(page - 1);              /* align DOWN to chunk end */
+    if (hi <= lo) return;            /* no whole free page to drop */
+
+    {
+        int d = __atomic_load_n(&dbg, __ATOMIC_RELAXED);
+        if (d < 0) {
+            const char *e = getenv("PYGO_DATASTACK_DEBUG");
+            d = (e != NULL && e[0] != '0') ? 1 : 0;
+            __atomic_store_n(&dbg, d, __ATOMIC_RELAXED);
+        }
+        if (d) {
+            unsigned long long tail = (unsigned long long)(hi - lo);
+            unsigned long long res = pygo_ds_resident_bytes(lo, hi, page);
+            __atomic_add_fetch(&pygo_ds_sweep_tail_bytes, tail,
+                               __ATOMIC_RELAXED);
+            __atomic_add_fetch(&pygo_ds_sweep_resident_bytes, res,
+                               __ATOMIC_RELAXED);
+            __atomic_add_fetch(&pygo_ds_sweep_chunks, 1ULL, __ATOMIC_RELAXED);
+        }
+    }
+
+    (void)madvise((void *)lo, (size_t)(hi - lo), MADV_DONTNEED);
+#else
+    (void)g;
+#endif
+}
+
+void pygo_sched_datastack_sweep_stats(unsigned long long *tail_bytes,
+                                      unsigned long long *resident_bytes,
+                                      unsigned long long *chunks)
+{
+#if PY_VERSION_HEX >= 0x030B0000 && !defined(_WIN32) && defined(MADV_DONTNEED)
+    if (tail_bytes)
+        *tail_bytes = __atomic_load_n(&pygo_ds_sweep_tail_bytes, __ATOMIC_RELAXED);
+    if (resident_bytes)
+        *resident_bytes = __atomic_load_n(&pygo_ds_sweep_resident_bytes,
+                                          __ATOMIC_RELAXED);
+    if (chunks)
+        *chunks = __atomic_load_n(&pygo_ds_sweep_chunks, __ATOMIC_RELAXED);
+#else
+    if (tail_bytes) *tail_bytes = 0;
+    if (resident_bytes) *resident_bytes = 0;
+    if (chunks) *chunks = 0;
 #endif
 }
 

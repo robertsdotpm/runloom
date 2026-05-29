@@ -334,6 +334,32 @@ void pygo_drain_g_datastack(void);
  * fields NULL so PyEval will arena-allocate.  Either is correct. */
 void pygo_first_run_install_datastack(void);
 
+/* Reclaim the idle tail of a parked Python goroutine's datastack chunk.
+ * The companion of pygo_coro_madvise_idle (which drops the C stack below
+ * SP): here we MADV_DONTNEED the free pages of g's CURRENT _PyStackChunk
+ * above the live frontier (snap->datastack_top) up to the chunk end
+ * (snap->datastack_limit).  Frames live in [chunk, top); everything above
+ * is unpushed free space that refaults zero on the next frame push.
+ *
+ * SAFE under the same M:N contract as the C-stack sweep: the caller must
+ * be g's OWNING hub (so nothing resumes g while we madvise) and g must be
+ * suspended with a stable snap.  No-op for C-only gs (datastack_chunk
+ * NULL), gs that never went deep enough to have a reclaimable tail, and
+ * on pre-3.11 Pythons / platforms without MADV_DONTNEED.
+ *
+ * Gated by PYGO_DATASTACK_SWEEP (read once); the netpoll dwell sweep calls
+ * this per batched parker right after the C-stack madvise. */
+void pygo_sched_madvise_datastack_idle(pygo_g_t *g);
+
+/* Decompose instrumentation for the datastack sweep (PYGO_DATASTACK_DEBUG).
+ * Accumulated only when the debug env is set: total reclaimable tail bytes
+ * seen, how many of those were RESIDENT at madvise time (mincore), and the
+ * number of chunks swept.  Lets the bench read off "is there resident RSS
+ * to reclaim" before trusting the RSS A/B.  Counters are process-global. */
+void pygo_sched_datastack_sweep_stats(unsigned long long *tail_bytes,
+                                      unsigned long long *resident_bytes,
+                                      unsigned long long *chunks);
+
 /* Sleep-heap helpers exposed for mn_sched.c's per-hub timer processing.
  * Single-thread drain still uses them via #define aliases. */
 pygo_g_t *pygo_sched_sleep_peek(pygo_sched_t *s);
