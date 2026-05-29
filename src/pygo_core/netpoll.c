@@ -101,7 +101,25 @@ typedef struct pygo_parked {
      * its owning thread's freelist; pool_next chains them.  Cleared
      * on acquire. */
     struct pygo_parked *pool_next;
+    /* Atomic park/wake commit (Go netpollblockcommit, adapted to pygo's
+     * re-queue model).  Closes the residual lost-wake: a pump can claim
+     * a still-linked parker in the window between wait_fd's last
+     * readiness re-check and its commit to parking.  Exactly one of
+     * {pump, parking g} CASes this away from ARMED:
+     *   ARMED  - linked, g has not yet committed to parking.
+     *   PARKED - g committed (yielded / about to); a pump that claims a
+     *            PARKED parker re-queues the g via pygo_mn_wake_g.
+     *   WOKEN  - claimed (by a pump or cancel).  A pump that claims an
+     *            ARMED parker records readiness + unlinks but does NOT
+     *            re-queue (the g hasn't parked); the g's commit CAS then
+     *            fails, so it aborts the park and returns ready_mask
+     *            instead -- no lost wake, no double-resume. */
+    int commit;
 } pygo_parked_t;
+
+#define PYGO_PARK_ARMED  0
+#define PYGO_PARK_PARKED 1
+#define PYGO_PARK_WOKEN  2
 
 /* Forcibly wake all parked goroutines with a cancelled marker.
  * Returns count of waiters woken.  Used by sched_reset() so paio.run
@@ -147,6 +165,9 @@ static pygo_parked_t *pygo_parker_pool_acquire(void)
         if (p == NULL) return NULL;
     }
     p->heap_index = -1;
+    /* Fresh park: not yet committed, not yet woken.  Plain store is
+     * safe -- the parker is not linked, so no pump can see it. */
+    p->commit = PYGO_PARK_ARMED;
     /* Mint a fresh generation.  Wraparound after 2^32 is fine: the
      * gen is a diag aid, not a security token. */
     p->gen = __atomic_add_fetch(&pygo_parker_gen_next, 1, __ATOMIC_RELAXED);
@@ -1343,21 +1364,38 @@ int pygo_netpoll_drain_parked(void)
         /* Drain the deadline heap too; everything is leaving. */
         pool->dh_size = 0;
         while (p != NULL) {
+            int cur;
             next = p->next;
-            if (p->ready_out != NULL) {
-                *p->ready_out = -1;   /* signal cancellation */
-            }
             p->next = NULL;
             p->slot = NULL;
             p->next_by_fd = NULL;
             p->prev_by_fd = NULL;
             p->heap_index = -1;
-            if (p->hub != NULL) {
-                pygo_mn_wake_g(p->hub, p->g);
-            } else {
-                pygo_sched_wake(p->g);
+            /* Claim the parker (same protocol as the pump) so a g that is
+             * mid-commit doesn't both park and get cancel-woken. */
+            for (;;) {
+                cur = __atomic_load_n(&p->commit, __ATOMIC_ACQUIRE);
+                if (cur == PYGO_PARK_WOKEN) break;
+                if (__atomic_compare_exchange_n(&p->commit, &cur,
+                                                PYGO_PARK_WOKEN, 0,
+                                                __ATOMIC_ACQ_REL,
+                                                __ATOMIC_ACQUIRE))
+                    break;
             }
             __atomic_sub_fetch(&pool->total, 1, __ATOMIC_RELEASE);
+            if (cur == PYGO_PARK_WOKEN) { p = next; continue; }  /* pump owns it */
+            if (p->ready_out != NULL) {
+                *p->ready_out = -1;   /* signal cancellation */
+            }
+            /* Only re-queue a g that had committed to parking; an ARMED
+             * g will see WOKEN at its commit CAS and abort itself. */
+            if (cur == PYGO_PARK_PARKED) {
+                if (p->hub != NULL) {
+                    pygo_mn_wake_g(p->hub, p->g);
+                } else {
+                    pygo_sched_wake(p->g);
+                }
+            }
             p = next;
             n++;
         }
@@ -1505,6 +1543,32 @@ int pygo_netpoll_wait_fd(int fd, int events, long long timeout_ns)
         }
     }
 
+    /* Commit to parking (Go netpollblockcommit).  CAS commit ARMED->
+     * PARKED.  If it fails, a pump has already claimed this parker
+     * (commit == WOKEN): it recorded readiness into ready_mask and
+     * unlinked us but did NOT re-queue (we hadn't committed), so abort
+     * the park and return that readiness directly.  This closes the
+     * window between the last pending re-check above and the yield
+     * below, where a pump on another hub could otherwise wake a parker
+     * we were about to park on -- the residual lost-wake. */
+    {
+        int expc = PYGO_PARK_ARMED;
+        if (!__atomic_compare_exchange_n(&park->commit, &expc,
+                                         PYGO_PARK_PARKED, 0,
+                                         __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+            /* expc == WOKEN: claimed by a pump.  ready_mask is set. */
+            pygo_mutex_lock(&pool->lock);
+            pygo_parker_unlink(pool, park);   /* no-op if pump unlinked */
+            pygo_mutex_unlock(&pool->lock);
+            if (current_g != NULL)
+                pygo_g_state_set(current_g, PYGO_GST_RUNNING);
+            if (current_g != NULL && current_g->netpoll_parker == park)
+                current_g->netpoll_parker = NULL;
+            pygo_parker_pool_release(park);
+            return ready_mask;
+        }
+    }
+
     /* Snapshot tstate (same as pygo_sched_yield does) so the next
      * resume restores it.  Then yield WITHOUT re-queueing -- pump
      * pushes us back when the fd becomes ready. */
@@ -1565,6 +1629,21 @@ static int pygo_pump_dispatch_event(int fd, int mask)
             while (p != NULL) {
                 pygo_parked_t *next_p = p->next_by_fd;
                 if (p->events & mask) {
+                    /* Claim the parker: CAS commit away from its current
+                     * state to WOKEN.  The g's own commit CAS (ARMED->
+                     * PARKED) is the only competing writer, so the loop
+                     * runs at most twice.  `cur` ends as the state we
+                     * claimed FROM. */
+                    int cur;
+                    for (;;) {
+                        cur = __atomic_load_n(&p->commit, __ATOMIC_ACQUIRE);
+                        if (cur == PYGO_PARK_WOKEN) break;  /* already claimed */
+                        if (__atomic_compare_exchange_n(
+                                &p->commit, &cur, PYGO_PARK_WOKEN, 0,
+                                __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+                            break;
+                    }
+                    if (cur == PYGO_PARK_WOKEN) { p = next_p; continue; }
                     *(p->ready_out) = mask & p->events;
                     pygo_parker_unlink(pool, p);
 #ifdef PYGO_PARKER_DEBUG
@@ -1579,7 +1658,14 @@ static int pygo_pump_dispatch_event(int fd, int mask)
                             (void *)p, fd);
                     }
 #endif
-                    pygo_mn_wake_g(p->hub, p->g);
+                    /* Only re-queue if the g had already committed to
+                     * parking.  If we claimed an ARMED parker, the g is
+                     * still running and will see WOKEN at its commit CAS,
+                     * abort the park, and return ready_mask itself --
+                     * re-queueing here would double-resume it. */
+                    if (cur == PYGO_PARK_PARKED) {
+                        pygo_mn_wake_g(p->hub, p->g);
+                    }
                     pygo_mutex_unlock(&pool->lock);
                     return 1;
                 }
@@ -1606,12 +1692,29 @@ static int pygo_pump_drain_expired(long long now)
         pygo_mutex_lock(&pool->lock);
         while (pool->dh_size > 0 && pool->dh_arr[0]->deadline_ns <= now) {
             pygo_parked_t *p = pool->dh_arr[0];
-            if (p->ready_out != NULL) *p->ready_out = 0;
-            pygo_parker_unlink(pool, p);
-            if (p->hub != NULL) pygo_mn_wake_g(p->hub, p->g);
-            else                pygo_sched_wake(p->g);
-            woke++;
-            PYGO_EVT(PYGO_EVT_PARKER_TIMEOUT, p, p->g, (long long)p->fd);
+            int cur;
+            /* Claim like the pump so a g mid-commit doesn't both park and
+             * get timeout-woken. */
+            for (;;) {
+                cur = __atomic_load_n(&p->commit, __ATOMIC_ACQUIRE);
+                if (cur == PYGO_PARK_WOKEN) break;
+                if (__atomic_compare_exchange_n(&p->commit, &cur,
+                                                PYGO_PARK_WOKEN, 0,
+                                                __ATOMIC_ACQ_REL,
+                                                __ATOMIC_ACQUIRE))
+                    break;
+            }
+            pygo_parker_unlink(pool, p);   /* always drop from the heap */
+            if (cur != PYGO_PARK_WOKEN) {
+                if (p->ready_out != NULL) *p->ready_out = 0;   /* timeout */
+                /* Re-queue only a committed g; an ARMED g aborts itself. */
+                if (cur == PYGO_PARK_PARKED) {
+                    if (p->hub != NULL) pygo_mn_wake_g(p->hub, p->g);
+                    else                pygo_sched_wake(p->g);
+                }
+                woke++;
+                PYGO_EVT(PYGO_EVT_PARKER_TIMEOUT, p, p->g, (long long)p->fd);
+            }
         }
         pygo_mutex_unlock(&pool->lock);
     }
