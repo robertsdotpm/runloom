@@ -247,8 +247,18 @@ static PYGO_THREAD_RET pygo_hub_main(void *arg)
                  * sub list. */
                 if (sub->snap.valid) {
                     pygo_sched_ready_push(&h->sched, sub);
-                } else {
-                    pygo_cldeque_push(&h->deque, sub);
+                } else if (pygo_cldeque_push(&h->deque, sub) != 0) {
+                    /* Deque full (>PYGO_CLDEQUE_CAP=4096 fresh gs on this
+                     * hub -- e.g. a big spawn burst at low hub count, the
+                     * H=2/N>=8K case).  Fall back to the local ready FIFO,
+                     * which grows on demand.  These gs run hub-pinned
+                     * rather than stealable, but are NEVER dropped: the
+                     * previous code ignored the push return and silently
+                     * dropped the g, orphaning one whose pending-inc was
+                     * already counted -> mn_run hung forever.  The resume
+                     * prologue handles a snap-invalid g from either queue
+                     * via the first-run install path. */
+                    pygo_sched_ready_push(&h->sched, sub);
                 }
                 sub = next;
             }
