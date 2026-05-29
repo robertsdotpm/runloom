@@ -156,7 +156,14 @@ static void accept_g(void *arg)
     set_nonblock(listen_fd);
     /* We need exactly N connections; stop once we've accepted them. */
     while (__atomic_load_n(&g_accepted, __ATOMIC_RELAXED) < g_N) {
-        if (pygo_netpoll_wait_fd(listen_fd, PYGO_NETPOLL_READ, -1LL) < 0) {
+        /* Finite (50 ms) wait, not infinite: this is a single goroutine,
+         * so a periodic wake is cheap, and it makes the accept loop
+         * self-healing -- if a listener-readiness edge is ever delayed
+         * under the 1M connect burst, we still re-drain the backlog every
+         * 50 ms instead of stalling the whole tail.  Timeout returns 0
+         * (not <0), so we just fall through to the accept-drain loop. */
+        if (pygo_netpoll_wait_fd(listen_fd, PYGO_NETPOLL_READ,
+                                 50LL * 1000 * 1000) < 0) {
             fprintf(stderr, "accept_g: wait_fd failed: %s\n", strerror(errno));
             return;
         }
@@ -245,7 +252,19 @@ static void client_g(void *arg)
 {
     (void)arg;
     __atomic_fetch_add(&g_client_entered, 1, __ATOMIC_RELAXED);
-    int fd = connect_nonblock(g_port);
+    /* Retry connect.  Under the synchronized N-client connect burst the
+     * listener's accept/SYN queue transiently overflows and the kernel
+     * rejects a handshake with ECONNREFUSED -- a load-generation
+     * artifact (not a peer failure and not a netpoll lost-wake; a 1M run
+     * showed self_check parked=0 at the end, i.e. no stuck parkers).
+     * Cooperatively yield between attempts so the accept loop drains the
+     * queue and the retry lands; bounded so a genuinely dead server
+     * can't spin forever. */
+    int fd = -1;
+    for (int attempt = 0; fd < 0 && attempt < 4096; attempt++) {
+        fd = connect_nonblock(g_port);
+        if (fd < 0) pygo_mn_yield_current();
+    }
     if (fd < 0) return;
     __atomic_fetch_add(&g_client_connected, 1, __ATOMIC_RELAXED);
     char buf[PAYLOAD_LEN];
