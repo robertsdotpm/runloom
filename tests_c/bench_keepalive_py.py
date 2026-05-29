@@ -84,6 +84,9 @@ latencies = []          # latencies[idx] = list of in-window per-request seconds
 succeeded = []          # succeeded[idx] = ran to measure_end without error
 established = []         # 1 per connection that completed connect()
 steady_rss_kib = -1      # peak VmRSS sampled across the measure window
+steady_maps = -1         # peak /proc/self/maps line count across the window
+final_rss_kib = -1       # last VmRSS sample (post-reclaim floor in an idle window)
+final_maps = -1          # last maps sample
 
 
 def _rst_close(sock):
@@ -289,17 +292,27 @@ def client(idx):
 
 
 def sampler():
-    """Track peak VmRSS across the steady-state window."""
-    global steady_rss_kib
+    """Track peak + final VmRSS and maps across the steady-state window.
+    In an idle-parked window the FINAL sample is the post-reclaim floor;
+    peak is the pre-reclaim high-water -- their gap = what the sweep gave back."""
+    global steady_rss_kib, steady_maps, final_rss_kib, final_maps
     while time.monotonic() < MEASURE_START_T:
         pygo_core.sched_sleep(0.05)
     peak = -1
+    peak_maps = -1
+    cur = lastm = -1
     while time.monotonic() < MEASURE_END_T:
         cur = _cur_rss_kib()
         if cur > peak:
             peak = cur
+        lastm = _cur_maps()
+        if lastm > peak_maps:
+            peak_maps = lastm
         pygo_core.sched_sleep(0.1)
     steady_rss_kib = peak
+    steady_maps = peak_maps
+    final_rss_kib = cur
+    final_maps = lastm
 
 
 def _cur_rss_kib():
@@ -311,6 +324,15 @@ def _cur_rss_kib():
     except (OSError, ValueError):
         pass
     return -1
+
+
+def _cur_maps():
+    """Count VMAs (/proc/self/maps lines) -- the max_map_count pressure."""
+    try:
+        with open("/proc/self/maps") as f:
+            return sum(1 for _ in f)
+    except OSError:
+        return -1
 
 
 def _percentile(sorted_vals, q):
@@ -401,10 +423,11 @@ def main(argv):
     print("N=%d H=%d think_ms=%.0f work_ms=%.1f ramp=%.0f warmup=%.0f measure=%.0f "
           "established=%d done=%d/%d win_reqs=%d %.0frps util=%.0f%% "
           "p50=%.1fms p99=%.1fms p99.9=%.1fms "
-          "peak_rss_kib=%d steady_rss_kib=%d nofile=%d"
+          "peak_rss_kib=%d steady_rss_kib=%d final_rss_kib=%d "
+          "steady_maps=%d final_maps=%d nofile=%d"
           % (N, H, THINK_S * 1000, WORK_S * 1000, RAMP_S, WARMUP_S, MEASURE_S,
              est, done, N, nreq, win_rps, util, p50, p99, p999,
-             peak, steady_rss_kib, nofile))
+             peak, steady_rss_kib, final_rss_kib, steady_maps, final_maps, nofile))
     if ds_chunks:
         print("  datastack_sweep: chunks=%d tail=%.1fMB resident=%.1fMB "
               "(%.0f%% of tail was resident -> reclaimable RSS)"
