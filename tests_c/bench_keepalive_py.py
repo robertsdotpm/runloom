@@ -332,6 +332,12 @@ def main(argv):
     listen_sock.setblocking(False)
     PORT = listen_sock.getsockname()[1]
 
+    # PYGO_BENCH_STACK=<bytes>: pin the goroutine stack size (freezes
+    # calibration) so we can measure RSS vs stack allocation size.
+    _bench_stack = os.environ.get("PYGO_BENCH_STACK")
+    if _bench_stack:
+        pygo_core.set_stack_size(int(_bench_stack))
+
     if pygo_core.mn_init(H) < 0:
         sys.stderr.write("mn_init failed\n")
         return 2
