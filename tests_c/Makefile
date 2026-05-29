@@ -5,10 +5,12 @@
 # exercises exactly the code path that Python sees.
 #
 # Targets:
-#   bench_mn         release build
-#   bench_mn-asan    AddressSanitizer (catches use-after-free, OOB)
-#   bench_mn-tsan    ThreadSanitizer  (catches data races)
-#   bench_mn-ubsan   UndefinedBehaviorSanitizer
+#   bench_mn             release build (pthread echo server + pygo clients)
+#   bench_mn-asan        AddressSanitizer (catches use-after-free, OOB)
+#   bench_mn-tsan        ThreadSanitizer  (catches data races)
+#   bench_mn-ubsan       UndefinedBehaviorSanitizer
+#   bench_server_pygo    canonical scaling bench (server AND client in pygo)
+#   bench_server_pygo-{asan,tsan,ubsan}
 #   clean
 #
 # Default Python is 3.13t (free-threaded), since that's where the
@@ -57,7 +59,27 @@ bench_mn-ubsan: bench_mn.c $(PYGO_SO)
 	$(CC) $(CFLAGS_BASE) -fsanitize=undefined bench_mn.c -o bench_mn-ubsan \
 	    $(LDFLAGS_BASE) -fsanitize=undefined
 
+# bench_server_pygo: both the echo server AND the client live in pygo
+# goroutines (no pthread-per-conn ceiling).  This is the canonical
+# scaling benchmark -- use it as the primary measurement going forward.
+bench_server_pygo: bench_server_pygo.c $(PYGO_SO)
+	$(CC) $(CFLAGS_BASE) bench_server_pygo.c -o bench_server_pygo $(LDFLAGS_BASE)
+
+bench_server_pygo-asan: bench_server_pygo.c $(PYGO_SO)
+	$(CC) $(CFLAGS_BASE) -fsanitize=address bench_server_pygo.c \
+	    -o bench_server_pygo-asan $(LDFLAGS_BASE) -fsanitize=address
+
+bench_server_pygo-tsan: bench_server_pygo.c $(PYGO_SO)
+	$(CC) $(CFLAGS_BASE) -fsanitize=thread bench_server_pygo.c \
+	    -o bench_server_pygo-tsan $(LDFLAGS_BASE) -fsanitize=thread
+
+bench_server_pygo-ubsan: bench_server_pygo.c $(PYGO_SO)
+	$(CC) $(CFLAGS_BASE) -fsanitize=undefined bench_server_pygo.c \
+	    -o bench_server_pygo-ubsan $(LDFLAGS_BASE) -fsanitize=undefined
+
 clean:
-	rm -f bench_mn bench_mn-asan bench_mn-tsan bench_mn-ubsan
+	rm -f bench_mn bench_mn-asan bench_mn-tsan bench_mn-ubsan \
+	      bench_server_pygo bench_server_pygo-asan \
+	      bench_server_pygo-tsan bench_server_pygo-ubsan
 
 .PHONY: clean
