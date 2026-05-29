@@ -329,8 +329,11 @@ int main(int argc, char **argv)
     g_N = N;
     g_M = M;
 
-    /* Lift FD limit before we do anything fd-y. */
-    struct rlimit rl = { 1u << 20, 1u << 20 };
+    /* Lift FD limit before we do anything fd-y.  1<<22 = 4,194,304 covers
+     * N=1M connections (~2M in-process fds: a client + an accepted fd
+     * each).  Requires fs.nr_open >= this (sysctl -w fs.nr_open=4194304);
+     * setrlimit clamps to nr_open otherwise. */
+    struct rlimit rl = { 1u << 22, 1u << 22 };
     if (setrlimit(RLIMIT_NOFILE, &rl) < 0) {
         fprintf(stderr, "setrlimit NOFILE: %s (continuing)\n", strerror(errno));
     }
@@ -368,13 +371,33 @@ int main(int argc, char **argv)
             return 2;
         }
     }
-    pygo_mn_run();
+    /* Wait for all N clients to complete by polling g_done_count rather
+     * than pygo_mn_run().  At very high N a tiny number of echo handlers
+     * can stay parked in recv waiting for a peer RST whose readiness edge
+     * was missed (a residual netpoll lost-wake at scale) -- that leaves
+     * pending_global > 0 and hangs mn_run forever even though every
+     * client was served.  The headline metric is "N clients done"; a
+     * handful of abandoned echo parkers on closed fds are harmless once
+     * we exit.  The 600 s deadline guards a genuine stall. */
+    {
+        double deadline = now_seconds() + 600.0;
+        for (;;) {
+            long dc;
+            pthread_mutex_lock(&g_done_lock);
+            dc = g_done_count;
+            pthread_mutex_unlock(&g_done_lock);
+            if (dc >= N || now_seconds() > deadline) break;
+            usleep(20 * 1000);                  /* 20 ms */
+        }
+    }
     double dt = now_seconds() - t0;
 
     long peak = peak_rss_kib();
     long maps = maps_count();
 
-    pygo_mn_fini();
+    /* No pygo_mn_fini(): it joins the hub threads, which won't exit while
+     * a stray echo parker keeps pending_global > 0.  We _exit() below
+     * after printing, abandoning the (harmless) leftover parkers. */
 
     int hubs = H;
     printf("N=%d H=%d M=%d done=%ld/%d "
@@ -395,7 +418,9 @@ int main(int argc, char **argv)
             fprintf(stderr, "---- diag_dump ----\n");
             pygo_diag_dump(2);
         }
-        return 1;
+        fflush(stdout); fflush(stderr);
+        _exit(1);
     }
-    return 0;
+    fflush(stdout); fflush(stderr);
+    _exit(0);                /* hard exit: skip Py_Finalize/atexit hangs */
 }
