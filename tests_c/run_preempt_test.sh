@@ -20,9 +20,12 @@ cc -g -O2 -Wall -Wextra -Wno-unused-parameter -Wno-unused-result \
 echo "build rc=$?"
 ls -la test_preempt 2>&1 || { echo "BUILD FAILED"; exit 1; }
 
-echo "--- RUN no PYGO_PREEMPT (wrapper not installed) -- expect RED (FAIL) ---"
+# NB: PYGO_PREEMPT now defaults ON (free-threaded 3.13+), so the RED baseline
+# sets PYGO_PREEMPT=0 explicitly (also HANDOFF=0 -- irrelevant here, the staller
+# is ATTACHED, but keep the baseline free of all recovery).
+echo "--- RUN recovery OFF (PYGO_PREEMPT=0 PYGO_HANDOFF=0) -- expect RED (FAIL) ---"
 for r in 1 2 3; do
-    timeout 30 ./test_preempt; echo "  run $r exit rc=$?"
+    PYGO_PREEMPT=0 PYGO_HANDOFF=0 timeout 30 ./test_preempt; echo "  run $r exit rc=$?"
 done
 
 echo "--- RUN PYGO_PREEMPT=1 (eval-frame wrapper) -- expect GREEN 64/64 ---"

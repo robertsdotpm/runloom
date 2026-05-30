@@ -18,8 +18,10 @@ cc -g -O2 -Wall -Wextra -Wno-unused-parameter \
 echo "build rc=$?"
 ls -la test_stall_steal 2>&1 || { echo "BUILD FAILED"; exit 1; }
 
-echo "--- RUN default mode (PYGO_PER_G_TSTATE=0) ---"
-PYGO_PER_G_TSTATE=0 timeout 30 ./test_stall_steal; echo "exit rc=$?"
+# NB: PYGO_HANDOFF + PYGO_PREEMPT now default ON (free-threaded 3.13+), so the
+# RED baseline sets them =0 explicitly to show the un-recovered problem.
+echo "--- RUN default mode, recovery OFF (PYGO_HANDOFF=0 PYGO_PREEMPT=0) -- expect RED ---"
+PYGO_PER_G_TSTATE=0 PYGO_HANDOFF=0 PYGO_PREEMPT=0 timeout 30 ./test_stall_steal; echo "exit rc=$?"
 
 echo "--- RUN per-g-tstate ON (PYGO_PER_G_TSTATE=1) -- recovers via global runq ---"
 PYGO_PER_G_TSTATE=1 timeout 30 ./test_stall_steal; echo "exit rc=$?"
@@ -33,7 +35,9 @@ STALL_ALLOW_THREADS=1 PYGO_HANDOFF=1 timeout 30 ./test_stall_steal; echo "exit r
 # Control: the raw-usleep staller keeps its tstate ATTACHED (CPU/raw-syscall
 # class), which a tstate handoff CANNOT recover -- must stay RED even with the
 # handoff on (the rescue correctly refuses to adopt a non-DETACHED wedge).
-echo "--- RUN ATTACHED staller + PYGO_HANDOFF=1 -- expect RED (not handoff-recoverable) ---"
-PYGO_HANDOFF=1 timeout 30 ./test_stall_steal; echo "exit rc=$?  (RED is correct here)"
+# (PYGO_PREEMPT=0 here: this staller is a raw-usleep *C* goroutine with no
+# Python frames, so preemption can't touch it anyway -- isolate the handoff.)
+echo "--- RUN ATTACHED staller + PYGO_HANDOFF=1 PYGO_PREEMPT=0 -- expect RED (not handoff-recoverable) ---"
+PYGO_HANDOFF=1 PYGO_PREEMPT=0 timeout 30 ./test_stall_steal; echo "exit rc=$?  (RED is correct here)"
 
 echo "=== stall test end $(date -Is) ==="

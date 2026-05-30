@@ -1517,10 +1517,28 @@ static PYGO_THREAD_RET pygo_sysmon_main(void *arg)
     PYGO_THREAD_RETURN(NULL);
 }
 
+/* Interpret an OPT-OUT env flag for the stall-recovery features.  Explicit
+ * "0" => off; explicit anything-else => on; UNSET => the build default.  The
+ * default is ON only on free-threaded 3.13+ -- the one configuration where
+ * PYGO_HANDOFF / PYGO_PREEMPT are validated (they need the free-threaded
+ * attach-state protocol, and that is where pygo's M:N scheduler actually runs
+ * Python in parallel).  On GIL / pre-3.13 builds the default is OFF so an
+ * untested config never silently enables them; an explicit env var still
+ * forces the user's choice (subject to the per-version / per-g gates below). */
+static int pygo_flag_default_on(const char *v)
+{
+    if (v != NULL) return (v[0] != '0') ? 1 : 0;
+#if defined(Py_GIL_DISABLED) && PY_VERSION_HEX >= 0x030D0000
+    return 1;
+#else
+    return 0;
+#endif
+}
+
 /* Read PYGO_SYSMON / PYGO_SYSMON_MS once and set the enable flag + threshold.
  * Must run in mn_init BEFORE the hub threads start so the per-resume
- * instrumentation is live from the first resume.  No-op (enabled stays 0)
- * unless PYGO_SYSMON is set to a non-"0" value. */
+ * instrumentation is live from the first resume.  PYGO_HANDOFF + PYGO_PREEMPT
+ * default ON on free-threaded 3.13+ (opt out with =0); they force sysmon on. */
 static void pygo_sysmon_config(void)
 {
     const char *e = getenv("PYGO_SYSMON");
@@ -1539,7 +1557,7 @@ static void pygo_sysmon_config(void)
      * (they ride a per-g tstate, not the snap, and wake to the global runq, not
      * the hub sub_list).  Stand the rescue down there -- per-g-tstate already
      * recovers stalled-hub work via the global run-queue. */
-    pygo_handoff_enabled = (ho != NULL && ho[0] != '0') ? 1 : 0;
+    pygo_handoff_enabled = pygo_flag_default_on(ho);   /* default ON (free-threaded 3.13+) */
 #if PY_VERSION_HEX < 0x030D0000
     pygo_handoff_enabled = 0;   /* no free-threaded attach states pre-3.13 */
 #endif
@@ -1562,13 +1580,14 @@ static void pygo_sysmon_config(void)
      * states to classify the wedge).  Like PYGO_HANDOFF it forces the sysmon
      * instrumentation + watchdog on (that is what detects the wedge and arms
      * preempt_requested).  The eval-frame wrapper is installed in mn_init. */
-    {
-        const char *pe = getenv("PYGO_PREEMPT");
-        pygo_preempt_enabled = (pe != NULL && pe[0] != '0') ? 1 : 0;
-    }
+    pygo_preempt_enabled = pygo_flag_default_on(getenv("PYGO_PREEMPT"));  /* default ON */
 #if PY_VERSION_HEX < 0x030D0000
     pygo_preempt_enabled = 0;
 #endif
+    /* Under per-g-tstate the hub's bound tstate is DETACHED every per-g resume,
+     * so the ATTACHED-wedge arm never fires and the wrapper would only be dead
+     * weight on the eval path -- stand it down (matches the handoff gating). */
+    if (pygo_get_per_g_tstate_mode()) pygo_preempt_enabled = 0;
     if (pygo_preempt_enabled) pygo_sysmon_enabled = 1;
     if (!pygo_sysmon_enabled) return;
     ms = getenv("PYGO_SYSMON_MS");
