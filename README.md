@@ -180,6 +180,37 @@ print(pygo_core.stats())
 See [the stack sizing guide](docs/stack-sizing.md) for the full
 mechanism, including the safety margin and when to override.
 
+## Memory per coroutine — and how it compares to Go
+
+pygo figures below are **measured** (the floor-decompose bench, default
+scheduler); the Go figures are the standard reference value for an empty
+goroutine plus an approximate add for a live connection's machinery.
+
+| state | Go goroutine | pygo (Python coroutine) |
+| --- | ---: | ---: |
+| empty / just spawned | ~2.5 KB | n/a — running Python needs a datastack chunk |
+| parked, holding a socket + read buffer | ~10–13 KB | **~26 KB** (~38 KB while active) |
+
+pygo's own per-coroutine structs are **< 0.3 KB** — lighter than Go's
+`g`.  The gap above is the **CPython object tax**: a Python `socket`,
+`bytes` buffers, and frame objects all carry PyObject headers and are
+simply fatter than Go structs and `[]byte`.  Run the *identical* handler
+in C (`pygo_mn_go_c`, no Python frames) and pygo drops to ~7–8 KB/conn —
+right next to Go.
+
+Two caveats that matter more than the table:
+
+- **"2 KB" is the *empty* goroutine.**  Give it a socket, a buffer, and
+  a grown stack and Go is ~10 KB+ too — the famous gap is mostly
+  empty-vs-loaded, not runtime-vs-runtime.
+- **Kernel socket buffers (~8 KB+/socket, autotuned) are
+  runtime-independent** and often dominate at scale.  So a million live
+  connections is never cheap in *any* runtime — order ~15–25 GB in Go,
+  ~30 GB+ for pygo-in-Python, ~10–15 GB for pygo-in-C.  The goroutine
+  *model* (vs 1 MB-stack OS threads, where a million threads is simply
+  impossible) is what makes it feasible at all — not any runtime making
+  connections free.
+
 ## Kernel limits for high goroutine counts
 
 Each goroutine owns a private mmap'd C stack, and with the guard page
