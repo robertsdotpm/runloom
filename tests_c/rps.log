@@ -1,0 +1,13 @@
+### bench_server_pygo 20000 8 200   (N H M; requests = N*M)
+N=20000 H=8 M=200 done=20000/20000 client_entered=20000 client_connected=20000 client_sent_once=20000 accepted=20000 echo_started=20000 echo_finished=20000 35.562s 112.5K/s peak_rss_kib=195604 maps=80112 nofile=8388608 hubs=8
+---- rc=0 ----
+### bench_server_pygo 20000 16 200   (N H M; requests = N*M)
+N=20000 H=16 M=200 done=20000/20000 client_entered=20000 client_connected=20000 client_sent_once=20000 accepted=20000 echo_started=20000 echo_finished=20000 23.033s 173.7K/s peak_rss_kib=200916 maps=80177 nofile=8388608 hubs=16
+---- rc=0 ----
+### bench_server_pygo 20000 32 200   (N H M; requests = N*M)
+N=20000 H=32 M=200 done=20000/20000 client_entered=20000 client_connected=20000 client_sent_once=20000 accepted=20000 echo_started=20000 echo_finished=20000 20.693s 193.3K/s peak_rss_kib=209872 maps=80306 nofile=8388608 hubs=32
+---- rc=0 ----
+### bench_server_pygo 100000 16 100   (N H M; requests = N*M)
+N=100000 H=16 M=100 done=100000/100000 client_entered=100000 client_connected=100000 client_sent_once=100000 accepted=100000 echo_started=100000 echo_finished=100000 56.436s 177.2K/s peak_rss_kib=939004 maps=400177 nofile=8388608 hubs=16
+---- rc=0 ----
+=== rps_probe done 2026-05-30T12:12:12+10:00 ===
