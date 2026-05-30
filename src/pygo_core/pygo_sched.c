@@ -65,10 +65,30 @@ double pygo_sched_monotonic_seconds(void)
  * combined.  Each PY_VERSION_HEX gate matches greenlet's GREENLET_PY*
  * branches.
  */
+/* Per-goroutine PyThreadState mode (PYGO_PER_G_TSTATE).  When the M:N
+ * scheduler runs in this mode, each goroutine owns its own PyThreadState,
+ * so the per-g "snap" (which swaps execution-state fields in/out of a
+ * shared per-hub tstate) is redundant and MUST NOT run -- snapping would
+ * clear context/top_frame/exc out of the g's own live tstate.  Making
+ * pygo_pystate_snap a no-op here (leaving snap->valid = 0) transparently
+ * disables the snap at every park primitive that calls it; load and
+ * snap_clear already no-op on !valid, so the whole snap machinery stands
+ * down.  Set by pygo_mn_init when the flag is on, cleared at pygo_mn_fini.
+ * Stays 0 for the single-thread scheduler path. */
+static int pygo_per_g_tstate_mode = 0;
+void pygo_set_per_g_tstate_mode(int on) { pygo_per_g_tstate_mode = on ? 1 : 0; }
+int  pygo_get_per_g_tstate_mode(void)   { return pygo_per_g_tstate_mode; }
+
 __attribute__((hot))
 void pygo_pystate_snap(pygo_pystate_snap_t *snap)
 {
-    PyThreadState *ts = PyThreadState_GET();
+    PyThreadState *ts;
+
+    if (__builtin_expect(pygo_per_g_tstate_mode, 0)) {
+        snap->valid = 0;   /* per-g tstate owns the state; nothing to swap out */
+        return;
+    }
+    ts = PyThreadState_GET();
 
     /* No memset: every field is assigned below.  Saves ~80B of
      * unnecessary writes on the hot per-yield path. */
@@ -994,6 +1014,17 @@ void pygo_g_decref(pygo_g_t *g)
     new_count = __atomic_sub_fetch(&g->refcount, 1, __ATOMIC_ACQ_REL);
     if (new_count <= 0) {
         pygo_pystate_snap_clear(&g->snap);
+        if (g->tstate != NULL) {
+            /* per-g tstate (PYGO_PER_G_TSTATE): g is done + detached, so its
+             * tstate is current on no thread.  Clear+Delete frees its
+             * datastack/frames/exc.  Mirrors mn_fini's hub-tstate teardown,
+             * which also clears non-current tstates with the caller's tstate
+             * held -- pygo_g_decref's contexts (hub completion, drain, PygoG
+             * dealloc) all run with some other tstate current. */
+            PyThreadState_Clear(g->tstate);
+            PyThreadState_Delete(g->tstate);
+            g->tstate = NULL;
+        }
         if (g->coro != NULL) {
             pygo_coro_destroy(g->coro);
             g->coro = NULL;

@@ -157,6 +157,28 @@ PYGO_INLINE void pygo_mn_pending_steal(pygo_hub_t *victim,
     __atomic_add_fetch(&thief->pending,  1, __ATOMIC_ACQ_REL);
 }
 
+/* PYGO_PER_G_TSTATE (default OFF, experimental): give each goroutine its
+ * own PyThreadState so its Python execution state is migratable across
+ * hubs.  A stolen woken g then resumes on ANY hub without the cross-hub
+ * corruption that per-hub-tstate + snap migration hits (the snap bakes the
+ * owning hub's tstate into the suspended frames).  Read once; mn_init
+ * copies it into pygo_set_per_g_tstate_mode (which stands the snap down).
+ * Trades memory (a tstate per g) for a closeable p99.9 tail. */
+static int pygo_per_g_tstate_flag(void)
+{
+    static int v = -1;
+    int cur = __atomic_load_n(&v, __ATOMIC_RELAXED);
+    if (cur < 0) {
+        const char *e = getenv("PYGO_PER_G_TSTATE");
+        cur = (e != NULL && e[0] != '0') ? 1 : 0;
+        __atomic_store_n(&v, cur, __ATOMIC_RELAXED);
+    }
+    return cur;
+}
+
+/* Interpreter for per-g PyThreadState_New, captured at mn_init. */
+static PyInterpreterState *pygo_mn_interp = NULL;
+
 /* TLS pointers set at hub_main entry.  pygo_mn_yield_current() and
  * pygo_mn_current_hub() read these to route per-g operations to the
  * right hub without each call site needing to look it up. */
@@ -363,7 +385,7 @@ static PYGO_THREAD_RET pygo_hub_main(void *arg)
                         on = (e != NULL && *e == '0') ? 0 : 1;
                         __atomic_store_n(&sweep_on, on, __ATOMIC_RELAXED);
                     }
-                    if (on && parked > 0) {
+                    if (on && parked > 0 && !pygo_get_per_g_tstate_mode()) {
                         double now_s = pygo_sched_monotonic_seconds();
                         double interval_s = (double)sweep_thresh_ns / 2e9;
                         if (now_s - h->last_sweep_s >= interval_s) {
@@ -428,6 +450,43 @@ static PYGO_THREAD_RET pygo_hub_main(void *arg)
          * (see entry comment). */
         {
             int self_queued;
+
+            if (pygo_get_per_g_tstate_mode()) {
+                /* ---- per-g-tstate path (PYGO_PER_G_TSTATE) ----
+                 * Swap the hub's tstate out, the g's own tstate in, resume,
+                 * swap back.  The g's suspended eval frames reference
+                 * g->tstate (not this hub's), so resuming on ANY hub is
+                 * consistent -- which is exactly what makes a stolen woken g
+                 * safe here.  No snap dance (snap no-ops under this mode). */
+                PyThreadState *hub_ts;
+                __atomic_store_n(&g->in_sub_queue, 0, __ATOMIC_RELEASE);
+                if (g->coro == NULL || g->tstate == NULL ||
+                    __atomic_load_n(&g->done, __ATOMIC_ACQUIRE)) {
+                    continue;   /* stale/dead queue entry; owner does teardown */
+                }
+                hub_ts = PyEval_SaveThread();        /* detach hub tstate */
+                PyEval_RestoreThread(g->tstate);      /* attach g's own tstate */
+                h->sched.current = g;
+                pygo_tls_current_g = g;
+                pygo_tls_self_queued = 0;
+                pygo_coro_resume(g->coro);
+                self_queued = pygo_tls_self_queued;
+                pygo_tls_self_queued = 0;
+                pygo_tls_current_g = NULL;
+                h->sched.current = NULL;
+                PyEval_SaveThread();                  /* detach g's tstate */
+                PyEval_RestoreThread(hub_ts);          /* reattach hub tstate */
+                if (pygo_coro_done(g->coro)) {
+                    pygo_netpoll_force_unlink_g_parker(g);
+                    pygo_mn_pending_complete(h);
+                    pygo_g_decref(g);   /* Clear+Delete g->tstate */
+                } else if (!self_queued) {
+                    pygo_sched_ready_push(&h->sched, g);   /* raw yield */
+                }
+                /* parked: waits for a wake -> sub-drain -> stealable deque
+                 * (snap.valid stays 0 under this mode). */
+                continue;
+            }
 
             if (g->snap.valid) {
                 pygo_pystate_load(&g->snap);
@@ -700,6 +759,10 @@ int pygo_mn_init(int n_threads)
     pygo_hub_count = n_threads;
     main_ts = PyThreadState_Get();
     interp = main_ts->interp;
+    /* Per-g-tstate mode: capture the interp for PyThreadState_New and stand
+     * the snap down BEFORE any hub thread starts running goroutines. */
+    pygo_mn_interp = interp;
+    pygo_set_per_g_tstate_mode(pygo_per_g_tstate_flag());
 
     for (i = 0; i < n_threads; i++) {
         pygo_hub_t *h = &pygo_hubs[i];
@@ -829,6 +892,9 @@ void pygo_mn_fini(void)
      * 0.  Any leaked g (incomplete at fini) leaves a non-zero residue
      * otherwise. */
     __atomic_store_n(&pygo_mn_pending_global, 0, __ATOMIC_RELEASE);
+    /* Stand the snap back up for any later single-thread scheduler use. */
+    pygo_set_per_g_tstate_mode(0);
+    pygo_mn_interp = NULL;
 }
 
 /* Internal core: pick hub, alloc g, set up coro, submit, bump counters.
@@ -877,6 +943,22 @@ static int pygo_mn_go_core(PyObject *callable, pygo_c_entry_fn c_fn,
         PyMem_Free(g);
         errno = ENOMEM;
         return -1;
+    }
+    /* PYGO_PER_G_TSTATE: give the g its own migratable PyThreadState.
+     * g->tstate was zeroed by the slab alloc, so the OFF path leaves it
+     * NULL (and pygo_g_decref's teardown is a no-op). */
+    if (pygo_get_per_g_tstate_mode() && pygo_mn_interp != NULL) {
+        g->tstate = PyThreadState_New(pygo_mn_interp);
+        if (g->tstate == NULL) {
+            pygo_coro_destroy(g->coro);
+            if (callable != NULL) {
+                Py_DECREF(callable);
+                PyErr_NoMemory();
+            }
+            PyMem_Free(g);
+            errno = ENOMEM;
+            return -1;
+        }
     }
     pygo_mn_hub_submit(h, g);
     pygo_mn_pending_inc(h);

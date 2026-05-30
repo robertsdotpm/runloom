@@ -103,6 +103,9 @@ struct pygo_g {
     PyObject *result;
     PyObject *error;
     pygo_pystate_snap_t snap;     /* saved tstate; valid only when suspended */
+    PyThreadState *tstate;        /* per-g tstate, non-NULL only under
+                                   * PYGO_PER_G_TSTATE; the g's own Python
+                                   * execution state, migratable across hubs */
     double wake_at;
     pygo_g_t *next;
     int done;
@@ -313,6 +316,12 @@ pygo_g_t *pygo_sched_ready_pop(pygo_sched_t *s);
 void pygo_pystate_snap(pygo_pystate_snap_t *snap);
 void pygo_pystate_load(pygo_pystate_snap_t *snap);
 void pygo_pystate_snap_clear(pygo_pystate_snap_t *snap);
+
+/* Per-goroutine-tstate mode (PYGO_PER_G_TSTATE).  When on, pygo_pystate_snap
+ * no-ops so each g's own tstate is never swapped out; mn_sched runs the
+ * tstate-attach/detach path instead.  Set by mn_init, cleared by mn_fini. */
+void pygo_set_per_g_tstate_mode(int on);
+int  pygo_get_per_g_tstate_mode(void);
 
 /* The user's callable trampoline for a goroutine; installs an initial
  * root cframe / current_frame on g's own stack, then runs g->callable.
