@@ -157,6 +157,112 @@ PYGO_INLINE void pygo_mn_pending_steal(pygo_hub_t *victim,
     __atomic_add_fetch(&thief->pending,  1, __ATOMIC_ACQ_REL);
 }
 
+/* ---- Global stealable run-queue (PYGO_PER_G_TSTATE only) ----
+ *
+ * Default mode routes a woken g back to its ORIGIN hub's owner-drained
+ * submission list (pygo_mn_hub_submit).  That strands the g whenever the
+ * origin hub is stuck in a non-yielding blocking C call (the classic one:
+ * libc getaddrinfo): the hub never loops, never drains its sub list, so the
+ * woken g never reaches a stealable deque and no idle hub can rescue it.
+ * This is asyncio's signature failure -- one blocking task stalling a whole
+ * fan-out -- reproduced in pygo's narrow blocking-C-call case.
+ *
+ * Under PYGO_PER_G_TSTATE a woken g carries its own migratable
+ * PyThreadState, so it can resume on ANY hub.  We exploit that: wake_g
+ * pushes the woken g onto this process-global queue instead of the origin
+ * hub's sub list, and every idle hub drains it in hub_main's empty-local/
+ * empty-deque path (alongside neighbour-steal).  An idle hub thus recovers a
+ * stalled hub's woken work.  This is Go's per-P-local + global-runq model.
+ *
+ * Accounting: the g stays counted in its origin hub's `pending` and the
+ * global counter while it sits here (we do NOT rebalance per-hub pending on
+ * pull).  That is correct because the idle path only ever reads the SUM of
+ * per-hub pending, and the sum is conserved regardless of which hub holds the
+ * count: spawn does +1 on one hub, completion does -1 on one hub, so the sum
+ * always equals the global in-flight count.  pygo_mn_run reads the global
+ * counter, which a queued g keeps non-zero until it actually completes.
+ *
+ * Single-owner safety (the load-bearing part).  Two per-g atomics (declared on
+ * pygo_g_t) make the MPMC queue safe without per-entry refcounting:
+ *
+ *   1. g->mn_wake -- EXACTLY-ONCE WAKE.  wake_g CASes it 0->1 and only the
+ *      winner enqueues.  It is cleared back to 0 ONLY inside the park
+ *      primitive (netpoll wait_fd) right before the park commits, so: a wake
+ *      racing the commit enqueues exactly once; a wake while the g is running
+ *      (mn_wake==1) is dropped.  Result: a g has AT MOST ONE entry at a time,
+ *      so there are no stale duplicates -> no spurious resume, no double
+ *      complete, and the g's own scheduler ref keeps it alive (no per-entry
+ *      refcount, exactly like the proven sub_list/deque path).
+ *   2. g->mn_owned -- EXCLUSIVE RESUME CLAIM.  A hub CASes it 0->1 before
+ *      resuming; the loser re-pushes its (single) entry so no wake is lost.
+ *      This closes the one residual window: between a g committing to its next
+ *      park (which lets a re-wake enqueue) and that g actually yielding back to
+ *      its hub, the g is still executing -- the claim stops a second hub from
+ *      resuming it in that gap.  Released on park/yield; left 1 on completion
+ *      (the slab zeroes it on the next alloc; exactly-once-wake guarantees no
+ *      other entry references the freed g).
+ *
+ * MPMC: many producers (any thread's wake_g) and many consumers (idle hubs).
+ * Mutex-protected singly-linked list through g->next -- the same field the
+ * per-hub sub list uses, safe because a given g is in exactly one of {sub
+ * list, global runq} at a time (a fresh g goes to its hub's sub list; a woken
+ * g under per-g-tstate comes here, long after it left the sub list).
+ *
+ * Process-lifetime lock: POSIX gets a static initialiser (usable with no
+ * init/destroy, survives mn_init/mn_fini cycles); Windows can't statically
+ * init a CRITICAL_SECTION, so mn_init does a one-time init there. */
+static pygo_mutex_t  pygo_global_runq_lock = PYGO_MUTEX_STATIC_INIT;
+static pygo_g_t     *pygo_global_runq_head = NULL;
+static pygo_g_t     *pygo_global_runq_tail = NULL;
+static volatile long pygo_global_runq_len  = 0;
+
+/* Link g onto the tail of the global run-queue.  The g is kept alive by its
+ * scheduler ref (it is a live woken g), exactly like the sub_list/deque path;
+ * no per-entry ref.  Enqueue is made exactly-once by the mn_wake CAS in the
+ * caller (wake_g); a re-push on claim contention re-links the same g. */
+static void pygo_mn_global_runq_push(pygo_g_t *g)
+{
+    pygo_mutex_lock(&pygo_global_runq_lock);
+    g->next = NULL;
+    if (pygo_global_runq_tail != NULL) {
+        pygo_global_runq_tail->next = g;
+    } else {
+        pygo_global_runq_head = g;
+    }
+    pygo_global_runq_tail = g;
+    __atomic_add_fetch(&pygo_global_runq_len, 1, __ATOMIC_RELAXED);
+    pygo_mutex_unlock(&pygo_global_runq_lock);
+    PYGO_EVT(PYGO_EVT_G_SUBMIT, g, NULL, 0);
+    pygo_g_state_set(g, PYGO_GST_SUBMITTED);
+}
+
+/* Pop one g from the global run-queue head (NULL if empty).  No per-hub
+ * pending rebalance (see header: only the sum matters, and the mutex
+ * release/acquire already orders the g's writes for the puller). */
+static pygo_g_t *pygo_mn_global_runq_pull(void)
+{
+    pygo_g_t *g;
+    /* Lock-free fast-out: the queue is empty in the common case (default
+     * mode never touches it; per-g-tstate only when a wake is in flight),
+     * so skip the mutex when there is clearly nothing to take.  A racing
+     * push between this load and a lock would just be picked up next loop. */
+    if (__atomic_load_n(&pygo_global_runq_len, __ATOMIC_ACQUIRE) == 0) {
+        return NULL;
+    }
+    pygo_mutex_lock(&pygo_global_runq_lock);
+    g = pygo_global_runq_head;
+    if (g != NULL) {
+        pygo_global_runq_head = g->next;
+        if (pygo_global_runq_head == NULL) {
+            pygo_global_runq_tail = NULL;
+        }
+        g->next = NULL;
+        __atomic_sub_fetch(&pygo_global_runq_len, 1, __ATOMIC_RELAXED);
+    }
+    pygo_mutex_unlock(&pygo_global_runq_lock);
+    return g;
+}
+
 /* PYGO_PER_G_TSTATE (default OFF, experimental): give each goroutine its
  * own PyThreadState so its Python execution state is migratable across
  * hubs.  A stolen woken g then resumes on ANY hub without the cross-hub
@@ -251,6 +357,12 @@ static PYGO_THREAD_RET pygo_hub_main(void *arg)
 
     while (!__atomic_load_n(&h->stopping, __ATOMIC_ACQUIRE)) {
         pygo_g_t *g;
+        /* Set when g came from the global run-queue: it then carries a queue
+         * ref this iteration must release, and its resume needs the exclusive
+         * g->mn_owned claim (the queue is MPMC, so a stale duplicate entry may
+         * coexist).  Gs from the local FIFO / own deque / a neighbour steal are
+         * single-owner by construction and skip both. */
+        int from_runq = 0;
         /* Drain the submission list into the deque first.  Pushing to
          * the deque is owner-only, so we (the hub) move fresh gs from
          * external producers onto our deque before anyone else looks. */
@@ -304,6 +416,16 @@ static PYGO_THREAD_RET pygo_hub_main(void *arg)
         g = pygo_sched_ready_pop(&h->sched);     /* local yielded */
         if (g == NULL) {
             g = (pygo_g_t *)pygo_cldeque_pop(&h->deque);  /* own fresh */
+        }
+        if (g == NULL) {
+            /* Global run-queue: woken migratable gs (per-g-tstate) that any
+             * idle hub may run, so a hub stuck in a blocking C call can't
+             * strand them.  Checked before neighbour-steal below so a
+             * stalled hub's woken work is recovered promptly.  from_runq tells
+             * the resume block to take the mn_owned claim and, on contention,
+             * re-push rather than drop. */
+            g = pygo_mn_global_runq_pull();
+            if (g != NULL) from_runq = 1;
         }
         if (g == NULL) {
             int i;
@@ -459,10 +581,49 @@ static PYGO_THREAD_RET pygo_hub_main(void *arg)
                  * consistent -- which is exactly what makes a stolen woken g
                  * safe here.  No snap dance (snap no-ops under this mode). */
                 PyThreadState *hub_ts;
+                /* A global-runq entry holds a QUEUE REF (incref'd in wake_g).
+                 * This is what makes the mn_owned re-push below safe: the g
+                 * cannot be freed while an entry references it, so the re-pusher
+                 * never reads a freed g's stale mn_owned (which, left 1 on a
+                 * completed g and never zeroed until the slab reallocs it, would
+                 * make every claim fail and spin forever).  done-gate first: an
+                 * entry whose g already completed (the owner left mn_owned 1 and
+                 * dropped the scheduler ref) is simply released. */
+                if (from_runq && __atomic_load_n(&g->done, __ATOMIC_ACQUIRE)) {
+                    pygo_g_decref(g);   /* queue ref; g already torn down */
+                    continue;
+                }
+                /* Exclusive resume claim (mn_owned).  Applied to EVERY source:
+                 * exactly-once-wake (mn_wake) means a g has at most one runq
+                 * entry, but a g that committed to its next park can have that
+                 * re-wake enqueued + pulled by another hub WHILE it is still
+                 * executing (between park-commit and the yield back to its hub);
+                 * a second PyEval_RestoreThread on that one live tstate corrupts
+                 * CPython's per-thread gilstate.  The CAS makes it impossible;
+                 * in the common case it wins on the first try. */
+                {
+                    int oexp = 0;
+                    if (!__atomic_compare_exchange_n(&g->mn_owned, &oexp, 1,
+                                                     0, __ATOMIC_ACQ_REL,
+                                                     __ATOMIC_ACQUIRE)) {
+                        /* Lost: another hub is mid-resume of this g.  A runq
+                         * entry re-pushes (ref retained) so its wake is retried
+                         * once the owner releases (a few instrs later); a
+                         * single-owner-source entry is dropped -- its owner
+                         * carries it to its next park or completion. */
+                        if (from_runq) pygo_mn_global_runq_push(g);
+                        continue;
+                    }
+                }
                 __atomic_store_n(&g->in_sub_queue, 0, __ATOMIC_RELEASE);
                 if (g->coro == NULL || g->tstate == NULL ||
                     __atomic_load_n(&g->done, __ATOMIC_ACQUIRE)) {
-                    continue;   /* stale/dead queue entry; owner does teardown */
+                    /* Dead under our claim (shouldn't happen -- we hold the
+                     * claim and the done-gate already screened from_runq), but
+                     * stay leak-safe: release the claim and drop the queue ref. */
+                    __atomic_store_n(&g->mn_owned, 0, __ATOMIC_RELEASE);
+                    if (from_runq) pygo_g_decref(g);   /* queue ref */
+                    continue;
                 }
                 hub_ts = PyEval_SaveThread();        /* detach hub tstate */
                 PyEval_RestoreThread(g->tstate);      /* attach g's own tstate */
@@ -479,12 +640,29 @@ static PYGO_THREAD_RET pygo_hub_main(void *arg)
                 if (pygo_coro_done(g->coro)) {
                     pygo_netpoll_force_unlink_g_parker(g);
                     pygo_mn_pending_complete(h);
-                    pygo_g_decref(g);   /* Clear+Delete g->tstate */
-                } else if (!self_queued) {
-                    pygo_sched_ready_push(&h->sched, g);   /* raw yield */
+                    /* Leave mn_owned set: the g is done.  Any racing entry hits
+                     * the done-gate above (kept alive by its own queue ref) and
+                     * is released there; nothing resumes a done g.  Drop the
+                     * scheduler ref, then this entry's queue ref -- the g frees
+                     * once both AND every other outstanding queue ref are gone. */
+                    pygo_g_decref(g);                  /* scheduler ref */
+                    if (from_runq) pygo_g_decref(g);   /* queue ref */
+                } else if (self_queued) {
+                    /* Parked on a waiter: release the claim so the eventual
+                     * wake's entry can be picked up; drop this entry's queue
+                     * ref.  The g keeps its scheduler ref while parked. */
+                    __atomic_store_n(&g->mn_owned, 0, __ATOMIC_RELEASE);
+                    if (from_runq) pygo_g_decref(g);   /* queue ref */
+                } else {
+                    /* Raw yield (pygo_coro_yield, no park -> no wake coming):
+                     * release the claim, drop the queue ref, and keep the g on
+                     * this hub's local FIFO so it makes progress (hub-pinned, as
+                     * the default path).  mn_wake stays 1 -- harmless, no wake
+                     * fires without a parker; the next real park clears it. */
+                    __atomic_store_n(&g->mn_owned, 0, __ATOMIC_RELEASE);
+                    if (from_runq) pygo_g_decref(g);   /* queue ref */
+                    pygo_sched_ready_push(&h->sched, g);
                 }
-                /* parked: waits for a wake -> sub-drain -> stealable deque
-                 * (snap.valid stays 0 under this mode). */
                 continue;
             }
 
@@ -696,6 +874,31 @@ void pygo_mn_wake_g(void *hub_opaque, pygo_g_t *g)
         pygo_sched_ready_push(pygo_sched_get(), g);
         return;
     }
+    if (pygo_get_per_g_tstate_mode()) {
+        /* per-g-tstate: g is migratable, so route it to the global run-queue
+         * any idle hub can drain instead of the origin hub's owner-drained sub
+         * list -- recovers it even if the origin hub is wedged in a blocking C
+         * call.  EXACTLY-ONCE WAKE: CAS mn_wake 0->1; only the winner enqueues.
+         * mn_wake is 0 only while the g is parked-and-not-yet-woken (it is
+         * cleared in the park primitive right before the park commits, see
+         * pygo_netpoll_wait_fd), so a wake while the g is running, already
+         * queued, or done CASes against 1 and is dropped -- at most one entry
+         * per park.  The winner takes a QUEUE REF (incref) so the entry keeps
+         * the g alive until a hub consumes it: that is what lets the puller's
+         * mn_owned re-push read the g safely even across the g's completion (a
+         * freed g's stale mn_owned would otherwise spin the re-push forever). */
+        int expected = 0;
+        (void)hub_opaque;   /* origin no longer needed: no per-hub rebalance */
+        PYGO_G_ASSERT_NOT(g, PYGO_GST_MASK_DEAD);
+        if (!__atomic_compare_exchange_n(&g->mn_wake, &expected, 1,
+                                         0, __ATOMIC_ACQ_REL,
+                                         __ATOMIC_ACQUIRE)) {
+            return;   /* not parked / already queued -- no duplicate entry */
+        }
+        pygo_g_incref(g);            /* queue ref, dropped when an entry is consumed */
+        pygo_mn_global_runq_push(g);
+        return;
+    }
     pygo_mn_hub_submit((pygo_hub_t *)hub_opaque, g);
 }
 
@@ -740,6 +943,19 @@ int pygo_mn_init(int n_threads)
     PyThreadState *saved;
 
     if (pygo_hubs != NULL) return 0;  /* already inited */
+#if defined(PYGO_OS_WINDOWS)
+    /* CRITICAL_SECTION can't be statically initialised; do it exactly once
+     * for the process (never destroyed -- a process-lifetime lock).  mn_init
+     * runs single-threaded before any hub spawns, so the flag needs no
+     * atomics beyond surviving repeated mn_init/mn_fini cycles. */
+    {
+        static int runq_lock_inited = 0;
+        if (!runq_lock_inited) {
+            pygo_mutex_init(&pygo_global_runq_lock);
+            runq_lock_inited = 1;
+        }
+    }
+#endif
     if (n_threads <= 0) {
         /* Auto: min(cores, 16).  Agent 6 measured pygo on 3.13t scaling
          * linearly to H=16 (~1.17 M ops/sec) then REGRESSING past H=32
@@ -879,6 +1095,23 @@ void pygo_mn_fini(void)
      * held here (we restored above). */
     for (i = 0; i < pygo_hub_count; i++) {
         pygo_mn_hub_drain_leftovers(&pygo_hubs[i]);
+    }
+    /* Drain the global run-queue too.  Exactly-once-wake means an entry here
+     * is a single, live, yet-to-run woken g holding its one scheduler ref (no
+     * per-entry ref; no stale duplicates).  A single decref mirrors the
+     * completion path and frees it -- exactly like pygo_mn_hub_drain_leftovers
+     * does for the sub_list / deque / FIFO.  Hubs are joined, so this is
+     * single-threaded -- no lock needed. */
+    {
+        pygo_g_t *g = pygo_global_runq_head;
+        pygo_global_runq_head = pygo_global_runq_tail = NULL;
+        __atomic_store_n(&pygo_global_runq_len, 0, __ATOMIC_RELEASE);
+        while (g != NULL) {
+            pygo_g_t *next = g->next;
+            g->next = NULL;
+            pygo_g_decref(g);
+            g = next;
+        }
     }
     for (i = 0; i < pygo_hub_count; i++) {
         PyThreadState_Clear(pygo_hubs[i].tstate);

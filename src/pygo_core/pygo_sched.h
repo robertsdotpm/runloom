@@ -138,6 +138,26 @@ struct pygo_g {
      * isn't enqueued and later popped twice, which would resume a
      * freed coro on the second pop. */
     int in_sub_queue;
+    /* ---- PYGO_PER_G_TSTATE global run-queue protocol (mn_sched.c) ----
+     * Two small per-g atomics that together give the woken-g global run-queue
+     * (a) exactly-one entry per park and (b) single-owner resume, so the queue
+     * can be drained by ANY idle hub (recovering a stalled hub's work) without
+     * the duplicate/double/concurrent-resume hazards a naive MPMC queue hits.
+     * Both untouched by the default (per-hub-tstate) scheduler.
+     *
+     * mn_wake -- exactly-once wake dedup.  wake_g CASes it 0->1 and only the
+     * winner enqueues; it is cleared back to 0 ONLY inside the park primitive
+     * (wait_fd) just before that park commits, so a wake that races the commit
+     * enqueues exactly once and a wake while the g is running (mn_wake==1) is
+     * dropped.  No duplicate entries can exist -> no stale/spurious resume. */
+    int mn_wake;
+    /* mn_owned -- exclusive-resume claim.  A hub CASes it 0->1 before resuming
+     * a global-runq g; the loser re-pushes its entry (no wake lost).  This
+     * closes the commit->yield window where the about-to-park g is still
+     * executing on one hub but its re-wake is already enqueued for another.
+     * Released on park/yield; left 1 on completion (the slab zeroes it on the
+     * next alloc, and exactly-once-wake guarantees no other entry exists). */
+    int mn_owned;
     /* Active netpoll parker, set by pygo_netpoll_wait_fd on link and
      * cleared on unlink.  Each g has at most one parker in flight (a
      * g calls wait_fd sequentially), so a single pointer suffices.

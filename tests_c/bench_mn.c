@@ -313,6 +313,18 @@ static double now_seconds(void)
     return ts.tv_sec + ts.tv_nsec / 1e9;
 }
 
+/* DIAG: dump the lifecycle event ring on a fatal signal so a load-only
+ * crash leaves a trace.  Only useful with PYGO_DEBUG_DIAG=ring|all. */
+extern void pygo_diag_dump(int fd);
+extern void pygo_diag_init(void);
+#include <signal.h>
+static void diag_crash_handler(int sig)
+{
+    pygo_diag_dump(2);
+    signal(sig, SIG_DFL);
+    raise(sig);
+}
+
 int main(int argc, char **argv)
 {
     int N = (argc > 1) ? atoi(argv[1]) : 256;
@@ -330,6 +342,9 @@ int main(int argc, char **argv)
      * (slab allocator uses PyMem_*, tstate setup, etc.).  This is a
      * minimal embed -- no Python script runs. */
     Py_Initialize();
+    pygo_diag_init();   /* parse PYGO_DEBUG_DIAG; enable the event ring */
+    signal(SIGSEGV, diag_crash_handler);
+    signal(SIGABRT, diag_crash_handler);
 
     int port = start_echo_server(N + 16);
     if (port < 0) {
