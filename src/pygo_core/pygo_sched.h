@@ -140,6 +140,7 @@ struct pygo_g {
                                    * PYGO_PER_G_TSTATE; the g's own Python
                                    * execution state, migratable across hubs */
     double wake_at;
+    uint64_t sleep_seq;  /* FIFO tiebreak for equal wake_at (asyncio (when,seq) order) */
     pygo_g_t *next;
     int done;
     int refcount;
@@ -297,6 +298,7 @@ struct pygo_sched {
     pygo_g_t **sleep_heap;
     Py_ssize_t sleep_size;
     Py_ssize_t sleep_cap;
+    uint64_t   sleep_seq_ctr;  /* monotonic counter for sleep_seq FIFO tiebreak */
     /* Default stack size for new gs. */
     Py_ssize_t stack_size;
     /* Goroutines completed since the last sched_drain. */

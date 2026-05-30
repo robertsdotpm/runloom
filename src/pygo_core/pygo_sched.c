@@ -712,7 +712,19 @@ pygo_g_t *pygo_sched_ready_pop(pygo_sched_t *s)
 #define pygo_ready_push pygo_sched_ready_push
 #define pygo_ready_pop  pygo_sched_ready_pop
 
-/* ---- Sleep heap (min-heap by wake_at) ---- */
+/* ---- Sleep heap (min-heap by (wake_at, sleep_seq)) ----
+ * The sleep_seq tiebreak makes equal-deadline sleepers wake in FIFO insertion
+ * order, matching asyncio's (when, seq) TimerHandle ordering.  Without it,
+ * two coros sleeping the same duration but started a tick apart could wake in
+ * the wrong relative order (observed breaking equal-timeout races, e.g.
+ * hypercorn's lifespan startup-timeout test). */
+static inline int pygo_sleep_before(const pygo_g_t *a, const pygo_g_t *b)
+{
+    if (a->wake_at < b->wake_at) return 1;
+    if (a->wake_at > b->wake_at) return 0;
+    return a->sleep_seq < b->sleep_seq;
+}
+
 static int pygo_sleep_grow(pygo_sched_t *s)
 {
     Py_ssize_t new_cap = s->sleep_cap ? s->sleep_cap * 2 : 16;
@@ -735,9 +747,11 @@ static int pygo_sleep_push(pygo_sched_t *s, pygo_g_t *g)
     }
     s->sleep_size++;
     i = s->sleep_size;
+    /* Assign the FIFO tiebreak sequence at push time. */
+    g->sleep_seq = s->sleep_seq_ctr++;
     s->sleep_heap[i] = g;
-    /* sift up */
-    while (i > 1 && s->sleep_heap[i / 2]->wake_at > g->wake_at) {
+    /* sift up: move g toward the root while it is earlier than its parent */
+    while (i > 1 && pygo_sleep_before(g, s->sleep_heap[i / 2])) {
         s->sleep_heap[i] = s->sleep_heap[i / 2];
         i /= 2;
     }
@@ -766,10 +780,11 @@ pygo_g_t *pygo_sched_sleep_pop(pygo_sched_t *s)
         child = i * 2;
         if (child > s->sleep_size) break;
         if (child + 1 <= s->sleep_size &&
-            s->sleep_heap[child + 1]->wake_at < s->sleep_heap[child]->wake_at) {
+            pygo_sleep_before(s->sleep_heap[child + 1], s->sleep_heap[child])) {
             child++;
         }
-        if (last->wake_at <= s->sleep_heap[child]->wake_at) break;
+        /* stop once `last` is no later than the smaller child */
+        if (!pygo_sleep_before(s->sleep_heap[child], last)) break;
         s->sleep_heap[i] = s->sleep_heap[child];
         i = child;
     }
