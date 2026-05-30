@@ -413,15 +413,24 @@ static volatile int pygo_sysmon_stop = 0;
  * start_the_world -- STW-safe for free (the per-g bug was thousands of
  * EPHEMERAL tstates churning across STW; these H bound tstates do not).
  *
- * Dispatch: the sysmon watchdog, on a DETACHED wedge, drops the hub id into a
- * single-slot mailbox (one wedged hub at a time; a pool is a later
- * generalisation).  The rescue clears the slot only at its final release, so a
- * persistently-wedged hub is re-dispatched on the next scan if a premature
- * release (e.g. a STW window) happened. */
+ * Dispatch: a pool of standby rescue threads + a per-hub claim slot
+ * (pygo_handoff_claim[hub], FREE/PENDING/OWNED).  The sysmon watchdog, on a
+ * DETACHED wedge, CASes the hub's slot FREE->PENDING; an idle rescue thread
+ * CASes PENDING->OWNED to take it (so at most one thread ever rescues a given
+ * hub -- the single-attach invariant holds), rescues it, then stores OWNED->FREE
+ * at its final release.  K simultaneous DETACHED wedges recover on K threads in
+ * parallel (each owns a distinct hub).  A persistently-wedged hub is re-flagged
+ * FREE->PENDING on the next sysmon scan after a premature release (e.g. a STW
+ * window left the hub wedged), since sysmon only ever CASes from FREE. */
+#define PYGO_HANDOFF_FREE    0   /* not wedged / not in rescue */
+#define PYGO_HANDOFF_PENDING 1   /* sysmon flagged a DETACHED wedge, awaiting pickup */
+#define PYGO_HANDOFF_OWNED   2   /* a rescue thread holds this hub */
 static int          pygo_handoff_enabled = 0;
-static volatile int pygo_handoff_mailbox = -1;   /* hub id to rescue, -1 idle */
-static pygo_thread_t pygo_handoff_thread;
-static int          pygo_handoff_running = 0;
+static int          pygo_handoff_pool    = 0;    /* number of rescue threads */
+static int         *pygo_handoff_claim   = NULL; /* per-hub FREE/PENDING/OWNED */
+static pygo_thread_t *pygo_handoff_threads = NULL;
+static int          pygo_handoff_running = 0;     /* count of spawned rescue threads */
+static int          pygo_handoff_debug   = 0;     /* PYGO_HANDOFF_DEBUG: trace adopts/drains */
 static volatile int pygo_handoff_stop = 0;
 
 /* Mark the start of a coro resume on this hub (sysmon progress beat).
@@ -1376,15 +1385,17 @@ static PYGO_THREAD_RET pygo_sysmon_main(void *arg)
             }
             /* Group B handoff dispatch.  Independent of the once-per-episode
              * log dedup above: attempt every tick a DETACHED wedge is live so a
-             * hub that the rescue released early (e.g. across a STW window) is
-             * re-dispatched.  The CAS only fills a FREE mailbox; the rescue M
-             * clears it at its final release, so at most one hub is in rescue at
-             * a time (single-slot; a pool is a later generalisation). */
+             * hub that a rescue thread released early (e.g. across a STW window)
+             * is re-flagged.  The CAS only fires from FREE->PENDING, so a hub
+             * already PENDING (awaiting pickup) or OWNED (in rescue) is left
+             * alone -- no double dispatch; a rescue thread takes it PENDING->
+             * OWNED and stores OWNED->FREE at its final release. */
             if (pygo_handoff_enabled && start != 0 &&
                 (now - start) > pygo_sysmon_wedge_ns &&
                 pygo_tstate_attach_state(h->tstate) == PYGO_TS_DETACHED) {
-                int empty = -1;
-                __atomic_compare_exchange_n(&pygo_handoff_mailbox, &empty, i, 0,
+                int free_st = PYGO_HANDOFF_FREE;
+                __atomic_compare_exchange_n(&pygo_handoff_claim[i], &free_st,
+                                            PYGO_HANDOFF_PENDING, 0,
                                             __ATOMIC_ACQ_REL, __ATOMIC_RELAXED);
             }
         }
@@ -1422,7 +1433,20 @@ static void pygo_sysmon_config(void)
     pygo_handoff_enabled = 0;   /* no free-threaded attach states pre-3.13 */
 #endif
     if (pygo_get_per_g_tstate_mode()) pygo_handoff_enabled = 0;
-    if (pygo_handoff_enabled) pygo_sysmon_enabled = 1;
+    if (pygo_handoff_enabled) {
+        const char *pl = getenv("PYGO_HANDOFF_POOL");
+        const char *dbg = getenv("PYGO_HANDOFF_DEBUG");
+        pygo_handoff_debug = (dbg != NULL && dbg[0] != '0') ? 1 : 0;
+        pygo_sysmon_enabled = 1;
+        /* Pool size: default min(hub_count, 4) -- enough to recover several
+         * simultaneous DETACHED wedges in parallel without standing up a
+         * standby thread per hub.  At most hub_count hubs can be wedged at
+         * once, so clamp there; floor at 1. */
+        pygo_handoff_pool = (pl != NULL) ? atoi(pl)
+                                         : (pygo_hub_count < 4 ? pygo_hub_count : 4);
+        if (pygo_handoff_pool < 1) pygo_handoff_pool = 1;
+        if (pygo_handoff_pool > pygo_hub_count) pygo_handoff_pool = pygo_hub_count;
+    }
     if (!pygo_sysmon_enabled) return;
     ms = getenv("PYGO_SYSMON_MS");
     if (ms != NULL) {
@@ -1539,6 +1563,7 @@ static void pygo_handoff_rescue(pygo_hub_t *h)
 {
     pygo_pystate_snap_t rescue_base;
     int attached = 0;
+    long drained = 0;
 
     for (;;) {
         pygo_g_t *g;
@@ -1574,6 +1599,8 @@ static void pygo_handoff_rescue(pygo_hub_t *h)
              * owner's END_ALLOW_THREADS re-attach finds it intact. */
             pygo_pystate_snap(&rescue_base);
             attached = 1;
+            if (pygo_handoff_debug)
+                fprintf(stderr, "[PYGO_HANDOFF] adopt hub %d\n", h->id);
         }
 
         /* ---- one drain pass (mirror hub_main, default-only, NO steal) ---- */
@@ -1611,9 +1638,13 @@ static void pygo_handoff_rescue(pygo_hub_t *h)
 
         if (g != NULL) {
             pygo_handoff_resume_g(h, g, &rescue_base);
+            drained++;
             continue;                                 /* try for more work */
         }
 
+        if (pygo_handoff_debug)
+            fprintf(stderr, "[PYGO_HANDOFF] hub %d drain pass empty "
+                            "(drained=%ld so far)\n", h->id, drained);
         /* Runq empty: restore g_block's slice, detach so the owner can reclaim
          * the instant its block ends, then re-verify.  Still DETACHED-wedged ->
          * loop re-adopts (after a short sleep that bounds the added latency for
@@ -1635,51 +1666,89 @@ static void pygo_handoff_rescue(pygo_hub_t *h)
     }
 }
 
-/* Rescue M main loop.  One standby thread; picks the wedged hub id out of the
- * single-slot mailbox, rescues it, then clears the slot (so the slot is held
- * for the whole rescue -> one hub in rescue at a time).  Holds no tstate while
- * idle. */
+/* Rescue M main loop.  One of a pool of standby threads; scans the per-hub
+ * claim slots for a PENDING wedge, CASes it PENDING->OWNED to take exclusive
+ * ownership of that hub's rescue (so two threads never rescue the same hub),
+ * rescues it, then stores OWNED->FREE.  At most one rescue per scan pass, then
+ * re-scan from the top for fairness across hubs.  Holds no tstate while idle. */
 static PYGO_THREAD_RET pygo_handoff_main(void *arg)
 {
     (void)arg;
     pygo_coro_thread_init();   /* per-OS-thread coro backend (no-op on POSIX) */
     while (!__atomic_load_n(&pygo_handoff_stop, __ATOMIC_ACQUIRE)) {
-        int hubid = __atomic_load_n(&pygo_handoff_mailbox, __ATOMIC_ACQUIRE);
-        if (hubid >= 0 && hubid < pygo_hub_count) {
-            pygo_handoff_rescue(&pygo_hubs[hubid]);
-            __atomic_store_n(&pygo_handoff_mailbox, -1, __ATOMIC_RELEASE);
-        } else {
-            pygo_sleep_ns(500000LL);   /* 0.5 ms idle poll for a dispatch */
+        int i, claimed = 0;
+        for (i = 0; i < pygo_hub_count; i++) {
+            int pend = PYGO_HANDOFF_PENDING;
+            if (__atomic_compare_exchange_n(&pygo_handoff_claim[i], &pend,
+                                            PYGO_HANDOFF_OWNED, 0,
+                                            __ATOMIC_ACQ_REL,
+                                            __ATOMIC_RELAXED)) {
+                pygo_handoff_rescue(&pygo_hubs[i]);
+                __atomic_store_n(&pygo_handoff_claim[i], PYGO_HANDOFF_FREE,
+                                 __ATOMIC_RELEASE);
+                claimed = 1;
+                break;   /* one rescue per pass; re-scan from the top */
+            }
         }
+        if (!claimed) pygo_sleep_ns(500000LL);   /* 0.5 ms idle poll */
     }
     pygo_coro_thread_fini();
     PYGO_THREAD_RETURN(NULL);
 }
 
-/* Spawn the rescue thread (after hubs exist).  Enabled-gated; spawn failure is
- * non-fatal -- the scheduler runs fine, just without stalled-hub recovery. */
+/* Spawn the rescue-thread pool (after hubs exist).  Enabled-gated; a partial or
+ * total spawn failure is non-fatal -- the scheduler runs fine, just with fewer
+ * (or no) parallel rescuers.  Allocates the per-hub claim array first. */
 static void pygo_handoff_spawn(void)
 {
+    int k;
     if (!pygo_handoff_enabled) return;
     pygo_handoff_stop = 0;
-    pygo_handoff_mailbox = -1;
-    if (pygo_thread_create(&pygo_handoff_thread, pygo_handoff_main, NULL) == 0) {
-        pygo_handoff_running = 1;
-    } else {
-        fprintf(stderr, "[PYGO_HANDOFF] rescue thread spawn failed; "
+    pygo_handoff_claim = (int *)calloc((size_t)(pygo_hub_count > 0 ?
+                                                pygo_hub_count : 1), sizeof(int));
+    pygo_handoff_threads = (pygo_thread_t *)calloc(
+        (size_t)(pygo_handoff_pool > 0 ? pygo_handoff_pool : 1),
+        sizeof(pygo_thread_t));
+    if (pygo_handoff_claim == NULL || pygo_handoff_threads == NULL) {
+        free(pygo_handoff_claim);   pygo_handoff_claim = NULL;
+        free(pygo_handoff_threads); pygo_handoff_threads = NULL;
+        pygo_handoff_enabled = 0;
+        fprintf(stderr, "[PYGO_HANDOFF] alloc failed; stalled-hub recovery "
+                        "disabled\n");
+        return;
+    }
+    pygo_handoff_running = 0;
+    for (k = 0; k < pygo_handoff_pool; k++) {
+        /* Pack successfully-created handles at [0, running) so stop_join joins
+         * exactly the threads that started. */
+        if (pygo_thread_create(&pygo_handoff_threads[pygo_handoff_running],
+                               pygo_handoff_main, NULL) == 0) {
+            pygo_handoff_running++;
+        }
+    }
+    if (pygo_handoff_running == 0) {
+        free(pygo_handoff_claim);   pygo_handoff_claim = NULL;
+        free(pygo_handoff_threads); pygo_handoff_threads = NULL;
+        pygo_handoff_enabled = 0;
+        fprintf(stderr, "[PYGO_HANDOFF] no rescue threads spawned; "
                         "stalled-hub recovery disabled\n");
     }
 }
 
-/* Stop + join the rescue thread.  Called in mn_fini AFTER the watchdog stops
- * (so no new dispatch) but BEFORE the hubs are torn down (so the rescue can
- * never hold a tstate that is about to be deleted). */
+/* Stop + join the rescue-thread pool.  Called in mn_fini AFTER the watchdog
+ * stops (so no new dispatch) but BEFORE the hubs are torn down (so no rescue
+ * thread can still hold a tstate that is about to be deleted). */
 static void pygo_handoff_stop_join(void)
 {
-    if (!pygo_handoff_running) return;
+    int k;
+    if (pygo_handoff_running <= 0) return;
     __atomic_store_n(&pygo_handoff_stop, 1, __ATOMIC_RELEASE);
-    pygo_thread_join(pygo_handoff_thread);
+    for (k = 0; k < pygo_handoff_running; k++) {
+        pygo_thread_join(pygo_handoff_threads[k]);
+    }
     pygo_handoff_running = 0;
+    free(pygo_handoff_threads); pygo_handoff_threads = NULL;
+    free(pygo_handoff_claim);   pygo_handoff_claim = NULL;
 }
 
 int pygo_mn_init(int n_threads)
