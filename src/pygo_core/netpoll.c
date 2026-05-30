@@ -1726,20 +1726,6 @@ int pygo_netpoll_wait_fd(int fd, int events, long long timeout_ns)
         }
     }
 
-    /* PYGO_PER_G_TSTATE exactly-once-wake (see pygo_mn_wake_g / the global
-     * run-queue header in mn_sched.c).  Clear g->mn_wake to 0 JUST before the
-     * commit CAS below.  A pump can only call wake_g for this parker once it
-     * observes commit == PARKED, i.e. strictly after our CAS succeeds; at that
-     * point mn_wake is already 0, so the wake's CAS 0->1 enqueues this g
-     * exactly once.  Earlier wakes (pump claims ARMED) never call wake_g, and
-     * a wake while the g was running saw mn_wake == 1 and was dropped.  If the
-     * commit loses to a pump (WOKEN below) the g keeps running, so restore
-     * mn_wake to 1.  Gated on per-g-tstate; the field is unused in default
-     * mode and for the single-thread scheduler. */
-    int per_g_woke = (current_g != NULL) && pygo_get_per_g_tstate_mode();
-    if (per_g_woke)
-        __atomic_store_n(&current_g->mn_wake, 0, __ATOMIC_RELEASE);
-
     /* Commit to parking (Go netpollblockcommit).  CAS commit ARMED->
      * PARKED.  If it fails, a pump has already claimed this parker
      * (commit == WOKEN): it recorded readiness into ready_mask and
@@ -1753,9 +1739,10 @@ int pygo_netpoll_wait_fd(int fd, int events, long long timeout_ns)
         if (!__atomic_compare_exchange_n(&park->commit, &expc,
                                          PYGO_PARK_PARKED, 0,
                                          __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
-            /* expc == WOKEN: claimed by a pump.  ready_mask is set. */
-            if (per_g_woke)   /* not parking after all -- look awake again */
-                __atomic_store_n(&current_g->mn_wake, 1, __ATOMIC_RELEASE);
+            /* expc == WOKEN: claimed by a pump.  ready_mask is set.  The g
+             * never committed to parking, so it keeps running; its wake_state
+             * stays RUNNING (the pump claimed an ARMED parker and so did NOT
+             * call wake_g -- nothing to undo). */
             pygo_mutex_lock(&pool->lock);
             pygo_parker_unlink(pool, park);   /* no-op if pump unlinked */
             pygo_mutex_unlock(&pool->lock);

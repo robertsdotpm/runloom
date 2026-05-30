@@ -24,6 +24,15 @@ typedef struct pygo_g pygo_g_t;
 typedef struct pygo_sched pygo_sched_t;
 typedef struct pygo_pystate_snap pygo_pystate_snap_t;
 
+/* Per-g wake state machine for the PYGO_PER_G_TSTATE global run-queue.
+ * See the wake_state field on struct pygo_g for the protocol and the legal
+ * edges.  PARKED is 0 so a slab-zeroed g is in a defined state; spawn lifts a
+ * fresh g to RUNNING under per-g-tstate before it can be resumed. */
+#define PYGO_WS_PARKED         0
+#define PYGO_WS_QUEUED         1
+#define PYGO_WS_RUNNING        2
+#define PYGO_WS_RUNNING_WOKEN  3
+
 /* Per-goroutine CPython thread state snapshot.
  *
  * Fields here are everything the interpreter keeps on PyThreadState that
@@ -138,26 +147,45 @@ struct pygo_g {
      * isn't enqueued and later popped twice, which would resume a
      * freed coro on the second pop. */
     int in_sub_queue;
-    /* ---- PYGO_PER_G_TSTATE global run-queue protocol (mn_sched.c) ----
-     * Two small per-g atomics that together give the woken-g global run-queue
-     * (a) exactly-one entry per park and (b) single-owner resume, so the queue
-     * can be drained by ANY idle hub (recovering a stalled hub's work) without
-     * the duplicate/double/concurrent-resume hazards a naive MPMC queue hits.
-     * Both untouched by the default (per-hub-tstate) scheduler.
+    /* ---- PYGO_PER_G_TSTATE global run-queue: per-g wake state machine ----
+     * A single atomic that makes the woken-g global run-queue safe for ANY
+     * idle hub to drain (so a hub wedged in a blocking C call can't strand its
+     * woken work) WITHOUT duplicate entries, double-resume, or lost wakes.  The
+     * one field unifies what two independent flags (an exactly-once-wake dedup
+     * + an exclusive-resume claim) used to split -- and which raced into a
+     * re-push livelock, because "one entry per park" and "one resumer" were
+     * separate invariants that could disagree.  Here they are the SAME
+     * invariant: a g holds at most one runq entry exactly when it is QUEUED,
+     * and exactly one hub owns it exactly when it is RUNNING, so there is no
+     * re-push and no duplicate.  Untouched by the default (per-hub-tstate)
+     * scheduler; valid only under PYGO_PER_G_TSTATE.
      *
-     * mn_wake -- exactly-once wake dedup.  wake_g CASes it 0->1 and only the
-     * winner enqueues; it is cleared back to 0 ONLY inside the park primitive
-     * (wait_fd) just before that park commits, so a wake that races the commit
-     * enqueues exactly once and a wake while the g is running (mn_wake==1) is
-     * dropped.  No duplicate entries can exist -> no stale/spurious resume. */
-    int mn_wake;
-    /* mn_owned -- exclusive-resume claim.  A hub CASes it 0->1 before resuming
-     * a global-runq g; the loser re-pushes its entry (no wake lost).  This
-     * closes the commit->yield window where the about-to-park g is still
-     * executing on one hub but its re-wake is already enqueued for another.
-     * Released on park/yield; left 1 on completion (the slab zeroes it on the
-     * next alloc, and exactly-once-wake guarantees no other entry exists). */
-    int mn_owned;
+     * States and the (only) legal edges, each a CAS by the named actor:
+     *
+     *   PARKED  -- suspended at a park; wakeable; no entry, no owner.
+     *   QUEUED  -- exactly one runq entry exists; not yet owned.
+     *   RUNNING -- one hub owns it (resuming, or finishing the resume up to
+     *              the post-detach release); wakes are remembered, not enqueued.
+     *   RUNNING_WOKEN -- RUNNING and a wake arrived while owned; the owner
+     *              enqueues it at release (so the wake during the
+     *              commit->detach window is never lost and never lets a second
+     *              hub attach the g's live tstate mid-detach).
+     *
+     *   wake_g (any thread):   PARKED -> QUEUED   (winner enqueues + increfs)
+     *                          RUNNING -> RUNNING_WOKEN  (remember; no enqueue)
+     *                          QUEUED / RUNNING_WOKEN: a wake is already pending
+     *                              -> drop (no duplicate entry).
+     *   hub pull+resume:       QUEUED -> RUNNING  (the entry's holder; the sole
+     *                              consumer of that entry, so this never fails).
+     *   hub release, parked:   RUNNING -> PARKED, or, if a wake landed in the
+     *                              window, RUNNING_WOKEN -> QUEUED (+enqueue).
+     *
+     * A fresh g (never parked) starts RUNNING (set at spawn under per-g-tstate);
+     * gs from the deque/local FIFO/steal are already RUNNING by this invariant,
+     * so they resume with no CAS.  The g's own scheduler ref + one queue ref per
+     * entry (incref at enqueue, decref at consume/drain) cover lifetime; at most
+     * one entry ever references a g, so the proven sub_list/deque ref model holds. */
+    int wake_state;
     /* Active netpoll parker, set by pygo_netpoll_wait_fd on link and
      * cleared on unlink.  Each g has at most one parker in flight (a
      * g calls wait_fd sequentially), so a single pointer suffices.
