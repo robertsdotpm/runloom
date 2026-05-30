@@ -115,6 +115,14 @@ typedef struct pygo_hub {
     volatile long long   resume_start_ns;
     volatile long        resume_seq;
     pygo_g_t            *resume_g;
+    /* PYGO_PREEMPT: set by the sysmon watchdog when this hub is ATTACHED-wedged
+     * (a CPU-bound / non-yielding goroutine the DETACHED handoff can't take).
+     * pygo's installed eval-frame wrapper reads it at the next Python frame
+     * boundary on THIS hub's owner thread and yields the running g back to the
+     * scheduler -- Go pre-1.14 cooperative preemption.  Written rarely (only
+     * while wedged); read every frame only when PYGO_PREEMPT installed the
+     * wrapper (opt-in, so default mode never touches it). */
+    volatile int         preempt_requested;
 } pygo_hub_t;
 
 static pygo_hub_t *pygo_hubs = NULL;
@@ -431,6 +439,30 @@ static int         *pygo_handoff_claim   = NULL; /* per-hub FREE/PENDING/OWNED *
 static pygo_thread_t *pygo_handoff_threads = NULL;
 static int          pygo_handoff_running = 0;     /* count of spawned rescue threads */
 static int          pygo_handoff_debug   = 0;     /* PYGO_HANDOFF_DEBUG: trace adopts/drains */
+
+/* ---- Group B step (a): ATTACHED/CPU preemption (PYGO_PREEMPT, default OFF) ----
+ *
+ * The DETACHED handoff above can't recover an ATTACHED wedge (a CPU-bound or
+ * raw-tstate-holding goroutine -- it never releases its hub's tstate).  The
+ * answer is preemption: make the offending g yield so the hub round-robins its
+ * other gs, exactly as Go time-slices a long-running goroutine.
+ *
+ * Mechanism = a chained eval-frame function (the only exported, build-stable
+ * hook; `_PyEval_AddPendingCall` can't target a specific thread, and pygo
+ * avoids internal headers).  On every Python frame boundary the wrapper checks
+ * THIS hub's `preempt_requested` (set by the sysmon watchdog on an ATTACHED
+ * wedge) and, if set, `pygo_coro_yield()`s the running g back to the hub before
+ * entering the frame -- a clean safe point identical to a recv-park.  This is
+ * Go pre-1.14 cooperative preemption: prompt for call-bearing CPU code; a tight
+ * single-frame / C-extension loop makes no Python calls and so is NOT preempted
+ * (the same class the sysmon already flags as out-of-handoff-scope).
+ *
+ * Cost: installing a custom eval-frame func disables CPython's
+ * `eval_frame == _PyEval_EvalFrameDefault` fast path, so EVERY frame goes
+ * indirect.  We therefore install it ONLY when PYGO_PREEMPT is set -- default
+ * mode keeps the fast path and never reads `preempt_requested`.  The wrapper
+ * itself is defined below pygo_tls_hub/pygo_tls_current_g (it reads them). */
+static int          pygo_preempt_enabled = 0;
 static volatile int pygo_handoff_stop = 0;
 
 /* Mark the start of a coro resume on this hub (sysmon progress beat).
@@ -478,6 +510,74 @@ static PYGO_TLS int pygo_tls_self_queued = 0;
  * (wakeable) vs RUNNING (hub-pinned) for the wake state machine.  Unused by the
  * default scheduler, which keys re-push purely on self_queued. */
 static PYGO_TLS int pygo_tls_parked_offqueue = 0;
+
+#if PY_VERSION_HEX >= 0x030D0000
+/* PYGO_PREEMPT eval-frame wrapper (see the block near pygo_preempt_enabled).
+ * Chains to the previous eval-frame func (normally _PyEval_EvalFrameDefault) so
+ * it composes with any other installed wrapper; _PyInterpreterFrame is opaque
+ * (passed straight through). */
+static _PyFrameEvalFunction pygo_preempt_prev_eval = NULL;
+
+static PyObject *pygo_preempt_eval_frame(PyThreadState *ts,
+                                         struct _PyInterpreterFrame *frame,
+                                         int throwflag)
+{
+    pygo_hub_t *h = pygo_tls_hub;
+    pygo_g_t *g;
+    if (h != NULL &&
+        __atomic_load_n(&h->preempt_requested, __ATOMIC_RELAXED) &&
+        (g = pygo_tls_current_g) != NULL) {
+        /* Clear first so one watchdog flag => one yield; the watchdog re-arms
+         * each tick the wedge persists, giving periodic time-slicing. */
+        __atomic_store_n(&h->preempt_requested, 0, __ATOMIC_RELAXED);
+        /* The SNAP-saving cooperative yield (pygo_mn_yield_current's body MINUS
+         * its trivial-switch fast path).  Two reasons not to reuse that helper:
+         * (1) raw pygo_coro_yield would re-resume off a STALE g->snap (the g's
+         * last park) -> frame-chain corruption for a Python-handler g; we must
+         * snap here.  (2) its fast path bails when the hub's FIFO/deque are
+         * empty and nothing is netpoll-parked -- but it does NOT look at the
+         * sub_list, where another hub's pump delivers THIS hub's woken workers.
+         * A preempted g runs unboundedly without ever returning to hub_main's
+         * loop-top drain, so the sub_list silently fills; the fast path would
+         * then skip the yield and the workers would never be drained.  Yielding
+         * unconditionally is correct: the watchdog already decided this hub is
+         * CPU-wedged, so a yield is always warranted.  hub_main's loop top then
+         * drains the sub_list and the g (now at the FIFO back) round-robins. */
+        pygo_sched_ready_push(&h->sched, g);
+        pygo_pystate_snap(&g->snap);
+        pygo_tls_self_queued = 1;
+        pygo_coro_yield();
+    }
+    return pygo_preempt_prev_eval(ts, frame, throwflag);
+}
+#endif
+
+/* Install/uninstall the preemption eval-frame wrapper on `interp`.  Install
+ * runs in mn_init after pygo_sysmon_config (so pygo_preempt_enabled is set) and
+ * BEFORE any goroutine runs Python; uninstall runs in mn_fini.  No-ops unless
+ * PYGO_PREEMPT (and 3.13+).  Capturing the previous func means we chain rather
+ * than clobber a wrapper someone else installed. */
+static void pygo_preempt_install(PyInterpreterState *interp)
+{
+#if PY_VERSION_HEX >= 0x030D0000
+    if (!pygo_preempt_enabled) return;
+    pygo_preempt_prev_eval = _PyInterpreterState_GetEvalFrameFunc(interp);
+    _PyInterpreterState_SetEvalFrameFunc(interp, pygo_preempt_eval_frame);
+#else
+    (void)interp;
+#endif
+}
+
+static void pygo_preempt_uninstall(PyInterpreterState *interp)
+{
+#if PY_VERSION_HEX >= 0x030D0000
+    if (!pygo_preempt_enabled || pygo_preempt_prev_eval == NULL) return;
+    _PyInterpreterState_SetEvalFrameFunc(interp, pygo_preempt_prev_eval);
+    pygo_preempt_prev_eval = NULL;
+#else
+    (void)interp;
+#endif
+}
 
 /* Hub thread main loop.  Phase C v2: runs the same snap/load dance
  * as pygo_sched_drain.  Each iteration:
@@ -1398,6 +1498,17 @@ static PYGO_THREAD_RET pygo_sysmon_main(void *arg)
                                             PYGO_HANDOFF_PENDING, 0,
                                             __ATOMIC_ACQ_REL, __ATOMIC_RELAXED);
             }
+            /* Group B step (a) preemption dispatch.  An ATTACHED wedge holds its
+             * tstate (no handoff possible) -> ask the eval-frame wrapper to
+             * yield the running g at its next Python frame.  Re-armed every tick
+             * the wedge persists (the wrapper clears it on each yield), giving
+             * periodic time-slicing.  Independent of the handoff above (that is
+             * DETACHED-only). */
+            if (pygo_preempt_enabled && start != 0 &&
+                (now - start) > pygo_sysmon_wedge_ns &&
+                pygo_tstate_attach_state(h->tstate) == PYGO_TS_ATTACHED) {
+                __atomic_store_n(&h->preempt_requested, 1, __ATOMIC_RELAXED);
+            }
         }
         pygo_sleep_ns(pygo_sysmon_tick_ns);
     }
@@ -1447,6 +1558,18 @@ static void pygo_sysmon_config(void)
         if (pygo_handoff_pool < 1) pygo_handoff_pool = 1;
         if (pygo_handoff_pool > pygo_hub_count) pygo_handoff_pool = pygo_hub_count;
     }
+    /* PYGO_PREEMPT: ATTACHED/CPU preemption (3.13+ only -- needs the attach
+     * states to classify the wedge).  Like PYGO_HANDOFF it forces the sysmon
+     * instrumentation + watchdog on (that is what detects the wedge and arms
+     * preempt_requested).  The eval-frame wrapper is installed in mn_init. */
+    {
+        const char *pe = getenv("PYGO_PREEMPT");
+        pygo_preempt_enabled = (pe != NULL && pe[0] != '0') ? 1 : 0;
+    }
+#if PY_VERSION_HEX < 0x030D0000
+    pygo_preempt_enabled = 0;
+#endif
+    if (pygo_preempt_enabled) pygo_sysmon_enabled = 1;
     if (!pygo_sysmon_enabled) return;
     ms = getenv("PYGO_SYSMON_MS");
     if (ms != NULL) {
@@ -1798,6 +1921,9 @@ int pygo_mn_init(int n_threads)
     /* Configure the sysmon watchdog (enable + threshold) BEFORE the hubs
      * spawn so the per-resume progress instrumentation is live immediately. */
     pygo_sysmon_config();
+    /* Install the PYGO_PREEMPT eval-frame wrapper (no-op unless enabled) while
+     * we still hold the main tstate and before any hub runs Python. */
+    pygo_preempt_install(interp);
 
     for (i = 0; i < n_threads; i++) {
         pygo_hub_t *h = &pygo_hubs[i];
@@ -1917,6 +2043,10 @@ void pygo_mn_fini(void)
         }
         PyEval_RestoreThread(saved);
     }
+    /* Uninstall the preempt wrapper now that every hub thread is joined (no one
+     * can call it) and the main tstate is held -- restores the original
+     * eval-frame func so a later mn_init re-captures it cleanly. */
+    pygo_preempt_uninstall(pygo_mn_interp);
     /* Drain leftover gs BEFORE tearing down per-hub tstates: g->snap
      * may reference per-tstate state (exc_info, datastack chunks) that
      * pystate_snap_clear needs to release while the tstate is still
