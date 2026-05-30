@@ -65,10 +65,21 @@ All measured; figures label whether the handler is Python or C.
   **2.5× from 1→8 hubs to 2.12 M ops/s**, ≈ `threading`×8 (2.24 M) — but with
   the goroutine model (cheap spawn, no thread-per-task explosion). asyncio
   gets **0× here — it cannot use a second core**.
-- **Network throughput** (C echo handler, amortized over many conns): **112 K
-  (8 hubs) → 193 K (32 hubs) req/s in one process**; ~177 K at 100 K live
-  connections. Single-core round-trip latency ~**44 µs** (C `TCPConn`) /
-  ~**82 µs** (Python handler) — vs Go's ~37 µs; see Limitations.
+- **Network throughput vs Go** — *same* in-process loopback echo bench (256
+  concurrent conns × 8-byte round-trips, C `TCPConn` handler), Go and pygo at
+  matched core/hub counts:
+
+  | cores / hubs | Go (`net`) | pygo C `TCPConn` |
+  | ---: | ---: | ---: |
+  | 1  | 27 K/s · 37 µs/RT | 22 K/s · 46 µs/RT |
+  | 4  | 94 K/s | 51 K/s |
+  | 8  | 193 K/s | 100 K/s |
+  | 16 | 324 K/s · 3.1 µs/RT | 143 K/s · 7.0 µs/RT |
+
+  Go is **~1.2× per core** and **~2.3× at 16** — it starts ~20% faster *and*
+  scales better (75% vs pygo's 41% efficiency over 16 cores, as pygo hits
+  CPython's refcount-contention ceiling). A **Python** handler is another
+  ~2.2× slower than the C path. See *Current limitations* for why.
 
 The honest ceiling: pygo does **not** make Python faster per core (~80 K
 pure-Python ops/s/core is a CPython constant). It lets one process **hit that
@@ -161,16 +172,15 @@ Read this before betting on pygo — it's where the project actually is.
 - **No per-core speedup.** pygo saturates all cores from one process but can't
   raise CPython's ~80 K ops/s/core. CPU-bound pure-Python work is still
   CPython-slow per thread.
-- **Go is faster on raw network I/O — modestly for C handlers, ~2× for
-  Python.** Identical single-core loopback echo bench (8-byte round-trips),
-  measured: **Go ~37 µs/RT · pygo C `TCPConn` ~44 µs (~20% slower) · pygo
-  Python handler ~82 µs (~2.2× slower)**. The gap is the per-syscall path plus,
-  for Python handlers, interpreter overhead on every `recv`/`send` — **not** the
-  scheduler (~47 ns/yield, Go-class). Across all cores in one process Go reaches
-  ~300–400 K req/s on this bench vs pygo's ~110–190 K (M:N hubs). An opt-in
-  io_uring path (`PYGO_TCPCONN_IOURING=1`) narrows the syscall side at high
-  fan-out on Linux; matching Go per-operation with a Python handler isn't
-  achievable.
+- **Go is faster on raw network I/O — ~1.2× per core, ~2.3× across 16, and
+  another ~2.2× if the handler is Python.** Measured on the identical loopback
+  echo bench (see *Performance*): single core **Go ~37 µs/RT vs pygo C
+  `TCPConn` ~46 µs**; at 16 cores **324 K vs 143 K req/s** (Go scales better —
+  pygo hits CPython's refcount-contention ceiling); a **Python** handler adds
+  ~2.2× on top (~82 µs/RT) from interpreter overhead per `recv`/`send`. None of
+  this is the scheduler — that's ~47 ns/yield, Go-class. An opt-in io_uring
+  path (`PYGO_TCPCONN_IOURING=1`) narrows the syscall side at high fan-out on
+  Linux; matching Go per-operation with a Python handler isn't achievable.
 - **Preemption only fires at Python bytecode boundaries.** A goroutine inside a
   long C call (`numpy`, `hashlib`) or a tight pure-C loop is **not**
   preemptible and will hold its hub until it returns — same limitation Go has
