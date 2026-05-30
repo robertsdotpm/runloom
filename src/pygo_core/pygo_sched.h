@@ -75,6 +75,14 @@ struct pygo_pystate_snap {
      * _PyErr_SetObject during the next exception cascade (e.g., async
      * function's StopIteration on return). */
     PyObject *current_exception;
+    /* Cross-hub snap migration (PYGO_STEAL_WOKEN): when the g suspended inside
+     * active exception handling (exc_info != &tstate->exc_state), the bottom
+     * per-g _PyErr_StackItem's previous_item points at the ORIGIN hub tstate's
+     * &exc_state -- hub-bound.  Recorded here at snap so load can re-root it
+     * onto the TARGET hub's &exc_state.  NULL in the common exc_info==base case.
+     * Borrowed (the item lives in a per-g gen/coro object kept alive by the g's
+     * frames); no ref held. */
+    _PyErr_StackItem *exc_chain_bottom;
 #endif
 #if PY_VERSION_HEX >= 0x030B0000 && PY_VERSION_HEX < 0x030C0000
     /* 3.11: single recursion counter, named recursion_remaining. */

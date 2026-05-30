@@ -138,10 +138,28 @@ void pygo_pystate_snap(pygo_pystate_snap_t *snap)
     if (__builtin_expect(ts->exc_info == &ts->exc_state &&
                          ts->exc_state.exc_value == NULL, 1)) {
         snap->exc_info = NULL;
+        snap->exc_chain_bottom = NULL;
     } else {
         snap->exc_info = ts->exc_info;
         snap->exc_state = ts->exc_state;
         Py_XINCREF(snap->exc_state.exc_value);
+        /* Record the bottom per-g exc item -- the one whose previous_item roots
+         * at THIS tstate's &exc_state -- so a cross-hub load (steal-woken) can
+         * re-root it onto the target hub's tstate.  Bounded walk (chain depth =
+         * coroutine nesting).  NULL if the chain doesn't root here (defensive;
+         * then load skips the re-root). */
+        {
+            _PyErr_StackItem *it = ts->exc_info;
+            int guard = 0;
+            snap->exc_chain_bottom = NULL;
+            while (it != NULL && it != &ts->exc_state && guard++ < 256) {
+                if (it->previous_item == &ts->exc_state) {
+                    snap->exc_chain_bottom = it;
+                    break;
+                }
+                it = it->previous_item;
+            }
+        }
     }
     /* current_exception is the in-flight raised-but-not-yet-caught
      * exception.  Save with our own ref so another goroutine can't
@@ -239,6 +257,15 @@ void pygo_pystate_load(pygo_pystate_snap_t *snap)
         Py_XDECREF(ts->exc_state.exc_value);
         ts->exc_state = snap->exc_state;
         ts->exc_info = snap->exc_info;
+        /* Re-root the bottom per-g exc item onto THIS hub's &exc_state.  Same-hub
+         * load: &ts->exc_state is the address snap recorded -- a no-op store.
+         * Cross-hub (steal-woken): fixes the previous_item that still pointed at
+         * the ORIGIN hub's tstate, which would otherwise dangle when the g's
+         * generator/coroutine unwinds its exception context on the new hub. */
+        if (snap->exc_chain_bottom != NULL) {
+            snap->exc_chain_bottom->previous_item = &ts->exc_state;
+            snap->exc_chain_bottom = NULL;
+        }
         snap->exc_info = NULL;
         snap->exc_state.exc_value = NULL;       /* ownership transferred */
         snap->exc_state.previous_item = NULL;

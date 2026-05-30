@@ -292,6 +292,36 @@ static int pygo_per_g_tstate_flag(void)
     return cur;
 }
 
+/* PYGO_STEAL_WOKEN (default OFF, experimental; Fix B): in the DEFAULT
+ * per-hub-tstate scheduler, route a woken g through the global stealable
+ * run-queue + the same wake-state machine per-g-tstate uses, so ANY idle hub
+ * can resume it -- migrating the g's interpreter state via its `snap` onto the
+ * stealing hub's single bound tstate.  Unlike PYGO_PER_G_TSTATE this needs NO
+ * extra PyThreadState per g (so it does NOT violate free-threaded CPython's
+ * one-tstate-per-OS-thread stop-the-world protocol -- see memory
+ * project_pygo_per_g_python_crash); it relies on snap portability (the exc
+ * chain is re-rooted onto the target hub's tstate in pygo_pystate_load).  When
+ * OFF the default scheduler is byte-unchanged. */
+static int pygo_steal_woken_flag(void)
+{
+    static int v = -1;
+    int cur = __atomic_load_n(&v, __ATOMIC_RELAXED);
+    if (cur < 0) {
+        const char *e = getenv("PYGO_STEAL_WOKEN");
+        cur = (e != NULL && e[0] != '0') ? 1 : 0;
+        __atomic_store_n(&v, cur, __ATOMIC_RELAXED);
+    }
+    return cur;
+}
+
+/* True when woken gs route to the global stealable run-queue + wake-state
+ * machine: either per-g-tstate (migrates via a per-g tstate) or steal-woken
+ * (migrates via the per-g snap onto the hub's tstate). */
+static int pygo_use_global_runq(void)
+{
+    return pygo_get_per_g_tstate_mode() || pygo_steal_woken_flag();
+}
+
 /* Interpreter for per-g PyThreadState_New, captured at mn_init. */
 static PyInterpreterState *pygo_mn_interp = NULL;
 
@@ -427,7 +457,26 @@ static PYGO_THREAD_RET pygo_hub_main(void *arg)
             while (h->sched.sleep_size > 0 &&
                    pygo_sched_sleep_peek(&h->sched)->wake_at <= now) {
                 pygo_g_t *woke = pygo_sched_sleep_pop(&h->sched);
-                pygo_sched_ready_push(&h->sched, woke);
+                if (pygo_use_global_runq()) {
+                    /* The timer is a wake, and under a global-runq mode the
+                     * sleep release left this g in wake_state PARKED.  Claim it
+                     * back to RUNNING through the state machine (it has no other
+                     * waker, so the CAS normally wins) and resume it hub-pinned
+                     * on the local FIFO.  If the CAS loses, a concurrent waker
+                     * (a g sleeping AND wakeable, e.g. a select-with-timeout)
+                     * already drove PARKED->QUEUED and enqueued it on the global
+                     * runq -- do NOT also push it here, or it would be scheduled
+                     * twice. */
+                    int pexp = PYGO_WS_PARKED;
+                    if (__atomic_compare_exchange_n(&woke->wake_state, &pexp,
+                                                    PYGO_WS_RUNNING, 0,
+                                                    __ATOMIC_ACQ_REL,
+                                                    __ATOMIC_ACQUIRE)) {
+                        pygo_sched_ready_push(&h->sched, woke);
+                    }
+                } else {
+                    pygo_sched_ready_push(&h->sched, woke);
+                }
             }
         }
 
@@ -708,6 +757,27 @@ static PYGO_THREAD_RET pygo_hub_main(void *arg)
                 continue;
             }
 
+            /* Steal-woken (or any non-per-g global-runq mode): a from_runq g
+             * arrived via a queue entry holding a queue ref, in wake_state
+             * QUEUED.  Claim it QUEUED->RUNNING (sole entry holder -> cannot
+             * lose).  Fresh / deque / local-FIFO / stolen gs are already
+             * RUNNING.  from_runq is only ever set under pygo_use_global_runq(),
+             * so this block is inert in the byte-unchanged default. */
+            int parked_offqueue = 0;
+            if (from_runq) {
+                int qexp = PYGO_WS_QUEUED;
+                if (!__atomic_compare_exchange_n(&g->wake_state, &qexp,
+                                                 PYGO_WS_RUNNING, 0,
+                                                 __ATOMIC_ACQ_REL,
+                                                 __ATOMIC_ACQUIRE)) {
+                    /* Not QUEUED: a queued g is parked-waiting, never done, so
+                     * this shouldn't happen.  Stay leak-safe: drop the queue ref
+                     * and skip. */
+                    pygo_g_decref(g);   /* queue ref */
+                    continue;
+                }
+            }
+
             if (g->snap.valid) {
                 pygo_pystate_load(&g->snap);
             } else {
@@ -753,11 +823,14 @@ static PYGO_THREAD_RET pygo_hub_main(void *arg)
                 __atomic_load_n(&g->done, __ATOMIC_ACQUIRE)) {
                 h->sched.current = NULL;
                 pygo_tls_current_g = NULL;
+                if (from_runq) pygo_g_decref(g);   /* queue ref */
                 continue;
             }
             pygo_coro_resume(g->coro);
             self_queued = pygo_tls_self_queued;
+            parked_offqueue = pygo_tls_parked_offqueue;
             pygo_tls_self_queued = 0;
+            pygo_tls_parked_offqueue = 0;
             pygo_tls_current_g = NULL;
             h->sched.current = NULL;
 
@@ -779,8 +852,71 @@ static PYGO_THREAD_RET pygo_hub_main(void *arg)
                  * dispatch.  This call covers that gap. */
                 pygo_netpoll_force_unlink_g_parker(g);
                 pygo_mn_pending_complete(h);
-                pygo_g_decref(g);
+                pygo_g_decref(g);                  /* scheduler ref */
+                if (from_runq) pygo_g_decref(g);   /* queue ref */
                 pygo_pystate_snap(&hub_snap);
+            } else if (pygo_use_global_runq()) {
+                /* Steal-woken release via the wake-state machine -- a near-exact
+                 * mirror of the per-g-tstate release above; the difference is
+                 * only that the migrated state rides in g->snap (saved by the
+                 * parker BEFORE it yielded) instead of a per-g tstate.
+                 *
+                 * parked_offqueue => the g parked off-queue (netpoll/chan/sleep)
+                 * and a wake_g will route it back through the global runq.  End
+                 * ownership now: this happens AFTER the snap was saved, and while
+                 * RUNNING a wake only set RUNNING_WOKEN (never enqueued), so no
+                 * other hub could pull the g and load a half-saved snap.  CAS
+                 * RUNNING->PARKED so a later wake enqueues it; if a wake already
+                 * landed (RUNNING_WOKEN), enqueue exactly once now. */
+                if (parked_offqueue) {
+                    int rexp = PYGO_WS_RUNNING;
+                    /* Detach the g's ref-holding interpreter state from THIS
+                     * hub's tstate now -- still RUNNING (sole owner), BEFORE the
+                     * g becomes migratable.  The parker already saved g->snap,
+                     * which owns its OWN refs to context / current_exception /
+                     * exc_value; loading the hub's clean base here drops this
+                     * hub's duplicate refs (rebalancing them).  Without it the
+                     * origin hub and the stealing hub (which loads the snap) both
+                     * own the g's exception and race its refcount -> the freed
+                     * object surfaces as "error return without exception set" /
+                     * SEGV deep in CPython's exception machinery.  This is the
+                     * snap-mode analogue of per-g-tstate's PyEval_SaveThread
+                     * (detach) before the RUNNING->PARKED transition.  Re-snap to
+                     * keep hub_snap valid for the next g. */
+                    pygo_pystate_load(&hub_snap);
+                    pygo_pystate_snap(&hub_snap);
+                    if (pygo_g_state_in(g, PYGO_GST_MASK_PARKED)) {
+                        /* madvise idle stack below sp while still RUNNING (sole
+                         * owner -- a wake only flips RUNNING->RUNNING_WOKEN), so
+                         * no hub can resume into pages mid-drop.  Cross-hub-safe
+                         * for the same reason the sweep handshake is.  No-op
+                         * unless PYGO_STACK_PARK_DONTNEED=1. */
+                        pygo_coro_park(g->coro);
+                    }
+                    if (__atomic_compare_exchange_n(&g->wake_state, &rexp,
+                                                    PYGO_WS_PARKED, 0,
+                                                    __ATOMIC_ACQ_REL,
+                                                    __ATOMIC_ACQUIRE)) {
+                        if (from_runq) pygo_g_decref(g);   /* old queue ref */
+                    } else {
+                        /* rexp == RUNNING_WOKEN: a wake landed during the resume.
+                         * Re-arm a single entry and enqueue now (snap is saved),
+                         * exactly once -- no lost wake, no duplicate. */
+                        __atomic_store_n(&g->wake_state, PYGO_WS_QUEUED,
+                                         __ATOMIC_RELEASE);
+                        pygo_g_incref(g);                  /* new queue ref */
+                        pygo_mn_global_runq_push(g);
+                        if (from_runq) pygo_g_decref(g);   /* old queue ref */
+                    }
+                } else {
+                    /* Cooperative yield (sched_yield: already on local FIFO, or
+                     * raw pygo_coro_yield: push it here).  Holds no live parker,
+                     * so no wake_g can race -- stays RUNNING, hub-pinned. */
+                    __atomic_store_n(&g->wake_state, PYGO_WS_RUNNING,
+                                     __ATOMIC_RELEASE);
+                    if (from_runq) pygo_g_decref(g);       /* old queue ref */
+                    if (!self_queued) pygo_sched_ready_push(&h->sched, g);
+                }
             } else if (!self_queued) {
                 /* Raw pygo_coro_yield() -- g didn't go through
                  * sched_yield to push itself.  Keep it alive on the
@@ -917,11 +1053,13 @@ void pygo_mn_wake_g(void *hub_opaque, pygo_g_t *g)
         pygo_sched_ready_push(pygo_sched_get(), g);
         return;
     }
-    if (pygo_get_per_g_tstate_mode()) {
-        /* per-g-tstate: g is migratable, so route it to the global run-queue
-         * any idle hub can drain instead of the origin hub's owner-drained sub
-         * list -- recovers it even if the origin hub is wedged in a blocking C
-         * call.  Drive the per-g wake state machine (see pygo_sched.h):
+    if (pygo_use_global_runq()) {
+        /* per-g-tstate OR steal-woken: g is migratable, so route it to the
+         * global run-queue any idle hub can drain instead of the origin hub's
+         * owner-drained sub list -- recovers it even if the origin hub is wedged
+         * in a blocking C call.  Drive the per-g wake state machine (see
+         * pygo_sched.h); it is tstate-agnostic -- the snap (steal-woken) or the
+         * per-g tstate (per-g-tstate) carries the migrated state:
          *
          *   PARKED  -> QUEUED          : we won the wake; enqueue exactly once
          *                                (+ a queue ref so the entry keeps g
@@ -1287,15 +1425,19 @@ static int pygo_mn_go_core(PyObject *callable, pygo_c_entry_fn c_fn,
         errno = ENOMEM;
         return -1;
     }
-    /* PYGO_PER_G_TSTATE: give the g its own migratable PyThreadState.
-     * g->tstate was zeroed by the slab alloc, so the OFF path leaves it
-     * NULL (and pygo_g_decref's teardown is a no-op). */
-    if (pygo_get_per_g_tstate_mode() && pygo_mn_interp != NULL) {
-        /* A fresh g has never parked, so it is conceptually owned/running from
-         * the moment a hub first resumes it (slab-zeroed wake_state would be
-         * PARKED, which the QUEUED->RUNNING claim and the park CAS both
-         * mis-handle).  Lift it to RUNNING up front. */
+    /* Wake-state machine init.  Any global-runq mode (per-g-tstate OR
+     * steal-woken) reads wake_state: a fresh g has never parked, so it is
+     * conceptually owned/running from the moment a hub first resumes it
+     * (slab-zeroed wake_state would be PARKED, which the QUEUED->RUNNING claim
+     * and the park CAS both mis-handle).  Lift it to RUNNING up front. */
+    if (pygo_use_global_runq()) {
         __atomic_store_n(&g->wake_state, PYGO_WS_RUNNING, __ATOMIC_RELEASE);
+    }
+    /* PYGO_PER_G_TSTATE only: give the g its own migratable PyThreadState.
+     * g->tstate was zeroed by the slab alloc, so every other path leaves it
+     * NULL (and pygo_g_decref's teardown is a no-op).  Steal-woken migrates via
+     * the snap instead, so it allocates no tstate here. */
+    if (pygo_get_per_g_tstate_mode() && pygo_mn_interp != NULL) {
         g->tstate = PyThreadState_New(pygo_mn_interp);
         if (g->tstate == NULL) {
             pygo_coro_destroy(g->coro);
