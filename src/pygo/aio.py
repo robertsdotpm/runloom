@@ -496,6 +496,16 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
         self._readers = {}
         self._writers = {}
         self._exception_handler = None
+        # Thread-safe callback queue + keepalive flag.  call_soon_threadsafe
+        # (called from FOREIGN OS threads -- run_in_executor pool workers,
+        # aiosqlite's per-Connection thread, etc.) appends here under the lock
+        # instead of spawning on the calling thread's scheduler (which is never
+        # drained).  A keepalive goroutine spawned in run_until_complete/
+        # run_forever drains this queue and keeps the single-thread scheduler
+        # from going idle while a goroutine is parked awaiting an external wake.
+        self._ts_lock = _threading.Lock()
+        self._ts_queue = []
+        self._ka_stop = False
         # Real asyncio loops (BaseEventLoop) expose these; stdlib
         # Future/Task/Timeout machinery and many libraries read them
         # directly (e.g. loop._thread_id, loop._debug).  AbstractEventLoop
@@ -555,7 +565,46 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
         pygo_core.go(runner)
         return handle
 
-    call_soon_threadsafe = call_soon
+    def call_soon_threadsafe(self, callback, *args, context=None):
+        # Thread-safe: may be called from ANY OS thread.  Enqueue under the
+        # lock; the keepalive goroutine on the loop thread drains and runs it.
+        # We do NOT pygo_core.go() here -- from a foreign thread that would
+        # spawn onto that thread's own (never-drained) scheduler.
+        handle = _Handle(callback, args)
+        with self._ts_lock:
+            self._ts_queue.append(handle)
+        return handle
+
+    def _drain_ts_queue(self):
+        """Run all callbacks enqueued via call_soon_threadsafe.  Called from
+        the keepalive goroutine on the loop thread."""
+        with self._ts_lock:
+            if not self._ts_queue:
+                return
+            pending, self._ts_queue = self._ts_queue, []
+        for handle in pending:
+            if handle._cancelled:
+                continue
+            try:
+                handle._callback(*handle._args)
+            except BaseException as e:
+                self.call_exception_handler(
+                    {"message": "call_soon_threadsafe callback", "exception": e})
+
+    def _spawn_keepalive(self):
+        """Spawn the goroutine that drains the thread-safe queue and keeps the
+        scheduler alive while the run is in progress.  Idempotent per run."""
+        self._ka_stop = False
+        def _keepalive():
+            # Poll the cross-thread queue.  sched_sleep keeps sleep_size>0 so
+            # pygo_sched_drain stays in its loop (a bare-parked goroutine alone
+            # would let it return idle) and re-checks the cross-thread wake list
+            # each wake.  2ms bounds foreign-wake latency; cheap for a test run.
+            while not self._ka_stop:
+                self._drain_ts_queue()
+                pygo_core.sched_sleep(0.002)
+            self._drain_ts_queue()
+        pygo_core.go(_keepalive)
 
     def call_later(self, delay, callback, *args, context=None):
         handle = _TimerHandle(callback, args)
@@ -805,8 +854,12 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
         # (accept loops, ticker goroutines, etc.) the user didn't
         # explicitly join.  Matches asyncio.run's semantics.
         def _stop_on_done(_fut):
+            self._ka_stop = True
             pygo_core.sched_stop()
         future.add_done_callback(_stop_on_done)
+        # Keepalive: drains call_soon_threadsafe + keeps the scheduler from
+        # returning idle while a goroutine is parked awaiting an external wake.
+        self._spawn_keepalive()
 
         # Resolve deep, non-yielding stdlib imports (e.g. getaddrinfo's
         # first-call codec import) on the main thread before any driver
