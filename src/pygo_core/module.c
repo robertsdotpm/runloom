@@ -32,6 +32,7 @@ snap/load paths; not built today."
 #include "mn_sched.h"
 #include "chan.h"
 #include "pygo_tcp.h"
+#include "pygo_blockpool.h"
 #include "pygo_diag.h"
 
 /* ---- Per-coro Python object ---- */
@@ -1034,6 +1035,87 @@ static PyTypeObject PygoChanType = {
     .tp_new = PyType_GenericNew,
 };
 
+/* ---- blocking(): run a Python callable on the blocking-offload pool ----
+ *
+ * Generalises the C-level getaddrinfo offload to any user-named blocking
+ * call: blocking(fn, *args, **kwargs) parks the calling goroutine and runs
+ * fn(*args, **kwargs) on a pool thread, so a blocking stdlib/C-extension
+ * call doesn't wedge the goroutine's hub.  The pool worker has no thread
+ * state of its own, so it PyGILState_Ensure()s one to run fn; fn's own
+ * blocking section releases the GIL (as socket / time.sleep / blocking C
+ * extensions do), which is what lets other goroutines keep running.
+ *
+ * fn runs OFF any goroutine, so it must not call pygo scheduler ops
+ * (sched_yield, channels, wait_fd, ...) -- it is for plain blocking work. */
+typedef struct {
+    PyObject *fn;
+    PyObject *args;        /* call args tuple (owned by m_blocking's frame) */
+    PyObject *kwargs;      /* call kwargs dict or NULL */
+    PyObject *result;      /* out: new ref, or NULL on exception */
+    PyObject *exc_type;    /* out: captured + normalised exception (or NULL) */
+    PyObject *exc_value;
+    PyObject *exc_tb;
+} py_blocking_job_t;
+
+static void *py_blocking_worker(void *p)
+{
+    py_blocking_job_t *j = (py_blocking_job_t *)p;
+    /* Ensure a thread state for this pool thread (reentrant-safe if the
+     * call ran inline on a thread that already holds the GIL). */
+    PyGILState_STATE st = PyGILState_Ensure();
+    j->result = PyObject_Call(j->fn, j->args, j->kwargs);
+    if (j->result == NULL) {
+        PyErr_Fetch(&j->exc_type, &j->exc_value, &j->exc_tb);
+        PyErr_NormalizeException(&j->exc_type, &j->exc_value, &j->exc_tb);
+    }
+    PyGILState_Release(st);
+    return NULL;
+}
+
+static PyObject *m_blocking(PyObject *self, PyObject *args, PyObject *kw)
+{
+    py_blocking_job_t job;
+    PyObject *fn, *call_args;
+    (void)self;
+
+    if (PyTuple_GET_SIZE(args) < 1) {
+        PyErr_SetString(PyExc_TypeError,
+                        "blocking() requires a callable as the first argument");
+        return NULL;
+    }
+    fn = PyTuple_GET_ITEM(args, 0);
+    if (!PyCallable_Check(fn)) {
+        PyErr_SetString(PyExc_TypeError, "blocking(): first argument must be callable");
+        return NULL;
+    }
+    call_args = PyTuple_GetSlice(args, 1, PyTuple_GET_SIZE(args));
+    if (call_args == NULL) return NULL;
+
+    job.fn       = fn;
+    job.args     = call_args;
+    job.kwargs   = kw;            /* NULL if no kwargs */
+    job.result   = NULL;
+    job.exc_type = job.exc_value = job.exc_tb = NULL;
+
+    /* Parks the goroutine and runs py_blocking_worker on a pool thread;
+     * returns once the worker has produced a result or exception.  Inline
+     * fallback (not on a goroutine / pool unavailable) runs it here. */
+    pygo_blocking_call(py_blocking_worker, &job);
+
+    Py_DECREF(call_args);
+
+    if (job.result == NULL) {
+        if (job.exc_type != NULL) {
+            PyErr_Restore(job.exc_type, job.exc_value, job.exc_tb);
+        } else {
+            PyErr_SetString(PyExc_RuntimeError,
+                            "blocking(): call produced neither result nor exception");
+        }
+        return NULL;
+    }
+    return job.result;
+}
+
 static PyObject *m_go(PyObject *self, PyObject *args, PyObject *kw)
 {
     static char *kwlist[] = {"fn", "stack_size", NULL};
@@ -1662,6 +1744,13 @@ static PyMethodDef module_methods[] = {
      "(post-calibration) for this one goroutine -- use when the entry\n"
      "function is known to recurse deeply or call into a C extension\n"
      "that consumes large amounts of C stack."},
+    {"blocking",    (PyCFunction)m_blocking, METH_VARARGS | METH_KEYWORDS,
+     "blocking(fn, *args, **kwargs): run fn(*args, **kwargs) on the\n"
+     "blocking-offload thread pool, parking the calling goroutine until it\n"
+     "returns.  Use for non-preemptible blocking calls (DNS, blocking\n"
+     "sockets/files, GIL-releasing C extensions) that would otherwise wedge\n"
+     "the goroutine's hub and strand everything queued behind it.  fn runs\n"
+     "off any goroutine and must not call pygo scheduler ops."},
     {"go_noyield",  m_go_noyield,  METH_O,
      "Spawn a goroutine that the caller promises will run to "
      "completion without yielding.  Skips the per-g datastack/snap/"

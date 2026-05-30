@@ -121,6 +121,20 @@ def sleep(seconds):
     pygo_core.sched_sleep(seconds)
 
 
+def blocking(fn, *args, **kwargs):
+    """Run a blocking call without wedging the goroutine's OS thread.
+
+    Offloads fn(*args, **kwargs) to a thread pool and parks the calling
+    goroutine until it returns, so a non-preemptible blocking call (DNS,
+    blocking sockets/files, a GIL-releasing C extension) doesn't strand the
+    other goroutines sharing its hub.  fn runs off any goroutine and must
+    not call pygo scheduler ops (yield/sleep/channels/wait_fd).
+
+    Delegates to pygo_core.blocking, which runs fn inline when the caller
+    isn't on a goroutine -- so the same call is safe in either context."""
+    return pygo_core.blocking(fn, *args, **kwargs)
+
+
 def current():
     """Return the currently-running Goroutine handle, or None.
 

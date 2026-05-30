@@ -24,6 +24,7 @@ from .runtime import (
     go,
     yield_,
     sleep,
+    blocking,
     run,
     current,
     Goroutine,
