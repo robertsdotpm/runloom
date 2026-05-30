@@ -105,6 +105,13 @@ struct pygo_pystate_snap {
     struct _PyInterpreterFrame *current_frame;
     PyObject *delete_later;                  /* owned ref */
 #endif
+    /* DIAG (PYGO_DIAG_MIGRATE): the PyThreadState bound when this snap was
+     * saved -- i.e. the tstate pointer baked into the g's suspended CPython
+     * eval-loop C frame.  A cross-hub resume loads the snap onto a DIFFERENT
+     * bound tstate; if current_frame != NULL the eval loop still threads this
+     * origin_tstate while the bound tstate differs -> the H>=2 corruption.
+     * Borrowed pointer; compared, never dereferenced through here. */
+    PyThreadState *origin_tstate;
 };
 
 /* One goroutine (the "G" in Go's M:P:G nomenclature).

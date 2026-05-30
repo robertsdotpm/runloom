@@ -91,6 +91,11 @@ void pygo_pystate_snap(pygo_pystate_snap_t *snap)
     }
     ts = PyThreadState_GET();
 
+    /* DIAG: remember which tstate is bound right now.  This is the pointer
+     * the suspended eval loop bakes into its C frame; load checks it for a
+     * cross-hub mismatch.  Cheap unconditional store (one word). */
+    snap->origin_tstate = ts;
+
     /* No memset: every field is assigned below.  Saves ~80B of
      * unnecessary writes on the hot per-yield path. */
 
@@ -202,6 +207,36 @@ void pygo_pystate_load(pygo_pystate_snap_t *snap)
         return;
     }
     ts = PyThreadState_GET();
+
+    /* DIAG (PYGO_DIAG_MIGRATE=1): detect the H>=2 cross-hub corruption at its
+     * SOURCE.  When we load a snap onto a tstate that differs from the one the
+     * snap was saved on (origin_tstate) AND the g has live Python frames
+     * (current_frame != NULL on 3.13), the g's suspended eval loop will keep
+     * threading origin_tstate while the bound tstate is `ts` -> divergent
+     * exception/datastack reads -> "error return without exception set" / SEGV.
+     * This fires immediately BEFORE the crash, naming both tstates. */
+    {
+        static int diag = -1;
+        int d = __atomic_load_n(&diag, __ATOMIC_RELAXED);
+        if (d < 0) {
+            const char *e = getenv("PYGO_DIAG_MIGRATE");
+            d = (e != NULL && e[0] != '0') ? 1 : 0;
+            __atomic_store_n(&diag, d, __ATOMIC_RELAXED);
+        }
+        if (d && snap->origin_tstate != ts) {
+            void *frame = NULL;
+#if PY_VERSION_HEX >= 0x030D0000
+            frame = (void *)snap->current_frame;
+#endif
+            fprintf(stderr,
+                "[PYGO_DIAG_MIGRATE] cross-hub snap load: origin_ts=%p "
+                "bound_ts=%p live_frame=%p exc_info=%p cur_exc=%p%s\n",
+                (void *)snap->origin_tstate, (void *)ts, frame,
+                (void *)snap->exc_info, (void *)snap->current_exception,
+                frame != NULL ? "  <-- LIVE FRAME: eval loop will use stale "
+                                "origin_ts (CORRUPTION)" : "  (no live frame)");
+        }
+    }
 
 #if PY_VERSION_HEX >= 0x030B0000
     /* contextvars fast path: if g didn't touch ts->context, the snap's
