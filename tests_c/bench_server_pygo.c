@@ -348,11 +348,12 @@ int main(int argc, char **argv)
     g_N = N;
     g_M = M;
 
-    /* Lift FD limit before we do anything fd-y.  1<<22 = 4,194,304 covers
-     * N=1M connections (~2M in-process fds: a client + an accepted fd
-     * each).  Requires fs.nr_open >= this (sysctl -w fs.nr_open=4194304);
-     * setrlimit clamps to nr_open otherwise. */
-    struct rlimit rl = { 1u << 22, 1u << 22 };
+    /* Lift FD limit before we do anything fd-y.  1<<23 = 8,388,608 covers
+     * N=2M connections (~4M in-process fds: a client + an accepted fd
+     * each, plus headroom for the spawn burst before RST-close recycles).
+     * 1<<22 (4.19M) is too tight at N=2M.  Requires fs.nr_open >= this
+     * (sysctl -w fs.nr_open=8388608); setrlimit clamps to nr_open otherwise. */
+    struct rlimit rl = { 1u << 23, 1u << 23 };
     if (setrlimit(RLIMIT_NOFILE, &rl) < 0) {
         fprintf(stderr, "setrlimit NOFILE: %s (continuing)\n", strerror(errno));
     }
