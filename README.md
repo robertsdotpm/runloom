@@ -160,6 +160,12 @@ Read this before betting on pygo — it's where the project actually is.
 - **No per-core speedup.** pygo saturates all cores from one process but can't
   raise CPython's ~80 K ops/s/core. CPU-bound pure-Python work is still
   CPython-slow per thread.
+- **Go is faster on raw network I/O.** A round-trip is ~49 µs loopback (C
+  `TCPConn`, epoll); Go's `net` is lower. The cost is the per-syscall path plus,
+  for Python handlers, interpreter overhead on every `recv`/`send` — **not** the
+  scheduler, which is Go-class (~47 ns/yield). An opt-in io_uring path
+  (`PYGO_TCPCONN_IOURING=1`) narrows it at high fan-out on Linux; matching Go
+  per-operation in Python isn't achievable.
 - **Preemption only fires at Python bytecode boundaries.** A goroutine inside a
   long C call (`numpy`, `hashlib`) or a tight pure-C loop is **not**
   preemptible and will hold its hub until it returns — same limitation Go has
