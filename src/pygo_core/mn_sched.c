@@ -101,6 +101,20 @@ typedef struct pygo_hub {
      * init -> first idle sweep fires immediately).  Rate-limits the
      * O(parked) walk under PYGO_STACK_PARK_SWEEP. */
     double               last_sweep_s;
+    /* ---- sysmon (Group B) progress instrumentation, PYGO_SYSMON only ----
+     * resume_start_ns: monotonic-ns when this hub entered its current
+     * pygo_coro_resume; 0 between resumes (idle / looping).  The sysmon
+     * watchdog reads it to spot a hub stuck inside a non-yielding blocking
+     * call (an UNANTICIPATED block -- the thing Group A's offload doesn't
+     * wrap).  resume_g is the g being resumed, for the wedge log line.
+     * resume_seq bumps every resume start so the watchdog can tell "same
+     * stuck resume" from "made progress" without racing on the ns value.
+     * Written by the hub only when pygo_sysmon_enabled (predicted-not-taken
+     * off the hot path); read RELAXED by the watchdog (a stale read just
+     * delays/!duplicates a report -- harmless for a watchdog). */
+    volatile long long   resume_start_ns;
+    volatile long        resume_seq;
+    pygo_g_t            *resume_g;
 } pygo_hub_t;
 
 static pygo_hub_t *pygo_hubs = NULL;
@@ -320,6 +334,60 @@ static int pygo_steal_woken_flag(void)
 static int pygo_use_global_runq(void)
 {
     return pygo_get_per_g_tstate_mode() || pygo_steal_woken_flag();
+}
+
+/* ---- sysmon watchdog (Group B: stalled-hub detection) ----
+ *
+ * PYGO_SYSMON (default OFF): spawn one extra OS thread that periodically
+ * scans every hub's resume_start_ns and logs a hub stuck inside a single
+ * pygo_coro_resume longer than PYGO_SYSMON_MS (the unanticipated-block
+ * signature -- a goroutine occupying its hub's OS thread with a
+ * non-yielding blocking C call that Group A's offload never wrapped).
+ *
+ * This first cut is DETECT-ONLY (log the wedge + how many gs it strands);
+ * the tstate-handoff recovery builds on top once the detector is measured.
+ * Gated so the per-resume instrumentation (two stores + a clock read) is a
+ * predicted-not-taken branch -- zero cost when the watchdog is off. */
+/* PyThreadState->state values (cpython/pystate.h documents the field;
+ * the numeric values live in the internal pycore_pystate.h).  Mirrored here
+ * so the watchdog can classify a wedge WITHOUT the Python C-API: it reads
+ * h->tstate->state to tell a handoff-RECOVERABLE stall (the running g
+ * released the tstate via Py_BEGIN_ALLOW_THREADS -> DETACHED, a well-behaved
+ * blocking-IO call a standby thread can take over) from an un-recoverable one
+ * (ATTACHED = CPU-bound bytecode or a raw tstate-holding syscall; SUSPENDED =
+ * a stop-the-world is in progress -- never adopt). */
+#define PYGO_TS_DETACHED  0
+#define PYGO_TS_ATTACHED  1
+#define PYGO_TS_SUSPENDED 2
+
+static int       pygo_sysmon_enabled = 0;
+static long long pygo_sysmon_wedge_ns = 50LL * 1000000LL;   /* 50 ms default */
+static long long pygo_sysmon_tick_ns  = 10LL * 1000000LL;   /* scan every 10 ms */
+static pygo_thread_t pygo_sysmon_thread;
+static int       pygo_sysmon_running = 0;   /* 1 once the thread is spawned */
+static volatile int pygo_sysmon_stop = 0;
+
+/* Mark the start of a coro resume on this hub (sysmon progress beat).
+ * resume_seq is bumped FIRST so a watchdog that samples mid-update sees a
+ * fresh seq with a possibly-stale ns and just waits one more tick.  Inlined
+ * and gated: when the watchdog is off this is a single predictable branch. */
+PYGO_INLINE void pygo_hub_resume_begin(pygo_hub_t *h, pygo_g_t *g)
+{
+    if (__builtin_expect(pygo_sysmon_enabled, 0)) {
+        h->resume_g = g;
+        __atomic_add_fetch(&h->resume_seq, 1, __ATOMIC_RELAXED);
+        __atomic_store_n(&h->resume_start_ns, pygo_monotonic_ns(),
+                         __ATOMIC_RELAXED);
+    }
+}
+
+/* Mark the end of a coro resume: clear resume_start_ns so the watchdog
+ * stops counting this hub as "in a resume". */
+PYGO_INLINE void pygo_hub_resume_end(pygo_hub_t *h)
+{
+    if (__builtin_expect(pygo_sysmon_enabled, 0)) {
+        __atomic_store_n(&h->resume_start_ns, 0, __ATOMIC_RELAXED);
+    }
 }
 
 /* Interpreter for per-g PyThreadState_New, captured at mn_init. */
@@ -696,7 +764,9 @@ static PYGO_THREAD_RET pygo_hub_main(void *arg)
                 pygo_tls_current_g = g;
                 pygo_tls_self_queued = 0;
                 pygo_tls_parked_offqueue = 0;
+                pygo_hub_resume_begin(h, g);
                 pygo_coro_resume(g->coro);
+                pygo_hub_resume_end(h);
                 self_queued = pygo_tls_self_queued;
                 parked_offqueue = pygo_tls_parked_offqueue;
                 pygo_tls_self_queued = 0;
@@ -826,7 +896,9 @@ static PYGO_THREAD_RET pygo_hub_main(void *arg)
                 if (from_runq) pygo_g_decref(g);   /* queue ref */
                 continue;
             }
+            pygo_hub_resume_begin(h, g);
             pygo_coro_resume(g->coro);
+            pygo_hub_resume_end(h);
             self_queued = pygo_tls_self_queued;
             parked_offqueue = pygo_tls_parked_offqueue;
             pygo_tls_self_queued = 0;
@@ -1183,6 +1255,123 @@ int pygo_mn_yield_current(void)
     return 1;
 }
 
+/* sysmon watchdog thread.  Holds NO GIL and NO tstate -- it only reads
+ * per-hub atomics and writes to stderr, never touching the Python C-API.
+ * Scans every pygo_sysmon_tick_ns; logs a hub whose current pygo_coro_resume
+ * has run longer than pygo_sysmon_wedge_ns (an unanticipated non-yielding
+ * block), once per wedge episode, and a matching "recovered" line so a run's
+ * wedge count + dwell are measurable.  DETECT-ONLY for now (no handoff). */
+static PYGO_THREAD_RET pygo_sysmon_main(void *arg)
+{
+    int n = pygo_hub_count;
+    /* w_seq[i] = the resume_seq currently logged as wedged on hub i (0 = none);
+     * w_start[i] = its resume_start_ns, for the recovery-dwell report. */
+    long      *w_seq   = (long *)calloc((size_t)(n > 0 ? n : 1), sizeof(long));
+    long long *w_start = (long long *)calloc((size_t)(n > 0 ? n : 1),
+                                             sizeof(long long));
+    (void)arg;
+    if (w_seq == NULL || w_start == NULL) {
+        free(w_seq); free(w_start);
+        PYGO_THREAD_RETURN(NULL);
+    }
+    while (!__atomic_load_n(&pygo_sysmon_stop, __ATOMIC_ACQUIRE)) {
+        long long now = pygo_monotonic_ns();
+        int i;
+        for (i = 0; i < n; i++) {
+            pygo_hub_t *h = &pygo_hubs[i];
+            long long start = __atomic_load_n(&h->resume_start_ns,
+                                              __ATOMIC_RELAXED);
+            long seq = __atomic_load_n(&h->resume_seq, __ATOMIC_RELAXED);
+            /* End of a previously-reported episode: the hub moved to a new
+             * resume (seq changed) or finished resuming (start cleared). */
+            if (w_seq[i] != 0 && (seq != w_seq[i] || start == 0)) {
+                long pend = __atomic_load_n(&h->pending, __ATOMIC_RELAXED);
+                fprintf(stderr,
+                    "[PYGO_SYSMON] hub %d RECOVERED after ~%.1f ms "
+                    "(pending=%ld)\n",
+                    i, (double)(now - w_start[i]) / 1e6, pend);
+                w_seq[i] = 0;
+            }
+            /* Start of a wedge episode: this resume has overrun the budget and
+             * we have not logged THIS seq yet. */
+            if (start != 0 && (now - start) > pygo_sysmon_wedge_ns &&
+                w_seq[i] != seq) {
+                long pend = __atomic_load_n(&h->pending, __ATOMIC_RELAXED);
+                /* Classify by the hub tstate's attach state (racy read, fine
+                 * for a diagnostic): DETACHED => the wedged g released the
+                 * GIL-era tstate (blocking IO) and a standby thread could
+                 * adopt the hub -> handoff-RECOVERABLE.  ATTACHED => CPU-bound
+                 * or a raw tstate-holding syscall -> needs preemption, not a
+                 * handoff.  SUSPENDED => stop-the-world. */
+                int tss = h->tstate != NULL
+                    ? __atomic_load_n(&h->tstate->state, __ATOMIC_RELAXED) : -1;
+                const char *cls =
+                    tss == PYGO_TS_DETACHED  ? "DETACHED (blocking-IO: handoff-recoverable)" :
+                    tss == PYGO_TS_ATTACHED  ? "ATTACHED (CPU/raw-syscall: needs preemption)" :
+                    tss == PYGO_TS_SUSPENDED ? "SUSPENDED (stop-the-world)" :
+                                               "?";
+                fprintf(stderr,
+                    "[PYGO_SYSMON] hub %d WEDGED %.1f ms in g=%p tstate=%s -- "
+                    "%ld g(s) stranded on this hub\n",
+                    i, (double)(now - start) / 1e6, (void *)h->resume_g, cls,
+                    pend > 0 ? pend - 1 : 0);
+                w_seq[i]   = seq;
+                w_start[i] = start;
+            }
+        }
+        pygo_sleep_ns(pygo_sysmon_tick_ns);
+    }
+    free(w_seq);
+    free(w_start);
+    PYGO_THREAD_RETURN(NULL);
+}
+
+/* Read PYGO_SYSMON / PYGO_SYSMON_MS once and set the enable flag + threshold.
+ * Must run in mn_init BEFORE the hub threads start so the per-resume
+ * instrumentation is live from the first resume.  No-op (enabled stays 0)
+ * unless PYGO_SYSMON is set to a non-"0" value. */
+static void pygo_sysmon_config(void)
+{
+    const char *e = getenv("PYGO_SYSMON");
+    const char *ms;
+    pygo_sysmon_enabled = (e != NULL && e[0] != '0') ? 1 : 0;
+    if (!pygo_sysmon_enabled) return;
+    ms = getenv("PYGO_SYSMON_MS");
+    if (ms != NULL) {
+        long long v = atoll(ms);
+        if (v > 0) pygo_sysmon_wedge_ns = v * 1000000LL;
+    }
+    /* Scan ~5x faster than the wedge budget (cap 10 ms) so detection latency
+     * is a small fraction of the threshold without busy-spinning. */
+    pygo_sysmon_tick_ns = pygo_sysmon_wedge_ns / 5;
+    if (pygo_sysmon_tick_ns > 10000000LL) pygo_sysmon_tick_ns = 10000000LL;
+    if (pygo_sysmon_tick_ns < 1000000LL)  pygo_sysmon_tick_ns = 1000000LL;
+}
+
+/* Spawn the watchdog thread (after hubs exist).  Enabled-gated; a spawn
+ * failure is non-fatal -- the scheduler runs fine without the watchdog. */
+static void pygo_sysmon_spawn(void)
+{
+    if (!pygo_sysmon_enabled) return;
+    pygo_sysmon_stop = 0;
+    if (pygo_thread_create(&pygo_sysmon_thread, pygo_sysmon_main, NULL) == 0) {
+        pygo_sysmon_running = 1;
+    } else {
+        fprintf(stderr, "[PYGO_SYSMON] watchdog thread spawn failed; "
+                        "stall detection disabled\n");
+    }
+}
+
+/* Stop + join the watchdog.  Called at the top of mn_fini, BEFORE the hubs
+ * are torn down, so the scan never reads freed hub state. */
+static void pygo_sysmon_stop_join(void)
+{
+    if (!pygo_sysmon_running) return;
+    __atomic_store_n(&pygo_sysmon_stop, 1, __ATOMIC_RELEASE);
+    pygo_thread_join(pygo_sysmon_thread);
+    pygo_sysmon_running = 0;
+}
+
 int pygo_mn_init(int n_threads)
 {
     int i;
@@ -1227,6 +1416,9 @@ int pygo_mn_init(int n_threads)
      * the snap down BEFORE any hub thread starts running goroutines. */
     pygo_mn_interp = interp;
     pygo_set_per_g_tstate_mode(pygo_per_g_tstate_flag());
+    /* Configure the sysmon watchdog (enable + threshold) BEFORE the hubs
+     * spawn so the per-resume progress instrumentation is live immediately. */
+    pygo_sysmon_config();
 
     for (i = 0; i < n_threads; i++) {
         pygo_hub_t *h = &pygo_hubs[i];
@@ -1283,6 +1475,8 @@ int pygo_mn_init(int n_threads)
         }
     }
     PyEval_RestoreThread(saved);
+    /* Hubs are up; start the watchdog (no-op unless PYGO_SYSMON is set). */
+    pygo_sysmon_spawn();
     return n_threads;
 }
 
@@ -1325,6 +1519,9 @@ void pygo_mn_fini(void)
 {
     int i;
     if (pygo_hubs == NULL) return;
+    /* Stop the watchdog before any hub teardown so its scan never touches
+     * freed hub state. */
+    pygo_sysmon_stop_join();
     for (i = 0; i < pygo_hub_count; i++) {
         __atomic_store_n(&pygo_hubs[i].stopping, 1, __ATOMIC_RELEASE);
     }
