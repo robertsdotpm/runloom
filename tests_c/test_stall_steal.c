@@ -72,7 +72,16 @@ static void worker_fn(void *arg)
 }
 
 /* Occupies its hub's OS thread with a non-yielding blocking C call once
- * woken -- the thing time-sliced preemption can't interrupt. */
+ * woken -- the thing time-sliced preemption can't interrupt.
+ *
+ * Two flavors (STALL_ALLOW_THREADS env):
+ *  - default (raw usleep): the hub's tstate stays ATTACHED -> the wedge is
+ *    Group-B class ATTACHED (CPU/raw-syscall), which a tstate-handoff CANNOT
+ *    recover (it models a tight loop / un-wrapped cgo call).
+ *  - STALL_ALLOW_THREADS=1: wrap the block in Py_BEGIN/END_ALLOW_THREADS so
+ *    the hub tstate goes DETACHED for the block -- the well-behaved blocking-IO
+ *    shape a standby M CAN adopt.  This is the handoff's RED baseline: today it
+ *    still strands the workers (no handoff yet); GREEN once the handoff lands. */
 static void staller_fn(void *arg)
 {
     (void)arg;
@@ -80,7 +89,13 @@ static void staller_fn(void *arg)
     if (pygo_netpoll_wait_fd(staller_efd, PYGO_NETPOLL_READ, -1LL) < 0) return;
     uint64_t v;
     (void)read(staller_efd, &v, sizeof v);
-    usleep(STALL_MS * 1000);          /* hold this hub hostage */
+    if (getenv("STALL_ALLOW_THREADS") != NULL) {
+        Py_BEGIN_ALLOW_THREADS           /* detach hub tstate (DETACHED) */
+        usleep(STALL_MS * 1000);         /* hold this hub's OS thread hostage */
+        Py_END_ALLOW_THREADS             /* re-attach (contends with a standby) */
+    } else {
+        usleep(STALL_MS * 1000);         /* hub tstate stays ATTACHED */
+    }
     pygo_netpoll_unregister(staller_efd);
 }
 
