@@ -360,12 +360,69 @@ static int pygo_use_global_runq(void)
 #define PYGO_TS_ATTACHED  1
 #define PYGO_TS_SUSPENDED 2
 
+/* Read a tstate's free-threaded attach state (DETACHED/ATTACHED/SUSPENDED).
+ * The `state` field + this tri-state attach protocol are free-threading
+ * infrastructure that only exists from 3.13 (3.12 has `_status` and no
+ * attach/detach/stop-the-world concept).  Pre-3.13 returns -1 ("unknown"),
+ * which makes the sysmon classifier print "?" and the handoff adopt/dispatch
+ * gates (== / != PYGO_TS_DETACHED) all fail closed -- the rescue never fires,
+ * matching pygo_handoff_enabled being forced off there. */
+#if PY_VERSION_HEX >= 0x030D0000
+PYGO_INLINE int pygo_tstate_attach_state(PyThreadState *ts)
+{
+    return ts != NULL ? __atomic_load_n(&ts->state, __ATOMIC_ACQUIRE) : -1;
+}
+#else
+PYGO_INLINE int pygo_tstate_attach_state(PyThreadState *ts)
+{
+    (void)ts;
+    return -1;
+}
+#endif
+
 static int       pygo_sysmon_enabled = 0;
 static long long pygo_sysmon_wedge_ns = 50LL * 1000000LL;   /* 50 ms default */
 static long long pygo_sysmon_tick_ns  = 10LL * 1000000LL;   /* scan every 10 ms */
 static pygo_thread_t pygo_sysmon_thread;
 static int       pygo_sysmon_running = 0;   /* 1 once the thread is spawned */
 static volatile int pygo_sysmon_stop = 0;
+
+/* ---- Group B: stalled-hub tstate handoff (PYGO_HANDOFF, default OFF) ----
+ *
+ * One standby "rescue" OS thread adopts a hub's DETACHED bound tstate -- a
+ * goroutine inside a Py_BEGIN_ALLOW_THREADS blocking call left it free -- and
+ * drains THAT hub's stranded runnable gs, handing the tstate back when the
+ * block ends.  This is the DETACHED-class wedge the sysmon detector classifies
+ * as handoff-recoverable (a well-behaved blocking-IO call), the asyncio-killer
+ * scenario: one blocking task no longer stalls a whole hub's fan-out.
+ *
+ * DEFAULT mode only (no per-g-tstate).  The adopted tstate is the hub's single
+ * bound tstate, so a stranded g resumes on the SAME tstate it parked under --
+ * the invariant the H>=2 cross-hub snap migration violated (a stackful coro's
+ * suspended eval-loop C frame caches its origin tstate; only resuming on that
+ * exact tstate is correct).  The rescue moves the *tstate* (to its own OS
+ * thread) rather than the goroutine, so the cached pointer stays valid.
+ *
+ * Single-runner safety = the tstate attach state itself.  PyEval_RestoreThread
+ * CASes the bound tstate DETACHED->ATTACHED; at most one thread holds it
+ * ATTACHED, and ONLY the ATTACHED holder mutates hub state.  The rescue adopts
+ * only while state==DETACHED (the owner provably parked in its block, not in
+ * the hub loop); attaching excludes the owner's END_ALLOW_THREADS re-attach
+ * until the rescue detaches.  A stop-the-world that beats the rescue to the
+ * tstate (DETACHED->SUSPENDED) makes the adopt attach block until
+ * start_the_world -- STW-safe for free (the per-g bug was thousands of
+ * EPHEMERAL tstates churning across STW; these H bound tstates do not).
+ *
+ * Dispatch: the sysmon watchdog, on a DETACHED wedge, drops the hub id into a
+ * single-slot mailbox (one wedged hub at a time; a pool is a later
+ * generalisation).  The rescue clears the slot only at its final release, so a
+ * persistently-wedged hub is re-dispatched on the next scan if a premature
+ * release (e.g. a STW window) happened. */
+static int          pygo_handoff_enabled = 0;
+static volatile int pygo_handoff_mailbox = -1;   /* hub id to rescue, -1 idle */
+static pygo_thread_t pygo_handoff_thread;
+static int          pygo_handoff_running = 0;
+static volatile int pygo_handoff_stop = 0;
 
 /* Mark the start of a coro resume on this hub (sysmon progress beat).
  * resume_seq is bumped FIRST so a watchdog that samples mid-update sees a
@@ -1303,8 +1360,7 @@ static PYGO_THREAD_RET pygo_sysmon_main(void *arg)
                  * adopt the hub -> handoff-RECOVERABLE.  ATTACHED => CPU-bound
                  * or a raw tstate-holding syscall -> needs preemption, not a
                  * handoff.  SUSPENDED => stop-the-world. */
-                int tss = h->tstate != NULL
-                    ? __atomic_load_n(&h->tstate->state, __ATOMIC_RELAXED) : -1;
+                int tss = pygo_tstate_attach_state(h->tstate);
                 const char *cls =
                     tss == PYGO_TS_DETACHED  ? "DETACHED (blocking-IO: handoff-recoverable)" :
                     tss == PYGO_TS_ATTACHED  ? "ATTACHED (CPU/raw-syscall: needs preemption)" :
@@ -1317,6 +1373,19 @@ static PYGO_THREAD_RET pygo_sysmon_main(void *arg)
                     pend > 0 ? pend - 1 : 0);
                 w_seq[i]   = seq;
                 w_start[i] = start;
+            }
+            /* Group B handoff dispatch.  Independent of the once-per-episode
+             * log dedup above: attempt every tick a DETACHED wedge is live so a
+             * hub that the rescue released early (e.g. across a STW window) is
+             * re-dispatched.  The CAS only fills a FREE mailbox; the rescue M
+             * clears it at its final release, so at most one hub is in rescue at
+             * a time (single-slot; a pool is a later generalisation). */
+            if (pygo_handoff_enabled && start != 0 &&
+                (now - start) > pygo_sysmon_wedge_ns &&
+                pygo_tstate_attach_state(h->tstate) == PYGO_TS_DETACHED) {
+                int empty = -1;
+                __atomic_compare_exchange_n(&pygo_handoff_mailbox, &empty, i, 0,
+                                            __ATOMIC_ACQ_REL, __ATOMIC_RELAXED);
             }
         }
         pygo_sleep_ns(pygo_sysmon_tick_ns);
@@ -1333,8 +1402,27 @@ static PYGO_THREAD_RET pygo_sysmon_main(void *arg)
 static void pygo_sysmon_config(void)
 {
     const char *e = getenv("PYGO_SYSMON");
+    const char *ho = getenv("PYGO_HANDOFF");
     const char *ms;
     pygo_sysmon_enabled = (e != NULL && e[0] != '0') ? 1 : 0;
+    /* The handoff rescue depends on the sysmon detector: its per-resume
+     * instrumentation (resume_start_ns) is what spots the DETACHED wedge and
+     * the watchdog is what dispatches it.  PYGO_HANDOFF=1 therefore forces the
+     * sysmon instrumentation + watchdog on, independent of PYGO_SYSMON.
+     *
+     * DEFAULT mode ONLY.  Under per-g-tstate the hub's bound tstate (h->tstate)
+     * is DETACHED for the ENTIRE duration of every per-g resume (the hub swaps
+     * it out for g->tstate), so it would constantly look like a DETACHED wedge;
+     * and the rescue's snap-based default-mode drain is wrong for per-g gs
+     * (they ride a per-g tstate, not the snap, and wake to the global runq, not
+     * the hub sub_list).  Stand the rescue down there -- per-g-tstate already
+     * recovers stalled-hub work via the global run-queue. */
+    pygo_handoff_enabled = (ho != NULL && ho[0] != '0') ? 1 : 0;
+#if PY_VERSION_HEX < 0x030D0000
+    pygo_handoff_enabled = 0;   /* no free-threaded attach states pre-3.13 */
+#endif
+    if (pygo_get_per_g_tstate_mode()) pygo_handoff_enabled = 0;
+    if (pygo_handoff_enabled) pygo_sysmon_enabled = 1;
     if (!pygo_sysmon_enabled) return;
     ms = getenv("PYGO_SYSMON_MS");
     if (ms != NULL) {
@@ -1370,6 +1458,228 @@ static void pygo_sysmon_stop_join(void)
     __atomic_store_n(&pygo_sysmon_stop, 1, __ATOMIC_RELEASE);
     pygo_thread_join(pygo_sysmon_thread);
     pygo_sysmon_running = 0;
+}
+
+/* ---- Group B rescue loop (PYGO_HANDOFF) ----
+ *
+ * Resume ONE default-mode g on the currently-adopted hub tstate, using
+ * `base` (the captured g_block slice) as the per-g register window exactly as
+ * hub_main uses hub_snap.  A faithful copy of hub_main's DEFAULT branch
+ * (mn_sched.c resume block) MINUS the per-g-tstate / global-runq paths (the
+ * handoff is default mode) and MINUS the sysmon resume_begin/end instrument
+ * (that field tracks the OWNER's g_block wedge; the rescue's own resumes are
+ * unwatched).  Kept as a separate routine per the project ethos: do NOT
+ * refactor hub_main, so the default scheduler path stays byte-unchanged.
+ *
+ * tstate-safety: every g in hub h's sub_list/FIFO/deque either is fresh (no
+ * tstate affinity) or parked while running on hub h (its parker recorded
+ * h->id, so a wake routes it back to h -- a g stolen to another hub records
+ * THAT hub and never lands here).  So resuming on hub_ts is always the
+ * same-tstate resume the H>=2 bug requires.  The rescue therefore NEVER steals
+ * from a neighbour (that g parked on a different tstate). */
+static void pygo_handoff_resume_g(pygo_hub_t *h, pygo_g_t *g,
+                                  pygo_pystate_snap_t *base)
+{
+    int self_queued;
+
+    if (g->snap.valid) {
+        pygo_pystate_load(&g->snap);
+    } else {
+        pygo_first_run_install_datastack();
+#if PY_VERSION_HEX >= 0x030D0000
+        {
+            PyThreadState *ts = PyThreadState_GET();
+            ts->current_frame = NULL;
+        }
+#endif
+    }
+    h->sched.current = g;
+    pygo_tls_current_g = g;
+    pygo_tls_self_queued = 0;
+    pygo_tls_parked_offqueue = 0;
+    __atomic_store_n(&g->in_sub_queue, 0, __ATOMIC_RELEASE);
+    PYGO_G_ASSERT_NOT(g, PYGO_GST_BIT(PYGO_GST_FREED));
+    PYGO_EVT(PYGO_EVT_G_POP, g, h, 0);
+    if (g->coro == NULL || __atomic_load_n(&g->done, __ATOMIC_ACQUIRE)) {
+        h->sched.current = NULL;
+        pygo_tls_current_g = NULL;
+        return;
+    }
+    /* NB: no pygo_hub_resume_begin/end -- the rescue must not write
+     * h->resume_start_ns (that is the owner's g_block wedge clock). */
+    pygo_coro_resume(g->coro);
+    self_queued = pygo_tls_self_queued;
+    pygo_tls_self_queued = 0;
+    pygo_tls_parked_offqueue = 0;
+    pygo_tls_current_g = NULL;
+    h->sched.current = NULL;
+
+    if (pygo_coro_done(g->coro)) {
+        pygo_drain_g_datastack();
+        pygo_pystate_load(base);
+        pygo_netpoll_force_unlink_g_parker(g);
+        pygo_mn_pending_complete(h);
+        pygo_g_decref(g);               /* scheduler ref */
+        pygo_pystate_snap(base);
+    } else if (!self_queued) {
+        /* Raw pygo_coro_yield(): keep it runnable, hub-pinned. */
+        pygo_sched_ready_push(&h->sched, g);
+    } else if (pygo_g_state_in(g, PYGO_GST_MASK_PARKED)) {
+        /* Parked off-queue (netpoll/chan/sleep): a wake_g routes it back to
+         * THIS hub's sub_list.  Drop its idle stack pages (no-op unless
+         * PYGO_STACK_PARK_DONTNEED=1). */
+        pygo_coro_park(g->coro);
+    }
+    /* else: cooperative sched_yield already re-queued itself on the FIFO. */
+}
+
+/* Drive a single adopt -> drain-to-empty -> handback cycle for the wedged hub,
+ * repeating until the wedge clears.  Runs on the rescue OS thread. */
+static void pygo_handoff_rescue(pygo_hub_t *h)
+{
+    pygo_pystate_snap_t rescue_base;
+    int attached = 0;
+
+    for (;;) {
+        pygo_g_t *g;
+
+        if (__atomic_load_n(&pygo_handoff_stop, __ATOMIC_ACQUIRE)) {
+            if (attached) {
+                pygo_pystate_load(&rescue_base);
+                pygo_tls_hub = NULL;
+                PyEval_SaveThread();
+            }
+            return;
+        }
+
+        if (!attached) {
+            /* Adopt only a genuinely DETACHED, still-active wedge.  The racy
+             * resume_start_ns + state checks keep us off (a) an idle-sleeping
+             * owner (resume_start_ns==0 -- it briefly detaches at idle), and
+             * (b) an owner actively in the hub loop (state==ATTACHED).  A lost
+             * race (owner re-grabs, or a STW sets SUSPENDED, between the check
+             * and the attach) makes PyEval_RestoreThread block until it can
+             * attach -- bounded and safe; we re-verify the wedge after. */
+            long long start = __atomic_load_n(&h->resume_start_ns,
+                                              __ATOMIC_RELAXED);
+            long long now = pygo_monotonic_ns();
+            if (h->tstate == NULL || start == 0 ||
+                (now - start) <= pygo_sysmon_wedge_ns ||
+                pygo_tstate_attach_state(h->tstate) != PYGO_TS_DETACHED) {
+                return;   /* wedge gone / not a DETACHED block -> nothing to do */
+            }
+            PyEval_RestoreThread(h->tstate);     /* attach hub_ts to THIS thread */
+            pygo_tls_hub = h;
+            /* Capture g_block's live slice; every handback restores it so the
+             * owner's END_ALLOW_THREADS re-attach finds it intact. */
+            pygo_pystate_snap(&rescue_base);
+            attached = 1;
+        }
+
+        /* ---- one drain pass (mirror hub_main, default-only, NO steal) ---- */
+        /* Drain submission list into deque (fresh) / local FIFO (woken). */
+        pygo_mutex_lock(&h->sub_lock);
+        {
+            pygo_g_t *sub = h->sub_head;
+            h->sub_head = h->sub_tail = NULL;
+            pygo_mutex_unlock(&h->sub_lock);
+            while (sub != NULL) {
+                pygo_g_t *next = sub->next;
+                sub->next = NULL;
+                if (sub->snap.valid) {
+                    pygo_sched_ready_push(&h->sched, sub);
+                } else if (pygo_cldeque_push(&h->deque, sub) != 0) {
+                    pygo_sched_ready_push(&h->sched, sub);
+                }
+                sub = next;
+            }
+        }
+        /* Expired sleepers -> local FIFO (default branch). */
+        if (h->sched.sleep_size > 0) {
+            double now = pygo_sched_monotonic_seconds();
+            while (h->sched.sleep_size > 0 &&
+                   pygo_sched_sleep_peek(&h->sched)->wake_at <= now) {
+                pygo_sched_ready_push(&h->sched,
+                                      pygo_sched_sleep_pop(&h->sched));
+            }
+        }
+
+        g = pygo_sched_ready_pop(&h->sched);          /* local yielded/woken */
+        if (g == NULL) {
+            g = (pygo_g_t *)pygo_cldeque_pop(&h->deque);  /* own fresh */
+        }
+
+        if (g != NULL) {
+            pygo_handoff_resume_g(h, g, &rescue_base);
+            continue;                                 /* try for more work */
+        }
+
+        /* Runq empty: restore g_block's slice, detach so the owner can reclaim
+         * the instant its block ends, then re-verify.  Still DETACHED-wedged ->
+         * loop re-adopts (after a short sleep that bounds the added latency for
+         * gs woken into the sub_list during the block); otherwise released. */
+        pygo_pystate_load(&rescue_base);
+        pygo_tls_hub = NULL;
+        PyEval_SaveThread();
+        attached = 0;
+        {
+            long long start = __atomic_load_n(&h->resume_start_ns,
+                                              __ATOMIC_RELAXED);
+            long long now = pygo_monotonic_ns();
+            if (start == 0 || (now - start) <= pygo_sysmon_wedge_ns ||
+                pygo_tstate_attach_state(h->tstate) != PYGO_TS_DETACHED) {
+                return;   /* block ended or owner/STW reclaimed -> released */
+            }
+        }
+        pygo_sleep_ns(200000LL);   /* 0.2 ms re-poll for wakes during the block */
+    }
+}
+
+/* Rescue M main loop.  One standby thread; picks the wedged hub id out of the
+ * single-slot mailbox, rescues it, then clears the slot (so the slot is held
+ * for the whole rescue -> one hub in rescue at a time).  Holds no tstate while
+ * idle. */
+static PYGO_THREAD_RET pygo_handoff_main(void *arg)
+{
+    (void)arg;
+    pygo_coro_thread_init();   /* per-OS-thread coro backend (no-op on POSIX) */
+    while (!__atomic_load_n(&pygo_handoff_stop, __ATOMIC_ACQUIRE)) {
+        int hubid = __atomic_load_n(&pygo_handoff_mailbox, __ATOMIC_ACQUIRE);
+        if (hubid >= 0 && hubid < pygo_hub_count) {
+            pygo_handoff_rescue(&pygo_hubs[hubid]);
+            __atomic_store_n(&pygo_handoff_mailbox, -1, __ATOMIC_RELEASE);
+        } else {
+            pygo_sleep_ns(500000LL);   /* 0.5 ms idle poll for a dispatch */
+        }
+    }
+    pygo_coro_thread_fini();
+    PYGO_THREAD_RETURN(NULL);
+}
+
+/* Spawn the rescue thread (after hubs exist).  Enabled-gated; spawn failure is
+ * non-fatal -- the scheduler runs fine, just without stalled-hub recovery. */
+static void pygo_handoff_spawn(void)
+{
+    if (!pygo_handoff_enabled) return;
+    pygo_handoff_stop = 0;
+    pygo_handoff_mailbox = -1;
+    if (pygo_thread_create(&pygo_handoff_thread, pygo_handoff_main, NULL) == 0) {
+        pygo_handoff_running = 1;
+    } else {
+        fprintf(stderr, "[PYGO_HANDOFF] rescue thread spawn failed; "
+                        "stalled-hub recovery disabled\n");
+    }
+}
+
+/* Stop + join the rescue thread.  Called in mn_fini AFTER the watchdog stops
+ * (so no new dispatch) but BEFORE the hubs are torn down (so the rescue can
+ * never hold a tstate that is about to be deleted). */
+static void pygo_handoff_stop_join(void)
+{
+    if (!pygo_handoff_running) return;
+    __atomic_store_n(&pygo_handoff_stop, 1, __ATOMIC_RELEASE);
+    pygo_thread_join(pygo_handoff_thread);
+    pygo_handoff_running = 0;
 }
 
 int pygo_mn_init(int n_threads)
@@ -1475,8 +1785,10 @@ int pygo_mn_init(int n_threads)
         }
     }
     PyEval_RestoreThread(saved);
-    /* Hubs are up; start the watchdog (no-op unless PYGO_SYSMON is set). */
+    /* Hubs are up; start the watchdog (no-op unless PYGO_SYSMON / PYGO_HANDOFF
+     * is set) and the rescue thread (no-op unless PYGO_HANDOFF is set). */
     pygo_sysmon_spawn();
+    pygo_handoff_spawn();
     return n_threads;
 }
 
@@ -1520,8 +1832,12 @@ void pygo_mn_fini(void)
     int i;
     if (pygo_hubs == NULL) return;
     /* Stop the watchdog before any hub teardown so its scan never touches
-     * freed hub state. */
+     * freed hub state, then stop the rescue thread (after the watchdog so no
+     * fresh dispatch lands) so it can never hold a tstate about to be deleted.
+     * At fini all gs have completed -> no wedge -> the rescue is idle, but the
+     * stop flag also unwinds an in-progress rescue (load base + detach). */
     pygo_sysmon_stop_join();
+    pygo_handoff_stop_join();
     for (i = 0; i < pygo_hub_count; i++) {
         __atomic_store_n(&pygo_hubs[i].stopping, 1, __ATOMIC_RELEASE);
     }

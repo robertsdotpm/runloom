@@ -21,7 +21,19 @@ ls -la test_stall_steal 2>&1 || { echo "BUILD FAILED"; exit 1; }
 echo "--- RUN default mode (PYGO_PER_G_TSTATE=0) ---"
 PYGO_PER_G_TSTATE=0 timeout 30 ./test_stall_steal; echo "exit rc=$?"
 
-echo "--- RUN per-g-tstate ON (PYGO_PER_G_TSTATE=1) -- expect RED today ---"
+echo "--- RUN per-g-tstate ON (PYGO_PER_G_TSTATE=1) -- recovers via global runq ---"
 PYGO_PER_G_TSTATE=1 timeout 30 ./test_stall_steal; echo "exit rc=$?"
+
+# Group B: stalled-hub tstate handoff.  The DETACHED staller (a well-behaved
+# Py_BEGIN_ALLOW_THREADS blocking call) is the handoff-recoverable class; the
+# rescue M adopts the hub's freed tstate and drains its stranded gs.
+echo "--- RUN DETACHED staller + PYGO_HANDOFF=1, default mode -- expect GREEN 64/64 ---"
+STALL_ALLOW_THREADS=1 PYGO_HANDOFF=1 timeout 30 ./test_stall_steal; echo "exit rc=$?"
+
+# Control: the raw-usleep staller keeps its tstate ATTACHED (CPU/raw-syscall
+# class), which a tstate handoff CANNOT recover -- must stay RED even with the
+# handoff on (the rescue correctly refuses to adopt a non-DETACHED wedge).
+echo "--- RUN ATTACHED staller + PYGO_HANDOFF=1 -- expect RED (not handoff-recoverable) ---"
+PYGO_HANDOFF=1 timeout 30 ./test_stall_steal; echo "exit rc=$?  (RED is correct here)"
 
 echo "=== stall test end $(date -Is) ==="
