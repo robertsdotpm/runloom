@@ -57,6 +57,14 @@ import pygo_core
 from . import runtime as _runtime
 
 
+def _resolve(host, port, family, type_, proto, flags):
+    """getaddrinfo via the blocking-offload pool, so DNS doesn't wedge the
+    goroutine's hub (it is a non-preemptible blocking C call).  Runs inline
+    when not on a goroutine -- safe in either context."""
+    return pygo_core.blocking(_socket.getaddrinfo, host, port,
+                              family, type_, proto, flags)
+
+
 def _close_sock(sock):
     """Close a socket and tell the netpoll backend to forget about it.
 
@@ -598,8 +606,8 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
         if ssl is not None:
             raise NotImplementedError("ssl not supported in pygo.aio loop.create_connection")
         if sock is None:
-            infos = _socket.getaddrinfo(host, port, family or _socket.AF_UNSPEC,
-                                        _socket.SOCK_STREAM, proto, flags)
+            infos = _resolve(host, port, family or _socket.AF_UNSPEC,
+                             _socket.SOCK_STREAM, proto, flags)
             last_err = None
             for fam, typ, prt, _canon, sa in infos:
                 try:
@@ -635,8 +643,8 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
         if ssl is not None:
             raise NotImplementedError("ssl not supported in pygo.aio loop.create_server")
         if sock is None:
-            infos = _socket.getaddrinfo(host, port, family,
-                                        _socket.SOCK_STREAM, 0, flags)
+            infos = _resolve(host, port, family,
+                             _socket.SOCK_STREAM, 0, flags)
             last_err = None
             for fam, typ, prt, _canon, sa in infos:
                 try:
@@ -661,9 +669,9 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
         return _ProtocolServer(sock, protocol_factory, loop=self)
 
     async def getaddrinfo(self, host, port, *, family=0, type=0, proto=0, flags=0):
-        # Blocking call -- runs in the OS thread.  monkey.py patches
-        # this to be cooperative if the user installs it.
-        return _socket.getaddrinfo(host, port, family, type, proto, flags)
+        # Offloaded to the blocking pool so DNS doesn't wedge the hub.
+        # monkey.py may still patch this to a cooperative resolver.
+        return _resolve(host, port, family, type, proto, flags)
 
     async def getnameinfo(self, sockaddr, flags=0):
         return _socket.getnameinfo(sockaddr, flags)
@@ -1109,13 +1117,12 @@ async def open_connection(host=None, port=None, *, family=0, proto=0,
     if sock is None:
         if host is None or port is None:
             raise ValueError("open_connection requires host+port or sock=")
-        # getaddrinfo + connect.  getaddrinfo blocks the OS thread; for
-        # now we accept that -- aionetiface's monkey patch makes it
-        # cooperative anyway.
-        infos = _socket.getaddrinfo(host, port,
-                                    family or _socket.AF_UNSPEC,
-                                    _socket.SOCK_STREAM,
-                                    proto, flags)
+        # getaddrinfo is a blocking C call; offload it so it doesn't wedge
+        # the hub (aionetiface's monkey patch may also make it cooperative).
+        infos = _resolve(host, port,
+                         family or _socket.AF_UNSPEC,
+                         _socket.SOCK_STREAM,
+                         proto, flags)
         last_err = None
         for fam, typ, prt, _canon, sa in infos:
             try:
