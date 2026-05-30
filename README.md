@@ -180,6 +180,53 @@ print(pygo_core.stats())
 See [the stack sizing guide](docs/stack-sizing.md) for the full
 mechanism, including the safety margin and when to override.
 
+## Kernel limits for high goroutine counts
+
+Each goroutine owns a private mmap'd C stack, and with the guard page
+that copy-grow installs that is **~2 virtual memory areas (VMAs) per
+goroutine**.  The Linux defaults cap a process at ~1 M VMAs and ~1 M
+open files, so past roughly **half a million live goroutines** the
+*kernel* — not pygo — starts refusing `mmap`/`socket` with `ENOMEM`
+("Cannot allocate memory").  The tell-tale is a spawn failure at a few
+GB resident with most of RAM still free: it is a VMA/fd cap, not real
+memory pressure.
+
+Raise these before a high-N run:
+
+| sysctl / limit | typical default | high-N value | why |
+| --- | --- | --- | --- |
+| `vm.max_map_count` | 65530–1048576 | `16777216` | ~2 VMAs/goroutine — the binding ceiling (N=2 M needs ~7 M maps) |
+| `fs.nr_open` | 1048576 | `8388608` | raises the per-process open-fd hard ceiling for socket servers |
+| `net.core.somaxconn` | 128–4096 | `1048576` | accept-queue depth for large connection bursts |
+| `net.ipv4.tcp_max_syn_backlog` | 1024–4096 | `1048576` | SYN-queue depth, same reason |
+
+```bash
+# one-off (these reset on reboot):
+sudo sysctl -w vm.max_map_count=16777216 fs.nr_open=8388608 \
+     net.core.somaxconn=1048576 net.ipv4.tcp_max_syn_backlog=1048576
+
+# persistent — re-applied at boot by systemd-sysctl:
+sudo tee /etc/sysctl.d/99-pygo.conf >/dev/null <<'EOF'
+vm.max_map_count = 16777216
+fs.nr_open = 8388608
+net.core.somaxconn = 1048576
+net.ipv4.tcp_max_syn_backlog = 1048576
+EOF
+sudo sysctl --system
+```
+
+A socket server also needs its **open-file soft limit** lifted in the
+process itself — `fs.nr_open` only raises the ceiling: `ulimit -n
+8388608`, or `setrlimit(RLIMIT_NOFILE, …)` at startup.  `vm.max_map_count`
+is the one that bites first and most silently.
+
+With these in place, **2,000,000 concurrent connections** (~4 M
+goroutines, both ends in-process) complete in a single process at
+~14 GB RSS; at the defaults the same run dies spawning at ~500 K
+goroutines.  macOS/BSD have analogous knobs (`kern.maxfiles`,
+`kern.ipc.somaxconn`); there is no `max_map_count` equivalent, the
+per-process fd limit is the practical ceiling there.
+
 ## Time-sliced preemption (3.13t)
 
 A goroutine that never calls `sched_yield()` can still cooperate
