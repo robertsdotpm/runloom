@@ -7,3 +7,15 @@ bench_server_pygo
 bench_server_pygo-asan
 bench_server_pygo-tsan
 bench_server_pygo-ubsan
+# Compiled standalone test binaries (built from test_*.c by the run_*.sh
+# scripts; the .c / .sh sources stay tracked).
+test_stall_steal
+test_stall_pool
+test_preempt
+test_blockpool
+# Sanitizer variants of any bench/test binary.
+*-asan
+*-tsan
+*-ubsan
+# Run logs written by the run_*.sh harness scripts.
+*.log
