@@ -32,6 +32,15 @@ typedef struct pygo_pystate_snap pygo_pystate_snap_t;
 #define PYGO_WS_QUEUED         1
 #define PYGO_WS_RUNNING        2
 #define PYGO_WS_RUNNING_WOKEN  3
+/* SWEEPING/SWEEPING_WOKEN mirror RUNNING/RUNNING_WOKEN for the idle stack
+ * sweep: an idle hub claims a long-parked g (PARKED -> SWEEPING) to own its
+ * stack exclusively while it MADV_DONTNEEDs the below-SP idle pages, so no
+ * other hub can resume the g into pages mid-zeroing.  A wake during the sweep
+ * is remembered (SWEEPING -> SWEEPING_WOKEN) and re-enqueued at release, never
+ * lost.  Lets per-g-tstate run the sweep it otherwise has to disable.  See the
+ * sweeper edges in the wake_state field comment. */
+#define PYGO_WS_SWEEPING       4
+#define PYGO_WS_SWEEPING_WOKEN 5
 
 /* Per-goroutine CPython thread state snapshot.
  *
@@ -170,15 +179,26 @@ struct pygo_g {
      *              enqueues it at release (so the wake during the
      *              commit->detach window is never lost and never lets a second
      *              hub attach the g's live tstate mid-detach).
+     *   SWEEPING -- an idle hub owns the g's stack for an MADV_DONTNEED idle
+     *              sweep; un-resumable for the madvise's duration (mirrors
+     *              RUNNING but with no tstate attached -- the g is still parked,
+     *              just held).
+     *   SWEEPING_WOKEN -- SWEEPING and a wake arrived; the sweeper enqueues it
+     *              at release, so a wake landing mid-madvise is never lost.
      *
      *   wake_g (any thread):   PARKED -> QUEUED   (winner enqueues + increfs)
      *                          RUNNING -> RUNNING_WOKEN  (remember; no enqueue)
-     *                          QUEUED / RUNNING_WOKEN: a wake is already pending
-     *                              -> drop (no duplicate entry).
+     *                          SWEEPING -> SWEEPING_WOKEN (remember; no enqueue)
+     *                          QUEUED / RUNNING_WOKEN / SWEEPING_WOKEN: a wake is
+     *                              already pending -> drop (no duplicate entry).
      *   hub pull+resume:       QUEUED -> RUNNING  (the entry's holder; the sole
      *                              consumer of that entry, so this never fails).
      *   hub release, parked:   RUNNING -> PARKED, or, if a wake landed in the
      *                              window, RUNNING_WOKEN -> QUEUED (+enqueue).
+     *   sweeper claim/release: PARKED -> SWEEPING (try-claim; loses to any
+     *                              non-PARKED state and skips the g), then after
+     *                              the madvise SWEEPING -> PARKED, or, if a wake
+     *                              landed, SWEEPING_WOKEN -> QUEUED (+enqueue).
      *
      * A fresh g (never parked) starts RUNNING (set at spawn under per-g-tstate);
      * gs from the deque/local FIFO/steal are already RUNNING by this invariant,

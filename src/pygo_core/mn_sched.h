@@ -112,6 +112,17 @@ pygo_sched_t *pygo_mn_current_sched(void);
  * routes them to the deque (if g is fresh) or local FIFO (if yielded). */
 void pygo_mn_wake_g(void *hub_opaque, pygo_g_t *g);
 
+/* Idle-stack-sweep handshake for PYGO_PER_G_TSTATE (no-op-safe to call in
+ * either mode; the sweep caller gates them on per-g-tstate).  try_claim CASes
+ * the g's wake_state PARKED -> SWEEPING and returns 1 if it won exclusive
+ * ownership of the g's stack for an MADV_DONTNEED, 0 if the g was concurrently
+ * woken/owned (skip it).  claim_release ends that ownership: SWEEPING -> PARKED,
+ * or, if a wake landed during the madvise, SWEEPING_WOKEN -> QUEUED and
+ * re-enqueues it onto the global run-queue exactly once (so the deferred wake is
+ * never lost).  See the wake_state field comment in pygo_sched.h. */
+int  pygo_mn_sweep_try_claim(pygo_g_t *g);
+void pygo_mn_sweep_claim_release(pygo_g_t *g);
+
 /* The current hub's per-thread io_uring ring (NULL if not in a hub,
  * or the hub failed to create its ring at startup -- callers should
  * fall back to the global ring path).  Used by pygo_iouring_recv /

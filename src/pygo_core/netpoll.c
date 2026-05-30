@@ -1273,6 +1273,7 @@ int pygo_netpoll_sweep_idle(void *hub_opaque, long long threshold_ns)
     pygo_parker_pool_t *pool = pygo_parker_pool_for_hub(hub_opaque);
     pygo_g_t *batch[PYGO_SWEEP_BATCH];
     int n = 0, i, visited = 0;
+    int per_g = pygo_get_per_g_tstate_mode();
     long long now;
     if (pool == NULL ||
         __atomic_load_n(&pool->lock_inited, __ATOMIC_ACQUIRE) != 2) {
@@ -1337,8 +1338,15 @@ int pygo_netpoll_sweep_idle(void *hub_opaque, long long threshold_ns)
                 __atomic_load_n(&p->commit, __ATOMIC_ACQUIRE)
                     == PYGO_PARK_PARKED &&
                 (now - p->park_ts) >= threshold_ns) {
-                p->reclaimed = 1;
-                batch[n++] = p->g;
+                /* Default mode: this hub is the g's sole resumer, so marking it
+                 * reclaimed and madvising below is race-free.  Per-g-tstate: a
+                 * woken g can be stolen by ANY hub, so claim it exclusively
+                 * (PARKED->SWEEPING) first; if the claim loses (the g is being
+                 * woken/owned) skip it -- never madvise a resumable stack. */
+                if (!per_g || pygo_mn_sweep_try_claim(p->g)) {
+                    p->reclaimed = 1;
+                    batch[n++] = p->g;
+                }
             }
             p = p->next;
             visited++;
@@ -1353,6 +1361,13 @@ int pygo_netpoll_sweep_idle(void *hub_opaque, long long threshold_ns)
          * chunk tail too (the C-stack madvise above never touches it).
          * Same owning-hub safety contract; gated by PYGO_DATASTACK_SWEEP. */
         pygo_sched_madvise_datastack_idle(batch[i]);
+        /* Per-g-tstate: release the exclusive sweep claim now that this g's
+         * madvise has completed (SWEEPING->PARKED, or re-enqueue a wake that
+         * landed mid-madvise).  Per-g release bounds a woken g's extra latency
+         * to its own single madvise, not the whole batch. */
+        if (per_g) {
+            pygo_mn_sweep_claim_release(batch[i]);
+        }
     }
     return n;
 }

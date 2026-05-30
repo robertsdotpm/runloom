@@ -525,7 +525,11 @@ static PYGO_THREAD_RET pygo_hub_main(void *arg)
                         on = (e != NULL && *e == '0') ? 0 : 1;
                         __atomic_store_n(&sweep_on, on, __ATOMIC_RELAXED);
                     }
-                    if (on && parked > 0 && !pygo_get_per_g_tstate_mode()) {
+                    /* Runs in BOTH modes now: under per-g-tstate the sweep's
+                     * sole-resumer safety is supplied by the per-g claim
+                     * handshake (PARKED->SWEEPING) inside pygo_netpoll_sweep_idle,
+                     * so a stolen wake can't resume a g into a stack mid-madvise. */
+                    if (on && parked > 0) {
                         double now_s = pygo_sched_monotonic_seconds();
                         double interval_s = (double)sweep_thresh_ns / 2e9;
                         if (now_s - h->last_sweep_s >= interval_s) {
@@ -955,12 +959,56 @@ void pygo_mn_wake_g(void *hub_opaque, pygo_g_t *g)
                                                 __ATOMIC_ACQUIRE)) {
                     return;   /* owner will enqueue at release */
                 }
+            } else if (st == PYGO_WS_SWEEPING) {
+                if (__atomic_compare_exchange_n(&g->wake_state, &st,
+                                                PYGO_WS_SWEEPING_WOKEN, 0,
+                                                __ATOMIC_ACQ_REL,
+                                                __ATOMIC_ACQUIRE)) {
+                    return;   /* sweeper will enqueue at release */
+                }
             } else {
-                return;   /* QUEUED or RUNNING_WOKEN: a wake already pending */
+                return;   /* QUEUED / RUNNING_WOKEN / SWEEPING_WOKEN: pending */
             }
         }
     }
     pygo_mn_hub_submit((pygo_hub_t *)hub_opaque, g);
+}
+
+/* Idle-stack-sweep handshake (PYGO_PER_G_TSTATE).  An idle hub about to
+ * MADV_DONTNEED a long-parked g's below-SP stack pages must hold the g
+ * un-resumable for the madvise's duration, or another hub could pull a wake and
+ * resume the g into pages the kernel is concurrently zeroing.  try_claim CASes
+ * PARKED -> SWEEPING (the same exclusivity QUEUED->RUNNING gives a resumer); it
+ * loses to any non-PARKED state (woken/owned) and the sweeper skips that g.
+ * The held g cannot run, complete, or be freed, so its pointer stays valid
+ * across the unlocked madvise -- restoring the exact liveness the default
+ * (sole-resumer) mode relies on. */
+int pygo_mn_sweep_try_claim(pygo_g_t *g)
+{
+    int st = PYGO_WS_PARKED;
+    return __atomic_compare_exchange_n(&g->wake_state, &st, PYGO_WS_SWEEPING,
+                                       0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+}
+
+/* End a sweep claim after the madvise.  SWEEPING -> PARKED if no wake landed.
+ * If a wake landed during the madvise the state is SWEEPING_WOKEN (wake_g
+ * remembered it without enqueueing); convert it to QUEUED and push exactly once
+ * -- the sweeper is the sole "winner" of that deferred wake, mirroring the
+ * RUNNING_WOKEN -> QUEUED release, so the wake is never lost and never
+ * duplicated. */
+void pygo_mn_sweep_claim_release(pygo_g_t *g)
+{
+    int st = PYGO_WS_SWEEPING;
+    if (__atomic_compare_exchange_n(&g->wake_state, &st, PYGO_WS_PARKED, 0,
+                                    __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+        return;   /* clean release; no wake during the madvise */
+    }
+    /* The only state try_claim could leave that isn't SWEEPING is
+     * SWEEPING_WOKEN (no other actor touches a SWEEPING g except wake_g, which
+     * only flips it to SWEEPING_WOKEN).  Re-enqueue the deferred wake. */
+    __atomic_store_n(&g->wake_state, PYGO_WS_QUEUED, __ATOMIC_RELEASE);
+    pygo_g_incref(g);   /* queue ref, dropped when consumed */
+    pygo_mn_global_runq_push(g);
 }
 
 int pygo_mn_yield_current(void)
