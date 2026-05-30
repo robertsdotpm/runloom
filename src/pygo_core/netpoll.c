@@ -44,6 +44,8 @@
 
 #if defined(PYGO_HAVE_EPOLL)
 #  include <sys/epoll.h>
+#  include <sys/eventfd.h>
+#  include <stdint.h>
 #  include <unistd.h>
 #elif defined(PYGO_HAVE_KQUEUE)
 #  include <sys/event.h>
@@ -905,6 +907,14 @@ static int pygo_epoll_fd = -1;
 /* Eventfd registered by io_uring.c for the GLOBAL ring; events on this
  * fd are dispatched to pygo_iouring_drain().  -1 = none registered. */
 static int pygo_iouring_eventfd_in_epoll = -1;
+/* Generic cross-thread pump interrupt.  An eventfd in the shared epoll
+ * whose only job is to break an idle epoll_wait from another thread, so a
+ * waker that re-queues a goroutine via the scheduler's lists (not via a
+ * netpoll fd event) can still wake a scheduler blocked in the pump.  Used
+ * by the blocking-offload pool to wake the single-thread scheduler, which
+ * (unlike the busy-polling hubs) blocks in epoll_wait with no timeout.
+ * On fire the pump just drains it -- it carries no parker. */
+static int pygo_pump_wake_fd = -1;
 
 /* Per-hub iouring rings registered via pygo_netpoll_add_iouring_ring.
  * The dispatch path matches epoll evs[i].data.fd against the eventfd
@@ -1408,6 +1418,50 @@ int pygo_netpoll_add_iouring_eventfd(int fd)
 #else
     (void)fd;
     return 0;     /* iouring is Linux-only; non-epoll backends never hit this */
+#endif
+}
+
+/* Arm the generic pump-interrupt eventfd (see pygo_pump_wake_fd).  Lazily
+ * created and registered LEVEL-triggered in the shared epoll; idempotent.
+ * Returns 0 if armed (so callers may rely on pygo_netpoll_wake_pump to
+ * wake an idle pump), -1 otherwise (the backend has no such primitive --
+ * callers fall back to not offloading on the single-thread scheduler). */
+int pygo_netpoll_wake_pump_arm(void)
+{
+#if defined(PYGO_HAVE_EPOLL)
+    struct epoll_event ev;
+    int fd;
+    if (pygo_netpoll_init() != 0) return -1;
+    if (pygo_pump_wake_fd >= 0) return 0;
+    fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+    if (fd < 0) return -1;
+    /* Level-triggered, NOT exclusive: the single-thread scheduler is the
+     * only pumper that blocks indefinitely, so there is no thundering
+     * herd; the pump drains it on fire to clear the level. */
+    ev.events  = EPOLLIN;
+    ev.data.fd = fd;
+    if (epoll_ctl(pygo_epoll_fd, EPOLL_CTL_ADD, fd, &ev) < 0 && errno != EEXIST) {
+        close(fd);
+        return -1;
+    }
+    pygo_pump_wake_fd = fd;
+    return 0;
+#else
+    return -1;
+#endif
+}
+
+/* Write the pump-interrupt eventfd to break an idle epoll_wait.  Safe to
+ * call from any thread; a no-op if not armed. */
+void pygo_netpoll_wake_pump(void)
+{
+#if defined(PYGO_HAVE_EPOLL)
+    int fd = __atomic_load_n(&pygo_pump_wake_fd, __ATOMIC_ACQUIRE);
+    if (fd >= 0) {
+        uint64_t one = 1;
+        ssize_t w = write(fd, &one, sizeof one);
+        (void)w;
+    }
 #endif
 }
 
@@ -1987,6 +2041,17 @@ int pygo_netpoll_pump(long long timeout_ns)
                 if (pygo_iouring_eventfd_in_epoll >= 0 &&
                     fd == pygo_iouring_eventfd_in_epoll) {
                     pygo_iouring_drain();
+                    continue;
+                }
+                /* Generic pump-interrupt eventfd: a cross-thread waker
+                 * (blocking-offload pool) poked it only to break this
+                 * epoll_wait.  Drain its counter to clear the level and
+                 * loop -- the re-queued goroutine is already on the
+                 * scheduler's wake_list/ready, picked up by the drain. */
+                if (pygo_pump_wake_fd >= 0 && fd == pygo_pump_wake_fd) {
+                    uint64_t v;
+                    ssize_t r = read(fd, &v, sizeof v);
+                    (void)r;
                     continue;
                 }
                 /* Per-hub iouring rings.  Dispatch to the matching

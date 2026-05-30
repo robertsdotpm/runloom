@@ -1,0 +1,232 @@
+/* pygo_blockpool.c -- blocking-offload thread pool.  See pygo_blockpool.h.
+ *
+ * A bounded set of worker OS threads drain an MPSC job queue (mutex +
+ * condvar).  pygo_blocking_call enqueues one job (allocated on the
+ * caller goroutine's own coroutine stack -- alive across the park),
+ * parks the goroutine, and a worker runs the job and wakes it.
+ *
+ * Waking it integrates with BOTH schedulers exactly like an io_uring
+ * completion does:
+ *   - the worker re-queues the specific goroutine via pygo_mn_wake_g
+ *     (hub) or pygo_sched_wake_safe (single-thread sched);
+ *   - an `inflight` counter keeps the single-thread drain loop from
+ *     exiting or busy-spinning while a job is outstanding (a park_safe'd
+ *     goroutine has no netpoll/iouring footprint of its own);
+ *   - for the single-thread sched -- which, unlike the busy-polling hubs,
+ *     blocks in epoll_wait with no timeout -- the worker also pokes the
+ *     netpoll pump-interrupt eventfd so the otherwise-idle scheduler
+ *     wakes to drain its wake_list.  Hubs busy-poll (~1 ms) so wake_g
+ *     alone suffices there.
+ */
+#if !defined(_WIN32)
+#  define _POSIX_C_SOURCE 200809L
+#  ifndef _GNU_SOURCE
+#    define _GNU_SOURCE
+#  endif
+#endif
+#define PY_SSIZE_T_CLEAN
+#include <Python.h>
+
+#include "plat.h"
+#include "plat_compat.h"
+#include "pygo_blockpool.h"
+#include "pygo_sched.h"
+#include "mn_sched.h"
+#include "netpoll.h"
+#include "coro.h"
+
+#include <stdlib.h>
+#include <string.h>
+
+#define PYGO_BLOCKPOOL_MAX     64
+#define PYGO_BLOCKPOOL_DEFAULT 8
+
+/* One offloaded job.  Lives on the calling goroutine's coroutine stack,
+ * which stays mapped across the park, so no heap alloc is needed. */
+typedef struct pygo_block_job {
+    void *(*fn)(void *);
+    void *arg;
+    void *result;
+    pygo_g_t *g;                  /* the parked goroutine */
+    void *hub;                    /* its hub, or NULL for the single-thread sched */
+    struct pygo_block_job *next;
+} pygo_block_job_t;
+
+static pygo_mutex_t  bp_lock = PYGO_MUTEX_STATIC_INIT;
+static pygo_cond_t   bp_cond;                 /* workers wait here for jobs */
+static pygo_block_job_t *bp_head = NULL;
+static pygo_block_job_t *bp_tail = NULL;
+static int           bp_inited   = 0;         /* 0 = not started, 1 = running */
+static int           bp_failed   = 0;         /* init tried and failed -> run inline */
+static volatile int  bp_stopping = 0;
+static int           bp_n_workers = 0;
+static int           bp_wake_armed = 0;       /* pump-interrupt available (single-thread offload) */
+static volatile long bp_inflight = 0;         /* jobs submitted, not yet completed */
+static pygo_thread_t bp_threads[PYGO_BLOCKPOOL_MAX];
+
+long pygo_blockpool_inflight(void)
+{
+    return __atomic_load_n(&bp_inflight, __ATOMIC_ACQUIRE);
+}
+
+static PYGO_THREAD_RET pygo_blockpool_worker(void *arg)
+{
+    (void)arg;
+    for (;;) {
+        pygo_block_job_t *job;
+        pygo_mutex_lock(&bp_lock);
+        while (bp_head == NULL && !bp_stopping) {
+            pygo_cond_wait(&bp_cond, &bp_lock);
+        }
+        if (bp_head == NULL) {            /* woken only to stop */
+            pygo_mutex_unlock(&bp_lock);
+            break;
+        }
+        job = bp_head;
+        bp_head = job->next;
+        if (bp_head == NULL) bp_tail = NULL;
+        pygo_mutex_unlock(&bp_lock);
+
+        /* Run the blocking work off the hub.  No GIL is held here. */
+        job->result = job->fn(job->arg);
+
+        /* Re-queue the goroutine, then (single-thread only) kick the
+         * pump so an idle scheduler wakes.  Re-queue BEFORE decrementing
+         * inflight so the drain loop, which stays alive while inflight>0,
+         * sees the goroutine on its wake_list the moment inflight hits 0.
+         * After the wake the worker must not touch the job again -- the
+         * resumed goroutine owns and frees it. */
+        if (job->hub != NULL) {
+            pygo_mn_wake_g(job->hub, job->g);
+        } else {
+            pygo_sched_wake_safe(job->g);
+            pygo_netpoll_wake_pump();
+        }
+        __atomic_sub_fetch(&bp_inflight, 1, __ATOMIC_ACQ_REL);
+    }
+    PYGO_THREAD_RETURN((void *)0);
+}
+
+int pygo_blockpool_init(int n_workers)
+{
+    int i, started;
+
+    /* Fast path: already up, or a prior attempt failed (don't retry). */
+    if (__atomic_load_n(&bp_inited, __ATOMIC_ACQUIRE)) return 0;
+    if (__atomic_load_n(&bp_failed, __ATOMIC_ACQUIRE)) return -1;
+
+    pygo_mutex_lock(&bp_lock);
+    if (bp_inited) { pygo_mutex_unlock(&bp_lock); return 0; }
+    if (bp_failed) { pygo_mutex_unlock(&bp_lock); return -1; }
+
+    if (n_workers <= 0) {
+        const char *e = getenv("PYGO_BLOCKPOOL_WORKERS");
+        n_workers = (e != NULL) ? atoi(e) : PYGO_BLOCKPOOL_DEFAULT;
+        if (n_workers <= 0) n_workers = PYGO_BLOCKPOOL_DEFAULT;
+    }
+    if (n_workers > PYGO_BLOCKPOOL_MAX) n_workers = PYGO_BLOCKPOOL_MAX;
+
+    if (pygo_cond_init(&bp_cond) != 0) {
+        __atomic_store_n(&bp_failed, 1, __ATOMIC_RELEASE);
+        pygo_mutex_unlock(&bp_lock);
+        return -1;
+    }
+    bp_stopping = 0;
+    bp_head = bp_tail = NULL;
+    /* Arm the pump interrupt so single-thread-scheduler offloads can wake
+     * an idle pump.  Best-effort: if the backend has no such primitive
+     * (non-epoll), single-thread callers fall back to inline below. */
+    bp_wake_armed = (pygo_netpoll_wake_pump_arm() == 0);
+    started = 0;
+    for (i = 0; i < n_workers; i++) {
+        if (pygo_thread_create(&bp_threads[i], pygo_blockpool_worker,
+                               NULL) != 0) {
+            break;
+        }
+        started++;
+    }
+    if (started == 0) {
+        pygo_cond_destroy(&bp_cond);
+        __atomic_store_n(&bp_failed, 1, __ATOMIC_RELEASE);
+        pygo_mutex_unlock(&bp_lock);
+        return -1;
+    }
+    bp_n_workers = started;
+    __atomic_store_n(&bp_inited, 1, __ATOMIC_RELEASE);
+    pygo_mutex_unlock(&bp_lock);
+    return 0;
+}
+
+void pygo_blockpool_fini(void)
+{
+    int i, n;
+    pygo_mutex_lock(&bp_lock);
+    if (!bp_inited) { pygo_mutex_unlock(&bp_lock); return; }
+    bp_stopping = 1;
+    n = bp_n_workers;
+    pygo_cond_broadcast(&bp_cond);
+    pygo_mutex_unlock(&bp_lock);
+
+    for (i = 0; i < n; i++) pygo_thread_join(bp_threads[i]);
+
+    pygo_mutex_lock(&bp_lock);
+    pygo_cond_destroy(&bp_cond);
+    bp_inited = 0;
+    bp_n_workers = 0;
+    bp_stopping = 0;
+    bp_head = bp_tail = NULL;
+    pygo_mutex_unlock(&bp_lock);
+}
+
+void *pygo_blocking_call(void *(*fn)(void *), void *arg)
+{
+    void *hub = pygo_mn_current_hub_opaque();
+    pygo_g_t *g;
+    pygo_block_job_t job;
+
+    if (hub != NULL) {
+        g = pygo_mn_tls_current_g();
+    } else {
+        pygo_sched_t *s = pygo_sched_get();
+        g = (s != NULL) ? s->current : NULL;
+    }
+    /* Must be inside a goroutine to park.  Also fall back to inline when
+     * the pool can't start, or -- for the single-thread sched only --
+     * when the pump interrupt isn't available (no way to wake an idle
+     * pump on this backend yet).  Hubs busy-poll, so they never need it. */
+    if (g == NULL || pygo_blockpool_init(0) != 0 ||
+        (hub == NULL && !bp_wake_armed)) {
+        return fn(arg);
+    }
+
+    job.fn     = fn;
+    job.arg    = arg;
+    job.result = NULL;
+    job.g      = g;
+    job.hub    = hub;
+    job.next   = NULL;
+
+    /* Count the job as outstanding BEFORE enqueueing so the single-thread
+     * drain loop never observes a transient "no work" between our enqueue
+     * and the worker re-queueing us, which would exit the loop early. */
+    __atomic_add_fetch(&bp_inflight, 1, __ATOMIC_ACQ_REL);
+
+    pygo_mutex_lock(&bp_lock);
+    if (bp_tail != NULL) bp_tail->next = &job;
+    else                 bp_head = &job;
+    bp_tail = &job;
+    pygo_cond_signal(&bp_cond);
+    pygo_mutex_unlock(&bp_lock);
+
+    /* Park until the worker wakes us.  Hub: snap the per-g tstate and
+     * yield (the wake routes back through the hub queue / global runq).
+     * Single-thread: the race-safe park_safe/wake_safe handshake. */
+    if (hub != NULL) {
+        pygo_sched_park_current();
+        pygo_coro_yield();
+    } else {
+        pygo_sched_park_safe();
+    }
+
+    return job.result;
+}

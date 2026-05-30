@@ -58,6 +58,7 @@
 #include "cldeque.h"
 #include "pygo_diag.h"
 #include "pygo_gstate.h"
+#include "pygo_blockpool.h"
 
 #include <errno.h>
 #include <stdlib.h>
@@ -983,7 +984,8 @@ int pygo_mn_yield_current(void)
     if (__builtin_expect(pygo_sched_ready_empty(&h->sched)
                          && pygo_cldeque_size(&h->deque) == 0
                          && h->sched.sleep_size == 0
-                         && pygo_netpoll_parked_count() == 0, 1)) {
+                         && pygo_netpoll_parked_count() == 0
+                         && pygo_blockpool_inflight() == 0, 1)) {
         return 1;
     }
     pygo_sched_ready_push(&h->sched, g);

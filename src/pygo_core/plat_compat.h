@@ -129,6 +129,38 @@ PYGO_INLINE int pygo_thread_join(pygo_thread_t t) {
 #endif
 
 /* ============================================================ */
+/* condition variable (pairs with pygo_mutex_t)                 */
+/* ============================================================ */
+/* Used by the blocking-offload pool's worker threads to sleep on an
+ * empty job queue.  Windows CONDITION_VARIABLE is Vista+; that's fine --
+ * the M:N / blocking-pool machinery only matters on free-threaded
+ * Python, which is far newer than XP.  Like pygo_mutex_t there is no
+ * static initialiser on Windows, so callers must pygo_cond_init() once. */
+#if defined(PYGO_OS_WINDOWS)
+typedef CONDITION_VARIABLE pygo_cond_t;
+PYGO_INLINE int  pygo_cond_init(pygo_cond_t *c) {
+    InitializeConditionVariable(c); return 0;
+}
+PYGO_INLINE void pygo_cond_destroy(pygo_cond_t *c) { (void)c; }
+PYGO_INLINE void pygo_cond_wait(pygo_cond_t *c, pygo_mutex_t *m) {
+    SleepConditionVariableCS(c, m, INFINITE);
+}
+PYGO_INLINE void pygo_cond_signal(pygo_cond_t *c)    { WakeConditionVariable(c); }
+PYGO_INLINE void pygo_cond_broadcast(pygo_cond_t *c) { WakeAllConditionVariable(c); }
+#else
+typedef pthread_cond_t pygo_cond_t;
+PYGO_INLINE int  pygo_cond_init(pygo_cond_t *c) {
+    return pthread_cond_init(c, NULL);
+}
+PYGO_INLINE void pygo_cond_destroy(pygo_cond_t *c) { pthread_cond_destroy(c); }
+PYGO_INLINE void pygo_cond_wait(pygo_cond_t *c, pygo_mutex_t *m) {
+    pthread_cond_wait(c, m);
+}
+PYGO_INLINE void pygo_cond_signal(pygo_cond_t *c)    { pthread_cond_signal(c); }
+PYGO_INLINE void pygo_cond_broadcast(pygo_cond_t *c) { pthread_cond_broadcast(c); }
+#endif
+
+/* ============================================================ */
 /* monotonic clock                                              */
 /* ============================================================ */
 #if defined(PYGO_OS_WINDOWS)

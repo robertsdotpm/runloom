@@ -88,6 +88,14 @@ int pygo_netpoll_add_iouring_ring(int eventfd_fd,
                                   struct pygo_iouring_ring *ring);
 void pygo_netpoll_remove_iouring_ring(int eventfd_fd);
 
+/* Generic cross-thread pump interrupt.  Arm once (idempotent); returns 0
+ * if the backend supports it (epoll today), -1 otherwise.  Any thread may
+ * then call pygo_netpoll_wake_pump() to break an idle epoll_wait so a
+ * scheduler blocked in the pump re-checks its ready/wake lists.  Used by
+ * the blocking-offload pool to wake the single-thread scheduler. */
+int  pygo_netpoll_wake_pump_arm(void);
+void pygo_netpoll_wake_pump(void);
+
 /* Does any registered iouring source (global or per-hub) have an
  * in-flight SQE?  Hub_main uses this to decide pump vs sleep when no
  * fd-parks are active. */

@@ -31,6 +31,7 @@
 #include "mn_sched.h"
 #include "netpoll.h"
 #include "io_uring.h"
+#include "pygo_blockpool.h"
 #include "pygo_diag.h"
 #include "pygo_gstate.h"
 
@@ -1100,7 +1101,8 @@ void pygo_sched_yield(pygo_sched_t *s)
      * baseline from ~230 ns to <10 ns. */
     if (__builtin_expect(pygo_sched_ready_empty(s)
                          && s->sleep_size == 0
-                         && pygo_netpoll_parked_count() == 0, 1)) {
+                         && pygo_netpoll_parked_count() == 0
+                         && pygo_blockpool_inflight() == 0, 1)) {
         return;
     }
     pygo_ready_push(s, g);
@@ -1316,6 +1318,7 @@ Py_ssize_t pygo_sched_drain(pygo_sched_t *s)
                             s->sleep_size > 0 ||
                             pygo_netpoll_parked_count() > 0 ||
                             pygo_iouring_inflight() > 0 ||
+                            pygo_blockpool_inflight() > 0 ||
                             __atomic_load_n(&s->wake_list_head,
                                             __ATOMIC_ACQUIRE) != NULL)) {
         double now = pygo_sched_monotonic_seconds();
@@ -1338,7 +1341,7 @@ Py_ssize_t pygo_sched_drain(pygo_sched_t *s)
          * the ready queue. */
         if (pygo_sched_ready_empty(s) &&
             (pygo_netpoll_parked_count() > 0 || s->sleep_size > 0 ||
-             pygo_iouring_inflight() > 0)) {
+             pygo_iouring_inflight() > 0 || pygo_blockpool_inflight() > 0)) {
             long long timeout_ns = -1;
             if (s->sleep_size > 0) {
                 double gap = pygo_sleep_peek(s)->wake_at - now;
@@ -1347,10 +1350,13 @@ Py_ssize_t pygo_sched_drain(pygo_sched_t *s)
                 timeout_ns = (long long)(gap * 1e9);
             }
             /* iouring goroutines wake when the pump observes a CQE on
-             * the registered eventfd, so the pump call covers both
-             * netpoll parkers and iouring waiters in one syscall. */
+             * the registered eventfd; blocking-pool goroutines wake when
+             * a worker pokes the pump-interrupt eventfd -- both ride the
+             * netpoll pump, so the pump call covers netpoll parkers,
+             * iouring waiters AND blocking-pool waiters in one syscall. */
             if (pygo_netpoll_parked_count() > 0 ||
-                pygo_iouring_inflight() > 0) {
+                pygo_iouring_inflight() > 0 ||
+                pygo_blockpool_inflight() > 0) {
                 pygo_netpoll_pump(timeout_ns);
             } else if (timeout_ns > 0) {
                 /* No fds parked, just a sleep heap timer.  Cap at 50 ms

@@ -28,6 +28,9 @@
 #include "plat_compat.h"
 #include "netpoll.h"
 #include "io_uring.h"
+#include "pygo_blockpool.h"
+#include "mn_sched.h"
+#include "pygo_sched.h"
 
 #include <errno.h>
 #include <string.h>
@@ -220,6 +223,24 @@ static int pygo_is_intr(void)
  * Returns 0 on success and fills `*storage` + `*addrlen` + `*family`.
  * On error sets a Python exception and returns -1.
  * ============================================================ */
+/* getaddrinfo offloaded to the blocking pool.  Job lives on the
+ * resolving goroutine's coroutine stack (alive across the park); the
+ * worker runs getaddrinfo with no GIL. */
+typedef struct {
+    const char *host;
+    const char *portbuf;
+    const struct addrinfo *hints;
+    struct addrinfo *res;
+    int rc;
+} pygo_resolve_job_t;
+
+static void *pygo_resolve_worker(void *p)
+{
+    pygo_resolve_job_t *j = (pygo_resolve_job_t *)p;
+    j->rc = getaddrinfo(j->host, j->portbuf, j->hints, &j->res);
+    return NULL;
+}
+
 static int pygo_resolve(const char *host, int port, int want_passive,
                         struct sockaddr_storage *storage,
                         socklen_t *addrlen, int *family)
@@ -227,6 +248,8 @@ static int pygo_resolve(const char *host, int port, int want_passive,
     struct addrinfo hints, *res = NULL, *p;
     char portbuf[16];
     int rc;
+    pygo_sched_t *sched;
+    int in_goroutine;
 
     memset(&hints, 0, sizeof(hints));
     hints.ai_family   = AF_UNSPEC;
@@ -238,9 +261,30 @@ static int pygo_resolve(const char *host, int port, int want_passive,
 
     snprintf(portbuf, sizeof(portbuf), "%d", port);
 
-    Py_BEGIN_ALLOW_THREADS
-    rc = getaddrinfo(host, portbuf, &hints, &res);
-    Py_END_ALLOW_THREADS
+    /* getaddrinfo is a non-preemptible blocking C call.  If we are
+     * running inside a goroutine, offload it to the blocking pool and
+     * park -- otherwise it would wedge the goroutine's hub (or the
+     * single-thread scheduler), stranding everything queued behind it.
+     * The worker runs getaddrinfo with no GIL, so we must NOT bracket
+     * the offload in Py_BEGIN_ALLOW_THREADS (you cannot yield a
+     * coroutine across that macro pair).  Outside a goroutine there is
+     * nothing to park, so fall back to the classic inline lookup with
+     * the GIL released. */
+    sched = pygo_sched_get();
+    in_goroutine = (pygo_mn_current_hub_opaque() != NULL) ||
+                   (sched != NULL && sched->current != NULL);
+    if (in_goroutine) {
+        pygo_resolve_job_t job;
+        job.host = host; job.portbuf = portbuf; job.hints = &hints;
+        job.res = NULL;  job.rc = 0;
+        pygo_blocking_call(pygo_resolve_worker, &job);
+        rc  = job.rc;
+        res = job.res;
+    } else {
+        Py_BEGIN_ALLOW_THREADS
+        rc = getaddrinfo(host, portbuf, &hints, &res);
+        Py_END_ALLOW_THREADS
+    }
     if (rc != 0 || res == NULL) {
         PyErr_Format(PyExc_OSError, "getaddrinfo: %s",
                      gai_strerror(rc));

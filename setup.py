@@ -160,6 +160,7 @@ def detect_sources():
         os.path.join(SRC_C, "chan.c"),
         os.path.join(SRC_C, "pygo_diag.c"),
         os.path.join(SRC_C, "pygo_gstate.c"),
+        os.path.join(SRC_C, "pygo_blockpool.c"),
     ]
     # Windows IOCP-AFD source -- compiled but no-op on non-Windows
     # because the whole file is wrapped in #if defined(PYGO_OS_WINDOWS).
