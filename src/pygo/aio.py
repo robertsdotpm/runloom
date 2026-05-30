@@ -51,6 +51,7 @@ import asyncio
 import errno as _errno
 import socket as _socket
 import sys
+import threading as _threading
 import time as _time
 
 import pygo_core
@@ -495,12 +496,37 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
         self._readers = {}
         self._writers = {}
         self._exception_handler = None
+        # Real asyncio loops (BaseEventLoop) expose these; stdlib
+        # Future/Task/Timeout machinery and many libraries read them
+        # directly (e.g. loop._thread_id, loop._debug).  AbstractEventLoop
+        # does not provide them, so add them for compat.  We deliberately
+        # do NOT enforce thread affinity (pygo is M:N: callbacks may run
+        # on any hub thread), so _thread_id exists purely so attribute
+        # reads + asyncio's early-return thread checks succeed.
+        self._thread_id = None
+        self._debug = False
+        try:
+            self._clock_resolution = _time.get_clock_info("monotonic").resolution
+        except Exception:
+            self._clock_resolution = 1e-6
 
     # ---- state ----
     def is_running(self):  return self._running
     def is_closed(self):   return self._closed
-    def get_debug(self):   return False
+    def get_debug(self):   return self._debug
+    def set_debug(self, enabled):  self._debug = bool(enabled)
     def close(self):       self._closed = True
+
+    def _check_closed(self):
+        if self._closed:
+            raise RuntimeError("Event loop is closed")
+
+    def _check_thread(self):
+        # No-op: pygo is M:N, callbacks legitimately run on any hub
+        # thread, so enforcing single-thread affinity (as BaseEventLoop
+        # does) would raise spurious "non-thread-safe" errors.  The
+        # attribute exists (see __init__) for code that reads it.
+        return
 
     def time(self):
         return _time.monotonic()
@@ -787,11 +813,13 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
         # goroutine runs them on a small stack -- see prewarm_stdlib.
         _runtime.prewarm_stdlib()
         self._running = True
+        self._thread_id = _threading.get_ident()
         asyncio._set_running_loop(self)
         try:
             pygo_core.run()
         finally:
             self._running = False
+            self._thread_id = None
             asyncio._set_running_loop(None)
             # After the main future completes, cancel any outstanding
             # background tasks.  Without this, paio.run-spawned tasks
@@ -839,11 +867,13 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
         # goroutine runs them on a small stack -- see prewarm_stdlib.
         _runtime.prewarm_stdlib()
         self._running = True
+        self._thread_id = _threading.get_ident()
         asyncio._set_running_loop(self)
         try:
             pygo_core.run()
         finally:
             self._running = False
+            self._thread_id = None
             asyncio._set_running_loop(None)
 
     def stop(self):
