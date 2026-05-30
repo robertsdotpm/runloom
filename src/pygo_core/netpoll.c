@@ -1739,7 +1739,10 @@ int pygo_netpoll_wait_fd(int fd, int events, long long timeout_ns)
         if (!__atomic_compare_exchange_n(&park->commit, &expc,
                                          PYGO_PARK_PARKED, 0,
                                          __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
-            /* expc == WOKEN: claimed by a pump.  ready_mask is set. */
+            /* expc == WOKEN: claimed by a pump.  ready_mask is set.  The g
+             * never committed to parking, so it keeps running; its wake_state
+             * stays RUNNING (the pump claimed an ARMED parker and so did NOT
+             * call wake_g -- nothing to undo). */
             pygo_mutex_lock(&pool->lock);
             pygo_parker_unlink(pool, park);   /* no-op if pump unlinked */
             pygo_mutex_unlock(&pool->lock);

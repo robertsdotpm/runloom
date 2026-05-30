@@ -1,4 +1,4 @@
-=== stall test 2026-05-30T13:18:19+10:00 ===
+=== stall test 2026-05-30T14:57:55+10:00 ===
 --- build ---
 test_stall_steal.c: In function ‘main’:
 test_stall_steal.c:125:11: warning: ignoring return value of ‘write’ declared with attribute ‘warn_unused_result’ [-Wunused-result]
@@ -16,13 +16,13 @@ test_stall_steal.c:82:11: warning: ignoring return value of ‘read’ declared 
    82 |     (void)read(staller_efd, &v, sizeof v);
       |           ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 build rc=0
--rwxrwxr-x 1 x x 26400 May 30 13:18 test_stall_steal
+-rwxrwxr-x 1 x x 26400 May 30 14:57 test_stall_steal
 --- RUN default mode (PYGO_PER_G_TSTATE=0) ---
-per_g_tstate=0 N=64 hubs=2 stall=2000ms window=400ms responded=33/64
+per_g_tstate=0 N=64 hubs=2 stall=2000ms window=400ms responded=32/64
 FAIL: stalled-hub work stranded behind the blocked hub
 exit rc=1
 --- RUN per-g-tstate ON (PYGO_PER_G_TSTATE=1) -- expect RED today ---
-per_g_tstate=1 N=64 hubs=2 stall=2000ms window=400ms responded=31/64
-FAIL: stalled-hub work stranded behind the blocked hub
-exit rc=1
-=== stall test end 2026-05-30T13:18:21+10:00 ===
+per_g_tstate=1 N=64 hubs=2 stall=2000ms window=400ms responded=64/64
+PASS: stalled-hub work recovered by another hub
+exit rc=0
+=== stall test end 2026-05-30T14:57:56+10:00 ===
