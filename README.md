@@ -67,7 +67,8 @@ All measured; figures label whether the handler is Python or C.
   gets **0× here — it cannot use a second core**.
 - **Network throughput** (C echo handler, amortized over many conns): **112 K
   (8 hubs) → 193 K (32 hubs) req/s in one process**; ~177 K at 100 K live
-  connections. Single-connection sequential round-trip latency ~**116 µs**.
+  connections. Single-core round-trip latency ~**44 µs** (C `TCPConn`) /
+  ~**82 µs** (Python handler) — vs Go's ~37 µs; see Limitations.
 
 The honest ceiling: pygo does **not** make Python faster per core (~80 K
 pure-Python ops/s/core is a CPython constant). It lets one process **hit that
@@ -160,12 +161,16 @@ Read this before betting on pygo — it's where the project actually is.
 - **No per-core speedup.** pygo saturates all cores from one process but can't
   raise CPython's ~80 K ops/s/core. CPU-bound pure-Python work is still
   CPython-slow per thread.
-- **Go is faster on raw network I/O.** A round-trip is ~49 µs loopback (C
-  `TCPConn`, epoll); Go's `net` is lower. The cost is the per-syscall path plus,
+- **Go is faster on raw network I/O — modestly for C handlers, ~2× for
+  Python.** Identical single-core loopback echo bench (8-byte round-trips),
+  measured: **Go ~37 µs/RT · pygo C `TCPConn` ~44 µs (~20% slower) · pygo
+  Python handler ~82 µs (~2.2× slower)**. The gap is the per-syscall path plus,
   for Python handlers, interpreter overhead on every `recv`/`send` — **not** the
-  scheduler, which is Go-class (~47 ns/yield). An opt-in io_uring path
-  (`PYGO_TCPCONN_IOURING=1`) narrows it at high fan-out on Linux; matching Go
-  per-operation in Python isn't achievable.
+  scheduler (~47 ns/yield, Go-class). Across all cores in one process Go reaches
+  ~300–400 K req/s on this bench vs pygo's ~110–190 K (M:N hubs). An opt-in
+  io_uring path (`PYGO_TCPCONN_IOURING=1`) narrows the syscall side at high
+  fan-out on Linux; matching Go per-operation with a Python handler isn't
+  achievable.
 - **Preemption only fires at Python bytecode boundaries.** A goroutine inside a
   long C call (`numpy`, `hashlib`) or a tight pure-C loop is **not**
   preemptible and will hold its hub until it returns — same limitation Go has
