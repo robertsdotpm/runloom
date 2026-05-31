@@ -48,6 +48,7 @@ A user can also opt into the bridge per-call:
     loop.run_until_complete(main())
 """
 import asyncio
+import contextvars as _contextvars
 import errno as _errno
 import os as _os
 import socket as _socket
@@ -554,7 +555,10 @@ class _PygoFutureMixin(object):
     def add_done_callback(self, callback, *, context=None):
         if self._pgstate != _PENDING:
             try:
-                callback(self)
+                if context is None:
+                    callback(self)
+                else:
+                    context.run(callback, self)
             except BaseException as e:
                 self._report_exc(e)
         else:
@@ -642,7 +646,7 @@ class PygoTask(_PygoFutureMixin, asyncio.Task):
     C Future state so asyncio.Task.__del__ doesn't warn "destroyed but pending".
     """
 
-    def __init__(self, coro, *, loop=None, name=None):
+    def __init__(self, coro, *, loop=None, name=None, context=None):
         if loop is None:
             loop = asyncio.get_event_loop()
         # Future half only -- gives a valid _loop + _asyncio_future_blocking and
@@ -651,6 +655,14 @@ class PygoTask(_PygoFutureMixin, asyncio.Task):
         self._asyncio_future_blocking = False
         self._pg_future_init()
         self._pgcoro = coro
+        # Per-task contextvars Context, exactly like stock asyncio.Task: capture
+        # a copy of the CURRENT context at creation (or honour an explicit
+        # context=, as anyio's portal passes through create_task) and run every
+        # coro step inside it.  Without this, contextvars set in a parent never
+        # reach the task -- breaking request-id/OTel/structlog middleware and
+        # any contextvar read from a threadpool-dispatched sync endpoint.
+        self._pgcontext = context if context is not None \
+            else _contextvars.copy_context()
         self._pgname = name or ("Task-%d" % next(_TASK_NAME_COUNTER))
         # _self_g: the driver's G handle (done-callbacks / cancel wake it).
         self._self_g = None
@@ -697,6 +709,9 @@ class PygoTask(_PygoFutureMixin, asyncio.Task):
     # ---- asyncio.Task surface ----
     def get_coro(self):
         return self._pgcoro
+
+    def get_context(self):
+        return self._pgcontext
 
     def get_name(self):
         return self._pgname
@@ -803,9 +818,9 @@ class PygoTask(_PygoFutureMixin, asyncio.Task):
                         self._pgmustcancel = False
                     if throw_exc is not None:
                         e, throw_exc = throw_exc, None
-                        yielded = coro.throw(e)
+                        yielded = self._pgcontext.run(coro.throw, e)
                     else:
-                        yielded = coro.send(send_value)
+                        yielded = self._pgcontext.run(coro.send, send_value)
                 except StopIteration as si:
                     if not self.done():
                         self.set_result(si.value)
@@ -1004,7 +1019,7 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
     # ---- task / future ----
     def create_task(self, coro, *, name=None, context=None):
         if self._can_spawn_here():
-            return PygoTask(coro, loop=self, name=name)
+            return PygoTask(coro, loop=self, name=name, context=context)
         # Foreign thread: PygoTask.__init__ spawns a goroutine, which would land
         # on the CALLING thread's sched (never drained by this loop).  Marshal
         # the creation onto the loop's own thread via its thread-safe queue and
@@ -1013,7 +1028,7 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
         ev = _threading.Event()
         def _mk():
             try:
-                box["t"] = PygoTask(coro, loop=self, name=name)
+                box["t"] = PygoTask(coro, loop=self, name=name, context=context)
             except BaseException as e:    # pragma: no cover - defensive
                 box["e"] = e
             finally:
@@ -1032,12 +1047,16 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
         # Off the driver thread, go() would race the ready ring; route through
         # the thread-safe queue (the driver's keepalive runs it).
         if not self._can_spawn_here():
-            return self.call_soon_threadsafe(callback, *args)
-        handle = _Handle(callback, args, self)
+            return self.call_soon_threadsafe(callback, *args, context=context)
+        handle = _Handle(callback, args, self, context)
         def runner():
             if not handle._cancelled:
                 try:
-                    callback(*args)
+                    # Run in the Handle's contextvars Context (captured at
+                    # construction, or the explicit context=), like stock asyncio
+                    # -- so a callback that does create_task/contextvar reads sees
+                    # the context active when call_soon was invoked.
+                    handle._context.run(callback, *args)
                 except BaseException as e:
                     self.call_exception_handler({"message": "call_soon callback", "exception": e})
         # asyncio's done-callbacks (gather, wait_for) generally don't
@@ -1053,7 +1072,11 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
         # lock; the keepalive goroutine on the loop thread drains and runs it.
         # We do NOT pygo_core.go() here -- from a foreign thread that would
         # spawn onto that thread's own (never-drained) scheduler.
-        handle = _Handle(callback, args, self)
+        # _Handle captures copy_context() HERE on the calling thread (or honours
+        # context=), so a contextvar set by the caller propagates to the drained
+        # callback -- this is how anyio's portal carries the caller-thread
+        # context into a run_coroutine_threadsafe-spawned task.
+        handle = _Handle(callback, args, self, context)
         with self._ts_lock:
             self._ts_queue.append(handle)
         return handle
@@ -1069,7 +1092,7 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
             if handle._cancelled:
                 continue
             try:
-                handle._callback(*handle._args)
+                handle._context.run(handle._callback, *handle._args)
             except BaseException as e:
                 self.call_exception_handler(
                     {"message": "call_soon_threadsafe callback", "exception": e})
@@ -1106,12 +1129,12 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
         pygo_core.go(_keepalive)
 
     def call_later(self, delay, callback, *args, context=None):
-        handle = _TimerHandle(callback, args, self, self.time() + delay)
+        handle = _TimerHandle(callback, args, self, self.time() + delay, context)
         def runner():
             pygo_core.sched_sleep(delay)
             if not handle._cancelled:
                 try:
-                    callback(*args)
+                    handle._context.run(callback, *args)
                 except BaseException as e:
                     # Keep this minimal -- printing a traceback from here
                     # can itself recurse if we're near the c_recursion limit.
