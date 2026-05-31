@@ -72,6 +72,58 @@ except ValueError:
     _TASK_STACK = 512 * 1024
 
 
+# ------------------------------------------------------------------
+# Single-driver coordination for CONCURRENT event loops.
+#
+# pygo has ONE global C scheduler (pygo_core.run / pygo_sched_drain), and
+# pygo_core.run swaps the calling OS thread's PyThreadState into each
+# goroutine as it resumes it -- so only ONE OS thread may drain it at a
+# time, and the ready ring (pygo_core.go) is NOT safe to push to from a
+# thread other than the draining one (plain non-atomic head/tail + a
+# possible realloc).  Yet real apps run several asyncio loops on several
+# threads at once -- e.g. aiosmtpd's threaded Controller: a proxy test
+# runs an upstream-server loop AND a proxy-server loop, each in its own
+# thread.  We reconcile that with the single global scheduler by electing
+# ONE "driver" thread that runs pygo_core.run and services EVERY loop's
+# goroutines; the other loops' threads block until their own stop/
+# completion condition holds, their goroutines running on the driver.
+# When the driver's own loop finishes while other loops are still active,
+# the driver role is handed to a waiting loop.
+#
+# A non-driver loop must NEVER touch the ready ring directly (create_task /
+# call_soon / call_later / _spawn_keepalive).  Such work is marshalled onto
+# the driver thread: per-callback work via the loop's call_soon_threadsafe
+# queue (drained by a keepalive goroutine), and one-shot "spawn my root
+# goroutine + keepalive" setups via the global bootstrap queue below, which
+# every keepalive drains on the driver thread.
+# ------------------------------------------------------------------
+_DRIVE_LOCK = _threading.Lock()
+_DRIVE_CV = _threading.Condition(_DRIVE_LOCK)
+# driver: is some thread currently inside pygo_core.run()?
+# driver_tid: that thread's ident (spawn sites check it to stay on-driver).
+# active: how many loops are currently inside a run_*() call.
+_DRIVE = {"driver": False, "driver_tid": None, "active": 0}
+
+# One-shot callables to run ON the driver thread asap (loop bootstraps).
+_BOOTSTRAP_LOCK = _threading.Lock()
+_BOOTSTRAP_QUEUE = []
+
+
+def _drain_bootstrap():
+    """Run queued loop-bootstrap callables.  Called from keepalive
+    goroutines, i.e. always on the driver thread -- the one place where a
+    waiter loop's root goroutine + keepalive can be spawned safely."""
+    while True:
+        with _BOOTSTRAP_LOCK:
+            if not _BOOTSTRAP_QUEUE:
+                return
+            fn = _BOOTSTRAP_QUEUE.pop(0)
+        try:
+            fn()
+        except BaseException as e:
+            sys.stderr.write("[pygo.aio] bootstrap cb: %r\n" % (e,))
+
+
 def _resolve(host, port, family, type_, proto, flags):
     """getaddrinfo via the blocking-offload pool, so DNS doesn't wedge the
     goroutine's hub (it is a non-preemptible blocking C call).  Runs inline
@@ -885,6 +937,9 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
         # sched_stop broke the drain) can never be revived by a later run
         # resetting a shared bool.  None until the first run.
         self._ka_stop_box = None
+        # Set by stop(); observed by the keepalive goroutine (which runs on the
+        # loop thread) to break run_forever()/run_until_complete's pygo_core.run().
+        self._stopping = False
         # Real asyncio loops (BaseEventLoop) expose these; stdlib
         # Future/Task/Timeout machinery and many libraries read them
         # directly (e.g. loop._thread_id, loop._debug).  AbstractEventLoop
@@ -941,13 +996,37 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
 
     # ---- task / future ----
     def create_task(self, coro, *, name=None, context=None):
-        return PygoTask(coro, loop=self, name=name)
+        if self._can_spawn_here():
+            return PygoTask(coro, loop=self, name=name)
+        # Foreign thread while another loop drives: PygoTask.__init__ spawns a
+        # goroutine, which would race the driver's ready ring.  Marshal the
+        # creation onto the driver thread and block for the resulting task
+        # (mirrors asyncio.run_coroutine_threadsafe's intent).
+        box = {}
+        ev = _threading.Event()
+        def _mk():
+            try:
+                box["t"] = PygoTask(coro, loop=self, name=name)
+            except BaseException as e:    # pragma: no cover - defensive
+                box["e"] = e
+            finally:
+                ev.set()
+        with _BOOTSTRAP_LOCK:
+            _BOOTSTRAP_QUEUE.append(_mk)
+        ev.wait()
+        if "e" in box:
+            raise box["e"]
+        return box["t"]
 
     def create_future(self):
         return PygoFuture(loop=self)
 
     # ---- callback scheduling ----
     def call_soon(self, callback, *args, context=None):
+        # Off the driver thread, go() would race the ready ring; route through
+        # the thread-safe queue (the driver's keepalive runs it).
+        if not self._can_spawn_here():
+            return self.call_soon_threadsafe(callback, *args)
         handle = _Handle(callback, args, self)
         def runner():
             if not handle._cancelled:
@@ -1000,15 +1079,33 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
             # would let it return idle) and re-checks the cross-thread wake list
             # each wake.  2ms bounds foreign-wake latency; cheap for a test run.
             # `stop` is this run's private box -- a later run can't revive us.
-            while not stop[0] and not self._closed:
+            while not stop[0] and not self._closed and not self._stopping:
+                # Bootstrap drain runs OTHER loops' setups (spawning their root
+                # goroutine + keepalive) on this driver thread -- the only
+                # thread where pygo_core.go is safe.  Cheap when empty.
+                _drain_bootstrap()
                 self._drain_ts_queue()
                 pygo_core.sched_sleep(0.002)
+            # Drain once more so a stop()-companion callback (e.g. the
+            # task.cancel() loop aiosmtpd queues alongside loop.stop()) runs.
+            _drain_bootstrap()
             self._drain_ts_queue()
+            if self._stopping:
+                # An explicit loop.stop() must unwind run_forever()'s (or a
+                # run_until_complete's) pygo_core.run().  sched_stop() acts on
+                # THIS thread's scheduler, and the keepalive always runs on the
+                # loop thread, so this is the one safe place to call it -- even
+                # when stop() was invoked from a FOREIGN thread and merely
+                # drained onto us via call_soon_threadsafe (exactly how
+                # aiosmtpd's threaded Controller.stop() reaches the loop).
+                try:
+                    pygo_core.sched_stop()
+                except Exception:
+                    pass
         pygo_core.go(_keepalive)
 
     def call_later(self, delay, callback, *args, context=None):
         handle = _TimerHandle(callback, args, self, self.time() + delay)
-        loop_self = self
         def runner():
             pygo_core.sched_sleep(delay)
             if not handle._cancelled:
@@ -1018,7 +1115,12 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
                     # Keep this minimal -- printing a traceback from here
                     # can itself recurse if we're near the c_recursion limit.
                     sys.stderr.write("[pygo.aio] call_later cb: %r\n" % (e,))
-        pygo_core.go(runner)
+        if self._can_spawn_here():
+            pygo_core.go(runner)
+        else:
+            # Off the driver thread: spawn the timer goroutine on the driver.
+            with _BOOTSTRAP_LOCK:
+                _BOOTSTRAP_QUEUE.append(lambda: pygo_core.go(runner))
         return handle
 
     def call_at(self, when, callback, *args, context=None):
@@ -1303,53 +1405,145 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
         self._default_executor = executor
 
     # ---- run loop ----
-    def run_until_complete(self, future):
-        if asyncio.iscoroutine(future):
-            future = self.create_task(future)
-        elif not (isinstance(future, asyncio.Future)
-                  or isinstance(future, PygoFuture)
-                  or asyncio.isfuture(future)):
-            raise TypeError("argument must be a Future or coroutine")
+    # ---- single-driver run machinery (see _DRIVE comment at top) ----
+    def _can_spawn_here(self):
+        """True iff pygo_core.go is safe on the CALLING thread: either no
+        loop is currently draining the global scheduler, or this very thread
+        is the driver.  Off-driver spawns must be marshalled instead."""
+        tid = _DRIVE["driver_tid"]
+        return tid is None or tid == _threading.get_ident()
 
-        # When the user-visible future completes, kick the scheduler
-        # out of its drain loop so we don't block on background tasks
-        # (accept loops, ticker goroutines, etc.) the user didn't
-        # explicitly join.  Matches asyncio.run's semantics.
-        def _stop_on_done(_fut):
-            box = self._ka_stop_box
-            if box is not None:
-                box[0] = True
-            pygo_core.sched_stop()
-        future.add_done_callback(_stop_on_done)
-        # Keepalive: drains call_soon_threadsafe + keeps the scheduler from
-        # returning idle while a goroutine is parked awaiting an external wake.
-        self._spawn_keepalive()
+    def _drive_loop(self, is_done):
+        """Caller has been elected driver: drain the global scheduler until
+        OUR loop's is_done() holds.  Another loop's stop() can break us out of
+        pygo_core.run() early (its keepalive calls sched_stop); while other
+        loops remain active we resume driving on their behalf."""
+        while not is_done():
+            completed = pygo_core.run()
+            if is_done():
+                break
+            with _DRIVE_CV:
+                others = _DRIVE["active"] > 1
+            if not others:
+                # Sole loop and run() returned without our own stop firing:
+                # the scheduler emptied, so there is nothing left to wait on.
+                # (run_until_complete surfaces this as the premature-stop
+                # RuntimeError below; run_forever simply returns.)
+                break
+            if completed == 0:
+                # Avoid a hot spin if a spurious wake produced no progress.
+                _time.sleep(0.0005)
 
-        # Resolve deep, non-yielding stdlib imports (e.g. getaddrinfo's
-        # first-call codec import) on the main thread before any driver
-        # goroutine runs them on a small stack -- see prewarm_stdlib.
-        _runtime.prewarm_stdlib()
+    def _run_until(self, is_done, setup):
+        """Run this loop until is_done().  Exactly one OS thread (the driver)
+        drains the single global scheduler; concurrent loops on other threads
+        block here while the driver services their goroutines, and take over
+        driving if it departs.  `setup()` spawns this loop's root goroutine +
+        keepalive and MUST run on the driver thread -- so we either run it
+        inline (when we are the driver) or hand it to the bootstrap queue."""
+        done_setup = [False]
+        def _do_setup():
+            if not done_setup[0]:
+                done_setup[0] = True
+                setup()
+        with _DRIVE_CV:
+            _DRIVE["active"] += 1
+            foreign_driver = (_DRIVE["driver"] and
+                              _DRIVE["driver_tid"] != _threading.get_ident())
+        # If a driver on another thread is already running, hand it our setup
+        # so our root goroutine is spawned ON that driver thread (ready-ring
+        # safe).  Idempotent with the inline path via done_setup.
+        if foreign_driver:
+            with _BOOTSTRAP_LOCK:
+                _BOOTSTRAP_QUEUE.append(_do_setup)
+        # is_running() must read True for the whole call -- including when we
+        # are a non-driver loop being serviced by another thread's driver.
         self._running = True
         self._thread_id = _threading.get_ident()
-        asyncio._set_running_loop(self)
         try:
-            pygo_core.run()
+            while not is_done():
+                with _DRIVE_CV:
+                    if not _DRIVE["driver"]:
+                        _DRIVE["driver"] = True
+                        _DRIVE["driver_tid"] = _threading.get_ident()
+                        elected = True
+                    else:
+                        elected = False
+                if elected:
+                    asyncio._set_running_loop(self)
+                    try:
+                        _do_setup()              # safe: we are the driver
+                        self._drive_loop(is_done)
+                    finally:
+                        asyncio._set_running_loop(None)
+                        with _DRIVE_CV:
+                            _DRIVE["driver"] = False
+                            _DRIVE["driver_tid"] = None
+                            _DRIVE_CV.notify_all()
+                else:
+                    # A foreign driver services our goroutines; just wait,
+                    # re-checking so we can take over if it departs.
+                    with _DRIVE_CV:
+                        if not is_done() and _DRIVE["driver"]:
+                            _DRIVE_CV.wait(0.02)
         finally:
             self._running = False
             self._thread_id = None
-            asyncio._set_running_loop(None)
-            # IMPORTANT: do NOT cancel outstanding tasks / sched_reset here.
-            # run_until_complete must leave other tasks + parked goroutines
-            # ALIVE -- IsolatedAsyncioTestCase (and asyncio.Runner generally)
-            # call run_until_complete once each for asyncSetUp / the test /
-            # asyncTearDown on the SAME loop, and rely on connections (their
-            # recv goroutines) created in setUp surviving into the test body.
-            # The asyncio.run-style teardown now lives in close() instead,
-            # which asyncio.run / Runner.close invoke exactly once at the end.
+            with _DRIVE_CV:
+                _DRIVE["active"] -= 1
+                _DRIVE_CV.notify_all()
 
-        if not future.done():
+    def run_until_complete(self, future):
+        if not asyncio.iscoroutine(future):
+            if not (isinstance(future, asyncio.Future)
+                    or isinstance(future, PygoFuture)
+                    or asyncio.isfuture(future)):
+                raise TypeError("argument must be a Future or coroutine")
+        # Resolve deep, non-yielding stdlib imports (e.g. getaddrinfo's
+        # first-call codec import) before any driver goroutine runs them on a
+        # small stack -- see prewarm_stdlib.
+        _runtime.prewarm_stdlib()
+        # Clear any stale stop request from a prior run on this loop (e.g. the
+        # loop.stop() that ended a preceding run_forever).
+        self._stopping = False
+        # `future` may be a coroutine that must be wrapped into a task -- but
+        # create_task spawns a goroutine, which is only safe on the driver
+        # thread, so defer the wrap into setup() (which always runs there).
+        holder = {"fut": None if asyncio.iscoroutine(future) else future}
+        coro = future if asyncio.iscoroutine(future) else None
+
+        def _setup():
+            if coro is not None:
+                holder["fut"] = self.create_task(coro)
+            fut = holder["fut"]
+            # When the user-visible future completes, kick the scheduler out
+            # of its drain loop (matches asyncio.run -- don't block on
+            # background accept/ticker goroutines the user didn't join).
+            def _stop_on_done(_fut):
+                box = self._ka_stop_box
+                if box is not None:
+                    box[0] = True
+                pygo_core.sched_stop()
+            if fut.done():
+                pygo_core.sched_stop()
+            else:
+                fut.add_done_callback(_stop_on_done)
+            self._spawn_keepalive()
+
+        def _is_done():
+            fut = holder["fut"]
+            return self._stopping or (fut is not None and fut.done())
+
+        self._run_until(_is_done, _setup)
+        # IMPORTANT: do NOT cancel outstanding tasks / sched_reset here.
+        # run_until_complete must leave other tasks + parked goroutines ALIVE
+        # (IsolatedAsyncioTestCase / asyncio.Runner reuse one loop across
+        # asyncSetUp / test / asyncTearDown).  asyncio.run-style teardown
+        # lives in close().
+        fut = holder["fut"]
+        if fut is None or not fut.done():
             raise RuntimeError("event loop stopped before Future completed")
-        return future.result()
+        return fut.result()
 
     def _cancel_outstanding_tasks(self):
         """Cancel every PygoTask still alive on this loop and clear
@@ -1381,23 +1575,34 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
 
     def run_forever(self):
         # Resolve deep, non-yielding stdlib imports (e.g. getaddrinfo's
-        # first-call codec import) on the main thread before any driver
-        # goroutine runs them on a small stack -- see prewarm_stdlib.
+        # first-call codec import) before any driver goroutine runs them on a
+        # small stack -- see prewarm_stdlib.
         _runtime.prewarm_stdlib()
-        self._running = True
-        self._thread_id = _threading.get_ident()
-        asyncio._set_running_loop(self)
+        self._stopping = False
+
+        def _setup():
+            # Keepalive: drains call_soon_threadsafe (so a cross-thread
+            # loop.stop(), as aiosmtpd's threaded Controller does, actually
+            # runs) and keeps the scheduler from returning idle while every
+            # goroutine is parked (run_forever must block until stop()).
+            self._spawn_keepalive()
+
         try:
-            pygo_core.run()
+            self._run_until(lambda: self._stopping, _setup)
         finally:
-            self._running = False
-            self._thread_id = None
-            asyncio._set_running_loop(None)
+            # Retire the keepalive we spawned so it can't linger parked in the
+            # sleep queue into the next run on this loop.
+            if self._ka_stop_box is not None:
+                self._ka_stop_box[0] = True
 
     def stop(self):
-        # Schedule a sentinel task that just exits, in case run_forever
-        # is waiting.  In practice users should call cancel() on tasks.
-        pass
+        # asyncio contract: request the loop stop after the current iteration.
+        # Setting the flag is thread-safe (a plain bool store); the keepalive
+        # goroutine -- which runs on the loop thread -- observes it and calls
+        # pygo_core.sched_stop() to return from run_forever()'s pygo_core.run().
+        # Works whether stop() is called directly on the loop thread or, per
+        # asyncio's rules, via call_soon_threadsafe() from another thread.
+        self._stopping = True
 
     # asyncio.run() shutdown protocol -- minimal no-ops so user code
     # written against asyncio.run works through `paio.install()`.
