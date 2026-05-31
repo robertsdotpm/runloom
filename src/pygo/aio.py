@@ -997,6 +997,18 @@ class PygoTask(_PygoFutureMixin, asyncio.Task):
             # (wake_pending counter; park is a no-op if wake arrived).
             yielded.add_done_callback(self._wake_unpark)
             self._pgfutwaiter = yielded
+            # select-before-wait: deliver any already-ready socket I/O before we
+            # park.  Stock asyncio runs one selector poll per loop iteration, so
+            # a peer goroutine parked in wait_fd advances even while this side
+            # has ready work; pygo only pumps netpoll when its ready ring drains
+            # to empty, so without this an `await` that parks here can leave a
+            # peer's recv loop starved (e.g. a server's run_asgi never sees a
+            # client's close frame before the client's teardown crosses a
+            # synchronous server.shutdown() boundary -> 1012 instead of 1001).
+            try:
+                pygo_core.netpoll_poll()
+            except AttributeError:
+                pass    # older pygo_core without the non-blocking pump
             pygo_core.park_self()
             self._pgfutwaiter = None
 
