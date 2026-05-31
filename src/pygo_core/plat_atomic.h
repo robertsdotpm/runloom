@@ -26,7 +26,12 @@
  *     Windows-on-ARM".
  *
  * Types supported (covering every site in pygo_core today):
- *   int, long, long long, void* (and Py_ssize_t via long-long alias)
+ *   int, long, long long, unsigned char, unsigned int,
+ *   unsigned long long (== size_t on x64), and object pointers
+ *   (unsigned char*, struct pygo_g* -- dispatched via a (void*) slot).
+ *   Py_ssize_t rides the long-long alias; uint32/64_t ride unsigned
+ *   int / unsigned long long.  fetch_or/fetch_and are byte-only (the
+ *   netpoll pending-wake bitmap); add a wider helper if a new site needs it.
  *
  * On any compiler that already provides __atomic_*, this header is a
  * no-op -- we test for that via __has_builtin / __GNUC__ / __clang__.
@@ -77,11 +82,21 @@
    static __forceinline long      pygo_atomic_load_l(const volatile long      *p) { return *p; }
    static __forceinline long long pygo_atomic_load_ll(const volatile long long *p) { return *p; }
    static __forceinline void *    pygo_atomic_load_p(void * const volatile *p)   { return *p; }
+   static __forceinline unsigned char      pygo_atomic_load_uc (const volatile unsigned char      *p) { return *p; }
+   static __forceinline unsigned int       pygo_atomic_load_u  (const volatile unsigned int       *p) { return *p; }
+   static __forceinline unsigned long long pygo_atomic_load_ull(const volatile unsigned long long *p) { return *p; }
+   /* Pointer load/store take the slot as a generic (volatile void *) so any
+    * T** converts implicitly (T** -> void* is allowed; T** -> void** is not).
+    * On x86/x64 a pointer-sized aligned access is atomic. */
+   static __forceinline void *pygo_atomic_load_ptr(volatile void *p) { return *(void * volatile *)p; }
 
    /* ---- typed store helpers ---- */
    static __forceinline void pygo_atomic_store_i(volatile int       *p, int v)       { *p = v; }
    static __forceinline void pygo_atomic_store_l(volatile long      *p, long v)      { *p = v; }
    static __forceinline void pygo_atomic_store_ll(volatile long long *p, long long v) { *p = v; }
+   static __forceinline void pygo_atomic_store_uc (volatile unsigned char      *p, unsigned char v)      { *p = v; }
+   static __forceinline void pygo_atomic_store_ull(volatile unsigned long long *p, unsigned long long v) { *p = v; }
+   static __forceinline void pygo_atomic_store_ptr(volatile void *p, void *v) { *(void * volatile *)p = v; }
 
    /* ---- typed add_fetch helpers (return new value, like GCC builtin)
     *
@@ -92,6 +107,8 @@
    static __forceinline int       pygo_atomic_add_i (volatile int       *p, int v)       { return (int)_InterlockedExchangeAdd((volatile LONG *)p, (LONG)v) + v; }
    static __forceinline long      pygo_atomic_add_l (volatile long      *p, long v)      { return (long)_InterlockedExchangeAdd((volatile LONG *)p, (LONG)v) + v; }
    static __forceinline long long pygo_atomic_add_ll(volatile long long *p, long long v) { return (long long)_InterlockedExchangeAdd64((volatile __int64 *)p, (__int64)v) + v; }
+   static __forceinline unsigned int       pygo_atomic_add_u  (volatile unsigned int       *p, unsigned int v)       { return (unsigned int)_InterlockedExchangeAdd((volatile LONG *)p, (LONG)v) + v; }
+   static __forceinline unsigned long long pygo_atomic_add_ull(volatile unsigned long long *p, unsigned long long v) { return (unsigned long long)_InterlockedExchangeAdd64((volatile __int64 *)p, (__int64)v) + v; }
 
    /* ---- typed sub_fetch helpers ---- */
    static __forceinline int       pygo_atomic_sub_i (volatile int       *p, int v)       { return (int)_InterlockedExchangeAdd((volatile LONG *)p, -(LONG)v) - v; }
@@ -117,6 +134,19 @@
        *expected = (long long)prev;
        return 0;
    }
+   static __forceinline int pygo_atomic_cas_uc(volatile unsigned char *p, unsigned char *expected, unsigned char desired) {
+       char prev = _InterlockedCompareExchange8((char volatile *)p, (char)desired, (char)*expected);
+       if ((unsigned char)prev == *expected) return 1;
+       *expected = (unsigned char)prev;
+       return 0;
+   }
+
+   /* ---- fetch_or / fetch_and on a byte.  Return the OLD value, matching
+    *      the GCC __atomic_fetch_* contract.  _InterlockedOr8/_And8 are
+    *      x86/x64 intrinsics that return the prior byte.  Used by the
+    *      netpoll pending-wake bitmap (set/consume one fd's mask). ---- */
+   static __forceinline unsigned char pygo_atomic_or_uc (volatile unsigned char *p, unsigned char v) { return (unsigned char)_InterlockedOr8 ((char volatile *)p, (char)v); }
+   static __forceinline unsigned char pygo_atomic_and_uc(volatile unsigned char *p, unsigned char v) { return (unsigned char)_InterlockedAnd8((char volatile *)p, (char)v); }
 
    /* ---- _Generic dispatch.  Match by pointer type to the typed
     *      helper.  Requires C11 _Generic (MSVC 19.20+). ---- */
@@ -134,7 +164,21 @@
            long long *:                pygo_atomic_load_ll,           \
            const long long *:          pygo_atomic_load_ll,           \
            volatile long long *:       pygo_atomic_load_ll,           \
-           const volatile long long *: pygo_atomic_load_ll            \
+           const volatile long long *: pygo_atomic_load_ll,           \
+           unsigned char *:                pygo_atomic_load_uc,       \
+           const unsigned char *:          pygo_atomic_load_uc,       \
+           volatile unsigned char *:       pygo_atomic_load_uc,       \
+           const volatile unsigned char *: pygo_atomic_load_uc,       \
+           unsigned int *:                pygo_atomic_load_u,         \
+           const unsigned int *:          pygo_atomic_load_u,         \
+           volatile unsigned int *:       pygo_atomic_load_u,         \
+           const volatile unsigned int *: pygo_atomic_load_u,         \
+           unsigned long long *:                pygo_atomic_load_ull, \
+           const unsigned long long *:          pygo_atomic_load_ull, \
+           volatile unsigned long long *:       pygo_atomic_load_ull, \
+           const volatile unsigned long long *: pygo_atomic_load_ull, \
+           unsigned char **:           pygo_atomic_load_ptr,          \
+           struct pygo_g **:           pygo_atomic_load_ptr           \
        )((p))
 
 #  define __atomic_store_n(p, v, ord)                                 \
@@ -144,7 +188,12 @@
            long *:          pygo_atomic_store_l,                      \
            volatile long *: pygo_atomic_store_l,                      \
            long long *:           pygo_atomic_store_ll,               \
-           volatile long long *:  pygo_atomic_store_ll                \
+           volatile long long *:  pygo_atomic_store_ll,               \
+           unsigned char *:          pygo_atomic_store_uc,            \
+           volatile unsigned char *: pygo_atomic_store_uc,            \
+           unsigned long long *:           pygo_atomic_store_ull,     \
+           volatile unsigned long long *:  pygo_atomic_store_ull,     \
+           unsigned char **:         pygo_atomic_store_ptr            \
        )((p), (v))
 
 #  define __atomic_add_fetch(p, v, ord)                               \
@@ -154,7 +203,11 @@
            long *:          pygo_atomic_add_l,                        \
            volatile long *: pygo_atomic_add_l,                        \
            long long *:           pygo_atomic_add_ll,                 \
-           volatile long long *:  pygo_atomic_add_ll                  \
+           volatile long long *:  pygo_atomic_add_ll,                 \
+           unsigned int *:          pygo_atomic_add_u,                \
+           volatile unsigned int *: pygo_atomic_add_u,                \
+           unsigned long long *:           pygo_atomic_add_ull,       \
+           volatile unsigned long long *:  pygo_atomic_add_ull        \
        )((p), (v))
 
    /* fetch_add (returns OLD value -- contrast with add_fetch which
@@ -191,8 +244,22 @@
            long *:          pygo_atomic_cas_l,                        \
            volatile long *: pygo_atomic_cas_l,                        \
            long long *:           pygo_atomic_cas_ll,                 \
-           volatile long long *:  pygo_atomic_cas_ll                  \
+           volatile long long *:  pygo_atomic_cas_ll,                 \
+           unsigned char *:          pygo_atomic_cas_uc,              \
+           volatile unsigned char *: pygo_atomic_cas_uc              \
        )((p), (expp), (des))
+
+#  define __atomic_fetch_or(p, v, ord)                                \
+       _Generic((p),                                                  \
+           unsigned char *:          pygo_atomic_or_uc,               \
+           volatile unsigned char *: pygo_atomic_or_uc                \
+       )((p), (v))
+
+#  define __atomic_fetch_and(p, v, ord)                               \
+       _Generic((p),                                                  \
+           unsigned char *:          pygo_atomic_and_uc,              \
+           volatile unsigned char *: pygo_atomic_and_uc               \
+       )((p), (v))
 
 #  define __atomic_thread_fence(ord)  MemoryBarrier()
 

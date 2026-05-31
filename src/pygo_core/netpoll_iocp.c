@@ -454,7 +454,14 @@ int pygo_iocp_wait(long long timeout_ns,
      * PostQueuedCompletionStatus path we use on STATUS_SUCCESS;
      * the async kernel-driven path has key == 0 (our AFD
      * association key). */
-    if (ov == NULL) return -1;
+    if (ov == NULL) {
+        /* A completion with a NULL OVERLAPPED is a pump-wake posted by
+         * pygo_iocp_wake() (PostQueuedCompletionStatus, NULL overlapped) --
+         * the Windows analogue of the epoll backend's eventfd write.  No
+         * fd to dispatch; report "woke, nothing ready" so the pump loop
+         * returns and the scheduler drains its wake_list. */
+        return 0;
+    }
     ctx = CONTAINING_RECORD(ov, pygo_poll_ctx_t, overlapped);
     (void)key;
     (void)bytes;
@@ -464,6 +471,30 @@ int pygo_iocp_wait(long long timeout_ns,
 
     free(ctx);
     return 1;
+}
+
+/* ============================================================ */
+/* pump wake (cross-thread interrupt of an idle pump)           */
+/* ============================================================ */
+
+/* 1 if pygo_iocp_wake() can post (the IOCP exists), 0 otherwise. */
+int pygo_iocp_wake_armed(void)
+{
+    return pygo_iocp_handle != NULL;
+}
+
+/* Break an idle pump out of GetQueuedCompletionStatus from any thread.
+ * Posts a completion with a NULL OVERLAPPED, which pygo_iocp_wait()
+ * recognises as a wake (returns 0 there).  This is the IOCP analogue of
+ * writing the epoll backend's pump-interrupt eventfd: the single-thread
+ * scheduler blocks here with no timeout when only blocking-offload /
+ * iouring waiters are outstanding, and a worker thread pokes it on
+ * completion so the scheduler wakes to drain its wake_list.  A no-op
+ * (returns -1) if the IOCP was never created. */
+int pygo_iocp_wake(void)
+{
+    if (pygo_iocp_handle == NULL) return -1;
+    return PostQueuedCompletionStatus(pygo_iocp_handle, 0, 0, NULL) ? 0 : -1;
 }
 
 #endif /* PYGO_OS_WINDOWS */

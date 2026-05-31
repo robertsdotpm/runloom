@@ -1461,13 +1461,28 @@ int pygo_netpoll_wake_pump_arm(void)
     }
     pygo_pump_wake_fd = fd;
     return 0;
+#elif defined(PYGO_OS_WINDOWS)
+    /* IOCP: PostQueuedCompletionStatus wakes an idle
+     * GetQueuedCompletionStatus, so no per-arm primitive is needed beyond
+     * the IOCP existing (created in pygo_netpoll_init).  The WSAPoll /
+     * select pumps don't block on a wakeable object -- they re-poll the
+     * parked-fd set on a timeout -- so they expose no pump-wake and
+     * single-thread offload callers fall back to inline there.
+     *
+     * Init FIRST: pygo_win_use_iocp is 0 until backend selection runs, and
+     * a blocking-offload caller may arm before any socket I/O has triggered
+     * netpoll init (e.g. a goroutine that only does pygo.blocking()). */
+    if (pygo_netpoll_init() != 0) return -1;
+    if (pygo_win_use_iocp && pygo_iocp_wake_armed()) return 0;
+    return -1;
 #else
     return -1;
 #endif
 }
 
-/* Write the pump-interrupt eventfd to break an idle epoll_wait.  Safe to
- * call from any thread; a no-op if not armed. */
+/* Break an idle pump (epoll_wait / GetQueuedCompletionStatus) from any
+ * thread so the scheduler wakes to drain its wake_list.  A no-op if not
+ * armed. */
 void pygo_netpoll_wake_pump(void)
 {
 #if defined(PYGO_HAVE_EPOLL)
@@ -1476,6 +1491,10 @@ void pygo_netpoll_wake_pump(void)
         uint64_t one = 1;
         ssize_t w = write(fd, &one, sizeof one);
         (void)w;
+    }
+#elif defined(PYGO_OS_WINDOWS)
+    if (pygo_win_use_iocp) {
+        pygo_iocp_wake();
     }
 #endif
 }

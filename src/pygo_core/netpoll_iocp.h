@@ -56,5 +56,13 @@ int pygo_iocp_submit(int fd, int events, long long timeout_ns);
 int pygo_iocp_wait(long long timeout_ns,
                    int *out_fd, int *out_events);
 
+/* Pump-wake: break an idle pump out of GetQueuedCompletionStatus from
+ * another thread (the IOCP analogue of the epoll eventfd write).
+ * pygo_iocp_wake_armed() reports whether the IOCP exists so a wake can
+ * be posted; pygo_iocp_wake() posts it.  Both are no-ops/-1 when IOCP
+ * was never created. */
+int pygo_iocp_wake_armed(void);
+int pygo_iocp_wake(void);
+
 #endif /* PYGO_OS_WINDOWS */
 #endif /* PYGO_NETPOLL_IOCP_H */

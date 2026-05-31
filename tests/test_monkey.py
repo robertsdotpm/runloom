@@ -36,6 +36,20 @@ def _drive(fn):
     return box[0]
 
 
+def tearDownModule():
+    """Reverse every monkey-patch this module installs.
+
+    The patches mutate process-global stdlib state (threading.Lock/
+    Condition -> cooperative shims, socket.*, os.read/write, builtins.open,
+    ...).  Without this, that state leaks into every later test file in the
+    same pytest process.  On POSIX the leak is benign, but on Windows the
+    leaked cooperative threading.Condition deadlocks pytest's fd-capture
+    teardown (a real OS thread parks on a primitive that only a running
+    goroutine scheduler can wake), which intermittently wedges the whole
+    suite.  Restoring stdlib here keeps the run deterministic everywhere."""
+    pygo.monkey.unpatch()
+
+
 class TestPatchIdempotence(unittest.TestCase):
     def test_double_patch(self):
         pygo.monkey.patch()

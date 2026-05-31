@@ -64,6 +64,35 @@ static int           bp_wake_armed = 0;       /* pump-interrupt available (singl
 static volatile long bp_inflight = 0;         /* jobs submitted, not yet completed */
 static pygo_thread_t bp_threads[PYGO_BLOCKPOOL_MAX];
 
+/* bp_lock uses PYGO_MUTEX_STATIC_INIT.  On POSIX that is a live mutex
+ * (PTHREAD_MUTEX_INITIALIZER); on Windows it is only a zeroed
+ * CRITICAL_SECTION that MUST be InitializeCriticalSection'd before first
+ * use -- locking it zero-initialised is undefined behaviour.  Initialise
+ * it exactly once, race-free, before any lock.  We can't take bp_lock to
+ * guard this (it's the very thing being set up), so use the same 0/1/2
+ * CAS+spin guard the rest of pygo_core uses for one-time setup; this is
+ * safe under the lock-free hub callers on free-threaded 3.13t.  No-op on
+ * POSIX, where the static initialiser is already usable. */
+#if defined(PYGO_OS_WINDOWS)
+static int bp_lock_state = 0;   /* 0 = uninit, 1 = initialising, 2 = ready */
+static void bp_lock_ensure(void)
+{
+    int expected = 0;
+    if (__atomic_load_n(&bp_lock_state, __ATOMIC_ACQUIRE) == 2) return;
+    if (__atomic_compare_exchange_n(&bp_lock_state, &expected, 1, 0,
+                                    __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+        pygo_mutex_init(&bp_lock);
+        __atomic_store_n(&bp_lock_state, 2, __ATOMIC_RELEASE);
+    } else {
+        while (__atomic_load_n(&bp_lock_state, __ATOMIC_ACQUIRE) != 2) {
+            /* winner only runs InitializeCriticalSection -- a brief spin */
+        }
+    }
+}
+#else
+#  define bp_lock_ensure() ((void)0)
+#endif
+
 long pygo_blockpool_inflight(void)
 {
     return __atomic_load_n(&bp_inflight, __ATOMIC_ACQUIRE);
@@ -115,6 +144,7 @@ int pygo_blockpool_init(int n_workers)
     if (__atomic_load_n(&bp_inited, __ATOMIC_ACQUIRE)) return 0;
     if (__atomic_load_n(&bp_failed, __ATOMIC_ACQUIRE)) return -1;
 
+    bp_lock_ensure();               /* Windows: make bp_lock usable */
     pygo_mutex_lock(&bp_lock);
     if (bp_inited) { pygo_mutex_unlock(&bp_lock); return 0; }
     if (bp_failed) { pygo_mutex_unlock(&bp_lock); return -1; }
@@ -160,6 +190,7 @@ int pygo_blockpool_init(int n_workers)
 void pygo_blockpool_fini(void)
 {
     int i, n;
+    bp_lock_ensure();               /* Windows: make bp_lock usable */
     pygo_mutex_lock(&bp_lock);
     if (!bp_inited) { pygo_mutex_unlock(&bp_lock); return; }
     bp_stopping = 1;
