@@ -1370,6 +1370,20 @@ static PyObject *m_run(PyObject *self, PyObject *unused)
     return PyLong_FromSsize_t(completed);
 }
 
+/* pygo_core.run_ready() -> None.  Quiescence-barrier yield: parks the calling
+ * goroutine until no other goroutine is immediately runnable (every currently-
+ * ready g, including freshly-woken ones, has run to its next park or to
+ * completion), then resumes -- before the scheduler would block on I/O/timers.
+ * asyncio's "run the ready callbacks for this loop iteration" boundary,
+ * iterated to quiescence.  Must be called from inside a goroutine (no-op
+ * otherwise). */
+static PyObject *m_run_ready(PyObject *self, PyObject *unused)
+{
+    (void)self; (void)unused;
+    pygo_sched_run_ready(pygo_sched_get());
+    Py_RETURN_NONE;
+}
+
 static PyObject *m_wait_fd(PyObject *self, PyObject *args)
 {
     int fd, events;
@@ -1820,6 +1834,12 @@ static PyMethodDef module_methods[] = {
      "overhead of a Chan."},
     {"run",         m_run,         METH_NOARGS,
      "Drive the C scheduler until all goroutines finish.  Returns count."},
+    {"run_ready",   m_run_ready,   METH_NOARGS,
+     "run_ready(): quiescence-barrier yield.  Park the calling goroutine "
+     "until no other goroutine is immediately runnable (every ready g, "
+     "including freshly-woken ones, has run to its next park/completion), "
+     "then resume -- before the scheduler blocks on I/O/timers.  asyncio's "
+     "one-loop-iteration boundary, iterated to quiescence."},
     {"wait_fd",     m_wait_fd,     METH_VARARGS,
      "wait_fd(fd, events, timeout_ms=-1): park the current goroutine "
      "until fd is ready.  events is a bitmask: 1=read, 2=write."},

@@ -326,6 +326,16 @@ struct pygo_sched {
     pygo_mutex_t wake_list_lock;
     pygo_g_t *wake_list_head;
     pygo_g_t *wake_list_tail;
+    /* Quiescence-barrier wait list (single-thread sched only) -- goroutines
+     * parked by pygo_sched_run_ready().  FIFO, threaded through g->next (free
+     * for a live g on this sched; the slab free-list and M:N hub queues are
+     * the only other users of g->next and neither overlaps here).  The drain
+     * loop flushes the WHOLE list back to ready at the next quiescence point
+     * (ready empty, just before it would block on netpoll/timers), giving
+     * "resume me once no other goroutine is immediately runnable" -- asyncio's
+     * one-loop-iteration semantics, iterated to quiescence. */
+    pygo_g_t *quiescence_head;
+    pygo_g_t *quiescence_tail;
 };
 
 /* Is the ready queue empty?  Hot-path predicate; inline-friendly. */
@@ -387,6 +397,12 @@ void pygo_sched_yield(pygo_sched_t *s);
 
 /* Park the current g until wake_at (monotonic seconds).  Swap back. */
 void pygo_sched_sleep_until(pygo_sched_t *s, double wake_at);
+
+/* Park the current g on the quiescence-barrier list; the drain loop resumes
+ * it once no other goroutine is immediately runnable (ready empty), before
+ * blocking on netpoll/timers.  asyncio "one loop iteration" iterated to
+ * quiescence.  Single-thread sched only; a no-op if not inside a g. */
+void pygo_sched_run_ready(pygo_sched_t *s);
 
 /* Mark current g as parked (no ready_push); netpoll/sleep saves snap.
  * Caller must then yield via pygo_coro_yield. */

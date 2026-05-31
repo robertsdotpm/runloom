@@ -906,6 +906,8 @@ void pygo_sched_init(pygo_sched_t *s)
     pygo_mutex_init(&s->wake_list_lock);
     s->wake_list_head = NULL;
     s->wake_list_tail = NULL;
+    s->quiescence_head = NULL;
+    s->quiescence_tail = NULL;
 }
 
 /* Pop the cross-thread wake list and push each entry onto the
@@ -924,6 +926,22 @@ static void pygo_sched_drain_wake_list(pygo_sched_t *s)
     while (head != NULL) {
         pygo_g_t *next = head->wake_next;
         head->wake_next = NULL;
+        pygo_ready_push(s, head);
+        head = next;
+    }
+}
+
+/* Flush the whole quiescence-barrier wait list back onto the ready ring, in
+ * FIFO order (head first -- the order they called run_ready()).  Called by the
+ * drain loop at a quiescence point.  Linked through g->next. */
+static void pygo_sched_flush_quiescence(pygo_sched_t *s)
+{
+    pygo_g_t *head = s->quiescence_head;
+    s->quiescence_head = NULL;
+    s->quiescence_tail = NULL;
+    while (head != NULL) {
+        pygo_g_t *next = head->next;
+        head->next = NULL;
         pygo_ready_push(s, head);
         head = next;
     }
@@ -1460,6 +1478,38 @@ void pygo_sched_sleep_until(pygo_sched_t *s, double wake_at)
     pygo_coro_yield();
 }
 
+/* ---- run_ready: quiescence-barrier yield ----
+ *
+ * Park the current g on the quiescence list; the drain loop resumes it at the
+ * next quiescence point -- when the ready ring is empty and it would otherwise
+ * block on netpoll/timers (pygo_sched_drain).  Net effect: every goroutine
+ * that is runnable *now* (including ones just woken) runs to its next park or
+ * to completion before run_ready() returns, matching asyncio's "drain the
+ * ready callbacks for this loop iteration" boundary.  Single-thread sched
+ * only -- under an M:N hub this falls back to a single classic yield (no
+ * hub-local quiescence list), which is the closest safe behaviour. */
+void pygo_sched_run_ready(pygo_sched_t *s)
+{
+    pygo_g_t *g;
+    if (pygo_mn_current_sched() != NULL) {
+        /* M:N hub: no quiescence list on the hub sched.  Degrade to one pass. */
+        pygo_sched_yield(s);
+        return;
+    }
+    g = s->current;
+    if (g == NULL) return;            /* not inside a goroutine: no-op */
+    /* FIFO append onto the quiescence list (threaded through g->next). */
+    g->next = NULL;
+    if (s->quiescence_tail != NULL) {
+        s->quiescence_tail->next = g;
+    } else {
+        s->quiescence_head = g;
+    }
+    s->quiescence_tail = g;
+    pygo_pystate_snap(&g->snap);
+    pygo_coro_yield();
+}
+
 /* ---- Drain (main loop) ----
  *
  * sched_snap optimisation: the scheduler's tstate (the Python frame
@@ -1486,6 +1536,7 @@ Py_ssize_t pygo_sched_drain(pygo_sched_t *s)
                             __atomic_load_n(&s->netpoll_parked, __ATOMIC_ACQUIRE) > 0 ||
                             pygo_iouring_inflight() > 0 ||
                             pygo_blockpool_inflight() > 0 ||
+                            s->quiescence_head != NULL ||
                             __atomic_load_n(&s->wake_list_head,
                                             __ATOMIC_ACQUIRE) != NULL)) {
         double now = pygo_sched_monotonic_seconds();
@@ -1501,6 +1552,16 @@ Py_ssize_t pygo_sched_drain(pygo_sched_t *s)
         while (s->sleep_size > 0 && pygo_sleep_peek(s)->wake_at <= now) {
             pygo_g_t *woke = pygo_sleep_pop(s);
             pygo_ready_push(s, woke);
+        }
+        /* Quiescence checkpoint: if nothing else is immediately runnable
+         * (ready ring empty after draining wakes + due sleepers), resume the
+         * run_ready() waiters NOW -- before we would block on netpoll/timers.
+         * This is the "no goroutine is immediately runnable" boundary the
+         * primitive promises; do it before the netpoll-pump block below so a
+         * waiter never waits on I/O.  Re-loop to pop them as ready. */
+        if (pygo_sched_ready_empty(s) && s->quiescence_head != NULL) {
+            pygo_sched_flush_quiescence(s);
+            continue;
         }
         /* Pump netpoll: if any goroutines are parked, wait for I/O up
          * to the next sleep deadline (or forever if none).  Drives
