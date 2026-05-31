@@ -152,6 +152,12 @@ class TestThreadedServerLoop(unittest.TestCase):
             loop.run_until_complete(setup())   # listening; accept goroutine parked
             box["loop"] = loop
             loop.run_forever()                 # serve on THIS (non-main) thread
+            # Clean teardown on THIS thread after stop(): close the server so
+            # its accept goroutine is unparked (a leaked parked goroutine would
+            # otherwise linger in the shared netpoll), then close the loop.
+            box["server"].close()
+            loop.run_until_complete(box["server"].wait_closed())
+            loop.close()
 
         t = threading.Thread(target=server_thread, daemon=True)
         t.start()
