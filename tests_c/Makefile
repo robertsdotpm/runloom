@@ -77,9 +77,32 @@ bench_server_pygo-ubsan: bench_server_pygo.c $(PYGO_SO)
 	$(CC) $(CFLAGS_BASE) -fsanitize=undefined bench_server_pygo.c \
 	    -o bench_server_pygo-ubsan $(LDFLAGS_BASE) -fsanitize=undefined
 
+# test_cldeque: pure-C concurrency stress for the Chase-Lev work-stealing
+# deque.  No Python -- compiles cldeque.c directly, so it builds + runs
+# anywhere with a C compiler + pthreads.  Run the -tsan build under
+# `setarch -R` on kernels with high-entropy ASLR (else TSan aborts with
+# "unexpected memory mapping").  NOTE: cldeque.c's standalone SEQ_CST
+# fence in steal() is not modelled by TSan (it warns); that ordering is
+# covered exhaustively by verify/cbmc + verify/spin instead.
+CLDEQUE_SRC  := test_cldeque.c ../src/pygo_core/cldeque.c
+CLDEQUE_CF   := -g -Wall -Wextra -Wno-unused-parameter -I../src/pygo_core -pthread
+
+test_cldeque: $(CLDEQUE_SRC)
+	$(CC) -O2 $(CLDEQUE_CF) $(CLDEQUE_SRC) -o test_cldeque
+
+test_cldeque-asan: $(CLDEQUE_SRC)
+	$(CC) -O1 -fsanitize=address $(CLDEQUE_CF) $(CLDEQUE_SRC) -o test_cldeque-asan
+
+test_cldeque-tsan: $(CLDEQUE_SRC)
+	$(CC) -O1 -fsanitize=thread $(CLDEQUE_CF) $(CLDEQUE_SRC) -o test_cldeque-tsan
+
+test_cldeque-ubsan: $(CLDEQUE_SRC)
+	$(CC) -O1 -fsanitize=undefined $(CLDEQUE_CF) $(CLDEQUE_SRC) -o test_cldeque-ubsan
+
 clean:
 	rm -f bench_mn bench_mn-asan bench_mn-tsan bench_mn-ubsan \
 	      bench_server_pygo bench_server_pygo-asan \
-	      bench_server_pygo-tsan bench_server_pygo-ubsan
+	      bench_server_pygo-tsan bench_server_pygo-ubsan \
+	      test_cldeque test_cldeque-asan test_cldeque-tsan test_cldeque-ubsan
 
 .PHONY: clean

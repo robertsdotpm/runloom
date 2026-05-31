@@ -13,6 +13,7 @@ test_stall_steal
 test_stall_pool
 test_preempt
 test_blockpool
+test_cldeque
 # Sanitizer variants of any bench/test binary.
 *-asan
 *-tsan
