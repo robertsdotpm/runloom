@@ -406,6 +406,10 @@ class PygoFuture(object):
         self._exception = None
         self._callbacks = []
         self._loop     = loop
+        # asyncio's "exception was never retrieved" tracking: set True by
+        # set_exception, cleared once result()/exception() reads it; __del__
+        # warns if still set.  Libraries (async-lru) assert on it.
+        self._log_traceback = False
         # Re-armed to True in __await__ each time we suspend (Task.__step /
         # our driver set it False when adopting the future).
         self._asyncio_future_blocking = False
@@ -420,6 +424,7 @@ class PygoFuture(object):
             raise asyncio.InvalidStateError("Future not done")
         if self._state == _CANCELLED:
             raise asyncio.CancelledError()
+        self._log_traceback = False
         if self._exception is not None:
             raise self._exception
         return self._result
@@ -429,6 +434,7 @@ class PygoFuture(object):
             raise asyncio.InvalidStateError("Future not done")
         if self._state == _CANCELLED:
             raise asyncio.CancelledError()
+        self._log_traceback = False
         return self._exception
 
     # ---- mutation ----
@@ -450,7 +456,15 @@ class PygoFuture(object):
                 "and cannot be raised into a Future")
         self._exception = exception
         self._state     = _FINISHED
+        self._log_traceback = True
         self._fire_callbacks()
+        # NOTE: stock asyncio.Future.__del__ logs "exception was never
+        # retrieved" here when _log_traceback is still set at GC time.  pygo
+        # can't usefully add that yet: a completed PygoTask forms an
+        # uncollectable cycle (task -> self._g (PygoG) -> g->callable (the
+        # _driver bound method) -> task) because PygoGType has no
+        # tp_traverse/tp_clear, so the task is never GC'd.  Fixing that (C-level
+        # GC protocol on the G type) is the prerequisite -- see STATE.md.
 
     def cancel(self, msg=None):
         if self._state != _PENDING:
