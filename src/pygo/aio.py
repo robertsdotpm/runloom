@@ -1421,13 +1421,19 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
         return self._exception_handler
 
     def default_exception_handler(self, context):
-        msg = context.get("message", "unhandled exception")
+        # Log through the "asyncio" logger like stock asyncio (not raw stderr),
+        # so logging config + pytest's caplog (e.g. async-lru's
+        # test_done_callback_exception_logs) see it.
+        import logging
+        message = context.get("message") or "Unhandled exception in event loop"
         exc = context.get("exception")
-        sys.stderr.write("[pygo.aio] %s: %r\n" % (msg, exc))
-        if exc is not None:
-            import traceback
-            traceback.print_exception(type(exc), exc, exc.__traceback__,
-                                      file=sys.stderr)
+        exc_info = (type(exc), exc, exc.__traceback__) if exc is not None else False
+        log_lines = [message]
+        for key in sorted(context):
+            if key in ("message", "exception"):
+                continue
+            log_lines.append("%s: %r" % (key, context[key]))
+        logging.getLogger("asyncio").error("\n".join(log_lines), exc_info=exc_info)
 
     def call_exception_handler(self, context):
         if self._exception_handler is not None:
