@@ -35,6 +35,9 @@
 #  include <ws2tcpip.h>
 #  include <windows.h>
 #  include <process.h>     /* _beginthreadex */
+#  include <timeapi.h>     /* timeBeginPeriod (winmm) */
+#  include <stdlib.h>      /* getenv */
+#  include <string.h>      /* strcmp */
 #else
 #  include <pthread.h>
 #  include <time.h>
@@ -284,8 +287,29 @@ PYGO_INLINE void pygo_winsock_init(void) {
          * we'd want one, and CRT atexit ordering vs sockets is brittle. */
     }
 }
+
+/* Raise the system timer resolution to 1ms.  Windows defaults to a ~15.6ms
+ * tick, and the scheduler waits on sleep/timer deadlines at that granularity --
+ * so EVERY sub-15ms sched_sleep costs a full ~15.6ms tick.  That makes
+ * timer-bound workloads (the aio keepalive's 2ms poll that delivers
+ * call_soon_threadsafe results, asyncio.sleep, etc.) 10-15x slower and trips
+ * test timeouts (aiosqlite's 1000-op close test ran ~16ms/op -> ~16s).  1ms is
+ * what Go's runtime requests on Windows.  Called UNCONDITIONALLY from module
+ * init -- not winsock_init -- because socket-less workloads (pure sched_sleep /
+ * call_soon_threadsafe) never touch netpoll.  Opt out with PYGO_WIN_TIMER_RES=0.
+ * No timeEndPeriod: held for the process lifetime, like winsock above. */
+PYGO_INLINE void pygo_timer_res_init(void) {
+    static volatile LONG done = 0;
+    if (InterlockedCompareExchange(&done, 1, 0) == 0) {
+        const char *res = getenv("PYGO_WIN_TIMER_RES");
+        if (res == NULL || strcmp(res, "0") != 0) {
+            timeBeginPeriod(1);
+        }
+    }
+}
 #else
 PYGO_INLINE void pygo_winsock_init(void) { /* no-op on POSIX */ }
+PYGO_INLINE void pygo_timer_res_init(void) { /* no-op on POSIX */ }
 #endif
 
 #endif /* PYGO_PLAT_COMPAT_H */

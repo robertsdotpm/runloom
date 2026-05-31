@@ -1876,6 +1876,7 @@ PyMODINIT_FUNC PyInit_pygo_core(void)
 {
     PyObject *m;
     pygo_diag_init();          /* parses PYGO_DEBUG once; cheap; idempotent */
+    pygo_timer_res_init();     /* Windows: 1ms timer resolution (no-op POSIX) */
     if (PyType_Ready(&PygoCoroType) < 0) return NULL;
     if (PyType_Ready(&PygoGType) < 0) return NULL;
     m = PyModule_Create(&pygo_core_module);

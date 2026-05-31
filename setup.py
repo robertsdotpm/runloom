@@ -255,9 +255,10 @@ def detect_link_args():
         # Fibers + WSAPoll + select + Winsock all live in these two:
         #   kernel32 -- threads, fibers, memory, sync primitives
         #   ws2_32   -- Winsock 2 (WSAPoll, select, sockets)
+        #   winmm    -- timeBeginPeriod (1ms scheduler timer resolution)
         # ntdll is loaded dynamically by netpoll_iocp.c (GetProcAddress)
         # so we don't need ntdll.lib at link time.
-        libs += ["kernel32", "ws2_32"]
+        libs += ["kernel32", "ws2_32", "winmm"]
     elif IS_SOLARIS:
         libs += ["socket", "nsl"]
     elif IS_BSD or IS_DARWIN:
