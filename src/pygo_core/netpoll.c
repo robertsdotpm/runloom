@@ -1665,63 +1665,65 @@ int pygo_netpoll_any_iouring_inflight(void)
 #endif
 }
 
-/* Forcibly wake every parked goroutine with ready_mask=-1 (cancelled).
- * Each waiter's pygo_netpoll_wait_fd call returns -1; callers (server
- * accept loops, etc.) see that and exit their loops.  Returns count
- * woken.  Iterates every per-hub pool plus the default pool. */
+/* Forcibly wake the CALLING thread's parked goroutines with ready_mask=-1
+ * (cancelled).  Each waiter's pygo_netpoll_wait_fd call returns -1; callers
+ * (server accept loops, etc.) see that and exit their loops.  Returns count
+ * woken.
+ *
+ * Phase 2: SCOPED to the calling thread's scheduler (g->owner == this sched).
+ * pygo runs one scheduler per OS thread but a single shared netpoll, and every
+ * non-hub loop's parkers share the default pool.  A global drain (the old
+ * behavior) cancelled OTHER still-running loops' in-flight I/O too -- e.g. one
+ * paio.run()'s teardown (sched_reset) stranded a concurrent loop's recv with a
+ * spurious -1, surfacing as a BlockingIOError out of StreamReader._fill.  Only
+ * this thread's own parkers are drained now; others (and M:N hub gs, whose
+ * owner is NULL) stay linked. */
 int pygo_netpoll_drain_parked(void)
 {
+    pygo_sched_t *owner = pygo_sched_get();
     int n = 0;
     int pi;
-    pygo_parked_t *p, *next;
     for (pi = 0; pi < PYGO_PARKER_POOL_MAX; pi++) {
         pygo_parker_pool_t *pool = &pygo_pools[pi];
+        pygo_parked_t *p;
         if (__atomic_load_n(&pool->lock_inited, __ATOMIC_ACQUIRE) != 2) continue;
         pygo_mutex_lock(&pool->lock);
         p = pool->head;
-        pool->head = NULL;
-        /* Clear per-fd buckets too; everything is leaving the lists. */
-        if (pool->by_fd != NULL && pool->by_fd_cap > 0) {
-            memset(pool->by_fd, 0,
-                   pool->by_fd_cap * sizeof(*pool->by_fd));
-        }
-        /* Drain the deadline heap too; everything is leaving. */
-        pool->dh_size = 0;
         while (p != NULL) {
-            int cur;
-            next = p->next;
-            p->next = NULL;
-            p->slot = NULL;
-            p->next_by_fd = NULL;
-            p->prev_by_fd = NULL;
-            p->heap_index = -1;
-            /* Claim the parker (same protocol as the pump) so a g that is
-             * mid-commit doesn't both park and get cancel-woken. */
-            for (;;) {
-                cur = __atomic_load_n(&p->commit, __ATOMIC_ACQUIRE);
-                if (cur == PYGO_PARK_WOKEN) break;
-                if (__atomic_compare_exchange_n(&p->commit, &cur,
-                                                PYGO_PARK_WOKEN, 0,
-                                                __ATOMIC_ACQ_REL,
-                                                __ATOMIC_ACQUIRE))
-                    break;
-            }
-            __atomic_sub_fetch(&pool->total, 1, __ATOMIC_RELEASE);
-            if (cur == PYGO_PARK_WOKEN) { p = next; continue; }  /* pump owns it */
-            if (p->ready_out != NULL) {
-                *p->ready_out = -1;   /* signal cancellation */
-            }
-            /* Only re-queue a g that had committed to parking; an ARMED
-             * g will see WOKEN at its commit CAS and abort itself. */
-            if (cur == PYGO_PARK_PARKED) {
-                if (p->hub != NULL) {
-                    pygo_mn_wake_g(p->hub, p->g);
-                } else {
-                    pygo_sched_wake(p->g);
+            pygo_parked_t *next = p->next;   /* capture before unlink splices p out */
+            if (p->g != NULL && p->g->owner == owner) {
+                int cur;
+                /* Claim the parker (same protocol as the pump) so a g that is
+                 * mid-commit doesn't both park and get cancel-woken. */
+                for (;;) {
+                    cur = __atomic_load_n(&p->commit, __ATOMIC_ACQUIRE);
+                    if (cur == PYGO_PARK_WOKEN) break;
+                    if (__atomic_compare_exchange_n(&p->commit, &cur,
+                                                    PYGO_PARK_WOKEN, 0,
+                                                    __ATOMIC_ACQ_REL,
+                                                    __ATOMIC_ACQUIRE))
+                        break;
+                }
+                /* Removes p from the global list, per-fd bucket and deadline
+                 * heap, decrements pool->total, and clears p->g->netpoll_parker. */
+                (void)pygo_parker_unlink(pool, p);
+                if (cur != PYGO_PARK_WOKEN) {   /* not already claimed by the pump */
+                    if (p->ready_out != NULL) {
+                        *p->ready_out = -1;   /* signal cancellation */
+                    }
+                    /* Only re-queue a g that had committed to parking; an ARMED
+                     * g will see WOKEN at its commit CAS and abort itself. */
+                    if (cur == PYGO_PARK_PARKED) {
+                        if (p->hub != NULL) {
+                            pygo_mn_wake_g(p->hub, p->g);
+                        } else {
+                            pygo_sched_wake(p->g);
+                        }
+                    }
+                    n++;
                 }
             }
             p = next;
-            n++;
         }
         pygo_mutex_unlock(&pool->lock);
     }

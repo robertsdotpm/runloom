@@ -10,9 +10,16 @@ that, a recv woken cross-thread is enqueued on the wrong (waker's) thread and
 the owner never resumes it -> the round-trip hangs.
 
 This test runs two independent loops on two threads, each doing many localhost
-echo round-trips concurrently, and asserts both finish (no hang) with correct
-data.  With Phase 2 reverted (pygo_sched_wake -> plain ready_push to the waker
-thread), the cross-thread deliveries strand recvs and the threads time out.
+echo round-trips concurrently, and asserts both finish with correct data.  It
+guards two Phase 2 bugs (both fixed):
+  1. cross-thread wake routing -- pygo_sched_wake / pygo_mn_wake_g NULL-branch
+     route a woken g to its OWNER sched's wake_list + kick its pump, not the
+     waker thread's ready ring (a plain ready_push there corrupted the
+     single-consumer ring -> SIGSEGV, 4/4 before the fix);
+  2. scoped teardown -- pygo_netpoll_drain_parked (paio.run's sched_reset)
+     cancels only the CALLING thread's parkers (g->owner == this sched), not
+     every loop's; the old global drain stranded a concurrent loop's recv with
+     a spurious -1 -> BlockingIOError out of StreamReader._fill (~3/8 before).
 """
 import asyncio
 import threading
@@ -61,16 +68,6 @@ def _loop_workload(result, idx):
         result[idx] = e
 
 
-@unittest.skip(
-    "Phase 2 partial: the cross-thread wake-ROUTING fix (pygo_sched_wake -> "
-    "g->owner wake_list + kick) eliminates the SIGSEGV this workload hit on "
-    "plain Phase C (cross-thread ready_push corrupted the single-consumer "
-    "ready ring -- reproduced 4/4 before the fix, 0/8 after).  A SECOND, "
-    "deeper bug remains: a cross-thread wait_fd RESUME intermittently leaks a "
-    "spurious BlockingIOError (~3/8 runs) -- pygo_core.wait_fd returns/raises "
-    "EAGAIN out of aio.py StreamReader._fill's except block, a tstate/"
-    "exception-state-on-resume issue (cf project_pygo_per_g_python_crash).  "
-    "Un-skip once that resume path is fixed.")
 class TestPhase2MultiLoop(unittest.TestCase):
     def test_two_loops_two_threads_socket_echo(self):
         result = {}
