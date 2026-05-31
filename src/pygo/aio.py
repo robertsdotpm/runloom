@@ -970,7 +970,12 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
         # on any hub thread), so _thread_id exists purely so attribute
         # reads + asyncio's early-return thread checks succeed.
         self._thread_id = None
-        self._debug = False
+        # Honour asyncio's debug-mode sources (PYTHONASYNCIODEBUG / -X dev), as
+        # BaseEventLoop does via coroutines._is_debug_mode(); libraries + anyio
+        # read loop.get_debug() and expect it to reflect the env.
+        self._debug = (sys.flags.dev_mode or
+                       (not sys.flags.ignore_environment and
+                        bool(_os.environ.get("PYTHONASYNCIODEBUG"))))
         try:
             self._clock_resolution = _time.get_clock_info("monotonic").resolution
         except Exception:
