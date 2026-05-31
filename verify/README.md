@@ -288,6 +288,21 @@ sub 1 while the contender holds sub 1 waiting for pool 1.
   deadline min-heap timeout sweep and `force_unlink` lifetime (exactly-once
   `pool_release`) remain unmodelled — both are `pool->lock`-serialised
   straight-line code, and the sweep shares the verified `pygo_pump_claim`.
+* **io_uring** is not modelled directly, by design: its single-op path
+  (`pygo_iouring_submit` / `pygo_iouring_drain`) is verified *by composition* —
+  the goroutine parks via `pygo_sched_park_safe` (covered by `parked_safe.pml`)
+  and the drain **wakes the goroutine before decrementing `inflight_count`**
+  (io_uring.c:620-625 wake, :640 decrement), the exact ordering `blockpool.pml`
+  proves keeps the single-thread drain from exiting early. The one genuinely
+  io_uring-specific surface is **multishot** (`pygo_iouring_ms_*`): a handle's
+  CQE-append/consume queue and, in particular, its free — `on_cqe` frees the
+  handle (io_uring.c:878-891) *outside* `h->lock`, after waking a captured
+  `waiter_g`, which would re-lock the handle in `ms_recv` (:999). That is safe
+  under single-owner sequential use (a consumer is never parked in `ms_recv`
+  when `ms_close` runs, so `waiter_g` is NULL at the closing CQE) but would be
+  a use-after-free if concurrent `recv`+`close` from different tasks on one
+  handle is ever supported. Modelling that lifetime (or auditing the close
+  contract) is the precise next io_uring FV target.
 
 ## Layout
 
