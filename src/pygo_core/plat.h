@@ -79,7 +79,12 @@
  *      choice; available since Win95.
  *   3. ucontext (PYGO_HAVE_UCONTEXT)                       -- POSIX fallback.
  * Exactly one of these is defined per platform. */
-#if (defined(PYGO_OS_LINUX) || defined(PYGO_OS_MACOS) || defined(PYGO_OS_BSD) \
+#if defined(PYGO_FORCE_UCONTEXT) && !defined(PYGO_OS_WINDOWS)
+/* Build-time override (setup.py: PYGO_BACKEND=ucontext / PYGO_NO_ASM).
+ * Skip the asm fast path even where it is available so the POSIX
+ * ucontext fallback can be exercised on asm-capable hosts. */
+#  define PYGO_HAVE_UCONTEXT 1
+#elif (defined(PYGO_OS_LINUX) || defined(PYGO_OS_MACOS) || defined(PYGO_OS_BSD) \
      || defined(PYGO_OS_ANDROID)) \
     && (defined(PYGO_ARCH_X86_64) || defined(PYGO_ARCH_AARCH64))
 #  define PYGO_HAVE_FCONTEXT 1

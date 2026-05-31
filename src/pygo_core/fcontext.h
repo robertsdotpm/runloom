@@ -23,8 +23,11 @@
 #include "plat.h"
 
 /* Enable the asm fast path on architectures we have an implementation
- * for and where the OS uses System V calling convention. */
-#if (defined(PYGO_OS_LINUX) || defined(PYGO_OS_MACOS) || defined(PYGO_OS_BSD) \
+ * for and where the OS uses System V calling convention.  PYGO_FORCE_UCONTEXT
+ * (setup.py: PYGO_BACKEND=ucontext / PYGO_NO_ASM) suppresses it; must stay in
+ * sync with the backend selection in plat.h. */
+#if !defined(PYGO_FORCE_UCONTEXT) \
+    && (defined(PYGO_OS_LINUX) || defined(PYGO_OS_MACOS) || defined(PYGO_OS_BSD) \
      || defined(PYGO_OS_ANDROID)) \
     && (defined(PYGO_ARCH_X86_64) || defined(PYGO_ARCH_AARCH64))
 #  define PYGO_HAVE_FCONTEXT 1
