@@ -114,6 +114,41 @@ else
     echo "  (cbmc not found -- skipping;  sudo apt-get install cbmc)"
 fi
 
+# ---- herd7: C11/RC11 weak-memory litmus (fence placement) -------------
+# Spin is sequentially consistent; these probe the actual memory_order on the
+# netpoll commit / wake-list paths.  run_litmus.sh skips cleanly if herd7 is
+# absent, and prints its own pass/fail line; fold its result into the total.
+if [ -x "$HERE/litmus/run_litmus.sh" ]; then
+    if lit_out="$("$HERE/litmus/run_litmus.sh" 2>&1)"; then
+        echo "$lit_out"
+        # count the litmus passes into the suite total when herd7 ran
+        if echo "$lit_out" | grep -q "passed, 0 failed"; then
+            lp="$(echo "$lit_out" | sed -n 's/.* \([0-9]*\) passed, 0 failed/\1/p' | tail -1)"
+            [ -n "$lp" ] && pass=$((pass+lp))
+        fi
+    else
+        echo "$lit_out"
+        fail=$((fail+1)); FAILED="$FAILED litmus"
+    fi
+fi
+
+# ---- GenMC: real C (pthreads + atomics) under RC11 --------------------
+# Explores every RC11 execution of the actual netpoll claim protocol, so it
+# catches a data race / misplaced fence, not just a bad interleaving.  Skips
+# cleanly if genmc is absent.
+if [ -x "$HERE/genmc/run_genmc.sh" ]; then
+    if gmc_out="$("$HERE/genmc/run_genmc.sh" 2>&1)"; then
+        echo "$gmc_out"
+        if echo "$gmc_out" | grep -q "passed, 0 failed"; then
+            gp="$(echo "$gmc_out" | sed -n 's/.* \([0-9]*\) passed, 0 failed/\1/p' | tail -1)"
+            [ -n "$gp" ] && pass=$((pass+gp))
+        fi
+    else
+        echo "$gmc_out"
+        fail=$((fail+1)); FAILED="$FAILED genmc"
+    fi
+fi
+
 echo "----------------------------------------------------------"
 echo "  $pass passed, $fail failed"
 [ -n "$FAILED" ] && echo "  failed:$FAILED"

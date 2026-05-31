@@ -1,19 +1,22 @@
 # pygo formal verification
 
 Machine-checked correctness for pygo's lock-free concurrency primitives.
-Two engines, used for what each is best at:
+Four engines, used for what each is best at:
 
 | engine | what it checks | how |
 |--------|----------------|-----|
 | **Spin** | the *algorithms*, exhaustively, over **all** thread interleavings (sequentially-consistent memory) | hand-written Promela models in [`spin/`](spin/) |
 | **CBMC** | the **actual C source** of the deque, including the real `__atomic_*` memory orderings, over a bounded schedule | harness in [`cbmc/`](cbmc/) compiles `src/pygo_core/cldeque.c` *unmodified* |
+| **herd7** | the **C11/RC11 fence placement** on the netpoll commit / wake paths — does the `memory_order` annotation hold on a *weak* hardware model? | litmus tests in [`litmus/`](litmus/) |
+| **GenMC** | the **real claim protocol as C** (pthreads + C11 atomics) under **RC11**, exploring every weak-memory execution | harness in [`genmc/`](genmc/) |
 
 They are complementary: Spin proves the algorithm has no bad interleaving
-but abstracts the C; CBMC runs on the real code (real index arithmetic,
-real acquire/release/seq_cst) but on a small bounded schedule. Together
-with the runtime sanitizer stress in `tests_c/test_cldeque.c` (real
-threads, millions of ops) that's three independent angles on the same
-code.
+but abstracts the C and assumes sequential consistency; CBMC and GenMC run
+on real code with real `acquire`/`release`/`seq_cst`; herd7 and GenMC drop
+the SC assumption and verify the fences against the weak (RC11) model.
+Together with the runtime sanitizer stress in `tests_c/test_cldeque.c`
+(real threads, millions of ops) that's several independent angles on the
+same code.
 
 ## Run it
 
@@ -381,13 +384,65 @@ releases unconditionally. Spin finds the double-free — the pump unlinks + wake
 the g (which resumes and releases p), and `force_unlink`, still holding the stale
 "token set", frees the same parker again.
 
+### 15. Weak-memory fence placement — `litmus/*.litmus` (herd7)
+
+The Spin models above are **sequentially consistent** — they prove the
+*algorithm* has no bad interleaving, but not that the C11 `memory_order`
+annotations are strong enough on a weak hardware model (ARM/Power). These herd7
+litmus tests probe exactly that, on the netpoll commit / wake paths, under the
+C11/RC11 axiomatic model:
+
+* **`commit_cas_then_publish` → reachable ("Sometimes").** A claimer
+  (`pygo_pump_dispatch_event` / `_drain_expired` / `pygo_netpoll_cancel_g`)
+  CASes `commit`→`WOKEN` (`acq_rel`) and *then* stores `*ready_out`. If the
+  aborting goroutine read `ready_out` relying only on its **acquire-load of
+  `commit`** seeing `WOKEN`, it could read a **stale** value — because the
+  `ready_out` store is sequenced *after* the release-CAS, so the acquire
+  doesn't order it. herd7 confirms the stale read is reachable: **the
+  commit-CAS acquire alone is insufficient.**
+* **`commit_lock_publish` → forbidden ("Never").** The real code closes that
+  window: `wait_fd`'s abort path re-takes `pool->lock` (acquire) before reading
+  `ready_mask`, and the claimer published `ready_out` *before* unlocking
+  (release). The unlock release is sequenced after the publish, so the lock
+  round-trip makes it visible — herd7 confirms the stale read is now
+  **unreachable**. So the `pool->lock` round-trip is **load-bearing**, not the
+  CAS ordering.
+* **`wakelist_mpsc` → forbidden ("Never").** The cross-thread wake
+  (`pygo_sched_wake` → owner's `wake_list` → drain) hands a g's state across OS
+  threads under `wake_list_lock`; the release-unlock / acquire-lock pair makes
+  the waker's writes visible to the owner's drain. No stale read.
+
+Run with `litmus/run_litmus.sh` (needs `herd7`; `opam install herdtools7`).
+`run_verify.sh` folds these into the suite total when herd7 is present.
+
+### 16. netpoll claim protocol under RC11 — `genmc/netpoll_claim.c` (GenMC)
+
+The litmus tests (§15) isolate the fence patterns; this verifies the **whole
+claim protocol** as real C — `pthread_mutex_t pool_lock` + C11 atomics — under
+the **RC11** weak memory model with [GenMC](https://github.com/MPI-SWS/genmc),
+which explores *every* RC11 execution (here 10) rather than a hand-modelled
+abstraction. A parking g races two distinct-value claimers (`R_MASK`,
+`R_CANCEL`); GenMC proves:
+
+* **No data race** on `ready_out` — every access is ordered by `pool->lock`.
+* **Value correctness** — the g reads exactly the winning claimer's value,
+  never `R_UNSET`, never the other claimer's.
+* **Exactly once** — at most one claimer re-queues the parked g.
+
+Negative control `-DBUG_NO_LOCK` makes the aborting g read `ready_out` relying
+only on its acquire-load of `commit` seeing `WOKEN`, *without* the `pool->lock`
+round-trip; GenMC reports a **non-atomic race** on `ready_out` (the read races
+the claimer's publish) — the same gap §15's `commit_cas_then_publish` isolates,
+here on the real protocol. Run with `genmc/run_genmc.sh` (needs `genmc`).
+
 ## Scope & honesty
 
 * Spin models are **sequentially consistent**: they prove the algorithm
   has no bad *interleaving*, not the C11 fence placement. The fence
   placement on the deque is what **CBMC** covers (it carries the real
-  `__atomic_*` orders). Where the three engines agree, that's strong
-  evidence; none is a substitute for the others.
+  `__atomic_*` orders), and the netpoll commit / wake-list fences are what the
+  **herd7 litmus** tests cover (§15, C11/RC11 axiomatic model). Where the
+  engines agree, that's strong evidence; none is a substitute for the others.
 * Bounds are small by necessity (BMC / explicit-state both blow up). The
   deque proofs use 2 thieves and ≤3 items; the wake machine uses 2
   wakers / 2 hubs / 1 sweeper. These are the cardinalities at which the
@@ -432,7 +487,7 @@ the g (which resumes and releases p), and `force_unlink`, still holding the stal
 
 ```
 verify/
-  run_verify.sh            driver: runs all Spin + CBMC checks, reports PASS/FAIL
+  run_verify.sh            driver: runs all Spin + CBMC + herd7 checks, reports PASS/FAIL
   spin/
     cldeque.pml            Chase-Lev deque (no loss / dup / phantom)
     wake_state.pml         per-g wake_state machine (+ BUGGY_DROP_WAKE control)
@@ -451,4 +506,12 @@ verify/
   cbmc/
     cldeque_cbmc.c         harness over the real cldeque.c
     stubs/plat_compat.h    minimal stub so cldeque.c compiles standalone under CBMC
+  litmus/
+    run_litmus.sh          driver: runs the herd7 C11/RC11 litmus tests
+    commit_cas_then_publish.litmus  commit-CAS acquire alone -> stale read (Sometimes)
+    commit_lock_publish.litmus      pool->lock round-trip closes it (Never)
+    wakelist_mpsc.litmus            cross-thread wake_list handoff ordering (Never)
+  genmc/
+    run_genmc.sh           driver: runs GenMC on the real claim protocol (RC11)
+    netpoll_claim.c        pthreads + C11 atomics claim race (+ BUG_NO_LOCK control)
 ```

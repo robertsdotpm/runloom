@@ -1,0 +1,41 @@
+C commit_cas_then_publish
+(*
+ * THE BUG CASE (proves the pool->lock round-trip is load-bearing).
+ *
+ * In src/pygo_core/netpoll.c, a claimer (pygo_pump_dispatch_event /
+ * pygo_pump_drain_expired / pygo_netpoll_cancel_g) does, in program order:
+ *
+ *     pygo_pump_claim: CAS commit ARMED->WOKEN   (memory_order_acq_rel)
+ *     *p->ready_out = <value>                    (plain store, AFTER the CAS)
+ *
+ * The aborting goroutine in pygo_netpoll_wait_fd CASes commit ARMED->PARKED;
+ * on failure it observes WOKEN with an ACQUIRE load.  QUESTION: if the g then
+ * read ready_out relying ONLY on that acquire (i.e. WITHOUT re-taking
+ * pool->lock), could it read a STALE ready_out?
+ *
+ * The data store *ready_out=1 is sequenced AFTER P0's release (modelled as a
+ * release store; only the CAS's release matters here -- P0 is the sole writer
+ * of commit).  P1's acquire-load of `commit` synchronizes only with that
+ * release, ordering what came BEFORE it -- not the later data store.  So a weak
+ * memory model must ALLOW (c==WOKEN /\ r==stale).  herd7 reports the `exists`
+ * is reachable -> the acquire alone is INSUFFICIENT, which is exactly why
+ * wait_fd's abort path re-takes pool->lock before reading ready_mask (see
+ * commit_lock_publish.litmus for the fixed version).
+ *)
+
+{
+  commit = 0;
+  ready_out = 0;
+}
+
+P0 (atomic_int *commit, int *ready_out) {
+  atomic_store_explicit(commit, 2, memory_order_release);
+  *ready_out = 1;
+}
+
+P1 (atomic_int *commit, int *ready_out) {
+  int c = atomic_load_explicit(commit, memory_order_acquire);
+  int r = *ready_out;
+}
+
+exists (1:c=2 /\ 1:r=0)

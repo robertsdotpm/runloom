@@ -1,0 +1,36 @@
+C commit_lock_publish
+(*
+ * THE FIX (proves the pool->lock round-trip closes the stale-read window).
+ *
+ * The claimer publishes ready_out and then UNLOCKS pool->lock; the aborting
+ * goroutine in pygo_netpoll_wait_fd re-ACQUIRES pool->lock before reading
+ * ready_mask (the abort branch does
+ * `pygo_mutex_lock(&pool->lock); pygo_parker_unlink(...); pygo_mutex_unlock`
+ * and only THEN `return ready_mask`).  So the read is ordered after the poollock
+ * acquire, which synchronizes-with the claimer's unlock release -- which is
+ * sequenced AFTER the publish.  Hence the publish is visible.
+ *
+ * Model: poollock starts HELD (=1) by P0.  P0 publishes ready_out then unlocks
+ * (release store 0).  P1 acquires the lock (acquire-load); if it observes the
+ * unlock (got==0) it reads ready_out.  Unlike commit_cas_then_publish, the
+ * synchronizing release (the unlock) is sequenced AFTER the data store, so the
+ * stale read (got==0 /\ r==0) is FORBIDDEN under the C11 model.  herd7 reports
+ * the `exists` is NOT reachable.
+ *)
+
+{
+  poollock = 1;
+  ready_out = 0;
+}
+
+P0 (atomic_int *poollock, int *ready_out) {
+  *ready_out = 1;
+  atomic_store_explicit(poollock, 0, memory_order_release);
+}
+
+P1 (atomic_int *poollock, int *ready_out) {
+  int got = atomic_load_explicit(poollock, memory_order_acquire);
+  int r = *ready_out;
+}
+
+exists (1:got=0 /\ 1:r=0)

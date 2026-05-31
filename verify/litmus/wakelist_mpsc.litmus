@@ -1,0 +1,32 @@
+C wakelist_mpsc
+(*
+ * Cross-thread wake (Phase C / Phase 2): a foreign thread (a run_in_executor
+ * pool worker, or a pump on another OS thread waking a g owned by this sched)
+ * routes the woken g to its owner sched's wake_list under wake_list_lock, then
+ * the owner thread drains the wake_list under the SAME lock.  Any field the
+ * waker wrote on the g BEFORE enqueue (here: the g's "payload", standing in for
+ * ready state / result) must be visible to the owner AFTER it drains.
+ *
+ * This is a release/acquire message-passing pattern through the lock: the
+ * waker writes payload then UNLOCKS (release); the owner LOCKS (acquire) then
+ * reads payload.  The stale read (saw the handoff but not the payload) must be
+ * FORBIDDEN -- this is what makes pygo_sched_wake -> wake_list -> drain safe to
+ * carry a g's state across threads.  herd7 reports the `exists` UNREACHABLE.
+ *)
+
+{
+  wake_list_lock = 1;
+  payload = 0;
+}
+
+P0 (atomic_int *wake_list_lock, int *payload) {
+  *payload = 1;
+  atomic_store_explicit(wake_list_lock, 0, memory_order_release);
+}
+
+P1 (atomic_int *wake_list_lock, int *payload) {
+  int got = atomic_load_explicit(wake_list_lock, memory_order_acquire);
+  int r = *payload;
+}
+
+exists (1:got=0 /\ 1:r=0)
