@@ -2663,6 +2663,26 @@ class _StreamTransport(asyncio.Transport):
         _close_sock(self._sock)
         if not self._conn_lost_called:
             self._conn_lost_called = True
+            self._deliver_connection_lost(exc)
+
+    def _deliver_connection_lost(self, exc):
+        # Schedule connection_lost on the loop (in this connection's context),
+        # NEVER inline -- exactly like asyncio's _call_connection_lost via
+        # call_soon.  Deferring matters on EOF: the recv loop may have just
+        # delivered the peer's final bytes (e.g. a websocket Close frame) to
+        # data_received, waking the protocol's reader task; that task must run
+        # and consume them BEFORE connection_lost, or the protocol reports an
+        # abnormal close instead of the clean one the peer actually sent.
+        def _deliver():
+            try:
+                self._protocol.connection_lost(exc)
+            except Exception as e:
+                self._report(e, "connection_lost")
+        loop = self._loop if self._loop is not None else asyncio.get_event_loop()
+        try:
+            loop.call_soon(_deliver, context=self._context)
+        except RuntimeError:
+            # Loop already closed: best-effort inline so done-futures resolve.
             try:
                 self._run_cb(self._protocol.connection_lost, exc)
             except Exception as e:
@@ -2825,18 +2845,20 @@ class _ProtocolServer(object):
     def close(self):
         if self._closed: return
         self._closed = True
+        # asyncio.Server.close() ONLY stops the listeners; established
+        # connections keep running until they finish (or are closed explicitly
+        # via close_clients()/abort_clients(), or cancelled when the loop ends).
+        # Closing client transports here breaks callers that close() the server
+        # and THEN message the live connections -- e.g. uvicorn's graceful
+        # shutdown closes the server, then sends each websocket a 1012 close
+        # frame; if we'd already torn the transport down that frame is dropped
+        # and the peer sees an abnormal 1006 close.  (We used to close clients
+        # here to dodge the cancel-can't-interrupt-wait_fd hang; that's fixed in
+        # the C core now, so the recv goroutines get cleaned up on loop teardown.)
         for sock in self._socks:
             try: sock.shutdown(_socket.SHUT_RDWR)
             except OSError: pass
             _close_sock(sock)
-        # Tear down accepted connections too.  asyncio's Server.close() leaves
-        # established connections running, but pygo create_server connections
-        # are serviced by goroutines on THIS loop -- once the loop is stopped
-        # (the usual reason close() is called: full teardown, e.g. aiosmtpd's
-        # Controller.stop()) nothing will service them, so a peer mid-request
-        # would hang.  Closing them makes the peer see a reset and fail fast,
-        # matching what stock asyncio achieves via handler-task cancellation.
-        self.close_clients()
 
     def close_clients(self):
         # asyncio 3.13+ API: gracefully close all client connections.
