@@ -441,8 +441,20 @@ class PygoTask(PygoFuture):
             # --- classify the yielded value ---
             if yielded is None:
                 # Bare `yield` (asyncio.sleep(0) shortcut, or any other
-                # cooperative checkpoint).  Round-trip through the
-                # scheduler so other tasks can run.
+                # cooperative checkpoint).  Stock asyncio's sleep(0) runs one
+                # full loop iteration, which INCLUDES a selector poll that
+                # delivers pending socket I/O.  pygo's sched_yield only
+                # round-robins ready goroutines and bypasses the drain loop's
+                # idle netpoll pump (and the aio keepalive keeps it from going
+                # idle), so without an explicit poll here a sleep(0) loop never
+                # advances I/O parked on other goroutines (e.g. a peer's recv
+                # loop) -- breaking the common `await asyncio.sleep(0)` idiom
+                # used to let pending reads land.  Deliver ready I/O first,
+                # then round-trip through the scheduler so other tasks run.
+                try:
+                    pygo_core.netpoll_poll()
+                except AttributeError:
+                    pass    # older pygo_core without the non-blocking pump
                 pygo_core.sched_yield_classic()
                 continue
 

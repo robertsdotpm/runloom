@@ -1385,6 +1385,21 @@ static PyObject *m_netpoll_backend(PyObject *self, PyObject *unused)
     return PyUnicode_FromString(pygo_netpoll_backend());
 }
 
+static PyObject *m_netpoll_poll(PyObject *self, PyObject *unused)
+{
+    (void)self; (void)unused;
+    /* Non-blocking netpoll drain: deliver any ready fd readiness by waking
+     * the parked goroutines (it only enqueues them; it never runs them), then
+     * return.  pygo.aio calls this on a bare `yield` (asyncio.sleep(0)) so a
+     * sleep(0) advances pending socket I/O the way stock asyncio's per-loop-
+     * iteration selector poll does.  Without it, sleep(0) loops never deliver
+     * I/O on parked goroutines because sched_yield bypasses the scheduler
+     * drain loop's idle pump (and the aio keepalive keeps it from going idle).
+     * pygo_netpoll_pump handles the GIL around the syscall itself. */
+    pygo_netpoll_pump(0);
+    Py_RETURN_NONE;
+}
+
 /* Production introspection: returns a dict of scheduler counters so a
  * stuck deployment can be debugged without attaching a C debugger.
  * Counts cover the single-thread scheduler; M:N hub stats arrive when
@@ -1789,6 +1804,10 @@ static PyMethodDef module_methods[] = {
      "until fd is ready.  events is a bitmask: 1=read, 2=write."},
     {"netpoll_backend", m_netpoll_backend, METH_NOARGS,
      "Return active netpoll backend name (\"epoll\", \"kqueue\", \"select\")."},
+    {"netpoll_poll", m_netpoll_poll, METH_NOARGS,
+     "netpoll_poll(): non-blocking netpoll drain -- deliver any ready fd "
+     "readiness by waking parked goroutines, then return.  Used by pygo.aio "
+     "so asyncio.sleep(0) advances pending I/O like a stock loop iteration."},
     {"netpoll_unregister", m_netpoll_unregister, METH_O,
      "netpoll_unregister(fd): clear the netpoll registration cache "
      "bit for fd.  Call from socket close so fd reuse re-registers "
