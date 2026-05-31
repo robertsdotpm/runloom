@@ -1476,6 +1476,33 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
             total += len(data)
         return total
 
+    async def start_tls(self, transport, protocol, sslcontext, *,
+                        server_side=False, server_hostname=None,
+                        ssl_handshake_timeout=None, ssl_shutdown_timeout=None,
+                        **_ignored):
+        """Upgrade an existing connection to TLS in place (STARTTLS, asyncpg
+        SSL).  AbstractEventLoop raises NotImplementedError.  Quiesce the
+        plaintext transport's recv loop (without closing the fd), wrap the same
+        socket in cooperative TLS, handshake, and return a new transport over
+        the TLS socket reusing the SAME protocol (connection_made is not
+        re-fired, matching asyncio)."""
+        sock = getattr(transport, "_sock", None)
+        if sock is None:
+            raise TypeError("transport does not expose a socket for start_tls")
+        # Stop the plaintext recv loop consuming the fd; it exits WITHOUT
+        # closing the socket (TLS takes fd ownership).  Suppress its
+        # connection_lost so the protocol stays "connected" across the upgrade.
+        transport._paused = True
+        transport._stopping = True
+        transport._conn_lost_called = True
+        transport._closed = True
+        await asyncio.sleep(0)   # give the old recv loop a turn to observe + exit
+        tls = _TLSSock(sock, sslcontext, server_side=server_side,
+                       server_hostname=server_hostname)
+        tls.do_handshake(ssl_handshake_timeout)
+        return _StreamTransport(tls, protocol, loop=self,
+                                call_connection_made=False)
+
     async def connect_accepted_socket(self, protocol_factory, sock, *, ssl=None,
                                       ssl_handshake_timeout=None, **_ignored):
         """Wrap an already-accepted socket into a transport (server side).
@@ -2208,7 +2235,7 @@ class _StreamTransport(asyncio.Transport):
     data_received via a recv goroutine; transports its write() through
     cooperative sendall."""
 
-    def __init__(self, sock, protocol, *, loop=None):
+    def __init__(self, sock, protocol, *, loop=None, call_connection_made=True):
         # Populate the asyncio.Transport _extra dict so the INHERITED
         # get_extra_info works -- libraries read these and tests
         # @patch("asyncio.Transport.get_extra_info"), which only intercepts
@@ -2235,10 +2262,13 @@ class _StreamTransport(asyncio.Transport):
         self._paused = False        # pause_reading() flow control
         self._eof_written = False   # write_eof() called -> write() must raise
         self._conn_lost_called = False  # connection_lost fires exactly once
-        try:
-            protocol.connection_made(self)
-        except Exception as e:
-            self._report(e, "connection_made")
+        # start_tls reuses an already-connected protocol, so it suppresses the
+        # re-fire (asyncio doesn't call connection_made again on TLS upgrade).
+        if call_connection_made:
+            try:
+                protocol.connection_made(self)
+            except Exception as e:
+                self._report(e, "connection_made")
         self._recv_g = pygo_core.go(self._recv_loop)
 
     def _recv_loop(self):
