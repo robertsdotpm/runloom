@@ -64,6 +64,15 @@ import pygo_core
 from . import runtime as _runtime
 
 
+def _signal_wakeup_noop(signum, frame):
+    # A Python-level handler must be installed for CPython to write the signum
+    # to set_wakeup_fd()'s pipe; the real dispatch happens loop-side off that
+    # pipe (see PygoEventLoop.add_signal_handler), so this is intentionally a
+    # no-op.  A server may temporarily replace it with its own handler -- the
+    # wakeup-fd write happens regardless, so loop-side dispatch survives.
+    pass
+
+
 # Per-task driver stack size (bytes).  PygoTask drivers run arbitrary user
 # code, including deep C-recursive first-time imports (pydantic etc.) that
 # overflow the scheduler's default 128 KB g-stack and SEGV.  512 KB clears
@@ -1756,18 +1765,20 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
         handle = _Handle(callback, args, self)
         if not hasattr(self, "_signal_handlers"):
             self._signal_handlers = {}
-        def _sig_handler(signum, frame, _h=handle):
-            # Runs on the main thread between bytecodes; do the real work on the
-            # loop thread.  If the loop is gone/closed, drop quietly.
-            if _h._cancelled:
-                return
-            try:
-                self.call_soon_threadsafe(_h._callback, *_h._args)
-            except RuntimeError:
-                pass
+        # Dispatch via signal.set_wakeup_fd + a self-pipe, exactly like
+        # asyncio's Unix loop -- NOT via our own signal.signal() callback.
+        # Servers (uvicorn, hypercorn) install their OWN
+        # signal.signal(sig, handle_exit) for graceful shutdown, which would
+        # clobber a Python-level handler we set and silently drop the user's
+        # callback.  CPython, however, still writes the signum to the wakeup fd
+        # for whatever Python handler is current, so the loop-side dispatch off
+        # that pipe survives a server overriding signal.signal().
+        self._setup_signal_wakeup()
         try:
-            _signal.signal(sig, _sig_handler)
-            # Allow the wakeup to interrupt a blocking syscall on the main thread.
+            # A handler must be installed for CPython to write to the wakeup fd;
+            # a no-op suffices (real work is loop-side).  siginterrupt(False)
+            # so the wakeup doesn't EINTR a syscall on the main thread.
+            _signal.signal(sig, _signal_wakeup_noop)
             try:
                 _signal.siginterrupt(sig, False)
             except (OSError, ValueError):
@@ -1776,6 +1787,46 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
             raise RuntimeError(str(e))
         self._signal_handlers[sig] = handle
 
+    def _setup_signal_wakeup(self):
+        if getattr(self, "_signal_wakeup_setup", False):
+            return
+        import signal as _signal
+        self._signal_rsock, self._signal_wsock = _socket.socketpair()
+        self._signal_rsock.setblocking(False)
+        self._signal_wsock.setblocking(False)
+        try:
+            self._signal_old_wakeup_fd = _signal.set_wakeup_fd(
+                self._signal_wsock.fileno(), warn_on_full_buffer=False)
+        except TypeError:    # pre-3.7 signature; shouldn't happen on 3.12+
+            self._signal_old_wakeup_fd = _signal.set_wakeup_fd(
+                self._signal_wsock.fileno())
+        # Drain the pipe on the loop and dispatch each pending signum's handler.
+        self.add_reader(self._signal_rsock.fileno(), self._read_signal_wakeup)
+        self._signal_wakeup_setup = True
+
+    def _read_signal_wakeup(self):
+        try:
+            data = self._signal_rsock.recv(4096)
+        except (BlockingIOError, InterruptedError):
+            return
+        except OSError:
+            return
+        if not data:
+            return
+        handlers = getattr(self, "_signal_handlers", None)
+        if not handlers:
+            return
+        for signum in data:
+            handle = handlers.get(signum)
+            if handle is not None and not handle._cancelled:
+                # Run the user callback on the loop in the Handle's captured
+                # context (matches asyncio's _handle_signal -> _add_callback).
+                try:
+                    self.call_soon(handle._callback, *handle._args,
+                                   context=handle._context)
+                except RuntimeError:
+                    pass
+
     def remove_signal_handler(self, sig):
         import signal as _signal
         handlers = getattr(self, "_signal_handlers", None)
@@ -1783,10 +1834,40 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
             return False
         handlers.pop(sig)._cancelled = True
         try:
-            _signal.signal(sig, _signal.SIG_DFL)
+            if sig == _signal.SIGINT:
+                _signal.signal(sig, _signal.default_int_handler)
+            else:
+                _signal.signal(sig, _signal.SIG_DFL)
         except (ValueError, OSError):
             pass
+        if not handlers:
+            self._teardown_signal_wakeup()
         return True
+
+    def _teardown_signal_wakeup(self):
+        if not getattr(self, "_signal_wakeup_setup", False):
+            return
+        import signal as _signal
+        try:
+            self.remove_reader(self._signal_rsock.fileno())
+        except Exception:
+            pass
+        try:
+            _signal.set_wakeup_fd(self._signal_old_wakeup_fd
+                                  if self._signal_old_wakeup_fd is not None
+                                  else -1)
+        except (ValueError, OSError):
+            pass
+        for s in (getattr(self, "_signal_rsock", None),
+                  getattr(self, "_signal_wsock", None)):
+            try:
+                if s is not None:
+                    s.close()
+            except OSError:
+                pass
+        self._signal_rsock = None
+        self._signal_wsock = None
+        self._signal_wakeup_setup = False
 
     # ---- run loop ----
     # ---- per-thread run machinery (Phase C: one sched per OS thread) ----
@@ -2382,7 +2463,23 @@ class _StreamTransport(asyncio.Transport):
     data_received via a recv goroutine; transports its write() through
     cooperative sendall."""
 
-    def __init__(self, sock, protocol, *, loop=None, call_connection_made=True):
+    def __init__(self, sock, protocol, *, loop=None, call_connection_made=True,
+                 context=None):
+        # Per-connection contextvars Context.  Stock asyncio runs a transport's
+        # protocol callbacks (connection_made / data_received / eof_received /
+        # connection_lost) inside the context captured when its reader Handle
+        # was registered -- i.e. the context active in create_server's accept
+        # callback (or create_connection's caller).  pygo's recv goroutine
+        # otherwise runs them in the bare scheduler context, so any contextvar
+        # set before the server/connection was created (request-id middleware,
+        # uvicorn's "context preserved by default") is invisible inside the
+        # ASGI task that data_received spawns.  Capture a fresh copy here (each
+        # connection independent, matching asyncio's per-transport copy_context)
+        # and run every protocol callback through it.
+        if context is not None:
+            self._context = context.run(_contextvars.copy_context)
+        else:
+            self._context = _contextvars.copy_context()
         # Populate the asyncio.Transport _extra dict so the INHERITED
         # get_extra_info works -- libraries read these and tests
         # @patch("asyncio.Transport.get_extra_info"), which only intercepts
@@ -2409,14 +2506,34 @@ class _StreamTransport(asyncio.Transport):
         self._paused = False        # pause_reading() flow control
         self._eof_written = False   # write_eof() called -> write() must raise
         self._conn_lost_called = False  # connection_lost fires exactly once
+        self._in_context = False    # re-entrancy guard for _run_cb (see below)
         # start_tls reuses an already-connected protocol, so it suppresses the
         # re-fire (asyncio doesn't call connection_made again on TLS upgrade).
         if call_connection_made:
             try:
-                protocol.connection_made(self)
+                self._run_cb(protocol.connection_made, self)
             except Exception as e:
                 self._report(e, "connection_made")
         self._recv_g = pygo_core.go(self._recv_loop)
+
+    def _run_cb(self, fn, *args):
+        # Run a protocol callback inside this connection's contextvars Context
+        # (so contextvars set before the connection -- e.g. uvicorn's request
+        # context -- reach any task it spawns).  A Context cannot be entered
+        # re-entrantly, and our callbacks fire synchronously: data_received may
+        # call transport.close() (-> connection_lost) while still inside its own
+        # _context.run.  Stock asyncio sidesteps this by scheduling each
+        # callback in its own loop iteration; we instead detect the nested case
+        # and call directly -- we are already executing inside self._context, so
+        # the contextvars are identical.  Goroutines are cooperative and these
+        # callbacks never await, so the flag needs no lock.
+        if self._in_context:
+            return fn(*args)
+        self._in_context = True
+        try:
+            return self._context.run(fn, *args)
+        finally:
+            self._in_context = False
 
     def _recv_loop(self):
         sock = self._sock
@@ -2455,7 +2572,7 @@ class _StreamTransport(asyncio.Transport):
                 # Close only if the protocol didn't ask to keep the
                 # transport open (eof_received() -> True) for its own writes.
                 try:
-                    keep = self._protocol.eof_received()
+                    keep = self._run_cb(self._protocol.eof_received)
                 except Exception as e:
                     self._report(e, "eof_received")
                     keep = False
@@ -2463,7 +2580,7 @@ class _StreamTransport(asyncio.Transport):
                     self.close()
                 return
             try:
-                self._protocol.data_received(data)
+                self._run_cb(self._protocol.data_received, data)
             except Exception as e:
                 # asyncio treats an exception out of data_received() as fatal:
                 # it closes the transport and delivers connection_lost(exc).
@@ -2474,6 +2591,17 @@ class _StreamTransport(asyncio.Transport):
                 self._report(e, "data_received")
                 self.close(e)
                 return
+            # Hand the scheduler to any goroutine data_received just woke (a
+            # protocol coroutine awaiting this read) BEFORE we recv() again.
+            # Stock asyncio does exactly one recv per loop iteration, then runs
+            # ready callbacks; without this yield our recv loop can drain the
+            # whole response AND the EOF/close in one burst, firing
+            # connection_lost (-> protocol state CLOSED) before the woken coro
+            # ran its post-read step.  That breaks ordering-sensitive protocols
+            # -- e.g. websockets' client handshake asserts state is CONNECTING
+            # in connection_open(), which runs only after the read it's blocked
+            # on; if connection_lost beats it the assert fails.
+            pygo_core.sched_yield_classic()
 
     def write(self, data):
         if self._eof_written:
@@ -2536,7 +2664,7 @@ class _StreamTransport(asyncio.Transport):
         if not self._conn_lost_called:
             self._conn_lost_called = True
             try:
-                self._protocol.connection_lost(exc)
+                self._run_cb(self._protocol.connection_lost, exc)
             except Exception as e:
                 self._report(e, "connection_lost")
 
@@ -2618,6 +2746,13 @@ class _ProtocolServer(object):
         self._ssl_context = ssl_context
         self._ssl_handshake_timeout = ssl_handshake_timeout
         self._closed = False
+        # Context active when the server was created (inside the awaiting
+        # create_server coroutine).  Each accepted connection's transport runs
+        # its protocol callbacks in a fresh copy of this -- so a contextvar set
+        # before create_server (uvicorn's "context preserved by default")
+        # reaches the ASGI task spawned from data_received.  Mirrors asyncio's
+        # accept-callback context flowing into each transport's reader Handle.
+        self._context = _contextvars.copy_context()
         # Track live client transports so close()/abort_clients() can tear
         # them down.  Without this, stopping the server (e.g. aiosmtpd's
         # Controller.stop()) leaves accepted connections' sockets open with no
@@ -2648,7 +2783,8 @@ class _ProtocolServer(object):
                 pygo_core.go(lambda c=conn: self._setup_tls_conn(c))
             else:
                 protocol = self._factory()
-                self._conns.add(_StreamTransport(conn, protocol, loop=self._loop))
+                self._conns.add(_StreamTransport(conn, protocol, loop=self._loop,
+                                                 context=self._context))
 
     def _setup_tls_conn(self, conn):
         try:
@@ -2665,7 +2801,8 @@ class _ProtocolServer(object):
             _close_sock(tls)
             return
         protocol = self._factory()
-        self._conns.add(_StreamTransport(tls, protocol, loop=self._loop))
+        self._conns.add(_StreamTransport(tls, protocol, loop=self._loop,
+                                         context=self._context))
 
     def get_loop(self):
         """asyncio.Server.get_loop().  Libraries (websockets) call this on
