@@ -1661,12 +1661,30 @@ class _Server(object):
 # code uses the StreamReader/Writer high-level path above; these exist
 # for libraries (like aionetiface) that consume the protocol API.
 # ====================================================================
-class _StreamTransport(object):
+class _StreamTransport(asyncio.Transport):
     """Thin TCP transport over a socket.  Drives the protocol's
     data_received via a recv goroutine; transports its write() through
     cooperative sendall."""
 
     def __init__(self, sock, protocol, *, loop=None):
+        # Populate the asyncio.Transport _extra dict so the INHERITED
+        # get_extra_info works -- libraries read these and tests
+        # @patch("asyncio.Transport.get_extra_info"), which only intercepts
+        # when we don't shadow it with our own method.
+        extra = {"socket": sock}
+        try: extra["sockname"] = sock.getsockname()
+        except OSError: pass
+        try: extra["peername"] = sock.getpeername()
+        except OSError: pass
+        ssl_obj = getattr(sock, "ssl_object", None)
+        if ssl_obj is not None:
+            extra["ssl_object"] = ssl_obj
+            extra["sslcontext"] = ssl_obj.context
+            try: extra["peercert"] = ssl_obj.getpeercert()
+            except Exception: pass
+            try: extra["cipher"] = ssl_obj.cipher()
+            except Exception: pass
+        super().__init__(extra=extra)
         self._sock = sock
         self._protocol = protocol
         self._loop = loop
@@ -1806,25 +1824,9 @@ class _StreamTransport(object):
     def is_closing(self):
         return self._closed
 
-    def get_extra_info(self, name, default=None):
-        if name == "socket":
-            return self._sock
-        if name == "sockname":
-            try: return self._sock.getsockname()
-            except OSError: return default
-        if name == "peername":
-            try: return self._sock.getpeername()
-            except OSError: return default
-        obj = getattr(self._sock, "ssl_object", None)
-        if name == "ssl_object":
-            return obj if obj is not None else default
-        if name == "peercert":
-            return obj.getpeercert() if obj is not None else default
-        if name == "cipher":
-            return obj.cipher() if obj is not None else default
-        if name == "sslcontext":
-            return obj.context if obj is not None else default
-        return default
+    # get_extra_info is inherited from asyncio.Transport (returns
+    # self._extra.get(name, default), populated in __init__) so it stays
+    # asyncio-compatible and patchable via asyncio.Transport.get_extra_info.
 
     def get_protocol(self):
         return self._protocol
