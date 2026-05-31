@@ -112,7 +112,21 @@ class TestEcho(unittest.TestCase):
         async def main():
             server = await paio.start_server(handler, "127.0.0.1", 0)
             host, port = server.sockets[0].getsockname()[:2]
-            results = await asyncio.gather(*[client(host, port, i)
+            # Bound in-flight connects.  Firing all 500 SYNs at once overruns
+            # the listen accept queue (min(backlog, kern.ipc.somaxconn) ~= 128);
+            # BSD/macOS answer the overflow with RST -> ConnectionResetError,
+            # whereas Linux silently drops the SYN and the client retransmits.
+            # This is not pygo-specific -- stdlib asyncio fails the same
+            # unbounded storm on FreeBSD (measured 349/500 RST).  Gating
+            # concurrency keeps 500 concurrent round-trips through the echo
+            # server while staying portable with no somaxconn tuning.
+            sem = asyncio.Semaphore(64)
+
+            async def bounded(n):
+                async with sem:
+                    return await client(host, port, n)
+
+            results = await asyncio.gather(*[bounded(i)
                                              for i in range(500)])
             server.close()
             return results
