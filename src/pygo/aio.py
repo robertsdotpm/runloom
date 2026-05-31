@@ -1728,7 +1728,15 @@ class _StreamTransport(object):
             try:
                 self._protocol.data_received(data)
             except Exception as e:
+                # asyncio treats an exception out of data_received() as fatal:
+                # it closes the transport and delivers connection_lost(exc).
+                # Without this a protocol that faults mid-read never gets
+                # connection_lost, so any await on closure (e.g. websockets
+                # recv() -> shield(connection_lost_waiter)) hangs forever.
+                # close()'s _conn_lost_called guard keeps it single-fire.
                 self._report(e, "data_received")
+                self.close(e)
+                return
 
     def write(self, data):
         if self._eof_written:
