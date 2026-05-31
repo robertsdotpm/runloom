@@ -1014,6 +1014,13 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
         if self._ka_stop_box is not None:
             self._ka_stop_box[0] = True
         self._closed = True
+        # Restore any signal handlers we installed (matches asyncio's Unix loop)
+        # so they don't leak into the next loop / test.
+        for sig in list(getattr(self, "_signal_handlers", {})):
+            try:
+                self.remove_signal_handler(sig)
+            except Exception:
+                pass
         try:
             self._cancel_outstanding_tasks()
         except Exception:
@@ -1489,6 +1496,54 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
         run_in_executor(None, ...).  Libraries (aiomisc) inject their own
         thread pool through this; the base class raises NotImplementedError."""
         self._default_executor = executor
+
+    # ---- Unix signals (loop.add_signal_handler) ----
+    # The base class raises NotImplementedError; servers (uvicorn, hypercorn,
+    # aiohttp) install SIGINT/SIGTERM handlers for graceful shutdown, so without
+    # this they can't run under pygo.  signal.signal must be called from the
+    # main thread (asyncio has the same constraint); the handler itself runs on
+    # the main thread, and we marshal the user callback onto the loop thread via
+    # call_soon_threadsafe so it runs cooperatively like asyncio's wakeup-fd path.
+    def add_signal_handler(self, sig, callback, *args):
+        import signal as _signal
+        if _threading.current_thread() is not _threading.main_thread():
+            raise ValueError("add_signal_handler() can only be called from the "
+                             "main thread")
+        self._check_closed()
+        handle = _Handle(callback, args, self)
+        if not hasattr(self, "_signal_handlers"):
+            self._signal_handlers = {}
+        def _sig_handler(signum, frame, _h=handle):
+            # Runs on the main thread between bytecodes; do the real work on the
+            # loop thread.  If the loop is gone/closed, drop quietly.
+            if _h._cancelled:
+                return
+            try:
+                self.call_soon_threadsafe(_h._callback, *_h._args)
+            except RuntimeError:
+                pass
+        try:
+            _signal.signal(sig, _sig_handler)
+            # Allow the wakeup to interrupt a blocking syscall on the main thread.
+            try:
+                _signal.siginterrupt(sig, False)
+            except (OSError, ValueError):
+                pass
+        except (ValueError, OSError, RuntimeError) as e:
+            raise RuntimeError(str(e))
+        self._signal_handlers[sig] = handle
+
+    def remove_signal_handler(self, sig):
+        import signal as _signal
+        handlers = getattr(self, "_signal_handlers", None)
+        if not handlers or sig not in handlers:
+            return False
+        handlers.pop(sig)._cancelled = True
+        try:
+            _signal.signal(sig, _signal.SIG_DFL)
+        except (ValueError, OSError):
+            pass
+        return True
 
     # ---- run loop ----
     # ---- per-thread run machinery (Phase C: one sched per OS thread) ----
