@@ -256,6 +256,32 @@ Negative control `-DBUG_LOCK_ORDER` makes the contender take its locks in the
 could introduce — and Spin finds the deadlock: a pump holds pool 1 waiting for
 sub 1 while the contender holds sub 1 waiting for pool 1.
 
+### 11. io_uring multishot handle lifetime — `spin/iouring_msclose.pml`
+
+The one genuinely io_uring-specific lifetime question (an audit finding, not a
+guessed property): `pygo_iouring_ms_recv` parks with the handle's `waiter_g`
+set and, on wake, **re-locks the handle** (io_uring.c:999); `on_cqe` on the
+closing CQE wakes that waiter and then frees the handle *outside* `h->lock`
+(io_uring.c:878-891), and `ms_close`'s `!armed` branch frees immediately
+(:1018-1032). `PygoTCPConn` holds no lock around `self->ms`/`self->closed`
+(pygo_tcp.c), so `recv` and `close` are unsynchronised.
+
+This is memory-safe **only under the single-owner convention**: a `TCPConn` is
+driven by one goroutine, so `close()` runs after `recv()` returns and no
+consumer is parked in `ms_recv` when the closing CQE frees the handle.
+(`PygoTCPConn` is a standalone primitive — *not* used by `pygo.aio` — and its
+benches/tests are one-goroutine-per-conn.) The model proves **no use-after-free
+under that convention**: the consumer never re-locks the handle after it is
+freed (`assert(freed == 0)` at the re-lock).
+
+Negative control `-DBUG_CONCURRENT_CLOSE` lifts the convention (a second task
+closes the conn while the first is parked in `recv` — a shared `TCPConn` under
+`PYGO_TCPCONN_IOURING=1` on M:N free-threaded) and Spin finds the UAF: the
+closing CQE wakes the parked consumer *and* frees the handle, and the woken
+consumer re-locks freed memory. So the single-owner convention is load-bearing
+for memory safety; making `TCPConn` shareable would require refcounting the
+handle or freeing it under coordination with a parked `recv`.
+
 ## Scope & honesty
 
 * Spin models are **sequentially consistent**: they prove the algorithm
@@ -294,15 +320,10 @@ sub 1 while the contender holds sub 1 waiting for pool 1.
   and the drain **wakes the goroutine before decrementing `inflight_count`**
   (io_uring.c:620-625 wake, :640 decrement), the exact ordering `blockpool.pml`
   proves keeps the single-thread drain from exiting early. The one genuinely
-  io_uring-specific surface is **multishot** (`pygo_iouring_ms_*`): a handle's
-  CQE-append/consume queue and, in particular, its free — `on_cqe` frees the
-  handle (io_uring.c:878-891) *outside* `h->lock`, after waking a captured
-  `waiter_g`, which would re-lock the handle in `ms_recv` (:999). That is safe
-  under single-owner sequential use (a consumer is never parked in `ms_recv`
-  when `ms_close` runs, so `waiter_g` is NULL at the closing CQE) but would be
-  a use-after-free if concurrent `recv`+`close` from different tasks on one
-  handle is ever supported. Modelling that lifetime (or auditing the close
-  contract) is the precise next io_uring FV target.
+  io_uring-specific surface is **multishot** (`pygo_iouring_ms_*`): its handle
+  lifetime (the `on_cqe`/`ms_close` free vs a parked `ms_recv`) is now modelled
+  by `iouring_msclose.pml` (§11) — memory-safe under the single-owner
+  convention, a use-after-free without it.
 
 ## Layout
 
@@ -320,6 +341,7 @@ verify/
     netpoll_commit.pml     netpoll park/wake commit protocol (+ BUG_NO_COMMIT)
     netpoll_rearm.pml      netpoll LT+ONESHOT re-arm vs not-yet-linked window (+ BUG_EDGE_TRIGGERED)
     netpoll_multipool.pml  netpoll multi-pool dispatch pool->sub lock hierarchy (+ BUG_LOCK_ORDER)
+    iouring_msclose.pml    io_uring multishot handle lifetime, recv vs close (+ BUG_CONCURRENT_CLOSE)
   cbmc/
     cldeque_cbmc.c         harness over the real cldeque.c
     stubs/plat_compat.h    minimal stub so cldeque.c compiles standalone under CBMC
