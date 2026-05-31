@@ -646,6 +646,20 @@ class PygoFuture(_PygoFutureMixin, asyncio.Future):
         self._pg_future_init()
 
 
+def _fut_cancelled_error(fut):
+    """Build the CancelledError to throw into a coroutine whose awaited future
+    was cancelled, PRESERVING the future's cancel message.  Both PygoFuture and
+    stdlib asyncio.Future expose _make_cancelled_error() (3.9+); fall back to a
+    bare CancelledError for any exotic awaitable that lacks it."""
+    mk = getattr(fut, "_make_cancelled_error", None)
+    if mk is not None:
+        try:
+            return mk()
+        except BaseException:
+            pass
+    return asyncio.CancelledError()
+
+
 # ====================================================================
 # PygoTask -- the heart of the bridge.
 # ====================================================================
@@ -727,6 +741,12 @@ class PygoTask(_PygoFutureMixin, asyncio.Task):
         if self.done():
             return False
         self._cancel_requested = True
+        # Remember the cancel message so the driver can deliver
+        # CancelledError(msg) -- anyio's cancel scopes recognise their own
+        # cancellation solely by exc.args[0] ("Cancelled via cancel scope ..."),
+        # so dropping the message makes the scope refuse to swallow it and the
+        # CancelledError escapes (breaks every StreamingResponse/SSE handler).
+        self._pgcancelmsg = msg
         self._pgnumcancels += 1
         # If we're suspended on a future/task, propagate the cancel INTO it
         # (mirrors stock asyncio cancelling self._fut_waiter).  Its completion
@@ -770,6 +790,22 @@ class PygoTask(_PygoFutureMixin, asyncio.Task):
             self._pgmustcancel = False
         return self._pgnumcancels
 
+    # Shadow the C asyncio.Task descriptors with our _pg* state.  anyio's
+    # _deliver_cancellation reads BOTH directly: `if task._must_cancel:
+    # continue` (skip a task that already has a cancel pending) and `waiter =
+    # task._fut_waiter` (only re-cancel while the awaited future isn't done).
+    # The never-updated C slots are always False/None, so without these anyio
+    # would hammer task.cancel() every loop cycle -- re-injecting CancelledError
+    # into cleanup awaits.  Read-only: nothing on our drive path sets them (the
+    # C Task.__step that would is never run); we keep state in the _pg* attrs.
+    @property
+    def _must_cancel(self):
+        return self._pgmustcancel
+
+    @property
+    def _fut_waiter(self):
+        return self._pgfutwaiter
+
     # ---- driver: the per-task goroutine body ----
     def _driver(self):
         # Capture our own G handle so cancel/done_callback can wake us.
@@ -794,8 +830,9 @@ class PygoTask(_PygoFutureMixin, asyncio.Task):
                     if self._pgmustcancel and throw_exc is None:
                         # Deliver the cancel exactly once, then clear it so the
                         # coro's cleanup awaits (async with __aexit__ / finally)
-                        # aren't re-cancelled before they finish.
-                        throw_exc = asyncio.CancelledError()
+                        # aren't re-cancelled before they finish.  Carry the
+                        # cancel message (anyio matches on it to swallow).
+                        throw_exc = self._make_cancelled_error()
                         self._pgmustcancel = False
                     if throw_exc is not None:
                         e, throw_exc = throw_exc, None
@@ -809,7 +846,9 @@ class PygoTask(_PygoFutureMixin, asyncio.Task):
                     return
                 except asyncio.CancelledError:
                     if not self.done():
-                        self._pg_future_cancel()
+                        # Record the task's own cancel message so a parent
+                        # awaiting THIS task receives CancelledError(msg) too.
+                        self._pg_future_cancel(self._pgcancelmsg)
                     self._pg_settle_c()
                     return
                 except BaseException as e:
@@ -864,13 +903,13 @@ class PygoTask(_PygoFutureMixin, asyncio.Task):
             if yielded.done():
                 try:
                     if yielded.cancelled():
-                        throw_exc = asyncio.CancelledError()
+                        throw_exc = _fut_cancelled_error(yielded)
                     elif yielded.exception() is not None:
                         throw_exc = yielded.exception()
                     else:
                         send_value = yielded.result()
-                except asyncio.CancelledError:
-                    throw_exc = asyncio.CancelledError()
+                except asyncio.CancelledError as e:
+                    throw_exc = e
                 continue
 
             # Slow path: park the goroutine until the future fires.
@@ -892,18 +931,18 @@ class PygoTask(_PygoFutureMixin, asyncio.Task):
                     yielded.remove_done_callback(self._wake_unpark)
                 except Exception:
                     pass
-                throw_exc = asyncio.CancelledError()
+                throw_exc = self._make_cancelled_error()
                 continue
 
             try:
                 if yielded.cancelled():
-                    throw_exc = asyncio.CancelledError()
+                    throw_exc = _fut_cancelled_error(yielded)
                 elif yielded.exception() is not None:
                     throw_exc = yielded.exception()
                 else:
                     send_value = yielded.result()
-            except asyncio.CancelledError:
-                throw_exc = asyncio.CancelledError()
+            except asyncio.CancelledError as e:
+                throw_exc = e
 
     def _wake_unpark(self, fut):
         # add_done_callback gives us the future; we don't need it.
