@@ -82,47 +82,46 @@ TSan abort otherwise).
 > These are **open** issues this tooling reproduces deterministically.
 > They are surfaced here, not fixed.
 
-### A. M:N: `select(default=True)` busy-poll loses a parked-sender wake — OPEN
+### A. M:N: select() under contention crashed / lost values — FIXED
 
-A busy-poll loop on `select([..., ("recv", ch)], default=True)` under the
-M:N hub scheduler loses a wake when `ch`'s sender parks (buffer full).
-The sender is then **stranded** → `mn_run()` never returns (hang), or —
-timing-dependent — the received value is **corrupted** → SIGSEGV in the
-result-tuple unpack (`_PyEval_EvalFrameDefault` with a `tstate` arg that
-aliases a `tupleiter`; `throwflag` garbage).
+Under real free-threaded parallelism, `select()` over channels with a
+concurrent `close()` could SIGSEGV, hang, or silently drop values
+(`tools/mn_stress.py` full mode mismatched ~1/16 iterations).  Root-caused
+to **four** distinct bugs in `chan.c`'s select path, all now fixed:
 
-Minimal deterministic repro: `tests/test_mn.py::
-test_select_default_busy_poll_xfail` (one feeder + one consumer, single
-hub reproduces). `tools/mn_stress.py` (full/non-`--stable` mode) also hits
-it via its select consumers.
+1. **close-wake returned NULL** (`dcd1988`).  `close()` woke a goroutine
+   parked in select Phase-2 with `value == NULL`; `m_select` put that NULL
+   into the `(value, ok)` result tuple → SIGSEGV in the caller's
+   `v, ok = ...` unpack.  Fixed: close-wake returns a fresh `Py_None`,
+   matching every other closed-recv path.
+2. **abort path returned a bare -1** (`ae2df38`).  Phase-2 install's
+   "channel went ready" abort returned `select_try_each()` directly, which
+   is -1 when the ready channel raced away.  For a *blocking* select a bare
+   -1 became `PyLong(-1)` → the caller's unpack raised `TypeError`, killing
+   the goroutine and dropping every value it had received.  Fixed: retry
+   the scan-then-park instead of returning -1.
+3. **abort dropped an already-delivered value** (`ae2df38`).  The abort's
+   `CAS(fired_case, -1→i)` result was ignored; if a delivery had already
+   fired the select on an earlier case (CAS won, value in that waiter), the
+   abort evicted/freed the waiter holding it → value vanished.  Fixed: a
+   lost CAS means "already fired" → stop installing and park, returning the
+   delivered value.
+4. **spurious wake returned -2-without-exception** (`ae2df38`).  A resume
+   with `fired_case < 0` returned -2 → `m_select` returned NULL with no
+   exception set → CPython `SystemError` → dead goroutine.  Fixed: retry
+   (Go's spurious-wakeup behaviour), with a 10M-retry guard.
 
-**Tightly isolated by elimination — all of these are CLEAN:**
+The earlier framing of this finding ("`select(default=True)` busy-poll")
+was a mis-minimisation: that repro also had a *usage* bug (unpacking
+select's `-1` default-sentinel as a tuple).  The real defects are the four
+above and are independent of `default=`.  The deque, `wake_state`,
+`park_safe`, and `select`-claim *algorithms* remain machine-proven in
+`verify/`; these were integration bugs in the select → park/wake path,
+surfaced by the fuzzer + watchdog under M:N.
 
-| variant | result |
-|---|---|
-| blocking `select([("recv", b)])` (receiver parks) | clean |
-| busy-poll `b.try_recv()` (never parks, no select) | clean |
-| `select(default=True)` with a buffer big enough the sender never parks | clean |
-| single-channel blocking `recv()` loop | clean |
-
-Only `select(default=True)` **+ a sender that parks** fails. So the defect
-is in `select`'s interaction with the **parked-sender wake** under the M:N
-hub scheduler. It is **NOT**:
-* in `select_try_each`'s value/wake handling — that block is textually
-  identical to the working `chan_recv_locked` (try_recv);
-* preemption/handoff — crashes with `PYGO_PREEMPT=0 PYGO_HANDOFF=0`;
-* cross-hub migration — single hub (`mn_init(1)`) reproduces;
-* a coroutine-stack overflow — repros at 32 KB and 512 KB.
-
-The deque, `wake_state`, `park_safe`, and `select`-claim *algorithms* are
-machine-proven in `verify/`, so this is an **integration** bug in the
-select → parked-sender wake path under `mn_sched.c`, scheduling-sequence
-dependent (select's slower per-call path takes a different cooperative
-schedule than try_recv's). Pinpointing the exact instruction needs C-level
-instrumentation of the sender park/wake under that schedule.
-
-Until fixed: prefer **blocking** `select` over a `default=True` busy-poll
-under M:N; `recv`/`try_recv` and blocking select are unaffected.
+Verified: `mn_stress` full (select consumers) CLEAN over 3000 iterations
+across 6 seeds; single/multi-channel blocking-select+close clean 40/40;
+guarded by `tests/test_mn.py::test_select_close_conservation`.
 
 ### B. `getaddrinfo` codec import overflowed the goroutine stack — FIXED
 

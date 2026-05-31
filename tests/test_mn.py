@@ -10,9 +10,10 @@ test modules call mn_init/mn_go/mn_run, so this fills that gap.
 Each test runs its workload in a FRESH SUBPROCESS, for two reasons:
   1. mn_init/mn_fini install process-global hub threads; a clean process
      per test avoids cross-test contamination of that global state.
-  2. the M:N scheduler can SIGSEGV under some contended Python workloads
-     (see test_contended_select_xfail); a subprocess turns that into a
-     clean test failure instead of taking down the whole pytest run.
+  2. a regression in the scheduler/channels can SIGSEGV or hang under
+     contended parallel workloads (see test_select_close_conservation,
+     which guards a fixed select()+close() crash/loss arc); a subprocess
+     turns that into a clean test failure, not a dead pytest run.
 
 Subprocesses run with PYTHON_GIL=0 so hubs genuinely run in parallel
 (true free-threading) -- the condition under which the scheduler's
@@ -21,8 +22,6 @@ concurrency is actually tested.
 import os
 import subprocess
 import sys
-
-import pytest
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -198,60 +197,81 @@ print("PASS")
 # ---------------------------------------------------------------------------
 # Known-broken workload, isolated + documented.
 # ---------------------------------------------------------------------------
-@pytest.mark.xfail(reason="OPEN BUG, minimally isolated: a busy-poll loop on "
-                          "select(..., default=True) under M:N loses a wake when "
-                          "the channel's sender parks (buffer full) -> the sender "
-                          "is stranded (hang) or its value is corrupted (SIGSEGV). "
-                          "Scheduling-sequence-dependent; reproduces single-hub.",
-                   strict=False)
-def test_select_default_busy_poll_xfail():
-    """Minimal deterministic repro of the open M:N select bug.
+def test_select_close_conservation():
+    """Regression for the M:N blocking-select + close() bug arc.
 
-    A single consumer busy-polls `select([(\"recv\", b)], default=True)` on a
-    buffered channel while a feeder fills it.  When the buffer fills the
-    feeder parks as a sender; the select path's wake of that parked sender
-    is lost, so the feeder is stranded (mn_run never returns -> hang) or,
-    timing-dependent, the received value is corrupted (-> SIGSEGV in the
-    result-tuple unpack).
+    Many consumers block in select() across a shared channel pool while
+    producers push a known multiset of tokens and a coordinator closes
+    the channels.  Every token must be received exactly once.
 
-    Tightly isolated (proven by elimination):
-      * blocking `select([(\"recv\", b)])`           -> CLEAN
-      * busy-poll `b.try_recv()` (no select)          -> CLEAN
-      * `select(default=True)` + buffer big enough     -> CLEAN
-        that the sender never parks
-    Only `select(default=True)` + a sender that parks fails.  So the defect
-    is in select's interaction with the parked-sender wake under the M:N
-    hub scheduler -- NOT in select_try_each's value handling (textually
-    identical to the working chan_recv_locked), NOT preemption/handoff
-    (crashes with both off), NOT cross-hub (single hub repros).
+    Before the fix this manifested three ways under M:N parallelism:
+      * SIGSEGV -- close() woke a parked select RECV with value==NULL,
+        which m_select put into the (value, ok) result tuple, crashing the
+        caller's `v, ok = ...` unpack (now: close-wake returns Py_None).
+      * Lost tokens / consumer death -- the Phase-2 install ABORT path
+        returned select_try_each()'s result directly, which can be -1 when
+        the ready channel raced away; a bare -1 from a *blocking* select
+        became PyLong(-1) and the caller's unpack raised TypeError, killing
+        the consumer (now: the abort retries instead of returning -1).
+      * Lost tokens -- if a delivery fired the select on an earlier case
+        while a later case looked ready, the abort evicted the waiter
+        holding the just-delivered value (now: a lost claim-CAS breaks to
+        the park and returns the delivered value).
 
-    Run in a subprocess so the hang/crash can't take down the suite.
-    When the M:N select-default wake path is fixed this flips to xpass.
+    Several iterations to shake out the timing-dependent races.  Runs in a
+    subprocess so any residual crash fails one test, not the suite.
     """
-    rc, out, err = run_mn(r"""
-N = 400
-b = pygo_core.Chan(8)          # small buffer -> feeder parks as sender when full
-res = pygo_core.Chan(1)
-def feeder():
-    for i in range(N):
-        b.send(1000 + i)       # ints > 256 are real refcounted objects
-def cons():
-    c = 0
-    while c < N:
-        idx, (v, ok) = pygo_core.select([("recv", b)], default=True)
-        if idx == -1:
-            pygo_core.sched_yield_classic(); continue
-        if ok: c += 1
-    res.send(c)
-pygo_core.mn_init(2)
-pygo_core.mn_go(cons); pygo_core.mn_go(feeder)
-pygo_core.mn_run()
-g = res.try_recv()
-pygo_core.mn_fini()
-assert g is not None and g[0] == N, g
+    assert_pass(r"""
+def experiment(nhubs, nprod, ncons, nchan, per):
+    chans = [pygo_core.Chan([0, 1, 8][i % 3]) for i in range(nchan)]
+    done = pygo_core.Chan(nprod)
+    res  = pygo_core.Chan(ncons)
+    def producer(pid):
+        def run():
+            for s in range(per):
+                chans[(pid + s) % nchan].send(pid * 1000 + s)
+                if (s & 7) == 0:
+                    pygo_core.sched_yield_classic()
+            done.send(pid)
+        return run
+    def closer():
+        for _ in range(nprod):
+            done.recv()
+        for ch in chans:
+            ch.close()
+    def consumer():
+        got = 0
+        total = 0
+        closed = [False] * nchan
+        while not all(closed):
+            cases = [("recv", chans[i]) for i in range(nchan) if not closed[i]]
+            if not cases:
+                break
+            idx, (v, ok) = pygo_core.select(cases)   # BLOCKING select
+            live = [i for i in range(nchan) if not closed[i]]
+            if ok:
+                got += 1; total += v
+            else:
+                closed[live[idx]] = True
+        res.send((got, total))
+    pygo_core.mn_init(nhubs)
+    for _ in range(ncons): pygo_core.mn_go(consumer)
+    for p in range(nprod):  pygo_core.mn_go(producer(p))
+    pygo_core.mn_go(closer)
+    pygo_core.mn_run()
+    rc = rt = 0
+    for _ in range(ncons):
+        g = res.try_recv()
+        if g is None: break
+        (c, t), ok = g
+        rc += c; rt += t
+    pygo_core.mn_fini()
+    exp_c = nprod * per
+    exp_t = sum(pid * 1000 + s for pid in range(nprod) for s in range(per))
+    assert (rc, rt) == (exp_c, exp_t), (nhubs, nprod, ncons, nchan, per, rc, rt, exp_c, exp_t)
+    assert pygo_core._self_check(0) == 0
+
+for it in range(60):
+    experiment(nhubs=2 + it % 3, nprod=5, ncons=8, nchan=1 + it % 3, per=24)
 print("PASS")
-""", timeout=10)
-    assert rc == 0 and "PASS" in out, (
-        "select(default=True) busy-poll under M:N failed: rc={0} "
-        "(124=hang/stranded sender; 139=SIGSEGV/value corruption)\n"
-        "stderr tail:\n{1}".format(rc, err[-800:]))
+""", timeout=60)

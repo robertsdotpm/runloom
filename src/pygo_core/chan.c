@@ -650,15 +650,18 @@ static void select_evict_self(pygo_select_case_t *cases, int n,
 int pygo_chan_select(pygo_select_case_t *cases, int n, int default_ready)
 {
     int rc;
+    int select_retries = 0;
 
     if (n <= 0) {
         PyErr_SetString(PyExc_ValueError, "select needs at least 1 case");
         return -2;
     }
 
+select_retry:
     /* Phase 1: try each case (no parking).  This handles the
      * common case (some channel is ready) and matches Go's select-
-     * scan-then-park semantics. */
+     * scan-then-park semantics.  Also the re-entry point after a
+     * spurious wake in Phase 2 (see the fired < 0 path below). */
     rc = select_try_each(cases, n);
     if (rc != -1) return rc;          /* fired, errored, or PyErr set */
 
@@ -674,7 +677,6 @@ int pygo_chan_select(pygo_select_case_t *cases, int n, int default_ready)
         struct pygo_select_park park;
         pygo_chan_waiter_t *waiters;
         int i, fired;
-        int select_rc;
 
         waiters = (pygo_chan_waiter_t *)PyMem_Calloc(
             (size_t)n, sizeof(pygo_chan_waiter_t));
@@ -738,13 +740,24 @@ int pygo_chan_select(pygo_select_case_t *cases, int n, int default_ready)
                     /* Race: someone freed space / opened a slot.
                      * Tear down what we've installed and retry try-each. */
                     /* Mark park as fired-by-us-on-this-case so other
-                     * channels skip our tombstones. */
+                     * channels skip our tombstones.  But if the CAS
+                     * LOSES, a concurrent sender/closer already claimed
+                     * us on an earlier-installed case and delivered its
+                     * value into that waiter.  Aborting + evicting now
+                     * would DROP that delivered value (the eviction frees
+                     * the waiter holding it).  Instead stop installing and
+                     * fall through to the park: the delivery already
+                     * woke us, so the park resumes immediately, clears the
+                     * stale hub-submission, and we return the delivered
+                     * value via the fired case below. */
                     {
                         int expected = -1;
-                        __atomic_compare_exchange_n(&park.fired_case,
+                        if (!__atomic_compare_exchange_n(&park.fired_case,
                                                     &expected, i, 0,
                                                     __ATOMIC_ACQ_REL,
-                                                    __ATOMIC_ACQUIRE);
+                                                    __ATOMIC_ACQUIRE)) {
+                            break;   /* already fired (expected = winner); go park */
+                        }
                     }
                     /* Already-installed waiters are tombstones; the
                      * channels they're on will skip them.  We need
@@ -760,10 +773,24 @@ int pygo_chan_select(pygo_select_case_t *cases, int n, int default_ready)
                             }
                         }
                     }
-                    select_rc = select_try_each(cases, n);
                     PyMem_Free(waiters);
                     PYGO_SELECT_UNPIN();
-                    return select_rc;
+                    /* Retry the whole scan-then-park.  Do NOT return
+                     * select_try_each() directly: it can come back -1
+                     * (the channel that looked ready raced away to
+                     * another goroutine), and a bare -1 for a BLOCKING
+                     * select becomes PyLong(-1) in m_select -> the
+                     * caller's `v, ok = select(...)` unpack raises
+                     * TypeError and the goroutine dies, dropping work.
+                     * select_retry re-scans and, if still nothing is
+                     * ready, re-parks (or returns -1 only when a default
+                     * case actually exists). */
+                    if (++select_retries > 10000000) {
+                        PyErr_SetString(PyExc_RuntimeError,
+                                        "select: too many retries");
+                        return -2;
+                    }
+                    goto select_retry;
                 }
                 waiter_push(&ch->senders, &ch->senders_tail, &waiters[i]);
                 pygo_mutex_unlock(&ch->lock);
@@ -774,10 +801,13 @@ int pygo_chan_select(pygo_select_case_t *cases, int n, int default_ready)
                     pygo_mutex_unlock(&ch->lock);
                     {
                         int expected = -1;
-                        __atomic_compare_exchange_n(&park.fired_case,
+                        if (!__atomic_compare_exchange_n(&park.fired_case,
                                                     &expected, i, 0,
                                                     __ATOMIC_ACQ_REL,
-                                                    __ATOMIC_ACQUIRE);
+                                                    __ATOMIC_ACQUIRE)) {
+                            break;   /* already fired by a delivery: go park
+                                      * to drain the wake + return its value */
+                        }
                     }
                     select_evict_self(cases, n, waiters, /*fired*/-1);
                     {
@@ -788,10 +818,18 @@ int pygo_chan_select(pygo_select_case_t *cases, int n, int default_ready)
                             }
                         }
                     }
-                    select_rc = select_try_each(cases, n);
                     PyMem_Free(waiters);
                     PYGO_SELECT_UNPIN();
-                    return select_rc;
+                    /* Retry rather than returning select_try_each() (which
+                     * can be -1 if the ready channel raced away) -- see the
+                     * SEND abort path above for why a bare -1 here would
+                     * crash a blocking select's caller. */
+                    if (++select_retries > 10000000) {
+                        PyErr_SetString(PyExc_RuntimeError,
+                                        "select: too many retries");
+                        return -2;
+                    }
+                    goto select_retry;
                 }
                 waiter_push(&ch->receivers, &ch->receivers_tail, &waiters[i]);
             }
@@ -806,13 +844,36 @@ int pygo_chan_select(pygo_select_case_t *cases, int n, int default_ready)
         }
         pygo_coro_yield();
 
-        /* Woken.  park.fired_case is the winning index. */
+        /* Woken.  park.fired_case is the winning index, OR still -1 on a
+         * spurious wake: the scheduler resumed us without any channel
+         * having claimed our park (e.g. a stale hub-submission entry left
+         * by a wake that raced our park).  Returning -2 here made m_select
+         * hand back NULL with no exception -> CPython SystemError ->
+         * the goroutine died mid-loop, silently dropping every value it
+         * had already received.  Instead, behave like Go's select on a
+         * spurious wakeup: tear down our waiters and retry the whole
+         * scan-then-park from the top.  No value can have been delivered
+         * to us (fired_case is unset), so nothing is lost. */
         fired = park.fired_case;
         if (fired < 0) {
-            /* Shouldn't happen -- defensive. */
+            select_evict_self(cases, n, waiters, /*fired*/-1);
+            {
+                int j;
+                for (j = 0; j < n; j++) {
+                    if (cases[j].op == PYGO_SELECT_SEND &&
+                        waiters[j].value != NULL) {
+                        Py_DECREF(waiters[j].value);
+                    }
+                }
+            }
             PyMem_Free(waiters);
             PYGO_SELECT_UNPIN();
-            return -2;
+            if (++select_retries > 10000000) {
+                PyErr_SetString(PyExc_RuntimeError,
+                                "select: too many spurious wakeups");
+                return -2;
+            }
+            goto select_retry;
         }
 
         /* Evict our tombstone waiters from all losing channels. */
@@ -845,9 +906,21 @@ int pygo_chan_select(pygo_select_case_t *cases, int n, int default_ready)
             PYGO_SELECT_UNPIN();
             return fired;
         }
-        /* Fired RECV: waiters[fired].value + .ok hold the result. */
-        cases[fired].recv_value = waiters[fired].value;
+        /* Fired RECV: waiters[fired].value + .ok hold the result.  A
+         * close-wake (pygo_chan_close) leaves value == NULL and ok == 0
+         * -- the channel was closed while we were parked.  Normalise that
+         * to a fresh Py_None so the (value, ok) result matches the
+         * Phase-1 closed path and chan_recv_locked; otherwise the NULL
+         * propagates into the (value, ok) tuple m_select builds and
+         * crashes the caller's `v, ok = ...` unpack (SIGSEGV in
+         * tupleiter_next on a NULL item). */
         cases[fired].recv_ok = (waiters[fired].ok == 1);
+        if (waiters[fired].value != NULL) {
+            cases[fired].recv_value = waiters[fired].value;  /* delivered ref */
+        } else {
+            Py_INCREF(Py_None);
+            cases[fired].recv_value = Py_None;               /* closed-while-parked */
+        }
         PyMem_Free(waiters);
         PYGO_SELECT_UNPIN();
         return fired;
