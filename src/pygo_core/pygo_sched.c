@@ -945,6 +945,13 @@ static void pygo_sched_drain_wake_list(pygo_sched_t *s)
  * thread is gone).  A thread churning many short loops (e.g. aiosmtpd's
  * per-test Controller thread) leaks one sched per thread, not per loop. */
 static PYGO_TLS pygo_sched_t *pygo_tls_sched = NULL;
+/* Count of per-thread scheds ever created.  When a SECOND one appears,
+ * cross-thread wakes become possible (a g owned by one thread's sched woken by
+ * another -- a foreign-thread future resolution, or the shared netpoll pump on
+ * a different loop's thread delivering an fd event for this thread's parker).
+ * That is when we arm the pump-interrupt eventfd (Phase 2); a single-loop app
+ * stays exactly as before, with no eventfd in the shared epoll. */
+static volatile int pygo_sched_count = 0;
 
 pygo_sched_t *pygo_sched_get(void)
 {
@@ -956,6 +963,13 @@ pygo_sched_t *pygo_sched_get(void)
     }
     pygo_sched_init(s);                 /* sets stack_size = pygo_cal_default */
     pygo_tls_sched = s;
+    /* First call on THIS thread -- never under pool->lock (it runs before this
+     * thread touches netpoll), so arming (which takes pool->lock via
+     * pygo_netpoll_init) cannot self-deadlock against the wake path.  Arm only
+     * once a second thread's sched exists; idempotent thereafter. */
+    if (__atomic_add_fetch(&pygo_sched_count, 1, __ATOMIC_ACQ_REL) >= 2) {
+        pygo_netpoll_wake_pump_arm();
+    }
     return s;
 }
 
@@ -1261,9 +1275,36 @@ void pygo_sched_park_current(void)
 
 void pygo_sched_wake(pygo_g_t *g)
 {
+    pygo_sched_t *self, *owner;
     if (g == NULL) return;
     pygo_g_state_set(g, PYGO_GST_RUNNABLE);
-    pygo_ready_push(pygo_sched_get(), g);
+    self  = pygo_sched_get();
+    owner = g->owner ? g->owner : self;
+    if (owner == self) {
+        /* Same thread (the common single-loop / same-loop case): push onto our
+         * own cooperative ready ring. */
+        pygo_ready_push(self, g);
+        return;
+    }
+    /* Phase 2 -- cross-thread wake.  g's owner sched runs on ANOTHER OS thread
+     * (e.g. the shared netpoll pump that delivered this fd event is draining on
+     * a different loop's thread than the one that parked the g).  Pushing onto
+     * OUR ready ring would resume the g on the wrong thread (and our ready ring
+     * is single-consumer, not cross-thread-safe).  Instead enqueue onto the
+     * OWNER's thread-safe wake_list (its drain consumes it), then kick its pump
+     * so an idle epoll_wait wakes to drain the list.  Same mechanism as
+     * pygo_sched_wake_safe; the kick eventfd is level-triggered + non-exclusive
+     * so every blocked pumper wakes and drains its own wake_list. */
+    pygo_mutex_lock(&owner->wake_list_lock);
+    g->wake_next = NULL;
+    if (owner->wake_list_tail != NULL) {
+        owner->wake_list_tail->wake_next = g;
+    } else {
+        owner->wake_list_head = g;
+    }
+    owner->wake_list_tail = g;
+    pygo_mutex_unlock(&owner->wake_list_lock);
+    pygo_netpoll_wake_pump();
 }
 
 /* Race-safe park/wake.  Used by pygo.aio.PygoTask to replace its

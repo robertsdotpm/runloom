@@ -1286,9 +1286,14 @@ static void pygo_mn_hub_submit(pygo_hub_t *h, pygo_g_t *g)
 void pygo_mn_wake_g(void *hub_opaque, pygo_g_t *g)
 {
     if (hub_opaque == NULL) {
-        /* g belongs to the single-thread global scheduler (or netpoll
-         * was used outside any hub context). */
-        pygo_sched_ready_push(pygo_sched_get(), g);
+        /* g belongs to a per-thread (single-thread) scheduler, or netpoll was
+         * used outside any hub context.  Route via pygo_sched_wake, which (Phase
+         * 2) sends the g to its OWNER sched's wake_list + kicks that thread's
+         * pump when the waker is a foreign thread -- e.g. the shared netpoll
+         * pump on one loop's thread delivering an fd event for a g parked on
+         * another loop's thread.  A plain ready_push here would wake it on the
+         * wrong (waker's) thread. */
+        pygo_sched_wake(g);
         return;
     }
     if (pygo_use_global_runq()) {
