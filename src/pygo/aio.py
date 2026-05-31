@@ -1446,6 +1446,20 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
         transport = _StreamTransport(sock, protocol, loop=self)
         return transport, protocol
 
+    async def connect_accepted_socket(self, protocol_factory, sock, *, ssl=None,
+                                      ssl_handshake_timeout=None, **_ignored):
+        """Wrap an already-accepted socket into a transport (server side).
+        AbstractEventLoop raises NotImplementedError; servers that accept()
+        manually (some test harnesses, custom acceptors) hand the socket here."""
+        sock.setblocking(False)
+        if ssl is not None:
+            tls = _TLSSock(sock, ssl, server_side=True)
+            tls.do_handshake(ssl_handshake_timeout)
+            sock = tls
+        protocol = protocol_factory()
+        transport = _StreamTransport(sock, protocol, loop=self)
+        return transport, protocol
+
     async def getaddrinfo(self, host, port, *, family=0, type=0, proto=0, flags=0):
         # Offloaded to the blocking pool so DNS doesn't wedge the hub.
         # monkey.py may still patch this to a cooperative resolver.
