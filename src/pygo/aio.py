@@ -1699,7 +1699,14 @@ class _StreamTransport(object):
                     self._report(e2, "connection_lost")
                 return
             if not data:
-                # EOF
+                # EOF: the peer half-closed its write side, so recv() now
+                # returns b'' immediately and forever.  Stop the recv loop
+                # either way -- mirrors stock asyncio removing the reader on
+                # EOF.  `continue`ing here would busy-spin recv()->b'' at
+                # 100% CPU, hogging the hub and starving every other
+                # goroutine (e.g. the peer task still awaiting its read).
+                # Close only if the protocol didn't ask to keep the
+                # transport open (eof_received() -> True) for its own writes.
                 try:
                     keep = self._protocol.eof_received()
                 except Exception as e:
@@ -1707,8 +1714,7 @@ class _StreamTransport(object):
                     keep = False
                 if not keep:
                     self.close()
-                    return
-                continue
+                return
             try:
                 self._protocol.data_received(data)
             except Exception as e:
