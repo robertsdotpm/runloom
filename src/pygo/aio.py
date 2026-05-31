@@ -49,6 +49,7 @@ A user can also opt into the bridge per-call:
 """
 import asyncio
 import errno as _errno
+import os as _os
 import socket as _socket
 import sys
 import threading as _threading
@@ -56,6 +57,18 @@ import time as _time
 
 import pygo_core
 from . import runtime as _runtime
+
+
+# Per-task driver stack size (bytes).  PygoTask drivers run arbitrary user
+# code, including deep C-recursive first-time imports (pydantic etc.) that
+# overflow the scheduler's default 128 KB g-stack and SEGV.  512 KB clears
+# every real-world import chain seen so far while staying cheap relative to
+# the CPython object tax per task.  Set PYGO_AIO_TASK_STACK=0 to disable and
+# use the scheduler default; set a custom byte count to tune.
+try:
+    _TASK_STACK = int(_os.environ.get("PYGO_AIO_TASK_STACK", 512 * 1024))
+except ValueError:
+    _TASK_STACK = 512 * 1024
 
 
 def _resolve(host, port, family, type_, proto, flags):
@@ -329,7 +342,18 @@ class PygoTask(PygoFuture):
             except TypeError:
                 pass
         # Off we go.  The goroutine owns the coro from here.
-        self._g = pygo_core.go(self._driver)
+        #
+        # Driver goroutines run *arbitrary user async code*, which routinely
+        # includes first-time imports of heavy packages (pydantic, etc.)
+        # whose import machinery recurses deeply in C.  The scheduler's
+        # default per-g stack (128 KB) is sized for cooperative I/O handlers,
+        # not deep C-recursive imports, so such an import can overflow the
+        # goroutine's C stack and SEGV the process -- a real crash seen on
+        # getsentry/responses + spulec/freezegun (both import pydantic lazily
+        # inside an async test).  Give task drivers a roomier stack.  Override
+        # with PYGO_AIO_TASK_STACK (bytes); 0 keeps the scheduler default.
+        self._g = pygo_core.go(self._driver, stack_size=_TASK_STACK) \
+            if _TASK_STACK else pygo_core.go(self._driver)
 
     # ---- asyncio.Task surface ----
     def get_name(self):
