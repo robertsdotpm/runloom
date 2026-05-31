@@ -282,6 +282,39 @@ consumer re-locks freed memory. So the single-owner convention is load-bearing
 for memory safety; making `TCPConn` shareable would require refcounting the
 handle or freeing it under coordination with a parked `recv`.
 
+### 12. Phase C per-thread-scheduler wake routing — `spin/cross_thread_wake.pml`
+
+pygo now runs **one scheduler per OS thread** (commit 4bef422); pygo.aio drives
+each event loop on its own thread, and a goroutine records its owner sched at
+spawn (`g->owner`). When a **foreign thread** wakes it — a `run_in_executor`
+pool worker, or an io_uring CQE resolving a future the owner awaits —
+`pygo_sched_wake_safe` must enqueue the g onto the **owner sched's** wake_list
+(the list the owner thread drains), not the waker thread's:
+
+```c
+pygo_sched_t *s = g->owner ? g->owner : pygo_sched_get();   /* route to owner */
+```
+
+This composes the verified `park_safe`/`wake_safe` handshake (§3, unchanged by
+Phase C) with the new routing dimension. Proven over a goroutine owned by and
+parked on the owner sched, woken by a foreign thread:
+
+* **No lost wake** — the g is always resumed: it either consumed the pending
+  wake at park (the waker beat it) or parked and the **owner's** drain pulled
+  it off the owner wake_list. A lost wake leaves the g blocked at its park with
+  the owner drain idle = a Spin invalid end state.
+
+Negative control `-DBUG_ROUTE_TO_WAKER` enqueues the woken g onto the *waker*
+thread's wake_list (the pre-Phase-C `pygo_sched_get()` behavior); the owner's
+drain never sees it and the foreign waker runs no drain loop, so Spin finds the
+lost wake — exactly the concurrent-loop deadlock Phase C fixes.
+
+> **Phase 2 (pending, sequence with this work):** routing **netpoll** fd
+> completions to the parker's owner sched (the multi-loop *socket* case) is the
+> next step — the pump may run on a different thread than the parker's owner,
+> so `dispatch_event`/`drain_expired` must wake to `p->g->owner`, not the pump
+> thread's sched. It extends this model + `netpoll_commit.pml`.
+
 ## Scope & honesty
 
 * Spin models are **sequentially consistent**: they prove the algorithm
@@ -342,6 +375,7 @@ verify/
     netpoll_rearm.pml      netpoll LT+ONESHOT re-arm vs not-yet-linked window (+ BUG_EDGE_TRIGGERED)
     netpoll_multipool.pml  netpoll multi-pool dispatch pool->sub lock hierarchy (+ BUG_LOCK_ORDER)
     iouring_msclose.pml    io_uring multishot handle lifetime, recv vs close (+ BUG_CONCURRENT_CLOSE)
+    cross_thread_wake.pml  Phase C per-thread-sched owner-routed wake_safe (+ BUG_ROUTE_TO_WAKER)
   cbmc/
     cldeque_cbmc.c         harness over the real cldeque.c
     stubs/plat_compat.h    minimal stub so cldeque.c compiles standalone under CBMC
