@@ -95,7 +95,16 @@
 #endif
 
 /* ---- Netpoll backend ---- */
-#if defined(PYGO_OS_LINUX)
+#if defined(PYGO_FORCE_SELECT)
+/* Build-time override (setup.py: PYGO_NETPOLL=select).  Suppress the
+ * kernel pollers so netpoll.c falls through to its select() path -- the
+ * same configuration a platform with neither epoll/kqueue/event_ports
+ * (e.g. Solaris/illumos) compiles.  Lets the POSIX select fallback be
+ * exercised on Linux/BSD without exotic hardware.  On Windows select is
+ * forced at runtime via PYGO_NETPOLL=select (the pump keys on
+ * PYGO_OS_WINDOWS, not on a PYGO_HAVE_* macro), so this define is a
+ * POSIX-only knob. */
+#elif defined(PYGO_OS_LINUX)
 #  define PYGO_HAVE_EPOLL 1
 #elif defined(PYGO_OS_BSD) || defined(PYGO_OS_MACOS)
 #  define PYGO_HAVE_KQUEUE 1

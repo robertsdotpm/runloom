@@ -58,6 +58,7 @@
 #else
 #  include <sys/select.h>
 #  include <unistd.h>
+#  include <fcntl.h>      /* self-pipe wake: O_NONBLOCK / FD_CLOEXEC */
 #endif
 
 /* ---- internal park record ----
@@ -945,6 +946,15 @@ typedef int (WSAAPI *pygo_wsapoll_fn)(LPWSAPOLLFD, ULONG, INT);
 static pygo_wsapoll_fn pygo_win_wsapoll = NULL;
 static int             pygo_win_use_iocp = 0;
 static const char     *pygo_win_backend_name = "select";   /* updated by init */
+#else
+/* POSIX select() fallback: self-pipe pump interrupt -- the select()
+ * analogue of the epoll eventfd.  The read end joins every select()
+ * read set; any thread pokes the write end (pygo_netpoll_wake_pump) to
+ * break an idle select so a cross-thread re-queue (e.g. a blocking-
+ * offload worker) wakes a scheduler blocked in the pump.  -1 = unarmed.
+ * Created once in pygo_netpoll_init under pygo_pool.lock. */
+static int pygo_selfpipe_r = -1;
+static int pygo_selfpipe_w = -1;
 #endif
 
 /* Initialise pool->lock once, regardless of platform.  POSIX could use
@@ -1068,6 +1078,23 @@ int pygo_netpoll_init(void)
             pygo_win_backend_name = (pygo_win_wsapoll != NULL) ? "wsapoll" : "select";
         }
     }
+#else
+    /* select() fallback: arm the self-pipe wake.  Best-effort -- if
+     * pipe()/fcntl() fail the pump still re-polls on its bounded
+     * timeout, so wake latency degrades but nothing wedges. */
+    {
+        int pfd[2];
+        if (pipe(pfd) == 0) {
+            int k;
+            for (k = 0; k < 2; k++) {
+                int fl = fcntl(pfd[k], F_GETFL, 0);
+                if (fl >= 0) (void)fcntl(pfd[k], F_SETFL, fl | O_NONBLOCK);
+                (void)fcntl(pfd[k], F_SETFD, FD_CLOEXEC);
+            }
+            pygo_selfpipe_r = pfd[0];
+            pygo_selfpipe_w = pfd[1];
+        }
+    }
 #endif
     /* RELEASE: publish the backend handle + array writes above to any
      * thread that later observes inited==1 via the ACQUIRE load (at the
@@ -1092,6 +1119,10 @@ void pygo_netpoll_fini(void)
     }
     /* WSAPoll / select are stateless; nothing else to close.
      * Winsock itself is left up by design (see pygo_winsock_init). */
+#else
+    /* select() fallback: tear down the self-pipe wake. */
+    if (pygo_selfpipe_r >= 0) { close(pygo_selfpipe_r); pygo_selfpipe_r = -1; }
+    if (pygo_selfpipe_w >= 0) { close(pygo_selfpipe_w); pygo_selfpipe_w = -1; }
 #endif
     __atomic_store_n(&pygo_netpoll_inited, 0, __ATOMIC_RELEASE);
 }
@@ -1431,8 +1462,15 @@ int pygo_netpoll_add_iouring_eventfd(int fd)
     pygo_iouring_eventfd_in_epoll = fd;
     return 0;
 #else
+    /* No epoll to deliver the io_uring CQE-ready eventfd, so io_uring
+     * cannot wake the pump on this build.  Report failure: io_uring.c
+     * treats a non-zero return as init failure and disables itself
+     * (iouring_available() -> false), so callers use the netpoll path.
+     * Normally non-epoll => non-Linux => io_uring.c is #if'd out and
+     * this is unreachable; it IS reached under PYGO_FORCE_SELECT on
+     * Linux, where reporting unavailable is exactly right. */
     (void)fd;
-    return 0;     /* iouring is Linux-only; non-epoll backends never hit this */
+    return -1;
 #endif
 }
 
@@ -1476,7 +1514,12 @@ int pygo_netpoll_wake_pump_arm(void)
     if (pygo_win_use_iocp && pygo_iocp_wake_armed()) return 0;
     return -1;
 #else
-    return -1;
+    /* select() fallback: the self-pipe created in pygo_netpoll_init is
+     * the wake primitive.  Report armed iff the pipe came up, so the
+     * blocking-offload pool offloads (instead of running inline) on the
+     * single-thread scheduler too. */
+    if (pygo_netpoll_init() != 0) return -1;
+    return (__atomic_load_n(&pygo_selfpipe_r, __ATOMIC_ACQUIRE) >= 0) ? 0 : -1;
 #endif
 }
 
@@ -1495,6 +1538,16 @@ void pygo_netpoll_wake_pump(void)
 #elif defined(PYGO_OS_WINDOWS)
     if (pygo_win_use_iocp) {
         pygo_iocp_wake();
+    }
+#else
+    /* select() fallback: poke the self-pipe to break an idle select().
+     * write() to a pipe is thread-safe and needs no lock; EAGAIN (pipe
+     * already has unread bytes) is fine -- select will still fire. */
+    int fd = __atomic_load_n(&pygo_selfpipe_w, __ATOMIC_ACQUIRE);
+    if (fd >= 0) {
+        char b = 1;
+        ssize_t w = write(fd, &b, 1);
+        (void)w;
     }
 #endif
 }
@@ -2331,48 +2384,91 @@ int pygo_netpoll_pump(long long timeout_ns)
 post_wait:
     ;
 #else
-    /* POSIX select() backend.  Same as kqueue/epoll absent platforms. */
+    /* POSIX select() backend.  Used by Solaris/illumos and by any host
+     * built with PYGO_NETPOLL=select. */
     {
         fd_set rfds, wfds;
         int max_fd = -1;
+        int rc = 0;
+        struct timeval tv, *tvp = NULL;
         pygo_parked_t *p;
+
         FD_ZERO(&rfds); FD_ZERO(&wfds);
+        /* Build the fd set under the lock, then RELEASE it before the
+         * (possibly long) select().  Holding pygo_pool.lock across the
+         * GIL release below would invert the GIL<->lock order: another
+         * thread that takes the GIL then blocks on pygo_pool.lock would
+         * wedge against this thread, which holds the lock and needs the
+         * GIL back at Py_END_ALLOW_THREADS.  epoll/kqueue likewise don't
+         * hold the lock across their wait. */
         pygo_mutex_lock(&pygo_pool.lock);
         for (p = pygo_pool.head; p != NULL; p = p->next) {
             if (p->fd > max_fd) max_fd = p->fd;
             if (p->events & PYGO_NETPOLL_READ)  FD_SET(p->fd, &rfds);
             if (p->events & PYGO_NETPOLL_WRITE) FD_SET(p->fd, &wfds);
         }
-        if (max_fd >= 0) {
-            struct timeval tv, *tvp = NULL;
-            if (timeout_ns >= 0) {
-                tv.tv_sec = (long)(timeout_ns / 1000000000LL);
-                tv.tv_usec = (long)((timeout_ns % 1000000000LL) / 1000LL);
-                tvp = &tv;
-            }
-            if (select(max_fd + 1, &rfds, &wfds, NULL, tvp) > 0) {
-                pygo_parked_t *p = pygo_pool.head;
-                while (p != NULL) {
-                    pygo_parked_t *next_p = p->next;
-                    int mask = 0;
-                    if (FD_ISSET(p->fd, &rfds)) mask |= PYGO_NETPOLL_READ;
-                    if (FD_ISSET(p->fd, &wfds)) mask |= PYGO_NETPOLL_WRITE;
-                    if (mask & p->events) {
-                        /* Claim before waking (see pygo_pump_claim). */
-                        int cur = pygo_pump_claim(p);
-                        if (cur != PYGO_PARK_WOKEN) {
-                            *(p->ready_out) = mask & p->events;
-                            pygo_parker_unlink(&pygo_pool, p);
-                            if (cur == PYGO_PARK_PARKED)
-                                pygo_mn_wake_g(p->hub, p->g);
-                            woke++;
-                        }
-                    }
-                    p = next_p;
-                }
-            }
-        }
         pygo_mutex_unlock(&pygo_pool.lock);
+        /* Self-pipe read end: a cross-thread pygo_netpoll_wake_pump (a
+         * blocking-offload worker re-queueing a g, or any waker that
+         * re-queues via the scheduler lists rather than a netpoll fd
+         * event) breaks an idle select even with no socket fd parked.
+         * It also keeps max_fd >= 0 so the pump blocks-and-is-wakeable
+         * instead of spin-returning when the only outstanding work is
+         * off-netpoll -- what wedged the single-thread scheduler here. */
+        if (pygo_selfpipe_r >= 0) {
+            FD_SET(pygo_selfpipe_r, &rfds);
+            if (pygo_selfpipe_r > max_fd) max_fd = pygo_selfpipe_r;
+        }
+        if (timeout_ns >= 0) {
+            tv.tv_sec  = (long)(timeout_ns / 1000000000LL);
+            tv.tv_usec = (long)((timeout_ns % 1000000000LL) / 1000LL);
+            tvp = &tv;
+        }
+        if (max_fd >= 0) {
+            /* Release the GIL across select() exactly like epoll_wait /
+             * kevent; otherwise the single-thread scheduler holds the GIL
+             * during an idle wait and the blocking-offload workers (which
+             * need the GIL to run their Python callable) can never finish
+             * to wake it -> deadlock. */
+            Py_BEGIN_ALLOW_THREADS
+            rc = select(max_fd + 1, &rfds, &wfds, NULL, tvp);
+            Py_END_ALLOW_THREADS
+        }
+        if (rc > 0) {
+            /* Drain the self-pipe if it fired; it carries no parker, the
+             * re-queued g is already on the scheduler wake_list. */
+            if (pygo_selfpipe_r >= 0 && FD_ISSET(pygo_selfpipe_r, &rfds)) {
+                char drain[64];
+                while (read(pygo_selfpipe_r, drain, sizeof drain) > 0) { }
+            }
+            /* Re-acquire for dispatch.  The parked list may have changed
+             * during the unlocked select; we walk the CURRENT list and
+             * test the snapshot fd set.  A parker added after the snapshot
+             * isn't in the set (woken next cycle); a spurious match just
+             * makes the g re-check its fd and re-park -- both tolerated by
+             * wait_fd's park/re-check loop. */
+            pygo_mutex_lock(&pygo_pool.lock);
+            p = pygo_pool.head;
+            while (p != NULL) {
+                pygo_parked_t *next_p = p->next;
+                int mask = 0;
+                if (FD_ISSET(p->fd, &rfds)) mask |= PYGO_NETPOLL_READ;
+                if (FD_ISSET(p->fd, &wfds)) mask |= PYGO_NETPOLL_WRITE;
+                if (mask & p->events) {
+                    /* Claim before waking (see pygo_pump_claim). */
+                    int cur = pygo_pump_claim(p);
+                    if (cur != PYGO_PARK_WOKEN) {
+                        *(p->ready_out) = mask & p->events;
+                        pygo_parker_unlink(&pygo_pool, p);
+                        if (cur == PYGO_PARK_PARKED)
+                            pygo_mn_wake_g(p->hub, p->g);
+                        woke++;
+                    }
+                }
+                p = next_p;
+            }
+            pygo_mutex_unlock(&pygo_pool.lock);
+        }
     }
 #endif
 
