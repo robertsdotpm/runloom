@@ -222,6 +222,40 @@ re-arm delivery ever comes. (Matches the recorded "EPOLLET+ONESHOT+re-arm hung
 96/96; only LEVEL fixed it".) This is precisely *why* the bitmap needs the LT
 re-arm.
 
+### 10. netpoll multi-pool dispatch — `spin/netpoll_multipool.pml`
+
+Per-hub parker pools: a g parked on hub H links into `pool[H]`. One epoll
+delivery is processed by one pump (`EPOLLONESHOT`) that doesn't know the owning
+hub, so `pygo_pump_dispatch_event` (netpoll.c:1977-2023) **walks every pool**,
+dropping each pool lock before the next, and on a match claims + unlinks +
+`wake_g(parker->hub)` — and `wake_g` takes the *home hub's* `sub_lock`
+(`pygo_mn_hub_submit`, mn_sched.c:1273) **while still holding the pool lock**.
+That is a two-level hierarchy with a documented order (netpoll.c:1972-1976):
+
+```
+pool->lock  <  hub->sub_lock        (always; never reversed)
+at most ONE pool lock held at a time (dropped before walking the next pool)
+```
+
+Confirmed against the source: the only takers of *both* locks are
+`dispatch_event` and `pygo_pump_drain_expired`, both `pool→sub`; every
+`sub_lock` region (`hub_submit`, the hub-drain at mn_sched.c:651) takes the sub
+lock alone. Proven over **two pumps racing one delivery** whose parker lives in
+pool 1, plus a `sub_lock` contender (a hub draining its submission list):
+
+* **No deadlock** — with pool-before-sub and one pool at a time there is no
+  circular wait; every actor terminates (a deadlock is a Spin invalid end
+  state).
+* **Found anywhere** — the parker is found in whichever pool holds it (here the
+  second pool walked), regardless of which pump reaches it.
+* **Claimed once** — the pool lock + commit claim make exactly one pump wake
+  the g though both find it (`wakes ≤ 1`); the loser sees it unlinked / WOKEN.
+
+Negative control `-DBUG_LOCK_ORDER` makes the contender take its locks in the
+**reverse** order (`sub_lock` then `pool_lock`) — the ABBA a future refactor
+could introduce — and Spin finds the deadlock: a pump holds pool 1 waiting for
+sub 1 while the contender holds sub 1 waiting for pool 1.
+
 ## Scope & honesty
 
 * Spin models are **sequentially consistent**: they prove the algorithm
@@ -249,10 +283,11 @@ re-arm.
   for the wake decision, so the exactly-once guarantee of #8 carries to them;
   the list surgery and force-unlink are lock-protected straight-line code
   (`pool->lock` serialises them against the pump) exercised by the netpoll
-  tests and `tools/mn_stress.py`. `netpoll_rearm.pml` is a single-fd model: a
-  multi-pool dispatch (a pump walking every hub's pool for one event) is the
-  natural next extension, though the all-pools walk means a linked parker is
-  found regardless of which pool holds it.
+  tests and `tools/mn_stress.py`. The multi-pool dispatch walk and its
+  `pool→sub` lock hierarchy are covered by `netpoll_multipool.pml`; the
+  deadline min-heap timeout sweep and `force_unlink` lifetime (exactly-once
+  `pool_release`) remain unmodelled — both are `pool->lock`-serialised
+  straight-line code, and the sweep shares the verified `pygo_pump_claim`.
 
 ## Layout
 
@@ -269,6 +304,7 @@ verify/
     blockpool.pml          blocking-offload wake order (+ BUG_DEC_BEFORE_REQUEUE)
     netpoll_commit.pml     netpoll park/wake commit protocol (+ BUG_NO_COMMIT)
     netpoll_rearm.pml      netpoll LT+ONESHOT re-arm vs not-yet-linked window (+ BUG_EDGE_TRIGGERED)
+    netpoll_multipool.pml  netpoll multi-pool dispatch pool->sub lock hierarchy (+ BUG_LOCK_ORDER)
   cbmc/
     cldeque_cbmc.c         harness over the real cldeque.c
     stubs/plat_compat.h    minimal stub so cldeque.c compiles standalone under CBMC
