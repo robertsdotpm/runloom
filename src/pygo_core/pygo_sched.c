@@ -902,6 +902,7 @@ void pygo_sched_init(pygo_sched_t *s)
     s->stack_size = (Py_ssize_t)pygo_cal_default;
     s->completed = 0;
     s->stopping = 0;
+    s->netpoll_parked = 0;
     pygo_mutex_init(&s->wake_list_lock);
     s->wake_list_head = NULL;
     s->wake_list_tail = NULL;
@@ -1482,7 +1483,7 @@ Py_ssize_t pygo_sched_drain(pygo_sched_t *s)
 
     while (!s->stopping && (!pygo_sched_ready_empty(s) ||
                             s->sleep_size > 0 ||
-                            pygo_netpoll_parked_count() > 0 ||
+                            __atomic_load_n(&s->netpoll_parked, __ATOMIC_ACQUIRE) > 0 ||
                             pygo_iouring_inflight() > 0 ||
                             pygo_blockpool_inflight() > 0 ||
                             __atomic_load_n(&s->wake_list_head,
@@ -1506,7 +1507,7 @@ Py_ssize_t pygo_sched_drain(pygo_sched_t *s)
          * pygo_sched_wake which moves ready I/O goroutines back to
          * the ready queue. */
         if (pygo_sched_ready_empty(s) &&
-            (pygo_netpoll_parked_count() > 0 || s->sleep_size > 0 ||
+            (__atomic_load_n(&s->netpoll_parked, __ATOMIC_ACQUIRE) > 0 || s->sleep_size > 0 ||
              pygo_iouring_inflight() > 0 || pygo_blockpool_inflight() > 0)) {
             long long timeout_ns = -1;
             if (s->sleep_size > 0) {
@@ -1520,7 +1521,7 @@ Py_ssize_t pygo_sched_drain(pygo_sched_t *s)
              * a worker pokes the pump-interrupt eventfd -- both ride the
              * netpoll pump, so the pump call covers netpoll parkers,
              * iouring waiters AND blocking-pool waiters in one syscall. */
-            if (pygo_netpoll_parked_count() > 0 ||
+            if (__atomic_load_n(&s->netpoll_parked, __ATOMIC_ACQUIRE) > 0 ||
                 pygo_iouring_inflight() > 0 ||
                 pygo_blockpool_inflight() > 0) {
                 pygo_netpoll_pump(timeout_ns);

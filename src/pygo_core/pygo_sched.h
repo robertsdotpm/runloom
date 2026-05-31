@@ -310,6 +310,13 @@ struct pygo_sched {
     Py_ssize_t completed;
     /* When set, sched_drain returns. */
     int stopping;
+    /* Count of THIS sched's goroutines currently parked in netpoll (non-hub
+     * parkers whose g->owner == this sched).  Bumped in pygo_parker_link /
+     * unlink.  The drain loop uses this -- NOT the global parked count -- so a
+     * goroutine parked on another (or a dead) OS thread can't keep this
+     * thread's pygo_core.run() alive forever.  Accessed atomically: a pump on
+     * another thread may unlink (decrement) one of our parkers cross-thread. */
+    int netpoll_parked;
     /* Cross-thread wake list -- MPSC linked through g->wake_next.
      * Foreign-thread wake_safe pushes here under wake_list_lock; the
      * drain owner consumes once per iteration via

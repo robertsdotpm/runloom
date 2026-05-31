@@ -531,6 +531,11 @@ static void pygo_parker_link(pygo_parker_pool_t *pool, pygo_parked_t *p)
      * global list. */
     pygo_dh_insert(pool, p);
     __atomic_add_fetch(&pool->total, 1, __ATOMIC_RELEASE);
+    /* Per-owner-sched parked count for the single-thread drain (non-hub
+     * parkers only; M:N hubs have their own drain).  g->owner is set once at
+     * spawn and never changes, so this is balanced by the unlink decrement. */
+    if (p->hub == NULL && p->g != NULL && p->g->owner != NULL)
+        __atomic_add_fetch(&p->g->owner->netpoll_parked, 1, __ATOMIC_RELEASE);
     pool->link_count++;       /* arrival counter for the sweep churn throttle */
     PYGO_EVT(PYGO_EVT_PARKER_LINK, p, p->g, (long long)p->fd);
 }
@@ -600,6 +605,9 @@ static int pygo_parker_unlink(pygo_parker_pool_t *pool, pygo_parked_t *p)
     }
     if (touched) {
         __atomic_sub_fetch(&pool->total, 1, __ATOMIC_RELEASE);
+        /* Mirror the per-owner-sched parked count bumped at link. */
+        if (p->hub == NULL && p->g != NULL && p->g->owner != NULL)
+            __atomic_sub_fetch(&p->g->owner->netpoll_parked, 1, __ATOMIC_RELEASE);
         /* Clear the per-g back-pointer so g completion's force-unlink
          * (in mn_sched.c hub_main) doesn't see a stale reference. */
         if (p->g != NULL && p->g->netpoll_parker == p) {

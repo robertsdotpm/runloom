@@ -264,5 +264,68 @@ class TestCancelWaitFd(unittest.TestCase):
         self.assertTrue(paio.run(main()))
 
 
+class TestLeakedParkerCrossThread(unittest.TestCase):
+    """A goroutine left parked in netpoll on one OS thread (e.g. a loop thread
+    that stopped without cancelling/closing -- a leaked accept/recv) must NOT
+    keep ANOTHER thread's pygo_core.run() alive.  The single-thread drain
+    counts only THIS sched's parkers (g->owner == this sched), not the global
+    parked count -- otherwise a parker owned by a dead/other thread wedges
+    every other loop forever."""
+
+    def test_leaked_parker_does_not_wedge_other_loop(self):
+        ready = threading.Event()
+        box = {}
+
+        def leaker():
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.bind(("127.0.0.1", 0))
+            s.setblocking(False)
+            box["sock"] = s
+
+            async def park_forever():
+                await loop.sock_recv(s, 100)  # parks in netpoll, never wakes
+
+            async def setup():
+                asyncio.ensure_future(park_forever())
+                await asyncio.sleep(0.03)     # let it park in netpoll
+                ready.set()
+
+            loop.run_until_complete(setup())
+            # Leak: return without cancelling the parked task or closing -- the
+            # goroutine stays parked in the shared netpoll, owned by this
+            # (about-to-exit) thread's scheduler.
+
+        t = threading.Thread(target=leaker)
+        t.start()
+        self.assertTrue(ready.wait(10), "leaker thread never parked")
+        t.join(10)
+        self.assertFalse(t.is_alive(), "leaker thread did not exit")
+
+        # A fresh run on the MAIN thread must complete, not wedge on the dead
+        # thread's leaked netpoll parker.  Run it in a watchdog thread so a
+        # regression can't hang the whole suite.
+        result = {}
+
+        def runner():
+            async def quick():
+                await asyncio.sleep(0.01)
+                return "done"
+            try:
+                result["v"] = paio.run(quick())
+            except BaseException as e:  # noqa: BLE001
+                result["v"] = e
+
+        r = threading.Thread(target=runner)
+        r.start()
+        r.join(10)
+        box["sock"].close()
+        self.assertFalse(r.is_alive(),
+                         "main-thread run() wedged on another thread's leaked "
+                         "netpoll parker (global vs per-sched parked count)")
+        self.assertEqual(result.get("v"), "done")
+
+
 if __name__ == "__main__":
     unittest.main()
