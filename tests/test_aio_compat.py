@@ -326,5 +326,85 @@ class TestStreams(unittest.TestCase):
         self.assertEqual(paio.run(main()), b"echo:hi")
 
 
+class TestFatalExceptionPropagation(unittest.TestCase):
+    """KeyboardInterrupt / SystemExit raised inside a callback or task must
+    propagate OUT of run_until_complete (asyncio re-raises these BaseExceptions
+    out of the loop rather than routing them to the exception handler), and a
+    SUBSEQUENT run on the same loop must still work -- exactly what
+    asyncio.Runner does on Ctrl-C (run_until_complete then a cleanup
+    run_until_complete).  Regression for the anyio
+    test_unhandled_exception_group / aiosmtpd TestSigint hangs+masking."""
+
+    def _run1_then_run2(self, setup_coro, exc_type):
+        loop = asyncio.new_event_loop()
+        try:
+            with self.assertRaises(exc_type):
+                loop.run_until_complete(setup_coro(loop))
+            # A later run on the same loop must NOT inherit the aborted run's
+            # stop callback (a stale _stop_on_done would break it early with a
+            # spurious "event loop stopped before Future completed").
+            async def later():
+                await asyncio.sleep(0)
+                return "ok"
+            self.assertEqual(loop.run_until_complete(later()), "ok")
+        finally:
+            loop.close()
+
+    def test_ki_in_call_soon_with_parked_siblings(self):
+        def crash():
+            raise KeyboardInterrupt
+        async def setup(loop):
+            asyncio.ensure_future(asyncio.sleep(30))  # parked sibling
+            await asyncio.sleep(0)
+            loop.call_soon(crash)
+            await asyncio.sleep(30)                    # parent parks
+        self._run1_then_run2(setup, KeyboardInterrupt)
+
+    def test_systemexit_in_call_soon(self):
+        def crash():
+            raise SystemExit(3)
+        async def setup(loop):
+            loop.call_soon(crash)
+            await asyncio.sleep(30)
+        self._run1_then_run2(setup, SystemExit)
+
+    def test_ki_in_child_task(self):
+        async def child():
+            raise KeyboardInterrupt
+        async def setup(loop):
+            asyncio.ensure_future(child())
+            await asyncio.sleep(30)
+        self._run1_then_run2(setup, KeyboardInterrupt)
+
+    def test_ki_as_top_level_coro(self):
+        async def setup(loop):
+            raise KeyboardInterrupt
+        self._run1_then_run2(setup, KeyboardInterrupt)
+
+    def test_runner_cleanup_after_ki_gathers_leftovers(self):
+        # Mimic asyncio.Runner.close(): after a Ctrl-C aborts the run, cancel
+        # the leftover tasks and gather them.  The gather must complete (not
+        # die with "event loop stopped before Future completed").
+        def crash():
+            raise KeyboardInterrupt
+        async def main(loop):
+            asyncio.ensure_future(asyncio.sleep(30))
+            await asyncio.sleep(0)
+            loop.call_soon(crash)
+            await asyncio.sleep(30)
+        loop = asyncio.new_event_loop()
+        try:
+            with self.assertRaises(KeyboardInterrupt):
+                loop.run_until_complete(main(loop))
+            leftover = asyncio.all_tasks(loop)
+            for t in leftover:
+                t.cancel()
+            # Must not raise:
+            loop.run_until_complete(
+                asyncio.gather(*leftover, return_exceptions=True))
+        finally:
+            loop.close()
+
+
 if __name__ == "__main__":
     unittest.main()

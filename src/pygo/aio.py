@@ -842,6 +842,16 @@ class PygoTask(_PygoFutureMixin, asyncio.Task):
                         self._pg_future_cancel(self._pgcancelmsg)
                     self._pg_settle_c()
                     return
+                except (KeyboardInterrupt, SystemExit) as e:
+                    # asyncio's Task.__step records the exception on the task
+                    # AND re-raises it out of the loop.  Mirror that: store it
+                    # (so a parent retrieving this task's result sees it) and
+                    # signal the loop to break the drive and re-raise.
+                    if not self.done():
+                        self.set_exception(e)
+                    self._pg_settle_c()
+                    loop._pg_signal_fatal(e)
+                    return
                 except BaseException as e:
                     if not self.done():
                         self.set_exception(e)
@@ -971,6 +981,13 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
         # Set by stop(); observed by the keepalive goroutine (which runs on the
         # loop thread) to break run_forever()/run_until_complete's pygo_core.run().
         self._stopping = False
+        # A KeyboardInterrupt / SystemExit raised inside a callback or task must
+        # NOT be routed to the exception handler (that's for ordinary
+        # exceptions) -- asyncio re-raises these BaseExceptions out of the loop
+        # so a Ctrl-C / sys.exit aborts run_until_complete/run_forever.  We
+        # stash the first one here and break the drive (sched_stop); _drive
+        # re-raises it after pygo_core.run() returns.  None = none pending.
+        self._pg_fatal_exc = None
         # Real asyncio loops (BaseEventLoop) expose these; stdlib
         # Future/Task/Timeout machinery and many libraries read them
         # directly (e.g. loop._thread_id, loop._debug).  AbstractEventLoop
@@ -1082,6 +1099,10 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
                     # -- so a callback that does create_task/contextvar reads sees
                     # the context active when call_soon was invoked.
                     handle._context.run(callback, *args)
+                except (KeyboardInterrupt, SystemExit) as e:
+                    # asyncio re-raises these out of the loop (Handle._run);
+                    # signal the loop to break the drive and re-raise.
+                    self._pg_signal_fatal(e)
                 except BaseException as e:
                     self.call_exception_handler({"message": "call_soon callback", "exception": e})
         # asyncio's done-callbacks (gather, wait_for) generally don't
@@ -1123,6 +1144,9 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
                 continue
             try:
                 handle._context.run(handle._callback, *handle._args)
+            except (KeyboardInterrupt, SystemExit) as e:
+                # asyncio re-raises these out of the loop; break the drive.
+                self._pg_signal_fatal(e)
             except BaseException as e:
                 self.call_exception_handler(
                     {"message": "call_soon_threadsafe callback", "exception": e})
@@ -1166,6 +1190,9 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
             if not handle._cancelled:
                 try:
                     handle._context.run(callback, *args)
+                except (KeyboardInterrupt, SystemExit) as e:
+                    # asyncio re-raises these out of the loop; break the drive.
+                    self._pg_signal_fatal(e)
                 except BaseException as e:
                     # Keep this minimal -- printing a traceback from here
                     # can itself recurse if we're near the c_recursion limit.
@@ -1718,6 +1745,15 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
             # into the next run on this loop.
             if self._ka_stop_box is not None:
                 self._ka_stop_box[0] = True
+        # A KeyboardInterrupt / SystemExit raised in a callback or task during
+        # the drive was stashed by _pg_signal_fatal (which sched_stop'd us out
+        # of pygo_core.run()).  Re-raise it so it propagates out of
+        # run_until_complete / run_forever, as asyncio does.  Pop it first so a
+        # subsequent run on this loop (asyncio.Runner cleanup) starts clean.
+        fatal = self._pg_fatal_exc
+        if fatal is not None:
+            self._pg_fatal_exc = None
+            raise fatal
 
     def run_until_complete(self, future):
         if asyncio.iscoroutine(future):
@@ -1743,7 +1779,20 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
                 pygo_core.sched_stop()
             future.add_done_callback(_stop_on_done)
             self._spawn_keepalive()
-            self._drive()
+            # Remove the stop callback when the drive returns, no matter HOW it
+            # returns (future done, KeyboardInterrupt out of a callback, or the
+            # scheduler emptying) -- exactly as stock asyncio's
+            # run_until_complete does in its finally.  Otherwise a future that
+            # this run abandoned (e.g. a task left parked when a Ctrl-C aborted
+            # the run) keeps the stale callback, and when a LATER run completes
+            # that task its _stop_on_done fires and sched_stop()s the wrong
+            # drive -- breaking it before its own future is done -> a spurious
+            # "event loop stopped before Future completed" that masks the
+            # original KeyboardInterrupt (asyncio.Runner cleanup hits this).
+            try:
+                self._drive()
+            finally:
+                future.remove_done_callback(_stop_on_done)
         # IMPORTANT: do NOT cancel outstanding tasks / sched_reset here.
         # run_until_complete must leave other tasks + parked goroutines ALIVE
         # (IsolatedAsyncioTestCase / asyncio.Runner reuse one loop across
@@ -1803,6 +1852,28 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
         # Works whether stop() is called directly on the loop thread or, per
         # asyncio's rules, via call_soon_threadsafe() from another thread.
         self._stopping = True
+
+    def _pg_signal_fatal(self, exc):
+        """Record a KeyboardInterrupt / SystemExit raised inside a callback or
+        task and break the drive so it propagates OUT of the current run.
+
+        asyncio routes ordinary callback/task exceptions to the exception
+        handler, but re-raises (KeyboardInterrupt, SystemExit) out of the loop
+        (Handle._run / Task.__step re-raise them) so Ctrl-C and sys.exit abort
+        run_until_complete / run_forever.  We can't unwind the C drain through a
+        goroutine's raise, so we stash the first such exception here and call
+        sched_stop() to return from pygo_core.run(); _drive re-raises it.
+
+        Always called on the loop thread (every callback/task runner runs
+        there), so sched_stop() targets this thread's scheduler."""
+        if self._pg_fatal_exc is None:
+            self._pg_fatal_exc = exc
+        if self._ka_stop_box is not None:
+            self._ka_stop_box[0] = True
+        try:
+            pygo_core.sched_stop()
+        except Exception:
+            pass
 
     # asyncio.run() shutdown protocol -- minimal no-ops so user code
     # written against asyncio.run works through `paio.install()`.
