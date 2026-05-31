@@ -145,10 +145,15 @@ static void *pygo_stack_map_guarded(size_t usable)
 {
     size_t guard = pygo_stack_guard();
     size_t total = guard + usable;
+    /* Deliberately NOT MAP_STACK.  On FreeBSD/macOS MAP_STACK requests a
+     * kernel grow-down stack whose lower pages stay inaccessible until the
+     * stack grows into them, so eagerly writing the usable region low->high
+     * (pygo_stack_paint, and the first asm pushes) faults with "invalid
+     * permissions for mapped object".  pygo installs its OWN PROT_NONE guard
+     * page below the usable region (see below), so the kernel auto-grow
+     * semantics are both unnecessary and harmful.  MAP_STACK is a no-op on
+     * Linux, so dropping it changes nothing there. */
     int flags = MAP_PRIVATE | MAP_ANONYMOUS;
-#ifdef MAP_STACK
-    flags |= MAP_STACK;
-#endif
     {
         void *base = mmap(NULL, total, PROT_READ | PROT_WRITE, flags, -1, 0);
         if (base == MAP_FAILED) return NULL;
