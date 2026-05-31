@@ -190,6 +190,38 @@ the pump re-queues only if it happens to observe a plain `parked` flag already
 set) and Spin finds the classic lost wake: the pump checks the flag *before*
 the g sets it, declines to wake, and the g parks forever.
 
+### 9. netpoll LT+ONESHOT re-arm — `spin/netpoll_rearm.pml`
+
+The *other* half of the netpoll lost-wake guard (#8 models the parker-claim
+commit; this models the **arming discipline**). An fd can become ready while no
+parker is linked (the g unlinked on its last wake and hasn't re-linked); a pump
+processing that delivery finds no parker and stashes it in the per-fd
+pending-wake bitmap. But the **bitmap alone does not close the window**: the
+pump can be preempted between "found no parker" and the lock-free
+`pygo_fd_pending_wake_set` (netpoll.c:2185-2195), letting the g link, consume
+the still-empty bitmap twice, commit, and park *before* the bit is set.
+
+What closes it is the documented T1.5 fix (`pygo_netpoll_register`,
+netpoll.c:1158-1207): arm **LEVEL-triggered + `EPOLLONESHOT`, re-armed via
+`EPOLL_CTL_MOD` on every park, strictly after linking the parker** (link 1803,
+register 1845). `MOD` being level-triggered re-reports a still-ready fd,
+queueing a *fresh* delivery — generated after the link, so it finds the linked
+parker and wakes it. `EPOLLONESHOT` means the prior arm delivered once and
+disarmed, so nothing is in flight before the re-arm.
+
+* **No lost wake** — the g always becomes runnable. Under LT+ONESHOT the only
+  delivery is the post-link re-arm one, which finds the linked parker; the
+  bitmap is provably never even needed (the model never sets `pending`).
+
+Negative control `-DBUG_EDGE_TRIGGERED` models the **old scheme** (EPOLLET,
+registered once, never re-armed): `register` is a cached no-op and an
+already-ready fd is *not* re-reported. Spin finds the lost wake — the pump
+consumes the lone edge before the link, is preempted, the g links + double-
+consumes the empty bitmap + parks, then the pump sets the bit too late and no
+re-arm delivery ever comes. (Matches the recorded "EPOLLET+ONESHOT+re-arm hung
+96/96; only LEVEL fixed it".) This is precisely *why* the bitmap needs the LT
+re-arm.
+
 ## Scope & honesty
 
 * Spin models are **sequentially consistent**: they prove the algorithm
@@ -208,15 +240,19 @@ the g sets it, declines to wake, and the g parks forever.
   `select` claim) + straight-line locked code. The integrated channel is
   exercised by `tests/test_chan.py`, `tests/test_mn.py`, and
   `tools/mn_stress.py`.
-* `netpoll_commit.pml` models the **commit protocol** — the lost-wake core —
-  but not the surrounding netpoll machinery: the per-fd bucket / global-list
-  link & unlink, the deadline min-heap timeout sweep, and
-  `pygo_netpoll_force_unlink_g_parker` (the g-completion safety unlink) are
-  not yet modelled. They share the same `commit` claim (`pygo_pump_claim`) for
-  the wake decision, so the exactly-once guarantee carries; the list surgery
-  itself is lock-protected straight-line code exercised by the netpoll tests
-  and `tools/mn_stress.py`. Modelling the timeout-sweep / force-unlink races
-  against the pump is the natural next extension.
+* The netpoll models cover the two lost-wake cores — the parker-claim commit
+  (`netpoll_commit.pml`) and the arming discipline (`netpoll_rearm.pml`) — but
+  not all the surrounding machinery: the per-fd bucket / global-list link &
+  unlink surgery, the deadline min-heap timeout sweep, and
+  `pygo_netpoll_force_unlink_g_parker` (the g-completion safety unlink) are not
+  modelled. The timeout sweep and cancel/drain use the *same* `pygo_pump_claim`
+  for the wake decision, so the exactly-once guarantee of #8 carries to them;
+  the list surgery and force-unlink are lock-protected straight-line code
+  (`pool->lock` serialises them against the pump) exercised by the netpoll
+  tests and `tools/mn_stress.py`. `netpoll_rearm.pml` is a single-fd model: a
+  multi-pool dispatch (a pump walking every hub's pool for one event) is the
+  natural next extension, though the all-pools walk means a linked parker is
+  found regardless of which pool holds it.
 
 ## Layout
 
@@ -232,6 +268,7 @@ verify/
     hub_submit.pml         default M:N wake dedup (+ BUG_NO_DEDUP control)
     blockpool.pml          blocking-offload wake order (+ BUG_DEC_BEFORE_REQUEUE)
     netpoll_commit.pml     netpoll park/wake commit protocol (+ BUG_NO_COMMIT)
+    netpoll_rearm.pml      netpoll LT+ONESHOT re-arm vs not-yet-linked window (+ BUG_EDGE_TRIGGERED)
   cbmc/
     cldeque_cbmc.c         harness over the real cldeque.c
     stubs/plat_compat.h    minimal stub so cldeque.c compiles standalone under CBMC
