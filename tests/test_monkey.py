@@ -316,29 +316,43 @@ class TestSubprocessWait(unittest.TestCase):
     def test_wait_uses_cooperative_poll(self):
         import subprocess as _sp
         pygo.monkey.patch()
-        # Two child processes with overlapping sleeps; if wait() blocked
-        # the scheduler, total wall time would be 2x child sleep.  Pick
-        # a child duration long enough that Popen()'s ~30 ms spawn cost
-        # and the poll loop's ~32 ms tail latency don't swamp the
-        # parallel/sequential signal.
-        log = []
         SLEEP = 0.2
+
+        def spawn():
+            return _sp.Popen([sys.executable, "-c",
+                              "import time; time.sleep({})".format(SLEEP)])
+
+        # Measure a SEQUENTIAL baseline with the very same child, rather than
+        # asserting against an absolute wall-clock target.  An absolute target
+        # is fragile: the child here is a fresh interpreter, whose startup cost
+        # (~0.1 s on a free-threaded build) is far larger than a plain process
+        # spawn, so even a perfectly-overlapping run lands well above a naive
+        # "< 2*SLEEP" bound.  The seq-vs-cooperative ratio cancels that startup
+        # cost out and isolates the only thing under test: did the two waits
+        # overlap?
+        t0 = time.monotonic()
+        for _ in range(2):
+            spawn().wait()
+        sequential = time.monotonic() - t0
+
+        log = []
         def waiter(name):
             log.append((name, "start"))
-            p = _sp.Popen([sys.executable, "-c",
-                           "import time; time.sleep({})".format(SLEEP)])
-            rc = p.wait()
+            rc = spawn().wait()
             log.append((name, "done", rc))
         t0 = time.monotonic()
         pygo_core.go(lambda: waiter("A"))
         pygo_core.go(lambda: waiter("B"))
         pygo_core.run()
         elapsed = time.monotonic() - t0
-        # Sequential ~= 0.4 s (+ 2x spawn).  Cooperative ~= 0.2 s + 2x
-        # spawn + poll tail.  Allow generous headroom for slow CI boxes
-        # while still failing on a true sequential regression.
-        self.assertLess(elapsed, SLEEP * 2 - 0.05,
-                        "cooperative wait should overlap")
+
+        # Overlapping the two child sleeps must save ~one full SLEEP versus
+        # running them back to back; if wait() blocked the scheduler the
+        # cooperative run would match the sequential baseline and fail here.
+        self.assertLess(elapsed, sequential - SLEEP * 0.5,
+                        "cooperative wait should overlap "
+                        "(cooperative={0:.3f}s seq={1:.3f}s)".format(
+                            elapsed, sequential))
         self.assertEqual([e[1] for e in log if e[1] == "start"],
                          ["start", "start"])
         for e in log:
