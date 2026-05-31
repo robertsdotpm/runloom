@@ -48,11 +48,13 @@ A user can also opt into the bridge per-call:
     loop.run_until_complete(main())
 """
 import asyncio
+import collections as _collections
 import contextvars as _contextvars
 import errno as _errno
 import os as _os
 import socket as _socket
 import ssl as _ssl
+import subprocess as _subprocess
 import sys
 import threading as _threading
 import time as _time
@@ -1207,6 +1209,31 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
     # ---- Network: high-level loop APIs ----
     async def create_datagram_endpoint(self, protocol_factory, **kw):
         return await _create_datagram_endpoint(self, protocol_factory, **kw)
+
+    # ---- subprocesses (thread-backed) ----
+    # AbstractEventLoop.subprocess_exec/shell -- asyncio.create_subprocess_exec/
+    # _shell route through these.  pygo's netpoll can't portably select() on
+    # child stdio pipes (esp. Windows anonymous pipes), so we drive each pipe on
+    # its own OS thread and marshal data/exit back onto the loop thread via
+    # call_soon_threadsafe -- exactly how run_in_executor already bridges blocking
+    # work.  Returns (SubprocessTransport, protocol) like stock asyncio.
+    async def subprocess_exec(self, protocol_factory, program, *args,
+                              stdin=_subprocess.PIPE, stdout=_subprocess.PIPE,
+                              stderr=_subprocess.PIPE, **kwargs):
+        protocol = protocol_factory()
+        transport = _SubprocessTransport(
+            self, protocol, [program] + list(args), shell=False,
+            stdin=stdin, stdout=stdout, stderr=stderr, **kwargs)
+        return transport, protocol
+
+    async def subprocess_shell(self, protocol_factory, cmd,
+                               stdin=_subprocess.PIPE, stdout=_subprocess.PIPE,
+                               stderr=_subprocess.PIPE, **kwargs):
+        protocol = protocol_factory()
+        transport = _SubprocessTransport(
+            self, protocol, cmd, shell=True,
+            stdin=stdin, stdout=stdout, stderr=stderr, **kwargs)
+        return transport, protocol
 
     async def create_connection(self, protocol_factory, host=None, port=None, *,
                                 ssl=None, family=0, proto=0, flags=0, sock=None,
@@ -2447,6 +2474,273 @@ class DatagramTransport(object):
                 "message": "Datagram " + where + " raised",
                 "exception": exc,
             })
+
+
+# ====================================================================
+# Subprocess support (thread-backed).  Each child pipe is pumped on its own
+# OS thread; data + EOF + process-exit are marshalled back to the loop thread
+# via call_soon_threadsafe, so the protocol callbacks all run on the loop.
+# ====================================================================
+class _SubprocessReadPipe(asyncio.ReadTransport):
+    """ReadTransport for a child's stdout/stderr.  A reader thread (started by
+    the SubprocessTransport) does the blocking reads and calls
+    protocol.pipe_data_received; this object exists for the protocol's
+    get_pipe_transport(fd) + flow-control calls."""
+    def __init__(self, proc_transport, fd, pipe):
+        self._proc = proc_transport
+        self._fd = fd
+        self._pipe = pipe
+        self._paused = False
+
+    # Flow control: the reader thread checks _paused between reads.  Not a hard
+    # backpressure guarantee (one read may already be buffered), but enough for
+    # StreamReader's high-water-mark pause to take effect.
+    def pause_reading(self):
+        self._paused = True
+
+    def resume_reading(self):
+        self._paused = False
+
+    def is_closing(self):
+        return self._proc._closed
+
+    def close(self):
+        self._proc.close()
+
+    def get_protocol(self):
+        return self._proc._protocol
+
+    def get_extra_info(self, name, default=None):
+        if name == "pipe":
+            return self._pipe
+        return default
+
+
+class _SubprocessWritePipe(asyncio.WriteTransport):
+    """WriteTransport for a child's stdin.  Writes are queued and drained by a
+    dedicated thread so a full pipe buffer never blocks the loop thread."""
+    def __init__(self, proc_transport, fd, pipe):
+        self._proc = proc_transport
+        self._fd = fd
+        self._pipe = pipe
+        self._closed = False
+        self._q = _collections.deque()
+        self._cond = _threading.Condition()
+        self._eof = False
+        self._thread = _threading.Thread(
+            target=self._drain, name="pygo-subproc-stdin", daemon=True)
+        self._thread.start()
+
+    def _drain(self):
+        while True:
+            with self._cond:
+                while not self._q and not self._eof:
+                    self._cond.wait()
+                if self._q:
+                    data = self._q.popleft()
+                else:
+                    break    # _eof and queue empty
+            try:
+                self._pipe.write(data)
+                self._pipe.flush()
+            except (BrokenPipeError, OSError):
+                break
+        try:
+            self._pipe.close()
+        except Exception:
+            pass
+
+    def write(self, data):
+        if self._closed or self._eof:
+            return
+        with self._cond:
+            self._q.append(bytes(data))
+            self._cond.notify()
+
+    def writelines(self, list_of_data):
+        self.write(b"".join(list_of_data))
+
+    def write_eof(self):
+        with self._cond:
+            self._eof = True
+            self._cond.notify()
+
+    def can_write_eof(self):
+        return True
+
+    def close(self):
+        self._closed = True
+        self.write_eof()
+
+    def abort(self):
+        self.close()
+
+    def is_closing(self):
+        return self._closed or self._eof
+
+    def get_protocol(self):
+        return self._proc._protocol
+
+    def get_extra_info(self, name, default=None):
+        if name == "pipe":
+            return self._pipe
+        return default
+
+
+class _SubprocessTransport(asyncio.SubprocessTransport):
+    def __init__(self, loop, protocol, args, *, shell,
+                 stdin, stdout, stderr, **kwargs):
+        self._loop = loop
+        self._protocol = protocol
+        self._closed = False
+        self._returncode = None
+        self._exit_waiters = []
+        self._pipes = {}        # fd -> pipe transport
+        self._pipes_open = 0    # outstanding stdout/stderr reader threads
+        self._extra = {}
+        # bufsize=0: unbuffered, so reader threads see data promptly and our
+        # stdin writer controls flushing.  Spawn the child.
+        self._proc = _subprocess.Popen(
+            args, shell=shell, stdin=stdin, stdout=stdout, stderr=stderr,
+            bufsize=0, **kwargs)
+        self._pid = self._proc.pid
+        self._extra["subprocess"] = self._proc
+        # Build the pipe transports FIRST: the protocol's connection_made calls
+        # get_pipe_transport(fd) to create its StreamReader/Writer, so they must
+        # exist before we fire it.
+        if self._proc.stdin is not None:
+            self._pipes[0] = _SubprocessWritePipe(self, 0, self._proc.stdin)
+        if self._proc.stdout is not None:
+            self._pipes[1] = _SubprocessReadPipe(self, 1, self._proc.stdout)
+        if self._proc.stderr is not None:
+            self._pipes[2] = _SubprocessReadPipe(self, 2, self._proc.stderr)
+        # connection_made before any pipe-data/exit callback (asyncio contract).
+        try:
+            protocol.connection_made(self)
+        except Exception as e:
+            self._report(e, "connection_made")
+        # Only NOW start the reader/wait threads -- so no pipe_data_received or
+        # process_exited can land before connection_made has run.
+        if 1 in self._pipes:
+            self._start_reader(1, self._proc.stdout)
+        if 2 in self._pipes:
+            self._start_reader(2, self._proc.stderr)
+        _threading.Thread(target=self._wait_thread,
+                          name="pygo-subproc-wait", daemon=True).start()
+
+    def _start_reader(self, fd, pipe):
+        self._pipes_open += 1
+        rp = self._pipes[fd]
+
+        def reader():
+            try:
+                while True:
+                    if rp._paused:
+                        _time.sleep(0.001)
+                        continue
+                    data = pipe.read(32768)
+                    if not data:
+                        break
+                    self._loop.call_soon_threadsafe(
+                        self._protocol.pipe_data_received, fd, data)
+            except (BrokenPipeError, OSError):
+                pass
+            finally:
+                self._loop.call_soon_threadsafe(self._pipe_lost, fd, None)
+
+        _threading.Thread(target=reader, name="pygo-subproc-read-%d" % fd,
+                          daemon=True).start()
+
+    def _pipe_lost(self, fd, exc):
+        try:
+            self._protocol.pipe_connection_lost(fd, exc)
+        except Exception as e:
+            self._report(e, "pipe_connection_lost")
+        self._pipes_open -= 1
+        self._maybe_connection_lost()
+
+    def _wait_thread(self):
+        rc = self._proc.wait()
+        self._loop.call_soon_threadsafe(self._on_exit, rc)
+
+    def _on_exit(self, rc):
+        if self._returncode is not None:
+            return
+        self._returncode = rc
+        try:
+            self._protocol.process_exited()
+        except Exception as e:
+            self._report(e, "process_exited")
+        for fut in self._exit_waiters:
+            if not fut.done():
+                fut.set_result(rc)
+        self._exit_waiters.clear()
+        self._maybe_connection_lost()
+
+    def _maybe_connection_lost(self):
+        # Mirror asyncio: connection_lost fires once the process has exited AND
+        # both output pipes have hit EOF.
+        if self._returncode is not None and self._pipes_open <= 0 \
+                and not self._closed:
+            self._closed = True
+            try:
+                self._protocol.connection_lost(None)
+            except Exception as e:
+                self._report(e, "connection_lost")
+
+    # ---- asyncio.SubprocessTransport interface ----
+    def get_pid(self):
+        return self._pid
+
+    def get_returncode(self):
+        return self._returncode
+
+    def get_pipe_transport(self, fd):
+        return self._pipes.get(fd)
+
+    def _wait(self):
+        # asyncio.subprocess.Process.wait() awaits this.
+        fut = self._loop.create_future()
+        if self._returncode is not None:
+            fut.set_result(self._returncode)
+        else:
+            self._exit_waiters.append(fut)
+        return fut
+
+    def send_signal(self, signal):
+        self._proc.send_signal(signal)
+
+    def terminate(self):
+        self._proc.terminate()
+
+    def kill(self):
+        self._proc.kill()
+
+    def is_closing(self):
+        return self._closed
+
+    def close(self):
+        # Best-effort: kill a still-running child, then close stdin.
+        if self._returncode is None:
+            try:
+                self._proc.kill()
+            except (ProcessLookupError, OSError):
+                pass
+        stdin = self._pipes.get(0)
+        if stdin is not None:
+            stdin.close()
+
+    def get_protocol(self):
+        return self._protocol
+
+    def get_extra_info(self, name, default=None):
+        return self._extra.get(name, default)
+
+    def _report(self, exc, where):
+        self._loop.call_exception_handler({
+            "message": "Subprocess " + where + " raised",
+            "exception": exc,
+        })
 
 
 async def _create_datagram_endpoint(loop, protocol_factory, local_addr=None,
