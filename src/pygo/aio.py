@@ -340,22 +340,21 @@ _TASK_NAME_COUNTER = _itertools.count(1)
 # ====================================================================
 # Handles -- minimal asyncio.Handle / asyncio.TimerHandle compat.
 # ====================================================================
-class _Handle(object):
-    """Stand-in for asyncio.Handle.  The backing goroutine consults
-    _cancelled before firing the callback."""
-    __slots__ = ("_cancelled", "_callback", "_args")
-    def __init__(self, cb, args):
-        self._cancelled = False
-        self._callback  = cb
-        self._args      = args
-    def cancel(self):
-        self._cancelled = True
-    def cancelled(self):
-        return self._cancelled
+class _Handle(asyncio.Handle):
+    """asyncio.Handle subclass, but created OUTSIDE the loop's call queue --
+    pygo fires the callback from a goroutine after consulting `_cancelled`
+    (which asyncio.Handle.cancel() sets).  Subclassing the real type so that
+    `isinstance(h, asyncio.Handle)` holds -- libraries (e.g. aiocache) assert
+    that loop.call_*() returns an asyncio.Handle."""
+    def __init__(self, cb, args, loop, context=None):
+        super().__init__(cb, args, loop, context)
 
 
-class _TimerHandle(_Handle):
-    """asyncio.TimerHandle compat shim."""
+class _TimerHandle(asyncio.TimerHandle):
+    """asyncio.TimerHandle subclass (see _Handle).  `when` is informational --
+    pygo schedules via a goroutine sched_sleep, not the loop's timer heap."""
+    def __init__(self, cb, args, loop, when=0, context=None):
+        super().__init__(when, cb, args, loop, context)
 
 
 # ====================================================================
@@ -811,6 +810,10 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
     def is_closed(self):   return self._closed
     def get_debug(self):   return self._debug
     def set_debug(self, enabled):  self._debug = bool(enabled)
+    def _timer_handle_cancelled(self, handle):
+        # asyncio.TimerHandle.cancel() calls this for the loop's timer-heap
+        # bookkeeping; pygo schedules timers as goroutines, so it's a no-op.
+        pass
     def close(self):
         # The asyncio.run / Runner.close cleanup point (NOT
         # run_until_complete -- that must leave background tasks + parked
@@ -851,7 +854,7 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
 
     # ---- callback scheduling ----
     def call_soon(self, callback, *args, context=None):
-        handle = _Handle(callback, args)
+        handle = _Handle(callback, args, self)
         def runner():
             if not handle._cancelled:
                 try:
@@ -871,7 +874,7 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
         # lock; the keepalive goroutine on the loop thread drains and runs it.
         # We do NOT pygo_core.go() here -- from a foreign thread that would
         # spawn onto that thread's own (never-drained) scheduler.
-        handle = _Handle(callback, args)
+        handle = _Handle(callback, args, self)
         with self._ts_lock:
             self._ts_queue.append(handle)
         return handle
@@ -910,7 +913,7 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
         pygo_core.go(_keepalive)
 
     def call_later(self, delay, callback, *args, context=None):
-        handle = _TimerHandle(callback, args)
+        handle = _TimerHandle(callback, args, self, self.time() + delay)
         loop_self = self
         def runner():
             pygo_core.sched_sleep(delay)
@@ -944,7 +947,7 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
     def _add_io(self, fd, evt, callback, args, table):
         if fd in table:
             table[fd]._cancelled = True
-        handle = _Handle(callback, args)
+        handle = _Handle(callback, args, self)
         table[fd] = handle
         def runner():
             while not handle._cancelled:
