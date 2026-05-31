@@ -345,6 +345,39 @@ replaced: `drain_expired` pops the heap top and **unconditionally** writes
 spurious-timeout / double-resume — the fd dispatch delivers a nonzero mask and
 re-queues, the sweep clobbers `ready_out` with `0` and re-queues *again*.
 
+### 14. netpoll force_unlink release lifetime — `spin/netpoll_forceunlink.pml`
+
+The **exactly-once `pool_release`** question. A parker `p` lives on the parking
+g's coroutine stack and is tracked by `g->netpoll_parker` (the *token*).
+`pygo_parker_unlink` clears that token under `pool->lock` whenever it removes p
+(netpoll.c:605-606). Three sites touch p: the **pump** unlinks it (clearing the
+token) and re-queues the g, but **never releases** — the woken g resumes in
+`wait_fd` and releases p itself; **`wait_fd`** releases p on every exit *after*
+clearing the token; and **`pygo_netpoll_force_unlink_g_parker`** (the
+g-completion safety net) takes `pool->lock`, **re-reads the token under the
+lock** (netpoll.c:1421-1424: *"in case `g->netpoll_parker` was cleared by a
+concurrent unlink between the check above and the lock acquire"*), and
+unlinks + releases **only if it still saw the token set**.
+
+`wait_fd` and `force_unlink` run on the same thread in program order (the
+coroutine, then `hub_main`'s completion), so they never race each other. The
+genuine race is `force_unlink` (completion thread) vs the pump (a poller thread)
+for a p that is about to go back to the pool and be re-issued. Proven:
+
+* **Exactly-once release** — `released <= 1`: p is released by exactly one of
+  {the resumed g riding the pump's wake, `force_unlink`}, never both. The
+  under-lock token re-read is what makes the loser observe the cleared token and
+  decline.
+* **No use-after-free** — `assert(!freed)` guards every unlink/release: once p is
+  unlinked under the lock a later pump pass cannot find it, and `force_unlink`
+  cannot release a parker the resumed g already returned.
+
+Negative control `-DBUG_NO_RECHECK` drops the under-lock re-read: `force_unlink`
+trusts the stale cheap-path token it sampled *before* taking the lock and
+releases unconditionally. Spin finds the double-free — the pump unlinks + wakes
+the g (which resumes and releases p), and `force_unlink`, still holding the stale
+"token set", frees the same parker again.
+
 ## Scope & honesty
 
 * Spin models are **sequentially consistent**: they prove the algorithm
@@ -375,11 +408,12 @@ re-queues, the sweep clobbers `ready_out` with `0` and re-queues *again*.
   tests and `tools/mn_stress.py`. The multi-pool dispatch walk and its
   `pool→sub` lock hierarchy are covered by `netpoll_multipool.pml`, and the
   deadline min-heap timeout sweep (the fd-dispatch-vs-timeout-drain claim race)
-  by `netpoll_deadline.pml` (§13). The min-heap *mechanics* (sift-up/down,
-  arbitrary-remove via `heap_index`) and `force_unlink` lifetime (exactly-once
-  `pool_release`) remain unmodelled — both are `pool->lock`-serialised
-  straight-line code, and the sweep's wake decision shares the verified
-  `pygo_pump_claim`.
+  by `netpoll_deadline.pml` (§13), and the `force_unlink` release lifetime
+  (exactly-once `pool_release`, no use-after-free vs the pump) by
+  `netpoll_forceunlink.pml` (§14). What remains unmodelled is the min-heap
+  *mechanics* (sift-up/down, arbitrary-remove via `heap_index`) — pure
+  `pool->lock`-serialised straight-line code with no concurrency, exercised by
+  the netpoll tests and `tools/mn_stress.py`.
 * **io_uring** is not modelled directly, by design: its single-op path
   (`pygo_iouring_submit` / `pygo_iouring_drain`) is verified *by composition* —
   the goroutine parks via `pygo_sched_park_safe` (covered by `parked_safe.pml`)
@@ -409,6 +443,7 @@ verify/
     netpoll_multipool.pml  netpoll multi-pool dispatch pool->sub lock hierarchy (+ BUG_LOCK_ORDER)
     iouring_msclose.pml    io_uring multishot handle lifetime, recv vs close (+ BUG_CONCURRENT_CLOSE)
     netpoll_deadline.pml   netpoll deadline sweep vs fd dispatch, value correctness (+ BUG_SWEEP_NO_COMMIT)
+    netpoll_forceunlink.pml netpoll force_unlink vs pump, exactly-once release / no UAF (+ BUG_NO_RECHECK)
     cross_thread_wake.pml  Phase C per-thread-sched owner-routed wake_safe (+ BUG_ROUTE_TO_WAKER)
   cbmc/
     cldeque_cbmc.c         harness over the real cldeque.c
