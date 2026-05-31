@@ -1333,6 +1333,7 @@ class _StreamTransport(object):
         self._loop = loop
         self._closed = False
         self._stopping = False
+        self._paused = False        # pause_reading() flow control
         try:
             protocol.connection_made(self)
         except Exception as e:
@@ -1342,6 +1343,12 @@ class _StreamTransport(object):
     def _recv_loop(self):
         sock = self._sock
         while not self._stopping:
+            if self._paused:
+                # Flow control: paused by pause_reading().  Poll the flag
+                # cooperatively (resume_reading() clears it).  Pauses are
+                # short backpressure windows, so a 1 ms tick is fine.
+                pygo_core.sched_sleep(0.001)
+                continue
             try:
                 data = sock.recv(65536)
             except (BlockingIOError, InterruptedError):
@@ -1456,6 +1463,45 @@ class _StreamTransport(object):
     def set_protocol(self, protocol):
         self._protocol = protocol
 
+    # ---- flow control (read side) ----
+    def pause_reading(self):
+        self._paused = True
+
+    def resume_reading(self):
+        self._paused = False
+
+    def is_reading(self):
+        return not self._paused and not self._closed
+
+    # ---- abort / half-close ----
+    def abort(self):
+        # Immediate teardown (no graceful flush); close() already does a
+        # shutdown + connection_lost, which is acceptable for abort here.
+        self.close()
+
+    def can_write_eof(self):
+        return True
+
+    def write_eof(self):
+        if self._closed:
+            return
+        try:
+            self._sock.shutdown(_socket.SHUT_WR)
+        except OSError:
+            pass
+
+    # ---- write-buffer flow control: we write synchronously / via a flush
+    # goroutine, so the buffer is effectively always drained.  Report 0 and
+    # never invoke pause_writing; accept the setters as no-ops. ----
+    def set_write_buffer_limits(self, high=None, low=None):
+        pass
+
+    def get_write_buffer_limits(self):
+        return (0, 0)
+
+    def get_write_buffer_size(self):
+        return 0
+
     def _report(self, exc, where):
         if self._loop is not None:
             self._loop.call_exception_handler({
@@ -1472,6 +1518,10 @@ class _ProtocolServer(object):
         self._sock = sock
         self._factory = protocol_factory
         self._loop = loop
+        # asyncio.Server exposes _ssl_context (None when no TLS); libraries
+        # (e.g. websockets' test helpers) read it off the server object.
+        # pygo.aio's create_server rejects ssl=, so it is always None here.
+        self._ssl_context = None
         self._closed = False
         self._accept_g = pygo_core.go(self._accept_loop)
 
@@ -1491,8 +1541,23 @@ class _ProtocolServer(object):
             protocol = self._factory()
             _StreamTransport(conn, protocol, loop=self._loop)
 
+    def get_loop(self):
+        """asyncio.Server.get_loop().  Libraries (websockets) call this on
+        the server returned by create_server to schedule cleanup tasks."""
+        return self._loop if self._loop is not None else asyncio.get_event_loop()
+
     def is_serving(self):
         return not self._closed
+
+    async def start_serving(self):
+        # The accept loop is started in __init__, so we are already serving;
+        # this mirrors asyncio.Server.start_serving() as a no-op when already up.
+        return None
+
+    async def serve_forever(self):
+        # Run until close() (or cancellation of this coroutine) ends it.
+        while not self._closed:
+            await asyncio.sleep(0.05)
 
     def close(self):
         if self._closed: return
@@ -1501,12 +1566,26 @@ class _ProtocolServer(object):
         except OSError: pass
         _close_sock(self._sock)
 
+    def close_clients(self):
+        # asyncio 3.13+ API; we don't track client transports here yet.
+        pass
+
+    def abort_clients(self):
+        pass
+
     async def wait_closed(self):
         await asyncio.sleep(0)
 
     @property
     def sockets(self):
         return (self._sock,) if not self._closed else ()
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        self.close()
+        await self.wait_closed()
 
 
 class DatagramTransport(object):
