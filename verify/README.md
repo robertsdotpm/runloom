@@ -156,6 +156,40 @@ already sees the goroutine on its wake list.
 Negative control `-DBUG_DEC_BEFORE_REQUEUE` flips the order and the model
 fails (the drain exits and strands the goroutine).
 
+### 8. netpoll park/wake commit — `spin/netpoll_commit.pml`
+
+The lost-wake guard for I/O parking (`netpoll.c`): the piece where the real
+lost-wake bugs have lived (EPOLLET edge-drop, and the residual "missing atomic
+park-commit"). It models Go's `netpollblockcommit`, adapted to pygo's re-queue
+model — the `commit` field (`ARMED → {PARKED | WOKEN}`) shared between a
+goroutine parking on an fd (`pygo_netpoll_wait_fd`) and the pump that delivers
+readiness (`pygo_pump_dispatch_event` / `pygo_pump_claim`):
+
+* the parking g CASes `ARMED → PARKED`; on success it yields, on failure
+  (`WOKEN`) a pump beat it to the parker, so it aborts the park and returns the
+  readiness it left;
+* the pump CASes `commit → WOKEN` and re-queues the g **only** if it claimed
+  from `PARKED` — claiming from `ARMED` means the g hasn't parked yet and will
+  abort itself, so re-queueing would double-resume it; a second claimer that
+  sees `WOKEN` skips entirely.
+
+Proven over one parking g racing **two** pumps that both see the fd ready
+(so the "second claimer sees `WOKEN`, touches nothing" path is exercised):
+
+* **No lost wake** — the g always returns from `wait_fd` (re-queued if it
+  parked, self-aborts if a pump claimed first). A lost wake leaves it blocked
+  forever at the park = a Spin invalid end state.
+* **At most once** — `resumes ≤ 1` / `requeues ≤ 1`: at most one pump claims
+  from `PARKED`, and an aborting g is never re-queued.
+* **Readiness delivered** — whenever the g returns, `ready_out` was written by
+  the claiming pump first (the `pool->lock` ordering the abort path re-takes).
+* **Mutually exclusive paths** — the g never both parks and aborts.
+
+Negative control `-DBUG_NO_COMMIT` drops the commit CAS (the g always parks;
+the pump re-queues only if it happens to observe a plain `parked` flag already
+set) and Spin finds the classic lost wake: the pump checks the flag *before*
+the g sets it, declines to wake, and the g parks forever.
+
 ## Scope & honesty
 
 * Spin models are **sequentially consistent**: they prove the algorithm
@@ -174,6 +208,15 @@ fails (the drain exits and strands the goroutine).
   `select` claim) + straight-line locked code. The integrated channel is
   exercised by `tests/test_chan.py`, `tests/test_mn.py`, and
   `tools/mn_stress.py`.
+* `netpoll_commit.pml` models the **commit protocol** — the lost-wake core —
+  but not the surrounding netpoll machinery: the per-fd bucket / global-list
+  link & unlink, the deadline min-heap timeout sweep, and
+  `pygo_netpoll_force_unlink_g_parker` (the g-completion safety unlink) are
+  not yet modelled. They share the same `commit` claim (`pygo_pump_claim`) for
+  the wake decision, so the exactly-once guarantee carries; the list surgery
+  itself is lock-protected straight-line code exercised by the netpoll tests
+  and `tools/mn_stress.py`. Modelling the timeout-sweep / force-unlink races
+  against the pump is the natural next extension.
 
 ## Layout
 
@@ -188,6 +231,7 @@ verify/
     select_close.pml       select Phase-2 vs send/close (+ 4 bug controls)
     hub_submit.pml         default M:N wake dedup (+ BUG_NO_DEDUP control)
     blockpool.pml          blocking-offload wake order (+ BUG_DEC_BEFORE_REQUEUE)
+    netpoll_commit.pml     netpoll park/wake commit protocol (+ BUG_NO_COMMIT)
   cbmc/
     cldeque_cbmc.c         harness over the real cldeque.c
     stubs/plat_compat.h    minimal stub so cldeque.c compiles standalone under CBMC
