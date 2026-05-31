@@ -12,6 +12,17 @@ import pygo
 import pygo_core
 
 
+# Single-thread blocking offloads run CONCURRENTLY only on netpoll backends
+# that expose a pump-wake primitive: epoll (eventfd), kqueue (EVFILT_USER)
+# and Windows IOCP+AFD (PostQueuedCompletionStatus).  The Windows WSAPoll /
+# select fallback pumps re-poll the parked-fd set on a timeout and have no
+# wakeable object, so a worker thread can't interrupt an idle pump; on those
+# backends blocking() runs the call inline (serial) rather than offloading
+# (see pygo_netpoll_wake_pump_arm in netpoll.c).  The offloads still complete
+# correctly there -- only the wall-clock concurrency bound does not hold.
+_PUMP_WAKE = pygo_core.netpoll_backend() in ("epoll", "kqueue", "iocp-afd")
+
+
 class TestBlocking(unittest.TestCase):
     def test_result_and_args(self):
         """blocking() returns fn's value and forwards *args / **kwargs."""
@@ -62,10 +73,18 @@ class TestBlocking(unittest.TestCase):
         pygo_core.run()
         wall = time.monotonic() - t0
 
+        # Correctness holds on every backend: all offloads complete.
         self.assertEqual(sorted(done), list(range(N)))
-        # Serial-on-one-thread would be N*NAP; offloaded is ~NAP.  Half the
-        # serial time is a generous bar that still proves concurrency.
-        self.assertLess(wall, N * NAP * 0.5)
+        if _PUMP_WAKE:
+            # Serial-on-one-thread would be N*NAP; offloaded is ~NAP.  Half
+            # the serial time is a generous bar that still proves concurrency.
+            self.assertLess(wall, N * NAP * 0.5)
+        else:
+            # WSAPoll / select fallback pumps run the offload inline; only
+            # completion (checked above) is guaranteed, not concurrency.
+            self.skipTest(
+                "netpoll backend %r has no pump-wake; blocking() runs inline"
+                % pygo_core.netpoll_backend())
 
     def test_inline_outside_goroutine(self):
         """Called outside any goroutine, blocking() just runs fn inline."""
