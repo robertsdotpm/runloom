@@ -979,6 +979,9 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
         # on any hub thread), so _thread_id exists purely so attribute
         # reads + asyncio's early-return thread checks succeed.
         self._thread_id = None
+        # BaseEventLoop exposes this; libraries (asgiref) read loop._default_executor
+        # directly, before ever calling run_in_executor.  Filled in lazily there.
+        self._default_executor = None
         # Honour asyncio's debug-mode sources (PYTHONASYNCIODEBUG / -X dev), as
         # BaseEventLoop does via coroutines._is_debug_mode(); libraries + anyio
         # read loop.get_debug() and expect it to reflect the env.
@@ -1455,7 +1458,7 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
         import concurrent.futures as _cf
         if executor is None:
             # Lazy-init default pool.
-            if not hasattr(self, "_default_executor"):
+            if self._default_executor is None:
                 self._default_executor = _cf.ThreadPoolExecutor(max_workers=8)
             executor = self._default_executor
         fut = PygoFuture(loop=self)
