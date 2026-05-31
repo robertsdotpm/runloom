@@ -1446,6 +1446,36 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
         transport = _StreamTransport(sock, protocol, loop=self)
         return transport, protocol
 
+    async def sendfile(self, transport, file, offset=0, count=None, *,
+                       fallback=True):
+        """asyncio.loop.sendfile.  We have no OS sendfile path, so do the
+        portable read+write fallback (asyncio falls back to this too when the
+        native path is unavailable).  Used by aiohttp's FileResponse etc.; the
+        base class raises NotImplementedError.  Blocking file reads are offloaded
+        so they don't wedge the loop."""
+        if transport.is_closing():
+            raise RuntimeError("Transport is closing")
+        if not fallback:
+            # Caller demanded the native path, which pygo transports lack.
+            raise asyncio.SendfileNotAvailableError(
+                "sendfile syscall path is not available on pygo transports")
+        if offset:
+            await self.run_in_executor(None, file.seek, offset)
+        blocksize = 16384
+        total = 0
+        while True:
+            want = blocksize
+            if count is not None:
+                want = min(blocksize, count - total)
+                if want <= 0:
+                    break
+            data = await self.run_in_executor(None, file.read, want)
+            if not data:
+                break
+            transport.write(data)
+            total += len(data)
+        return total
+
     async def connect_accepted_socket(self, protocol_factory, sock, *, ssl=None,
                                       ssl_handshake_timeout=None, **_ignored):
         """Wrap an already-accepted socket into a transport (server side).
