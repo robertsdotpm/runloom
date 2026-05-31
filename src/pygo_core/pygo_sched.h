@@ -142,6 +142,11 @@ struct pygo_g {
     double wake_at;
     uint64_t sleep_seq;  /* FIFO tiebreak for equal wake_at (asyncio (when,seq) order) */
     pygo_g_t *next;
+    /* Owning per-thread scheduler (Phase C: one sched per OS thread).  Set at
+     * spawn to the spawning thread's sched.  A cross-thread wake_safe (e.g. a
+     * run_in_executor pool worker resolving a future the owner awaits) must
+     * route the g back to THIS sched's wake_list, not the waker thread's. */
+    pygo_sched_t *owner;
     int done;
     int refcount;
     /* Caller-asserted "this goroutine will never yield".  Spawned via

@@ -796,8 +796,9 @@ pygo_g_t *pygo_sched_sleep_pop(pygo_sched_t *s)
 #define pygo_sleep_pop  pygo_sched_sleep_pop
 
 /* ---- Scheduler lifecycle ---- */
-static pygo_sched_t pygo_global_sched;
-static int pygo_global_sched_init_done = 0;  /* 0=uninit 1=initing 2=ready; atomics only */
+/* Phase C: per-thread schedulers (see pygo_sched_get below).  pygo_cal_default
+ * holds the calibrated default stack size that each new thread's sched is
+ * initialised with. */
 
 /* ---- Stack calibration ----
  *
@@ -851,9 +852,10 @@ static void pygo_cal_record(pygo_g_t *g)
         pygo_cal_default = chosen;
         pygo_cal_frozen = 1;
         pygo_coro_paint_set(0);
-        if (__atomic_load_n(&pygo_global_sched_init_done, __ATOMIC_ACQUIRE) == 2) {
-            pygo_global_sched.stack_size = (Py_ssize_t)chosen;
-        }
+        /* cal_record runs inside drain on this thread's own sched; bump it so
+         * the freeze takes effect immediately here.  Other threads' scheds pick
+         * up pygo_cal_default when they spawn their next g. */
+        pygo_sched_get()->stack_size = (Py_ssize_t)chosen;
     }
 }
 
@@ -864,9 +866,9 @@ void pygo_sched_set_default_stack_size(size_t bytes)
     pygo_cal_default = bytes;
     pygo_cal_frozen = 1;
     pygo_coro_paint_set(0);
-    if (pygo_global_sched_init_done) {
-        pygo_global_sched.stack_size = (Py_ssize_t)bytes;
-    }
+    /* Update the calling thread's sched immediately; other threads pick up
+     * pygo_cal_default on their next spawn. */
+    pygo_sched_get()->stack_size = (Py_ssize_t)bytes;
 }
 
 size_t pygo_sched_get_default_stack_size(void)
@@ -926,35 +928,35 @@ static void pygo_sched_drain_wake_list(pygo_sched_t *s)
     }
 }
 
+/* Phase C: ONE scheduler per OS thread.  pygo.aio runs each event loop on the
+ * thread that drives it (pygo_core.run -> pygo_sched_drain on this thread's
+ * sched), so two loops on two threads are fully independent -- one thread
+ * blocking synchronously inside a coroutine (concurrent.futures.Future.result,
+ * thread.join, queue.get -- anyio BlockingPortal, run_coroutine_threadsafe,
+ * threaded server controllers) only freezes ITS OWN sched, never the other's.
+ *
+ * The sched is thread-local and lazily created on first use.  No cross-thread
+ * init race (each thread builds its own), so the old 0->1->2 election is gone.
+ * M:N hubs keep their own per-hub scheds via pygo_mn_current_sched and never
+ * funnel through here for their run loop.
+ *
+ * Lifetime: the per-thread sched is intentionally leaked at thread exit (no
+ * portable pre-C11 TLS destructor across GCC/MSVC; a sched is small and the
+ * thread is gone).  A thread churning many short loops (e.g. aiosmtpd's
+ * per-test Controller thread) leaks one sched per thread, not per loop. */
+static PYGO_TLS pygo_sched_t *pygo_tls_sched = NULL;
+
 pygo_sched_t *pygo_sched_get(void)
 {
-    /* Lock-free one-time init via a 0->1->2 state machine (mirrors the
-     * netpoll pool lock_inited pattern).  Without this, two hub threads
-     * hitting the first pygo_sched_get concurrently (e.g. both in
-     * pygo_netpoll_wait_fd at startup) each saw the plain !init_done flag
-     * and double-initialised pygo_global_sched -- leaking the first
-     * ready_ring, re-init'ing wake_list_lock, and racing every field
-     * write.  TSan caught this; it is the same class as the epoll
-     * double-init race fixed in 603fcd8. */
-    int st = __atomic_load_n(&pygo_global_sched_init_done, __ATOMIC_ACQUIRE);
-    if (st == 2) return &pygo_global_sched;
-    if (st == 0) {
-        int expected = 0;
-        if (__atomic_compare_exchange_n(&pygo_global_sched_init_done,
-                                        &expected, 1, 0,
-                                        __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
-            /* We won the election: initialise, then publish state 2. */
-            pygo_sched_init(&pygo_global_sched);
-            __atomic_store_n(&pygo_global_sched_init_done, 2, __ATOMIC_RELEASE);
-            return &pygo_global_sched;
-        }
+    pygo_sched_t *s = pygo_tls_sched;
+    if (__builtin_expect(s != NULL, 1)) return s;
+    s = (pygo_sched_t *)PyMem_RawMalloc(sizeof(*s));
+    if (s == NULL) {
+        Py_FatalError("pygo: per-thread scheduler allocation failed");
     }
-    /* Lost the election (or observed st==1): another thread is mid-init.
-     * Wait for it to publish 2.  init is a handful of instructions, so
-     * this spins only in the tiny startup window. */
-    while (__atomic_load_n(&pygo_global_sched_init_done, __ATOMIC_ACQUIRE) != 2)
-        ;
-    return &pygo_global_sched;
+    pygo_sched_init(s);                 /* sets stack_size = pygo_cal_default */
+    pygo_tls_sched = s;
+    return s;
 }
 
 /* ---- Coro entry shim ----
@@ -1146,6 +1148,7 @@ static PyObject *spawn_common(pygo_sched_t *s, PyObject *callable,
     Py_INCREF(callable);
     g->callable = callable;
     g->refcount = 1;   /* one ref for the scheduler queue */
+    g->owner = s;      /* per-thread sched that owns this g (Phase C) */
     g->noyield = noyield;
     g->coro = pygo_coro_new(stack_size, pygo_g_entry, g);
     if (g->coro == NULL) {
@@ -1307,7 +1310,11 @@ void pygo_sched_wake_safe(pygo_g_t *g)
         if (__atomic_compare_exchange_n(&g->parked_safe, &expected, 0,
                                         0, __ATOMIC_ACQ_REL,
                                         __ATOMIC_ACQUIRE)) {
-            pygo_sched_t *s = pygo_sched_get();
+            /* Route to the g's OWNER sched (the thread that spawned it),
+             * not the waker's thread -- the waker may be a foreign thread
+             * (run_in_executor pool worker, iouring CQE) whose own sched is
+             * never drained.  g->owner's drain owner consumes the wake_list. */
+            pygo_sched_t *s = g->owner ? g->owner : pygo_sched_get();
             pygo_mutex_lock(&s->wake_list_lock);
             g->wake_next = NULL;
             if (s->wake_list_tail != NULL) {
