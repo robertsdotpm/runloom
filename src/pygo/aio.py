@@ -459,12 +459,19 @@ class PygoFuture(object):
         self._log_traceback = True
         self._fire_callbacks()
         # NOTE: stock asyncio.Future.__del__ logs "exception was never
-        # retrieved" here when _log_traceback is still set at GC time.  pygo
-        # can't usefully add that yet: a completed PygoTask forms an
-        # uncollectable cycle (task -> self._g (PygoG) -> g->callable (the
-        # _driver bound method) -> task) because PygoGType has no
-        # tp_traverse/tp_clear, so the task is never GC'd.  Fixing that (C-level
-        # GC protocol on the G type) is the prerequisite -- see STATE.md.
+        # retrieved" here when _log_traceback is still set at GC time.  That was
+        # blocked because a completed PygoTask used to form an uncollectable
+        # cycle (task -> self._g (PygoG) -> g->callable (the _driver bound
+        # method) -> task) that cyclic GC couldn't see through the C pygo_g_t.
+        # That cycle is now broken at the source: pygo_g_entry releases
+        # g->callable the instant the goroutine completes (it's never called
+        # again), so a completed task collects by plain refcounting.  Adding the
+        # __del__ warning is therefore unblocked -- with one caveat to handle:
+        # for a fire-and-forget task whose only ref IS g->callable, releasing it
+        # collects the task in the goroutine's own completion context, so the
+        # __del__ would run there (not at a later GC).  call_exception_handler /
+        # logging is fine there, but anything that re-enters the scheduler is
+        # not -- keep the warning side-effect-free or defer it via call_soon.
 
     def cancel(self, msg=None):
         if self._state != _PENDING:

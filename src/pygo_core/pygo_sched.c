@@ -1019,6 +1019,26 @@ void pygo_g_entry(void *user)
     } else {
         g->result = res;
     }
+    /* The goroutine has run to completion; g->callable is never invoked
+     * again.  Release it NOW rather than waiting for the g's last decref --
+     * otherwise a pygo.aio task, whose callable is the task's own bound
+     * _driver method, is kept alive forever by an unbreakable cycle:
+     *
+     *     task -> task._g (PygoG) -> pygo_g_t -> g->callable (_driver) -> task
+     *
+     * pygo_g_t is a C struct, invisible to cyclic GC, and the PygoG wrapper
+     * has no tp_traverse, so the collector cannot see the g->callable edge and
+     * never reclaims the completed task (its 'exception never retrieved'
+     * warning never fires either).  Clearing callable here cuts that edge at
+     * the source, so the remaining task graph collects by plain refcounting.
+     *
+     * Running the resulting finalizer here is safe: we are on g's own stack in
+     * g's tstate (any finalizer frames land on g's datastack chunk, drained
+     * immediately after this returns), and the scheduler still holds its
+     * ref(s) to g, so g itself cannot be freed under us.  pygo_g_decref's later
+     * Py_XDECREF(g->callable) becomes a NULL no-op.  Done last, so g->done
+     * publishes a fully torn-down g. */
+    Py_CLEAR(g->callable);
     /* RELEASE store on g->done publishes the prior g->result/g->error
      * writes; PygoG_done_get / PygoG_result_get load g->done with
      * ACQUIRE and only read result/error if done. */
