@@ -1059,6 +1059,7 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
 
     # ---- task / future ----
     def create_task(self, coro, *, name=None, context=None):
+        self._check_closed()
         if self._can_spawn_here():
             return PygoTask(coro, loop=self, name=name, context=context)
         # Foreign thread: PygoTask.__init__ spawns a goroutine, which would land
@@ -1117,7 +1118,8 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
         # Raise on a closed loop (asyncio parity).  asgiref relies on this to
         # detect a dead main_event_loop and fall back to a fresh loop+thread;
         # without it, async_to_sync schedules onto the closed loop and pumps
-        # run_until_future() forever -- the AsyncSingleThreadContext suite hang.
+        # run_until_future() forever -- the AsyncSingleThreadContext suite hang
+        # (and the sync_to_async(thread_sensitive=True) deadlock).
         self._check_closed()
         # Thread-safe: may be called from ANY OS thread.  Enqueue under the
         # lock; the keepalive goroutine on the loop thread drains and runs it.
@@ -1654,7 +1656,13 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
                     fut.set_exception(cf_fut.exception())
                 else:
                     fut.set_result(cf_fut.result())
-            self.call_soon_threadsafe(_set)
+            try:
+                self.call_soon_threadsafe(_set)
+            except RuntimeError:
+                # Loop closed before the pool thread finished -- nothing to
+                # resolve into; drop the result (matches stock asyncio, whose
+                # wrap_future done-callback no-ops once the loop is closed).
+                pass
         cf_fut.add_done_callback(_on_thread_done)
         return fut
 

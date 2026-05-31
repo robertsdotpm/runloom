@@ -406,5 +406,45 @@ class TestFatalExceptionPropagation(unittest.TestCase):
             loop.close()
 
 
+class TestClosedLoopRaises(unittest.TestCase):
+    """Scheduling onto a CLOSED loop must raise RuntimeError, like stock
+    asyncio (BaseEventLoop._check_closed).  asgiref's AsyncToSync depends on
+    this: its sticky threadlocal keeps pointing at a prior run's now-closed
+    loop, and a later call_soon_threadsafe onto it must raise so asgiref falls
+    back to a fresh loop instead of enqueuing work the dead loop never drains
+    (the sync_to_async(thread_sensitive=True) deadlock)."""
+
+    def _closed_loop(self):
+        loop = asyncio.new_event_loop()
+        loop.close()
+        return loop
+
+    def test_call_soon_threadsafe_raises(self):
+        loop = self._closed_loop()
+        with self.assertRaises(RuntimeError):
+            loop.call_soon_threadsafe(lambda: None)
+
+    def test_call_soon_raises(self):
+        loop = self._closed_loop()
+        with self.assertRaises(RuntimeError):
+            loop.call_soon(lambda: None)
+
+    def test_call_later_raises(self):
+        loop = self._closed_loop()
+        with self.assertRaises(RuntimeError):
+            loop.call_later(0.1, lambda: None)
+
+    def test_create_task_raises(self):
+        loop = self._closed_loop()
+        async def c():
+            return None
+        coro = c()
+        try:
+            with self.assertRaises(RuntimeError):
+                loop.create_task(coro)
+        finally:
+            coro.close()
+
+
 if __name__ == "__main__":
     unittest.main()
