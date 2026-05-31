@@ -345,12 +345,16 @@ except AttributeError:
     _CURRENT_TASKS = {}
 
 
-# WeakSet that asyncio.all_tasks() walks.  Registering keeps debug
-# tooling happy and lets external code see our tasks.
+# Make our tasks visible to asyncio.all_tasks() (and debug tooling, anyio's
+# get_running_tasks, etc.).  Use the register/unregister hooks rather than a
+# specific set: 3.11 walked asyncio.tasks._all_tasks, but 3.12+ renamed it to
+# _scheduled_tasks and all_tasks() enumerates THAT via _register_task -- so the
+# old `_all_tasks` lookup AttributeError'd on 3.13 and our tasks never showed up.
 try:
-    _ALL_TASKS = asyncio.tasks._all_tasks
+    _REGISTER_TASK = asyncio.tasks._register_task
+    _UNREGISTER_TASK = asyncio.tasks._unregister_task
 except AttributeError:
-    _ALL_TASKS = None
+    _REGISTER_TASK = _UNREGISTER_TASK = None
 
 # Default task names mirror stock asyncio's "Task-N" (some libraries -- e.g.
 # aiojobs -- assert task.get_name().startswith("Task-")).
@@ -680,10 +684,10 @@ class PygoTask(_PygoFutureMixin, asyncio.Task):
         self._pgfutwaiter = None
         self._pgnumcancels = 0          # cancelling()/uncancel() counter
         # Register in asyncio.all_tasks() (Task.__init__ would normally do this).
-        if _ALL_TASKS is not None:
+        if _REGISTER_TASK is not None:
             try:
-                _ALL_TASKS.add(self)
-            except TypeError:
+                _REGISTER_TASK(self)
+            except Exception:
                 pass
         # Driver goroutines run arbitrary user async code (deep C-recursive
         # first-time imports overflow the default 128 KB g-stack and SEGV), so
@@ -1513,14 +1517,15 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
         Strategy: cancel all known tasks (best-effort -- not all are
         interruptible), then sched_reset() the scheduler's ready+sleep
         queues so the next pygo_core.run() sees a clean slate."""
-        if _ALL_TASKS is not None:
-            tasks = [t for t in list(_ALL_TASKS)
-                     if not t.done() and t._loop is self]
-            for t in tasks:
-                try:
-                    t.cancel()
-                except Exception:
-                    pass
+        try:
+            tasks = [t for t in asyncio.all_tasks(self) if t._loop is self]
+        except Exception:
+            tasks = []
+        for t in tasks:
+            try:
+                t.cancel()
+            except Exception:
+                pass
         # Forcibly drop anything still scheduled.  Goroutines parked on
         # netpoll/wake/chan that aren't interrupted by cancel get
         # abandoned; the underlying coro and snap are freed when the
