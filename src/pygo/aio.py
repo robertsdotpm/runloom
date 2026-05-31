@@ -1394,6 +1394,58 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
         return _ProtocolServer(socks, protocol_factory, loop=self, ssl_context=ssl,
                                ssl_handshake_timeout=ssl_handshake_timeout)
 
+    # ---- Unix domain sockets (loop.create_unix_server / _connection) ----
+    # The base class raises NotImplementedError; UDS is common for local IPC
+    # (uvicorn/gunicorn --uds, database sockets).  Mirror create_server /
+    # create_connection with an AF_UNIX socket.
+    async def create_unix_server(self, protocol_factory, path=None, *, sock=None,
+                                 backlog=100, ssl=None,
+                                 ssl_handshake_timeout=None, **_ignored):
+        if sock is None:
+            if path is None:
+                raise ValueError("path was not specified, and no sock specified")
+            sock = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+            try:
+                sock.bind(path)
+            except OSError as e:
+                sock.close()
+                if e.errno == _errno.EADDRINUSE:
+                    raise OSError(e.errno, "Address %r is already in use" % (path,))
+                raise
+            except Exception:
+                sock.close()
+                raise
+        sock.setblocking(False)
+        sock.listen(backlog)
+        return _ProtocolServer([sock], protocol_factory, loop=self,
+                               ssl_context=ssl,
+                               ssl_handshake_timeout=ssl_handshake_timeout)
+
+    async def create_unix_connection(self, protocol_factory, path=None, *,
+                                     ssl=None, sock=None, server_hostname=None,
+                                     ssl_handshake_timeout=None, **_ignored):
+        if sock is None:
+            if path is None:
+                raise ValueError("no path and no sock were specified")
+            sock = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+            sock.setblocking(False)
+            try:
+                sock.connect(path)
+            except BlockingIOError:
+                pygo_core.wait_fd(sock.fileno(), 2)
+                err = sock.getsockopt(_socket.SOL_SOCKET, _socket.SO_ERROR)
+                if err != 0:
+                    sock.close()
+                    raise OSError(err, "connect failed")
+        else:
+            sock.setblocking(False)
+        if ssl is not None:
+            sock = _tls_wrap_client(sock, ssl, server_hostname, None,
+                                    ssl_handshake_timeout)
+        protocol = protocol_factory()
+        transport = _StreamTransport(sock, protocol, loop=self)
+        return transport, protocol
+
     async def getaddrinfo(self, host, port, *, family=0, type=0, proto=0, flags=0):
         # Offloaded to the blocking pool so DNS doesn't wedge the hub.
         # monkey.py may still patch this to a cooperative resolver.
