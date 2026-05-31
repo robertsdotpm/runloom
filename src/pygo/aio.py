@@ -775,31 +775,85 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
                             reuse_address=None, reuse_port=None, **_ignored):
         if ssl is not None:
             raise NotImplementedError("ssl not supported in pygo.aio loop.create_server")
-        if sock is None:
-            infos = _resolve(host, port, family,
-                             _socket.SOCK_STREAM, 0, flags)
-            last_err = None
-            for fam, typ, prt, _canon, sa in infos:
-                try:
-                    sock = _socket.socket(fam, typ, prt)
-                    if reuse_address is not False:
-                        sock.setsockopt(_socket.SOL_SOCKET,
-                                        _socket.SO_REUSEADDR, 1)
-                    sock.setblocking(False)
-                    sock.bind(sa)
-                    sock.listen(backlog)
-                    break
-                except OSError as e:
-                    last_err = e
-                    _close_sock(sock)
-                    sock = None
-            if sock is None:
-                raise last_err or OSError("could not bind")
-        else:
+        if sock is not None:
             sock.setblocking(False)
+            socks = [sock]
+        else:
+            # asyncio binds EVERY address getaddrinfo returns (one socket each),
+            # not just the first -- so "localhost" listens on both 127.0.0.1 and
+            # ::1.  The old code break'd after the first bind, which left no IPv4
+            # socket whenever getaddrinfo sorts IPv6 first (Windows), so callers
+            # that look for an AF_INET socket (websockets' get_host_port) failed.
+            if host == "" or host is None:
+                hosts = [None]
+            elif isinstance(host, str):
+                hosts = [host]
+            else:
+                hosts = list(host)
+            # asyncio default: SO_REUSEADDR on POSIX only -- on Windows it lets a
+            # second bind hijack the port, so it stays off there by default.
+            if reuse_address is None:
+                reuse_address = (_os.name == "posix" and sys.platform != "cygwin")
+            infos = []
+            seen = set()
+            for hst in hosts:
+                for info in _resolve(hst, port, family,
+                                     _socket.SOCK_STREAM, 0, flags):
+                    fam, typ, prt, _canon, sa = info
+                    key = (fam, sa)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    infos.append(info)
+            socks = []
+            last_err = None
+            completed = False
+            try:
+                for fam, typ, prt, _canon, sa in infos:
+                    try:
+                        s = _socket.socket(fam, typ, prt)
+                    except OSError:
+                        # getaddrinfo can return a family the host can't create
+                        # (e.g. AF_INET6 with IPv6 disabled) -- skip it.
+                        continue
+                    socks.append(s)
+                    if reuse_address:
+                        s.setsockopt(_socket.SOL_SOCKET,
+                                     _socket.SO_REUSEADDR, 1)
+                    if reuse_port and hasattr(_socket, "SO_REUSEPORT"):
+                        s.setsockopt(_socket.SOL_SOCKET,
+                                     _socket.SO_REUSEPORT, 1)
+                    # Keep the IPv6 wildcard socket from also grabbing the IPv4
+                    # wildcard (dual-stack) and colliding with the AF_INET bind.
+                    if (fam == _socket.AF_INET6
+                            and hasattr(_socket, "IPPROTO_IPV6")
+                            and hasattr(_socket, "IPV6_V6ONLY")):
+                        try:
+                            s.setsockopt(_socket.IPPROTO_IPV6,
+                                         _socket.IPV6_V6ONLY, 1)
+                        except OSError:
+                            pass
+                    s.setblocking(False)
+                    try:
+                        s.bind(sa)
+                    except OSError as e:
+                        last_err = OSError(
+                            e.errno,
+                            "error while attempting to bind on address %r: %s"
+                            % (sa, e.strerror))
+                        raise last_err
+                completed = True
+            finally:
+                if not completed:
+                    for s in socks:
+                        _close_sock(s)
+            if not socks:
+                raise last_err or OSError("could not bind to any address")
+            for s in socks:
+                s.listen(backlog)
         # cb=None: caller wired up via protocol factory + Transport.
-        # We still need an accept loop that builds Transports per conn.
-        return _ProtocolServer(sock, protocol_factory, loop=self)
+        # We still need an accept loop per socket that builds Transports per conn.
+        return _ProtocolServer(socks, protocol_factory, loop=self)
 
     async def getaddrinfo(self, host, port, *, family=0, type=0, proto=0, flags=0):
         # Offloaded to the blocking pool so DNS doesn't wedge the hub.
@@ -1575,8 +1629,10 @@ class _ProtocolServer(object):
     """Server compatible with asyncio.Server: per-accept builds a
     _StreamTransport and a protocol via factory."""
 
-    def __init__(self, sock, protocol_factory, *, loop=None):
-        self._sock = sock
+    def __init__(self, socks, protocol_factory, *, loop=None):
+        # create_server may bind several sockets (one per address family);
+        # accept independently on each.
+        self._socks = list(socks)
         self._factory = protocol_factory
         self._loop = loop
         # asyncio.Server exposes _ssl_context (None when no TLS); libraries
@@ -1584,19 +1640,20 @@ class _ProtocolServer(object):
         # pygo.aio's create_server rejects ssl=, so it is always None here.
         self._ssl_context = None
         self._closed = False
-        self._accept_g = pygo_core.go(self._accept_loop)
+        self._accept_gs = [pygo_core.go(lambda s=s: self._accept_loop(s))
+                           for s in self._socks]
 
-    def _accept_loop(self):
+    def _accept_loop(self, sock):
         while not self._closed:
             try:
-                conn, _addr = self._sock.accept()
+                conn, _addr = sock.accept()
             except (BlockingIOError, InterruptedError):
                 if self._closed: return
-                pygo_core.wait_fd(self._sock.fileno(), 1)
+                pygo_core.wait_fd(sock.fileno(), 1)
                 continue
             except OSError:
-                if self._closed: return
-                self._closed = True
+                # One listener erroring stops accepting on it but must not
+                # tear down the whole (multi-socket) server.
                 return
             conn.setblocking(False)
             protocol = self._factory()
@@ -1623,9 +1680,10 @@ class _ProtocolServer(object):
     def close(self):
         if self._closed: return
         self._closed = True
-        try: self._sock.shutdown(_socket.SHUT_RDWR)
-        except OSError: pass
-        _close_sock(self._sock)
+        for sock in self._socks:
+            try: sock.shutdown(_socket.SHUT_RDWR)
+            except OSError: pass
+            _close_sock(sock)
 
     def close_clients(self):
         # asyncio 3.13+ API; we don't track client transports here yet.
@@ -1639,7 +1697,7 @@ class _ProtocolServer(object):
 
     @property
     def sockets(self):
-        return (self._sock,) if not self._closed else ()
+        return tuple(self._socks) if not self._closed else ()
 
     async def __aenter__(self):
         return self
