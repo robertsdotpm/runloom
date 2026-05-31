@@ -119,6 +119,43 @@ controls (`-DBUG_CLOSE_NULL`, `-DBUG_ABORT_NOCASE`, `-DBUG_ABORT_DROP`,
 `-DBUG_SPURIOUS`) each reintroduce a bug and make the model fail, so the
 properties demonstrably have teeth.
 
+### 6. Default M:N wake path — `spin/hub_submit.pml`
+
+The wake path that actually runs by default on Linux free-threaded 3.13t:
+`PYGO_PER_G_TSTATE` and `PYGO_STEAL_WOKEN` are both off, so `pygo_mn_wake_g`
+routes through `pygo_mn_hub_submit` (the per-hub-tstate MPSC submission
+list), **not** the global-runq `wake_state` machine of #2. A parker can be
+`wake_g`'d more than once (a netpoll-pump unlink + a stale safety-unlink
+wake); two defenses keep that safe and are modelled here:
+
+* **No resume-after-done** — the hub never resumes a g that already ran to
+  completion (the second resume would touch a coro freed by the
+  post-completion decref — the segfault these defenses prevent). Guarded
+  by the `in_sub_queue` CAS dedup **and** the done-check at pop.
+* **Runs exactly once** — coalesced wakes resume the g exactly once (no
+  lost wake, no double-resume).
+* **At most one entry** — the dedup keeps g's submission count ≤ 1.
+
+Negative control `-DBUG_NO_DEDUP` removes both defenses and the model
+fails (resume-after-done).
+
+### 7. Blocking-offload wake order — `spin/blockpool.pml`
+
+The default `pygo.blocking` / DNS-offload path (`pygo_blockpool.c`): a
+goroutine offloads to a worker thread and parks; the single-thread drain
+blocks in `epoll_wait`, so an `inflight` counter keeps it alive while a job
+is outstanding. The worker must **re-queue the goroutine before
+decrementing `inflight`**, so the instant `inflight` hits 0 the drain
+already sees the goroutine on its wake list.
+
+* **No lost wake** — the offloaded goroutine is always resumed; the drain
+  never exits (`inflight==0 && ready empty`) leaving it parked. Encoded as
+  Spin's invalid-end-state check (a lost wake deadlocks the parked caller).
+* **Resumed once** — the goroutine is resumed exactly once.
+
+Negative control `-DBUG_DEC_BEFORE_REQUEUE` flips the order and the model
+fails (the drain exits and strands the goroutine).
+
 ## Scope & honesty
 
 * Spin models are **sequentially consistent**: they prove the algorithm
@@ -148,6 +185,9 @@ verify/
     wake_state.pml         per-g wake_state machine (+ BUGGY_DROP_WAKE control)
     parked_safe.pml        park_safe/wake_safe handshake
     select_claim.pml       select fired_case CAS
+    select_close.pml       select Phase-2 vs send/close (+ 4 bug controls)
+    hub_submit.pml         default M:N wake dedup (+ BUG_NO_DEDUP control)
+    blockpool.pml          blocking-offload wake order (+ BUG_DEC_BEFORE_REQUEUE)
   cbmc/
     cldeque_cbmc.c         harness over the real cldeque.c
     stubs/plat_compat.h    minimal stub so cldeque.c compiles standalone under CBMC
