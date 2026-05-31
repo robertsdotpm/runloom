@@ -368,8 +368,21 @@ class TestNetworkStress(unittest.TestCase):
             server = await paio.start_server(handler, "127.0.0.1", 0)
             host, port = server.sockets[0].getsockname()[:2]
             payloads = [b"msg-%05d" % i for i in range(500)]
+            # Bound in-flight connects.  500 simultaneous SYNs overrun the
+            # listen accept queue (min(backlog, kern.ipc.somaxconn) ~= 128):
+            # BSD/macOS answer the overflow with RST -> ConnectionResetError,
+            # while Linux silently drops the SYN and the client retransmits.
+            # Not pygo-specific (stdlib asyncio fails the same unbounded storm
+            # on FreeBSD).  Gate concurrency so the queue never overflows while
+            # still driving 500 concurrent round-trips.
+            sem = asyncio.Semaphore(64)
+
+            async def bounded(p):
+                async with sem:
+                    return await client(host, port, p)
+
             results = await asyncio.gather(
-                *[client(host, port, p) for p in payloads])
+                *[bounded(p) for p in payloads])
             server.close()
             return results
 
