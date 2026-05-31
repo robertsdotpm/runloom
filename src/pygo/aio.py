@@ -154,8 +154,12 @@ class _TLSSock(object):
     def fileno(self):
         return self._ssl.fileno()
 
-    def do_handshake(self):
+    def do_handshake(self, timeout=None):
+        # timeout (seconds) bounds the WHOLE handshake (asyncio's
+        # ssl_handshake_timeout); a peer that stalls mid-handshake must not
+        # park this goroutine forever.  None = wait indefinitely.
         fd = self._ssl.fileno()
+        deadline = None if timeout is None else (_time.monotonic() + timeout)
         while True:
             want = None
             with self._lock:
@@ -166,7 +170,15 @@ class _TLSSock(object):
                     want = _WAIT_READ
                 except _ssl.SSLWantWriteError:
                     want = _WAIT_WRITE
-            pygo_core.wait_fd(fd, want)
+            if deadline is None:
+                pygo_core.wait_fd(fd, want)
+            else:
+                remaining = deadline - _time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("TLS handshake timed out")
+                # wait_fd returns (without raising) when the timeout elapses;
+                # the next loop re-checks the deadline and raises above.
+                pygo_core.wait_fd(fd, want, max(1, int(remaining * 1000)))
 
     def recv(self, n):
         if self._closed:
@@ -276,7 +288,7 @@ class _TLSSock(object):
         return self._ssl
 
 
-def _tls_wrap_client(raw, ssl_arg, server_hostname, host):
+def _tls_wrap_client(raw, ssl_arg, server_hostname, host, handshake_timeout=None):
     """Wrap a freshly-connected client socket in cooperative TLS and finish
     the handshake.  ``ssl_arg`` is True (default context) or an SSLContext."""
     context = _ssl.create_default_context() if ssl_arg is True else ssl_arg
@@ -284,7 +296,7 @@ def _tls_wrap_client(raw, ssl_arg, server_hostname, host):
         server_hostname = host
     tls = _TLSSock(raw, context, server_side=False,
                    server_hostname=server_hostname)
-    tls.do_handshake()
+    tls.do_handshake(handshake_timeout)
     return tls
 
 
@@ -959,7 +971,8 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
 
     async def create_connection(self, protocol_factory, host=None, port=None, *,
                                 ssl=None, family=0, proto=0, flags=0, sock=None,
-                                local_addr=None, server_hostname=None, **_ignored):
+                                local_addr=None, server_hostname=None,
+                                ssl_handshake_timeout=None, **_ignored):
         """Lower-level create_connection.  Returns (transport, protocol).
         Builds a TCP socket + thin Transport over our Stream classes;
         protocol's connection_made / data_received / connection_lost
@@ -992,7 +1005,8 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
         else:
             sock.setblocking(False)
         if ssl is not None:
-            sock = _tls_wrap_client(sock, ssl, server_hostname, host)
+            sock = _tls_wrap_client(sock, ssl, server_hostname, host,
+                                    ssl_handshake_timeout)
         protocol = protocol_factory()
         transport = _StreamTransport(sock, protocol, loop=self)
         return transport, protocol
@@ -1000,7 +1014,8 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
     async def create_server(self, protocol_factory, host=None, port=None, *,
                             family=_socket.AF_UNSPEC, flags=_socket.AI_PASSIVE,
                             sock=None, backlog=100, ssl=None,
-                            reuse_address=None, reuse_port=None, **_ignored):
+                            reuse_address=None, reuse_port=None,
+                            ssl_handshake_timeout=None, **_ignored):
         if sock is not None:
             sock.setblocking(False)
             socks = [sock]
@@ -1079,7 +1094,8 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
                 s.listen(backlog)
         # cb=None: caller wired up via protocol factory + Transport.
         # We still need an accept loop per socket that builds Transports per conn.
-        return _ProtocolServer(socks, protocol_factory, loop=self, ssl_context=ssl)
+        return _ProtocolServer(socks, protocol_factory, loop=self, ssl_context=ssl,
+                               ssl_handshake_timeout=ssl_handshake_timeout)
 
     async def getaddrinfo(self, host, port, *, family=0, type=0, proto=0, flags=0):
         # Offloaded to the blocking pool so DNS doesn't wedge the hub.
@@ -1537,6 +1553,7 @@ class StreamWriter(object):
 async def open_connection(host=None, port=None, *, family=0, proto=0,
                           flags=0, sock=None, local_addr=None,
                           server_hostname=None, ssl=None,
+                          ssl_handshake_timeout=None,
                           limit=2**16, **_ignored):
     """Establish a TCP connection and return (reader, writer).
 
@@ -1579,7 +1596,8 @@ async def open_connection(host=None, port=None, *, family=0, proto=0,
         sock.setblocking(False)
 
     if ssl is not None:
-        sock = _tls_wrap_client(sock, ssl, server_hostname, host)
+        sock = _tls_wrap_client(sock, ssl, server_hostname, host,
+                                ssl_handshake_timeout)
     reader = StreamReader(sock, limit=limit)
     writer = StreamWriter(sock, reader=reader)
     return reader, writer
@@ -1590,11 +1608,12 @@ class _Server(object):
     the accept-loop goroutine running until close() is called."""
 
     def __init__(self, sock, client_connected_cb, *, limit=2**16,
-                 ssl_context=None):
+                 ssl_context=None, ssl_handshake_timeout=None):
         self._sock = sock
         self._cb   = client_connected_cb
         self._limit = limit
         self._ssl_context = ssl_context
+        self._ssl_handshake_timeout = ssl_handshake_timeout
         self._closed = False
         self._accept_g = pygo_core.go(self._accept_loop)
 
@@ -1645,7 +1664,7 @@ class _Server(object):
             _close_sock(conn)
             return
         try:
-            tls.do_handshake()
+            tls.do_handshake(self._ssl_handshake_timeout)
         except Exception:
             _close_sock(tls)
             return
@@ -1917,7 +1936,8 @@ class _ProtocolServer(object):
     """Server compatible with asyncio.Server: per-accept builds a
     _StreamTransport and a protocol via factory."""
 
-    def __init__(self, socks, protocol_factory, *, loop=None, ssl_context=None):
+    def __init__(self, socks, protocol_factory, *, loop=None, ssl_context=None,
+                 ssl_handshake_timeout=None):
         # create_server may bind several sockets (one per address family);
         # accept independently on each.
         self._socks = list(socks)
@@ -1927,6 +1947,7 @@ class _ProtocolServer(object):
         # (e.g. websockets' test helpers) read it off the server object.  It
         # holds the real SSLContext when create_server was given ssl=.
         self._ssl_context = ssl_context
+        self._ssl_handshake_timeout = ssl_handshake_timeout
         self._closed = False
         self._accept_gs = [pygo_core.go(lambda s=s: self._accept_loop(s))
                            for s in self._socks]
@@ -1959,10 +1980,11 @@ class _ProtocolServer(object):
             _close_sock(conn)
             return
         try:
-            tls.do_handshake()
+            tls.do_handshake(self._ssl_handshake_timeout)
         except Exception:
-            # Bad cert / SNI / protocol error from the peer: drop it quietly,
-            # exactly as asyncio's SSL transport does.
+            # Bad cert / SNI / protocol error, or a peer that stalled past
+            # ssl_handshake_timeout: drop it quietly, like asyncio's SSL
+            # transport does.
             _close_sock(tls)
             return
         protocol = self._factory()
@@ -2166,7 +2188,7 @@ async def start_server(client_connected_cb, host=None, port=None, *,
                        family=_socket.AF_UNSPEC, flags=_socket.AI_PASSIVE,
                        sock=None, backlog=100, limit=2**16,
                        reuse_address=None, reuse_port=None,
-                       ssl=None, **_ignored):
+                       ssl=None, ssl_handshake_timeout=None, **_ignored):
     """Listen on host:port and call client_connected_cb(reader, writer)
     per accepted connection.  Returns a _Server with .close() / .sockets.
 
@@ -2195,7 +2217,8 @@ async def start_server(client_connected_cb, host=None, port=None, *,
     else:
         sock.setblocking(False)
 
-    return _Server(sock, client_connected_cb, limit=limit, ssl_context=ssl)
+    return _Server(sock, client_connected_cb, limit=limit, ssl_context=ssl,
+                   ssl_handshake_timeout=ssl_handshake_timeout)
 
 
 class PygoEventLoopPolicy(asyncio.AbstractEventLoopPolicy):
