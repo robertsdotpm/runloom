@@ -1061,6 +1061,7 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
 
     # ---- callback scheduling ----
     def call_soon(self, callback, *args, context=None):
+        self._check_closed()
         # Off the driver thread, go() would race the ready ring; route through
         # the thread-safe queue (the driver's keepalive runs it).
         if not self._can_spawn_here():
@@ -1085,6 +1086,11 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
         return handle
 
     def call_soon_threadsafe(self, callback, *args, context=None):
+        # Raise on a closed loop (asyncio parity).  asgiref relies on this to
+        # detect a dead main_event_loop and fall back to a fresh loop+thread;
+        # without it, async_to_sync schedules onto the closed loop and pumps
+        # run_until_future() forever -- the AsyncSingleThreadContext suite hang.
+        self._check_closed()
         # Thread-safe: may be called from ANY OS thread.  Enqueue under the
         # lock; the keepalive goroutine on the loop thread drains and runs it.
         # We do NOT pygo_core.go() here -- from a foreign thread that would
@@ -1146,6 +1152,7 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
         pygo_core.go(_keepalive)
 
     def call_later(self, delay, callback, *args, context=None):
+        self._check_closed()
         handle = _TimerHandle(callback, args, self, self.time() + delay, context)
         def runner():
             pygo_core.sched_sleep(delay)
