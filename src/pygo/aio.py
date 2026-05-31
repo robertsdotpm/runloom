@@ -1664,6 +1664,8 @@ class _StreamTransport(object):
         self._closed = False
         self._stopping = False
         self._paused = False        # pause_reading() flow control
+        self._eof_written = False   # write_eof() called -> write() must raise
+        self._conn_lost_called = False  # connection_lost fires exactly once
         try:
             protocol.connection_made(self)
         except Exception as e:
@@ -1693,10 +1695,9 @@ class _StreamTransport(object):
                 if e.errno in (_errno.EAGAIN, _errno.EWOULDBLOCK):
                     pygo_core.wait_fd(sock.fileno(), 1)
                     continue
-                try:
-                    self._protocol.connection_lost(e)
-                except Exception as e2:
-                    self._report(e2, "connection_lost")
+                # Route through close() so connection_lost(e) fires exactly
+                # once (the guard) rather than racing close()'s own call.
+                self.close(e)
                 return
             if not data:
                 # EOF: the peer half-closed its write side, so recv() now
@@ -1721,6 +1722,11 @@ class _StreamTransport(object):
                 self._report(e, "data_received")
 
     def write(self, data):
+        if self._eof_written:
+            # Mirror stock asyncio's selector transport so callers (e.g.
+            # websockets' broadcast) see the failure they expect, with the
+            # same message they assert on.
+            raise RuntimeError("Cannot call write() after write_eof()")
         if self._closed:
             return
         try:
@@ -1754,17 +1760,16 @@ class _StreamTransport(object):
                         return
             pygo_core.go(_flush)
         except OSError as e:
-            try:
-                self._protocol.connection_lost(e)
-            except Exception:
-                pass
-            self.close()
+            # close() delivers connection_lost(e) exactly once -- calling it
+            # here too double-fires it (websockets' connection_lost sets a
+            # one-shot Future -> InvalidStateError "Future already done").
+            self.close(e)
 
     def writelines(self, lines):
         for line in lines:
             self.write(line)
 
-    def close(self):
+    def close(self, exc=None):
         if self._closed:
             return
         self._closed = True
@@ -1774,10 +1779,12 @@ class _StreamTransport(object):
         except OSError:
             pass
         _close_sock(self._sock)
-        try:
-            self._protocol.connection_lost(None)
-        except Exception as e:
-            self._report(e, "connection_lost")
+        if not self._conn_lost_called:
+            self._conn_lost_called = True
+            try:
+                self._protocol.connection_lost(exc)
+            except Exception as e:
+                self._report(e, "connection_lost")
 
     def is_closing(self):
         return self._closed
@@ -1828,8 +1835,9 @@ class _StreamTransport(object):
         return True
 
     def write_eof(self):
-        if self._closed:
+        if self._closed or self._eof_written:
             return
+        self._eof_written = True
         try:
             self._sock.shutdown(_socket.SHUT_WR)
         except OSError:
