@@ -331,6 +331,11 @@ try:
 except AttributeError:
     _ALL_TASKS = None
 
+# Default task names mirror stock asyncio's "Task-N" (some libraries -- e.g.
+# aiojobs -- assert task.get_name().startswith("Task-")).
+import itertools as _itertools
+_TASK_NAME_COUNTER = _itertools.count(1)
+
 
 # ====================================================================
 # Handles -- minimal asyncio.Handle / asyncio.TimerHandle compat.
@@ -534,7 +539,7 @@ class PygoTask(PygoFuture):
             loop = asyncio.get_event_loop()
         super().__init__(loop=loop)
         self._coro    = coro
-        self._name    = name or "pygo-task"
+        self._name    = name or ("Task-%d" % next(_TASK_NAME_COUNTER))
         # _self_g is captured by the driver on its first iteration.
         # The driver-internal G handle is what done-callbacks wake.
         # Cheaper than the previous Chan(1) approach -- saves a Chan
