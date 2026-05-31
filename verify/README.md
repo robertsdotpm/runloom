@@ -309,11 +309,41 @@ thread's wake_list (the pre-Phase-C `pygo_sched_get()` behavior); the owner's
 drain never sees it and the foreign waker runs no drain loop, so Spin finds the
 lost wake — exactly the concurrent-loop deadlock Phase C fixes.
 
-> **Phase 2 (pending, sequence with this work):** routing **netpoll** fd
-> completions to the parker's owner sched (the multi-loop *socket* case) is the
-> next step — the pump may run on a different thread than the parker's owner,
-> so `dispatch_event`/`drain_expired` must wake to `p->g->owner`, not the pump
-> thread's sched. It extends this model + `netpoll_commit.pml`.
+> **Phase 2 (done, merged):** routing **netpoll** fd completions to the
+> parker's owner sched (the multi-loop *socket* case) landed — the pump may run
+> on a different thread than the parker's owner, so `dispatch_event` /
+> `drain_expired` wake via `p->g->owner` (`pygo_sched_wake` routes cross-thread),
+> and `drain_parked` is scoped to the calling thread's gs. This model +
+> `netpoll_commit.pml` cover the wake decision underneath it.
+
+### 13. netpoll deadline sweep vs fd dispatch — `spin/netpoll_deadline.pml`
+
+The *timeout* half of the netpoll. A parked goroutine has both an fd it waits on
+and a finite deadline in the per-pool min-heap, so two **different** pump paths
+can wake it, delivering **different values**:
+
+* `pygo_pump_dispatch_event` — the fd became ready: `*ready_out = mask` (nonzero).
+* `pygo_pump_drain_expired` — the deadline passed: `*ready_out = 0` (timeout).
+
+Both serialise on `pool->lock` and both gate the `ready_out` write behind the
+*same* `pygo_pump_claim` commit CAS (§8). The property here — beyond the
+no-lost-wake / at-most-once of §8 — is **value correctness** under a simultaneous
+fd-ready + deadline-expiry race: the g resumes **exactly once** and observes the
+value of whichever claimer actually won the CAS, never a spurious timeout (`0`)
+clobbering a delivered nonzero mask, and never the un-set initial. Proven over a
+parking g racing one fd dispatch and one deadline drain:
+
+* **No lost wake** — the g always returns from `wait_fd`.
+* **At most once** — `resumes <= 1`, `requeues <= 1`: the loser of the claim CAS
+  sees `WOKEN` and touches neither `ready_out` nor the run queue.
+* **Value correctness** — on return, `ready_out` was written by exactly the
+  claimer recorded in `winner` (fd-win ⇒ mask, timeout-win ⇒ 0), never `UNSET`.
+
+Negative control `-DBUG_SWEEP_NO_COMMIT` models the naive sweep the commit CAS
+replaced: `drain_expired` pops the heap top and **unconditionally** writes
+`*ready_out = 0` and re-queues a parked g, without claiming. Spin finds the
+spurious-timeout / double-resume — the fd dispatch delivers a nonzero mask and
+re-queues, the sweep clobbers `ready_out` with `0` and re-queues *again*.
 
 ## Scope & honesty
 
@@ -343,10 +373,13 @@ lost wake — exactly the concurrent-loop deadlock Phase C fixes.
   the list surgery and force-unlink are lock-protected straight-line code
   (`pool->lock` serialises them against the pump) exercised by the netpoll
   tests and `tools/mn_stress.py`. The multi-pool dispatch walk and its
-  `pool→sub` lock hierarchy are covered by `netpoll_multipool.pml`; the
-  deadline min-heap timeout sweep and `force_unlink` lifetime (exactly-once
+  `pool→sub` lock hierarchy are covered by `netpoll_multipool.pml`, and the
+  deadline min-heap timeout sweep (the fd-dispatch-vs-timeout-drain claim race)
+  by `netpoll_deadline.pml` (§13). The min-heap *mechanics* (sift-up/down,
+  arbitrary-remove via `heap_index`) and `force_unlink` lifetime (exactly-once
   `pool_release`) remain unmodelled — both are `pool->lock`-serialised
-  straight-line code, and the sweep shares the verified `pygo_pump_claim`.
+  straight-line code, and the sweep's wake decision shares the verified
+  `pygo_pump_claim`.
 * **io_uring** is not modelled directly, by design: its single-op path
   (`pygo_iouring_submit` / `pygo_iouring_drain`) is verified *by composition* —
   the goroutine parks via `pygo_sched_park_safe` (covered by `parked_safe.pml`)
@@ -375,6 +408,7 @@ verify/
     netpoll_rearm.pml      netpoll LT+ONESHOT re-arm vs not-yet-linked window (+ BUG_EDGE_TRIGGERED)
     netpoll_multipool.pml  netpoll multi-pool dispatch pool->sub lock hierarchy (+ BUG_LOCK_ORDER)
     iouring_msclose.pml    io_uring multishot handle lifetime, recv vs close (+ BUG_CONCURRENT_CLOSE)
+    netpoll_deadline.pml   netpoll deadline sweep vs fd dispatch, value correctness (+ BUG_SWEEP_NO_COMMIT)
     cross_thread_wake.pml  Phase C per-thread-sched owner-routed wake_safe (+ BUG_ROUTE_TO_WAKER)
   cbmc/
     cldeque_cbmc.c         harness over the real cldeque.c
