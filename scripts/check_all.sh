@@ -40,11 +40,7 @@ for ph in "${phases[@]}"; do
   case "$ph" in
     tests)
       hr "Python test suite"
-      # test_sync is excluded: it has a known pre-existing crash (32 KB
-      # coroutine stack too small for getaddrinfo's codec import -- see
-      # tools/README.md finding B).  Remove the --ignore to include it.
-      "$PYTHON" -m pytest tests/ -q -p no:cacheprovider \
-          --ignore=tests/test_sync.py || rc=1
+      "$PYTHON" -m pytest tests/ -q -p no:cacheprovider || rc=1
       ;;
     mn)
       hr "M:N scheduler fuzzer (stable gate)"

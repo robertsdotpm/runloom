@@ -43,10 +43,17 @@ def run_mn(code, timeout=60):
     env = dict(os.environ)
     env["PYTHON_GIL"] = "0"          # force GIL off: real parallel hubs
     env["PYGO_GIL"] = "0"
-    p = subprocess.run(
-        [sys.executable, "-c", preamble + code],
-        cwd=REPO, env=env, timeout=timeout,
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        p = subprocess.run(
+            [sys.executable, "-c", preamble + code],
+            cwd=REPO, env=env, timeout=timeout,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    except subprocess.TimeoutExpired as e:
+        # A wedge/lost-wake hang: surface as rc=124 (like coreutils timeout)
+        # rather than letting TimeoutExpired escape as a test error.
+        out = e.stdout.decode() if isinstance(e.stdout, bytes) else (e.stdout or "")
+        err = e.stderr.decode() if isinstance(e.stderr, bytes) else (e.stderr or "")
+        return 124, out, err + "\n[run_mn: timed out after {0}s]".format(timeout)
     return p.returncode, p.stdout, p.stderr
 
 
@@ -191,58 +198,60 @@ print("PASS")
 # ---------------------------------------------------------------------------
 # Known-broken workload, isolated + documented.
 # ---------------------------------------------------------------------------
-@pytest.mark.xfail(reason="M:N scheduler corrupts goroutine tstate/stack under "
-                          "CONTENDED select-across-channels (reproduced by "
-                          "tools/mn_stress.py seed 12346). Crash is independent "
-                          "of PYGO_HANDOFF/PYGO_PREEMPT; range-recv+close is "
-                          "stable, only contended select() crashes.",
+@pytest.mark.xfail(reason="OPEN BUG, minimally isolated: a busy-poll loop on "
+                          "select(..., default=True) under M:N loses a wake when "
+                          "the channel's sender parks (buffer full) -> the sender "
+                          "is stranded (hang) or its value is corrupted (SIGSEGV). "
+                          "Scheduling-sequence-dependent; reproduces single-hub.",
                    strict=False)
-def test_contended_select_xfail():
-    """Documents the bug tools/mn_stress.py found: many consumers doing
-    select() across a shared channel pool, while producers push and a
-    coordinator closes, under real parallelism -> SIGSEGV in the eval
-    loop on a corrupted tstate.  Isolated in a subprocess so it can't
-    crash the suite.  When the M:N select path is fixed this flips to
-    xpass."""
+def test_select_default_busy_poll_xfail():
+    """Minimal deterministic repro of the open M:N select bug.
+
+    A single consumer busy-polls `select([(\"recv\", b)], default=True)` on a
+    buffered channel while a feeder fills it.  When the buffer fills the
+    feeder parks as a sender; the select path's wake of that parked sender
+    is lost, so the feeder is stranded (mn_run never returns -> hang) or,
+    timing-dependent, the received value is corrupted (-> SIGSEGV in the
+    result-tuple unpack).
+
+    Tightly isolated (proven by elimination):
+      * blocking `select([(\"recv\", b)])`           -> CLEAN
+      * busy-poll `b.try_recv()` (no select)          -> CLEAN
+      * `select(default=True)` + buffer big enough     -> CLEAN
+        that the sender never parks
+    Only `select(default=True)` + a sender that parks fails.  So the defect
+    is in select's interaction with the parked-sender wake under the M:N
+    hub scheduler -- NOT in select_try_each's value handling (textually
+    identical to the working chan_recv_locked), NOT preemption/handoff
+    (crashes with both off), NOT cross-hub (single hub repros).
+
+    Run in a subprocess so the hang/crash can't take down the suite.
+    When the M:N select-default wake path is fixed this flips to xpass.
+    """
     rc, out, err = run_mn(r"""
-import random
-rng = random.Random(12346)
-def experiment():
-    nchan = 3
-    chans = [pygo_core.Chan(rng.choice([0, 1, 8])) for _ in range(nchan)]
-    nprod, ncons, per = 6, 6, 30
-    done = pygo_core.Chan(nprod)
-    res  = pygo_core.Chan(ncons)
-    def prod(pid):
-        def r():
-            for s in range(per):
-                chans[(pid + s) % nchan].send(pid * 1000 + s)
-            done.send(1)
-        return r
-    def closer():
-        for _ in range(nprod): done.recv()
-        for ch in chans: ch.close()
-    def cons():
-        c = t = 0
-        closed = [False] * nchan
-        while not all(closed):
-            cases = [("recv", chans[i]) for i in range(nchan) if not closed[i]]
-            if not cases: break
-            idx, (v, ok) = pygo_core.select(cases)
-            live = [i for i in range(nchan) if not closed[i]]
-            if ok: c += 1; t += v
-            else: closed[live[idx]] = True
-        res.send((c, t))
-    pygo_core.mn_init(3)
-    for _ in range(ncons): pygo_core.mn_go(cons)
-    for p in range(nprod): pygo_core.mn_go(prod(p))
-    pygo_core.mn_go(closer)
-    pygo_core.mn_run()
-    pygo_core.mn_fini()
-for _ in range(5):
-    experiment()
+N = 400
+b = pygo_core.Chan(8)          # small buffer -> feeder parks as sender when full
+res = pygo_core.Chan(1)
+def feeder():
+    for i in range(N):
+        b.send(1000 + i)       # ints > 256 are real refcounted objects
+def cons():
+    c = 0
+    while c < N:
+        idx, (v, ok) = pygo_core.select([("recv", b)], default=True)
+        if idx == -1:
+            pygo_core.sched_yield_classic(); continue
+        if ok: c += 1
+    res.send(c)
+pygo_core.mn_init(2)
+pygo_core.mn_go(cons); pygo_core.mn_go(feeder)
+pygo_core.mn_run()
+g = res.try_recv()
+pygo_core.mn_fini()
+assert g is not None and g[0] == N, g
 print("PASS")
-""", timeout=60)
+""", timeout=10)
     assert rc == 0 and "PASS" in out, (
-        "M:N contended select crashed: rc={0} (negative => signal; "
-        "139=SIGSEGV)\nstderr tail:\n{1}".format(rc, err[-800:]))
+        "select(default=True) busy-poll under M:N failed: rc={0} "
+        "(124=hang/stranded sender; 139=SIGSEGV/value corruption)\n"
+        "stderr tail:\n{1}".format(rc, err[-800:]))

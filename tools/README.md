@@ -82,36 +82,59 @@ TSan abort otherwise).
 > These are **open** issues this tooling reproduces deterministically.
 > They are surfaced here, not fixed.
 
-### A. M:N scheduler corrupts goroutine tstate under contended `select()`
+### A. M:N: `select(default=True)` busy-poll loses a parked-sender wake — OPEN
 
-`tools/mn_stress.py --seed 12346` (and `tests/test_mn.py::
-test_contended_select_xfail`) reliably **SIGSEGVs**. Backtrace:
-`_PyEval_EvalFrameDefault` running a goroutine with a *corrupted
-thread-state* (the `tstate` arg aliases a `tupleiter` object; `throwflag`
-is garbage) during a `select()` tuple-unpack.
+A busy-poll loop on `select([..., ("recv", ch)], default=True)` under the
+M:N hub scheduler loses a wake when `ch`'s sender parks (buffer full).
+The sender is then **stranded** → `mn_run()` never returns (hang), or —
+timing-dependent — the received value is **corrupted** → SIGSEGV in the
+result-tuple unpack (`_PyEval_EvalFrameDefault` with a `tstate` arg that
+aliases a `tupleiter`; `throwflag` garbage).
 
-Characterization (all reproduced):
-* Needs **contention**: many cross-hub consumers doing `select()` across
-  a shared channel pool while producers push and a coordinator closes.
-  A single selector, or any amount of plain `recv`-range + `close`, is
-  **stable** (see the passing `tests/test_mn.py` cases).
-* **Independent of `PYGO_HANDOFF` / `PYGO_PREEMPT`** (crashes with both
-  off) and of coroutine stack size (crashes at 32 KB and 512 KB).
-* Consistent with the project's known per-g-tstate / cross-hub-migration
-  hazard: the corruption is in the contended `select` park/evict path.
+Minimal deterministic repro: `tests/test_mn.py::
+test_select_default_busy_poll_xfail` (one feeder + one consumer, single
+hub reproduces). `tools/mn_stress.py` (full/non-`--stable` mode) also hits
+it via its select consumers.
+
+**Tightly isolated by elimination — all of these are CLEAN:**
+
+| variant | result |
+|---|---|
+| blocking `select([("recv", b)])` (receiver parks) | clean |
+| busy-poll `b.try_recv()` (never parks, no select) | clean |
+| `select(default=True)` with a buffer big enough the sender never parks | clean |
+| single-channel blocking `recv()` loop | clean |
+
+Only `select(default=True)` **+ a sender that parks** fails. So the defect
+is in `select`'s interaction with the **parked-sender wake** under the M:N
+hub scheduler. It is **NOT**:
+* in `select_try_each`'s value/wake handling — that block is textually
+  identical to the working `chan_recv_locked` (try_recv);
+* preemption/handoff — crashes with `PYGO_PREEMPT=0 PYGO_HANDOFF=0`;
+* cross-hub migration — single hub (`mn_init(1)`) reproduces;
+* a coroutine-stack overflow — repros at 32 KB and 512 KB.
 
 The deque, `wake_state`, `park_safe`, and `select`-claim *algorithms* are
-proven correct in `verify/`, so the bug is in the **integration** —
-likely the cross-hub `select_evict_self` walk / parked-select migration
-in `chan.c` under `mn_sched.c`, not the claim CAS itself.
+machine-proven in `verify/`, so this is an **integration** bug in the
+select → parked-sender wake path under `mn_sched.c`, scheduling-sequence
+dependent (select's slower per-call path takes a different cooperative
+schedule than try_recv's). Pinpointing the exact instruction needs C-level
+instrumentation of the sender park/wake under that schedule.
 
-### B. Default 32 KB coroutine stack is too small for `getaddrinfo`
+Until fixed: prefer **blocking** `select` over a `default=True` busy-poll
+under M:N; `recv`/`try_recv` and blocking select are unaffected.
 
-`tests/test_sync.py` SIGSEGVs (standalone) on the first network call.
-Root cause: the first `socket.getaddrinfo` triggers a deep C-level codec
-import that overflows the 32 KB default coroutine stack — caught cleanly
-by the PROT_NONE guard page (so it's a clean fault, not silent
-corruption). Fixed by either pre-warming the codec before the goroutine
-or raising the stack (`pygo_core.set_stack_size(256*1024)` makes it pass;
-warming `getaddrinfo` once before entering a goroutine also does). Worth
-a decision on the default-stack floor for I/O-heavy goroutines.
+### B. `getaddrinfo` codec import overflowed the goroutine stack — FIXED
+
+`tests/test_sync.py` used to SIGSEGV on the first network call: the first
+`socket.getaddrinfo` triggers a deep C-level codec import
+(`encodings.idna` → `stringprep` → `unicodedata`) that overflowed the
+32 KB default coroutine stack — caught cleanly by the PROT_NONE guard
+page (a clean fault, not silent corruption).
+
+`pygo.runtime` already had `prewarm_stdlib()` (resolves that import on the
+main thread's big stack before any goroutine runs) and `pygo.runtime.run`
+/ the aio loop called it — but `pygo.sync.run`/`pygo.sync.go` did not.
+Fixed by calling `prewarm_stdlib()` from the `pygo.sync` entry points
+too, guarded so it only warms on the main thread (never on a goroutine's
+small stack). `tests/test_sync.py` now passes 7/7.

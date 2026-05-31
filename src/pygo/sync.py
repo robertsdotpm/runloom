@@ -31,6 +31,7 @@ import threading as _threading
 import time as _time
 
 import pygo_core
+from pygo.runtime import prewarm_stdlib as _prewarm_stdlib
 
 
 # --------------------------------------------------------------------
@@ -40,6 +41,13 @@ def go(callable_, *args, **kwargs):
     """Spawn a goroutine.  Returns a G handle (has .done / .result /
     .wake / .stack).  Equivalent of asyncio.create_task minus the
     coroutine layer."""
+    # Warm the deep, non-yielding stdlib imports getaddrinfo triggers
+    # (encodings.idna -> stringprep -> unicodedata) here, on the main
+    # thread's large stack -- but only when NOT already inside a
+    # goroutine, since prewarm itself does a getaddrinfo and would
+    # overflow the small coroutine stack it is meant to protect.
+    if pygo_core.current_g() is None:
+        _prewarm_stdlib()
     if args or kwargs:
         target = lambda: callable_(*args, **kwargs)
     else:
@@ -49,6 +57,9 @@ def go(callable_, *args, **kwargs):
 
 def run(main_fn=None):
     """Drive the scheduler until idle.  Optionally spawn main_fn first."""
+    # Same prewarm as pygo.runtime.run(): resolve getaddrinfo's lazy codec
+    # import on the big stack before any goroutine runs on a small one.
+    _prewarm_stdlib()
     if main_fn is not None:
         pygo_core.go(main_fn)
     return pygo_core.run()
