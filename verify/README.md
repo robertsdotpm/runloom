@@ -94,6 +94,31 @@ channels racing to deliver:
   and never wake the goroutine.
 * **Consistent result** — `fired_case` ends a valid index = the winner.
 
+### 5. `select()` Phase-2 vs send/close — `spin/select_close.pml`
+
+The full protocol where the 2026-05-31 select crash/loss arc lived (the
+claim CAS alone is #4; this models install → abort-on-ready → park → wake
+→ result, racing a concurrent send and close on the channel). A blocking
+RECV select against a sender, a closer, and a spurious-wake source:
+
+* **WELL-FORMED** — the result is exactly a sent value or *closed*; never
+  NULL (the close-wake SIGSEGV) and never the no-case sentinel (a blocking
+  select must never report "nothing ready").
+* **CONSERVATION** — a value that was produced (claimed into our waiter or
+  buffered) is the one returned; the abort / spurious-retry paths must not
+  evict-and-drop a just-delivered value.
+* **PROGRESS** — always terminates (bounded retries; no deadlock).
+
+This model **found two additional real races** beyond the three the fuzzer
+hit (close-wake-NULL, abort-bare-−1, abort-drops-value): (a) a value
+buffered in the Phase-1→install window is orphaned if close claims the
+waiter first — fixed by re-scanning on a close-wake (buffered drains
+before closed); (b) a spurious-retry frees a waiter a racing delivery just
+filled — fixed by evicting *before* re-reading `fired_case`. Five negative
+controls (`-DBUG_CLOSE_NULL`, `-DBUG_ABORT_NOCASE`, `-DBUG_ABORT_DROP`,
+`-DBUG_SPURIOUS`) each reintroduce a bug and make the model fail, so the
+properties demonstrably have teeth.
+
 ## Scope & honesty
 
 * Spin models are **sequentially consistent**: they prove the algorithm

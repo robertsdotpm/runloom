@@ -275,3 +275,117 @@ for it in range(60):
     experiment(nhubs=2 + it % 3, nprod=5, ncons=8, nchan=1 + it % 3, per=24)
 print("PASS")
 """, timeout=60)
+
+
+def test_select_send_and_recv_mixed():
+    """select with BOTH send and recv cases under M:N: a relay goroutine
+    selects to either forward into `out` (send) or pull from `in_` (recv);
+    conservation across a chain of relays.  Exercises the select SEND
+    install/abort/park path that the RECV tests don't."""
+    assert_pass(r"""
+def run_once(nrelay, n):
+    src  = pygo_core.Chan(0)
+    dst  = pygo_core.Chan(0)
+    res  = pygo_core.Chan(1)
+    def producer():
+        for i in range(n):
+            src.send(1000 + i)
+        src.close()
+    def relay(a, b):
+        # forward every value a->b via blocking select on a recv + b send
+        def run():
+            pending = None
+            while True:
+                if pending is None:
+                    cases = [("recv", a)]
+                else:
+                    cases = [("recv", a), ("send", b, pending)]
+                idx, payload = pygo_core.select(cases)
+                if idx == 0:
+                    v, ok = payload
+                    if not ok:
+                        if pending is not None:
+                            b.send(pending)
+                        b.close(); return
+                    if pending is None:
+                        pending = v
+                    else:
+                        # got a new value while still holding one: drain old first
+                        b.send(pending); pending = v
+                else:
+                    pending = None   # the send fired
+        return run
+    def consumer():
+        c = 0; t = 0
+        for v in dst:
+            c += 1; t += v
+        res.send((c, t))
+    pygo_core.mn_init(3)
+    pygo_core.mn_go(consumer)
+    pygo_core.mn_go(relay(src, dst))
+    pygo_core.mn_go(producer)
+    pygo_core.mn_run()
+    g = res.try_recv()
+    pygo_core.mn_fini()
+    (c, t), ok = g
+    assert (c, t) == (n, sum(1000 + i for i in range(n))), (c, t, n)
+    assert pygo_core._self_check(0) == 0
+
+for _ in range(20):
+    run_once(2, 25)
+print("PASS")
+""")
+
+
+def test_select_concurrent_send_close():
+    """The edge case verify/spin/select_close.pml flagged: producers send
+    WITHOUT a done-barrier while a closer closes concurrently, so values
+    can be buffered in the Phase-1->install window and close can race the
+    select's abort/park.  We don't assert exact conservation here (a send
+    racing close legitimately raises), only that it never crashes, hangs,
+    or trips the self-check -- the model proves the no-loss/no-NULL parts.
+    """
+    assert_pass(r"""
+def experiment(it):
+    nchan = 1 + it % 3
+    chans = [pygo_core.Chan([0, 1, 4][i % 3]) for i in range(nchan)]
+    res = pygo_core.Chan(6)
+    ncons = 4 + it % 3
+    def prod(pid):
+        def r():
+            for s in range(20):
+                try:
+                    chans[(pid + s) % nchan].send(pid * 100 + s)
+                except ValueError:
+                    pass   # send on closed channel: expected under the race
+        return r
+    def closer():
+        pygo_core.sched_yield_classic()
+        for ch in chans:
+            ch.close()
+    def cons():
+        c = 0
+        closed = [False] * nchan
+        while not all(closed):
+            cs = [("recv", chans[i]) for i in range(nchan) if not closed[i]]
+            if not cs:
+                break
+            idx, (v, ok) = pygo_core.select(cs)
+            live = [i for i in range(nchan) if not closed[i]]
+            if ok:
+                c += 1
+            else:
+                closed[live[idx]] = True
+        res.send(c)
+    pygo_core.mn_init(3)
+    for _ in range(ncons): pygo_core.mn_go(cons)
+    for p in range(3): pygo_core.mn_go(prod(p))
+    pygo_core.mn_go(closer)
+    pygo_core.mn_run()
+    pygo_core.mn_fini()
+    assert pygo_core._self_check(0) == 0
+
+for it in range(80):
+    experiment(it)
+print("PASS")
+""", timeout=60)

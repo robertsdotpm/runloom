@@ -848,16 +848,22 @@ select_retry:
          * spurious wake: the scheduler resumed us without any channel
          * having claimed our park (e.g. a stale hub-submission entry left
          * by a wake that raced our park).  Returning -2 here made m_select
-         * hand back NULL with no exception -> CPython SystemError ->
-         * the goroutine died mid-loop, silently dropping every value it
-         * had already received.  Instead, behave like Go's select on a
-         * spurious wakeup: tear down our waiters and retry the whole
-         * scan-then-park from the top.  No value can have been delivered
-         * to us (fired_case is unset), so nothing is lost. */
+         * hand back NULL with no exception -> CPython SystemError -> the
+         * goroutine died mid-loop, dropping every value it had received.
+         *
+         * On an apparent spurious wake we cannot just free + retry: a
+         * delivery could be claiming a still-installed waiter right now,
+         * and freeing the waiters[] would drop the value it hands us.  So
+         * EVICT first -- once our waiters are out of every channel's queue
+         * no further claim can occur and fired_case is frozen -- THEN
+         * re-read it.  A value claimed before/during the eviction is now
+         * safely captured in waiters[fired]; only a still-unset fired_case
+         * is genuinely spurious and retries (Go's spurious-wakeup path). */
         fired = park.fired_case;
         if (fired < 0) {
             select_evict_self(cases, n, waiters, /*fired*/-1);
-            {
+            fired = park.fired_case;          /* re-read: now stable */
+            if (fired < 0) {
                 int j;
                 for (j = 0; j < n; j++) {
                     if (cases[j].op == PYGO_SELECT_SEND &&
@@ -865,15 +871,18 @@ select_retry:
                         Py_DECREF(waiters[j].value);
                     }
                 }
+                PyMem_Free(waiters);
+                PYGO_SELECT_UNPIN();
+                if (++select_retries > 10000000) {
+                    PyErr_SetString(PyExc_RuntimeError,
+                                    "select: too many spurious wakeups");
+                    return -2;
+                }
+                goto select_retry;
             }
-            PyMem_Free(waiters);
-            PYGO_SELECT_UNPIN();
-            if (++select_retries > 10000000) {
-                PyErr_SetString(PyExc_RuntimeError,
-                                "select: too many spurious wakeups");
-                return -2;
-            }
-            goto select_retry;
+            /* else: a delivery claimed waiters[fired] before we evicted;
+             * fall through to handle it.  Our waiters are already out of
+             * their queues, so the eviction below is a harmless no-op. */
         }
 
         /* Evict our tombstone waiters from all losing channels. */
@@ -906,24 +915,33 @@ select_retry:
             PYGO_SELECT_UNPIN();
             return fired;
         }
-        /* Fired RECV: waiters[fired].value + .ok hold the result.  A
-         * close-wake (pygo_chan_close) leaves value == NULL and ok == 0
-         * -- the channel was closed while we were parked.  Normalise that
-         * to a fresh Py_None so the (value, ok) result matches the
-         * Phase-1 closed path and chan_recv_locked; otherwise the NULL
-         * propagates into the (value, ok) tuple m_select builds and
-         * crashes the caller's `v, ok = ...` unpack (SIGSEGV in
-         * tupleiter_next on a NULL item). */
-        cases[fired].recv_ok = (waiters[fired].ok == 1);
+        /* Fired RECV.  A real delivery has value != NULL -- return it. */
         if (waiters[fired].value != NULL) {
             cases[fired].recv_value = waiters[fired].value;  /* delivered ref */
-        } else {
-            Py_INCREF(Py_None);
-            cases[fired].recv_value = Py_None;               /* closed-while-parked */
+            cases[fired].recv_ok = 1;
+            PyMem_Free(waiters);
+            PYGO_SELECT_UNPIN();
+            return fired;
         }
+        /* Otherwise this was a close-wake (pygo_chan_close left value ==
+         * NULL, ok == 0).  Do NOT report closed yet: re-scan from the top.
+         * A value may have been buffered on this channel in the window
+         * between our Phase-1 and our install (the sender buffered before
+         * our waiter existed, then close claimed our waiter before our
+         * abort-check could) -- and buffered values must drain before
+         * closed (Go / chan_recv_locked semantics).  Likewise a sibling
+         * case may now be ready and should win over a bare close.  The
+         * re-scan's Phase-1 returns the buffered value / ready case if any,
+         * else the closed case with ok=0.  This is bounded: a closed (or
+         * ready) channel makes Phase-1 return without re-parking. */
         PyMem_Free(waiters);
         PYGO_SELECT_UNPIN();
-        return fired;
+        if (++select_retries > 10000000) {
+            PyErr_SetString(PyExc_RuntimeError,
+                            "select: too many spurious wakeups");
+            return -2;
+        }
+        goto select_retry;
         #undef PYGO_SELECT_UNPIN
     }
 }

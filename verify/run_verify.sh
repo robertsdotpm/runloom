@@ -64,7 +64,12 @@ if have spin && have cc; then
     check_spin wake_state   "per-g wake_state machine: no lost wake / no double-resume / no dup runq entry"
     check_spin parked_safe  "park_safe/wake_safe handshake: no lost wake, balanced"
     check_spin select_claim "select fired_case CAS: fires at most one case, exactly-once wake"
-    check_spin_must_fail wake_state BUGGY_DROP_WAKE "a wake dropped during RUNNING (classic lost-wakeup)"
+    check_spin select_close "select Phase-2 vs send/close: no lost/NULL/spurious-sentinel result, conservation"
+    check_spin_must_fail wake_state  BUGGY_DROP_WAKE   "a wake dropped during RUNNING (classic lost-wakeup)"
+    check_spin_must_fail select_close BUG_CLOSE_NULL   "close-wake delivers NULL instead of closed (the SIGSEGV)"
+    check_spin_must_fail select_close BUG_ABORT_NOCASE "abort returns the no-case sentinel for a blocking select"
+    check_spin_must_fail select_close BUG_ABORT_DROP   "abort evicts + drops an already-delivered value"
+    check_spin_must_fail select_close BUG_SPURIOUS     "spurious wake errors out instead of retrying"
 else
     echo "  (spin / cc not found -- skipping Spin models;  sudo apt-get install spin)"
 fi
