@@ -1170,6 +1170,27 @@ void pygo_sched_yield(pygo_sched_t *s)
     }
     g = s->current;
     if (__builtin_expect(g == NULL, 0)) return;
+    /* Fold any pending wakes into the ready ring BEFORE the fast-path
+     * check and BEFORE we re-queue ourselves.  G.wake() (used by
+     * pygo.aio for Task.cancel() / future.set_result()/set_exception())
+     * routes through wake_safe, which appends to the cross-thread
+     * wake_list rather than the ready ring.  The wake_list is normally
+     * drained only inside the drain loop, so a wake() issued by THIS
+     * goroutine immediately before `await asyncio.sleep(0)` was invisible
+     * to this yield: the woken g sat in the wake_list (so the ready-empty
+     * fast path returned without ever entering the drain loop), and even
+     * when the drain loop ran it, we had already pushed ourselves first
+     * and resumed before it -- so the woken task only ran on the SECOND
+     * sleep(0).  Stock asyncio's sleep(0) is one loop iteration that runs
+     * the callbacks scheduled before it; draining here restores that.
+     * Draining before our own ready_push means the woken g sits ahead of
+     * us in FIFO order and runs first.  The cheap NULL hint keeps the
+     * tight-yield fast path intact (empty in the common case; a same-
+     * thread setter's store is already visible to us here, and a missed
+     * cross-thread store is harmless -- the drain loop still catches it). */
+    if (__builtin_expect(s->wake_list_head != NULL, 0)) {
+        pygo_sched_drain_wake_list(s);
+    }
     /* Fast path (Go's runtime.Gosched shortcut): if there's nobody
      * else to run -- no other ready gs, no sleepers due, no parked
      * I/O -- yielding is just expensive bookkeeping that hands
