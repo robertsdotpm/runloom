@@ -1235,6 +1235,20 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
             stdin=stdin, stdout=stdout, stderr=stderr, **kwargs)
         return transport, protocol
 
+    # ---- pipe transports (thread-backed, like subprocess) ----
+    # connect_read_pipe / connect_write_pipe wrap an arbitrary readable/writable
+    # pipe or file object in a transport driving a standard Protocol.  Used by
+    # aioconsole + libs doing async stdio.  Same thread-bridge as subprocess.
+    async def connect_read_pipe(self, protocol_factory, pipe):
+        protocol = protocol_factory()
+        transport = _ReadPipeTransport(self, pipe, protocol)
+        return transport, protocol
+
+    async def connect_write_pipe(self, protocol_factory, pipe):
+        protocol = protocol_factory()
+        transport = _WritePipeTransport(self, pipe, protocol)
+        return transport, protocol
+
     async def create_connection(self, protocol_factory, host=None, port=None, *,
                                 ssl=None, family=0, proto=0, flags=0, sock=None,
                                 local_addr=None, server_hostname=None,
@@ -2741,6 +2755,183 @@ class _SubprocessTransport(asyncio.SubprocessTransport):
             "message": "Subprocess " + where + " raised",
             "exception": exc,
         })
+
+
+class _ReadPipeTransport(asyncio.ReadTransport):
+    """connect_read_pipe transport: a thread does blocking reads on the pipe and
+    feeds protocol.data_received; EOF -> eof_received + connection_lost."""
+    def __init__(self, loop, pipe, protocol):
+        self._loop = loop
+        self._pipe = pipe
+        self._protocol = protocol
+        self._closing = False
+        self._paused = False
+        try:
+            protocol.connection_made(self)
+        except Exception as e:
+            self._report(e, "connection_made")
+        _threading.Thread(target=self._reader, name="pygo-readpipe",
+                          daemon=True).start()
+
+    def _reader(self):
+        try:
+            while not self._closing:
+                if self._paused:
+                    _time.sleep(0.001)
+                    continue
+                data = self._pipe.read(32768)
+                if not data:
+                    break
+                self._loop.call_soon_threadsafe(self._deliver, data)
+        except (BrokenPipeError, OSError):
+            pass
+        finally:
+            self._loop.call_soon_threadsafe(self._eof)
+
+    def _deliver(self, data):
+        if not self._closing:
+            try:
+                self._protocol.data_received(data)
+            except Exception as e:
+                self._report(e, "data_received")
+
+    def _eof(self):
+        keep_open = False
+        try:
+            keep_open = bool(self._protocol.eof_received())
+        except Exception as e:
+            self._report(e, "eof_received")
+            keep_open = False
+        if not keep_open:
+            self._close(None)
+
+    def _close(self, exc):
+        if self._closing:
+            return
+        self._closing = True
+        try:
+            self._pipe.close()
+        except Exception:
+            pass
+        try:
+            self._protocol.connection_lost(exc)
+        except Exception as e:
+            self._report(e, "connection_lost")
+
+    def pause_reading(self):
+        self._paused = True
+
+    def resume_reading(self):
+        self._paused = False
+
+    def close(self):
+        self._close(None)
+
+    def is_closing(self):
+        return self._closing
+
+    def get_protocol(self):
+        return self._protocol
+
+    def set_protocol(self, protocol):
+        self._protocol = protocol
+
+    def get_extra_info(self, name, default=None):
+        return self._pipe if name == "pipe" else default
+
+    def _report(self, exc, where):
+        self._loop.call_exception_handler(
+            {"message": "Read pipe " + where + " raised", "exception": exc})
+
+
+class _WritePipeTransport(asyncio.WriteTransport):
+    """connect_write_pipe transport: queued writes drained by a thread so a full
+    pipe never blocks the loop; connection_lost fires on close/EOF/error."""
+    def __init__(self, loop, pipe, protocol):
+        self._loop = loop
+        self._pipe = pipe
+        self._protocol = protocol
+        self._closing = False
+        self._eof = False
+        self._q = _collections.deque()
+        self._cond = _threading.Condition()
+        try:
+            protocol.connection_made(self)
+        except Exception as e:
+            self._report(e, "connection_made")
+        _threading.Thread(target=self._drain, name="pygo-writepipe",
+                          daemon=True).start()
+
+    def _drain(self):
+        exc = None
+        while True:
+            with self._cond:
+                while not self._q and not self._eof:
+                    self._cond.wait()
+                if self._q:
+                    data = self._q.popleft()
+                else:
+                    break
+            try:
+                self._pipe.write(data)
+                self._pipe.flush()
+            except (BrokenPipeError, OSError) as e:
+                exc = e
+                break
+        try:
+            self._pipe.close()
+        except Exception:
+            pass
+        self._loop.call_soon_threadsafe(self._lost, exc)
+
+    def _lost(self, exc):
+        if self._closing:
+            return
+        self._closing = True
+        try:
+            self._protocol.connection_lost(exc)
+        except Exception as e:
+            self._report(e, "connection_lost")
+
+    def write(self, data):
+        if self._closing or self._eof:
+            return
+        with self._cond:
+            self._q.append(bytes(data))
+            self._cond.notify()
+
+    def writelines(self, list_of_data):
+        self.write(b"".join(list_of_data))
+
+    def write_eof(self):
+        with self._cond:
+            self._eof = True
+            self._cond.notify()
+
+    def can_write_eof(self):
+        return True
+
+    def close(self):
+        self.write_eof()
+
+    def abort(self):
+        self.write_eof()
+
+    def is_closing(self):
+        return self._closing or self._eof
+
+    def get_protocol(self):
+        return self._protocol
+
+    def set_protocol(self, protocol):
+        self._protocol = protocol
+
+    def get_extra_info(self, name, default=None):
+        return self._pipe if name == "pipe" else default
+
+    def _report(self, exc, where):
+        self._loop.call_exception_handler(
+            {"message": "Write pipe " + where + " raised", "exception": exc})
 
 
 async def _create_datagram_endpoint(loop, protocol_factory, local_addr=None,
