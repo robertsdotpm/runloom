@@ -663,7 +663,10 @@ class PygoTask(_PygoFutureMixin, asyncio.Task):
         # any contextvar read from a threadpool-dispatched sync endpoint.
         self._pgcontext = context if context is not None \
             else _contextvars.copy_context()
-        self._pgname = name or ("Task-%d" % next(_TASK_NAME_COUNTER))
+        # Match asyncio.Task: only None falls back to the auto name; an explicit
+        # name (incl. the empty string "") is kept as-is, str()-coerced.
+        self._pgname = ("Task-%d" % next(_TASK_NAME_COUNTER)) \
+            if name is None else str(name)
         # _self_g: the driver's G handle (done-callbacks / cancel wake it).
         self._self_g = None
         # _pgmustcancel: ONE-SHOT cancel-delivery flag (mirrors asyncio.Task's
