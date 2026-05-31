@@ -51,6 +51,7 @@ import asyncio
 import errno as _errno
 import os as _os
 import socket as _socket
+import ssl as _ssl
 import sys
 import threading as _threading
 import time as _time
@@ -98,6 +99,193 @@ def _close_sock(sock):
         except (AttributeError, OSError): pass
     try: sock.close()
     except OSError: pass
+
+
+# A cooperative mutex (parks the goroutine, not the OS thread) imported lazily
+# to keep the import graph acyclic.  Used to serialise access to one SSLSocket
+# shared by a connection's recv goroutine and concurrent writers under M:N.
+_CoLock = None
+
+
+def _get_colock():
+    global _CoLock
+    if _CoLock is None:
+        from .monkey import CoLock as _CL
+        _CoLock = _CL
+    return _CoLock
+
+
+# wait_fd direction flags (match the literals used throughout this file).
+_WAIT_READ = 1
+_WAIT_WRITE = 2
+
+
+class _TLSSock(object):
+    """Cooperative TLS for the asyncio bridge, working on every netpoll
+    backend (epoll/kqueue/IOCP/WSAPoll/select).
+
+    Wraps the raw socket in a real ``ssl.SSLSocket`` (which owns the fd) and
+    drives its non-blocking ``recv``/``send``/``do_handshake`` with pygo's
+    ``wait_fd``, mirroring pygo.monkey's validated ssl patch.  It presents the
+    same blocking-cooperative socket surface (recv/send/sendall/fileno/
+    shutdown/close/getpeername/...) that StreamReader/StreamWriter/
+    _StreamTransport already expect, so those classes use it unchanged --
+    plaintext and TLS go through the exact same I/O loops.
+
+    SSLSocket / OpenSSL are not safe for concurrent use, so a cooperative
+    CoLock serialises every SSLObject call.  Crucially the lock is RELEASED
+    across every wait_fd, so a read parked waiting for inbound bytes never
+    blocks a concurrent write (full-duplex keeps working).  Holding a real
+    OS lock here would be wrong -- pygo can switch goroutines at a bytecode
+    boundary while one holds it, deadlocking the hub; CoLock is switch-safe.
+    """
+
+    def __init__(self, raw, context, *, server_side=False,
+                 server_hostname=None):
+        raw.setblocking(False)
+        self._ssl = context.wrap_socket(
+            raw, server_side=server_side,
+            server_hostname=server_hostname,
+            do_handshake_on_connect=False)
+        self._ssl.setblocking(False)
+        self._lock = _get_colock()()
+        self._closed = False
+
+    def fileno(self):
+        return self._ssl.fileno()
+
+    def do_handshake(self):
+        fd = self._ssl.fileno()
+        while True:
+            want = None
+            with self._lock:
+                try:
+                    self._ssl.do_handshake()
+                    return
+                except _ssl.SSLWantReadError:
+                    want = _WAIT_READ
+                except _ssl.SSLWantWriteError:
+                    want = _WAIT_WRITE
+            pygo_core.wait_fd(fd, want)
+
+    def recv(self, n):
+        if self._closed:
+            return b""
+        fd = self._ssl.fileno()
+        while True:
+            want = None
+            with self._lock:
+                try:
+                    return self._ssl.recv(n)
+                except _ssl.SSLWantReadError:
+                    want = _WAIT_READ
+                except _ssl.SSLWantWriteError:
+                    want = _WAIT_WRITE
+                except _ssl.SSLZeroReturnError:
+                    return b""          # clean TLS close_notify -> EOF
+                except _ssl.SSLEOFError:
+                    return b""          # peer dropped without close_notify
+                except OSError as e:
+                    # SSLWant*/Zero/EOF are SSLError(=OSError) subclasses and
+                    # are caught above; a bare EAGAIN means the kernel buffer
+                    # is dry -- park for readability.  Anything else is real.
+                    if e.errno in (_errno.EAGAIN, _errno.EWOULDBLOCK):
+                        want = _WAIT_READ
+                    else:
+                        raise
+            pygo_core.wait_fd(fd, want)
+
+    def recv_into(self, buffer, nbytes=0):
+        if self._closed:
+            return 0
+        fd = self._ssl.fileno()
+        while True:
+            want = None
+            with self._lock:
+                try:
+                    return self._ssl.recv_into(buffer, nbytes)
+                except _ssl.SSLWantReadError:
+                    want = _WAIT_READ
+                except _ssl.SSLWantWriteError:
+                    want = _WAIT_WRITE
+                except (_ssl.SSLZeroReturnError, _ssl.SSLEOFError):
+                    return 0
+                except OSError as e:
+                    if e.errno in (_errno.EAGAIN, _errno.EWOULDBLOCK):
+                        want = _WAIT_READ
+                    else:
+                        raise
+            pygo_core.wait_fd(fd, want)
+
+    def send(self, data):
+        fd = self._ssl.fileno()
+        while True:
+            want = None
+            with self._lock:
+                try:
+                    return self._ssl.send(data)
+                except _ssl.SSLWantReadError:
+                    want = _WAIT_READ
+                except _ssl.SSLWantWriteError:
+                    want = _WAIT_WRITE
+                except OSError as e:
+                    if e.errno in (_errno.EAGAIN, _errno.EWOULDBLOCK):
+                        want = _WAIT_WRITE
+                    else:
+                        raise
+            pygo_core.wait_fd(fd, want)
+
+    def sendall(self, data):
+        view = data if isinstance(data, memoryview) else memoryview(data)
+        total = len(view)
+        sent = 0
+        while sent < total:
+            sent += self.send(view[sent:])
+        return None
+
+    def setblocking(self, flag):
+        # Always cooperative-nonblocking under the hood; ignore.
+        pass
+
+    def shutdown(self, how):
+        try:
+            self._ssl.shutdown(how)
+        except OSError:
+            pass
+
+    def close(self):
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            self._ssl.close()
+        except OSError:
+            pass
+
+    def getpeername(self):
+        return self._ssl.getpeername()
+
+    def getsockname(self):
+        return self._ssl.getsockname()
+
+    def getsockopt(self, *a):
+        return self._ssl.getsockopt(*a)
+
+    @property
+    def ssl_object(self):
+        return self._ssl
+
+
+def _tls_wrap_client(raw, ssl_arg, server_hostname, host):
+    """Wrap a freshly-connected client socket in cooperative TLS and finish
+    the handshake.  ``ssl_arg`` is True (default context) or an SSLContext."""
+    context = _ssl.create_default_context() if ssl_arg is True else ssl_arg
+    if server_hostname is None and isinstance(host, str) and host:
+        server_hostname = host
+    tls = _TLSSock(raw, context, server_side=False,
+                   server_hostname=server_hostname)
+    tls.do_handshake()
+    return tls
 
 
 # Python's per-thread C recursion counter is shared across all
@@ -736,8 +924,6 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
         Builds a TCP socket + thin Transport over our Stream classes;
         protocol's connection_made / data_received / connection_lost
         get fired."""
-        if ssl is not None:
-            raise NotImplementedError("ssl not supported in pygo.aio loop.create_connection")
         if sock is None:
             infos = _resolve(host, port, family or _socket.AF_UNSPEC,
                              _socket.SOCK_STREAM, proto, flags)
@@ -765,6 +951,8 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
                 raise last_err or OSError("could not connect")
         else:
             sock.setblocking(False)
+        if ssl is not None:
+            sock = _tls_wrap_client(sock, ssl, server_hostname, host)
         protocol = protocol_factory()
         transport = _StreamTransport(sock, protocol, loop=self)
         return transport, protocol
@@ -773,8 +961,6 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
                             family=_socket.AF_UNSPEC, flags=_socket.AI_PASSIVE,
                             sock=None, backlog=100, ssl=None,
                             reuse_address=None, reuse_port=None, **_ignored):
-        if ssl is not None:
-            raise NotImplementedError("ssl not supported in pygo.aio loop.create_server")
         if sock is not None:
             sock.setblocking(False)
             socks = [sock]
@@ -853,7 +1039,7 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
                 s.listen(backlog)
         # cb=None: caller wired up via protocol factory + Transport.
         # We still need an accept loop per socket that builds Transports per conn.
-        return _ProtocolServer(socks, protocol_factory, loop=self)
+        return _ProtocolServer(socks, protocol_factory, loop=self, ssl_context=ssl)
 
     async def getaddrinfo(self, host, port, *, family=0, type=0, proto=0, flags=0):
         # Offloaded to the blocking pool so DNS doesn't wedge the hub.
@@ -1290,6 +1476,15 @@ class StreamWriter(object):
                 return default
         if name == "socket":
             return self._sock
+        obj = getattr(self._sock, "ssl_object", None)
+        if name == "ssl_object":
+            return obj if obj is not None else default
+        if name == "peercert":
+            return obj.getpeercert() if obj is not None else default
+        if name == "cipher":
+            return obj.cipher() if obj is not None else default
+        if name == "sslcontext":
+            return obj.context if obj is not None else default
         return default
 
     @property
@@ -1307,11 +1502,8 @@ async def open_connection(host=None, port=None, *, family=0, proto=0,
 
     Mirrors asyncio.open_connection but bypasses Transport/Protocol --
     our Stream classes talk to the socket directly via cooperative
-    wait_fd.  SSL not supported in this MVP.
+    wait_fd.  TLS is handled by the cooperative _TLSSock wrapper.
     """
-    if ssl is not None:
-        raise NotImplementedError("ssl= in pygo.aio.open_connection is not yet supported")
-
     if sock is None:
         if host is None or port is None:
             raise ValueError("open_connection requires host+port or sock=")
@@ -1346,6 +1538,8 @@ async def open_connection(host=None, port=None, *, family=0, proto=0,
     else:
         sock.setblocking(False)
 
+    if ssl is not None:
+        sock = _tls_wrap_client(sock, ssl, server_hostname, host)
     reader = StreamReader(sock, limit=limit)
     writer = StreamWriter(sock, reader=reader)
     return reader, writer
@@ -1355,10 +1549,12 @@ class _Server(object):
     """asyncio.Server compatible: keeps the listening socket alive and
     the accept-loop goroutine running until close() is called."""
 
-    def __init__(self, sock, client_connected_cb, *, limit=2**16):
+    def __init__(self, sock, client_connected_cb, *, limit=2**16,
+                 ssl_context=None):
         self._sock = sock
         self._cb   = client_connected_cb
         self._limit = limit
+        self._ssl_context = ssl_context
         self._closed = False
         self._accept_g = pygo_core.go(self._accept_loop)
 
@@ -1384,17 +1580,36 @@ class _Server(object):
                 self._closed = True
                 return
             conn.setblocking(False)
-            reader = StreamReader(conn, limit=self._limit)
-            writer = StreamWriter(conn, reader=reader)
+            if self._ssl_context is not None:
+                # Handshake off the accept loop so a slow client can't stall it.
+                pygo_core.go(lambda c=conn: self._setup_conn_tls(c))
+            else:
+                self._spawn_conn(conn)
 
-            # Build the connection coroutine and drive it directly as
-            # a PygoTask.  We're already inside a non-task goroutine
-            # (the accept loop); creating PygoTask directly here -- the
-            # earlier "wrap in pygo_core.go then PygoTask inside" added
-            # a second goroutine spawn for no real benefit.
-            coro = self._cb(reader, writer)
-            if asyncio.iscoroutine(coro):
-                PygoTask(coro, loop=asyncio.get_event_loop())
+    def _spawn_conn(self, sock):
+        reader = StreamReader(sock, limit=self._limit)
+        writer = StreamWriter(sock, reader=reader)
+        # Build the connection coroutine and drive it directly as a PygoTask.
+        # We're already inside a non-task goroutine (the accept loop or a
+        # per-conn TLS goroutine); creating PygoTask directly here -- the
+        # earlier "wrap in pygo_core.go then PygoTask inside" added a second
+        # goroutine spawn for no real benefit.
+        coro = self._cb(reader, writer)
+        if asyncio.iscoroutine(coro):
+            PygoTask(coro, loop=asyncio.get_event_loop())
+
+    def _setup_conn_tls(self, conn):
+        try:
+            tls = _TLSSock(conn, self._ssl_context, server_side=True)
+        except Exception:
+            _close_sock(conn)
+            return
+        try:
+            tls.do_handshake()
+        except Exception:
+            _close_sock(tls)
+            return
+        self._spawn_conn(tls)
 
     def is_serving(self):
         return not self._closed
@@ -1570,6 +1785,15 @@ class _StreamTransport(object):
         if name == "peername":
             try: return self._sock.getpeername()
             except OSError: return default
+        obj = getattr(self._sock, "ssl_object", None)
+        if name == "ssl_object":
+            return obj if obj is not None else default
+        if name == "peercert":
+            return obj.getpeercert() if obj is not None else default
+        if name == "cipher":
+            return obj.cipher() if obj is not None else default
+        if name == "sslcontext":
+            return obj.context if obj is not None else default
         return default
 
     def get_protocol(self):
@@ -1629,16 +1853,16 @@ class _ProtocolServer(object):
     """Server compatible with asyncio.Server: per-accept builds a
     _StreamTransport and a protocol via factory."""
 
-    def __init__(self, socks, protocol_factory, *, loop=None):
+    def __init__(self, socks, protocol_factory, *, loop=None, ssl_context=None):
         # create_server may bind several sockets (one per address family);
         # accept independently on each.
         self._socks = list(socks)
         self._factory = protocol_factory
         self._loop = loop
         # asyncio.Server exposes _ssl_context (None when no TLS); libraries
-        # (e.g. websockets' test helpers) read it off the server object.
-        # pygo.aio's create_server rejects ssl=, so it is always None here.
-        self._ssl_context = None
+        # (e.g. websockets' test helpers) read it off the server object.  It
+        # holds the real SSLContext when create_server was given ssl=.
+        self._ssl_context = ssl_context
         self._closed = False
         self._accept_gs = [pygo_core.go(lambda s=s: self._accept_loop(s))
                            for s in self._socks]
@@ -1656,8 +1880,29 @@ class _ProtocolServer(object):
                 # tear down the whole (multi-socket) server.
                 return
             conn.setblocking(False)
-            protocol = self._factory()
-            _StreamTransport(conn, protocol, loop=self._loop)
+            if self._ssl_context is not None:
+                # Finish the TLS handshake in its own goroutine so a slow or
+                # stalled client never blocks accepting new connections.
+                pygo_core.go(lambda c=conn: self._setup_tls_conn(c))
+            else:
+                protocol = self._factory()
+                _StreamTransport(conn, protocol, loop=self._loop)
+
+    def _setup_tls_conn(self, conn):
+        try:
+            tls = _TLSSock(conn, self._ssl_context, server_side=True)
+        except Exception:
+            _close_sock(conn)
+            return
+        try:
+            tls.do_handshake()
+        except Exception:
+            # Bad cert / SNI / protocol error from the peer: drop it quietly,
+            # exactly as asyncio's SSL transport does.
+            _close_sock(tls)
+            return
+        protocol = self._factory()
+        _StreamTransport(tls, protocol, loop=self._loop)
 
     def get_loop(self):
         """asyncio.Server.get_loop().  Libraries (websockets) call this on
@@ -1861,11 +2106,8 @@ async def start_server(client_connected_cb, host=None, port=None, *,
     """Listen on host:port and call client_connected_cb(reader, writer)
     per accepted connection.  Returns a _Server with .close() / .sockets.
 
-    Compared to asyncio.start_server, we skip Transport/Protocol and
-    the SSL-handshake plumbing.  Suitable for plain TCP services."""
-    if ssl is not None:
-        raise NotImplementedError("ssl= in pygo.aio.start_server is not yet supported")
-
+    Compared to asyncio.start_server, we skip Transport/Protocol but still
+    wrap accepted connections in cooperative TLS when ssl= is given."""
     if sock is None:
         infos = _socket.getaddrinfo(host, port, family,
                                     _socket.SOCK_STREAM, 0, flags)
@@ -1889,7 +2131,7 @@ async def start_server(client_connected_cb, host=None, port=None, *,
     else:
         sock.setblocking(False)
 
-    return _Server(sock, client_connected_cb, limit=limit)
+    return _Server(sock, client_connected_cb, limit=limit, ssl_context=ssl)
 
 
 class PygoEventLoopPolicy(asyncio.AbstractEventLoopPolicy):
