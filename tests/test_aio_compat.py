@@ -446,5 +446,63 @@ class TestClosedLoopRaises(unittest.TestCase):
             coro.close()
 
 
+class TestTaskExceptionRefcycle(unittest.TestCase):
+    """A finished task that captured an exception must not be pinned by a
+    refcycle through its own driver frame.  pygo runs the task driver as a
+    Python goroutine, so an exception unwinding through it puts the driver
+    frame (which holds the task as a local) into the exception's traceback:
+    task -> _pgexc -> __traceback__ -> driver frame -> task.  That cycle
+    survives REFCOUNTING (only gc.collect breaks it), keeping the finished
+    task and its exception alive longer than stock asyncio (whose task step is
+    C).  Regression for anyio TestRefcycles::test_exception_refcycles_*."""
+
+    def test_stored_exception_tb_excludes_driver_frame(self):
+        async def boom():
+            raise ValueError("boom")
+        async def main():
+            t = asyncio.ensure_future(boom())
+            (exc,) = await asyncio.gather(t, return_exceptions=True)
+            names = []
+            tb = exc.__traceback__
+            while tb is not None:
+                names.append(tb.tb_frame.f_code.co_name)
+                tb = tb.tb_next
+            return names
+        names = paio.run(main())
+        self.assertNotIn("_driver", names,
+                         "pygo driver frame leaked into the stored exception's "
+                         "traceback (refcycle pins the finished task): %r" % names)
+
+    def test_nested_exception_group_not_pinned(self):
+        # Mirror anyio TestRefcycles::test_exception_refcycles_parent_task with
+        # stdlib TaskGroups: a deeply-nested exception extracted from nested
+        # ExceptionGroups must have NO lingering referrers once the groups
+        # unwind (the driver-frame traceback cycle would pin it).
+        import gc
+        async def main():
+            class _Done(Exception):
+                pass
+            async def coro_fn(outer_tg):
+                async with outer_tg:
+                    raise _Done
+            exc = None
+            try:
+                async with asyncio.TaskGroup() as tg_outer:
+                    inner = asyncio.TaskGroup()
+                    tg_outer.create_task(coro_fn(inner))
+            except* _Done as eg:
+                # unwrap to the leaf _Done
+                cur = eg
+                while isinstance(cur, BaseExceptionGroup):
+                    cur = cur.exceptions[0]
+                exc = cur
+            assert isinstance(exc, _Done), exc
+            return [r for r in gc.get_referrers(exc)
+                    if not (hasattr(r, "f_code"))]  # drop the checking frame
+        extra = paio.run(main())
+        self.assertEqual(extra, [],
+                         "leaf exception pinned by a refcycle: %r" % (extra,))
+
+
 if __name__ == "__main__":
     unittest.main()

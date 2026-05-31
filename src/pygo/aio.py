@@ -708,6 +708,45 @@ class PygoTask(_PygoFutureMixin, asyncio.Task):
                 asyncio.Future.set_result(self, None)
         except BaseException:
             pass
+        # Drop our goroutine handles at completion.  The driver frame (still on
+        # the goroutine's stack here) holds `self` as a local, so as long as the
+        # task references its goroutine via _g / _self_g there is a cycle
+        # task -> _g/_self_g -> g -> retained driver frame -> self that survives
+        # REFCOUNTING -- it only clears on the next gc.collect().  That keeps a
+        # finished task (and its captured _pgexc + traceback) alive longer than
+        # stock asyncio, which a well-behaved teardown -- and anyio's
+        # TestRefcycles -- relies on NOT happening.  c9e1db2 cleared g->callable
+        # in C; this clears the Python-side frame path.  Both _g and _self_g
+        # wrap the SAME goroutine, so clearing the Python refs (rather than
+        # adding tp_traverse to the shared G type, which double-counts the one
+        # g->callable across the two wrappers) is the safe break.  cancel() and
+        # _wake_unpark only touch _self_g while pending, so dropping it now (the
+        # task is terminal) is safe.
+        self._g = None
+        self._self_g = None
+
+    def _pg_strip_driver_tb(self, exc):
+        """Drop this driver's own frame(s) from the head of exc's traceback.
+
+        An exception raised by the user coro unwinds through the driver's
+        Python frame (the coro.send / coro.throw call), so exc.__traceback__'s
+        leading frame is the driver frame -- which holds `self` as a local.
+        Storing exc as the task's result then forms a cycle that survives
+        REFCOUNTING: task -> _pgexc -> __traceback__ -> driver frame -> self,
+        keeping the finished task (and its captured exception) alive until the
+        next gc.collect().  Stock asyncio's task step is C, so its traceback
+        never carries a self-holding Python frame; matching that (and giving
+        cleaner tracebacks free of pygo internals) means stripping the driver
+        frame here.  Nested exceptions (ExceptionGroup.exceptions, __cause__)
+        keep their own tracebacks -- those point at user frames, not us."""
+        try:
+            tb = exc.__traceback__
+            code = self._driver.__func__.__code__
+            while tb is not None and tb.tb_frame.f_code is code:
+                tb = tb.tb_next
+            return exc.with_traceback(tb)
+        except Exception:
+            return exc
 
     def __repr__(self):
         return "<PygoTask name=%r state=%s>" % (
@@ -848,13 +887,13 @@ class PygoTask(_PygoFutureMixin, asyncio.Task):
                     # (so a parent retrieving this task's result sees it) and
                     # signal the loop to break the drive and re-raise.
                     if not self.done():
-                        self.set_exception(e)
+                        self.set_exception(self._pg_strip_driver_tb(e))
                     self._pg_settle_c()
                     loop._pg_signal_fatal(e)
                     return
                 except BaseException as e:
                     if not self.done():
-                        self.set_exception(e)
+                        self.set_exception(self._pg_strip_driver_tb(e))
                     self._pg_settle_c()
                     return
             finally:
