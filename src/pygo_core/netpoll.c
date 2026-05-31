@@ -51,6 +51,7 @@
 #  include <sys/event.h>
 #  include <sys/time.h>
 #  include <unistd.h>
+#  include <fcntl.h>      /* self-pipe wake: O_NONBLOCK / FD_CLOEXEC */
 #elif defined(PYGO_OS_WINDOWS)
    /* winsock2.h, ws2tcpip.h and windows.h are already pulled in via
     * plat_compat.h.  WSAPoll + WSAPOLLFD live in winsock2.h, FD_SET /
@@ -972,6 +973,17 @@ static struct pygo_iouring_ring *pygo_iouring_ring_ptrs[PYGO_IOURING_RINGS_MAX];
 static int                       pygo_iouring_ring_count = 0;
 #elif defined(PYGO_HAVE_KQUEUE)
 static int pygo_kqueue_fd = -1;
+/* kqueue cross-thread pump wake: a self-pipe whose read end is registered
+ * in the kqueue (EVFILT_READ | EV_CLEAR).  Any thread pokes the write end
+ * via pygo_netpoll_wake_pump() to break an idle kevent() so a cross-thread
+ * re-queue (e.g. a blocking-offload worker) wakes a scheduler parked in the
+ * pump -- the kqueue analogue of the epoll eventfd / select self-pipe.
+ * Same names as the select() branch on purpose: the backends are mutually
+ * exclusive so only one set ever compiles, and the shared
+ * wake_pump_arm()/wake_pump() #else paths then work unchanged on kqueue.
+ * -1 = unarmed.  Created once in pygo_netpoll_init under pygo_pool.lock. */
+static int pygo_selfpipe_r = -1;
+static int pygo_selfpipe_w = -1;
 #elif defined(PYGO_OS_WINDOWS)
 #  include "netpoll_iocp.h"
 /* Runtime-selected Windows backend.  Tier order:
@@ -1173,6 +1185,29 @@ int pygo_netpoll_init(void)
 #elif defined(PYGO_HAVE_KQUEUE)
     pygo_kqueue_fd = kqueue();
     if (pygo_kqueue_fd < 0) { pygo_mutex_unlock(&pygo_pool.lock); return -1; }
+    /* Cross-thread pump wake: a self-pipe registered in the kqueue.  Best
+     * effort -- if pipe()/fcntl()/kevent() fail the pump still re-polls on
+     * its bounded timeout, so wake latency degrades but nothing wedges. */
+    {
+        int pfd[2];
+        if (pipe(pfd) == 0) {
+            int k;
+            struct kevent kev;
+            for (k = 0; k < 2; k++) {
+                int fl = fcntl(pfd[k], F_GETFL, 0);
+                if (fl >= 0) (void)fcntl(pfd[k], F_SETFL, fl | O_NONBLOCK);
+                (void)fcntl(pfd[k], F_SETFD, FD_CLOEXEC);
+            }
+            EV_SET(&kev, pfd[0], EVFILT_READ, EV_ADD | EV_CLEAR, 0, 0, NULL);
+            if (kevent(pygo_kqueue_fd, &kev, 1, NULL, 0, NULL) == 0) {
+                pygo_selfpipe_r = pfd[0];
+                pygo_selfpipe_w = pfd[1];
+            } else {
+                close(pfd[0]);
+                close(pfd[1]);
+            }
+        }
+    }
 #elif defined(PYGO_OS_WINDOWS)
     /* Bring up Winsock once.  Idempotent via plat_compat's
      * InterlockedCompareExchange guard. */
@@ -1238,6 +1273,9 @@ void pygo_netpoll_fini(void)
     if (pygo_epoll_fd >= 0) { close(pygo_epoll_fd); pygo_epoll_fd = -1; }
 #elif defined(PYGO_HAVE_KQUEUE)
     if (pygo_kqueue_fd >= 0) { close(pygo_kqueue_fd); pygo_kqueue_fd = -1; }
+    /* Self-pipe wake teardown (see pygo_netpoll_init kqueue branch). */
+    if (pygo_selfpipe_r >= 0) { close(pygo_selfpipe_r); pygo_selfpipe_r = -1; }
+    if (pygo_selfpipe_w >= 0) { close(pygo_selfpipe_w); pygo_selfpipe_w = -1; }
 #elif defined(PYGO_OS_WINDOWS)
     if (pygo_win_use_iocp) {
         pygo_iocp_fini();
@@ -2444,8 +2482,18 @@ int pygo_netpoll_pump(long long timeout_ns)
             int i;
             for (i = 0; i < n; i++) {
                 int fd = (int)evs[i].ident;
-                int mask = (evs[i].filter == EVFILT_READ) ?
-                           PYGO_NETPOLL_READ : PYGO_NETPOLL_WRITE;
+                int mask;
+                /* Self-pipe wake: carries no parker -- the cross-thread
+                 * re-queue already placed the g on the scheduler wake_list,
+                 * the byte's only job was to break this idle kevent().
+                 * Drain it (EV_CLEAR already reset the edge) and move on. */
+                if (pygo_selfpipe_r >= 0 && fd == pygo_selfpipe_r) {
+                    char drain[64];
+                    while (read(pygo_selfpipe_r, drain, sizeof drain) > 0) { }
+                    continue;
+                }
+                mask = (evs[i].filter == EVFILT_READ) ?
+                       PYGO_NETPOLL_READ : PYGO_NETPOLL_WRITE;
                 if (pygo_pump_dispatch_event(fd, mask)) woke++;
             }
         }
