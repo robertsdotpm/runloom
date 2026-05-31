@@ -382,71 +382,101 @@ _FINISHED  = 1
 _CANCELLED = 2
 
 
-class PygoFuture(object):
-    """Duck-typed Future with synchronous-callback dispatch.
+class _PygoFutureMixin(object):
+    """Shared Future logic for PygoFuture (over asyncio.Future) and PygoTask
+    (over asyncio.Task).
 
-    Used by PygoEventLoop.create_future and as the base of PygoTask.
-    Intentionally no __slots__ -- asyncio.gather and friends set extra
-    attributes (_log_destroy_pending, _cancel_message, ...) on futures
-    they adopt, and we need to accept whatever they throw at us."""
+    Why subclass the real asyncio types at all: libraries check
+    `isinstance(x, asyncio.Future)` / `asyncio.Task)` (e.g. aiomisc's
+    cancel_tasks) and SKIP objects that aren't.  asyncio's own C fast paths only
+    fire for CheckExact instances, so a *subclass* gets the generic path that
+    calls these public Python methods -- our overrides win and the C state
+    fields are never read.
 
-    # MUST be a class attribute: asyncio.isfuture() returns True only when
-    # hasattr(type(obj), '_asyncio_future_blocking').  Without it our futures
-    # aren't recognised as futures, so asyncio.ensure_future / shield / gather
-    # wrap each one in an EXTRA PygoTask instead of using it directly.  That
-    # wrapper deadlocks shield(already-done-future): e.g. websockets' recv()
-    # after close does `await asyncio.shield(connection_lost_waiter)` on a
-    # future that's already set, which must return immediately but instead
-    # hangs waiting on the never-driven wrapper task.
-    _asyncio_future_blocking = False
+    Why a mixin + _pg* names: the C Future/Task expose _state/_result/_coro/
+    _fut_waiter/... as READ-ONLY descriptors, so we can't store our state under
+    those names.  We keep our own state in _pg* attrs and override every method.
+    `_asyncio_future_blocking` and `_loop` ARE usable (the C base's __init__
+    initialises them) so we leave those on the C object.
+    """
 
-    def __init__(self, *, loop=None):
-        self._state    = _PENDING
-        self._result   = None
-        self._exception = None
-        self._callbacks = []
-        self._loop     = loop
-        # asyncio's "exception was never retrieved" tracking: set True by
-        # set_exception, cleared once result()/exception() reads it; __del__
-        # warns if still set.  Libraries (async-lru) assert on it.
-        self._log_traceback = False
-        # Re-armed to True in __await__ each time we suspend (Task.__step /
-        # our driver set it False when adopting the future).
-        self._asyncio_future_blocking = False
+    def _pg_future_init(self):
+        self._pgstate = _PENDING
+        self._pgresult = None
+        self._pgexc = None
+        self._pgcbs = []
+        self._pgcancelmsg = None
+        # asyncio's "exception was never retrieved" tracking (libraries assert
+        # on _log_traceback).  Our own copy -- the C _log_traceback descriptor
+        # forbids being set True.
+        self._pglogtb = False
 
     # ---- query ----
-    def done(self):       return self._state != _PENDING
-    def cancelled(self):  return self._state == _CANCELLED
-    def get_loop(self):   return self._loop
+    def done(self):       return self._pgstate != _PENDING
+    def cancelled(self):  return self._pgstate == _CANCELLED
 
     def result(self):
-        if self._state == _PENDING:
+        if self._pgstate == _PENDING:
             raise asyncio.InvalidStateError("Future not done")
-        if self._state == _CANCELLED:
-            raise asyncio.CancelledError()
-        self._log_traceback = False
-        if self._exception is not None:
-            raise self._exception
-        return self._result
+        if self._pgstate == _CANCELLED:
+            raise self._make_cancelled_error()
+        self._pglogtb = False
+        if self._pgexc is not None:
+            raise self._pgexc
+        return self._pgresult
 
     def exception(self):
-        if self._state == _PENDING:
+        if self._pgstate == _PENDING:
             raise asyncio.InvalidStateError("Future not done")
-        if self._state == _CANCELLED:
-            raise asyncio.CancelledError()
-        self._log_traceback = False
-        return self._exception
+        if self._pgstate == _CANCELLED:
+            raise self._make_cancelled_error()
+        self._pglogtb = False
+        return self._pgexc
+
+    @property
+    def _log_traceback(self):
+        return self._pglogtb
+
+    @_log_traceback.setter
+    def _log_traceback(self, val):
+        # Some asyncio code sets this False; honour False, ignore True coming
+        # from outside (we set _pglogtb ourselves in set_exception).
+        if not val:
+            self._pglogtb = False
+
+    # Map the C Future's read-only descriptor NAMES to our _pg* state, so code
+    # that pokes the "private" attributes directly (e.g. async-lru reads
+    # task._exception to avoid clearing _log_traceback) sees our real state, not
+    # the never-updated C fields.  These properties shadow the C descriptors
+    # because the mixin precedes asyncio.Future/Task in the MRO.
+    @property
+    def _exception(self):
+        return self._pgexc
+
+    @property
+    def _result(self):
+        return self._pgresult
+
+    @property
+    def _callbacks(self):
+        return self._pgcbs
+
+    @property
+    def _state(self):
+        s = self._pgstate
+        return ("PENDING" if s == _PENDING else
+                "FINISHED" if s == _FINISHED else "CANCELLED")
 
     # ---- mutation ----
     def set_result(self, result):
-        if self._state != _PENDING:
+        if self._pgstate != _PENDING:
             raise asyncio.InvalidStateError("Future already done")
-        self._result = result
-        self._state  = _FINISHED
+        self._pgresult = result
+        self._pgstate  = _FINISHED
         self._fire_callbacks()
 
     def set_exception(self, exception):
-        if self._state != _PENDING:
+        if self._pgstate != _PENDING:
             raise asyncio.InvalidStateError("Future already done")
         if isinstance(exception, type):
             exception = exception()
@@ -454,62 +484,70 @@ class PygoFuture(object):
             raise TypeError(
                 "StopIteration interacts badly with generators "
                 "and cannot be raised into a Future")
-        self._exception = exception
-        self._state     = _FINISHED
-        self._log_traceback = True
+        self._pgexc = exception
+        self._pgstate = _FINISHED
+        self._pglogtb = True
         self._fire_callbacks()
-        # NOTE: stock asyncio.Future.__del__ logs "exception was never
-        # retrieved" here when _log_traceback is still set at GC time.  That was
-        # blocked because a completed PygoTask used to form an uncollectable
-        # cycle (task -> self._g (PygoG) -> g->callable (the _driver bound
-        # method) -> task) that cyclic GC couldn't see through the C pygo_g_t.
-        # That cycle is now broken at the source: pygo_g_entry releases
-        # g->callable the instant the goroutine completes (it's never called
-        # again), so a completed task collects by plain refcounting.  Adding the
-        # __del__ warning is therefore unblocked -- with one caveat to handle:
-        # for a fire-and-forget task whose only ref IS g->callable, releasing it
-        # collects the task in the goroutine's own completion context, so the
-        # __del__ would run there (not at a later GC).  call_exception_handler /
-        # logging is fine there, but anything that re-enters the scheduler is
-        # not -- keep the warning side-effect-free or defer it via call_soon.
 
-    def cancel(self, msg=None):
-        if self._state != _PENDING:
+    def __del__(self):
+        # "exception was never retrieved" warning, now that a completed task is
+        # collectable (upstream c9e1db2 releases g->callable at goroutine
+        # completion, breaking the task->_g->callable->task cycle).  Keep it
+        # side-effect-free: for a fire-and-forget task whose only ref is
+        # g->callable, this runs in the goroutine's own completion context, so
+        # we must NOT re-enter the scheduler -- a plain call_exception_handler
+        # (logging) is fine.
+        if not self._pglogtb or self._pgexc is None:
+            return
+        loop = self._loop
+        if loop is None or loop.is_closed():
+            return
+        try:
+            loop.call_exception_handler({
+                "message": "%s exception was never retrieved"
+                           % self.__class__.__name__,
+                "exception": self._pgexc,
+                "future": self,
+            })
+        except BaseException:
+            pass
+
+    def _pg_future_cancel(self, msg=None):
+        if self._pgstate != _PENDING:
             return False
-        self._cancel_message = msg
-        self._state = _CANCELLED
+        self._pgcancelmsg = msg
+        self._pgstate = _CANCELLED
         self._fire_callbacks()
         return True
 
+    # PygoFuture's public cancel IS the future-cancel; PygoTask overrides it
+    # with the task-cancel and uses _pg_future_cancel internally.
+    cancel = _pg_future_cancel
+
     def _make_cancelled_error(self):
-        """Build the CancelledError that asyncio internals (gather's
-        _done_callback, Task.__step's cancellation path) expect."""
-        msg = getattr(self, "_cancel_message", None)
+        msg = self._pgcancelmsg
         if msg is None:
             return asyncio.CancelledError()
         return asyncio.CancelledError(msg)
 
     # ---- callbacks ----
     def add_done_callback(self, callback, *, context=None):
-        if self._state != _PENDING:
-            # Already resolved -- fire this one callback immediately,
-            # consistent with asyncio.Future's semantics for late
-            # add_done_callback.
+        if self._pgstate != _PENDING:
             try:
                 callback(self)
             except BaseException as e:
                 self._report_exc(e)
         else:
-            self._callbacks.append((callback, context))
+            self._pgcbs.append((callback, context))
 
     def remove_done_callback(self, callback):
-        filtered = [(cb, ctx) for cb, ctx in self._callbacks if cb is not callback]
-        removed  = len(self._callbacks) - len(filtered)
-        self._callbacks = filtered
+        filtered = [(cb, ctx) for cb, ctx in self._pgcbs if cb is not callback]
+        removed  = len(self._pgcbs) - len(filtered)
+        self._pgcbs = filtered
         return removed
 
     def _fire_callbacks(self):
-        cbs, self._callbacks = self._callbacks, []
+        cbs, self._pgcbs = self._pgcbs, []
         for cb, ctx in cbs:
             try:
                 if ctx is None:
@@ -529,113 +567,135 @@ class PygoFuture(object):
 
     # ---- await protocol ----
     def __await__(self):
-        if self._state == _PENDING:
+        if self._pgstate == _PENDING:
             self._asyncio_future_blocking = True
             yield self
-            assert self._state != _PENDING
+            assert self._pgstate != _PENDING
         return self.result()
 
-    # Generators implement __iter__; tasks expect that to exist for await.
     __iter__ = __await__
+
+
+class PygoFuture(_PygoFutureMixin, asyncio.Future):
+    """A real asyncio.Future subclass with pygo's synchronous-callback
+    dispatch.  isinstance(x, asyncio.Future) holds; asyncio uses our overridden
+    methods (subclasses miss the C fast paths)."""
+
+    def __init__(self, *, loop=None):
+        if loop is None:
+            loop = asyncio.get_event_loop()
+        # Initialise the C Future (gives us a valid _loop + _asyncio_future_
+        # blocking field).  Its _state stays PENDING forever -- asyncio reads
+        # our done()/result() instead, and a PENDING C Future doesn't warn at
+        # GC (only Tasks do).
+        asyncio.Future.__init__(self, loop=loop)
+        self._asyncio_future_blocking = False
+        self._pg_future_init()
 
 
 # ====================================================================
 # PygoTask -- the heart of the bridge.
 # ====================================================================
-class PygoTask(PygoFuture):
-    """asyncio.Task replacement.  Each task owns a goroutine that drives
-    the coroutine; the Future side exposes the asyncio-visible state
-    so external code can `await task` etc.
+class PygoTask(_PygoFutureMixin, asyncio.Task):
+    """A real asyncio.Task subclass (isinstance(x, asyncio.Task) holds) driven
+    by a pygo goroutine instead of the C task machinery.
 
-    Subclasses PygoFuture, not asyncio.Future -- the C Future class
-    forbids real method overrides and we need set_result/set_exception/
-    cancel to fire callbacks synchronously (otherwise our gather-in-
-    flight done-callback cascade goes through N call_soon -> N
-    goroutine spawns and the bridge ends up slower than asyncio).
+    We initialise only the Future half of the C object (asyncio.Future.__init__)
+    -- NOT Task.__init__, which would schedule the C task-step and double-drive
+    our coroutine (the C step is a C callable we can't shadow from Python).  The
+    C Task's own fields (_coro, _fut_waiter, ...) stay NULL; we keep our state in
+    _pg* attrs and override the readers.  On completion we settle the underlying
+    C Future state so asyncio.Task.__del__ doesn't warn "destroyed but pending".
     """
 
     def __init__(self, coro, *, loop=None, name=None):
         if loop is None:
             loop = asyncio.get_event_loop()
-        super().__init__(loop=loop)
-        self._coro    = coro
-        self._name    = name or ("Task-%d" % next(_TASK_NAME_COUNTER))
-        # _self_g is captured by the driver on its first iteration.
-        # The driver-internal G handle is what done-callbacks wake.
-        # Cheaper than the previous Chan(1) approach -- saves a Chan
-        # alloc + try_send/recv per task at fan-out time.
+        # Future half only -- gives a valid _loop + _asyncio_future_blocking and
+        # does NOT schedule a C task-step.
+        asyncio.Future.__init__(self, loop=loop)
+        self._asyncio_future_blocking = False
+        self._pg_future_init()
+        self._pgcoro = coro
+        self._pgname = name or ("Task-%d" % next(_TASK_NAME_COUNTER))
+        # _self_g: the driver's G handle (done-callbacks / cancel wake it).
         self._self_g = None
-        # _must_cancel is a ONE-SHOT delivery flag (mirrors asyncio.Task):
-        # cancel() sets it, the driver throws CancelledError ONCE then clears
-        # it.  A persistent re-throw would re-cancel the cleanup awaits that run
-        # inside `async with __aexit__` / `try: finally:` during cancellation
-        # (e.g. aiofiles closing its file via run_in_executor), so the cleanup
-        # never completes.  _cancel_requested stays as the "outstanding cancel"
-        # state bit.
+        # _pgmustcancel: ONE-SHOT cancel-delivery flag (mirrors asyncio.Task's
+        # _must_cancel); cancel() sets it, the driver throws CancelledError once
+        # then clears it (a persistent re-throw would re-cancel cleanup awaits in
+        # `async with __aexit__`/finally before they finish).
         self._cancel_requested = False
-        self._must_cancel = False
-        # The future/task we're currently suspended on (asyncio.Task._fut_waiter
-        # analogue), so cancel() can propagate INTO it.  None while running.
-        self._fut_waiter = None
-        # cancelling()/uncancel() are required by asyncio.timeouts in
-        # 3.11+.  Mirrors asyncio.Task: count of unresolved cancels.
-        self._num_cancels_requested = 0
-        # Register in asyncio.all_tasks() for introspection parity.
+        self._pgmustcancel = False
+        # _pgfutwaiter: the future/task we're suspended on, so cancel() can
+        # propagate INTO it (asyncio.Task._fut_waiter analogue).  None while running.
+        self._pgfutwaiter = None
+        self._pgnumcancels = 0          # cancelling()/uncancel() counter
+        # Register in asyncio.all_tasks() (Task.__init__ would normally do this).
         if _ALL_TASKS is not None:
             try:
                 _ALL_TASKS.add(self)
             except TypeError:
                 pass
-        # Off we go.  The goroutine owns the coro from here.
-        #
-        # Driver goroutines run *arbitrary user async code*, which routinely
-        # includes first-time imports of heavy packages (pydantic, etc.)
-        # whose import machinery recurses deeply in C.  The scheduler's
-        # default per-g stack (128 KB) is sized for cooperative I/O handlers,
-        # not deep C-recursive imports, so such an import can overflow the
-        # goroutine's C stack and SEGV the process -- a real crash seen on
-        # getsentry/responses + spulec/freezegun (both import pydantic lazily
-        # inside an async test).  Give task drivers a roomier stack.  Override
-        # with PYGO_AIO_TASK_STACK (bytes); 0 keeps the scheduler default.
+        # Driver goroutines run arbitrary user async code (deep C-recursive
+        # first-time imports overflow the default 128 KB g-stack and SEGV), so
+        # give them a roomier stack.  Override with PYGO_AIO_TASK_STACK.
         self._g = pygo_core.go(self._driver, stack_size=_TASK_STACK) \
             if _TASK_STACK else pygo_core.go(self._driver)
 
+    def _pg_settle_c(self):
+        # Settle the underlying C Future to FINISHED so asyncio.Task.__del__
+        # doesn't warn "Task was destroyed but it is pending" -- our goroutine
+        # drives the coro, so the C task machinery never settles its own state.
+        # The C Future has no C callbacks (asyncio uses our add_done_callback),
+        # so this fires nothing.
+        try:
+            if not asyncio.Future.done(self):
+                asyncio.Future.set_result(self, None)
+        except BaseException:
+            pass
+
+    def __repr__(self):
+        return "<PygoTask name=%r state=%s>" % (
+            self._pgname,
+            "PENDING" if self._pgstate == _PENDING else
+            ("CANCELLED" if self._pgstate == _CANCELLED else "FINISHED"))
+
     # ---- asyncio.Task surface ----
+    def get_coro(self):
+        return self._pgcoro
+
     def get_name(self):
-        return self._name
+        return self._pgname
 
     def set_name(self, name):
-        self._name = name
-
-    def get_coro(self):
-        return self._coro
+        self._pgname = str(name)
 
     def cancel(self, msg=None):
         if self.done():
             return False
         self._cancel_requested = True
-        self._num_cancels_requested += 1
+        self._pgnumcancels += 1
         # If we're suspended on a future/task, propagate the cancel INTO it
         # (mirrors stock asyncio cancelling self._fut_waiter).  Its completion
         # then wakes us via the already-registered done-callback -- so an
         # awaited inner task runs its OWN cleanup (async with __aexit__ /
         # finally) and we wait for it before our CancelledError surfaces.
-        if self._fut_waiter is not None:
-            if self._fut_waiter.cancel(msg=msg):
+        if self._pgfutwaiter is not None:
+            if self._pgfutwaiter.cancel(msg=msg):
                 return True
-            # _fut_waiter couldn't take the cancel (already cancelling/done),
+            # _pgfutwaiter couldn't take the cancel (already cancelling/done),
             # but it WILL still wake us when it completes.  Mark a one-shot
             # cancel for the driver to deliver then, and do NOT wake now: a
-            # premature unpark would abandon our wait on _fut_waiter, leaking it
+            # premature unpark would abandon our wait on _pgfutwaiter, leaking it
             # half-cancelled (seen with nested wait_for where both the outer and
             # inner timeouts cancel the same task on the same tick).  Mirrors
             # stock asyncio.Task.cancel(), which sets _must_cancel without
             # rescheduling when _fut_waiter is present.
-            self._must_cancel = True
+            self._pgmustcancel = True
             return True
         # Not suspended on a cancellable future (running): deliver a one-shot
         # cancel at the next driver step.
-        self._must_cancel = True
+        self._pgmustcancel = True
         if self._self_g is not None:
             self._self_g.wake()
         return True
@@ -643,26 +703,26 @@ class PygoTask(PygoFuture):
     def cancelling(self):
         """Number of unresolved cancel() calls.  Required by
         asyncio.timeouts / asyncio.TaskGroup in 3.11+."""
-        return self._num_cancels_requested
+        return self._pgnumcancels
 
     def uncancel(self):
         """Decrement the cancelling counter.  When it returns to zero, clear
         the outstanding-cancel state and any not-yet-delivered one-shot cancel
         (asyncio.timeout / TaskGroup call this after handling a CancelledError,
         meaning 'don't keep cancelling me')."""
-        if self._num_cancels_requested > 0:
-            self._num_cancels_requested -= 1
-        if self._num_cancels_requested == 0:
+        if self._pgnumcancels > 0:
+            self._pgnumcancels -= 1
+        if self._pgnumcancels == 0:
             self._cancel_requested = False
-            self._must_cancel = False
-        return self._num_cancels_requested
+            self._pgmustcancel = False
+        return self._pgnumcancels
 
     # ---- driver: the per-task goroutine body ----
     def _driver(self):
         # Capture our own G handle so cancel/done_callback can wake us.
         self._self_g = pygo_core.current_g()
 
-        coro       = self._coro
+        coro       = self._pgcoro
         send_value = None
         throw_exc  = None
 
@@ -678,12 +738,12 @@ class PygoTask(PygoFuture):
             _CURRENT_TASKS[loop] = self
             try:
                 try:
-                    if self._must_cancel and throw_exc is None:
+                    if self._pgmustcancel and throw_exc is None:
                         # Deliver the cancel exactly once, then clear it so the
                         # coro's cleanup awaits (async with __aexit__ / finally)
                         # aren't re-cancelled before they finish.
                         throw_exc = asyncio.CancelledError()
-                        self._must_cancel = False
+                        self._pgmustcancel = False
                     if throw_exc is not None:
                         e, throw_exc = throw_exc, None
                         yielded = coro.throw(e)
@@ -692,14 +752,17 @@ class PygoTask(PygoFuture):
                 except StopIteration as si:
                     if not self.done():
                         self.set_result(si.value)
+                    self._pg_settle_c()
                     return
                 except asyncio.CancelledError:
                     if not self.done():
-                        super().cancel()
+                        self._pg_future_cancel()
+                    self._pg_settle_c()
                     return
                 except BaseException as e:
                     if not self.done():
                         self.set_exception(e)
+                    self._pg_settle_c()
                     return
             finally:
                 if prev_current is None:
@@ -763,15 +826,15 @@ class PygoTask(PygoFuture):
             # add_done_callback is handled by park_safe / wake_safe
             # (wake_pending counter; park is a no-op if wake arrived).
             yielded.add_done_callback(self._wake_unpark)
-            self._fut_waiter = yielded
+            self._pgfutwaiter = yielded
             pygo_core.park_self()
-            self._fut_waiter = None
+            self._pgfutwaiter = None
 
             # We're back.  Cancel() may have propagated into `yielded` (then it
             # wakes us as a cancelled future, handled below) or, if it couldn't,
-            # set the one-shot _must_cancel -- deliver that now.
-            if self._must_cancel:
-                self._must_cancel = False
+            # set the one-shot _pgmustcancel -- deliver that now.
+            if self._pgmustcancel:
+                self._pgmustcancel = False
                 try:
                     yielded.remove_done_callback(self._wake_unpark)
                 except Exception:
