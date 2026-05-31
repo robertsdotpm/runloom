@@ -505,7 +505,12 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
         # from going idle while a goroutine is parked awaiting an external wake.
         self._ts_lock = _threading.Lock()
         self._ts_queue = []
-        self._ka_stop = False
+        # Per-run keepalive stop flag, as a 1-element box.  Each
+        # run_until_complete gets a FRESH box so a previous run's keepalive
+        # goroutine (which may still be parked in the sleep queue when
+        # sched_stop broke the drain) can never be revived by a later run
+        # resetting a shared bool.  None until the first run.
+        self._ka_stop_box = None
         # Real asyncio loops (BaseEventLoop) expose these; stdlib
         # Future/Task/Timeout machinery and many libraries read them
         # directly (e.g. loop._thread_id, loop._debug).  AbstractEventLoop
@@ -525,7 +530,22 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
     def is_closed(self):   return self._closed
     def get_debug(self):   return self._debug
     def set_debug(self, enabled):  self._debug = bool(enabled)
-    def close(self):       self._closed = True
+    def close(self):
+        # The asyncio.run / Runner.close cleanup point (NOT
+        # run_until_complete -- that must leave background tasks + parked
+        # goroutines alive between calls, e.g. for IsolatedAsyncioTestCase's
+        # asyncSetUp -> test -> asyncTearDown on one loop).  Stop the
+        # keepalive and tear down outstanding tasks + parked goroutines
+        # (accept/recv loops, call_later runners) so they don't leak.
+        if self._closed:
+            return
+        if self._ka_stop_box is not None:
+            self._ka_stop_box[0] = True
+        self._closed = True
+        try:
+            self._cancel_outstanding_tasks()
+        except Exception:
+            pass
 
     def _check_closed(self):
         if self._closed:
@@ -594,13 +614,15 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
     def _spawn_keepalive(self):
         """Spawn the goroutine that drains the thread-safe queue and keeps the
         scheduler alive while the run is in progress.  Idempotent per run."""
-        self._ka_stop = False
-        def _keepalive():
+        stop = [False]
+        self._ka_stop_box = stop
+        def _keepalive(stop=stop):
             # Poll the cross-thread queue.  sched_sleep keeps sleep_size>0 so
             # pygo_sched_drain stays in its loop (a bare-parked goroutine alone
             # would let it return idle) and re-checks the cross-thread wake list
             # each wake.  2ms bounds foreign-wake latency; cheap for a test run.
-            while not self._ka_stop:
+            # `stop` is this run's private box -- a later run can't revive us.
+            while not stop[0] and not self._closed:
                 self._drain_ts_queue()
                 pygo_core.sched_sleep(0.002)
             self._drain_ts_queue()
@@ -854,7 +876,9 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
         # (accept loops, ticker goroutines, etc.) the user didn't
         # explicitly join.  Matches asyncio.run's semantics.
         def _stop_on_done(_fut):
-            self._ka_stop = True
+            box = self._ka_stop_box
+            if box is not None:
+                box[0] = True
             pygo_core.sched_stop()
         future.add_done_callback(_stop_on_done)
         # Keepalive: drains call_soon_threadsafe + keeps the scheduler from
@@ -874,13 +898,14 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
             self._running = False
             self._thread_id = None
             asyncio._set_running_loop(None)
-            # After the main future completes, cancel any outstanding
-            # background tasks.  Without this, paio.run-spawned tasks
-            # parked on park_self leak across runs -- their pygo_g_t
-            # stays alive, their snap holds Python references, and the
-            # next paio.run sees stale state.  Mirrors asyncio.run's
-            # _cancel_all_tasks.
-            self._cancel_outstanding_tasks()
+            # IMPORTANT: do NOT cancel outstanding tasks / sched_reset here.
+            # run_until_complete must leave other tasks + parked goroutines
+            # ALIVE -- IsolatedAsyncioTestCase (and asyncio.Runner generally)
+            # call run_until_complete once each for asyncSetUp / the test /
+            # asyncTearDown on the SAME loop, and rely on connections (their
+            # recv goroutines) created in setUp surviving into the test body.
+            # The asyncio.run-style teardown now lives in close() instead,
+            # which asyncio.run / Runner.close invoke exactly once at the end.
 
         if not future.done():
             raise RuntimeError("event loop stopped before Future completed")
