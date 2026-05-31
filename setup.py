@@ -89,6 +89,11 @@ PYGO_DEBUG     = os.environ.get("PYGO_DEBUG", "").strip() not in ("", "0", "no",
 PYGO_NO_ASM    = os.environ.get("PYGO_NO_ASM", "").strip() not in ("", "0", "no", "false")
 PYGO_BACKEND   = os.environ.get("PYGO_BACKEND", "").strip().lower()
 PYGO_NO_IOCP   = os.environ.get("PYGO_NO_IOCP", "").strip() not in ("", "0", "no", "false")
+# PYGO_NETPOLL=select forces the select() fallback at build time on POSIX
+# (suppresses epoll/kqueue/event_ports in plat.h so netpoll.c uses its
+# select path).  On Windows the same env var is honoured at *runtime* by
+# netpoll.c, so the build define is a no-op there.
+PYGO_FORCE_SELECT = os.environ.get("PYGO_NETPOLL", "").strip().lower() == "select"
 PYGO_EXTRA_CFLAGS  = os.environ.get("PYGO_EXTRA_CFLAGS", "").split()
 PYGO_EXTRA_LDFLAGS = os.environ.get("PYGO_EXTRA_LDFLAGS", "").split()
 
@@ -232,6 +237,13 @@ def detect_compile_args():
             ]
     if PYGO_NO_IOCP and IS_WINDOWS:
         args.append("-DPYGO_NO_IOCP=1" if not _using_mingw() else "-DPYGO_NO_IOCP=1")
+    if PYGO_FORCE_SELECT:
+        # MSVC uses /D; everything else (GCC/Clang/MinGW) uses -D.  Same
+        # macro either way; consumed by plat.h's netpoll selector.
+        if IS_WINDOWS and not _using_mingw():
+            args.append("/DPYGO_FORCE_SELECT=1")
+        else:
+            args.append("-DPYGO_FORCE_SELECT=1")
     args += PYGO_EXTRA_CFLAGS
     return args
 
