@@ -55,6 +55,7 @@ import ssl as _ssl
 import sys
 import threading as _threading
 import time as _time
+import weakref as _weakref
 
 import pygo_core
 from . import runtime as _runtime
@@ -2268,6 +2269,14 @@ class _ProtocolServer(object):
         self._ssl_context = ssl_context
         self._ssl_handshake_timeout = ssl_handshake_timeout
         self._closed = False
+        # Track live client transports so close()/abort_clients() can tear
+        # them down.  Without this, stopping the server (e.g. aiosmtpd's
+        # Controller.stop()) leaves accepted connections' sockets open with no
+        # goroutine servicing them -- a peer mid-request (a client between DATA
+        # and the terminating dot) then blocks forever waiting for a reply that
+        # never comes.  WeakSet so a finished connection's transport is pruned
+        # once its recv goroutine ends and drops the last reference.
+        self._conns = _weakref.WeakSet()
         self._accept_gs = [pygo_core.go(lambda s=s: self._accept_loop(s))
                            for s in self._socks]
 
@@ -2290,7 +2299,7 @@ class _ProtocolServer(object):
                 pygo_core.go(lambda c=conn: self._setup_tls_conn(c))
             else:
                 protocol = self._factory()
-                _StreamTransport(conn, protocol, loop=self._loop)
+                self._conns.add(_StreamTransport(conn, protocol, loop=self._loop))
 
     def _setup_tls_conn(self, conn):
         try:
@@ -2307,7 +2316,7 @@ class _ProtocolServer(object):
             _close_sock(tls)
             return
         protocol = self._factory()
-        _StreamTransport(tls, protocol, loop=self._loop)
+        self._conns.add(_StreamTransport(tls, protocol, loop=self._loop))
 
     def get_loop(self):
         """asyncio.Server.get_loop().  Libraries (websockets) call this on
@@ -2334,13 +2343,31 @@ class _ProtocolServer(object):
             try: sock.shutdown(_socket.SHUT_RDWR)
             except OSError: pass
             _close_sock(sock)
+        # Tear down accepted connections too.  asyncio's Server.close() leaves
+        # established connections running, but pygo create_server connections
+        # are serviced by goroutines on THIS loop -- once the loop is stopped
+        # (the usual reason close() is called: full teardown, e.g. aiosmtpd's
+        # Controller.stop()) nothing will service them, so a peer mid-request
+        # would hang.  Closing them makes the peer see a reset and fail fast,
+        # matching what stock asyncio achieves via handler-task cancellation.
+        self.close_clients()
 
     def close_clients(self):
-        # asyncio 3.13+ API; we don't track client transports here yet.
-        pass
+        # asyncio 3.13+ API: gracefully close all client connections.
+        for tr in list(self._conns):
+            try:
+                tr.close()
+            except Exception:
+                pass
 
     def abort_clients(self):
-        pass
+        # asyncio 3.13+ API: abort (our close() already does an immediate
+        # shutdown + connection_lost, so it doubles as abort).
+        for tr in list(self._conns):
+            try:
+                tr.abort()
+            except Exception:
+                pass
 
     async def wait_closed(self):
         await asyncio.sleep(0)
