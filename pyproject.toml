@@ -74,3 +74,14 @@ environment = "MACOSX_DEPLOYMENT_TARGET=10.13"
 archs = ["AMD64"]
 # Verify both backends work.
 test-command = "python -c \"import pygo_core; assert pygo_core.netpoll_backend() in ('iocp-afd','wsapoll','select'); print(pygo_core.backend(), pygo_core.netpoll_backend())\""
+
+# --------------------------------------------------------------------
+# pytest: tests/conftest.py adds a per-test invariant fixture (structural
+# self_check + leaked-parker detection).  tests/run_isolated.py runs each
+# file in its own subprocess for crash/hang containment -- prefer it in CI.
+# --------------------------------------------------------------------
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "pygo_leaky: test deliberately leaves a netpoll parker behind; skip the post-test parked-leak invariant for it.",
+]
