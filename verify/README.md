@@ -316,34 +316,37 @@ lost wake — exactly the concurrent-loop deadlock Phase C fixes.
 > and `drain_parked` is scoped to the calling thread's gs. This model +
 > `netpoll_commit.pml` cover the wake decision underneath it.
 
-### 13. netpoll deadline sweep vs fd dispatch — `spin/netpoll_deadline.pml`
+### 13. netpoll multi-claimer wake race — `spin/netpoll_deadline.pml`
 
-The *timeout* half of the netpoll. A parked goroutine has both an fd it waits on
-and a finite deadline in the per-pool min-heap, so two **different** pump paths
-can wake it, delivering **different values**:
+A parked goroutine can be woken by **three** different paths, each delivering a
+**different value**, each claiming via the *same* `pygo_pump_claim` commit CAS:
 
 * `pygo_pump_dispatch_event` — the fd became ready: `*ready_out = mask` (nonzero).
 * `pygo_pump_drain_expired` — the deadline passed: `*ready_out = 0` (timeout).
+* `pygo_netpoll_cancel_g` — `task.cancel()` hit a g blocked in `wait_fd` (no coro
+  await-point): `*ready_out = PYGO_NETPOLL_CANCELLED` (→ `CancelledError`).
 
-Both serialise on `pool->lock` and both gate the `ready_out` write behind the
-*same* `pygo_pump_claim` commit CAS (§8). The property here — beyond the
-no-lost-wake / at-most-once of §8 — is **value correctness** under a simultaneous
-fd-ready + deadline-expiry race: the g resumes **exactly once** and observes the
+All three serialise on `pool->lock` and gate the `ready_out` write behind the
+single commit-CAS claim (§8). The property here — beyond the no-lost-wake /
+at-most-once of §8 — is **value correctness** under a *simultaneous* fd-ready +
+deadline-expiry + cancel race: the g resumes **exactly once** and observes the
 value of whichever claimer actually won the CAS, never a spurious timeout (`0`)
-clobbering a delivered nonzero mask, and never the un-set initial. Proven over a
-parking g racing one fd dispatch and one deadline drain:
+clobbering a delivered mask, never a cancel lost to a concurrent fd-ready, never
+the un-set initial. Proven over a parking g racing all three claimers:
 
 * **No lost wake** — the g always returns from `wait_fd`.
-* **At most once** — `resumes <= 1`, `requeues <= 1`: the loser of the claim CAS
-  sees `WOKEN` and touches neither `ready_out` nor the run queue.
+* **At most once** — `resumes <= 1`, `requeues <= 1`: the losers of the claim CAS
+  see `WOKEN` and touch neither `ready_out` nor the run queue.
 * **Value correctness** — on return, `ready_out` was written by exactly the
-  claimer recorded in `winner` (fd-win ⇒ mask, timeout-win ⇒ 0), never `UNSET`.
+  claimer recorded in `winner` (fd ⇒ mask, timeout ⇒ 0, cancel ⇒ CANCELLED),
+  never `UNSET`.
 
-Negative control `-DBUG_SWEEP_NO_COMMIT` models the naive sweep the commit CAS
-replaced: `drain_expired` pops the heap top and **unconditionally** writes
-`*ready_out = 0` and re-queues a parked g, without claiming. Spin finds the
-spurious-timeout / double-resume — the fd dispatch delivers a nonzero mask and
-re-queues, the sweep clobbers `ready_out` with `0` and re-queues *again*.
+Negative controls model a claimer that **skips** the commit CAS and
+unconditionally writes its value + re-queues a parked g:
+`-DBUG_SWEEP_NO_COMMIT` (the naive timeout sweep the commit CAS replaced) and
+`-DBUG_CANCEL_NO_COMMIT` (a cancel that wakes without claiming). Either lets a
+concurrent fd dispatch's delivered mask get clobbered and/or the g resumed
+twice — both caught by Spin.
 
 ### 14. netpoll force_unlink release lifetime — `spin/netpoll_forceunlink.pml`
 
@@ -442,7 +445,7 @@ verify/
     netpoll_rearm.pml      netpoll LT+ONESHOT re-arm vs not-yet-linked window (+ BUG_EDGE_TRIGGERED)
     netpoll_multipool.pml  netpoll multi-pool dispatch pool->sub lock hierarchy (+ BUG_LOCK_ORDER)
     iouring_msclose.pml    io_uring multishot handle lifetime, recv vs close (+ BUG_CONCURRENT_CLOSE)
-    netpoll_deadline.pml   netpoll deadline sweep vs fd dispatch, value correctness (+ BUG_SWEEP_NO_COMMIT)
+    netpoll_deadline.pml   netpoll fd-dispatch vs timeout vs cancel claim race (+ BUG_SWEEP_NO_COMMIT, BUG_CANCEL_NO_COMMIT)
     netpoll_forceunlink.pml netpoll force_unlink vs pump, exactly-once release / no UAF (+ BUG_NO_RECHECK)
     cross_thread_wake.pml  Phase C per-thread-sched owner-routed wake_safe (+ BUG_ROUTE_TO_WAKER)
   cbmc/
