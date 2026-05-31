@@ -1437,6 +1437,52 @@ void pygo_netpoll_force_unlink_g_parker(pygo_g_t *g)
     if (p != NULL) pygo_parker_pool_release(p);
 }
 
+/* Cancel a goroutine parked in pygo_netpoll_wait_fd.  Unlike force_unlink
+ * (g-completion: unlink + release, no wake), the g here WILL resume in wait_fd,
+ * so we WAKE it instead of releasing -- wait_fd's own resume path releases the
+ * parker.  We claim via the same commit CAS the pump uses, so the
+ * {pump fd-ready, timeout sweep, cancel} race resolves to exactly one winner;
+ * the loser observes WOKEN and leaves ready_out untouched. */
+int pygo_netpoll_cancel_g(pygo_g_t *g)
+{
+    pygo_parked_t *p;
+    pygo_parker_pool_t *pool;
+    int cur, woke = 0;
+    if (g == NULL) return 0;
+    if (g->netpoll_parker == NULL) return 0;   /* not parked in wait_fd */
+    p = (pygo_parked_t *)g->netpoll_parker;
+    pool = pygo_parker_pool_for_hub(p->hub);
+    pygo_mutex_lock(&pool->lock);
+    /* Re-read under the lock (a pump/timeout/force-unlink may have cleared it
+     * between the cheap check and the lock acquire). */
+    p = (pygo_parked_t *)g->netpoll_parker;
+    if (p != NULL) {
+        for (;;) {
+            cur = __atomic_load_n(&p->commit, __ATOMIC_ACQUIRE);
+            if (cur == PYGO_PARK_WOKEN) break;       /* pump/timeout won */
+            if (__atomic_compare_exchange_n(&p->commit, &cur, PYGO_PARK_WOKEN, 0,
+                                            __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+                break;
+        }
+        if (cur != PYGO_PARK_WOKEN) {
+            if (p->ready_out != NULL) *p->ready_out = PYGO_NETPOLL_CANCELLED;
+            pygo_parker_unlink(pool, p);   /* clears g->netpoll_parker */
+            /* Re-queue only a committed (PARKED) g; an ARMED g hasn't yielded
+             * yet -- it sees WOKEN at its own commit CAS, aborts the park, and
+             * returns PYGO_NETPOLL_CANCELLED itself (re-queueing would double-
+             * resume it). */
+            if (cur == PYGO_PARK_PARKED) {
+                if (p->hub != NULL) pygo_mn_wake_g(p->hub, p->g);
+                else                pygo_sched_wake(p->g);
+            }
+            woke = 1;
+            PYGO_EVT(PYGO_EVT_PARKER_FORCE, p, p->g, (long long)p->fd);
+        }
+    }
+    pygo_mutex_unlock(&pool->lock);
+    return woke;
+}
+
 int pygo_netpoll_add_iouring_eventfd(int fd)
 {
 #if defined(PYGO_HAVE_EPOLL)

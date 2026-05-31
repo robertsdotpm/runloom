@@ -789,6 +789,23 @@ static PyObject *PygoG_wake(PygoG *self, PyObject *unused)
     Py_RETURN_NONE;
 }
 
+/* Cancel this goroutine if it is parked in pygo_core.wait_fd: its wait_fd
+ * returns the WAIT_FD_CANCELLED sentinel and the g is re-queued.  Returns True
+ * if it was netpoll-parked (and woken), False otherwise (running, or parked via
+ * park_self -- use wake() for that).  This is the cancel path for a goroutine
+ * blocked in a socket recv/accept/connect, which has no coro await-point for
+ * the driver to throw CancelledError into. */
+static PyObject *PygoG_cancel_wait_fd(PygoG *self, PyObject *unused)
+{
+    int woke = 0;
+    (void)unused;
+    if (self->g != NULL) {
+        woke = pygo_netpoll_cancel_g(self->g);
+    }
+    if (woke) Py_RETURN_TRUE;
+    Py_RETURN_FALSE;
+}
+
 /* Return a small introspection dict for a parked goroutine:
  *   {"state": "done"|"running"|"parked"|"fresh",
  *    "has_snap": bool}
@@ -835,6 +852,10 @@ static PyMethodDef PygoG_methods[] = {
     {"wake", (PyCFunction)PygoG_wake, METH_NOARGS,
      "Wake this goroutine if parked via park_self().  Safe to call "
      "before park_self (race-handled)."},
+    {"cancel_wait_fd", (PyCFunction)PygoG_cancel_wait_fd, METH_NOARGS,
+     "Cancel this goroutine if parked in wait_fd: its wait_fd returns the "
+     "WAIT_FD_CANCELLED sentinel and it is re-queued.  Returns True if it was "
+     "netpoll-parked, else False (use wake() for park_self parkers)."},
     {"stack", (PyCFunction)PygoG_stack, METH_NOARGS,
      "Return a small introspection dict: "
      "{'state': 'done'|'running'|'parked'|'fresh', 'has_snap': bool}.  "
@@ -1906,6 +1927,13 @@ PyMODINIT_FUNC PyInit_pygo_core(void)
         return NULL;
     }
     if (pygo_tcpconn_register(m) < 0) {
+        Py_DECREF(m);
+        return NULL;
+    }
+    /* Sentinel that wait_fd returns when cancelled via G.cancel_wait_fd();
+     * pygo.aio turns it into CancelledError. */
+    if (PyModule_AddIntConstant(m, "WAIT_FD_CANCELLED",
+                                PYGO_NETPOLL_CANCELLED) < 0) {
         Py_DECREF(m);
         return NULL;
     }

@@ -142,6 +142,23 @@ def _get_colock():
 _WAIT_READ = 1
 _WAIT_WRITE = 2
 
+# Sentinel pygo_core.wait_fd returns when the parked goroutine was cancelled
+# out-of-band via G.cancel_wait_fd() -- a task.cancel() that targets a g blocked
+# in a socket recv/accept/connect, where there's no coro await-point to throw
+# CancelledError into.  _wait_fd turns it back into CancelledError so it unwinds
+# the recv loop -> the coro -> the driver, which settles the task cancelled.
+_WAIT_FD_CANCELLED = getattr(pygo_core, "WAIT_FD_CANCELLED", 0x40000000)
+
+
+def _wait_fd(fd, events, timeout_ms=-1):
+    """pygo_core.wait_fd, but a cancellation (G.cancel_wait_fd) raises
+    CancelledError instead of returning the raw sentinel.  Every aio I/O loop
+    parks through this, so cancelling a task blocked in any socket wait works."""
+    r = pygo_core.wait_fd(fd, events, timeout_ms)
+    if r == _WAIT_FD_CANCELLED:
+        raise asyncio.CancelledError()
+    return r
+
 
 class _TLSSock(object):
     """Cooperative TLS for the asyncio bridge, working on every netpoll
@@ -194,14 +211,14 @@ class _TLSSock(object):
                 except _ssl.SSLWantWriteError:
                     want = _WAIT_WRITE
             if deadline is None:
-                pygo_core.wait_fd(fd, want)
+                _wait_fd(fd, want)
             else:
                 remaining = deadline - _time.monotonic()
                 if remaining <= 0:
                     raise TimeoutError("TLS handshake timed out")
                 # wait_fd returns (without raising) when the timeout elapses;
                 # the next loop re-checks the deadline and raises above.
-                pygo_core.wait_fd(fd, want, max(1, int(remaining * 1000)))
+                _wait_fd(fd, want, max(1, int(remaining * 1000)))
 
     def recv(self, n):
         if self._closed:
@@ -228,7 +245,7 @@ class _TLSSock(object):
                         want = _WAIT_READ
                     else:
                         raise
-            pygo_core.wait_fd(fd, want)
+            _wait_fd(fd, want)
 
     def recv_into(self, buffer, nbytes=0):
         if self._closed:
@@ -250,7 +267,7 @@ class _TLSSock(object):
                         want = _WAIT_READ
                     else:
                         raise
-            pygo_core.wait_fd(fd, want)
+            _wait_fd(fd, want)
 
     def send(self, data):
         fd = self._ssl.fileno()
@@ -268,7 +285,7 @@ class _TLSSock(object):
                         want = _WAIT_WRITE
                     else:
                         raise
-            pygo_core.wait_fd(fd, want)
+            _wait_fd(fd, want)
 
     def sendall(self, data):
         view = data if isinstance(data, memoryview) else memoryview(data)
@@ -796,11 +813,23 @@ class PygoTask(_PygoFutureMixin, asyncio.Task):
             # rescheduling when _fut_waiter is present.
             self._pgmustcancel = True
             return True
-        # Not suspended on a cancellable future (running): deliver a one-shot
-        # cancel at the next driver step.
+        # Not suspended on a cancellable future (running, or parked in a C
+        # wait_fd): deliver a one-shot cancel at the next driver step.
         self._pgmustcancel = True
         if self._self_g is not None:
-            self._self_g.wake()
+            # If the goroutine is parked in pygo_core.wait_fd (sock_recv /
+            # sock_accept / sock_connect / a transport recv loop), there is NO
+            # coro await-point for the driver to throw into, and G.wake() only
+            # wakes park_self parkers -- so it would hang forever.  cancel_wait_fd
+            # wakes the netpoll parker: wait_fd returns the CANCELLED sentinel,
+            # _wait_fd raises CancelledError, and the driver settles us cancelled.
+            # Falls back to wake() for a running / park_self goroutine.
+            woke = False
+            cwf = getattr(self._self_g, "cancel_wait_fd", None)
+            if cwf is not None:
+                woke = cwf()
+            if not woke:
+                self._self_g.wake()
         return True
 
     def cancelling(self):
@@ -1270,7 +1299,7 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
         def runner():
             while not handle._cancelled:
                 try:
-                    pygo_core.wait_fd(fd, evt)
+                    _wait_fd(fd, evt)
                 except Exception:
                     return
                 if handle._cancelled:
@@ -1355,7 +1384,7 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
                     try:
                         s.connect(sa)
                     except BlockingIOError:
-                        pygo_core.wait_fd(s.fileno(), 2)
+                        _wait_fd(s.fileno(), 2)
                         err = s.getsockopt(_socket.SOL_SOCKET, _socket.SO_ERROR)
                         if err != 0:
                             raise OSError(err, "connect failed")
@@ -1500,7 +1529,7 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
             try:
                 sock.connect(path)
             except BlockingIOError:
-                pygo_core.wait_fd(sock.fileno(), 2)
+                _wait_fd(sock.fileno(), 2)
                 err = sock.getsockopt(_socket.SOL_SOCKET, _socket.SO_ERROR)
                 if err != 0:
                     sock.close()
@@ -1599,7 +1628,7 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
         try:
             sock.connect(address)
         except BlockingIOError:
-            pygo_core.wait_fd(sock.fileno(), 2)
+            _wait_fd(sock.fileno(), 2)
             err = sock.getsockopt(_socket.SOL_SOCKET, _socket.SO_ERROR)
             if err != 0:
                 raise OSError(err, "connect failed")
@@ -1610,7 +1639,7 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
             try:
                 return sock.accept()
             except (BlockingIOError, InterruptedError):
-                pygo_core.wait_fd(sock.fileno(), 1)
+                _wait_fd(sock.fileno(), 1)
 
     async def sock_recv(self, sock, nbytes):
         sock.setblocking(False)
@@ -1618,7 +1647,7 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
             try:
                 return sock.recv(nbytes)
             except (BlockingIOError, InterruptedError):
-                pygo_core.wait_fd(sock.fileno(), 1)
+                _wait_fd(sock.fileno(), 1)
 
     async def sock_recv_into(self, sock, buf):
         sock.setblocking(False)
@@ -1626,7 +1655,7 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
             try:
                 return sock.recv_into(buf)
             except (BlockingIOError, InterruptedError):
-                pygo_core.wait_fd(sock.fileno(), 1)
+                _wait_fd(sock.fileno(), 1)
 
     async def sock_recvfrom(self, sock, bufsize):
         sock.setblocking(False)
@@ -1634,7 +1663,7 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
             try:
                 return sock.recvfrom(bufsize)
             except (BlockingIOError, InterruptedError):
-                pygo_core.wait_fd(sock.fileno(), 1)
+                _wait_fd(sock.fileno(), 1)
 
     async def sock_recvfrom_into(self, sock, buf, nbytes=0):
         # asyncio 3.11+ API; base class raises NotImplementedError.
@@ -1643,7 +1672,7 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
             try:
                 return sock.recvfrom_into(buf, nbytes)
             except (BlockingIOError, InterruptedError):
-                pygo_core.wait_fd(sock.fileno(), 1)
+                _wait_fd(sock.fileno(), 1)
 
     async def sock_sendfile(self, sock, file, offset=0, count=None, *,
                             fallback=True):
@@ -1662,7 +1691,7 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
                 n = sock.send(view[sent:])
                 sent += n
             except (BlockingIOError, InterruptedError):
-                pygo_core.wait_fd(sock.fileno(), 2)
+                _wait_fd(sock.fileno(), 2)
 
     async def sock_sendto(self, sock, data, address):
         sock.setblocking(False)
@@ -1670,7 +1699,7 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
             try:
                 return sock.sendto(data, address)
             except (BlockingIOError, InterruptedError):
-                pygo_core.wait_fd(sock.fileno(), 2)
+                _wait_fd(sock.fileno(), 2)
 
     # ---- executor (thread pool) ----
     def run_in_executor(self, executor, func, *args):
@@ -2008,11 +2037,11 @@ class StreamReader(object):
             try:
                 chunk = self._sock.recv(self._limit)
             except (BlockingIOError, InterruptedError):
-                pygo_core.wait_fd(self._sock.fileno(), 1)
+                _wait_fd(self._sock.fileno(), 1)
                 continue
             except OSError as e:
                 if e.errno in (_errno.EAGAIN, _errno.EWOULDBLOCK, _errno.EINTR):
-                    pygo_core.wait_fd(self._sock.fileno(), 1)
+                    _wait_fd(self._sock.fileno(), 1)
                     continue
                 raise
             if not chunk:
@@ -2135,7 +2164,7 @@ class StreamWriter(object):
             except OSError as e:
                 if e.errno not in (_errno.EAGAIN, _errno.EWOULDBLOCK, _errno.EINTR):
                     raise
-            pygo_core.wait_fd(self._sock.fileno(), 2)
+            _wait_fd(self._sock.fileno(), 2)
 
     def close(self):
         if self._closed:
@@ -2217,7 +2246,7 @@ async def open_connection(host=None, port=None, *, family=0, proto=0,
                 try:
                     s.connect(sa)
                 except BlockingIOError:
-                    pygo_core.wait_fd(s.fileno(), 2)
+                    _wait_fd(s.fileno(), 2)
                     err = s.getsockopt(_socket.SOL_SOCKET, _socket.SO_ERROR)
                     if err != 0:
                         raise OSError(err, "connect failed")
@@ -2261,7 +2290,7 @@ class _Server(object):
             except (BlockingIOError, InterruptedError):
                 if self._closed:
                     return
-                pygo_core.wait_fd(self._sock.fileno(), 1)
+                _wait_fd(self._sock.fileno(), 1)
                 continue
             except OSError as e:
                 # close() will close the listening socket; the next
@@ -2270,7 +2299,7 @@ class _Server(object):
                 if self._closed:
                     return
                 if e.errno in (_errno.EAGAIN, _errno.EWOULDBLOCK):
-                    pygo_core.wait_fd(self._sock.fileno(), 1)
+                    _wait_fd(self._sock.fileno(), 1)
                     continue
                 # Real error -- record and exit.
                 self._closed = True
@@ -2403,14 +2432,14 @@ class _StreamTransport(asyncio.Transport):
             except (BlockingIOError, InterruptedError):
                 if self._stopping: return
                 try:
-                    pygo_core.wait_fd(sock.fileno(), 1)
+                    _wait_fd(sock.fileno(), 1)
                 except Exception:
                     return
                 continue
             except OSError as e:
                 if self._stopping: return
                 if e.errno in (_errno.EAGAIN, _errno.EWOULDBLOCK):
-                    pygo_core.wait_fd(sock.fileno(), 1)
+                    _wait_fd(sock.fileno(), 1)
                     continue
                 # Route through close() so connection_lost(e) fires exactly
                 # once (the guard) rather than racing close()'s own call.
@@ -2466,7 +2495,7 @@ class _StreamTransport(asyncio.Transport):
                             sent = self._sock.send(b)
                             b = b[sent:]
                         except (BlockingIOError, InterruptedError):
-                            try: pygo_core.wait_fd(self._sock.fileno(), 2)
+                            try: _wait_fd(self._sock.fileno(), 2)
                             except Exception: return
                         except OSError:
                             return
@@ -2479,7 +2508,7 @@ class _StreamTransport(asyncio.Transport):
                         sent = self._sock.send(b)
                         b = b[sent:]
                     except (BlockingIOError, InterruptedError):
-                        try: pygo_core.wait_fd(self._sock.fileno(), 2)
+                        try: _wait_fd(self._sock.fileno(), 2)
                         except Exception: return
                     except OSError:
                         return
@@ -2606,7 +2635,7 @@ class _ProtocolServer(object):
                 conn, _addr = sock.accept()
             except (BlockingIOError, InterruptedError):
                 if self._closed: return
-                pygo_core.wait_fd(sock.fileno(), 1)
+                _wait_fd(sock.fileno(), 1)
                 continue
             except OSError:
                 # One listener erroring stops accepting on it but must not
@@ -2735,14 +2764,14 @@ class DatagramTransport(object):
             except (BlockingIOError, InterruptedError):
                 if self._stopping: return
                 try:
-                    pygo_core.wait_fd(sock.fileno(), 1)
+                    _wait_fd(sock.fileno(), 1)
                 except Exception:
                     return
                 continue
             except OSError as e:
                 if self._stopping: return
                 if e.errno in (_errno.EAGAIN, _errno.EWOULDBLOCK):
-                    pygo_core.wait_fd(sock.fileno(), 1)
+                    _wait_fd(sock.fileno(), 1)
                     continue
                 # Error -- notify protocol and stop.
                 try:
@@ -3285,7 +3314,7 @@ async def _create_datagram_endpoint(loop, protocol_factory, local_addr=None,
             try:
                 sock.connect(remote_addr)
             except BlockingIOError:
-                pygo_core.wait_fd(sock.fileno(), 2)
+                _wait_fd(sock.fileno(), 2)
     else:
         sock.setblocking(False)
 

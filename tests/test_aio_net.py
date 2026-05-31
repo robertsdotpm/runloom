@@ -179,5 +179,90 @@ class TestThreadedServerLoop(unittest.TestCase):
             self.assertFalse(t.is_alive(), "server loop thread did not stop")
 
 
+class TestCancelWaitFd(unittest.TestCase):
+    """task.cancel() must interrupt a goroutine parked in a C netpoll wait_fd
+    (loop.sock_recv / sock_accept / sock_connect).  There is no coro
+    await-point while blocked in the syscall, and G.wake() only wakes a
+    park_self parker -- so before the cancel_wait_fd primitive these hung
+    forever (the root of the aiosmtpd-unthreaded / asgiref-teardown / anyio
+    socket teardown hangs)."""
+
+    def _udp_sock(self):
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.bind(("127.0.0.1", 0))
+        s.setblocking(False)
+        return s
+
+    def test_cancel_sock_recv(self):
+        async def main():
+            loop = asyncio.get_running_loop()
+            s = self._udp_sock()
+            async def recv_forever():
+                await loop.sock_recv(s, 4096)  # parks in wait_fd, no data ever
+            t = asyncio.ensure_future(recv_forever())
+            await asyncio.sleep(0.02)
+            t.cancel()
+            try:
+                await t
+                return "no-raise"
+            except asyncio.CancelledError:
+                return "cancelled"
+            finally:
+                s.close()
+        self.assertEqual(paio.run(main()), "cancelled")
+
+    def test_cancel_sock_accept(self):
+        async def main():
+            loop = asyncio.get_running_loop()
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.bind(("127.0.0.1", 0))
+            s.listen()
+            s.setblocking(False)
+            async def acc():
+                await loop.sock_accept(s)  # parks in wait_fd
+            t = asyncio.ensure_future(acc())
+            await asyncio.sleep(0.02)
+            t.cancel()
+            try:
+                await t
+                return "no-raise"
+            except asyncio.CancelledError:
+                return "cancelled"
+            finally:
+                s.close()
+        self.assertEqual(paio.run(main()), "cancelled")
+
+    def test_wait_for_timeout_interrupts_sock_recv(self):
+        # wait_for's timeout must cancel an inner task blocked in wait_fd.
+        async def main():
+            loop = asyncio.get_running_loop()
+            s = self._udp_sock()
+            async def recv_forever():
+                await loop.sock_recv(s, 4096)
+            try:
+                await asyncio.wait_for(recv_forever(), timeout=0.1)
+                return "no-timeout"
+            except asyncio.TimeoutError:
+                return "timeout"
+            finally:
+                s.close()
+        self.assertEqual(paio.run(main()), "timeout")
+
+    def test_gather_teardown_cancels_sock_recv(self):
+        # The teardown pattern: a leftover sock_recv task cancelled + gathered.
+        async def main():
+            loop = asyncio.get_running_loop()
+            s = self._udp_sock()
+            async def recv_forever():
+                await loop.sock_recv(s, 4096)
+            t = asyncio.ensure_future(recv_forever())
+            await asyncio.sleep(0.02)
+            t.cancel()
+            r = await asyncio.gather(t, return_exceptions=True)
+            s.close()
+            return isinstance(r[0], asyncio.CancelledError)
+        self.assertTrue(paio.run(main()))
+
+
 if __name__ == "__main__":
     unittest.main()

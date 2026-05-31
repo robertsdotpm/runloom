@@ -24,6 +24,14 @@
 #define PYGO_NETPOLL_READ  0x1
 #define PYGO_NETPOLL_WRITE 0x2
 
+/* Sentinel returned by pygo_netpoll_wait_fd when the parked goroutine was
+ * cancelled out-of-band via pygo_netpoll_cancel_g (a task.cancel() targeting a
+ * g parked in a C wait_fd, where there is no coro await-point to throw into).
+ * A high positive bit that can never be a real event mask (0x1/0x2) nor the
+ * 0/-1 timeout/error returns, so callers distinguish it without an errno or a
+ * sign check.  pygo.aio's wait_fd wrapper turns this into CancelledError. */
+#define PYGO_NETPOLL_CANCELLED 0x40000000
+
 /* Park the current goroutine until fd is ready for any of `events`,
  * or timeout_ns nanoseconds have passed (-1 = wait forever).
  * Returns the ready events mask (subset of `events`), 0 on timeout,
@@ -56,6 +64,15 @@ int pygo_netpoll_drain_parked(void);
  * into stack-pool reuse and resurrect the freed g via pump dispatch. */
 struct pygo_g;
 void pygo_netpoll_force_unlink_g_parker(struct pygo_g *g);
+
+/* Cancel a goroutine parked in pygo_netpoll_wait_fd: claim its parker (the
+ * same commit-CAS the pump uses, so exactly one of {pump, timeout, cancel}
+ * wins), make its wait_fd return PYGO_NETPOLL_CANCELLED, and re-queue it to its
+ * owner scheduler.  Returns 1 if a parked g was woken, 0 if g had no live
+ * parker (not parked in wait_fd, or already woken by the pump/timeout).  This
+ * is the per-g cancel primitive that lets task.cancel() interrupt a g blocked
+ * in a socket recv/accept/connect with no coro await-point. */
+int pygo_netpoll_cancel_g(struct pygo_g *g);
 
 /* Clear the "fd is registered in netpoll" cache bit.  Call from the
  * socket-close hook so a future fd reuse re-registers cleanly.  No
