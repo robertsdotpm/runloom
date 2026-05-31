@@ -1541,6 +1541,23 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
             except (BlockingIOError, InterruptedError):
                 pygo_core.wait_fd(sock.fileno(), 1)
 
+    async def sock_recvfrom_into(self, sock, buf, nbytes=0):
+        # asyncio 3.11+ API; base class raises NotImplementedError.
+        sock.setblocking(False)
+        while True:
+            try:
+                return sock.recvfrom_into(buf, nbytes)
+            except (BlockingIOError, InterruptedError):
+                pygo_core.wait_fd(sock.fileno(), 1)
+
+    async def sock_sendfile(self, sock, file, offset=0, count=None, *,
+                            fallback=True):
+        # No OS sendfile path on pygo; mirror asyncio's "native unavailable"
+        # signal so callers fall back to read+send (loop.sendfile handles the
+        # transport-level fallback).
+        raise asyncio.SendfileNotAvailableError(
+            "sock_sendfile syscall path is not available on pygo")
+
     async def sock_sendall(self, sock, data):
         sock.setblocking(False)
         view = memoryview(data)
