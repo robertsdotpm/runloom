@@ -616,8 +616,18 @@ class PygoTask(PygoFuture):
         if self._fut_waiter is not None:
             if self._fut_waiter.cancel(msg=msg):
                 return True
-        # Not suspended on a cancellable future (running, or it's already
-        # done): deliver a one-shot cancel at the next driver step instead.
+            # _fut_waiter couldn't take the cancel (already cancelling/done),
+            # but it WILL still wake us when it completes.  Mark a one-shot
+            # cancel for the driver to deliver then, and do NOT wake now: a
+            # premature unpark would abandon our wait on _fut_waiter, leaking it
+            # half-cancelled (seen with nested wait_for where both the outer and
+            # inner timeouts cancel the same task on the same tick).  Mirrors
+            # stock asyncio.Task.cancel(), which sets _must_cancel without
+            # rescheduling when _fut_waiter is present.
+            self._must_cancel = True
+            return True
+        # Not suspended on a cancellable future (running): deliver a one-shot
+        # cancel at the next driver step.
         self._must_cancel = True
         if self._self_g is not None:
             self._self_g.wake()
@@ -1215,6 +1225,12 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
             self.call_soon_threadsafe(_set)
         cf_fut.add_done_callback(_on_thread_done)
         return fut
+
+    def set_default_executor(self, executor):
+        """asyncio.AbstractEventLoop.set_default_executor.  Used by
+        run_in_executor(None, ...).  Libraries (aiomisc) inject their own
+        thread pool through this; the base class raises NotImplementedError."""
+        self._default_executor = executor
 
     # ---- run loop ----
     def run_until_complete(self, future):
