@@ -528,7 +528,18 @@ class PygoTask(PygoFuture):
         # Cheaper than the previous Chan(1) approach -- saves a Chan
         # alloc + try_send/recv per task at fan-out time.
         self._self_g = None
+        # _must_cancel is a ONE-SHOT delivery flag (mirrors asyncio.Task):
+        # cancel() sets it, the driver throws CancelledError ONCE then clears
+        # it.  A persistent re-throw would re-cancel the cleanup awaits that run
+        # inside `async with __aexit__` / `try: finally:` during cancellation
+        # (e.g. aiofiles closing its file via run_in_executor), so the cleanup
+        # never completes.  _cancel_requested stays as the "outstanding cancel"
+        # state bit.
         self._cancel_requested = False
+        self._must_cancel = False
+        # The future/task we're currently suspended on (asyncio.Task._fut_waiter
+        # analogue), so cancel() can propagate INTO it.  None while running.
+        self._fut_waiter = None
         # cancelling()/uncancel() are required by asyncio.timeouts in
         # 3.11+.  Mirrors asyncio.Task: count of unresolved cancels.
         self._num_cancels_requested = 0
@@ -567,7 +578,17 @@ class PygoTask(PygoFuture):
             return False
         self._cancel_requested = True
         self._num_cancels_requested += 1
-        # Unblock the driver so it sees _cancel_requested on next iter.
+        # If we're suspended on a future/task, propagate the cancel INTO it
+        # (mirrors stock asyncio cancelling self._fut_waiter).  Its completion
+        # then wakes us via the already-registered done-callback -- so an
+        # awaited inner task runs its OWN cleanup (async with __aexit__ /
+        # finally) and we wait for it before our CancelledError surfaces.
+        if self._fut_waiter is not None:
+            if self._fut_waiter.cancel(msg=msg):
+                return True
+        # Not suspended on a cancellable future (running, or it's already
+        # done): deliver a one-shot cancel at the next driver step instead.
+        self._must_cancel = True
         if self._self_g is not None:
             self._self_g.wake()
         return True
@@ -578,13 +599,15 @@ class PygoTask(PygoFuture):
         return self._num_cancels_requested
 
     def uncancel(self):
-        """Decrement the cancelling counter.  When it returns to zero,
-        clear the cancel-requested flag so the driver stops trying to
-        raise CancelledError."""
+        """Decrement the cancelling counter.  When it returns to zero, clear
+        the outstanding-cancel state and any not-yet-delivered one-shot cancel
+        (asyncio.timeout / TaskGroup call this after handling a CancelledError,
+        meaning 'don't keep cancelling me')."""
         if self._num_cancels_requested > 0:
             self._num_cancels_requested -= 1
         if self._num_cancels_requested == 0:
             self._cancel_requested = False
+            self._must_cancel = False
         return self._num_cancels_requested
 
     # ---- driver: the per-task goroutine body ----
@@ -608,8 +631,12 @@ class PygoTask(PygoFuture):
             _CURRENT_TASKS[loop] = self
             try:
                 try:
-                    if self._cancel_requested and throw_exc is None:
+                    if self._must_cancel and throw_exc is None:
+                        # Deliver the cancel exactly once, then clear it so the
+                        # coro's cleanup awaits (async with __aexit__ / finally)
+                        # aren't re-cancelled before they finish.
                         throw_exc = asyncio.CancelledError()
+                        self._must_cancel = False
                     if throw_exc is not None:
                         e, throw_exc = throw_exc, None
                         yielded = coro.throw(e)
@@ -689,11 +716,15 @@ class PygoTask(PygoFuture):
             # add_done_callback is handled by park_safe / wake_safe
             # (wake_pending counter; park is a no-op if wake arrived).
             yielded.add_done_callback(self._wake_unpark)
+            self._fut_waiter = yielded
             pygo_core.park_self()
+            self._fut_waiter = None
 
-            # We're back.  Either the future is done, or we were
-            # cancelled; figure out which.
-            if self._cancel_requested:
+            # We're back.  Cancel() may have propagated into `yielded` (then it
+            # wakes us as a cancelled future, handled below) or, if it couldn't,
+            # set the one-shot _must_cancel -- deliver that now.
+            if self._must_cancel:
+                self._must_cancel = False
                 try:
                     yielded.remove_done_callback(self._wake_unpark)
                 except Exception:
