@@ -374,15 +374,24 @@ class PygoFuture(object):
     attributes (_log_destroy_pending, _cancel_message, ...) on futures
     they adopt, and we need to accept whatever they throw at us."""
 
+    # MUST be a class attribute: asyncio.isfuture() returns True only when
+    # hasattr(type(obj), '_asyncio_future_blocking').  Without it our futures
+    # aren't recognised as futures, so asyncio.ensure_future / shield / gather
+    # wrap each one in an EXTRA PygoTask instead of using it directly.  That
+    # wrapper deadlocks shield(already-done-future): e.g. websockets' recv()
+    # after close does `await asyncio.shield(connection_lost_waiter)` on a
+    # future that's already set, which must return immediately but instead
+    # hangs waiting on the never-driven wrapper task.
+    _asyncio_future_blocking = False
+
     def __init__(self, *, loop=None):
         self._state    = _PENDING
         self._result   = None
         self._exception = None
         self._callbacks = []
         self._loop     = loop
-        # Required by asyncio's await protocol.  Task.__step sets this
-        # to False when it adopts the future; we re-arm to True in
-        # __await__ each time we suspend.
+        # Re-armed to True in __await__ each time we suspend (Task.__step /
+        # our driver set it False when adopting the future).
         self._asyncio_future_blocking = False
 
     # ---- query ----
