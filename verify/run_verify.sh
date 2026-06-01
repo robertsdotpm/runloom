@@ -208,6 +208,21 @@ if [ -x "$HERE/tla/run_tla.sh" ]; then
     fi
 fi
 
+# ---- Alloy: structural invariant of the netpoll parker graph -------------
+# Formalizes what pygo_self_check walks at runtime (no list cycle, every
+# bucket entry on the global list).  Skips cleanly if java/jar absent.
+if [ -x "$HERE/alloy/run_alloy.sh" ]; then
+    if al_out="$("$HERE/alloy/run_alloy.sh" 2>&1)"; then
+        echo "$al_out"
+        if echo "$al_out" | grep -q "passed, 0 failed"; then
+            ap="$(echo "$al_out" | sed -n 's/.* \([0-9]*\) passed, 0 failed/\1/p' | tail -1)"
+            [ -n "$ap" ] && pass=$((pass+ap))
+        fi
+    else
+        echo "$al_out"; fail=$((fail+1)); FAILED="$FAILED alloy"
+    fi
+fi
+
 echo "----------------------------------------------------------"
 echo "  $pass passed, $fail failed"
 [ -n "$FAILED" ] && echo "  failed:$FAILED"
