@@ -238,6 +238,21 @@ if [ -x "$HERE/coq/run_coq.sh" ]; then
     fi
 fi
 
+# ---- Iris: concurrent separation logic on running HeapLang programs -------
+# The deepest tier: proves a real concurrent program (CmpXchg races, parallel
+# composition), thread-modular.  Skips cleanly if coqc/Iris absent.
+if [ -x "$HERE/iris/run_iris.sh" ]; then
+    if ir_out="$("$HERE/iris/run_iris.sh" 2>&1)"; then
+        echo "$ir_out"
+        if echo "$ir_out" | grep -q "passed, 0 failed"; then
+            ip="$(echo "$ir_out" | sed -n 's/.* \([0-9]*\) passed, 0 failed/\1/p' | tail -1)"
+            [ -n "$ip" ] && pass=$((pass+ip))
+        fi
+    else
+        echo "$ir_out"; fail=$((fail+1)); FAILED="$FAILED iris"
+    fi
+fi
+
 echo "----------------------------------------------------------"
 echo "  $pass passed, $fail failed"
 [ -n "$FAILED" ] && echo "  failed:$FAILED"
