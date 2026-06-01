@@ -40,6 +40,20 @@ else
     echo "FAIL -- the injected lost-wake bug should violate AllComplete"; fail=$((fail+1))
 fi
 
+printf '  [tlc] %-28s ' "PygoHandoff (rescue)"
+if run_tlc hook -config PygoHandoff.cfg PygoHandoff.tla | grep -q "No error has been found"; then
+    echo "PASS -- TypeOK/NoConcurrentDrain + AllDrained (stall-recovery liveness)"; pass=$((pass+1))
+else
+    echo "FAIL -- correct handoff spec should hold"; fail=$((fail+1))
+fi
+
+printf '  [tlc] %-28s ' "PygoHandoff (no rescue)"
+if run_tlc hobug -deadlock -config PygoHandoff_bug.cfg PygoHandoff.tla | grep -q "Temporal properties were violated"; then
+    echo "PASS -- correctly DETECTS stranded work without the rescue M -> AllDrained violated"; pass=$((pass+1))
+else
+    echo "FAIL -- removing the rescue should strand a wedged hub's work"; fail=$((fail+1))
+fi
+
 "$(command -v safe-rm || echo rm)" -rf "$META"
 echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
