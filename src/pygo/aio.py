@@ -3991,6 +3991,7 @@ async def start_server(client_connected_cb, host=None, port=None, *,
 class PygoEventLoopPolicy(asyncio.AbstractEventLoopPolicy):
     def __init__(self):
         self._loop = None
+        self._child_watcher = None
 
     def get_event_loop(self):
         if self._loop is None or self._loop.is_closed():
@@ -4003,12 +4004,17 @@ class PygoEventLoopPolicy(asyncio.AbstractEventLoopPolicy):
     def new_event_loop(self):
         return PygoEventLoop()
 
-    # Child-watcher stubs (asyncio asks for these on Unix).
+    # Child-watcher accessors (deprecated asyncio API still asked for on Unix).
+    # pygo drives subprocesses with its own per-process _wait_thread, NOT an
+    # asyncio child watcher, so any watcher set here is INERT -- pygo never
+    # calls add_child_handler on it.  But we must still store and hand back the
+    # exact object set, or callers that do the set/get/attach_loop(None)/close
+    # lifecycle (e.g. CPython's test_subprocess watcher mixins) crash on a None.
     def get_child_watcher(self):
-        return None
+        return self._child_watcher
 
     def set_child_watcher(self, watcher):
-        pass
+        self._child_watcher = watcher
 
 
 def install():
