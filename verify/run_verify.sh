@@ -223,6 +223,21 @@ if [ -x "$HERE/alloy/run_alloy.sh" ]; then
     fi
 fi
 
+# ---- Coq: machine-checked, UNBOUNDED protocol invariants -----------------
+# Spin/CBMC are bounded; this proves the wake_state safety invariants over
+# every reachable state (any number of transitions).  Skips if coqc absent.
+if [ -x "$HERE/coq/run_coq.sh" ]; then
+    if cq_out="$("$HERE/coq/run_coq.sh" 2>&1)"; then
+        echo "$cq_out"
+        if echo "$cq_out" | grep -q "passed, 0 failed"; then
+            cp2="$(echo "$cq_out" | sed -n 's/.* \([0-9]*\) passed, 0 failed/\1/p' | tail -1)"
+            [ -n "$cp2" ] && pass=$((pass+cp2))
+        fi
+    else
+        echo "$cq_out"; fail=$((fail+1)); FAILED="$FAILED coq"
+    fi
+fi
+
 echo "----------------------------------------------------------"
 echo "  $pass passed, $fail failed"
 [ -n "$FAILED" ] && echo "  failed:$FAILED"
