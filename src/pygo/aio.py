@@ -1683,7 +1683,15 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
                     try: s.close()
                     except OSError: pass
             if sock is None:
-                raise last_err or OSError("could not connect")
+                # Clear last_err as we raise so the propagating exception's
+                # traceback frame doesn't keep referencing it (exc -> tb ->
+                # this frame -> last_err -> exc).  asyncio breaks the same cycle
+                # explicitly; test_open_connection_happy_eyeball_refcycles
+                # asserts gc.get_referrers(exc) == [].
+                try:
+                    raise last_err or OSError("could not connect")
+                finally:
+                    last_err = None
         else:
             sock.setblocking(False)
         if ssl is not None:
