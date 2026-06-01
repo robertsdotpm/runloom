@@ -92,6 +92,56 @@ print("PASS", len(results))
 """)
 
 
+def test_sched_yield_no_starvation_multi_hub():
+    """sched_yield must not let a busy-spinning goroutine starve a never-run
+    one.  Before the fairness fix, hub_main served the ready ring (yielded gs)
+    strictly before the deque (fresh gs), AND the yield fast path spun without
+    returning to hub_main to drain sub_head -- so a goroutine looping
+    `while not flag: sched_yield()` waiting for a goroutine spawned afterwards
+    (or onto an already-busy hub) would spin forever.  Fixed by bounding both
+    (hub_main forces a deque turn after N ready services; the fast path forces
+    a real yield after N trivial spins).  A hang here = subprocess timeout."""
+    assert_pass(r"""
+flag = [False]
+def waiter():
+    while not flag[0]:
+        pygo_core.sched_yield()
+def setter():
+    flag[0] = True
+pygo_core.mn_init(4)
+for _ in range(8):          # 8 spinners monopolizing the hubs first ...
+    pygo_core.mn_go(waiter)
+pygo_core.mn_go(setter)     # ... then the never-run goroutine they wait on
+pygo_core.mn_run()
+pygo_core.mn_fini()
+assert flag[0]
+assert pygo_core._self_check(0) == 0
+print("PASS")
+""", timeout=20)
+
+
+def test_sched_yield_no_starvation_single_hub():
+    """H=1 deterministic case: a spinner popped before a fresh setter sitting
+    on the deque must still let the setter run.  The ready-ring-before-deque
+    order used to re-serve the spinner forever; the hub_main deque-turn bound
+    breaks it."""
+    assert_pass(r"""
+flag = [False]
+def waiter():
+    while not flag[0]:
+        pygo_core.sched_yield()
+def setter():
+    flag[0] = True
+pygo_core.mn_init(1)
+pygo_core.mn_go(setter)     # fresh -> goes to the deque
+pygo_core.mn_go(waiter)     # popped first (deque LIFO); must yield to setter
+pygo_core.mn_run()
+pygo_core.mn_fini()
+assert flag[0]
+print("PASS")
+""", timeout=20)
+
+
 def test_channel_fanin_with_close():
     """N producers -> shared buffered channel -> M range-recv consumers,
     coordinator closes after producers finish.  Conservation of every

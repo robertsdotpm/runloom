@@ -510,6 +510,17 @@ static PYGO_TLS int pygo_tls_self_queued = 0;
  * (wakeable) vs RUNNING (hub-pinned) for the wake state machine.  Unused by the
  * default scheduler, which keys re-push purely on self_queued. */
 static PYGO_TLS int pygo_tls_parked_offqueue = 0;
+/* Consecutive trivial sched_yield fast-paths on THIS hub thread since the last
+ * real yield (see pygo_mn_yield_current).  Bounds the fast path so a g looping
+ * on sched_yield can't spin forever without returning to hub_main to drain
+ * h->sub_head (work mn_go'd / wake_g'd onto this hub after the loop started).
+ * Per-thread; only the running g touches it; reset on every real yield. */
+static PYGO_TLS int pygo_tls_fastpath_streak = 0;
+/* After this many consecutive trivial fast-paths, force one real yield so
+ * hub_main drains sub_head + re-polls.  Large enough that a genuine lone poller
+ * rarely pays the round-trip; small enough that newly-arrived work waits only
+ * microseconds. */
+#define PYGO_YIELD_FASTPATH_BOUND 64
 
 #if PY_VERSION_HEX >= 0x030D0000
 /* PYGO_PREEMPT eval-frame wrapper (see the block near pygo_preempt_enabled).
@@ -637,6 +648,22 @@ static PYGO_THREAD_RET pygo_hub_main(void *arg)
      * out of the loop is ~10 ns/yield on the M:N hot path. */
     pygo_pystate_snap(&hub_snap);
 
+    /* sched_yield fairness (see the pick block below).  ready_streak counts
+     * consecutive ready-ring services; after starve_bound of them we force one
+     * deque turn so a busy sched_yield loop can't starve never-run goroutines.
+     * Hub-local (this thread only).  starve_bound resolved once from env;
+     * default 64, 0 disables (legacy ready-before-deque).  The first-touch race
+     * across hubs is benign (all store the same value) -- same lazy-static
+     * pattern as sweep_on below. */
+    unsigned ready_streak = 0;
+    static int starve_bound = -1;
+    if (starve_bound < 0) {
+        const char *e = getenv("PYGO_READY_STARVE_BOUND");
+        int v = (e != NULL) ? atoi(e) : 64;
+        if (v < 0) v = 0;
+        __atomic_store_n(&starve_bound, v, __ATOMIC_RELAXED);
+    }
+
     while (!__atomic_load_n(&h->stopping, __ATOMIC_ACQUIRE)) {
         pygo_g_t *g;
         /* Set when g came from the global run-queue: it then carries a queue
@@ -714,9 +741,30 @@ static PYGO_THREAD_RET pygo_hub_main(void *arg)
             }
         }
 
-        g = pygo_sched_ready_pop(&h->sched);     /* local yielded */
+        /* Pick the next g.  Normal order: ready ring (yielded/woken -- "hot")
+         * before the deque (fresh, never-run gs), which keeps woken I/O
+         * goroutines low-latency.  BUT a goroutine busy-looping on sched_yield
+         * re-enters the ready ring every time, so pure ready-before-deque lets
+         * it starve every fresh g forever (they never get a first run -- the
+         * sched_yield-fairness bug).  Bound it: after starve_bound consecutive
+         * ready-ring services, force ONE deque turn.  ready_streak resets the
+         * moment the ready ring drains naturally, so workloads that aren't
+         * monopolizing never trip it; a sustained yielder pays only a 1-in-
+         * starve_bound interleave.  All hub-local + single-consumer; the deque
+         * is touched via its normal owner-pop, never re-ordered internally. */
+        g = NULL;
+        if (starve_bound && ready_streak >= (unsigned)starve_bound) {
+            ready_streak = 0;
+            g = (pygo_g_t *)pygo_cldeque_pop(&h->deque);  /* forced fresh turn */
+        }
         if (g == NULL) {
-            g = (pygo_g_t *)pygo_cldeque_pop(&h->deque);  /* own fresh */
+            g = pygo_sched_ready_pop(&h->sched);     /* local yielded/woken */
+            if (g != NULL) {
+                ready_streak++;
+            } else {
+                g = (pygo_g_t *)pygo_cldeque_pop(&h->deque);  /* own fresh */
+                ready_streak = 0;
+            }
         }
         if (g == NULL) {
             /* Global run-queue: woken migratable gs (per-g-tstate) that any
@@ -1415,8 +1463,20 @@ int pygo_mn_yield_current(void)
                          && h->sched.sleep_size == 0
                          && pygo_netpoll_parked_count() == 0
                          && pygo_blockpool_inflight() == 0, 1)) {
-        return 1;
+        /* The fast path deliberately does NOT look at h->sub_head -- work
+         * delivered by mn_go (main thread) or wake_g (another hub) lands there,
+         * and checking it lock-free on this hot path is fragile.  But that
+         * means a g looping on sched_yield with momentarily-empty local queues
+         * would spin forever and NEVER return to hub_main to drain sub_head, so
+         * a goroutine later mn_go'd / woken onto this hub starves (the multi-hub
+         * sched_yield-fairness bug).  Bound it: after PYGO_YIELD_FASTPATH_BOUND
+         * consecutive trivial fast-paths, fall through to a real yield so
+         * hub_main drains sub_head (under sub_lock, as always) + re-polls. */
+        if (++pygo_tls_fastpath_streak < PYGO_YIELD_FASTPATH_BOUND) {
+            return 1;
+        }
     }
+    pygo_tls_fastpath_streak = 0;
     pygo_sched_ready_push(&h->sched, g);
     pygo_pystate_snap(&g->snap);
     pygo_tls_self_queued = 1;
