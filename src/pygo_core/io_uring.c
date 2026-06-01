@@ -639,12 +639,22 @@ void pygo_iouring_drain(void)
             switch (type) {
             case PYGO_IOURING_OP_SINGLE:
                 op->result = res;
-                if (op->hub != NULL) {
-                    pygo_mn_wake_g(op->hub, op->g);
-                } else if (op->g != NULL) {
-                    /* wake_safe is race-safe: if the submitter hasn't
-                     * parked yet, it bumps wake_pending and the next
-                     * park_safe consumes the count without yielding. */
+                /* Do NOT wake a hub op's goroutine.  In the hub path
+                 * (pygo_iouring_do, hub != NULL) the submitter SPIN-DRAINS --
+                 * it polls op->result and drains its own ring and never parks --
+                 * so it observes op->result directly without any wake.  And
+                 * pygo_mn_wake_g in the default (non-global-runq) mode
+                 * unconditionally pygo_mn_hub_submit()s the g: calling it here
+                 * (the submitter's own inline/spin drain) re-submits a goroutine
+                 * that is currently RUNNING and about to complete, corrupting
+                 * the hub's submit-list / pending accounting and stranding other
+                 * queued goroutines -- an intermittent M:N hang reproducible even
+                 * at mn_init(1), found by the io_uring file_read M:N stress.
+                 * Only the single-thread sched path parks and needs a wake;
+                 * wake_safe there is race-safe (if the submitter hasn't parked
+                 * yet it bumps wake_pending and the next park_safe consumes the
+                 * count without yielding). */
+                if (op->hub == NULL && op->g != NULL) {
                     pygo_sched_wake_safe(op->g);
                 }
                 break;

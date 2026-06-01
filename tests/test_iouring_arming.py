@@ -176,36 +176,19 @@ def test_concurrent_distinct_files_single_thread():
             os.unlink(p)
 
 
-@pytest.mark.skip(reason="KNOWN OPEN BUG (found by this test): intermittent "
-                  "hang when goroutines run io_uring file_read under the M:N "
-                  "scheduler. Pre-existing (reproduces without this batch's "
-                  "changes) and NOT multi-hub-specific -- it reproduces even "
-                  "with mn_init(1) (one hub), so it is not the cross-hub "
-                  "cq_head race. Diagnosed at hang time: all hubs idle in the C "
-                  "scheduler (no goroutine frame) and netpoll_parked==0, so the "
-                  "stuck goroutine is neither spin-draining nor netpoll-parked "
-                  "-- it is wedged in the mn completion-wake path (a CQE drainer "
-                  "calls pygo_mn_wake_g on a goroutine that is RUNNING/spin-"
-                  "draining rather than parked). Single-thread io_uring is "
-                  "unaffected (all other tests here pass). Root cause not yet "
-                  "isolated; needs a focused M:N arc. The submit-EINTR fix in "
-                  "this batch is real and validated but does NOT close this hang.")
-def test_concurrent_mn_drain_cas():
-    """M:N stress: many goroutines reading their own files across parallel
-    hubs.  Exercises the multi-drainer cq_head CAS and cross-hub completion
-    routing.  Run in a fresh free-threaded subprocess (mn_init installs
-    process-global hubs).  Skipped pending a fix for the M:N completion-wake
-    hang it surfaced (see skip reason)."""
+def _mn_fileread_snippet(hubs, n):
+    """A self-contained snippet: spawn `n` goroutines across `hubs` M:N hubs,
+    each file_read'ing its own file, and PASS iff every byte payload is right."""
     code = r'''
 import sys; sys.path.insert(0, __SRCPATH__)
 import os, tempfile
 import pygo_core
 
 if not pygo_core.iouring_available():
-    print("PASS")   # nothing to stress; harness skip handled by caller
+    print("PASS")   # nothing to stress
     sys.exit(0)
 
-N = 200
+N = __N__; H = __H__
 paths, fds, expected, results = [], [], [], [None] * N
 for i in range(N):
     content = ("mn-%04d-" % i).encode() * 32
@@ -219,11 +202,11 @@ def mk(i):
     def w():
         size = len(expected[i])
         buf = bytearray(size)
-        n = pygo_core.file_read(fds[i], buf, size, 0)
-        results[i] = bytes(buf[:n])
+        m = pygo_core.file_read(fds[i], buf, size, 0)
+        results[i] = bytes(buf[:m])
     return w
 
-pygo_core.mn_init(4)
+pygo_core.mn_init(H)
 for i in range(N):
     pygo_core.mn_go(mk(i))
 pygo_core.mn_run()
@@ -234,12 +217,51 @@ for p in paths: os.unlink(p)
 
 bad = [i for i in range(N) if results[i] != expected[i]]
 print("PASS" if not bad else ("FAIL cross/missed: %r" % bad[:10]))
-'''.replace("__SRCPATH__", repr(os.path.join(REPO, "src")))
+'''
+    return (code.replace("__SRCPATH__", repr(os.path.join(REPO, "src")))
+                .replace("__N__", str(n)).replace("__H__", str(hubs)))
+
+
+def _run_snippet(code, timeout=60):
     env = dict(os.environ)
     env["PYTHON_GIL"] = "0"
-    p = subprocess.run([sys.executable, "-c", code], cwd=REPO, env=env,
-                       stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                       text=True, timeout=120)
+    return subprocess.run([sys.executable, "-c", code], cwd=REPO, env=env,
+                          stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                          text=True, timeout=timeout)
+
+
+def test_mn_iouring_fileread_single_hub():
+    """Regression for the M:N io_uring completion-wake corruption.  Under the
+    M:N scheduler a file_read's own CQE drain called pygo_mn_wake_g on the
+    RUNNING, spin-draining submitter; in the default (non-global-runq) mode that
+    re-submits the goroutine to its hub while it is running and about to
+    complete, corrupting the hub run-queue/pending accounting and stranding
+    other queued goroutines -- an intermittent hang reproducible even with ONE
+    hub.  Fixed by not waking hub SINGLE ops (the spinner observes op->result
+    directly).  Heavy single-hub stress, repeated, in fresh subprocesses
+    (mn_init installs process-global hubs)."""
+    for _ in range(5):
+        p = _run_snippet(_mn_fileread_snippet(hubs=1, n=200))
+        assert p.returncode == 0 and "PASS" in p.stdout, (
+            "rc=%d\n--- stdout ---\n%s\n--- stderr ---\n%s" % (
+                p.returncode, p.stdout, p.stderr))
+
+
+@pytest.mark.skip(reason="KNOWN OPEN BUG (separate from, and not closed by, the "
+                  "single-hub wake fix shipped here): with MULTIPLE hubs sharing "
+                  "the global io_uring ring, file_read intermittently hangs "
+                  "(H>=4). Two mechanisms: (1) a hub spin-draining the shared "
+                  "ring blocks in io_uring_enter(min_complete=1) for a CQE that "
+                  "another hub already consumed (cross-hub blocked-enter); "
+                  "(2) at high hub counts a submitted op's CQE is occasionally "
+                  "never processed by any drainer (submit returns 1, no "
+                  "completion drained). The architectural fix is to route hub "
+                  "file_reads through the per-hub io_uring ring the hub owns and "
+                  "pumps, not the shared global ring + spin-drain. See "
+                  "project_pygo_mn_iouring_hang.md.")
+def test_mn_iouring_fileread_multi_hub():
+    """Multi-hub shared-ring stress -- documents the open H>1 hang."""
+    p = _run_snippet(_mn_fileread_snippet(hubs=4, n=200), timeout=120)
     assert p.returncode == 0 and "PASS" in p.stdout, (
         "rc=%d\n--- stdout ---\n%s\n--- stderr ---\n%s" % (
             p.returncode, p.stdout, p.stderr))
