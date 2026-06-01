@@ -165,7 +165,7 @@ pygo_core.go(main)
 pygo_core.run()
 ```
 
-`select` on a closed `done` channel returns immediately — `recv` from
+`select` on a closed `done` channel returns immediately -- `recv` from
 a closed channel never blocks.
 
 ## Timeouts via `select`
@@ -198,7 +198,7 @@ pygo_core.go(main)
 pygo_core.run()
 ```
 
-For asyncio code, just use `asyncio.wait_for(coro, timeout=N)` —
+For asyncio code, just use `asyncio.wait_for(coro, timeout=N)` --
 `pygo.aio` handles it natively.
 
 ## Graceful shutdown
@@ -263,7 +263,7 @@ for t in threads: t.join()
 ```
 
 Each thread runs its own scheduler with its own goroutines.  Channels
-are not shared across thread schedulers in this mode — that's what
+are not shared across thread schedulers in this mode -- that's what
 M:N is for.
 
 ## Throttling via a semaphore
@@ -386,7 +386,7 @@ Spawn rate goes from ~10k/sec to ~1.7M/sec.
 
 ## Bridging pygo with `asyncio` libraries
 
-You can call `pygo_core.go(fn)` from inside an async coroutine — the
+You can call `pygo_core.go(fn)` from inside an async coroutine -- the
 goroutine runs concurrently with the awaiting code:
 
 ```python

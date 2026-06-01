@@ -23,7 +23,7 @@ ch.send(value)                # blocks if buffer full
 value, ok = ch.recv()         # blocks if buffer empty
 ```
 
-`recv` returns a tuple — `value` is the payload, `ok` is `True` if it
+`recv` returns a tuple -- `value` is the payload, `ok` is `True` if it
 came from a real send and `False` if the channel was closed and empty:
 
 ```python
@@ -83,7 +83,7 @@ ch.try_recv()                 # ("first", True)
 ch.try_recv()                 # None  -- buffer empty
 ```
 
-These never park the goroutine — useful for polling, watchdog probes,
+These never park the goroutine -- useful for polling, watchdog probes,
 or "drain whatever's available without waiting."
 
 ## Unbuffered (rendezvous)
@@ -114,7 +114,7 @@ sent
 ```
 
 Unbuffered channels are how Go expresses synchronisation as well as
-data flow — pair them with a goroutine and they become the equivalent
+data flow -- pair them with a goroutine and they become the equivalent
 of a mailbox/actor.
 
 ## `select`
@@ -122,8 +122,8 @@ of a mailbox/actor.
 `pygo_core.select(cases, default=False)` waits on multiple channels
 at once.  Each case is a tuple:
 
-- `("recv", ch)` — wait until `ch` has data, then receive.
-- `("send", ch, value)` — wait until `ch` can accept, then send.
+- `("recv", ch)` -- wait until `ch` has data, then receive.
+- `("send", ch, value)` -- wait until `ch` can accept, then send.
 
 Returns `(case_index, payload)`.  For a `recv` case, `payload` is the
 `(value, ok)` tuple.  For a `send` case, `payload` is `None`.
@@ -160,7 +160,7 @@ a got: ('A', True)
 ### Default case (non-blocking select)
 
 Pass `default=True` to return immediately if no case is ready.  In that
-event `select` returns `-1` (not a tuple — the caller's signal that
+event `select` returns `-1` (not a tuple -- the caller's signal that
 the default branch fired).
 
 ```python
@@ -202,7 +202,7 @@ After this:
 - `ch.close()` a second time raises `ValueError("close on closed channel")`.
 
 Closing is a one-way operation; once closed a channel cannot be
-re-opened (matches Go's semantics — you'd create a new channel).
+re-opened (matches Go's semantics -- you'd create a new channel).
 
 ## When to use channels vs. plain data structures
 
@@ -213,7 +213,7 @@ Use a channel when:
   recv pairing replaces locks.
 - A goroutine should wait until something is ready (work item, event,
   cancellation signal).
-- You want backpressure — a slow consumer naturally slows the producer
+- You want backpressure -- a slow consumer naturally slows the producer
   via channel-full blocking.
 
 Use a `list` or `dict` (no synchronisation needed) when you're on one
@@ -248,7 +248,7 @@ Either coordinate so producers stop sending before `close()`, or wrap
 
 ### `recv` on closed-and-empty returns `(None, False)`
 
-Not an exception — easy to miss.  Always check `ok`:
+Not an exception -- easy to miss.  Always check `ok`:
 
 ```python
 v, ok = ch.recv()

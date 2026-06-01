@@ -1,20 +1,20 @@
 # Time-sliced preemption
 
-By default, pygo goroutines are **cooperative** — they yield only when
+By default, pygo goroutines are **cooperative** -- they yield only when
 they explicitly call `sched_yield`, sleep, or block on I/O.  If you
 write a tight CPU loop with no yield, that goroutine monopolises the
 scheduler until it returns.
 
 This works for Go-style code (which conventionally has yields
 sprinkled through it via channel operations and I/O) but is brittle
-when you mix in libraries that don't expect to be cooperative — a
+when you mix in libraries that don't expect to be cooperative -- a
 long `numpy` matmul or a 10-million-iteration arithmetic loop will
 starve every other goroutine.
 
 `pygo_core.preempt_init(quantum_us=10_000)` solves this on
 **free-threaded Python 3.13t** (the GIL-disabled build).  A timer
 thread posts a `Py_AddPendingCall` every quantum; CPython's
-`eval_breaker` check — already done between bytecodes — invokes our
+`eval_breaker` check -- already done between bytecodes -- invokes our
 callback, which calls `pygo_sched_yield()` on the running goroutine.
 
 ## Hello, preempted goroutine
@@ -46,7 +46,7 @@ forces `hog` to yield every 10 ms.
 
 ## What's the cost?
 
-The hot path (between yields) pays nothing — preemption only adds
+The hot path (between yields) pays nothing -- preemption only adds
 work when the quantum fires:
 
 - ~300 ns per quantum to dispatch the pending call.
@@ -71,7 +71,7 @@ We exploit this by:
    thread and, if so, calls `pygo_sched_yield()` to swap it out.
 
 The goroutine resumes the next time it's at the head of the ready
-queue — typically immediately after every other ready goroutine has
+queue -- typically immediately after every other ready goroutine has
 had a slice.
 
 ## Caveats
@@ -81,7 +81,7 @@ had a slice.
 The `eval_breaker` check happens between Python bytecodes.  If a
 goroutine is sitting inside a long **C call** (e.g. `numpy.dot` on a
 huge matrix, `hashlib.sha256` on a multi-MB blob, a blocking system
-call), the check doesn't fire — Python isn't running.  Preemption
+call), the check doesn't fire -- Python isn't running.  Preemption
 will hit as soon as the C call returns.
 
 This is the same limitation Go has with cgo: while you're in C, the
@@ -92,7 +92,7 @@ enough that this isn't noticeable in practice.
 
 `preempt_init` raises `RuntimeError` on GIL builds.  The preemption
 path relies on the M:N hub model and `Py_AddPendingCall` having a
-fast path that's safe across hubs — both of which are part of the
+fast path that's safe across hubs -- both of which are part of the
 3.13t support that doesn't exist on earlier or non-free-threaded
 Pythons.
 
@@ -114,17 +114,17 @@ pygo_core.preempt_fini()
 ```
 
 Idempotent.  Joins the timer thread.  Use this if you're toggling
-preemption on/off for benchmarks — most production code will just
+preemption on/off for benchmarks -- most production code will just
 leave it on after `preempt_init`.
 
 ## Choosing a quantum
 
-- **10 ms (10 000 µs)** — fair scheduling for typical mixed workloads,
+- **10 ms (10 000 µs)** -- fair scheduling for typical mixed workloads,
   ~0.003% overhead.  This is the default.
-- **1 ms (1 000 µs)** — much finer-grained interleaving, ~0.03%
+- **1 ms (1 000 µs)** -- much finer-grained interleaving, ~0.03%
   overhead.  Use if you've got tight latency requirements (e.g. a
   game-loop-style update with strict frame timing).
-- **100 ms** — coarser, less responsive but lighter on the timer
+- **100 ms** -- coarser, less responsive but lighter on the timer
   thread.  Use if you're CPU-bound and don't have latency-sensitive
   goroutines.
 

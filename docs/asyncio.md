@@ -17,12 +17,12 @@ primitive.
 - You're chaining many `await` operations per task (the pygo win
   amortises over awaits).
 - You want to mix monkey-patched sync code (cooperative `socket.recv`,
-  `time.sleep`) with `async def` in the same process — pygo's
+  `time.sleep`) with `async def` in the same process -- pygo's
   scheduler drives both.
 
 **Stick with vanilla asyncio when:**
 
-- Your workload is "one `await` per task and dispatch" — asyncio's
+- Your workload is "one `await` per task and dispatch" -- asyncio's
   tight C-deque dispatcher beats pygo's PygoTask setup cost in that
   shape (a 5× slowdown was measured on a fan-out microbench).
 - You depend on asyncio internals beyond what pygo implements
@@ -110,7 +110,7 @@ paio.run(main())
 
 The server runs at full speed using pygo's netpoll (epoll on Linux,
 kqueue on BSD/macOS, WSAPoll/IOCP on Windows).  Per-connection
-overhead is one goroutine — by default 16 KB of stack after
+overhead is one goroutine -- by default 16 KB of stack after
 [calibration](stack-sizing.md).
 
 ### Client
@@ -155,7 +155,7 @@ others run.  No threads, no callbacks.
 
 ## Locks, Events, Queues, Conditions
 
-The asyncio synchronisation primitives work as-is — `pygo.aio` doesn't
+The asyncio synchronisation primitives work as-is -- `pygo.aio` doesn't
 reimplement them; they're driven via `Future` and `call_soon`, which
 pygo's loop implements.
 
@@ -206,7 +206,7 @@ async def main():
 paio.run(main())
 ```
 
-`shield(coro)` works as in stdlib asyncio — a cancellation on the
+`shield(coro)` works as in stdlib asyncio -- a cancellation on the
 shielded awaitable doesn't propagate to the underlying coroutine.
 
 ## `loop.add_reader` / `add_writer`
@@ -273,7 +273,7 @@ paio.run(main())
 | `open_connection`/`start_server` (StreamReader/Writer) | works |
 | `loop.create_connection`/`create_server` (Transport+Protocol) | works |
 | `loop.create_datagram_endpoint` (UDP) | works |
-| SSL (`ssl=` keyword) | not implemented — use blocking-style SSL via monkey-patch |
+| SSL (`ssl=` keyword) | not implemented -- use blocking-style SSL via monkey-patch |
 | `loop.subprocess_*` | not implemented |
 | `signal.set_wakeup_fd` integration | not implemented |
 
@@ -323,8 +323,8 @@ async def main():
 paio.run(main())
 ```
 
-This lets you use libraries that don't support `async` — `requests`,
-`pymysql`, plain stdlib `urllib` — without spawning threads.
+This lets you use libraries that don't support `async` -- `requests`,
+`pymysql`, plain stdlib `urllib` -- without spawning threads.
 
 ## How it compares to vanilla asyncio internally
 

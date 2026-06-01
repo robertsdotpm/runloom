@@ -1,7 +1,7 @@
 # pygo concurrency tooling
 
 Tools for exposing deadlocks, hangs, races, and crashes in the pygo
-runtime — and the harnesses that drive them hard.
+runtime -- and the harnesses that drive them hard.
 
 | tool | purpose |
 |------|---------|
@@ -12,7 +12,7 @@ runtime — and the harnesses that drive them hard.
 See also `../verify/` (formal proofs) and `../tests_c/test_cldeque.c`
 (deque stress).
 
-## watchdog.py — hang / deadlock detector
+## watchdog.py -- hang / deadlock detector
 
 A goroutine deadlock or a scheduler lost-wake looks like a process that
 just stops: `run()` / `mn_run()` never returns, no exception. This makes
@@ -46,13 +46,13 @@ Self-demo (catches a deliberate non-terminating scheduler):
 PYGO_DEBUG=ring,gstate python tools/watchdog.py
 ```
 
-## mn_stress.py — M:N scheduler fuzzer
+## mn_stress.py -- M:N scheduler fuzzer
 
 The rest of `tests/` runs single-threaded; this hammers the multi-hub
 path. Each iteration is a seeded "token conservation" experiment:
 producers push a known multiset of tokens into a channel pool, a
 coordinator closes them, consumers (some `recv`-range, some `select`)
-drain them — and **every token must be received exactly once**.
+drain them -- and **every token must be received exactly once**.
 `_self_check()` must stay clean between iterations, all under the
 watchdog so a hang prints its reproducing seed.
 
@@ -64,7 +64,7 @@ python tools/mn_stress.py --iters 1 --seed 12346   # deterministic repro
 Exit 0 = clean; non-zero = conservation mismatch, self-check violation,
 or hang (with the offending seed).
 
-## run_sanitizers.sh — C sanitizer harnesses
+## run_sanitizers.sh -- C sanitizer harnesses
 
 ```sh
 tools/run_sanitizers.sh                 # quick (seconds)
@@ -82,7 +82,7 @@ TSan abort otherwise).
 > These are **open** issues this tooling reproduces deterministically.
 > They are surfaced here, not fixed.
 
-### A. M:N: select() under contention crashed / lost values — FIXED
+### A. M:N: select() under contention crashed / lost values -- FIXED
 
 Under real free-threaded parallelism, `select()` over channels with a
 concurrent `close()` could SIGSEGV, hang, or silently drop values
@@ -123,17 +123,17 @@ Verified: `mn_stress` full (select consumers) CLEAN over 3000 iterations
 across 6 seeds; single/multi-channel blocking-select+close clean 40/40;
 guarded by `tests/test_mn.py::test_select_close_conservation`.
 
-### B. `getaddrinfo` codec import overflowed the goroutine stack — FIXED
+### B. `getaddrinfo` codec import overflowed the goroutine stack -- FIXED
 
 `tests/test_sync.py` used to SIGSEGV on the first network call: the first
 `socket.getaddrinfo` triggers a deep C-level codec import
 (`encodings.idna` → `stringprep` → `unicodedata`) that overflowed the
-32 KB default coroutine stack — caught cleanly by the PROT_NONE guard
+32 KB default coroutine stack -- caught cleanly by the PROT_NONE guard
 page (a clean fault, not silent corruption).
 
 `pygo.runtime` already had `prewarm_stdlib()` (resolves that import on the
 main thread's big stack before any goroutine runs) and `pygo.runtime.run`
-/ the aio loop called it — but `pygo.sync.run`/`pygo.sync.go` did not.
+/ the aio loop called it -- but `pygo.sync.run`/`pygo.sync.go` did not.
 Fixed by calling `prewarm_stdlib()` from the `pygo.sync` entry points
 too, guarded so it only warms on the main thread (never on a goroutine's
 small stack). `tests/test_sync.py` now passes 7/7.

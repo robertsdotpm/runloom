@@ -1,7 +1,7 @@
 # M:N parallelism
 
 The default pygo scheduler runs **all** goroutines on a single OS
-thread.  This is the right model for I/O-bound work — there's no
+thread.  This is the right model for I/O-bound work -- there's no
 contention, no synchronisation, no cache-line ping-pong, and context
 switches are 80 ns of asm.
 
@@ -20,9 +20,9 @@ free-threaded Python 3.13t.
 
 **Skip it when:**
 
-- You're on a GIL build — the GIL serialises Python execution across
+- You're on a GIL build -- the GIL serialises Python execution across
   threads anyway, so M:N gives no speedup.
-- All your work is I/O-bound — a single OS thread with netpoll
+- All your work is I/O-bound -- a single OS thread with netpoll
   saturates an NIC easily; M:N adds overhead without benefit.
 
 ## API surface
@@ -89,7 +89,7 @@ Each hub thread:
 - Has a per-hub MPSC submission queue for external producers
   (so `mn_go` from outside any hub doesn't race the deque owner).
 - Routes goroutines back to the originating hub on yield/sleep/I/O
-  wake — this preserves locality (the goroutine's per-thread cache
+  wake -- this preserves locality (the goroutine's per-thread cache
   warms one hub, not all of them).
 
 When a hub has no work and no other hub does either, the hub
@@ -101,7 +101,7 @@ blocks on a condition variable.  Wakes happen when:
 
 ## Channels across hubs
 
-Channels work across hubs.  A `Chan` is a synchronised primitive —
+Channels work across hubs.  A `Chan` is a synchronised primitive --
 producers on hub A and consumers on hub B exchange via the same
 channel object:
 
@@ -130,7 +130,7 @@ pygo_core.mn_fini()
 
 ## Network I/O on M:N
 
-Each hub has its own netpoll (epoll/kqueue) — goroutines parked on
+Each hub has its own netpoll (epoll/kqueue) -- goroutines parked on
 I/O wake on the hub that submitted the parking call.  This means
 your accept loop and connection handlers stay on the same hub by
 default, which is good for cache locality:
@@ -167,7 +167,7 @@ by four different hub threads simultaneously (subject to scheduling).
 
 ## Performance characteristics
 
-- **Spawn**: `mn_go` is ~250 ns on 3.13t — submission to the per-hub
+- **Spawn**: `mn_go` is ~250 ns on 3.13t -- submission to the per-hub
   MPSC queue + work-steal-eligible push.  Comparable to single-thread
   `go`.
 - **Yield**: per-hub yield is the same ~80 ns swap.  No cross-thread
@@ -184,7 +184,7 @@ dominated by the actual work.
 
 ## Pairing with preemption
 
-[Time-sliced preemption](preemption.md) works with M:N — each hub has
+[Time-sliced preemption](preemption.md) works with M:N -- each hub has
 its own preemption timer.  If you've got a goroutine that doesn't
 yield naturally, preemption applies on whichever hub it's running on
 without affecting the others.
@@ -216,7 +216,7 @@ sends to, you'll see scaling fall off.  Mitigations:
 ### Goroutine routing back to origin hub
 
 If goroutine A on hub 1 parks for I/O, and the I/O wake fires while
-hub 1 is busy, A waits for hub 1 to be free — even if hub 2 is idle.
+hub 1 is busy, A waits for hub 1 to be free -- even if hub 2 is idle.
 This preserves locality at the cost of some load balance.  In
 practice this evens out under steady load.
 

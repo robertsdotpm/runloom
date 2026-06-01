@@ -2,8 +2,8 @@
 
 **Go-style stackful coroutines for Python.**
 
-pygo gives you the *cooperative concurrency* model from Go — `go(fn)`,
-channels, cheap goroutines, blocking-style I/O — running on top of
+pygo gives you the *cooperative concurrency* model from Go -- `go(fn)`,
+channels, cheap goroutines, blocking-style I/O -- running on top of
 CPython with a hand-rolled assembly context switch and a C scheduler.
 
 ```python
@@ -28,7 +28,7 @@ pygo_core.go(accept_loop)
 pygo_core.run()
 ```
 
-No `async`, no `await`, no callback chains — `recv` and `accept`
+No `async`, no `await`, no callback chains -- `recv` and `accept`
 suspend the goroutine cooperatively while the OS thread runs other
 goroutines.
 
@@ -68,10 +68,10 @@ goroutines.
 
 - You need to interoperate with libraries that already drive an
   asyncio loop and aren't willing to switch (Trio, custom event loops).
-- You're CPU-bound on a single goroutine — that's threads, not
+- You're CPU-bound on a single goroutine -- that's threads, not
   coroutines.  pygo can't preempt inside a long C call (same limitation
   Go has with cgo).
-- You need Python 3.10 or older — pygo requires 3.11+ for the
+- You need Python 3.10 or older -- pygo requires 3.11+ for the
   per-goroutine `PyThreadState` snapshot.
 
 ## How it works in 60 seconds
@@ -95,7 +95,7 @@ when the fd becomes ready, the goroutine returns to the ready FIFO.
 
 The result is that *every concurrent connection costs one stack + one
 metadata struct*, and switching between them costs the same as a
-function call — no callbacks, no chains of `await`, no thread context
+function call -- no callbacks, no chains of `await`, no thread context
 switches.
 
 ## What's next

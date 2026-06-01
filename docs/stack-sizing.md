@@ -1,6 +1,6 @@
 # Stack sizing & memory
 
-Each goroutine in pygo owns a private C stack — this is what enables
+Each goroutine in pygo owns a private C stack -- this is what enables
 the "looks-like-a-thread, costs-like-a-callback" cooperative model.
 This page explains how pygo manages that stack so you can run a lot of
 goroutines at once without burning memory.
@@ -12,7 +12,7 @@ fresh stack is painted with a sentinel pattern, every completed
 goroutine's high-water mark is scanned, and after 1 000 completions
 the default is locked to `next_pow2(max_hwm × 4)` clamped to
 `[16 KB, 8 MB]`.  When a goroutine finishes, its stack returns to a
-per-thread pool with `MADV_DONTNEED` applied — the kernel reclaims the
+per-thread pool with `MADV_DONTNEED` applied -- the kernel reclaims the
 physical pages while keeping the virtual mapping.  Net effect: 10 000
 idle goroutines cost about as much RAM as their actual stack usage,
 not their reservation.
@@ -22,16 +22,16 @@ not their reservation.
 Stackful coroutines (pygo, greenlet, gevent, Go) keep the C stack
 *per coroutine*.  Switching between them is a single `swap` instruction
 that saves callee-saved registers, swaps the stack pointer, and
-restores the new context — ~80 ns on x86_64.
+restores the new context -- ~80 ns on x86_64.
 
 Stackless coroutines (asyncio, Trio, vanilla Python `async def`) keep
 state in heap-allocated frame objects and switch by returning to a
-trampoline.  No per-coroutine C stack — but every `await` requires
+trampoline.  No per-coroutine C stack -- but every `await` requires
 allocating frame state and walking back through the event loop.
 
 Both models are valid; pygo picks stackful because the switch cost is
 ~22× lower and the user code can be ordinary blocking-style without
-async/await colour.  The cost is *per-goroutine memory* — which is
+async/await colour.  The cost is *per-goroutine memory* -- which is
 exactly what this page is about minimising.
 
 ## Auto-calibration
@@ -68,12 +68,12 @@ next to risk overflow.
 
 The scan walks the goroutine's stack memory in 8-byte chunks looking
 for the deepest non-sentinel word.  This catches anything the
-goroutine actually wrote — including local C variables, frame
+goroutine actually wrote -- including local C variables, frame
 linkage, saved registers, deep Python recursion.
 
 What it *misses*: a goroutine that allocates a 50 KB local C buffer,
 writes through it briefly, and then returns before yielding.  The
-peak is real but transient — the sentinel scan only sees what was
+peak is real but transient -- the sentinel scan only sees what was
 still in memory at the moment we ran it.  In practice this rarely
 matters because the safety factor (4×) covers reasonable transients.
 
@@ -81,14 +81,14 @@ matters because the safety factor (4×) covers reasonable transients.
 
 When a goroutine finishes, its stack returns to a per-thread free
 list capped at 4 096 entries.  Without `MADV_DONTNEED` that would
-mean **4 096 × stack_size** resident memory — at the default 256 KB
+mean **4 096 × stack_size** resident memory -- at the default 256 KB
 that's 1 GB just for idle pool entries.
 
 The release path calls `madvise(addr, size, MADV_DONTNEED)` on
 everything except the first 4 KB (which holds the pool's
 linked-list pointer).  The kernel reclaims the page frames; the
 mapping itself stays.  Next time the stack is reused, the goroutine
-faults in fresh zero pages as it writes — same correctness as a brand
+faults in fresh zero pages as it writes -- same correctness as a brand
 new mmap, but no syscall.
 
 Measured: after a burst of 5 000 goroutines × 1 MB stacks, RSS lands
@@ -97,7 +97,7 @@ mostly headers).  Without `MADV_DONTNEED` that workload would hold
 ~5 GB.
 
 This is a Linux/POSIX optimisation.  On Windows (Fibers backend) the
-OS manages stacks differently — pygo lets it.
+OS manages stacks differently -- pygo lets it.
 
 ## Per-call override
 
@@ -114,7 +114,7 @@ pygo_core.go(tight_loop,  stack_size=8 * 1024)
 The `stack_size=N` kwarg overrides the calibrated default for that
 single spawn.  The default is unaffected.
 
-Use this for the rare outlier — most goroutines should use whatever
+Use this for the rare outlier -- most goroutines should use whatever
 the scheduler calibrated to.
 
 ## Locking a known-good size
@@ -152,7 +152,7 @@ Bounds: `[16 KB, 8 MB]`.  Below or above is silently clamped.
 ## What's a "safe" stack size?
 
 A pure-Python goroutine doing socket I/O typically uses **< 1 KB** of
-C stack — Python's interpreter loop stores frames in the *datastack*
+C stack -- Python's interpreter loop stores frames in the *datastack*
 (a separate arena), not the C stack.  C extensions that recurse on
 the C stack (`json.dumps`, `re`, nested function calls in extension
 code) push the usage up.
@@ -191,7 +191,7 @@ print(pygo_core.stats())
 # }
 ```
 
-Useful for production observability — log the calibrated size on
+Useful for production observability -- log the calibrated size on
 startup and the high-water mark periodically.
 
 ## Defending against overflow
@@ -201,8 +201,8 @@ page (planned for a follow-up).  If a goroutine does overflow its
 calibrated stack:
 
 - On the **fcontext** backend (Linux/macOS/BSD x86_64 + aarch64): the
-  goroutine's stack overflow lands in adjacent memory — usually
-  another goroutine's stack — causing silent corruption.  This is
+  goroutine's stack overflow lands in adjacent memory -- usually
+  another goroutine's stack -- causing silent corruption.  This is
   why the safety factor is set to 4× and the minimum size is 16 KB:
   you have to overshoot by a lot to hit this.
 - On the **Fibers** backend (Windows): Fibers reserve large virtual

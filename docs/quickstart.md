@@ -22,7 +22,7 @@ hello from a goroutine!
 ```
 
 `go(fn)` queues `fn` for execution on the pygo scheduler.  Nothing
-runs until you call `pygo_core.run()` — that's the scheduler's main
+runs until you call `pygo_core.run()` -- that's the scheduler's main
 loop, equivalent of Go's program-startup runtime.
 
 ## Many goroutines
@@ -55,7 +55,7 @@ closures over a loop variable.  Each goroutine captures its own `i`.
 
 `pygo_core.sched_sleep(seconds)` suspends the current goroutine for at
 least `seconds`, letting other goroutines run in the meantime.  This is
-not `time.sleep` — `time.sleep` would block the whole OS thread.
+not `time.sleep` -- `time.sleep` would block the whole OS thread.
 
 ```python
 import pygo_core, time
@@ -121,12 +121,12 @@ got 3
 got 4
 ```
 
-See [Channels](channels.md) for the full API — `try_send`/`try_recv`,
+See [Channels](channels.md) for the full API -- `try_send`/`try_recv`,
 `select`, error semantics on closed channels.
 
 ## TCP echo server
 
-The simplest realistic program — a TCP server that echoes whatever
+The simplest realistic program -- a TCP server that echoes whatever
 clients send.
 
 ```python
@@ -197,7 +197,7 @@ when this wins vs. losing against vanilla asyncio.
 
 ## Where to go next
 
-- [Channels](channels.md) — the deep dive on send/recv/select
-- [Monkey-patching](monkey-patching.md) — making the stdlib cooperative
-- [Cookbook](cookbook.md) — patterns: worker pool, pipeline, fan-in/out
-- [Stack sizing](stack-sizing.md) — keep memory low under load
+- [Channels](channels.md) -- the deep dive on send/recv/select
+- [Monkey-patching](monkey-patching.md) -- making the stdlib cooperative
+- [Cookbook](cookbook.md) -- patterns: worker pool, pipeline, fan-in/out
+- [Stack sizing](stack-sizing.md) -- keep memory low under load

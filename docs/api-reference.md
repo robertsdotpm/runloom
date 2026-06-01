@@ -1,7 +1,7 @@
 # API reference
 
 Every public symbol exported by pygo, organised by module.  This is
-a reference — start with the [guides](index.md) if you're learning
+a reference -- start with the [guides](index.md) if you're learning
 your way around.
 
 ## `pygo_core` (C extension)
@@ -15,9 +15,9 @@ The low-level scheduler API.  Most user code calls `pygo_core.go` and
 
 Spawn a goroutine running `fn`.  Returns a [`G`](#g) handle.
 
-- `fn` — a zero-arg callable.  Bind arguments with `lambda` or
+- `fn` -- a zero-arg callable.  Bind arguments with `lambda` or
   `functools.partial`.
-- `stack_size` — optional per-call override (bytes).  Bypasses the
+- `stack_size` -- optional per-call override (bytes).  Bypasses the
   scheduler's calibrated default.  See [stack sizing](stack-sizing.md).
 
 #### `go_noyield(fn) → G`
@@ -57,7 +57,7 @@ netpoll-parked).  Returns `(n_ready, n_sleep, n_parked)`.  Used by
 #### `park_self()`
 
 Park the current goroutine until `g.wake()` is called on its handle.
-Race-safe — a wake that arrives before the park is consumed and the
+Race-safe -- a wake that arrives before the park is consumed and the
 park returns immediately.  Use with `current_g()` to capture the
 handle before parking.
 
@@ -86,17 +86,17 @@ unbuffered (rendezvous).  See [Channels](channels.md).
 
 Methods:
 
-- `send(value)` — block until the value fits, then enqueue.  Raises
+- `send(value)` -- block until the value fits, then enqueue.  Raises
   `ValueError` on closed channel.
-- `recv() → (value, ok)` — block for a value.  Returns
+- `recv() → (value, ok)` -- block for a value.  Returns
   `(None, False)` after the channel is closed and drained.
-- `try_send(value) → bool` — non-blocking send; `False` if the buffer
+- `try_send(value) → bool` -- non-blocking send; `False` if the buffer
   is full.
-- `try_recv() → (value, ok) | None` — non-blocking; `None` if buffer
+- `try_recv() → (value, ok) | None` -- non-blocking; `None` if buffer
   empty.
-- `close()` — wake every parked sender (they raise) and receiver
+- `close()` -- wake every parked sender (they raise) and receiver
   (they get `(None, False)`).
-- `__iter__()` — yields values until the channel closes.
+- `__iter__()` -- yields values until the channel closes.
 
 #### `select(cases, default=False)`
 
@@ -136,17 +136,17 @@ True if the kernel supports io_uring (Linux 5.1+).
 
 See [Parallelism](parallelism.md).
 
-- `mn_init(n=0)` — start `n` hub threads (defaults to `cpu_count`).
-- `mn_go(fn) → G` — spawn on a round-robin hub.
-- `mn_run() → int` — wait for all hubs to drain.
-- `mn_fini()` — tear down the pool.
+- `mn_init(n=0)` -- start `n` hub threads (defaults to `cpu_count`).
+- `mn_go(fn) → G` -- spawn on a round-robin hub.
+- `mn_run() → int` -- wait for all hubs to drain.
+- `mn_fini()` -- tear down the pool.
 
 ### Preemption (3.13t only)
 
 See [Preemption](preemption.md).
 
-- `preempt_init(quantum_us=10000)` — start the per-thread quantum timer.
-- `preempt_fini()` — stop the timer.
+- `preempt_init(quantum_us=10000)` -- start the per-thread quantum timer.
+- `preempt_fini()` -- stop the timer.
 
 ### Pre-warming
 
@@ -186,12 +186,12 @@ manually if you're embedding pygo in a non-main thread.
 
 Goroutine handle.  Attributes:
 
-- `done` — `True` once the goroutine has returned.
-- `result` — return value (or `None` until done).
-- `error` — exception object if the goroutine raised, else `None`.
-- `wake()` — re-queue a parked goroutine; race-safe with
+- `done` -- `True` once the goroutine has returned.
+- `result` -- return value (or `None` until done).
+- `error` -- exception object if the goroutine raised, else `None`.
+- `wake()` -- re-queue a parked goroutine; race-safe with
   `park_self()`.
-- `stack(limit=None)` — return a list of `(filename, lineno, name)`
+- `stack(limit=None)` -- return a list of `(filename, lineno, name)`
   frames for the goroutine's current Python stack.
 
 #### `Coro`
@@ -234,16 +234,16 @@ pygo.aio.start_server(cb, host, port)  # async server with serve_forever()
 
 Classes:
 
-- `PygoEventLoop` — drop-in `asyncio.AbstractEventLoop` backed by
+- `PygoEventLoop` -- drop-in `asyncio.AbstractEventLoop` backed by
   pygo's scheduler.
-- `PygoEventLoopPolicy` — sets `PygoEventLoop` as the default loop.
-- `PygoFuture` — duck-typed Future with synchronous done-callback
+- `PygoEventLoopPolicy` -- sets `PygoEventLoop` as the default loop.
+- `PygoFuture` -- duck-typed Future with synchronous done-callback
   dispatch.
-- `PygoTask` — `asyncio.Task` replacement that drives the coroutine
+- `PygoTask` -- `asyncio.Task` replacement that drives the coroutine
   inside a goroutine.
-- `StreamReader` / `StreamWriter` — asyncio-compatible stream
+- `StreamReader` / `StreamWriter` -- asyncio-compatible stream
   interface, backed by `wait_fd`.
-- `DatagramTransport` — UDP transport for
+- `DatagramTransport` -- UDP transport for
   `loop.create_datagram_endpoint`.
 
 ---
@@ -270,10 +270,10 @@ pygo.sync.udp_endpoint(local_addr=None, remote_addr=None) → Socket
 
 Synchronisation primitives matching `asyncio.*`:
 
-- `pygo.sync.Lock` — cooperative mutex.
-- `pygo.sync.Event` — set/clear/wait.
-- `pygo.sync.Condition` — waiter + notifier on a lock.
-- `pygo.sync.Semaphore` — bounded counting semaphore.
+- `pygo.sync.Lock` -- cooperative mutex.
+- `pygo.sync.Event` -- set/clear/wait.
+- `pygo.sync.Condition` -- waiter + notifier on a lock.
+- `pygo.sync.Semaphore` -- bounded counting semaphore.
 
 #### `Socket`
 
@@ -309,21 +309,21 @@ after.recv()           # blocks until the timer fires
 
 Single-shot timer.  Methods:
 
-- `Timer.C` — channel that fires once.
-- `Timer.Stop()` — cancel; returns `True` if cancelled before firing.
-- `Timer.Reset(seconds)` — rearm.
+- `Timer.C` -- channel that fires once.
+- `Timer.Stop()` -- cancel; returns `True` if cancelled before firing.
+- `Timer.Reset(seconds)` -- rearm.
 
 #### `NewTicker(seconds) → Ticker`
 
 Recurring ticker.  Methods:
 
-- `Ticker.C` — channel that fires every `seconds`.
-- `Ticker.Stop()` — stop emitting.
+- `Ticker.C` -- channel that fires every `seconds`.
+- `Ticker.Stop()` -- stop emitting.
 
 #### `Tick(seconds) → Chan`
 
 Shorthand for `NewTicker(seconds).C` when you don't need to stop it
-(the ticker leaks — only use for program-lifetime tickers).
+(the ticker leaks -- only use for program-lifetime tickers).
 
 ---
 
@@ -350,10 +350,10 @@ Reverse patches.  Without args, reverses everything applied.
 
 Available even without `patch()`:
 
-- `CoLock`, `CoRLock` — cooperative mutexes.
-- `CoEvent` — set/wait.
-- `CoCondition` — `wait` releases the lock cooperatively.
-- `CoSemaphore`, `CoBoundedSemaphore` — counting semaphores.
+- `CoLock`, `CoRLock` -- cooperative mutexes.
+- `CoEvent` -- set/wait.
+- `CoCondition` -- `wait` releases the lock cooperatively.
+- `CoSemaphore`, `CoBoundedSemaphore` -- counting semaphores.
 
 These implement the `threading.*` interface but park goroutines
 instead of OS threads.  Useful when you want sync primitives but

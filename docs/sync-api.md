@@ -1,7 +1,7 @@
 # Sync API (`pygo.sync`)
 
 `pygo.sync` is the *no-`async`/`await`* facade.  Same scheduler, same
-performance, but the user code is plain straight-line Python — no
+performance, but the user code is plain straight-line Python -- no
 coroutines, no event loop ceremony.
 
 This exists because many libraries (and many users) don't want their
@@ -42,7 +42,7 @@ ps.run(main)
 ```
 
 `ps.go(fn, *args, **kwargs)` is like `threading.Thread(target=...).start()`
-except the "thread" is a goroutine — cheap to create, cooperatively
+except the "thread" is a goroutine -- cheap to create, cooperatively
 scheduled.
 
 ## Cooperative sleep
@@ -107,7 +107,7 @@ def main():
 ps.run(main)
 ```
 
-The socket returned by `tcp_listen` is a `ps.Socket` wrapper — same
+The socket returned by `tcp_listen` is a `ps.Socket` wrapper -- same
 interface as `socket.socket`, but `recv`/`accept`/`sendall` park the
 goroutine on `wait_fd` instead of blocking the OS thread.
 
@@ -164,7 +164,7 @@ in place of a `Chan(1)` per task.  Same idea is available to user code.
 
 **Choose `pygo.sync` when:**
 
-- You're writing new code and want it to *look* synchronous — easier
+- You're writing new code and want it to *look* synchronous -- easier
   to read, easier to debug, no callback colour.
 - You're porting Go code (each `goroutine` in Go is a `pygo.sync.go` here).
 - You want a library API that doesn't require its callers to be in an
@@ -178,7 +178,7 @@ in place of a `Chan(1)` per task.  Same idea is available to user code.
 - You want compatibility with an `await`-based codebase you can't
   control.
 
-The two APIs share the same scheduler — you can mix them, though
+The two APIs share the same scheduler -- you can mix them, though
 each adds a bit of overhead in its own layer.
 
 ## A complete example: parallel HTTP fetcher
@@ -214,5 +214,5 @@ ps.run(main)
 ```
 
 Straight-line code, no `async`, fully concurrent (each fetch runs
-independently — `tcp_connect` and `recv` park the goroutine while
+independently -- `tcp_connect` and `recv` park the goroutine while
 others make progress).

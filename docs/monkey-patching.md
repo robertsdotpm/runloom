@@ -7,8 +7,8 @@ thread.  After the patch, ordinary `socket.recv`, `time.sleep`,
 and several `threading` primitives all yield instead of stalling the
 whole interpreter.
 
-This means **you can use any synchronous library** — `requests`,
-`pymysql`, stdlib `urllib`, `psycopg2`, plain `socket` code — and it
+This means **you can use any synchronous library** -- `requests`,
+`pymysql`, stdlib `urllib`, `psycopg2`, plain `socket` code -- and it
 becomes cooperative.
 
 ## The basic call
@@ -68,7 +68,7 @@ pygo.monkey.unpatch()              # reverse everything
 pygo.monkey.unpatch(socket=False)  # keep socket patched, reverse the rest
 ```
 
-Patching is **idempotent** — calling `patch()` twice does nothing the
+Patching is **idempotent** -- calling `patch()` twice does nothing the
 second time.  Unpatch is the inverse.
 
 ## Recipe: a fully synchronous-looking HTTP fetcher
@@ -100,7 +100,7 @@ pygo_core.run()
 ```
 
 Three HTTP requests, fully concurrent, written in completely linear
-synchronous style — `urllib.request` doesn't know it's been
+synchronous style -- `urllib.request` doesn't know it's been
 monkey-patched.
 
 ## Recipe: a database pool with `pymysql`
@@ -157,7 +157,7 @@ still gets the patched version because we rebind the class attribute.
 
 ### `threading.Thread` is not replaced
 
-Patching doesn't turn `threading.Thread` into a goroutine — it would
+Patching doesn't turn `threading.Thread` into a goroutine -- it would
 break too many assumptions.  If you spawn an OS thread, it runs
 independently of the pygo scheduler.
 
@@ -195,10 +195,10 @@ print(pygo.monkey._applied)
 ## When NOT to monkey-patch
 
 If your entire program is written in `async def` and uses
-`pygo.aio.run` for I/O, you don't need monkey-patching — the asyncio
+`pygo.aio.run` for I/O, you don't need monkey-patching -- the asyncio
 bridge already drives I/O through pygo's netpoll.  Monkey-patching is
 for **mixing** sync code with the scheduler.
 
 If you're embedding pygo inside another process that also uses
-threads + blocking I/O for unrelated work, don't patch — confining
+threads + blocking I/O for unrelated work, don't patch -- confining
 pygo to its own region keeps the rest unaffected.
