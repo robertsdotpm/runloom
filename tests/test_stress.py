@@ -49,7 +49,14 @@ class TestSchedulerStress(unittest.TestCase):
         stats = pygo_core.stats()
         self.assertEqual(stats["ready"], 0)
         self.assertEqual(stats["sleeping"], 0)
-        self.assertEqual(stats["netpoll_parked"], 0)
+        # Use the PER-SCHED parked count (this thread's sched), not the global
+        # one: in an in-process suite a parker can be stranded on another (or a
+        # since-exited) thread's sched -- e.g. test_leaked_parker_does_not_wedge
+        # deliberately leaks one on a dead thread -- and the global count then
+        # flakes this assertion even though THIS workload (100k spawn/drain on
+        # the main sched) leaked nothing.
+        self.assertEqual(stats.get("netpoll_parked_self",
+                                   stats["netpoll_parked"]), 0)
 
     def test_deep_yield_chain(self):
         """One goroutine doing 100k yields.  Catches snap/load drift

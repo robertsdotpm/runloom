@@ -80,7 +80,12 @@ def pytest_runtest_makereport(item, call):
 
 
 def _parked():
-    return int(pygo_core.stats()["netpoll_parked"])
+    # Per-sched count (this thread's sched), not the global one: a parker
+    # stranded on another/since-exited thread's sched (e.g. a test that
+    # deliberately leaks one on a dead thread) is not this test's leak and
+    # must not trip the check.  Falls back to the global count on an older .so.
+    s = pygo_core.stats()
+    return int(s.get("netpoll_parked_self", s["netpoll_parked"]))
 
 
 def _settle_parked(baseline):

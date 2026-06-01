@@ -724,6 +724,38 @@ int pygo_netpoll_inspect_for_self_check(struct pygo_self_check_stats *out)
     return 0;
 }
 
+/* DIAG: walk the global parker list and print each parker's fd/g/hub/commit to
+ * stderr.  Used to identify a leaked netpoll parker (cross-file flake). */
+void pygo_netpoll_dump_parkers(void)
+{
+    pygo_parker_pool_t *pool = &pygo_pool;
+    pygo_parked_t *p;
+    int n = 0;
+    char buf[256];
+    int m;
+    if (!__atomic_load_n(&pygo_netpoll_inited, __ATOMIC_ACQUIRE)) {
+        m = snprintf(buf, sizeof buf, "[parker-dump] netpoll not inited\n");
+        (void)write(2, buf, (size_t)m);
+        return;
+    }
+    pygo_parker_pool_lock_ensure_inited(pool);
+    pygo_mutex_lock(&pool->lock);
+    m = snprintf(buf, sizeof buf, "[parker-dump] total=%d head=%p\n",
+                 __atomic_load_n(&pool->total, __ATOMIC_ACQUIRE), (void *)pool->head);
+    (void)write(2, buf, (size_t)m);
+    p = pool->head;
+    while (p != NULL && n < 64) {
+        m = snprintf(buf, sizeof buf,
+            "[parker-dump]  #%d parker=%p fd=%d events=%d g=%p hub=%p commit=%d gen=%u deadline_ns=%lld\n",
+            n, (void *)p, p->fd, p->events, (void *)p->g, (void *)p->hub,
+            p->commit, p->gen, (long long)p->deadline_ns);
+        (void)write(2, buf, (size_t)m);
+        n++;
+        p = p->next;
+    }
+    pygo_mutex_unlock(&pool->lock);
+}
+
 /* ---- per-fd registration cache ----
  * One bit per fd; set when we've already issued EPOLL_CTL_ADD (or
  * the kqueue equivalent) for this fd as edge-triggered for both

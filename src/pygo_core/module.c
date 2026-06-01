@@ -1460,7 +1460,14 @@ static PyObject *m_stats(PyObject *self, PyObject *unused)
 
     PYGO_STATS_SET("ready",     ready);
     PYGO_STATS_SET("sleeping",  s->sleep_size);
+    /* netpoll_parked is the GLOBAL count (all scheds/threads).  netpoll_parked_self
+     * is THIS thread's sched only -- the right metric for "did the work I ran on
+     * this thread leak a parker", immune to parkers stranded on a dead/other
+     * thread's sched (e.g. a thread that exited with a goroutine still parked;
+     * the per-thread sched is intentionally leaked at thread exit). */
     PYGO_STATS_SET("netpoll_parked", pygo_netpoll_parked_count());
+    PYGO_STATS_SET("netpoll_parked_self",
+                   __atomic_load_n(&s->netpoll_parked, __ATOMIC_ACQUIRE));
     PYGO_STATS_SET("completed", s->completed);
     PYGO_STATS_SET("running",   (s->current != NULL) ? 1 : 0);
     PYGO_STATS_SET("stack_size_default", s->stack_size);
@@ -1719,6 +1726,13 @@ static PyObject *m_diag_dump(PyObject *self, PyObject *args)
     Py_RETURN_NONE;
 }
 
+static PyObject *m_dump_parkers(PyObject *self, PyObject *args)
+{
+    (void)self; (void)args;
+    pygo_netpoll_dump_parkers();
+    Py_RETURN_NONE;
+}
+
 static PyObject *m_diag_flags(PyObject *self, PyObject *args)
 {
     (void)self; (void)args;
@@ -1887,6 +1901,9 @@ static PyMethodDef module_methods[] = {
     {"_diag_dump", m_diag_dump, METH_VARARGS,
      "_diag_dump(fd=2) -> None.  Dump every OS thread's lifecycle "
      "event ring to fd (default stderr).  Newest-first."},
+    {"_dump_parkers", m_dump_parkers, METH_NOARGS,
+     "_dump_parkers() -> None.  Dump every parked netpoll parker "
+     "(fd/g/hub/commit) to stderr.  Diagnostic."},
     {"_diag_flags", m_diag_flags, METH_NOARGS,
      "_diag_flags() -> int.  Current PYGO_DEBUG flag mask."},
     {"_datastack_sweep_stats", m_datastack_sweep_stats, METH_NOARGS,

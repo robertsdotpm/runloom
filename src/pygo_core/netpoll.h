@@ -47,6 +47,9 @@ int pygo_netpoll_pump(long long timeout_ns);
  * to decide whether to call pump or exit. */
 int pygo_netpoll_parked_count(void);
 
+/* DIAG: dump every parked parker (fd/g/hub/commit) to stderr. */
+void pygo_netpoll_dump_parkers(void);
+
 /* Hub-idle dwell-based stack reclaim (PYGO_STACK_PARK_SWEEP).  The
  * calling hub madvises the idle stack pages of its OWN parkers whose
  * park has exceeded threshold_ns.  Safe only when called by the owning
