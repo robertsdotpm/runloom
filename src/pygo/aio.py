@@ -1246,8 +1246,9 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
     def __init__(self):
         self._running = False
         self._closed  = False
-        self._readers = {}
-        self._writers = {}
+        # fd -> {"r": reader _Handle|None, "w": writer _Handle|None,
+        #        "g": the single per-fd I/O goroutine}.  See add_reader.
+        self._io = {}
         self._exception_handler = None
         # Thread-safe callback queue + keepalive flag.  call_soon_threadsafe
         # (called from FOREIGN OS threads -- run_in_executor pool workers,
@@ -1504,46 +1505,94 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
         return handle
 
     # ---- I/O readers / writers (level-triggered, matches selector loops) ----
+    # Stock asyncio keeps ONE selector key per fd carrying a COMBINED event mask
+    # (READ|WRITE) and services both directions from a single readiness check.
+    # pygo MUST mirror that with ONE goroutine per fd: a separate goroutine per
+    # direction would park the SAME fd in netpoll twice, and the arm is one-shot
+    # per fd -- so the second registration's direction silently overwrites the
+    # first's.  A reader AND a writer on one fd (e.g. tornado IOStream: an
+    # add_writer to detect connect completion + an add_reader for the response,
+    # both live at once) then lose one direction's wakeups: the connect-write
+    # event never fires, the queued request never flushes, the peer hangs.  So a
+    # single per-fd goroutine parks on the UNION mask and dispatches by the
+    # ready mask wait_fd returns; interest changes wake it to re-evaluate.
     def add_reader(self, fd, callback, *args):
-        self._add_io(fd, 1, callback, args, self._readers)
+        return self._pg_set_io(fd, 1, _Handle(callback, args, self))
 
     def remove_reader(self, fd):
-        return self._remove_io(fd, self._readers)
+        return self._pg_clear_io(fd, 1)
 
     def add_writer(self, fd, callback, *args):
-        self._add_io(fd, 2, callback, args, self._writers)
+        return self._pg_set_io(fd, 2, _Handle(callback, args, self))
 
     def remove_writer(self, fd):
-        return self._remove_io(fd, self._writers)
+        return self._pg_clear_io(fd, 2)
 
-    def _add_io(self, fd, evt, callback, args, table):
-        if fd in table:
-            table[fd]._cancelled = True
-        handle = _Handle(callback, args, self)
-        table[fd] = handle
-        def runner():
-            while not handle._cancelled:
-                try:
-                    _wait_fd(fd, evt)
-                except Exception:
-                    return
-                if handle._cancelled:
-                    return
-                try:
-                    callback(*args)
-                except Exception as e:
-                    self.call_exception_handler({"message": "I/O callback", "exception": e})
-                # Yield to scheduler before re-arming (mimic level-triggered).
-                pygo_core.sched_yield_classic()
-        pygo_core.go(runner)
+    def _pg_set_io(self, fd, evt, handle):
+        st = self._io.get(fd)
+        if st is None:
+            st = {"r": None, "w": None, "g": None}
+            self._io[fd] = st
+        key = "r" if evt == 1 else "w"
+        old = st[key]
+        if old is not None:
+            old._cancelled = True
+        st[key] = handle
+        self._pg_kick_io(fd, st)
         return handle
 
-    def _remove_io(self, fd, table):
-        h = table.pop(fd, None)
-        if h is not None:
-            h._cancelled = True
-            return True
-        return False
+    def _pg_clear_io(self, fd, evt):
+        st = self._io.get(fd)
+        if st is None:
+            return False
+        key = "r" if evt == 1 else "w"
+        h = st[key]
+        if h is None:
+            return False
+        h._cancelled = True
+        st[key] = None
+        if st["r"] is None and st["w"] is None:
+            self._io.pop(fd, None)
+        self._pg_kick_io(fd, st)
+        return True
+
+    def _pg_kick_io(self, fd, st):
+        # Wake the fd's I/O goroutine (if parked) so it re-reads the interest
+        # mask after a reader/writer was added/removed; spawn it if none runs.
+        g = st["g"]
+        if g is not None:
+            try:
+                g.cancel_wait_fd()   # raises CancelledError in its _wait_fd;
+            except Exception:        # the runner catches it and re-evaluates.
+                pass
+        if g is None and (st["r"] is not None or st["w"] is not None):
+            st["g"] = pygo_core.go(lambda: self._pg_io_runner(fd, st))
+
+    def _pg_io_runner(self, fd, st):
+        while True:
+            r = st["r"]; w = st["w"]
+            mask = (1 if (r is not None and not r._cancelled) else 0) \
+                 | (2 if (w is not None and not w._cancelled) else 0)
+            if mask == 0:
+                st["g"] = None
+                return
+            try:
+                ready = _wait_fd(fd, mask)
+            except asyncio.CancelledError:
+                # Interest changed (or fd dropped) via _pg_kick_io -- re-loop to
+                # recompute the mask and re-park, or exit if nothing's left.
+                continue
+            except Exception:
+                st["g"] = None
+                return
+            # Re-read each slot at dispatch time: a reader callback may add/remove
+            # the writer (or close the fd) before we service the write side.
+            if (ready & 1) and st["r"] is not None and not st["r"]._cancelled:
+                st["r"]._run()
+            if (ready & 2) and st["w"] is not None and not st["w"]._cancelled:
+                st["w"]._run()
+            # Yield before re-arming, mimicking a level-triggered selector pass.
+            pygo_core.sched_yield_classic()
 
     # ---- Network: high-level loop APIs ----
     async def create_datagram_endpoint(self, protocol_factory, **kw):
