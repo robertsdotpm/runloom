@@ -1797,7 +1797,7 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
     # (uvicorn/gunicorn --uds, database sockets).  Mirror create_server /
     # create_connection with an AF_UNIX socket.
     async def create_unix_server(self, protocol_factory, path=None, *, sock=None,
-                                 backlog=100, ssl=None,
+                                 backlog=100, ssl=None, cleanup_socket=True,
                                  ssl_handshake_timeout=None, **_ignored):
         if path is not None and sock is not None:
             raise ValueError(
@@ -1819,7 +1819,7 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
         sock.setblocking(False)
         sock.listen(backlog)
         return _ProtocolServer([sock], protocol_factory, loop=self,
-                               ssl_context=ssl,
+                               ssl_context=ssl, cleanup_unix=cleanup_socket,
                                ssl_handshake_timeout=ssl_handshake_timeout)
 
     async def create_unix_connection(self, protocol_factory, path=None, *,
@@ -2796,7 +2796,11 @@ class _StreamTransport(asyncio.Transport):
     cooperative sendall."""
 
     def __init__(self, sock, protocol, *, loop=None, call_connection_made=True,
-                 context=None):
+                 context=None, server=None):
+        # The _ProtocolServer that accepted this connection (None for client
+        # transports), so connection_lost can _detach() it and let the server's
+        # wait_closed() complete once every connection has dropped.
+        self._pg_server = server
         # Per-connection contextvars Context.  Stock asyncio runs a transport's
         # protocol callbacks (connection_made / data_received / eof_received /
         # connection_lost) inside the context captured when its reader Handle
@@ -3031,6 +3035,15 @@ class _StreamTransport(asyncio.Transport):
             except OSError:
                 pass
             _close_sock(self._sock)
+        def _detach_server():
+            # Let the accepting server's wait_closed() learn this connection is
+            # gone (asyncio calls server._detach from connection_lost).
+            srv = self._pg_server
+            if srv is not None and deliver_cl:
+                try:
+                    srv._detach(self)
+                except Exception:
+                    pass
         def _deliver():
             if deliver_cl:
                 try:
@@ -3038,6 +3051,7 @@ class _StreamTransport(asyncio.Transport):
                 except Exception as e:
                     self._report(e, "connection_lost")
             _close_sock_now()
+            _detach_server()
         loop = self._loop if self._loop is not None else asyncio.get_event_loop()
         try:
             loop.call_soon(_deliver, context=self._context)
@@ -3049,6 +3063,7 @@ class _StreamTransport(asyncio.Transport):
                 except Exception as e:
                     self._report(e, "connection_lost")
             _close_sock_now()
+            _detach_server()
 
     def is_closing(self):
         return self._closed
@@ -3127,7 +3142,7 @@ class _ProtocolServer(object):
     _StreamTransport and a protocol via factory."""
 
     def __init__(self, socks, protocol_factory, *, loop=None, ssl_context=None,
-                 ssl_handshake_timeout=None):
+                 ssl_handshake_timeout=None, cleanup_unix=True):
         # create_server may bind several sockets (one per address family);
         # accept independently on each.
         self._socks = list(socks)
@@ -3154,6 +3169,24 @@ class _ProtocolServer(object):
         # never comes.  WeakSet so a finished connection's transport is pruned
         # once its recv goroutine ends and drops the last reference.
         self._conns = _weakref.WeakSet()
+        # asyncio.Server.wait_closed(): block until the server is closed AND
+        # every accepted connection has finished.  _waiters is a list while
+        # pending; _wakeup() (called when both conditions hold) sets it to None.
+        self._waiters = []
+        # Unix server sockets bound to a filesystem path: remember (path, inode)
+        # so close() unlinks the socket file like asyncio's _unix_server_sockets
+        # -- only when the inode still matches (never unlink a file that replaced
+        # ours).  Abstract-namespace (\0-prefixed) and unbound sockets are skipped.
+        self._unix_paths = []
+        if cleanup_unix:
+            for s in self._socks:
+                try:
+                    if s.family == _socket.AF_UNIX:
+                        path = s.getsockname()
+                        if isinstance(path, str) and path and not path.startswith("\0"):
+                            self._unix_paths.append((path, _os.stat(path).st_ino))
+                except OSError:
+                    pass
         self._accept_gs = [pygo_core.go(lambda s=s: self._accept_loop(s))
                            for s in self._socks]
 
@@ -3177,7 +3210,7 @@ class _ProtocolServer(object):
             else:
                 protocol = self._factory()
                 self._conns.add(_StreamTransport(conn, protocol, loop=self._loop,
-                                                 context=self._context))
+                                                 context=self._context, server=self))
 
     def _setup_tls_conn(self, conn):
         try:
@@ -3195,7 +3228,7 @@ class _ProtocolServer(object):
             return
         protocol = self._factory()
         self._conns.add(_StreamTransport(tls, protocol, loop=self._loop,
-                                         context=self._context))
+                                         context=self._context, server=self))
 
     def get_loop(self):
         """asyncio.Server.get_loop().  Libraries (websockets) call this on
@@ -3232,6 +3265,38 @@ class _ProtocolServer(object):
             try: sock.shutdown(_socket.SHUT_RDWR)
             except OSError: pass
             _close_sock(sock)
+        # Unlink unix server socket files (inode-checked), like asyncio's
+        # _UnixSelectorEventLoop._stop_serving -- test_unix_server_addr_cleanup
+        # asserts os.path.exists(addr) is False right after close().
+        for path, ino in self._unix_paths:
+            try:
+                if _os.stat(path).st_ino == ino:
+                    _os.unlink(path)
+            except FileNotFoundError:
+                pass
+            except OSError:
+                pass
+        self._unix_paths = []
+        # If no connections are live, the "closed AND drained" condition holds
+        # now -- wake wait_closed() waiters.  Otherwise the last _detach() will.
+        if not self._conns:
+            self._wakeup()
+
+    def _detach(self, transport):
+        # Called by an accepted connection's transport when it finishes.  Once
+        # the server is closed and the last connection drops, wake wait_closed().
+        self._conns.discard(transport)
+        if self._closed and not self._conns:
+            self._wakeup()
+
+    def _wakeup(self):
+        waiters = self._waiters
+        if waiters is None:
+            return
+        self._waiters = None
+        for waiter in waiters:
+            if not waiter.done():
+                waiter.set_result(None)
 
     def close_clients(self):
         # asyncio 3.13+ API: gracefully close all client connections.
@@ -3251,7 +3316,15 @@ class _ProtocolServer(object):
                 pass
 
     async def wait_closed(self):
-        await asyncio.sleep(0)
+        # Block until the server is closed AND every connection has dropped, in
+        # either order (asyncio.Server.wait_closed).  _waiters is None only once
+        # _wakeup() has fired, i.e. both conditions already hold.
+        if self._waiters is None:
+            return
+        loop = self._loop if self._loop is not None else asyncio.get_event_loop()
+        waiter = loop.create_future()
+        self._waiters.append(waiter)
+        await waiter
 
     @property
     def sockets(self):
