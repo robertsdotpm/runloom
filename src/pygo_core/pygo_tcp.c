@@ -881,7 +881,14 @@ static PyObject *PygoTCPConn_connect_cls(PyTypeObject *cls, PyObject *args, PyOb
 #else
     rc = connect(fd, (struct sockaddr *)&addr, addrlen);
     if (rc < 0) {
-        if (errno == EINPROGRESS || errno == EAGAIN) {
+        /* EINTR is handled like EINPROGRESS, NOT as an error: POSIX says a
+         * connect() interrupted by a signal is not aborted -- the connection
+         * continues asynchronously, and the caller must wait for writability
+         * and check SO_ERROR (re-issuing connect() would fail EALREADY/
+         * EADDRINUSE).  Without this, a signal landing on the connect() syscall
+         * spuriously failed the connection with OSError(EINTR) -- confirmed by
+         * fault injection (strace -e inject=connect:error=EINTR:when=1). */
+        if (errno == EINPROGRESS || errno == EAGAIN || errno == EINTR) {
             if (pygo_netpoll_wait_fd(fd, PYGO_NETPOLL_WRITE, -1LL) < 0) {
                 int saved = errno;
                 close(fd);
