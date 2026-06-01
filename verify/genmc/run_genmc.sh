@@ -60,4 +60,15 @@ fi
 
 rm -f "$HERE/.genmc.pos.log" "$HERE/.genmc.neg.log" 2>/dev/null
 echo "  $pass passed, $fail failed"
-[ "$fail" -eq 0 ]
+
+# Chase-Lev work-stealing deque oracle -- its own harness (single-element
+# take/steal race, 2-element SC-fence necessity, resize, + the REAL
+# src/pygo_core/cldeque.c driven verbatim, each with a negative control).
+# Wired in here so the standard sweep exercises it; its exit status folds
+# into ours, so run_verify.sh fails if either tier regresses.
+cl_rc=0
+if [ -x "$HERE/run_chase_lev.sh" ]; then
+    echo ""
+    "$HERE/run_chase_lev.sh" || cl_rc=1
+fi
+[ "$fail" -eq 0 ] && [ "$cl_rc" -eq 0 ]

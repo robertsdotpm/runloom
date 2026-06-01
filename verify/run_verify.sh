@@ -153,6 +153,18 @@ if have cbmc; then
     else
         red "FAIL"; echo " -- see $WORK/cbmc.log"; fail=$((fail+1)); FAILED="$FAILED cbmc-cldeque"
     fi
+    # INV_race disjointness monitor on the same real cldeque.c (compiled with the
+    # zero-cost PYGO_CLDEQUE_VERIFY ghost hooks): segment-disjointness at pop's
+    # fenced top-read + TAKEN-once.  Its own harness also runs the -DBUG_SELFTEST
+    # negative control (teeth).  Slower (--unwind 8); fold its result in.
+    printf '  [cbmc] %-34s ' "cldeque.c INV_race monitor"
+    if [ -x "$CBMC_DIR/run_cldeque_disjoint.sh" ] \
+            && "$CBMC_DIR/run_cldeque_disjoint.sh" >"$WORK/cbmc_disjoint.log" 2>&1; then
+        green "PASS"; echo " -- INV_race: disjointness + TAKEN-once (+ teeth) on real cldeque.c"
+        pass=$((pass+1))
+    else
+        red "FAIL"; echo " -- see $WORK/cbmc_disjoint.log"; fail=$((fail+1)); FAILED="$FAILED cbmc-disjoint"
+    fi
 else
     echo "  (cbmc not found -- skipping;  sudo apt-get install cbmc)"
 fi

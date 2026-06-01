@@ -27,16 +27,22 @@ else echo "  (no rocq/coqc in switch '$SW' -- skipping)"; exit 0; fi
 
 pass=0; fail=0
 cd "$HERE"
-for v in "$HERE"/*.v; do
+# Compile every top-level proof, plus those in proof subdirectories (e.g.
+# chase_lev/StealClaim.v -- the Chase-Lev iRC11 fragment).  Each subdir proof is
+# compiled from its own directory so its .vo artifacts land beside it.
+for v in "$HERE"/*.v "$HERE"/*/*.v; do
     [ -e "$v" ] || continue
-    name="$(basename "$v" .v)"
-    printf '  [rc11] %-22s ' "$name"
-    if COMPILE "$name.v" >/tmp/rc11.$$.log 2>&1; then
+    d="$(dirname "$v")"; name="$(basename "$v" .v)"
+    label="$name"; [ "$d" != "$HERE" ] && label="$(basename "$d")/$name"
+    printf '  [rc11] %-22s ' "$label"
+    if ( cd "$d" && COMPILE "$name.v" ) >/tmp/rc11.$$.log 2>&1; then
         echo "PASS -- RC11 separation-logic proof machine-checked"; pass=$((pass+1))
     else
         echo "FAIL -- see below"; grep -iE 'error|tactic failure' /tmp/rc11.$$.log | head -8; fail=$((fail+1))
     fi
 done
-"$(command -v safe-rm || echo rm)" -f /tmp/rc11.$$.log "$HERE"/*.vo "$HERE"/*.vok "$HERE"/*.vos "$HERE"/*.glob 2>/dev/null
+"$(command -v safe-rm || echo rm)" -f /tmp/rc11.$$.log \
+    "$HERE"/*.vo "$HERE"/*.vok "$HERE"/*.vos "$HERE"/*.glob \
+    "$HERE"/*/*.vo "$HERE"/*/*.vok "$HERE"/*/*.vos "$HERE"/*/*.glob 2>/dev/null
 echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
