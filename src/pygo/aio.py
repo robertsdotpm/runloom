@@ -2786,37 +2786,53 @@ class _StreamTransport(asyncio.Transport):
             return
         self._closed = True
         self._stopping = True
-        try:
-            self._sock.shutdown(_socket.SHUT_RDWR)
-        except OSError:
-            pass
-        _close_sock(self._sock)
-        if not self._conn_lost_called:
+        # asyncio closes the fd inside the DEFERRED _call_connection_lost, NOT
+        # synchronously here.  Code routinely reads the socket right after
+        # transport.close() -- e.g. aiohttp's fingerprint-mismatch path does
+        # transport.close() then transport.get_extra_info("socket").getpeername()
+        # to drop the bad peer -- so closing the fd synchronously gives them
+        # EBADF (and the resulting OSError masks the ServerFingerprintMismatch
+        # they expect).  Defer the shutdown+close to the same loop turn that
+        # delivers connection_lost.
+        deliver_cl = not self._conn_lost_called
+        if deliver_cl:
             self._conn_lost_called = True
-            self._deliver_connection_lost(exc)
+        self._deliver_connection_lost(exc, deliver_cl)
 
-    def _deliver_connection_lost(self, exc):
-        # Schedule connection_lost on the loop (in this connection's context),
-        # NEVER inline -- exactly like asyncio's _call_connection_lost via
-        # call_soon.  Deferring matters on EOF: the recv loop may have just
-        # delivered the peer's final bytes (e.g. a websocket Close frame) to
-        # data_received, waking the protocol's reader task; that task must run
-        # and consume them BEFORE connection_lost, or the protocol reports an
-        # abnormal close instead of the clean one the peer actually sent.
-        def _deliver():
+    def _deliver_connection_lost(self, exc, deliver_cl=True):
+        # Schedule connection_lost (if not already delivered) AND the socket
+        # shutdown+close on the loop in this connection's context, NEVER inline
+        # -- exactly like asyncio's _call_connection_lost via call_soon, which
+        # also closes self._sock only after connection_lost.  Deferring matters
+        # on EOF: the recv loop may have just delivered the peer's final bytes
+        # (e.g. a websocket Close frame) to data_received, waking the protocol's
+        # reader task; that task must run and consume them BEFORE connection_lost
+        # (or the protocol reports an abnormal close), and the fd must stay valid
+        # until this turn so a post-close() getpeername() doesn't hit EBADF.
+        def _close_sock_now():
             try:
-                self._protocol.connection_lost(exc)
-            except Exception as e:
-                self._report(e, "connection_lost")
+                self._sock.shutdown(_socket.SHUT_RDWR)
+            except OSError:
+                pass
+            _close_sock(self._sock)
+        def _deliver():
+            if deliver_cl:
+                try:
+                    self._protocol.connection_lost(exc)
+                except Exception as e:
+                    self._report(e, "connection_lost")
+            _close_sock_now()
         loop = self._loop if self._loop is not None else asyncio.get_event_loop()
         try:
             loop.call_soon(_deliver, context=self._context)
         except RuntimeError:
             # Loop already closed: best-effort inline so done-futures resolve.
-            try:
-                self._run_cb(self._protocol.connection_lost, exc)
-            except Exception as e:
-                self._report(e, "connection_lost")
+            if deliver_cl:
+                try:
+                    self._run_cb(self._protocol.connection_lost, exc)
+                except Exception as e:
+                    self._report(e, "connection_lost")
+            _close_sock_now()
 
     def is_closing(self):
         return self._closed
