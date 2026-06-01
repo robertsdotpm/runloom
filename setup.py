@@ -191,7 +191,7 @@ def detect_compile_args():
         # MSVC / clang-cl.
         args += [
             "/W3",
-            "/std:c11",                # _Generic, needed by plat_atomic.h
+            "/std:c11",                # C11 baseline (all platforms); plat_atomic.h _Generic
             "/D_CRT_SECURE_NO_WARNINGS",
             "/DWIN32_LEAN_AND_MEAN",
             "/DNOMINMAX",
@@ -204,7 +204,8 @@ def detect_compile_args():
     else:
         # GCC / Clang / MinGW / ICC.
         args += [
-            "-std=gnu99",          # -std=c99 hides cpu_set_t / pthread internals on glibc
+            "-std=gnu11",          # C11 baseline (matches MSVC /std:c11); gnu* (not strict
+                                   # c11) keeps cpu_set_t / pthread internals visible on glibc
             "-Wall",
             "-Wextra",
             "-Wno-unused-parameter",
