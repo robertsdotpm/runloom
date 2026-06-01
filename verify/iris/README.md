@@ -18,24 +18,30 @@ an exclusive `claimed γ` token and two such tokens are contradictory
 property of `wake_state.pml` and `netpoll_commit.pml`, lifted from a finite-state
 check to a thread-modular program proof.
 
+## `WakeQueue.v` (Stage 2 — plain/SC Iris)
+The full `wake_state` lifecycle as a 3-state cell PARKED(0)→QUEUED(1)→
+RUNNING(2) with two CAS transitions, proving as a running concurrent program
+the two invariants `wake_state.pml` checks:
+- `wake_at_most_once` (INV1): among racing wakers, at most one enqueues the g
+  (no duplicate / orphan run-queue entry);
+- `pull_at_most_once` (INV2): among racing hubs, at most one runs it
+  (no double resume).
+Two exclusive ghost tokens (enq/run) flow to the unique CAS winner of each
+transition; two winners would hold two copies of an exclusive token.
+
 ## Scope and the weak-memory ceiling
-`OneShotWake.v` is **sequentially-consistent** Iris (HeapLang has an SC memory
-model). The honest ceiling of this arc:
-
-- **Stage 2** (planned): the full `wake_state` 6-state protocol as a HeapLang
-  module with ghost state, proving exactly-once/no-double-resume under
-  concurrency (not just the one-shot fragment).
-- **Stage 3** (weak memory): re-establish the publish/claim property under
-  **RC11** using **iRC11 / gpfsl** (the relaxed-memory separation logic built
-  on Iris). gpfsl lives in the iris-dev opam repo, not `coq-released`; if it
-  does not install against this Iris/Rocq, the herd7 litmus tests
-  (`verify/litmus/`) and GenMC (`verify/genmc/`) remain the weak-memory
-  evidence for the same fences, and this stays documented as open.
-
-A complete iRC11 proof of the full Chase-Lev deque or the entire netpoll claim
-protocol is a research-paper-scale effort; this directory advances the frontier
-as far as is soundly checkable here and marks the boundary explicitly rather
-than leaving `Admitted` holes claimed as proofs.
+Stages 1–2 are **sequentially-consistent** Iris (HeapLang has an SC memory
+model). **Stage 3** — re-establishing pygo's release/acquire fences under
+**RC11** with **iRC11 / gpfsl** — is the genuine research-scale ceiling, and is
+documented in `WEAK_MEMORY.md` rather than left as `Admitted` stubs. The key
+honesty point: the weak-memory *fence correctness* this would target (the
+netpoll commit publish needs the `pool->lock` round-trip, not the CAS acquire)
+is **already machine-checked** under RC11 by the herd7 litmus tests
+(`verify/litmus/`) and GenMC (`verify/genmc/`), both green in the suite. iRC11
+would add the unbounded, compositional separation-logic spec on top; the opam
+install is feasible (clean resolution; see `WEAK_MEMORY.md`) but the proof
+itself is a research artifact. This directory advances the frontier as far as
+is soundly checkable here and marks the boundary explicitly.
 
 ## Run
 ```sh
