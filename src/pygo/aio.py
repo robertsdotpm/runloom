@@ -157,12 +157,31 @@ def _pg_run_with_module_root(body, module_name):
 # ------------------------------------------------------------------
 
 
+def _blocking(fn, *args):
+    """pygo_core.blocking (offload fn to the blocking-pool), but deliver a
+    cancellation requested WHILE we were in the call.
+
+    pygo_core.blocking parks the goroutine in C with no driver await-point, so
+    task.cancel() cannot interrupt it -- it only sets the task's one-shot
+    _pgmustcancel and wakes us (which pygo_core.blocking now ignores until the
+    worker is done, to avoid freeing the in-flight job).  Stock asyncio resolves
+    via run_in_executor, an await that raises CancelledError on cancel; mirror
+    that here so a cancel during DNS doesn't silently get swallowed and let the
+    caller go on to park uncancellably (e.g. in the connect wait_fd -> hang)."""
+    r = pygo_core.blocking(fn, *args)
+    task = asyncio.current_task()
+    if task is not None and getattr(task, "_pgmustcancel", False):
+        task._pgmustcancel = False
+        raise asyncio.CancelledError()
+    return r
+
+
 def _resolve(host, port, family, type_, proto, flags):
     """getaddrinfo via the blocking-offload pool, so DNS doesn't wedge the
     goroutine's hub (it is a non-preemptible blocking C call).  Runs inline
     when not on a goroutine -- safe in either context."""
-    return pygo_core.blocking(_socket.getaddrinfo, host, port,
-                              family, type_, proto, flags)
+    return _blocking(_socket.getaddrinfo, host, port,
+                     family, type_, proto, flags)
 
 
 def _close_sock(sock):

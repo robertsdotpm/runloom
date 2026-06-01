@@ -49,6 +49,11 @@ typedef struct pygo_block_job {
     void *result;
     pygo_g_t *g;                  /* the parked goroutine */
     void *hub;                    /* its hub, or NULL for the single-thread sched */
+    int done;                     /* set (release) once the worker is fully
+                                   * finished touching this job; the parked
+                                   * goroutine spins on it so a spurious wake
+                                   * (e.g. task.cancel() -> G.wake()) can't
+                                   * return and free the stack job mid-worker. */
     struct pygo_block_job *next;
 } pygo_block_job_t;
 
@@ -116,22 +121,37 @@ static PYGO_THREAD_RET pygo_blockpool_worker(void *arg)
         if (bp_head == NULL) bp_tail = NULL;
         pygo_mutex_unlock(&bp_lock);
 
-        /* Run the blocking work off the hub.  No GIL is held here. */
-        job->result = job->fn(job->arg);
+        /* Snapshot the wake target BEFORE publishing `done`.  Once `done` is
+         * set, the parked goroutine may resume and free its stack `job` at any
+         * instant, so neither the wake below nor anything after it may read
+         * job->.  (The goroutine can be resumed early by a spurious wake --
+         * task.cancel() -> G.wake() -- which is exactly the use-after-free that
+         * crashed here: it returned from pygo_blocking_call and unwound while
+         * this worker was still about to call job->fn.) */
+        {
+            void *hub = job->hub;
+            pygo_g_t *g = job->g;
 
-        /* Re-queue the goroutine, then (single-thread only) kick the
-         * pump so an idle scheduler wakes.  Re-queue BEFORE decrementing
-         * inflight so the drain loop, which stays alive while inflight>0,
-         * sees the goroutine on its wake_list the moment inflight hits 0.
-         * After the wake the worker must not touch the job again -- the
-         * resumed goroutine owns and frees it. */
-        if (job->hub != NULL) {
-            pygo_mn_wake_g(job->hub, job->g);
-        } else {
-            pygo_sched_wake_safe(job->g);
-            pygo_netpoll_wake_pump();
+            /* Run the blocking work off the hub.  No GIL is held here. */
+            job->result = job->fn(job->arg);
+
+            /* Publish completion: release-store so the resumed goroutine sees
+             * job->result, and a marker that the worker is done with job-> .
+             * After this line the worker touches ONLY locals + statics. */
+            __atomic_store_n(&job->done, 1, __ATOMIC_RELEASE);
+
+            /* Re-queue the goroutine, then (single-thread only) kick the pump
+             * so an idle scheduler wakes.  Re-queue BEFORE decrementing
+             * inflight so the drain loop, which stays alive while inflight>0,
+             * sees the goroutine on its wake_list the moment inflight hits 0. */
+            if (hub != NULL) {
+                pygo_mn_wake_g(hub, g);
+            } else {
+                pygo_sched_wake_safe(g);
+                pygo_netpoll_wake_pump();
+            }
+            __atomic_sub_fetch(&bp_inflight, 1, __ATOMIC_ACQ_REL);
         }
-        __atomic_sub_fetch(&bp_inflight, 1, __ATOMIC_ACQ_REL);
     }
     PYGO_THREAD_RETURN((void *)0);
 }
@@ -235,6 +255,7 @@ void *pygo_blocking_call(void *(*fn)(void *), void *arg)
     job.result = NULL;
     job.g      = g;
     job.hub    = hub;
+    job.done   = 0;
     job.next   = NULL;
 
     /* Count the job as outstanding BEFORE enqueueing so the single-thread
@@ -249,14 +270,22 @@ void *pygo_blocking_call(void *(*fn)(void *), void *arg)
     pygo_cond_signal(&bp_cond);
     pygo_mutex_unlock(&bp_lock);
 
-    /* Park until the worker wakes us.  Hub: snap the per-g tstate and
-     * yield (the wake routes back through the hub queue / global runq).
-     * Single-thread: the race-safe park_safe/wake_safe handshake. */
+    /* Park until the WORKER signals completion (job.done).  Re-park on any
+     * other wake: a task.cancel() delivers G.wake() to this goroutine while it
+     * is parked here, and returning then would free the stack `job` while the
+     * worker still references it (use-after-free SIGSEGV).  The worker always
+     * runs the job and wakes us, so the loop always terminates; cancellation is
+     * delivered at the next real await-point after we return.  Hub: snap the
+     * per-g tstate and yield.  Single-thread: race-safe park_safe/wake_safe. */
     if (hub != NULL) {
-        pygo_sched_park_current();
-        pygo_coro_yield();
+        while (!__atomic_load_n(&job.done, __ATOMIC_ACQUIRE)) {
+            pygo_sched_park_current();
+            pygo_coro_yield();
+        }
     } else {
-        pygo_sched_park_safe();
+        while (!__atomic_load_n(&job.done, __ATOMIC_ACQUIRE)) {
+            pygo_sched_park_safe();
+        }
     }
 
     return job.result;
