@@ -57,6 +57,39 @@ check_spin_must_fail() {  # name, define, human-description
     else red "FAIL"; echo " (expected the injected bug to be caught) -- $desc"; fail=$((fail+1)); FAILED="$FAILED $name-neg"; fi
 }
 
+# ---- Spin LIVENESS: acceptance-cycle detection (pan -a), optionally under
+#      weak fairness (pan -a -f).  A liveness model passes iff pan finds no
+#      acceptance cycle ("errors: 0"); a negative control passes iff it DOES
+#      find one.  NOREDUCE keeps partial-order reduction out of the
+#      fairness/acceptance search (sound, and the models are tiny). ----------
+run_spin_live() {  # name, panflags (e.g. "-a -f"), extra-spin-define
+    local name="$1" panflags="$2" extra="${3:-}"
+    local d; d="$(mktemp -d "$WORK/${name}.XXXX")"; cp "$SPIN_DIR/$name.pml" "$d/"
+    ( cd "$d" || exit 2
+      spin $extra -a "$name.pml" >gen.log 2>&1 || { echo "SPINGEN_FAIL"; exit 0; }
+      cc -O2 -DNOREDUCE -o pan pan.c >cc.log 2>&1 || { echo "CC_FAIL"; exit 0; }
+      ./pan $panflags -m500000 >run.log 2>&1
+      grep -q "errors: 0" run.log && echo OK || echo BAD )
+}
+
+check_spin_live() {  # name, panflags, human-description
+    local name="$1" panflags="$2" desc="$3"
+    printf '  [spin] %-26s ' "$name [$panflags]"
+    local r; r="$(run_spin_live "$name" "$panflags")"
+    if [ "$r" = OK ]; then green "PASS"; echo " -- $desc"; pass=$((pass+1))
+    else red "FAIL"; echo " ($r) -- $desc"; fail=$((fail+1)); FAILED="$FAILED $name-live"; fi
+}
+
+# negative liveness control: pan MUST find an acceptance cycle here.
+check_spin_live_must_fail() {  # name, panflags, define-or-empty, human-description
+    local name="$1" panflags="$2" def="$3" desc="$4"
+    local extra=""; [ -n "$def" ] && extra="-D$def"
+    printf '  [spin] %-26s ' "$name [$panflags${def:+ -D$def}]"
+    local r; r="$(run_spin_live "$name" "$panflags" "$extra")"
+    if [ "$r" = BAD ]; then green "PASS"; echo " -- correctly DETECTS: $desc"; pass=$((pass+1))
+    else red "FAIL"; echo " (expected a liveness violation) -- $desc"; fail=$((fail+1)); FAILED="$FAILED $name-live-neg"; fi
+}
+
 echo "================ pygo formal verification ================"
 if have spin && have cc; then
     echo "-- SPIN (exhaustive interleaving, SC memory model) --"
@@ -89,6 +122,16 @@ if have spin && have cc; then
     check_spin_must_fail select_close BUG_ABORT_NOCASE "abort returns the no-case sentinel for a blocking select"
     check_spin_must_fail select_close BUG_ABORT_DROP   "abort evicts + drops an already-delivered value"
     check_spin_must_fail select_close BUG_SPURIOUS     "spurious wake errors out instead of retrying"
+
+    echo "-- SPIN liveness (acceptance-cycle detection; -f = weak fairness) --"
+    # Non-starvation of the wake path REQUIRES fairness: holds under -f,
+    # and (the teeth) FAILS without it -- a busy peer can starve the woken g.
+    check_spin_live          live_wake  "-a -f"  "wake non-starvation: a woken g is eventually resumed (under weak fairness)"
+    check_spin_live_must_fail live_wake "-a"  "" "without fairness a busy peer starves the woken g forever -> fairness is load-bearing"
+    # Lock-free progress of the steal path needs NO fairness: holds under -a,
+    # and the blocking-design control (a preemptible lock holder) FAILS it.
+    check_spin_live          live_deque "-a"     "deque lock-free progress: every item consumed under ANY scheduling (no fairness assumed)"
+    check_spin_live_must_fail live_deque "-a" BUG_BLOCKING "a blocking steal whose lock holder is preempted stalls all waiters -> not lock-free"
 else
     echo "  (spin / cc not found -- skipping Spin models;  sudo apt-get install spin)"
 fi
