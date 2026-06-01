@@ -2080,13 +2080,20 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
         # first-call codec import) before any goroutine runs them on a small
         # stack -- see prewarm_stdlib.
         _runtime.prewarm_stdlib()
-        self._stopping = False
-        # Keepalive: drains call_soon_threadsafe (so a cross-thread loop.stop(),
-        # as aiosmtpd's threaded Controller does, actually runs) and keeps the
-        # scheduler from returning idle while every goroutine is parked
-        # (run_forever must block until stop()).
+        # Do NOT reset self._stopping here.  asyncio honors a stop() issued
+        # BEFORE run_forever() -- it runs one iteration and returns (stock checks
+        # self._stopping at the top of each loop pass and only clears it on
+        # EXIT).  Resetting it at entry wipes that request, so the keepalive
+        # goroutine never sees the stop and spins sched_sleep forever -- the
+        # `loop.stop(); loop.run_forever()` cleanup idiom (aiohttp's synchronous
+        # test_streams/test_web_app default-loop tests) hangs.  When _stopping is
+        # already True the keepalive calls sched_stop() on its first pass and the
+        # drive returns immediately.
         self._spawn_keepalive()
-        self._drive()
+        try:
+            self._drive()
+        finally:
+            self._stopping = False
 
     def stop(self):
         # asyncio contract: request the loop stop after the current iteration.
