@@ -29,19 +29,20 @@ the two invariants `wake_state.pml` checks:
 Two exclusive ghost tokens (enq/run) flow to the unique CAS winner of each
 transition; two winners would hold two copies of an exclusive token.
 
-## Scope and the weak-memory ceiling
+## `rc11/CommitPublish.v` (Stage 3 — weak memory, DONE)
 Stages 1–2 are **sequentially-consistent** Iris (HeapLang has an SC memory
-model). **Stage 3** — re-establishing pygo's release/acquire fences under
-**RC11** with **iRC11 / gpfsl** — is the genuine research-scale ceiling, and is
-documented in `WEAK_MEMORY.md` rather than left as `Admitted` stubs. The key
-honesty point: the weak-memory *fence correctness* this would target (the
-netpoll commit publish needs the `pool->lock` round-trip, not the CAS acquire)
-is **already machine-checked** under RC11 by the herd7 litmus tests
-(`verify/litmus/`) and GenMC (`verify/genmc/`), both green in the suite. iRC11
-would add the unbounded, compositional separation-logic spec on top; the opam
-install is feasible (clean resolution; see `WEAK_MEMORY.md`) but the proof
-itself is a research artifact. This directory advances the frontier as far as
-is soundly checkable here and marks the boundary explicitly.
+model). **Stage 3** is the genuine weak-memory tier: `rc11/CommitPublish.v`
+proves pygo's commit-publish release/acquire pattern correct under **RC11** in
+**iRC11 / gpfsl** — a running concurrent program whose parker reads the
+published readiness (42), never the stale 0, under the relaxed-memory model.
+It is machine-checked (`rc11/run_rc11.sh` → PASS), not an `Admitted` stub. See
+`WEAK_MEMORY.md` for the property, the proof, and the build. The same fence is
+independently corroborated by the herd7 litmus tests (`verify/litmus/`) and
+GenMC (`verify/genmc/`) — three independent weak-memory witnesses. (gpfsl pins
+iris-dev, so it lives in its own opam switch and never disturbs the
+released-Iris build of Stages 1–2.) A full iRC11 proof of the *entire* deque /
+claim protocol remains research-scale; the load-bearing commit-publish core is
+done.
 
 ## Run
 ```sh

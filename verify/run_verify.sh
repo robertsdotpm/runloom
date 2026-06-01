@@ -253,6 +253,21 @@ if [ -x "$HERE/iris/run_iris.sh" ]; then
     fi
 fi
 
+# ---- iRC11 / RC11 weak-memory separation logic (gpfsl) -------------------
+# The genuine weak-memory tier: a running concurrent program proved under RC11.
+# Needs the gpfsl opam switch; skips cleanly otherwise (see WEAK_MEMORY.md).
+if [ -x "$HERE/iris/rc11/run_rc11.sh" ]; then
+    if rc_out="$("$HERE/iris/rc11/run_rc11.sh" 2>&1)"; then
+        echo "$rc_out"
+        if echo "$rc_out" | grep -q "passed, 0 failed"; then
+            rp="$(echo "$rc_out" | sed -n 's/.* \([0-9]*\) passed, 0 failed/\1/p' | tail -1)"
+            [ -n "$rp" ] && pass=$((pass+rp))
+        fi
+    else
+        echo "$rc_out"; fail=$((fail+1)); FAILED="$FAILED rc11"
+    fi
+fi
+
 echo "----------------------------------------------------------"
 echo "  $pass passed, $fail failed"
 [ -n "$FAILED" ] && echo "  failed:$FAILED"
