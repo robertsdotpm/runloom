@@ -1672,13 +1672,21 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
             sock = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
             sock.setblocking(False)
             try:
-                sock.connect(path)
-            except BlockingIOError:
-                _wait_fd(sock.fileno(), 2)
-                err = sock.getsockopt(_socket.SOL_SOCKET, _socket.SO_ERROR)
-                if err != 0:
-                    sock.close()
-                    raise OSError(err, "connect failed")
+                try:
+                    sock.connect(path)
+                except BlockingIOError:
+                    _wait_fd(sock.fileno(), 2)
+                    err = sock.getsockopt(_socket.SOL_SOCKET, _socket.SO_ERROR)
+                    if err != 0:
+                        raise OSError(err, "connect failed")
+            except BaseException:
+                # connect() to a missing/forbidden path fails IMMEDIATELY with
+                # FileNotFoundError / PermissionError -- never raising
+                # BlockingIOError -- so close the socket on ANY failure (as
+                # asyncio's create_unix_connection does), or it leaks and
+                # surfaces as ResourceWarning("unclosed <socket ...>").
+                sock.close()
+                raise
         else:
             sock.setblocking(False)
         if ssl is not None:
@@ -2878,6 +2886,17 @@ class _StreamTransport(asyncio.Transport):
 
     def set_protocol(self, protocol):
         self._protocol = protocol
+
+    @property
+    def _sslcontext(self):
+        # White-box compat: code/tests read a transport's SSLContext via the
+        # private _sslcontext (asyncio's _SSLProtocolTransport attribute).
+        # aiohttp's test_tcp_connector_do_not_raise_connector_ssl_error asserts
+        # `transport._sslcontext is client_ssl_ctx` to verify the connector
+        # reuses the caller's context.  Surface the context the _TLSSock wrapped
+        # the socket with (None for a plaintext transport, like stock asyncio).
+        obj = getattr(self._sock, "ssl_object", None)
+        return obj.context if obj is not None else None
 
     # ---- flow control (read side) ----
     def pause_reading(self):
