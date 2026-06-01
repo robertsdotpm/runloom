@@ -1732,9 +1732,12 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
     async def create_unix_connection(self, protocol_factory, path=None, *,
                                      ssl=None, sock=None, server_hostname=None,
                                      ssl_handshake_timeout=None, **_ignored):
+        if path is not None and sock is not None:
+            raise ValueError(
+                "path and sock can not be specified at the same time")
         if sock is None:
             if path is None:
-                raise ValueError("no path and no sock were specified")
+                raise ValueError("no path and sock were specified")
             sock = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
             sock.setblocking(False)
             try:
