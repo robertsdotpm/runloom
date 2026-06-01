@@ -91,6 +91,43 @@ for ctl in BUG_NO_SC_FENCE BUG_NO_RECHECK BUG_NO_BUMP; do
     fi
 done
 
+# --- io_uring SINGLE-op park/wake commit handshake (io_uring.c op->wait) -----
+# Drift-guard: the harness mirrors the RELEASE result-store + ACQ_REL exchange /
+# CAS on op->wait.  If io_uring.c drops the handshake or weakens those orders,
+# fail loudly so iouring_waitcommit.c gets re-synced rather than silently
+# passing against a stale model.
+IOU_C="$HERE/../../src/pygo_core/io_uring.c"
+printf '  [genmc] %-30s ' "iouring wait-commit drift-guard"
+if [ -f "$IOU_C" ] \
+   && grep -q "PYGO_IOURING_WAIT_PARKED" "$IOU_C" \
+   && grep -q "PYGO_IOURING_WAIT_DONE" "$IOU_C" \
+   && [ "$(grep -c '__atomic_exchange_n(&op->wait' "$IOU_C")" -ge 2 ]; then
+    green "PASS"; echo " -- io_uring.c retains the op->wait commit handshake (drain + ring)"; pass=$((pass+1))
+else
+    red "FAIL"; echo " -- io_uring.c changed the op->wait handshake; re-sync iouring_waitcommit.c"; fail=$((fail+1))
+fi
+
+printf '  [genmc] %-30s ' "iouring_waitcommit.c"
+if "$G" -- "$HERE/iouring_waitcommit.c" >"$HERE/.genmc.pos.log" 2>&1 \
+        && grep -q "No errors were detected" "$HERE/.genmc.pos.log"; then
+    n="$(sed -n 's/.*complete executions explored: \([0-9]*\).*/\1/p' "$HERE/.genmc.pos.log" | tail -1)"
+    green "PASS"; echo " -- no lost wake / no wake-without-park / result-visible (${n:-?} RC11 execs)"; pass=$((pass+1))
+else
+    red "FAIL"; echo " -- see $HERE/.genmc.pos.log"; fail=$((fail+1))
+fi
+for ctl in BUG_PARK_PLAIN_STORE BUG_EXCHANGE_RELAXED BUG_WOKE_RELAXED BUG_LOAD_RELAXED; do
+    printf '  [genmc] %-30s ' "iouring_waitcommit.c(-D$ctl)"
+    if "$G" -- "-D$ctl" "$HERE/iouring_waitcommit.c" >"$HERE/.genmc.neg.log" 2>&1; then
+        red "FAIL"; echo " (expected a violation) -- see $HERE/.genmc.neg.log"; fail=$((fail+1))
+    else
+        if grep -qiE "violation|error" "$HERE/.genmc.neg.log"; then
+            green "PASS"; echo " -- correctly DETECTS the lost wake / stale result"; pass=$((pass+1))
+        else
+            red "FAIL"; echo " (errored but no violation) -- see $HERE/.genmc.neg.log"; fail=$((fail+1))
+        fi
+    fi
+done
+
 rm -f "$HERE/.genmc.pos.log" "$HERE/.genmc.neg.log" 2>/dev/null
 echo "  $pass passed, $fail failed"
 
