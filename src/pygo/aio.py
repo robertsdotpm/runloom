@@ -2105,7 +2105,8 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
                             family=_socket.AF_UNSPEC, flags=_socket.AI_PASSIVE,
                             sock=None, backlog=100, ssl=None,
                             reuse_address=None, reuse_port=None,
-                            ssl_handshake_timeout=None, **_ignored):
+                            ssl_handshake_timeout=None, start_serving=True,
+                            **_ignored):
         if sock is not None:
             sock.setblocking(False)
             socks = [sock]
@@ -2190,7 +2191,8 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
         # cb=None: caller wired up via protocol factory + Transport.
         # We still need an accept loop per socket that builds Transports per conn.
         return _ProtocolServer(socks, protocol_factory, loop=self, ssl_context=ssl,
-                               ssl_handshake_timeout=ssl_handshake_timeout)
+                               ssl_handshake_timeout=ssl_handshake_timeout,
+                               start_serving=start_serving)
 
     # ---- Unix domain sockets (loop.create_unix_server / _connection) ----
     # The base class raises NotImplementedError; UDS is common for local IPC
@@ -2198,7 +2200,8 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
     # create_connection with an AF_UNIX socket.
     async def create_unix_server(self, protocol_factory, path=None, *, sock=None,
                                  backlog=100, ssl=None, cleanup_socket=True,
-                                 ssl_handshake_timeout=None, **_ignored):
+                                 ssl_handshake_timeout=None, start_serving=True,
+                                 **_ignored):
         if path is not None and sock is not None:
             raise ValueError(
                 "path and sock can not be specified at the same time")
@@ -2220,7 +2223,8 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
         sock.listen(backlog)
         return _ProtocolServer([sock], protocol_factory, loop=self,
                                ssl_context=ssl, cleanup_unix=cleanup_socket,
-                               ssl_handshake_timeout=ssl_handshake_timeout)
+                               ssl_handshake_timeout=ssl_handshake_timeout,
+                               start_serving=start_serving)
 
     async def create_unix_connection(self, protocol_factory, path=None, *,
                                      ssl=None, sock=None, server_hostname=None,
@@ -3866,10 +3870,12 @@ class _ProtocolServer(object):
     _StreamTransport and a protocol via factory."""
 
     def __init__(self, socks, protocol_factory, *, loop=None, ssl_context=None,
-                 ssl_handshake_timeout=None, cleanup_unix=True):
+                 ssl_handshake_timeout=None, cleanup_unix=True,
+                 start_serving=True):
         # create_server may bind several sockets (one per address family);
-        # accept independently on each.
-        self._socks = list(socks)
+        # accept independently on each.  Named _sockets to match asyncio.Server
+        # (libraries / tests read srv._sockets); nulled in close().
+        self._sockets = list(socks)
         self._factory = protocol_factory
         self._loop = loop
         # asyncio.Server exposes _ssl_context (None when no TLS); libraries
@@ -3903,7 +3909,7 @@ class _ProtocolServer(object):
         # ours).  Abstract-namespace (\0-prefixed) and unbound sockets are skipped.
         self._unix_paths = []
         if cleanup_unix:
-            for s in self._socks:
+            for s in self._sockets:
                 try:
                     if s.family == _socket.AF_UNIX:
                         path = s.getsockname()
@@ -3911,8 +3917,19 @@ class _ProtocolServer(object):
                             self._unix_paths.append((path, _os.stat(path).st_ino))
                 except OSError:
                     pass
+        # asyncio create_server(start_serving=False): bind+listen now, but don't
+        # accept until start_serving()/serve_forever().  is_serving() reflects it.
+        self._serving = False
+        self._accept_gs = []
+        if start_serving:
+            self._start_accepting()
+
+    def _start_accepting(self):
+        if self._serving or self._closed or self._sockets is None:
+            return
+        self._serving = True
         self._accept_gs = [pygo_core.go(lambda s=s: self._accept_loop(s))
-                           for s in self._socks]
+                           for s in self._sockets]
 
     def _accept_loop(self, sock):
         while not self._closed:
@@ -3960,21 +3977,27 @@ class _ProtocolServer(object):
         return self._loop if self._loop is not None else asyncio.get_event_loop()
 
     def is_serving(self):
-        return not self._closed
+        return self._serving and not self._closed
 
     async def start_serving(self):
-        # The accept loop is started in __init__, so we are already serving;
-        # this mirrors asyncio.Server.start_serving() as a no-op when already up.
-        return None
+        # asyncio.Server.start_serving(): begin accepting (idempotent).  For a
+        # server created with start_serving=False this spawns the accept loops.
+        self._start_accepting()
 
     async def serve_forever(self):
-        # Run until close() (or cancellation of this coroutine) ends it.
+        # asyncio.Server.serve_forever(): start accepting if not already, then
+        # run until close() (or cancellation of this coroutine) ends it.  On a
+        # closed server it raises, like asyncio.
+        if self._closed:
+            raise RuntimeError("server {0!r} is closed".format(self))
+        self._start_accepting()
         while not self._closed:
             await asyncio.sleep(0.05)
 
     def close(self):
         if self._closed: return
         self._closed = True
+        self._serving = False
         # asyncio.Server.close() ONLY stops the listeners; established
         # connections keep running until they finish (or are closed explicitly
         # via close_clients()/abort_clients(), or cancelled when the loop ends).
@@ -3985,10 +4008,13 @@ class _ProtocolServer(object):
         # and the peer sees an abnormal 1006 close.  (We used to close clients
         # here to dodge the cancel-can't-interrupt-wait_fd hang; that's fixed in
         # the C core now, so the recv goroutines get cleaned up on loop teardown.)
-        for sock in self._socks:
+        for sock in self._sockets:
             try: sock.shutdown(_socket.SHUT_RDWR)
             except OSError: pass
             _close_sock(sock)
+        # asyncio.Server nulls _sockets on close (the public `sockets` property
+        # then returns ()); tests assert `srv._sockets is None` afterward.
+        self._sockets = None
         # Unlink unix server socket files (inode-checked), like asyncio's
         # _UnixSelectorEventLoop._stop_serving -- test_unix_server_addr_cleanup
         # asserts os.path.exists(addr) is False right after close().
@@ -4052,7 +4078,9 @@ class _ProtocolServer(object):
 
     @property
     def sockets(self):
-        return tuple(self._socks) if not self._closed else ()
+        if self._closed or self._sockets is None:
+            return ()
+        return tuple(self._sockets)
 
     async def __aenter__(self):
         return self
