@@ -147,6 +147,29 @@ static int sys_io_uring_register(int fd, unsigned opcode, void *arg,
     return (int)syscall(__NR_io_uring_register, fd, opcode, arg, nr_args);
 }
 
+/* Submit pending SQEs (min_complete=0, non-blocking), retrying on EINTR.
+ *
+ * A submit-only io_uring_enter does not wait, but the kernel still checks for a
+ * pending signal first and can return EINTR before consuming the SQEs.  Letting
+ * that EINTR reach the caller corrupts an otherwise-fine file_read/recv into a
+ * spurious OSError(EINTR) -- confirmed by fault injection (strace
+ * -e inject=io_uring_enter:error=EINTR:when=1).  Retry instead: a re-issued
+ * enter submits whatever the previous call left unconsumed in the SQ.  Our
+ * submit path holds sub_lock across the single-SQE write + enter, so that is
+ * exactly our one SQE (if the EINTR'd call hadn't taken it) or nothing (if it
+ * had -- the op is already in flight and enter returns 0); the SQE is submitted
+ * exactly once either way.  EINTR is transient (a delivered signal), so this is
+ * bounded; any other error is returned unchanged.  Mirrors the EINTR-retry the
+ * GETEVENTS wait loops already do. */
+static int sys_io_uring_submit_eintr(int ring_fd, unsigned to_submit)
+{
+    int n;
+    do {
+        n = sys_io_uring_enter(ring_fd, to_submit, 0, 0, NULL, 0);
+    } while (n < 0 && errno == EINTR);
+    return n;
+}
+
 /* Per-op record.  user_data on the SQE points to one of these so
  * drain can route the completion back to the right waiter.  For
  * "single" ops the record lives on the submitter's C stack across
@@ -546,7 +569,7 @@ static int pygo_iouring_submit_sqe(struct io_uring_sqe sqe_template,
     /* Submit without waiting -- the kernel takes the SQE and we
      * return immediately.  The CQE will arrive whenever the op
      * completes; the eventfd notifies the netpoll pump. */
-    n = sys_io_uring_enter(s->ring_fd, 1, 0, 0, NULL, 0);
+    n = sys_io_uring_submit_eintr(s->ring_fd, 1);   /* retry on EINTR */
     pygo_mutex_unlock(&s->sub_lock);
     if (n < 0) return -1;
     __atomic_add_fetch(&pygo_iouring_inflight_count, 1, __ATOMIC_ACQ_REL);
@@ -1276,7 +1299,7 @@ static int pygo_iouring_ring_submit_sqe(pygo_iouring_ring_t *r,
     r->sqes[idx].user_data = (uint64_t)(uintptr_t)op;
     r->sq_array[idx] = idx;
     __atomic_store_n(r->sq_tail, tail + 1, __ATOMIC_RELEASE);
-    n = sys_io_uring_enter(r->ring_fd, 1, 0, 0, NULL, 0);
+    n = sys_io_uring_submit_eintr(r->ring_fd, 1);   /* retry on EINTR */
     if (n < 0) return -1;
     __atomic_add_fetch(&r->inflight, 1, __ATOMIC_ACQ_REL);
     /* Also bump the process-wide counter so hub_main's idle decision
