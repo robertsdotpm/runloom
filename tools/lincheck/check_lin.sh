@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# check_lin.sh -- linearizability pipeline for pygo channels.
+#
+#   1. record a concurrent send/recv/close history from a real M:N run;
+#   2. check it against the sequential FIFO-channel spec with Porcupine
+#      (expect LINEARIZABLE);
+#   3. teeth: corrupt the history (phantom delivery) and re-check
+#      (expect NOT LINEARIZABLE);
+#   4. run the stateful Hypothesis model of the channel API.
+#
+# Usage:  tools/lincheck/check_lin.sh
+# Env:    PYTHON=...  interpreter (default: free-threaded 3.13t if present)
+set -u
+HERE="$(cd "$(dirname "$0")" && pwd)"
+ROOT="$(cd "$HERE/../.." && pwd)"
+
+if [ -z "${PYTHON:-}" ]; then
+    for cand in "$HOME/.pyenv/versions/3.13.13t/bin/python3" python3.13t python3; do
+        command -v "$cand" >/dev/null 2>&1 && { PYTHON="$cand"; break; }
+    done
+fi
+export PYTHON PYTHON_GIL=0
+RM="$(command -v safe-rm || echo rm)"
+HIST="$(mktemp /tmp/pygo_hist.XXXX.json)"
+BAD="$(mktemp /tmp/pygo_hist_bad.XXXX.json)"
+rc=0
+
+echo "== 1. record concurrent channel history (real M:N) =="
+PYTHONPATH="$ROOT/src" "$PYTHON" "$HERE/record_history.py" "$HIST" 4 3 8 2 || rc=1
+
+echo "== 2. Porcupine check (expect LINEARIZABLE) =="
+if [ ! -x "$HERE/porcupine/lincheck" ]; then
+    ( cd "$HERE/porcupine" && go build -o lincheck . ) || { echo "go build failed"; exit 2; }
+fi
+"$HERE/porcupine/lincheck" "$HIST" || rc=1
+
+echo "== 3. teeth: phantom delivery (expect NOT LINEARIZABLE) =="
+"$PYTHON" - "$HIST" "$BAD" <<'PY'
+import json, sys
+h = json.load(open(sys.argv[1]))
+for e in h["events"]:
+    if e["op"] == "recv" and e["result"] == "ok":
+        e["value"] = 999999          # never sent
+        break
+json.dump(h, open(sys.argv[2], "w"))
+PY
+if "$HERE/porcupine/lincheck" "$BAD"; then
+    echo "  >>> FAIL: checker accepted a corrupted history (no teeth)"; rc=1
+else
+    echo "  >>> OK: corrupted history correctly rejected"
+fi
+
+echo "== 4. stateful Hypothesis model of the channel API =="
+PYTHONPATH="$ROOT/src" "$PYTHON" -m pytest "$HERE/stateful_chan.py" -q -p no:cacheprovider || rc=1
+
+$RM -f "$HIST" "$BAD"
+echo "== linearizability pipeline rc=$rc =="
+exit $rc
