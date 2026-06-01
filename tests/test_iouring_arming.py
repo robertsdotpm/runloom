@@ -247,21 +247,131 @@ def test_mn_iouring_fileread_single_hub():
                 p.returncode, p.stdout, p.stderr))
 
 
-@pytest.mark.skip(reason="KNOWN OPEN BUG (separate from, and not closed by, the "
-                  "single-hub wake fix shipped here): with MULTIPLE hubs sharing "
-                  "the global io_uring ring, file_read intermittently hangs "
-                  "(H>=4). Two mechanisms: (1) a hub spin-draining the shared "
-                  "ring blocks in io_uring_enter(min_complete=1) for a CQE that "
-                  "another hub already consumed (cross-hub blocked-enter); "
-                  "(2) at high hub counts a submitted op's CQE is occasionally "
-                  "never processed by any drainer (submit returns 1, no "
-                  "completion drained). The architectural fix is to route hub "
-                  "file_reads through the per-hub io_uring ring the hub owns and "
-                  "pumps, not the shared global ring + spin-drain. See "
-                  "project_pygo_mn_iouring_hang.md.")
+def _mn_concurrent_init_snippet(hubs, n):
+    """Like _mn_fileread_snippet but WITHOUT a prior single-threaded
+    iouring_available() call, so the goroutines are the FIRST io_uring users
+    and several hubs race the lazy ring init.  Regression for the multi-hub
+    "lost completion" hang: concurrent pygo_iouring_available() first-callers
+    each ran lazy_init -> multiple io_uring_setup() rings raced the shared
+    ring-state pointers, so submits scribbled over each other's SQE slots and
+    those ops never completed.  (Tests that pre-call iouring_available() on the
+    main thread mask this -- so this snippet deliberately does NOT.)"""
+    code = r'''
+import sys; sys.path.insert(0, __SRCPATH__)
+import os, tempfile
+import pygo_core
+# NB: NO pygo_core.iouring_available() here -- the goroutines below are the
+# first io_uring users, exercising concurrent lazy init across hubs.
+N = __N__; H = __H__
+paths, fds, expected, results = [], [], [], [None] * N
+for i in range(N):
+    content = ("ci-%04d-" % i).encode() * 32
+    p = tempfile.mktemp()
+    with open(p, "wb") as f:
+        f.write(content)
+    paths.append(p); expected.append(content)
+    fds.append(os.open(p, os.O_RDONLY))
+
+def mk(i):
+    def w():
+        size = len(expected[i])
+        buf = bytearray(size)
+        m = pygo_core.file_read(fds[i], buf, size, 0)
+        results[i] = bytes(buf[:m])
+    return w
+
+pygo_core.mn_init(H)
+for i in range(N):
+    pygo_core.mn_go(mk(i))
+pygo_core.mn_run()
+pygo_core.mn_fini()
+for fd in fds: os.close(fd)
+for p in paths: os.unlink(p)
+bad = [i for i in range(N) if results[i] != expected[i]]
+print("PASS" if not bad else ("FAIL cross/missed: %r" % bad[:10]))
+'''
+    return (code.replace("__SRCPATH__", repr(os.path.join(REPO, "src")))
+                .replace("__N__", str(n)).replace("__H__", str(hubs)))
+
+
+def _mn_fileread_gc_snippet(hubs, n):
+    """file_read on PIPES (forced-async: the read can't complete until a peer
+    writes) under the M:N scheduler, with a concurrent thread hammering
+    gc.collect() (a free-threaded stop-the-world) and a staggered feeder.
+    Regression for the STW deadlock: the old hub spin-drain blocked in
+    io_uring_enter while holding its tstate ATTACHED, so a GC stop-the-world
+    could never complete (the feeder that would finish the read is frozen at
+    the STW barrier) -- a hard hang.  The park-not-spin rework drops the tstate
+    by yielding, so STW proceeds and the read completes."""
+    code = r'''
+import sys; sys.path.insert(0, __SRCPATH__)
+import os, threading, time, gc
+import pygo_core
+N = __N__; H = __H__
+rfds, wfds, results = [], [], [None] * N
+for i in range(N):
+    r, w = os.pipe(); rfds.append(r); wfds.append(w)
+PAYLOAD = b"gc-stw-payload-0123456789abcdef "  # 32 bytes
+stop = [False]
+
+def mk(i):
+    def w():
+        buf = bytearray(len(PAYLOAD))
+        m = pygo_core.file_read(rfds[i], buf, len(PAYLOAD), 0)
+        results[i] = bytes(buf[:m])
+    return w
+
+def feeder():
+    time.sleep(0.03)
+    for w in wfds:
+        try: os.write(w, PAYLOAD)
+        except OSError: pass
+        time.sleep(0.003)
+
+def gcer():
+    for _ in range(8):
+        if stop[0]: break
+        gc.collect(); time.sleep(0.01)
+
+gt = threading.Thread(target=gcer, daemon=True); gt.start()
+t = threading.Thread(target=feeder); t.start()
+pygo_core.mn_init(H)
+for i in range(N): pygo_core.mn_go(mk(i))
+pygo_core.mn_run()
+pygo_core.mn_fini()
+stop[0] = True; t.join()
+for fd in rfds + wfds:
+    try: os.close(fd)
+    except OSError: pass
+bad = [i for i in range(N) if results[i] != PAYLOAD]
+print("PASS" if not bad else ("FAIL missed: %d/%d %r" % (len(bad), N, bad[:8])))
+'''
+    return (code.replace("__SRCPATH__", repr(os.path.join(REPO, "src")))
+                .replace("__N__", str(n)).replace("__H__", str(hubs)))
+
+
 def test_mn_iouring_fileread_multi_hub():
-    """Multi-hub shared-ring stress -- documents the open H>1 hang."""
-    p = _run_snippet(_mn_fileread_snippet(hubs=4, n=200), timeout=120)
-    assert p.returncode == 0 and "PASS" in p.stdout, (
-        "rc=%d\n--- stdout ---\n%s\n--- stderr ---\n%s" % (
-            p.returncode, p.stdout, p.stderr))
+    """Multi-hub file_read with CONCURRENT lazy ring init (no pre-init on the
+    main thread).  Regression for the lost-completion hang: concurrent
+    first-callers raced lazy_init, corrupting the shared ring so some ops never
+    completed.  Fixed by serializing lazy_init under sub_lock.  Repeated in
+    fresh subprocesses (mn_init + lazy init are process-global, so each run is
+    a fresh concurrent-init race).  A hang shows up as a subprocess timeout."""
+    for _ in range(6):
+        p = _run_snippet(_mn_concurrent_init_snippet(hubs=4, n=64), timeout=30)
+        assert p.returncode == 0 and "PASS" in p.stdout, (
+            "rc=%d\n--- stdout ---\n%s\n--- stderr ---\n%s" % (
+                p.returncode, p.stdout, p.stderr))
+
+
+def test_mn_iouring_fileread_under_gc():
+    """Multi-hub forced-async file_read under a concurrent GC stop-the-world.
+    Regression for the deadlock where the hub spin-drain held its tstate across
+    a blocking io_uring_enter, so a stop-the-world (whose unblocking needs the
+    frozen feeder thread) could never complete.  Fixed by parking (yielding the
+    tstate) instead of spin-draining.  A hang = subprocess timeout."""
+    for _ in range(6):
+        p = _run_snippet(_mn_fileread_gc_snippet(hubs=4, n=12), timeout=30)
+        assert p.returncode == 0 and "PASS" in p.stdout, (
+            "rc=%d\n--- stdout ---\n%s\n--- stderr ---\n%s" % (
+                p.returncode, p.stdout, p.stderr))

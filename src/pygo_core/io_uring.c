@@ -181,11 +181,31 @@ typedef enum {
     PYGO_IOURING_OP_CANCEL    = 2,    /* fire-and-forget */
 } pygo_iouring_op_type_t;
 
+/* SINGLE-op park/wake handshake for hub (M:N) callers.  A hub goroutine
+ * that submits a SINGLE op PARKS (coro_yield) instead of blocking the OS
+ * thread; a drainer (the idle-hub netpoll pump) wakes it when the CQE
+ * arrives.  Without a handshake the INLINE drain -- which runs ON the
+ * submitter, synchronously, BEFORE it parks -- could wake a not-yet-parked
+ * g via pygo_mn_wake_g, stranding it on the hub sub-list and double-
+ * resuming it (this was "Bug 1", and the same latent hole exists in the
+ * recv/send ring path).  `wait` is the single atomic commit point:
+ *   INFLIGHT -> PARKED  (submitter, CAS): committed to yield; any drainer
+ *                        that completes the op after this MUST wake us.
+ *   * -> DONE           (drainer, exchange): record completion; wake the
+ *                        submitter IFF the prior state was PARKED (i.e. it
+ *                        had already committed to yielding).  A drainer that
+ *                        sees INFLIGHT does NOT wake -- the submitter will
+ *                        observe DONE on its own CAS and skip the park. */
+#define PYGO_IOURING_WAIT_INFLIGHT 0
+#define PYGO_IOURING_WAIT_PARKED   1
+#define PYGO_IOURING_WAIT_DONE     2
+
 typedef struct pygo_iouring_op {
     int       type;          /* pygo_iouring_op_type_t */
     pygo_g_t *g;             /* SINGLE: g to wake when this op completes */
     void     *hub;           /* opaque hub_t* or NULL for global sched */
     int32_t   result;        /* SINGLE: CQE res field; valid after wake */
+    int       wait;          /* SINGLE hub op: park/wake commit (see above) */
 } pygo_iouring_op_t;
 
 /* Forward-declare for the drain handler. */
@@ -301,7 +321,7 @@ static int pygo_iouring_lazy_init(void)
      */
     fd = sys_io_uring_setup(64, &p);
     if (fd < 0) {
-        pygo_iouring_state.initialised = -1;
+        __atomic_store_n(&pygo_iouring_state.initialised, -1, __ATOMIC_RELEASE);
         return -1;
     }
 
@@ -362,7 +382,9 @@ static int pygo_iouring_lazy_init(void)
     pygo_iouring_state.cq_entries = *(unsigned *)((char *)cq_map + p.cq_off.ring_entries);
     pygo_iouring_state.cqes       = (struct io_uring_cqe *)((char *)cq_map + p.cq_off.cqes);
 
-    pygo_iouring_state.initialised = 1;
+    /* initialised is published (atomic-release) only at the very END of init,
+     * after the eventfd is hooked into the pump -- so a lock-free fast-path
+     * reader in pygo_iouring_available() never observes a half-built ring. */
 
     /* Best-effort provided-buffer-ring setup for multishot recv.
      * Linux 5.19+; older kernels just leave pool_base = NULL and
@@ -433,11 +455,8 @@ static int pygo_iouring_lazy_init(void)
      * will get no CQE delivery and park forever.  Treat as init
      * failure -- the hub path still works via spin-drain. */
     if (pygo_netpoll_add_iouring_eventfd(efd) != 0) {
-        /* Don't tear down the ring; just abort init.  The lazy_init
-         * sentinel is set to -1 above the fail label only on hard
-         * failures (mmap, syscall) -- here we have a partially-
-         * functional ring.  Mark as failed so callers fall back. */
-        pygo_iouring_state.initialised = -1;
+        /* Don't tear down the ring; just abort init.  Mark as failed so
+         * callers fall back. */
         munmap(sq_map,  sq_size);
         munmap(cq_map,  cq_size);
         munmap(sqe_map, sqe_size);
@@ -445,8 +464,11 @@ static int pygo_iouring_lazy_init(void)
         close(fd);
         pygo_iouring_state.eventfd_fd = -1;
         pygo_iouring_state.ring_fd    = -1;
+        __atomic_store_n(&pygo_iouring_state.initialised, -1, __ATOMIC_RELEASE);
         return -1;
     }
+    /* Fully built AND hooked into the pump: publish ready, release. */
+    __atomic_store_n(&pygo_iouring_state.initialised, 1, __ATOMIC_RELEASE);
     return 0;
 
 fail:
@@ -454,17 +476,34 @@ fail:
     if (cq_map  != MAP_FAILED) munmap(cq_map,  cq_size);
     if (sqe_map != MAP_FAILED) munmap(sqe_map, sqe_size);
     close(fd);
-    pygo_iouring_state.initialised = -1;
+    __atomic_store_n(&pygo_iouring_state.initialised, -1, __ATOMIC_RELEASE);
     return -1;
 }
 
 int pygo_iouring_available(void)
 {
-    if (pygo_iouring_state.initialised == 0) {
+    if (__atomic_load_n(&pygo_iouring_state.initialised, __ATOMIC_ACQUIRE) == 0) {
+        /* Serialize lazy init.  Concurrent first-callers -- e.g. several M:N
+         * hubs each running a goroutine that touches io_uring at the same
+         * instant, with no prior single-threaded available() call -- must NOT
+         * each run lazy_init: that io_uring_setup()s multiple rings and races
+         * the shared ring-state pointers (ring_fd / sq_tail / sqes / ...), so
+         * submits land in different/short-lived rings, SQE slots get
+         * overwritten, and ops vanish without ever completing (an intermittent
+         * multi-hub "lost completion" hang -- masked whenever a test happens to
+         * call iouring_available() once on the main thread first).
+         * lock_ensure_inited gives us an initialized sub_lock; double-check
+         * `initialised` under it so EXACTLY ONE caller runs lazy_init, and hold
+         * it across init so no submit_sqe (also sub_lock) sees a half-built
+         * ring. */
         pygo_iouring_lock_ensure_inited();
-        pygo_iouring_lazy_init();
+        pygo_mutex_lock(&pygo_iouring_state.sub_lock);
+        if (pygo_iouring_state.initialised == 0) {
+            pygo_iouring_lazy_init();
+        }
+        pygo_mutex_unlock(&pygo_iouring_state.sub_lock);
     }
-    return pygo_iouring_state.initialised == 1;
+    return __atomic_load_n(&pygo_iouring_state.initialised, __ATOMIC_ACQUIRE) == 1;
 }
 
 int pygo_iouring_eventfd(void)
@@ -638,23 +677,28 @@ void pygo_iouring_drain(void)
         if (op != NULL) {
             switch (type) {
             case PYGO_IOURING_OP_SINGLE:
-                op->result = res;
-                /* Do NOT wake a hub op's goroutine.  In the hub path
-                 * (pygo_iouring_do, hub != NULL) the submitter SPIN-DRAINS --
-                 * it polls op->result and drains its own ring and never parks --
-                 * so it observes op->result directly without any wake.  And
-                 * pygo_mn_wake_g in the default (non-global-runq) mode
-                 * unconditionally pygo_mn_hub_submit()s the g: calling it here
-                 * (the submitter's own inline/spin drain) re-submits a goroutine
-                 * that is currently RUNNING and about to complete, corrupting
-                 * the hub's submit-list / pending accounting and stranding other
-                 * queued goroutines -- an intermittent M:N hang reproducible even
-                 * at mn_init(1), found by the io_uring file_read M:N stress.
-                 * Only the single-thread sched path parks and needs a wake;
-                 * wake_safe there is race-safe (if the submitter hasn't parked
-                 * yet it bumps wake_pending and the next park_safe consumes the
-                 * count without yielding). */
-                if (op->hub == NULL && op->g != NULL) {
+                /* Publish the result BEFORE the wake handshake so a woken
+                 * (or self-recovering) submitter sees it. */
+                __atomic_store_n(&op->result, res, __ATOMIC_RELEASE);
+                if (op->hub != NULL) {
+                    /* Hub (M:N) op: the submitter parks via coro_yield.
+                     * Claim the completion with an exchange and wake ONLY if
+                     * the submitter had already committed to parking
+                     * (wait == PARKED).  If it is still INFLIGHT -- e.g. this
+                     * is the submitter's own INLINE drain, before it parks --
+                     * we must NOT wake: pygo_mn_wake_g would hub-submit a
+                     * still-running g and double-resume it (Bug 1).  The
+                     * submitter will instead observe DONE on its own CAS and
+                     * skip the park entirely. */
+                    int prev = __atomic_exchange_n(&op->wait,
+                                                   PYGO_IOURING_WAIT_DONE,
+                                                   __ATOMIC_ACQ_REL);
+                    if (prev == PYGO_IOURING_WAIT_PARKED) {
+                        pygo_mn_wake_g(op->hub, op->g);
+                    }
+                } else if (op->g != NULL) {
+                    /* Single-thread sched: race-safe via wake_pending (if the
+                     * submitter hasn't parked yet park_safe just decrements). */
                     pygo_sched_wake_safe(op->g);
                 }
                 break;
@@ -694,6 +738,7 @@ static pygo_iouring_ssize_t pygo_iouring_do(struct io_uring_sqe sqe)
     op.g      = (hub != NULL) ? pygo_mn_tls_current_g()
                               : pygo_sched_get()->current;
     op.result = INT32_MIN;        /* sentinel: not yet completed */
+    op.wait   = PYGO_IOURING_WAIT_INFLIGHT;
 
     if (pygo_iouring_submit_sqe(sqe, &op) != 0) return -1;
 
@@ -703,22 +748,40 @@ static pygo_iouring_ssize_t pygo_iouring_do(struct io_uring_sqe sqe)
      * Draining here turns "submit + park + pump + drain + wake +
      * resume" into "submit + drain + return" for the data-ready
      * case, saving an entire scheduler round-trip per RT in the
-     * common echo workload.  The race-safe wake_pending counter
-     * (single-thread sched) absorbs the wake so park_safe just
-     * decrements and returns. */
+     * common echo workload.  Runs while op.wait == INFLIGHT, so for
+     * OUR op the drain just sets result + flips wait to DONE (no wake);
+     * we observe that below and skip the park. */
     pygo_iouring_drain();
 
     if (hub != NULL) {
-        /* Hub path: spin-drain inline.  The hub's local pump doesn't
-         * know about the io_uring eventfd, so we can't park
-         * cooperatively here without more plumbing.  Block in
-         * io_uring_enter with min_complete=1 and drain after each
-         * wakeup until our op is done. */
-        while (op.result == INT32_MIN) {
-            int n = sys_io_uring_enter(pygo_iouring_state.ring_fd, 0, 1,
-                                       IORING_ENTER_GETEVENTS, NULL, 0);
-            if (n < 0 && errno != EINTR) return -1;
-            pygo_iouring_drain();
+        /* Hub (M:N) path: PARK -- do NOT block the OS thread.  A blocking
+         * io_uring_enter here holds this hub's tstate ATTACHED across the
+         * wait, which deadlocks any stop-the-world (free-threaded GC, the
+         * per-g-tstate attach protocol) whose completion depends on a thread
+         * frozen at the STW barrier -- and it monopolizes the hub so its
+         * other goroutines can't run.  Yield instead: the hub returns to its
+         * (STW-safe, handoff-compatible) main loop, and when idle pumps the
+         * shared ring's eventfd; a drainer wakes us via the wait handshake.
+         * The inline drain above already completed us inline in the common
+         * data-ready case (wait == DONE) -- skip the park then. */
+        if (__atomic_load_n(&op.wait, __ATOMIC_ACQUIRE)
+                != PYGO_IOURING_WAIT_DONE) {
+            int prev = PYGO_IOURING_WAIT_INFLIGHT;
+            if (__atomic_compare_exchange_n(&op.wait, &prev,
+                                            PYGO_IOURING_WAIT_PARKED, 0,
+                                            __ATOMIC_ACQ_REL,
+                                            __ATOMIC_ACQUIRE)) {
+                /* Committed to park: any drainer completing the op now
+                 * observes PARKED and wakes us.  park_current marks the g
+                 * off-queue (hub_main won't re-enqueue on yield-return);
+                 * the wake routes it back onto the hub sub-list, and the
+                 * in_sub_queue CAS in hub_submit dedups a wake that races
+                 * our coro_yield. */
+                pygo_sched_park_current();
+                pygo_coro_yield();
+            }
+            /* else prev == DONE: a concurrent drainer completed the op
+             * between the load and the CAS; op.result is set, fall through. */
         }
     } else if (op.g != NULL) {
         /* Single-thread sched path: park cooperatively.  When the
@@ -727,20 +790,25 @@ static pygo_iouring_ssize_t pygo_iouring_do(struct io_uring_sqe sqe)
          * via pygo_coro_yield; on resume we eat the pending wake. */
         pygo_sched_park_safe();
     } else {
-        /* Not inside a goroutine.  Block like the hub path. */
-        while (op.result == INT32_MIN) {
-            int n = sys_io_uring_enter(pygo_iouring_state.ring_fd, 0, 1,
-                                       IORING_ENTER_GETEVENTS, NULL, 0);
+        /* Not inside a goroutine (plain thread / main thread calling
+         * file_read directly).  Block, but RELEASE the tstate around the
+         * wait so a stop-the-world isn't held off by this syscall. */
+        while (__atomic_load_n(&op.result, __ATOMIC_ACQUIRE) == INT32_MIN) {
+            int n;
+            Py_BEGIN_ALLOW_THREADS
+            n = sys_io_uring_enter(pygo_iouring_state.ring_fd, 0, 1,
+                                   IORING_ENTER_GETEVENTS, NULL, 0);
+            Py_END_ALLOW_THREADS
             if (n < 0 && errno != EINTR) return -1;
             pygo_iouring_drain();
         }
     }
 
-    if (op.result < 0) {
-        errno = -op.result;
-        return -1;
+    {
+        int32_t r = __atomic_load_n(&op.result, __ATOMIC_ACQUIRE);
+        if (r < 0) { errno = -r; return -1; }
+        return r;
     }
-    return op.result;
 }
 
 pygo_iouring_ssize_t pygo_iouring_pread(int fd, void *buf, size_t n,
