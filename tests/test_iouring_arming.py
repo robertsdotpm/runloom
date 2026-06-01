@@ -375,3 +375,91 @@ def test_mn_iouring_fileread_under_gc():
         assert p.returncode == 0 and "PASS" in p.stdout, (
             "rc=%d\n--- stdout ---\n%s\n--- stderr ---\n%s" % (
                 p.returncode, p.stdout, p.stderr))
+
+
+def _mn_sockpair_recv_gc_snippet(hubs, n):
+    """N pre-connected socketpairs (NO listen/accept/connect -- isolates the
+    recv path) recv'd by goroutines across `hubs` M:N hubs, with a FEEDER
+    thread writing the peer ends STAGGERED (so each recv genuinely BLOCKS until
+    data arrives) and a concurrent thread hammering gc.collect().  This is the
+    socket analogue of the forced-async file_read+feeder test: it reproduces
+    the multishot-recv (pygo_iouring_ms_recv, the DEFAULT TCPConn.recv) STW
+    deadlock -- the hub recv spin-drained holding its tstate, so a GC stop-the-
+    world whose unblocking needs the (frozen) feeder could never complete.
+    Fixed by parking instead of spin-draining."""
+    code = r'''
+import sys; sys.path.insert(0, __SRCPATH__)
+import os, socket, threading, time, gc
+import pygo_core
+
+N = __N__; H = __H__
+results = [None] * N
+stop = [False]
+peer_fds = []   # the feeder-side raw fd per pair
+recv_fds = []   # the goroutine-side raw fd per pair
+PAYLOAD = b"ms-recv-payload-0123456789abcdef"   # 32 bytes
+for i in range(N):
+    a, b = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+    b.setblocking(False)
+    pa, rb = a.fileno(), b.fileno()
+    a.detach(); b.detach()
+    peer_fds.append(pa); recv_fds.append(rb)
+
+def mk_server(i):
+    def h():
+        conn = pygo_core.TCPConn(recv_fds[i])
+        results[i] = conn.recv(64)
+        conn.close()
+    return h
+
+def feeder():
+    time.sleep(0.03)
+    for fd in peer_fds:
+        try: os.write(fd, PAYLOAD)
+        except OSError: pass
+        time.sleep(0.003)
+
+def gcer():
+    for _ in range(25):
+        if stop[0]: break
+        gc.collect(); time.sleep(0.005)
+
+threading.Thread(target=gcer, daemon=True).start()
+t = threading.Thread(target=feeder); t.start()
+pygo_core.mn_init(H)
+for i in range(N):
+    pygo_core.mn_go(mk_server(i))
+pygo_core.mn_run()
+pygo_core.mn_fini()
+stop[0] = True; t.join()
+for fd in peer_fds:
+    try: os.close(fd)
+    except OSError: pass
+bad = [i for i in range(N) if results[i] != PAYLOAD]
+print("PASS" if not bad else ("FAIL missed: %d/%d %r" % (len(bad), N, bad[:8])))
+'''
+    return (code.replace("__SRCPATH__", repr(os.path.join(REPO, "src")))
+                .replace("__N__", str(n)).replace("__H__", str(hubs)))
+
+
+def test_mn_iouring_sockpair_recv_under_gc():
+    """GUARD: multi-hub blocking socket recv under a concurrent GC
+    stop-the-world, on pre-connected socketpairs fed by a staggered writer
+    thread (isolates recv from listen/accept/connect).  Exercises the socket
+    io_uring recv paths -- multishot (pygo_iouring_ms_recv) and single-shot
+    per-hub-ring (pygo_iouring_ring_recv) -- which were hardened to PARK (and
+    a per-op wait handshake) instead of spin-draining holding the tstate /
+    inline-waking a not-yet-parked submitter, mirroring the file_read fix.
+
+    NOTE: unlike file_read, the socket spin-drain was NOT reproducibly
+    deadlock-prone on pristine here -- TCPConn recv is threshold-gated with a
+    netpoll-park fallback, and the io_uring sub-paths either already park or get
+    enough CQE traffic to keep tstate-holds short.  So this is a regression
+    GUARD on the parked socket recv path (catches a wake/park regression =
+    subprocess timeout), not a pristine-fails teeth-proof like the file_read
+    tests above."""
+    for _ in range(6):
+        p = _run_snippet(_mn_sockpair_recv_gc_snippet(hubs=4, n=16), timeout=30)
+        assert p.returncode == 0 and "PASS" in p.stdout, (
+            "rc=%d\n--- stdout ---\n%s\n--- stderr ---\n%s" % (
+                p.returncode, p.stdout, p.stderr))

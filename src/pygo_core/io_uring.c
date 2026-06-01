@@ -1076,24 +1076,23 @@ pygo_iouring_ssize_t pygo_iouring_ms_recv(pygo_iouring_ms_t *h,
                                           : pygo_sched_get()->current;
             pygo_mutex_unlock(&h->lock);
             if (hub != NULL) {
-                /* Hub callers can't ride wake_pending (bound to the
-                 * global sched), so spin-drain via io_uring_enter. */
-                for (;;) {
-                    int n2;
-                    pygo_mutex_lock(&h->lock);
-                    if (h->ready_head || h->eof || h->err ||
-                        h->inflight_bid >= 0) {
-                        pygo_mutex_unlock(&h->lock);
-                        break;
-                    }
-                    pygo_mutex_unlock(&h->lock);
-                    n2 = sys_io_uring_enter(pygo_iouring_state.ring_fd,
-                                            0, 1,
-                                            IORING_ENTER_GETEVENTS,
-                                            NULL, 0);
-                    if (n2 < 0 && errno != EINTR) return -1;
-                    pygo_iouring_drain();
-                }
+                /* PARK -- do NOT spin-drain.  A blocking io_uring_enter here
+                 * holds this hub's tstate ATTACHED across the wait, which
+                 * deadlocks any stop-the-world (free-threaded GC) whose
+                 * completion depends on a thread frozen at the STW barrier
+                 * (e.g. the socket peer) -- this is the DEFAULT TCP recv path,
+                 * so it's a live hang.  Yield instead: ms_on_cqe (run by the
+                 * idle-hub pump draining the global ring) appends the buffer
+                 * and wakes us via mn_wake_g.  No lost wakeup: waiter_g was
+                 * published above under h->lock, and ms_on_cqe captures+NULLs
+                 * it under the same lock -- and ms_recv holds h->lock
+                 * continuously from the ready-queue check through publishing
+                 * waiter_g, so a buffer either lands before our check (we
+                 * consume it, never parking) or after we publish (ms_on_cqe
+                 * wakes us).  The in_sub_queue CAS dedups a wake that races
+                 * our coro_yield. */
+                pygo_sched_park_current();
+                pygo_coro_yield();
             } else {
                 pygo_sched_park_safe();
             }
@@ -1422,11 +1421,21 @@ void pygo_iouring_ring_drain(pygo_iouring_ring_t *r)
         }
         if (op != NULL) {
             /* Hub rings only carry SINGLE ops -- multishot stays on the
-             * global ring.  The op's hub field routes the wake; nominally
-             * == this ring's owning hub. */
-            op->result = res;
+             * global ring.  Same park/wake handshake as the global-ring
+             * SINGLE path: publish result, then wake ONLY if the submitter
+             * committed to parking (wait == PARKED).  The inline ring_drain
+             * runs on the not-yet-parked submitter (wait == INFLIGHT), so it
+             * records the completion without waking -- the submitter sees
+             * DONE on its own CAS and skips the park.  Without this the inline
+             * drain would mn_wake_g a still-running g and double-resume it. */
+            __atomic_store_n(&op->result, res, __ATOMIC_RELEASE);
             if (op->hub != NULL) {
-                pygo_mn_wake_g(op->hub, op->g);
+                int prev = __atomic_exchange_n(&op->wait,
+                                               PYGO_IOURING_WAIT_DONE,
+                                               __ATOMIC_ACQ_REL);
+                if (prev == PYGO_IOURING_WAIT_PARKED) {
+                    pygo_mn_wake_g(op->hub, op->g);
+                }
             } else if (op->g != NULL) {
                 pygo_sched_wake_safe(op->g);
             }
@@ -1468,34 +1477,40 @@ static pygo_iouring_ssize_t pygo_iouring_ring_do(pygo_iouring_ring_t *r,
     op.hub    = hub;
     op.g      = pygo_mn_tls_current_g();
     op.result = INT32_MIN;
+    op.wait   = PYGO_IOURING_WAIT_INFLIGHT;
 
     if (pygo_iouring_ring_submit_sqe(r, sqe, &op) != 0) return -1;
 
     /* Inline drain: with FAST_POLL the CQE may already be in the ring.
-     * Drain locally so the data-ready case avoids a park+wake round-
-     * trip entirely.  pygo_mn_wake_g is race-safe -- if we're not yet
-     * parked it just queues onto the hub's submission list, which the
-     * hub will drain on the next iteration. */
+     * Drain locally so the data-ready case avoids a park+wake round-trip.
+     * Runs while op.wait == INFLIGHT, so for OUR op the drain records the
+     * result + flips wait to DONE WITHOUT waking (we're not parked yet) --
+     * we observe that below and skip the park. */
     pygo_iouring_ring_drain(r);
-    if (op.result != INT32_MIN) {
-        if (op.result < 0) { errno = -op.result; return -1; }
-        return op.result;
+
+    /* Park the hub g unless the op already completed (inline or via a
+     * concurrent drainer).  pygo_sched_park_current snaps the per-g tstate
+     * slice AND marks self_queued so hub_main won't re-enqueue on return
+     * from yield.  Commit to parking with the wait CAS so any drainer that
+     * completes the op after this observes PARKED and wakes us; a drainer
+     * that already completed it set wait=DONE, so the CAS fails and we
+     * don't park.  Wake routes via mn_wake_g -> hub sub-list; the
+     * in_sub_queue CAS dedups a wake that races our coro_yield. */
+    if (__atomic_load_n(&op.wait, __ATOMIC_ACQUIRE) != PYGO_IOURING_WAIT_DONE) {
+        int prev = PYGO_IOURING_WAIT_INFLIGHT;
+        if (__atomic_compare_exchange_n(&op.wait, &prev,
+                                        PYGO_IOURING_WAIT_PARKED, 0,
+                                        __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+            pygo_sched_park_current();
+            pygo_coro_yield();
+        }
     }
 
-    /* Park the hub g.  pygo_sched_park_current snaps the per-g tstate
-     * slice AND marks self_queued so hub_main won't re-enqueue on
-     * return from yield.  Without the snap, the g resumes with the
-     * hub's tstate (not its own) and the pump's
-     * PyEval_SaveThread/RestoreThread roundtrip leaves us with no
-     * GIL on resume -> "PyEval_SaveThread: must be called with GIL".
-     * Wake comes from drain via mn_wake_g pushing onto h->sub_head;
-     * hub_main moves it onto its local FIFO on the next iteration;
-     * then hub_main loads g->snap before pygo_coro_resume. */
-    pygo_sched_park_current();
-    pygo_coro_yield();
-
-    if (op.result < 0) { errno = -op.result; return -1; }
-    return op.result;
+    {
+        int32_t rr = __atomic_load_n(&op.result, __ATOMIC_ACQUIRE);
+        if (rr < 0) { errno = -rr; return -1; }
+        return rr;
+    }
 }
 
 pygo_iouring_ssize_t pygo_iouring_ring_recv(pygo_iouring_ring_t *r,
