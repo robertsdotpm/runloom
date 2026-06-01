@@ -52,6 +52,7 @@ import collections as _collections
 import contextvars as _contextvars
 import errno as _errno
 import inspect as _inspect
+import os as _os
 import socket as _socket
 import ssl as _ssl
 import subprocess as _subprocess
