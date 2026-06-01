@@ -2741,6 +2741,20 @@ class _StreamTransport(asyncio.Transport):
             except Exception: pass
         super().__init__(extra=extra)
         self._sock = sock
+        # asyncio enables TCP_NODELAY (Nagle off) on every TCP stream transport
+        # -- _SelectorSocketTransport calls _set_nodelay in __init__.  Without it
+        # a small write (e.g. a websocket ping frame) sits in the send buffer
+        # until the idle peer's delayed ACK (up to ~40 ms), stalling
+        # request/response and keepalive round-trips that stock asyncio completes
+        # in microseconds.  Mirror asyncio's _set_nodelay exactly: TCP sockets
+        # only (AF_INET/AF_INET6 + SOCK_STREAM + IPPROTO_TCP); never AF_UNIX.
+        if (sock.family in (_socket.AF_INET, _socket.AF_INET6) and
+                sock.type == _socket.SOCK_STREAM and
+                sock.proto == _socket.IPPROTO_TCP):
+            try:
+                sock.setsockopt(_socket.IPPROTO_TCP, _socket.TCP_NODELAY, 1)
+            except OSError:
+                pass
         self._protocol = protocol
         self._loop = loop
         self._closed = False
