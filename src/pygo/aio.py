@@ -610,14 +610,35 @@ class _PygoFutureMixin(object):
 
     def _fire_callbacks(self):
         cbs, self._pgcbs = self._pgcbs, []
+        loop = self._loop
         for cb, ctx in cbs:
-            try:
-                if ctx is None:
-                    cb(self)
-                else:
-                    ctx.run(cb, self)
-            except BaseException as e:
-                self._report_exc(e)
+            # A stock C _asyncio.Task awaiting a PygoFuture registers its
+            # Task.__wakeup as the done-callback (aiohttp creates eager-start
+            # asyncio.Task()s directly, not via loop.create_task -> PygoTask).
+            # Stock asyncio schedules future callbacks via loop.call_soon; firing
+            # __wakeup SYNCHRONOUSLY from inside the future's own cancel()/
+            # set_result is re-entrant and the C Task mishandles it -- it never
+            # reschedules __step, so the awaiting task hangs (e.g. write_bytes,
+            # the streaming-request body-writer, cancelled on connection close).
+            # Defer ONLY those callbacks (match asyncio); every other callback --
+            # pygo's _wake_unpark, library done-callbacks -- stays synchronous,
+            # preserving pygo's wake timing.
+            host = getattr(cb, "__self__", None)
+            if (loop is not None and not loop.is_closed()
+                    and isinstance(host, asyncio.Task)
+                    and not isinstance(host, PygoTask)):
+                try:
+                    loop.call_soon(cb, self, context=ctx)
+                except BaseException as e:
+                    self._report_exc(e)
+            else:
+                try:
+                    if ctx is None:
+                        cb(self)
+                    else:
+                        ctx.run(cb, self)
+                except BaseException as e:
+                    self._report_exc(e)
 
     def _report_exc(self, e):
         if self._loop is not None:
