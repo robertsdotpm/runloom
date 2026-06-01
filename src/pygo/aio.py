@@ -356,6 +356,26 @@ class _TLSSock(object):
                 # the next loop re-checks the deadline and raises above.
                 _wait_fd(fd, want, max(1, int(remaining * 1000)))
 
+    def recv_nb(self, n):
+        # SINGLE non-blocking recv attempt: returns decrypted bytes, b'' on EOF,
+        # or raises BlockingIOError if no application data is ready yet.  Never
+        # parks -- the merged _StreamTransport io goroutine must not block in
+        # recv (it would stall the write drain on the SAME goroutine, a
+        # full-duplex deadlock).  The cooperative parking recv() below is for
+        # callers that own a dedicated read goroutine.
+        if self._closed:
+            return b""
+        with self._lock:
+            try:
+                return self._ssl.recv(n)
+            except (_ssl.SSLWantReadError, _ssl.SSLWantWriteError):
+                raise BlockingIOError()
+            except _ssl.SSLZeroReturnError:
+                self._peer_close_notify = True
+                return b""
+            except _ssl.SSLEOFError:
+                return b""
+
     def recv(self, n):
         if self._closed:
             return b""
@@ -1950,7 +1970,17 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
         transport._stopping = True
         transport._conn_lost_called = True
         transport._closed = True
-        await asyncio.sleep(0)   # give the old recv loop a turn to observe + exit
+        # The old io goroutine is parked in _wait_fd on this fd; a bare sleep(0)
+        # won't wake it, so it would linger parked and STEAL the post-handshake
+        # data wakeup meant for the new TLS transport (then exit), stranding the
+        # read -> b''.  Cancel its park so it observes _stopping and exits NOW.
+        old_g = getattr(transport, "_io_g", None)
+        if old_g is not None:
+            try:
+                old_g.cancel_wait_fd()
+            except Exception:
+                pass
+        await asyncio.sleep(0)   # give the old io loop a turn to observe + exit
         tls = _TLSSock(sock, sslcontext, server_side=server_side,
                        server_hostname=server_hostname)
         tls.do_handshake(ssl_handshake_timeout)
@@ -2896,9 +2926,34 @@ class _StreamTransport(asyncio.Transport):
         self._closed = False
         self._stopping = False
         self._paused = False        # pause_reading() flow control
-        self._eof_written = False   # write_eof() called -> write() must raise
+        self._read_eof = False      # peer half-closed: stop reading, keep writing
+        self._eof_written = False   # write_eof() done -> write() must raise
+        self._eof_pending = False   # write_eof() requested, buffer not yet drained
         self._conn_lost_called = False  # connection_lost fires exactly once
         self._in_context = False    # re-entrancy guard for _run_cb (see below)
+        # ---- write buffering (single ordered buffer, drained by the ONE io
+        # goroutine) ----  pygo's netpoll arms one direction per fd one-shot, so
+        # a separate write goroutine parking EPOLLOUT would clobber the recv
+        # goroutine's EPOLLIN arm and strand the read under full-duplex
+        # backpressure (verified).  So recv AND drain share a single goroutine
+        # that parks on the UNION mask, exactly like add_reader/add_writer's
+        # _pg_io_runner.  write() appends here and kicks that goroutine.
+        self._write_buf = bytearray()
+        self._protocol_paused = False   # did we call protocol.pause_writing()?
+        self._high_water = 64 * 1024
+        self._low_water = 16 * 1024
+        # Graceful close: close() with data still queued flushes the buffer
+        # before tearing down (asyncio semantics -- a write()+close() must not
+        # drop the write).  The io goroutine's _drain_step fires the teardown
+        # once the buffer empties.
+        self._close_when_drained = False
+        self._close_exc = None
+        self._close_deliver_cl = False
+        # A plaintext non-blocking socket's send() never parks, so write() can
+        # fast-path an immediate send from the caller's goroutine.  A _TLSSock
+        # send() can park EPOLLOUT (and clobber the recv arm), so TLS writes
+        # ALWAYS go through the buffer + single io goroutine.
+        self._sock_is_plain = getattr(sock, "ssl_object", None) is None
         # start_tls reuses an already-connected protocol, so it suppresses the
         # re-fire (asyncio doesn't call connection_made again on TLS upgrade).
         if call_connection_made:
@@ -2906,7 +2961,7 @@ class _StreamTransport(asyncio.Transport):
                 self._run_cb(protocol.connection_made, self)
             except Exception as e:
                 self._report(e, "connection_made")
-        self._recv_g = pygo_core.go(self._recv_loop)
+        self._io_g = pygo_core.go(self._io_loop)
 
     def _run_cb(self, fn, *args):
         # Run a protocol callback inside this connection's contextvars Context
@@ -2927,117 +2982,232 @@ class _StreamTransport(asyncio.Transport):
         finally:
             self._in_context = False
 
-    def _recv_loop(self):
+    def _io_loop(self):
+        # The ONE goroutine for this fd.  Parks on the union of the directions
+        # we currently need (READ unless paused / read-EOF'd, WRITE while the
+        # write buffer is non-empty) and services whichever is ready.  Merging
+        # recv and drain into one goroutine is mandatory on pygo's netpoll: a
+        # second goroutine parking the other direction on the same fd clobbers
+        # this one's arm (one-shot per fd) and strands it.
         sock = self._sock
         while not self._stopping:
-            if self._paused:
-                # Flow control: paused by pause_reading().  Poll the flag
-                # cooperatively (resume_reading() clears it).  Pauses are
-                # short backpressure windows, so a 1 ms tick is fine.
-                pygo_core.sched_sleep(0.001)
-                continue
-            try:
-                data = sock.recv(65536)
-            except (BlockingIOError, InterruptedError):
-                if self._stopping: return
+            mask = 0
+            if not self._paused and not self._read_eof and not self._closed:
+                mask |= 1
+            if self._write_buf:
+                mask |= 2
+            if mask == 0:
+                # Paused/EOF'd for reading and nothing queued to write: nobody
+                # needs the fd right now.  Exit; resume_reading()/write() will
+                # respawn us via _kick_io.  (Incoming bytes wait in the kernel
+                # buffer = correct read backpressure.)
+                self._io_g = None
+                return
+            if (mask & 1) and not self._sock_is_plain:
+                # TLS read-ahead: OpenSSL may hold already-decrypted application
+                # bytes (read together with a prior record / the handshake's
+                # final flight).  The socket isn't readable, so _wait_fd(READ)
+                # would never fire and the data would strand -- service it now,
+                # before parking, mirroring the old recv-first loop.
                 try:
-                    _wait_fd(sock.fileno(), 1)
+                    pend = self._sock.pending()
                 except Exception:
+                    pend = 0
+                if pend:
+                    if not self._recv_step():
+                        return
+                    pygo_core.sched_yield_classic()
+                    continue
+            try:
+                fd = sock.fileno()
+            except Exception:
+                self._io_g = None
+                return
+            try:
+                ready = _wait_fd(fd, mask)
+            except asyncio.CancelledError:
+                # Interest changed via _kick_io (write()/resume_reading()/
+                # close()): re-loop to recompute the mask (or exit on _stopping).
+                continue
+            except Exception:
+                if self._stopping:
                     return
                 continue
-            except OSError as e:
-                if self._stopping: return
-                if e.errno in (_errno.EAGAIN, _errno.EWOULDBLOCK):
-                    _wait_fd(sock.fileno(), 1)
-                    continue
-                # Route through close() so connection_lost(e) fires exactly
-                # once (the guard) rather than racing close()'s own call.
-                self.close(e)
+            if self._stopping:
                 return
-            if not data:
-                # EOF: the peer half-closed its write side, so recv() now
-                # returns b'' immediately and forever.  Stop the recv loop
-                # either way -- mirrors stock asyncio removing the reader on
-                # EOF.  `continue`ing here would busy-spin recv()->b'' at
-                # 100% CPU, hogging the hub and starving every other
-                # goroutine (e.g. the peer task still awaiting its read).
-                # Close only if the protocol didn't ask to keep the
-                # transport open (eof_received() -> True) for its own writes.
-                try:
-                    keep = self._run_cb(self._protocol.eof_received)
-                except Exception as e:
-                    self._report(e, "eof_received")
-                    keep = False
-                if not keep:
-                    self.close()
-                return
-            try:
-                self._run_cb(self._protocol.data_received, data)
-            except Exception as e:
-                # asyncio treats an exception out of data_received() as fatal:
-                # it closes the transport and delivers connection_lost(exc).
-                # Without this a protocol that faults mid-read never gets
-                # connection_lost, so any await on closure (e.g. websockets
-                # recv() -> shield(connection_lost_waiter)) hangs forever.
-                # close()'s _conn_lost_called guard keeps it single-fire.
-                self._report(e, "data_received")
-                self.close(e)
-                return
-            # Hand the scheduler to any goroutine data_received just woke (a
+            # Drain queued writes first so output flushes promptly, then read.
+            # Re-check flags between steps: a drain error or a data_received
+            # callback may close() the transport.
+            if (ready & 2) and self._write_buf and not self._stopping:
+                self._drain_step()
+            if (ready & 1) and not self._paused and not self._read_eof \
+                    and not self._stopping:
+                if not self._recv_step():
+                    return
+            # Hand the scheduler to any goroutine a data_received just woke (a
             # protocol coroutine awaiting this read) BEFORE we recv() again.
-            # Stock asyncio does exactly one recv per loop iteration, then runs
-            # ready callbacks; without this yield our recv loop can drain the
-            # whole response AND the EOF/close in one burst, firing
-            # connection_lost (-> protocol state CLOSED) before the woken coro
-            # ran its post-read step.  That breaks ordering-sensitive protocols
-            # -- e.g. websockets' client handshake asserts state is CONNECTING
-            # in connection_open(), which runs only after the read it's blocked
-            # on; if connection_lost beats it the assert fails.
+            # Without this yield the loop can drain the whole response AND the
+            # EOF/close in one burst, firing connection_lost (-> protocol state
+            # CLOSED) before the woken coro ran its post-read step -- breaking
+            # ordering-sensitive protocols (e.g. websockets' client handshake
+            # asserts CONNECTING in connection_open()).
             pygo_core.sched_yield_classic()
+        self._io_g = None
+
+    def _recv_step(self):
+        # One NON-BLOCKING recv + dispatch.  Returns True to keep looping, False
+        # to stop the io goroutine (transport closed).  Must not park: a
+        # plaintext socket.recv raises BlockingIOError when dry; a _TLSSock's
+        # parking recv() would stall the write drain on this same goroutine, so
+        # use its single-shot recv_nb instead.
+        sock = self._sock
+        try:
+            recv_nb = getattr(sock, "recv_nb", None)
+            data = recv_nb(65536) if recv_nb is not None else sock.recv(65536)
+        except (BlockingIOError, InterruptedError):
+            return True            # nothing ready / spurious readiness; re-park
+        except OSError as e:
+            if self._stopping: return False
+            if e.errno in (_errno.EAGAIN, _errno.EWOULDBLOCK):
+                return True
+            # Route through close() so connection_lost(e) fires exactly once
+            # (the guard) rather than racing close()'s own call.
+            self.close(e)
+            return False
+        if not data:
+            # EOF: peer half-closed its write side; recv() now returns b''
+            # forever, so stop READING (a `continue` here would busy-spin at
+            # 100% CPU).  Keep the transport (and this goroutine, for our own
+            # writes) only if the protocol asked (eof_received() -> True).
+            try:
+                keep = self._run_cb(self._protocol.eof_received)
+            except Exception as e:
+                self._report(e, "eof_received")
+                keep = False
+            if not keep:
+                self.close()
+                return False
+            self._read_eof = True   # mask drops READ; loop stays for writes
+            return True
+        try:
+            self._run_cb(self._protocol.data_received, data)
+        except Exception as e:
+            # asyncio treats an exception out of data_received() as fatal: close
+            # the transport and deliver connection_lost(exc).  Without this a
+            # protocol that faults mid-read never gets connection_lost, so any
+            # await on closure (websockets recv() -> shield(connection_lost_
+            # waiter)) hangs forever.  close()'s guard keeps it single-fire.
+            self._report(e, "data_received")
+            self.close(e)
+            return False
+        return True
+
+    def _drain_step(self):
+        # Send as much of the write buffer as the socket accepts now.  Snapshot
+        # a bounded chunk: a _TLSSock send() can park (releasing its CoLock), so
+        # a concurrent write() may append meanwhile -- snapshotting keeps the
+        # bytes we send stable, and del[:n] still removes exactly the consumed
+        # prefix (appends stay at the tail for the next pass).
+        sock = self._sock
+        chunk = bytes(self._write_buf[:262144])
+        try:
+            n = sock.send(chunk)
+        except (BlockingIOError, InterruptedError):
+            return                 # not actually writable; re-park
+        except OSError as e:
+            # Peer dropped mid-drain.  If we were draining for a graceful close,
+            # close() already ran (so it'd early-return) -- fire the teardown
+            # directly; otherwise route through close(e).
+            if self._close_when_drained:
+                self._close_when_drained = False
+                self._stopping = True
+                self._deliver_connection_lost(e, self._close_deliver_cl)
+            else:
+                self.close(e)
+            return
+        if n:
+            del self._write_buf[:n]
+            self._maybe_resume_writing()
+        if not self._write_buf:
+            if self._eof_pending and not self._eof_written and not self._closed:
+                # Buffer drained: honour the deferred write_eof half-close.
+                self._eof_pending = False
+                self._eof_written = True
+                try:
+                    sock.shutdown(_socket.SHUT_WR)
+                except OSError:
+                    pass
+            if self._close_when_drained and not self._stopping:
+                # Graceful close's queued output is flushed: tear down now.
+                self._close_when_drained = False
+                self._stopping = True
+                self._deliver_connection_lost(self._close_exc,
+                                              self._close_deliver_cl)
+
+    def _kick_io(self):
+        # Re-evaluate the io goroutine's interest mask after write()/resume_
+        # reading() changed it: wake it if parked, or respawn it if it had
+        # exited (mask was 0).
+        if self._stopping:
+            return
+        g = self._io_g
+        if g is not None:
+            try:
+                g.cancel_wait_fd()
+            except Exception:
+                pass
+        else:
+            self._io_g = pygo_core.go(self._io_loop)
+
+    def _maybe_pause_writing(self):
+        if not self._protocol_paused and len(self._write_buf) > self._high_water:
+            self._protocol_paused = True
+            try:
+                self._run_cb(self._protocol.pause_writing)
+            except Exception as e:
+                self._report(e, "pause_writing")
+
+    def _maybe_resume_writing(self):
+        if self._protocol_paused and len(self._write_buf) <= self._low_water:
+            self._protocol_paused = False
+            try:
+                self._run_cb(self._protocol.resume_writing)
+            except Exception as e:
+                self._report(e, "resume_writing")
 
     def write(self, data):
-        if self._eof_written:
+        if self._eof_written or self._eof_pending:
             # Mirror stock asyncio's selector transport so callers (e.g.
             # websockets' broadcast) see the failure they expect, with the
             # same message they assert on.
             raise RuntimeError("Cannot call write() after write_eof()")
         if self._closed:
             return
-        try:
-            n = self._sock.send(data)
-            if n < len(data):
-                # Spawn a goroutine to finish.  Rare on small writes
-                # to a healthy peer.
-                rest = bytes(data[n:])
-                def _flush(b=rest):
-                    while b:
-                        try:
-                            sent = self._sock.send(b)
-                            b = b[sent:]
-                        except (BlockingIOError, InterruptedError):
-                            try: _wait_fd(self._sock.fileno(), 2)
-                            except Exception: return
-                        except OSError:
-                            return
-                pygo_core.go(_flush)
-        except (BlockingIOError, InterruptedError):
-            rest = bytes(data)
-            def _flush(b=rest):
-                while b:
-                    try:
-                        sent = self._sock.send(b)
-                        b = b[sent:]
-                    except (BlockingIOError, InterruptedError):
-                        try: _wait_fd(self._sock.fileno(), 2)
-                        except Exception: return
-                    except OSError:
-                        return
-            pygo_core.go(_flush)
-        except OSError as e:
-            # close() delivers connection_lost(e) exactly once -- calling it
-            # here too double-fires it (websockets' connection_lost sets a
-            # one-shot Future -> InvalidStateError "Future already done").
-            self.close(e)
+        if not data:
+            return
+        if not self._write_buf and self._sock_is_plain:
+            # Fast path: nothing queued and a plaintext non-blocking socket whose
+            # send() never parks -- send straight from the caller's goroutine.
+            # (A _TLSSock send() can park EPOLLOUT and clobber the recv arm, so
+            # TLS skips this and always buffers + lets the io goroutine drain.)
+            try:
+                n = self._sock.send(data)
+            except (BlockingIOError, InterruptedError):
+                n = 0
+            except OSError as e:
+                # close() delivers connection_lost(e) exactly once -- calling it
+                # here too double-fires it (websockets' connection_lost sets a
+                # one-shot Future -> InvalidStateError "Future already done").
+                self.close(e)
+                return
+            if n >= len(data):
+                return                          # fully sent, no buffer needed
+            data = memoryview(data)[n:]         # buffer the remainder, in order
+        # Queue (preserving order) and hand off to the single io goroutine,
+        # which drains EPOLLOUT on the SAME union-mask park as the recv side.
+        self._write_buf += bytes(data)
+        self._maybe_pause_writing()
+        self._kick_io()
 
     def writelines(self, lines):
         for line in lines:
@@ -3046,19 +3216,39 @@ class _StreamTransport(asyncio.Transport):
     def close(self, exc=None):
         if self._closed:
             return
+        # _closed marks the transport closing: is_closing() True, further
+        # write()s dropped, the io loop stops READing.  But DON'T tear down yet
+        # if a graceful close still has queued output -- flush it first.
         self._closed = True
-        self._stopping = True
+        deliver_cl = not self._conn_lost_called
+        if deliver_cl:
+            self._conn_lost_called = True
+        if exc is None and self._write_buf:
+            # Graceful close with data queued: let the io goroutine drain the
+            # buffer; its _drain_step fires the teardown once empty (asyncio
+            # flushes the write buffer before connection_lost).
+            self._close_exc = None
+            self._close_deliver_cl = deliver_cl
+            self._close_when_drained = True
+            self._kick_io()
+            return
+        # Error/abort close, or nothing queued: tear down now.
         # asyncio closes the fd inside the DEFERRED _call_connection_lost, NOT
         # synchronously here.  Code routinely reads the socket right after
         # transport.close() -- e.g. aiohttp's fingerprint-mismatch path does
         # transport.close() then transport.get_extra_info("socket").getpeername()
         # to drop the bad peer -- so closing the fd synchronously gives them
         # EBADF (and the resulting OSError masks the ServerFingerprintMismatch
-        # they expect).  Defer the shutdown+close to the same loop turn that
-        # delivers connection_lost.
-        deliver_cl = not self._conn_lost_called
-        if deliver_cl:
-            self._conn_lost_called = True
+        # they expect).  Defer the shutdown+close to the loop turn that delivers
+        # connection_lost.
+        self._stopping = True
+        # Wake the io goroutine if parked so it sees _stopping and exits now.
+        g = self._io_g
+        if g is not None:
+            try:
+                g.cancel_wait_fd()
+            except Exception:
+                pass
         self._deliver_connection_lost(exc, deliver_cl)
 
     def _deliver_connection_lost(self, exc, deliver_cl=True):
@@ -3136,22 +3326,34 @@ class _StreamTransport(asyncio.Transport):
         self._paused = True
 
     def resume_reading(self):
+        if not self._paused:
+            return
         self._paused = False
+        # The io goroutine may have exited (mask 0) or be parked WRITE-only;
+        # kick it so READ re-enters its interest mask.
+        self._kick_io()
 
     def is_reading(self):
         return not self._paused and not self._closed
 
     # ---- abort / half-close ----
     def abort(self):
-        # Immediate teardown (no graceful flush); close() already does a
-        # shutdown + connection_lost, which is acceptable for abort here.
+        # Immediate teardown: discard any queued output so close() tears down
+        # now instead of draining (asyncio's abort() drops the write buffer).
+        self._write_buf = bytearray()
         self.close()
 
     def can_write_eof(self):
         return True
 
     def write_eof(self):
-        if self._closed or self._eof_written:
+        if self._closed or self._eof_written or self._eof_pending:
+            return
+        if self._write_buf:
+            # Defer the half-close until the buffer drains (asyncio flushes the
+            # write buffer before shutting the write side); the io goroutine's
+            # _drain_step does the SHUT_WR once the buffer empties.
+            self._eof_pending = True
             return
         self._eof_written = True
         try:
@@ -3159,17 +3361,28 @@ class _StreamTransport(asyncio.Transport):
         except OSError:
             pass
 
-    # ---- write-buffer flow control: we write synchronously / via a flush
-    # goroutine, so the buffer is effectively always drained.  Report 0 and
-    # never invoke pause_writing; accept the setters as no-ops. ----
+    # ---- write-buffer flow control ----  A single ordered buffer drained by
+    # the io goroutine, with real high/low watermarks driving the protocol's
+    # pause_writing/resume_writing (so a slow peer applies backpressure instead
+    # of unbounded memory growth) and an accurate get_write_buffer_size.
     def set_write_buffer_limits(self, high=None, low=None):
-        pass
+        if high is None:
+            high = 4 * low if low is not None else 64 * 1024
+        if low is None:
+            low = high // 4
+        if not high >= low >= 0:
+            raise ValueError(
+                "high (%r) must be >= low (%r) must be >= 0" % (high, low))
+        self._high_water = high
+        self._low_water = low
+        self._maybe_pause_writing()
+        self._maybe_resume_writing()
 
     def get_write_buffer_limits(self):
-        return (0, 0)
+        return (self._low_water, self._high_water)
 
     def get_write_buffer_size(self):
-        return 0
+        return len(self._write_buf)
 
     def _report(self, exc, where):
         if self._loop is not None:
