@@ -192,6 +192,22 @@ if [ -x "$HERE/genmc/run_genmc.sh" ]; then
     fi
 fi
 
+# ---- TLC: composed-scheduler TLA+ spec (emergent end-to-end properties) ----
+# Spin verifies each primitive separately; this checks their COMPOSITION
+# (multi-hub dispatch + wake/park one-shot race) for no-lost-goroutine.
+# Skips cleanly if java/jar absent; prints its own pass/fail line.
+if [ -x "$HERE/tla/run_tla.sh" ]; then
+    if tla_out="$("$HERE/tla/run_tla.sh" 2>&1)"; then
+        echo "$tla_out"
+        if echo "$tla_out" | grep -q "passed, 0 failed"; then
+            tp="$(echo "$tla_out" | sed -n 's/.* \([0-9]*\) passed, 0 failed/\1/p' | tail -1)"
+            [ -n "$tp" ] && pass=$((pass+tp))
+        fi
+    else
+        echo "$tla_out"; fail=$((fail+1)); FAILED="$FAILED tla"
+    fi
+fi
+
 echo "----------------------------------------------------------"
 echo "  $pass passed, $fail failed"
 [ -n "$FAILED" ] && echo "  failed:$FAILED"
