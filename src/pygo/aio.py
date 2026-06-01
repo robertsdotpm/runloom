@@ -373,6 +373,34 @@ except AttributeError:
     _CURRENT_TASKS = {}
 
 
+def _run_stock_task_cb(loop, cb, fut):
+    # Run a deferred stock-C-_asyncio.Task done-callback (its __wakeup) the way
+    # asyncio's loop would: between task steps, with NO current task registered.
+    #
+    # The C Task's __wakeup -> task_step calls enter_task(loop, task), which
+    # RAISES "Cannot enter into task X while another task Y is being executed"
+    # if loop is already a key in _current_tasks.  Stock asyncio guarantees the
+    # slot is empty when a call_soon callback runs.  pygo CANNOT: PygoTask._driver
+    # keeps _current_tasks[loop] = self across the whole send/throw, and a task
+    # that parks mid-step on a RAW scheduler primitive (pygo's transport I/O
+    # does sock_recv/connect via pygo_core.wait_fd, not by yielding a future)
+    # leaves its entry in place while the goroutine is switched out -- so this
+    # deferred callback, scheduled onto another goroutine, would see a stale
+    # "current" PygoTask and the stock Task.__wakeup would raise instead of
+    # delivering the cancellation (the body-writer hangs forever).
+    #
+    # The parked PygoTask is suspended, not actually executing, so clearing its
+    # slot for the duration of the (synchronous) stock-Task step is safe; we
+    # restore it afterward so the PygoTask's own _driver finally still sees the
+    # value it expects.  Single-thread sched per loop => no races on the swap.
+    prev = _CURRENT_TASKS.pop(loop, None)
+    try:
+        cb(fut)
+    finally:
+        if prev is not None:
+            _CURRENT_TASKS[loop] = prev
+
+
 # Make our tasks visible to asyncio.all_tasks() (and debug tooling, anyio's
 # get_running_tasks, etc.).  Use the register/unregister hooks rather than a
 # specific set: 3.11 walked asyncio.tasks._all_tasks, but 3.12+ renamed it to
@@ -628,7 +656,8 @@ class _PygoFutureMixin(object):
                     and isinstance(host, asyncio.Task)
                     and not isinstance(host, PygoTask)):
                 try:
-                    loop.call_soon(cb, self, context=ctx)
+                    loop.call_soon(_run_stock_task_cb, loop, cb, self,
+                                   context=ctx)
                 except BaseException as e:
                     self._report_exc(e)
             else:
