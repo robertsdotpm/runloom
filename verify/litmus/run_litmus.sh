@@ -50,5 +50,12 @@ check commit_lock_publish Never \
 check wakelist_mpsc Never \
       "cross-thread wake_list handoff carries g state (no stale read)"
 
+# park_safe/wake_safe StoreLoad (SB/Dekker) lost wakeup -- the herd7/LKMM
+# second oracle for verify/genmc/sched_parkwake.c (pygo_sched.c:1372/1433).
+check parkwake_no_fence Sometimes \
+      "release/acquire ALONE allows the park/wake SB lost wakeup (fence needed)"
+check parkwake_sc_fence Never \
+      "seq_cst StoreLoad fences forbid the park/wake lost wakeup (fence suffices)"
+
 echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

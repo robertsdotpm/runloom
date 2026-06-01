@@ -1,0 +1,48 @@
+C parkwake_no_fence
+(*
+ * THE BUG CASE -- the park_safe/wake_safe lost wakeup WITHOUT the StoreLoad
+ * fence (the bug GenMC found; see verify/genmc/sched_parkwake.c and
+ * src/pygo_core/pygo_sched.c:1363).  This is the LKMM/herd7 second oracle: a
+ * classic store-buffering (SB / Dekker) shape, proven reachable here under the
+ * C11/RC11 model with release/acquire ALONE.
+ *
+ * Two DIFFERENT locations:
+ *   wake_pending  -- waker bumps it; parker rechecks it after committing.
+ *   parked_safe   -- parker stores 1 (committed to park); waker CAS 1->0.
+ *
+ * Program order (pygo_sched.c):
+ *   park_safe (parker, P0):            wake_safe (waker, P1):
+ *     parked_safe = 1   (release)        wake_pending += 1   (release; modelled
+ *     <NO FENCE>                                              as store 1, single
+ *     wp = wake_pending (acquire)          <NO FENCE>         waker, init 0)
+ *     wp==0  -> PARK (sleep)              ps = parked_safe (acquire; the read
+ *                                              half of the CAS 1->0)
+ *                                         ps==0 -> CAS fails, DO NOT enqueue
+ *
+ * release/acquire does NOT order a store-then-load on different locations, so
+ * BOTH threads may read the other's pre-store value:
+ *   P0 reads wake_pending==0  -> parks
+ *   P1 reads parked_safe==0   -> does not enqueue
+ * => g parks and is never woken: permanent hang.  herd7 reports the `exists`
+ * is reachable (Observation Sometimes) -- the acquire/release are INSUFFICIENT;
+ * the seq_cst StoreLoad fence is required (see parkwake_sc_fence.litmus).
+ *
+ * x86-TSO is also vulnerable (the store buffer realises exactly this SB).
+ *)
+
+{
+  wake_pending = 0;
+  parked_safe = 0;
+}
+
+P0 (atomic_int *parked_safe, atomic_int *wake_pending) {
+  atomic_store_explicit(parked_safe, 1, memory_order_release);
+  int wp = atomic_load_explicit(wake_pending, memory_order_acquire);
+}
+
+P1 (atomic_int *parked_safe, atomic_int *wake_pending) {
+  atomic_store_explicit(wake_pending, 1, memory_order_release);
+  int ps = atomic_load_explicit(parked_safe, memory_order_acquire);
+}
+
+exists (0:wp=0 /\ 1:ps=0)

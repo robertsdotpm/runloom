@@ -1,0 +1,39 @@
+C parkwake_sc_fence
+(*
+ * THE FIX -- park_safe/wake_safe with the seq_cst StoreLoad fence on BOTH
+ * sides (src/pygo_core/pygo_sched.c:1372 in wake_safe, :1433 in park_safe;
+ * merged as 1052aba).  Identical SB/Dekker shape to parkwake_no_fence.litmus,
+ * but each thread places an atomic_thread_fence(seq_cst) BETWEEN its store and
+ * its load.
+ *
+ * The two seq_cst fences impose a global order on the four accesses such that
+ * the two "both read stale 0" reads cannot coexist: if P0's load sees
+ * wake_pending==0 then its store of parked_safe=1 is globally before P1's load,
+ * so P1 MUST see parked_safe==1 (CAS succeeds -> g enqueued).  Symmetrically if
+ * P1's load sees parked_safe==0.  At least one side always observes the other's
+ * store -> at least one of {parker aborts the park, waker enqueues} happens ->
+ * no lost wakeup.
+ *
+ * herd7 reports the `exists` is NOT reachable (Observation Never) -- the fence
+ * is sufficient.  Pair with parkwake_no_fence.litmus (Sometimes) to show it is
+ * also necessary.  Second oracle for verify/genmc/sched_parkwake.c.
+ *)
+
+{
+  wake_pending = 0;
+  parked_safe = 0;
+}
+
+P0 (atomic_int *parked_safe, atomic_int *wake_pending) {
+  atomic_store_explicit(parked_safe, 1, memory_order_release);
+  atomic_thread_fence(memory_order_seq_cst);
+  int wp = atomic_load_explicit(wake_pending, memory_order_acquire);
+}
+
+P1 (atomic_int *parked_safe, atomic_int *wake_pending) {
+  atomic_store_explicit(wake_pending, 1, memory_order_release);
+  atomic_thread_fence(memory_order_seq_cst);
+  int ps = atomic_load_explicit(parked_safe, memory_order_acquire);
+}
+
+exists (0:wp=0 /\ 1:ps=0)
