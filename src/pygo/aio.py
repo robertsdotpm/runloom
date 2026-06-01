@@ -1386,10 +1386,21 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
         pygo_core.go(_keepalive)
 
     def call_later(self, delay, callback, *args, context=None):
+        # Mirror asyncio: call_later is call_at(self.time() + delay, ...).
+        return self.call_at(self.time() + delay, callback, *args,
+                            context=context)
+
+    def call_at(self, when, callback, *args, context=None):
         self._check_closed()
-        handle = _TimerHandle(callback, args, self, self.time() + delay, context)
+        # Store `when` VERBATIM in the handle, exactly like asyncio -- callers
+        # read handle._when back and rely on the value (and its int-ness) they
+        # passed.  aiohttp's TimeoutHandle.start() does when = ceil(loop.time()
+        # + timeout) then asserts loop.call_at(when, ...)._when == that int;
+        # the old round-trip through call_later (self.time() + (when -
+        # self.time())) both drifted the value and forced it to float.
+        handle = _TimerHandle(callback, args, self, when, context)
         def runner():
-            pygo_core.sched_sleep(delay)
+            pygo_core.sched_sleep(max(0.0, when - self.time()))
             if not handle._cancelled:
                 try:
                     handle._context.run(callback, *args)
@@ -1399,17 +1410,13 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
                 except BaseException as e:
                     # Keep this minimal -- printing a traceback from here
                     # can itself recurse if we're near the c_recursion limit.
-                    sys.stderr.write("[pygo.aio] call_later cb: %r\n" % (e,))
+                    sys.stderr.write("[pygo.aio] timer cb: %r\n" % (e,))
         if self._can_spawn_here():
             pygo_core.go(runner)
         else:
             # Foreign thread: spawn the timer goroutine on the loop's own thread.
             self.call_soon_threadsafe(lambda: pygo_core.go(runner))
         return handle
-
-    def call_at(self, when, callback, *args, context=None):
-        delay = max(0.0, when - self.time())
-        return self.call_later(delay, callback, *args, context=context)
 
     # ---- I/O readers / writers (level-triggered, matches selector loops) ----
     def add_reader(self, fd, callback, *args):
