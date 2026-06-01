@@ -138,6 +138,35 @@ such that
    `claim(b)` whenever `t ≤ b`, which is what licenses the **no-CAS** read of
    `buf[b]`.
 
+> ### ⚠ PROOF-INSTANT vs RUNTIME — the authoritative runtime form of INV_race
+>
+> Clause 2's whole-segment ownership `⊛_{i∈[Tc,B)} claim(i)` (equivalently
+> "`∀ i∈[t,B): owner owns i` at the fenced read") is a **linearization-INSTANT
+> invariant**: it holds at the LP, and is what the *proof* threads. It is
+> **NOT a runtime-checkable predicate** and must never be asserted as a runtime
+> monitor. Reason: between the owner's fenced `top`-read and any later
+> observation, thieves *legitimately* claim indices in `[t, b-1]` (the owner only
+> takes `b`), so the whole-segment assertion fails on **correct** code. CBMC
+> confirms this — the whole-segment assert FAILS on the real `cldeque.c` while
+> the loop-unwind assertion and every per-claim assertion pass
+> (`verify/cbmc/cldeque_disjoint.c`, diagnosed 2026-06-01).
+>
+> **The authoritative RUNTIME form of INV_race (use this; it is what
+> `cldeque_disjoint.c` checks and what any CBMC/Spin port must use):**
+> 1. **Per-claim disjointness + TAKEN-once.** At every claim of index `i`
+>    (thief steal CAS, owner pop CAS, or owner no-CAS take): `owner_of[i] ==
+>    OWNER` immediately before, then set `TAKEN`; and `taken[i]` ends `≤ 1`.
+>    This catches *any* double-claim (two thieves, or thief+owner).
+> 2. **No-contention boundary check.** At the fenced read, `if (t < b) assert
+>    owner_of[b] == OWNER` — *only* index `b`, not the segment. In the
+>    no-contention branch `top` can never reach `b` while the owner holds
+>    `bottom = b`, so `b` stays owner-owned; this is the clause-(4) consequence
+>    that **depends on the SC ordering** (a stale `bottom` would let a thief
+>    reach `b`).
+>
+> Slogan: *the whole segment is the proof's device; index `b` is the monitor's
+> checkable shadow.*
+
 **The single fact that closes the race is (4):** the SC fence turns the owner's
 post-decrement read of `top` into a *sound lower bound* on the real top, making
 the owner's retained-claim set `[t,B)` **disjoint** from the thieves' claimable
