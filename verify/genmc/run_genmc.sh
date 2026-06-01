@@ -58,6 +58,39 @@ else
     fi
 fi
 
+# --- park_safe/wake_safe cross-thread handshake (pygo_sched.c) --------------
+# Drift-guard: the harness's correct default assumes the source has the two
+# StoreLoad seq_cst fences (added after GenMC found a lost wakeup in the
+# fence-free version).  If the source loses a fence, the harness no longer
+# mirrors it -- fail loudly so it gets re-synced rather than silently passing.
+SCHED_C="$HERE/../../src/pygo_core/pygo_sched.c"
+printf '  [genmc] %-30s ' "park/wake SC-fence drift-guard"
+if [ -f "$SCHED_C" ] && [ "$(grep -c '__atomic_thread_fence(__ATOMIC_SEQ_CST)' "$SCHED_C")" -ge 2 ]; then
+    green "PASS"; echo " -- pygo_sched.c park/wake retains its StoreLoad fences"; pass=$((pass+1))
+else
+    red "FAIL"; echo " -- pygo_sched.c lost a seq_cst fence; re-sync sched_parkwake.c"; fail=$((fail+1))
+fi
+
+printf '  [genmc] %-30s ' "sched_parkwake.c"
+if "$G" -- "$HERE/sched_parkwake.c" >"$HERE/.genmc.pos.log" 2>&1 \
+        && grep -q "No errors were detected" "$HERE/.genmc.pos.log"; then
+    green "PASS"; echo " -- no lost wake / enqueued-at-most-once under RC11"; pass=$((pass+1))
+else
+    red "FAIL"; echo " -- see $HERE/.genmc.pos.log"; fail=$((fail+1))
+fi
+for ctl in BUG_NO_SC_FENCE BUG_NO_RECHECK BUG_NO_BUMP; do
+    printf '  [genmc] %-30s ' "sched_parkwake.c(-D$ctl)"
+    if "$G" -- "-D$ctl" "$HERE/sched_parkwake.c" >"$HERE/.genmc.neg.log" 2>&1; then
+        red "FAIL"; echo " (expected a lost wake) -- see $HERE/.genmc.neg.log"; fail=$((fail+1))
+    else
+        if grep -qiE "violation|error" "$HERE/.genmc.neg.log"; then
+            green "PASS"; echo " -- correctly DETECTS the lost wakeup"; pass=$((pass+1))
+        else
+            red "FAIL"; echo " (errored but no violation) -- see $HERE/.genmc.neg.log"; fail=$((fail+1))
+        fi
+    fi
+done
+
 rm -f "$HERE/.genmc.pos.log" "$HERE/.genmc.neg.log" 2>/dev/null
 echo "  $pass passed, $fail failed"
 

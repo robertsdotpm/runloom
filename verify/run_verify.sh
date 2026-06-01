@@ -165,6 +165,17 @@ if have cbmc; then
     else
         red "FAIL"; echo " -- see $WORK/cbmc_disjoint.log"; fail=$((fail+1)); FAILED="$FAILED cbmc-disjoint"
     fi
+    # pygo_sched.c single-threaded data structures: the ready FIFO ring (FIFO /
+    # no-loss / no-dup across wraparound + grow) and the per-g tstate save/restore
+    # (completeness + cross-g isolation), each with a negative control (teeth).
+    printf '  [cbmc] %-34s ' "pygo_sched.c ready-ring + tstate"
+    if [ -x "$CBMC_DIR/run_sched_cbmc.sh" ] \
+            && "$CBMC_DIR/run_sched_cbmc.sh" >"$WORK/cbmc_sched.log" 2>&1; then
+        green "PASS"; echo " -- ready-ring FIFO/grow + tstate save/restore (+ teeth)"
+        pass=$((pass+1))
+    else
+        red "FAIL"; echo " -- see $WORK/cbmc_sched.log"; fail=$((fail+1)); FAILED="$FAILED cbmc-sched"
+    fi
 else
     echo "  (cbmc not found -- skipping;  sudo apt-get install cbmc)"
 fi

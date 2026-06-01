@@ -1360,6 +1360,17 @@ void pygo_sched_wake_safe(pygo_g_t *g)
      * park_safe's load-acquire on wake_pending. */
     __atomic_add_fetch(&g->wake_pending, 1, __ATOMIC_ACQ_REL);
 
+    /* StoreLoad barrier: the bump (store to wake_pending) and the CAS-load of
+     * parked_safe below are on DIFFERENT locations, and release/acquire alone
+     * does NOT order a store-then-load -- so without this fence the waker's CAS
+     * could read a stale parked_safe==0 while, symmetrically, the parker's
+     * recheck reads a stale wake_pending==0, and BOTH miss each other: the g
+     * parks but is never enqueued (lost wakeup -> permanent hang).  This is the
+     * Dekker/StoreLoad pattern; the matching fence is in park_safe.  Verified
+     * necessary + sufficient by verify/genmc/sched_parkwake.c under RC11
+     * (x86-TSO is also vulnerable via the store buffer). */
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+
     /* Try to transition parked_safe 1->0.  On success, we own the
      * wake and route g back to its home sched via the thread-safe
      * wake_list (pygo_global_sched here -- park_safe is single-thread
@@ -1410,6 +1421,16 @@ void pygo_sched_park_safe(void)
      * wake_next reset). */
     g->wake_next = NULL;
     __atomic_store_n(&g->parked_safe, 1, __ATOMIC_RELEASE);
+
+    /* StoreLoad barrier between the parked_safe store (above) and the
+     * wake_pending recheck (below).  They are on DIFFERENT locations, so
+     * release/acquire does NOT prevent the store-load reorder -- without this
+     * fence the recheck could read a stale wake_pending==0 while wake_safe's
+     * CAS reads a stale parked_safe==0, and the wake is lost (g parks, never
+     * enqueued).  Pairs with the fence in wake_safe; see that comment and
+     * verify/genmc/sched_parkwake.c (the -DBUG_NO_SC_FENCE control reproduces
+     * the lost wake; the SC fence makes GenMC clean under RC11). */
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
 
     /* Recheck wake_pending after the store.  Two outcomes pair with
      * wake_safe's "bump pending, CAS parked_safe":
