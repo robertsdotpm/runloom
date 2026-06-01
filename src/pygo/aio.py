@@ -3448,6 +3448,14 @@ class _StreamTransport(asyncio.Transport):
         # plaintext socket.recv raises BlockingIOError when dry; a _TLSSock's
         # parking recv() would stall the write drain on this same goroutine, so
         # use its single-shot recv_nb instead.
+        #
+        # BufferedProtocol path: ask the protocol for a buffer and recv straight
+        # into it (get_buffer -> recv_into -> buffer_updated), asyncio's
+        # zero-copy read contract, instead of recv() -> data_received().  Checked
+        # dynamically so a set_protocol() swap is always honoured.
+        proto = self._protocol
+        if isinstance(proto, asyncio.BufferedProtocol):
+            return self._recv_step_buffered(proto)
         sock = self._sock
         try:
             recv_nb = getattr(sock, "recv_nb", None)
@@ -3463,20 +3471,7 @@ class _StreamTransport(asyncio.Transport):
             self.close(e)
             return False
         if not data:
-            # EOF: peer half-closed its write side; recv() now returns b''
-            # forever, so stop READING (a `continue` here would busy-spin at
-            # 100% CPU).  Keep the transport (and this goroutine, for our own
-            # writes) only if the protocol asked (eof_received() -> True).
-            try:
-                keep = self._run_cb(self._protocol.eof_received)
-            except Exception as e:
-                self._report(e, "eof_received")
-                keep = False
-            if not keep:
-                self.close()
-                return False
-            self._read_eof = True   # mask drops READ; loop stays for writes
-            return True
+            return self._handle_read_eof()
         try:
             self._run_cb(self._protocol.data_received, data)
         except Exception as e:
@@ -3486,6 +3481,67 @@ class _StreamTransport(asyncio.Transport):
             # await on closure (websockets recv() -> shield(connection_lost_
             # waiter)) hangs forever.  close()'s guard keeps it single-fire.
             self._report(e, "data_received")
+            self.close(e)
+            return False
+        return True
+
+    def _handle_read_eof(self):
+        # EOF: peer half-closed its write side; recv() now returns b'' forever,
+        # so stop READING (a `continue` here would busy-spin at 100% CPU).  Keep
+        # the transport (and this goroutine, for our own writes) only if the
+        # protocol asked (eof_received() -> True).  Shared by the data_received
+        # and BufferedProtocol read paths.
+        try:
+            keep = self._run_cb(self._protocol.eof_received)
+        except Exception as e:
+            self._report(e, "eof_received")
+            keep = False
+        if not keep:
+            self.close()
+            return False
+        self._read_eof = True   # mask drops READ; loop stays for writes
+        return True
+
+    def _recv_step_buffered(self, proto):
+        # BufferedProtocol read: get_buffer(-1) -> recv_into(buf) ->
+        # buffer_updated(nbytes).  Mirrors asyncio _SelectorSocketTransport's
+        # _read_ready__get_buffer.  Must not park (same constraint as
+        # _recv_step): plain sockets recv_into non-blocking and zero-copy; a
+        # _TLSSock has no non-blocking recv_into, so use its single-shot recv_nb
+        # and copy into the protocol's buffer.
+        sock = self._sock
+        try:
+            buf = self._run_cb(proto.get_buffer, -1)
+            if not len(buf):
+                raise RuntimeError("get_buffer() returned an empty buffer")
+        except Exception as e:
+            self._report(e, "get_buffer")
+            self.close(e)
+            return False
+        try:
+            recv_nb = getattr(sock, "recv_nb", None)
+            if recv_nb is None:
+                nbytes = sock.recv_into(buf)          # plain: zero-copy
+            else:
+                data = recv_nb(len(memoryview(buf)))  # TLS: single-shot + copy
+                if data:
+                    memoryview(buf)[:len(data)] = data
+                nbytes = len(data)
+        except (BlockingIOError, InterruptedError):
+            return True
+        except OSError as e:
+            if self._stopping:
+                return False
+            if e.errno in (_errno.EAGAIN, _errno.EWOULDBLOCK):
+                return True
+            self.close(e)
+            return False
+        if not nbytes:
+            return self._handle_read_eof()
+        try:
+            self._run_cb(proto.buffer_updated, nbytes)
+        except Exception as e:
+            self._report(e, "buffer_updated")
             self.close(e)
             return False
         return True
