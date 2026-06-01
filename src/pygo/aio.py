@@ -51,6 +51,7 @@ import asyncio
 import collections as _collections
 import contextvars as _contextvars
 import errno as _errno
+import inspect as _inspect
 import os as _os
 import socket as _socket
 import ssl as _ssl
@@ -83,6 +84,58 @@ try:
     _TASK_STACK = int(_os.environ.get("PYGO_AIO_TASK_STACK", 512 * 1024))
 except ValueError:
     _TASK_STACK = 512 * 1024
+
+
+# ------------------------------------------------------------------
+# Module-root frame for task-driver goroutines.
+#
+# A PygoTask drives its coroutine on the goroutine's own swapped C stack,
+# whose Python frame chain pygo_core deliberately severs at the goroutine
+# root (so tracebacks / recursion don't bleed across goroutines).  Stock
+# asyncio instead runs a Task's coro synchronously nested under
+# _run_once -> run_forever -> ... -> "<module>" on ONE stack, so a library
+# that derives its module name by walking frame.f_back to the first
+# co_name == "<module>" -- aiohttp's web.AppKey (helpers.py) -- finds it.
+# Under pygo the walk dead-ends at the driver and AppKey raises
+# UnboundLocalError (test_web_app subapp tests; pass under stock asyncio).
+#
+# Fix: run the driver coroutine *underneath* a real "<module>"-named frame.
+# compile(src, name, "exec") yields a top code object whose co_name is
+# literally "<module>"; exec'ing it with a globals dict carrying the right
+# __name__ seats a genuine, lifecycle-correct module frame at the goroutine
+# root.  No hand-built _PyInterpreterFrame, and crucially no cross-stack
+# f_back link to the spawner (that would dangle the moment the spawner's
+# stack is swapped away or returns, and would be a lie -- the spawner is
+# concurrent, not on the goroutine's call stack).  Only task-driver
+# goroutines are wrapped; raw pygo_core.go() goroutines (netpoll pump,
+# keepalive, timers) are untouched, so the per-goroutine cost stays off the
+# scale-out path.  Disable with PYGO_AIO_MODULE_ROOT=0.
+_PG_MODULE_ROOT_ON = _os.environ.get("PYGO_AIO_MODULE_ROOT", "1") != "0"
+_PG_ROOT_CODE = compile("__pygo_body__()", "<pygo-task-root>", "exec")
+
+
+def _pg_capture_module_name(default="__main__"):
+    """Walk the CREATOR's live stack (PygoTask.__init__ runs synchronously on
+    it) to the nearest "<module>" frame and copy its __name__ -- the same
+    module asyncio's frame walk would reach.  Holds only the string, never the
+    frame.  A nested create_task() finds the parent task's own module-root
+    frame first, so the name self-propagates down the task tree."""
+    f = _inspect.currentframe()
+    try:
+        f = f.f_back if f is not None else None     # skip our own frame
+        while f is not None:
+            if f.f_code.co_name == "<module>":
+                name = f.f_globals.get("__name__")
+                if name is not None:
+                    return name
+            f = f.f_back
+    finally:
+        del f                                       # don't strand a frame ref
+    return default
+
+
+def _pg_run_with_module_root(body, module_name):
+    exec(_PG_ROOT_CODE, {"__name__": module_name, "__pygo_body__": body})
 
 
 # ------------------------------------------------------------------
@@ -832,11 +885,24 @@ class PygoTask(_PygoFutureMixin, asyncio.Task):
         # _cancel_outstanding_tasks): the pygo scheduler is shared per-thread,
         # so a close()-time sched_reset must not bulldoze a sibling loop's work.
         _PG_ALL_TASKS.add(self)
+        # Run the driver under a "<module>" root frame so libraries that derive
+        # their module by walking frame.f_back (aiohttp web.AppKey) reach one,
+        # matching asyncio.  Capture the creator's module name HERE (we're on
+        # its live stack) before the goroutine swaps stacks.  See
+        # _pg_run_with_module_root.  Clearing g->callable at completion still
+        # breaks the task<->g cycle: the closure's only strong ref to self is
+        # the bound self._driver it carries, dropped when the closure is.
+        if _PG_MODULE_ROOT_ON:
+            _modname = _pg_capture_module_name()
+            _driver = self._driver
+            _body = lambda: _pg_run_with_module_root(_driver, _modname)
+        else:
+            _body = self._driver
         # Driver goroutines run arbitrary user async code (deep C-recursive
         # first-time imports overflow the default 128 KB g-stack and SEGV), so
         # give them a roomier stack.  Override with PYGO_AIO_TASK_STACK.
-        self._g = pygo_core.go(self._driver, stack_size=_TASK_STACK) \
-            if _TASK_STACK else pygo_core.go(self._driver)
+        self._g = pygo_core.go(_body, stack_size=_TASK_STACK) \
+            if _TASK_STACK else pygo_core.go(_body)
 
     def _pg_settle_c(self):
         # Settle the underlying C Future to FINISHED so asyncio.Task.__del__
