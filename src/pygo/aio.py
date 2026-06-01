@@ -52,7 +52,6 @@ import collections as _collections
 import contextvars as _contextvars
 import errno as _errno
 import inspect as _inspect
-import os as _os
 import socket as _socket
 import ssl as _ssl
 import subprocess as _subprocess
@@ -3267,6 +3266,7 @@ class _StreamTransport(asyncio.Transport):
         self._read_eof = False      # peer half-closed: stop reading, keep writing
         self._eof_written = False   # write_eof() done -> write() must raise
         self._eof_pending = False   # write_eof() requested, buffer not yet drained
+        self._tls_shutdown_sent = False  # answered a peer close_notify with ours
         self._conn_lost_called = False  # connection_lost fires exactly once
         self._in_context = False    # re-entrancy guard for _run_cb (see below)
         # ---- write buffering (single ordered buffer, drained by the ONE io
@@ -3329,6 +3329,19 @@ class _StreamTransport(asyncio.Transport):
         # this one's arm (one-shot per fd) and strands it.
         sock = self._sock
         while not self._stopping:
+            # TLS bidirectional half-close: once the peer's close_notify has
+            # been read (read EOF) AND our write buffer is fully drained, answer
+            # with OUR close_notify -- the asyncio/sslproto behaviour.  Without
+            # it a peer doing a clean ssl.SSLSocket.unwrap() blocks forever
+            # waiting for our close_notify (test_remote_shutdown trailing-data:
+            # its server reads our data, then ends its read loop only on our
+            # close_notify).  Fire once, here in the io goroutine (send may park).
+            if (self._read_eof and not self._write_buf and not self._closed
+                    and not self._sock_is_plain and not self._tls_shutdown_sent):
+                self._tls_shutdown_sent = True
+                snc = getattr(self._sock, "send_close_notify", None)
+                if snc is not None:
+                    snc()
             mask = 0
             if not self._paused and not self._read_eof and not self._closed:
                 mask |= 1
@@ -3347,8 +3360,7 @@ class _StreamTransport(asyncio.Transport):
                 # flight / a prior record).  The socket isn't readable for that,
                 # so _wait_fd(READ) would never fire -- drain it before parking.
                 # Stop draining when pending() stops dropping (a partial record
-                # that needs more socket bytes), then fall through to park READ;
-                # this avoids a busy-loop on a split record.
+                # that needs more socket bytes).
                 drained = False
                 while not self._stopping:
                     try:
@@ -3367,7 +3379,14 @@ class _StreamTransport(asyncio.Transport):
                         break
                 if drained:
                     pygo_core.sched_yield_classic()
-                    # fall through to park READ (socket) for anything still owed
+                    # RE-LOOP, don't fall through: _recv_step delivered data,
+                    # which can wake a peer coroutine that queues writes during
+                    # the yield above (a streaming write loop, or a test's
+                    # _test__append_write_backlog).  `mask` was computed at the
+                    # top of THIS iteration -- stale now -- so parking on it
+                    # would park READ-only and strand the new write buffer.
+                    # Re-evaluating the mask picks up WRITE.
+                    continue
             try:
                 fd = sock.fileno()
             except Exception:
@@ -3746,6 +3765,18 @@ class _StreamTransport(asyncio.Transport):
 
     def get_write_buffer_size(self):
         return len(self._write_buf)
+
+    def _test__append_write_backlog(self, data):
+        # asyncio's _SSLProtocolTransport exposes this test-only hook (see
+        # sslproto.py) to QUEUE data without an immediate flush -- simulating a
+        # filled write backlog so tests can exercise trailing-data delivery
+        # after a remote shutdown.  With our single ordered write buffer it maps
+        # cleanly: append (preserving order) and let the io goroutine drain it.
+        if not data:
+            return
+        self._write_buf += bytes(data)
+        self._maybe_pause_writing()
+        self._kick_io()
 
     def _report(self, exc, where):
         if self._loop is not None:
