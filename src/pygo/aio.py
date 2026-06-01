@@ -205,6 +205,23 @@ def _close_sock(sock):
     except OSError: pass
 
 
+def _reject_subprocess_text_mode(kwargs):
+    """Mirror asyncio.base_events.subprocess_{exec,shell}: an asyncio
+    subprocess is always binary and unbuffered.  Reject text-mode / buffering
+    kwargs with ValueError (CPython's test_subprocess asserts these raises),
+    and pop bufsize so it can't collide with our hardcoded bufsize=0 Popen."""
+    if kwargs.get("universal_newlines"):
+        raise ValueError("universal_newlines must be False")
+    if kwargs.get("text"):
+        raise ValueError("text must be False")
+    if kwargs.get("encoding") is not None:
+        raise ValueError("encoding must be None")
+    if kwargs.get("errors") is not None:
+        raise ValueError("errors must be None")
+    if kwargs.pop("bufsize", 0) != 0:
+        raise ValueError("bufsize must be 0")
+
+
 # A cooperative mutex (parks the goroutine, not the OS thread) imported lazily
 # to keep the import graph acyclic.  Used to serialise access to one SSLSocket
 # shared by a connection's recv goroutine and concurrent writers under M:N.
@@ -1645,6 +1662,7 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
     async def subprocess_exec(self, protocol_factory, program, *args,
                               stdin=_subprocess.PIPE, stdout=_subprocess.PIPE,
                               stderr=_subprocess.PIPE, **kwargs):
+        _reject_subprocess_text_mode(kwargs)
         protocol = protocol_factory()
         transport = _SubprocessTransport(
             self, protocol, [program] + list(args), shell=False,
@@ -1654,6 +1672,7 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
     async def subprocess_shell(self, protocol_factory, cmd,
                                stdin=_subprocess.PIPE, stdout=_subprocess.PIPE,
                                stderr=_subprocess.PIPE, **kwargs):
+        _reject_subprocess_text_mode(kwargs)
         protocol = protocol_factory()
         transport = _SubprocessTransport(
             self, protocol, cmd, shell=True,
@@ -3717,8 +3736,13 @@ class _SubprocessTransport(asyncio.SubprocessTransport):
         return self._closed
 
     def close(self):
-        # Best-effort: kill a still-running child, then close stdin.
-        if self._returncode is None:
+        # Best-effort: kill a still-running child, then close stdin.  Only kill
+        # if the process is genuinely still running -- poll() the Popen rather
+        # than trusting self._returncode, which our _wait_thread sets
+        # ASYNCHRONOUSLY: a child that already exited may not have been notified
+        # yet, and close() must not kill a finished process (test_close_dont_
+        # kill_finished).
+        if self._returncode is None and self._proc.poll() is None:
             try:
                 self._proc.kill()
             except (ProcessLookupError, OSError):
