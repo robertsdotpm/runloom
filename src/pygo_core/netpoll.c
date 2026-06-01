@@ -2198,8 +2198,17 @@ int pygo_netpoll_pump(long long timeout_ns)
     {
         struct epoll_event evs[64];
         int n;
+        /* epoll_wait's timeout is MILLISECOND-granular.  A positive but
+         * sub-millisecond timeout (timeout_ns in (0, 1e6)) must round UP to
+         * 1 ms, not truncate to 0: truncating to 0 turns the idle pump into a
+         * 100% busy-spin of epoll_wait(0) whenever the nearest sleep deadline
+         * is under a millisecond away (e.g. the aio keepalive's 2 ms poll plus
+         * a burst of asyncio timers keep it sub-ms).  Round up so the OS thread
+         * actually sleeps and an fd that becomes ready still wakes it promptly.
+         * A genuine non-blocking pump passes timeout_ns == 0 and stays ms 0. */
         int ms = timeout_ns < 0 ? -1 :
-                 (timeout_ns > 1000000000LL ? 1000 : (int)(timeout_ns / 1000000LL));
+                 (timeout_ns > 1000000000LL ? 1000 :
+                  (int)((timeout_ns + 999999LL) / 1000000LL));
         Py_BEGIN_ALLOW_THREADS
         n = epoll_wait(pygo_epoll_fd, evs, 64, ms);
         Py_END_ALLOW_THREADS
