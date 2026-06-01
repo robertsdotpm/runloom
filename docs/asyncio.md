@@ -273,7 +273,7 @@ paio.run(main())
 | `open_connection`/`start_server` (StreamReader/Writer) | works |
 | `loop.create_connection`/`create_server` (Transport+Protocol) | works |
 | `loop.create_datagram_endpoint` (UDP) | works |
-| SSL (`ssl=` keyword) | not implemented -- use blocking-style SSL via monkey-patch |
+| SSL (`ssl=` keyword on `create_connection`/`create_server`) | works -- cooperative `SSLSocket` (client + server, ALPN, cert fingerprint) |
 | `loop.subprocess_*` | not implemented |
 | `signal.set_wakeup_fd` integration | not implemented |
 
@@ -340,3 +340,81 @@ The trade is: pygo costs more memory per task but switches between
 tasks ~22× faster.  Workloads with many switches per task amortise that;
 workloads with one switch per task pay the memory cost without
 collecting the speed benefit.
+
+## Known semantic differences from asyncio
+
+`pygo.aio` is a high-fidelity bridge for real-world async code -- it runs
+aiohttp, uvicorn, starlette, hypercorn, websockets, anyio and friends -- but it
+is **not** a bit-exact emulator of asyncio's *scheduler semantics*.  Because a
+task is a stackful goroutine ordered by pygo's M:N scheduler (not a callback on
+a single FIFO ready-queue driven by `loop._run_once`), a thin slice of code that
+depends on asyncio's exact callback/timer ordering can observe a difference.
+
+For the overwhelming majority of projects there is **no practical difference**
+(the frameworks above all pass).  The differences below only surface in code
+that depends on *when* a callback fires relative to other work in the same loop
+iteration, or that drives timers by mocking the clock, or that runs several
+loops on one OS thread.  When they do bite, they bite *loudly* (a failing test
+or a hang), never as silent data corruption.
+
+### 1. Future done-callbacks may fire synchronously, not deferred
+
+asyncio schedules every future done-callback through `loop.call_soon`, so the
+code that completed the future finishes its synchronous run *before* any
+callback fires.  pygo fires most callbacks **inline** from `set_result` /
+`set_exception` / `cancel` (a deliberate performance choice -- it avoids a
+goroutine spawn per callback and is a large part of why the bridge is fast at
+high fan-out).  Stock-`asyncio.Task` wakeups *are* deferred (so eager
+`asyncio.Task()` consumers, e.g. uvicorn's websocket close path, behave
+correctly), but library done-callbacks are not.
+
+Affects you only if a done-callback's effect is ordering-sensitive relative to
+the completer's continued synchronous code, *with no `await` in between* -- e.g.
+a coroutine that does `fut.set_result(x)` and then keeps running, where another
+party's done-callback must not observe the in-between state.  Normal code
+`await`s, and the distinction washes out.
+
+### 2. Timers are real wall-clock, on a per-OS-thread scheduler
+
+asyncio keeps a per-loop timer heap and fires timers by comparing `loop.time()`
+inside `_run_once`.  pygo schedules `call_later`/`call_at`/`asyncio.sleep` as
+real wall-clock goroutine sleeps on the scheduler shared by every loop on that
+OS thread.  Two consequences:
+
+- **`loop.time()` is not consulted for firing.**  Mocking `loop.time()` to
+  fast-forward a timer (a common asyncio *test* trick) does not advance pygo's
+  timers -- they fire on real elapsed time.  Drive such tests with a real (short)
+  duration instead of a mocked clock.
+- **Timers are not isolated per loop on the same thread.**  If you run two event
+  loops on one OS thread, a timer scheduled under loop A keeps counting while
+  loop B is being driven, and can fire during B's run.  asyncio would never fire
+  A's timer while only B is running.  (`call_at(when, ...)` *does* store `when`
+  verbatim on the returned handle, matching asyncio; only the *firing* mechanism
+  differs.)
+
+### 3. Wake / callback ordering is the scheduler's, not a single FIFO
+
+asyncio runs coroutine-steps, `call_soon` callbacks and task wakeups as entries
+in one strict-FIFO ready deque, one batch per iteration.  pygo runs them as
+goroutines ordered by the M:N scheduler (ready-ring + work-stealing deque +
+wake-state machine).  The *set* of work that runs is the same; the exact
+interleaving between a just-woken task and a freshly scheduled callback can
+differ.  Again: only code that pins on that sub-iteration ordering notices.
+
+### Is a failing test a real problem or an over-specified test?
+
+The useful question when a library's test fails under pygo: **does it assert an
+observable behavioral guarantee, or does it assume an implementation
+mechanism?**
+
+- *Assumes a mechanism* -- mocks `loop.time()`, relies on an exact `sleep`
+  duration, or runs multiple loops per thread.  Usually adaptable with light
+  effort (use real time; close throwaway coroutines instead of awaiting them);
+  arguably the test over-specifies asyncio internals.
+- *Asserts observable behavior* -- e.g. "this callback must not see state X
+  before `close()` runs."  Not adaptable without changing intent; it's flagging
+  a genuine (if narrow) fidelity gap worth taking seriously.
+
+If asyncio-exact scheduler semantics ever become a hard requirement for your use
+case, that's a deeper change to the bridge's ready-queue/timer model (and a
+trade against the performance the goroutine model buys) -- open an issue.
