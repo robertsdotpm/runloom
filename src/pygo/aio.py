@@ -1505,8 +1505,13 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
                         _close_sock(s)
             if not socks:
                 raise last_err or OSError("could not bind to any address")
-            for s in socks:
-                s.listen(backlog)
+        # listen() on EVERY socket -- including a caller-supplied sock= (asyncio's
+        # create_server(sock=...) always listens on it).  aiohttp's TestServer
+        # pre-binds a socket and hands it over un-listened via SockSite(sock=...);
+        # without this it stayed bound-but-not-listening and every client got
+        # ECONNREFUSED.  listen() on an already-listening socket is harmless.
+        for s in socks:
+            s.listen(backlog)
         # cb=None: caller wired up via protocol factory + Transport.
         # We still need an accept loop per socket that builds Transports per conn.
         return _ProtocolServer(socks, protocol_factory, loop=self, ssl_context=ssl,
