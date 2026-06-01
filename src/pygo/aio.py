@@ -2348,7 +2348,16 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
         return _socket.getnameinfo(sockaddr, flags)
 
     # ---- low-level socket ops (loop.sock_*) ----
+    def _check_sock_nonblocking(self, sock):
+        # asyncio's contract for the low-level sock_* ops: in debug mode a
+        # blocking socket is a usage error (it would block the whole loop).
+        # Matches CPython BaseSelectorEventLoop (selector_events.py).  Outside
+        # debug pygo stays lenient and coerces the socket non-blocking below.
+        if self._debug and sock.gettimeout() != 0:
+            raise ValueError("the socket must be non-blocking")
+
     async def sock_connect(self, sock, address):
+        self._check_sock_nonblocking(sock)
         sock.setblocking(False)
         try:
             sock.connect(address)
@@ -2359,14 +2368,18 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
                 raise OSError(err, "connect failed")
 
     async def sock_accept(self, sock):
+        self._check_sock_nonblocking(sock)
         sock.setblocking(False)
         while True:
             try:
-                return sock.accept()
+                conn, addr = sock.accept()
+                conn.setblocking(False)   # asyncio returns a non-blocking conn
+                return conn, addr
             except (BlockingIOError, InterruptedError):
                 _wait_fd(sock.fileno(), 1)
 
     async def sock_recv(self, sock, nbytes):
+        self._check_sock_nonblocking(sock)
         sock.setblocking(False)
         while True:
             try:
@@ -2375,6 +2388,7 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
                 _wait_fd(sock.fileno(), 1)
 
     async def sock_recv_into(self, sock, buf):
+        self._check_sock_nonblocking(sock)
         sock.setblocking(False)
         while True:
             try:
@@ -2383,6 +2397,7 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
                 _wait_fd(sock.fileno(), 1)
 
     async def sock_recvfrom(self, sock, bufsize):
+        self._check_sock_nonblocking(sock)
         sock.setblocking(False)
         while True:
             try:
@@ -2392,6 +2407,7 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
 
     async def sock_recvfrom_into(self, sock, buf, nbytes=0):
         # asyncio 3.11+ API; base class raises NotImplementedError.
+        self._check_sock_nonblocking(sock)
         sock.setblocking(False)
         while True:
             try:
@@ -2408,6 +2424,7 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
             "sock_sendfile syscall path is not available on pygo")
 
     async def sock_sendall(self, sock, data):
+        self._check_sock_nonblocking(sock)
         sock.setblocking(False)
         view = memoryview(data)
         sent = 0
@@ -2419,6 +2436,7 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
                 _wait_fd(sock.fileno(), 2)
 
     async def sock_sendto(self, sock, data, address):
+        self._check_sock_nonblocking(sock)
         sock.setblocking(False)
         while True:
             try:
