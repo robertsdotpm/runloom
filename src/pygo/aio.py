@@ -2054,7 +2054,17 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
         elif not (isinstance(future, asyncio.Future)
                   or isinstance(future, PygoFuture)
                   or asyncio.isfuture(future)):
-            raise TypeError("argument must be a Future or coroutine")
+            if hasattr(future, "__await__"):
+                # asyncio's run_until_complete accepts ANY awaitable -- its
+                # ensure_future wraps a bare __await__ object in a coroutine.
+                # aiohttp's Connector.close()/ClientSession.close() return such
+                # deprecation-wrapper awaitables, so run_until_complete(
+                # conn.close()) must accept them instead of rejecting anything
+                # that isn't already a coroutine/Future.  Reuse asyncio's own
+                # wrapper (it calls our create_task under the hood).
+                future = asyncio.ensure_future(future, loop=self)
+            else:
+                raise TypeError("argument must be a Future or coroutine")
         # Resolve deep, non-yielding stdlib imports (e.g. getaddrinfo's
         # first-call codec import) before any goroutine runs them on a small
         # stack -- see prewarm_stdlib.
