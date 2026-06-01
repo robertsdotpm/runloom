@@ -351,6 +351,21 @@ class _TLSSock(object):
     def ssl_object(self):
         return self._ssl
 
+    def __del__(self):
+        # Safety net: a _TLSSock dropped without close() -- e.g. a connection
+        # that errored mid-setup and never routed through transport.close(), or
+        # a session torn down on error -- would otherwise let its underlying
+        # ssl.SSLSocket reach GC with an open fd, raising ResourceWarning(
+        # "unclosed <ssl.SSLSocket ...>").  pytest's unraisable-exception hook
+        # elevates that to a test error (test_error_in_performing_request,
+        # test_aiohttp_request_ctx_manager_close_sess_on_error).  Close it here
+        # before SSLSocket.__del__ can warn.
+        if not getattr(self, "_closed", True):
+            try:
+                self._ssl.close()
+            except Exception:
+                pass
+
 
 def _tls_wrap_client(raw, ssl_arg, server_hostname, host, handshake_timeout=None):
     """Wrap a freshly-connected client socket in cooperative TLS and finish
