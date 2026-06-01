@@ -389,6 +389,12 @@ except AttributeError:
 import itertools as _itertools
 _TASK_NAME_COUNTER = _itertools.count(1)
 
+# Every PygoTask, across ALL loops on this process.  The pygo scheduler is one
+# per OS thread (shared by every PygoEventLoop on that thread), so loop.close()
+# needs to know if a SIBLING loop still has live tasks before it drains the
+# shared scheduler.  WeakSet so finished/collected tasks drop out on their own.
+_PG_ALL_TASKS = _weakref.WeakSet()
+
 
 # ====================================================================
 # Handles -- minimal asyncio.Handle / asyncio.TimerHandle compat.
@@ -717,6 +723,11 @@ class PygoTask(_PygoFutureMixin, asyncio.Task):
                 _REGISTER_TASK(self)
             except Exception:
                 pass
+        # Also track in a pygo-global set so loop.close() can tell whether
+        # ANOTHER loop on this OS thread still has live tasks (see
+        # _cancel_outstanding_tasks): the pygo scheduler is shared per-thread,
+        # so a close()-time sched_reset must not bulldoze a sibling loop's work.
+        _PG_ALL_TASKS.add(self)
         # Driver goroutines run arbitrary user async code (deep C-recursive
         # first-time imports overflow the default 128 KB g-stack and SEGV), so
         # give them a roomier stack.  Override with PYGO_AIO_TASK_STACK.
@@ -1999,11 +2010,20 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
         # netpoll/wake/chan that aren't interrupted by cancel get
         # abandoned; the underlying coro and snap are freed when the
         # last Python reference drops.
-        try:
-            pygo_core.sched_reset()
-        except AttributeError:
-            # Older build without sched_reset; best-effort drain.
-            pass
+        # Only drain the shared per-thread scheduler if NO sibling loop still
+        # has live tasks on it.  The pygo scheduler is one-per-OS-thread, shared
+        # by every PygoEventLoop on the thread; a blind sched_reset here would
+        # bulldoze another loop's still-needed goroutines -- e.g. a background
+        # server task's in-flight asyncio.sleep sitting in the shared sleep heap
+        # -- deadlocking that loop when it is next driven (the hypercorn /
+        # pytest-asyncio fixture-vs-test multi-loop case).
+        sibling_busy = any(
+            (t._loop is not self and not t.done()) for t in list(_PG_ALL_TASKS))
+        if not sibling_busy:
+            try:
+                pygo_core.sched_reset()
+            except AttributeError:
+                pass  # Older build without sched_reset; best-effort drain.
 
     def run_forever(self):
         # Resolve deep, non-yielding stdlib imports (e.g. getaddrinfo's
