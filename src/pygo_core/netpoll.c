@@ -2172,6 +2172,45 @@ static long long pygo_dh_peek_deadline_global(void)
     return earliest;
 }
 
+/* Recover from a failed blocking wait (epoll_wait / kevent).
+ *
+ * EINTR is benign: a signal interrupted the wait, the caller re-pumps, and the
+ * next epoll_wait/kevent blocks normally -- no spin, nothing to do.
+ *
+ * Any OTHER errno is "impossible": the epoll/kqueue fd is owned by netpoll,
+ * created once in pygo_netpoll_init and only closed in pygo_netpoll_fini.  The
+ * ways it can still happen are a teardown race (fd closed under a pump on
+ * another thread -> EBADF) or corruption (EINVAL/EFAULT).  The danger is that
+ * the error returns WITHOUT blocking, so the scheduler's idle loop -- which
+ * re-pumps the instant pump() returns 0 with parkers still outstanding -- turns
+ * into a 100% CPU busy-spin that can never make progress (the same trap the
+ * sub-ms-timeout rounding above guards against, but driven by a hard error
+ * instead of a 0 timeout).  libuv abort()s here; we can't kill the embedding
+ * interpreter, so instead we log once and back off a millisecond, degrading a
+ * silent CPU peg into an observable, throttled slow-loop with a logged cause.
+ * Returns 1 if it handled an error (caller should not treat n as a count). */
+#if defined(PYGO_HAVE_EPOLL) || defined(PYGO_HAVE_KQUEUE)
+static int pygo_netpoll_wait_failed(int n)
+{
+    static int warned;            /* relaxed: a few duplicate logs are harmless */
+    int err = errno;
+    if (n >= 0 || err == EINTR) return n < 0;   /* EINTR: retry, no backoff */
+    if (!__atomic_exchange_n(&warned, 1, __ATOMIC_RELAXED)) {
+        fprintf(stderr,
+                "[pygo] netpoll pump: blocking wait failed (errno=%d); "
+                "backing off to avoid a busy-spin -- the poll fd is likely "
+                "closed (teardown race) or corrupt\n", err);
+    }
+    {
+        struct timespec backoff = { 0, 1000000L };   /* 1 ms */
+        Py_BEGIN_ALLOW_THREADS
+        nanosleep(&backoff, NULL);
+        Py_END_ALLOW_THREADS
+    }
+    return 1;
+}
+#endif /* PYGO_HAVE_EPOLL || PYGO_HAVE_KQUEUE */
+
 int pygo_netpoll_pump(long long timeout_ns)
 {
     long long now;
@@ -2212,7 +2251,9 @@ int pygo_netpoll_pump(long long timeout_ns)
         Py_BEGIN_ALLOW_THREADS
         n = epoll_wait(pygo_epoll_fd, evs, 64, ms);
         Py_END_ALLOW_THREADS
-        if (n > 0) {
+        if (n < 0) {
+            pygo_netpoll_wait_failed(n);   /* EINTR -> retry; else log+backoff */
+        } else if (n > 0) {
             int i;
             for (i = 0; i < n; i++) {
                 int fd = evs[i].data.fd;
@@ -2308,7 +2349,9 @@ int pygo_netpoll_pump(long long timeout_ns)
         Py_BEGIN_ALLOW_THREADS
         n = kevent(pygo_kqueue_fd, NULL, 0, evs, 64, tsp);
         Py_END_ALLOW_THREADS
-        if (n > 0) {
+        if (n < 0) {
+            pygo_netpoll_wait_failed(n);   /* EINTR -> retry; else log+backoff */
+        } else if (n > 0) {
             int i;
             for (i = 0; i < n; i++) {
                 int fd = (int)evs[i].ident;
