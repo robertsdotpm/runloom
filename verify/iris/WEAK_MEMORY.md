@@ -72,7 +72,17 @@ in its own switch so it never disturbs the released-Iris build of Stages 1–2.
 
 ## What remains genuinely open
 
-A full iRC11 proof of the *entire* Chase-Lev deque or the *entire* netpoll
-claim protocol (not just the commit-publish MP core) is still research-scale —
-gpfsl ships a `chase_lev` example that would be the starting point. The
-commit-publish core, the load-bearing fence the litmus tests isolate, is done.
+A full iRC11 proof of the *entire* Chase-Lev deque under RC11 is research-scale
+and has **no adaptable reference**: gpfsl's `gpfsl-examples/chase_lev` ships
+`code.v` only (the implementation, ~97 lines) — there is no spec or proof file
+to specialize. Deriving the deque's linearizability/safety under RC11 in iRC11
+from scratch is the content of the Lê–Pop–Cohen–Nardelli line of work, i.e. a
+research paper, not an adaptation. It is therefore left as the explicit
+ceiling rather than faked with `Admitted`.
+
+What IS established for the deque, at the levels that are soundly checkable
+here: the unbounded conservation / no-double-consume invariant in Coq
+(`verify/coq/Deque.v`), the real C with its `__atomic` orders in CBMC
+(`verify/cbmc`), and the related fences under RC11 in herd7 + GenMC. The
+commit-publish core — the load-bearing fence the litmus tests isolate — is
+fully proven in iRC11 here (`rc11/CommitPublish.v`).
