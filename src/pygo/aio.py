@@ -1709,6 +1709,9 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
     async def create_unix_server(self, protocol_factory, path=None, *, sock=None,
                                  backlog=100, ssl=None,
                                  ssl_handshake_timeout=None, **_ignored):
+        if path is not None and sock is not None:
+            raise ValueError(
+                "path and sock can not be specified at the same time")
         if sock is None:
             if path is None:
                 raise ValueError("path was not specified, and no sock specified")
