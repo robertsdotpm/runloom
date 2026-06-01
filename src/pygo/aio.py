@@ -595,6 +595,10 @@ class _PygoFutureMixin(object):
         self._pgexc = None
         self._pgcbs = []
         self._pgcancelmsg = None
+        # The actual CancelledError instance a cancelled coroutine raised, so
+        # result()/exception() re-raise the SAME object (identity + chained
+        # context), matching asyncio.Future._cancelled_exc.  None until set.
+        self._pg_cancelled_exc = None
         # asyncio's "exception was never retrieved" tracking (libraries assert
         # on _log_traceback).  Our own copy -- the C _log_traceback descriptor
         # forbids being set True.
@@ -738,6 +742,13 @@ class _PygoFutureMixin(object):
     cancel = _pg_future_cancel
 
     def _make_cancelled_error(self):
+        # Preserve the exact CancelledError a cancelled coroutine raised (its
+        # identity and __context__), exactly like asyncio.Future, so
+        # `assertIs(awaited_exc, raised)` holds and chained context survives.
+        exc = self._pg_cancelled_exc
+        if exc is not None:
+            self._pg_cancelled_exc = None
+            return exc
         msg = self._pgcancelmsg
         if msg is None:
             return asyncio.CancelledError()
@@ -1109,10 +1120,13 @@ class PygoTask(_PygoFutureMixin, asyncio.Task):
                         self.set_result(si.value)
                     self._pg_settle_c()
                     return
-                except asyncio.CancelledError:
+                except asyncio.CancelledError as cancel_exc:
                     if not self.done():
-                        # Record the task's own cancel message so a parent
-                        # awaiting THIS task receives CancelledError(msg) too.
+                        # Keep the SAME CancelledError instance the coroutine
+                        # raised so a parent awaiting THIS task receives it
+                        # unchanged (identity + chained context), like asyncio's
+                        # Task._cancelled_exc.  _pgcancelmsg still carries the msg.
+                        self._pg_cancelled_exc = cancel_exc
                         self._pg_future_cancel(self._pgcancelmsg)
                     self._pg_settle_c()
                     return
