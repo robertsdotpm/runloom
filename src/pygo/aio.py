@@ -200,6 +200,21 @@ class _TLSSock(object):
         self._lock = _get_colock()()
         self._closed = False
 
+    def __getattr__(self, name):
+        # Delegate socket-introspection surface we don't wrap explicitly --
+        # family / type / proto / setsockopt / getsockname / ... -- to the
+        # underlying ssl.SSLSocket, which subclasses socket.socket and exposes
+        # them.  asyncio code that pulls the socket via
+        # transport.get_extra_info("socket") treats it as a real socket; e.g.
+        # aiohttp's tcp_nodelay reads sock.family and calls sock.setsockopt(),
+        # which raised AttributeError on the bare _TLSSock.  The cooperative
+        # recv/send/sendall/fileno/etc. are defined on the class, so they take
+        # precedence and __getattr__ never shadows them.  Guard _ssl and dunders
+        # to avoid recursion before __init__ binds _ssl.
+        if name == "_ssl" or name.startswith("__"):
+            raise AttributeError(name)
+        return getattr(self._ssl, name)
+
     def fileno(self):
         return self._ssl.fileno()
 
@@ -520,6 +535,30 @@ class _PygoFutureMixin(object):
         self._pglogtb = False
         return self._pgexc
 
+    def __repr__(self):
+        # asyncio-compatible repr.  PygoFuture/PygoTask are drop-in asyncio
+        # Future/Task; code and tests inspect the repr and expect the asyncio
+        # spelling -- aiohttp's test_format_task_get asserts
+        # f"{task}".startswith("<Task pending"), and StreamReader.__repr__
+        # embeds repr(waiter) expecting "<Future pending>".  So present as
+        # Future/Task, not the PygoFuture/PygoTask implementation class name
+        # that asyncio.Future.__repr__ would otherwise emit.
+        state = ("pending" if self._pgstate == _PENDING else
+                 "cancelled" if self._pgstate == _CANCELLED else "finished")
+        if isinstance(self, asyncio.Task):
+            info = ["Task", state, "name=%r" % self._pgname]
+            coro = getattr(self, "_pgcoro", None)
+            if coro is not None:
+                info.append("coro=%r" % (coro,))
+        else:
+            info = ["Future", state]
+            if self._pgstate == _FINISHED:
+                if self._pgexc is not None:
+                    info.append("exception=%r" % (self._pgexc,))
+                else:
+                    info.append("result=%r" % (self._pgresult,))
+        return "<%s>" % " ".join(info)
+
     @property
     def _log_traceback(self):
         return self._pglogtb
@@ -835,11 +874,8 @@ class PygoTask(_PygoFutureMixin, asyncio.Task):
         except Exception:
             return exc
 
-    def __repr__(self):
-        return "<PygoTask name=%r state=%s>" % (
-            self._pgname,
-            "PENDING" if self._pgstate == _PENDING else
-            ("CANCELLED" if self._pgstate == _CANCELLED else "FINISHED"))
+    # __repr__ is inherited from _PygoFutureMixin (asyncio-compatible
+    # "<Task pending name=... coro=...>"), shared with PygoFuture.
 
     # ---- asyncio.Task surface ----
     def get_coro(self):
