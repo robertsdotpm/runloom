@@ -264,6 +264,14 @@ class _TLSSock(object):
     def __init__(self, raw, context, *, server_side=False,
                  server_hostname=None):
         raw.setblocking(False)
+        # Mirror asyncio's sslproto normalisation: a falsy server_hostname --
+        # notably the empty string, which create_connection accepts to mean
+        # "TLS without SNI / hostname verification" -- and every server-side
+        # wrap must pass None to the ssl machinery.  ssl.wrap_socket raises
+        # ValueError on an empty (or leading-dot) server_hostname, so without
+        # this an explicit server_hostname='' blows up the whole handshake.
+        if server_side or not server_hostname:
+            server_hostname = None
         self._ssl = context.wrap_socket(
             raw, server_side=server_side,
             server_hostname=server_hostname,
@@ -306,12 +314,27 @@ class _TLSSock(object):
                     want = _WAIT_READ
                 except _ssl.SSLWantWriteError:
                     want = _WAIT_WRITE
+                except _ssl.SSLEOFError:
+                    # Peer closed the connection mid-handshake (EOF in
+                    # violation of protocol).  asyncio's sslproto translates a
+                    # premature EOF while DO_HANDSHAKE into ConnectionResetError
+                    # (eof_received -> _on_handshake_complete(ConnectionResetError));
+                    # mirror that so callers see the connection-reset they expect
+                    # rather than a raw ssl.SSLEOFError.
+                    raise ConnectionResetError(
+                        "Connection lost during TLS handshake") from None
             if deadline is None:
                 _wait_fd(fd, want)
             else:
                 remaining = deadline - _time.monotonic()
                 if remaining <= 0:
-                    raise TimeoutError("TLS handshake timed out")
+                    # Match asyncio's ssl_handshake_timeout exception type and
+                    # message (sslproto._check_handshake_timeout) so callers'
+                    # assertRaisesRegex(ConnectionAbortedError, 'SSL handshake.*
+                    # is taking longer') holds.
+                    raise ConnectionAbortedError(
+                        "SSL handshake is taking longer than {0} seconds: "
+                        "aborting the connection".format(timeout))
                 # wait_fd returns (without raising) when the timeout elapses;
                 # the next loop re-checks the deadline and raises above.
                 _wait_fd(fd, want, max(1, int(remaining * 1000)))
