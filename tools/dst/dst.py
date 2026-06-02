@@ -24,7 +24,7 @@ Two pluggable scheduling strategies:
 Scope honesty: this is deterministic for the SINGLE-THREAD cooperative
 scheduler + channel/select logic.  Controlled interleaving of the multi-OS-
 thread M:N path (which would reproduce the OS-thread flake class) requires a
-C-level scheduler hook and is the next step (see VALIDATION.md).
+C-level scheduler hook and is the next step (see docs/dev/VALIDATION.md).
 
 Usage:
   tools/dst/dst.py determinism            # prove same seed -> same execution

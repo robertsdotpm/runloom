@@ -183,7 +183,7 @@ A lock-free M:N scheduler is exactly where bugs hide in rare interleavings, so
 the concurrency core is checked from several independent angles. Every
 machine-checked proof ships with a **negative control** that *must* fail, so the
 checks are known to have teeth. One driver runs the lot: `scripts/check_all.sh
-all`; the full writeup is in [VALIDATION.md](VALIDATION.md) and [verify/](verify/).
+all`; the full writeup is in [docs/dev/VALIDATION.md](docs/dev/VALIDATION.md) and [verify/](verify/).
 
 **Formal verification** ([verify/](verify/), `verify/run_verify.sh`):
 

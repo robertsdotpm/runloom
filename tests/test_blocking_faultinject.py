@@ -92,7 +92,7 @@ class TestFlockFaults(unittest.TestCase):
             fd = os.open(self.path, os.O_RDWR)
             fd2 = os.open(self.path, os.O_RDWR)
             try:
-                with inject(pygo.monkey, "_orig_flock", InterruptedError, n=1):
+                with inject(pygo.monkey.files, "_orig_flock", InterruptedError, n=1):
                     fcntl.flock(fd, fcntl.LOCK_EX)   # EINTR once -> retried
                 # Verify the lock is ACTUALLY held (not silently dropped on the
                 # EINTR): a second open description must fail to take it.
@@ -113,7 +113,7 @@ class TestFlockFaults(unittest.TestCase):
         def body():
             fd = os.open(self.path, os.O_RDWR)
             try:
-                with inject(pygo.monkey, "_orig_flock",
+                with inject(pygo.monkey.files, "_orig_flock",
                             _oserr(errno.EWOULDBLOCK), n=3) as st:
                     fcntl.flock(fd, fcntl.LOCK_EX)
                 fcntl.flock(fd, fcntl.LOCK_UN)
@@ -126,7 +126,7 @@ class TestFlockFaults(unittest.TestCase):
         def body():
             fd = os.open(self.path, os.O_RDWR)
             try:
-                with inject(pygo.monkey, "_orig_flock", _oserr(errno.EBADF), n=99):
+                with inject(pygo.monkey.files, "_orig_flock", _oserr(errno.EBADF), n=99):
                     with self.assertRaises(OSError) as cm:
                         fcntl.flock(fd, fcntl.LOCK_EX)
                     return cm.exception.errno
@@ -143,7 +143,7 @@ class TestReadvFaults(unittest.TestCase):
             try:
                 os.set_blocking(r, False); os.set_blocking(w, False)
                 os.write(w, b"abcd")
-                with inject(pygo.monkey, "_orig_os_readv", InterruptedError, n=1):
+                with inject(pygo.monkey.osio, "_orig_os_readv", InterruptedError, n=1):
                     bufs = [bytearray(2), bytearray(2)]
                     n = os.readv(r, bufs)
                 return n, bytes(bufs[0]) + bytes(bufs[1])
@@ -221,7 +221,7 @@ class TestSendfileFaults(unittest.TestCase):
             pygo_core.go(server)
             cli = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             cli.connect(addr)
-            with inject(pygo.monkey, "_raw_os_sendfile",
+            with inject(pygo.monkey.sockets, "_raw_os_sendfile",
                         lambda: BlockingIOError(errno.EAGAIN, "EAGAIN"), n=2):
                 with open(path, "rb") as f:
                     sent = cli.sendfile(f)
