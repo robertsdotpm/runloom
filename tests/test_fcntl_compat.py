@@ -33,6 +33,7 @@ except ImportError:
     fcntl = None
 
 _IS_WINDOWS = platform.system() == "Windows"
+_IS_DARWIN = platform.system() == "Darwin"
 
 
 def _drive(fn):
@@ -169,6 +170,8 @@ class TestLockf(unittest.TestCase):
         self.assertTrue(_drive(body))
 
     @unittest.skipUnless(hasattr(os, "fork"), "no os.fork")
+    @unittest.skipIf(_IS_DARWIN, "fork-from-goroutine in a multi-threaded "
+                     "process is unsafe on macOS (EBADF); use spawn/forkserver")
     def test_lockf_cross_process_contention_yields(self):
         """POSIX locks are per-process: a forked child holds the lock, the
         parent's lockf blocks until the child exits, and a sibling goroutine
@@ -202,6 +205,7 @@ class TestLockf(unittest.TestCase):
         self.assertTrue(acquired)
         self.assertGreaterEqual(ticks, 1)
 
+    @unittest.skipIf(_IS_DARWIN, "fork-from-goroutine unsafe on macOS (EBADF)")
     def test_lockf_nb_passthrough_raises(self):
         """A second process holds the lock; LOCK_NB must raise immediately."""
         if not hasattr(os, "fork"):

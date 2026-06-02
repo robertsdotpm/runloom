@@ -133,20 +133,21 @@ class TestSubprocessRun(unittest.TestCase):
 @unittest.skipIf(_IS_WINDOWS, "POSIX os.wait* semantics")
 class TestOsWait(unittest.TestCase):
     def test_waitpid_exit_status(self):
+        # Note: this child exits immediately, so the reap may complete on the
+        # first WNOHANG poll without ever parking -- correct, and NOT a yield
+        # point.  Cooperative yielding is asserted by the delayed-child tests
+        # (test_waitpid_killed_by_signal / test_pidfd_wait_yields_to_sibling),
+        # which hold a real wait window on every platform (pidfd or busy-poll).
         def body():
             pid = os.fork()
             if pid == 0:
                 os._exit(42)
-            ticks = []
-            _sibling_counter(ticks)
             wpid, status = os.waitpid(pid, 0)
-            return (wpid == pid, os.WIFEXITED(status),
-                    os.WEXITSTATUS(status), len(ticks))
-        ok, exited, code, ticks = _drive(body)
+            return wpid == pid, os.WIFEXITED(status), os.WEXITSTATUS(status)
+        ok, exited, code = _drive(body)
         self.assertTrue(ok)
         self.assertTrue(exited)
         self.assertEqual(code, 42)
-        self.assertGreaterEqual(ticks, 1)
 
     def test_waitpid_killed_by_signal(self):
         def body():

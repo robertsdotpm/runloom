@@ -64,6 +64,11 @@ def tearDownModule():
 @unittest.skipIf(SIG is None, "no SIGUSR1")
 @unittest.skipUnless(_HAVE_SIGMASK, "no pthread_sigmask")
 @unittest.skipUnless(_HAVE_SIGWAIT, "no sigwait")
+# sigwait/sigwaitinfo are only made *cooperative* via a zero-timeout
+# sigtimedwait poll; without sigtimedwait (e.g. macOS) the shim falls back to
+# the blocking sigwait, which can't yield to the goroutine that sends the
+# signal -- so the cooperative tests only apply where sigtimedwait exists.
+@unittest.skipUnless(_HAVE_SIGTIMEDWAIT, "no sigtimedwait (sigwait not cooperative)")
 class TestSigwait(unittest.TestCase):
     def test_sigwait_returns_signal_and_yields(self):
         def body():
