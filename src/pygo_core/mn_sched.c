@@ -469,6 +469,127 @@ static volatile int pygo_handoff_stop = 0;
  * resume_seq is bumped FIRST so a watchdog that samples mid-update sees a
  * fresh seq with a possibly-stale ns and just waits one more tick.  Inlined
  * and gated: when the watchdog is off this is a single predictable branch. */
+/* ====================================================================
+ * Controlled M:N scheduler (PYGO_MN_SEED) -- CHESS-style serialization for
+ * deterministic-ish replay + seeded exploration of the REAL hub/deque/steal/
+ * wake path (where single-hub PCT, PYGO_PCT_SEED, cannot reach).
+ *
+ * When PYGO_MN_SEED is set, goroutine *execution segments* across all hubs are
+ * serialized through one baton: a hub may run a goroutine (pygo_coro_resume)
+ * only while it holds the baton, and a seeded controller picks which waiting
+ * hub gets it next.  This trades real parallelism for REPRODUCIBILITY +
+ * CONTROL: the same seed drives the same cross-hub interleaving of scheduling
+ * decisions, so scheduling-order bugs (lost wakeups, cross-hub wake ordering,
+ * deadlocks) become reproducible and seed-sweepable on the real M:N code.
+ *
+ * A goroutine that parks/yields/finishes returns to hub_main, which releases
+ * the baton -- so cooperative blocking (channels, sleep, I/O) never deadlocks
+ * the baton; only a busy-wait that never yields would (which is a bug anyway).
+ * While waiting for the baton a hub DETACHES its Python thread state
+ * (PyEval_SaveThread) so it sits at a GC safepoint -- essential under the
+ * free-threaded interpreter.  Handoff + preemption are forced off in this mode
+ * (their timing is nondeterministic and the handoff rescue resumes off-baton).
+ *
+ * Caveat: this controls SCHEDULING nondeterminism, not data races within one
+ * uninterrupted segment, and the moment an idle hub re-enters the baton pool is
+ * not fully pinned (full barrier-rendezvous determinism is future work).
+ * Testing-only; zero cost (one predicted-not-taken branch) when unset.
+ * ==================================================================== */
+typedef struct {
+    int          enabled;
+    int          n;
+    pygo_mutex_t lock;
+    pygo_cond_t  cond;
+    int          current;     /* hub id allowed to run a g now; -1 = free */
+    int         *want;        /* per-hub: requesting the baton */
+    uint64_t     rng;
+} pygo_mn_ctrl_t;
+static pygo_mn_ctrl_t pygo_mn_ctrl;
+
+static uint64_t pygo_mn_ctrl_rand(void)      /* xorshift64 */
+{
+    uint64_t x = pygo_mn_ctrl.rng;
+    x ^= x << 13; x ^= x >> 7; x ^= x << 17;
+    pygo_mn_ctrl.rng = x;
+    return x;
+}
+
+/* lock held: pick a requesting hub by seed, or -1 if none requesting */
+static int pygo_mn_ctrl_choose(void)
+{
+    int cnt = 0, i, k;
+    for (i = 0; i < pygo_mn_ctrl.n; i++) cnt += pygo_mn_ctrl.want[i];
+    if (cnt == 0) return -1;
+    k = (int)(pygo_mn_ctrl_rand() % (uint64_t)cnt);
+    for (i = 0; i < pygo_mn_ctrl.n; i++)
+        if (pygo_mn_ctrl.want[i] && k-- == 0) return i;
+    return -1;
+}
+
+static void pygo_mn_ctrl_init(int n)
+{
+    const char *seed = getenv("PYGO_MN_SEED");
+    pygo_mn_ctrl.enabled = 0;
+    if (seed == NULL || seed[0] == '\0' || n <= 0) return;
+    pygo_mn_ctrl.want = (int *)PyMem_Calloc((size_t)n, sizeof(int));
+    if (pygo_mn_ctrl.want == NULL) return;     /* OOM -> stay disabled */
+    pygo_mutex_init(&pygo_mn_ctrl.lock);
+    pygo_cond_init(&pygo_mn_ctrl.cond);
+    pygo_mn_ctrl.n = n;
+    pygo_mn_ctrl.current = -1;
+    pygo_mn_ctrl.rng = strtoull(seed, NULL, 10);
+    if (pygo_mn_ctrl.rng == 0) pygo_mn_ctrl.rng = 0x9E3779B97F4A7C15ULL;
+    pygo_mn_ctrl.enabled = 1;
+    /* nondeterministic timers off: their firing would unpin the schedule, and
+     * the handoff rescue resumes a goroutine OFF the baton. */
+    pygo_handoff_enabled = 0;
+    pygo_preempt_enabled = 0;
+}
+
+static void pygo_mn_ctrl_fini(void)
+{
+    if (!pygo_mn_ctrl.enabled) return;
+    pygo_mn_ctrl.enabled = 0;
+    pygo_cond_destroy(&pygo_mn_ctrl.cond);
+    pygo_mutex_destroy(&pygo_mn_ctrl.lock);
+    PyMem_Free(pygo_mn_ctrl.want);
+    pygo_mn_ctrl.want = NULL;
+}
+
+/* Block until this hub holds the baton.  Detaches the Python thread state
+ * across the wait so a blocked hub is at a GC safepoint. */
+static void pygo_mn_ctrl_acquire(int hub)
+{
+    if (!pygo_mn_ctrl.enabled || hub < 0 || hub >= pygo_mn_ctrl.n) return;
+    pygo_mutex_lock(&pygo_mn_ctrl.lock);
+    pygo_mn_ctrl.want[hub] = 1;
+    if (pygo_mn_ctrl.current == -1) {
+        pygo_mn_ctrl.current = pygo_mn_ctrl_choose();
+        pygo_cond_broadcast(&pygo_mn_ctrl.cond);
+    }
+    if (pygo_mn_ctrl.current != hub) {
+        PyThreadState *ts = PyEval_SaveThread();   /* detach while we block */
+        while (pygo_mn_ctrl.current != hub)
+            pygo_cond_wait(&pygo_mn_ctrl.cond, &pygo_mn_ctrl.lock);
+        pygo_mn_ctrl.want[hub] = 0;
+        pygo_mutex_unlock(&pygo_mn_ctrl.lock);
+        PyEval_RestoreThread(ts);
+        return;
+    }
+    pygo_mn_ctrl.want[hub] = 0;
+    pygo_mutex_unlock(&pygo_mn_ctrl.lock);
+}
+
+static void pygo_mn_ctrl_release(int hub)
+{
+    if (!pygo_mn_ctrl.enabled || hub < 0 || hub >= pygo_mn_ctrl.n) return;
+    pygo_mutex_lock(&pygo_mn_ctrl.lock);
+    if (pygo_mn_ctrl.current == hub) pygo_mn_ctrl.current = -1;
+    pygo_mn_ctrl.current = pygo_mn_ctrl_choose();   /* hand to next by seed */
+    pygo_cond_broadcast(&pygo_mn_ctrl.cond);
+    pygo_mutex_unlock(&pygo_mn_ctrl.lock);
+}
+
 PYGO_INLINE void pygo_hub_resume_begin(pygo_hub_t *h, pygo_g_t *g)
 {
     if (__builtin_expect(pygo_sysmon_enabled, 0)) {
@@ -479,6 +600,8 @@ PYGO_INLINE void pygo_hub_resume_begin(pygo_hub_t *h, pygo_g_t *g)
         __atomic_store_n(&h->resume_start_ns, pygo_monotonic_ns(),
                          __ATOMIC_RELAXED);
     }
+    /* controlled mode: block until this hub holds the execution baton */
+    pygo_mn_ctrl_acquire(h->id);
 }
 
 /* Mark the end of a coro resume: clear resume_start_ns so the watchdog
@@ -488,6 +611,8 @@ PYGO_INLINE void pygo_hub_resume_end(pygo_hub_t *h)
     if (__builtin_expect(pygo_sysmon_enabled, 0)) {
         __atomic_store_n(&h->resume_start_ns, 0, __ATOMIC_RELAXED);
     }
+    /* controlled mode: hand the baton to the next hub (seeded) */
+    pygo_mn_ctrl_release(h->id);
 }
 
 /* Interpreter for per-g PyThreadState_New, captured at mn_init. */
@@ -2029,6 +2154,9 @@ int pygo_mn_init(int n_threads)
     /* Install the PYGO_PREEMPT eval-frame wrapper (no-op unless enabled) while
      * we still hold the main tstate and before any hub runs Python. */
     pygo_preempt_install(interp);
+    /* controlled M:N (PYGO_MN_SEED): set up the execution baton before any hub
+     * runs; forces handoff/preempt off (see pygo_mn_ctrl_init). No-op if unset. */
+    pygo_mn_ctrl_init(n_threads);
 
     for (i = 0; i < n_threads; i++) {
         pygo_hub_t *h = &pygo_hubs[i];
@@ -2148,6 +2276,8 @@ void pygo_mn_fini(void)
         }
         PyEval_RestoreThread(saved);
     }
+    /* controlled-mode baton: all hubs joined, nobody can acquire/release now */
+    pygo_mn_ctrl_fini();
     /* Uninstall the preempt wrapper now that every hub thread is joined (no one
      * can call it) and the main tstate is held -- restores the original
      * eval-frame func so a later mn_init re-captures it cleanly. */
