@@ -86,6 +86,26 @@ try:
 except ValueError:
     _TASK_STACK = 512 * 1024
 
+# Per-connection I/O goroutine stack size (bytes).  The transport read /
+# datagram / accept goroutines invoke arbitrary user protocol callbacks
+# (data_received, connection_made, datagram_received, ...) SYNCHRONOUSLY on
+# their own swapped C stack -- and those callbacks can run deep C-recursive
+# code (e.g. asyncssh runs a full crypto key-exchange + chacha20/OpenSSL chain
+# inside data_received).  That overflows the scheduler's default 128 KB g-stack
+# and SEGVs, exactly like the task-driver case above.  Give them the same
+# roomier stack.  Set PYGO_AIO_IO_STACK=0 to use the scheduler default; set a
+# custom byte count to tune.
+try:
+    _IO_STACK = int(_os.environ.get("PYGO_AIO_IO_STACK", _TASK_STACK or 512 * 1024))
+except ValueError:
+    _IO_STACK = _TASK_STACK or 512 * 1024
+
+
+def _go_io(fn):
+    """Spawn a goroutine that synchronously runs user protocol callbacks,
+    on the roomier _IO_STACK (falls back to the scheduler default if disabled)."""
+    return pygo_core.go(fn, stack_size=_IO_STACK) if _IO_STACK else pygo_core.go(fn)
+
 
 # ------------------------------------------------------------------
 # Module-root frame for task-driver goroutines.
@@ -2001,7 +2021,10 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
         # We use go_noyield to skip the per-g snap dance.  If a user
         # ever passes a callback that DOES yield, go_noyield's
         # behaviour is undefined; switch back to pygo_core.go.
-        pygo_core.go(runner)
+        # Roomier stack: call_soon delivers protocol callbacks (data_received,
+        # pipe_data_received, ...) that can run deep C-recursive code (crypto),
+        # which overflows the default 128 KB g-stack and SEGVs -- see _IO_STACK.
+        _go_io(runner)
         return handle
 
     def call_soon_threadsafe(self, callback, *args, context=None):
@@ -2094,7 +2117,9 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
                     pygo_core.sched_stop()
                 except Exception:
                     pass
-        pygo_core.go(_keepalive)
+        # Roomier stack: the keepalive runs call_soon_threadsafe callbacks
+        # (_drain_ts_queue), which may be deep protocol/crypto callbacks.
+        _go_io(_keepalive)
 
     def call_later(self, delay, callback, *args, context=None):
         # Mirror asyncio: call_later is call_at(self.time() + delay, ...).
@@ -2123,10 +2148,10 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
                     # can itself recurse if we're near the c_recursion limit.
                     sys.stderr.write("[pygo.aio] timer cb: %r\n" % (e,))
         if self._can_spawn_here():
-            pygo_core.go(runner)
+            _go_io(runner)
         else:
             # Foreign thread: spawn the timer goroutine on the loop's own thread.
-            self.call_soon_threadsafe(lambda: pygo_core.go(runner))
+            self.call_soon_threadsafe(lambda: _go_io(runner))
         return handle
 
     # ---- I/O readers / writers (level-triggered, matches selector loops) ----
@@ -2210,7 +2235,7 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
             except Exception:        # the runner catches it and re-evaluates.
                 pass
         if g is None and (st["r"] is not None or st["w"] is not None):
-            st["g"] = pygo_core.go(lambda: self._pg_io_runner(fd, st))
+            st["g"] = _go_io(lambda: self._pg_io_runner(fd, st))
 
     def _pg_io_runner(self, fd, st):
         while True:
@@ -3495,7 +3520,7 @@ class _Server(object):
         self._ssl_context = ssl_context
         self._ssl_handshake_timeout = ssl_handshake_timeout
         self._closed = False
-        self._accept_g = pygo_core.go(self._accept_loop)
+        self._accept_g = _go_io(self._accept_loop)
 
     def _accept_loop(self):
         while not self._closed:
@@ -3521,7 +3546,7 @@ class _Server(object):
             conn.setblocking(False)
             if self._ssl_context is not None:
                 # Handshake off the accept loop so a slow client can't stall it.
-                pygo_core.go(lambda c=conn: self._setup_conn_tls(c))
+                _go_io(lambda c=conn: self._setup_conn_tls(c))
             else:
                 self._spawn_conn(conn)
 
@@ -3705,7 +3730,7 @@ class _StreamTransport(asyncio.Transport):
                 self._run_cb(protocol.connection_made, self)
             except Exception as e:
                 self._report(e, "connection_made")
-        self._io_g = pygo_core.go(self._io_loop)
+        self._io_g = _go_io(self._io_loop)
 
     def _run_cb(self, fn, *args):
         # Run a protocol callback inside this connection's contextvars Context
@@ -3998,7 +4023,7 @@ class _StreamTransport(asyncio.Transport):
             except Exception:
                 pass
         else:
-            self._io_g = pygo_core.go(self._io_loop)
+            self._io_g = _go_io(self._io_loop)
 
     def _maybe_pause_writing(self):
         if not self._protocol_paused and len(self._write_buf) > self._high_water:
@@ -4365,7 +4390,7 @@ class _ProtocolServer(object):
         if self._serving or self._closed or self._sockets is None:
             return
         self._serving = True
-        self._accept_gs = [pygo_core.go(lambda s=s: self._accept_loop(s))
+        self._accept_gs = [_go_io(lambda s=s: self._accept_loop(s))
                            for s in self._sockets]
 
     def _accept_loop(self, sock):
@@ -4384,7 +4409,7 @@ class _ProtocolServer(object):
             if self._ssl_context is not None:
                 # Finish the TLS handshake in its own goroutine so a slow or
                 # stalled client never blocks accepting new connections.
-                pygo_core.go(lambda c=conn: self._setup_tls_conn(c))
+                _go_io(lambda c=conn: self._setup_tls_conn(c))
             else:
                 protocol = self._factory()
                 self._conns.add(_StreamTransport(conn, protocol, loop=self._loop,
@@ -4548,7 +4573,7 @@ class DatagramTransport(object):
         except Exception as e:
             self._report(e, "connection_made")
         # Spawn the recv loop.
-        self._recv_g = pygo_core.go(self._recv_loop)
+        self._recv_g = _go_io(self._recv_loop)
 
     def _recv_loop(self):
         sock = self._sock
