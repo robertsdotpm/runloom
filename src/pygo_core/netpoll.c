@@ -1060,52 +1060,32 @@ const char *pygo_netpoll_backend(void)
 #endif
 }
 
-/* ---- Windows netpoll fault injection (test-only) ----------------------- *
- * There is no strace on Windows, so the netpoll fault-injection campaign gates
- * IN PROCESS on env vars.  PYGO_FAULT_<SITE> = "<mode>:<wsa_code>", mode in
- * {once, always}, forces the named Windows poll syscall to report a failure:
+/* ---- netpoll syscall fault injection (test-only) ----------------------- *
+ * Where strace's `-e inject=` drives the Linux epoll campaign, the platforms
+ * WITHOUT a syscall-injecting tracer (Windows; FreeBSD/macOS kqueue) gate IN
+ * PROCESS on env vars.  PYGO_FAULT_<SITE> = "<mode>:<code>", mode in
+ * {once, always}, forces the named pump syscall to report a failure:
  *   once:CODE   -- inject CODE exactly the first time the site is reached
  *   always:CODE -- inject CODE every time (persistent error)
- * Each site counts how many times it fired (read via pygo_core._fault_count)
- * so a test can prove a PERSISTENT poll error BACKS OFF (bounded count) rather
- * than busy-spinning (unbounded count).  Inert unless the env var is set, so
- * the cost on a normal run is one getenv() per pump iteration.  The Linux
- * campaign gets the same coverage for free from strace's syscall injection;
- * this is the Windows equivalent. */
-#if defined(PYGO_OS_WINDOWS)
+ * code is a WSA error (Windows) or an errno (kqueue).  Each site counts how
+ * many times it fired (read via pygo_core._fault_count) so a test can prove a
+ * PERSISTENT error BACKS OFF (bounded count) instead of busy-spinning.  Inert
+ * unless the env var is set (one getenv per pump iteration when armed).  The
+ * counters + count/reset are compiled on every platform so module.c exposes
+ * the introspection uniformly (they stay zero on epoll, which uses strace). */
 enum { PYGO_FAULT_WSAPOLL = 0, PYGO_FAULT_SELECT, PYGO_FAULT_IOCP_WAIT,
-       PYGO_FAULT_IOCP_SUBMIT, PYGO_FAULT_NSITES };
+       PYGO_FAULT_IOCP_SUBMIT, PYGO_FAULT_KQUEUE_WAIT, PYGO_FAULT_NSITES };
 static const char *const pygo_fault_names[PYGO_FAULT_NSITES] = {
-    "WSAPOLL", "SELECT", "IOCP_WAIT", "IOCP_SUBMIT" };
-static const char *const pygo_fault_envs[PYGO_FAULT_NSITES] = {
-    "PYGO_FAULT_WSAPOLL", "PYGO_FAULT_SELECT",
-    "PYGO_FAULT_IOCP_WAIT", "PYGO_FAULT_IOCP_SUBMIT" };
-static volatile LONG pygo_fault_fired[PYGO_FAULT_NSITES];
-static volatile LONG pygo_fault_once_done[PYGO_FAULT_NSITES];
-
-/* Returns the WSA error to inject (nonzero) if this site should fail now. */
-static int pygo_fault_inject(int site)
-{
-    const char *spec = getenv(pygo_fault_envs[site]);
-    int code, once;
-    if (spec == NULL || *spec == '\0') return 0;
-    if (strncmp(spec, "once:", 5) == 0)        { once = 1; code = atoi(spec + 5); }
-    else if (strncmp(spec, "always:", 7) == 0) { once = 0; code = atoi(spec + 7); }
-    else return 0;
-    if (code == 0) return 0;
-    if (once &&
-        InterlockedCompareExchange(&pygo_fault_once_done[site], 1, 0) != 0)
-        return 0;          /* once-mode already fired */
-    InterlockedIncrement(&pygo_fault_fired[site]);
-    return code;
-}
+    "WSAPOLL", "SELECT", "IOCP_WAIT", "IOCP_SUBMIT", "KQUEUE_WAIT" };
+static volatile long pygo_fault_fired[PYGO_FAULT_NSITES];
+static volatile long pygo_fault_once_done[PYGO_FAULT_NSITES];
 
 long pygo_fault_count(const char *name)
 {
     int i;
     for (i = 0; i < PYGO_FAULT_NSITES; i++)
         if (strcmp(pygo_fault_names[i], name) == 0)
-            return (long)pygo_fault_fired[i];
+            return pygo_fault_fired[i];
     return -1;
 }
 
@@ -1118,6 +1098,42 @@ void pygo_fault_reset(void)
     }
 }
 
+#if defined(PYGO_OS_WINDOWS) || defined(PYGO_HAVE_KQUEUE)
+static const char *const pygo_fault_envs[PYGO_FAULT_NSITES] = {
+    "PYGO_FAULT_WSAPOLL", "PYGO_FAULT_SELECT", "PYGO_FAULT_IOCP_WAIT",
+    "PYGO_FAULT_IOCP_SUBMIT", "PYGO_FAULT_KQUEUE_WAIT" };
+
+/* Returns the error code to inject (nonzero) if this site should fail now. */
+static int pygo_fault_inject(int site)
+{
+    const char *spec = getenv(pygo_fault_envs[site]);
+    int code, once;
+    if (spec == NULL || *spec == '\0') return 0;
+    if (strncmp(spec, "once:", 5) == 0)        { once = 1; code = atoi(spec + 5); }
+    else if (strncmp(spec, "always:", 7) == 0) { once = 0; code = atoi(spec + 7); }
+    else return 0;
+    if (code == 0) return 0;
+    if (once) {
+#if defined(PYGO_OS_WINDOWS)
+        if (InterlockedCompareExchange(&pygo_fault_once_done[site], 1, 0) != 0)
+            return 0;          /* once-mode already fired */
+#else
+        long expected = 0;
+        if (!__atomic_compare_exchange_n(&pygo_fault_once_done[site], &expected,
+                1, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+            return 0;
+#endif
+    }
+#if defined(PYGO_OS_WINDOWS)
+    InterlockedIncrement(&pygo_fault_fired[site]);
+#else
+    __atomic_add_fetch(&pygo_fault_fired[site], 1, __ATOMIC_RELAXED);
+#endif
+    return code;
+}
+#endif /* PYGO_OS_WINDOWS || PYGO_HAVE_KQUEUE */
+
+#if defined(PYGO_OS_WINDOWS)
 /* Windows analogue of pygo_netpoll_wait_failed (epoll/kqueue): a hard poll
  * error returns WITHOUT blocking, so a persistent one (a polled socket closed
  * under us -> WSAENOTSOCK, a teardown race) would peg a CPU as the idle loop
@@ -1139,11 +1155,6 @@ static int pygo_netpoll_win_wait_failed(int wsa_err)
     Py_END_ALLOW_THREADS
     return 1;
 }
-#else
-/* Non-Windows: fault injection rides on strace; these exist only so module.c
- * can expose _fault_count / _fault_reset uniformly. */
-long pygo_fault_count(const char *name) { (void)name; return -1; }
-void pygo_fault_reset(void) { }
 #endif /* PYGO_OS_WINDOWS */
 
 int pygo_netpoll_init(void)
@@ -1375,12 +1386,25 @@ static int pygo_netpoll_register(int fd, int events)
     pygo_mutex_unlock(&pygo_pool.lock);
     return -1;
 #elif defined(PYGO_HAVE_KQUEUE)
-    (void)events;
+    /* Arm ONLY the requested direction(s), ONE-SHOT (NOT EV_CLEAR), re-arming
+     * on EVERY park -- the kqueue counterpart of the epoll EPOLLONESHOT re-arm
+     * fix above.  The old scheme (register-once + EV_CLEAR, and SKIP the kevent
+     * when the per-fd bit was already set) lost wakeups two ways, both caught by
+     * test_netpoll_conformance's fd-reuse case:
+     *   - EV_CLEAR is edge-triggered: an edge missed in the window between
+     *     EV_ADD and the next kevent() never refired (same trap as epoll's old
+     *     EPOLLET register-once);
+     *   - a reused fd NUMBER whose close-hook had not run (raw socket.close(),
+     *     no pygo wrapper) kept its bitmap bit set, so the second register
+     *     RETURNED EARLY without issuing the kevent -> the new socket was never
+     *     armed and its reader parked forever (timed out via the deadline, or
+     *     hung outright with no timeout).
+     * EV_ADD re-checks readiness NOW (kqueue reports a level-ready fd at add
+     * time, so data that arrived before the parker linked is still delivered),
+     * and EV_ONESHOT delivers once then auto-disables (no thundering herd; the
+     * always-writable OUT can't busy-loop the pump).  The bitmap is still kept
+     * in sync for unregister, but no longer gates the kevent. */
     pygo_mutex_lock(&pygo_pool.lock);
-    if (pygo_fd_bit_get(fd)) {
-        pygo_mutex_unlock(&pygo_pool.lock);
-        return 0;
-    }
     if (pygo_fd_bit_set(fd) != 0) {
         pygo_mutex_unlock(&pygo_pool.lock);
         errno = ENOMEM;
@@ -1389,9 +1413,13 @@ static int pygo_netpoll_register(int fd, int events)
     pygo_mutex_unlock(&pygo_pool.lock);
     {
         struct kevent kev[2];
-        EV_SET(&kev[0], fd, EVFILT_READ,  EV_ADD | EV_CLEAR, 0, 0, NULL);
-        EV_SET(&kev[1], fd, EVFILT_WRITE, EV_ADD | EV_CLEAR, 0, 0, NULL);
-        if (kevent(pygo_kqueue_fd, kev, 2, NULL, 0, NULL) == 0) return 0;
+        int n = 0;
+        if (events & PYGO_NETPOLL_READ)
+            EV_SET(&kev[n++], fd, EVFILT_READ,  EV_ADD | EV_ONESHOT, 0, 0, NULL);
+        if (events & PYGO_NETPOLL_WRITE)
+            EV_SET(&kev[n++], fd, EVFILT_WRITE, EV_ADD | EV_ONESHOT, 0, 0, NULL);
+        if (n == 0) return 0;
+        if (kevent(pygo_kqueue_fd, kev, n, NULL, 0, NULL) == 0) return 0;
     }
     pygo_mutex_lock(&pygo_pool.lock);
     pygo_fd_bit_clear(fd);
@@ -2473,9 +2501,16 @@ int pygo_netpoll_pump(long long timeout_ns)
             ts.tv_nsec = (long)(timeout_ns % 1000000000LL);
             tsp = &ts;
         }
-        Py_BEGIN_ALLOW_THREADS
-        n = kevent(pygo_kqueue_fd, NULL, 0, evs, 64, tsp);
-        Py_END_ALLOW_THREADS
+        {
+            int finj = pygo_fault_inject(PYGO_FAULT_KQUEUE_WAIT);
+            if (finj) {
+                n = -1; errno = finj;      /* short-circuit kevent */
+            } else {
+                Py_BEGIN_ALLOW_THREADS
+                n = kevent(pygo_kqueue_fd, NULL, 0, evs, 64, tsp);
+                Py_END_ALLOW_THREADS
+            }
+        }
         if (n < 0) {
             pygo_netpoll_wait_failed(n);   /* EINTR -> retry; else log+backoff */
         } else if (n > 0) {

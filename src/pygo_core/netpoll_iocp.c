@@ -467,6 +467,21 @@ int pygo_iocp_wait(long long timeout_ns,
     (void)bytes;
 
     *out_fd = ctx->fd;
+
+    /* AFD poll timeout: the driver writes NumberOfHandles = (# handles that
+     * signaled) on completion -- 0 means the per-op Timeout elapsed with
+     * nothing ready.  The Handles[0].Events field still holds the INPUT mask we
+     * submitted (the buffer is shared in/out), so reading it would report a
+     * phantom readiness (e.g. a wait_fd(READ, timeout) returning READ instead of
+     * 0 on its deadline -- caught by test_netpoll_conformance on iocp-afd).
+     * Report "nothing ready" (return 0) and let the parker wake via its deadline
+     * heap entry, matching the wsapoll/select and epoll/kqueue backends. */
+    if (ctx->poll_info.NumberOfHandles == 0) {
+        *out_events = 0;
+        free(ctx);
+        return 0;
+    }
+
     *out_events = pygo_from_afd_events(ctx->poll_info.Handles[0].Events);
 
     free(ctx);
