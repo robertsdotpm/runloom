@@ -196,7 +196,15 @@ class _LoopScheduleMixin(object):
             pygo_core.sched_sleep(max(0.0, when - self.time()))
             if not handle._cancelled:
                 try:
-                    handle._context.run(callback, *args)
+                    # Read the callback/args THROUGH the handle, never via closure
+                    # capture: asyncio.Handle.cancel() nulls handle._callback /
+                    # handle._args, so a cancelled timer's still-sleeping goroutine
+                    # then holds NO reference to the callback (or anything it closes
+                    # over).  Capturing `callback`/`args` directly here kept them --
+                    # and e.g. an aiocoap retransmit's whole message/transport --
+                    # alive until the original deadline, leaking past cancel and
+                    # failing strict gc-leak teardown checks.
+                    handle._context.run(handle._callback, *handle._args)
                 except (KeyboardInterrupt, SystemExit) as e:
                     # asyncio re-raises these out of the loop; break the drive.
                     self._pg_signal_fatal(e)
