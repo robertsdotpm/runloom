@@ -221,9 +221,6 @@ Read this before betting on pygo -- it's where the project actually is.
   macOS/BSD/Windows and aarch64 backends are code-complete and maintained
   in-step, but the deep validation (2 M-conn runs, fuzzing, sanitizers) is on
   Linux; aarch64 is exercised via `qemu` + review, not yet on real ARM hardware.
-- **Young project.** APIs are stabilising, expect rough edges off the documented
-  happy paths, and some modes are experimental/default-OFF (e.g.
-  `PYGO_PER_G_TSTATE`, which SEGVs with Python handlers under load).
 
 ## Building
 
