@@ -30,14 +30,11 @@ pygo_core.run()
 Already have `async def` code? Run it unchanged on pygo's scheduler with the
 `pygo.aio` bridge (`paio.run(main())` ≈ `asyncio.run`). See [docs/](docs/).
 
-**The trade-off:** the bridge has more per-task overhead than asyncio's own
-loop. If your tasks each do just one `await` and finish (lots of tiny tasks,
-little work each), it's about **5× slower than plain asyncio**. If your tasks do
-a lot of `await`s before finishing, pygo's fast context switch pays off and it's
-**~1.7–1.9× faster**. So the bridge isn't a guaranteed speed-up -- think of it as
-a way to run your existing async code on pygo's scheduler. The easy way to find
-out is to just point the extension at your code with the bridge and see how it
-does.
+**The trade-off:** the bridge isn't a guaranteed speed-up -- it has more
+per-task overhead than asyncio's own loop, so whether it comes out faster
+depends on how many `await`s each task does before finishing.[^bridge] Think of
+it as a way to run your existing async code on pygo's scheduler: point the
+extension at your code and measure.
 
 ---
 
@@ -162,16 +159,11 @@ scheduling is unchanged.
   transparently on fd readiness. Lost-wake-free 3-state park-commit on all
   backends.
 - **Stdlib monkey-patch** -- `pygo.monkey.patch()` makes blocking stdlib
-  cooperative across ~20 categories: `socket`/`ssl` (incl. `sendfile` + fd
-  passing), files & `os` I/O, `select`/`selectors`, `subprocess` + child reaping
-  (pidfd on Linux), `threading`/`queue`/`concurrent.futures`, `multiprocessing`,
-  `fcntl` locks, `signal` waits, async DNS, and **size-gated auto-offload of
-  CPU-bound C calls** (`hashlib`, `zlib`/`gzip`/`bz2`/`lzma`, KDFs). Run
-  `requests`, `pymysql`, plain `urllib` unchanged.
+  cooperative across ~20 categories, so `requests`, `pymysql`, plain `urllib`
+  and friends run unchanged.[^monkey]
 - **`pygo.aio`** -- run existing `async`/`await` code on the scheduler;
   high-fidelity enough to run **aiohttp, uvicorn, starlette, hypercorn,
-  websockets and anyio** unchanged (streams, transports, UDP, SSL client+server,
-  `run_in_executor`).
+  websockets and anyio** unchanged.[^aio]
 - **Go-style channels** -- `Chan(capacity)`, `select`, `for v in ch`; unbuffered
   ping-pong ~560 ns/round-trip (within 7% of Go 1.22 on the same box).
 - **`pygo.blocking(fn, …)` / `pygo.monkey.offload(fn, …)`** -- offload a
@@ -220,21 +212,14 @@ Read this before betting on pygo -- it's where the project actually is.
   **single-core** like asyncio; the headline parallelism numbers don't apply.
 - **pygo doesn't make Python faster per core.** It saturates every core from one
   process, but CPython's ~80 K pure-Python ops/s/core is a constant it can't
-  raise, and on raw network I/O Go is **~1.2× faster per core, ~2.3× across 16**
-  (pygo hits CPython's refcount-contention ceiling), plus another **~2.2× if the
-  handler is Python** rather than C. None of that is the scheduler (~47 ns/yield,
-  Go-class) -- it's the interpreter. (`PYGO_TCPCONN_IOURING=1` narrows the
-  syscall side at high fan-out on Linux.)
+  raise, and Go stays faster on raw network I/O. None of that is the scheduler
+  (~47 ns/yield, Go-class) -- it's the interpreter.[^percore]
 - **Higher memory per goroutine than Go** (~26 KB with a Python handler vs Go's
   ~2.5–13 KB) -- the CPython object tax, only avoidable by dropping to C handlers.
 - **Preemption only fires at Python bytecode boundaries.** A goroutine inside a
   tight pure-C call or third-party C extension (e.g. `numpy`) is **not**
   preemptible and holds its hub until it returns -- the same limitation Go has
-  with cgo. The monkey layer's `heavy` category auto-offloads the common stdlib
-  offenders (`hashlib`, `zlib`/`gzip`/`bz2`/`lzma`, KDFs) above a size gate, and
-  `pygo.blocking(fn)` / `pygo.monkey.offload(fn)` are the manual escape hatch;
-  the residual gap is a long non-stdlib C call you don't offload. (Blocking-IO
-  is covered by the rescue handoff, pure-Python CPU by preemption.)
+  with cgo.[^preempt]
 - **Linux x86_64 / 3.13t is the primary, heavily-validated target.**
   macOS/BSD/Windows and aarch64 backends are code-complete and maintained
   in-step, but the deep validation (2 M-conn runs, fuzzing, sanitizers) is on
@@ -291,3 +276,37 @@ Full guide in [docs/](docs/) (also on Read the Docs):
 | `src/pygo_core/` | C extension: scheduler, channels, netpoll, asm backends, M:N hubs, stall recovery |
 | `src/pygo/` | Python layers: `aio`, `sync`, `monkey`, `time`, `runtime` |
 | `tests/` · `examples/` · `docs/` · `scripts/` | tests · benches + sample servers · docs · bootstrap installers |
+
+## Notes
+
+[^bridge]: Tasks that do one `await` and finish (lots of tiny tasks, little work
+    each) run about **5× slower** than plain asyncio; tasks that do many
+    `await`s before finishing are **~1.7–1.9× faster**, as pygo's fast context
+    switch amortises over the awaits.
+
+[^monkey]: Patched categories: `socket`/`ssl` (incl. `sendfile` + fd passing),
+    files & `os` I/O, `select`/`selectors`, `subprocess` + child reaping (pidfd
+    on Linux), `threading`/`queue`/`concurrent.futures`, `multiprocessing`,
+    `fcntl` locks, `signal` waits, async DNS, and size-gated auto-offload of
+    CPU-bound C calls (`hashlib`, `zlib`/`gzip`/`bz2`/`lzma`, KDFs above
+    `PYGO_OFFLOAD_BYTES`, default 256 KiB). Full reference:
+    [Monkey-patching](docs/monkey-patching.md).
+
+[^aio]: Supported surface includes streams (`open_connection` / `start_server`),
+    transports + protocols, UDP datagram endpoints, SSL client **and** server,
+    `loop.add_reader` / `add_writer`, and `run_in_executor`. Full reference:
+    [Asyncio bridge](docs/asyncio.md).
+
+[^percore]: On the identical in-process loopback echo bench, Go is **~1.2×
+    faster per core** and **~2.3× across 16 cores** (pygo hits CPython's
+    refcount-contention ceiling), plus another **~2.2× if the handler is
+    Python** rather than C. `PYGO_TCPCONN_IOURING=1` narrows the syscall side at
+    high fan-out on Linux. See *How it compares → Speed* above for the full
+    table.
+
+[^preempt]: The monkey layer's `heavy` category auto-offloads the common stdlib
+    offenders (`hashlib`, `zlib`/`gzip`/`bz2`/`lzma`, KDFs) above a size gate,
+    and `pygo.blocking(fn)` / `pygo.monkey.offload(fn)` are the manual escape
+    hatch; the residual gap is a long non-stdlib C call you don't offload.
+    (Blocking-IO is covered by the rescue handoff, pure-Python CPU by
+    preemption.)
