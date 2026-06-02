@@ -33,6 +33,12 @@ if command -v setarch >/dev/null 2>&1; then
     SETARCH="setarch $(uname -m) -R"
 fi
 
+# LeakSanitizer is Linux-only; macOS ASan aborts on detect_leaks=1 before it
+# runs anything ("not supported on this platform").  Turn it off on Darwin so
+# the ASan build still exercises the address checks on arm64.
+DETECT_LEAKS=1
+[ "$(uname -s)" = "Darwin" ] && DETECT_LEAKS=0
+
 run_one() {  # label, needs_setarch(0/1), env, binary, args...
     local label="$1" use_sa="$2" envv="$3"; shift 3
     printf '  %-26s ' "$label"
@@ -57,7 +63,7 @@ make -C "$TC" test_cldeque test_cldeque-asan test_cldeque-tsan test_cldeque-ubsa
 
 echo "-- running --"
 run_one cldeque-plain 0 "" "$TC/test_cldeque" "$PUSHES" "$THIEVES" "$ROUNDS"
-run_one cldeque-asan  0 "ASAN_OPTIONS=detect_leaks=1:halt_on_error=1" \
+run_one cldeque-asan  0 "ASAN_OPTIONS=detect_leaks=$DETECT_LEAKS:halt_on_error=1" \
         "$TC/test_cldeque-asan" "$PUSHES" "$THIEVES" "$ROUNDS"
 run_one cldeque-tsan  1 "TSAN_OPTIONS=halt_on_error=1:second_deadlock_stack=1" \
         "$TC/test_cldeque-tsan" "$PUSHES" "$THIEVES" "$ROUNDS"
