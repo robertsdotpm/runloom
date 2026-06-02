@@ -1216,13 +1216,28 @@ class _PygoFutureMixin(object):
     # ---- callbacks ----
     def add_done_callback(self, callback, *, context=None):
         if self._pgstate != _PENDING:
-            try:
-                if context is None:
-                    callback(self)
-                else:
-                    context.run(callback, self)
-            except BaseException as e:
-                self._report_exc(e)
+            # asyncio contract: a callback added to an ALREADY-DONE future is
+            # scheduled via call_soon, NEVER run inline.  Library code depends on
+            # this -- e.g. asyncio.as_completed adds _handle_completion to each
+            # future inside its own setup loop; firing it synchronously re-enters
+            # before _todo exists (AttributeError) and the async-for hangs.  (The
+            # PENDING->done path in _fire_callbacks stays synchronous on purpose
+            # for pygo's wake timing; only THIS already-done path must defer.)
+            loop = self._loop
+            if loop is not None and not loop.is_closed():
+                try:
+                    loop.call_soon(callback, self, context=context)
+                except BaseException as e:
+                    self._report_exc(e)
+            else:
+                # No usable loop (teardown): best-effort inline.
+                try:
+                    if context is None:
+                        callback(self)
+                    else:
+                        context.run(callback, self)
+                except BaseException as e:
+                    self._report_exc(e)
         else:
             self._pgcbs.append((callback, context))
 
