@@ -923,6 +923,44 @@ except AttributeError:
     # return None and asyncio.timeouts won't work, but the rest does.
     _CURRENT_TASKS = {}
 
+# Stock asyncio.Task types whose wakeups must be DEFERRED (scheduled via
+# call_soon), never run synchronously from inside a future's set_result/cancel.
+# Two distinct stock implementations exist: the C `_asyncio.Task` (exposed as
+# asyncio.Task) and the pure-Python `asyncio.tasks._PyTask` -- and the Python
+# one is NOT a subclass of the C one, so an `isinstance(host, asyncio.Task)`
+# check alone misses every _PyTask (CPython's own test_asyncio drives many).
+# We list BOTH; PygoTask (our own) is excluded at the call site since it wants
+# synchronous wakes.  See _fire_callbacks.
+_STOCK_TASK_TYPES = (asyncio.Task,)
+_PyTaskCls = getattr(asyncio.tasks, "_PyTask", None)
+if _PyTaskCls is not None and _PyTaskCls is not asyncio.Task:
+    _STOCK_TASK_TYPES = (asyncio.Task, _PyTaskCls)
+
+
+def _pg_convert_future_exc(exc):
+    """Convert a concurrent.futures exception to its asyncio twin when a
+    concurrent.futures.Future result is marshalled into an asyncio Future
+    (run_in_executor / wrap_future).  Reuses asyncio's own
+    futures._convert_future_exc when present (handles CancelledError +
+    InvalidStateError, version-correctly); falls back to a local mapping."""
+    try:
+        conv = asyncio.futures._convert_future_exc
+    except AttributeError:
+        conv = None
+    if conv is not None:
+        try:
+            return conv(exc)
+        except Exception:
+            pass
+    import concurrent.futures as _cf
+    klass = type(exc)
+    if klass is _cf.CancelledError:
+        return asyncio.CancelledError(*exc.args).with_traceback(exc.__traceback__)
+    ise = getattr(_cf, "InvalidStateError", None)
+    if ise is not None and klass is ise:
+        return asyncio.InvalidStateError(*exc.args).with_traceback(exc.__traceback__)
+    return exc
+
 
 def _run_stock_task_cb(loop, cb, fut):
     # Run a deferred stock-C-_asyncio.Task done-callback (its __wakeup) the way
@@ -1251,20 +1289,26 @@ class _PygoFutureMixin(object):
         cbs, self._pgcbs = self._pgcbs, []
         loop = self._loop
         for cb, ctx in cbs:
-            # A stock C _asyncio.Task awaiting a PygoFuture registers its
-            # Task.__wakeup as the done-callback (aiohttp creates eager-start
-            # asyncio.Task()s directly, not via loop.create_task -> PygoTask).
+            # A stock asyncio.Task (C `_asyncio.Task` OR pure-Python `_PyTask`)
+            # awaiting a PygoFuture registers its Task.__wakeup as the
+            # done-callback, WITH context=task._context (aiohttp eager-starts
+            # C Task()s directly; CPython's own test_asyncio drives _PyTask).
             # Stock asyncio schedules future callbacks via loop.call_soon; firing
             # __wakeup SYNCHRONOUSLY from inside the future's own cancel()/
-            # set_result is re-entrant and the C Task mishandles it -- it never
-            # reschedules __step, so the awaiting task hangs (e.g. write_bytes,
-            # the streaming-request body-writer, cancelled on connection close).
-            # Defer ONLY those callbacks (match asyncio); every other callback --
-            # pygo's _wake_unpark, library done-callbacks -- stays synchronous,
-            # preserving pygo's wake timing.
+            # set_result is wrong two ways: the C Task mishandles re-entry (never
+            # reschedules __step -> the awaiting task hangs, e.g. write_bytes,
+            # the streaming-request body-writer, cancelled on connection close),
+            # and a _PyTask whose task._context is ALREADY entered higher on the
+            # stack (a self-cancelling task: cancel() inside its own coro fires
+            # the just-registered wakeup before __step returns) makes ctx.run
+            # raise "cannot enter context" -> the wake is dropped -> hang
+            # (test_tasks::test_cancel_current_task).  Defer BOTH stock-task
+            # kinds (match asyncio); every other callback -- pygo's _wake_unpark,
+            # library done-callbacks -- stays synchronous, preserving pygo's wake
+            # timing.
             host = getattr(cb, "__self__", None)
             if (loop is not None and not loop.is_closed()
-                    and isinstance(host, asyncio.Task)
+                    and isinstance(host, _STOCK_TASK_TYPES)
                     and not isinstance(host, PygoTask)):
                 try:
                     loop.call_soon(_run_stock_task_cb, loop, cb, self,
@@ -1277,6 +1321,23 @@ class _PygoFutureMixin(object):
                         cb(self)
                     else:
                         ctx.run(cb, self)
+                except RuntimeError as e:
+                    # Defensive net for ANY callback registered with a context
+                    # that is already entered higher on this stack (a future
+                    # completed synchronously from inside that very context).
+                    # Context.run rejects re-entry BEFORE invoking cb, so cb has
+                    # NOT run; deferring to the next loop tick (the context has
+                    # exited by then) mirrors asyncio's always-call_soon dispatch
+                    # rather than dropping the wake and hanging the awaiter.
+                    if (ctx is not None and loop is not None
+                            and not loop.is_closed()
+                            and str(e).startswith("cannot enter context")):
+                        try:
+                            loop.call_soon(cb, self, context=ctx)
+                        except BaseException as e2:
+                            self._report_exc(e2)
+                    else:
+                        self._report_exc(e)
                 except BaseException as e:
                     self._report_exc(e)
 
@@ -1775,6 +1836,12 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
         # BaseEventLoop exposes this; libraries (asgiref) read loop._default_executor
         # directly, before ever calling run_in_executor.  Filled in lazily there.
         self._default_executor = None
+        # loop.set_task_factory() target.  None => default (build a PygoTask);
+        # otherwise a callable (loop, coro, **kwargs) -> Task that create_task
+        # delegates to.  Custom factories install Task subclasses for OTel /
+        # structlog / contextvar instrumentation and are exercised directly by
+        # CPython's test_asyncio (RunCoroutineThreadsafe + task-factory tests).
+        self._task_factory = None
         # Honour asyncio's debug-mode sources (PYTHONASYNCIODEBUG / -X dev), as
         # BaseEventLoop does via coroutines._is_debug_mode(); libraries + anyio
         # read loop.get_debug() and expect it to reflect the env.
@@ -1834,10 +1901,10 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
         return _time.monotonic()
 
     # ---- task / future ----
-    def create_task(self, coro, *, name=None, context=None):
+    def create_task(self, coro, *, name=None, context=None, **kwargs):
         self._check_closed()
         if self._can_spawn_here():
-            return PygoTask(coro, loop=self, name=name, context=context)
+            return self._pg_make_task(coro, name, context, kwargs)
         # Foreign thread: PygoTask.__init__ spawns a goroutine, which would land
         # on the CALLING thread's sched (never drained by this loop).  Marshal
         # the creation onto the loop's own thread via its thread-safe queue and
@@ -1846,8 +1913,8 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
         ev = _threading.Event()
         def _mk():
             try:
-                box["t"] = PygoTask(coro, loop=self, name=name, context=context)
-            except BaseException as e:    # pragma: no cover - defensive
+                box["t"] = self._pg_make_task(coro, name, context, kwargs)
+            except BaseException as e:
                 box["e"] = e
             finally:
                 ev.set()
@@ -1856,6 +1923,25 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
         if "e" in box:
             raise box["e"]
         return box["t"]
+
+    def _pg_make_task(self, coro, name, context, kwargs):
+        # Build the task for create_task, honouring a custom task factory
+        # (loop.set_task_factory).  Mirrors BaseEventLoop.create_task: the
+        # factory is called WITHOUT name (context only when non-None), then
+        # task.set_name(name) applies the name -- so a factory installing a
+        # plain asyncio.Task / Task subclass works exactly as on stock.  No
+        # factory => our own PygoTask (the default, goroutine-driven path).
+        factory = self._task_factory
+        if factory is not None:
+            if context is not None:
+                kwargs = dict(kwargs)
+                kwargs["context"] = context
+            task = factory(self, coro, **kwargs)
+            task.set_name(name)
+            return task
+        # Default path: PygoTask ignores any stray kwargs (eager_start etc. --
+        # the eager-task factory installs its own factory above).
+        return PygoTask(coro, loop=self, name=name, context=context)
 
     def create_future(self):
         return PygoFuture(loop=self)
@@ -2655,7 +2741,13 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
                 if cf_fut.cancelled():
                     fut.cancel()
                 elif cf_fut.exception() is not None:
-                    fut.set_exception(cf_fut.exception())
+                    # A concurrent.futures exception crossing into asyncio-land
+                    # must become its asyncio twin: concurrent.futures.Cancelled
+                    # Error subclasses Exception, but asyncio.CancelledError
+                    # subclasses BaseException -- distinct classes, so the raw
+                    # concurrent kind slips past `except asyncio.CancelledError`.
+                    # Stock wrap_future/_chain_future runs this same conversion.
+                    fut.set_exception(_pg_convert_future_exc(cf_fut.exception()))
                 else:
                     fut.set_result(cf_fut.result())
             try:
@@ -3015,10 +3107,15 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
         return None
 
     def get_task_factory(self):
-        return None
+        return self._task_factory
 
     def set_task_factory(self, factory):
-        pass
+        # asyncio contract: None resets to the default factory; otherwise the
+        # factory must be callable.  BaseEventLoop raises TypeError on a
+        # non-callable, and test_asyncio asserts that.
+        if factory is not None and not callable(factory):
+            raise TypeError("task factory must be a callable or None")
+        self._task_factory = factory
 
     # ---- exception handling ----
     def set_exception_handler(self, handler):
