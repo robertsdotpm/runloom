@@ -17,7 +17,7 @@ error contracts, not memory-model races:
     no crash, no stranded goroutine.
 
 Each backend (wsapoll / select / iocp-afd) is forced via PYGO_NETPOLL; the
-workload (win_netpoll_fault_workload.py) parks a goroutine on a socket so the
+workload (netpoll_inproc_fault_workload.py) parks a goroutine on a socket so the
 fault hits a live pump and the deadline still wakes it.  Windows-only.
 """
 import os
@@ -33,7 +33,7 @@ pytestmark = pytest.mark.skipif(
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
-WORKLOAD = os.path.join(HERE, "win_netpoll_fault_workload.py")
+WORKLOAD = os.path.join(HERE, "netpoll_inproc_fault_workload.py")
 
 WSAEINTR = 10004
 WSAENOTSOCK = 10038
