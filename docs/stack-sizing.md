@@ -196,28 +196,48 @@ startup and the high-water mark periodically.
 
 ## Defending against overflow
 
-pygo doesn't currently install a `SIGSEGV` handler around the guard
-page (planned for a follow-up).  If a goroutine does overflow its
-calibrated stack:
+A goroutine running low on stack is defended in layers -- the same kind of
+protection the main thread gets, scaled to the goroutine's smaller stack:
 
-- On the **fcontext** backend (Linux/macOS/BSD x86_64 + aarch64): the
-  goroutine's stack overflow lands in adjacent memory -- usually
-  another goroutine's stack -- causing silent corruption.  This is
-  why the safety factor is set to 4× and the minimum size is 16 KB:
-  you have to overshoot by a lot to hit this.
-- On the **Fibers** backend (Windows): Fibers reserve large virtual
-  ranges with guard pages handled by the OS; overflow trips a
-  Windows-level exception (loud crash).
-- On the **ucontext** backend (Solaris/illumos/fallback): same risk
-  as fcontext.
+- **Deep recursion raises `RecursionError`, not a crash.** CPython's
+  C-recursion counter is tracked per goroutine (saved and restored across
+  yields), so unbounded Python *or* C recursion (`json`, `re`, deeply nested
+  calls) hits a catchable `RecursionError` well before the stack overflows.
+- **Stacks grow on demand.** At each resume boundary a goroutine whose headroom
+  has dropped below a quarter of its stack is copied onto a stack twice as big
+  (`PYGO_STACK_GROW`, default on; `PYGO_STACK_GROW=0` disables). A goroutine
+  that gradually deepens grows with it.
+- **Every stack has a guard page.** A `PROT_NONE` page sits just below each
+  goroutine stack (the OS provides one on the Windows Fibers backend). An
+  overflow faults *immediately and cleanly* at the guard rather than silently
+  scribbling over a neighbouring stack. pygo does not yet turn that fault into a
+  friendly message -- it currently surfaces as a `faulthandler` segfault
+  traceback (a diagnostic handler is a possible follow-up).
+- **CPython's stack-hungry error paths are neutralised.** A missing-attribute
+  lookup on a module makes CPython 3.13 reserve a 32 KB path buffer just to
+  build a "did you shadow a stdlib module?" hint -- on its own larger than a
+  default goroutine stack. pygo skips that hint while on a goroutine (the
+  `AttributeError` is otherwise unchanged), so `getattr`/`hasattr` misses on a
+  module can't blow the stack, by any lookup path.
 
-If you suspect overflow, bump the size:
+Between them those cover everything that's actually come up in practice. The
+residual is a **single native/FFI C frame larger than the whole goroutine
+stack** -- a deeply-nested C-extension call that bypasses CPython's recursion
+counter and is big enough to jump the guard page in one allocation. With
+`-fstack-clash`-compiled code (CPython itself) that still faults cleanly at the
+guard; a non-probing extension could corrupt. If you have such a goroutine,
+give it a bigger stack up front:
 
 ```python
-pygo_core.set_stack_size(128 * 1024)
+pygo_core.set_stack_size(128 * 1024)        # process-wide default floor
+# or just the suspicious goroutine:
+pygo_core.go(work, stack_size=512 * 1024)
 ```
 
-Or use the per-call override on the suspicious goroutine.
+So the 16 KB minimum is a *floor for the calibrator*, not a blanket "safe for
+anything" size: it works because recursion is bounded, stacks grow, and the one
+oversized CPython frame is handled -- not because 16 KB fits every possible C
+call.
 
 ## Putting it all together
 

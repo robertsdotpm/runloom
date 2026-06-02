@@ -147,21 +147,12 @@ scheduling is unchanged.
 
 ## Stack safety (default ON)
 
-Goroutine stacks are small (that's what makes a million of them affordable), so
-pygo protects them like the main thread protects its 8 MB:
-
-- **Deep recursion raises `RecursionError`**, not a crash -- CPython's C-recursion
-  counter is tracked per goroutine (Python *and* C recursion, e.g. `json`).
-- **Stacks grow on demand** -- a goroutine that gets deeper has its stack copied
-  to a larger one at a yield boundary (`PYGO_STACK_GROW`, default on).
-- **A guard page** sits below every stack: an overflow faults immediately and
-  cleanly, never silently corrupting a neighbour.
-- **Big single C frames are handled too** -- e.g. a missing-attribute lookup on a
-  module makes CPython 3.13 reserve a 32 KB path buffer purely to build a
-  prettier error; pygo skips that inside a goroutine so it can't blow the stack.
-
-For the rare native call that needs a large stack in one shot, spawn it roomy:
-`pygo_core.go(fn, stack_size=512*1024)` (the asyncio bridge already does this).
+Goroutine stacks are small (that's what makes a million of them affordable) but
+safe: deep recursion raises `RecursionError` (not a crash), stacks grow on
+demand, every stack has a guard page so an overflow faults cleanly instead of
+corrupting a neighbour, and CPython's stack-hungry error paths can't blow a
+goroutine. For a native call that needs a big stack in one shot, pass
+`stack_size=`. Details: [docs/stack-sizing.md](docs/stack-sizing.md#defending-against-overflow).
 
 ## Ways to use it
 
