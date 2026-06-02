@@ -11,8 +11,11 @@ Apply once at startup:
 
 Categories (all default True):
     socket       socket.socket recv/recv_into/send/sendall/accept/connect/
-                 recvfrom/sendto  +  recvmsg/recvmsg_into/sendmsg (fd passing,
-                 ancillary data) where the platform provides them
+                 recvfrom/recvfrom_into/sendto/sendfile  +  recvmsg/
+                 recvmsg_into/sendmsg (fd passing, ancillary data) where the
+                 platform provides them.  sendfile reimplements the stdlib's
+                 zero-copy os.sendfile fast path + read()/send() fallback,
+                 parking on wait_fd instead of a selector.
     time         time.sleep
     os           os.read / os.write -- wait_fd for pollable fds (pipes,
                  sockets, ttys), thread-pool offload for regular files
@@ -28,17 +31,34 @@ Categories (all default True):
     stdio        builtins.input  +  sys.stdin.read/readline
     ssl          ssl.SSLSocket recv/send/sendall/do_handshake
     subprocess   subprocess.Popen.wait  (and, via `selectors` + `os`,
-                 subprocess.run / call / check_output / communicate)
-    process      os.waitpid / os.wait / os.waitid (WNOHANG cooperative loop on
-                 POSIX, backend offload on Windows) + os.system (offload)
+                 subprocess.run / call / check_output / communicate).  On Linux
+                 5.3+ it parks on a pidfd (event-driven) instead of busy-poll.
+    process      os.waitpid / os.wait / os.waitid: park on a pidfd until the
+                 child exits, then reap WNOHANG (busy-poll fallback for pid<=0,
+                 stop/continue waits, or no pidfd) + os.system (offload)
     threading    Lock, RLock, Event, Condition, Semaphore, BoundedSemaphore
-                 + Thread.join (cooperative is_alive() poll)
+                 (+ _at_fork_reinit) + Thread.join (cooperative is_alive() poll).
+                 threading.Barrier needs nothing extra (builds on Condition).
     queue        queue.SimpleQueue -> cooperative CoSimpleQueue.  queue.Queue
                  needs nothing extra: it builds on threading.Condition, which
                  is already cooperative once `threading` is patched.
+    futures      concurrent.futures.ThreadPoolExecutor -> goroutine-backed
+                 (work runs as goroutines so Future.result/wait/as_completed
+                 resolve in-domain; a real-threaded executor would notify a
+                 CoCondition cross-thread and deadlock the cooperative waiter).
+    multiprocessing  rebind Connection._recv/_send/_close's captured os.read/
+                 os.write/os.close defaults to the cooperative versions, so
+                 Pipe/Queue/Pool/Process.join cooperate regardless of import
+                 order (POSIX).  Use forkserver/spawn -- "fork" inherits pygo's
+                 threads and can deadlock the child.
     file         builtins.open (open syscall offloaded to backend)
     syscalls     os.stat/lstat/listdir/scandir/mkdir/rename/unlink/fsync/...
                  -- all disk-touching os.* calls dispatched to backend
+    fcntl        fcntl.flock / fcntl.lockf -- non-blocking acquire + _co_sleep
+                 backoff park (no readiness fd for a file lock)
+    signal       signal.sigwait / sigtimedwait (poll a zero-timeout
+                 sigtimedwait) + signal.pause (set_wakeup_fd self-pipe on the
+                 main thread, else offload)
     dns          pure-async UDP resolver (Go-netgo-style): parses
                  /etc/resolv.conf + /etc/hosts, sends queries via
                  cooperatively-patched UDP sockets, parallel A/AAAA,
