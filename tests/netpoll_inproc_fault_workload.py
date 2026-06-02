@@ -19,6 +19,12 @@ import socket
 import sys
 
 sys.path.insert(0, "src")
+# A harness may point at an alternate build (e.g. the select-forced variant
+# the POSIX select fault test builds into a temp dir) -- prepend it so its
+# pygo_core wins over the default in-tree one.
+_core = os.environ.get("PYGO_CORE_PATH")
+if _core:
+    sys.path.insert(0, _core)
 
 import pygo_core
 

@@ -2367,7 +2367,7 @@ static long long pygo_dh_peek_deadline_global(void)
  * interpreter, so instead we log once and back off a millisecond, degrading a
  * silent CPU peg into an observable, throttled slow-loop with a logged cause.
  * Returns 1 if it handled an error (caller should not treat n as a count). */
-#if defined(PYGO_HAVE_EPOLL) || defined(PYGO_HAVE_KQUEUE)
+#if !defined(PYGO_OS_WINDOWS)   /* epoll, kqueue, AND the POSIX select fallback */
 static int pygo_netpoll_wait_failed(int n)
 {
     static int warned;            /* relaxed: a few duplicate logs are harmless */
@@ -2387,7 +2387,7 @@ static int pygo_netpoll_wait_failed(int n)
     }
     return 1;
 }
-#endif /* PYGO_HAVE_EPOLL || PYGO_HAVE_KQUEUE */
+#endif /* !PYGO_OS_WINDOWS */
 
 int pygo_netpoll_pump(long long timeout_ns)
 {
@@ -2800,9 +2800,14 @@ post_wait:
              * during an idle wait and the blocking-offload workers (which
              * need the GIL to run their Python callable) can never finish
              * to wake it -> deadlock. */
-            Py_BEGIN_ALLOW_THREADS
-            rc = select(max_fd + 1, &rfds, &wfds, NULL, tvp);
-            Py_END_ALLOW_THREADS
+            int finj = pygo_fault_inject(PYGO_FAULT_SELECT);
+            if (finj) {
+                rc = -1; errno = finj;        /* test-only: short-circuit select() */
+            } else {
+                Py_BEGIN_ALLOW_THREADS
+                rc = select(max_fd + 1, &rfds, &wfds, NULL, tvp);
+                Py_END_ALLOW_THREADS
+            }
         }
         if (rc > 0) {
             /* Drain the self-pipe if it fired; it carries no parker, the
@@ -2838,6 +2843,14 @@ post_wait:
                 p = next_p;
             }
             pygo_mutex_unlock(&pygo_pool.lock);
+        } else if (rc < 0) {
+            /* Persistent select() error (e.g. EBADF: a parked fd closed under
+             * us, a teardown race) must back off, not busy-spin the idle pump
+             * -- the same contract the epoll/kqueue paths get.  EINTR is
+             * retried (no backoff).  pygo_netpoll_wait_failed was previously
+             * gated to epoll/kqueue and never compiled on a select build, so
+             * this path used to peg a CPU on a hard select() error. */
+            pygo_netpoll_wait_failed(rc);
         }
     }
 #endif
