@@ -2600,6 +2600,41 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
             except (BlockingIOError, InterruptedError):
                 _wait_fd(sock.fileno(), 2)
 
+    # recvmsg / sendmsg (POSIX): ancillary-data + SCM_RIGHTS fd passing over the
+    # loop.  Not part of AbstractEventLoop, but pygo.monkey makes the blocking
+    # socket.recvmsg/sendmsg cooperative and the bridge (monkey OFF) needs an
+    # equivalent -- same EAGAIN -> wait_fd loop as the other sock_* ops.
+    if hasattr(_socket.socket, "recvmsg"):
+        async def sock_recvmsg(self, sock, bufsize, ancbufsize=0, flags=0):
+            self._check_sock_nonblocking(sock)
+            sock.setblocking(False)
+            while True:
+                try:
+                    return sock.recvmsg(bufsize, ancbufsize, flags)
+                except (BlockingIOError, InterruptedError):
+                    _wait_fd(sock.fileno(), 1)
+
+        async def sock_recvmsg_into(self, sock, buffers, ancbufsize=0, flags=0):
+            self._check_sock_nonblocking(sock)
+            sock.setblocking(False)
+            while True:
+                try:
+                    return sock.recvmsg_into(buffers, ancbufsize, flags)
+                except (BlockingIOError, InterruptedError):
+                    _wait_fd(sock.fileno(), 1)
+
+        async def sock_sendmsg(self, sock, buffers, ancdata=(), flags=0,
+                               address=None):
+            self._check_sock_nonblocking(sock)
+            sock.setblocking(False)
+            while True:
+                try:
+                    if address is None:
+                        return sock.sendmsg(buffers, ancdata, flags)
+                    return sock.sendmsg(buffers, ancdata, flags, address)
+                except (BlockingIOError, InterruptedError):
+                    _wait_fd(sock.fileno(), 2)
+
     # ---- executor (thread pool) ----
     def run_in_executor(self, executor, func, *args):
         """Run func(*args) on a thread pool.  Returns a PygoFuture
@@ -4523,8 +4558,48 @@ class _SubprocessTransport(asyncio.SubprocessTransport):
             self._pipes[1] = None
         if self._proc.stderr is not None:
             self._pipes[2] = None
-        _threading.Thread(target=self._wait_thread,
-                          name="pygo-subproc-wait", daemon=True).start()
+        self._start_reaper()
+
+    def _start_reaper(self):
+        # Reap the child COOPERATIVELY via its pidfd (Linux 5.3+ / py3.9+): a
+        # goroutine parks on the pidfd -- which becomes readable exactly when the
+        # child exits -- instead of burning a dedicated OS thread blocked in
+        # Popen.wait().  This is the asyncio-bridge equivalent of pygo.monkey's
+        # cooperative os.waitpid.  Falls back to the wait thread where pidfd_open
+        # is missing or fails (older kernels, non-Linux).
+        pidfd = None
+        opener = getattr(_os, "pidfd_open", None)
+        if opener is not None:
+            try:
+                pidfd = opener(self._pid)
+            except OSError:
+                pidfd = None
+        if pidfd is None:
+            _threading.Thread(target=self._wait_thread,
+                              name="pygo-subproc-wait", daemon=True).start()
+            return
+
+        def reaper():
+            try:
+                _wait_fd(pidfd, _WAIT_READ)   # readable once the child exits
+            except BaseException:
+                pass
+            finally:
+                try:
+                    _os.close(pidfd)
+                except OSError:
+                    pass
+            # The child has exited: Popen.wait() reaps it immediately (no block),
+            # and we are on the loop thread (this goroutine), so deliver inline.
+            try:
+                rc = self._proc.wait()
+            except Exception:
+                rc = self._proc.poll()
+                if rc is None:
+                    rc = -1
+            self._process_exited(rc)
+
+        pygo_core.go(reaper)
 
     async def _connect_pipes(self):
         # Mirror asyncio.base_subprocess._connect_pipes: await the loop's pipe
@@ -4699,35 +4774,61 @@ class _SubprocessTransport(asyncio.SubprocessTransport):
 
 
 class _ReadPipeTransport(asyncio.ReadTransport):
-    """connect_read_pipe transport: a thread does blocking reads on the pipe and
-    feeds protocol.data_received; EOF -> eof_received + connection_lost."""
+    """connect_read_pipe transport: a goroutine parks on the pipe fd via wait_fd
+    (cooperative, no OS thread) and feeds protocol.data_received; EOF ->
+    eof_received + connection_lost."""
     def __init__(self, loop, pipe, protocol):
         self._loop = loop
         self._pipe = pipe
+        self._fd = pipe.fileno()
         self._protocol = protocol
         self._closing = False
         self._paused = False
+        self._read_g = None
+        try:
+            _os.set_blocking(self._fd, False)
+        except OSError:
+            pass
         try:
             protocol.connection_made(self)
         except Exception as e:
             self._report(e, "connection_made")
-        _threading.Thread(target=self._reader, name="pygo-readpipe",
-                          daemon=True).start()
+        self._read_g = pygo_core.go(self._read_loop)
 
-    def _reader(self):
-        try:
-            while not self._closing:
-                if self._paused:
-                    _time.sleep(0.001)
-                    continue
-                data = self._pipe.read(32768)
-                if not data:
+    def _read_loop(self):
+        # Cooperative replacement for the old reader thread: non-blocking os.read
+        # + wait_fd(READ) on the raw pipe fd, on the loop thread, so data_received
+        # / eof fire inline (no call_soon_threadsafe).  Exits on pause (respawned
+        # by resume_reading), close, or EOF.
+        fd = self._fd
+        eof = False
+        while True:
+            if self._closing or self._paused:
+                self._read_g = None
+                return
+            try:
+                data = _os.read(fd, 32768)
+            except (BlockingIOError, InterruptedError):
+                try:
+                    _wait_fd(fd, _WAIT_READ)
+                except asyncio.CancelledError:
+                    continue          # interest changed (pause/close): re-check
+                except Exception:
+                    eof = True
                     break
-                self._loop.call_soon_threadsafe(self._deliver, data)
-        except (BrokenPipeError, OSError):
-            pass
-        finally:
-            self._loop.call_soon_threadsafe(self._eof)
+                continue
+            except OSError:
+                eof = True            # peer reset etc. -> treat as EOF
+                break
+            if not data:
+                eof = True            # clean EOF
+                break
+            self._deliver(data)
+            # Hand the scheduler to a woken consumer before reading again.
+            pygo_core.sched_yield_classic()
+        self._read_g = None
+        if eof and not self._closing:
+            self._eof()
 
     def _deliver(self, data):
         if not self._closing:
@@ -4757,6 +4858,12 @@ class _ReadPipeTransport(asyncio.ReadTransport):
         if self._closing:
             return
         self._closing = True
+        g = self._read_g
+        if g is not None:
+            try:
+                g.cancel_wait_fd()   # wake the parked read goroutine so it exits
+            except Exception:
+                pass
         try:
             self._pipe.close()
         except Exception:
@@ -4768,9 +4875,19 @@ class _ReadPipeTransport(asyncio.ReadTransport):
 
     def pause_reading(self):
         self._paused = True
+        g = self._read_g
+        if g is not None:
+            try:
+                g.cancel_wait_fd()   # wake it so it observes _paused and exits
+            except Exception:
+                pass
 
     def resume_reading(self):
+        if not self._paused:
+            return
         self._paused = False
+        if self._read_g is None and not self._closing:
+            self._read_g = pygo_core.go(self._read_loop)
 
     def close(self):
         self._close(None)
@@ -4793,89 +4910,92 @@ class _ReadPipeTransport(asyncio.ReadTransport):
 
 
 class _WritePipeTransport(asyncio.WriteTransport):
-    """connect_write_pipe transport: queued writes drained by a thread so a full
-    pipe never blocks the loop; connection_lost fires on close/EOF/error."""
+    """connect_write_pipe transport: a goroutine drains the write buffer to the
+    pipe fd via wait_fd (cooperative, no OS thread); connection_lost fires on
+    close/EOF/error.  Implements the asyncio watermark flow-control contract so
+    StreamWriter.drain() blocks until the backlog flushes or the pipe breaks."""
     def __init__(self, loop, pipe, protocol):
         self._loop = loop
         self._pipe = pipe
+        self._fd = pipe.fileno()
         self._protocol = protocol
         self._closing = False
-        self._eof = False
-        self._q = _collections.deque()
-        self._cond = _threading.Condition()
-        # Flow control (asyncio watermark contract): the drain thread writes in
-        # the background, so without backpressure StreamWriter.drain() would
-        # return instantly and never surface a broken pipe.  Pause the protocol
-        # once the queued byte count crosses the high-water mark and resume it
-        # below the low-water mark, exactly like a selector WriteTransport.
-        self._buffer_size = 0
+        self._eof_requested = False
+        self._conn_lost_fired = False
+        self._buf = bytearray()
         self._high_water = 64 * 1024
         self._low_water = 16 * 1024
         self._protocol_paused = False
+        self._drain_g = None
+        try:
+            _os.set_blocking(self._fd, False)
+        except OSError:
+            pass
         try:
             protocol.connection_made(self)
         except Exception as e:
             self._report(e, "connection_made")
-        _threading.Thread(target=self._drain, name="pygo-writepipe",
-                          daemon=True).start()
 
-    def _drain(self):
-        exc = None
-        while True:
-            with self._cond:
-                while not self._q and not self._eof:
-                    self._cond.wait()
-                if self._q:
-                    data = self._q.popleft()
-                else:
-                    break
+    def _kick(self):
+        # Wake/spawn the drain goroutine after write()/write_eof changed the
+        # buffer.  write() and the drain both run on the loop thread, so there is
+        # no cross-thread queue -- just one bytearray + one goroutine.
+        if self._drain_g is None:
+            if not self._closing:
+                self._drain_g = pygo_core.go(self._drain_loop)
+        else:
             try:
-                # proc.stdin is a RAW FileIO (bufsize=0): write() returns a
-                # PARTIAL count, so loop until every byte is on the wire.  Without
-                # this a big write neither blocks nor surfaces the peer's hangup --
-                # it silently drops the tail and StreamWriter.drain() returns
-                # cleanly (test_stdin_broken_pipe expects BrokenPipeError).
-                view = memoryview(data)
-                while view:
-                    n = self._pipe.write(view)
-                    if not n:
-                        break
-                    view = view[n:]
-                self._pipe.flush()
-            except (BrokenPipeError, OSError) as e:
-                exc = e
-                break
-            with self._cond:
-                self._buffer_size -= len(data)
-            self._call_soon_safe(self._maybe_resume)
+                self._drain_g.cancel_wait_fd()   # wake it if parked on WRITE
+            except Exception:
+                pass
+
+    def _drain_loop(self):
+        fd = self._fd
+        while True:
+            if not self._buf:
+                if self._eof_requested:
+                    self._drain_g = None
+                    self._finish(None)
+                    return
+                self._drain_g = None
+                return                           # idle; respawn on next write()
+            chunk = bytes(self._buf[:262144])
+            try:
+                n = _os.write(fd, chunk)
+            except (BlockingIOError, InterruptedError):
+                try:
+                    _wait_fd(fd, _WAIT_WRITE)
+                except asyncio.CancelledError:
+                    continue                     # new write()/close: re-check
+                except Exception as e:
+                    self._drain_g = None
+                    self._finish(e)
+                    return
+                continue
+            except OSError as e:                 # BrokenPipe etc.
+                self._drain_g = None
+                self._finish(e)
+                return
+            if n:
+                del self._buf[:n]
+                self._maybe_resume()
+
+    def _maybe_resume(self):
+        if self._protocol_paused and len(self._buf) <= self._low_water:
+            self._protocol_paused = False
+            try:
+                self._protocol.resume_writing()
+            except Exception as e:
+                self._report(e, "resume_writing")
+
+    def _finish(self, exc):
         try:
             self._pipe.close()
         except Exception:
             pass
-        self._call_soon_safe(self._lost, exc)
-
-    def _call_soon_safe(self, cb, *args):
-        # The drain thread outlives the loop in teardown races; a late callback
-        # on a closed loop raises RuntimeError -- swallow it.
-        try:
-            self._loop.call_soon_threadsafe(cb, *args)
-        except RuntimeError:
-            pass
-
-    def _maybe_resume(self):
-        # On the loop thread: lift the pause once the backlog has drained enough.
-        with self._cond:
-            if not self._protocol_paused or self._buffer_size > self._low_water:
-                return
-            self._protocol_paused = False
-        try:
-            self._protocol.resume_writing()
-        except Exception as e:
-            self._report(e, "resume_writing")
-
-    def _lost(self, exc):
-        if self._closing:
+        if self._conn_lost_fired:
             return
+        self._conn_lost_fired = True
         self._closing = True
         try:
             self._protocol.connection_lost(exc)
@@ -4883,32 +5003,25 @@ class _WritePipeTransport(asyncio.WriteTransport):
             self._report(e, "connection_lost")
 
     def write(self, data):
-        if self._closing or self._eof:
+        if self._closing or self._eof_requested:
             return
         data = bytes(data)
         if not data:
             return
-        with self._cond:
-            self._q.append(data)
-            self._buffer_size += len(data)
-            self._cond.notify()
-            pause = (not self._protocol_paused
-                     and self._buffer_size > self._high_water)
-            if pause:
-                self._protocol_paused = True
-        # pause_writing runs on the loop thread (write() is called there); the
-        # protocol's drain() then blocks until _maybe_resume / connection_lost.
-        if pause:
+        self._buf += data
+        if (not self._protocol_paused) and len(self._buf) > self._high_water:
+            self._protocol_paused = True
             try:
                 self._protocol.pause_writing()
             except Exception as e:
                 self._report(e, "pause_writing")
+        self._kick()
 
     def writelines(self, list_of_data):
         self.write(b"".join(list_of_data))
 
     def get_write_buffer_size(self):
-        return self._buffer_size
+        return len(self._buf)
 
     def get_write_buffer_limits(self):
         return (self._low_water, self._high_water)
@@ -4922,9 +5035,15 @@ class _WritePipeTransport(asyncio.WriteTransport):
         self._low_water = low
 
     def write_eof(self):
-        with self._cond:
-            self._eof = True
-            self._cond.notify()
+        if self._eof_requested:
+            return
+        self._eof_requested = True
+        # Drain whatever is queued, then finish.  If nothing is queued and no
+        # drain goroutine is running, finish inline now.
+        if self._drain_g is None and not self._buf:
+            self._finish(None)
+        else:
+            self._kick()
 
     def can_write_eof(self):
         return True
@@ -4936,7 +5055,7 @@ class _WritePipeTransport(asyncio.WriteTransport):
         self.write_eof()
 
     def is_closing(self):
-        return self._closing or self._eof
+        return self._closing or self._eof_requested
 
     def get_protocol(self):
         return self._protocol
