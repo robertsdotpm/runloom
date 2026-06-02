@@ -80,6 +80,7 @@ import _thread
 import builtins
 import collections
 import errno
+import io
 import os
 import platform as _platform
 import select as _select_mod
@@ -126,6 +127,10 @@ _raw_time_sleep = time.sleep
 # forever on a non-blocking recv that returns BlockingIOError).
 _raw_sock_recv = socket.socket.recv
 _raw_sock_send = socket.socket.send
+# Raw os.sendfile (before _patch_syscalls offloads it to the pool).  The
+# cooperative socket.sendfile drives this directly in non-blocking mode and
+# parks on wait_fd, rather than blocking a pool worker for the whole transfer.
+_raw_os_sendfile = getattr(os, "sendfile", None)
 
 
 # ---------- goroutine-context detection ----------
@@ -449,6 +454,8 @@ _orig_sendto = None
 _orig_recvmsg = None
 _orig_recvmsg_into = None
 _orig_sendmsg = None
+_orig_recvfrom_into = None
+_orig_sendfile = None
 
 # recvmsg / recvmsg_into / sendmsg are POSIX-only (fd passing, ancillary
 # data via SCM_RIGHTS).  Windows sockets have no equivalent, so socket.socket
@@ -622,6 +629,118 @@ def _patched_sendmsg(self, buffers, ancdata=(), flags=0, address=None):
             pygo_core.wait_fd(self.fileno(), WRITE)
 
 
+def _patched_recvfrom_into(self, buffer, nbytes=0, flags=0):
+    """Zero-alloc datagram receive -- the recvfrom analogue of recv_into.
+    UDP servers that own a reusable buffer save the bytes allocation per
+    packet that plain recvfrom() pays."""
+    if not _in_goroutine():
+        return _orig_recvfrom_into(self, buffer, nbytes, flags)
+    _make_nonblocking(self)
+    while True:
+        try:
+            return _orig_recvfrom_into(self, buffer, nbytes, flags)
+        except (BlockingIOError, InterruptedError):
+            pygo_core.wait_fd(self.fileno(), READ)
+
+
+# ---------- cooperative sendfile ----------
+#
+# Stock socket.sendfile refuses non-blocking sockets (raises ValueError) and
+# drives the os.sendfile loop with its own selectors.PollSelector.  Our
+# goroutine sockets are non-blocking by construction, so we reimplement both
+# halves of the stdlib's two-strategy sendfile -- the zero-copy os.sendfile
+# fast path and the read()+send() fallback -- parking on wait_fd instead of a
+# selector.  Faithful to Lib/socket.py: same _check_sendfile_params validation,
+# same _GiveupOnSendfile fallback trigger, same offset/seek bookkeeping.
+
+def _co_sendfile_use_sendfile(self, file, offset, count):
+    self._check_sendfile_params(file, offset, count)
+    sockno = self.fileno()
+    try:
+        fileno = file.fileno()
+    except (AttributeError, io.UnsupportedOperation) as err:
+        raise socket._GiveupOnSendfile(err)        # not a regular file
+    try:
+        fsize = os.fstat(fileno).st_size
+    except OSError as err:
+        raise socket._GiveupOnSendfile(err)        # not a regular file
+    if not fsize:
+        return 0                                    # empty file
+    # Truncate to 1 GiB to avoid OverflowError, mirroring bpo-38319.
+    blocksize = min(count or fsize, 2 ** 30)
+    total_sent = 0
+    try:
+        while True:
+            if count:
+                blocksize = min(count - total_sent, blocksize)
+                if blocksize <= 0:
+                    break
+            try:
+                sent = _raw_os_sendfile(sockno, fileno, offset, blocksize)
+            except (BlockingIOError, InterruptedError):
+                pygo_core.wait_fd(sockno, WRITE)
+                continue
+            except OSError as err:
+                if total_sent == 0:
+                    # 'file' is likely not a regular mmap-like file; fall
+                    # back to plain send().
+                    raise socket._GiveupOnSendfile(err)
+                raise err from None
+            else:
+                if sent == 0:
+                    break                           # EOF
+                offset += sent
+                total_sent += sent
+        return total_sent
+    finally:
+        if total_sent > 0 and hasattr(file, "seek"):
+            file.seek(offset)
+
+
+def _co_sendfile_use_send(self, file, offset, count):
+    self._check_sendfile_params(file, offset, count)
+    if offset:
+        file.seek(offset)
+    blocksize = min(count, 8192) if count else 8192
+    total_sent = 0
+    file_read = file.read
+    sock_send = self.send                           # cooperative patched send
+    try:
+        while True:
+            if count:
+                blocksize = min(count - total_sent, blocksize)
+                if blocksize <= 0:
+                    break
+            data = memoryview(file_read(blocksize))
+            if not data:
+                break                               # EOF
+            while data:
+                # The patched send parks rather than raising BlockingIOError,
+                # so it always returns a positive count here.
+                sent = sock_send(data)
+                total_sent += sent
+                data = data[sent:]
+        return total_sent
+    finally:
+        if total_sent > 0 and hasattr(file, "seek"):
+            file.seek(offset + total_sent)
+
+
+def _patched_sendfile(self, file, offset=0, count=None):
+    """Cooperative socket.sendfile.  Zero-copy os.sendfile fast path, with the
+    stdlib's read()+send() fallback for non-regular files -- both parking on
+    wait_fd so the whole transfer doesn't pin a scheduler thread."""
+    if not _in_goroutine():
+        return _orig_sendfile(self, file, offset, count)
+    _make_nonblocking(self)
+    if _raw_os_sendfile is not None:
+        try:
+            return _co_sendfile_use_sendfile(self, file, offset, count)
+        except socket._GiveupOnSendfile:
+            pass
+    return _co_sendfile_use_send(self, file, offset, count)
+
+
 _orig_close   = None
 _orig_detach  = None
 _netpoll_unregister = getattr(pygo_core, "netpoll_unregister", None)
@@ -656,6 +775,7 @@ def _patch_socket():
     global _orig_recv, _orig_recv_into, _orig_send, _orig_sendall, _orig_accept
     global _orig_connect, _orig_recvfrom, _orig_sendto, _orig_close, _orig_detach
     global _orig_recvmsg, _orig_recvmsg_into, _orig_sendmsg
+    global _orig_recvfrom_into, _orig_sendfile
     s = socket.socket
     _orig_recv      = s.recv
     _orig_recv_into = s.recv_into
@@ -664,7 +784,9 @@ def _patch_socket():
     _orig_accept    = s.accept
     _orig_connect   = s.connect
     _orig_recvfrom  = s.recvfrom
+    _orig_recvfrom_into = s.recvfrom_into
     _orig_sendto    = s.sendto
+    _orig_sendfile  = s.sendfile
     _orig_close     = s.close
     _orig_detach    = s.detach
     s.recv      = _patched_recv
@@ -674,7 +796,9 @@ def _patch_socket():
     s.accept    = _patched_accept
     s.connect   = _patched_connect
     s.recvfrom  = _patched_recvfrom
+    s.recvfrom_into = _patched_recvfrom_into
     s.sendto    = _patched_sendto
+    s.sendfile  = _patched_sendfile
     s.close     = _patched_close
     s.detach    = _patched_detach
     if _HAVE_RECVMSG:
@@ -696,7 +820,9 @@ def _unpatch_socket():
     s.accept    = _orig_accept
     s.connect   = _orig_connect
     s.recvfrom  = _orig_recvfrom
+    s.recvfrom_into = _orig_recvfrom_into
     s.sendto    = _orig_sendto
+    s.sendfile  = _orig_sendfile
     s.close     = _orig_close
     s.detach    = _orig_detach
     if _HAVE_RECVMSG:

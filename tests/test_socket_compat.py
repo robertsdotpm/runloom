@@ -17,9 +17,11 @@ is the parts a cooperative re-implementation can get wrong:
 """
 import array
 import errno
+import io
 import os
 import platform
 import socket
+import tempfile
 import time
 import unittest
 
@@ -373,6 +375,241 @@ class TestFaultInjection(unittest.TestCase):
                 a.recv(16)             # EBADF on a closed socket
             b.close()
         _drive(body)
+
+
+def _write_temp(data):
+    """Write `data` to a fresh temp file, return its path.  Caller unlinks."""
+    fd, path = tempfile.mkstemp(prefix="pygo_sendfile_")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+    except BaseException:
+        os.unlink(path)
+        raise
+    return path
+
+
+class TestSendfile(unittest.TestCase):
+    """Cooperative socket.sendfile.
+
+    Adapted from CPython Lib/test/test_socket.py SendfileUsingSendfileTest
+    and SendfileUsingSendTest.  Stock sendfile refuses non-blocking sockets
+    and drives os.sendfile with its own selector; the cooperative version
+    must move the whole file (zero-copy os.sendfile fast path), honour
+    offset/count, fall back to read()+send() for non-regular files, and park
+    on wait_fd throughout so a sibling goroutine keeps running.
+    """
+
+    # 256 KiB -- larger than the kernel send buffer, so the transfer is
+    # guaranteed to hit EAGAIN and exercise the wait_fd park/resume path.
+    DATA = bytes(range(256)) * 1024
+
+    def _run_sendfile(self, make_file, offset=0, count=None):
+        def body():
+            srv, addr = _tcp_server()
+            received = {"buf": b""}
+
+            def server():
+                conn, _ = srv.accept()
+                while True:
+                    chunk = conn.recv(65536)
+                    if not chunk:
+                        break
+                    received["buf"] += chunk
+                conn.close()
+
+            pygo_core.go(server)
+            cli = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            cli.connect(addr)
+            f = make_file()
+            try:
+                sent = cli.sendfile(f, offset, count)
+            finally:
+                f.close()
+            cli.shutdown(socket.SHUT_WR)
+            want = (len(self.DATA) - offset) if count is None else count
+            t0 = time.monotonic()
+            while len(received["buf"]) < want and time.monotonic() - t0 < 5:
+                pygo.sleep(0.005)
+            cli.close(); srv.close()
+            return sent, received["buf"]
+        return _drive(body)
+
+    def test_sendfile_regular_file_zero_copy(self):
+        path = _write_temp(self.DATA)
+        try:
+            sent, buf = self._run_sendfile(lambda: open(path, "rb"))
+        finally:
+            os.unlink(path)
+        self.assertEqual(sent, len(self.DATA))
+        self.assertEqual(buf, self.DATA)
+
+    def test_sendfile_offset_and_count(self):
+        path = _write_temp(self.DATA)
+        try:
+            sent, buf = self._run_sendfile(
+                lambda: open(path, "rb"), offset=100, count=5000)
+        finally:
+            os.unlink(path)
+        self.assertEqual(sent, 5000)
+        self.assertEqual(buf, self.DATA[100:5100])
+
+    def test_sendfile_fallback_nonregular_file(self):
+        # BytesIO has no fileno() -> _GiveupOnSendfile -> read()+send() path.
+        sent, buf = self._run_sendfile(lambda: io.BytesIO(self.DATA))
+        self.assertEqual(sent, len(self.DATA))
+        self.assertEqual(buf, self.DATA)
+
+    def test_sendfile_empty_file(self):
+        path = _write_temp(b"")
+        try:
+            sent, buf = self._run_sendfile(lambda: open(path, "rb"))
+        finally:
+            os.unlink(path)
+        self.assertEqual(sent, 0)
+        self.assertEqual(buf, b"")
+
+    def test_sendfile_text_mode_rejected(self):
+        """_check_sendfile_params must still reject text-mode files."""
+        path = _write_temp(b"abc")
+        try:
+            def body():
+                cli = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                with self.assertRaises(ValueError):
+                    cli.sendfile(open(path, "r"))
+                cli.close()
+            _drive(body)
+        finally:
+            os.unlink(path)
+
+    def test_sendfile_blocked_yields_to_sibling(self):
+        """A goroutine pushing a large file must let a sibling make progress
+        while the send buffer is full (proves wait_fd parking, not spinning)."""
+        path = _write_temp(self.DATA)
+        ticks = {"n": 0}
+
+        def body():
+            srv, addr = _tcp_server()
+            done = {"v": False}
+
+            def server():
+                conn, _ = srv.accept()
+                total = 0
+                while total < len(self.DATA):
+                    chunk = conn.recv(65536)
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                    pygo.sleep(0.002)   # drain slowly so the sender blocks
+                conn.close()
+
+            def ticker():
+                while not done["v"]:
+                    ticks["n"] += 1
+                    pygo.sleep(0.002)
+
+            pygo_core.go(server)
+            pygo_core.go(ticker)
+            cli = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            cli.connect(addr)
+            with open(path, "rb") as f:
+                sent = cli.sendfile(f)
+            cli.shutdown(socket.SHUT_WR)
+            cli.close(); srv.close()
+            done["v"] = True
+            return sent
+
+        try:
+            sent = _drive(body)
+        finally:
+            os.unlink(path)
+        self.assertEqual(sent, len(self.DATA))
+        # the ticker ran concurrently while sendfile was blocked
+        self.assertGreater(ticks["n"], 0)
+
+
+class TestRecvfromInto(unittest.TestCase):
+    """Cooperative socket.recvfrom_into (zero-alloc datagram receive).
+
+    Adapted from CPython Lib/test/test_socket.py BasicUDPTest /
+    RecvIntoTests.  Fills a caller-owned buffer and returns (nbytes, addr);
+    a blocked recvfrom_into must yield to siblings.
+    """
+
+    def test_udp_recvfrom_into(self):
+        def body():
+            rx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            rx.bind(("127.0.0.1", 0))
+            addr = rx.getsockname()
+
+            def sender():
+                tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                tx.sendto(b"datagram-payload", addr)
+                tx.close()
+
+            pygo_core.go(sender)
+            buf = bytearray(64)
+            n, peer = rx.recvfrom_into(buf)
+            rx.close()
+            return n, bytes(buf[:n]), peer
+        n, data, peer = _drive(body)
+        self.assertEqual(n, len(b"datagram-payload"))
+        self.assertEqual(data, b"datagram-payload")
+        self.assertEqual(peer[0], "127.0.0.1")
+
+    def test_recvfrom_into_nbytes_cap(self):
+        """recvfrom_into with an explicit nbytes reads at most that many."""
+        def body():
+            rx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            rx.bind(("127.0.0.1", 0))
+            addr = rx.getsockname()
+
+            def sender():
+                tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                tx.sendto(b"0123456789", addr)
+                tx.close()
+
+            pygo_core.go(sender)
+            buf = bytearray(64)
+            n, _ = rx.recvfrom_into(buf, 4)
+            rx.close()
+            return n, bytes(buf[:4])
+        n, data = _drive(body)
+        self.assertEqual(n, 4)
+        self.assertEqual(data, b"0123")
+
+    def test_recvfrom_into_blocks_then_yields(self):
+        def body():
+            rx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            rx.bind(("127.0.0.1", 0))
+            addr = rx.getsockname()
+            order = []
+
+            def receiver():
+                order.append("recv-wait")
+                buf = bytearray(32)
+                rx.recvfrom_into(buf)
+                order.append("got")
+
+            def sender():
+                for _ in range(3):
+                    time.sleep(0.005)
+                    order.append("tick")
+                tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                tx.sendto(b"ping", addr)
+                tx.close()
+
+            pygo_core.go(receiver)
+            pygo_core.go(sender)
+            t0 = time.monotonic()
+            while "got" not in order and time.monotonic() - t0 < 5:
+                pygo.sleep(0.005)
+            rx.close()
+            return order
+        order = _drive(body)
+        self.assertIn("got", order)
+        self.assertIn("tick", order)
+        self.assertLess(order.index("recv-wait"), order.index("got"))
 
 
 def _linger_struct():
