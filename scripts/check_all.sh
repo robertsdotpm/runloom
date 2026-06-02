@@ -2,6 +2,7 @@
 # check_all.sh -- run every layer of pygo's correctness stack.
 #
 # Layers, fastest first:
+#   static      gcc -fanalyzer + cppcheck on the C core           ~1-2 min
 #   tests       Python test suite (pytest tests/)               ~seconds
 #   mn          M:N scheduler fuzzer (tools/mn_stress.py)        ~seconds-min
 #   lincheck    linearizability (Porcupine + stateful select)   ~seconds
@@ -44,7 +45,7 @@ fi
 phases=("$@")
 [ ${#phases[@]} -eq 0 ] && phases=(tests mn lincheck dst ctest)
 if [ "${phases[0]}" = all ]; then
-  phases=(tests mn lincheck dst ctest sanitizers exttsan verify)
+  phases=(tests mn lincheck dst ctest static sanitizers exttsan verify)
 fi
 
 rc=0
@@ -62,6 +63,10 @@ for ph in "${phases[@]}"; do
       # For full fuzzing (which reproduces the contended-select crash,
       # finding A in tools/README.md) run: tools/mn_stress.py --iters N
       "$PYTHON" tools/mn_stress.py --iters "${MN_ITERS:-150}" --stable || rc=1
+      ;;
+    static)
+      hr "Static analysis (gcc -fanalyzer gate + cppcheck advisory)"
+      PYTHON="$PYTHON" bash tools/static_analysis.sh || rc=1
       ;;
     lincheck)
       hr "Linearizability (Porcupine + stateful select model)"
@@ -89,7 +94,7 @@ for ph in "${phases[@]}"; do
       verify/run_verify.sh || rc=1
       ;;
     *)
-      echo "unknown phase: $ph (want: tests mn lincheck dst ctest sanitizers exttsan verify all)"; rc=2 ;;
+      echo "unknown phase: $ph (want: tests mn lincheck dst ctest static sanitizers exttsan verify all)"; rc=2 ;;
   esac
 done
 

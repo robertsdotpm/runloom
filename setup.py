@@ -210,8 +210,18 @@ def detect_compile_args():
             "-Wextra",
             "-Wno-unused-parameter",
             "-fno-strict-aliasing",
+            # Security hardening (cheap, portable across GCC/Clang on Linux/
+            # macOS/BSD): stack canaries on at-risk frames + flag the classic
+            # format-string vulnerability (printf(user_str)) at compile time.
+            "-fstack-protector-strong",
+            "-Wformat-security",
         ]
         args.append("-O0" if PYGO_DEBUG else "-O2")
+        if not PYGO_DEBUG:
+            # _FORTIFY_SOURCE bounds-checks libc calls (memcpy/strcpy/sprintf/
+            # ...) at runtime; it needs optimization (-O1+) so it is a no-op /
+            # warning under PYGO_DEBUG's -O0.  =2 is the widely-portable level.
+            args.append("-D_FORTIFY_SOURCE=2")
         if PYGO_DEBUG:
             args.append("-g")
         if USE_UCONTEXT:

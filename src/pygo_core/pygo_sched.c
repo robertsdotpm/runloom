@@ -1661,6 +1661,14 @@ Py_ssize_t pygo_sched_drain(pygo_sched_t *s)
             pygo_g_t *g = pygo_ready_pop(s);
             pygo_g_t *prev = s->current;
 
+            /* Defensive (flagged by gcc -fanalyzer): the ready ring can be
+             * empty here even though the loop condition was true -- the loop is
+             * also entered for a non-NULL wake_list_head, and draining it (or a
+             * concurrent cross-thread wake) need not leave a g in the ring.
+             * pygo_ready_pop then returns NULL; re-loop rather than deref it. */
+            if (g == NULL)
+                continue;
+
             /* sched_snap is loop-invariant (taken at drain entry).  We
              * deliberately do NOT snap or load it per-iter: drain runs
              * no Python between iterations, so tstate can stay in g's
