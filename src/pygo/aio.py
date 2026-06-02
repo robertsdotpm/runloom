@@ -2363,8 +2363,28 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
         tls = _MemoryBIOTLS(sock, sslcontext, server_side=server_side,
                        server_hostname=server_hostname)
         tls.do_handshake(ssl_handshake_timeout)
-        return _StreamTransport(tls, protocol, loop=self,
-                                call_connection_made=False)
+        # Transfer the accepting server's registration from the old (now
+        # quiesced) transport to the new TLS one.  The accepted transport sits in
+        # the server's _conns set and its connection_lost would _detach it -- but
+        # we suppressed that connection_lost for the upgrade, so without moving
+        # the registration the old transport lingers in _conns forever (it is
+        # also pinned by its parked io goroutine) and the new transport never
+        # detaches, so server.wait_closed() blocks for good (the scheduler then
+        # drains to empty -> "event loop stopped before Future completed").
+        srv = getattr(transport, "_pg_server", None)
+        if srv is not None:
+            try:
+                srv._conns.discard(transport)
+            except Exception:
+                pass
+        new_tr = _StreamTransport(tls, protocol, loop=self,
+                                  call_connection_made=False, server=srv)
+        if srv is not None:
+            try:
+                srv._conns.add(new_tr)
+            except Exception:
+                pass
+        return new_tr
 
     async def connect_accepted_socket(self, protocol_factory, sock, *, ssl=None,
                                       ssl_handshake_timeout=None, **_ignored):
