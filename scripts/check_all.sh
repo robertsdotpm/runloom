@@ -5,6 +5,7 @@
 #   static      gcc -fanalyzer + cppcheck on the C core           ~1-2 min
 #   tests       Python test suite (pytest tests/)               ~seconds
 #   mn          M:N scheduler fuzzer (tools/mn_stress.py)        ~seconds-min
+#   replay      controlled-M:N deterministic replay probes       ~seconds-min
 #   lincheck    linearizability (Porcupine + stateful select)   ~seconds
 #   dst         deterministic simulation seed sweep             ~seconds
 #   ctest       C deque concurrency stress (tests_c/test_cldeque) ~seconds
@@ -47,9 +48,9 @@ if [ -z "${PYTHON:-}" ]; then
 fi
 
 phases=("$@")
-[ ${#phases[@]} -eq 0 ] && phases=(tests mn lincheck dst ctest)
+[ ${#phases[@]} -eq 0 ] && phases=(tests mn replay lincheck dst ctest)
 if [ "${phases[0]}" = all ]; then
-  phases=(tests mn lincheck dst ctest static sanitizers exttsan verify)
+  phases=(tests mn replay lincheck dst ctest static sanitizers exttsan verify)
 fi
 
 rc=0
@@ -67,6 +68,14 @@ for ph in "${phases[@]}"; do
       # For full fuzzing (which reproduces the contended-select crash,
       # finding A in tools/README.md) run: tools/mn_stress.py --iters N
       "$PYTHON" tools/mn_stress.py --iters "${MN_ITERS:-150}" --stable || rc=1
+      ;;
+    replay)
+      hr "Controlled M:N deterministic replay (PYGO_MN_BARRIER)"
+      # Same seed must reproduce one signature across reps; each probe exits
+      # non-zero if any seed varies.  Guards the five replay levers
+      # (tools/mn_controlled/README.md) against silent regression.
+      "$PYTHON" tools/mn_controlled/repro_probe.py "${REPLAY_SEEDS:-8}" "${REPLAY_REPS:-6}" || rc=1
+      "$PYTHON" tools/mn_controlled/repro_select.py "${REPLAY_SEEDS:-8}" "${REPLAY_REPS:-6}" || rc=1
       ;;
     static)
       hr "Static analysis (gcc -fanalyzer gate + cppcheck advisory)"
