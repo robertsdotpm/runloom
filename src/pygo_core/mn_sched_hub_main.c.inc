@@ -80,6 +80,11 @@ static PYGO_THREAD_RET pygo_hub_main(void *arg)
         __atomic_store_n(&starve_bound, sbound, __ATOMIC_RELAXED);
     }
 
+    /* Controlled-replay startup rendezvous: wait until mn_run has placed all
+     * initial goroutines before this hub starts scheduling, so the first
+     * requester set is complete (no-op unless PYGO_MN_SEED + barrier). */
+    pygo_mn_ctrl_wait_armed();
+
     while (!__atomic_load_n(&h->stopping, __ATOMIC_ACQUIRE)) {
         pygo_g_t *g;
         /* Set when g came from the global run-queue: it then carries a queue
@@ -194,7 +199,7 @@ static PYGO_THREAD_RET pygo_hub_main(void *arg)
         }
         if (g == NULL) {
             int i;
-            for (i = 0; i < pygo_hub_count; i++) {
+            for (i = 0; !pygo_mn_ctrl_no_steal() && i < pygo_hub_count; i++) {
                 if (i == h->id) continue;
                 g = (pygo_g_t *)pygo_cldeque_steal(&pygo_hubs[i].deque);
                 if (g != NULL) {
@@ -219,6 +224,11 @@ static PYGO_THREAD_RET pygo_hub_main(void *arg)
                 PyThreadState *saved;
                 int parked;
                 long long idle_ns;
+                /* No goroutine to run: check in as IDLE for the controlled-
+                 * scheduler census round so the barrier-rendezvous grant isn't
+                 * blocked waiting on a hub that has nothing to request.  No-op
+                 * unless PYGO_MN_SEED + barrier are on. */
+                pygo_mn_ctrl_census_idle(h->id);
                 for (j = 0; j < pygo_hub_count; j++) {
                     total += __atomic_load_n(&pygo_hubs[j].pending,
                                              __ATOMIC_RELAXED);

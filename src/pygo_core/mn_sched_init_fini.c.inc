@@ -323,7 +323,11 @@ Py_ssize_t pygo_mn_run(void)
      * Py_ssize_t -- long long on 64-bit Windows MSVC, long on
      * 64-bit POSIX).  Using plain long would truncate on Windows. */
     Py_ssize_t total_completed = 0;
-    PyThreadState *saved = PyEval_SaveThread();
+    PyThreadState *saved;
+    /* Controlled-replay: all pre-run mn_go placement is done; release the hubs'
+     * startup gate so their first census is over the complete requester set. */
+    pygo_mn_ctrl_arm();
+    saved = PyEval_SaveThread();
     for (;;) {
         /* Read the GLOBAL pending counter, not the per-hub fields.
          * The per-hub fields race during work-stealing (source dec

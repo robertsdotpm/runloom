@@ -3,9 +3,11 @@
 
 Runs a small cross-hub channel workload under the execution baton and shows
 that different seeds explore different cross-hub interleavings while every run
-stays conservation-clean. This is the part that works; see README.md for the
-two open gaps (not-yet-deterministic replay; intermittent deadlock on complex
-select+coordinator workloads).
+stays conservation-clean.  With the barrier-rendezvous on (the default under a
+seed) each seed also REPRODUCES identically run-to-run -- deterministic replay;
+prove it with repro_probe.py.  See README.md for the mechanism and the
+remaining scope (closed CPU+channel/sync workloads; real-I/O timing is the
+open-system limit).
 
 Each subprocess: 3 hubs, several goroutines that recv from a shared channel and
 record their (hub-influenced) order; the producer sends 2*m values then closes.
@@ -68,7 +70,7 @@ def main():
     print("-" * 56)
     print("  {} seeds -> {} distinct cross-hub interleavings".format(n, len(seen)))
     print("  conservation violations: {}".format(lost))
-    print("  (note: this is seeded EXPLORATION, not deterministic replay -- see README)")
+    print("  (seeded exploration; each seed also replays identically -- see repro_probe.py)")
     return 1 if lost else 0
 
 
