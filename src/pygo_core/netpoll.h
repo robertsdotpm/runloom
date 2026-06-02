@@ -91,6 +91,14 @@ void pygo_netpoll_fini(void);
 /* Backend name for diagnostics: "epoll" / "kqueue" / "select". */
 const char *pygo_netpoll_backend(void);
 
+/* Test-only Windows netpoll fault-injection introspection (see netpoll.c).
+ * pygo_fault_count returns how many times the named site ("WSAPOLL"/"SELECT"/
+ * "IOCP_WAIT"/"IOCP_SUBMIT") injected an error (-1 for an unknown name / a
+ * non-Windows build); pygo_fault_reset clears all counters + once-flags.
+ * No-ops on non-Windows. */
+long pygo_fault_count(const char *name);
+void pygo_fault_reset(void);
+
 /* Register an external eventfd so the pump treats EPOLLIN on that fd
  * as a "drain io_uring CQEs" signal.  Only meaningful on the epoll
  * backend (Linux); a no-op elsewhere.  Used by io_uring.c to hook

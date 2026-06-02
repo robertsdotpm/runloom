@@ -1420,6 +1420,24 @@ static PyObject *m_netpoll_backend(PyObject *self, PyObject *unused)
     return PyUnicode_FromString(pygo_netpoll_backend());
 }
 
+/* Test-only: read how many times a Windows netpoll fault-injection site fired
+ * (see netpoll.c).  Returns -1 for an unknown site / non-Windows build. */
+static PyObject *m_fault_count(PyObject *self, PyObject *arg)
+{
+    const char *name;
+    (void)self;
+    name = PyUnicode_AsUTF8(arg);
+    if (name == NULL) return NULL;
+    return PyLong_FromLong(pygo_fault_count(name));
+}
+
+static PyObject *m_fault_reset(PyObject *self, PyObject *unused)
+{
+    (void)self; (void)unused;
+    pygo_fault_reset();
+    Py_RETURN_NONE;
+}
+
 static PyObject *m_netpoll_poll(PyObject *self, PyObject *unused)
 {
     (void)self; (void)unused;
@@ -1859,6 +1877,11 @@ static PyMethodDef module_methods[] = {
      "until fd is ready.  events is a bitmask: 1=read, 2=write."},
     {"netpoll_backend", m_netpoll_backend, METH_NOARGS,
      "Return active netpoll backend name (\"epoll\", \"kqueue\", \"select\")."},
+    {"_fault_count", m_fault_count, METH_O,
+     "_fault_count(site): test-only.  Times the Windows netpoll fault-injection "
+     "site (WSAPOLL/SELECT/IOCP_WAIT/IOCP_SUBMIT) fired; -1 if unknown/non-Win."},
+    {"_fault_reset", m_fault_reset, METH_NOARGS,
+     "_fault_reset(): test-only.  Clear all Windows fault-injection counters."},
     {"netpoll_poll", m_netpoll_poll, METH_NOARGS,
      "netpoll_poll(): non-blocking netpoll drain -- deliver any ready fd "
      "readiness by waking parked goroutines, then return.  Used by pygo.aio "

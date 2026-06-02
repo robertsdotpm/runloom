@@ -1048,6 +1048,92 @@ const char *pygo_netpoll_backend(void)
 #endif
 }
 
+/* ---- Windows netpoll fault injection (test-only) ----------------------- *
+ * There is no strace on Windows, so the netpoll fault-injection campaign gates
+ * IN PROCESS on env vars.  PYGO_FAULT_<SITE> = "<mode>:<wsa_code>", mode in
+ * {once, always}, forces the named Windows poll syscall to report a failure:
+ *   once:CODE   -- inject CODE exactly the first time the site is reached
+ *   always:CODE -- inject CODE every time (persistent error)
+ * Each site counts how many times it fired (read via pygo_core._fault_count)
+ * so a test can prove a PERSISTENT poll error BACKS OFF (bounded count) rather
+ * than busy-spinning (unbounded count).  Inert unless the env var is set, so
+ * the cost on a normal run is one getenv() per pump iteration.  The Linux
+ * campaign gets the same coverage for free from strace's syscall injection;
+ * this is the Windows equivalent. */
+#if defined(PYGO_OS_WINDOWS)
+enum { PYGO_FAULT_WSAPOLL = 0, PYGO_FAULT_SELECT, PYGO_FAULT_IOCP_WAIT,
+       PYGO_FAULT_IOCP_SUBMIT, PYGO_FAULT_NSITES };
+static const char *const pygo_fault_names[PYGO_FAULT_NSITES] = {
+    "WSAPOLL", "SELECT", "IOCP_WAIT", "IOCP_SUBMIT" };
+static const char *const pygo_fault_envs[PYGO_FAULT_NSITES] = {
+    "PYGO_FAULT_WSAPOLL", "PYGO_FAULT_SELECT",
+    "PYGO_FAULT_IOCP_WAIT", "PYGO_FAULT_IOCP_SUBMIT" };
+static volatile LONG pygo_fault_fired[PYGO_FAULT_NSITES];
+static volatile LONG pygo_fault_once_done[PYGO_FAULT_NSITES];
+
+/* Returns the WSA error to inject (nonzero) if this site should fail now. */
+static int pygo_fault_inject(int site)
+{
+    const char *spec = getenv(pygo_fault_envs[site]);
+    int code, once;
+    if (spec == NULL || *spec == '\0') return 0;
+    if (strncmp(spec, "once:", 5) == 0)        { once = 1; code = atoi(spec + 5); }
+    else if (strncmp(spec, "always:", 7) == 0) { once = 0; code = atoi(spec + 7); }
+    else return 0;
+    if (code == 0) return 0;
+    if (once &&
+        InterlockedCompareExchange(&pygo_fault_once_done[site], 1, 0) != 0)
+        return 0;          /* once-mode already fired */
+    InterlockedIncrement(&pygo_fault_fired[site]);
+    return code;
+}
+
+long pygo_fault_count(const char *name)
+{
+    int i;
+    for (i = 0; i < PYGO_FAULT_NSITES; i++)
+        if (strcmp(pygo_fault_names[i], name) == 0)
+            return (long)pygo_fault_fired[i];
+    return -1;
+}
+
+void pygo_fault_reset(void)
+{
+    int i;
+    for (i = 0; i < PYGO_FAULT_NSITES; i++) {
+        pygo_fault_fired[i] = 0;
+        pygo_fault_once_done[i] = 0;
+    }
+}
+
+/* Windows analogue of pygo_netpoll_wait_failed (epoll/kqueue): a hard poll
+ * error returns WITHOUT blocking, so a persistent one (a polled socket closed
+ * under us -> WSAENOTSOCK, a teardown race) would peg a CPU as the idle loop
+ * re-pumps the instant pump() returns.  WSAEINTR is transient (retry, no
+ * backoff); anything else logs once and sleeps 1 ms, degrading a silent CPU
+ * peg into an observable, throttled slow-loop.  Returns 1 (handled). */
+static int pygo_netpoll_win_wait_failed(int wsa_err)
+{
+    static volatile LONG warned;
+    if (wsa_err == WSAEINTR) return 1;
+    if (InterlockedExchange(&warned, 1) == 0) {
+        fprintf(stderr,
+                "[pygo] netpoll pump: Windows poll failed (WSA=%d); backing off "
+                "to avoid a busy-spin -- the polled socket is likely closed "
+                "(teardown race) or invalid\n", wsa_err);
+    }
+    Py_BEGIN_ALLOW_THREADS
+    Sleep(1);
+    Py_END_ALLOW_THREADS
+    return 1;
+}
+#else
+/* Non-Windows: fault injection rides on strace; these exist only so module.c
+ * can expose _fault_count / _fault_reset uniformly. */
+long pygo_fault_count(const char *name) { (void)name; return -1; }
+void pygo_fault_reset(void) { }
+#endif /* PYGO_OS_WINDOWS */
+
 int pygo_netpoll_init(void)
 {
     /* ACQUIRE pairs with the RELEASE store at the end: any thread that
@@ -1913,7 +1999,10 @@ int pygo_netpoll_wait_fd(int fd, int events, long long timeout_ns)
      * completions.  Falls through to the no-op register for the
      * WSAPoll / select paths. */
     if (pygo_win_use_iocp) {
-        if (pygo_iocp_submit(fd, events, timeout_ns) != 0) {
+        /* Fault injection short-circuits the real submit so no AFD IRP is left
+         * in flight on a simulated failure; the parker is cleanly unlinked. */
+        int finj = pygo_fault_inject(PYGO_FAULT_IOCP_SUBMIT);
+        if (finj || pygo_iocp_submit(fd, events, timeout_ns) != 0) {
             pygo_mutex_lock(&pool->lock);
             pygo_parker_unlink(pool, park);
             pygo_mutex_unlock(&pool->lock);
@@ -2384,26 +2473,39 @@ int pygo_netpoll_pump(long long timeout_ns)
          * pump again with a fresh timeout if it needs to wait. */
         long long deadline = timeout_ns;
         int local_woke = 0;
+        int iocp_err = 0;
         while (1) {
             int fd, evs;
             int rc;
             long long step = (local_woke == 0) ? deadline : 0;
-            Py_BEGIN_ALLOW_THREADS
-            rc = pygo_iocp_wait(step, &fd, &evs);
-            Py_END_ALLOW_THREADS
-            if (rc <= 0) break;             /* 0 = timeout, -1 = error */
+            int finj = pygo_fault_inject(PYGO_FAULT_IOCP_WAIT);
+            if (finj) {
+                rc = -1; WSASetLastError(finj);   /* short-circuit GQCS */
+            } else {
+                Py_BEGIN_ALLOW_THREADS
+                rc = pygo_iocp_wait(step, &fd, &evs);
+                Py_END_ALLOW_THREADS
+            }
+            if (rc < 0) { iocp_err = WSAGetLastError(); break; }
+            if (rc == 0) break;             /* timeout: nothing ready */
             local_woke++;
             if (pygo_pump_dispatch_event(fd, evs)) woke++;
         }
+        /* A hard completion-wait error must not busy-spin the idle loop. */
+        if (iocp_err) pygo_netpoll_win_wait_failed(iocp_err);
     } else if (pygo_win_wsapoll != NULL) {
         /* --- WSAPoll path --- */
         WSAPOLLFD fds_stack[128];
         WSAPOLLFD *fds = fds_stack;
         ULONG fds_cap = 128;
         ULONG n_fds = 0;
+        /* Round a positive sub-millisecond timeout UP to 1 ms, never down to
+         * 0: truncating to 0 turns the idle pump into a busy-spin of
+         * WSAPoll(0) for the last fraction of a millisecond before the nearest
+         * deadline (the same trap the epoll path guards against above). */
         int ms = timeout_ns < 0 ? -1 :
                  (timeout_ns > 1000000000LL ? 1000 :
-                  (int)(timeout_ns / 1000000LL));
+                  (int)((timeout_ns + 999999LL) / 1000000LL));
         int rc;
         pygo_parked_t *p;
 
@@ -2430,10 +2532,20 @@ int pygo_netpoll_pump(long long timeout_ns)
             fds[n_fds].revents = 0;
             n_fds++;
         }
+        int win_poll_err = 0;
         if (n_fds > 0) {
-            Py_BEGIN_ALLOW_THREADS
-            rc = pygo_win_wsapoll(fds, n_fds, ms);
-            Py_END_ALLOW_THREADS
+            /* Fault injection SHORT-CIRCUITS the real poll so the error is
+             * returned immediately (as a closed socket would), reproducing the
+             * no-block path that a busy-spin would feed on. */
+            int finj = pygo_fault_inject(PYGO_FAULT_WSAPOLL);
+            if (finj) {
+                rc = SOCKET_ERROR; WSASetLastError(finj);
+            } else {
+                Py_BEGIN_ALLOW_THREADS
+                rc = pygo_win_wsapoll(fds, n_fds, ms);
+                Py_END_ALLOW_THREADS
+            }
+            if (rc < 0) win_poll_err = WSAGetLastError();
             if (rc > 0) {
                 ULONG i;
                 for (i = 0; i < n_fds; i++) {
@@ -2470,6 +2582,9 @@ int pygo_netpoll_pump(long long timeout_ns)
         }
         if (fds != fds_stack) free(fds);
         pygo_mutex_unlock(&pygo_pool.lock);
+        /* Back off OUTSIDE the pool lock: a persistent WSAPoll error (a polled
+         * socket closed under us) must not busy-spin the idle pump. */
+        if (win_poll_err) pygo_netpoll_win_wait_failed(win_poll_err);
     } else {
         /* --- select() fallback (XP / Server 2003 / no WSAPoll) ---
          * Windows select() uses SOCKET handles directly; the first arg
@@ -2493,9 +2608,16 @@ int pygo_netpoll_pump(long long timeout_ns)
             tv.tv_usec = (long)((timeout_ns % 1000000000LL) / 1000LL);
             tvp = &tv;
         }
-        Py_BEGIN_ALLOW_THREADS
-        rc = select(0, &rfds, &wfds, &efds, tvp);
-        Py_END_ALLOW_THREADS
+        int win_poll_err = 0;
+        int finj = pygo_fault_inject(PYGO_FAULT_SELECT);
+        if (finj) {
+            rc = SOCKET_ERROR; WSASetLastError(finj);
+        } else {
+            Py_BEGIN_ALLOW_THREADS
+            rc = select(0, &rfds, &wfds, &efds, tvp);
+            Py_END_ALLOW_THREADS
+        }
+        if (rc < 0) win_poll_err = WSAGetLastError();
         if (rc > 0) {
             pygo_parked_t *p = pygo_pool.head;
             while (p != NULL) {
@@ -2520,6 +2642,8 @@ int pygo_netpoll_pump(long long timeout_ns)
             }
         }
         pygo_mutex_unlock(&pygo_pool.lock);
+        /* Persistent select() error must back off, not busy-spin. */
+        if (win_poll_err) pygo_netpoll_win_wait_failed(win_poll_err);
     }
 post_wait:
     ;
