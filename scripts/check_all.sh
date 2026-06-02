@@ -4,12 +4,15 @@
 # Layers, fastest first:
 #   tests       Python test suite (pytest tests/)               ~seconds
 #   mn          M:N scheduler fuzzer (tools/mn_stress.py)        ~seconds-min
+#   lincheck    linearizability (Porcupine + stateful select)   ~seconds
+#   dst         deterministic simulation seed sweep             ~seconds
 #   ctest       C deque concurrency stress (tests_c/test_cldeque) ~seconds
-#   sanitizers  same harness under ASan/TSan/UBSan               ~seconds-min
+#   sanitizers  C deque harness under ASan/TSan/UBSan            ~seconds-min
+#   exttsan     WHOLE ext under ThreadSanitizer (real runtime)  ~30s-min
 #   verify      formal proofs: Spin models + CBMC on real C      ~3-4 min
 #
 # Usage:
-#   scripts/check_all.sh                 # tests + mn + ctest  (the fast set)
+#   scripts/check_all.sh                 # tests + mn + lincheck + dst + ctest
 #   scripts/check_all.sh all             # everything incl. sanitizers + verify
 #   scripts/check_all.sh verify          # just the formal proofs
 #   scripts/check_all.sh tests ctest     # pick phases
@@ -30,8 +33,10 @@ if [ -z "${PYTHON:-}" ]; then
 fi
 
 phases=("$@")
-[ ${#phases[@]} -eq 0 ] && phases=(tests mn ctest)
-if [ "${phases[0]}" = all ]; then phases=(tests mn ctest sanitizers verify); fi
+[ ${#phases[@]} -eq 0 ] && phases=(tests mn lincheck dst ctest)
+if [ "${phases[0]}" = all ]; then
+  phases=(tests mn lincheck dst ctest sanitizers exttsan verify)
+fi
 
 rc=0
 hr() { printf '\n========== %s ==========\n' "$1"; }
@@ -49,6 +54,18 @@ for ph in "${phases[@]}"; do
       # finding A in tools/README.md) run: tools/mn_stress.py --iters N
       "$PYTHON" tools/mn_stress.py --iters "${MN_ITERS:-150}" --stable || rc=1
       ;;
+    lincheck)
+      hr "Linearizability (Porcupine + stateful select model)"
+      PYTHON="$PYTHON" bash tools/lincheck/check_lin.sh || rc=1
+      ;;
+    dst)
+      hr "Deterministic simulation (seed sweep)"
+      PYTHON_GIL=0 PYTHONPATH=src "$PYTHON" tools/dst/dst.py sweep "${DST_SEEDS:-200}" || rc=1
+      ;;
+    exttsan)
+      hr "Whole-ext ThreadSanitizer (real runtime under TSan)"
+      PYTHON="$PYTHON" tools/run_sanitizers_ext.sh "${MN_ITERS:-150}" || rc=1
+      ;;
     ctest)
       hr "C deque concurrency stress"
       make -C tests_c test_cldeque >/dev/null && \
@@ -63,7 +80,7 @@ for ph in "${phases[@]}"; do
       verify/run_verify.sh || rc=1
       ;;
     *)
-      echo "unknown phase: $ph (want: tests mn ctest sanitizers verify all)"; rc=2 ;;
+      echo "unknown phase: $ph (want: tests mn lincheck dst ctest sanitizers exttsan verify all)"; rc=2 ;;
   esac
 done
 
