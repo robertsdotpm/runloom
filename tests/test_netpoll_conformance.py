@@ -186,6 +186,154 @@ class TestNetpollConformance(unittest.TestCase):
         for a, b in pairs:
             a.close(); b.close()
 
+    # ======================================================================
+    # Additional edge cases drawn from wepoll's + mio's + libuv's poll test
+    # suites -- the corners where the kqueue fd-reuse and iocp AFD-timeout
+    # bugs lived.  Same contract: identical result on every backend.
+    # ======================================================================
+
+    # -- LEVEL readiness persists across a PARTIAL consume (wepoll level vs.
+    #    edge; mio re-register).  Peer sends TWO messages; the reader consumes
+    #    only ONE, then re-parks -- a level-triggered backend (or a correct
+    #    one-shot re-arm) must report the still-buffered data again.  An
+    #    edge-triggered drop (the kqueue bug class) would hang the 2nd park.
+    def test_level_readiness_persists_after_partial_consume(self):
+        a, b = _pair()
+        ready = pygo_core.Chan()
+        out = []
+
+        def reader():
+            r1 = pygo_core.wait_fd(a.fileno(), READ, 2000)
+            a.recv(1)                       # consume only ONE byte of two
+            ready.send(1)
+            r2 = pygo_core.wait_fd(a.fileno(), READ, 2000)
+            a.recv(1)
+            out.append((r1, r2))
+
+        def writer():
+            pygo_core.sched_yield()
+            b.send(b"AB")                   # two bytes; reader takes one at a time
+            ready.recv()                    # reader consumed one + re-parked
+
+        _drive(reader, writer)
+        self.assertEqual(out, [(READ, READ)],
+                         "buffered data not re-reported on re-park (edge drop), "
+                         "backend=%s" % self.backend)
+        a.close(); b.close()
+
+    # -- re-arm in a DIFFERENT direction on the same fd (mio reregister): park
+    #    READ (wake on data), then park WRITE on the same fd -> WRITE.  A
+    #    per-direction one-shot must switch direction on re-arm.
+    def test_reregister_different_direction(self):
+        a, b = _pair()
+        out = []
+
+        def reader():
+            r1 = pygo_core.wait_fd(a.fileno(), READ, 2000)
+            a.recv(16)
+            r2 = pygo_core.wait_fd(a.fileno(), WRITE, 2000)   # now ask WRITE
+            out.append((r1, r2))
+
+        def writer():
+            pygo_core.sched_yield()
+            b.send(b"x")
+
+        _drive(reader, writer)
+        self.assertEqual(out, [(READ, WRITE)],
+                         "direction not switched on re-arm, backend=%s"
+                         % self.backend)
+        a.close(); b.close()
+
+    # -- NO spurious wake on the wrong direction (mio/wepoll): a socket is
+    #    always writable but not readable; a READ-only wait must NOT fire on
+    #    writability -- it wakes only via its deadline (0).  (Inverse of the
+    #    R|W-subset test: proves the backend masks to the REQUESTED direction.)
+    def test_no_spurious_wake_on_unrequested_direction(self):
+        a, b = _pair()                      # a writable, never readable
+        out = []
+        _drive(lambda: out.append(pygo_core.wait_fd(a.fileno(), READ, 250)))
+        self.assertEqual(out, [0],
+                         "READ-only wait fired on writability (wrong direction), "
+                         "backend=%s" % self.backend)
+        a.close(); b.close()
+
+    # -- BOTH directions ready at once (wepoll): request R|W on a socket that
+    #    is both readable (peer wrote) and writable -> report both (3).
+    def test_both_directions_ready(self):
+        a, b = _pair()
+        b.send(b"x")                        # a now readable AND writable
+        out = []
+        _drive(lambda: out.append(
+            pygo_core.wait_fd(a.fileno(), READ | WRITE, 1000)))
+        self.assertEqual(out, [READ | WRITE],
+                         "both-ready not reported as R|W, backend=%s"
+                         % self.backend)
+        a.close(); b.close()
+
+    # -- repeated rapid re-arm on the SAME fd (mio oneshot storm): many
+    #    park->ready->consume cycles must each fire -- a re-arm that leaks or
+    #    drops after the first delivery hangs partway through.
+    def test_repeated_rearm_storm(self):
+        a, b = _pair()
+        ready = pygo_core.Chan()
+        ROUNDS = 50
+        out = []
+
+        def reader():
+            n = 0
+            for _ in range(ROUNDS):
+                if pygo_core.wait_fd(a.fileno(), READ, 2000) == READ:
+                    a.recv(1)
+                    n += 1
+                ready.send(1)
+            out.append(n)
+
+        def writer():
+            for _ in range(ROUNDS):
+                pygo_core.sched_yield()
+                b.send(b"x")
+                ready.recv()                # one cycle done; reader re-parked
+
+        _drive(reader, writer)
+        self.assertEqual(out, [ROUNDS],
+                         "re-arm dropped mid-storm, backend=%s" % self.backend)
+        a.close(); b.close()
+
+    # -- many fds, MIXED directions (libuv multi-poll): half park READ (peer
+    #    writes), half park WRITE (already writable); every one wakes with its
+    #    own correct direction.
+    def test_many_fds_mixed_directions(self):
+        N = 12
+        pairs = [_pair() for _ in range(N)]
+        got = {}
+
+        def make_reader(i, a):
+            def run():
+                got[i] = pygo_core.wait_fd(a.fileno(), READ, 3000)
+            return run
+
+        def make_writer_waiter(i, a):
+            def run():
+                got[i] = pygo_core.wait_fd(a.fileno(), WRITE, 3000)
+            return run
+
+        def feeder():
+            pygo_core.sched_yield()
+            for i, (_a, b) in enumerate(pairs):
+                if i % 2 == 0:
+                    b.send(b"!")            # make the even ones readable
+
+        gs = []
+        for i, (a, _b) in enumerate(pairs):
+            gs.append((make_reader if i % 2 == 0 else make_writer_waiter)(i, a))
+        _drive(*gs, feeder)
+        expect = {i: (READ if i % 2 == 0 else WRITE) for i in range(N)}
+        self.assertEqual(got, expect,
+                         "mixed-direction multi-poll wrong, backend=%s"
+                         % self.backend)
+        for a, b in pairs:
+            a.close(); b.close()
+
 
 if __name__ == "__main__":
     print("netpoll backend under test:", pygo_core.netpoll_backend())
