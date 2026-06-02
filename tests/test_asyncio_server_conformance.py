@@ -15,11 +15,26 @@ this is the standing regression guard.
 import sys
 import unittest
 
+import pytest
+
 sys.path.insert(0, "src")
 
 import pygo.aio as paio
 
-from test.test_asyncio import test_server as _tsrv
+try:
+    from test.test_asyncio import test_server as _tsrv
+    _HAVE_CPYTHON_TESTS = True
+except ImportError:                   # stdlib `test` package not installed
+    _HAVE_CPYTHON_TESTS = False
+
+pytestmark = pytest.mark.skipif(
+    not _HAVE_CPYTHON_TESTS,
+    reason="CPython stdlib `test` package not installed on this interpreter")
+
+if not _HAVE_CPYTHON_TESTS:
+    class _tsrv:                       # noqa: N801 - placeholder; module skipped
+        class BaseStartServer:
+            pass
 
 
 class PygoStartServerConformance(_tsrv.BaseStartServer, unittest.TestCase):

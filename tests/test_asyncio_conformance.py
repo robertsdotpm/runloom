@@ -29,13 +29,33 @@ CONFORMANCE (updated 2026-06-02 after fixing the gaps it surfaced):
 import sys
 import unittest
 
+import pytest
+
 sys.path.insert(0, "src")
 
 import pygo.aio as paio
 
-# CPython's own asyncio test machinery (present on this build).
-from test.test_asyncio import test_sock_lowlevel as _tsl
-from test.test_asyncio import utils as _test_utils
+# CPython's own asyncio test machinery.  Not every interpreter ships the
+# stdlib `test` package (e.g. some manually-installed/embedded Windows builds);
+# skip cleanly there instead of erroring at collection.
+try:
+    from test.test_asyncio import test_sock_lowlevel as _tsl
+    from test.test_asyncio import utils as _test_utils
+    _HAVE_CPYTHON_TESTS = True
+except ImportError:
+    _HAVE_CPYTHON_TESTS = False
+
+pytestmark = pytest.mark.skipif(
+    not _HAVE_CPYTHON_TESTS,
+    reason="CPython stdlib `test` package not installed on this interpreter")
+
+if not _HAVE_CPYTHON_TESTS:
+    class _tsl:                       # noqa: N801 - placeholder so the class
+        class BaseSockTestsMixin:     # body below still parses when test is
+            pass                      # absent (the whole module is skipped)
+    class _test_utils:                # noqa: N801
+        class TestCase:
+            pass
 
 
 # Methods that fail against PygoEventLoop for a *characterised* reason -- each

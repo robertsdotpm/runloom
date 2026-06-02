@@ -257,17 +257,22 @@ class TestNetpollConformance(unittest.TestCase):
                          "backend=%s" % self.backend)
         a.close(); b.close()
 
-    # -- BOTH directions ready at once (wepoll): request R|W on a socket that
-    #    is both readable (peer wrote) and writable -> report both (3).
+    # -- BOTH directions ready at once: request R|W on a socket that is both
+    #    readable (peer wrote) and writable.  A backend that COALESCES readiness
+    #    (epoll / iocp-afd / wsapoll / select) reports both at once (R|W);
+    #    kqueue delivers EVFILT_READ and EVFILT_WRITE as SEPARATE events, so a
+    #    combined wait legitimately returns just one direction (the caller gets
+    #    the other on its next wait).  The universal contract is therefore: a
+    #    non-empty subset of the requested directions, all of which are ready.
     def test_both_directions_ready(self):
         a, b = _pair()
         b.send(b"x")                        # a now readable AND writable
         out = []
         _drive(lambda: out.append(
             pygo_core.wait_fd(a.fileno(), READ | WRITE, 1000)))
-        self.assertEqual(out, [READ | WRITE],
-                         "both-ready not reported as R|W, backend=%s"
-                         % self.backend)
+        self.assertIn(out[0], (READ, WRITE, READ | WRITE),
+                      "both-ready reported nothing/garbage (%r), backend=%s"
+                      % (out, self.backend))
         a.close(); b.close()
 
     # -- repeated rapid re-arm on the SAME fd (mio oneshot storm): many
