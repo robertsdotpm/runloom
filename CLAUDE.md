@@ -68,6 +68,16 @@
   default 512 KB, env `PYGO_AIO_IO_STACK`) — the same reason task drivers use
   `_TASK_STACK`. Do NOT revert these to a bare `pygo_core.go`. The 512 KB is
   virtual + pooled; only the asyncio bridge is affected (M:N paths keep 128 KB).
+- **A timer goroutine must read its callback THROUGH the handle, never via
+  closure capture.** call_at/call_later run a goroutine that `sched_sleep`s to
+  the deadline then fires `handle._callback`. `asyncio.Handle.cancel()` nulls
+  `_callback`/`_args`, so reading through the handle means a CANCELLED timer's
+  still-sleeping goroutine holds no reference to the callback or its graph.
+  Capturing `callback`/`args` in the runner closure instead leaks them (and
+  everything they reach) until the original deadline — broad, since cancelled
+  timers are everywhere (timeout/wait_for, retries, retransmits) and it fails
+  strict gc-leak teardown checks (aiocoap). Regression guard:
+  `pygo_compat/timer_leak.py`.
 
 ## Conventions
 - Use `safe-rm`, never plain `rm`, for any file deletion.
