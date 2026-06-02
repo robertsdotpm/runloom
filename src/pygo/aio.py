@@ -1238,7 +1238,11 @@ class _PygoFutureMixin(object):
         if not self._pglogtb or self._pgexc is None:
             return
         loop = self._loop
-        if loop is None or loop.is_closed():
+        # Read the _closed ATTRIBUTE, not the is_closed() method: asyncio's
+        # internal machinery never invokes the (user-overridable) is_closed()
+        # for its own checks, and janus's test_closed_loop_non_failing asserts
+        # an exact is_closed() call count -- calling the method here inflates it.
+        if loop is None or getattr(loop, "_closed", False):
             return
         try:
             loop.call_exception_handler({
@@ -1286,7 +1290,7 @@ class _PygoFutureMixin(object):
             # PENDING->done path in _fire_callbacks stays synchronous on purpose
             # for pygo's wake timing; only THIS already-done path must defer.)
             loop = self._loop
-            if loop is not None and not loop.is_closed():
+            if loop is not None and not getattr(loop, "_closed", False):
                 try:
                     loop.call_soon(callback, self, context=context)
                 except BaseException as e:
@@ -1331,7 +1335,7 @@ class _PygoFutureMixin(object):
             # library done-callbacks -- stays synchronous, preserving pygo's wake
             # timing.
             host = getattr(cb, "__self__", None)
-            if (loop is not None and not loop.is_closed()
+            if (loop is not None and not getattr(loop, "_closed", False)
                     and isinstance(host, _STOCK_TASK_TYPES)
                     and not isinstance(host, PygoTask)):
                 try:
@@ -1354,7 +1358,7 @@ class _PygoFutureMixin(object):
                     # exited by then) mirrors asyncio's always-call_soon dispatch
                     # rather than dropping the wake and hanging the awaiter.
                     if (ctx is not None and loop is not None
-                            and not loop.is_closed()
+                            and not getattr(loop, "_closed", False)
                             and str(e).startswith("cannot enter context")):
                         try:
                             loop.call_soon(cb, self, context=ctx)
