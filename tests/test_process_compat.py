@@ -254,5 +254,96 @@ class TestPopenWait(unittest.TestCase):
         self.assertTrue(_drive(body))
 
 
+@unittest.skipUnless(hasattr(os, "fork"), "no os.fork")
+class TestPidfdReaping(unittest.TestCase):
+    """The pidfd fast path: os.pidfd_open(pid) yields an fd that becomes
+    readable on child exit, so the wait parks on netpoll instead of busy-
+    polling.  Adapted from CPython Lib/test/test_os.py (test_pidfd_open) and
+    the stop/continue semantics in the kernel's waitid(2)/wait(2) contract --
+    a pidfd only signals *termination*, so WUNTRACED must keep the poll loop.
+    """
+
+    @unittest.skipUnless(pygo.monkey._HAVE_PIDFD, "no os.pidfd_open")
+    def test_pidfd_open_basics(self):
+        def body():
+            pid = os.fork()
+            if pid == 0:
+                time.sleep(10)
+                os._exit(0)
+            # a live child -> a real, pollable fd
+            pfd = pygo.monkey._pidfd_open(pid)
+            ok = pfd is not None and pfd >= 0
+            if pfd is not None:
+                os.close(pfd)
+            # -1 ("any child") and 0 are not single positive pids -> None
+            none_for_any = pygo.monkey._pidfd_open(-1)
+            none_for_zero = pygo.monkey._pidfd_open(0)
+            os.kill(pid, signal.SIGKILL)
+            os.waitpid(pid, 0)
+            return ok, none_for_any, none_for_zero
+        ok, none_any, none_zero = _drive(body)
+        self.assertTrue(ok)
+        self.assertIsNone(none_any)
+        self.assertIsNone(none_zero)
+
+    def test_pidfd_wait_yields_to_sibling(self):
+        """os.waitpid(pid, 0) on a child that exits after a delay must let a
+        sibling goroutine make progress -- i.e. it parks, never spins."""
+        def body():
+            pid = os.fork()
+            if pid == 0:
+                time.sleep(0.05)
+                os._exit(7)
+            ticks = []
+            _sibling_counter(ticks, n=6)
+            wpid, status = os.waitpid(pid, 0)
+            return wpid == pid, os.WEXITSTATUS(status), len(ticks)
+        ok, code, ticks = _drive(body)
+        self.assertTrue(ok)
+        self.assertEqual(code, 7)
+        self.assertGreaterEqual(ticks, 1)
+
+    def test_sequential_waits_no_fd_leak(self):
+        """Reaping several children in a row must not leak the pidfd or wedge
+        the netpoll registration (each open/close is balanced)."""
+        def body():
+            codes = []
+            for i in range(5):
+                pid = os.fork()
+                if pid == 0:
+                    time.sleep(0.01)
+                    os._exit(i)
+                _wpid, status = os.waitpid(pid, 0)
+                codes.append(os.WEXITSTATUS(status))
+            return codes
+        self.assertEqual(_drive(body), [0, 1, 2, 3, 4])
+
+    @unittest.skipUnless(hasattr(os, "WUNTRACED"), "no WUNTRACED")
+    def test_wuntraced_reports_stop_via_pollpath(self):
+        """A stopped (not terminated) child is reported by waitpid(WUNTRACED).
+        pidfd can't see stop events, so this must fall back to the poll loop
+        and still observe the SIGSTOP -- validating the _PIDFD_INCOMPATIBLE
+        gate."""
+        def body():
+            pid = os.fork()
+            if pid == 0:
+                time.sleep(10)
+                os._exit(0)
+            time.sleep(0.02)
+            os.kill(pid, signal.SIGSTOP)
+            wpid, status = os.waitpid(pid, os.WUNTRACED)
+            stopped = os.WIFSTOPPED(status)
+            stopsig = os.WSTOPSIG(status) if stopped else None
+            # clean up: continue then kill then reap
+            os.kill(pid, signal.SIGCONT)
+            os.kill(pid, signal.SIGKILL)
+            os.waitpid(pid, 0)
+            return wpid == pid, stopped, stopsig
+        ok, stopped, stopsig = _drive(body)
+        self.assertTrue(ok)
+        self.assertTrue(stopped)
+        self.assertEqual(stopsig, signal.SIGSTOP)
+
+
 if __name__ == "__main__":
     unittest.main()
