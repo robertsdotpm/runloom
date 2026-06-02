@@ -50,7 +50,13 @@
   run_in_executor blockpool worker / iouring CQE, that has no usable heap).
   Regression guard: `pygo_compat/call_soon_fifo.py`.
 
-## aio bridge invariants (src/pygo/aio.py)
+## aio bridge invariants (src/pygo/aio/)
+- `pygo.aio` is a package (`src/pygo/aio/`): the shared foundation is
+  `_base.py` (`_go_io`, `_wait_fd`, `_CURRENT_TASKS`, the lazy CoLock); the
+  event loop is composed from the `loop_*.py` mixins into `loop.py`; futures /
+  tasks / streams / tls_* / transport_* split out by role. `from ._base import
+  *` is the foundation import. Internals stay reachable as `pygo.aio.<name>`
+  via a PEP 562 `__getattr__` in `__init__.py`.
 - **Goroutines that synchronously run user protocol callbacks need a roomy
   stack.** `data_received` / `pipe_data_received` / `connection_made` /
   `datagram_received` (and anything dispatched through `call_soon` / `call_at` /
