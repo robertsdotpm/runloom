@@ -2026,12 +2026,34 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
             # would let it return idle) and re-checks the cross-thread wake list
             # each wake.  2ms bounds foreign-wake latency; cheap for a test run.
             # `stop` is this run's private box -- a later run can't revive us.
-            while not stop[0] and not self._closed and not self._stopping:
+            try:
+                while not stop[0] and not self._closed and not self._stopping:
+                    self._drain_ts_queue()
+                    pygo_core.sched_sleep(0.002)
+                # Drain once more so a stop()-companion callback (e.g. the
+                # task.cancel() loop aiosmtpd queues alongside loop.stop()) runs.
                 self._drain_ts_queue()
-                pygo_core.sched_sleep(0.002)
-            # Drain once more so a stop()-companion callback (e.g. the
-            # task.cancel() loop aiosmtpd queues alongside loop.stop()) runs.
-            self._drain_ts_queue()
+            except BaseException as e:
+                # An async signal handler fired in THIS goroutine's eval loop:
+                # SIGINT's default handler raises KeyboardInterrupt (Ctrl-C),
+                # sys.exit raises SystemExit, and a custom handler (e.g.
+                # pytest-timeout's SIGALRM) may raise anything.  The keepalive
+                # runs Python every ~2ms while the loop is otherwise idle, so
+                # it's the goroutine that most often catches a signal during a
+                # parked run_forever() -- the only Python making progress.
+                # CPython delivers the pending handler at a bytecode boundary on
+                # the main thread regardless of which goroutine is current; if
+                # we just let the keepalive die, an idle loop with any still-
+                # parked task would hang forever (the signal never reaches
+                # run_forever).  _drain_ts_queue() already swallows ordinary
+                # callback exceptions (routing them to the exception handler),
+                # so the ONLY thing that reaches here is an async signal-handler
+                # raise (or a fatal internal error) -- either way break the
+                # drive and re-raise it OUT of run_forever()/run_until_complete,
+                # exactly as stock asyncio propagates a signal handler's
+                # exception out of the loop.
+                self._pg_signal_fatal(e)
+                return
             if self._stopping:
                 # An explicit loop.stop() must unwind run_forever()'s (or a
                 # run_until_complete's) pygo_core.run().  sched_stop() acts on
@@ -2822,27 +2844,39 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
         self._signal_wakeup_setup = True
 
     def _read_signal_wakeup(self):
+        # This runs in the per-fd I/O goroutine that watches the signal
+        # self-pipe.  set_wakeup_fd writes EVERY caught signum to the pipe, so
+        # this goroutine wakes and runs Python on the loop thread whenever any
+        # signal fires -- which means CPython delivers a pending Python signal
+        # handler (e.g. pytest-timeout's SIGALRM raising, or a user SIGUSR1
+        # handler) at a bytecode boundary INSIDE this body.  Everything below is
+        # exception-safe on its own (recv errors handled; call_soon guarded), so
+        # any BaseException reaching the outer handler is an async signal-handler
+        # raise -> route it out of run_forever() via the fatal path, exactly as
+        # the keepalive does (otherwise this goroutine swallows it and an idle
+        # loop hangs -- the reason aiosmtpd's main() under pytest-timeout hung).
         try:
-            data = self._signal_rsock.recv(4096)
-        except (BlockingIOError, InterruptedError):
-            return
-        except OSError:
-            return
-        if not data:
-            return
-        handlers = getattr(self, "_signal_handlers", None)
-        if not handlers:
-            return
-        for signum in data:
-            handle = handlers.get(signum)
-            if handle is not None and not handle._cancelled:
-                # Run the user callback on the loop in the Handle's captured
-                # context (matches asyncio's _handle_signal -> _add_callback).
-                try:
-                    self.call_soon(handle._callback, *handle._args,
-                                   context=handle._context)
-                except RuntimeError:
-                    pass
+            try:
+                data = self._signal_rsock.recv(4096)
+            except (BlockingIOError, InterruptedError, OSError):
+                return
+            if not data:
+                return
+            handlers = getattr(self, "_signal_handlers", None)
+            if not handlers:
+                return
+            for signum in data:
+                handle = handlers.get(signum)
+                if handle is not None and not handle._cancelled:
+                    # Run the user callback on the loop in the Handle's captured
+                    # context (matches asyncio's _handle_signal -> _add_callback).
+                    try:
+                        self.call_soon(handle._callback, *handle._args,
+                                       context=handle._context)
+                    except RuntimeError:
+                        pass
+        except BaseException as e:
+            self._pg_signal_fatal(e)
 
     def remove_signal_handler(self, sig):
         import signal as _signal

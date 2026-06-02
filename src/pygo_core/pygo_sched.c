@@ -1548,6 +1548,12 @@ Py_ssize_t pygo_sched_drain(pygo_sched_t *s)
 {
     Py_ssize_t completed_before = s->completed;
     pygo_pystate_snap_t sched_snap;
+    /* An async Python signal handler (Ctrl-C etc.) that RAISED while we were
+     * idle: carry it across the exit-path sched_snap load (which restores
+     * current_exception from the snap and would otherwise clobber it), then
+     * PyErr_Restore it so it propagates out of m_run -> run_forever. */
+    int sig_break = 0;
+    PyObject *sig_t = NULL, *sig_v = NULL, *sig_b = NULL;
 
     s->stopping = 0;
     pygo_pystate_snap(&sched_snap);
@@ -1613,6 +1619,25 @@ Py_ssize_t pygo_sched_drain(pygo_sched_t *s)
                  * unstick us quickly. */
                 if (timeout_ns > 50000000LL) timeout_ns = 50000000LL;
                 pygo_sleep_ns(timeout_ns);
+            }
+            /* We just blocked on I/O/timers with NO Python on this thread's
+             * stack.  An async signal (Ctrl-C -> SIGINT) that fired during the
+             * block left a pending Python handler but only EINTR'd the syscall
+             * -- CPython's eval breaker runs handlers only inside a goroutine's
+             * eval loop, so without this the loop would re-block forever.  Run
+             * pending handlers NOW, in the scheduler's tstate, BEFORE looping
+             * back to resume any woken goroutine: the scheduler must WIN the
+             * race to catch the signal (whichever goroutine's eval loop catches
+             * it first would just swallow it -> hang).  A raised exception
+             * (KeyboardInterrupt / a custom handler's) then propagates out of
+             * run_forever().  PyErr_CheckSignals is a cheap no-op when nothing
+             * is tripped, and a no-op off the main thread (correct: signals run
+             * only there).  This idle path is not the hot path. */
+            pygo_pystate_load(&sched_snap);
+            if (PyErr_CheckSignals() < 0) {
+                PyErr_Fetch(&sig_t, &sig_v, &sig_b);
+                sig_break = 1;
+                break;
             }
             continue;
         }
@@ -1747,6 +1772,12 @@ Py_ssize_t pygo_sched_drain(pygo_sched_t *s)
     }
     /* Restore drain's tstate before returning to Python. */
     pygo_pystate_load(&sched_snap);
+    /* A signal handler raised (Ctrl-C): re-arm the exception on the now-restored
+     * scheduler tstate so m_run returns NULL and it propagates out of the
+     * run_forever()/run_until_complete() drive, as on stock asyncio. */
+    if (sig_break) {
+        PyErr_Restore(sig_t, sig_v, sig_b);
+    }
     return s->completed - completed_before;
 }
 

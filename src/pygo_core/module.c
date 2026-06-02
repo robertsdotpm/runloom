@@ -1412,6 +1412,12 @@ static PyObject *m_run(PyObject *self, PyObject *unused)
     Py_ssize_t completed;
     (void)self; (void)unused;
     completed = pygo_sched_drain(pygo_sched_get());
+    /* drain may have run a pending Python signal handler that RAISED
+     * (Ctrl-C -> KeyboardInterrupt); surface it instead of a result so it
+     * aborts run_forever()/run_until_complete like stock asyncio. */
+    if (PyErr_Occurred()) {
+        return NULL;
+    }
     return PyLong_FromSsize_t(completed);
 }
 
