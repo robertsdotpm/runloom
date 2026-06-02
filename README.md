@@ -161,12 +161,22 @@ scheduling is unchanged.
 - **netpoll** -- epoll / kqueue / IOCP / WSAPoll / select; goroutines park
   transparently on fd readiness. Lost-wake-free 3-state park-commit on all
   backends.
-- **Socket monkey-patch** -- drop-in cooperative `socket`, `time`, `ssl`.
-- **`pygo.aio`** -- run existing `async`/`await` code on the scheduler.
+- **Stdlib monkey-patch** -- `pygo.monkey.patch()` makes blocking stdlib
+  cooperative across ~20 categories: `socket`/`ssl` (incl. `sendfile` + fd
+  passing), files & `os` I/O, `select`/`selectors`, `subprocess` + child reaping
+  (pidfd on Linux), `threading`/`queue`/`concurrent.futures`, `multiprocessing`,
+  `fcntl` locks, `signal` waits, async DNS, and **size-gated auto-offload of
+  CPU-bound C calls** (`hashlib`, `zlib`/`gzip`/`bz2`/`lzma`, KDFs). Run
+  `requests`, `pymysql`, plain `urllib` unchanged.
+- **`pygo.aio`** -- run existing `async`/`await` code on the scheduler;
+  high-fidelity enough to run **aiohttp, uvicorn, starlette, hypercorn,
+  websockets and anyio** unchanged (streams, transports, UDP, SSL client+server,
+  `run_in_executor`).
 - **Go-style channels** -- `Chan(capacity)`, `select`, `for v in ch`; unbuffered
   ping-pong ~560 ns/round-trip (within 7% of Go 1.22 on the same box).
-- **`pygo.blocking(fn, …)`** -- offload a genuinely-blocking call to a worker
-  pool so it never wedges a hub in the first place.
+- **`pygo.blocking(fn, …)` / `pygo.monkey.offload(fn, …)`** -- offload a
+  genuinely-blocking or CPU-bound call to a worker pool so it never wedges a hub
+  (runs inline when not on a goroutine).
 
 ## Correctness, verification & security
 
@@ -218,10 +228,13 @@ Read this before betting on pygo -- it's where the project actually is.
 - **Higher memory per goroutine than Go** (~26 KB with a Python handler vs Go's
   ~2.5–13 KB) -- the CPython object tax, only avoidable by dropping to C handlers.
 - **Preemption only fires at Python bytecode boundaries.** A goroutine inside a
-  long C call (`numpy`, `hashlib`) or a tight pure-C loop is **not** preemptible
-  and holds its hub until it returns -- the same limitation Go has with cgo.
-  (Blocking-IO is covered by the rescue handoff; pure-Python CPU by preemption;
-  tight C loops are the remaining gap.)
+  tight pure-C call or third-party C extension (e.g. `numpy`) is **not**
+  preemptible and holds its hub until it returns -- the same limitation Go has
+  with cgo. The monkey layer's `heavy` category auto-offloads the common stdlib
+  offenders (`hashlib`, `zlib`/`gzip`/`bz2`/`lzma`, KDFs) above a size gate, and
+  `pygo.blocking(fn)` / `pygo.monkey.offload(fn)` are the manual escape hatch;
+  the residual gap is a long non-stdlib C call you don't offload. (Blocking-IO
+  is covered by the rescue handoff, pure-Python CPU by preemption.)
 - **Linux x86_64 / 3.13t is the primary, heavily-validated target.**
   macOS/BSD/Windows and aarch64 backends are code-complete and maintained
   in-step, but the deep validation (2 M-conn runs, fuzzing, sanitizers) is on
