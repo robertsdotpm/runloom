@@ -565,7 +565,18 @@ class _MemoryBIOTLS(object):
     def _feed_in_nb(self):
         # Read encrypted bytes from the raw socket NON-BLOCKING into the incoming
         # BIO.  True = bytes fed; raises BlockingIOError if the socket is dry;
-        # False = peer EOF (write_eof the BIO so SSLObject surfaces it).
+        # False = peer EOF.
+        #
+        # DELIBERATELY does NOT self._inc.write_eof() on EOF: write_eof'ing the
+        # incoming BIO poisons the SSLObject's WRITE side too -- a subsequent
+        # self._obj.write() then raises SSLEOFError ("EOF in violation of
+        # protocol").  That breaks a TLS half-close where the peer sent a bare
+        # FIN (socket.shutdown(SHUT_WR), no close_notify) but is still READING
+        # our queued trailing data (test_remote_shutdown_receives_trailing_data's
+        # eof_server): we must keep draining 4MB through _obj.write() AFTER our
+        # read side EOF'd.  asyncio's SSLProtocol never write_eof's its incoming
+        # BIO either; it surfaces read-EOF via its state machine.  We do the
+        # same with the _eof_in flag, which recv_nb turns into a b'' return.
         if self._eof_in:
             return False
         try:
@@ -574,11 +585,9 @@ class _MemoryBIOTLS(object):
             raise BlockingIOError()
         except OSError:
             self._eof_in = True
-            self._inc.write_eof()
             return False
         if not enc:
             self._eof_in = True
-            self._inc.write_eof()
             return False
         self._inc.write(enc)
         return True
@@ -673,9 +682,14 @@ class _MemoryBIOTLS(object):
             if want_read:
                 fed = self._feed_in_nb()       # raises BlockingIOError if dry
                 if not fed:
-                    # peer EOF written into the BIO; loop so read() surfaces
-                    # SSLZeroReturnError (clean) or SSLEOFError (abrupt) -> b''.
-                    continue
+                    # Peer EOF.  A clean close_notify arrives as DATA (an alert
+                    # record), so read() already raised SSLZeroReturnError above
+                    # -- reaching here means a BARE FIN with no close_notify and
+                    # no buffered record.  _feed_in_nb does NOT write_eof the BIO
+                    # (that would poison a concurrent _obj.write() draining our
+                    # trailing data), so read() would just keep wanting-read;
+                    # surface the EOF directly as b''.
+                    return b""
             # want_write path: we pumped; loop to retry the read.
 
     def recv(self, n):
@@ -3589,7 +3603,17 @@ class _StreamTransport(asyncio.Transport):
             keep = False
         if not keep:
             self.close()
-            return False
+            # A TLS half-close: the peer sent close_notify (our read side is now
+            # EOF) but we may still owe it queued output -- the classic
+            # remote-shutdown-with-trailing-data case
+            # (test_remote_shutdown_receives_trailing_data, where the peer reads
+            # 4MB AFTER sending close_notify).  close() deferred teardown to
+            # flush that backlog (_close_when_drained); KEEP this io goroutine
+            # alive to drain it -- _closed now masks READ off so we only pump
+            # WRITE, and _drain_step fires the teardown (and our close_notify)
+            # once empty.  With nothing queued, close() tore down already ->
+            # stop the goroutine.
+            return self._close_when_drained
         self._read_eof = True   # mask drops READ; loop stays for writes
         return True
 
