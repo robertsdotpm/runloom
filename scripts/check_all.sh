@@ -25,6 +25,15 @@ set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
+# Skip pytest's third-party plugin autoload for every phase that shells into
+# pytest.  ~20 unrelated plugins are installed in this env and pytest imports
+# all of them per process (~4s/file of pure overhead), and one pulls _brotli
+# which re-enables the GIL -- wrong for the free-threaded target.  The suite
+# uses none of them.  Opt back in with PYGO_TEST_PYTEST_PLUGINS=1.
+if [ "${PYGO_TEST_PYTEST_PLUGINS:-}" != "1" ]; then
+    export PYTEST_DISABLE_PLUGIN_AUTOLOAD=1
+fi
+
 # Prefer a free-threaded build -- that's where the M:N scheduler is real.
 if [ -z "${PYTHON:-}" ]; then
     for cand in "$HOME/.pyenv/versions/3.13.13t/bin/python3" python3.13t python3; do

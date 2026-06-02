@@ -46,6 +46,39 @@ SLOW_FILES = {
     "test_workloads.py": 600,
 }
 
+# Files that assert tight wall-clock UPPER bounds to *prove* cooperative
+# overlap (e.g. "two 50ms waits finish in <90ms").  Those bounds are real
+# correctness checks but they flake if the scheduler thread is starved of a
+# CPU, so these run in a dedicated serial lane -- never overlapping each other
+# or the parallel pool -- regardless of -j.  (Identified by grepping for
+# assertLess on an elapsed/wall delta, plus the join-timing test that TSan
+# slowdown tripped.)  Everything else is embarrassingly parallel: each file
+# already gets its own interpreter + scheduler + ephemeral ports.
+SERIAL_FILES = frozenset({
+    "test_blocking.py",
+    "test_aio.py",
+    "test_context.py",
+    "test_monkey.py",
+    "test_time.py",
+    "test_sched_fairness.py",
+    "test_selectors_compat.py",
+    "test_scheduler_channel_compat.py",
+    "test_threading_compat.py",
+    "test_process_compat.py",
+})
+
+# Default parallel workers for the non-timing files.  Capped well under the
+# core count so the timing lane (and each pooled file's own threads) never
+# oversubscribe.  Override with -jN / --jobs N or PYGO_TEST_JOBS.
+def _default_jobs():
+    try:
+        env = os.environ.get("PYGO_TEST_JOBS")
+        if env:
+            return max(1, int(env))
+        return max(1, min(8, (os.cpu_count() or 4)))
+    except ValueError:
+        return 4
+
 
 def discover():
     out = []
@@ -61,6 +94,14 @@ def run_file(name, pytest_args):
     env = dict(os.environ)
     env["PYTHON_GIL"] = "0"
     env["PYGO_GIL"] = "0"
+    # Skip pytest's third-party plugin autoload.  ~20 unrelated plugins
+    # (codspeed/sanic/aiohttp/faker/hypothesis/...) are installed here and
+    # pytest imports every one of them per process -- ~4s of pure overhead per
+    # file, and one of them pulls _brotli which RE-ENABLES the GIL (wrong for
+    # the free-threaded target).  The suite uses none of them.  Opt back in
+    # with PYGO_TEST_PYTEST_PLUGINS=1 if a test ever needs one.
+    if os.environ.get("PYGO_TEST_PYTEST_PLUGINS") != "1":
+        env["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"
     # Keep the in-tree .so importable regardless of how the runner was invoked.
     src = os.path.join(REPO, "src")
     env["PYTHONPATH"] = src + os.pathsep + env.get("PYTHONPATH", "")
@@ -91,11 +132,32 @@ def classify(rc):
     return "FAIL"
 
 
+def _summary_line(out):
+    for line in reversed(out.splitlines()):
+        ls = line.strip()
+        if ls and ("passed" in ls or "failed" in ls or "error" in ls
+                   or "no tests ran" in ls or "TIMED OUT" in ls):
+            return ls.strip("= ")
+    return ""
+
+
 def main(argv):
-    # Split argv into (file names that exist in tests/) and (pytest pass-through).
+    import threading
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    # Split argv into (file names that exist in tests/), -j/--jobs, and
+    # pytest pass-through.
     files, passthru = [], []
     known = set(discover())
-    for a in argv:
+    jobs = _default_jobs()
+    it = iter(argv)
+    for a in it:
+        if a in ("-j", "--jobs"):
+            jobs = max(1, int(next(it)))
+            continue
+        if a.startswith("-j") and a[2:].isdigit():
+            jobs = max(1, int(a[2:]))
+            continue
         base = os.path.basename(a)
         if base in known:
             files.append(base)
@@ -104,29 +166,43 @@ def main(argv):
     if not files:
         files = discover()
 
-    print("== pygo isolated suite: {0} file(s), {1} ==".format(
-        len(files), sys.executable))
+    parallel = [f for f in files if f not in SERIAL_FILES]
+    serial   = [f for f in files if f in SERIAL_FILES]
+    jobs = min(jobs, len(parallel)) or 1
+
+    print("== pygo isolated suite: {0} file(s), j={1} parallel + {2} serial, "
+          "{3} ==".format(len(files), jobs, len(serial), sys.executable))
+
     results = []
-    for name in files:
-        sys.stdout.write("  {0:<28} ".format(name))
-        sys.stdout.flush()
-        rc, out, dt = run_file(name, passthru)
+    print_lock = threading.Lock()
+
+    def record(name, rc, out, dt):
         verdict = classify(rc)
-        results.append((name, verdict, rc, out, dt))
-        # Pull pytest's own summary tail line for a one-liner.
-        summary = ""
-        for line in reversed(out.splitlines()):
-            ls = line.strip()
-            if ls and ("passed" in ls or "failed" in ls or "error" in ls
-                       or "no tests ran" in ls or "TIMED OUT" in ls):
-                summary = ls.strip("= ")
-                break
-        print("{0:<12} {1:6.1f}s  {2}".format(verdict, dt, summary))
-        # Surface conftest leak reports even when the file passed (report
-        # mode does not fail the test, so the tail-on-failure path misses them).
-        for line in out.splitlines():
-            if "[pygo-leak]" in line:
-                print("      {0}".format(line.strip()))
+        with print_lock:
+            results.append((name, verdict, rc, out, dt))
+            print("  {0:<28} {1:<12} {2:6.1f}s  {3}".format(
+                name, verdict, dt, _summary_line(out)))
+            # Surface conftest leak reports even when the file passed (report
+            # mode does not fail, so the tail-on-failure path misses them).
+            for line in out.splitlines():
+                if "[pygo-leak]" in line:
+                    print("      {0}".format(line.strip()))
+            sys.stdout.flush()
+
+    # Phase 1: the embarrassingly-parallel bulk.
+    if parallel:
+        with ThreadPoolExecutor(max_workers=jobs) as pool:
+            futs = {pool.submit(run_file, n, passthru): n for n in parallel}
+            for fut in as_completed(futs):
+                name = futs[fut]
+                rc, out, dt = fut.result()
+                record(name, rc, out, dt)
+
+    # Phase 2: timing-sensitive files, strictly one at a time so the
+    # scheduler thread is never starved of a CPU.
+    for name in serial:
+        rc, out, dt = run_file(name, passthru)
+        record(name, rc, out, dt)
 
     bad = [r for r in results if r[1] != "PASS"]
     print("-" * 60)
