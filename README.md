@@ -1,5 +1,7 @@
 # pygo
 
+> **Disclaimer:** all code written by Claude Opus 4.8.
+
 Go-style stackful coroutines for Python. Write **blocking** code -- `go(fn)`,
 plain `recv`/`send`, no `async`/`await` -- and run a million of them across
 every core in one process. Hand-rolled asm context switch + C work-stealing
