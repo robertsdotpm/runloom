@@ -72,3 +72,40 @@ fails only if a workload crashes, never on a number.
 
 Add one: write a `() -> (ops, seconds)` function and register it in
 `WORKLOADS`. The harness handles everything else.
+
+## Scalability — Universal Scalability Law (`usl.py`)
+
+`rigor.py` measures *one* configuration well; `usl.py` measures the *shape* of
+M:N scaling and explains it. It runs a cooperatively-preemptible pure-Python
+CPU workload across `1,2,4,…,cpu_count` hubs and fits Gunther's USL:
+
+```
+C(p) = p / (1 + alpha·(p-1) + beta·p·(p-1))
+  alpha = contention (serialization → a throughput ceiling)
+  beta  = coherence  (pairwise crosstalk → a throughput PEAK, then decline)
+  p*    = sqrt((1-alpha)/beta)   the optimal hub count
+```
+
+```sh
+PYTHON_GIL=0 ~/.pyenv/versions/3.13.13t/bin/python3 tools/bench/usl.py
+```
+
+Example (64-core, GIL off): `alpha≈0.028, beta≈0.0002`, predicted peak ≈72
+hubs — i.e. pygo scales cleanly across all cores, mildly coherence-bound, with
+contention the dominant limiter past ~16 hubs. The workload is deliberately
+pure-Python (not hashlib) so it stays preemptible and avoids the auto-offload
+path; that keeps the curve about scheduler+interpreter scaling, not codec C.
+
+## Profiling (causal / off-CPU / native-split)
+
+`profile/` holds skip-if-absent wrappers for research-grade profilers that
+answer questions throughput numbers can't:
+
+| wrapper | tool | question it answers |
+|---------|------|---------------------|
+| `coz_profile.sh` | Coz (SOSP'15) | *which* code, if sped up, speeds up the **whole** program (virtual speedup — uniquely right for a scheduler) |
+| `offcpu.sh` | bpftrace/perf | where goroutines **block** and how long park→wake takes (off-CPU, the scheduler's real cost) |
+| `scalene_profile.sh` | Scalene (OSDI'23) | how much time/memory is **native (C ext) vs Python** |
+
+Each prints install instructions and exits 0 if its tool isn't present, so it
+never breaks a run on a machine that lacks it.
