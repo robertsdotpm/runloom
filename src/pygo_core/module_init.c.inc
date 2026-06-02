@@ -187,11 +187,91 @@ static struct PyModuleDef pygo_core_module = {
 #  define PYGO_FT_OK 1
 #endif
 
+/* --------------------------------------------------------------------------
+ * Goroutine-safe module attribute lookup.
+ *
+ * CPython 3.13's module getattr, on a *missing* attribute, calls
+ * _PyModule_IsPossiblyShadowing to append a "did you shadow a stdlib module?"
+ * hint to the AttributeError.  That helper reserves ~32 KB of C stack (two
+ * wchar_t[MAXPATHLEN] path buffers) -- more than a whole default goroutine
+ * stack -- so an ordinary attribute miss (hasattr(mod, x) == False, a
+ * namespace __getattr__ proxy, ...) inside a goroutine overflows the stack and
+ * crashes (the only thing the hint adds is a nicer error string).
+ *
+ * Replace PyModule_Type's getattr slot with a thin wrapper: do the normal
+ * lookup (every hit, plus a proper AttributeError on miss), honour a
+ * module-level __getattr__, and then -- only when running on a goroutine's
+ * small swapped stack -- raise that AttributeError directly, skipping the
+ * 32 KB hint.  Off-goroutine we defer to the stock implementation, so the hint
+ * and every other behaviour are byte-for-byte preserved on the main thread.
+ * -------------------------------------------------------------------------- */
+static getattrofunc pygo_orig_module_getattro = NULL;
+static PyObject    *pygo_str_dunder_getattr   = NULL;   /* interned "__getattr__" */
+
+static int pygo_running_in_goroutine(void)
+{
+    /* Both are non-allocating thread-local peeks (never pygo_sched_get). */
+    if (pygo_mn_tls_current_g() != NULL) return 1;       /* M:N hub path        */
+    return pygo_sched_peek_current() != NULL;            /* single-thread path  */
+}
+
+static PyObject *pygo_module_getattro(PyObject *m, PyObject *name)
+{
+    PyObject *res = PyObject_GenericGetAttr(m, name);
+    if (res != NULL) return res;                         /* hit -- common case  */
+    if (!PyErr_ExceptionMatches(PyExc_AttributeError)) return NULL;
+
+    /* Miss: keep GenericGetAttr's AttributeError (correct .name/.obj) and look
+     * for a module-level __getattr__ (PEP 562), honoured in both domains. */
+    PyObject *exc = PyErr_GetRaisedException();          /* clears current exc  */
+    PyObject *mdict = PyModule_GetDict(m);               /* borrowed; non-NULL for a module */
+    PyObject *getattr = NULL;
+    if (mdict != NULL && pygo_str_dunder_getattr != NULL) {
+        if (PyDict_GetItemRef(mdict, pygo_str_dunder_getattr, &getattr) < 0) {
+            Py_DECREF(exc);
+            return NULL;                                 /* lookup error        */
+        }
+    }
+    if (getattr != NULL) {
+        Py_DECREF(exc);
+        PyObject *r = PyObject_CallOneArg(getattr, name);
+        Py_DECREF(getattr);
+        return r;
+    }
+    if (pygo_running_in_goroutine()) {
+        PyErr_SetRaisedException(exc);                   /* plain AttributeError */
+        return NULL;                                     /* ...no 32 KB hint    */
+    }
+    Py_DECREF(exc);
+    return pygo_orig_module_getattro(m, name);           /* stock hint off-g    */
+}
+
+static void pygo_install_module_getattro(void)
+{
+    if (pygo_orig_module_getattro != NULL) return;       /* idempotent          */
+    pygo_str_dunder_getattr = PyUnicode_InternFromString("__getattr__");
+    if (pygo_str_dunder_getattr == NULL) { PyErr_Clear(); return; }
+    pygo_orig_module_getattro = PyModule_Type.tp_getattro;
+    PyModule_Type.tp_getattro = pygo_module_getattro;
+    /* This covers every direct module attribute lookup -- getattr(mod, x),
+     * hasattr(mod, x), mod.x -- which is how the overflow is reached in
+     * practice (feature-detection misses on user/cwd modules).  It does NOT
+     * cover a ModuleType *subclass* that defines its own __getattr__: that
+     * gets tp_getattro = slot_tp_getattr_hook, which reaches the stock module
+     * getattr through the __getattribute__ wrapper descriptor, bypassing this
+     * slot.  Repointing that descriptor was tried and crashes PyInit, so the
+     * subclass-__getattr__ pattern is left alone -- use the equivalent
+     * module-level __getattr__ *function* (PEP 562) instead, which is both the
+     * common idiom and inherently safe (the stock getattr finds and calls it
+     * before ever reaching the 32 KB hint). */
+}
+
 PyMODINIT_FUNC PyInit_pygo_core(void)
 {
     PyObject *m;
     pygo_diag_init();          /* parses PYGO_DEBUG once; cheap; idempotent */
     pygo_timer_res_init();     /* Windows: 1ms timer resolution (no-op POSIX) */
+    pygo_install_module_getattro();   /* goroutine-safe module attr lookup */
     if (PyType_Ready(&PygoCoroType) < 0) return NULL;
     /* Set by hand rather than in the positional initializer, whose long run
      * of zero slots is easy to miscount: identity-free equality/hash so a
