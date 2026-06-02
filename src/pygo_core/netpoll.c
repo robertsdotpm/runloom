@@ -1074,9 +1074,11 @@ const char *pygo_netpoll_backend(void)
  * counters + count/reset are compiled on every platform so module.c exposes
  * the introspection uniformly (they stay zero on epoll, which uses strace). */
 enum { PYGO_FAULT_WSAPOLL = 0, PYGO_FAULT_SELECT, PYGO_FAULT_IOCP_WAIT,
-       PYGO_FAULT_IOCP_SUBMIT, PYGO_FAULT_KQUEUE_WAIT, PYGO_FAULT_NSITES };
+       PYGO_FAULT_IOCP_SUBMIT, PYGO_FAULT_KQUEUE_WAIT,
+       PYGO_FAULT_KQUEUE_CREATE, PYGO_FAULT_KQUEUE_CTL, PYGO_FAULT_NSITES };
 static const char *const pygo_fault_names[PYGO_FAULT_NSITES] = {
-    "WSAPOLL", "SELECT", "IOCP_WAIT", "IOCP_SUBMIT", "KQUEUE_WAIT" };
+    "WSAPOLL", "SELECT", "IOCP_WAIT", "IOCP_SUBMIT", "KQUEUE_WAIT",
+    "KQUEUE_CREATE", "KQUEUE_CTL" };
 static volatile long pygo_fault_fired[PYGO_FAULT_NSITES];
 static volatile long pygo_fault_once_done[PYGO_FAULT_NSITES];
 
@@ -1101,7 +1103,8 @@ void pygo_fault_reset(void)
 #if defined(PYGO_OS_WINDOWS) || defined(PYGO_HAVE_KQUEUE)
 static const char *const pygo_fault_envs[PYGO_FAULT_NSITES] = {
     "PYGO_FAULT_WSAPOLL", "PYGO_FAULT_SELECT", "PYGO_FAULT_IOCP_WAIT",
-    "PYGO_FAULT_IOCP_SUBMIT", "PYGO_FAULT_KQUEUE_WAIT" };
+    "PYGO_FAULT_IOCP_SUBMIT", "PYGO_FAULT_KQUEUE_WAIT",
+    "PYGO_FAULT_KQUEUE_CREATE", "PYGO_FAULT_KQUEUE_CTL" };
 
 /* Returns the error code to inject (nonzero) if this site should fail now. */
 static int pygo_fault_inject(int site)
@@ -1195,6 +1198,16 @@ int pygo_netpoll_init(void)
     if (pygo_epoll_fd < 0) { pygo_mutex_unlock(&pygo_pool.lock); return -1; }
 #elif defined(PYGO_HAVE_KQUEUE)
     pygo_kqueue_fd = kqueue();
+    {   /* test-only: force kqueue() to fail so the init-error path is covered.
+         * A hard init failure must surface as a clean OSError to the first
+         * parker (via the -1 return below), never crash or hang. */
+        int finj = pygo_fault_inject(PYGO_FAULT_KQUEUE_CREATE);
+        if (finj) {
+            if (pygo_kqueue_fd >= 0) close(pygo_kqueue_fd);
+            pygo_kqueue_fd = -1;
+            errno = finj;
+        }
+    }
     if (pygo_kqueue_fd < 0) { pygo_mutex_unlock(&pygo_pool.lock); return -1; }
     /* Cross-thread pump wake: a self-pipe registered in the kqueue.  Best
      * effort -- if pipe()/fcntl()/kevent() fail the pump still re-polls on
@@ -1419,7 +1432,13 @@ static int pygo_netpoll_register(int fd, int events)
         if (events & PYGO_NETPOLL_WRITE)
             EV_SET(&kev[n++], fd, EVFILT_WRITE, EV_ADD | EV_ONESHOT, 0, 0, NULL);
         if (n == 0) return 0;
-        if (kevent(pygo_kqueue_fd, kev, n, NULL, 0, NULL) == 0) return 0;
+        {   /* test-only: force the registration kevent() to fail; the error
+             * surfaces as OSError(errno) to the goroutine parking on this fd
+             * (the fd-bit is rolled back below). */
+            int finj = pygo_fault_inject(PYGO_FAULT_KQUEUE_CTL);
+            if (finj) errno = finj;
+            else if (kevent(pygo_kqueue_fd, kev, n, NULL, 0, NULL) == 0) return 0;
+        }
     }
     pygo_mutex_lock(&pygo_pool.lock);
     pygo_fd_bit_clear(fd);
