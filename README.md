@@ -143,6 +143,23 @@ M:N scheduler isolates a stall to one hub, and a watchdog actively recovers it
 A >50 ms threshold keeps both dormant under normal load, so steady-state
 scheduling is unchanged.
 
+## Ways to use it
+
+pygo is one scheduler with several front-ends -- pick whichever fits your code;
+they share the same goroutines and can be mixed.
+
+- **`pygo.sync`** -- Go-style straight-line code: `go(fn)`, `Chan`, `select`,
+  cooperative `sleep` and sockets. No `async`/`await`, no event-loop ceremony.
+- **Stdlib monkey-patch** -- `pygo.monkey.patch()` makes blocking stdlib
+  cooperative across ~20 categories, so `requests`, `pymysql`, plain `urllib`
+  and friends run unchanged.[^monkey]
+- **`pygo.aio`** -- run existing `async`/`await` code on the scheduler;
+  high-fidelity enough to run **aiohttp, uvicorn, starlette, hypercorn,
+  websockets and anyio** unchanged.[^aio]
+- **`pygo.blocking(fn, …)` / `pygo.monkey.offload(fn, …)`** -- offload a
+  genuinely-blocking or CPU-bound call to a worker pool so it never wedges a hub
+  (runs inline when not on a goroutine).
+
 ## Features
 
 - **Hand-rolled asm context switch** (x86_64 SysV, aarch64) -- ~80 ns/swap, no
@@ -155,17 +172,8 @@ scheduling is unchanged.
 - **netpoll** -- epoll / kqueue / IOCP / WSAPoll / select; goroutines park
   transparently on fd readiness. Lost-wake-free 3-state park-commit on all
   backends.
-- **Stdlib monkey-patch** -- `pygo.monkey.patch()` makes blocking stdlib
-  cooperative across ~20 categories, so `requests`, `pymysql`, plain `urllib`
-  and friends run unchanged.[^monkey]
-- **`pygo.aio`** -- run existing `async`/`await` code on the scheduler;
-  high-fidelity enough to run **aiohttp, uvicorn, starlette, hypercorn,
-  websockets and anyio** unchanged.[^aio]
 - **Go-style channels** -- `Chan(capacity)`, `select`, `for v in ch`; unbuffered
   ping-pong ~560 ns/round-trip (within 7% of Go 1.22 on the same box).
-- **`pygo.blocking(fn, …)` / `pygo.monkey.offload(fn, …)`** -- offload a
-  genuinely-blocking or CPU-bound call to a worker pool so it never wedges a hub
-  (runs inline when not on a goroutine).
 
 ## Correctness, verification & security
 
