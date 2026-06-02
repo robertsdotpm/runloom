@@ -2768,7 +2768,20 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
             self._pg_fatal_exc = None
             raise fatal
 
+    def _check_running(self):
+        # asyncio contract (BaseEventLoop._check_running): a loop may not be
+        # re-entered, and only ONE loop may run on a thread at a time.  Without
+        # the second check a nested run_forever()/run_until_complete() (e.g. a
+        # coroutine that calls another loop's run_forever) drains forever instead
+        # of raising -> hang (test_base_events::test_running_loop_within_a_loop).
+        if self.is_running():
+            raise RuntimeError("This event loop is already running")
+        if asyncio.events._get_running_loop() is not None:
+            raise RuntimeError(
+                "Cannot run the event loop while another loop is running")
+
     def run_until_complete(self, future):
+        self._check_running()
         if asyncio.iscoroutine(future):
             future = self.create_task(future)
         elif not (isinstance(future, asyncio.Future)
@@ -2873,6 +2886,7 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
                 pass  # Older build without sched_reset; best-effort drain.
 
     def run_forever(self):
+        self._check_running()
         # Resolve deep, non-yielding stdlib imports (e.g. getaddrinfo's
         # first-call codec import) before any goroutine runs them on a small
         # stack -- see prewarm_stdlib.
