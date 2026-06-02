@@ -7,14 +7,20 @@
 # CPython supports this directly: ./configure --disable-gil
 # --with-thread-sanitizer, and ships Tools/tsan/suppressions_free_threading.txt.
 #
-# STATUS (2026-06-02): on this toolchain (gcc 13.3, glibc 2.39, Linux 6.17) the
-# build compiles and links but the freshly-built `./python` aborts in frozen
-# getpath with "character U+6f006e is not in range" -- a wchar-width corruption
-# in the TSan-instrumented interpreter that blocks `make install`.  Tried:
-# clean tree, default vs -O1 CFLAGS, LC_ALL=C.UTF-8, ac_cv_buggy_getaddrinfo.
-# Until that upstream quirk is resolved, use tools/run_sanitizers_ext.sh, which
-# TSan-instruments only the EXT and runs it under a stock free-threaded
-# interpreter (correctly scoped to pygo's own C; CPython noise suppressed).
+# THE CRITICAL GOTCHA (cost a day): `configure` must ALSO run under `setarch -R`.
+# With --with-thread-sanitizer, configure's own AC_RUN_IFELSE feature-probe
+# binaries are compiled with -fsanitize=thread.  On Linux 6.x's high-entropy
+# ASLR every TSan binary aborts at startup ("unexpected memory mapping"), so
+# each runtime probe "fails" and configure bakes garbage into pyconfig.h --
+# notably SIZEOF_WCHAR_T=0 and WORDS_BIGENDIAN=1 on a little-endian x86-64.
+# That wrong endianness/width is exactly the "character U+6f006e is not in range"
+# getpath crash (a wchar string read byte-swapped at the wrong stride).  Running
+# configure under setarch -R disables ASLR for those probe binaries too, so they
+# run and detect SIZEOF_WCHAR_T=4 / little-endian correctly.  (make/install were
+# already wrapped; configure was the missing one.)
+#
+# tools/run_sanitizers_ext.sh remains the lighter-weight path (instruments only
+# the ext, no patched interpreter needed); this is the gold-standard complement.
 #
 # Usage:  tools/build_tsan_cpython.sh [VERSION]
 # Env:    PY_VER (default 3.13.13), SRC_DIR, PREFIX
@@ -37,10 +43,22 @@ tar xzf /tmp/py-$VER.tgz -C "$(dirname "$SRC")"
 mv "$(dirname "$SRC")/Python-$VER" "$SRC"
 cd "$SRC"
 
-# ac_cv_buggy_getaddrinfo=no: skip the network runtime-probe a sandboxed build
-# fails (same workaround pyenv uses).  Default optimization (no CFLAGS override).
-ac_cv_buggy_getaddrinfo=no \
-./configure --disable-gil --with-thread-sanitizer --prefix="$PREFIX" >/dev/null
+# Run configure UNDER setarch -R (see header): its TSan-instrumented probe
+# binaries must not abort under ASLR, or feature detection silently corrupts
+# pyconfig.h (SIZEOF_WCHAR_T=0, WORDS_BIGENDIAN on x86-64 -> getpath U+6f006e).
+# ac_cv_buggy_getaddrinfo=no additionally skips the one network probe.
+$SA env ac_cv_buggy_getaddrinfo=no \
+    ./configure --disable-gil --with-thread-sanitizer --prefix="$PREFIX" >/dev/null
+
+# Sanity-check the detection that the ASLR-abort used to corrupt, before a long
+# build: bail loudly if configure still mis-detected (e.g. setarch unavailable).
+wsz="$(sed -n 's/^#define SIZEOF_WCHAR_T //p' pyconfig.h)"
+if [ "$wsz" != 4 ]; then
+    echo "FATAL: configure mis-detected SIZEOF_WCHAR_T=$wsz (expected 4)."
+    echo "       configure's TSan probes likely aborted under ASLR -- need setarch -R."
+    exit 1
+fi
+grep -q "WORDS_BIGENDIAN" pyconfig.h && { echo "FATAL: WORDS_BIGENDIAN set on a little-endian host -- same ASLR-probe corruption."; exit 1; }
 
 $SA make -j"$(nproc)"
 $SA make install
