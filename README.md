@@ -168,47 +168,67 @@ scheduling is unchanged.
 - **`pygo.blocking(fn, …)`** -- offload a genuinely-blocking call to a worker
   pool so it never wedges a hub in the first place.
 
+## Correctness, verification & security
+
+A lock-free M:N scheduler is exactly where bugs hide in rare interleavings, so
+the concurrency core is checked from several independent angles. Every
+machine-checked proof ships with a **negative control** that *must* fail, so the
+checks are known to have teeth. One driver runs the lot: `scripts/check_all.sh
+all`; the full writeup is in [VALIDATION.md](VALIDATION.md) and [verify/](verify/).
+
+**Formal verification** ([verify/](verify/), `verify/run_verify.sh`):
+
+| engine | what it proves |
+| --- | --- |
+| **Spin** | the algorithms (Chase-Lev deque, `wake_state`, park/wake) over *all* interleavings -- safety **and** liveness (LTL + fairness) |
+| **CBMC** | the **unmodified C source** of the deque, with its real `__atomic_*` memory orderings, over a bounded schedule |
+| **herd7 / GenMC** | the C11/RC11 fence placement on the netpoll commit + wake paths, on a *weak* (RC11) memory model |
+| **TLA+ / Alloy** | the *composed* scheduler + stall-recovery handoff (no lost/stranded goroutine); the `self_check` parker-graph invariant |
+| **Coq / Iris / iRC11** | unbounded, machine-checked: `wake_state` & deque conservation over every reachable state, and the commit-publish release/acquire under RC11 |
+
+**Testing:** the pytest suite plus a C deque stress harness (real threads,
+millions of ops); a randomized M:N scheduler fuzzer; channel
+**linearizability** via Porcupine + stateful Hypothesis; **deterministic
+simulation** (seed → byte-identical repro) with PCT interleaving search; gcov
+coverage that itemizes uncovered error/cleanup paths; and an `LD_PRELOAD`
+**fault injector** that fails the Nth malloc/mmap/epoll_ctl so cleanup branches
+run (0 cleanup-path bugs on the bundled workload). Backend conformance is
+swept across epoll/kqueue/IOCP/WSAPoll/select.
+
+**Security:** the C core runs clean under **ASan / TSan / UBSan**; `gcc
+-fanalyzer` is a gating static-analysis phase (it found + fixed a real
+NULL-deref); and optimized builds are hardened (`-fstack-protector-strong`,
+`-D_FORTIFY_SOURCE=2`, `-Wformat-security`).
+
 ## Current limitations & downsides
 
 Read this before betting on pygo -- it's where the project actually is.
 
-- **The multi-core win requires free-threaded CPython 3.13t.** On a normal
-  (GIL) build pygo still runs -- cheap spawn, the goroutine model, netpoll -- but
-  it's **single-core**, like asyncio. The headline parallelism numbers do not
-  apply there.
-- **Higher memory per goroutine than Go in Python** (~26 KB vs ~2.5–13 KB) --
-  the CPython object tax; unwinnable without dropping to C handlers.
-- **No per-core speedup.** pygo saturates all cores from one process but can't
-  raise CPython's ~80 K ops/s/core. CPU-bound pure-Python work is still
-  CPython-slow per thread.
-- **Go is faster on raw network I/O -- ~1.2× per core, ~2.3× across 16, and
-  another ~2.2× if the handler is Python.** Measured on the identical loopback
-  echo bench (see *Performance*): single core **Go ~37 µs/RT vs pygo C
-  `TCPConn` ~46 µs**; at 16 cores **324 K vs 143 K req/s** (Go scales better --
-  pygo hits CPython's refcount-contention ceiling); a **Python** handler adds
-  ~2.2× on top (~82 µs/RT) from interpreter overhead per `recv`/`send`. None of
-  this is the scheduler -- that's ~47 ns/yield, Go-class. An opt-in io_uring
-  path (`PYGO_TCPCONN_IOURING=1`) narrows the syscall side at high fan-out on
-  Linux; matching Go per-operation with a Python handler isn't achievable.
+- **The multi-core win needs free-threaded CPython 3.13t** (and 3.11+ at all --
+  the frame snapshot depends on the 3.11+ tstate layout). On a normal GIL build
+  pygo still runs -- cheap spawn, the goroutine model, netpoll -- but it's
+  **single-core** like asyncio; the headline parallelism numbers don't apply.
+- **pygo doesn't make Python faster per core.** It saturates every core from one
+  process, but CPython's ~80 K pure-Python ops/s/core is a constant it can't
+  raise, and on raw network I/O Go is **~1.2× faster per core, ~2.3× across 16**
+  (pygo hits CPython's refcount-contention ceiling), plus another **~2.2× if the
+  handler is Python** rather than C. None of that is the scheduler (~47 ns/yield,
+  Go-class) -- it's the interpreter. (`PYGO_TCPCONN_IOURING=1` narrows the
+  syscall side at high fan-out on Linux.)
+- **Higher memory per goroutine than Go** (~26 KB with a Python handler vs Go's
+  ~2.5–13 KB) -- the CPython object tax, only avoidable by dropping to C handlers.
 - **Preemption only fires at Python bytecode boundaries.** A goroutine inside a
-  long C call (`numpy`, `hashlib`) or a tight pure-C loop is **not**
-  preemptible and will hold its hub until it returns -- same limitation Go has
-  with cgo. (Blocking-IO is covered by the rescue handoff; call-bearing Python
-  CPU by preemption; the remaining gap is tight C loops.)
-- **Linux is the primary, heavily-validated target.** macOS/BSD/Windows
-  backends are code-complete and maintained in-step, but the deep
-  validation (2 M-conn runs, fuzzing, ASan) is on Linux x86_64 / 3.13t.
-- **Young project.** APIs are stabilising; expect rough edges outside the
-  documented happy paths.
-- **`PYGO_PER_G_TSTATE` mode is experimental / default-OFF** (it SEGVs with
-  Python handlers under load). The default snapshot-based scheduler is the
-  supported path; per-g-tstate is not.
-- **Python 3.11+ only** -- the frame snapshot depends on 3.11+ tstate layout;
-  the pre-3.11 frame model isn't supported.
-- **Two `aio`-compat tests are skipped** pending a fix to an executor-wake race
-  in `pygo.aio` (a flake, not corruption).
-- **aarch64 / Apple Silicon** validated via `qemu` + code review, not yet on
-  real ARM hardware.
+  long C call (`numpy`, `hashlib`) or a tight pure-C loop is **not** preemptible
+  and holds its hub until it returns -- the same limitation Go has with cgo.
+  (Blocking-IO is covered by the rescue handoff; pure-Python CPU by preemption;
+  tight C loops are the remaining gap.)
+- **Linux x86_64 / 3.13t is the primary, heavily-validated target.**
+  macOS/BSD/Windows and aarch64 backends are code-complete and maintained
+  in-step, but the deep validation (2 M-conn runs, fuzzing, sanitizers) is on
+  Linux; aarch64 is exercised via `qemu` + review, not yet on real ARM hardware.
+- **Young project.** APIs are stabilising, expect rough edges off the documented
+  happy paths, and some modes are experimental/default-OFF (e.g.
+  `PYGO_PER_G_TSTATE`, which SEGVs with Python handlers under load).
 
 ## Building
 
