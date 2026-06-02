@@ -836,6 +836,19 @@ class _SSLProtocolView(object):
     def _get_extra_info(self, name, default=None):
         return default
 
+    def pause_writing(self):
+        # asyncio's SSLProtocol.pause_writing(): hold app writes off the wire.
+        # We pause the driving transport's write drain so _write_buf accumulates.
+        tr = getattr(self._tls, "_pg_transport", None)
+        if tr is not None:
+            tr._write_paused = True
+
+    def resume_writing(self):
+        tr = getattr(self._tls, "_pg_transport", None)
+        if tr is not None and tr._write_paused:
+            tr._write_paused = False
+            tr._kick_io()   # respawn/wake the io goroutine to flush _write_buf
+
 
 def _tls_wrap_client(raw, ssl_arg, server_hostname, host, handshake_timeout=None):
     """Wrap a freshly-connected client socket in cooperative TLS and finish
@@ -3321,8 +3334,22 @@ class _StreamTransport(asyncio.Transport):
         # _pg_io_runner.  write() appends here and kicks that goroutine.
         self._write_buf = bytearray()
         self._protocol_paused = False   # did we call protocol.pause_writing()?
+        # Explicit write-side flow control: transport._ssl_protocol.pause_writing()
+        # (white-box TLS tests, e.g. test_ssl test_flush_before_shutdown) stops
+        # the io goroutine from draining _write_buf so app writes accumulate;
+        # resume_writing() flushes.  A close() always clears it (a graceful close
+        # must flush the buffer regardless).  Distinct from _paused (read side).
+        self._write_paused = False
         self._high_water = 64 * 1024
         self._low_water = 16 * 1024
+        # Let the TLS layer's _SSLProtocolView reach back to us for the
+        # pause_writing()/resume_writing() flow-control surface asyncio's
+        # SSLProtocol exposes.  Only MemoryBIO TLS socks accept the attribute;
+        # plaintext sockets don't (and have no _ssl_protocol anyway).
+        try:
+            sock._pg_transport = self
+        except (AttributeError, TypeError):
+            pass
         # Graceful close: close() with data still queued flushes the buffer
         # before tearing down (asyncio semantics -- a write()+close() must not
         # drop the write).  The io goroutine's _drain_step fires the teardown
@@ -3388,7 +3415,7 @@ class _StreamTransport(asyncio.Transport):
             mask = 0
             if not self._paused and not self._read_eof and not self._closed:
                 mask |= 1
-            if self._write_buf:
+            if self._write_buf and not self._write_paused:
                 mask |= 2
             if mask == 0:
                 # Paused/EOF'd for reading and nothing queued to write: nobody
@@ -3688,6 +3715,10 @@ class _StreamTransport(asyncio.Transport):
         # write()s dropped, the io loop stops READing.  But DON'T tear down yet
         # if a graceful close still has queued output -- flush it first.
         self._closed = True
+        # A graceful close must flush queued output even if writing was paused
+        # via _ssl_protocol.pause_writing() -- asyncio drains the buffer before
+        # connection_lost.  Lift the pause so the io goroutine can drain.
+        self._write_paused = False
         deliver_cl = not self._conn_lost_called
         if deliver_cl:
             self._conn_lost_called = True
