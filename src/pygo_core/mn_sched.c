@@ -652,16 +652,19 @@ static PYGO_THREAD_RET pygo_hub_main(void *arg)
      * consecutive ready-ring services; after starve_bound of them we force one
      * deque turn so a busy sched_yield loop can't starve never-run goroutines.
      * Hub-local (this thread only).  starve_bound resolved once from env;
-     * default 64, 0 disables (legacy ready-before-deque).  The first-touch race
-     * across hubs is benign (all store the same value) -- same lazy-static
-     * pattern as sweep_on below. */
+     * default 64, 0 disables (legacy ready-before-deque).  First touch across
+     * hubs is a relaxed-atomic lazy-static loaded into the loop-invariant local
+     * `sbound` (all store the same value) -- same pattern as sweep_on below.
+     * (Previously the read was plain while the store was atomic: a technical
+     * C11 data race TSan flags, behaviourally benign but now removed.) */
     unsigned ready_streak = 0;
     static int starve_bound = -1;
-    if (starve_bound < 0) {
+    int sbound = __atomic_load_n(&starve_bound, __ATOMIC_RELAXED);
+    if (sbound < 0) {
         const char *e = getenv("PYGO_READY_STARVE_BOUND");
-        int v = (e != NULL) ? atoi(e) : 64;
-        if (v < 0) v = 0;
-        __atomic_store_n(&starve_bound, v, __ATOMIC_RELAXED);
+        sbound = (e != NULL) ? atoi(e) : 64;
+        if (sbound < 0) sbound = 0;
+        __atomic_store_n(&starve_bound, sbound, __ATOMIC_RELAXED);
     }
 
     while (!__atomic_load_n(&h->stopping, __ATOMIC_ACQUIRE)) {
@@ -753,7 +756,7 @@ static PYGO_THREAD_RET pygo_hub_main(void *arg)
          * starve_bound interleave.  All hub-local + single-consumer; the deque
          * is touched via its normal owner-pop, never re-ordered internally. */
         g = NULL;
-        if (starve_bound && ready_streak >= (unsigned)starve_bound) {
+        if (sbound && ready_streak >= (unsigned)sbound) {
             ready_streak = 0;
             g = (pygo_g_t *)pygo_cldeque_pop(&h->deque);  /* forced fresh turn */
         }
