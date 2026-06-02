@@ -23,26 +23,17 @@ pytestmark = [
     pytest.mark.skipif(not REALTHREAD, reason=REALTHREAD_REASON),
 ]
 
-# KNOWN divergence: the cooperative CoLock/CoRLock are not weakref-able, while
-# _thread.lock is.  weakref.ref(threading.Lock()) raises TypeError under monkey.
-# Real, fixable (give the Co* types a __weakref__ slot); recorded, not silenced.
-_LOCK_SKIPS = {
-    "test_weakref_exists": "monkey CoLock has no __weakref__ (cooperative-type divergence)",
-    "test_weakref_deleted": "monkey CoLock has no __weakref__ (cooperative-type divergence)",
-    # test_repr trips CPython's tearDown thread-leak detector against the
-    # harness's per-test worker thread (a hosting artifact, not a monkey bug).
-    "test_repr": "tearDown thread-leak check vs the harness worker thread (artifact)",
-}
-
 if HAVE_CPYTHON_TESTS:
     pygo.monkey.patch()
     import threading
     from test import lock_tests as _L
 
+    # (The CoLock/CoRLock weakref divergence the verbatim run first surfaced is
+    # FIXED -- the Co* types now carry a __weakref__ slot -- so no skips here.)
     TestPygoLock = hosted(_L.LockTests, "TestPygoLock",
-                          attrs={"locktype": staticmethod(threading.Lock)}, skips=_LOCK_SKIPS)
+                          attrs={"locktype": staticmethod(threading.Lock)})
     TestPygoRLock = hosted(_L.RLockTests, "TestPygoRLock",
-                           attrs={"locktype": staticmethod(threading.RLock)}, skips=_LOCK_SKIPS)
+                           attrs={"locktype": staticmethod(threading.RLock)})
     TestPygoEvent = hosted(_L.EventTests, "TestPygoEvent",
                            attrs={"eventtype": staticmethod(threading.Event)})
     TestPygoCondition = hosted(_L.ConditionTests, "TestPygoCondition",

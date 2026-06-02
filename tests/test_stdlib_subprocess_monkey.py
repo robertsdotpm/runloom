@@ -21,15 +21,4 @@ tearDownModule = unpatch_module
 if HAVE_CPYTHON_TESTS:
     from test import test_subprocess as _m
 
-    TestPygoSubprocess = hosted(
-        _m.ProcessTestCase, "TestPygoSubprocess",
-        skips={
-            # KNOWN divergence: Popen(cwd=<relative>) under monkey raises a
-            # FileExistsError from the cooperative os layer (monkey.py:367)
-            # where stock CPython succeeds -- the cwd/relative-path handling in
-            # the offloaded os path differs.  Real, recorded for follow-up.
-            "test_cwd_with_relative_arg":
-                "monkey cooperative os cwd+relative-path divergence (FileExistsError)",
-            "test_cwd_with_relative_executable":
-                "monkey cooperative os cwd+relative-path divergence (FileExistsError)",
-        })
+    TestPygoSubprocess = hosted(_m.ProcessTestCase, "TestPygoSubprocess")

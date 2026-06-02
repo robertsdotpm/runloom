@@ -1501,7 +1501,10 @@ class CoLock(object):
     acquire/release (the single-thread cooperative model never has true
     cross-thread contention between goroutines).
     """
-    __slots__ = ("_locked", "_owner", "_waiters")
+    # __weakref__: stdlib _thread.lock is weakref-able; without this slot a
+    # weakref.ref(threading.Lock()) raises TypeError under monkey (found by the
+    # verbatim CPython lock_tests).
+    __slots__ = ("_locked", "_owner", "_waiters", "__weakref__")
 
     def __init__(self):
         self._locked  = False
@@ -1572,7 +1575,7 @@ class CoLock(object):
 
 class CoRLock(object):
     """Cooperative re-entrant lock."""
-    __slots__ = ("_lock", "_owner", "_count")
+    __slots__ = ("_lock", "_owner", "_count", "__weakref__")
 
     def __init__(self):
         self._lock  = CoLock()
@@ -1622,7 +1625,7 @@ class CoRLock(object):
 
 
 class CoEvent(object):
-    __slots__ = ("_flag", "_waiters")
+    __slots__ = ("_flag", "_waiters", "__weakref__")
 
     def __init__(self):
         self._flag    = False
@@ -1755,7 +1758,7 @@ class CoCondition(object):
 
 
 class CoSemaphore(object):
-    __slots__ = ("_value", "_waiters")
+    __slots__ = ("_value", "_waiters", "__weakref__")
 
     def __init__(self, value=1):
         if value < 0:
