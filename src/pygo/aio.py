@@ -739,7 +739,17 @@ class _MemoryBIOTLS(object):
         pass
 
     def send_close_notify(self):
-        # Best-effort: emit a close_notify alert (unwrap()) and flush it.
+        # Best-effort: emit a close_notify alert (unwrap()) and flush it -- so a
+        # peer doing a clean ssl.SSLSocket.unwrap() (which waits for ours)
+        # completes instead of seeing a bare FIN.  But NOT if the peer already
+        # dropped with a bare FIN itself (TCP half-close, no close_notify): the
+        # session is being torn down unexpectedly and a peer that did
+        # socket.shutdown(SHUT_WR) is now in recv()==b'' -- our close_notify
+        # bytes would be read as junk (test_shutdown_timeout_handler_not_set).
+        # asyncio's SSLProtocol likewise shuts down cleanly only when the
+        # session is healthy or the peer sent its own close_notify first.
+        if self._eof_in and not self._peer_close_notify:
+            return
         try:
             with self._lock:
                 try:
@@ -3441,10 +3451,7 @@ class _StreamTransport(asyncio.Transport):
             # close_notify).  Fire once, here in the io goroutine (send may park).
             if (self._read_eof and not self._write_buf and not self._closed
                     and not self._sock_is_plain and not self._tls_shutdown_sent):
-                self._tls_shutdown_sent = True
-                snc = getattr(self._sock, "send_close_notify", None)
-                if snc is not None:
-                    snc()
+                self._send_tls_close_notify()
             mask = 0
             if not self._paused and not self._read_eof and not self._closed:
                 mask |= 1
@@ -3666,7 +3673,10 @@ class _StreamTransport(asyncio.Transport):
                 except OSError:
                     pass
             if self._close_when_drained and not self._stopping:
-                # Graceful close's queued output is flushed: tear down now.
+                # Graceful close's queued output is flushed: send our TLS
+                # close_notify (so a peer in unwrap() completes), then tear down.
+                if self._close_exc is None:
+                    self._send_tls_close_notify()
                 self._close_when_drained = False
                 self._stopping = True
                 self._deliver_connection_lost(self._close_exc,
@@ -3741,6 +3751,27 @@ class _StreamTransport(asyncio.Transport):
         for line in lines:
             self.write(line)
 
+    def _send_tls_close_notify(self):
+        # Graceful TLS close: emit OUR close_notify so a peer doing a clean
+        # ssl.SSLSocket.unwrap() -- which sends its close_notify then BLOCKS
+        # for ours -- completes instead of seeing a bare TCP FIN (which it
+        # surfaces as SSLEOFError UNEXPECTED_EOF_WHILE_READING and treats as a
+        # protocol violation).  asyncio's SSLProtocol sends close_notify on
+        # close whether or not the peer sent theirs first; pygo's stream-EOF
+        # path (_handle_read_eof -> eof_received()==False -> close()) used to
+        # close the raw socket with no close_notify, so a server doing the
+        # symmetric unwrap() (test_ssl::test_shutdown_cleanly) aborted -- and
+        # under its sequential threaded server that abort cascaded a FIN to
+        # every still-handshaking client.  Idempotent (the io-loop half-close
+        # block shares _tls_shutdown_sent) and a no-op on plaintext sockets.
+        if self._sock_is_plain or self._tls_shutdown_sent:
+            return
+        snc = getattr(self._sock, "send_close_notify", None)
+        if snc is None:
+            return
+        self._tls_shutdown_sent = True
+        snc()
+
     def close(self, exc=None):
         if self._closed:
             return
@@ -3757,13 +3788,19 @@ class _StreamTransport(asyncio.Transport):
             self._conn_lost_called = True
         if exc is None and self._write_buf:
             # Graceful close with data queued: let the io goroutine drain the
-            # buffer; its _drain_step fires the teardown once empty (asyncio
-            # flushes the write buffer before connection_lost).
+            # buffer; its _drain_step fires the teardown (and our close_notify)
+            # once empty (asyncio flushes the write buffer before
+            # connection_lost).
             self._close_exc = None
             self._close_deliver_cl = deliver_cl
             self._close_when_drained = True
             self._kick_io()
             return
+        # Graceful close with nothing queued: send our TLS close_notify before
+        # the FIN so a peer blocked in unwrap() completes (see helper).  Only on
+        # a clean close -- an error/abort close (exc set) skips it.
+        if exc is None:
+            self._send_tls_close_notify()
         # Error/abort close, or nothing queued: tear down now.
         # asyncio closes the fd inside the DEFERRED _call_connection_lost, NOT
         # synchronously here.  Code routinely reads the socket right after
