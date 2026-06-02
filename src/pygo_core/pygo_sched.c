@@ -1386,16 +1386,49 @@ void pygo_sched_wake_safe(pygo_g_t *g)
              * not the waker's thread -- the waker may be a foreign thread
              * (run_in_executor pool worker, iouring CQE) whose own sched is
              * never drained.  g->owner's drain owner consumes the wake_list. */
+            /* Peek THIS thread's sched WITHOUT creating one.  A foreign waker
+             * (run_in_executor blockpool worker, iouring CQE) has no per-thread
+             * sched and must NOT lazily allocate one here -- pygo_sched_get()
+             * runs mimalloc, and on a thread with no usable Python heap that
+             * crashes.  pygo_tls_sched is NULL on exactly those threads, which
+             * is precisely the cross-thread case.  Keep the `s` (wake target)
+             * computation byte-identical to the original so owner-less and
+             * foreign paths are unchanged: pygo_sched_get() is still reached
+             * only when g->owner == NULL (never on a foreign waker, whose woken
+             * g always has an owner). */
+            pygo_sched_t *cur = pygo_tls_sched;
             pygo_sched_t *s = g->owner ? g->owner : pygo_sched_get();
-            pygo_mutex_lock(&s->wake_list_lock);
-            g->wake_next = NULL;
-            if (s->wake_list_tail != NULL) {
-                s->wake_list_tail->wake_next = g;
+            if (cur != NULL && s == cur) {
+                /* Same-thread wake -- the single-hub asyncio bridge's common
+                 * case: a future completed by a goroutine on the loop's own
+                 * thread wakes a PygoTask parked on that future.  Push straight
+                 * onto our cooperative ready ring (exactly what pygo_sched_wake
+                 * does for owner==self) so the wake is FIFO-ordered with the
+                 * go()/call_soon spawns issued AFTER it.  Routing a same-thread
+                 * wake through the batch-drained wake_list instead made a woken
+                 * task resume AFTER a call_soon scheduled later in the same turn,
+                 * violating asyncio's guarantee that a future's completion
+                 * callbacks run in call_soon (FIFO) order -- the asyncssh
+                 * channel-open-vs-close ordering crash, and
+                 * call_soon_fifo.py::test_future_then_callback.  The parked_safe
+                 * CAS above already serialized the claim, so this is race-safe;
+                 * the ready ring is single-consumer and we are its consumer. */
+                pygo_ready_push(s, g);
             } else {
-                s->wake_list_head = g;
+                /* Cross-thread wake -- foreign-thread waker (run_in_executor
+                 * pool worker, iouring CQE).  Our ready ring is single-consumer
+                 * and not cross-thread-safe; route to the owner's thread-safe
+                 * wake_list, which its own drain consumes. */
+                pygo_mutex_lock(&s->wake_list_lock);
+                g->wake_next = NULL;
+                if (s->wake_list_tail != NULL) {
+                    s->wake_list_tail->wake_next = g;
+                } else {
+                    s->wake_list_head = g;
+                }
+                s->wake_list_tail = g;
+                pygo_mutex_unlock(&s->wake_list_lock);
             }
-            s->wake_list_tail = g;
-            pygo_mutex_unlock(&s->wake_list_lock);
         }
         /* CAS failed: g was either running (parked_safe==0 already)
          * or another wake_safe already claimed it.  Our wake_pending
