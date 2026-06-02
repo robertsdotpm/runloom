@@ -10,16 +10,32 @@ Apply once at startup:
     pygo.monkey.patch(threading=False)       # opt out of one
 
 Categories (all default True):
-    socket       socket.socket recv/send/sendall/accept/connect/recvfrom/sendto
+    socket       socket.socket recv/recv_into/send/sendall/accept/connect/
+                 recvfrom/sendto  +  recvmsg/recvmsg_into/sendmsg (fd passing,
+                 ancillary data) where the platform provides them
     time         time.sleep
     os           os.read / os.write -- wait_fd for pollable fds (pipes,
                  sockets, ttys), thread-pool offload for regular files
     select       select.select  (fast path for 1 fd; busy-poll otherwise)
+    selectors    select.poll / select.epoll / select.kqueue made cooperative,
+                 which transparently makes the high-level `selectors` module
+                 (DefaultSelector / PollSelector / EpollSelector /
+                 KqueueSelector) cooperative too -- this is what
+                 subprocess.communicate(), socketserver, http.server, wsgiref
+                 and most hand-rolled poll loops actually block on.  epoll /
+                 kqueue wait on their own backing fd via wait_fd (event-driven,
+                 no busy-poll); poll has no backing fd so it probe+yields.
     stdio        builtins.input  +  sys.stdin.read/readline
     ssl          ssl.SSLSocket recv/send/sendall/do_handshake
-    subprocess   subprocess.Popen.wait
+    subprocess   subprocess.Popen.wait  (and, via `selectors` + `os`,
+                 subprocess.run / call / check_output / communicate)
+    process      os.waitpid / os.wait / os.waitid (WNOHANG cooperative loop on
+                 POSIX, backend offload on Windows) + os.system (offload)
     threading    Lock, RLock, Event, Condition, Semaphore, BoundedSemaphore
-    queue        no-op (works automatically once threading.Condition is cooperative)
+                 + Thread.join (cooperative is_alive() poll)
+    queue        queue.SimpleQueue -> cooperative CoSimpleQueue.  queue.Queue
+                 needs nothing extra: it builds on threading.Condition, which
+                 is already cooperative once `threading` is patched.
     file         builtins.open (open syscall offloaded to backend)
     syscalls     os.stat/lstat/listdir/scandir/mkdir/rename/unlink/fsync/...
                  -- all disk-touching os.* calls dispatched to backend
@@ -38,11 +54,15 @@ Backend layer:
 Limitations:
     * Designed for the C scheduler (pygo_core.go / pygo_core.run).  The
       pure-Python scheduler in pygo.runtime has no netpoll integration.
-    * select.select with >1 fd is a 1ms-yield busy-poll.
+    * select.select with >1 fd, and select.poll(), are yield-backoff
+      busy-polls (no backing fd to park on).  epoll/kqueue ARE event-driven
+      (they park on their own fd).
     * Replacing threading.Lock etc. is best-effort coordination with real
       OS threads -- the single-thread cooperative model is the design target.
-    * `queue.Queue` instances created before patch() keep the original
-      sync primitives; patch() early.
+    * `queue.Queue` / `queue.SimpleQueue` and `selectors.*Selector` instances
+      created before patch() keep the original (blocking) primitives; patch()
+      early.  Buffered file .read()/.write() bypass os.read/write (see the
+      file section) so they are not offloaded.
 
 Platform notes:
     * Linux, macOS, *BSD: fully supported by the C-side netpoll (epoll,
@@ -73,6 +93,20 @@ import time
 
 _IS_WINDOWS = _platform.system() == "Windows"
 _IS_DARWIN  = _platform.system() == "Darwin"
+
+# The pid that imported this module -- i.e. the process whose pygo scheduler
+# our cooperative identity (pygo.current()) is valid in.  After os.fork() the
+# child inherits a *copy* of the scheduler that is not actually running, so
+# pygo.current() there returns a fresh, meaningless G on every call.  This is
+# captured once and never reassigned, so a pid mismatch reliably means "we are
+# in a forked child" regardless of os.register_at_fork handler ordering.  It is
+# only ever consulted on cold error paths (see _is_forked_child), never in the
+# I/O hot path -- os.getpid() costs ~1.3us, far too much per recv/send.
+_PID_IMPORT = os.getpid()
+
+
+def _is_forked_child():
+    return os.getpid() != _PID_IMPORT
 
 import pygo
 import pygo_core
@@ -375,6 +409,23 @@ def _get_backend():
     return _backend
 
 
+def _after_fork_child():
+    """Drop scheduler-derived state the child can't reuse after os.fork().
+
+    fork() copies only the forking thread, so the thread-pool backend's
+    workers are gone in the child and its self-pipe parkers are shared with
+    the parent.  Null the backend so it is rebuilt on first use and drop the
+    pooled parkers so the child never writes wake bytes into the parent's
+    pipes.  Cheap and only runs on an actual fork."""
+    global _backend
+    _backend = None
+    _Parker._pool = []
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_after_fork_child)
+
+
 def _blocking_call(fn, *args, **kwargs):
     """Run fn(*args, **kwargs) off-scheduler.  In a goroutine, dispatch
     to the backend (other goroutines keep running).  Outside a
@@ -395,6 +446,15 @@ _orig_accept = None
 _orig_connect = None
 _orig_recvfrom = None
 _orig_sendto = None
+_orig_recvmsg = None
+_orig_recvmsg_into = None
+_orig_sendmsg = None
+
+# recvmsg / recvmsg_into / sendmsg are POSIX-only (fd passing, ancillary
+# data via SCM_RIGHTS).  Windows sockets have no equivalent, so socket.socket
+# simply lacks the attributes there; the patch is skipped.
+_HAVE_RECVMSG = hasattr(socket.socket, "recvmsg")
+_HAVE_SENDMSG = hasattr(socket.socket, "sendmsg")
 
 
 _tcp_recv_alloc = getattr(pygo_core, "tcp_recv_alloc", None)
@@ -526,6 +586,42 @@ def _patched_sendto(self, data, *args):
             pygo_core.wait_fd(self.fileno(), WRITE)
 
 
+def _patched_recvmsg(self, bufsize, ancbufsize=0, flags=0):
+    """Cooperative recvmsg.  Same EAGAIN -> wait_fd loop as recv, but
+    carries the ancillary-data tuple (data, ancdata, msg_flags, address)
+    that SCM_RIGHTS fd-passing and IP_PKTINFO callers rely on."""
+    if not _in_goroutine():
+        return _orig_recvmsg(self, bufsize, ancbufsize, flags)
+    _make_nonblocking(self)
+    while True:
+        try:
+            return _orig_recvmsg(self, bufsize, ancbufsize, flags)
+        except (BlockingIOError, InterruptedError):
+            pygo_core.wait_fd(self.fileno(), READ)
+
+
+def _patched_recvmsg_into(self, buffers, ancbufsize=0, flags=0):
+    if not _in_goroutine():
+        return _orig_recvmsg_into(self, buffers, ancbufsize, flags)
+    _make_nonblocking(self)
+    while True:
+        try:
+            return _orig_recvmsg_into(self, buffers, ancbufsize, flags)
+        except (BlockingIOError, InterruptedError):
+            pygo_core.wait_fd(self.fileno(), READ)
+
+
+def _patched_sendmsg(self, buffers, ancdata=(), flags=0, address=None):
+    if not _in_goroutine():
+        return _orig_sendmsg(self, buffers, ancdata, flags, address)
+    _make_nonblocking(self)
+    while True:
+        try:
+            return _orig_sendmsg(self, buffers, ancdata, flags, address)
+        except (BlockingIOError, InterruptedError):
+            pygo_core.wait_fd(self.fileno(), WRITE)
+
+
 _orig_close   = None
 _orig_detach  = None
 _netpoll_unregister = getattr(pygo_core, "netpoll_unregister", None)
@@ -559,6 +655,7 @@ def _patched_detach(self):
 def _patch_socket():
     global _orig_recv, _orig_recv_into, _orig_send, _orig_sendall, _orig_accept
     global _orig_connect, _orig_recvfrom, _orig_sendto, _orig_close, _orig_detach
+    global _orig_recvmsg, _orig_recvmsg_into, _orig_sendmsg
     s = socket.socket
     _orig_recv      = s.recv
     _orig_recv_into = s.recv_into
@@ -580,6 +677,14 @@ def _patch_socket():
     s.sendto    = _patched_sendto
     s.close     = _patched_close
     s.detach    = _patched_detach
+    if _HAVE_RECVMSG:
+        _orig_recvmsg      = s.recvmsg
+        _orig_recvmsg_into = s.recvmsg_into
+        s.recvmsg      = _patched_recvmsg
+        s.recvmsg_into = _patched_recvmsg_into
+    if _HAVE_SENDMSG:
+        _orig_sendmsg = s.sendmsg
+        s.sendmsg     = _patched_sendmsg
 
 
 def _unpatch_socket():
@@ -594,6 +699,11 @@ def _unpatch_socket():
     s.sendto    = _orig_sendto
     s.close     = _orig_close
     s.detach    = _orig_detach
+    if _HAVE_RECVMSG:
+        s.recvmsg      = _orig_recvmsg
+        s.recvmsg_into = _orig_recvmsg_into
+    if _HAVE_SENDMSG:
+        s.sendmsg = _orig_sendmsg
 
 
 # ============================================================
@@ -778,6 +888,273 @@ def _patch_select():
 
 def _unpatch_select():
     _select_mod.select = _orig_select_select
+
+
+# ============================================================
+# selectors -- cooperative select.poll / select.epoll / select.kqueue
+#
+# The high-level `selectors` module is what modern stdlib actually blocks
+# on: selectors.DefaultSelector is EpollSelector on Linux, KqueueSelector
+# on *BSD/macOS, and subprocess.communicate() uses PollSelector.  None of
+# those route through select.select (only SelectSelector does, and that is
+# already covered by the `select` category).  Each of the others builds its
+# backing object by calling select.poll() / select.epoll() / select.kqueue()
+# at instantiation time -- looked up dynamically on the `select` module --
+# so replacing those three factories with cooperative wrappers makes the
+# whole `selectors` module cooperative for free, and also covers code that
+# uses select.poll/epoll/kqueue directly (socketserver, asyncore-style
+# loops, hand-rolled poll loops).
+#
+# Strategy per primitive:
+#   epoll / kqueue: the object owns a real kernel fd (fileno()), and an
+#     epoll/kqueue fd is itself pollable -- it signals readable exactly when
+#     it has >=1 ready event.  So we park on wait_fd(self.fileno(), READ)
+#     and then drain with a non-blocking poll(0).  Fully event-driven, no
+#     busy-poll, no goroutine fan-out, no leaked parkers.
+#   poll: select.poll has no backing fd, so we fall back to a non-blocking
+#     poll(0) + cooperative yield loop (same shape as multi-fd select.select).
+#
+# Outside a goroutine every wrapper degrades to the real blocking call, so
+# helper threads keep working after patch().
+# ============================================================
+_real_select_poll  = getattr(_select_mod, "poll", None)
+_real_select_epoll = getattr(_select_mod, "epoll", None)
+_real_select_kqueue = getattr(_select_mod, "kqueue", None)
+
+# Cap on how long a single cooperative wait blocks before re-probing, so a
+# wait that was registered before its fd became ready (or a level-triggered
+# edge we already drained) can never wedge longer than this.  The epoll/
+# kqueue fd readiness wakes us immediately in the common case; this is only
+# the backstop.
+_SELECTOR_REPROBE_S = 0.05
+
+
+def _backing_fd_wait(real_obj, deadline):
+    """Park on an epoll/kqueue object's own fd until it has ready events
+    (or the per-iteration re-probe cap elapses, or the caller deadline is
+    hit).  Returns False if the caller deadline has already passed."""
+    if deadline is not None:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        timeout_ms = max(1, int(min(_SELECTOR_REPROBE_S, remaining) * 1000))
+    else:
+        timeout_ms = int(_SELECTOR_REPROBE_S * 1000)
+    try:
+        pygo_core.wait_fd(real_obj.fileno(), READ, timeout_ms)
+    except OSError:
+        # fileno() gone (closed under us) or netpoll refused it -- let the
+        # caller re-probe with poll(0), which will surface the real error.
+        pass
+    return True
+
+
+class CoPoll(object):
+    """Cooperative wrapper around select.poll().
+
+    poll objects have no kernel fd of their own, so this is a non-blocking
+    poll(0) + yield loop -- the same proven shape as the multi-fd
+    select.select() path.  register/modify/unregister forward to the real
+    object via __getattr__."""
+    __slots__ = ("_r",)
+
+    def __init__(self):
+        self._r = _real_select_poll()
+
+    def poll(self, timeout=None):
+        # poll() timeout is in MILLISECONDS; None or negative == infinite.
+        if not _in_goroutine():
+            return self._r.poll(timeout)
+        if timeout is None or timeout < 0:
+            deadline = None
+        else:
+            deadline = time.monotonic() + timeout / 1000.0
+        step = 0.0005
+        while True:
+            ev = self._r.poll(0)
+            if ev:
+                return ev
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return []
+                _co_sleep(min(step, remaining))
+            else:
+                _co_sleep(step)
+            if step < 0.02:
+                step *= 2
+
+    def __getattr__(self, name):
+        return getattr(self._r, name)
+
+
+class CoEpoll(object):
+    """Cooperative wrapper around select.epoll(): parks on the epoll fd."""
+    __slots__ = ("_r",)
+
+    def __init__(self, sizehint=-1, flags=0):
+        self._r = _real_select_epoll(sizehint, flags)
+
+    @classmethod
+    def fromfd(cls, fd):
+        self = object.__new__(cls)
+        self._r = _real_select_epoll.fromfd(fd)
+        return self
+
+    def poll(self, timeout=None, maxevents=-1):
+        # epoll.poll() timeout is in SECONDS (float); None or negative ==
+        # infinite.  maxevents -1 == unlimited.
+        if not _in_goroutine():
+            return self._r.poll(timeout, maxevents)
+        if timeout is None or timeout < 0:
+            deadline = None
+        else:
+            deadline = time.monotonic() + timeout
+        while True:
+            ev = self._r.poll(0, maxevents)
+            if ev:
+                return ev
+            if not _backing_fd_wait(self._r, deadline):
+                return []
+
+    def fileno(self):
+        return self._r.fileno()
+
+    def close(self):
+        # The epoll fd is about to disappear; drop its netpoll registration
+        # so a later fd reuse re-registers cleanly (epoll.close() goes
+        # straight to the C close, bypassing our patched os.close).
+        if _netpoll_unregister is not None:
+            try:
+                fd = self._r.fileno()
+                if fd >= 0:
+                    _netpoll_unregister(fd)
+            except (OSError, ValueError):
+                pass
+        return self._r.close()
+
+    @property
+    def closed(self):
+        return self._r.closed
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        self.close()
+
+    def __getattr__(self, name):
+        return getattr(self._r, name)
+
+
+class CoKqueue(object):
+    """Cooperative wrapper around select.kqueue(): parks on the kqueue fd.
+
+    kqueue.control(changelist, max_events, timeout) both applies changes
+    and retrieves events.  We split it: apply the changelist with a
+    register-only control (max_events=0), then park on the kqueue fd and
+    drain with a non-blocking control."""
+    __slots__ = ("_r",)
+
+    def __init__(self):
+        self._r = _real_select_kqueue()
+
+    @classmethod
+    def fromfd(cls, fd):
+        self = object.__new__(cls)
+        self._r = _real_select_kqueue.fromfd(fd)
+        return self
+
+    def control(self, changelist, max_events, timeout=None):
+        # max_events == 0 means register-only (never waits) -- pass through.
+        if not _in_goroutine() or not max_events:
+            return self._r.control(changelist, max_events, timeout)
+        if changelist:
+            self._r.control(changelist, 0)          # apply, retrieve nothing
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while True:
+            ev = self._r.control(None, max_events, 0)
+            if ev:
+                return ev
+            if not _backing_fd_wait(self._r, deadline):
+                return []
+
+    def fileno(self):
+        return self._r.fileno()
+
+    def close(self):
+        if _netpoll_unregister is not None:
+            try:
+                fd = self._r.fileno()
+                if fd >= 0:
+                    _netpoll_unregister(fd)
+            except (OSError, ValueError):
+                pass
+        return self._r.close()
+
+    @property
+    def closed(self):
+        return self._r.closed
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        self.close()
+
+    def __getattr__(self, name):
+        return getattr(self._r, name)
+
+
+import selectors as _selectors_mod
+
+# selectors.PollSelector / EpollSelector / KqueueSelector each capture their
+# backing factory as a *class attribute* (_selector_cls) at import time, so
+# replacing select.poll/epoll/kqueue is not enough on its own -- the already
+# imported selector classes have to be flipped too.  We do both: the select.*
+# factories for code that uses select.poll()/epoll()/kqueue() directly, and
+# the selectors._selector_cls attributes for code that goes through the
+# high-level `selectors` module (subprocess, socketserver, http.server, ...).
+_orig_selector_cls = {}    # selectors class name -> original _selector_cls
+
+_SELECTORS_BINDINGS = (
+    ("PollSelector",   CoPoll,   _real_select_poll),
+    ("EpollSelector",  CoEpoll,  _real_select_epoll),
+    ("KqueueSelector", CoKqueue, _real_select_kqueue),
+)
+
+
+def _patch_selectors():
+    # Only patch what the platform actually provides: epoll is Linux-only,
+    # kqueue is *BSD/macOS-only, poll is most POSIX.
+    if _real_select_poll is not None:
+        _select_mod.poll = CoPoll
+    if _real_select_epoll is not None:
+        _select_mod.epoll = CoEpoll
+    if _real_select_kqueue is not None:
+        _select_mod.kqueue = CoKqueue
+    for clsname, co_cls, real_factory in _SELECTORS_BINDINGS:
+        if real_factory is None:
+            continue
+        sel_cls = getattr(_selectors_mod, clsname, None)
+        if sel_cls is None or not hasattr(sel_cls, "_selector_cls"):
+            continue
+        _orig_selector_cls[clsname] = sel_cls._selector_cls
+        sel_cls._selector_cls = co_cls
+
+
+def _unpatch_selectors():
+    if _real_select_poll is not None:
+        _select_mod.poll = _real_select_poll
+    if _real_select_epoll is not None:
+        _select_mod.epoll = _real_select_epoll
+    if _real_select_kqueue is not None:
+        _select_mod.kqueue = _real_select_kqueue
+    for clsname, orig in list(_orig_selector_cls.items()):
+        sel_cls = getattr(_selectors_mod, clsname, None)
+        if sel_cls is not None:
+            sel_cls._selector_cls = orig
+    _orig_selector_cls.clear()
 
 
 # ============================================================
@@ -1011,6 +1388,100 @@ def _unpatch_subprocess():
 
 
 # ============================================================
+# process -- os.waitpid / os.wait / os.waitid / os.system
+#
+# subprocess.Popen.wait is handled above, but bare os.wait* calls (used by
+# code that forks directly, by os.popen, by some test harnesses) and
+# os.system still block the OS thread.  On POSIX we make the wait family
+# cooperative with a WNOHANG poll loop; os.system has no non-blocking form,
+# so it is offloaded to the backend pool.  On Windows WNOHANG does not
+# exist, so os.waitpid is offloaded too.
+# ============================================================
+_orig_os_waitpid = None
+_orig_os_wait    = None
+_orig_os_waitid  = None
+_orig_os_system  = None
+
+_HAVE_WNOHANG = hasattr(os, "WNOHANG")
+
+
+def _patched_os_waitpid(pid, options):
+    if not _in_goroutine():
+        return _orig_os_waitpid(pid, options)
+    if not _HAVE_WNOHANG:
+        # Windows: no polling form -- offload the blocking wait.
+        return _blocking_call(_orig_os_waitpid, pid, options)
+    if options & os.WNOHANG:
+        return _orig_os_waitpid(pid, options)
+    step = 0.0005
+    while True:
+        # WNOHANG returns (0, 0) when the requested child has not yet
+        # changed state; ECHILD (no such child) propagates as it should.
+        r = _orig_os_waitpid(pid, options | os.WNOHANG)
+        if r[0] != 0:
+            return r
+        _co_sleep(step)
+        if step < 0.02:
+            step *= 2
+
+
+def _patched_os_wait():
+    if not _in_goroutine() or not _HAVE_WNOHANG:
+        return _orig_os_wait()
+    # os.wait() == waitpid(-1, 0): wait for any child.
+    return _patched_os_waitpid(-1, 0)
+
+
+def _patched_os_waitid(idtype, id, options):
+    if not _in_goroutine():
+        return _orig_os_waitid(idtype, id, options)
+    if options & os.WNOHANG:
+        return _orig_os_waitid(idtype, id, options)
+    step = 0.0005
+    while True:
+        # waitid with WNOHANG returns None when no child has changed state.
+        r = _orig_os_waitid(idtype, id, options | os.WNOHANG)
+        if r is not None:
+            return r
+        _co_sleep(step)
+        if step < 0.02:
+            step *= 2
+
+
+def _patched_os_system(command):
+    # No non-blocking form; run it on the backend pool so the goroutine
+    # parks instead of freezing the scheduler for the child's lifetime.
+    return _blocking_call(_orig_os_system, command)
+
+
+def _patch_process():
+    global _orig_os_waitpid, _orig_os_wait, _orig_os_waitid, _orig_os_system
+    if hasattr(os, "waitpid"):
+        _orig_os_waitpid = os.waitpid
+        os.waitpid = _patched_os_waitpid
+    if hasattr(os, "wait"):
+        _orig_os_wait = os.wait
+        os.wait = _patched_os_wait
+    if hasattr(os, "waitid"):
+        _orig_os_waitid = os.waitid
+        os.waitid = _patched_os_waitid
+    if hasattr(os, "system"):
+        _orig_os_system = os.system
+        os.system = _patched_os_system
+
+
+def _unpatch_process():
+    if _orig_os_waitpid is not None:
+        os.waitpid = _orig_os_waitpid
+    if _orig_os_wait is not None:
+        os.wait = _orig_os_wait
+    if _orig_os_waitid is not None:
+        os.waitid = _orig_os_waitid
+    if _orig_os_system is not None:
+        os.system = _orig_os_system
+
+
+# ============================================================
 # threading -- cooperative Lock / RLock / Event / Condition / Semaphore
 # ============================================================
 _real_Lock      = _th.Lock
@@ -1074,6 +1545,13 @@ class CoLock(object):
 
     def release(self):
         if not self._locked:
+            # A forked child running stdlib teardown (threading._after_fork)
+            # can reach a release whose matching acquire happened in the
+            # parent / under an identity that no longer exists here.  That is
+            # benign post-fork noise, not a real double-release, so swallow
+            # it; a genuine in-process double-release still raises.
+            if _is_forked_child():
+                return
             raise RuntimeError("release unlocked lock")
         self._owner = None
         if self._waiters:
@@ -1103,7 +1581,13 @@ class CoRLock(object):
 
     def acquire(self, blocking=True, timeout=-1):
         cur = pygo.current() if _in_goroutine() else _real_get_ident()
-        if self._owner == cur:
+        # `self._owner is not None` guard: a fresh/released lock has owner
+        # None, and a caller whose identity is also None (e.g. the forked
+        # child running threading._after_fork, where no scheduler is live so
+        # pygo.current() is None) must NOT be mistaken for the owner -- that
+        # would skip the real inner acquire and then blow up on release with
+        # "release unlocked lock".
+        if self._owner is not None and self._owner == cur:
             self._count += 1
             return True
         ok = self._lock.acquire(blocking, timeout)
@@ -1115,6 +1599,16 @@ class CoRLock(object):
     def release(self):
         cur = pygo.current() if _in_goroutine() else _real_get_ident()
         if self._owner != cur:
+            # In a forked child pygo.current() returns a different G each
+            # call, so a legitimate acquire/release pair (e.g. the CoRLock
+            # threading._after_fork builds for _active_limbo_lock) looks like
+            # a foreign release.  Detect the fork and reset instead of raising.
+            if _is_forked_child():
+                self._count = 0
+                self._owner = None
+                if self._lock.locked():
+                    self._lock.release()
+                return
             raise RuntimeError("cannot release un-acquired lock")
         self._count -= 1
         if self._count == 0:
@@ -1324,13 +1818,49 @@ class CoBoundedSemaphore(CoSemaphore):
         CoSemaphore.release(self, n)
 
 
+_orig_thread_join = None
+
+
+def _patched_thread_join(self, timeout=None):
+    """Cooperative Thread.join: a goroutine joining a real OS thread polls
+    is_alive() in a _co_sleep loop instead of parking the scheduler on the
+    thread's C-level _tstate_lock (which only the dying thread can release,
+    so a plain join would freeze every other goroutine until it does).
+
+    Outside a goroutine, the real blocking join is used.  The not-started /
+    join-self guards mirror threading.Thread.join so error semantics match."""
+    if not self._initialized:
+        raise RuntimeError("Thread.__init__() not called")
+    if not _in_goroutine():
+        return _orig_thread_join(self, timeout)
+    if not self._started.is_set():
+        raise RuntimeError("cannot join thread before it is started")
+    if self is _th.current_thread():
+        raise RuntimeError("cannot join current thread")
+    deadline = None if timeout is None else time.monotonic() + timeout
+    step = 0.0005
+    while self.is_alive():
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            _co_sleep(min(step, remaining))
+        else:
+            _co_sleep(step)
+        if step < 0.02:
+            step *= 2
+
+
 def _patch_threading():
+    global _orig_thread_join
     _th.Lock      = CoLock
     _th.RLock     = CoRLock
     _th.Event     = CoEvent
     _th.Condition = CoCondition
     _th.Semaphore = CoSemaphore
     _th.BoundedSemaphore = CoBoundedSemaphore
+    _orig_thread_join = _th.Thread.join
+    _th.Thread.join = _patched_thread_join
 
 
 def _unpatch_threading():
@@ -1340,29 +1870,128 @@ def _unpatch_threading():
     _th.Condition = _real_Condition
     _th.Semaphore = _real_Semaphore
     _th.BoundedSemaphore = _real_BoundedSemaphore
+    if _orig_thread_join is not None:
+        _th.Thread.join = _orig_thread_join
 
 
 # ============================================================
-# queue  -- no-op; queue.Queue picks up CoLock/CoCondition at __init__
+# queue  -- queue.Queue picks up CoLock/CoCondition at __init__ for free;
+# queue.SimpleQueue is a C type (_queue.SimpleQueue) whose .get(block=True)
+# parks on a C lock the scheduler can't wake, so it needs a cooperative
+# replacement.  SimpleQueue is used by logging.handlers.QueueHandler /
+# QueueListener and by ThreadPoolExecutor's work queue, so goroutine code
+# bumps into it more than you'd expect.
 # ============================================================
+import queue as _queue_mod
+
+_real_SimpleQueue = _queue_mod.SimpleQueue
+
+
+class CoSimpleQueue(object):
+    """Cooperative, unbounded FIFO matching queue.SimpleQueue's surface.
+
+    put() never blocks (SimpleQueue is unbounded), so the block/timeout
+    args are accepted and ignored exactly as the C type does.  get() parks
+    the goroutine on a parker when empty; a producer hands the next item to
+    the longest-waiting getter."""
+    __slots__ = ("_items", "_waiters")
+
+    def __init__(self):
+        self._items   = collections.deque()
+        self._waiters = collections.deque()
+
+    def put(self, item, block=True, timeout=None):
+        self._items.append(item)
+        while self._waiters:
+            # Wake one waiter; if it already timed out (released its parker)
+            # the unpark is harmless, so loop until we hand off to a live one
+            # or run out -- but a single live waiter is the normal case.
+            self._waiters.popleft().unpark()
+            break
+
+    def put_nowait(self, item):
+        self.put(item, False)
+
+    def get(self, block=True, timeout=None):
+        if self._items:
+            return self._items.popleft()
+        if not block:
+            raise _queue_mod.Empty
+        if not _in_goroutine():
+            # No goroutine to park; spin + yield to the OS so a producer on
+            # a real thread can fill us.
+            t0 = time.monotonic()
+            while not self._items:
+                _raw_time_sleep(0.0001)
+                if timeout is not None and time.monotonic() - t0 >= timeout:
+                    raise _queue_mod.Empty
+            return self._items.popleft()
+        p = _Parker()
+        # _Parker() may yield (Windows socketpair path); re-check first.
+        if self._items:
+            p.release()
+            return self._items.popleft()
+        self._waiters.append(p)
+        if timeout is None:
+            p.park()
+        else:
+            deadline = time.monotonic() + timeout
+            done = [False]
+            def waker(parker=p, dl=deadline):
+                while not done[0]:
+                    remaining = dl - time.monotonic()
+                    if remaining <= 0:
+                        parker.unpark()
+                        return
+                    _co_sleep(min(remaining, 0.05))
+            pygo_core.go(waker)
+            p.park()
+            done[0] = True
+        p.release()
+        if self._items:
+            return self._items.popleft()
+        # Woken with nothing to take -> timed out.
+        try:
+            self._waiters.remove(p)
+        except ValueError:
+            pass
+        raise _queue_mod.Empty
+
+    def get_nowait(self):
+        return self.get(False)
+
+    def empty(self):
+        return not self._items
+
+    def qsize(self):
+        return len(self._items)
+
+
 def _patch_queue():
-    # Queue uses `threading.Lock()` and `threading.Condition()` at
-    # instantiation time, so once threading is patched, every new Queue
-    # is already cooperative.  Nothing to do here.
-    pass
+    # Queue uses threading.Lock()/Condition() at instantiation, so once
+    # threading is patched every new Queue is already cooperative.  Only
+    # SimpleQueue (C type) needs swapping out.
+    _queue_mod.SimpleQueue = CoSimpleQueue
 
 def _unpatch_queue():
-    pass
+    _queue_mod.SimpleQueue = _real_SimpleQueue
 
 
 # ============================================================
 # file -- builtins.open dispatched through the backend
 #
-# Once open() lands on a regular file, read/write traffic flows through
-# os.read/os.write, which we already dispatch to the backend for
-# non-pollable fds.  Wrapping open() itself covers the open syscall
-# (cold-inode lookups, NFS, FUSE, slow disk) so the goroutine doesn't
-# block the scheduler waiting on it.
+# Wrapping open() covers the open syscall itself (cold-inode lookups, NFS,
+# FUSE, slow disk) so the goroutine doesn't freeze the scheduler waiting on
+# it.  NOTE: the returned file object's later .read()/.write() do NOT go
+# through our os.read/os.write patches -- io.FileIO issues the read()/write()
+# syscalls directly in C, bypassing the os module entirely.  For local,
+# page-cache-warm files that is fast and invisible.  For genuinely slow
+# media (NFS/FUSE/cold spindle) a large .read() can still stall the
+# scheduler; callers on slow storage that care should use
+# pygo.monkey._blocking_call(f.read, n) or os.read on the raw fd (which IS
+# offloaded for regular files).  Offloading every buffered read/write is
+# possible but adds a backend round trip to the common fast case, so it is
+# deliberately left out of v0.
 # ============================================================
 _orig_open = None
 
@@ -1865,17 +2494,20 @@ def _uninstall_go_wrapper():
         _orig_pygo_core_mn_go = None
 
 
-_DEFAULTS = ("socket", "time", "os", "select", "stdio", "ssl",
-             "subprocess", "threading", "queue", "file", "syscalls", "dns")
+_DEFAULTS = ("socket", "time", "os", "select", "selectors", "stdio", "ssl",
+             "subprocess", "process", "threading", "queue", "file",
+             "syscalls", "dns")
 
 _PATCHERS = {
     "socket":     (_patch_socket,     _unpatch_socket),
     "time":       (_patch_time,       _unpatch_time),
     "os":         (_patch_os,         _unpatch_os),
     "select":     (_patch_select,     _unpatch_select),
+    "selectors":  (_patch_selectors,  _unpatch_selectors),
     "stdio":      (_patch_stdio,      _unpatch_stdio),
     "ssl":        (_patch_ssl,        _unpatch_ssl),
     "subprocess": (_patch_subprocess, _unpatch_subprocess),
+    "process":    (_patch_process,    _unpatch_process),
     "threading":  (_patch_threading,  _unpatch_threading),
     "queue":      (_patch_queue,      _unpatch_queue),
     "file":       (_patch_file,       _unpatch_file),
@@ -1892,8 +2524,9 @@ def patch(**flags):
     All categories default to True.  Pass keyword False to opt out:
         pygo.monkey.patch(threading=False, dns=False)
 
-    Categories: socket, time, os, select, stdio, ssl, subprocess,
-    threading, queue, dns.  See module docstring.
+    Categories: socket, time, os, select, selectors, stdio, ssl,
+    subprocess, process, threading, queue, file, syscalls, dns.  See
+    module docstring.
     """
     unknown = set(flags) - set(_PATCHERS)
     if unknown:
