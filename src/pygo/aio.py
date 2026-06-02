@@ -1990,17 +1990,36 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
     # event never fires, the queued request never flushes, the peer hangs.  So a
     # single per-fd goroutine parks on the UNION mask and dispatches by the
     # ready mask wait_fd returns; interest changes wake it to re-evaluate.
+    def _pg_fileobj_to_fd(self, fileobj):
+        # asyncio/selectors contract: accept an int fd or an object exposing
+        # fileno(); anything else is a ValueError (test_add_reader_invalid_
+        # argument).  Without this an arbitrary object would be stored as a live
+        # io key and silently ignored instead of erroring.
+        if isinstance(fileobj, int):
+            fd = fileobj
+        else:
+            try:
+                fd = int(fileobj.fileno())
+            except (AttributeError, TypeError, ValueError):
+                raise ValueError(
+                    "Invalid file object: {0!r}".format(fileobj)) from None
+        if fd < 0:
+            raise ValueError("Invalid file descriptor: {0}".format(fd))
+        return fd
+
     def add_reader(self, fd, callback, *args):
-        return self._pg_set_io(fd, 1, _Handle(callback, args, self))
+        return self._pg_set_io(self._pg_fileobj_to_fd(fd), 1,
+                               _Handle(callback, args, self))
 
     def remove_reader(self, fd):
-        return self._pg_clear_io(fd, 1)
+        return self._pg_clear_io(self._pg_fileobj_to_fd(fd), 1)
 
     def add_writer(self, fd, callback, *args):
-        return self._pg_set_io(fd, 2, _Handle(callback, args, self))
+        return self._pg_set_io(self._pg_fileobj_to_fd(fd), 2,
+                               _Handle(callback, args, self))
 
     def remove_writer(self, fd):
-        return self._pg_clear_io(fd, 2)
+        return self._pg_clear_io(self._pg_fileobj_to_fd(fd), 2)
 
     def _pg_set_io(self, fd, evt, handle):
         st = self._io.get(fd)
