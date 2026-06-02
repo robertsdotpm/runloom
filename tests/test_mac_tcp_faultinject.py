@@ -46,8 +46,10 @@ WORKLOAD = os.path.join(HERE, "tcp_fault_workload.py")
 # Darwin/BSD errno values (identical across macOS + the BSDs for these).
 EINTR, ENOMEM = 4, 12
 ENFILE, EMFILE = 23, 24
-EADDRNOTAVAIL = 49
-ECONNABORTED, ECONNRESET, ECONNREFUSED = 53, 54, 61
+EPIPE = 32
+EADDRNOTAVAIL, ENETUNREACH = 49, 51
+ECONNABORTED, ECONNRESET, ENOBUFS = 53, 54, 55
+ENOTCONN, ETIMEDOUT, ECONNREFUSED = 57, 60, 61
 
 
 def _run(site, spec, mode, timeout=30):
@@ -122,6 +124,42 @@ def test_connect_econnrefused_surfaces_oserror():
                          ids=["EMFILE", "ENFILE", "ENOMEM"])
 def test_socket_creation_failure_surfaces_oserror(errno_):
     p = _run("TCP_SOCKET", "once:%d" % errno_, "connectonly")
+    assert p.returncode == 42, (errno_, p.stdout, p.stderr)
+    assert "errno=%d" % errno_ in p.stdout, p.stdout
+
+
+# ---- errno breadth: every other non-retryable return -> a clean OSError -----
+
+@pytest.mark.parametrize("errno_", [EPIPE, ENOBUFS], ids=["EPIPE", "ENOBUFS"])
+def test_send_hard_error_surfaces_oserror(errno_):
+    """A non-retryable send error (peer gone / buffers exhausted) surfaces as a
+    clean OSError -- matches Go's netFD.Write (neither retries these)."""
+    p = _run("TCP_SEND", "once:%d" % errno_, "sendonce")
+    assert p.returncode == 42, (errno_, p.stdout, p.stderr)
+    assert "errno=%d" % errno_ in p.stdout, p.stdout
+
+
+@pytest.mark.parametrize("errno_", [EADDRNOTAVAIL, ENETUNREACH, ETIMEDOUT],
+                         ids=["EADDRNOTAVAIL", "ENETUNREACH", "ETIMEDOUT"])
+def test_connect_hard_error_surfaces_oserror(errno_):
+    p = _run("TCP_CONNECT", "once:%d" % errno_, "connectonly")
+    assert p.returncode == 42, (errno_, p.stdout, p.stderr)
+    assert "errno=%d" % errno_ in p.stdout, p.stdout
+
+
+@pytest.mark.parametrize("errno_", [ENOTCONN, ETIMEDOUT],
+                         ids=["ENOTCONN", "ETIMEDOUT"])
+def test_recv_hard_error_surfaces_oserror(errno_):
+    p = _run("TCP_RECV", "once:%d" % errno_, "recvonce")
+    assert p.returncode == 42, (errno_, p.stdout, p.stderr)
+    assert "errno=%d" % errno_ in p.stdout, p.stdout
+
+
+@pytest.mark.parametrize("errno_", [EMFILE, ENFILE], ids=["EMFILE", "ENFILE"])
+def test_accept_hard_error_surfaces_oserror(errno_):
+    """accept() fd-exhaustion (EMFILE/ENFILE) surfaces as a clean OSError to the
+    accepting goroutine -- the listener is unharmed, no crash, no hang."""
+    p = _run("TCP_ACCEPT", "once:%d" % errno_, "acceptfail")
     assert p.returncode == 42, (errno_, p.stdout, p.stderr)
     assert "errno=%d" % errno_ in p.stdout, p.stdout
 

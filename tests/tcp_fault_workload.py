@@ -168,6 +168,66 @@ def mode_recvonce():
     return 0
 
 
+def mode_sendonce():
+    # One socket connected to a PASSIVE listener (never accepted): a single
+    # send with an injected non-retryable error must surface as OSError.  No
+    # peer goroutine parks, so an injected send failure cannot hang the run.
+    lsock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    lsock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    lsock.bind(("127.0.0.1", 0))
+    lsock.listen(16)
+    target_port = lsock.getsockname()[1]
+    box = {}
+
+    def client():
+        try:
+            c = pygo_core.TCPConn.connect("127.0.0.1", target_port)
+            c.send_all(b"x" * 64)
+            box["sent"] = True
+            c.close()
+        except OSError as e:
+            box["errno"] = e.errno
+
+    _drive(client)
+    lsock.close()
+    if "errno" in box:
+        print("OSERROR errno=%s" % box["errno"])
+        return 42
+    print("SENT ok=%s" % box.get("sent"))
+    return 0
+
+
+def mode_acceptfail():
+    # A real (raw) client fills the accept queue, then a single accept() with an
+    # injected non-retryable error must surface as OSError -- no peer goroutine
+    # parks, so the workload cannot hang.
+    listener = pygo_core.TCPConn.listen("127.0.0.1", 0)
+    target_port = _port(listener)
+    raw = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    raw.connect(("127.0.0.1", target_port))
+    box = {}
+
+    def server():
+        try:
+            conn = listener.accept()
+            box["ok"] = True
+            conn.close()
+        except OSError as e:
+            box["errno"] = e.errno
+
+    _drive(server)
+    raw.close()
+    listener.close()
+    if "errno" in box:
+        print("OSERROR errno=%s" % box["errno"])
+        return 42
+    if box.get("ok"):
+        print("OK accept")
+        return 0
+    print("FAIL box=%r" % box)
+    return 1
+
+
 def main():
     mode = sys.argv[1] if len(sys.argv) > 1 else "echo"
     dispatch = {
@@ -175,6 +235,8 @@ def main():
         "connectrefused": mode_connectrefused,
         "connectonly": mode_connectonly,
         "recvonce": mode_recvonce,
+        "sendonce": mode_sendonce,
+        "acceptfail": mode_acceptfail,
     }
     fn = dispatch.get(mode)
     if fn is None:
