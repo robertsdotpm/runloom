@@ -858,11 +858,17 @@ select_retry:
          * no further claim can occur and fired_case is frozen -- THEN
          * re-read it.  A value claimed before/during the eviction is now
          * safely captured in waiters[fired]; only a still-unset fired_case
-         * is genuinely spurious and retries (Go's spurious-wakeup path). */
-        fired = park.fired_case;
+         * is genuinely spurious and retries (Go's spurious-wakeup path).
+         *
+         * Acquire-load: fired_case is claimed by waiter_claim's ACQ_REL CAS on
+         * another thread; reading it plain was a data race (TSan) and, on weak
+         * HW, could observe fired_case >= 0 while waiters[fired].value (written
+         * before the release-CAS) was still stale.  The acquire pairs with that
+         * release so the captured value is visible. */
+        fired = __atomic_load_n(&park.fired_case, __ATOMIC_ACQUIRE);
         if (fired < 0) {
             select_evict_self(cases, n, waiters, /*fired*/-1);
-            fired = park.fired_case;          /* re-read: now stable */
+            fired = __atomic_load_n(&park.fired_case, __ATOMIC_ACQUIRE);  /* re-read: now stable */
             if (fired < 0) {
                 int j;
                 for (j = 0; j < n; j++) {

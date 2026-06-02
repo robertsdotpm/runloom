@@ -1746,9 +1746,20 @@ int pygo_netpoll_wake_pump_arm(void)
     struct epoll_event ev;
     int fd;
     if (pygo_netpoll_init() != 0) return -1;
-    if (pygo_pump_wake_fd >= 0) return 0;
+    /* Fast path: already armed.  Acquire-load pairs with the release-store
+     * below (and matches the waker's load in pygo_netpoll_wake_pump). */
+    if (__atomic_load_n(&pygo_pump_wake_fd, __ATOMIC_ACQUIRE) >= 0) return 0;
+    /* Serialise the lazy create under pygo_pool.lock -- the file's convention
+     * for once-init globals.  Without it two hub threads arming concurrently
+     * each create+register an eventfd and one leaks (registered, never fired),
+     * besides the read/write data race TSan flagged. */
+    pygo_mutex_lock(&pygo_pool.lock);
+    if (__atomic_load_n(&pygo_pump_wake_fd, __ATOMIC_RELAXED) >= 0) {
+        pygo_mutex_unlock(&pygo_pool.lock);
+        return 0;
+    }
     fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
-    if (fd < 0) return -1;
+    if (fd < 0) { pygo_mutex_unlock(&pygo_pool.lock); return -1; }
     /* Level-triggered, NOT exclusive: the single-thread scheduler is the
      * only pumper that blocks indefinitely, so there is no thundering
      * herd; the pump drains it on fire to clear the level. */
@@ -1756,9 +1767,11 @@ int pygo_netpoll_wake_pump_arm(void)
     ev.data.fd = fd;
     if (epoll_ctl(pygo_epoll_fd, EPOLL_CTL_ADD, fd, &ev) < 0 && errno != EEXIST) {
         close(fd);
+        pygo_mutex_unlock(&pygo_pool.lock);
         return -1;
     }
-    pygo_pump_wake_fd = fd;
+    __atomic_store_n(&pygo_pump_wake_fd, fd, __ATOMIC_RELEASE);
+    pygo_mutex_unlock(&pygo_pool.lock);
     return 0;
 #elif defined(PYGO_OS_WINDOWS)
     /* IOCP: PostQueuedCompletionStatus wakes an idle
@@ -2451,7 +2464,8 @@ int pygo_netpoll_pump(long long timeout_ns)
                  * epoll_wait.  Drain its counter to clear the level and
                  * loop -- the re-queued goroutine is already on the
                  * scheduler's wake_list/ready, picked up by the drain. */
-                if (pygo_pump_wake_fd >= 0 && fd == pygo_pump_wake_fd) {
+                if (__atomic_load_n(&pygo_pump_wake_fd, __ATOMIC_ACQUIRE) == fd
+                    && fd >= 0) {
                     uint64_t v;
                     ssize_t r = read(fd, &v, sizeof v);
                     (void)r;

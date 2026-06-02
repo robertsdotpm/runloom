@@ -472,7 +472,9 @@ static volatile int pygo_handoff_stop = 0;
 PYGO_INLINE void pygo_hub_resume_begin(pygo_hub_t *h, pygo_g_t *g)
 {
     if (__builtin_expect(pygo_sysmon_enabled, 0)) {
-        h->resume_g = g;
+        /* Relaxed-atomic like its two siblings below: the sysmon thread reads
+         * resume_g concurrently for the wedge log (best-effort sample). */
+        __atomic_store_n(&h->resume_g, g, __ATOMIC_RELAXED);
         __atomic_add_fetch(&h->resume_seq, 1, __ATOMIC_RELAXED);
         __atomic_store_n(&h->resume_start_ns, pygo_monotonic_ns(),
                          __ATOMIC_RELAXED);
@@ -559,7 +561,14 @@ static PyObject *pygo_preempt_eval_frame(PyThreadState *ts,
         pygo_tls_self_queued = 1;
         pygo_coro_yield();
     }
-    return pygo_preempt_prev_eval(ts, frame, throwflag);
+    /* Acquire-load: install/uninstall (other thread, or main during the
+     * init/fini windows while hub gs already run Python) writes this pointer
+     * with release; a plain read on the per-frame hot path was a data race. */
+    {
+        _PyFrameEvalFunction prev =
+            __atomic_load_n(&pygo_preempt_prev_eval, __ATOMIC_ACQUIRE);
+        return prev(ts, frame, throwflag);
+    }
 }
 #endif
 
@@ -572,7 +581,11 @@ static void pygo_preempt_install(PyInterpreterState *interp)
 {
 #if PY_VERSION_HEX >= 0x030D0000
     if (!pygo_preempt_enabled) return;
-    pygo_preempt_prev_eval = _PyInterpreterState_GetEvalFrameFunc(interp);
+    /* Release-store so the eval hook's acquire-load sees a fully-published
+     * prev pointer; pairs with the load in pygo_preempt_eval_frame. */
+    __atomic_store_n(&pygo_preempt_prev_eval,
+                     _PyInterpreterState_GetEvalFrameFunc(interp),
+                     __ATOMIC_RELEASE);
     _PyInterpreterState_SetEvalFrameFunc(interp, pygo_preempt_eval_frame);
 #else
     (void)interp;
@@ -582,9 +595,13 @@ static void pygo_preempt_install(PyInterpreterState *interp)
 static void pygo_preempt_uninstall(PyInterpreterState *interp)
 {
 #if PY_VERSION_HEX >= 0x030D0000
-    if (!pygo_preempt_enabled || pygo_preempt_prev_eval == NULL) return;
-    _PyInterpreterState_SetEvalFrameFunc(interp, pygo_preempt_prev_eval);
-    pygo_preempt_prev_eval = NULL;
+    {
+        _PyFrameEvalFunction prev =
+            __atomic_load_n(&pygo_preempt_prev_eval, __ATOMIC_ACQUIRE);
+        if (!pygo_preempt_enabled || prev == NULL) return;
+        _PyInterpreterState_SetEvalFrameFunc(interp, prev);
+        __atomic_store_n(&pygo_preempt_prev_eval, NULL, __ATOMIC_RELEASE);
+    }
 #else
     (void)interp;
 #endif
@@ -1546,7 +1563,8 @@ static PYGO_THREAD_RET pygo_sysmon_main(void *arg)
                 fprintf(stderr,
                     "[PYGO_SYSMON] hub %d WEDGED %.1f ms in g=%p tstate=%s -- "
                     "%ld g(s) stranded on this hub\n",
-                    i, (double)(now - start) / 1e6, (void *)h->resume_g, cls,
+                    i, (double)(now - start) / 1e6,
+                    (void *)__atomic_load_n(&h->resume_g, __ATOMIC_RELAXED), cls,
                     pend > 0 ? pend - 1 : 0);
                 w_seq[i]   = seq;
                 w_start[i] = start;
