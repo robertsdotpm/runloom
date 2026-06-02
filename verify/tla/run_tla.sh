@@ -54,6 +54,33 @@ else
     echo "FAIL -- removing the rescue should strand a wedged hub's work"; fail=$((fail+1))
 fi
 
+# ---- Controlled M:N scheduler (PYGO_MN_SEED experiment): the baton +
+# rendezvous protocol.  Correct = mutual-exclusion + deadlock-free +
+# deterministic grant.  Two negative controls model the two real obstacles:
+# no preemption -> a CPU-bound hub starves all (the deadlock fixed by keeping
+# preemption on); no barrier -> a grant over a partial requester set (the
+# residual nondeterminism the rendezvous removes).
+printf '  [tlc] %-28s ' "PygoMNControl (correct)"
+if run_tlc mnok -config PygoMNControl.cfg PygoMNControl.tla | grep -q "No error has been found"; then
+    echo "PASS -- MutualExclusion/BatonConsistent/DeterministicGrant + AllRun (no deadlock)"; pass=$((pass+1))
+else
+    echo "FAIL -- controlled-baton+rendezvous spec should hold"; fail=$((fail+1))
+fi
+
+printf '  [tlc] %-28s ' "PygoMNControl (Preempt=FALSE)"
+if run_tlc mnnp -config PygoMNControl_nopreempt.cfg PygoMNControl.tla | grep -q "Temporal properties were violated"; then
+    echo "PASS -- correctly DETECTS the baton deadlock (CPU-bound hub starves all) without preemption"; pass=$((pass+1))
+else
+    echo "FAIL -- no preemption should violate AllRun (liveness)"; fail=$((fail+1))
+fi
+
+printf '  [tlc] %-28s ' "PygoMNControl (Barrier=FALSE)"
+if run_tlc mnnb -config PygoMNControl_nobarrier.cfg PygoMNControl.tla | grep -q "is violated"; then
+    echo "PASS -- correctly DETECTS a grant over a partial requester set (nondeterminism) without the rendezvous"; pass=$((pass+1))
+else
+    echo "FAIL -- no barrier should violate DeterministicGrant"; fail=$((fail+1))
+fi
+
 "$(command -v safe-rm || echo rm)" -rf "$META"
 echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
