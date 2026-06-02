@@ -17,12 +17,14 @@ for liveness — see below). Off by default; zero cost when unset.
 ## Deterministic replay (the barrier-rendezvous)
 
 Same `PYGO_MN_SEED` ⇒ **identical execution**, run to run — verified by
-`repro_probe.py` (16/16 seeds reproduce identically; seed 1 identical over
-500/500 reps under heavy CPU load; distinct seeds still explore distinct
-interleavings). The baton alone is *not* enough — it serializes who runs, but the
-requester set and the goroutine each hub holds still raced OS timing. Four levers,
-gated together behind `PYGO_MN_BARRIER` (default on under a seed;
-`PYGO_MN_BARRIER=0` reverts to timing-dependent exploration for A/B):
+`repro_probe.py` (single channel: 16/16 seeds identical, seed 1 identical over
+500/500 reps under heavy CPU load) and `repro_select.py` (select over multiple
+channels + mid-run goroutine spawn: 10/10 seeds identical). Distinct seeds still
+explore distinct interleavings. The baton alone is *not* enough — it serializes
+who runs, but the requester set, the goroutine each hub holds, and the preemption
+point still raced OS timing. Five levers, gated together behind `PYGO_MN_BARRIER`
+(default on under a seed; `PYGO_MN_BARRIER=0` reverts to timing-dependent
+exploration for A/B):
 
 1. **Barrier-rendezvous census.** The controller grants the baton only once the
    requester set for the round is *complete* — every hub has checked in, as a
@@ -40,45 +42,48 @@ gated together behind `PYGO_MN_BARRIER` (default on under a seed;
    gate.
 3. **No work-stealing.** With deterministic `mn_go` placement
    (`spawn_counter % hub_count`) and hub-pinned wakes, disabling steal makes each
-   hub's execution stream a fixed function of the schedule — closing the last gap
+   hub's execution stream a fixed function of the schedule — closing the gap
    where an identical grant sequence still produced different goroutine orderings.
    Steal is a lock-free, sub-segment CAS race; it is covered by the memory-model
    tools (`verify/` GenMC / herd7, `tools/lincheck`), not by segment-granularity
    replay, so dropping it here loses no coverage that lives at this level.
+4. **Census-idle wake-guard.** `census_idle` must not declare a hub idle on a
+   drain that *predates* a wake: hub Y drains its sub_list (empty) → hub X's
+   segment wakes a goroutine onto Y → X releases (new round) → Y checks in *idle*,
+   having missed the goroutine, so it runs a round late — timing-decided. Fix: Y
+   re-tests its sub_list under `sub_lock` *while holding the controller lock*
+   before declaring idle. Having observed the round (set under the controller lock
+   by the release that opened it), Y is guaranteed to see any wake the just-ended
+   segment published before that release (segment-wake → release happens-before
+   round-observed → sub re-test); if work is there it re-loops and drains it. This
+   was a rare (~1%, load-sensitive) Heisenbug — any grant-path instrumentation hid
+   it; with the guard, seed 1 is identical over 500/500 reps under heavy load
+   (16 CPU hogs), previously ~1/60 there.
+5. **Deterministic preemption.** Preemption is load-bearing — a goroutine that
+   runs Python without yielding would hold the baton forever (the deadlock
+   below) — but the sysmon fires it on a *wall-clock* threshold, the last
+   nondeterministic input to the schedule (it broke the tie e.g. on which of two
+   back-to-back `mn_go`s a segment finishes before yielding). In barrier mode the
+   eval-frame wrapper ignores the wall-clock flag and instead yields the baton
+   after a fixed COUNT of Python frame entries on the baton
+   (`PYGO_MN_PREEMPT_FRAMES`, default 4096) — a deterministic function of the
+   goroutine's own execution. Cooperative goroutines park in far fewer frames, so
+   they never trip it (natural, reproducible schedule); a CPU-bound goroutine that
+   keeps calling functions hits the count and yields (liveness), at a *reproducible*
+   frame: a `while not check(): n+=1` spinner stops at the same `n` every run
+   (e.g. seed 8 → 20478 = 5·4096−2, 8/8 reps). Same frame-entry granularity as
+   the wall-clock trigger — neither preempts a single-frame tight loop — but
+   reproducible. This is what made the select + mid-run-spawn workload go from
+   7/8 to 10/10 stable.
 
-**Scope.** This pins *scheduling* nondeterminism for **closed** workloads —
-CPU + channel/lock/sync among the goroutines themselves, plus logical timers.
-Real network I/O is nondeterministic by nature (the wire decides when an fd is
-ready), so an open workload replays its *scheduling decisions* but not external
-arrival timing — the standard limit of this technique (CHESS, Coyote, rr-for-
-syscalls all draw the same line). A future lever for CPU-bound-without-yield
-goroutines: deterministic *bytecode-count* preemption to replace the wall-clock
-sysmon trigger; not needed for the park-fast workloads the demo/probe cover,
-where preemption rarely fires.
-
-**A fourth lever was needed — the census-idle wake race (fixed).** A first cut
-left a rare (~1%, load-sensitive) Heisenbug: a seed would occasionally produce a
-different run. It looked sub-segment (any grant-path instrumentation hid it), but
-it was a real gap in lever 1: `census_idle` declared a hub idle for the new round
-based on a drain that could *predate* a wake. Sequence: hub Y drains its sub_list
-(empty) → hub X's segment wakes a goroutine onto Y's sub_list → X releases (new
-round) → Y checks in *idle*, having missed the freshly-woken goroutine. The
-census then completed without Y and ran its goroutine a round late — and whether
-Y's drain beat X's wake was pure timing. Fix: `census_idle` re-tests the sub_list
-under `sub_lock` *while holding the controller lock* before declaring idle
-(having observed the round, it is guaranteed to see any wake the just-ended
-segment published before the release that opened it: segment-wake → release
-happens-before round-observed → sub re-test); if work is there, the hub re-loops
-and drains it instead of falsely idling. With the guard, seed 1 is identical over
-500/500 reps under heavy load (16 CPU hogs) — previously ~1/60 there — and the
-probe is 16/16 seeds stable.
-
-**Remaining open scope** (genuinely out of the closed-workload demo's reach):
-*real network I/O* arrival timing (the wire decides fd-readiness — the open-
-system limit shared by CHESS/Coyote/rr) and *CPU-bound-without-yield* goroutines,
-whose preemption point is still wall-clock (sysmon) rather than deterministic
-bytecode-count — a future lever, not exercised by the park-fast demo where
-preemption rarely fires.
+**Scope.** This pins *all scheduling* nondeterminism for **closed** workloads —
+CPU + channel/lock/sync among the goroutines themselves (including CPU-bound
+segments, lever 5). The one genuinely out-of-reach source is *real network I/O*
+arrival timing: the wire decides when an fd is ready, so an open workload replays
+its scheduling decisions but not external arrival timing — the standard limit of
+this technique (CHESS, Coyote, rr-for-syscalls all draw the same line). Wall-clock
+*timers* (`sched_sleep`) are the same flavour and would want a logical clock to
+replay; the probes avoid them.
 
 **Deadlock — FIXED (2026-06-03).** An earlier version *disabled* preemption; a
 goroutine that ran Python without yielding then held the baton forever and
@@ -98,12 +103,14 @@ default-path change is one predictable-false branch.
 # seeded exploration, conservation-clean, each seed reproducible:
 PYTHON_GIL=0 ~/.pyenv/versions/3.13.13t/bin/python3 tools/mn_controlled/demo.py
 
-# deterministic-replay yardstick (same seed x N reps -> one signature):
-PYTHON_GIL=0 ~/.pyenv/versions/3.13.13t/bin/python3 tools/mn_controlled/repro_probe.py 12 8
+# deterministic-replay yardsticks (same seed x N reps -> one signature):
+PYTHON_GIL=0 …/python3 tools/mn_controlled/repro_probe.py 12 8    # single channel
+PYTHON_GIL=0 …/python3 tools/mn_controlled/repro_select.py 10 8   # select + spawn
 PYGO_MN_BARRIER=0 … repro_probe.py 12 8      # A/B: reverts to nondeterministic
 
-# grant trace (one hub-id per baton grant, to a file):
-PYGO_MN_SEED=1 PYGO_MN_TRACE=/tmp/g.txt … <workload>
+# tunables:
+PYGO_MN_PREEMPT_FRAMES=1024 …   # frame budget before a CPU-bound g yields the baton
+PYGO_MN_SEED=1 PYGO_MN_TRACE=/tmp/g.txt …   # grant trace: one hub-id per baton grant
 ```
 `mn_stress` (select + coordinator close) also runs clean under controlled mode —
 a randomized concurrency-testing mode on the real hubs.

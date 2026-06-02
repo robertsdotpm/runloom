@@ -63,6 +63,19 @@ typedef struct {
      * constant in verify/tla/PygoMNControl.tla (DeterministicGrant). */
     int          barrier;     /* census gate on */
     int          armed;       /* mn_run reached: hubs may begin + grants may fire */
+    /* Deterministic preemption (PYGO_MN_PREEMPT_FRAMES, >0 under the barrier).
+     * The wall-clock sysmon preempt trigger is the one remaining nondeterministic
+     * input to the schedule: it fires a runaway goroutine's yield at a *timing*-
+     * decided frame boundary, which perturbs the grant order (observable e.g. as
+     * different mn_go spawn-counter interleavings).  In barrier mode we ignore it
+     * and instead preempt after a fixed COUNT of Python frame entries on the
+     * baton -- a deterministic function of the goroutine's own execution.
+     * Cooperative goroutines park long before the count, so they never preempt
+     * (natural, deterministic schedule); a CPU-bound goroutine that keeps calling
+     * functions hits the count and yields the baton (liveness).  Same frame-entry
+     * granularity as the wall-clock trigger (neither can break a single-frame
+     * tight loop), but reproducible. */
+    int          preempt_frames;  /* frame-entry budget per segment; 0 = wall-clock */
     uint64_t     round;       /* current census round; bumped at each release */
     uint64_t    *seen;        /* per-hub: last round this hub checked in */
     /* Grant trace (PYGO_MN_TRACE=<path>).  Recorded into an in-memory byte ring
@@ -156,6 +169,17 @@ static void pygo_mn_ctrl_init(int n)
     /* Barrier on by default (it's the whole point of a seed); PYGO_MN_BARRIER=0
      * reverts to the timing-dependent immediate handoff for A/B comparison. */
     pygo_mn_ctrl.barrier = (bar == NULL || bar[0] != '0');
+    /* Deterministic frame-count preemption: on (default 4096) under the barrier,
+     * off (0 -> wall-clock) without it.  A cooperative goroutine parks in far
+     * fewer than 4096 frame entries, so it never trips; the value only sets how
+     * promptly a CPU-bound goroutine yields the baton. */
+    if (pygo_mn_ctrl.barrier) {
+        const char *pf = getenv("PYGO_MN_PREEMPT_FRAMES");
+        pygo_mn_ctrl.preempt_frames = (pf != NULL) ? atoi(pf) : 4096;
+        if (pygo_mn_ctrl.preempt_frames < 0) pygo_mn_ctrl.preempt_frames = 0;
+    } else {
+        pygo_mn_ctrl.preempt_frames = 0;
+    }
     pygo_mn_ctrl.rng = strtoull(seed, NULL, 10);
     if (pygo_mn_ctrl.rng == 0) pygo_mn_ctrl.rng = 0x9E3779B97F4A7C15ULL;
     if (trc != NULL && trc[0] != '\0') {             /* opt-in grant trace */
@@ -172,8 +196,11 @@ static void pygo_mn_ctrl_init(int n)
     /* Preemption stays ON (liveness backstop, proven necessary by
      * verify/tla/PygoMNControl.tla's Preempt=FALSE control): a goroutine that
      * runs Python without yielding would otherwise hold the baton forever and
-     * wedge every other hub.  Preempt yields it at a bytecode boundary ->
-     * resume_end -> baton released -> progress. */
+     * wedge every other hub.  Under the barrier the trigger is the DETERMINISTIC
+     * frame counter above (not the wall-clock watchdog), so a runaway goroutine
+     * is still broken off -- at a reproducible frame -> resume_end -> baton
+     * released -> progress.  The eval-frame wrapper must be installed for this,
+     * so leave pygo_preempt_enabled as the sysmon config set it (default on). */
 }
 
 static void pygo_mn_ctrl_fini(void)
@@ -330,6 +357,12 @@ PYGO_INLINE int pygo_mn_ctrl_no_steal(void)
     return pygo_mn_ctrl.enabled && pygo_mn_ctrl.barrier;
 }
 
+/* Python frame entries on the baton since this segment began (deterministic
+ * preemption counter; controlled+barrier only).  TLS = per hub thread, and only
+ * the baton holder runs Python, so this counts exactly the running segment's
+ * frames.  Reset at each resume_begin, bumped in the eval-frame wrapper. */
+static PYGO_TLS int pygo_mn_preempt_ctr = 0;
+
 PYGO_INLINE void pygo_hub_resume_begin(pygo_hub_t *h, pygo_g_t *g)
 {
     if (__builtin_expect(pygo_sysmon_enabled, 0)) {
@@ -342,6 +375,7 @@ PYGO_INLINE void pygo_hub_resume_begin(pygo_hub_t *h, pygo_g_t *g)
     }
     /* controlled mode: block until this hub holds the execution baton */
     pygo_mn_ctrl_acquire(h->id);
+    pygo_mn_preempt_ctr = 0;     /* fresh frame budget for this segment */
 }
 
 /* Mark the end of a coro resume: clear resume_start_ns so the watchdog
@@ -402,13 +436,26 @@ static PyObject *pygo_preempt_eval_frame(PyThreadState *ts,
 {
     pygo_hub_t *h = pygo_tls_hub;
     pygo_g_t *g;
-    if (h != NULL &&
-        __atomic_load_n(&h->preempt_requested, __ATOMIC_RELAXED) &&
-        (g = pygo_tls_current_g) != NULL) {
-        /* Clear first so one watchdog flag => one yield; the watchdog re-arms
-         * each tick the wedge persists, giving periodic time-slicing. */
-        __atomic_store_n(&h->preempt_requested, 0, __ATOMIC_RELAXED);
-        /* The SNAP-saving cooperative yield (pygo_mn_yield_current's body MINUS
+    int do_preempt;
+    /* Decide whether to yield the baton at this frame entry.  In controlled
+     * barrier mode the trigger is DETERMINISTIC -- a fixed frame-entry count on
+     * the baton -- and the wall-clock watchdog flag is ignored (it would fire at
+     * a timing-decided frame, perturbing the grant order).  Otherwise (default
+     * scheduler, or barrier off) it is the wall-clock watchdog flag as before. */
+    if (h != NULL && pygo_mn_ctrl.preempt_frames > 0) {
+        do_preempt = (++pygo_mn_preempt_ctr >= pygo_mn_ctrl.preempt_frames);
+        if (do_preempt) pygo_mn_preempt_ctr = 0;
+    } else {
+        do_preempt = (h != NULL &&
+                      __atomic_load_n(&h->preempt_requested, __ATOMIC_RELAXED));
+        if (do_preempt) __atomic_store_n(&h->preempt_requested, 0,
+                                         __ATOMIC_RELAXED);
+    }
+    if (h != NULL && do_preempt && (g = pygo_tls_current_g) != NULL) {
+        /* The trigger (frame-count or watchdog flag) was already consumed above,
+         * so one trigger => one yield; the wall-clock watchdog re-arms each tick
+         * the wedge persists, the frame counter re-fills from the next resume.
+         * The SNAP-saving cooperative yield (pygo_mn_yield_current's body MINUS
          * its trivial-switch fast path).  Two reasons not to reuse that helper:
          * (1) raw pygo_coro_yield would re-resume off a STALE g->snap (the g's
          * last park) -> frame-chain corruption for a Python-handler g; we must
