@@ -253,17 +253,25 @@ static void pygo_install_module_getattro(void)
     if (pygo_str_dunder_getattr == NULL) { PyErr_Clear(); return; }
     pygo_orig_module_getattro = PyModule_Type.tp_getattro;
     PyModule_Type.tp_getattro = pygo_module_getattro;
-    /* This covers every direct module attribute lookup -- getattr(mod, x),
-     * hasattr(mod, x), mod.x -- which is how the overflow is reached in
-     * practice (feature-detection misses on user/cwd modules).  It does NOT
-     * cover a ModuleType *subclass* that defines its own __getattr__: that
-     * gets tp_getattro = slot_tp_getattr_hook, which reaches the stock module
-     * getattr through the __getattribute__ wrapper descriptor, bypassing this
-     * slot.  Repointing that descriptor was tried and crashes PyInit, so the
-     * subclass-__getattr__ pattern is left alone -- use the equivalent
-     * module-level __getattr__ *function* (PEP 562) instead, which is both the
-     * common idiom and inherently safe (the stock getattr finds and calls it
-     * before ever reaching the 32 KB hint). */
+    /* The slot above covers every DIRECT module lookup (getattr/hasattr/mod.x).
+     * A ModuleType *subclass* that defines its own __getattr__ instead gets
+     * tp_getattro = slot_tp_getattr_hook, which reaches stock module getattr
+     * via the __getattribute__ wrapper descriptor, bypassing the slot -- as
+     * does an explicit mod.__getattribute__(x).  Repoint that descriptor at
+     * our wrapper too, so EVERY path is covered.  (Static-type tp_dict is NULL
+     * in 3.12+, so go through PyType_GetDict, not &PyModule_Type->tp_dict.) */
+    {
+        PyObject *mtdict = PyType_GetDict(&PyModule_Type);   /* new ref */
+        if (mtdict != NULL) {
+            PyObject *ga = PyDict_GetItemString(mtdict, "__getattribute__");
+            if (ga != NULL && Py_IS_TYPE(ga, &PyWrapperDescr_Type)) {
+                ((PyWrapperDescrObject *)ga)->d_wrapped =
+                    (void *)pygo_module_getattro;
+            }
+            Py_DECREF(mtdict);
+        }
+        PyErr_Clear();   /* a failed lookup is non-fatal: slot still covers the common path */
+    }
 }
 
 PyMODINIT_FUNC PyInit_pygo_core(void)

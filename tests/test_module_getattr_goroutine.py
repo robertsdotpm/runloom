@@ -105,6 +105,32 @@ class TestModuleGetattrGoroutine(unittest.TestCase):
             pygo_core.mn_fini()
         self.assertEqual(box[0], "ok")
 
+    def test_subclass_getattr_miss(self):
+        # A ModuleType subclass with a class-level __getattr__ reaches stock
+        # module getattr via slot_tp_getattr_hook -> the __getattribute__ wrapper
+        # descriptor, NOT the tp_getattro slot.  Must still be safe.
+        class _NS(types.ModuleType):
+            def __getattr__(self, name):
+                raise AttributeError(name)
+
+        m = _NS("pygo_modmiss_subcls")
+        m.__file__ = self.path
+
+        def body():
+            with self.assertRaises(AttributeError):
+                m.definitely_missing
+            return "ok"
+        self.assertEqual(_drive(body), "ok")
+
+    def test_explicit_getattribute_miss(self):
+        # Calling module.__getattribute__('missing') directly also goes through
+        # the wrapper descriptor, bypassing the slot.  Must still be safe.
+        def body():
+            with self.assertRaises(AttributeError):
+                type(self.mod).__getattribute__(self.mod, "definitely_missing")
+            return "ok"
+        self.assertEqual(_drive(body), "ok")
+
 
 if __name__ == "__main__":
     unittest.main()
