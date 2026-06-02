@@ -8,14 +8,20 @@
 # driven by real goroutines on real OS threads with the GIL off -- the regime
 # where pygo's lock-free park/wake/select bugs actually live.
 #
-# How: build only the ext with -fsanitize=thread and force-load libtsan into a
-# stock free-threaded CPython.  TSan instruments every load/store in the ext
-# (including inlined Py_INCREF / atomics) -- exactly pygo's code -- and is blind
-# to the uninstrumented interpreter's internals, the few of which that surface
-# are filtered by tools/tsan_suppressions.txt.  A fully TSan-built interpreter
-# is the gold standard but currently hits an upstream getpath miscompile on this
-# toolchain (see tools/build_tsan_cpython.sh); this preload path needs no patched
-# interpreter and is correctly scoped to pygo's C.
+# Default (ext-only): build the ext with -fsanitize=thread and force-load
+# libtsan into a stock free-threaded CPython.  TSan instruments every load/store
+# in the ext (including inlined Py_INCREF / atomics) -- exactly pygo's code --
+# and is blind to the uninstrumented interpreter's internals, the few of which
+# that surface are filtered by tools/tsan_suppressions.txt.  Needs no patched
+# CPython.
+#
+# Gold standard (PYGO_TSAN_PYTHON=/path/to/tsan/python3.13t): build + run under
+# a FULLY TSan-instrumented free-threaded interpreter (tools/build_tsan_cpython.sh)
+# so races crossing into CPython internals are attributed too.  Set
+# PYGO_TSAN_CPYTHON_SUPP to that tree's suppressions_free_threading.txt to mute
+# the known CPython free-threading races.  (Verified: pygo's C is TSan-clean
+# under it; the only reports are CPython's own _Py_ExplicitMergeRefcount /
+# tstate_activate internals.)
 #
 # TSan + ASLR: TSan's shadow mapping aborts under high-entropy ASLR on Linux
 # 6.x ("unexpected memory mapping"); every run is wrapped in `setarch -R`.
@@ -46,17 +52,42 @@ SA=""
 command -v setarch >/dev/null 2>&1 && SA="setarch $(uname -m) -R"
 [ -z "$SA" ] && echo "WARNING: setarch not found; TSan may abort under ASLR"
 
+# Optional gold-standard mode: a FULLY TSan-instrumented free-threaded
+# interpreter (build it with tools/build_tsan_cpython.sh).  Point
+# PYGO_TSAN_PYTHON at it and the ext is built against + run UNDER it directly --
+# no libtsan preload -- so races crossing into CPython internals are attributed
+# too.  Set PYGO_TSAN_CPYTHON_SUPP to that tree's
+# Tools/tsan/suppressions_free_threading.txt to fold in the known CPython
+# free-threading races.  Unset = the default preload path (instruments only the
+# ext; needs no patched interpreter).
+FULL_PY="${PYGO_TSAN_PYTHON:-}"
+SUPP_EFF="$SUPP"
+if [ -n "$FULL_PY" ]; then
+    [ -x "$FULL_PY" ] || { echo "PYGO_TSAN_PYTHON=$FULL_PY not executable"; exit 2; }
+    BUILD_PY="$FULL_PY"; RUN_PY="$FULL_PY"; PRELOAD=""; MODE="fully-instrumented interpreter (no preload)"
+    if [ -n "${PYGO_TSAN_CPYTHON_SUPP:-}" ] && [ -f "${PYGO_TSAN_CPYTHON_SUPP}" ]; then
+        SUPP_EFF="$(mktemp /tmp/pygo_tsan_supp.XXXX.txt)"
+        cat "$SUPP" "$PYGO_TSAN_CPYTHON_SUPP" > "$SUPP_EFF"
+    fi
+else
+    BUILD_PY="$PYTHON"; RUN_PY="$PYTHON"; PRELOAD="$LIBTSAN"; MODE="ext-only (libtsan preload)"
+fi
+
 echo "================ pygo ext under ThreadSanitizer ================"
-echo "  python : $PYTHON"
-echo "  libtsan: $LIBTSAN"
-echo "  supp   : $SUPP"
+echo "  build/run python : $RUN_PY"
+echo "  mode             : $MODE"
+echo "  suppressions     : $SUPP_EFF"
 
 echo "-- building instrumented extension (-fsanitize=thread -O1) --"
+# Clean build/lib.* too: with a stale cached .so there, setuptools skips
+# compilation entirely and just copies it (a non-instrumented .so sneaks in).
 $RM -f src/pygo_core*.so
-$RM -rf build/temp.tsan
-PYGO_EXTRA_CFLAGS="-fsanitize=thread -g -O1 -fno-omit-frame-pointer" \
+$RM -rf build/temp.tsan build/lib.*
+# setarch -R: in full-interpreter mode BUILD_PY is itself TSan-instrumented and
+# would abort under ASLR while running setup.py; harmless for a normal BUILD_PY.
+$SA env PYGO_EXTRA_CFLAGS="-fsanitize=thread -g -O1 -fno-omit-frame-pointer" \
 PYGO_EXTRA_LDFLAGS="-fsanitize=thread" \
-    "$PYTHON" setup.py build_ext --inplace --build-temp build/temp.tsan \
+    "$BUILD_PY" setup.py build_ext --inplace --build-temp build/temp.tsan \
     >/tmp/pygo_tsan_ext_build.log 2>&1 \
     || { echo "  BUILD FAILED -- see /tmp/pygo_tsan_ext_build.log"; tail -20 /tmp/pygo_tsan_ext_build.log; exit 2; }
 ldd src/pygo_core*.so | grep -q tsan \
@@ -65,11 +96,13 @@ ldd src/pygo_core*.so | grep -q tsan \
 
 LOGDIR="$(mktemp -d /tmp/pygo_tsan.XXXX)"
 # halt_on_error=0: collect ALL races across the run, don't stop at the first.
-export TSAN_OPTIONS="halt_on_error=0:report_bugs=1:history_size=7:suppressions=$SUPP:log_path=$LOGDIR/tsan"
+export TSAN_OPTIONS="halt_on_error=0:report_bugs=1:history_size=7:suppressions=$SUPP_EFF:log_path=$LOGDIR/tsan"
 run() {  # label, cmd...
     local label="$1"; shift
     printf -- "-- %-24s " "$label"
-    if $SA env PYTHON_GIL=0 LD_PRELOAD="$LIBTSAN" PYTHONPATH=src "$@" \
+    local pre=""
+    [ -n "$PRELOAD" ] && pre="LD_PRELOAD=$PRELOAD"
+    if $SA env PYTHON_GIL=0 $pre PYTHONPATH=src "$@" \
             >"$LOGDIR/$label.out" 2>&1; then
         echo "ran (exit 0)"
     else
@@ -78,13 +111,13 @@ run() {  # label, cmd...
 }
 
 echo "-- driving workloads under TSan --"
-run mn_stress   "$PYTHON" tools/mn_stress.py --iters "$MN_ITERS"
-run lincheck_plain  "$PYTHON" tools/lincheck/record_history.py "$LOGDIR/h_plain.json"  4 3 8 2 0
-run lincheck_select "$PYTHON" tools/lincheck/record_history.py "$LOGDIR/h_select.json" 4 3 8 2 3
+run mn_stress   "$RUN_PY" tools/mn_stress.py --iters "$MN_ITERS"
+run lincheck_plain  "$RUN_PY" tools/lincheck/record_history.py "$LOGDIR/h_plain.json"  4 3 8 2 0
+run lincheck_select "$RUN_PY" tools/lincheck/record_history.py "$LOGDIR/h_select.json" 4 3 8 2 3
 
 PYTEST_TARGETS="${TSAN_PYTEST-tests/test_chan_stress.py tests/test_sched_fairness.py tests/test_chan_queue.py}"
 if [ -n "$PYTEST_TARGETS" ]; then
-    run pytest_subset "$PYTHON" -m pytest $PYTEST_TARGETS -q -p no:cacheprovider --no-header
+    run pytest_subset "$RUN_PY" -m pytest $PYTEST_TARGETS -q -p no:cacheprovider --no-header
 fi
 
 echo "----------------------------------------------------------------"
@@ -96,13 +129,15 @@ if [ ${#reports[@]} -eq 0 ]; then
     rc=0
 else
     cat "$LOGDIR"/tsan.* | grep "SUMMARY: ThreadSanitizer" | sort | uniq -c | sort -rn | sed 's/^/    /'
-    # only pygo-frame races count as failures (CPython noise is suppressed, but
-    # double-check nothing in src/pygo_core slipped through)
-    if cat "$LOGDIR"/tsan.* | grep -q "src/pygo_core/"; then
+    # Judge by the SUMMARY line -- the authoritative racing site -- NOT any stack
+    # frame.  In full-interpreter mode pygo frames legitimately appear deep in
+    # the call stack of a CPython-internal race (e.g. a refcount merge triggered
+    # from a goroutine); only a SUMMARY pointing at src/pygo_core is a pygo bug.
+    if cat "$LOGDIR"/tsan.* | grep "SUMMARY: ThreadSanitizer" | grep -q "src/pygo_core/"; then
         echo "  >>> data races in pygo's own C -- see $LOGDIR/tsan.*"
         rc=1
     else
-        echo "  (all in CPython internals; no pygo-frame races)"
+        echo "  (all race summaries are in CPython internals; pygo's C is clean)"
         rc=0
     fi
 fi
