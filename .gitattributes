@@ -1,0 +1,16 @@
+# GitHub Linguist language overrides.
+#
+# These ONLY affect the language bar / stats shown on github.com. They do not
+# change how anything is compiled (the build is C11/gnu11 -- see setup.py).
+#
+# Why this file exists:
+#   - `.h` is ambiguous (C / C++ / Objective-C). Linguist's classifier often
+#     mislabels plain-C headers as C++, which made the repo report C++.
+#   - `.inc` defaults to PHP in Linguist, but every .inc here is a `*.c.inc`
+#     C source fragment #included into a translation unit.
+#   - `.v` is ambiguous (Coq / Verilog / V); ours are Coq proofs in verify/.
+
+*.c   linguist-language=C
+*.h   linguist-language=C
+*.inc linguist-language=C
+*.v   linguist-language=Coq
