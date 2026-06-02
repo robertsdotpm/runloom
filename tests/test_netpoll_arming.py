@@ -238,25 +238,31 @@ def test_peer_close_wakes_reader():
 def test_close_armed_fd_degrades_to_timeout():
     """If the very fd a goroutine is parked on is closed out from under it, the
     kernel drops it from the poll set and no event ever comes; the park must
-    still terminate via its timeout (bounded), not hang or crash."""
+    still terminate via its timeout (bounded), not hang or crash.
+
+    Unlike the readiness-edge tests above, the close runs from a SECOND
+    GOROUTINE rather than an OS thread.  The reason is a registration race: an
+    OS thread that closes data_r can win against wait_fd's fd registration, so
+    the register kevent() hits EBADF and wait_fd *raises* instead of degrading
+    to a timeout (the bug this used to flake on -- got == []).  The cooperative
+    scheduler removes the race: the closer yields once, the waiter runs and
+    parks (its fd now registered), then the closer resumes and closes -- so the
+    close is always "fd closed while parked", which is exactly the contract
+    under test.
+    """
     data_r, data_w = _pair_nonblocking_read()
     got = []
-    armed = threading.Event()
-
-    def closer():
-        armed.wait(5)
-        data_r.close()                        # close the fd we're parked on
-
-    t = threading.Thread(target=closer, daemon=True)
-    t.start()
 
     def waiter():
-        armed.set()
         got.append(pygo_core.wait_fd(data_r.fileno(), READ, 400))
 
+    def closer():
+        pygo_core.sched_yield()               # let the waiter register its fd + park
+        data_r.close()                        # close the fd we're parked on
+
     pygo_core.go(waiter)
+    pygo_core.go(closer)
     pygo_core.run()
-    t.join(5)
     data_w.close()
     assert got == [0], "closing the armed fd should time out cleanly: %r" % got
 
