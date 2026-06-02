@@ -81,6 +81,20 @@ else
     echo "FAIL -- no barrier should violate DeterministicGrant"; fail=$((fail+1))
 fi
 
+printf '  [tlc] %-28s ' "PygoMNControl (timers+clock)"
+if run_tlc mntm -config PygoMNControl_timer.cfg PygoMNControl.tla | grep -q "No error has been found"; then
+    echo "PASS -- logical clock: DeterministicTick + MutualExclusion + AllRun hold with timer waits"; pass=$((pass+1))
+else
+    echo "FAIL -- timers + logical clock spec should hold"; fail=$((fail+1))
+fi
+
+printf '  [tlc] %-28s ' "PygoMNControl (LogicalClock=F)"
+if run_tlc mnlc -config PygoMNControl_nologicalclock.cfg PygoMNControl.tla | grep -q "is violated"; then
+    echo "PASS -- correctly DETECTS a later timer firing before an earlier deadline (nondeterminism) without the logical clock"; pass=$((pass+1))
+else
+    echo "FAIL -- no logical clock should violate DeterministicTick"; fail=$((fail+1))
+fi
+
 "$(command -v safe-rm || echo rm)" -rf "$META"
 echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
