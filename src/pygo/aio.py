@@ -4689,14 +4689,21 @@ class _ReadPipeTransport(asyncio.ReadTransport):
                 self._report(e, "data_received")
 
     def _eof(self):
-        keep_open = False
+        # A read pipe is unidirectional, so EOF is terminal -- there is nothing
+        # left to read and no write side to keep half-open.  Like CPython's
+        # _UnixReadPipeTransport._read_ready, call eof_received() for the
+        # protocol's sake (it feeds EOF to a StreamReader) but IGNORE its return
+        # and ALWAYS close: honouring a True return (StreamReaderProtocol over a
+        # pipe returns True) left self._pipe open forever, so an abandoned pipe
+        # transport leaked its FileIO -> a stray "unclosed file" ResourceWarning
+        # at the next gc (test_streams::test_unclosed_resource_warnings counts
+        # ResourceWarnings and saw 2 instead of 1).  Defer the close one turn so
+        # a pending reader.read() drains the buffered data before connection_lost.
         try:
-            keep_open = bool(self._protocol.eof_received())
+            self._protocol.eof_received()
         except Exception as e:
             self._report(e, "eof_received")
-            keep_open = False
-        if not keep_open:
-            self._close(None)
+        self._loop.call_soon(self._close, None)
 
     def _close(self, exc):
         if self._closing:
