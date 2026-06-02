@@ -418,5 +418,90 @@ class TestThreadJoin(unittest.TestCase):
         self.assertTrue(alive)
 
 
+class TestBarrier(unittest.TestCase):
+    """threading.Barrier is not patched directly: it builds Condition(Lock())
+    from the threading-module globals, which patch() has replaced with the
+    cooperative versions, so a Barrier created after patch() is cooperative
+    for free.  Adapted from CPython Lib/test/lock_tests.py BarrierTests.
+    """
+
+    def test_barrier_releases_all_parties(self):
+        def body():
+            parties = 4
+            b = threading.Barrier(parties)
+            order = []
+            done = {"v": 0}
+
+            def worker(i):
+                order.append(("wait", i))
+                idx = b.wait()              # all block until the 4th arrives
+                order.append(("pass", i, idx))
+                done["v"] += 1
+
+            for i in range(parties):
+                pygo_core.go(lambda i=i: worker(i))
+
+            t0 = time.monotonic()
+            while done["v"] < parties and time.monotonic() - t0 < 5:
+                pygo.sleep(0.005)
+            return order, done["v"]
+
+        order, n = _drive(body)
+        self.assertEqual(n, 4)
+        # every party waited before any party passed (true rendezvous)
+        first_pass = min(k for k, o in enumerate(order) if o[0] == "pass")
+        waits_before = sum(1 for o in order[:first_pass] if o[0] == "wait")
+        self.assertEqual(waits_before, 4)
+        # wait() hands back the unique 0..parties-1 index, exactly once each
+        idxs = sorted(o[2] for o in order if o[0] == "pass")
+        self.assertEqual(idxs, [0, 1, 2, 3])
+
+    def test_barrier_reusable_across_cycles(self):
+        def body():
+            b = threading.Barrier(3)
+            counts = []
+
+            def worker():
+                for _ in range(3):          # 3 rendezvous cycles
+                    b.wait()
+                counts.append(1)
+
+            for _ in range(3):
+                pygo_core.go(worker)
+            t0 = time.monotonic()
+            while len(counts) < 3 and time.monotonic() - t0 < 5:
+                pygo.sleep(0.005)
+            return len(counts)
+        self.assertEqual(_drive(body), 3)
+
+    def test_barrier_abort_breaks_waiters(self):
+        """A broken barrier must raise BrokenBarrierError in the waiters
+        instead of hanging the scheduler."""
+        def body():
+            b = threading.Barrier(3)
+            broken = {"n": 0}
+
+            def worker():
+                try:
+                    b.wait()
+                except threading.BrokenBarrierError:
+                    broken["n"] += 1
+
+            # only two of three parties ever arrive; a third goroutine aborts
+            pygo_core.go(worker)
+            pygo_core.go(worker)
+
+            def breaker():
+                pygo.sleep(0.02)
+                b.abort()
+
+            pygo_core.go(breaker)
+            t0 = time.monotonic()
+            while broken["n"] < 2 and time.monotonic() - t0 < 5:
+                pygo.sleep(0.005)
+            return broken["n"]
+        self.assertEqual(_drive(body), 2)
+
+
 if __name__ == "__main__":
     unittest.main()
