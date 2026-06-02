@@ -483,24 +483,28 @@ class TestSendfile(unittest.TestCase):
             os.unlink(path)
 
     def test_sendfile_blocked_yields_to_sibling(self):
-        """A goroutine pushing a large file must let a sibling make progress
-        while the send buffer is full (proves wait_fd parking, not spinning)."""
-        path = _write_temp(self.DATA)
-        ticks = {"n": 0}
+        """A goroutine pushing a file far larger than the send buffer must park
+        on wait_fd and let a sibling run WHILE blocked -- not spin.  The payload
+        is big enough that EAGAIN is sustained, so a non-parking sendfile would
+        busy-loop, starve the (sibling) server that drains the socket, and hang.
+        We assert the ticker advanced *during* the sendfile, not just after."""
+        big = bytes(range(256)) * (64 * 1024)     # 16 MiB >> any send buffer
+        path = _write_temp(big)
 
         def body():
             srv, addr = _tcp_server()
+            ticks = {"n": 0}
             done = {"v": False}
 
             def server():
                 conn, _ = srv.accept()
                 total = 0
-                while total < len(self.DATA):
+                while total < len(big):
                     chunk = conn.recv(65536)
                     if not chunk:
                         break
                     total += len(chunk)
-                    pygo.sleep(0.002)   # drain slowly so the sender blocks
+                    pygo.sleep(0.001)        # drain slowly so the sender blocks
                 conn.close()
 
             def ticker():
@@ -514,18 +518,18 @@ class TestSendfile(unittest.TestCase):
             cli.connect(addr)
             with open(path, "rb") as f:
                 sent = cli.sendfile(f)
+            ticks_during = ticks["n"]           # progress made WHILE blocked
             cli.shutdown(socket.SHUT_WR)
             cli.close(); srv.close()
             done["v"] = True
-            return sent
+            return sent, ticks_during
 
         try:
-            sent = _drive(body)
+            sent, ticks_during = _drive(body)
         finally:
             os.unlink(path)
-        self.assertEqual(sent, len(self.DATA))
-        # the ticker ran concurrently while sendfile was blocked
-        self.assertGreater(ticks["n"], 0)
+        self.assertEqual(sent, len(big))
+        self.assertGreaterEqual(ticks_during, 1)   # parked + yielded mid-transfer
 
 
 class TestRecvfromInto(unittest.TestCase):

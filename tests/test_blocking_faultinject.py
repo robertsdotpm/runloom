@@ -90,13 +90,22 @@ class TestFlockFaults(unittest.TestCase):
     def test_eintr_is_retried(self):
         def body():
             fd = os.open(self.path, os.O_RDWR)
+            fd2 = os.open(self.path, os.O_RDWR)
             try:
                 with inject(pygo.monkey, "_orig_flock", InterruptedError, n=1):
                     fcntl.flock(fd, fcntl.LOCK_EX)   # EINTR once -> retried
+                # Verify the lock is ACTUALLY held (not silently dropped on the
+                # EINTR): a second open description must fail to take it.
+                held = False
+                try:
+                    fcntl.flock(fd2, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    fcntl.flock(fd2, fcntl.LOCK_UN)
+                except BlockingIOError:
+                    held = True
                 fcntl.flock(fd, fcntl.LOCK_UN)
-                return True
+                return held
             finally:
-                os.close(fd)
+                os.close(fd); os.close(fd2)
         self.assertTrue(_drive(body))
 
     def test_contention_errno_then_acquire(self):
