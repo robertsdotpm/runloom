@@ -12,6 +12,7 @@
 #   exttsan     WHOLE ext under ThreadSanitizer (real runtime)  ~30s-min
 #   verify      formal proofs: Spin models + CBMC on real C      ~3-4 min
 #   bench       rigorous microbench sweep (informational)        ~1-3 min
+#   combo       pairwise config-matrix interaction sweep          ~1-2 min
 #
 # Usage:
 #   scripts/check_all.sh                 # tests + mn + lincheck + dst + ctest
@@ -19,6 +20,7 @@
 #   scripts/check_all.sh verify          # just the formal proofs
 #   scripts/check_all.sh tests ctest     # pick phases
 #   scripts/check_all.sh bench           # perf only (NOT in `all` -- machine-dependent)
+#   scripts/check_all.sh combo           # config-matrix sweep (candidate for `all`)
 #
 # Env:
 #   PYTHON=...   interpreter for the Python suite + fuzzer
@@ -99,8 +101,12 @@ for ph in "${phases[@]}"; do
       hr "Rigorous microbench sweep (informational -- bootstrap CIs)"
       PYTHON="$PYTHON" bash tools/bench/bench.sh || rc=1
       ;;
+    combo)
+      hr "Combinatorial config-matrix sweep (pairwise interactions)"
+      PYTHON_GIL=0 "$PYTHON" tools/combinatorial/covering.py --iters "${COMBO_ITERS:-40}" || rc=1
+      ;;
     *)
-      echo "unknown phase: $ph (want: tests mn lincheck dst ctest static sanitizers exttsan verify bench all)"; rc=2 ;;
+      echo "unknown phase: $ph (want: tests mn lincheck dst ctest static sanitizers exttsan verify bench combo all)"; rc=2 ;;
   esac
 done
 
