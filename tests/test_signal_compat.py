@@ -100,7 +100,7 @@ class TestSigwait(unittest.TestCase):
         """Fault injection: sigtimedwait raising EINTR mid-poll must be retried,
         not propagated -- the sigwait still reaps the pending signal."""
         import pygo.monkey as _m
-        real = _m._orig_sigtimedwait
+        real = _m.signals._orig_sigtimedwait
         st = {"n": 0}
 
         def flaky(sigset, timeout):
@@ -111,7 +111,7 @@ class TestSigwait(unittest.TestCase):
 
         def body():
             signal.pthread_sigmask(signal.SIG_BLOCK, {SIG})
-            _m._orig_sigtimedwait = flaky
+            _m.signals._orig_sigtimedwait = flaky
             try:
                 def sender():
                     pygo.sleep(0.02)
@@ -119,7 +119,7 @@ class TestSigwait(unittest.TestCase):
                 pygo_core.go(sender)
                 return signal.sigwait({SIG})
             finally:
-                _m._orig_sigtimedwait = real
+                _m.signals._orig_sigtimedwait = real
                 signal.pthread_sigmask(signal.SIG_UNBLOCK, {SIG})
         self.assertEqual(_drive(body), SIG)
         self.assertGreaterEqual(st["n"], 1)

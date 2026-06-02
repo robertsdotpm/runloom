@@ -343,7 +343,7 @@ ext = Extension(
 
 setup(
     package_dir={"": "src"},
-    packages=["pygo"],
+    packages=["pygo", "pygo.monkey"],
     ext_modules=[ext],
     cmdclass={"build_ext": pygo_build_ext},
 )
