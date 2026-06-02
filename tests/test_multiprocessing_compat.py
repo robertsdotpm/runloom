@@ -192,5 +192,74 @@ class TestConnectionInProcess(unittest.TestCase):
         self.assertEqual(data, b"\x00\x01\x02" * 10000)
 
 
+@unittest.skipIf(_IS_WINDOWS, "POSIX SemLock path")
+class TestSyncPrimitives(unittest.TestCase):
+    """multiprocessing.Lock/Semaphore are POSIX semaphores (sem_wait blocks the
+    OS thread).  The cooperative SemLock.acquire does sem_trywait + backoff, so
+    a contended acquire yields.  A process-shared semaphore contends within one
+    process too, so this is exercised in-process (no fork).  Adapted from
+    CPython Lib/test/_test_multiprocessing (_TestLock / _TestSemaphore).
+    """
+
+    def test_lock_acquire_is_cooperative(self):
+        self.assertIn("_co_semlock_acquire",
+                      multiprocessing.Lock().acquire.__qualname__)
+
+    def test_lock_mutual_exclusion_and_yield(self):
+        def body():
+            lock = multiprocessing.Lock()
+            order, ticks, stop = [], [], {"v": False}
+
+            def holder():
+                lock.acquire()
+                order.append("A-lock")
+                for _ in range(6):
+                    pygo.sleep(0.004)
+                order.append("A-unlock")
+                lock.release()
+
+            def waiter():
+                pygo.sleep(0.002)
+                lock.acquire()            # blocks until holder releases
+                order.append("B-lock")
+                lock.release()
+
+            def ticker():
+                while "B-lock" not in order:
+                    ticks.append(1)
+                    pygo.sleep(0.003)
+
+            pygo_core.go(holder)
+            pygo_core.go(waiter)
+            pygo_core.go(ticker)
+            import time
+            t0 = time.monotonic()
+            while "B-lock" not in order and time.monotonic() - t0 < 5:
+                pygo.sleep(0.005)
+            return order, len(ticks)
+        order, ticks = _drive(body)
+        self.assertIn("B-lock", order)
+        # B got the lock only after A released it (real mutual exclusion)
+        self.assertLess(order.index("A-unlock"), order.index("B-lock"))
+        # ... and the scheduler kept running while B was blocked
+        self.assertGreaterEqual(ticks, 1)
+
+    def test_semaphore_nonblocking_passthrough(self):
+        def body():
+            s = multiprocessing.Semaphore(1)
+            return s.acquire(), s.acquire(False)   # True, then False (empty)
+        first, second = _drive(body)
+        self.assertTrue(first)
+        self.assertFalse(second)
+
+    def test_bounded_semaphore_count(self):
+        def body():
+            s = multiprocessing.BoundedSemaphore(2)
+            got = [s.acquire(False), s.acquire(False), s.acquire(False)]
+            s.release(); s.release()
+            return got
+        self.assertEqual(_drive(body), [True, True, False])
+
+
 if __name__ == "__main__":
     unittest.main()

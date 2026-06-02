@@ -168,6 +168,36 @@ class TestRLock(unittest.TestCase):
         self.assertIn(("B-nonblock", False), log)
         self.assertLess(log.index("A-out"), log.index("B-in"))
 
+    def test_rlock_internal_api_parity(self):
+        """CoRLock must expose the same private API a real threading.RLock
+        does (_recursion_count / _is_owned / _release_save / _acquire_restore):
+        threading.Condition and multiprocessing.resource_tracker call these.
+        Adapted from CPython Lib/test/lock_tests.RLockTests.
+        """
+        def body():
+            rl = threading.RLock()
+            r = {}
+            r["unheld_count"] = rl._recursion_count()      # 0
+            r["unheld_owned"] = rl._is_owned()             # False
+            rl.acquire(); rl.acquire()
+            r["held_count"] = rl._recursion_count()        # 2
+            r["held_owned"] = rl._is_owned()               # True
+            saved = rl._release_save()                     # fully release
+            r["after_save_owned"] = rl._is_owned()         # False
+            rl._acquire_restore(saved)                     # restore depth
+            r["restored_count"] = rl._recursion_count()    # 2
+            rl.release(); rl.release()
+            r["final_owned"] = rl._is_owned()              # False
+            return r
+        r = _drive(body)
+        self.assertEqual(r["unheld_count"], 0)
+        self.assertFalse(r["unheld_owned"])
+        self.assertEqual(r["held_count"], 2)
+        self.assertTrue(r["held_owned"])
+        self.assertFalse(r["after_save_owned"])
+        self.assertEqual(r["restored_count"], 2)
+        self.assertFalse(r["final_owned"])
+
 
 class TestEvent(unittest.TestCase):
     def test_set_wakes_all_waiters(self):

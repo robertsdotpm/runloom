@@ -91,6 +91,34 @@ class TestSigwait(unittest.TestCase):
         self.assertEqual(sig, SIG)
         self.assertGreaterEqual(ticks, 1)   # the runtime kept scheduling
 
+    @unittest.skipUnless(hasattr(signal, "sigwaitinfo"), "no sigwaitinfo")
+    def test_sigwaitinfo_returns_siginfo_and_yields(self):
+        """sigwaitinfo returns the full struct_siginfo (vs sigwait's signo)."""
+        def body():
+            ticks = []
+            done = {"v": False}
+            signal.pthread_sigmask(signal.SIG_BLOCK, {SIG})
+            try:
+                def sender():
+                    pygo.sleep(0.02)
+                    os.kill(os.getpid(), SIG)
+
+                def ticker():
+                    while not done["v"]:
+                        ticks.append(1)
+                        pygo.sleep(0.002)
+
+                pygo_core.go(sender)
+                pygo_core.go(ticker)
+                info = signal.sigwaitinfo({SIG})
+                done["v"] = True
+            finally:
+                signal.pthread_sigmask(signal.SIG_UNBLOCK, {SIG})
+            return info.si_signo, len(ticks)
+        signo, ticks = _drive(body)
+        self.assertEqual(signo, SIG)
+        self.assertGreaterEqual(ticks, 1)
+
 
 @unittest.skipIf(SIG is None, "no SIGUSR1")
 @unittest.skipUnless(_HAVE_SIGMASK, "no pthread_sigmask")

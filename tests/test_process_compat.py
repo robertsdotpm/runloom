@@ -345,5 +345,55 @@ class TestPidfdReaping(unittest.TestCase):
         self.assertEqual(stopsig, signal.SIGSTOP)
 
 
+@unittest.skipUnless(hasattr(os, "fork"), "no os.fork")
+@unittest.skipUnless(hasattr(os, "wait4"), "no os.wait4")
+class TestOsWait34(unittest.TestCase):
+    """os.wait4 / os.wait3 -- waitpid / wait plus a resource-usage struct.
+    Cooperative via the same pidfd park + WNOHANG reap.  Adapted from CPython
+    Lib/test/test_os.py (test_wait4 / test_wait3)."""
+
+    def test_wait4_exit_status_and_rusage(self):
+        def body():
+            pid = os.fork()
+            if pid == 0:
+                os._exit(13)
+            ticks = []
+            _sibling_counter(ticks)
+            wpid, status, rusage = os.wait4(pid, 0)
+            return (wpid == pid, os.WIFEXITED(status), os.WEXITSTATUS(status),
+                    hasattr(rusage, "ru_utime"), len(ticks))
+        ok, exited, code, has_ru, ticks = _drive(body)
+        self.assertTrue(ok)
+        self.assertTrue(exited)
+        self.assertEqual(code, 13)
+        self.assertTrue(has_ru)
+        self.assertGreaterEqual(ticks, 1)
+
+    def test_wait4_wnohang_passthrough(self):
+        def body():
+            pid = os.fork()
+            if pid == 0:
+                time.sleep(0.2)
+                os._exit(0)
+            r = os.wait4(pid, os.WNOHANG)     # still alive -> pid field 0
+            os.waitpid(pid, 0)                # reap
+            return r[0]
+        self.assertEqual(_drive(body), 0)
+
+    @unittest.skipUnless(hasattr(os, "wait3"), "no os.wait3")
+    def test_wait3_any_child(self):
+        def body():
+            pid = os.fork()
+            if pid == 0:
+                time.sleep(0.02)
+                os._exit(5)
+            wpid, status, rusage = os.wait3(0)
+            return wpid == pid, os.WEXITSTATUS(status), hasattr(rusage, "ru_stime")
+        ok, code, has_ru = _drive(body)
+        self.assertTrue(ok)
+        self.assertEqual(code, 5)
+        self.assertTrue(has_ru)
+
+
 if __name__ == "__main__":
     unittest.main()

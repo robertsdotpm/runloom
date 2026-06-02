@@ -17,8 +17,9 @@ Categories (all default True):
                  zero-copy os.sendfile fast path + read()/send() fallback,
                  parking on wait_fd instead of a selector.
     time         time.sleep
-    os           os.read / os.write -- wait_fd for pollable fds (pipes,
-                 sockets, ttys), thread-pool offload for regular files
+    os           os.read / os.write / os.readv / os.writev -- wait_fd for
+                 pollable fds (pipes, sockets, ttys), thread-pool offload for
+                 regular files
     select       select.select  (fast path for 1 fd; busy-poll otherwise)
     selectors    select.poll / select.epoll / select.kqueue made cooperative,
                  which transparently makes the high-level `selectors` module
@@ -33,12 +34,14 @@ Categories (all default True):
     subprocess   subprocess.Popen.wait  (and, via `selectors` + `os`,
                  subprocess.run / call / check_output / communicate).  On Linux
                  5.3+ it parks on a pidfd (event-driven) instead of busy-poll.
-    process      os.waitpid / os.wait / os.waitid: park on a pidfd until the
-                 child exits, then reap WNOHANG (busy-poll fallback for pid<=0,
-                 stop/continue waits, or no pidfd) + os.system (offload)
-    threading    Lock, RLock, Event, Condition, Semaphore, BoundedSemaphore
-                 (+ _at_fork_reinit) + Thread.join (cooperative is_alive() poll).
-                 threading.Barrier needs nothing extra (builds on Condition).
+    process      os.waitpid / os.wait / os.waitid / os.wait3 / os.wait4: park
+                 on a pidfd until the child exits, then reap WNOHANG (busy-poll
+                 fallback for pid<=0, stop/continue waits, or no pidfd) +
+                 os.system (offload)
+    threading    Lock, RLock (+ full _recursion_count/_is_owned/_release_save/
+                 _acquire_restore/_at_fork_reinit API), Event, Condition,
+                 Semaphore, BoundedSemaphore + Thread.join (cooperative
+                 is_alive() poll).  threading.Barrier builds on Condition.
     queue        queue.SimpleQueue -> cooperative CoSimpleQueue.  queue.Queue
                  needs nothing extra: it builds on threading.Condition, which
                  is already cooperative once `threading` is patched.
@@ -46,19 +49,22 @@ Categories (all default True):
                  (work runs as goroutines so Future.result/wait/as_completed
                  resolve in-domain; a real-threaded executor would notify a
                  CoCondition cross-thread and deadlock the cooperative waiter).
-    multiprocessing  rebind Connection._recv/_send/_close's captured os.read/
-                 os.write/os.close defaults to the cooperative versions, so
-                 Pipe/Queue/Pool/Process.join cooperate regardless of import
-                 order (POSIX).  Use forkserver/spawn -- "fork" inherits pygo's
-                 threads and can deadlock the child.
+    multiprocessing  (1) rebind Connection._recv/_send/_close's captured
+                 os.read/os.write/os.close defaults to the cooperative versions,
+                 so Pipe/Queue/Pool/Process.join cooperate regardless of import
+                 order; (2) SemLock.acquire -> sem_trywait + backoff park, so
+                 Lock/Semaphore/Event/Condition/Barrier cooperate under
+                 contention.  POSIX.  Use forkserver/spawn -- "fork" inherits
+                 pygo's threads and can deadlock the child.
     file         builtins.open (open syscall offloaded to backend)
-    syscalls     os.stat/lstat/listdir/scandir/mkdir/rename/unlink/fsync/...
-                 -- all disk-touching os.* calls dispatched to backend
+    syscalls     os.stat/lstat/listdir/scandir/mkdir/rename/unlink/fsync/
+                 splice/copy_file_range/... -- disk / zero-copy os.* calls
+                 dispatched to the backend pool
     fcntl        fcntl.flock / fcntl.lockf -- non-blocking acquire + _co_sleep
                  backoff park (no readiness fd for a file lock)
-    signal       signal.sigwait / sigtimedwait (poll a zero-timeout
-                 sigtimedwait) + signal.pause (set_wakeup_fd self-pipe on the
-                 main thread, else offload)
+    signal       signal.sigwait / sigwaitinfo / sigtimedwait (poll a zero-
+                 timeout sigtimedwait) + signal.pause (set_wakeup_fd self-pipe
+                 on the main thread, else offload)
     dns          pure-async UDP resolver (Go-netgo-style): parses
                  /etc/resolv.conf + /etc/hosts, sends queries via
                  cooperatively-patched UDP sockets, parallel A/AAAA,
@@ -81,8 +87,18 @@ Limitations:
       OS threads -- the single-thread cooperative model is the design target.
     * `queue.Queue` / `queue.SimpleQueue` and `selectors.*Selector` instances
       created before patch() keep the original (blocking) primitives; patch()
-      early.  Buffered file .read()/.write() bypass os.read/write (see the
-      file section) so they are not offloaded.
+      early.
+    * Buffered file .read()/.write() can't be made cooperative: io.FileIO and
+      io.Buffered* are immutable C types (their methods are unassignable), so
+      a blocking buffered read on slow media (NFS/FUSE/cold spindle) or a
+      pipe stream (proc.stdout.read(), os.popen()) still stalls the scheduler.
+      Use os.read/os.write on the raw fd (cooperative), or pygo.monkey.offload()
+      for the blocking call.  open() itself IS offloaded.
+    * concurrent.futures.ProcessPoolExecutor is not supported: its result is
+      delivered by an internal manager *thread* coordinating worker processes
+      over multiprocessing queues, and that real-thread/forkserver machinery is
+      nondeterministic under the cooperative scheduler.  Use the (goroutine-
+      backed) ThreadPoolExecutor, or drive multiprocessing directly.
 
 Platform notes:
     * Linux, macOS, *BSD: fully supported by the C-side netpoll (epoll,
@@ -459,6 +475,21 @@ def _blocking_call(fn, *args, **kwargs):
     if not _in_goroutine():
         return fn(*args, **kwargs)
     return _get_backend().submit(fn, args, kwargs)
+
+
+def offload(fn, *args, **kwargs):
+    """Run a blocking callable on the backend thread pool, parking the current
+    goroutine until it returns (run inline when not in a goroutine).
+
+    The sanctioned escape hatch for blocking calls pygo cannot transparently
+    make cooperative: buffered file .read()/.write() on slow media (io.FileIO /
+    io.Buffered* are immutable C types and can't be patched), C-extension
+    database drivers, CPU-bound hashing/compression, etc.
+
+        data = pygo.monkey.offload(f.read, 65536)
+        rows = pygo.monkey.offload(cursor.execute, sql, params)
+    """
+    return _blocking_call(fn, *args, **kwargs)
 
 
 # ============================================================
@@ -930,6 +961,44 @@ def _patched_os_write(fd, data):
     return _blocking_call(_orig_os_write, fd, data)
 
 
+_orig_os_readv  = None
+_orig_os_writev = None
+
+
+def _patched_os_readv(fd, buffers):
+    # Vectored read -- the readv analogue of read: cooperative on pollable
+    # fds, pool offload on regular files.
+    if not _in_goroutine():
+        return _orig_os_readv(fd, buffers)
+    if _fd_pollable(fd):
+        try:
+            os.set_blocking(fd, False)
+        except OSError:
+            return _blocking_call(_orig_os_readv, fd, buffers)
+        while True:
+            try:
+                return _orig_os_readv(fd, buffers)
+            except (BlockingIOError, InterruptedError):
+                pygo_core.wait_fd(fd, READ)
+    return _blocking_call(_orig_os_readv, fd, buffers)
+
+
+def _patched_os_writev(fd, buffers):
+    if not _in_goroutine():
+        return _orig_os_writev(fd, buffers)
+    if _fd_pollable(fd):
+        try:
+            os.set_blocking(fd, False)
+        except OSError:
+            return _blocking_call(_orig_os_writev, fd, buffers)
+        while True:
+            try:
+                return _orig_os_writev(fd, buffers)
+            except (BlockingIOError, InterruptedError):
+                pygo_core.wait_fd(fd, WRITE)
+    return _blocking_call(_orig_os_writev, fd, buffers)
+
+
 _orig_os_close = None
 
 
@@ -944,18 +1013,29 @@ def _patched_os_close(fd):
 
 def _patch_os():
     global _orig_os_read, _orig_os_write, _orig_os_close
+    global _orig_os_readv, _orig_os_writev
     _orig_os_read  = os.read
     _orig_os_write = os.write
     _orig_os_close = os.close
     os.read  = _patched_os_read
     os.write = _patched_os_write
     os.close = _patched_os_close
+    if hasattr(os, "readv"):
+        _orig_os_readv = os.readv
+        os.readv = _patched_os_readv
+    if hasattr(os, "writev"):
+        _orig_os_writev = os.writev
+        os.writev = _patched_os_writev
 
 
 def _unpatch_os():
     os.read  = _orig_os_read
     os.write = _orig_os_write
     os.close = _orig_os_close
+    if _orig_os_readv is not None:
+        os.readv = _orig_os_readv
+    if _orig_os_writev is not None:
+        os.writev = _orig_os_writev
 
 
 # ============================================================
@@ -1600,6 +1680,8 @@ def _unpatch_subprocess():
 _orig_os_waitpid = None
 _orig_os_wait    = None
 _orig_os_waitid  = None
+_orig_os_wait3   = None
+_orig_os_wait4   = None
 _orig_os_system  = None
 
 _HAVE_WNOHANG = hasattr(os, "WNOHANG")
@@ -1676,6 +1758,41 @@ def _patched_os_waitid(idtype, id, options):
             os.close(pfd)
 
 
+def _patched_os_wait4(pid, options):
+    # wait4(pid, options) -> (pid, status, rusage); like waitpid + rusage.
+    if not _in_goroutine() or not _HAVE_WNOHANG:
+        return _orig_os_wait4(pid, options)
+    if options & os.WNOHANG:
+        return _orig_os_wait4(pid, options)
+    pfd = None
+    if not (options & _PIDFD_INCOMPATIBLE):
+        pfd = _pidfd_open(pid)
+    step = 0.0005
+    try:
+        while True:
+            r = _orig_os_wait4(pid, options | os.WNOHANG)
+            if r[0] != 0:
+                return r
+            if pfd is not None:
+                pygo_core.wait_fd(pfd, READ)
+                os.close(pfd)
+                pfd = None
+                continue
+            _co_sleep(step)
+            if step < 0.02:
+                step *= 2
+    finally:
+        if pfd is not None:
+            os.close(pfd)
+
+
+def _patched_os_wait3(options):
+    # wait3(options) == wait4(-1, options): any child, with rusage.
+    if not _in_goroutine() or not _HAVE_WNOHANG:
+        return _orig_os_wait3(options)
+    return _patched_os_wait4(-1, options)
+
+
 def _patched_os_system(command):
     # No non-blocking form; run it on the backend pool so the goroutine
     # parks instead of freezing the scheduler for the child's lifetime.
@@ -1684,6 +1801,13 @@ def _patched_os_system(command):
 
 def _patch_process():
     global _orig_os_waitpid, _orig_os_wait, _orig_os_waitid, _orig_os_system
+    global _orig_os_wait3, _orig_os_wait4
+    if hasattr(os, "wait3"):
+        _orig_os_wait3 = os.wait3
+        os.wait3 = _patched_os_wait3
+    if hasattr(os, "wait4"):
+        _orig_os_wait4 = os.wait4
+        os.wait4 = _patched_os_wait4
     if hasattr(os, "waitpid"):
         _orig_os_waitpid = os.waitpid
         os.waitpid = _patched_os_waitpid
@@ -1705,6 +1829,10 @@ def _unpatch_process():
         os.wait = _orig_os_wait
     if _orig_os_waitid is not None:
         os.waitid = _orig_os_waitid
+    if _orig_os_wait3 is not None:
+        os.wait3 = _orig_os_wait3
+    if _orig_os_wait4 is not None:
+        os.wait4 = _orig_os_wait4
     if _orig_os_system is not None:
         os.system = _orig_os_system
 
@@ -1829,6 +1957,7 @@ _HAVE_SIGTIMEDWAIT = (_signal_mod is not None and
                       hasattr(_signal_mod, "sigtimedwait"))
 
 _orig_sigwait        = None
+_orig_sigwaitinfo    = None
 _orig_sigtimedwait   = None
 _orig_signal_pause   = None
 
@@ -1844,6 +1973,23 @@ def _patched_sigwait(sigset):
             continue                               # EINTR by an out-of-set sig
         if info is not None:
             return info.si_signo
+        _co_sleep(step)
+        if step < 0.02:
+            step *= 2
+
+
+def _patched_sigwaitinfo(sigset):
+    # Like sigwait but returns the full struct_siginfo (no timeout form).
+    if not _in_goroutine() or not _HAVE_SIGTIMEDWAIT:
+        return _orig_sigwaitinfo(sigset)
+    step = 0.0005
+    while True:
+        try:
+            info = _orig_sigtimedwait(sigset, 0)
+        except InterruptedError:
+            continue
+        if info is not None:
+            return info
         _co_sleep(step)
         if step < 0.02:
             step *= 2
@@ -1900,12 +2046,15 @@ def _patched_signal_pause():
 
 
 def _patch_signal():
-    global _orig_sigwait, _orig_sigtimedwait, _orig_signal_pause
+    global _orig_sigwait, _orig_sigwaitinfo, _orig_sigtimedwait, _orig_signal_pause
     if _signal_mod is None:
         return
     if hasattr(_signal_mod, "sigwait"):
         _orig_sigwait = _signal_mod.sigwait
         _signal_mod.sigwait = _patched_sigwait
+    if hasattr(_signal_mod, "sigwaitinfo"):
+        _orig_sigwaitinfo = _signal_mod.sigwaitinfo
+        _signal_mod.sigwaitinfo = _patched_sigwaitinfo
     if hasattr(_signal_mod, "sigtimedwait"):
         _orig_sigtimedwait = _signal_mod.sigtimedwait
         _signal_mod.sigtimedwait = _patched_sigtimedwait
@@ -1919,6 +2068,8 @@ def _unpatch_signal():
         return
     if _orig_sigwait is not None:
         _signal_mod.sigwait = _orig_sigwait
+    if _orig_sigwaitinfo is not None:
+        _signal_mod.sigwaitinfo = _orig_sigwaitinfo
     if _orig_sigtimedwait is not None:
         _signal_mod.sigtimedwait = _orig_sigtimedwait
     if _orig_signal_pause is not None:
@@ -2077,6 +2228,36 @@ class CoRLock(object):
         if self._count == 0:
             self._owner = None
             self._lock.release()
+
+    # ---- RLock-completeness API (CPython threading._RLock parity) ----
+    # stdlib internals call these on anything that quacks like an RLock:
+    # threading.Condition uses _release_save / _acquire_restore to drop a
+    # recursively-held lock across a wait; multiprocessing.resource_tracker
+    # asserts _recursion_count() > 0.  Without them those paths AttributeError.
+    def _is_owned(self):
+        cur = pygo.current() if _in_goroutine() else _real_get_ident()
+        return self._owner is not None and self._owner == cur
+
+    def _recursion_count(self):
+        # Recursive-acquire depth held by the *current* owner, else 0 -- matches
+        # _thread.RLock._recursion_count.
+        return self._count if self._is_owned() else 0
+
+    def _release_save(self):
+        if self._count == 0:
+            raise RuntimeError("cannot release un-acquired lock")
+        count, owner = self._count, self._owner
+        self._count = 0
+        self._owner = None
+        self._lock.release()
+        return (count, owner)
+
+    def _acquire_restore(self, state):
+        count, owner = state
+        self._lock.acquire()
+        self._count = count
+        self._owner = owner
+        return True
 
     def _at_fork_reinit(self):
         self._lock._at_fork_reinit()
@@ -2607,9 +2788,42 @@ def _unpatch_futures():
 _orig_mp_recv_defaults  = None
 _orig_mp_send_defaults  = None
 _orig_mp_close_defaults = None
+_orig_semlock_make_methods = None
 
 
-def _patch_multiprocessing():
+def _co_semlock_acquire(semlock):
+    """Cooperative SemLock.acquire.  A blocking acquire from a goroutine does a
+    non-blocking sem_trywait + _co_sleep backoff instead of sem_wait, so a
+    contended cross-process Lock/Semaphore/Event/Condition/Barrier doesn't
+    freeze the scheduler thread.  Real threads and explicit non-blocking
+    acquires fall straight through to the C call.  (POSIX semaphores have no
+    readiness fd, so this is a backoff poll -- same shape as the fcntl shim.)"""
+    def acquire(block=True, timeout=None):
+        if not block or not _in_goroutine():
+            return semlock.acquire(block, timeout)
+        deadline = None if timeout is None else time.monotonic() + timeout
+        step = 0.0005
+        while True:
+            if semlock.acquire(False):          # sem_trywait
+                return True
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                _co_sleep(min(step, remaining))
+            else:
+                _co_sleep(step)
+            if step < 0.02:
+                step *= 2
+    return acquire
+
+
+def _patched_semlock_make_methods(self):
+    _orig_semlock_make_methods(self)            # binds the C acquire/release
+    self.acquire = _co_semlock_acquire(self._semlock)
+
+
+def _patch_mp_connection():
     global _orig_mp_recv_defaults, _orig_mp_send_defaults, _orig_mp_close_defaults
     conn = sys.modules.get("multiprocessing.connection")
     if conn is None:
@@ -2639,7 +2853,38 @@ def _patch_multiprocessing():
         conn._write = os.write
 
 
+def _patch_mp_synchronize():
+    # SemLock._make_methods binds self.acquire to the C sem_wait; replace it
+    # with a cooperative version.  Only SemLock instances created after this
+    # runs cooperate (patch early).  Force-import synchronize only when the
+    # program already uses multiprocessing, so non-mp users pay nothing.
+    global _orig_semlock_make_methods
+    if _orig_semlock_make_methods is not None:
+        return
+    if "multiprocessing" not in sys.modules:
+        return
+    try:
+        import multiprocessing.synchronize as sync
+    except ImportError:
+        return
+    SemLock = getattr(sync, "SemLock", None)
+    if SemLock is None or not hasattr(SemLock, "_make_methods"):
+        return
+    _orig_semlock_make_methods = SemLock._make_methods
+    SemLock._make_methods = _patched_semlock_make_methods
+
+
+def _patch_multiprocessing():
+    _patch_mp_connection()
+    _patch_mp_synchronize()
+
+
 def _unpatch_multiprocessing():
+    global _orig_semlock_make_methods
+    sync = sys.modules.get("multiprocessing.synchronize")
+    if sync is not None and _orig_semlock_make_methods is not None:
+        sync.SemLock._make_methods = _orig_semlock_make_methods
+        _orig_semlock_make_methods = None
     conn = sys.modules.get("multiprocessing.connection")
     if conn is None:
         return
@@ -2709,6 +2954,10 @@ _SYSCALL_NAMES = (
     "fsync", "fdatasync",
     "utime",
     "open", "sendfile", "pread", "pwrite",
+    # splice / copy_file_range: Linux zero-copy fd-to-fd moves.  Two fds + a
+    # length; the simplest cooperative form is a backend offload (the goroutine
+    # parks while a pool worker runs the blocking move), like os.system.
+    "splice", "copy_file_range",
 )
 
 _orig_syscalls = {}
