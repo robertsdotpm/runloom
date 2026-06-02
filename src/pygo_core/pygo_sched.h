@@ -310,6 +310,12 @@ struct pygo_sched {
     Py_ssize_t completed;
     /* When set, sched_drain returns. */
     int stopping;
+    /* A Python signal-handler exception (normalized, traceback attached) the
+     * idle scheduler grab ran and is handing to a goroutine parked in wait_fd:
+     * set just before pygo_netpoll_signal_wake re-queues that g, consumed (taken
+     * + cleared) by pygo_netpoll_wait_fd when it resumes on the
+     * PYGO_NETPOLL_SIGNALED sentinel.  Owned ref while set; NULL otherwise. */
+    PyObject *signal_exc;
     /* Count of THIS sched's goroutines currently parked in netpoll (non-hub
      * parkers whose g->owner == this sched).  Bumped in pygo_parker_link /
      * unlink.  The drain loop uses this -- NOT the global parked count -- so a

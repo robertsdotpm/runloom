@@ -32,6 +32,15 @@
  * sign check.  pygo.aio's wait_fd wrapper turns this into CancelledError. */
 #define PYGO_NETPOLL_CANCELLED 0x40000000
 
+/* Sentinel stored in a parker's ready_out by pygo_netpoll_signal_wake when the
+ * scheduler hands a raised Python signal-handler exception to a goroutine
+ * parked in wait_fd (so it propagates out of the cooperative blocking call
+ * through that goroutine's own stack, not out of run()).  On resume wait_fd
+ * restores the exception the scheduler stashed on this g's owner scheduler
+ * (->signal_exc) and returns -1 with it set.  A distinct high bit, never a real
+ * event mask nor the 0/-1/CANCELLED returns. */
+#define PYGO_NETPOLL_SIGNALED 0x20000000
+
 /* Park the current goroutine until fd is ready for any of `events`,
  * or timeout_ns nanoseconds have passed (-1 = wait forever).
  * Returns the ready events mask (subset of `events`), 0 on timeout,
@@ -60,6 +69,18 @@ int pygo_netpoll_sweep_idle(void *hub_opaque, long long threshold_ns);
  * sched_reset() on paio.run cleanup so leftover accept loops /
  * tickers don't block the next pygo_core.run(). */
 int pygo_netpoll_drain_parked(void);
+
+/* Wake ONE wait_fd parker owned by the calling thread's scheduler with a
+ * benign (ready_mask=0) result, so it resumes and runs PyErr_CheckSignals in
+ * its own tstate.  Called by the idle pump when its blocking wait returned
+ * EINTR (a signal interrupted it): the woken goroutine delivers the pending
+ * Python signal handler in-context, so a handler that raises propagates out of
+ * the cooperative blocking call (recv/accept/select/...) through that
+ * goroutine's stack -- where its own try/except sees it -- instead of the
+ * scheduler swallowing it or carrying it out of run().  Returns 1 if a parker
+ * was woken, 0 if none were eligible (the scheduler then handles the signal
+ * itself and carries a raised exception out of run_forever()). */
+int pygo_netpoll_signal_wake(void);
 
 /* Force-unlink a g's pending parker, if any.  Called by the hub
  * completion path before pygo_g_decref so a leaked parker (M:N race

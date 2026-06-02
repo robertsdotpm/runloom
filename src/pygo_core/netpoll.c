@@ -2004,6 +2004,60 @@ int pygo_netpoll_drain_parked(void)
     return n;
 }
 
+/* Hand a raised Python signal-handler exception (already stashed on the calling
+ * thread's scheduler ->signal_exc) to ONE wait_fd parker owned by that
+ * scheduler: claim it, store the PYGO_NETPOLL_SIGNALED sentinel in its
+ * ready_out, and re-queue it.  On resume pygo_netpoll_wait_fd sees the sentinel,
+ * restores ->signal_exc into the goroutine's tstate, and returns -1 -- so the
+ * exception propagates out of the cooperative blocking call (recv/accept/
+ * select/...) through THAT goroutine's stack, where its own try/except sees it,
+ * exactly as a signal interrupting a real recv()/select() does.  This is what
+ * lets the verbatim CPython test_select_interrupt_exc pass instead of the
+ * scheduler swallowing the signal or carrying it out of run().  Returns 1 if a
+ * parker took it, 0 if none were eligible (the scheduler then carries the
+ * exception out of run_forever()/run_until_complete -- the sleep-only/idle
+ * fallback).  Called only from the scheduler grab, which has already verified
+ * (via PyErr_CheckSignals) that a handler actually raised -- so a goroutine is
+ * never woken spuriously (an EINTR with no pending Python signal wakes no one). */
+int pygo_netpoll_signal_wake(void)
+{
+    pygo_sched_t *owner = pygo_sched_get();
+    int pi;
+    for (pi = 0; pi < PYGO_PARKER_POOL_MAX; pi++) {
+        pygo_parker_pool_t *pool = &pygo_pools[pi];
+        pygo_parked_t *p;
+        if (__atomic_load_n(&pool->lock_inited, __ATOMIC_ACQUIRE) != 2) continue;
+        pygo_mutex_lock(&pool->lock);
+        for (p = pool->head; p != NULL; p = p->next) {
+            int cur;
+            if (p->g == NULL || p->g->owner != owner) continue;
+            /* Claim via the same commit CAS the pump/timeout/cancel use, so
+             * exactly one waker wins this parker. */
+            for (;;) {
+                cur = __atomic_load_n(&p->commit, __ATOMIC_ACQUIRE);
+                if (cur == PYGO_PARK_WOKEN) break;
+                if (__atomic_compare_exchange_n(&p->commit, &cur, PYGO_PARK_WOKEN,
+                                                0, __ATOMIC_ACQ_REL,
+                                                __ATOMIC_ACQUIRE))
+                    break;
+            }
+            /* Only a committed (PARKED) g is re-queued here: it has yielded and
+             * will resume in wait_fd to pick up the stashed exception.  An ARMED
+             * g hasn't yielded (still running on its own thread) and a WOKEN one
+             * was just claimed by another waker -- skip both, try the next. */
+            if (cur != PYGO_PARK_PARKED) continue;
+            if (p->ready_out != NULL) *p->ready_out = PYGO_NETPOLL_SIGNALED;
+            pygo_parker_unlink(pool, p);
+            if (p->hub != NULL) pygo_mn_wake_g(p->hub, p->g);
+            else                pygo_sched_wake(p->g);
+            pygo_mutex_unlock(&pool->lock);
+            return 1;
+        }
+        pygo_mutex_unlock(&pool->lock);
+    }
+    return 0;
+}
+
 /* ---- park / wake ---- */
 int pygo_netpoll_wait_fd(int fd, int events, long long timeout_ns)
 {
@@ -2215,6 +2269,25 @@ int pygo_netpoll_wait_fd(int fd, int events, long long timeout_ns)
         current_g->netpoll_parker = NULL;
     }
     pygo_parker_pool_release(park);
+    /* The scheduler handed us a raised Python signal-handler exception (Ctrl-C
+     * -> KeyboardInterrupt, an alarm handler, ...): it ran the handler in its
+     * own tstate, stashed the raised exception on our owner scheduler, and woke
+     * us with this sentinel (pygo_netpoll_signal_wake).  Restore it into THIS
+     * goroutine's tstate and return -1 so it propagates out of the cooperative
+     * blocking call (recv/accept/select/...) through this goroutine's own stack
+     * -- where its try/except sees it -- instead of out of run().  Callers treat
+     * a -1 with a Python error already set as "propagate", not OSError. */
+    if (ready_mask == PYGO_NETPOLL_SIGNALED) {
+        pygo_sched_t *owner = (current_g != NULL) ? current_g->owner : s;
+        PyObject *exc = (owner != NULL) ? owner->signal_exc : NULL;
+        if (owner != NULL) owner->signal_exc = NULL;
+        if (exc != NULL) {
+            PyObject *tb = PyException_GetTraceback(exc);   /* new ref or NULL */
+            /* PyErr_Restore steals all three refs. */
+            PyErr_Restore((PyObject *)Py_NewRef(Py_TYPE(exc)), exc, tb);
+        }
+        return -1;
+    }
     return ready_mask;
 }
 

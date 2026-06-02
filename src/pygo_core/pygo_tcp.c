@@ -533,7 +533,9 @@ static PyObject *PygoTCPConn_recv(PygoTCPConn *self, PyObject *args)
 #endif
         if (pygo_netpoll_wait_fd(fd, PYGO_NETPOLL_READ, -1LL) < 0) {
             Py_DECREF(result);
-            return PyErr_SetFromErrno(PyExc_OSError);
+            /* wait_fd may have run a Python signal handler that raised (e.g. an
+             * alarm handler / Ctrl-C) -> propagate it; don't overwrite with OSError. */
+            return PyErr_Occurred() ? NULL : PyErr_SetFromErrno(PyExc_OSError);
         }
     }
 
@@ -605,7 +607,9 @@ static PyObject *PygoTCPConn_recv_into(PygoTCPConn *self, PyObject *args)
 #endif
         if (pygo_netpoll_wait_fd(fd, PYGO_NETPOLL_READ, -1LL) < 0) {
             PyBuffer_Release(&buf);
-            return PyErr_SetFromErrno(PyExc_OSError);
+            /* wait_fd may have run a Python signal handler that raised (e.g. an
+             * alarm handler / Ctrl-C) -> propagate it; don't overwrite with OSError. */
+            return PyErr_Occurred() ? NULL : PyErr_SetFromErrno(PyExc_OSError);
         }
     }
     PyBuffer_Release(&buf);
@@ -654,7 +658,9 @@ static PyObject *PygoTCPConn_send(PygoTCPConn *self, PyObject *args)
 #endif
         if (pygo_netpoll_wait_fd(fd, PYGO_NETPOLL_WRITE, -1LL) < 0) {
             PyBuffer_Release(&buf);
-            return PyErr_SetFromErrno(PyExc_OSError);
+            /* wait_fd may have run a Python signal handler that raised (e.g. an
+             * alarm handler / Ctrl-C) -> propagate it; don't overwrite with OSError. */
+            return PyErr_Occurred() ? NULL : PyErr_SetFromErrno(PyExc_OSError);
         }
     }
     PyBuffer_Release(&buf);
@@ -724,7 +730,9 @@ static PyObject *PygoTCPConn_send_all(PygoTCPConn *self, PyObject *args)
 #endif
         if (pygo_netpoll_wait_fd(fd, PYGO_NETPOLL_WRITE, -1LL) < 0) {
             PyBuffer_Release(&buf);
-            return PyErr_SetFromErrno(PyExc_OSError);
+            /* wait_fd may have run a Python signal handler that raised (e.g. an
+             * alarm handler / Ctrl-C) -> propagate it; don't overwrite with OSError. */
+            return PyErr_Occurred() ? NULL : PyErr_SetFromErrno(PyExc_OSError);
         }
     }
     PyBuffer_Release(&buf);
@@ -835,7 +843,9 @@ static PyObject *PygoTCPConn_accept(PygoTCPConn *self, PyObject *unused)
         }
 #endif
         if (pygo_netpoll_wait_fd(self->fd, PYGO_NETPOLL_READ, -1LL) < 0) {
-            return PyErr_SetFromErrno(PyExc_OSError);
+            /* wait_fd may have run a Python signal handler that raised (e.g. an
+             * alarm handler / Ctrl-C) -> propagate it; don't overwrite with OSError. */
+            return PyErr_Occurred() ? NULL : PyErr_SetFromErrno(PyExc_OSError);
         }
     }
 
@@ -902,7 +912,9 @@ static PyObject *PygoTCPConn_connect_cls(PyTypeObject *cls, PyObject *args, PyOb
                 int saved = errno;
                 closesocket((SOCKET)fd);
                 errno = saved;
-                return PyErr_SetFromErrno(PyExc_OSError);
+                /* wait_fd may have run a Python signal handler that raised (e.g. an
+                 * alarm handler / Ctrl-C) -> propagate it; don't overwrite with OSError. */
+                return PyErr_Occurred() ? NULL : PyErr_SetFromErrno(PyExc_OSError);
             }
             int sockerr = 0; int optlen = sizeof(sockerr);
             if (getsockopt((SOCKET)fd, SOL_SOCKET, SO_ERROR,
@@ -938,7 +950,9 @@ static PyObject *PygoTCPConn_connect_cls(PyTypeObject *cls, PyObject *args, PyOb
                 int saved = errno;
                 close(fd);
                 errno = saved;
-                return PyErr_SetFromErrno(PyExc_OSError);
+                /* wait_fd may have run a Python signal handler that raised (e.g. an
+                 * alarm handler / Ctrl-C) -> propagate it; don't overwrite with OSError. */
+                return PyErr_Occurred() ? NULL : PyErr_SetFromErrno(PyExc_OSError);
             }
             int sockerr = 0;
             socklen_t soptlen = sizeof(sockerr);

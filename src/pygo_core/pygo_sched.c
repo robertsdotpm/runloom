@@ -902,6 +902,7 @@ void pygo_sched_init(pygo_sched_t *s)
     s->stack_size = (Py_ssize_t)pygo_cal_default;
     s->completed = 0;
     s->stopping = 0;
+    s->signal_exc = NULL;
     s->netpoll_parked = 0;
     pygo_mutex_init(&s->wake_list_lock);
     s->wake_list_head = NULL;
@@ -1634,8 +1635,50 @@ Py_ssize_t pygo_sched_drain(pygo_sched_t *s)
              * is tripped, and a no-op off the main thread (correct: signals run
              * only there).  This idle path is not the hot path. */
             pygo_pystate_load(&sched_snap);
-            if (PyErr_CheckSignals() < 0) {
+            /* Re-queue any sleeper whose deadline elapsed while we blocked: the
+             * top-of-loop sweep won't run until the NEXT iteration, but the grab
+             * below runs NOW, so without this an expired sleeper leaves the ready
+             * ring "empty" and the grab steals its signal.  A busy-poll
+             * cooperative wrapper (CoPoll: select.poll has no backing fd) parks
+             * on a short sched_sleep; once it expires it resumes and its OWN eval
+             * loop runs the pending signal handler -- so let it. */
+            now = pygo_sched_monotonic_seconds();
+            while (s->sleep_size > 0 && pygo_sleep_peek(s)->wake_at <= now) {
+                pygo_ready_push(s, pygo_sleep_pop(s));
+            }
+            /* A due sleeper just re-queued (above) runs Python next and its own
+             * eval loop delivers any pending signal in-context -- so only probe
+             * for a signal when the ready ring is still empty.  We're the only
+             * thread that can run Python signal handlers (the loop thread); the
+             * idle blocking syscall above EINTR'd on a signal but ran no handler
+             * (no Python on the C scheduler's stack).  Run pending handlers NOW.
+             * If one RAISES, hand the exception to a goroutine parked in wait_fd
+             * (pygo_netpoll_signal_wake) so it propagates out of that goroutine's
+             * cooperative blocking call -- where a user try/except sees it,
+             * exactly as a signal interrupting a real recv()/select() does (the
+             * verbatim CPython test_select_interrupt_exc contract).  Only when no
+             * such parker exists (genuinely idle / sleep-only) does the scheduler
+             * carry the raised exception out of run_forever()/run_until_complete,
+             * as stock asyncio does for Ctrl-C. */
+            if (pygo_sched_ready_empty(s) && PyErr_CheckSignals() < 0) {
                 PyErr_Fetch(&sig_t, &sig_v, &sig_b);
+                PyErr_NormalizeException(&sig_t, &sig_v, &sig_b);
+                if (sig_v != NULL && sig_b != NULL)
+                    PyException_SetTraceback(sig_v, sig_b);
+                /* Prefer in-goroutine delivery: stash the raised exception and
+                 * wake one wait_fd parker to pick it up (see signal_wake /
+                 * wait_fd).  signal_wake is called only here, after a handler
+                 * actually raised -- never on a bare EINTR -- so a goroutine is
+                 * never woken spuriously. */
+                if (s->signal_exc == NULL && sig_v != NULL) {
+                    s->signal_exc = sig_v;
+                    if (pygo_netpoll_signal_wake()) {
+                        Py_XDECREF(sig_t); Py_XDECREF(sig_b);
+                        sig_t = sig_v = sig_b = NULL;
+                        continue;   /* the woken parker raises it in its own stack */
+                    }
+                    s->signal_exc = NULL;   /* no parker; carry it out of run() */
+                }
                 sig_break = 1;
                 break;
             }
@@ -1785,6 +1828,14 @@ Py_ssize_t pygo_sched_drain(pygo_sched_t *s)
      * run_forever()/run_until_complete() drive, as on stock asyncio. */
     if (sig_break) {
         PyErr_Restore(sig_t, sig_v, sig_b);
+    }
+    /* Defensive: a signal exception stashed for in-goroutine delivery should
+     * have been consumed by the woken parker's wait_fd resume before we return.
+     * If the drain somehow exits first (e.g. a concurrent sched_stop), don't
+     * leak it -- and don't carry it out silently either; drop it (the parker it
+     * targeted is no longer being driven). */
+    if (s->signal_exc != NULL) {
+        Py_CLEAR(s->signal_exc);
     }
     return s->completed - completed_before;
 }

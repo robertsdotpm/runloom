@@ -32,23 +32,13 @@ if HAVE_CPYTHON_TESTS:
     if hasattr(_m, "KqueueSelectorTestCase"):
         TestPygoKqueueSelector = hosted(_m.KqueueSelectorTestCase, "TestPygoKqueueSelector")
 
-    # KNOWN LIMITATION (macOS/kqueue): test_select_interrupt_exc installs a
-    # SIGALRM handler that raises during select() and expects the exception to
-    # propagate out.  Through the cooperative wait_fd park this works on Linux
-    # (epoll) but not on macOS (kqueue) -- a kevent() interrupted by the signal
-    # is retried by the netpoll instead of waking the parked goroutine to run
-    # PyErr_CheckSignals, so the handler's exception never surfaces from
-    # select().  A real (niche) kqueue-backend gap, flagged for the netpoll
-    # owner; skip the verbatim CPython case on darwin so the rest stays green.
-    import platform as _platform
-    if _platform.system() == "Darwin":
-        import unittest as _ut
-        _skip_intr = _ut.skip(
-            "kqueue wait_fd doesn't propagate a signal-handler exception "
-            "from select() (epoll does); known netpoll limitation")
-        for _name in ("TestPygoDefaultSelector", "TestPygoSelectSelector",
-                      "TestPygoPollSelector", "TestPygoKqueueSelector"):
-            _cls = globals().get(_name)
-            if _cls is not None and hasattr(_cls, "test_select_interrupt_exc"):
-                _cls.test_select_interrupt_exc = _skip_intr(
-                    _cls.test_select_interrupt_exc)
+    # test_select_interrupt_exc installs a SIGALRM handler that raises during
+    # select() and expects the exception to propagate out of the call.  Through
+    # the cooperative wait_fd park this works on every backend: when a signal
+    # EINTRs the scheduler's idle pump, the scheduler runs the pending handler
+    # and, if it raises, hands the exception to the parked goroutine (which
+    # restores it on resume and returns out of select()), instead of swallowing
+    # it or carrying it out of run().  That delivery path is in the backend-
+    # independent scheduler/wait_fd core (pygo_netpoll_signal_wake +
+    # PYGO_NETPOLL_SIGNALED), so epoll / kqueue / select all pass -- no skip.
+    # See tests/test_signal_interrupt.py for the focused regression test.
