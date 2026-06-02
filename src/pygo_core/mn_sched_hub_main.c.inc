@@ -133,9 +133,12 @@ static PYGO_THREAD_RET pygo_hub_main(void *arg)
         }
 
         /* Wake any sleepers whose timers have expired and move them
-         * onto the local FIFO so the pop below picks them up. */
+         * onto the local FIFO so the pop below picks them up.  In controlled-
+         * replay mode the clock is logical (advanced only at a quiescent census,
+         * see pygo_mn_ctrl_try_grant), so timer firing is reproducible; otherwise
+         * it is the wall clock, exactly as before. */
         if (h->sched.sleep_size > 0) {
-            double now = pygo_sched_monotonic_seconds();
+            double now = pygo_mn_logical_now_or(pygo_sched_monotonic_seconds());
             while (h->sched.sleep_size > 0 &&
                    pygo_sched_sleep_peek(&h->sched)->wake_at <= now) {
                 pygo_g_t *woke = pygo_sched_sleep_pop(&h->sched);
@@ -241,8 +244,12 @@ static PYGO_THREAD_RET pygo_hub_main(void *arg)
                 idle_ns = (total == 0) ? 500000LL : 100000LL;
                 /* Cap by the next-due sleeper on THIS hub so we don't
                  * oversleep past a local timer.  (Other hubs' timers
-                 * are handled by those hubs.) */
-                if (h->sched.sleep_size > 0) {
+                 * are handled by those hubs.)  Skipped in controlled-replay
+                 * mode: there wake_at is LOGICAL (mismatched with wall-clock
+                 * `now`, which would force a busy-spin), and the logical timer
+                 * fires at loop top under the census-driven clock advance, so
+                 * the hub need only re-poll at the default cadence. */
+                if (h->sched.sleep_size > 0 && !pygo_mn_ctrl_no_steal()) {
                     double now = pygo_sched_monotonic_seconds();
                     double gap = pygo_sched_sleep_peek(&h->sched)->wake_at - now;
                     long long gap_ns = (long long)(gap * 1e9);

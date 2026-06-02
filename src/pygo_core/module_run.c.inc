@@ -13,7 +13,9 @@ static PyObject *m_sched_sleep(PyObject *self, PyObject *arg)
     }
     s = pygo_sched_get();
     {
-        double now = pygo_monotonic_seconds_compat();
+        /* In controlled-replay mode the deadline is logical (so timer firing is
+         * reproducible); otherwise wall-clock, exactly as before. */
+        double now = pygo_mn_logical_now_or(pygo_monotonic_seconds_compat());
         pygo_sched_sleep_until(s, now + secs);
     }
     Py_RETURN_NONE;

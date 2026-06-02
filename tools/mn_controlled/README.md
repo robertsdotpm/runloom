@@ -18,13 +18,14 @@ for liveness — see below). Off by default; zero cost when unset.
 
 Same `PYGO_MN_SEED` ⇒ **identical execution**, run to run — verified by
 `repro_probe.py` (single channel: 16/16 seeds identical, seed 1 identical over
-500/500 reps under heavy CPU load) and `repro_select.py` (select over multiple
-channels + mid-run goroutine spawn: 10/10 seeds identical). Distinct seeds still
-explore distinct interleavings. The baton alone is *not* enough — it serializes
-who runs, but the requester set, the goroutine each hub holds, and the preemption
-point still raced OS timing. Five levers, gated together behind `PYGO_MN_BARRIER`
-(default on under a seed; `PYGO_MN_BARRIER=0` reverts to timing-dependent
-exploration for A/B):
+500/500 reps under heavy CPU load), `repro_select.py` (select over multiple
+channels + mid-run goroutine spawn: 10/10), and `repro_timer.py` (same-delay +
+staggered `sched_sleep`: 10/10). Distinct seeds still explore distinct
+interleavings. The baton alone is *not* enough — it serializes who runs, but the
+requester set, the goroutine each hub holds, the preemption point, and timer
+firing all still raced OS timing. Six levers, gated together behind
+`PYGO_MN_BARRIER` (default on under a seed; `PYGO_MN_BARRIER=0` reverts to
+timing-dependent exploration for A/B):
 
 1. **Barrier-rendezvous census.** The controller grants the baton only once the
    requester set for the round is *complete* — every hub has checked in, as a
@@ -75,15 +76,25 @@ exploration for A/B):
    the wall-clock trigger — neither preempts a single-frame tight loop — but
    reproducible. This is what made the select + mid-run-spawn workload go from
    7/8 to 10/10 stable.
+6. **Logical clock (timers).** `sched_sleep` deadlines are computed against a
+   logical clock, not the wall clock, and timers fire *only* when the controller
+   advances it — which it does at a **quiescent census** (every hub idle, none
+   wanting the baton) to the earliest pending deadline across all hubs (each hub
+   reports its own sleep-heap minimum in `census_idle`). So timer firing order is
+   a function of the schedule, not of when each hub's wall-clock poll happens to
+   run. Same-delay timers — whose order is *purely* scheduling-decided — go from
+   3-distinct/20 to one signature per seed; overlapping periodic sleeps replay
+   identically and never hang (the clock keeps advancing to the next deadline).
 
 **Scope.** This pins *all scheduling* nondeterminism for **closed** workloads —
 CPU + channel/lock/sync among the goroutines themselves (including CPU-bound
-segments, lever 5). The one genuinely out-of-reach source is *real network I/O*
-arrival timing: the wire decides when an fd is ready, so an open workload replays
-its scheduling decisions but not external arrival timing — the standard limit of
-this technique (CHESS, Coyote, rr-for-syscalls all draw the same line). Wall-clock
-*timers* (`sched_sleep`) are the same flavour and would want a logical clock to
-replay; the probes avoid them.
+segments, lever 5) and `sched_sleep` timers (lever 6). The one genuinely
+out-of-reach source is *real network I/O* arrival timing: the wire decides when an
+fd is ready, so an open workload replays its scheduling decisions but not external
+arrival timing — the standard limit of this technique (CHESS, Coyote, rr-for-
+syscalls all draw the same line). (The `pygo.aio` event-loop timer path —
+`call_at`/`call_later` — has its own clock and is not yet routed through the
+logical clock; the `sched_sleep` primitive is.)
 
 **Deadlock — FIXED (2026-06-03).** An earlier version *disabled* preemption; a
 goroutine that ran Python without yielding then held the baton forever and
@@ -106,6 +117,7 @@ PYTHON_GIL=0 ~/.pyenv/versions/3.13.13t/bin/python3 tools/mn_controlled/demo.py
 # deterministic-replay yardsticks (same seed x N reps -> one signature):
 PYTHON_GIL=0 …/python3 tools/mn_controlled/repro_probe.py 12 8    # single channel
 PYTHON_GIL=0 …/python3 tools/mn_controlled/repro_select.py 10 8   # select + spawn
+PYTHON_GIL=0 …/python3 tools/mn_controlled/repro_timer.py 10 8    # sched_sleep timers
 PYGO_MN_BARRIER=0 … repro_probe.py 12 8      # A/B: reverts to nondeterministic
 
 # tunables:

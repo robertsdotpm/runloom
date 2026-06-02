@@ -62,6 +62,12 @@ int pygo_mn_go_c(pygo_c_entry_fn fn, void *arg);
 Py_ssize_t pygo_mn_run(void);
 void pygo_mn_fini(void);
 
+/* Logical clock for the controlled-replay scheduler (PYGO_MN_SEED + barrier).
+ * Returns the deterministic logical time that sched_sleep deadlines and timer
+ * firing are measured against; `fallback` (a wall-clock value) is returned when
+ * controlled mode is off, so callers stay wall-clock in production. */
+double pygo_mn_logical_now_or(double fallback);
+
 /* Phase C v2 hook.  Called from pygo_sched_yield to give the M:N
  * scheduler a chance to handle the yield in hub context.  Returns
  * 1 if we're inside a hub and the yield was handled (g re-queued on

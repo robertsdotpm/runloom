@@ -34,11 +34,15 @@
  * sees all initially-placed work; (3) no work-stealing, so each hub's stream is
  * a fixed function of the schedule; (4) census_idle re-tests the sub_list before
  * declaring idle (a wake from the just-ended segment can land post-drain, and
- * declaring idle then would run that g a round late -- a timing-decided outcome).
- * Same seed => identical run (repro_probe.py: 16/16 seeds stable; seed 1
- * identical over 500/500 reps under heavy CPU load).  Open scope: real-I/O
- * arrival timing (open-system limit) and CPU-bound-without-yield preemption,
- * still wall-clock (a future deterministic-bytecode-count lever).  Formal model +
+ * declaring idle then would run that g a round late -- a timing-decided outcome);
+ * (5) deterministic frame-count preemption (the eval-frame wrapper yields the
+ * baton after a fixed Python-frame count, not the wall-clock sysmon flag); and
+ * (6) a logical clock for sched_sleep timers (advanced only at a quiescent census
+ * to the earliest pending deadline, so timer firing order is schedule-decided).
+ * Same seed => identical run incl. CPU-bound segments and timers (repro_probe.py
+ * 16/16, seed 1 500/500 under heavy load; repro_select.py 10/10; repro_timer.py
+ * 10/10).  Open scope: real-I/O arrival timing (the open-system limit) and the
+ * pygo.aio call_at timer path (not yet on the logical clock).  Formal model +
  * properties (the no-preempt deadlock and the barrier's DeterministicGrant):
  * verify/tla/PygoMNControl.tla.  Mechanism + scope: tools/mn_controlled/README.md.
  * Zero cost when PYGO_MN_SEED is unset.
@@ -76,6 +80,16 @@ typedef struct {
      * granularity as the wall-clock trigger (neither can break a single-frame
      * tight loop), but reproducible. */
     int          preempt_frames;  /* frame-entry budget per segment; 0 = wall-clock */
+    /* Logical clock (timer determinism).  sched_sleep deadlines are computed
+     * against logical_now (not wall-clock), and timers fire only when the
+     * controller advances it -- which it does ONLY at a quiescent census (every
+     * hub idle, none wanting the baton) to the earliest pending deadline across
+     * all hubs.  So timer firing order is a function of the schedule, not of when
+     * each hub's wall-clock poll happens to run.  next_deadline/have_deadline
+     * collect the per-round minimum reported by hubs in census_idle. */
+    double       logical_now;     /* current logical time (seconds), lock-held */
+    double       next_deadline;   /* min pending deadline reported this round */
+    int          have_deadline;   /* any hub reported a pending timer this round */
     uint64_t     round;       /* current census round; bumped at each release */
     uint64_t    *seen;        /* per-hub: last round this hub checked in */
     /* Grant trace (PYGO_MN_TRACE=<path>).  Recorded into an in-memory byte ring
@@ -130,7 +144,23 @@ static void pygo_mn_ctrl_try_grant(void)
     if (pygo_mn_ctrl.barrier && !pygo_mn_ctrl_census_complete())
         return;                                      /* set still forming */
     c = pygo_mn_ctrl_choose();
-    if (c < 0) return;                               /* nobody wants it */
+    if (c < 0) {
+        /* Census complete, the baton is free, and nobody wants it -- the system
+         * is quiescent.  If a timer is pending, this is the only legitimate point
+         * to advance the logical clock: jump it to the earliest deadline and
+         * re-open the census so the hub(s) owning a now-due timer fire it at
+         * their loop top and come back as wanters.  Deterministic: the deadline
+         * set and the minimum are functions of the schedule, not wall time.
+         * Without a pending timer there is simply no runnable work (run is
+         * draining to completion) -- do nothing. */
+        if (pygo_mn_ctrl.barrier && pygo_mn_ctrl.have_deadline) {
+            pygo_mn_ctrl.logical_now = pygo_mn_ctrl.next_deadline;
+            pygo_mn_ctrl.have_deadline = 0;
+            pygo_mn_ctrl.round++;                    /* re-open: re-report + fire */
+            pygo_cond_broadcast(&pygo_mn_ctrl.cond);
+        }
+        return;
+    }
     pygo_mn_ctrl.current = c;
     /* Grant trace (opt-in, PYGO_MN_TRACE): one byte into an in-memory ring, no
      * syscall on the hot path; dumped to the file at fini.  NB the residual
@@ -165,6 +195,9 @@ static void pygo_mn_ctrl_init(int n)
     pygo_mn_ctrl.n = n;
     pygo_mn_ctrl.current = -1;
     pygo_mn_ctrl.armed = 0;                  /* mn_run arms after initial placement */
+    pygo_mn_ctrl.logical_now = 0.0;
+    pygo_mn_ctrl.next_deadline = 0.0;
+    pygo_mn_ctrl.have_deadline = 0;
     pygo_mn_ctrl.round = 1;                  /* seen[] starts 0 -> nobody checked in */
     /* Barrier on by default (it's the whole point of a seed); PYGO_MN_BARRIER=0
      * reverts to the timing-dependent immediate handoff for A/B comparison. */
@@ -261,6 +294,7 @@ static void pygo_mn_ctrl_release(int hub)
      * idle hub, must re-check-in for the new round before the next grant -- the
      * barrier that pins the requester set. */
     pygo_mn_ctrl.round++;
+    pygo_mn_ctrl.have_deadline = 0;                 /* re-collect deadlines this round */
     for (i = 0; i < pygo_mn_ctrl.n; i++)
         if (pygo_mn_ctrl.want[i]) pygo_mn_ctrl.seen[i] = pygo_mn_ctrl.round;
     pygo_mn_ctrl_try_grant();                       /* hand to next by seed */
@@ -300,6 +334,15 @@ static int pygo_mn_ctrl_census_idle(pygo_hub_t *h)
     pygo_mutex_unlock(&h->sub_lock);
     if (!has_work) {
         pygo_mn_ctrl.seen[hub] = pygo_mn_ctrl.round;   /* checked in (idle) */
+        /* Report this hub's earliest pending timer so a quiescent census can
+         * advance the logical clock to it (this hub owns its sleep heap, so the
+         * peek is race-free even under the controller lock). */
+        if (h->sched.sleep_size > 0) {
+            double d = pygo_sched_sleep_peek(&h->sched)->wake_at;
+            if (!pygo_mn_ctrl.have_deadline || d < pygo_mn_ctrl.next_deadline)
+                pygo_mn_ctrl.next_deadline = d;
+            pygo_mn_ctrl.have_deadline = 1;
+        }
         pygo_mn_ctrl_try_grant();
     }
     pygo_mutex_unlock(&pygo_mn_ctrl.lock);
@@ -355,6 +398,21 @@ static void pygo_mn_ctrl_wait_armed(void)
 PYGO_INLINE int pygo_mn_ctrl_no_steal(void)
 {
     return pygo_mn_ctrl.enabled && pygo_mn_ctrl.barrier;
+}
+
+/* The clock sched_sleep deadlines and hub_main timer firing read: the logical
+ * clock in controlled+barrier mode, else the wall-clock `fallback` the caller
+ * passes.  Read under the controller lock (logical_now is written there at a
+ * clock advance) so it is race-free; controlled mode only, so the lock cost is
+ * irrelevant.  Callable across translation units (m_sched_sleep is in module.c). */
+double pygo_mn_logical_now_or(double fallback)
+{
+    double v;
+    if (!(pygo_mn_ctrl.enabled && pygo_mn_ctrl.barrier)) return fallback;
+    pygo_mutex_lock(&pygo_mn_ctrl.lock);
+    v = pygo_mn_ctrl.logical_now;
+    pygo_mutex_unlock(&pygo_mn_ctrl.lock);
+    return v;
 }
 
 /* Python frame entries on the baton since this segment began (deterministic

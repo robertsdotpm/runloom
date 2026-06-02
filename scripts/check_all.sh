@@ -76,6 +76,7 @@ for ph in "${phases[@]}"; do
       # (tools/mn_controlled/README.md) against silent regression.
       "$PYTHON" tools/mn_controlled/repro_probe.py "${REPLAY_SEEDS:-8}" "${REPLAY_REPS:-6}" || rc=1
       "$PYTHON" tools/mn_controlled/repro_select.py "${REPLAY_SEEDS:-8}" "${REPLAY_REPS:-6}" || rc=1
+      "$PYTHON" tools/mn_controlled/repro_timer.py "${REPLAY_SEEDS:-8}" "${REPLAY_REPS:-6}" || rc=1
       ;;
     static)
       hr "Static analysis (gcc -fanalyzer gate + cppcheck advisory)"
