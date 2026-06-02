@@ -921,7 +921,10 @@ static void pygo_sched_drain_wake_list(pygo_sched_t *s)
     pygo_g_t *head;
     pygo_mutex_lock(&s->wake_list_lock);
     head = s->wake_list_head;
-    s->wake_list_head = NULL;
+    /* RELEASE atomic: this clear is read by the owner's lock-free ACQUIRE peek
+     * (the under-lock read above doesn't race -- producers write under the same
+     * lock). */
+    __atomic_store_n(&s->wake_list_head, NULL, __ATOMIC_RELEASE);
     s->wake_list_tail = NULL;
     pygo_mutex_unlock(&s->wake_list_lock);
     while (head != NULL) {
@@ -1245,7 +1248,8 @@ void pygo_sched_yield(pygo_sched_t *s)
      * tight-yield fast path intact (empty in the common case; a same-
      * thread setter's store is already visible to us here, and a missed
      * cross-thread store is harmless -- the drain loop still catches it). */
-    if (__builtin_expect(s->wake_list_head != NULL, 0)) {
+    if (__builtin_expect(
+            __atomic_load_n(&s->wake_list_head, __ATOMIC_ACQUIRE) != NULL, 0)) {
         pygo_sched_drain_wake_list(s);
     }
     /* Fast path (Go's runtime.Gosched shortcut): if there's nobody
@@ -1320,7 +1324,9 @@ void pygo_sched_wake(pygo_g_t *g)
     if (owner->wake_list_tail != NULL) {
         owner->wake_list_tail->wake_next = g;
     } else {
-        owner->wake_list_head = g;
+        /* RELEASE: see the matching note in pygo_sched_wake_safe -- pairs with
+         * the owner drain's lock-free ACQUIRE peek of wake_list_head. */
+        __atomic_store_n(&owner->wake_list_head, g, __ATOMIC_RELEASE);
     }
     owner->wake_list_tail = g;
     pygo_mutex_unlock(&owner->wake_list_lock);
@@ -1424,7 +1430,11 @@ void pygo_sched_wake_safe(pygo_g_t *g)
                 if (s->wake_list_tail != NULL) {
                     s->wake_list_tail->wake_next = g;
                 } else {
-                    s->wake_list_head = g;
+                    /* RELEASE: publishes g (and its wake_next/fields) to the
+                     * owner's LOCK-FREE peek of wake_list_head, which loads it
+                     * ACQUIRE. tail/wake_next are only read under the lock, so
+                     * only head needs an atomic on the lock-free edge. */
+                    __atomic_store_n(&s->wake_list_head, g, __ATOMIC_RELEASE);
                 }
                 s->wake_list_tail = g;
                 pygo_mutex_unlock(&s->wake_list_lock);
