@@ -120,6 +120,7 @@ WRITE = 2
 # patched versions calling back into themselves.
 _raw_os_read  = os.read
 _raw_os_write = os.write
+_raw_os_close = os.close
 _raw_time_sleep = time.sleep
 # Captured before _patch_socket installs the cooperative versions.  Parker
 # uses these to talk to its self-pipe / self-socketpair without going
@@ -2555,6 +2556,92 @@ def _unpatch_futures():
 
 
 # ============================================================
+# multiprocessing -- cooperate regardless of import order
+#
+# multiprocessing.connection.Connection._recv / _send (POSIX) capture os.read /
+# os.write as *default arguments* at import time:
+#
+#     _read = os.read
+#     def _recv(self, size, read=_read): ...
+#
+# If multiprocessing was imported before patch(), those defaults are the
+# original *blocking* os.read/os.write -- so Connection.recv/send (and
+# everything built on Connection: Pipe, Queue, Pool, Process.join's sentinel
+# wait) does a blocking read that freezes the whole scheduler instead of
+# parking on wait_fd.  The data still flows, so it "works", but it doesn't
+# yield.  Rebind the captured defaults (and the module _read/_write) to the
+# now-patched cooperative os.read/os.write.  Runs after the "os" patch, so
+# os.read/os.write already point at the cooperative versions.  If the module
+# isn't imported yet, it's a no-op -- a later import binds the patched os.read.
+#
+# Connection._close(self, _close=os.close) captures os.close the same way:
+# the patched os.close clears the fd's netpoll registration bit so a reused fd
+# re-arms cleanly under the edge-triggered register-once scheme, but the
+# original os.close does not -- so a Connection closed with the unpatched
+# default leaves a stale registration, and the next Connection that reuses that
+# fd number never wakes from wait_fd (a hang).  Rebind it too.
+#
+# Windows Connection uses _multiprocessing.recv/send (overlapped I/O), a
+# separate path this does not touch.
+# ============================================================
+_orig_mp_recv_defaults  = None
+_orig_mp_send_defaults  = None
+_orig_mp_close_defaults = None
+
+
+def _patch_multiprocessing():
+    global _orig_mp_recv_defaults, _orig_mp_send_defaults, _orig_mp_close_defaults
+    conn = sys.modules.get("multiprocessing.connection")
+    if conn is None:
+        return
+    Connection = getattr(conn, "Connection", None)
+    if Connection is None:
+        return
+    recv  = Connection.__dict__.get("_recv")
+    send  = Connection.__dict__.get("_send")
+    close = Connection.__dict__.get("_close")
+    # Only the POSIX os.read/os.write/os.close-based Connection has these as
+    # plain functions with a captured default; skip otherwise.
+    if recv is not None and getattr(recv, "__defaults__", None):
+        _orig_mp_recv_defaults = recv.__defaults__
+        recv.__defaults__ = (os.read,)
+    if send is not None and getattr(send, "__defaults__", None):
+        _orig_mp_send_defaults = send.__defaults__
+        send.__defaults__ = (os.write,)
+    # Rebind _close only when its captured default is the real os.close (the
+    # POSIX variant); the win/socket variants capture a different closer.
+    if close is not None and getattr(close, "__defaults__", None) == (_raw_os_close,):
+        _orig_mp_close_defaults = close.__defaults__
+        close.__defaults__ = (os.close,)
+    if hasattr(conn, "_read"):
+        conn._read = os.read
+    if hasattr(conn, "_write"):
+        conn._write = os.write
+
+
+def _unpatch_multiprocessing():
+    conn = sys.modules.get("multiprocessing.connection")
+    if conn is None:
+        return
+    Connection = getattr(conn, "Connection", None)
+    if Connection is None:
+        return
+    recv  = Connection.__dict__.get("_recv")
+    send  = Connection.__dict__.get("_send")
+    close = Connection.__dict__.get("_close")
+    if recv is not None and _orig_mp_recv_defaults is not None:
+        recv.__defaults__ = _orig_mp_recv_defaults
+    if send is not None and _orig_mp_send_defaults is not None:
+        send.__defaults__ = _orig_mp_send_defaults
+    if close is not None and _orig_mp_close_defaults is not None:
+        close.__defaults__ = _orig_mp_close_defaults
+    if hasattr(conn, "_read"):
+        conn._read = _orig_os_read if _orig_os_read is not None else os.read
+    if hasattr(conn, "_write"):
+        conn._write = _orig_os_write if _orig_os_write is not None else os.write
+
+
+# ============================================================
 # file -- builtins.open dispatched through the backend
 #
 # Wrapping open() covers the open syscall itself (cold-inode lookups, NFS,
@@ -3072,8 +3159,8 @@ def _uninstall_go_wrapper():
 
 
 _DEFAULTS = ("socket", "time", "os", "select", "selectors", "stdio", "ssl",
-             "subprocess", "process", "threading", "queue", "futures", "file",
-             "syscalls", "fcntl", "signal", "dns")
+             "subprocess", "process", "threading", "queue", "futures",
+             "multiprocessing", "file", "syscalls", "fcntl", "signal", "dns")
 
 _PATCHERS = {
     "socket":     (_patch_socket,     _unpatch_socket),
@@ -3088,6 +3175,7 @@ _PATCHERS = {
     "threading":  (_patch_threading,  _unpatch_threading),
     "queue":      (_patch_queue,      _unpatch_queue),
     "futures":    (_patch_futures,    _unpatch_futures),
+    "multiprocessing": (_patch_multiprocessing, _unpatch_multiprocessing),
     "file":       (_patch_file,       _unpatch_file),
     "syscalls":   (_patch_syscalls,   _unpatch_syscalls),
     "fcntl":      (_patch_fcntl,      _unpatch_fcntl),
@@ -3105,8 +3193,8 @@ def patch(**flags):
         pygo.monkey.patch(threading=False, dns=False)
 
     Categories: socket, time, os, select, selectors, stdio, ssl,
-    subprocess, process, threading, queue, file, syscalls, dns.  See
-    module docstring.
+    subprocess, process, threading, queue, futures, multiprocessing, file,
+    syscalls, fcntl, signal, dns.  See module docstring.
     """
     unknown = set(flags) - set(_PATCHERS)
     if unknown:
