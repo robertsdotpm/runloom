@@ -764,6 +764,19 @@ class _MemoryBIOTLS(object):
             self._raw.close()
         except OSError:
             pass
+        # Drop the SSLObject + SSLContext (and the BIO pair) so they are freed
+        # promptly -- asyncio's SSLProtocol releases its sslcontext on
+        # connection_lost, so the context dies even though the user's
+        # transport<->protocol reference cycle lingers until the GC runs.
+        # test_create_connection_memory_leak asserts the client SSLContext is
+        # gone via weakref the instant the connection closes (no gc.collect()).
+        # recv_nb()/send() already short-circuit on self._closed, so nothing
+        # touches _obj after this; the ssl_object/context/_sslobj views just
+        # return None on a closed transport, exactly like asyncio.  (Only _obj +
+        # _context hold the SSLContext -- the SSLObject keeps it internally -- so
+        # those are the ones to drop; the BIO pair holds no context ref.)
+        self._obj = None
+        self._context = None
 
     def getpeername(self):
         return self._raw.getpeername()
@@ -3783,6 +3796,19 @@ class _StreamTransport(asyncio.Transport):
                     self._report(e, "connection_lost")
             _close_sock_now()
             _detach_server()
+            # Release the SSL references the extra dict holds (the SSLObject and
+            # SSLContext stored at construction for get_extra_info).  asyncio's
+            # SSLProtocol drops its sslcontext on connection_lost, so the context
+            # dies even though the user's transport<->protocol reference cycle
+            # lingers until the GC runs (test_create_connection_memory_leak
+            # asserts the client SSLContext is gone via weakref the instant the
+            # connection closes -- no gc.collect()).  _MemoryBIOTLS.close()
+            # already cleared its own _obj/_context; these are the only other
+            # strong refs.
+            extra = getattr(self, "_extra", None)
+            if extra:
+                for key in ("ssl_object", "sslcontext", "peercert", "cipher"):
+                    extra.pop(key, None)
         loop = self._loop if self._loop is not None else asyncio.get_event_loop()
         try:
             loop.call_soon(_deliver, context=self._context)
