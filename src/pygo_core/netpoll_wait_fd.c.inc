@@ -1,0 +1,356 @@
+/* Part of netpoll.c -- #included into that translation unit, not compiled
+ * standalone.  See netpoll.c for the includes/typedefs/file-scope state
+ * these definitions depend on. */
+
+
+/* Forcibly wake the CALLING thread's parked goroutines with ready_mask=-1
+ * (cancelled).  Each waiter's pygo_netpoll_wait_fd call returns -1; callers
+ * (server accept loops, etc.) see that and exit their loops.  Returns count
+ * woken.
+ *
+ * Phase 2: SCOPED to the calling thread's scheduler (g->owner == this sched).
+ * pygo runs one scheduler per OS thread but a single shared netpoll, and every
+ * non-hub loop's parkers share the default pool.  A global drain (the old
+ * behavior) cancelled OTHER still-running loops' in-flight I/O too -- e.g. one
+ * paio.run()'s teardown (sched_reset) stranded a concurrent loop's recv with a
+ * spurious -1, surfacing as a BlockingIOError out of StreamReader._fill.  Only
+ * this thread's own parkers are drained now; others (and M:N hub gs, whose
+ * owner is NULL) stay linked. */
+int pygo_netpoll_drain_parked(void)
+{
+    pygo_sched_t *owner = pygo_sched_get();
+    int n = 0;
+    int pi;
+    for (pi = 0; pi < PYGO_PARKER_POOL_MAX; pi++) {
+        pygo_parker_pool_t *pool = &pygo_pools[pi];
+        pygo_parked_t *p;
+        if (__atomic_load_n(&pool->lock_inited, __ATOMIC_ACQUIRE) != 2) continue;
+        pygo_mutex_lock(&pool->lock);
+        p = pool->head;
+        while (p != NULL) {
+            pygo_parked_t *next = p->next;   /* capture before unlink splices p out */
+            if (p->g != NULL && p->g->owner == owner) {
+                int cur;
+                /* Claim the parker (same protocol as the pump) so a g that is
+                 * mid-commit doesn't both park and get cancel-woken. */
+                for (;;) {
+                    cur = __atomic_load_n(&p->commit, __ATOMIC_ACQUIRE);
+                    if (cur == PYGO_PARK_WOKEN) break;
+                    if (__atomic_compare_exchange_n(&p->commit, &cur,
+                                                    PYGO_PARK_WOKEN, 0,
+                                                    __ATOMIC_ACQ_REL,
+                                                    __ATOMIC_ACQUIRE))
+                        break;
+                }
+                /* Removes p from the global list, per-fd bucket and deadline
+                 * heap, decrements pool->total, and clears p->g->netpoll_parker. */
+                (void)pygo_parker_unlink(pool, p);
+                if (cur != PYGO_PARK_WOKEN) {   /* not already claimed by the pump */
+                    if (p->ready_out != NULL) {
+                        *p->ready_out = -1;   /* signal cancellation */
+                    }
+                    /* Only re-queue a g that had committed to parking; an ARMED
+                     * g will see WOKEN at its commit CAS and abort itself. */
+                    if (cur == PYGO_PARK_PARKED) {
+                        if (p->hub != NULL) {
+                            pygo_mn_wake_g(p->hub, p->g);
+                        } else {
+                            pygo_sched_wake(p->g);
+                        }
+                    }
+                    n++;
+                }
+            }
+            p = next;
+        }
+        pygo_mutex_unlock(&pool->lock);
+    }
+    return n;
+}
+
+/* Hand a raised Python signal-handler exception (already stashed on the calling
+ * thread's scheduler ->signal_exc) to ONE wait_fd parker owned by that
+ * scheduler: claim it, store the PYGO_NETPOLL_SIGNALED sentinel in its
+ * ready_out, and re-queue it.  On resume pygo_netpoll_wait_fd sees the sentinel,
+ * restores ->signal_exc into the goroutine's tstate, and returns -1 -- so the
+ * exception propagates out of the cooperative blocking call (recv/accept/
+ * select/...) through THAT goroutine's stack, where its own try/except sees it,
+ * exactly as a signal interrupting a real recv()/select() does.  This is what
+ * lets the verbatim CPython test_select_interrupt_exc pass instead of the
+ * scheduler swallowing the signal or carrying it out of run().  Returns 1 if a
+ * parker took it, 0 if none were eligible (the scheduler then carries the
+ * exception out of run_forever()/run_until_complete -- the sleep-only/idle
+ * fallback).  Called only from the scheduler grab, which has already verified
+ * (via PyErr_CheckSignals) that a handler actually raised -- so a goroutine is
+ * never woken spuriously (an EINTR with no pending Python signal wakes no one). */
+int pygo_netpoll_signal_wake(void)
+{
+    pygo_sched_t *owner = pygo_sched_get();
+    int pi;
+    for (pi = 0; pi < PYGO_PARKER_POOL_MAX; pi++) {
+        pygo_parker_pool_t *pool = &pygo_pools[pi];
+        pygo_parked_t *p;
+        if (__atomic_load_n(&pool->lock_inited, __ATOMIC_ACQUIRE) != 2) continue;
+        pygo_mutex_lock(&pool->lock);
+        for (p = pool->head; p != NULL; p = p->next) {
+            int cur;
+            if (p->g == NULL || p->g->owner != owner) continue;
+            /* Claim via the same commit CAS the pump/timeout/cancel use, so
+             * exactly one waker wins this parker. */
+            for (;;) {
+                cur = __atomic_load_n(&p->commit, __ATOMIC_ACQUIRE);
+                if (cur == PYGO_PARK_WOKEN) break;
+                if (__atomic_compare_exchange_n(&p->commit, &cur, PYGO_PARK_WOKEN,
+                                                0, __ATOMIC_ACQ_REL,
+                                                __ATOMIC_ACQUIRE))
+                    break;
+            }
+            /* Only a committed (PARKED) g is re-queued here: it has yielded and
+             * will resume in wait_fd to pick up the stashed exception.  An ARMED
+             * g hasn't yielded (still running on its own thread) and a WOKEN one
+             * was just claimed by another waker -- skip both, try the next. */
+            if (cur != PYGO_PARK_PARKED) continue;
+            if (p->ready_out != NULL) *p->ready_out = PYGO_NETPOLL_SIGNALED;
+            pygo_parker_unlink(pool, p);
+            if (p->hub != NULL) pygo_mn_wake_g(p->hub, p->g);
+            else                pygo_sched_wake(p->g);
+            pygo_mutex_unlock(&pool->lock);
+            return 1;
+        }
+        pygo_mutex_unlock(&pool->lock);
+    }
+    return 0;
+}
+
+/* ---- park / wake ---- */
+int pygo_netpoll_wait_fd(int fd, int events, long long timeout_ns)
+{
+    pygo_parked_t *park;
+    pygo_sched_t *s;
+    int ready_mask = 0;
+    void *hub_opaque;
+    pygo_g_t *current_g;
+    pygo_parker_pool_t *pool;
+
+    if (pygo_netpoll_init() != 0) return -1;
+
+    park = pygo_parker_pool_acquire();
+    if (park == NULL) { errno = ENOMEM; return -1; }
+
+    /* Determine where this g lives so pump can route the wake.
+     * If we're inside an M:N hub, the hub TLS gives us the target;
+     * otherwise it's the global single-thread scheduler. */
+    hub_opaque = pygo_mn_current_hub_opaque();
+    s = pygo_sched_get();
+    if (hub_opaque != NULL) {
+        /* Hub context: current g is in TLS (set by hub_main).  We
+         * don't read s->current because that's the single-thread
+         * sched's slot, not the hub's. */
+        current_g = pygo_mn_tls_current_g();
+    } else {
+        current_g = s->current;
+    }
+
+    /* Pick the parker pool by current hub.  Per-hub pools mean a
+     * goroutine parked on hub H links into pool[H].head + pool[H]
+     * .by_fd[fd] + pool[H].dh_arr; another hub's wait_fd contends
+     * only on its own pool's lock.  Single-thread sched + non-hub
+     * callers fall back to pool[DEFAULT]. */
+    pool = pygo_parker_pool_for_hub(hub_opaque);
+    pygo_parker_pool_lock_ensure_inited(pool);
+
+    park->fd = fd;
+    park->events = events;
+    park->deadline_ns = timeout_ns < 0 ? -1 : monotonic_ns() + timeout_ns;
+    park->ready_out = &ready_mask;
+    park->g = current_g;
+    park->hub = hub_opaque;
+    /* next/slot/next_by_fd/prev_by_fd are NULL from pool acquire. */
+
+    /* Per-g parker tracking: each g has at most one parker active.
+     * Setting this lets hub_main's completion path detect+forcibly
+     * unlink any leaked parker before the g's stack is returned to
+     * the pool (which would otherwise let pump dereference freed
+     * memory via the stale parker pointer). */
+    if (current_g != NULL) {
+        current_g->netpoll_parker = park;
+    }
+
+    /* ORDER MATTERS (M:N + free-threaded race fix):
+     *
+     *   1. Link the parker.  Now any pump that wakes on an event for
+     *      this fd can find it in pool->by_fd[fd].
+     *   2. Consume any wakeups that fired BEFORE we got here.  Under
+     *      M:N another hub's pump may have observed an event between
+     *      this g's previous unlink (on its last wake) and the link
+     *      above; the pending-wake bitmap captured it.
+     *   3. Only then call epoll_ctl ADD / IOCP submit.  If ADD
+     *      synthesizes an edge because the fd is already ready, the
+     *      parker is already visible -- the pump will route it.
+     *
+     * The PREVIOUS ordering (submit before link) lost wakes in two
+     * ways: (a) ADD-synthesized edges processed by another hub before
+     * the parker was visible; (b) edges fired during the gap between
+     * a previous parker being unlinked-on-wake and a new one being
+     * linked. */
+    pygo_mutex_lock(&pool->lock);
+    pygo_parker_link(pool, park);
+    pygo_mutex_unlock(&pool->lock);
+    if (current_g != NULL) pygo_g_state_set(current_g, PYGO_GST_PARKED_NETPOLL);
+
+    /* Drain any pre-existing pending-wake bits.  If something is
+     * already there (from a pump that saw an event between our last
+     * unlink and this link), wake ourselves immediately instead of
+     * parking. */
+    {
+        int pending = pygo_fd_pending_wake_consume(fd, events);
+        if (pending != 0) {
+            pygo_mutex_lock(&pool->lock);
+            pygo_parker_unlink(pool, park);
+            pygo_mutex_unlock(&pool->lock);
+            if (current_g != NULL) pygo_g_state_set(current_g, PYGO_GST_RUNNING);
+            pygo_parker_pool_release(park);
+            return pending;
+        }
+    }
+
+#if defined(PYGO_OS_WINDOWS)
+    /* IOCP-AFD: submit the poll request now; pump just drains
+     * completions.  Falls through to the no-op register for the
+     * WSAPoll / select paths. */
+    if (pygo_win_use_iocp) {
+        /* Fault injection short-circuits the real submit so no AFD IRP is left
+         * in flight on a simulated failure; the parker is cleanly unlinked. */
+        int finj = pygo_fault_inject(PYGO_FAULT_IOCP_SUBMIT);
+        if (finj || pygo_iocp_submit(fd, events, timeout_ns) != 0) {
+            pygo_mutex_lock(&pool->lock);
+            pygo_parker_unlink(pool, park);
+            pygo_mutex_unlock(&pool->lock);
+            pygo_parker_pool_release(park);
+            return -1;
+        }
+    } else {
+        if (pygo_netpoll_register(fd, events) != 0) {
+            pygo_mutex_lock(&pool->lock);
+            pygo_parker_unlink(pool, park);
+            pygo_mutex_unlock(&pool->lock);
+            pygo_parker_pool_release(park);
+            return -1;
+        }
+    }
+#else
+    if (pygo_netpoll_register(fd, events) != 0) {
+        pygo_mutex_lock(&pool->lock);
+        pygo_parker_unlink(pool, park);
+        pygo_mutex_unlock(&pool->lock);
+        pygo_parker_pool_release(park);
+        return -1;
+    }
+#endif
+
+    /* Re-check pending bits after register: the ADD may have
+     * synthesized an edge that another hub's pump processed in the
+     * window between link and register; that pump's "no parker"
+     * fallback now sets the pending bit (because we re-arrange the
+     * pump path below to do that).  Drain again before yielding. */
+    {
+        int pending = pygo_fd_pending_wake_consume(fd, events);
+        if (pending != 0) {
+            pygo_mutex_lock(&pool->lock);
+            pygo_parker_unlink(pool, park);
+            pygo_mutex_unlock(&pool->lock);
+            pygo_parker_pool_release(park);
+            return pending;
+        }
+    }
+
+    /* Commit to parking (Go netpollblockcommit).  CAS commit ARMED->
+     * PARKED.  If it fails, a pump has already claimed this parker
+     * (commit == WOKEN): it recorded readiness into ready_mask and
+     * unlinked us but did NOT re-queue (we hadn't committed), so abort
+     * the park and return that readiness directly.  This closes the
+     * window between the last pending re-check above and the yield
+     * below, where a pump on another hub could otherwise wake a parker
+     * we were about to park on -- the residual lost-wake. */
+    {
+        int expc = PYGO_PARK_ARMED;
+        if (!__atomic_compare_exchange_n(&park->commit, &expc,
+                                         PYGO_PARK_PARKED, 0,
+                                         __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+            /* expc == WOKEN: claimed by a pump.  ready_mask is set.  The g
+             * never committed to parking, so it keeps running; its wake_state
+             * stays RUNNING (the pump claimed an ARMED parker and so did NOT
+             * call wake_g -- nothing to undo). */
+            pygo_mutex_lock(&pool->lock);
+            pygo_parker_unlink(pool, park);   /* no-op if pump unlinked */
+            pygo_mutex_unlock(&pool->lock);
+            if (current_g != NULL)
+                pygo_g_state_set(current_g, PYGO_GST_RUNNING);
+            if (current_g != NULL && current_g->netpoll_parker == park)
+                current_g->netpoll_parker = NULL;
+            pygo_parker_pool_release(park);
+            return ready_mask;
+        }
+    }
+
+    /* Committed to parking: stamp the dwell clock for the hub-idle
+     * stack-reclaim sweep (PYGO_STACK_PARK_SWEEP).  Plain store -- only
+     * the sweep on this g's owning hub reads it, after this point. */
+    park->park_ts = monotonic_ns();
+
+    /* Snapshot tstate (same as pygo_sched_yield does) so the next
+     * resume restores it.  Then yield WITHOUT re-queueing -- pump
+     * pushes us back when the fd becomes ready. */
+    if (current_g != NULL) {
+        pygo_sched_park_current();
+    }
+    pygo_coro_yield();
+    /* On wake: pump SHOULD have set ready_mask and removed us from the
+     * parked lists.  Defensive unlink covers the case where pump
+     * routed the wake via a path that bypassed pygo_parker_unlink. */
+    if (park->slot != NULL || park->prev_by_fd != NULL ||
+        park->next_by_fd != NULL ||
+        (park->fd >= 0 && (size_t)park->fd < pool->by_fd_cap &&
+         pool->by_fd[park->fd] == park)) {
+#ifdef PYGO_PARKER_DEBUG
+        fprintf(stderr,
+                "[pygo] wait_fd resumed with parker still linked: "
+                "parker=%p gen=%u fd=%d g=%p slot=%p next=%p nbf=%p pbf=%p "
+                "bucket=%p\n",
+                (void *)park, park->gen, park->fd, (void *)park->g,
+                (void *)park->slot, (void *)park->next,
+                (void *)park->next_by_fd, (void *)park->prev_by_fd,
+                (park->fd >= 0 && (size_t)park->fd < pool->by_fd_cap)
+                    ? (void *)pool->by_fd[park->fd] : NULL);
+#endif
+        pygo_mutex_lock(&pool->lock);
+        pygo_parker_unlink(pool, park);
+        pygo_mutex_unlock(&pool->lock);
+    }
+    /* Clear g->netpoll_parker before release so completion's force-
+     * unlink cannot dereference a freelist entry. */
+    if (current_g != NULL && current_g->netpoll_parker == park) {
+        current_g->netpoll_parker = NULL;
+    }
+    pygo_parker_pool_release(park);
+    /* The scheduler handed us a raised Python signal-handler exception (Ctrl-C
+     * -> KeyboardInterrupt, an alarm handler, ...): it ran the handler in its
+     * own tstate, stashed the raised exception on our owner scheduler, and woke
+     * us with this sentinel (pygo_netpoll_signal_wake).  Restore it into THIS
+     * goroutine's tstate and return -1 so it propagates out of the cooperative
+     * blocking call (recv/accept/select/...) through this goroutine's own stack
+     * -- where its try/except sees it -- instead of out of run().  Callers treat
+     * a -1 with a Python error already set as "propagate", not OSError. */
+    if (ready_mask == PYGO_NETPOLL_SIGNALED) {
+        pygo_sched_t *owner = (current_g != NULL) ? current_g->owner : s;
+        PyObject *exc = (owner != NULL) ? owner->signal_exc : NULL;
+        if (owner != NULL) owner->signal_exc = NULL;
+        if (exc != NULL) {
+            PyObject *tb = PyException_GetTraceback(exc);   /* new ref or NULL */
+            /* PyErr_Restore steals all three refs. */
+            PyErr_Restore((PyObject *)Py_NewRef(Py_TYPE(exc)), exc, tb);
+        }
+        return -1;
+    }
+    return ready_mask;
+}
