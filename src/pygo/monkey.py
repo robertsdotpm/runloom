@@ -1491,6 +1491,13 @@ _real_Condition = _th.Condition
 _real_Semaphore = _th.Semaphore
 _real_BoundedSemaphore = _th.BoundedSemaphore
 _real_get_ident = _th.get_ident
+# Low-level _thread primitives.  stdlib internals capture these DIRECTLY
+# (e.g. tempfile: `from _thread import allocate_lock`), bypassing threading.*,
+# so patching only threading.Lock leaves those internal locks real -- and a
+# real lock held by one goroutine across a yielding (offloaded) call while
+# another goroutine blocks on it FREEZES the single scheduler thread (deadlock).
+_real_allocate_lock = _thread.allocate_lock
+_real_thread_RLock  = getattr(_thread, "RLock", None)
 
 
 class CoLock(object):
@@ -1862,6 +1869,12 @@ def _patch_threading():
     _th.Condition = CoCondition
     _th.Semaphore = CoSemaphore
     _th.BoundedSemaphore = CoBoundedSemaphore
+    # Also patch the low-level _thread factories that stdlib internals grab
+    # directly (tempfile._once_lock, etc.).  CoLock() is call-compatible with
+    # allocate_lock() and degrades to an immediate acquire off-goroutine.
+    _thread.allocate_lock = CoLock
+    if _real_thread_RLock is not None:
+        _thread.RLock = CoRLock
     _orig_thread_join = _th.Thread.join
     _th.Thread.join = _patched_thread_join
 
@@ -1873,6 +1886,9 @@ def _unpatch_threading():
     _th.Condition = _real_Condition
     _th.Semaphore = _real_Semaphore
     _th.BoundedSemaphore = _real_BoundedSemaphore
+    _thread.allocate_lock = _real_allocate_lock
+    if _real_thread_RLock is not None:
+        _thread.RLock = _real_thread_RLock
     if _orig_thread_join is not None:
         _th.Thread.join = _orig_thread_join
 
