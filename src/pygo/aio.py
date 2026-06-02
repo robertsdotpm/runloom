@@ -923,6 +923,16 @@ _TASK_NAME_COUNTER = _itertools.count(1)
 # shared scheduler.  WeakSet so finished/collected tasks drop out on their own.
 _PG_ALL_TASKS = _weakref.WeakSet()
 
+# Every PygoEventLoop that has been constructed and not yet close()'d, across
+# the process.  close()'s sched_reset() bulldozes the SHARED per-thread sleep
+# heap + ready ring, which would drop another still-open loop's in-flight work
+# -- and not just its tasks: a raw call_later timer goroutine (an asyncio.sleep
+# that a server handler on a sibling loop is parked on) lives in that shared
+# sleep heap too, invisible to the _PG_ALL_TASKS task guard.  So close() only
+# resets when it is the LAST open loop (see _cancel_outstanding_tasks).  WeakSet
+# so a loop that is GC'd without close() drops out on its own.
+_PG_OPEN_LOOPS = _weakref.WeakSet()
+
 
 # ====================================================================
 # Handles -- minimal asyncio.Handle / asyncio.TimerHandle compat.
@@ -1658,6 +1668,7 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
     def __init__(self):
         self._running = False
         self._closed  = False
+        _PG_OPEN_LOOPS.add(self)
         # fd -> {"r": reader _Handle|None, "w": writer _Handle|None,
         #        "g": the single per-fd I/O goroutine}.  See add_reader.
         self._io = {}
@@ -2739,7 +2750,16 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
         # pytest-asyncio fixture-vs-test multi-loop case).
         sibling_busy = any(
             (t._loop is not self and not t.done()) for t in list(_PG_ALL_TASKS))
-        if not sibling_busy:
+        # sched_reset() bulldozes the SHARED per-thread scheduler (ready ring +
+        # sleep heap).  Any OTHER open loop on this thread may have live work
+        # sitting there -- including raw call_later timer goroutines (a server
+        # handler's in-flight asyncio.sleep) that the _PG_ALL_TASKS task guard
+        # cannot see.  So only reset when we are the LAST open loop; otherwise a
+        # sibling's pending sleep is silently dropped and the goroutine awaiting
+        # it hangs forever (aiohttp's streaming-handler teardown deadlock).
+        other_loop_open = any(
+            (lp is not self and not lp._closed) for lp in list(_PG_OPEN_LOOPS))
+        if not sibling_busy and not other_loop_open:
             try:
                 pygo_core.sched_reset()
             except AttributeError:
