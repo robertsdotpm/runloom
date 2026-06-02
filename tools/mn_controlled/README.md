@@ -17,48 +17,60 @@ preemption are forced off in this mode. Off by default; zero cost when unset.
 
 **Works.** Builds clean; off-path is regression-free (mn_stress + suite green
 with `PYGO_MN_SEED` unset). With it on, the baton correctly serializes the real
-hub/deque/park/wake path: simple and channel workloads run to completion,
-conservation-clean, no deadlock, and across seeds it explores **diverse**
-cross-hub interleavings (8/8 distinct on a 3-hub yield workload) — i.e. it is a
-genuine *randomized concurrency testing* mode on the real M:N code, which
-single-hub PCT cannot reach.
+hub/deque/park/wake path: simple + channel workloads **and the full `mn_stress`
+fuzzer** (select + coordinator close, 1/2/default hubs) run to completion,
+conservation-clean, no deadlock — soaked over 6 seeds × 20 iters since the
+deadlock fix. Across seeds it explores **diverse** cross-hub interleavings
+(10/10 distinct on the channel demo) — i.e. it is a genuine *randomized
+concurrency testing* mode on the real M:N code, which single-hub PCT cannot
+reach.
 
-**Two real gaps remain (why it is NOT merged to main):**
+**Deadlock — FIXED (2026-06-03).** Earlier, multi-iter `mn_stress` (select +
+coordinator) wedged. Root cause: the mode had *disabled preemption*, so a
+goroutine that ran Python without yielding held the baton forever and starved
+every other hub (gdb showed exactly this — a thread deep in the eval loop under
+`pygo_preempt_eval_frame`, baton free, all other hubs idle). Fix: **keep
+preemption ON** in controlled mode — it yields a runaway goroutine at a bytecode
+boundary, which releases the baton. (Handoff stays off; its rescue thread
+resumes off-baton.) Soak after the fix: `mn_stress` CLEAN over 6 seeds × 20
+iters and 1/2/default hubs, off-path unchanged.
 
-1. **Not deterministic replay.** Same `PYGO_MN_SEED` does *not* yet reproduce
-   the same interleaving run-to-run. The controller's seeded choice is only
-   among the hubs *currently* in `acquire`; which hubs are requesting at a given
-   handoff still depends on OS timing (when an idle hub re-enters the pool, when
-   a netpoll wake lands, work-stealing distribution). The seed controls the
-   *choice*, not the *requester set*. Full determinism needs the schedule's
-   nondeterminism pinned end-to-end, not just the baton handoff.
+**One real gap remains (why it is NOT merged to main):**
 
-2. **Intermittent deadlock on complex workloads.** Single `mn_stress` iters
-   pass, but a multi-iter run (select consumers + coordinator close) wedges on
-   some iters. The baton + the scheduler's idle/netpoll/steal paths admit a
-   liveness cycle not yet diagnosed.
+1. **Not deterministic replay.** Same `PYGO_MN_SEED` still varies run-to-run.
+   The controller's seeded choice is only among the hubs *currently* in
+   `acquire`; the requester set still depends on OS timing (idle-hub re-entry,
+   netpoll wakes, work-stealing). **And the deadlock fix added a second source:**
+   preemption is now load-bearing for liveness, but it fires on a *wall-clock*
+   sysmon threshold — inherently nondeterministic. So determinism needs both the
+   requester set pinned *and* preemption made deterministic.
 
 ## What full determinism actually requires (the remaining work)
 
 The baton controls *which hub runs a goroutine next*. Deterministic replay also
 needs the rest of the schedule's nondeterminism pinned:
 
+- **Deterministic preemption.** Replace the wall-clock sysmon preempt trigger
+  (now load-bearing for liveness) with a *bytecode-count* preempt in the eval
+  hook, so the runaway-goroutine yield point is schedule-determined, not timing-
+  determined.
 - **Gate the wake/steal/netpoll-dispatch points**, not just resume — so *which*
   goroutines are ready, and on *which* hub, is seed-determined too.
 - **Barrier rendezvous** at each scheduling point: wait until every non-blocked
   hub has reached the controller before choosing, so the requester set is a
   function of the schedule, not OS timing.
-- **A deadlock-free baton protocol** that accounts for a hub going idle in
-  netpoll while holding/wanting the baton (the gap behind the hang above).
 
 That is a substantial, `verify/`-grade effort (and arguably wants a TLA+/Spin
 model of the baton protocol first — which the repo is well set up for). This
-prototype is the proof-of-concept and a precise statement of the hard parts.
+prototype is the proof-of-concept, now deadlock-free, and a precise statement
+of what remains for full deterministic replay.
 
-## Demo (the working case)
+## Demo
 
 ```sh
 PYGO_GIL=0 ~/.pyenv/versions/3.13.13t/bin/python3 tools/mn_controlled/demo.py
 ```
-Shows serialized cross-hub channel exploration: diverse interleavings across
-seeds, conservation-clean. Do NOT point it at `mn_stress` multi-iter yet (gap 2).
+Serialized cross-hub channel exploration: diverse interleavings across seeds,
+conservation-clean. Since the deadlock fix, `mn_stress` also runs clean under
+controlled mode (`PYGO_MN_SEED=<n> … tools/mn_stress.py`) — a randomized
+concurrency-testing mode on the real hubs.

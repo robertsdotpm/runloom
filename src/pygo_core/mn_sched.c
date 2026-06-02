@@ -540,10 +540,15 @@ static void pygo_mn_ctrl_init(int n)
     pygo_mn_ctrl.rng = strtoull(seed, NULL, 10);
     if (pygo_mn_ctrl.rng == 0) pygo_mn_ctrl.rng = 0x9E3779B97F4A7C15ULL;
     pygo_mn_ctrl.enabled = 1;
-    /* nondeterministic timers off: their firing would unpin the schedule, and
-     * the handoff rescue resumes a goroutine OFF the baton. */
+    /* Handoff MUST stay off: its rescue thread resumes a goroutine OFF the
+     * baton (bypasses resume_begin/end), which would break serialization. */
     pygo_handoff_enabled = 0;
-    pygo_preempt_enabled = 0;
+    /* Preemption stays ON (liveness backstop): a goroutine that runs Python
+     * without yielding would otherwise hold the baton forever and wedge every
+     * other hub.  Preempt yields it at a bytecode boundary -> resume_end ->
+     * baton released -> progress.  (It costs some determinism via sysmon's
+     * wall-clock trigger; pinning that is part of the deterministic-replay
+     * follow-up.)  Earlier disabling it here was the deadlock cause. */
 }
 
 static void pygo_mn_ctrl_fini(void)
