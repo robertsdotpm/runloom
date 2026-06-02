@@ -50,14 +50,11 @@ What you actually pay is the **CPython object tax**, not the scheduler:
 | empty / just spawned | ~2.5 KB | -- (running Python needs a datastack chunk) | -- |
 | parked, holding a socket + read buffer | ~10–13 KB | **~26 KB** (~38 KB active) | **~7–8 KB** |
 
-Straight answer: **in Python you will not beat Go on memory** -- a Python
-`socket` + `bytes` buffers + frame objects all carry PyObject headers and are
-simply fatter than Go structs and `[]byte`. Run the *same* handler in C
-(`pygo_mn_go_c`, no Python frames) and you're at Go parity. At scale the
-kernel's own socket buffers (~8 KB+/socket) dominate in **any** runtime, so a
-million live connections is ~tens of GB everywhere. The goroutine *model* is
-what makes a million feasible at all (vs ~1 MB-stack OS threads, where a
-million is impossible) -- not any runtime making connections free.
+Straight answer: **in Python you will not beat Go on memory** (PyObject headers
+make every `socket`/`bytes`/frame fatter than Go's structs) -- but a C handler
+hits Go parity, and at scale the kernel's own socket buffers dominate in any
+runtime anyway. The goroutine *model* is what makes a million feasible at all;
+no runtime makes the connections themselves free.[^memory]
 
 ### 2. Speed
 
@@ -283,6 +280,14 @@ Full guide in [docs/](docs/) (also on Read the Docs):
     each) run about **5× slower** than plain asyncio; tasks that do many
     `await`s before finishing are **~1.7–1.9× faster**, as pygo's fast context
     switch amortises over the awaits.
+
+[^memory]: A Python `socket` + `bytes` buffers + frame objects all carry
+    PyObject headers and are simply fatter than Go structs and `[]byte`. Run the
+    *same* handler in C (`pygo_mn_go_c`, no Python frames) and you're at Go
+    parity. At scale the kernel's own socket buffers (~8 KB+/socket) dominate in
+    any runtime, so a million live connections is ~tens of GB everywhere -- and
+    vs ~1 MB-stack OS threads (where a million is impossible), the goroutine
+    model is the only reason a million is feasible at all.
 
 [^monkey]: Patched categories: `socket`/`ssl` (incl. `sendfile` + fd passing),
     files & `os` I/O, `select`/`selectors`, `subprocess` + child reaping (pidfd
