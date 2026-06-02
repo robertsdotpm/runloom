@@ -11,12 +11,14 @@
 #   sanitizers  C deque harness under ASan/TSan/UBSan            ~seconds-min
 #   exttsan     WHOLE ext under ThreadSanitizer (real runtime)  ~30s-min
 #   verify      formal proofs: Spin models + CBMC on real C      ~3-4 min
+#   bench       rigorous microbench sweep (informational)        ~1-3 min
 #
 # Usage:
 #   scripts/check_all.sh                 # tests + mn + lincheck + dst + ctest
 #   scripts/check_all.sh all             # everything incl. sanitizers + verify
 #   scripts/check_all.sh verify          # just the formal proofs
 #   scripts/check_all.sh tests ctest     # pick phases
+#   scripts/check_all.sh bench           # perf only (NOT in `all` -- machine-dependent)
 #
 # Env:
 #   PYTHON=...   interpreter for the Python suite + fuzzer
@@ -93,8 +95,12 @@ for ph in "${phases[@]}"; do
       hr "Formal verification (Spin + CBMC)"
       verify/run_verify.sh || rc=1
       ;;
+    bench)
+      hr "Rigorous microbench sweep (informational -- bootstrap CIs)"
+      PYTHON="$PYTHON" bash tools/bench/bench.sh || rc=1
+      ;;
     *)
-      echo "unknown phase: $ph (want: tests mn lincheck dst ctest static sanitizers exttsan verify all)"; rc=2 ;;
+      echo "unknown phase: $ph (want: tests mn lincheck dst ctest static sanitizers exttsan verify bench all)"; rc=2 ;;
   esac
 done
 
