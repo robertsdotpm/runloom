@@ -761,6 +761,8 @@ typedef struct {
     pygo_g_t *g;
 } PygoG;
 
+static PyTypeObject PygoGType;   /* defined below; referenced by richcompare */
+
 static void PygoG_dealloc(PygoG *self)
 {
     if (self->g != NULL) {
@@ -863,6 +865,32 @@ static PyObject *PygoG_stack(PygoG *self, PyObject *unused)
         return NULL;
     }
     return d;
+}
+
+/* Two G handles compare equal iff they wrap the same underlying goroutine.
+ * pygo_core.current_g() mints a fresh PygoG on every call (a new PyObject
+ * wrapping the same pygo_g_t*), so identity-based '==' would make a goroutine
+ * fail to recognise its own handle across calls -- breaking, e.g., a
+ * reentrant cooperative lock that records the owner as current_g().  Compare
+ * by the wrapped pointer, and hash to match so G works as a dict/set key. */
+static PyObject *PygoG_richcompare(PyObject *a, PyObject *b, int op)
+{
+    int eq;
+    if ((op != Py_EQ && op != Py_NE) ||
+        !PyObject_TypeCheck(a, &PygoGType) ||
+        !PyObject_TypeCheck(b, &PygoGType)) {
+        Py_RETURN_NOTIMPLEMENTED;
+    }
+    eq = (((PygoG *)a)->g == ((PygoG *)b)->g);
+    if (op == Py_NE) eq = !eq;
+    if (eq) Py_RETURN_TRUE;
+    Py_RETURN_FALSE;
+}
+
+static Py_hash_t PygoG_hash(PyObject *self)
+{
+    Py_hash_t h = (Py_hash_t)(Py_uintptr_t)((PygoG *)self)->g;
+    return h == -1 ? -2 : h;
 }
 
 static PyMethodDef PygoG_methods[] = {
@@ -1976,6 +2004,11 @@ PyMODINIT_FUNC PyInit_pygo_core(void)
     pygo_diag_init();          /* parses PYGO_DEBUG once; cheap; idempotent */
     pygo_timer_res_init();     /* Windows: 1ms timer resolution (no-op POSIX) */
     if (PyType_Ready(&PygoCoroType) < 0) return NULL;
+    /* Set by hand rather than in the positional initializer, whose long run
+     * of zero slots is easy to miscount: identity-free equality/hash so a
+     * goroutine recognises its own current_g() handle across calls. */
+    PygoGType.tp_richcompare = PygoG_richcompare;
+    PygoGType.tp_hash = PygoG_hash;
     if (PyType_Ready(&PygoGType) < 0) return NULL;
     m = PyModule_Create(&pygo_core_module);
     if (m == NULL) {
