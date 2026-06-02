@@ -2079,13 +2079,32 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
     # its own OS thread and marshal data/exit back onto the loop thread via
     # call_soon_threadsafe -- exactly how run_in_executor already bridges blocking
     # work.  Returns (SubprocessTransport, protocol) like stock asyncio.
+    async def _make_subprocess(self, protocol, args, *, shell,
+                               stdin, stdout, stderr, **kwargs):
+        # Spawn the child, then connect its pipes by AWAITING connect_*_pipe.  If
+        # that connect raises (e.g. cancellation) the child is already running,
+        # so kill + reap it before propagating -- mirror asyncio's
+        # _make_subprocess_transport so create_subprocess_* never leaks a child.
+        transport = _SubprocessTransport(
+            self, protocol, args, shell=shell,
+            stdin=stdin, stdout=stdout, stderr=stderr, **kwargs)
+        try:
+            await transport._connect_pipes()
+        except (SystemExit, KeyboardInterrupt):
+            raise
+        except BaseException:
+            transport.close()
+            await transport._wait()
+            raise
+        return transport
+
     async def subprocess_exec(self, protocol_factory, program, *args,
                               stdin=_subprocess.PIPE, stdout=_subprocess.PIPE,
                               stderr=_subprocess.PIPE, **kwargs):
         _reject_subprocess_text_mode(kwargs)
         protocol = protocol_factory()
-        transport = _SubprocessTransport(
-            self, protocol, [program] + list(args), shell=False,
+        transport = await self._make_subprocess(
+            protocol, [program] + list(args), shell=False,
             stdin=stdin, stdout=stdout, stderr=stderr, **kwargs)
         return transport, protocol
 
@@ -2094,8 +2113,8 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
                                stderr=_subprocess.PIPE, **kwargs):
         _reject_subprocess_text_mode(kwargs)
         protocol = protocol_factory()
-        transport = _SubprocessTransport(
-            self, protocol, cmd, shell=True,
+        transport = await self._make_subprocess(
+            protocol, cmd, shell=True,
             stdin=stdin, stdout=stdout, stderr=stderr, **kwargs)
         return transport, protocol
 
@@ -4383,212 +4402,187 @@ class DatagramTransport(object):
 # OS thread; data + EOF + process-exit are marshalled back to the loop thread
 # via call_soon_threadsafe, so the protocol callbacks all run on the loop.
 # ====================================================================
-class _SubprocessReadPipe(asyncio.ReadTransport):
-    """ReadTransport for a child's stdout/stderr.  A reader thread (started by
-    the SubprocessTransport) does the blocking reads and calls
-    protocol.pipe_data_received; this object exists for the protocol's
-    get_pipe_transport(fd) + flow-control calls."""
-    def __init__(self, proc_transport, fd, pipe):
-        self._proc = proc_transport
-        self._fd = fd
-        self._pipe = pipe
-        self._paused = False
+class _WriteSubprocessPipeProto(asyncio.BaseProtocol):
+    """Bridge protocol for a child's stdin pipe.  connect_write_pipe drives the
+    real _WritePipeTransport; this forwards its lifecycle to the owning
+    _SubprocessTransport (mirrors CPython asyncio.base_subprocess.
+    WriteSubprocessPipeProto)."""
+    def __init__(self, proc, fd):
+        self.proc = proc
+        self.fd = fd
+        self.pipe = None
+        self.disconnected = False
 
-    # Flow control: the reader thread checks _paused between reads.  Not a hard
-    # backpressure guarantee (one read may already be buffered), but enough for
-    # StreamReader's high-water-mark pause to take effect.
-    def pause_reading(self):
-        self._paused = True
+    def connection_made(self, transport):
+        self.pipe = transport
 
-    def resume_reading(self):
-        self._paused = False
+    def connection_lost(self, exc):
+        self.disconnected = True
+        self.proc._pipe_connection_lost(self.fd, exc)
+        self.proc = None
 
-    def is_closing(self):
-        return self._proc._closed
+    def pause_writing(self):
+        self.proc._protocol.pause_writing()
 
-    def close(self):
-        self._proc.close()
-
-    def get_protocol(self):
-        return self._proc._protocol
-
-    def get_extra_info(self, name, default=None):
-        if name == "pipe":
-            return self._pipe
-        return default
+    def resume_writing(self):
+        self.proc._protocol.resume_writing()
 
 
-class _SubprocessWritePipe(asyncio.WriteTransport):
-    """WriteTransport for a child's stdin.  Writes are queued and drained by a
-    dedicated thread so a full pipe buffer never blocks the loop thread."""
-    def __init__(self, proc_transport, fd, pipe):
-        self._proc = proc_transport
-        self._fd = fd
-        self._pipe = pipe
-        self._closed = False
-        self._q = _collections.deque()
-        self._cond = _threading.Condition()
-        self._eof = False
-        self._thread = _threading.Thread(
-            target=self._drain, name="pygo-subproc-stdin", daemon=True)
-        self._thread.start()
-
-    def _drain(self):
-        while True:
-            with self._cond:
-                while not self._q and not self._eof:
-                    self._cond.wait()
-                if self._q:
-                    data = self._q.popleft()
-                else:
-                    break    # _eof and queue empty
-            try:
-                self._pipe.write(data)
-                self._pipe.flush()
-            except (BrokenPipeError, OSError):
-                break
-        try:
-            self._pipe.close()
-        except Exception:
-            pass
-
-    def write(self, data):
-        if self._closed or self._eof:
-            return
-        with self._cond:
-            self._q.append(bytes(data))
-            self._cond.notify()
-
-    def writelines(self, list_of_data):
-        self.write(b"".join(list_of_data))
-
-    def write_eof(self):
-        with self._cond:
-            self._eof = True
-            self._cond.notify()
-
-    def can_write_eof(self):
-        return True
-
-    def close(self):
-        self._closed = True
-        self.write_eof()
-
-    def abort(self):
-        self.close()
-
-    def is_closing(self):
-        return self._closed or self._eof
-
-    def get_protocol(self):
-        return self._proc._protocol
-
-    def get_extra_info(self, name, default=None):
-        if name == "pipe":
-            return self._pipe
-        return default
+class _ReadSubprocessPipeProto(_WriteSubprocessPipeProto, asyncio.Protocol):
+    """Bridge protocol for a child's stdout/stderr pipe; adds data forwarding."""
+    def data_received(self, data):
+        self.proc._pipe_data_received(self.fd, data)
 
 
 class _SubprocessTransport(asyncio.SubprocessTransport):
+    """Subprocess transport that, like CPython's BaseSubprocessTransport, builds
+    its per-fd pipe transports by AWAITING loop.connect_write_pipe /
+    connect_read_pipe (with the bridge protocols above) rather than constructing
+    them inline.  Routing through those loop methods is what makes start-time
+    cancellation propagate and lets flow-control / pause_reading be observed on
+    the returned pipe transport (test_subprocess's pipe-cancel + pause_reading
+    tests mock exactly those loop methods)."""
     def __init__(self, loop, protocol, args, *, shell,
                  stdin, stdout, stderr, **kwargs):
         self._loop = loop
         self._protocol = protocol
         self._closed = False
+        self._finished = False
         self._returncode = None
         self._exit_waiters = []
-        self._pipes = {}        # fd -> pipe transport
-        self._pipes_open = 0    # outstanding stdout/stderr reader threads
+        self._pipes = {}            # fd -> bridge protocol (.pipe = transport)
+        self._pipes_connected = False
         self._extra = {}
-        # bufsize=0: unbuffered, so reader threads see data promptly and our
-        # stdin writer controls flushing.  Spawn the child.
+        # _pending_calls holds pipe_data_received / process_exited that land
+        # before the protocol's connection_made has run; flushed by _connect_pipes.
+        self._pending_calls = []
+        # bufsize=0: unbuffered, so reads see data promptly and our stdin writer
+        # controls flushing.  Spawn the child, then reap it on a wait thread.
         self._proc = _subprocess.Popen(
             args, shell=shell, stdin=stdin, stdout=stdout, stderr=stderr,
             bufsize=0, **kwargs)
         self._pid = self._proc.pid
         self._extra["subprocess"] = self._proc
-        # Build the pipe transports FIRST: the protocol's connection_made calls
-        # get_pipe_transport(fd) to create its StreamReader/Writer, so they must
-        # exist before we fire it.
+        # Placeholder ONLY for fds that actually have a pipe: Popen leaves
+        # proc.std* None for DEVNULL / an inherited fd / a passed file, and those
+        # must NOT seed a _pipes entry -- _connect_pipes connects exactly the same
+        # set (gated on proc.std* is not None), so a None placeholder here would
+        # never be filled and _try_finish's all-disconnected gate (hence wait())
+        # would hang (test_devnull_input).
         if self._proc.stdin is not None:
-            self._pipes[0] = _SubprocessWritePipe(self, 0, self._proc.stdin)
+            self._pipes[0] = None
         if self._proc.stdout is not None:
-            self._pipes[1] = _SubprocessReadPipe(self, 1, self._proc.stdout)
+            self._pipes[1] = None
         if self._proc.stderr is not None:
-            self._pipes[2] = _SubprocessReadPipe(self, 2, self._proc.stderr)
-        # connection_made before any pipe-data/exit callback (asyncio contract).
-        try:
-            protocol.connection_made(self)
-        except Exception as e:
-            self._report(e, "connection_made")
-        # Only NOW start the reader/wait threads -- so no pipe_data_received or
-        # process_exited can land before connection_made has run.
-        if 1 in self._pipes:
-            self._start_reader(1, self._proc.stdout)
-        if 2 in self._pipes:
-            self._start_reader(2, self._proc.stderr)
+            self._pipes[2] = None
         _threading.Thread(target=self._wait_thread,
                           name="pygo-subproc-wait", daemon=True).start()
 
-    def _start_reader(self, fd, pipe):
-        self._pipes_open += 1
-        rp = self._pipes[fd]
-
-        def reader():
-            try:
-                while True:
-                    if rp._paused:
-                        _time.sleep(0.001)
-                        continue
-                    data = pipe.read(32768)
-                    if not data:
-                        break
-                    self._loop.call_soon_threadsafe(
-                        self._protocol.pipe_data_received, fd, data)
-            except (BrokenPipeError, OSError):
-                pass
-            finally:
-                self._loop.call_soon_threadsafe(self._pipe_lost, fd, None)
-
-        _threading.Thread(target=reader, name="pygo-subproc-read-%d" % fd,
-                          daemon=True).start()
-
-    def _pipe_lost(self, fd, exc):
+    async def _connect_pipes(self):
+        # Mirror asyncio.base_subprocess._connect_pipes: await the loop's pipe
+        # connectors so a cancellation there (or any failure) propagates to the
+        # create_subprocess_* caller, then fire connection_made and flush the
+        # callbacks that arrived while connecting.
+        loop = self._loop
+        proc = self._proc
+        if proc.stdin is not None:
+            _, proto = await loop.connect_write_pipe(
+                lambda: _WriteSubprocessPipeProto(self, 0), proc.stdin)
+            self._pipes[0] = proto
+        if proc.stdout is not None:
+            _, proto = await loop.connect_read_pipe(
+                lambda: _ReadSubprocessPipeProto(self, 1), proc.stdout)
+            self._pipes[1] = proto
+        if proc.stderr is not None:
+            _, proto = await loop.connect_read_pipe(
+                lambda: _ReadSubprocessPipeProto(self, 2), proc.stderr)
+            self._pipes[2] = proto
+        # connection_made must run BEFORE create_subprocess_*'s Process.__init__
+        # reads protocol.stdout/stderr (SubprocessStreamProtocol sets those in
+        # connection_made).  Stock asyncio relies on a waiter + FIFO call_soon to
+        # order it; pygo awaits _connect_pipes directly and it completes without
+        # suspending (connect_*_pipe never awaits the loop), so a call_soon here
+        # would run AFTER Process.__init__ -> stdout=None -> stdin never closed ->
+        # deadlock.  Call it inline instead; pipe_data_received/process_exited
+        # that arrived mid-connect are still deferred (call_soon) so they land
+        # after connection_made.
         try:
-            self._protocol.pipe_connection_lost(fd, exc)
+            self._protocol.connection_made(self)
         except Exception as e:
-            self._report(e, "pipe_connection_lost")
-        self._pipes_open -= 1
-        self._maybe_connection_lost()
+            self._report(e, "connection_made")
+        for cb, data in self._pending_calls:
+            loop.call_soon(cb, *data)
+        self._pending_calls = None
+        self._pipes_connected = True
+        self._try_finish()
+
+    def _call(self, cb, *data):
+        # Before connection_made: queue; after: dispatch on the loop.
+        if self._pending_calls is not None:
+            self._pending_calls.append((cb, data))
+        else:
+            self._loop.call_soon(cb, *data)
+
+    def _pipe_data_received(self, fd, data):
+        self._call(self._protocol.pipe_data_received, fd, data)
+
+    def _pipe_connection_lost(self, fd, exc):
+        self._call(self._protocol.pipe_connection_lost, fd, exc)
+        self._try_finish()
 
     def _wait_thread(self):
         rc = self._proc.wait()
-        self._loop.call_soon_threadsafe(self._on_exit, rc)
+        self._loop.call_soon_threadsafe(self._process_exited, rc)
 
-    def _on_exit(self, rc):
+    def _process_exited(self, rc):
         if self._returncode is not None:
             return
         self._returncode = rc
-        try:
-            self._protocol.process_exited()
-        except Exception as e:
-            self._report(e, "process_exited")
-        for fut in self._exit_waiters:
-            if not fut.done():
-                fut.set_result(rc)
-        self._exit_waiters.clear()
-        self._maybe_connection_lost()
-
-    def _maybe_connection_lost(self):
-        # Mirror asyncio: connection_lost fires once the process has exited AND
-        # both output pipes have hit EOF.
-        if self._returncode is not None and self._pipes_open <= 0 \
-                and not self._closed:
-            self._closed = True
+        self._call(self._protocol.process_exited)
+        # The child is gone, so its stdin read end is closed.  Stock asyncio sees
+        # that as POLLHUP and disconnects the write pipe; pygo's stdin transport
+        # is a blocking-thread _WritePipeTransport that can't observe the hangup
+        # on its own, so close it here -- otherwise it never disconnects and
+        # _try_finish's all-pipes-disconnected gate (hence wait()) hangs for any
+        # process whose stdin was left open (e.g. one just awaiting exit).
+        # Output pipes are left alone: they EOF naturally and may still hold
+        # buffered data to deliver.
+        stdin = self._pipes.get(0)
+        if stdin is not None and stdin.pipe is not None and not stdin.disconnected:
             try:
-                self._protocol.connection_lost(None)
-            except Exception as e:
-                self._report(e, "connection_lost")
+                stdin.pipe.close()
+            except Exception:
+                pass
+        self._try_finish()
+
+    def _try_finish(self):
+        # connection_lost fires once the process has exited AND every connected
+        # pipe has disconnected -- mirror asyncio.base_subprocess._try_finish.
+        if self._returncode is None or self._finished:
+            return
+        if not self._pipes_connected:
+            # _connect_pipes never completed (failed / cancelled): wake wait()ers
+            # so they don't hang, but don't deliver connection_made/lost.
+            for fut in self._exit_waiters:
+                if not fut.done():
+                    fut.set_result(self._returncode)
+            self._exit_waiters = []
+            return
+        if all(p is not None and p.disconnected for p in self._pipes.values()):
+            self._finished = True
+            self._closed = True
+            self._call(self._call_connection_lost, None)
+
+    def _call_connection_lost(self, exc):
+        try:
+            self._protocol.connection_lost(exc)
+        except Exception as e:
+            self._report(e, "connection_lost")
+        finally:
+            for fut in self._exit_waiters:
+                if not fut.done():
+                    fut.set_result(self._returncode)
+            self._exit_waiters = []
 
     # ---- asyncio.SubprocessTransport interface ----
     def get_pid(self):
@@ -4598,7 +4592,8 @@ class _SubprocessTransport(asyncio.SubprocessTransport):
         return self._returncode
 
     def get_pipe_transport(self, fd):
-        return self._pipes.get(fd)
+        proto = self._pipes.get(fd)
+        return proto.pipe if proto is not None else None
 
     def _wait(self):
         # asyncio.subprocess.Process.wait() awaits this.
@@ -4622,20 +4617,25 @@ class _SubprocessTransport(asyncio.SubprocessTransport):
         return self._closed
 
     def close(self):
-        # Best-effort: kill a still-running child, then close stdin.  Only kill
-        # if the process is genuinely still running -- poll() the Popen rather
-        # than trusting self._returncode, which our _wait_thread sets
-        # ASYNCHRONOUSLY: a child that already exited may not have been notified
-        # yet, and close() must not kill a finished process (test_close_dont_
-        # kill_finished).
+        # Best-effort: close every connected pipe transport, then kill a child
+        # that is genuinely still running.  Only kill if poll() confirms it is
+        # alive -- self._returncode is set ASYNCHRONOUSLY by the wait thread, so
+        # a child that already exited may not have been notified yet, and close()
+        # must not kill a finished process (test_close_dont_kill_finished).
+        if self._closed:
+            return
+        self._closed = True
+        for proto in self._pipes.values():
+            if proto is not None and proto.pipe is not None:
+                try:
+                    proto.pipe.close()
+                except Exception:
+                    pass
         if self._returncode is None and self._proc.poll() is None:
             try:
                 self._proc.kill()
             except (ProcessLookupError, OSError):
                 pass
-        stdin = self._pipes.get(0)
-        if stdin is not None:
-            stdin.close()
 
     def get_protocol(self):
         return self._protocol
@@ -4755,6 +4755,15 @@ class _WritePipeTransport(asyncio.WriteTransport):
         self._eof = False
         self._q = _collections.deque()
         self._cond = _threading.Condition()
+        # Flow control (asyncio watermark contract): the drain thread writes in
+        # the background, so without backpressure StreamWriter.drain() would
+        # return instantly and never surface a broken pipe.  Pause the protocol
+        # once the queued byte count crosses the high-water mark and resume it
+        # below the low-water mark, exactly like a selector WriteTransport.
+        self._buffer_size = 0
+        self._high_water = 64 * 1024
+        self._low_water = 16 * 1024
+        self._protocol_paused = False
         try:
             protocol.connection_made(self)
         except Exception as e:
@@ -4773,16 +4782,48 @@ class _WritePipeTransport(asyncio.WriteTransport):
                 else:
                     break
             try:
-                self._pipe.write(data)
+                # proc.stdin is a RAW FileIO (bufsize=0): write() returns a
+                # PARTIAL count, so loop until every byte is on the wire.  Without
+                # this a big write neither blocks nor surfaces the peer's hangup --
+                # it silently drops the tail and StreamWriter.drain() returns
+                # cleanly (test_stdin_broken_pipe expects BrokenPipeError).
+                view = memoryview(data)
+                while view:
+                    n = self._pipe.write(view)
+                    if not n:
+                        break
+                    view = view[n:]
                 self._pipe.flush()
             except (BrokenPipeError, OSError) as e:
                 exc = e
                 break
+            with self._cond:
+                self._buffer_size -= len(data)
+            self._call_soon_safe(self._maybe_resume)
         try:
             self._pipe.close()
         except Exception:
             pass
-        self._loop.call_soon_threadsafe(self._lost, exc)
+        self._call_soon_safe(self._lost, exc)
+
+    def _call_soon_safe(self, cb, *args):
+        # The drain thread outlives the loop in teardown races; a late callback
+        # on a closed loop raises RuntimeError -- swallow it.
+        try:
+            self._loop.call_soon_threadsafe(cb, *args)
+        except RuntimeError:
+            pass
+
+    def _maybe_resume(self):
+        # On the loop thread: lift the pause once the backlog has drained enough.
+        with self._cond:
+            if not self._protocol_paused or self._buffer_size > self._low_water:
+                return
+            self._protocol_paused = False
+        try:
+            self._protocol.resume_writing()
+        except Exception as e:
+            self._report(e, "resume_writing")
 
     def _lost(self, exc):
         if self._closing:
@@ -4796,12 +4837,41 @@ class _WritePipeTransport(asyncio.WriteTransport):
     def write(self, data):
         if self._closing or self._eof:
             return
+        data = bytes(data)
+        if not data:
+            return
         with self._cond:
-            self._q.append(bytes(data))
+            self._q.append(data)
+            self._buffer_size += len(data)
             self._cond.notify()
+            pause = (not self._protocol_paused
+                     and self._buffer_size > self._high_water)
+            if pause:
+                self._protocol_paused = True
+        # pause_writing runs on the loop thread (write() is called there); the
+        # protocol's drain() then blocks until _maybe_resume / connection_lost.
+        if pause:
+            try:
+                self._protocol.pause_writing()
+            except Exception as e:
+                self._report(e, "pause_writing")
 
     def writelines(self, list_of_data):
         self.write(b"".join(list_of_data))
+
+    def get_write_buffer_size(self):
+        return self._buffer_size
+
+    def get_write_buffer_limits(self):
+        return (self._low_water, self._high_water)
+
+    def set_write_buffer_limits(self, high=None, low=None):
+        if high is None:
+            high = 64 * 1024 if low is None else 4 * low
+        if low is None:
+            low = high // 4
+        self._high_water = high
+        self._low_water = low
 
     def write_eof(self):
         with self._cond:
@@ -4961,10 +5031,18 @@ class PygoEventLoopPolicy(asyncio.AbstractEventLoopPolicy):
     # exact object set, or callers that do the set/get/attach_loop(None)/close
     # lifecycle (e.g. CPython's test_subprocess watcher mixins) crash on a None.
     def get_child_watcher(self):
+        _warnings._deprecated(
+            "get_child_watcher",
+            "{name!r} is deprecated as of Python 3.12 and will be "
+            "removed in Python {remove}.", remove=(3, 14))
         return self._child_watcher
 
     def set_child_watcher(self, watcher):
         self._child_watcher = watcher
+        _warnings._deprecated(
+            "set_child_watcher",
+            "{name!r} is deprecated as of Python 3.12 and will be "
+            "removed in Python {remove}.", remove=(3, 14))
 
 
 def install():
