@@ -26,7 +26,13 @@ def _run(coro_fn):
 
 
 def _fd_count():
-    return len(os.listdir("/proc/self/fd"))
+    # /proc/self/fd on Linux, /dev/fd on macOS/BSD; None where neither exists.
+    for p in ("/proc/self/fd", "/dev/fd"):
+        try:
+            return len(os.listdir(p))
+        except OSError:
+            pass
+    return None
 
 
 def _pair():
@@ -111,6 +117,7 @@ def test_repeated_cancel_no_fd_leak():
         base = _fd_count()
         for _ in range(40):
             await one(loop)
-        leaked = _fd_count() - base
-        assert leaked <= 0, "leaked {0} fd(s) across cancel cycles".format(leaked)
+        if base is not None:
+            leaked = _fd_count() - base
+            assert leaked <= 0, "leaked {0} fd(s) across cancel cycles".format(leaked)
     _run(main)

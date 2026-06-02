@@ -113,14 +113,21 @@ def test_repeated_fork_no_fd_leak():
     """Many forks, each doing cooperative work in the child, must all exit 0 and
     must not leak descriptors in the PARENT (the self-pipe / pool fds)."""
     def fd_count():
-        return len(os.listdir("/proc/self/fd"))
+        # /proc/self/fd on Linux, /dev/fd on macOS/BSD; None where neither.
+        for p in ("/proc/self/fd", "/dev/fd"):
+            try:
+                return len(os.listdir(p))
+            except OSError:
+                pass
+        return None
 
     _coop(_file_offload)               # warm the pool first
     base = fd_count()
     for _ in range(12):
         assert _run_child_workload_under_fork(_socketpair_roundtrip) == 0
-    leaked = fd_count() - base
-    assert leaked <= 0, "parent leaked {0} fd(s) across forks".format(leaked)
+    if base is not None:
+        leaked = fd_count() - base
+        assert leaked <= 0, "parent leaked {0} fd(s) across forks".format(leaked)
 
 
 def test_parent_survives_forks():

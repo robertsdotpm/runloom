@@ -199,11 +199,19 @@ class TestSelectorsReadiness(unittest.TestCase):
             sel.register(a, selectors.EVENT_READ | selectors.EVENT_WRITE)
             ready = sel.select(timeout=1.0)
             sel.close(); a.close(); b.close()
-            self.assertEqual(len(ready), 1)
-            _, mask = ready[0]
-            self.assertTrue(mask & selectors.EVENT_READ)
-            self.assertTrue(mask & selectors.EVENT_WRITE)
-        _drive(body)
+            return ready
+        ready = _drive(body)
+        # epoll coalesces a fd's read+write readiness into one (key, READ|WRITE)
+        # entry; kqueue uses separate EVFILT_READ/EVFILT_WRITE filters and the
+        # stdlib KqueueSelector returns ONE entry per filter (it does NOT
+        # coalesce -- verified against stock selectors on macOS).  So assert the
+        # union of masks across all entries has both bits, backend-agnostically.
+        self.assertGreaterEqual(len(ready), 1)
+        combined = 0
+        for _, mask in ready:
+            combined |= mask
+        self.assertTrue(combined & selectors.EVENT_READ)
+        self.assertTrue(combined & selectors.EVENT_WRITE)
 
     def test_many_fds_only_ready_returned(self):
         def body():
