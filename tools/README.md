@@ -7,10 +7,12 @@ runtime -- and the harnesses that drive them hard.
 |------|---------|
 | [`watchdog.py`](watchdog.py) | turn a silent hang into a full state dump (thread stacks + scheduler self-check + stats + lifecycle event ring) |
 | [`mn_stress.py`](mn_stress.py) | seeded randomized fuzzer for the M:N (multi-hub) scheduler: cross-hub channels + select under real parallelism, with conservation checks |
-| [`run_sanitizers.sh`](run_sanitizers.sh) | build + run the C concurrency harnesses under ASan / TSan / UBSan |
+| [`run_sanitizers.sh`](run_sanitizers.sh) | build + run the standalone C harnesses (test_cldeque) under ASan / TSan / UBSan |
+| [`run_sanitizers_ext.sh`](run_sanitizers_ext.sh) | build the **whole pygo_core ext** under TSan + run it under the free-threaded interpreter (mn_stress + lincheck + pytest subset) -- hunts races in the real scheduler/chan/select/netpoll, not just the deque |
+| [`build_tsan_cpython.sh`](build_tsan_cpython.sh) | recipe for a fully TSan-instrumented free-threaded CPython (gold standard; currently blocked on an upstream getpath quirk -- see header) |
 
-See also `../verify/` (formal proofs) and `../tests_c/test_cldeque.c`
-(deque stress).
+See also `../verify/` (formal proofs), `lincheck/` (linearizability +
+stateful model), and `../tests_c/test_cldeque.c` (deque stress).
 
 ## watchdog.py -- hang / deadlock detector
 
@@ -75,6 +77,30 @@ Builds and runs `tests_c/test_cldeque` under ASan/TSan/UBSan. TSan runs
 are auto-wrapped in `setarch -R` (high-entropy ASLR on 6.x kernels makes
 TSan abort otherwise).
 
+## run_sanitizers_ext.sh -- the whole runtime under TSan
+
+`run_sanitizers.sh` only covers the standalone deque. This builds the
+**entire `pygo_core` extension** with `-fsanitize=thread` and runs it
+under a stock free-threaded CPython (force-loading `libtsan`), driven by
+`mn_stress` + the lincheck recorder (plain **and** select consumers) + a
+chan/sched pytest subset -- so TSan watches the real scheduler, channel,
+select, and netpoll code under genuine GIL-off parallelism.
+
+```sh
+tools/run_sanitizers_ext.sh            # ~30s
+tools/run_sanitizers_ext.sh 1000       # heavier mn_stress soak
+```
+
+TSan instruments only the ext (exactly pygo's C, incl. inlined `Py_INCREF`);
+the few races inside the uninstrumented interpreter are filtered by
+[`tsan_suppressions.txt`](tsan_suppressions.txt) (CPython-only -- never
+suppress a `src/pygo_core/*` frame). The fully-instrumented interpreter
+([`build_tsan_cpython.sh`](build_tsan_cpython.sh)) is the gold standard but
+is currently blocked upstream; this preload path needs no patched CPython.
+
+This harness found and fixed five real scheduler/chan/netpoll data races on
+its first runs (see Findings C below).
+
 ---
 
 ## Findings (what the tooling has already turned up)
@@ -137,3 +163,33 @@ main thread's big stack before any goroutine runs) and `pygo.runtime.run`
 Fixed by calling `prewarm_stdlib()` from the `pygo.sync` entry points
 too, guarded so it only warms on the main thread (never on a goroutine's
 small stack). `tests/test_sync.py` now passes 7/7.
+
+### C. Whole-runtime TSan: five scheduler/chan/netpoll data races -- FIXED
+
+`run_sanitizers_ext.sh` (the ext under ThreadSanitizer, driven by mn_stress +
+lincheck + a pytest subset) flagged five data races in pygo's own C on its
+first runs.  All were real C11 races -- benign on x86 (aligned word
+read/write) but UB, and several stale-prone on weak memory models.  Each was
+the lone plain access among siblings that already used the correct atomic, and
+each is now fixed to match:
+
+1. **`chan.c` select** -- `park.fired_case` read plain after wake while
+   `waiter_claim` claims it with an ACQ_REL CAS (the dominant report, 77/80
+   under mn_stress).  Acquire-load both reads; pairs with the claimer's release
+   so the captured value is visible.
+2. **`mn_sched.c` preempt hook** -- `pygo_preempt_prev_eval` (function pointer
+   on the per-frame eval hot path) read plain vs plain install/uninstall writes.
+   Release-store on install/uninstall, acquire-load on the eval path.
+3. **`mn_sched.c` sysmon** -- `h->resume_g` read plain by the watchdog vs the
+   hub's per-resume write.  Relaxed-atomic both sides (its two siblings already
+   were).
+4. **`mn_sched.c` starve_bound** -- lazy-static env flag read plain vs an atomic
+   first-touch store.  Loaded once into a loop-invariant local via
+   `__atomic_load_n`, matching all seven sibling flags.
+5. **`netpoll.c` pump** -- `pygo_pump_wake_fd` lazy-init eventfd checked/set
+   plain (also double-created on concurrent first-arm).  Double-checked locking
+   under `pygo_pool.lock` + release-store; readers acquire-load.
+
+The select/deque/park-wake *algorithms* remain machine-proven in `verify/`;
+these were missing-atomic-qualifier bugs in the shipped C that only a sanitizer
+on the real binary (not a model of an extracted fragment) can see.

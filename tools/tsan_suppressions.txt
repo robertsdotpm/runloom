@@ -1,0 +1,24 @@
+# ThreadSanitizer suppressions for the pygo ext TSan runs (run_sanitizers_ext.sh).
+#
+# We instrument ONLY pygo's extension (-fsanitize=thread) and run it under a
+# stock free-threaded CPython.  TSan therefore sees every access in pygo's C
+# but NOT the interpreter's internal synchronization, so a handful of races
+# *inside CPython itself* are reported that are not pygo bugs and that pygo
+# cannot fix.  Suppress those by the CPython function/file they occur in.
+#
+# Keep this list MINIMAL and CPython-only.  Never suppress a frame in
+# src/pygo_core/* -- those are real and must be fixed, not hidden.
+
+# --- CPython free-threaded biased reference counting (Python/brc.c) ---
+# Cross-thread refcount merge frees and re-mallocs _PyObjectStackChunk; the
+# allocator's reuse synchronization is invisible to a half-instrumented build.
+race:_Py_brc_merge_refcounts
+race:merge_queued_objects
+race:_PyObjectStack_Pop
+race:_PyObjectStackChunk_New
+
+# --- CPython interpreter/GC internals that touch shared objects ---
+# (Add specific CPython functions here as broader suite runs surface them;
+#  prefer the narrowest function name over a whole-file match.  Do NOT use a
+#  blanket called_from_lib:libpython... rule -- every pygo race is "called
+#  from" libpython via cfunction_call, so that would hide real bugs.)
