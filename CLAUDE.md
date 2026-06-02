@@ -24,3 +24,18 @@
   + stateful select model), `dst/` (deterministic simulation), `mutate/`
   (mutation testing), `coverage.sh` (gcov), plus `../verify/` (Spin/CBMC/
   GenMC/herd7). See `tools/README.md`.
+
+## Scheduler invariants
+- **Signals deliver INTO the parked goroutine, never via the scheduler.** A
+  Python signal handler that raises during a cooperative blocking call
+  (`select`/`poll`/`recv`/`accept`/…) must propagate out of *that call* into the
+  caller's own `try/except` — exactly as a signal interrupting a real
+  `recv()`/`select()` does. The idle scheduler must NOT grab a pending handler
+  and carry a raised exception out of `run()` while a goroutine is parked in a
+  cooperative wait to receive it; it carries one out of `run()` *only* when
+  nothing is parked to take it (the idle / sleep-only Ctrl-C case). The delivery
+  path is `pygo_netpoll_signal_wake` + the `PYGO_NETPOLL_SIGNALED` sentinel that
+  `wait_fd` restores on resume — backend-independent (epoll/kqueue/select).
+
+## Conventions
+- Use `safe-rm`, never plain `rm`, for any file deletion.
