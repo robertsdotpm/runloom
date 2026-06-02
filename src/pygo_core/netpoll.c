@@ -1077,7 +1077,8 @@ const char *pygo_netpoll_backend(void)
 static const char *const pygo_fault_names[PYGO_FAULT_NSITES] = {
     "WSAPOLL", "SELECT", "IOCP_WAIT", "IOCP_SUBMIT", "KQUEUE_WAIT",
     "KQUEUE_CREATE", "KQUEUE_CTL",
-    "TCP_SOCKET", "TCP_CONNECT", "TCP_ACCEPT", "TCP_RECV", "TCP_SEND" };
+    "TCP_SOCKET", "TCP_CONNECT", "TCP_ACCEPT", "TCP_RECV", "TCP_SEND",
+    "FD_READ", "FD_WRITE" };
 static volatile long pygo_fault_fired[PYGO_FAULT_NSITES];
 static volatile long pygo_fault_once_done[PYGO_FAULT_NSITES];
 
@@ -1099,13 +1100,16 @@ void pygo_fault_reset(void)
     }
 }
 
-#if defined(PYGO_OS_WINDOWS) || defined(PYGO_HAVE_KQUEUE)
+/* Compiled on every platform: the netpoll pump faults (KQUEUE/SELECT/IOCP/
+ * WSAPOLL) only fire on their own backend, but the syscall-surface faults
+ * (TCP_*, FD_*) are reachable on Linux too (e.g. module.c fd_read/fd_write). */
 static const char *const pygo_fault_envs[PYGO_FAULT_NSITES] = {
     "PYGO_FAULT_WSAPOLL", "PYGO_FAULT_SELECT", "PYGO_FAULT_IOCP_WAIT",
     "PYGO_FAULT_IOCP_SUBMIT", "PYGO_FAULT_KQUEUE_WAIT",
     "PYGO_FAULT_KQUEUE_CREATE", "PYGO_FAULT_KQUEUE_CTL",
     "PYGO_FAULT_TCP_SOCKET", "PYGO_FAULT_TCP_CONNECT", "PYGO_FAULT_TCP_ACCEPT",
-    "PYGO_FAULT_TCP_RECV", "PYGO_FAULT_TCP_SEND" };
+    "PYGO_FAULT_TCP_RECV", "PYGO_FAULT_TCP_SEND",
+    "PYGO_FAULT_FD_READ", "PYGO_FAULT_FD_WRITE" };
 
 /* Returns the error code to inject (nonzero) if this site should fail now. */
 int pygo_fault_inject(int site)
@@ -1135,7 +1139,6 @@ int pygo_fault_inject(int site)
 #endif
     return code;
 }
-#endif /* PYGO_OS_WINDOWS || PYGO_HAVE_KQUEUE */
 
 #if defined(PYGO_OS_WINDOWS)
 /* Windows analogue of pygo_netpoll_wait_failed (epoll/kqueue): a hard poll

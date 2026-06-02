@@ -29,6 +29,7 @@ snap/load paths; not built today."
 #include "coro.h"
 #include "pygo_sched.h"
 #include "netpoll.h"
+#include <stdlib.h>   /* getenv -- the test-only fd-fault guard below */
 #include "mn_sched.h"
 #include "chan.h"
 #include "pygo_tcp.h"
@@ -542,6 +543,18 @@ static PyObject *m_tcp_send_once(PyObject *self, PyObject *args)
  * the OS thread.  This is the same trade-off monkey.py already takes
  * via _blocking_call; exposing it here lets the C scheduler shortcut
  * around the Python frame overhead. */
+/* test-only fd_read/fd_write fault injection.  kqueue/Windows have no syscall
+ * tracer; Linux could use strace but the compiled-in path is uniform.  Cached
+ * so the cooperative read/write loop pays only a load+branch when disarmed. */
+static int pygo_fdio_fault_armed(void)
+{
+    static int cached = -1;
+    if (cached < 0)
+        cached = (getenv("PYGO_FAULT_FD_READ") || getenv("PYGO_FAULT_FD_WRITE")) ? 1 : 0;
+    return cached;
+}
+#define PYGO_FDIO_FINJ(site) (pygo_fdio_fault_armed() ? pygo_fault_inject(site) : 0)
+
 static PyObject *m_fd_read(PyObject *self, PyObject *args)
 {
     int fd;
@@ -569,7 +582,9 @@ static PyObject *m_fd_read(PyObject *self, PyObject *args)
     }
 #else
     while (1) {
-        ssize_t r = read(fd, buf.buf, (size_t)n_bytes);
+        int injerr = PYGO_FDIO_FINJ(PYGO_FAULT_FD_READ);
+        ssize_t r = injerr ? (errno = injerr, (ssize_t)-1)
+                           : read(fd, buf.buf, (size_t)n_bytes);
         if (r > 0)  { got = (Py_ssize_t)r; break; }
         if (r == 0) { got = 0; break; }   /* EOF */
         if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
@@ -605,8 +620,10 @@ static PyObject *m_fd_write(PyObject *self, PyObject *args)
     }
 #else
     while (written < buf.len) {
-        ssize_t r = write(fd, (const char *)buf.buf + written,
-                          (size_t)(buf.len - written));
+        int injerr = PYGO_FDIO_FINJ(PYGO_FAULT_FD_WRITE);
+        ssize_t r = injerr ? (errno = injerr, (ssize_t)-1)
+                           : write(fd, (const char *)buf.buf + written,
+                                   (size_t)(buf.len - written));
         if (r >= 0) { written += r; continue; }
         if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
             PyBuffer_Release(&buf);
