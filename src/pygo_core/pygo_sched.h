@@ -162,6 +162,10 @@ struct pygo_g {
      * is undefined -- frames will alias across goroutines.  Use
      * only for pure-compute callables. */
     int noyield;
+    /* PCT (Probabilistic Concurrency Testing) priority -- 0 = unassigned;
+     * only read/written on the single-hub ready path when PYGO_PCT_SEED is
+     * set (testing only, zero cost otherwise).  See pygo_sched.c. */
+    int pct_prio;
     /* Race-safe park/wake counter.  pygo_sched_park_safe decrements;
      * if >0, the wake already arrived and we skip the yield.
      * pygo_sched_wake_safe increments and (if g is currently parked)

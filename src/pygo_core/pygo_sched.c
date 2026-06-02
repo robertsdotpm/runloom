@@ -696,10 +696,125 @@ void pygo_sched_ready_push(pygo_sched_t *s, pygo_g_t *g)
     s->ready_tail++;
 }
 
+/* ====================================================================
+ * PCT -- Probabilistic Concurrency Testing (controlled scheduler)
+ *
+ * Burckhardt, Kothari, Musuvathi, Nagarakatte, "A Randomized Scheduler with
+ * Probabilistic Guarantees of Finding Bugs", ASPLOS 2010.  When PYGO_PCT_SEED
+ * is set, the single-hub ready-pop stops being FIFO and instead always runs
+ * the highest-priority ready goroutine; goroutines get random priorities and
+ * d-1 random "priority change points" demote a goroutine mid-run.  This gives
+ * a probabilistic lower bound of finding any depth-d bug.
+ *
+ * SCOPE: meaningful ONLY for the single-hub cooperative run() path, where the
+ * ready-pop order IS the entire schedule.  It does NOT control the M:N hubs
+ * (those are real parallel OS threads).  Testing-only; zero cost when the env
+ * var is unset (one predicted-not-taken branch in the hot pop).
+ *
+ * Env: PYGO_PCT_SEED (enable + seed), PYGO_PCT_DEPTH (d, default 3),
+ *      PYGO_PCT_STEPS (estimated total scheduling steps k, default 2000),
+ *      PYGO_PCT_DEBUG (print the chosen change points once).
+ * ==================================================================== */
+#define PCT_MAX_DEPTH 16
+typedef struct {
+    int      inited;
+    int      enabled;
+    uint64_t rng;
+    int      depth;
+    long     steps;
+    long     change_at[PCT_MAX_DEPTH];   /* d-1 ascending step indices */
+    int      next_change;
+    int      lo_ctr;                     /* assigns distinct low (demoted) prios */
+} pygo_pct_t;
+static pygo_pct_t pygo_pct;
+
+static uint64_t pygo_pct_rand(void)      /* xorshift64 */
+{
+    uint64_t x = pygo_pct.rng;
+    x ^= x << 13; x ^= x >> 7; x ^= x << 17;
+    pygo_pct.rng = x;
+    return x;
+}
+
+static void pygo_pct_init(void)
+{
+    const char *seed = getenv("PYGO_PCT_SEED");
+    int i;
+    pygo_pct.inited = 1;
+    if (seed == NULL || seed[0] == '\0') { pygo_pct.enabled = 0; return; }
+    pygo_pct.enabled = 1;
+    pygo_pct.rng = strtoull(seed, NULL, 10);
+    if (pygo_pct.rng == 0) pygo_pct.rng = 0x9E3779B97F4A7C15ULL;  /* xorshift fixpoint */
+    pygo_pct.depth = getenv("PYGO_PCT_DEPTH") ? atoi(getenv("PYGO_PCT_DEPTH")) : 3;
+    if (pygo_pct.depth < 1) pygo_pct.depth = 1;
+    if (pygo_pct.depth > PCT_MAX_DEPTH) pygo_pct.depth = PCT_MAX_DEPTH;
+    long k = getenv("PYGO_PCT_STEPS") ? atol(getenv("PYGO_PCT_STEPS")) : 2000;
+    if (k < 1) k = 1;
+    for (i = 0; i < pygo_pct.depth - 1; i++)
+        pygo_pct.change_at[i] = 1 + (long)(pygo_pct_rand() % (uint64_t)k);
+    for (i = 1; i < pygo_pct.depth - 1; i++) {   /* insertion sort ascending */
+        long v = pygo_pct.change_at[i]; int j = i - 1;
+        while (j >= 0 && pygo_pct.change_at[j] > v) {
+            pygo_pct.change_at[j + 1] = pygo_pct.change_at[j]; j--;
+        }
+        pygo_pct.change_at[j + 1] = v;
+    }
+    pygo_pct.steps = 0;
+    pygo_pct.next_change = 0;
+    pygo_pct.lo_ctr = 0;
+    if (getenv("PYGO_PCT_DEBUG")) {
+        fprintf(stderr, "[pct] seed=%s depth=%d steps<=%ld change_at=",
+                seed, pygo_pct.depth, k);
+        for (i = 0; i < pygo_pct.depth - 1; i++)
+            fprintf(stderr, "%ld%s", pygo_pct.change_at[i],
+                    i + 1 < pygo_pct.depth - 1 ? "," : "\n");
+        if (pygo_pct.depth <= 1) fprintf(stderr, "(none)\n");
+    }
+}
+
+/* Find the logical ring index of the highest-priority ready g, assigning a
+ * fresh random high priority to any g that doesn't have one yet. */
+static size_t pygo_pct_argmax(pygo_sched_t *s)
+{
+    size_t p, best = s->ready_head;
+    int best_prio = -2147483647 - 1;
+    for (p = s->ready_head; p != s->ready_tail; p++) {
+        pygo_g_t *cg = s->ready_ring[p & s->ready_mask];
+        if (cg->pct_prio == 0)   /* unassigned -> random high priority */
+            cg->pct_prio = 0x40000000 + (int)(pygo_pct_rand() & 0x3FFFFFFF);
+        if (cg->pct_prio > best_prio) { best_prio = cg->pct_prio; best = p; }
+    }
+    return best;
+}
+
+static pygo_g_t *pygo_pct_pick(pygo_sched_t *s)
+{
+    size_t best, p;
+    pygo_g_t *g;
+    pygo_pct.steps++;
+    best = pygo_pct_argmax(s);
+    /* change point: demote the would-be winner below everyone, then re-pick,
+     * so the schedule diverges at this step (one priority inversion). */
+    if (pygo_pct.next_change < pygo_pct.depth - 1 &&
+        pygo_pct.steps == pygo_pct.change_at[pygo_pct.next_change]) {
+        s->ready_ring[best & s->ready_mask]->pct_prio = -(++pygo_pct.lo_ctr);
+        pygo_pct.next_change++;
+        best = pygo_pct_argmax(s);
+    }
+    g = s->ready_ring[best & s->ready_mask];
+    /* remove logical slot `best` by shifting the rest of the queue down one */
+    for (p = best; p + 1 != s->ready_tail; p++)
+        s->ready_ring[p & s->ready_mask] = s->ready_ring[(p + 1) & s->ready_mask];
+    s->ready_tail--;
+    return g;
+}
+
 pygo_g_t *pygo_sched_ready_pop(pygo_sched_t *s)
 {
     pygo_g_t *g;
     if (s->ready_head == s->ready_tail) return NULL;
+    if (__builtin_expect(pygo_pct.enabled, 0))
+        return pygo_pct_pick(s);
     g = s->ready_ring[s->ready_head & s->ready_mask];
     s->ready_head++;
     /* Note: we deliberately do NOT clear g->next here -- the linked-
@@ -1177,7 +1292,10 @@ void pygo_g_decref(pygo_g_t *g)
 static PyObject *spawn_common(pygo_sched_t *s, PyObject *callable,
                               int noyield, size_t stack_size)
 {
-    pygo_g_t *g = pygo_g_slab_alloc();
+    pygo_g_t *g;
+    if (__builtin_expect(!pygo_pct.inited, 0))
+        pygo_pct_init();   /* read PYGO_PCT_SEED once, before any ready-pop */
+    g = pygo_g_slab_alloc();
     if (g == NULL) {
         PyErr_NoMemory();
         return NULL;
@@ -1187,6 +1305,7 @@ static PyObject *spawn_common(pygo_sched_t *s, PyObject *callable,
     g->refcount = 1;   /* one ref for the scheduler queue */
     g->owner = s;      /* per-thread sched that owns this g (Phase C) */
     g->noyield = noyield;
+    g->pct_prio = 0;   /* fresh goroutine: unassigned PCT priority (slab reuse) */
     g->coro = pygo_coro_new(stack_size, pygo_g_entry, g);
     if (g->coro == NULL) {
         Py_DECREF(g->callable);
