@@ -215,6 +215,24 @@ if [ -x "$HERE/genmc/run_genmc.sh" ]; then
     fi
 fi
 
+# ---- Dartagnan: SMT bounded encoding of the SAME litmus tests under a .cat --
+# A third, independent engine on the fence-placement questions: encodes bounded
+# executions + the RC11 memory model as one SMT formula (CAV'19).  Reuses the
+# herd7 litmus corpus; agreement across herd7 + GenMC + Dartagnan is strong.
+# Skips cleanly if Dartagnan/cat absent.
+if [ -x "$HERE/dartagnan/run_dartagnan.sh" ]; then
+    if dat_out="$("$HERE/dartagnan/run_dartagnan.sh" 2>&1)"; then
+        echo "$dat_out"
+        if echo "$dat_out" | grep -q "passed, 0 failed"; then
+            dp="$(echo "$dat_out" | sed -n 's/.* \([0-9]*\) passed, 0 failed/\1/p' | tail -1)"
+            [ -n "$dp" ] && pass=$((pass+dp))
+        fi
+    else
+        echo "$dat_out"
+        fail=$((fail+1)); FAILED="$FAILED dartagnan"
+    fi
+fi
+
 # ---- TLC: composed-scheduler TLA+ spec (emergent end-to-end properties) ----
 # Spin verifies each primitive separately; this checks their COMPOSITION
 # (multi-hub dispatch + wake/park one-shot race) for no-lost-goroutine.
