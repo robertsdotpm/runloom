@@ -227,8 +227,11 @@ static PYGO_THREAD_RET pygo_hub_main(void *arg)
                 /* No goroutine to run: check in as IDLE for the controlled-
                  * scheduler census round so the barrier-rendezvous grant isn't
                  * blocked waiting on a hub that has nothing to request.  No-op
-                 * unless PYGO_MN_SEED + barrier are on. */
-                pygo_mn_ctrl_census_idle(h->id);
+                 * unless PYGO_MN_SEED + barrier are on.  Returns 1 if a wake
+                 * landed on our sub_list since this iteration's drain -> re-loop
+                 * and drain it rather than falsely checking in idle (the guard
+                 * that closes the sub-segment replay race). */
+                if (pygo_mn_ctrl_census_idle(h)) continue;
                 for (j = 0; j < pygo_hub_count; j++) {
                     total += __atomic_load_n(&pygo_hubs[j].pending,
                                              __ATOMIC_RELAXED);

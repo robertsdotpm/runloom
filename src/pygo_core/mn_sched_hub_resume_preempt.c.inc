@@ -32,15 +32,16 @@
  * is over the COMPLETE requester set, not whoever raced into acquire first;
  * (2) a startup entry gate (pygo_mn_ctrl_arm, from mn_run) so the first census
  * sees all initially-placed work; (3) no work-stealing, so each hub's stream is
- * a fixed function of the schedule.  The seeded GRANT SEQUENCE is deterministic;
- * same seed => identical run ~99% of the time (repro_probe.py).  A rare (~1%)
- * tail residual remains in the lock-free park/wake/ready-ring primitives BELOW
- * segment granularity (conservation-clean order permutation; a Heisenbug that
- * instrumentation hides) -- that sub-segment layer is the memory-model tools'
- * province, not this one.  Real-I/O arrival timing also stays nondeterministic
- * (the open-system limit).  Formal model + properties (the no-preempt deadlock
- * and the barrier's DeterministicGrant): verify/tla/PygoMNControl.tla.  Mechanism
- * + scope + residual: tools/mn_controlled/README.md.  Zero cost when unset.
+ * a fixed function of the schedule; (4) census_idle re-tests the sub_list before
+ * declaring idle (a wake from the just-ended segment can land post-drain, and
+ * declaring idle then would run that g a round late -- a timing-decided outcome).
+ * Same seed => identical run (repro_probe.py: 16/16 seeds stable; seed 1
+ * identical over 500/500 reps under heavy CPU load).  Open scope: real-I/O
+ * arrival timing (open-system limit) and CPU-bound-without-yield preemption,
+ * still wall-clock (a future deterministic-bytecode-count lever).  Formal model +
+ * properties (the no-preempt deadlock and the barrier's DeterministicGrant):
+ * verify/tla/PygoMNControl.tla.  Mechanism + scope: tools/mn_controlled/README.md.
+ * Zero cost when PYGO_MN_SEED is unset.
  * ==================================================================== */
 typedef struct {
     int          enabled;
@@ -243,18 +244,39 @@ static void pygo_mn_ctrl_release(int hub)
 /* Check in as IDLE for the current round (called from hub_main's no-work
  * branch).  A no-op without the barrier.  Lets the census complete when a hub
  * has no goroutine to run this round, so the grant isn't held hostage to a hub
- * that will never want the baton.  Cheap branch-gated: in controlled mode the
- * idle path already runs at poll cadence, so taking the lock here is free. */
-static void pygo_mn_ctrl_census_idle(int hub)
+ * that will never want the baton.
+ *
+ * Returns 1 if the hub actually has undrained work after all (caller must
+ * re-loop and drain instead of idling), else 0.  This guard is what makes the
+ * replay deterministic at sub-segment granularity: a wake from the just-ended
+ * segment can land on this hub's sub_list AFTER this iteration's drain but
+ * BEFORE this check-in.  Declaring idle then would let the census complete
+ * without this hub and run its woken goroutine a round late -- a timing-decided
+ * (hence nondeterministic) outcome, the ~1% tail Heisenbug.  We re-test the
+ * sub_list under sub_lock WHILE HOLDING the controller lock: having observed the
+ * current round (set under the controller lock by the release that opened it),
+ * we are guaranteed to see any wake the just-ended segment published before that
+ * release (segment-wake -> release happens-before round-observed -> sub re-test).
+ * Lock order is controller -> sub_lock; nothing takes them the other way. */
+static int pygo_mn_ctrl_census_idle(pygo_hub_t *h)
 {
+    int hub = h->id, has_work;
     if (!pygo_mn_ctrl.enabled || !pygo_mn_ctrl.barrier ||
-        hub < 0 || hub >= pygo_mn_ctrl.n) return;
+        hub < 0 || hub >= pygo_mn_ctrl.n) return 0;
     pygo_mutex_lock(&pygo_mn_ctrl.lock);
-    if (pygo_mn_ctrl.seen[hub] != pygo_mn_ctrl.round) {
+    if (pygo_mn_ctrl.seen[hub] == pygo_mn_ctrl.round) {
+        pygo_mutex_unlock(&pygo_mn_ctrl.lock);       /* already in for this round */
+        return 0;
+    }
+    pygo_mutex_lock(&h->sub_lock);
+    has_work = (h->sub_head != NULL);
+    pygo_mutex_unlock(&h->sub_lock);
+    if (!has_work) {
         pygo_mn_ctrl.seen[hub] = pygo_mn_ctrl.round;   /* checked in (idle) */
         pygo_mn_ctrl_try_grant();
     }
     pygo_mutex_unlock(&pygo_mn_ctrl.lock);
+    return has_work;
 }
 
 /* Startup rendezvous.  Without it, the main thread places the initial

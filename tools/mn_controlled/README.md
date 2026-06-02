@@ -17,12 +17,12 @@ for liveness — see below). Off by default; zero cost when unset.
 ## Deterministic replay (the barrier-rendezvous)
 
 Same `PYGO_MN_SEED` ⇒ **identical execution**, run to run — verified by
-`repro_probe.py` (12/12 seeds reproduce identically across 8 reps; distinct
-seeds still explore distinct interleavings). The baton alone is *not* enough —
-it serializes who runs, but the requester set and the goroutine each hub holds
-still raced OS timing. Three levers, gated together behind `PYGO_MN_BARRIER`
-(default on under a seed; `PYGO_MN_BARRIER=0` reverts to timing-dependent
-exploration for A/B):
+`repro_probe.py` (16/16 seeds reproduce identically; seed 1 identical over
+500/500 reps under heavy CPU load; distinct seeds still explore distinct
+interleavings). The baton alone is *not* enough — it serializes who runs, but the
+requester set and the goroutine each hub holds still raced OS timing. Four levers,
+gated together behind `PYGO_MN_BARRIER` (default on under a seed;
+`PYGO_MN_BARRIER=0` reverts to timing-dependent exploration for A/B):
 
 1. **Barrier-rendezvous census.** The controller grants the baton only once the
    requester set for the round is *complete* — every hub has checked in, as a
@@ -56,19 +56,29 @@ goroutines: deterministic *bytecode-count* preemption to replace the wall-clock
 sysmon trigger; not needed for the park-fast workloads the demo/probe cover,
 where preemption rarely fires.
 
-**Residual (measured, ~1%).** The baton serializes *execution segments*; the
-**grant sequence** (which hub runs which segment) is deterministic. Below that
-granularity, the lock-free park/wake/ready-ring primitives carry a rare
-(~1/100–1/250 on the demo, slightly load-sensitive) ordering nondeterminism that
-occasionally permutes the *tail* of a run — always conservation-clean (no value
-lost or duplicated), only the observed interleaving order differs. It is a
-genuine **Heisenbug**: any added instrumentation in the grant path (even a single
-in-memory byte write) perturbs the window and hides it, so the grant trace can't
-localize it. That is the expected boundary line — sub-segment, lock-free
-ordering is the province of the memory-model tools (`verify/` GenMC/herd7,
-`tools/lincheck`), not of segment-granularity replay. Closing it would need
-those primitives' wake-publish ordering pinned too (a deeper lever); the probe
-reports it honestly as the occasional non-reproducing seed.
+**A fourth lever was needed — the census-idle wake race (fixed).** A first cut
+left a rare (~1%, load-sensitive) Heisenbug: a seed would occasionally produce a
+different run. It looked sub-segment (any grant-path instrumentation hid it), but
+it was a real gap in lever 1: `census_idle` declared a hub idle for the new round
+based on a drain that could *predate* a wake. Sequence: hub Y drains its sub_list
+(empty) → hub X's segment wakes a goroutine onto Y's sub_list → X releases (new
+round) → Y checks in *idle*, having missed the freshly-woken goroutine. The
+census then completed without Y and ran its goroutine a round late — and whether
+Y's drain beat X's wake was pure timing. Fix: `census_idle` re-tests the sub_list
+under `sub_lock` *while holding the controller lock* before declaring idle
+(having observed the round, it is guaranteed to see any wake the just-ended
+segment published before the release that opened it: segment-wake → release
+happens-before round-observed → sub re-test); if work is there, the hub re-loops
+and drains it instead of falsely idling. With the guard, seed 1 is identical over
+500/500 reps under heavy load (16 CPU hogs) — previously ~1/60 there — and the
+probe is 16/16 seeds stable.
+
+**Remaining open scope** (genuinely out of the closed-workload demo's reach):
+*real network I/O* arrival timing (the wire decides fd-readiness — the open-
+system limit shared by CHESS/Coyote/rr) and *CPU-bound-without-yield* goroutines,
+whose preemption point is still wall-clock (sysmon) rather than deterministic
+bytecode-count — a future lever, not exercised by the park-fast demo where
+preemption rarely fires.
 
 **Deadlock — FIXED (2026-06-03).** An earlier version *disabled* preemption; a
 goroutine that ran Python without yielding then held the baton forever and
