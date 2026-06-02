@@ -249,11 +249,35 @@ _WAIT_WRITE = 2
 _WAIT_FD_CANCELLED = getattr(pygo_core, "WAIT_FD_CANCELLED", 0x40000000)
 
 
+# asyncio's non-raising "loop running on this thread, or None" accessor (C fn);
+# used on the hot socket-I/O path in _wait_fd to keep current_task() correct.
+_PG_GET_RUNNING_LOOP = asyncio.events._get_running_loop
+
+
 def _wait_fd(fd, events, timeout_ms=-1):
     """pygo_core.wait_fd, but a cancellation (G.cancel_wait_fd) raises
     CancelledError instead of returning the raw sentinel.  Every aio I/O loop
-    parks through this, so cancelling a task blocked in any socket wait works."""
-    r = pygo_core.wait_fd(fd, events, timeout_ms)
+    parks through this, so cancelling a task blocked in any socket wait works.
+
+    Also preserves asyncio's "current task" across the park.  The PygoTask
+    driver sets _CURRENT_TASKS[loop] = self around each coro.send and restores
+    it in a finally -- but a coroutine that parks HERE for socket I/O suspends
+    the goroutine MID-send, so that finally can't run until the send eventually
+    returns.  While we're parked, other tasks run and their drivers mutate the
+    single shared per-loop slot (and pop it back to whatever preceded them), so
+    on resume the slot may name the wrong task or be empty -- breaking
+    asyncio.current_task() and hence asyncio.timeout()/wait_for() ("Timeout
+    should be used inside a task").  Snapshot our task before the C park and
+    re-establish it on resume so current_task() is correct across a socket wait.
+    (Future-based awaits don't need this: they park BETWEEN sends, after the
+    driver's finally has already run.)"""
+    loop = _PG_GET_RUNNING_LOOP()
+    saved = _CURRENT_TASKS.get(loop) if loop is not None else None
+    try:
+        r = pygo_core.wait_fd(fd, events, timeout_ms)
+    finally:
+        if saved is not None and _CURRENT_TASKS.get(loop) is not saved:
+            _CURRENT_TASKS[loop] = saved
     if r == _WAIT_FD_CANCELLED:
         raise asyncio.CancelledError()
     return r
