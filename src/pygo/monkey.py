@@ -1689,6 +1689,98 @@ def _unpatch_process():
 
 
 # ============================================================
+# fcntl -- cooperative flock / lockf (advisory file locks)
+#
+# A blocking flock(LOCK_EX) / lockf parks the OS thread inside the kernel
+# until the lock is granted -- there is no readiness fd to hand to netpoll
+# (you cannot epoll a file lock).  So the cooperative form acquires with the
+# non-blocking variant (LOCK_NB) and, on contention, parks via _co_sleep and
+# retries on a backoff.  This keeps the scheduler thread free and stays
+# cancel-friendly (a cancelled goroutine just stops retrying), rather than
+# pinning a backend-pool worker on an uninterruptible blocking lock.
+#
+# Pass-through (no cooperative loop) when: outside a goroutine, the caller
+# already asked for LOCK_NB (wants the immediate raise), or the op is an
+# unlock (LOCK_UN -- never blocks).
+# ============================================================
+try:
+    import fcntl as _fcntl_mod
+except ImportError:
+    _fcntl_mod = None        # Windows: no fcntl module, patch is a no-op.
+
+_orig_flock = None
+_orig_lockf = None
+
+# Errnos that mean "lock is held by someone else, try again", per flock(2)
+# (EWOULDBLOCK) and fcntl(2) F_SETLK (EACCES / EAGAIN).
+_LOCK_CONTENDED = frozenset(
+    e for e in (getattr(errno, "EWOULDBLOCK", None),
+                getattr(errno, "EAGAIN", None),
+                getattr(errno, "EACCES", None))
+    if e is not None)
+
+
+def _co_lock_acquire(call, op, nb_bit, lock_bits):
+    """Shared cooperative acquire loop for flock/lockf.  `call` performs the
+    lock with a given operation; we OR in the non-blocking bit and retry."""
+    step = 0.0005
+    nb_op = op | nb_bit
+    while True:
+        try:
+            return call(nb_op)
+        except InterruptedError:
+            continue                         # EINTR: retry immediately
+        except (BlockingIOError, PermissionError):
+            pass                             # contended: park + retry
+        except OSError as e:
+            if e.errno not in _LOCK_CONTENDED:
+                raise
+        _co_sleep(step)
+        if step < 0.02:
+            step *= 2
+
+
+def _patched_flock(fd, operation):
+    lock_bits = _fcntl_mod.LOCK_SH | _fcntl_mod.LOCK_EX
+    if not _in_goroutine() or (operation & _fcntl_mod.LOCK_NB) or \
+            not (operation & lock_bits):
+        return _orig_flock(fd, operation)
+    return _co_lock_acquire(lambda op: _orig_flock(fd, op),
+                            operation, _fcntl_mod.LOCK_NB, lock_bits)
+
+
+def _patched_lockf(fd, cmd, length=0, start=0, whence=0):
+    lock_bits = _fcntl_mod.LOCK_SH | _fcntl_mod.LOCK_EX
+    if not _in_goroutine() or (cmd & _fcntl_mod.LOCK_NB) or \
+            not (cmd & lock_bits):
+        return _orig_lockf(fd, cmd, length, start, whence)
+    return _co_lock_acquire(
+        lambda op: _orig_lockf(fd, op, length, start, whence),
+        cmd, _fcntl_mod.LOCK_NB, lock_bits)
+
+
+def _patch_fcntl():
+    global _orig_flock, _orig_lockf
+    if _fcntl_mod is None:
+        return
+    if hasattr(_fcntl_mod, "flock"):
+        _orig_flock = _fcntl_mod.flock
+        _fcntl_mod.flock = _patched_flock
+    if hasattr(_fcntl_mod, "lockf"):
+        _orig_lockf = _fcntl_mod.lockf
+        _fcntl_mod.lockf = _patched_lockf
+
+
+def _unpatch_fcntl():
+    if _fcntl_mod is None:
+        return
+    if _orig_flock is not None:
+        _fcntl_mod.flock = _orig_flock
+    if _orig_lockf is not None:
+        _fcntl_mod.lockf = _orig_lockf
+
+
+# ============================================================
 # threading -- cooperative Lock / RLock / Event / Condition / Semaphore
 # ============================================================
 _real_Lock      = _th.Lock
@@ -2722,7 +2814,7 @@ def _uninstall_go_wrapper():
 
 _DEFAULTS = ("socket", "time", "os", "select", "selectors", "stdio", "ssl",
              "subprocess", "process", "threading", "queue", "file",
-             "syscalls", "dns")
+             "syscalls", "fcntl", "dns")
 
 _PATCHERS = {
     "socket":     (_patch_socket,     _unpatch_socket),
@@ -2738,6 +2830,7 @@ _PATCHERS = {
     "queue":      (_patch_queue,      _unpatch_queue),
     "file":       (_patch_file,       _unpatch_file),
     "syscalls":   (_patch_syscalls,   _unpatch_syscalls),
+    "fcntl":      (_patch_fcntl,      _unpatch_fcntl),
     "dns":        (_patch_dns,        _unpatch_dns),
 }
 
