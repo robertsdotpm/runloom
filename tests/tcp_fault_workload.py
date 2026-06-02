@@ -170,16 +170,26 @@ def mode_recvonce():
 
 def main():
     mode = sys.argv[1] if len(sys.argv) > 1 else "echo"
-    if mode == "echo":
-        return mode_echo()
-    if mode == "connectrefused":
-        return mode_connectrefused()
-    if mode == "connectonly":
-        return mode_connectonly()
-    if mode == "recvonce":
-        return mode_recvonce()
-    print("BADMODE %r" % mode)
-    return 2
+    dispatch = {
+        "echo": mode_echo,
+        "connectrefused": mode_connectrefused,
+        "connectonly": mode_connectonly,
+        "recvonce": mode_recvonce,
+    }
+    fn = dispatch.get(mode)
+    if fn is None:
+        print("BADMODE %r" % mode)
+        return 2
+    rc = fn()
+    # The compiled-in (kqueue/Windows) fault harness sets FAULT_SITE so it can
+    # confirm the injection actually fired; strace runs (Linux) leave it unset.
+    site = os.environ.get("FAULT_SITE")
+    if site:
+        try:
+            print("FAULTS=%d" % pygo_core._fault_count(site))
+        except Exception:
+            pass
+    return rc
 
 
 if __name__ == "__main__":

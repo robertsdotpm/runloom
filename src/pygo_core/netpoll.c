@@ -1073,12 +1073,11 @@ const char *pygo_netpoll_backend(void)
  * unless the env var is set (one getenv per pump iteration when armed).  The
  * counters + count/reset are compiled on every platform so module.c exposes
  * the introspection uniformly (they stay zero on epoll, which uses strace). */
-enum { PYGO_FAULT_WSAPOLL = 0, PYGO_FAULT_SELECT, PYGO_FAULT_IOCP_WAIT,
-       PYGO_FAULT_IOCP_SUBMIT, PYGO_FAULT_KQUEUE_WAIT,
-       PYGO_FAULT_KQUEUE_CREATE, PYGO_FAULT_KQUEUE_CTL, PYGO_FAULT_NSITES };
+/* Fault-injection site enum lives in netpoll.h (shared with pygo_tcp.c). */
 static const char *const pygo_fault_names[PYGO_FAULT_NSITES] = {
     "WSAPOLL", "SELECT", "IOCP_WAIT", "IOCP_SUBMIT", "KQUEUE_WAIT",
-    "KQUEUE_CREATE", "KQUEUE_CTL" };
+    "KQUEUE_CREATE", "KQUEUE_CTL",
+    "TCP_SOCKET", "TCP_CONNECT", "TCP_ACCEPT", "TCP_RECV", "TCP_SEND" };
 static volatile long pygo_fault_fired[PYGO_FAULT_NSITES];
 static volatile long pygo_fault_once_done[PYGO_FAULT_NSITES];
 
@@ -1104,10 +1103,12 @@ void pygo_fault_reset(void)
 static const char *const pygo_fault_envs[PYGO_FAULT_NSITES] = {
     "PYGO_FAULT_WSAPOLL", "PYGO_FAULT_SELECT", "PYGO_FAULT_IOCP_WAIT",
     "PYGO_FAULT_IOCP_SUBMIT", "PYGO_FAULT_KQUEUE_WAIT",
-    "PYGO_FAULT_KQUEUE_CREATE", "PYGO_FAULT_KQUEUE_CTL" };
+    "PYGO_FAULT_KQUEUE_CREATE", "PYGO_FAULT_KQUEUE_CTL",
+    "PYGO_FAULT_TCP_SOCKET", "PYGO_FAULT_TCP_CONNECT", "PYGO_FAULT_TCP_ACCEPT",
+    "PYGO_FAULT_TCP_RECV", "PYGO_FAULT_TCP_SEND" };
 
 /* Returns the error code to inject (nonzero) if this site should fail now. */
-static int pygo_fault_inject(int site)
+int pygo_fault_inject(int site)
 {
     const char *spec = getenv(pygo_fault_envs[site]);
     int code, once;

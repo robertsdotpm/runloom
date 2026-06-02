@@ -197,6 +197,32 @@ static PyObject *pygo_raise_errno(void)
 #endif
 }
 
+/* ---- test-only socket-surface fault injection (kqueue/Windows) -------------
+ * Linux faults the socket syscalls with strace; the kqueue/Windows backends
+ * have no such tracer, so they gate in-process on PYGO_FAULT_TCP_<CALL> (see
+ * netpoll.c).  pygo_tcp_fault_armed() caches whether ANY such env is set, so
+ * the hot recv/send path pays only a load+branch when disarmed -- the getenv
+ * scan runs once.  cached is written idempotently (always the same 0/1), so
+ * the benign first-call race needs no atomic.  Compiled out on Linux, where
+ * PYGO_TCP_FINJ() is a constant 0 (no overhead, no reference to the helper).
+ *
+ * Usage:  int injerr = PYGO_TCP_FINJ(SITE);
+ *         r = injerr ? (errno = injerr, -1) : <real syscall>; */
+#if defined(PYGO_OS_WINDOWS) || defined(PYGO_HAVE_KQUEUE)
+static int pygo_tcp_fault_armed(void)
+{
+    static int cached = -1;
+    if (cached < 0)
+        cached = (getenv("PYGO_FAULT_TCP_SOCKET")  || getenv("PYGO_FAULT_TCP_CONNECT") ||
+                  getenv("PYGO_FAULT_TCP_ACCEPT")  || getenv("PYGO_FAULT_TCP_RECV")    ||
+                  getenv("PYGO_FAULT_TCP_SEND")) ? 1 : 0;
+    return cached;
+}
+#  define PYGO_TCP_FINJ(site) (pygo_tcp_fault_armed() ? pygo_fault_inject(site) : 0)
+#else
+#  define PYGO_TCP_FINJ(site) 0
+#endif
+
 #if defined(PYGO_OS_WINDOWS)
 /* Used only on Windows branches below; the POSIX paths inline the
  * errno comparisons.  Tagged so non-Windows builds (which include
@@ -496,7 +522,9 @@ static PyObject *PygoTCPConn_recv(PygoTCPConn *self, PyObject *args)
             return pygo_raise_errno();
         }
 #else
-        ssize_t r = recv(fd, out, (size_t)n_bytes, flags);
+        int injerr = PYGO_TCP_FINJ(PYGO_FAULT_TCP_RECV);
+        ssize_t r = injerr ? (errno = injerr, (ssize_t)-1)
+                           : recv(fd, out, (size_t)n_bytes, flags);
         if (r >= 0) { got = (Py_ssize_t)r; break; }
         if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
             Py_DECREF(result);
@@ -684,8 +712,10 @@ static PyObject *PygoTCPConn_send_all(PygoTCPConn *self, PyObject *args)
             return pygo_raise_errno();
         }
 #else
-        ssize_t r = send(fd, (const char *)buf.buf + sent,
-                         (size_t)(buf.len - sent), flags);
+        int injerr = PYGO_TCP_FINJ(PYGO_FAULT_TCP_SEND);
+        ssize_t r = injerr ? (errno = injerr, (ssize_t)-1)
+                           : send(fd, (const char *)buf.buf + sent,
+                                  (size_t)(buf.len - sent), flags);
         if (r >= 0) { sent += r; continue; }
         if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
             PyBuffer_Release(&buf);
@@ -742,7 +772,9 @@ static PyObject *PygoTCPConn_listen_cls(PyTypeObject *cls, PyObject *args, PyObj
         fd = (int)s;
     }
 #else
-    fd = socket(family, SOCK_STREAM, IPPROTO_TCP);
+    {   int injerr = PYGO_TCP_FINJ(PYGO_FAULT_TCP_SOCKET);
+        fd = injerr ? (errno = injerr, -1)
+                    : socket(family, SOCK_STREAM, IPPROTO_TCP); }
     if (fd < 0) return PyErr_SetFromErrno(PyExc_OSError);
     (void)setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on));
     if (bind(fd, (struct sockaddr *)&addr, addrlen) < 0 ||
@@ -791,9 +823,14 @@ static PyObject *PygoTCPConn_accept(PygoTCPConn *self, PyObject *unused)
             return pygo_raise_errno();
         }
 #else
-        new_fd = accept(self->fd, NULL, NULL);
+        int injerr = PYGO_TCP_FINJ(PYGO_FAULT_TCP_ACCEPT);
+        new_fd = injerr ? (errno = injerr, -1) : accept(self->fd, NULL, NULL);
         if (new_fd >= 0) break;
-        if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
+        /* ECONNABORTED: the peer reset between the SYN and our accept() -- a
+         * transient, not a listener failure.  Go's netpoll and libuv both
+         * retry it; surfacing it spuriously killed the accept loop. */
+        if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR
+            && errno != ECONNABORTED) {
             return PyErr_SetFromErrno(PyExc_OSError);
         }
 #endif
@@ -845,7 +882,9 @@ static PyObject *PygoTCPConn_connect_cls(PyTypeObject *cls, PyObject *args, PyOb
         fd = (int)s;
     }
 #else
-    fd = socket(family, SOCK_STREAM, IPPROTO_TCP);
+    {   int injerr = PYGO_TCP_FINJ(PYGO_FAULT_TCP_SOCKET);
+        fd = injerr ? (errno = injerr, -1)
+                    : socket(family, SOCK_STREAM, IPPROTO_TCP); }
     if (fd < 0) return PyErr_SetFromErrno(PyExc_OSError);
 #endif
 
@@ -880,6 +919,12 @@ static PyObject *PygoTCPConn_connect_cls(PyTypeObject *cls, PyObject *args, PyOb
     }
 #else
     rc = connect(fd, (struct sockaddr *)&addr, addrlen);
+    {   /* test-only: override the result AFTER the real connect() initiates the
+         * connection, so EINTR is modelled as a signal on an in-flight connect
+         * (park WRITE + SO_ERROR completes it) rather than a no-op that hangs. */
+        int injerr = PYGO_TCP_FINJ(PYGO_FAULT_TCP_CONNECT);
+        if (injerr) { rc = -1; errno = injerr; }
+    }
     if (rc < 0) {
         /* EINTR is handled like EINPROGRESS, NOT as an error: POSIX says a
          * connect() interrupted by a signal is not aborted -- the connection

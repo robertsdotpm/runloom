@@ -99,6 +99,23 @@ const char *pygo_netpoll_backend(void);
 long pygo_fault_count(const char *name);
 void pygo_fault_reset(void);
 
+/* Fault-injection site indices, shared with pygo_tcp.c so the socket-surface
+ * syscalls can be faulted on the kqueue/Windows backends (which have no
+ * syscall-injecting tracer; Linux uses strace).  Keep in sync with the name/
+ * env tables in netpoll.c. */
+enum {
+    PYGO_FAULT_WSAPOLL = 0, PYGO_FAULT_SELECT, PYGO_FAULT_IOCP_WAIT,
+    PYGO_FAULT_IOCP_SUBMIT, PYGO_FAULT_KQUEUE_WAIT,
+    PYGO_FAULT_KQUEUE_CREATE, PYGO_FAULT_KQUEUE_CTL,
+    PYGO_FAULT_TCP_SOCKET, PYGO_FAULT_TCP_CONNECT, PYGO_FAULT_TCP_ACCEPT,
+    PYGO_FAULT_TCP_RECV, PYGO_FAULT_TCP_SEND,
+    PYGO_FAULT_NSITES
+};
+/* Returns the errno/WSA code to inject at this site now (nonzero), or 0.
+ * Defined only on the kqueue/Windows backends (Linux uses strace); pygo_tcp.c
+ * calls it only there, so this prototype is harmless + unreferenced on Linux. */
+int pygo_fault_inject(int site);
+
 /* Register an external eventfd so the pump treats EPOLLIN on that fd
  * as a "drain io_uring CQEs" signal.  Only meaningful on the epoll
  * backend (Linux); a no-op elsewhere.  Used by io_uring.c to hook
