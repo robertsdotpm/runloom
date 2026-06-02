@@ -91,6 +91,34 @@ class TestSigwait(unittest.TestCase):
         self.assertEqual(sig, SIG)
         self.assertGreaterEqual(ticks, 1)   # the runtime kept scheduling
 
+    def test_sigwait_retries_eintr_fault(self):
+        """Fault injection: sigtimedwait raising EINTR mid-poll must be retried,
+        not propagated -- the sigwait still reaps the pending signal."""
+        import pygo.monkey as _m
+        real = _m._orig_sigtimedwait
+        st = {"n": 0}
+
+        def flaky(sigset, timeout):
+            if st["n"] < 2:
+                st["n"] += 1
+                raise InterruptedError()
+            return real(sigset, timeout)
+
+        def body():
+            signal.pthread_sigmask(signal.SIG_BLOCK, {SIG})
+            _m._orig_sigtimedwait = flaky
+            try:
+                def sender():
+                    pygo.sleep(0.02)
+                    os.kill(os.getpid(), SIG)
+                pygo_core.go(sender)
+                return signal.sigwait({SIG})
+            finally:
+                _m._orig_sigtimedwait = real
+                signal.pthread_sigmask(signal.SIG_UNBLOCK, {SIG})
+        self.assertEqual(_drive(body), SIG)
+        self.assertGreaterEqual(st["n"], 1)
+
     @unittest.skipUnless(hasattr(signal, "sigwaitinfo"), "no sigwaitinfo")
     def test_sigwaitinfo_returns_siginfo_and_yields(self):
         """sigwaitinfo returns the full struct_siginfo (vs sigwait's signo)."""

@@ -115,7 +115,13 @@ run mn_stress   "$RUN_PY" tools/mn_stress.py --iters "$MN_ITERS"
 run lincheck_plain  "$RUN_PY" tools/lincheck/record_history.py "$LOGDIR/h_plain.json"  4 3 8 2 0
 run lincheck_select "$RUN_PY" tools/lincheck/record_history.py "$LOGDIR/h_select.json" 4 3 8 2 3
 
-PYTEST_TARGETS="${TSAN_PYTEST-tests/test_chan_stress.py tests/test_sched_fairness.py tests/test_chan_queue.py}"
+# Default set: the chan/sched stressors PLUS the blocking shims that touch real
+# OS threads -- the goroutine-backed executor's cross-thread Future delivery,
+# the backend pool's self-pipe parkers (offload / heavy / file syscalls), and
+# the cooperative threading primitives.  Those are the data-race-prone paths the
+# monkey layer added.  Fork-based files (process/mp/fcntl) are left out (fork
+# under TSan is unreliable).  Override with TSAN_PYTEST="...".
+PYTEST_TARGETS="${TSAN_PYTEST-tests/test_chan_stress.py tests/test_sched_fairness.py tests/test_chan_queue.py tests/test_futures_compat.py tests/test_threading_compat.py tests/test_heavy_compat.py tests/test_blocking.py tests/test_os_io_compat.py}"
 if [ -n "$PYTEST_TARGETS" ]; then
     run pytest_subset "$RUN_PY" -m pytest $PYTEST_TARGETS -q -p no:cacheprovider --no-header
 fi
