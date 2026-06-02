@@ -59,6 +59,7 @@ import subprocess as _subprocess
 import sys
 import threading as _threading
 import time as _time
+import warnings as _warnings
 import weakref as _weakref
 
 import pygo_core
@@ -2384,8 +2385,25 @@ class PygoEventLoop(asyncio.AbstractEventLoop):
             except Exception:
                 pass
         await asyncio.sleep(0)   # give the old io loop a turn to observe + exit
+        # gh-142352: on the server side the peer's TLS ClientHello may have
+        # ALREADY been read off the plaintext socket into the StreamReader's
+        # buffer (a server that waits for data before calling start_tls -- see
+        # test_streams::test_start_tls_buffered_data).  Those bytes are gone from
+        # the socket, so seed them into the handshake's incoming BIO or the
+        # server's do_handshake() blocks forever waiting for a ClientHello that
+        # already arrived.  Mirror asyncio's base_events.start_tls: pull the
+        # StreamReaderProtocol's _stream_reader._buffer and clear it.
+        incoming_data = b""
+        if server_side:
+            stream_reader = getattr(protocol, "_stream_reader", None)
+            if stream_reader is not None:
+                buffer = getattr(stream_reader, "_buffer", None)
+                if buffer:
+                    incoming_data = bytes(buffer)
+                    buffer.clear()
         tls = _MemoryBIOTLS(sock, sslcontext, server_side=server_side,
-                       server_hostname=server_hostname)
+                       server_hostname=server_hostname,
+                       incoming_data=incoming_data)
         tls.do_handshake(ssl_handshake_timeout)
         # Transfer the accepting server's registration from the old (now
         # quiesced) transport to the new TLS one.  The accepted transport sits in
@@ -4883,14 +4901,47 @@ async def start_server(client_connected_cb, host=None, port=None, *,
 class PygoEventLoopPolicy(asyncio.AbstractEventLoopPolicy):
     def __init__(self):
         self._loop = None
+        self._set_called = False
         self._child_watcher = None
 
     def get_event_loop(self):
-        if self._loop is None or self._loop.is_closed():
-            self._loop = PygoEventLoop()
+        # Mirror CPython's BaseDefaultEventLoopPolicy exactly: lazily create a
+        # loop ONLY on the main thread and ONLY if set_event_loop() was never
+        # called; once a loop has been explicitly set (even to None, as the
+        # test suites do via test_utils.set_event_loop -> set_event_loop(None)
+        # to force loops to be passed explicitly), or off the main thread, a
+        # missing loop is an ERROR -- raise instead of silently fabricating one.
+        # The old unconditional auto-create masked that contract and broke
+        # test_streams::test_streamreader*_constructor_without_loop.
+        if (self._loop is None
+                and not self._set_called
+                and _threading.current_thread() is _threading.main_thread()):
+            stacklevel = 2
+            try:
+                f = sys._getframe(1)
+            except AttributeError:
+                pass
+            else:
+                while f:
+                    module = f.f_globals.get("__name__")
+                    if module == "asyncio" or (
+                            module and module.startswith("asyncio.")):
+                        f = f.f_back
+                        stacklevel += 1
+                    else:
+                        break
+            _warnings.warn(
+                "There is no current event loop",
+                DeprecationWarning, stacklevel=stacklevel)
+            self.set_event_loop(self.new_event_loop())
+        if self._loop is None:
+            raise RuntimeError(
+                "There is no current event loop in thread %r."
+                % _threading.current_thread().name)
         return self._loop
 
     def set_event_loop(self, loop):
+        self._set_called = True
         self._loop = loop
 
     def new_event_loop(self):
