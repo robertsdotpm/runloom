@@ -354,21 +354,21 @@ class TestOsWait34(unittest.TestCase):
     Lib/test/test_os.py (test_wait4 / test_wait3)."""
 
     def test_wait4_exit_status_and_rusage(self):
+        # Immediate-exit child: with no os.pidfd_open (macOS) the busy-poll
+        # reaps on the first WNOHANG without parking, so no yield is correct
+        # here.  Yielding is covered by the delayed-child tests.
         def body():
             pid = os.fork()
             if pid == 0:
                 os._exit(13)
-            ticks = []
-            _sibling_counter(ticks)
             wpid, status, rusage = os.wait4(pid, 0)
             return (wpid == pid, os.WIFEXITED(status), os.WEXITSTATUS(status),
-                    hasattr(rusage, "ru_utime"), len(ticks))
-        ok, exited, code, has_ru, ticks = _drive(body)
+                    hasattr(rusage, "ru_utime"))
+        ok, exited, code, has_ru = _drive(body)
         self.assertTrue(ok)
         self.assertTrue(exited)
         self.assertEqual(code, 13)
         self.assertTrue(has_ru)
-        self.assertGreaterEqual(ticks, 1)
 
     def test_wait4_wnohang_passthrough(self):
         def body():
