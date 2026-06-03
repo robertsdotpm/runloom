@@ -1,7 +1,7 @@
 runloom - validated asyncio projects
 ========================================
 
-128 name-brand Python asyncio projects whose own test suites (or
+130 name-brand Python asyncio projects whose own test suites (or
 equivalent end-to-end exercises) run GREEN under runloom's pure-Python
 M:N runtime -- driven through runloom.aio / RunloomEventLoop on free-threaded
 CPython 3.13t (PYTHON_GIL=0). 'pass==stock' means the result matches
@@ -220,4 +220,11 @@ BEYOND 100 (cont.): UDP transport, event emitter (2)
 127. asyncudp                   - real UDP datagram x10 over runloom netpoll
 128. pyee                       - AsyncIOEventEmitter async handlers fired
 
-TOTAL DISTINCT PROJECTS PASSING: 128
+
+------------------------------------------------------------
+BEYOND 100 (cont.): OAuth client, async logging (2)
+------------------------------------------------------------
+129. authlib                    - AsyncOAuth2Client fetch_token over mocked httpx
+130. loguru                     - async (enqueue) sink + await logger.complete()
+
+TOTAL DISTINCT PROJECTS PASSING: 130
