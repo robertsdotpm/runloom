@@ -1,4 +1,4 @@
-"""profile/target.py -- a sustained, scheduler-bound pygo workload to profile.
+"""profile/target.py -- a sustained, scheduler-bound runloom workload to profile.
 
 Unlike the one-shot tools/faultinj/workload.py, this runs a *bounded but
 sustained* load (many channel ping-pong rounds) so a sampling profiler
@@ -18,7 +18,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 "..", "..", "..", "src"))
-import pygo_core
+import runloom_c
 
 try:
     import coz
@@ -43,8 +43,8 @@ def mark_end():
 
 
 def ping_pong(n):
-    a = pygo_core.Chan()
-    b = pygo_core.Chan()
+    a = runloom_c.Chan()
+    b = runloom_c.Chan()
 
     def pinger():
         for i in range(n):
@@ -56,16 +56,16 @@ def ping_pong(n):
             v, _ = a.recv()
             b.send(v)
 
-    pygo_core.go(pinger)
-    pygo_core.go(ponger)
-    pygo_core.run()
+    runloom_c.go(pinger)
+    runloom_c.go(ponger)
+    runloom_c.run()
 
 
 def main():
     units = int(os.environ.get("PROFILE_UNITS", "2000"))
     pings = int(os.environ.get("PROFILE_PINGS", "500"))
-    if hasattr(pygo_core, "warmup"):
-        pygo_core.warmup(2000)
+    if hasattr(runloom_c, "warmup"):
+        runloom_c.warmup(2000)
     for _ in range(units):
         mark_begin()
         ping_pong(pings)

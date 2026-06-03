@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""pct_explore.py -- drive pygo's PCT (Probabilistic Concurrency Testing) mode.
+"""pct_explore.py -- drive runloom's PCT (Probabilistic Concurrency Testing) mode.
 
-The runtime supports a controlled single-hub scheduler when PYGO_PCT_SEED is
+The runtime supports a controlled single-hub scheduler when RUNLOOM_PCT_SEED is
 set: instead of FIFO, the ready-pop runs the highest-priority ready goroutine,
 with random priorities + d-1 random "priority change points" that demote a
 goroutine mid-run -- giving a probabilistic lower bound on finding any depth-d
@@ -39,23 +39,23 @@ def demo_once(seed, m=6):
     env["PYTHON_GIL"] = "0"
     env["PYTHONPATH"] = os.path.join(ROOT, "src")
     if seed is not None:
-        env["PYGO_PCT_SEED"] = str(seed)
+        env["RUNLOOM_PCT_SEED"] = str(seed)
     code = (
-        "import sys; sys.path.insert(0, 'src'); import pygo_core\n"
+        "import sys; sys.path.insert(0, 'src'); import runloom_c\n"
         "m = {}\n".format(m) +
-        "ch = pygo_core.Chan(); got = []\n"
+        "ch = runloom_c.Chan(); got = []\n"
         "def receiver(rid):\n"
         "    while True:\n"
         "        v, ok = ch.recv()\n"
         "        if not ok: break\n"
         "        got.append((rid, v))\n"
         "for r in range(m):\n"
-        "    pygo_core.go(lambda r=r: receiver(r))\n"
+        "    runloom_c.go(lambda r=r: receiver(r))\n"
         "def producer():\n"
         "    for v in range(m*2): ch.send(v)\n"
         "    ch.close()\n"
-        "pygo_core.go(producer)\n"
-        "pygo_core.run()\n"
+        "runloom_c.go(producer)\n"
+        "runloom_c.run()\n"
         "sig = ''.join(str(r) for r, _ in got)\n"
         "vals = sorted(v for _, v in got)\n"
         "ok = (vals == list(range(m*2)))\n"
@@ -99,8 +99,8 @@ def cmd_sweep(args):
         env = dict(os.environ)
         env["PYTHON_GIL"] = "0"
         env["PYTHONPATH"] = os.path.join(ROOT, "src")
-        env["PYGO_PCT_SEED"] = str(s)
-        env["PYGO_PCT_DEPTH"] = str(args.depth)
+        env["RUNLOOM_PCT_SEED"] = str(s)
+        env["RUNLOOM_PCT_DEPTH"] = str(args.depth)
         try:
             p = subprocess.run(
                 [sys.executable, "-m", "pytest", args.target, "-q",
@@ -116,7 +116,7 @@ def cmd_sweep(args):
     print("-" * 56)
     if failures:
         print("{} order-dependent FAILURE(s). Reproduce e.g.:".format(len(failures)))
-        print("  PYGO_PCT_SEED={} PYGO_PCT_DEPTH={} PYTHON_GIL=0 PYTHONPATH=src "
+        print("  RUNLOOM_PCT_SEED={} RUNLOOM_PCT_DEPTH={} PYTHON_GIL=0 PYTHONPATH=src "
               "python -m pytest {}".format(failures[0], args.depth, args.target))
         return 1
     print("all {} seeds passed (no order-dependent failure found at depth {})".format(

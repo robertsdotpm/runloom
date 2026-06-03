@@ -27,9 +27,9 @@
       39
     ],
     "py_cflags": "-fno-strict-overflow -Wsign-compare -DNDEBUG -g -O3 -Wall",
-    "pygo_backend": "fcontext-asm",
-    "pygo_netpoll": "epoll",
-    "pygo_so": "/home/x/projects/pygo-perf/src/pygo_core.cpython-313t-x86_64-linux-gnu.so",
+    "runloom_backend": "fcontext-asm",
+    "runloom_netpoll": "epoll",
+    "runloom_so": "/home/x/projects/pygo-perf/src/runloom_c.cpython-313t-x86_64-linux-gnu.so",
     "python": "3.13.13",
     "python_build": "main May 27 2026 11:40:38",
     "python_impl": "CPython",

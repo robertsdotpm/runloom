@@ -3,9 +3,9 @@ C commit_lock_publish
  * THE FIX (proves the pool->lock round-trip closes the stale-read window).
  *
  * The claimer publishes ready_out and then UNLOCKS pool->lock; the aborting
- * goroutine in pygo_netpoll_wait_fd re-ACQUIRES pool->lock before reading
+ * goroutine in runloom_netpoll_wait_fd re-ACQUIRES pool->lock before reading
  * ready_mask (the abort branch does
- * `pygo_mutex_lock(&pool->lock); pygo_parker_unlink(...); pygo_mutex_unlock`
+ * `runloom_mutex_lock(&pool->lock); runloom_parker_unlink(...); runloom_mutex_unlock`
  * and only THEN `return ready_mask`).  So the read is ordered after the poollock
  * acquire, which synchronizes-with the claimer's unlock release -- which is
  * sequenced AFTER the publish.  Hence the publish is visible.

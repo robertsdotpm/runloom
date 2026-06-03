@@ -1,6 +1,6 @@
 # cldeque — perf observations (DO NOT ACT until the optimization phase)
 
-Surfaced while diffing the production `src/pygo_core/cldeque.c` access modes
+Surfaced while diffing the production `src/runloom_c/cldeque.c` access modes
 against the GenMC/RC11 fence map. These are **safe over-synchronizations**: the
 code is correct; these are spots where a *weaker* order would still verify, i.e.
 candidate hot-path fence removals. Logged per [[optimize_after_working]] —
@@ -36,7 +36,7 @@ All claims below are backed by the GenMC oracle (`run_chase_lev.sh`).
    fence is NECESSARY at ≥2 elements (`chase_lev2.c -DBUG_NO_FENCE` →
    duplication). So this is **not** a safe removal in general; it would only be
    sound under a proof that the deque is never accessed with ≥2 elements while a
-   pop races a steal — which is not an invariant pygo maintains. Logged as an
+   pop races a steal — which is not an invariant runloom maintains. Logged as an
    observation; **the fence stays.**
 
 ### Net

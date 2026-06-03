@@ -10,7 +10,7 @@ C wakelist_mpsc
  * This is a release/acquire message-passing pattern through the lock: the
  * waker writes payload then UNLOCKS (release); the owner LOCKS (acquire) then
  * reads payload.  The stale read (saw the handoff but not the payload) must be
- * FORBIDDEN -- this is what makes pygo_sched_wake -> wake_list -> drain safe to
+ * FORBIDDEN -- this is what makes runloom_sched_wake -> wake_list -> drain safe to
  * carry a g's state across threads.  herd7 reports the `exists` UNREACHABLE.
  *)
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# run_sanitizers.sh -- build + run pygo's C concurrency harnesses under
+# run_sanitizers.sh -- build + run runloom's C concurrency harnesses under
 # AddressSanitizer / ThreadSanitizer / UndefinedBehaviorSanitizer.
 #
 # Hunts use-after-free, out-of-bounds, data races, and UB in the
@@ -44,22 +44,22 @@ run_one() {  # label, needs_setarch(0/1), env, binary, args...
     printf '  %-26s ' "$label"
     local pre=""
     [ "$use_sa" = 1 ] && pre="$SETARCH"
-    if env $envv $pre "$@" >"/tmp/pygo_san_$label.log" 2>&1; then
+    if env $envv $pre "$@" >"/tmp/runloom_san_$label.log" 2>&1; then
         green "PASS"; echo; pass=$((pass+1))
     else
-        red "FAIL"; echo " (rc=$? -- see /tmp/pygo_san_$label.log)"
-        tail -8 "/tmp/pygo_san_$label.log" | sed 's/^/      /'
+        red "FAIL"; echo " (rc=$? -- see /tmp/runloom_san_$label.log)"
+        tail -8 "/tmp/runloom_san_$label.log" | sed 's/^/      /'
         fail=$((fail+1))
     fi
 }
 
-echo "================ pygo sanitizer harnesses ================"
+echo "================ runloom sanitizer harnesses ================"
 echo "  deque stress: $PUSHES pushes x $THIEVES thieves x $ROUNDS rounds"
 [ -z "$SETARCH" ] && echo "  (setarch not found; TSan may abort under high-entropy ASLR)"
 echo "-- building --"
 make -C "$TC" test_cldeque test_cldeque-asan test_cldeque-tsan test_cldeque-ubsan \
-    >/tmp/pygo_san_build.log 2>&1 \
-    && echo "  build OK" || { echo "  BUILD FAILED -- see /tmp/pygo_san_build.log"; tail -20 /tmp/pygo_san_build.log; exit 2; }
+    >/tmp/runloom_san_build.log 2>&1 \
+    && echo "  build OK" || { echo "  BUILD FAILED -- see /tmp/runloom_san_build.log"; tail -20 /tmp/runloom_san_build.log; exit 2; }
 
 echo "-- running --"
 run_one cldeque-plain 0 "" "$TC/test_cldeque" "$PUSHES" "$THIEVES" "$ROUNDS"

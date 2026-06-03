@@ -2,7 +2,7 @@
  * netpoll_rearm.pml -- Promela model of the OTHER half of netpoll's lost-wake
  * guard (netpoll_commit.pml models the parker-claim commit; this models the
  * arming discipline): the LEVEL-triggered + EPOLLONESHOT re-arm in
- * pygo_netpoll_register, working with the per-fd pending-wake bitmap.
+ * runloom_netpoll_register, working with the per-fd pending-wake bitmap.
  *
  * THE NOT-YET-LINKED WINDOW.  An fd can become ready while no parker is linked
  * for it (the g unlinked on its last wake and has not re-linked, or has not
@@ -10,7 +10,7 @@
  * and stashes the readiness in the per-fd pending-wake bitmap; the next
  * wait_fd consumes it before parking.  But the bitmap ALONE does not close the
  * window: a pump can be preempted between "found no parker" and the lock-free
- * pygo_fd_pending_wake_set (netpoll.c:2185-2195), letting the g link, consume
+ * runloom_fd_pending_wake_set (netpoll.c:2185-2195), letting the g link, consume
  * the (still-empty) bitmap twice, commit, and park BEFORE the bit is set.
  *
  * WHAT ACTUALLY CLOSES IT (the documented T1.5 fix, netpoll.c:1158-1207):
@@ -107,11 +107,11 @@ active proctype pump()
 #endif
     do
     :: atomic { (deliv > 0) -> deliv--; arm = 0; }   /* ONESHOT: delivery disarms */
-       /* pygo_pump_dispatch_event: walk by_fd under pool->lock */
+       /* runloom_pump_dispatch_event: walk by_fd under pool->lock */
        LOCK;
        if
        :: linked ->
-           atomic {                              /* pygo_pump_claim */
+           atomic {                              /* runloom_pump_claim */
                prior = commit;
                if :: commit != WOKEN -> commit = WOKEN;
                   :: else            -> skip;

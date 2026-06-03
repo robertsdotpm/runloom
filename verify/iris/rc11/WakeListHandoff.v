@@ -1,4 +1,4 @@
-(* WakeListHandoff.v -- Stage 3 (weak memory): an iRC11 / RC11 proof of pygo's
+(* WakeListHandoff.v -- Stage 3 (weak memory): an iRC11 / RC11 proof of runloom's
    CROSS-THREAD wake_list handoff, the second load-bearing release/acquire fence
    (the one the herd7 `wakelist_mpsc` litmus and the Phase-C owner-routed
    wake_safe cover).
@@ -12,7 +12,7 @@
                                 read gstate  -- MUST see the published value
 
    It is the same message-passing release/acquire CORE as CommitPublish (so the
-   proof shares its shape), but at a distinct pygo fence: cross-thread wake
+   proof shares its shape), but at a distinct runloom fence: cross-thread wake
    routing rather than the pump's commit.  Together the two give iRC11
    coverage of BOTH load-bearing fences the litmus tests isolate.
 

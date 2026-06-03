@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""bench_keepalive_py.py -- steady-state keepalive workload (T3.1 pygo target).
+"""bench_keepalive_py.py -- steady-state keepalive workload (T3.1 runloom target).
 
 Unlike bench_server_py.py (fire-and-close echo), this models the N=1M
 steady state honest-bench targets: many LONG-LIVED connections that each
@@ -42,7 +42,7 @@ Args: N [H] [think_ms] [work_ms] [ramp_s] [warmup_s] [measure_s]
   warmup_s  run-but-don't-record window after the ramp completes
   measure_s steady-state window over which latencies + RSS are sampled
 
-Compare PYGO_STACK_PARK_SWEEP=1 vs unset to read off the RSS reclaim and
+Compare RUNLOOM_STACK_PARK_SWEEP=1 vs unset to read off the RSS reclaim and
 its (expected ~0) tail-latency cost on a clean steady-state window.
 """
 import os
@@ -53,7 +53,7 @@ import sys
 import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
-import pygo_core
+import runloom_c
 
 REQ = b"GET /work\n"
 REQ_LEN = len(REQ)
@@ -101,7 +101,7 @@ def _rst_close(sock):
         pass
     if fd >= 0:
         try:
-            pygo_core.netpoll_unregister(fd)
+            runloom_c.netpoll_unregister(fd)
         except (AttributeError, OSError):
             pass
     try:
@@ -116,7 +116,7 @@ def _recv_exactly(sock, fd, n):
         try:
             chunk = sock.recv(n - len(out))
         except (BlockingIOError, InterruptedError):
-            pygo_core.wait_fd(fd, READ)
+            runloom_c.wait_fd(fd, READ)
             continue
         except OSError:
             return b""
@@ -133,7 +133,7 @@ def _send_all(sock, fd, data):
         try:
             sent += sock.send(view[sent:])
         except (BlockingIOError, InterruptedError):
-            pygo_core.wait_fd(fd, WRITE)
+            runloom_c.wait_fd(fd, WRITE)
         except OSError:
             return False
     return True
@@ -150,13 +150,13 @@ def _db_latency_s(seq):
     return WORK_S
 
 
-# Deep-then-shallow knob: PYGO_BENCH_DEPTH makes the handler recurse this
+# Deep-then-shallow knob: RUNLOOM_BENCH_DEPTH makes the handler recurse this
 # many Python frames per request before parking again.  On 3.11+ a
 # Python->Python call grows the DATASTACK (not the C stack), so this
 # faults the handler's _PyStackChunk tail into resident RAM, then returns
 # to a shallow recv-park -- the exact "parse deep, then wait" shape that
 # leaves a reclaimable resident datastack tail.  Default 0 = flat handler.
-BENCH_DEPTH = int(os.environ.get("PYGO_BENCH_DEPTH", "0"))
+BENCH_DEPTH = int(os.environ.get("RUNLOOM_BENCH_DEPTH", "0"))
 
 
 def _consume_datastack(n):
@@ -178,7 +178,7 @@ def server_conn(conn, idx):
                 break
             if BENCH_DEPTH:
                 _consume_datastack(BENCH_DEPTH)         # parse-deep, then park shallow
-            pygo_core.sched_sleep(_db_latency_s(idx * 131 + seq))   # "DB"
+            runloom_c.sched_sleep(_db_latency_s(idx * 131 + seq))   # "DB"
             seq += 1
             if not _send_all(conn, fd, RESP):
                 break
@@ -190,7 +190,7 @@ def server_conn(conn, idx):
             pass
         if f2 >= 0:
             try:
-                pygo_core.netpoll_unregister(f2)
+                runloom_c.netpoll_unregister(f2)
             except (AttributeError, OSError):
                 pass
         try:
@@ -211,19 +211,19 @@ def accept_loop():
         try:
             conn, _ = listen_sock.accept()
         except (BlockingIOError, InterruptedError):
-            pygo_core.wait_fd(lfd, READ, 50)
+            runloom_c.wait_fd(lfd, READ, 50)
             continue
         except OSError:
             break
         while True:
             conn.setblocking(False)
             try:
-                pygo_core.netpoll_unregister(conn.fileno())
+                runloom_c.netpoll_unregister(conn.fileno())
             except (AttributeError, OSError):
                 pass
             cidx = accepted
             accepted += 1
-            pygo_core.mn_go(lambda c=conn, i=cidx: server_conn(c, i))
+            runloom_c.mn_go(lambda c=conn, i=cidx: server_conn(c, i))
             if accepted >= N:
                 break
             try:
@@ -234,7 +234,7 @@ def accept_loop():
                 accepted = N
                 break
     try:
-        pygo_core.netpoll_unregister(lfd)
+        runloom_c.netpoll_unregister(lfd)
     except (AttributeError, OSError):
         pass
 
@@ -253,12 +253,12 @@ def _client_body(idx):
     # Establishment lands before MEASURE_START_T, so it can't pollute the
     # measured window.
     if RAMP_S > 0.0 and N > 1:
-        pygo_core.sched_sleep((idx / float(N)) * RAMP_S)
+        runloom_c.sched_sleep((idx / float(N)) * RAMP_S)
     fd = s.fileno()
     try:
         s.connect((HOST, PORT))
     except BlockingIOError:
-        pygo_core.wait_fd(fd, WRITE)
+        runloom_c.wait_fd(fd, WRITE)
         if s.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR) != 0:
             _rst_close(s)
             return False
@@ -282,7 +282,7 @@ def _client_body(idx):
         t1 = time.monotonic()
         if MEASURE_START_T <= t1 < MEASURE_END_T:
             mine.append(t1 - t0)
-        pygo_core.sched_sleep(THINK_S)        # think-time: parked + idle
+        runloom_c.sched_sleep(THINK_S)        # think-time: parked + idle
     _rst_close(s)
     return True
 
@@ -297,7 +297,7 @@ def sampler():
     peak is the pre-reclaim high-water -- their gap = what the sweep gave back."""
     global steady_rss_kib, steady_maps, final_rss_kib, final_maps
     while time.monotonic() < MEASURE_START_T:
-        pygo_core.sched_sleep(0.05)
+        runloom_c.sched_sleep(0.05)
     peak = -1
     peak_maps = -1
     cur = lastm = -1
@@ -308,7 +308,7 @@ def sampler():
         lastm = _cur_maps()
         if lastm > peak_maps:
             peak_maps = lastm
-        pygo_core.sched_sleep(0.1)
+        runloom_c.sched_sleep(0.1)
     steady_rss_kib = peak
     steady_maps = peak_maps
     final_rss_kib = cur
@@ -372,35 +372,35 @@ def main(argv):
     listen_sock.setblocking(False)
     PORT = listen_sock.getsockname()[1]
 
-    # PYGO_BENCH_STACK=<bytes>: pin the goroutine stack size (freezes
+    # RUNLOOM_BENCH_STACK=<bytes>: pin the goroutine stack size (freezes
     # calibration) so we can measure RSS vs stack allocation size.
-    _bench_stack = os.environ.get("PYGO_BENCH_STACK")
+    _bench_stack = os.environ.get("RUNLOOM_BENCH_STACK")
     if _bench_stack:
-        pygo_core.set_stack_size(int(_bench_stack))
+        runloom_c.set_stack_size(int(_bench_stack))
 
-    if pygo_core.mn_init(H) < 0:
+    if runloom_c.mn_init(H) < 0:
         sys.stderr.write("mn_init failed\n")
         return 2
 
     T0 = time.monotonic()
     MEASURE_START_T = T0 + RAMP_S + WARMUP_S
     MEASURE_END_T = MEASURE_START_T + MEASURE_S
-    pygo_core.mn_go(accept_loop)
-    pygo_core.mn_go(sampler)
+    runloom_c.mn_go(accept_loop)
+    runloom_c.mn_go(sampler)
     for i in range(N):
-        pygo_core.mn_go(lambda i=i: client(i))
-    pygo_core.mn_run()
+        runloom_c.mn_go(lambda i=i: client(i))
+    runloom_c.mn_run()
 
     peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     # Datastack-tail sweep decompose readout (nonzero only under
-    # PYGO_DATASTACK_DEBUG): total reclaimable tail bytes seen, how many
+    # RUNLOOM_DATASTACK_DEBUG): total reclaimable tail bytes seen, how many
     # were resident at madvise time (mincore), and chunk count.
     ds_tail = ds_res = ds_chunks = 0
     try:
-        ds_tail, ds_res, ds_chunks = pygo_core._datastack_sweep_stats()
+        ds_tail, ds_res, ds_chunks = runloom_c._datastack_sweep_stats()
     except AttributeError:
         pass
-    pygo_core.mn_fini()
+    runloom_c.mn_fini()
     listen_sock.close()
 
     allat = []

@@ -42,7 +42,7 @@ jobs:
         env:
           # Smoke-test imports on every wheel.  --skip enforced via
           # pyproject.toml so we stay consistent across local + CI runs.
-          CIBW_TEST_COMMAND: "python -c \"import pygo, pygo_core; print('OK', pygo_core.backend(), pygo_core.netpoll_backend())\""
+          CIBW_TEST_COMMAND: "python -c \"import runloom, runloom_c; print('OK', runloom_c.backend(), runloom_c.netpoll_backend())\""
 
       - uses: actions/upload-artifact@v4
         with:

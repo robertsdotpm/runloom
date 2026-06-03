@@ -7,7 +7,7 @@ build-backend = "setuptools.build_meta"
 # Distribution name on PyPI is `runloom` (the short `runloom` is taken).
 # The IMPORT names are unchanged: `import runloom` and `import runloom_c`.
 name = "runloom"
-version = "0.0.1"
+version = "0.1.0"
 description = "Go-style stackful coroutines in Python (transparent-blocking I/O via socket monkey-patch)."
 requires-python = ">=3.11"
 # Keep the table form for compatibility with setuptools < 77.

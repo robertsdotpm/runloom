@@ -1,10 +1,10 @@
 /* test_blockpool.c -- blocking-offload pool keeps a hub live.
  *
  * Premise (Group A, "move the work off the hub"): a goroutine that makes
- * a blocking C call must NOT wedge its hub.  pygo_blocking_call runs the
+ * a blocking C call must NOT wedge its hub.  runloom_blocking_call runs the
  * call on a pool thread and parks the goroutine instead.
  *
- * Setup: ONE hub, N blocker goroutines, each calling pygo_blocking_call
+ * Setup: ONE hub, N blocker goroutines, each calling runloom_blocking_call
  * with a fn that sleeps BLOCK_MS and returns a per-g sentinel.
  *
  *   offloaded (correct): all N park, the pool runs them concurrently, so
@@ -27,9 +27,9 @@
 #include <unistd.h>
 #include <time.h>
 
-#include "../src/pygo_core/pygo_sched.h"
-#include "../src/pygo_core/mn_sched.h"
-#include "../src/pygo_core/pygo_blockpool.h"
+#include "../src/runloom_c/runloom_sched.h"
+#include "../src/runloom_c/mn_sched.h"
+#include "../src/runloom_c/runloom_blockpool.h"
 
 #define NHUBS     1
 #define NBLOCK    6
@@ -55,7 +55,7 @@ static void *sleep_work(void *arg)
 
 static void blocker_fn(void *arg)
 {
-    void *r = pygo_blocking_call(sleep_work, arg);
+    void *r = runloom_blocking_call(sleep_work, arg);
     if (r == (void *)((long)arg + SENTINEL))
         __atomic_fetch_add(&result_ok, 1, __ATOMIC_RELAXED);
     __atomic_fetch_add(&completed, 1, __ATOMIC_RELEASE);
@@ -67,13 +67,13 @@ int main(void)
     double t0, wall, t;
 
     Py_Initialize();
-    pygo_sched_set_default_stack_size(64 * 1024);
+    runloom_sched_set_default_stack_size(64 * 1024);
 
-    if (pygo_mn_init(NHUBS) < 0) { fprintf(stderr, "mn_init failed\n"); return 2; }
+    if (runloom_mn_init(NHUBS) < 0) { fprintf(stderr, "mn_init failed\n"); return 2; }
 
     t0 = now_ms();
     for (i = 0; i < NBLOCK; i++) {
-        if (pygo_mn_go_c(blocker_fn, (void *)(long)i) < 0) {
+        if (runloom_mn_go_c(blocker_fn, (void *)(long)i) < 0) {
             fprintf(stderr, "go blocker %d\n", i); return 2;
         }
     }

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# coz_profile.sh -- causal (virtual-speedup) profiling of pygo with Coz.
+# coz_profile.sh -- causal (virtual-speedup) profiling of runloom with Coz.
 #
 # A normal profiler tells you where wall-time accumulates; in a concurrent
 # runtime that is almost never where the bottleneck is.  Coz answers the
@@ -13,7 +13,7 @@
 # channel paths interleave, so accumulated self-time is misleading.
 # target.py marks each unit of work as a Coz progress point.
 #
-# For line-level virtual speedups inside pygo_core the .so should carry debug
+# For line-level virtual speedups inside runloom_c the .so should carry debug
 # info (build with CFLAGS="-g -gdwarf-4"); Coz still works without it at
 # coarser granularity.
 #

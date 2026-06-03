@@ -1,4 +1,4 @@
-"""workloads.py -- canonical pygo microbenchmarks for the rigor harness.
+"""workloads.py -- canonical runloom microbenchmarks for the rigor harness.
 
 Each workload is a plain function returning ``(ops, seconds)`` for ONE
 in-process iteration:
@@ -20,15 +20,15 @@ import time
 # names (``rigor.py list``) without a built extension on its path.  Children
 # run with PYTHONPATH=src, where the import succeeds.
 try:
-    import pygo_core
+    import runloom_c
 except ImportError:
-    pygo_core = None
+    runloom_c = None
 
 
 def spawn(scale=100000):
     """Spawn ``scale`` no-op goroutines and drain them once.
 
-    Exercises pygo_g_t alloc + coro_new (stack-pool pop) + capsule handle.
+    Exercises runloom_g_t alloc + coro_new (stack-pool pop) + capsule handle.
     ops = goroutines spawned-and-run.
     """
     def noop():
@@ -36,8 +36,8 @@ def spawn(scale=100000):
 
     t0 = time.perf_counter()
     for _ in range(scale):
-        pygo_core.go(noop)
-    pygo_core.run()
+        runloom_c.go(noop)
+    runloom_c.run()
     return scale, time.perf_counter() - t0
 
 
@@ -47,8 +47,8 @@ def chan_pingpong(scale=200000):
     The classic ``BenchmarkPingPong`` shape: every roundtrip is 4 channel
     ops + 2 goroutine switches, all parking.  ops = roundtrips.
     """
-    a = pygo_core.Chan()
-    b = pygo_core.Chan()
+    a = runloom_c.Chan()
+    b = runloom_c.Chan()
 
     def pinger():
         for i in range(scale):
@@ -60,10 +60,10 @@ def chan_pingpong(scale=200000):
             v, _ = a.recv()
             b.send(v)
 
-    pygo_core.go(pinger)
-    pygo_core.go(ponger)
+    runloom_c.go(pinger)
+    runloom_c.go(ponger)
     t0 = time.perf_counter()
-    pygo_core.run()
+    runloom_c.run()
     return scale, time.perf_counter() - t0
 
 
@@ -73,7 +73,7 @@ def chan_buffered(scale=500000, cap=64):
     Most sends don't park (buffer absorbs them): measures the buffered
     fast path rather than the park/wake path.  ops = items moved.
     """
-    ch = pygo_core.Chan(cap)
+    ch = runloom_c.Chan(cap)
 
     def producer():
         for i in range(scale):
@@ -86,10 +86,10 @@ def chan_buffered(scale=500000, cap=64):
             if not ok:
                 break
 
-    pygo_core.go(producer)
-    pygo_core.go(consumer)
+    runloom_c.go(producer)
+    runloom_c.go(consumer)
     t0 = time.perf_counter()
-    pygo_core.run()
+    runloom_c.run()
     return scale, time.perf_counter() - t0
 
 
@@ -101,12 +101,12 @@ def yield_storm(gs=200, k=2000):
     """
     def spinner():
         for _ in range(k):
-            pygo_core.yield_()
+            runloom_c.yield_()
 
     for _ in range(gs):
-        pygo_core.go(spinner)
+        runloom_c.go(spinner)
     t0 = time.perf_counter()
-    pygo_core.run()
+    runloom_c.run()
     return gs * k, time.perf_counter() - t0
 
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # build_tsan_cpython.sh -- build a free-threaded CPython instrumented with
-# ThreadSanitizer, the "gold standard" interpreter for TSan-ing pygo (CPython's
+# ThreadSanitizer, the "gold standard" interpreter for TSan-ing runloom (CPython's
 # own internals are then instrumented too, so races that cross the
 # ext <-> interpreter boundary are attributed precisely).
 #

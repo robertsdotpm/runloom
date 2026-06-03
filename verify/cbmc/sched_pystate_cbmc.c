@@ -1,6 +1,6 @@
 /*
- * sched_pystate_cbmc.c -- CBMC harness for pygo's per-goroutine tstate
- * save/restore (pygo_sched.c: pygo_pystate_snap / pygo_pystate_load), which
+ * sched_pystate_cbmc.c -- CBMC harness for runloom's per-goroutine tstate
+ * save/restore (runloom_sched.c: runloom_pystate_snap / runloom_pystate_load), which
  * swaps a slice of PyThreadState (c_recursion_remaining, datastack_chunk /
  * datastack_top / datastack_limit, current_frame) in and out as goroutines are
  * context-switched on one OS thread.
@@ -40,14 +40,14 @@ static unsigned long tstate[NFIELDS];
 /* per-g saved snapshot */
 static unsigned long snap[NG][NFIELDS];
 
-/* src: pygo_pystate_snap -- copy the live tstate fields OUT into g's snap */
+/* src: runloom_pystate_snap -- copy the live tstate fields OUT into g's snap */
 static void pystate_snap(int g)
 {
     for (int f = 0; f < NFIELDS; f++)
         snap[g][f] = tstate[f];
 }
 
-/* src: pygo_pystate_load -- copy g's snap back INTO the live tstate */
+/* src: runloom_pystate_load -- copy g's snap back INTO the live tstate */
 static void pystate_load(int g)
 {
 #ifdef BUG_DROP_FIELD

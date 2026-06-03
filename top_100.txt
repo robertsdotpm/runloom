@@ -31,8 +31,8 @@ FRAMEWORKS, PROTOCOL STACKS & STDLIB CONFORMANCE  (54)
  13. httpcore                   - present, green
  14. aiohappyeyeballs           - 2.6.2 full suite 50 passed == stock (dual-stack happy-eyeballs connect logic)
  15. websockets                 - 440 passed (NODELAY + unix + netpoll)
- 16. python-socketio (async)    - 234/234 pygo-specific clean: test_client 80, test_server 81, test_namespace 26, test_man
- 17. python-engineio (async)    - 227/227 pygo-specific clean: test_asgi 26, test_socket 36, test_client 82, test_server 8
+ 16. python-socketio (async)    - 234/234 runloom-specific clean: test_client 80, test_server 81, test_namespace 26, test_man
+ 17. python-engineio (async)    - 227/227 runloom-specific clean: test_asgi 26, test_socket 36, test_client 82, test_server 8
  18. channels                   - see #10 (core async consumer machinery green; channels-redis needs a redis server)
  19. aiosqlite                  - present, green (no server needed)
  20. sqlalchemy (asyncio)       - greenlet async ORM over aiosqlite
@@ -51,7 +51,7 @@ FRAMEWORKS, PROTOCOL STACKS & STDLIB CONFORMANCE  (54)
  33. asyncio TLS transport      - direct stress (tls_stress.py, trustme cert): 4/4 == stock — TLS echo via start_server/op
  34. strawberry-graphql         - tests/schema 615 passed == stock (1 env fail identical on both)
  35. ariadne                    - full suite 700 passed/1 skip == stock (2 errors identical = env)
- 36. anyio                      - Core structured-concurrency validated green on PygoEventLoop via direct stress (anyio_st
+ 36. anyio                      - Core structured-concurrency validated green on RunloomEventLoop via direct stress (anyio_st
  37. async-timeout              - present, green
  38. tenacity (async retry)     - test_asyncio.py 25/25 == stock
  39. backoff                    - 2.2.1 test_backoff_async.py 26 passed == stock (1 error == stock env)
@@ -68,7 +68,7 @@ FRAMEWORKS, PROTOCOL STACKS & STDLIB CONFORMANCE  (54)
  50. aioshutil                  - full suite 8 passed == stock (async shutil over threadpool)
  51. CPython test_asyncio       - SWEPT CLEAN — only arch/by-design fails remain (authoritative conformance)
  52. twisted (asyncioreactor)   - ~1745 tests == stock, no fixes needed
- 53. pytest-asyncio             - 1.4.0 full own suite (~390 meta-tests, each spawns a sub-pytest session managing PygoEve
+ 53. pytest-asyncio             - 1.4.0 full own suite (~390 meta-tests, each spawns a sub-pytest session managing RunloomEve
  54. asyncio subprocess transport - direct stress (subprocess_stress.py): 9/9 == stock — pipes, exit codes, stdin roundtrip,
 
 ------------------------------------------------------------
@@ -106,7 +106,7 @@ NEXT-40 PUSH: utilities, ASGI adapters, sans-IO, DB (21)
  79. blacksheep                 - ASGI framework: routed GET -> 200 pong
  80. asgiref                    - Django bridge: sync_to_async offloads to worker thread
  81. async-asgi-testclient      - ASGI TestClient GET -> 200 pong
- 82. sniffio                    - current_async_library() -> asyncio under PygoEventLoop
+ 82. sniffio                    - current_async_library() -> asyncio under RunloomEventLoop
  83. outcome                    - capture Value/Error + unwrap
  84. a2wsgi                     - WSGI->ASGI adapter -> 200 pong (threadpool)
  85. aioitertools               - islice/zip/chain/enumerate over async iters
@@ -126,12 +126,12 @@ NEXT-40 PUSH (cont.): cache/limiter/proto/redis-lock (10)
  94. aiohttp-retry              - RetryClient retried 500,500->200 over aioresponses
  95. aioredlock                 - Redlock distributed lock acquire/is_locked/unlock vs real redis
 
-NOTE: one real pygo divergence found this push -- aiocsv: its C _Parser
+NOTE: one real runloom divergence found this push -- aiocsv: its C _Parser
 async-iterator (self-referential awaitable delegating to an executor
-future) raises "_Parser has no attribute 'send'" under pygo but works on
-stock. Niche (only lib hit); fix lives in pygo's coro/task driver (FV-gated).
+future) raises "_Parser has no attribute 'send'" under runloom but works on
+stock. Niche (only lib hit); fix lives in runloom's coro/task driver (FV-gated).
 aiodebug also diverges by design: it monkey-patches asyncio Handle._run,
-which PygoEventLoop doesn't use (callbacks run on goroutines).
+which RunloomEventLoop doesn't use (callbacks run on goroutines).
 
 
 ------------------------------------------------------------
@@ -175,8 +175,8 @@ BEYOND 100 (cont.): task utils, sans-IO GitLab (2)
 111. aiotools                   - TaskGroup fan-out x5 (aclosing/async ctx utils)
 112. gidgetlab                  - sans-IO GitLab API getitem over mocked aiohttp
 
-NOTE: unsync diverges (pygo accepts awaiting a Future bound to another
-loop; stock raises 'attached to a different loop') -- pygo is MORE permissive
+NOTE: unsync diverges (runloom accepts awaiting a Future bound to another
+loop; stock raises 'attached to a different loop') -- runloom is MORE permissive
 on loop-affinity, not a failure. Not counted.
 
 

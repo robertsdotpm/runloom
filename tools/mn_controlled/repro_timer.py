@@ -10,7 +10,7 @@ function of the seed.
 
 Workload: N workers all sleep the SAME delay then record their id; plus a few
 with mixed delays to exercise multiple distinct deadlines.  Signature is the
-record order.  Same PYGO_MN_SEED must reproduce one signature.  House style:
+record order.  Same RUNLOOM_MN_SEED must reproduce one signature.  House style:
 .format().
 
 Usage: repro_timer.py [seeds] [reps]   (defaults 8 seeds, 6 reps)
@@ -22,18 +22,18 @@ import sys
 ROOT = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 
 WORKLOAD = r"""
-import sys; sys.path.insert(0, 'src'); import pygo_core
-pygo_core.mn_init(3)
+import sys; sys.path.insert(0, 'src'); import runloom_c
+runloom_c.mn_init(3)
 got = []
 def worker(wid, delay):
-    pygo_core.sched_sleep(delay)
+    runloom_c.sched_sleep(delay)
     got.append(wid)
 # 6 same-delay workers (pure scheduling order) + 3 staggered (distinct deadlines)
 for i in range(6):
-    pygo_core.mn_go(lambda i=i: worker(i, 0.002))
+    runloom_c.mn_go(lambda i=i: worker(i, 0.002))
 for j in range(3):
-    pygo_core.mn_go(lambda j=j: worker(100 + j, 0.001 * (j + 1)))
-pygo_core.mn_run(); pygo_core.mn_fini()
+    runloom_c.mn_go(lambda j=j: worker(100 + j, 0.001 * (j + 1)))
+runloom_c.mn_run(); runloom_c.mn_fini()
 # conservation: every worker recorded exactly once
 ok = sorted(got) == sorted([0,1,2,3,4,5,100,101,102])
 print(",".join(str(x) for x in got) + ("|OK" if ok else "|LOST"))
@@ -44,7 +44,7 @@ def run_once(seed):
     env = dict(os.environ)
     env["PYTHON_GIL"] = "0"
     env["PYTHONPATH"] = os.path.join(ROOT, "src")
-    env["PYGO_MN_SEED"] = str(seed)
+    env["RUNLOOM_MN_SEED"] = str(seed)
     try:
         out = subprocess.run([sys.executable, "-c", WORKLOAD], env=env, cwd=ROOT,
                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=60)

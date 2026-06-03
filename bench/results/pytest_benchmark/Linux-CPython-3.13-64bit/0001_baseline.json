@@ -133,7 +133,7 @@
         "time": "2026-06-03T10:43:53+10:00",
         "author_time": "2026-06-03T10:43:53+10:00",
         "dirty": true,
-        "project": "pygo",
+        "project": "runloom",
         "branch": "perf/bench-campaign"
     },
     "benchmarks": [

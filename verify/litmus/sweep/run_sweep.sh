@@ -2,7 +2,7 @@
 # run_sweep.sh -- generate the park/wake memory_order lattice and run every
 # variant through herd7, then report the WEAKEST fence that forbids the lost
 # wakeup.  Automated necessity+sufficiency proof for the seq_cst StoreLoad
-# fence (src/pygo_core/pygo_sched.c:1363), generalising the two hand-written
+# fence (src/runloom_c/runloom_sched.c:1363), generalising the two hand-written
 # parkwake_{no_fence,sc_fence}.litmus endpoints to the full 12-point lattice.
 #
 # Needs herd7 (herdtools7).  Install: `opam install herdtools7`.
@@ -22,7 +22,7 @@ if ! command -v "$HERD" >/dev/null 2>&1; then
     exit 0
 fi
 
-GEN="$(mktemp -d /tmp/pygo_fencesweep.XXXXXX)"
+GEN="$(mktemp -d /tmp/runloom_fencesweep.XXXXXX)"
 "$PY" "$HERE/gen_sweep.py" "$GEN" >/dev/null
 
 echo "-- park/wake fence-order sweep (herd7, RC11) --"

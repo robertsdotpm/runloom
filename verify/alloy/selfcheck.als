@@ -1,7 +1,7 @@
 /*
- * selfcheck.als -- Alloy model of pygo's runtime structural invariant.
+ * selfcheck.als -- Alloy model of runloom's runtime structural invariant.
  *
- * pygo_self_check (src/pygo_core/pygo_diag.c) walks the netpoll parker graph
+ * runloom_self_check (src/runloom_c/runloom_diag.c) walks the netpoll parker graph
  * at runtime and flags four structural violations:
  *   1. a cycle in the global parker list,
  *   2. a per-fd bucket that self-loops,

@@ -1,14 +1,14 @@
 /*
  * cross_thread_wake.pml -- Promela model of the Phase C per-thread-scheduler
- * wake routing in pygo_sched_wake_safe (src/pygo_core/pygo_sched.c, commit
- * 4bef422).  pygo now runs ONE scheduler per OS thread; pygo.aio drives each
+ * wake routing in runloom_sched_wake_safe (src/runloom_c/runloom_sched.c, commit
+ * 4bef422).  runloom now runs ONE scheduler per OS thread; runloom.aio drives each
  * event loop on its own thread.  A goroutine records its owner sched at spawn
  * (g->owner).  When a FOREIGN thread wakes it -- a run_in_executor pool worker
  * or an io_uring CQE resolving a future the owner awaits -- wake_safe must
  * enqueue the g onto the OWNER sched's wake_list (the list the owner thread
  * drains), NOT the waker thread's list (which no one drains):
  *
- *     pygo_sched_t *s = g->owner ? g->owner : pygo_sched_get();   // route to owner
+ *     runloom_sched_t *s = g->owner ? g->owner : runloom_sched_get();   // route to owner
  *     ... enqueue g on s->wake_list ...                           // owner drains s
  *
  * This composes the verified park_safe/wake_safe handshake (parked_safe.pml --
@@ -25,7 +25,7 @@
  *
  * Negative control -DBUG_ROUTE_TO_WAKER enqueues the woken g onto the WAKER
  * thread's wake_list (the pre-Phase-C behavior: wake_safe used the waker's own
- * pygo_sched_get()).  The owner's drain never sees it and the foreign waker
+ * runloom_sched_get()).  The owner's drain never sees it and the foreign waker
  * thread runs no drain loop, so Spin finds the lost wake -- exactly the
  * concurrent-loop deadlock Phase C fixes.
  */
@@ -36,7 +36,7 @@ bit owner_wl      = 0;   /* g enqueued on the OWNER sched's wake_list       */
 bit waker_wl      = 0;   /* g enqueued on the WAKER thread's wake_list (bug)*/
 bit g_resumed     = 0;   /* g is runnable again (resumed, or skipped park)  */
 
-/* The goroutine: runs on its OWNER thread, parks via pygo_sched_park_safe. */
+/* The goroutine: runs on its OWNER thread, parks via runloom_sched_park_safe. */
 active proctype g_park()
 {
     bit consumed;
@@ -52,7 +52,7 @@ active proctype g_park()
     fi;
 }
 
-/* A foreign-thread waker: pygo_sched_wake_safe(g). */
+/* A foreign-thread waker: runloom_sched_wake_safe(g). */
 active proctype waker()
 {
     atomic { wake_pending = 1; }     /* we hold the wake */

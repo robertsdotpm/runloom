@@ -15,3 +15,5 @@ core.*
 *.swp
 *.swo
 .DS_Store
+wheelhouse/
+scripts/release_hosts.env

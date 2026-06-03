@@ -1,4 +1,4 @@
-# pygo — project guidance
+# runloom — project guidance
 
 ## No hosted CI
 - **Do NOT add GitHub Actions or any hosted CI.** Never create
@@ -47,28 +47,28 @@
   and carry a raised exception out of `run()` while a goroutine is parked in a
   cooperative wait to receive it; it carries one out of `run()` *only* when
   nothing is parked to take it (the idle / sleep-only Ctrl-C case). The delivery
-  path is `pygo_netpoll_signal_wake` + the `PYGO_NETPOLL_SIGNALED` sentinel that
+  path is `runloom_netpoll_signal_wake` + the `RUNLOOM_NETPOLL_SIGNALED` sentinel that
   `wait_fd` restores on resume — backend-independent (epoll/kqueue/select).
 - **Future-completion wakes must be call_soon-FIFO.** asyncio guarantees a
   future's done-callbacks run in `call_soon` (FIFO) order, so a task awaiting a
   future resumes *before* a callback scheduled later in the same `set_result`.
-  A PygoTask parks on a future via `park_safe` / `wake_safe`; `wake_safe` MUST
+  A RunloomTask parks on a future via `park_safe` / `wake_safe`; `wake_safe` MUST
   keep its same-thread fast-path (push the woken g straight onto the ready ring,
-  like `pygo_sched_wake`) rather than routing same-thread wakes through the
+  like `runloom_sched_wake`) rather than routing same-thread wakes through the
   batch-drained `wake_list` — the latter lands the task *after* a later
   `call_soon`, inverting the order (crashed asyncssh: a channel-close callback
   ran before the channel-open awaiter, clearing state it needed). Detect
-  same-thread by PEEKING `pygo_tls_sched`, never `pygo_sched_get()` (which
+  same-thread by PEEKING `runloom_tls_sched`, never `runloom_sched_get()` (which
   lazily allocates a sched + runs mimalloc — fatal on a foreign waker thread, a
   run_in_executor blockpool worker / iouring CQE, that has no usable heap).
   Regression guard: `pygo_compat/call_soon_fifo.py`.
 
-## aio bridge invariants (src/pygo/aio/)
-- `pygo.aio` is a package (`src/pygo/aio/`): the shared foundation is
+## aio bridge invariants (src/runloom/aio/)
+- `runloom.aio` is a package (`src/runloom/aio/`): the shared foundation is
   `_base.py` (`_go_io`, `_wait_fd`, `_CURRENT_TASKS`, the lazy CoLock); the
   event loop is composed from the `loop_*.py` mixins into `loop.py`; futures /
   tasks / streams / tls_* / transport_* split out by role. `from ._base import
-  *` is the foundation import. Internals stay reachable as `pygo.aio.<name>`
+  *` is the foundation import. Internals stay reachable as `runloom.aio.<name>`
   via a PEP 562 `__getattr__` in `__init__.py`.
 - **Goroutines that synchronously run user protocol callbacks need a roomy
   stack.** `data_received` / `pipe_data_received` / `connection_made` /
@@ -78,8 +78,8 @@
   encrypt inside `data_received`). The scheduler's default 32 KB g-stack
   overflows the guard page → SEGV (stock asyncio runs callbacks on the 8 MB
   main-thread stack). Spawn every such goroutine via `_go_io` (`_IO_STACK`,
-  default 512 KB, env `PYGO_AIO_IO_STACK`) — the same reason task drivers use
-  `_TASK_STACK`. Do NOT revert these to a bare `pygo_core.go`. The 512 KB is
+  default 512 KB, env `RUNLOOM_AIO_IO_STACK`) — the same reason task drivers use
+  `_TASK_STACK`. Do NOT revert these to a bare `runloom_c.go`. The 512 KB is
   virtual + pooled; only the asyncio bridge is affected (M:N paths keep 128 KB).
 - **A timer goroutine must read its callback THROUGH the handle, never via
   closure capture.** call_at/call_later run a goroutine that `sched_sleep`s to
@@ -105,10 +105,10 @@
   with NO current task active** — route them through `_pg_run_loop_cb`, which
   clears `_CURRENT_TASKS[loop]` for the callback and restores it after, exactly
   like stock asyncio's `_run_once` (current_task() is None there; a deferred
-  `Task.__step` does its own enter_task/leave_task). A PygoTask that parks
-  mid-`coro.send` via a raw pygo park leaves the slot pointing at itself; without
+  `Task.__step` does its own enter_task/leave_task). A RunloomTask that parks
+  mid-`coro.send` via a raw runloom park leaves the slot pointing at itself; without
   this clear, a deferred STOCK-Task wakeup running at loop level hits enter_task's
-  "Cannot enter into task X while another task Y is being executed", and pygo
+  "Cannot enter into task X while another task Y is being executed", and runloom
   drops the wakeup → the woken task hangs (aiohttp connector `_wait_for_close`
   teardown deadlock). Generalizes 78c1d03 (the `_wait_fd` save/restore) to the
   callback side. Regression guard: `pygo_compat/aiohttp_leak_probe.py`.
@@ -128,10 +128,10 @@
   mutates shared state, is observed in asyncio order: the waiter scheduled first
   (by an earlier `set_result`) resumes BEFORE the future's later done-callbacks.
   `_fire_callbacks` must therefore defer every callback EXCEPT
-  `PygoTask._wake_unpark` (pygo's own await-wake primitive -- deferring it would
+  `RunloomTask._wake_unpark` (runloom's own await-wake primitive -- deferring it would
   spawn a goroutine per await and break park/unpark; it only readies the g, which
   is FIFO-after an already-readied waiter, so ordering still holds) and callbacks
-  tagged `_pygo_fire_sync` (the run loop's `_stop_on_done`, which must stop the
+  tagged `_runloom_fire_sync` (the run loop's `_stop_on_done`, which must stop the
   drive in the same turn). Stock C-Task/`_PyTask` wakeups keep the
   `_run_stock_task_cb` trampoline (re-entry-unsafe). Firing library callbacks
   synchronously inverted the order and broke the falcon/uvicorn websocket-close
@@ -139,7 +139,7 @@
   aiojobs' pending-job promotion. Regression guard:
   `pygo_compat/ws_close_order_repro.py` (frame_sent True == stock).
   NOTE: this matches asyncio's *callback* order, not its inline-task-step: a
-  woken PygoTask is readied (a goroutine), not run-to-next-await inline inside
+  woken RunloomTask is readied (a goroutine), not run-to-next-await inline inside
   its wakeup, so a done-callback racing the woken task's NEXT step is still M:N
   (aiojobs `test_job_close_exception`).
 

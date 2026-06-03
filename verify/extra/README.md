@@ -19,7 +19,7 @@ absent, and runs the real check when installed.
 
 ## Runnable once the tool is installed
 
-- **`rr_chaos.sh`** — Mozilla **rr** `record --chaos` over a pygo workload, with
+- **`rr_chaos.sh`** — Mozilla **rr** `record --chaos` over a runloom workload, with
   perfect deterministic replay + reverse execution. The fastest way to capture
   *and* root-cause the residual cross-file leaked-parker flake on the real M:N
   path. `sudo apt-get install rr` (+ `kernel.perf_event_paranoid<=1`, ptrace;
@@ -32,7 +32,7 @@ absent, and runs the real check when installed.
 
 ## Roadmap — heavier, higher-assurance engines
 
-Ordered by leverage. Each lists the pygo target, what it would prove beyond
+Ordered by leverage. Each lists the runloom target, what it would prove beyond
 the current suite, and the install.
 
 1. **Ivy — parameterized / unbounded.** Re-express the wake/steal protocol so
@@ -50,7 +50,7 @@ the current suite, and the install.
    unmodelled.** Systematically covers the deadline min-heap (sift-up/down,
    arbitrary-remove via `heap_index`) and the per-fd list surgery — pure
    `pool->lock`-serialised code with no concurrency, so symbolic path coverage
-   (not interleaving) is the right tool. Targets: `pygo_netpoll` heap ops in
+   (not interleaving) is the right tool. Targets: `runloom_netpoll` heap ops in
    `netpoll.c`. Needs LLVM bitcode + KLEE (https://klee.github.io).
 
 4. **PRISM / Storm — quantitative.** Model the scheduler as a CTMC/MDP and

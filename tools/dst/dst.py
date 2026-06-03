@@ -1,10 +1,10 @@
-"""Deterministic Simulation Testing (DST) for pygo's channel / scheduler core.
+"""Deterministic Simulation Testing (DST) for runloom's channel / scheduler core.
 
-The single-thread cooperative scheduler (pygo_core.go + run) is deterministic:
+The single-thread cooperative scheduler (runloom_c.go + run) is deterministic:
 for a fixed set of goroutines making fixed yield decisions, the run-queue
 order is fixed, so the whole execution is reproducible.  This harness drives
-REAL pygo channels/select on that scheduler while a seeded decision oracle
-chooses WHERE each goroutine yields (pygo_core.sched_yield) -- so a different
+REAL runloom channels/select on that scheduler while a seeded decision oracle
+chooses WHERE each goroutine yields (runloom_c.sched_yield) -- so a different
 seed explores a different interleaving, and the SAME seed reproduces an
 execution exactly.  A failing run therefore reduces to a single integer seed
 (the property the cross-file leaked-parker flake never had).
@@ -19,7 +19,7 @@ Two pluggable scheduling strategies:
                         ASPLOS'10).  This is the bounded-preemption adaptation
                         of PCT to cooperative yield insertion; full
                         priority-scheduler PCT needs scheduler control (the
-                        documented PYGO_SIM C-hook extension).
+                        documented RUNLOOM_SIM C-hook extension).
 
 Scope honesty: this is deterministic for the SINGLE-THREAD cooperative
 scheduler + channel/select logic.  Controlled interleaving of the multi-OS-
@@ -39,7 +39,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "src"))
 
 import random
 
-import pygo_core
+import runloom_c
 
 
 # ---- scheduling strategies (the decision oracle) -------------------------
@@ -95,7 +95,7 @@ class Sim(object):
         """A cooperative decision point inside a goroutine."""
         self.step += 1
         if self.strategy.should_yield(self.rng, self.step, gid):
-            pygo_core.sched_yield()
+            runloom_c.sched_yield()
 
     def record(self, ev):
         self.events.append(ev)
@@ -104,12 +104,12 @@ class Sim(object):
         return hash(tuple(self.events))
 
 
-# ---- scenarios: real pygo goroutines with invariants ---------------------
+# ---- scenarios: real runloom goroutines with invariants ---------------------
 # Each returns a list of "sent" facts; the harness checks conservation +
-# self_check after pygo_core.run() drains.
+# self_check after runloom_c.run() drains.
 
 def scenario_unbuffered_handoff(sim):
-    ch = pygo_core.Chan()           # unbuffered: every send rendezvous-paired
+    ch = runloom_c.Chan()           # unbuffered: every send rendezvous-paired
     n = 6
     received = []
 
@@ -128,9 +128,9 @@ def scenario_unbuffered_handoff(sim):
                 break
             received.append(v)
 
-    pygo_core.go(sender)
-    pygo_core.go(receiver)
-    pygo_core.run()
+    runloom_c.go(sender)
+    runloom_c.go(receiver)
+    runloom_c.run()
     sim.record(("recv_order", tuple(received)))
     # unbuffered single sender/receiver: strict FIFO handoff, nothing lost
     assert received == list(range(n)), "handoff lost/reordered: {0}".format(received)
@@ -138,13 +138,13 @@ def scenario_unbuffered_handoff(sim):
 
 def scenario_buffered_mpmc(sim):
     cap = 3
-    ch = pygo_core.Chan(cap)
+    ch = runloom_c.Chan(cap)
     nprod = 3
     per = 4
     sent = [p * 100 + i for p in range(nprod) for i in range(per)]
     total = nprod * per
     received = []
-    done = pygo_core.Chan()
+    done = runloom_c.Chan()
 
     def producer(p):
         for i in range(per):
@@ -166,11 +166,11 @@ def scenario_buffered_mpmc(sim):
             received.append(v)
 
     for p in range(nprod):
-        pygo_core.go(lambda p=p: producer(p))
-    pygo_core.go(closer)
+        runloom_c.go(lambda p=p: producer(p))
+    runloom_c.go(closer)
     for c in range(2):
-        pygo_core.go(lambda c=c: consumer(c))
-    pygo_core.run()
+        runloom_c.go(lambda c=c: consumer(c))
+    runloom_c.run()
     sim.record(("recv_set", tuple(sorted(received))))
     # conservation: every produced value received exactly once (any order)
     assert sorted(received) == sorted(sent), \
@@ -179,8 +179,8 @@ def scenario_buffered_mpmc(sim):
 
 
 def scenario_select_race(sim):
-    a = pygo_core.Chan()
-    b = pygo_core.Chan()
+    a = runloom_c.Chan()
+    b = runloom_c.Chan()
     got = []
     n = 4
 
@@ -203,7 +203,7 @@ def scenario_select_race(sim):
             if open_b:
                 cases.append(("recv", b))
             # cases are (op, chan[, value]); r[0]=fired index, r[1]=(val, ok)
-            r = pygo_core.select(cases)
+            r = runloom_c.select(cases)
             chan = cases[r[0]][1]
             val, ok = r[1]
             if ok:
@@ -213,10 +213,10 @@ def scenario_select_race(sim):
             else:
                 open_b = False
 
-    pygo_core.go(lambda: sender(a, 0))
-    pygo_core.go(lambda: sender(b, 1000))
-    pygo_core.go(selector)
-    pygo_core.run()
+    runloom_c.go(lambda: sender(a, 0))
+    runloom_c.go(lambda: sender(b, 1000))
+    runloom_c.go(selector)
+    runloom_c.run()
     sim.record(("select_set", tuple(sorted(got))))
     want = sorted([i for i in range(n)] + [1000 + i for i in range(n)])
     assert sorted(got) == want, "select lost/dup: got {0}".format(sorted(got))
@@ -236,7 +236,7 @@ def scenario_BUG_strict_order(sim):
     a buffered channel with TWO consumers -- which legitimately reorders.  So
     some interleavings violate it.  The harness must catch that and reproduce
     it from the seed; that is the proof its invariant checks have teeth."""
-    ch = pygo_core.Chan(2)
+    ch = runloom_c.Chan(2)
     n = 6
     received = []
 
@@ -254,10 +254,10 @@ def scenario_BUG_strict_order(sim):
                 break
             received.append(v)
 
-    pygo_core.go(prod)
-    pygo_core.go(lambda: cons(0))
-    pygo_core.go(lambda: cons(1))
-    pygo_core.run()
+    runloom_c.go(prod)
+    runloom_c.go(lambda: cons(0))
+    runloom_c.go(lambda: cons(1))
+    runloom_c.run()
     sim.record(("order", tuple(received)))
     assert received == list(range(n)), "non-FIFO arrival: {0}".format(received)
 
@@ -279,7 +279,7 @@ def run_once(scenario, seed, strategy, horizon):
     err = None
     try:
         scenario(sim)
-        if pygo_core._self_check(0) != 0:
+        if runloom_c._self_check(0) != 0:
             err = "self_check != 0"
     except Exception as exc:  # invariant violation or crash
         err = "{0}: {1}".format(type(exc).__name__, exc)

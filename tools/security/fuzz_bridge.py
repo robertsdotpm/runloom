@@ -1,17 +1,17 @@
-"""Adversarial network fuzzer for the pygo.aio bridge (S6).
+"""Adversarial network fuzzer for the runloom.aio bridge (S6).
 
 All the existing verification targets the scheduler core (channels, deque,
 park/wake, netpoll). The aio bridge's *transport lifecycle* -- the actual
 remote attack surface -- is where the delicate invariants live (connection
 teardown, the per-connection io goroutine, RST/half-close handling,
-backpressure, accept-loop close). This drives a real pygo.aio echo server
+backpressure, accept-loop close). This drives a real runloom.aio echo server
 with raw-socket chaos and watches for a crash, a hang (lost wakeup), an ASan
 error, or a goroutine/fd leak.
 
 Run it under ASan (so a transport memory bug or a stack-pool use-after-recycle
 -- S5 -- is caught too):
 
-    PYGO_EXTRA_CFLAGS="-fsanitize=address -g" PYGO_EXTRA_LDFLAGS=-fsanitize=address \\
+    RUNLOOM_EXTRA_CFLAGS="-fsanitize=address -g" RUNLOOM_EXTRA_LDFLAGS=-fsanitize=address \\
         python setup.py build_ext --inplace --force
     LD_PRELOAD=$(gcc -print-file-name=libasan.so) ASAN_OPTIONS=detect_leaks=0 \\
     PYTHON_GIL=0 PYTHONPATH=src python tools/security/fuzz_bridge.py --iters 4000
@@ -27,10 +27,10 @@ import time
 HOST = "127.0.0.1"
 
 
-# ---- server subprocess: a real pygo.aio echo server -------------------------
+# ---- server subprocess: a real runloom.aio echo server -------------------------
 def run_server(port_file):
     import asyncio
-    import pygo.aio as paio
+    import runloom.aio as paio
 
     async def handle(reader, writer):
         try:
@@ -168,7 +168,7 @@ def main():
             print("SERVER FAILED TO START"); return 1
         time.sleep(0.1)
     port = int(open(pf).read())
-    print("fuzzing pygo.aio echo server on port %d, %d iters" % (port, args.iters))
+    print("fuzzing runloom.aio echo server on port %d, %d iters" % (port, args.iters))
 
     if not clean_echo(port):
         print("FAIL: server not responsive at start"); proc.kill(); return 1

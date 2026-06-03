@@ -11,22 +11,22 @@ runs each; numbers below are representative.
 | asyncio | 13.8K | 71ms | 108ms | 114ms | 114ms |
 | gevent (greenlet+libev) | 13.2K | 74ms | 135ms | 170ms | 183ms |
 | uvloop (libuv) | 24.2K | 32ms | 54ms | 410ms | 8.0s |
-| **pygo (1 hub)** | **21.4K** | 45ms | 67ms | 81ms | 84ms |
+| **runloom (1 hub)** | **21.4K** | 45ms | 67ms | 81ms | 84ms |
 
-- pygo ≈ **1.6× gevent** (its direct blocking-style analog) and **1.55×
+- runloom ≈ **1.6× gevent** (its direct blocking-style analog) and **1.55×
   asyncio**, with the **tightest tail** of the four.
-- uvloop's peak is ~12% above pygo, but its tail blew out (p99.9 410ms, max
+- uvloop's peak is ~12% above runloom, but its tail blew out (p99.9 410ms, max
   ~8s, hundreds of requests in the overflow bucket) under this connection
-  load; pygo stayed bounded (max 84ms).
+  load; runloom stayed bounded (max 84ms).
 
-## Multi-core, free-threaded 3.13t (pygo's native runtime)
+## Multi-core, free-threaded 3.13t (runloom's native runtime)
 
 | runtime | rps | p50 | p99.9 | max | cores |
 | --- | ---: | ---: | ---: | ---: | --- |
 | asyncio | 11.3K | 87ms | 114ms | 116ms | 1 |
 | uvloop | 19.9K | 41ms | 409ms | 8.2s | 1 |
-| pygo (1 hub) | 19.6K | 49ms | 86ms | 88ms | 1 |
-| **pygo (8 hub)** | **121K** | **7.9ms** | 16ms | 42ms | 8 |
+| runloom (1 hub) | 19.6K | 49ms | 86ms | 88ms | 1 |
+| **runloom (8 hub)** | **121K** | **7.9ms** | 16ms | 42ms | 8 |
 
-pygo **scales ~6.2× to 8 hubs** — multi-core that gevent/uvloop/asyncio
+runloom **scales ~6.2× to 8 hubs** — multi-core that gevent/uvloop/asyncio
 cannot do (single loop, single core by design). gevent can't run here at all.

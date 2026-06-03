@@ -3,10 +3,10 @@ bench_mn
 bench_mn-asan
 bench_mn-tsan
 bench_mn-ubsan
-bench_server_pygo
-bench_server_pygo-asan
-bench_server_pygo-tsan
-bench_server_pygo-ubsan
+bench_server_runloom
+bench_server_runloom-asan
+bench_server_runloom-tsan
+bench_server_runloom-ubsan
 # Compiled standalone test binaries (built from test_*.c by the run_*.sh
 # scripts; the .c / .sh sources stay tracked).
 test_stall_steal

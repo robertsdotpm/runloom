@@ -1,6 +1,6 @@
 /*
  * cldeque_cbmc.c -- CBMC bounded-model-checking harness for the REAL
- * Chase-Lev deque.  This compiles the unmodified src/pygo_core/cldeque.c
+ * Chase-Lev deque.  This compiles the unmodified src/runloom_c/cldeque.c
  * alongside this file, so we verify the production C -- the actual index
  * arithmetic and the actual __atomic_* memory orderings -- not a model.
  *
@@ -26,7 +26,7 @@
 
 #define NITEMS 3
 
-static pygo_cldeque_t D;
+static runloom_cldeque_t D;
 static _Bool claimed[NITEMS + 1];   /* 1-indexed item tags                 */
 static int   consumed;              /* items popped or stolen              */
 
@@ -50,12 +50,12 @@ static void *owner(void *arg)
     (void)arg;
     /* A schedule that repeatedly hits the 1-element boundary, where the
      * owner's pop CAS races the thieves' steal CAS on `top`. */
-    (void)pygo_cldeque_push(&D, (void *)1L);
-    (void)pygo_cldeque_push(&D, (void *)2L);
-    x = pygo_cldeque_pop(&D);   if (x) claim(x);
-    (void)pygo_cldeque_push(&D, (void *)3L);
-    x = pygo_cldeque_pop(&D);   if (x) claim(x);
-    x = pygo_cldeque_pop(&D);   if (x) claim(x);
+    (void)runloom_cldeque_push(&D, (void *)1L);
+    (void)runloom_cldeque_push(&D, (void *)2L);
+    x = runloom_cldeque_pop(&D);   if (x) claim(x);
+    (void)runloom_cldeque_push(&D, (void *)3L);
+    x = runloom_cldeque_pop(&D);   if (x) claim(x);
+    x = runloom_cldeque_pop(&D);   if (x) claim(x);
     return (void *)0;
 }
 
@@ -63,8 +63,8 @@ static void *thief(void *arg)
 {
     void *x;
     (void)arg;
-    x = pygo_cldeque_steal(&D);  if (x) claim(x);
-    x = pygo_cldeque_steal(&D);  if (x) claim(x);
+    x = runloom_cldeque_steal(&D);  if (x) claim(x);
+    x = runloom_cldeque_steal(&D);  if (x) claim(x);
     return (void *)0;
 }
 
@@ -73,7 +73,7 @@ int main(void)
     pthread_t o, t1, t2;
     long size;
 
-    pygo_cldeque_init(&D);
+    runloom_cldeque_init(&D);
 
     pthread_create(&o,  (void *)0, owner, (void *)0);
     pthread_create(&t1, (void *)0, thief, (void *)0);
@@ -84,7 +84,7 @@ int main(void)
 
     /* Quiescent: every pushed item is either consumed exactly once or
      * still logically in the deque -- nothing vanished, nothing doubled. */
-    size = pygo_cldeque_size(&D);
+    size = runloom_cldeque_size(&D);
     __CPROVER_assert(consumed + size == 3, "no work-item lost");
     __CPROVER_assert(size >= 0, "deque size non-negative");
     return 0;

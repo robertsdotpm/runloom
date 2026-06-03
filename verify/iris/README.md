@@ -32,7 +32,7 @@ transition; two winners would hold two copies of an exclusive token.
 ## `rc11/CommitPublish.v` (Stage 3 — weak memory, DONE)
 Stages 1–2 are **sequentially-consistent** Iris (HeapLang has an SC memory
 model). **Stage 3** is the genuine weak-memory tier: `rc11/CommitPublish.v`
-proves pygo's commit-publish release/acquire pattern correct under **RC11** in
+proves runloom's commit-publish release/acquire pattern correct under **RC11** in
 **iRC11 / gpfsl** — a running concurrent program whose parker reads the
 published readiness (42), never the stale 0, under the relaxed-memory model.
 It is machine-checked (`rc11/run_rc11.sh` → PASS), not an `Admitted` stub. See

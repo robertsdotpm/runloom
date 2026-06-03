@@ -12,7 +12,7 @@ OUT=/tmp/hunt_capture.txt
 
 echo "hunt: N=$N H=$H M=$M seeds=[$START..$((START+COUNT-1))] watchdog=${WD}s"
 for ((s=START; s<START+COUNT; s++)); do
-    PYGO_DEBUG_DIAG=ring,gstate "$BIN" "$N" "$H" "$M" "$s" >/tmp/hunt_run.txt 2>&1 &
+    RUNLOOM_DEBUG_DIAG=ring,gstate "$BIN" "$N" "$H" "$M" "$s" >/tmp/hunt_run.txt 2>&1 &
     pid=$!
     # Poll for completion.
     done=0
@@ -40,8 +40,8 @@ for ((s=START; s<START+COUNT; s++)); do
     timeout 40 sudo -n gdb -p "$pid" -batch \
         -ex 'set pagination off' \
         -ex 'thread apply all bt' \
-        -ex 'call (void)pygo_diag_dump(2)' \
-        -ex 'call (int)pygo_self_check(1)' 2>&1 | tee -a "$OUT"
+        -ex 'call (void)runloom_diag_dump(2)' \
+        -ex 'call (int)runloom_self_check(1)' 2>&1 | tee -a "$OUT"
     echo "=== leaving pid=$pid ALIVE for manual gdb (kill it when done) ===" | tee -a "$OUT"
     echo "PID=$pid" > /tmp/hunt_pid.txt
     exit 42

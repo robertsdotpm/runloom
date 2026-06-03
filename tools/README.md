@@ -1,6 +1,6 @@
-# pygo concurrency tooling
+# runloom concurrency tooling
 
-Tools for exposing deadlocks, hangs, races, and crashes in the pygo
+Tools for exposing deadlocks, hangs, races, and crashes in the runloom
 runtime -- and the harnesses that drive them hard.
 
 | tool | purpose |
@@ -8,7 +8,7 @@ runtime -- and the harnesses that drive them hard.
 | [`watchdog.py`](watchdog.py) | turn a silent hang into a full state dump (thread stacks + scheduler self-check + stats + lifecycle event ring) |
 | [`mn_stress.py`](mn_stress.py) | seeded randomized fuzzer for the M:N (multi-hub) scheduler: cross-hub channels + select under real parallelism, with conservation checks |
 | [`run_sanitizers.sh`](run_sanitizers.sh) | build + run the standalone C harnesses (test_cldeque) under ASan / TSan / UBSan |
-| [`run_sanitizers_ext.sh`](run_sanitizers_ext.sh) | build the **whole pygo_core ext** under TSan + run it under the free-threaded interpreter (mn_stress + lincheck + pytest subset) -- hunts races in the real scheduler/chan/select/netpoll, not just the deque |
+| [`run_sanitizers_ext.sh`](run_sanitizers_ext.sh) | build the **whole runloom_c ext** under TSan + run it under the free-threaded interpreter (mn_stress + lincheck + pytest subset) -- hunts races in the real scheduler/chan/select/netpoll, not just the deque |
 | [`build_tsan_cpython.sh`](build_tsan_cpython.sh) | recipe for a fully TSan-instrumented free-threaded CPython (gold standard; currently blocked on an upstream getpath quirk -- see header) |
 
 See also `../verify/` (formal proofs), `lincheck/` (linearizability +
@@ -26,12 +26,12 @@ from tools.watchdog import run_guarded, watchdog, hang_dump
 # test-friendly: runs fn() in a worker thread, raises TimeoutError (after
 # dumping full state) if it overruns -- works even when the scheduler is
 # wedged, because the wedge is on the worker, not the caller.
-run_guarded(lambda: pygo_core.run(), seconds=5.0, label="my workload")
+run_guarded(lambda: runloom_c.run(), seconds=5.0, label="my workload")
 
 # context-manager form (good when the block DOES return, just slowly;
 # pass abort=True to os.abort() for a core dump on a true wedge):
 with watchdog(5.0, label="ping-pong", abort=False):
-    pygo_core.run()
+    runloom_c.run()
 
 # or dump state on demand from anywhere:
 hang_dump(label="manual")
@@ -40,12 +40,12 @@ hang_dump(label="manual")
 On a breach it dumps: every OS thread's stack (`faulthandler`), the
 scheduler/netpoll `_self_check`, `stats()`, and the per-thread lifecycle
 event ring (`_diag_dump`). For the ring to contain anything, start with
-`PYGO_DEBUG=ring,gstate` (read once at import).
+`RUNLOOM_DEBUG=ring,gstate` (read once at import).
 
 Self-demo (catches a deliberate non-terminating scheduler):
 
 ```sh
-PYGO_DEBUG=ring,gstate python tools/watchdog.py
+RUNLOOM_DEBUG=ring,gstate python tools/watchdog.py
 ```
 
 ## mn_stress.py -- M:N scheduler fuzzer
@@ -80,7 +80,7 @@ TSan abort otherwise).
 ## run_sanitizers_ext.sh -- the whole runtime under TSan
 
 `run_sanitizers.sh` only covers the standalone deque. This builds the
-**entire `pygo_core` extension** with `-fsanitize=thread` and runs it
+**entire `runloom_c` extension** with `-fsanitize=thread` and runs it
 under a stock free-threaded CPython (force-loading `libtsan`), driven by
 `mn_stress` + the lincheck recorder (plain **and** select consumers) + a
 chan/sched pytest subset -- so TSan watches the real scheduler, channel,
@@ -91,10 +91,10 @@ tools/run_sanitizers_ext.sh            # ~30s
 tools/run_sanitizers_ext.sh 1000       # heavier mn_stress soak
 ```
 
-TSan instruments only the ext (exactly pygo's C, incl. inlined `Py_INCREF`);
+TSan instruments only the ext (exactly runloom's C, incl. inlined `Py_INCREF`);
 the few races inside the uninstrumented interpreter are filtered by
 [`tsan_suppressions.txt`](tsan_suppressions.txt) (CPython-only -- never
-suppress a `src/pygo_core/*` frame). The fully-instrumented interpreter
+suppress a `src/runloom_c/*` frame). The fully-instrumented interpreter
 ([`build_tsan_cpython.sh`](build_tsan_cpython.sh)) is the gold standard but
 is currently blocked upstream; this preload path needs no patched CPython.
 
@@ -157,17 +157,17 @@ guarded by `tests/test_mn.py::test_select_close_conservation`.
 32 KB default coroutine stack -- caught cleanly by the PROT_NONE guard
 page (a clean fault, not silent corruption).
 
-`pygo.runtime` already had `prewarm_stdlib()` (resolves that import on the
-main thread's big stack before any goroutine runs) and `pygo.runtime.run`
-/ the aio loop called it -- but `pygo.sync.run`/`pygo.sync.go` did not.
-Fixed by calling `prewarm_stdlib()` from the `pygo.sync` entry points
+`runloom.runtime` already had `prewarm_stdlib()` (resolves that import on the
+main thread's big stack before any goroutine runs) and `runloom.runtime.run`
+/ the aio loop called it -- but `runloom.sync.run`/`runloom.sync.go` did not.
+Fixed by calling `prewarm_stdlib()` from the `runloom.sync` entry points
 too, guarded so it only warms on the main thread (never on a goroutine's
 small stack). `tests/test_sync.py` now passes 7/7.
 
 ### C. Whole-runtime TSan: five scheduler/chan/netpoll data races -- FIXED
 
 `run_sanitizers_ext.sh` (the ext under ThreadSanitizer, driven by mn_stress +
-lincheck + a pytest subset) flagged five data races in pygo's own C on its
+lincheck + a pytest subset) flagged five data races in runloom's own C on its
 first runs.  All were real C11 races -- benign on x86 (aligned word
 read/write) but UB, and several stale-prone on weak memory models.  Each was
 the lone plain access among siblings that already used the correct atomic, and
@@ -177,7 +177,7 @@ each is now fixed to match:
    `waiter_claim` claims it with an ACQ_REL CAS (the dominant report, 77/80
    under mn_stress).  Acquire-load both reads; pairs with the claimer's release
    so the captured value is visible.
-2. **`mn_sched.c` preempt hook** -- `pygo_preempt_prev_eval` (function pointer
+2. **`mn_sched.c` preempt hook** -- `runloom_preempt_prev_eval` (function pointer
    on the per-frame eval hot path) read plain vs plain install/uninstall writes.
    Release-store on install/uninstall, acquire-load on the eval path.
 3. **`mn_sched.c` sysmon** -- `h->resume_g` read plain by the watchdog vs the
@@ -186,9 +186,9 @@ each is now fixed to match:
 4. **`mn_sched.c` starve_bound** -- lazy-static env flag read plain vs an atomic
    first-touch store.  Loaded once into a loop-invariant local via
    `__atomic_load_n`, matching all seven sibling flags.
-5. **`netpoll.c` pump** -- `pygo_pump_wake_fd` lazy-init eventfd checked/set
+5. **`netpoll.c` pump** -- `runloom_pump_wake_fd` lazy-init eventfd checked/set
    plain (also double-created on concurrent first-arm).  Double-checked locking
-   under `pygo_pool.lock` + release-store; readers acquire-load.
+   under `runloom_pool.lock` + release-store; readers acquire-load.
 
 The select/deque/park-wake *algorithms* remain machine-proven in `verify/`;
 these were missing-atomic-qualifier bugs in the shipped C that only a sanitizer

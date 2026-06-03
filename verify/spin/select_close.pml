@@ -1,9 +1,9 @@
 /*
- * select_close.pml -- Promela model of pygo's select() Phase-2 park path
+ * select_close.pml -- Promela model of runloom's select() Phase-2 park path
  * racing a concurrent send + close on the selected channel.
  *
  * This models the protocol where the 2026-05-31 select()+close() bug arc
- * lived (chan.c pygo_chan_select Phase 2 + pygo_chan_close); the abstract
+ * lived (chan.c runloom_chan_select Phase 2 + runloom_chan_close); the abstract
  * fired_case CAS alone is in select_claim.pml, but the FOUR real bugs were
  * in how the selecting goroutine installs / aborts / parks / wakes and how
  * close delivers.  A faithful model of that protocol catches all four.

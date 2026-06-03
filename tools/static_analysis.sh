@@ -36,10 +36,10 @@ case "$(uname -s)" in
     *BSD)   OSDEF="-D_BSD_SOURCE" ;;
 esac
 CFLAGS="-std=gnu11 -fno-strict-aliasing -O2 -Wall -Wextra -Wno-unused-parameter \
-        $OSDEF -I$PYINC -Isrc/pygo_core"
+        $OSDEF -I$PYINC -Isrc/runloom_c"
 
 # Core translation units; skip the Windows-only IOCP backend and the .S asm.
-FILES=$(ls src/pygo_core/*.c | grep -v netpoll_iocp)
+FILES=$(ls src/runloom_c/*.c | grep -v netpoll_iocp)
 
 rc=0
 
@@ -70,13 +70,13 @@ fi
 if command -v cppcheck >/dev/null 2>&1; then
     echo "== cppcheck (advisory; high FP rate on Python C-API + atomic builtins) =="
     cppcheck --enable=warning,performance,portability --inconclusive \
-        --std=c11 --language=c --platform=unix64 -I"$PYINC" -Isrc/pygo_core \
+        --std=c11 --language=c --platform=unix64 -I"$PYINC" -Isrc/runloom_c \
         --suppress=internalAstError --suppress=missingInclude \
         --suppress=missingIncludeSystem --suppress=unmatchedSuppression \
         --suppress="*:$PYINC/*" \
         `# confirmed false positives (see comments in the named files):` \
-        --suppress=shiftTooManyBits:src/pygo_core/coro.c \
-        --suppress=nullPointerRedundantCheck:src/pygo_core/pygo_sched.c \
+        --suppress=shiftTooManyBits:src/runloom_c/coro.c \
+        --suppress=nullPointerRedundantCheck:src/runloom_c/runloom_sched.c \
         --quiet $FILES 2>&1 | sed 's/^/  /' | head -50
     echo "  (advisory -- triage manually; not gating)"
 else

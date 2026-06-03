@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# check_lin.sh -- linearizability pipeline for pygo channels.
+# check_lin.sh -- linearizability pipeline for runloom channels.
 #
 #   1. record a concurrent send/recv/close history from a real M:N run
 #      -- twice: once with plain recv consumers, once with select() consumers;
@@ -24,9 +24,9 @@ if [ -z "${PYTHON:-}" ]; then
 fi
 export PYTHON PYTHON_GIL=0
 RM="$(command -v safe-rm || echo rm)"
-HIST="$(mktemp /tmp/pygo_hist.XXXX.json)"
-HSEL="$(mktemp /tmp/pygo_hist_sel.XXXX.json)"
-BAD="$(mktemp /tmp/pygo_hist_bad.XXXX.json)"
+HIST="$(mktemp /tmp/runloom_hist.XXXX.json)"
+HSEL="$(mktemp /tmp/runloom_hist_sel.XXXX.json)"
+BAD="$(mktemp /tmp/runloom_hist_bad.XXXX.json)"
 rc=0
 
 echo "== 1a. record concurrent history -- plain recv consumers (real M:N) =="

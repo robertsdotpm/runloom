@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""covering.py -- t-way combinatorial interaction testing of pygo's config matrix.
+"""covering.py -- t-way combinatorial interaction testing of runloom's config matrix.
 
-pygo has a combinatorial explosion of runtime knobs -- netpoll backend x
+runloom has a combinatorial explosion of runtime knobs -- netpoll backend x
 P-handoff x preemption x sysmon x woken-stealing x ... -- and bugs love to hide
 in *interactions* between them, not in any single setting. Testing the full
 cartesian product is wasteful; testing one-factor-at-a-time misses interactions
@@ -44,25 +44,25 @@ ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
 # These are the *supported* knobs -- the gating matrix exercises interactions
 # among features that are meant to work, so it stays a clean regression gate.
 FACTORS = [
-    ("PYGO_NETPOLL", ["epoll", "select", "io_uring"]),
-    ("PYGO_HANDOFF", ["0", "1"]),
-    ("PYGO_PREEMPT", ["0", "1"]),
-    ("PYGO_SYSMON",  ["0", "1"]),
+    ("RUNLOOM_NETPOLL", ["epoll", "select", "io_uring"]),
+    ("RUNLOOM_HANDOFF", ["0", "1"]),
+    ("RUNLOOM_PREEMPT", ["0", "1"]),
+    ("RUNLOOM_SYSMON",  ["0", "1"]),
 ]
 
 # Experimental/known-unstable knobs, added only with --include-experimental.
 # On the very FIRST run of this tool, the pairwise array over the supported set
-# plus PYGO_STEAL_WOKEN immediately isolated a single-factor SIGSEGV: every
+# plus RUNLOOM_STEAL_WOKEN immediately isolated a single-factor SIGSEGV: every
 # failing config had STEAL_WOKEN=1, every passing one had =0.  That matches the
 # documented-dead "Fix B" cross-hub-migration path (mn_sched.c:317 "default
 # OFF, experimental"): the eval loop bakes the origin hub's tstate into the
-# stackful-coro frame, so migrating a live frame crashes.  PYGO_PER_G_TSTATE is
+# stackful-coro frame, so migrating a live frame crashes.  RUNLOOM_PER_G_TSTATE is
 # the sibling experimental migration mode with the same STW-protocol hazard.
 # They are excluded from the gate but available here for anyone working on them
 # -- a good demonstration of why interaction testing earns its keep.
 EXPERIMENTAL_FACTORS = [
-    ("PYGO_STEAL_WOKEN",  ["0", "1"]),
-    ("PYGO_PER_G_TSTATE", ["0", "1"]),
+    ("RUNLOOM_STEAL_WOKEN",  ["0", "1"]),
+    ("RUNLOOM_PER_G_TSTATE", ["0", "1"]),
 ]
 
 

@@ -2,7 +2,7 @@
 # fuzz_mn.sh -- seeded fuzz driver for tests_c/bench_mn.
 #
 # Sweeps seeds 1..MAX looking for a failure.  On failure, re-runs with
-# PYGO_DEBUG_DIAG=all so the lifecycle event ring is dumped to stderr
+# RUNLOOM_DEBUG_DIAG=all so the lifecycle event ring is dumped to stderr
 # alongside self_check output.  The reproducing seed is printed last so
 # subsequent debugging runs can be deterministic.
 #
@@ -30,8 +30,8 @@ for s in $(seq 1 "$MAX"); do
         cat /tmp/fuzz_mn.$$.out
         rm -f /tmp/fuzz_mn.$$.out
         echo
-        echo "[fuzz] reproducing with PYGO_DEBUG_DIAG=all ..."
-        PYGO_DEBUG_DIAG=all timeout 20 "$BENCH" "$N" "$H" "$M" "$s"
+        echo "[fuzz] reproducing with RUNLOOM_DEBUG_DIAG=all ..."
+        RUNLOOM_DEBUG_DIAG=all timeout 20 "$BENCH" "$N" "$H" "$M" "$s"
         echo "[fuzz] reproducer:  $BENCH $N $H $M $s"
         exit 1
     fi

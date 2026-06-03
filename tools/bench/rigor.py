@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""rigor.py -- statistically rigorous microbenchmark harness for pygo.
+"""rigor.py -- statistically rigorous microbenchmark harness for runloom.
 
 Most "is it faster?" numbers are wrong for two well-documented reasons, and
 this harness defends against both:
@@ -22,7 +22,7 @@ Design:
     ``--inner`` timed repetitions (inner, with ``--warmup`` discarded).  Each
     process contributes ONE point (its inner median); the reported CI is the
     nonparametric bootstrap over those independent points.
-  * Layout-bias guard: every child gets a random-length ``PYGO_BENCH_PAD``
+  * Layout-bias guard: every child gets a random-length ``RUNLOOM_BENCH_PAD``
     env var, so layout varies run-to-run and the CI *absorbs* layout
     sensitivity instead of hiding it.  ``--pin`` disables it (for a tightly
     controlled A/B on one machine state).
@@ -96,13 +96,13 @@ def cv(points):
 def run_child(name, inner, warmup, scale):
     if SRC not in sys.path:
         sys.path.insert(0, SRC)
-    import pygo_core
+    import runloom_c
     import workloads
 
     fn, unit = workloads.WORKLOADS[name]
     # Pre-warm the stack pool so we measure steady state, not first mmap.
-    if hasattr(pygo_core, "warmup"):
-        pygo_core.warmup(200000)
+    if hasattr(runloom_c, "warmup"):
+        runloom_c.warmup(200000)
 
     kw = {} if scale is None else {"scale": scale}
     for _ in range(warmup):
@@ -122,7 +122,7 @@ def run_child(name, inner, warmup, scale):
     print(json.dumps({
         "workload": name,
         "unit": unit,
-        "backend": pygo_core.backend() if hasattr(pygo_core, "backend") else "?",
+        "backend": runloom_c.backend() if hasattr(runloom_c, "backend") else "?",
         "inner_rates": rates,        # ops/sec per inner repetition
         "inner_median": statistics.median(rates),
     }))
@@ -138,7 +138,7 @@ def child_env(pin):
     if not pin:
         # Mytkowicz layout-bias guard: perturb the environment size so the
         # stack/heap/code layout differs between independent runs.
-        env["PYGO_BENCH_PAD"] = "x" * random.randint(0, 4096)
+        env["RUNLOOM_BENCH_PAD"] = "x" * random.randint(0, 4096)
     return env
 
 

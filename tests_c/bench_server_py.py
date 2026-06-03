@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""bench_server_py.py -- Python-handler twin of tests_c/bench_server_pygo.
+"""bench_server_py.py -- Python-handler twin of tests_c/bench_server_runloom.
 
 Same topology as the C bench (one accept-loop goroutine, N per-connection
 echo handlers, N clients, all on the M:N scheduler), but every goroutine
 runs a real Python `def` instead of a C function.  That matters for one
 reason: a goroutine only allocates a CPython `_PyStackChunk` (the 4 KB
 datastack chunk) once it executes Python *bytecode*.  The pure-C bench
-(pygo_mn_go_c) never does, so it allocates zero chunks and can't measure
+(runloom_mn_go_c) never does, so it allocates zero chunks and can't measure
 the datastack RSS that T2.3 targets.  This bench does, and -- because a
 handler parks inside wait_fd while a live Python frame sits on its chunk
 -- it models the N=1M steady state ("95% parked, each holding a chunk").
@@ -19,7 +19,7 @@ Python cost (frame + datastack chunk + socket/closure objects):
 
 Args: N [H] [M]   (N connections, H hubs, M round-trips per connection)
 
-Defences mirrored from bench_mn.c / bench_server_pygo.c so high N is
+Defences mirrored from bench_mn.c / bench_server_runloom.c so high N is
 sustainable on one host:
   * RST close on the client (SO_LINGER{1,0}) -> no TIME_WAIT.
   * Round-robin source IP across 127.0.0.2..251 -> independent ~28K
@@ -34,12 +34,12 @@ import sys
 import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
-import pygo_core
+import runloom_c
 
 PAYLOAD = b"hellopyg"
 PAYLOAD_LEN = len(PAYLOAD)
 
-# wait_fd direction masks (match PYGO_NETPOLL_READ / WRITE).
+# wait_fd direction masks (match RUNLOOM_NETPOLL_READ / WRITE).
 READ = 1
 WRITE = 2
 
@@ -95,7 +95,7 @@ def _rst_close(sock):
         pass
     if fd >= 0:
         try:
-            pygo_core.netpoll_unregister(fd)
+            runloom_c.netpoll_unregister(fd)
         except (AttributeError, OSError):
             pass
     try:
@@ -111,7 +111,7 @@ def _recv_exactly(sock, fd, n):
         try:
             chunk = sock.recv(n - len(out))
         except (BlockingIOError, InterruptedError):
-            pygo_core.wait_fd(fd, READ)
+            runloom_c.wait_fd(fd, READ)
             continue
         except OSError:
             return b""          # peer RST / error
@@ -128,7 +128,7 @@ def _send_all(sock, fd, data):
         try:
             sent += sock.send(view[sent:])
         except (BlockingIOError, InterruptedError):
-            pygo_core.wait_fd(fd, WRITE)
+            runloom_c.wait_fd(fd, WRITE)
         except OSError:
             return False
     return True
@@ -153,7 +153,7 @@ def echo_handler(conn):
             pass
         if fd2 >= 0:
             try:
-                pygo_core.netpoll_unregister(fd2)
+                runloom_c.netpoll_unregister(fd2)
             except (AttributeError, OSError):
                 pass
         try:
@@ -170,7 +170,7 @@ def accept_loop():
         try:
             conn, _addr = listen_sock.accept()
         except (BlockingIOError, InterruptedError):
-            pygo_core.wait_fd(lfd, READ)
+            runloom_c.wait_fd(lfd, READ)
             continue
         except OSError:
             break
@@ -182,11 +182,11 @@ def accept_loop():
             # Clear any stale registration on a reused fd number before the
             # handler arms it (the registration-cache gotcha).
             try:
-                pygo_core.netpoll_unregister(cfd)
+                runloom_c.netpoll_unregister(cfd)
             except (AttributeError, OSError):
                 pass
             accepted += 1
-            pygo_core.mn_go(lambda c=conn: echo_handler(c))
+            runloom_c.mn_go(lambda c=conn: echo_handler(c))
             if accepted >= N:
                 break
             try:
@@ -197,7 +197,7 @@ def accept_loop():
                 accepted = N
                 break
     try:
-        pygo_core.netpoll_unregister(lfd)
+        runloom_c.netpoll_unregister(lfd)
     except (AttributeError, OSError):
         pass
 
@@ -217,7 +217,7 @@ def _client_body(idx):
     try:
         s.connect((HOST, PORT))
     except BlockingIOError:
-        pygo_core.wait_fd(fd, WRITE)
+        runloom_c.wait_fd(fd, WRITE)
         err = s.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
         if err != 0:
             _rst_close(s)
@@ -239,7 +239,7 @@ def _client_body(idx):
         # holding a stack.  The server handler is parked on recv waiting
         # for the close that comes after the idle window.
         ready.append(1)
-        pygo_core.sched_sleep(IDLE_S)
+        runloom_c.sched_sleep(IDLE_S)
     _rst_close(s)
     return True
 
@@ -254,10 +254,10 @@ def sampler():
     global idle_rss_kib
     # Wait for all connections to reach the idle phase.
     while len(ready) < N:
-        pygo_core.sched_sleep(0.01)
+        runloom_c.sched_sleep(0.01)
     # Let the scheduler quiesce (any in-flight parks complete / madvise
     # runs at park time) before sampling.
-    pygo_core.sched_sleep(min(0.5, IDLE_S * 0.4))
+    runloom_c.sched_sleep(min(0.5, IDLE_S * 0.4))
     idle_rss_kib = _cur_rss_kib()
 
 
@@ -296,22 +296,22 @@ def main(argv):
     listen_sock.setblocking(False)
     PORT = listen_sock.getsockname()[1]
 
-    if pygo_core.mn_init(H) < 0:
+    if runloom_c.mn_init(H) < 0:
         sys.stderr.write("mn_init failed\n")
         return 2
 
     t0 = time.monotonic()
-    pygo_core.mn_go(accept_loop)
+    runloom_c.mn_go(accept_loop)
     if IDLE_S > 0.0:
-        pygo_core.mn_go(sampler)
+        runloom_c.mn_go(sampler)
     for i in range(N):
-        pygo_core.mn_go(lambda i=i: client(i))
-    completed = pygo_core.mn_run()
+        runloom_c.mn_go(lambda i=i: client(i))
+    completed = runloom_c.mn_run()
     dt = time.monotonic() - t0
 
     peak = _peak_rss_kib()
     maps = _maps_count()
-    pygo_core.mn_fini()
+    runloom_c.mn_fini()
     listen_sock.close()
 
     done = sum(1 for r in results if r is True)
@@ -330,7 +330,7 @@ def main(argv):
     if done != N:
         sys.stderr.write("FAIL: %d/%d completed\n" % (done, N))
         try:
-            pygo_core._self_check(1)
+            runloom_c._self_check(1)
         except Exception:
             pass
         return 1

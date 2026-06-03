@@ -1,8 +1,8 @@
 /*
- * iouring_waitcommit.c -- GenMC oracle for pygo's io_uring SINGLE-op park/wake
- * commit handshake (src/pygo_core/io_uring.c: the `op->wait` word shared by
- * pygo_iouring_do's hub park path and pygo_iouring_drain's SINGLE-op case; the
- * recv/send per-hub-ring path pygo_iouring_ring_do / pygo_iouring_ring_drain is
+ * iouring_waitcommit.c -- GenMC oracle for runloom's io_uring SINGLE-op park/wake
+ * commit handshake (src/runloom_c/io_uring.c: the `op->wait` word shared by
+ * runloom_iouring_do's hub park path and runloom_iouring_drain's SINGLE-op case; the
+ * recv/send per-hub-ring path runloom_iouring_ring_do / runloom_iouring_ring_drain is
  * byte-identical), in REAL C (pthreads + C11 atomics) under GenMC's RC11
  * weak-memory model.
  *
@@ -16,7 +16,7 @@
  * of blocking the OS thread; a CONCURRENT drainer (the idle-hub netpoll pump
  * that drains the shared ring) completes the op and must wake the parker.  The
  * op's CQE is claimed by exactly one drainer upstream (the cq_head CAS in
- * pygo_iouring_drain), so this is ONE submitter vs ONE drainer.  Without a
+ * runloom_iouring_drain), so this is ONE submitter vs ONE drainer.  Without a
  * handshake the inline drain -- which runs on the not-yet-parked submitter --
  * would wake a still-running g (Bug 1); and a wake racing the park must not be
  * lost (permanent hang) nor delivered to a g that didn't park (double-resume).
@@ -78,7 +78,7 @@ static atomic_int woke;        /* # wakes the drainer issued (mn_wake_g) */
 static atomic_int parked;      /* submitter committed to coro_yield */
 static atomic_int bad_result;  /* submitter read op->result == SENTINEL (stale) */
 
-/* ---- concurrent drainer: pygo_iouring_drain SINGLE-op case ---- */
+/* ---- concurrent drainer: runloom_iouring_drain SINGLE-op case ---- */
 static void *drainer(void *arg)
 {
     (void)arg;
@@ -96,7 +96,7 @@ static void *drainer(void *arg)
 #else
         memory_order_acq_rel);
 #endif
-    /* src: if (prev == WAIT_PARKED) pygo_mn_wake_g(op->hub, op->g); */
+    /* src: if (prev == WAIT_PARKED) runloom_mn_wake_g(op->hub, op->g); */
     if (prev == PARKED) {
         atomic_store_explicit(&woke, 1,
 #ifdef BUG_WOKE_RELAXED
@@ -108,7 +108,7 @@ static void *drainer(void *arg)
     return 0;
 }
 
-/* ---- submitter: pygo_iouring_do hub park path (inline drain already ran with
+/* ---- submitter: runloom_iouring_do hub park path (inline drain already ran with
  * wait==INFLIGHT, i.e. our op was not completed inline -- the interesting race
  * is the CONCURRENT drainer completing it while we decide to park). ---- */
 static void *submitter(void *arg)
@@ -138,7 +138,7 @@ static void *submitter(void *arg)
 #else
                 memory_order_acquire)) {
 #endif
-            did_park = 1;   /* committed: pygo_sched_park_current(); coro_yield */
+            did_park = 1;   /* committed: runloom_sched_park_current(); coro_yield */
         }
         /* else prev==DONE: a drainer completed us; do NOT park. */
 #endif

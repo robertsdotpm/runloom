@@ -1,12 +1,12 @@
 /*
  * hub_submit.pml -- Promela model of the DEFAULT M:N wake path on Linux
- * free-threaded 3.13t (per-hub-tstate; PYGO_PER_G_TSTATE and
- * PYGO_STEAL_WOKEN both OFF, so pygo_mn_wake_g routes through
- * pygo_mn_hub_submit, NOT the global-runq wake_state machine modelled in
+ * free-threaded 3.13t (per-hub-tstate; RUNLOOM_PER_G_TSTATE and
+ * RUNLOOM_STEAL_WOKEN both OFF, so runloom_mn_wake_g routes through
+ * runloom_mn_hub_submit, NOT the global-runq wake_state machine modelled in
  * wake_state.pml).
  *
- * Models src/pygo_core/mn_sched.c:
- *   pygo_mn_hub_submit  -- CAS g->in_sub_queue 0->1; only the winner links
+ * Models src/runloom_c/mn_sched.c:
+ *   runloom_mn_hub_submit  -- CAS g->in_sub_queue 0->1; only the winner links
  *                          g into the hub's MPSC submission list.
  *   hub_main            -- pops g, clears in_sub_queue just before the
  *                          resume, and SKIPS a g whose coro is already
@@ -38,7 +38,7 @@ int resumes      = 0;     /* times the hub resumed g's coro           */
 bit resumed_done = 0;     /* hub resumed an already-done g (the bug)   */
 int wakers_done  = 0;
 
-/* pygo_mn_hub_submit: dedup via CAS, then link. */
+/* runloom_mn_hub_submit: dedup via CAS, then link. */
 inline submit() {
     atomic {
 #ifdef BUG_NO_DEDUP

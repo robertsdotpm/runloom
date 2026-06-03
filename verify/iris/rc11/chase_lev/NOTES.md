@@ -264,10 +264,10 @@ The precise wall for the take/steal proof in iRC11:
 ### Definition of done — the portable invariant (DONE: `verify/cbmc/cldeque_disjoint.c`)
 
 INV_race ports to a CBMC monitor on the **real C deque** (the zero-cost
-`PYGO_CLDEQUE_VERIFY` ghost hooks in `cldeque.c`):
+`RUNLOOM_CLDEQUE_VERIFY` ghost hooks in `cldeque.c`):
 
 - ghost `owner_of[i] ∈ {OWNER, TAKEN}`; `push` → OWNER; each claim → TAKEN.
-- per-claim disjointness + TAKEN-once: `pygo_cl_claim(i)` asserts
+- per-claim disjointness + TAKEN-once: `runloom_cl_claim(i)` asserts
   `owner_of[i]==OWNER` then sets TAKEN and asserts `taken[i]==1`. Catches ANY
   double-claim (two thieves, or thief+owner). **CBMC: verified on `cldeque.c`.**
 - boundary disjointness at the fenced read: `if (t<b) assert owner_of[b]==OWNER`
@@ -294,7 +294,7 @@ CBMC monitor adds the SC-ordering-dependent boundary check on the real code.
 
 ## 8. Gate 2 — production diff & bug-check (the finding most wanted)
 
-Diffed the GenMC models against the shipped `src/pygo_core/cldeque.c` line by
+Diffed the GenMC models against the shipped `src/runloom_c/cldeque.c` line by
 line, and drove the **real cldeque.c** under GenMC verbatim
 (`verify/genmc/chase_lev_real.c`, CAP=4, 2-elt pop + 2 steals): **No errors, 29
 executions.** Verdict: **no live bug — production does NOT skimp.**
@@ -322,8 +322,8 @@ executions.** Verdict: **no live bug — production does NOT skimp.**
    equivalent to the model's relaxed-store + SC-fence + acquire-load. The
    `steal` load-load ordering is an **explicit `SEQ_CST` fence** (`:65`). So the
    `-DBUG_NO_FENCE` duplication is **not** reachable in the shipped code.
-2. **Resize finding is N/A to pygo.** `cldeque.c` is fixed-cap circular
-   (`PYGO_CLDEQUE_CAP`, `& MASK`; `push` returns -1 when full). It never grows
+2. **Resize finding is N/A to runloom.** `cldeque.c` is fixed-cap circular
+   (`RUNLOOM_CLDEQUE_CAP`, `& MASK`; `push` returns -1 when full). It never grows
    (header: *"growable if needed later"*). The rel/acq-on-array-pointer race
    (`chase_lev_resize.c -DBUG_RLX_ARR`) applies only to the growable variant — a
    **live constraint to honour IF/when growth is added**, not a current bug.
@@ -356,7 +356,7 @@ ingredient gpfsl does not export:
    GPS_Reader top t' ∗ ⌜t ≤ t'⌝` where `t'` is a lower bound certified across the
   fence — i.e. an SC-fence variant of `GPS_iSP_SWWriter_latest` spanning the
   *other* protocol. This is iRC11 metatheory (gpfsl/orc11 `psc` reasoning), a
-  candidate to raise with the gpfsl authors, **not** pygo work.
+  candidate to raise with the gpfsl authors, **not** runloom work.
 
 ## Files
 
@@ -366,7 +366,7 @@ ingredient gpfsl does not export:
   `-DBUG_NO_FENCE`).
 - `../../genmc/chase_lev2.c` — two-element fence-necessity (+ `-DBUG_NO_FENCE`).
 - `../../genmc/chase_lev_resize.c` — grow/copy/switch (+ `-DBUG_RLX_ARR`).
-- `../../genmc/chase_lev_real.c` — drives the REAL `src/pygo_core/cldeque.c`
+- `../../genmc/chase_lev_real.c` — drives the REAL `src/runloom_c/cldeque.c`
   verbatim under GenMC (Gate 2). Clean, 29 executions.
 - `../../genmc/run_chase_lev.sh` — runs all 8 GenMC checks (8/0).
 - `../../genmc/PERF_OBSERVATIONS.md` — over-synchronizations / fence-removal

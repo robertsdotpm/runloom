@@ -1,6 +1,6 @@
----------------------------- MODULE PygoSched ----------------------------
+---------------------------- MODULE RunloomSched ----------------------------
 (***************************************************************************)
-(* A system-level TLA+ model of pygo's M:N scheduler, composing the wake/  *)
+(* A system-level TLA+ model of runloom's M:N scheduler, composing the wake/  *)
 (* park protocol with the multi-hub dispatcher.                            *)
 (*                                                                         *)
 (* The Spin models verify each primitive (wake_state, park_safe,           *)

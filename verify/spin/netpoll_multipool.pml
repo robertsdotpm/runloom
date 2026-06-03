@@ -1,5 +1,5 @@
 /*
- * netpoll_multipool.pml -- Promela model of pygo_pump_dispatch_event's
+ * netpoll_multipool.pml -- Promela model of runloom_pump_dispatch_event's
  * MULTI-POOL walk and its two-level lock hierarchy (netpoll.c:1977-2023).
  *
  * Per-hub parker pools mean a goroutine parked on hub H links into pool[H].
@@ -11,7 +11,7 @@
  *       unlock p.           // each pool lock is dropped before the next
  *
  * wake_g routes to the parker's HOME hub and takes that hub's sub_lock
- * (pygo_mn_hub_submit, mn_sched.c:1273) -- WHILE still holding the pool lock.
+ * (runloom_mn_hub_submit, mn_sched.c:1273) -- WHILE still holding the pool lock.
  * So there are two nested levels, and a strict order the code documents
  * (netpoll.c:1972-1976):
  *
@@ -19,7 +19,7 @@
  *     at most ONE pool lock held at a time  (dropped before the next pool)
  *
  * Confirmed against the source: the only takers of BOTH locks are
- * dispatch_event and pygo_pump_drain_expired, both pool->sub; every sub_lock
+ * dispatch_event and runloom_pump_drain_expired, both pool->sub; every sub_lock
  * region (hub_submit / the hub-drain at mn_sched.c:651) takes the sub lock
  * alone and never a pool lock.
  *
@@ -70,7 +70,7 @@ proctype pump()
     ACQ(poolL1);              /* walk pool 1 */
     if
     :: linked1 ->
-        atomic {              /* pygo_pump_claim */
+        atomic {              /* runloom_pump_claim */
             prior = commit;
             if :: commit != WOKEN -> commit = WOKEN;
                :: else            -> skip;

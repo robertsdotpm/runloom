@@ -1,8 +1,8 @@
 /*
  * parked_safe.pml -- Promela model of the race-safe park_safe/wake_safe
- * handshake (pygo_sched_park_safe / pygo_sched_wake_safe in
- * src/pygo_core/pygo_sched.c).  This is the lost-wake guard used by
- * pygo.aio's PygoTask and the blocking-offload pool: a goroutine parks
+ * handshake (runloom_sched_park_safe / runloom_sched_wake_safe in
+ * src/runloom_c/runloom_sched.c).  This is the lost-wake guard used by
+ * runloom.aio's RunloomTask and the blocking-offload pool: a goroutine parks
  * on the single-thread scheduler while a wake may arrive concurrently
  * from another OS thread.
  *

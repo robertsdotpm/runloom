@@ -1,5 +1,5 @@
 """Single-fault-injection sweep: fail each Nth allocation/syscall in turn and
-classify how pygo's cleanup path reacted.
+classify how runloom's cleanup path reacted.
 
 For N in 1..MAX, run workload.py under faultinj.so with FAULTINJ_NTH=N and
 classify the outcome:
@@ -11,10 +11,10 @@ classify the outcome:
   HANG      timed out -- a lost-wake / stranded-goroutine BUG on the error path.
 
 CRASH/HANG are the findings.  Default targets are the low-frequency,
-pygo-specific syscalls (epoll_ctl/eventfd/timerfd/mmap) where the signal is
+runloom-specific syscalls (epoll_ctl/eventfd/timerfd/mmap) where the signal is
 cleanest; malloc/calloc/realloc are available but noisier (CPython itself
 churns millions of allocations and may Py_FatalError on an early failure,
-which is a CPython limitation, not a pygo bug).
+which is a CPython limitation, not a runloom bug).
 
 Usage:  tools/fault_sweep.py [targets] [maxN]
         tools/fault_sweep.py epoll_ctl,eventfd 40

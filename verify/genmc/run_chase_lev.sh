@@ -42,10 +42,10 @@ want_bug   chase_lev2.c "duplication" "-DBUG_NO_FENCE"
 want_clean chase_lev_resize.c ""
 want_bug   chase_lev_resize.c "data race on new buffer" "-DBUG_RLX_ARR"
 
-# --- the ACTUAL production deque (src/pygo_core/cldeque.c), driven verbatim ---
+# --- the ACTUAL production deque (src/runloom_c/cldeque.c), driven verbatim ---
 # Locate the repo from this script so the sweep works in any checkout/worktree.
 ROOT="$(cd "$HERE/../.." && pwd)"
-SRC="${PYGO_SRC:-$ROOT/src/pygo_core}"
+SRC="${RUNLOOM_SRC:-$ROOT/src/runloom_c}"
 if [ -f "$SRC/cldeque.c" ]; then
   ok "chase_lev_real.c (REAL cldeque.c, 2elt pop+2steal)"
   if "$G" -- -I"$SRC" chase_lev_real.c 2>&1 | grep -q "No errors were detected"; then

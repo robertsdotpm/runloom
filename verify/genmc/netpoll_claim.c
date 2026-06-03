@@ -1,6 +1,6 @@
 /*
  * netpoll_claim.c -- GenMC model of the netpoll commit-claim race in
- * src/pygo_core/netpoll.c, in REAL C (pthreads + C11 atomics), verified under
+ * src/runloom_c/netpoll.c, in REAL C (pthreads + C11 atomics), verified under
  * GenMC's RC11 weak memory model.  Where the Spin model (netpoll_deadline.pml)
  * proves the algorithm has no bad SC interleaving, GenMC explores every RC11
  * execution of the actual atomic ops + the pool->lock mutex -- so it also
@@ -8,8 +8,8 @@
  * interleaving.
  *
  * THE PROTOCOL.  A goroutine parks: it CASes commit ARMED->PARKED (acq_rel).
- * Concurrently up to two claimers (pygo_pump_dispatch_event with R_MASK and
- * pygo_netpoll_cancel_g with R_CANCEL -- the timeout sweep is identical)
+ * Concurrently up to two claimers (runloom_pump_dispatch_event with R_MASK and
+ * runloom_netpoll_cancel_g with R_CANCEL -- the timeout sweep is identical)
  * each, under pool->lock: claim commit ->WOKEN (the loser sees WOKEN and does
  * nothing), publish *ready_out, and -- if they claimed a PARKED g -- re-queue
  * it (woken=1).  The parking g, on a committed park, resumes only after being
@@ -55,7 +55,7 @@ static pthread_mutex_t pool_lock;
 #define VALUE_OK(r, w) \
     (((w) == FD && (r) == R_MASK) || ((w) == CANCEL && (r) == R_CANCEL))
 
-/* A claimer: pygo_pump_claim under pool->lock, publish, re-queue if PARKED. */
+/* A claimer: runloom_pump_claim under pool->lock, publish, re-queue if PARKED. */
 static void claim(int who, int val)
 {
     pthread_mutex_lock(&pool_lock);
@@ -82,7 +82,7 @@ static void claim(int who, int val)
 static void *fd_claimer(void *_)     { (void)_; claim(FD, R_MASK);     return 0; }
 static void *cancel_claimer(void *_) { (void)_; claim(CANCEL, R_CANCEL); return 0; }
 
-/* The parking goroutine: pygo_netpoll_wait_fd's commit + abort/resume. */
+/* The parking goroutine: runloom_netpoll_wait_fd's commit + abort/resume. */
 static void *parker(void *_)
 {
     (void)_;

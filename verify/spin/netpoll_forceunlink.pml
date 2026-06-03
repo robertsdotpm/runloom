@@ -1,15 +1,15 @@
 /*
  * netpoll_forceunlink.pml -- Promela model of the parker-release lifetime in
- * src/pygo_core/netpoll.c: pygo_netpoll_force_unlink_g_parker (the g-completion
+ * src/runloom_c/netpoll.c: runloom_netpoll_force_unlink_g_parker (the g-completion
  * safety net) racing the pump for the same parker.  This is the "exactly-once
  * pool_release" question.
  *
  * THE SETUP.  A parker `p` lives on the parking g's coroutine stack and is
- * tracked by g->netpoll_parker (the "token").  pygo_parker_unlink (under
+ * tracked by g->netpoll_parker (the "token").  runloom_parker_unlink (under
  * pool->lock) clears that token whenever it actually removes p from the pool
  * (netpoll.c:605-606).  Three sites touch p:
  *
- *   - pump (pygo_pump_dispatch_event / drain_expired): under pool->lock,
+ *   - pump (runloom_pump_dispatch_event / drain_expired): under pool->lock,
  *     unlinks p (clearing the token) and -- if it claimed a PARKED g --
  *     re-queues it.  The pump NEVER releases p.  The woken g resumes in
  *     wait_fd and releases p itself (the release rides on the wake).
@@ -68,7 +68,7 @@ proctype pump()
     :: linked ->
         assert(!freed);            /* NO UAF: pump must not touch a freed parker */
         linked = 0;
-        token  = 0;                /* pygo_parker_unlink clears g->netpoll_parker */
+        token  = 0;                /* runloom_parker_unlink clears g->netpoll_parker */
         pump_unlinked = 1;
     :: else -> skip;               /* already unlinked (force_unlink beat us) */
     fi;
@@ -86,7 +86,7 @@ proctype pump()
     fi;
 }
 
-/* g-completion safety net: pygo_netpoll_force_unlink_g_parker. */
+/* g-completion safety net: runloom_netpoll_force_unlink_g_parker. */
 proctype force_unlink()
 {
     bit cheap;

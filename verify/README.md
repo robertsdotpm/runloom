@@ -1,12 +1,12 @@
-# pygo formal verification
+# runloom formal verification
 
-Machine-checked correctness for pygo's lock-free concurrency primitives.
+Machine-checked correctness for runloom's lock-free concurrency primitives.
 Four engines, used for what each is best at:
 
 | engine | what it checks | how |
 |--------|----------------|-----|
 | **Spin** | the *algorithms*, exhaustively, over **all** thread interleavings (sequentially-consistent memory) | hand-written Promela models in [`spin/`](spin/) |
-| **CBMC** | the **actual C source** of the deque, including the real `__atomic_*` memory orderings, over a bounded schedule | harness in [`cbmc/`](cbmc/) compiles `src/pygo_core/cldeque.c` *unmodified* |
+| **CBMC** | the **actual C source** of the deque, including the real `__atomic_*` memory orderings, over a bounded schedule | harness in [`cbmc/`](cbmc/) compiles `src/runloom_c/cldeque.c` *unmodified* |
 | **herd7** | the **C11/RC11 fence placement** on the netpoll commit / wake paths -- does the `memory_order` annotation hold on a *weak* hardware model? | litmus tests in [`litmus/`](litmus/) |
 | **GenMC** | the **real claim protocol as C** (pthreads + C11 atomics) under **RC11**, exploring every weak-memory execution | harness in [`genmc/`](genmc/) |
 
@@ -35,7 +35,7 @@ sudo apt-get install spin cbmc
 
 ### 1. Chase-Lev work-stealing deque -- `spin/cldeque.pml` + `cbmc/cldeque_cbmc.c`
 
-The run-queue under each M:N hub (`src/pygo_core/cldeque.c`). One owner
+The run-queue under each M:N hub (`src/runloom_c/cldeque.c`). One owner
 pushes/pops the bottom lock-free; thieves CAS the top. Famous for being
 *wrong* under weak memory in its original SPAA'05 form (see Lê, Pop,
 Cohen, Nardelli, PPoPP'13); `cldeque.c` uses the corrected seq-cst
@@ -50,14 +50,14 @@ the pop CAS races the steal CAS:
 * **No deadlock / size never negative.**
 
 CBMC checks the same on the **unmodified `cldeque.c`** (compiled at
-`-DPYGO_CLDEQUE_CAP=4` for a tractable SAT instance -- the logic is
+`-DRUNLOOM_CLDEQUE_CAP=4` for a tractable SAT instance -- the logic is
 capacity-independent; production stays 4096). All 5 assertions:
 `VERIFICATION SUCCESSFUL`.
 
 ### 2. Per-g `wake_state` machine -- `spin/wake_state.pml`
 
 The heart of the M:N scheduler: the 6-state CAS protocol documented on
-`struct pygo_g.wake_state` (`pygo_sched.h`). Its predecessor -- two
+`struct runloom_g.wake_state` (`runloom_sched.h`). Its predecessor -- two
 separate flags for "exactly-once wake" and "exclusive resume" -- raced
 into a re-push **livelock**; this model verifies the unified machine
 against concurrent wakers (any thread), hubs (pull/resume/release), and
@@ -75,9 +75,9 @@ has teeth. `run_verify.sh` runs this and asserts it *does* fail.
 
 ### 3. `park_safe`/`wake_safe` handshake -- `spin/parked_safe.pml`
 
-The race-safe single-thread park used by `pygo.aio`'s `PygoTask` and the
+The race-safe single-thread park used by `runloom.aio`'s `RunloomTask` and the
 blocking-offload pool, where a wake can arrive from another OS thread
-mid-park (`pygo_sched_park_safe` / `pygo_sched_wake_safe`). Models the
+mid-park (`runloom_sched_park_safe` / `runloom_sched_wake_safe`). Models the
 `wake_pending` counter + `parked_safe` CAS handoff verbatim:
 
 * **No lost wake** -- the parker never blocks forever at the yield while a
@@ -125,8 +125,8 @@ properties demonstrably have teeth.
 ### 6. Default M:N wake path -- `spin/hub_submit.pml`
 
 The wake path that actually runs by default on Linux free-threaded 3.13t:
-`PYGO_PER_G_TSTATE` and `PYGO_STEAL_WOKEN` are both off, so `pygo_mn_wake_g`
-routes through `pygo_mn_hub_submit` (the per-hub-tstate MPSC submission
+`RUNLOOM_PER_G_TSTATE` and `RUNLOOM_STEAL_WOKEN` are both off, so `runloom_mn_wake_g`
+routes through `runloom_mn_hub_submit` (the per-hub-tstate MPSC submission
 list), **not** the global-runq `wake_state` machine of #2. A parker can be
 `wake_g`'d more than once (a netpoll-pump unlink + a stale safety-unlink
 wake); two defenses keep that safe and are modelled here:
@@ -144,7 +144,7 @@ fails (resume-after-done).
 
 ### 7. Blocking-offload wake order -- `spin/blockpool.pml`
 
-The default `pygo.blocking` / DNS-offload path (`pygo_blockpool.c`): a
+The default `runloom.blocking` / DNS-offload path (`runloom_blockpool.c`): a
 goroutine offloads to a worker thread and parks; the single-thread drain
 blocks in `epoll_wait`, so an `inflight` counter keeps it alive while a job
 is outstanding. The worker must **re-queue the goroutine before
@@ -163,10 +163,10 @@ fails (the drain exits and strands the goroutine).
 
 The lost-wake guard for I/O parking (`netpoll.c`): the piece where the real
 lost-wake bugs have lived (EPOLLET edge-drop, and the residual "missing atomic
-park-commit"). It models Go's `netpollblockcommit`, adapted to pygo's re-queue
+park-commit"). It models Go's `netpollblockcommit`, adapted to runloom's re-queue
 model -- the `commit` field (`ARMED → {PARKED | WOKEN}`) shared between a
-goroutine parking on an fd (`pygo_netpoll_wait_fd`) and the pump that delivers
-readiness (`pygo_pump_dispatch_event` / `pygo_pump_claim`):
+goroutine parking on an fd (`runloom_netpoll_wait_fd`) and the pump that delivers
+readiness (`runloom_pump_dispatch_event` / `runloom_pump_claim`):
 
 * the parking g CASes `ARMED → PARKED`; on success it yields, on failure
   (`WOKEN`) a pump beat it to the parker, so it aborts the park and returns the
@@ -201,10 +201,10 @@ parker is linked (the g unlinked on its last wake and hasn't re-linked); a pump
 processing that delivery finds no parker and stashes it in the per-fd
 pending-wake bitmap. But the **bitmap alone does not close the window**: the
 pump can be preempted between "found no parker" and the lock-free
-`pygo_fd_pending_wake_set` (netpoll.c:2185-2195), letting the g link, consume
+`runloom_fd_pending_wake_set` (netpoll.c:2185-2195), letting the g link, consume
 the still-empty bitmap twice, commit, and park *before* the bit is set.
 
-What closes it is the documented T1.5 fix (`pygo_netpoll_register`,
+What closes it is the documented T1.5 fix (`runloom_netpoll_register`,
 netpoll.c:1158-1207): arm **LEVEL-triggered + `EPOLLONESHOT`, re-armed via
 `EPOLL_CTL_MOD` on every park, strictly after linking the parker** (link 1803,
 register 1845). `MOD` being level-triggered re-reports a still-ready fd,
@@ -229,10 +229,10 @@ re-arm.
 
 Per-hub parker pools: a g parked on hub H links into `pool[H]`. One epoll
 delivery is processed by one pump (`EPOLLONESHOT`) that doesn't know the owning
-hub, so `pygo_pump_dispatch_event` (netpoll.c:1977-2023) **walks every pool**,
+hub, so `runloom_pump_dispatch_event` (netpoll.c:1977-2023) **walks every pool**,
 dropping each pool lock before the next, and on a match claims + unlinks +
 `wake_g(parker->hub)` -- and `wake_g` takes the *home hub's* `sub_lock`
-(`pygo_mn_hub_submit`, mn_sched.c:1273) **while still holding the pool lock**.
+(`runloom_mn_hub_submit`, mn_sched.c:1273) **while still holding the pool lock**.
 That is a two-level hierarchy with a documented order (netpoll.c:1972-1976):
 
 ```
@@ -241,7 +241,7 @@ at most ONE pool lock held at a time (dropped before walking the next pool)
 ```
 
 Confirmed against the source: the only takers of *both* locks are
-`dispatch_event` and `pygo_pump_drain_expired`, both `pool→sub`; every
+`dispatch_event` and `runloom_pump_drain_expired`, both `pool→sub`; every
 `sub_lock` region (`hub_submit`, the hub-drain at mn_sched.c:651) takes the sub
 lock alone. Proven over **two pumps racing one delivery** whose parker lives in
 pool 1, plus a `sub_lock` contender (a hub draining its submission list):
@@ -262,24 +262,24 @@ sub 1 while the contender holds sub 1 waiting for pool 1.
 ### 11. io_uring multishot handle lifetime -- `spin/iouring_msclose.pml`
 
 The one genuinely io_uring-specific lifetime question (an audit finding, not a
-guessed property): `pygo_iouring_ms_recv` parks with the handle's `waiter_g`
+guessed property): `runloom_iouring_ms_recv` parks with the handle's `waiter_g`
 set and, on wake, **re-locks the handle** (io_uring.c:999); `on_cqe` on the
 closing CQE wakes that waiter and then frees the handle *outside* `h->lock`
 (io_uring.c:878-891), and `ms_close`'s `!armed` branch frees immediately
-(:1018-1032). `PygoTCPConn` holds no lock around `self->ms`/`self->closed`
-(pygo_tcp.c), so `recv` and `close` are unsynchronised.
+(:1018-1032). `RunloomTCPConn` holds no lock around `self->ms`/`self->closed`
+(runloom_tcp.c), so `recv` and `close` are unsynchronised.
 
 This is memory-safe **only under the single-owner convention**: a `TCPConn` is
 driven by one goroutine, so `close()` runs after `recv()` returns and no
 consumer is parked in `ms_recv` when the closing CQE frees the handle.
-(`PygoTCPConn` is a standalone primitive -- *not* used by `pygo.aio` -- and its
+(`RunloomTCPConn` is a standalone primitive -- *not* used by `runloom.aio` -- and its
 benches/tests are one-goroutine-per-conn.) The model proves **no use-after-free
 under that convention**: the consumer never re-locks the handle after it is
 freed (`assert(freed == 0)` at the re-lock).
 
 Negative control `-DBUG_CONCURRENT_CLOSE` lifts the convention (a second task
 closes the conn while the first is parked in `recv` -- a shared `TCPConn` under
-`PYGO_TCPCONN_IOURING=1` on M:N free-threaded) and Spin finds the UAF: the
+`RUNLOOM_TCPCONN_IOURING=1` on M:N free-threaded) and Spin finds the UAF: the
 closing CQE wakes the parked consumer *and* frees the handle, and the woken
 consumer re-locks freed memory. So the single-owner convention is load-bearing
 for memory safety; making `TCPConn` shareable would require refcounting the
@@ -287,15 +287,15 @@ handle or freeing it under coordination with a parked `recv`.
 
 ### 12. Phase C per-thread-scheduler wake routing -- `spin/cross_thread_wake.pml`
 
-pygo now runs **one scheduler per OS thread** (commit 4bef422); pygo.aio drives
+runloom now runs **one scheduler per OS thread** (commit 4bef422); runloom.aio drives
 each event loop on its own thread, and a goroutine records its owner sched at
 spawn (`g->owner`). When a **foreign thread** wakes it -- a `run_in_executor`
 pool worker, or an io_uring CQE resolving a future the owner awaits --
-`pygo_sched_wake_safe` must enqueue the g onto the **owner sched's** wake_list
+`runloom_sched_wake_safe` must enqueue the g onto the **owner sched's** wake_list
 (the list the owner thread drains), not the waker thread's:
 
 ```c
-pygo_sched_t *s = g->owner ? g->owner : pygo_sched_get();   /* route to owner */
+runloom_sched_t *s = g->owner ? g->owner : runloom_sched_get();   /* route to owner */
 ```
 
 This composes the verified `park_safe`/`wake_safe` handshake (§3, unchanged by
@@ -308,26 +308,26 @@ parked on the owner sched, woken by a foreign thread:
   the owner drain idle = a Spin invalid end state.
 
 Negative control `-DBUG_ROUTE_TO_WAKER` enqueues the woken g onto the *waker*
-thread's wake_list (the pre-Phase-C `pygo_sched_get()` behavior); the owner's
+thread's wake_list (the pre-Phase-C `runloom_sched_get()` behavior); the owner's
 drain never sees it and the foreign waker runs no drain loop, so Spin finds the
 lost wake -- exactly the concurrent-loop deadlock Phase C fixes.
 
 > **Phase 2 (done, merged):** routing **netpoll** fd completions to the
 > parker's owner sched (the multi-loop *socket* case) landed -- the pump may run
 > on a different thread than the parker's owner, so `dispatch_event` /
-> `drain_expired` wake via `p->g->owner` (`pygo_sched_wake` routes cross-thread),
+> `drain_expired` wake via `p->g->owner` (`runloom_sched_wake` routes cross-thread),
 > and `drain_parked` is scoped to the calling thread's gs. This model +
 > `netpoll_commit.pml` cover the wake decision underneath it.
 
 ### 13. netpoll multi-claimer wake race -- `spin/netpoll_deadline.pml`
 
 A parked goroutine can be woken by **three** different paths, each delivering a
-**different value**, each claiming via the *same* `pygo_pump_claim` commit CAS:
+**different value**, each claiming via the *same* `runloom_pump_claim` commit CAS:
 
-* `pygo_pump_dispatch_event` -- the fd became ready: `*ready_out = mask` (nonzero).
-* `pygo_pump_drain_expired` -- the deadline passed: `*ready_out = 0` (timeout).
-* `pygo_netpoll_cancel_g` -- `task.cancel()` hit a g blocked in `wait_fd` (no coro
-  await-point): `*ready_out = PYGO_NETPOLL_CANCELLED` (→ `CancelledError`).
+* `runloom_pump_dispatch_event` -- the fd became ready: `*ready_out = mask` (nonzero).
+* `runloom_pump_drain_expired` -- the deadline passed: `*ready_out = 0` (timeout).
+* `runloom_netpoll_cancel_g` -- `task.cancel()` hit a g blocked in `wait_fd` (no coro
+  await-point): `*ready_out = RUNLOOM_NETPOLL_CANCELLED` (→ `CancelledError`).
 
 All three serialise on `pool->lock` and gate the `ready_out` write behind the
 single commit-CAS claim (§8). The property here -- beyond the no-lost-wake /
@@ -355,11 +355,11 @@ twice -- both caught by Spin.
 
 The **exactly-once `pool_release`** question. A parker `p` lives on the parking
 g's coroutine stack and is tracked by `g->netpoll_parker` (the *token*).
-`pygo_parker_unlink` clears that token under `pool->lock` whenever it removes p
+`runloom_parker_unlink` clears that token under `pool->lock` whenever it removes p
 (netpoll.c:605-606). Three sites touch p: the **pump** unlinks it (clearing the
 token) and re-queues the g, but **never releases** -- the woken g resumes in
 `wait_fd` and releases p itself; **`wait_fd`** releases p on every exit *after*
-clearing the token; and **`pygo_netpoll_force_unlink_g_parker`** (the
+clearing the token; and **`runloom_netpoll_force_unlink_g_parker`** (the
 g-completion safety net) takes `pool->lock`, **re-reads the token under the
 lock** (netpoll.c:1421-1424: *"in case `g->netpoll_parker` was cleared by a
 concurrent unlink between the check above and the lock acquire"*), and
@@ -393,7 +393,7 @@ litmus tests probe exactly that, on the netpoll commit / wake paths, under the
 C11/RC11 axiomatic model:
 
 * **`commit_cas_then_publish` → reachable ("Sometimes").** A claimer
-  (`pygo_pump_dispatch_event` / `_drain_expired` / `pygo_netpoll_cancel_g`)
+  (`runloom_pump_dispatch_event` / `_drain_expired` / `runloom_netpoll_cancel_g`)
   CASes `commit`→`WOKEN` (`acq_rel`) and *then* stores `*ready_out`. If the
   aborting goroutine read `ready_out` relying only on its **acquire-load of
   `commit`** seeing `WOKEN`, it could read a **stale** value -- because the
@@ -408,7 +408,7 @@ C11/RC11 axiomatic model:
   **unreachable**. So the `pool->lock` round-trip is **load-bearing**, not the
   CAS ordering.
 * **`wakelist_mpsc` → forbidden ("Never").** The cross-thread wake
-  (`pygo_sched_wake` → owner's `wake_list` → drain) hands a g's state across OS
+  (`runloom_sched_wake` → owner's `wake_list` → drain) hands a g's state across OS
   threads under `wake_list_lock`; the release-unlock / acquire-lock pair makes
   the waker's writes visible to the owner's drain. No stale read.
 
@@ -458,8 +458,8 @@ here on the real protocol. Run with `genmc/run_genmc.sh` (needs `genmc`).
   (`netpoll_commit.pml`) and the arming discipline (`netpoll_rearm.pml`) -- but
   not all the surrounding machinery: the per-fd bucket / global-list link &
   unlink surgery, the deadline min-heap timeout sweep, and
-  `pygo_netpoll_force_unlink_g_parker` (the g-completion safety unlink) are not
-  modelled. The timeout sweep and cancel/drain use the *same* `pygo_pump_claim`
+  `runloom_netpoll_force_unlink_g_parker` (the g-completion safety unlink) are not
+  modelled. The timeout sweep and cancel/drain use the *same* `runloom_pump_claim`
   for the wake decision, so the exactly-once guarantee of #8 carries to them;
   the list surgery and force-unlink are lock-protected straight-line code
   (`pool->lock` serialises them against the pump) exercised by the netpoll
@@ -473,12 +473,12 @@ here on the real protocol. Run with `genmc/run_genmc.sh` (needs `genmc`).
   `pool->lock`-serialised straight-line code with no concurrency, exercised by
   the netpoll tests and `tools/mn_stress.py`.
 * **io_uring** is not modelled directly, by design: its single-op path
-  (`pygo_iouring_submit` / `pygo_iouring_drain`) is verified *by composition* --
-  the goroutine parks via `pygo_sched_park_safe` (covered by `parked_safe.pml`)
+  (`runloom_iouring_submit` / `runloom_iouring_drain`) is verified *by composition* --
+  the goroutine parks via `runloom_sched_park_safe` (covered by `parked_safe.pml`)
   and the drain **wakes the goroutine before decrementing `inflight_count`**
   (io_uring.c:620-625 wake, :640 decrement), the exact ordering `blockpool.pml`
   proves keeps the single-thread drain from exiting early. The one genuinely
-  io_uring-specific surface is **multishot** (`pygo_iouring_ms_*`): its handle
+  io_uring-specific surface is **multishot** (`runloom_iouring_ms_*`): its handle
   lifetime (the `on_cqe`/`ms_close` free vs a parked `ms_recv`) is now modelled
   by `iouring_msclose.pml` (§11) -- memory-safe under the single-owner
   convention, a use-after-free without it.

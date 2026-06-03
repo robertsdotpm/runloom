@@ -6,10 +6,10 @@
 set -u
 cd /home/x/projects/pygo
 exec > tests_c/rps.log 2>&1
-# args to bench_server_pygo: N H M   (M = round-trips per connection)
+# args to bench_server_runloom: N H M   (M = round-trips per connection)
 for cfg in "20000 8 200" "20000 16 200" "20000 32 200" "100000 16 100"; do
-    echo "### bench_server_pygo $cfg   (N H M; requests = N*M)"
-    timeout 300 sudo -n env PYGO_PER_G_TSTATE=0 tests_c/bench_server_pygo $cfg 2>&1
+    echo "### bench_server_runloom $cfg   (N H M; requests = N*M)"
+    timeout 300 sudo -n env RUNLOOM_PER_G_TSTATE=0 tests_c/bench_server_runloom $cfg 2>&1
     echo "---- rc=$? ----"
 done
 echo "=== rps_probe done $(date -Is) ==="

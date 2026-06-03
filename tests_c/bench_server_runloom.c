@@ -1,18 +1,18 @@
-/* bench_server_pygo.c -- pure-C M:N + netpoll bench with BOTH the
- * server AND the client side living inside pygo.
+/* bench_server_runloom.c -- pure-C M:N + netpoll bench with BOTH the
+ * server AND the client side living inside runloom.
  *
  * Built off bench_mn.c, but the pthread-per-connection echo server is
- * replaced by a pygo goroutine accept loop that spawns one g per
+ * replaced by a runloom goroutine accept loop that spawns one g per
  * accepted connection.  This is the headline measurement: how many
- * concurrent pygo coroutines can we hold up to without the
+ * concurrent runloom coroutines can we hold up to without the
  * pthread-per-conn ceiling pinning us first?
  *
  * Build:
- *   make -C tests_c bench_server_pygo
+ *   make -C tests_c bench_server_runloom
  *
  * Run:
  *   ulimit -n 1048576
- *   tests_c/bench_server_pygo 65536 8 5   # N=65536 H=8 hubs M=5 round-trips
+ *   tests_c/bench_server_runloom 65536 8 5   # N=65536 H=8 hubs M=5 round-trips
  */
 
 #define _GNU_SOURCE
@@ -33,10 +33,10 @@
 #include <sys/resource.h>
 #include <arpa/inet.h>
 
-#include "../src/pygo_core/pygo_sched.h"
-#include "../src/pygo_core/mn_sched.h"
-#include "../src/pygo_core/netpoll.h"
-#include "../src/pygo_core/pygo_diag.h"
+#include "../src/runloom_c/runloom_sched.h"
+#include "../src/runloom_c/mn_sched.h"
+#include "../src/runloom_c/netpoll.h"
+#include "../src/runloom_c/runloom_diag.h"
 
 #define PAYLOAD     "hellopyg"
 #define PAYLOAD_LEN 8
@@ -95,7 +95,7 @@ static int send_all_nb(int fd, const void *buf, size_t len)
         if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
             return -1;
         }
-        if (pygo_netpoll_wait_fd(fd, PYGO_NETPOLL_WRITE, -1LL) < 0) return -1;
+        if (runloom_netpoll_wait_fd(fd, RUNLOOM_NETPOLL_WRITE, -1LL) < 0) return -1;
     }
     return 0;
 }
@@ -111,7 +111,7 @@ static int recv_some_nb(int fd, void *buf, size_t len, ssize_t *out_n)
         if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
             return -1;
         }
-        if (pygo_netpoll_wait_fd(fd, PYGO_NETPOLL_READ, -1LL) < 0) return -1;
+        if (runloom_netpoll_wait_fd(fd, RUNLOOM_NETPOLL_READ, -1LL) < 0) return -1;
     }
 }
 
@@ -126,7 +126,7 @@ static int recv_all_nb(int fd, void *buf, size_t len)
         if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
             return -1;
         }
-        if (pygo_netpoll_wait_fd(fd, PYGO_NETPOLL_READ, -1LL) < 0) return -1;
+        if (runloom_netpoll_wait_fd(fd, RUNLOOM_NETPOLL_READ, -1LL) < 0) return -1;
     }
     return 0;
 }
@@ -143,7 +143,7 @@ static void echo_conn_g(void *arg)
         if (recv_some_nb(fd, buf, sizeof(buf), &got) < 0) break;
         if (send_all_nb(fd, buf, got) < 0) break;
     }
-    pygo_netpoll_unregister(fd);
+    runloom_netpoll_unregister(fd);
     close(fd);
     __atomic_fetch_add(&g_echo_finished, 1, __ATOMIC_RELAXED);
 }
@@ -162,7 +162,7 @@ static void accept_g(void *arg)
          * under the 1M connect burst, we still re-drain the backlog every
          * 50 ms instead of stalling the whole tail.  Timeout returns 0
          * (not <0), so we just fall through to the accept-drain loop. */
-        if (pygo_netpoll_wait_fd(listen_fd, PYGO_NETPOLL_READ,
+        if (runloom_netpoll_wait_fd(listen_fd, RUNLOOM_NETPOLL_READ,
                                  50LL * 1000 * 1000) < 0) {
             fprintf(stderr, "accept_g: wait_fd failed: %s\n", strerror(errno));
             return;
@@ -182,10 +182,10 @@ static void accept_g(void *arg)
             /* IMPORTANT: clear the registration cache for the new fd
              * BEFORE we spawn the echo g.  If a previous connection
              * lived on this same fd number, the cached bit will fool
-             * pygo_netpoll_register into skipping epoll_ctl ADD. */
-            pygo_netpoll_unregister(conn);
+             * runloom_netpoll_register into skipping epoll_ctl ADD. */
+            runloom_netpoll_unregister(conn);
             long n = __atomic_add_fetch(&g_accepted, 1, __ATOMIC_RELAXED);
-            if (pygo_mn_go_c(echo_conn_g, (void *)(long)conn) < 0) {
+            if (runloom_mn_go_c(echo_conn_g, (void *)(long)conn) < 0) {
                 fprintf(stderr, "accept_g: mn_go_c failed at accepted=%ld\n", n);
                 close(conn);
                 return;
@@ -194,7 +194,7 @@ static void accept_g(void *arg)
         }
     }
 done:
-    pygo_netpoll_unregister(listen_fd);
+    runloom_netpoll_unregister(listen_fd);
     /* leave listen_fd open; main closes it after run() returns */
 }
 
@@ -226,13 +226,13 @@ static int connect_nonblock(int port)
     addr.sin_port = htons(port);
     int rc = connect(fd, (struct sockaddr *)&addr, sizeof(addr));
     if (rc < 0 && errno != EINPROGRESS) {
-        pygo_netpoll_unregister(fd);
+        runloom_netpoll_unregister(fd);
         close(fd);
         return -1;
     }
     if (rc < 0) {
-        if (pygo_netpoll_wait_fd(fd, PYGO_NETPOLL_WRITE, -1LL) < 0) {
-            pygo_netpoll_unregister(fd);
+        if (runloom_netpoll_wait_fd(fd, RUNLOOM_NETPOLL_WRITE, -1LL) < 0) {
+            runloom_netpoll_unregister(fd);
             close(fd);
             return -1;
         }
@@ -240,7 +240,7 @@ static int connect_nonblock(int port)
         socklen_t slen = sizeof(sockerr);
         if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &sockerr, &slen) < 0 ||
             sockerr != 0) {
-            pygo_netpoll_unregister(fd);
+            runloom_netpoll_unregister(fd);
             close(fd);
             return -1;
         }
@@ -263,7 +263,7 @@ static void client_g(void *arg)
     int fd = -1;
     for (int attempt = 0; fd < 0 && attempt < 4096; attempt++) {
         fd = connect_nonblock(g_port);
-        if (fd < 0) pygo_mn_yield_current();
+        if (fd < 0) runloom_mn_yield_current();
     }
     if (fd < 0) return;
     __atomic_fetch_add(&g_client_connected, 1, __ATOMIC_RELAXED);
@@ -273,7 +273,7 @@ static void client_g(void *arg)
         if (i == 0) __atomic_fetch_add(&g_client_sent_once, 1, __ATOMIC_RELAXED);
         if (recv_all_nb(fd, buf, PAYLOAD_LEN) < 0) break;
     }
-    pygo_netpoll_unregister(fd);
+    runloom_netpoll_unregister(fd);
     rst_close(fd);              /* RST close: no TIME_WAIT (see rst_close) */
     pthread_mutex_lock(&g_done_lock);
     g_done_count++;
@@ -363,14 +363,14 @@ int main(int argc, char **argv)
     Py_Initialize();
 
     /* Per Agent 3: 32 KB default stack size keeps the per-conn server gs
-     * cheap.  Must be set before pygo_mn_init so all hubs pick it up. */
-    pygo_sched_set_default_stack_size(32 * 1024);
+     * cheap.  Must be set before runloom_mn_init so all hubs pick it up. */
+    runloom_sched_set_default_stack_size(32 * 1024);
 
     int port = start_listener(65535);
     if (port < 0) return 2;
     g_port = port;
 
-    if (pygo_mn_init(H) < 0) {
+    if (runloom_mn_init(H) < 0) {
         fprintf(stderr, "mn_init failed\n");
         if (PyErr_Occurred()) PyErr_PrintEx(0);
         return 2;
@@ -379,20 +379,20 @@ int main(int argc, char **argv)
     double t0 = now_seconds();
 
     /* Spawn the accept goroutine first so it's ready to take connects. */
-    if (pygo_mn_go_c(accept_g, NULL) < 0) {
+    if (runloom_mn_go_c(accept_g, NULL) < 0) {
         fprintf(stderr, "spawn accept_g failed\n");
         return 2;
     }
     /* Then spawn the N client goroutines. */
     for (int i = 0; i < N; i++) {
-        if (pygo_mn_go_c(client_g, NULL) < 0) {
+        if (runloom_mn_go_c(client_g, NULL) < 0) {
             fprintf(stderr, "mn_go_c client failed at i=%d: %s\n",
                     i, strerror(errno));
             return 2;
         }
     }
     /* Wait for all N clients to complete by polling g_done_count rather
-     * than pygo_mn_run().  At very high N a tiny number of echo handlers
+     * than runloom_mn_run().  At very high N a tiny number of echo handlers
      * can stay parked in recv waiting for a peer RST whose readiness edge
      * was missed (a residual netpoll lost-wake at scale) -- that leaves
      * pending_global > 0 and hangs mn_run forever even though every
@@ -415,7 +415,7 @@ int main(int argc, char **argv)
     long peak = peak_rss_kib();
     long maps = maps_count();
 
-    /* No pygo_mn_fini(): it joins the hub threads, which won't exit while
+    /* No runloom_mn_fini(): it joins the hub threads, which won't exit while
      * a stray echo parker keeps pending_global > 0.  We _exit() below
      * after printing, abandoning the (harmless) leftover parkers. */
 
@@ -433,10 +433,10 @@ int main(int argc, char **argv)
     if (g_done_count != N) {
         fprintf(stderr, "FAIL: %ld/%d completed\n", g_done_count, N);
         fprintf(stderr, "---- self_check ----\n");
-        (void)pygo_self_check(1);
-        if (pygo_debug_flags & PYGO_DBG_RING) {
+        (void)runloom_self_check(1);
+        if (runloom_debug_flags & RUNLOOM_DBG_RING) {
             fprintf(stderr, "---- diag_dump ----\n");
-            pygo_diag_dump(2);
+            runloom_diag_dump(2);
         }
         fflush(stdout); fflush(stderr);
         _exit(1);

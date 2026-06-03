@@ -1,11 +1,11 @@
 /*
  * netpoll_commit.pml -- Promela model of the netpoll park/wake commit
- * protocol in src/pygo_core/netpoll.c (Go's netpollblockcommit, adapted to
- * pygo's re-queue model).  This is the lost-wake guard for I/O parking, the
+ * protocol in src/runloom_c/netpoll.c (Go's netpollblockcommit, adapted to
+ * runloom's re-queue model).  This is the lost-wake guard for I/O parking, the
  * piece where real lost-wake bugs have lived (EPOLLET edge-drop; the residual
  * "missing atomic park-commit" closed by the `commit` field).
  *
- * THE PROTOCOL (pygo_netpoll_wait_fd vs pygo_pump_dispatch_event):
+ * THE PROTOCOL (runloom_netpoll_wait_fd vs runloom_pump_dispatch_event):
  *
  *   commit: ARMED -> {PARKED | WOKEN}, set once, by a single CAS each.
  *
@@ -15,7 +15,7 @@
  *       recorded readiness but did NOT re-queue us, so abort the park and
  *       return the readiness directly.
  *
- *   Pump (pygo_pump_claim): CAS commit ->WOKEN, returning the prior state.
+ *   Pump (runloom_pump_claim): CAS commit ->WOKEN, returning the prior state.
  *     - prior WOKEN: someone already claimed it -- skip entirely (don't touch
  *       ready_out, don't unlink, don't re-queue).
  *     - prior ARMED: g hasn't parked; record readiness + unlink, do NOT
@@ -97,7 +97,7 @@ proctype pump()
 {
     byte prior;
     LOCK;                              /* dispatch_event holds pool->lock ... */
-    atomic {                           /* pygo_pump_claim: CAS commit->WOKEN  */
+    atomic {                           /* runloom_pump_claim: CAS commit->WOKEN  */
         prior = commit;
         if
         :: commit != WOKEN -> commit = WOKEN;

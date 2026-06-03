@@ -1,6 +1,6 @@
---------------------------- MODULE PygoMNControl ---------------------------
+--------------------------- MODULE RunloomMNControl ---------------------------
 (***************************************************************************)
-(* TLA+ model of pygo's CONTROLLED M:N scheduler (PYGO_MN_SEED, the        *)
+(* TLA+ model of runloom's CONTROLLED M:N scheduler (RUNLOOM_MN_SEED, the        *)
 (* tools/mn_controlled experiment): an execution "baton" serializes        *)
 (* goroutine execution across hubs, a seeded controller hands it off, and  *)
 (* a barrier rendezvous pins the requester set so the choice is a function *)

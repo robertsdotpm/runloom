@@ -2,13 +2,13 @@
 
 The high-value follow-up to single-hub PCT: control the scheduling of the
 **real M:N hubs** (work-stealing parallel OS threads) so the parallel races
-where pygo's hard bugs live become reproducible and seed-explorable.
+where runloom's hard bugs live become reproducible and seed-explorable.
 
-Runtime hook (`src/pygo_core/mn_sched_hub_resume_preempt.c.inc`,
-`pygo_mn_ctrl_*`): when `PYGO_MN_SEED` is set, goroutine execution segments
+Runtime hook (`src/runloom_c/mn_sched_hub_resume_preempt.c.inc`,
+`runloom_mn_ctrl_*`): when `RUNLOOM_MN_SEED` is set, goroutine execution segments
 across all hubs are serialized through one **execution baton** — a hub may run a
-goroutine (`pygo_coro_resume`) only while it holds the baton, gated in
-`pygo_hub_resume_begin/end`; a seeded controller hands the baton to the next
+goroutine (`runloom_coro_resume`) only while it holds the baton, gated in
+`runloom_hub_resume_begin/end`; a seeded controller hands the baton to the next
 hub. A waiting hub detaches its Python thread state (`PyEval_SaveThread`) so it
 sits at a GC safepoint (essential under free-threaded CPython). Handoff is forced
 off (its rescue thread resumes off-baton); preemption stays **on** (load-bearing
@@ -16,7 +16,7 @@ for liveness — see below). Off by default; zero cost when unset.
 
 ## Deterministic replay (the barrier-rendezvous)
 
-Same `PYGO_MN_SEED` ⇒ **identical execution**, run to run — verified by
+Same `RUNLOOM_MN_SEED` ⇒ **identical execution**, run to run — verified by
 `repro_probe.py` (single channel: 16/16 seeds identical, seed 1 identical over
 500/500 reps under heavy CPU load), `repro_select.py` (select over multiple
 channels + mid-run goroutine spawn: 10/10), and `repro_timer.py` (same-delay +
@@ -24,7 +24,7 @@ staggered `sched_sleep`: 10/10). Distinct seeds still explore distinct
 interleavings. The baton alone is *not* enough — it serializes who runs, but the
 requester set, the goroutine each hub holds, the preemption point, and timer
 firing all still raced OS timing. Six levers, gated together behind
-`PYGO_MN_BARRIER` (default on under a seed; `PYGO_MN_BARRIER=0` reverts to
+`RUNLOOM_MN_BARRIER` (default on under a seed; `RUNLOOM_MN_BARRIER=0` reverts to
 timing-dependent exploration for A/B):
 
 1. **Barrier-rendezvous census.** The controller grants the baton only once the
@@ -32,7 +32,7 @@ timing-dependent exploration for A/B):
    wanter (in `acquire`) or as idle (in `hub_main`'s no-work branch). The single
    seeded RNG draw per grant is then over the full set, so the handoff sequence
    is a function of the schedule, not of who happened to register first. This is
-   the `Barrier` constant in `verify/tla/PygoMNControl.tla` (`DeterministicGrant`
+   the `Barrier` constant in `verify/tla/RunloomMNControl.tla` (`DeterministicGrant`
    holds with it, fails without it).
 2. **Startup entry gate.** Hubs block at loop entry until `mn_run` arms the
    controller — *after* all pre-run `mn_go` placement. Without it the main thread
@@ -67,7 +67,7 @@ timing-dependent exploration for A/B):
    back-to-back `mn_go`s a segment finishes before yielding). In barrier mode the
    eval-frame wrapper ignores the wall-clock flag and instead yields the baton
    after a fixed COUNT of Python frame entries on the baton
-   (`PYGO_MN_PREEMPT_FRAMES`, default 4096) — a deterministic function of the
+   (`RUNLOOM_MN_PREEMPT_FRAMES`, default 4096) — a deterministic function of the
    goroutine's own execution. Cooperative goroutines park in far fewer frames, so
    they never trip it (natural, reproducible schedule); a CPU-bound goroutine that
    keeps calling functions hits the count and yields (liveness), at a *reproducible*
@@ -106,20 +106,20 @@ segments, lever 5) and `sched_sleep` timers (lever 6). The one genuinely
 out-of-reach source is *real network I/O* arrival timing: the wire decides when an
 fd is ready, so an open workload replays its scheduling decisions but not external
 arrival timing — the standard limit of this technique (CHESS, Coyote, rr-for-
-syscalls all draw the same line). (The `pygo.aio` event-loop timer path —
+syscalls all draw the same line). (The `runloom.aio` event-loop timer path —
 `call_at`/`call_later` — has its own clock and is not yet routed through the
 logical clock; the `sched_sleep` primitive is.)
 
 **Deadlock — FIXED (2026-06-03).** An earlier version *disabled* preemption; a
 goroutine that ran Python without yielding then held the baton forever and
 starved every other hub (gdb: a thread deep in the eval loop under
-`pygo_preempt_eval_frame`, baton free, all other hubs idle). Fix: **keep
+`runloom_preempt_eval_frame`, baton free, all other hubs idle). Fix: **keep
 preemption ON** — it yields a runaway goroutine at a bytecode boundary, releasing
 the baton. The TLA+ model's `Preempt=FALSE` control reproduces exactly this
 (`AllRun` liveness violated).
 
-**Off-path is regression-free.** Full isolated suite green with `PYGO_MN_SEED`
-unset (the controlled path is gated behind `pygo_mn_ctrl.enabled`); the only
+**Off-path is regression-free.** Full isolated suite green with `RUNLOOM_MN_SEED`
+unset (the controlled path is gated behind `runloom_mn_ctrl.enabled`); the only
 default-path change is one predictable-false branch.
 
 ## Demo / probe
@@ -132,11 +132,11 @@ PYTHON_GIL=0 ~/.pyenv/versions/3.13.13t/bin/python3 tools/mn_controlled/demo.py
 PYTHON_GIL=0 …/python3 tools/mn_controlled/repro_probe.py 12 8    # single channel
 PYTHON_GIL=0 …/python3 tools/mn_controlled/repro_select.py 10 8   # select + spawn
 PYTHON_GIL=0 …/python3 tools/mn_controlled/repro_timer.py 10 8    # sched_sleep timers
-PYGO_MN_BARRIER=0 … repro_probe.py 12 8      # A/B: reverts to nondeterministic
+RUNLOOM_MN_BARRIER=0 … repro_probe.py 12 8      # A/B: reverts to nondeterministic
 
 # tunables:
-PYGO_MN_PREEMPT_FRAMES=1024 …   # frame budget before a CPU-bound g yields the baton
-PYGO_MN_SEED=1 PYGO_MN_TRACE=/tmp/g.txt …   # grant trace: one hub-id per baton grant
+RUNLOOM_MN_PREEMPT_FRAMES=1024 …   # frame budget before a CPU-bound g yields the baton
+RUNLOOM_MN_SEED=1 RUNLOOM_MN_TRACE=/tmp/g.txt …   # grant trace: one hub-id per baton grant
 ```
 `mn_stress` (select + coordinator close) also runs clean under controlled mode —
 a randomized concurrency-testing mode on the real hubs.

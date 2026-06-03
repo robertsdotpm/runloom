@@ -4,7 +4,7 @@
  * non-yielding blocking C call (here: usleep) must not strand OTHER
  * goroutines whose work could run on an idle hub.
  *
- * Today even PYGO_PER_G_TSTATE=1 strands them: a woken g is submitted to
+ * Today even RUNLOOM_PER_G_TSTATE=1 strands them: a woken g is submitted to
  * its ORIGIN hub's owner-drained submission list, so if that hub never
  * loops (stuck in the C call) the woken g never reaches a stealable
  * deque -- no other hub can pick it up.
@@ -36,9 +36,9 @@
 #include <time.h>
 #include <sys/eventfd.h>
 
-#include "../src/pygo_core/pygo_sched.h"
-#include "../src/pygo_core/mn_sched.h"
-#include "../src/pygo_core/netpoll.h"
+#include "../src/runloom_c/runloom_sched.h"
+#include "../src/runloom_c/mn_sched.h"
+#include "../src/runloom_c/netpoll.h"
 
 #define N_WORKERS 64
 #define NHUBS      2
@@ -64,11 +64,11 @@ static void worker_fn(void *arg)
 {
     long i = (long)arg;
     __atomic_fetch_add(&parked_count, 1, __ATOMIC_RELAXED);
-    if (pygo_netpoll_wait_fd(w_efd[i], PYGO_NETPOLL_READ, -1LL) < 0) return;
+    if (runloom_netpoll_wait_fd(w_efd[i], RUNLOOM_NETPOLL_READ, -1LL) < 0) return;
     uint64_t v;
     (void)read(w_efd[i], &v, sizeof v);
     __atomic_store_n(&w_responded[i], 1, __ATOMIC_RELEASE);
-    pygo_netpoll_unregister(w_efd[i]);
+    runloom_netpoll_unregister(w_efd[i]);
 }
 
 /* Occupies its hub's OS thread with a non-yielding blocking C call once
@@ -86,7 +86,7 @@ static void staller_fn(void *arg)
 {
     (void)arg;
     __atomic_store_n(&staller_parked, 1, __ATOMIC_RELEASE);
-    if (pygo_netpoll_wait_fd(staller_efd, PYGO_NETPOLL_READ, -1LL) < 0) return;
+    if (runloom_netpoll_wait_fd(staller_efd, RUNLOOM_NETPOLL_READ, -1LL) < 0) return;
     uint64_t v;
     (void)read(staller_efd, &v, sizeof v);
     if (getenv("STALL_ALLOW_THREADS") != NULL) {
@@ -96,14 +96,14 @@ static void staller_fn(void *arg)
     } else {
         usleep(STALL_MS * 1000);         /* hub tstate stays ATTACHED */
     }
-    pygo_netpoll_unregister(staller_efd);
+    runloom_netpoll_unregister(staller_efd);
 }
 
 int main(void)
 {
     int i;
     Py_Initialize();
-    pygo_sched_set_default_stack_size(32 * 1024);
+    runloom_sched_set_default_stack_size(32 * 1024);
 
     for (i = 0; i < N_WORKERS; i++) {
         w_efd[i] = eventfd(0, EFD_NONBLOCK);
@@ -112,12 +112,12 @@ int main(void)
     staller_efd = eventfd(0, EFD_NONBLOCK);
     if (staller_efd < 0) { perror("eventfd staller"); return 2; }
 
-    if (pygo_mn_init(NHUBS) < 0) { fprintf(stderr, "mn_init failed\n"); return 2; }
+    if (runloom_mn_init(NHUBS) < 0) { fprintf(stderr, "mn_init failed\n"); return 2; }
 
     /* staller first (so it claims an origin hub), then the workers. */
-    if (pygo_mn_go_c(staller_fn, NULL) < 0) { fprintf(stderr, "go staller\n"); return 2; }
+    if (runloom_mn_go_c(staller_fn, NULL) < 0) { fprintf(stderr, "go staller\n"); return 2; }
     for (i = 0; i < N_WORKERS; i++) {
-        if (pygo_mn_go_c(worker_fn, (void *)(long)i) < 0) {
+        if (runloom_mn_go_c(worker_fn, (void *)(long)i) < 0) {
             fprintf(stderr, "go worker %d\n", i); return 2;
         }
     }
@@ -150,7 +150,7 @@ int main(void)
     for (i = 0; i < N_WORKERS; i++)
         if (__atomic_load_n(&w_responded[i], __ATOMIC_ACQUIRE)) responded++;
 
-    int per_g = pygo_get_per_g_tstate_mode();
+    int per_g = runloom_get_per_g_tstate_mode();
     printf("per_g_tstate=%d N=%d hubs=%d stall=%dms window=%dms responded=%ld/%d\n",
            per_g, N_WORKERS, NHUBS, STALL_MS, WINDOW_MS, responded, N_WORKERS);
     int pass = (responded == N_WORKERS);

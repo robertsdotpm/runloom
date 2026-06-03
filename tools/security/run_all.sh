@@ -1,5 +1,5 @@
 #!/usr/bin/env sh
-# Run the pygo security-verification checks (see FINDINGS.md). Free-threaded
+# Run the runloom security-verification checks (see FINDINGS.md). Free-threaded
 # 3.13t, GIL forced off. Exits non-zero if any check fails.
 #
 # For the race checks (S2/S3) under ThreadSanitizer, build the whole ext with
@@ -21,10 +21,10 @@ if command -v valgrind >/dev/null 2>&1; then
     REALPY="$("$PY" -c 'import sys; print(sys.executable)')"
     valgrind --tool=memcheck --trace-children=yes --leak-check=no \
         --errors-for-leak-kinds=none --error-exitcode=99 \
-        --suppressions=tools/security/pygo.supp \
-        "$REALPY" tools/security/vg_smoke.py >/tmp/pygo_vg.out 2>&1 \
-        && grep -E 'ERROR SUMMARY' /tmp/pygo_vg.out | tail -1 \
-        || { echo "  valgrind found errors:"; grep -E 'ERROR SUMMARY|Invalid|uninitialised' /tmp/pygo_vg.out | tail; exit 1; }
+        --suppressions=tools/security/runloom.supp \
+        "$REALPY" tools/security/vg_smoke.py >/tmp/runloom_vg.out 2>&1 \
+        && grep -E 'ERROR SUMMARY' /tmp/runloom_vg.out | tail -1 \
+        || { echo "  valgrind found errors:"; grep -E 'ERROR SUMMARY|Invalid|uninitialised' /tmp/runloom_vg.out | tail; exit 1; }
 else
     echo "  SKIP: valgrind not installed"
 fi

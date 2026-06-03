@@ -78,7 +78,7 @@ proctype hub()
  * WITHOUT fairness Spin may schedule ONLY this process forever, starving
  * the hub: that is the acceptance cycle that fails the liveness property.
  * WEAK FAIRNESS forbids it (a continuously-enabled hub must eventually
- * run), which is precisely the scheduler guarantee pygo relies on.
+ * run), which is precisely the scheduler guarantee runloom relies on.
  */
 proctype noise()
 {

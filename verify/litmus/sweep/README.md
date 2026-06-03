@@ -28,7 +28,7 @@ Validated result (herd7 / RC11):
   with relaxed store/load (release/acquire and release fences do not).
 ```
 
-So the `seq_cst` fence on `pygo_sched.c:1363` carries *all* the ordering: the
+So the `seq_cst` fence on `runloom_sched.c:1363` carries *all* the ordering: the
 lost wakeup is forbidden across the whole lattice iff that fence is present.
 This generalizes the two endpoints into a necessity+sufficiency proof.
 
@@ -39,7 +39,7 @@ POPL'17) instead *searches* with Alloy/SMT for litmus tests that distinguish
 two memory models — useful for discovering corner cases you didn't think to
 template (e.g. "find an execution where RC11 and IMM disagree on this fence").
 Wiring it in needs Alloy + the memalloy framework
-(<https://github.com/johnwickerson/memalloy>); point it at the pygo `.cat` /
+(<https://github.com/johnwickerson/memalloy>); point it at the runloom `.cat` /
 the RC11 model and harvest distinguishing tests into `generated/`. Deferred
 until Alloy is in the toolchain; the enumerative sweep covers the park/wake
 question completely in the meantime.

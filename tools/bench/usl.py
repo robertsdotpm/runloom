@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""usl.py -- Universal Scalability Law fit for pygo's M:N scheduler.
+"""usl.py -- Universal Scalability Law fit for runloom's M:N scheduler.
 
 Throughput rarely scales linearly with hubs.  Gunther's Universal Scalability
 Law explains why with two coefficients:
@@ -14,7 +14,7 @@ Law explains why with two coefficients:
                            sharing).  Pure-beta scaling has a PEAK, then gets
                            *slower* as you add hubs.
 
-Fitting (alpha, beta) to measured throughput-vs-hubs tells you which wall pygo
+Fitting (alpha, beta) to measured throughput-vs-hubs tells you which wall runloom
 is hitting and predicts the optimal hub count:
 
     p* = sqrt((1 - alpha) / beta)        (the throughput peak, if beta > 0)
@@ -35,14 +35,14 @@ import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 "..", "..", "src"))
-import pygo_core
+import runloom_c
 
 
 def work(n):
     """CPU-bound, GIL-off-parallelisable, and *cooperatively preemptible*.
 
     A pure-Python LCG loop on purpose: it runs as interpreter bytecode, so
-    pygo's eval-hook preemption keeps hubs fair (no sysmon "WEDGED" flood),
+    runloom's eval-hook preemption keeps hubs fair (no sysmon "WEDGED" flood),
     and it is NOT auto-offloaded the way hashlib/zlib are -- so the curve
     measures real M:N + interpreter parallel scaling, not the offload path.
     """
@@ -54,13 +54,13 @@ def work(n):
 
 def throughput(hubs, tasks, iters):
     """ops/sec for `tasks` sha-chains of length `iters` across `hubs` hubs."""
-    pygo_core.mn_init(hubs)
+    runloom_c.mn_init(hubs)
     t0 = time.perf_counter()
     for _ in range(tasks):
-        pygo_core.mn_go(lambda: work(iters))
-    pygo_core.mn_run()
+        runloom_c.mn_go(lambda: work(iters))
+    runloom_c.mn_run()
     dt = time.perf_counter() - t0
-    pygo_core.mn_fini()
+    runloom_c.mn_fini()
     return (tasks * iters) / dt if dt > 0 else float("inf")
 
 
@@ -104,7 +104,7 @@ def fit_usl(pts):
 
 def report(pts, alpha, beta, x1):
     print("")
-    print("backend : {}".format(pygo_core.backend()))
+    print("backend : {}".format(runloom_c.backend()))
     print("cpus    : {}".format(os.cpu_count()))
     print("-" * 64)
     print("  hubs     measured        USL model      speedup   (model)")
@@ -153,8 +153,8 @@ def main():
         if hub_list[-1] != n:
             hub_list.append(n)
 
-    if hasattr(pygo_core, "warmup"):
-        pygo_core.warmup(args.tasks * 2)
+    if hasattr(runloom_c, "warmup"):
+        runloom_c.warmup(args.tasks * 2)
     pts = measure(hub_list, args.tasks, args.iter, args.reps)
     alpha, beta, x1 = fit_usl(pts)
     report(pts, alpha, beta, x1)

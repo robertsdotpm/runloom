@@ -1,4 +1,4 @@
-"""pygo.tools.watchdog -- deadlock / hang detector with full state dump.
+"""runloom.tools.watchdog -- deadlock / hang detector with full state dump.
 
 A goroutine deadlock or a scheduler lost-wake shows up as a process that
 simply stops making progress: `run()` / `mn_run()` never returns and no
@@ -7,30 +7,30 @@ debuggable artifact.
 
 On a deadline breach it dumps, to stderr:
   1. every OS thread's C+Python stack            (faulthandler)
-  2. pygo's per-thread lifecycle event ring      (pygo_core._diag_dump)
-  3. the scheduler/netpoll self-check result     (pygo_core._self_check)
-  4. scheduler stats                             (pygo_core.stats)
+  2. runloom's per-thread lifecycle event ring      (runloom_c._diag_dump)
+  3. the scheduler/netpoll self-check result     (runloom_c._self_check)
+  4. scheduler stats                             (runloom_c.stats)
 
 Usage
 -----
     from tools.watchdog import watchdog, run_guarded
 
     with watchdog(5.0, label="chan ping-pong"):
-        pygo_core.run()
+        runloom_c.run()
 
     # or wrap a callable:
-    run_guarded(lambda: pygo_core.run(), seconds=5.0)
+    run_guarded(lambda: runloom_c.run(), seconds=5.0)
 
 For the event ring (#2) to contain anything, start the process with
-    PYGO_DEBUG=ring,gstate        (or PYGO_DEBUG=all)
-which pygo_core reads once at import.
+    RUNLOOM_DEBUG=ring,gstate        (or RUNLOOM_DEBUG=all)
+which runloom_c reads once at import.
 
 Notes
 -----
 * faulthandler (#1) works even when the interpreter is wedged in a C
   call holding the GIL -- it runs from a dedicated watchdog thread and
   writes the dump directly.  On free-threaded 3.13t there is no GIL, so
-  the pygo diag calls (#2-#4) also run reliably from the timer thread.
+  the runloom diag calls (#2-#4) also run reliably from the timer thread.
 * By default a breach RAISES TimeoutError in the watchdog thread context
   and (optionally) aborts the process for a core dump.  In tests, prefer
   raising; for live hunting (hunt_hang-style), pass abort=True.
@@ -42,9 +42,9 @@ import threading
 import time
 
 try:
-    import pygo_core
+    import runloom_c
 except ImportError:  # allow importing this module without the ext built
-    pygo_core = None
+    runloom_c = None
 
 
 def hang_dump(file=sys.stderr, label=""):
@@ -52,7 +52,7 @@ def hang_dump(file=sys.stderr, label=""):
     any thread; never raises."""
     sep = "=" * 70
     print("\n" + sep, file=file)
-    print("PYGO HANG DUMP" + (": " + label if label else ""), file=file)
+    print("RUNLOOM HANG DUMP" + (": " + label if label else ""), file=file)
     print("pid={0}  time={1}".format(os.getpid(), time.strftime("%H:%M:%S")),
           file=file)
     print(sep, file=file)
@@ -64,28 +64,28 @@ def hang_dump(file=sys.stderr, label=""):
     except Exception as e:                     # pragma: no cover - defensive
         print("  (faulthandler failed: {0!r})".format(e), file=file)
 
-    if pygo_core is not None:
+    if runloom_c is not None:
         # 2. scheduler self-check (walks parker lists / fd buckets / counters).
-        print("\n--- pygo_core._self_check(verbose=1) ---", file=file)
+        print("\n--- runloom_c._self_check(verbose=1) ---", file=file)
         try:
             file.flush()
-            violations = pygo_core._self_check(1)
+            violations = runloom_c._self_check(1)
             print("  violations: {0}".format(violations), file=file)
         except Exception as e:
             print("  (self_check failed: {0!r})".format(e), file=file)
 
         # 3. scheduler / netpoll stats.
-        print("\n--- pygo_core.stats() ---", file=file)
+        print("\n--- runloom_c.stats() ---", file=file)
         try:
-            print("  {0}".format(pygo_core.stats()), file=file)
+            print("  {0}".format(runloom_c.stats()), file=file)
         except Exception as e:
             print("  (stats failed: {0!r})".format(e), file=file)
 
-        # 4. per-thread lifecycle event ring (needs PYGO_DEBUG=ring).
-        print("\n--- pygo_core._diag_dump() (event ring) ---", file=file)
+        # 4. per-thread lifecycle event ring (needs RUNLOOM_DEBUG=ring).
+        print("\n--- runloom_c._diag_dump() (event ring) ---", file=file)
         try:
             file.flush()
-            pygo_core._diag_dump(file.fileno() if hasattr(file, "fileno") else -1)
+            runloom_c._diag_dump(file.fileno() if hasattr(file, "fileno") else -1)
         except Exception as e:
             print("  (diag_dump failed: {0!r})".format(e), file=file)
 
@@ -117,7 +117,7 @@ class _Watchdog(object):
 
     def __enter__(self):
         # faulthandler's own timer is C-level and fires even under a held
-        # GIL; we ALSO run a Python timer so the pygo diag calls happen.
+        # GIL; we ALSO run a Python timer so the runloom diag calls happen.
         faulthandler.enable()
         faulthandler.dump_traceback_later(self.seconds, exit=False)
         self._timer = threading.Timer(self.seconds + 0.05, self._fire)
@@ -166,7 +166,7 @@ def run_guarded(fn, seconds=10.0, label="", dump=True):
         except BaseException as e:                  # noqa: BLE001
             box["exc"] = e
 
-    t = threading.Thread(target=worker, name="pygo-guarded", daemon=True)
+    t = threading.Thread(target=worker, name="runloom-guarded", daemon=True)
     t.start()
     t.join(seconds)
     if t.is_alive():
@@ -185,7 +185,7 @@ if __name__ == "__main__":
     # so run() never returns -- a genuine "scheduler never makes the work
     # finish" hang.  run_guarded catches it, dumps state, and raises.
     sys.path.insert(0, "src")
-    import pygo_core as pc
+    import runloom_c as pc
 
     def never_finishes():
         def spinner():

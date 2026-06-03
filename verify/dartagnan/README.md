@@ -1,6 +1,6 @@
 # Dartagnan — SMT bounded encoding (the third weak-memory engine)
 
-pygo already checks its fence placement two ways: **herd7** (axiomatic
+runloom already checks its fence placement two ways: **herd7** (axiomatic
 enumeration of executions, `verify/litmus/`) and **GenMC** (stateless model
 checking of the real C under RC11, `verify/genmc/`). Dartagnan adds a third,
 *technologically independent* way: it encodes the bounded executions **and**

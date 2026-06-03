@@ -1,4 +1,4 @@
-"""Compact pygo workload for fault-injection sweeps.
+"""Compact runloom workload for fault-injection sweeps.
 
 Exercises the paths whose cleanup branches the coverage report flagged as
 untested: channel send/recv, the single-thread scheduler, the M:N scheduler
@@ -11,12 +11,12 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "src"))
 
-import pygo
-import pygo_core
+import runloom
+import runloom_c
 
 
 def producer_consumer():
-    ch = pygo_core.Chan(4)
+    ch = runloom_c.Chan(4)
 
     def prod():
         for i in range(8):
@@ -32,31 +32,31 @@ def producer_consumer():
             total += v
         return total
 
-    pygo_core.go(prod)
-    pygo_core.go(cons)
-    pygo_core.run()
+    runloom_c.go(prod)
+    runloom_c.go(cons)
+    runloom_c.run()
 
 
 def mn_round():
-    pygo_core.mn_init(2)
+    runloom_c.mn_init(2)
     for i in range(16):
-        pygo_core.mn_go(lambda n=i: n * 2)
-    pygo_core.mn_run()
-    pygo_core.mn_fini()
+        runloom_c.mn_go(lambda n=i: n * 2)
+    runloom_c.mn_run()
+    runloom_c.mn_fini()
 
 
 def timed_park():
     def g():
-        pygo.sleep(0.001)
-    pygo.go(g)
-    pygo.run()
+        runloom.sleep(0.001)
+    runloom.go(g)
+    runloom.run()
 
 
 def main():
     producer_consumer()
     mn_round()
     timed_park()
-    assert pygo_core._self_check(0) == 0, "self_check failed after injected fault"
+    assert runloom_c._self_check(0) == 0, "self_check failed after injected fault"
     print("WORKLOAD_OK")
 
 

@@ -1,11 +1,11 @@
 /*
- * sched_parkwake.c -- GenMC oracle for pygo's park_safe/wake_safe handshake
- * (pygo_sched.c: pygo_sched_park_safe / pygo_sched_wake_safe), in REAL C
+ * sched_parkwake.c -- GenMC oracle for runloom's park_safe/wake_safe handshake
+ * (runloom_sched.c: runloom_sched_park_safe / runloom_sched_wake_safe), in REAL C
  * (pthreads + C11 atomics) under GenMC's RC11 weak-memory model.
  *
- * FAITHFUL SLICE (not byte-shared).  pygo_sched.c cannot be compiled wholesale
- * under GenMC -- it pulls in Python.h and the functions call pygo_coro_yield /
- * pygo_pystate_snap / pygo_sched_get.  This harness reproduces the EXACT atomic
+ * FAITHFUL SLICE (not byte-shared).  runloom_sched.c cannot be compiled wholesale
+ * under GenMC -- it pulls in Python.h and the functions call runloom_coro_yield /
+ * runloom_pystate_snap / runloom_sched_get.  This harness reproduces the EXACT atomic
  * sequence and memory orders of the race-critical core of the two functions;
  * the structural drift-guard (verify/genmc/run_chase_lev.sh's sibling check, see
  * run_genmc.sh) fails if the source's orderings change without this being
@@ -30,7 +30,7 @@
  *       run).  enqueued <= 1 in every execution.
  * Asserted in EVERY RC11 execution GenMC explores.
  *
- * MEMORY ORDERS pinned to pygo_sched.c (NO order strengthened beyond the two
+ * MEMORY ORDERS pinned to runloom_sched.c (NO order strengthened beyond the two
  * SC fences the protocol itself needs):
  *   park_safe:  wake_pending ACQUIRE-load (early-out);
  *               parked_safe RELEASE-store (commit);
@@ -65,9 +65,9 @@
 static atomic_int parked_safe;
 static atomic_int wake_pending;
 static atomic_int enqueued;    /* # of wakers that routed g to the wake_list */
-static atomic_int yielded;     /* parker committed to pygo_coro_yield (parked) */
+static atomic_int yielded;     /* parker committed to runloom_coro_yield (parked) */
 
-/* ---- foreign thread: pygo_sched_wake_safe(g) ---- */
+/* ---- foreign thread: runloom_sched_wake_safe(g) ---- */
 static void *waker(void *arg)
 {
     (void)arg;
@@ -93,7 +93,7 @@ static void *waker(void *arg)
     return 0;
 }
 
-/* ---- owner thread: pygo_sched_park_safe() (race-critical core) ---- */
+/* ---- owner thread: runloom_sched_park_safe() (race-critical core) ---- */
 static void *parker(void *arg)
 {
     (void)arg;
@@ -127,7 +127,7 @@ static void *parker(void *arg)
          * through to yield; the owner's drain dequeues g from the wake_list. */
     }
 #endif
-    /* src: pygo_coro_yield() -- g is now parked; re-run relies on the wake_list. */
+    /* src: runloom_coro_yield() -- g is now parked; re-run relies on the wake_list. */
     atomic_store_explicit(&yielded, 1, memory_order_release);
     return 0;
 }

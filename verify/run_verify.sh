@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# run_verify.sh -- run every pygo formal-verification check and report.
+# run_verify.sh -- run every runloom formal-verification check and report.
 #
 # Two engines:
 #   SPIN  -- exhaustive interleaving model checker (Promela models of the
@@ -18,7 +18,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
 SPIN_DIR="$HERE/spin"
 CBMC_DIR="$HERE/cbmc"
-WORK="$(mktemp -d /tmp/pygo_verify.XXXXXX)"
+WORK="$(mktemp -d /tmp/runloom_verify.XXXXXX)"
 QUIET=0; [ "${1:-}" = "-q" ] && QUIET=1
 
 pass=0; fail=0; FAILED=""
@@ -90,7 +90,7 @@ check_spin_live_must_fail() {  # name, panflags, define-or-empty, human-descript
     else red "FAIL"; echo " (expected a liveness violation) -- $desc"; fail=$((fail+1)); FAILED="$FAILED $name-live-neg"; fi
 }
 
-echo "================ pygo formal verification ================"
+echo "================ runloom formal verification ================"
 if have spin && have cc; then
     echo "-- SPIN (exhaustive interleaving, SC memory model) --"
     check_spin cldeque      "Chase-Lev deque: no lost / duplicated work-item"
@@ -140,13 +140,13 @@ fi
 echo "-- CBMC (bounded, on the UNMODIFIED cldeque.c source) --"
 if have cbmc; then
     printf '  [cbmc] %-34s ' "cldeque.c"
-    # Verify the real cldeque.c at a small capacity (-DPYGO_CLDEQUE_CAP=4):
+    # Verify the real cldeque.c at a small capacity (-DRUNLOOM_CLDEQUE_CAP=4):
     # the algorithm is identical, but a 4-slot buffer keeps the SAT
     # encoding tractable.  Production default stays 4096; the stress test
     # in tests_c/test_cldeque.c exercises the full-size deque.
-    if cbmc "$CBMC_DIR/cldeque_cbmc.c" "$ROOT/src/pygo_core/cldeque.c" \
-            -I "$CBMC_DIR/stubs" -I "$ROOT/src/pygo_core" \
-            -DPYGO_CLDEQUE_CAP=4 \
+    if cbmc "$CBMC_DIR/cldeque_cbmc.c" "$ROOT/src/runloom_c/cldeque.c" \
+            -I "$CBMC_DIR/stubs" -I "$ROOT/src/runloom_c" \
+            -DRUNLOOM_CLDEQUE_CAP=4 \
             >"$WORK/cbmc.log" 2>&1; then
         green "PASS"; echo " -- no loss / no duplication / no phantom under all interleavings"
         pass=$((pass+1))
@@ -154,7 +154,7 @@ if have cbmc; then
         red "FAIL"; echo " -- see $WORK/cbmc.log"; fail=$((fail+1)); FAILED="$FAILED cbmc-cldeque"
     fi
     # INV_race disjointness monitor on the same real cldeque.c (compiled with the
-    # zero-cost PYGO_CLDEQUE_VERIFY ghost hooks): segment-disjointness at pop's
+    # zero-cost RUNLOOM_CLDEQUE_VERIFY ghost hooks): segment-disjointness at pop's
     # fenced top-read + TAKEN-once.  Its own harness also runs the -DBUG_SELFTEST
     # negative control (teeth).  Slower (--unwind 8); fold its result in.
     printf '  [cbmc] %-34s ' "cldeque.c INV_race monitor"
@@ -165,10 +165,10 @@ if have cbmc; then
     else
         red "FAIL"; echo " -- see $WORK/cbmc_disjoint.log"; fail=$((fail+1)); FAILED="$FAILED cbmc-disjoint"
     fi
-    # pygo_sched.c single-threaded data structures: the ready FIFO ring (FIFO /
+    # runloom_sched.c single-threaded data structures: the ready FIFO ring (FIFO /
     # no-loss / no-dup across wraparound + grow) and the per-g tstate save/restore
     # (completeness + cross-g isolation), each with a negative control (teeth).
-    printf '  [cbmc] %-34s ' "pygo_sched.c ready-ring + tstate"
+    printf '  [cbmc] %-34s ' "runloom_sched.c ready-ring + tstate"
     if [ -x "$CBMC_DIR/run_sched_cbmc.sh" ] \
             && "$CBMC_DIR/run_sched_cbmc.sh" >"$WORK/cbmc_sched.log" 2>&1; then
         green "PASS"; echo " -- ready-ring FIFO/grow + tstate save/restore (+ teeth)"
@@ -250,7 +250,7 @@ if [ -x "$HERE/tla/run_tla.sh" ]; then
 fi
 
 # ---- Alloy: structural invariant of the netpoll parker graph -------------
-# Formalizes what pygo_self_check walks at runtime (no list cycle, every
+# Formalizes what runloom_self_check walks at runtime (no list cycle, every
 # bucket entry on the global list).  Skips cleanly if java/jar absent.
 if [ -x "$HERE/alloy/run_alloy.sh" ]; then
     if al_out="$("$HERE/alloy/run_alloy.sh" 2>&1)"; then

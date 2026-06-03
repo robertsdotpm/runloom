@@ -4,8 +4,8 @@
  * cldeque_cbmc.c checks the OUTCOME form of correctness (no dup / no loss / no
  * phantom).  This harness checks the deeper INTERNAL invariant that EXPLAINS it
  * -- INV_race from verify/iris/rc11/chase_lev/NOTES.md §4 -- ported as a ghost
- * monitor on the production source (compiled with -DPYGO_CLDEQUE_VERIFY so the
- * pygo_cl_* hooks in cldeque.c fire; the hooks are zero-cost without it).
+ * monitor on the production source (compiled with -DRUNLOOM_CLDEQUE_VERIFY so the
+ * runloom_cl_* hooks in cldeque.c fire; the hooks are zero-cost without it).
  *
  * THE PREDICATE (segment-disjointness, the one-fact that closes the race):
  *   at pop()'s SC-fenced top-read t (with b = bottom-1), the owner still owns
@@ -16,8 +16,8 @@
  * so the monitor itself is race-free; the concurrency under test is entirely in
  * cldeque.c, untouched.
  *
- * Build: cbmc cldeque_disjoint.c ../../src/pygo_core/cldeque.c \
- *        -I stubs -I ../../src/pygo_core -DPYGO_CLDEQUE_CAP=4 -DPYGO_CLDEQUE_VERIFY
+ * Build: cbmc cldeque_disjoint.c ../../src/runloom_c/cldeque.c \
+ *        -I stubs -I ../../src/runloom_c -DRUNLOOM_CLDEQUE_CAP=4 -DRUNLOOM_CLDEQUE_VERIFY
  */
 #include <pthread.h>
 #include "cldeque.h"
@@ -32,20 +32,20 @@
 #define OWNER 0
 #define TAKEN 1
 
-static pygo_cldeque_t D;
+static runloom_cldeque_t D;
 static int owner_of[MAXIDX];   /* 0 = OWNER (owner holds claim); TAKEN = claimed */
 static int taken[MAXIDX];      /* times index claimed -- must end <= 1          */
 
 /* ---- ghost hooks called from inside cldeque.c (zero-cost in production) ---- */
 
-void pygo_cl_push(long i)
+void runloom_cl_push(long i)
 {
     __CPROVER_atomic_begin();
     owner_of[i] = OWNER;       /* owner now holds the claim for index i */
     __CPROVER_atomic_end();
 }
 
-void pygo_cl_pop_fenced(long t, long b)
+void runloom_cl_pop_fenced(long t, long b)
 {
     /* INV_race, runtime-robust boundary form.  The full "owner owns ALL of
      * [t,B)" is a proof-INSTANT invariant (true at the linearization point) but
@@ -65,7 +65,7 @@ void pygo_cl_pop_fenced(long t, long b)
     }
 }
 
-void pygo_cl_claim(long i, int who)
+void runloom_cl_claim(long i, int who)
 {
     (void)who;
     __CPROVER_atomic_begin();
@@ -84,27 +84,27 @@ void pygo_cl_claim(long i, int who)
 static void *owner(void *arg)
 {
     void *x; (void)arg;
-    (void)pygo_cldeque_push(&D, (void *)1L);
-    (void)pygo_cldeque_push(&D, (void *)2L);
-    (void)pygo_cldeque_push(&D, (void *)3L);
-    x = pygo_cldeque_pop(&D);   (void)x;
-    x = pygo_cldeque_pop(&D);   (void)x;
-    x = pygo_cldeque_pop(&D);   (void)x;
+    (void)runloom_cldeque_push(&D, (void *)1L);
+    (void)runloom_cldeque_push(&D, (void *)2L);
+    (void)runloom_cldeque_push(&D, (void *)3L);
+    x = runloom_cldeque_pop(&D);   (void)x;
+    x = runloom_cldeque_pop(&D);   (void)x;
+    x = runloom_cldeque_pop(&D);   (void)x;
     return (void *)0;
 }
 
 static void *thief(void *arg)
 {
     void *x; (void)arg;
-    x = pygo_cldeque_steal(&D);  (void)x;
-    x = pygo_cldeque_steal(&D);  (void)x;
+    x = runloom_cldeque_steal(&D);  (void)x;
+    x = runloom_cldeque_steal(&D);  (void)x;
     return (void *)0;
 }
 
 int main(void)
 {
     pthread_t o, t1, t2;
-    pygo_cldeque_init(&D);     /* owner_of[] is static-zero = OWNER; no init loop */
+    runloom_cldeque_init(&D);     /* owner_of[] is static-zero = OWNER; no init loop */
     pthread_create(&o,  (void *)0, owner, (void *)0);
     pthread_create(&t1, (void *)0, thief, (void *)0);
     pthread_create(&t2, (void *)0, thief, (void *)0);
@@ -115,9 +115,9 @@ int main(void)
 #ifdef BUG_SELFTEST
     /* teeth: a deliberate double-claim of one index must trip the monitor,
        proving the disjointness / TAKEN-once assertions are not vacuous. */
-    pygo_cl_push(7);
-    pygo_cl_claim(7, 1);
-    pygo_cl_claim(7, 1);
+    runloom_cl_push(7);
+    runloom_cl_claim(7, 1);
+    runloom_cl_claim(7, 1);
 #endif
     return 0;
 }

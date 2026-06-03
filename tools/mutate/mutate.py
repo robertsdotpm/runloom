@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Mutation testing for pygo's C core -- does the suite actually have teeth?
+"""Mutation testing for runloom's C core -- does the suite actually have teeth?
 
 Coverage says which lines run; mutation says whether a test would NOTICE if
 that line were wrong.  We introduce one small, compilable fault at a time
@@ -23,8 +23,8 @@ a final `git checkout` backstop.  Runs on a COPY of the worktree state only in
 the sense that we never commit; the .c is patched in place and put back.
 
 Usage:
-  tools/mutate/mutate.py src/pygo_core/chan.c [--max 25] [--seed 1] [--json out]
-  tools/mutate/mutate.py src/pygo_core/chan.c --list      # just enumerate
+  tools/mutate/mutate.py src/runloom_c/chan.c [--max 25] [--seed 1] [--json out]
+  tools/mutate/mutate.py src/runloom_c/chan.c --list      # just enumerate
 Env:
   PYTHON     interpreter (default: free-threaded 3.13t if present)
   TEST_CMD   shell command whose exit code decides kill/survive (default: a

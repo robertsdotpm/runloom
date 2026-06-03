@@ -33,7 +33,7 @@
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 LIT="$HERE/../litmus"
-WORK="$(mktemp -d /tmp/pygo_dartagnan.XXXXXX)"
+WORK="$(mktemp -d /tmp/runloom_dartagnan.XXXXXX)"
 BOUND="${DARTAGNAN_BOUND:-2}"
 
 green() { printf '\033[32m%s\033[0m' "$1"; }

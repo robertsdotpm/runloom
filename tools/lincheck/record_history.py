@@ -20,7 +20,7 @@ import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "src"))
 
-import pygo_core
+import runloom_c
 
 T0 = time.monotonic_ns()
 
@@ -30,8 +30,8 @@ def now():
 
 
 def record(out_path, nhubs, nprod, nper, cap, nselect=0):
-    ch = pygo_core.Chan(cap)
-    done = pygo_core.Chan(nprod)             # buffered barrier: producers never block on it
+    ch = runloom_c.Chan(cap)
+    done = runloom_c.Chan(nprod)             # buffered barrier: producers never block on it
     nconsumers = nprod                       # balanced
     nselect = min(nselect, nconsumers)       # how many consumers receive via select(...)
     logs = {}                                # gid -> list of op records (per-goroutine)
@@ -78,10 +78,10 @@ def record(out_path, nhubs, nprod, nper, cap, nselect=0):
         # channels and must abort/clean up the never-firing one, which is
         # exactly where chan.c's four historical select bugs lived.
         log = logs[gid]
-        idle = pygo_core.Chan(1)             # never sent to / never closed
+        idle = runloom_c.Chan(1)             # never sent to / never closed
         while True:
             t = now()
-            idx, res = pygo_core.select([("recv", ch), ("recv", idle)])
+            idx, res = runloom_c.select([("recv", ch), ("recv", idle)])
             r = now()
             assert idx == 0, "idle select case fired (idx={0})".format(idx)
             v, ok = res
@@ -90,16 +90,16 @@ def record(out_path, nhubs, nprod, nper, cap, nselect=0):
             if not ok:
                 break
 
-    pygo_core.mn_init(nhubs)
+    runloom_c.mn_init(nhubs)
     for p in range(nprod):
-        pygo_core.mn_go(lambda gid=p, base=p: producer(gid, base))
+        runloom_c.mn_go(lambda gid=p, base=p: producer(gid, base))
     for c in range(nconsumers):
         fn = select_consumer if c < nselect else consumer
-        pygo_core.mn_go(lambda gid=nprod + c, fn=fn: fn(gid))
-    pygo_core.mn_go(lambda gid=nprod + nconsumers: closer(gid))
-    pygo_core.mn_run()
-    pygo_core.mn_fini()
-    assert pygo_core._self_check(0) == 0, "self_check failed after run"
+        runloom_c.mn_go(lambda gid=nprod + c, fn=fn: fn(gid))
+    runloom_c.mn_go(lambda gid=nprod + nconsumers: closer(gid))
+    runloom_c.mn_run()
+    runloom_c.mn_fini()
+    assert runloom_c._self_check(0) == 0, "self_check failed after run"
 
     events = []
     for g in range(ngor):

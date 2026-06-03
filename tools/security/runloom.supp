@@ -1,8 +1,8 @@
-# pygo memcheck suppressions.
+# runloom memcheck suppressions.
 #
-# pygo's goroutine stacks are mmap'd and the SP is swapped to them by the
-# fcontext asm; pygo does not register them with valgrind (no
-# VALGRIND_STACK_REGISTER). So valgrind treats pygo's *direct* (pointer, not
+# runloom's goroutine stacks are mmap'd and the SP is swapped to them by the
+# fcontext asm; runloom does not register them with valgrind (no
+# VALGRIND_STACK_REGISTER). So valgrind treats runloom's *direct* (pointer, not
 # SP-relative) accesses to a goroutine stack -- the stack paint and the
 # high-water-mark scan -- as "Invalid read/write" of unaddressable memory.
 # These are by-design accesses to validly-mmap'd stacks, not bugs. Suppress
@@ -10,12 +10,12 @@
 # REGISTER on stack create + VALGRIND_MAKE_MEM_DEFINED around the paint/scan,
 # guarded by RUNNING_ON_VALGRIND.)
 {
-   pygo-stack-paint-addr8
+   runloom-stack-paint-addr8
    Memcheck:Addr8
-   fun:pygo_stack_paint
+   fun:runloom_stack_paint
 }
 {
-   pygo-hwm-scan-addr8
+   runloom-hwm-scan-addr8
    Memcheck:Addr8
-   fun:pygo_stack_hwm_scan
+   fun:runloom_stack_hwm_scan
 }

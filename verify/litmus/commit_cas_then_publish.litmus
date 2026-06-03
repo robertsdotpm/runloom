@@ -2,13 +2,13 @@ C commit_cas_then_publish
 (*
  * THE BUG CASE (proves the pool->lock round-trip is load-bearing).
  *
- * In src/pygo_core/netpoll.c, a claimer (pygo_pump_dispatch_event /
- * pygo_pump_drain_expired / pygo_netpoll_cancel_g) does, in program order:
+ * In src/runloom_c/netpoll.c, a claimer (runloom_pump_dispatch_event /
+ * runloom_pump_drain_expired / runloom_netpoll_cancel_g) does, in program order:
  *
- *     pygo_pump_claim: CAS commit ARMED->WOKEN   (memory_order_acq_rel)
+ *     runloom_pump_claim: CAS commit ARMED->WOKEN   (memory_order_acq_rel)
  *     *p->ready_out = <value>                    (plain store, AFTER the CAS)
  *
- * The aborting goroutine in pygo_netpoll_wait_fd CASes commit ARMED->PARKED;
+ * The aborting goroutine in runloom_netpoll_wait_fd CASes commit ARMED->PARKED;
  * on failure it observes WOKEN with an ACQUIRE load.  QUESTION: if the g then
  * read ready_out relying ONLY on that acquire (i.e. WITHOUT re-taking
  * pool->lock), could it read a STALE ready_out?

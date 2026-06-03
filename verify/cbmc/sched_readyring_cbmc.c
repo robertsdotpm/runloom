@@ -1,8 +1,8 @@
 /*
- * sched_readyring_cbmc.c -- CBMC harness for pygo's per-sched ready FIFO ring
- * (pygo_sched.c: pygo_sched_ready_push / pygo_sched_ready_pop / pygo_ready_grow).
+ * sched_readyring_cbmc.c -- CBMC harness for runloom's per-sched ready FIFO ring
+ * (runloom_sched.c: runloom_sched_ready_push / runloom_sched_ready_pop / runloom_ready_grow).
  *
- * FAITHFUL SLICE (not byte-shared).  pygo_sched.c pulls in Python.h, so the
+ * FAITHFUL SLICE (not byte-shared).  runloom_sched.c pulls in Python.h, so the
  * three ring ops are reproduced here verbatim: monotonic head/tail counters,
  * power-of-2 mask indexing (`idx = counter & mask`), and grow-by-doubling that
  * copies the live window [head,tail) and re-bases head to 0.  (The production
@@ -32,14 +32,14 @@ extern _Bool nondet_bool(void);
 #define MAXCAP   8          /* doubling 2->4->8 stays within the op bound */
 #define NOPS     7
 
-typedef struct { int id; } g_t;     /* stand-in for pygo_g_t* (track by id) */
+typedef struct { int id; } g_t;     /* stand-in for runloom_g_t* (track by id) */
 
 static g_t *ring[MAXCAP];           /* the backing array (static, no heap) */
 static g_t *scratch[MAXCAP];        /* grow copy buffer */
 
 static unsigned long ready_cap, ready_mask, ready_head, ready_tail;
 
-/* ---- grow: faithful copy of pygo_ready_grow (doubling, head re-based to 0) -- */
+/* ---- grow: faithful copy of runloom_ready_grow (doubling, head re-based to 0) -- */
 static int ready_grow(void)
 {
     unsigned long new_cap = ready_cap ? ready_cap * 2 : INIT_CAP;
@@ -60,7 +60,7 @@ static int ready_grow(void)
     return 0;
 }
 
-/* ---- push: faithful copy of pygo_sched_ready_push ---- */
+/* ---- push: faithful copy of runloom_sched_ready_push ---- */
 static void ready_push(g_t *g)
 {
 #ifndef BUG_NO_CAPCHECK
@@ -72,7 +72,7 @@ static void ready_push(g_t *g)
     ready_tail++;
 }
 
-/* ---- pop: faithful copy of pygo_sched_ready_pop ---- */
+/* ---- pop: faithful copy of runloom_sched_ready_pop ---- */
 static g_t *ready_pop(void)
 {
     g_t *g;

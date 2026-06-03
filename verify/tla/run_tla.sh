@@ -23,73 +23,73 @@ if [ ! -f "$JAR" ]; then
 fi
 
 pass=0; fail=0
-META="$(mktemp -d /tmp/pygo_tlc.XXXX)"
+META="$(mktemp -d /tmp/runloom_tlc.XXXX)"
 run_tlc() { ( cd "$HERE" && java -cp "$JAR" tlc2.TLC -metadir "$META/$1" "${@:2}" 2>&1 ); }
 
-printf '  [tlc] %-28s ' "PygoSched (correct)"
-if run_tlc ok -config PygoSched.cfg PygoSched.tla | grep -q "No error has been found"; then
+printf '  [tlc] %-28s ' "RunloomSched (correct)"
+if run_tlc ok -config RunloomSched.cfg RunloomSched.tla | grep -q "No error has been found"; then
     echo "PASS -- TypeOK/NoDoubleRun/DoneIsTerminal + AllComplete (liveness)"; pass=$((pass+1))
 else
     echo "FAIL -- correct spec should hold"; fail=$((fail+1))
 fi
 
-printf '  [tlc] %-28s ' "PygoSched (Buggy=TRUE)"
-if run_tlc bug -deadlock -config PygoSched_bug.cfg PygoSched.tla | grep -q "Temporal properties were violated"; then
+printf '  [tlc] %-28s ' "RunloomSched (Buggy=TRUE)"
+if run_tlc bug -deadlock -config RunloomSched_bug.cfg RunloomSched.tla | grep -q "Temporal properties were violated"; then
     echo "PASS -- correctly DETECTS lost wakeup -> AllComplete violated"; pass=$((pass+1))
 else
     echo "FAIL -- the injected lost-wake bug should violate AllComplete"; fail=$((fail+1))
 fi
 
-printf '  [tlc] %-28s ' "PygoHandoff (rescue)"
-if run_tlc hook -config PygoHandoff.cfg PygoHandoff.tla | grep -q "No error has been found"; then
+printf '  [tlc] %-28s ' "RunloomHandoff (rescue)"
+if run_tlc hook -config RunloomHandoff.cfg RunloomHandoff.tla | grep -q "No error has been found"; then
     echo "PASS -- TypeOK/NoConcurrentDrain + AllDrained (stall-recovery liveness)"; pass=$((pass+1))
 else
     echo "FAIL -- correct handoff spec should hold"; fail=$((fail+1))
 fi
 
-printf '  [tlc] %-28s ' "PygoHandoff (no rescue)"
-if run_tlc hobug -deadlock -config PygoHandoff_bug.cfg PygoHandoff.tla | grep -q "Temporal properties were violated"; then
+printf '  [tlc] %-28s ' "RunloomHandoff (no rescue)"
+if run_tlc hobug -deadlock -config RunloomHandoff_bug.cfg RunloomHandoff.tla | grep -q "Temporal properties were violated"; then
     echo "PASS -- correctly DETECTS stranded work without the rescue M -> AllDrained violated"; pass=$((pass+1))
 else
     echo "FAIL -- removing the rescue should strand a wedged hub's work"; fail=$((fail+1))
 fi
 
-# ---- Controlled M:N scheduler (PYGO_MN_SEED experiment): the baton +
+# ---- Controlled M:N scheduler (RUNLOOM_MN_SEED experiment): the baton +
 # rendezvous protocol.  Correct = mutual-exclusion + deadlock-free +
 # deterministic grant.  Two negative controls model the two real obstacles:
 # no preemption -> a CPU-bound hub starves all (the deadlock fixed by keeping
 # preemption on); no barrier -> a grant over a partial requester set (the
 # residual nondeterminism the rendezvous removes).
-printf '  [tlc] %-28s ' "PygoMNControl (correct)"
-if run_tlc mnok -config PygoMNControl.cfg PygoMNControl.tla | grep -q "No error has been found"; then
+printf '  [tlc] %-28s ' "RunloomMNControl (correct)"
+if run_tlc mnok -config RunloomMNControl.cfg RunloomMNControl.tla | grep -q "No error has been found"; then
     echo "PASS -- MutualExclusion/BatonConsistent/DeterministicGrant + AllRun (no deadlock)"; pass=$((pass+1))
 else
     echo "FAIL -- controlled-baton+rendezvous spec should hold"; fail=$((fail+1))
 fi
 
-printf '  [tlc] %-28s ' "PygoMNControl (Preempt=FALSE)"
-if run_tlc mnnp -config PygoMNControl_nopreempt.cfg PygoMNControl.tla | grep -q "Temporal properties were violated"; then
+printf '  [tlc] %-28s ' "RunloomMNControl (Preempt=FALSE)"
+if run_tlc mnnp -config RunloomMNControl_nopreempt.cfg RunloomMNControl.tla | grep -q "Temporal properties were violated"; then
     echo "PASS -- correctly DETECTS the baton deadlock (CPU-bound hub starves all) without preemption"; pass=$((pass+1))
 else
     echo "FAIL -- no preemption should violate AllRun (liveness)"; fail=$((fail+1))
 fi
 
-printf '  [tlc] %-28s ' "PygoMNControl (Barrier=FALSE)"
-if run_tlc mnnb -config PygoMNControl_nobarrier.cfg PygoMNControl.tla | grep -q "is violated"; then
+printf '  [tlc] %-28s ' "RunloomMNControl (Barrier=FALSE)"
+if run_tlc mnnb -config RunloomMNControl_nobarrier.cfg RunloomMNControl.tla | grep -q "is violated"; then
     echo "PASS -- correctly DETECTS a grant over a partial requester set (nondeterminism) without the rendezvous"; pass=$((pass+1))
 else
     echo "FAIL -- no barrier should violate DeterministicGrant"; fail=$((fail+1))
 fi
 
-printf '  [tlc] %-28s ' "PygoMNControl (timers+clock)"
-if run_tlc mntm -config PygoMNControl_timer.cfg PygoMNControl.tla | grep -q "No error has been found"; then
+printf '  [tlc] %-28s ' "RunloomMNControl (timers+clock)"
+if run_tlc mntm -config RunloomMNControl_timer.cfg RunloomMNControl.tla | grep -q "No error has been found"; then
     echo "PASS -- logical clock: DeterministicTick + MutualExclusion + AllRun hold with timer waits"; pass=$((pass+1))
 else
     echo "FAIL -- timers + logical clock spec should hold"; fail=$((fail+1))
 fi
 
-printf '  [tlc] %-28s ' "PygoMNControl (LogicalClock=F)"
-if run_tlc mnlc -config PygoMNControl_nologicalclock.cfg PygoMNControl.tla | grep -q "is violated"; then
+printf '  [tlc] %-28s ' "RunloomMNControl (LogicalClock=F)"
+if run_tlc mnlc -config RunloomMNControl_nologicalclock.cfg RunloomMNControl.tla | grep -q "is violated"; then
     echo "PASS -- correctly DETECTS a later timer firing before an earlier deadline (nondeterminism) without the logical clock"; pass=$((pass+1))
 else
     echo "FAIL -- no logical clock should violate DeterministicTick"; fail=$((fail+1))

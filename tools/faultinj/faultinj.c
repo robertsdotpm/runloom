@@ -1,7 +1,7 @@
 /*
- * faultinj.c -- a tiny LD_PRELOAD fault injector for pygo's cleanup paths.
+ * faultinj.c -- a tiny LD_PRELOAD fault injector for runloom's cleanup paths.
  *
- * No libfiu dependency.  Interposes the allocators and syscalls pygo's C
+ * No libfiu dependency.  Interposes the allocators and syscalls runloom's C
  * extension uses for setup, and fails a *chosen* call so the error/cleanup
  * branch runs -- the 170 uncovered ENOMEM / `return -1` / arg-parse-fail
  * lines that tools/coverage.sh surfaces.  A graceful failure (Python

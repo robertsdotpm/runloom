@@ -58,17 +58,17 @@ else
     fi
 fi
 
-# --- park_safe/wake_safe cross-thread handshake (pygo_sched.c) --------------
+# --- park_safe/wake_safe cross-thread handshake (runloom_sched.c) --------------
 # Drift-guard: the harness's correct default assumes the source has the two
 # StoreLoad seq_cst fences (added after GenMC found a lost wakeup in the
 # fence-free version).  If the source loses a fence, the harness no longer
 # mirrors it -- fail loudly so it gets re-synced rather than silently passing.
-SCHED_C="$HERE/../../src/pygo_core/pygo_sched.c"
+SCHED_C="$HERE/../../src/runloom_c/runloom_sched.c"
 printf '  [genmc] %-30s ' "park/wake SC-fence drift-guard"
 if [ -f "$SCHED_C" ] && [ "$(grep -c '__atomic_thread_fence(__ATOMIC_SEQ_CST)' "$SCHED_C")" -ge 2 ]; then
-    green "PASS"; echo " -- pygo_sched.c park/wake retains its StoreLoad fences"; pass=$((pass+1))
+    green "PASS"; echo " -- runloom_sched.c park/wake retains its StoreLoad fences"; pass=$((pass+1))
 else
-    red "FAIL"; echo " -- pygo_sched.c lost a seq_cst fence; re-sync sched_parkwake.c"; fail=$((fail+1))
+    red "FAIL"; echo " -- runloom_sched.c lost a seq_cst fence; re-sync sched_parkwake.c"; fail=$((fail+1))
 fi
 
 printf '  [genmc] %-30s ' "sched_parkwake.c"
@@ -96,11 +96,11 @@ done
 # CAS on op->wait.  If io_uring.c drops the handshake or weakens those orders,
 # fail loudly so iouring_waitcommit.c gets re-synced rather than silently
 # passing against a stale model.
-IOU_C="$HERE/../../src/pygo_core/io_uring.c"
+IOU_C="$HERE/../../src/runloom_c/io_uring.c"
 printf '  [genmc] %-30s ' "iouring wait-commit drift-guard"
 if [ -f "$IOU_C" ] \
-   && grep -q "PYGO_IOURING_WAIT_PARKED" "$IOU_C" \
-   && grep -q "PYGO_IOURING_WAIT_DONE" "$IOU_C" \
+   && grep -q "RUNLOOM_IOURING_WAIT_PARKED" "$IOU_C" \
+   && grep -q "RUNLOOM_IOURING_WAIT_DONE" "$IOU_C" \
    && [ "$(grep -c '__atomic_exchange_n(&op->wait' "$IOU_C")" -ge 2 ]; then
     green "PASS"; echo " -- io_uring.c retains the op->wait commit handshake (drain + ring)"; pass=$((pass+1))
 else
@@ -133,7 +133,7 @@ echo "  $pass passed, $fail failed"
 
 # Chase-Lev work-stealing deque oracle -- its own harness (single-element
 # take/steal race, 2-element SC-fence necessity, resize, + the REAL
-# src/pygo_core/cldeque.c driven verbatim, each with a negative control).
+# src/runloom_c/cldeque.c driven verbatim, each with a negative control).
 # Wired in here so the standard sweep exercises it; its exit status folds
 # into ours, so run_verify.sh fails if either tier regresses.
 cl_rc=0

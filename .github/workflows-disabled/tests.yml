@@ -25,7 +25,7 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
-      - name: Install build deps + pygo
+      - name: Install build deps + runloom
         run: |
           python -m pip install --upgrade pip setuptools wheel
           python -m pip install -e .
@@ -36,4 +36,4 @@ jobs:
         run: python -m unittest discover tests -v
 
       - name: Print active backend
-        run: python -c "import pygo_core; print('coro=', pygo_core.backend(), '  netpoll=', pygo_core.netpoll_backend())"
+        run: python -c "import runloom_c; print('coro=', runloom_c.backend(), '  netpoll=', runloom_c.netpoll_backend())"

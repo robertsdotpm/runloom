@@ -1,7 +1,7 @@
 # tools/bench — rigorous microbenchmarking
 
 Performance numbers are easy to get and easy to get *wrong*. This harness
-exists so a pygo speed claim survives scrutiny.
+exists so a runloom speed claim survives scrutiny.
 
 ## The two failure modes it defends against
 
@@ -26,7 +26,7 @@ exists so a pygo speed claim survives scrutiny.
   is a **nonparametric bootstrap** over those independent points — no
   normality assumption, pure stdlib.
 - **Layout-bias guard (on by default).** Every child gets a random-length
-  `PYGO_BENCH_PAD` env var, so layout varies run-to-run and the interval
+  `RUNLOOM_BENCH_PAD` env var, so layout varies run-to-run and the interval
   *absorbs* layout sensitivity instead of hiding it. `--pin` turns it off for
   a tightly controlled single-state A/B.
 - **A noise gate.** Reports the coefficient of variation and warns when it's
@@ -91,7 +91,7 @@ PYTHON_GIL=0 ~/.pyenv/versions/3.13.13t/bin/python3 tools/bench/usl.py
 ```
 
 Example (64-core, GIL off): `alpha≈0.028, beta≈0.0002`, predicted peak ≈72
-hubs — i.e. pygo scales cleanly across all cores, mildly coherence-bound, with
+hubs — i.e. runloom scales cleanly across all cores, mildly coherence-bound, with
 contention the dominant limiter past ~16 hubs. The workload is deliberately
 pure-Python (not hashlib) so it stays preemptible and avoids the auto-offload
 path; that keeps the curve about scheduler+interpreter scaling, not codec C.

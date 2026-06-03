@@ -1,6 +1,6 @@
 # tools/combinatorial — config-matrix interaction testing
 
-pygo's runtime knobs multiply: netpoll backend × P-handoff × preemption ×
+runloom's runtime knobs multiply: netpoll backend × P-handoff × preemption ×
 sysmon × … . Bugs hide in the *interactions*, not in any single setting, but
 the full cartesian product is wasteful to test and one-factor-at-a-time misses
 interactions entirely.
@@ -28,11 +28,11 @@ Also `scripts/check_all.sh combo`.
 ## Supported vs experimental factors
 
 The default (gating) matrix covers only knobs that are *meant* to work, so it
-stays a clean regression gate: `PYGO_NETPOLL` (epoll/select/io_uring),
-`PYGO_HANDOFF`, `PYGO_PREEMPT`, `PYGO_SYSMON` — 24 cartesian configs reduced to
+stays a clean regression gate: `RUNLOOM_NETPOLL` (epoll/select/io_uring),
+`RUNLOOM_HANDOFF`, `RUNLOOM_PREEMPT`, `RUNLOOM_SYSMON` — 24 cartesian configs reduced to
 **7** pairwise, all CLEAN.
 
-`--include-experimental` adds `PYGO_STEAL_WOKEN` and `PYGO_PER_G_TSTATE` (the
+`--include-experimental` adds `RUNLOOM_STEAL_WOKEN` and `RUNLOOM_PER_G_TSTATE` (the
 known-dead "Fix B" cross-hub-migration path). This is also the tool's own first
 success story: the very first pairwise run over the supported set *plus*
 `STEAL_WOKEN` immediately isolated a single-factor SIGSEGV — every failing

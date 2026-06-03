@@ -1,7 +1,7 @@
 """Cross-hub PyObject refcount race (S3).
 
 Free-threaded CPython makes refcounts on *shared* objects atomic; this checks
-that pygo's C scheduler paths don't bypass that. Many goroutines spread across
+that runloom's C scheduler paths don't bypass that. Many goroutines spread across
 hubs hammer one shared object's refcount concurrently (bind/unbind a local in
 a tight loop = incref/decref). A non-atomic refcount race would crash, or
 leave the object over-freed (segfault) or leaked (refcount drift).
@@ -14,7 +14,7 @@ import gc
 import sys
 
 sys.path.insert(0, "src")
-import pygo_core
+import runloom_c
 
 SHARED = None          # module global -> goroutines read it without a closure
                        # cell so the only refs are accountable.
@@ -39,11 +39,11 @@ def main():
     gc.collect()
     base = sys.getrefcount(SHARED)
 
-    pygo_core.mn_init(N_HUBS)
+    runloom_c.mn_init(N_HUBS)
     for _ in range(N_GOROUTINES):
-        pygo_core.mn_go(worker)
-    pygo_core.mn_run()
-    pygo_core.mn_fini()
+        runloom_c.mn_go(worker)
+    runloom_c.mn_run()
+    runloom_c.mn_fini()
 
     gc.collect()
     final = sys.getrefcount(SHARED)

@@ -2,7 +2,7 @@ C parkwake_no_fence
 (*
  * THE BUG CASE -- the park_safe/wake_safe lost wakeup WITHOUT the StoreLoad
  * fence (the bug GenMC found; see verify/genmc/sched_parkwake.c and
- * src/pygo_core/pygo_sched.c:1363).  This is the LKMM/herd7 second oracle: a
+ * src/runloom_c/runloom_sched.c:1363).  This is the LKMM/herd7 second oracle: a
  * classic store-buffering (SB / Dekker) shape, proven reachable here under the
  * C11/RC11 model with release/acquire ALONE.
  *
@@ -10,7 +10,7 @@ C parkwake_no_fence
  *   wake_pending  -- waker bumps it; parker rechecks it after committing.
  *   parked_safe   -- parker stores 1 (committed to park); waker CAS 1->0.
  *
- * Program order (pygo_sched.c):
+ * Program order (runloom_sched.c):
  *   park_safe (parker, P0):            wake_safe (waker, P1):
  *     parked_safe = 1   (release)        wake_pending += 1   (release; modelled
  *     <NO FENCE>                                              as store 1, single

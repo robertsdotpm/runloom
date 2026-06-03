@@ -1,8 +1,8 @@
-/* test_preempt.c -- repro for ATTACHED/CPU-class preemption (PYGO_PREEMPT).
+/* test_preempt.c -- repro for ATTACHED/CPU-class preemption (RUNLOOM_PREEMPT).
  *
  * The DETACHED handoff (test_stall_steal / test_stall_pool) cannot recover an
  * ATTACHED wedge: a goroutine running a CPU-bound *Python* loop holds its hub's
- * tstate the whole time, so no standby thread can adopt it.  PYGO_PREEMPT
+ * tstate the whole time, so no standby thread can adopt it.  RUNLOOM_PREEMPT
  * installs a chained eval-frame wrapper; the sysmon watchdog, on an ATTACHED
  * wedge, arms the hub's preempt_requested flag, and the wrapper yields the
  * offending g at its next Python frame boundary (Go pre-1.14 cooperative
@@ -14,10 +14,10 @@
  * scope), which is why test_stall_steal's usleep staller stays RED.
  *
  * Same binary, env discriminator:
- *   (PYGO_PREEMPT unset)  -> RED  (wrapper not installed: the CPU-bound Python g
+ *   (RUNLOOM_PREEMPT unset)  -> RED  (wrapper not installed: the CPU-bound Python g
  *                                  monopolises its hub; that hub's workers and
  *                                  its netpoll pump are starved for the window)
- *   PYGO_PREEMPT=1        -> GREEN (the g yields periodically -> the hub loops,
+ *   RUNLOOM_PREEMPT=1        -> GREEN (the g yields periodically -> the hub loops,
  *                                  pumps netpoll, drains its workers)
  *
  * Build/run via tests_c/run_preempt_test.sh.
@@ -35,9 +35,9 @@
 #include <time.h>
 #include <sys/eventfd.h>
 
-#include "../src/pygo_core/pygo_sched.h"
-#include "../src/pygo_core/mn_sched.h"
-#include "../src/pygo_core/netpoll.h"
+#include "../src/runloom_c/runloom_sched.h"
+#include "../src/runloom_c/mn_sched.h"
+#include "../src/runloom_c/netpoll.h"
 
 #define N_WORKERS 64
 #define NHUBS      2
@@ -62,11 +62,11 @@ static void worker_fn(void *arg)
 {
     long i = (long)arg;
     __atomic_fetch_add(&parked_count, 1, __ATOMIC_RELAXED);
-    if (pygo_netpoll_wait_fd(w_efd[i], PYGO_NETPOLL_READ, -1LL) < 0) return;
+    if (runloom_netpoll_wait_fd(w_efd[i], RUNLOOM_NETPOLL_READ, -1LL) < 0) return;
     uint64_t v;
     (void)read(w_efd[i], &v, sizeof v);
     __atomic_store_n(&w_responded[i], 1, __ATOMIC_RELEASE);
-    pygo_netpoll_unregister(w_efd[i]);
+    runloom_netpoll_unregister(w_efd[i]);
 }
 
 /* Occupies its hub's OS thread with a CPU-bound *Python* loop (frames hit the
@@ -75,7 +75,7 @@ static void staller_fn(void *arg)
 {
     (void)arg;
     __atomic_store_n(&staller_parked, 1, __ATOMIC_RELEASE);
-    if (pygo_netpoll_wait_fd(staller_efd, PYGO_NETPOLL_READ, -1LL) < 0) return;
+    if (runloom_netpoll_wait_fd(staller_efd, RUNLOOM_NETPOLL_READ, -1LL) < 0) return;
     uint64_t v;
     (void)read(staller_efd, &v, sizeof v);
     /* Run CPU-bound Python until now+STALL_MS.  We're on a hub, so the hub's
@@ -89,14 +89,14 @@ static void staller_fn(void *arg)
         Py_XDECREF(r);
         if (PyErr_Occurred()) PyErr_Print();
     }
-    pygo_netpoll_unregister(staller_efd);
+    runloom_netpoll_unregister(staller_efd);
 }
 
 int main(void)
 {
     int i;
     Py_Initialize();
-    pygo_sched_set_default_stack_size(64 * 1024);
+    runloom_sched_set_default_stack_size(64 * 1024);
 
     /* Define the CPU-bound Python loop.  _spin_inner is a Python function so
      * each call creates a frame the eval-frame wrapper sees -> a preemption
@@ -125,11 +125,11 @@ int main(void)
     staller_efd = eventfd(0, EFD_NONBLOCK);
     if (staller_efd < 0) { perror("eventfd staller"); return 2; }
 
-    if (pygo_mn_init(NHUBS) < 0) { fprintf(stderr, "mn_init failed\n"); return 2; }
+    if (runloom_mn_init(NHUBS) < 0) { fprintf(stderr, "mn_init failed\n"); return 2; }
 
-    if (pygo_mn_go_c(staller_fn, NULL) < 0) { fprintf(stderr, "go staller\n"); return 2; }
+    if (runloom_mn_go_c(staller_fn, NULL) < 0) { fprintf(stderr, "go staller\n"); return 2; }
     for (i = 0; i < N_WORKERS; i++) {
-        if (pygo_mn_go_c(worker_fn, (void *)(long)i) < 0) {
+        if (runloom_mn_go_c(worker_fn, (void *)(long)i) < 0) {
             fprintf(stderr, "go worker %d\n", i); return 2;
         }
     }
@@ -159,7 +159,7 @@ int main(void)
         if (__atomic_load_n(&w_responded[i], __ATOMIC_ACQUIRE)) responded++;
 
     printf("preempt=%s N=%d hubs=%d stall=%dms window=%dms responded=%ld/%d\n",
-           getenv("PYGO_PREEMPT") ? getenv("PYGO_PREEMPT") : "(off)",
+           getenv("RUNLOOM_PREEMPT") ? getenv("RUNLOOM_PREEMPT") : "(off)",
            N_WORKERS, NHUBS, STALL_MS, WINDOW_MS, responded, N_WORKERS);
     int pass = (responded == N_WORKERS);
     printf("%s\n", pass ? "PASS: CPU-bound Python g preempted; hub workers ran"

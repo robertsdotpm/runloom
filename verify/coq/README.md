@@ -9,7 +9,7 @@ transitions, via an inductive invariant.
 ## `WakeState.v`
 The unbounded analog of `verify/spin/wake_state.pml`. Models the per-g
 `wake_state` machine (the 6-state PARKED/QUEUED/RUNNING/RUNNING_WOKEN/
-SWEEPING/SWEEPING_WOKEN protocol from `pygo_sched.h`) as a transition relation
+SWEEPING/SWEEPING_WOKEN protocol from `runloom_sched.h`) as a transition relation
 and proves the two safety invariants the pml's `check_inv()` asserts:
 
 - **INV1** `qentries = (state = QUEUED ? 1 : 0)` — no duplicated / orphaned

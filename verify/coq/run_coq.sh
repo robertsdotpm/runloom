@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# run_coq.sh -- machine-check the Coq proofs of pygo protocol invariants.
+# run_coq.sh -- machine-check the Coq proofs of runloom protocol invariants.
 #
 # WakeState.v proves the wake_state machine's safety invariants over EVERY
 # reachable state (unbounded), complementing the bounded Spin model.  A passing

@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # scalene_profile.sh -- native-vs-Python time & memory split with Scalene.
 #
-# The central pygo performance question is "how much of this is the C
+# The central runloom performance question is "how much of this is the C
 # extension vs the interpreter?"  Scalene answers it directly: it attributes
 # time and memory line-by-line and, crucially, separates *native* (C ext /
-# system) from *Python* execution -- exactly the boundary pygo straddles.
+# system) from *Python* execution -- exactly the boundary runloom straddles.
 #   Berger et al, "Triangulating Python Performance Issues with Scalene",
 #   OSDI 2023.
 #

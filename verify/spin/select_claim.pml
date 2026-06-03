@@ -1,9 +1,9 @@
 /*
  * select_claim.pml -- Promela model of the select() cross-channel claim
- * CAS in src/pygo_core/chan.c (waiter_claim / pygo_select_park).
+ * CAS in src/runloom_c/chan.c (waiter_claim / runloom_select_park).
  *
  * A goroutine blocked in select() installs a waiter on EVERY case's
- * channel, all sharing one `pygo_select_park` with a single
+ * channel, all sharing one `runloom_select_park` with a single
  * `fired_case` (init -1).  When any channel goes to deliver to such a
  * waiter it first CASes fired_case from -1 to its own case index; only
  * the winner performs the handoff + wakes the goroutine.  Losing

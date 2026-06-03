@@ -1,26 +1,26 @@
 /*
  * iouring_msclose.pml -- Promela model of the io_uring multishot handle
- * lifetime: the free in pygo_iouring_ms_close / on_cqe (io_uring.c) versus a
- * parked pygo_iouring_ms_recv re-locking the handle.
+ * lifetime: the free in runloom_iouring_ms_close / on_cqe (io_uring.c) versus a
+ * parked runloom_iouring_ms_recv re-locking the handle.
  *
- * AUDIT RESULT THIS FORMALISES.  pygo_iouring_ms_recv parks with the handle's
+ * AUDIT RESULT THIS FORMALISES.  runloom_iouring_ms_recv parks with the handle's
  * waiter_g set, and on wake RE-LOCKS the handle (io_uring.c:999).  on_cqe, on
  * the closing CQE (was_closing && !more), wakes that waiter and then frees the
  * handle OUTSIDE h->lock -- destroying h->lock + free(h) (io_uring.c:878-891);
- * ms_close's !armed branch frees immediately too (:1018-1032).  PygoTCPConn
- * holds NO lock around self->ms / self->closed (pygo_tcp.c:44-51), so recv and
+ * ms_close's !armed branch frees immediately too (:1018-1032).  RunloomTCPConn
+ * holds NO lock around self->ms / self->closed (runloom_tcp.c:44-51), so recv and
  * close are unsynchronised.
  *
  * This is memory-safe ONLY under the single-owner convention: a TCPConn is
  * used by one goroutine, so close() runs after recv() has returned -- there is
  * no consumer parked in ms_recv when the closing CQE frees the handle.
- * (PygoTCPConn is a standalone primitive; it is NOT used by pygo.aio, and its
+ * (RunloomTCPConn is a standalone primitive; it is NOT used by runloom.aio, and its
  * benches/tests are one-goroutine-per-conn.)  This model proves memory-safety
  * under that convention.
  *
  * Negative control -DBUG_CONCURRENT_CLOSE lifts the convention (a second task
  * closes the conn while the first is parked in recv -- e.g. a shared TCPConn
- * under PYGO_TCPCONN_IOURING=1 on M:N free-threaded).  Spin then finds the
+ * under RUNLOOM_TCPCONN_IOURING=1 on M:N free-threaded).  Spin then finds the
  * use-after-free: the closing CQE wakes the parked consumer and frees the
  * handle, and the woken consumer re-locks freed memory.
  *
@@ -39,7 +39,7 @@ bit cancel_cqe = 0;     /* the closing/cancel CQE has been delivered      */
 #define LOCK   d_step { (h_lock == 0) -> h_lock = 1 }
 #define UNLOCK h_lock = 0
 
-/* pygo_iouring_ms_recv: no data yet -> register waiter, park, and on wake
+/* runloom_iouring_ms_recv: no data yet -> register waiter, park, and on wake
  * RE-LOCK the handle (io_uring.c:970-1001). */
 active proctype recv()
 {
@@ -53,7 +53,7 @@ active proctype recv()
     UNLOCK;
 }
 
-/* pygo_iouring_ms_close: set closing; armed -> cancel SQE whose CQE frees via
+/* runloom_iouring_ms_close: set closing; armed -> cancel SQE whose CQE frees via
  * on_cqe; this models the armed (cancel) path. */
 active proctype close_conn()
 {

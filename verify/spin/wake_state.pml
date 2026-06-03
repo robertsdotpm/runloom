@@ -1,8 +1,8 @@
 /*
  * wake_state.pml -- Promela model of the per-g wake_state machine.
  *
- * Models the PYGO_PER_G_TSTATE protocol documented on `struct pygo_g`
- * in src/pygo_core/pygo_sched.h (the `wake_state` field).  A single
+ * Models the RUNLOOM_PER_G_TSTATE protocol documented on `struct runloom_g`
+ * in src/runloom_c/runloom_sched.h (the `wake_state` field).  A single
  * atomic unifies the exactly-once-wake dedup with the exclusive-resume
  * claim.  History (see the project's stall-recovery / lost-wake arc):
  * the predecessor used two independent flags that raced into a re-push

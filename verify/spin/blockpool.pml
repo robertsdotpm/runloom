@@ -1,7 +1,7 @@
 /*
  * blockpool.pml -- Promela model of the blocking-offload wake ordering in
- * src/pygo_core/pygo_blockpool.c (pygo_blocking_call + worker), the path
- * pygo.blocking / DNS resolution take by default on Linux.
+ * src/runloom_c/runloom_blockpool.c (runloom_blocking_call + worker), the path
+ * runloom.blocking / DNS resolution take by default on Linux.
  *
  * A goroutine offloads a blocking fn to a worker thread and parks.  The
  * single-thread scheduler's drain loop blocks in epoll_wait with no
@@ -30,7 +30,7 @@ bit ready      = 0;     /* the goroutine is back on the wake list    */
 bit g_resumed  = 0;     /* the drain loop resumed the goroutine      */
 bit parked     = 0;     /* caller has incremented inflight + parked  */
 
-/* pygo_blocking_call: count the job, enqueue it, then park.  The caller
+/* runloom_blocking_call: count the job, enqueue it, then park.  The caller
  * runs INSIDE the drain loop (it is a goroutine the drain resumed), so
  * inflight++ happens-before the drain re-evaluates its exit condition --
  * the `parked` gate on the drain models that. */

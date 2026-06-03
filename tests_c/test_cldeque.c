@@ -1,6 +1,6 @@
 /*
  * test_cldeque.c -- high-volume concurrency stress for the Chase-Lev
- * work-stealing deque (src/pygo_core/cldeque.c).
+ * work-stealing deque (src/runloom_c/cldeque.c).
  *
  * Complements verify/cbmc/cldeque_cbmc.c: CBMC proves correctness
  * exhaustively but on a tiny bounded schedule; this hammers the SAME
@@ -30,7 +30,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-static pygo_cldeque_t   D;
+static runloom_cldeque_t   D;
 static unsigned char   *claimed;     /* claimed[tag] = 1 once consumed     */
 static long             total_push;  /* tags are 1..total_push             */
 static long             consumed;    /* atomic count of consumed items     */
@@ -63,19 +63,19 @@ static void *owner_fn(void *arg)
     (void)arg;
     for (i = 1; i <= total_push; i++) {
         /* Push; if full, pop some down to make room (also races thieves). */
-        while (pygo_cldeque_push(&D, (void *)i) != 0) {
-            x = pygo_cldeque_pop(&D);
+        while (runloom_cldeque_push(&D, (void *)i) != 0) {
+            x = runloom_cldeque_pop(&D);
             if (x) claim(x);
         }
         /* Periodically pop from the bottom so the owner's pop CAS races
          * the thieves' steal CAS on the last element. */
         if ((i & 3) == 0) {
-            x = pygo_cldeque_pop(&D);
+            x = runloom_cldeque_pop(&D);
             if (x) claim(x);
         }
     }
     /* Owner helps drain whatever the thieves left behind. */
-    while ((x = pygo_cldeque_pop(&D)) != NULL) claim(x);
+    while ((x = runloom_cldeque_pop(&D)) != NULL) claim(x);
     __atomic_store_n(&producing, 0, __ATOMIC_RELEASE);
     return NULL;
 }
@@ -85,7 +85,7 @@ static void *thief_fn(void *arg)
     void *x;
     (void)arg;
     for (;;) {
-        x = pygo_cldeque_steal(&D);
+        x = runloom_cldeque_steal(&D);
         if (x) {
             claim(x);
             continue;
@@ -93,7 +93,7 @@ static void *thief_fn(void *arg)
         /* Empty/lost.  Stop only once production is done AND the deque
          * has been observed empty (owner's final drain has run). */
         if (!__atomic_load_n(&producing, __ATOMIC_ACQUIRE) &&
-            pygo_cldeque_size(&D) <= 0) {
+            runloom_cldeque_size(&D) <= 0) {
             break;
         }
     }
@@ -107,7 +107,7 @@ static int run_round(void)
     int i;
     long size;
 
-    pygo_cldeque_init(&D);
+    runloom_cldeque_init(&D);
     for (i = 0; i <= total_push; i++) claimed[i] = 0;
     consumed = 0;
     __atomic_store_n(&producing, 1, __ATOMIC_RELEASE);
@@ -119,7 +119,7 @@ static int run_round(void)
     pthread_join(owner, NULL);
     for (i = 0; i < n_thieves; i++) pthread_join(thieves[i], NULL);
 
-    size = pygo_cldeque_size(&D);
+    size = runloom_cldeque_size(&D);
     if (size != 0) {
         fprintf(stderr, "LOSS: deque not empty after drain (size=%ld)\n", size);
         return 1;
@@ -145,7 +145,7 @@ int main(int argc, char **argv)
     if (!claimed) { fprintf(stderr, "OOM\n"); return 2; }
 
     printf("test_cldeque: %ld pushes, %d thieves, %d rounds (CAP=%d)\n",
-           total_push, n_thieves, rounds, PYGO_CLDEQUE_CAP);
+           total_push, n_thieves, rounds, RUNLOOM_CLDEQUE_CAP);
     for (r = 0; r < rounds; r++) {
         if (run_round() != 0) {
             fprintf(stderr, "FAIL at round %d\n", r);

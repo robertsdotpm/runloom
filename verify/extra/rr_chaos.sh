@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# rr_chaos.sh -- record/replay chaos testing of a pygo workload with rr.
+# rr_chaos.sh -- record/replay chaos testing of a runloom workload with rr.
 #
 # Mozilla rr's chaos mode (rr record --chaos) actively perturbs thread
 # scheduling to provoke rare races, and gives PERFECT deterministic replay
 # with reverse execution -- the fastest way to capture AND root-cause the
-# residual cross-file leaked-parker flake (project_pygo_crossfile_thread_leak)
+# residual cross-file leaked-parker flake (project_runloom_crossfile_thread_leak)
 # without waiting on the deterministic-sim harness to cover the M:N path.
 #
 # rr needs ptrace + a low perf_event_paranoid and usually does not run inside
@@ -26,9 +26,9 @@ if ! rr record true >/dev/null 2>&1; then
     echo "[rr] rr present but cannot record here (need ptrace / perf_event_paranoid<=1)"; exit 0
 fi
 
-echo "[rr] $N chaos recordings of the pygo workload; first crash/hang is kept for replay"
+echo "[rr] $N chaos recordings of the runloom workload; first crash/hang is kept for replay"
 for i in $(seq 1 "$N"); do
-    dir="/tmp/pygo_rr_$i"
+    dir="/tmp/runloom_rr_$i"
     if ! PYTHON_GIL=0 PYTHONPATH="$ROOT/src" timeout 30 \
          rr record --chaos -o "$dir" "$PYBIN" "$WORKLOAD" >/dev/null 2>&1; then
         echo "[rr] FAILURE on recording $i -- replay with: rr replay $dir"

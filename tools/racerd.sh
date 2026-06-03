@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # racerd.sh -- compositional STATIC race + memory-safety analysis with Infer.
 #
-# pygo already hunts races dynamically (ThreadSanitizer on the whole ext, real
+# runloom already hunts races dynamically (ThreadSanitizer on the whole ext, real
 # threads) and proves the lock-free algorithms in verify/.  Infer adds a third
 # angle that needs neither a running binary nor the racy interleaving to occur:
 #
@@ -34,7 +34,7 @@ if ! command -v infer >/dev/null 2>&1; then
 fi
 
 OUT="${INFER_OUT:-$ROOT/infer-out}"
-echo "[infer] capturing the pygo_core ext build and running RacerD + Pulse"
+echo "[infer] capturing the runloom_c ext build and running RacerD + Pulse"
 # A clean rebuild so Infer's compiler wrapper captures every translation unit.
 "$(command -v safe-rm || echo rm)" -rf build "$OUT" 2>/dev/null
 if ! infer run --racerd --pulse --results-dir "$OUT" -- \
@@ -45,9 +45,9 @@ fi
 
 echo "[infer] report ($OUT/report.txt):"
 if [ -s "$OUT/report.txt" ]; then
-    grep -E 'src/pygo_core/' "$OUT/report.txt" | head -60 || head -60 "$OUT/report.txt"
+    grep -E 'src/runloom_c/' "$OUT/report.txt" | head -60 || head -60 "$OUT/report.txt"
     n="$(grep -c . "$OUT/report.txt" 2>/dev/null || echo 0)"
-    echo "[infer] $n report line(s).  Advisory only -- triage src/pygo_core/* findings;"
+    echo "[infer] $n report line(s).  Advisory only -- triage src/runloom_c/* findings;"
     echo "        hand-rolled C11 atomics will draw lock-discipline false positives."
 else
     echo "[infer] no issues reported."

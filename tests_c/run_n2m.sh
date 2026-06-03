@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Driver: build bench_server_pygo, sanity-run, then push N to 2,000,000.
+# Driver: build bench_server_runloom, sanity-run, then push N to 2,000,000.
 # Logs everything (incl. peak RSS via /usr/bin/time -v) to tests_c/n2m.log
 # so results survive a stalled interactive result channel.
 set -u
@@ -12,7 +12,7 @@ exec > "$LOG" 2>&1
 echo "=== run_n2m start $(date -Is) ==="
 
 echo "--- host enablers (idempotent) ---"
-# vm.max_map_count is THE binding limit: pygo mmaps ~2 VMAs/goroutine (stack +
+# vm.max_map_count is THE binding limit: runloom mmaps ~2 VMAs/goroutine (stack +
 # guard page), so ~2M live gs at N=1M need >4M maps; the 1.05M default reboot
 # value made mn_go_c fail with ENOMEM at ~500K-1M gs (RSS only ~4GB, 69GB free).
 sudo -n sysctl -w vm.max_map_count=16777216
@@ -26,12 +26,12 @@ echo "port_range=$(cat /proc/sys/net/ipv4/ip_local_port_range) tw_reuse=$(cat /p
 echo "--- flush libvirt loopback nft noise if present (best-effort) ---"
 sudo -n nft flush ruleset 2>/dev/null && echo "nft flushed" || echo "nft flush skipped"
 
-echo "--- build bench_server_pygo (3.13t .so) ---"
-make -C tests_c bench_server_pygo 2>&1
+echo "--- build bench_server_runloom (3.13t .so) ---"
+make -C tests_c bench_server_runloom 2>&1
 BR=$?
 echo "make rc=$BR"
-ls -la tests_c/bench_server_pygo 2>&1
-if [ $BR -ne 0 ] || [ ! -x tests_c/bench_server_pygo ]; then
+ls -la tests_c/bench_server_runloom 2>&1
+if [ $BR -ne 0 ] || [ ! -x tests_c/bench_server_runloom ]; then
     echo "BUILD FAILED — aborting"; echo "=== run_n2m end $(date -Is) ==="; exit 1
 fi
 
@@ -39,7 +39,7 @@ run_n () {
     local NN=$1 HH=$2 RR=$3 TMO=${4:-600}
     echo ""
     echo "################ RUN N=$NN H=$HH RAMP=$RR (timeout ${TMO}s) @ $(date -Is) ################"
-    timeout "$TMO" /usr/bin/time -v sudo -n env PYGO_PER_G_TSTATE=0 tests_c/bench_server_pygo "$NN" "$HH" "$RR" 2>&1
+    timeout "$TMO" /usr/bin/time -v sudo -n env RUNLOOM_PER_G_TSTATE=0 tests_c/bench_server_runloom "$NN" "$HH" "$RR" 2>&1
     echo "---- exit rc=$? (124=timeout) ----"
     # cool-down so TIME_WAIT/ports recycle before the next, heavier run
     sleep 8

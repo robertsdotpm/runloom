@@ -1,5 +1,5 @@
 (* CommitPublish.v -- Stage 3 (weak memory): a machine-checked iRC11 / RC11
-   separation-logic proof of pygo's netpoll commit-publish, the message-passing
+   separation-logic proof of runloom's netpoll commit-publish, the message-passing
    release/acquire pattern, under the RELAXED (RC11) memory model.
 
    Stages 1-2 (../OneShotWake.v, ../WakeQueue.v) are sequentially-consistent
@@ -7,7 +7,7 @@
    HeapLang has the RC11 operational semantics with explicit release/acquire
    accesses, and proves the no-stale-read property the C relies on.
 
-   The pygo shape (src/pygo_core/netpoll.c, and verify/litmus §15):
+   The runloom shape (src/runloom_c/netpoll.c, and verify/litmus §15):
        claimer:  *ready_out = mask;          // publish the readiness (data)
                  <release the commit>        // commit-CAS / unlock pool->lock
        parker:   <acquire the commit>        // re-read under acquire

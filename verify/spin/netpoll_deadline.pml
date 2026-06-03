@@ -1,20 +1,20 @@
 /*
  * netpoll_deadline.pml -- Promela model of the multi-claimer wake race in
- * src/pygo_core/netpoll.c.  A parked goroutine has an fd it waits on, a finite
+ * src/runloom_c/netpoll.c.  A parked goroutine has an fd it waits on, a finite
  * deadline in the per-pool min-heap, AND may be cancelled out-of-band.  THREE
  * different paths can wake it, each delivering a DISTINCT value, and each
- * claiming via the SAME commit CAS (pygo_pump_claim semantics):
+ * claiming via the SAME commit CAS (runloom_pump_claim semantics):
  *
- *   pygo_pump_dispatch_event  -- the fd became ready.  *ready_out = mask
+ *   runloom_pump_dispatch_event  -- the fd became ready.  *ready_out = mask
  *                                (a NONZERO event mask).
- *   pygo_pump_drain_expired   -- the deadline passed.  *ready_out = 0 (timeout).
- *   pygo_netpoll_cancel_g     -- task.cancel() targeted a g blocked in wait_fd
+ *   runloom_pump_drain_expired   -- the deadline passed.  *ready_out = 0 (timeout).
+ *   runloom_netpoll_cancel_g     -- task.cancel() targeted a g blocked in wait_fd
  *                                (no coro await-point).  *ready_out =
- *                                PYGO_NETPOLL_CANCELLED; wait_fd's _wait_fd
+ *                                RUNLOOM_NETPOLL_CANCELLED; wait_fd's _wait_fd
  *                                wrapper turns it into CancelledError.
  *
  * Each claims commit->WOKEN, writes ready_out, and re-queues iff it claimed
- * from PARKED.  The parking g (pygo_netpoll_wait_fd) CASes commit ARMED->PARKED;
+ * from PARKED.  The parking g (runloom_netpoll_wait_fd) CASes commit ARMED->PARKED;
  * on failure (==WOKEN) it aborts the park, re-takes pool->lock (ordering it
  * after the winner's ready_out write), and returns ready_mask (starts 0).
  *
@@ -53,7 +53,7 @@
 #define R_UNSET     0
 #define R_MASK      1   /* fd became ready: *ready_out = (nonzero) event mask  */
 #define R_TIMEOUT   2   /* deadline expired: *ready_out = 0                     */
-#define R_CANCELLED 3   /* cancelled: *ready_out = PYGO_NETPOLL_CANCELLED       */
+#define R_CANCELLED 3   /* cancelled: *ready_out = RUNLOOM_NETPOLL_CANCELLED       */
 
 #define NONE   0
 #define FD     1
@@ -109,14 +109,14 @@ proctype parker()
     fi;
 }
 
-/* A claimer that routes through the commit CAS (pygo_pump_dispatch_event /
- * pygo_pump_drain_expired / pygo_netpoll_cancel_g).  `who`/`val` are its
+/* A claimer that routes through the commit CAS (runloom_pump_dispatch_event /
+ * runloom_pump_drain_expired / runloom_netpoll_cancel_g).  `who`/`val` are its
  * identity + the value it delivers. */
 inline claim_and_deliver(who, val)
 {
     byte prior;
     LOCK;
-    atomic {                           /* pygo_pump_claim: CAS commit->WOKEN */
+    atomic {                           /* runloom_pump_claim: CAS commit->WOKEN */
         prior = commit;
         if
         :: commit != WOKEN -> commit = WOKEN;

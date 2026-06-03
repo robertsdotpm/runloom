@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # run_alloy.sh -- check the netpoll-parker structural invariant with Alloy.
 #
-# Formalizes pygo_self_check's relational invariant (verify/alloy/selfcheck.als)
+# Formalizes runloom_self_check's relational invariant (verify/alloy/selfcheck.als)
 # and asserts two commands, mirroring the verify/ negative-control style:
 #   WellFormedImpliesOK  -> expect UNSAT (valid: runtime well-formedness
 #                           implies the self_check invariant)

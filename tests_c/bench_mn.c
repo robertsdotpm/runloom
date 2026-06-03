@@ -7,9 +7,9 @@
  *
  * Differences from the Python harness:
  *   - No CPython interpreter -- everything runs through the C-only
- *     pygo_mn_go_c spawn path added in this commit.  Python is only
+ *     runloom_mn_go_c spawn path added in this commit.  Python is only
  *     used to call Py_Initialize once at startup so PyMem_*, etc., are
- *     available (pygo_core internals still call into CPython for the
+ *     available (runloom_c internals still call into CPython for the
  *     slab allocator and a few other places even when no Python work
  *     is actually performed -- removing that dependency is a separate
  *     project).
@@ -45,10 +45,10 @@
 #include <sys/socket.h>
 #include <arpa/inet.h>
 
-#include "../src/pygo_core/pygo_sched.h"
-#include "../src/pygo_core/mn_sched.h"
-#include "../src/pygo_core/netpoll.h"
-#include "../src/pygo_core/pygo_diag.h"
+#include "../src/runloom_c/runloom_sched.h"
+#include "../src/runloom_c/mn_sched.h"
+#include "../src/runloom_c/netpoll.h"
+#include "../src/runloom_c/runloom_diag.h"
 
 #define PAYLOAD     "hellopyg"
 #define PAYLOAD_LEN 8
@@ -75,7 +75,7 @@ static void rst_close(int fd)
     close(fd);
 }
 
-/* ---- echo server (pure pthread, no pygo) ---- */
+/* ---- echo server (pure pthread, no runloom) ---- */
 typedef struct {
     int fd;
     int payload_len;
@@ -210,14 +210,14 @@ static int connect_nonblock(int port)
     addr.sin_port = htons(port);
     int rc = connect(fd, (struct sockaddr *)&addr, sizeof(addr));
     if (rc < 0 && errno != EINPROGRESS) {
-        pygo_netpoll_unregister(fd);
+        runloom_netpoll_unregister(fd);
         close(fd);
         return -1;
     }
     if (rc < 0) {
         /* EINPROGRESS: wait for writability. */
-        if (pygo_netpoll_wait_fd(fd, 2 /* PYGO_NETPOLL_WRITE */, -1LL) < 0) {
-            pygo_netpoll_unregister(fd);
+        if (runloom_netpoll_wait_fd(fd, 2 /* RUNLOOM_NETPOLL_WRITE */, -1LL) < 0) {
+            runloom_netpoll_unregister(fd);
             close(fd);
             return -1;
         }
@@ -225,7 +225,7 @@ static int connect_nonblock(int port)
         socklen_t slen = sizeof(sockerr);
         if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &sockerr, &slen) < 0 ||
             sockerr != 0) {
-            pygo_netpoll_unregister(fd);
+            runloom_netpoll_unregister(fd);
             close(fd);
             return -1;
         }
@@ -243,7 +243,7 @@ static int send_all_nb(int fd, const void *buf, size_t len)
         if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
             return -1;
         }
-        if (pygo_netpoll_wait_fd(fd, 2 /* WRITE */, -1LL) < 0) return -1;
+        if (runloom_netpoll_wait_fd(fd, 2 /* WRITE */, -1LL) < 0) return -1;
     }
     return 0;
 }
@@ -259,7 +259,7 @@ static int recv_all_nb(int fd, void *buf, size_t len)
         if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
             return -1;
         }
-        if (pygo_netpoll_wait_fd(fd, 1 /* READ */, -1LL) < 0) return -1;
+        if (runloom_netpoll_wait_fd(fd, 1 /* READ */, -1LL) < 0) return -1;
     }
     return 0;
 }
@@ -298,7 +298,7 @@ static void client_g(void *arg)
             nanosleep(&ts, NULL);
         }
     }
-    pygo_netpoll_unregister(fd);   /* clear registration bitmap so fd reuse re-registers */
+    runloom_netpoll_unregister(fd);   /* clear registration bitmap so fd reuse re-registers */
     rst_close(fd);                 /* RST close: no TIME_WAIT (see rst_close) */
     pthread_mutex_lock(&g_done_lock);
     g_done_count++;
@@ -314,13 +314,13 @@ static double now_seconds(void)
 }
 
 /* DIAG: dump the lifecycle event ring on a fatal signal so a load-only
- * crash leaves a trace.  Only useful with PYGO_DEBUG_DIAG=ring|all. */
-extern void pygo_diag_dump(int fd);
-extern void pygo_diag_init(void);
+ * crash leaves a trace.  Only useful with RUNLOOM_DEBUG_DIAG=ring|all. */
+extern void runloom_diag_dump(int fd);
+extern void runloom_diag_init(void);
 #include <signal.h>
 static void diag_crash_handler(int sig)
 {
-    pygo_diag_dump(2);
+    runloom_diag_dump(2);
     signal(sig, SIG_DFL);
     raise(sig);
 }
@@ -338,11 +338,11 @@ int main(int argc, char **argv)
     g_M = M;
     g_seed = seed;
 
-    /* Initialise CPython enough to satisfy pygo_core's internal calls
+    /* Initialise CPython enough to satisfy runloom_c's internal calls
      * (slab allocator uses PyMem_*, tstate setup, etc.).  This is a
      * minimal embed -- no Python script runs. */
     Py_Initialize();
-    pygo_diag_init();   /* parse PYGO_DEBUG_DIAG; enable the event ring */
+    runloom_diag_init();   /* parse RUNLOOM_DEBUG_DIAG; enable the event ring */
     signal(SIGSEGV, diag_crash_handler);
     signal(SIGABRT, diag_crash_handler);
 
@@ -355,8 +355,8 @@ int main(int argc, char **argv)
     /* Tiny grace period for the accept thread to wire up. */
     usleep(50000);
 
-    /* pygo_mn_init returns n_threads on success (not 0), -1 on failure. */
-    if (pygo_mn_init(H) < 0) {
+    /* runloom_mn_init returns n_threads on success (not 0), -1 on failure. */
+    if (runloom_mn_init(H) < 0) {
         fprintf(stderr, "mn_init failed: ");
         if (PyErr_Occurred()) PyErr_PrintEx(0);
         else fprintf(stderr, "(no Python error set)\n");
@@ -365,15 +365,15 @@ int main(int argc, char **argv)
 
     double t0 = now_seconds();
     for (int i = 0; i < N; i++) {
-        if (pygo_mn_go_c(client_g, NULL) < 0) {
+        if (runloom_mn_go_c(client_g, NULL) < 0) {
             fprintf(stderr, "mn_go_c failed at i=%d: %s\n",
                     i, strerror(errno));
             return 2;
         }
     }
-    pygo_mn_run();
+    runloom_mn_run();
     double dt = now_seconds() - t0;
-    pygo_mn_fini();
+    runloom_mn_fini();
 
     printf("N=%d H=%d M=%d seed=%u done=%ld/%d entered=%ld connected=%ld sent_once=%ld %.3fs %.1fK/s\n",
            N, H, M, g_seed, g_done_count, N, g_entered, g_connected, g_sent_once, dt,
@@ -386,13 +386,13 @@ int main(int argc, char **argv)
          * diagnostic instead of just an exit code.  Cheap; only fires
          * on the FAIL path. */
         fprintf(stderr, "---- self_check ----\n");
-        (void)pygo_self_check(1);
-        if (pygo_debug_flags & PYGO_DBG_RING) {
+        (void)runloom_self_check(1);
+        if (runloom_debug_flags & RUNLOOM_DBG_RING) {
             fprintf(stderr, "---- diag_dump ----\n");
-            pygo_diag_dump(2);
+            runloom_diag_dump(2);
         } else {
             fprintf(stderr,
-                "[hint] re-run with PYGO_DEBUG_DIAG=ring (or =all) to see "
+                "[hint] re-run with RUNLOOM_DEBUG_DIAG=ring (or =all) to see "
                 "lifecycle events leading to the FAIL\n");
         }
         return 1;

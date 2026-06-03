@@ -1,5 +1,5 @@
 (* TreiberStack.v -- Iris (HeapLang) proof of a lock-free Treiber stack, the
-   structure behind pygo's lock-free LIFO stacks (the idle-parker stack and the
+   structure behind runloom's lock-free LIFO stacks (the idle-parker stack and the
    per-hub submission stack: push a node by CAS-ing the head, pop by CAS-ing
    the head to its tail).
 

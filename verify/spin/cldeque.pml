@@ -1,7 +1,7 @@
 /*
  * cldeque.pml -- Promela model of the Chase-Lev work-stealing deque.
  *
- * Models src/pygo_core/cldeque.c:  one OWNER thread that push/pops at the
+ * Models src/runloom_c/cldeque.c:  one OWNER thread that push/pops at the
  * bottom, plus N THIEF threads that steal from the top.  Spin explores
  * every interleaving of the individual atomic memory operations under a
  * sequentially-consistent memory model.

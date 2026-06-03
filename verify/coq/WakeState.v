@@ -24,7 +24,7 @@
 
 From Stdlib Require Import Lia.
 
-(* The six wake states, exactly as in pygo_sched.h / wake_state.pml. *)
+(* The six wake states, exactly as in runloom_sched.h / wake_state.pml. *)
 Inductive WState : Set :=
   | Parked
   | Queued

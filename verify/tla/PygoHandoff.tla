@@ -1,6 +1,6 @@
----------------------------- MODULE PygoHandoff ----------------------------
+---------------------------- MODULE RunloomHandoff ----------------------------
 (***************************************************************************)
-(* TLA+ model of pygo's stall-recovery / P-handoff (PYGO_HANDOFF, the      *)
+(* TLA+ model of runloom's stall-recovery / P-handoff (RUNLOOM_HANDOFF, the      *)
 (* "Group B" arc): when a hub WEDGES (blocks in a syscall or a Python       *)
 (* handler and stops draining its run queue), a rescue M must adopt that    *)
 (* hub and drain ITS queue to empty, so the wedged hub's work is never      *)

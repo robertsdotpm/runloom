@@ -2,7 +2,7 @@
 
 Coverage and TSan find wrong behaviour; this finds LEAKED resources -- the bug
 class runloom has a documented history of (FD leak in load_interfaces, the
-completed-PygoTask task<->driver cycle, the exception refcycle, leaked parkers)
+completed-RunloomTask task<->driver cycle, the exception refcycle, leaked parkers)
 and which the new monkey layer adds fresh surface for (the thread-pool offload
 backend, the 60 s DNS cache, subprocess pipes, the cooperative socket/selector
 wrappers).

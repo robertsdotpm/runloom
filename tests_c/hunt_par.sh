@@ -13,9 +13,9 @@ OUT=/tmp/hunt_capture.txt
 : > "$OUT"
 echo "par-hunt: N=$N H=$H M=$M total=$TOTAL P=$P watchdog=${WD}s"
 
-# Launch the sweep in the background.  PYGO_DEBUG_DIAG so a captured
+# Launch the sweep in the background.  RUNLOOM_DEBUG_DIAG so a captured
 # hang has a populated event ring.
-export PYGO_DEBUG_DIAG=ring,gstate
+export RUNLOOM_DEBUG_DIAG=ring,gstate
 ( seq 1 "$TOTAL" | xargs -P"$P" -I{} "$BIN" "$N" "$H" "$M" {} >/dev/null 2>&1 ) &
 SWEEP=$!
 echo "sweep pid=$SWEEP"
@@ -33,8 +33,8 @@ capture() {
     timeout 50 sudo -n gdb -p "$pid" -batch \
         -ex 'set pagination off' \
         -ex 'thread apply all bt' \
-        -ex 'call (void)pygo_diag_dump(2)' \
-        -ex 'call (int)pygo_self_check(1)' 2>&1 | tee -a "$OUT"
+        -ex 'call (void)runloom_diag_dump(2)' \
+        -ex 'call (int)runloom_self_check(1)' 2>&1 | tee -a "$OUT"
     echo "PID=$pid" > /tmp/hunt_pid.txt
     echo "=== pid=$pid left ALIVE for manual gdb ===" | tee -a "$OUT"
 }

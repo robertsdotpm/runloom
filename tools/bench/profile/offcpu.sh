@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# offcpu.sh -- off-CPU / scheduler-latency profiling of a pygo workload.
+# offcpu.sh -- off-CPU / scheduler-latency profiling of a runloom workload.
 #
 # For a scheduler, where goroutines *block* and how long they wait to be
 # rescheduled matters more than where CPU burns.  On-CPU profilers miss this
@@ -10,8 +10,8 @@
 #   2. bpftrace    -- off-CPU time histogram (sched_switch): how long threads
 #                     stay blocked.  (Brendan Gregg's off-CPU analysis.)
 #
-# Goroutine-level park->wake latency (below the OS thread) lives in pygo's own
-# event ring -- run the workload with PYGO_DEBUG=ring,gstate and read
+# Goroutine-level park->wake latency (below the OS thread) lives in runloom's own
+# event ring -- run the workload with RUNLOOM_DEBUG=ring,gstate and read
 # _diag_dump; this script measures the OS-thread layer underneath it.
 #
 # perf needs kernel.perf_event_paranoid <= 1; bpftrace needs root.  Both are
@@ -29,7 +29,7 @@ PARANOID="$(cat /proc/sys/kernel/perf_event_paranoid 2>/dev/null || echo 99)"
 # ---- preferred: perf sched run-queue latency -----------------------------
 if command -v perf >/dev/null 2>&1 && [ "$PARANOID" -le 1 ]; then
     echo "[offcpu] perf sched record on target.py (run-queue latency)"
-    REC="$(mktemp /tmp/pygo_perfsched.XXXXXX)"
+    REC="$(mktemp /tmp/runloom_perfsched.XXXXXX)"
     if perf sched record -o "$REC" -- "$PY" "$HERE/target.py" >/dev/null 2>&1; then
         perf sched latency -i "$REC" | head -40
         "$(command -v safe-rm || echo rm)" -f "$REC"

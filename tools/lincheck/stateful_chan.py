@@ -1,4 +1,4 @@
-"""Stateful (model-based) Hypothesis testing of pygo channel semantics.
+"""Stateful (model-based) Hypothesis testing of runloom channel semantics.
 
 The existing tests/test_chan_properties.py uses only @given (stateless).  This
 is a RuleBasedStateMachine: Hypothesis generates random *sequences* of
@@ -22,26 +22,26 @@ from hypothesis import settings
 from hypothesis import strategies as st
 from hypothesis.stateful import RuleBasedStateMachine, invariant, precondition, rule
 
-import pygo_core
+import runloom_c
 
 
 def go1(fn):
     """Run one short, non-blocking goroutine to completion."""
-    pygo_core.go(fn)
-    pygo_core.run()
+    runloom_c.go(fn)
+    runloom_c.run()
 
 
 class ChannelStateMachine(RuleBasedStateMachine):
     def __init__(self):
         super(ChannelStateMachine, self).__init__()
         self.cap = 8
-        self.ch = pygo_core.Chan(self.cap)
+        self.ch = runloom_c.Chan(self.cap)
         self.ref = deque()       # reference FIFO model of the buffer
         self.closed = False
         # Second channel, used only to give select() a genuine multi-case
         # choice.  Kept open for the whole run (never closed) to bound the
         # state space; ch is the one that exercises the close paths.
-        self.ch2 = pygo_core.Chan(self.cap)
+        self.ch2 = runloom_c.Chan(self.cap)
         self.ref2 = deque()
 
     @rule(v=st.integers(min_value=0, max_value=10 ** 6))
@@ -68,7 +68,7 @@ class ChannelStateMachine(RuleBasedStateMachine):
         # is the multi-waiter install/abort/cleanup path -- chan.c's four
         # historical select bugs all lived here.
         box = []
-        go1(lambda: box.append(pygo_core.select([("recv", self.ch), ("recv", self.ch2)])))
+        go1(lambda: box.append(runloom_c.select([("recv", self.ch), ("recv", self.ch2)])))
         idx, res = box[0]
         v, ok = res
         assert idx in (0, 1), "select returned bad index {0}".format(idx)
@@ -112,7 +112,7 @@ class ChannelStateMachine(RuleBasedStateMachine):
 
     @invariant()
     def runtime_consistent(self):
-        assert pygo_core._self_check(0) == 0, "self_check failed"
+        assert runloom_c._self_check(0) == 0, "self_check failed"
 
 
 ChannelStateMachine.TestCase.settings = settings(max_examples=200, stateful_step_count=50)
