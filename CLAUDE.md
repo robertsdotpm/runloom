@@ -107,5 +107,28 @@
   long-lived loop (per-test loop reset hides it). Regression guard:
   `pygo_compat/goroutine_leak_char.py` (parked stays 0 across cycles).
 
+- **Future done-callbacks defer through call_soon, in asyncio order.**
+  `Future.__schedule_callbacks` in asyncio defers EVERY done-callback via
+  `loop.call_soon` -- a waiting Task's `__wakeup` AND library/user done-callbacks
+  (gather's `_done_callback`, aiojobs' job `_done_callback`, ...). So a setter
+  that completes a future and KEEPS RUNNING, or a task whose own done-callback
+  mutates shared state, is observed in asyncio order: the waiter scheduled first
+  (by an earlier `set_result`) resumes BEFORE the future's later done-callbacks.
+  `_fire_callbacks` must therefore defer every callback EXCEPT
+  `PygoTask._wake_unpark` (pygo's own await-wake primitive -- deferring it would
+  spawn a goroutine per await and break park/unpark; it only readies the g, which
+  is FIFO-after an already-readied waiter, so ordering still holds) and callbacks
+  tagged `_pygo_fire_sync` (the run loop's `_stop_on_done`, which must stop the
+  drive in the same turn). Stock C-Task/`_PyTask` wakeups keep the
+  `_run_stock_task_cb` trampoline (re-entry-unsafe). Firing library callbacks
+  synchronously inverted the order and broke the falcon/uvicorn websocket-close
+  ordering (a close frame's done-callback ran before the recv waiter) and
+  aiojobs' pending-job promotion. Regression guard:
+  `pygo_compat/ws_close_order_repro.py` (frame_sent True == stock).
+  NOTE: this matches asyncio's *callback* order, not its inline-task-step: a
+  woken PygoTask is readied (a goroutine), not run-to-next-await inline inside
+  its wakeup, so a done-callback racing the woken task's NEXT step is still M:N
+  (aiojobs `test_job_close_exception`).
+
 ## Conventions
 - Use `safe-rm`, never plain `rm`, for any file deletion.

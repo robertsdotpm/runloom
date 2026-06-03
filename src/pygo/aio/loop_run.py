@@ -91,6 +91,11 @@ class _LoopRunMixin(object):
                 if box is not None:
                     box[0] = True
                 pygo_core.sched_stop()
+            # Fire synchronously the instant the main future completes (do NOT
+            # defer through call_soon like a library done-callback): this is the
+            # run loop's own control hook -- it must stop the drive in the same
+            # turn, not a tick later. See _fire_callbacks (_pygo_fire_sync).
+            _stop_on_done._pygo_fire_sync = True
             future.add_done_callback(_stop_on_done)
             self._spawn_keepalive()
             # Remove the stop callback when the drive returns, no matter HOW it

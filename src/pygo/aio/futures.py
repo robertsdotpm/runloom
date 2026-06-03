@@ -229,58 +229,70 @@ class _PygoFutureMixin(object):
         from .tasks import PygoTask   # lazy: breaks the futures<->tasks cycle
         cbs, self._pgcbs = self._pgcbs, []
         loop = self._loop
+        live = loop is not None and not getattr(loop, "_closed", False)
         for cb, ctx in cbs:
-            # A stock asyncio.Task (C `_asyncio.Task` OR pure-Python `_PyTask`)
-            # awaiting a PygoFuture registers its Task.__wakeup as the
-            # done-callback, WITH context=task._context (aiohttp eager-starts
-            # C Task()s directly; CPython's own test_asyncio drives _PyTask).
-            # Stock asyncio schedules future callbacks via loop.call_soon; firing
-            # __wakeup SYNCHRONOUSLY from inside the future's own cancel()/
-            # set_result is wrong two ways: the C Task mishandles re-entry (never
-            # reschedules __step -> the awaiting task hangs, e.g. write_bytes,
-            # the streaming-request body-writer, cancelled on connection close),
-            # and a _PyTask whose task._context is ALREADY entered higher on the
-            # stack (a self-cancelling task: cancel() inside its own coro fires
-            # the just-registered wakeup before __step returns) makes ctx.run
-            # raise "cannot enter context" -> the wake is dropped -> hang
-            # (test_tasks::test_cancel_current_task).  Defer BOTH stock-task
-            # kinds (match asyncio); every other callback -- pygo's _wake_unpark,
-            # library done-callbacks -- stays synchronous, preserving pygo's wake
-            # timing.
+            # asyncio's Future.__schedule_callbacks defers EVERY done-callback
+            # through loop.call_soon -- a waiting Task's __wakeup AND library/user
+            # done-callbacks (gather's _done_callback, aiojobs' job _done_callback,
+            # ...). So a setter that completes a future and KEEPS RUNNING, or a
+            # task whose own done-callback mutates shared state, is observed in
+            # asyncio order: the awaiter that was scheduled first (by an earlier
+            # set_result) resumes BEFORE the future's other, later done-callbacks.
+            # pygo keeps exactly ONE callback synchronous: PygoTask._wake_unpark,
+            # its own await-wake primitive -- deferring it would spawn a goroutine
+            # per await and break park/unpark (it only readies the g, which is
+            # itself FIFO-after an already-readied waiter, so ordering still
+            # holds). A pygo-internal control callback may opt back into sync via
+            # the `_pygo_fire_sync` marker (the run loop's _stop_on_done). EVERY
+            # other callback is deferred to match asyncio.
+            #
+            # Stock C-Task/_PyTask __wakeup additionally MUST go through the
+            # trampoline, never fire synchronously: the C Task mishandles re-entry
+            # (never reschedules __step -> awaiter hangs) and a _PyTask whose
+            # _context is already entered higher on the stack raises "cannot enter
+            # context". Firing library callbacks synchronously inverted the order
+            # above and broke aiojobs (close() exception propagation + pending-job
+            # promotion) and the falcon/uvicorn websocket-close ordering.
             host = getattr(cb, "__self__", None)
-            if (loop is not None and not getattr(loop, "_closed", False)
-                    and isinstance(host, _STOCK_TASK_TYPES)
-                    and not isinstance(host, PygoTask)):
+            sync = (isinstance(host, PygoTask)
+                    or getattr(cb, "_pygo_fire_sync", False)
+                    or not live)
+            if not sync:
                 try:
-                    loop.call_soon(_run_stock_task_cb, loop, cb, self,
-                                   context=ctx)
+                    if isinstance(host, _STOCK_TASK_TYPES):
+                        loop.call_soon(_run_stock_task_cb, loop, cb, self,
+                                       context=ctx)
+                    else:
+                        loop.call_soon(cb, self, context=ctx)
                 except BaseException as e:
                     self._report_exc(e)
-            else:
-                try:
-                    if ctx is None:
-                        cb(self)
-                    else:
-                        ctx.run(cb, self)
-                except RuntimeError as e:
-                    # Defensive net for ANY callback registered with a context
-                    # that is already entered higher on this stack (a future
-                    # completed synchronously from inside that very context).
-                    # Context.run rejects re-entry BEFORE invoking cb, so cb has
-                    # NOT run; deferring to the next loop tick (the context has
-                    # exited by then) mirrors asyncio's always-call_soon dispatch
-                    # rather than dropping the wake and hanging the awaiter.
-                    if (ctx is not None and loop is not None
-                            and not getattr(loop, "_closed", False)
-                            and str(e).startswith("cannot enter context")):
-                        try:
-                            loop.call_soon(cb, self, context=ctx)
-                        except BaseException as e2:
-                            self._report_exc(e2)
-                    else:
-                        self._report_exc(e)
-                except BaseException as e:
+                continue
+            # Synchronous: PygoTask._wake_unpark, a marked internal control
+            # callback, or the loop is gone (nothing to defer onto).
+            try:
+                if ctx is None:
+                    cb(self)
+                else:
+                    ctx.run(cb, self)
+            except RuntimeError as e:
+                # Defensive net for a callback registered with a context that is
+                # already entered higher on this stack (a future completed
+                # synchronously from inside that very context). Context.run
+                # rejects re-entry BEFORE invoking cb, so cb has NOT run;
+                # deferring to the next loop tick (the context has exited by
+                # then) mirrors asyncio's always-call_soon dispatch rather than
+                # dropping the wake and hanging the awaiter.
+                if (ctx is not None and loop is not None
+                        and not getattr(loop, "_closed", False)
+                        and str(e).startswith("cannot enter context")):
+                    try:
+                        loop.call_soon(cb, self, context=ctx)
+                    except BaseException as e2:
+                        self._report_exc(e2)
+                else:
                     self._report_exc(e)
+            except BaseException as e:
+                self._report_exc(e)
 
     def _report_exc(self, e):
         if self._loop is not None:
