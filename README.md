@@ -86,6 +86,26 @@ All measured; figures label whether the handler is Python or C.
   CPython's refcount-contention ceiling). A **Python** handler is another
   ~2.2× slower than the C path. See *Current limitations* for why.
 
+- **vs the async ecosystem** -- same TCP echo (N=1000 keepalive conns, 1 ms
+  simulated backend I/O), Python handler, one core, on **GIL'd 3.13** so every
+  runtime is single-core and comparable (gevent/uvloop don't run on
+  free-threaded 3.13t -- gevent's cffi dep won't build):
+
+  | runtime | rps | p50 | p99.9 | max |
+  | --- | ---: | ---: | ---: | ---: |
+  | asyncio | 13.8 K | 71 ms | 114 ms | 114 ms |
+  | **gevent** (greenlet + libev) | 13.2 K | 74 ms | 170 ms | 183 ms |
+  | uvloop (libuv) | 24.2 K | 32 ms | 410 ms | **8.0 s** |
+  | **pygo** (1 core) | **21.4 K** | 45 ms | **81 ms** | **84 ms** |
+
+  pygo is **~1.6× gevent** -- its closest analog (blocking-style code, one
+  task per connection) -- and **~1.55× asyncio**, with the **tightest tail of
+  the four**. uvloop's peak is ~12% higher, but its tail blew out (max ~8 s,
+  hundreds of requests overflowing) under this connection load while pygo
+  stayed bounded. And on free-threaded 3.13t pygo additionally **scales ~6× to
+  8 cores (121 K rps, p50 7.9 ms)** -- multi-core that none of the others can
+  do. Harness + numbers: [bench/io_compare/](bench/io_compare/).
+
 The honest ceiling: pygo does **not** make Python faster per core (~80 K
 pure-Python ops/s/core is a CPython constant). It lets one process **hit that
 on every core at once** with a blocking programming model -- which asyncio
