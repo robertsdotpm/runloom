@@ -11,12 +11,17 @@
   everything, or name phases). Run that before proposing a merge.
 - There is also a **local self-hosted CI runner** (a cron-driven shell script on
   the dev box, NOT GitHub Actions) that auto-builds+tests every new `origin/main`
-  on a matrix: Linux 3.13t + Windows 3.12 + Windows 3.13t. It is **post-merge
-  validation, NOT a merge gate.** Do **not** wait on it or block a merge on it —
-  a full Windows pass is ~15 min, too slow to sit on. Just **periodically check**
-  its result: `~/projects/pygo-ci-runner/ci-status.sh` (or `cat
-  ~/projects/pygo-ci-status/latest.txt`). `PASS`/`PASS_BASELINE` = fine;
+  on a matrix: Linux 3.13t + Windows 3.12 + Windows 3.13t + **macOS arm64 3.13t**.
+  It is **post-merge validation, NOT a merge gate.** Do **not** wait on it or
+  block a merge on it — a full pass is ~15 min, too slow to sit on. Just
+  **periodically check** its result: `~/projects/pygo-ci-runner/ci-status.sh`
+  (or `cat ~/projects/pygo-ci-status/latest.txt`). `PASS`/`PASS_BASELINE` = fine;
   `REGRESSION` = a NEW failure worth a look (known platform gaps are baselined).
+  Each target deletes its built extension before the `--force` rebuild, so a
+  broken build surfaces as `BUILD_FAIL` instead of hiding behind a stale `.pyd`/
+  `.so`.  Known baselined gap: `test_freethread_stress::test_gc_stw_under_goroutine_churn`
+  HANGS (~80%) on **win-3.13t only** — free-threaded-Windows M:N under a
+  `gc.collect()` stop-the-world; passes on linux/mac/win-3.12.
 
 ## Build & test
 - Target is **free-threaded CPython 3.13t** — the M:N scheduler is only real
