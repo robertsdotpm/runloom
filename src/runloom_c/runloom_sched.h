@@ -457,9 +457,6 @@ PyObject *runloom_sched_spawn_sized(runloom_sched_t *s, PyObject *callable,
  * calibration; subsequent goroutines spawn at the requested size. */
 void   runloom_sched_set_default_stack_size(size_t bytes);
 size_t runloom_sched_get_default_stack_size(void);
-/* Non-freezing floor set (RUNLOOM_STACK_SIZE at import); calibration still
- * adapts up from the new floor.  Call before the first runloom_sched_get(). */
-void   runloom_sched_set_default_stack_floor(size_t bytes);
 
 /* Snapshot of calibration state.  All fields are best-effort reads
  * (no lock).  Used by runloom_c.stats(). */

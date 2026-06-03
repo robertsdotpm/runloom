@@ -153,6 +153,22 @@ def _patch_ssl():
     _orig_wrap_socket = _ssl_mod.SSLContext.wrap_socket
     _ssl_mod.SSLContext.wrap_socket = _patched_wrap_socket
 
+    # Pre-pay OpenSSL's one-time init on the MAIN thread (8 MB stack).  The
+    # first use of _ssl in a process drives a ~40 KB C-stack init path that
+    # overflows the default 32 KB goroutine stack -> a guard-page SEGV (a g
+    # that is the first ever to touch ssl would crash; see
+    # tests/test_stack_frames.py and docs/cooperative_stdlib_coverage.md).
+    # Importing ssl (via _ssl_mod, on the main thread) already triggers this,
+    # but force it explicitly so a future lazy-import refactor can't silently
+    # move the fat init onto a goroutine's stack.  Throwaway, no network.
+    try:
+        proto = getattr(_ssl_mod, "PROTOCOL_TLS_CLIENT", None)
+        if proto is None:
+            proto = _ssl_mod.PROTOCOL_TLS
+        _ssl_mod.SSLContext(proto)
+    except Exception:        # noqa: BLE001  warm-up is best-effort
+        pass
+
 
 def _unpatch_ssl():
     S = _ssl_mod.SSLSocket

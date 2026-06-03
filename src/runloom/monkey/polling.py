@@ -2,14 +2,125 @@
 from ._base import *  # noqa: F401,F403  (shared foundation)
 from .sockets import _netpoll_unregister  # noqa: F401
 
+# Real select.* factories, captured once.  Used by BOTH the select.select
+# reimplementation below and the selectors wrappers further down.
+_real_select_poll   = getattr(_select_mod, "poll", None)
+_real_select_epoll  = getattr(_select_mod, "epoll", None)
+_real_select_kqueue = getattr(_select_mod, "kqueue", None)
+
+# epoll event masks for the cooperative select.select reimplementation.
+_EPOLLIN  = getattr(_select_mod, "EPOLLIN", None)
+_EPOLLOUT = getattr(_select_mod, "EPOLLOUT", None)
+_EPOLLPRI = getattr(_select_mod, "EPOLLPRI", None)
+_EPOLLERR = getattr(_select_mod, "EPOLLERR", 0)
+_EPOLLHUP = getattr(_select_mod, "EPOLLHUP", 0)
+# The cooperative path needs a real epoll AND its event constants (Linux).
+_CO_EPOLL_OK = _real_select_epoll is not None and _EPOLLIN is not None
+
 # ============================================================
-# select.select
+# select.select -- cooperative, on netpoll
+#
+# select.select waits on a SET of fds; runloom's wait_fd parks on ONE fd.  An
+# epoll fd is itself pollable (readable exactly when it has >=1 ready event),
+# so we express select.select the same way the epoll/kqueue selector wrappers
+# do: register the fds on a transient epoll, park on THAT epoll's fd via
+# wait_fd, drain with a non-blocking poll(0), and map the events back to the
+# three result lists.  This:
+#   * never calls CPython's select_select_impl (whose three pylist[FD_SETSIZE+1]
+#     arrays are a ~51 KB single C frame that overflows the goroutine stack --
+#     the only stdlib leaf that does; see docs/cooperative_stdlib_coverage.md),
+#   * consumes NO pool thread -- the goroutine parks on netpoll like every
+#     other socket, so it scales to a million concurrent waiters, and
+#   * keeps the hub free (cooperative) without the heavier offload fallback.
+#
+# Fallback to a pool-thread offload (the blocking OS select runs on a real
+# 8 MB thread stack, the goroutine merely parks on the offload) ONLY when there
+# is no usable epoll -- a non-epollable fd (regular file/char device, which
+# select treats as always-ready but epoll rejects) or a platform without epoll
+# (Windows; *BSD/macOS could grow a kqueue path later).  The offload never runs
+# select inline on the goroutine stack, so the fat frame is never an issue.
 # ============================================================
 _orig_select_select = None
 
 
+class _SelectFallback(Exception):
+    """Internal: this select can't ride epoll (non-epollable fd / no epoll);
+    fall back to the pool-thread offload."""
+
+
 def _fd_of(x):
     return x.fileno() if hasattr(x, "fileno") else int(x)
+
+
+def _select_map_back(ready, rfds, wfds, xfds):
+    """Map epoll (fd, eventmask) results back to select's (r, w, x) lists,
+    returning the ORIGINAL objects the caller passed.  An errored/hung-up fd
+    is reported ready in whichever lists it was registered (matching how
+    CPython emulates select over poll)."""
+    rmask = _EPOLLIN | _EPOLLERR | _EPOLLHUP
+    wmask = _EPOLLOUT | _EPOLLERR | _EPOLLHUP
+    xmask = _EPOLLPRI | _EPOLLERR
+    r = []; w = []; x = []
+    for fd, ev in ready:
+        if fd in rfds and (ev & rmask):
+            r.append(rfds[fd])
+        if fd in wfds and (ev & wmask):
+            w.append(wfds[fd])
+        if fd in xfds and (ev & xmask):
+            x.append(xfds[fd])
+    return r, w, x
+
+
+def _co_select_via_epoll(rlist, wlist, xlist, timeout):
+    """Cooperative select on a transient epoll; raises _SelectFallback if any
+    fd can't be registered (caller then offloads the whole call)."""
+    rfds = {}; wfds = {}; xfds = {}
+    masks = {}
+    for o in rlist:
+        fd = _fd_of(o); rfds[fd] = o; masks[fd] = masks.get(fd, 0) | _EPOLLIN
+    for o in wlist:
+        fd = _fd_of(o); wfds[fd] = o; masks[fd] = masks.get(fd, 0) | _EPOLLOUT
+    for o in xlist:
+        fd = _fd_of(o); xfds[fd] = o; masks[fd] = masks.get(fd, 0) | _EPOLLPRI
+
+    ep = _real_select_epoll()
+    try:
+        for fd, m in masks.items():
+            try:
+                ep.register(fd, m)
+            except (OSError, ValueError):
+                # Regular files / unpollable fds: epoll rejects them but select
+                # treats them as ready.  Hand the whole call to the offload.
+                raise _SelectFallback()
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while True:
+            ready = ep.poll(0)              # non-blocking drain
+            if ready:
+                return _select_map_back(ready, rfds, wfds, xfds)
+            if timeout is not None and timeout <= 0:
+                return [], [], []           # non-blocking: nothing ready
+            if deadline is None:
+                wait_ms = -1
+            else:
+                rem = deadline - time.monotonic()
+                if rem <= 0:
+                    return [], [], []
+                wait_ms = max(1, int(rem * 1000))
+            try:
+                runloom_c.wait_fd(ep.fileno(), READ, wait_ms)  # park on epoll fd
+            except OSError:
+                raise _SelectFallback()
+    finally:
+        # Drop the transient epoll fd's netpoll registration before closing it,
+        # so a later fd reuse re-registers cleanly.
+        try:
+            if _netpoll_unregister is not None:
+                fd = ep.fileno()
+                if fd >= 0:
+                    _netpoll_unregister(fd)
+        except (OSError, ValueError):
+            pass
+        ep.close()
 
 
 def _patched_select(rlist, wlist, xlist, timeout=None):
@@ -17,68 +128,39 @@ def _patched_select(rlist, wlist, xlist, timeout=None):
         return _orig_select_select(rlist, wlist, xlist, timeout)
 
     # select.select() accepts ANY iterable of fds, and selectors.SelectSelector
-    # -- which is selectors.DefaultSelector on Windows -- passes SETS
-    # (self._readers / self._writers).  The fast path below indexes rlist[0],
-    # so normalise to lists first; otherwise a set raises
-    # "'set' object is not subscriptable", which on Windows broke every
-    # selectors-driven select (the goroutine died -> hang/crash).  Real
+    # passes SETS (self._readers / self._writers).  Normalise to lists; real
     # select.select returns lists regardless of input type, so this matches.
     rlist = list(rlist)
     wlist = list(wlist)
     xlist = list(xlist)
 
-    # A zero (or negative) timeout select is non-blocking by definition: poll
-    # the OS select once and return.  No cooperation is needed -- it cannot
-    # block -- and this sidesteps wait_fd(timeout=0), whose Windows IOCP path
-    # races the async AFD completion against the deadline-heap wake and can hang
-    # (a not-ready fd never returns).  selectors' non-blocking poll lands here.
-    if timeout is not None and timeout <= 0:
-        return _orig_select_select(rlist, wlist, xlist, 0)
+    # No fds: select is just a (cooperative) sleep for `timeout`.
+    if not rlist and not wlist and not xlist:
+        if timeout is None:
+            # Degenerate "block forever waiting for nothing": park in long
+            # cooperative increments (cancellable) rather than busy-wait.
+            while True:
+                _co_sleep(3600.0)
+        if timeout > 0:
+            _co_sleep(timeout)
+        return [], [], []
 
-    # Non-socket fds (pipes/files) can't ride the Windows netpoll backend, but
-    # we DON'T pre-screen them with os.fstat here: os.fstat on a raw WinSock
-    # SOCKET handle takes the CRT fd-validation error path, and doing that on a
-    # goroutine's swapped stack under concurrency access-violates on Windows
-    # (a non-socket fstat that *succeeds* is fine; it is the failing call that
-    # crashes).  The fast path below already handles non-sockets correctly:
-    # wait_fd raises OSError on an unpollable fd (verified), and we fall back to
-    # the OS select -- the same consistent error path the pre-check gave, minus
-    # the crash.  The multi-fd path likewise falls back via its own except.
-    n = len(rlist) + len(wlist)
-    # Fast path: one fd, no xlist -> map to wait_fd directly.
-    if n == 1 and not xlist:
-        if rlist:
-            fd, events, src = _fd_of(rlist[0]), READ, "r"
-            obj = rlist[0]
-        else:
-            fd, events, src = _fd_of(wlist[0]), WRITE, "w"
-            obj = wlist[0]
-        timeout_ms = -1 if timeout is None else max(0, int(timeout * 1000))
+    # Cooperative path: register the fds on a transient epoll and park on ITS
+    # fd via netpoll -- no select_select_impl fat frame, no pool thread.
+    if _CO_EPOLL_OK:
         try:
-            ready = runloom_c.wait_fd(fd, events, timeout_ms)
-        except OSError:
-            return _orig_select_select(rlist, wlist, xlist, timeout)
-        if ready == 0:
-            return [], [], []
-        return ([obj], [], []) if src == "r" else ([], [obj], [])
+            return _co_select_via_epoll(rlist, wlist, xlist, timeout)
+        except _SelectFallback:
+            pass
 
-    # Multi-fd: offload the blocking OS select to the backend pool and park
-    # this goroutine on it.
-    #
-    # The previous form busy-polled -- real select(timeout=0) [releases +
-    # reacquires the GIL] + _co_sleep [park], in a loop, on the hub thread.
-    # A GIL-release-then-park cycle on an M:N hub corrupts the goroutine's
-    # suspended eval-frame tstate -> SIGSEGV (deterministic on >=2 hubs; see
-    # _mntests/findings_segv_gilrelease_park.py -- a core scheduler hazard).
-    # Offloading keeps the GIL-releasing select on a PLAIN POOL THREAD (never a
-    # hub) while the goroutine merely PARKS on the offload (the crash-free
-    # pattern), staying cooperative: other goroutines run while the pool thread
-    # blocks in select for the full timeout.
-    try:
-        return _get_backend().submit(
-            _orig_select_select, (rlist, wlist, xlist, timeout), {})
-    except (OSError, ValueError):
-        return _orig_select_select(rlist, wlist, xlist, timeout)
+    # Fallback (no epoll / non-epollable fd): run the blocking OS select on a
+    # pool thread (8 MB stack -- the fat frame is fine there) and PARK this
+    # goroutine on the offload.  We never call _orig_select_select inline: its
+    # ~51 KB frame overflows the goroutine's C stack.  A normalised timeout<=0
+    # stays non-blocking on the pool thread.
+    pool_timeout = 0 if (timeout is not None and timeout <= 0) else timeout
+    return _get_backend().submit(
+        _orig_select_select, (rlist, wlist, xlist, pool_timeout), {})
 
 
 def _patch_select():
@@ -117,11 +199,9 @@ def _unpatch_select():
 #
 # Outside a goroutine every wrapper degrades to the real blocking call, so
 # helper threads keep working after patch().
+# (_real_select_poll / _real_select_epoll / _real_select_kqueue are captured
+# once at the top of this module.)
 # ============================================================
-_real_select_poll  = getattr(_select_mod, "poll", None)
-_real_select_epoll = getattr(_select_mod, "epoll", None)
-_real_select_kqueue = getattr(_select_mod, "kqueue", None)
-
 # Cap on how long a single cooperative wait blocks before re-probing, so a
 # wait that was registered before its fd became ready (or a level-triggered
 # edge we already drained) can never wedge longer than this.  The epoll/
@@ -166,14 +246,14 @@ class CoPoll(object):
         # poll() timeout is in MILLISECONDS; None or negative == infinite.
         if not _in_goroutine():
             return self._r.poll(timeout)
-        # poll() has no kernel fd to park on, so the old form busy-polled
-        # poll(0) [GIL release] + _co_sleep [park] on the hub -- a
-        # GIL-release-then-park cycle that corrupts the goroutine's suspended
-        # eval-frame tstate under the M:N scheduler -> SIGSEGV (see
-        # _mntests/findings_segv_gilrelease_park.py).  This path backs
-        # selectors.PollSelector, i.e. subprocess.communicate() on Linux.
-        # Offload the blocking poll to the pool (the GIL-releasing poll runs
-        # on a plain pool thread, never a hub) and merely park on it.
+        # A poll object has no kernel fd of its own to park on, so (unlike
+        # epoll/kqueue, which park on their backing fd, and select.select,
+        # which parks on a transient epoll fd) there's no clean netpoll target.
+        # The old form busy-polled poll(0) + _co_sleep on the hub; instead we
+        # offload the blocking poll to a pool thread and PARK on the offload --
+        # the goroutine yields, other goroutines run, no hub spin.  (poll's C
+        # frame is heap-backed, so this is about cooperation, not the
+        # select_select_impl stack-frame issue.)  Backs selectors.PollSelector.
         return _get_backend().submit(self._r.poll, (timeout,), {})
 
     def __getattr__(self, name):
