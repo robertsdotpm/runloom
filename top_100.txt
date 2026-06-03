@@ -1,7 +1,7 @@
 runloom - validated asyncio projects
 ========================================
 
-181 name-brand Python asyncio projects whose own test suites (or
+186 name-brand Python asyncio projects whose own test suites (or
 equivalent end-to-end exercises) run GREEN under runloom's pure-Python
 M:N runtime -- driven through runloom.aio / RunloomEventLoop on free-threaded
 CPython 3.13t (PYTHON_GIL=0). 'pass==stock' means the result matches
@@ -369,4 +369,14 @@ BEYOND 100 (bulk): popular AI/bot libs (>=1000 stars) (4)
 180. pydantic-ai                - Agent.run with TestModel
 181. aiogram                    - Dispatcher.feed_update routed message
 
-TOTAL DISTINCT PROJECTS PASSING: 181
+
+------------------------------------------------------------
+BEYOND 100 (bulk): Rx, distributed, parsers (>=1000 stars) (5)
+------------------------------------------------------------
+182. tqdm                       - tqdm.asyncio async-iter + gather
+183. httptools                  - sans-IO HTTP request parse
+184. reactivex                  - Rx pipeline on AsyncIOScheduler
+185. aiomonitor                 - start_monitor console on the loop
+186. dask                       - dask.distributed async Client map/gather (local cluster)
+
+TOTAL DISTINCT PROJECTS PASSING: 186
