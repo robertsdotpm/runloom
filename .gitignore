@@ -17,3 +17,6 @@ core.*
 .DS_Store
 wheelhouse/
 scripts/release_hosts.env
+
+# hang-hunter generated reports
+hang_hunter_reports/
