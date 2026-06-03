@@ -104,7 +104,7 @@ class _LoopScheduleMixin(object):
         # behaviour is undefined; switch back to pygo_core.go.
         # Roomier stack: call_soon delivers protocol callbacks (data_received,
         # pipe_data_received, ...) that can run deep C-recursive code (crypto),
-        # which overflows the default 128 KB g-stack and SEGVs -- see _IO_STACK.
+        # which overflows the default 32 KB g-stack and SEGVs -- see _IO_STACK.
         _go_io(runner)
         return handle
 

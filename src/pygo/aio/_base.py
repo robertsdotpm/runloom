@@ -48,7 +48,7 @@ def _signal_wakeup_noop(signum, frame):
 
 # Per-task driver stack size (bytes).  PygoTask drivers run arbitrary user
 # code, including deep C-recursive first-time imports (pydantic etc.) that
-# overflow the scheduler's default 128 KB g-stack and SEGV.  512 KB clears
+# overflow the scheduler's default 32 KB g-stack and SEGV.  512 KB clears
 # every real-world import chain seen so far while staying cheap relative to
 # the CPython object tax per task.  Set PYGO_AIO_TASK_STACK=0 to disable and
 # use the scheduler default; set a custom byte count to tune.
@@ -62,7 +62,7 @@ except ValueError:
 # (data_received, connection_made, datagram_received, ...) SYNCHRONOUSLY on
 # their own swapped C stack -- and those callbacks can run deep C-recursive
 # code (e.g. asyncssh runs a full crypto key-exchange + chacha20/OpenSSL chain
-# inside data_received).  That overflows the scheduler's default 128 KB g-stack
+# inside data_received).  That overflows the scheduler's default 32 KB g-stack
 # and SEGVs, exactly like the task-driver case above.  Give them the same
 # roomier stack.  Set PYGO_AIO_IO_STACK=0 to use the scheduler default; set a
 # custom byte count to tune.

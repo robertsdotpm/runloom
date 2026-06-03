@@ -62,7 +62,7 @@
   `datagram_received` (and anything dispatched through `call_soon` / `call_at` /
   the keepalive) run on a goroutine's swapped C stack, and user code there can
   recurse deep into C (e.g. asyncssh runs a full SSH kex + chacha20/OpenSSL
-  encrypt inside `data_received`). The scheduler's default 128 KB g-stack
+  encrypt inside `data_received`). The scheduler's default 32 KB g-stack
   overflows the guard page → SEGV (stock asyncio runs callbacks on the 8 MB
   main-thread stack). Spawn every such goroutine via `_go_io` (`_IO_STACK`,
   default 512 KB, env `PYGO_AIO_IO_STACK`) — the same reason task drivers use

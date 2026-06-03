@@ -81,7 +81,7 @@ class PygoTask(_PygoFutureMixin, asyncio.Task):
         else:
             _body = self._driver
         # Driver goroutines run arbitrary user async code (deep C-recursive
-        # first-time imports overflow the default 128 KB g-stack and SEGV), so
+        # first-time imports overflow the default 32 KB g-stack and SEGV), so
         # give them a roomier stack.  Override with PYGO_AIO_TASK_STACK.
         # fifo=True: task STEPS are scheduled call_soon-FIFO in asyncio, so the
         # PCT controlled scheduler must keep this driver in order with the loop's
