@@ -72,7 +72,8 @@ static const char *const pygo_fault_names[PYGO_FAULT_NSITES] = {
     "WSAPOLL", "SELECT", "IOCP_WAIT", "IOCP_SUBMIT", "KQUEUE_WAIT",
     "KQUEUE_CREATE", "KQUEUE_CTL",
     "TCP_SOCKET", "TCP_CONNECT", "TCP_ACCEPT", "TCP_RECV", "TCP_SEND",
-    "FD_READ", "FD_WRITE" };
+    "FD_READ", "FD_WRITE",
+    "SPAWN_G", "SPAWN_STACK", "SPAWN_TSTATE" };
 static volatile long pygo_fault_fired[PYGO_FAULT_NSITES];
 static volatile long pygo_fault_once_done[PYGO_FAULT_NSITES];
 
@@ -103,7 +104,20 @@ static const char *const pygo_fault_envs[PYGO_FAULT_NSITES] = {
     "PYGO_FAULT_KQUEUE_CREATE", "PYGO_FAULT_KQUEUE_CTL",
     "PYGO_FAULT_TCP_SOCKET", "PYGO_FAULT_TCP_CONNECT", "PYGO_FAULT_TCP_ACCEPT",
     "PYGO_FAULT_TCP_RECV", "PYGO_FAULT_TCP_SEND",
-    "PYGO_FAULT_FD_READ", "PYGO_FAULT_FD_WRITE" };
+    "PYGO_FAULT_FD_READ", "PYGO_FAULT_FD_WRITE",
+    "PYGO_FAULT_SPAWN_G", "PYGO_FAULT_SPAWN_STACK", "PYGO_FAULT_SPAWN_TSTATE" };
+
+/* Cached "any spawn-OOM fault armed" -- keeps the hot spawn alloc sites at a
+ * single branch when no PYGO_FAULT_SPAWN_* env is set.  Read once. */
+int pygo_spawn_fault_armed(void)
+{
+    static int cached = -1;
+    if (cached < 0) {
+        cached = (getenv("PYGO_FAULT_SPAWN_G") || getenv("PYGO_FAULT_SPAWN_STACK")
+                  || getenv("PYGO_FAULT_SPAWN_TSTATE")) ? 1 : 0;
+    }
+    return cached;
+}
 
 /* Returns the error code to inject (nonzero) if this site should fail now. */
 int pygo_fault_inject(int site)

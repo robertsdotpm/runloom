@@ -145,12 +145,21 @@ enum {
     PYGO_FAULT_TCP_SOCKET, PYGO_FAULT_TCP_CONNECT, PYGO_FAULT_TCP_ACCEPT,
     PYGO_FAULT_TCP_RECV, PYGO_FAULT_TCP_SEND,
     PYGO_FAULT_FD_READ, PYGO_FAULT_FD_WRITE,
+    /* Goroutine-spawn allocation OOM injection (every platform). */
+    PYGO_FAULT_SPAWN_G, PYGO_FAULT_SPAWN_STACK, PYGO_FAULT_SPAWN_TSTATE,
     PYGO_FAULT_NSITES
 };
 /* Returns the errno/WSA code to inject at this site now (nonzero), or 0.
  * Defined only on the kqueue/Windows backends (Linux uses strace); pygo_tcp.c
- * calls it only there, so this prototype is harmless + unreferenced on Linux. */
+ * calls it only there, so this prototype is harmless + unreferenced on Linux.
+ * The SPAWN_* sites are injected on every platform (in-process alloc faults). */
 int pygo_fault_inject(int site);
+
+/* Cached "is any PYGO_FAULT_SPAWN_* env set" check, so the goroutine-spawn
+ * alloc sites pay only a branch when OOM injection is not armed. */
+int pygo_spawn_fault_armed(void);
+#define PYGO_SPAWN_FINJ(site) \
+    (pygo_spawn_fault_armed() ? pygo_fault_inject(site) : 0)
 
 /* Register an external eventfd so the pump treats EPOLLIN on that fd
  * as a "drain io_uring CQEs" signal.  Only meaningful on the epoll

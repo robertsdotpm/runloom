@@ -298,6 +298,10 @@ static PYGO_TLS int pygo_g_slab_size = 0;
 pygo_g_t *pygo_g_slab_alloc(void)
 {
     pygo_g_t *g = pygo_g_slab;
+    /* OOM fault injection (test-only; inert unless PYGO_FAULT_SPAWN_G is set):
+     * simulate "can't allocate a goroutine struct" regardless of the slab
+     * cache, so the spawn error paths get exercised. */
+    if (PYGO_SPAWN_FINJ(PYGO_FAULT_SPAWN_G)) return NULL;
     if (g != NULL) {
         pygo_g_slab = g->next;
         pygo_g_slab_size--;
@@ -414,7 +418,11 @@ static PyObject *spawn_common(pygo_sched_t *s, PyObject *callable,
     g->park_fd = -1;   /* not parked on any fd yet (reset after slab reuse) */
     g->pct_prio = 0;   /* fresh goroutine: unassigned PCT priority (slab reuse) */
     g->pct_fifo = 0;   /* default reorderable; m_go(fifo=True) sets it after spawn */
-    g->coro = pygo_coro_new(stack_size, pygo_g_entry, g);
+    /* OOM fault injection (test-only): simulate a stack-allocation failure
+     * (mmap ENOMEM) by forcing coro_new to "fail", exercising the existing
+     * coro==NULL cleanup path.  Inert unless PYGO_FAULT_SPAWN_STACK is set. */
+    g->coro = PYGO_SPAWN_FINJ(PYGO_FAULT_SPAWN_STACK)
+              ? NULL : pygo_coro_new(stack_size, pygo_g_entry, g);
     if (g->coro == NULL) {
         Py_DECREF(g->callable);
         pygo_g_slab_free(g);
