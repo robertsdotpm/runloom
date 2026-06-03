@@ -28,4 +28,5 @@ if command -v valgrind >/dev/null 2>&1; then
 else
     echo "  SKIP: valgrind not installed"
 fi
+echo "== S6 bridge network fuzz =="; "$PY" tools/security/fuzz_bridge.py --iters 600
 echo "== all security checks passed =="
