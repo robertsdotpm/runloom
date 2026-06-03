@@ -1,0 +1,591 @@
+/* runloom_crash.c -- fatal-signal crash reporter.  See runloom_crash.h. */
+
+#if !defined(_WIN32)
+#  define _POSIX_C_SOURCE 200809L
+#endif
+#define PY_SSIZE_T_CLEAN
+#include <Python.h>
+
+#include "runloom_crash.h"
+#include "runloom_introspect.h"
+#include "mn_sched.h"
+#include "coro.h"
+#include "plat.h"
+#include "plat_compat.h"
+
+#include <stdarg.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#if !defined(_WIN32)
+#  include <signal.h>
+#  include <unistd.h>
+#  include <fcntl.h>
+#  include <errno.h>
+#  include <time.h>
+#  include <pthread.h>
+#  include <sys/types.h>
+#  include <sys/mman.h>
+#  if defined(__has_include)
+#    if __has_include(<execinfo.h>)
+#      include <execinfo.h>
+#      define RUNLOOM_HAVE_EXECINFO 1
+#    endif
+#    if __has_include(<sys/prctl.h>)
+#      include <sys/prctl.h>
+#      define RUNLOOM_HAVE_PRCTL 1
+#    endif
+#    if __has_include(<sys/wait.h>)
+#      include <sys/wait.h>
+#    endif
+#  else
+#    include <sys/wait.h>
+#  endif
+#endif
+
+/* ---------------------------------------------------------------- *
+ *  Shared state                                                    *
+ * ---------------------------------------------------------------- */
+static int runloom_crash_flags_v   = 0;
+static int runloom_crash_on        = 0;    /* installed? (atomic) */
+static int runloom_crash_report_fd = -1;   /* extra report file, or -1 */
+
+#if !defined(_WIN32)
+
+/* The fatal signals we install on.  SIGSEGV / SIGBUS are the headline (a
+ * goroutine stack overflow lands in a guard page -> SIGSEGV); the rest are
+ * crashes worth a dump.  SIGABRT is special on the chain-out (re-raise, the
+ * faulting-instruction re-execution trick does not apply to a raised signal). */
+static const int runloom_crash_signals[] = {
+    SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGABRT
+};
+#define RUNLOOM_CRASH_NSIG \
+    ((int)(sizeof runloom_crash_signals / sizeof runloom_crash_signals[0]))
+
+static struct sigaction runloom_crash_prev[RUNLOOM_CRASH_NSIG];
+static struct sigaction runloom_crash_prev_cont;   /* SIGCONT (wait-release) */
+static int  runloom_crash_cont_saved = 0;
+static long runloom_crash_wait_secs = 0;   /* RUNLOOM_CRASH_WAIT_SECS snapshot */
+
+static volatile sig_atomic_t runloom_crash_in_progress = 0;
+static volatile sig_atomic_t runloom_crash_wait_release = 0;
+
+/* Per-thread altstack bookkeeping (so disarm can unmap on thread exit). */
+static RUNLOOM_TLS int    runloom_crash_armed     = 0;
+static RUNLOOM_TLS void  *runloom_crash_alt_base  = NULL;
+static RUNLOOM_TLS size_t runloom_crash_alt_total = 0;
+
+/* ---------------------------------------------------------------- *
+ *  Async-signal-safe-ish emit (write + snprintf only, no malloc)   *
+ * ---------------------------------------------------------------- */
+static void crash_write(int fd, const char *s, size_t n)
+{
+    ssize_t off = 0;
+    while ((size_t)off < n) {
+        ssize_t w = write(fd, s + off, n - off);
+        if (w <= 0) break;
+        off += w;
+    }
+}
+
+static void crash_emit(const char *s)
+{
+    size_t n = strlen(s);
+    crash_write(2, s, n);
+    if (runloom_crash_report_fd >= 0) crash_write(runloom_crash_report_fd, s, n);
+}
+
+static void crash_emitf(const char *fmt, ...)
+{
+    char buf[512];
+    int m;
+    va_list ap;
+    va_start(ap, fmt);
+    m = vsnprintf(buf, sizeof buf, fmt, ap);
+    va_end(ap);
+    if (m > 0) {
+        if ((size_t)m >= sizeof buf) m = (int)sizeof buf - 1;
+        crash_write(2, buf, (size_t)m);
+        if (runloom_crash_report_fd >= 0)
+            crash_write(runloom_crash_report_fd, buf, (size_t)m);
+    }
+}
+
+static const char *crash_sig_name(int sig)
+{
+    switch (sig) {
+    case SIGSEGV: return "SIGSEGV";
+    case SIGBUS:  return "SIGBUS";
+    case SIGILL:  return "SIGILL";
+    case SIGFPE:  return "SIGFPE";
+    case SIGABRT: return "SIGABRT";
+    default:      return "signal";
+    }
+}
+
+static int crash_sig_index(int sig)
+{
+    int i;
+    for (i = 0; i < RUNLOOM_CRASH_NSIG; i++)
+        if (runloom_crash_signals[i] == sig) return i;
+    return -1;
+}
+
+/* ---------------------------------------------------------------- *
+ *  Per-thread sigaltstack                                          *
+ * ---------------------------------------------------------------- */
+static size_t crash_altstack_size(void)
+{
+    size_t want = (size_t)64 * 1024;
+    long ps;
+    size_t page;
+#if defined(_SC_SIGSTKSZ)
+    {
+        long v = sysconf(_SC_SIGSTKSZ);
+        if (v > 0 && (size_t)v > want) want = (size_t)v;
+    }
+#elif defined(SIGSTKSZ)
+    if ((size_t)SIGSTKSZ > want) want = (size_t)SIGSTKSZ;
+#endif
+    ps = sysconf(_SC_PAGESIZE);
+    page = (ps > 0) ? (size_t)ps : (size_t)4096;
+    return (want + page - 1) & ~(page - 1);
+}
+
+void runloom_crash_thread_arm(void)
+{
+    long ps;
+    size_t page, total;
+    void *base;
+    stack_t ss;
+
+    if (!__atomic_load_n(&runloom_crash_on, __ATOMIC_ACQUIRE)) return;
+    if (runloom_crash_armed) return;
+
+    ps = sysconf(_SC_PAGESIZE);
+    page = (ps > 0) ? (size_t)ps : (size_t)4096;
+    total = crash_altstack_size() + page;   /* +1 guard page below the altstack */
+
+    base = mmap(NULL, total, PROT_READ | PROT_WRITE,
+                MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (base == MAP_FAILED) return;
+    (void)mprotect(base, page, PROT_NONE);   /* trap an altstack overflow too */
+
+    ss.ss_sp    = (char *)base + page;
+    ss.ss_size  = total - page;
+    ss.ss_flags = 0;
+    if (sigaltstack(&ss, NULL) != 0) {
+        munmap(base, total);
+        return;
+    }
+    runloom_crash_alt_base  = base;
+    runloom_crash_alt_total = total;
+    runloom_crash_armed     = 1;
+}
+
+void runloom_crash_thread_disarm(void)
+{
+    stack_t ss;
+    if (!runloom_crash_armed) return;
+    ss.ss_sp    = NULL;
+    ss.ss_size  = 0;
+    ss.ss_flags = SS_DISABLE;
+    (void)sigaltstack(&ss, NULL);
+    if (runloom_crash_alt_base != NULL)
+        munmap(runloom_crash_alt_base, runloom_crash_alt_total);
+    runloom_crash_alt_base  = NULL;
+    runloom_crash_alt_total = 0;
+    runloom_crash_armed     = 0;
+}
+
+void runloom_crash_reset_after_fork(void)
+{
+    /* Single-threaded child: the surviving thread keeps its inherited altstack
+     * and the process-wide handler.  Just clear the latch in case the fork
+     * raced a crash on another (now-dead) thread. */
+    runloom_crash_in_progress = 0;
+    runloom_crash_wait_release = 0;
+}
+
+/* ---------------------------------------------------------------- *
+ *  Debugger integration                                            *
+ * ---------------------------------------------------------------- */
+static void crash_cont_handler(int sig)
+{
+    (void)sig;
+    runloom_crash_wait_release = 1;   /* `kill -CONT <pid>` releases the wait */
+}
+
+static void crash_wait_for_debugger(void)
+{
+    long pid = (long)getpid();
+    long waited_ms = 0;
+    crash_emitf(
+        "\n[runloom] paused for a debugger. Attach to live state with:\n"
+        "    gdb -p %ld        (or)        lldb -p %ld\n"
+        "  then `continue`, or run `kill -CONT %ld` from another shell to resume.\n",
+        pid, pid, pid);
+    runloom_crash_wait_release = 0;
+    while (!runloom_crash_wait_release) {
+        struct timespec ts;
+        ts.tv_sec  = 0;
+        ts.tv_nsec = 200L * 1000L * 1000L;   /* 200 ms */
+        nanosleep(&ts, NULL);
+        waited_ms += 200;
+        if (runloom_crash_wait_secs > 0 &&
+            waited_ms >= runloom_crash_wait_secs * 1000) {
+            crash_emit("[runloom] debugger wait timed out; continuing.\n");
+            break;
+        }
+    }
+}
+
+static void crash_spawn_gdb(void)
+{
+    char pidbuf[24];
+    pid_t child;
+    snprintf(pidbuf, sizeof pidbuf, "%ld", (long)getpid());
+    crash_emit("\n[runloom] launching gdb (thread apply all bt full) ...\n");
+    child = fork();
+    if (child == 0) {
+        char *const argv[] = {
+            (char *)"gdb", (char *)"-p", pidbuf, (char *)"-batch", (char *)"-nx",
+            (char *)"-ex", (char *)"set pagination off",
+            (char *)"-ex", (char *)"thread apply all bt full",
+            (char *)"-ex", (char *)"detach",
+            (char *)"-ex", (char *)"quit",
+            (char *)NULL
+        };
+        execvp("gdb", argv);
+        _exit(127);
+    } else if (child > 0) {
+        int st;
+        while (waitpid(child, &st, 0) < 0 && errno == EINTR) { /* retry */ }
+    }
+}
+
+/* ---------------------------------------------------------------- *
+ *  The handler                                                     *
+ * ---------------------------------------------------------------- */
+static void crash_handler(int sig, siginfo_t *si, void *uctx)
+{
+    int   idx  = crash_sig_index(sig);
+    void *addr = (si != NULL) ? si->si_addr : NULL;
+    (void)uctx;
+
+    /* Serialise: only the first faulting thread drives the dump.  A second
+     * concurrent fault (or a re-fault while we dump) parks until the owner
+     * re-raises the default disposition and terminates the process -- this
+     * keeps the report from interleaving and prevents infinite recursion. */
+    if (__atomic_exchange_n(&runloom_crash_in_progress, 1, __ATOMIC_ACQ_REL) != 0) {
+        for (;;) pause();
+    }
+
+    crash_emit("\n======================== runloom crash ========================\n");
+    if (sig == SIGSEGV || sig == SIGBUS)
+        crash_emitf("[runloom] fatal %s at address %p", crash_sig_name(sig), addr);
+    else
+        crash_emitf("[runloom] fatal %s", crash_sig_name(sig));
+    crash_emitf("  (pid %ld, thread 0x%lx)\n",
+                (long)getpid(), (unsigned long)pthread_self());
+
+    /* Classify the fault against the per-goroutine guard pages. */
+    {
+        int kind = 0;
+        unsigned skib = 0;
+        long long gid = (addr != NULL)
+                      ? runloom_goroutine_for_addr(addr, &kind, &skib) : 0;
+        if (kind == 1) {
+            /* The long lines go through crash_emit (strlen + write, no fixed
+             * buffer); only the goid line needs the formatting buffer. */
+            crash_emit("[runloom] >>> GOROUTINE STACK OVERFLOW <<<\n");
+            crash_emitf(
+                "[runloom]     goroutine g%lld ran off the low end of its %u KiB C stack\n",
+                gid, skib);
+            crash_emit(
+                "[runloom]     (the fault hit the guard page just below it).\n"
+                "[runloom]     Fix: give it a bigger stack -- runloom_c.go(fn, stack_size=N),\n"
+                "[runloom]     RUNLOOM_AIO_IO_STACK for the asyncio bridge, or the scheduler\n"
+                "[runloom]     default -- or reduce the C-recursion depth running on it.\n");
+        } else if (kind == 2) {
+            crash_emitf(
+                "[runloom] fault is INSIDE goroutine g%lld's %u KiB stack (not the guard\n",
+                gid, skib);
+            crash_emit(
+                "[runloom]     page) -- likely a wild pointer / use-after-free in code\n"
+                "[runloom]     running on that goroutine.\n");
+        } else {
+            crash_emit(
+                "[runloom] fault is not in any goroutine stack (main/hub stack, the heap,\n"
+                "[runloom]     or a wild pointer).\n");
+        }
+    }
+
+    /* What this thread was running (may differ from the address-mapped g if the
+     * fault address is a wild pointer rather than this g's own stack). */
+    {
+        runloom_g_t *cur = runloom_mn_tls_current_g();
+        if (cur != NULL)
+            crash_emitf("[runloom] this thread was executing goroutine g%lld.\n",
+                        (long long)runloom_g_id(cur));
+    }
+
+    /* Full goroutine registry dump (async-signal-safe; try-locked). */
+    if (runloom_crash_flags_v & RUNLOOM_CRASH_GOROUTINES) {
+        runloom_dump_goroutines_fd(2);
+        if (runloom_crash_report_fd >= 0)
+            runloom_dump_goroutines_fd(runloom_crash_report_fd);
+    }
+
+#if defined(RUNLOOM_HAVE_EXECINFO)
+    if (runloom_crash_flags_v & RUNLOOM_CRASH_BACKTRACE) {
+        void *bt[64];
+        int n = backtrace(bt, 64);
+        crash_emit("\n[runloom] native backtrace (faulting thread):\n");
+        backtrace_symbols_fd(bt, n, 2);
+        if (runloom_crash_report_fd >= 0)
+            backtrace_symbols_fd(bt, n, runloom_crash_report_fd);
+    }
+#endif
+
+    if (runloom_crash_flags_v & RUNLOOM_CRASH_GDB)  crash_spawn_gdb();
+    if (runloom_crash_flags_v & RUNLOOM_CRASH_WAIT) crash_wait_for_debugger();
+
+    crash_emit("[runloom] chaining to the default handler"
+               " (a Python traceback may follow) ...\n");
+    crash_emit("===============================================================\n");
+
+    /* Chain out: restore the previously-installed disposition (faulthandler ->
+     * prints the Python traceback then cores, or SIG_DFL -> cores) and let the
+     * fault re-trigger.  For a synchronous fault, returning re-executes the
+     * faulting instruction under the restored disposition; SIGABRT came from a
+     * raise()/abort() that we'd return PAST, so re-raise it explicitly. */
+    if (idx >= 0) sigaction(sig, &runloom_crash_prev[idx], NULL);
+    if (sig == SIGABRT) {
+        sigset_t s;
+        sigemptyset(&s);
+        sigaddset(&s, sig);
+        sigprocmask(SIG_UNBLOCK, &s, NULL);
+        raise(sig);
+    }
+}
+
+/* ---------------------------------------------------------------- *
+ *  Install / uninstall (POSIX)                                     *
+ * ---------------------------------------------------------------- */
+int runloom_crash_install(int flags, const char *report_path)
+{
+    int i;
+    if (flags == 0) flags = RUNLOOM_CRASH_DEFAULT;
+
+    if (report_path != NULL && report_path[0] != '\0') {
+        int fd = open(report_path, O_WRONLY | O_CREAT | O_APPEND, 0644);
+        if (fd >= 0) {
+            if (runloom_crash_report_fd >= 0 && runloom_crash_report_fd != 2)
+                close(runloom_crash_report_fd);
+            runloom_crash_report_fd = fd;
+        }
+    }
+
+    {
+        const char *s = getenv("RUNLOOM_CRASH_WAIT_SECS");
+        runloom_crash_wait_secs = (s != NULL) ? atol(s) : 0;
+    }
+
+    /* Option D: enable faulthandler FIRST so our handler -- installed after,
+     * hence outermost -- runs the goroutine dump and then chains out to
+     * faulthandler for the Python traceback. */
+    if (flags & RUNLOOM_CRASH_PYSTACK) {
+        PyObject *fh = PyImport_ImportModule("faulthandler");
+        if (fh != NULL) {
+            PyObject *r = PyObject_CallMethod(fh, "enable", NULL);
+            Py_XDECREF(r);
+            Py_DECREF(fh);
+        }
+        PyErr_Clear();
+    }
+
+#if defined(RUNLOOM_HAVE_PRCTL) && defined(PR_SET_PTRACER)
+    /* Let a forked child (auto-gdb) or an external debugger attach under a
+     * restrictive Yama ptrace_scope. */
+    if (flags & (RUNLOOM_CRASH_GDB | RUNLOOM_CRASH_WAIT)) {
+#  if defined(PR_SET_PTRACER_ANY)
+        prctl(PR_SET_PTRACER, PR_SET_PTRACER_ANY, 0, 0, 0);
+#  else
+        prctl(PR_SET_PTRACER, (unsigned long)-1, 0, 0, 0);
+#  endif
+    }
+#endif
+
+    if (flags & RUNLOOM_CRASH_WAIT) {
+        struct sigaction sc;
+        memset(&sc, 0, sizeof sc);
+        sc.sa_handler = crash_cont_handler;
+        sigemptyset(&sc.sa_mask);
+        sc.sa_flags = SA_RESTART;
+        if (sigaction(SIGCONT, &sc, &runloom_crash_prev_cont) == 0)
+            runloom_crash_cont_saved = 1;
+    }
+
+    runloom_crash_flags_v = flags;
+
+    for (i = 0; i < RUNLOOM_CRASH_NSIG; i++) {
+        struct sigaction sa;
+        int j;
+        memset(&sa, 0, sizeof sa);
+        sa.sa_sigaction = crash_handler;
+        sigemptyset(&sa.sa_mask);
+        /* Block the other fatal signals while handling one (belt-and-braces
+         * with the in_progress latch). */
+        for (j = 0; j < RUNLOOM_CRASH_NSIG; j++)
+            sigaddset(&sa.sa_mask, runloom_crash_signals[j]);
+        sa.sa_flags = SA_SIGINFO | SA_ONSTACK | SA_RESTART;
+        (void)sigaction(runloom_crash_signals[i], &sa, &runloom_crash_prev[i]);
+    }
+
+    __atomic_store_n(&runloom_crash_on, 1, __ATOMIC_RELEASE);
+    runloom_crash_thread_arm();   /* arm the installing (main) thread now */
+    return 0;
+}
+
+void runloom_crash_uninstall(void)
+{
+    int i;
+    if (!__atomic_load_n(&runloom_crash_on, __ATOMIC_ACQUIRE)) return;
+    for (i = 0; i < RUNLOOM_CRASH_NSIG; i++)
+        (void)sigaction(runloom_crash_signals[i], &runloom_crash_prev[i], NULL);
+    if (runloom_crash_cont_saved) {
+        (void)sigaction(SIGCONT, &runloom_crash_prev_cont, NULL);
+        runloom_crash_cont_saved = 0;
+    }
+    __atomic_store_n(&runloom_crash_on, 0, __ATOMIC_RELEASE);
+    if (runloom_crash_report_fd >= 0 && runloom_crash_report_fd != 2) {
+        close(runloom_crash_report_fd);
+        runloom_crash_report_fd = -1;
+    }
+}
+
+#else /* _WIN32 ----------------------------------------------------- */
+
+/* Minimal Windows path: a Vectored Exception Handler that dumps the goroutine
+ * registry on an access violation / stack overflow, then continues the search
+ * so the OS still produces the crash.  (No sigaltstack equivalent yet, so a
+ * true stack overflow may be unable to run this; the rich path is POSIX.) */
+static void *runloom_crash_veh_handle = NULL;
+
+static LONG WINAPI runloom_crash_veh(EXCEPTION_POINTERS *ep)
+{
+    DWORD code = (ep && ep->ExceptionRecord) ? ep->ExceptionRecord->ExceptionCode : 0;
+    if (code == EXCEPTION_ACCESS_VIOLATION || code == EXCEPTION_STACK_OVERFLOW) {
+        if (runloom_crash_flags_v & RUNLOOM_CRASH_GOROUTINES)
+            runloom_dump_goroutines_fd(2);
+    }
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
+int runloom_crash_install(int flags, const char *report_path)
+{
+    (void)report_path;
+    if (flags == 0) flags = RUNLOOM_CRASH_DEFAULT;
+    if (flags & RUNLOOM_CRASH_PYSTACK) {
+        PyObject *fh = PyImport_ImportModule("faulthandler");
+        if (fh != NULL) {
+            PyObject *r = PyObject_CallMethod(fh, "enable", NULL);
+            Py_XDECREF(r);
+            Py_DECREF(fh);
+        }
+        PyErr_Clear();
+    }
+    runloom_crash_flags_v = flags;
+    if (runloom_crash_veh_handle == NULL)
+        runloom_crash_veh_handle = AddVectoredExceptionHandler(1, runloom_crash_veh);
+    __atomic_store_n(&runloom_crash_on, 1, __ATOMIC_RELEASE);
+    return 0;
+}
+
+void runloom_crash_uninstall(void)
+{
+    if (runloom_crash_veh_handle != NULL) {
+        RemoveVectoredExceptionHandler(runloom_crash_veh_handle);
+        runloom_crash_veh_handle = NULL;
+    }
+    __atomic_store_n(&runloom_crash_on, 0, __ATOMIC_RELEASE);
+}
+
+void runloom_crash_thread_arm(void)      { /* no altstack on Windows yet */ }
+void runloom_crash_thread_disarm(void)   { }
+void runloom_crash_reset_after_fork(void){ }
+
+#endif /* _WIN32 */
+
+/* ---------------------------------------------------------------- *
+ *  Shared helpers                                                  *
+ * ---------------------------------------------------------------- */
+int runloom_crash_installed(void)
+{
+    return __atomic_load_n(&runloom_crash_on, __ATOMIC_ACQUIRE);
+}
+
+int runloom_crash_parse_flags(const char *s)
+{
+    char buf[160];
+    size_t i;
+    int f = 0;
+    if (s == NULL || s[0] == '\0') return RUNLOOM_CRASH_DEFAULT;
+    for (i = 0; s[i] != '\0' && i < sizeof buf - 1; i++) {
+        char c = s[i];
+        if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+        buf[i] = c;
+    }
+    buf[i] = '\0';
+    if (strstr(buf, "off") != NULL || strcmp(buf, "0") == 0) return -1;
+    if (strstr(buf, "all") != NULL)        f |= RUNLOOM_CRASH_ALL;
+    if (strstr(buf, "goroutine") != NULL)  f |= RUNLOOM_CRASH_GOROUTINES;
+    if (strstr(buf, "backtrace") != NULL ||
+        strstr(buf, "native") != NULL)     f |= RUNLOOM_CRASH_BACKTRACE;
+    if (strstr(buf, "py") != NULL)         f |= RUNLOOM_CRASH_PYSTACK;
+    if (strstr(buf, "wait") != NULL)       f |= RUNLOOM_CRASH_WAIT;
+    if (strstr(buf, "gdb") != NULL)        f |= RUNLOOM_CRASH_GDB;
+    if (f == 0) f = RUNLOOM_CRASH_DEFAULT;   /* "on"/"1"/unknown -> default */
+    else        f |= RUNLOOM_CRASH_GOROUTINES;  /* always include the dump */
+    return f;
+}
+
+/* ---------------------------------------------------------------- *
+ *  Test-only fault injection                                       *
+ *                                                                  *
+ *  Deterministically overflow the CURRENT C stack via unbounded    *
+ *  real-C recursion -- unlike Python recursion (which CPython's own *
+ *  C-recursion guard catches with a RecursionError), this runs off  *
+ *  the low end of the stack and into the guard page.  Run from      *
+ *  inside a goroutine to exercise the per-goroutine-overflow path.  *
+ *  Used only by tests/test_crash_handler.py.                       *
+ * ---------------------------------------------------------------- */
+volatile char runloom_crash_selftest_sink = 0;
+
+/* The unbounded recursion is the whole point -- silence the (correct) warning. */
+#if defined(__GNUC__) && !defined(__clang__)
+#  pragma GCC diagnostic push
+#  pragma GCC diagnostic ignored "-Winfinite-recursion"
+#endif
+#if defined(__GNUC__)
+__attribute__((noinline))
+#endif
+static void runloom_crash_recurse(int depth)
+{
+    volatile char pad[512];
+    pad[0] = (char)depth;
+    runloom_crash_selftest_sink = pad[0];
+    runloom_crash_recurse(depth + 1);
+    /* Use pad AFTER the call so the frame can't be tail-call-eliminated. */
+    runloom_crash_selftest_sink = pad[sizeof pad - 1];
+}
+#if defined(__GNUC__) && !defined(__clang__)
+#  pragma GCC diagnostic pop
+#endif
+
+void runloom_crash_selftest_overflow(void)
+{
+    runloom_crash_recurse(0);
+}

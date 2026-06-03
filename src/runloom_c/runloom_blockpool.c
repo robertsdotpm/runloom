@@ -34,6 +34,7 @@
 #include "mn_sched.h"
 #include "netpoll.h"
 #include "coro.h"
+#include "runloom_crash.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -106,6 +107,9 @@ long runloom_blockpool_inflight(void)
 static RUNLOOM_THREAD_RET runloom_blockpool_worker(void *arg)
 {
     (void)arg;
+    /* Arm this worker's sigaltstack too -- offloaded user C code can fault here.
+     * No-op unless the crash handler is installed. */
+    runloom_crash_thread_arm();
     for (;;) {
         runloom_block_job_t *job;
         runloom_mutex_lock(&bp_lock);

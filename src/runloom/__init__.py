@@ -106,6 +106,21 @@ import os as _os
 if hasattr(_os, "register_at_fork"):
     _os.register_at_fork(after_in_child=_core.reset_after_fork)
 
+# Opt-in crash reporter: set RUNLOOM_CRASH (on/all/wait/gdb/backtrace/pystack)
+# to install a fatal-signal handler at import, so a SIGSEGV (e.g. a goroutine
+# stack overflow) prints a classified goroutine dump instead of dying silently.
+# Off by default -- we don't hijack process-wide signal handlers unless asked.
+# Installed here, before the runtime starts, so the scheduler hubs are armed as
+# they spawn.  See runloom.inspect.install_crash_handler() to install in code.
+if _os.environ.get("RUNLOOM_CRASH", "").strip().lower() not in ("", "0", "off"):
+    try:
+        _core.install_crash_handler(
+            _os.environ.get("RUNLOOM_CRASH"),
+            _os.environ.get("RUNLOOM_CRASH_FILE"),
+        )
+    except Exception:   # never let crash-reporter setup break import
+        pass
+
 # Runtime introspection -- `runloom.inspect.dump()`, goroutines(), stack(), etc.
 # See runloom/inspect.py.  Exposed as a submodule plus a couple of top-level
 # conveniences (the common "what are all my goroutines doing" calls).

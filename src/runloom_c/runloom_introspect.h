@@ -128,6 +128,22 @@ long long runloom_introspect_monotonic_ns(void);
  * interpreter is wedged. */
 void runloom_dump_goroutines_fd(int fd);
 
+/* ---- crash-handler helpers ----
+ * runloom_goroutine_for_addr: find the live goroutine whose stack region (its
+ * usable stack or the guard page below it) contains `addr`.  Returns its goid
+ * (>0) and sets *kind to 1 if addr is in the guard page (a STACK OVERFLOW), 2
+ * if in the usable stack (a wild pointer / UAF on that g), or 0 if no match;
+ * *stack_kib is set to that goroutine's stack size in KiB.  Try-locks the
+ * registry (returns 0 / kind 0 if busy or unmatched).  Reads g->coro -- only
+ * call from the crash path, where best-effort is acceptable.
+ *
+ * runloom_g_id: the goid of a g (acquire/relaxed read), or -1 if NULL.  A tiny
+ * accessor so the crash handler can name the running g without the full
+ * runloom_sched.h struct layout. */
+long long runloom_goroutine_for_addr(const void *addr, int *kind,
+                                     unsigned *stack_kib);
+long long runloom_g_id(const runloom_g_t *g);
+
 /* ---- rich snapshot (Python context only) ----
  * Every field is PLAIN DATA copied out of the g struct under the registry
  * lock.  Deliberately no owned-object pointers (callable / coro / parker):

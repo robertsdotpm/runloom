@@ -16,6 +16,7 @@
 #include "runloom_iframe.h"
 #include "runloom_blockpool.h"
 #include "runloom_diag.h"
+#include "runloom_crash.h"
 #include "plat.h"
 #include "plat_compat.h"
 
@@ -420,6 +421,62 @@ void runloom_dump_goroutines_fd(int fd)
 }
 
 /* ---------------------------------------------------------------- *
+ *  Crash-handler helpers                                           *
+ *                                                                  *
+ *  runloom_goroutine_for_addr maps a faulting address onto a live    *
+ *  goroutine's stack region.  Unlike the dump it DOES read g->coro   *
+ *  (to recover the stack base/size) -- acceptable only because the   *
+ *  caller is the crash path, where a nested fault is caught by the   *
+ *  handler's in-progress latch and the process is dying anyway.      *
+ * ---------------------------------------------------------------- */
+long long runloom_g_id(const runloom_g_t *g)
+{
+    if (g == NULL) return -1;
+    return (long long)__atomic_load_n(&g->id, __ATOMIC_RELAXED);
+}
+
+long long runloom_goroutine_for_addr(const void *addr, int *kind,
+                                     unsigned *stack_kib)
+{
+    runloom_g_t *g;
+    size_t guard = runloom_coro_guard_size();
+    if (kind != NULL) *kind = 0;
+    if (stack_kib != NULL) *stack_kib = 0;
+    if (!runloom_greg_inited || addr == NULL) return 0;
+    if (runloom_mutex_trylock(&runloom_greg_lock) != 0) return 0;
+
+    for (g = runloom_greg_head; g != NULL; g = g->reg_next) {
+        unsigned int st = __atomic_load_n(&g->state, __ATOMIC_ACQUIRE);
+        runloom_coro_t *c;
+        const char *base;
+        size_t size;
+        if (st == RUNLOOM_GST_FREED) continue;
+        c = g->coro;
+        if (c == NULL) continue;
+        base = (const char *)runloom_coro_stack_base(c);
+        size = runloom_coro_stack_size(c);
+        if (base == NULL || size == 0) continue;
+        if ((const char *)addr >= base && (const char *)addr < base + size) {
+            long long id = __atomic_load_n(&g->id, __ATOMIC_RELAXED);
+            if (kind != NULL) *kind = 2;
+            if (stack_kib != NULL) *stack_kib = (unsigned)(size / 1024u);
+            runloom_mutex_unlock(&runloom_greg_lock);
+            return id;
+        }
+        if (guard > 0 &&
+            (const char *)addr >= base - guard && (const char *)addr < base) {
+            long long id = __atomic_load_n(&g->id, __ATOMIC_RELAXED);
+            if (kind != NULL) *kind = 1;
+            if (stack_kib != NULL) *stack_kib = (unsigned)(size / 1024u);
+            runloom_mutex_unlock(&runloom_greg_lock);
+            return id;
+        }
+    }
+    runloom_mutex_unlock(&runloom_greg_lock);
+    return 0;
+}
+
+/* ---------------------------------------------------------------- *
  *  Rich snapshot (POD copy under the lock)                         *
  * ---------------------------------------------------------------- */
 runloom_g_info_t *runloom_goroutine_snapshot(long *count_out)
@@ -493,6 +550,7 @@ void runloom_after_fork_child(void)
     runloom_netpoll_reset_after_fork();      /* own poll fd, drop stale parkers */
     runloom_blockpool_reset_after_fork();    /* dead offload workers -> re-create */
     runloom_diag_reset_after_fork();         /* diag ring lock */
+    runloom_crash_reset_after_fork();        /* clear crash latch (keep altstack) */
 }
 
 /* ---------------------------------------------------------------- *

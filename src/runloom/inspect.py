@@ -205,6 +205,47 @@ def install_dump_signal(sig=None):
     return _core.install_traceback_signal(signum)
 
 
+def install_crash_handler(level=None, file=None):
+    """Install a fatal-signal handler (SIGSEGV / SIGBUS / SIGILL / SIGFPE /
+    SIGABRT) that turns a crash into a structured dump instead of a silent core.
+
+    On a fault it CLASSIFIES the faulting address against the per-goroutine
+    guard pages -- a goroutine stack overflow is named and distinguished from a
+    wild pointer -- then dumps the full live-goroutine registry, optionally a
+    native backtrace and the Python traceback, and finally chains to the default
+    handler so a core dump / correct exit code still follow.
+
+    `level` selects behaviour (comma/space separated; default from the
+    RUNLOOM_CRASH env var, else just the goroutine dump):
+
+        on / goroutines  dump the goroutine registry (the default)
+        all              goroutines + native backtrace + Python traceback
+        backtrace        add a native C backtrace (needs execinfo)
+        pystack          add the Python traceback (enables faulthandler)
+        wait             after the dump, BLOCK for a debugger to attach
+                         (prints `gdb -p <pid>`; resume with `kill -CONT <pid>`)
+        gdb              fork+exec `gdb -batch -ex 'thread apply all bt'` on self
+        off              uninstall
+
+    `file` (or RUNLOOM_CRASH_FILE) also appends the report to that path.
+
+    For full per-thread coverage call this BEFORE starting the runtime, so the
+    scheduler hubs are armed as they spawn.  Returns the installed flag bitmask
+    (or None if uninstalled).  POSIX has the rich path; Windows dumps via a
+    Vectored Exception Handler.  Idempotent; chains to any existing handler."""
+    return _core.install_crash_handler(level, file)
+
+
+def uninstall_crash_handler():
+    """Restore the signal dispositions saved by install_crash_handler()."""
+    _core.uninstall_crash_handler()
+
+
+def crash_handler_installed():
+    """True if install_crash_handler() is currently active."""
+    return _core.crash_handler_installed()
+
+
 def _detail(g):
     bits = []
     if g["state"] == "io-wait" and g["fd"] is not None:

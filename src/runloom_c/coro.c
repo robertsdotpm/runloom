@@ -7,6 +7,7 @@
  */
 
 #include "coro.h"
+#include "runloom_crash.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -97,6 +98,34 @@ size_t runloom_coro_stack_size(const runloom_coro_t *c)
     if (c == NULL) return 0;
 #if defined(RUNLOOM_HAVE_FCONTEXT) || defined(RUNLOOM_HAVE_UCONTEXT)
     return c->stack_size;
+#else
+    return 0;
+#endif
+}
+
+/* Lowest usable byte of c's stack; the PROT_NONE guard page is the page
+ * immediately below this (see runloom_stack_map_guarded).  NULL on backends
+ * with no introspectable stack (Windows Fibers). */
+void *runloom_coro_stack_base(const runloom_coro_t *c)
+{
+    if (c == NULL) return NULL;
+#if defined(RUNLOOM_HAVE_FCONTEXT) || defined(RUNLOOM_HAVE_UCONTEXT)
+    return c->stack;
+#else
+    return NULL;
+#endif
+}
+
+/* Size in bytes of the guard page below each coro stack (0 if the backend
+ * installs no guard).  Mirrors runloom_stack_guard() without depending on its
+ * later definition. */
+size_t runloom_coro_guard_size(void)
+{
+#if defined(RUNLOOM_HAVE_FCONTEXT) || defined(RUNLOOM_HAVE_UCONTEXT)
+    {
+        long ps = sysconf(_SC_PAGESIZE);
+        return (ps > 0) ? (size_t)ps : (size_t)4096;
+    }
 #else
     return 0;
 #endif
@@ -383,11 +412,15 @@ int runloom_coro_thread_init(void)
         runloom_tls_thread_was_fiber = 1;
     }
 #endif
+    /* Arm this OS thread's sigaltstack so the crash handler can run even when
+     * the fault is a goroutine stack overflow.  No-op unless installed. */
+    runloom_crash_thread_arm();
     return 0;
 }
 
 void runloom_coro_thread_fini(void)
 {
+    runloom_crash_thread_disarm();
 #if defined(RUNLOOM_HAVE_FIBERS)
     if (runloom_tls_thread_was_fiber) {
         ConvertFiberToThread();

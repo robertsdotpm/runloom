@@ -168,6 +168,7 @@ def detect_sources():
         os.path.join(SRC_C, "runloom_introspect.c"),
         os.path.join(SRC_C, "runloom_iframe.c"),
         os.path.join(SRC_C, "runloom_blockpool.c"),
+        os.path.join(SRC_C, "runloom_crash.c"),
     ]
     # Windows IOCP-AFD source -- compiled but no-op on non-Windows
     # because the whole file is wrapped in #if defined(RUNLOOM_OS_WINDOWS).

@@ -50,6 +50,15 @@ int runloom_coro_done(const runloom_coro_t *c);
  * introspectable stack (Fibers).  Used by the goroutine dump. */
 size_t runloom_coro_stack_size(const runloom_coro_t *c);
 
+/* Lowest usable byte of this coro's stack (the PROT_NONE guard page is the page
+ * immediately below it), or NULL on backends with no introspectable stack.
+ * Used by the crash handler to map a faulting address back to a goroutine. */
+void *runloom_coro_stack_base(const runloom_coro_t *c);
+
+/* Size in bytes of the guard page below each coro stack (0 if the backend
+ * installs no guard, e.g. Windows Fibers). */
+size_t runloom_coro_guard_size(void);
+
 /* Backend identifier ("fibers", "ucontext"); useful for tests. */
 const char *runloom_coro_backend(void);
 

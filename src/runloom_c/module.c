@@ -54,6 +54,7 @@ static inline int PyDict_GetItemRef(PyObject *d, PyObject *key, PyObject **resul
 #include "runloom_diag.h"
 #include "runloom_gstate.h"
 #include "runloom_introspect.h"
+#include "runloom_crash.h"
 
 /* ---- Per-coro Python object ---- */
 
@@ -133,5 +134,6 @@ RUNLOOM_INLINE void runloom_tstate_restore(const RunloomTstateSnapshot *s)
 #include "module_go.c.inc"
 #include "module_run.c.inc"
 #include "module_introspect.c.inc"
+#include "module_crash.c.inc"
 #include "module_select.c.inc"
 #include "module_init.c.inc"

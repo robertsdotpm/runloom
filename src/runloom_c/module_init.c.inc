@@ -248,6 +248,29 @@ static PyMethodDef module_methods[] = {
      "_datastack_sweep_stats() -> (tail_bytes, resident_bytes, chunks).  "
      "Datastack-tail sweep decompose counters; nonzero only under "
      "RUNLOOM_DATASTACK_DEBUG."},
+    {"install_crash_handler", (PyCFunction)m_install_crash_handler,
+     METH_VARARGS | METH_KEYWORDS,
+     "install_crash_handler(level=None, file=None) -> int.  Install a "
+     "fatal-signal (SIGSEGV/SIGBUS/SIGILL/SIGFPE/SIGABRT) handler that, on a "
+     "crash, classifies the fault against the per-goroutine guard pages "
+     "(goroutine stack overflow vs wild pointer), dumps the live-goroutine "
+     "registry, and chains to the default handler so a core / Python traceback "
+     "still follows.  level: 'on'|'all'|'backtrace'|'pystack'|'wait'|'gdb' "
+     "(comma-separated; default from RUNLOOM_CRASH env, else goroutine dump).  "
+     "file: also append the report there.  Returns the flag bitmask installed."},
+    {"uninstall_crash_handler", m_uninstall_crash_handler, METH_NOARGS,
+     "uninstall_crash_handler() -> None.  Restore the previous signal "
+     "dispositions."},
+    {"crash_handler_installed", m_crash_handler_installed, METH_NOARGS,
+     "crash_handler_installed() -> bool."},
+    {"crash_thread_arm", m_crash_thread_arm, METH_NOARGS,
+     "crash_thread_arm() -> None.  Arm the calling OS thread's sigaltstack so "
+     "the crash handler survives a stack overflow on this thread (done "
+     "automatically for runloom's own threads)."},
+    {"_crash_selftest_overflow", m_crash_selftest_overflow, METH_NOARGS,
+     "_crash_selftest_overflow() -> None.  TEST ONLY: overflow the current C "
+     "stack via real-C recursion (does not return).  Run inside a goroutine to "
+     "fault into its guard page."},
     {NULL, NULL, 0, NULL}
 };
 
