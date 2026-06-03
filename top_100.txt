@@ -1,7 +1,7 @@
 runloom - validated asyncio projects
 ========================================
 
-154 name-brand Python asyncio projects whose own test suites (or
+155 name-brand Python asyncio projects whose own test suites (or
 equivalent end-to-end exercises) run GREEN under runloom's pure-Python
 M:N runtime -- driven through runloom.aio / RunloomEventLoop on free-threaded
 CPython 3.13t (PYTHON_GIL=0). 'pass==stock' means the result matches
@@ -302,4 +302,10 @@ BEYOND 100 (cont.): reactive events, signals, DI (3)
 153. pynnex                     - signal/slot emit across objects
 154. magic-di                   - dependency injector resolves service
 
-TOTAL DISTINCT PROJECTS PASSING: 154
+
+------------------------------------------------------------
+BEYOND 100 (cont.): valkey client (1)
+------------------------------------------------------------
+155. valkey                     - valkey.asyncio set/get/pipeline vs real redis
+
+TOTAL DISTINCT PROJECTS PASSING: 155
