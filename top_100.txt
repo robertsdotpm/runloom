@@ -1,7 +1,7 @@
 runloom - validated asyncio projects
 ========================================
 
-195 name-brand Python asyncio projects whose own test suites (or
+201 name-brand Python asyncio projects whose own test suites (or
 equivalent end-to-end exercises) run GREEN under runloom's pure-Python
 M:N runtime -- driven through runloom.aio / RunloomEventLoop on free-threaded
 CPython 3.13t (PYTHON_GIL=0). 'pass==stock' means the result matches
@@ -407,4 +407,15 @@ BEYOND 100 (bulk): OPC-UA, ORM (2)
 194. asyncua                    - OPC-UA server+client read/write variable (in-process)
 195. edgy                       - async ORM create(10)/count/filter/get (sqlite)
 
-TOTAL DISTINCT PROJECTS PASSING: 195
+
+------------------------------------------------------------
+BEYOND 100 (bulk): langchain provider integrations (langchain-ai org) (6)
+------------------------------------------------------------
+196. langchain-anthropic        - ChatAnthropic ainvoke (local server)
+197. langchain-ollama           - ChatOllama ainvoke (local server)
+198. langchain-openai           - ChatOpenAI ainvoke (local server)
+199. langchain-groq             - ChatGroq ainvoke (local server)
+200. langchain-mistralai        - ChatMistralAI ainvoke (local server)
+201. langchain-together         - ChatTogether ainvoke (local server)
+
+TOTAL DISTINCT PROJECTS PASSING: 201
