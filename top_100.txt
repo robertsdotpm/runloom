@@ -1,7 +1,7 @@
 runloom - validated asyncio projects
 ========================================
 
-150 name-brand Python asyncio projects whose own test suites (or
+151 name-brand Python asyncio projects whose own test suites (or
 equivalent end-to-end exercises) run GREEN under runloom's pure-Python
 M:N runtime -- driven through runloom.aio / RunloomEventLoop on free-threaded
 CPython 3.13t (PYTHON_GIL=0). 'pass==stock' means the result matches
@@ -282,4 +282,16 @@ BEYOND 100 (cont.): sync primitives, greenlet bridge, DNS (3)
 149. awaitlet                   - greenlet sync->async bridge -> 42 (on 3.13t)
 150. aiodnsresolver             - pure-python DNS resolved example.com A
 
-TOTAL DISTINCT PROJECTS PASSING: 150
+
+------------------------------------------------------------
+BEYOND 100 (cont.): sans-IO IRC (1)
+------------------------------------------------------------
+151. bottom                     - sans-IO IRC client event trigger/handler
+
+NOTE: greenback diverges by design -- it reads asyncio.Task._coro via a
+hard-coded C struct offset (assumes the C _asyncio.Task layout); runloom's
+Task is a Python asyncio.Task subclass with no such C field, so greenback
+raises "Couldn't determine C offset". Same class as aiodebug/unsync: a lib
+reaching into CPython/asyncio internals runloom implements differently.
+
+TOTAL DISTINCT PROJECTS PASSING: 151
