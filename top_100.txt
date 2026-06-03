@@ -1,7 +1,7 @@
 runloom - validated asyncio projects
 ========================================
 
-64 name-brand Python asyncio projects whose own test suites (or
+128 name-brand Python asyncio projects whose own test suites (or
 equivalent end-to-end exercises) run GREEN under runloom's pure-Python
 M:N runtime -- driven through runloom.aio / RunloomEventLoop on free-threaded
 CPython 3.13t (PYTHON_GIL=0). 'pass==stock' means the result matches
@@ -213,4 +213,11 @@ BEYOND 100 (cont.): retry + DI containers (3)
 125. kink                       - DI inject decorator resolves dependency
 126. lagom                      - DI container resolves service
 
-TOTAL DISTINCT PROJECTS PASSING: 126
+
+------------------------------------------------------------
+BEYOND 100 (cont.): UDP transport, event emitter (2)
+------------------------------------------------------------
+127. asyncudp                   - real UDP datagram x10 over runloom netpoll
+128. pyee                       - AsyncIOEventEmitter async handlers fired
+
+TOTAL DISTINCT PROJECTS PASSING: 128
