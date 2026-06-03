@@ -64,6 +64,7 @@ nav:
       - Stack sizing & memory: stack-sizing.md
       - Time-sliced preemption: preemption.md
       - M:N parallelism: parallelism.md
+      - Debugging & introspection: debugging.md
   - Reference:
       - Cookbook: cookbook.md
       - API reference: api-reference.md

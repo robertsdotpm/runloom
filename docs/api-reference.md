@@ -173,6 +173,54 @@ Snapshot of scheduler counters.  Keys: `ready`, `sleeping`,
 `stack_hwm`, `stack_completed`, `stack_calibrated`, `stack_painting`,
 `backend`, `netpoll`.  Cheap; safe to poll periodically.
 
+### Goroutine introspection
+
+A Go-style goroutine dump -- which goroutines exist, what each is blocked
+on, and where in your code.  See the [Debugging guide](debugging.md) for
+the full picture (and the friendlier `pygo.inspect` wrappers).
+
+#### `goroutines() → list[dict]`
+
+One dict per live goroutine: `id`, `state` (`running` / `runnable` /
+`io-wait` / `sleep` / `chan-wait` / `park` / ...), `blocked_on`, `fd` +
+`events` (when `io-wait`), `wake_in` (when `sleep`), `age`, `refcount`,
+`noyield`, `owner`.  Cheap; safe from a watchdog.
+
+#### `goroutine_count() → int`
+
+Number of live goroutines.
+
+#### `goroutine_stack(id) → (callable_repr, [(file, line, func), ...])`
+
+Best-effort reconstructed Python stack of one goroutine (deepest first).
+Full stack under the single-thread scheduler (`pygo.aio`) and per-g-tstate
+M:N; withheld under default M:N (no safe way to freeze a hub-resumable
+goroutine).
+
+#### `dump_goroutines(fd=2) → None`
+
+Write an async-signal-safe structural dump (state histogram + per-goroutine
+line, no Python objects) to `fd`.  The SIGQUIT path -- usable from a signal
+handler and when the interpreter is wedged.
+
+#### `set_introspect_timestamps(bool)`
+
+Track each goroutine's park time so `goroutines()`/dumps report `age`.  Off
+by default (one clock read per park); also via `PYGO_INTROSPECT_TIME=1`.
+
+#### `install_traceback_signal(signum=SIGQUIT) → int`
+
+Install a raw-C signal handler that dumps all goroutines to stderr -- Go's
+`GOTRACEBACK` / `kill -QUIT`.  Also via `PYGO_TRACEBACK=1`.  POSIX only.
+
+#### `reset_after_fork() → None`
+
+Reset the runtime to a clean single-process state in a forked child
+(abandons the dead hub/offload threads, re-inits inherited locks, gives the
+child its own netpoll fd).  Registered automatically as an
+`os.register_at_fork(after_in_child=...)` handler; see the [Debugging
+guide](debugging.md#fork-safety).
+
 ### Thread setup
 
 #### `thread_init()` / `thread_fini()`
@@ -218,6 +266,21 @@ pygo.backend() → str
 ```
 
 For new code, prefer `pygo_core` (faster) or `pygo.sync` (richer API).
+
+---
+
+## `pygo.inspect`
+
+Runtime introspection -- the friendly wrappers over the goroutine
+registry.  `goroutines(stacks=)`, `count()`, `stack(id)`, `format(stacks=)`
+(a human dump as a string), `dump(file=, stacks=)`, `enable_timestamps()`,
+`install_dump_signal()`.  See the [Debugging guide](debugging.md).
+
+```python
+import pygo.inspect as gi
+print(gi.format(stacks=True))   # which goroutines, and where they're stuck
+gi.install_dump_signal()        # kill -QUIT <pid> -> dump
+```
 
 ---
 
