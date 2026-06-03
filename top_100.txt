@@ -1,7 +1,7 @@
 runloom - validated asyncio projects
 ========================================
 
-189 name-brand Python asyncio projects whose own test suites (or
+193 name-brand Python asyncio projects whose own test suites (or
 equivalent end-to-end exercises) run GREEN under runloom's pure-Python
 M:N runtime -- driven through runloom.aio / RunloomEventLoop on free-threaded
 CPython 3.13t (PYTHON_GIL=0). 'pass==stock' means the result matches
@@ -391,4 +391,13 @@ NOTE: orjson (Rust, no 3.13t build) is provided as a pure-Python json-backed
 shim so orjson-dependent libs import; stock+runloom use it identically, so
 pass==stock still cleanly validates runloom's async machinery.
 
-TOTAL DISTINCT PROJECTS PASSING: 189
+
+------------------------------------------------------------
+BEYOND 100 (bulk): major AI frameworks, test-model path (4)
+------------------------------------------------------------
+190. llama-index-core           - MockLLM acomplete + astream_complete
+191. autogen-core               - agent runtime send_message handler
+192. haystack-ai                - AsyncPipeline.run_async custom component
+193. dspy                       - async Predict.acall with DummyLM
+
+TOTAL DISTINCT PROJECTS PASSING: 193
