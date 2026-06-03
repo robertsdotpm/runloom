@@ -8,7 +8,7 @@ import asyncio
 import socket
 import unittest
 
-import pygo.aio as paio
+import runloom.aio as paio
 
 
 # ====================================================================
@@ -448,7 +448,7 @@ class TestClosedLoopRaises(unittest.TestCase):
 
 class TestTaskExceptionRefcycle(unittest.TestCase):
     """A finished task that captured an exception must not be pinned by a
-    refcycle through its own driver frame.  pygo runs the task driver as a
+    refcycle through its own driver frame.  runloom runs the task driver as a
     Python goroutine, so an exception unwinding through it puts the driver
     frame (which holds the task as a local) into the exception's traceback:
     task -> _pgexc -> __traceback__ -> driver frame -> task.  That cycle
@@ -470,7 +470,7 @@ class TestTaskExceptionRefcycle(unittest.TestCase):
             return names
         names = paio.run(main())
         self.assertNotIn("_driver", names,
-                         "pygo driver frame leaked into the stored exception's "
+                         "runloom driver frame leaked into the stored exception's "
                          "traceback (refcycle pins the finished task): %r" % names)
 
     def test_nested_exception_group_not_pinned(self):

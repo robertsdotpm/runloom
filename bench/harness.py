@@ -1,4 +1,4 @@
-"""bench.harness -- reproducible micro / throughput benchmark harness for pygo.
+"""bench.harness -- reproducible micro / throughput benchmark harness for runloom.
 
 Why a dedicated harness instead of the existing bench/bench_*.py scripts:
 those print a single wall-clock number from one run.  That is fine as a
@@ -7,7 +7,7 @@ no dispersion, no environment record -- so two numbers taken on two days
 cannot be compared, and a regression is invisible.  This module fixes that:
 
     * captures the full environment (CPU, NUMA, ASLR, governor, Python
-      build, pygo backend, git sha, compile flags) into every result file,
+      build, runloom backend, git sha, compile flags) into every result file,
     * pins the process to a fixed CPU set on one NUMA node to cut scheduler
       noise on this shared, virtualized box,
     * runs ``warmup`` discarded iterations then ``samples`` measured ones,
@@ -16,7 +16,7 @@ cannot be compared, and a regression is invisible.  This module fixes that:
     * writes machine-readable JSON so runs are diffable and a regression
       gate can compare against a committed baseline.
 
-Primary target runtime is free-threaded CPython 3.13t: pygo's M:N hub pool
+Primary target runtime is free-threaded CPython 3.13t: runloom's M:N hub pool
 only gets real core-level parallelism with the GIL off.  Everything here is
 stdlib-only so it runs under 3.13t with no extra wheels to build.
 
@@ -38,7 +38,7 @@ from bench.gil import assert_nogil
 
 
 # --------------------------------------------------------------------
-# Repo / import bootstrap.  Make "import pygo_core" work regardless of
+# Repo / import bootstrap.  Make "import runloom_c" work regardless of
 # the caller's PYTHONPATH by putting the worktree src/ first.
 # --------------------------------------------------------------------
 HARNESS_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -125,10 +125,10 @@ def capture_env(pinned=None):
     import sysconfig
 
     try:
-        import pygo_core
-        backend = pygo_core.backend()
-        netpoll = pygo_core.netpoll_backend()
-        so = getattr(pygo_core, "__file__", "")
+        import runloom_c
+        backend = runloom_c.backend()
+        netpoll = runloom_c.netpoll_backend()
+        so = getattr(runloom_c, "__file__", "")
     except Exception as e:  # pragma: no cover - import is the whole point
         backend = netpoll = so = "import-failed: %r" % (e,)
 
@@ -156,9 +156,9 @@ def capture_env(pinned=None):
         "gil_enabled": gil,
         "python_build": " ".join(platform.python_build()),
         "py_cflags": (sysconfig.get_config_var("CFLAGS") or "")[:200],
-        "pygo_backend": backend,
-        "pygo_netpoll": netpoll,
-        "pygo_so": so,
+        "runloom_backend": backend,
+        "runloom_netpoll": netpoll,
+        "runloom_so": so,
         "git_sha": git_sha(),
         "git_dirty": git_dirty(),
         "pinned_cpus": pinned,
@@ -319,9 +319,9 @@ class Suite:
         e = self.env
         print("=" * 78)
         print("suite: %s" % self.name)
-        print("python %s %s  gil=%s  | pygo %s/%s @ %s%s"
+        print("python %s %s  gil=%s  | runloom %s/%s @ %s%s"
               % (e["python"], e["python_impl"], e["gil_enabled"],
-                 e["pygo_backend"], e["pygo_netpoll"], e["git_sha"],
+                 e["runloom_backend"], e["runloom_netpoll"], e["git_sha"],
                  "-dirty" if e["git_dirty"] else ""))
         print("cpu: %s  | %d vCPU / %s NUMA  | pinned=%s  aslr=%s  load=%s"
               % (e["cpu_model"], e["nproc"], e["numa_nodes"],

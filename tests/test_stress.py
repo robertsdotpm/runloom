@@ -1,6 +1,6 @@
-"""Stress tests for pygo.  High volume, long-running, memory soak.
+"""Stress tests for runloom.  High volume, long-running, memory soak.
 
-Run a subset by default; the full suite (PYGO_RUN_STRESS=1) exercises
+Run a subset by default; the full suite (RUNLOOM_RUN_STRESS=1) exercises
 patterns that take seconds to minutes and are kept out of the normal
 unit run so CI stays fast.  These tests are how we catch:
 
@@ -17,12 +17,12 @@ import sys
 import time
 import unittest
 
-import pygo_core
-import pygo.aio as paio
-import pygo.sync as ps
+import runloom_c
+import runloom.aio as paio
+import runloom.sync as ps
 
 
-_FULL = os.environ.get("PYGO_RUN_STRESS", "").strip() not in ("", "0", "no", "false")
+_FULL = os.environ.get("RUNLOOM_RUN_STRESS", "").strip() not in ("", "0", "no", "false")
 
 
 def _rss_mb():
@@ -43,10 +43,10 @@ class TestSchedulerStress(unittest.TestCase):
         goroutine slab / stack pool leaks."""
         for batch in range(10):
             for _ in range(10_000):
-                pygo_core.go(lambda: None)
-            pygo_core.run()
+                runloom_c.go(lambda: None)
+            runloom_c.run()
         gc.collect()
-        stats = pygo_core.stats()
+        stats = runloom_c.stats()
         self.assertEqual(stats["ready"], 0)
         self.assertEqual(stats["sleeping"], 0)
         # Use the PER-SCHED parked count (this thread's sched), not the global
@@ -65,9 +65,9 @@ class TestSchedulerStress(unittest.TestCase):
         def w():
             for _ in range(100_000):
                 counter[0] += 1
-                pygo_core.sched_yield_classic()
-        pygo_core.go(w)
-        pygo_core.run()
+                runloom_c.sched_yield_classic()
+        runloom_c.go(w)
+        runloom_c.run()
         self.assertEqual(counter[0], 100_000)
 
     def test_n_yielding_workers(self):
@@ -78,10 +78,10 @@ class TestSchedulerStress(unittest.TestCase):
         def w(i):
             for _ in range(K):
                 counters[i] += 1
-                pygo_core.sched_yield_classic()
+                runloom_c.sched_yield_classic()
         for i in range(N):
-            pygo_core.go(lambda i=i: w(i))
-        pygo_core.run()
+            runloom_c.go(lambda i=i: w(i))
+        runloom_c.run()
         self.assertEqual(sum(counters), N * K)
         self.assertTrue(all(c == K for c in counters))
 
@@ -92,11 +92,11 @@ class TestSchedulerStress(unittest.TestCase):
         wakes = [None] * N
         t0 = time.monotonic()
         def w(i):
-            pygo_core.sched_sleep(0.001 + i * 0.00001)
+            runloom_c.sched_sleep(0.001 + i * 0.00001)
             wakes[i] = time.monotonic() - t0
         for i in range(N):
-            pygo_core.go(lambda i=i: w(i))
-        pygo_core.run()
+            runloom_c.go(lambda i=i: w(i))
+        runloom_c.run()
         # Every sleep completed.
         self.assertTrue(all(w is not None for w in wakes))
         # Wake times are roughly ascending (matches sleep deadlines).
@@ -113,8 +113,8 @@ class TestSchedulerStress(unittest.TestCase):
 class TestChannelStress(unittest.TestCase):
     def test_pingpong_1m(self):
         """1M ping-pong rounds through a buffered channel."""
-        ch_a = pygo_core.Chan(0)
-        ch_b = pygo_core.Chan(0)
+        ch_a = runloom_c.Chan(0)
+        ch_b = runloom_c.Chan(0)
         N = 1_000_000 if _FULL else 100_000
         def pinger():
             for _ in range(N):
@@ -124,10 +124,10 @@ class TestChannelStress(unittest.TestCase):
             for _ in range(N):
                 ch_a.recv()
                 ch_b.send(1)
-        pygo_core.go(pinger)
-        pygo_core.go(ponger)
+        runloom_c.go(pinger)
+        runloom_c.go(ponger)
         t0 = time.monotonic()
-        pygo_core.run()
+        runloom_c.run()
         elapsed = time.monotonic() - t0
         print("\n  pingpong %d rounds in %.2fs (%.1f ns/round)"
               % (N, elapsed, elapsed * 1e9 / N))
@@ -137,7 +137,7 @@ class TestChannelStress(unittest.TestCase):
         sender queues."""
         N = 100
         K = 1000
-        ch = pygo_core.Chan(16)
+        ch = runloom_c.Chan(16)
         results = []
 
         def producer(pid):
@@ -149,9 +149,9 @@ class TestChannelStress(unittest.TestCase):
                 results.append(ch.recv())
 
         for p in range(N):
-            pygo_core.go(lambda p=p: producer(p))
-        pygo_core.go(consumer)
-        pygo_core.run()
+            runloom_c.go(lambda p=p: producer(p))
+        runloom_c.go(consumer)
+        runloom_c.run()
 
         self.assertEqual(len(results), N * K)
         # Each producer's K messages all arrive (order may interleave).
@@ -165,7 +165,7 @@ class TestChannelStress(unittest.TestCase):
         """1 producer, N consumers."""
         N = 50
         K = 2000
-        ch = pygo_core.Chan(8)
+        ch = runloom_c.Chan(8)
         per_consumer = [0] * N
 
         def producer():
@@ -177,24 +177,24 @@ class TestChannelStress(unittest.TestCase):
             for _v in ch:
                 per_consumer[idx] += 1
 
-        pygo_core.go(producer)
+        runloom_c.go(producer)
         for i in range(N):
-            pygo_core.go(lambda i=i: consumer(i))
-        pygo_core.run()
+            runloom_c.go(lambda i=i: consumer(i))
+        runloom_c.run()
 
         self.assertEqual(sum(per_consumer), N * K)
 
     def test_select_under_load(self):
         """Many select() calls choosing across hot channels."""
-        ch_a = pygo_core.Chan(0)
-        ch_b = pygo_core.Chan(0)
-        ch_done = pygo_core.Chan(1)
+        ch_a = runloom_c.Chan(0)
+        ch_b = runloom_c.Chan(0)
+        ch_done = runloom_c.Chan(1)
         K = 5000
         counts = {"a": 0, "b": 0}
 
         def selector():
             for _ in range(K * 2):
-                idx, val = pygo_core.select([
+                idx, val = runloom_c.select([
                     ("recv", ch_a),
                     ("recv", ch_b),
                 ])
@@ -208,11 +208,11 @@ class TestChannelStress(unittest.TestCase):
             for i in range(K):
                 ch.send((key, i))
 
-        pygo_core.go(selector)
-        pygo_core.go(lambda: feeder(ch_a, "a"))
-        pygo_core.go(lambda: feeder(ch_b, "b"))
-        pygo_core.go(lambda: ch_done.recv())
-        pygo_core.run()
+        runloom_c.go(selector)
+        runloom_c.go(lambda: feeder(ch_a, "a"))
+        runloom_c.go(lambda: feeder(ch_b, "b"))
+        runloom_c.go(lambda: ch_done.recv())
+        runloom_c.run()
 
         self.assertEqual(counts["a"], K)
         self.assertEqual(counts["b"], K)
@@ -221,20 +221,20 @@ class TestChannelStress(unittest.TestCase):
 # ====================================================================
 # Section 3: memory soak (gated)
 # ====================================================================
-@unittest.skipUnless(_FULL, "set PYGO_RUN_STRESS=1 to enable")
+@unittest.skipUnless(_FULL, "set RUNLOOM_RUN_STRESS=1 to enable")
 class TestMemorySoak(unittest.TestCase):
     def test_no_leak_spawn_drain(self):
         """1M spawn/drain cycles, measure RSS growth post-warmup."""
         for _ in range(10_000):
-            pygo_core.go(lambda: None)
-        pygo_core.run()
+            runloom_c.go(lambda: None)
+        runloom_c.run()
         gc.collect()
         baseline = _rss_mb()
 
         for _ in range(99):
             for _ in range(10_000):
-                pygo_core.go(lambda: None)
-            pygo_core.run()
+                runloom_c.go(lambda: None)
+            runloom_c.run()
 
         gc.collect()
         growth = _rss_mb() - baseline
@@ -261,24 +261,24 @@ class TestMemorySoak(unittest.TestCase):
     def test_no_leak_channel_pingpong(self):
         """Long-running channel ping-pong with periodic memory checks."""
         # Warm
-        ch_a = pygo_core.Chan(0)
-        ch_b = pygo_core.Chan(0)
+        ch_a = runloom_c.Chan(0)
+        ch_b = runloom_c.Chan(0)
         def pinger(N):
             for _ in range(N): ch_a.send(1); ch_b.recv()
         def ponger(N):
             for _ in range(N): ch_a.recv(); ch_b.send(1)
-        pygo_core.go(lambda: pinger(10_000))
-        pygo_core.go(lambda: ponger(10_000))
-        pygo_core.run()
+        runloom_c.go(lambda: pinger(10_000))
+        runloom_c.go(lambda: ponger(10_000))
+        runloom_c.run()
         gc.collect()
         baseline = _rss_mb()
         # Long run with fresh channels each batch
         for _ in range(50):
-            ch_a = pygo_core.Chan(0)
-            ch_b = pygo_core.Chan(0)
-            pygo_core.go(lambda: pinger(10_000))
-            pygo_core.go(lambda: ponger(10_000))
-            pygo_core.run()
+            ch_a = runloom_c.Chan(0)
+            ch_b = runloom_c.Chan(0)
+            runloom_c.go(lambda: pinger(10_000))
+            runloom_c.go(lambda: ponger(10_000))
+            runloom_c.run()
         gc.collect()
         growth = _rss_mb() - baseline
         print("\n  channel pingpong leak: %.1f MiB after 500k extra ops" % growth)
@@ -290,7 +290,7 @@ class TestMemorySoak(unittest.TestCase):
 # ====================================================================
 class TestAioStress(unittest.TestCase):
     def test_5000_concurrent_tasks(self):
-        """5000 PygoTasks each doing one short sleep."""
+        """5000 RunloomTasks each doing one short sleep."""
         async def w():
             await asyncio.sleep(0.001)
             return 1
@@ -300,7 +300,7 @@ class TestAioStress(unittest.TestCase):
 
     def test_deep_await_chain(self):
         """One task doing K=10000 awaits on already-done futures.
-        Catches PygoTask driver loop bugs."""
+        Catches RunloomTask driver loop bugs."""
         async def main():
             loop = asyncio.get_running_loop()
             for _ in range(10_000):
@@ -372,7 +372,7 @@ class TestNetworkStress(unittest.TestCase):
             # listen accept queue (min(backlog, kern.ipc.somaxconn) ~= 128):
             # BSD/macOS answer the overflow with RST -> ConnectionResetError,
             # while Linux silently drops the SYN and the client retransmits.
-            # Not pygo-specific (stdlib asyncio fails the same unbounded storm
+            # Not runloom-specific (stdlib asyncio fails the same unbounded storm
             # on FreeBSD).  Gate concurrency so the queue never overflows while
             # still driving 500 concurrent round-trips.
             sem = asyncio.Semaphore(64)

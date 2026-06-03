@@ -1,12 +1,12 @@
-"""TCP echo loopback: native pygo_core.tcp_recv/send vs the
+"""TCP echo loopback: native runloom_c.tcp_recv/send vs the
 monkey-patched socket.recv/sendall.  Same workload, two paths."""
 import socket
 import sys
 import time
 
 sys.path.insert(0, "src")
-import pygo, pygo.monkey, pygo_core
-pygo.monkey.patch()
+import runloom, runloom.monkey, runloom_c
+runloom.monkey.patch()
 
 
 def bench(N=2000, mode="monkey"):
@@ -26,10 +26,10 @@ def bench(N=2000, mode="monkey"):
             fd = conn.fileno()
             buf = bytearray(64)
             for _ in range(N):
-                got = pygo_core.tcp_recv(fd, buf, 8)
+                got = runloom_c.tcp_recv(fd, buf, 8)
                 if got == 0:
                     break
-                pygo_core.tcp_send(fd, bytes(buf[:got]))
+                runloom_c.tcp_send(fd, bytes(buf[:got]))
         else:
             for _ in range(N):
                 data = conn.recv(64)
@@ -48,8 +48,8 @@ def bench(N=2000, mode="monkey"):
             fd = c.fileno()
             buf = bytearray(8)
             for _ in range(N):
-                pygo_core.tcp_send(fd, msg)
-                pygo_core.tcp_recv(fd, buf, 8)
+                runloom_c.tcp_send(fd, msg)
+                runloom_c.tcp_recv(fd, buf, 8)
         else:
             for _ in range(N):
                 c.sendall(msg)
@@ -57,9 +57,9 @@ def bench(N=2000, mode="monkey"):
         result[0] = time.perf_counter() - t0[0]
         c.close()
 
-    pygo_core.go(server)
-    pygo_core.go(client)
-    pygo_core.run()
+    runloom_c.go(server)
+    runloom_c.go(client)
+    runloom_c.run()
     srv.close()
     return result[0]
 

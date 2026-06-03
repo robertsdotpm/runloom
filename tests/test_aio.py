@@ -1,9 +1,9 @@
-"""Tests for pygo.aio (the async/await bridge)."""
+"""Tests for runloom.aio (the async/await bridge)."""
 import asyncio
 import time
 import unittest
 
-import pygo.aio as aio
+import runloom.aio as aio
 
 
 class TestBasicRun(unittest.TestCase):

@@ -1,23 +1,23 @@
-"""Tests for pygo_core.Chan -- Go-style channels."""
+"""Tests for runloom_c.Chan -- Go-style channels."""
 import sys
 import time
 import unittest
 
 sys.path.insert(0, "src")
 
-import pygo_core
+import runloom_c
 
 
 def _run_in_sched(*goroutines):
     """Spawn each callable, run scheduler to completion."""
     for g in goroutines:
-        pygo_core.go(g)
-    pygo_core.run()
+        runloom_c.go(g)
+    runloom_c.run()
 
 
 class TestUnbufferedBasic(unittest.TestCase):
     def test_send_then_recv(self):
-        ch = pygo_core.Chan()
+        ch = runloom_c.Chan()
         out = []
 
         def producer():
@@ -31,7 +31,7 @@ class TestUnbufferedBasic(unittest.TestCase):
         self.assertEqual(out, [(7, True)])
 
     def test_recv_then_send_blocks_in_right_order(self):
-        ch = pygo_core.Chan()
+        ch = runloom_c.Chan()
         log = []
 
         def consumer():
@@ -53,7 +53,7 @@ class TestUnbufferedBasic(unittest.TestCase):
 
 class TestBuffered(unittest.TestCase):
     def test_buffer_fills_drains(self):
-        ch = pygo_core.Chan(3)
+        ch = runloom_c.Chan(3)
         out = []
 
         def writer():
@@ -69,7 +69,7 @@ class TestBuffered(unittest.TestCase):
         self.assertEqual(out, [0, 1, 2, 3, 4])
 
     def test_len_capacity(self):
-        ch = pygo_core.Chan(4)
+        ch = runloom_c.Chan(4)
         out = []
         def runner():
             out.append(ch.capacity)
@@ -85,7 +85,7 @@ class TestBuffered(unittest.TestCase):
 
 class TestClose(unittest.TestCase):
     def test_recv_after_close_returns_ok_false(self):
-        ch = pygo_core.Chan()
+        ch = runloom_c.Chan()
         out = []
         def runner():
             ch.close()
@@ -95,7 +95,7 @@ class TestClose(unittest.TestCase):
         self.assertEqual(out, [(None, False)])
 
     def test_buffered_drains_after_close(self):
-        ch = pygo_core.Chan(2)
+        ch = runloom_c.Chan(2)
         out = []
         def runner():
             ch.send(10)
@@ -108,7 +108,7 @@ class TestClose(unittest.TestCase):
         self.assertEqual(out, [(10, True), (20, True), (None, False)])
 
     def test_send_on_closed_raises(self):
-        ch = pygo_core.Chan()
+        ch = runloom_c.Chan()
         err = []
         def runner():
             ch.close()
@@ -120,7 +120,7 @@ class TestClose(unittest.TestCase):
         self.assertEqual(err, ["send on closed channel"])
 
     def test_double_close_raises(self):
-        ch = pygo_core.Chan()
+        ch = runloom_c.Chan()
         err = []
         def runner():
             ch.close()
@@ -132,7 +132,7 @@ class TestClose(unittest.TestCase):
         self.assertEqual(err, ["close on closed channel"])
 
     def test_close_wakes_parked_senders(self):
-        ch = pygo_core.Chan()      # unbuffered
+        ch = runloom_c.Chan()      # unbuffered
         log = []
 
         def sender():
@@ -144,20 +144,20 @@ class TestClose(unittest.TestCase):
 
         def closer():
             # Yield so sender gets to park first.
-            pygo_core.sched_yield()
+            runloom_c.sched_yield()
             ch.close()
 
         _run_in_sched(sender, closer)
         self.assertEqual(log, ["closed"])
 
     def test_close_wakes_parked_receivers(self):
-        ch = pygo_core.Chan()
+        ch = runloom_c.Chan()
         log = []
         def receiver():
             v, ok = ch.recv()
             log.append((v, ok))
         def closer():
-            pygo_core.sched_yield()
+            runloom_c.sched_yield()
             ch.close()
         _run_in_sched(receiver, closer)
         self.assertEqual(log, [(None, False)])
@@ -165,7 +165,7 @@ class TestClose(unittest.TestCase):
 
 class TestNonBlocking(unittest.TestCase):
     def test_try_send_full_returns_false(self):
-        ch = pygo_core.Chan(1)
+        ch = runloom_c.Chan(1)
         out = []
         def runner():
             out.append(ch.try_send(1))   # True (room)
@@ -174,7 +174,7 @@ class TestNonBlocking(unittest.TestCase):
         self.assertEqual(out, [True, False])
 
     def test_try_recv_empty_returns_none(self):
-        ch = pygo_core.Chan(1)
+        ch = runloom_c.Chan(1)
         out = []
         def runner():
             out.append(ch.try_recv())    # None (empty, would-block)
@@ -191,8 +191,8 @@ class TestPingPong(unittest.TestCase):
     """End-to-end test of the actual concurrency: two goroutines
     bouncing values through a channel."""
     def test_ping_pong(self):
-        a = pygo_core.Chan()
-        b = pygo_core.Chan()
+        a = runloom_c.Chan()
+        b = runloom_c.Chan()
         log = []
         N = 5
 
@@ -213,7 +213,7 @@ class TestPingPong(unittest.TestCase):
 
     def test_fan_in(self):
         """N producers, 1 consumer, buffered channel."""
-        ch = pygo_core.Chan(4)
+        ch = runloom_c.Chan(4)
         out = []
         N = 4
 
@@ -240,7 +240,7 @@ class TestIteration(unittest.TestCase):
     `for v in ch:` -- iteration ends when the channel is closed."""
 
     def test_range_basic(self):
-        ch = pygo_core.Chan(8)
+        ch = runloom_c.Chan(8)
         out = []
 
         def producer():
@@ -256,7 +256,7 @@ class TestIteration(unittest.TestCase):
         self.assertEqual(out, [0, 11, 22, 33, 44])
 
     def test_range_empty_after_close(self):
-        ch = pygo_core.Chan()
+        ch = runloom_c.Chan()
         out = []
         def runner():
             ch.close()
@@ -269,11 +269,11 @@ class TestIteration(unittest.TestCase):
 
 class TestSelect(unittest.TestCase):
     def test_default_no_case_ready(self):
-        a = pygo_core.Chan()
-        b = pygo_core.Chan(1)
+        a = runloom_c.Chan()
+        b = runloom_c.Chan(1)
         out = []
         def runner():
-            r = pygo_core.select([
+            r = runloom_c.select([
                 ("recv", a),
                 ("recv", b),
             ], default=True)
@@ -282,20 +282,20 @@ class TestSelect(unittest.TestCase):
         self.assertEqual(out, [-1])
 
     def test_immediate_recv(self):
-        ch = pygo_core.Chan(1)
+        ch = runloom_c.Chan(1)
         out = []
         def runner():
             ch.send("ready")
-            i, payload = pygo_core.select([("recv", ch)])
+            i, payload = runloom_c.select([("recv", ch)])
             out.append((i, payload))
         _run_in_sched(runner)
         self.assertEqual(out, [(0, ("ready", True))])
 
     def test_immediate_send_into_buffer(self):
-        ch = pygo_core.Chan(2)
+        ch = runloom_c.Chan(2)
         out = []
         def runner():
-            i, _ = pygo_core.select([("send", ch, 99)])
+            i, _ = runloom_c.select([("send", ch, 99)])
             out.append(i)
             v, ok = ch.recv()
             out.append((v, ok))
@@ -305,31 +305,31 @@ class TestSelect(unittest.TestCase):
     def test_blocking_two_chans(self):
         """One goroutine selects on two channels; another writes to
         the second one.  The select should fire on case 1."""
-        a = pygo_core.Chan()
-        b = pygo_core.Chan()
+        a = runloom_c.Chan()
+        b = runloom_c.Chan()
         log = []
 
         def selector():
-            r = pygo_core.select([
+            r = runloom_c.select([
                 ("recv", a),
                 ("recv", b),
             ])
             log.append(("fired", r[0], r[1]))
 
         def writer_b():
-            pygo_core.sched_yield()       # let selector park first
+            runloom_c.sched_yield()       # let selector park first
             b.send("from-b")
 
         _run_in_sched(selector, writer_b)
         self.assertEqual(log, [("fired", 1, ("from-b", True))])
 
     def test_select_send_on_one_recv_on_other(self):
-        a = pygo_core.Chan()
-        b = pygo_core.Chan()
+        a = runloom_c.Chan()
+        b = runloom_c.Chan()
         log = []
 
         def selector():
-            r = pygo_core.select([
+            r = runloom_c.select([
                 ("send", a, "to-a"),
                 ("recv", b),
             ])

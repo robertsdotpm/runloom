@@ -1,10 +1,10 @@
-"""TCP open_connection / start_server tests for pygo.aio."""
+"""TCP open_connection / start_server tests for runloom.aio."""
 import asyncio
 import socket
 import threading
 import unittest
 
-import pygo.aio as paio
+import runloom.aio as paio
 
 
 class TestEcho(unittest.TestCase):
@@ -21,7 +21,7 @@ class TestEcho(unittest.TestCase):
             host, port = sock.getsockname()[:2]
 
             reader, writer = await paio.open_connection(host, port)
-            writer.write(b"hello pygo")
+            writer.write(b"hello runloom")
             await writer.drain()
             data = await reader.read(4096)
             writer.close()
@@ -29,7 +29,7 @@ class TestEcho(unittest.TestCase):
             server.close()
             return data
 
-        self.assertEqual(paio.run(main()), b"hello pygo")
+        self.assertEqual(paio.run(main()), b"hello runloom")
 
     def test_readline(self):
         async def handler(reader, writer):
@@ -116,7 +116,7 @@ class TestEcho(unittest.TestCase):
             # the listen accept queue (min(backlog, kern.ipc.somaxconn) ~= 128);
             # BSD/macOS answer the overflow with RST -> ConnectionResetError,
             # whereas Linux silently drops the SYN and the client retransmits.
-            # This is not pygo-specific -- stdlib asyncio fails the same
+            # This is not runloom-specific -- stdlib asyncio fails the same
             # unbounded storm on FreeBSD (measured 349/500 RST).  Gating
             # concurrency keeps 500 concurrent round-trips through the echo
             # server while staying portable with no somaxconn tuning.
@@ -281,7 +281,7 @@ class TestCancelWaitFd(unittest.TestCase):
 class TestLeakedParkerCrossThread(unittest.TestCase):
     """A goroutine left parked in netpoll on one OS thread (e.g. a loop thread
     that stopped without cancelling/closing -- a leaked accept/recv) must NOT
-    keep ANOTHER thread's pygo_core.run() alive.  The single-thread drain
+    keep ANOTHER thread's runloom_c.run() alive.  The single-thread drain
     counts only THIS sched's parkers (g->owner == this sched), not the global
     parked count -- otherwise a parker owned by a dead/other thread wedges
     every other loop forever."""

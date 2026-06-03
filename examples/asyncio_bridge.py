@@ -1,9 +1,9 @@
-"""asyncio bridge — run existing async/await code on pygo's scheduler.
+"""asyncio bridge — run existing async/await code on runloom's scheduler.
 
-Already have async def code?  pygo.aio.run(coro) is a drop-in for
-asyncio.run that drives each Task on a pygo goroutine.  Standard
+Already have async def code?  runloom.aio.run(coro) is a drop-in for
+asyncio.run that drives each Task on a runloom goroutine.  Standard
 asyncio building blocks — gather, sleep, wait_for, Queue, Lock — work
-unchanged; pygo just provides the event loop underneath.
+unchanged; runloom just provides the event loop underneath.
 
 Run:
     python3 examples/asyncio_bridge.py
@@ -14,7 +14,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 
-import pygo.aio as paio
+import runloom.aio as paio
 
 
 async def fetch(name, delay):

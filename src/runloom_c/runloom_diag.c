@@ -1,0 +1,387 @@
+/* runloom_diag.c -- diagnostic infrastructure: env-driven flags,
+ * lock-free per-thread lifecycle event rings, self_check invariant
+ * pass.  See runloom_diag.h for the contract. */
+
+#if !defined(_WIN32)
+#  define _POSIX_C_SOURCE 200809L
+#endif
+
+#include "runloom_diag.h"
+#include "plat.h"
+#include "plat_compat.h"
+#include "plat_atomic.h"
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <ctype.h>
+#if defined(_WIN32)
+#  include <io.h>
+#else
+#  include <unistd.h>
+#endif
+
+/* ---------------------------------------------------------------- *
+ *  Flag parsing                                                    *
+ * ---------------------------------------------------------------- */
+
+unsigned int runloom_debug_flags = 0;
+
+static unsigned int parse_one_token(const char *t, size_t n)
+{
+    if (n == 0) return 0;
+    if (n == 4 && memcmp(t, "none", 4) == 0)    return 0;
+    if (n == 3 && memcmp(t, "all",  3) == 0)    return RUNLOOM_DBG_ALL;
+    if (n == 6 && memcmp(t, "parker", 6) == 0)  return RUNLOOM_DBG_PARKER;
+    if (n == 6 && memcmp(t, "gstate", 6) == 0)  return RUNLOOM_DBG_GSTATE;
+    if (n == 10 && memcmp(t, "invariants", 10) == 0) return RUNLOOM_DBG_INVARIANTS;
+    if (n == 4 && memcmp(t, "ring", 4) == 0)    return RUNLOOM_DBG_RING;
+    /* "1" -- legacy: tag for "build-style debug" only, no diag flags. */
+    /* Unknown token: keep silent.  setup.py also uses RUNLOOM_DEBUG=1
+     * which we ignore here. */
+    return 0;
+}
+
+static void parse_runloom_debug_env(void)
+{
+    const char *env = getenv("RUNLOOM_DEBUG_DIAG");
+    if (env == NULL || *env == '\0') {
+        /* Fall back to RUNLOOM_DEBUG, but ignore the legacy "=1" form
+         * (that's the build-style debug flag, not a diag selector). */
+        env = getenv("RUNLOOM_DEBUG");
+        if (env == NULL || *env == '\0') return;
+        /* Skip if it looks like the build-style "1"/"0"/"true"/etc.
+         * value -- we don't want RUNLOOM_DEBUG=1 to enable runtime
+         * checks unintentionally. */
+        if ((env[0] == '0' || env[0] == '1') && env[1] == '\0') return;
+        if (strcmp(env, "true") == 0 || strcmp(env, "false") == 0) return;
+        if (strcmp(env, "yes")  == 0 || strcmp(env, "no")    == 0) return;
+    }
+    {
+        const char *p = env;
+        unsigned int flags = 0;
+        while (*p != '\0') {
+            const char *start;
+            size_t n;
+            while (*p == ',' || *p == ' ' || *p == '\t') p++;
+            start = p;
+            while (*p != '\0' && *p != ',' && *p != ' ' && *p != '\t') p++;
+            n = (size_t)(p - start);
+            /* lowercase in place would mutate the env; do a stack
+             * copy for short tokens. */
+            if (n > 0 && n < 32) {
+                char buf[32];
+                size_t i;
+                for (i = 0; i < n; i++) buf[i] = (char)tolower((unsigned char)start[i]);
+                flags |= parse_one_token(buf, n);
+            }
+        }
+        runloom_debug_flags = flags;
+    }
+}
+
+
+/* ---------------------------------------------------------------- *
+ *  Lifecycle event ring                                            *
+ * ---------------------------------------------------------------- */
+
+/* Power-of-two size; head is monotonic, slot = head & mask.  Each
+ * record is 32 bytes so the ring fits in cache lines cleanly. */
+#define RUNLOOM_RING_LOG2 10        /* 1024 entries = 32 KiB per thread */
+#define RUNLOOM_RING_CAP  (1u << RUNLOOM_RING_LOG2)
+#define RUNLOOM_RING_MASK (RUNLOOM_RING_CAP - 1u)
+
+typedef struct runloom_evt {
+    unsigned int   op;            /* runloom_evt_op_t */
+    unsigned int   tid;           /* lightweight: owning ring's seq id */
+    const void    *p1;
+    const void    *p2;
+    long long      aux;
+    long long      ts_ns;
+} runloom_evt_t;
+
+typedef struct runloom_ring {
+    runloom_evt_t      slots[RUNLOOM_RING_CAP];
+    unsigned long   head;         /* monotonic counter; only owner writes */
+    unsigned int    tid;          /* registry seq */
+    struct runloom_ring *next;       /* registry list */
+} runloom_ring_t;
+
+/* TLS: each thread's own ring.  Lazily allocated. */
+static RUNLOOM_TLS runloom_ring_t *runloom_tls_ring = NULL;
+
+/* Registry list head + lock.  Used only during ring creation and
+ * during runloom_diag_dump; emission never touches the registry. */
+static runloom_ring_t  *runloom_ring_list = NULL;
+static runloom_mutex_t  runloom_ring_list_lock;
+static int           runloom_ring_list_lock_inited = 0;
+static unsigned int  runloom_ring_next_tid = 0;
+
+static long long monotonic_ns(void)
+{
+#if defined(CLOCK_MONOTONIC)
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) == 0)
+        return (long long)ts.tv_sec * 1000000000LL + (long long)ts.tv_nsec;
+#endif
+    return 0;
+}
+
+static runloom_ring_t *ring_acquire(void)
+{
+    runloom_ring_t *r = runloom_tls_ring;
+    if (r != NULL) return r;
+    r = (runloom_ring_t *)calloc(1, sizeof(*r));
+    if (r == NULL) return NULL;
+    runloom_mutex_lock(&runloom_ring_list_lock);
+    r->tid  = ++runloom_ring_next_tid;
+    r->next = runloom_ring_list;
+    runloom_ring_list = r;
+    runloom_mutex_unlock(&runloom_ring_list_lock);
+    runloom_tls_ring = r;
+    return r;
+}
+
+void runloom_evt_log_(runloom_evt_op_t op,
+                   const void *p1, const void *p2, long long aux)
+{
+    runloom_ring_t *r;
+    runloom_evt_t  *s;
+    unsigned long idx;
+    if (!runloom_ring_list_lock_inited) return;     /* before init */
+    r = ring_acquire();
+    if (r == NULL) return;
+    idx = r->head++;
+    s = &r->slots[idx & RUNLOOM_RING_MASK];
+    s->op    = (unsigned int)op;
+    s->tid   = r->tid;
+    s->p1    = p1;
+    s->p2    = p2;
+    s->aux   = aux;
+    s->ts_ns = monotonic_ns();
+}
+
+int runloom_diag_registered_thread_count(void)
+{
+    int n = 0;
+    runloom_ring_t *r;
+    if (!runloom_ring_list_lock_inited) return 0;
+    runloom_mutex_lock(&runloom_ring_list_lock);
+    for (r = runloom_ring_list; r != NULL; r = r->next) n++;
+    runloom_mutex_unlock(&runloom_ring_list_lock);
+    return n;
+}
+
+static const char *op_name(unsigned int op)
+{
+    switch ((runloom_evt_op_t)op) {
+    case RUNLOOM_EVT_PARKER_LINK:    return "PARK_LINK";
+    case RUNLOOM_EVT_PARKER_UNLINK:  return "PARK_UNLINK";
+    case RUNLOOM_EVT_PARKER_WAKE:    return "PARK_WAKE";
+    case RUNLOOM_EVT_PARKER_TIMEOUT: return "PARK_TIMEOUT";
+    case RUNLOOM_EVT_PARKER_GHOST:   return "PARK_GHOST";
+    case RUNLOOM_EVT_PARKER_FORCE:   return "PARK_FORCE";
+    case RUNLOOM_EVT_G_TRANSITION:   return "G_TRANSITION";
+    case RUNLOOM_EVT_G_SUBMIT:       return "G_SUBMIT";
+    case RUNLOOM_EVT_G_POP:          return "G_POP";
+    case RUNLOOM_EVT_G_DECREF:       return "G_DECREF";
+    case RUNLOOM_EVT_G_COMPLETE:     return "G_COMPLETE";
+    case RUNLOOM_EVT_CHAN_PARK:      return "CHAN_PARK";
+    case RUNLOOM_EVT_CHAN_WAKE:      return "CHAN_WAKE";
+    default:                      return "?";
+    }
+}
+
+static void emit(int fd, const char *buf, size_t len)
+{
+    if (fd < 0) { (void)fwrite(buf, 1, len, stderr); return; }
+#if defined(_WIN32)
+    (void)_write(fd, buf, (unsigned)len);
+#else
+    ssize_t off = 0;
+    while ((size_t)off < len) {
+        ssize_t w = write(fd, buf + off, len - off);
+        if (w <= 0) break;
+        off += w;
+    }
+#endif
+}
+
+void runloom_diag_dump(int fd)
+{
+    runloom_ring_t *r;
+    char hdr[256];
+    int n;
+    if (!runloom_ring_list_lock_inited) {
+        emit(fd, "[runloom-diag] not initialised\n", 28);
+        return;
+    }
+    n = snprintf(hdr, sizeof hdr,
+        "[runloom-diag] flags=0x%x threads=%d ring_cap=%u\n",
+        runloom_debug_flags, runloom_diag_registered_thread_count(),
+        (unsigned)RUNLOOM_RING_CAP);
+    if (n > 0) emit(fd, hdr, (size_t)n);
+
+    runloom_mutex_lock(&runloom_ring_list_lock);
+    for (r = runloom_ring_list; r != NULL; r = r->next) {
+        unsigned long head = r->head;
+        unsigned long count = head < RUNLOOM_RING_CAP ? head : RUNLOOM_RING_CAP;
+        unsigned long i;
+        n = snprintf(hdr, sizeof hdr,
+            "[runloom-diag] tid=%u events=%lu (head=%lu)\n",
+            r->tid, count, head);
+        if (n > 0) emit(fd, hdr, (size_t)n);
+        /* Newest-first walk. */
+        for (i = 0; i < count; i++) {
+            unsigned long idx = (head - 1 - i) & RUNLOOM_RING_MASK;
+            const runloom_evt_t *e = &r->slots[idx];
+            char line[200];
+            int m;
+            m = snprintf(line, sizeof line,
+                "  ts=%lld op=%-12s p1=%p p2=%p aux=%lld\n",
+                e->ts_ns, op_name(e->op),
+                (void *)e->p1, (void *)e->p2, e->aux);
+            if (m > 0) emit(fd, line, (size_t)m);
+        }
+    }
+    runloom_mutex_unlock(&runloom_ring_list_lock);
+}
+
+
+/* ---------------------------------------------------------------- *
+ *  Self check                                                      *
+ *                                                                  *
+ *  Implemented as a friend of netpoll.c: netpoll exposes the       *
+ *  inspection primitives below, this just orchestrates the walk.   *
+ * ---------------------------------------------------------------- */
+
+/* Hooks into netpoll.c.  Implemented there because they need access
+ * to the static parker structures; declared here so callers don't
+ * have to include netpoll.h directly. */
+struct runloom_self_check_stats {
+    int  global_list_count;
+    int  global_list_cycle;
+    int  parked_total_atomic;
+    int  bucket_count_total;
+    int  bucket_self_loops;
+    int  bucket_unreachable;
+};
+
+extern int runloom_netpoll_inspect_for_self_check(
+    struct runloom_self_check_stats *out);
+
+/* Setter exposed so netpoll.c can fill in the stats without including
+ * runloom_diag.c's private struct definition. */
+void runloom_self_check_stats_set(struct runloom_self_check_stats *out,
+                               int global_list_count,
+                               int global_list_cycle,
+                               int parked_total_atomic,
+                               int bucket_count_total,
+                               int bucket_self_loops,
+                               int bucket_unreachable)
+{
+    if (out == NULL) return;
+    out->global_list_count    = global_list_count;
+    out->global_list_cycle    = global_list_cycle;
+    out->parked_total_atomic  = parked_total_atomic;
+    out->bucket_count_total   = bucket_count_total;
+    out->bucket_self_loops    = bucket_self_loops;
+    out->bucket_unreachable   = bucket_unreachable;
+}
+
+int runloom_self_check(int verbose)
+{
+    struct runloom_self_check_stats s;
+    int violations = 0;
+    char buf[400];
+    int n;
+    memset(&s, 0, sizeof s);
+    if (runloom_netpoll_inspect_for_self_check(&s) != 0) {
+        emit(-1, "[runloom-diag] self_check: netpoll inspect failed\n", 47);
+        return 1;
+    }
+    if (s.global_list_cycle) {
+        n = snprintf(buf, sizeof buf,
+            "[runloom-diag] self_check: GLOBAL LIST CYCLE detected "
+            "(walked %d entries before cycle)\n", s.global_list_count);
+        emit(-1, buf, (size_t)n);
+        violations++;
+    }
+    if (s.bucket_self_loops > 0) {
+        n = snprintf(buf, sizeof buf,
+            "[runloom-diag] self_check: %d per-fd buckets self-loop\n",
+            s.bucket_self_loops);
+        emit(-1, buf, (size_t)n);
+        violations++;
+    }
+    if (!s.global_list_cycle &&
+        s.global_list_count != s.parked_total_atomic) {
+        n = snprintf(buf, sizeof buf,
+            "[runloom-diag] self_check: parked_total=%d but walked=%d\n",
+            s.parked_total_atomic, s.global_list_count);
+        emit(-1, buf, (size_t)n);
+        violations++;
+    }
+    if (s.bucket_unreachable > 0) {
+        n = snprintf(buf, sizeof buf,
+            "[runloom-diag] self_check: %d bucket entries not in global list\n",
+            s.bucket_unreachable);
+        emit(-1, buf, (size_t)n);
+        violations++;
+    }
+    if (verbose && violations == 0) {
+        n = snprintf(buf, sizeof buf,
+            "[runloom-diag] self_check: OK (parked=%d buckets=%d)\n",
+            s.global_list_count, s.bucket_count_total);
+        emit(-1, buf, (size_t)n);
+    }
+    return violations;
+}
+
+
+/* ---------------------------------------------------------------- *
+ *  Init / fini                                                     *
+ * ---------------------------------------------------------------- */
+
+static int runloom_diag_inited = 0;
+
+void runloom_diag_init(void)
+{
+    if (runloom_diag_inited) return;
+    runloom_mutex_init(&runloom_ring_list_lock);
+    runloom_ring_list_lock_inited = 1;
+    parse_runloom_debug_env();
+    runloom_diag_inited = 1;
+}
+
+void runloom_diag_reset_after_fork(void)
+{
+    /* Forked child: re-init the registry lock (a dead thread may have held
+     * it at fork) and abandon the inherited per-thread ring list (those
+     * rings belonged to threads that no longer exist; leak them rather than
+     * free, since their owning threads are gone).  Single-thread child. */
+    if (!runloom_diag_inited) return;
+    runloom_mutex_init(&runloom_ring_list_lock);
+    runloom_ring_list = NULL;
+    runloom_ring_next_tid = 0;
+    runloom_tls_ring = NULL;
+}
+
+void runloom_diag_fini(void)
+{
+    runloom_ring_t *r, *next;
+    if (!runloom_diag_inited) return;
+    runloom_mutex_lock(&runloom_ring_list_lock);
+    r = runloom_ring_list;
+    runloom_ring_list = NULL;
+    runloom_mutex_unlock(&runloom_ring_list_lock);
+    while (r != NULL) {
+        next = r->next;
+        free(r);
+        r = next;
+    }
+    runloom_mutex_destroy(&runloom_ring_list_lock);
+    runloom_ring_list_lock_inited = 0;
+    runloom_diag_inited = 0;
+    runloom_tls_ring = NULL;   /* don't free TLS rings on fini: they're freed above */
+}

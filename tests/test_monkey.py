@@ -1,6 +1,6 @@
-"""Tests for pygo.monkey -- cooperative patches across the stdlib.
+"""Tests for runloom.monkey -- cooperative patches across the stdlib.
 
-These tests exercise the C scheduler (pygo_core.go / pygo_core.run)
+These tests exercise the C scheduler (runloom_c.go / runloom_c.run)
 because that's the path the monkey-patches target.
 """
 import os
@@ -16,9 +16,9 @@ _IS_WINDOWS = platform.system() == "Windows"
 
 sys.path.insert(0, "src")
 
-import pygo
-import pygo.monkey
-import pygo_core
+import runloom
+import runloom.monkey
+import runloom_c
 
 
 def _drive(fn):
@@ -29,8 +29,8 @@ def _drive(fn):
             box[0] = fn()
         except BaseException as e:
             box[1] = e
-    pygo_core.go(runner)
-    pygo_core.run()
+    runloom_c.go(runner)
+    runloom_c.run()
     if box[1] is not None:
         raise box[1]
     return box[0]
@@ -47,29 +47,29 @@ def tearDownModule():
     teardown (a real OS thread parks on a primitive that only a running
     goroutine scheduler can wake), which intermittently wedges the whole
     suite.  Restoring stdlib here keeps the run deterministic everywhere."""
-    pygo.monkey.unpatch()
+    runloom.monkey.unpatch()
 
 
 class TestPatchIdempotence(unittest.TestCase):
     def test_double_patch(self):
-        pygo.monkey.patch()
-        pygo.monkey.patch()   # second call is a no-op
+        runloom.monkey.patch()
+        runloom.monkey.patch()   # second call is a no-op
         self.assertTrue(callable(time.sleep))
         self.assertTrue(callable(socket.socket.recv))
 
 
 class TestTimeSleep(unittest.TestCase):
     def test_sleep_interleaves(self):
-        pygo.monkey.patch()
+        runloom.monkey.patch()
         log = []
         def sleeper(name, dur):
             log.append((name, "start"))
-            time.sleep(dur)            # patched -> pygo.sleep
+            time.sleep(dur)            # patched -> runloom.sleep
             log.append((name, "end"))
-        pygo_core.go(lambda: sleeper("A", 0.05))
-        pygo_core.go(lambda: sleeper("B", 0.05))
+        runloom_c.go(lambda: sleeper("A", 0.05))
+        runloom_c.go(lambda: sleeper("B", 0.05))
         t0 = time.monotonic()
-        pygo_core.run()
+        runloom_c.run()
         elapsed = time.monotonic() - t0
         # If both were truly parallel sleepers, elapsed ~= 0.05, not 0.10.
         self.assertLess(elapsed, 0.09)
@@ -79,18 +79,18 @@ class TestTimeSleep(unittest.TestCase):
 
 class TestThreadingLock(unittest.TestCase):
     def test_lock_excludes_goroutines(self):
-        pygo.monkey.patch()
+        runloom.monkey.patch()
         lock = threading.Lock()
         log = []
         def worker(name):
             with lock:
                 log.append((name, "in"))
-                pygo.sleep(0.01)
+                runloom.sleep(0.01)
                 log.append((name, "out"))
-        pygo_core.go(lambda: worker("A"))
-        pygo_core.go(lambda: worker("B"))
-        pygo_core.go(lambda: worker("C"))
-        pygo_core.run()
+        runloom_c.go(lambda: worker("A"))
+        runloom_c.go(lambda: worker("B"))
+        runloom_c.go(lambda: worker("C"))
+        runloom_c.run()
         # Within each pair (in, out) must be adjacent -- no interleaving.
         names = [n for n, _ in log]
         for i in range(0, len(log), 2):
@@ -101,7 +101,7 @@ class TestThreadingLock(unittest.TestCase):
 
 class TestThreadingEvent(unittest.TestCase):
     def test_event_wakes_waiters(self):
-        pygo.monkey.patch()
+        runloom.monkey.patch()
         ev = threading.Event()
         log = []
         def waiter():
@@ -109,13 +109,13 @@ class TestThreadingEvent(unittest.TestCase):
             ev.wait()
             log.append("wait-end")
         def setter():
-            pygo.sleep(0.02)
+            runloom.sleep(0.02)
             log.append("set")
             ev.set()
-        pygo_core.go(waiter)
-        pygo_core.go(waiter)
-        pygo_core.go(setter)
-        pygo_core.run()
+        runloom_c.go(waiter)
+        runloom_c.go(waiter)
+        runloom_c.go(setter)
+        runloom_c.run()
         self.assertEqual(log.count("wait-start"), 2)
         self.assertEqual(log.count("wait-end"), 2)
         self.assertEqual(log[2], "set")  # both waits started before set
@@ -124,7 +124,7 @@ class TestThreadingEvent(unittest.TestCase):
 
 class TestQueue(unittest.TestCase):
     def test_producer_consumer(self):
-        pygo.monkey.patch()
+        runloom.monkey.patch()
         q = queue.Queue(maxsize=3)
         consumed = []
         def producer():
@@ -133,9 +133,9 @@ class TestQueue(unittest.TestCase):
         def consumer():
             for _ in range(5):
                 consumed.append(q.get())
-        pygo_core.go(producer)
-        pygo_core.go(consumer)
-        pygo_core.run()
+        runloom_c.go(producer)
+        runloom_c.go(consumer)
+        runloom_c.run()
         self.assertEqual(consumed, [0, 1, 2, 3, 4])
 
 
@@ -144,7 +144,7 @@ class TestOsReadWrite(unittest.TestCase):
         "Windows pipes aren't pollable via Winsock select/WSAPoll; "
         "this test exercises the POSIX pipe-cooperative path.")
     def test_pipe_round_trip(self):
-        pygo.monkey.patch()
+        runloom.monkey.patch()
         r, w = os.pipe()
         got = [None]
         def writer():
@@ -154,9 +154,9 @@ class TestOsReadWrite(unittest.TestCase):
         def reader():
             got[0] = os.read(r, 1024)
             os.close(r)
-        pygo_core.go(reader)
-        pygo_core.go(writer)
-        pygo_core.run()
+        runloom_c.go(reader)
+        runloom_c.go(writer)
+        runloom_c.run()
         self.assertEqual(got[0], b"hello")
 
 
@@ -166,7 +166,7 @@ class TestOsReadWrite(unittest.TestCase):
 class TestSelect(unittest.TestCase):
     def test_select_single_fd(self):
         import select
-        pygo.monkey.patch()
+        runloom.monkey.patch()
         r, w = os.pipe()
         ready_fd = [None]
         def writer():
@@ -176,22 +176,22 @@ class TestSelect(unittest.TestCase):
             rr, _, _ = select.select([r], [], [], 1.0)
             ready_fd[0] = rr
             os.read(r, 1)
-        pygo_core.go(reader)
-        pygo_core.go(writer)
-        pygo_core.run()
+        runloom_c.go(reader)
+        runloom_c.go(writer)
+        runloom_c.run()
         os.close(r); os.close(w)
         self.assertEqual(ready_fd[0], [r])
 
     def test_select_timeout(self):
         import select
-        pygo.monkey.patch()
+        runloom.monkey.patch()
         r, _ = os.pipe()
         result = [None]
         def waiter():
             result[0] = select.select([r], [], [], 0.05)
-        pygo_core.go(waiter)
+        runloom_c.go(waiter)
         t0 = time.monotonic()
-        pygo_core.run()
+        runloom_c.run()
         elapsed = time.monotonic() - t0
         os.close(r)
         self.assertEqual(result[0], ([], [], []))
@@ -200,13 +200,13 @@ class TestSelect(unittest.TestCase):
 
 class TestDNS(unittest.TestCase):
     def test_getaddrinfo_localhost(self):
-        pygo.monkey.patch()
+        runloom.monkey.patch()
         result = [None]
         def looker():
             result[0] = socket.getaddrinfo("localhost", 80,
                                            type=socket.SOCK_STREAM)
-        pygo_core.go(looker)
-        pygo_core.run()
+        runloom_c.go(looker)
+        runloom_c.run()
         self.assertIsNotNone(result[0])
         self.assertTrue(len(result[0]) > 0)
         # Should land on 127.0.0.1 or ::1 via /etc/hosts.
@@ -214,21 +214,21 @@ class TestDNS(unittest.TestCase):
         self.assertTrue(addrs & {"127.0.0.1", "::1"})
 
     def test_getaddrinfo_ip_literal(self):
-        pygo.monkey.patch()
+        runloom.monkey.patch()
         result = [None]
         def looker():
             result[0] = socket.getaddrinfo("8.8.8.8", 53,
                                            family=socket.AF_INET,
                                            type=socket.SOCK_DGRAM)
-        pygo_core.go(looker)
-        pygo_core.run()
+        runloom_c.go(looker)
+        runloom_c.run()
         self.assertEqual(result[0][0][4][0], "8.8.8.8")
 
     def test_getaddrinfo_no_thread_handoff(self):
         # Async DNS must NOT block the scheduler.  Two concurrent lookups
         # should both finish in roughly the time of one.
-        pygo.monkey.patch()
-        import pygo.monkey as M
+        runloom.monkey.patch()
+        import runloom.monkey as M
         # Clear cache so we actually do round-trips.
         M._dns_result_cache.clear()
         times = []
@@ -239,9 +239,9 @@ class TestDNS(unittest.TestCase):
             except Exception:
                 pass
             times.append(time.monotonic() - t0)
-        pygo_core.go(lambda: looker("localhost"))
-        pygo_core.go(lambda: looker("localhost"))
-        pygo_core.run()
+        runloom_c.go(lambda: looker("localhost"))
+        runloom_c.go(lambda: looker("localhost"))
+        runloom_c.run()
         # Both should be sub-second (they hit /etc/hosts, no UDP).
         self.assertTrue(all(t < 0.5 for t in times), times)
 
@@ -249,18 +249,18 @@ class TestDNS(unittest.TestCase):
 class TestFile(unittest.TestCase):
     def test_open_read_regular_file(self):
         import tempfile
-        pygo.monkey.patch()
+        runloom.monkey.patch()
         path = tempfile.mktemp()
         with open(path, "w") as f:
-            f.write("hello pygo")
+            f.write("hello runloom")
         try:
             got = [None]
             def reader():
                 with open(path, "r") as f:
                     got[0] = f.read()
-            pygo_core.go(reader)
-            pygo_core.run()
-            self.assertEqual(got[0], "hello pygo")
+            runloom_c.go(reader)
+            runloom_c.run()
+            self.assertEqual(got[0], "hello runloom")
         finally:
             os.unlink(path)
 
@@ -268,7 +268,7 @@ class TestFile(unittest.TestCase):
         # Two goroutines reading files should overlap via the thread
         # pool -- the scheduler must not be blocked while one reads.
         import tempfile
-        pygo.monkey.patch()
+        runloom.monkey.patch()
         path = tempfile.mktemp()
         with open(path, "wb") as f:
             f.write(b"x" * 4096)
@@ -279,9 +279,9 @@ class TestFile(unittest.TestCase):
                 with open(path, "rb") as f:
                     f.read()
                 log.append((name, "done"))
-            pygo_core.go(lambda: reader("A"))
-            pygo_core.go(lambda: reader("B"))
-            pygo_core.run()
+            runloom_c.go(lambda: reader("A"))
+            runloom_c.go(lambda: reader("B"))
+            runloom_c.run()
             starts = [e for e in log if e[1] == "start"]
             self.assertEqual(len(starts), 2)
         finally:
@@ -291,7 +291,7 @@ class TestFile(unittest.TestCase):
 class TestSyscalls(unittest.TestCase):
     def test_stat_listdir(self):
         import tempfile
-        pygo.monkey.patch()
+        runloom.monkey.patch()
         tmpdir = tempfile.mkdtemp()
         try:
             for nm in ("a.txt", "b.txt"):
@@ -301,8 +301,8 @@ class TestSyscalls(unittest.TestCase):
             def worker():
                 got[0] = sorted(os.listdir(tmpdir))
                 got[1] = os.stat(os.path.join(tmpdir, "a.txt")).st_size
-            pygo_core.go(worker)
-            pygo_core.run()
+            runloom_c.go(worker)
+            runloom_c.run()
             self.assertEqual(got[0], ["a.txt", "b.txt"])
             self.assertEqual(got[1], 5)
         finally:
@@ -315,7 +315,7 @@ class TestSubprocessWait(unittest.TestCase):
 
     def test_wait_uses_cooperative_poll(self):
         import subprocess as _sp
-        pygo.monkey.patch()
+        runloom.monkey.patch()
         SLEEP = 0.2
 
         def spawn():
@@ -341,9 +341,9 @@ class TestSubprocessWait(unittest.TestCase):
             rc = spawn().wait()
             log.append((name, "done", rc))
         t0 = time.monotonic()
-        pygo_core.go(lambda: waiter("A"))
-        pygo_core.go(lambda: waiter("B"))
-        pygo_core.run()
+        runloom_c.go(lambda: waiter("A"))
+        runloom_c.go(lambda: waiter("B"))
+        runloom_c.run()
         elapsed = time.monotonic() - t0
 
         # Overlapping the two child sleeps must save ~one full SLEEP versus
@@ -378,8 +378,8 @@ class TestParkerSocketpair(unittest.TestCase):
                     except OSError: pass
 
     def test_socketpair_parker_round_trip(self):
-        import pygo.monkey as M
-        pygo.monkey.patch()
+        import runloom.monkey as M
+        runloom.monkey.patch()
         # Drain any pooled parkers so the next _Parker() actually
         # constructs a fresh one through the forced path.
         self._drain_parker_pool(M)
@@ -392,12 +392,12 @@ class TestParkerSocketpair(unittest.TestCase):
                 def signaller():
                     sequence.append("signal")
                     p.unpark()
-                pygo_core.go(signaller)
+                runloom_c.go(signaller)
                 p.park()
                 sequence.append("woken")
                 p.release()
-            pygo_core.go(coordinator)
-            pygo_core.run()
+            runloom_c.go(coordinator)
+            runloom_c.run()
         finally:
             M._IS_WINDOWS = was_windows
             self._drain_parker_pool(M)
@@ -407,7 +407,7 @@ class TestParkerSocketpair(unittest.TestCase):
 class TestSocketStillWorks(unittest.TestCase):
     """Regression: the original socket patches still work after refactor."""
     def test_echo(self):
-        pygo.monkey.patch()
+        runloom.monkey.patch()
         srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         srv.bind(("127.0.0.1", 0))
@@ -425,9 +425,9 @@ class TestSocketStillWorks(unittest.TestCase):
             c.sendall(b"ping")
             result[0] = c.recv(1024)
             c.close()
-        pygo_core.go(server)
-        pygo_core.go(client)
-        pygo_core.run()
+        runloom_c.go(server)
+        runloom_c.go(client)
+        runloom_c.run()
         srv.close()
         self.assertEqual(result[0], b"ping")
 

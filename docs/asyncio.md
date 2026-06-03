@@ -1,31 +1,31 @@
-# Asyncio bridge (`pygo.aio`)
+# Asyncio bridge (`runloom.aio`)
 
-`pygo.aio` lets you run existing `async def` code on the pygo
+`runloom.aio` lets you run existing `async def` code on the runloom
 scheduler.  It implements the asyncio event-loop protocol on top of
-goroutines: every `asyncio.Task` becomes a pygo goroutine driving the
+goroutines: every `asyncio.Task` becomes a runloom goroutine driving the
 coroutine, and `await fut` parks the goroutine on a per-task wake
 primitive.
 
 ## When to use this
 
-**Use `pygo.aio` when:**
+**Use `runloom.aio` when:**
 
 - You already have `async def` code and don't want to rewrite it
   Go-style.
 - You want sub-microsecond context switches (~80 ns vs. asyncio's
   ~1800 ns).
-- You're chaining many `await` operations per task (the pygo win
+- You're chaining many `await` operations per task (the runloom win
   amortises over awaits).
 - You want to mix monkey-patched sync code (cooperative `socket.recv`,
-  `time.sleep`) with `async def` in the same process -- pygo's
+  `time.sleep`) with `async def` in the same process -- runloom's
   scheduler drives both.
 
 **Stick with vanilla asyncio when:**
 
 - Your workload is "one `await` per task and dispatch" -- asyncio's
-  tight C-deque dispatcher beats pygo's PygoTask setup cost in that
+  tight C-deque dispatcher beats runloom's RunloomTask setup cost in that
   shape (a 5× slowdown was measured on a fan-out microbench).
-- You depend on asyncio internals beyond what pygo implements
+- You depend on asyncio internals beyond what runloom implements
   (debug hooks, custom selectors, low-level transport flags).
 
 Measured performance on Python 3.12 (Linux):
@@ -40,7 +40,7 @@ Measured performance on Python 3.12 (Linux):
 
 ```python
 import asyncio
-import pygo.aio as paio
+import runloom.aio as paio
 
 async def main():
     print("hello from", asyncio.current_task())
@@ -52,8 +52,8 @@ paio.run(main())
 
 `paio.run(coro)` is the equivalent of `asyncio.run(coro)`:
 
-1. Installs the pygo event-loop policy (`PygoEventLoopPolicy`).
-2. Creates a `PygoEventLoop`.
+1. Installs the runloom event-loop policy (`RunloomEventLoopPolicy`).
+2. Creates a `RunloomEventLoop`.
 3. Runs your top-level coroutine to completion.
 4. Cancels any pending tasks and drains the scheduler before returning.
 
@@ -62,7 +62,7 @@ paio.run(main())
 Standard asyncio idioms work:
 
 ```python
-import asyncio, pygo.aio as paio
+import asyncio, runloom.aio as paio
 
 async def worker(i):
     await asyncio.sleep(0.001)
@@ -87,11 +87,11 @@ async def main():
 
 ## TCP server with streams
 
-`pygo.aio` provides `open_connection` and `start_server` that return
+`runloom.aio` provides `open_connection` and `start_server` that return
 `StreamReader`/`StreamWriter` objects compatible with `asyncio.streams`:
 
 ```python
-import asyncio, pygo.aio as paio
+import asyncio, runloom.aio as paio
 
 async def handler(reader, writer):
     line = await reader.readline()
@@ -108,7 +108,7 @@ async def main():
 paio.run(main())
 ```
 
-The server runs at full speed using pygo's netpoll (epoll on Linux,
+The server runs at full speed using runloom's netpoll (epoll on Linux,
 kqueue on BSD/macOS, WSAPoll/IOCP on Windows).  Per-connection
 overhead is one goroutine -- by default 16 KB of stack after
 [calibration](stack-sizing.md).
@@ -116,7 +116,7 @@ overhead is one goroutine -- by default 16 KB of stack after
 ### Client
 
 ```python
-import asyncio, pygo.aio as paio
+import asyncio, runloom.aio as paio
 
 async def main():
     reader, writer = await paio.open_connection("127.0.0.1", 9000)
@@ -132,7 +132,7 @@ paio.run(main())
 ## Concurrent clients (the fan-out asyncio is supposed to be good at)
 
 ```python
-import asyncio, pygo.aio as paio
+import asyncio, runloom.aio as paio
 
 async def fetch_one(host, port):
     r, w = await paio.open_connection(host, port)
@@ -155,12 +155,12 @@ others run.  No threads, no callbacks.
 
 ## Locks, Events, Queues, Conditions
 
-The asyncio synchronisation primitives work as-is -- `pygo.aio` doesn't
+The asyncio synchronisation primitives work as-is -- `runloom.aio` doesn't
 reimplement them; they're driven via `Future` and `call_soon`, which
-pygo's loop implements.
+runloom's loop implements.
 
 ```python
-import asyncio, pygo.aio as paio
+import asyncio, runloom.aio as paio
 
 async def waiter(lock, name):
     async with lock:
@@ -192,7 +192,7 @@ all behave the same way.
 ## `wait_for`, `shield`, cancellation
 
 ```python
-import asyncio, pygo.aio as paio
+import asyncio, runloom.aio as paio
 
 async def slow():
     await asyncio.sleep(60.0)
@@ -211,10 +211,10 @@ shielded awaitable doesn't propagate to the underlying coroutine.
 
 ## `loop.add_reader` / `add_writer`
 
-Low-level fd readiness callbacks work, driven by pygo's netpoll:
+Low-level fd readiness callbacks work, driven by runloom's netpoll:
 
 ```python
-import asyncio, os, pygo.aio as paio
+import asyncio, os, runloom.aio as paio
 
 async def main():
     loop = asyncio.get_running_loop()
@@ -234,7 +234,7 @@ paio.run(main())
 ```
 
 These are level-triggered (like asyncio's default selector loop) just
-driven by pygo's netpoll.
+driven by runloom's netpoll.
 
 ## Datagram (UDP) endpoints
 
@@ -242,7 +242,7 @@ driven by pygo's netpoll.
 pair with the standard asyncio protocol callbacks:
 
 ```python
-import asyncio, pygo.aio as paio
+import asyncio, runloom.aio as paio
 
 class EchoProto(asyncio.DatagramProtocol):
     def connection_made(self, transport):
@@ -298,7 +298,7 @@ total = sum(results)
 
 ### Avoid making a new task for trivial work
 
-A `PygoTask` allocates a 16 KB goroutine stack.  For something that's
+A `RunloomTask` allocates a 16 KB goroutine stack.  For something that's
 basically "return a value", just call the function:
 
 ```python
@@ -312,8 +312,8 @@ result = await trivial()
 ### Mix in monkey-patched blocking I/O
 
 ```python
-import pygo.monkey, pygo.aio as paio
-pygo.monkey.patch()    # makes socket / time / ssl cooperative
+import runloom.monkey, runloom.aio as paio
+runloom.monkey.patch()    # makes socket / time / ssl cooperative
 
 async def main():
     # This blocks the goroutine, not the OS thread:
@@ -328,7 +328,7 @@ This lets you use libraries that don't support `async` -- `requests`,
 
 ## How it compares to vanilla asyncio internally
 
-| | vanilla asyncio | `pygo.aio` |
+| | vanilla asyncio | `runloom.aio` |
 | --- | --- | --- |
 | Task storage | callback chains in `_callbacks` lists | per-task goroutine + 1-call-deep stack |
 | Context switch | `loop._run_once` + `selector.select` | C `swap` instruction |
@@ -336,17 +336,17 @@ This lets you use libraries that don't support `async` -- `requests`,
 | Per-task memory | ~5 KB (interpreter frame + Task object) | ~16 KB (stack) + ~250 B (G + Task) |
 | Switch cost | ~1800 ns | ~80 ns |
 
-The trade is: pygo costs more memory per task but switches between
+The trade is: runloom costs more memory per task but switches between
 tasks ~22× faster.  Workloads with many switches per task amortise that;
 workloads with one switch per task pay the memory cost without
 collecting the speed benefit.
 
 ## Known semantic differences from asyncio
 
-`pygo.aio` is a high-fidelity bridge for real-world async code -- it runs
+`runloom.aio` is a high-fidelity bridge for real-world async code -- it runs
 aiohttp, uvicorn, starlette, hypercorn, websockets, anyio and friends -- but it
 is **not** a bit-exact emulator of asyncio's *scheduler semantics*.  Because a
-task is a stackful goroutine ordered by pygo's M:N scheduler (not a callback on
+task is a stackful goroutine ordered by runloom's M:N scheduler (not a callback on
 a single FIFO ready-queue driven by `loop._run_once`), a thin slice of code that
 depends on asyncio's exact callback/timer ordering can observe a difference.
 
@@ -361,7 +361,7 @@ or a hang), never as silent data corruption.
 
 asyncio schedules every future done-callback through `loop.call_soon`, so the
 code that completed the future finishes its synchronous run *before* any
-callback fires.  pygo fires most callbacks **inline** from `set_result` /
+callback fires.  runloom fires most callbacks **inline** from `set_result` /
 `set_exception` / `cancel` (a deliberate performance choice -- it avoids a
 goroutine spawn per callback and is a large part of why the bridge is fast at
 high fan-out).  Stock-`asyncio.Task` wakeups *are* deferred (so eager
@@ -377,12 +377,12 @@ party's done-callback must not observe the in-between state.  Normal code
 ### 2. Timers are real wall-clock, on a per-OS-thread scheduler
 
 asyncio keeps a per-loop timer heap and fires timers by comparing `loop.time()`
-inside `_run_once`.  pygo schedules `call_later`/`call_at`/`asyncio.sleep` as
+inside `_run_once`.  runloom schedules `call_later`/`call_at`/`asyncio.sleep` as
 real wall-clock goroutine sleeps on the scheduler shared by every loop on that
 OS thread.  Two consequences:
 
 - **`loop.time()` is not consulted for firing.**  Mocking `loop.time()` to
-  fast-forward a timer (a common asyncio *test* trick) does not advance pygo's
+  fast-forward a timer (a common asyncio *test* trick) does not advance runloom's
   timers -- they fire on real elapsed time.  Drive such tests with a real (short)
   duration instead of a mocked clock.
 - **Timers are not isolated per loop on the same thread.**  If you run two event
@@ -395,7 +395,7 @@ OS thread.  Two consequences:
 ### 3. Wake / callback ordering is the scheduler's, not a single FIFO
 
 asyncio runs coroutine-steps, `call_soon` callbacks and task wakeups as entries
-in one strict-FIFO ready deque, one batch per iteration.  pygo runs them as
+in one strict-FIFO ready deque, one batch per iteration.  runloom runs them as
 goroutines ordered by the M:N scheduler (ready-ring + work-stealing deque +
 wake-state machine).  The *set* of work that runs is the same; the exact
 interleaving between a just-woken task and a freshly scheduled callback can
@@ -403,7 +403,7 @@ differ.  Again: only code that pins on that sub-iteration ordering notices.
 
 ### Is a failing test a real problem or an over-specified test?
 
-The useful question when a library's test fails under pygo: **does it assert an
+The useful question when a library's test fails under runloom: **does it assert an
 observable behavioral guarantee, or does it assume an implementation
 mechanism?**
 

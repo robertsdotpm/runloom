@@ -1,10 +1,10 @@
-"""Phase 2 regression: concurrent pygo event loops on separate OS threads,
+"""Phase 2 regression: concurrent runloom event loops on separate OS threads,
 each doing socket I/O.
 
-pygo runs one scheduler per OS thread (Phase C) but a SINGLE shared netpoll
+runloom runs one scheduler per OS thread (Phase C) but a SINGLE shared netpoll
 epoll.  So the pump draining on one loop's thread can pick up an fd event for a
 goroutine parked on ANOTHER loop's thread.  The wake must route to the parker's
-OWNER sched (Phase 2 -- pygo_sched_wake / pygo_mn_wake_g NULL-branch route to
+OWNER sched (Phase 2 -- runloom_sched_wake / runloom_mn_wake_g NULL-branch route to
 g->owner's wake_list + kick its pump), not the pump thread's sched.  Without
 that, a recv woken cross-thread is enqueued on the wrong (waker's) thread and
 the owner never resumes it -> the round-trip hangs.
@@ -12,11 +12,11 @@ the owner never resumes it -> the round-trip hangs.
 This test runs two independent loops on two threads, each doing many localhost
 echo round-trips concurrently, and asserts both finish with correct data.  It
 guards two Phase 2 bugs (both fixed):
-  1. cross-thread wake routing -- pygo_sched_wake / pygo_mn_wake_g NULL-branch
+  1. cross-thread wake routing -- runloom_sched_wake / runloom_mn_wake_g NULL-branch
      route a woken g to its OWNER sched's wake_list + kick its pump, not the
      waker thread's ready ring (a plain ready_push there corrupted the
      single-consumer ring -> SIGSEGV, 4/4 before the fix);
-  2. scoped teardown -- pygo_netpoll_drain_parked (paio.run's sched_reset)
+  2. scoped teardown -- runloom_netpoll_drain_parked (paio.run's sched_reset)
      cancels only the CALLING thread's parkers (g->owner == this sched), not
      every loop's; the old global drain stranded a concurrent loop's recv with
      a spurious -1 -> BlockingIOError out of StreamReader._fill (~3/8 before).
@@ -25,7 +25,7 @@ import asyncio
 import threading
 import unittest
 
-import pygo.aio as paio
+import runloom.aio as paio
 
 ROUND_TRIPS = 60
 PAYLOAD = b"phase2-cross-thread-wake"

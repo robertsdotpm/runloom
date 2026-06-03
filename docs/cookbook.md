@@ -1,13 +1,13 @@
 # Cookbook
 
-Patterns and complete recipes for common pygo use cases.
+Patterns and complete recipes for common runloom use cases.
 
 ## Worker pool
 
 A fixed pool of workers pulling jobs from a channel:
 
 ```python
-import pygo_core
+import runloom_c
 
 def worker(jobs, results):
     while True:
@@ -20,11 +20,11 @@ def main():
     N_WORKERS = 8
     N_JOBS = 200
 
-    jobs = pygo_core.Chan(N_JOBS)
-    results = pygo_core.Chan(N_JOBS)
+    jobs = runloom_c.Chan(N_JOBS)
+    results = runloom_c.Chan(N_JOBS)
 
     for _ in range(N_WORKERS):
-        pygo_core.go(lambda: worker(jobs, results))
+        runloom_c.go(lambda: worker(jobs, results))
 
     # Feed jobs
     for i in range(N_JOBS):
@@ -38,8 +38,8 @@ def main():
         total += v
     print("sum:", total)
 
-pygo_core.go(main)
-pygo_core.run()
+runloom_c.go(main)
+runloom_c.run()
 ```
 
 ## Pipeline (3-stage)
@@ -48,7 +48,7 @@ Stage 1 emits values; stage 2 transforms; stage 3 aggregates.  Each
 stage is its own goroutine connected by channels.
 
 ```python
-import pygo_core
+import runloom_c
 
 def stage1(out):
     for i in range(100):
@@ -67,41 +67,41 @@ def stage3(in_, result):
     result.send(total)
 
 def main():
-    a, b = pygo_core.Chan(10), pygo_core.Chan(10)
-    result = pygo_core.Chan(1)
+    a, b = runloom_c.Chan(10), runloom_c.Chan(10)
+    result = runloom_c.Chan(1)
 
-    pygo_core.go(lambda: stage1(a))
-    pygo_core.go(lambda: stage2(a, b))
-    pygo_core.go(lambda: stage3(b, result))
+    runloom_c.go(lambda: stage1(a))
+    runloom_c.go(lambda: stage2(a, b))
+    runloom_c.go(lambda: stage3(b, result))
 
     print(result.recv()[0])
 
-pygo_core.go(main)
-pygo_core.run()
+runloom_c.go(main)
+runloom_c.run()
 ```
 
 ## Fan-in (many producers, one consumer)
 
 ```python
-import pygo_core
+import runloom_c
 
 def producer(id, out):
     for i in range(10):
         out.send((id, i))
 
 def main():
-    ch = pygo_core.Chan(100)
+    ch = runloom_c.Chan(100)
     PRODUCERS = 5
     for p in range(PRODUCERS):
-        pygo_core.go(lambda p=p: producer(p, ch))
+        runloom_c.go(lambda p=p: producer(p, ch))
 
     # Drain everything (sender count × items per sender)
     for _ in range(PRODUCERS * 10):
         prod_id, value = ch.recv()[0]
         print(prod_id, value)
 
-pygo_core.go(main)
-pygo_core.run()
+runloom_c.go(main)
+runloom_c.run()
 ```
 
 If producers might close the channel, use `for v in ch`.  If they
@@ -113,7 +113,7 @@ Multiple consumers pull from the same channel; the runtime picks one
 for each value.
 
 ```python
-import pygo_core
+import runloom_c
 
 def producer(out):
     for i in range(100):
@@ -125,13 +125,13 @@ def consumer(id, in_):
         print("consumer", id, "got", v)
 
 def main():
-    ch = pygo_core.Chan(10)
-    pygo_core.go(lambda: producer(ch))
+    ch = runloom_c.Chan(10)
+    runloom_c.go(lambda: producer(ch))
     for c in range(4):
-        pygo_core.go(lambda c=c: consumer(c, ch))
+        runloom_c.go(lambda c=c: consumer(c, ch))
 
-pygo_core.go(main)
-pygo_core.run()
+runloom_c.go(main)
+runloom_c.run()
 ```
 
 ## Cancellation via a "done" channel
@@ -140,11 +140,11 @@ Go's idiomatic pattern: pass a `done` channel that callers close to
 signal cancellation.
 
 ```python
-import pygo_core
+import runloom_c
 
 def worker(done):
     while True:
-        idx, _ = pygo_core.select([
+        idx, _ = runloom_c.select([
             ("recv", done),         # case 0: cancellation
             ("send", out, "work"),  # case 1: emit a value
         ])
@@ -153,16 +153,16 @@ def worker(done):
             return
 
 def main():
-    done = pygo_core.Chan(0)        # unbuffered; close to broadcast
-    out = pygo_core.Chan(10)
-    pygo_core.go(lambda: worker(done))
+    done = runloom_c.Chan(0)        # unbuffered; close to broadcast
+    out = runloom_c.Chan(10)
+    runloom_c.go(lambda: worker(done))
 
     # ... do stuff with out ...
-    pygo_core.sched_sleep(0.05)
+    runloom_c.sched_sleep(0.05)
     done.close()                    # wakes every recv on done
 
-pygo_core.go(main)
-pygo_core.run()
+runloom_c.go(main)
+runloom_c.run()
 ```
 
 `select` on a closed `done` channel returns immediately -- `recv` from
@@ -171,17 +171,17 @@ a closed channel never blocks.
 ## Timeouts via `select`
 
 ```python
-import pygo_core
+import runloom_c
 import threading
 
 def with_timeout(ch, seconds):
-    timer = pygo_core.Chan(1)
+    timer = runloom_c.Chan(1)
     def fire():
-        pygo_core.sched_sleep(seconds)
+        runloom_c.sched_sleep(seconds)
         timer.send(None)
-    pygo_core.go(fire)
+    runloom_c.go(fire)
 
-    idx, payload = pygo_core.select([
+    idx, payload = runloom_c.select([
         ("recv", ch),
         ("recv", timer),
     ])
@@ -190,16 +190,16 @@ def with_timeout(ch, seconds):
     return payload[0]               # got the real value
 
 def main():
-    data = pygo_core.Chan(1)
+    data = runloom_c.Chan(1)
     # Don't send anything to data; the timeout will fire
     print(with_timeout(data, 0.1))  # None
 
-pygo_core.go(main)
-pygo_core.run()
+runloom_c.go(main)
+runloom_c.run()
 ```
 
 For asyncio code, just use `asyncio.wait_for(coro, timeout=N)` --
-`pygo.aio` handles it natively.
+`runloom.aio` handles it natively.
 
 ## Graceful shutdown
 
@@ -209,7 +209,7 @@ shutdown signal, close the input channel and wait for workers to
 finish.
 
 ```python
-import pygo_core, signal, threading
+import runloom_c, signal, threading
 
 def worker(jobs, finished):
     for job in jobs:
@@ -218,11 +218,11 @@ def worker(jobs, finished):
     finished.send(None)
 
 def main():
-    jobs = pygo_core.Chan(100)
-    finished = pygo_core.Chan(4)        # one slot per worker
+    jobs = runloom_c.Chan(100)
+    finished = runloom_c.Chan(4)        # one slot per worker
 
     for _ in range(4):
-        pygo_core.go(lambda: worker(jobs, finished))
+        runloom_c.go(lambda: worker(jobs, finished))
 
     shutdown = threading.Event()
     signal.signal(signal.SIGINT, lambda *_: shutdown.set())
@@ -238,24 +238,24 @@ def main():
             finished.recv()
         print("clean shutdown")
 
-pygo_core.go(main)
-pygo_core.run()
+runloom_c.go(main)
+runloom_c.run()
 ```
 
-## Mixing pygo with `threading`
+## Mixing runloom with `threading`
 
-You can spawn an OS thread that drives its own pygo scheduler:
+You can spawn an OS thread that drives its own runloom scheduler:
 
 ```python
-import threading, pygo_core
+import threading, runloom_c
 
 def worker_thread():
     def task():
         # ... cooperative work ...
         pass
     for _ in range(100):
-        pygo_core.go(task)
-    pygo_core.run()
+        runloom_c.go(task)
+    runloom_c.run()
 
 threads = [threading.Thread(target=worker_thread) for _ in range(4)]
 for t in threads: t.start()
@@ -271,10 +271,10 @@ M:N is for.
 A buffered channel makes a great semaphore:
 
 ```python
-import pygo_core
+import runloom_c
 
 # Allow at most 4 concurrent slow operations
-sem = pygo_core.Chan(4)
+sem = runloom_c.Chan(4)
 for _ in range(4):
     sem.try_send(None)              # fill it; tokens
 
@@ -282,13 +282,13 @@ def slow_op():
     sem.recv()                      # acquire (blocks if no token)
     try:
         # ... slow thing ...
-        pygo_core.sched_sleep(0.5)
+        runloom_c.sched_sleep(0.5)
     finally:
         sem.send(None)              # release
 
 for _ in range(20):
-    pygo_core.go(slow_op)
-pygo_core.run()
+    runloom_c.go(slow_op)
+runloom_c.run()
 ```
 
 20 goroutines compete for 4 tokens; at most 4 ever run simultaneously.
@@ -299,7 +299,7 @@ A useful pattern for routing: producers send *channels* through a
 "router" channel; consumers receive a channel and read from it.
 
 ```python
-import pygo_core
+import runloom_c
 
 def consumer(work):
     chan = work.recv()[0]
@@ -308,7 +308,7 @@ def consumer(work):
 
 def producer(work):
     for batch in range(3):
-        ch = pygo_core.Chan(10)
+        ch = runloom_c.Chan(10)
         work.send(ch)
         for i in range(10):
             ch.send((batch, i))
@@ -316,12 +316,12 @@ def producer(work):
     work.close()
 
 def main():
-    work = pygo_core.Chan(1)
-    pygo_core.go(lambda: producer(work))
-    pygo_core.go(lambda: consumer(work))
+    work = runloom_c.Chan(1)
+    runloom_c.go(lambda: producer(work))
+    runloom_c.go(lambda: consumer(work))
 
-pygo_core.go(main)
-pygo_core.run()
+runloom_c.go(main)
+runloom_c.run()
 ```
 
 ## Echo server with per-connection cancellation
@@ -330,9 +330,9 @@ A complete server: each connection gets a goroutine; closing the
 listener cancels every active connection cleanly.
 
 ```python
-import socket, pygo, pygo.monkey, pygo_core
+import socket, runloom, runloom.monkey, runloom_c
 
-pygo.monkey.patch()
+runloom.monkey.patch()
 
 def handle(conn, done):
     try:
@@ -355,14 +355,14 @@ def serve(addr):
     try:
         while not done.is_set():
             conn, _ = srv.accept()
-            pygo_core.go(lambda c=conn: handle(c, done))
+            runloom_c.go(lambda c=conn: handle(c, done))
     except KeyboardInterrupt:
         done.set()
         srv.close()
 
 import threading
-pygo_core.go(lambda: serve(("127.0.0.1", 9000)))
-pygo_core.run()
+runloom_c.go(lambda: serve(("127.0.0.1", 9000)))
+runloom_c.run()
 ```
 
 ## Replacing `threading.Thread` for I/O-bound work
@@ -377,28 +377,28 @@ t = threading.Thread(target=worker)
 t.start()
 
 # After
-import pygo_core
-g = pygo_core.go(worker)             # plus pygo_core.run() at top level
+import runloom_c
+g = runloom_c.go(worker)             # plus runloom_c.run() at top level
 ```
 
 You go from 8 MB per thread (Linux default) to ~16 KB per goroutine.
 Spawn rate goes from ~10k/sec to ~1.7M/sec.
 
-## Bridging pygo with `asyncio` libraries
+## Bridging runloom with `asyncio` libraries
 
-You can call `pygo_core.go(fn)` from inside an async coroutine -- the
+You can call `runloom_c.go(fn)` from inside an async coroutine -- the
 goroutine runs concurrently with the awaiting code:
 
 ```python
-import asyncio, pygo, pygo.aio as paio, pygo_core
+import asyncio, runloom, runloom.aio as paio, runloom_c
 
 def background_worker():
     while True:
         # ... cooperative work ...
-        pygo_core.sched_sleep(1.0)
+        runloom_c.sched_sleep(1.0)
 
 async def main():
-    pygo_core.go(background_worker)
+    runloom_c.go(background_worker)
     # ... your async code runs in parallel with the background goroutine ...
     await asyncio.sleep(5)
 

@@ -1,14 +1,14 @@
 # Installation
 
-pygo is a C extension that needs a compiler at build time.  Once
+runloom is a C extension that needs a compiler at build time.  Once
 prebuilt wheels are uploaded (see roadmap), the simplest install path
-will be plain `pip install pygo`; until then build from source.
+will be plain `pip install runloom`; until then build from source.
 
 ## Requirements
 
 - **Python 3.11 or newer.**  The per-goroutine `PyThreadState`
   snapshot uses 3.11+ tstate fields (`cframe`, `datastack_chunk`,
-  `exc_state`).  Pre-3.11 used a different frame model that pygo
+  `exc_state`).  Pre-3.11 used a different frame model that runloom
   doesn't cover.
 - A C compiler.  Anything reasonably modern works: GCC 4.7+, Clang
   3.5+, MSVC 19.20+ (VS 2019 16.0+), MinGW-w64.
@@ -18,8 +18,8 @@ will be plain `pip install pygo`; until then build from source.
 ## Editable install
 
 ```bash
-git clone https://github.com/robertsdotpm/pygo
-cd pygo
+git clone https://github.com/robertsdotpm/runloom
+cd runloom
 pip install -e .
 ```
 
@@ -59,26 +59,26 @@ MinGW-w64 (via the WinLibs zip).
 
 | Variable | Effect |
 | --- | --- |
-| `PYGO_BACKEND=ucontext` | Force the ucontext stack-swap backend even on x86_64/aarch64. |
-| `PYGO_NO_ASM=1` | Drop the `.S` source from the build (same effect as above). |
-| `PYGO_NO_IOCP=1` | Omit the Windows IOCP-AFD backend (falls back to WSAPoll/select). |
-| `PYGO_DEBUG=1` | `-O0 -g` (POSIX) or `/Od /Zi` (MSVC). |
-| `PYGO_EXTRA_CFLAGS` | Appended to the compile command line. |
-| `PYGO_EXTRA_LDFLAGS` | Appended to the link command line. |
+| `RUNLOOM_BACKEND=ucontext` | Force the ucontext stack-swap backend even on x86_64/aarch64. |
+| `RUNLOOM_NO_ASM=1` | Drop the `.S` source from the build (same effect as above). |
+| `RUNLOOM_NO_IOCP=1` | Omit the Windows IOCP-AFD backend (falls back to WSAPoll/select). |
+| `RUNLOOM_DEBUG=1` | `-O0 -g` (POSIX) or `/Od /Zi` (MSVC). |
+| `RUNLOOM_EXTRA_CFLAGS` | Appended to the compile command line. |
+| `RUNLOOM_EXTRA_LDFLAGS` | Appended to the link command line. |
 | `CC` | Usual setuptools override; controls compiler selection on Windows too. |
 
 ## Verifying the install
 
 ```python
-import pygo_core
-print("backend:", pygo_core.backend())            # e.g. fcontext-asm
-print("netpoll:", pygo_core.netpoll_backend())    # e.g. epoll
-print("stack default:", pygo_core.get_stack_size(), "bytes")
+import runloom_c
+print("backend:", runloom_c.backend())            # e.g. fcontext-asm
+print("netpoll:", runloom_c.netpoll_backend())    # e.g. epoll
+print("stack default:", runloom_c.get_stack_size(), "bytes")
 
 def hello():
     print("hello from a goroutine!")
-pygo_core.go(hello)
-pygo_core.run()
+runloom_c.go(hello)
+runloom_c.run()
 ```
 
 If `backend()` returns `"fcontext-asm"`, you're on the fast path (~80

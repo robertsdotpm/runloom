@@ -3,7 +3,7 @@
 A port forwarder is the textbook two-goroutines-per-connection job: one
 goroutine copies client->upstream, another copies upstream->client, and
 each blocks on recv without holding up the other.  Under
-pygo.monkey.patch() these are plain blocking sockets.
+runloom.monkey.patch() these are plain blocking sockets.
 
 Self-contained: it stands up an echo upstream, the proxy, and a client
 as three goroutines and runs the traffic through end to end.
@@ -17,11 +17,11 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 
-import pygo
-import pygo.monkey
-import pygo_core
+import runloom
+import runloom.monkey
+import runloom_c
 
-pygo.monkey.patch()
+runloom.monkey.patch()
 
 
 def pump(src, dst):
@@ -45,7 +45,7 @@ def handle(client, upstream_addr):
     upstream = socket.socket()
     upstream.connect(upstream_addr)
     # One goroutine each way; this goroutine handles the return path.
-    pygo.go(pump, client, upstream)
+    runloom.go(pump, client, upstream)
     pump(upstream, client)
     client.close()
     upstream.close()
@@ -89,17 +89,17 @@ def client(proxy_addr):
 
 
 def main():
-    up_ready = pygo_core.Chan(1)
-    proxy_ready = pygo_core.Chan(1)
+    up_ready = runloom_c.Chan(1)
+    proxy_ready = runloom_c.Chan(1)
 
-    pygo.go(echo_upstream, up_ready)
+    runloom.go(echo_upstream, up_ready)
     upstream_addr = up_ready.recv()[0]
 
-    pygo.go(proxy, proxy_ready, upstream_addr)
+    runloom.go(proxy, proxy_ready, upstream_addr)
     proxy_addr = proxy_ready.recv()[0]
 
-    pygo.go(client, proxy_addr)
+    runloom.go(client, proxy_addr)
 
 
 if __name__ == "__main__":
-    pygo.run(main)
+    runloom.run(main)

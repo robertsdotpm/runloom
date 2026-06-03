@@ -1,5 +1,5 @@
 #!/usr/bin/env sh
-# perf stat for a pygo workload, SOFTWARE events only.
+# perf stat for a runloom workload, SOFTWARE events only.
 #
 # This box is a VM with no hardware PMU (campaign finding F5): cycles /
 # instructions / cache-misses read <not supported>. The software events

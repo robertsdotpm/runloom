@@ -23,10 +23,10 @@ import tempfile
 
 import pytest
 
-import pygo_core
+import runloom_c
 
 pytestmark = pytest.mark.skipif(
-    not pygo_core.iouring_available(),
+    not runloom_c.iouring_available(),
     reason="io_uring not available (need Linux >= 5.1)")
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -39,14 +39,14 @@ def _read_via_goroutine(fd, n, offset=0):
     def worker():
         buf = bytearray(n)
         try:
-            got = pygo_core.file_read(fd, buf, n, offset)
+            got = runloom_c.file_read(fd, buf, n, offset)
             out["data"] = bytes(buf[:got])
             out["n"] = got
         except OSError as e:
             out["errno"] = e.errno
 
-    pygo_core.go(worker)
-    pygo_core.run()
+    runloom_c.go(worker)
+    runloom_c.run()
     return out
 
 
@@ -70,10 +70,10 @@ def test_roundtrip_write_then_read():
         out = {}
 
         def w():
-            out["written"] = pygo_core.file_write(fd, data, 0)
+            out["written"] = runloom_c.file_write(fd, data, 0)
 
-        pygo_core.go(w)
-        pygo_core.run()
+        runloom_c.go(w)
+        runloom_c.run()
         assert out["written"] == len(data)
 
         got = _read_via_goroutine(fd, len(data), 0)
@@ -157,13 +157,13 @@ def test_concurrent_distinct_files_single_thread():
             def worker():
                 size = os.path.getsize(paths[i])
                 buf = bytearray(size)
-                got = pygo_core.file_read(fds[i], buf, size, 0)
+                got = runloom_c.file_read(fds[i], buf, size, 0)
                 results[i] = bytes(buf[:got])
             return worker
 
         for i in range(N):
-            pygo_core.go(make_worker(i))
-        pygo_core.run()
+            runloom_c.go(make_worker(i))
+        runloom_c.run()
 
         for i in range(N):
             expected = ("file-%03d-" % i).encode() * 40
@@ -182,9 +182,9 @@ def _mn_fileread_snippet(hubs, n):
     code = r'''
 import sys; sys.path.insert(0, __SRCPATH__)
 import os, tempfile
-import pygo_core
+import runloom_c
 
-if not pygo_core.iouring_available():
+if not runloom_c.iouring_available():
     print("PASS")   # nothing to stress
     sys.exit(0)
 
@@ -202,15 +202,15 @@ def mk(i):
     def w():
         size = len(expected[i])
         buf = bytearray(size)
-        m = pygo_core.file_read(fds[i], buf, size, 0)
+        m = runloom_c.file_read(fds[i], buf, size, 0)
         results[i] = bytes(buf[:m])
     return w
 
-pygo_core.mn_init(H)
+runloom_c.mn_init(H)
 for i in range(N):
-    pygo_core.mn_go(mk(i))
-pygo_core.mn_run()
-pygo_core.mn_fini()
+    runloom_c.mn_go(mk(i))
+runloom_c.mn_run()
+runloom_c.mn_fini()
 
 for fd in fds: os.close(fd)
 for p in paths: os.unlink(p)
@@ -232,7 +232,7 @@ def _run_snippet(code, timeout=60):
 
 def test_mn_iouring_fileread_single_hub():
     """Regression for the M:N io_uring completion-wake corruption.  Under the
-    M:N scheduler a file_read's own CQE drain called pygo_mn_wake_g on the
+    M:N scheduler a file_read's own CQE drain called runloom_mn_wake_g on the
     RUNNING, spin-draining submitter; in the default (non-global-runq) mode that
     re-submits the goroutine to its hub while it is running and about to
     complete, corrupting the hub run-queue/pending accounting and stranding
@@ -251,7 +251,7 @@ def _mn_concurrent_init_snippet(hubs, n):
     """Like _mn_fileread_snippet but WITHOUT a prior single-threaded
     iouring_available() call, so the goroutines are the FIRST io_uring users
     and several hubs race the lazy ring init.  Regression for the multi-hub
-    "lost completion" hang: concurrent pygo_iouring_available() first-callers
+    "lost completion" hang: concurrent runloom_iouring_available() first-callers
     each ran lazy_init -> multiple io_uring_setup() rings raced the shared
     ring-state pointers, so submits scribbled over each other's SQE slots and
     those ops never completed.  (Tests that pre-call iouring_available() on the
@@ -259,8 +259,8 @@ def _mn_concurrent_init_snippet(hubs, n):
     code = r'''
 import sys; sys.path.insert(0, __SRCPATH__)
 import os, tempfile
-import pygo_core
-# NB: NO pygo_core.iouring_available() here -- the goroutines below are the
+import runloom_c
+# NB: NO runloom_c.iouring_available() here -- the goroutines below are the
 # first io_uring users, exercising concurrent lazy init across hubs.
 N = __N__; H = __H__
 paths, fds, expected, results = [], [], [], [None] * N
@@ -276,15 +276,15 @@ def mk(i):
     def w():
         size = len(expected[i])
         buf = bytearray(size)
-        m = pygo_core.file_read(fds[i], buf, size, 0)
+        m = runloom_c.file_read(fds[i], buf, size, 0)
         results[i] = bytes(buf[:m])
     return w
 
-pygo_core.mn_init(H)
+runloom_c.mn_init(H)
 for i in range(N):
-    pygo_core.mn_go(mk(i))
-pygo_core.mn_run()
-pygo_core.mn_fini()
+    runloom_c.mn_go(mk(i))
+runloom_c.mn_run()
+runloom_c.mn_fini()
 for fd in fds: os.close(fd)
 for p in paths: os.unlink(p)
 bad = [i for i in range(N) if results[i] != expected[i]]
@@ -306,7 +306,7 @@ def _mn_fileread_gc_snippet(hubs, n):
     code = r'''
 import sys; sys.path.insert(0, __SRCPATH__)
 import os, threading, time, gc
-import pygo_core
+import runloom_c
 N = __N__; H = __H__
 rfds, wfds, results = [], [], [None] * N
 for i in range(N):
@@ -317,7 +317,7 @@ stop = [False]
 def mk(i):
     def w():
         buf = bytearray(len(PAYLOAD))
-        m = pygo_core.file_read(rfds[i], buf, len(PAYLOAD), 0)
+        m = runloom_c.file_read(rfds[i], buf, len(PAYLOAD), 0)
         results[i] = bytes(buf[:m])
     return w
 
@@ -335,10 +335,10 @@ def gcer():
 
 gt = threading.Thread(target=gcer, daemon=True); gt.start()
 t = threading.Thread(target=feeder); t.start()
-pygo_core.mn_init(H)
-for i in range(N): pygo_core.mn_go(mk(i))
-pygo_core.mn_run()
-pygo_core.mn_fini()
+runloom_c.mn_init(H)
+for i in range(N): runloom_c.mn_go(mk(i))
+runloom_c.mn_run()
+runloom_c.mn_fini()
 stop[0] = True; t.join()
 for fd in rfds + wfds:
     try: os.close(fd)
@@ -383,14 +383,14 @@ def _mn_sockpair_recv_gc_snippet(hubs, n):
     thread writing the peer ends STAGGERED (so each recv genuinely BLOCKS until
     data arrives) and a concurrent thread hammering gc.collect().  This is the
     socket analogue of the forced-async file_read+feeder test: it reproduces
-    the multishot-recv (pygo_iouring_ms_recv, the DEFAULT TCPConn.recv) STW
+    the multishot-recv (runloom_iouring_ms_recv, the DEFAULT TCPConn.recv) STW
     deadlock -- the hub recv spin-drained holding its tstate, so a GC stop-the-
     world whose unblocking needs the (frozen) feeder could never complete.
     Fixed by parking instead of spin-draining."""
     code = r'''
 import sys; sys.path.insert(0, __SRCPATH__)
 import os, socket, threading, time, gc
-import pygo_core
+import runloom_c
 
 N = __N__; H = __H__
 results = [None] * N
@@ -407,7 +407,7 @@ for i in range(N):
 
 def mk_server(i):
     def h():
-        conn = pygo_core.TCPConn(recv_fds[i])
+        conn = runloom_c.TCPConn(recv_fds[i])
         results[i] = conn.recv(64)
         conn.close()
     return h
@@ -426,11 +426,11 @@ def gcer():
 
 threading.Thread(target=gcer, daemon=True).start()
 t = threading.Thread(target=feeder); t.start()
-pygo_core.mn_init(H)
+runloom_c.mn_init(H)
 for i in range(N):
-    pygo_core.mn_go(mk_server(i))
-pygo_core.mn_run()
-pygo_core.mn_fini()
+    runloom_c.mn_go(mk_server(i))
+runloom_c.mn_run()
+runloom_c.mn_fini()
 stop[0] = True; t.join()
 for fd in peer_fds:
     try: os.close(fd)
@@ -446,8 +446,8 @@ def test_mn_iouring_sockpair_recv_under_gc():
     """GUARD: multi-hub blocking socket recv under a concurrent GC
     stop-the-world, on pre-connected socketpairs fed by a staggered writer
     thread (isolates recv from listen/accept/connect).  Exercises the socket
-    io_uring recv paths -- multishot (pygo_iouring_ms_recv) and single-shot
-    per-hub-ring (pygo_iouring_ring_recv) -- which were hardened to PARK (and
+    io_uring recv paths -- multishot (runloom_iouring_ms_recv) and single-shot
+    per-hub-ring (runloom_iouring_ring_recv) -- which were hardened to PARK (and
     a per-op wait handshake) instead of spin-draining holding the tstate /
     inline-waking a not-yet-parked submitter, mirroring the file_read fix.
 

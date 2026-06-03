@@ -1,4 +1,4 @@
-"""Sustained spawn-rate bench: how many gs/sec can pygo handle when
+"""Sustained spawn-rate bench: how many gs/sec can runloom handle when
 each one does a small amount of work and finishes?  This is the
 load pattern of a real server -- not "spawn 100k upfront" (which
 maxes out the working set + thrashes cache), but "1k batches of
@@ -14,7 +14,7 @@ import sys
 import time
 
 sys.path.insert(0, "src")
-import pygo_core
+import runloom_c
 
 
 def bench(total, batch, mode):
@@ -36,15 +36,15 @@ def bench(total, batch, mode):
     while spawned < total:
         n = min(batch, total - spawned)
         for _ in range(n):
-            pygo_core.go(w)
-        pygo_core.run()
+            runloom_c.go(w)
+        runloom_c.run()
         spawned += n
     return time.perf_counter() - t0
 
 
 def main():
-    print("pygo sustained-rate bench")
-    print("backend:", pygo_core.backend())
+    print("runloom sustained-rate bench")
+    print("backend:", runloom_c.backend())
     print()
     print("(spawn + run, peak concurrency = batch size)")
     print()

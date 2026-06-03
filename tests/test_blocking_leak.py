@@ -13,9 +13,9 @@ import os
 import time
 import unittest
 
-import pygo
-import pygo.monkey
-import pygo_core
+import runloom
+import runloom.monkey
+import runloom_c
 
 _HAVE_FORK = hasattr(os, "fork")
 
@@ -39,19 +39,19 @@ def _drive(fn):
         except BaseException as e:   # noqa: BLE001
             box[1] = e
 
-    pygo_core.go(runner)
-    pygo_core.run()
+    runloom_c.go(runner)
+    runloom_c.run()
     if box[1] is not None:
         raise box[1]
     return box[0]
 
 
 def setUpModule():
-    pygo.monkey.patch()
+    runloom.monkey.patch()
 
 
 def tearDownModule():
-    pygo.monkey.unpatch()
+    runloom.monkey.unpatch()
 
 
 @unittest.skipUnless(_HAVE_PROCFD, "needs /proc/self/fd")
@@ -61,11 +61,11 @@ class TestOffloadBalance(unittest.TestCase):
             # Warm up: prime the backend pool + the parker free-list so the
             # measured window only sees steady-state churn.
             for _ in range(25):
-                pygo.monkey.offload(lambda: 1)
+                runloom.monkey.offload(lambda: 1)
             base_fd = _fd_count()
             for _ in range(500):
-                pygo.monkey.offload(lambda: 1)
-            return base_fd, _fd_count(), len(pygo.monkey._Parker._pool)
+                runloom.monkey.offload(lambda: 1)
+            return base_fd, _fd_count(), len(runloom.monkey._Parker._pool)
         base_fd, after_fd, pool = _drive(body)
         self.assertLessEqual(after_fd - base_fd, 4)   # no per-iter fd growth
         self.assertLessEqual(pool, 64)                # parker free-list is capped

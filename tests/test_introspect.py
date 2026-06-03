@@ -1,4 +1,4 @@
-"""Goroutine registry + dump (pygo.inspect / pygo_core introspection)."""
+"""Goroutine registry + dump (runloom.inspect / runloom_c introspection)."""
 import io
 import os
 import sys
@@ -9,42 +9,42 @@ import pytest
 
 sys.path.insert(0, "src")
 
-import pygo
-import pygo_core
-import pygo.inspect as gi
+import runloom
+import runloom_c
+import runloom.inspect as gi
 
-# Goroutine introspection is POSIX-only (pygo_introspect.c is wrapped in
+# Goroutine introspection is POSIX-only (runloom_introspect.c is wrapped in
 # #if !defined(_WIN32)); the C functions aren't built on Windows, so skip
 # wherever the API is absent rather than hardcoding a platform.
 pytestmark = pytest.mark.skipif(
-    not hasattr(pygo_core, "goroutine_count"),
+    not hasattr(runloom_c, "goroutine_count"),
     reason="goroutine introspection is POSIX-only (not built on this platform)")
 
 
 class TestCountAndRegistry(unittest.TestCase):
     def test_count_zero_when_idle(self):
-        self.assertEqual(pygo_core.goroutine_count(), 0)
-        self.assertEqual(pygo_core.goroutines(), [])
+        self.assertEqual(runloom_c.goroutine_count(), 0)
+        self.assertEqual(runloom_c.goroutines(), [])
 
     def test_count_tracks_live_goroutines(self):
         seen = {}
 
         def sleeper():
-            pygo.sleep(0.03)
+            runloom.sleep(0.03)
 
         def main():
             for _ in range(5):
-                pygo.go(sleeper)
-            pygo.sleep(0.005)            # let them park
-            seen["count"] = pygo_core.goroutine_count()
-            seen["states"] = [g["state"] for g in pygo_core.goroutines()]
+                runloom.go(sleeper)
+            runloom.sleep(0.005)            # let them park
+            seen["count"] = runloom_c.goroutine_count()
+            seen["states"] = [g["state"] for g in runloom_c.goroutines()]
 
-        pygo.run(main)
+        runloom.run(main)
         # 5 sleepers + main itself
         self.assertEqual(seen["count"], 6)
         self.assertEqual(seen["states"].count("sleep"), 5)
         # everything drained -> registry reports zero live again
-        self.assertEqual(pygo_core.goroutine_count(), 0)
+        self.assertEqual(runloom_c.goroutine_count(), 0)
 
     def test_registry_balances_under_churn(self):
         def noop():
@@ -52,25 +52,25 @@ class TestCountAndRegistry(unittest.TestCase):
 
         def main():
             for _ in range(2000):
-                pygo.go(noop)
-                pygo.yield_()
+                runloom.go(noop)
+                runloom.yield_()
 
-        pygo.run(main)
-        self.assertEqual(pygo_core.goroutine_count(), 0)
+        runloom.run(main)
+        self.assertEqual(runloom_c.goroutine_count(), 0)
 
     def test_ids_are_unique(self):
         ids = {}
 
         def sleeper():
-            pygo.sleep(0.02)
+            runloom.sleep(0.02)
 
         def main():
             for _ in range(8):
-                pygo.go(sleeper)
-            pygo.sleep(0.005)
-            ids["set"] = [g["id"] for g in pygo_core.goroutines()]
+                runloom.go(sleeper)
+            runloom.sleep(0.005)
+            ids["set"] = [g["id"] for g in runloom_c.goroutines()]
 
-        pygo.run(main)
+        runloom.run(main)
         got = ids["set"]
         self.assertEqual(len(got), len(set(got)))   # all unique
         self.assertTrue(all(i > 0 for i in got))
@@ -81,16 +81,16 @@ class TestStates(unittest.TestCase):
         cap = {}
 
         def sleeper():
-            pygo.sleep(0.05)
+            runloom.sleep(0.05)
 
         def main():
-            pygo.go(sleeper)
-            pygo.sleep(0.005)
-            g = [x for x in pygo_core.goroutines() if x["state"] == "sleep"][0]
+            runloom.go(sleeper)
+            runloom.sleep(0.005)
+            g = [x for x in runloom_c.goroutines() if x["state"] == "sleep"][0]
             cap["wake_in"] = g["wake_in"]
             cap["blocked_on"] = g["blocked_on"]
 
-        pygo.run(main)
+        runloom.run(main)
         self.assertIsNotNone(cap["wake_in"])
         self.assertGreater(cap["wake_in"], 0.0)
         self.assertEqual(cap["blocked_on"], "timer")
@@ -103,19 +103,19 @@ class TestStates(unittest.TestCase):
         cap = {}
         try:
             def waiter():
-                pygo_core.wait_fd(r, 1, -1)     # park on readable
+                runloom_c.wait_fd(r, 1, -1)     # park on readable
                 os.read(r, 1)
 
             def main():
-                pygo.go(waiter)
-                pygo.sleep(0.01)
-                iow = [g for g in pygo_core.goroutines()
+                runloom.go(waiter)
+                runloom.sleep(0.01)
+                iow = [g for g in runloom_c.goroutines()
                        if g["state"] == "io-wait"]
                 cap["iow"] = iow
                 os.write(w, b"x")               # wake it -> drains
-                pygo.sleep(0.01)
+                runloom.sleep(0.01)
 
-            pygo.run(main)
+            runloom.run(main)
         finally:
             os.close(r)
             os.close(w)
@@ -133,7 +133,7 @@ class TestStackReconstruction(unittest.TestCase):
         cap = {}
 
         def leaf():
-            pygo.sleep(0.05)
+            runloom.sleep(0.05)
 
         def middle():
             leaf()
@@ -142,21 +142,21 @@ class TestStackReconstruction(unittest.TestCase):
             middle()
 
         def main():
-            pygo.go(top)
-            pygo.sleep(0.01)
-            gid = [g for g in pygo_core.goroutines()
+            runloom.go(top)
+            runloom.sleep(0.01)
+            gid = [g for g in runloom_c.goroutines()
                    if g["state"] == "sleep"][0]["id"]
             cap["frames"] = gi.stack(gid)
             cap["entry"] = gi.entry(gid)
 
-        pygo.run(main)
+        runloom.run(main)
         # co_qualname is fully-qualified (Class.method.<locals>.leaf); match
         # on suffix.  single-thread scheduler -> full user stack, deepest first.
         funcs = [name for (_fn, _ln, name) in cap["frames"]]
         self.assertTrue(any(n.endswith("leaf") for n in funcs), funcs)
         self.assertTrue(any(n.endswith("middle") for n in funcs), funcs)
         self.assertTrue(any(n.endswith("top") for n in funcs), funcs)
-        # deepest frame is the pygo.sleep internal; user frames follow
+        # deepest frame is the runloom.sleep internal; user frames follow
         self.assertEqual(funcs[0], "sleep")
         self.assertIn("top", cap["entry"])
 
@@ -167,16 +167,16 @@ class TestAge(unittest.TestCase):
         gi.enable_timestamps(True)
         try:
             def sleeper():
-                pygo.sleep(0.05)
+                runloom.sleep(0.05)
 
             def main():
-                pygo.go(sleeper)
-                pygo.sleep(0.02)
-                g = [x for x in pygo_core.goroutines()
+                runloom.go(sleeper)
+                runloom.sleep(0.02)
+                g = [x for x in runloom_c.goroutines()
                      if x["state"] == "sleep"][0]
                 cap["age"] = g["age"]
 
-            pygo.run(main)
+            runloom.run(main)
         finally:
             gi.enable_timestamps(False)
         self.assertIsNotNone(cap["age"])
@@ -189,17 +189,17 @@ class TestDump(unittest.TestCase):
         out = {}
 
         def sleeper():
-            pygo.sleep(0.03)
+            runloom.sleep(0.03)
 
         def main():
-            pygo.go(sleeper)
-            pygo.sleep(0.005)
+            runloom.go(sleeper)
+            runloom.sleep(0.005)
             fd, path = tempfile.mkstemp()
             out["path"] = path
-            pygo_core.dump_goroutines(fd)
+            runloom_c.dump_goroutines(fd)
             os.close(fd)
 
-        pygo.run(main)
+        runloom.run(main)
         with open(out["path"]) as f:
             text = f.read()
         os.unlink(out["path"])
@@ -210,31 +210,31 @@ class TestDump(unittest.TestCase):
         cap = {}
 
         def sleeper():
-            pygo.sleep(0.03)
+            runloom.sleep(0.03)
 
         def main():
-            pygo.go(sleeper)
-            pygo.sleep(0.005)
+            runloom.go(sleeper)
+            runloom.sleep(0.005)
             cap["text"] = gi.format(stacks=True)
 
-        pygo.run(main)
-        self.assertIn("pygo goroutines:", cap["text"])
+        runloom.run(main)
+        self.assertIn("runloom goroutines:", cap["text"])
         self.assertIn("sleep", cap["text"])
 
     def test_dump_to_file_object(self):
         cap = {}
 
         def sleeper():
-            pygo.sleep(0.03)
+            runloom.sleep(0.03)
 
         def main():
-            pygo.go(sleeper)
-            pygo.sleep(0.005)
+            runloom.go(sleeper)
+            runloom.sleep(0.005)
             buf = io.StringIO()
             gi.dump(file=buf, stacks=True)
             cap["text"] = buf.getvalue()
 
-        pygo.run(main)
+        runloom.run(main)
         self.assertIn("goroutine", cap["text"])
 
 
@@ -247,7 +247,7 @@ def _run_script(code, env_extra=None):
     (returncode, stdout+stderr)."""
     env = dict(os.environ)
     env["PYTHON_GIL"] = "0"
-    env["PYGO_SYSMON"] = "0"
+    env["RUNLOOM_SYSMON"] = "0"
     env["PYTHONPATH"] = "src" + os.pathsep + env.get("PYTHONPATH", "")
     if env_extra:
         env.update(env_extra)
@@ -271,14 +271,14 @@ class TestDeadlockDetection(unittest.TestCase):
             gi.set_deadlock_mode(old)
 
     def test_count_deadlocked_zero_when_idle(self):
-        self.assertEqual(pygo_core.count_deadlocked(), 0)
+        self.assertEqual(runloom_c.count_deadlocked(), 0)
 
     def test_raise_end_to_end(self):
         rc, out = _run_script(
-            "import pygo, pygo_core, pygo.inspect as gi\n"
+            "import runloom, runloom_c, runloom.inspect as gi\n"
             "gi.set_deadlock_mode('raise')\n"
             "try:\n"
-            "    pygo.run(lambda: pygo_core.Chan(0).recv())\n"
+            "    runloom.run(lambda: runloom_c.Chan(0).recv())\n"
             "    print('NO_RAISE')\n"
             "except RuntimeError as e:\n"
             "    print('RAISED_OK' if 'deadlock' in str(e).lower() else 'WRONG')\n")
@@ -287,13 +287,13 @@ class TestDeadlockDetection(unittest.TestCase):
 
     def test_warn_is_non_fatal(self):
         rc, out = _run_script(
-            "import pygo, pygo_core, pygo.inspect as gi\n"
+            "import runloom, runloom_c, runloom.inspect as gi\n"
             "gi.set_deadlock_mode('warn')\n"
-            "def waiter(): pygo_core.Chan(0).recv()\n"
+            "def waiter(): runloom_c.Chan(0).recv()\n"
             "def main():\n"
-            "    pygo.go(waiter)\n"
-            "    pygo_core.Chan(0).recv()\n"
-            "pygo.run(main)\n"            # warn -> prints, no raise
+            "    runloom.go(waiter)\n"
+            "    runloom_c.Chan(0).recv()\n"
+            "runloom.run(main)\n"            # warn -> prints, no raise
             "print('SURVIVED')\n")
         self.assertEqual(rc, 0)
         self.assertIn("SURVIVED", out)
@@ -302,9 +302,9 @@ class TestDeadlockDetection(unittest.TestCase):
 
     def test_off_mode_silent(self):
         rc, out = _run_script(
-            "import pygo, pygo_core, pygo.inspect as gi\n"
+            "import runloom, runloom_c, runloom.inspect as gi\n"
             "gi.set_deadlock_mode('off')\n"
-            "pygo.run(lambda: pygo_core.Chan(0).recv())\n"
+            "runloom.run(lambda: runloom_c.Chan(0).recv())\n"
             "print('SURVIVED')\n")
         self.assertEqual(rc, 0)
         self.assertIn("SURVIVED", out)
@@ -312,14 +312,14 @@ class TestDeadlockDetection(unittest.TestCase):
 
     def test_no_false_positive_on_clean_run(self):
         rc, out = _run_script(
-            "import pygo, pygo.inspect as gi\n"
+            "import runloom, runloom.inspect as gi\n"
             "gi.set_deadlock_mode('raise')\n"
             "def worker():\n"
-            "    [pygo.yield_() for _ in range(3)]\n"
+            "    [runloom.yield_() for _ in range(3)]\n"
             "def main():\n"
-            "    [pygo.go(worker) for _ in range(5)]\n"
-            "    pygo.sleep(0.005)\n"
-            "pygo.run(main)\n"            # completes -> no deadlock
+            "    [runloom.go(worker) for _ in range(5)]\n"
+            "    runloom.sleep(0.005)\n"
+            "runloom.run(main)\n"            # completes -> no deadlock
             "print('CLEAN_OK')\n")
         self.assertEqual(rc, 0)
         self.assertIn("CLEAN_OK", out)
@@ -331,17 +331,17 @@ class TestLeakWatchdog(unittest.TestCase):
         cap = {}
 
         def sleeper():
-            pygo.sleep(0.06)
+            runloom.sleep(0.06)
 
         def main():
             gi.enable_timestamps(True)
             for _ in range(3):
-                pygo.go(sleeper)
-            pygo.sleep(0.03)            # let them age
+                runloom.go(sleeper)
+            runloom.sleep(0.03)            # let them age
             cap["hits"] = gi.leaked(min_age=0.01, states=("sleep",))
             cap["none"] = gi.leaked(min_age=10.0, states=("sleep",))
 
-        pygo.run(main)
+        runloom.run(main)
         self.assertEqual(len(cap["hits"]), 3)
         self.assertTrue(all(g["age"] >= 0.01 for g in cap["hits"]))
         self.assertEqual(cap["none"], [])   # nothing parked >10s
@@ -350,7 +350,7 @@ class TestLeakWatchdog(unittest.TestCase):
         gi.enable_timestamps(False)
         # leaked() should turn tracking on rather than error
         self.assertEqual(gi.leaked(min_age=0.01), [])
-        self.assertTrue(pygo_core.get_introspect_timestamps())
+        self.assertTrue(runloom_c.get_introspect_timestamps())
 
 
 class TestMaxGoroutines(unittest.TestCase):
@@ -364,19 +364,19 @@ class TestMaxGoroutines(unittest.TestCase):
             gi.set_max_goroutines(5)
             spawned = rejected = 0
             def parker():
-                pygo_core.park_self()       # occupies a slot
+                runloom_c.park_self()       # occupies a slot
             for _ in range(20):
                 try:
-                    pygo.go(parker)
+                    runloom.go(parker)
                     spawned += 1
                 except RuntimeError:
                     rejected += 1
             cap["spawned"] = spawned
             cap["rejected"] = rejected
             cap["live"] = gi.live_goroutines()
-            pygo_core.sched_reset()         # finish the parkers -> free slots
+            runloom_c.sched_reset()         # finish the parkers -> free slots
 
-        pygo.run(main)
+        runloom.run(main)
         self.assertEqual(cap["spawned"], 5)
         self.assertEqual(cap["rejected"], 15)
         self.assertEqual(cap["live"], 5)
@@ -392,10 +392,10 @@ class TestMaxGoroutines(unittest.TestCase):
             def quick():
                 ran["n"] += 1
             for _ in range(500):
-                pygo.go(quick)
-                pygo.yield_()               # let some finish, freeing slots
+                runloom.go(quick)
+                runloom.yield_()               # let some finish, freeing slots
 
-        pygo.run(main)
+        runloom.run(main)
         self.assertEqual(ran["n"], 500)
         self.assertEqual(gi.live_goroutines(), 0)
 
@@ -407,9 +407,9 @@ class TestMaxGoroutines(unittest.TestCase):
 class TestOutsideGoroutine(unittest.TestCase):
     def test_apis_safe_when_idle(self):
         # No scheduler running: must not crash.
-        self.assertEqual(pygo_core.goroutine_count(), 0)
-        self.assertEqual(pygo_core.goroutines(), [])
-        rep, frames = pygo_core.goroutine_stack(999999)
+        self.assertEqual(runloom_c.goroutine_count(), 0)
+        self.assertEqual(runloom_c.goroutines(), [])
+        rep, frames = runloom_c.goroutine_stack(999999)
         self.assertIsNone(rep)
         self.assertEqual(frames, [])
 

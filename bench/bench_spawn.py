@@ -1,8 +1,8 @@
-"""Spawn cost: time pygo.go() in a tight loop, run all gs once.
+"""Spawn cost: time runloom.go() in a tight loop, run all gs once.
 
 Spawn touches:
-  - PyMem_Calloc of pygo_g_t (small, fast)
-  - pygo_coro_new which pops/pushes a per-thread stack pool (fast once warm)
+  - PyMem_Calloc of runloom_g_t (small, fast)
+  - runloom_coro_new which pops/pushes a per-thread stack pool (fast once warm)
   - PyCapsule_New for the handle (Python alloc)
 
 Each run primes the stack pool first, then re-measures so we see steady
@@ -12,7 +12,7 @@ import sys
 import time
 
 sys.path.insert(0, "src")
-import pygo_core
+import runloom_c
 
 
 def noop():
@@ -24,8 +24,8 @@ def measure(n, repeats=5):
     for _ in range(repeats):
         t0 = time.perf_counter()
         for _ in range(n):
-            pygo_core.go(noop)
-        pygo_core.run()
+            runloom_c.go(noop)
+        runloom_c.run()
         dt = time.perf_counter() - t0
         if dt < best:
             best = dt
@@ -33,8 +33,8 @@ def measure(n, repeats=5):
 
 
 def main():
-    print("pygo spawn microbench")
-    print("backend:", pygo_core.backend())
+    print("runloom spawn microbench")
+    print("backend:", runloom_c.backend())
     print()
     # Warm the stack pool with one big run.
     measure(10_000, repeats=1)

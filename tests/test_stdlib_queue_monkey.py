@@ -1,4 +1,4 @@
-"""CPython's OWN Lib/test/test_queue.py, run verbatim under pygo.monkey.patch().
+"""CPython's OWN Lib/test/test_queue.py, run verbatim under runloom.monkey.patch().
 
 monkey makes ``queue.SimpleQueue`` cooperative (CoSimpleQueue) and ``queue.Queue``
 cooperative transitively (it's built on the now-cooperative threading.Condition).
@@ -25,7 +25,7 @@ tearDownModule = unpatch_module
 if HAVE_CPYTHON_TESTS:
     from test import test_queue as _m
 
-    TestPygoSimpleQueue = hosted(_m.PySimpleQueueTest, "TestPygoSimpleQueue")
-    TestPygoQueue = hosted(_m.PyQueueTest, "TestPygoQueue")
-    TestPygoLifoQueue = hosted(_m.PyLifoQueueTest, "TestPygoLifoQueue")
-    TestPygoPriorityQueue = hosted(_m.PyPriorityQueueTest, "TestPygoPriorityQueue")
+    TestRunloomSimpleQueue = hosted(_m.PySimpleQueueTest, "TestRunloomSimpleQueue")
+    TestRunloomQueue = hosted(_m.PyQueueTest, "TestRunloomQueue")
+    TestRunloomLifoQueue = hosted(_m.PyLifoQueueTest, "TestRunloomLifoQueue")
+    TestRunloomPriorityQueue = hosted(_m.PyPriorityQueueTest, "TestRunloomPriorityQueue")

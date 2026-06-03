@@ -1,6 +1,6 @@
 """M:N scheduler — real multi-core parallelism (free-threaded 3.13t).
 
-This is pygo's headline trick: with the GIL off, the M:N scheduler runs
+This is runloom's headline trick: with the GIL off, the M:N scheduler runs
 goroutines across a pool of hub threads, one per core.  mn_init(n)
 starts n hubs, mn_go schedules onto them round-robin, mn_run waits for
 them all.  SHA-256 releases the GIL while it hashes, so adding hubs
@@ -19,7 +19,7 @@ import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 
-import pygo_core
+import runloom_c
 
 NUM_TASKS = 64
 ROUNDS = 4000
@@ -33,13 +33,13 @@ def work():
 
 
 def run_with_hubs(n_hubs):
-    pygo_core.mn_init(n_hubs)
+    runloom_c.mn_init(n_hubs)
     start = time.perf_counter()
     for _ in range(NUM_TASKS):
-        pygo_core.mn_go(work)
-    pygo_core.mn_run()
+        runloom_c.mn_go(work)
+    runloom_c.mn_run()
     elapsed = time.perf_counter() - start
-    pygo_core.mn_fini()
+    runloom_c.mn_fini()
     return elapsed
 
 

@@ -19,9 +19,9 @@ import threading
 import time
 import unittest
 
-import pygo
-import pygo.monkey
-import pygo_core
+import runloom
+import runloom.monkey
+import runloom_c
 
 
 def _drive(fn):
@@ -33,19 +33,19 @@ def _drive(fn):
         except BaseException as e:   # noqa: BLE001
             box[1] = e
 
-    pygo_core.go(runner)
-    pygo_core.run()
+    runloom_c.go(runner)
+    runloom_c.run()
     if box[1] is not None:
         raise box[1]
     return box[0]
 
 
 def setUpModule():
-    pygo.monkey.patch()
+    runloom.monkey.patch()
 
 
 def tearDownModule():
-    pygo.monkey.unpatch()
+    runloom.monkey.unpatch()
 
 
 class TestSimpleQueueContract(unittest.TestCase):
@@ -95,7 +95,7 @@ class TestSimpleQueueContract(unittest.TestCase):
                 order.append("put")
                 q.put("item")
 
-            pygo_core.go(producer)
+            runloom_c.go(producer)
             val = q.get()              # parks until producer runs
             order.append("got")
             self.assertEqual(val, "item")
@@ -118,7 +118,7 @@ class TestSimpleQueueConservation(unittest.TestCase):
                 for i in range(M):
                     q.put(base + i)
                     if i % 7 == 0:
-                        pygo.yield_()
+                        runloom.yield_()
 
             def consumer():
                 while True:
@@ -131,14 +131,14 @@ class TestSimpleQueueConservation(unittest.TestCase):
                             return
 
             for p in range(N_PROD):
-                pygo_core.go(lambda base=p * 1000: producer(base))
+                runloom_c.go(lambda base=p * 1000: producer(base))
             for _ in range(N_CONS):
-                pygo_core.go(consumer)
+                runloom_c.go(consumer)
 
             # Wait for all items, cooperatively.
             t0 = time.monotonic()
             while len(received) < total and time.monotonic() - t0 < 5:
-                pygo.sleep(0.005)
+                runloom.sleep(0.005)
             return sorted(received)
 
         got = _drive(body)
@@ -200,7 +200,7 @@ class TestQueueBlockingHandoff(unittest.TestCase):
                 time.sleep(0.02)
                 order.append("get:" + q.get())
 
-            pygo_core.go(consumer)
+            runloom_c.go(consumer)
             order.append("put-start")
             q.put("second")            # blocks until consumer takes "first"
             order.append("put-done")
@@ -224,7 +224,7 @@ class TestQueueBlockingHandoff(unittest.TestCase):
                     drained.append(item)
                     q.task_done()
 
-            pygo_core.go(worker)
+            runloom_c.go(worker)
             q.join()                   # parks until task_done called 5x
             return sorted(drained)
         self.assertEqual(_drive(body), [0, 1, 2, 3, 4])

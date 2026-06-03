@@ -1,7 +1,7 @@
-"""Behavioral torture test for pygo_tcp (TCPConn) error handling.
+"""Behavioral torture test for runloom_tcp (TCPConn) error handling.
 
 Same approach as the netpoll/io_uring arming tests, applied to the socket
-error contract of connect/accept/recv/send.  pygo_tcp runs the classic
+error contract of connect/accept/recv/send.  runloom_tcp runs the classic
 non-blocking loop: try the syscall; on EAGAIN/EWOULDBLOCK/EINTR park on netpoll
 and retry; on any other errno raise OSError.  These tests pin the observable
 end of that contract over real loopback sockets, driven as cooperative
@@ -18,7 +18,7 @@ import socket
 
 import pytest
 
-import pygo_core
+import runloom_c
 
 
 def _drive(*goroutines):
@@ -34,8 +34,8 @@ def _drive(*goroutines):
         return runner
 
     for g in goroutines:
-        pygo_core.go(wrap(g))
-    pygo_core.run()
+        runloom_c.go(wrap(g))
+    runloom_c.run()
     if box:
         raise box[0]
 
@@ -65,7 +65,7 @@ def test_echo_round_trip():
     result = [None]
 
     def server():
-        ln = pygo_core.TCPConn.listen("127.0.0.1", 0)
+        ln = runloom_c.TCPConn.listen("127.0.0.1", 0)
         port[0] = _port(ln)
         conn = ln.accept()
         result[0] = conn.recv(1024)
@@ -75,8 +75,8 @@ def test_echo_round_trip():
 
     def client():
         while port[0] is None:
-            pygo_core.sched_yield()
-        c = pygo_core.TCPConn.connect("127.0.0.1", port[0])
+            runloom_c.sched_yield()
+        c = runloom_c.TCPConn.connect("127.0.0.1", port[0])
         c.send_all(b"ping")
         echo = c.recv(1024)
         c.close()
@@ -93,7 +93,7 @@ def test_recv_returns_empty_on_clean_peer_close():
     got = [None]
 
     def server():
-        ln = pygo_core.TCPConn.listen("127.0.0.1", 0)
+        ln = runloom_c.TCPConn.listen("127.0.0.1", 0)
         port[0] = _port(ln)
         conn = ln.accept()
         conn.close()          # close immediately, no data -> client sees EOF
@@ -101,8 +101,8 @@ def test_recv_returns_empty_on_clean_peer_close():
 
     def client():
         while port[0] is None:
-            pygo_core.sched_yield()
-        c = pygo_core.TCPConn.connect("127.0.0.1", port[0])
+            runloom_c.sched_yield()
+        c = runloom_c.TCPConn.connect("127.0.0.1", port[0])
         got[0] = c.recv(1024)
         c.close()
 
@@ -118,7 +118,7 @@ def test_connect_refused_raises_oserror():
 
     def client():
         try:
-            pygo_core.TCPConn.connect("127.0.0.1", dead)
+            runloom_c.TCPConn.connect("127.0.0.1", dead)
         except OSError as e:
             box["errno"] = e.errno
 
@@ -131,7 +131,7 @@ def test_recv_into_round_trip():
     out = [None]
 
     def server():
-        ln = pygo_core.TCPConn.listen("127.0.0.1", 0)
+        ln = runloom_c.TCPConn.listen("127.0.0.1", 0)
         port[0] = _port(ln)
         conn = ln.accept()
         conn.send_all(b"abcdef")
@@ -140,8 +140,8 @@ def test_recv_into_round_trip():
 
     def client():
         while port[0] is None:
-            pygo_core.sched_yield()
-        c = pygo_core.TCPConn.connect("127.0.0.1", port[0])
+            runloom_c.sched_yield()
+        c = runloom_c.TCPConn.connect("127.0.0.1", port[0])
         buf = bytearray(16)
         n = c.recv_into(buf)
         out[0] = (n, bytes(buf[:n]))

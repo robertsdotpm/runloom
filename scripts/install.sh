@@ -1,9 +1,9 @@
 #!/usr/bin/env sh
-# install.sh -- detect / bootstrap / build / install pygo.
+# install.sh -- detect / bootstrap / build / install runloom.
 #
 # Convenience wrapper around `pip install .` that runs the compiler
 # bootstrapper first if no C compiler is on PATH.  Aimed at users who
-# clone the repo and just want to get pygo working without thinking
+# clone the repo and just want to get runloom working without thinking
 # about toolchains.
 #
 # Usage:
@@ -12,7 +12,7 @@
 #   ./scripts/install.sh --editable       # pip install -e .
 #   PYTHON=python3.12 ./scripts/install.sh  # build against a specific interp
 #
-# Honours all PYGO_* env vars consumed by setup.py.
+# Honours all RUNLOOM_* env vars consumed by setup.py.
 
 set -eu
 
@@ -38,7 +38,7 @@ log "using $PYTHON (Python $PY_VER)"
 
 # 2. Quick version check (matches requires-python = >=3.11 in pyproject.toml).
 "$PYTHON" -c 'import sys; sys.exit(0 if sys.version_info >= (3,11) else 1)' \
-    || { log "pygo requires Python 3.11+; you have $PY_VER"; exit 1; }
+    || { log "runloom requires Python 3.11+; you have $PY_VER"; exit 1; }
 
 # 3. Bootstrap a compiler if none is present.
 if ! (have cc || have gcc || have clang); then
@@ -67,5 +67,5 @@ cd "$REPO_DIR"
 
 # 6. Sanity-check the import + report backend.
 log "validating install"
-"$PYTHON" -c "import pygo_core; print('coro=', pygo_core.backend(), ' netpoll=', pygo_core.netpoll_backend())"
+"$PYTHON" -c "import runloom_c; print('coro=', runloom_c.backend(), ' netpoll=', runloom_c.netpoll_backend())"
 log "done"

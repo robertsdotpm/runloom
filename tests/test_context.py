@@ -1,9 +1,9 @@
-"""Tests for pygo.context (Go-style cancellation)."""
+"""Tests for runloom.context (Go-style cancellation)."""
 import time as _time
 import unittest
 
-import pygo_core
-import pygo.context as ctxmod
+import runloom_c
+import runloom.context as ctxmod
 
 
 class TestBackground(unittest.TestCase):
@@ -23,16 +23,16 @@ class TestWithCancel(unittest.TestCase):
         got = []
 
         def waiter():
-            idx, _ = pygo_core.select([("recv", ctx.done)])
+            idx, _ = runloom_c.select([("recv", ctx.done)])
             got.append(("woken", idx, ctx.err()))
 
         def canceller():
-            pygo_core.sched_sleep(0.01)
+            runloom_c.sched_sleep(0.01)
             cancel()
 
-        pygo_core.go(waiter)
-        pygo_core.go(canceller)
-        pygo_core.run()
+        runloom_c.go(waiter)
+        runloom_c.go(canceller)
+        runloom_c.run()
 
         self.assertEqual(len(got), 1)
         self.assertEqual(got[0][2], ctxmod.CANCELED)
@@ -44,16 +44,16 @@ class TestWithCancel(unittest.TestCase):
         got = []
 
         def child_waiter():
-            pygo_core.select([("recv", child.done)])
+            runloom_c.select([("recv", child.done)])
             got.append(child.err())
 
         def cancel_parent():
-            pygo_core.sched_sleep(0.01)
+            runloom_c.sched_sleep(0.01)
             p_cancel()
 
-        pygo_core.go(child_waiter)
-        pygo_core.go(cancel_parent)
-        pygo_core.run()
+        runloom_c.go(child_waiter)
+        runloom_c.go(cancel_parent)
+        runloom_c.run()
 
         self.assertEqual(got, [ctxmod.CANCELED])
 
@@ -70,11 +70,11 @@ class TestWithTimeout(unittest.TestCase):
         outcome = []
 
         def waiter():
-            pygo_core.select([("recv", ctx.done)])
+            runloom_c.select([("recv", ctx.done)])
             outcome.append(ctx.err())
 
-        pygo_core.go(waiter)
-        pygo_core.run()
+        runloom_c.go(waiter)
+        runloom_c.run()
 
         self.assertEqual(outcome, [ctxmod.DEADLINE_EXCEEDED])
 
@@ -84,16 +84,16 @@ class TestWithTimeout(unittest.TestCase):
         outcome = []
 
         def waiter():
-            pygo_core.select([("recv", ctx.done)])
+            runloom_c.select([("recv", ctx.done)])
             outcome.append(ctx.err())
 
         def early_cancel():
-            pygo_core.sched_sleep(0.01)
+            runloom_c.sched_sleep(0.01)
             cancel()
 
-        pygo_core.go(waiter)
-        pygo_core.go(early_cancel)
-        pygo_core.run()
+        runloom_c.go(waiter)
+        runloom_c.go(early_cancel)
+        runloom_c.run()
 
         self.assertEqual(outcome, [ctxmod.CANCELED])
 
@@ -106,11 +106,11 @@ class TestWithTimeout(unittest.TestCase):
         outcome = []
 
         def waiter():
-            pygo_core.select([("recv", child.done)])
+            runloom_c.select([("recv", child.done)])
             outcome.append((child.err(), _time.monotonic() - t0))
 
-        pygo_core.go(waiter)
-        pygo_core.run()
+        runloom_c.go(waiter)
+        runloom_c.run()
 
         err, elapsed = outcome[0]
         self.assertEqual(err, ctxmod.DEADLINE_EXCEEDED)

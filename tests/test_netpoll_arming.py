@@ -4,9 +4,9 @@ This mirrors the Linux kernel's own approach to verifying epoll wakeup
 semantics (``tools/testing/selftests/filesystems/epoll/epoll_wakeup_test.c``):
 drive an fd's readiness from *outside* the scheduler -- a real OS thread doing
 real socket I/O -- and assert the EXACT number of times a goroutine parked in
-``pygo_core.wait_fd`` wakes, not merely "does it eventually make progress".
+``runloom_c.wait_fd`` wakes, not merely "does it eventually make progress".
 
-That exact-wake-count level is where the historical arming bugs lived.  pygo's
+That exact-wake-count level is where the historical arming bugs lived.  runloom's
 netpoll once registered fds ``EPOLLET | EPOLLEXCLUSIVE`` once and never re-armed;
 a consumed-then-readable-again fd produced an edge the kernel never refired, so
 the *second* ``wait_fd`` on that fd hung forever (the "hung 96/96" finding that
@@ -41,17 +41,17 @@ import threading
 import pytest
 
 # conftest.py already prepends <repo>/src to sys.path.
-import pygo_core
+import runloom_c
 
-READ = 1   # PYGO_NETPOLL_READ
-WRITE = 2  # PYGO_NETPOLL_WRITE
+READ = 1   # RUNLOOM_NETPOLL_READ
+WRITE = 2  # RUNLOOM_NETPOLL_WRITE
 
 # A healthy arm wakes in microseconds; this ceiling is only ever paid when an
 # arm is BROKEN (the wake never comes), turning a hang into a 0 return we can
 # assert on.  Overridable so the fault-injection harness can shorten it.
-TIMEOUT_MS = int(os.environ.get("PYGO_ARMING_TIMEOUT_MS", "4000"))
+TIMEOUT_MS = int(os.environ.get("RUNLOOM_ARMING_TIMEOUT_MS", "4000"))
 
-BACKEND = pygo_core.netpoll_backend()
+BACKEND = runloom_c.netpoll_backend()
 
 
 def _drain(sock):
@@ -101,14 +101,14 @@ def _run_rearm(n_edges, timeout_ms=TIMEOUT_MS):
 
     def waiter():
         for _ in range(n_edges):
-            m = pygo_core.wait_fd(data_r.fileno(), READ, timeout_ms)
+            m = runloom_c.wait_fd(data_r.fileno(), READ, timeout_ms)
             woke.append(m)
             if m & READ:
                 _drain(data_r)
             ack_w.send(b"a")                  # release the feeder for edge N+1
 
-    pygo_core.go(waiter)
-    pygo_core.run()
+    runloom_c.go(waiter)
+    runloom_c.run()
     t.join(timeout=10)
     try:
         assert not t.is_alive(), "feeder thread did not finish"
@@ -140,10 +140,10 @@ def test_ready_before_park_returns_immediately():
     got = []
 
     def waiter():
-        got.append(pygo_core.wait_fd(data_r.fileno(), READ, TIMEOUT_MS))
+        got.append(runloom_c.wait_fd(data_r.fileno(), READ, TIMEOUT_MS))
 
-    pygo_core.go(waiter)
-    pygo_core.run()
+    runloom_c.go(waiter)
+    runloom_c.run()
     data_r.close(); data_w.close()
     assert got == [READ], "ready-at-arm not reported on %s: %r" % (BACKEND, got)
 
@@ -154,10 +154,10 @@ def test_write_side_is_ready_immediately():
     got = []
 
     def waiter():
-        got.append(pygo_core.wait_fd(a.fileno(), WRITE, TIMEOUT_MS))
+        got.append(runloom_c.wait_fd(a.fileno(), WRITE, TIMEOUT_MS))
 
-    pygo_core.go(waiter)
-    pygo_core.run()
+    runloom_c.go(waiter)
+    runloom_c.run()
     a.close(); b.close()
     assert got and (got[0] & WRITE), "writable arm not reported: %r" % got
 
@@ -170,10 +170,10 @@ def test_combined_read_write_returns_write_subset():
     got = []
 
     def waiter():
-        got.append(pygo_core.wait_fd(a.fileno(), READ | WRITE, TIMEOUT_MS))
+        got.append(runloom_c.wait_fd(a.fileno(), READ | WRITE, TIMEOUT_MS))
 
-    pygo_core.go(waiter)
-    pygo_core.run()
+    runloom_c.go(waiter)
+    runloom_c.run()
     a.close(); b.close()
     assert got, "no return"
     assert got[0] & WRITE, "WRITE not reported: %r" % got
@@ -191,10 +191,10 @@ def test_never_ready_times_out():
     got = []
 
     def waiter():
-        got.append(pygo_core.wait_fd(data_r.fileno(), READ, 200))
+        got.append(runloom_c.wait_fd(data_r.fileno(), READ, 200))
 
-    pygo_core.go(waiter)
-    pygo_core.run()
+    runloom_c.go(waiter)
+    runloom_c.run()
     data_r.close(); data_w.close()
     assert got == [0], "expected timeout (0), got %r on %s" % (got, BACKEND)
 
@@ -219,11 +219,11 @@ def test_peer_close_wakes_reader():
 
     def waiter():
         ready.set()                           # tell the closer we're about to park
-        m = pygo_core.wait_fd(data_r.fileno(), READ, TIMEOUT_MS)
+        m = runloom_c.wait_fd(data_r.fileno(), READ, TIMEOUT_MS)
         woke.append(m)
 
-    pygo_core.go(waiter)
-    pygo_core.run()
+    runloom_c.go(waiter)
+    runloom_c.run()
     t.join(5)
     data_r.close()
     assert woke == [READ], (
@@ -254,15 +254,15 @@ def test_close_armed_fd_degrades_to_timeout():
     got = []
 
     def waiter():
-        got.append(pygo_core.wait_fd(data_r.fileno(), READ, 400))
+        got.append(runloom_c.wait_fd(data_r.fileno(), READ, 400))
 
     def closer():
-        pygo_core.sched_yield()               # let the waiter register its fd + park
+        runloom_c.sched_yield()               # let the waiter register its fd + park
         data_r.close()                        # close the fd we're parked on
 
-    pygo_core.go(waiter)
-    pygo_core.go(closer)
-    pygo_core.run()
+    runloom_c.go(waiter)
+    runloom_c.go(closer)
+    runloom_c.run()
     data_w.close()
     assert got == [0], "closing the armed fd should time out cleanly: %r" % got
 
@@ -293,15 +293,15 @@ def test_concurrent_distinct_fds_thundering():
             r, _ = pairs[i]
             if i == 0:
                 started.set()                 # release the feeder once gs exist
-            m = pygo_core.wait_fd(r.fileno(), READ, TIMEOUT_MS)
+            m = runloom_c.wait_fd(r.fileno(), READ, TIMEOUT_MS)
             woke[i].append(m)
             if m & READ:
                 _drain(r)
         return waiter
 
     for i in range(N):
-        pygo_core.go(make_waiter(i))
-    pygo_core.run()
+        runloom_c.go(make_waiter(i))
+    runloom_c.run()
     t.join(5)
     for r, w in pairs:
         r.close(); w.close()
@@ -333,7 +333,7 @@ def test_concurrent_distinct_fds_staggered():
     def make_waiter(i):
         def waiter():
             r, _ = pairs[i]
-            m = pygo_core.wait_fd(r.fileno(), READ, TIMEOUT_MS)
+            m = runloom_c.wait_fd(r.fileno(), READ, TIMEOUT_MS)
             woke[i].append(m)
             if m & READ:
                 _drain(r)
@@ -341,8 +341,8 @@ def test_concurrent_distinct_fds_staggered():
         return waiter
 
     for i in range(N):
-        pygo_core.go(make_waiter(i))
-    pygo_core.run()
+        runloom_c.go(make_waiter(i))
+    runloom_c.run()
     t.join(10)
     for r, w in pairs:
         r.close(); w.close()

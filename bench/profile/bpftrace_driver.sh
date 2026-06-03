@@ -1,5 +1,5 @@
 #!/usr/bin/env sh
-# Run a bpftrace script while a pygo workload runs, then print the maps.
+# Run a bpftrace script while a runloom workload runs, then print the maps.
 #
 # bpftrace uses kprobes/tracepoints (not the PMU), so latency histograms work
 # on this VM even though perf's hardware counters don't (finding F5). Needs

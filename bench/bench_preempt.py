@@ -16,7 +16,7 @@ import sys
 import time
 
 sys.path.insert(0, "src")
-import pygo_core
+import runloom_c
 
 
 def busy_loop(n_iters, marker):
@@ -32,21 +32,21 @@ def reader(marker, n_target):
     """Cooperative goroutine; records its first-tick time."""
     marker["reader_first_ts"] = time.perf_counter()
     for _ in range(n_target):
-        pygo_core.sched_yield()
+        runloom_c.sched_yield()
     marker["reader_done_ts"] = time.perf_counter()
 
 
 def run(quantum_us, label):
     marker = {"start_ts": time.perf_counter()}
     if quantum_us > 0:
-        pygo_core.preempt_init(quantum_us)
+        runloom_c.preempt_init(quantum_us)
     try:
-        pygo_core.go(lambda: busy_loop(8_000_000, marker))
-        pygo_core.go(lambda: reader(marker, 10))
-        pygo_core.run()
+        runloom_c.go(lambda: busy_loop(8_000_000, marker))
+        runloom_c.go(lambda: reader(marker, 10))
+        runloom_c.run()
     finally:
         if quantum_us > 0:
-            pygo_core.preempt_fini()
+            runloom_c.preempt_fini()
     start = marker["start_ts"]
     busy_end = marker["busy_done_ts"] - start
     reader_first = marker["reader_first_ts"] - start
@@ -58,7 +58,7 @@ def run(quantum_us, label):
 
 
 def main():
-    print("pygo time-sliced preemption demo (3.13t)")
+    print("runloom time-sliced preemption demo (3.13t)")
     print()
     run(0,      "no preemption")
     run(10_000, "preempt every 10 ms")

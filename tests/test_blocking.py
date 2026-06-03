@@ -1,4 +1,4 @@
-"""Tests for pygo.blocking / pygo_core.blocking -- the blocking-offload pool.
+"""Tests for runloom.blocking / runloom_c.blocking -- the blocking-offload pool.
 
 A goroutine that makes a non-preemptible blocking call (DNS, blocking
 sockets, GIL-releasing C extensions) must not wedge the OS thread it
@@ -8,8 +8,8 @@ pool and parks the goroutine, so the others keep running.
 import time
 import unittest
 
-import pygo
-import pygo_core
+import runloom
+import runloom_c
 
 
 # Single-thread blocking offloads run CONCURRENTLY only on netpoll backends
@@ -18,9 +18,9 @@ import pygo_core
 # select fallback pumps re-poll the parked-fd set on a timeout and have no
 # wakeable object, so a worker thread can't interrupt an idle pump; on those
 # backends blocking() runs the call inline (serial) rather than offloading
-# (see pygo_netpoll_wake_pump_arm in netpoll.c).  The offloads still complete
+# (see runloom_netpoll_wake_pump_arm in netpoll.c).  The offloads still complete
 # correctly there -- only the wall-clock concurrency bound does not hold.
-_PUMP_WAKE = pygo_core.netpoll_backend() in ("epoll", "kqueue", "iocp-afd")
+_PUMP_WAKE = runloom_c.netpoll_backend() in ("epoll", "kqueue", "iocp-afd")
 
 
 class TestBlocking(unittest.TestCase):
@@ -33,10 +33,10 @@ class TestBlocking(unittest.TestCase):
             return a + b + c
 
         def w():
-            out.append(pygo.blocking(add, 2, 3, c=10))
+            out.append(runloom.blocking(add, 2, 3, c=10))
 
-        pygo_core.go(w)
-        pygo_core.run()
+        runloom_c.go(w)
+        runloom_c.run()
         self.assertEqual(out, [15])
 
     def test_exception_propagates(self):
@@ -49,12 +49,12 @@ class TestBlocking(unittest.TestCase):
 
         def w():
             try:
-                pygo.blocking(boom)
+                runloom.blocking(boom)
             except ValueError as e:
                 seen.append(str(e))
 
-        pygo_core.go(w)
-        pygo_core.run()
+        runloom_c.go(w)
+        runloom_c.run()
         self.assertEqual(seen, ["kaboom"])
 
     def test_does_not_wedge_the_hub(self):
@@ -64,13 +64,13 @@ class TestBlocking(unittest.TestCase):
         done = []
 
         def w(i):
-            pygo.blocking(time.sleep, NAP)
+            runloom.blocking(time.sleep, NAP)
             done.append(i)
 
         for i in range(N):
-            pygo_core.go(lambda i=i: w(i))
+            runloom_c.go(lambda i=i: w(i))
         t0 = time.monotonic()
-        pygo_core.run()
+        runloom_c.run()
         wall = time.monotonic() - t0
 
         # Correctness holds on every backend: all offloads complete.
@@ -84,11 +84,11 @@ class TestBlocking(unittest.TestCase):
             # completion (checked above) is guaranteed, not concurrency.
             self.skipTest(
                 "netpoll backend %r has no pump-wake; blocking() runs inline"
-                % pygo_core.netpoll_backend())
+                % runloom_c.netpoll_backend())
 
     def test_inline_outside_goroutine(self):
         """Called outside any goroutine, blocking() just runs fn inline."""
-        self.assertEqual(pygo_core.blocking(lambda x: x * 2, 21), 42)
+        self.assertEqual(runloom_c.blocking(lambda x: x * 2, 21), 42)
 
 
 if __name__ == "__main__":

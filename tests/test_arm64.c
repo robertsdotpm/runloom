@@ -10,7 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "../src/pygo_core/coro.h"
+#include "../src/runloom_c/coro.h"
 
 #define EXPECT(cond, msg) do {                                              \
     if (!(cond)) { fprintf(stderr, "FAIL: %s\n", msg); exit(1); }           \
@@ -29,9 +29,9 @@ static void coro_entry(void *user)
 {
     long *counter = (long *)user;
     log_step(1);
-    pygo_coro_yield();
+    runloom_coro_yield();
     log_step(3);
-    pygo_coro_yield();
+    runloom_coro_yield();
     log_step(5);
     *counter = 42;
     /* Falls off end -- trampoline marks done. */
@@ -39,28 +39,28 @@ static void coro_entry(void *user)
 
 int main(void)
 {
-    pygo_coro_t *c;
+    runloom_coro_t *c;
     long counter = 0;
     int expected[] = {0, 1, 2, 3, 4, 5, 6};
     size_t i;
 
-    printf("pygo aarch64 test (backend=%s)\n", pygo_coro_backend());
+    printf("runloom aarch64 test (backend=%s)\n", runloom_coro_backend());
 
-    EXPECT(pygo_coro_thread_init() == 0, "thread_init");
+    EXPECT(runloom_coro_thread_init() == 0, "thread_init");
 
-    c = pygo_coro_new(65536, coro_entry, &counter);
+    c = runloom_coro_new(65536, coro_entry, &counter);
     EXPECT(c != NULL, "coro_new");
 
     log_step(0);
-    pygo_coro_resume(c);
+    runloom_coro_resume(c);
     log_step(2);
-    EXPECT(!pygo_coro_done(c), "not done after first yield");
-    pygo_coro_resume(c);
+    EXPECT(!runloom_coro_done(c), "not done after first yield");
+    runloom_coro_resume(c);
     log_step(4);
-    EXPECT(!pygo_coro_done(c), "not done after second yield");
-    pygo_coro_resume(c);
+    EXPECT(!runloom_coro_done(c), "not done after second yield");
+    runloom_coro_resume(c);
     log_step(6);
-    EXPECT(pygo_coro_done(c), "done after fallthrough");
+    EXPECT(runloom_coro_done(c), "done after fallthrough");
     EXPECT(counter == 42, "counter set by coro");
 
     EXPECT(step_count == 7, "exactly 7 steps logged");
@@ -68,8 +68,8 @@ int main(void)
         EXPECT(step_log[i] == expected[i], "step sequence");
     }
 
-    pygo_coro_destroy(c);
-    pygo_coro_thread_fini();
+    runloom_coro_destroy(c);
+    runloom_coro_thread_fini();
 
     printf("OK\n");
     return 0;

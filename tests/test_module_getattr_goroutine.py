@@ -8,9 +8,9 @@ than a whole default goroutine stack -- so an ordinary attribute miss
 (hasattr / getattr feature-detection, a namespace __getattr__ proxy) inside a
 goroutine used to overflow the stack and SIGSEGV.
 
-pygo replaces PyModule_Type's getattr slot to skip that hint while running on a
+runloom replaces PyModule_Type's getattr slot to skip that hint while running on a
 goroutine's small stack (the AttributeError itself -- type, .name/.obj, message
-core -- is unchanged).  See src/pygo_core/module_init.c.inc.
+core -- is unchanged).  See src/runloom_c/module_init.c.inc.
 """
 import os
 import sys
@@ -18,9 +18,9 @@ import tempfile
 import types
 import unittest
 
-import pygo_core
+import runloom_c
 
-MODNAME = "pygo_modmiss_mod"
+MODNAME = "runloom_modmiss_mod"
 
 
 def _drive(fn):
@@ -33,8 +33,8 @@ def _drive(fn):
         except BaseException as e:   # noqa: BLE001
             box[1] = e
 
-    pygo_core.go(runner)
-    pygo_core.run()
+    runloom_c.go(runner)
+    runloom_c.run()
     if box[1] is not None:
         raise box[1]
     return box[0]
@@ -44,7 +44,7 @@ class TestModuleGetattrGoroutine(unittest.TestCase):
     def setUp(self):
         # A module WITH a __file__ is what makes CPython attempt the 32 KB
         # shadowing hint on a miss (the path that overflows the goroutine stack).
-        fd, self.path = tempfile.mkstemp(suffix=".py", prefix="pygo_modmiss_")
+        fd, self.path = tempfile.mkstemp(suffix=".py", prefix="runloom_modmiss_")
         os.close(fd)
         self.mod = types.ModuleType(MODNAME)
         self.mod.__file__ = self.path
@@ -97,12 +97,12 @@ class TestModuleGetattrGoroutine(unittest.TestCase):
             except AttributeError:
                 box[0] = "ok"
 
-        pygo_core.mn_init(2)
+        runloom_c.mn_init(2)
         try:
-            pygo_core.mn_go(runner)
-            pygo_core.mn_run()
+            runloom_c.mn_go(runner)
+            runloom_c.mn_run()
         finally:
-            pygo_core.mn_fini()
+            runloom_c.mn_fini()
         self.assertEqual(box[0], "ok")
 
     def test_subclass_getattr_miss(self):
@@ -113,7 +113,7 @@ class TestModuleGetattrGoroutine(unittest.TestCase):
             def __getattr__(self, name):
                 raise AttributeError(name)
 
-        m = _NS("pygo_modmiss_subcls")
+        m = _NS("runloom_modmiss_subcls")
         m.__file__ = self.path
 
         def body():

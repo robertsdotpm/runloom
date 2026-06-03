@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# check_all.sh -- run every layer of pygo's correctness stack.
+# check_all.sh -- run every layer of runloom's correctness stack.
 #
 # Layers, fastest first:
 #   static      gcc -fanalyzer + cppcheck on the C core           ~1-2 min
@@ -35,8 +35,8 @@ cd "$ROOT"
 # pytest.  ~20 unrelated plugins are installed in this env and pytest imports
 # all of them per process (~4s/file of pure overhead), and one pulls _brotli
 # which re-enables the GIL -- wrong for the free-threaded target.  The suite
-# uses none of them.  Opt back in with PYGO_TEST_PYTEST_PLUGINS=1.
-if [ "${PYGO_TEST_PYTEST_PLUGINS:-}" != "1" ]; then
+# uses none of them.  Opt back in with RUNLOOM_TEST_PYTEST_PLUGINS=1.
+if [ "${RUNLOOM_TEST_PYTEST_PLUGINS:-}" != "1" ]; then
     export PYTEST_DISABLE_PLUGIN_AUTOLOAD=1
 fi
 
@@ -70,7 +70,7 @@ for ph in "${phases[@]}"; do
       "$PYTHON" tools/mn_stress.py --iters "${MN_ITERS:-150}" --stable || rc=1
       ;;
     replay)
-      hr "Controlled M:N deterministic replay (PYGO_MN_BARRIER)"
+      hr "Controlled M:N deterministic replay (RUNLOOM_MN_BARRIER)"
       # Same seed must reproduce one signature across reps; each probe exits
       # non-zero if any seed varies.  Guards the five replay levers
       # (tools/mn_controlled/README.md) against silent regression.

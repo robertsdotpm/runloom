@@ -14,8 +14,8 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 
-import pygo
-import pygo_core
+import runloom
+import runloom_c
 
 LIMIT = 60
 
@@ -34,8 +34,8 @@ def filter_multiples(prime, inp, out):
 
 
 def main():
-    ch = pygo_core.Chan()
-    pygo.go(generate, ch)
+    ch = runloom_c.Chan()
+    runloom.go(generate, ch)
 
     primes = []
     while True:
@@ -43,8 +43,8 @@ def main():
         if not ok:
             break
         primes.append(prime)
-        nxt = pygo_core.Chan()
-        pygo.go(filter_multiples, prime, ch, nxt)
+        nxt = runloom_c.Chan()
+        runloom.go(filter_multiples, prime, ch, nxt)
         ch = nxt                    # next round reads from the filtered stream
 
     print("primes up to {0}:".format(LIMIT))
@@ -52,4 +52,4 @@ def main():
 
 
 if __name__ == "__main__":
-    pygo.run(main)
+    runloom.run(main)

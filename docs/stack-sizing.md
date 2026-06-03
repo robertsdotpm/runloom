@@ -1,13 +1,13 @@
 # Stack sizing & memory
 
-Each goroutine in pygo owns a private C stack -- this is what enables
+Each goroutine in runloom owns a private C stack -- this is what enables
 the "looks-like-a-thread, costs-like-a-callback" cooperative model.
-This page explains how pygo manages that stack so you can run a lot of
+This page explains how runloom manages that stack so you can run a lot of
 goroutines at once without burning memory.
 
 ## The mechanisms in one paragraph
 
-pygo defaults to **256 KB** per goroutine but auto-calibrates: every
+runloom defaults to **256 KB** per goroutine but auto-calibrates: every
 fresh stack is painted with a sentinel pattern, every completed
 goroutine's high-water mark is scanned, and after 1 000 completions
 the default is locked to `next_pow2(max_hwm × 4)` clamped to
@@ -19,7 +19,7 @@ not their reservation.
 
 ## Why goroutines have stacks at all
 
-Stackful coroutines (pygo, greenlet, gevent, Go) keep the C stack
+Stackful coroutines (runloom, greenlet, gevent, Go) keep the C stack
 *per coroutine*.  Switching between them is a single `swap` instruction
 that saves callee-saved registers, swaps the stack pointer, and
 restores the new context -- ~80 ns on x86_64.
@@ -29,7 +29,7 @@ state in heap-allocated frame objects and switch by returning to a
 trampoline.  No per-coroutine C stack -- but every `await` requires
 allocating frame state and walking back through the event loop.
 
-Both models are valid; pygo picks stackful because the switch cost is
+Both models are valid; runloom picks stackful because the switch cost is
 ~22× lower and the user code can be ordinary blocking-style without
 async/await colour.  The cost is *per-goroutine memory* -- which is
 exactly what this page is about minimising.
@@ -41,9 +41,9 @@ get their stacks painted on creation, scanned on completion.  After
 the calibration window:
 
 ```python
-import pygo_core
+import runloom_c
 
-s = pygo_core.stats()
+s = runloom_c.stats()
 print(s["stack_size_default"])    # the new default (post-calibration)
 print(s["stack_hwm"])              # max bytes any goroutine actually used
 print(s["stack_completed"])        # how many goroutines were measured
@@ -97,18 +97,18 @@ mostly headers).  Without `MADV_DONTNEED` that workload would hold
 ~5 GB.
 
 This is a Linux/POSIX optimisation.  On Windows (Fibers backend) the
-OS manages stacks differently -- pygo lets it.
+OS manages stacks differently -- runloom lets it.
 
 ## Per-call override
 
 ```python
-import pygo_core
+import runloom_c
 
 # Goroutine known to recurse deeply or call into a heavy C extension:
-pygo_core.go(deep_handler, stack_size=512 * 1024)
+runloom_c.go(deep_handler, stack_size=512 * 1024)
 
 # Pure-compute callable that you've confirmed fits in 8 KB:
-pygo_core.go(tight_loop,  stack_size=8 * 1024)
+runloom_c.go(tight_loop,  stack_size=8 * 1024)
 ```
 
 The `stack_size=N` kwarg overrides the calibrated default for that
@@ -123,13 +123,13 @@ If you don't want to spend the first 1 000 goroutines running at the
 generous default, lock the size up-front:
 
 ```python
-import pygo_core
+import runloom_c
 
-# Before any pygo_core.go() call:
-pygo_core.set_stack_size(32 * 1024)
+# Before any runloom_c.go() call:
+runloom_c.set_stack_size(32 * 1024)
 
 # Subsequent goroutines use exactly 32 KB:
-pygo_core.go(worker)
+runloom_c.go(worker)
 ```
 
 `set_stack_size` also **freezes** calibration (no further auto-tuning)
@@ -142,9 +142,9 @@ and disables painting (no per-spawn overhead).  Use this when:
 - You're running a benchmark and want the size to not drift.
 
 ```python
-import pygo_core
+import runloom_c
 
-print(pygo_core.get_stack_size())   # current default
+print(runloom_c.get_stack_size())   # current default
 ```
 
 Bounds: `[16 KB, 8 MB]`.  Below or above is silently clamped.
@@ -175,10 +175,10 @@ When in doubt, run with calibration on, look at the measured
 ## Inspecting current usage
 
 ```python
-import pygo_core
+import runloom_c
 
 # Snapshot of calibration state
-print(pygo_core.stats())
+print(runloom_c.stats())
 # {
 #   'ready': 0, 'sleeping': 0, 'netpoll_parked': 0,
 #   'completed': 1042, 'running': 0,
@@ -205,18 +205,18 @@ protection the main thread gets, scaled to the goroutine's smaller stack:
   calls) hits a catchable `RecursionError` well before the stack overflows.
 - **Stacks grow on demand.** At each resume boundary a goroutine whose headroom
   has dropped below a quarter of its stack is copied onto a stack twice as big
-  (`PYGO_STACK_GROW`, default on; `PYGO_STACK_GROW=0` disables). A goroutine
+  (`RUNLOOM_STACK_GROW`, default on; `RUNLOOM_STACK_GROW=0` disables). A goroutine
   that gradually deepens grows with it.
 - **Every stack has a guard page.** A `PROT_NONE` page sits just below each
   goroutine stack (the OS provides one on the Windows Fibers backend). An
   overflow faults *immediately and cleanly* at the guard rather than silently
-  scribbling over a neighbouring stack. pygo does not yet turn that fault into a
+  scribbling over a neighbouring stack. runloom does not yet turn that fault into a
   friendly message -- it currently surfaces as a `faulthandler` segfault
   traceback (a diagnostic handler is a possible follow-up).
 - **CPython's stack-hungry error paths are neutralised.** A missing-attribute
   lookup on a module makes CPython 3.13 reserve a 32 KB path buffer just to
   build a "did you shadow a stdlib module?" hint -- on its own larger than a
-  default goroutine stack. pygo skips that hint while on a goroutine (the
+  default goroutine stack. runloom skips that hint while on a goroutine (the
   `AttributeError` is otherwise unchanged), so `getattr`/`hasattr` misses on a
   module can't blow the stack, by any lookup path.
 
@@ -229,9 +229,9 @@ guard; a non-probing extension could corrupt. If you have such a goroutine,
 give it a bigger stack up front:
 
 ```python
-pygo_core.set_stack_size(128 * 1024)        # process-wide default floor
+runloom_c.set_stack_size(128 * 1024)        # process-wide default floor
 # or just the suspicious goroutine:
-pygo_core.go(work, stack_size=512 * 1024)
+runloom_c.go(work, stack_size=512 * 1024)
 ```
 
 So the 16 KB minimum is a *floor for the calibrator*, not a blanket "safe for
@@ -244,19 +244,19 @@ call.
 For a production service:
 
 ```python
-import pygo_core
+import runloom_c
 
 # Optional: pre-calibrate during a dry-run, then lock for production
-pygo_core.set_stack_size(32 * 1024)        # whatever your dry-run found
+runloom_c.set_stack_size(32 * 1024)        # whatever your dry-run found
 
 # Spawn workers
 for i in range(10000):
-    pygo_core.go(worker)
+    runloom_c.go(worker)
 
-pygo_core.run()
+runloom_c.run()
 
 # Inspect after the burst
-print("peak resident usage:", pygo_core.stats())
+print("peak resident usage:", runloom_c.stats())
 ```
 
 For exploratory work or benchmarks, just let calibration run and

@@ -29,7 +29,7 @@ import sys
 
 import pytest
 
-import pygo_core
+import runloom_c
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 WORKLOAD = os.path.join(HERE, "netpoll_fault_workload.py")
@@ -65,7 +65,7 @@ def _strace_supports_inject():
 pytestmark = [
     pytest.mark.skipif(not sys.platform.startswith("linux"),
                        reason="strace fault injection is Linux-only"),
-    pytest.mark.skipif(pygo_core.netpoll_backend() != "epoll",
+    pytest.mark.skipif(runloom_c.netpoll_backend() != "epoll",
                        reason="this harness targets the epoll backend"),
     pytest.mark.skipif(not _strace_supports_inject(),
                        reason="strace with -e inject= not available"),
@@ -120,7 +120,7 @@ def test_epoll_wait_ebadf_does_not_busy_spin():
     rc, out, err = _run_under_strace(
         WAIT_SYSCALLS + ":error=EBADF:when=1+", "timeout",
         extra=["-c"],   # summary mode: count syscalls
-        env_extra={"PYGO_FAULT_TIMEOUT_MS": str(EBADF_TIMEOUT_MS)},
+        env_extra={"RUNLOOM_FAULT_TIMEOUT_MS": str(EBADF_TIMEOUT_MS)},
         timeout=30)
     # strace -c writes its summary to stderr; the workload's stdout still shows.
     assert rc == 0, "workload should still terminate cleanly: rc=%d\n%s\n%s" % (

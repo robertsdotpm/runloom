@@ -4,9 +4,9 @@ requires = ["setuptools>=61", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-# Distribution name on PyPI is `pygo-runtime` (the short `pygo` is taken).
-# The IMPORT names are unchanged: `import pygo` and `import pygo_core`.
-name = "pygo-runtime"
+# Distribution name on PyPI is `runloom` (the short `runloom` is taken).
+# The IMPORT names are unchanged: `import runloom` and `import runloom_c`.
+name = "runloom"
 version = "0.0.1"
 description = "Go-style stackful coroutines in Python (transparent-blocking I/O via socket monkey-patch)."
 requires-python = ">=3.11"
@@ -41,8 +41,8 @@ classifiers = [
     "Typing :: Typed",
 ]
 
-# No runtime dependencies — pygo is a self-contained C extension + the
-# Python standard library.  `pip install pygo-runtime` pulls in nothing else.
+# No runtime dependencies — runloom is a self-contained C extension + the
+# Python standard library.  `pip install runloom` pulls in nothing else.
 dependencies = []
 
 [project.optional-dependencies]
@@ -53,26 +53,26 @@ test = [
 ]
 # Everything needed to build + check + publish a release locally.
 dev = [
-    "pygo-runtime[test]",
+    "runloom[test]",
     "build>=1.0",
     "twine>=5",
     "cibuildwheel>=2.16",
 ]
 
 [project.urls]
-# NOTE: these point at the post-rename repo name (robertsdotpm/pygo-runtime).
-# GitHub 301-redirects the old `pygo` URLs once the repo is renamed.
-Homepage = "https://github.com/robertsdotpm/pygo-runtime"
-Documentation = "https://github.com/robertsdotpm/pygo-runtime/tree/main/docs"
-Issues = "https://github.com/robertsdotpm/pygo-runtime/issues"
-Source = "https://github.com/robertsdotpm/pygo-runtime"
+# NOTE: these point at the post-rename repo name (robertsdotpm/runloom).
+# GitHub 301-redirects the old `runloom` URLs once the repo is renamed.
+Homepage = "https://github.com/robertsdotpm/runloom"
+Documentation = "https://github.com/robertsdotpm/runloom/tree/main/docs"
+Issues = "https://github.com/robertsdotpm/runloom/issues"
+Source = "https://github.com/robertsdotpm/runloom"
 
 # --------------------------------------------------------------------
 # cibuildwheel: build prebuilt wheels for the matrix of Python versions
 # x supported OSes.  This project uses NO hosted CI -- run it by hand on
 # each target host: `pipx run cibuildwheel --output-dir wheels` (or
 # `python -m cibuildwheel`).  Until prebuilt wheels are uploaded, `pip
-# install pygo-runtime` builds from the sdist (needs a C compiler).
+# install runloom` builds from the sdist (needs a C compiler).
 # --------------------------------------------------------------------
 [tool.cibuildwheel]
 # CPython only (PyPy lacks the C-API surface we rely on).
@@ -81,7 +81,7 @@ build = "cp311-* cp312-* cp313-* cp314-*"
 # testing that's not in CI yet.  Linux x86_64 + aarch64, glibc only.
 skip = ["*-win32", "*-manylinux_i686", "*-musllinux_*", "pp*"]
 # Sanity-check imports after the wheel is built.
-test-command = "python -c \"import pygo, pygo_core; print('OK', pygo_core.backend(), pygo_core.netpoll_backend())\""
+test-command = "python -c \"import runloom, runloom_c; print('OK', runloom_c.backend(), runloom_c.netpoll_backend())\""
 build-verbosity = 1
 
 [tool.cibuildwheel.linux]
@@ -104,7 +104,7 @@ environment = "MACOSX_DEPLOYMENT_TARGET=10.13"
 # MSVC 2022 Build Tools come pre-installed on GitHub's windows-2022 runner.
 archs = ["AMD64"]
 # Verify both backends work.
-test-command = "python -c \"import pygo_core; assert pygo_core.netpoll_backend() in ('iocp-afd','wsapoll','select'); print(pygo_core.backend(), pygo_core.netpoll_backend())\""
+test-command = "python -c \"import runloom_c; assert runloom_c.netpoll_backend() in ('iocp-afd','wsapoll','select'); print(runloom_c.backend(), runloom_c.netpoll_backend())\""
 
 # --------------------------------------------------------------------
 # pytest: tests/conftest.py adds a per-test invariant fixture (structural
@@ -114,5 +114,5 @@ test-command = "python -c \"import pygo_core; assert pygo_core.netpoll_backend()
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = [
-    "pygo_leaky: test deliberately leaves a netpoll parker behind; skip the post-test parked-leak invariant for it.",
+    "runloom_leaky: test deliberately leaves a netpoll parker behind; skip the post-test parked-leak invariant for it.",
 ]

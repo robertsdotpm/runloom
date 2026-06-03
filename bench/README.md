@@ -1,11 +1,11 @@
-# pygo performance-benchmark campaign
+# runloom performance-benchmark campaign
 
-A reproducible, statistically-honest measurement layer for pygo, plus the
+A reproducible, statistically-honest measurement layer for runloom, plus the
 profiling drivers used to explain the numbers.  This is **measurement
 infrastructure**, not optimization work: the goal is that any number is
 diffable, has its full environment recorded, and a regression is visible.
 
-Primary target runtime is free-threaded CPython **3.13t** (pygo's M:N hub
+Primary target runtime is free-threaded CPython **3.13t** (runloom's M:N hub
 pool only gets real core-level parallelism with the GIL off).  GIL'd 3.13,
 asyncio, and the Go loadgen are comparison baselines.
 

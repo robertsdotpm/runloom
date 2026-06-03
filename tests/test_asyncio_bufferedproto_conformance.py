@@ -1,11 +1,11 @@
-"""CPython asyncio BufferedProtocol conformance against PygoEventLoop.
+"""CPython asyncio BufferedProtocol conformance against RunloomEventLoop.
 
 Companion to test_asyncio_conformance.py.  Runs CPython's OWN
 test_buffered_proto.BaseTestBufferedProtocol verbatim (the get_buffer() ->
-recv_into -> buffer_updated() read contract) against pygo.aio.PygoEventLoop via
+recv_into -> buffer_updated() read contract) against runloom.aio.RunloomEventLoop via
 the suite's new_loop hook.
 
-This was a documented gap (PygoEventLoop's stream transport used to call
+This was a documented gap (RunloomEventLoop's stream transport used to call
 protocol.data_received even for an asyncio.BufferedProtocol; the buffered read
 path was unimplemented).  Implemented in _StreamTransport._recv_step_buffered;
 this is the standing regression guard for it.
@@ -17,7 +17,7 @@ import pytest
 
 sys.path.insert(0, "src")
 
-import pygo.aio as paio
+import runloom.aio as paio
 
 try:
     from test.test_asyncio import test_buffered_proto as _tbp
@@ -35,14 +35,14 @@ if not _HAVE_CPYTHON_TESTS:
             pass
 
 
-class PygoBufferedProtocolConformance(_tbp.BaseTestBufferedProtocol,
+class RunloomBufferedProtocolConformance(_tbp.BaseTestBufferedProtocol,
                                       unittest.TestCase):
-    """CPython's BaseTestBufferedProtocol, driven by a PygoEventLoop.
+    """CPython's BaseTestBufferedProtocol, driven by a RunloomEventLoop.
 
-    Every test_* method is CPython's, unmodified; only the loop is pygo's."""
+    Every test_* method is CPython's, unmodified; only the loop is runloom's."""
 
     def new_loop(self):
-        return paio.PygoEventLoop()
+        return paio.RunloomEventLoop()
 
 
 if __name__ == "__main__":

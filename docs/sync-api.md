@@ -1,18 +1,18 @@
-# Sync API (`pygo.sync`)
+# Sync API (`runloom.sync`)
 
-`pygo.sync` is the *no-`async`/`await`* facade.  Same scheduler, same
+`runloom.sync` is the *no-`async`/`await`* facade.  Same scheduler, same
 performance, but the user code is plain straight-line Python -- no
 coroutines, no event loop ceremony.
 
 This exists because many libraries (and many users) don't want their
-public API to be `async def`-coloured.  With `pygo.sync` you get
+public API to be `async def`-coloured.  With `runloom.sync` you get
 cooperative concurrency that *looks* like threaded code but actually
 runs as a single OS thread of goroutines.
 
 ## Hello world
 
 ```python
-import pygo.sync as ps
+import runloom.sync as ps
 
 def main():
     print("hello from a goroutine")
@@ -28,7 +28,7 @@ until everything's done, and returns.
 ## Spawning goroutines
 
 ```python
-import pygo.sync as ps
+import runloom.sync as ps
 
 def worker(i):
     ps.sleep(0.01)
@@ -59,7 +59,7 @@ Outside any goroutine (e.g. at module top-level before `run()`),
 Channels are re-exported as `ps.Chan` and `ps.select`:
 
 ```python
-import pygo.sync as ps
+import runloom.sync as ps
 
 def producer(ch):
     for i in range(10):
@@ -82,11 +82,11 @@ See [Channels](channels.md) for the full API.
 
 ## TCP server (straight-line style)
 
-`pygo.sync` ships helper wrappers `tcp_connect` and `tcp_listen` that
+`runloom.sync` ships helper wrappers `tcp_connect` and `tcp_listen` that
 return cooperative sockets:
 
 ```python
-import pygo.sync as ps
+import runloom.sync as ps
 
 def handle(conn):
     try:
@@ -139,17 +139,17 @@ ps.run(main)
 
 ## Park / wake primitive
 
-For library authors building custom synchronisation, `pygo.sync.wake`
-+ `pygo_core.park_self()` form a lightweight per-task wake:
+For library authors building custom synchronisation, `runloom.sync.wake`
++ `runloom_c.park_self()` form a lightweight per-task wake:
 
 ```python
-import pygo.sync as ps
-import pygo_core
+import runloom.sync as ps
+import runloom_c
 
 def waiter():
-    g = pygo_core.current_g()
+    g = runloom_c.current_g()
     # ... arrange for someone else to call g.wake() ...
-    pygo_core.park_self()       # blocks until wake arrives
+    runloom_c.park_self()       # blocks until wake arrives
     print("woken")
 
 def main():
@@ -157,20 +157,20 @@ def main():
     # Later, from another goroutine: ps.wake(g)  -- or g.wake()
 ```
 
-This is what `pygo.aio` uses internally as the per-task wake mechanism
+This is what `runloom.aio` uses internally as the per-task wake mechanism
 in place of a `Chan(1)` per task.  Same idea is available to user code.
 
-## When to use `pygo.sync` vs. `pygo.aio`
+## When to use `runloom.sync` vs. `runloom.aio`
 
-**Choose `pygo.sync` when:**
+**Choose `runloom.sync` when:**
 
 - You're writing new code and want it to *look* synchronous -- easier
   to read, easier to debug, no callback colour.
-- You're porting Go code (each `goroutine` in Go is a `pygo.sync.go` here).
+- You're porting Go code (each `goroutine` in Go is a `runloom.sync.go` here).
 - You want a library API that doesn't require its callers to be in an
   `async def`.
 
-**Choose `pygo.aio` when:**
+**Choose `runloom.aio` when:**
 
 - You already have `async def` code and don't want to rewrite it.
 - You need a specific asyncio primitive (`asyncio.Queue`, `gather`,
@@ -184,7 +184,7 @@ each adds a bit of overhead in its own layer.
 ## A complete example: parallel HTTP fetcher
 
 ```python
-import pygo.sync as ps
+import runloom.sync as ps
 
 def fetch_one(host, port, ch):
     try:

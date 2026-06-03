@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-var payload = []byte("hellopyg") // 8 bytes, same as pygo bench
+var payload = []byte("hellopyg") // 8 bytes, same as runloom bench
 
 var work = [][2]int{
 	{1, 1000}, {8, 1000}, {64, 500}, {256, 200},

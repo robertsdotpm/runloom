@@ -40,7 +40,7 @@ def main(argv=None):
     cur, cur_env = load(args.current)
 
     # A different build/runtime invalidates the comparison -- warn loudly.
-    for k in ("pygo_backend", "python", "gil_enabled"):
+    for k in ("runloom_backend", "python", "gil_enabled"):
         if base_env.get(k) != cur_env.get(k):
             print("WARNING: env mismatch %s: baseline=%r current=%r"
                   % (k, base_env.get(k), cur_env.get(k)))

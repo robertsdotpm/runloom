@@ -15,13 +15,13 @@
 #   bench/profile/perfc2c.sh mn --n 256 --iter 2000 --hubs 16 --reps 4
 #
 # Then read: the "Shared Data Cache Line Table" -- lines with high
-# %HITM and contended offsets from different pygo_sched fields are the
+# %HITM and contended offsets from different runloom_sched fields are the
 # false-sharing suspects; pad/align those to a cache line.
 set -eu
 WORKLOAD="${1:-mn}"
 [ "$#" -gt 0 ] && shift || true
 PY="${PYTHON:-python3}"
-DATA="$(mktemp /tmp/pygo_c2c.XXXXXX).data"
+DATA="$(mktemp /tmp/runloom_c2c.XXXXXX).data"
 
 if ! perf mem record -e list 2>/dev/null | grep -q .; then
     cat >&2 <<'MSG'

@@ -25,9 +25,9 @@ import tempfile
 import time
 import unittest
 
-import pygo
-import pygo.monkey
-import pygo_core
+import runloom
+import runloom.monkey
+import runloom_c
 
 _IS_WINDOWS = platform.system() == "Windows"
 _HAVE_MSG = hasattr(socket.socket, "sendmsg") and hasattr(socket.socket, "recvmsg")
@@ -42,19 +42,19 @@ def _drive(fn):
         except BaseException as e:   # noqa: BLE001
             box[1] = e
 
-    pygo_core.go(runner)
-    pygo_core.run()
+    runloom_c.go(runner)
+    runloom_c.run()
     if box[1] is not None:
         raise box[1]
     return box[0]
 
 
 def setUpModule():
-    pygo.monkey.patch()
+    runloom.monkey.patch()
 
 
 def tearDownModule():
-    pygo.monkey.unpatch()
+    runloom.monkey.unpatch()
 
 
 def _tcp_server():
@@ -81,7 +81,7 @@ class TestTCPEcho(unittest.TestCase):
                 conn.sendall(data[::-1])
                 conn.close()
 
-            pygo_core.go(server)
+            runloom_c.go(server)
             cli = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             cli.connect(addr)
             n = cli.send(b"hello-world")
@@ -142,7 +142,7 @@ class TestTCPEcho(unittest.TestCase):
                     received["n"] += len(chunk)
                 conn.close()
 
-            pygo_core.go(server)
+            runloom_c.go(server)
             cli = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             cli.connect(addr)
             cli.sendall(payload)
@@ -150,7 +150,7 @@ class TestTCPEcho(unittest.TestCase):
             # let the server drain
             t0 = time.monotonic()
             while received["n"] < len(payload) and time.monotonic() - t0 < 5:
-                pygo.sleep(0.005)
+                runloom.sleep(0.005)
             cli.close(); srv.close()
             return received["n"]
 
@@ -175,11 +175,11 @@ class TestTCPEcho(unittest.TestCase):
                 c.connect(addr)
                 c.close()
 
-            pygo_core.go(acceptor)
-            pygo_core.go(connector)
+            runloom_c.go(acceptor)
+            runloom_c.go(connector)
             t0 = time.monotonic()
             while "accepted" not in order and time.monotonic() - t0 < 5:
-                pygo.sleep(0.005)
+                runloom.sleep(0.005)
             srv.close()
             return order
 
@@ -206,12 +206,12 @@ class TestUDP(unittest.TestCase):
                 got["data"] = data
                 got["peer_ok"] = peer[0] == "127.0.0.1"
 
-            pygo_core.go(receiver)
+            runloom_c.go(receiver)
             time.sleep(0.01)
             s2.sendto(b"datagram", addr1)
             t0 = time.monotonic()
             while "data" not in got and time.monotonic() - t0 < 5:
-                pygo.sleep(0.005)
+                runloom.sleep(0.005)
             s1.close(); s2.close()
             return got
 
@@ -233,12 +233,12 @@ class TestSendmsgRecvmsg(unittest.TestCase):
                 got["data"] = data
                 got["anc"] = ancdata
 
-            pygo_core.go(receiver)
+            runloom_c.go(receiver)
             time.sleep(0.01)
             n = b.sendmsg([b"hello", b"-msg"])
             t0 = time.monotonic()
             while "data" not in got and time.monotonic() - t0 < 5:
-                pygo.sleep(0.005)
+                runloom.sleep(0.005)
             a.close(); b.close()
             return n, got
         n, got = _drive(body)
@@ -274,14 +274,14 @@ class TestSendmsgRecvmsg(unittest.TestCase):
                 got["msg"] = msg
                 got["fds"] = list(fds)
 
-            pygo_core.go(receiver)
+            runloom_c.go(receiver)
             time.sleep(0.01)
             b.sendmsg([b"fd!"],
                       [(socket.SOL_SOCKET, socket.SCM_RIGHTS,
                         array.array("i", [rfd]))])
             t0 = time.monotonic()
             while "fds" not in got and time.monotonic() - t0 < 5:
-                pygo.sleep(0.005)
+                runloom.sleep(0.005)
             os.close(rfd)
             a.close(); b.close()
             # Read the passed fd to prove it is a working duplicate.
@@ -324,7 +324,7 @@ class TestFaultInjection(unittest.TestCase):
                                 _linger_struct())
                 conn.close()
 
-            pygo_core.go(server)
+            runloom_c.go(server)
             c = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             # The RST can race any step: connect (handshake then abort),
             # send (write to a reset peer) or recv (notice the RST).  Catch
@@ -379,7 +379,7 @@ class TestFaultInjection(unittest.TestCase):
 
 def _write_temp(data):
     """Write `data` to a fresh temp file, return its path.  Caller unlinks."""
-    fd, path = tempfile.mkstemp(prefix="pygo_sendfile_")
+    fd, path = tempfile.mkstemp(prefix="runloom_sendfile_")
     try:
         with os.fdopen(fd, "wb") as f:
             f.write(data)
@@ -418,7 +418,7 @@ class TestSendfile(unittest.TestCase):
                     received["buf"] += chunk
                 conn.close()
 
-            pygo_core.go(server)
+            runloom_c.go(server)
             cli = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             cli.connect(addr)
             f = make_file()
@@ -430,7 +430,7 @@ class TestSendfile(unittest.TestCase):
             want = (len(self.DATA) - offset) if count is None else count
             t0 = time.monotonic()
             while len(received["buf"]) < want and time.monotonic() - t0 < 5:
-                pygo.sleep(0.005)
+                runloom.sleep(0.005)
             cli.close(); srv.close()
             return sent, received["buf"]
         return _drive(body)
@@ -504,16 +504,16 @@ class TestSendfile(unittest.TestCase):
                     if not chunk:
                         break
                     total += len(chunk)
-                    pygo.sleep(0.001)        # drain slowly so the sender blocks
+                    runloom.sleep(0.001)        # drain slowly so the sender blocks
                 conn.close()
 
             def ticker():
                 while not done["v"]:
                     ticks["n"] += 1
-                    pygo.sleep(0.002)
+                    runloom.sleep(0.002)
 
-            pygo_core.go(server)
-            pygo_core.go(ticker)
+            runloom_c.go(server)
+            runloom_c.go(ticker)
             cli = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             cli.connect(addr)
             with open(path, "rb") as f:
@@ -551,7 +551,7 @@ class TestRecvfromInto(unittest.TestCase):
                 tx.sendto(b"datagram-payload", addr)
                 tx.close()
 
-            pygo_core.go(sender)
+            runloom_c.go(sender)
             buf = bytearray(64)
             n, peer = rx.recvfrom_into(buf)
             rx.close()
@@ -573,7 +573,7 @@ class TestRecvfromInto(unittest.TestCase):
                 tx.sendto(b"0123456789", addr)
                 tx.close()
 
-            pygo_core.go(sender)
+            runloom_c.go(sender)
             buf = bytearray(64)
             n, _ = rx.recvfrom_into(buf, 4)
             rx.close()
@@ -603,11 +603,11 @@ class TestRecvfromInto(unittest.TestCase):
                 tx.sendto(b"ping", addr)
                 tx.close()
 
-            pygo_core.go(receiver)
-            pygo_core.go(sender)
+            runloom_c.go(receiver)
+            runloom_c.go(sender)
             t0 = time.monotonic()
             while "got" not in order and time.monotonic() - t0 < 5:
-                pygo.sleep(0.005)
+                runloom.sleep(0.005)
             rx.close()
             return order
         order = _drive(body)

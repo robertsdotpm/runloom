@@ -1,4 +1,4 @@
-"""Subprocess workload for the pygo_tcp (TCPConn) fault-injection harness.
+"""Subprocess workload for the runloom_tcp (TCPConn) fault-injection harness.
 
 Run STANDALONE (not collected by pytest) under ``strace -e inject=`` by
 test_tcp_faultinject.py.  Drives a real loopback TCPConn echo (connect / accept
@@ -18,7 +18,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__))), "src"))
-import pygo_core
+import runloom_c
 
 
 def _drive(*goroutines):
@@ -33,8 +33,8 @@ def _drive(*goroutines):
         return runner
 
     for g in goroutines:
-        pygo_core.go(wrap(g))
-    pygo_core.run()
+        runloom_c.go(wrap(g))
+    runloom_c.run()
     return box
 
 
@@ -43,7 +43,7 @@ def mode_echo():
     result = [None]
 
     def server():
-        listener = pygo_core.TCPConn.listen("127.0.0.1", 0)
+        listener = runloom_c.TCPConn.listen("127.0.0.1", 0)
         port[0] = listener.fileno() and _port(listener)
         conn = listener.accept()
         data = conn.recv(1024)
@@ -53,8 +53,8 @@ def mode_echo():
 
     def client():
         while port[0] is None:
-            pygo_core.sched_yield()
-        c = pygo_core.TCPConn.connect("127.0.0.1", port[0])
+            runloom_c.sched_yield()
+        c = runloom_c.TCPConn.connect("127.0.0.1", port[0])
         c.send_all(b"ping")
         result[0] = c.recv(1024)
         c.close()
@@ -95,7 +95,7 @@ def mode_connectrefused():
 
     def client():
         try:
-            pygo_core.TCPConn.connect("127.0.0.1", dead_port)
+            runloom_c.TCPConn.connect("127.0.0.1", dead_port)
             box["unexpected"] = True
         except OSError as e:
             box["errno"] = e.errno
@@ -122,7 +122,7 @@ def mode_connectonly():
 
     def client():
         try:
-            c = pygo_core.TCPConn.connect("127.0.0.1", target_port)
+            c = runloom_c.TCPConn.connect("127.0.0.1", target_port)
             box["ok"] = True
             c.close()
         except OSError as e:
@@ -154,7 +154,7 @@ def mode_recvonce():
 
     def client():
         try:
-            c = pygo_core.TCPConn.connect("127.0.0.1", target_port)
+            c = runloom_c.TCPConn.connect("127.0.0.1", target_port)
             data = c.recv(1024)
             box["data"] = data
             c.close()
@@ -183,7 +183,7 @@ def mode_sendonce():
 
     def client():
         try:
-            c = pygo_core.TCPConn.connect("127.0.0.1", target_port)
+            c = runloom_c.TCPConn.connect("127.0.0.1", target_port)
             c.send_all(b"x" * 64)
             box["sent"] = True
             c.close()
@@ -203,7 +203,7 @@ def mode_acceptfail():
     # A real (raw) client fills the accept queue, then a single accept() with an
     # injected non-retryable error must surface as OSError -- no peer goroutine
     # parks, so the workload cannot hang.
-    listener = pygo_core.TCPConn.listen("127.0.0.1", 0)
+    listener = runloom_c.TCPConn.listen("127.0.0.1", 0)
     target_port = _port(listener)
     raw = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     raw.connect(("127.0.0.1", target_port))
@@ -250,7 +250,7 @@ def main():
     site = os.environ.get("FAULT_SITE")
     if site:
         try:
-            print("FAULTS=%d" % pygo_core._fault_count(site))
+            print("FAULTS=%d" % runloom_c._fault_count(site))
         except Exception:
             pass
     return rc

@@ -1,4 +1,4 @@
-"""Tests for pygo_core.TCPConn: connect/listen/accept/recv/send/close."""
+"""Tests for runloom_c.TCPConn: connect/listen/accept/recv/send/close."""
 import socket
 import sys
 import threading
@@ -7,8 +7,8 @@ import unittest
 
 sys.path.insert(0, "src")
 
-import pygo
-import pygo_core
+import runloom
+import runloom_c
 
 
 def _bound_port(listener):
@@ -31,8 +31,8 @@ def _drive(*goroutines):
                 box.append(e)
         return runner
     for g in goroutines:
-        pygo_core.go(wrap(g))
-    pygo_core.run()
+        runloom_c.go(wrap(g))
+    runloom_c.run()
     if box:
         raise box[0]
 
@@ -45,7 +45,7 @@ class TestBasicEcho(unittest.TestCase):
         result = [None]
 
         def server():
-            listener = pygo_core.TCPConn.listen("127.0.0.1", 0)
+            listener = runloom_c.TCPConn.listen("127.0.0.1", 0)
             port_holder[0] = _bound_port(listener)
             conn = listener.accept()
             data = conn.recv(1024)
@@ -55,8 +55,8 @@ class TestBasicEcho(unittest.TestCase):
 
         def client():
             while port_holder[0] is None:
-                pygo_core.sched_yield()
-            c = pygo_core.TCPConn.connect("127.0.0.1", port_holder[0])
+                runloom_c.sched_yield()
+            c = runloom_c.TCPConn.connect("127.0.0.1", port_holder[0])
             c.send_all(b"ping")
             result[0] = c.recv(1024)
             c.close()
@@ -74,7 +74,7 @@ class TestRecvInto(unittest.TestCase):
         result = [None]
 
         def server():
-            listener = pygo_core.TCPConn.listen("127.0.0.1", 0)
+            listener = runloom_c.TCPConn.listen("127.0.0.1", 0)
             port_holder[0] = _bound_port(listener)
             conn = listener.accept()
             conn.send_all(b"abcdef")
@@ -83,8 +83,8 @@ class TestRecvInto(unittest.TestCase):
 
         def client():
             while port_holder[0] is None:
-                pygo_core.sched_yield()
-            c = pygo_core.TCPConn.connect("127.0.0.1", port_holder[0])
+                runloom_c.sched_yield()
+            c = runloom_c.TCPConn.connect("127.0.0.1", port_holder[0])
             buf = bytearray(16)
             n = c.recv_into(buf)
             result[0] = (n, bytes(buf[:n]))
@@ -104,7 +104,7 @@ class TestRecvIntoSizeLimit(unittest.TestCase):
         result = [None]
 
         def server():
-            listener = pygo_core.TCPConn.listen("127.0.0.1", 0)
+            listener = runloom_c.TCPConn.listen("127.0.0.1", 0)
             port_holder[0] = _bound_port(listener)
             conn = listener.accept()
             conn.send_all(b"abcdef")
@@ -113,8 +113,8 @@ class TestRecvIntoSizeLimit(unittest.TestCase):
 
         def client():
             while port_holder[0] is None:
-                pygo_core.sched_yield()
-            c = pygo_core.TCPConn.connect("127.0.0.1", port_holder[0])
+                runloom_c.sched_yield()
+            c = runloom_c.TCPConn.connect("127.0.0.1", port_holder[0])
             buf = bytearray(16)
             n = c.recv_into(buf, 3)
             result[0] = (n, bytes(buf[:n]))
@@ -136,7 +136,7 @@ class TestOrderlyShutdown(unittest.TestCase):
         got = [None]
 
         def server():
-            listener = pygo_core.TCPConn.listen("127.0.0.1", 0)
+            listener = runloom_c.TCPConn.listen("127.0.0.1", 0)
             port_holder[0] = _bound_port(listener)
             conn = listener.accept()
             conn.close()
@@ -144,8 +144,8 @@ class TestOrderlyShutdown(unittest.TestCase):
 
         def client():
             while port_holder[0] is None:
-                pygo_core.sched_yield()
-            c = pygo_core.TCPConn.connect("127.0.0.1", port_holder[0])
+                runloom_c.sched_yield()
+            c = runloom_c.TCPConn.connect("127.0.0.1", port_holder[0])
             got[0] = c.recv(64)
             c.close()
 
@@ -157,7 +157,7 @@ class TestOrderlyShutdown(unittest.TestCase):
         got = [None]
 
         def server():
-            listener = pygo_core.TCPConn.listen("127.0.0.1", 0)
+            listener = runloom_c.TCPConn.listen("127.0.0.1", 0)
             port_holder[0] = _bound_port(listener)
             conn = listener.accept()
             conn.close()
@@ -165,8 +165,8 @@ class TestOrderlyShutdown(unittest.TestCase):
 
         def client():
             while port_holder[0] is None:
-                pygo_core.sched_yield()
-            c = pygo_core.TCPConn.connect("127.0.0.1", port_holder[0])
+                runloom_c.sched_yield()
+            c = runloom_c.TCPConn.connect("127.0.0.1", port_holder[0])
             buf = bytearray(64)
             got[0] = c.recv_into(buf)
             c.close()
@@ -182,7 +182,7 @@ class TestCloseSemantics(unittest.TestCase):
         seen = []
 
         def coro():
-            c = pygo_core.TCPConn.listen("127.0.0.1", 0)
+            c = runloom_c.TCPConn.listen("127.0.0.1", 0)
             seen.append(("before", c.closed, c.fileno() >= 0))
             c.close()
             seen.append(("after", c.closed, c.fileno()))
@@ -205,19 +205,19 @@ class TestRecvBlocksUntilData(unittest.TestCase):
         result = [None]
 
         def server():
-            listener = pygo_core.TCPConn.listen("127.0.0.1", 0)
+            listener = runloom_c.TCPConn.listen("127.0.0.1", 0)
             port_holder[0] = _bound_port(listener)
             conn = listener.accept()
             # Sleep briefly so client.recv has to actually park.
-            pygo_core.sched_sleep(0.05)
+            runloom_c.sched_sleep(0.05)
             conn.send_all(b"slow data")
             conn.close()
             listener.close()
 
         def client():
             while port_holder[0] is None:
-                pygo_core.sched_yield()
-            c = pygo_core.TCPConn.connect("127.0.0.1", port_holder[0])
+                runloom_c.sched_yield()
+            c = runloom_c.TCPConn.connect("127.0.0.1", port_holder[0])
             result[0] = c.recv(64)
             c.close()
 
@@ -226,7 +226,7 @@ class TestRecvBlocksUntilData(unittest.TestCase):
             # is parked, this ticker should run many times.
             for _ in range(20):
                 ticks[0] += 1
-                pygo_core.sched_sleep(0.005)
+                runloom_c.sched_sleep(0.005)
 
         _drive(server, client, ticker)
         self.assertEqual(result[0], b"slow data")
@@ -263,7 +263,7 @@ class TestInteropWithStdlibSocket(unittest.TestCase):
         th.start()
 
         def client():
-            c = pygo_core.TCPConn.connect("127.0.0.1", port)
+            c = runloom_c.TCPConn.connect("127.0.0.1", port)
             data = c.recv(1024)
             c.send_all(b"back from tcpconn")
             c.close()

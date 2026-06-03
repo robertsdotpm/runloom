@@ -1,6 +1,6 @@
 """Backend-agnostic netpoll readiness-conformance suite.
 
-These are the universal event-notification semantics that EVERY pygo netpoll
+These are the universal event-notification semantics that EVERY runloom netpoll
 backend must satisfy -- epoll (Linux), kqueue (FreeBSD/macOS), and the three
 Windows backends (iocp-afd / wsapoll / select).  The scenarios are the
 distilled "standardized" set from the Linux kernel's own epoll selftest
@@ -10,9 +10,9 @@ write readiness, R|W subset, deadline/timeout, peer-close EOF, re-arm after
 consume (the edge-triggered drop class), and many concurrent waiters.
 
 This is the "are we doing it right?" suite: run it on any OS, force any backend
-with PYGO_NETPOLL=epoll|kqueue|iocp|wsapoll|select, and the SAME assertions must
+with RUNLOOM_NETPOLL=epoll|kqueue|iocp|wsapoll|select, and the SAME assertions must
 hold.  Backend-portable on purpose -- it asserts BEHAVIOUR through real sockets
-(socketpair) + pygo_core.wait_fd, never a backend-specific internal.
+(socketpair) + runloom_c.wait_fd, never a backend-specific internal.
 
 wait_fd(fd, events, timeout_ms) contract (verified against netpoll.c):
   returns the ready mask (1=READ, 2=WRITE, 3=both) when fd becomes ready,
@@ -24,7 +24,7 @@ import unittest
 
 sys.path.insert(0, "src")
 
-import pygo_core
+import runloom_c
 
 READ = 1
 WRITE = 2
@@ -44,8 +44,8 @@ def _drive(*goroutines):
         return runner
 
     for g in goroutines:
-        pygo_core.go(wrap(g))
-    pygo_core.run()
+        runloom_c.go(wrap(g))
+    runloom_c.run()
     if box:
         raise box[0]
 
@@ -62,14 +62,14 @@ class TestNetpollConformance(unittest.TestCase):
 
     def setUp(self):
         # Surface which backend is under test in failure output.
-        self.backend = pygo_core.netpoll_backend()
+        self.backend = runloom_c.netpoll_backend()
 
     # -- ready BEFORE park: an already-readable fd returns immediately --------
     def test_ready_before_park(self):
         a, b = _pair()
         b.send(b"x")                       # a is readable before we park
         out = []
-        _drive(lambda: out.append(pygo_core.wait_fd(a.fileno(), READ, 1000)))
+        _drive(lambda: out.append(runloom_c.wait_fd(a.fileno(), READ, 1000)))
         self.assertEqual(out, [READ], "backend=%s" % self.backend)
         a.close(); b.close()
 
@@ -79,10 +79,10 @@ class TestNetpollConformance(unittest.TestCase):
         out = []
 
         def reader():
-            out.append(pygo_core.wait_fd(a.fileno(), READ, 2000))
+            out.append(runloom_c.wait_fd(a.fileno(), READ, 2000))
 
         def writer():
-            pygo_core.sched_yield()        # let the reader park first
+            runloom_c.sched_yield()        # let the reader park first
             b.send(b"hello")
 
         _drive(reader, writer)
@@ -94,7 +94,7 @@ class TestNetpollConformance(unittest.TestCase):
     def test_write_ready(self):
         a, b = _pair()
         out = []
-        _drive(lambda: out.append(pygo_core.wait_fd(a.fileno(), WRITE, 1000)))
+        _drive(lambda: out.append(runloom_c.wait_fd(a.fileno(), WRITE, 1000)))
         self.assertEqual(out, [WRITE], "backend=%s" % self.backend)
         a.close(); b.close()
 
@@ -103,7 +103,7 @@ class TestNetpollConformance(unittest.TestCase):
         a, b = _pair()                     # a: writable, not readable (no data)
         out = []
         _drive(lambda: out.append(
-            pygo_core.wait_fd(a.fileno(), READ | WRITE, 1000)))
+            runloom_c.wait_fd(a.fileno(), READ | WRITE, 1000)))
         self.assertEqual(out, [WRITE], "backend=%s" % self.backend)
         a.close(); b.close()
 
@@ -112,7 +112,7 @@ class TestNetpollConformance(unittest.TestCase):
     def test_timeout_deadline_wakes(self):
         a, b = _pair()                     # nothing ever written to a
         out = []
-        _drive(lambda: out.append(pygo_core.wait_fd(a.fileno(), READ, 250)))
+        _drive(lambda: out.append(runloom_c.wait_fd(a.fileno(), READ, 250)))
         self.assertEqual(out, [0], "deadline did not fire, backend=%s"
                          % self.backend)
         a.close(); b.close()
@@ -123,10 +123,10 @@ class TestNetpollConformance(unittest.TestCase):
         out = []
 
         def reader():
-            out.append(pygo_core.wait_fd(a.fileno(), READ, 2000))
+            out.append(runloom_c.wait_fd(a.fileno(), READ, 2000))
 
         def closer():
-            pygo_core.sched_yield()
+            runloom_c.sched_yield()
             b.close()                      # EOF -> a readable
 
         _drive(reader, closer)
@@ -139,19 +139,19 @@ class TestNetpollConformance(unittest.TestCase):
     #    a backend that armed once and never refired would hang the 2nd park.
     def test_rearm_after_consume(self):
         a, b = _pair()
-        ready = pygo_core.Chan()            # reader -> writer handshake
+        ready = runloom_c.Chan()            # reader -> writer handshake
         out = []
 
         def reader():
-            r1 = pygo_core.wait_fd(a.fileno(), READ, 2000)
+            r1 = runloom_c.wait_fd(a.fileno(), READ, 2000)
             a.recv(16)                      # consume -> not readable
             ready.send(1)                   # "consumed; re-parking now"
-            r2 = pygo_core.wait_fd(a.fileno(), READ, 2000)
+            r2 = runloom_c.wait_fd(a.fileno(), READ, 2000)
             a.recv(16)
             out.append((r1, r2))
 
         def writer():
-            pygo_core.sched_yield()
+            runloom_c.sched_yield()
             b.send(b"one")
             ready.recv()                    # wait until reader re-armed
             b.send(b"two")                  # second edge -> must refire
@@ -169,13 +169,13 @@ class TestNetpollConformance(unittest.TestCase):
 
         def make_reader(i, a):
             def run():
-                r = pygo_core.wait_fd(a.fileno(), READ, 3000)
+                r = runloom_c.wait_fd(a.fileno(), READ, 3000)
                 if r == READ:
                     woke.append(i)
             return run
 
         def writer():
-            pygo_core.sched_yield()         # let all readers park
+            runloom_c.sched_yield()         # let all readers park
             for _a, b in pairs:
                 b.send(b"!")
 
@@ -199,19 +199,19 @@ class TestNetpollConformance(unittest.TestCase):
     #    edge-triggered drop (the kqueue bug class) would hang the 2nd park.
     def test_level_readiness_persists_after_partial_consume(self):
         a, b = _pair()
-        ready = pygo_core.Chan()
+        ready = runloom_c.Chan()
         out = []
 
         def reader():
-            r1 = pygo_core.wait_fd(a.fileno(), READ, 2000)
+            r1 = runloom_c.wait_fd(a.fileno(), READ, 2000)
             a.recv(1)                       # consume only ONE byte of two
             ready.send(1)
-            r2 = pygo_core.wait_fd(a.fileno(), READ, 2000)
+            r2 = runloom_c.wait_fd(a.fileno(), READ, 2000)
             a.recv(1)
             out.append((r1, r2))
 
         def writer():
-            pygo_core.sched_yield()
+            runloom_c.sched_yield()
             b.send(b"AB")                   # two bytes; reader takes one at a time
             ready.recv()                    # reader consumed one + re-parked
 
@@ -229,13 +229,13 @@ class TestNetpollConformance(unittest.TestCase):
         out = []
 
         def reader():
-            r1 = pygo_core.wait_fd(a.fileno(), READ, 2000)
+            r1 = runloom_c.wait_fd(a.fileno(), READ, 2000)
             a.recv(16)
-            r2 = pygo_core.wait_fd(a.fileno(), WRITE, 2000)   # now ask WRITE
+            r2 = runloom_c.wait_fd(a.fileno(), WRITE, 2000)   # now ask WRITE
             out.append((r1, r2))
 
         def writer():
-            pygo_core.sched_yield()
+            runloom_c.sched_yield()
             b.send(b"x")
 
         _drive(reader, writer)
@@ -251,7 +251,7 @@ class TestNetpollConformance(unittest.TestCase):
     def test_no_spurious_wake_on_unrequested_direction(self):
         a, b = _pair()                      # a writable, never readable
         out = []
-        _drive(lambda: out.append(pygo_core.wait_fd(a.fileno(), READ, 250)))
+        _drive(lambda: out.append(runloom_c.wait_fd(a.fileno(), READ, 250)))
         self.assertEqual(out, [0],
                          "READ-only wait fired on writability (wrong direction), "
                          "backend=%s" % self.backend)
@@ -269,7 +269,7 @@ class TestNetpollConformance(unittest.TestCase):
         b.send(b"x")                        # a now readable AND writable
         out = []
         _drive(lambda: out.append(
-            pygo_core.wait_fd(a.fileno(), READ | WRITE, 1000)))
+            runloom_c.wait_fd(a.fileno(), READ | WRITE, 1000)))
         self.assertIn(out[0], (READ, WRITE, READ | WRITE),
                       "both-ready reported nothing/garbage (%r), backend=%s"
                       % (out, self.backend))
@@ -280,14 +280,14 @@ class TestNetpollConformance(unittest.TestCase):
     #    drops after the first delivery hangs partway through.
     def test_repeated_rearm_storm(self):
         a, b = _pair()
-        ready = pygo_core.Chan()
+        ready = runloom_c.Chan()
         ROUNDS = 50
         out = []
 
         def reader():
             n = 0
             for _ in range(ROUNDS):
-                if pygo_core.wait_fd(a.fileno(), READ, 2000) == READ:
+                if runloom_c.wait_fd(a.fileno(), READ, 2000) == READ:
                     a.recv(1)
                     n += 1
                 ready.send(1)
@@ -295,7 +295,7 @@ class TestNetpollConformance(unittest.TestCase):
 
         def writer():
             for _ in range(ROUNDS):
-                pygo_core.sched_yield()
+                runloom_c.sched_yield()
                 b.send(b"x")
                 ready.recv()                # one cycle done; reader re-parked
 
@@ -314,16 +314,16 @@ class TestNetpollConformance(unittest.TestCase):
 
         def make_reader(i, a):
             def run():
-                got[i] = pygo_core.wait_fd(a.fileno(), READ, 3000)
+                got[i] = runloom_c.wait_fd(a.fileno(), READ, 3000)
             return run
 
         def make_writer_waiter(i, a):
             def run():
-                got[i] = pygo_core.wait_fd(a.fileno(), WRITE, 3000)
+                got[i] = runloom_c.wait_fd(a.fileno(), WRITE, 3000)
             return run
 
         def feeder():
-            pygo_core.sched_yield()
+            runloom_c.sched_yield()
             for i, (_a, b) in enumerate(pairs):
                 if i % 2 == 0:
                     b.send(b"!")            # make the even ones readable
@@ -341,5 +341,5 @@ class TestNetpollConformance(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    print("netpoll backend under test:", pygo_core.netpoll_backend())
+    print("netpoll backend under test:", runloom_c.netpoll_backend())
     unittest.main()

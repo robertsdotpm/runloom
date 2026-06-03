@@ -8,7 +8,7 @@ import sys
 import time
 
 sys.path.insert(0, "src")
-import pygo_core
+import runloom_c
 
 
 def make_yielder(fn, n):
@@ -22,9 +22,9 @@ def measure(fn, n_coros, n_yields, repeats=5):
     best = float("inf")
     for _ in range(repeats):
         for _ in range(n_coros):
-            pygo_core.go(make_yielder(fn, n_yields))
+            runloom_c.go(make_yielder(fn, n_yields))
         t0 = time.perf_counter()
-        pygo_core.run()
+        runloom_c.run()
         dt = time.perf_counter() - t0
         if dt < best:
             best = dt
@@ -32,12 +32,12 @@ def measure(fn, n_coros, n_yields, repeats=5):
 
 
 def main():
-    print("pygo snap microbench")
-    print("backend:", pygo_core.backend())
+    print("runloom snap microbench")
+    print("backend:", runloom_c.backend())
     print()
     variants = [
-        ("vectorcall (default)", pygo_core.sched_yield),
-        ("METH_NOARGS (classic)", pygo_core.sched_yield_classic),
+        ("vectorcall (default)", runloom_c.sched_yield),
+        ("METH_NOARGS (classic)", runloom_c.sched_yield_classic),
     ]
     print("FAST PATH (1 coro tight loop -- nothing else ready):")
     for label, fn in variants:

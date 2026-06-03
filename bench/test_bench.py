@@ -1,4 +1,4 @@
-"""pytest-benchmark front-end for the core pygo microbenchmarks.
+"""pytest-benchmark front-end for the core runloom microbenchmarks.
 
 This gives the *standard* Python benchmarking tool -- calibrated rounds,
 auto warmup, JSON save/compare -- alongside bench.harness (which exists for
@@ -18,7 +18,7 @@ codec that otherwise re-enables the GIL.  bench/conftest.py fails the
 session loudly if you forget it (see bench/gil.py).
 
 Requires the free-threaded 3.13t interpreter (== `python3` here) and
-PYTHONPATH=src for the in-place pygo_core build.  Inner counts are smaller
+PYTHONPATH=src for the in-place runloom_c build.  Inner counts are smaller
 than bench.micro's because pytest-benchmark runs many calibrated rounds.
 """
 import os

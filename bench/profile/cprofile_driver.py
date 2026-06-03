@@ -1,7 +1,7 @@
-"""cProfile a Python-level pygo workload -> top tables (+ optional .pstats).
+"""cProfile a Python-level runloom workload -> top tables (+ optional .pstats).
 
 Scope/caveats (important so the output isn't misread):
-  * cProfile only sees PYTHON frames. pygo's scheduler / channels / fcontext
+  * cProfile only sees PYTHON frames. runloom's scheduler / channels / fcontext
     swap are C and invisible here -- use perfrecord.sh for the C hot path
     (finding F6). cProfile is for the Python-visible call breakdown + counts.
   * cProfile only profiles the CALLING OS thread, so use it on single-hub

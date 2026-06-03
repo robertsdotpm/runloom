@@ -8,7 +8,7 @@ Per request, pick a tier:
 
 The pathological tier is the whole point: 100 ms of un-awaitable CPU in 2% of
 requests is head-of-line blocking that a single-threaded event loop cannot
-hide -- every request queued behind it waits. pygo (preempted + multi-hub on
+hide -- every request queued behind it waits. runloom (preempted + multi-hub on
 3.13t) keeps serving; asyncio/uvloop/gevent freeze for the duration.
 """
 import time

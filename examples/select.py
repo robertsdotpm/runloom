@@ -1,6 +1,6 @@
 """select — wait on several channel operations at once.
 
-pygo_core.select takes a list of cases: ("recv", ch) or
+runloom_c.select takes a list of cases: ("recv", ch) or
 ("send", ch, value).  It blocks until exactly one is ready, then
 returns (index, payload) — payload is (value, ok) for a recv, or None
 for a send.  With default=True it never blocks: it returns (-1, None)
@@ -14,20 +14,20 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 
-import pygo
-import pygo_core
+import runloom
+import runloom_c
 
 
 def main():
-    a = pygo_core.Chan(1)
-    b = pygo_core.Chan(1)
+    a = runloom_c.Chan(1)
+    b = runloom_c.Chan(1)
 
-    pygo.go(lambda: a.send("from a"))
-    pygo.go(lambda: b.send("from b"))
+    runloom.go(lambda: a.send("from a"))
+    runloom.go(lambda: b.send("from b"))
 
     # Receive from whichever is ready first; do it twice to drain both.
     for _ in range(2):
-        idx, payload = pygo_core.select([
+        idx, payload = runloom_c.select([
             ("recv", a),
             ("recv", b),
         ])
@@ -35,16 +35,16 @@ def main():
         print("case {0} fired -> {1}".format(idx, value))
 
     # A send case: parks until a receiver shows up, then completes.
-    sink = pygo_core.Chan()            # unbuffered
-    pygo.go(lambda: print("received:", sink.recv()[0]))
-    idx, payload = pygo_core.select([("send", sink, "hello")])
+    sink = runloom_c.Chan()            # unbuffered
+    runloom.go(lambda: print("received:", sink.recv()[0]))
+    idx, payload = runloom_c.select([("send", sink, "hello")])
     print("send case {0} completed (payload={1})".format(idx, payload))
 
     # Non-blocking probe with default — nothing is ready here.
-    empty = pygo_core.Chan(1)
-    idx, _ = pygo_core.select([("recv", empty)], default=True)
+    empty = runloom_c.Chan(1)
+    idx, _ = runloom_c.select([("recv", empty)], default=True)
     print("default fired" if idx == -1 else "got a value")
 
 
 if __name__ == "__main__":
-    pygo.run(main)
+    runloom.run(main)

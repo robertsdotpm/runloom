@@ -1,6 +1,6 @@
 """Queue-semantics tests adapted from CPython's Lib/test/test_queue.py.
 
-A pygo ``Chan`` with capacity N is, semantically, a bounded blocking FIFO
+A runloom ``Chan`` with capacity N is, semantically, a bounded blocking FIFO
 queue: send==put, recv==get, capacity==maxsize, len()==qsize().  CPython's
 test_queue.py encodes decades of blocking-queue edge cases that map straight
 onto channels -- and the standout is Python 3.13's ``Queue.shutdown()``, whose
@@ -13,7 +13,7 @@ semantics are *exactly* channel close:
     wakes blocked put/get       wakes parked senders (raise) / receivers (zero)
 
 (Queue.shutdown(immediate=True), which DISCARDS buffered items, has no Chan
-analog -- pygo close always drains -- so only the default/drain shutdown is
+analog -- runloom close always drains -- so only the default/drain shutdown is
 mapped.  task_done()/join() likewise have no channel analog and are skipped.)
 
 The deterministic queue-semantics tests run in-process on the single-thread
@@ -28,15 +28,15 @@ import unittest
 
 sys.path.insert(0, "src")
 
-import pygo_core
+import runloom_c
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def _run(*goroutines):
     for g in goroutines:
-        pygo_core.go(g)
-    pygo_core.run()
+        runloom_c.go(g)
+    runloom_c.run()
 
 
 # ===========================================================================
@@ -48,7 +48,7 @@ class TestFifoOrder(unittest.TestCase):
 
     def test_fifo_single_producer_consumer(self):
         N = 50
-        ch = pygo_core.Chan(N)          # cap >= N: producer never blocks
+        ch = runloom_c.Chan(N)          # cap >= N: producer never blocks
         out = []
 
         def producer():
@@ -69,7 +69,7 @@ class TestMaxsizeQsize(unittest.TestCase):
     try_send-on-full / try_recv-on-empty."""
 
     def test_qsize_full_empty(self):
-        ch = pygo_core.Chan(3)          # maxsize 3
+        ch = runloom_c.Chan(3)          # maxsize 3
         log = []
 
         def runner():
@@ -99,7 +99,7 @@ class TestBlockingGetPut(unittest.TestCase):
     get() once full."""
 
     def test_get_blocks_until_put(self):
-        ch = pygo_core.Chan()           # unbuffered
+        ch = runloom_c.Chan()           # unbuffered
         log = []
 
         def consumer():
@@ -116,7 +116,7 @@ class TestBlockingGetPut(unittest.TestCase):
         self.assertIn(("got", 42), log)
 
     def test_put_blocks_until_get_when_full(self):
-        ch = pygo_core.Chan(1)          # maxsize 1
+        ch = runloom_c.Chan(1)          # maxsize 1
         log = []
 
         def producer():
@@ -126,7 +126,7 @@ class TestBlockingGetPut(unittest.TestCase):
             log.append("put2-done")
 
         def consumer():
-            pygo_core.sched_yield()     # let producer fill + block on put2
+            runloom_c.sched_yield()     # let producer fill + block on put2
             log.append("get")
             v, _ = ch.recv()            # frees a slot -> put2 completes
             log.append(("got", v))
@@ -147,7 +147,7 @@ class TestShutdownIsClose(unittest.TestCase):
         """Queue.shutdown: pending items still get()-able (drain), then ShutDown;
         put() after shutdown raises.  Chan.close: recv drains buffer then
         (None, False); send on closed raises."""
-        ch = pygo_core.Chan(4)
+        ch = runloom_c.Chan(4)
         log = []
 
         def runner():
@@ -171,14 +171,14 @@ class TestShutdownIsClose(unittest.TestCase):
     def test_shutdown_wakes_blocked_getter(self):
         """q.shutdown() wakes a thread blocked in get() with ShutDown ->
         close() wakes a goroutine parked in recv() with (None, False)."""
-        ch = pygo_core.Chan()
+        ch = runloom_c.Chan()
         log = []
 
         def getter():
             log.append(ch.recv())
 
         def shutdowner():
-            pygo_core.sched_yield()      # let getter park in recv()
+            runloom_c.sched_yield()      # let getter park in recv()
             ch.close()
 
         _run(getter, shutdowner)
@@ -187,7 +187,7 @@ class TestShutdownIsClose(unittest.TestCase):
     def test_shutdown_wakes_blocked_putter(self):
         """q.shutdown() wakes a thread blocked in put() with ShutDown ->
         close() wakes a goroutine parked in send() with ValueError."""
-        ch = pygo_core.Chan()            # unbuffered: send parks immediately
+        ch = runloom_c.Chan()            # unbuffered: send parks immediately
         log = []
 
         def putter():
@@ -198,7 +198,7 @@ class TestShutdownIsClose(unittest.TestCase):
                 log.append("put-shutdown")
 
         def shutdowner():
-            pygo_core.sched_yield()      # let putter park in send()
+            runloom_c.sched_yield()      # let putter park in send()
             ch.close()
 
         _run(putter, shutdowner)
@@ -211,11 +211,11 @@ class TestShutdownIsClose(unittest.TestCase):
 def _run_mn(code, timeout=60):
     preamble = (
         "import sys; sys.path.insert(0, %r)\n"
-        "import pygo_core\n" % os.path.join(REPO, "src")
+        "import runloom_c\n" % os.path.join(REPO, "src")
     )
     env = dict(os.environ)
     env["PYTHON_GIL"] = "0"
-    env["PYGO_GIL"] = "0"
+    env["RUNLOOM_GIL"] = "0"
     try:
         p = subprocess.run(
             [sys.executable, "-c", preamble + code],
@@ -239,9 +239,9 @@ class TestConcurrentMPMC(unittest.TestCase):
         rc, out, err = _run_mn(r"""
 def once(it):
     nprod, ncons, per, cap = 6, 5, 50, 8
-    ch   = pygo_core.Chan(cap)
-    done = pygo_core.Chan(nprod)
-    res  = pygo_core.Chan(ncons)
+    ch   = runloom_c.Chan(cap)
+    done = runloom_c.Chan(nprod)
+    res  = runloom_c.Chan(ncons)
     def prod(pid):
         def r():
             for s in range(per):
@@ -258,20 +258,20 @@ def once(it):
                 bad += 1                 # per-producer FIFO violated
             last[pid] = s; c += 1
         res.send((c, bad))
-    pygo_core.mn_init(4)
-    for _ in range(ncons): pygo_core.mn_go(cons)
-    for p in range(nprod): pygo_core.mn_go(prod(p))
-    pygo_core.mn_go(closer)
-    pygo_core.mn_run()
+    runloom_c.mn_init(4)
+    for _ in range(ncons): runloom_c.mn_go(cons)
+    for p in range(nprod): runloom_c.mn_go(prod(p))
+    runloom_c.mn_go(closer)
+    runloom_c.mn_run()
     tot_c = tot_bad = 0
     for _ in range(ncons):
         g = res.try_recv()
         if g is None: break
         (c, bad), ok = g; tot_c += c; tot_bad += bad
-    pygo_core.mn_fini()
+    runloom_c.mn_fini()
     assert tot_c == nprod * per, ("lost/dup items", tot_c, nprod * per)
     assert tot_bad == 0, ("per-producer FIFO violated", tot_bad)
-    assert pygo_core._self_check(0) == 0
+    assert runloom_c._self_check(0) == 0
 
 for it in range(15):
     once(it)

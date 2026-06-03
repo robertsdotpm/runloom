@@ -7,7 +7,7 @@ ThreadPoolExecutorTest, WaitTests, AsCompletedTests, FutureTests).
 The stock ThreadPoolExecutor runs work on OS threads and notifies each
 Future's threading.Condition from the worker thread; after patch() that
 Condition is cooperative and a cross-thread notify of a goroutine waiter would
-deadlock.  pygo.monkey makes ThreadPoolExecutor goroutine-backed, so submitted
+deadlock.  runloom.monkey makes ThreadPoolExecutor goroutine-backed, so submitted
 work runs on the cooperative scheduler and Future.result()/wait()/
 as_completed() resolve in-domain.  These tests pin down result delivery,
 exception propagation, map ordering, wait()/as_completed() semantics, cancel,
@@ -16,9 +16,9 @@ and that a blocked result() yields to siblings.
 import time
 import unittest
 
-import pygo
-import pygo.monkey
-import pygo_core
+import runloom
+import runloom.monkey
+import runloom_c
 
 import concurrent.futures as cf
 
@@ -32,19 +32,19 @@ def _drive(fn):
         except BaseException as e:   # noqa: BLE001
             box[1] = e
 
-    pygo_core.go(runner)
-    pygo_core.run()
+    runloom_c.go(runner)
+    runloom_c.run()
     if box[1] is not None:
         raise box[1]
     return box[0]
 
 
 def setUpModule():
-    pygo.monkey.patch()
+    runloom.monkey.patch()
 
 
 def tearDownModule():
-    pygo.monkey.unpatch()
+    runloom.monkey.unpatch()
 
 
 class TestThreadPoolExecutor(unittest.TestCase):
@@ -102,7 +102,7 @@ class TestThreadPoolExecutor(unittest.TestCase):
                 live["now"] += 1
                 live["peak"] = max(live["peak"], live["now"])
                 for _ in range(5):
-                    pygo.sleep(0.002)
+                    runloom.sleep(0.002)
                 live["now"] -= 1
 
             with cf.ThreadPoolExecutor(max_workers=3) as ex:
@@ -121,12 +121,12 @@ class TestThreadPoolExecutor(unittest.TestCase):
             def ticker():
                 while not done["v"]:
                     ticks.append(1)
-                    pygo.sleep(0.002)
+                    runloom.sleep(0.002)
 
-            pygo_core.go(ticker)
+            runloom_c.go(ticker)
             with cf.ThreadPoolExecutor() as ex:
                 fut = ex.submit(lambda: (
-                    [pygo.sleep(0.005) for _ in range(6)], 99)[1])
+                    [runloom.sleep(0.005) for _ in range(6)], 99)[1])
                 val = fut.result()
             done["v"] = True
             return val, len(ticks)
@@ -139,7 +139,7 @@ class TestWait(unittest.TestCase):
     def test_wait_all_completed(self):
         def body():
             with cf.ThreadPoolExecutor(max_workers=4) as ex:
-                futs = [ex.submit(lambda i=i: (pygo.sleep(0.005), i)[1])
+                futs = [ex.submit(lambda i=i: (runloom.sleep(0.005), i)[1])
                         for i in range(6)]
                 done, not_done = cf.wait(futs)
                 return len(done), len(not_done)
@@ -149,7 +149,7 @@ class TestWait(unittest.TestCase):
         def body():
             with cf.ThreadPoolExecutor(max_workers=4) as ex:
                 fast = ex.submit(lambda: 1)
-                slow = ex.submit(lambda: ([pygo.sleep(0.01) for _ in range(10)],
+                slow = ex.submit(lambda: ([runloom.sleep(0.01) for _ in range(10)],
                                           2)[1])
                 done, not_done = cf.wait(
                     [fast, slow], return_when=cf.FIRST_COMPLETED)
@@ -161,7 +161,7 @@ class TestWait(unittest.TestCase):
     def test_wait_timeout(self):
         def body():
             with cf.ThreadPoolExecutor() as ex:
-                slow = ex.submit(lambda: ([pygo.sleep(0.01) for _ in range(20)],
+                slow = ex.submit(lambda: ([runloom.sleep(0.01) for _ in range(20)],
                                           1)[1])
                 done, not_done = cf.wait([slow], timeout=0.02)
                 got = (len(done), len(not_done))
@@ -174,7 +174,7 @@ class TestAsCompleted(unittest.TestCase):
     def test_as_completed_yields_all(self):
         def body():
             with cf.ThreadPoolExecutor(max_workers=4) as ex:
-                futs = [ex.submit(lambda i=i: (pygo.sleep(0.003 * (i % 3)), i)[1])
+                futs = [ex.submit(lambda i=i: (runloom.sleep(0.003 * (i % 3)), i)[1])
                         for i in range(8)]
                 return sorted(f.result() for f in cf.as_completed(futs))
         self.assertEqual(_drive(body), list(range(8)))
@@ -193,7 +193,7 @@ class TestFutureCancel(unittest.TestCase):
 
             with cf.ThreadPoolExecutor(max_workers=1) as ex:
                 blocker = ex.submit(
-                    lambda: ([pygo.sleep(0.01) for _ in range(5)], 0)[1])
+                    lambda: ([runloom.sleep(0.01) for _ in range(5)], 0)[1])
                 target = ex.submit(slow_marker)
                 cancelled = target.cancel()      # still queued behind blocker
                 blocker.result()

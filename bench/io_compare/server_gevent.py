@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""gevent baseline -- greenlet + libev, pygo's DIRECT competitor: blocking-
+"""gevent baseline -- greenlet + libev, runloom's DIRECT competitor: blocking-
 style code, one greenlet per connection, single-core. Same wire protocol.
 Usage: server_gevent.py [host] [port] [io_ms]"""
 from gevent import monkey

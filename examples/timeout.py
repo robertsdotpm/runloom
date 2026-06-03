@@ -1,6 +1,6 @@
 """Timeouts — race a result against a timer with select.
 
-pygo.time.After(d) returns a channel that fires once after d seconds.
+runloom.time.After(d) returns a channel that fires once after d seconds.
 select-ing on both the real work and the timer gives you a timeout for
 free: whichever is ready first wins.  This is Go's canonical timeout
 idiom, no special API required.
@@ -13,22 +13,22 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 
-import pygo
-import pygo.time
-import pygo_core
+import runloom
+import runloom.time
+import runloom_c
 
 
 def slow_op(out, delay):
-    pygo.sleep(delay)
+    runloom.sleep(delay)
     out.send("result after {0}s".format(delay))
 
 
 def with_timeout(delay, limit):
-    result = pygo_core.Chan(1)
-    pygo.go(slow_op, result, delay)
-    idx, payload = pygo_core.select([
+    result = runloom_c.Chan(1)
+    runloom.go(slow_op, result, delay)
+    idx, payload = runloom_c.select([
         ("recv", result),                 # case 0: the work finished
-        ("recv", pygo.time.After(limit)), # case 1: the deadline fired
+        ("recv", runloom.time.After(limit)), # case 1: the deadline fired
     ])
     if idx == 1:
         return "TIMEOUT after {0}s".format(limit)
@@ -41,4 +41,4 @@ def main():
 
 
 if __name__ == "__main__":
-    pygo.run(main)
+    runloom.run(main)

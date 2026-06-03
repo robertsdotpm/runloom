@@ -1,7 +1,7 @@
 """Multithreaded M:N scheduler tests (the path the rest of tests/ never
 exercises).
 
-pygo's channels, select, sleep, and work-stealing all behave differently
+runloom's channels, select, sleep, and work-stealing all behave differently
 once goroutines are spread across N OS-thread hubs on free-threaded
 CPython -- that is where cross-hub channel handoff, work-stealing, and
 the per-g wake machinery actually run in parallel.  None of the other
@@ -37,11 +37,11 @@ def run_mn(code, timeout=60):
     'PASS' on success."""
     preamble = (
         "import sys; sys.path.insert(0, %r)\n"
-        "import pygo_core\n" % os.path.join(REPO, "src")
+        "import runloom_c\n" % os.path.join(REPO, "src")
     )
     env = dict(os.environ)
     env["PYTHON_GIL"] = "0"          # force GIL off: real parallel hubs
-    env["PYGO_GIL"] = "0"
+    env["RUNLOOM_GIL"] = "0"
     try:
         p = subprocess.run(
             [sys.executable, "-c", preamble + code],
@@ -77,17 +77,17 @@ def mk(k):
         s = 0
         for i in range(50):
             s += i
-            pygo_core.sched_yield_classic()
+            runloom_c.sched_yield_classic()
         results.append((k, s))
     return w
-pygo_core.mn_init(4)
+runloom_c.mn_init(4)
 for k in range(N):
-    pygo_core.mn_go(mk(k))
-pygo_core.mn_run()
-pygo_core.mn_fini()
+    runloom_c.mn_go(mk(k))
+runloom_c.mn_run()
+runloom_c.mn_fini()
 assert len(results) == N, len(results)
 assert all(s == 1225 for _, s in results)
-assert pygo_core._self_check(0) == 0
+assert runloom_c._self_check(0) == 0
 print("PASS", len(results))
 """)
 
@@ -105,17 +105,17 @@ def test_sched_yield_no_starvation_multi_hub():
 flag = [False]
 def waiter():
     while not flag[0]:
-        pygo_core.sched_yield()
+        runloom_c.sched_yield()
 def setter():
     flag[0] = True
-pygo_core.mn_init(4)
+runloom_c.mn_init(4)
 for _ in range(8):          # 8 spinners monopolizing the hubs first ...
-    pygo_core.mn_go(waiter)
-pygo_core.mn_go(setter)     # ... then the never-run goroutine they wait on
-pygo_core.mn_run()
-pygo_core.mn_fini()
+    runloom_c.mn_go(waiter)
+runloom_c.mn_go(setter)     # ... then the never-run goroutine they wait on
+runloom_c.mn_run()
+runloom_c.mn_fini()
 assert flag[0]
-assert pygo_core._self_check(0) == 0
+assert runloom_c._self_check(0) == 0
 print("PASS")
 """, timeout=20)
 
@@ -129,14 +129,14 @@ def test_sched_yield_no_starvation_single_hub():
 flag = [False]
 def waiter():
     while not flag[0]:
-        pygo_core.sched_yield()
+        runloom_c.sched_yield()
 def setter():
     flag[0] = True
-pygo_core.mn_init(1)
-pygo_core.mn_go(setter)     # fresh -> goes to the deque
-pygo_core.mn_go(waiter)     # popped first (deque LIFO); must yield to setter
-pygo_core.mn_run()
-pygo_core.mn_fini()
+runloom_c.mn_init(1)
+runloom_c.mn_go(setter)     # fresh -> goes to the deque
+runloom_c.mn_go(waiter)     # popped first (deque LIFO); must yield to setter
+runloom_c.mn_run()
+runloom_c.mn_fini()
 assert flag[0]
 print("PASS")
 """, timeout=20)
@@ -148,9 +148,9 @@ def test_channel_fanin_with_close():
     token across all consumers, run repeatedly to shake out races."""
     assert_pass(r"""
 def fanin(nprod, ncons, per):
-    work = pygo_core.Chan(16)
-    done = pygo_core.Chan(nprod)
-    res  = pygo_core.Chan(ncons)
+    work = runloom_c.Chan(16)
+    done = runloom_c.Chan(nprod)
+    res  = runloom_c.Chan(ncons)
     def prod(pid):
         def r():
             for s in range(per):
@@ -166,22 +166,22 @@ def fanin(nprod, ncons, per):
         for v in work:
             c += 1; t += v
         res.send((c, t))
-    pygo_core.mn_init(4)
-    for _ in range(ncons): pygo_core.mn_go(cons)
-    for p in range(nprod): pygo_core.mn_go(prod(p))
-    pygo_core.mn_go(closer)
-    pygo_core.mn_run()
+    runloom_c.mn_init(4)
+    for _ in range(ncons): runloom_c.mn_go(cons)
+    for p in range(nprod): runloom_c.mn_go(prod(p))
+    runloom_c.mn_go(closer)
+    runloom_c.mn_run()
     tc = tt = 0
     for _ in range(ncons):
         g = res.try_recv()
         if g is None: break
         (c, t), ok = g
         tc += c; tt += t
-    pygo_core.mn_fini()
+    runloom_c.mn_fini()
     exp_c = nprod * per
     exp_t = sum(pid*1000 + s for pid in range(nprod) for s in range(per))
     assert (tc, tt) == (exp_c, exp_t), (tc, tt, exp_c, exp_t)
-    assert pygo_core._self_check(0) == 0
+    assert runloom_c._self_check(0) == 0
 
 for _ in range(20):
     fanin(6, 6, 30)
@@ -194,9 +194,9 @@ def test_pingpong_unbuffered_pairs():
     channels (direct cross-hub handoff, no buffer)."""
     assert_pass(r"""
 NPAIRS, ROUNDS = 16, 100
-totals = pygo_core.Chan(NPAIRS)
+totals = runloom_c.Chan(NPAIRS)
 def pair(pid):
-    a = pygo_core.Chan(); b = pygo_core.Chan()
+    a = runloom_c.Chan(); b = runloom_c.Chan()
     def pinger():
         acc = 0
         for i in range(ROUNDS):
@@ -209,20 +209,20 @@ def pair(pid):
             v, _ = a.recv()
             b.send(v * 2)
     return pinger, ponger
-pygo_core.mn_init(4)
+runloom_c.mn_init(4)
 for pid in range(NPAIRS):
     pi, po = pair(pid)
-    pygo_core.mn_go(pi); pygo_core.mn_go(po)
-pygo_core.mn_run()
+    runloom_c.mn_go(pi); runloom_c.mn_go(po)
+runloom_c.mn_run()
 got = 0
 for _ in range(NPAIRS):
     g = totals.try_recv()
     if g is None: break
     v, ok = g; got += v
-pygo_core.mn_fini()
+runloom_c.mn_fini()
 exp = NPAIRS * sum(i * 2 for i in range(ROUNDS))
 assert got == exp, (got, exp)
-assert pygo_core._self_check(0) == 0
+assert runloom_c._self_check(0) == 0
 print("PASS", got)
 """)
 
@@ -232,13 +232,13 @@ def test_self_check_clean_after_mn():
     report zero violations after an M:N run."""
     assert_pass(r"""
 def w():
-    ch = pygo_core.Chan(1)
+    ch = runloom_c.Chan(1)
     ch.send(1); ch.recv()
-pygo_core.mn_init(3)
-for _ in range(500): pygo_core.mn_go(w)
-pygo_core.mn_run()
-pygo_core.mn_fini()
-v = pygo_core._self_check(1)
+runloom_c.mn_init(3)
+for _ in range(500): runloom_c.mn_go(w)
+runloom_c.mn_run()
+runloom_c.mn_fini()
+v = runloom_c._self_check(1)
 assert v == 0, v
 print("PASS")
 """)
@@ -273,15 +273,15 @@ def test_select_close_conservation():
     """
     assert_pass(r"""
 def experiment(nhubs, nprod, ncons, nchan, per):
-    chans = [pygo_core.Chan([0, 1, 8][i % 3]) for i in range(nchan)]
-    done = pygo_core.Chan(nprod)
-    res  = pygo_core.Chan(ncons)
+    chans = [runloom_c.Chan([0, 1, 8][i % 3]) for i in range(nchan)]
+    done = runloom_c.Chan(nprod)
+    res  = runloom_c.Chan(ncons)
     def producer(pid):
         def run():
             for s in range(per):
                 chans[(pid + s) % nchan].send(pid * 1000 + s)
                 if (s & 7) == 0:
-                    pygo_core.sched_yield_classic()
+                    runloom_c.sched_yield_classic()
             done.send(pid)
         return run
     def closer():
@@ -297,29 +297,29 @@ def experiment(nhubs, nprod, ncons, nchan, per):
             cases = [("recv", chans[i]) for i in range(nchan) if not closed[i]]
             if not cases:
                 break
-            idx, (v, ok) = pygo_core.select(cases)   # BLOCKING select
+            idx, (v, ok) = runloom_c.select(cases)   # BLOCKING select
             live = [i for i in range(nchan) if not closed[i]]
             if ok:
                 got += 1; total += v
             else:
                 closed[live[idx]] = True
         res.send((got, total))
-    pygo_core.mn_init(nhubs)
-    for _ in range(ncons): pygo_core.mn_go(consumer)
-    for p in range(nprod):  pygo_core.mn_go(producer(p))
-    pygo_core.mn_go(closer)
-    pygo_core.mn_run()
+    runloom_c.mn_init(nhubs)
+    for _ in range(ncons): runloom_c.mn_go(consumer)
+    for p in range(nprod):  runloom_c.mn_go(producer(p))
+    runloom_c.mn_go(closer)
+    runloom_c.mn_run()
     rc = rt = 0
     for _ in range(ncons):
         g = res.try_recv()
         if g is None: break
         (c, t), ok = g
         rc += c; rt += t
-    pygo_core.mn_fini()
+    runloom_c.mn_fini()
     exp_c = nprod * per
     exp_t = sum(pid * 1000 + s for pid in range(nprod) for s in range(per))
     assert (rc, rt) == (exp_c, exp_t), (nhubs, nprod, ncons, nchan, per, rc, rt, exp_c, exp_t)
-    assert pygo_core._self_check(0) == 0
+    assert runloom_c._self_check(0) == 0
 
 for it in range(60):
     experiment(nhubs=2 + it % 3, nprod=5, ncons=8, nchan=1 + it % 3, per=24)
@@ -334,9 +334,9 @@ def test_select_send_and_recv_mixed():
     install/abort/park path that the RECV tests don't."""
     assert_pass(r"""
 def run_once(nrelay, n):
-    src  = pygo_core.Chan(0)
-    dst  = pygo_core.Chan(0)
-    res  = pygo_core.Chan(1)
+    src  = runloom_c.Chan(0)
+    dst  = runloom_c.Chan(0)
+    res  = runloom_c.Chan(1)
     def producer():
         for i in range(n):
             src.send(1000 + i)
@@ -350,7 +350,7 @@ def run_once(nrelay, n):
                     cases = [("recv", a)]
                 else:
                     cases = [("recv", a), ("send", b, pending)]
-                idx, payload = pygo_core.select(cases)
+                idx, payload = runloom_c.select(cases)
                 if idx == 0:
                     v, ok = payload
                     if not ok:
@@ -370,16 +370,16 @@ def run_once(nrelay, n):
         for v in dst:
             c += 1; t += v
         res.send((c, t))
-    pygo_core.mn_init(3)
-    pygo_core.mn_go(consumer)
-    pygo_core.mn_go(relay(src, dst))
-    pygo_core.mn_go(producer)
-    pygo_core.mn_run()
+    runloom_c.mn_init(3)
+    runloom_c.mn_go(consumer)
+    runloom_c.mn_go(relay(src, dst))
+    runloom_c.mn_go(producer)
+    runloom_c.mn_run()
     g = res.try_recv()
-    pygo_core.mn_fini()
+    runloom_c.mn_fini()
     (c, t), ok = g
     assert (c, t) == (n, sum(1000 + i for i in range(n))), (c, t, n)
-    assert pygo_core._self_check(0) == 0
+    assert runloom_c._self_check(0) == 0
 
 for _ in range(20):
     run_once(2, 25)
@@ -398,8 +398,8 @@ def test_select_concurrent_send_close():
     assert_pass(r"""
 def experiment(it):
     nchan = 1 + it % 3
-    chans = [pygo_core.Chan([0, 1, 4][i % 3]) for i in range(nchan)]
-    res = pygo_core.Chan(6)
+    chans = [runloom_c.Chan([0, 1, 4][i % 3]) for i in range(nchan)]
+    res = runloom_c.Chan(6)
     ncons = 4 + it % 3
     def prod(pid):
         def r():
@@ -410,7 +410,7 @@ def experiment(it):
                     pass   # send on closed channel: expected under the race
         return r
     def closer():
-        pygo_core.sched_yield_classic()
+        runloom_c.sched_yield_classic()
         for ch in chans:
             ch.close()
     def cons():
@@ -420,20 +420,20 @@ def experiment(it):
             cs = [("recv", chans[i]) for i in range(nchan) if not closed[i]]
             if not cs:
                 break
-            idx, (v, ok) = pygo_core.select(cs)
+            idx, (v, ok) = runloom_c.select(cs)
             live = [i for i in range(nchan) if not closed[i]]
             if ok:
                 c += 1
             else:
                 closed[live[idx]] = True
         res.send(c)
-    pygo_core.mn_init(3)
-    for _ in range(ncons): pygo_core.mn_go(cons)
-    for p in range(3): pygo_core.mn_go(prod(p))
-    pygo_core.mn_go(closer)
-    pygo_core.mn_run()
-    pygo_core.mn_fini()
-    assert pygo_core._self_check(0) == 0
+    runloom_c.mn_init(3)
+    for _ in range(ncons): runloom_c.mn_go(cons)
+    for p in range(3): runloom_c.mn_go(prod(p))
+    runloom_c.mn_go(closer)
+    runloom_c.mn_run()
+    runloom_c.mn_fini()
+    assert runloom_c._self_check(0) == 0
 
 for it in range(80):
     experiment(it)

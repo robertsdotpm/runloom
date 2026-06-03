@@ -8,7 +8,7 @@ import tempfile
 import time
 
 sys.path.insert(0, "src")
-import pygo_core
+import runloom_c
 
 
 def make_tempfile(size):
@@ -28,7 +28,7 @@ def bench(name, fn, iters):
 
 
 def main():
-    if not pygo_core.iouring_available():
+    if not runloom_c.iouring_available():
         print("io_uring not available on this system; skipping bench")
         return
 
@@ -45,10 +45,10 @@ def main():
         os.read(fd_r, size)
     bench("os.read", plain, iters)
 
-    # pygo_core.file_read with io_uring
+    # runloom_c.file_read with io_uring
     def fr():
-        pygo_core.file_read(fd_r, buf, size, 0)
-    bench("pygo_core.file_read", fr, iters)
+        runloom_c.file_read(fd_r, buf, size, 0)
+    bench("runloom_c.file_read", fr, iters)
 
     os.close(fd_r)
     os.unlink(path)

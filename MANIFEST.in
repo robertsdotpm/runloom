@@ -1,5 +1,5 @@
 # Files that must ship inside the source distribution (sdist) so that
-# `pip install pygo-runtime` can compile the C extension on the user's
+# `pip install runloom` can compile the C extension on the user's
 # machine -- on ANY supported platform/arch, not just the one the sdist
 # was built on.
 #
@@ -16,12 +16,12 @@ include pyproject.toml
 include setup.py
 
 # C extension: every source, header, inline fragment, and arch asm.
-recursive-include src/pygo_core *.c *.h *.inc *.S
+recursive-include src/runloom_c *.c *.h *.inc *.S
 
 # Type stubs + PEP 561 marker.
-include src/pygo_core.pyi
-recursive-include src/pygo *.pyi
-include src/pygo/py.typed
+include src/runloom_c.pyi
+recursive-include src/runloom *.pyi
+include src/runloom/py.typed
 
 # Keep build/test/site artifacts out of the sdist.
 prune build

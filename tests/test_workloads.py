@@ -1,5 +1,5 @@
 """Realistic workload patterns: scenarios that approximate how real
-applications use pygo / paio.
+applications use runloom / paio.
 
 Each test exercises a complete request/response or pipeline pattern
 end-to-end -- the goal is to surface integration bugs that pure unit
@@ -11,8 +11,8 @@ import os
 import socket
 import unittest
 
-import pygo_core
-import pygo.aio as paio
+import runloom_c
+import runloom.aio as paio
 
 
 def _pick_port():
@@ -125,8 +125,8 @@ class TestWorkerPool(unittest.TestCase):
         N_WORKERS = 8
         N_JOBS = 200
 
-        jobs = pygo_core.Chan(N_JOBS)
-        results = pygo_core.Chan(N_JOBS)
+        jobs = runloom_c.Chan(N_JOBS)
+        results = runloom_c.Chan(N_JOBS)
 
         def worker():
             while True:
@@ -141,23 +141,23 @@ class TestWorkerPool(unittest.TestCase):
             jobs.close()
 
         for _ in range(N_WORKERS):
-            pygo_core.go(worker)
-        pygo_core.go(feeder)
+            runloom_c.go(worker)
+        runloom_c.go(feeder)
 
         out = []
         def collector():
             for _ in range(N_JOBS):
                 v, _ = results.recv()
                 out.append(v)
-        pygo_core.go(collector)
-        pygo_core.run()
+        runloom_c.go(collector)
+        runloom_c.run()
         self.assertEqual(sorted(out), [i * 2 for i in range(N_JOBS)])
 
     def test_pipeline_three_stages(self):
         """Stage 1 emits 0..99, stage 2 doubles, stage 3 sums."""
-        in_ch = pygo_core.Chan(10)
-        mid_ch = pygo_core.Chan(10)
-        out_ch = pygo_core.Chan(1)
+        in_ch = runloom_c.Chan(10)
+        mid_ch = runloom_c.Chan(10)
+        out_ch = runloom_c.Chan(1)
 
         def stage1():
             for i in range(100):
@@ -175,10 +175,10 @@ class TestWorkerPool(unittest.TestCase):
                 total += v
             out_ch.send(total)
 
-        pygo_core.go(stage1)
-        pygo_core.go(stage2)
-        pygo_core.go(stage3)
-        pygo_core.run()
+        runloom_c.go(stage1)
+        runloom_c.go(stage2)
+        runloom_c.go(stage3)
+        runloom_c.run()
         v, _ = out_ch.recv()
         self.assertEqual(v, sum(i * 2 for i in range(100)))
 
@@ -261,7 +261,7 @@ class TestMixedExecution(unittest.TestCase):
     def test_goroutine_feeds_into_asyncio_chan(self):
         """A raw goroutine produces values; an asyncio task consumes
         them via Chan."""
-        ch = pygo_core.Chan(50)
+        ch = runloom_c.Chan(50)
         N = 30
         out = []
 
@@ -286,7 +286,7 @@ class TestMixedExecution(unittest.TestCase):
                 count += 1
 
         async def main():
-            pygo_core.go(producer)
+            runloom_c.go(producer)
             await consumer()
 
         paio.run(main())

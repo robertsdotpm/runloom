@@ -1,6 +1,6 @@
 """Subprocess workload for the fd_read/fd_write (module.c) fault harness.
 
-Drives cooperative pygo_core.fd_read / fd_write over an os.pipe() as goroutines,
+Drives cooperative runloom_c.fd_read / fd_write over an os.pipe() as goroutines,
 so an injected read()/write() error lands on the live EINTR-continue /
 EAGAIN-park / surface-OSError loop.  Modes:
   echo      -- writer sends b"ping", reader reads it; must print "OK ping".
@@ -16,7 +16,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__))), "src"))
-import pygo_core
+import runloom_c
 
 
 def _drive(*goroutines):
@@ -31,8 +31,8 @@ def _drive(*goroutines):
         return runner
 
     for g in goroutines:
-        pygo_core.go(wrap(g))
-    pygo_core.run()
+        runloom_c.go(wrap(g))
+    runloom_c.run()
     return box
 
 
@@ -48,11 +48,11 @@ def mode_echo():
     out = {}
 
     def writer():
-        pygo_core.fd_write(w, b"ping")
+        runloom_c.fd_write(w, b"ping")
 
     def reader():
         buf = bytearray(64)
-        n = pygo_core.fd_read(r, buf, 64)
+        n = runloom_c.fd_read(r, buf, 64)
         out["data"] = bytes(buf[:n])
 
     errs = _drive(writer, reader)
@@ -75,7 +75,7 @@ def mode_readfail():
     def reader():
         try:
             buf = bytearray(64)
-            n = pygo_core.fd_read(r, buf, 64)
+            n = runloom_c.fd_read(r, buf, 64)
             box["data"] = bytes(buf[:n])
         except OSError as e:
             box["errno"] = e.errno
@@ -93,7 +93,7 @@ def mode_writefail():
 
     def writer():
         try:
-            pygo_core.fd_write(w, b"ping")
+            runloom_c.fd_write(w, b"ping")
             box["wrote"] = True
         except OSError as e:
             box["errno"] = e.errno
@@ -116,7 +116,7 @@ def main():
     site = os.environ.get("FAULT_SITE")
     if site:
         try:
-            print("FAULTS=%d" % pygo_core._fault_count(site))
+            print("FAULTS=%d" % runloom_c._fault_count(site))
         except Exception:
             pass
     return rc

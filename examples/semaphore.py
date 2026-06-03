@@ -13,21 +13,21 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 
-import pygo
-import pygo_core
+import runloom
+import runloom_c
 
 MAX_CONCURRENT = 3
 NUM_TASKS = 10
 
 
 def main():
-    sem = pygo_core.Chan(MAX_CONCURRENT)
+    sem = runloom_c.Chan(MAX_CONCURRENT)
     for _ in range(MAX_CONCURRENT):
         sem.try_send(None)                 # fill with tokens
 
     active = [0]
     peak = [0]
-    done = pygo_core.Chan(NUM_TASKS)
+    done = runloom_c.Chan(NUM_TASKS)
 
     def task(tid):
         sem.recv()                         # acquire (blocks if no token)
@@ -35,14 +35,14 @@ def main():
             active[0] += 1
             peak[0] = max(peak[0], active[0])
             print("task {0} running (active={1})".format(tid, active[0]))
-            pygo.sleep(0.02)               # the protected "slow" section
+            runloom.sleep(0.02)               # the protected "slow" section
             active[0] -= 1
         finally:
             sem.send(None)                 # release
             done.send(tid)
 
     for tid in range(NUM_TASKS):
-        pygo.go(task, tid)
+        runloom.go(task, tid)
     for _ in range(NUM_TASKS):
         done.recv()
 
@@ -50,4 +50,4 @@ def main():
 
 
 if __name__ == "__main__":
-    pygo.run(main)
+    runloom.run(main)

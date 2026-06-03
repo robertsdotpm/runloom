@@ -1,4 +1,4 @@
-"""Bench pygo_core.TCPConn against the monkey-patched socket and the
+"""Bench runloom_c.TCPConn against the monkey-patched socket and the
 free-floating tcp_recv/tcp_send fastpaths.  Single client, sequential
 RT echoes -- the worst case for overhead because every byte pays one
 goroutine yield + one netpoll wake."""
@@ -7,7 +7,7 @@ import sys
 import time
 
 sys.path.insert(0, "src")
-import pygo, pygo.monkey, pygo_core
+import runloom, runloom.monkey, runloom_c
 
 
 def _bound_port(listener):
@@ -20,7 +20,7 @@ def _bound_port(listener):
 
 
 def bench_monkey(N):
-    pygo.monkey.patch()
+    runloom.monkey.patch()
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     srv.bind(("127.0.0.1", 0))
@@ -50,13 +50,13 @@ def bench_monkey(N):
         t[0] = time.perf_counter() - t0
         c.close()
 
-    pygo_core.go(server); pygo_core.go(client); pygo_core.run()
+    runloom_c.go(server); runloom_c.go(client); runloom_c.run()
     srv.close()
     return t[0]
 
 
 def bench_native_fns(N):
-    pygo.monkey.patch()
+    runloom.monkey.patch()
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     srv.bind(("127.0.0.1", 0))
@@ -70,9 +70,9 @@ def bench_native_fns(N):
         fd = conn.fileno()
         buf = bytearray(64)
         for _ in range(N):
-            got = pygo_core.tcp_recv(fd, buf, 8)
+            got = runloom_c.tcp_recv(fd, buf, 8)
             if got == 0: break
-            pygo_core.tcp_send(fd, bytes(buf[:got]))
+            runloom_c.tcp_send(fd, bytes(buf[:got]))
         conn.close()
 
     def client():
@@ -82,12 +82,12 @@ def bench_native_fns(N):
         buf = bytearray(8)
         t0 = time.perf_counter()
         for _ in range(N):
-            pygo_core.tcp_send(fd, msg)
-            pygo_core.tcp_recv(fd, buf, 8)
+            runloom_c.tcp_send(fd, msg)
+            runloom_c.tcp_recv(fd, buf, 8)
         t[0] = time.perf_counter() - t0
         c.close()
 
-    pygo_core.go(server); pygo_core.go(client); pygo_core.run()
+    runloom_c.go(server); runloom_c.go(client); runloom_c.run()
     srv.close()
     return t[0]
 
@@ -97,7 +97,7 @@ def bench_tcpconn(N):
     port_holder = [None]
 
     def server():
-        listener = pygo_core.TCPConn.listen("127.0.0.1", 0, backlog=8)
+        listener = runloom_c.TCPConn.listen("127.0.0.1", 0, backlog=8)
         port_holder[0] = _bound_port(listener)
         conn = listener.accept()
         buf = bytearray(64)
@@ -110,8 +110,8 @@ def bench_tcpconn(N):
 
     def client():
         while port_holder[0] is None:
-            pygo_core.sched_yield()
-        c = pygo_core.TCPConn.connect("127.0.0.1", port_holder[0])
+            runloom_c.sched_yield()
+        c = runloom_c.TCPConn.connect("127.0.0.1", port_holder[0])
         msg = b"hellopyg"
         buf = bytearray(8)
         t0 = time.perf_counter()
@@ -121,7 +121,7 @@ def bench_tcpconn(N):
         t[0] = time.perf_counter() - t0
         c.close()
 
-    pygo_core.go(server); pygo_core.go(client); pygo_core.run()
+    runloom_c.go(server); runloom_c.go(client); runloom_c.run()
     return t[0]
 
 

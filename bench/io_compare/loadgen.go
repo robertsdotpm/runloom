@@ -1,4 +1,4 @@
-// loadgen.go -- common neutral load generator for the pygo/Go/asyncio
+// loadgen.go -- common neutral load generator for the runloom/Go/asyncio
 // I/O-bound concurrency comparison.  Opens N long-lived keepalive TCP
 // connections (staggered over a ramp), each looping: write a fixed REQ,
 // read a fixed RESP, record the round-trip latency (only inside the

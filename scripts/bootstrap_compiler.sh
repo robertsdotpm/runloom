@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 # bootstrap_compiler.sh
 #
-# Best-effort: install a C compiler suitable for building pygo if one
+# Best-effort: install a C compiler suitable for building runloom if one
 # isn't already on the system.  Idempotent; safe to re-run.
 #
 # Strategy: detect distro / OS via uname + /etc/os-release, then pick

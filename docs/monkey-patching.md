@@ -1,6 +1,6 @@
 # Monkey-patching the stdlib
 
-`pygo.monkey.patch()` replaces blocking stdlib calls with cooperative
+`runloom.monkey.patch()` replaces blocking stdlib calls with cooperative
 equivalents that park the current goroutine instead of blocking the OS
 thread.  After the patch, ordinary `socket.recv`, `time.sleep`,
 `select.select`, `ssl.read`, file I/O, `subprocess` waits, DNS lookups,
@@ -14,9 +14,9 @@ becomes cooperative.
 ## The basic call
 
 ```python
-import pygo, pygo.monkey, pygo_core
+import runloom, runloom.monkey, runloom_c
 
-pygo.monkey.patch()                    # patch everything
+runloom.monkey.patch()                    # patch everything
 ```
 
 After this:
@@ -33,8 +33,8 @@ def worker():
     s.close()
     return data
 
-pygo_core.go(worker)
-pygo_core.run()
+runloom_c.go(worker)
+runloom_c.run()
 ```
 
 ## What gets patched
@@ -46,7 +46,7 @@ enable/disable:
 | --- | --- |
 | `socket` | `socket.socket`'s `connect`, `recv`, `send`, `sendall`, `accept`, `recv_into`, `recvfrom`, `sendto` park on `wait_fd` instead of blocking. |
 | `time` | `time.sleep` becomes cooperative (uses scheduler's sleep heap). |
-| `select` | `select.select`, `select.poll`, `selectors.*` rerouted through pygo's netpoll. |
+| `select` | `select.select`, `select.poll`, `selectors.*` rerouted through runloom's netpoll. |
 | `os` | `os.read`, `os.write` on regular files dispatch to a worker thread (`run_in_executor`-style) so the goroutine doesn't block. |
 | `ssl` | `ssl.SSLSocket` reads/writes park on `wait_fd`; handshake is cooperative. |
 | `subprocess` | `Popen.wait` / `communicate` poll the child's exit cooperatively. |
@@ -58,14 +58,14 @@ enable/disable:
 All default to enabled.  Opt out with kwargs:
 
 ```python
-pygo.monkey.patch(threading=False, queue=False)
+runloom.monkey.patch(threading=False, queue=False)
 ```
 
 ## Unpatch
 
 ```python
-pygo.monkey.unpatch()              # reverse everything
-pygo.monkey.unpatch(socket=False)  # keep socket patched, reverse the rest
+runloom.monkey.unpatch()              # reverse everything
+runloom.monkey.unpatch(socket=False)  # keep socket patched, reverse the rest
 ```
 
 Patching is **idempotent** -- calling `patch()` twice does nothing the
@@ -74,10 +74,10 @@ second time.  Unpatch is the inverse.
 ## Recipe: a fully synchronous-looking HTTP fetcher
 
 ```python
-import pygo, pygo.monkey, pygo_core
+import runloom, runloom.monkey, runloom_c
 import urllib.request
 
-pygo.monkey.patch()
+runloom.monkey.patch()
 
 def fetch(url):
     with urllib.request.urlopen(url, timeout=5) as resp:
@@ -89,14 +89,14 @@ def main():
         "http://example.org",
         "http://example.net",
     ]
-    results = pygo_core.Chan(len(urls))
+    results = runloom_c.Chan(len(urls))
     for u in urls:
-        pygo_core.go(lambda url=u: results.send((url, len(fetch(url)))))
+        runloom_c.go(lambda url=u: results.send((url, len(fetch(url)))))
     for _ in urls:
         print(results.recv()[0])
 
-pygo_core.go(main)
-pygo_core.run()
+runloom_c.go(main)
+runloom_c.run()
 ```
 
 Three HTTP requests, fully concurrent, written in completely linear
@@ -106,10 +106,10 @@ monkey-patched.
 ## Recipe: a database pool with `pymysql`
 
 ```python
-import pygo, pygo.monkey, pygo_core
+import runloom, runloom.monkey, runloom_c
 import pymysql                                # plain blocking driver
 
-pygo.monkey.patch()
+runloom.monkey.patch()
 
 def query(sql):
     conn = pymysql.connect(host="db", user="x", password="y", db="z")
@@ -125,8 +125,8 @@ def worker(i):
     print("bucket", i, "->", len(rows), "rows")
 
 for i in range(32):
-    pygo_core.go(lambda i=i: worker(i))
-pygo_core.run()
+    runloom_c.go(lambda i=i: worker(i))
+runloom_c.run()
 ```
 
 32 concurrent MySQL queries on one OS thread, no thread pool, no
@@ -137,8 +137,8 @@ pygo_core.run()
 ### Patch early
 
 ```python
-import pygo.monkey
-pygo.monkey.patch()        # <-- before importing modules that capture sockets
+import runloom.monkey
+runloom.monkey.patch()        # <-- before importing modules that capture sockets
 
 import some_library        # this sees patched socket from the start
 ```
@@ -159,10 +159,10 @@ still gets the patched version because we rebind the class attribute.
 
 Patching doesn't turn `threading.Thread` into a goroutine -- it would
 break too many assumptions.  If you spawn an OS thread, it runs
-independently of the pygo scheduler.
+independently of the runloom scheduler.
 
-For "I want pygo, not threads," use `pygo_core.go(fn)` or
-`pygo.sync.go(fn)`.
+For "I want runloom, not threads," use `runloom_c.go(fn)` or
+`runloom.sync.go(fn)`.
 
 ### `os.read` on a regular file dispatches to a thread
 
@@ -170,7 +170,7 @@ The Linux io_uring backend (when available) lets us do truly async
 file I/O, but the default path is a small executor that runs the
 read/write off the scheduler's OS thread.  This means file I/O won't
 *block* your goroutines, but it does pay a thread-hop on each call.
-See [io_uring](https://github.com/robertsdotpm/pygo/blob/main/src/pygo_core/io_uring.c)
+See [io_uring](https://github.com/robertsdotpm/runloom/blob/main/src/runloom_c/io_uring.c)
 for direct ring access.
 
 ### Windows
@@ -183,9 +183,9 @@ goes through the same executor path.
 ## Listing applied patches
 
 ```python
-import pygo.monkey
-pygo.monkey.patch()
-print(pygo.monkey._applied)
+import runloom.monkey
+runloom.monkey.patch()
+print(runloom.monkey._applied)
 # {'socket', 'time', 'select', 'os', 'ssl', 'subprocess',
 #  'threading', 'queue', 'stdio', 'dns'}
 ```
@@ -195,10 +195,10 @@ print(pygo.monkey._applied)
 ## When NOT to monkey-patch
 
 If your entire program is written in `async def` and uses
-`pygo.aio.run` for I/O, you don't need monkey-patching -- the asyncio
-bridge already drives I/O through pygo's netpoll.  Monkey-patching is
+`runloom.aio.run` for I/O, you don't need monkey-patching -- the asyncio
+bridge already drives I/O through runloom's netpoll.  Monkey-patching is
 for **mixing** sync code with the scheduler.
 
-If you're embedding pygo inside another process that also uses
+If you're embedding runloom inside another process that also uses
 threads + blocking I/O for unrelated work, don't patch -- confining
-pygo to its own region keeps the rest unaffected.
+runloom to its own region keeps the rest unaffected.

@@ -1,5 +1,5 @@
 """Cooperative vectored os I/O (os.readv / os.writev) and the public
-pygo.monkey.offload() escape hatch.
+runloom.monkey.offload() escape hatch.
 
 os.readv/os.writev are the vectored analogues of os.read/os.write: on a
 pollable fd (pipe/socket) they park on wait_fd; on a regular file they offload
@@ -7,16 +7,16 @@ to the backend pool.  Adapted from CPython Lib/test/test_os.py
 (ReadvWritevTests / test_readv / test_writev).
 
 offload() runs a blocking callable on the backend pool, parking the goroutine
--- the sanctioned escape hatch for blocking calls pygo can't transparently make
+-- the sanctioned escape hatch for blocking calls runloom can't transparently make
 cooperative (buffered FileIO on slow media, C DB drivers, CPU-bound work).
 """
 import os
 import time
 import unittest
 
-import pygo
-import pygo.monkey
-import pygo_core
+import runloom
+import runloom.monkey
+import runloom_c
 
 
 def _drive(fn):
@@ -28,19 +28,19 @@ def _drive(fn):
         except BaseException as e:   # noqa: BLE001
             box[1] = e
 
-    pygo_core.go(runner)
-    pygo_core.run()
+    runloom_c.go(runner)
+    runloom_c.run()
     if box[1] is not None:
         raise box[1]
     return box[0]
 
 
 def setUpModule():
-    pygo.monkey.patch()
+    runloom.monkey.patch()
 
 
 def tearDownModule():
-    pygo.monkey.unpatch()
+    runloom.monkey.unpatch()
 
 
 @unittest.skipUnless(hasattr(os, "writev") and hasattr(os, "readv"),
@@ -70,15 +70,15 @@ class TestVectoredIO(unittest.TestCase):
             def ticker():
                 while not stop["v"]:
                     ticks.append(1)
-                    pygo.sleep(0.003)
+                    runloom.sleep(0.003)
 
             def sender():
                 for _ in range(6):
-                    pygo.sleep(0.004)        # ~24 ms before data lands
+                    runloom.sleep(0.004)        # ~24 ms before data lands
                 os.writev(w, [b"AB", b"CD"])
 
-            pygo_core.go(ticker)
-            pygo_core.go(sender)
+            runloom_c.go(ticker)
+            runloom_c.go(sender)
             bufs = [bytearray(2), bytearray(2)]
             n = os.readv(r, bufs)            # blocks until the sender writes
             stop["v"] = True
@@ -90,7 +90,7 @@ class TestVectoredIO(unittest.TestCase):
 
     def test_readv_on_regular_file(self):
         import tempfile
-        fd, path = tempfile.mkstemp(prefix="pygo_readv_")
+        fd, path = tempfile.mkstemp(prefix="runloom_readv_")
         os.write(fd, b"0123456789")
         os.close(fd)
 
@@ -125,10 +125,10 @@ class TestOffload(unittest.TestCase):
             def ticker():
                 while not stop["v"]:
                     ticks.append(1)
-                    pygo.sleep(0.003)
+                    runloom.sleep(0.003)
 
-            pygo_core.go(ticker)
-            val = pygo.monkey.offload(slow_double, 21)
+            runloom_c.go(ticker)
+            val = runloom.monkey.offload(slow_double, 21)
             stop["v"] = True
             return val, len(ticks)
         val, ticks = _drive(body)
@@ -141,7 +141,7 @@ class TestOffload(unittest.TestCase):
 
         def body():
             try:
-                pygo.monkey.offload(boom)
+                runloom.monkey.offload(boom)
             except ValueError as e:
                 return str(e)
             return None

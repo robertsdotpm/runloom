@@ -2,14 +2,14 @@
 
 Adapted from CPython's Lib/test/test_selectors.py (BaseSelectorTestCase)
 and the readiness-event matrix in libuv's test/test-poll.c.  The point is to
-prove that pygo.monkey's `selectors` category makes the high-level selector
+prove that runloom.monkey's `selectors` category makes the high-level selector
 API cooperative *without changing its observable contract*: the same
 (key, events) return shape, the same EVENT_READ / EVENT_WRITE / POLLHUP
 return codes, the same KeyError / ValueError fault behaviour -- but a
 goroutine blocked in select() now yields the OS thread to its siblings
 instead of freezing the scheduler.
 
-Run under the C scheduler (pygo_core.go / pygo_core.run), which is the path
+Run under the C scheduler (runloom_c.go / runloom_c.run), which is the path
 the monkey-patches target.
 """
 import errno
@@ -21,9 +21,9 @@ import socket
 import time
 import unittest
 
-import pygo
-import pygo.monkey
-import pygo_core
+import runloom
+import runloom.monkey
+import runloom_c
 
 _IS_WINDOWS = platform.system() == "Windows"
 
@@ -38,19 +38,19 @@ def _drive(fn):
         except BaseException as e:   # noqa: BLE001 - propagate to the test
             box[1] = e
 
-    pygo_core.go(runner)
-    pygo_core.run()
+    runloom_c.go(runner)
+    runloom_c.run()
     if box[1] is not None:
         raise box[1]
     return box[0]
 
 
 def setUpModule():
-    pygo.monkey.patch()
+    runloom.monkey.patch()
 
 
 def tearDownModule():
-    pygo.monkey.unpatch()
+    runloom.monkey.unpatch()
 
 
 def _pair():
@@ -146,7 +146,7 @@ class TestSelectorsReadiness(unittest.TestCase):
                 order.append("write")
                 b.send(b"payload")
 
-            pygo_core.go(writer)
+            runloom_c.go(writer)
             t0 = time.monotonic()
             ready = sel.select(timeout=2.0)
             dt = time.monotonic() - t0
@@ -248,7 +248,7 @@ class TestSelectorsConcurrency(unittest.TestCase):
                     time.sleep(0.05)
                     b.send(b"go")
 
-                pygo_core.go(w)
+                runloom_c.go(w)
                 sel.select(timeout=2.0)
                 a.recv(4)
                 sel.close(); a.close(); b.close()
@@ -257,10 +257,10 @@ class TestSelectorsConcurrency(unittest.TestCase):
             t0 = time.monotonic()
             g_done = []
             for i in range(2):
-                pygo_core.go(lambda i=i: (one(i), g_done.append(1)))
+                runloom_c.go(lambda i=i: (one(i), g_done.append(1)))
             # Spin the driving goroutine until both children finish.
             while len(g_done) < 2:
-                pygo.sleep(0.005)
+                runloom.sleep(0.005)
             return time.monotonic() - t0
 
         elapsed = _drive(body)
@@ -283,7 +283,7 @@ class TestSelectPollDirect(unittest.TestCase):
                 time.sleep(0.02)
                 b.send(b"data")
 
-            pygo_core.go(w)
+            runloom_c.go(w)
             evts = p.poll(2000)         # milliseconds
             d = a.recv(8)
             a.close(); b.close()
@@ -350,7 +350,7 @@ class TestSelectEpollDirect(unittest.TestCase):
                 time.sleep(0.02)
                 b.send(b"epoll")
 
-            pygo_core.go(w)
+            runloom_c.go(w)
             evts = ep.poll(timeout=2.0)   # seconds
             d = a.recv(8)
             ep.close(); a.close(); b.close()

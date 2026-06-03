@@ -1,11 +1,11 @@
 """Fork safety: after os.fork() the child keeps only the forking thread, so
-the M:N hub threads and the blocking-offload workers are gone.  pygo registers
+the M:N hub threads and the blocking-offload workers are gone.  runloom registers
 an os.register_at_fork(after_in_child=...) handler that resets the runtime so
 the child neither hangs (run/mn_run waiting on dead hubs) nor deadlocks on an
 inherited held lock, and gets its own netpoll fd.
 
 These tests cover the SUPPORTED cases: a child that runs the single-thread
-scheduler / pygo.aio (the multiprocessing-fork and pre-fork-server pattern),
+scheduler / runloom.aio (the multiprocessing-fork and pre-fork-server pattern),
 and a child that starts a brand-new M:N scheduler when the parent never used
 one.  Re-initialising M:N *inside* a fork-child of an already-active M:N parent
 is NOT supported (use forkserver/spawn, or run single-thread in the child).
@@ -19,8 +19,8 @@ import pytest
 
 sys.path.insert(0, "src")
 
-import pygo
-import pygo_core
+import runloom
+import runloom_c
 
 # fork() is POSIX-only; this whole module forks, so it cannot run on Windows.
 pytestmark = pytest.mark.skipif(
@@ -58,16 +58,16 @@ class TestSingleThreadChild(unittest.TestCase):
         # Parent exercises the single-thread scheduler (so netpoll is inited),
         # then forks; the child must be able to run its own scheduler.
         def warm():
-            pygo.sleep(0.005)
-        pygo.run(warm)
+            runloom.sleep(0.005)
+        runloom.run(warm)
 
         def child():
             out = []
             def w():
                 out.append(1)
             for _ in range(4):
-                pygo.go(w)
-            pygo.run()
+                runloom.go(w)
+            runloom.run()
             return 0 if len(out) == 4 else 3
 
         rc = run_child(child)
@@ -77,12 +77,12 @@ class TestSingleThreadChild(unittest.TestCase):
 class TestAioChildAfterMNParent(unittest.TestCase):
     def test_child_runs_fresh_aio_loop(self):
         import asyncio
-        import pygo.aio as paio
+        import runloom.aio as paio
 
-        pygo_core.mn_init(4)
+        runloom_c.mn_init(4)
         try:
             for _ in range(8):
-                pygo_core.mn_go(lambda: pygo.sleep(0.3))
+                runloom_c.mn_go(lambda: runloom.sleep(0.3))
             time.sleep(0.02)
 
             def child():
@@ -94,43 +94,43 @@ class TestAioChildAfterMNParent(unittest.TestCase):
             rc = run_child(child)
             self.assertEqual(rc, 0)
         finally:
-            pygo_core.mn_run()
-            pygo_core.mn_fini()
+            runloom_c.mn_run()
+            runloom_c.mn_fini()
 
     def test_mn_run_in_child_does_not_hang(self):
         # The originally-reproduced deadlock: a child that calls mn_run() with
         # the parent's (now-dead) hubs.  The reset zeroes the pending counter so
         # mn_run returns immediately instead of waiting on hubs that don't exist.
-        pygo_core.mn_init(4)
+        runloom_c.mn_init(4)
         try:
             for _ in range(8):
-                pygo_core.mn_go(lambda: pygo.sleep(0.3))
+                runloom_c.mn_go(lambda: runloom.sleep(0.3))
             time.sleep(0.02)
 
             def child():
-                pygo_core.mn_run()   # must return, not hang
+                runloom_c.mn_run()   # must return, not hang
                 return 0
 
             rc = run_child(child, timeout=6.0)
             self.assertEqual(rc, 0)
         finally:
-            pygo_core.mn_run()
-            pygo_core.mn_fini()
+            runloom_c.mn_run()
+            runloom_c.mn_fini()
 
 
 class TestForkUnderLoad(unittest.TestCase):
     def test_repeated_forks_under_mn_load(self):
         import asyncio
-        import pygo.aio as paio
+        import runloom.aio as paio
         import threading
 
-        pygo_core.mn_init(4)
+        runloom_c.mn_init(4)
         stop = [False]
 
         def churn():
             while not stop[0]:
                 for _ in range(40):
-                    pygo_core.mn_go(lambda: None)
+                    runloom_c.mn_go(lambda: None)
                 time.sleep(0.001)
 
         t = threading.Thread(target=churn, daemon=True)
@@ -148,8 +148,8 @@ class TestForkUnderLoad(unittest.TestCase):
         finally:
             stop[0] = True
             t.join(timeout=1.0)
-            pygo_core.mn_run()
-            pygo_core.mn_fini()
+            runloom_c.mn_run()
+            runloom_c.mn_fini()
 
 
 class TestIntrospectionInChild(unittest.TestCase):
@@ -158,13 +158,13 @@ class TestIntrospectionInChild(unittest.TestCase):
             # registry was reset -> starts empty, populates with child goroutines
             out = []
             def w():
-                pygo.sleep(0.02)
+                runloom.sleep(0.02)
             def main():
                 for _ in range(3):
-                    pygo.go(w)
-                pygo.sleep(0.005)
-                out.append(pygo_core.goroutine_count())
-            pygo.run(main)
+                    runloom.go(w)
+                runloom.sleep(0.005)
+                out.append(runloom_c.goroutine_count())
+            runloom.run(main)
             return 0 if out and out[0] == 4 else 6
 
         rc = run_child(child)

@@ -3,7 +3,7 @@
 Spawns one goroutine per candidate port and connects to them all at
 once.  This is where goroutines shine over threads: a thousand
 in-flight connect()s cost ~thousands of cheap goroutines, not a
-thousand 8 MB OS threads.  Under pygo.monkey.patch() the ordinary
+thousand 8 MB OS threads.  Under runloom.monkey.patch() the ordinary
 blocking socket.connect parks the goroutine on netpoll instead of the
 OS thread, so they really do overlap.
 
@@ -19,11 +19,11 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 
-import pygo
-import pygo.monkey
-import pygo_core
+import runloom
+import runloom.monkey
+import runloom_c
 
-pygo.monkey.patch()
+runloom.monkey.patch()
 
 
 def probe(host, port, results):
@@ -53,9 +53,9 @@ def main():
     # Candidates: the open ports plus some that are almost certainly closed.
     candidates = sorted(set(open_ports + [40001, 40002, 40003, 40004, 40005]))
 
-    results = pygo_core.Chan(len(candidates))
+    results = runloom_c.Chan(len(candidates))
     for port in candidates:
-        pygo.go(probe, host, port, results)
+        runloom.go(probe, host, port, results)
 
     found = []
     for _ in range(len(candidates)):
@@ -70,4 +70,4 @@ def main():
 
 
 if __name__ == "__main__":
-    pygo.run(main)
+    runloom.run(main)

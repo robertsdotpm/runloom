@@ -13,15 +13,15 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 
-import pygo
-import pygo_core
+import runloom
+import runloom_c
 
 
 class WaitGroup(object):
     """Minimal sync.WaitGroup built on a channel."""
 
     def __init__(self):
-        self.pending = pygo_core.Chan(1024)
+        self.pending = runloom_c.Chan(1024)
         self.total = 0
 
     def add(self, n):
@@ -37,7 +37,7 @@ class WaitGroup(object):
 
 def task(wg, tid):
     try:
-        pygo.sleep(0.01 * (tid + 1))
+        runloom.sleep(0.01 * (tid + 1))
         print("task {0} finished".format(tid))
     finally:
         wg.done()                         # always report, even on error
@@ -48,10 +48,10 @@ def main():
     num_tasks = 5
     wg.add(num_tasks)
     for tid in range(num_tasks):
-        pygo.go(task, wg, tid)
+        runloom.go(task, wg, tid)
     wg.wait()
     print("all {0} tasks done".format(num_tasks))
 
 
 if __name__ == "__main__":
-    pygo.run(main)
+    runloom.run(main)

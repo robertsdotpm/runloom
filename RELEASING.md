@@ -1,9 +1,10 @@
-# Releasing pygo-runtime to PyPI
+# Releasing runloom to PyPI
 
-The PyPI distribution name is **`pygo-runtime`** (import names stay `pygo` /
-`pygo_core`). Version lives in `pyproject.toml` (`[project] version`).
+The PyPI distribution name is **`runloom`** — same as the import names
+(`import runloom` / `import runloom_c`). Version lives in
+`pyproject.toml` (`[project] version`).
 
-pygo is a C-extension package, so for users to `pip install pygo-runtime`
+runloom is a C-extension package, so for users to `pip install runloom`
 without a compiler we publish **prebuilt wheels**. There is **no hosted CI**
 in this project (deliberately — see `CLAUDE.md`), so wheels are built by hand,
 once per platform, per release.
@@ -26,7 +27,7 @@ else.
 Install the maintainer tooling:
 
 ```bash
-pip install "pygo-runtime[dev]"     # build + twine + cibuildwheel
+pip install "runloom[dev]"     # build + twine + cibuildwheel
 ```
 
 - **Linux wheels** need **Docker** (cibuildwheel builds inside manylinux
@@ -57,7 +58,7 @@ pip install "pygo-runtime[dev]"     # build + twine + cibuildwheel
 
    ```bash
    python -m venv /tmp/t && CC=/bin/false /tmp/t/bin/pip install wheelhouse/<your>.whl
-   /tmp/t/bin/python -c "import pygo, pygo_core; print(pygo_core.backend(), pygo_core.netpoll_backend())"
+   /tmp/t/bin/python -c "import runloom, runloom_c; print(runloom_c.backend(), runloom_c.netpoll_backend())"
    ```
 
 5. **Upload** (do a TestPyPI dry run first if you like:
@@ -67,7 +68,7 @@ pip install "pygo-runtime[dev]"     # build + twine + cibuildwheel
    twine upload dist/*.tar.gz wheelhouse/*.whl
    ```
 
-That's it — `pip install pygo-runtime` now serves wheels to everyone on a
+That's it — `pip install runloom` now serves wheels to everyone on a
 covered platform, and the sdist to everyone else.
 
 ## Quick local build without cibuildwheel

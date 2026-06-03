@@ -1,8 +1,8 @@
-site_name: pygo
+site_name: runloom
 site_description: Go-style stackful coroutines for Python
-site_url: https://pygo.readthedocs.io/
-repo_url: https://github.com/robertsdotpm/pygo
-repo_name: robertsdotpm/pygo
+site_url: https://runloom.readthedocs.io/
+repo_url: https://github.com/robertsdotpm/runloom
+repo_name: robertsdotpm/runloom
 edit_uri: edit/main/docs/
 
 theme:

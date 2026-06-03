@@ -1,4 +1,4 @@
-# bootstrap_compiler.ps1 -- Windows compiler bootstrapper for pygo.
+# bootstrap_compiler.ps1 -- Windows compiler bootstrapper for runloom.
 #
 # Strategy: prefer the MSVC Build Tools (best Python wheel compatibility),
 # fall back to MinGW-w64 (smaller download, works on Win 7+), then clang.

@@ -1,12 +1,12 @@
 """Cooperative multiprocessing: Connection (Pipe) recv / send / poll.
 
-Nothing in pygo.monkey reimplements multiprocessing -- it cooperates because
+Nothing in runloom.monkey reimplements multiprocessing -- it cooperates because
 the primitives it is built on are cooperative.  On POSIX
 multiprocessing.connection.Connection reads its pipe with os.read and waits
 with select/poll, all patched, so Connection.recv parks on wait_fd and
 Process.join / Queue.get / Pool (built on Connection) come along.
 
-The one thing pygo.monkey *does* patch: Connection._recv/_send/_close capture
+The one thing runloom.monkey *does* patch: Connection._recv/_send/_close capture
 os.read/os.write/os.close as DEFAULT ARGUMENTS at import time
 
     _read = os.read
@@ -20,16 +20,16 @@ them to the cooperative versions.  This file imports multiprocessing at the top
 fix.
 
 Coverage is intentionally IN-PROCESS -- a Pipe's two ends used by two
-goroutines -- because that isolates exactly what pygo is responsible for (a
+goroutines -- because that isolates exactly what runloom is responsible for (a
 blocked recv parks on the cooperative os.read and yields), with no fork.
 
 CAVEAT (not tested here): cross-process multiprocessing works, but only with
 the "forkserver" or "spawn" start methods.  The "fork" start method inherits
-pygo's background threads, and a fork of a multi-threaded process can deadlock
+runloom's background threads, and a fork of a multi-threaded process can deadlock
 the child (Python warns: "use of fork() may lead to deadlocks in the child").
-Single short-lived forks usually survive, but a long-lived pygo process doing
+Single short-lived forks usually survive, but a long-lived runloom process doing
 several fork-based multiprocessing operations reliably wedges.  Use forkserver
-or spawn under pygo.
+or spawn under runloom.
 
 Adapted from CPython Lib/test/_test_multiprocessing (_TestConnection) and the
 pipe round-trip patterns in libuv test/test-pipe-*.c.
@@ -40,9 +40,9 @@ import os
 import platform
 import unittest
 
-import pygo
-import pygo.monkey
-import pygo_core
+import runloom
+import runloom.monkey
+import runloom_c
 
 _IS_WINDOWS = platform.system() == "Windows"
 _Connection = multiprocessing.connection.Connection
@@ -57,19 +57,19 @@ def _drive(fn):
         except BaseException as e:   # noqa: BLE001
             box[1] = e
 
-    pygo_core.go(runner)
-    pygo_core.run()
+    runloom_c.go(runner)
+    runloom_c.run()
     if box[1] is not None:
         raise box[1]
     return box[0]
 
 
 def setUpModule():
-    pygo.monkey.patch()
+    runloom.monkey.patch()
 
 
 def tearDownModule():
-    pygo.monkey.unpatch()
+    runloom.monkey.unpatch()
 
 
 @unittest.skipIf(_IS_WINDOWS, "POSIX Connection (os.read) path")
@@ -119,15 +119,15 @@ class TestConnectionInProcess(unittest.TestCase):
             def ticker():
                 while not stop["v"]:
                     ticks.append(1)
-                    pygo.sleep(0.003)
+                    runloom.sleep(0.003)
 
             def sender():
                 for _ in range(8):
-                    pygo.sleep(0.004)       # ~32 ms before the message lands
+                    runloom.sleep(0.004)       # ~32 ms before the message lands
                 b.send(("payload", 99))
 
-            pygo_core.go(ticker)
-            pygo_core.go(sender)
+            runloom_c.go(ticker)
+            runloom_c.go(sender)
             got = a.recv()                  # blocks until the sender sends
             stop["v"] = True
             a.close(); b.close()
@@ -171,20 +171,20 @@ class TestConnectionInProcess(unittest.TestCase):
             def ticker():
                 while not stop["v"]:
                     ticks.append(1)
-                    pygo.sleep(0.003)
+                    runloom.sleep(0.003)
 
             def reader(out):
                 out.append(b.recv_bytes())
 
             out = []
-            pygo_core.go(ticker)
-            pygo_core.go(lambda: reader(out))
+            runloom_c.go(ticker)
+            runloom_c.go(lambda: reader(out))
             a.send_bytes(payload)
             # let the reader drain
             import time
             t0 = time.monotonic()
             while not out and time.monotonic() - t0 < 5:
-                pygo.sleep(0.003)
+                runloom.sleep(0.003)
             stop["v"] = True
             a.close(); b.close()
             return (out[0] if out else None), len(ticks)
@@ -214,12 +214,12 @@ class TestSyncPrimitives(unittest.TestCase):
                 lock.acquire()
                 order.append("A-lock")
                 for _ in range(6):
-                    pygo.sleep(0.004)
+                    runloom.sleep(0.004)
                 order.append("A-unlock")
                 lock.release()
 
             def waiter():
-                pygo.sleep(0.002)
+                runloom.sleep(0.002)
                 lock.acquire()            # blocks until holder releases
                 order.append("B-lock")
                 lock.release()
@@ -227,15 +227,15 @@ class TestSyncPrimitives(unittest.TestCase):
             def ticker():
                 while "B-lock" not in order:
                     ticks.append(1)
-                    pygo.sleep(0.003)
+                    runloom.sleep(0.003)
 
-            pygo_core.go(holder)
-            pygo_core.go(waiter)
-            pygo_core.go(ticker)
+            runloom_c.go(holder)
+            runloom_c.go(waiter)
+            runloom_c.go(ticker)
             import time
             t0 = time.monotonic()
             while "B-lock" not in order and time.monotonic() - t0 < 5:
-                pygo.sleep(0.005)
+                runloom.sleep(0.005)
             return order, len(ticks)
         order, ticks = _drive(body)
         self.assertIn("B-lock", order)

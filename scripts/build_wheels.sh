@@ -17,7 +17,7 @@
 # Then publish everything at once (see RELEASING.md):
 #   twine upload dist/*.tar.gz wheelhouse/*.whl
 #
-# Requires the dev tools:  pip install "pygo-runtime[dev]"   (build + cibuildwheel)
+# Requires the dev tools:  pip install "runloom[dev]"   (build + cibuildwheel)
 set -eu
 
 cd "$(dirname "$0")/.."
@@ -34,7 +34,7 @@ run_tool() {
     elif command -v pipx >/dev/null 2>&1; then
         pipx run "$mod" "$@"
     else
-        echo "error: '$mod' is not installed. Run:  $PY -m pip install \"pygo-runtime[dev]\"" >&2
+        echo "error: '$mod' is not installed. Run:  $PY -m pip install \"runloom[dev]\"" >&2
         echo "       (or install pipx)" >&2
         exit 1
     fi

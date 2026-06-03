@@ -1,7 +1,7 @@
 """Memory + scheduler stability soak tests.
 
 Marked SKIP by default so the normal test suite stays fast.  Run with:
-    PYGO_RUN_SOAK=1 python -m unittest tests.test_soak
+    RUNLOOM_RUN_SOAK=1 python -m unittest tests.test_soak
 
 Tests here exercise long lifetimes and high spawn rates to catch:
   * stack / coro / g leaks (RSS climbs over many drains)
@@ -19,10 +19,10 @@ import os
 import time
 import unittest
 
-import pygo_core
+import runloom_c
 
 
-_RUN = os.environ.get("PYGO_RUN_SOAK", "").strip() not in ("", "0", "no", "false")
+_RUN = os.environ.get("RUNLOOM_RUN_SOAK", "").strip() not in ("", "0", "no", "false")
 
 
 def _rss_mb():
@@ -34,7 +34,7 @@ def _rss_mb():
         return -1.0
 
 
-@unittest.skipUnless(_RUN, "set PYGO_RUN_SOAK=1 to enable")
+@unittest.skipUnless(_RUN, "set RUNLOOM_RUN_SOAK=1 to enable")
 class TestSpawnSoak(unittest.TestCase):
     def test_spawn_drain_million(self):
         """1M total spawn/drain cycles in batches of 10k.  RSS measured
@@ -45,15 +45,15 @@ class TestSpawnSoak(unittest.TestCase):
 
         # Warmup batch: stack pool, g slab, parker pool all populate.
         for _ in range(per):
-            pygo_core.go(lambda: None)
-        pygo_core.run()
+            runloom_c.go(lambda: None)
+        runloom_c.run()
         gc.collect()
         rss_baseline = _rss_mb()
 
         for i in range(1, batches):
             for _ in range(per):
-                pygo_core.go(lambda: None)
-            pygo_core.run()
+                runloom_c.go(lambda: None)
+            runloom_c.run()
             if i % 10 == 0:
                 gc.collect()
                 rss = _rss_mb()
@@ -70,13 +70,13 @@ class TestSpawnSoak(unittest.TestCase):
             "RSS grew by %.1f MiB across 990k post-warmup gs" % growth)
 
 
-@unittest.skipUnless(_RUN, "set PYGO_RUN_SOAK=1 to enable")
+@unittest.skipUnless(_RUN, "set RUNLOOM_RUN_SOAK=1 to enable")
 class TestChannelSoak(unittest.TestCase):
     def test_chan_ping_pong_100k(self):
         """100k ping-pong cycles between two goroutines through a
         single channel.  Catches g/snap-block growth in the C path."""
-        ch_a = pygo_core.Chan(0)
-        ch_b = pygo_core.Chan(0)
+        ch_a = runloom_c.Chan(0)
+        ch_b = runloom_c.Chan(0)
 
         def pinger():
             for _ in range(100_000):
@@ -89,9 +89,9 @@ class TestChannelSoak(unittest.TestCase):
                 ch_b.send(1)
 
         t0 = time.monotonic()
-        pygo_core.go(pinger)
-        pygo_core.go(ponger)
-        pygo_core.run()
+        runloom_c.go(pinger)
+        runloom_c.go(ponger)
+        runloom_c.run()
         dt = time.monotonic() - t0
         print("[soak] 100k ping-pong in %.2fs (%.1f ns/round)"
               % (dt, dt * 1e9 / 100_000), flush=True)

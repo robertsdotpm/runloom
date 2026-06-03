@@ -12,7 +12,7 @@ import sys
 import time
 
 sys.path.insert(0, "src")
-import pygo_core
+import runloom_c
 
 PAYLOAD = b"hellopyg"   # 8 bytes, same as the single-thread + Go benches
 
@@ -26,7 +26,7 @@ def _bound_port(listener):
 
 
 def run(H, N, M):
-    listener = pygo_core.TCPConn.listen("127.0.0.1", 0, backlog=N + 16)
+    listener = runloom_c.TCPConn.listen("127.0.0.1", 0, backlog=N + 16)
     port = _bound_port(listener)
 
     def make_handler(conn):
@@ -43,12 +43,12 @@ def run(H, N, M):
     def server():
         for _ in range(N):
             c = listener.accept()
-            pygo_core.mn_go(make_handler(c))
+            runloom_c.mn_go(make_handler(c))
         listener.close()
 
     def make_client():
         def client():
-            c = pygo_core.TCPConn.connect("127.0.0.1", port)
+            c = runloom_c.TCPConn.connect("127.0.0.1", port)
             buf = bytearray(len(PAYLOAD))
             for _ in range(M):
                 c.send_all(PAYLOAD)
@@ -56,14 +56,14 @@ def run(H, N, M):
             c.close()
         return client
 
-    pygo_core.mn_init(H)
-    pygo_core.mn_go(server)
+    runloom_c.mn_init(H)
+    runloom_c.mn_go(server)
     t0 = time.perf_counter()
     for _ in range(N):
-        pygo_core.mn_go(make_client())
-    pygo_core.mn_run()
+        runloom_c.mn_go(make_client())
+    runloom_c.mn_run()
     dt = time.perf_counter() - t0
-    pygo_core.mn_fini()
+    runloom_c.mn_fini()
     return dt
 
 

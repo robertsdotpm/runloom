@@ -1,12 +1,12 @@
 # M:N parallelism
 
-The default pygo scheduler runs **all** goroutines on a single OS
+The default runloom scheduler runs **all** goroutines on a single OS
 thread.  This is the right model for I/O-bound work -- there's no
 contention, no synchronisation, no cache-line ping-pong, and context
 switches are 80 ns of asm.
 
 But if you have CPU-bound goroutines that you want to spread across
-multiple cores, you need OS threads.  pygo's **M:N scheduler** (M
+multiple cores, you need OS threads.  runloom's **M:N scheduler** (M
 goroutines, N hub threads, work-stealing) gives you that on
 free-threaded Python 3.13t.
 
@@ -28,17 +28,17 @@ free-threaded Python 3.13t.
 ## API surface
 
 ```python
-import pygo_core
+import runloom_c
 
-pygo_core.mn_init(n=8)         # start 8 hub threads
+runloom_c.mn_init(n=8)         # start 8 hub threads
                                 # n defaults to cpu_count() if omitted
 
-pygo_core.mn_go(fn)            # spawn a goroutine on a round-robin hub
+runloom_c.mn_go(fn)            # spawn a goroutine on a round-robin hub
                                 # returns a G handle
 
-pygo_core.mn_run()             # wait for everyone; returns total completed
+runloom_c.mn_run()             # wait for everyone; returns total completed
 
-pygo_core.mn_fini()            # tear down the hub pool
+runloom_c.mn_fini()            # tear down the hub pool
 ```
 
 The M:N scheduler is separate from the single-threaded one; you call
@@ -47,7 +47,7 @@ The M:N scheduler is separate from the single-threaded one; you call
 ## Example: parallel SHA-256
 
 ```python
-import hashlib, pygo_core, time
+import hashlib, runloom_c, time
 
 DATA = b"x" * 4096
 N = 100
@@ -57,13 +57,13 @@ def hash_loop():
     for _ in range(ITERS):
         hashlib.sha256(DATA).digest()
 
-pygo_core.mn_init(n=8)
+runloom_c.mn_init(n=8)
 t0 = time.time()
 for _ in range(N):
-    pygo_core.mn_go(hash_loop)
-pygo_core.mn_run()
+    runloom_c.mn_go(hash_loop)
+runloom_c.mn_run()
 print("8 hubs:", time.time() - t0, "s")
-pygo_core.mn_fini()
+runloom_c.mn_fini()
 ```
 
 Measured on 3.13t (GIL disabled, Linux x86_64, 8 cores):
@@ -76,7 +76,7 @@ Measured on 3.13t (GIL disabled, Linux x86_64, 8 cores):
 | 8 | 236 ms | 2.12 M ops/s | **2.50×** |
 
 For comparison: `threading.Thread` × 8 on the same hardware hits
-2.24 M ops/s.  pygo matches that within ~5% while keeping the
+2.24 M ops/s.  runloom matches that within ~5% while keeping the
 goroutine model (cheap spawn, no per-thread overhead).
 
 ## How it works
@@ -106,11 +106,11 @@ producers on hub A and consumers on hub B exchange via the same
 channel object:
 
 ```python
-import pygo_core
+import runloom_c
 
-pygo_core.mn_init(n=4)
+runloom_c.mn_init(n=4)
 
-ch = pygo_core.Chan(100)
+ch = runloom_c.Chan(100)
 
 def producer():
     for i in range(1000):
@@ -122,10 +122,10 @@ def consumer():
         total += v
     print("consumed:", total)
 
-pygo_core.mn_go(producer)
-pygo_core.mn_go(consumer)
-pygo_core.mn_run()
-pygo_core.mn_fini()
+runloom_c.mn_go(producer)
+runloom_c.mn_go(consumer)
+runloom_c.mn_run()
+runloom_c.mn_fini()
 ```
 
 ## Network I/O on M:N
@@ -136,10 +136,10 @@ your accept loop and connection handlers stay on the same hub by
 default, which is good for cache locality:
 
 ```python
-import pygo, pygo.monkey, pygo_core, socket
+import runloom, runloom.monkey, runloom_c, socket
 
-pygo.monkey.patch()
-pygo_core.mn_init(n=4)
+runloom.monkey.patch()
+runloom_c.mn_init(n=4)
 
 def handle(conn):
     while True:
@@ -155,11 +155,11 @@ def accept_loop():
     srv.listen(128)
     while True:
         conn, _ = srv.accept()
-        pygo_core.mn_go(lambda c=conn: handle(c))
+        runloom_c.mn_go(lambda c=conn: handle(c))
 
-pygo_core.mn_go(accept_loop)
-pygo_core.mn_run()
-pygo_core.mn_fini()
+runloom_c.mn_go(accept_loop)
+runloom_c.mn_run()
+runloom_c.mn_fini()
 ```
 
 On a 4-core machine, four concurrent client requests get processed
@@ -190,8 +190,8 @@ yield naturally, preemption applies on whichever hub it's running on
 without affecting the others.
 
 ```python
-pygo_core.mn_init(n=8)
-pygo_core.preempt_init(quantum_us=10_000)
+runloom_c.mn_init(n=8)
+runloom_c.preempt_init(quantum_us=10_000)
 ```
 
 ## Caveats
@@ -223,7 +223,7 @@ practice this evens out under steady load.
 ## Inspecting hub state
 
 ```python
-pygo_core.mn_stats()
+runloom_c.mn_stats()
 # {'hubs': 8,
 #  'ready_per_hub': [3, 0, 2, 1, 0, 0, 4, 0],
 #  'completed_per_hub': [12431, 9854, ...],

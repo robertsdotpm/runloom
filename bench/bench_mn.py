@@ -1,9 +1,9 @@
-"""Phase C M:N bench: pygo vs asyncio vs plain Python threading.
+"""Phase C M:N bench: runloom vs asyncio vs plain Python threading.
 
 Workload: N goroutines / tasks each doing M SHA-256 iterations of
 a 500-byte buffer (CPU-bound, no I/O).
 
-On free-threaded Python 3.13t (GIL disabled) pygo's M:N hub pool
+On free-threaded Python 3.13t (GIL disabled) runloom's M:N hub pool
 gets actual core-level parallelism.  asyncio is still single-OS-
 thread (no GIL benefit) and threading hits the same per-thread
 overhead but without our work-stealing.
@@ -19,7 +19,7 @@ import threading
 import time
 
 sys.path.insert(0, "src")
-import pygo_core
+import runloom_c
 
 
 N = 100
@@ -32,15 +32,15 @@ def work(n):
         x = hashlib.sha256(x).digest()
 
 
-# ----- pygo M:N -----
-def bench_pygo(n_hubs):
-    pygo_core.mn_init(n_hubs)
+# ----- runloom M:N -----
+def bench_runloom(n_hubs):
+    runloom_c.mn_init(n_hubs)
     t0 = time.perf_counter()
     for _ in range(N):
-        pygo_core.mn_go(lambda: work(ITER))
-    pygo_core.mn_run()
+        runloom_c.mn_go(lambda: work(ITER))
+    runloom_c.mn_run()
     t = time.perf_counter() - t0
-    pygo_core.mn_fini()
+    runloom_c.mn_fini()
     return t
 
 
@@ -97,8 +97,8 @@ def main():
     print()
     print("                              wall          throughput")
     for n in (1, 2, 4, 8):
-        t = bench_pygo(n)
-        print("pygo M:N {0:>2} hubs:           {1}".format(n, fmt(t)))
+        t = bench_runloom(n)
+        print("runloom M:N {0:>2} hubs:           {1}".format(n, fmt(t)))
     print()
     t = bench_asyncio()
     print("asyncio (1 thread):          {0}".format(fmt(t)))

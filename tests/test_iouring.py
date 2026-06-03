@@ -4,22 +4,22 @@ import tempfile
 import time
 import unittest
 
-import pygo_core
+import runloom_c
 
 
-@unittest.skipUnless(pygo_core.iouring_available(),
+@unittest.skipUnless(runloom_c.iouring_available(),
                      "io_uring not available (need Linux >= 5.1)")
 class TestIouring(unittest.TestCase):
     def test_write_then_read(self):
         path = tempfile.mktemp()
         fd = os.open(path, os.O_RDWR | os.O_CREAT)
         try:
-            data = b"hello pygo io_uring" * 100
-            n = pygo_core.file_write(fd, data)
+            data = b"hello runloom io_uring" * 100
+            n = runloom_c.file_write(fd, data)
             self.assertEqual(n, len(data))
 
             buf = bytearray(len(data))
-            n = pygo_core.file_read(fd, buf, len(data), 0)
+            n = runloom_c.file_read(fd, buf, len(data), 0)
             self.assertEqual(n, len(data))
             self.assertEqual(bytes(buf), data)
         finally:
@@ -32,7 +32,7 @@ class TestIouring(unittest.TestCase):
         try:
             os.write(fd, b"abcdefghij")
             buf = bytearray(5)
-            n = pygo_core.file_read(fd, buf, 5, 0)
+            n = runloom_c.file_read(fd, buf, 5, 0)
             self.assertEqual(n, 5)
             self.assertEqual(bytes(buf), b"abcde")
         finally:
@@ -46,7 +46,7 @@ class TestIouring(unittest.TestCase):
         def worker(path):
             fd = os.open(path, os.O_RDONLY)
             buf = bytearray(11)
-            pygo_core.file_read(fd, buf, 11, 0)
+            runloom_c.file_read(fd, buf, 11, 0)
             out.append(bytes(buf))
             os.close(fd)
 
@@ -54,8 +54,8 @@ class TestIouring(unittest.TestCase):
         with open(path, "wb") as f:
             f.write(b"hello world")
 
-        pygo_core.go(lambda: worker(path))
-        pygo_core.run()
+        runloom_c.go(lambda: worker(path))
+        runloom_c.run()
         os.unlink(path)
 
         self.assertEqual(out, [b"hello world"])
@@ -75,18 +75,18 @@ class TestIouring(unittest.TestCase):
             fd = os.open(path, os.O_RDONLY)
             buf = bytearray(4096)
             events.append("read-start")
-            pygo_core.file_read(fd, buf, 4096, 0)
+            runloom_c.file_read(fd, buf, 4096, 0)
             events.append("read-done")
             os.close(fd)
 
         def runner():
             for i in range(5):
                 events.append("tick-" + str(i))
-                pygo_core.sched_yield()
+                runloom_c.sched_yield()
 
-        pygo_core.go(reader)
-        pygo_core.go(runner)
-        pygo_core.run()
+        runloom_c.go(reader)
+        runloom_c.go(runner)
+        runloom_c.run()
         os.unlink(path)
 
         # Reader starts before runner's first tick (both go() calls happen
@@ -110,9 +110,9 @@ class TestFallback(unittest.TestCase):
     TestIouring above when io_uring is enabled."""
 
     def test_function_exists(self):
-        self.assertTrue(callable(pygo_core.file_read))
-        self.assertTrue(callable(pygo_core.file_write))
-        self.assertTrue(callable(pygo_core.iouring_available))
+        self.assertTrue(callable(runloom_c.file_read))
+        self.assertTrue(callable(runloom_c.file_write))
+        self.assertTrue(callable(runloom_c.iouring_available))
 
 
 if __name__ == "__main__":

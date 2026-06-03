@@ -1,9 +1,9 @@
-"""Memory + stack-footprint profiling for pygo goroutines.
+"""Memory + stack-footprint profiling for runloom goroutines.
 
-Three lenses, all from stdlib + pygo_core's own introspection -- no external
+Three lenses, all from stdlib + runloom_c's own introspection -- no external
 tools, so it runs anywhere the ext builds:
 
-  1. stack HWM  -- pygo *paints* goroutine stacks, so pygo_core.stats()
+  1. stack HWM  -- runloom *paints* goroutine stacks, so runloom_c.stats()
      ['stack_hwm'] is the high-water mark actually touched. Tells us whether
      the 32 KB default is over- or under-provisioned for a given Python call
      depth (ties to F4 and the stack-sizing strategy in docs/).
@@ -19,7 +19,7 @@ import resource
 import sys
 import tracemalloc
 
-import pygo_core
+import runloom_c
 
 from bench.gil import ensure_nogil
 from bench.harness import default_pin_set, pin
@@ -33,7 +33,7 @@ def rss_mb():
 def recurse_then_yield(depth):
     """Recurse to `depth` nested Python frames, then yield AT THE BOTTOM.
 
-    pygo's stack paint-sweep runs at swap-out, so the goroutine must be
+    runloom's stack paint-sweep runs at swap-out, so the goroutine must be
     suspended while its stack is deep for the high-water mark to capture the
     real usage -- a synchronous recurse-and-return is back to a shallow
     frame before any sweep sees it (that is why an un-yielded recursion
@@ -41,7 +41,7 @@ def recurse_then_yield(depth):
     """
     if depth > 0:
         return recurse_then_yield(depth - 1)
-    pygo_core.sched_yield()
+    runloom_c.sched_yield()
     return 0
 
 
@@ -54,21 +54,21 @@ def stack_hwm():
     default budget and the implied C-stack cost per nested Python frame.
     """
     print("== stack high-water mark vs Python recursion depth (yield-at-depth) ==")
-    size = pygo_core.get_stack_size()
+    size = runloom_c.get_stack_size()
     print("default goroutine stack: %d bytes (%d KB)" % (size, size // 1024))
     print("  %6s  %10s  %8s  %12s" % ("depth", "stack_hwm", "% of 32K", "headroom"))
     points = {}
     for depth in (0, 10, 50, 100, 200, 400, 800):
-        pygo_core.sched_reset()
+        runloom_c.sched_reset()
 
         def worker(d=depth):
             recurse_then_yield(d)
         # >=2 goroutines so yields actually swap (and paint) rather than
         # idle the run loop.
         for _ in range(8):
-            pygo_core.go(worker)
-        pygo_core.run()
-        hwm = pygo_core.stats()["stack_hwm"]
+            runloom_c.go(worker)
+        runloom_c.run()
+        hwm = runloom_c.stats()["stack_hwm"]
         points[depth] = hwm
         pct = 100.0 * hwm / size if size else 0.0
         print("  %6d  %10d  %7.1f%%  %9d B" % (depth, hwm, pct, size - hwm))
@@ -98,15 +98,15 @@ def c_recursion(size):
             nxt = []
             cur.append(nxt)
             cur = nxt
-        pygo_core.sched_reset()
+        runloom_c.sched_reset()
 
         def worker(d=nested):
             json.dumps(d)
-            pygo_core.sched_yield()
+            runloom_c.sched_yield()
         for _ in range(8):
-            pygo_core.go(worker)
-        pygo_core.run()
-        hwm = pygo_core.stats()["stack_hwm"]
+            runloom_c.go(worker)
+        runloom_c.run()
+        hwm = runloom_c.stats()["stack_hwm"]
         if base is None:
             base = hwm
         per = (hwm - base) / depth if depth else 0.0
@@ -122,12 +122,12 @@ def rss_sweep():
     print("  %8s  %10s  %14s" % ("N", "RSS (MB)", "KB/goroutine"))
     base = rss_mb()
     for n in (1000, 5000, 10000, 20000):
-        pygo_core.sched_reset()
+        runloom_c.sched_reset()
         def noop():
             pass
         for _ in range(n):
-            pygo_core.go(noop)
-        pygo_core.run()
+            runloom_c.go(noop)
+        runloom_c.run()
         rss = rss_mb()
         print("  %8d  %10.1f  %14.2f" % (n, rss, (rss - base) * 1024.0 / n))
 
@@ -151,8 +151,8 @@ def main(argv=None):
     ensure_nogil()
     which = (argv or sys.argv[1:] or ["all"])[0]
     pin(default_pin_set(n=8, node=1))
-    print("pygo %s/%s  gil=%s\n"
-          % (pygo_core.backend(), pygo_core.netpoll_backend(),
+    print("runloom %s/%s  gil=%s\n"
+          % (runloom_c.backend(), runloom_c.netpoll_backend(),
              getattr(sys, "_is_gil_enabled", lambda: True)()))
     if which in ("all", "hwm"):
         stack_hwm(); print()

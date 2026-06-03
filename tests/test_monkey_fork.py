@@ -19,22 +19,22 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 import pytest
 
-import pygo            # noqa: E402
-import pygo.monkey     # noqa: E402
-import pygo_core       # noqa: E402
+import runloom            # noqa: E402
+import runloom.monkey     # noqa: E402
+import runloom_c       # noqa: E402
 
 pytestmark = pytest.mark.skipif(not hasattr(os, "fork"), reason="os.fork required")
 
-pygo.monkey.patch()
+runloom.monkey.patch()
 
-CHILD_TIMEOUT = float(os.environ.get("PYGO_FORK_TIMEOUT", "15"))
+CHILD_TIMEOUT = float(os.environ.get("RUNLOOM_FORK_TIMEOUT", "15"))
 
 
 def _coop(workload):
     """Run workload() inside a goroutine, return its result."""
     box = []
-    pygo_core.go(lambda: box.append(workload()), stack_size=8 << 20)
-    pygo_core.run()
+    runloom_c.go(lambda: box.append(workload()), stack_size=8 << 20)
+    runloom_c.run()
     return box[0] if box else None
 
 

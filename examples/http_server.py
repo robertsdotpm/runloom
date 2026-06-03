@@ -1,6 +1,6 @@
 """Tiny HTTP server — and stdlib clients that "just work".
 
-The selling point of pygo.monkey.patch(): code that was written to
+The selling point of runloom.monkey.patch(): code that was written to
 block runs cooperatively, unchanged.  Here a hand-rolled HTTP/1.0
 server accepts connections in blocking style, while several
 urllib.request.urlopen() clients fetch from it concurrently — all on
@@ -16,13 +16,13 @@ from urllib.request import urlopen
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 
-import pygo
-import pygo.monkey
-import pygo_core
+import runloom
+import runloom.monkey
+import runloom_c
 
-pygo.monkey.patch()
+runloom.monkey.patch()
 
-BODY = b"Hello from pygo!\n"
+BODY = b"Hello from runloom!\n"
 NUM_CLIENTS = 5
 
 
@@ -43,7 +43,7 @@ def http_server(ready, n_requests):
     ready.send(s.getsockname()[1])        # tell main which port we got
     for _ in range(n_requests):
         conn, _ = s.accept()
-        pygo.go(serve_one, conn)          # one goroutine per connection
+        runloom.go(serve_one, conn)          # one goroutine per connection
     s.close()
 
 
@@ -53,13 +53,13 @@ def fetcher(fid, port, results):
 
 
 def main():
-    ready = pygo_core.Chan(1)
-    pygo.go(http_server, ready, NUM_CLIENTS)
+    ready = runloom_c.Chan(1)
+    runloom.go(http_server, ready, NUM_CLIENTS)
     port = ready.recv()[0]
 
-    results = pygo_core.Chan(NUM_CLIENTS)
+    results = runloom_c.Chan(NUM_CLIENTS)
     for fid in range(NUM_CLIENTS):
-        pygo.go(fetcher, fid, port, results)
+        runloom.go(fetcher, fid, port, results)
 
     for _ in range(NUM_CLIENTS):
         fid, body = results.recv()[0]
@@ -67,4 +67,4 @@ def main():
 
 
 if __name__ == "__main__":
-    pygo.run(main)
+    runloom.run(main)

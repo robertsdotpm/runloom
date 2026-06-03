@@ -11,7 +11,7 @@ Verifies that:
     submission list (and from there to its local FIFO via the
     g->snap.valid dispatch in hub_main).
   - No segfault from the previously-unlocked shared parked list,
-    and no permanent stuck gs from pygo_sched_wake routing to the
+    and no permanent stuck gs from runloom_sched_wake routing to the
     global sched instead of the hub.
 
 Run with the free-threaded interpreter:
@@ -23,14 +23,14 @@ import threading
 import time
 
 sys.path.insert(0, "src")
-import pygo, pygo.monkey
-import pygo_core
+import runloom, runloom.monkey
+import runloom_c
 
-pygo.monkey.patch()
+runloom.monkey.patch()
 
 N_CLIENTS = 200
 N_HUBS = 4
-PAYLOAD = b"ping-from-pygo-hub" * 8
+PAYLOAD = b"ping-from-runloom-hub" * 8
 
 stats = {"served": 0, "echoed": 0}
 lock = threading.Lock()
@@ -55,7 +55,7 @@ def server(listen_sock, ready_event, target):
             conn, _ = listen_sock.accept()
         except OSError:
             return
-        pygo_core.mn_go(lambda c=conn: handler(c))
+        runloom_c.mn_go(lambda c=conn: handler(c))
 
 
 def client(port):
@@ -83,21 +83,21 @@ def main():
     listen_sock.listen(128)
     port = listen_sock.getsockname()[1]
 
-    pygo_core.mn_init(N_HUBS)
+    runloom_c.mn_init(N_HUBS)
 
     ready_event = threading.Event()
-    pygo_core.mn_go(lambda: server(listen_sock, ready_event, N_CLIENTS))
+    runloom_c.mn_go(lambda: server(listen_sock, ready_event, N_CLIENTS))
     while not ready_event.is_set():
         time.sleep(0.001)
 
     t0 = time.perf_counter()
     for _ in range(N_CLIENTS):
-        pygo_core.mn_go(lambda p=port: client(p))
-    pygo_core.mn_run()
+        runloom_c.mn_go(lambda p=port: client(p))
+    runloom_c.mn_run()
     dt = time.perf_counter() - t0
 
     listen_sock.close()
-    pygo_core.mn_fini()
+    runloom_c.mn_fini()
 
     print(f"  {N_HUBS} hubs, {N_CLIENTS} clients")
     print(f"  wall:    {dt*1000:.1f} ms")

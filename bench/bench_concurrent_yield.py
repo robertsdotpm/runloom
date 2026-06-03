@@ -1,6 +1,6 @@
 """Concurrent-yield stress test for Phase B.
 
-Spawns N goroutines, each yielding K times.  Before Phase B, pygo
+Spawns N goroutines, each yielding K times.  Before Phase B, runloom
 crashed somewhere around 150-200 concurrent yielded goroutines because
 each suspended goroutine's frames stayed linked into one shared cframe
 chain on the OS thread, and CPython traceback walks / recursion checks
@@ -12,21 +12,21 @@ should see clean runs at 500, 1000, 2000 concurrent.
 """
 import sys, time
 sys.path.insert(0, "src")
-import pygo_core
+import runloom_c
 
 
 def make_worker(yields):
     def worker():
         for _ in range(yields):
-            pygo_core.sched_yield()
+            runloom_c.sched_yield()
     return worker
 
 
 def run_burst(n, yields):
     t0 = time.perf_counter()
     for _ in range(n):
-        pygo_core.go(make_worker(yields))
-    pygo_core.run()
+        runloom_c.go(make_worker(yields))
+    runloom_c.run()
     dt = time.perf_counter() - t0
     total_yields = n * yields
     rate = total_yields / dt if dt > 0 else 0
@@ -36,7 +36,7 @@ def run_burst(n, yields):
 
 
 def main():
-    print("pygo concurrent-yield stress test (Phase B)")
+    print("runloom concurrent-yield stress test (Phase B)")
     print("--------------------------------------------")
     # Start small to confirm baseline, then ramp up past where the
     # cliff used to be.

@@ -3,8 +3,8 @@
 libuv's tests are C against its own loop API, so they can't be ported
 mechanically -- but the *scenarios* are the distilled hard cases of async TCP
 (backpressure, half-close, close-mid-write, many concurrent connections,
-stream-order integrity), and they map directly onto pygo's TCPConn (the
-io_uring/netpoll recv/send paths just hardened) and pygo.sync.Socket.
+stream-order integrity), and they map directly onto runloom's TCPConn (the
+io_uring/netpoll recv/send paths just hardened) and runloom.sync.Socket.
 
 These run in-process on the single-thread scheduler (the test_tcpconn.py idiom:
 server + client goroutines cooperate, recv/send park on netpoll readiness).
@@ -25,15 +25,15 @@ import zlib
 
 sys.path.insert(0, "src")
 
-import pygo_core
-import pygo.sync as psync
+import runloom_c
+import runloom.sync as psync
 
 # Prewarm getaddrinfo's deep, non-yielding lazy import chain
 # (encodings.idna -> stringprep -> unicodedata) on the MAIN thread, with its
-# full C stack.  pygo.sync.run()/pygo.runtime.run() do this for you; these
-# tests drive the low-level pygo_core.go/run() path directly, which does not,
+# full C stack.  runloom.sync.run()/runloom.runtime.run() do this for you; these
+# tests drive the low-level runloom_c.go/run() path directly, which does not,
 # so the first getaddrinfo inside a goroutine would otherwise overflow the
-# (small) goroutine stack and crash.  See pygo/sync.py prewarm comment.
+# (small) goroutine stack and crash.  See runloom/sync.py prewarm comment.
 socket.getaddrinfo("127.0.0.1", 0, socket.AF_INET, socket.SOCK_STREAM)
 
 
@@ -60,8 +60,8 @@ def _drive(*goroutines):
         return runner
 
     for g in goroutines:
-        pygo_core.go(wrap(g))
-    pygo_core.run()
+        runloom_c.go(wrap(g))
+    runloom_c.run()
     if box:
         raise box[0]
 
@@ -87,7 +87,7 @@ class TestBackpressure(unittest.TestCase):
         got = [None]
 
         def server():
-            listener = pygo_core.TCPConn.listen("127.0.0.1", 0)
+            listener = runloom_c.TCPConn.listen("127.0.0.1", 0)
             port_holder[0] = _bound_port(listener)
             conn = listener.accept()
             crc = 0
@@ -104,8 +104,8 @@ class TestBackpressure(unittest.TestCase):
 
         def client():
             while port_holder[0] is None:
-                pygo_core.sched_yield()
-            c = pygo_core.TCPConn.connect("127.0.0.1", port_holder[0])
+                runloom_c.sched_yield()
+            c = runloom_c.TCPConn.connect("127.0.0.1", port_holder[0])
             c.send_all(payload)         # blocks/parks repeatedly: backpressure
             c.close()                   # FIN after all buffered bytes flushed
 
@@ -129,7 +129,7 @@ class TestStreamIntegrity(unittest.TestCase):
         got = [None]
 
         def server():
-            listener = pygo_core.TCPConn.listen("127.0.0.1", 0)
+            listener = runloom_c.TCPConn.listen("127.0.0.1", 0)
             port_holder[0] = _bound_port(listener)
             conn = listener.accept()
             crc = 0
@@ -146,8 +146,8 @@ class TestStreamIntegrity(unittest.TestCase):
 
         def client():
             while port_holder[0] is None:
-                pygo_core.sched_yield()
-            c = pygo_core.TCPConn.connect("127.0.0.1", port_holder[0])
+                runloom_c.sched_yield()
+            c = runloom_c.TCPConn.connect("127.0.0.1", port_holder[0])
             off = 0
             for sz in sizes:
                 c.send_all(whole[off:off + sz])
@@ -172,7 +172,7 @@ class TestCloseWhileWriting(unittest.TestCase):
         outcome = [None]
 
         def server():
-            listener = pygo_core.TCPConn.listen("127.0.0.1", 0)
+            listener = runloom_c.TCPConn.listen("127.0.0.1", 0)
             port_holder[0] = _bound_port(listener)
             conn = listener.accept()
             conn.recv(4096)             # take a little, then abandon the peer
@@ -181,8 +181,8 @@ class TestCloseWhileWriting(unittest.TestCase):
 
         def client():
             while port_holder[0] is None:
-                pygo_core.sched_yield()
-            c = pygo_core.TCPConn.connect("127.0.0.1", port_holder[0])
+                runloom_c.sched_yield()
+            c = runloom_c.TCPConn.connect("127.0.0.1", port_holder[0])
             try:
                 c.send_all(payload)
                 outcome[0] = "completed"
@@ -196,14 +196,14 @@ class TestCloseWhileWriting(unittest.TestCase):
         self.assertIn(
             outcome[0] if isinstance(outcome[0], str) else outcome[0][0],
             ("completed", "oserror"))
-        self.assertEqual(pygo_core._self_check(0), 0)
+        self.assertEqual(runloom_c._self_check(0), 0)
 
 
 class TestHalfClose(unittest.TestCase):
     """libuv test-tcp-shutdown-after-write: the client writes its request and
     shuts down its WRITE half; the server reads to EOF, then -- the connection
     still being open the other direction -- sends a reply the client reads.
-    Uses pygo.sync.Socket (TCPConn has no shutdown())."""
+    Uses runloom.sync.Socket (TCPConn has no shutdown())."""
 
     def test_shutdown_wr_then_read_reply(self):
         port_holder = [None]
@@ -230,7 +230,7 @@ class TestHalfClose(unittest.TestCase):
 
         def client():
             while port_holder[0] is None:
-                pygo_core.sched_yield()
+                runloom_c.sched_yield()
             s = psync.tcp_connect("127.0.0.1", port_holder[0])
             s.sendall(req)
             s.shutdown(socket.SHUT_WR)  # half-close: signals EOF to the server
@@ -266,11 +266,11 @@ class TestManyConcurrentConnections(unittest.TestCase):
             return run
 
         def server():
-            listener = pygo_core.TCPConn.listen("127.0.0.1", 0)
+            listener = runloom_c.TCPConn.listen("127.0.0.1", 0)
             port_holder[0] = _bound_port(listener)
             for _ in range(N):
                 conn = listener.accept()
-                pygo_core.go(handler(conn))   # one goroutine per connection
+                runloom_c.go(handler(conn))   # one goroutine per connection
             listener.close()
 
         def make_client(i):
@@ -278,8 +278,8 @@ class TestManyConcurrentConnections(unittest.TestCase):
 
             def run():
                 while port_holder[0] is None:
-                    pygo_core.sched_yield()
-                c = pygo_core.TCPConn.connect("127.0.0.1", port_holder[0])
+                    runloom_c.sched_yield()
+                c = runloom_c.TCPConn.connect("127.0.0.1", port_holder[0])
                 c.send_all(payload)
                 buf = bytearray()
                 while len(buf) < len(payload):

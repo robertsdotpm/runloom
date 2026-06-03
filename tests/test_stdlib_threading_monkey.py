@@ -1,4 +1,4 @@
-"""CPython's OWN Lib/test/lock_tests.py, run verbatim against pygo.monkey's
+"""CPython's OWN Lib/test/lock_tests.py, run verbatim against runloom.monkey's
 cooperative threading primitives.
 
 monkey.patch() replaces threading.Lock / RLock / Event / Condition / Semaphore
@@ -14,7 +14,7 @@ into the hosted classes' ``locktype``/``eventtype``/... attributes.
 import pytest
 
 from _monkey_stdlib import (HAVE_CPYTHON_TESTS, REALTHREAD, REALTHREAD_REASON, hosted)
-import pygo.monkey
+import runloom.monkey
 
 pytestmark = [
     pytest.mark.skipif(
@@ -24,21 +24,21 @@ pytestmark = [
 ]
 
 if HAVE_CPYTHON_TESTS:
-    pygo.monkey.patch()
+    runloom.monkey.patch()
     import threading
     from test import lock_tests as _L
 
     # (The CoLock/CoRLock weakref divergence the verbatim run first surfaced is
     # FIXED -- the Co* types now carry a __weakref__ slot -- so no skips here.)
-    TestPygoLock = hosted(_L.LockTests, "TestPygoLock",
+    TestRunloomLock = hosted(_L.LockTests, "TestRunloomLock",
                           attrs={"locktype": staticmethod(threading.Lock)})
-    TestPygoRLock = hosted(_L.RLockTests, "TestPygoRLock",
+    TestRunloomRLock = hosted(_L.RLockTests, "TestRunloomRLock",
                            attrs={"locktype": staticmethod(threading.RLock)})
-    TestPygoEvent = hosted(_L.EventTests, "TestPygoEvent",
+    TestRunloomEvent = hosted(_L.EventTests, "TestRunloomEvent",
                            attrs={"eventtype": staticmethod(threading.Event)})
-    TestPygoCondition = hosted(_L.ConditionTests, "TestPygoCondition",
+    TestRunloomCondition = hosted(_L.ConditionTests, "TestRunloomCondition",
                                attrs={"condtype": staticmethod(threading.Condition)})
-    TestPygoSemaphore = hosted(_L.SemaphoreTests, "TestPygoSemaphore",
+    TestRunloomSemaphore = hosted(_L.SemaphoreTests, "TestRunloomSemaphore",
                                attrs={"semtype": staticmethod(threading.Semaphore)})
-    TestPygoBoundedSemaphore = hosted(_L.BoundedSemaphoreTests, "TestPygoBoundedSemaphore",
+    TestRunloomBoundedSemaphore = hosted(_L.BoundedSemaphoreTests, "TestRunloomBoundedSemaphore",
                                       attrs={"semtype": staticmethod(threading.BoundedSemaphore)})

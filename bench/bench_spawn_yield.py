@@ -1,4 +1,4 @@
-"""pygo bench: spawn cost + yield cost vs asyncio.
+"""runloom bench: spawn cost + yield cost vs asyncio.
 
 Both libraries run the same shape -- N coros, each yields M times.
 """
@@ -8,22 +8,22 @@ import time
 
 sys.path.insert(0, "src")
 
-import pygo
-import pygo_core
+import runloom
+import runloom_c
 
 
-def bench_pygo(n_coros, yields_per_coro):
+def bench_runloom(n_coros, yields_per_coro):
     def worker(n):
         for _ in range(n):
-            pygo.yield_()
+            runloom.yield_()
 
     t0 = time.perf_counter()
     for _ in range(n_coros):
-        pygo.go(worker, yields_per_coro)
+        runloom.go(worker, yields_per_coro)
     spawn = time.perf_counter() - t0
 
     t0 = time.perf_counter()
-    pygo.run()
+    runloom.run()
     run_t = time.perf_counter() - t0
     total = n_coros * yields_per_coro
     return spawn, run_t, total
@@ -53,7 +53,7 @@ def fmt_throughput(t, ops):
 
 
 def main():
-    print("backend:", pygo_core.backend())
+    print("backend:", runloom_c.backend())
     print()
     cases = [
         (100,   100),
@@ -62,10 +62,10 @@ def main():
         (10000, 100),
     ]
     print("{0:>8}  {1:>8}  {2:>14}  {3:>14}  {4:>14}  {5:>14}  {6:>10}".format(
-        "N coros", "yields", "pygo spawn", "pygo run", "pygo K/s",
+        "N coros", "yields", "runloom spawn", "runloom run", "runloom K/s",
         "asyncio run", "asyncio K/s"))
     for n, y in cases:
-        ps, pr, total = bench_pygo(n, y)
+        ps, pr, total = bench_runloom(n, y)
         at, _ = bench_asyncio(n, y)
         print("{0:>8d}  {1:>8d}  {2:>11.3f} ms  {3:>11.3f} ms  {4:>14}  {5:>11.3f} ms  {6:>14}".format(
             n, y, ps * 1000, pr * 1000, fmt_throughput(pr, total),

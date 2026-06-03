@@ -1,6 +1,6 @@
 """Property-based tests for channel + select semantics (single-thread sched).
 
-These run on the deterministic single-thread scheduler (pygo_core.go +
+These run on the deterministic single-thread scheduler (runloom_c.go +
 run), so Hypothesis can explore buffer sizes, value sequences, and
 producer/consumer fan-outs while we assert the algebraic invariants Go
 channels must satisfy:
@@ -20,7 +20,7 @@ import sys
 
 sys.path.insert(0, "src")
 
-import pygo_core
+import runloom_c
 from hypothesis import given, settings, strategies as st
 
 SETTINGS = settings(max_examples=200, deadline=None)
@@ -33,7 +33,7 @@ ints = st.integers(min_value=-(10 ** 6), max_value=10 ** 6)
 def test_buffered_fifo(cap, values):
     """A single producer/consumer over a buffered channel preserves order
     and loses nothing, for any cap and value sequence."""
-    ch = pygo_core.Chan(cap)
+    ch = runloom_c.Chan(cap)
     out = []
 
     def producer():
@@ -46,8 +46,8 @@ def test_buffered_fifo(cap, values):
             out.append(v)
 
     for g in (producer, consumer):
-        pygo_core.go(g)
-    pygo_core.run()
+        runloom_c.go(g)
+    runloom_c.run()
     assert out == values
 
 
@@ -61,8 +61,8 @@ def test_buffered_fifo(cap, values):
 def test_fanin_conservation(nprod, ncons, per, cap):
     """N producers, M consumers, one channel: every (pid, seq) token is
     received exactly once regardless of buffering."""
-    ch = pygo_core.Chan(cap)
-    done = pygo_core.Chan(nprod)
+    ch = runloom_c.Chan(cap)
+    done = runloom_c.Chan(nprod)
     got = []
 
     def producer(pid):
@@ -82,11 +82,11 @@ def test_fanin_conservation(nprod, ncons, per, cap):
             got.append(v)
 
     for c in range(ncons):
-        pygo_core.go(consumer)
+        runloom_c.go(consumer)
     for p in range(nprod):
-        pygo_core.go(producer(p))
-    pygo_core.go(closer)
-    pygo_core.run()
+        runloom_c.go(producer(p))
+    runloom_c.go(closer)
+    runloom_c.run()
 
     expected = sorted((p, s) for p in range(nprod) for s in range(per))
     assert sorted(got) == expected
@@ -103,7 +103,7 @@ def test_close_drains_then_stops(cap, buffered, extra_recv):
     drain exactly those (ok=True, in order), then every further recv is
     (None, False).  Buffered values out-rank closed-ness."""
     buffered = buffered[:cap]               # only what fits without blocking
-    ch = pygo_core.Chan(cap)
+    ch = runloom_c.Chan(cap)
     out = []
 
     def runner():
@@ -118,8 +118,8 @@ def test_close_drains_then_stops(cap, buffered, extra_recv):
         for _ in range(extra_recv):
             out.append(ch.recv())
 
-    pygo_core.go(runner)
-    pygo_core.run()
+    runloom_c.go(runner)
+    runloom_c.run()
 
     expect = [(v, True) for v in buffered] + [(None, False)] * extra_recv
     assert out == expect
@@ -137,18 +137,18 @@ def test_select_default_picks_ready(vals):
     result = {}
 
     def runner():
-        chans = [pygo_core.Chan(1) for _ in range(n)]
+        chans = [runloom_c.Chan(1) for _ in range(n)]
         ready = {}
         for i, v in enumerate(vals):
             if v is not None:
                 chans[i].send(v)
                 ready[i] = v
-        r = pygo_core.select([("recv", chans[i]) for i in range(n)], default=True)
+        r = runloom_c.select([("recv", chans[i]) for i in range(n)], default=True)
         result["r"] = r
         result["ready"] = ready
 
-    pygo_core.go(runner)
-    pygo_core.run()
+    runloom_c.go(runner)
+    runloom_c.run()
 
     r = result["r"]
     ready = result["ready"]

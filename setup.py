@@ -1,4 +1,4 @@
-"""pygo build script.
+"""runloom build script.
 
 Goals:
   - One `pip install .` works across Linux, macOS, FreeBSD/OpenBSD/NetBSD/
@@ -10,11 +10,11 @@ Goals:
       * other POSIX archs        -> ucontext fallback
       * Windows                  -> Fibers (no .S)
   - Honour user overrides:
-      PYGO_BACKEND=ucontext   force ucontext on POSIX even if asm is available
-      PYGO_NO_ASM=1           same as above
-      PYGO_DEBUG=1            -O0 -g
-      PYGO_EXTRA_CFLAGS=...   appended to compile args
-      PYGO_EXTRA_LDFLAGS=...  appended to link args
+      RUNLOOM_BACKEND=ucontext   force ucontext on POSIX even if asm is available
+      RUNLOOM_NO_ASM=1           same as above
+      RUNLOOM_DEBUG=1            -O0 -g
+      RUNLOOM_EXTRA_CFLAGS=...   appended to compile args
+      RUNLOOM_EXTRA_LDFLAGS=...  appended to link args
       CC, CXX                 picked up by setuptools as usual
 
 Toolchains regularly built against:
@@ -46,7 +46,7 @@ try:
 except Exception:
     pass
 
-SRC_C = "src/pygo_core"
+SRC_C = "src/runloom_c"
 
 # --------------------------------------------------------------------
 # macOS universal-binary fix.  CPython on macOS is built universal2,
@@ -85,21 +85,21 @@ IS_AARCH64 = MACHINE in ("aarch64", "arm64")
 IS_RISCV   = MACHINE.startswith("riscv")
 IS_PPC     = MACHINE.startswith(("ppc", "powerpc"))
 
-PYGO_DEBUG     = os.environ.get("PYGO_DEBUG", "").strip() not in ("", "0", "no", "false")
-PYGO_NO_ASM    = os.environ.get("PYGO_NO_ASM", "").strip() not in ("", "0", "no", "false")
-PYGO_BACKEND   = os.environ.get("PYGO_BACKEND", "").strip().lower()
-PYGO_NO_IOCP   = os.environ.get("PYGO_NO_IOCP", "").strip() not in ("", "0", "no", "false")
-# PYGO_NETPOLL=select forces the select() fallback at build time on POSIX
+RUNLOOM_DEBUG     = os.environ.get("RUNLOOM_DEBUG", "").strip() not in ("", "0", "no", "false")
+RUNLOOM_NO_ASM    = os.environ.get("RUNLOOM_NO_ASM", "").strip() not in ("", "0", "no", "false")
+RUNLOOM_BACKEND   = os.environ.get("RUNLOOM_BACKEND", "").strip().lower()
+RUNLOOM_NO_IOCP   = os.environ.get("RUNLOOM_NO_IOCP", "").strip() not in ("", "0", "no", "false")
+# RUNLOOM_NETPOLL=select forces the select() fallback at build time on POSIX
 # (suppresses epoll/kqueue/event_ports in plat.h so netpoll.c uses its
 # select path).  On Windows the same env var is honoured at *runtime* by
 # netpoll.c, so the build define is a no-op there.
-PYGO_FORCE_SELECT = os.environ.get("PYGO_NETPOLL", "").strip().lower() == "select"
-PYGO_EXTRA_CFLAGS  = os.environ.get("PYGO_EXTRA_CFLAGS", "").split()
-PYGO_EXTRA_LDFLAGS = os.environ.get("PYGO_EXTRA_LDFLAGS", "").split()
+RUNLOOM_FORCE_SELECT = os.environ.get("RUNLOOM_NETPOLL", "").strip().lower() == "select"
+RUNLOOM_EXTRA_CFLAGS  = os.environ.get("RUNLOOM_EXTRA_CFLAGS", "").split()
+RUNLOOM_EXTRA_LDFLAGS = os.environ.get("RUNLOOM_EXTRA_LDFLAGS", "").split()
 
 USE_UCONTEXT = (
-    PYGO_BACKEND == "ucontext"
-    or PYGO_NO_ASM
+    RUNLOOM_BACKEND == "ucontext"
+    or RUNLOOM_NO_ASM
     or (IS_POSIX and not (IS_X86_64 or IS_AARCH64))
 )
 
@@ -145,7 +145,7 @@ def _probe_compiler():
             cc = "msvc"
         else:
             cc = sysconfig.get_config_var("CC") or "(default)"
-    print("pygo build: platform=%s machine=%s python=%d.%d cc=%s backend=%s"
+    print("runloom build: platform=%s machine=%s python=%d.%d cc=%s backend=%s"
           % (PLAT, MACHINE, sys.version_info[0], sys.version_info[1],
              cc, "ucontext" if USE_UCONTEXT else "asm/fibers"))
 
@@ -158,22 +158,22 @@ def detect_sources():
         os.path.join(SRC_C, "module.c"),
         os.path.join(SRC_C, "coro.c"),
         os.path.join(SRC_C, "fcontext.c"),
-        os.path.join(SRC_C, "pygo_sched.c"),
+        os.path.join(SRC_C, "runloom_sched.c"),
         os.path.join(SRC_C, "netpoll.c"),
         os.path.join(SRC_C, "cldeque.c"),
         os.path.join(SRC_C, "mn_sched.c"),
         os.path.join(SRC_C, "chan.c"),
-        os.path.join(SRC_C, "pygo_diag.c"),
-        os.path.join(SRC_C, "pygo_gstate.c"),
-        os.path.join(SRC_C, "pygo_introspect.c"),
-        os.path.join(SRC_C, "pygo_iframe.c"),
-        os.path.join(SRC_C, "pygo_blockpool.c"),
+        os.path.join(SRC_C, "runloom_diag.c"),
+        os.path.join(SRC_C, "runloom_gstate.c"),
+        os.path.join(SRC_C, "runloom_introspect.c"),
+        os.path.join(SRC_C, "runloom_iframe.c"),
+        os.path.join(SRC_C, "runloom_blockpool.c"),
     ]
     # Windows IOCP-AFD source -- compiled but no-op on non-Windows
-    # because the whole file is wrapped in #if defined(PYGO_OS_WINDOWS).
+    # because the whole file is wrapped in #if defined(RUNLOOM_OS_WINDOWS).
     srcs.append(os.path.join(SRC_C, "netpoll_iocp.c"))
     srcs.append(os.path.join(SRC_C, "io_uring.c"))
-    srcs.append(os.path.join(SRC_C, "pygo_tcp.c"))
+    srcs.append(os.path.join(SRC_C, "runloom_tcp.c"))
 
     # Arch-specific asm fast path.  POSIX only; Windows uses Fibers.
     # Other archs (riscv, ppc, ...) fall through to the ucontext POSIX
@@ -200,8 +200,8 @@ def detect_compile_args():
             "/D_WIN32_WINNT=0x0600",   # Vista+: enables WSAPoll prototype
             "/DFD_SETSIZE=1024",
         ]
-        args.append("/Od" if PYGO_DEBUG else "/O2")
-        if PYGO_DEBUG:
+        args.append("/Od" if RUNLOOM_DEBUG else "/O2")
+        if RUNLOOM_DEBUG:
             args.append("/Zi")
     else:
         # GCC / Clang / MinGW / ICC.
@@ -218,16 +218,16 @@ def detect_compile_args():
             "-fstack-protector-strong",
             "-Wformat-security",
         ]
-        args.append("-O0" if PYGO_DEBUG else "-O2")
-        if not PYGO_DEBUG:
+        args.append("-O0" if RUNLOOM_DEBUG else "-O2")
+        if not RUNLOOM_DEBUG:
             # _FORTIFY_SOURCE bounds-checks libc calls (memcpy/strcpy/sprintf/
             # ...) at runtime; it needs optimization (-O1+) so it is a no-op /
-            # warning under PYGO_DEBUG's -O0.  =2 is the widely-portable level.
+            # warning under RUNLOOM_DEBUG's -O0.  =2 is the widely-portable level.
             args.append("-D_FORTIFY_SOURCE=2")
-        if PYGO_DEBUG:
+        if RUNLOOM_DEBUG:
             args.append("-g")
         if USE_UCONTEXT:
-            args.append("-DPYGO_FORCE_UCONTEXT=1")
+            args.append("-DRUNLOOM_FORCE_UCONTEXT=1")
         if IS_LINUX or IS_ANDROID:
             args += ["-D_GNU_SOURCE"]
         if IS_DARWIN:
@@ -248,16 +248,16 @@ def detect_compile_args():
                 "-D_WIN32_WINNT=0x0600",
                 "-DFD_SETSIZE=1024",
             ]
-    if PYGO_NO_IOCP and IS_WINDOWS:
-        args.append("-DPYGO_NO_IOCP=1" if not _using_mingw() else "-DPYGO_NO_IOCP=1")
-    if PYGO_FORCE_SELECT:
+    if RUNLOOM_NO_IOCP and IS_WINDOWS:
+        args.append("-DRUNLOOM_NO_IOCP=1" if not _using_mingw() else "-DRUNLOOM_NO_IOCP=1")
+    if RUNLOOM_FORCE_SELECT:
         # MSVC uses /D; everything else (GCC/Clang/MinGW) uses -D.  Same
         # macro either way; consumed by plat.h's netpoll selector.
         if IS_WINDOWS and not _using_mingw():
-            args.append("/DPYGO_FORCE_SELECT=1")
+            args.append("/DRUNLOOM_FORCE_SELECT=1")
         else:
-            args.append("-DPYGO_FORCE_SELECT=1")
-    args += PYGO_EXTRA_CFLAGS
+            args.append("-DRUNLOOM_FORCE_SELECT=1")
+    args += RUNLOOM_EXTRA_CFLAGS
     return args
 
 
@@ -297,14 +297,14 @@ def detect_link_flags():
             "-static-libgcc",
             "-Wl,-Bstatic", "-lwinpthread",
         ]
-    flags += PYGO_EXTRA_LDFLAGS
+    flags += RUNLOOM_EXTRA_LDFLAGS
     return flags
 
 
 # --------------------------------------------------------------------
 # Custom build_ext with graceful fallback to ucontext if asm fails
 # --------------------------------------------------------------------
-class pygo_build_ext(_build_ext):
+class runloom_build_ext(_build_ext):
     """Wrap build_ext to retry with the ucontext backend if asm fails.
 
     Some toolchains (busybox-on-musl, exotic cross-compilers, very old
@@ -321,7 +321,7 @@ class pygo_build_ext(_build_ext):
             if USE_UCONTEXT:
                 raise
             # Already failed once with asm; switch to ucontext and retry.
-            print("pygo build: asm path failed (%s); retrying with ucontext"
+            print("runloom build: asm path failed (%s); retrying with ucontext"
                   % e.__class__.__name__)
             USE_UCONTEXT = True
             for e_obj in self.extensions:
@@ -345,7 +345,7 @@ _ext_depends = sorted(
 )
 
 ext = Extension(
-    name="pygo_core",
+    name="runloom_c",
     sources=detect_sources(),
     include_dirs=[SRC_C],
     depends=_ext_depends,
@@ -357,10 +357,10 @@ ext = Extension(
 
 setup(
     package_dir={"": "src"},
-    packages=["pygo", "pygo.monkey", "pygo.aio"],
+    packages=["runloom", "runloom.monkey", "runloom.aio"],
     # Ship the PEP 561 typing marker + stubs inside the wheel so type
-    # checkers see pygo as typed once it's installed.
-    package_data={"pygo": ["py.typed", "*.pyi"]},
+    # checkers see runloom as typed once it's installed.
+    package_data={"runloom": ["py.typed", "*.pyi"]},
     ext_modules=[ext],
-    cmdclass={"build_ext": pygo_build_ext},
+    cmdclass={"build_ext": runloom_build_ext},
 )

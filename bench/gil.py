@@ -26,7 +26,7 @@ import os
 import sys
 import sysconfig
 
-REEXEC_FLAG = "PYGO_BENCH_NOGIL_REEXEC"
+REEXEC_FLAG = "RUNLOOM_BENCH_NOGIL_REEXEC"
 
 
 def is_free_threaded_build():
@@ -46,14 +46,14 @@ def ensure_nogil():
     Free-threaded builds only; no-op otherwise and no-op once `-X gil=0`
     is already in force.  Otherwise re-execs the interpreter with the flag
     set so any C extension imported later cannot turn the GIL back on.
-    Set PYGO_NO_REEXEC=1 to opt out of the re-exec (the harness tripwire
+    Set RUNLOOM_NO_REEXEC=1 to opt out of the re-exec (the harness tripwire
     still protects you).
     """
     if not is_free_threaded_build():
         return
     if os.environ.get("PYTHON_GIL") == "0":
         return  # already forced off; later imports cannot re-enable
-    if os.environ.get("PYGO_NO_REEXEC") == "1":
+    if os.environ.get("RUNLOOM_NO_REEXEC") == "1":
         return
     if os.environ.get(REEXEC_FLAG) == "1":
         # We already re-exec'd; if it still didn't take, fail loudly here

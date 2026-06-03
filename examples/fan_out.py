@@ -12,8 +12,8 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 
-import pygo
-import pygo_core
+import runloom
+import runloom_c
 
 NUM_CONSUMERS = 4
 NUM_ITEMS = 40
@@ -33,12 +33,12 @@ def consumer(cid, jobs, done):
 
 
 def main():
-    jobs = pygo_core.Chan(8)
-    done = pygo_core.Chan(NUM_CONSUMERS)
+    jobs = runloom_c.Chan(8)
+    done = runloom_c.Chan(NUM_CONSUMERS)
 
-    pygo.go(producer, jobs)
+    runloom.go(producer, jobs)
     for cid in range(NUM_CONSUMERS):
-        pygo.go(consumer, cid, jobs, done)
+        runloom.go(consumer, cid, jobs, done)
 
     total = 0
     for _ in range(NUM_CONSUMERS):
@@ -49,4 +49,4 @@ def main():
 
 
 if __name__ == "__main__":
-    pygo.run(main)
+    runloom.run(main)

@@ -1,5 +1,5 @@
 """Edge-case coverage: boundary conditions and error paths across the
-pygo public surface.
+runloom public surface.
 
 Where the happy-path tests assert correct values on correct inputs,
 these tests assert correct *errors* (or no errors) on adversarial
@@ -15,8 +15,8 @@ inputs:
 import asyncio
 import unittest
 
-import pygo_core
-import pygo.aio as paio
+import runloom_c
+import runloom.aio as paio
 
 
 # ====================================================================
@@ -108,7 +108,7 @@ class TestFutureEdges(unittest.TestCase):
 # ====================================================================
 class TestChannelEdges(unittest.TestCase):
     def test_send_on_closed_raises(self):
-        ch = pygo_core.Chan(1)
+        ch = runloom_c.Chan(1)
         ch.close()
         out = []
         def w():
@@ -117,59 +117,59 @@ class TestChannelEdges(unittest.TestCase):
                 out.append("no-raise")
             except ValueError:
                 out.append("closed")
-        pygo_core.go(w)
-        pygo_core.run()
+        runloom_c.go(w)
+        runloom_c.run()
         self.assertEqual(out, ["closed"])
 
     def test_double_close_raises(self):
-        ch = pygo_core.Chan(1)
+        ch = runloom_c.Chan(1)
         ch.close()
         with self.assertRaises(Exception):
             ch.close()
 
     def test_recv_on_empty_closed_returns_default(self):
-        ch = pygo_core.Chan(1)
+        ch = runloom_c.Chan(1)
         ch.close()
         out = []
         def w():
             out.append(ch.recv())
-        pygo_core.go(w)
-        pygo_core.run()
+        runloom_c.go(w)
+        runloom_c.run()
         self.assertEqual(out, [(None, False)])
 
     def test_try_recv_empty_returns_none(self):
         """try_recv on empty chan returns None (would-block sentinel)."""
-        ch = pygo_core.Chan(1)
+        ch = runloom_c.Chan(1)
         out = []
         def w():
             out.append(ch.try_recv())
-        pygo_core.go(w)
-        pygo_core.run()
+        runloom_c.go(w)
+        runloom_c.run()
         self.assertEqual(out, [None])
 
     def test_try_recv_with_value(self):
-        ch = pygo_core.Chan(1)
+        ch = runloom_c.Chan(1)
         ch.try_send("v")
         out = []
         def w():
             out.append(ch.try_recv())
-        pygo_core.go(w)
-        pygo_core.run()
+        runloom_c.go(w)
+        runloom_c.run()
         self.assertEqual(out, [("v", True)])
 
     def test_try_send_full_returns_false(self):
-        ch = pygo_core.Chan(1)
+        ch = runloom_c.Chan(1)
         out = []
         def w():
             out.append(ch.try_send("a"))
             out.append(ch.try_send("b"))   # full
-        pygo_core.go(w)
-        pygo_core.run()
+        runloom_c.go(w)
+        runloom_c.run()
         self.assertEqual(out, [True, False])
 
     def test_zero_capacity_chan(self):
         """Chan(0) is unbuffered -- send blocks until recv."""
-        ch = pygo_core.Chan(0)
+        ch = runloom_c.Chan(0)
         out = []
         def producer():
             ch.send("hi")
@@ -177,29 +177,29 @@ class TestChannelEdges(unittest.TestCase):
         def consumer():
             v, _ = ch.recv()
             out.append(("got", v))
-        pygo_core.go(producer)
-        pygo_core.go(consumer)
-        pygo_core.run()
+        runloom_c.go(producer)
+        runloom_c.go(consumer)
+        runloom_c.run()
         self.assertIn(("got", "hi"), out)
         self.assertIn("sent", out)
 
     def test_close_unblocks_pending_recv(self):
-        ch = pygo_core.Chan(0)
+        ch = runloom_c.Chan(0)
         out = []
         def waiter():
             v, ok = ch.recv()
             out.append((v, ok))
         def closer():
-            pygo_core.sched_sleep(0.005)
+            runloom_c.sched_sleep(0.005)
             ch.close()
-        pygo_core.go(waiter)
-        pygo_core.go(closer)
-        pygo_core.run()
+        runloom_c.go(waiter)
+        runloom_c.go(closer)
+        runloom_c.run()
         self.assertEqual(out, [(None, False)])
 
     def test_negative_capacity_raises(self):
         with self.assertRaises(Exception):
-            pygo_core.Chan(-1)
+            runloom_c.Chan(-1)
 
 
 # ====================================================================

@@ -1,4 +1,4 @@
-"""Concurrency tests for pygo: race conditions, deadlocks, ordering.
+"""Concurrency tests for runloom: race conditions, deadlocks, ordering.
 
 Each test pins down a specific cooperative-concurrency invariant that
 could otherwise silently break in a refactor:
@@ -16,8 +16,8 @@ Designed to fail loudly if any future change breaks the invariant.
 import asyncio
 import unittest
 
-import pygo_core
-import pygo.aio as paio
+import runloom_c
+import runloom.aio as paio
 
 
 # ====================================================================
@@ -31,24 +31,24 @@ class TestParkWakeRace(unittest.TestCase):
         order = []
 
         def parker():
-            g_holder.append(pygo_core.current_g())
+            g_holder.append(runloom_c.current_g())
             # Yield once so waker can capture our handle.
-            pygo_core.sched_yield_classic()
+            runloom_c.sched_yield_classic()
             order.append("before-park")
-            pygo_core.park_self()   # should not block
+            runloom_c.park_self()   # should not block
             order.append("after-park")
 
         def waker():
             # Wait for parker to capture and yield, then wake before
             # parker calls park_self.
-            pygo_core.sched_yield_classic()  # let parker run
-            pygo_core.sched_yield_classic()  # parker is back in scheduler
+            runloom_c.sched_yield_classic()  # let parker run
+            runloom_c.sched_yield_classic()  # parker is back in scheduler
             g_holder[0].wake()
             order.append("waked")
 
-        pygo_core.go(parker)
-        pygo_core.go(waker)
-        pygo_core.run()
+        runloom_c.go(parker)
+        runloom_c.go(waker)
+        runloom_c.run()
         # Both orderings ("waked" before "before-park" OR after) are
         # legal; what matters is "after-park" happens.
         self.assertIn("after-park", order)
@@ -59,20 +59,20 @@ class TestParkWakeRace(unittest.TestCase):
         order = []
 
         def parker():
-            g_holder.append(pygo_core.current_g())
+            g_holder.append(runloom_c.current_g())
             order.append("before-park")
-            pygo_core.park_self()
+            runloom_c.park_self()
             order.append("after-park")
 
         def waker():
             # Sleep so parker definitely parks first.
-            pygo_core.sched_sleep(0.005)
+            runloom_c.sched_sleep(0.005)
             order.append("waking")
             g_holder[0].wake()
 
-        pygo_core.go(parker)
-        pygo_core.go(waker)
-        pygo_core.run()
+        runloom_c.go(parker)
+        runloom_c.go(waker)
+        runloom_c.run()
         self.assertEqual(order, ["before-park", "waking", "after-park"])
 
     def test_multiple_wakes_consumed(self):
@@ -82,22 +82,22 @@ class TestParkWakeRace(unittest.TestCase):
         events = []
 
         def parker():
-            g_holder.append(pygo_core.current_g())
-            pygo_core.sched_yield_classic()
+            g_holder.append(runloom_c.current_g())
+            runloom_c.sched_yield_classic()
             # 3 parks; should all return immediately since 3 wakes are queued.
             for _ in range(3):
-                pygo_core.park_self()
+                runloom_c.park_self()
                 events.append("p")
 
         def burst_waker():
-            pygo_core.sched_yield_classic()
-            pygo_core.sched_yield_classic()  # let parker capture itself
+            runloom_c.sched_yield_classic()
+            runloom_c.sched_yield_classic()  # let parker capture itself
             for _ in range(3):
                 g_holder[0].wake()
 
-        pygo_core.go(parker)
-        pygo_core.go(burst_waker)
-        pygo_core.run()
+        runloom_c.go(parker)
+        runloom_c.go(burst_waker)
+        runloom_c.run()
         self.assertEqual(events, ["p", "p", "p"])
 
 
@@ -174,7 +174,7 @@ class TestCancellationRace(unittest.TestCase):
 class TestChannelOrdering(unittest.TestCase):
     def test_send_recv_fifo_buffered(self):
         """Buffered channel: receives in send-order."""
-        ch = pygo_core.Chan(100)
+        ch = runloom_c.Chan(100)
         out = []
         def producer():
             for i in range(50):
@@ -183,15 +183,15 @@ class TestChannelOrdering(unittest.TestCase):
         def consumer():
             for v in ch:
                 out.append(v)
-        pygo_core.go(producer)
-        pygo_core.go(consumer)
-        pygo_core.run()
+        runloom_c.go(producer)
+        runloom_c.go(consumer)
+        runloom_c.run()
         self.assertEqual(out, list(range(50)))
 
     def test_send_recv_fifo_unbuffered(self):
         """Unbuffered channel: hand-off preserves order with one
         producer and one consumer."""
-        ch = pygo_core.Chan(0)
+        ch = runloom_c.Chan(0)
         out = []
         def producer():
             for i in range(20):
@@ -200,14 +200,14 @@ class TestChannelOrdering(unittest.TestCase):
         def consumer():
             for v in ch:
                 out.append(v)
-        pygo_core.go(producer)
-        pygo_core.go(consumer)
-        pygo_core.run()
+        runloom_c.go(producer)
+        runloom_c.go(consumer)
+        runloom_c.run()
         self.assertEqual(out, list(range(20)))
 
     def test_try_send_after_close_returns_false(self):
         """try_send on closed chan returns False (or raises)."""
-        ch = pygo_core.Chan(1)
+        ch = runloom_c.Chan(1)
         ch.try_send("first")
         ch.close()
         # Receiver picks up "first" then sees close.
@@ -215,13 +215,13 @@ class TestChannelOrdering(unittest.TestCase):
         def consumer():
             for v in ch:
                 out.append(v)
-        pygo_core.go(consumer)
-        pygo_core.run()
+        runloom_c.go(consumer)
+        runloom_c.run()
         self.assertEqual(out, ["first"])
 
     def test_recv_after_close_drains_then_returns_default(self):
         """recv on closed chan returns (None, False) once drained."""
-        ch = pygo_core.Chan(2)
+        ch = runloom_c.Chan(2)
         ch.try_send("a")
         ch.try_send("b")
         ch.close()
@@ -230,8 +230,8 @@ class TestChannelOrdering(unittest.TestCase):
             recv_results.append(ch.recv())   # "a", True
             recv_results.append(ch.recv())   # "b", True
             recv_results.append(ch.recv())   # None, False
-        pygo_core.go(consumer)
-        pygo_core.run()
+        runloom_c.go(consumer)
+        runloom_c.run()
         self.assertEqual(recv_results,
                          [("a", True), ("b", True), (None, False)])
 
@@ -243,61 +243,61 @@ class TestSelect(unittest.TestCase):
     def test_select_with_default_no_block(self):
         """select(default=True) returns -1 immediately when no case
         is ready."""
-        ch_a = pygo_core.Chan(1)
-        ch_b = pygo_core.Chan(1)
+        ch_a = runloom_c.Chan(1)
+        ch_b = runloom_c.Chan(1)
         result = [None]
 
         def w():
-            r = pygo_core.select([("recv", ch_a),
+            r = runloom_c.select([("recv", ch_a),
                                   ("recv", ch_b)], default=True)
             # default-fired returns bare -1 (not a tuple)
             result[0] = r if isinstance(r, int) else r[0]
-        pygo_core.go(w)
-        pygo_core.run()
+        runloom_c.go(w)
+        runloom_c.run()
         self.assertEqual(result[0], -1)
 
     def test_select_picks_ready_case(self):
-        ch_a = pygo_core.Chan(1)
-        ch_b = pygo_core.Chan(1)
+        ch_a = runloom_c.Chan(1)
+        ch_b = runloom_c.Chan(1)
         ch_b.try_send("b-value")
 
         result = [None]
         def w():
-            idx, val = pygo_core.select([("recv", ch_a),
+            idx, val = runloom_c.select([("recv", ch_a),
                                          ("recv", ch_b)])
             result[0] = (idx, val)
-        pygo_core.go(w)
-        pygo_core.run()
+        runloom_c.go(w)
+        runloom_c.run()
         self.assertEqual(result[0], (1, ("b-value", True)))
 
     def test_select_send_case(self):
-        ch = pygo_core.Chan(1)
+        ch = runloom_c.Chan(1)
         result = [None]
 
         def w():
-            idx, _ = pygo_core.select([("send", ch, "x")])
+            idx, _ = runloom_c.select([("send", ch, "x")])
             result[0] = idx
 
-        pygo_core.go(w)
-        pygo_core.run()
+        runloom_c.go(w)
+        runloom_c.run()
         self.assertEqual(result[0], 0)
 
     def test_select_blocks_until_ready(self):
         """select without default blocks until any case is ready."""
-        ch = pygo_core.Chan(0)
+        ch = runloom_c.Chan(0)
         out = []
 
         def w():
-            idx, val = pygo_core.select([("recv", ch)])
+            idx, val = runloom_c.select([("recv", ch)])
             out.append((idx, val))
 
         def feeder():
-            pygo_core.sched_sleep(0.005)
+            runloom_c.sched_sleep(0.005)
             ch.send("late")
 
-        pygo_core.go(w)
-        pygo_core.go(feeder)
-        pygo_core.run()
+        runloom_c.go(w)
+        runloom_c.go(feeder)
+        runloom_c.run()
         self.assertEqual(out, [(0, ("late", True))])
 
 
@@ -379,15 +379,15 @@ class TestFastPath(unittest.TestCase):
 
     def test_recv_buffered_chan_no_park(self):
         """recv on a chan with buffered data returns immediately."""
-        ch = pygo_core.Chan(5)
+        ch = runloom_c.Chan(5)
         for i in range(5):
             ch.try_send(i)
         out = []
         def w():
             for _ in range(5):
                 out.append(ch.recv())
-        pygo_core.go(w)
-        pygo_core.run()
+        runloom_c.go(w)
+        runloom_c.run()
         self.assertEqual(out, [(i, True) for i in range(5)])
 
 

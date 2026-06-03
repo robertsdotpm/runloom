@@ -2,7 +2,7 @@
 
 Each goroutine sleeps for a per-g duration on whichever hub it runs on.
 Verifies that:
-  - pygo.sched_sleep inside a hub goroutine pushes onto the HUB's
+  - runloom.sched_sleep inside a hub goroutine pushes onto the HUB's
     per-thread sleep heap (not the global single-thread heap, which
     no hub processes).
   - hub_main pops due sleepers off its local heap and runs them.
@@ -16,12 +16,12 @@ import time
 import threading
 
 sys.path.insert(0, "src")
-import pygo_core
+import runloom_c
 
 
 def sleeper(secs, label, results, lock):
     t0 = time.perf_counter()
-    pygo_core.sched_sleep(secs)
+    runloom_c.sched_sleep(secs)
     dt = time.perf_counter() - t0
     with lock:
         results.append((label, secs, dt))
@@ -38,13 +38,13 @@ def main():
     results = []
     lock = threading.Lock()
 
-    pygo_core.mn_init(N_HUBS)
+    runloom_c.mn_init(N_HUBS)
     t0 = time.perf_counter()
     for i in range(N):
         secs = BASE + STEP * i
-        pygo_core.mn_go(lambda secs=secs, i=i: sleeper(secs, i, results, lock))
-    pygo_core.mn_run()
-    pygo_core.mn_fini()
+        runloom_c.mn_go(lambda secs=secs, i=i: sleeper(secs, i, results, lock))
+    runloom_c.mn_run()
+    runloom_c.mn_fini()
     wall = time.perf_counter() - t0
 
     results.sort()

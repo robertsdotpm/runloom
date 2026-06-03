@@ -1,5 +1,5 @@
 """CPython's OWN Lib/test/test_selectors.py, run verbatim under
-``pygo.monkey.patch()``.
+``runloom.monkey.patch()``.
 
 The ``selectors`` category of the monkey layer makes select.poll/epoll/kqueue
 (and thus the high-level ``selectors`` module) cooperative.  This runs
@@ -23,14 +23,14 @@ if HAVE_CPYTHON_TESTS:
 
     # The default selector + the explicit pollable backends.  Epoll/Kqueue/
     # Devpoll classes self-skip on platforms where that primitive is absent.
-    TestPygoDefaultSelector = hosted(_m.DefaultSelectorTestCase, "TestPygoDefaultSelector")
-    TestPygoSelectSelector = hosted(_m.SelectSelectorTestCase, "TestPygoSelectSelector")
+    TestRunloomDefaultSelector = hosted(_m.DefaultSelectorTestCase, "TestRunloomDefaultSelector")
+    TestRunloomSelectSelector = hosted(_m.SelectSelectorTestCase, "TestRunloomSelectSelector")
     if hasattr(_m, "PollSelectorTestCase"):
-        TestPygoPollSelector = hosted(_m.PollSelectorTestCase, "TestPygoPollSelector")
+        TestRunloomPollSelector = hosted(_m.PollSelectorTestCase, "TestRunloomPollSelector")
     if hasattr(_m, "EpollSelectorTestCase"):
-        TestPygoEpollSelector = hosted(_m.EpollSelectorTestCase, "TestPygoEpollSelector")
+        TestRunloomEpollSelector = hosted(_m.EpollSelectorTestCase, "TestRunloomEpollSelector")
     if hasattr(_m, "KqueueSelectorTestCase"):
-        TestPygoKqueueSelector = hosted(_m.KqueueSelectorTestCase, "TestPygoKqueueSelector")
+        TestRunloomKqueueSelector = hosted(_m.KqueueSelectorTestCase, "TestRunloomKqueueSelector")
 
     # test_select_interrupt_exc installs a SIGALRM handler that raises during
     # select() and expects the exception to propagate out of the call.  Through
@@ -39,6 +39,6 @@ if HAVE_CPYTHON_TESTS:
     # and, if it raises, hands the exception to the parked goroutine (which
     # restores it on resume and returns out of select()), instead of swallowing
     # it or carrying it out of run().  That delivery path is in the backend-
-    # independent scheduler/wait_fd core (pygo_netpoll_signal_wake +
-    # PYGO_NETPOLL_SIGNALED), so epoll / kqueue / select all pass -- no skip.
+    # independent scheduler/wait_fd core (runloom_netpoll_signal_wake +
+    # RUNLOOM_NETPOLL_SIGNALED), so epoll / kqueue / select all pass -- no skip.
     # See tests/test_signal_interrupt.py for the focused regression test.

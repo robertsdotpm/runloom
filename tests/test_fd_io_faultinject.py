@@ -1,7 +1,7 @@
-"""Compiled-in fault injection for pygo_core.fd_read / fd_write (module.c).
+"""Compiled-in fault injection for runloom_c.fd_read / fd_write (module.c).
 
 The cooperative fd I/O loop (POSIX read(2)/write(2) with netpoll parking) is
-faulted in-process via PYGO_FAULT_FD_READ / PYGO_FAULT_FD_WRITE (see module.c +
+faulted in-process via RUNLOOM_FAULT_FD_READ / RUNLOOM_FAULT_FD_WRITE (see module.c +
 netpoll.c) -- uniform across kqueue/epoll/Windows, no tracer needed.  Uses the
 errno module so it is correct on every platform.  Asserts:
 
@@ -35,7 +35,7 @@ def _run(site, spec, mode, timeout=30):
     env["PYTHONPATH"] = os.path.join(REPO, "src")
     env["PYTHON_GIL"] = "0"                       # focus: free-threaded only
     env["FAULT_SITE"] = site
-    env["PYGO_FAULT_" + site] = spec
+    env["RUNLOOM_FAULT_" + site] = spec
     return subprocess.run(
         [sys.executable, WORKLOAD, mode], cwd=REPO, env=env, timeout=timeout,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)

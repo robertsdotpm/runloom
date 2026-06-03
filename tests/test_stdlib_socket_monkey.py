@@ -1,4 +1,4 @@
-"""CPython's OWN Lib/test/test_socket.py, run verbatim under pygo.monkey.patch().
+"""CPython's OWN Lib/test/test_socket.py, run verbatim under runloom.monkey.patch().
 
 monkey makes blocking socket recv/send/recvfrom/sendto/accept/connect (and
 recvmsg/sendmsg) cooperative.  We host:
@@ -30,8 +30,8 @@ tearDownModule = unpatch_module
 if HAVE_CPYTHON_TESTS:
     from test import test_socket as _m
 
-    TestPygoSocketGeneral = hosted(_m.GeneralModuleTests, "TestPygoSocketGeneral")
+    TestRunloomSocketGeneral = hosted(_m.GeneralModuleTests, "TestRunloomSocketGeneral")
     if hasattr(_m, "BasicTCPTest"):
-        TestPygoSocketBasicTCP = hosted(_m.BasicTCPTest, "TestPygoSocketBasicTCP")
+        TestRunloomSocketBasicTCP = hosted(_m.BasicTCPTest, "TestRunloomSocketBasicTCP")
     if hasattr(_m, "BasicUDPTest"):
-        TestPygoSocketBasicUDP = hosted(_m.BasicUDPTest, "TestPygoSocketBasicUDP")
+        TestRunloomSocketBasicUDP = hosted(_m.BasicUDPTest, "TestRunloomSocketBasicUDP")

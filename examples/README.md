@@ -1,7 +1,7 @@
-# pygo examples
+# runloom examples
 
 Small, self-contained programs — each one demonstrates a single aspect of
-pygo. They run on a normal (GIL) build except where noted; `mn_parallel.py`
+runloom. They run on a normal (GIL) build except where noted; `mn_parallel.py`
 needs free-threaded 3.13t for the parallelism payoff.
 
 Run any of them from the repo root:
@@ -40,9 +40,9 @@ For raw performance numbers and the measurement harness, see [`../bench/`](../be
 
 | Example | Shows |
 | --- | --- |
-| [timeout.py](timeout.py) | race work against `pygo.time.After` with `select` |
-| [ticker.py](ticker.py) | periodic ticks with `pygo.time.NewTicker` |
-| [context_cancel.py](context_cancel.py) | `pygo.context` cancellation fanned out to many goroutines |
+| [timeout.py](timeout.py) | race work against `runloom.time.After` with `select` |
+| [ticker.py](ticker.py) | periodic ticks with `runloom.time.NewTicker` |
+| [context_cancel.py](context_cancel.py) | `runloom.context` cancellation fanned out to many goroutines |
 
 ## Networking (blocking-style sockets)
 
@@ -52,15 +52,15 @@ For raw performance numbers and the measurement harness, see [`../bench/`](../be
 | [http_server.py](http_server.py) | hand-rolled HTTP server + `urllib.urlopen` clients, all cooperative |
 | [tcp_proxy.py](tcp_proxy.py) | a port forwarder with two pump goroutines per connection |
 | [port_scanner.py](port_scanner.py) | thousands of concurrent `connect()`s via fan-out |
-| [udp_echo.py](udp_echo.py) | cooperative UDP datagrams with the `pygo.sync` front-end |
+| [udp_echo.py](udp_echo.py) | cooperative UDP datagrams with the `runloom.sync` front-end |
 
 ## Runtime features
 
 | Example | Shows |
 | --- | --- |
-| [offload_blocking.py](offload_blocking.py) | `pygo.blocking` keeps a hub alive across a non-cooperative call |
+| [offload_blocking.py](offload_blocking.py) | `runloom.blocking` keeps a hub alive across a non-cooperative call |
 | [mn_parallel.py](mn_parallel.py) | the M:N scheduler scaling across cores (free-threaded 3.13t) |
-| [asyncio_bridge.py](asyncio_bridge.py) | run existing `async`/`await` code on pygo via `pygo.aio.run` |
+| [asyncio_bridge.py](asyncio_bridge.py) | run existing `async`/`await` code on runloom via `runloom.aio.run` |
 
 ### Free-threaded run (for `mn_parallel.py`)
 

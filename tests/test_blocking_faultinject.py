@@ -3,7 +3,7 @@
 The shims have error paths the "result is correct" tests never exercise: EINTR
 retry, contention retry, the pidfd-open ESRCH race -> busy-poll fallback, and
 real-error propagation.  Here we inject those at the shim's captured original
-(e.g. pygo.monkey._raw_os_sendfile / _orig_flock / os.pidfd_open) and assert
+(e.g. runloom.monkey._raw_os_sendfile / _orig_flock / os.pidfd_open) and assert
 the wrapper retries, falls back, or raises -- and never hangs (a hang shows up
 as a run_isolated TIMEOUT).
 
@@ -18,9 +18,9 @@ import tempfile
 import time
 import unittest
 
-import pygo
-import pygo.monkey
-import pygo_core
+import runloom
+import runloom.monkey
+import runloom_c
 
 _HAVE_FORK = hasattr(os, "fork")
 _HAVE_PIDFD = hasattr(os, "pidfd_open")
@@ -39,19 +39,19 @@ def _drive(fn):
         except BaseException as e:   # noqa: BLE001
             box[1] = e
 
-    pygo_core.go(runner)
-    pygo_core.run()
+    runloom_c.go(runner)
+    runloom_c.run()
     if box[1] is not None:
         raise box[1]
     return box[0]
 
 
 def setUpModule():
-    pygo.monkey.patch()
+    runloom.monkey.patch()
 
 
 def tearDownModule():
-    pygo.monkey.unpatch()
+    runloom.monkey.unpatch()
 
 
 @contextlib.contextmanager
@@ -81,7 +81,7 @@ def _oserr(num):
 @unittest.skipIf(fcntl is None or not hasattr(fcntl, "flock"), "no flock")
 class TestFlockFaults(unittest.TestCase):
     def setUp(self):
-        fd, self.path = tempfile.mkstemp(prefix="pygo_fi_")
+        fd, self.path = tempfile.mkstemp(prefix="runloom_fi_")
         os.close(fd)
 
     def tearDown(self):
@@ -92,7 +92,7 @@ class TestFlockFaults(unittest.TestCase):
             fd = os.open(self.path, os.O_RDWR)
             fd2 = os.open(self.path, os.O_RDWR)
             try:
-                with inject(pygo.monkey.files, "_orig_flock", InterruptedError, n=1):
+                with inject(runloom.monkey.files, "_orig_flock", InterruptedError, n=1):
                     fcntl.flock(fd, fcntl.LOCK_EX)   # EINTR once -> retried
                 # Verify the lock is ACTUALLY held (not silently dropped on the
                 # EINTR): a second open description must fail to take it.
@@ -113,7 +113,7 @@ class TestFlockFaults(unittest.TestCase):
         def body():
             fd = os.open(self.path, os.O_RDWR)
             try:
-                with inject(pygo.monkey.files, "_orig_flock",
+                with inject(runloom.monkey.files, "_orig_flock",
                             _oserr(errno.EWOULDBLOCK), n=3) as st:
                     fcntl.flock(fd, fcntl.LOCK_EX)
                 fcntl.flock(fd, fcntl.LOCK_UN)
@@ -126,7 +126,7 @@ class TestFlockFaults(unittest.TestCase):
         def body():
             fd = os.open(self.path, os.O_RDWR)
             try:
-                with inject(pygo.monkey.files, "_orig_flock", _oserr(errno.EBADF), n=99):
+                with inject(runloom.monkey.files, "_orig_flock", _oserr(errno.EBADF), n=99):
                     with self.assertRaises(OSError) as cm:
                         fcntl.flock(fd, fcntl.LOCK_EX)
                     return cm.exception.errno
@@ -143,7 +143,7 @@ class TestReadvFaults(unittest.TestCase):
             try:
                 os.set_blocking(r, False); os.set_blocking(w, False)
                 os.write(w, b"abcd")
-                with inject(pygo.monkey.osio, "_orig_os_readv", InterruptedError, n=1):
+                with inject(runloom.monkey.osio, "_orig_os_readv", InterruptedError, n=1):
                     bufs = [bytearray(2), bytearray(2)]
                     n = os.readv(r, bufs)
                 return n, bytes(bufs[0]) + bytes(bufs[1])
@@ -202,7 +202,7 @@ class TestSendfileFaults(unittest.TestCase):
     def test_sendfile_eagain_then_completes(self):
         """os.sendfile raising EAGAIN must park on wait_fd and resume, not fail."""
         data = bytes(range(256)) * 1024
-        fd, path = tempfile.mkstemp(prefix="pygo_fi_sf_")
+        fd, path = tempfile.mkstemp(prefix="runloom_fi_sf_")
         os.write(fd, data); os.close(fd)
 
         def body():
@@ -218,17 +218,17 @@ class TestSendfileFaults(unittest.TestCase):
                     got["buf"] += chunk
                 conn.close()
 
-            pygo_core.go(server)
+            runloom_c.go(server)
             cli = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             cli.connect(addr)
-            with inject(pygo.monkey.sockets, "_raw_os_sendfile",
+            with inject(runloom.monkey.sockets, "_raw_os_sendfile",
                         lambda: BlockingIOError(errno.EAGAIN, "EAGAIN"), n=2):
                 with open(path, "rb") as f:
                     sent = cli.sendfile(f)
             cli.shutdown(socket.SHUT_WR)
             t0 = time.monotonic()
             while len(got["buf"]) < len(data) and time.monotonic() - t0 < 5:
-                pygo.sleep(0.005)
+                runloom.sleep(0.005)
             cli.close(); srv.close()
             return sent, got["buf"]
         try:

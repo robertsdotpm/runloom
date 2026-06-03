@@ -8,10 +8,10 @@ then never get resumed by anyone.
 Phase C v2 adds:
   - thread-local current_hub / current_g pointers set when hub_main
     runs a g.
-  - pygo_mn_yield_current() that pushes the current g onto its hub's
+  - runloom_mn_yield_current() that pushes the current g onto its hub's
     local FIFO (separate from the steal-able fresh-g deque) and asm-
     yields back to hub_main.
-  - pygo_sched_yield consults pygo_mn_yield_current first.
+  - runloom_sched_yield consults runloom_mn_yield_current first.
 
 This test spawns N gs across H hubs, each yielding Y times before a
 counter increment, and checks the final counter is N * Y.  Demonstrates
@@ -23,27 +23,27 @@ import time
 import threading
 
 sys.path.insert(0, "src")
-import pygo_core
+import runloom_c
 
 
 def make_yielder(yields, counter, lock):
     def worker():
         for _ in range(yields):
-            pygo_core.sched_yield()
+            runloom_c.sched_yield()
         with lock:
             counter[0] += 1
     return worker
 
 
 def run_case(hubs, n_gs, yields_per_g, label):
-    pygo_core.mn_init(hubs)
+    runloom_c.mn_init(hubs)
     counter = [0]
     lock = threading.Lock()
     t0 = time.perf_counter()
     for _ in range(n_gs):
-        pygo_core.mn_go(make_yielder(yields_per_g, counter, lock))
-    pygo_core.mn_run()
-    pygo_core.mn_fini()
+        runloom_c.mn_go(make_yielder(yields_per_g, counter, lock))
+    runloom_c.mn_run()
+    runloom_c.mn_fini()
     dt = time.perf_counter() - t0
     total_yields = n_gs * yields_per_g
     expected = n_gs

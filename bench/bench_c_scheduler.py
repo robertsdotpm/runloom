@@ -1,11 +1,11 @@
-"""pygo C-scheduler vs Python-scheduler vs asyncio.
+"""runloom C-scheduler vs Python-scheduler vs asyncio.
 
 The C scheduler is the Phase A target: asm context switch + C-side
 ready queue + single C-call yield.  At small fan-out it crushes asyncio
 (~5M yields/s vs asyncio's ~0.6M).
 
 NOTE: The C-scheduler currently crashes when many gs run in sequence
-across multiple pygo_core.run() calls -- the CPython frame chain (tstate
+across multiple runloom_c.run() calls -- the CPython frame chain (tstate
 cframe->current_frame) is not yet snapshotted per goroutine.  Phase B
 work.  To get clean numbers we drive each cell in its own subprocess.
 """
@@ -16,8 +16,8 @@ import sys
 import time
 
 sys.path.insert(0, "src")
-import pygo
-import pygo_core
+import runloom
+import runloom_c
 
 
 def run_subprocess_bench(impl, n_coros, yields_per_coro):
@@ -27,20 +27,20 @@ import sys; sys.path.insert(0, 'src')
 import time
 N = {0}; Y = {1}
 if {2!r} == 'cgo':
-    import pygo_core
+    import runloom_c
     def w():
-        for _ in range(Y): pygo_core.sched_yield()
-    for _ in range(N): pygo_core.go(w)
+        for _ in range(Y): runloom_c.sched_yield()
+    for _ in range(N): runloom_c.go(w)
     t0 = time.perf_counter()
-    pygo_core.run()
+    runloom_c.run()
     t = time.perf_counter() - t0
-elif {2!r} == 'pygo':
-    import pygo
+elif {2!r} == 'runloom':
+    import runloom
     def w(n):
-        for _ in range(n): pygo.yield_()
-    for _ in range(N): pygo.go(w, Y)
+        for _ in range(n): runloom.yield_()
+    for _ in range(N): runloom.go(w, Y)
     t0 = time.perf_counter()
-    pygo.run()
+    runloom.run()
     t = time.perf_counter() - t0
 elif {2!r} == 'asyncio':
     import asyncio
@@ -76,7 +76,7 @@ def fmt(t, ops):
 
 
 def main():
-    print("backend:", pygo_core.backend())
+    print("backend:", runloom_c.backend())
     print()
     print("Each cell is a fresh subprocess.")
     print()
@@ -90,11 +90,11 @@ def main():
         (1000, 100),
     ]
     print("{0:>6}  {1:>6}    {2:>13}    {3:>13}    {4:>13}".format(
-        "coros", "yields", "pygo (C)", "pygo (Py)", "asyncio"))
+        "coros", "yields", "runloom (C)", "runloom (Py)", "asyncio"))
     for n, y in cases:
         total = n * y
         c_t  = run_subprocess_bench("cgo", n, y)
-        py_t = run_subprocess_bench("pygo", n, y)
+        py_t = run_subprocess_bench("runloom", n, y)
         as_t = run_subprocess_bench("asyncio", n, y)
         print("{0:>6d}  {1:>6d}    {2:>13}    {3:>13}    {4:>13}".format(
             n, y, fmt(c_t, total), fmt(py_t, total), fmt(as_t, total)))

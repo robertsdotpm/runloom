@@ -138,7 +138,7 @@ def render_svg(root, path, width=1600, frame_h=16):
     parts = ['<svg xmlns="http://www.w3.org/2000/svg" width="%d" height="%d" '
              'font-family="monospace" font-size="11">' % (width, height)]
     parts.append('<rect width="%d" height="%d" fill="#f8f8f0"/>' % (width, height))
-    parts.append('<text x="6" y="16" font-size="13">pygo flame graph '
+    parts.append('<text x="6" y="16" font-size="13">runloom flame graph '
                  '(%d samples, task-clock)</text>' % total)
     y0 = 24
     for x, depth, w, name, value in rows:

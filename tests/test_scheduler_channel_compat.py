@@ -8,7 +8,7 @@ test/test-tcp-* and test/test-timer.c.
 test_chan.py already covers channels in isolation.  The point *here* is that
 the blocking-API patches and the channel/scheduler primitives compose: many
 goroutines parked on real socket I/O all make progress, data sourced from
-blocking reads flows through native channels in a pipeline, and pygo_core's
+blocking reads flows through native channels in a pipeline, and runloom_c's
 select() picks among channels fed by blocking I/O -- with no starvation, no
 lost items, and genuine overlap rather than serialization.
 """
@@ -16,9 +16,9 @@ import socket
 import time
 import unittest
 
-import pygo
-import pygo.monkey
-import pygo_core
+import runloom
+import runloom.monkey
+import runloom_c
 
 
 def _drive(fn):
@@ -30,19 +30,19 @@ def _drive(fn):
         except BaseException as e:   # noqa: BLE001
             box[1] = e
 
-    pygo_core.go(runner)
-    pygo_core.run()
+    runloom_c.go(runner)
+    runloom_c.run()
     if box[1] is not None:
         raise box[1]
     return box[0]
 
 
 def setUpModule():
-    pygo.monkey.patch()
+    runloom.monkey.patch()
 
 
 def tearDownModule():
-    pygo.monkey.unpatch()
+    runloom.monkey.unpatch()
 
 
 def _echo_pair():
@@ -70,7 +70,7 @@ class TestSchedulerFairness(unittest.TestCase):
                 done.append((idx, data))
 
             for i in range(N):
-                pygo_core.go(lambda i=i: worker(i))
+                runloom_c.go(lambda i=i: worker(i))
 
             # Let them all park, then feed every peer in a burst.
             def feeder():
@@ -78,11 +78,11 @@ class TestSchedulerFairness(unittest.TestCase):
                 for _a, b in pairs:
                     b.send(b"go")
 
-            pygo_core.go(feeder)
+            runloom_c.go(feeder)
 
             t0 = time.monotonic()
             while len(done) < N and time.monotonic() - t0 < 5:
-                pygo.sleep(0.005)
+                runloom.sleep(0.005)
             for a, b in pairs:
                 a.close(); b.close()
             return done
@@ -107,7 +107,7 @@ class TestSchedulerFairness(unittest.TestCase):
                     time.sleep(DELAY)        # simulate work
                     a.send(b"pong")
 
-                pygo_core.go(responder)
+                runloom_c.go(responder)
                 b.send(b"ping")
                 r = b.recv(8)
                 results.append((idx, r))
@@ -115,9 +115,9 @@ class TestSchedulerFairness(unittest.TestCase):
 
             t0 = time.monotonic()
             for i in range(N):
-                pygo_core.go(lambda i=i: round_trip(i))
+                runloom_c.go(lambda i=i: round_trip(i))
             while len(results) < N and time.monotonic() - t0 < 5:
-                pygo.sleep(0.005)
+                runloom.sleep(0.005)
             return len(results), time.monotonic() - t0
 
         n, elapsed = _drive(body)
@@ -134,8 +134,8 @@ class TestChannelPipeline(unittest.TestCase):
         producer."""
         def body():
             ITEMS = 50
-            src = pygo_core.Chan(8)
-            mid = pygo_core.Chan(8)
+            src = runloom_c.Chan(8)
+            mid = runloom_c.Chan(8)
             collected = []
 
             # Feed a socket from which stage 1 reads, one byte-record per item.
@@ -172,14 +172,14 @@ class TestChannelPipeline(unittest.TestCase):
                         break
                     collected.append(v)
 
-            pygo_core.go(producer)
-            pygo_core.go(stage1)
-            pygo_core.go(stage2)
-            pygo_core.go(collector)
+            runloom_c.go(producer)
+            runloom_c.go(stage1)
+            runloom_c.go(stage2)
+            runloom_c.go(collector)
 
             t0 = time.monotonic()
             while len(collected) < ITEMS and time.monotonic() - t0 < 5:
-                pygo.sleep(0.005)
+                runloom.sleep(0.005)
             a.close(); b.close()
             return collected
 
@@ -193,7 +193,7 @@ class TestChannelPipeline(unittest.TestCase):
         def body():
             M, PER = 6, 20
             total = M * PER
-            hub = pygo_core.Chan(4)
+            hub = runloom_c.Chan(4)
             got = []
 
             pairs = [_echo_pair() for _ in range(M)]
@@ -232,13 +232,13 @@ class TestChannelPipeline(unittest.TestCase):
                     got.append(v)
 
             for i in range(M):
-                pygo_core.go(lambda i=i: feeder(i))
-                pygo_core.go(lambda i=i: producer_wrap(i))
-            pygo_core.go(consumer)
+                runloom_c.go(lambda i=i: feeder(i))
+                runloom_c.go(lambda i=i: producer_wrap(i))
+            runloom_c.go(consumer)
 
             t0 = time.monotonic()
             while len(got) < total and time.monotonic() - t0 < 5:
-                pygo.sleep(0.005)
+                runloom.sleep(0.005)
             for a, b in pairs:
                 a.close(); b.close()
             return got
@@ -256,8 +256,8 @@ class TestSelectWithIO(unittest.TestCase):
         blocking socket read first.  select must return the one that becomes
         ready, and over repeated rounds both sources get serviced."""
         def body():
-            ch0 = pygo_core.Chan()
-            ch1 = pygo_core.Chan()
+            ch0 = runloom_c.Chan()
+            ch1 = runloom_c.Chan()
 
             def io_feeder(ch, pair, tag, delay):
                 a, b = pair
@@ -265,18 +265,18 @@ class TestSelectWithIO(unittest.TestCase):
                 def kick():
                     time.sleep(delay)
                     b.send(b"x")
-                pygo_core.go(kick)
+                runloom_c.go(kick)
                 a.recv(4)
                 ch.send(tag)
                 a.close(); b.close()
 
             p0, p1 = _echo_pair(), _echo_pair()
-            pygo_core.go(lambda: io_feeder(ch0, p0, "zero", 0.04))
-            pygo_core.go(lambda: io_feeder(ch1, p1, "one", 0.02))
+            runloom_c.go(lambda: io_feeder(ch0, p0, "zero", 0.04))
+            runloom_c.go(lambda: io_feeder(ch1, p1, "one", 0.02))
 
             results = []
             for _ in range(2):
-                idx, val = pygo_core.select([("recv", ch0), ("recv", ch1)])
+                idx, val = runloom_c.select([("recv", ch0), ("recv", ch1)])
                 results.append(val[0] if isinstance(val, tuple) else val)
             return sorted(results)
 
@@ -299,9 +299,9 @@ class TestConcurrentTimers(unittest.TestCase):
 
             t0 = time.monotonic()
             for i in range(N):
-                pygo_core.go(lambda i=i: napper(i))
+                runloom_c.go(lambda i=i: napper(i))
             while len(fired) < N and time.monotonic() - t0 < 5:
-                pygo.sleep(0.002)
+                runloom.sleep(0.002)
             return len(fired), time.monotonic() - t0
 
         n, elapsed = _drive(body)

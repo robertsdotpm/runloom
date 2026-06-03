@@ -15,7 +15,7 @@ All N concurrent RTs are in flight simultaneously in the scheduler;
 the kernel sees N parallel TCP streams.  Total wall time covers from
 first connect to last client done.  Aggregate K/s = N*M/t.
 
-Set PYGO_TCPCONN_IOURING=1 to route TCPConn.recv through the
+Set RUNLOOM_TCPCONN_IOURING=1 to route TCPConn.recv through the
 io_uring multishot path (Linux only); leave unset for the default
 epoll register-once path.
 """
@@ -25,7 +25,7 @@ import sys
 import time
 
 sys.path.insert(0, "src")
-import pygo, pygo.monkey, pygo_core
+import runloom, runloom.monkey, runloom_c
 
 
 PAYLOAD = b"hellopyg"
@@ -66,18 +66,18 @@ def bench_tcpconn(N, M):
         return handler
 
     def server():
-        listener = pygo_core.TCPConn.listen("127.0.0.1", 0, backlog=N + 8)
+        listener = runloom_c.TCPConn.listen("127.0.0.1", 0, backlog=N + 8)
         port_holder[0] = _bound_port(listener)
         for _ in range(N):
             c = listener.accept()
-            pygo_core.go(make_handler(c))
+            runloom_c.go(make_handler(c))
         listener.close()
 
     def make_client():
         def client():
             while port_holder[0] is None:
-                pygo_core.sched_yield()
-            c = pygo_core.TCPConn.connect("127.0.0.1", port_holder[0])
+                runloom_c.sched_yield()
+            c = runloom_c.TCPConn.connect("127.0.0.1", port_holder[0])
             buf = bytearray(len(PAYLOAD))
             for _ in range(M):
                 c.send_all(PAYLOAD)
@@ -89,21 +89,21 @@ def bench_tcpconn(N, M):
         return client
 
     def driver():
-        pygo_core.go(server)
+        runloom_c.go(server)
         while port_holder[0] is None:
-            pygo_core.sched_yield()
+            runloom_c.sched_yield()
         t_start[0] = time.perf_counter()
         for _ in range(N):
-            pygo_core.go(make_client())
+            runloom_c.go(make_client())
 
-    pygo_core.go(driver)
-    pygo_core.run()
+    runloom_c.go(driver)
+    runloom_c.run()
     return t_end[0] - t_start[0]
 
 
 def bench_monkey(N, M):
     """Apples-to-apples concurrent monkey-patched-socket bench."""
-    pygo.monkey.patch()
+    runloom.monkey.patch()
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     srv.bind(("127.0.0.1", 0))
@@ -129,7 +129,7 @@ def bench_monkey(N, M):
     def server():
         for _ in range(N):
             c, _ = srv.accept()
-            pygo_core.go(make_handler(c))
+            runloom_c.go(make_handler(c))
 
     def make_client():
         def client():
@@ -146,23 +146,23 @@ def bench_monkey(N, M):
         return client
 
     def driver():
-        pygo_core.go(server)
+        runloom_c.go(server)
         t_start[0] = time.perf_counter()
         for _ in range(N):
-            pygo_core.go(make_client())
+            runloom_c.go(make_client())
 
-    pygo_core.go(driver)
-    pygo_core.run()
+    runloom_c.go(driver)
+    runloom_c.run()
     srv.close()
     return t_end[0] - t_start[0]
 
 
 def main():
-    iouring_on = os.environ.get("PYGO_TCPCONN_IOURING") == "1"
-    skip_monkey = os.environ.get("PYGO_BENCH_SKIP_MONKEY") == "1"
+    iouring_on = os.environ.get("RUNLOOM_TCPCONN_IOURING") == "1"
+    skip_monkey = os.environ.get("RUNLOOM_BENCH_SKIP_MONKEY") == "1"
 
     print("Concurrent echo bench -- N clients, M RTs each, 8-byte payload")
-    print("PYGO_TCPCONN_IOURING={}".format("1" if iouring_on else "(unset)"))
+    print("RUNLOOM_TCPCONN_IOURING={}".format("1" if iouring_on else "(unset)"))
     print()
     cols = ["N", "M", "TCPConn K/s", "us/RT (t)"]
     if not skip_monkey:

@@ -1,31 +1,31 @@
-"""M:N core-scaling benchmark -- pygo's headline value proposition.
+"""M:N core-scaling benchmark -- runloom's headline value proposition.
 
 CPU-bound workload (chained SHA-256, no I/O, nothing to preempt) spread
 over a varying number of M:N hubs on free-threaded 3.13t.  With the GIL
-off, pygo's hub pool gets real cores, so wall time should fall ~linearly
+off, runloom's hub pool gets real cores, so wall time should fall ~linearly
 with hub count until memory bandwidth / NUMA / desktop noise caps it.
 
 Reported per config: throughput (hashes/s), speedup vs 1 hub, and parallel
-efficiency (speedup / hubs).  Baselines: a raw sequential call (no pygo),
+efficiency (speedup / hubs).  Baselines: a raw sequential call (no runloom),
 plain threading (also GIL-free parallel), and asyncio (single OS thread, so
-no parallel benefit -- the thing pygo beats).
+no parallel benefit -- the thing runloom beats).
 
 Run:
     PYTHONPATH=src ~/.pyenv/versions/3.13.13t/bin/python -m bench.mn
 
-Tunables: PYGO_BENCH_N (goroutines), PYGO_BENCH_ITER (sha256 chain length).
+Tunables: RUNLOOM_BENCH_N (goroutines), RUNLOOM_BENCH_ITER (sha256 chain length).
 """
 import hashlib
 import os
 import threading
 
-import pygo_core
+import runloom_c
 
 from bench.gil import ensure_nogil
 from bench.harness import Suite, default_pin_set
 
-N = int(os.environ.get("PYGO_BENCH_N", "128"))
-ITER = int(os.environ.get("PYGO_BENCH_ITER", "2000"))
+N = int(os.environ.get("RUNLOOM_BENCH_N", "128"))
+ITER = int(os.environ.get("RUNLOOM_BENCH_ITER", "2000"))
 HUB_COUNTS = [1, 2, 4, 8, 16]
 TOTAL = N * ITER  # total sha256 ops per sample -> ops_per_s == hashes/s
 
@@ -53,7 +53,7 @@ def make_mn(hubs):
     hub counts.  mn_run is reusable after a single mn_init.
     """
     mn_init, mn_go, mn_run, mn_fini = (
-        pygo_core.mn_init, pygo_core.mn_go, pygo_core.mn_run, pygo_core.mn_fini)
+        runloom_c.mn_init, runloom_c.mn_go, runloom_c.mn_run, runloom_c.mn_fini)
 
     def setup():
         mn_init(hubs)
@@ -120,7 +120,7 @@ def main():
     print("workload: %d goroutines x %d-deep SHA-256 chain = %d hashes/sample\n"
           % (N, ITER, TOTAL))
 
-    seq = s.bench("sequential (no pygo)", make_sequential(), inner=TOTAL,
+    seq = s.bench("sequential (no runloom)", make_sequential(), inner=TOTAL,
                   note="single-thread reference")
     base1 = None
     mn_results = {}
@@ -137,7 +137,7 @@ def main():
             make_threading(min(16, len(cpus))), inner=TOTAL,
             note="GIL-free OS threads")
     s.bench("asyncio (1 thread)", make_asyncio(), inner=TOTAL,
-            note="no parallelism -- the baseline pygo beats")
+            note="no parallelism -- the baseline runloom beats")
 
     # Scaling table (uses the robust min(best) sample per config).
     print("\n  scaling (best-sample throughput):")

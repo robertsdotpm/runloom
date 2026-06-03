@@ -1,13 +1,13 @@
 """Regression tests for goroutine/task lifetime under GC.
 
-A pygo.aio task owns a goroutine whose callable is the task's own bound
-`_driver` method, so the C-level pygo_g_t holds  g->callable -> _driver ->
-task.  Combined with task._g (a PygoG wrapping that same pygo_g_t) this is a
+A runloom.aio task owns a goroutine whose callable is the task's own bound
+`_driver` method, so the C-level runloom_g_t holds  g->callable -> _driver ->
+task.  Combined with task._g (a RunloomG wrapping that same runloom_g_t) this is a
 reference cycle:
 
-    task -> task._g (PygoG) -> pygo_g_t -> g->callable (_driver) -> task
+    task -> task._g (RunloomG) -> runloom_g_t -> g->callable (_driver) -> task
 
-pygo_g_t is a plain C struct, invisible to cyclic GC, and PygoG has no
+runloom_g_t is a plain C struct, invisible to cyclic GC, and RunloomG has no
 tp_traverse, so the collector cannot see the g->callable edge.  Before the fix
 a *completed* task therefore leaked forever.  The fix releases g->callable the
 moment the goroutine finishes (it is never called again), cutting the cycle at
@@ -17,7 +17,7 @@ import gc
 import asyncio
 import unittest
 
-import pygo.aio as aio
+import runloom.aio as aio
 
 
 def _count(typename):
@@ -27,7 +27,7 @@ def _count(typename):
 class TestTaskGC(unittest.TestCase):
     def test_completed_tasks_do_not_accumulate(self):
         """Inside one running loop, spawning + awaiting + dropping many tasks
-        must not grow the live PygoTask population.
+        must not grow the live RunloomTask population.
 
         Measured as a delta from a baseline taken inside main(), so the count
         is unaffected by tasks other tests in the suite may have leaked (e.g.
@@ -39,7 +39,7 @@ class TestTaskGC(unittest.TestCase):
         async def main():
             loop = asyncio.get_event_loop()
             gc.collect()
-            base = _count("PygoTask")
+            base = _count("RunloomTask")
             deltas = []
             for _ in range(4):
                 for i in range(150):
@@ -47,7 +47,7 @@ class TestTaskGC(unittest.TestCase):
                     await t
                     del t
                 gc.collect()
-                deltas.append(_count("PygoTask") - base)
+                deltas.append(_count("RunloomTask") - base)
             return deltas
 
         deltas = aio.run(main())
@@ -81,7 +81,7 @@ class TestTaskGC(unittest.TestCase):
         shape as the task<->driver cycle) is reclaimed once it completes,
         because the goroutine releases its callable at completion."""
         import weakref
-        import pygo_core
+        import runloom_c
         box = {}
 
         def run_once():
@@ -89,13 +89,13 @@ class TestTaskGC(unittest.TestCase):
 
             def body():
                 # body's closure holds `cell`; cell holds the handle, whose
-                # pygo_g_t holds body -> a cycle through the C struct.
-                cell["g"] = pygo_core.current_g()
+                # runloom_g_t holds body -> a cycle through the C struct.
+                cell["g"] = runloom_c.current_g()
                 return 7
 
             box["w"] = weakref.ref(body)
-            pygo_core.go(body)
-            pygo_core.run()
+            runloom_c.go(body)
+            runloom_c.run()
             del body
 
         run_once()

@@ -1,5 +1,5 @@
 """CPython's OWN Lib/test/test_subprocess.py (ProcessTestCase) verbatim under
-pygo.monkey.patch().
+runloom.monkey.patch().
 
 monkey makes ``subprocess.Popen.wait`` cooperative (via the cooperative
 ``selectors`` + ``os`` categories) and routes the pipe I/O through the
@@ -21,4 +21,4 @@ tearDownModule = unpatch_module
 if HAVE_CPYTHON_TESTS:
     from test import test_subprocess as _m
 
-    TestPygoSubprocess = hosted(_m.ProcessTestCase, "TestPygoSubprocess")
+    TestRunloomSubprocess = hosted(_m.ProcessTestCase, "TestRunloomSubprocess")

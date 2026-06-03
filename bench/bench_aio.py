@@ -1,4 +1,4 @@
-"""Benchmark pygo.aio vs stock asyncio across three common patterns.
+"""Benchmark runloom.aio vs stock asyncio across three common patterns.
 
 Each test runs the same async code under both loops and reports ns
 per logical operation.  Patterns chosen to surface the dispatch-tier
@@ -18,7 +18,7 @@ import sys
 import time
 
 sys.path.insert(0, "src")
-import pygo.aio as paio
+import runloom.aio as paio
 
 
 # --------------------------------------------------------------------
@@ -89,7 +89,7 @@ def run_asyncio(coro):
     asyncio.run(coro)
 
 
-def run_pygo(coro):
+def run_runloom(coro):
     paio.run(coro)
 
 
@@ -104,24 +104,24 @@ def main():
     header("1. await chain (per-await overhead)")
     N = 200_000
     a = bench("asyncio",   lambda: chain_main(N), N, runner=run_asyncio)
-    p = bench("pygo.aio",  lambda: chain_main(N), N, runner=run_pygo)
-    print("  pygo.aio is %.2fx asyncio" % (a / p))
+    p = bench("runloom.aio",  lambda: chain_main(N), N, runner=run_runloom)
+    print("  runloom.aio is %.2fx asyncio" % (a / p))
 
     # 2. sleep(0) gather
     header("2. sleep(0) gather (dispatch + bare-yield)")
     N, M = 100, 200
     ops = N * M
     a = bench("asyncio",   lambda: sleep_main(N, M), ops, runner=run_asyncio)
-    p = bench("pygo.aio",  lambda: sleep_main(N, M), ops, runner=run_pygo)
-    print("  pygo.aio is %.2fx asyncio" % (a / p))
+    p = bench("runloom.aio",  lambda: sleep_main(N, M), ops, runner=run_runloom)
+    print("  runloom.aio is %.2fx asyncio" % (a / p))
 
     # 3. queue ping-pong
     header("3. asyncio.Queue ping-pong")
     N, P = 50, 100
     ops = N * P * 2 * 2     # 2 sides * 2 ops/side per iter
     a = bench("asyncio",   lambda: pingpong_main(N, P), ops, runner=run_asyncio)
-    p = bench("pygo.aio",  lambda: pingpong_main(N, P), ops, runner=run_pygo)
-    print("  pygo.aio is %.2fx asyncio" % (a / p))
+    p = bench("runloom.aio",  lambda: pingpong_main(N, P), ops, runner=run_runloom)
+    print("  runloom.aio is %.2fx asyncio" % (a / p))
 
 
 if __name__ == "__main__":

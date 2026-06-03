@@ -1,13 +1,13 @@
-"""Smoke test for pygo_core.stats() -- production introspection."""
+"""Smoke test for runloom_c.stats() -- production introspection."""
 import unittest
 
-import pygo
-import pygo_core
+import runloom
+import runloom_c
 
 
 class TestStats(unittest.TestCase):
     def test_keys_and_types(self):
-        s = pygo_core.stats()
+        s = runloom_c.stats()
         self.assertIsInstance(s, dict)
         for k in ("ready", "sleeping", "netpoll_parked", "completed",
                   "running", "stack_size_default", "ready_capacity",
@@ -25,11 +25,11 @@ class TestStats(unittest.TestCase):
         self.assertTrue(s["netpoll"])
 
     def test_completed_increments(self):
-        before = pygo_core.stats()["completed"]
-        pygo_core.go(lambda: None)
-        pygo_core.go(lambda: None)
-        pygo_core.run()
-        after = pygo_core.stats()["completed"]
+        before = runloom_c.stats()["completed"]
+        runloom_c.go(lambda: None)
+        runloom_c.go(lambda: None)
+        runloom_c.run()
+        after = runloom_c.stats()["completed"]
         self.assertGreaterEqual(after - before, 2)
 
 

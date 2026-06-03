@@ -1,6 +1,6 @@
 # Time-sliced preemption
 
-By default, pygo goroutines are **cooperative** -- they yield only when
+By default, runloom goroutines are **cooperative** -- they yield only when
 they explicitly call `sched_yield`, sleep, or block on I/O.  If you
 write a tight CPU loop with no yield, that goroutine monopolises the
 scheduler until it returns.
@@ -11,18 +11,18 @@ when you mix in libraries that don't expect to be cooperative -- a
 long `numpy` matmul or a 10-million-iteration arithmetic loop will
 starve every other goroutine.
 
-`pygo_core.preempt_init(quantum_us=10_000)` solves this on
+`runloom_c.preempt_init(quantum_us=10_000)` solves this on
 **free-threaded Python 3.13t** (the GIL-disabled build).  A timer
 thread posts a `Py_AddPendingCall` every quantum; CPython's
 `eval_breaker` check -- already done between bytecodes -- invokes our
-callback, which calls `pygo_sched_yield()` on the running goroutine.
+callback, which calls `runloom_sched_yield()` on the running goroutine.
 
 ## Hello, preempted goroutine
 
 ```python
-import pygo_core
+import runloom_c
 
-pygo_core.preempt_init(quantum_us=10_000)    # 10 ms slices
+runloom_c.preempt_init(quantum_us=10_000)    # 10 ms slices
 
 def hog():
     total = 0
@@ -33,11 +33,11 @@ def hog():
 def chatty():
     for i in range(50):
         print("chatty tick", i)
-        pygo_core.sched_sleep(0.01)
+        runloom_c.sched_sleep(0.01)
 
-pygo_core.go(hog)
-pygo_core.go(chatty)
-pygo_core.run()
+runloom_c.go(hog)
+runloom_c.go(chatty)
+runloom_c.run()
 ```
 
 Without `preempt_init`, `chatty` wouldn't get any time until `hog`
@@ -50,7 +50,7 @@ The hot path (between yields) pays nothing -- preemption only adds
 work when the quantum fires:
 
 - ~300 ns per quantum to dispatch the pending call.
-- One pygo yield (~80 ns asm + snap/load).
+- One runloom yield (~80 ns asm + snap/load).
 
 At 100 Hz (the default 10 ms quantum), that's ~30 µs of overhead per
 real-time second.  ≈ 0.003%.
@@ -68,7 +68,7 @@ We exploit this by:
 2. Every `quantum_us` microseconds, the timer thread calls
    `Py_AddPendingCall(yield_cb)`.
 3. `yield_cb` checks if any goroutine is currently running on this
-   thread and, if so, calls `pygo_sched_yield()` to swap it out.
+   thread and, if so, calls `runloom_sched_yield()` to swap it out.
 
 The goroutine resumes the next time it's at the head of the ready
 queue -- typically immediately after every other ready goroutine has
@@ -97,7 +97,7 @@ fast path that's safe across hubs -- both of which are part of the
 Pythons.
 
 If you really want time-slicing on a GIL build, the workaround is to
-sprinkle `pygo_core.sched_yield_classic()` calls into your hot loops.
+sprinkle `runloom_c.sched_yield_classic()` calls into your hot loops.
 Crude but works.
 
 ### Per-thread, not per-process
@@ -110,7 +110,7 @@ scheduler; preemption needs to be initialised on each.  The
 ## Stopping preemption
 
 ```python
-pygo_core.preempt_fini()
+runloom_c.preempt_fini()
 ```
 
 Idempotent.  Joins the timer thread.  Use this if you're toggling
@@ -129,7 +129,7 @@ leave it on after `preempt_init`.
   goroutines.
 
 ```python
-pygo_core.preempt_init(quantum_us=1_000)
+runloom_c.preempt_init(quantum_us=1_000)
 ```
 
 ## When to use preemption
@@ -149,7 +149,7 @@ pygo_core.preempt_init(quantum_us=1_000)
   jitter from quantum-driven yields.
 - You're on a GIL build (it'll raise).
 
-The default for pygo is *no preemption*, which matches Go's behaviour
+The default for runloom is *no preemption*, which matches Go's behaviour
 pre-1.14.  Opt into preemption when you actually need it.
 
 ## Combining with M:N

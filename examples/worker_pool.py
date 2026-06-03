@@ -13,8 +13,8 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 
-import pygo
-import pygo_core
+import runloom
+import runloom_c
 
 NUM_WORKERS = 4
 NUM_JOBS = 20
@@ -26,11 +26,11 @@ def worker(wid, jobs, results):
 
 
 def main():
-    jobs = pygo_core.Chan(NUM_JOBS)
-    results = pygo_core.Chan(NUM_JOBS)
+    jobs = runloom_c.Chan(NUM_JOBS)
+    results = runloom_c.Chan(NUM_JOBS)
 
     for wid in range(NUM_WORKERS):
-        pygo.go(worker, wid, jobs, results)
+        runloom.go(worker, wid, jobs, results)
 
     for n in range(1, NUM_JOBS + 1):
         jobs.send(n)
@@ -42,4 +42,4 @@ def main():
 
 
 if __name__ == "__main__":
-    pygo.run(main)
+    runloom.run(main)

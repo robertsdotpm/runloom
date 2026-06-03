@@ -1,5 +1,5 @@
 /*
- * futexlat.bt -- futex wait-latency histogram for a pygo workload.
+ * futexlat.bt -- futex wait-latency histogram for a runloom workload.
  *
  * The park/wake path (channel park, M:N hub coordination) bottoms out in
  * futex syscalls; this is how long threads actually block. bpftrace uses

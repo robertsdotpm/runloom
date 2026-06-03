@@ -1,4 +1,4 @@
-"""Syscall fault-injection harness for pygo_tcp (TCPConn).
+"""Syscall fault-injection harness for runloom_tcp (TCPConn).
 
 strace's ``-e inject=`` forces connect/accept/recv/send to fail with chosen
 errnos under a real loopback TCPConn workload (tests/tcp_fault_workload.py),

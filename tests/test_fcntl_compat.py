@@ -23,9 +23,9 @@ import tempfile
 import time
 import unittest
 
-import pygo
-import pygo.monkey
-import pygo_core
+import runloom
+import runloom.monkey
+import runloom_c
 
 try:
     import fcntl
@@ -45,23 +45,23 @@ def _drive(fn):
         except BaseException as e:   # noqa: BLE001
             box[1] = e
 
-    pygo_core.go(runner)
-    pygo_core.run()
+    runloom_c.go(runner)
+    runloom_c.run()
     if box[1] is not None:
         raise box[1]
     return box[0]
 
 
 def setUpModule():
-    pygo.monkey.patch()
+    runloom.monkey.patch()
 
 
 def tearDownModule():
-    pygo.monkey.unpatch()
+    runloom.monkey.unpatch()
 
 
 def _tmpfile():
-    fd, path = tempfile.mkstemp(prefix="pygo_lock_")
+    fd, path = tempfile.mkstemp(prefix="runloom_lock_")
     os.write(fd, b"lockfile-contents")
     os.close(fd)
     return path
@@ -100,12 +100,12 @@ class TestFlock(unittest.TestCase):
                 fcntl.flock(fd_a, fcntl.LOCK_EX)
                 order.append("a-locked")
                 for _ in range(5):
-                    pygo.sleep(0.005)       # hold, cooperatively
+                    runloom.sleep(0.005)       # hold, cooperatively
                 order.append("a-unlock")
                 fcntl.flock(fd_a, fcntl.LOCK_UN)
 
             def waiter():
-                pygo.sleep(0.002)           # let the holder grab it first
+                runloom.sleep(0.002)           # let the holder grab it first
                 order.append("b-try")
                 fcntl.flock(fd_b, fcntl.LOCK_EX)   # blocks until a unlocks
                 order.append("b-locked")
@@ -114,14 +114,14 @@ class TestFlock(unittest.TestCase):
             def ticker():
                 while "b-locked" not in order:
                     ticks.append(1)
-                    pygo.sleep(0.003)
+                    runloom.sleep(0.003)
 
-            pygo_core.go(holder)
-            pygo_core.go(waiter)
-            pygo_core.go(ticker)
+            runloom_c.go(holder)
+            runloom_c.go(waiter)
+            runloom_c.go(ticker)
             t0 = time.monotonic()
             while "b-locked" not in order and time.monotonic() - t0 < 5:
-                pygo.sleep(0.005)
+                runloom.sleep(0.005)
             os.close(fd_a); os.close(fd_b)
             return order, len(ticks)
 
@@ -192,9 +192,9 @@ class TestLockf(unittest.TestCase):
             def ticker():
                 for _ in range(20):
                     ticks.append(1)
-                    pygo.sleep(0.004)
+                    runloom.sleep(0.004)
 
-            pygo_core.go(ticker)
+            runloom_c.go(ticker)
             fcntl.lockf(fd, fcntl.LOCK_EX)  # blocks until the child releases
             acquired = True
             fcntl.lockf(fd, fcntl.LOCK_UN)

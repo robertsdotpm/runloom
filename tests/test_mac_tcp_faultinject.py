@@ -3,7 +3,7 @@
 The Linux campaign faults connect/accept/recv/send with strace's ``-e inject=``
 (test_tcp_faultinject.py).  Darwin/BSD have no syscall-injecting tracer, so the
 socket surface carries the same compiled-in, env-gated fault points as the
-netpoll pump -- PYGO_FAULT_TCP_<CALL>="<mode>:<errno>" (see pygo_tcp.c).  This
+netpoll pump -- RUNLOOM_FAULT_TCP_<CALL>="<mode>:<errno>" (see runloom_tcp.c).  This
 harness drives a real loopback TCPConn workload (tcp_fault_workload.py) and
 asserts the non-blocking + netpoll-retry loop handles every errno the Darwin
 socket(2)/connect(2)/accept(2)/recv(2)/send(2) man pages permit:
@@ -29,13 +29,13 @@ import sys
 
 import pytest
 
-import pygo_core
+import runloom_c
 
 pytestmark = [
     pytest.mark.skipif(
         not sys.platform.startswith(("darwin", "freebsd", "openbsd", "netbsd")),
         reason="compiled-in TCP fault injection targets the kqueue backends"),
-    pytest.mark.skipif(pygo_core.netpoll_backend() != "kqueue",
+    pytest.mark.skipif(runloom_c.netpoll_backend() != "kqueue",
                        reason="needs the kqueue backend"),
 ]
 
@@ -57,7 +57,7 @@ def _run(site, spec, mode, timeout=30):
     env["PYTHONPATH"] = os.path.join(REPO, "src")
     env["PYTHON_GIL"] = "0"                       # focus: free-threaded only
     env["FAULT_SITE"] = site
-    env["PYGO_FAULT_" + site] = spec
+    env["RUNLOOM_FAULT_" + site] = spec
     return subprocess.run(
         [sys.executable, WORKLOAD, mode], cwd=REPO, env=env, timeout=timeout,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)

@@ -1,13 +1,13 @@
 # API reference
 
-Every public symbol exported by pygo, organised by module.  This is
+Every public symbol exported by runloom, organised by module.  This is
 a reference -- start with the [guides](index.md) if you're learning
 your way around.
 
-## `pygo_core` (C extension)
+## `runloom_c` (C extension)
 
-The low-level scheduler API.  Most user code calls `pygo_core.go` and
-`pygo_core.run`; everything else is for advanced use.
+The low-level scheduler API.  Most user code calls `runloom_c.go` and
+`runloom_c.run`; everything else is for advanced use.
 
 ### Scheduler control
 
@@ -46,7 +46,7 @@ Other goroutines run in the meantime.
 #### `sched_stop()`
 
 Signal the scheduler to exit its drain loop at the next safe point.
-Used internally by `pygo.aio` for early termination.
+Used internally by `runloom.aio` for early termination.
 
 #### `sched_reset() → (int, int, int)`
 
@@ -177,7 +177,7 @@ Snapshot of scheduler counters.  Keys: `ready`, `sleeping`,
 
 A Go-style goroutine dump -- which goroutines exist, what each is blocked
 on, and where in your code.  See the [Debugging guide](debugging.md) for
-the full picture (and the friendlier `pygo.inspect` wrappers).
+the full picture (and the friendlier `runloom.inspect` wrappers).
 
 #### `goroutines() → list[dict]`
 
@@ -193,7 +193,7 @@ Number of live goroutines.
 #### `goroutine_stack(id) → (callable_repr, [(file, line, func), ...])`
 
 Best-effort reconstructed Python stack of one goroutine (deepest first).
-Full stack under the single-thread scheduler (`pygo.aio`) and per-g-tstate
+Full stack under the single-thread scheduler (`runloom.aio`) and per-g-tstate
 M:N; withheld under default M:N (no safe way to freeze a hub-resumable
 goroutine).
 
@@ -206,12 +206,12 @@ handler and when the interpreter is wedged.
 #### `set_introspect_timestamps(bool)`
 
 Track each goroutine's park time so `goroutines()`/dumps report `age`.  Off
-by default (one clock read per park); also via `PYGO_INTROSPECT_TIME=1`.
+by default (one clock read per park); also via `RUNLOOM_INTROSPECT_TIME=1`.
 
 #### `install_traceback_signal(signum=SIGQUIT) → int`
 
 Install a raw-C signal handler that dumps all goroutines to stderr -- Go's
-`GOTRACEBACK` / `kill -QUIT`.  Also via `PYGO_TRACEBACK=1`.  POSIX only.
+`GOTRACEBACK` / `kill -QUIT`.  Also via `RUNLOOM_TRACEBACK=1`.  POSIX only.
 
 #### `reset_after_fork() → None`
 
@@ -225,25 +225,25 @@ guide](debugging.md#fork-safety).
 
 Deadlock detection: when the single-thread scheduler quiesces with
 goroutines still blocked on channels/parks, mode 0=off, 1=warn (print the
-dump, default), 2=raise `RuntimeError`.  Also `PYGO_DEADLOCK=off|warn|raise`.
+dump, default), 2=raise `RuntimeError`.  Also `RUNLOOM_DEADLOCK=off|warn|raise`.
 `count_deadlocked()` is the current chan/park-blocked count.
 
 #### `set_max_goroutines(n)` / `get_max_goroutines() → int` / `live_goroutines() → int`
 
 Backpressure: cap the live-goroutine count (0 = unlimited).  Over the cap,
-spawn raises `RuntimeError`.  Also `PYGO_MAX_GOROUTINES`.  Zero hot-path cost
+spawn raises `RuntimeError`.  Also `RUNLOOM_MAX_GOROUTINES`.  Zero hot-path cost
 when unset.
 
 #### `set_introspect_timestamps(bool)` / `get_introspect_timestamps() → bool`
 
-Park-age tracking (enables the `age` field + `pygo.inspect.leaked()`).
+Park-age tracking (enables the `age` field + `runloom.inspect.leaked()`).
 
 ### Thread setup
 
 #### `thread_init()` / `thread_fini()`
 
 Per-OS-thread setup/teardown.  Called automatically; only invoke
-manually if you're embedding pygo in a non-main thread.
+manually if you're embedding runloom in a non-main thread.
 
 ### Types
 
@@ -266,27 +266,27 @@ directly; `G` wraps a `Coro` plus scheduler metadata.
 
 ---
 
-## `pygo`
+## `runloom`
 
-Top-level package.  Re-exports a Go-style API from `pygo.runtime`
+Top-level package.  Re-exports a Go-style API from `runloom.runtime`
 (the original Python-only scheduler, kept for backward compatibility).
 
 ```python
-import pygo
+import runloom
 
-pygo.go(fn)            # spawn (uses the C scheduler under the hood)
-pygo.yield_()          # cooperative yield
-pygo.sleep(seconds)    # cooperative sleep
-pygo.run(main_fn=None) # drive until idle
-pygo.current() → Goroutine
-pygo.backend() → str
+runloom.go(fn)            # spawn (uses the C scheduler under the hood)
+runloom.yield_()          # cooperative yield
+runloom.sleep(seconds)    # cooperative sleep
+runloom.run(main_fn=None) # drive until idle
+runloom.current() → Goroutine
+runloom.backend() → str
 ```
 
-For new code, prefer `pygo_core` (faster) or `pygo.sync` (richer API).
+For new code, prefer `runloom_c` (faster) or `runloom.sync` (richer API).
 
 ---
 
-## `pygo.inspect`
+## `runloom.inspect`
 
 Runtime introspection -- the friendly wrappers over the goroutine
 registry.  `goroutines(stacks=)`, `count()`, `stack(id)`, `format(stacks=)`
@@ -297,32 +297,32 @@ registry.  `goroutines(stacks=)`, `count()`, `stack(id)`, `format(stacks=)`
 [Debugging guide](debugging.md).
 
 ```python
-import pygo.inspect as gi
+import runloom.inspect as gi
 print(gi.format(stacks=True))   # which goroutines, and where they're stuck
 gi.install_dump_signal()        # kill -QUIT <pid> -> dump
 ```
 
 ---
 
-## `pygo.aio`
+## `runloom.aio`
 
-Asyncio bridge.  See [pygo.aio](asyncio.md).
+Asyncio bridge.  See [runloom.aio](asyncio.md).
 
 ```python
-pygo.aio.run(coro)                     # equivalent of asyncio.run
-pygo.aio.install()                     # set PygoEventLoopPolicy globally
-pygo.aio.open_connection(host, port)   # async (reader, writer)
-pygo.aio.start_server(cb, host, port)  # async server with serve_forever()
+runloom.aio.run(coro)                     # equivalent of asyncio.run
+runloom.aio.install()                     # set RunloomEventLoopPolicy globally
+runloom.aio.open_connection(host, port)   # async (reader, writer)
+runloom.aio.start_server(cb, host, port)  # async server with serve_forever()
 ```
 
 Classes:
 
-- `PygoEventLoop` -- drop-in `asyncio.AbstractEventLoop` backed by
-  pygo's scheduler.
-- `PygoEventLoopPolicy` -- sets `PygoEventLoop` as the default loop.
-- `PygoFuture` -- duck-typed Future with synchronous done-callback
+- `RunloomEventLoop` -- drop-in `asyncio.AbstractEventLoop` backed by
+  runloom's scheduler.
+- `RunloomEventLoopPolicy` -- sets `RunloomEventLoop` as the default loop.
+- `RunloomFuture` -- duck-typed Future with synchronous done-callback
   dispatch.
-- `PygoTask` -- `asyncio.Task` replacement that drives the coroutine
+- `RunloomTask` -- `asyncio.Task` replacement that drives the coroutine
   inside a goroutine.
 - `StreamReader` / `StreamWriter` -- asyncio-compatible stream
   interface, backed by `wait_fd`.
@@ -331,32 +331,32 @@ Classes:
 
 ---
 
-## `pygo.sync`
+## `runloom.sync`
 
 No-`async`/`await` facade.  See [Sync API](sync-api.md).
 
 ```python
-pygo.sync.go(fn, *args, **kwargs)        # spawn with args
-pygo.sync.run(main_fn=None)              # drive scheduler
-pygo.sync.sleep(seconds)
-pygo.sync.yield_now()
-pygo.sync.current() → G
+runloom.sync.go(fn, *args, **kwargs)        # spawn with args
+runloom.sync.run(main_fn=None)              # drive scheduler
+runloom.sync.sleep(seconds)
+runloom.sync.yield_now()
+runloom.sync.current() → G
 
-pygo.sync.Chan                            # re-export of pygo_core.Chan
-pygo.sync.select                          # re-export of pygo_core.select
-pygo.sync.park / wake                     # park_self + wake helpers
+runloom.sync.Chan                            # re-export of runloom_c.Chan
+runloom.sync.select                          # re-export of runloom_c.select
+runloom.sync.park / wake                     # park_self + wake helpers
 
-pygo.sync.tcp_connect(host, port) → Socket
-pygo.sync.tcp_listen(host, port, *, backlog=128) → Socket
-pygo.sync.udp_endpoint(local_addr=None, remote_addr=None) → Socket
+runloom.sync.tcp_connect(host, port) → Socket
+runloom.sync.tcp_listen(host, port, *, backlog=128) → Socket
+runloom.sync.udp_endpoint(local_addr=None, remote_addr=None) → Socket
 ```
 
 Synchronisation primitives matching `asyncio.*`:
 
-- `pygo.sync.Lock` -- cooperative mutex.
-- `pygo.sync.Event` -- set/clear/wait.
-- `pygo.sync.Condition` -- waiter + notifier on a lock.
-- `pygo.sync.Semaphore` -- bounded counting semaphore.
+- `runloom.sync.Lock` -- cooperative mutex.
+- `runloom.sync.Event` -- set/clear/wait.
+- `runloom.sync.Condition` -- waiter + notifier on a lock.
+- `runloom.sync.Semaphore` -- bounded counting semaphore.
 
 #### `Socket`
 
@@ -367,13 +367,13 @@ park cooperatively on `wait_fd`.  Standard `socket.socket` attributes
 
 ---
 
-## `pygo.time`
+## `runloom.time`
 
 Go-style timers and tickers.
 
 #### `Sleep(seconds)`
 
-Cooperative sleep.  Alias for `pygo_core.sched_sleep`.
+Cooperative sleep.  Alias for `runloom_c.sched_sleep`.
 
 #### `After(seconds) → Chan`
 
@@ -381,7 +381,7 @@ Returns a channel that will receive the current time after `seconds`.
 Equivalent of Go's `time.After`.
 
 ```python
-import pygo.time as t
+import runloom.time as t
 
 after = t.After(1.0)
 # ... do work ...
@@ -410,7 +410,7 @@ Shorthand for `NewTicker(seconds).C` when you don't need to stop it
 
 ---
 
-## `pygo.monkey`
+## `runloom.monkey`
 
 Stdlib monkey-patching.  See [Monkey-patching](monkey-patching.md).
 
@@ -419,7 +419,7 @@ Stdlib monkey-patching.  See [Monkey-patching](monkey-patching.md).
 Apply patches.  Default: all categories enabled.  Opt out:
 
 ```python
-pygo.monkey.patch(threading=False, dns=False)
+runloom.monkey.patch(threading=False, dns=False)
 ```
 
 Categories: `socket`, `time`, `os`, `select`, `stdio`, `ssl`,

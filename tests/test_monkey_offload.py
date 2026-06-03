@@ -12,10 +12,10 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-import pygo.monkey
-import pygo_core
+import runloom.monkey
+import runloom_c
 
-pygo.monkey.patch()
+runloom.monkey.patch()
 
 import tempfile     # imported AFTER patch, so its _once_lock is cooperative
 
@@ -33,15 +33,15 @@ def _filework():
 
 def test_concurrent_offload_single_thread():
     for _ in range(16):
-        pygo_core.go(_filework, stack_size=2 << 20)
-    pygo_core.run()
-    assert pygo_core._self_check(0) == 0
+        runloom_c.go(_filework, stack_size=2 << 20)
+    runloom_c.run()
+    assert runloom_c._self_check(0) == 0
 
 
 def test_concurrent_offload_mn():
-    pygo_core.mn_init(4)
+    runloom_c.mn_init(4)
     for _ in range(16):
-        pygo_core.mn_go(_filework)
-    pygo_core.mn_run()
-    pygo_core.mn_fini()
-    assert pygo_core._self_check(0) == 0
+        runloom_c.mn_go(_filework)
+    runloom_c.mn_run()
+    runloom_c.mn_fini()
+    assert runloom_c._self_check(0) == 0

@@ -2,7 +2,7 @@
 
 Run STANDALONE (not collected by pytest) under ``strace -e inject=`` by
 test_iouring_faultinject.py.  Exercises the io_uring file-I/O path
-(pygo_core.file_read / file_write) from inside a goroutine so an error injected
+(runloom_c.file_read / file_write) from inside a goroutine so an error injected
 into io_uring_setup / io_uring_enter hits a real submit + completion path.
 
 Modes (argv[1]):
@@ -23,7 +23,7 @@ import threading
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__))), "src"))
-import pygo_core
+import runloom_c
 
 PAYLOAD = b"io_uring fault workload payload " * 64
 
@@ -42,7 +42,7 @@ def mode_fileread():
         try:
             buf = bytearray(len(PAYLOAD))
             try:
-                n = pygo_core.file_read(fd, buf, len(PAYLOAD), 0)
+                n = runloom_c.file_read(fd, buf, len(PAYLOAD), 0)
                 out["n"] = n
                 out["ok"] = (bytes(buf) == PAYLOAD)
             except OSError as e:
@@ -50,8 +50,8 @@ def mode_fileread():
         finally:
             os.close(fd)
 
-    pygo_core.go(worker)
-    pygo_core.run()
+    runloom_c.go(worker)
+    runloom_c.run()
     os.unlink(path)
     if "errno" in out:
         print("OSERROR errno=%d" % out["errno"])
@@ -71,13 +71,13 @@ def mode_badfd():
         os.close(fd)                      # now stale -> read must fail EBADF
         buf = bytearray(16)
         try:
-            pygo_core.file_read(fd, buf, 16, 0)
+            runloom_c.file_read(fd, buf, 16, 0)
             out["unexpected"] = True
         except OSError as e:
             out["errno"] = e.errno
 
-    pygo_core.go(worker)
-    pygo_core.run()
+    runloom_c.go(worker)
+    runloom_c.run()
     if out.get("unexpected"):
         print("FAIL read on closed fd did not error")
         return 1
@@ -87,7 +87,7 @@ def mode_badfd():
 
 def main():
     mode = sys.argv[1] if len(sys.argv) > 1 else "fileread"
-    print("IOURING_AVAIL=%d" % (1 if pygo_core.iouring_available() else 0),
+    print("IOURING_AVAIL=%d" % (1 if runloom_c.iouring_available() else 0),
           file=sys.stderr)
     if mode == "fileread":
         return mode_fileread()

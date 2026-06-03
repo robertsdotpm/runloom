@@ -1,9 +1,9 @@
-"""Per-test invariant checks for the pygo suite.
+"""Per-test invariant checks for the runloom suite.
 
 Every test in this directory runs through an autouse fixture that, AFTER the
 test body, asserts two things about the C runtime:
 
-  1. ``pygo_core._self_check(0) == 0`` -- a structural walk of every live
+  1. ``runloom_c._self_check(0) == 0`` -- a structural walk of every live
      scheduler / netpoll data structure (no list cycle, no self-looping
      per-fd bucket, the atomic parked count matches the walked count, no
      bucket entry missing from the global list).  This is a pure consistency
@@ -18,27 +18,27 @@ test body, asserts two things about the C runtime:
      to drain its own parker.
 
 Why this exists: in practice a leaked parker did not fail the test that
-caused it -- it wedged an *unrelated* ``pygo_core.run()`` several files later,
+caused it -- it wedged an *unrelated* ``runloom_c.run()`` several files later,
 which is brutal to bisect.  Attributing the leak to the test that created it
 (via a per-test before/after delta) turns "the suite hangs sometimes" into
 "this one test leaked a parker."
 
-Opt out with ``@pytest.mark.pygo_leaky`` for a test that deliberately leaves a
+Opt out with ``@pytest.mark.runloom_leaky`` for a test that deliberately leaves a
 parker behind (e.g. the regression that proves a leaked parker no longer
 wedges other threads).
 
 Env knobs:
-  PYGO_TEST_LEAK_REPORT=1  -- print the per-test parked delta instead of
+  RUNLOOM_TEST_LEAK_REPORT=1  -- print the per-test parked delta instead of
                               failing on it (survey mode; self_check still
                               hard-asserts).
-  PYGO_TEST_NO_INVARIANTS=1 -- disable the fixture entirely.
+  RUNLOOM_TEST_NO_INVARIANTS=1 -- disable the fixture entirely.
 """
 import os
 import sys
 import time
 
 # Match run_tests.py / test_mn.py: test the in-tree .so, not whatever else
-# might be on the path.  Harmless if pygo_core is already imported (Python
+# might be on the path.  Harmless if runloom_c is already imported (Python
 # caches the module, so the fixture inspects the same runtime the tests use).
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _SRC = os.path.join(REPO, "src")
@@ -48,12 +48,12 @@ if _SRC not in sys.path:
 import pytest
 
 try:
-    import pygo_core
-except Exception:  # pragma: no cover - pygo_core should always import here
-    pygo_core = None
+    import runloom_c
+except Exception:  # pragma: no cover - runloom_c should always import here
+    runloom_c = None
 
-_REPORT_ONLY = os.environ.get("PYGO_TEST_LEAK_REPORT") == "1"
-_DISABLED = os.environ.get("PYGO_TEST_NO_INVARIANTS") == "1"
+_REPORT_ONLY = os.environ.get("RUNLOOM_TEST_LEAK_REPORT") == "1"
+_DISABLED = os.environ.get("RUNLOOM_TEST_NO_INVARIANTS") == "1"
 
 # How long to let a background thread finish draining its own parker before we
 # call a non-zero delta a real leak.  Real leaks never drain, so this only
@@ -65,7 +65,7 @@ _SETTLE_STEP_S = 0.01
 def pytest_configure(config):
     config.addinivalue_line(
         "markers",
-        "pygo_leaky: test deliberately leaves a netpoll parker behind; "
+        "runloom_leaky: test deliberately leaves a netpoll parker behind; "
         "skip the post-test parked-leak invariant for it.")
 
 
@@ -84,7 +84,7 @@ def _parked():
     # stranded on another/since-exited thread's sched (e.g. a test that
     # deliberately leaks one on a dead thread) is not this test's leak and
     # must not trip the check.  Falls back to the global count on an older .so.
-    s = pygo_core.stats()
+    s = runloom_c.stats()
     return int(s.get("netpoll_parked_self", s["netpoll_parked"]))
 
 
@@ -104,8 +104,8 @@ def _settle_parked(baseline):
 
 
 @pytest.fixture(autouse=True)
-def pygo_invariants(request):
-    if _DISABLED or pygo_core is None:
+def runloom_invariants(request):
+    if _DISABLED or runloom_c is None:
         yield
         return
 
@@ -118,14 +118,14 @@ def pygo_invariants(request):
         return
 
     # (1) structural integrity -- always holds, cheap, no false positives.
-    viol = pygo_core._self_check(0)
+    viol = runloom_c._self_check(0)
     assert viol == 0, (
-        "pygo_core._self_check reported {0} violation(s) after this test "
-        "(see stderr [pygo-diag] lines): netpoll/scheduler structures are "
+        "runloom_c._self_check reported {0} violation(s) after this test "
+        "(see stderr [runloom-diag] lines): netpoll/scheduler structures are "
         "inconsistent.".format(viol))
 
     # (2) leaked-parker delta.
-    if request.node.get_closest_marker("pygo_leaky") is not None:
+    if request.node.get_closest_marker("runloom_leaky") is not None:
         return
     after = _settle_parked(baseline)
     delta = after - baseline
@@ -133,10 +133,10 @@ def pygo_invariants(request):
         msg = ("leaked {0} netpoll parker(s): netpoll_parked was {1} before "
                "the test and {2} after (did not drain within {3}s). A "
                "goroutine parked in wait_fd was never woken -- mark the test "
-               "@pytest.mark.pygo_leaky if that is intentional.".format(
+               "@pytest.mark.runloom_leaky if that is intentional.".format(
                    delta, baseline, after, _SETTLE_DEADLINE_S))
         if _REPORT_ONLY:
-            sys.stderr.write("[pygo-leak] {0}::{1}: {2}\n".format(
+            sys.stderr.write("[runloom-leak] {0}::{1}: {2}\n".format(
                 request.node.module.__name__, request.node.name, msg))
         else:
             pytest.fail(msg, pytrace=False)

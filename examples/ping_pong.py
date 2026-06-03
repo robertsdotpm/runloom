@@ -13,8 +13,8 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 
-import pygo
-import pygo_core
+import runloom
+import runloom_c
 
 ROUNDS = 5
 
@@ -37,11 +37,11 @@ def pong(from_ping, to_ping):
 
 
 def main():
-    a = pygo_core.Chan()       # ping -> pong  (unbuffered rendezvous)
-    b = pygo_core.Chan()       # pong -> ping
-    pygo.go(ping, a, b)
-    pygo.go(pong, a, b)
+    a = runloom_c.Chan()       # ping -> pong  (unbuffered rendezvous)
+    b = runloom_c.Chan()       # pong -> ping
+    runloom.go(ping, a, b)
+    runloom.go(pong, a, b)
 
 
 if __name__ == "__main__":
-    pygo.run(main)
+    runloom.run(main)

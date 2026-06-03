@@ -4,9 +4,9 @@ import sys
 import time
 
 sys.path.insert(0, "src")
-import pygo
-import pygo.monkey
-import pygo_core
+import runloom
+import runloom.monkey
+import runloom_c
 
 
 HOST = "127.0.0.1"
@@ -30,7 +30,7 @@ def client(client_id, n_msgs, payload):
 
 
 def main():
-    pygo.monkey.patch()
+    runloom.monkey.patch()
     n_clients = int(sys.argv[1]) if len(sys.argv) > 1 else 100
     n_msgs    = int(sys.argv[2]) if len(sys.argv) > 2 else 100
     size      = int(sys.argv[3]) if len(sys.argv) > 3 else 64
@@ -39,9 +39,9 @@ def main():
         n_clients, n_msgs, size))
 
     for i in range(n_clients):
-        pygo_core.go(lambda i=i: client(i, n_msgs, payload))
+        runloom_c.go(lambda i=i: client(i, n_msgs, payload))
     t0 = time.perf_counter()
-    pygo_core.run()
+    runloom_c.run()
     t = time.perf_counter() - t0
     total = n_clients * n_msgs
     print("{0} round-trips in {1:.2f}s -- {2:.0f} req/s, {3:.1f} us/RT".format(

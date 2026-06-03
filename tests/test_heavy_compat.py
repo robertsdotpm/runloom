@@ -3,8 +3,8 @@
 hashlib.sha*/md5/blake2 and zlib/gzip/bz2/lzma compress/decompress burn CPU in
 a tight C loop with no yield point -- a goroutine can't hand off mid-sha256 and
 the sysmon preemptor can't interrupt a frameless C loop, so it pins the
-scheduler.  pygo.monkey can't make these cooperative, only RELOCATE them: above
-PYGO_OFFLOAD_BYTES (default 256 KiB) the call runs on the backend pool so the
+scheduler.  runloom.monkey can't make these cooperative, only RELOCATE them: above
+RUNLOOM_OFFLOAD_BYTES (default 256 KiB) the call runs on the backend pool so the
 goroutine parks and its siblings keep running.  KDFs (pbkdf2_hmac / scrypt) are
 always offloaded (cost is iterations, not size).
 
@@ -25,9 +25,9 @@ import hashlib
 import lzma
 import zlib
 
-import pygo
-import pygo.monkey
-import pygo_core
+import runloom
+import runloom.monkey
+import runloom_c
 
 # ~4 MiB, comfortably above the 256 KiB default threshold.
 DATA = b"the quick brown fox jumps over the lazy dog\n" * 100_000
@@ -57,35 +57,35 @@ def _drive(fn):
         except BaseException as e:   # noqa: BLE001
             box[1] = e
 
-    pygo_core.go(runner)
-    pygo_core.run()
+    runloom_c.go(runner)
+    runloom_c.run()
     if box[1] is not None:
         raise box[1]
     return box[0]
 
 
 def setUpModule():
-    pygo.monkey.patch()
+    runloom.monkey.patch()
 
 
 def tearDownModule():
-    pygo.monkey.unpatch()
+    runloom.monkey.unpatch()
 
 
 def _ticker(ticks, stop):
     def t():
         while not stop["v"]:
             ticks.append(1)
-            pygo.sleep(0.003)
-    pygo_core.go(t)
+            runloom.sleep(0.003)
+    runloom_c.go(t)
 
 
 class TestInstalled(unittest.TestCase):
     def test_wrappers_installed(self):
         # The size-gate wrapper is in place but transparent (keeps __name__).
-        self.assertTrue(getattr(hashlib.sha256, "__pygo_heavy__", False))
-        self.assertTrue(getattr(zlib.compress, "__pygo_heavy__", False))
-        self.assertTrue(getattr(lzma.compress, "__pygo_heavy__", False))
+        self.assertTrue(getattr(hashlib.sha256, "__runloom_heavy__", False))
+        self.assertTrue(getattr(zlib.compress, "__runloom_heavy__", False))
+        self.assertTrue(getattr(lzma.compress, "__runloom_heavy__", False))
         self.assertEqual(hashlib.sha256.__name__,
                          hashlib.sha256.__wrapped__.__name__)
 

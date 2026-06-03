@@ -1,6 +1,6 @@
 """Channels — buffered, unbuffered, close, and range.
 
-A pygo_core.Chan is a Go channel: a typed-agnostic, goroutine-safe queue.
+A runloom_c.Chan is a Go channel: a typed-agnostic, goroutine-safe queue.
 Buffered channels hold up to `capacity` values before a send blocks;
 an unbuffered channel (capacity 0) is a rendezvous — each send blocks
 until a receiver takes the value.  `recv()` returns (value, ok); `ok`
@@ -15,13 +15,13 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 
-import pygo
-import pygo_core
+import runloom
+import runloom_c
 
 
 def main():
     # --- Buffered: sends up to capacity don't block, no receiver yet. ---
-    buf = pygo_core.Chan(3)
+    buf = runloom_c.Chan(3)
     buf.send("a")
     buf.send("b")
     buf.send("c")
@@ -30,19 +30,19 @@ def main():
         print("buffered:", v)
 
     # --- Unbuffered: each send rendezvous with a receiver. ---
-    pipe = pygo_core.Chan()    # capacity 0
+    pipe = runloom_c.Chan()    # capacity 0
 
     def producer():
         for i in range(3):
             pipe.send(i)       # blocks until main's loop receives
         pipe.close()
 
-    pygo.go(producer)
+    runloom.go(producer)
     for v in pipe:             # receives 0, 1, 2 then sees the close
         print("unbuffered:", v)
 
     # --- recv() spells out the (value, ok) close signal explicitly. ---
-    done = pygo_core.Chan(1)
+    done = runloom_c.Chan(1)
     done.send(99)
     done.close()
     value, ok = done.recv()
@@ -52,4 +52,4 @@ def main():
 
 
 if __name__ == "__main__":
-    pygo.run(main)
+    runloom.run(main)

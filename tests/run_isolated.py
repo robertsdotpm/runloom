@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the pygo test suite one FILE per subprocess.
+"""Run the runloom test suite one FILE per subprocess.
 
 The in-process pytest run is order- and load-sensitive: a file that leaves a
 hub thread running, leaks a parker, or SIGSEGVs under contention can wedge or
@@ -22,7 +22,7 @@ Usage:
   tests/run_isolated.py                 # every tests/test_*.py
   tests/run_isolated.py test_aio_net.py test_chan.py
   tests/run_isolated.py -k cancel       # pass-through pytest args after files
-  PYGO_TEST_TIMEOUT=600 tests/run_isolated.py
+  RUNLOOM_TEST_TIMEOUT=600 tests/run_isolated.py
 
 Exit status is non-zero if any file failed, timed out, or crashed.
 """
@@ -36,7 +36,7 @@ REPO = os.path.dirname(HERE)
 
 # Per-file wall-clock ceiling.  A hang (lost wake / un-interruptible park)
 # trips this and is reported as TIMEOUT rather than blocking the whole run.
-DEFAULT_TIMEOUT = int(os.environ.get("PYGO_TEST_TIMEOUT", "300"))
+DEFAULT_TIMEOUT = int(os.environ.get("RUNLOOM_TEST_TIMEOUT", "300"))
 
 # Files that need a longer ceiling (soak / stress spin many goroutines).
 SLOW_FILES = {
@@ -69,10 +69,10 @@ SERIAL_FILES = frozenset({
 
 # Default parallel workers for the non-timing files.  Capped well under the
 # core count so the timing lane (and each pooled file's own threads) never
-# oversubscribe.  Override with -jN / --jobs N or PYGO_TEST_JOBS.
+# oversubscribe.  Override with -jN / --jobs N or RUNLOOM_TEST_JOBS.
 def _default_jobs():
     try:
-        env = os.environ.get("PYGO_TEST_JOBS")
+        env = os.environ.get("RUNLOOM_TEST_JOBS")
         if env:
             return max(1, int(env))
         return max(1, min(8, (os.cpu_count() or 4)))
@@ -93,14 +93,14 @@ def run_file(name, pytest_args):
     timeout = SLOW_FILES.get(name, DEFAULT_TIMEOUT)
     env = dict(os.environ)
     env["PYTHON_GIL"] = "0"
-    env["PYGO_GIL"] = "0"
+    env["RUNLOOM_GIL"] = "0"
     # Skip pytest's third-party plugin autoload.  ~20 unrelated plugins
     # (codspeed/sanic/aiohttp/faker/hypothesis/...) are installed here and
     # pytest imports every one of them per process -- ~4s of pure overhead per
     # file, and one of them pulls _brotli which RE-ENABLES the GIL (wrong for
     # the free-threaded target).  The suite uses none of them.  Opt back in
-    # with PYGO_TEST_PYTEST_PLUGINS=1 if a test ever needs one.
-    if os.environ.get("PYGO_TEST_PYTEST_PLUGINS") != "1":
+    # with RUNLOOM_TEST_PYTEST_PLUGINS=1 if a test ever needs one.
+    if os.environ.get("RUNLOOM_TEST_PYTEST_PLUGINS") != "1":
         env["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"
     # Keep the in-tree .so importable regardless of how the runner was invoked.
     src = os.path.join(REPO, "src")
@@ -170,7 +170,7 @@ def main(argv):
     serial   = [f for f in files if f in SERIAL_FILES]
     jobs = min(jobs, len(parallel)) or 1
 
-    print("== pygo isolated suite: {0} file(s), j={1} parallel + {2} serial, "
+    print("== runloom isolated suite: {0} file(s), j={1} parallel + {2} serial, "
           "{3} ==".format(len(files), jobs, len(serial), sys.executable))
 
     results = []
@@ -185,7 +185,7 @@ def main(argv):
             # Surface conftest leak reports even when the file passed (report
             # mode does not fail, so the tail-on-failure path misses them).
             for line in out.splitlines():
-                if "[pygo-leak]" in line:
+                if "[runloom-leak]" in line:
                     print("      {0}".format(line.strip()))
             sys.stdout.flush()
 

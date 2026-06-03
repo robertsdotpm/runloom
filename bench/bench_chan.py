@@ -1,4 +1,4 @@
-"""pygo channel microbench -- send/recv throughput vs Go.
+"""runloom channel microbench -- send/recv throughput vs Go.
 
 Two goroutines bouncing a value through an unbuffered + a buffered
 channel.  Equivalent to Go's `BenchmarkPingPong` with `make(chan int)`.
@@ -9,12 +9,12 @@ import sys
 import time
 
 sys.path.insert(0, "src")
-import pygo_core
+import runloom_c
 
 
 def bench_unbuffered_ping_pong(N=200_000):
-    a = pygo_core.Chan()
-    b = pygo_core.Chan()
+    a = runloom_c.Chan()
+    b = runloom_c.Chan()
 
     def pinger():
         for i in range(N):
@@ -26,10 +26,10 @@ def bench_unbuffered_ping_pong(N=200_000):
             v, _ = a.recv()
             b.send(v)
 
-    pygo_core.go(pinger)
-    pygo_core.go(ponger)
+    runloom_c.go(pinger)
+    runloom_c.go(ponger)
     t0 = time.perf_counter()
-    pygo_core.run()
+    runloom_c.run()
     dt = time.perf_counter() - t0
     # Each ping = a.send + a.recv + b.send + b.recv = 4 chan ops, 2 yields.
     # Report per-roundtrip cost (one full ping-pong).
@@ -42,7 +42,7 @@ def bench_unbuffered_ping_pong(N=200_000):
 def bench_buffered(N=500_000, cap=64):
     """Buffered channel, single producer + consumer.  The buffer means
     most sends don't park, so this measures the buffered fast path."""
-    ch = pygo_core.Chan(cap)
+    ch = runloom_c.Chan(cap)
 
     def producer():
         for i in range(N):
@@ -52,10 +52,10 @@ def bench_buffered(N=500_000, cap=64):
         for _ in range(N):
             ch.recv()
 
-    pygo_core.go(producer)
-    pygo_core.go(consumer)
+    runloom_c.go(producer)
+    runloom_c.go(consumer)
     t0 = time.perf_counter()
-    pygo_core.run()
+    runloom_c.run()
     dt = time.perf_counter() - t0
     ops_per_s = N / dt
     ns_per_op = dt * 1e9 / N
@@ -64,8 +64,8 @@ def bench_buffered(N=500_000, cap=64):
 
 
 def main():
-    print("pygo channel microbench")
-    print("backend:", pygo_core.backend())
+    print("runloom channel microbench")
+    print("backend:", runloom_c.backend())
     print()
     bench_unbuffered_ping_pong()
     bench_buffered(cap=1)

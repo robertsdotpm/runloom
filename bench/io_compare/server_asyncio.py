@@ -3,7 +3,7 @@
 
 Per-connection coroutine: read fixed REQ, await asyncio.sleep(io_delay)
 (simulated backend/DB I/O), write fixed RESP, loop.  asyncio is inherently
-single-threaded (one core), which is exactly the limitation pygo's
+single-threaded (one core), which is exactly the limitation runloom's
 free-threaded multi-core model is meant to lift -- so this is the honest
 "what you'd use today" comparison point.
 

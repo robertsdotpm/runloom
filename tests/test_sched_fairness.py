@@ -1,7 +1,7 @@
 """Scheduler fairness / parallelism tests, ported in spirit from Go's
 runtime/proc_test.go.
 
-pygo IS a Go-style M:N scheduler (single sched + N OS-thread hubs, a Chase-Lev
+runloom IS a Go-style M:N scheduler (single sched + N OS-thread hubs, a Chase-Lev
 work-stealing deque per hub, a ready ring for woken/yielded gs).  Go's
 proc_test.go has explicit guards for exactly the failure modes this scheduler
 can have -- and one of them (yield starvation, TestYieldProgress) is the class
@@ -22,8 +22,8 @@ What is asserted vs. what Go asserts:
   * Parallelism -> work observably runs on >1 hub OS-thread (Go uses a tighter
     in-loop check; the OS-thread spread is the robust, non-flaky proxy).
   * Preemption -> a goroutine in a tight loop with NO explicit yield still lets
-    a sibling run.  Requires pygo's eval-wrapper preemption (default-on);
-    skipped only if PYGO_PREEMPT=0 is set explicitly.
+    a sibling run.  Requires runloom's eval-wrapper preemption (default-on);
+    skipped only if RUNLOOM_PREEMPT=0 is set explicitly.
 """
 import os
 import subprocess
@@ -37,11 +37,11 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 def run_mn(code, timeout=30):
     preamble = (
         "import sys; sys.path.insert(0, %r)\n"
-        "import pygo_core\n" % os.path.join(REPO, "src")
+        "import runloom_c\n" % os.path.join(REPO, "src")
     )
     env = dict(os.environ)
     env["PYTHON_GIL"] = "0"
-    env["PYGO_GIL"] = "0"
+    env["RUNLOOM_GIL"] = "0"
     try:
         p = subprocess.run(
             [sys.executable, "-c", preamble + code],
@@ -74,26 +74,26 @@ def test_yield_round_robin_all_progress():
     assert_pass(r"""
 def run(nhubs, n, rounds):
     counts = [0] * n
-    done = pygo_core.Chan(n)
+    done = runloom_c.Chan(n)
     def mk(k):
         def w():
             for _ in range(rounds):
                 counts[k] += 1
-                pygo_core.sched_yield()
+                runloom_c.sched_yield()
             done.send(1)
         return w
-    pygo_core.mn_init(nhubs)
+    runloom_c.mn_init(nhubs)
     for k in range(n):
-        pygo_core.mn_go(mk(k))
-    pygo_core.mn_run()
+        runloom_c.mn_go(mk(k))
+    runloom_c.mn_run()
     fin = 0
     for _ in range(n):
         if done.try_recv() is None: break
         fin += 1
-    pygo_core.mn_fini()
+    runloom_c.mn_fini()
     assert fin == n, ("not all finished", fin, n)
     assert all(c == rounds for c in counts), "uneven progress"
-    assert pygo_core._self_check(0) == 0
+    assert runloom_c._self_check(0) == 0
 
 run(1, 64, 200)
 run(4, 256, 200)
@@ -115,32 +115,32 @@ def test_spinners_dont_starve_workers():
     assert_pass(r"""
 NWORK = 64
 stop = [False]
-done = pygo_core.Chan(NWORK)
+done = runloom_c.Chan(NWORK)
 def spinner():
     while not stop[0]:
-        pygo_core.sched_yield()
+        runloom_c.sched_yield()
 def worker(k):
     def w():
         s = 0
         for i in range(100):
             s += i
-            pygo_core.sched_yield_classic()
+            runloom_c.sched_yield_classic()
         done.send(s)
     return w
-pygo_core.mn_init(4)
+runloom_c.mn_init(4)
 for _ in range(8):                 # spinners monopolize the hubs first
-    pygo_core.mn_go(spinner)
+    runloom_c.mn_go(spinner)
 for k in range(NWORK):             # then the workers they could starve
-    pygo_core.mn_go(worker(k))
+    runloom_c.mn_go(worker(k))
 def stopper():                     # workers done -> release the spinners
     for _ in range(NWORK):
         done.recv()
     stop[0] = True
-pygo_core.mn_go(stopper)
-pygo_core.mn_run()
-pygo_core.mn_fini()
+runloom_c.mn_go(stopper)
+runloom_c.mn_run()
+runloom_c.mn_fini()
 assert stop[0]
-assert pygo_core._self_check(0) == 0
+assert runloom_c._self_check(0) == 0
 print("PASS")
 """, timeout=25)
 
@@ -160,7 +160,7 @@ import threading
 NHUBS, N = 4, 400
 seen = {}
 lock = threading.Lock()
-done = pygo_core.Chan(N)
+done = runloom_c.Chan(N)
 def mk(k):
     def w():
         s = 0
@@ -171,30 +171,30 @@ def mk(k):
             seen[tid] = seen.get(tid, 0) + 1
         done.send(1)
     return w
-pygo_core.mn_init(NHUBS)
+runloom_c.mn_init(NHUBS)
 for k in range(N):
-    pygo_core.mn_go(mk(k))
-pygo_core.mn_run()
+    runloom_c.mn_go(mk(k))
+runloom_c.mn_run()
 fin = 0
 for _ in range(N):
     if done.try_recv() is None: break
     fin += 1
-pygo_core.mn_fini()
+runloom_c.mn_fini()
 assert fin == N, (fin, N)
 assert len(seen) >= 2, ("work did not spread across hubs", seen)
 assert max(seen.values()) <= int(N * 0.9), ("one hub hogged the work", seen)
-assert pygo_core._self_check(0) == 0
+assert runloom_c._self_check(0) == 0
 print("PASS", len(seen), max(seen.values()))
 """, timeout=25)
 
 
 # ---------------------------------------------------------------------------
 # TestPreemption -- a goroutine in a tight loop with NO explicit yield point
-# still yields the hub so a sibling can run.  Relies on pygo's eval-wrapper
+# still yields the hub so a sibling can run.  Relies on runloom's eval-wrapper
 # preemption (default-on).  Failure => infinite busy loop => timeout.
 # ---------------------------------------------------------------------------
-@pytest.mark.skipif(os.environ.get("PYGO_PREEMPT") == "0",
-                    reason="preemption explicitly disabled (PYGO_PREEMPT=0)")
+@pytest.mark.skipif(os.environ.get("RUNLOOM_PREEMPT") == "0",
+                    reason="preemption explicitly disabled (RUNLOOM_PREEMPT=0)")
 def test_preemption_busy_loop_yields_to_sibling():
     """A goroutine running `while not flag: pass` with NO sched_yield must
     still be preempted so the sibling that sets `flag` gets to run.  Tested at
@@ -209,13 +209,13 @@ def run(nhubs):
             pass
     def setter():
         flag[0] = True
-    pygo_core.mn_init(nhubs)
-    pygo_core.mn_go(waiter)
-    pygo_core.mn_go(setter)
-    pygo_core.mn_run()
-    pygo_core.mn_fini()
+    runloom_c.mn_init(nhubs)
+    runloom_c.mn_go(waiter)
+    runloom_c.mn_go(setter)
+    runloom_c.mn_run()
+    runloom_c.mn_fini()
     assert flag[0]
-    assert pygo_core._self_check(0) == 0
+    assert runloom_c._self_check(0) == 0
 
 run(1)
 run(2)

@@ -24,7 +24,7 @@ import sys
 
 import pytest
 
-import pygo_core
+import runloom_c
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 WORKLOAD = os.path.join(HERE, "iouring_fault_workload.py")
@@ -46,7 +46,7 @@ def _strace_supports_inject():
 pytestmark = [
     pytest.mark.skipif(not sys.platform.startswith("linux"),
                        reason="strace fault injection is Linux-only"),
-    pytest.mark.skipif(not pygo_core.iouring_available(),
+    pytest.mark.skipif(not runloom_c.iouring_available(),
                        reason="io_uring not available (need Linux >= 5.1)"),
     pytest.mark.skipif(not _strace_supports_inject(),
                        reason="strace with -e inject= not available"),

@@ -1,6 +1,6 @@
-"""Cancellation / teardown torture for the pygo aio layer.
+"""Cancellation / teardown torture for the runloom aio layer.
 
-pygo's history is dense with cancel/teardown bugs: cancel couldn't interrupt a
+runloom's history is dense with cancel/teardown bugs: cancel couldn't interrupt a
 task parked in wait_fd (sock_recv/accept/connect), loop.close() hung, and
 exception refcycles leaked on teardown.  This cancels tasks blocked on
 cooperative I/O at staggered points and asserts cancellation is PROMPT (a hang
@@ -14,11 +14,11 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-import pygo.aio as aio
+import runloom.aio as aio
 
 
 def _run(coro_fn):
-    loop = aio.PygoEventLoop()
+    loop = aio.RunloomEventLoop()
     try:
         return loop.run_until_complete(coro_fn(loop))
     finally:
