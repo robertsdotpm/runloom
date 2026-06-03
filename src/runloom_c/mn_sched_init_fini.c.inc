@@ -277,7 +277,7 @@ void runloom_mn_reset_after_fork(void)
  * not both.  Returns 0 on success, -1 on failure (errno set).  Python
  * error is also set on failure when callable != NULL. */
 static int runloom_mn_go_core(PyObject *callable, runloom_c_entry_fn c_fn,
-                           void *c_arg)
+                           void *c_arg, size_t stack_size)
 {
     long n;
     int hub_idx;
@@ -327,11 +327,20 @@ static int runloom_mn_go_core(PyObject *callable, runloom_c_entry_fn c_fn,
     g->owner = &h->sched;   /* owning hub's sched -- groups goroutines in the dump */
     __atomic_store_n(&g->id, runloom_next_goid(), __ATOMIC_RELAXED);
     g->park_fd = -1;
-    /* Autosize: start this kind's goroutine at its learned size (or the
-     * start-large default for an unseen kind); falls back to the hub default
-     * when autosize is off. */
+    /* Stack size, in precedence order:
+     *  1. an explicit per-spawn override (mn_go(fn, stack_size) > 0) -- a caller
+     *     that knows it runs a deep, NON-yielding C burst (cold stdlib import,
+     *     readline/terminfo init, a doctest, OpenSSL) asks for a roomy stack up
+     *     front; the resume-boundary copy-grow only rescues stacks that deepen
+     *     ACROSS yields, not a single-frame burst;
+     *  2. otherwise the adaptive autosizer -- this goroutine-kind's learned
+     *     size (start-large default for an unseen kind), which itself falls
+     *     back to the hub default when autosize is off. */
     g->coro = runloom_coro_new(
-                runloom_advice_size_for(g->advice_key, (size_t)h->sched.stack_size),
+                stack_size > 0
+                    ? stack_size
+                    : runloom_advice_size_for(g->advice_key,
+                                              (size_t)h->sched.stack_size),
                 runloom_g_entry, g);
     if (g->coro == NULL) {
         if (callable != NULL) {
@@ -377,12 +386,12 @@ static int runloom_mn_go_core(PyObject *callable, runloom_c_entry_fn c_fn,
 int runloom_mn_go_c(runloom_c_entry_fn fn, void *arg)
 {
     if (fn == NULL) { errno = EINVAL; return -1; }
-    return runloom_mn_go_core(NULL, fn, arg);
+    return runloom_mn_go_core(NULL, fn, arg, 0);
 }
 
-PyObject *runloom_mn_go(PyObject *callable)
+PyObject *runloom_mn_go(PyObject *callable, size_t stack_size)
 {
-    if (runloom_mn_go_core(callable, NULL, NULL) < 0) {
+    if (runloom_mn_go_core(callable, NULL, NULL, stack_size) < 0) {
         return NULL;
     }
     Py_RETURN_NONE;

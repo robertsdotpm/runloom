@@ -150,8 +150,10 @@ static PyMethodDef module_methods[] = {
      "Return whether recycled-stack scrubbing is enabled."},
     {"mn_init",     m_mn_init,     METH_VARARGS,
      "mn_init(n=cpus): start N hub threads.  Returns count."},
-    {"mn_go",       m_mn_go,       METH_O,
-     "mn_go(callable): spawn a goroutine on a round-robin hub.  "
+    {"mn_go",       (PyCFunction)m_mn_go, METH_VARARGS | METH_KEYWORDS,
+     "mn_go(callable, stack_size=0): spawn a goroutine on a round-robin hub.  "
+     "stack_size>0 overrides the hub's small default C-stack (bytes) for a g "
+     "that runs a deep non-yielding C burst.  "
      "v1 only supports run-to-completion gs (no yield)."},
     {"mn_run",      m_mn_run,      METH_NOARGS,
      "mn_run(): wait for all gs to complete.  Returns total completed."},

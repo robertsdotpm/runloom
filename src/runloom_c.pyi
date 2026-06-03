@@ -118,8 +118,13 @@ def mn_init(n: int = ...) -> int:
     """Start N hub threads (default: nproc).  Returns count."""
     ...
 
-def mn_go(callable_: Callable[[], Any]) -> G:
-    """Spawn on a round-robin hub.  v1: run-to-completion only."""
+def mn_go(callable_: Callable[[], Any], stack_size: int = 0) -> G:
+    """Spawn on a round-robin hub.  v1: run-to-completion only.
+
+    stack_size>0 overrides the hub's small default C-stack (bytes) for a
+    goroutine that runs a deep, non-yielding C burst (cold imports,
+    terminfo/OpenSSL init) that the resume-boundary copy-grow can't rescue.
+    """
     ...
 
 def mn_run() -> int:

@@ -54,7 +54,10 @@
 struct runloom_iouring_ring;
 
 int runloom_mn_init(int n_threads);
-PyObject *runloom_mn_go(PyObject *callable);
+/* stack_size: per-goroutine C-stack override in bytes; 0 = the hub default.
+ * Use a larger value for a g that runs a deep, non-yielding C burst (cold
+ * imports, terminfo/OpenSSL init) that the copy-grow can't rescue mid-burst. */
+PyObject *runloom_mn_go(PyObject *callable, size_t stack_size);
 /* C-only spawn: no Python callable, just a function + arg.  Distributes
  * goroutines across hubs round-robin (same as runloom_mn_go).  Returns 0 on
  * success, -1 with errno on failure (ENOMEM, EINVAL). */

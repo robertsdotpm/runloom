@@ -262,14 +262,21 @@ static PyObject *m_mn_init(PyObject *self, PyObject *args)
     }
 }
 
-static PyObject *m_mn_go(PyObject *self, PyObject *callable)
+static PyObject *m_mn_go(PyObject *self, PyObject *args, PyObject *kw)
 {
+    static char *kwlist[] = {"fn", "stack_size", NULL};
+    PyObject *callable;
+    Py_ssize_t stack_size = 0;
     (void)self;
+    if (!PyArg_ParseTupleAndKeywords(args, kw, "O|n", kwlist,
+                                     &callable, &stack_size)) {
+        return NULL;
+    }
     if (!PyCallable_Check(callable)) {
         PyErr_SetString(PyExc_TypeError, "mn_go(): callable required");
         return NULL;
     }
-    return runloom_mn_go(callable);
+    return runloom_mn_go(callable, stack_size > 0 ? (size_t)stack_size : 0);
 }
 
 static PyObject *m_mn_run(PyObject *self, PyObject *unused)
