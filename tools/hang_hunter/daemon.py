@@ -29,6 +29,7 @@ tries via `sudo -n`; otherwise see the printed hint).
 import argparse
 import os
 import random
+import re
 import signal
 import subprocess
 import sys
@@ -146,7 +147,15 @@ class Hunter(object):
 
     def on_hang(self, slot):
         pid = slot["proc"].pid
+        # Sample completion progress across ~2s purely as CONTEXT in the report
+        # (a human can see whether goroutines are completing or truly stranded);
+        # it is not used to gate the report (see reap()).
+        p0 = self.read_pending(pid)
+        time.sleep(2.0)
+        p1 = self.read_pending(pid) if slot["proc"].poll() is None else None
         buf = []
+        buf.append("PROGRESS: pending_global {0} -> {1} over 2s "
+                   "(unchanged => goroutines stranded)\n\n".format(p0, p1))
         triage.triage_hang(pid, buf.append)
         text = "".join(buf)
         sig, key = triage.signature(text)
@@ -168,14 +177,42 @@ class Hunter(object):
         self.record("CRASH", sig, key,
                     slot["job"].repro + "  (rc={0})".format(rc), "".join(buf))
 
+    def read_pending(self, pid):
+        """runloom_mn_pending_global = goroutines ever-pushed minus completed.
+        Read it via gdb; returns int, or None if unreadable (non-runloom job /
+        no gdb / process gone)."""
+        g = triage.gdb_path()
+        if not g:
+            return None
+        try:
+            out = subprocess.run(
+                [g, "-p", str(pid), "-batch", "-nx", "-ex", "set pagination off",
+                 "-ex", 'printf "PG=%ld\\n", runloom_mn_pending_global'],
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                timeout=20, text=True).stdout
+        except Exception:
+            return None
+        m = re.search(r"PG=(-?\d+)", out)
+        return int(m.group(1)) if m else None
+
     def reap(self):
+        # A job's `timeout` is a GENEROUS wall-clock (>> any healthy workload,
+        # which the engine sizes to finish in seconds) -- so still being alive
+        # at the timeout means a real deadlock, not slowness.  We deliberately do
+        # NOT use a CPU- or completion-rate heuristic to "confirm": the monopoly
+        # deadlock is a *spinning* collector (high CPU) whose stranded workers
+        # complete nothing, and a merely slow gc-bound run can also complete
+        # nothing for tens of seconds -- so neither CPU nor short-window progress
+        # separates them.  The only robust separator is "did it finish within a
+        # generous budget", which the timeout already encodes.  on_hang() still
+        # records pending_global in the report for the human reading it.
         still = []
         now = time.time()
         for slot in self.running:
             rc = slot["proc"].poll()
             if rc is None:
                 if now - slot["start"] > slot["job"].timeout:
-                    self.on_hang(slot)            # alive past timeout -> HANG
+                    self.on_hang(slot)            # alive past generous timeout -> HANG
                 else:
                     still.append(slot)
             elif rc == 0:

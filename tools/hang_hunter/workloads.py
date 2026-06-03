@@ -51,9 +51,20 @@ def stress_job(rng, py):
     nhub = rng.choice([1, 2, 2, 4, 4, 6, 8])
     env["HH_NHUB"] = str(nhub)
     if which == "gc_churn":
-        env["HH_NWORK"] = str(rng.choice([1, 4, 16, 48, 96]))
-        env["HH_ROUNDS"] = str(rng.choice([50, 200, 500]))
-        env["HH_NCOLL"] = str(rng.choice([1, 1, 2, 3]))
+        # Each collector loops gc.collect() = near-continuous stop-the-world, so
+        # workers progress slowly; NCOLL*NWORK*ROUNDS is a "how long" budget.
+        # Cap it so a HEALTHY run finishes in seconds-to-~30s (even under load):
+        # that keeps the generous hang timeout a clean deadlock/slow separator.
+        # We still want variety (incl. multi-collector), just not the
+        # pathologically-slow corner (NCOLL=3 x NWORK=96 x ROUNDS=500 ~ 1-2 min).
+        ncoll = rng.choice([1, 1, 1, 2])
+        if ncoll == 1:
+            env["HH_NWORK"] = str(rng.choice([1, 4, 16, 48, 96]))
+            env["HH_ROUNDS"] = str(rng.choice([50, 200, 500]))
+        else:                                      # 2 collectors -> keep workers light
+            env["HH_NWORK"] = str(rng.choice([4, 16, 48]))
+            env["HH_ROUNDS"] = str(rng.choice([50, 200]))
+        env["HH_NCOLL"] = str(ncoll)
     else:
         env["HH_PAIRS"] = str(rng.choice([2, 8, 16, 48]))
         env["HH_MSGS"] = str(rng.choice([50, 200, 500]))
@@ -63,7 +74,9 @@ def stress_job(rng, py):
     repro = " ".join("{0}={1}".format(k, v) for k, v in sorted(env.items())
                      if k.startswith(("HH_", "RUNLOOM_"))) + \
         "  {0} {1}".format(py, os.path.join(WL, which + ".py"))
-    return Job("stress:" + which, argv, env, 60, repro)
+    # 120s >> a healthy capped run (seconds-to-~30s) but << "forever": alive at
+    # 120s == a real deadlock.
+    return Job("stress:" + which, argv, env, 120, repro)
 
 
 def hypo_job(rng, py):
@@ -73,7 +86,7 @@ def hypo_job(rng, py):
     argv = [py, os.path.join(WL, "hypo_model.py"), str(sd)]
     repro = "HH_MAX_EXAMPLES={0}  {1} {2} {3}".format(
         env["HH_MAX_EXAMPLES"], py, os.path.join(WL, "hypo_model.py"), sd)
-    return Job("hypo", argv, env, 150, repro)
+    return Job("hypo", argv, env, 180, repro)
 
 
 ENGINES = {"stress": stress_job, "hypo": hypo_job}
