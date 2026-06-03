@@ -221,6 +221,23 @@ child its own netpoll fd).  Registered automatically as an
 `os.register_at_fork(after_in_child=...)` handler; see the [Debugging
 guide](debugging.md#fork-safety).
 
+#### `set_deadlock_mode(0|1|2)` / `get_deadlock_mode() → int` / `count_deadlocked() → int`
+
+Deadlock detection: when the single-thread scheduler quiesces with
+goroutines still blocked on channels/parks, mode 0=off, 1=warn (print the
+dump, default), 2=raise `RuntimeError`.  Also `PYGO_DEADLOCK=off|warn|raise`.
+`count_deadlocked()` is the current chan/park-blocked count.
+
+#### `set_max_goroutines(n)` / `get_max_goroutines() → int` / `live_goroutines() → int`
+
+Backpressure: cap the live-goroutine count (0 = unlimited).  Over the cap,
+spawn raises `RuntimeError`.  Also `PYGO_MAX_GOROUTINES`.  Zero hot-path cost
+when unset.
+
+#### `set_introspect_timestamps(bool)` / `get_introspect_timestamps() → bool`
+
+Park-age tracking (enables the `age` field + `pygo.inspect.leaked()`).
+
 ### Thread setup
 
 #### `thread_init()` / `thread_fini()`
@@ -274,7 +291,10 @@ For new code, prefer `pygo_core` (faster) or `pygo.sync` (richer API).
 Runtime introspection -- the friendly wrappers over the goroutine
 registry.  `goroutines(stacks=)`, `count()`, `stack(id)`, `format(stacks=)`
 (a human dump as a string), `dump(file=, stacks=)`, `enable_timestamps()`,
-`install_dump_signal()`.  See the [Debugging guide](debugging.md).
+`install_dump_signal()`, `leaked(min_age, states)` / `watch_leaks(...)`
+(leak detection), `set_deadlock_mode("off"/"warn"/"raise")`,
+`set_max_goroutines(n)` / `live_goroutines()` (backpressure).  See the
+[Debugging guide](debugging.md).
 
 ```python
 import pygo.inspect as gi
