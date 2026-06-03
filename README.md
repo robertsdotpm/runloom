@@ -152,7 +152,7 @@ safe: deep recursion raises `RecursionError` (not a crash), stacks grow on
 demand, every stack has a guard page so an overflow faults cleanly instead of
 corrupting a neighbour, and CPython's stack-hungry error paths can't blow a
 goroutine. For a native call that needs a big stack in one shot, pass
-`stack_size=`. Details: [docs/stack-sizing.md](docs/stack-sizing.md#defending-against-overflow).
+`stack_size=`.[^bridgestack] Details: [docs/stack-sizing.md](docs/stack-sizing.md#defending-against-overflow).
 
 ## Ways to use it
 
@@ -331,3 +331,15 @@ Full guide in [docs/](docs/) (also on Read the Docs):
     hatch; the residual gap is a long non-stdlib C call you don't offload.
     (Blocking-IO is covered by the rescue handoff, pure-Python CPU by
     preemption.)
+
+[^bridgestack]: The `pygo.aio` bridge does this for you: goroutines that run
+    user protocol callbacks (`data_received`, `connection_made`, …) are spawned
+    with a **512 KB** stack (`PYGO_AIO_IO_STACK` / `PYGO_AIO_TASK_STACK`),
+    larger than the small default the core scheduler uses. Those callbacks can
+    recurse deep into *C* — a TLS/SSH handshake runs an OpenSSL key exchange +
+    cipher synchronously inside the callback — and C-level recursion (unlike
+    Python recursion, whose frames live on the heap) burns the goroutine's
+    real C stack, overflowing the small default into a clean guard-page fault.
+    The 512 KB is virtual and pooled, so only the handful of pages a callback
+    actually touches cost any RSS; only the bridge pays it — the core M:N paths
+    keep the small default.
