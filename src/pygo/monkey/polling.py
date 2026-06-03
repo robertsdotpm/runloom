@@ -27,6 +27,14 @@ def _patched_select(rlist, wlist, xlist, timeout=None):
     wlist = list(wlist)
     xlist = list(xlist)
 
+    # A zero (or negative) timeout select is non-blocking by definition: poll
+    # the OS select once and return.  No cooperation is needed -- it cannot
+    # block -- and this sidesteps wait_fd(timeout=0), whose Windows IOCP path
+    # races the async AFD completion against the deadline-heap wake and can hang
+    # (a not-ready fd never returns).  selectors' non-blocking poll lands here.
+    if timeout is not None and timeout <= 0:
+        return _orig_select_select(rlist, wlist, xlist, 0)
+
     # Non-socket fds (pipes/files) can't ride the Windows netpoll backend, but
     # we DON'T pre-screen them with os.fstat here: os.fstat on a raw WinSock
     # SOCKET handle takes the CRT fd-validation error path, and doing that on a
