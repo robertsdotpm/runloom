@@ -136,4 +136,5 @@ RUNLOOM_INLINE void runloom_tstate_restore(const RunloomTstateSnapshot *s)
 #include "module_introspect.c.inc"
 #include "module_crash.c.inc"
 #include "module_select.c.inc"
+#include "module_machinecode.c.inc"
 #include "module_init.c.inc"

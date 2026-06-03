@@ -450,6 +450,17 @@ PyMODINIT_FUNC PyInit_runloom_c(void)
         Py_DECREF(m);
         return NULL;
     }
+    if (PyType_Ready(&RunloomMachineCodeType) < 0) {
+        Py_DECREF(m);
+        return NULL;
+    }
+    Py_INCREF(&RunloomMachineCodeType);
+    if (PyModule_AddObject(m, "MachineCode",
+                           (PyObject *)&RunloomMachineCodeType) < 0) {
+        Py_DECREF(&RunloomMachineCodeType);
+        Py_DECREF(m);
+        return NULL;
+    }
     if (runloom_tcpconn_register(m) < 0) {
         Py_DECREF(m);
         return NULL;
