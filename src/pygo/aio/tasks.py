@@ -352,7 +352,17 @@ class PygoTask(_PygoFutureMixin, asyncio.Task):
                     elif yielded.exception() is not None:
                         throw_exc = yielded.exception()
                     else:
-                        send_value = yielded.result()
+                        # Resume with None, NOT yielded.result() -- exactly like
+                        # asyncio's Task.__step, which always does coro.send(None).
+                        # A Future's __await__ retrieves its own value (`return
+                        # self.result()`) and ignores what was sent in; injecting
+                        # the result is redundant for Futures and BREAKS a custom
+                        # C awaitable-iterator that propagates the sent value (e.g.
+                        # aiocsv's _Parser, which delegates to an executor future):
+                        # a non-None send routes PyIter_Send to its `.send()`
+                        # branch instead of `__next__`, raising "object has no
+                        # attribute 'send'".
+                        send_value = None
                 except asyncio.CancelledError as e:
                     throw_exc = e
                 continue
@@ -397,7 +407,11 @@ class PygoTask(_PygoFutureMixin, asyncio.Task):
                 elif yielded.exception() is not None:
                     throw_exc = yielded.exception()
                 else:
-                    send_value = yielded.result()
+                    # Resume with None (asyncio's Task.__step always sends None);
+                    # the Future's __await__ returns its own self.result(). See
+                    # the matching note in the fast path above -- injecting the
+                    # result breaks custom C awaitable-iterators (aiocsv _Parser).
+                    send_value = None
             except asyncio.CancelledError as e:
                 throw_exc = e
 

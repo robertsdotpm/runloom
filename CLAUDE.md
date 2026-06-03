@@ -138,5 +138,18 @@
   its wakeup, so a done-callback racing the woken task's NEXT step is still M:N
   (aiojobs `test_job_close_exception`).
 
+- **The driver resumes a coroutine with `coro.send(None)`, never
+  `coro.send(future.result())`.** asyncio's `Task.__step` *always* sends `None`;
+  a `Future`'s `__await__` retrieves its own value (`return self.result()`) and
+  ignores whatever was sent in, so injecting the result is redundant for Futures.
+  It is also WRONG: a custom awaitable-iterator that propagates the sent value
+  through the iterator protocol (a C `__anext__`/`__await__`→self object with
+  `__next__` but no `send`, delegating to an executor future -- e.g. aiocsv's
+  `_Parser`) takes `PyIter_Send`'s `.send()` branch on a non-None resume value
+  instead of its `__next__` branch, raising "object has no attribute 'send'".
+  `_driver` must therefore set `send_value = None` in BOTH the fast (future
+  already done) and slow (parked) wake paths; exceptions/cancels still route via
+  `coro.throw`. Regression guard: `pygo_compat/aiocsv_repro.py`.
+
 ## Conventions
 - Use `safe-rm`, never plain `rm`, for any file deletion.
