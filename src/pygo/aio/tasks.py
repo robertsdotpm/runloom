@@ -16,6 +16,14 @@ class PygoTask(_PygoFutureMixin, asyncio.Task):
     """
 
     def __init__(self, coro, *, loop=None, name=None, context=None):
+        # Match asyncio.Task.__init__: reject a non-coroutine SYNCHRONOUSLY.
+        # loop.create_task(123) / create_task(some_plain_fn) must raise TypeError
+        # right here -- not accept the bad arg and later blow up in the driver
+        # with "'NoneType'/'int' object has no attribute 'send'" (logged as an
+        # unretrieved task exception).  Defensive callers rely on this (falcon's
+        # resp.schedule type-check, test_scheduled_jobs_type_error).
+        if not asyncio.iscoroutine(coro):
+            raise TypeError("a coroutine was expected, got {0!r}".format(coro))
         if loop is None:
             loop = asyncio.get_event_loop()
         # Future half only -- gives a valid _loop + _asyncio_future_blocking and
