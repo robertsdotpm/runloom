@@ -535,8 +535,11 @@ static PyObject *pygo_preempt_eval_frame(PyThreadState *ts,
      * init/fini windows while hub gs already run Python) writes this pointer
      * with release; a plain read on the per-frame hot path was a data race. */
     {
-        _PyFrameEvalFunction prev =
-            __atomic_load_n(&pygo_preempt_prev_eval, __ATOMIC_ACQUIRE);
+        /* Cast through void** for the MSVC atomic shim's _Generic (it can't
+         * name _PyFrameEvalFunction in the shared macro -- some TUs lack the
+         * Python headers); a no-op on GCC's type-generic builtin. */
+        _PyFrameEvalFunction prev = (_PyFrameEvalFunction)
+            __atomic_load_n((void **)&pygo_preempt_prev_eval, __ATOMIC_ACQUIRE);
         return prev(ts, frame, throwflag);
     }
 }
@@ -597,8 +600,8 @@ static void pygo_preempt_install(PyInterpreterState *interp)
     if (!pygo_preempt_enabled) return;
     /* Release-store so the eval hook's acquire-load sees a fully-published
      * prev pointer; pairs with the load in pygo_preempt_eval_frame. */
-    __atomic_store_n(&pygo_preempt_prev_eval,
-                     _PyInterpreterState_GetEvalFrameFunc(interp),
+    __atomic_store_n((void **)&pygo_preempt_prev_eval,
+                     (void *)_PyInterpreterState_GetEvalFrameFunc(interp),
                      __ATOMIC_RELEASE);
     _PyInterpreterState_SetEvalFrameFunc(interp, pygo_preempt_eval_frame);
 #else
@@ -610,11 +613,14 @@ static void pygo_preempt_uninstall(PyInterpreterState *interp)
 {
 #if PY_VERSION_HEX >= 0x030D0000
     {
-        _PyFrameEvalFunction prev =
-            __atomic_load_n(&pygo_preempt_prev_eval, __ATOMIC_ACQUIRE);
+        /* Cast through void** for the MSVC atomic shim's _Generic (it can't
+         * name _PyFrameEvalFunction in the shared macro -- some TUs lack the
+         * Python headers); a no-op on GCC's type-generic builtin. */
+        _PyFrameEvalFunction prev = (_PyFrameEvalFunction)
+            __atomic_load_n((void **)&pygo_preempt_prev_eval, __ATOMIC_ACQUIRE);
         if (!pygo_preempt_enabled || prev == NULL) return;
         _PyInterpreterState_SetEvalFrameFunc(interp, prev);
-        __atomic_store_n(&pygo_preempt_prev_eval, NULL, __ATOMIC_RELEASE);
+        __atomic_store_n((void **)&pygo_preempt_prev_eval, (void *)NULL, __ATOMIC_RELEASE);
     }
 #else
     (void)interp;

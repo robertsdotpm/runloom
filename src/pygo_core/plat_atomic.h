@@ -32,6 +32,10 @@
  *   Py_ssize_t rides the long-long alias; uint32/64_t ride unsigned
  *   int / unsigned long long.  fetch_or/fetch_and are byte-only (the
  *   netpoll pending-wake bitmap); add a wider helper if a new site needs it.
+ *   exchange_n covers int/long/long long.  A site holding an exotic pointer
+ *   the _Generic can't name (e.g. _PyFrameEvalFunction, not declared in every
+ *   TU that includes this header) casts its operand to (void**) and rides the
+ *   universal `void **` slot -- see mn_sched's preempt eval-hook swap.
  *
  * On any compiler that already provides __atomic_*, this header is a
  * no-op -- we test for that via __has_builtin / __GNUC__ / __clang__.
@@ -178,7 +182,8 @@
            volatile unsigned long long *:       pygo_atomic_load_ull, \
            const volatile unsigned long long *: pygo_atomic_load_ull, \
            unsigned char **:           pygo_atomic_load_ptr,          \
-           struct pygo_g **:           pygo_atomic_load_ptr           \
+           struct pygo_g **:           pygo_atomic_load_ptr,          \
+           void **:                    pygo_atomic_load_ptr           \
        )((p))
 
 #  define __atomic_store_n(p, v, ord)                                 \
@@ -193,7 +198,9 @@
            volatile unsigned char *: pygo_atomic_store_uc,            \
            unsigned long long *:           pygo_atomic_store_ull,     \
            volatile unsigned long long *:  pygo_atomic_store_ull,     \
-           unsigned char **:         pygo_atomic_store_ptr            \
+           unsigned char **:         pygo_atomic_store_ptr,           \
+           struct pygo_g **:         pygo_atomic_store_ptr,           \
+           void **:                  pygo_atomic_store_ptr            \
        )((p), (v))
 
 #  define __atomic_add_fetch(p, v, ord)                               \
@@ -225,6 +232,25 @@
            volatile long *: pygo_atomic_fetch_add_l,                  \
            long long *:           pygo_atomic_fetch_add_ll,           \
            volatile long long *:  pygo_atomic_fetch_add_ll            \
+       )((p), (v))
+
+   /* ---- exchange_n: store v, return the OLD value (GCC contract).
+    *      _InterlockedExchange* return the prior value.  Current sites
+    *      (io_uring op->wait, netpoll warned flag) are int and live behind
+    *      non-Windows gates, but the shim claims to provide the full GCC
+    *      atomic set, so cover int/long/long long/pointer for parity. ---- */
+   static __forceinline int       pygo_atomic_xchg_i (volatile int       *p, int v)       { return (int)_InterlockedExchange((volatile LONG *)p, (LONG)v); }
+   static __forceinline long      pygo_atomic_xchg_l (volatile long      *p, long v)      { return (long)_InterlockedExchange((volatile LONG *)p, (LONG)v); }
+   static __forceinline long long pygo_atomic_xchg_ll(volatile long long *p, long long v) { return (long long)_InterlockedExchange64((volatile __int64 *)p, (__int64)v); }
+
+#  define __atomic_exchange_n(p, v, ord)                              \
+       _Generic((p),                                                  \
+           int *:           pygo_atomic_xchg_i,                       \
+           volatile int *:  pygo_atomic_xchg_i,                       \
+           long *:          pygo_atomic_xchg_l,                       \
+           volatile long *: pygo_atomic_xchg_l,                       \
+           long long *:           pygo_atomic_xchg_ll,                \
+           volatile long long *:  pygo_atomic_xchg_ll                 \
        )((p), (v))
 
 #  define __atomic_sub_fetch(p, v, ord)                               \
