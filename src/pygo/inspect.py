@@ -114,6 +114,66 @@ def deadlock_mode():
     return inv.get(_core.get_deadlock_mode(), "warn")
 
 
+PARKED_STATES = ("io-wait", "chan-wait", "park", "sleep")
+
+
+def leaked(min_age=60.0, states=PARKED_STATES):
+    """Goroutines that have been parked in one of `states` for longer than
+    `min_age` seconds -- the candidates for a leak: an orphaned accept loop,
+    a never-awaited task, a waiter whose waker is gone, a stuck timer.
+
+    Needs park-age tracking, so this enables it on first call (via
+    enable_timestamps()); ages are measured from when tracking turned on, so
+    the first call right after enabling returns nothing useful -- run it from
+    a periodic watchdog.
+
+    A long-lived server legitimately has old io-wait goroutines (its accept
+    loops) and old sleep goroutines (tickers); narrow `states` or raise
+    `min_age` to suit, e.g. leaked(min_age=300, states=('chan-wait','park'))
+    for "stuck waiting on another goroutine for 5 minutes"."""
+    if not _core.get_introspect_timestamps():
+        enable_timestamps(True)
+    out = []
+    for g in goroutines():
+        if (g["state"] in states and g["age"] is not None
+                and g["age"] >= min_age):
+            out.append(g)
+    return out
+
+
+def watch_leaks(min_age=60.0, interval=30.0, states=PARKED_STATES, on_leak=None):
+    """Spawn a goroutine that every `interval` seconds reports goroutines
+    parked longer than `min_age` (see leaked()).  `on_leak(list_of_dicts)`
+    is called with any hits; the default logs a one-line summary + the dump
+    to stderr.  Returns the watchdog's goroutine handle.
+
+    Run this inside your scheduler (pygo.run / pygo.aio); it uses cooperative
+    sleep, so it never blocks an OS thread."""
+    import pygo as _pygo
+
+    enable_timestamps(True)
+
+    def report(hits):
+        sys.stderr.write(
+            "pygo: {0} goroutine(s) parked > {1:.0f}s (possible leak):\n"
+            .format(len(hits), min_age))
+        for g in hits:
+            sys.stderr.write("    goroutine {0} [{1}{2}]\n".format(
+                g["id"], g["state"], _detail(g)))
+        sys.stderr.flush()
+
+    cb = on_leak if on_leak is not None else report
+
+    def loop():
+        while True:
+            _pygo.sleep(interval)
+            hits = leaked(min_age=min_age, states=states)
+            if hits:
+                cb(hits)
+
+    return _pygo.go(loop)
+
+
 def install_dump_signal(sig=None):
     """Install a SIGQUIT (or `sig`) handler that dumps all goroutines to
     stderr -- Go's GOTRACEBACK / `kill -QUIT <pid>`.

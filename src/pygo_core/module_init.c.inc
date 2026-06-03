@@ -208,6 +208,8 @@ static PyMethodDef module_methods[] = {
      "its own netpoll fd.  Registered automatically as an "
      "os.register_at_fork(after_in_child=...) handler; call directly only if "
      "you fork without importing the pygo package.  CHILD process only."},
+    {"get_introspect_timestamps", m_get_introspect_timestamps, METH_NOARGS,
+     "get_introspect_timestamps() -> bool.  Whether park-age tracking is on."},
     {"set_deadlock_mode", m_set_deadlock_mode, METH_O,
      "set_deadlock_mode(0|1|2): 0=off, 1=warn (print the goroutine dump), "
      "2=raise RuntimeError when the scheduler quiesces with goroutines still "

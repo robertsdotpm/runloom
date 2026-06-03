@@ -62,6 +62,28 @@ Off by default (it costs one clock read per park).  Turn it on to populate
 gi.enable_timestamps()       # or env PYGO_INTROSPECT_TIME=1
 ```
 
+### Leak watchdog
+
+A goroutine parked far longer than expected is usually a leak — an orphaned
+accept loop, a never-awaited task, a waiter whose waker is gone.  `leaked()`
+finds them (it turns on age tracking for you):
+
+```python
+gi.leaked(min_age=60)                                  # parked > 60s
+gi.leaked(min_age=300, states=("chan-wait", "park"))   # stuck on another
+                                                       # goroutine for 5 min
+```
+
+Or run a periodic watchdog inside your scheduler:
+
+```python
+gi.watch_leaks(min_age=120, interval=30)   # logs anything parked > 2 min
+```
+
+A long-lived server legitimately has old `io-wait` goroutines (its accept
+loops) and old `sleep` goroutines (tickers), so narrow `states` / raise
+`min_age` to match what *you* consider stuck.
+
 ### When is the Python stack available?
 
 * **Single-thread scheduler (`pygo.aio`, the common case):** the full stack

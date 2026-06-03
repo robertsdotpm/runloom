@@ -117,6 +117,12 @@ static PyObject *m_introspect_timestamps(PyObject *self, PyObject *arg)
     Py_RETURN_NONE;
 }
 
+static PyObject *m_get_introspect_timestamps(PyObject *self, PyObject *unused)
+{
+    (void)self; (void)unused;
+    return PyBool_FromLong(pygo_introspect_get_timestamps());
+}
+
 static PyObject *m_set_deadlock_mode(PyObject *self, PyObject *arg)
 {
     long mode;

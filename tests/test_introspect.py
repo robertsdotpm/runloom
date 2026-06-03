@@ -320,6 +320,33 @@ class TestDeadlockDetection(unittest.TestCase):
         self.assertNotIn("DEADLOCK", out)
 
 
+class TestLeakWatchdog(unittest.TestCase):
+    def test_leaked_finds_old_parkers(self):
+        cap = {}
+
+        def sleeper():
+            pygo.sleep(0.06)
+
+        def main():
+            gi.enable_timestamps(True)
+            for _ in range(3):
+                pygo.go(sleeper)
+            pygo.sleep(0.03)            # let them age
+            cap["hits"] = gi.leaked(min_age=0.01, states=("sleep",))
+            cap["none"] = gi.leaked(min_age=10.0, states=("sleep",))
+
+        pygo.run(main)
+        self.assertEqual(len(cap["hits"]), 3)
+        self.assertTrue(all(g["age"] >= 0.01 for g in cap["hits"]))
+        self.assertEqual(cap["none"], [])   # nothing parked >10s
+
+    def test_leaked_auto_enables_timestamps(self):
+        gi.enable_timestamps(False)
+        # leaked() should turn tracking on rather than error
+        self.assertEqual(gi.leaked(min_age=0.01), [])
+        self.assertTrue(pygo_core.get_introspect_timestamps())
+
+
 class TestOutsideGoroutine(unittest.TestCase):
     def test_apis_safe_when_idle(self):
         # No scheduler running: must not crash.
