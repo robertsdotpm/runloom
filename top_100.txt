@@ -1,7 +1,7 @@
 runloom - validated asyncio projects
 ========================================
 
-144 name-brand Python asyncio projects whose own test suites (or
+147 name-brand Python asyncio projects whose own test suites (or
 equivalent end-to-end exercises) run GREEN under runloom's pure-Python
 M:N runtime -- driven through runloom.aio / RunloomEventLoop on free-threaded
 CPython 3.13t (PYTHON_GIL=0). 'pass==stock' means the result matches
@@ -266,4 +266,12 @@ BEYOND 100 (cont.): locks, pools, channels, DB, resilience (6)
 143. aiotinydb                  - async TinyDB insert/read (file-backed)
 144. hyx                        - resilience retry decorator to success
 
-TOTAL DISTINCT PROJECTS PASSING: 144
+
+------------------------------------------------------------
+BEYOND 100 (cont.): redis client, event bus, scheduler (3)
+------------------------------------------------------------
+145. coredis                    - redis client set/get/incr(50) vs real redis
+146. pyventus                   - event linker + AsyncIO emitter
+147. asyncz                     - AsyncIOScheduler interval task fired
+
+TOTAL DISTINCT PROJECTS PASSING: 147
