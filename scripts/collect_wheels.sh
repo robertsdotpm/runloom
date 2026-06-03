@@ -94,7 +94,7 @@ for entry in $RELEASE_SSH_HOSTS; do
     REMOTE_CLEANUP="$REMOTE_CLEANUP
 $target|$bdir"
     echo ">> [$target] fresh clone $RUNLOOM_REF in $bdir + cibuildwheel ..."
-    ssh "$target" "rm -rf '$bdir' && git clone --depth 1 --branch '$RUNLOOM_REF' '$RUNLOOM_REPO_URL' '$bdir' && cd '$bdir' && python -m cibuildwheel --output-dir wheelhouse"
+    ssh "$target" "mkdir -p '$base' && rm -rf '$bdir' && git clone --depth 1 --branch '$RUNLOOM_REF' '$RUNLOOM_REPO_URL' '$bdir' && cd '$bdir' && { command -v cibuildwheel >/dev/null 2>&1 && cibuildwheel --output-dir wheelhouse || { command -v python3 >/dev/null 2>&1 && python3 -m cibuildwheel --output-dir wheelhouse || python -m cibuildwheel --output-dir wheelhouse; }; }"
     echo ">> [$target] pulling wheels back ..."
     rsync -az "$target:$bdir/wheelhouse/" wheelhouse/
 done
