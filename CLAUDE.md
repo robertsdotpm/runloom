@@ -19,9 +19,10 @@
   `REGRESSION` = a NEW failure worth a look (known platform gaps are baselined).
   Each target deletes its built extension before the `--force` rebuild, so a
   broken build surfaces as `BUILD_FAIL` instead of hiding behind a stale `.pyd`/
-  `.so`.  Known baselined gap: `test_freethread_stress::test_gc_stw_under_goroutine_churn`
-  HANGS (~80%) on **win-3.13t only** — free-threaded-Windows M:N under a
-  `gc.collect()` stop-the-world; passes on linux/mac/win-3.12.
+  `.so`.  (`test_freethread_stress::test_gc_stw_under_goroutine_churn` was a
+  baselined win-3.13t hang — a stop-the-world MONOPOLY deadlock that in fact
+  reproduced on Linux too; fixed in the scheduler 2026-06-03 and un-baselined,
+  so a regression now surfaces as `REGRESSION`.)
 
 ## Build & test
 - Target is **free-threaded CPython 3.13t** — the M:N scheduler is only real
