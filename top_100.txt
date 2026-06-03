@@ -1,7 +1,7 @@
 runloom - validated asyncio projects
 ========================================
 
-177 name-brand Python asyncio projects whose own test suites (or
+181 name-brand Python asyncio projects whose own test suites (or
 equivalent end-to-end exercises) run GREEN under runloom's pure-Python
 M:N runtime -- driven through runloom.aio / RunloomEventLoop on free-threaded
 CPython 3.13t (PYTHON_GIL=0). 'pass==stock' means the result matches
@@ -360,4 +360,13 @@ BEYOND 100 (bulk): gRPC over HTTP/2, mongo (2)
 176. grpclib                    - in-process gRPC HealthCheck over HTTP/2 -> SERVING
 177. mongomock-motor            - async mongo insert(10)/count/find_one/find-cursor (in-process)
 
-TOTAL DISTINCT PROJECTS PASSING: 177
+
+------------------------------------------------------------
+BEYOND 100 (bulk): popular AI/bot libs (>=1000 stars) (4)
+------------------------------------------------------------
+178. ollama                     - AsyncClient chat (local server) [>=1000 stars]
+179. litellm                    - acompletion routed to local server
+180. pydantic-ai                - Agent.run with TestModel
+181. aiogram                    - Dispatcher.feed_update routed message
+
+TOTAL DISTINCT PROJECTS PASSING: 181
