@@ -3,6 +3,15 @@ from ._base import *  # noqa: F401,F403  (shared foundation)
 from .events import CoEvent, CoSemaphore  # noqa: F401
 from . import osio  # _orig_os_read/_orig_os_write are rebound at patch-time -> read live
 
+
+def _spawn(fn):
+    """Spawn the worker goroutine on whichever scheduler is active: mn_go under
+    M:N (mn_hub_count() > 0), else the single-thread go.  A task spawned via the
+    single-thread go() never runs under mn_run, so future.result() would hang."""
+    if runloom_c.mn_hub_count() > 0:
+        return runloom_c.mn_go(fn)
+    return runloom_c.go(fn)
+
 # ============================================================
 # concurrent.futures -- goroutine-backed ThreadPoolExecutor
 #
@@ -75,7 +84,7 @@ def _build_co_tpe():
                     sem.release()
                     done.set()
 
-            runloom_c.go(task)
+            _spawn(task)
             return fut
 
         def shutdown(self, wait=True, *, cancel_futures=False):

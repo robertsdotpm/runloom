@@ -14,6 +14,16 @@ import queue as _queue_mod
 _real_SimpleQueue = _queue_mod.SimpleQueue
 
 
+def _spawn(fn):
+    """Spawn a helper goroutine on whichever scheduler is active: mn_go under
+    M:N (mn_hub_count() > 0), else the single-thread go.  A waker spawned via
+    the single-thread go() never runs under mn_run, so a timed get() would hang
+    until something is put."""
+    if runloom_c.mn_hub_count() > 0:
+        return runloom_c.mn_go(fn)
+    return runloom_c.go(fn)
+
+
 class CoSimpleQueue(object):
     """Cooperative, unbounded FIFO matching queue.SimpleQueue's surface.
 
@@ -71,7 +81,7 @@ class CoSimpleQueue(object):
                         parker.unpark()
                         return
                     _co_sleep(min(remaining, 0.05))
-            runloom_c.go(waker)
+            _spawn(waker)
             p.park()
             done[0] = True
         p.release()

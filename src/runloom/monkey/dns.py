@@ -22,6 +22,16 @@ _hosts_cache     = None
 _dns_result_cache = {}    # (lowername, qtype) -> (addrs, expire_ts)
 
 
+def _spawn(fn):
+    """Spawn a resolver goroutine on whichever scheduler is active: mn_go under
+    M:N (mn_hub_count() > 0), else the single-thread go.  A runner spawned via
+    the single-thread go() never runs under mn_run, so the parker.park() in
+    _resolve_dual would hang forever (the M:N getaddrinfo deadlock)."""
+    if runloom_c.mn_hub_count() > 0:
+        return runloom_c.mn_go(fn)
+    return runloom_c.go(fn)
+
+
 def _resolv_conf_paths():
     """Candidate paths for resolver config, in order of preference.
 
@@ -207,8 +217,8 @@ def _resolve_dual(name, want_v4, want_v6):
         remaining[0] -= 1
         if remaining[0] == 0:
             parker.unpark()
-    runloom_c.go(lambda: runner(0, _QTYPE_A))
-    runloom_c.go(lambda: runner(1, _QTYPE_AAAA))
+    _spawn(lambda: runner(0, _QTYPE_A))
+    _spawn(lambda: runner(1, _QTYPE_AAAA))
     parker.park()
     parker.release()
     out = []
