@@ -5,11 +5,20 @@ import sys
 import tempfile
 import unittest
 
+import pytest
+
 sys.path.insert(0, "src")
 
 import pygo
 import pygo_core
 import pygo.inspect as gi
+
+# Goroutine introspection is POSIX-only (pygo_introspect.c is wrapped in
+# #if !defined(_WIN32)); the C functions aren't built on Windows, so skip
+# wherever the API is absent rather than hardcoding a platform.
+pytestmark = pytest.mark.skipif(
+    not hasattr(pygo_core, "goroutine_count"),
+    reason="goroutine introspection is POSIX-only (not built on this platform)")
 
 
 class TestCountAndRegistry(unittest.TestCase):

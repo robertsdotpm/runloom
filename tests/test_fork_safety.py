@@ -15,10 +15,16 @@ import sys
 import time
 import unittest
 
+import pytest
+
 sys.path.insert(0, "src")
 
 import pygo
 import pygo_core
+
+# fork() is POSIX-only; this whole module forks, so it cannot run on Windows.
+pytestmark = pytest.mark.skipif(
+    not hasattr(os, "fork"), reason="fork() is POSIX-only")
 
 
 def run_child(child_fn, timeout=8.0):
