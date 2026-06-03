@@ -1,7 +1,7 @@
 runloom - validated asyncio projects
 ========================================
 
-163 name-brand Python asyncio projects whose own test suites (or
+168 name-brand Python asyncio projects whose own test suites (or
 equivalent end-to-end exercises) run GREEN under runloom's pure-Python
 M:N runtime -- driven through runloom.aio / RunloomEventLoop on free-threaded
 CPython 3.13t (PYTHON_GIL=0). 'pass==stock' means the result matches
@@ -326,4 +326,14 @@ BEYOND 100 (bulk): LLM/HTTP async clients via clean venv (4)
 162. httpx-sse                  - consumed 2 SSE events (clean httpx)
 163. cohere                     - AsyncClientV2 chat (mocked)
 
-TOTAL DISTINCT PROJECTS PASSING: 163
+
+------------------------------------------------------------
+BEYOND 100 (bulk): API clients via clean venv (5)
+------------------------------------------------------------
+164. groq                       - AsyncGroq chat completion (mocked)
+165. together                   - AsyncTogether chat completion (mocked)
+166. notion-client              - AsyncClient users.me (mocked httpx)
+167. elevenlabs                 - AsyncElevenLabs voices.get_all (mocked)
+168. stripe                     - async StripeClient customers.retrieve (mocked)
+
+TOTAL DISTINCT PROJECTS PASSING: 168
