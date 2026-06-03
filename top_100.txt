@@ -196,4 +196,13 @@ BEYOND 100 (cont.): GitHub client, DI container (2)
 118. githubkit                  - async GitHub API request over mocked httpx
 119. aioinject                  - Singleton dependency resolve in async context
 
-TOTAL DISTINCT PROJECTS PASSING: 119
+
+------------------------------------------------------------
+BEYOND 100 (cont.): DI containers, client cache, GitHub (4)
+------------------------------------------------------------
+120. dishka                     - async DI container provides typed dependency
+121. aiohttp-client-cache       - CachedSession GET over mocked aiohttp
+122. aiogithubapi               - async GitHub API generic GET (mocked)
+123. wireup                     - DI container resolves service
+
+TOTAL DISTINCT PROJECTS PASSING: 123
