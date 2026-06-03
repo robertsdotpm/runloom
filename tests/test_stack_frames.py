@@ -249,5 +249,49 @@ print("PASS")
 """)
 
 
+class TestDeepRecursionSafety(unittest.TestCase):
+    """Deeply-nested input to C-recursive stdlib ops must degrade to a clean
+    RecursionError on a goroutine's small stack, NOT a SEGV -- otherwise a
+    nested-JSON/pickle bomb crashes the process.  Safe because these ops cost
+    ~60-80 B of C stack per level, so CPython's recursion counter fires (~150
+    levels ~ 12 KB) well within the 32 KB default.  (ast/compile cost ~1.5 KB
+    per level and CAN SEGV a goroutine past ~18 deep -- a documented residual,
+    see docs/cooperative_stdlib_coverage.md; not exercised here because a SEGV
+    would take the test process down.)"""
+
+    def test_json_bomb_is_clean_recursionerror(self):
+        assert_pass(r"""
+import json
+def w():
+    try:
+        json.loads("[" * 5000 + "]" * 5000)
+        ok = "no-error"
+    except RecursionError:
+        ok = "clean"
+    assert ok == "clean", ok
+runloom_c.go(w); runloom_c.run()
+print("PASS")
+""")
+
+    def test_pickle_deep_is_clean(self):
+        assert_pass(r"""
+import pickle
+def w():
+    # build the nesting in-goroutine (pure-Python loop -> datastack, safe);
+    # pickle.dumps then C-recurses and must hit a clean RecursionError, not SEGV.
+    x = []; cur = x
+    for _ in range(5000):
+        n = []; cur.append(n); cur = n
+    try:
+        pickle.loads(pickle.dumps(x))
+        ok = "no-error"
+    except RecursionError:
+        ok = "clean"
+    assert ok == "clean", ok
+runloom_c.go(w); runloom_c.run()
+print("PASS")
+""")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -96,3 +96,41 @@ def worker():
     select.select([], [], [], 0)       # cooperative epoll path; no 51 KB frame
 runloom.mn_init(2); GO(worker); runloom.mn_run(); runloom.mn_fini()
 ```
+
+### Deep C-recursion residual (`ast` / `compile`)
+
+A second, narrower stack class is *depth*, not a single frame.  A goroutine's
+C-recursion guard is CPython 3.13's fixed `c_recursion_remaining` counter, which
+is calibrated for the main thread's 8 MB stack and is NOT lowered per goroutine
+(it has no stack-pointer check; that arrives in 3.14).  So whether deeply-nested
+input gives a clean `RecursionError` or a SEGV on a 32 KB goroutine depends on
+how much C stack each recursion level costs:
+
+| op | C stack / level | result at depth in a 32 KB g |
+| --- | --- | --- |
+| `json` / `pickle` / `marshal` / `copy.deepcopy` / `pprint` | ~60–80 B | **clean RecursionError** (counter fires ~150 levels ≈ 12 KB, well under 32 KB) |
+| `ast.parse` / `compile()` | ~1.5 KB | **SEGV at ~20 levels** — the stack is gone before the counter fires |
+
+So the common, DoS-relevant cases (parsing untrusted nested JSON/pickle in a
+goroutine) are **safe** — they degrade to `RecursionError` exactly like on the
+main thread.  The only SEGV is `ast`/`compile` of source nested deeper than
+~18, inside a goroutine — uncommon (compiling code is rarely on a hot goroutine
+path).  There is no clean shared-counter fix (lowering the counter to make
+`ast` safe would force `json`/`pickle` to `RecursionError` at ~14, breaking
+ordinary nested data); the general fix is CPython 3.14's stack-pointer-based
+recursion check, at which point runloom should set each goroutine's
+`c_stack_*` bounds.  Until then: a goroutine that compiles/`ast`-parses
+deeply-nested (or untrusted) source should use a roomier stack
+(`runloom_c.go(fn, stack_size=…)`) or offload it to a thread.
+
+### Re-scan summary (stdlib C-frame sweep)
+
+A measured sweep of ~40 stdlib leaf operations confirms the fat-frame surface
+is exactly **two single frames** — `select.select` (50.9 KB) and first-`ssl`
+use (40 KB), both handled above — and the `ast`/`compile` depth residual.
+Everything else fits the 32 KB default with margin (next-largest: `email`
+parse 21 KB, `json` nested 15 KB, `sqlite3` 13 KB, hashlib/socket/subprocess
+~10 KB).  The blocking surface (sockets, TLS handshake, DNS, selectors,
+buffered pipes, subprocess, files, signals, sync primitives) is cooperative or
+offloaded per the table above; the earlier TLS-handshake / buffered-pipe gaps
+are closed.
