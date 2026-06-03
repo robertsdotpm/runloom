@@ -1,7 +1,7 @@
 runloom - validated asyncio projects
 ========================================
 
-134 name-brand Python asyncio projects whose own test suites (or
+137 name-brand Python asyncio projects whose own test suites (or
 equivalent end-to-end exercises) run GREEN under runloom's pure-Python
 M:N runtime -- driven through runloom.aio / RunloomEventLoop on free-threaded
 CPython 3.13t (PYTHON_GIL=0). 'pass==stock' means the result matches
@@ -241,4 +241,12 @@ BEYOND 100 (cont.): distributed hash table over UDP (1)
 ------------------------------------------------------------
 134. kademlia                   - 2-node Kademlia DHT set/get both directions over real UDP
 
-TOTAL DISTINCT PROJECTS PASSING: 134
+
+------------------------------------------------------------
+BEYOND 100 (cont.): scheduler, OAuth2, event framework (3)
+------------------------------------------------------------
+135. aioclock                   - Every(0.05s) scheduled task fired repeatedly
+136. aioauth                    - OAuth2 token utils + grant types
+137. circuits                   - event-driven component fired event
+
+TOTAL DISTINCT PROJECTS PASSING: 137
