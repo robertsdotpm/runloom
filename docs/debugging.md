@@ -123,6 +123,64 @@ stderr and lets the process continue.  The underlying primitive is
 `runloom.dump_goroutines(fd)`, which is async-signal-safe-ish (it
 try-locks the registry and uses only `write(2)`).
 
+## Crash reporting (`SIGSEGV` / `SIGBUS`)
+
+A goroutine runs on a small, fixed C stack with a `PROT_NONE` **guard page**
+just below it, so the commonest hard crash in runloom is a **goroutine stack
+overflow** — deep C recursion (a big `repr`, an OpenSSL/regex/JSON call, a
+recursive protocol callback) running off the low end of that stack and into the
+guard page.  By default that is a bare `Segmentation fault` with no clue which
+goroutine or why.
+
+The crash reporter turns it into a classified dump:
+
+```python
+gi.install_crash_handler()       # or "all" / "wait" / "gdb" / ...
+# or set env RUNLOOM_CRASH=on (auto-installs at import — every crash dumps)
+```
+
+On a fault it maps the faulting address onto the guard pages and prints, e.g.:
+
+```
+======================== runloom crash ========================
+[runloom] fatal SIGSEGV at address 0x7622eca18f30  (pid 48681, thread 0x7622ebbff6c0)
+[runloom] >>> GOROUTINE STACK OVERFLOW <<<
+[runloom]     goroutine g1 ran off the low end of its 128 KiB C stack
+[runloom]     (the fault hit the guard page just below it).
+[runloom]     Fix: give it a bigger stack -- runloom_c.go(fn, stack_size=N), ...
+[runloom] this thread was executing goroutine g1.
+=== runloom goroutine dump: 1 live (default stack 128 KiB) ===
+  ...
+```
+
+A fault **inside** a goroutine stack is reported as a likely wild pointer / UAF
+on that goroutine; anything else (main/hub stack, heap, a stray pointer) is
+flagged as a non-goroutine fault.  After the dump it **chains to the previous
+handler** so a core dump / correct exit code still follow.
+
+`level` (or the `RUNLOOM_CRASH` env value) selects behaviour, comma-separated:
+
+| level        | effect                                                           |
+|--------------|------------------------------------------------------------------|
+| `on`         | classified goroutine dump (the default)                          |
+| `all`        | `+ backtrace + pystack`                                          |
+| `backtrace`  | add a native C backtrace (`execinfo`)                            |
+| `pystack`    | add the Python traceback (enables `faulthandler` and chains to it) |
+| `wait`       | after the dump, **block for a debugger** — prints `gdb -p <pid>`; resume with `kill -CONT <pid>` |
+| `gdb`        | fork+exec `gdb -batch -ex 'thread apply all bt full'` on self    |
+| `off`        | uninstall                                                        |
+
+`RUNLOOM_CRASH_FILE` (or `install_crash_handler(file=...)`) appends the report
+to a file as well as stderr.  Call `install_crash_handler()` **before** starting
+the runtime so the scheduler hubs are armed as they spawn.
+
+It survives the very overflow it reports because every runloom OS thread (the
+main thread, each scheduler hub, the blocking-offload workers) installs its own
+`sigaltstack`, so the handler runs on a separate stack when the goroutine stack
+is exhausted.  Off by default — it does not hijack process-wide signal handlers
+unless asked.  **Windows** uses a Vectored Exception Handler that dumps the
+goroutine registry and continues the search (the rich path is POSIX).
+
 ## Deadlock detection
 
 Go reports `fatal error: all goroutines are asleep - deadlock!` when the
