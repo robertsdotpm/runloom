@@ -85,4 +85,30 @@ UTILITIES, ORMs, QUEUES & SERVICE-BACKED TIER (embedded servers)  (10)
  63. aiologger                  - 27 passed (async logging; uvloop/json-dep fails == stock)
  64. slixmpp                    - core stanza/JID/element suites pass (base 5, element 32, msg 4, iq 5, jid 35) == stock
 
-TOTAL DISTINCT PROJECTS PASSING: 64
+
+------------------------------------------------------------
+NEXT-40 PUSH: utilities, ASGI adapters, sans-IO, DB (21)
+------------------------------------------------------------
+ 65. stamina                    - retry decorator: 3-attempt async retry-on-exception
+ 66. asyncstdlib                - async sum/islice/list/scoped_iter over async iterators
+ 67. culsans                    - sync<->async queue: async put/get x20 across tasks
+ 68. aiochannel                 - async channel: bounded put + async-iter consume x15
+ 69. h11                        - sans-IO HTTP/1.1: full request+response roundtrip
+ 70. asgi-lifespan              - ASGI LifespanManager startup/shutdown
+ 71. cashews                    - memory cache set/get/incr + @cache decorator
+ 72. dependency-injector        - async Resource provider init/shutdown
+ 73. databases                  - sqlite (aiosqlite): insert(30)/count/transaction
+ 74. limits                     - async rate-limit (memory FixedWindow) 5/sec
+ 75. wsproto                    - sans-IO WebSocket: handshake + text frame roundtrip
+ 76. watchfiles                 - Rust awatch: async file-change detection on 3.13t
+ 77. piccolo                    - sqlite ORM: create/insert(12)/count/where
+ 78. aiomisc                    - PeriodicCallback fires repeatedly on the loop
+ 79. blacksheep                 - ASGI framework: routed GET -> 200 pong
+ 80. asgiref                    - Django bridge: sync_to_async offloads to worker thread
+ 81. async-asgi-testclient      - ASGI TestClient GET -> 200 pong
+ 82. sniffio                    - current_async_library() -> asyncio under PygoEventLoop
+ 83. outcome                    - capture Value/Error + unwrap
+ 84. a2wsgi                     - WSGI->ASGI adapter -> 200 pong (threadpool)
+ 85. aioitertools               - islice/zip/chain/enumerate over async iters
+
+TOTAL DISTINCT PROJECTS PASSING: 85
