@@ -63,6 +63,24 @@
   lazily allocates a sched + runs mimalloc — fatal on a foreign waker thread, a
   run_in_executor blockpool worker / iouring CQE, that has no usable heap).
   Regression guard: `runloom_compat/call_soon_fifo.py`.
+- **Preemption must NOT yield a goroutine mid object-destruction.** The preempt
+  eval-frame wrapper and the single-frame liveness backstop fire at arbitrary
+  Python-frame entries — which can be nested inside an in-flight `tp_dealloc`
+  (a weakref callback or finalizer, driven by the free-threaded biased-refcount
+  cross-thread merge or the trashcan unwind). Yielding there freezes a
+  half-finished destructor on the goroutine's coro stack while the hub thread
+  returns to hub_main, a **GC-safe point**; a concurrent stop-the-world GC /
+  QSBR reclaim on another thread (e.g. a native thread's `gc.collect()`) then
+  runs against partially-destroyed objects → use-after-free (crashed
+  `test_weakref.test_threaded_weak_key_dict_copy`). Both yield sites gate on
+  `runloom_tstate_in_destruction(ts)` (`tstate->delete_later` for the trashcan;
+  `brc.local_objects_to_merge` for the merge drain) and DEFER while it is true,
+  leaving the trigger armed so the next frame entry after the destructor unwinds
+  takes the yield — never lost. Cooperative yields are exempt: they only happen
+  at Python-level call points, never nested in a C destructor. Do NOT try to fix
+  this by rerouting preemption through the eval-breaker / pending-call boundary —
+  the merge's dealloc→callback→eval re-enters `_Py_HandlePending` nested, so a
+  pending-call preempt still fires inside the destructor.
 
 ## aio bridge invariants (src/runloom/aio/)
 - `runloom.aio` is a package (`src/runloom/aio/`): the shared foundation is
