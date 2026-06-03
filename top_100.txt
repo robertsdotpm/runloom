@@ -1,7 +1,7 @@
 runloom - validated asyncio projects
 ========================================
 
-147 name-brand Python asyncio projects whose own test suites (or
+150 name-brand Python asyncio projects whose own test suites (or
 equivalent end-to-end exercises) run GREEN under runloom's pure-Python
 M:N runtime -- driven through runloom.aio / RunloomEventLoop on free-threaded
 CPython 3.13t (PYTHON_GIL=0). 'pass==stock' means the result matches
@@ -274,4 +274,12 @@ BEYOND 100 (cont.): redis client, event bus, scheduler (3)
 146. pyventus                   - event linker + AsyncIO emitter
 147. asyncz                     - AsyncIOScheduler interval task fired
 
-TOTAL DISTINCT PROJECTS PASSING: 147
+
+------------------------------------------------------------
+BEYOND 100 (cont.): sync primitives, greenlet bridge, DNS (3)
+------------------------------------------------------------
+148. aiologic                   - async Event set/await across tasks (sync primitives)
+149. awaitlet                   - greenlet sync->async bridge -> 42 (on 3.13t)
+150. aiodnsresolver             - pure-python DNS resolved example.com A
+
+TOTAL DISTINCT PROJECTS PASSING: 150
