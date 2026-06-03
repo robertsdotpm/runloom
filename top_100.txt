@@ -1,16 +1,16 @@
-pygo - validated asyncio projects
+runloom - validated asyncio projects
 ========================================
 
 64 name-brand Python asyncio projects whose own test suites (or
-equivalent end-to-end exercises) run GREEN under pygo's pure-Python
-M:N runtime -- driven through pygo.aio / PygoEventLoop on free-threaded
+equivalent end-to-end exercises) run GREEN under runloom's pure-Python
+M:N runtime -- driven through runloom.aio / RunloomEventLoop on free-threaded
 CPython 3.13t (PYTHON_GIL=0). 'pass==stock' means the result matches
 stock asyncio on the same interpreter; every residual failure traced to
 environment / version / test-framework issues that reproduce on stock,
-not to pygo.
+not to runloom.
 
 Across these projects -- tens of thousands of third-party tests -- exactly
-one pygo bug surfaced, and it was found, fixed, and merged (the future
+one runloom bug surfaced, and it was found, fixed, and merged (the future
 done-callback ordering / websocket-close fix).
 
 ------------------------------------------------------------
