@@ -239,34 +239,45 @@ class Suite:
         self.env = capture_env(self.pinned)
         self.results = []
 
-    def bench(self, name, fn, *, inner=1, samples=None, warmup=None, note=""):
+    def bench(self, name, fn, *, inner=1, samples=None, warmup=None, note="",
+              setup=None, teardown=None):
         """Time ``fn`` (which performs ``inner`` units of work per call).
 
         fn is called warmup+samples times; the first ``warmup`` are discarded.
         Use ``inner`` for cheap ops so each sample is long enough to dominate
         timer granularity (perf_counter_ns is ~10-40ns here).
+
+        ``setup`` / ``teardown`` run once, untimed, around the whole sample
+        loop -- use them to spin up persistent state (e.g. an M:N hub pool)
+        whose construction cost must NOT be folded into the per-op number.
         """
         import gc
         s = self.samples if samples is None else samples
         w = self.warmup if warmup is None else warmup
-        for _ in range(w):
-            fn()
-        times = []
-        for _ in range(s):
-            # Collect cyclic garbage from the previous sample untimed, then
-            # freeze the collector so a stray collection can't land inside
-            # this timing window and inflate its dispersion.
-            gc.collect()
-            gc_was = gc.isenabled()
-            gc.disable()
-            try:
-                t0 = time.perf_counter_ns()
+        if setup is not None:
+            setup()
+        try:
+            for _ in range(w):
                 fn()
-                dt = time.perf_counter_ns() - t0
-            finally:
-                if gc_was:
-                    gc.enable()
-            times.append(dt / 1e9)
+            times = []
+            for _ in range(s):
+                # Collect cyclic garbage from the previous sample untimed,
+                # then freeze the collector so a stray collection can't land
+                # inside this timing window and inflate its dispersion.
+                gc.collect()
+                gc_was = gc.isenabled()
+                gc.disable()
+                try:
+                    t0 = time.perf_counter_ns()
+                    fn()
+                    dt = time.perf_counter_ns() - t0
+                finally:
+                    if gc_was:
+                        gc.enable()
+                times.append(dt / 1e9)
+        finally:
+            if teardown is not None:
+                teardown()
         stats = summarize(times, inner)
         stats["name"] = name
         stats["note"] = note
