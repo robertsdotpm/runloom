@@ -7,7 +7,7 @@ Future's done_callback fires.  Cooperative switching between tasks is
 a stack swap (~80 ns).
 
 Measured perf characteristics (Python 3.12 on Linux, see
-examples/bench_aio_io.py):
+bench/bench_aio_io.py):
   * Multi-await chains (n=100 k=100 awaits each): ~1.9x faster
   * Deep recursive awaits (n=100 d=20): ~1.7x faster
   * Simple fan-out (10k tasks one sleep each): ~5x SLOWER

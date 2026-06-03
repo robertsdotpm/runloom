@@ -10,7 +10,7 @@ overhead asyncio incurs per await:
                         shared asyncio.Queue
 
 Run:
-    PYTHONPATH=src python3 examples/bench_aio.py
+    PYTHONPATH=src python3 bench/bench_aio.py
 """
 import asyncio
 import gc

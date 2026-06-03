@@ -9,7 +9,7 @@ Verifies that:
   - mn_run waits for sleeping gs to finish (pending count stays
     positive until the g actually completes).
 
-Run with `~/.pyenv/versions/3.13.13t/bin/python3.13t examples/bench_mn_sleep.py`.
+Run with `~/.pyenv/versions/3.13.13t/bin/python3.13t bench/bench_mn_sleep.py`.
 """
 import sys
 import time

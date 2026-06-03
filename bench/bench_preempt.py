@@ -9,7 +9,7 @@ tick happens AFTER busy_done_ts.  With preemption the reader gets
 periodic turns inside the busy loop -- so its FIRST tick happens
 BEFORE busy_done_ts.
 
-Run with `~/.pyenv/versions/3.13.13t/bin/python3.13t examples/bench_preempt.py`.
+Run with `~/.pyenv/versions/3.13.13t/bin/python3.13t bench/bench_preempt.py`.
 preempt_init is 3.13t-only.
 """
 import sys

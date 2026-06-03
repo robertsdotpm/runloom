@@ -9,7 +9,7 @@ thread (no GIL benefit) and threading hits the same per-thread
 overhead but without our work-stealing.
 
 Run as:
-    ~/.pyenv/versions/3.13.13t/bin/python3.13t examples/bench_mn.py
+    ~/.pyenv/versions/3.13.13t/bin/python3.13t bench/bench_mn.py
 """
 import asyncio
 import hashlib

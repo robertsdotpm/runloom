@@ -318,7 +318,7 @@ Full guide in [docs/](docs/) (also on Read the Docs):
 | --- | --- |
 | `src/pygo_core/` | C extension: scheduler, channels, netpoll, asm backends, M:N hubs, stall recovery |
 | `src/pygo/` | Python layers: `aio`, `sync`, `monkey`, `time`, `runtime` |
-| `tests/` · `examples/` · `docs/` · `scripts/` | tests · benches + sample servers · docs · bootstrap installers |
+| `tests/` · `examples/` · `bench/` · `docs/` · `scripts/` | tests · runnable examples · benchmarks + perf harness · docs · bootstrap installers |
 
 ## Notes
 

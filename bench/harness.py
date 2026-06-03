@@ -1,6 +1,6 @@
 """bench.harness -- reproducible micro / throughput benchmark harness for pygo.
 
-Why a dedicated harness instead of the existing examples/bench_*.py scripts:
+Why a dedicated harness instead of the existing bench/bench_*.py scripts:
 those print a single wall-clock number from one run.  That is fine as a
 sanity check but unusable as a *measurement* -- no warmup, no repetition,
 no dispersion, no environment record -- so two numbers taken on two days

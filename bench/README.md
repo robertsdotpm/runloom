@@ -9,7 +9,7 @@ Primary target runtime is free-threaded CPython **3.13t** (pygo's M:N hub
 pool only gets real core-level parallelism with the GIL off).  GIL'd 3.13,
 asyncio, and the Go loadgen are comparison baselines.
 
-## Why not just the existing `examples/bench_*.py`?
+## Why not just the existing `bench/bench_*.py`?
 
 Those print one wall-clock number from one run -- no warmup, no repetition,
 no dispersion, no environment record.  Useful as a smoke check, useless as a

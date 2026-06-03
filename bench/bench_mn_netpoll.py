@@ -15,7 +15,7 @@ Verifies that:
     global sched instead of the hub.
 
 Run with the free-threaded interpreter:
-  ~/.pyenv/versions/3.13.13t/bin/python3.13t examples/bench_mn_netpoll.py
+  ~/.pyenv/versions/3.13.13t/bin/python3.13t bench/bench_mn_netpoll.py
 """
 import socket
 import sys

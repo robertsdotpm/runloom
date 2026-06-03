@@ -3,7 +3,7 @@
 Two goroutines bouncing a value through an unbuffered + a buffered
 channel.  Equivalent to Go's `BenchmarkPingPong` with `make(chan int)`.
 
-Run alongside the Go bench in examples/bench_chan_go.go (same machine).
+Run alongside the Go bench in bench/bench_chan_go.go (same machine).
 """
 import sys
 import time

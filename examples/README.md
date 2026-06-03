@@ -1,0 +1,69 @@
+# pygo examples
+
+Small, self-contained programs — each one demonstrates a single aspect of
+pygo. They run on a normal (GIL) build except where noted; `mn_parallel.py`
+needs free-threaded 3.13t for the parallelism payoff.
+
+Run any of them from the repo root:
+
+```bash
+python3 examples/hello_goroutines.py
+```
+
+(Each script puts `../src` on `sys.path`, so it works without
+`pip install -e .` and from any working directory.)
+
+For raw performance numbers and the measurement harness, see [`../bench/`](../bench/).
+
+## Goroutines & channels
+
+| Example | Shows |
+| --- | --- |
+| [hello_goroutines.py](hello_goroutines.py) | `go` / `run` / `yield_` / `sleep` — the basics |
+| [channels.py](channels.py) | buffered vs unbuffered channels, `close`, `for v in ch` |
+| [select.py](select.py) | `select` over recv/send cases, plus non-blocking `default` |
+| [ping_pong.py](ping_pong.py) | two goroutines synchronised purely by channels |
+
+## Concurrency patterns
+
+| Example | Shows |
+| --- | --- |
+| [worker_pool.py](worker_pool.py) | a fixed pool of workers draining a job channel |
+| [pipeline.py](pipeline.py) | staged processing connected by channels |
+| [fan_in.py](fan_in.py) | many producers merged into one channel |
+| [fan_out.py](fan_out.py) | one producer spread across many consumers |
+| [semaphore.py](semaphore.py) | bounding concurrency with a buffered channel |
+| [waitgroup.py](waitgroup.py) | a `sync.WaitGroup` in ~10 lines |
+| [prime_sieve.py](prime_sieve.py) | the classic concurrent prime sieve |
+
+## Time, timeouts & cancellation
+
+| Example | Shows |
+| --- | --- |
+| [timeout.py](timeout.py) | race work against `pygo.time.After` with `select` |
+| [ticker.py](ticker.py) | periodic ticks with `pygo.time.NewTicker` |
+| [context_cancel.py](context_cancel.py) | `pygo.context` cancellation fanned out to many goroutines |
+
+## Networking (blocking-style sockets)
+
+| Example | Shows |
+| --- | --- |
+| [echo_server.py](echo_server.py) / [echo_client.py](echo_client.py) | a TCP echo server + load-generating client |
+| [http_server.py](http_server.py) | hand-rolled HTTP server + `urllib.urlopen` clients, all cooperative |
+| [tcp_proxy.py](tcp_proxy.py) | a port forwarder with two pump goroutines per connection |
+| [port_scanner.py](port_scanner.py) | thousands of concurrent `connect()`s via fan-out |
+| [udp_echo.py](udp_echo.py) | cooperative UDP datagrams with the `pygo.sync` front-end |
+
+## Runtime features
+
+| Example | Shows |
+| --- | --- |
+| [offload_blocking.py](offload_blocking.py) | `pygo.blocking` keeps a hub alive across a non-cooperative call |
+| [mn_parallel.py](mn_parallel.py) | the M:N scheduler scaling across cores (free-threaded 3.13t) |
+| [asyncio_bridge.py](asyncio_bridge.py) | run existing `async`/`await` code on pygo via `pygo.aio.run` |
+
+### Free-threaded run (for `mn_parallel.py`)
+
+```bash
+PYTHON_GIL=0 ~/.pyenv/versions/3.13.13t/bin/python3 examples/mn_parallel.py
+```

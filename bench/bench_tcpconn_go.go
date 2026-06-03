@@ -16,7 +16,7 @@ var work = [][2]int{
 	{512, 100}, {1024, 50}, {2048, 25}, {4096, 10},
 }
 
-// Same shape as examples/bench_tcpconn_concurrent.py: N concurrent client
+// Same shape as bench/bench_tcpconn_concurrent.py: N concurrent client
 // conns, each does M 8-byte echo round-trips against an in-process server
 // (one handler goroutine per conn). Aggregate K/s = N*M/wall.
 func bench(N, M int) float64 {
