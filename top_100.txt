@@ -133,4 +133,13 @@ stock. Niche (only lib hit); fix lives in pygo's coro/task driver (FV-gated).
 aiodebug also diverges by design: it monkey-patches asyncio Handle._run,
 which PygoEventLoop doesn't use (callbacks run on goroutines).
 
-TOTAL DISTINCT PROJECTS PASSING: 95
+
+------------------------------------------------------------
+NEXT-40 PUSH (cont.): Rx/dataloader/scheduler + aiocsv-fixed (4)
+------------------------------------------------------------
+ 96. aiocsv                     - async CSV write/read roundtrip (C _Parser awaitable; FIXED by send(None))
+ 97. aioreactive                - Rx map/filter pipeline over async observable
+ 98. aiodataloader              - DataLoader batched 3 loads into 1 batch
+ 99. apscheduler                - AsyncScheduler 4.x interval job fired
+
+TOTAL DISTINCT PROJECTS PASSING: 99
