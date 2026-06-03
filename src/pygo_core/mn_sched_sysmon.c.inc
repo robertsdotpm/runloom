@@ -91,6 +91,23 @@ static PYGO_THREAD_RET pygo_sysmon_main(void *arg)
                 (now - start) > pygo_sysmon_wedge_ns &&
                 pygo_tstate_attach_state(h->tstate) == PYGO_TS_ATTACHED) {
                 __atomic_store_n(&h->preempt_requested, 1, __ATOMIC_RELAXED);
+                /* Controlled-replay liveness backstop (Feature 1): the eval-frame
+                 * flag above only fires at a Python FRAME boundary, so it cannot
+                 * break a single-frame `while: pass` -- which, serialized under
+                 * the baton, would hold it forever.  Post an eval-breaker pending
+                 * call too; it rides backward-jump checks INSIDE the frame and
+                 * yields the baton holder (pygo_mn_liveness_pending_cb).  Gated to
+                 * controlled+barrier: the default scheduler survives single-frame
+                 * loops via parallelism, and frame-bearing code never reaches this
+                 * branch (frame-count preempt resolves it first), so this fires
+                 * only for the genuine single-frame deadlock case. */
+#ifdef PYGO_MN_LIVENESS_BACKSTOP
+                if (pygo_mn_ctrl.enabled && pygo_mn_ctrl.barrier &&
+                    pygo_mn_interp != NULL) {
+                    _PyEval_AddPendingCall(pygo_mn_interp,
+                                           pygo_mn_liveness_pending_cb, NULL, 0);
+                }
+#endif
             }
         }
         pygo_sleep_ns(pygo_sysmon_tick_ns);

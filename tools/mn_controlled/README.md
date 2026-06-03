@@ -72,10 +72,24 @@ timing-dependent exploration for A/B):
    they never trip it (natural, reproducible schedule); a CPU-bound goroutine that
    keeps calling functions hits the count and yields (liveness), at a *reproducible*
    frame: a `while not check(): n+=1` spinner stops at the same `n` every run
-   (e.g. seed 8 → 20478 = 5·4096−2, 8/8 reps). Same frame-entry granularity as
-   the wall-clock trigger — neither preempts a single-frame tight loop — but
-   reproducible. This is what made the select + mid-run-spawn workload go from
-   7/8 to 10/10 stable.
+   (e.g. seed 8 → 20478 = 5·4096−2, 8/8 reps). This is what made the select +
+   mid-run-spawn workload go from 7/8 to 10/10 stable.
+
+   *Frame granularity + a liveness backstop.* Frame-count preemption (like the
+   wall-clock trigger it replaces) acts only at a Python frame boundary, so it
+   can't break a goroutine spinning in ONE frame with no calls
+   (`while not flag: pass`) — which, serialized under the baton with no parallel
+   sibling, would hold the baton forever. The sysmon catches such a wedge and
+   posts an eval-breaker pending call (`_PyEval_AddPendingCall`, flags=0 so it
+   runs on the *hub* thread, not the parked main thread — the public
+   `Py_AddPendingCall` is main-only), which rides CPython's backward-jump checks
+   *inside* the frame and yields the baton holder. So a single-frame loop no
+   longer deadlocks (`while not flag: pass` finishes ~0.1s instead of hanging).
+   It fires only on a genuine single-frame wedge — never for frame-bearing or
+   park-fast code, where frame-count preempt resolves things first — so it trades
+   determinism for liveness in exactly that one pathological case and leaves the
+   replay-gate workloads bit-identical. (3.12+; on older builds the limitation
+   stands.)
 6. **Logical clock (timers).** `sched_sleep` deadlines are computed against a
    logical clock, not the wall clock, and timers fire *only* when the controller
    advances it — which it does at a **quiescent census** (every hub idle, none

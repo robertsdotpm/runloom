@@ -542,6 +542,50 @@ static PyObject *pygo_preempt_eval_frame(PyThreadState *ts,
 }
 #endif
 
+/* Controlled-scheduler liveness backstop (Feature 1, single-frame loops).
+ * Frame-count preemption (lever 5) and the eval-frame wrapper both act only at a
+ * Python FRAME boundary, so neither can break a goroutine spinning in ONE frame
+ * with no calls (`while not flag: pass`).  Under serialization (no parallel
+ * sibling) such a goroutine holds the baton forever and deadlocks every other
+ * hub.  This Py_AddPendingCall callback rides CPython's eval-breaker -- checked
+ * on BACKWARD JUMPS *inside* a frame -- so it interrupts even a call-less loop.
+ * It runs on the baton holder (the only thread executing Python in controlled
+ * mode) and yields that goroutine UNCONDITIONALLY: the same body as the
+ * eval-frame wrapper, NOT pygo_mn_yield_current (whose fast path would bail here
+ * -- this hub's own queues are empty, the spinner is the only local g, and the
+ * other hubs are blocked in acquire, not in our queues).  Posted by the sysmon
+ * only when a controlled-mode resume wedges past the watchdog threshold, so it
+ * never fires for frame-bearing code (frame-count preempt resolves that first,
+ * deterministically); only a genuine single-frame loop trips it -- trading
+ * determinism for liveness in exactly the pathological case that otherwise
+ * hangs.  No-op when no goroutine is running on this hub. */
+/* Per-thread pending call (flags=0 -> runs on ANY thread's eval-breaker, not
+ * just the main thread's, which is what the public Py_AddPendingCall is pinned
+ * to in 3.13 -- and the main thread is parked in mn_run, so it would never
+ * reach the hub running the loop).  Private-but-stable, like the eval-frame-func
+ * setters pygo already uses; declared here to avoid pulling in pycore headers.
+ * The 4-arg form (with flags) is 3.12+; on older builds the backstop is absent
+ * and single-frame loops stay the documented controlled-mode limitation. */
+#if PY_VERSION_HEX >= 0x030C0000
+#define PYGO_MN_LIVENESS_BACKSTOP 1
+extern int _PyEval_AddPendingCall(PyInterpreterState *interp,
+                                  int (*func)(void *), void *arg, int flags);
+
+static int pygo_mn_liveness_pending_cb(void *arg)
+{
+    pygo_hub_t *h = pygo_tls_hub;
+    pygo_g_t *g;
+    (void)arg;
+    if (h != NULL && (g = pygo_tls_current_g) != NULL) {
+        pygo_sched_ready_push(&h->sched, g);
+        pygo_pystate_snap(&g->snap);
+        pygo_tls_self_queued = 1;
+        pygo_coro_yield();
+    }
+    return 0;
+}
+#endif
+
 /* Install/uninstall the preemption eval-frame wrapper on `interp`.  Install
  * runs in mn_init after pygo_sysmon_config (so pygo_preempt_enabled is set) and
  * BEFORE any goroutine runs Python; uninstall runs in mn_fini.  No-ops unless
