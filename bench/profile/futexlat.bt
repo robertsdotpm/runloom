@@ -1,0 +1,32 @@
+/*
+ * futexlat.bt -- futex wait-latency histogram for a pygo workload.
+ *
+ * The park/wake path (channel park, M:N hub coordination) bottoms out in
+ * futex syscalls; this is how long threads actually block. bpftrace uses
+ * kernel tracepoints, not the PMU, so it WORKS on this VM where perf's
+ * hardware counters don't (campaign finding F5) -- it's the PMU-free way to
+ * see latency distributions behind F6's __schedule/futex cost.
+ *
+ * Run via bench/profile/bpftrace_driver.sh (it handles sudo + timing).
+ * Comm filter is "python3"; adjust if you launch a differently-named interp.
+ */
+tracepoint:syscalls:sys_enter_futex
+/comm == "python3"/
+{
+    @start[tid] = nsecs;
+}
+
+tracepoint:syscalls:sys_exit_futex
+/comm == "python3" && @start[tid]/
+{
+    @futex_wait_us = hist((nsecs - @start[tid]) / 1000);
+    @futex_calls = count();
+    delete(@start[tid]);
+}
+
+END
+{
+    clear(@start);
+    printf("\n(@futex_wait_us = futex wait latency in microseconds; ");
+    printf("@futex_calls = total futex syscalls during the run)\n");
+}

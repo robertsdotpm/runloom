@@ -57,7 +57,9 @@ static PyObject *PygoChan_recv(PygoChan *self, PyObject *unused)
         PyObject *tup = PyTuple_New(2);
         if (tup == NULL) { Py_DECREF(v); return NULL; }
         PyTuple_SET_ITEM(tup, 0, v);                     /* steals ref */
-        PyTuple_SET_ITEM(tup, 1, PyBool_FromLong(ok));
+        /* inline the bool instead of an out-of-line PyBool_FromLong call;
+         * Py_True/Py_False are immortal singletons (perf finding F6b). */
+        PyTuple_SET_ITEM(tup, 1, Py_NewRef(ok ? Py_True : Py_False));
         return tup;
     }
 }
@@ -76,7 +78,7 @@ static PyObject *PygoChan_try_recv(PygoChan *self, PyObject *unused)
         PyObject *tup = PyTuple_New(2);
         if (tup == NULL) { Py_DECREF(v); return NULL; }
         PyTuple_SET_ITEM(tup, 0, v);
-        PyTuple_SET_ITEM(tup, 1, PyBool_FromLong(ok));
+        PyTuple_SET_ITEM(tup, 1, Py_NewRef(ok ? Py_True : Py_False));
         return tup;
     }
 }
