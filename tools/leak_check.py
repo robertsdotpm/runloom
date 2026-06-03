@@ -1,7 +1,7 @@
 """Leak / resource-balance harness.
 
 Coverage and TSan find wrong behaviour; this finds LEAKED resources -- the bug
-class pygo has a documented history of (FD leak in load_interfaces, the
+class runloom has a documented history of (FD leak in load_interfaces, the
 completed-PygoTask task<->driver cycle, the exception refcycle, leaked parkers)
 and which the new monkey layer adds fresh surface for (the thread-pool offload
 backend, the 60 s DNS cache, subprocess pipes, the cooperative socket/selector
@@ -11,7 +11,7 @@ Method: run a workload as a goroutine `iters` times and assert the live-object
 population AND the open-fd count return to a post-warmup baseline.  Warmup
 absorbs one-time setup (lazy imports, the offload pool, cache priming) so only
 *per-iteration* growth -- a real leak -- trips it.  The fd check is the
-strongest signal for pygo's history: any descriptor opened per iteration and
+strongest signal for runloom's history: any descriptor opened per iteration and
 not closed shows up immediately.
 
 Usage:
@@ -24,7 +24,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-import pygo_core
+import runloom_c
 
 
 def fd_count():
@@ -36,8 +36,8 @@ def fd_count():
 
 def _drive(fn):
     box = []
-    pygo_core.go(lambda: box.append(fn()), stack_size=8 << 20)
-    pygo_core.run()
+    runloom_c.go(lambda: box.append(fn()), stack_size=8 << 20)
+    runloom_c.run()
     return box[0] if box else None
 
 
@@ -118,8 +118,8 @@ def _wl_subprocess():
 
 
 def main():
-    import pygo.monkey
-    pygo.monkey.patch()
+    import runloom.monkey
+    runloom.monkey.patch()
     rc = 0
     workloads = [
         ("socketpair", _wl_socketpair, 80),
