@@ -24,6 +24,23 @@ frame model (PyFrameObject linked list) and would need separate \
 snap/load paths; not built today."
 #endif
 
+/* PyDict_GetItemRef arrived in CPython 3.13.  On 3.11/3.12 provide the same
+ * contract (return 1 found / 0 missing / -1 error; *result = a new strong
+ * reference or NULL) on top of the borrowed-ref PyDict_GetItemWithError, so
+ * the goroutine-safe module __getattr__ lookup builds on every target. */
+#if PY_VERSION_HEX < 0x030D0000
+static inline int PyDict_GetItemRef(PyObject *d, PyObject *key, PyObject **result)
+{
+    PyObject *value = PyDict_GetItemWithError(d, key);   /* borrowed */
+    if (value != NULL) {
+        *result = Py_NewRef(value);
+        return 1;
+    }
+    *result = NULL;
+    return PyErr_Occurred() ? -1 : 0;
+}
+#endif
+
 #include "plat.h"
 #include "plat_compat.h"
 #include "coro.h"
