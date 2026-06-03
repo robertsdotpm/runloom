@@ -75,7 +75,10 @@ class _ProtocolServer(object):
                 conn, _addr = sock.accept()
             except (BlockingIOError, InterruptedError):
                 if self._closed: return
-                _wait_fd(sock.fileno(), 1)
+                try:
+                    _wait_fd(sock.fileno(), 1)
+                except asyncio.CancelledError:
+                    return          # close() woke us to exit (see close())
                 continue
             except OSError:
                 # One listener erroring stops accepting on it but must not
@@ -136,6 +139,15 @@ class _ProtocolServer(object):
         if self._closed: return
         self._closed = True
         self._serving = False
+        # Wake the accept-loop goroutines parked in _wait_fd so they observe
+        # _closed and EXIT.  Without this they stay parked forever on the
+        # listening fd we're about to close (no readability event ever comes) --
+        # a goroutine leak that accumulates one-per-server in a long-lived loop
+        # that opens many servers (a test suite's per-test loop reset hid it).
+        for g in self._accept_gs:
+            try: g.cancel_wait_fd()
+            except Exception: pass
+        self._accept_gs = []
         # asyncio.Server.close() ONLY stops the listeners; established
         # connections keep running until they finish (or are closed explicitly
         # via close_clients()/abort_clients(), or cancelled when the loop ends).

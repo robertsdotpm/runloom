@@ -51,6 +51,29 @@ class _LoopScheduleMixin(object):
     def create_future(self):
         return PygoFuture(loop=self)
 
+    def _pg_run_loop_cb(self, ctx, callback, args):
+        # Run a loop-level callback (call_soon / call_at / call_soon_threadsafe)
+        # with NO current task active, exactly like stock asyncio's _run_once:
+        # current_task() is None there, and a deferred Task.__step does its own
+        # enter_task/leave_task.  This matters because a PygoTask that parks
+        # MID-send (a raw pygo park inside coro.send -- a blocking offload, etc.,
+        # i.e. not the driver's clean future-park which restores the slot) leaves
+        # _CURRENT_TASKS[loop] pointing at itself.  If a deferred STOCK-asyncio
+        # Task wakeup then runs here, its enter_task sees that stale task and
+        # raises "Cannot enter into task X while another task Y is being executed"
+        # -- pygo swallows it as a callback error and the wakeup is DROPPED, so
+        # the woken task hangs forever (aiohttp's connector _wait_for_close: the
+        # ClientSession/AppRunner teardown deadlocks).  Clear the slot for the
+        # callback and restore it after (symmetry with the driver's finally).
+        prev = _CURRENT_TASKS.get(self)
+        if prev is not None:
+            _CURRENT_TASKS.pop(self, None)
+        try:
+            ctx.run(callback, *args)
+        finally:
+            if prev is not None:
+                _CURRENT_TASKS[self] = prev
+
     # ---- callback scheduling ----
     def call_soon(self, callback, *args, context=None):
         self._check_closed()
@@ -65,8 +88,9 @@ class _LoopScheduleMixin(object):
                     # Run in the Handle's contextvars Context (captured at
                     # construction, or the explicit context=), like stock asyncio
                     # -- so a callback that does create_task/contextvar reads sees
-                    # the context active when call_soon was invoked.
-                    handle._context.run(callback, *args)
+                    # the context active when call_soon was invoked.  At loop
+                    # level: no current task (see _pg_run_loop_cb).
+                    self._pg_run_loop_cb(handle._context, callback, args)
                 except (KeyboardInterrupt, SystemExit) as e:
                     # asyncio re-raises these out of the loop (Handle._run);
                     # signal the loop to break the drive and re-raise.
@@ -115,7 +139,8 @@ class _LoopScheduleMixin(object):
             if handle._cancelled:
                 continue
             try:
-                handle._context.run(handle._callback, *handle._args)
+                self._pg_run_loop_cb(handle._context, handle._callback,
+                                     handle._args)
             except (KeyboardInterrupt, SystemExit) as e:
                 # asyncio re-raises these out of the loop; break the drive.
                 self._pg_signal_fatal(e)
@@ -203,8 +228,10 @@ class _LoopScheduleMixin(object):
                     # over).  Capturing `callback`/`args` directly here kept them --
                     # and e.g. an aiocoap retransmit's whole message/transport --
                     # alive until the original deadline, leaking past cancel and
-                    # failing strict gc-leak teardown checks.
-                    handle._context.run(handle._callback, *handle._args)
+                    # failing strict gc-leak teardown checks.  At loop level: no
+                    # current task (see _pg_run_loop_cb).
+                    self._pg_run_loop_cb(handle._context, handle._callback,
+                                         handle._args)
                 except (KeyboardInterrupt, SystemExit) as e:
                     # asyncio re-raises these out of the loop; break the drive.
                     self._pg_signal_fatal(e)
