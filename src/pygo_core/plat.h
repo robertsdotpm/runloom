@@ -135,6 +135,18 @@
 #endif
 
 /* ---- Thread-local storage ---- */
+/* ASan/TSan ship their own initial-exec TLS and can exhaust the static-TLS
+ * surplus a dlopen'd extension needs -> "cannot allocate memory in static
+ * TLS block" at import. Sanitizer builds are never used for perf, so fall
+ * back to the default (global-dynamic) TLS model under any sanitizer. */
+#if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__)
+#  define PYGO_TLS_GLOBAL_DYNAMIC 1
+#elif defined(__has_feature)
+#  if __has_feature(address_sanitizer) || __has_feature(thread_sanitizer)
+#    define PYGO_TLS_GLOBAL_DYNAMIC 1
+#  endif
+#endif
+
 #if defined(PYGO_CC_MSVC)
 #  define PYGO_TLS __declspec(thread)
 #elif defined(PYGO_CC_GCC) || defined(PYGO_CC_CLANG) || defined(PYGO_CC_ICC)
