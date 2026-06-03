@@ -11,6 +11,28 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* Recycle-hygiene checker (security): pygo pools and reuses goroutine stacks
+ * in raw mmap'd memory that ASan treats as always-valid, so a use-after-
+ * recycle of a stack (the S1 leak class, generalized) is invisible to ASan.
+ * Manually poison a stack while it sits in a pool and unpoison it on reuse --
+ * then the existing ASan suite flags any access to a recycled-but-not-yet-
+ * reacquired stack. No-op unless built with -fsanitize=address. */
+#if defined(__SANITIZE_ADDRESS__)
+#  define PYGO_ASAN 1
+#elif defined(__has_feature)
+#  if __has_feature(address_sanitizer)
+#    define PYGO_ASAN 1
+#  endif
+#endif
+#if defined(PYGO_ASAN)
+#  include <sanitizer/asan_interface.h>
+#  define PYGO_POISON(p, n)   ASAN_POISON_MEMORY_REGION((p), (n))
+#  define PYGO_UNPOISON(p, n) ASAN_UNPOISON_MEMORY_REGION((p), (n))
+#else
+#  define PYGO_POISON(p, n)   ((void)0)
+#  define PYGO_UNPOISON(p, n) ((void)0)
+#endif
+
 #if defined(PYGO_HAVE_FCONTEXT)
 #  include "fcontext.h"
 #  include <sys/mman.h>
@@ -178,6 +200,7 @@ static void *pygo_stack_acquire(size_t size)
             pygo_tls_stack_pool = (void **)head[PYGO_STACK_HDR_NEXT];
             /* Caller will overwrite the header bytes as the stack
              * grows; the new coroutine doesn't observe them. */
+            PYGO_UNPOISON((void *)head, size);
             return (void *)head;
         }
         /* Size mismatch (different stack_size requested than what the
@@ -193,6 +216,7 @@ static void *pygo_stack_acquire(size_t size)
         pygo_tls_stack_pool = head;
         if (head != NULL) {
             pygo_tls_stack_pool = (void **)head[PYGO_STACK_HDR_NEXT];
+            PYGO_UNPOISON((void *)head, size);
             return (void *)head;
         }
     }
@@ -225,6 +249,12 @@ static void pygo_stack_release(void *stack, size_t size)
     hdr[PYGO_STACK_HDR_NEXT] = (void *)pygo_tls_stack_pool;
     hdr[PYGO_STACK_HDR_SIZE] = (void *)size;
     pygo_tls_stack_pool = hdr;
+    /* Poison the body (skip the 16-byte pool header read by the next
+     * pygo_stack_acquire) so ASan flags any access to this stack while it
+     * sits free in the pool. Unpoisoned again on acquire. */
+    if (size > 16) {
+        PYGO_POISON((char *)stack + 16, size - 16);
+    }
 }
 
 /* Pre-warm n stacks of the given size into the per-thread pool.
@@ -429,6 +459,9 @@ pygo_coro_t *pygo_coro_new(size_t stack_size,
         pygo_coro_pool = c->pool_next;
         pygo_coro_pool_size--;
         c->pool_next = NULL;
+        /* Stack was poisoned when this coro was recycled (see destroy);
+         * unpoison before the goroutine runs on it again. */
+        PYGO_UNPOISON(c->stack, rounded);
         c->entry = entry;
         c->user = user;
         c->done = 0;
@@ -479,6 +512,9 @@ void pygo_coro_destroy(pygo_coro_t *c)
         c->pool_next = pygo_coro_pool;
         pygo_coro_pool = c;
         pygo_coro_pool_size++;
+        /* Poison the attached stack while the coro sits in the pool so ASan
+         * flags any use-after-recycle of it; unpoisoned on reuse. */
+        PYGO_POISON(c->stack, c->stack_size);
         return;
     }
     if (c->stack != NULL) {
