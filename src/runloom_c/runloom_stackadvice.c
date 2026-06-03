@@ -33,7 +33,12 @@ typedef struct {
 static runloom_advice_entry_t runloom_advice_tbl[RUNLOOM_ADVICE_CAP];
 static runloom_mutex_t        runloom_advice_lock;
 static int                    runloom_advice_lock_inited = 0;
-static int                    runloom_advice_on = 0;   /* atomic */
+static int                    runloom_advice_on = 0;        /* measurement (atomic) */
+static int                    runloom_autosize_on = 0;      /* apply learned sizes (atomic) */
+static size_t                 runloom_autosize_start = (size_t)256 * 1024;  /* unseen-kind start */
+
+/* Forward decls (find/insert are defined lower, after the lock helpers). */
+static runloom_advice_entry_t *runloom_advice_find(size_t key);
 
 static size_t runloom_advice_pow2(size_t v)
 {
@@ -71,6 +76,53 @@ void runloom_advice_set_enabled(int on)
 int runloom_advice_enabled(void)
 {
     return __atomic_load_n(&runloom_advice_on, __ATOMIC_ACQUIRE);
+}
+
+void runloom_advice_set_autosize(int on)
+{
+    runloom_advice_ensure_lock();
+    {
+        const char *e = getenv("RUNLOOM_STACK_AUTOSIZE_START");
+        if (e != NULL && e[0]) {
+            long v = atol(e);
+            if (v > 0) runloom_autosize_start = (size_t)v;
+        }
+    }
+    if (on) {
+        /* Autosize implies measurement (to learn sizes), painting (for the HWM
+         * scan), and park-time reclaim (so the large starts stay RSS-free). */
+        __atomic_store_n(&runloom_advice_on, 1, __ATOMIC_RELEASE);
+        runloom_coro_paint_set(1);
+        runloom_coro_park_reclaim_set(1);
+    }
+    __atomic_store_n(&runloom_autosize_on, on ? 1 : 0, __ATOMIC_RELEASE);
+}
+
+int runloom_advice_autosize_enabled(void)
+{
+    return __atomic_load_n(&runloom_autosize_on, __ATOMIC_ACQUIRE);
+}
+
+size_t runloom_advice_size_for(size_t key, size_t fallback)
+{
+    runloom_advice_entry_t *e;
+    size_t sz;
+    if (!__atomic_load_n(&runloom_autosize_on, __ATOMIC_RELAXED)) return fallback;
+    if (key == 0) return fallback;    /* untracked / table-full: normal default */
+    runloom_advice_ensure_lock();
+    runloom_mutex_lock(&runloom_advice_lock);
+    e = runloom_advice_find(key);
+    if (e != NULL && e->samples > 0) {
+        /* Learned: size to the observed peak with margin (== suggested). */
+        sz = runloom_advice_pow2(e->max_hwm * RUNLOOM_ADVICE_SAFETY);
+        if (sz < RUNLOOM_ADVICE_MIN) sz = RUNLOOM_ADVICE_MIN;
+        if (sz > RUNLOOM_ADVICE_MAX) sz = RUNLOOM_ADVICE_MAX;
+    } else {
+        /* Unseen kind: start large, then learn down on the next spawn. */
+        sz = runloom_autosize_start;
+    }
+    runloom_mutex_unlock(&runloom_advice_lock);
+    return sz;
 }
 
 static size_t runloom_advice_hash(const char *s)

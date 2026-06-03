@@ -327,8 +327,12 @@ static int runloom_mn_go_core(PyObject *callable, runloom_c_entry_fn c_fn,
     g->owner = &h->sched;   /* owning hub's sched -- groups goroutines in the dump */
     __atomic_store_n(&g->id, runloom_next_goid(), __ATOMIC_RELAXED);
     g->park_fd = -1;
-    g->coro = runloom_coro_new((size_t)h->sched.stack_size,
-                            runloom_g_entry, g);
+    /* Autosize: start this kind's goroutine at its learned size (or the
+     * start-large default for an unseen kind); falls back to the hub default
+     * when autosize is off. */
+    g->coro = runloom_coro_new(
+                runloom_advice_size_for(g->advice_key, (size_t)h->sched.stack_size),
+                runloom_g_entry, g);
     if (g->coro == NULL) {
         if (callable != NULL) {
             Py_DECREF(callable);

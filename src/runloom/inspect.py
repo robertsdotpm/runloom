@@ -267,6 +267,35 @@ def stack_advice_enabled():
     return _core.stack_advice_enabled()
 
 
+def enable_stack_autosize(on=True):
+    """Turn on the adaptive per-goroutine-kind stack auto-sizer.
+
+    Each goroutine kind (its entry callable) starts *large* the first time it is
+    seen; once runloom has measured how much C stack it actually uses, later
+    goroutines of that kind start at the learned size -- "start large, learn
+    down". This right-sizes stacks per kind without you setting `stack_size=` by
+    hand, while keeping the high-concurrency memory profile (the large first
+    starts are returned to the OS on park, so they cost address space, not RSS).
+
+    In-memory only: the learned sizes are **never written to disk** -- a
+    remembered-small size is only a lower bound on what a future input needs, so
+    persisting it would be a foot-gun. The guard page, on-demand stack growth,
+    and the crash reporter remain the safety net for any underestimate.
+
+    Enabling autosize implies `enable_stack_advice()` (so `stack_advice()` keeps
+    reporting) and turns on park-time idle-page reclaim. An explicit
+    `runloom.go(fn, stack_size=...)` always overrides the auto-sizer. Off by
+    default; also enable via `RUNLOOM_STACK_AUTOSIZE=1` (start size via
+    `RUNLOOM_STACK_AUTOSIZE_START`, default 256 KiB). Best enabled before the
+    runtime starts so kinds are sized from their first spawn."""
+    _core.enable_stack_autosize(bool(on))
+
+
+def stack_autosize_enabled():
+    """True if enable_stack_autosize() is currently active."""
+    return _core.stack_autosize_enabled()
+
+
 def reset_stack_advice():
     """Clear the accumulated per-kind stack samples."""
     _core.reset_stack_advice()

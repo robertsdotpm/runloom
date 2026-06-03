@@ -121,6 +121,16 @@ if _os.environ.get("RUNLOOM_CRASH", "").strip().lower() not in ("", "0", "off"):
     except Exception:   # never let crash-reporter setup break import
         pass
 
+# Opt-in adaptive stack auto-sizer: RUNLOOM_STACK_AUTOSIZE=1 starts each
+# goroutine kind large and learns its real size down over its first runs (in
+# memory only, never persisted).  Off by default -- it changes per-kind stack
+# sizes.  See runloom.inspect.enable_stack_autosize().
+if _os.environ.get("RUNLOOM_STACK_AUTOSIZE", "").strip().lower() in ("1", "on", "true"):
+    try:
+        _core.enable_stack_autosize(True)
+    except Exception:
+        pass
+
 # Runtime introspection -- `runloom.inspect.dump()`, goroutines(), stack(), etc.
 # See runloom/inspect.py.  Exposed as a submodule plus a couple of top-level
 # conveniences (the common "what are all my goroutines doing" calls).

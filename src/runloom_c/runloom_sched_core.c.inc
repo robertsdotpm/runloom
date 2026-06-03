@@ -406,7 +406,7 @@ void runloom_g_decref(runloom_g_t *g)
 
 /* ---- Spawn ---- */
 static PyObject *spawn_common(runloom_sched_t *s, PyObject *callable,
-                              int noyield, size_t stack_size)
+                              int noyield, size_t stack_size, size_t advice_key)
 {
     runloom_g_t *g;
     if (__builtin_expect(!runloom_pct.inited, 0))
@@ -431,8 +431,7 @@ static PyObject *spawn_common(runloom_sched_t *s, PyObject *callable,
     }
     Py_INCREF(callable);
     g->callable = callable;
-    /* Stack-advice: note the kind at spawn (no-op / 0 unless profiling on). */
-    g->advice_key = runloom_advice_note_spawn(callable);
+    g->advice_key = advice_key;   /* kind key (0 unless profiling on); resolved by caller */
     g->refcount = 1;   /* one ref for the scheduler queue */
     g->owner = s;      /* per-thread sched that owns this g (Phase C) */
     g->noyield = noyield;
@@ -458,10 +457,16 @@ static PyObject *spawn_common(runloom_sched_t *s, PyObject *callable,
 
 PyObject *runloom_sched_spawn(runloom_sched_t *s, PyObject *callable)
 {
-    return spawn_common(s, callable, /*noyield*/0, (size_t)s->stack_size);
+    /* Default-size path: profile the kind, and (autosize) start it at the
+     * kind's learned size instead of the global default. */
+    size_t key = runloom_advice_note_spawn(callable);
+    size_t sz  = runloom_advice_size_for(key, (size_t)s->stack_size);
+    return spawn_common(s, callable, /*noyield*/0, sz, key);
 }
 
 PyObject *runloom_sched_spawn_noyield(runloom_sched_t *s, PyObject *callable)
 {
-    return spawn_common(s, callable, /*noyield*/1, (size_t)s->stack_size);
+    size_t key = runloom_advice_note_spawn(callable);
+    size_t sz  = runloom_advice_size_for(key, (size_t)s->stack_size);
+    return spawn_common(s, callable, /*noyield*/1, sz, key);
 }

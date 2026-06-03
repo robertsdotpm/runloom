@@ -284,6 +284,15 @@ static PyMethodDef module_methods[] = {
      "a suggested stack_size (next_pow2(max_hwm*4))."},
     {"reset_stack_advice", m_reset_stack_advice, METH_NOARGS,
      "reset_stack_advice() -> None.  Clear accumulated samples."},
+    {"enable_stack_autosize", m_enable_stack_autosize, METH_VARARGS,
+     "enable_stack_autosize(on=True) -> None.  Turn the adaptive stack auto-"
+     "sizer on/off.  Each goroutine kind starts large when first seen and, once "
+     "its real stack use is measured, later goroutines of that kind start at the "
+     "learned size (start large, learn down).  In-memory only -- never persisted. "
+     "Implies measurement + park-time reclaim.  An explicit stack_size= always "
+     "wins.  Off by default."},
+    {"stack_autosize_enabled", m_stack_autosize_enabled, METH_NOARGS,
+     "stack_autosize_enabled() -> bool."},
     {NULL, NULL, 0, NULL}
 };
 

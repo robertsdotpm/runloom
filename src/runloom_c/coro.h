@@ -59,6 +59,11 @@ void *runloom_coro_stack_base(const runloom_coro_t *c);
  * installs no guard, e.g. Windows Fibers). */
 size_t runloom_coro_guard_size(void);
 
+/* Force park-time idle-page reclaim on/off programmatically (in addition to the
+ * RUNLOOM_STACK_PARK_DONTNEED env).  The stack auto-sizer enables it so that
+ * starting goroutines large stays RSS-free. */
+void runloom_coro_park_reclaim_set(int on);
+
 /* Backend identifier ("fibers", "ucontext"); useful for tests. */
 const char *runloom_coro_backend(void);
 

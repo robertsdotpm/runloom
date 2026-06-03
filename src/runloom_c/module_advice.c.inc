@@ -17,6 +17,21 @@ static PyObject *m_stack_advice_enabled(PyObject *self, PyObject *unused)
     return PyBool_FromLong(runloom_advice_enabled());
 }
 
+static PyObject *m_enable_stack_autosize(PyObject *self, PyObject *args)
+{
+    int on = 1;
+    (void)self;
+    if (!PyArg_ParseTuple(args, "|p", &on)) return NULL;
+    runloom_advice_set_autosize(on);
+    Py_RETURN_NONE;
+}
+
+static PyObject *m_stack_autosize_enabled(PyObject *self, PyObject *unused)
+{
+    (void)self; (void)unused;
+    return PyBool_FromLong(runloom_advice_autosize_enabled());
+}
+
 static PyObject *m_stack_advice(PyObject *self, PyObject *unused)
 {
     (void)self; (void)unused;

@@ -884,6 +884,16 @@ void runloom_coro_madvise_idle(runloom_coro_t *c)
 #endif
 }
 
+/* Programmatic override for park-time idle-page reclaim, in addition to the
+ * RUNLOOM_STACK_PARK_DONTNEED env.  The stack auto-sizer turns this on when it
+ * starts goroutines large (so the large idle pages are returned on park),
+ * making "start large, learn down" RSS-free without a global env flip. */
+static int runloom_park_reclaim_forced = 0;
+void runloom_coro_park_reclaim_set(int on)
+{
+    __atomic_store_n(&runloom_park_reclaim_forced, on ? 1 : 0, __ATOMIC_RELAXED);
+}
+
 void runloom_coro_park(runloom_coro_t *c)
 {
 #if defined(RUNLOOM_HAVE_FCONTEXT) && defined(MADV_DONTNEED)
@@ -896,7 +906,7 @@ void runloom_coro_park(runloom_coro_t *c)
         on = (e != NULL && *e == '1') ? 1 : 0;
         __atomic_store_n(&park_dontneed, on, __ATOMIC_RELAXED);
     }
-    if (!on) return;
+    if (!on && !__atomic_load_n(&runloom_park_reclaim_forced, __ATOMIC_RELAXED)) return;
     runloom_coro_madvise_idle(c);
 #else
     (void)c;

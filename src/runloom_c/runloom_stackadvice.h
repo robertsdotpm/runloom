@@ -27,6 +27,24 @@ extern "C" {
 void   runloom_advice_set_enabled(int on);
 int    runloom_advice_enabled(void);
 
+/* Auto-sizer: in addition to measuring, actually APPLY the learned per-kind
+ * size to the next goroutine of that kind.  "Start large, learn down": an
+ * unseen kind's first goroutines start at a generous size, and once measured
+ * the kind's later goroutines start at next_pow2(observed_max * 4) (clamped).
+ * In-memory only -- never persisted (a remembered-small size is only a lower
+ * bound on what a future input needs; the guard page + grow + crash reporter
+ * stay the safety net).  Enabling autosize implies measurement, forces painting
+ * on, and turns on park-time idle-page reclaim (so the large starts are
+ * RSS-free).  Off by default. */
+void   runloom_advice_set_autosize(int on);
+int    runloom_advice_autosize_enabled(void);
+
+/* At spawn (default-size path only; an explicit stack_size= bypasses this):
+ * given the kind key from runloom_advice_note_spawn, return the stack size to
+ * use -- the learned size if the kind has samples, the start-large default if
+ * not, or `fallback` unchanged if autosize is off.  No Python objects touched. */
+size_t runloom_advice_size_for(size_t key, size_t fallback);
+
 /* At spawn (GIL held): return a non-zero key identifying this callable's kind,
  * recording the kind's display name if first-seen.  Returns 0 if advice is off,
  * the callable is NULL, or the table is full. */

@@ -284,6 +284,34 @@ runloom.go(handle_request, stack_size=128 * 1024)
 Enabling the profiler keeps stack painting on (a small per-spawn cost) for the
 session; it is off by default and costs nothing until you turn it on.
 
+### Letting runloom size them for you
+
+If you'd rather not read the table and apply sizes by hand, turn on the
+**adaptive auto-sizer**, which does it automatically:
+
+```python
+runloom.inspect.enable_stack_autosize()    # or RUNLOOM_STACK_AUTOSIZE=1
+```
+
+It works by **starting large and learning down**: the first time a goroutine
+kind is seen its goroutines start at a generous size (256 KiB by default,
+`RUNLOOM_STACK_AUTOSIZE_START`); once runloom has measured how much C stack that
+kind really uses, its later goroutines start at the learned size
+(`next_pow2(peak * 4)`). A kind that turns out shallow shrinks toward the floor;
+a deep one settles at a roomy size. Because over-sizing the first few is cheap
+(the idle pages are returned to the OS on park -- the auto-sizer turns park-time
+reclaim on -- so they cost address space, not RSS) and under-sizing is the only
+dangerous direction, "start large, learn down" is the safe polarity.
+
+It is **in-memory only and never persisted to disk.** A remembered-small size
+is only a lower bound on what a *future* input might need (recursion depth is
+data-dependent), so writing it out would be a foot-gun across restarts and
+deploys -- the run that finally gets the deep input would load a too-small size.
+The guard page, on-demand growth, and the crash reporter remain the safety net
+for any underestimate. An explicit `runloom.go(fn, stack_size=...)` always wins
+over the auto-sizer. Off by default (it changes per-kind stack sizes); enable it
+before the runtime starts so kinds are sized from their first spawn.
+
 ## Putting it all together
 
 For a production service:
