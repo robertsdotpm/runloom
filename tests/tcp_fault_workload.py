@@ -75,7 +75,9 @@ def mode_echo():
 
 
 def _port(listener):
-    s = socket.socket(fileno=os.dup(listener.fileno()))
+    # socket.dup (WSADuplicateSocket on Windows), NOT os.dup: os.dup is a CRT
+    # fd op and corrupts a raw WinSock socket handle on Windows.
+    s = socket.socket(fileno=socket.dup(listener.fileno()))
     try:
         return s.getsockname()[1]
     finally:
