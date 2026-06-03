@@ -8,24 +8,22 @@ every core in one process. Hand-rolled asm context switch + C work-stealing
 scheduler + netpoll, built for **free-threaded Python 3.13t** (GIL off).
 
 ```python
-import socket
-import runloom
+import runloom, threading, hashlib, urllib.request
 runloom.monkey.patch()
 
-def handle(conn, addr):
-    while True:
-        data = conn.recv(4096)
-        if not data: break
-        conn.sendall(data)          # looks blocking; parks the goroutine
-    conn.close()
+URLS = ["https://example.com/"] * 64
 
-def accept_loop():
-    s = socket.socket(); s.bind(("127.0.0.1", 9000)); s.listen(128)
-    while True:
-        conn, addr = s.accept()
-        runloom.go(lambda c=conn, a=addr: handle(c, a))
+def crawl(url):
+    # blocking I/O parks the goroutine; the sha256 keeps a hub busy
+    body = urllib.request.urlopen(url, timeout=10).read()
+    digest = hashlib.sha256(body).hexdigest()[:8]
+    print(threading.get_native_id(), len(body), digest)
 
-runloom.run(1, accept_loop)
+def main():
+    for u in URLS:
+        runloom.go(crawl, u)
+
+runloom.run(8, main) # 8 hub threads -> real cores on 3.13t (GIL off)
 ```
 
 Already have `async def` code? Run it unchanged on runloom's scheduler with the
