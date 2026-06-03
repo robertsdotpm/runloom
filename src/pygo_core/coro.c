@@ -90,6 +90,18 @@ struct pygo_coro {
 #endif
 };
 
+/* Stack size in bytes for this coro, or 0 on backends without an
+ * introspectable stack (Fibers).  Used by the goroutine dump. */
+size_t pygo_coro_stack_size(const pygo_coro_t *c)
+{
+    if (c == NULL) return 0;
+#if defined(PYGO_HAVE_FCONTEXT) || defined(PYGO_HAVE_UCONTEXT)
+    return c->stack_size;
+#else
+    return 0;
+#endif
+}
+
 /* Per-thread "currently executing" pointer.  Used by pygo_coro_yield
  * to find the caller context.  Thread-local. */
 static PYGO_TLS pygo_coro_t *pygo_tls_current = NULL;

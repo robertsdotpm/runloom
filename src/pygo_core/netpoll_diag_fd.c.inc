@@ -121,6 +121,18 @@ void pygo_netpoll_dump_parkers(void)
     pygo_mutex_unlock(&pool->lock);
 }
 
+/* Introspection accessor: read a parker's plain fields.  See netpoll.h. */
+int pygo_netpoll_parker_info(void *parker, int *fd_out, int *events_out,
+                             long long *deadline_ns_out)
+{
+    pygo_parked_t *p = (pygo_parked_t *)parker;
+    if (p == NULL) return 0;
+    if (fd_out != NULL)          *fd_out = p->fd;
+    if (events_out != NULL)      *events_out = p->events;
+    if (deadline_ns_out != NULL) *deadline_ns_out = p->deadline_ns;
+    return 1;
+}
+
 /* ---- per-fd registration cache ----
  * One bit per fd; set when we've already issued EPOLL_CTL_ADD (or
  * the kqueue equivalent) for this fd as edge-triggered for both

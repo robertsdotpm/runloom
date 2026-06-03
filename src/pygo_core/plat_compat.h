@@ -63,6 +63,12 @@ PYGO_INLINE void pygo_mutex_destroy(pygo_mutex_t *m) {
 PYGO_INLINE void pygo_mutex_lock(pygo_mutex_t *m) {
     EnterCriticalSection(m);
 }
+/* 0 = acquired, nonzero = contended (would block).  Used by the
+ * signal-safe goroutine dump so a contended lock degrades to a partial
+ * dump instead of deadlocking a SIGQUIT handler. */
+PYGO_INLINE int pygo_mutex_trylock(pygo_mutex_t *m) {
+    return TryEnterCriticalSection(m) ? 0 : -1;
+}
 PYGO_INLINE void pygo_mutex_unlock(pygo_mutex_t *m) {
     LeaveCriticalSection(m);
 }
@@ -81,6 +87,12 @@ PYGO_INLINE void pygo_mutex_destroy(pygo_mutex_t *m) {
 }
 PYGO_INLINE void pygo_mutex_lock(pygo_mutex_t *m) {
     pthread_mutex_lock(m);
+}
+/* 0 = acquired, nonzero = contended (would block).  Used by the
+ * signal-safe goroutine dump so a contended lock degrades to a partial
+ * dump instead of deadlocking a SIGQUIT handler. */
+PYGO_INLINE int pygo_mutex_trylock(pygo_mutex_t *m) {
+    return pthread_mutex_trylock(m);
 }
 PYGO_INLINE void pygo_mutex_unlock(pygo_mutex_t *m) {
     pthread_mutex_unlock(m);

@@ -324,9 +324,11 @@ static void pygo_sched_sleep_until_ex(pygo_sched_t *s, double wake_at, int real)
         g->wake_at = wake_at;
         g->sleep_real = real;
         if (pygo_sleep_push(target, g) < 0) return;
+        pygo_g_state_set(g, PYGO_GST_PARKED_SLEEP);
         pygo_pystate_snap(&g->snap);
         pygo_mn_tls_mark_parked();
         pygo_coro_yield();
+        pygo_g_state_set(g, PYGO_GST_RUNNING);
         return;
     }
     /* Single-thread path */
@@ -337,8 +339,10 @@ static void pygo_sched_sleep_until_ex(pygo_sched_t *s, double wake_at, int real)
     if (pygo_sleep_push(s, g) < 0) {
         return; /* leave g in current; caller will see exception */
     }
+    pygo_g_state_set(g, PYGO_GST_PARKED_SLEEP);
     pygo_pystate_snap(&g->snap);
     pygo_coro_yield();
+    pygo_g_state_set(g, PYGO_GST_RUNNING);
 }
 
 void pygo_sched_sleep_until(pygo_sched_t *s, double wake_at)

@@ -175,6 +175,38 @@ static PyMethodDef module_methods[] = {
     {"_dump_parkers", m_dump_parkers, METH_NOARGS,
      "_dump_parkers() -> None.  Dump every parked netpoll parker "
      "(fd/g/hub/commit) to stderr.  Diagnostic."},
+    {"goroutines",  m_goroutines,  METH_NOARGS,
+     "goroutines() -> list[dict].  A snapshot of every live goroutine: "
+     "id, state ('io-wait'/'sleep'/'chan-wait'/'running'/...), blocked_on "
+     "class, fd + events (when io-wait), wake_in (when sleeping), age (when "
+     "PYGO_INTROSPECT_TIME tracking is on), refcount, noyield, owner.  "
+     "Cheap; safe to poll from a watchdog goroutine."},
+    {"goroutine_count", m_goroutine_count, METH_NOARGS,
+     "goroutine_count() -> int.  Number of live goroutines."},
+    {"dump_goroutines", m_dump_goroutines, METH_VARARGS,
+     "dump_goroutines(fd=2) -> None.  Write a Go-style structural dump of "
+     "every live goroutine (state histogram + per-goroutine line) to fd "
+     "using only write(2).  Async-signal-safe-ish: try-locks the registry, "
+     "touches no Python objects, so it is usable from a SIGQUIT handler and "
+     "when the interpreter is wedged."},
+    {"goroutine_stack", m_goroutine_stack, METH_O,
+     "goroutine_stack(id) -> (callable_repr, [(file, line, func), ...]).  "
+     "Best-effort reconstructed Python stack of one goroutine (deepest "
+     "first).  Full stack under per-g-tstate; top frame under the single-"
+     "thread (pygo.aio) loop; empty under default M:N (no safe claim).  "
+     "Safe: the goroutine is pinned + claimed so it can't resume/free "
+     "mid-walk."},
+    {"set_introspect_timestamps", m_introspect_timestamps, METH_O,
+     "set_introspect_timestamps(bool): when True, stamp each goroutine's "
+     "park time so goroutines()/dump report 'age' (how long it has been "
+     "wedged).  Off by default (one vDSO clock read per park); also via "
+     "PYGO_INTROSPECT_TIME=1."},
+    {"install_traceback_signal", m_install_traceback_signal, METH_VARARGS,
+     "install_traceback_signal(signum=SIGQUIT) -> int.  Install a RAW C "
+     "signal handler that writes the goroutine dump to stderr -- Go's "
+     "GOTRACEBACK / `kill -QUIT`.  Works even when the interpreter is "
+     "wedged (unlike a Python signal handler, which needs a bytecode "
+     "boundary).  Also via PYGO_TRACEBACK=1.  POSIX only."},
     {"_diag_flags", m_diag_flags, METH_NOARGS,
      "_diag_flags() -> int.  Current PYGO_DEBUG flag mask."},
     {"_datastack_sweep_stats", m_datastack_sweep_stats, METH_NOARGS,
@@ -293,11 +325,25 @@ PyMODINIT_FUNC PyInit_pygo_core(void)
     PyObject *m;
     const char *scrub_env;
     pygo_diag_init();          /* parses PYGO_DEBUG once; cheap; idempotent */
+    pygo_introspect_init();    /* goroutine registry lock; reads PYGO_INTROSPECT_TIME */
     pygo_timer_res_init();     /* Windows: 1ms timer resolution (no-op POSIX) */
     scrub_env = getenv("PYGO_STACK_SCRUB");   /* opt-in recycled-stack wipe */
     if (scrub_env && scrub_env[0] && scrub_env[0] != '0') {
         pygo_coro_scrub_set(1);
     }
+#if !defined(_WIN32)
+    {
+        const char *tb_env = getenv("PYGO_TRACEBACK");  /* GOTRACEBACK-style SIGQUIT dump */
+        if (tb_env && tb_env[0] && tb_env[0] != '0') {
+            struct sigaction sa;
+            memset(&sa, 0, sizeof sa);
+            sa.sa_handler = pygo_traceback_signal_handler;
+            sigemptyset(&sa.sa_mask);
+            sa.sa_flags = SA_RESTART;
+            (void)sigaction(SIGQUIT, &sa, NULL);
+        }
+    }
+#endif
     pygo_install_module_getattro();   /* goroutine-safe module attr lookup */
     if (PyType_Ready(&PygoCoroType) < 0) return NULL;
     /* Set by hand rather than in the positional initializer, whose long run

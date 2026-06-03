@@ -301,20 +301,37 @@ pygo_g_t *pygo_g_slab_alloc(void)
     if (g != NULL) {
         pygo_g_slab = g->next;
         pygo_g_slab_size--;
-        /* memset the fields that callers expect zeroed.  Slightly
-         * smaller than the original PyMem_Calloc which zeroes the
-         * whole struct -- but spawn always overwrites callable,
-         * coro, refcount; we only need to clear the rest. */
-        memset(g, 0, sizeof(*g));
+        /* Reuse path (HOT).  Clear only the fields up to the
+         * introspection block -- everything from `state` onward (the
+         * state byte, id, state_since_ns, park_fd/events, reg_prev/next)
+         * is left untouched: reg_prev/reg_next MUST survive recycling
+         * (the g stays linked in the global registry, see
+         * pygo_introspect.c) and they are only ever written under the
+         * registry lock, never here.  `state` is re-initialised
+         * atomically below so a concurrent dump's atomic load never
+         * races a non-atomic memset.  id / park_fd are reset at spawn.
+         * spawn always overwrites callable, coro, refcount; we only
+         * need to clear the rest. */
+        memset(g, 0, offsetof(pygo_g_t, state));
+        __atomic_store_n(&g->state, (unsigned char)PYGO_GST_INIT,
+                         __ATOMIC_RELEASE);
         return g;
     }
-    return (pygo_g_t *)PyMem_Calloc(1, sizeof(*g));
+    /* Cold path: a brand-new struct from the OS.  PyMem_Calloc zeroes
+     * everything (incl. the registry links + id); link it into the
+     * global registry exactly once for the struct's whole lifetime. */
+    g = (pygo_g_t *)PyMem_Calloc(1, sizeof(*g));
+    if (g != NULL) pygo_greg_link(g);
+    return g;
 }
 
 void pygo_g_slab_free(pygo_g_t *g)
 {
     pygo_g_state_set(g, PYGO_GST_FREED);
     if (pygo_g_slab_size >= PYGO_G_SLAB_CAP) {
+        /* Struct is leaving for the OS -- drop it from the registry
+         * first so the dump never walks freed memory. */
+        pygo_greg_unlink(g);
         PyMem_Free(g);
         return;
     }
@@ -327,6 +344,20 @@ void pygo_g_slab_free(pygo_g_t *g)
 void pygo_g_incref(pygo_g_t *g)
 {
     if (g) __atomic_add_fetch(&g->refcount, 1, __ATOMIC_RELAXED);
+}
+
+int pygo_g_try_incref(pygo_g_t *g)
+{
+    int old;
+    if (g == NULL) return 0;
+    old = __atomic_load_n(&g->refcount, __ATOMIC_RELAXED);
+    while (old > 0) {
+        if (__atomic_compare_exchange_n(&g->refcount, &old, old + 1, 0,
+                                        __ATOMIC_ACQ_REL, __ATOMIC_RELAXED))
+            return 1;
+        /* old reloaded with the current value; loop while still live. */
+    }
+    return 0;
 }
 
 void pygo_g_decref(pygo_g_t *g)
@@ -379,6 +410,8 @@ static PyObject *spawn_common(pygo_sched_t *s, PyObject *callable,
     g->refcount = 1;   /* one ref for the scheduler queue */
     g->owner = s;      /* per-thread sched that owns this g (Phase C) */
     g->noyield = noyield;
+    __atomic_store_n(&g->id, pygo_next_goid(), __ATOMIC_RELAXED);
+    g->park_fd = -1;   /* not parked on any fd yet (reset after slab reuse) */
     g->pct_prio = 0;   /* fresh goroutine: unassigned PCT priority (slab reuse) */
     g->pct_fifo = 0;   /* default reorderable; m_go(fifo=True) sets it after spawn */
     g->coro = pygo_coro_new(stack_size, pygo_g_entry, g);

@@ -32,3 +32,10 @@ from .runtime import (
 import pygo_core as _core  # noqa: F401  – C extension lives at top level
 
 backend = _core.backend
+
+# Runtime introspection -- `pygo.inspect.dump()`, goroutines(), stack(), etc.
+# See pygo/inspect.py.  Exposed as a submodule plus a couple of top-level
+# conveniences (the common "what are all my goroutines doing" calls).
+from . import inspect  # noqa: E402,F401
+goroutines = inspect.goroutines
+dump = inspect.dump

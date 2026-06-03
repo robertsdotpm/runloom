@@ -196,7 +196,15 @@ int pygo_netpoll_wait_fd(int fd, int events, long long timeout_ns)
     pygo_mutex_lock(&pool->lock);
     pygo_parker_link(pool, park);
     pygo_mutex_unlock(&pool->lock);
-    if (current_g != NULL) pygo_g_state_set(current_g, PYGO_GST_PARKED_NETPOLL);
+    if (current_g != NULL) {
+        /* Record what we're blocked on as plain data ON the g, so the
+         * goroutine dump can report "fd=N R/W" without ever dereferencing
+         * the (pool-recycled) parker.  Set before the state flip so a dump
+         * that sees PARKED_NETPOLL also sees a matching fd. */
+        __atomic_store_n(&current_g->park_fd, fd, __ATOMIC_RELAXED);
+        __atomic_store_n(&current_g->park_events, events, __ATOMIC_RELAXED);
+        pygo_g_state_set(current_g, PYGO_GST_PARKED_NETPOLL);
+    }
 
     /* Drain any pre-existing pending-wake bits.  If something is
      * already there (from a pump that saw an event between our last

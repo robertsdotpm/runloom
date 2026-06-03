@@ -34,6 +34,7 @@
 #include "pygo_blockpool.h"
 #include "pygo_diag.h"
 #include "pygo_gstate.h"
+#include "pygo_introspect.h"
 
 #include <math.h>
 #include <stdio.h>

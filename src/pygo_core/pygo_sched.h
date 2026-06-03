@@ -278,6 +278,44 @@ struct pygo_g {
      * g already in DONE).  Single atomic byte; cost is one store
      * per transition. */
     unsigned char state;
+
+    /* ---- introspection block (pygo_introspect.c) ----
+     * These fields are deliberately the LAST members of pygo_g_t.  The
+     * per-thread slab reuse path (pygo_g_slab_alloc) bulk-clears a g only
+     * up to offsetof(pygo_g_t, id) -- i.e. everything BEFORE this block --
+     * so reg_prev/reg_next survive recycling untouched.  That is what
+     * keeps the global goroutine registry walkable without taking the
+     * registry lock on the (hot) spawn path: the only writers of reg_prev/
+     * reg_next are pygo_greg_link/unlink, both under pygo_greg_lock, on the
+     * cold OS-alloc / slab-overflow-free paths.  See the reuse branch in
+     * pygo_sched_core.c.inc and the field-ordering contract there. */
+
+    /* Per-incarnation goroutine id (Go's goid analogue).  Assigned fresh
+     * at each spawn from a per-thread counter (no global atomic -> no
+     * cross-hub cacheline contention); unique for the life of the process.
+     * Read under pygo_greg_lock by the dump; written at spawn with an
+     * atomic store.  0 until first spawned. */
+    uint64_t id;
+    /* Monotonic-ns timestamp of the last state transition into a PARKED_*
+     * state, stamped only when introspection timestamping is enabled
+     * (pygo_introspect_set_timestamps / PYGO_INTROSPECT_TIME).  Lets the
+     * dump report "parked for 45.2s" to spot a wedged goroutine.  -1 when
+     * never stamped / tracking off. */
+    long long state_since_ns;
+    /* "What am I blocked on" summary, kept as plain data ON THE G so the
+     * dump never has to dereference the (teardown-freeable) parker object.
+     * park_fd/park_events are written when the g commits to a netpoll wait
+     * (pygo_netpoll_wait_fd); they are stale-but-harmless once the g moves
+     * on (the dump only trusts them when state == PYGO_GST_PARKED_NETPOLL).
+     * park_fd defaults to -1. */
+    int park_fd;
+    int park_events;
+    /* Intrusive doubly-linked global registry of every live g STRUCT
+     * (live + slab-cached).  Linked once when the struct is first OS-
+     * allocated, unlinked only when it is returned to the OS.  A cached
+     * (PYGO_GST_FREED) g stays linked; the dump skips FREED entries. */
+    pygo_g_t *reg_prev;
+    pygo_g_t *reg_next;
 };
 
 /* Park current g until pygo_sched_wake_g(g) is called.  Race-safe:
@@ -293,6 +331,13 @@ void pygo_sched_wake_safe(pygo_g_t *g);
 /* Lifetime helpers. */
 void pygo_g_incref(pygo_g_t *g);
 void pygo_g_decref(pygo_g_t *g);
+
+/* Acquire a reference ONLY if the g is still live (refcount > 0).  Returns
+ * 1 on success (caller now owns a ref, must decref), 0 if the g is already
+ * being torn down (refcount reached 0).  CAS loop; used by the goroutine
+ * dump to pin a g found via the registry without resurrecting one that a
+ * concurrent final decref is mid-freeing. */
+int pygo_g_try_incref(pygo_g_t *g);
 
 /* Slab allocator for pygo_g_t -- per-thread LIFO free list with cap.
  * Exposed so mn_sched.c can share the same recycle pool as the

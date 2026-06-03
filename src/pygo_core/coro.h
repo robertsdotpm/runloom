@@ -46,6 +46,10 @@ void pygo_coro_yield(void);
 /* Predicates. */
 int pygo_coro_done(const pygo_coro_t *c);
 
+/* This coro's stack size in bytes, or 0 if the backend has no
+ * introspectable stack (Fibers).  Used by the goroutine dump. */
+size_t pygo_coro_stack_size(const pygo_coro_t *c);
+
 /* Backend identifier ("fibers", "ucontext"); useful for tests. */
 const char *pygo_coro_backend(void);
 

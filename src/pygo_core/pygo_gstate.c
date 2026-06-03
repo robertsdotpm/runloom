@@ -10,6 +10,7 @@
 #include "pygo_gstate.h"
 #include "pygo_sched.h"
 #include "pygo_diag.h"
+#include "pygo_introspect.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -25,6 +26,7 @@ void pygo_g_state_set(struct pygo_g *g, pygo_g_state_t to)
     if (g == NULL) return;
     prev = (pygo_g_state_t)__atomic_load_n(&g->state, __ATOMIC_ACQUIRE);
     __atomic_store_n(&g->state, (unsigned char)to, __ATOMIC_RELEASE);
+    pygo_introspect_note_transition(g, (unsigned int)to);
     PYGO_EVT(PYGO_EVT_G_TRANSITION, g, NULL,
              ((long long)prev << 8) | (long long)to);
 }
@@ -38,6 +40,7 @@ int pygo_g_state_cas(struct pygo_g *g, pygo_g_state_t from, pygo_g_state_t to)
                                     0,    /* strong CAS */
                                     __ATOMIC_ACQ_REL,
                                     __ATOMIC_ACQUIRE)) {
+        pygo_introspect_note_transition(g, (unsigned int)to);
         PYGO_EVT(PYGO_EVT_G_TRANSITION, g, NULL,
                  ((long long)from << 8) | (long long)to);
         return 1;

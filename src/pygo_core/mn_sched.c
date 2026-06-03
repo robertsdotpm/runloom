@@ -58,6 +58,7 @@
 #include "cldeque.h"
 #include "pygo_diag.h"
 #include "pygo_gstate.h"
+#include "pygo_introspect.h"
 #include "pygo_blockpool.h"
 
 #include <errno.h>

@@ -11,6 +11,7 @@ int pygo_mn_init(int n_threads)
     PyThreadState *saved;
 
     if (pygo_hubs != NULL) return 0;  /* already inited */
+    pygo_introspect_init();   /* registry lock; idempotent (also done in PyInit) */
 #if defined(PYGO_OS_WINDOWS)
     /* CRITICAL_SECTION can't be statically initialised; do it exactly once
      * for the process (never destroyed -- a process-lifetime lock).  mn_init
@@ -261,6 +262,9 @@ static int pygo_mn_go_core(PyObject *callable, pygo_c_entry_fn c_fn,
         g->c_arg   = c_arg;
     }
     g->refcount = 1;
+    g->owner = &h->sched;   /* owning hub's sched -- groups goroutines in the dump */
+    __atomic_store_n(&g->id, pygo_next_goid(), __ATOMIC_RELAXED);
+    g->park_fd = -1;
     g->coro = pygo_coro_new((size_t)h->sched.stack_size,
                             pygo_g_entry, g);
     if (g->coro == NULL) {
@@ -268,6 +272,7 @@ static int pygo_mn_go_core(PyObject *callable, pygo_c_entry_fn c_fn,
             Py_DECREF(callable);
             PyErr_NoMemory();
         }
+        pygo_greg_unlink(g);
         PyMem_Free(g);
         errno = ENOMEM;
         return -1;
@@ -292,6 +297,7 @@ static int pygo_mn_go_core(PyObject *callable, pygo_c_entry_fn c_fn,
                 Py_DECREF(callable);
                 PyErr_NoMemory();
             }
+            pygo_greg_unlink(g);
             PyMem_Free(g);
             errno = ENOMEM;
             return -1;

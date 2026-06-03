@@ -52,6 +52,8 @@ static inline int PyDict_GetItemRef(PyObject *d, PyObject *key, PyObject **resul
 #include "pygo_tcp.h"
 #include "pygo_blockpool.h"
 #include "pygo_diag.h"
+#include "pygo_gstate.h"
+#include "pygo_introspect.h"
 
 /* ---- Per-coro Python object ---- */
 
@@ -130,5 +132,6 @@ PYGO_INLINE void pygo_tstate_restore(const PygoTstateSnapshot *s)
 #include "module_chan.c.inc"
 #include "module_go.c.inc"
 #include "module_run.c.inc"
+#include "module_introspect.c.inc"
 #include "module_select.c.inc"
 #include "module_init.c.inc"

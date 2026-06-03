@@ -1,0 +1,373 @@
+/* pygo_introspect.c -- goroutine registry + developer-facing dump.
+ * See pygo_introspect.h for the contract and the lifetime reasoning. */
+
+#if !defined(_WIN32)
+#  define _POSIX_C_SOURCE 200809L
+#endif
+#define PY_SSIZE_T_CLEAN
+#include <Python.h>
+
+#include "pygo_introspect.h"
+#include "pygo_sched.h"
+#include "pygo_gstate.h"
+#include "coro.h"
+#include "netpoll.h"
+#include "mn_sched.h"
+#include "pygo_iframe.h"
+#include "plat.h"
+#include "plat_compat.h"
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+#if defined(_WIN32)
+#  include <io.h>
+#else
+#  include <unistd.h>
+#endif
+
+/* ---------------------------------------------------------------- *
+ *  Monotonic clock                                                 *
+ * ---------------------------------------------------------------- */
+long long pygo_introspect_monotonic_ns(void)
+{
+#if defined(CLOCK_MONOTONIC)
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) == 0)
+        return (long long)ts.tv_sec * 1000000000LL + (long long)ts.tv_nsec;
+#endif
+    return 0;
+}
+
+/* ---------------------------------------------------------------- *
+ *  Per-incarnation goroutine id (Go's goid)                        *
+ *                                                                  *
+ *  Contention-free: each thread grabs a block of ids from the      *
+ *  global counter and hands them out locally, so the shared        *
+ *  cacheline is touched only once per GOID_BLOCK spawns.  Ids are   *
+ *  compact + roughly monotonic, which is what a human wants.        *
+ * ---------------------------------------------------------------- */
+#define PYGO_GOID_BLOCK 1024
+static uint64_t pygo_goid_global = 1;   /* next id to hand out (1-based) */
+static PYGO_TLS uint64_t pygo_tls_goid_next = 0;
+static PYGO_TLS uint64_t pygo_tls_goid_end  = 0;
+
+uint64_t pygo_next_goid(void)
+{
+    if (pygo_tls_goid_next >= pygo_tls_goid_end) {
+        uint64_t base = __atomic_fetch_add(&pygo_goid_global,
+                                           PYGO_GOID_BLOCK, __ATOMIC_RELAXED);
+        pygo_tls_goid_next = base;
+        pygo_tls_goid_end  = base + PYGO_GOID_BLOCK;
+    }
+    return pygo_tls_goid_next++;
+}
+
+/* ---------------------------------------------------------------- *
+ *  State name tables                                               *
+ * ---------------------------------------------------------------- */
+const char *pygo_g_state_name(unsigned int s)
+{
+    switch ((pygo_g_state_t)s) {
+    case PYGO_GST_INIT:           return "init";
+    case PYGO_GST_SPAWNING:       return "spawning";
+    case PYGO_GST_RUNNABLE:       return "runnable";
+    case PYGO_GST_SUBMITTED:      return "submitted";
+    case PYGO_GST_RUNNING:        return "running";
+    case PYGO_GST_PARKED_NETPOLL: return "io-wait";
+    case PYGO_GST_PARKED_CHAN:    return "chan-wait";
+    case PYGO_GST_PARKED_SLEEP:   return "sleep";
+    case PYGO_GST_PARKED_SAFE:    return "park";
+    case PYGO_GST_WAKING:         return "waking";
+    case PYGO_GST_DONE:           return "done";
+    case PYGO_GST_FREED:          return "freed";
+    default:                      return "?";
+    }
+}
+
+const char *pygo_g_state_blockclass(unsigned int s)
+{
+    switch ((pygo_g_state_t)s) {
+    case PYGO_GST_PARKED_NETPOLL: return "io";
+    case PYGO_GST_PARKED_CHAN:    return "chan";
+    case PYGO_GST_PARKED_SLEEP:   return "timer";
+    case PYGO_GST_PARKED_SAFE:    return "sync";
+    case PYGO_GST_RUNNING:        return "running";
+    case PYGO_GST_RUNNABLE:
+    case PYGO_GST_SUBMITTED:      return "runnable";
+    case PYGO_GST_WAKING:         return "waking";
+    default:                      return "other";
+    }
+}
+
+/* Is `to` one of the parked states (the ones worth timestamping)? */
+static int state_is_parked(unsigned int to)
+{
+    return to == PYGO_GST_PARKED_NETPOLL || to == PYGO_GST_PARKED_CHAN ||
+           to == PYGO_GST_PARKED_SLEEP   || to == PYGO_GST_PARKED_SAFE;
+}
+
+/* ---------------------------------------------------------------- *
+ *  Age timestamping (opt-in)                                       *
+ * ---------------------------------------------------------------- */
+static int pygo_introspect_ts_on = 0;
+
+void pygo_introspect_set_timestamps(int on)
+{
+    __atomic_store_n(&pygo_introspect_ts_on, on ? 1 : 0, __ATOMIC_RELAXED);
+}
+
+int pygo_introspect_get_timestamps(void)
+{
+    return __atomic_load_n(&pygo_introspect_ts_on, __ATOMIC_RELAXED);
+}
+
+void pygo_introspect_note_transition(pygo_g_t *g, unsigned int to)
+{
+    if (g == NULL) return;
+    if (!__atomic_load_n(&pygo_introspect_ts_on, __ATOMIC_RELAXED)) return;
+    if (state_is_parked(to))
+        __atomic_store_n(&g->state_since_ns,
+                         pygo_introspect_monotonic_ns(), __ATOMIC_RELAXED);
+}
+
+/* ---------------------------------------------------------------- *
+ *  Registry                                                        *
+ * ---------------------------------------------------------------- */
+static pygo_mutex_t pygo_greg_lock;
+static int          pygo_greg_inited = 0;
+static pygo_g_t    *pygo_greg_head   = NULL;   /* doubly-linked, no tail */
+static long         pygo_greg_total  = 0;      /* live + cached structs */
+
+void pygo_introspect_init(void)
+{
+    const char *env;
+    if (pygo_greg_inited) return;
+    pygo_mutex_init(&pygo_greg_lock);
+    pygo_greg_inited = 1;
+    env = getenv("PYGO_INTROSPECT_TIME");
+    if (env != NULL && env[0] && env[0] != '0')
+        pygo_introspect_set_timestamps(1);
+}
+
+void pygo_introspect_fini(void)
+{
+    /* The g structs themselves are owned by the slab / PyMem; we only
+     * drop our list head so a fresh init starts clean.  Leaving the
+     * structs linked would be a dangling-list bug after PyMem_Free, but
+     * fini runs at interpreter teardown when nothing walks the list. */
+    if (!pygo_greg_inited) return;
+    pygo_mutex_lock(&pygo_greg_lock);
+    pygo_greg_head = NULL;
+    pygo_greg_total = 0;
+    pygo_mutex_unlock(&pygo_greg_lock);
+}
+
+void pygo_greg_link(pygo_g_t *g)
+{
+    if (g == NULL || !pygo_greg_inited) return;
+    pygo_mutex_lock(&pygo_greg_lock);
+    g->reg_prev = NULL;
+    g->reg_next = pygo_greg_head;
+    if (pygo_greg_head != NULL) pygo_greg_head->reg_prev = g;
+    pygo_greg_head = g;
+    pygo_greg_total++;
+    pygo_mutex_unlock(&pygo_greg_lock);
+}
+
+void pygo_greg_unlink(pygo_g_t *g)
+{
+    if (g == NULL || !pygo_greg_inited) return;
+    pygo_mutex_lock(&pygo_greg_lock);
+    /* Defensive: only unlink a g that is actually linked.  A g whose
+     * reg_next/reg_prev are both NULL AND is not the head was never
+     * linked (e.g. allocated before init); skip it. */
+    if (pygo_greg_head == g || g->reg_prev != NULL || g->reg_next != NULL) {
+        if (g->reg_prev != NULL) g->reg_prev->reg_next = g->reg_next;
+        else if (pygo_greg_head == g) pygo_greg_head = g->reg_next;
+        if (g->reg_next != NULL) g->reg_next->reg_prev = g->reg_prev;
+        g->reg_prev = NULL;
+        g->reg_next = NULL;
+        pygo_greg_total--;
+    }
+    pygo_mutex_unlock(&pygo_greg_lock);
+}
+
+long pygo_goroutine_count(void)
+{
+    long n = 0;
+    pygo_g_t *g;
+    if (!pygo_greg_inited) return 0;
+    pygo_mutex_lock(&pygo_greg_lock);
+    for (g = pygo_greg_head; g != NULL; g = g->reg_next) {
+        unsigned int st = __atomic_load_n(&g->state, __ATOMIC_ACQUIRE);
+        if (st != PYGO_GST_FREED) n++;
+    }
+    pygo_mutex_unlock(&pygo_greg_lock);
+    return n;
+}
+
+/* ---------------------------------------------------------------- *
+ *  Async-signal-safe-ish structural dump                           *
+ *                                                                  *
+ *  Reads ONLY plain data off each g (never a parker/coro/callable   *
+ *  pointer), writes with snprintf + write only, and try-locks the   *
+ *  registry so a SIGQUIT handler can't deadlock on it.              *
+ * ---------------------------------------------------------------- */
+static void emit(int fd, const char *buf, size_t len)
+{
+    if (fd < 0) { (void)fwrite(buf, 1, len, stderr); return; }
+#if defined(_WIN32)
+    (void)_write(fd, buf, (unsigned)len);
+#else
+    {
+        ssize_t off = 0;
+        while ((size_t)off < len) {
+            ssize_t w = write(fd, buf + off, len - off);
+            if (w <= 0) break;
+            off += w;
+        }
+    }
+#endif
+}
+
+void pygo_dump_goroutines_fd(int fd)
+{
+    char buf[256];
+    int  m;
+    pygo_g_t *g;
+    long live = 0;
+    /* histogram by state index */
+    long counts[PYGO_GST__LAST];
+    long long now;
+    size_t i;
+
+    if (!pygo_greg_inited) {
+        emit(fd, "[pygo] goroutine dump: registry not initialised\n", 48);
+        return;
+    }
+    for (i = 0; i < (size_t)PYGO_GST__LAST; i++) counts[i] = 0;
+    now = pygo_introspect_monotonic_ns();
+
+    if (pygo_mutex_trylock(&pygo_greg_lock) != 0) {
+        /* Contended -- almost certainly a spawn/teardown holding the lock
+         * for a few instructions.  Do NOT fall back to any blocking lock
+         * (this runs from a SIGQUIT handler); just report and bail. */
+        emit(fd, "[pygo] goroutine dump: registry busy, retry\n", 44);
+        return;
+    }
+
+    for (g = pygo_greg_head; g != NULL; g = g->reg_next) {
+        unsigned int st = __atomic_load_n(&g->state, __ATOMIC_ACQUIRE);
+        if (st == PYGO_GST_FREED) continue;
+        if (st < (unsigned)PYGO_GST__LAST) counts[st]++;
+        live++;
+    }
+
+    m = snprintf(buf, sizeof buf,
+        "\n=== pygo goroutine dump: %ld live (default stack %zu KiB) ===\n",
+        live, pygo_sched_get_default_stack_size() / 1024u);
+    if (m > 0) emit(fd, buf, (size_t)m);
+    for (i = 0; i < (size_t)PYGO_GST__LAST; i++) {
+        if (counts[i] == 0) continue;
+        m = snprintf(buf, sizeof buf, "  %-10s %ld\n",
+                     pygo_g_state_name((unsigned)i), counts[i]);
+        if (m > 0) emit(fd, buf, (size_t)m);
+    }
+
+    for (g = pygo_greg_head; g != NULL; g = g->reg_next) {
+        unsigned int st = __atomic_load_n(&g->state, __ATOMIC_ACQUIRE);
+        uint64_t id;
+        int rc;
+        long long since;
+        char detail[96];
+        if (st == PYGO_GST_FREED) continue;
+        id    = __atomic_load_n(&g->id, __ATOMIC_RELAXED);
+        rc    = __atomic_load_n(&g->refcount, __ATOMIC_RELAXED);
+        since = __atomic_load_n(&g->state_since_ns, __ATOMIC_RELAXED);
+        detail[0] = '\0';
+        if (st == PYGO_GST_PARKED_NETPOLL) {
+            int pfd = __atomic_load_n(&g->park_fd, __ATOMIC_RELAXED);
+            int pev = __atomic_load_n(&g->park_events, __ATOMIC_RELAXED);
+            snprintf(detail, sizeof detail, " fd=%d ev=%s%s", pfd,
+                     (pev & 1) ? "R" : "", (pev & 2) ? "W" : "");
+        } else if (st == PYGO_GST_PARKED_SLEEP) {
+            double dt = g->wake_at - pygo_sched_monotonic_seconds();
+            snprintf(detail, sizeof detail, " wake_in=%.3fs", dt);
+        }
+        if (since > 0 && now > 0 && state_is_parked(st)) {
+            char age[40];
+            snprintf(age, sizeof age, " age=%.1fs",
+                     (double)(now - since) / 1e9);
+            strncat(detail, age, sizeof detail - strlen(detail) - 1);
+        }
+        m = snprintf(buf, sizeof buf,
+            "  g%-8llu %-10s rc=%d owner=%p%s\n",
+            (unsigned long long)id, pygo_g_state_name(st), rc,
+            (void *)g->owner, detail);
+        if (m > 0) emit(fd, buf, (size_t)m);
+    }
+    emit(fd, "=== end goroutine dump ===\n", 27);
+    pygo_mutex_unlock(&pygo_greg_lock);
+}
+
+/* ---------------------------------------------------------------- *
+ *  Rich snapshot (POD copy under the lock)                         *
+ * ---------------------------------------------------------------- */
+pygo_g_info_t *pygo_goroutine_snapshot(long *count_out)
+{
+    pygo_g_info_t *arr;
+    pygo_g_t *g;
+    long cap, n = 0;
+    long long now;
+    if (count_out != NULL) *count_out = 0;
+    if (!pygo_greg_inited) return NULL;
+
+    now = pygo_introspect_monotonic_ns();
+    pygo_mutex_lock(&pygo_greg_lock);
+    cap = pygo_greg_total > 0 ? pygo_greg_total : 1;
+    arr = (pygo_g_info_t *)malloc((size_t)cap * sizeof(*arr));
+    if (arr == NULL) {
+        pygo_mutex_unlock(&pygo_greg_lock);
+        return NULL;
+    }
+    for (g = pygo_greg_head; g != NULL && n < cap; g = g->reg_next) {
+        pygo_g_info_t *o;
+        unsigned int st = __atomic_load_n(&g->state, __ATOMIC_ACQUIRE);
+        long long since;
+        if (st == PYGO_GST_FREED) continue;
+        o = &arr[n++];
+        o->id          = __atomic_load_n(&g->id, __ATOMIC_RELAXED);
+        o->state       = st;
+        o->park_fd     = (st == PYGO_GST_PARKED_NETPOLL)
+                         ? __atomic_load_n(&g->park_fd, __ATOMIC_RELAXED) : -1;
+        o->park_events = (st == PYGO_GST_PARKED_NETPOLL)
+                         ? __atomic_load_n(&g->park_events, __ATOMIC_RELAXED) : 0;
+        o->wake_at     = (st == PYGO_GST_PARKED_SLEEP) ? g->wake_at : 0.0;
+        since          = __atomic_load_n(&g->state_since_ns, __ATOMIC_RELAXED);
+        o->age_ns      = (since > 0 && now > 0 && state_is_parked(st))
+                         ? (now - since) : -1;
+        o->refcount    = __atomic_load_n(&g->refcount, __ATOMIC_RELAXED);
+        o->noyield     = g->noyield;
+        o->owner       = (const void *)g->owner;
+    }
+    pygo_mutex_unlock(&pygo_greg_lock);
+    if (count_out != NULL) *count_out = n;
+    return arr;
+}
+
+void pygo_goroutine_snapshot_free(pygo_g_info_t *arr, long count)
+{
+    (void)count;
+    free(arr);
+}
+
+/* ---------------------------------------------------------------- *
+ *  Per-goroutine Python stack reconstruction (claim-protected)     *
+ *                                                                  *
+ *  Implemented in pygo_introspect_frames.c.inc to keep the         *
+ *  CPython-internal frame-walk gated by #if PY_VERSION_HEX in one   *
+ *  place.                                                          *
+ * ---------------------------------------------------------------- */
+#include "pygo_introspect_frames.c.inc"

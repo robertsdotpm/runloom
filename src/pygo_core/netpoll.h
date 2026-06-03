@@ -59,6 +59,15 @@ int pygo_netpoll_parked_count(void);
 /* DIAG: dump every parked parker (fd/g/hub/commit) to stderr. */
 void pygo_netpoll_dump_parkers(void);
 
+/* Introspection: read a goroutine's active netpoll parker (g->netpoll_parker,
+ * an opaque void* from the g's view) into plain fields for the dump.  Each
+ * out-pointer may be NULL.  Returns 1 if `parker` was non-NULL (fields
+ * written), 0 otherwise (fields left untouched).  A bare struct field read;
+ * the caller must ensure the parker can't be freed under it (it holds the g
+ * alive, and a g's parker lives as long as the g is parked). */
+int pygo_netpoll_parker_info(void *parker, int *fd_out, int *events_out,
+                             long long *deadline_ns_out);
+
 /* Hub-idle dwell-based stack reclaim (PYGO_STACK_PARK_SWEEP).  The
  * calling hub madvises the idle stack pages of its OWN parkers whose
  * park has exceeded threshold_ns.  Safe only when called by the owning
