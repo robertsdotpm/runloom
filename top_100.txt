@@ -1,7 +1,7 @@
 runloom - validated asyncio projects
 ========================================
 
-207 name-brand Python asyncio projects whose own test suites (or
+214 name-brand Python asyncio projects whose own test suites (or
 equivalent end-to-end exercises) run GREEN under runloom's pure-Python
 M:N runtime -- driven through runloom.aio / RunloomEventLoop on free-threaded
 CPython 3.13t (PYTHON_GIL=0). 'pass==stock' means the result matches
@@ -429,4 +429,20 @@ BEYOND 100 (bulk): langchain + llama-index provider integrations (6)
 206. llama-index-llms-anthropic - async acomplete (local server)
 207. llama-index-llms-mistralai - async acomplete (local server)
 
-TOTAL DISTINCT PROJECTS PASSING: 207
+
+------------------------------------------------------------
+BEYOND 100 (bulk): llama-index provider integrations (7)
+------------------------------------------------------------
+208. llama-index-embeddings-openai - async embedding (local server)
+209. llama-index-llms-groq      - async acomplete (local server)
+210. llama-index-llms-together  - async acomplete (local server)
+211. llama-index-llms-openrouter - async acomplete (local server)
+212. llama-index-llms-deepseek  - async acomplete (local server)
+213. llama-index-llms-fireworks - async acomplete (local server)
+214. llama-index-llms-perplexity - async acomplete (local server)
+
+NOTE: importing some frame-walking modules INSIDE a goroutine can hit
+runloom's goroutine-frame-chain limit (recursion); module-scope imports (the
+normal pattern) work -- confirmed for these via top-level imports.
+
+TOTAL DISTINCT PROJECTS PASSING: 214
