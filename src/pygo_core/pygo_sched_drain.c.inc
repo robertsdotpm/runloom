@@ -3,6 +3,37 @@
  * these definitions depend on. */
 
 
+/* ---- Single-thread logical clock (deterministic asyncio-timer replay) ----
+ *
+ * When PYGO_LOGICAL_CLOCK=1, sched_sleep deadlines and the loop clock
+ * (pygo.aio loop.time()) are measured against this logical clock, not the wall
+ * clock, and the drain advances it to the earliest pending timer ONLY at
+ * quiescence -- ready ring empty and no I/O parkers, i.e. a pure-timer wait.
+ * So timer firing order becomes a function of the schedule (e.g. PCT's
+ * controlled ready-pop) rather than wall-clock timing: the single-thread
+ * analogue of the M:N logical clock (mn lever 6).  Real I/O still rides the wall
+ * clock (the netpoll pump), so a workload with live fds is not made
+ * deterministic by this -- the open-system limit.  Off by default; zero cost. */
+static int    pygo_sched_logical_on = -1;     /* -1 = lazy-init from env */
+static double pygo_sched_logical_val = 0.0;
+
+static int pygo_sched_logical_enabled(void)
+{
+    if (__builtin_expect(pygo_sched_logical_on < 0, 0)) {
+        const char *e = getenv("PYGO_LOGICAL_CLOCK");
+        pygo_sched_logical_on = (e != NULL && e[0] == '1') ? 1 : 0;
+    }
+    return pygo_sched_logical_on;
+}
+
+/* The clock sched_sleep deadlines and loop.time() read: the logical clock when
+ * enabled, else the wall-clock `fallback` the caller passes.  Callable across
+ * translation units (m_sched_sleep / the loop-clock builtin are in module.c). */
+double pygo_sched_logical_now_or(double fallback)
+{
+    return pygo_sched_logical_enabled() ? pygo_sched_logical_val : fallback;
+}
+
 /* ---- Drain (main loop) ----
  *
  * sched_snap optimisation: the scheduler's tstate (the Python frame
@@ -38,7 +69,7 @@ Py_ssize_t pygo_sched_drain(pygo_sched_t *s)
                             s->quiescence_head != NULL ||
                             __atomic_load_n(&s->wake_list_head,
                                             __ATOMIC_ACQUIRE) != NULL)) {
-        double now = pygo_sched_monotonic_seconds();
+        double now = pygo_sched_logical_now_or(pygo_sched_monotonic_seconds());
         /* Drain cross-thread wakes into the ready ring before any
          * other work this iteration.  Empty in the common (same-
          * thread wake_safe) case -- one atomic load on the head.
@@ -47,10 +78,15 @@ Py_ssize_t pygo_sched_drain(pygo_sched_t *s)
         if (__atomic_load_n(&s->wake_list_head, __ATOMIC_ACQUIRE) != NULL) {
             pygo_sched_drain_wake_list(s);
         }
-        /* Wake up any sleepers whose time has come. */
-        while (s->sleep_size > 0 && pygo_sleep_peek(s)->wake_at <= now) {
-            pygo_g_t *woke = pygo_sleep_pop(s);
-            pygo_ready_push(s, woke);
+        /* Wake up any sleepers whose time has come.  A LOGICAL sleeper is due
+         * when the logical clock (`now`) reaches it; a REAL one (keepalive) when
+         * the wall clock does.  Off the logical clock both reduce to `now`
+         * (== wall), the original behaviour. */
+        while (s->sleep_size > 0) {
+            pygo_g_t *pk = pygo_sleep_peek(s);
+            double clk = pk->sleep_real ? pygo_sched_monotonic_seconds() : now;
+            if (pk->wake_at > clk) break;
+            pygo_ready_push(s, pygo_sleep_pop(s));
         }
         /* Quiescence checkpoint: if nothing else is immediately runnable
          * (ready ring empty after draining wakes + due sleepers), resume the
@@ -84,13 +120,40 @@ Py_ssize_t pygo_sched_drain(pygo_sched_t *s)
             if (__atomic_load_n(&s->netpoll_parked, __ATOMIC_ACQUIRE) > 0 ||
                 pygo_iouring_inflight() > 0 ||
                 pygo_blockpool_inflight() > 0) {
+                /* Logical-clock mode: timeout_ns is a LOGICAL gap, meaningless
+                 * as a real I/O wait, so cap it to a short real re-poll.  The
+                 * logical clock advances only at full quiescence (the else-if
+                 * below), reached once no fd is parked -- so a live-I/O workload
+                 * stays wall-clock (the open-system limit). */
+                if (pygo_sched_logical_enabled() && timeout_ns > 50000000LL)
+                    timeout_ns = 50000000LL;
                 pygo_netpoll_pump(timeout_ns);
             } else if (timeout_ns > 0) {
-                /* No fds parked, just a sleep heap timer.  Cap at 50 ms
-                 * so an external caller (signal handler, debugger) can
-                 * unstick us quickly. */
-                if (timeout_ns > 50000000LL) timeout_ns = 50000000LL;
-                pygo_sleep_ns(timeout_ns);
+                if (pygo_sched_logical_enabled() &&
+                    !pygo_sleep_peek(s)->sleep_real) {
+                    /* Earliest pending timer is a LOGICAL one (app sched_sleep /
+                     * call_at): jump the logical clock straight to its deadline;
+                     * the sweep (below + next loop top) fires it.  No real sleep
+                     * -> deterministic order.  A real-time sleeper (the loop
+                     * keepalive heartbeat) is never at the heap front while any
+                     * logical timer is pending (its wall-clock wake_at dwarfs the
+                     * small logical ones), so this only fires app timers. */
+                    pygo_sched_logical_val = pygo_sleep_peek(s)->wake_at;
+                } else {
+                    /* Real-time sleeper (keepalive), or logical clock off: sleep
+                     * real wall-clock until it.  Under the logical clock the
+                     * timeout_ns above was computed against logical `now`, which
+                     * is meaningless for a wall-clock sleeper, so recompute the
+                     * real gap.  Cap at 50 ms so a signal/debugger can unstick. */
+                    if (pygo_sched_logical_enabled()) {
+                        double rgap = pygo_sleep_peek(s)->wake_at -
+                                      pygo_sched_monotonic_seconds();
+                        if (rgap < 0) rgap = 0;
+                        timeout_ns = (long long)(rgap * 1e9);
+                    }
+                    if (timeout_ns > 50000000LL) timeout_ns = 50000000LL;
+                    if (timeout_ns > 0) pygo_sleep_ns(timeout_ns);
+                }
             }
             /* We just blocked on I/O/timers with NO Python on this thread's
              * stack.  An async signal (Ctrl-C -> SIGINT) that fired during the
@@ -113,8 +176,11 @@ Py_ssize_t pygo_sched_drain(pygo_sched_t *s)
              * cooperative wrapper (CoPoll: select.poll has no backing fd) parks
              * on a short sched_sleep; once it expires it resumes and its OWN eval
              * loop runs the pending signal handler -- so let it. */
-            now = pygo_sched_monotonic_seconds();
-            while (s->sleep_size > 0 && pygo_sleep_peek(s)->wake_at <= now) {
+            now = pygo_sched_logical_now_or(pygo_sched_monotonic_seconds());
+            while (s->sleep_size > 0) {
+                pygo_g_t *pk = pygo_sleep_peek(s);
+                double clk = pk->sleep_real ? pygo_sched_monotonic_seconds() : now;
+                if (pk->wake_at > clk) break;
                 pygo_ready_push(s, pygo_sleep_pop(s));
             }
             /* A due sleeper just re-queued (above) runs Python next and its own

@@ -312,7 +312,9 @@ void pygo_sched_park_safe(void)
  * also mark self_queued so hub_main doesn't re-push the g onto the
  * local FIFO on return from pygo_coro_yield (same rationale as
  * pygo_sched_park_current). */
-void pygo_sched_sleep_until(pygo_sched_t *s, double wake_at)
+/* real != 0: this sleeper uses the WALL clock even under the logical clock
+ * (PYGO_LOGICAL_CLOCK) -- see g->sleep_real.  Public wrappers below. */
+static void pygo_sched_sleep_until_ex(pygo_sched_t *s, double wake_at, int real)
 {
     pygo_g_t *g;
     pygo_sched_t *target = pygo_mn_current_sched();
@@ -320,6 +322,7 @@ void pygo_sched_sleep_until(pygo_sched_t *s, double wake_at)
         g = pygo_mn_tls_current_g();
         if (g == NULL) return;
         g->wake_at = wake_at;
+        g->sleep_real = real;
         if (pygo_sleep_push(target, g) < 0) return;
         pygo_pystate_snap(&g->snap);
         pygo_mn_tls_mark_parked();
@@ -330,11 +333,24 @@ void pygo_sched_sleep_until(pygo_sched_t *s, double wake_at)
     g = s->current;
     if (g == NULL) return;
     g->wake_at = wake_at;
+    g->sleep_real = real;
     if (pygo_sleep_push(s, g) < 0) {
         return; /* leave g in current; caller will see exception */
     }
     pygo_pystate_snap(&g->snap);
     pygo_coro_yield();
+}
+
+void pygo_sched_sleep_until(pygo_sched_t *s, double wake_at)
+{
+    pygo_sched_sleep_until_ex(s, wake_at, 0);
+}
+
+/* Sleep until a WALL-clock deadline that the logical clock won't advance for
+ * (the aio keepalive heartbeat). */
+void pygo_sched_sleep_until_real(pygo_sched_t *s, double wake_at)
+{
+    pygo_sched_sleep_until_ex(s, wake_at, 1);
 }
 
 /* ---- run_ready: quiescence-barrier yield ----

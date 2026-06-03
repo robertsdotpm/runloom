@@ -79,6 +79,13 @@ static PyMethodDef module_methods[] = {
      "for benchmarking against the vectorcall singleton)."},
     {"sched_sleep", m_sched_sleep, METH_O,
      "Sleep the current goroutine for N seconds (C scheduler aware)."},
+    {"sched_sleep_real", m_sched_sleep_real, METH_O,
+     "Like sched_sleep but a REAL wall-clock sleep even under "
+     "PYGO_LOGICAL_CLOCK (for the aio keepalive heartbeat)."},
+    {"loop_clock",  m_loop_clock,  METH_NOARGS,
+     "loop_clock() -> float: the aio event-loop clock -- the logical clock when "
+     "PYGO_LOGICAL_CLOCK is set (deterministic call_at/sleep replay), else "
+     "monotonic.  Used by pygo.aio loop.time()."},
     {"sched_stop",  m_sched_stop,  METH_NOARGS,
      "Signal the C scheduler to exit its drain loop at the next safe "
      "point.  Background goroutines parked on netpoll/sleep/wake will "

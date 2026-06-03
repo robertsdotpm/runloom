@@ -13,12 +13,39 @@ static PyObject *m_sched_sleep(PyObject *self, PyObject *arg)
     }
     s = pygo_sched_get();
     {
-        /* In controlled-replay mode the deadline is logical (so timer firing is
-         * reproducible); otherwise wall-clock, exactly as before. */
-        double now = pygo_mn_logical_now_or(pygo_monotonic_seconds_compat());
+        /* Deadline base clock: the single-thread logical clock (aio timer
+         * replay, PYGO_LOGICAL_CLOCK) if on, else the M:N controlled logical
+         * clock if active, else wall-clock -- exactly as before when both off. */
+        double now = pygo_sched_logical_now_or(
+                         pygo_mn_logical_now_or(pygo_monotonic_seconds_compat()));
         pygo_sched_sleep_until(s, now + secs);
     }
     Py_RETURN_NONE;
+}
+
+/* pygo_core.sched_sleep_real(s) -> None.  Like sched_sleep but a REAL wall-clock
+ * sleep even under PYGO_LOGICAL_CLOCK -- for the aio keepalive heartbeat, which
+ * must poll in real time and must not advance the logical clock. */
+static PyObject *m_sched_sleep_real(PyObject *self, PyObject *arg)
+{
+    double secs;
+    (void)self;
+    secs = PyFloat_AsDouble(arg);
+    if (secs == -1.0 && PyErr_Occurred()) return NULL;
+    pygo_sched_sleep_until_real(pygo_sched_get(),
+                                pygo_monotonic_seconds_compat() + secs);
+    Py_RETURN_NONE;
+}
+
+/* pygo_core.loop_clock() -> float.  The clock pygo.aio's loop.time() reads: the
+ * single-thread logical clock when PYGO_LOGICAL_CLOCK is on (so call_at /
+ * call_later deadlines line up with sched_sleep's logical deadlines and the
+ * timer schedule replays deterministically), else wall-clock monotonic. */
+static PyObject *m_loop_clock(PyObject *self, PyObject *unused)
+{
+    (void)self; (void)unused;
+    return PyFloat_FromDouble(
+        pygo_sched_logical_now_or(pygo_monotonic_seconds_compat()));
 }
 
 static PyObject *m_run(PyObject *self, PyObject *unused)

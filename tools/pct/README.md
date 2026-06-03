@@ -62,6 +62,24 @@ specific raw wake order — `test_stress.test_sleeper_storm`, the
 `TestParkWakeRace` yield-coordination tests — are by design not PCT-robust and
 will "fail" under a seed; that is PCT exploring, not a runtime bug.)
 
+## Logical clock for timers (`PYGO_LOGICAL_CLOCK`)
+
+To make a TIMER schedule replay deterministically (and make `loop.time()` exact),
+`PYGO_LOGICAL_CLOCK=1` measures `sched_sleep` deadlines + the aio `loop.time()`
+against a logical clock the single-thread drain advances — at quiescence only —
+straight to the earliest pending deadline (the single-thread analogue of the M:N
+logical clock, `tools/mn_controlled/` lever 6). So `loop.time()` advances by exact
+logical amounts (a two-`sleep` `0.05 + 0.03` measures **exactly** `0.08` every run,
+not `0.0807…`), and timer firing order is a function of the schedule, not wall
+time. Combine with `PYGO_PCT_SEED` for full order+time deterministic replay.
+
+**Closed workloads only.** Real network I/O still rides the wall clock (the
+netpoll pump), and the logical clock advances *only* when no fd is parked, so a
+workload with live fds is not made deterministic — and a real-I/O *timeout* can't
+fire under it (its logical deadline never advances while the I/O is parked), so
+forcing it on a real-I/O test will hang. Off by default; the aio keepalive's
+real-time heartbeat uses `sched_sleep_real` so it is never advanced by it.
+
 ## Keep / drop
 
 This is **experimental**. It is correct, regression-free, and free when off,

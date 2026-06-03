@@ -110,7 +110,12 @@ class _LoopCoreMixin(object):
         return
 
     def time(self):
-        return _time.monotonic()
+        # The loop clock: monotonic normally, but the single-thread logical
+        # clock when PYGO_LOGICAL_CLOCK is on -- so call_at/call_later deadlines
+        # line up with sched_sleep's logical deadlines and the timer schedule
+        # replays deterministically (e.g. under PYGO_PCT_SEED).  Identical to
+        # _time.monotonic() when the logical clock is off.
+        return pygo_core.loop_clock()
 
     # ---- task / future ----
 

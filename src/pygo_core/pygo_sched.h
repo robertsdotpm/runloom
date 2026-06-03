@@ -175,6 +175,12 @@ struct pygo_g {
      * un-marked raw goroutines/channels in a mixed program.  Slab-zeroed to 0
      * (reorderable) by default; testing-only, zero cost when PCT is off. */
     int pct_fifo;
+    /* This sleep uses the WALL clock even when the logical clock is on (set per
+     * sched_sleep).  The aio loop keepalive is a real-time heartbeat (poll the
+     * cross-thread queue every few ms), so it must NOT ride the logical clock --
+     * else it busy-loops advancing logical time.  Only app sched_sleep / call_at
+     * are logical.  Default 0 (logical); set 1 by pygo_sched_sleep_until_real. */
+    int sleep_real;
     /* Race-safe park/wake counter.  pygo_sched_park_safe decrements;
      * if >0, the wake already arrived and we skip the yield.
      * pygo_sched_wake_safe increments and (if g is currently parked)
@@ -419,6 +425,9 @@ void pygo_sched_yield(pygo_sched_t *s);
 
 /* Park the current g until wake_at (monotonic seconds).  Swap back. */
 void pygo_sched_sleep_until(pygo_sched_t *s, double wake_at);
+/* As above, but a WALL-clock deadline the logical clock won't advance for
+ * (the aio keepalive heartbeat -- must not ride PYGO_LOGICAL_CLOCK). */
+void pygo_sched_sleep_until_real(pygo_sched_t *s, double wake_at);
 
 /* Park the current g on the quiescence-barrier list; the drain loop resumes
  * it once no other goroutine is immediately runnable (ready empty), before
@@ -513,6 +522,12 @@ pygo_g_t *pygo_sched_sleep_pop(pygo_sched_t *s);
 /* Monotonic clock used by the sleep heap.  Public so hub_main can
  * decide when sleepers are due. */
 double pygo_sched_monotonic_seconds(void);
+
+/* Single-thread logical clock (PYGO_LOGICAL_CLOCK, deterministic asyncio-timer
+ * replay).  Returns the logical time that sched_sleep deadlines + the aio loop
+ * clock are measured against when enabled, else `fallback` (a wall-clock value).
+ * See pygo_sched_drain.c.inc. */
+double pygo_sched_logical_now_or(double fallback);
 
 /* Time-sliced cooperative preemption (3.13t only).
  *

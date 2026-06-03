@@ -162,7 +162,10 @@ class _LoopScheduleMixin(object):
             try:
                 while not stop[0] and not self._closed and not self._stopping:
                     self._drain_ts_queue()
-                    pygo_core.sched_sleep(0.002)
+                    # REAL-time heartbeat: poll every 2 ms of WALL time.  Must NOT
+                    # ride the logical clock (PYGO_LOGICAL_CLOCK) -- a logical 2 ms
+                    # advances instantly and busy-loops, starving real progress.
+                    pygo_core.sched_sleep_real(0.002)
                 # Drain once more so a stop()-companion callback (e.g. the
                 # task.cancel() loop aiosmtpd queues alongside loop.stop()) runs.
                 self._drain_ts_queue()
