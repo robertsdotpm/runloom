@@ -168,4 +168,15 @@ BEYOND 100 (cont.): pubsub, sans-IO API, rate limit (3)
 109. gidgethub                  - sans-IO GitHub API getitem over mocked aiohttp
 110. throttler                  - async Throttler rate limiting
 
-TOTAL DISTINCT PROJECTS PASSING: 110
+
+------------------------------------------------------------
+BEYOND 100 (cont.): task utils, sans-IO GitLab (2)
+------------------------------------------------------------
+111. aiotools                   - TaskGroup fan-out x5 (aclosing/async ctx utils)
+112. gidgetlab                  - sans-IO GitLab API getitem over mocked aiohttp
+
+NOTE: unsync diverges (pygo accepts awaiting a Future bound to another
+loop; stock raises 'attached to a different loop') -- pygo is MORE permissive
+on loop-affinity, not a failure. Not counted.
+
+TOTAL DISTINCT PROJECTS PASSING: 112
