@@ -271,7 +271,32 @@ Read this before betting on pygo -- it's where the project actually is.
   in-step, but the deep validation (2 M-conn runs, fuzzing, sanitizers) is on
   Linux; aarch64 is exercised via `qemu` + review, not yet on real ARM hardware.
 
+## Install
+
+```bash
+pip install pygo-runtime
+```
+
+The PyPI distribution is **`pygo-runtime`** (the name `pygo` was taken); the
+import names are unchanged:
+
+```python
+import pygo, pygo_core      # no path setup needed once installed
+```
+
+When a prebuilt **wheel** exists for your platform + Python, `pip` just
+downloads it — **no compiler, no build step**, like installing `numpy`.
+Wheels are published for CPython 3.11–3.14 on Linux (x86_64/aarch64),
+macOS (arm64/x86_64) and Windows (AMD64). On anything else, `pip` falls back
+to the **source distribution** and compiles the C extension locally (you need
+a C compiler then — see *Building*). pygo has **no runtime dependencies**.
+
+> Maintainers: this project uses no hosted CI, so wheels are built by hand per
+> platform — see [RELEASING.md](RELEASING.md).
+
 ## Building
+
+From a clone (editable / development install):
 
 ```bash
 pip install -e .                                    # needs a C compiler

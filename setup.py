@@ -358,6 +358,9 @@ ext = Extension(
 setup(
     package_dir={"": "src"},
     packages=["pygo", "pygo.monkey", "pygo.aio"],
+    # Ship the PEP 561 typing marker + stubs inside the wheel so type
+    # checkers see pygo as typed once it's installed.
+    package_data={"pygo": ["py.typed", "*.pyi"]},
     ext_modules=[ext],
     cmdclass={"build_ext": pygo_build_ext},
 )

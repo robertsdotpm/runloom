@@ -1,16 +1,22 @@
 [build-system]
-requires = ["setuptools>=42", "wheel"]
+# setuptools >= 61 is the first release that reads PEP 621 [project] metadata.
+requires = ["setuptools>=61", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "pygo"
+# Distribution name on PyPI is `pygo-runtime` (the short `pygo` is taken).
+# The IMPORT names are unchanged: `import pygo` and `import pygo_core`.
+name = "pygo-runtime"
 version = "0.0.1"
 description = "Go-style stackful coroutines in Python (transparent-blocking I/O via socket monkey-patch)."
 requires-python = ">=3.11"
 # Keep the table form for compatibility with setuptools < 77.
 # The newer SPDX-string `license = "MIT"` form requires setuptools 77+.
 license = {text = "MIT"}
-authors = [{name = "Matthew Roberts", email = "matthew@roberts.pm"}]
+authors = [
+    {name = "Matthew Roberts", email = "matthew@roberts.pm"},
+    {name = "Claude"},
+]
 readme = "README.md"
 keywords = ["coroutine", "goroutine", "scheduler", "io", "asyncio", "networking", "monkey-patch"]
 classifiers = [
@@ -32,16 +38,41 @@ classifiers = [
     "Programming Language :: Python :: Implementation :: CPython",
     "Topic :: Software Development :: Libraries :: Python Modules",
     "Topic :: System :: Networking",
+    "Typing :: Typed",
+]
+
+# No runtime dependencies — pygo is a self-contained C extension + the
+# Python standard library.  `pip install pygo-runtime` pulls in nothing else.
+dependencies = []
+
+[project.optional-dependencies]
+# Running the test suite (see tests/ and tests/run_isolated.py).
+test = [
+    "pytest>=7",
+    "hypothesis>=6",
+]
+# Everything needed to build + check + publish a release locally.
+dev = [
+    "pygo-runtime[test]",
+    "build>=1.0",
+    "twine>=5",
+    "cibuildwheel>=2.16",
 ]
 
 [project.urls]
-Homepage = "https://github.com/robertsdotpm/pygo"
-Issues = "https://github.com/robertsdotpm/pygo/issues"
-Source = "https://github.com/robertsdotpm/pygo"
+# NOTE: these point at the post-rename repo name (robertsdotpm/pygo-runtime).
+# GitHub 301-redirects the old `pygo` URLs once the repo is renamed.
+Homepage = "https://github.com/robertsdotpm/pygo-runtime"
+Documentation = "https://github.com/robertsdotpm/pygo-runtime/tree/main/docs"
+Issues = "https://github.com/robertsdotpm/pygo-runtime/issues"
+Source = "https://github.com/robertsdotpm/pygo-runtime"
 
 # --------------------------------------------------------------------
 # cibuildwheel: build prebuilt wheels for the matrix of Python versions
-# x supported OSes.  Trigger from CI with `cibuildwheel --output-dir wheels`.
+# x supported OSes.  This project uses NO hosted CI -- run it by hand on
+# each target host: `pipx run cibuildwheel --output-dir wheels` (or
+# `python -m cibuildwheel`).  Until prebuilt wheels are uploaded, `pip
+# install pygo-runtime` builds from the sdist (needs a C compiler).
 # --------------------------------------------------------------------
 [tool.cibuildwheel]
 # CPython only (PyPy lacks the C-API surface we rely on).

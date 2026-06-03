@@ -1,0 +1,34 @@
+# Files that must ship inside the source distribution (sdist) so that
+# `pip install pygo-runtime` can compile the C extension on the user's
+# machine -- on ANY supported platform/arch, not just the one the sdist
+# was built on.
+#
+# This is load-bearing: setup.py's detect_sources() only adds the asm
+# file for the *host* arch (swap_x86_64.S on x86_64, swap_aarch64.S on
+# aarch64), so without an explicit recursive-include the sdist would be
+# missing the other arch's asm and fail to build there.  Likewise the
+# `.h` headers and `.c.inc` fragments are #included (not in `sources`),
+# so they must be listed here too.
+
+include LICENSE
+include README.md
+include pyproject.toml
+include setup.py
+
+# C extension: every source, header, inline fragment, and arch asm.
+recursive-include src/pygo_core *.c *.h *.inc *.S
+
+# Type stubs + PEP 561 marker.
+include src/pygo_core.pyi
+recursive-include src/pygo *.pyi
+include src/pygo/py.typed
+
+# Keep build/test/site artifacts out of the sdist.
+prune build
+prune dist
+prune site
+prune .hypothesis
+prune .pytest_cache
+prune .github
+global-exclude *.so *.pyd *.dylib *.dll *.o *.obj *.pyc
+global-exclude __pycache__
