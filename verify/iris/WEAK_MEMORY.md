@@ -61,12 +61,12 @@ separation-logic program proof.
 ## Build (isolated switch — gpfsl pins iris-dev)
 
 ```sh
-opam switch create pygo-weakmem --packages=ocaml-system
+opam switch create runloom-weakmem --packages=ocaml-system
 opam repo add coq-released https://coq.inria.fr/opam/released
 opam repo add iris-dev git+https://gitlab.mpi-sws.org/iris/opam.git
 opam install -y coq-gpfsl
 ```
-`run_rc11.sh` auto-selects the `pygo-weakmem` switch (override with
+`run_rc11.sh` auto-selects the `runloom-weakmem` switch (override with
 `RUNLOOM_WEAKMEM_SWITCH`) and uses `rocq compile` (Rocq 9.2) or `coqc`. It is kept
 in its own switch so it never disturbs the released-Iris build of Stages 1–2.
 

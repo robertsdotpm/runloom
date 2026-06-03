@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# build.sh -- compile the chase_lev experiment under the pygo-weakmem gpfsl switch.
+# build.sh -- compile the chase_lev experiment under the runloom-weakmem gpfsl switch.
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
-SW="${RUNLOOM_WEAKMEM_SWITCH:-pygo-weakmem}"
+SW="${RUNLOOM_WEAKMEM_SWITCH:-runloom-weakmem}"
 eval "$(opam env --switch="$SW" --set-switch 2>/dev/null)"
 export PATH="$HOME/.opam/$SW/bin:$PATH"
 if command -v rocq >/dev/null 2>&1; then COMPILE() { rocq compile -q "$1"; }

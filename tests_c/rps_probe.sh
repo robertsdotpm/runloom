@@ -4,7 +4,7 @@
 # request throughput, not connection establishment. (The N=2M scale run uses
 # M=1, so its rate is connection-bound — different metric.)
 set -u
-cd /home/x/projects/pygo
+cd /home/x/projects/runloom
 exec > tests_c/rps.log 2>&1
 # args to bench_server_runloom: N H M   (M = round-trips per connection)
 for cfg in "20000 8 200" "20000 16 200" "20000 32 200" "100000 16 100"; do

@@ -14,8 +14,8 @@
   on a matrix: Linux 3.13t + Windows 3.12 + Windows 3.13t + **macOS arm64 3.13t**.
   It is **post-merge validation, NOT a merge gate.** Do **not** wait on it or
   block a merge on it — a full pass is ~15 min, too slow to sit on. Just
-  **periodically check** its result: `~/projects/pygo-ci-runner/ci-status.sh`
-  (or `cat ~/projects/pygo-ci-status/latest.txt`). `PASS`/`PASS_BASELINE` = fine;
+  **periodically check** its result: `~/projects/runloom-ci-runner/ci-status.sh`
+  (or `cat ~/projects/runloom-ci-status/latest.txt`). `PASS`/`PASS_BASELINE` = fine;
   `REGRESSION` = a NEW failure worth a look (known platform gaps are baselined).
   Each target deletes its built extension before the `--force` rebuild, so a
   broken build surfaces as `BUILD_FAIL` instead of hiding behind a stale `.pyd`/
@@ -62,7 +62,7 @@
   same-thread by PEEKING `runloom_tls_sched`, never `runloom_sched_get()` (which
   lazily allocates a sched + runs mimalloc — fatal on a foreign waker thread, a
   run_in_executor blockpool worker / iouring CQE, that has no usable heap).
-  Regression guard: `pygo_compat/call_soon_fifo.py`.
+  Regression guard: `runloom_compat/call_soon_fifo.py`.
 
 ## aio bridge invariants (src/runloom/aio/)
 - `runloom.aio` is a package (`src/runloom/aio/`): the shared foundation is
@@ -91,7 +91,7 @@
   everything they reach) until the original deadline — broad, since cancelled
   timers are everywhere (timeout/wait_for, retries, retransmits) and it fails
   strict gc-leak teardown checks (aiocoap). Regression guard:
-  `pygo_compat/timer_leak.py`.
+  `runloom_compat/timer_leak.py`.
 - **_StreamTransport must seed `self._io_g = None` BEFORE calling
   connection_made.** A protocol that writes inside connection_made (server
   greeting, aiocoap CSM, SMTP banner) reaches `_kick_io`, which reads
@@ -101,7 +101,7 @@
   dropped connection. Seed it None first (so the kick spawns the io goroutine),
   and make the post-connection_made spawn `if self._io_g is None` to avoid two
   io goroutines on one fd (corrupts the one-shot netpoll arm). Regression guard:
-  `pygo_compat/tls_connection_made_write.py`.
+  `runloom_compat/tls_connection_made_write.py`.
 - **Loop-level callbacks (call_soon / call_at / call_soon_threadsafe) must run
   with NO current task active** — route them through `_pg_run_loop_cb`, which
   clears `_CURRENT_TASKS[loop]` for the callback and restores it after, exactly
@@ -112,14 +112,14 @@
   "Cannot enter into task X while another task Y is being executed", and runloom
   drops the wakeup → the woken task hangs (aiohttp connector `_wait_for_close`
   teardown deadlock). Generalizes 78c1d03 (the `_wait_fd` save/restore) to the
-  callback side. Regression guard: `pygo_compat/aiohttp_leak_probe.py`.
+  callback side. Regression guard: `runloom_compat/aiohttp_leak_probe.py`.
 
 - **Server close() must wake its accept-loop goroutines.** Each create_server
   accept loop parks in `_wait_fd(listen_fd, READ)`; `close()` must
   `cancel_wait_fd()` them (then they see `_closed` and exit), else they stay
   parked forever on the closed listen fd -- a one-per-server goroutine leak in a
   long-lived loop (per-test loop reset hides it). Regression guard:
-  `pygo_compat/goroutine_leak_char.py` (parked stays 0 across cycles).
+  `runloom_compat/goroutine_leak_char.py` (parked stays 0 across cycles).
 
 - **Future done-callbacks defer through call_soon, in asyncio order.**
   `Future.__schedule_callbacks` in asyncio defers EVERY done-callback via
@@ -138,7 +138,7 @@
   synchronously inverted the order and broke the falcon/uvicorn websocket-close
   ordering (a close frame's done-callback ran before the recv waiter) and
   aiojobs' pending-job promotion. Regression guard:
-  `pygo_compat/ws_close_order_repro.py` (frame_sent True == stock).
+  `runloom_compat/ws_close_order_repro.py` (frame_sent True == stock).
   NOTE: this matches asyncio's *callback* order, not its inline-task-step: a
   woken RunloomTask is readied (a goroutine), not run-to-next-await inline inside
   its wakeup, so a done-callback racing the woken task's NEXT step is still M:N
@@ -155,7 +155,7 @@
   instead of its `__next__` branch, raising "object has no attribute 'send'".
   `_driver` must therefore set `send_value = None` in BOTH the fast (future
   already done) and slow (parked) wake paths; exceptions/cancels still route via
-  `coro.throw`. Regression guard: `pygo_compat/aiocsv_repro.py`.
+  `coro.throw`. Regression guard: `runloom_compat/aiocsv_repro.py`.
 
 ## Conventions
 - Use `safe-rm`, never plain `rm`, for any file deletion.

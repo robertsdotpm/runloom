@@ -3,7 +3,7 @@
 # Logs everything (incl. peak RSS via /usr/bin/time -v) to tests_c/n2m.log
 # so results survive a stalled interactive result channel.
 set -u
-cd /home/x/projects/pygo
+cd /home/x/projects/runloom
 # Single-instance guard: a second launch no-ops instead of racing the first.
 exec 9>/tmp/n2m.lock
 flock -n 9 || { echo "another run_n2m holds the lock; exiting" >&2; exit 0; }

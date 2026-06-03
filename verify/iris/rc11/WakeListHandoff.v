@@ -19,7 +19,7 @@
    The spec proves the owner reads the published readiness (42), never the stale
    0, under RC11.  Adapted from gpfsl-examples/mp; unique token inlined.
 
-   Run: verify/iris/rc11/run_rc11.sh  (needs the pygo-weakmem gpfsl switch). *)
+   Run: verify/iris/rc11/run_rc11.sh  (needs the runloom-weakmem gpfsl switch). *)
 
 From stdpp Require Import namespaces.
 From iris.algebra Require Import excl.

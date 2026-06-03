@@ -53,7 +53,7 @@ asyncio code (no legal reordering freedom); its bug-finding value is raw
 goroutine/channel/select code and the raw parts of mixed programs.
 (`call_soon_threadsafe` is a separate Python-level FIFO queue drained in order by
 the keepalive, never on the ready ring; regression-guarded by
-`pygo_compat/call_soon_fifo.py`.)
+`runloom_compat/call_soon_fifo.py`.)
 
 Its real, demonstrated surface is: several (raw) goroutines parked on
 channels/select/sleep in single-hub mode, whose **wake order** it permutes —

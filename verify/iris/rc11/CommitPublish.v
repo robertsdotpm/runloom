@@ -24,7 +24,7 @@
    `true` state ships an escrow that transfers ownership of `ready ↦ 42`, so
    the acquiring reader obtains it.  A `coqc` PASS under gpfsl IS the proof.
 
-   Run: verify/iris/rc11/run_rc11.sh  (needs the pygo-weakmem opam switch). *)
+   Run: verify/iris/rc11/run_rc11.sh  (needs the runloom-weakmem opam switch). *)
 
 From stdpp Require Import namespaces.
 From iris.algebra Require Import excl.

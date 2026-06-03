@@ -5,13 +5,13 @@
 # A passing compile IS the proof check.  Prints "N passed, M failed".
 #
 # Needs gpfsl, which pins iris-dev and so lives in its own opam switch.  Install:
-#   opam switch create pygo-weakmem --packages=ocaml-system
+#   opam switch create runloom-weakmem --packages=ocaml-system
 #   opam repo add coq-released https://coq.inria.fr/opam/released
 #   opam repo add iris-dev git+https://gitlab.mpi-sws.org/iris/opam.git
 #   opam install -y coq-gpfsl
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
-SW="${RUNLOOM_WEAKMEM_SWITCH:-pygo-weakmem}"
+SW="${RUNLOOM_WEAKMEM_SWITCH:-runloom-weakmem}"
 
 echo "-- iRC11 / RC11 weak memory (gpfsl) --"
 if [ ! -d "$HOME/.opam/$SW/lib/coq/user-contrib/gpfsl" ]; then
