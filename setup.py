@@ -331,10 +331,22 @@ class pygo_build_ext(_build_ext):
 
 _probe_compiler()
 
+# Headers and #included `.c.inc` fragments are not in `sources`, so editing one
+# would NOT trigger a recompile of the `.c` that #includes it -- build_ext only
+# compares each source's mtime to its `.o`.  List them as `depends` so touching
+# any header or fragment rebuilds the whole extension.  (The big `.c` files are
+# split into `<stem>_*.c.inc` fragments; see e.g. module.c.)
+import glob as _glob
+_ext_depends = sorted(
+    _glob.glob(os.path.join(SRC_C, "*.h"))
+    + _glob.glob(os.path.join(SRC_C, "*.c.inc"))
+)
+
 ext = Extension(
     name="pygo_core",
     sources=detect_sources(),
     include_dirs=[SRC_C],
+    depends=_ext_depends,
     extra_compile_args=detect_compile_args(),
     extra_link_args=detect_link_flags(),
     libraries=detect_link_args(),

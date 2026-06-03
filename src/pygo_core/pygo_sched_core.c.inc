@@ -174,6 +174,17 @@ pygo_sched_t *pygo_sched_get(void)
     return s;
 }
 
+/* Non-allocating peek at the goroutine currently running on THIS thread's
+ * single-thread scheduler (NULL if none / no sched here yet).  Unlike
+ * pygo_sched_get() it never lazily mallocs a sched, so it is safe to call from
+ * any thread / hot path.  The M:N path tracks its current g separately
+ * (pygo_mn_tls_current_g). */
+pygo_g_t *pygo_sched_peek_current(void)
+{
+    pygo_sched_t *s = pygo_tls_sched;
+    return s != NULL ? s->current : NULL;
+}
+
 /* ---- Coro entry shim ----
  *
  * Runs ON THE GOROUTINE'S STACK.  Local variables here live for the

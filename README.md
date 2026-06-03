@@ -145,6 +145,15 @@ M:N scheduler isolates a stall to one hub, and a watchdog actively recovers it
 A >50 ms threshold keeps both dormant under normal load, so steady-state
 scheduling is unchanged.
 
+## Stack safety (default ON)
+
+Goroutine stacks are small (that's what makes a million of them affordable) but
+safe: deep recursion raises `RecursionError` (not a crash), stacks grow on
+demand, every stack has a guard page so an overflow faults cleanly instead of
+corrupting a neighbour, and CPython's stack-hungry error paths can't blow a
+goroutine. For a native call that needs a big stack in one shot, pass
+`stack_size=`. Details: [docs/stack-sizing.md](docs/stack-sizing.md#defending-against-overflow).
+
 ## Ways to use it
 
 pygo is one scheduler with several front-ends -- pick whichever fits your code;

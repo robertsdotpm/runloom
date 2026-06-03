@@ -109,6 +109,15 @@ class _StreamTransport(_StreamIOMixin, asyncio.Transport):
         # send() can park EPOLLOUT (and clobber the recv arm), so TLS writes
         # ALWAYS go through the buffer + single io goroutine.
         self._sock_is_plain = getattr(sock, "ssl_object", None) is None
+        # _io_g must exist BEFORE connection_made: a protocol that WRITES inside
+        # connection_made (e.g. aiocoap sends its initial CSM, SMTP its greeting)
+        # reaches _kick_io, which reads self._io_g.  Over TLS every write goes
+        # through the buffer + io goroutine (a _TLSSock send can park EPOLLOUT),
+        # so the write can't fast-path -- it kicks, and an undefined _io_g raised
+        # AttributeError.  Seed it None; _kick_io then SPAWNS the io goroutine,
+        # and the post-connection_made spawn below becomes a no-op (must not
+        # double-spawn -- two io goroutines on one fd corrupt the netpoll arm).
+        self._io_g = None
         # start_tls reuses an already-connected protocol, so it suppresses the
         # re-fire (asyncio doesn't call connection_made again on TLS upgrade).
         if call_connection_made:
@@ -116,7 +125,8 @@ class _StreamTransport(_StreamIOMixin, asyncio.Transport):
                 self._run_cb(protocol.connection_made, self)
             except Exception as e:
                 self._report(e, "connection_made")
-        self._io_g = _go_io(self._io_loop)
+        if self._io_g is None:
+            self._io_g = _go_io(self._io_loop)
 
 
     def close(self, exc=None):

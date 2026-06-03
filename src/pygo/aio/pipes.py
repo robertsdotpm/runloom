@@ -21,7 +21,12 @@ class _ReadPipeTransport(asyncio.ReadTransport):
             protocol.connection_made(self)
         except Exception as e:
             self._report(e, "connection_made")
-        self._read_g = pygo_core.go(self._read_loop)
+        # Roomy stack: _read_loop runs protocol.data_received synchronously, and
+        # that can recurse deep into C (e.g. asyncssh encrypts a channel write
+        # via chacha20/OpenSSL right inside data_received) -- the default 128 KB
+        # g-stack overflows and SEGVs.  Same rationale as the socket io_loop /
+        # _IO_STACK; the pipe transport just took a different spawn path.
+        self._read_g = _go_io(self._read_loop)
 
     def _read_loop(self):
         # Cooperative replacement for the old reader thread: non-blocking os.read
@@ -115,7 +120,7 @@ class _ReadPipeTransport(asyncio.ReadTransport):
             return
         self._paused = False
         if self._read_g is None and not self._closing:
-            self._read_g = pygo_core.go(self._read_loop)
+            self._read_g = _go_io(self._read_loop)
 
     def close(self):
         self._close(None)
@@ -170,7 +175,9 @@ class _WritePipeTransport(asyncio.WriteTransport):
         # no cross-thread queue -- just one bytearray + one goroutine.
         if self._drain_g is None:
             if not self._closing:
-                self._drain_g = pygo_core.go(self._drain_loop)
+                # Roomy stack: the drain side runs protocol.resume_writing (user
+                # callback), kept consistent with the read loop / _IO_STACK.
+                self._drain_g = _go_io(self._drain_loop)
         else:
             try:
                 self._drain_g.cancel_wait_fd()   # wake it if parked on WRITE

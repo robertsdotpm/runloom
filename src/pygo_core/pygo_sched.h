@@ -357,6 +357,9 @@ PYGO_INLINE int pygo_sched_ready_empty(const pygo_sched_t *s) {
  * a single global. */
 pygo_sched_t *pygo_sched_get(void);
 
+/* Non-allocating: the g running on this thread's single-thread sched, or NULL. */
+pygo_g_t *pygo_sched_peek_current(void);
+
 /* Spawn a new goroutine.  Returns a NEW reference to a PygoG Python
  * object (the wrapper around pygo_g_t).  Stealing the callable. */
 PyObject *pygo_sched_spawn(pygo_sched_t *s, PyObject *callable);
