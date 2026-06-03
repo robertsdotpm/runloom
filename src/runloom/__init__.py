@@ -39,7 +39,7 @@ import sys as _sys
 # CPython's per-thread recursion counter is not swapped across our
 # ucontext stack switch (v0 -- properly handled in the M:N C path
 # planned for phase 3).  Each runloom.yield_() permanently decrements the
-# counter on the OS thread, so a long runloom.run() eventually hits
+# counter on the OS thread, so a long runloom.run_single() eventually hits
 # RecursionError.  Bumping the limit makes the leak tolerable for
 # anything short of a multi-hour service; the proper fix is to
 # save/restore tstate->py_recursion_remaining + c_recursion_remaining

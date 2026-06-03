@@ -50,7 +50,7 @@ def prewarm_stdlib():
     later takes through ``getaddrinfo`` is shallow.
 
     Idempotent and best-effort: never raises into the caller.  Called
-    from runloom.run() and the aio loop before the scheduler drives any
+    from runloom.run() / run_single() and the aio loop before the scheduler drives any
     goroutine.  This is the enabler for small default goroutine stacks."""
     global _prewarmed
     if _prewarmed:

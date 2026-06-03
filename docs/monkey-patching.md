@@ -34,7 +34,7 @@ def worker():
     return data
 
 runloom.go(worker)
-runloom.run()
+runloom.run_single()
 ```
 
 ## What gets patched
@@ -96,7 +96,7 @@ def main():
         print(results.recv()[0])
 
 runloom.go(main)
-runloom.run()
+runloom.run_single()
 ```
 
 Three HTTP requests, fully concurrent, written in completely linear
@@ -126,7 +126,7 @@ def worker(i):
 
 for i in range(32):
     runloom.go(lambda i=i: worker(i))
-runloom.run()
+runloom.run_single()
 ```
 
 32 concurrent MySQL queries on one OS thread, no thread pool, no

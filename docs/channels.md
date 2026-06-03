@@ -42,7 +42,7 @@ def consumer():
 
 runloom.go(producer)
 runloom.go(consumer)
-runloom.run()
+runloom.run_single()
 ```
 
 Output:
@@ -103,7 +103,7 @@ def consumer():
 
 runloom.go(producer)
 runloom.go(consumer)
-runloom.run()
+runloom.run_single()
 ```
 
 Output:
@@ -148,7 +148,7 @@ def consumer():
 
 runloom.go(producer)
 runloom.go(consumer)
-runloom.run()
+runloom.run_single()
 ```
 
 Output:
@@ -260,7 +260,7 @@ if not ok:
 
 ### Don't share a closed-channel object across `run()` calls
 
-`runloom.run()` returns when all goroutines are done.  If you keep a
+`runloom.run_single()` returns when all goroutines are done.  If you keep a
 closed channel as a module-level singleton across multiple `run()`
 calls, you'll see `close on closed channel` errors on the second
 iteration.  Create channels inside the entry point.

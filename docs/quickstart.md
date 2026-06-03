@@ -12,7 +12,7 @@ def hello():
     print("hello from a goroutine!")
 
 runloom.go(hello)        # spawn -- doesn't run yet
-runloom.run()            # drive the scheduler until everyone finishes
+runloom.run_single()            # drive the scheduler until everyone finishes
 ```
 
 Output:
@@ -22,7 +22,7 @@ hello from a goroutine!
 ```
 
 `go(fn)` queues `fn` for execution on the runloom scheduler.  Nothing
-runs until you call `runloom.run()` -- that's the scheduler's main
+runs until you call `runloom.run_single()` -- that's the scheduler's main
 loop, equivalent of Go's program-startup runtime.
 
 ## Many goroutines
@@ -35,7 +35,7 @@ def worker(i):
 
 for i in range(10):
     runloom.go(lambda i=i: worker(i))   # bind i per-spawn
-runloom.run()
+runloom.run_single()
 ```
 
 Output (order is scheduler-dependent):
@@ -68,7 +68,7 @@ def slow():
 # Spawn three sleeps concurrently; they all wake at ~the same time.
 for _ in range(3):
     runloom.go(slow)
-runloom.run()
+runloom.run_single()
 ```
 
 Output:
@@ -108,7 +108,7 @@ def consumer():
 
 runloom.go(producer)
 runloom.go(consumer)
-runloom.run()
+runloom.run_single()
 ```
 
 Output:
@@ -155,7 +155,7 @@ def accept_loop():
         runloom.go(lambda c=conn: handle(c))
 
 runloom.go(accept_loop)
-runloom.run()
+runloom.run_single()
 ```
 
 Test it:

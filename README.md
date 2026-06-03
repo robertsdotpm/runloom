@@ -26,7 +26,7 @@ def accept_loop():
         runloom.go(lambda c=conn, a=addr: handle(c, a))
 
 runloom.go(accept_loop)
-runloom.run()
+runloom.run_single()
 ```
 
 Already have `async def` code? Run it unchanged on runloom's scheduler with the

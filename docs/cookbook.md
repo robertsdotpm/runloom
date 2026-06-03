@@ -39,7 +39,7 @@ def main():
     print("sum:", total)
 
 runloom.go(main)
-runloom.run()
+runloom.run_single()
 ```
 
 ## Pipeline (3-stage)
@@ -77,7 +77,7 @@ def main():
     print(result.recv()[0])
 
 runloom.go(main)
-runloom.run()
+runloom.run_single()
 ```
 
 ## Fan-in (many producers, one consumer)
@@ -101,7 +101,7 @@ def main():
         print(prod_id, value)
 
 runloom.go(main)
-runloom.run()
+runloom.run_single()
 ```
 
 If producers might close the channel, use `for v in ch`.  If they
@@ -131,7 +131,7 @@ def main():
         runloom.go(lambda c=c: consumer(c, ch))
 
 runloom.go(main)
-runloom.run()
+runloom.run_single()
 ```
 
 ## Cancellation via a "done" channel
@@ -162,7 +162,7 @@ def main():
     done.close()                    # wakes every recv on done
 
 runloom.go(main)
-runloom.run()
+runloom.run_single()
 ```
 
 `select` on a closed `done` channel returns immediately -- `recv` from
@@ -195,7 +195,7 @@ def main():
     print(with_timeout(data, 0.1))  # None
 
 runloom.go(main)
-runloom.run()
+runloom.run_single()
 ```
 
 For asyncio code, just use `asyncio.wait_for(coro, timeout=N)` --
@@ -239,7 +239,7 @@ def main():
         print("clean shutdown")
 
 runloom.go(main)
-runloom.run()
+runloom.run_single()
 ```
 
 ## Mixing runloom with `threading`
@@ -255,7 +255,7 @@ def worker_thread():
         pass
     for _ in range(100):
         runloom.go(task)
-    runloom.run()
+    runloom.run_single()
 
 threads = [threading.Thread(target=worker_thread) for _ in range(4)]
 for t in threads: t.start()
@@ -288,7 +288,7 @@ def slow_op():
 
 for _ in range(20):
     runloom.go(slow_op)
-runloom.run()
+runloom.run_single()
 ```
 
 20 goroutines compete for 4 tokens; at most 4 ever run simultaneously.
@@ -321,7 +321,7 @@ def main():
     runloom.go(lambda: consumer(work))
 
 runloom.go(main)
-runloom.run()
+runloom.run_single()
 ```
 
 ## Echo server with per-connection cancellation
@@ -362,7 +362,7 @@ def serve(addr):
 
 import threading
 runloom.go(lambda: serve(("127.0.0.1", 9000)))
-runloom.run()
+runloom.run_single()
 ```
 
 ## Replacing `threading.Thread` for I/O-bound work
@@ -378,7 +378,7 @@ t.start()
 
 # After
 import runloom
-g = runloom.go(worker)             # plus runloom.run() at top level
+g = runloom.go(worker)             # plus runloom.run_single() at top level
 ```
 
 You go from 8 MB per thread (Linux default) to ~16 KB per goroutine.
