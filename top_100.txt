@@ -1,7 +1,7 @@
 runloom - validated asyncio projects
 ========================================
 
-151 name-brand Python asyncio projects whose own test suites (or
+154 name-brand Python asyncio projects whose own test suites (or
 equivalent end-to-end exercises) run GREEN under runloom's pure-Python
 M:N runtime -- driven through runloom.aio / RunloomEventLoop on free-threaded
 CPython 3.13t (PYTHON_GIL=0). 'pass==stock' means the result matches
@@ -294,4 +294,12 @@ Task is a Python asyncio.Task subclass with no such C field, so greenback
 raises "Couldn't determine C offset". Same class as aiodebug/unsync: a lib
 reaching into CPython/asyncio internals runloom implements differently.
 
-TOTAL DISTINCT PROJECTS PASSING: 151
+
+------------------------------------------------------------
+BEYOND 100 (cont.): reactive events, signals, DI (3)
+------------------------------------------------------------
+152. eventkit                   - reactive Event emit + handler chain
+153. pynnex                     - signal/slot emit across objects
+154. magic-di                   - dependency injector resolves service
+
+TOTAL DISTINCT PROJECTS PASSING: 154
