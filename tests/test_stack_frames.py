@@ -250,14 +250,18 @@ print("PASS")
 
 
 class TestDeepRecursionSafety(unittest.TestCase):
-    """Deeply-nested input to C-recursive stdlib ops must degrade to a clean
-    RecursionError on a goroutine's small stack, NOT a SEGV -- otherwise a
-    nested-JSON/pickle bomb crashes the process.  Safe because these ops cost
-    ~60-80 B of C stack per level, so CPython's recursion counter fires (~150
-    levels ~ 12 KB) well within the 32 KB default.  (ast/compile cost ~1.5 KB
-    per level and CAN SEGV a goroutine past ~18 deep -- a documented residual,
-    see docs/cooperative_stdlib_coverage.md; not exercised here because a SEGV
-    would take the test process down.)"""
+    """Deeply-nested input to C-recursive stdlib ops must not SEGV a goroutine.
+
+    Two mechanisms keep it safe:
+      * json/pickle/marshal/copy.deepcopy (~60-80 B of C stack per level)
+        degrade to a clean RecursionError -- CPython's recursion counter fires
+        (~150 levels ~ 12 KB) well within the 32 KB default stack.
+      * ast/compile (~1.5 KB per level, which WOULD SEGV past ~18 deep before
+        the counter fires) are auto-offloaded to the backend pool's full-size
+        thread stack when called inside a goroutine (the `compile` patch).
+    eval(str)/exec(str) compile internally in C (not via builtins.compile) and
+    are the documented residual -- use offload()/a roomier g-stack.
+    """
 
     def test_json_bomb_is_clean_recursionerror(self):
         assert_pass(r"""
@@ -289,6 +293,37 @@ def w():
         ok = "clean"
     assert ok == "clean", ok
 runloom_c.go(w); runloom_c.run()
+print("PASS")
+""")
+
+    def test_compile_deep_offloaded_no_segv(self):
+        # compile of 100-deep nested source SEGVs inline (~1.5 KB/level) but is
+        # auto-offloaded to the pool's 8 MB stack by the `compile` patch.
+        assert_pass(r"""
+SRC = "(" * 100 + "1" + ")" * 100
+def w():
+    code = compile(SRC, "<s>", "eval")   # auto-offloaded inside a goroutine
+    assert eval(code) == 1
+runloom_c.go(w); runloom_c.run()
+print("PASS")
+""")
+
+    def test_ast_parse_deep_offloaded_no_segv(self):
+        # ast.parse routes through builtins.compile, so it's covered too.
+        assert_pass(r"""
+import ast
+SRC = "(" * 100 + "1" + ")" * 100
+def w():
+    tree = ast.parse(SRC)
+    assert type(tree).__name__ == "Module"
+runloom_c.go(w); runloom_c.run()
+print("PASS")
+""")
+
+    def test_compile_passthrough_off_goroutine(self):
+        # Off any goroutine, compile must be the plain builtin (no offload).
+        assert_pass(r"""
+assert eval(compile("6*7", "<s>", "eval")) == 42
 print("PASS")
 """)
 

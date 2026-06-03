@@ -124,3 +124,47 @@ def _unpatch_heavy():
         if mod is not None:
             setattr(mod, func, orig)
     _orig_heavy.clear()
+
+
+# ============================================================
+# compile -- offload the parse/compile of a goroutine's source
+#
+# compile() (and ast.parse(), which calls builtins.compile) recurse one C-stack
+# frame per nesting level of the SOURCE, ~1.5 KB/level -- enough to overflow a
+# goroutine's 32 KB C stack past ~18-deep nesting (a guard-page SEGV), and it
+# happens BEFORE CPython's recursion counter (sized for the 8 MB main stack)
+# can fire a clean RecursionError.  This is the one C-recursion the stdlib has
+# that crashes a goroutine rather than raising: json/pickle/marshal/deepcopy
+# cost only ~60-80 B/level, so their counter fires first and they stay safe (see
+# docs/cooperative_stdlib_coverage.md).  compile is pure -- source in, code
+# object out, no thread affinity -- so relocate it (like the heavy table above)
+# to the backend pool's full-size thread stack when called inside a goroutine:
+# the deep recursion runs where it fits and the goroutine parks.
+#
+# Cheap: compiles overwhelmingly happen at import on the MAIN thread, where
+# _in_goroutine() is false -> straight passthrough; only an in-goroutine compile
+# takes the pool round-trip.  Covers builtins.compile directly, ast.parse()
+# (bare `compile` -> builtins), and source imports that compile via the builtin.
+# NOT covered: eval(str)/exec(str), which compile internally in C (not via
+# builtins.compile) and need the caller's namespace -- a goroutine that evals/
+# execs deeply-nested untrusted source should use runloom.monkey.offload() (or a
+# roomier g-stack via runloom_c.go(fn, stack_size=...)).
+# ============================================================
+_orig_compile = None
+
+
+def _patched_compile(*args, **kwargs):
+    if not _in_goroutine():
+        return _orig_compile(*args, **kwargs)
+    return _get_backend().submit(_orig_compile, args, kwargs)
+
+
+def _patch_compile():
+    global _orig_compile
+    _orig_compile = builtins.compile
+    builtins.compile = _patched_compile
+
+
+def _unpatch_compile():
+    if _orig_compile is not None:
+        builtins.compile = _orig_compile

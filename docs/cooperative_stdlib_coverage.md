@@ -113,21 +113,33 @@ how much C stack each recursion level costs:
 
 So the common, DoS-relevant cases (parsing untrusted nested JSON/pickle in a
 goroutine) are **safe** — they degrade to `RecursionError` exactly like on the
-main thread.  The only SEGV is `ast`/`compile` of source nested deeper than
-~18, inside a goroutine — uncommon (compiling code is rarely on a hot goroutine
-path).  There is no clean shared-counter fix (lowering the counter to make
-`ast` safe would force `json`/`pickle` to `RecursionError` at ~14, breaking
-ordinary nested data); the general fix is CPython 3.14's stack-pointer-based
-recursion check, at which point runloom should set each goroutine's
-`c_stack_*` bounds.  Until then: a goroutine that compiles/`ast`-parses
-deeply-nested (or untrusted) source should use a roomier stack
-(`runloom_c.go(fn, stack_size=…)`) or offload it to a thread.
+main thread.  `ast`/`compile` would be the exception (they SEGV past ~18-deep,
+before the counter fires), so they are **auto-offloaded**: the `compile` patch
+(`monkey/heavy.py`) routes `builtins.compile` to the backend pool's full-size
+thread stack when called inside a goroutine, where the recursion fits and
+degrades to a clean `RecursionError` like the main thread.  This covers
+`compile()`, `ast.parse()` (it calls `builtins.compile`), and source imports.
+It's a no-op off-goroutine (where compiles normally happen), so import-time
+compilation is untouched.
+
+There is no clean shared-counter fix that would make this general (lowering the
+counter to make `ast` safe would force `json`/`pickle` to `RecursionError` at
+~14, breaking ordinary nested data); the general fix is CPython 3.14's
+stack-pointer-based recursion check, at which point runloom can set each
+goroutine's `c_stack_*` bounds and drop the offload.
+
+**Residual:** `eval(str)`/`exec(str)` compile *internally in C* (not via
+`builtins.compile`) and need the caller's namespace, so they are not offloaded.
+A goroutine that `eval`/`exec`s deeply-nested untrusted source should use
+`runloom.monkey.offload()` / `runloom_c.blocking()` for the compile, or a
+roomier g-stack (`runloom_c.go(fn, stack_size=…)`).
 
 ### Re-scan summary (stdlib C-frame sweep)
 
 A measured sweep of ~40 stdlib leaf operations confirms the fat-frame surface
 is exactly **two single frames** — `select.select` (50.9 KB) and first-`ssl`
-use (40 KB), both handled above — and the `ast`/`compile` depth residual.
+use (40 KB), both handled above — plus the `ast`/`compile` deep-recursion case
+(now auto-offloaded; `eval`/`exec`-of-string the documented residual).
 Everything else fits the 32 KB default with margin (next-largest: `email`
 parse 21 KB, `json` nested 15 KB, `sqlite3` 13 KB, hashlib/socket/subprocess
 ~10 KB).  The blocking surface (sockets, TLS handshake, DNS, selectors,

@@ -75,6 +75,12 @@ Categories (all default True):
                  /etc/resolv.conf + /etc/hosts, sends queries via
                  cooperatively-patched UDP sockets, parallel A/AAAA,
                  60s result cache.  No threads.
+    compile      builtins.compile offloaded to the pool when called inside a
+                 goroutine (covers ast.parse + source imports too).  compile's
+                 ~1.5 KB/level recursion on nested source overflows a 32 KB
+                 g-stack before CPython's recursion counter fires; the pool
+                 thread's full-size stack runs it safely.  No-op on the main
+                 thread (where compiles normally happen).
 
 Backend layer:
     The non-pollable I/O patches (file, syscalls, os.read/write on
@@ -143,7 +149,8 @@ from .queues import CoSimpleQueue, _patch_queue, _unpatch_queue
 from .executors import (_patch_futures, _unpatch_futures,
                         _patch_multiprocessing, _unpatch_multiprocessing)
 from .dns import _patch_dns, _unpatch_dns
-from .heavy import _patch_heavy, _unpatch_heavy
+from .heavy import (_patch_heavy, _unpatch_heavy,
+                    _patch_compile, _unpatch_compile)
 
 # Section modules, kept as objects so any internal name a caller reads for
 # (runloom.monkey._orig_recv, _dns_result_cache, _patched_send, ...) resolves
@@ -217,7 +224,7 @@ def _uninstall_go_wrapper():
 _DEFAULTS = ("socket", "time", "os", "select", "selectors", "stdio", "ssl",
              "subprocess", "process", "threading", "queue", "futures",
              "multiprocessing", "file", "syscalls", "fcntl", "signal",
-             "heavy", "dns")
+             "heavy", "compile", "dns")
 
 _PATCHERS = {
     "socket":     (_patch_socket,     _unpatch_socket),
@@ -238,6 +245,7 @@ _PATCHERS = {
     "fcntl":      (_patch_fcntl,      _unpatch_fcntl),
     "signal":     (_patch_signal,     _unpatch_signal),
     "heavy":      (_patch_heavy,      _unpatch_heavy),
+    "compile":    (_patch_compile,    _unpatch_compile),
     "dns":        (_patch_dns,        _unpatch_dns),
 }
 
