@@ -32,12 +32,6 @@ import pytest
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-# True on a GIL-enabled interpreter (stock CPython, or a free-threaded build run
-# with PYTHON_GIL=1).  A few tests assert a property that requires hubs to run in
-# genuine PARALLEL; under the GIL they are concurrent-but-serialised and the
-# property can't hold, so those tests skip rather than spuriously hang.
-_GIL_ON = (not hasattr(sys, "_is_gil_enabled")) or sys._is_gil_enabled()
-
 
 def run_mn(code, timeout=60):
     """Run an M:N snippet in a fresh free-threaded subprocess (GIL off).
@@ -172,9 +166,6 @@ print("PASS")
 # must never satisfy its own send with its own recv (unbuffered), and the
 # whole thing must make progress (no deadlock).
 # ---------------------------------------------------------------------------
-@pytest.mark.skipif(_GIL_ON, reason="self-select requires genuine parallelism; "
-                    "the select-to-select rendezvous deadlocks under the GIL "
-                    "(see project_pygo_gil_on_mn_self_select)")
 def test_self_select_no_self_pairing():
     """Go TestSelfSelect: two goroutines, each looping
     `select { case c<-id: ; case v:=<-c: }` on a SHARED channel.  For an

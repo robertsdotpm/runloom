@@ -51,6 +51,26 @@ static int waiter_claim(pygo_chan_waiter_t *w)
                                        __ATOMIC_ACQUIRE);
 }
 
+/* Lock held.  Does this waiter queue hold any waiter that does NOT belong to
+ * `park`?  A select installs its waiters case-by-case and then re-checks each
+ * case for a ready counterparty; counting its OWN already-installed waiter (a
+ * self-select: send AND recv on one channel) as that counterparty makes the
+ * install abort and retry -- forever under serial execution, where no other
+ * goroutine can interleave to consume it (the GIL-on / controlled-scheduler
+ * self-select livelock).  Only a FOREIGN waiter -- a plain channel op, or a
+ * different select -- is a real rendezvous, so the readiness re-check uses this
+ * instead of a bare non-NULL test.  Go avoids the issue structurally by checking
+ * all cases ready BEFORE enqueuing any sudog; this is the same guarantee kept
+ * within pygo's incremental-install scheme. */
+static int waiter_has_foreign(pygo_chan_waiter_t *head,
+                              struct pygo_select_park *park)
+{
+    pygo_chan_waiter_t *w;
+    for (w = head; w != NULL; w = w->next)
+        if (w->select != park) return 1;   /* select==NULL (plain) or other park */
+    return 0;
+}
+
 /* Pop the first claimable waiter from the queue.  Stale select
  * tombstones (already claimed by a different channel) are popped and
  * discarded.  Returns NULL when queue exhausted. */

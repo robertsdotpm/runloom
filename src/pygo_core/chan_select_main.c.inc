@@ -91,7 +91,7 @@ select_retry:
              * phase-1.  Re-check before parking. */
             if (cases[i].op == PYGO_SELECT_SEND) {
                 if (ch->closed || (ch->cap > 0 && ch->len < ch->cap) ||
-                    ch->receivers != NULL) {
+                    waiter_has_foreign(ch->receivers, &park)) {
                     pygo_mutex_unlock(&ch->lock);
                     /* Race: someone freed space / opened a slot.
                      * Tear down what we've installed and retry try-each. */
@@ -153,7 +153,8 @@ select_retry:
                 continue;
             }
             if (cases[i].op == PYGO_SELECT_RECV) {
-                if (ch->closed || ch->len > 0 || ch->senders != NULL) {
+                if (ch->closed || ch->len > 0 ||
+                    waiter_has_foreign(ch->senders, &park)) {
                     pygo_mutex_unlock(&ch->lock);
                     {
                         int expected = -1;
