@@ -100,5 +100,12 @@
   teardown deadlock). Generalizes 78c1d03 (the `_wait_fd` save/restore) to the
   callback side. Regression guard: `pygo_compat/aiohttp_leak_probe.py`.
 
+- **Server close() must wake its accept-loop goroutines.** Each create_server
+  accept loop parks in `_wait_fd(listen_fd, READ)`; `close()` must
+  `cancel_wait_fd()` them (then they see `_closed` and exit), else they stay
+  parked forever on the closed listen fd -- a one-per-server goroutine leak in a
+  long-lived loop (per-test loop reset hides it). Regression guard:
+  `pygo_compat/goroutine_leak_char.py` (parked stays 0 across cycles).
+
 ## Conventions
 - Use `safe-rm`, never plain `rm`, for any file deletion.
