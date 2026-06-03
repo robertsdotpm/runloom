@@ -88,6 +88,17 @@
   and make the post-connection_made spawn `if self._io_g is None` to avoid two
   io goroutines on one fd (corrupts the one-shot netpoll arm). Regression guard:
   `pygo_compat/tls_connection_made_write.py`.
+- **Loop-level callbacks (call_soon / call_at / call_soon_threadsafe) must run
+  with NO current task active** — route them through `_pg_run_loop_cb`, which
+  clears `_CURRENT_TASKS[loop]` for the callback and restores it after, exactly
+  like stock asyncio's `_run_once` (current_task() is None there; a deferred
+  `Task.__step` does its own enter_task/leave_task). A PygoTask that parks
+  mid-`coro.send` via a raw pygo park leaves the slot pointing at itself; without
+  this clear, a deferred STOCK-Task wakeup running at loop level hits enter_task's
+  "Cannot enter into task X while another task Y is being executed", and pygo
+  drops the wakeup → the woken task hangs (aiohttp connector `_wait_for_close`
+  teardown deadlock). Generalizes 78c1d03 (the `_wait_fd` save/restore) to the
+  callback side. Regression guard: `pygo_compat/aiohttp_leak_probe.py`.
 
 ## Conventions
 - Use `safe-rm`, never plain `rm`, for any file deletion.
