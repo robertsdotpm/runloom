@@ -110,23 +110,44 @@ def _unpatch_fcntl():
 # possible but adds a backend round trip to the common fast case, so it is
 # deliberately left out of v0.
 # ============================================================
+import io as _io_mod
+import _pyio
+
 _orig_open = None
+_orig_io_open = None
 
 
-def _patched_open(*args, **kwargs):
+def _patched_open(file, *args, **kwargs):
+    # A POLLABLE fd (pipe/fifo/socket/tty) opened as a buffered file object --
+    # the classic `subprocess.Popen(...).stdout.read()` / `os.popen().read()`
+    # footgun -- routes through pure-Python _pyio, whose FileIO uses the
+    # cooperative os.read/os.write (park on wait_fd) instead of the immutable
+    # C BufferedReader's raw blocking syscall.  So a buffered read on a pipe
+    # parks the goroutine rather than wedging the hub.  Regular files keep the
+    # fast C path (their buffered reads don't block on local disk; the open
+    # syscall itself is offloaded when called from a goroutine).
+    if isinstance(file, int) and _fd_pollable(file):
+        return _pyio.open(file, *args, **kwargs)
     if not _in_goroutine():
-        return _orig_open(*args, **kwargs)
-    return _get_backend().submit(_orig_open, args, kwargs)
+        return _orig_open(file, *args, **kwargs)
+    return _get_backend().submit(_orig_open, (file,) + args, kwargs)
 
 
 def _patch_file():
-    global _orig_open
+    # builtins.open and io.open are the same object but separate attributes;
+    # subprocess builds its pipe streams via io.open, so patch both.
+    global _orig_open, _orig_io_open
     _orig_open = builtins.open
+    _orig_io_open = _io_mod.open
     builtins.open = _patched_open
+    _io_mod.open = _patched_open
 
 
 def _unpatch_file():
-    builtins.open = _orig_open
+    if _orig_open is not None:
+        builtins.open = _orig_open
+    if _orig_io_open is not None:
+        _io_mod.open = _orig_io_open
 
 
 
