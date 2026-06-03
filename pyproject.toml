@@ -56,7 +56,7 @@ dev = [
     "runloom[test]",
     "build>=1.0",
     "twine>=5",
-    "cibuildwheel>=2.16",
+    "cibuildwheel>=2.20",   # `enable = ["cpython-freethreading"]` support
 ]
 
 [project.urls]
@@ -76,12 +76,16 @@ Source = "https://github.com/robertsdotpm/runloom"
 # --------------------------------------------------------------------
 [tool.cibuildwheel]
 # CPython only (PyPy lacks the C-API surface we rely on).
-build = "cp311-* cp312-* cp313-* cp314-*"
+# Build the free-threaded (no-GIL) interpreters too: cp31Xt is a SEPARATE
+# ABI from cp31X, and 3.13t is runloom's headline multi-core target -- without
+# its own wheels those users would have to compile the sdist.
+enable = ["cpython-freethreading"]
+build = "cp311-* cp312-* cp313-* cp313t-* cp314-* cp314t-*"
 # Skip 32-bit and musl for now; the asm fcontext path needs musl-specific
 # testing that's not in CI yet.  Linux x86_64 + aarch64, glibc only.
 skip = ["*-win32", "*-manylinux_i686", "*-musllinux_*", "pp*"]
 # Sanity-check imports after the wheel is built.
-test-command = "python -c \"import runloom, runloom_c; print('OK', runloom_c.backend(), runloom_c.netpoll_backend())\""
+test-command = "python -c \"import runloom; print('OK', runloom.backend(), runloom.netpoll_backend())\""
 build-verbosity = 1
 
 [tool.cibuildwheel.linux]

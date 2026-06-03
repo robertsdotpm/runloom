@@ -293,20 +293,21 @@ a C compiler then — see *Building*). runloom has **no runtime dependencies**.
 > Maintainers: this project uses no hosted CI, so wheels are built by hand per
 > platform — see [RELEASING.md](https://github.com/robertsdotpm/runloom/blob/main/RELEASING.md).
 
-## Building
+## Building from source (contributors)
 
-From a clone (editable / development install):
+Only needed to hack on runloom itself — normal use is `pip install runloom`
+above. From a clone:
 
 ```bash
-pip install -e .                                    # needs a C compiler
+pip install -e .                                    # editable; compiles the C ext
 ~/.pyenv/versions/3.13.13t/bin/python3.13t -m pip install -e .   # free-threaded
 ```
 
-No compiler? `scripts/install.sh` (POSIX) / `scripts\install.bat` (Windows)
-detect-and-install one, then build. Build knobs (`RUNLOOM_BACKEND=ucontext`,
-`RUNLOOM_NO_IOCP=1`, `RUNLOOM_DEBUG=1`, `RUNLOOM_EXTRA_CFLAGS`, …) and the
-`cibuildwheel` matrix (CPython 3.11–3.14, Linux/macOS/Windows) are documented
-in [docs/](https://github.com/robertsdotpm/runloom/tree/main/docs/).
+Needs a C compiler; `scripts/install.sh` (POSIX) / `scripts\install.bat`
+(Windows) bootstrap one if absent. Build knobs (`RUNLOOM_BACKEND`,
+`RUNLOOM_NO_IOCP`, `RUNLOOM_DEBUG`, `RUNLOOM_EXTRA_CFLAGS`, …) and the
+`cibuildwheel` matrix are documented in
+[docs/](https://github.com/robertsdotpm/runloom/tree/main/docs/).
 
 ## Platform & Python support
 
