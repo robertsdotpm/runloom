@@ -1,7 +1,7 @@
 runloom - validated asyncio projects
 ========================================
 
-214 name-brand Python asyncio projects whose own test suites (or
+219 name-brand Python asyncio projects whose own test suites (or
 equivalent end-to-end exercises) run GREEN under runloom's pure-Python
 M:N runtime -- driven through runloom.aio / RunloomEventLoop on free-threaded
 CPython 3.13t (PYTHON_GIL=0). 'pass==stock' means the result matches
@@ -441,8 +441,18 @@ BEYOND 100 (bulk): llama-index provider integrations (7)
 213. llama-index-llms-fireworks - async acomplete (local server)
 214. llama-index-llms-perplexity - async acomplete (local server)
 
+
+------------------------------------------------------------
+BEYOND 100 (bulk): diverse web/graphql/sse libs (5)
+------------------------------------------------------------
+215. quart                  - async Flask-API framework: test_client GET+POST json
+216. graphql-core           - GraphQL reference engine: async graphql() execution
+217. langchain-cerebras     - ChatCerebras ainvoke (openai-compatible, local server)
+218. sse-starlette          - EventSourceResponse server-sent-events stream (3 events)
+219. aiohttp-cors           - CORS ACAO header on aiohttp test-server GET
+
 NOTE: importing some frame-walking modules INSIDE a goroutine can hit
 runloom's goroutine-frame-chain limit (recursion); module-scope imports (the
 normal pattern) work -- confirmed for these via top-level imports.
 
-TOTAL DISTINCT PROJECTS PASSING: 214
+TOTAL DISTINCT PROJECTS PASSING: 219
