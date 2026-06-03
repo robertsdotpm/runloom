@@ -211,6 +211,68 @@ print("PASS")
 """, timeout=50)
 
 
+# ---------------------------------------------------------------------------
+# BUG-002 regression guard: preemption must never freeze a goroutine mid
+# object-destruction.  A goroutine owns a big WeakKeyDictionary (so the hub
+# tstate owns the keys under biased refcounting) and stays in the eval loop
+# copying it, draining cross-thread refcount merges at every eval-breaker --
+# while a native thread drops the last key references (queuing those merges)
+# and STW-collects.  Before the fix, the wall-clock preemptor would yield the
+# goroutine at a Python-frame entry nested inside an in-flight tp_dealloc
+# (a weakref callback driven by the merge), freezing a half-finished destructor
+# at a GC-safe point -> the native gc.collect() reclaimed the partially-
+# destroyed objects -> use-after-free SIGSEGV.  Mirror of
+# test_weakref.MappingTestCase.test_threaded_weak_key_dict_copy; crashed ~100%
+# pre-fix, clean after (commit fixing runloom_tstate_in_destruction gating).
+# ---------------------------------------------------------------------------
+def test_no_preempt_during_weakref_destruction():
+    """A goroutine churning a WeakKeyDictionary while a native thread GC-collects
+    its keys must not be preempted mid tp_dealloc (free-threaded use-after-free).
+    Runs on a roomy stack so the deep cold-import C burst (the unrelated stack-
+    policy issue) can't confound the result."""
+    assert_pass(r"""
+import gc, threading, weakref
+NHUB, ROUNDS, N = 4, 3, 50000
+def body():
+    class DummyKey:
+        def __init__(self, c): self.c = c
+    class DummyValue:
+        def __init__(self, c): self.c = c
+    for _ in range(ROUNDS):
+        d = weakref.WeakKeyDictionary()
+        keys = []
+        for i in range(N):
+            k, v = DummyKey(i), DummyValue(i)
+            keys.append(k)
+            d[k] = v
+            del k, v
+        def collect(lst=keys):
+            n = 0
+            while lst:
+                lst.pop()
+                n += 1
+                if n % 5000 == 0:
+                    gc.collect()          # full stop-the-world
+        t = threading.Thread(target=collect)
+        t.start()
+        # Stay in the eval loop: drains the cross-thread refcount merges (-> the
+        # weakref-callback destructors) at every eval-breaker, long enough to be
+        # flagged for preemption -- exactly mid-destruction.
+        while keys:
+            try:
+                d.copy()
+            except Exception:
+                pass
+        t.join()
+runloom_c.mn_init(NHUB)
+runloom_c.mn_go(body, 8 << 20)            # roomy stack: dodge the cold-import overflow
+runloom_c.mn_run()
+runloom_c.mn_fini()
+assert runloom_c._self_check(0) == 0
+print("PASS")
+""", timeout=90)
+
+
 if __name__ == "__main__":
     import pytest
     raise SystemExit(pytest.main([__file__, "-v"]))
