@@ -1,7 +1,7 @@
 runloom - validated asyncio projects
 ========================================
 
-172 name-brand Python asyncio projects whose own test suites (or
+175 name-brand Python asyncio projects whose own test suites (or
 equivalent end-to-end exercises) run GREEN under runloom's pure-Python
 M:N runtime -- driven through runloom.aio / RunloomEventLoop on free-threaded
 CPython 3.13t (PYTHON_GIL=0). 'pass==stock' means the result matches
@@ -345,4 +345,12 @@ BEYOND 100 (bulk): tracing/analytics/ML clients (4)
 171. huggingface_hub            - AsyncInferenceClient text_generation (mocked)
 172. replicate                  - async models.get (mocked)
 
-TOTAL DISTINCT PROJECTS PASSING: 172
+
+------------------------------------------------------------
+BEYOND 100 (bulk): MCP SDK + AWS tier via cffi-restored venv (3)
+------------------------------------------------------------
+173. mcp                        - in-memory MCP server+client list_tools + call_tool (anyio streams)
+174. aioboto3                   - async S3 create/put/get/list vs moto server
+175. aiobotocore                - async S3 create/put/get vs moto server (lower-level)
+
+TOTAL DISTINCT PROJECTS PASSING: 175
