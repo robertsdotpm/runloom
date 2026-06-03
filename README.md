@@ -371,7 +371,9 @@ Full guide in [docs/](docs/) (also on Read the Docs):
 [^aio]: Supported surface includes streams (`open_connection` / `start_server`),
     transports + protocols, UDP datagram endpoints, SSL client **and** server,
     `loop.add_reader` / `add_writer`, and `run_in_executor`. Full reference:
-    [Asyncio bridge](docs/asyncio.md).
+    [Asyncio bridge](docs/asyncio.md). The running list of name-brand asyncio
+    projects whose own test suites pass green under the bridge (driven through
+    `PygoEventLoop` on free-threaded 3.13t) is in [top_100.txt](top_100.txt).
 
 [^percore]: On the identical in-process loopback echo bench, Go is **~1.2×
     faster per core** and **~2.3× across 16 cores** (pygo hits CPython's

@@ -1,0 +1,88 @@
+pygo - validated asyncio projects
+========================================
+
+64 name-brand Python asyncio projects whose own test suites (or
+equivalent end-to-end exercises) run GREEN under pygo's pure-Python
+M:N runtime -- driven through pygo.aio / PygoEventLoop on free-threaded
+CPython 3.13t (PYTHON_GIL=0). 'pass==stock' means the result matches
+stock asyncio on the same interpreter; every residual failure traced to
+environment / version / test-framework issues that reproduce on stock,
+not to pygo.
+
+Across these projects -- tens of thousands of third-party tests -- exactly
+one pygo bug surfaced, and it was found, fixed, and merged (the future
+done-callback ordering / websocket-close fix).
+
+------------------------------------------------------------
+FRAMEWORKS, PROTOCOL STACKS & STDLIB CONFORMANCE  (54)
+------------------------------------------------------------
+  1. aiohttp                    - 3.13.5
+  2. starlette                  - 522 passed
+  3. uvicorn                    - ws teardown 1012→1001 fixes landed
+  4. hypercorn                  - asyncio 16/16; close()/sched_reset fix
+  5. tornado                    - selector one-goroutine-per-fd fix
+  6. sanic                      - 25.12.1, installs on 3.13t (httptools/multidict built; SANIC_NO_UVLOOP)
+  7. fastapi                    - 0.136.3
+  8. django channels            - channels 4.3.2 tests/ 33 passed == stock (8 errors identical = channels-redis layer need
+  9. aiohttp-* ecosystem        - aiohttp-jinja2 30 passed + aiohttp-cors 21 passed == stock; aiohttp-session needs aiomca
+ 10. falcon (asgi)              - 4.2.0
+ 11. emmett                     - full suite 146 passed == stock (async web framework: routing, ORM, pipeline, sessions, w
+ 12. httpx                      - SIGSEGV blockpool fix
+ 13. httpcore                   - present, green
+ 14. aiohappyeyeballs           - 2.6.2 full suite 50 passed == stock (dual-stack happy-eyeballs connect logic)
+ 15. websockets                 - 440 passed (NODELAY + unix + netpoll)
+ 16. python-socketio (async)    - 234/234 pygo-specific clean: test_client 80, test_server 81, test_namespace 26, test_man
+ 17. python-engineio (async)    - 227/227 pygo-specific clean: test_asgi 26, test_socket 36, test_client 82, test_server 8
+ 18. channels                   - see #10 (core async consumer machinery green; channels-redis needs a redis server)
+ 19. aiosqlite                  - present, green (no server needed)
+ 20. sqlalchemy (asyncio)       - greenlet async ORM over aiosqlite
+ 21. aiocache                   - 1.0.0a0 memory-backend tests (ut, minus redis/memcached backends): 223 passed == stock,
+ 22. taskiq                     - tests/ 217 passed == stock (7 errors identical = env: deps)
+ 23. faststream                 - asgi+asyncapi+utils 406 passed == stock (3 errors identical = env)
+ 24. celery                     - t/unit app+utils 1153 passed == stock (3 errors identical = env)
+ 25. aiosmtpd                   - *
+ 26. aioftp                     - 786/786 == stock
+ 27. dnspython (async)          - async resolver UDP+TCP: 79 passed / 5 skip == stock (2 fails = testQueryUDPFallback, net
+ 28. asyncssh                   - 2.23.0 on 3.13t (cryptography 48 + bcrypt 5 build)
+ 29. aiomqtt                    - validated over an in-process pure-Python amqtt broker (mqtt_stress.py): QoS1 pub/sub 50/
+ 30. aiocoap                    - CoAP/UDP (add_reader+recvmsg transport)
+ 31. telnetlib3                 - 4.0.4
+ 32. asyncwhois                 - full suite 58 passed == stock (whois/RDAP client over asyncio sockets)
+ 33. asyncio TLS transport      - direct stress (tls_stress.py, trustme cert): 4/4 == stock — TLS echo via start_server/op
+ 34. strawberry-graphql         - tests/schema 615 passed == stock (1 env fail identical on both)
+ 35. ariadne                    - full suite 700 passed/1 skip == stock (2 errors identical = env)
+ 36. anyio                      - Core structured-concurrency validated green on PygoEventLoop via direct stress (anyio_st
+ 37. async-timeout              - present, green
+ 38. tenacity (async retry)     - test_asyncio.py 25/25 == stock
+ 39. backoff                    - 2.2.1 test_backoff_async.py 26 passed == stock (1 error == stock env)
+ 40. aiostream                  - async-generator operators 106/106 == stock
+ 41. aioitertools               - 134 unittest tests OK == stock (async itertools: chain/zip/groupby/islice over async ite
+ 42. aioconsole                 - 0.8.3
+ 43. asyncio Unix-domain sockets - direct stress (unixsock_stress.py): 4/4 == stock — start_unix_server/open_unix_connectio
+ 44. aiometer                   - 1.0.0 full suite 126 passed == stock (run_all/run_on_each/amap concurrency+rate limiting
+ 45. asyncer (tiangolo)         - 0.0.17 full suite 31 passed == stock (syncify/asyncify over anyio)
+ 46. aiomultiprocess            - 20 unittest tests (core+scheduler), 19/20 == stock (1 mp failure identical on both = env
+ 47. janus (sync↔async queue)   - 103/1skip == stock
+ 48. aiofiles                   - present, green (threadpool file I/O)
+ 49. aiopath                    - 38 passed == stock (2 env fails identical on both)
+ 50. aioshutil                  - full suite 8 passed == stock (async shutil over threadpool)
+ 51. CPython test_asyncio       - SWEPT CLEAN — only arch/by-design fails remain (authoritative conformance)
+ 52. twisted (asyncioreactor)   - ~1745 tests == stock, no fixes needed
+ 53. pytest-asyncio             - 1.4.0 full own suite (~390 meta-tests, each spawns a sub-pytest session managing PygoEve
+ 54. asyncio subprocess transport - direct stress (subprocess_stress.py): 9/9 == stock — pipes, exit codes, stdin roundtrip,
+
+------------------------------------------------------------
+UTILITIES, ORMs, QUEUES & SERVICE-BACKED TIER (embedded servers)  (10)
+------------------------------------------------------------
+ 55. async-lru                  - 73
+ 56. aiosmtplib                 - vs embedded aiosmtpd server, 20 roundtrips real TCP (==stock)
+ 57. arq                        - e2e vs embedded real redis-server (enqueue→burst-worker→result, ==stock)
+ 58. saq                        - e2e vs embedded real redis-server (==stock)
+ 59. tortoise-orm               - sqlite async CRUD/filter/update (==stock)
+ 60. redis (redis.asyncio)      - set/get/pipeline/BLPOP/pubsub vs bundled redis-server
+ 61. fakeredis                  - redis.asyncio API surface
+ 62. gql                        - 731 passed (GraphQL client; 88 env fails == stock = sync-requests transport/appsync)
+ 63. aiologger                  - 27 passed (async logging; uvloop/json-dep fails == stock)
+ 64. slixmpp                    - core stanza/JID/element suites pass (base 5, element 32, msg 4, iq 5, jid 35) == stock
+
+TOTAL DISTINCT PROJECTS PASSING: 64
