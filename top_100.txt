@@ -205,4 +205,12 @@ BEYOND 100 (cont.): DI containers, client cache, GitHub (4)
 122. aiogithubapi               - async GitHub API generic GET (mocked)
 123. wireup                     - DI container resolves service
 
-TOTAL DISTINCT PROJECTS PASSING: 123
+
+------------------------------------------------------------
+BEYOND 100 (cont.): retry + DI containers (3)
+------------------------------------------------------------
+124. aioretry                   - async retry-policy retried to success
+125. kink                       - DI inject decorator resolves dependency
+126. lagom                      - DI container resolves service
+
+TOTAL DISTINCT PROJECTS PASSING: 126
