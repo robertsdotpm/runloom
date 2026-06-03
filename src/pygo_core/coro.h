@@ -105,6 +105,10 @@ void pygo_coro_madvise_idle(pygo_coro_t *c);
 void pygo_coro_paint_set(int enabled);
 int  pygo_coro_paint_enabled(void);
 
+/* Opt-in security scrub of recycled goroutine stacks (default off). */
+void pygo_coro_scrub_set(int enabled);
+int  pygo_coro_scrub_enabled(void);
+
 /* Returns the high-water mark in bytes (deepest write detected by
  * scanning for the sentinel).  Returns 0 if painting was disabled or
  * the coro hasn't been used.  Backend may return 0 on Fibers

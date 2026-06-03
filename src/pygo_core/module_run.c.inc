@@ -233,6 +233,22 @@ static PyObject *m_get_stack_size(PyObject *self, PyObject *unused)
     return PyLong_FromSize_t(pygo_sched_get_default_stack_size());
 }
 
+static PyObject *m_set_stack_scrub(PyObject *self, PyObject *arg)
+{
+    int on;
+    (void)self;
+    on = PyObject_IsTrue(arg);
+    if (on < 0) return NULL;
+    pygo_coro_scrub_set(on);
+    Py_RETURN_NONE;
+}
+
+static PyObject *m_get_stack_scrub(PyObject *self, PyObject *unused)
+{
+    (void)self; (void)unused;
+    return PyBool_FromLong(pygo_coro_scrub_enabled());
+}
+
 /* ---- M:N scheduler bindings (Phase C) ---- */
 static PyObject *m_mn_init(PyObject *self, PyObject *args)
 {

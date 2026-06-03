@@ -141,6 +141,13 @@ static PyMethodDef module_methods[] = {
      "before spawning, or to bump after seeing a near-overflow."},
     {"get_stack_size", m_get_stack_size, METH_NOARGS,
      "Return the current per-goroutine default stack size in bytes."},
+    {"set_stack_scrub", m_set_stack_scrub, METH_O,
+     "set_stack_scrub(bool): when True, zero each goroutine's stack as it is\n"
+     "recycled so the next goroutine to reuse it can't read the previous\n"
+     "one's leftovers (TLS keys, request bodies).  Off by default (costs a\n"
+     "stack-sized memset per goroutine completion).  Also via PYGO_STACK_SCRUB=1."},
+    {"get_stack_scrub", m_get_stack_scrub, METH_NOARGS,
+     "Return whether recycled-stack scrubbing is enabled."},
     {"mn_init",     m_mn_init,     METH_VARARGS,
      "mn_init(n=cpus): start N hub threads.  Returns count."},
     {"mn_go",       m_mn_go,       METH_O,
@@ -284,8 +291,13 @@ static void pygo_install_module_getattro(void)
 PyMODINIT_FUNC PyInit_pygo_core(void)
 {
     PyObject *m;
+    const char *scrub_env;
     pygo_diag_init();          /* parses PYGO_DEBUG once; cheap; idempotent */
     pygo_timer_res_init();     /* Windows: 1ms timer resolution (no-op POSIX) */
+    scrub_env = getenv("PYGO_STACK_SCRUB");   /* opt-in recycled-stack wipe */
+    if (scrub_env && scrub_env[0] && scrub_env[0] != '0') {
+        pygo_coro_scrub_set(1);
+    }
     pygo_install_module_getattro();   /* goroutine-safe module attr lookup */
     if (PyType_Ready(&PygoCoroType) < 0) return NULL;
     /* Set by hand rather than in the positional initializer, whose long run

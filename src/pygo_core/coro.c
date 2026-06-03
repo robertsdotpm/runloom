@@ -268,6 +268,34 @@ static int pygo_stack_paint_on = 1;
 void pygo_coro_paint_set(int enabled) { pygo_stack_paint_on = enabled ? 1 : 0; }
 int  pygo_coro_paint_enabled(void)    { return pygo_stack_paint_on; }
 
+/* Security: wipe a goroutine's stack when it is recycled, so the next
+ * goroutine to reuse that stack can't read this one's leftovers (TLS keys,
+ * request bodies -- the aio bridge runs OpenSSL on these stacks). OFF by
+ * default: it costs one stack-sized memset per goroutine completion, and the
+ * leftover is only reachable via a C extension reading uninitialised stack
+ * (Python objects live on the heap, not the goroutine C stack). Enable for
+ * security-sensitive workloads via PYGO_STACK_SCRUB=1 or set_stack_scrub(True).
+ * (Painting would also overwrite the data, but it is calibrated off for
+ * performance after the first few spawns -- so it can't be relied on.) */
+static int pygo_stack_scrub_on = 0;
+void pygo_coro_scrub_set(int enabled) { pygo_stack_scrub_on = enabled ? 1 : 0; }
+int  pygo_coro_scrub_enabled(void)    { return pygo_stack_scrub_on; }
+
+/* Wipe a whole goroutine stack.  On Linux, MADV_DONTNEED frees the page
+ * frames and the next touch re-faults a zero page -- a complete scrub that
+ * costs an O(1) syscall instead of a stack-sized memset (a 512 KB memset
+ * was ~60x the spawn cost in measurement; this is ~flat).  Elsewhere
+ * MADV_DONTNEED is only advisory (may not zero), so fall back to memset for
+ * a guaranteed wipe.  stack is page-aligned and size page-rounded. */
+static void pygo_stack_scrub(void *stack, size_t size)
+{
+#if defined(__linux__) && defined(MADV_DONTNEED)
+    (void)madvise(stack, size, MADV_DONTNEED);
+#else
+    memset(stack, 0, size);
+#endif
+}
+
 #if defined(PYGO_HAVE_FCONTEXT) || defined(PYGO_HAVE_UCONTEXT)
 /* Paint every 8-byte chunk of the stack body with the sentinel.
  * Skip the first 16 bytes (reserved for the pool's free-list header)
@@ -433,6 +461,13 @@ pygo_coro_t *pygo_coro_new(size_t stack_size,
 void pygo_coro_destroy(pygo_coro_t *c)
 {
     if (c == NULL) return;
+    /* Security scrub (opt-in): wipe the stack before it is recycled OR
+     * released, so a later goroutine reusing it sees zero, not this
+     * goroutine's leftovers.  Covers both the coro-pool fast path (which
+     * keeps the stack attached, unscrubbed) and the stack-pool path. */
+    if (pygo_stack_scrub_on && c->stack != NULL) {
+        pygo_stack_scrub(c->stack, c->stack_size);
+    }
     /* Recycle if there's room.  Stack stays attached -- next
      * pygo_coro_new pop reuses it without touching the stack pool.
      * EXCEPT a copy-grown coro: its oversized stack won't match the
