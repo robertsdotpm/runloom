@@ -59,6 +59,7 @@
 #include "runloom_diag.h"
 #include "runloom_gstate.h"
 #include "runloom_introspect.h"
+#include "runloom_iframe.h"
 #include "runloom_stackadvice.h"
 #include "runloom_blockpool.h"
 

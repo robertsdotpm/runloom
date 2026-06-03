@@ -33,6 +33,18 @@ typedef int (*runloom_iframe_cb)(PyCodeObject *code, int line, void *ctx);
  * top is NULL or the platform has no internal frame layout. */
 int runloom_iframe_walk(void *top, int max, runloom_iframe_cb cb, void *ctx);
 
+/* True when `ts` is currently executing CPython object-destruction machinery
+ * that must not be interrupted by a goroutine switch -- a tp_dealloc and its
+ * weakref callbacks / finalizers, driven by either the trashcan unwind
+ * (tstate->delete_later) or the free-threaded biased-refcount cross-thread
+ * merge drain (brc.local_objects_to_merge).  Suspending a goroutine here would
+ * freeze a half-finished destructor on its coro stack while the hub thread
+ * reaches a GC-safe point, letting a concurrent stop-the-world GC / QSBR
+ * reclaim corrupt the partially-destroyed objects.  Reaches into internal
+ * tstate layout, so it lives in this Py_BUILD_CORE-isolated TU.  Returns 0 on
+ * pre-3.13 / non-core builds. */
+int runloom_tstate_in_destruction(PyThreadState *ts);
+
 #ifdef __cplusplus
 }
 #endif

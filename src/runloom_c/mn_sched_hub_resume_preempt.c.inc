@@ -502,12 +502,29 @@ static PyObject *runloom_preempt_eval_frame(PyThreadState *ts,
      * scheduler, or barrier off) it is the wall-clock watchdog flag as before. */
     if (h != NULL && runloom_mn_ctrl.preempt_frames > 0) {
         do_preempt = (++runloom_mn_preempt_ctr >= runloom_mn_ctrl.preempt_frames);
-        if (do_preempt) runloom_mn_preempt_ctr = 0;
     } else {
         do_preempt = (h != NULL &&
                       __atomic_load_n(&h->preempt_requested, __ATOMIC_RELAXED));
-        if (do_preempt) __atomic_store_n(&h->preempt_requested, 0,
-                                         __ATOMIC_RELAXED);
+    }
+    /* Never yield the goroutine while CPython is mid object-destruction on this
+     * tstate -- a tp_dealloc and its weakref callbacks / finalizers, driven by
+     * the trashcan unwind (tstate->delete_later) or the free-threaded biased-
+     * refcount cross-thread merge drain (brc.local_objects_to_merge).
+     * Suspending there freezes a half-finished destructor on the g's coro stack
+     * while the hub thread returns to hub_main (a GC-safe point); a concurrent
+     * stop-the-world GC / QSBR reclaim (e.g. another thread's gc.collect())
+     * then runs against partially-destroyed objects -> use-after-free SIGSEGV
+     * (test_weakref.test_threaded_weak_key_dict_copy).  Cooperative yields never
+     * hit this: they only happen at Python-level call points, never nested
+     * inside a C destructor.  The trigger is left ARMED (frame counter not
+     * reset / preempt_requested not cleared) so the very next frame entry after
+     * the destructor unwinds takes the yield -- preemption is deferred a few
+     * frames, never lost. */
+    if (do_preempt && runloom_tstate_in_destruction(ts)) {
+        do_preempt = 0;
+    } else if (do_preempt) {
+        if (runloom_mn_ctrl.preempt_frames > 0) runloom_mn_preempt_ctr = 0;
+        else __atomic_store_n(&h->preempt_requested, 0, __ATOMIC_RELAXED);
     }
     if (h != NULL && do_preempt && (g = runloom_tls_current_g) != NULL) {
         /* The trigger (frame-count or watchdog flag) was already consumed above,
@@ -579,6 +596,14 @@ static int runloom_mn_liveness_pending_cb(void *arg)
     runloom_hub_t *h = runloom_tls_hub;
     runloom_g_t *g;
     (void)arg;
+    /* Same destruction guard as the eval-frame wrapper: a yield mid tp_dealloc
+     * freezes a half-finished destructor at a GC-safe point (use-after-free).
+     * A single-frame loop -- the only thing this backstop targets -- can't be
+     * inside a C destructor, so this is belt-and-suspenders; if it ever does
+     * fire there, skip and let the sysmon re-post once destruction unwinds. */
+    if (runloom_tstate_in_destruction(PyThreadState_GET())) {
+        return 0;
+    }
     if (h != NULL && (g = runloom_tls_current_g) != NULL) {
         runloom_sched_ready_push(&h->sched, g);
         runloom_pystate_snap(&g->snap);
