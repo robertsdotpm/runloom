@@ -34,7 +34,7 @@ from bench.micro import (  # noqa: E402
 
 
 @pytest.fixture(scope="session", autouse=True)
-def _pin_to_one_numa_node():
+def pin_to_one_numa_node():
     """Pin the whole pytest process to one NUMA node, same as bench.harness,
     so these numbers are comparable to the harness suite."""
     pin(default_pin_set(n=8, node=1))

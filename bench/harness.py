@@ -25,7 +25,6 @@ Run a suite with, e.g.::
     PYTHONPATH=src ~/.pyenv/versions/3.13.13t/bin/python -m bench.micro
 """
 import json
-import math
 import os
 import platform
 import random
@@ -50,7 +49,7 @@ if SRC_DIR not in sys.path:
 RESULTS_DIR = os.path.join(HARNESS_DIR, "results")
 
 
-def _run(cmd):
+def cmd_output(cmd):
     """Best-effort capture of a shell command's stdout; '' on any failure."""
     try:
         out = subprocess.check_output(cmd, stderr=subprocess.DEVNULL)
@@ -59,7 +58,7 @@ def _run(cmd):
         return ""
 
 
-def _read(path):
+def read_text(path):
     try:
         with open(path) as f:
             return f.read().strip()
@@ -68,11 +67,11 @@ def _read(path):
 
 
 def git_sha():
-    return _run(["git", "-C", REPO_ROOT, "rev-parse", "--short", "HEAD"])
+    return cmd_output(["git", "-C", REPO_ROOT, "rev-parse", "--short", "HEAD"])
 
 
 def git_dirty():
-    return bool(_run(["git", "-C", REPO_ROOT, "status", "--porcelain"]))
+    return bool(cmd_output(["git", "-C", REPO_ROOT, "status", "--porcelain"]))
 
 
 # --------------------------------------------------------------------
@@ -83,7 +82,7 @@ def git_dirty():
 # tends to land on the low cpus).
 # --------------------------------------------------------------------
 def numa_cpulist(node):
-    txt = _read("/sys/devices/system/node/node%d/cpulist" % node)
+    txt = read_text("/sys/devices/system/node/node%d/cpulist" % node)
     cpus = []
     for part in txt.split(","):
         if not part:
@@ -139,19 +138,19 @@ def capture_env(pinned=None):
 
     # cpufreq governor is absent on this VM; record whatever is (or isn't)
     # there so a future run on bare metal is comparable.
-    gov = _read("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor") or "n/a (virtualized)"
+    gov = read_text("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor") or "n/a (virtualized)"
 
     return {
         "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "host": platform.node(),
         "kernel": platform.release(),
-        "cpu_model": _cpu_model(),
+        "cpu_model": cpu_model_str(),
         "nproc": os.cpu_count(),
-        "numa_nodes": _numa_node_count(),
+        "numa_nodes": numa_node_count(),
         "governor": gov,
-        "aslr": _read("/proc/sys/kernel/randomize_va_space") or "?",
-        "perf_event_paranoid": _read("/proc/sys/kernel/perf_event_paranoid") or "?",
-        "loadavg": _read("/proc/loadavg").split(" ")[:3],
+        "aslr": read_text("/proc/sys/kernel/randomize_va_space") or "?",
+        "perf_event_paranoid": read_text("/proc/sys/kernel/perf_event_paranoid") or "?",
+        "loadavg": read_text("/proc/loadavg").split(" ")[:3],
         "python": platform.python_version(),
         "python_impl": platform.python_implementation(),
         "gil_enabled": gil,
@@ -166,14 +165,14 @@ def capture_env(pinned=None):
     }
 
 
-def _cpu_model():
-    for line in _read("/proc/cpuinfo").splitlines():
+def cpu_model_str():
+    for line in read_text("/proc/cpuinfo").splitlines():
         if line.startswith("model name"):
             return line.split(":", 1)[1].strip()
     return platform.processor() or "unknown"
 
 
-def _numa_node_count():
+def numa_node_count():
     try:
         return len([d for d in os.listdir("/sys/devices/system/node")
                     if d.startswith("node") and d[4:].isdigit()])
@@ -186,7 +185,7 @@ def _numa_node_count():
 # preemption spike that a mean would smear; the bootstrap CI gives an
 # honest uncertainty band on the median without assuming normality.
 # --------------------------------------------------------------------
-def _bootstrap_median_ci(samples, iters=2000, conf=0.95, seed=12345):
+def bootstrap_median_ci(samples, iters=2000, conf=0.95, seed=12345):
     if len(samples) < 3:
         return (min(samples), max(samples))
     rng = random.Random(seed)
@@ -207,7 +206,7 @@ def summarize(times, inner):
     mean = statistics.fmean(times)
     mad = statistics.median([abs(t - median) for t in times])
     stdev = statistics.pstdev(times) if len(times) > 1 else 0.0
-    lo, hi = _bootstrap_median_ci(times)
+    lo, hi = bootstrap_median_ci(times)
     per_op = median / inner
     return {
         "samples": len(times),
@@ -290,10 +289,10 @@ class Suite:
         stats["note"] = note
         stats["raw_s"] = times
         self.results.append(stats)
-        self._print_row(stats)
+        self.print_row(stats)
         return stats
 
-    def _print_row(self, s):
+    def print_row(self, s):
         print("  %-34s %10.1f ops/s  %10.1f ns/op  med=%8.3fms  rsd=%4.1f%%"
               % (s["name"], s["ops_per_s"], s["per_op_ns"],
                  s["median_s"] * 1e3, s["rsd_pct"]))
@@ -326,12 +325,12 @@ class Suite:
                  "-dirty" if e["git_dirty"] else ""))
         print("cpu: %s  | %d vCPU / %s NUMA  | pinned=%s  aslr=%s  load=%s"
               % (e["cpu_model"], e["nproc"], e["numa_nodes"],
-                 _fmt_cpus(e["pinned_cpus"]), e["aslr"],
+                 fmt_cpus(e["pinned_cpus"]), e["aslr"],
                  "/".join(e["loadavg"])))
         print("=" * 78)
 
 
-def _fmt_cpus(cpus):
+def fmt_cpus(cpus):
     if not cpus:
         return "none"
     return "%d cpus [%d..%d]" % (len(cpus), cpus[0], cpus[-1])

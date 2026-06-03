@@ -63,19 +63,30 @@ def ensure_nogil():
                 "GIL still enabled after re-exec with PYTHON_GIL=0 -- "
                 "cannot guarantee a free-threaded benchmark")
         return
+    argv = reexec_argv()
+    if argv is None:
+        # Can't safely rebuild the command (stdin '-' or `-c ...`): don't
+        # re-exec into an empty/wrong program. The assert_nogil tripwire
+        # still protects any measurement that follows.
+        return
     env = dict(os.environ)
     env["PYTHON_GIL"] = "0"
     env[REEXEC_FLAG] = "1"
-    os.execve(sys.executable, _reexec_argv(), env)
+    os.execve(sys.executable, argv, env)
 
 
-def _reexec_argv():
-    """Rebuild argv, preserving the `-m module` form when present."""
+def reexec_argv():
+    """Rebuild argv to re-launch with the GIL forced off, preserving the
+    `-m module` form.  Returns None when the entry point can't be
+    reconstructed (a `-` stdin script or `python -c`)."""
     base = [sys.executable, "-X", "gil=0"]
     main = sys.modules.get("__main__")
     spec = getattr(main, "__spec__", None)
     if spec is not None and getattr(spec, "name", None):
         return base + ["-m", spec.name] + sys.argv[1:]
+    argv0 = sys.argv[0] if sys.argv else ""
+    if argv0 in ("", "-", "-c") or not os.path.isfile(argv0):
+        return None
     return base + sys.argv
 
 

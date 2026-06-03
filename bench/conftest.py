@@ -16,7 +16,7 @@ from bench.gil import assert_nogil, is_free_threaded_build
 
 
 @pytest.fixture(scope="session", autouse=True)
-def _require_nogil():
+def require_nogil():
     # Runs after collection (where brotli would have flipped the GIL) but
     # before any benchmark executes -- the right place to catch a forgotten
     # PYTHON_GIL=0 before a single number is recorded.

@@ -144,17 +144,17 @@ def main():
     print("  %-12s %14s %9s %11s" % ("config", "hashes/s", "speedup", "efficiency"))
     seq_tput = TOTAL / seq["min_s"]
     print("  %-12s %14s %9s %11s"
-          % ("sequential", _h(seq_tput), "1.00x", "-"))
+          % ("sequential", fmt_hashes(seq_tput), "1.00x", "-"))
     if base1:
         b = TOTAL / base1["min_s"]
         for h, r in mn_results.items():
             t = TOTAL / r["min_s"]
             print("  %-12s %14s %8.2fx %10.0f%%"
-                  % ("mn %d hub" % h, _h(t), t / b, 100.0 * (t / b) / h))
+                  % ("mn %d hub" % h, fmt_hashes(t), t / b, 100.0 * (t / b) / h))
     s.write()
 
 
-def _h(x):
+def fmt_hashes(x):
     return "%.2f M/s" % (x / 1e6)
 
 
