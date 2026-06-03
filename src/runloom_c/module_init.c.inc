@@ -366,6 +366,20 @@ PyMODINIT_FUNC PyInit_runloom_c(void)
     if (scrub_env && scrub_env[0] && scrub_env[0] != '0') {
         runloom_coro_scrub_set(1);
     }
+    {   /* RUNLOOM_STACK_SIZE=<bytes>: override the per-goroutine stack floor
+         * before any scheduler is created.  Non-freezing -- calibration still
+         * ratchets up.  Lets the 1M-goroutine memory model trade the 128 KB
+         * select-safety floor back down (accepting the no-fat-C-frame contract)
+         * without touching code. */
+        const char *sz_env = getenv("RUNLOOM_STACK_SIZE");
+        if (sz_env && sz_env[0]) {
+            char *end = NULL;
+            unsigned long long v = strtoull(sz_env, &end, 10);
+            if (end != sz_env && v > 0) {
+                runloom_sched_set_default_stack_floor((size_t)v);
+            }
+        }
+    }
     {
         /* GOTRACEBACK-style goroutine dump: SIGQUIT on POSIX, Ctrl+Break
          * (CTRL_BREAK_EVENT) on Windows. */

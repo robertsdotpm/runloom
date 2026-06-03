@@ -25,6 +25,15 @@ static void runloom_cal_record(runloom_g_t *g)
     if (runloom_cal_completed >= RUNLOOM_CAL_TARGET) {
         size_t bound = runloom_cal_max_hwm * RUNLOOM_CAL_SAFETY;
         size_t chosen = runloom_next_pow2(bound);
+        /* Calibration only adapts UP, never below the established floor:
+         * a g that overflows crashes before completing (its HWM is never
+         * sampled), so shrinking the floor under a program whose first
+         * RUNLOOM_CAL_TARGET gs happen not to call a fat-C-frame leaf
+         * (select.select needs ~51 KB) would re-arm a guard-page SEGV on
+         * the next such call.  runloom_cal_default starts at the compile
+         * default (or the RUNLOOM_STACK_SIZE / set_stack_size floor) and
+         * only ratchets upward. */
+        if (chosen < runloom_cal_default) chosen = runloom_cal_default;
         if (chosen < RUNLOOM_MIN_STACK_SIZE) chosen = RUNLOOM_MIN_STACK_SIZE;
         if (chosen > RUNLOOM_MAX_STACK_SIZE) chosen = RUNLOOM_MAX_STACK_SIZE;
         runloom_cal_default = chosen;
@@ -52,6 +61,18 @@ void runloom_sched_set_default_stack_size(size_t bytes)
 size_t runloom_sched_get_default_stack_size(void)
 {
     return runloom_cal_default;
+}
+
+/* Set the initial stack floor WITHOUT freezing calibration (unlike
+ * runloom_sched_set_default_stack_size, which is the explicit user override and
+ * freezes).  Used once at import to apply RUNLOOM_STACK_SIZE: it moves the
+ * floor that calibration ratchets up from, but leaves painting/adaptation on.
+ * Must run before the first runloom_sched_get() so the main sched picks it up. */
+void runloom_sched_set_default_stack_floor(size_t bytes)
+{
+    if (bytes < RUNLOOM_MIN_STACK_SIZE) bytes = RUNLOOM_MIN_STACK_SIZE;
+    if (bytes > RUNLOOM_MAX_STACK_SIZE) bytes = RUNLOOM_MAX_STACK_SIZE;
+    runloom_cal_default = bytes;
 }
 
 void runloom_sched_stack_stats(runloom_stack_stats_t *out)

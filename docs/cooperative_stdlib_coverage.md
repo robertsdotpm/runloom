@@ -23,7 +23,7 @@ routes through it cooperates transparently.  e.g. `urllib`/`http.client`/
 | TLS (`ssl`) incl. handshake | **COOP** | `wrap_socket` does a cooperative client handshake |
 | DNS (`getaddrinfo`/`gethostbyname`) | **COOP** | async resolver; honors `AI_NUMERICHOST` |
 | `select.epoll`/`select.kqueue` + `selectors` | **COOP** | park on the backing fd via `wait_fd` |
-| `select.select` / `select.poll` (multi-fd) | **COOP** | offloaded to the pool (see crash note) |
+| `select.select` / `select.poll` (multi-fd) | **COOP** | offloaded to the pool so the wait parks instead of busy-polling the hub |
 | pollable-fd file objects (pipes: `Popen.stdout`, `os.popen`) | **COOP** | `open`/`io.open` route pollable fds through `_pyio` on cooperative `os.read` |
 | `subprocess` run/communicate/wait | **COOP** | pidfd + cooperative selectors/os |
 | `os.waitpid`/`wait*`, `os.system` | **COOP** | pidfd / offload |
@@ -41,33 +41,48 @@ routes through it cooperates transparently.  e.g. `urllib`/`http.client`/
 `*` Handoff makes GIL-releasing C calls cooperative without an explicit patch:
 the hub goes DETACHED, a rescue thread adopts it (~50 ms), other goroutines run.
 
-## Known issue: GIL-release + timer-park SIGSEGV (scheduler-level)
+## Resolved: select.select() SIGSEGV was a goroutine stack overflow
 
-A goroutine that makes a **GIL-releasing C call and then parks on the timer
-(`sched_sleep`)**, in a loop, under **≥2 hubs**, gets its suspended eval-frame
-tstate corrupted → deterministic SIGSEGV.  Parks on `wait_fd` (netpoll) are
-**not** affected, and a park-only loop is clean — so the trigger is
-specifically *GIL-release then timer-park* on a hub.
+An earlier note here described a "GIL-release + timer-park SIGSEGV" thought to
+be a deep M:N tstate-corruption hazard.  **That diagnosis was wrong** — it was
+a plain goroutine **C-stack overflow**, and it had nothing to do with the GIL,
+timers, or the number of hubs.
 
-This is a deep M:N/free-threaded tstate hazard (the eval loop bakes a tstate
-into the stackful-coro frame); it needs a scheduler fix validated with the
-TSan/FV tooling, **not** a monkey patch.  The monkey busy-poll paths that used
-this shape on a hot loop — `select.select`/`select.poll` (→ `subprocess.
-communicate`, `socketserver`, `http.server`) — were changed to **offload** the
-blocking call instead (the goroutine merely parks, the crash-free pattern), so
-no first-party stdlib path triggers it.  Lower-frequency busy-poll sites
-(`fcntl.flock`, `sigtimedwait`, mp `SemLock`) retain the residual risk; they
-use a growing backoff (few cycles) and can't be safely offloaded (per-thread
-signal masks / lock ownership).
+CPython's `select_select_impl` declares three `pylist[FD_SETSIZE + 1]` arrays
+and uses **50.9 KB of C stack in a single frame** (measured with
+`runloom_coro_scan_hwm`).  Every other stdlib leaf is <10 KB — `ssl` handshake
+8 KB, `json` 6 KB, `getaddrinfo`/`re` ~3 KB — so `select` is the worst case by
+6×.  The old default goroutine stack was **32 KB**, smaller than that frame, so
+the *very first* `select.select()` in a goroutine ran its
+`-fstack-clash-protection` probe page-by-page straight into the coro's
+PROT_NONE guard page → deterministic SIGSEGV, on **every** scheduler (M:1 `go`,
+M:N `mn_go`, any hub count).  The "GIL-release / timer-park / ≥2 hubs" framing
+was correlation: `select.select` happened to be the test's GIL-releasing call,
+but its real relevance was the fat frame.  Park-only and `wait_fd` loops were
+clean only because they never call a fat-frame C function.
 
-Minimal reproducer (deterministic, ≥2 hubs):
+**Fix (scheduler-level, not a monkey patch):** the default goroutine C-stack is
+now **128 KB** — it clears `select`'s 50.9 KB with a ~2.5× margin for Python /
+user frames above it.  The cost is VM address space only, not RSS (coro stacks
+are demand-paged and `MADV_DONTNEED`'d on recycle; VMA count is size-
+independent).  Calibration still adapts UP for stack-hungry programs but now
+**never shrinks below the floor** (a g that overflows crashes before its HWM is
+sampled, so a program whose first 1000 gs happen not to call `select` must not
+be allowed to shrink the floor and re-arm the crash).  Tune the floor with
+`RUNLOOM_STACK_SIZE=<bytes>` or `runloom_c.set_stack_size()`.  Regression guard:
+`tests/test_stack_size.py`.
+
+The `select.select`/`select.poll` **multi-fd offload** is retained, but for
+cooperation, not crash-safety: it lets a multi-fd wait *park* on a pool worker
+instead of busy-polling the hub.  Empty/single-fd `select` still runs inline on
+the goroutine stack and is safe purely because of the 128 KB floor.
+
+Reproducer (now exits cleanly; SEGV'd before the fix at the 32 KB default):
 
 ```python
 import select, runloom, runloom_c
 runloom.monkey.patch(); GO = runloom_c.mn_go
 def worker():
-    for _ in range(300):
-        select.select([], [], [], 0)   # releases + reacquires the GIL
-        runloom.sleep(0.001)           # timer park
+    select.select([], [], [], 0)       # ~51 KB C frame; overflowed 32 KB
 runloom.mn_init(2); GO(worker); runloom.mn_run(); runloom.mn_fini()
 ```

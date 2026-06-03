@@ -501,20 +501,38 @@ runloom_g_t *runloom_sched_sleep_pop(runloom_sched_t *s)
 
 /* ---- Stack calibration ----
  *
- * Default: 32 KB.  Empirically the test suite passes at 16 KB on
- * CPython 3.13t and 8 KB on 3.12; the deepest path is
- * socket.getaddrinfo, which lazy-loads the encodings codec on first
- * call.  32 KB doubles the worst measured floor and keeps 1M gs at
- * 32 GB VM (256 KB would be 256 GB).  Demand-paging means the unused
- * tail consumes no physical RAM until touched.  Calibration adapts
- * UP for stack-hungry programs: after RUNLOOM_CAL_TARGET completions we
- * freeze to next_pow2(max_hwm * RUNLOOM_CAL_SAFETY).  Programs with deep
- * frames in the first 1000 gs (before freeze) should call
- * runloom_sched_set_default_stack_size() -- stacks have no guard page.
+ * Default: 128 KB.  The floor is set by the deepest SINGLE C frame in
+ * the stdlib, NOT by Python call depth: select.select() declares three
+ * `pylist[FD_SETSIZE + 1]` arrays and burns 50.9 KB of C stack in one
+ * frame (measured with runloom_coro_scan_hwm; every other stdlib leaf is
+ * <10 KB -- ssl handshake 8 KB, json 6 KB, getaddrinfo/re ~3 KB).  An
+ * earlier 32 KB default predated measuring select (the comment here used
+ * to claim getaddrinfo, ~3 KB, was the deepest path) and SEGV'd on the
+ * very first select.select() in a goroutine: the frame's
+ * -fstack-clash-protection probe walks page-by-page straight into the
+ * coro's PROT_NONE guard page.  128 KB clears select with a ~2.5x margin
+ * for Python / user frames stacked above it.
+ *
+ * The cost of the larger floor is VM ADDRESS SPACE only, not RSS: coro
+ * stacks are demand-paged and MADV_DONTNEED'd on recycle, so a g that
+ * touches 4 KB costs 4 KB RSS regardless of the 128 KB reservation, and
+ * the VMA count (2 per stack: guard + usable) is independent of size.
+ * 1M gs reserve 128 GB VM (was 32 GB) with unchanged RSS; on 64-bit that
+ * is free under default overcommit.  Memory-model-extreme users who KNOW
+ * their goroutines never reach a fat C frame can lower it via
+ * RUNLOOM_STACK_SIZE=<bytes> or runloom_c.set_stack_size() (accepting the
+ * no-fat-C-frame contract -- select will then SEGV again).
+ *
+ * Calibration adapts UP from the floor for stack-hungry programs (after
+ * RUNLOOM_CAL_TARGET completions, freeze to next_pow2(max_hwm *
+ * RUNLOOM_CAL_SAFETY)) but NEVER shrinks below it: a g that overflows
+ * crashes before completing, so its HWM is never sampled, and shrinking
+ * the floor under a program whose first 1000 gs happen not to call
+ * select would re-arm the very crash this floor prevents.
  *
  * Reads/writes are plain (single-threaded scheduler in v0); when
  * Phase C arrives these will move under the scheduler lock. */
-#define RUNLOOM_DEFAULT_STACK_SIZE   (32  * 1024)
+#define RUNLOOM_DEFAULT_STACK_SIZE   (128 * 1024)
 #define RUNLOOM_MIN_STACK_SIZE       (16  * 1024)   /* 3.13t hard floor */
 #define RUNLOOM_MAX_STACK_SIZE       (8   * 1024 * 1024)
 #define RUNLOOM_CAL_TARGET           1000     /* gs before freeze */
