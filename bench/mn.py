@@ -21,6 +21,7 @@ import threading
 
 import pygo_core
 
+from bench.gil import ensure_nogil
 from bench.harness import Suite, default_pin_set
 
 N = int(os.environ.get("PYGO_BENCH_N", "128"))
@@ -108,6 +109,10 @@ def make_asyncio():
 
 
 def main():
+    # Force the GIL off before measuring real M:N parallelism, which a
+    # silently re-enabled GIL would invalidate.  In main(), not at import,
+    # so pytest collection of this module stays side-effect-free.
+    ensure_nogil()
     # Need at least max(HUB_COUNTS) cpus to show real scaling.
     cpus = default_pin_set(n=max(HUB_COUNTS), node=1)
     s = Suite("mn", pin_cpus=cpus, samples=10, warmup=2)

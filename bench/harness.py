@@ -35,6 +35,8 @@ import sys
 import time
 from datetime import datetime, timezone
 
+from bench.gil import assert_nogil
+
 
 # --------------------------------------------------------------------
 # Repo / import bootstrap.  Make "import pygo_core" work regardless of
@@ -234,6 +236,8 @@ class Suite:
         self.name = name
         self.samples = samples
         self.warmup = warmup
+        # Tripwire: never let a GIL-on run masquerade as free-threaded.
+        assert_nogil("Suite(%r) construction" % name)
         cpus = pin_cpus if pin_cpus is not None else default_pin_set()
         self.pinned = pin(cpus)
         self.env = capture_env(self.pinned)
@@ -252,6 +256,9 @@ class Suite:
         whose construction cost must NOT be folded into the per-op number.
         """
         import gc
+        # Re-check before every bench: a workload's own imports could have
+        # flipped the GIL on after the Suite was built.
+        assert_nogil("bench(%r)" % name)
         s = self.samples if samples is None else samples
         w = self.warmup if warmup is None else warmup
         if setup is not None:

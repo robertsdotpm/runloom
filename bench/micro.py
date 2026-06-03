@@ -17,6 +17,7 @@ Run:
 """
 import pygo_core
 
+from bench.gil import ensure_nogil
 from bench.harness import Suite
 
 
@@ -116,6 +117,10 @@ def make_buffered(n, cap):
 
 
 def main():
+    # Run-as-script entry point: force the GIL off (re-exec with -X gil=0 if
+    # needed) before any measurement.  Done here, not at import time, so that
+    # `import bench.micro` from pytest stays side-effect-free.
+    ensure_nogil()
     s = Suite("micro", samples=20, warmup=5)
     s.banner()
     s.bench("spawn+run noop x10k", make_spawn(10_000), inner=10_000,
