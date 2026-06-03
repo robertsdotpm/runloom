@@ -312,6 +312,30 @@ for any underestimate. An explicit `runloom.go(fn, stack_size=...)` always wins
 over the auto-sizer. Off by default (it changes per-kind stack sizes); enable it
 before the runtime starts so kinds are sized from their first spawn.
 
+#### Cold-start scan (`prescan=True`)
+
+The auto-sizer's one weak moment is a kind's *first* goroutine: it starts at the
+generic large default before anything has been measured, so a kind that needs
+more than that on its very first run can overflow before learn-down ever sees
+it. The standout offender is `Decimal` arithmetic -- a single
+`_decimal` frame (`squaretrans_pow2`, big-integer multiply/pow) is **256 KiB**,
+the fattest single frame in the whole 3.13 stdlib.
+
+```python
+runloom.inspect.enable_stack_autosize(prescan=True)   # or RUNLOOM_STACK_AUTOSIZE=prescan
+```
+
+With `prescan` on, an unseen kind's bytecode is loosely scanned for symbols whose
+C implementation has a known fat single frame (from a DWARF `.eh_frame` profile
+of the stdlib -- see `tools/heavy_frames/`). If it references one, the kind
+starts big enough to hold that frame (the **largest** matched frame, never a sum
+-- only the deepest single frame constrains the stack), so it survives its first
+run; learn-down then measures the real usage and right-sizes from there. Only a
+handful of stdlib symbols qualify (chiefly `Decimal`); everything else cold-
+starts at the normal default. The scan is one-level and name-based, so it is a
+loose heuristic, not a guarantee -- the guard page and crash reporter still
+backstop anything it misses.
+
 ## Putting it all together
 
 For a production service:

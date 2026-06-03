@@ -17,12 +17,15 @@ static PyObject *m_stack_advice_enabled(PyObject *self, PyObject *unused)
     return PyBool_FromLong(runloom_advice_enabled());
 }
 
-static PyObject *m_enable_stack_autosize(PyObject *self, PyObject *args)
+static PyObject *m_enable_stack_autosize(PyObject *self, PyObject *args,
+                                         PyObject *kw)
 {
-    int on = 1;
+    static char *kwlist[] = {"on", "prescan", NULL};
+    int on = 1, prescan = 0;
     (void)self;
-    if (!PyArg_ParseTuple(args, "|p", &on)) return NULL;
-    runloom_advice_set_autosize(on);
+    if (!PyArg_ParseTupleAndKeywords(args, kw, "|pp", kwlist, &on, &prescan))
+        return NULL;
+    runloom_advice_set_autosize(on, prescan);
     Py_RETURN_NONE;
 }
 

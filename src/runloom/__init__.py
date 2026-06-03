@@ -125,9 +125,10 @@ if _os.environ.get("RUNLOOM_CRASH", "").strip().lower() not in ("", "0", "off"):
 # goroutine kind large and learns its real size down over its first runs (in
 # memory only, never persisted).  Off by default -- it changes per-kind stack
 # sizes.  See runloom.inspect.enable_stack_autosize().
-if _os.environ.get("RUNLOOM_STACK_AUTOSIZE", "").strip().lower() in ("1", "on", "true"):
+_autosize_env = _os.environ.get("RUNLOOM_STACK_AUTOSIZE", "").strip().lower()
+if _autosize_env in ("1", "on", "true", "prescan"):
     try:
-        _core.enable_stack_autosize(True)
+        _core.enable_stack_autosize(True, _autosize_env == "prescan")
     except Exception:
         pass
 

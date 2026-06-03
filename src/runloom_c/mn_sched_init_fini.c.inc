@@ -339,7 +339,7 @@ static int runloom_mn_go_core(PyObject *callable, runloom_c_entry_fn c_fn,
     g->coro = runloom_coro_new(
                 stack_size > 0
                     ? stack_size
-                    : runloom_advice_size_for(g->advice_key,
+                    : runloom_advice_size_for(g->advice_key, callable,
                                               (size_t)h->sched.stack_size),
                 runloom_g_entry, g);
     if (g->coro == NULL) {

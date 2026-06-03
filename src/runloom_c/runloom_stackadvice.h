@@ -36,14 +36,21 @@ int    runloom_advice_enabled(void);
  * stay the safety net).  Enabling autosize implies measurement, forces painting
  * on, and turns on park-time idle-page reclaim (so the large starts are
  * RSS-free).  Off by default. */
-void   runloom_advice_set_autosize(int on);
+/* `prescan`: also run the cold-start optimizer -- loosely scan an unseen kind's
+ * bytecode for symbols whose C implementation has a fat single stack frame
+ * (e.g. Decimal arithmetic at 256 KiB) and start its first goroutines big
+ * enough to hold that frame, so they don't overflow before being measured.
+ * Off within autosize unless requested. */
+void   runloom_advice_set_autosize(int on, int prescan);
 int    runloom_advice_autosize_enabled(void);
 
 /* At spawn (default-size path only; an explicit stack_size= bypasses this):
- * given the kind key from runloom_advice_note_spawn, return the stack size to
- * use -- the learned size if the kind has samples, the start-large default if
- * not, or `fallback` unchanged if autosize is off.  No Python objects touched. */
-size_t runloom_advice_size_for(size_t key, size_t fallback);
+ * given the kind key (from runloom_advice_note_spawn) and the entry callable,
+ * return the stack size to use -- the learned size if the kind has samples; for
+ * an unseen kind the start-large default, raised by the cold-start optimizer if
+ * `prescan` is on and the code references a fat-frame symbol; or `fallback`
+ * unchanged if autosize is off.  GIL must be held (it may read the callable). */
+size_t runloom_advice_size_for(size_t key, PyObject *callable, size_t fallback);
 
 /* At spawn (GIL held): return a non-zero key identifying this callable's kind,
  * recording the kind's display name if first-seen.  Returns 0 if advice is off,

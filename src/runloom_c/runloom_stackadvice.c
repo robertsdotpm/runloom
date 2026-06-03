@@ -10,6 +10,7 @@
 #include "runloom_stackadvice.h"
 #include "runloom_sched.h"   /* runloom_g_t fields (advice_key, coro) */
 #include "coro.h"
+#include "runloom_heavy_frames.h"   /* generated fat-frame symbol table */
 #include "plat.h"
 #include "plat_compat.h"
 
@@ -21,6 +22,7 @@
 #define RUNLOOM_ADVICE_MIN    ((size_t)16  * 1024)
 #define RUNLOOM_ADVICE_MAX    ((size_t)8   * 1024 * 1024)
 #define RUNLOOM_ADVICE_CAP    2048
+#define RUNLOOM_AUTOSIZE_START_DEFAULT  ((size_t)256 * 1024)
 
 typedef struct {
     size_t key;        /* 0 = empty slot */
@@ -35,7 +37,8 @@ static runloom_mutex_t        runloom_advice_lock;
 static int                    runloom_advice_lock_inited = 0;
 static int                    runloom_advice_on = 0;        /* measurement (atomic) */
 static int                    runloom_autosize_on = 0;      /* apply learned sizes (atomic) */
-static size_t                 runloom_autosize_start = (size_t)256 * 1024;  /* unseen-kind start */
+static int                    runloom_prescan_on = 0;       /* cold-start fat-frame scan (atomic) */
+static size_t                 runloom_autosize_start = RUNLOOM_AUTOSIZE_START_DEFAULT;
 
 /* Forward decls (find/insert are defined lower, after the lock helpers). */
 static runloom_advice_entry_t *runloom_advice_find(size_t key);
@@ -78,9 +81,12 @@ int runloom_advice_enabled(void)
     return __atomic_load_n(&runloom_advice_on, __ATOMIC_ACQUIRE);
 }
 
-void runloom_advice_set_autosize(int on)
+void runloom_advice_set_autosize(int on, int prescan)
 {
     runloom_advice_ensure_lock();
+    /* Establish the start size deterministically each enable: the default,
+     * overridden by the env if set -- never a leftover from a previous call. */
+    runloom_autosize_start = RUNLOOM_AUTOSIZE_START_DEFAULT;
     {
         const char *e = getenv("RUNLOOM_STACK_AUTOSIZE_START");
         if (e != NULL && e[0]) {
@@ -95,6 +101,7 @@ void runloom_advice_set_autosize(int on)
         runloom_coro_paint_set(1);
         runloom_coro_park_reclaim_set(1);
     }
+    __atomic_store_n(&runloom_prescan_on, (on && prescan) ? 1 : 0, __ATOMIC_RELEASE);
     __atomic_store_n(&runloom_autosize_on, on ? 1 : 0, __ATOMIC_RELEASE);
 }
 
@@ -103,26 +110,77 @@ int runloom_advice_autosize_enabled(void)
     return __atomic_load_n(&runloom_autosize_on, __ATOMIC_ACQUIRE);
 }
 
-size_t runloom_advice_size_for(size_t key, size_t fallback)
+/* Cold-start optimizer: loosely scan the entry callable's bytecode names for a
+ * fat-frame symbol (Decimal arithmetic, ...) and, if present, return a stack big
+ * enough to hold that single frame plus headroom for the call chain reaching it.
+ * MAX over matches, never a sum -- only the deepest single frame constrains the
+ * stack (sequential C calls reuse the same stack).  GIL held.  Returns `generic`
+ * unchanged when nothing heavy is referenced or the callable has no code. */
+static size_t runloom_advice_cold_start(PyObject *callable, size_t generic)
 {
-    runloom_advice_entry_t *e;
-    size_t sz;
+    PyObject *code, *names;
+    Py_ssize_t i, n;
+    size_t worst = 0, want;
+
+    if (callable == NULL) return generic;
+    code = PyObject_GetAttrString(callable, "__code__");
+    if (code == NULL) { PyErr_Clear(); return generic; }
+    names = PyObject_GetAttrString(code, "co_names");
+    Py_DECREF(code);
+    if (names == NULL || !PyTuple_Check(names)) {
+        Py_XDECREF(names);
+        PyErr_Clear();
+        return generic;
+    }
+    n = PyTuple_GET_SIZE(names);
+    for (i = 0; i < n; i++) {
+        PyObject *nm = PyTuple_GET_ITEM(names, i);
+        const char *s;
+        int j;
+        if (!PyUnicode_Check(nm)) continue;
+        s = PyUnicode_AsUTF8(nm);
+        if (s == NULL) { PyErr_Clear(); continue; }
+        for (j = 0; j < RUNLOOM_HEAVY_FRAME_COUNT; j++) {
+            if (strcmp(s, runloom_heavy_frames[j].sym) == 0 &&
+                runloom_heavy_frames[j].frame_bytes > worst) {
+                worst = runloom_heavy_frames[j].frame_bytes;   /* MAX, not sum */
+            }
+        }
+    }
+    Py_DECREF(names);
+    if (worst == 0) return generic;
+    /* Frame + ~50% headroom for the Python/C chain that reaches it. */
+    want = runloom_advice_pow2(worst + worst / 2);
+    if (want < generic) want = generic;
+    if (want > RUNLOOM_ADVICE_MAX) want = RUNLOOM_ADVICE_MAX;
+    return want;
+}
+
+size_t runloom_advice_size_for(size_t key, PyObject *callable, size_t fallback)
+{
+    int sampled = 0;
+    size_t learned = 0;
     if (!__atomic_load_n(&runloom_autosize_on, __ATOMIC_RELAXED)) return fallback;
     if (key == 0) return fallback;    /* untracked / table-full: normal default */
     runloom_advice_ensure_lock();
     runloom_mutex_lock(&runloom_advice_lock);
-    e = runloom_advice_find(key);
-    if (e != NULL && e->samples > 0) {
-        /* Learned: size to the observed peak with margin (== suggested). */
-        sz = runloom_advice_pow2(e->max_hwm * RUNLOOM_ADVICE_SAFETY);
-        if (sz < RUNLOOM_ADVICE_MIN) sz = RUNLOOM_ADVICE_MIN;
-        if (sz > RUNLOOM_ADVICE_MAX) sz = RUNLOOM_ADVICE_MAX;
-    } else {
-        /* Unseen kind: start large, then learn down on the next spawn. */
-        sz = runloom_autosize_start;
+    {
+        runloom_advice_entry_t *e = runloom_advice_find(key);
+        if (e != NULL && e->samples > 0) {
+            /* Learned: size to the observed peak with margin (== suggested). */
+            sampled = 1;
+            learned = runloom_advice_pow2(e->max_hwm * RUNLOOM_ADVICE_SAFETY);
+            if (learned < RUNLOOM_ADVICE_MIN) learned = RUNLOOM_ADVICE_MIN;
+            if (learned > RUNLOOM_ADVICE_MAX) learned = RUNLOOM_ADVICE_MAX;
+        }
     }
     runloom_mutex_unlock(&runloom_advice_lock);
-    return sz;
+    if (sampled) return learned;
+    /* Unseen kind: start large; the cold-start optimizer (prescan) can raise it
+     * to cover a fat single frame the code is about to call. */
+    if (__atomic_load_n(&runloom_prescan_on, __ATOMIC_RELAXED))
+        return runloom_advice_cold_start(callable, runloom_autosize_start);
+    return runloom_autosize_start;
 }
 
 static size_t runloom_advice_hash(const char *s)

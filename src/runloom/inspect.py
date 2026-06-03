@@ -267,7 +267,7 @@ def stack_advice_enabled():
     return _core.stack_advice_enabled()
 
 
-def enable_stack_autosize(on=True):
+def enable_stack_autosize(on=True, prescan=False):
     """Turn on the adaptive per-goroutine-kind stack auto-sizer.
 
     Each goroutine kind (its entry callable) starts *large* the first time it is
@@ -287,8 +287,16 @@ def enable_stack_autosize(on=True):
     `runloom.go(fn, stack_size=...)` always overrides the auto-sizer. Off by
     default; also enable via `RUNLOOM_STACK_AUTOSIZE=1` (start size via
     `RUNLOOM_STACK_AUTOSIZE_START`, default 256 KiB). Best enabled before the
-    runtime starts so kinds are sized from their first spawn."""
-    _core.enable_stack_autosize(bool(on))
+    runtime starts so kinds are sized from their first spawn.
+
+    `prescan=True` additionally runs the cold-start optimizer: before an unseen
+    kind has been measured, its bytecode is loosely scanned for symbols whose C
+    implementation has an unusually fat single stack frame (chiefly `Decimal`
+    arithmetic, which can use 256 KiB in one frame -- see
+    tools/heavy_frames/). A kind that references one starts big enough to hold
+    that frame, so it doesn't overflow on its very first run before the
+    auto-sizer has had a chance to measure it."""
+    _core.enable_stack_autosize(bool(on), bool(prescan))
 
 
 def stack_autosize_enabled():

@@ -1,0 +1,83 @@
+{
+ "meta": {
+  "generated_utc": "2026-06-03T21:53:29.241435Z",
+  "python": "3.13.13t",
+  "platform": "linux-x86_64",
+  "method": "max .eh_frame CFA offset minus 8 (return address); per-function PROLOGUE frame size in bytes, incl. -fstack-clash big frames. NOT cumulative call depth.",
+  "function_count": 11949,
+  "default_goroutine_stack_bytes": 32768,
+  "note": "Trimmed from the full 11949-function profile (stdlib_c_stack_sizes.json) to just the single frames > 8 KiB -- the only ones large enough to matter for a goroutine's small C stack."
+ },
+ "fat_frames_over_8k": [
+  {
+   "name": "squaretrans_pow2",
+   "module": "_decimal",
+   "stack_bytes": 262376
+  },
+  {
+   "name": "swap_halfrows_pow2",
+   "module": "_decimal",
+   "stack_bytes": 65784
+  },
+  {
+   "name": "_PyPathConfig_ComputeSysPath0",
+   "module": "libpython",
+   "stack_bytes": 65608
+  },
+  {
+   "name": "select_select_impl.isra.0",
+   "module": "select",
+   "stack_bytes": 49768
+  },
+  {
+   "name": "_PyModule_IsPossiblyShadowing",
+   "module": "libpython",
+   "stack_bytes": 32808
+  },
+  {
+   "name": "socket_gethostbyaddr",
+   "module": "_socket",
+   "stack_bytes": 16664
+  },
+  {
+   "name": "socket_gethostbyname_ex",
+   "module": "_socket",
+   "stack_bytes": 16616
+  },
+  {
+   "name": "getpath_realpath",
+   "module": "libpython",
+   "stack_bytes": 16456
+  },
+  {
+   "name": "_Py_abspath",
+   "module": "libpython",
+   "stack_bytes": 16440
+  },
+  {
+   "name": "fuzz_pycompile",
+   "module": "_xxtestfuzz",
+   "stack_bytes": 16424
+  },
+  {
+   "name": "stack_overflow",
+   "module": "libpython",
+   "stack_bytes": 16408
+  },
+  {
+   "name": "stack_overflow.constprop.0",
+   "module": "libpython",
+   "stack_bytes": 16408
+  },
+  {
+   "name": "PyMarshal_WriteObjectToFile",
+   "module": "libpython",
+   "stack_bytes": 8296
+  },
+  {
+   "name": "_curses_window_putwin",
+   "module": "_curses",
+   "stack_bytes": 8280
+  }
+ ]
+}

@@ -10,6 +10,7 @@ goroutines actually ran with), which the auto-sizer drives.
 """
 import json
 import os
+from decimal import Decimal
 
 import pytest
 
@@ -126,6 +127,47 @@ def test_env_start_size(monkeypatch):
     runloom.inspect.enable_stack_autosize(True)   # reads the env at enable time
     _batch([heavy], 10)
     assert _row(heavy)["reserved"] == 64 * 1024
+
+
+def decimal_kind():
+    # references the `Decimal` symbol -> _decimal squaretrans_pow2 (256K frame)
+    return Decimal(2) ** 8
+
+
+# next_pow2(262376 * 1.5), the cold-start size for a Decimal-referencing kind
+DECIMAL_COLD = 512 * 1024
+
+
+def test_prescan_off_by_default():
+    runloom.inspect.enable_stack_autosize(True)            # no prescan arg
+    _batch([decimal_kind], 20)
+    assert _row(decimal_kind)["reserved"] == START         # not bumped
+
+
+def test_prescan_bumps_a_fat_frame_kind():
+    runloom.inspect.enable_stack_autosize(True, prescan=True)
+    _batch([decimal_kind, light], 20)
+    # the Decimal kind cold-starts big enough to hold the 256K frame ...
+    assert _row(decimal_kind)["reserved"] == DECIMAL_COLD
+    # ... while a kind with no fat-frame symbols stays at the generic start
+    assert _row(light)["reserved"] == START
+
+
+def test_prescan_does_not_bump_plain_kind():
+    runloom.inspect.enable_stack_autosize(True, prescan=True)
+    _batch([heavy], 20)        # json -- not a fat-frame symbol
+    assert _row(heavy)["reserved"] == START
+
+
+def test_prescan_learns_down_after_first_run():
+    runloom.inspect.enable_stack_autosize(True, prescan=True)
+    _batch([decimal_kind], 20)                  # batch 1: cold-start big
+    assert _row(decimal_kind)["reserved"] == DECIMAL_COLD
+    hwm = _row(decimal_kind)["max_hwm"]
+    _batch([decimal_kind], 20)                  # batch 2: measured -> learned down
+    learned = _row(decimal_kind)["reserved"]
+    assert learned < DECIMAL_COLD               # shrank once measured
+    assert learned >= hwm
 
 
 def test_autosize_under_mn():

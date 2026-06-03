@@ -460,13 +460,13 @@ PyObject *runloom_sched_spawn(runloom_sched_t *s, PyObject *callable)
     /* Default-size path: profile the kind, and (autosize) start it at the
      * kind's learned size instead of the global default. */
     size_t key = runloom_advice_note_spawn(callable);
-    size_t sz  = runloom_advice_size_for(key, (size_t)s->stack_size);
+    size_t sz  = runloom_advice_size_for(key, callable, (size_t)s->stack_size);
     return spawn_common(s, callable, /*noyield*/0, sz, key);
 }
 
 PyObject *runloom_sched_spawn_noyield(runloom_sched_t *s, PyObject *callable)
 {
     size_t key = runloom_advice_note_spawn(callable);
-    size_t sz  = runloom_advice_size_for(key, (size_t)s->stack_size);
+    size_t sz  = runloom_advice_size_for(key, callable, (size_t)s->stack_size);
     return spawn_common(s, callable, /*noyield*/1, sz, key);
 }
