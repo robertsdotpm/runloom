@@ -49,7 +49,11 @@ static void runloom_mn_world_yield_if_monopolizing(runloom_hub_t *h)
         int tss;
         long pend;
         if (i == h->id) continue;
-        tss  = runloom_tstate_attach_state(runloom_hubs[i].tstate);
+        /* Acquire load: a sibling hub publishes its tstate on its own thread
+         * (runloom_hub_main); NULL during that startup window -> attach-state
+         * -1 -> neither branch below fires (skip). */
+        tss  = runloom_tstate_attach_state(
+                   __atomic_load_n(&runloom_hubs[i].tstate, __ATOMIC_ACQUIRE));
         pend = __atomic_load_n(&runloom_hubs[i].pending, __ATOMIC_RELAXED);
         if (tss == RUNLOOM_TS_SUSPENDED ||
             (tss == RUNLOOM_TS_DETACHED && pend > 0)) {
@@ -93,8 +97,33 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
 {
     runloom_hub_t *h = (runloom_hub_t *)arg;
     runloom_pystate_snap_t hub_snap;
+    PyThreadState *hts;
 
-    PyEval_RestoreThread(h->tstate);
+    /* Create this hub's PyThreadState ON THIS THREAD.  PyThreadState_New binds
+     * the tstate (biased-refcount owner id + mimalloc heap) to the calling
+     * thread, so doing it here -- not on the main thread in runloom_mn_init --
+     * makes brc->tid == the ob_tid every object this hub creates carries.  That
+     * is required for cross-thread DECREF to find the live owner instead of
+     * merging its refcount as "exited" (the gc-churn use-after-free).  Publish
+     * with release; sysmon / handoff / world-yield read it with acquire and
+     * tolerate the brief NULL window before this store. */
+    /* Serialize across hubs: CPython's new_threadstate() races on the
+     * gc.immortalize check-then-act outside its HEAD_LOCK when several threads
+     * create tstates at once (see runloom_hub_tstate_lock).  The lock's
+     * release/acquire also publishes the immortalize-flag write to later hubs. */
+    runloom_mutex_lock(&runloom_hub_tstate_lock);
+    hts = PyThreadState_New(runloom_mn_interp);
+    runloom_mutex_unlock(&runloom_hub_tstate_lock);
+    if (hts == NULL) {
+        /* Astronomically unlikely (a small allocation).  This hub cannot run
+         * Python; mark it stopping so the scheduler stops counting on it and
+         * exit.  Other hubs keep draining the global runq; h->tstate stays NULL
+         * and the fini cleanup skips it. */
+        __atomic_store_n(&h->stopping, 1, __ATOMIC_RELEASE);
+        RUNLOOM_THREAD_RETURN(NULL);
+    }
+    __atomic_store_n(&h->tstate, hts, __ATOMIC_RELEASE);
+    PyEval_RestoreThread(hts);
     /* Per-OS-thread coro-backend setup.  On Windows Fibers this calls
      * ConvertThreadToFiber so SwitchToFiber works on this thread; on
      * POSIX it's a no-op.  Must run BEFORE the first runloom_coro_resume

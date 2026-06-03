@@ -130,6 +130,18 @@ static runloom_hub_t *runloom_hubs = NULL;
 static int runloom_hub_count = 0;
 static volatile long runloom_mn_spawn_counter = 0;
 
+/* Serializes the hubs' one-time PyThreadState_New at startup.  Each hub creates
+ * its OWN tstate on its OWN thread (so biased-refcount + mimalloc bind to the
+ * thread that will run it -- see runloom_mn_init), but CPython's new_threadstate()
+ * does a check-then-act on interp->gc.immortalize OUTSIDE its HEAD_LOCK, so N
+ * hubs calling PyThreadState_New at once race there.  Stock CPython never hits
+ * it (threads are spawned serially); this lock restores that serialization.
+ * Process-lifetime, init-once (CRITICAL_SECTION can't be statically inited on
+ * Windows), never destroyed -- mn_init runs single-threaded so the flag needs
+ * no atomics. */
+static runloom_mutex_t runloom_hub_tstate_lock;
+static int runloom_hub_tstate_lock_inited = 0;
+
 /* Global pending-g counter, replacing the per-hub `pending` field
  * for purposes of "is there any work left in the M:N scheduler".
  * Incremented in runloom_mn_go (spawn), decremented in hub_main when a

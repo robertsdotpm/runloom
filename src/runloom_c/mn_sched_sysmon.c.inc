@@ -30,6 +30,10 @@ static RUNLOOM_THREAD_RET runloom_sysmon_main(void *arg)
             long long start = __atomic_load_n(&h->resume_start_ns,
                                               __ATOMIC_RELAXED);
             long seq = __atomic_load_n(&h->resume_seq, __ATOMIC_RELAXED);
+            /* Acquire load: the hub publishes its tstate on its own thread; a
+             * racy/NULL read here is fine -- attach-state -1 classifies as "?"
+             * and gates every handoff/preempt dispatch closed. */
+            PyThreadState *hts = __atomic_load_n(&h->tstate, __ATOMIC_ACQUIRE);
             /* End of a previously-reported episode: the hub moved to a new
              * resume (seq changed) or finished resuming (start cleared). */
             if (w_seq[i] != 0 && (seq != w_seq[i] || start == 0)) {
@@ -51,7 +55,7 @@ static RUNLOOM_THREAD_RET runloom_sysmon_main(void *arg)
                  * adopt the hub -> handoff-RECOVERABLE.  ATTACHED => CPU-bound
                  * or a raw tstate-holding syscall -> needs preemption, not a
                  * handoff.  SUSPENDED => stop-the-world. */
-                int tss = runloom_tstate_attach_state(h->tstate);
+                int tss = runloom_tstate_attach_state(hts);
                 const char *cls =
                     tss == RUNLOOM_TS_DETACHED  ? "DETACHED (blocking-IO: handoff-recoverable)" :
                     tss == RUNLOOM_TS_ATTACHED  ? "ATTACHED (CPU/raw-syscall: needs preemption)" :
@@ -75,7 +79,7 @@ static RUNLOOM_THREAD_RET runloom_sysmon_main(void *arg)
              * OWNED and stores OWNED->FREE at its final release. */
             if (runloom_handoff_enabled && start != 0 &&
                 (now - start) > runloom_sysmon_wedge_ns &&
-                runloom_tstate_attach_state(h->tstate) == RUNLOOM_TS_DETACHED) {
+                runloom_tstate_attach_state(hts) == RUNLOOM_TS_DETACHED) {
                 int free_st = RUNLOOM_HANDOFF_FREE;
                 __atomic_compare_exchange_n(&runloom_handoff_claim[i], &free_st,
                                             RUNLOOM_HANDOFF_PENDING, 0,
@@ -89,7 +93,7 @@ static RUNLOOM_THREAD_RET runloom_sysmon_main(void *arg)
              * DETACHED-only). */
             if (runloom_preempt_enabled && start != 0 &&
                 (now - start) > runloom_sysmon_wedge_ns &&
-                runloom_tstate_attach_state(h->tstate) == RUNLOOM_TS_ATTACHED) {
+                runloom_tstate_attach_state(hts) == RUNLOOM_TS_ATTACHED) {
                 __atomic_store_n(&h->preempt_requested, 1, __ATOMIC_RELAXED);
                 /* Controlled-replay liveness backstop (Feature 1): the eval-frame
                  * flag above only fires at a Python FRAME boundary, so it cannot

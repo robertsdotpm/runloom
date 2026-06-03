@@ -34,12 +34,15 @@ static void runloom_handoff_rescue(runloom_hub_t *h)
             long long start = __atomic_load_n(&h->resume_start_ns,
                                               __ATOMIC_RELAXED);
             long long now = runloom_monotonic_ns();
-            if (h->tstate == NULL || start == 0 ||
+            /* Acquire load: the hub publishes its tstate on its own thread.
+             * NULL during that startup window -> fail closed (return). */
+            PyThreadState *hts = __atomic_load_n(&h->tstate, __ATOMIC_ACQUIRE);
+            if (hts == NULL || start == 0 ||
                 (now - start) <= runloom_sysmon_wedge_ns ||
-                runloom_tstate_attach_state(h->tstate) != RUNLOOM_TS_DETACHED) {
+                runloom_tstate_attach_state(hts) != RUNLOOM_TS_DETACHED) {
                 return;   /* wedge gone / not a DETACHED block -> nothing to do */
             }
-            PyEval_RestoreThread(h->tstate);     /* attach hub_ts to THIS thread */
+            PyEval_RestoreThread(hts);     /* attach hub_ts to THIS thread */
             runloom_tls_hub = h;
             /* Capture g_block's live slice; every handback restores it so the
              * owner's END_ALLOW_THREADS re-attach finds it intact. */
@@ -104,7 +107,9 @@ static void runloom_handoff_rescue(runloom_hub_t *h)
                                               __ATOMIC_RELAXED);
             long long now = runloom_monotonic_ns();
             if (start == 0 || (now - start) <= runloom_sysmon_wedge_ns ||
-                runloom_tstate_attach_state(h->tstate) != RUNLOOM_TS_DETACHED) {
+                runloom_tstate_attach_state(
+                    __atomic_load_n(&h->tstate, __ATOMIC_ACQUIRE))
+                    != RUNLOOM_TS_DETACHED) {
                 return;   /* block ended or owner/STW reclaimed -> released */
             }
         }

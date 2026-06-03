@@ -59,6 +59,14 @@ int runloom_mn_init(int n_threads)
      * No-op when RUNLOOM_MN_SEED is unset. */
     runloom_mn_ctrl_init(n_threads);
 
+    /* Init-once the lock that serializes the hubs' PyThreadState_New (see its
+     * declaration in mn_sched.c).  mn_init is single-threaded here, before any
+     * hub spawns, so the flag needs no atomics. */
+    if (!runloom_hub_tstate_lock_inited) {
+        runloom_mutex_init(&runloom_hub_tstate_lock);
+        runloom_hub_tstate_lock_inited = 1;
+    }
+
     for (i = 0; i < n_threads; i++) {
         runloom_hub_t *h = &runloom_hubs[i];
         h->id = i;
@@ -66,25 +74,24 @@ int runloom_mn_init(int n_threads)
         runloom_cldeque_init(&h->deque);
         runloom_mutex_init(&h->sub_lock);
         h->sub_head = h->sub_tail = NULL;
-        h->tstate = PyThreadState_New(interp);
-        if (h->tstate == NULL) {
-            /* Clean up everything we've partially initialised so far
-             * (mutexes + earlier tstates) and reset module state.
-             * Without this, a later mn_fini would join an
-             * uninitialised thread handle = undefined behaviour. */
-            int j;
-            runloom_mutex_destroy(&h->sub_lock);   /* this hub's mutex */
-            for (j = 0; j < i; j++) {
-                PyThreadState_Clear(runloom_hubs[j].tstate);
-                PyThreadState_Delete(runloom_hubs[j].tstate);
-                runloom_mutex_destroy(&runloom_hubs[j].sub_lock);
-            }
-            PyMem_Free(runloom_hubs);
-            runloom_hubs = NULL;
-            runloom_hub_count = 0;
-            PyErr_NoMemory();
-            return -1;
-        }
+        /* h->tstate is created BY THE HUB THREAD (in runloom_hub_main), NOT
+         * here.  PyThreadState_New eagerly binds the tstate to the CALLING
+         * thread: bind_tstate() -> _Py_brc_init_thread() + the mimalloc bind,
+         * which CPython documents "needs to be initialized from the active
+         * thread."  Binding on the main thread stamps the hub tstate's
+         * biased-refcount owner id (brc->tid) with MAIN's thread id, while
+         * every object the hub later creates gets ob_tid = the HUB thread's id.
+         * A cross-thread DECREF of such an object then can't find its owner in
+         * the brc hash table (find_thread_state() looks up by ob_tid and
+         * misses), so CPython concludes the owner "must have exited" and merges
+         * the refcount out from under the still-running hub -- a data race on
+         * ob_ref_local -> torn refcount -> premature free -> use-after-free (the
+         * gc-churn SIGSEGV the hang-hunter found).  Creating the tstate on the
+         * hub's own thread makes brc->tid == ob_tid for every object the hub
+         * owns, so the owner is always found.  PyMem_Calloc already zeroed
+         * h->tstate; sysmon / handoff / world-yield read it with an acquire load
+         * and treat NULL as attach-state -1 (fail closed) during the brief
+         * window before the hub publishes it. */
     }
     saved = PyEval_SaveThread();
     for (i = 0; i < n_threads; i++) {
@@ -102,8 +109,15 @@ int runloom_mn_init(int n_threads)
             }
             PyEval_RestoreThread(saved);
             for (j = 0; j < n_threads; j++) {
-                PyThreadState_Clear(runloom_hubs[j].tstate);
-                PyThreadState_Delete(runloom_hubs[j].tstate);
+                /* tstate is created by the hub thread, so an unspawned hub (or
+                 * one that failed its own PyThreadState_New) leaves it NULL.
+                 * Spawned hubs were joined just above, so any tstate is now
+                 * detached and safe to clear/delete from this (main) thread. */
+                PyThreadState *hts = runloom_hubs[j].tstate;
+                if (hts != NULL) {
+                    PyThreadState_Clear(hts);
+                    PyThreadState_Delete(hts);
+                }
                 runloom_mutex_destroy(&runloom_hubs[j].sub_lock);
             }
             PyMem_Free(runloom_hubs);
@@ -210,8 +224,14 @@ void runloom_mn_fini(void)
         }
     }
     for (i = 0; i < runloom_hub_count; i++) {
-        PyThreadState_Clear(runloom_hubs[i].tstate);
-        PyThreadState_Delete(runloom_hubs[i].tstate);
+        /* Created on the hub thread (see runloom_mn_init); NULL if that hub
+         * never started or failed its own PyThreadState_New.  Hubs are joined
+         * by now, so a non-NULL tstate is detached and safe to delete here. */
+        PyThreadState *hts = runloom_hubs[i].tstate;
+        if (hts != NULL) {
+            PyThreadState_Clear(hts);
+            PyThreadState_Delete(hts);
+        }
         runloom_mutex_destroy(&runloom_hubs[i].sub_lock);
     }
     PyMem_Free(runloom_hubs);
