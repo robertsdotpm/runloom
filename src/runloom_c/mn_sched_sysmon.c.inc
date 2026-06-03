@@ -13,13 +13,18 @@ static RUNLOOM_THREAD_RET runloom_sysmon_main(void *arg)
 {
     int n = runloom_hub_count;
     /* w_seq[i] = the resume_seq currently logged as wedged on hub i (0 = none);
-     * w_start[i] = its resume_start_ns, for the recovery-dwell report. */
-    long      *w_seq   = (long *)calloc((size_t)(n > 0 ? n : 1), sizeof(long));
-    long long *w_start = (long long *)calloc((size_t)(n > 0 ? n : 1),
+     * w_start[i] = its resume_start_ns, for the recovery-dwell report.
+     * d_streak[i] = consecutive sysmon ticks hub i has been observed DETACHED
+     * while wedged -- the handoff dispatch requires this to reach
+     * RUNLOOM_HANDOFF_DETACH_TICKS so it fires only on a STABLE (genuine
+     * blocking-call) DETACH, never a transient one (see the gate below). */
+    long      *w_seq    = (long *)calloc((size_t)(n > 0 ? n : 1), sizeof(long));
+    long long *w_start  = (long long *)calloc((size_t)(n > 0 ? n : 1),
                                              sizeof(long long));
+    long      *d_streak = (long *)calloc((size_t)(n > 0 ? n : 1), sizeof(long));
     (void)arg;
-    if (w_seq == NULL || w_start == NULL) {
-        free(w_seq); free(w_start);
+    if (w_seq == NULL || w_start == NULL || d_streak == NULL) {
+        free(w_seq); free(w_start); free(d_streak);
         RUNLOOM_THREAD_RETURN(NULL);
     }
     while (!__atomic_load_n(&runloom_sysmon_stop, __ATOMIC_ACQUIRE)) {
@@ -34,6 +39,23 @@ static RUNLOOM_THREAD_RET runloom_sysmon_main(void *arg)
              * racy/NULL read here is fine -- attach-state -1 classifies as "?"
              * and gates every handoff/preempt dispatch closed. */
             PyThreadState *hts = __atomic_load_n(&h->tstate, __ATOMIC_ACQUIRE);
+            int tss = runloom_tstate_attach_state(hts);
+            /* Track how long this hub has been continuously DETACHED-while-wedged.
+             * A genuine blocking call (Py_BEGIN_ALLOW_THREADS) holds the tstate
+             * DETACHED for the whole wedge -- the owner thread is parked in a
+             * syscall and will NOT touch the tstate until it returns, so a rescue
+             * may safely adopt it.  A TRANSIENT detach (an idle/world-yield blip,
+             * or the instant before a stop-the-world suspend flips the state to
+             * SUSPENDED) does NOT survive consecutive ticks -- and adopting one
+             * races the owner re-attaching/suspending on the same tstate
+             * (tstate_activate vs tstate_deactivate on the non-atomic _status,
+             * which CPython only ever touches from the tstate's single owner) ->
+             * use-after-free.  Requiring a stable streak before handoff dispatch
+             * (below) keeps the rescue off transient detaches. */
+            int detached_wedge = (start != 0 &&
+                                  (now - start) > runloom_sysmon_wedge_ns &&
+                                  tss == RUNLOOM_TS_DETACHED);
+            d_streak[i] = detached_wedge ? d_streak[i] + 1 : 0;
             /* End of a previously-reported episode: the hub moved to a new
              * resume (seq changed) or finished resuming (start cleared). */
             if (w_seq[i] != 0 && (seq != w_seq[i] || start == 0)) {
@@ -55,7 +77,6 @@ static RUNLOOM_THREAD_RET runloom_sysmon_main(void *arg)
                  * adopt the hub -> handoff-RECOVERABLE.  ATTACHED => CPU-bound
                  * or a raw tstate-holding syscall -> needs preemption, not a
                  * handoff.  SUSPENDED => stop-the-world. */
-                int tss = runloom_tstate_attach_state(hts);
                 const char *cls =
                     tss == RUNLOOM_TS_DETACHED  ? "DETACHED (blocking-IO: handoff-recoverable)" :
                     tss == RUNLOOM_TS_ATTACHED  ? "ATTACHED (CPU/raw-syscall: needs preemption)" :
@@ -70,16 +91,17 @@ static RUNLOOM_THREAD_RET runloom_sysmon_main(void *arg)
                 w_seq[i]   = seq;
                 w_start[i] = start;
             }
-            /* Group B handoff dispatch.  Independent of the once-per-episode
-             * log dedup above: attempt every tick a DETACHED wedge is live so a
-             * hub that a rescue thread released early (e.g. across a STW window)
-             * is re-flagged.  The CAS only fires from FREE->PENDING, so a hub
+            /* Group B handoff dispatch.  Fires only after the hub has been
+             * STABLY DETACHED for RUNLOOM_HANDOFF_DETACH_TICKS consecutive ticks
+             * (d_streak) -- i.e. a genuine blocking-call detach, not a transient
+             * one a rescue could race the owner on (see the d_streak note above).
+             * Re-flagged every qualifying tick (a rescue released early across a
+             * STW window re-arms).  The CAS only fires FREE->PENDING, so a hub
              * already PENDING (awaiting pickup) or OWNED (in rescue) is left
              * alone -- no double dispatch; a rescue thread takes it PENDING->
              * OWNED and stores OWNED->FREE at its final release. */
-            if (runloom_handoff_enabled && start != 0 &&
-                (now - start) > runloom_sysmon_wedge_ns &&
-                runloom_tstate_attach_state(hts) == RUNLOOM_TS_DETACHED) {
+            if (runloom_handoff_enabled &&
+                d_streak[i] >= RUNLOOM_HANDOFF_DETACH_TICKS) {
                 int free_st = RUNLOOM_HANDOFF_FREE;
                 __atomic_compare_exchange_n(&runloom_handoff_claim[i], &free_st,
                                             RUNLOOM_HANDOFF_PENDING, 0,
@@ -93,7 +115,7 @@ static RUNLOOM_THREAD_RET runloom_sysmon_main(void *arg)
              * DETACHED-only). */
             if (runloom_preempt_enabled && start != 0 &&
                 (now - start) > runloom_sysmon_wedge_ns &&
-                runloom_tstate_attach_state(hts) == RUNLOOM_TS_ATTACHED) {
+                tss == RUNLOOM_TS_ATTACHED) {
                 __atomic_store_n(&h->preempt_requested, 1, __ATOMIC_RELAXED);
                 /* Controlled-replay liveness backstop (Feature 1): the eval-frame
                  * flag above only fires at a Python FRAME boundary, so it cannot
@@ -118,6 +140,7 @@ static RUNLOOM_THREAD_RET runloom_sysmon_main(void *arg)
     }
     free(w_seq);
     free(w_start);
+    free(d_streak);
     RUNLOOM_THREAD_RETURN(NULL);
 }
 

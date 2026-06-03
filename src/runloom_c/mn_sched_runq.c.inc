@@ -286,6 +286,16 @@ static volatile int runloom_sysmon_stop = 0;
 #define RUNLOOM_HANDOFF_FREE    0   /* not wedged / not in rescue */
 #define RUNLOOM_HANDOFF_PENDING 1   /* sysmon flagged a DETACHED wedge, awaiting pickup */
 #define RUNLOOM_HANDOFF_OWNED   2   /* a rescue thread holds this hub */
+/* The sysmon must observe a hub continuously DETACHED-while-wedged for this many
+ * consecutive ticks before dispatching a handoff.  A genuine blocking call
+ * (Py_BEGIN_ALLOW_THREADS: owner parked in a syscall, not touching the tstate)
+ * stays DETACHED across ticks and is safe to adopt; a transient detach (idle /
+ * world-yield blip, or the instant before a stop-the-world flips the state to
+ * SUSPENDED) does not, and adopting it races the owner re-attaching/suspending
+ * on the same tstate's non-atomic _status -> use-after-free.  2 ticks
+ * (>= one full tick of continuous DETACH) excludes the transients while adding
+ * at most ~one tick of rescue latency to a real blocking wedge. */
+#define RUNLOOM_HANDOFF_DETACH_TICKS 2
 static int          runloom_handoff_enabled = 0;
 static int          runloom_handoff_pool    = 0;    /* number of rescue threads */
 static int         *runloom_handoff_claim   = NULL; /* per-hub FREE/PENDING/OWNED */
