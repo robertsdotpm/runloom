@@ -65,7 +65,10 @@ All measured; figures label whether the handler is Python or C.
 - **Scheduler / context switch** (Python, 3.12): fast-path yield **47 ns**
   (75 ns on 3.13t) -- matching Go's `runtime.Gosched()` (~50 ns) and **~25–40×
   faster than asyncio** (~1800 ns/step). Sustains **2.4–3.1 M context
-  switches/s** vs asyncio's ~0.4–0.5 M/s (**~5–8×**).
+  switches/s** vs asyncio's ~0.4–0.5 M/s (**~5–8×**). A real cross-goroutine
+  switch (2+ runnable, 3.13t) is ~360 ns -- **~1.6× faster than greenlet's
+  raw `switch()`** (575 ns): pygo swaps registers via fcontext on separate
+  stacks, greenlet copies stack on every switch.
 - **Multi-core compute** (Python, 3.13t, 100 goroutines × SHA-256): scales
   **2.5× from 1→8 hubs to 2.12 M ops/s**, ≈ `threading`×8 (2.24 M) -- but with
   the goroutine model (cheap spawn, no thread-per-task explosion). asyncio
@@ -164,6 +167,13 @@ M:N scheduler isolates a stall to one hub, and a watchdog actively recovers it
 
 A >50 ms threshold keeps both dormant under normal load, so steady-state
 scheduling is unchanged.
+
+On a production-shaped workload (60/30/8% I/O tiers + a **2% tier doing
+100 ms of pure-Python CPU** -- the head-of-line blocker echo benchmarks omit),
+this is decisive: asyncio and uvloop freeze (p50 ~405 ms, ~400 rps as every
+request queues behind a CPU block), while pygo holds **p50 11 ms at 7–10× the
+throughput** by running the CPU blocks on other hubs. Numbers:
+[bench/results/honest_bench.md](bench/results/honest_bench.md).
 
 ## Stack safety (default ON)
 
