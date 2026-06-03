@@ -62,24 +62,23 @@ def _patched_select(rlist, wlist, xlist, timeout=None):
             return [], [], []
         return ([obj], [], []) if src == "r" else ([], [obj], [])
 
-    # Multi-fd: short non-blocking selects + yields.  Not free, but
-    # makes select.select() cooperative enough for stdlib internals.
-    deadline = None if timeout is None else time.monotonic() + timeout
-    step = 0.001
-    while True:
-        try:
-            r, w, x = _orig_select_select(rlist, wlist, xlist, 0)
-        except (OSError, ValueError):
-            return _orig_select_select(rlist, wlist, xlist, timeout)
-        if r or w or x:
-            return r, w, x
-        if deadline is not None:
-            now = time.monotonic()
-            if now >= deadline:
-                return [], [], []
-            _co_sleep(min(step, deadline - now))
-        else:
-            _co_sleep(step)
+    # Multi-fd: offload the blocking OS select to the backend pool and park
+    # this goroutine on it.
+    #
+    # The previous form busy-polled -- real select(timeout=0) [releases +
+    # reacquires the GIL] + _co_sleep [park], in a loop, on the hub thread.
+    # A GIL-release-then-park cycle on an M:N hub corrupts the goroutine's
+    # suspended eval-frame tstate -> SIGSEGV (deterministic on >=2 hubs; see
+    # _mntests/findings_segv_gilrelease_park.py -- a core scheduler hazard).
+    # Offloading keeps the GIL-releasing select on a PLAIN POOL THREAD (never a
+    # hub) while the goroutine merely PARKS on the offload (the crash-free
+    # pattern), staying cooperative: other goroutines run while the pool thread
+    # blocks in select for the full timeout.
+    try:
+        return _get_backend().submit(
+            _orig_select_select, (rlist, wlist, xlist, timeout), {})
+    except (OSError, ValueError):
+        return _orig_select_select(rlist, wlist, xlist, timeout)
 
 
 def _patch_select():
@@ -167,24 +166,15 @@ class CoPoll(object):
         # poll() timeout is in MILLISECONDS; None or negative == infinite.
         if not _in_goroutine():
             return self._r.poll(timeout)
-        if timeout is None or timeout < 0:
-            deadline = None
-        else:
-            deadline = time.monotonic() + timeout / 1000.0
-        step = 0.0005
-        while True:
-            ev = self._r.poll(0)
-            if ev:
-                return ev
-            if deadline is not None:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    return []
-                _co_sleep(min(step, remaining))
-            else:
-                _co_sleep(step)
-            if step < 0.02:
-                step *= 2
+        # poll() has no kernel fd to park on, so the old form busy-polled
+        # poll(0) [GIL release] + _co_sleep [park] on the hub -- a
+        # GIL-release-then-park cycle that corrupts the goroutine's suspended
+        # eval-frame tstate under the M:N scheduler -> SIGSEGV (see
+        # _mntests/findings_segv_gilrelease_park.py).  This path backs
+        # selectors.PollSelector, i.e. subprocess.communicate() on Linux.
+        # Offload the blocking poll to the pool (the GIL-releasing poll runs
+        # on a plain pool thread, never a hub) and merely park on it.
+        return _get_backend().submit(self._r.poll, (timeout,), {})
 
     def __getattr__(self, name):
         return getattr(self._r, name)
