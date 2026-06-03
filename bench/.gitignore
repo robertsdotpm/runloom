@@ -1,0 +1,9 @@
+# Raw profiler artifacts are large and fully regenerable from the drivers
+# (bench/profile/*) -- keep them local, don't bloat the repo. The small
+# JSON baselines under results/ (micro.json, mn.json, pytest_benchmark/)
+# ARE committed: they are the regression-gate inputs.
+results/profiles/*.svg
+results/profiles/*.folded
+results/profiles/*.data
+*.perf
+perf.data*
