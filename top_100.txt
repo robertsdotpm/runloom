@@ -1,7 +1,7 @@
 runloom - validated asyncio projects
 ========================================
 
-133 name-brand Python asyncio projects whose own test suites (or
+134 name-brand Python asyncio projects whose own test suites (or
 equivalent end-to-end exercises) run GREEN under runloom's pure-Python
 M:N runtime -- driven through runloom.aio / RunloomEventLoop on free-threaded
 CPython 3.13t (PYTHON_GIL=0). 'pass==stock' means the result matches
@@ -235,4 +235,10 @@ BEYOND 100 (cont.): DNS, AMQP framing, SSE server (3)
 132. pamqp                      - AMQP 0-9-1 frame marshal/unmarshal roundtrip (sans-IO)
 133. aiohttp-sse                - real aiohttp server streamed 3 SSE events to a client
 
-TOTAL DISTINCT PROJECTS PASSING: 133
+
+------------------------------------------------------------
+BEYOND 100 (cont.): distributed hash table over UDP (1)
+------------------------------------------------------------
+134. kademlia                   - 2-node Kademlia DHT set/get both directions over real UDP
+
+TOTAL DISTINCT PROJECTS PASSING: 134
