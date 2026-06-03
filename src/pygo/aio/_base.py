@@ -22,6 +22,21 @@ import pygo_core
 from .. import runtime as _runtime
 
 
+# Security: the bridge runs user protocol callbacks -- including TLS handshakes
+# and OpenSSL key material -- on goroutine stacks that are pooled and reused.
+# By default those stacks are not scrubbed on recycle, so a later connection's
+# goroutine could read the previous one's leftovers off a shared stack (see
+# tools/security/FINDINGS.md, S1). Enable scrubbing by default for the bridge:
+# its goroutines are long-lived (per connection / per task), so the per-recycle
+# cost (MADV_DONTNEED, ~8 us) is negligible. Opt out with PYGO_STACK_SCRUB=0.
+# No-op on a pygo_core too old to expose the API.
+if _os.environ.get("PYGO_STACK_SCRUB") != "0":
+    try:
+        pygo_core.set_stack_scrub(True)
+    except AttributeError:
+        pass
+
+
 def _signal_wakeup_noop(signum, frame):
     # A Python-level handler must be installed for CPython to write the signum
     # to set_wakeup_fd()'s pipe; the real dispatch happens loop-side off that
