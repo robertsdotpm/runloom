@@ -74,7 +74,7 @@ void pygo_greg_unlink(pygo_g_t *g);
 /* Per-incarnation goroutine id, Go's goid analogue.  Contention-free:
  * a per-thread counter ORed with a per-thread base, so spawning on many
  * hubs never touches a shared cacheline.  Unique for the process life. */
-uint64_t pygo_next_goid(void);
+long long pygo_next_goid(void);
 
 /* Number of live (non-FREED) goroutines.  Takes pygo_greg_lock. */
 long pygo_goroutine_count(void);
@@ -138,7 +138,7 @@ void pygo_dump_goroutines_fd(int fd);
  * identity + Python stack come from the claim-protected
  * pygo_goroutine_frames_by_id path instead. */
 typedef struct pygo_g_info {
-    uint64_t      id;
+    long long     id;
     unsigned int  state;        /* pygo_g_state_t */
     int           park_fd;      /* netpoll fd parked on, or -1 */
     int           park_events;  /* netpoll events bitmask (1=R 2=W), or 0 */
@@ -166,7 +166,7 @@ void pygo_goroutine_snapshot_free(pygo_g_info_t *arr, long count);
  * scheduler the calling thread already owns it.  Normal interpreter
  * context only.  Returns NULL with a Python exception set only on a hard
  * error (OOM). */
-PyObject *pygo_goroutine_frames_by_id(uint64_t id);
+PyObject *pygo_goroutine_frames_by_id(long long id);
 
 #ifdef __cplusplus
 }

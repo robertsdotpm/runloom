@@ -34,12 +34,10 @@
  * ---------------------------------------------------------------- */
 long long pygo_introspect_monotonic_ns(void)
 {
-#if defined(CLOCK_MONOTONIC)
-    struct timespec ts;
-    if (clock_gettime(CLOCK_MONOTONIC, &ts) == 0)
-        return (long long)ts.tv_sec * 1000000000LL + (long long)ts.tv_nsec;
-#endif
-    return 0;
+    /* Cross-platform (QueryPerformanceCounter on Windows, CLOCK_MONOTONIC on
+     * POSIX) -- the raw CLOCK_MONOTONIC path used to return 0 on MSVC, which
+     * left park-age tracking dead on Windows. */
+    return pygo_monotonic_ns();
 }
 
 /* ---------------------------------------------------------------- *
@@ -50,16 +48,20 @@ long long pygo_introspect_monotonic_ns(void)
  *  cacheline is touched only once per GOID_BLOCK spawns.  Ids are   *
  *  compact + roughly monotonic, which is what a human wants.        *
  * ---------------------------------------------------------------- */
+/* `long long` (not uint64_t): the MSVC _Generic atomic shim names long long
+ * but not unsigned __int64 (== uint64_t there) -- and __atomic_fetch_add has
+ * no unsigned-long-long slot at all.  Ids are always positive, so signed is
+ * fine. */
 #define PYGO_GOID_BLOCK 1024
-static uint64_t pygo_goid_global = 1;   /* next id to hand out (1-based) */
-static PYGO_TLS uint64_t pygo_tls_goid_next = 0;
-static PYGO_TLS uint64_t pygo_tls_goid_end  = 0;
+static long long pygo_goid_global = 1;   /* next id to hand out (1-based) */
+static PYGO_TLS long long pygo_tls_goid_next = 0;
+static PYGO_TLS long long pygo_tls_goid_end  = 0;
 
-uint64_t pygo_next_goid(void)
+long long pygo_next_goid(void)
 {
     if (pygo_tls_goid_next >= pygo_tls_goid_end) {
-        uint64_t base = __atomic_fetch_add(&pygo_goid_global,
-                                           PYGO_GOID_BLOCK, __ATOMIC_RELAXED);
+        long long base = __atomic_fetch_add(&pygo_goid_global,
+                                            PYGO_GOID_BLOCK, __ATOMIC_RELAXED);
         pygo_tls_goid_next = base;
         pygo_tls_goid_end  = base + PYGO_GOID_BLOCK;
     }
@@ -383,7 +385,7 @@ void pygo_dump_goroutines_fd(int fd)
 
     for (g = pygo_greg_head; g != NULL; g = g->reg_next) {
         unsigned int st = __atomic_load_n(&g->state, __ATOMIC_ACQUIRE);
-        uint64_t id;
+        long long id;
         int rc;
         long long since;
         char detail[96];

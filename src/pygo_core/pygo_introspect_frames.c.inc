@@ -67,7 +67,7 @@ static void frames_walk(void *top_iframe, PyObject *list)
     pygo_iframe_walk(top_iframe, PYGO_FRAMES_MAX, frames_cb, list);
 }
 
-PyObject *pygo_goroutine_frames_by_id(uint64_t id)
+PyObject *pygo_goroutine_frames_by_id(long long id)
 {
     pygo_g_t *g, *found = NULL;
     PyObject *frames, *repr = NULL, *result;

@@ -100,11 +100,11 @@ static PyObject *m_dump_goroutines(PyObject *self, PyObject *args)
 
 static PyObject *m_goroutine_stack(PyObject *self, PyObject *arg)
 {
-    unsigned long long id;
+    long long id;
     (void)self;
-    id = PyLong_AsUnsignedLongLong(arg);
-    if (id == (unsigned long long)-1 && PyErr_Occurred()) return NULL;
-    return pygo_goroutine_frames_by_id((uint64_t)id);
+    id = PyLong_AsLongLong(arg);
+    if (id == -1 && PyErr_Occurred()) return NULL;
+    return pygo_goroutine_frames_by_id(id);
 }
 
 static PyObject *m_introspect_timestamps(PyObject *self, PyObject *arg)

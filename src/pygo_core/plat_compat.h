@@ -185,12 +185,21 @@ PYGO_INLINE long long pygo_monotonic_ns(void) {
      * The QueryPerformanceFrequency value is constant per boot. */
     static LARGE_INTEGER freq = {0};
     LARGE_INTEGER now;
+    long long sec, rem;
     if (freq.QuadPart == 0) {
         QueryPerformanceFrequency(&freq);
         if (freq.QuadPart == 0) return 0;
     }
     QueryPerformanceCounter(&now);
-    return (long long)((now.QuadPart * 1000000000LL) / freq.QuadPart);
+    /* Split sec + remainder before scaling to ns: the naive
+     * `ticks * 1e9 / freq` overflows int64 once ticks exceed ~9.2e9 (at
+     * 10 MHz, ~15 minutes of uptime), wrapping to a negative/garbage time.
+     * Difference-based scheduler math mostly cancels the wrap, but any
+     * absolute-timestamp consumer (e.g. goroutine park-age tracking) saw
+     * bogus values.  This form keeps the product small. */
+    sec = (long long)(now.QuadPart / freq.QuadPart);
+    rem = (long long)(now.QuadPart % freq.QuadPart);
+    return sec * 1000000000LL + (rem * 1000000000LL) / (long long)freq.QuadPart;
 }
 #else
 PYGO_INLINE long long pygo_monotonic_ns(void) {

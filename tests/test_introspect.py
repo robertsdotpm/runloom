@@ -95,6 +95,9 @@ class TestStates(unittest.TestCase):
         self.assertGreater(cap["wake_in"], 0.0)
         self.assertEqual(cap["blocked_on"], "timer")
 
+    @pytest.mark.skipif(sys.platform == "win32",
+                        reason="pipe fds aren't pollable by the Windows netpoll "
+                               "(no io-wait park); socket I/O covers it instead")
     def test_io_wait_reports_fd(self):
         r, w = os.pipe()
         cap = {}
@@ -123,6 +126,9 @@ class TestStates(unittest.TestCase):
 
 
 class TestStackReconstruction(unittest.TestCase):
+    @pytest.mark.skipif(sys.version_info < (3, 13),
+                        reason="interpreter-frame stack reconstruction needs "
+                               "3.13+ (the PyUnstable frame API / internal walk)")
     def test_full_stack_of_parked_goroutine(self):
         cap = {}
 

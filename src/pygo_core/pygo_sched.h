@@ -291,11 +291,12 @@ struct pygo_g {
      * pygo_sched_core.c.inc and the field-ordering contract there. */
 
     /* Per-incarnation goroutine id (Go's goid analogue).  Assigned fresh
-     * at each spawn from a per-thread counter (no global atomic -> no
-     * cross-hub cacheline contention); unique for the life of the process.
-     * Read under pygo_greg_lock by the dump; written at spawn with an
-     * atomic store.  0 until first spawned. */
-    uint64_t id;
+     * at each spawn from a block-batched global counter; unique + always
+     * positive for the life of the process.  Read by the dump, written at
+     * spawn with an atomic store.  0 until first spawned.  `long long` (not
+     * uint64_t) so the MSVC _Generic atomic shim has a matching slot --
+     * uint64_t is `unsigned __int64` there, which the shim doesn't name. */
+    long long id;
     /* Monotonic-ns timestamp of the last state transition into a PARKED_*
      * state, stamped only when introspection timestamping is enabled
      * (pygo_introspect_set_timestamps / PYGO_INTROSPECT_TIME).  Lets the
