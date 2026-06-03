@@ -1,7 +1,7 @@
 runloom - validated asyncio projects
 ========================================
 
-137 name-brand Python asyncio projects whose own test suites (or
+138 name-brand Python asyncio projects whose own test suites (or
 equivalent end-to-end exercises) run GREEN under runloom's pure-Python
 M:N runtime -- driven through runloom.aio / RunloomEventLoop on free-threaded
 CPython 3.13t (PYTHON_GIL=0). 'pass==stock' means the result matches
@@ -249,4 +249,10 @@ BEYOND 100 (cont.): scheduler, OAuth2, event framework (3)
 136. aioauth                    - OAuth2 token utils + grant types
 137. circuits                   - event-driven component fired event
 
-TOTAL DISTINCT PROJECTS PASSING: 137
+
+------------------------------------------------------------
+BEYOND 100 (cont.): aiohttp middleware (1)
+------------------------------------------------------------
+138. aiohttp-middlewares        - timeout middleware passthrough on a real aiohttp server
+
+TOTAL DISTINCT PROJECTS PASSING: 138
