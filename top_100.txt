@@ -179,4 +179,14 @@ NOTE: unsync diverges (pygo accepts awaiting a Future bound to another
 loop; stock raises 'attached to a different loop') -- pygo is MORE permissive
 on loop-affinity, not a failure. Not counted.
 
-TOTAL DISTINCT PROJECTS PASSING: 112
+
+------------------------------------------------------------
+BEYOND 100 (cont.): descriptors, ASGI, state machine, functional (5)
+------------------------------------------------------------
+113. async-property             - async @property descriptor
+114. asyncinit                  - async __init__ class construction
+115. asgi-tools                 - minimal ASGI framework routed GET -> 200
+116. transitions                - AsyncMachine async state transitions a->b->c
+117. expression                 - functional seq map/filter pipeline
+
+TOTAL DISTINCT PROJECTS PASSING: 117
