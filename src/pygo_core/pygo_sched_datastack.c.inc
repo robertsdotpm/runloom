@@ -189,8 +189,9 @@ void pygo_drain_g_datastack(void)
  * scheduler, or worse, another goroutine.  Then traceback walks and
  * recursion checks pull in every frame across every goroutine.
  *
- * On 3.12, we put a fresh _PyCFrame at the bottom of g's stack and
- * point its previous to tstate->root_cframe (the per-thread sentinel).
+ * On 3.12, we put a fresh _PyCFrame at the bottom of g's stack, point its
+ * previous to tstate->root_cframe (the per-thread sentinel), AND null its
+ * current_frame so g's first interpreter frame roots its own chain.
  * On 3.13, the cframe is gone; we just NULL out tstate->current_frame.
  * In both cases the chain starts here and walks back to a terminator,
  * not to the previous coroutine. */
@@ -198,7 +199,17 @@ void pygo_drain_g_datastack(void)
 static void pygo_install_initial_root_frame(_PyCFrame *frame_storage)
 {
     PyThreadState *ts = PyThreadState_GET();
-    *frame_storage = *ts->cframe;            /* inherit current_frame, etc. */
+    *frame_storage = *ts->cframe;
+    /* Sever BOTH chains, not just the cframe `previous`: current_frame is what
+     * interpreter-frame `previous` links to and what traceback/recursion walks
+     * follow.  Inheriting the scheduler's current_frame links g's frames onto
+     * whoever ran last on this thread -- usually harmless (that frame is live),
+     * but after a frame is torn down (e.g. a task aborted by a KeyboardInterrupt
+     * whose run is then re-entered) the inherited current_frame dangles, and g's
+     * first frame push roots onto freed memory.  Silent on glibc (still mapped),
+     * a hard access violation on Windows.  3.13 already nulls current_frame; do
+     * the same here. */
+    frame_storage->current_frame = NULL;
     frame_storage->previous = &ts->root_cframe;
     ts->cframe = frame_storage;
 }
