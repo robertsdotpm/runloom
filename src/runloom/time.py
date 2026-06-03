@@ -17,6 +17,21 @@ further sends.  The backing goroutine exits on next tick.
 import runloom_c
 
 
+def _spawn(fn):
+    """Spawn a timer goroutine on whichever scheduler is active.
+
+    runloom.time primitives are driven by a backing goroutine, which must run
+    under the M:N scheduler (mn_run) as well as the single-thread one --
+    otherwise After/Tick/Timer/Ticker hang under mn_run because nothing drains
+    the single-thread queue.  mn_hub_count() > 0 means mn_init() is in effect,
+    so route through mn_go; else use the single-thread go.  Reading
+    runloom_c.go / mn_go at call time also picks up monkey's
+    goroutine-context wrapper when patch() is active."""
+    if runloom_c.mn_hub_count() > 0:
+        return runloom_c.mn_go(fn)
+    return runloom_c.go(fn)
+
+
 def Sleep(seconds):
     """Block the current goroutine for `seconds` seconds.
 
@@ -49,7 +64,7 @@ def After(seconds):
             pass
         ch.close()
 
-    runloom_c.go(fire)
+    _spawn(fire)
     return ch
 
 
@@ -76,7 +91,7 @@ class Timer(object):
             if self._stopped or self._gen != gen:
                 return
             self.c.try_send(self._d)
-        runloom_c.go(fire)
+        _spawn(fire)
 
     def Stop(self):
         """Prevent the timer from firing.  Returns True if the call
@@ -126,7 +141,7 @@ class Ticker(object):
                 # try_send so we never block the ticker goroutine; the
                 # buffer-1 channel naturally drops backlog (matches Go).
                 self.c.try_send(self._d)
-        runloom_c.go(loop)
+        _spawn(loop)
 
     def Stop(self):
         if self._stopped:

@@ -33,6 +33,18 @@ import time as _time
 import runloom_c
 
 
+def _spawn(fn):
+    """Spawn the deadline goroutine on whichever scheduler is active.
+
+    WithDeadline/WithTimeout arm a goroutine that fires when the deadline
+    passes; it must run under the M:N scheduler (mn_run) too, not only the
+    single-thread one -- otherwise the deadline silently never fires under
+    mn_run.  mn_hub_count() > 0 means mn_init() is in effect."""
+    if runloom_c.mn_hub_count() > 0:
+        return runloom_c.mn_go(fn)
+    return runloom_c.go(fn)
+
+
 # Error sentinels (strings -- runloom deliberately avoids custom exception
 # classes here so the public API stays close to Go's, where ctx.Err()
 # just returns context.Canceled or context.DeadlineExceeded).
@@ -165,7 +177,7 @@ def WithDeadline(parent, deadline_monotonic):
         if ctx._err is None:
             ctx._cancel(DEADLINE_EXCEEDED)
 
-    runloom_c.go(deadline_waker)
+    _spawn(deadline_waker)
     return ctx, cancel
 
 
