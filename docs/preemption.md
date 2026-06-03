@@ -37,7 +37,7 @@ def chatty():
 
 runloom.go(hog)
 runloom.go(chatty)
-runloom.run_single()
+runloom.run(1)
 ```
 
 Without `preempt_init`, `chatty` wouldn't get any time until `hog`

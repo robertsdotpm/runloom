@@ -206,7 +206,7 @@ the child, so:
   gets its own netpoll fd and a clean scheduler.
 * A child that starts a **fresh `runloom.mn_init()`** works when the parent
   never used M:N.
-* `runloom.mn_run()` / `runloom.run_single()` in the child **return** instead of
+* `runloom.mn_run()` / `runloom.run(1)` in the child **return** instead of
   hanging forever on the parent's dead hubs.
 
 **Not supported:** re-initialising the M:N scheduler *inside* a fork-child of

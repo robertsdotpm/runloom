@@ -2,11 +2,11 @@
 
 Everyday API -- `import runloom` is all you need:
     runloom.go(fn, *args, **kw)   spawn a goroutine
-    runloom.run(n, main_fn)       run main_fn with n hubs: n=1 single-thread,
-                                  n>1 M:N parallel (needs 3.13t + GIL off;
-                                  n>1 on a GIL build raises).  Collapses the
-                                  mn_init/mn_go/mn_run/mn_fini envelope.
-    runloom.run_single(main_fn=None)  single-thread scheduler; == run(1, main_fn)
+    runloom.run(n, main_fn)       THE entry point. run main_fn with n hubs:
+                                  n=1 single-thread, n>1 M:N parallel across n
+                                  cores (needs 3.13t + GIL off; n>1 on a GIL
+                                  build raises).  Collapses mn_init/mn_go/
+                                  mn_run/mn_fini.  main_fn optional -> drain only.
     runloom.sleep(seconds)        sleep without blocking the OS thread
     runloom.yield_()              cooperative yield
     runloom.Chan(capacity=0)      Go-style channel
@@ -39,7 +39,7 @@ import sys as _sys
 # CPython's per-thread recursion counter is not swapped across our
 # ucontext stack switch (v0 -- properly handled in the M:N C path
 # planned for phase 3).  Each runloom.yield_() permanently decrements the
-# counter on the OS thread, so a long runloom.run_single() eventually hits
+# counter on the OS thread, so a long runloom.run() eventually hits
 # RecursionError.  Bumping the limit makes the leak tolerable for
 # anything short of a multi-hour service; the proper fix is to
 # save/restore tstate->py_recursion_remaining + c_recursion_remaining
@@ -53,7 +53,6 @@ from .runtime import (
     sleep,
     blocking,
     run,
-    run_single,
     current,
     Goroutine,
 )
@@ -126,7 +125,7 @@ from . import aio      # noqa: E402,F401  – run async/await on the scheduler
 
 __all__ = [
     # scheduler
-    "go", "run", "run_single", "sleep", "yield_", "blocking", "current",
+    "go", "run", "sleep", "yield_", "blocking", "current",
     "Goroutine", "go_noyield", "warmup", "thread_init", "thread_fini",
     "preempt_init", "preempt_fini",
     # channels

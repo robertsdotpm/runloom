@@ -78,7 +78,7 @@ print("stack default:", runloom.get_stack_size(), "bytes")
 def hello():
     print("hello from a goroutine!")
 runloom.go(hello)
-runloom.run_single()
+runloom.run(1)
 ```
 
 If `backend()` returns `"fcontext-asm"`, you're on the fast path (~80

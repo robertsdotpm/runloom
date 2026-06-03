@@ -25,7 +25,7 @@ def accept_loop():
         runloom.go(lambda c=conn: handle(c))
 
 runloom.go(accept_loop)
-runloom.run_single()
+runloom.run(1)
 ```
 
 No `async`, no `await`, no callback chains -- `recv` and `accept`
@@ -78,7 +78,7 @@ goroutines.
 
 When you call `runloom.go(fn)`, the scheduler allocates a new
 goroutine (a C struct + a private C stack) and puts it on the ready
-queue.  `runloom.run_single()` starts the scheduler loop.  Each iteration:
+queue.  `runloom.run(1)` starts the scheduler loop.  Each iteration:
 
 1. Pop the next goroutine from the ready FIFO.
 2. Switch to its private C stack (one `swap` instruction, ~80 ns on

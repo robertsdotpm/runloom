@@ -277,11 +277,11 @@ import runloom
 runloom.go(fn)            # spawn (uses the C scheduler under the hood)
 runloom.yield_()          # cooperative yield
 runloom.sleep(seconds)    # cooperative sleep
-runloom.run(n, main_fn)   # run main_fn with n hubs: n=1 single-thread,
-                          #   n>1 M:N parallel (needs 3.13t + GIL off; n>1
-                          #   under the GIL raises).  Collapses mn_init/
-                          #   mn_go/mn_run/mn_fini.  Returns goroutines done.
-runloom.run_single(main_fn=None)  # single-thread driver; == run(1, main_fn)
+runloom.run(n, main_fn=None)  # THE entry point. run main_fn with n hubs:
+                          #   n=1 single-thread, n>1 M:N parallel across n
+                          #   cores (needs 3.13t + GIL off; n>1 under the GIL
+                          #   raises).  main_fn optional -> drain-only.
+                          #   Collapses mn_init/mn_go/mn_run/mn_fini.
 runloom.current() → Goroutine
 runloom.backend() → str
 ```

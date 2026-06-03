@@ -50,7 +50,7 @@ def prewarm_stdlib():
     later takes through ``getaddrinfo`` is shallow.
 
     Idempotent and best-effort: never raises into the caller.  Called
-    from runloom.run() / run_single() and the aio loop before the scheduler drives any
+    from runloom.run() and the aio loop before the scheduler drives any
     goroutine.  This is the enabler for small default goroutine stacks."""
     global _prewarmed
     if _prewarmed:
@@ -111,8 +111,8 @@ def go(callable_, *args, **kwargs):
     fn(*args, **kwargs) to run cooperatively and returns immediately.
 
     Dispatches on the active scheduler so the same call works in both modes:
-      - single-thread (run_single / run(1, ...)): spawns on this thread's
-        scheduler and returns a Goroutine handle.
+      - single-thread (run(1, ...)): spawns on this thread's scheduler and
+        returns a Goroutine handle.
       - M:N (run(n > 1, ...)): spawns onto a hub via mn_go.  M:N v1 is
         run-to-completion with no join handle, so this returns None.
 
@@ -174,55 +174,39 @@ def current():
     return runloom_c.current_g()
 
 
-def run_single(main_fn=None):
-    """Drive the single-thread (M:1) scheduler until idle.
+def run(n, main_fn=None):
+    """Run the scheduler on n OS-thread hubs until every goroutine finishes.
 
-    Many goroutines multiplexed onto ONE OS thread: overlapping in-flight
-    I/O, but never two goroutines running Python at the same instant (the
-    asyncio / Go-with-GOMAXPROCS=1 model).  If main_fn is given it's spawned
-    first -- the moral equivalent of Go's `func main()`; otherwise the
-    scheduler just drains goroutines you've already go()'d.
+    The one and only entry point:
 
-    run_single(main_fn) is exactly run(1, main_fn); it's the name to reach
-    for when you never want parallelism and would rather not pass a count.
-    Returns the number of goroutines completed.
-    """
-    prewarm_stdlib()
-    if main_fn is not None:
-        go(main_fn)
-    return runloom_c.run()
+        run(1, main)   single-thread (M:1): cooperative concurrency, no two
+                       goroutines run Python at once (asyncio / Go GOMAXPROCS=1).
+        run(8, main)   M:N: goroutines spread across 8 hub threads with the GIL
+                       off -> real multi-core parallelism.  Needs a free-threaded
+                       build (CPython 3.13t, PYTHON_GIL=0); n > 1 with the GIL on
+                       raises rather than silently running serial.
+        run(n)         main_fn omitted -> just drain goroutines you've already
+                       go()'d (n == 1 is the common drain-only case).
 
-
-def run(n, main_fn):
-    """Run main_fn on the scheduler with n OS-thread hubs, then drain.
-
-        n == 1   single-thread (M:1): cooperative concurrency, no two
-                 goroutines run Python at once.  Same as run_single(main_fn).
-        n  > 1   M:N: goroutines spread across n hub threads with the GIL
-                 off -> real multi-core parallelism.  REQUIRES a free-threaded
-                 build (CPython 3.13t, PYTHON_GIL=0); n > 1 with the GIL on
-                 raises rather than silently running serially.
-
-    n is a required, explicit argument on purpose.  M:N is not just a faster
-    run() -- it is a different correctness model: goroutines execute Python
-    in parallel, so shared state that is safe under M:1 can race.  You opt
-    into that by typing the number, never by accident or by which interpreter
-    happens to be free-threaded.
-
-    main_fn is the root goroutine; it may go() more (those dispatch to the
-    hubs automatically).  This single call collapses the raw
-    mn_init / mn_go / mn_run / mn_fini envelope.  Returns the number of
-    goroutines completed.
+    n is required and explicit: M:N is a different correctness model (goroutines
+    execute Python in parallel, so shared state can race), opted into by typing
+    the number -- never by accident or by which interpreter is free-threaded.
+    main_fn, when given, is the root goroutine and may go() more (those dispatch
+    to the hubs automatically).  Collapses the raw mn_init / mn_go / mn_run /
+    mn_fini envelope.  Returns the number of goroutines completed.
     """
     if isinstance(n, bool) or not isinstance(n, int) or n < 1:
         raise ValueError(
             "run(n, main_fn): n must be an int >= 1 (got {0!r})".format(n))
-    if not callable(main_fn):
+    if main_fn is not None and not callable(main_fn):
         raise TypeError(
-            "run(n, main_fn): main_fn must be callable (got {0!r}); for a "
-            "drain-only single-thread run use run_single()".format(main_fn))
+            "run(n, main_fn): main_fn must be callable or None (got {0!r})"
+            .format(main_fn))
     if n == 1:
-        return run_single(main_fn)
+        prewarm_stdlib()
+        if main_fn is not None:
+            go(main_fn)
+        return runloom_c.run()
     if gil_enabled():
         raise RuntimeError(
             "run(n={0}) needs a free-threaded build with the GIL off, but "
@@ -232,7 +216,8 @@ def run(n, main_fn):
     prewarm_stdlib()
     runloom_c.mn_init(n)
     try:
-        runloom_c.mn_go(main_fn)
+        if main_fn is not None:
+            runloom_c.mn_go(main_fn)
         return runloom_c.mn_run()
     finally:
         runloom_c.mn_fini()

@@ -92,7 +92,7 @@ static PyObject *RunloomCoro_resume(RunloomCoro *self, PyObject *unused)
      * swapcontext returns (the coro yielded or finished), save its
      * counters into our snapshot and restore the caller's.  Without
      * this, each yield permanently decrements py_recursion_remaining
-     * on the OS thread, so a sufficiently-long runloom.run_single() hits
+     * on the OS thread, so a sufficiently-long runloom.run() hits
      * RecursionError. */
     runloom_tstate_save(&caller_snap);
     if (self->tstate_snap.initialised) {

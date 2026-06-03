@@ -1,27 +1,29 @@
-"""M:N scheduler — real multi-core parallelism (free-threaded 3.13t).
+"""M:N scheduler — runloom's headline trick: use ALL your cores.
 
-This is runloom's headline trick: with the GIL off, run(n, main_fn) spreads
-goroutines across n hub threads — one per core — for genuine parallelism.
-The whole mn_init / mn_go / mn_run / mn_fini envelope collapses into a single
-run(n, ...) call; inside it, runloom.go() dispatches each goroutine onto a hub
-automatically.  SHA-256 releases the GIL while it hashes, so adding hubs gives
-near-linear speedup here.
+With the GIL off, `run(n, main_fn)` spreads goroutines across n hub threads —
+one per core — for genuine multi-core parallelism.  The whole
+mn_init / mn_go / mn_run / mn_fini envelope collapses into that single call;
+inside it, `runloom.go()` lands each goroutine on a hub automatically.  Here we
+fan out CPU-bound SHA-256 work (which releases the GIL while it hashes) and run
+it across every core, so the speedup over a single thread is near-linear.
 
 Needs free-threaded CPython 3.13t with the GIL disabled:
     PYTHON_GIL=0 ~/.pyenv/versions/3.13.13t/bin/python3 examples/mn_parallel.py
 
-On a normal (GIL) build, run(n>1) RAISES rather than silently running serial —
-parallelism is opt-in and only honest with the GIL off — so there we just run
+On a normal (GIL) build, `run(n>1)` RAISES rather than silently running serial
+— parallelism is opt-in and only honest with the GIL off — so there we just run
 the single-thread path.
 """
 import hashlib
+import os
 import sys
 import time
 
 import runloom
 
-NUM_TASKS = 64
-ROUNDS = 4000
+NCPU = os.cpu_count() or 4
+NUM_TASKS = NCPU * 4
+ROUNDS = 3000
 
 def work():
     data = b"x" * 1024
@@ -35,29 +37,28 @@ def spawn_all():
     for _ in range(NUM_TASKS):
         runloom.go(work)
 
-def time_hubs(n_hubs):
+def time_run(n_hubs):
     start = time.perf_counter()
     runloom.run(n_hubs, spawn_all)   # collapses mn_init/mn_go/mn_run/mn_fini
     return time.perf_counter() - start
 
 def main():
+    print("workload: {0} goroutines x {1} SHA-256 rounds; cores available: {2}\n"
+          .format(NUM_TASKS, ROUNDS, NCPU))
+
     gil_on = getattr(sys, "_is_gil_enabled", lambda: True)()
     if gil_on:
         print("NOTE: the GIL is ENABLED -- run(n>1) would raise, so this can")
-        print("      only run single-threaded.  For real parallelism use")
+        print("      only run single-threaded.  For real multi-core speedup use")
         print("      free-threaded CPython 3.13t with PYTHON_GIL=0.\n")
-        elapsed = time_hubs(1)
-        print(" 1 hub: {0:6.3f}s   (single-thread; add hubs with the GIL off)"
-              .format(elapsed))
+        print("   1 hub      : {0:6.3f}s   (single-thread)".format(time_run(1)))
         return
 
-    baseline = None
-    for hubs in (1, 2, 4, 8):
-        elapsed = time_hubs(hubs)
-        if baseline is None:
-            baseline = elapsed
-        print("{0:2d} hubs: {1:6.3f}s   speedup x{2:.2f}".format(
-            hubs, elapsed, baseline / elapsed))
+    base = time_run(1)            # run(1, ...)    -- one thread
+    full = time_run(NCPU)         # run(NCPU, ...) -- every core
+    print("   1 hub      : {0:6.3f}s".format(base))
+    print("  {0:2d} hubs (all): {1:6.3f}s   speedup x{2:.2f}".format(
+        NCPU, full, base / full))
 
 if __name__ == "__main__":
     main()

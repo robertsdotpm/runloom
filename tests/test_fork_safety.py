@@ -67,7 +67,7 @@ class TestSingleThreadChild(unittest.TestCase):
                 out.append(1)
             for _ in range(4):
                 runloom.go(w)
-            runloom.run_single()
+            runloom.run(1)
             return 0 if len(out) == 4 else 3
 
         rc = run_child(child)

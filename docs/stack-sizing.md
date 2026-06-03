@@ -253,7 +253,7 @@ runloom.set_stack_size(32 * 1024)        # whatever your dry-run found
 for i in range(10000):
     runloom.go(worker)
 
-runloom.run_single()
+runloom.run(1)
 
 # Inspect after the burst
 print("peak resident usage:", runloom.stats())

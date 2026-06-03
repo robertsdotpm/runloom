@@ -37,9 +37,9 @@ def go(
     """Spawn a goroutine.  Same semantics as `go fn(a, b)` in Go:
     schedules fn(*args, **kwargs) to run cooperatively, returns immediately.
 
-    Returns a Goroutine handle on the single-thread scheduler (run_single /
-    run(1, ...)); inside an M:N run (run(n > 1, ...)) it spawns onto a hub
-    via mn_go, which is fire-and-forget in v1, so it returns None."""
+    Returns a Goroutine handle on the single-thread scheduler (run(1, ...));
+    inside an M:N run (run(n > 1, ...)) it spawns onto a hub via mn_go, which
+    is fire-and-forget in v1, so it returns None."""
     ...
 
 def yield_() -> None:
@@ -50,26 +50,20 @@ def sleep(seconds: float) -> None:
     """Sleep without blocking the OS thread.  Other goroutines run."""
     ...
 
-def run(n: int, main_fn: Callable[[], Any]) -> int:
-    """Run main_fn on the scheduler with n OS-thread hubs, then drain.
+def run(n: int, main_fn: Callable[[], Any] | None = ...) -> int:
+    """THE entry point: run the scheduler on n OS-thread hubs until idle.
 
-        n == 1   single-thread (M:1); same as run_single(main_fn).
-        n  > 1   M:N: goroutines across n hubs with the GIL off -> real
-                 multi-core parallelism.  Requires a free-threaded build
-                 (3.13t, PYTHON_GIL=0); n > 1 with the GIL on raises.
+        run(1, main)   single-thread (M:1).
+        run(n, main)   M:N across n hubs, GIL off -> real multi-core
+                       parallelism.  Requires a free-threaded build (3.13t,
+                       PYTHON_GIL=0); n > 1 with the GIL on raises.
+        run(n)         main_fn omitted -> drain already-go()'d goroutines.
 
     n is required and explicit: M:N is a different correctness model (Python
     runs in parallel, so shared state can race), opted into by typing the
-    number.  main_fn is the root goroutine and may go() more.  Collapses the
-    raw mn_init/mn_go/mn_run/mn_fini envelope.  Returns goroutines completed."""
-    ...
-
-def run_single(main_fn: Callable[[], Any] | None = ...) -> int:
-    """Drive the single-thread (M:1) scheduler until idle; == run(1, main_fn).
-
-    If main_fn is given it's spawned first (Go's `func main()`); otherwise the
-    scheduler just drains goroutines already go()'d.  Returns goroutines
-    completed."""
+    number.  main_fn, when given, is the root goroutine and may go() more.
+    Collapses the raw mn_init/mn_go/mn_run/mn_fini envelope.  Returns the
+    number of goroutines completed."""
     ...
 
 def current() -> Goroutine | None:
