@@ -3,6 +3,77 @@
  * these definitions depend on. */
 
 
+/* gc-stop-the-world fairness (free-threaded 3.13+ only).
+ *
+ * A goroutine that loops a stop-the-world operation -- a tight `gc.collect()`
+ * loop is the canonical case -- while it is the SOLE runnable g on its hub gets
+ * re-run back-to-back by the loop below, holding the world stopped ~100% of the
+ * time.  That starves goroutines stranded on OTHER hubs: in default (per-hub-
+ * tstate) mode a started goroutine is hub-pinned (its suspended eval frame caches
+ * its origin tstate via the snap dance, so it is NOT stealable) and lives in its
+ * hub's local ready ring; if that hub is held SUSPENDED for the world-stop it can
+ * never re-attach to drain the ring -> the stranded work never finishes -> the
+ * stop-the-world looper never sees its exit condition -> whole-process deadlock.
+ * (Observed as the intermittent hang in test_freethread_stress::
+ * test_gc_stw_under_goroutine_churn.)
+ *
+ * A cooperative turn should relinquish to the whole system, not just respin the
+ * same g.  When this hub is about to re-run its sole runnable g AND a sibling hub
+ * has unfinished work but is NOT running it, briefly DETACH this thread and sleep:
+ * a detached thread counts as already-stopped, so the window lets the stalled
+ * sibling start-the-world / re-attach and make progress before this hub stops the
+ * world again.
+ *
+ * "Not running its work" = the sibling tstate is SUSPENDED (stopped for an active
+ * world-stop) OR DETACHED with pending goroutines (it just got released by a
+ * start-the-world and is trying to re-attach, or is otherwise blocked off-CPU with
+ * work owed).  The DETACHED-with-work case is essential: right after THIS hub's own
+ * gc.collect() returns (its start-the-world set the siblings DETACHED), the sibling
+ * has not re-attached yet, so a SUSPENDED-only test would miss the window and let
+ * the monopoly continue (observed as a residual ~1/120 hang).  pending>0 keeps a
+ * genuinely-idle sibling (no work) from ever arming the pause.
+ *
+ * Precisely targeted -- a busy multi-g hub short-circuits on the ready-count test
+ * (a couple of relaxed loads); a lone yielder whose siblings are idle (pending==0)
+ * or running (ATTACHED) never pays the pause.  No-op before 3.13 (no attach-state /
+ * stop-the-world protocol there). */
+static void runloom_mn_world_yield_if_monopolizing(runloom_hub_t *h)
+{
+#if PY_VERSION_HEX >= 0x030D0000
+    int i;
+    if (__atomic_load_n(&h->stopping, __ATOMIC_ACQUIRE)) return;
+    /* Sole runnable g: exactly one in the ready ring and the own deque empty. */
+    if ((h->sched.ready_tail - h->sched.ready_head) != 1) return;
+    if (runloom_cldeque_size(&h->deque) != 0) return;
+    for (i = 0; i < runloom_hub_count; i++) {
+        int tss;
+        long pend;
+        if (i == h->id) continue;
+        tss  = runloom_tstate_attach_state(runloom_hubs[i].tstate);
+        pend = __atomic_load_n(&runloom_hubs[i].pending, __ATOMIC_RELAXED);
+        if (tss == RUNLOOM_TS_SUSPENDED ||
+            (tss == RUNLOOM_TS_DETACHED && pend > 0)) {
+            static long long yield_ns = -1;
+            long long pause_ns = __atomic_load_n(&yield_ns, __ATOMIC_RELAXED);
+            PyThreadState *yts;
+            if (pause_ns < 0) {
+                const char *e = getenv("RUNLOOM_WORLD_YIELD_NS");
+                pause_ns = (e != NULL) ? atoll(e) : 100000LL;   /* 100 us default */
+                if (pause_ns < 0) pause_ns = 0;
+                __atomic_store_n(&yield_ns, pause_ns, __ATOMIC_RELAXED);
+            }
+            if (pause_ns == 0) return;
+            yts = PyEval_SaveThread();
+            runloom_sleep_ns(pause_ns);
+            PyEval_RestoreThread(yts);
+            return;
+        }
+    }
+#else
+    (void)h;
+#endif
+}
+
 /* Hub thread main loop.  Phase C v2: runs the same snap/load dance
  * as runloom_sched_drain.  Each iteration:
  *   1. Pop a g (local FIFO of yielded gs first, then own deque of
@@ -668,6 +739,9 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
             /* remaining sched_yield path: g pushed itself, tstate has
              * g's state, no work needed here. */
         }
+        /* Relinquish the world if re-running a sole g while a sibling is
+         * stopped for the world (breaks the gc-stw-churn monopoly deadlock). */
+        runloom_mn_world_yield_if_monopolizing(h);
     }
     /* Restore hub's tstate before the thread exits. */
     runloom_pystate_load(&hub_snap);
