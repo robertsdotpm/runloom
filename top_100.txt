@@ -1,7 +1,7 @@
 runloom - validated asyncio projects
 ========================================
 
-168 name-brand Python asyncio projects whose own test suites (or
+172 name-brand Python asyncio projects whose own test suites (or
 equivalent end-to-end exercises) run GREEN under runloom's pure-Python
 M:N runtime -- driven through runloom.aio / RunloomEventLoop on free-threaded
 CPython 3.13t (PYTHON_GIL=0). 'pass==stock' means the result matches
@@ -336,4 +336,13 @@ BEYOND 100 (bulk): API clients via clean venv (5)
 167. elevenlabs                 - AsyncElevenLabs voices.get_all (mocked)
 168. stripe                     - async StripeClient customers.retrieve (mocked)
 
-TOTAL DISTINCT PROJECTS PASSING: 168
+
+------------------------------------------------------------
+BEYOND 100 (bulk): tracing/analytics/ML clients (4)
+------------------------------------------------------------
+169. sentry-sdk                 - captured exception envelope across await (custom transport)
+170. posthog                    - capture+flush analytics event (mocked)
+171. huggingface_hub            - AsyncInferenceClient text_generation (mocked)
+172. replicate                  - async models.get (mocked)
+
+TOTAL DISTINCT PROJECTS PASSING: 172
