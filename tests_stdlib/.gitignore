@@ -1,0 +1,9 @@
+# vendored CPython test corpus -- populated locally, NOT committed
+# (it's ~80 MB of verbatim upstream Lib/test; see README "Vendor the corpus")
+test/
+# run artifacts from sweep_mn.py (baseline + any control re-runs)
+results/
+results_*/
+# bytecode caches (corpus is vendored as source only)
+__pycache__/
+*.pyc
