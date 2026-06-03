@@ -1,7 +1,7 @@
 runloom - validated asyncio projects
 ========================================
 
-155 name-brand Python asyncio projects whose own test suites (or
+159 name-brand Python asyncio projects whose own test suites (or
 equivalent end-to-end exercises) run GREEN under runloom's pure-Python
 M:N runtime -- driven through runloom.aio / RunloomEventLoop on free-threaded
 CPython 3.13t (PYTHON_GIL=0). 'pass==stock' means the result matches
@@ -308,4 +308,13 @@ BEYOND 100 (cont.): valkey client (1)
 ------------------------------------------------------------
 155. valkey                     - valkey.asyncio set/get/pipeline vs real redis
 
-TOTAL DISTINCT PROJECTS PASSING: 155
+
+------------------------------------------------------------
+BEYOND 100 (bulk): GraphQL, TUI, tracing, Slack (4)
+------------------------------------------------------------
+156. graphene                   - async GraphQL execute_async (resolvers)
+157. textual                    - headless TUI app run_test: mount + click event handled
+158. opentelemetry              - async parent+child spans recorded across awaits
+159. slack-sdk                  - AsyncWebClient auth_test (mocked aiohttp)
+
+TOTAL DISTINCT PROJECTS PASSING: 159
