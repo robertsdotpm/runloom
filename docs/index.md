@@ -105,3 +105,5 @@ switches.
 - Working on a server?  See the [Cookbook](cookbook.md) for worker
   pools, pipelines, and graceful shutdown.
 - Memory matters?  See [Stack sizing](stack-sizing.md).
+- Curious how deep "real native stacks" goes?  [Research: executing native
+  machine code from a goroutine](research-native-code.md) (experimental).
