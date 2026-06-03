@@ -532,6 +532,7 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
                      * wake_state is still RUNNING with no other entry.  Force-
                      * unlink any stale parker, then drop both refs -- the slab
                      * re-zeroes wake_state when it reallocs the g. */
+                    runloom_advice_record_g(g);   /* fold stack HWM (profiling) */
                     runloom_g_state_set(g, RUNLOOM_GST_DONE);
                     runloom_netpoll_force_unlink_g_parker(g);
                     runloom_mn_pending_complete(h);
@@ -660,6 +661,7 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
             h->sched.current = NULL;
 
             if (runloom_coro_done(g->coro)) {
+                runloom_advice_record_g(g);   /* fold stack HWM (profiling) */
                 runloom_g_state_set(g, RUNLOOM_GST_DONE);
                 /* Drain g's chunks, restore hub's tstate so the decref
                  * (potentially calling Python tp_dealloc) allocates on

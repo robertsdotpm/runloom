@@ -316,9 +316,12 @@ static int runloom_mn_go_core(PyObject *callable, runloom_c_entry_fn c_fn,
     if (callable != NULL) {
         Py_INCREF(callable);
         g->callable = callable;
+        /* Stack-advice: note the kind at spawn (0 unless profiling on). */
+        g->advice_key = runloom_advice_note_spawn(callable);
     } else {
         g->c_entry = c_fn;
         g->c_arg   = c_arg;
+        g->advice_key = 0;   /* C-entry goroutines aren't profiled */
     }
     g->refcount = 1;
     g->owner = &h->sched;   /* owning hub's sched -- groups goroutines in the dump */

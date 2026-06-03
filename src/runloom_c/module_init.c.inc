@@ -271,6 +271,19 @@ static PyMethodDef module_methods[] = {
      "_crash_selftest_overflow() -> None.  TEST ONLY: overflow the current C "
      "stack via real-C recursion (does not return).  Run inside a goroutine to "
      "fault into its guard page."},
+    {"enable_stack_advice", m_enable_stack_advice, METH_VARARGS,
+     "enable_stack_advice(on=True) -> None.  Turn the per-goroutine-kind stack "
+     "profiler on/off.  While on, each kind's actual C-stack high-water mark is "
+     "measured so stack_advice() can recommend a stack_size.  Advisory only -- "
+     "it never changes or persists stack sizes itself.  Off by default."},
+    {"stack_advice_enabled", m_stack_advice_enabled, METH_NOARGS,
+     "stack_advice_enabled() -> bool."},
+    {"stack_advice", m_stack_advice, METH_NOARGS,
+     "stack_advice() -> list[dict].  Per goroutine kind: {kind, samples, "
+     "max_hwm, reserved, suggested} -- the deepest stack used vs reserved, and "
+     "a suggested stack_size (next_pow2(max_hwm*4))."},
+    {"reset_stack_advice", m_reset_stack_advice, METH_NOARGS,
+     "reset_stack_advice() -> None.  Clear accumulated samples."},
     {NULL, NULL, 0, NULL}
 };
 

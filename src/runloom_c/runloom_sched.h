@@ -130,6 +130,11 @@ typedef void (*runloom_c_entry_fn)(void *);
 
 struct runloom_g {
     runloom_coro_t *coro;
+    /* Stack-advice kind key (FNV hash of the entry callable's identity), or 0.
+     * Set at spawn only while stack-advice profiling is enabled; read at
+     * completion to fold this g's C-stack HWM into its kind.  See
+     * runloom_stackadvice.c. */
+    size_t advice_key;
     PyObject *callable;     /* Python callable (NULL if c_entry set) */
     runloom_c_entry_fn c_entry;
     void *c_arg;

@@ -17,6 +17,7 @@
 #include "runloom_blockpool.h"
 #include "runloom_diag.h"
 #include "runloom_crash.h"
+#include "runloom_stackadvice.h"
 #include "plat.h"
 #include "plat_compat.h"
 
@@ -551,6 +552,7 @@ void runloom_after_fork_child(void)
     runloom_blockpool_reset_after_fork();    /* dead offload workers -> re-create */
     runloom_diag_reset_after_fork();         /* diag ring lock */
     runloom_crash_reset_after_fork();        /* clear crash latch (keep altstack) */
+    runloom_advice_reset_after_fork();       /* stack-advice table lock */
 }
 
 /* ---------------------------------------------------------------- *

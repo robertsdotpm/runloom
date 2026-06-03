@@ -200,7 +200,10 @@ safe: deep recursion raises `RecursionError` (not a crash), stacks grow on
 demand, every stack has a guard page so an overflow faults cleanly instead of
 corrupting a neighbour, and CPython's stack-hungry error paths can't blow a
 goroutine. For a native call that needs a big stack in one shot, pass
-`stack_size=`.[^bridgestack] Details: [docs/stack-sizing.md](https://github.com/robertsdotpm/runloom/blob/main/docs/stack-sizing.md#defending-against-overflow).
+`stack_size=`.[^bridgestack] To find which goroutine kinds are over- or
+under-reserving, `runloom.inspect.enable_stack_advice()` then
+`print_stack_advice()` measures real per-kind stack use and suggests sizes
+(advisory only). Details: [docs/stack-sizing.md](https://github.com/robertsdotpm/runloom/blob/main/docs/stack-sizing.md#defending-against-overflow).
 
 ## Ways to use it
 

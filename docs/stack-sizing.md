@@ -210,9 +210,11 @@ protection the main thread gets, scaled to the goroutine's smaller stack:
 - **Every stack has a guard page.** A `PROT_NONE` page sits just below each
   goroutine stack (the OS provides one on the Windows Fibers backend). An
   overflow faults *immediately and cleanly* at the guard rather than silently
-  scribbling over a neighbouring stack. runloom does not yet turn that fault into a
-  friendly message -- it currently surfaces as a `faulthandler` segfault
-  traceback (a diagnostic handler is a possible follow-up).
+  scribbling over a neighbouring stack. With the crash reporter installed
+  (`runloom.inspect.install_crash_handler()` or `RUNLOOM_CRASH=on`) that fault
+  is turned into a classified message that *names the overflowing goroutine and
+  its stack size* instead of a bare segfault -- see
+  [Crash reporting](debugging.md#crash-reporting-sigsegv--sigbus).
 - **CPython's stack-hungry error paths are neutralised.** A missing-attribute
   lookup on a module makes CPython 3.13 reserve a 32 KB path buffer just to
   build a "did you shadow a stdlib module?" hint -- on its own larger than a
@@ -238,6 +240,49 @@ So the 16 KB minimum is a *floor for the calibrator*, not a blanket "safe for
 anything" size: it works because recursion is bounded, stacks grow, and the one
 oversized CPython frame is handled -- not because 16 KB fits every possible C
 call.
+
+## Right-sizing with the advisory profiler
+
+The calibrator picks one global default from the deepest goroutine it sees, and
+the layers above stop overflow turning into corruption. But to know whether a
+*particular* goroutine kind is over-reserving (wasting address space at high
+goroutine counts) or running close to its limit (a candidate for an explicit
+bigger `stack_size`), measure it directly:
+
+```python
+import runloom
+
+runloom.inspect.enable_stack_advice()      # opt-in; keeps stack painting on
+... run your real workload ...
+runloom.inspect.print_stack_advice()
+```
+
+```
+=== runloom stack advice (3 kinds) ===
+samples  max_use  reserved  suggested  kind
+   4012      41K       32K        16K   app.handle_request (server.py:88)  (tight -- consider a bigger stack)
+  12030       1K       32K        16K   app.heartbeat (server.py:204)  (over-reserved)
+    980      11K       32K        16K   app.parse_json (codec.py:55)
+```
+
+Each row is one **goroutine kind** (its entry callable), with the deepest C
+stack any goroutine of that kind actually used (`max_use`) versus what it
+reserved, plus a `suggested` `stack_size` that covers the observed peak with
+margin. `runloom.inspect.stack_advice()` returns the same data as a list of
+dicts (`kind`, `samples`, `max_hwm`, `reserved`, `suggested`).
+
+It is **purely advisory**: runloom never changes or persists a stack size from
+this -- a remembered-small size is only ever a lower bound on what a future
+input might need (recursion depth is data-dependent), so the guard page and
+crash reporter stay the safety net. You read the advice and apply it yourself,
+e.g. give the `tight` kind a roomier stack:
+
+```python
+runloom.go(handle_request, stack_size=128 * 1024)
+```
+
+Enabling the profiler keeps stack painting on (a small per-spawn cost) for the
+session; it is off by default and costs nothing until you turn it on.
 
 ## Putting it all together
 

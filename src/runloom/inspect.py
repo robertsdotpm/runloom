@@ -246,6 +246,80 @@ def crash_handler_installed():
     return _core.crash_handler_installed()
 
 
+def enable_stack_advice(on=True):
+    """Turn the per-goroutine-kind stack-usage profiler on or off.
+
+    While on, every goroutine's actual C-stack high-water mark is measured and
+    grouped by its entry function, so stack_advice() can tell you how much of
+    each kind's reserved stack it really uses and suggest a stack_size.
+
+    Purely ADVISORY: the runtime never changes or persists a stack size itself
+    -- a remembered-small size is only a lower bound on what a future input
+    might need, so you read the advice and apply it yourself via
+    ``runloom_c.go(fn, stack_size=...)``, with the guard page + crash reporter
+    still backstopping every choice.  Off by default; enabling it keeps stack
+    painting on (a small profiling cost) for the session."""
+    _core.enable_stack_advice(bool(on))
+
+
+def stack_advice_enabled():
+    """True if enable_stack_advice() is currently active."""
+    return _core.stack_advice_enabled()
+
+
+def reset_stack_advice():
+    """Clear the accumulated per-kind stack samples."""
+    _core.reset_stack_advice()
+
+
+def stack_advice():
+    """Return per-goroutine-kind stack usage as a list of dicts, each with:
+
+        kind       -- "module.qualname (file:line)" of the entry callable
+        samples    -- goroutines of this kind measured
+        max_hwm    -- deepest C-stack bytes any of them actually used
+        reserved   -- the stack_size they ran with
+        suggested  -- a stack_size that covers the observed max with margin
+                      (next power of two of max_hwm * 4)
+
+    Sorted by max_hwm descending (the stack-hungriest kinds first)."""
+    rows = _core.stack_advice()
+    rows.sort(key=lambda r: r["max_hwm"], reverse=True)
+    return rows
+
+
+def print_stack_advice(file=None):
+    """Write a human-readable stack_advice() table to ``file`` (default stderr).
+
+    Flags kinds that are over-reserved (using a small fraction of their stack)
+    or close to their reservation (worth a bigger stack_size)."""
+    if file is None:
+        file = sys.stderr
+    rows = stack_advice()
+    if not rows:
+        file.write("no stack advice yet "
+                   "(enable_stack_advice() then run the workload)\n")
+        file.flush()
+        return
+
+    def kib(n):
+        return "{0}K".format(n // 1024)
+
+    file.write("=== runloom stack advice ({0} kinds) ===\n".format(len(rows)))
+    file.write("{0:>7} {1:>8} {2:>9} {3:>10}  kind\n".format(
+        "samples", "max_use", "reserved", "suggested"))
+    for r in rows:
+        used, res, sug = r["max_hwm"], r["reserved"], r["suggested"]
+        note = ""
+        if res and used * 8 < res:
+            note = "  (over-reserved)"
+        elif res and used * 4 > res * 3:
+            note = "  (tight -- consider a bigger stack)"
+        file.write("{0:>7} {1:>8} {2:>9} {3:>10}  {4}{5}\n".format(
+            r["samples"], kib(used), kib(res), kib(sug), r["kind"], note))
+    file.flush()
+
+
 def _detail(g):
     bits = []
     if g["state"] == "io-wait" and g["fd"] is not None:

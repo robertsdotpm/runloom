@@ -17,8 +17,11 @@ static size_t runloom_next_pow2(size_t v)
 static void runloom_cal_record(runloom_g_t *g)
 {
     size_t hwm;
-    if (runloom_cal_frozen || !runloom_coro_paint_enabled()) return;
     if (g == NULL || g->coro == NULL) return;
+    /* Stack-advice profiler: fold this g's HWM into its kind, independent of
+     * whether the global calibration window has frozen. */
+    runloom_advice_record_g(g);
+    if (runloom_cal_frozen || !runloom_coro_paint_enabled()) return;
     hwm = runloom_coro_scan_hwm(g->coro);
     if (hwm > runloom_cal_max_hwm) runloom_cal_max_hwm = hwm;
     runloom_cal_completed++;
@@ -428,6 +431,8 @@ static PyObject *spawn_common(runloom_sched_t *s, PyObject *callable,
     }
     Py_INCREF(callable);
     g->callable = callable;
+    /* Stack-advice: note the kind at spawn (no-op / 0 unless profiling on). */
+    g->advice_key = runloom_advice_note_spawn(callable);
     g->refcount = 1;   /* one ref for the scheduler queue */
     g->owner = s;      /* per-thread sched that owns this g (Phase C) */
     g->noyield = noyield;
