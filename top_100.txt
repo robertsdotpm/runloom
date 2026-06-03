@@ -1,7 +1,7 @@
 runloom - validated asyncio projects
 ========================================
 
-159 name-brand Python asyncio projects whose own test suites (or
+163 name-brand Python asyncio projects whose own test suites (or
 equivalent end-to-end exercises) run GREEN under runloom's pure-Python
 M:N runtime -- driven through runloom.aio / RunloomEventLoop on free-threaded
 CPython 3.13t (PYTHON_GIL=0). 'pass==stock' means the result matches
@@ -317,4 +317,13 @@ BEYOND 100 (bulk): GraphQL, TUI, tracing, Slack (4)
 158. opentelemetry              - async parent+child spans recorded across awaits
 159. slack-sdk                  - AsyncWebClient auth_test (mocked aiohttp)
 
-TOTAL DISTINCT PROJECTS PASSING: 159
+
+------------------------------------------------------------
+BEYOND 100 (bulk): LLM/HTTP async clients via clean venv (4)
+------------------------------------------------------------
+160. openai                     - AsyncOpenAI chat completion vs local server
+161. anthropic                  - AsyncAnthropic message vs local server
+162. httpx-sse                  - consumed 2 SSE events (clean httpx)
+163. cohere                     - AsyncClientV2 chat (mocked)
+
+TOTAL DISTINCT PROJECTS PASSING: 163
