@@ -138,7 +138,18 @@
 #if defined(PYGO_CC_MSVC)
 #  define PYGO_TLS __declspec(thread)
 #elif defined(PYGO_CC_GCC) || defined(PYGO_CC_CLANG) || defined(PYGO_CC_ICC)
-#  define PYGO_TLS __thread
+#  if defined(PYGO_TLS_GLOBAL_DYNAMIC)
+#    define PYGO_TLS __thread
+#  else
+/* initial-exec drops the __tls_get_addr() function call the default
+ * global-dynamic model emits on every thread-local access (it was ~7% of
+ * the chan ping-pong hot path -- perf finding F6a; current-g and the
+ * per-thread sched pointer are touched on every context switch / wake).
+ * pygo's whole TLS footprint is a few hundred bytes, well within glibc's
+ * static-TLS surplus for a dlopen'd extension. Define
+ * PYGO_TLS_GLOBAL_DYNAMIC to fall back if a platform's surplus is tight. */
+#    define PYGO_TLS __thread __attribute__((tls_model("initial-exec")))
+#  endif
 #else
 #  define PYGO_TLS /* must use pthread_setspecific */
 #  define PYGO_TLS_FALLBACK_PTHREAD 1
