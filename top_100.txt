@@ -151,4 +151,13 @@ BEYOND 100: HTTP mockers, circuit breaker, async CLI (4)
 102. purgatory                  - async circuit breaker opens after failure threshold
 103. asyncclick                 - async CLI command via CliRunner -> output
 
-TOTAL DISTINCT PROJECTS PASSING: 103
+
+------------------------------------------------------------
+BEYOND 100 (cont.): resilience, file IO, sessions (4)
+------------------------------------------------------------
+104. aiobreaker                 - async circuit breaker opens after fail_max
+105. aioresult                  - ResultCapture in an anyio task group -> result
+106. aiofile                    - async_open (caio) write/read roundtrip
+107. starsessions               - InMemoryStore async session write/read
+
+TOTAL DISTINCT PROJECTS PASSING: 107
