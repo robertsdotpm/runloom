@@ -21,87 +21,73 @@ _real_thread_RLock  = getattr(_thread, "RLock", None)
 
 
 class CoLock(object):
-    """Cooperative mutex.  Non-reentrant.
+    """Cooperative mutex.  Non-reentrant.  M:N-safe.
 
-    When called from a goroutine: park on a parker queue under contention.
-    When called from outside any goroutine: degrade to immediate
-    acquire/release (the single-thread cooperative model never has true
-    cross-thread contention between goroutines).
+    Backed by runloom_c.Mutex (a capacity-1 channel: one buffered token ==
+    unlocked).  The channel's formally-verified cross-hub park/wake gives
+    real mutual exclusion across M:N hub threads -- the previous non-atomic
+    ``if not self._locked: self._locked = True`` lost updates / deadlocked
+    once goroutines ran on several hubs in parallel.
+
+    Parking is only legal from a goroutine, so:
+      * goroutine, blocking, no timeout -> Mutex.lock() (parks on contention);
+      * non-blocking / timeout / a foreign OS thread (e.g. the
+        multiprocessing.Queue feeder) -> try_lock(), spinning cooperatively
+        (goroutine) or with a raw sleep (foreign thread) -- never parks a
+        non-goroutine.
     """
     # __weakref__: stdlib _thread.lock is weakref-able; without this slot a
     # weakref.ref(threading.Lock()) raises TypeError under monkey (found by the
     # verbatim CPython lock_tests).
-    __slots__ = ("_locked", "_owner", "_waiters", "__weakref__")
+    __slots__ = ("_mu", "__weakref__")
 
     def __init__(self):
-        self._locked  = False
-        self._owner   = None
-        self._waiters = collections.deque()
+        self._mu = runloom_c.Mutex()
 
     def acquire(self, blocking=True, timeout=-1):
-        cur = runloom.current() if _in_goroutine() else _real_get_ident()
-        if not self._locked:
-            self._locked = True
-            self._owner  = cur
-            return True
         if not blocking:
-            return False
-        if not _in_goroutine():
-            # No goroutine to park; spin briefly + yield to the OS.
-            t0 = time.monotonic()
-            while self._locked:
-                _raw_time_sleep(0.0001)
-                if timeout is not None and timeout >= 0:
-                    if time.monotonic() - t0 >= timeout:
-                        return False
-            self._locked = True
-            self._owner  = cur
+            return self._mu.try_lock()
+        if _in_goroutine():
+            if timeout is None or timeout < 0:
+                self._mu.lock()             # parks on contention (cooperative)
+                return True
+            # Timed acquire inside a goroutine: cooperative try + sleep so we
+            # never park past the deadline.
+            deadline = time.monotonic() + timeout
+            while not self._mu.try_lock():
+                if time.monotonic() >= deadline:
+                    return False
+                runloom.sleep(0.0005)
             return True
-        p = _Parker()
-        # _Parker() may yield during socketpair creation (Windows path).
-        # If the lock got freed while we yielded, claim it now instead
-        # of parking forever -- nobody will unpark us, because nobody
-        # saw us in self._waiters when they released.
-        if not self._locked:
-            self._locked = True
-            self._owner  = cur
-            p.release()
-            return True
-        self._waiters.append(p)
-        p.park()
-        p.release()
-        self._owner = cur
+        # Foreign / non-goroutine thread: cannot park; spin on try_lock.
+        t0 = time.monotonic()
+        while not self._mu.try_lock():
+            if timeout is not None and timeout >= 0:
+                if time.monotonic() - t0 >= timeout:
+                    return False
+            _raw_time_sleep(0.0001)
         return True
 
     def release(self):
-        if not self._locked:
+        try:
+            self._mu.unlock()               # raises "release unlocked lock"
+        except RuntimeError:
             # A forked child running stdlib teardown (threading._after_fork)
             # can reach a release whose matching acquire happened in the
-            # parent / under an identity that no longer exists here.  That is
-            # benign post-fork noise, not a real double-release, so swallow
-            # it; a genuine in-process double-release still raises.
+            # parent.  Benign post-fork noise, not a real double-release.
             if _is_forked_child():
                 return
-            raise RuntimeError("release unlocked lock")
-        self._owner = None
-        if self._waiters:
-            # Ownership transfers to next waiter; keep _locked True.
-            p = self._waiters.popleft()
-            p.unpark()
-        else:
-            self._locked = False
+            raise
 
     def locked(self):
-        return self._locked
+        return self._mu.locked()
 
     def _at_fork_reinit(self):
         # Mirror _thread.lock._at_fork_reinit: the child inherits none of the
-        # parent's goroutines, so reset to a fresh unlocked state.  Called via
+        # parent's goroutines, so reset to a fresh unlocked mutex.  Called via
         # os.register_at_fork by stdlib modules (concurrent.futures.thread,
         # logging, ...) that build a module-global Lock at import time.
-        self._locked  = False
-        self._owner   = None
-        self._waiters.clear()
+        self._mu = runloom_c.Mutex()
 
     def __enter__(self):
         self.acquire(); return self

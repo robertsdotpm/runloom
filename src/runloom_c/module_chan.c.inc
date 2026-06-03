@@ -173,6 +173,147 @@ static PyTypeObject RunloomChanType = {
     .tp_new = PyType_GenericNew,
 };
 
+/* ============================================================ */
+/* RunloomMutex -- an M:N-safe goroutine mutex.                    */
+/*                                                                */
+/* A buffered channel of capacity 1 holding one token IS a mutex: */
+/*   unlocked = the token sits in the buffer                      */
+/*   lock()   = recv the token (blocks while another holder has   */
+/*              it; a parked locker is woken when the holder sends */
+/*              the token back -- direct hand-off, FIFO)           */
+/*   unlock() = send the token back (full buffer => double-release)*/
+/*                                                                 */
+/* Backing the mutex with the channel reuses its formally-verified */
+/* (Spin/CBMC/GenMC) cross-hub park/wake + publish ordering rather */
+/* than hand-rolling a second lock-free primitive.  acquire() only */
+/* ever BLOCKS (chan_recv) when the Python wrapper knows it runs   */
+/* inside a goroutine; foreign OS threads must use try_lock (which */
+/* never parks).  A bare-CAS uncontended fast path is a possible   */
+/* follow-up -- it would need its own GenMC harness to land.       */
+/* ============================================================ */
+typedef struct {
+    PyObject_HEAD
+    runloom_chan_t *ch;     /* cap 1; one buffered token == unlocked */
+} RunloomMutex;
+
+static int RunloomMutex_init(RunloomMutex *self, PyObject *args, PyObject *kw)
+{
+    static char *kwlist[] = {NULL};
+    if (!PyArg_ParseTupleAndKeywords(args, kw, "", kwlist)) return -1;
+    self->ch = runloom_chan_new(1);
+    if (self->ch == NULL) return -1;
+    /* Seed the token: the mutex starts unlocked.  try_send returns 0 on
+     * success (room in the empty cap-1 buffer). */
+    if (runloom_chan_try_send(self->ch, Py_None) != 0) {
+        runloom_chan_decref(self->ch);
+        self->ch = NULL;
+        if (!PyErr_Occurred())
+            PyErr_SetString(PyExc_RuntimeError, "mutex init failed");
+        return -1;
+    }
+    return 0;
+}
+
+static void RunloomMutex_dealloc(RunloomMutex *self)
+{
+    if (self->ch != NULL) {
+        runloom_chan_decref(self->ch);
+        self->ch = NULL;
+    }
+    Py_TYPE(self)->tp_free((PyObject *)self);
+}
+
+/* lock(): take the token, blocking until available.  MUST be called from a
+ * goroutine (it can park).  The Python wrapper guarantees that; a foreign
+ * thread uses try_lock instead. */
+static PyObject *RunloomMutex_lock(RunloomMutex *self, PyObject *unused)
+{
+    int ok;
+    PyObject *v;
+    (void)unused;
+    v = runloom_chan_recv(self->ch, &ok);   /* blocks while held elsewhere */
+    if (v == NULL) return NULL;
+    Py_DECREF(v);                            /* the token (None); discard */
+    Py_RETURN_NONE;
+}
+
+/* try_lock(): non-blocking.  Never parks -> safe from a foreign OS thread. */
+static PyObject *RunloomMutex_try_lock(RunloomMutex *self, PyObject *unused)
+{
+    int ok;
+    PyObject *v;
+    (void)unused;
+    if (runloom_chan_try_recv(self->ch, &v, &ok) < 0) return NULL;
+    if (v == NULL) Py_RETURN_FALSE;          /* would-block: held elsewhere */
+    Py_DECREF(v);
+    Py_RETURN_TRUE;
+}
+
+/* unlock(): return the token.  A full buffer means the token was never taken
+ * -> releasing an unlocked mutex, which raises (matches threading.Lock). */
+static PyObject *RunloomMutex_unlock(RunloomMutex *self, PyObject *unused)
+{
+    int r;
+    (void)unused;
+    r = runloom_chan_try_send(self->ch, Py_None);
+    if (r < 0) return NULL;
+    if (r == 1) {
+        PyErr_SetString(PyExc_RuntimeError, "release unlocked lock");
+        return NULL;
+    }
+    Py_RETURN_NONE;
+}
+
+static PyObject *RunloomMutex_locked(RunloomMutex *self, PyObject *unused)
+{
+    (void)unused;
+    /* token taken (buffer empty) => held */
+    if (runloom_chan_len(self->ch) == 0) Py_RETURN_TRUE;
+    Py_RETURN_FALSE;
+}
+
+static PyObject *RunloomMutex_enter(RunloomMutex *self, PyObject *unused)
+{
+    PyObject *r = RunloomMutex_lock(self, unused);
+    if (r == NULL) return NULL;
+    Py_DECREF(r);
+    Py_INCREF(self);
+    return (PyObject *)self;
+}
+
+static PyObject *RunloomMutex_exit(RunloomMutex *self, PyObject *args)
+{
+    (void)args;
+    return RunloomMutex_unlock(self, NULL);
+}
+
+static PyMethodDef RunloomMutex_methods[] = {
+    {"lock",     (PyCFunction)RunloomMutex_lock,     METH_NOARGS,
+     "Acquire, blocking until available.  Call only from a goroutine."},
+    {"try_lock", (PyCFunction)RunloomMutex_try_lock, METH_NOARGS,
+     "Try to acquire without blocking.  Returns True/False.  Foreign-thread safe."},
+    {"unlock",   (PyCFunction)RunloomMutex_unlock,   METH_NOARGS,
+     "Release.  Raises RuntimeError if not held."},
+    {"locked",   (PyCFunction)RunloomMutex_locked,   METH_NOARGS,
+     "True if currently held."},
+    {"__enter__", (PyCFunction)RunloomMutex_enter,   METH_NOARGS, NULL},
+    {"__exit__",  (PyCFunction)RunloomMutex_exit,    METH_VARARGS, NULL},
+    {NULL, NULL, 0, NULL}
+};
+
+static PyTypeObject RunloomMutexType = {
+    PyVarObject_HEAD_INIT(NULL, 0)
+    .tp_name = "runloom_c.Mutex",
+    .tp_basicsize = sizeof(RunloomMutex),
+    .tp_dealloc = (destructor)RunloomMutex_dealloc,
+    .tp_flags = Py_TPFLAGS_DEFAULT,
+    .tp_doc = "M:N-safe goroutine mutex (channel-backed).  lock/unlock/"
+              "try_lock/locked.",
+    .tp_methods = RunloomMutex_methods,
+    .tp_init = (initproc)RunloomMutex_init,
+    .tp_new = PyType_GenericNew,
+};
+
 /* ---- blocking(): run a Python callable on the blocking-offload pool ----
  *
  * Generalises the C-level getaddrinfo offload to any user-named blocking

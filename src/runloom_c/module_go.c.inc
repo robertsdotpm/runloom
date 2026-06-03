@@ -198,12 +198,20 @@ static PyObject *m_park_self(PyObject *self, PyObject *unused)
  * to capture its own handle for wake-from-callback. */
 static PyObject *m_current_g(PyObject *self, PyObject *unused)
 {
-    runloom_sched_t *s = runloom_sched_get();
     runloom_g_t *g;
     RunloomG *handle;
     (void)self; (void)unused;
 
-    g = s->current;
+    /* On an M:N hub the running goroutine lives in the hub's TLS, NOT in
+     * the single-thread scheduler's ->current -- check it first so
+     * current_g() works under mn_run too.  Without this it returned None
+     * on every hub, which broke CoRLock owner identity (self-deadlock) and
+     * anything else keying off runloom.current() under M:N. */
+    if (runloom_mn_current_hub_opaque() != NULL) {
+        g = runloom_mn_tls_current_g();
+    } else {
+        g = runloom_sched_get()->current;
+    }
     if (g == NULL) {
         Py_RETURN_NONE;
     }

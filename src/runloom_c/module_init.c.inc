@@ -417,6 +417,16 @@ PyMODINIT_FUNC PyInit_runloom_c(void)
         Py_DECREF(m);
         return NULL;
     }
+    if (PyType_Ready(&RunloomMutexType) < 0) {
+        Py_DECREF(m);
+        return NULL;
+    }
+    Py_INCREF(&RunloomMutexType);
+    if (PyModule_AddObject(m, "Mutex", (PyObject *)&RunloomMutexType) < 0) {
+        Py_DECREF(&RunloomMutexType);
+        Py_DECREF(m);
+        return NULL;
+    }
     if (runloom_tcpconn_register(m) < 0) {
         Py_DECREF(m);
         return NULL;

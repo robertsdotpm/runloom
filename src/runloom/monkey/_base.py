@@ -167,10 +167,19 @@ def _fd_pollable(fd):
 class _Parker(object):
     __slots__ = ("r", "w", "_sockets")
     _pool = []
+    # Real lock guarding the shared pool: under M:N several hub threads
+    # build/release parkers concurrently, and `if _pool: _pool.pop()` is a
+    # TOCTOU race (two threads both see it non-empty, one pops an empty list
+    # -> IndexError).  Held only for the O(1) pop/append, never across I/O.
+    _pool_lock = _thread.allocate_lock()
 
     def __init__(self):
-        if _Parker._pool:
-            self.r, self.w, self._sockets = _Parker._pool.pop()
+        reused = None
+        with _Parker._pool_lock:
+            if _Parker._pool:
+                reused = _Parker._pool.pop()
+        if reused is not None:
+            self.r, self.w, self._sockets = reused
         elif _IS_WINDOWS:
             s1, s2 = socket.socketpair()
             s1.setblocking(False)
@@ -227,9 +236,12 @@ class _Parker(object):
                     pass
             except (BlockingIOError, OSError):
                 pass
-        if len(_Parker._pool) < 64:
-            _Parker._pool.append((self.r, self.w, self._sockets))
-        else:
+        pooled = False
+        with _Parker._pool_lock:
+            if len(_Parker._pool) < 64:
+                _Parker._pool.append((self.r, self.w, self._sockets))
+                pooled = True
+        if not pooled:
             if self._sockets is not None:
                 for s in self._sockets:
                     try: s.close()
