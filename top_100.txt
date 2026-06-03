@@ -142,4 +142,13 @@ NEXT-40 PUSH (cont.): Rx/dataloader/scheduler + aiocsv-fixed (4)
  98. aiodataloader              - DataLoader batched 3 loads into 1 batch
  99. apscheduler                - AsyncScheduler 4.x interval job fired
 
-TOTAL DISTINCT PROJECTS PASSING: 99
+
+------------------------------------------------------------
+BEYOND 100: HTTP mockers, circuit breaker, async CLI (4)
+------------------------------------------------------------
+100. respx                      - mocked httpx AsyncClient GET via respx router
+101. aresponses                 - mocked aiohttp GET via aresponses mock server
+102. purgatory                  - async circuit breaker opens after failure threshold
+103. asyncclick                 - async CLI command via CliRunner -> output
+
+TOTAL DISTINCT PROJECTS PASSING: 103
