@@ -380,6 +380,7 @@ static PyObject *spawn_common(pygo_sched_t *s, PyObject *callable,
     g->owner = s;      /* per-thread sched that owns this g (Phase C) */
     g->noyield = noyield;
     g->pct_prio = 0;   /* fresh goroutine: unassigned PCT priority (slab reuse) */
+    g->pct_fifo = 0;   /* default reorderable; m_go(fifo=True) sets it after spawn */
     g->coro = pygo_coro_new(stack_size, pygo_g_entry, g);
     if (g->coro == NULL) {
         Py_DECREF(g->callable);

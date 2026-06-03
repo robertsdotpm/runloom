@@ -35,28 +35,32 @@ ready-pop order *is* the whole schedule. It deliberately does **not**:
 - **permute pure-compute `yield_`** — single-hub `yield_` has a
   run-to-completion fast path when nothing else is parked.
 
-**Do NOT run PCT against the asyncio bridge (`pygo.aio`) tests.** Regular
-`loop.call_soon` spawns one goroutine per callback (`_go_io`, for the roomy
-stack protocol callbacks need — see the aio invariants in CLAUDE.md), so the
-call_soon callbacks ARE ready-ring goroutines that PCT permutes. But asyncio
-*guarantees* call_soon FIFO (a future's awaiter resumes before a later-scheduled
-callback; `await sleep(0)` drains all ready callbacks before resuming). pygo.aio
-satisfies that in production because the default scheduler is FIFO — so permuting
-it is exploring an interleaving the asyncio contract FORBIDS, i.e. a FALSE
-POSITIVE, not a bug. (Confirmed 2026-06-03: under PCT seeds, `test_edge_cases.
-test_done_callback_after_done_fires_immediately` drops the callback,
-`test_stress.test_sleeper_storm` exceeds its wake-order budget, etc. — all the
-same call_soon/wake-FIFO reordering; the runtime primitives themselves (park/
-wake, channels) stay correct under PCT.) An earlier version of this note wrongly
-claimed PCT "does not reach call_soon ordering" — it does; the right conclusion
-is simply that PCT's valid surface is raw goroutine/channel/select code, not the
-FIFO-ordered asyncio callback layer. (`call_soon_threadsafe` IS a real
-Python-level FIFO queue drained in order by the keepalive, untouched by PCT;
-regression-guarded by `pygo_compat/call_soon_fifo.py`.)
+**asyncio-aware (call_soon-FIFO preserved).** Regular `loop.call_soon` spawns
+one goroutine per callback (`_go_io`, for the roomy stack protocol callbacks
+need), and task steps are scheduled the same way, so those callbacks ARE
+ready-ring goroutines. asyncio *guarantees* them call_soon-FIFO — permuting them
+is exploring an interleaving the contract FORBIDS (a false positive, not a bug).
+So the aio bridge marks every such goroutine `fifo` (`pygo_core.go(fn,
+fifo=True)` → `g->pct_fifo`), and PCT keeps `fifo` goroutines in spawn order:
+only the OLDEST ready `fifo` g is a pick candidate, younger ones wait their
+turn. PCT may still freely interleave *raw* (un-marked) goroutines/channels —
+even between two call_soon callbacks — it just can't run a later callback before
+an earlier one. Result: PCT is safe to run on `pygo.aio` (asyncio test surface
+clean across seeds — `test_edge_cases`, `test_aio*`, `test_asyncio_conformance`),
+while still exploring raw concurrency in mixed programs. Note that asyncio
+scheduling is essentially FIFO-deterministic, so PCT finds little in *pure*
+asyncio code (no legal reordering freedom); its bug-finding value is raw
+goroutine/channel/select code and the raw parts of mixed programs.
+(`call_soon_threadsafe` is a separate Python-level FIFO queue drained in order by
+the keepalive, never on the ready ring; regression-guarded by
+`pygo_compat/call_soon_fifo.py`.)
 
-Its real, demonstrated surface is: several goroutines parked on
+Its real, demonstrated surface is: several (raw) goroutines parked on
 channels/select/sleep in single-hub mode, whose **wake order** it permutes —
-a genuine complement to `lincheck` for ordering robustness.
+a genuine complement to `lincheck` for ordering robustness. (Tests that ASSERT a
+specific raw wake order — `test_stress.test_sleeper_storm`, the
+`TestParkWakeRace` yield-coordination tests — are by design not PCT-robust and
+will "fail" under a seed; that is PCT exploring, not a runtime bug.)
 
 ## Keep / drop
 

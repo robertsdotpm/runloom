@@ -334,13 +334,25 @@ static void pygo_pct_init(void)
 }
 
 /* Find the logical ring index of the highest-priority ready g, assigning a
- * fresh random high priority to any g that doesn't have one yet. */
+ * fresh random high priority to any g that doesn't have one yet.
+ *
+ * FIFO goroutines (pct_fifo, the aio bridge's call_soon/task gs) must keep their
+ * relative spawn order: only the OLDEST ready FIFO g is a candidate; younger
+ * ones are skipped until it has run.  So PCT may still interleave reorderable
+ * (raw) gs freely and may even defer the oldest FIFO g behind one, but it can
+ * never run a later call_soon callback before an earlier one -- honouring
+ * asyncio's call_soon-FIFO contract while still exploring raw concurrency. */
 static size_t pygo_pct_argmax(pygo_sched_t *s)
 {
     size_t p, best = s->ready_head;
     int best_prio = -2147483647 - 1;
+    int seen_fifo = 0;
     for (p = s->ready_head; p != s->ready_tail; p++) {
         pygo_g_t *cg = s->ready_ring[p & s->ready_mask];
+        if (cg->pct_fifo) {
+            if (seen_fifo) continue;     /* keep FIFO gs in spawn order */
+            seen_fifo = 1;
+        }
         if (cg->pct_prio == 0)   /* unassigned -> random high priority */
             cg->pct_prio = 0x40000000 + (int)(pygo_pct_rand() & 0x3FFFFFFF);
         if (cg->pct_prio > best_prio) { best_prio = cg->pct_prio; best = p; }

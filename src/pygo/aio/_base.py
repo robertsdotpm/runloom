@@ -59,8 +59,16 @@ except ValueError:
 
 def _go_io(fn):
     """Spawn a goroutine that synchronously runs user protocol callbacks,
-    on the roomier _IO_STACK (falls back to the scheduler default if disabled)."""
-    return pygo_core.go(fn, stack_size=_IO_STACK) if _IO_STACK else pygo_core.go(fn)
+    on the roomier _IO_STACK (falls back to the scheduler default if disabled).
+
+    fifo=True marks the goroutine so the PCT controlled scheduler (PYGO_PCT_SEED)
+    keeps it in spawn order relative to other aio goroutines -- the aio bridge
+    delivers call_soon callbacks / task steps as goroutines, and asyncio
+    guarantees them call_soon-FIFO, so permuting them is a false positive, not a
+    bug.  No effect when PCT is off; PCT still freely interleaves raw goroutines."""
+    if _IO_STACK:
+        return pygo_core.go(fn, stack_size=_IO_STACK, fifo=True)
+    return pygo_core.go(fn, fifo=True)
 
 
 # ------------------------------------------------------------------

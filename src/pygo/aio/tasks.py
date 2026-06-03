@@ -75,8 +75,12 @@ class PygoTask(_PygoFutureMixin, asyncio.Task):
         # Driver goroutines run arbitrary user async code (deep C-recursive
         # first-time imports overflow the default 128 KB g-stack and SEGV), so
         # give them a roomier stack.  Override with PYGO_AIO_TASK_STACK.
-        self._g = pygo_core.go(_body, stack_size=_TASK_STACK) \
-            if _TASK_STACK else pygo_core.go(_body)
+        # fifo=True: task STEPS are scheduled call_soon-FIFO in asyncio, so the
+        # PCT controlled scheduler must keep this driver in order with the loop's
+        # other call_soon goroutines (else a sleep(0) resume can race ahead of a
+        # call_soon callback -- a false positive, not a bug).  See pct_fifo.
+        self._g = pygo_core.go(_body, stack_size=_TASK_STACK, fifo=True) \
+            if _TASK_STACK else pygo_core.go(_body, fifo=True)
 
     def _pg_settle_c(self):
         # Settle the underlying C Future to FINISHED so asyncio.Task.__del__

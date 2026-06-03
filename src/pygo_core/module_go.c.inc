@@ -48,15 +48,16 @@ static PyObject *m_blocking(PyObject *self, PyObject *args, PyObject *kw)
 
 static PyObject *m_go(PyObject *self, PyObject *args, PyObject *kw)
 {
-    static char *kwlist[] = {"fn", "stack_size", NULL};
+    static char *kwlist[] = {"fn", "stack_size", "fifo", NULL};
     pygo_sched_t *s;
     PygoG *handle;
     pygo_g_t *g;
     PyObject *cap, *callable;
     Py_ssize_t stack_size = -1;
+    int fifo = 0;
     (void)self;
-    if (!PyArg_ParseTupleAndKeywords(args, kw, "O|n", kwlist,
-                                     &callable, &stack_size)) {
+    if (!PyArg_ParseTupleAndKeywords(args, kw, "O|np", kwlist,
+                                     &callable, &stack_size, &fifo)) {
         return NULL;
     }
     if (!PyCallable_Check(callable)) {
@@ -73,6 +74,9 @@ static PyObject *m_go(PyObject *self, PyObject *args, PyObject *kw)
     g = (pygo_g_t *)PyCapsule_GetPointer(cap, "pygo_g");
     Py_DECREF(cap);
     if (g == NULL) return NULL;
+    /* fifo=True: PCT must keep this g in spawn order vs other FIFO gs (asyncio
+     * call_soon-FIFO; see pct_fifo).  No effect unless PYGO_PCT_SEED is set. */
+    if (fifo) g->pct_fifo = 1;
 
     handle = PyObject_New(PygoG, &PygoGType);
     if (handle == NULL) {

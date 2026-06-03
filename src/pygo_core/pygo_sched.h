@@ -166,6 +166,15 @@ struct pygo_g {
      * only read/written on the single-hub ready path when PYGO_PCT_SEED is
      * set (testing only, zero cost otherwise).  See pygo_sched.c. */
     int pct_prio;
+    /* PCT FIFO marker: when set, PCT must NOT reorder this g relative to other
+     * FIFO-marked gs -- it preserves their spawn (ready-ring) order.  The aio
+     * bridge marks every _go_io goroutine (call_soon callbacks, task steps,
+     * io/timer drivers) so PCT respects asyncio's call_soon-FIFO contract
+     * instead of permuting it (which was a false positive, not a bug -- asyncio
+     * scheduling has no legal reordering freedom).  PCT still freely interleaves
+     * un-marked raw goroutines/channels in a mixed program.  Slab-zeroed to 0
+     * (reorderable) by default; testing-only, zero cost when PCT is off. */
+    int pct_fifo;
     /* Race-safe park/wake counter.  pygo_sched_park_safe decrements;
      * if >0, the wake already arrived and we skip the yield.
      * pygo_sched_wake_safe increments and (if g is currently parked)
