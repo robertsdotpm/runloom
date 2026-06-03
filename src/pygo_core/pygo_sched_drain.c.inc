@@ -370,6 +370,33 @@ Py_ssize_t pygo_sched_drain(pygo_sched_t *s)
     }
     /* Restore drain's tstate before returning to Python. */
     pygo_pystate_load(&sched_snap);
+    /* Deadlock detection.  The loop above exited; if it exited because the
+     * scheduler went QUIESCENT (not because of a clean sched_stop) yet
+     * goroutines remain parked on a channel / via park_safe, those goroutines
+     * are blocked on each other with no event source left to wake them (every
+     * netpoll/timer/io/blockpool source was empty -- that's the loop's own exit
+     * condition).  That is Go's "all goroutines are asleep - deadlock!".  Report
+     * it instead of returning silently with the work unfinished.  aio shuts its
+     * loop down via sched_stop (s->stopping), so a clean aio teardown with
+     * pending background tasks is excluded.  Single-thread only (M:N hubs have
+     * their own liveness, and the registry count is process-global). */
+    if (!s->stopping && !sig_break && pygo_mn_hub_count() == 0 &&
+        pygo_deadlock_mode() != 0) {
+        long ndead = pygo_count_deadlockable_goroutines((const void *)s);
+        if (ndead > 0) {
+            fprintf(stderr,
+                "\npygo: DEADLOCK -- the scheduler ran out of work with %ld "
+                "goroutine(s) still blocked on a channel/park and no way to "
+                "wake them:\n", ndead);
+            fflush(stderr);
+            pygo_dump_goroutines_fd(2);
+            if (pygo_deadlock_mode() == 2) {
+                PyErr_Format(PyExc_RuntimeError,
+                    "pygo: all goroutines are blocked -- deadlock "
+                    "(%ld parked, none runnable)", ndead);
+            }
+        }
+    }
     /* A signal handler raised (Ctrl-C): re-arm the exception on the now-restored
      * scheduler tstate so m_run returns NULL and it propagates out of the
      * run_forever()/run_until_complete() drive, as on stock asyncio. */

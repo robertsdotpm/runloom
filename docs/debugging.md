@@ -98,6 +98,40 @@ stderr and lets the process continue.  The underlying primitive is
 `pygo_core.dump_goroutines(fd)`, which is async-signal-safe-ish (it
 try-locks the registry and uses only `write(2)`).
 
+## Deadlock detection
+
+Go reports `fatal error: all goroutines are asleep - deadlock!` when the
+scheduler runs out of runnable work but goroutines are still blocked on each
+other.  pygo does the same: if the single-thread scheduler quiesces — nothing
+runnable, no timers, no I/O, no offload in flight — while goroutines are still
+parked on a channel or a `park`, those goroutines can never be woken, so it
+reports the deadlock with a goroutine dump:
+
+```
+pygo: DEADLOCK -- the scheduler ran out of work with 2 goroutine(s) still
+blocked on a channel/park and no way to wake them:
+
+=== pygo goroutines: 2 live ===
+  chan-wait  2
+goroutine 1 [chan-wait] ...
+goroutine 2 [chan-wait] ...
+```
+
+Three modes (default **warn**):
+
+```python
+import pygo.inspect as gi
+gi.set_deadlock_mode("warn")    # print the dump, keep going (default)
+gi.set_deadlock_mode("raise")   # raise RuntimeError out of run()
+gi.set_deadlock_mode("off")     # do nothing
+```
+
+Also via env `PYGO_DEADLOCK=off|warn|raise`.  This applies to the
+single-thread scheduler (which `pygo.aio` uses).  A clean `pygo.aio` shutdown
+goes through `sched_stop`, which is **excluded**, so a normal loop teardown
+with pending background tasks never trips the detector — only a genuine
+"everyone is blocked, nothing can make progress" quiescence does.
+
 ## Cost
 
 The registry that powers all of this has **no hot-path cost**: a goroutine

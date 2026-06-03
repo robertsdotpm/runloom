@@ -79,6 +79,16 @@ uint64_t pygo_next_goid(void);
 /* Number of live (non-FREED) goroutines.  Takes pygo_greg_lock. */
 long pygo_goroutine_count(void);
 
+/* Count goroutines owned by `owner` (a pygo_sched_t*; NULL = any) parked on a
+ * channel or via park_safe -- the deadlockable set.  Used by the drain's
+ * deadlock detector. */
+long pygo_count_deadlockable_goroutines(const void *owner);
+
+/* Deadlock-detection mode: 0=off, 1=warn (print the goroutine dump), 2=raise
+ * a RuntimeError.  Default 1; also via PYGO_DEADLOCK=off|warn|raise. */
+int  pygo_deadlock_mode(void);
+void pygo_set_deadlock_mode(int mode);
+
 /* PYGO_GST_* -> short stable name ("running", "io-wait", ...).  Never
  * NULL (returns "?" for an out-of-range value). */
 const char *pygo_g_state_name(unsigned int state);

@@ -208,6 +208,17 @@ static PyMethodDef module_methods[] = {
      "its own netpoll fd.  Registered automatically as an "
      "os.register_at_fork(after_in_child=...) handler; call directly only if "
      "you fork without importing the pygo package.  CHILD process only."},
+    {"set_deadlock_mode", m_set_deadlock_mode, METH_O,
+     "set_deadlock_mode(0|1|2): 0=off, 1=warn (print the goroutine dump), "
+     "2=raise RuntimeError when the scheduler quiesces with goroutines still "
+     "blocked on channels/parks (Go's 'all goroutines are asleep - deadlock!'). "
+     "Default 1; also via PYGO_DEADLOCK=off|warn|raise.  Single-thread "
+     "scheduler only; aio's clean stop is excluded."},
+    {"get_deadlock_mode", m_get_deadlock_mode, METH_NOARGS,
+     "get_deadlock_mode() -> int.  Current deadlock-detection mode."},
+    {"count_deadlocked", m_count_deadlocked, METH_NOARGS,
+     "count_deadlocked() -> int.  Goroutines currently parked on a "
+     "channel/park (the set that deadlocks if the scheduler quiesces)."},
     {"install_traceback_signal", m_install_traceback_signal, METH_VARARGS,
      "install_traceback_signal(signum=SIGQUIT) -> int.  Install a RAW C "
      "signal handler that writes the goroutine dump to stderr -- Go's "

@@ -414,6 +414,7 @@ static PYGO_THREAD_RET pygo_hub_main(void *arg)
                 pygo_tls_current_g = g;
                 pygo_tls_self_queued = 0;
                 pygo_tls_parked_offqueue = 0;
+                pygo_g_state_set(g, PYGO_GST_RUNNING);   /* observational: now on-CPU */
                 pygo_hub_resume_begin(h, g);
                 pygo_coro_resume(g->coro);
                 pygo_hub_resume_end(h);
@@ -431,6 +432,7 @@ static PYGO_THREAD_RET pygo_hub_main(void *arg)
                      * wake_state is still RUNNING with no other entry.  Force-
                      * unlink any stale parker, then drop both refs -- the slab
                      * re-zeroes wake_state when it reallocs the g. */
+                    pygo_g_state_set(g, PYGO_GST_DONE);
                     pygo_netpoll_force_unlink_g_parker(g);
                     pygo_mn_pending_complete(h);
                     pygo_g_decref(g);                  /* scheduler ref */
@@ -546,6 +548,7 @@ static PYGO_THREAD_RET pygo_hub_main(void *arg)
                 if (from_runq) pygo_g_decref(g);   /* queue ref */
                 continue;
             }
+            pygo_g_state_set(g, PYGO_GST_RUNNING);   /* observational: now on-CPU */
             pygo_hub_resume_begin(h, g);
             pygo_coro_resume(g->coro);
             pygo_hub_resume_end(h);
@@ -557,6 +560,7 @@ static PYGO_THREAD_RET pygo_hub_main(void *arg)
             h->sched.current = NULL;
 
             if (pygo_coro_done(g->coro)) {
+                pygo_g_state_set(g, PYGO_GST_DONE);
                 /* Drain g's chunks, restore hub's tstate so the decref
                  * (potentially calling Python tp_dealloc) allocates on
                  * the hub's chunk -- not on a NULL datastack that

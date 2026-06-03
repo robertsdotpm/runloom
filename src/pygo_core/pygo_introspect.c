@@ -151,6 +151,12 @@ void pygo_introspect_init(void)
     env = getenv("PYGO_INTROSPECT_TIME");
     if (env != NULL && env[0] && env[0] != '0')
         pygo_introspect_set_timestamps(1);
+    env = getenv("PYGO_DEADLOCK");   /* off | warn | raise (default warn) */
+    if (env != NULL && env[0]) {
+        if (strcmp(env, "off") == 0 || env[0] == '0')      pygo_set_deadlock_mode(0);
+        else if (strcmp(env, "raise") == 0 || env[0] == '2') pygo_set_deadlock_mode(2);
+        else                                                 pygo_set_deadlock_mode(1);
+    }
 }
 
 void pygo_introspect_fini(void)
@@ -219,6 +225,41 @@ long pygo_goroutine_count(void)
     }
     pygo_mutex_unlock(&pygo_greg_lock);
     return n;
+}
+
+/* Count goroutines owned by `owner` parked on a channel or via park_safe --
+ * the "blocked on each other" set.  At a quiescent drain exit (no ready /
+ * sleep / netpoll / io / blockpool work left) these are unwakeable: a
+ * deadlock.  owner==NULL counts every sched's such goroutines. */
+long pygo_count_deadlockable_goroutines(const void *owner)
+{
+    long n = 0;
+    pygo_g_t *g;
+    if (!pygo_greg_inited) return 0;
+    pygo_mutex_lock(&pygo_greg_lock);
+    for (g = pygo_greg_head; g != NULL; g = g->reg_next) {
+        unsigned int st = __atomic_load_n(&g->state, __ATOMIC_ACQUIRE);
+        if (st != PYGO_GST_PARKED_CHAN && st != PYGO_GST_PARKED_SAFE) continue;
+        if (owner != NULL && (const void *)g->owner != owner) continue;
+        n++;
+    }
+    pygo_mutex_unlock(&pygo_greg_lock);
+    return n;
+}
+
+/* ---- deadlock-detection mode: 0=off, 1=warn (dump), 2=raise ---- */
+static int pygo_deadlock_mode_v = 1;   /* default: warn */
+
+int pygo_deadlock_mode(void)
+{
+    return __atomic_load_n(&pygo_deadlock_mode_v, __ATOMIC_RELAXED);
+}
+
+void pygo_set_deadlock_mode(int mode)
+{
+    if (mode < 0) mode = 0;
+    if (mode > 2) mode = 2;
+    __atomic_store_n(&pygo_deadlock_mode_v, mode, __ATOMIC_RELAXED);
 }
 
 /* ---------------------------------------------------------------- *

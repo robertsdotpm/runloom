@@ -88,6 +88,32 @@ def enable_timestamps(on=True):
     _core.set_introspect_timestamps(bool(on))
 
 
+DEADLOCK_MODES = {"off": 0, "warn": 1, "raise": 2}
+
+
+def set_deadlock_mode(mode):
+    """Control deadlock detection when the single-thread scheduler quiesces
+    with goroutines still blocked on channels/parks (Go's "all goroutines
+    are asleep - deadlock!").
+
+        "off"    do nothing
+        "warn"   print the goroutine dump (default; non-fatal)
+        "raise"  raise RuntimeError out of run()
+
+    Also settable via env PYGO_DEADLOCK=off|warn|raise.  aio's clean loop
+    shutdown is excluded, so this won't fire on a normal aio teardown with
+    pending background tasks."""
+    if isinstance(mode, str):
+        mode = DEADLOCK_MODES[mode]
+    _core.set_deadlock_mode(int(mode))
+
+
+def deadlock_mode():
+    """Current deadlock-detection mode as a string ('off'/'warn'/'raise')."""
+    inv = {v: k for k, v in DEADLOCK_MODES.items()}
+    return inv.get(_core.get_deadlock_mode(), "warn")
+
+
 def install_dump_signal(sig=None):
     """Install a SIGQUIT (or `sig`) handler that dumps all goroutines to
     stderr -- Go's GOTRACEBACK / `kill -QUIT <pid>`.

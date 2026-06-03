@@ -232,6 +232,94 @@ class TestDump(unittest.TestCase):
         self.assertIn("goroutine", cap["text"])
 
 
+import subprocess
+
+
+def _run_script(code, env_extra=None):
+    """Run `code` in a fresh interpreter (full isolation: a deadlock leaves
+    goroutines parked, which mustn't pollute the test process).  Returns
+    (returncode, stdout+stderr)."""
+    env = dict(os.environ)
+    env["PYTHON_GIL"] = "0"
+    env["PYGO_SYSMON"] = "0"
+    env["PYTHONPATH"] = "src" + os.pathsep + env.get("PYTHONPATH", "")
+    if env_extra:
+        env.update(env_extra)
+    p = subprocess.run([sys.executable, "-c", code], env=env,
+                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                       timeout=30)
+    return p.returncode, p.stdout.decode("utf-8", "replace")
+
+
+class TestDeadlockDetection(unittest.TestCase):
+    def test_mode_get_set(self):
+        old = gi.deadlock_mode()
+        try:
+            gi.set_deadlock_mode("off")
+            self.assertEqual(gi.deadlock_mode(), "off")
+            gi.set_deadlock_mode("raise")
+            self.assertEqual(gi.deadlock_mode(), "raise")
+            gi.set_deadlock_mode("warn")
+            self.assertEqual(gi.deadlock_mode(), "warn")
+        finally:
+            gi.set_deadlock_mode(old)
+
+    def test_count_deadlocked_zero_when_idle(self):
+        self.assertEqual(pygo_core.count_deadlocked(), 0)
+
+    def test_raise_end_to_end(self):
+        rc, out = _run_script(
+            "import pygo, pygo_core, pygo.inspect as gi\n"
+            "gi.set_deadlock_mode('raise')\n"
+            "try:\n"
+            "    pygo.run(lambda: pygo_core.Chan(0).recv())\n"
+            "    print('NO_RAISE')\n"
+            "except RuntimeError as e:\n"
+            "    print('RAISED_OK' if 'deadlock' in str(e).lower() else 'WRONG')\n")
+        self.assertIn("RAISED_OK", out)
+        self.assertIn("DEADLOCK", out)            # the dump printed too
+
+    def test_warn_is_non_fatal(self):
+        rc, out = _run_script(
+            "import pygo, pygo_core, pygo.inspect as gi\n"
+            "gi.set_deadlock_mode('warn')\n"
+            "def waiter(): pygo_core.Chan(0).recv()\n"
+            "def main():\n"
+            "    pygo.go(waiter)\n"
+            "    pygo_core.Chan(0).recv()\n"
+            "pygo.run(main)\n"            # warn -> prints, no raise
+            "print('SURVIVED')\n")
+        self.assertEqual(rc, 0)
+        self.assertIn("SURVIVED", out)
+        self.assertIn("DEADLOCK", out)
+        self.assertIn("chan-wait", out)
+
+    def test_off_mode_silent(self):
+        rc, out = _run_script(
+            "import pygo, pygo_core, pygo.inspect as gi\n"
+            "gi.set_deadlock_mode('off')\n"
+            "pygo.run(lambda: pygo_core.Chan(0).recv())\n"
+            "print('SURVIVED')\n")
+        self.assertEqual(rc, 0)
+        self.assertIn("SURVIVED", out)
+        self.assertNotIn("DEADLOCK", out)
+
+    def test_no_false_positive_on_clean_run(self):
+        rc, out = _run_script(
+            "import pygo, pygo.inspect as gi\n"
+            "gi.set_deadlock_mode('raise')\n"
+            "def worker():\n"
+            "    [pygo.yield_() for _ in range(3)]\n"
+            "def main():\n"
+            "    [pygo.go(worker) for _ in range(5)]\n"
+            "    pygo.sleep(0.005)\n"
+            "pygo.run(main)\n"            # completes -> no deadlock
+            "print('CLEAN_OK')\n")
+        self.assertEqual(rc, 0)
+        self.assertIn("CLEAN_OK", out)
+        self.assertNotIn("DEADLOCK", out)
+
+
 class TestOutsideGoroutine(unittest.TestCase):
     def test_apis_safe_when_idle(self):
         # No scheduler running: must not crash.

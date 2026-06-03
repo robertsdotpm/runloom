@@ -117,6 +117,28 @@ static PyObject *m_introspect_timestamps(PyObject *self, PyObject *arg)
     Py_RETURN_NONE;
 }
 
+static PyObject *m_set_deadlock_mode(PyObject *self, PyObject *arg)
+{
+    long mode;
+    (void)self;
+    mode = PyLong_AsLong(arg);
+    if (mode == -1 && PyErr_Occurred()) return NULL;
+    pygo_set_deadlock_mode((int)mode);
+    Py_RETURN_NONE;
+}
+
+static PyObject *m_get_deadlock_mode(PyObject *self, PyObject *unused)
+{
+    (void)self; (void)unused;
+    return PyLong_FromLong((long)pygo_deadlock_mode());
+}
+
+static PyObject *m_count_deadlocked(PyObject *self, PyObject *unused)
+{
+    (void)self; (void)unused;
+    return PyLong_FromLong(pygo_count_deadlockable_goroutines(NULL));
+}
+
 /* ---- SIGQUIT-style goroutine dump (Go's GOTRACEBACK) ----
  *
  * A RAW C signal handler so the dump works even when the interpreter is
