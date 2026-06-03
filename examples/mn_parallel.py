@@ -19,7 +19,8 @@ import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 
-import runloom_c
+import runloom
+
 
 NUM_TASKS = 64
 ROUNDS = 4000
@@ -33,13 +34,13 @@ def work():
 
 
 def run_with_hubs(n_hubs):
-    runloom_c.mn_init(n_hubs)
+    runloom.mn_init(n_hubs)
     start = time.perf_counter()
     for _ in range(NUM_TASKS):
-        runloom_c.mn_go(work)
-    runloom_c.mn_run()
+        runloom.mn_go(work)
+    runloom.mn_run()
     elapsed = time.perf_counter() - start
-    runloom_c.mn_fini()
+    runloom.mn_fini()
     return elapsed
 
 

@@ -14,7 +14,6 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 
 import runloom
-import runloom_c
 
 ROUNDS = 5
 
@@ -37,8 +36,8 @@ def pong(from_ping, to_ping):
 
 
 def main():
-    a = runloom_c.Chan()       # ping -> pong  (unbuffered rendezvous)
-    b = runloom_c.Chan()       # pong -> ping
+    a = runloom.Chan()       # ping -> pong  (unbuffered rendezvous)
+    b = runloom.Chan()       # pong -> ping
     runloom.go(ping, a, b)
     runloom.go(pong, a, b)
 

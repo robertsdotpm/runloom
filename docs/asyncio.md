@@ -40,17 +40,17 @@ Measured performance on Python 3.12 (Linux):
 
 ```python
 import asyncio
-import runloom.aio as paio
+import runloom
 
 async def main():
     print("hello from", asyncio.current_task())
     await asyncio.sleep(0.01)
     print("woke up")
 
-paio.run(main())
+runloom.aio.run(main())
 ```
 
-`paio.run(coro)` is the equivalent of `asyncio.run(coro)`:
+`runloom.aio.run(coro)` is the equivalent of `asyncio.run(coro)`:
 
 1. Installs the runloom event-loop policy (`RunloomEventLoopPolicy`).
 2. Creates a `RunloomEventLoop`.
@@ -62,7 +62,7 @@ paio.run(main())
 Standard asyncio idioms work:
 
 ```python
-import asyncio, runloom.aio as paio
+import asyncio, runloom
 
 async def worker(i):
     await asyncio.sleep(0.001)
@@ -72,7 +72,7 @@ async def main():
     results = await asyncio.gather(*(worker(i) for i in range(10)))
     return results
 
-print(paio.run(main()))   # [0, 2, 4, ..., 18]
+print(runloom.aio.run(main()))   # [0, 2, 4, ..., 18]
 ```
 
 `asyncio.create_task(coro)` schedules a task and returns immediately;
@@ -91,7 +91,7 @@ async def main():
 `StreamReader`/`StreamWriter` objects compatible with `asyncio.streams`:
 
 ```python
-import asyncio, runloom.aio as paio
+import asyncio, runloom
 
 async def handler(reader, writer):
     line = await reader.readline()
@@ -101,11 +101,11 @@ async def handler(reader, writer):
     writer.close()
 
 async def main():
-    server = await paio.start_server(handler, "127.0.0.1", 9000)
+    server = await runloom.aio.start_server(handler, "127.0.0.1", 9000)
     async with server:
         await server.serve_forever()
 
-paio.run(main())
+runloom.aio.run(main())
 ```
 
 The server runs at full speed using runloom's netpoll (epoll on Linux,
@@ -116,26 +116,26 @@ overhead is one goroutine -- by default 16 KB of stack after
 ### Client
 
 ```python
-import asyncio, runloom.aio as paio
+import asyncio, runloom
 
 async def main():
-    reader, writer = await paio.open_connection("127.0.0.1", 9000)
+    reader, writer = await runloom.aio.open_connection("127.0.0.1", 9000)
     writer.write(b"hi\n")
     await writer.drain()
     response = await reader.readline()
     print(response)
     writer.close()
 
-paio.run(main())
+runloom.aio.run(main())
 ```
 
 ## Concurrent clients (the fan-out asyncio is supposed to be good at)
 
 ```python
-import asyncio, runloom.aio as paio
+import asyncio, runloom
 
 async def fetch_one(host, port):
-    r, w = await paio.open_connection(host, port)
+    r, w = await runloom.aio.open_connection(host, port)
     w.write(b"GET / HTTP/1.0\r\n\r\n")
     await w.drain()
     body = await r.read()
@@ -147,7 +147,7 @@ async def main():
     sizes = await asyncio.gather(*(fetch_one(h, p) for h, p in targets))
     return sum(sizes)
 
-print(paio.run(main()))
+print(runloom.aio.run(main()))
 ```
 
 100 concurrent TCP connections, each parking on netpoll while the
@@ -160,7 +160,7 @@ reimplement them; they're driven via `Future` and `call_soon`, which
 runloom's loop implements.
 
 ```python
-import asyncio, runloom.aio as paio
+import asyncio, runloom
 
 async def waiter(lock, name):
     async with lock:
@@ -175,7 +175,7 @@ async def main():
         waiter(lock, "C"),
     )
 
-paio.run(main())
+runloom.aio.run(main())
 ```
 
 Output (always sequential):
@@ -192,7 +192,7 @@ all behave the same way.
 ## `wait_for`, `shield`, cancellation
 
 ```python
-import asyncio, runloom.aio as paio
+import asyncio, runloom
 
 async def slow():
     await asyncio.sleep(60.0)
@@ -203,7 +203,7 @@ async def main():
     except asyncio.TimeoutError:
         print("timed out")
 
-paio.run(main())
+runloom.aio.run(main())
 ```
 
 `shield(coro)` works as in stdlib asyncio -- a cancellation on the
@@ -214,7 +214,7 @@ shielded awaitable doesn't propagate to the underlying coroutine.
 Low-level fd readiness callbacks work, driven by runloom's netpoll:
 
 ```python
-import asyncio, os, runloom.aio as paio
+import asyncio, os, runloom
 
 async def main():
     loop = asyncio.get_running_loop()
@@ -230,7 +230,7 @@ async def main():
     await asyncio.sleep(0.01)
     os.close(r); os.close(w)
 
-paio.run(main())
+runloom.aio.run(main())
 ```
 
 These are level-triggered (like asyncio's default selector loop) just
@@ -242,7 +242,7 @@ driven by runloom's netpoll.
 pair with the standard asyncio protocol callbacks:
 
 ```python
-import asyncio, runloom.aio as paio
+import asyncio, runloom
 
 class EchoProto(asyncio.DatagramProtocol):
     def connection_made(self, transport):
@@ -258,7 +258,7 @@ async def main():
     await asyncio.sleep(10)
     transport.close()
 
-paio.run(main())
+runloom.aio.run(main())
 ```
 
 ## Compatibility status
@@ -312,7 +312,7 @@ result = await trivial()
 ### Mix in monkey-patched blocking I/O
 
 ```python
-import runloom.monkey, runloom.aio as paio
+import runloom
 runloom.monkey.patch()    # makes socket / time / ssl cooperative
 
 async def main():
@@ -320,7 +320,7 @@ async def main():
     response = requests.get("http://example.com").content
     return len(response)
 
-paio.run(main())
+runloom.aio.run(main())
 ```
 
 This lets you use libraries that don't support `async` -- `requests`,

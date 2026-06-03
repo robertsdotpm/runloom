@@ -2,9 +2,24 @@
 from collections.abc import Callable
 from typing import Any, TypeVar
 
+# Core primitives re-exported from the C extension so `import runloom` suffices.
+from runloom_c import (
+    Chan as Chan,
+    select as select,
+    mn_init as mn_init,
+    mn_go as mn_go,
+    mn_run as mn_run,
+    mn_fini as mn_fini,
+    netpoll_backend as netpoll_backend,
+)
+
 _T = TypeVar("_T")
 
 __version__: str
+
+def blocking(fn: Callable[..., _T], *args: Any, **kwargs: Any) -> _T:
+    """Offload a blocking/CPU-bound call to a worker pool; park until done."""
+    ...
 
 class Goroutine:
     """Opaque handle returned by go().  Has no public methods today --

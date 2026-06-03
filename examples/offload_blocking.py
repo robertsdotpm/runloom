@@ -20,7 +20,6 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 
 import runloom
-import runloom_c
 
 
 def crunch(rounds):
@@ -47,7 +46,7 @@ def heartbeat(stop):
 
 
 def main():
-    results = runloom_c.Chan(1)
+    results = runloom.Chan(1)
     stop = [False]
 
     runloom.go(heartbeat, stop)

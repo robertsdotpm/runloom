@@ -14,7 +14,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 
-import runloom.aio as paio
+import runloom
 
 
 async def fetch(name, delay):
@@ -63,4 +63,4 @@ async def main():
 
 
 if __name__ == "__main__":
-    paio.run(main())
+    runloom.aio.run(main())

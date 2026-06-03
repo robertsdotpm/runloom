@@ -18,8 +18,6 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 
 import runloom
-import runloom.monkey
-import runloom_c
 
 runloom.monkey.patch()
 
@@ -89,8 +87,8 @@ def client(proxy_addr):
 
 
 def main():
-    up_ready = runloom_c.Chan(1)
-    proxy_ready = runloom_c.Chan(1)
+    up_ready = runloom.Chan(1)
+    proxy_ready = runloom.Chan(1)
 
     runloom.go(echo_upstream, up_ready)
     upstream_addr = up_ready.recv()[0]

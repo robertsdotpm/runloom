@@ -14,14 +14,13 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 
 import runloom
-import runloom_c
 
 
 class WaitGroup(object):
     """Minimal sync.WaitGroup built on a channel."""
 
     def __init__(self):
-        self.pending = runloom_c.Chan(1024)
+        self.pending = runloom.Chan(1024)
         self.total = 0
 
     def add(self, n):

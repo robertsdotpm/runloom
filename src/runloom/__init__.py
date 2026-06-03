@@ -1,11 +1,25 @@
 """runloom -- Go-style coroutines in Python.
 
-Public API (v0):
+Everyday API -- `import runloom` is all you need:
     runloom.go(fn, *args, **kw)   spawn a goroutine
-    runloom.yield_()              cooperative yield
-    runloom.sleep(seconds)        sleep without blocking the OS thread
     runloom.run(main_fn=None)     drive the scheduler until idle
-    runloom.backend()             "fibers" | "ucontext"
+    runloom.sleep(seconds)        sleep without blocking the OS thread
+    runloom.yield_()              cooperative yield
+    runloom.Chan(capacity=0)      Go-style channel
+    runloom.select(cases, ...)    wait on multiple channel ops
+    runloom.blocking(fn, ...)     offload a blocking/CPU call off the hub
+    runloom.mn_init/mn_go/mn_run/mn_fini   M:N scheduler (3.13t, GIL off)
+    runloom.backend() / .netpoll_backend()
+
+Feature packages (import as needed, Go-style):
+    runloom.monkey  -- make blocking stdlib cooperative (manual: .patch())
+    runloom.time    -- After / Tick / Timer / Ticker
+    runloom.context -- Background / WithCancel / WithTimeout
+    runloom.sync    -- blocking-style sockets + Lock/Event/Semaphore
+    runloom.aio     -- run async/await code on the scheduler
+
+The raw C extension stays importable as `runloom_c` for advanced use
+(TCPConn, wait_fd, warmup, raw Coro/G handles, go_noyield, ...).
 """
 # Distribution version, read from the installed package metadata so that
 # pyproject.toml stays the single source of truth.
@@ -41,6 +55,37 @@ from .runtime import (
 import runloom_c as _core  # noqa: F401  – C extension lives at top level
 
 backend = _core.backend
+netpoll_backend = _core.netpoll_backend
+
+# Re-export the core scheduler + channel primitives so `import runloom` is all
+# everyday code needs -- no separate `import runloom_c`.  (go / run / sleep /
+# yield_ / blocking / current above are the friendly wrappers from .runtime.)
+Chan = _core.Chan
+select = _core.select
+
+# M:N scheduler -- real multi-core parallelism on free-threaded 3.13t.
+mn_init = _core.mn_init
+mn_go = _core.mn_go
+mn_run = _core.mn_run
+mn_fini = _core.mn_fini
+
+# Lower-level C primitives, surfaced here so `runloom_c` never needs importing
+# directly for normal use.  (The raw module stays available as `runloom_c` for
+# deep internals: sched_*, park_self, the get_/set_ tuning knobs, etc.)
+TCPConn = _core.TCPConn                # C-level TCP connection (Go-parity perf)
+Coro = _core.Coro                      # raw stackful coroutine handle
+G = _core.G                            # goroutine handle type
+wait_fd = _core.wait_fd                # park the current goroutine on fd readiness
+WAIT_FD_CANCELLED = _core.WAIT_FD_CANCELLED
+tcp_recv = _core.tcp_recv
+tcp_send = _core.tcp_send
+go_noyield = _core.go_noyield          # faster spawn for run-to-completion work
+warmup = _core.warmup                  # pre-allocate the per-thread stack pool
+thread_init = _core.thread_init
+thread_fini = _core.thread_fini
+preempt_init = _core.preempt_init
+preempt_fini = _core.preempt_fini
+iouring_available = _core.iouring_available
 
 # Fork safety: after os.fork() the child keeps only the forking thread, so the
 # M:N hub threads and the blocking-offload workers are gone.  Reset the C
@@ -59,3 +104,32 @@ if hasattr(_os, "register_at_fork"):
 from . import inspect  # noqa: E402,F401
 goroutines = inspect.goroutines
 dump = inspect.dump
+
+# Feature packages, imported eagerly so that `import runloom` is the ONLY
+# import statement you ever need.  Importing them has no side effects -- in
+# particular monkey patches the stdlib only when you call runloom.monkey.patch().
+# (monkey first: runloom.sync builds its Lock/Event on monkey's primitives.)
+from . import monkey   # noqa: E402,F401  – cooperative stdlib (manual .patch())
+from . import time     # noqa: E402,F401  – After / Tick / Timer / Ticker
+from . import context  # noqa: E402,F401  – Background / WithCancel / WithTimeout
+from . import sync     # noqa: E402,F401  – blocking-style sockets + sync prims
+from . import aio      # noqa: E402,F401  – run async/await on the scheduler
+
+__all__ = [
+    # scheduler
+    "go", "run", "sleep", "yield_", "blocking", "current", "Goroutine",
+    "go_noyield", "warmup", "thread_init", "thread_fini",
+    "preempt_init", "preempt_fini",
+    # channels
+    "Chan", "select",
+    # M:N (free-threaded 3.13t)
+    "mn_init", "mn_go", "mn_run", "mn_fini",
+    # low-level I/O primitives
+    "TCPConn", "Coro", "G", "wait_fd", "WAIT_FD_CANCELLED",
+    "tcp_recv", "tcp_send", "iouring_available",
+    # introspection
+    "backend", "netpoll_backend", "goroutines", "dump", "inspect",
+    # feature packages
+    "monkey", "time", "context", "sync", "aio",
+    "__version__",
+]

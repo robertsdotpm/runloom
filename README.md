@@ -9,7 +9,7 @@ scheduler + netpoll, built for **free-threaded Python 3.13t** (GIL off).
 
 ```python
 import socket, sys; sys.path.insert(0, "src")
-import runloom, runloom.monkey, runloom_c
+import runloom
 runloom.monkey.patch()
 
 def handle(conn, addr):
@@ -23,14 +23,14 @@ def accept_loop():
     s = socket.socket(); s.bind(("127.0.0.1", 9000)); s.listen(128)
     while True:
         conn, addr = s.accept()
-        runloom_c.go(lambda c=conn, a=addr: handle(c, a))
+        runloom.go(lambda c=conn, a=addr: handle(c, a))
 
-runloom_c.go(accept_loop)
-runloom_c.run()
+runloom.go(accept_loop)
+runloom.run()
 ```
 
 Already have `async def` code? Run it unchanged on runloom's scheduler with the
-`runloom.aio` bridge (`paio.run(main())` ≈ `asyncio.run`). See [docs/](https://github.com/robertsdotpm/runloom/tree/main/docs/).
+`runloom.aio` bridge (`runloom.aio.run(main())` ≈ `asyncio.run`). See [docs/](https://github.com/robertsdotpm/runloom/tree/main/docs/).
 
 **The trade-off:** the bridge isn't a guaranteed speed-up -- it has more
 per-task overhead than asyncio's own loop, so whether it comes out faster
@@ -39,6 +39,21 @@ it as a way to run your existing async code on runloom's scheduler: point the
 extension at your code and measure.
 
 ---
+
+## Features
+
+- **Hand-rolled asm context switch** (x86_64 SysV, aarch64) -- ~80 ns/swap, no
+  syscall. Windows Fibers / POSIX `ucontext` fallback.
+- **Per-goroutine `PyThreadState` snapshot** (cframe, datastack chunks,
+  exc_info, contextvars, recursion) -- 50 000 yielded goroutines share one OS
+  thread with no frame-chain cliff.
+- **M:N work-stealing scheduler** (3.13t) -- Chase-Lev deque per hub, per-hub
+  MPSC submission, goroutines routed back to their origin hub on wake.
+- **netpoll** -- epoll / kqueue / IOCP / WSAPoll / select; goroutines park
+  transparently on fd readiness. Lost-wake-free 3-state park-commit on all
+  backends.
+- **Go-style channels** -- `Chan(capacity)`, `select`, `for v in ch`; unbuffered
+  ping-pong ~560 ns/round-trip (within 7% of Go 1.22 on the same box).
 
 ## How it compares -- the short answers
 
@@ -201,21 +216,6 @@ they share the same goroutines and can be mixed.
   genuinely-blocking or CPU-bound call to a worker pool so it never wedges a hub
   (runs inline when not on a goroutine).
 
-## Features
-
-- **Hand-rolled asm context switch** (x86_64 SysV, aarch64) -- ~80 ns/swap, no
-  syscall. Windows Fibers / POSIX `ucontext` fallback.
-- **Per-goroutine `PyThreadState` snapshot** (cframe, datastack chunks,
-  exc_info, contextvars, recursion) -- 50 000 yielded goroutines share one OS
-  thread with no frame-chain cliff.
-- **M:N work-stealing scheduler** (3.13t) -- Chase-Lev deque per hub, per-hub
-  MPSC submission, goroutines routed back to their origin hub on wake.
-- **netpoll** -- epoll / kqueue / IOCP / WSAPoll / select; goroutines park
-  transparently on fd readiness. Lost-wake-free 3-state park-commit on all
-  backends.
-- **Go-style channels** -- `Chan(capacity)`, `select`, `for v in ch`; unbuffered
-  ping-pong ~560 ns/round-trip (within 7% of Go 1.22 on the same box).
-
 ## Correctness, verification & security
 
 A lock-free M:N scheduler is exactly where bugs hide in rare interleavings, so
@@ -277,10 +277,10 @@ Read this before betting on runloom -- it's where the project actually is.
 pip install runloom
 ```
 
-Install name and import name match:
+One import is all you need:
 
 ```python
-import runloom, runloom_c      # no path setup needed once installed
+import runloom      # scheduler + channels, plus monkey/time/context/sync/aio
 ```
 
 When a prebuilt **wheel** exists for your platform + Python, `pip` just

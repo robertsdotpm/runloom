@@ -6,13 +6,13 @@ core primitives: channels, sleep, fan-out, and a tiny TCP echo server.
 ## Your first goroutine
 
 ```python
-import runloom_c
+import runloom
 
 def hello():
     print("hello from a goroutine!")
 
-runloom_c.go(hello)        # spawn -- doesn't run yet
-runloom_c.run()            # drive the scheduler until everyone finishes
+runloom.go(hello)        # spawn -- doesn't run yet
+runloom.run()            # drive the scheduler until everyone finishes
 ```
 
 Output:
@@ -22,20 +22,20 @@ hello from a goroutine!
 ```
 
 `go(fn)` queues `fn` for execution on the runloom scheduler.  Nothing
-runs until you call `runloom_c.run()` -- that's the scheduler's main
+runs until you call `runloom.run()` -- that's the scheduler's main
 loop, equivalent of Go's program-startup runtime.
 
 ## Many goroutines
 
 ```python
-import runloom_c
+import runloom
 
 def worker(i):
     print("worker", i)
 
 for i in range(10):
-    runloom_c.go(lambda i=i: worker(i))   # bind i per-spawn
-runloom_c.run()
+    runloom.go(lambda i=i: worker(i))   # bind i per-spawn
+runloom.run()
 ```
 
 Output (order is scheduler-dependent):
@@ -53,22 +53,22 @@ closures over a loop variable.  Each goroutine captures its own `i`.
 
 ## Cooperative sleep
 
-`runloom_c.sched_sleep(seconds)` suspends the current goroutine for at
+`runloom.sched_sleep(seconds)` suspends the current goroutine for at
 least `seconds`, letting other goroutines run in the meantime.  This is
 not `time.sleep` -- `time.sleep` would block the whole OS thread.
 
 ```python
-import runloom_c, time
+import time, runloom
 
 def slow():
     print("start", time.time())
-    runloom_c.sched_sleep(0.5)
+    runloom.sched_sleep(0.5)
     print("end  ", time.time())
 
 # Spawn three sleeps concurrently; they all wake at ~the same time.
 for _ in range(3):
-    runloom_c.go(slow)
-runloom_c.run()
+    runloom.go(slow)
+runloom.run()
 ```
 
 Output:
@@ -93,9 +93,9 @@ unbuffered channels rendezvous (the sender blocks until a receiver is
 ready, and vice-versa).
 
 ```python
-import runloom_c
+import runloom
 
-ch = runloom_c.Chan(10)            # buffered, capacity 10
+ch = runloom.Chan(10)            # buffered, capacity 10
 
 def producer():
     for i in range(5):
@@ -106,9 +106,9 @@ def consumer():
     for v in ch:                   # iterates until ch closes
         print("got", v)
 
-runloom_c.go(producer)
-runloom_c.go(consumer)
-runloom_c.run()
+runloom.go(producer)
+runloom.go(consumer)
+runloom.run()
 ```
 
 Output:
@@ -131,7 +131,7 @@ clients send.
 
 ```python
 import socket
-import runloom, runloom.monkey, runloom_c
+import runloom
 
 runloom.monkey.patch()                 # makes socket cooperative
 
@@ -152,10 +152,10 @@ def accept_loop():
     srv.listen(128)
     while True:
         conn, _ = srv.accept()
-        runloom_c.go(lambda c=conn: handle(c))
+        runloom.go(lambda c=conn: handle(c))
 
-runloom_c.go(accept_loop)
-runloom_c.run()
+runloom.go(accept_loop)
+runloom.run()
 ```
 
 Test it:
@@ -174,7 +174,7 @@ Run it on the runloom scheduler with `runloom.aio`:
 
 ```python
 import asyncio
-import runloom.aio as paio
+import runloom
 
 async def handler(reader, writer):
     line = await reader.readline()
@@ -183,14 +183,14 @@ async def handler(reader, writer):
     writer.close()
 
 async def main():
-    server = await paio.start_server(handler, "127.0.0.1", 9000)
+    server = await runloom.aio.start_server(handler, "127.0.0.1", 9000)
     async with server:
         await server.serve_forever()
 
-paio.run(main())
+runloom.aio.run(main())
 ```
 
-`paio.run(coro)` is the equivalent of `asyncio.run(coro)`.  It
+`runloom.aio.run(coro)` is the equivalent of `asyncio.run(coro)`.  It
 installs the runloom event-loop policy, creates a `RunloomEventLoop`, and
 drives your top-level coroutine.  See [Asyncio bridge](asyncio.md) for
 when this wins vs. losing against vanilla asyncio.

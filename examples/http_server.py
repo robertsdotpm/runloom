@@ -17,8 +17,6 @@ from urllib.request import urlopen
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 
 import runloom
-import runloom.monkey
-import runloom_c
 
 runloom.monkey.patch()
 
@@ -53,11 +51,11 @@ def fetcher(fid, port, results):
 
 
 def main():
-    ready = runloom_c.Chan(1)
+    ready = runloom.Chan(1)
     runloom.go(http_server, ready, NUM_CLIENTS)
     port = ready.recv()[0]
 
-    results = runloom_c.Chan(NUM_CLIENTS)
+    results = runloom.Chan(NUM_CLIENTS)
     for fid in range(NUM_CLIENTS):
         runloom.go(fetcher, fid, port, results)
 

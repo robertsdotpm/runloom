@@ -28,17 +28,17 @@ free-threaded Python 3.13t.
 ## API surface
 
 ```python
-import runloom_c
+import runloom
 
-runloom_c.mn_init(n=8)         # start 8 hub threads
+runloom.mn_init(n=8)         # start 8 hub threads
                                 # n defaults to cpu_count() if omitted
 
-runloom_c.mn_go(fn)            # spawn a goroutine on a round-robin hub
+runloom.mn_go(fn)            # spawn a goroutine on a round-robin hub
                                 # returns a G handle
 
-runloom_c.mn_run()             # wait for everyone; returns total completed
+runloom.mn_run()             # wait for everyone; returns total completed
 
-runloom_c.mn_fini()            # tear down the hub pool
+runloom.mn_fini()            # tear down the hub pool
 ```
 
 The M:N scheduler is separate from the single-threaded one; you call
@@ -47,7 +47,7 @@ The M:N scheduler is separate from the single-threaded one; you call
 ## Example: parallel SHA-256
 
 ```python
-import hashlib, runloom_c, time
+import hashlib, time, runloom
 
 DATA = b"x" * 4096
 N = 100
@@ -57,13 +57,13 @@ def hash_loop():
     for _ in range(ITERS):
         hashlib.sha256(DATA).digest()
 
-runloom_c.mn_init(n=8)
+runloom.mn_init(n=8)
 t0 = time.time()
 for _ in range(N):
-    runloom_c.mn_go(hash_loop)
-runloom_c.mn_run()
+    runloom.mn_go(hash_loop)
+runloom.mn_run()
 print("8 hubs:", time.time() - t0, "s")
-runloom_c.mn_fini()
+runloom.mn_fini()
 ```
 
 Measured on 3.13t (GIL disabled, Linux x86_64, 8 cores):
@@ -106,11 +106,11 @@ producers on hub A and consumers on hub B exchange via the same
 channel object:
 
 ```python
-import runloom_c
+import runloom
 
-runloom_c.mn_init(n=4)
+runloom.mn_init(n=4)
 
-ch = runloom_c.Chan(100)
+ch = runloom.Chan(100)
 
 def producer():
     for i in range(1000):
@@ -122,10 +122,10 @@ def consumer():
         total += v
     print("consumed:", total)
 
-runloom_c.mn_go(producer)
-runloom_c.mn_go(consumer)
-runloom_c.mn_run()
-runloom_c.mn_fini()
+runloom.mn_go(producer)
+runloom.mn_go(consumer)
+runloom.mn_run()
+runloom.mn_fini()
 ```
 
 ## Network I/O on M:N
@@ -136,10 +136,10 @@ your accept loop and connection handlers stay on the same hub by
 default, which is good for cache locality:
 
 ```python
-import runloom, runloom.monkey, runloom_c, socket
+import socket, runloom
 
 runloom.monkey.patch()
-runloom_c.mn_init(n=4)
+runloom.mn_init(n=4)
 
 def handle(conn):
     while True:
@@ -155,11 +155,11 @@ def accept_loop():
     srv.listen(128)
     while True:
         conn, _ = srv.accept()
-        runloom_c.mn_go(lambda c=conn: handle(c))
+        runloom.mn_go(lambda c=conn: handle(c))
 
-runloom_c.mn_go(accept_loop)
-runloom_c.mn_run()
-runloom_c.mn_fini()
+runloom.mn_go(accept_loop)
+runloom.mn_run()
+runloom.mn_fini()
 ```
 
 On a 4-core machine, four concurrent client requests get processed
@@ -190,8 +190,8 @@ yield naturally, preemption applies on whichever hub it's running on
 without affecting the others.
 
 ```python
-runloom_c.mn_init(n=8)
-runloom_c.preempt_init(quantum_us=10_000)
+runloom.mn_init(n=8)
+runloom.preempt_init(quantum_us=10_000)
 ```
 
 ## Caveats
@@ -223,7 +223,7 @@ practice this evens out under steady load.
 ## Inspecting hub state
 
 ```python
-runloom_c.mn_stats()
+runloom.mn_stats()
 # {'hubs': 8,
 #  'ready_per_hub': [3, 0, 2, 1, 0, 0, 4, 0],
 #  'completed_per_hub': [12431, 9854, ...],

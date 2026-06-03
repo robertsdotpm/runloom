@@ -12,7 +12,7 @@ runs as a single OS thread of goroutines.
 ## Hello world
 
 ```python
-import runloom.sync as ps
+import runloom
 
 def main():
     print("hello from a goroutine")
@@ -28,7 +28,7 @@ until everything's done, and returns.
 ## Spawning goroutines
 
 ```python
-import runloom.sync as ps
+import runloom
 
 def worker(i):
     ps.sleep(0.01)
@@ -59,7 +59,7 @@ Outside any goroutine (e.g. at module top-level before `run()`),
 Channels are re-exported as `ps.Chan` and `ps.select`:
 
 ```python
-import runloom.sync as ps
+import runloom
 
 def producer(ch):
     for i in range(10):
@@ -86,7 +86,7 @@ See [Channels](channels.md) for the full API.
 return cooperative sockets:
 
 ```python
-import runloom.sync as ps
+import runloom
 
 def handle(conn):
     try:
@@ -140,16 +140,15 @@ ps.run(main)
 ## Park / wake primitive
 
 For library authors building custom synchronisation, `runloom.sync.wake`
-+ `runloom_c.park_self()` form a lightweight per-task wake:
++ `runloom.park_self()` form a lightweight per-task wake:
 
 ```python
-import runloom.sync as ps
-import runloom_c
+import runloom
 
 def waiter():
-    g = runloom_c.current_g()
+    g = runloom.current_g()
     # ... arrange for someone else to call g.wake() ...
-    runloom_c.park_self()       # blocks until wake arrives
+    runloom.park_self()       # blocks until wake arrives
     print("woken")
 
 def main():
@@ -184,7 +183,7 @@ each adds a bit of overhead in its own layer.
 ## A complete example: parallel HTTP fetcher
 
 ```python
-import runloom.sync as ps
+import runloom
 
 def fetch_one(host, port, ch):
     try:

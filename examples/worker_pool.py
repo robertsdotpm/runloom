@@ -14,7 +14,6 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 
 import runloom
-import runloom_c
 
 NUM_WORKERS = 4
 NUM_JOBS = 20
@@ -26,8 +25,8 @@ def worker(wid, jobs, results):
 
 
 def main():
-    jobs = runloom_c.Chan(NUM_JOBS)
-    results = runloom_c.Chan(NUM_JOBS)
+    jobs = runloom.Chan(NUM_JOBS)
+    results = runloom.Chan(NUM_JOBS)
 
     for wid in range(NUM_WORKERS):
         runloom.go(worker, wid, jobs, results)

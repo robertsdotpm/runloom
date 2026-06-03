@@ -70,15 +70,15 @@ MinGW-w64 (via the WinLibs zip).
 ## Verifying the install
 
 ```python
-import runloom_c
-print("backend:", runloom_c.backend())            # e.g. fcontext-asm
-print("netpoll:", runloom_c.netpoll_backend())    # e.g. epoll
-print("stack default:", runloom_c.get_stack_size(), "bytes")
+import runloom
+print("backend:", runloom.backend())            # e.g. fcontext-asm
+print("netpoll:", runloom.netpoll_backend())    # e.g. epoll
+print("stack default:", runloom.get_stack_size(), "bytes")
 
 def hello():
     print("hello from a goroutine!")
-runloom_c.go(hello)
-runloom_c.run()
+runloom.go(hello)
+runloom.run()
 ```
 
 If `backend()` returns `"fcontext-asm"`, you're on the fast path (~80

@@ -13,7 +13,6 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 
 import runloom
-import runloom_c
 
 NUM_PRODUCERS = 4
 ITEMS_EACH = 5
@@ -25,7 +24,7 @@ def producer(pid, out):
 
 
 def main():
-    merged = runloom_c.Chan(16)
+    merged = runloom.Chan(16)
     for pid in range(NUM_PRODUCERS):
         runloom.go(producer, pid, merged)
 

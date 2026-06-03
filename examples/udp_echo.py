@@ -15,8 +15,6 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 
 import runloom
-import runloom.sync
-import runloom_c
 
 ROUNDS = 3
 
@@ -41,7 +39,7 @@ def client(ready):
 
 
 def main():
-    ready = runloom_c.Chan(1)
+    ready = runloom.Chan(1)
     runloom.go(server, ready)
     runloom.go(client, ready)
 

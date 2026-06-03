@@ -11,7 +11,7 @@ when you mix in libraries that don't expect to be cooperative -- a
 long `numpy` matmul or a 10-million-iteration arithmetic loop will
 starve every other goroutine.
 
-`runloom_c.preempt_init(quantum_us=10_000)` solves this on
+`runloom.preempt_init(quantum_us=10_000)` solves this on
 **free-threaded Python 3.13t** (the GIL-disabled build).  A timer
 thread posts a `Py_AddPendingCall` every quantum; CPython's
 `eval_breaker` check -- already done between bytecodes -- invokes our
@@ -20,9 +20,9 @@ callback, which calls `runloom_sched_yield()` on the running goroutine.
 ## Hello, preempted goroutine
 
 ```python
-import runloom_c
+import runloom
 
-runloom_c.preempt_init(quantum_us=10_000)    # 10 ms slices
+runloom.preempt_init(quantum_us=10_000)    # 10 ms slices
 
 def hog():
     total = 0
@@ -33,11 +33,11 @@ def hog():
 def chatty():
     for i in range(50):
         print("chatty tick", i)
-        runloom_c.sched_sleep(0.01)
+        runloom.sched_sleep(0.01)
 
-runloom_c.go(hog)
-runloom_c.go(chatty)
-runloom_c.run()
+runloom.go(hog)
+runloom.go(chatty)
+runloom.run()
 ```
 
 Without `preempt_init`, `chatty` wouldn't get any time until `hog`
@@ -97,7 +97,7 @@ fast path that's safe across hubs -- both of which are part of the
 Pythons.
 
 If you really want time-slicing on a GIL build, the workaround is to
-sprinkle `runloom_c.sched_yield_classic()` calls into your hot loops.
+sprinkle `runloom.sched_yield_classic()` calls into your hot loops.
 Crude but works.
 
 ### Per-thread, not per-process
@@ -110,7 +110,7 @@ scheduler; preemption needs to be initialised on each.  The
 ## Stopping preemption
 
 ```python
-runloom_c.preempt_fini()
+runloom.preempt_fini()
 ```
 
 Idempotent.  Joins the timer thread.  Use this if you're toggling
@@ -129,7 +129,7 @@ leave it on after `preempt_init`.
   goroutines.
 
 ```python
-runloom_c.preempt_init(quantum_us=1_000)
+runloom.preempt_init(quantum_us=1_000)
 ```
 
 ## When to use preemption

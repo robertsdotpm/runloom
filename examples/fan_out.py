@@ -13,7 +13,6 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 
 import runloom
-import runloom_c
 
 NUM_CONSUMERS = 4
 NUM_ITEMS = 40
@@ -33,8 +32,8 @@ def consumer(cid, jobs, done):
 
 
 def main():
-    jobs = runloom_c.Chan(8)
-    done = runloom_c.Chan(NUM_CONSUMERS)
+    jobs = runloom.Chan(8)
+    done = runloom.Chan(NUM_CONSUMERS)
 
     runloom.go(producer, jobs)
     for cid in range(NUM_CONSUMERS):

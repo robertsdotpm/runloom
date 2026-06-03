@@ -14,8 +14,6 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 
 import runloom
-import runloom.time
-import runloom_c
 
 
 def slow_op(out, delay):
@@ -24,9 +22,9 @@ def slow_op(out, delay):
 
 
 def with_timeout(delay, limit):
-    result = runloom_c.Chan(1)
+    result = runloom.Chan(1)
     runloom.go(slow_op, result, delay)
-    idx, payload = runloom_c.select([
+    idx, payload = runloom.select([
         ("recv", result),                 # case 0: the work finished
         ("recv", runloom.time.After(limit)), # case 1: the deadline fired
     ])

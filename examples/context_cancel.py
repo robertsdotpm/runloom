@@ -15,13 +15,11 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 
 import runloom
-import runloom.context
-import runloom_c
 
 
 def worker(ctx, work, wid):
     while True:
-        idx, payload = runloom_c.select([
+        idx, payload = runloom.select([
             ("recv", ctx.done),           # case 0: cancelled
             ("recv", work),               # case 1: a job to do
         ])
@@ -33,7 +31,7 @@ def worker(ctx, work, wid):
 
 def main():
     ctx, cancel = runloom.context.WithCancel(runloom.context.Background())
-    work = runloom_c.Chan()               # unbuffered
+    work = runloom.Chan()               # unbuffered
 
     for wid in range(2):
         runloom.go(worker, ctx, work, wid)

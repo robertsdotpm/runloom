@@ -8,7 +8,7 @@ from your own code or a watchdog.
 ## Quick look
 
 ```python
-import runloom.inspect as gi
+import runloom
 
 gi.count()                 # how many goroutines are live
 print(gi.format(stacks=True))   # a formatted dump (string) -> log it
@@ -35,7 +35,7 @@ goroutine 3 [io-wait, fd=12 R, age=30.1s]  <function accept_loop at 0x...>:
 
 ## The structured API
 
-`runloom.inspect.goroutines()` (or `runloom_c.goroutines()`) returns a list of
+`runloom.inspect.goroutines()` (or `runloom.goroutines()`) returns a list of
 dicts, one per live goroutine:
 
 | key          | meaning |
@@ -120,7 +120,7 @@ kill -QUIT <pid>
 writes a structural dump (state histogram + per-goroutine line, no Python
 stacks — touching Python objects from a signal handler is not safe) to
 stderr and lets the process continue.  The underlying primitive is
-`runloom_c.dump_goroutines(fd)`, which is async-signal-safe-ish (it
+`runloom.dump_goroutines(fd)`, which is async-signal-safe-ish (it
 try-locks the registry and uses only `write(2)`).
 
 ## Deadlock detection
@@ -145,7 +145,7 @@ goroutine 2 [chan-wait] ...
 Three modes (default **warn**):
 
 ```python
-import runloom.inspect as gi
+import runloom
 gi.set_deadlock_mode("warn")    # print the dump, keep going (default)
 gi.set_deadlock_mode("raise")   # raise RuntimeError out of run()
 gi.set_deadlock_mode("off")     # do nothing
@@ -165,7 +165,7 @@ flood) can still exhaust memory.  An optional admission gate caps the number
 of live goroutines:
 
 ```python
-import runloom.inspect as gi
+import runloom
 gi.set_max_goroutines(100_000)   # 0 = unlimited (default); env RUNLOOM_MAX_GOROUTINES
 ```
 
@@ -204,9 +204,9 @@ the child, so:
 * A child that runs the **single-thread scheduler / `runloom.aio`** works — this
   is the `multiprocessing` (fork) and pre-fork-server pattern.  The child
   gets its own netpoll fd and a clean scheduler.
-* A child that starts a **fresh `runloom_c.mn_init()`** works when the parent
+* A child that starts a **fresh `runloom.mn_init()`** works when the parent
   never used M:N.
-* `runloom_c.mn_run()` / `runloom_c.run()` in the child **return** instead of
+* `runloom.mn_run()` / `runloom.run()` in the child **return** instead of
   hanging forever on the parent's dead hubs.
 
 **Not supported:** re-initialising the M:N scheduler *inside* a fork-child of

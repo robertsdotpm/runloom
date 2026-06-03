@@ -6,8 +6,8 @@ your way around.
 
 ## `runloom_c` (C extension)
 
-The low-level scheduler API.  Most user code calls `runloom_c.go` and
-`runloom_c.run`; everything else is for advanced use.
+The low-level scheduler API.  Most user code calls `runloom.go` and
+`runloom.run`; everything else is for advanced use.
 
 ### Scheduler control
 
@@ -52,7 +52,7 @@ Used internally by `runloom.aio` for early termination.
 
 Drop everything queued in the scheduler (ready FIFO, sleep heap,
 netpoll-parked).  Returns `(n_ready, n_sleep, n_parked)`.  Used by
-`paio.run` for cleanup between runs.
+`runloom.aio.run` for cleanup between runs.
 
 #### `park_self()`
 
@@ -297,7 +297,7 @@ registry.  `goroutines(stacks=)`, `count()`, `stack(id)`, `format(stacks=)`
 [Debugging guide](debugging.md).
 
 ```python
-import runloom.inspect as gi
+import runloom
 print(gi.format(stacks=True))   # which goroutines, and where they're stuck
 gi.install_dump_signal()        # kill -QUIT <pid> -> dump
 ```
@@ -342,8 +342,8 @@ runloom.sync.sleep(seconds)
 runloom.sync.yield_now()
 runloom.sync.current() → G
 
-runloom.sync.Chan                            # re-export of runloom_c.Chan
-runloom.sync.select                          # re-export of runloom_c.select
+runloom.sync.Chan                            # re-export of runloom.Chan
+runloom.sync.select                          # re-export of runloom.select
 runloom.sync.park / wake                     # park_self + wake helpers
 
 runloom.sync.tcp_connect(host, port) → Socket
@@ -373,7 +373,7 @@ Go-style timers and tickers.
 
 #### `Sleep(seconds)`
 
-Cooperative sleep.  Alias for `runloom_c.sched_sleep`.
+Cooperative sleep.  Alias for `runloom.sched_sleep`.
 
 #### `After(seconds) → Chan`
 
@@ -381,7 +381,7 @@ Returns a channel that will receive the current time after `seconds`.
 Equivalent of Go's `time.After`.
 
 ```python
-import runloom.time as t
+import runloom
 
 after = t.After(1.0)
 # ... do work ...

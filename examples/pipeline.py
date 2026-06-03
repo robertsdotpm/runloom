@@ -13,7 +13,6 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 
 import runloom
-import runloom_c
 
 
 def generate(out, n):
@@ -36,9 +35,9 @@ def sum_all(inp, result):
 
 
 def main():
-    nums = runloom_c.Chan(10)
-    squares = runloom_c.Chan(10)
-    result = runloom_c.Chan(1)
+    nums = runloom.Chan(10)
+    squares = runloom.Chan(10)
+    result = runloom.Chan(1)
 
     runloom.go(generate, nums, 10)
     runloom.go(square, nums, squares)

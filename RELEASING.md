@@ -1,7 +1,6 @@
 # Releasing runloom to PyPI
 
-The PyPI distribution name is **`runloom`** — same as the import names
-(`import runloom` / `import runloom_c`). Version lives in
+The PyPI distribution name is **`runloom`** — same as the import name (`import runloom`). Version lives in
 `pyproject.toml` (`[project] version`).
 
 runloom is a C-extension package, so for users to `pip install runloom`
@@ -58,7 +57,7 @@ pip install "runloom[dev]"     # build + twine + cibuildwheel
 
    ```bash
    python -m venv /tmp/t && CC=/bin/false /tmp/t/bin/pip install wheelhouse/<your>.whl
-   /tmp/t/bin/python -c "import runloom, runloom_c; print(runloom_c.backend(), runloom_c.netpoll_backend())"
+   /tmp/t/bin/python -c "import runloom; print(runloom.backend(), runloom.netpoll_backend())"
    ```
 
 5. **Upload** (do a TestPyPI dry run first if you like:

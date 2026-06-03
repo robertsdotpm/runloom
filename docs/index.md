@@ -7,7 +7,7 @@ channels, cheap goroutines, blocking-style I/O -- running on top of
 CPython with a hand-rolled assembly context switch and a C scheduler.
 
 ```python
-import socket, runloom, runloom.monkey, runloom_c
+import socket, runloom
 runloom.monkey.patch()
 
 def handle(conn):
@@ -22,10 +22,10 @@ def accept_loop():
     s = socket.socket(); s.bind(("127.0.0.1", 9000)); s.listen(128)
     while True:
         conn, _ = s.accept()
-        runloom_c.go(lambda c=conn: handle(c))
+        runloom.go(lambda c=conn: handle(c))
 
-runloom_c.go(accept_loop)
-runloom_c.run()
+runloom.go(accept_loop)
+runloom.run()
 ```
 
 No `async`, no `await`, no callback chains -- `recv` and `accept`
@@ -37,11 +37,11 @@ goroutines.
 - **Cheap goroutines.**  A goroutine is ~16 KB of C stack + ~150 B
   metadata after [calibration](stack-sizing.md).  50 000 idle
   goroutines on one OS thread is normal; 200 000 has been tested.
-- **Two programming styles.**  Use `runloom_c.go(fn)` for plain
+- **Two programming styles.**  Use `runloom.go(fn)` for plain
   Go-style code, or `runloom.aio.run(coro)` to drive existing `async def`
   code on the same scheduler.  See the [asyncio bridge](asyncio.md).
-- **Channels.**  `runloom_c.Chan(capacity)` with send/recv/close, plus
-  `runloom_c.select([...])` for multi-channel waits.  Buffered and
+- **Channels.**  `runloom.Chan(capacity)` with send/recv/close, plus
+  `runloom.select([...])` for multi-channel waits.  Buffered and
   unbuffered.  See [Channels](channels.md).
 - **Monkey-patched stdlib.**  After `runloom.monkey.patch()`, ordinary
   `socket.recv`, `time.sleep`, `select.select`, `ssl`, `subprocess`,
@@ -76,9 +76,9 @@ goroutines.
 
 ## How it works in 60 seconds
 
-When you call `runloom_c.go(fn)`, the scheduler allocates a new
+When you call `runloom.go(fn)`, the scheduler allocates a new
 goroutine (a C struct + a private C stack) and puts it on the ready
-queue.  `runloom_c.run()` starts the scheduler loop.  Each iteration:
+queue.  `runloom.run()` starts the scheduler loop.  Each iteration:
 
 1. Pop the next goroutine from the ready FIFO.
 2. Switch to its private C stack (one `swap` instruction, ~80 ns on

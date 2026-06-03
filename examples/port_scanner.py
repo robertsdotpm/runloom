@@ -20,8 +20,6 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 
 import runloom
-import runloom.monkey
-import runloom_c
 
 runloom.monkey.patch()
 
@@ -53,7 +51,7 @@ def main():
     # Candidates: the open ports plus some that are almost certainly closed.
     candidates = sorted(set(open_ports + [40001, 40002, 40003, 40004, 40005]))
 
-    results = runloom_c.Chan(len(candidates))
+    results = runloom.Chan(len(candidates))
     for port in candidates:
         runloom.go(probe, host, port, results)
 

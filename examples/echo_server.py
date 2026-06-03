@@ -17,8 +17,6 @@ import sys
 
 sys.path.insert(0, "src")
 import runloom
-import runloom.monkey
-import runloom_c
 
 
 HOST = "127.0.0.1"
@@ -42,7 +40,7 @@ def handle(conn, addr):
 
 def main():
     runloom.monkey.patch()
-    print("backend:", runloom_c.backend(), "netpoll:", runloom_c.netpoll_backend())
+    print("backend:", runloom.backend(), "netpoll:", runloom.netpoll_backend())
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     listener.bind((HOST, PORT))
@@ -52,10 +50,10 @@ def main():
     def accept_loop():
         while True:
             conn, addr = listener.accept()
-            runloom_c.go(lambda c=conn, a=addr: handle(c, a))
+            runloom.go(lambda c=conn, a=addr: handle(c, a))
 
-    runloom_c.go(accept_loop)
-    runloom_c.run()
+    runloom.go(accept_loop)
+    runloom.run()
 
 
 if __name__ == "__main__":

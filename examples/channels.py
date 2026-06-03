@@ -1,6 +1,6 @@
 """Channels — buffered, unbuffered, close, and range.
 
-A runloom_c.Chan is a Go channel: a typed-agnostic, goroutine-safe queue.
+A runloom.Chan is a Go channel: a typed-agnostic, goroutine-safe queue.
 Buffered channels hold up to `capacity` values before a send blocks;
 an unbuffered channel (capacity 0) is a rendezvous — each send blocks
 until a receiver takes the value.  `recv()` returns (value, ok); `ok`
@@ -16,12 +16,11 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 
 import runloom
-import runloom_c
 
 
 def main():
     # --- Buffered: sends up to capacity don't block, no receiver yet. ---
-    buf = runloom_c.Chan(3)
+    buf = runloom.Chan(3)
     buf.send("a")
     buf.send("b")
     buf.send("c")
@@ -30,7 +29,7 @@ def main():
         print("buffered:", v)
 
     # --- Unbuffered: each send rendezvous with a receiver. ---
-    pipe = runloom_c.Chan()    # capacity 0
+    pipe = runloom.Chan()    # capacity 0
 
     def producer():
         for i in range(3):
@@ -42,7 +41,7 @@ def main():
         print("unbuffered:", v)
 
     # --- recv() spells out the (value, ok) close signal explicitly. ---
-    done = runloom_c.Chan(1)
+    done = runloom.Chan(1)
     done.send(99)
     done.close()
     value, ok = done.recv()

@@ -5,8 +5,6 @@ import time
 
 sys.path.insert(0, "src")
 import runloom
-import runloom.monkey
-import runloom_c
 
 
 HOST = "127.0.0.1"
@@ -39,9 +37,9 @@ def main():
         n_clients, n_msgs, size))
 
     for i in range(n_clients):
-        runloom_c.go(lambda i=i: client(i, n_msgs, payload))
+        runloom.go(lambda i=i: client(i, n_msgs, payload))
     t0 = time.perf_counter()
-    runloom_c.run()
+    runloom.run()
     t = time.perf_counter() - t0
     total = n_clients * n_msgs
     print("{0} round-trips in {1:.2f}s -- {2:.0f} req/s, {3:.1f} us/RT".format(

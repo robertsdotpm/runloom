@@ -11,9 +11,9 @@ runloom channels match Go's semantics:
   then returns `(None, False)`.
 
 ```python
-import runloom_c
+import runloom
 
-ch = runloom_c.Chan(5)        # capacity 5
+ch = runloom.Chan(5)        # capacity 5
 ```
 
 ## Send and receive
@@ -40,9 +40,9 @@ def consumer():
             return
         print("got", v)
 
-runloom_c.go(producer)
-runloom_c.go(consumer)
-runloom_c.run()
+runloom.go(producer)
+runloom.go(consumer)
+runloom.run()
 ```
 
 Output:
@@ -74,7 +74,7 @@ if the buffer was full.  `try_recv()` returns `None` if nothing is
 ready, or `(value, ok)` if a value was available.
 
 ```python
-ch = runloom_c.Chan(1)
+ch = runloom.Chan(1)
 
 ch.try_send("first")          # True  -- buffer was empty
 ch.try_send("second")         # False -- buffer is full
@@ -92,7 +92,7 @@ or "drain whatever's available without waiting."
 until the other side is ready.
 
 ```python
-ch = runloom_c.Chan(0)
+ch = runloom.Chan(0)
 
 def producer():
     ch.send("hi")             # blocks here until consumer arrives
@@ -101,9 +101,9 @@ def producer():
 def consumer():
     print("got:", ch.recv())  # blocks here until producer sends
 
-runloom_c.go(producer)
-runloom_c.go(consumer)
-runloom_c.run()
+runloom.go(producer)
+runloom.go(consumer)
+runloom.run()
 ```
 
 Output:
@@ -119,7 +119,7 @@ of a mailbox/actor.
 
 ## `select`
 
-`runloom_c.select(cases, default=False)` waits on multiple channels
+`runloom.select(cases, default=False)` waits on multiple channels
 at once.  Each case is a tuple:
 
 - `("recv", ch)` -- wait until `ch` has data, then receive.
@@ -129,15 +129,15 @@ Returns `(case_index, payload)`.  For a `recv` case, `payload` is the
 `(value, ok)` tuple.  For a `send` case, `payload` is `None`.
 
 ```python
-import runloom_c
+import runloom
 
-a, b = runloom_c.Chan(1), runloom_c.Chan(1)
+a, b = runloom.Chan(1), runloom.Chan(1)
 
 def producer():
     a.send("A")
 
 def consumer():
-    idx, payload = runloom_c.select([
+    idx, payload = runloom.select([
         ("recv", a),
         ("recv", b),
     ])
@@ -146,9 +146,9 @@ def consumer():
     else:
         print("b got:", payload)
 
-runloom_c.go(producer)
-runloom_c.go(consumer)
-runloom_c.run()
+runloom.go(producer)
+runloom.go(consumer)
+runloom.run()
 ```
 
 Output:
@@ -164,7 +164,7 @@ event `select` returns `-1` (not a tuple -- the caller's signal that
 the default branch fired).
 
 ```python
-r = runloom_c.select([("recv", a), ("recv", b)], default=True)
+r = runloom.select([("recv", a), ("recv", b)], default=True)
 if r == -1:
     print("nobody ready right now")
 else:
@@ -175,7 +175,7 @@ else:
 ### Mixing send and recv
 
 ```python
-idx, _ = runloom_c.select([
+idx, _ = runloom.select([
     ("send", out_ch, computed_value),
     ("recv", cancel_ch),
 ])
@@ -188,7 +188,7 @@ This is the canonical "send unless cancelled" pattern.
 ## Closing semantics in detail
 
 ```python
-ch = runloom_c.Chan(2)
+ch = runloom.Chan(2)
 ch.try_send("a")
 ch.try_send("b")
 ch.close()
@@ -260,7 +260,7 @@ if not ok:
 
 ### Don't share a closed-channel object across `run()` calls
 
-`runloom_c.run()` returns when all goroutines are done.  If you keep a
+`runloom.run()` returns when all goroutines are done.  If you keep a
 closed channel as a module-level singleton across multiple `run()`
 calls, you'll see `close on closed channel` errors on the second
 iteration.  Create channels inside the entry point.

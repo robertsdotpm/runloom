@@ -41,9 +41,9 @@ get their stacks painted on creation, scanned on completion.  After
 the calibration window:
 
 ```python
-import runloom_c
+import runloom
 
-s = runloom_c.stats()
+s = runloom.stats()
 print(s["stack_size_default"])    # the new default (post-calibration)
 print(s["stack_hwm"])              # max bytes any goroutine actually used
 print(s["stack_completed"])        # how many goroutines were measured
@@ -102,13 +102,13 @@ OS manages stacks differently -- runloom lets it.
 ## Per-call override
 
 ```python
-import runloom_c
+import runloom
 
 # Goroutine known to recurse deeply or call into a heavy C extension:
-runloom_c.go(deep_handler, stack_size=512 * 1024)
+runloom.go(deep_handler, stack_size=512 * 1024)
 
 # Pure-compute callable that you've confirmed fits in 8 KB:
-runloom_c.go(tight_loop,  stack_size=8 * 1024)
+runloom.go(tight_loop,  stack_size=8 * 1024)
 ```
 
 The `stack_size=N` kwarg overrides the calibrated default for that
@@ -123,13 +123,13 @@ If you don't want to spend the first 1 000 goroutines running at the
 generous default, lock the size up-front:
 
 ```python
-import runloom_c
+import runloom
 
-# Before any runloom_c.go() call:
-runloom_c.set_stack_size(32 * 1024)
+# Before any runloom.go() call:
+runloom.set_stack_size(32 * 1024)
 
 # Subsequent goroutines use exactly 32 KB:
-runloom_c.go(worker)
+runloom.go(worker)
 ```
 
 `set_stack_size` also **freezes** calibration (no further auto-tuning)
@@ -142,9 +142,9 @@ and disables painting (no per-spawn overhead).  Use this when:
 - You're running a benchmark and want the size to not drift.
 
 ```python
-import runloom_c
+import runloom
 
-print(runloom_c.get_stack_size())   # current default
+print(runloom.get_stack_size())   # current default
 ```
 
 Bounds: `[16 KB, 8 MB]`.  Below or above is silently clamped.
@@ -175,10 +175,10 @@ When in doubt, run with calibration on, look at the measured
 ## Inspecting current usage
 
 ```python
-import runloom_c
+import runloom
 
 # Snapshot of calibration state
-print(runloom_c.stats())
+print(runloom.stats())
 # {
 #   'ready': 0, 'sleeping': 0, 'netpoll_parked': 0,
 #   'completed': 1042, 'running': 0,
@@ -229,9 +229,9 @@ guard; a non-probing extension could corrupt. If you have such a goroutine,
 give it a bigger stack up front:
 
 ```python
-runloom_c.set_stack_size(128 * 1024)        # process-wide default floor
+runloom.set_stack_size(128 * 1024)        # process-wide default floor
 # or just the suspicious goroutine:
-runloom_c.go(work, stack_size=512 * 1024)
+runloom.go(work, stack_size=512 * 1024)
 ```
 
 So the 16 KB minimum is a *floor for the calibrator*, not a blanket "safe for
@@ -244,19 +244,19 @@ call.
 For a production service:
 
 ```python
-import runloom_c
+import runloom
 
 # Optional: pre-calibrate during a dry-run, then lock for production
-runloom_c.set_stack_size(32 * 1024)        # whatever your dry-run found
+runloom.set_stack_size(32 * 1024)        # whatever your dry-run found
 
 # Spawn workers
 for i in range(10000):
-    runloom_c.go(worker)
+    runloom.go(worker)
 
-runloom_c.run()
+runloom.run()
 
 # Inspect after the burst
-print("peak resident usage:", runloom_c.stats())
+print("peak resident usage:", runloom.stats())
 ```
 
 For exploratory work or benchmarks, just let calibration run and

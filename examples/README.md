@@ -21,7 +21,7 @@ For raw performance numbers and the measurement harness, see [`../bench/`](../be
 | --- | --- |
 | [hello_goroutines.py](hello_goroutines.py) | `go` / `run` / `yield_` / `sleep` — the basics |
 | [channels.py](channels.py) | buffered vs unbuffered channels, `close`, `for v in ch` |
-| [select.py](select.py) | `select` over recv/send cases, plus non-blocking `default` |
+| [select_demo.py](select_demo.py) | `select` over recv/send cases, plus non-blocking `default` |
 | [ping_pong.py](ping_pong.py) | two goroutines synchronised purely by channels |
 
 ## Concurrency patterns

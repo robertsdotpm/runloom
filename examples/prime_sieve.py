@@ -15,7 +15,6 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 
 import runloom
-import runloom_c
 
 LIMIT = 60
 
@@ -34,7 +33,7 @@ def filter_multiples(prime, inp, out):
 
 
 def main():
-    ch = runloom_c.Chan()
+    ch = runloom.Chan()
     runloom.go(generate, ch)
 
     primes = []
@@ -43,7 +42,7 @@ def main():
         if not ok:
             break
         primes.append(prime)
-        nxt = runloom_c.Chan()
+        nxt = runloom.Chan()
         runloom.go(filter_multiples, prime, ch, nxt)
         ch = nxt                    # next round reads from the filtered stream
 

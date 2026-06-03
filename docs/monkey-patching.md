@@ -14,7 +14,7 @@ becomes cooperative.
 ## The basic call
 
 ```python
-import runloom, runloom.monkey, runloom_c
+import runloom
 
 runloom.monkey.patch()                    # patch everything
 ```
@@ -33,8 +33,8 @@ def worker():
     s.close()
     return data
 
-runloom_c.go(worker)
-runloom_c.run()
+runloom.go(worker)
+runloom.run()
 ```
 
 ## What gets patched
@@ -74,7 +74,7 @@ second time.  Unpatch is the inverse.
 ## Recipe: a fully synchronous-looking HTTP fetcher
 
 ```python
-import runloom, runloom.monkey, runloom_c
+import runloom
 import urllib.request
 
 runloom.monkey.patch()
@@ -89,14 +89,14 @@ def main():
         "http://example.org",
         "http://example.net",
     ]
-    results = runloom_c.Chan(len(urls))
+    results = runloom.Chan(len(urls))
     for u in urls:
-        runloom_c.go(lambda url=u: results.send((url, len(fetch(url)))))
+        runloom.go(lambda url=u: results.send((url, len(fetch(url)))))
     for _ in urls:
         print(results.recv()[0])
 
-runloom_c.go(main)
-runloom_c.run()
+runloom.go(main)
+runloom.run()
 ```
 
 Three HTTP requests, fully concurrent, written in completely linear
@@ -106,7 +106,7 @@ monkey-patched.
 ## Recipe: a database pool with `pymysql`
 
 ```python
-import runloom, runloom.monkey, runloom_c
+import runloom
 import pymysql                                # plain blocking driver
 
 runloom.monkey.patch()
@@ -125,8 +125,8 @@ def worker(i):
     print("bucket", i, "->", len(rows), "rows")
 
 for i in range(32):
-    runloom_c.go(lambda i=i: worker(i))
-runloom_c.run()
+    runloom.go(lambda i=i: worker(i))
+runloom.run()
 ```
 
 32 concurrent MySQL queries on one OS thread, no thread pool, no
@@ -137,7 +137,7 @@ runloom_c.run()
 ### Patch early
 
 ```python
-import runloom.monkey
+import runloom
 runloom.monkey.patch()        # <-- before importing modules that capture sockets
 
 import some_library        # this sees patched socket from the start
@@ -161,7 +161,7 @@ Patching doesn't turn `threading.Thread` into a goroutine -- it would
 break too many assumptions.  If you spawn an OS thread, it runs
 independently of the runloom scheduler.
 
-For "I want runloom, not threads," use `runloom_c.go(fn)` or
+For "I want runloom, not threads," use `runloom.go(fn)` or
 `runloom.sync.go(fn)`.
 
 ### `os.read` on a regular file dispatches to a thread
@@ -183,7 +183,7 @@ goes through the same executor path.
 ## Listing applied patches
 
 ```python
-import runloom.monkey
+import runloom
 runloom.monkey.patch()
 print(runloom.monkey._applied)
 # {'socket', 'time', 'select', 'os', 'ssl', 'subprocess',

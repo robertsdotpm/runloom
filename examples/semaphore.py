@@ -14,20 +14,19 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 
 import runloom
-import runloom_c
 
 MAX_CONCURRENT = 3
 NUM_TASKS = 10
 
 
 def main():
-    sem = runloom_c.Chan(MAX_CONCURRENT)
+    sem = runloom.Chan(MAX_CONCURRENT)
     for _ in range(MAX_CONCURRENT):
         sem.try_send(None)                 # fill with tokens
 
     active = [0]
     peak = [0]
-    done = runloom_c.Chan(NUM_TASKS)
+    done = runloom.Chan(NUM_TASKS)
 
     def task(tid):
         sem.recv()                         # acquire (blocks if no token)
