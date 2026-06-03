@@ -251,6 +251,14 @@ def _patched_getaddrinfo(host, port=0, family=0, type=0, proto=0, flags=0):
                                   "Address family mismatch")
         pairs = [(lit_af, host)]
     else:
+        # AI_NUMERICHOST: the host must already be a numeric address; libc
+        # performs NO name resolution (no DNS, no /etc/hosts) and returns
+        # EAI_NONAME immediately.  Match that -- otherwise a caller using the
+        # flag as a cheap "is this a literal IP?" check issues a real query
+        # that hangs offline instead of fast-failing.
+        if flags & socket.AI_NUMERICHOST:
+            raise socket.gaierror(socket.EAI_NONAME,
+                                  "Name or service not known")
         # /etc/hosts -- skip DNS if we have a static entry.
         hosts = _get_hosts()
         local = hosts.get(host.lower())
