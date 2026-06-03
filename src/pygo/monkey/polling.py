@@ -16,23 +16,26 @@ def _patched_select(rlist, wlist, xlist, timeout=None):
     if not _in_goroutine():
         return _orig_select_select(rlist, wlist, xlist, timeout)
 
-    # On Windows, only SOCKET handles can be polled.  If any fd in the
-    # request isn't a socket, fall back to the OS select (which will
-    # itself reject non-sockets -- same behaviour as outside a
-    # goroutine, so the caller sees a consistent error path).  This
-    # avoids parking forever on wait_fd for a pipe/file fd that the
-    # netpoll backend can't drive.
-    if _IS_WINDOWS:
-        for fd_obj in list(rlist) + list(wlist) + list(xlist):
-            fd = _fd_of(fd_obj)
-            try:
-                os.fstat(fd)
-                # fstat on a socket fd raises on Windows; if it
-                # succeeds, the fd is NOT a socket.
-                return _orig_select_select(rlist, wlist, xlist, timeout)
-            except OSError:
-                pass  # likely a socket -- continue with wait_fd path
+    # select.select() accepts ANY iterable of fds, and selectors.SelectSelector
+    # -- which is selectors.DefaultSelector on Windows -- passes SETS
+    # (self._readers / self._writers).  The fast path below indexes rlist[0],
+    # so normalise to lists first; otherwise a set raises
+    # "'set' object is not subscriptable", which on Windows broke every
+    # selectors-driven select (the goroutine died -> hang/crash).  Real
+    # select.select returns lists regardless of input type, so this matches.
+    rlist = list(rlist)
+    wlist = list(wlist)
+    xlist = list(xlist)
 
+    # Non-socket fds (pipes/files) can't ride the Windows netpoll backend, but
+    # we DON'T pre-screen them with os.fstat here: os.fstat on a raw WinSock
+    # SOCKET handle takes the CRT fd-validation error path, and doing that on a
+    # goroutine's swapped stack under concurrency access-violates on Windows
+    # (a non-socket fstat that *succeeds* is fine; it is the failing call that
+    # crashes).  The fast path below already handles non-sockets correctly:
+    # wait_fd raises OSError on an unpollable fd (verified), and we fall back to
+    # the OS select -- the same consistent error path the pre-check gave, minus
+    # the crash.  The multi-fd path likewise falls back via its own except.
     n = len(rlist) + len(wlist)
     # Fast path: one fd, no xlist -> map to wait_fd directly.
     if n == 1 and not xlist:
