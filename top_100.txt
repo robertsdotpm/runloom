@@ -1,7 +1,7 @@
 runloom - validated asyncio projects
 ========================================
 
-201 name-brand Python asyncio projects whose own test suites (or
+207 name-brand Python asyncio projects whose own test suites (or
 equivalent end-to-end exercises) run GREEN under runloom's pure-Python
 M:N runtime -- driven through runloom.aio / RunloomEventLoop on free-threaded
 CPython 3.13t (PYTHON_GIL=0). 'pass==stock' means the result matches
@@ -418,4 +418,15 @@ BEYOND 100 (bulk): langchain provider integrations (langchain-ai org) (6)
 200. langchain-mistralai        - ChatMistralAI ainvoke (local server)
 201. langchain-together         - ChatTogether ainvoke (local server)
 
-TOTAL DISTINCT PROJECTS PASSING: 201
+
+------------------------------------------------------------
+BEYOND 100 (bulk): langchain + llama-index provider integrations (6)
+------------------------------------------------------------
+202. langchain-deepseek         - ChatDeepSeek ainvoke (local server)
+203. langchain-xai              - ChatXAI ainvoke (local server)
+204. langchain-nvidia-ai-endpoints - ChatNVIDIA ainvoke (local server)
+205. llama-index-llms-openai    - async acomplete (local server)
+206. llama-index-llms-anthropic - async acomplete (local server)
+207. llama-index-llms-mistralai - async acomplete (local server)
+
+TOTAL DISTINCT PROJECTS PASSING: 207
