@@ -111,4 +111,26 @@ NEXT-40 PUSH: utilities, ASGI adapters, sans-IO, DB (21)
  84. a2wsgi                     - WSGI->ASGI adapter -> 200 pong (threadpool)
  85. aioitertools               - islice/zip/chain/enumerate over async iters
 
-TOTAL DISTINCT PROJECTS PASSING: 85
+
+------------------------------------------------------------
+NEXT-40 PUSH (cont.): cache/limiter/proto/redis-lock (10)
+------------------------------------------------------------
+ 86. asyncache                  - @cached async memoization (cachetools-backed)
+ 87. async-generator            - aclosing + asynccontextmanager backport
+ 88. h2                         - sans-IO HTTP/2: connection handshake + request frame
+ 89. aioresponses               - mocked aiohttp client GET -> 200
+ 90. broadcaster                - memory pub/sub publish->subscribe roundtrip
+ 91. aioprocessing              - AioQueue coro_put/coro_get x20 (no fork deadlock)
+ 92. aiolimiter                 - AsyncLimiter burst-then-exhaust rate limiting
+ 93. asynciolimiter             - Limiter.wait() rate limiting
+ 94. aiohttp-retry              - RetryClient retried 500,500->200 over aioresponses
+ 95. aioredlock                 - Redlock distributed lock acquire/is_locked/unlock vs real redis
+
+NOTE: one real pygo divergence found this push -- aiocsv: its C _Parser
+async-iterator (self-referential awaitable delegating to an executor
+future) raises "_Parser has no attribute 'send'" under pygo but works on
+stock. Niche (only lib hit); fix lives in pygo's coro/task driver (FV-gated).
+aiodebug also diverges by design: it monkey-patches asyncio Handle._run,
+which PygoEventLoop doesn't use (callbacks run on goroutines).
+
+TOTAL DISTINCT PROJECTS PASSING: 95
