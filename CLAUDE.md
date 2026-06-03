@@ -9,6 +9,14 @@
 - Our "CI" is **local**: `scripts/check_all.sh`. Phases: `tests mn lincheck dst
   ctest sanitizers exttsan verify` (run `scripts/check_all.sh all` for
   everything, or name phases). Run that before proposing a merge.
+- There is also a **local self-hosted CI runner** (a cron-driven shell script on
+  the dev box, NOT GitHub Actions) that auto-builds+tests every new `origin/main`
+  on a matrix: Linux 3.13t + Windows 3.12 + Windows 3.13t. It is **post-merge
+  validation, NOT a merge gate.** Do **not** wait on it or block a merge on it —
+  a full Windows pass is ~15 min, too slow to sit on. Just **periodically check**
+  its result: `~/projects/pygo-ci-runner/ci-status.sh` (or `cat
+  ~/projects/pygo-ci-status/latest.txt`). `PASS`/`PASS_BASELINE` = fine;
+  `REGRESSION` = a NEW failure worth a look (known platform gaps are baselined).
 
 ## Build & test
 - Target is **free-threaded CPython 3.13t** — the M:N scheduler is only real
