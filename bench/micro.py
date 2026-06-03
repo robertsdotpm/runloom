@@ -42,18 +42,24 @@ def make_yield(n_coros, m_yields):
 
     inner = n_coros * m_yields cooperative context switches.  Two shapes
     (few-long vs many-short) expose ready-queue vs per-goroutine cost.
+
+    NB: m_yields is captured via the closure, NOT passed as a second
+    positional to go() -- `pygo_core.go(fn, stack_size=None)` reads its
+    second positional as the stack size, so `go(worker, m)` would set the
+    stack to m bytes and call worker() with no args (silent TypeError,
+    swallowed by the scheduler -> zero work measured).
     """
     go = pygo_core.go
     run = pygo_core.run
     sched_yield = pygo_core.sched_yield
 
-    def worker(m):
-        for _ in range(m):
+    def worker():
+        for _ in range(m_yields):
             sched_yield()
 
     def once():
         for _ in range(n_coros):
-            go(worker, m_yields)
+            go(worker)
         run()
 
     return once
@@ -123,12 +129,15 @@ def main():
     ensure_nogil()
     s = Suite("micro", samples=20, warmup=5)
     s.banner()
+    # Inner counts are sized so each sample is >~25 ms: on a shared, noisy
+    # VM a sub-millisecond sample's dispersion swamps any real delta, which
+    # makes the regression gate useless. Longer samples -> stable min_s.
     s.bench("spawn+run noop x10k", make_spawn(10_000), inner=10_000,
             note="go()+run() round-trip per goroutine")
-    s.bench("yield 100coro x1000", make_yield(100, 1_000), inner=100_000,
-            note="context-switch, few long-lived goroutines")
-    s.bench("yield 1000coro x100", make_yield(1_000, 100), inner=100_000,
-            note="context-switch, many short goroutines")
+    s.bench("yield 100coro x2000", make_yield(100, 2_000), inner=200_000,
+            note="context-switch, few long-lived goroutines (cache-hot)")
+    s.bench("yield 1000coro x200", make_yield(1_000, 200), inner=200_000,
+            note="context-switch, many goroutines (cache-cold, cf. F1)")
     s.bench("chan unbuf ping-pong x100k", make_pingpong(100_000), inner=100_000,
             note="always-park round-trip; comparable to Go BenchmarkPingPong")
     s.bench("chan buf64 send/recv x500k", make_buffered(500_000, 64),
