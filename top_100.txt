@@ -1,7 +1,7 @@
 runloom - validated asyncio projects
 ========================================
 
-186 name-brand Python asyncio projects whose own test suites (or
+189 name-brand Python asyncio projects whose own test suites (or
 equivalent end-to-end exercises) run GREEN under runloom's pure-Python
 M:N runtime -- driven through runloom.aio / RunloomEventLoop on free-threaded
 CPython 3.13t (PYTHON_GIL=0). 'pass==stock' means the result matches
@@ -379,4 +379,16 @@ BEYOND 100 (bulk): Rx, distributed, parsers (>=1000 stars) (5)
 185. aiomonitor                 - start_monitor console on the loop
 186. dask                       - dask.distributed async Client map/gather (local cluster)
 
-TOTAL DISTINCT PROJECTS PASSING: 186
+
+------------------------------------------------------------
+BEYOND 100 (bulk): langchain ecosystem (orjson-shimmed) (3)
+------------------------------------------------------------
+187. niquests                   - AsyncSession GET (local server)
+188. langchain-core             - async chain ainvoke/abatch/astream (FakeChatModel)
+189. langgraph                  - StateGraph async nodes ainvoke
+
+NOTE: orjson (Rust, no 3.13t build) is provided as a pure-Python json-backed
+shim so orjson-dependent libs import; stock+runloom use it identically, so
+pass==stock still cleanly validates runloom's async machinery.
+
+TOTAL DISTINCT PROJECTS PASSING: 189
