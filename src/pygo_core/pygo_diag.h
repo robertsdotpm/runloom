@@ -50,6 +50,10 @@ extern unsigned int pygo_debug_flags;
 void pygo_diag_init(void);
 void pygo_diag_fini(void);
 
+/* Re-init the diag ring lock + drop the inherited ring list in a forked
+ * child (the rings' owning threads are gone).  Single-thread child only. */
+void pygo_diag_reset_after_fork(void);
+
 
 /* ---- lifecycle event ring ----
  *

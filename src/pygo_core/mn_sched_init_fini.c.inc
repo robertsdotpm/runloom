@@ -226,6 +226,32 @@ void pygo_mn_fini(void)
     pygo_mn_interp = NULL;
 }
 
+/* Reset the M:N scheduler in a forked CHILD.  After fork() only the
+ * forking thread survives -- the hub OS threads are gone -- so we must
+ * NOT join them (pygo_mn_run would hang forever waiting on dead hubs:
+ * the reproduced fork deadlock) and must NOT free/clear their structs
+ * (they hold PyThreadStates + locks tied to the dead threads).  Instead
+ * abandon the inherited hub array (a one-time leak in a short-lived
+ * child) and reset every global so the child sees an UNINITIALISED M:N
+ * scheduler: a fresh pygo_mn_init() works, and until then pygo runs on
+ * the single-thread scheduler.  The child is single-threaded at this
+ * point, so no lock is taken -- we only re-init the global run-queue lock
+ * in case a dead hub held it at fork time. */
+void pygo_mn_reset_after_fork(void)
+{
+    pygo_hubs = NULL;            /* abandon (leak) the inherited hub array */
+    pygo_hub_count = 0;
+    pygo_mn_spawn_counter = 0;
+    __atomic_store_n(&pygo_mn_pending_global, 0, __ATOMIC_RELAXED);
+    pygo_mn_interp = NULL;
+    pygo_set_per_g_tstate_mode(0);
+    pygo_mutex_init(&pygo_global_runq_lock);   /* may be inherited held */
+    pygo_global_runq_head = pygo_global_runq_tail = NULL;
+    __atomic_store_n(&pygo_global_runq_len, 0, __ATOMIC_RELAXED);
+    pygo_tls_hub = NULL;        /* the surviving thread is no longer a hub */
+    pygo_tls_current_g = NULL;
+}
+
 /* Internal core: pick hub, alloc g, set up coro, submit, bump counters.
  * Either callable (Python path) or c_fn+c_arg (C-only path) must be set,
  * not both.  Returns 0 on success, -1 on failure (errno set).  Python

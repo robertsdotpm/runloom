@@ -118,6 +118,11 @@ void pygo_netpoll_unregister(int fd);
 int pygo_netpoll_init(void);
 void pygo_netpoll_fini(void);
 
+/* Reset netpoll in a forked child: close the inherited (shared-with-parent)
+ * poll fd, re-init the per-pool locks, and drop inherited parker bookkeeping
+ * so the child re-creates its own poller cleanly.  Single-thread child only. */
+void pygo_netpoll_reset_after_fork(void);
+
 /* Backend name for diagnostics: "epoll" / "kqueue" / "select". */
 const char *pygo_netpoll_backend(void);
 

@@ -354,6 +354,19 @@ void pygo_diag_init(void)
     pygo_diag_inited = 1;
 }
 
+void pygo_diag_reset_after_fork(void)
+{
+    /* Forked child: re-init the registry lock (a dead thread may have held
+     * it at fork) and abandon the inherited per-thread ring list (those
+     * rings belonged to threads that no longer exist; leak them rather than
+     * free, since their owning threads are gone).  Single-thread child. */
+    if (!pygo_diag_inited) return;
+    pygo_mutex_init(&pygo_ring_list_lock);
+    pygo_ring_list = NULL;
+    pygo_ring_next_tid = 0;
+    pygo_tls_ring = NULL;
+}
+
 void pygo_diag_fini(void)
 {
     pygo_ring_t *r, *next;

@@ -43,6 +43,12 @@ int pygo_blockpool_init(int n_workers);
  * process-lifetime singleton. */
 void pygo_blockpool_fini(void);
 
+/* Reset the pool in a forked child: the worker threads are gone, so mark it
+ * "not started" (next offload re-creates it) and re-init bp_lock + drop the
+ * inherited job queue.  Does NOT join the dead workers.  Single-thread child
+ * only (called from the after-fork handler). */
+void pygo_blockpool_reset_after_fork(void);
+
 /* Number of offloaded jobs submitted but not yet completed.  The
  * single-thread scheduler's drain loop consults this so it neither exits
  * nor busy-spins while a goroutine is parked waiting on the pool (such a

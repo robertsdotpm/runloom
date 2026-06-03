@@ -313,6 +313,55 @@ void pygo_netpoll_fini(void)
     __atomic_store_n(&pygo_netpoll_inited, 0, __ATOMIC_RELEASE);
 }
 
+/* Reset netpoll in a forked CHILD.  The inherited epoll/kqueue fd is the
+ * SAME kernel object as the parent's (fork shares it), so a child that did
+ * I/O would cross-contaminate the parent's readiness -- it must get its
+ * own.  Single-threaded here, so no lock is taken; we only re-init the per-
+ * pool locks (a dead hub may have held one at fork) and drop the inherited
+ * parker bookkeeping (it references parent goroutines that don't exist in
+ * the child).  pygo_netpoll_fini() closes the inherited fds + marks uninit
+ * (it is itself lock-free); the next wait_fd re-creates a fresh poller. */
+void pygo_netpoll_reset_after_fork(void)
+{
+    size_t i;
+    pygo_netpoll_fini();        /* close inherited fds, inited = 0 (lock-free) */
+    for (i = 0; i < (size_t)PYGO_PARKER_POOL_MAX; i++) {
+        pygo_parker_pool_t *p = &pygo_pools[i];
+        pygo_mutex_init(&p->lock);
+        p->lock_inited = 2;     /* ready (re-inited above) */
+        p->head = NULL;
+        __atomic_store_n(&p->total, 0, __ATOMIC_RELAXED);
+        if (p->by_fd != NULL)
+            memset(p->by_fd, 0, p->by_fd_cap * sizeof(p->by_fd[0]));
+        p->dh_size = 0;
+        p->sweep_cursor = NULL;
+        p->sweep_cursor_gen = 0;
+        p->link_count = 0;
+        p->churn_last_links = 0;
+        p->churn_last_ns = 0;
+    }
+    /* The per-fd registration bitmap says "fd X is already armed in the
+     * poller"; against the child's BRAND-NEW poller every such bit is a lie
+     * that would make wait_fd skip EPOLL_CTL_ADD and lose the event.  Clear
+     * it (and the pending-wake bits) so the child re-arms cleanly. */
+    if (pygo_fd_registered_bm != NULL)
+        memset(pygo_fd_registered_bm, 0, pygo_fd_registered_cap_bytes);
+    {
+        unsigned char *pw = __atomic_load_n(&pygo_fd_pending_wake, __ATOMIC_RELAXED);
+        size_t cap = __atomic_load_n(&pygo_fd_pending_wake_cap, __ATOMIC_RELAXED);
+        if (pw != NULL) memset(pw, 0, cap);
+    }
+#if defined(PYGO_HAVE_EPOLL)
+    /* The per-hub io_uring ring registry names the PARENT hubs' rings (dead in
+     * the child).  The child's fresh hubs re-register their own; if we keep the
+     * stale entries the pump dispatches CQEs to freed rings -> hang/crash.  The
+     * epoll/eventfd/pump-wake fds were closed with the epoll fd above. */
+    pygo_iouring_ring_count = 0;
+    pygo_iouring_eventfd_in_epoll = -1;
+    pygo_pump_wake_fd = -1;
+#endif
+}
+
 static long long monotonic_ns(void)
 {
     return pygo_monotonic_ns();

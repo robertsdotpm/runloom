@@ -229,6 +229,30 @@ void pygo_blockpool_fini(void)
     pygo_mutex_unlock(&bp_lock);
 }
 
+/* Reset the blocking-offload pool in a forked CHILD.  The worker OS threads
+ * are gone, so we must NOT join them (pygo_blockpool_fini would hang) -- we
+ * reset to "not started" so the next offload re-creates the pool fresh.  The
+ * child is single-threaded here: re-init the sync objects (a dead worker may
+ * have held bp_lock at fork), drop the inherited job queue (its jobs point at
+ * parent goroutines), and zero the counters. */
+void pygo_blockpool_reset_after_fork(void)
+{
+    pygo_mutex_init(&bp_lock);
+#if defined(PYGO_OS_WINDOWS)
+    bp_lock_state = 2;
+#endif
+    bp_head = bp_tail = NULL;
+    bp_inited = 0;
+    bp_failed = 0;
+    bp_stopping = 0;
+    bp_n_workers = 0;
+    bp_wake_armed = 0;
+    __atomic_store_n(&bp_inflight, 0, __ATOMIC_RELAXED);
+    /* bp_cond is (re)created by pygo_blockpool_init on next offload; the
+     * inherited one is abandoned (no destroy -- it may be in an invalid
+     * post-fork state, and destroying an invalid cond is itself UB). */
+}
+
 void *pygo_blocking_call(void *(*fn)(void *), void *arg)
 {
     void *hub = pygo_mn_current_hub_opaque();

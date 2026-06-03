@@ -57,6 +57,13 @@ typedef struct pygo_g pygo_g_t;
 void pygo_introspect_init(void);
 void pygo_introspect_fini(void);
 
+/* Fork safety: reset every pygo subsystem to a clean single-process state
+ * in a forked child (hub + offload threads are gone).  Registered as an
+ * os.register_at_fork(after_in_child=...) handler.  Single-thread child
+ * only.  pygo_introspect_reset_after_fork resets just the registry. */
+void pygo_after_fork_child(void);
+void pygo_introspect_reset_after_fork(void);
+
 /* ---- registry link/unlink ----
  * Called ONLY from the g-struct OS alloc / OS free sites (slab miss /
  * slab overflow / mn teardown).  Both take pygo_greg_lock.  Never call

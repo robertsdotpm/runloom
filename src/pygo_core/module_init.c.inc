@@ -201,6 +201,13 @@ static PyMethodDef module_methods[] = {
      "park time so goroutines()/dump report 'age' (how long it has been "
      "wedged).  Off by default (one vDSO clock read per park); also via "
      "PYGO_INTROSPECT_TIME=1."},
+    {"reset_after_fork", m_reset_after_fork, METH_NOARGS,
+     "reset_after_fork() -> None.  Reset every pygo subsystem to a clean "
+     "single-process state after os.fork() -- abandons the (now-dead) M:N "
+     "hub + offload threads, re-inits inherited locks, and gives the child "
+     "its own netpoll fd.  Registered automatically as an "
+     "os.register_at_fork(after_in_child=...) handler; call directly only if "
+     "you fork without importing the pygo package.  CHILD process only."},
     {"install_traceback_signal", m_install_traceback_signal, METH_VARARGS,
      "install_traceback_signal(signum=SIGQUIT) -> int.  Install a RAW C "
      "signal handler that writes the goroutine dump to stderr -- Go's "

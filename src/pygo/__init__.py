@@ -33,6 +33,17 @@ import pygo_core as _core  # noqa: F401  – C extension lives at top level
 
 backend = _core.backend
 
+# Fork safety: after os.fork() the child keeps only the forking thread, so the
+# M:N hub threads and the blocking-offload workers are gone.  Reset the C
+# runtime in the child so it neither hangs (pygo_core.run / mn_run waiting on
+# dead hubs) nor deadlocks on a lock a dead thread held at fork, and so the
+# child gets its own netpoll fd instead of sharing the parent's.  Registered
+# here once, at import, for ALL pygo use (the monkey layer adds its own,
+# higher-level child handler on top).
+import os as _os
+if hasattr(_os, "register_at_fork"):
+    _os.register_at_fork(after_in_child=_core.reset_after_fork)
+
 # Runtime introspection -- `pygo.inspect.dump()`, goroutines(), stack(), etc.
 # See pygo/inspect.py.  Exposed as a submodule plus a couple of top-level
 # conveniences (the common "what are all my goroutines doing" calls).

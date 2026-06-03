@@ -62,6 +62,13 @@ int pygo_mn_go_c(pygo_c_entry_fn fn, void *arg);
 Py_ssize_t pygo_mn_run(void);
 void pygo_mn_fini(void);
 
+/* Reset the M:N scheduler in a forked child (the hub threads are gone).
+ * Abandons the inherited hubs, zeroes the pending counter so pygo_mn_run
+ * can't hang on dead hubs, and re-inits the global run-queue lock.  After
+ * this mn_hub_count()==0 and a fresh pygo_mn_init() works.  Single-thread
+ * child only (called from the after-fork handler). */
+void pygo_mn_reset_after_fork(void);
+
 /* Logical clock for the controlled-replay scheduler (PYGO_MN_SEED + barrier).
  * Returns the deterministic logical time that sched_sleep deadlines and timer
  * firing are measured against; `fallback` (a wall-clock value) is returned when

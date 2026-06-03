@@ -132,6 +132,13 @@ static void pygo_traceback_signal_handler(int sig)
 }
 #endif
 
+static PyObject *m_reset_after_fork(PyObject *self, PyObject *unused)
+{
+    (void)self; (void)unused;
+    pygo_after_fork_child();
+    Py_RETURN_NONE;
+}
+
 static PyObject *m_install_traceback_signal(PyObject *self, PyObject *args)
 {
     int signum = -1;

@@ -14,6 +14,8 @@
 #include "netpoll.h"
 #include "mn_sched.h"
 #include "pygo_iframe.h"
+#include "pygo_blockpool.h"
+#include "pygo_diag.h"
 #include "plat.h"
 #include "plat_compat.h"
 
@@ -194,6 +196,17 @@ void pygo_greg_unlink(pygo_g_t *g)
     pygo_mutex_unlock(&pygo_greg_lock);
 }
 
+/* Reset the registry in a forked child: re-init the lock (a dead thread may
+ * have held it at fork) and drop the inherited goroutine list -- the parent's
+ * goroutines don't exist in the child.  Single-thread child only. */
+void pygo_introspect_reset_after_fork(void)
+{
+    pygo_mutex_init(&pygo_greg_lock);
+    pygo_greg_head = NULL;
+    pygo_greg_total = 0;
+    pygo_greg_inited = 1;
+}
+
 long pygo_goroutine_count(void)
 {
     long n = 0;
@@ -361,6 +374,31 @@ void pygo_goroutine_snapshot_free(pygo_g_info_t *arr, long count)
 {
     (void)count;
     free(arr);
+}
+
+/* ---------------------------------------------------------------- *
+ *  Fork safety                                                     *
+ *                                                                  *
+ *  After os.fork() the child has only the forking thread; every    *
+ *  other OS thread (M:N hubs, blocking-offload workers) is gone,   *
+ *  but the inherited state still references them -- so a child that *
+ *  drives the runtime hangs (pygo_mn_run waits on dead hubs) or     *
+ *  deadlocks on a lock a dead thread held at fork.  This resets     *
+ *  every subsystem to a clean single-process state so the child can *
+ *  run pygo afresh (single-thread, or a fresh pygo_mn_init).  The   *
+ *  child is single-threaded here, so the resets take no locks; they *
+ *  only re-init the global locks (to clear any inherited-held       *
+ *  state) and drop bookkeeping that named the parent's goroutines.  *
+ *  Registered as an os.register_at_fork(after_in_child=...) handler *
+ *  by pygo/__init__.py.                                            *
+ * ---------------------------------------------------------------- */
+void pygo_after_fork_child(void)
+{
+    pygo_introspect_reset_after_fork();   /* registry + greg lock */
+    pygo_mn_reset_after_fork();           /* abandon dead hubs, unhang mn_run */
+    pygo_netpoll_reset_after_fork();      /* own poll fd, drop stale parkers */
+    pygo_blockpool_reset_after_fork();    /* dead offload workers -> re-create */
+    pygo_diag_reset_after_fork();         /* diag ring lock */
 }
 
 /* ---------------------------------------------------------------- *
