@@ -180,6 +180,20 @@ static void pygo_traceback_signal_handler(int sig)
     (void)sig;
     pygo_dump_goroutines_fd(2);
 }
+#else
+/* Windows analog of the SIGQUIT dump: a console control handler that fires on
+ * Ctrl+Break (CTRL_BREAK_EVENT), the closest thing to `kill -QUIT`.  Windows
+ * runs this on a dedicated thread, so the try-locking, write()-only structural
+ * dump is safe here too.  Returning TRUE marks the event handled so the
+ * process keeps running (Ctrl+Break would otherwise terminate it). */
+static BOOL WINAPI pygo_console_ctrl_handler(DWORD ctrl_type)
+{
+    if (ctrl_type == CTRL_BREAK_EVENT) {
+        pygo_dump_goroutines_fd(2);
+        return TRUE;
+    }
+    return FALSE;   /* leave Ctrl-C / close / logoff / shutdown to the default */
+}
 #endif
 
 static PyObject *m_reset_after_fork(PyObject *self, PyObject *unused)
@@ -195,10 +209,14 @@ static PyObject *m_install_traceback_signal(PyObject *self, PyObject *args)
     (void)self;
     if (!PyArg_ParseTuple(args, "|i", &signum)) return NULL;
 #if defined(_WIN32)
+    /* On Windows there is no SIGQUIT; the dump fires on Ctrl+Break instead
+     * (CTRL_BREAK_EVENT), installed via a console control handler. */
     (void)signum;
-    PyErr_SetString(PyExc_NotImplementedError,
-                    "install_traceback_signal: not supported on Windows");
-    return NULL;
+    if (!SetConsoleCtrlHandler(pygo_console_ctrl_handler, TRUE)) {
+        PyErr_SetFromWindowsErr(0);
+        return NULL;
+    }
+    return PyLong_FromLong(0);   /* no signal number on Windows */
 #else
     if (signum < 0) signum = SIGQUIT;
     {

@@ -233,10 +233,11 @@ static PyMethodDef module_methods[] = {
      "finished (0 when no cap is set)."},
     {"install_traceback_signal", m_install_traceback_signal, METH_VARARGS,
      "install_traceback_signal(signum=SIGQUIT) -> int.  Install a RAW C "
-     "signal handler that writes the goroutine dump to stderr -- Go's "
-     "GOTRACEBACK / `kill -QUIT`.  Works even when the interpreter is "
-     "wedged (unlike a Python signal handler, which needs a bytecode "
-     "boundary).  Also via PYGO_TRACEBACK=1.  POSIX only."},
+     "handler that writes the goroutine dump to stderr -- Go's GOTRACEBACK.  "
+     "On POSIX it's `kill -QUIT` (a signal handler that works even when the "
+     "interpreter is wedged, unlike a Python signal handler).  On Windows it's "
+     "Ctrl+Break / CTRL_BREAK_EVENT via a console control handler (signum is "
+     "ignored).  Also via PYGO_TRACEBACK=1."},
     {"_diag_flags", m_diag_flags, METH_NOARGS,
      "_diag_flags() -> int.  Current PYGO_DEBUG flag mask."},
     {"_datastack_sweep_stats", m_datastack_sweep_stats, METH_NOARGS,
@@ -361,19 +362,23 @@ PyMODINIT_FUNC PyInit_pygo_core(void)
     if (scrub_env && scrub_env[0] && scrub_env[0] != '0') {
         pygo_coro_scrub_set(1);
     }
-#if !defined(_WIN32)
     {
-        const char *tb_env = getenv("PYGO_TRACEBACK");  /* GOTRACEBACK-style SIGQUIT dump */
+        /* GOTRACEBACK-style goroutine dump: SIGQUIT on POSIX, Ctrl+Break
+         * (CTRL_BREAK_EVENT) on Windows. */
+        const char *tb_env = getenv("PYGO_TRACEBACK");
         if (tb_env && tb_env[0] && tb_env[0] != '0') {
+#if !defined(_WIN32)
             struct sigaction sa;
             memset(&sa, 0, sizeof sa);
             sa.sa_handler = pygo_traceback_signal_handler;
             sigemptyset(&sa.sa_mask);
             sa.sa_flags = SA_RESTART;
             (void)sigaction(SIGQUIT, &sa, NULL);
+#else
+            (void)SetConsoleCtrlHandler(pygo_console_ctrl_handler, TRUE);
+#endif
         }
     }
-#endif
     pygo_install_module_getattro();   /* goroutine-safe module attr lookup */
     if (PyType_Ready(&PygoCoroType) < 0) return NULL;
     /* Set by hand rather than in the positional initializer, whose long run

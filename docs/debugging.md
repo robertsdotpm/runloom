@@ -106,9 +106,12 @@ gi.install_dump_signal()     # SIGQUIT -> goroutine dump on stderr
 # or set env PYGO_TRACEBACK=1 before import
 ```
 
-This installs a **raw C** signal handler, so the dump fires even when the
+This installs a **raw C** handler, so the dump fires even when the
 interpreter is wedged (a Python `signal.signal` handler only runs at a
-bytecode boundary, which a fully-stalled process never reaches).  Then:
+bytecode boundary, which a fully-stalled process never reaches).  On
+**Windows** there is no SIGQUIT, so the trigger is **Ctrl+Break**
+(`CTRL_BREAK_EVENT`, via a console control handler) — the same dump, the same
+"keep running afterwards" behaviour.  Then, on POSIX:
 
 ```
 kill -QUIT <pid>
