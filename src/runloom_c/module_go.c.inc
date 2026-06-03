@@ -210,7 +210,15 @@ static PyObject *m_current_g(PyObject *self, PyObject *unused)
     if (runloom_mn_current_hub_opaque() != NULL) {
         g = runloom_mn_tls_current_g();
     } else {
-        g = runloom_sched_get()->current;
+        /* Foreign-thread-safe PEEK, never runloom_sched_get(): current_g() is
+         * reached from arbitrary OS threads via the monkey shims'
+         * _in_goroutine() (e.g. a multiprocessing.Queue feeder thread taking a
+         * patched threading.Lock).  runloom_sched_get() would lazily malloc a
+         * single-thread scheduler AND arm the netpoll wake-pump on that foreign
+         * thread -- unsafe under concurrent M:N (raced -> SIGSEGV) and a leak.
+         * A thread with no scheduler has no running goroutine, so NULL is the
+         * correct, allocation-free answer. */
+        g = runloom_sched_peek_current();
     }
     if (g == NULL) {
         Py_RETURN_NONE;
