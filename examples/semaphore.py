@@ -43,4 +43,4 @@ def main():
     print("peak concurrency was {0} (cap {1})".format(peak[0], MAX_CONCURRENT))
 
 if __name__ == "__main__":
-    runloom.run(main)
+    runloom.run(1, main)

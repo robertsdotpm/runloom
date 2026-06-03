@@ -47,8 +47,7 @@ def main():
             conn, addr = listener.accept()
             runloom.go(lambda c=conn, a=addr: handle(c, a))
 
-    runloom.go(accept_loop)
-    runloom.run()
+    runloom.run(1, accept_loop)
 
 if __name__ == "__main__":
     main()

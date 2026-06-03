@@ -39,7 +39,7 @@ class TestCountAndRegistry(unittest.TestCase):
             seen["count"] = runloom_c.goroutine_count()
             seen["states"] = [g["state"] for g in runloom_c.goroutines()]
 
-        runloom.run(main)
+        runloom.run(1, main)
         # 5 sleepers + main itself
         self.assertEqual(seen["count"], 6)
         self.assertEqual(seen["states"].count("sleep"), 5)
@@ -55,7 +55,7 @@ class TestCountAndRegistry(unittest.TestCase):
                 runloom.go(noop)
                 runloom.yield_()
 
-        runloom.run(main)
+        runloom.run(1, main)
         self.assertEqual(runloom_c.goroutine_count(), 0)
 
     def test_ids_are_unique(self):
@@ -70,7 +70,7 @@ class TestCountAndRegistry(unittest.TestCase):
             runloom.sleep(0.005)
             ids["set"] = [g["id"] for g in runloom_c.goroutines()]
 
-        runloom.run(main)
+        runloom.run(1, main)
         got = ids["set"]
         self.assertEqual(len(got), len(set(got)))   # all unique
         self.assertTrue(all(i > 0 for i in got))
@@ -90,7 +90,7 @@ class TestStates(unittest.TestCase):
             cap["wake_in"] = g["wake_in"]
             cap["blocked_on"] = g["blocked_on"]
 
-        runloom.run(main)
+        runloom.run(1, main)
         self.assertIsNotNone(cap["wake_in"])
         self.assertGreater(cap["wake_in"], 0.0)
         self.assertEqual(cap["blocked_on"], "timer")
@@ -115,7 +115,7 @@ class TestStates(unittest.TestCase):
                 os.write(w, b"x")               # wake it -> drains
                 runloom.sleep(0.01)
 
-            runloom.run(main)
+            runloom.run(1, main)
         finally:
             os.close(r)
             os.close(w)
@@ -149,7 +149,7 @@ class TestStackReconstruction(unittest.TestCase):
             cap["frames"] = gi.stack(gid)
             cap["entry"] = gi.entry(gid)
 
-        runloom.run(main)
+        runloom.run(1, main)
         # co_qualname is fully-qualified (Class.method.<locals>.leaf); match
         # on suffix.  single-thread scheduler -> full user stack, deepest first.
         funcs = [name for (_fn, _ln, name) in cap["frames"]]
@@ -176,7 +176,7 @@ class TestAge(unittest.TestCase):
                      if x["state"] == "sleep"][0]
                 cap["age"] = g["age"]
 
-            runloom.run(main)
+            runloom.run(1, main)
         finally:
             gi.enable_timestamps(False)
         self.assertIsNotNone(cap["age"])
@@ -199,7 +199,7 @@ class TestDump(unittest.TestCase):
             runloom_c.dump_goroutines(fd)
             os.close(fd)
 
-        runloom.run(main)
+        runloom.run(1, main)
         with open(out["path"]) as f:
             text = f.read()
         os.unlink(out["path"])
@@ -217,7 +217,7 @@ class TestDump(unittest.TestCase):
             runloom.sleep(0.005)
             cap["text"] = gi.format(stacks=True)
 
-        runloom.run(main)
+        runloom.run(1, main)
         self.assertIn("runloom goroutines:", cap["text"])
         self.assertIn("sleep", cap["text"])
 
@@ -234,7 +234,7 @@ class TestDump(unittest.TestCase):
             gi.dump(file=buf, stacks=True)
             cap["text"] = buf.getvalue()
 
-        runloom.run(main)
+        runloom.run(1, main)
         self.assertIn("goroutine", cap["text"])
 
 
@@ -278,7 +278,7 @@ class TestDeadlockDetection(unittest.TestCase):
             "import runloom, runloom_c, runloom.inspect as gi\n"
             "gi.set_deadlock_mode('raise')\n"
             "try:\n"
-            "    runloom.run(lambda: runloom_c.Chan(0).recv())\n"
+            "    runloom.run(1, lambda: runloom_c.Chan(0).recv())\n"
             "    print('NO_RAISE')\n"
             "except RuntimeError as e:\n"
             "    print('RAISED_OK' if 'deadlock' in str(e).lower() else 'WRONG')\n")
@@ -293,7 +293,7 @@ class TestDeadlockDetection(unittest.TestCase):
             "def main():\n"
             "    runloom.go(waiter)\n"
             "    runloom_c.Chan(0).recv()\n"
-            "runloom.run(main)\n"            # warn -> prints, no raise
+            "runloom.run(1, main)\n"            # warn -> prints, no raise
             "print('SURVIVED')\n")
         self.assertEqual(rc, 0)
         self.assertIn("SURVIVED", out)
@@ -304,7 +304,7 @@ class TestDeadlockDetection(unittest.TestCase):
         rc, out = _run_script(
             "import runloom, runloom_c, runloom.inspect as gi\n"
             "gi.set_deadlock_mode('off')\n"
-            "runloom.run(lambda: runloom_c.Chan(0).recv())\n"
+            "runloom.run(1, lambda: runloom_c.Chan(0).recv())\n"
             "print('SURVIVED')\n")
         self.assertEqual(rc, 0)
         self.assertIn("SURVIVED", out)
@@ -319,7 +319,7 @@ class TestDeadlockDetection(unittest.TestCase):
             "def main():\n"
             "    [runloom.go(worker) for _ in range(5)]\n"
             "    runloom.sleep(0.005)\n"
-            "runloom.run(main)\n"            # completes -> no deadlock
+            "runloom.run(1, main)\n"            # completes -> no deadlock
             "print('CLEAN_OK')\n")
         self.assertEqual(rc, 0)
         self.assertIn("CLEAN_OK", out)
@@ -341,7 +341,7 @@ class TestLeakWatchdog(unittest.TestCase):
             cap["hits"] = gi.leaked(min_age=0.01, states=("sleep",))
             cap["none"] = gi.leaked(min_age=10.0, states=("sleep",))
 
-        runloom.run(main)
+        runloom.run(1, main)
         self.assertEqual(len(cap["hits"]), 3)
         self.assertTrue(all(g["age"] >= 0.01 for g in cap["hits"]))
         self.assertEqual(cap["none"], [])   # nothing parked >10s
@@ -376,7 +376,7 @@ class TestMaxGoroutines(unittest.TestCase):
             cap["live"] = gi.live_goroutines()
             runloom_c.sched_reset()         # finish the parkers -> free slots
 
-        runloom.run(main)
+        runloom.run(1, main)
         self.assertEqual(cap["spawned"], 5)
         self.assertEqual(cap["rejected"], 15)
         self.assertEqual(cap["live"], 5)
@@ -395,7 +395,7 @@ class TestMaxGoroutines(unittest.TestCase):
                 runloom.go(quick)
                 runloom.yield_()               # let some finish, freeing slots
 
-        runloom.run(main)
+        runloom.run(1, main)
         self.assertEqual(ran["n"], 500)
         self.assertEqual(gi.live_goroutines(), 0)
 

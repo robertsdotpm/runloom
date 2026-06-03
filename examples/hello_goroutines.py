@@ -26,6 +26,6 @@ def main():
     runloom.go(napper)
 
 if __name__ == "__main__":
-    # runloom.run(main) spawns main() first, then drains the scheduler —
+    # runloom.run(1, main) spawns main() first, then drains the scheduler —
     # the moral equivalent of Go's func main().
-    runloom.run(main)
+    runloom.run(1, main)

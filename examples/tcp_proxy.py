@@ -89,4 +89,4 @@ def main():
     runloom.go(client, proxy_addr)
 
 if __name__ == "__main__":
-    runloom.run(main)
+    runloom.run(1, main)

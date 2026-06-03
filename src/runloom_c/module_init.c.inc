@@ -157,6 +157,10 @@ static PyMethodDef module_methods[] = {
      "mn_run(): wait for all gs to complete.  Returns total completed."},
     {"mn_fini",     m_mn_fini,     METH_NOARGS,
      "mn_fini(): tear down the hub pool."},
+    {"mn_hub_count", m_mn_hub_count, METH_NOARGS,
+     "mn_hub_count(): number of M:N hubs currently running (0 if mn_init "
+     "was never called or after mn_fini).  Lets the runloom.go() wrapper "
+     "dispatch to mn_go inside an M:N run."},
     {"preempt_init", m_preempt_init, METH_VARARGS,
      "preempt_init(quantum_us=10000): start the time-sliced preemption "
      "timer.  3.13t only.  Goroutines without explicit sched_yield "

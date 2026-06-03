@@ -65,7 +65,7 @@ class TestGCWithParkedGoroutines(unittest.TestCase):
             for _ in range(N):
                 done.recv()
 
-        runloom.run(main)
+        runloom.run(1, main)
         self.assertEqual(len(results), N)
         self.assertTrue(all(results.values()),
                         "a cycle held by a parked goroutine was collected")
@@ -111,7 +111,7 @@ class TestGCWithParkedGoroutines(unittest.TestCase):
             for _ in range(N):
                 done.recv()
 
-        runloom.run(main)
+        runloom.run(1, main)
         self.assertEqual(len(results), N)
         self.assertTrue(all(results.values()),
                         "a cycle held by a chan-parked goroutine was collected")
@@ -141,7 +141,7 @@ class TestGCWithParkedGoroutines(unittest.TestCase):
                 oks += done.recv()[0]
             self.assertEqual(oks, N, "a cycle held by a park_self goroutine was collected")
 
-        runloom.run(main)
+        runloom.run(1, main)
 
 
 if __name__ == "__main__":

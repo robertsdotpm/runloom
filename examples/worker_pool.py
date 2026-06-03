@@ -34,4 +34,4 @@ def main():
         print("worker {0}: {1}^2 = {2}".format(wid, job, square))
 
 if __name__ == "__main__":
-    runloom.run(main)
+    runloom.run(1, main)

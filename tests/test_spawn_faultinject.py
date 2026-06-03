@@ -41,7 +41,7 @@ try:
 except MemoryError:
     print('OOM_RAISED')
 c.go(lambda: ran.append('y'))   # fault was once -> succeeds
-runloom.run()
+runloom.run_single()
 print('RECOVERED' if ran == ['y'] and c.goroutine_count() == 0 else 'BAD')
 """
 

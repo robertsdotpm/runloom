@@ -35,7 +35,7 @@ def main():
     for i in range(n_clients):
         runloom.go(lambda i=i: client(i, n_msgs, payload))
     t0 = time.perf_counter()
-    runloom.run()
+    runloom.run_single()   # drain the already-spawned clients (timing stays tight)
     t = time.perf_counter() - t0
     total = n_clients * n_msgs
     print("{0} round-trips in {1:.2f}s -- {2:.0f} req/s, {3:.1f} us/RT".format(

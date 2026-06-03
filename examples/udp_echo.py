@@ -37,4 +37,4 @@ def main():
     runloom.go(client, ready)
 
 if __name__ == "__main__":
-    runloom.run(main)
+    runloom.run(1, main)

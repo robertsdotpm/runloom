@@ -40,4 +40,4 @@ def main():
     print("total handled:", total)            # == NUM_ITEMS
 
 if __name__ == "__main__":
-    runloom.run(main)
+    runloom.run(1, main)

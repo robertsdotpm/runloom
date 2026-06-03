@@ -38,4 +38,4 @@ def main():
     print("sum of squares 1..10 =", result.recv()[0])   # 385
 
 if __name__ == "__main__":
-    runloom.run(main)
+    runloom.run(1, main)

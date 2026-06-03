@@ -22,4 +22,4 @@ def main():
     print("stopped after 5 ticks")
 
 if __name__ == "__main__":
-    runloom.run(main)
+    runloom.run(1, main)

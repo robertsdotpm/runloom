@@ -43,4 +43,4 @@ def main():
     print(" ".join(str(p) for p in primes))
 
 if __name__ == "__main__":
-    runloom.run(main)
+    runloom.run(1, main)

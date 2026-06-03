@@ -68,7 +68,7 @@ class TestScheduler(unittest.TestCase):
         runloom.go(worker, "A", 3)
         runloom.go(worker, "B", 3)
         runloom.go(worker, "C", 3)
-        runloom.run()
+        runloom.run_single()
         # Should round-robin A0 B0 C0 A1 B1 C1 ...
         self.assertEqual(log, [
             ("A", 0), ("B", 0), ("C", 0),
@@ -89,7 +89,7 @@ class TestScheduler(unittest.TestCase):
         runloom.go(sleeper)
         runloom.go(burner)
         t0 = time.monotonic()
-        runloom.run()
+        runloom.run_single()
         elapsed = time.monotonic() - t0
         # burner finished long before sleeper woke
         self.assertEqual(log[:4], ["s1-start", ("b", 0), ("b", 1), ("b", 2)])

@@ -45,4 +45,4 @@ def main():
     print("recv ->", value, ok)        # None False  (closed + drained)
 
 if __name__ == "__main__":
-    runloom.run(main)
+    runloom.run(1, main)

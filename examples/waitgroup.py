@@ -45,4 +45,4 @@ def main():
     print("all {0} tasks done".format(num_tasks))
 
 if __name__ == "__main__":
-    runloom.run(main)
+    runloom.run(1, main)

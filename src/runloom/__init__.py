@@ -2,13 +2,17 @@
 
 Everyday API -- `import runloom` is all you need:
     runloom.go(fn, *args, **kw)   spawn a goroutine
-    runloom.run(main_fn=None)     drive the scheduler until idle
+    runloom.run(n, main_fn)       run main_fn with n hubs: n=1 single-thread,
+                                  n>1 M:N parallel (needs 3.13t + GIL off;
+                                  n>1 on a GIL build raises).  Collapses the
+                                  mn_init/mn_go/mn_run/mn_fini envelope.
+    runloom.run_single(main_fn=None)  single-thread scheduler; == run(1, main_fn)
     runloom.sleep(seconds)        sleep without blocking the OS thread
     runloom.yield_()              cooperative yield
     runloom.Chan(capacity=0)      Go-style channel
     runloom.select(cases, ...)    wait on multiple channel ops
     runloom.blocking(fn, ...)     offload a blocking/CPU call off the hub
-    runloom.mn_init/mn_go/mn_run/mn_fini   M:N scheduler (3.13t, GIL off)
+    runloom.mn_init/mn_go/mn_run/mn_fini   raw M:N scheduler (run() wraps these)
     runloom.backend() / .netpoll_backend()
 
 Feature packages (import as needed, Go-style):
@@ -49,6 +53,7 @@ from .runtime import (
     sleep,
     blocking,
     run,
+    run_single,
     current,
     Goroutine,
 )
@@ -64,10 +69,14 @@ Chan = _core.Chan
 select = _core.select
 
 # M:N scheduler -- real multi-core parallelism on free-threaded 3.13t.
+# Everyday code uses run(n, main_fn); these raw entry points stay exposed for
+# advanced use (custom spawn loops, benchmarks).  mn_hub_count() reports how
+# many hubs are live and is what the runloom.go() wrapper dispatches on.
 mn_init = _core.mn_init
 mn_go = _core.mn_go
 mn_run = _core.mn_run
 mn_fini = _core.mn_fini
+mn_hub_count = _core.mn_hub_count
 
 # Lower-level C primitives, surfaced here so `runloom_c` never needs importing
 # directly for normal use.  (The raw module stays available as `runloom_c` for
@@ -117,13 +126,13 @@ from . import aio      # noqa: E402,F401  – run async/await on the scheduler
 
 __all__ = [
     # scheduler
-    "go", "run", "sleep", "yield_", "blocking", "current", "Goroutine",
-    "go_noyield", "warmup", "thread_init", "thread_fini",
+    "go", "run", "run_single", "sleep", "yield_", "blocking", "current",
+    "Goroutine", "go_noyield", "warmup", "thread_init", "thread_fini",
     "preempt_init", "preempt_fini",
     # channels
     "Chan", "select",
     # M:N (free-threaded 3.13t)
-    "mn_init", "mn_go", "mn_run", "mn_fini",
+    "mn_init", "mn_go", "mn_run", "mn_fini", "mn_hub_count",
     # low-level I/O primitives
     "TCPConn", "Coro", "G", "wait_fd", "WAIT_FD_CANCELLED",
     "tcp_recv", "tcp_send", "iouring_available",

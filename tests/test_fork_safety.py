@@ -59,7 +59,7 @@ class TestSingleThreadChild(unittest.TestCase):
         # then forks; the child must be able to run its own scheduler.
         def warm():
             runloom.sleep(0.005)
-        runloom.run(warm)
+        runloom.run(1, warm)
 
         def child():
             out = []
@@ -67,7 +67,7 @@ class TestSingleThreadChild(unittest.TestCase):
                 out.append(1)
             for _ in range(4):
                 runloom.go(w)
-            runloom.run()
+            runloom.run_single()
             return 0 if len(out) == 4 else 3
 
         rc = run_child(child)
@@ -164,7 +164,7 @@ class TestIntrospectionInChild(unittest.TestCase):
                     runloom.go(w)
                 runloom.sleep(0.005)
                 out.append(runloom_c.goroutine_count())
-            runloom.run(main)
+            runloom.run(1, main)
             return 0 if out and out[0] == 4 else 6
 
         rc = run_child(child)

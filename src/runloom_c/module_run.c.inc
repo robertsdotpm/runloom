@@ -287,6 +287,12 @@ static PyObject *m_mn_fini(PyObject *self, PyObject *unused)
     Py_RETURN_NONE;
 }
 
+static PyObject *m_mn_hub_count(PyObject *self, PyObject *unused)
+{
+    (void)self; (void)unused;
+    return PyLong_FromLong(runloom_mn_hub_count());
+}
+
 /* Preemption: 3.13t only.  Refuse on other versions with a clear error
  * rather than silently failing -- the timer + Py_AddPendingCall path
  * has only been validated on free-threaded 3.13, and the M:N hub model

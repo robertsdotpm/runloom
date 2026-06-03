@@ -61,4 +61,4 @@ def main():
     print("scanned {0} ports; open: {1}".format(len(candidates), sorted(found)))
 
 if __name__ == "__main__":
-    runloom.run(main)
+    runloom.run(1, main)

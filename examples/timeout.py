@@ -31,4 +31,4 @@ def main():
     print(with_timeout(delay=0.30, limit=0.10))   # times out
 
 if __name__ == "__main__":
-    runloom.run(main)
+    runloom.run(1, main)

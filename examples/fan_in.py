@@ -27,4 +27,4 @@ def main():
         print("from producer {0}: item {1}".format(pid, item))
 
 if __name__ == "__main__":
-    runloom.run(main)
+    runloom.run(1, main)

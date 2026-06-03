@@ -35,4 +35,4 @@ def main():
     runloom.go(pong, a, b)
 
 if __name__ == "__main__":
-    runloom.run(main)
+    runloom.run(1, main)
