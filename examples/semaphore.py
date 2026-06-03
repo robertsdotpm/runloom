@@ -8,16 +8,11 @@ even though 10 are spawned.
 Run:
     python3 examples/semaphore.py
 """
-import os
-import sys
-
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 
 import runloom
 
 MAX_CONCURRENT = 3
 NUM_TASKS = 10
-
 
 def main():
     sem = runloom.Chan(MAX_CONCURRENT)
@@ -46,7 +41,6 @@ def main():
         done.recv()
 
     print("peak concurrency was {0} (cap {1})".format(peak[0], MAX_CONCURRENT))
-
 
 if __name__ == "__main__":
     runloom.run(main)

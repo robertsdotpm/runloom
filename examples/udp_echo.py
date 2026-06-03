@@ -9,15 +9,10 @@ process and exchange a few datagrams over loopback.
 Run:
     python3 examples/udp_echo.py
 """
-import os
-import sys
-
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 
 import runloom
 
 ROUNDS = 3
-
 
 def server(ready):
     sock = runloom.sync.udp_endpoint(local_addr=("127.0.0.1", 0))
@@ -26,7 +21,6 @@ def server(ready):
         data, addr = sock.recvfrom(1024)
         sock.sendto(b"echo:" + data, addr)
     sock.close()
-
 
 def client(ready):
     addr = ready.recv()[0]
@@ -37,12 +31,10 @@ def client(ready):
         print("client got:", reply.decode())
     sock.close()
 
-
 def main():
     ready = runloom.Chan(1)
     runloom.go(server, ready)
     runloom.go(client, ready)
-
 
 if __name__ == "__main__":
     runloom.run(main)

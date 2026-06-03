@@ -3,13 +3,10 @@ import socket
 import sys
 import time
 
-sys.path.insert(0, "src")
 import runloom
-
 
 HOST = "127.0.0.1"
 PORT = 9000
-
 
 def client(client_id, n_msgs, payload):
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -25,7 +22,6 @@ def client(client_id, n_msgs, payload):
                 got += chunk
     finally:
         s.close()
-
 
 def main():
     runloom.monkey.patch()
@@ -44,7 +40,6 @@ def main():
     total = n_clients * n_msgs
     print("{0} round-trips in {1:.2f}s -- {2:.0f} req/s, {3:.1f} us/RT".format(
         total, t, total / t, t / total * 1e6))
-
 
 if __name__ == "__main__":
     main()

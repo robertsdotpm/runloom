@@ -9,12 +9,8 @@ one OS thread, all parking on netpoll under the hood.
 Run:
     python3 examples/http_server.py
 """
-import os
 import socket
-import sys
 from urllib.request import urlopen
-
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 
 import runloom
 
@@ -23,7 +19,6 @@ runloom.monkey.patch()
 BODY = b"Hello from runloom!\n"
 NUM_CLIENTS = 5
 
-
 def serve_one(conn):
     try:
         conn.recv(4096)                   # read (and ignore) the request
@@ -31,7 +26,6 @@ def serve_one(conn):
         conn.sendall(head % len(BODY) + BODY)
     finally:
         conn.close()
-
 
 def http_server(ready, n_requests):
     s = socket.socket()
@@ -44,11 +38,9 @@ def http_server(ready, n_requests):
         runloom.go(serve_one, conn)          # one goroutine per connection
     s.close()
 
-
 def fetcher(fid, port, results):
     body = urlopen("http://127.0.0.1:{0}/".format(port)).read()
     results.send((fid, body))
-
 
 def main():
     ready = runloom.Chan(1)
@@ -62,7 +54,6 @@ def main():
     for _ in range(NUM_CLIENTS):
         fid, body = results.recv()[0]
         print("fetcher {0} got: {1}".format(fid, body.decode().strip()))
-
 
 if __name__ == "__main__":
     runloom.run(main)

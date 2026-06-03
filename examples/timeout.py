@@ -8,18 +8,12 @@ idiom, no special API required.
 Run:
     python3 examples/timeout.py
 """
-import os
-import sys
-
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 
 import runloom
-
 
 def slow_op(out, delay):
     runloom.sleep(delay)
     out.send("result after {0}s".format(delay))
-
 
 def with_timeout(delay, limit):
     result = runloom.Chan(1)
@@ -32,11 +26,9 @@ def with_timeout(delay, limit):
         return "TIMEOUT after {0}s".format(limit)
     return payload[0]
 
-
 def main():
     print(with_timeout(delay=0.05, limit=0.20))   # finishes in time
     print(with_timeout(delay=0.30, limit=0.10))   # times out
-
 
 if __name__ == "__main__":
     runloom.run(main)

@@ -13,15 +13,11 @@ To bench:
     python3 examples/echo_client.py 100      # 100 concurrent clients
 """
 import socket
-import sys
 
-sys.path.insert(0, "src")
 import runloom
-
 
 HOST = "127.0.0.1"
 PORT = 9000
-
 
 def handle(conn, addr):
     print("conn from", addr)
@@ -36,7 +32,6 @@ def handle(conn, addr):
     finally:
         conn.close()
         print("closed", addr)
-
 
 def main():
     runloom.monkey.patch()
@@ -54,7 +49,6 @@ def main():
 
     runloom.go(accept_loop)
     runloom.run()
-
 
 if __name__ == "__main__":
     main()

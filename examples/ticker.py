@@ -8,13 +8,8 @@ the consumer falls behind — the buffer is size 1.
 Run:
     python3 examples/ticker.py
 """
-import os
-import sys
-
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 
 import runloom
-
 
 def main():
     ticker = runloom.time.NewTicker(0.05)
@@ -25,7 +20,6 @@ def main():
     finally:
         ticker.Stop()                     # halt the backing goroutine
     print("stopped after 5 ticks")
-
 
 if __name__ == "__main__":
     runloom.run(main)

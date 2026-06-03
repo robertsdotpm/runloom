@@ -10,13 +10,8 @@ until close.
 Run:
     python3 examples/channels.py
 """
-import os
-import sys
-
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 
 import runloom
-
 
 def main():
     # --- Buffered: sends up to capacity don't block, no receiver yet. ---
@@ -48,7 +43,6 @@ def main():
     print("recv ->", value, ok)        # 99 True
     value, ok = done.recv()
     print("recv ->", value, ok)        # None False  (closed + drained)
-
 
 if __name__ == "__main__":
     runloom.run(main)

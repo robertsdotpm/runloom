@@ -9,18 +9,12 @@ Run:
     python3 examples/asyncio_bridge.py
 """
 import asyncio
-import os
-import sys
-
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 
 import runloom
-
 
 async def fetch(name, delay):
     await asyncio.sleep(delay)            # cooperative; other tasks run
     return "{0} done after {1}s".format(name, delay)
-
 
 async def worker(name, queue, results):
     while True:
@@ -31,7 +25,6 @@ async def worker(name, queue, results):
         await asyncio.sleep(0.01)
         results.append("{0} handled {1}".format(name, item))
         queue.task_done()
-
 
 async def main():
     # 1) Fan out with gather and race a slow one against a timeout.
@@ -60,7 +53,6 @@ async def main():
         await queue.put(None)
     await asyncio.gather(*consumers)
     print("queue results:", sorted(collected))
-
 
 if __name__ == "__main__":
     runloom.aio.run(main())

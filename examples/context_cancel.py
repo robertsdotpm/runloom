@@ -9,13 +9,8 @@ automatically, and cancellation is transitive to child contexts.
 Run:
     python3 examples/context_cancel.py
 """
-import os
-import sys
-
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 
 import runloom
-
 
 def worker(ctx, work, wid):
     while True:
@@ -27,7 +22,6 @@ def worker(ctx, work, wid):
             print("worker {0} stopping: {1}".format(wid, ctx.err()))
             return
         print("worker {0} did job {1}".format(wid, payload[0]))
-
 
 def main():
     ctx, cancel = runloom.context.WithCancel(runloom.context.Background())
@@ -42,7 +36,6 @@ def main():
     print("main: cancelling")
     cancel()                              # closes ctx.done -> wakes both workers
     runloom.sleep(0.02)                      # let them observe the cancellation
-
 
 if __name__ == "__main__":
     runloom.run(main)

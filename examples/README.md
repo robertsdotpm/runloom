@@ -4,14 +4,12 @@ Small, self-contained programs — each one demonstrates a single aspect of
 runloom. They run on a normal (GIL) build except where noted; `mn_parallel.py`
 needs free-threaded 3.13t for the parallelism payoff.
 
-Run any of them from the repo root:
+Install runloom first — `pip install runloom`, or `pip install -e .` from a
+clone — then run any example:
 
 ```bash
 python3 examples/hello_goroutines.py
 ```
-
-(Each script puts `../src` on `sys.path`, so it works without
-`pip install -e .` and from any working directory.)
 
 For raw performance numbers and the measurement harness, see [`../bench/`](../bench/).
 

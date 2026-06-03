@@ -14,13 +14,8 @@ that's the proof the scheduler wasn't wedged.
 Run:
     python3 examples/offload_blocking.py
 """
-import os
-import sys
-
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 
 import runloom
-
 
 def crunch(rounds):
     # A tight, yield-free loop — exactly what would otherwise stall a hub.
@@ -29,13 +24,11 @@ def crunch(rounds):
         total += i * i
     return total
 
-
 def heavy_worker(results):
     # Without runloom.blocking this loop would block every other goroutine
     # sharing this hub for its whole duration.
     result = runloom.blocking(crunch, 8_000_000)
     results.send(result)
-
 
 def heartbeat(stop):
     n = 0
@@ -43,7 +36,6 @@ def heartbeat(stop):
         print("heartbeat", n)
         n += 1
         runloom.sleep(0.01)
-
 
 def main():
     results = runloom.Chan(1)
@@ -55,7 +47,6 @@ def main():
     result = results.recv()[0]
     stop[0] = True
     print("crunch result:", result)
-
 
 if __name__ == "__main__":
     runloom.run(main)

@@ -8,7 +8,7 @@ every core in one process. Hand-rolled asm context switch + C work-stealing
 scheduler + netpoll, built for **free-threaded Python 3.13t** (GIL off).
 
 ```python
-import socket, sys; sys.path.insert(0, "src")
+import socket
 import runloom
 runloom.monkey.patch()
 

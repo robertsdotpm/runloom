@@ -13,25 +13,19 @@ On a normal (GIL) build it still runs correctly — just single-core, so
 the timings won't improve with more hubs.
 """
 import hashlib
-import os
 import sys
 import time
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
-
 import runloom
-
 
 NUM_TASKS = 64
 ROUNDS = 4000
-
 
 def work():
     data = b"x" * 1024
     for _ in range(ROUNDS):
         data = hashlib.sha256(data).digest()
     return data
-
 
 def run_with_hubs(n_hubs):
     runloom.mn_init(n_hubs)
@@ -42,7 +36,6 @@ def run_with_hubs(n_hubs):
     elapsed = time.perf_counter() - start
     runloom.mn_fini()
     return elapsed
-
 
 def main():
     gil_on = getattr(sys, "_is_gil_enabled", lambda: True)()
@@ -57,7 +50,6 @@ def main():
             baseline = elapsed
         print("{0:2d} hubs: {1:6.3f}s   speedup x{2:.2f}".format(
             hubs, elapsed, baseline / elapsed))
-
 
 if __name__ == "__main__":
     main()

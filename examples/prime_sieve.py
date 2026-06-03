@@ -9,28 +9,21 @@ stress test of cheap spawning + channel hand-off.
 Run:
     python3 examples/prime_sieve.py
 """
-import os
-import sys
-
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 
 import runloom
 
 LIMIT = 60
-
 
 def generate(out):
     for i in range(2, LIMIT + 1):
         out.send(i)
     out.close()
 
-
 def filter_multiples(prime, inp, out):
     for n in inp:
         if n % prime != 0:
             out.send(n)            # only non-multiples continue downstream
     out.close()
-
 
 def main():
     ch = runloom.Chan()
@@ -48,7 +41,6 @@ def main():
 
     print("primes up to {0}:".format(LIMIT))
     print(" ".join(str(p) for p in primes))
-
 
 if __name__ == "__main__":
     runloom.run(main)

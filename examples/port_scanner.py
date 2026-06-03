@@ -13,16 +13,11 @@ mix of those (open) and unused (refused) ports on localhost.
 Run:
     python3 examples/port_scanner.py
 """
-import os
 import socket
-import sys
-
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 
 import runloom
 
 runloom.monkey.patch()
-
 
 def probe(host, port, results):
     s = socket.socket()
@@ -33,7 +28,6 @@ def probe(host, port, results):
         results.send((port, False))
     finally:
         s.close()
-
 
 def main():
     host = "127.0.0.1"
@@ -65,7 +59,6 @@ def main():
         ln.close()
 
     print("scanned {0} ports; open: {1}".format(len(candidates), sorted(found)))
-
 
 if __name__ == "__main__":
     runloom.run(main)

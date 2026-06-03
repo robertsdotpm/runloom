@@ -8,13 +8,8 @@ is all the bookkeeping you need.
 Run:
     python3 examples/waitgroup.py
 """
-import os
-import sys
-
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 
 import runloom
-
 
 class WaitGroup(object):
     """Minimal sync.WaitGroup built on a channel."""
@@ -33,14 +28,12 @@ class WaitGroup(object):
         for _ in range(self.total):
             self.pending.recv()
 
-
 def task(wg, tid):
     try:
         runloom.sleep(0.01 * (tid + 1))
         print("task {0} finished".format(tid))
     finally:
         wg.done()                         # always report, even on error
-
 
 def main():
     wg = WaitGroup()
@@ -50,7 +43,6 @@ def main():
         runloom.go(task, wg, tid)
     wg.wait()
     print("all {0} tasks done".format(num_tasks))
-
 
 if __name__ == "__main__":
     runloom.run(main)

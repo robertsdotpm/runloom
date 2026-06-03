@@ -11,16 +11,11 @@ as three goroutines and runs the traffic through end to end.
 Run:
     python3 examples/tcp_proxy.py
 """
-import os
 import socket
-import sys
-
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 
 import runloom
 
 runloom.monkey.patch()
-
 
 def pump(src, dst):
     """Copy src -> dst until src reaches EOF, then half-close dst."""
@@ -38,7 +33,6 @@ def pump(src, dst):
         except OSError:
             pass
 
-
 def handle(client, upstream_addr):
     upstream = socket.socket()
     upstream.connect(upstream_addr)
@@ -47,7 +41,6 @@ def handle(client, upstream_addr):
     pump(upstream, client)
     client.close()
     upstream.close()
-
 
 def proxy(ready, upstream_addr):
     s = socket.socket()
@@ -58,7 +51,6 @@ def proxy(ready, upstream_addr):
     conn, _ = s.accept()                   # serve a single connection for the demo
     s.close()
     handle(conn, upstream_addr)
-
 
 def echo_upstream(ready):
     s = socket.socket()
@@ -75,7 +67,6 @@ def echo_upstream(ready):
         conn.sendall(data)
     conn.close()
 
-
 def client(proxy_addr):
     s = socket.socket()
     s.connect(proxy_addr)
@@ -84,7 +75,6 @@ def client(proxy_addr):
         print("client got:", s.recv(4096).decode().strip())
     s.shutdown(socket.SHUT_WR)             # EOF tears the whole chain down
     s.close()
-
 
 def main():
     up_ready = runloom.Chan(1)
@@ -97,7 +87,6 @@ def main():
     proxy_addr = proxy_ready.recv()[0]
 
     runloom.go(client, proxy_addr)
-
 
 if __name__ == "__main__":
     runloom.run(main)

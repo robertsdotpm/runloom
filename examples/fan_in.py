@@ -7,21 +7,15 @@ you — no locks, no shared list.
 Run:
     python3 examples/fan_in.py
 """
-import os
-import sys
-
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 
 import runloom
 
 NUM_PRODUCERS = 4
 ITEMS_EACH = 5
 
-
 def producer(pid, out):
     for i in range(ITEMS_EACH):
         out.send((pid, i))
-
 
 def main():
     merged = runloom.Chan(16)
@@ -31,7 +25,6 @@ def main():
     for _ in range(NUM_PRODUCERS * ITEMS_EACH):
         pid, item = merged.recv()[0]
         print("from producer {0}: item {1}".format(pid, item))
-
 
 if __name__ == "__main__":
     runloom.run(main)

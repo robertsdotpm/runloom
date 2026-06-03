@@ -9,13 +9,8 @@ when no case is immediately ready (Go's `select { ... default: }`).
 Run:
     python3 examples/select_demo.py
 """
-import os
-import sys
-
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 
 import runloom
-
 
 def main():
     a = runloom.Chan(1)
@@ -43,7 +38,6 @@ def main():
     empty = runloom.Chan(1)
     idx, _ = runloom.select([("recv", empty)], default=True)
     print("default fired" if idx == -1 else "got a value")
-
 
 if __name__ == "__main__":
     runloom.run(main)
