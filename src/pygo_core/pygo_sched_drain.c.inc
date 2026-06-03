@@ -169,6 +169,16 @@ Py_ssize_t pygo_sched_drain(pygo_sched_t *s)
              * is tripped, and a no-op off the main thread (correct: signals run
              * only there).  This idle path is not the hot path. */
             pygo_pystate_load(&sched_snap);
+            /* load() consumed sched_snap (valid=0).  Re-snap immediately to
+             * restore the loop invariant the completion path (the load+snap at
+             * the bottom) and the drain-exit load both rely on: sched_snap must
+             * be a VALID scheduler-tstate baseline at the top of every
+             * iteration.  Without this, a g that completes after an idle block
+             * hits a no-op load at completion, so tp_dealloc/cal_record runs on
+             * the just-freed g datastack chunk -> use-after-free (silent pooled-
+             * memory corruption on glibc; a hard access violation on Windows).
+             * Mirrors the load->snap pairing the completion path already uses. */
+            pygo_pystate_snap(&sched_snap);
             /* Re-queue any sleeper whose deadline elapsed while we blocked: the
              * top-of-loop sweep won't run until the NEXT iteration, but the grab
              * below runs NOW, so without this an expired sleeper leaves the ready
