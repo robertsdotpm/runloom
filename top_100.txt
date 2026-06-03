@@ -189,4 +189,11 @@ BEYOND 100 (cont.): descriptors, ASGI, state machine, functional (5)
 116. transitions                - AsyncMachine async state transitions a->b->c
 117. expression                 - functional seq map/filter pipeline
 
-TOTAL DISTINCT PROJECTS PASSING: 117
+
+------------------------------------------------------------
+BEYOND 100 (cont.): GitHub client, DI container (2)
+------------------------------------------------------------
+118. githubkit                  - async GitHub API request over mocked httpx
+119. aioinject                  - Singleton dependency resolve in async context
+
+TOTAL DISTINCT PROJECTS PASSING: 119
