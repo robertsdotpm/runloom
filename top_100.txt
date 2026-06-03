@@ -1,7 +1,7 @@
 runloom - validated asyncio projects
 ========================================
 
-138 name-brand Python asyncio projects whose own test suites (or
+144 name-brand Python asyncio projects whose own test suites (or
 equivalent end-to-end exercises) run GREEN under runloom's pure-Python
 M:N runtime -- driven through runloom.aio / RunloomEventLoop on free-threaded
 CPython 3.13t (PYTHON_GIL=0). 'pass==stock' means the result matches
@@ -255,4 +255,15 @@ BEYOND 100 (cont.): aiohttp middleware (1)
 ------------------------------------------------------------
 138. aiohttp-middlewares        - timeout middleware passthrough on a real aiohttp server
 
-TOTAL DISTINCT PROJECTS PASSING: 138
+
+------------------------------------------------------------
+BEYOND 100 (cont.): locks, pools, channels, DB, resilience (6)
+------------------------------------------------------------
+139. aiorwlock                  - async reader/writer lock
+140. asyncio-pool               - AioPool.map over 10 items (bounded size)
+141. asyncio-throttle           - Throttler rate limiting
+142. aiochan                    - CSP channel put/async-iter x8 (go-style)
+143. aiotinydb                  - async TinyDB insert/read (file-backed)
+144. hyx                        - resilience retry decorator to success
+
+TOTAL DISTINCT PROJECTS PASSING: 144
