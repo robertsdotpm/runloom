@@ -118,18 +118,29 @@ def _patched_connect(self, address):
     if not _in_goroutine():
         return _orig_connect(self, address)
     _make_nonblocking(self)
+    # connect_ex returns the errno instead of raising, so a synchronous
+    # completion (loopback frequently connects at once) and the in-flight
+    # case share one path.
+    err = self.connect_ex(address)
+    if err == 0 or err == errno.EISCONN:
+        return
+    if err not in (errno.EINPROGRESS, errno.EWOULDBLOCK, errno.EALREADY):
+        raise OSError(err, os.strerror(err))
+    # In flight: wait for writability, then read the outcome via SO_ERROR.
+    # The POSIX idiom of re-calling connect() to learn the result does NOT
+    # work on Windows -- a refused connect re-reports WSAEALREADY/
+    # WSAEWOULDBLOCK forever instead of the actual error, so the old loop hung
+    # there.  SO_ERROR is the portable way both stacks agree on (it is exactly
+    # what asyncio's selector loop uses), and OSError(err, ...) maps to the
+    # right subclass -- ConnectionRefusedError etc. -- on Linux AND Windows
+    # (where errno.ECONNREFUSED is the WSA code).
     while True:
-        try:
-            return _orig_connect(self, address)
-        except (BlockingIOError, InterruptedError):
-            pygo_core.wait_fd(self.fileno(), WRITE)
-        except OSError as e:
-            if e.errno == errno.EISCONN:
-                return
-            if e.errno in (errno.EINPROGRESS, errno.EALREADY):
-                pygo_core.wait_fd(self.fileno(), WRITE)
-                continue
-            raise
+        pygo_core.wait_fd(self.fileno(), WRITE)
+        err = self.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
+        if err == 0:
+            return
+        if err not in (errno.EINPROGRESS, errno.EALREADY):
+            raise OSError(err, os.strerror(err))
 
 
 def _patched_recvfrom(self, bufsize, flags=0):
