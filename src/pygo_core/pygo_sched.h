@@ -310,6 +310,10 @@ struct pygo_g {
      * park_fd defaults to -1. */
     int park_fd;
     int park_events;
+    /* Set to 1 at spawn when this goroutine was admitted under an active
+     * max-goroutines limit, so its final decref knows to release the slot.
+     * Travels with the g so toggling the limit can't unbalance the counter. */
+    unsigned char limit_counted;
     /* Intrusive doubly-linked global registry of every live g STRUCT
      * (live + slab-cached).  Linked once when the struct is first OS-
      * allocated, unlinked only when it is returned to the OS.  A cached

@@ -154,6 +154,35 @@ goes through `sched_stop`, which is **excluded**, so a normal loop teardown
 with pending background tasks never trips the detector — only a genuine
 "everyone is blocked, nothing can make progress" quiescence does.
 
+## Bounding goroutines (backpressure)
+
+Goroutines are cheap, but `go()` is unbounded — a runaway spawn loop (a
+fan-out with no limit, an accept loop that spawns per connection under a
+flood) can still exhaust memory.  An optional admission gate caps the number
+of live goroutines:
+
+```python
+import pygo.inspect as gi
+gi.set_max_goroutines(100_000)   # 0 = unlimited (default); env PYGO_MAX_GOROUTINES
+```
+
+Over the cap, `pygo.go` / the spawn raises `RuntimeError`, so the caller can
+apply backpressure — retry after a yield, shed the request, or block the
+producer:
+
+```python
+while True:
+    try:
+        pygo.go(handle, conn)
+        break
+    except RuntimeError:
+        pygo.yield_()            # let some finish, then retry
+```
+
+`gi.live_goroutines()` reports the current count under the cap.  The gate has
+**zero hot-path cost** when no cap is set (the live counter is only touched
+while a limit is active).
+
 ## Cost
 
 The registry that powers all of this has **no hot-path cost**: a goroutine

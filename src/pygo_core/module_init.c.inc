@@ -221,6 +221,16 @@ static PyMethodDef module_methods[] = {
     {"count_deadlocked", m_count_deadlocked, METH_NOARGS,
      "count_deadlocked() -> int.  Goroutines currently parked on a "
      "channel/park (the set that deadlocks if the scheduler quiesces)."},
+    {"set_max_goroutines", m_set_max_goroutines, METH_O,
+     "set_max_goroutines(n): cap the number of live goroutines (0 = unlimited, "
+     "the default).  Over the cap, go()/spawn raises RuntimeError -- an "
+     "admission gate so an unbounded spawn loop can't OOM the process.  Zero "
+     "hot-path cost when unset.  Also via PYGO_MAX_GOROUTINES."},
+    {"get_max_goroutines", m_get_max_goroutines, METH_NOARGS,
+     "get_max_goroutines() -> int.  Current cap (0 = unlimited)."},
+    {"live_goroutines", m_live_goroutines, METH_NOARGS,
+     "live_goroutines() -> int.  Goroutines admitted under the cap and not yet "
+     "finished (0 when no cap is set)."},
     {"install_traceback_signal", m_install_traceback_signal, METH_VARARGS,
      "install_traceback_signal(signum=SIGQUIT) -> int.  Install a RAW C "
      "signal handler that writes the goroutine dump to stderr -- Go's "

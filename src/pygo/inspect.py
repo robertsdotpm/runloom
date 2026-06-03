@@ -114,6 +114,25 @@ def deadlock_mode():
     return inv.get(_core.get_deadlock_mode(), "warn")
 
 
+def set_max_goroutines(n):
+    """Cap the number of live goroutines (0 = unlimited, the default).  Over
+    the cap, pygo.go / spawn raises RuntimeError -- an admission gate so an
+    unbounded spawn loop can't OOM the process.  The caller applies
+    backpressure (retry / shed load) on the rejection.  Zero hot-path cost
+    when unset; also via env PYGO_MAX_GOROUTINES."""
+    _core.set_max_goroutines(int(n))
+
+
+def max_goroutines():
+    """The current live-goroutine cap (0 = unlimited)."""
+    return _core.get_max_goroutines()
+
+
+def live_goroutines():
+    """Goroutines admitted under the cap and not yet finished (0 if no cap)."""
+    return _core.live_goroutines()
+
+
 PARKED_STATES = ("io-wait", "chan-wait", "park", "sleep")
 
 

@@ -274,11 +274,24 @@ static int pygo_mn_go_core(PyObject *callable, pygo_c_entry_fn c_fn,
     n = __atomic_fetch_add(&pygo_mn_spawn_counter, 1, __ATOMIC_RELAXED);
     hub_idx = (int)(n % pygo_hub_count);
     h = &pygo_hubs[hub_idx];
-    g = pygo_g_slab_alloc();
-    if (g == NULL) {
-        if (callable != NULL) PyErr_NoMemory();
-        errno = ENOMEM;
-        return -1;
+    {   /* Backpressure: admit under the max-goroutines limit. */
+        int adm = pygo_goroutine_admit();
+        if (adm == 0) {
+            if (callable != NULL)
+                PyErr_Format(PyExc_RuntimeError,
+                             "pygo: goroutine limit (%ld) exceeded",
+                             pygo_get_max_goroutines());
+            errno = EAGAIN;
+            return -1;
+        }
+        g = pygo_g_slab_alloc();
+        if (g == NULL) {
+            if (adm == 2) pygo_goroutine_release();
+            if (callable != NULL) PyErr_NoMemory();
+            errno = ENOMEM;
+            return -1;
+        }
+        g->limit_counted = (unsigned char)(adm == 2);
     }
     if (callable != NULL) {
         Py_INCREF(callable);

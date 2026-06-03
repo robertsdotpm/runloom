@@ -145,6 +145,28 @@ static PyObject *m_count_deadlocked(PyObject *self, PyObject *unused)
     return PyLong_FromLong(pygo_count_deadlockable_goroutines(NULL));
 }
 
+static PyObject *m_set_max_goroutines(PyObject *self, PyObject *arg)
+{
+    long n;
+    (void)self;
+    n = PyLong_AsLong(arg);
+    if (n == -1 && PyErr_Occurred()) return NULL;
+    pygo_set_max_goroutines(n);
+    Py_RETURN_NONE;
+}
+
+static PyObject *m_get_max_goroutines(PyObject *self, PyObject *unused)
+{
+    (void)self; (void)unused;
+    return PyLong_FromLong(pygo_get_max_goroutines());
+}
+
+static PyObject *m_live_goroutines(PyObject *self, PyObject *unused)
+{
+    (void)self; (void)unused;
+    return PyLong_FromLong(pygo_live_goroutines());
+}
+
 /* ---- SIGQUIT-style goroutine dump (Go's GOTRACEBACK) ----
  *
  * A RAW C signal handler so the dump works even when the interpreter is

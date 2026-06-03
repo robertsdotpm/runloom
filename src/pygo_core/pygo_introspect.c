@@ -157,6 +157,11 @@ void pygo_introspect_init(void)
         else if (strcmp(env, "raise") == 0 || env[0] == '2') pygo_set_deadlock_mode(2);
         else                                                 pygo_set_deadlock_mode(1);
     }
+    env = getenv("PYGO_MAX_GOROUTINES");
+    if (env != NULL && env[0]) {
+        long n = atol(env);
+        if (n > 0) pygo_set_max_goroutines(n);
+    }
 }
 
 void pygo_introspect_fini(void)
@@ -245,6 +250,52 @@ long pygo_count_deadlockable_goroutines(const void *owner)
     }
     pygo_mutex_unlock(&pygo_greg_lock);
     return n;
+}
+
+/* ---- max-goroutines admission gate (backpressure) ----
+ * 0 = unlimited (default).  When set, the spawn paths call pygo_goroutine_admit
+ * before allocating; over the limit it returns 0 and the spawn raises.  The
+ * live counter is maintained ONLY while a limit is active (admit increments,
+ * the g's final decref releases via pygo_goroutine_release iff it was counted)
+ * -- so an unset limit costs nothing on the hot path. */
+static long pygo_max_g  = 0;
+static long pygo_live_g = 0;   /* admitted-but-not-yet-released goroutines */
+
+long pygo_get_max_goroutines(void)
+{
+    return __atomic_load_n(&pygo_max_g, __ATOMIC_RELAXED);
+}
+
+void pygo_set_max_goroutines(long n)
+{
+    if (n < 0) n = 0;
+    __atomic_store_n(&pygo_max_g, n, __ATOMIC_RELAXED);
+}
+
+long pygo_live_goroutines(void)
+{
+    return __atomic_load_n(&pygo_live_g, __ATOMIC_RELAXED);
+}
+
+/* Try to admit one goroutine.  Returns 0 = rejected (over the limit; caller
+ * raises), 1 = admitted but NOT counted (no limit active), 2 = admitted AND
+ * counted (caller sets g->limit_counted so the final decref releases it). */
+int pygo_goroutine_admit(void)
+{
+    long max = __atomic_load_n(&pygo_max_g, __ATOMIC_RELAXED);
+    long now;
+    if (max <= 0) return 1;
+    now = __atomic_add_fetch(&pygo_live_g, 1, __ATOMIC_ACQ_REL);
+    if (now > max) {
+        __atomic_sub_fetch(&pygo_live_g, 1, __ATOMIC_ACQ_REL);   /* back out */
+        return 0;
+    }
+    return 2;
+}
+
+void pygo_goroutine_release(void)
+{
+    __atomic_sub_fetch(&pygo_live_g, 1, __ATOMIC_ACQ_REL);
 }
 
 /* ---- deadlock-detection mode: 0=off, 1=warn (dump), 2=raise ---- */

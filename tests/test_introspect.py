@@ -347,6 +347,57 @@ class TestLeakWatchdog(unittest.TestCase):
         self.assertTrue(pygo_core.get_introspect_timestamps())
 
 
+class TestMaxGoroutines(unittest.TestCase):
+    def tearDown(self):
+        gi.set_max_goroutines(0)
+
+    def test_admission_gate_rejects_over_cap(self):
+        cap = {}
+
+        def main():
+            gi.set_max_goroutines(5)
+            spawned = rejected = 0
+            def parker():
+                pygo_core.park_self()       # occupies a slot
+            for _ in range(20):
+                try:
+                    pygo.go(parker)
+                    spawned += 1
+                except RuntimeError:
+                    rejected += 1
+            cap["spawned"] = spawned
+            cap["rejected"] = rejected
+            cap["live"] = gi.live_goroutines()
+            pygo_core.sched_reset()         # finish the parkers -> free slots
+
+        pygo.run(main)
+        self.assertEqual(cap["spawned"], 5)
+        self.assertEqual(cap["rejected"], 15)
+        self.assertEqual(cap["live"], 5)
+        self.assertEqual(gi.live_goroutines(), 0)   # counter balanced
+
+    def test_counter_no_drift_over_recycling(self):
+        # spawn many short-lived goroutines under a small cap; slots must
+        # recycle (all run) and the live counter must return to 0.
+        ran = {"n": 0}
+
+        def main():
+            gi.set_max_goroutines(8)
+            def quick():
+                ran["n"] += 1
+            for _ in range(500):
+                pygo.go(quick)
+                pygo.yield_()               # let some finish, freeing slots
+
+        pygo.run(main)
+        self.assertEqual(ran["n"], 500)
+        self.assertEqual(gi.live_goroutines(), 0)
+
+    def test_unlimited_by_default(self):
+        self.assertEqual(gi.max_goroutines(), 0)
+        self.assertEqual(gi.live_goroutines(), 0)
+
+
 class TestOutsideGoroutine(unittest.TestCase):
     def test_apis_safe_when_idle(self):
         # No scheduler running: must not crash.

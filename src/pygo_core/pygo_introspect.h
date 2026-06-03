@@ -89,6 +89,16 @@ long pygo_count_deadlockable_goroutines(const void *owner);
 int  pygo_deadlock_mode(void);
 void pygo_set_deadlock_mode(int mode);
 
+/* ---- max-goroutines admission gate (backpressure) ----
+ * 0 = unlimited (default; zero hot-path cost).  Also via PYGO_MAX_GOROUTINES. */
+long pygo_get_max_goroutines(void);
+void pygo_set_max_goroutines(long n);
+long pygo_live_goroutines(void);
+/* Spawn paths: admit before allocating (1=ok + mark the g limit_counted;
+ * 0=over the limit, raise), release at the g's final decref iff counted. */
+int  pygo_goroutine_admit(void);
+void pygo_goroutine_release(void);
+
 /* PYGO_GST_* -> short stable name ("running", "io-wait", ...).  Never
  * NULL (returns "?" for an out-of-range value). */
 const char *pygo_g_state_name(unsigned int state);

@@ -393,6 +393,10 @@ void pygo_g_decref(pygo_g_t *g)
         Py_XDECREF(g->callable);
         Py_XDECREF(g->result);
         Py_XDECREF(g->error);
+        if (g->limit_counted) {           /* release the admission slot */
+            pygo_goroutine_release();
+            g->limit_counted = 0;
+        }
         pygo_g_slab_free(g);
     }
 }
@@ -404,10 +408,23 @@ static PyObject *spawn_common(pygo_sched_t *s, PyObject *callable,
     pygo_g_t *g;
     if (__builtin_expect(!pygo_pct.inited, 0))
         pygo_pct_init();   /* read PYGO_PCT_SEED once, before any ready-pop */
-    g = pygo_g_slab_alloc();
-    if (g == NULL) {
-        PyErr_NoMemory();
-        return NULL;
+    /* Backpressure: admit under the max-goroutines limit before allocating.
+     * adm: 0 rejected, 1 admitted (no limit), 2 admitted+counted. */
+    {
+        int adm = pygo_goroutine_admit();
+        if (adm == 0) {
+            PyErr_Format(PyExc_RuntimeError,
+                         "pygo: goroutine limit (%ld) exceeded",
+                         pygo_get_max_goroutines());
+            return NULL;
+        }
+        g = pygo_g_slab_alloc();
+        if (g == NULL) {
+            if (adm == 2) pygo_goroutine_release();
+            PyErr_NoMemory();
+            return NULL;
+        }
+        g->limit_counted = (unsigned char)(adm == 2);
     }
     Py_INCREF(callable);
     g->callable = callable;
