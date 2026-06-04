@@ -133,6 +133,32 @@ else
     echo "FAIL -- deleting a gilstate-bound tstate from the wrong thread should violate the contract"; fail=$((fail+1))
 fi
 
+# ---- WHOLE-PROGRAM LIVENESS (RunloomComposite): the scheduler + every wake
+# source (channels / netpoll / timers / foreign) composed, checked for NoHang
+# (every goroutine eventually completes).  Real hangs live in the seams between
+# subsystems; the two negative controls are the two ways the shared route-to-home
+# + don't-idle-past-a-wake machinery breaks.
+printf '  [tlc] %-28s ' "RunloomComposite (correct)"
+if run_tlc compok -config RunloomComposite.cfg RunloomComposite.tla | grep -q "No error has been found"; then
+    echo "PASS -- NoHang holds: every g completes across the channel + external (fd/timer/foreign) seams"; pass=$((pass+1))
+else
+    echo "FAIL -- the composed scheduler should be hang-free"; fail=$((fail+1))
+fi
+
+printf '  [tlc] %-28s ' "RunloomComposite (Quiesce)"
+if run_tlc compq -deadlock -config RunloomComposite_quiesce.cfg RunloomComposite.tla | grep -q "Temporal properties were violated"; then
+    echo "PASS -- correctly DETECTS the census-idle wake-guard hang (a hub idles past a wake) -> NoHang violated"; pass=$((pass+1))
+else
+    echo "FAIL -- removing the wake-guard should hang"; fail=$((fail+1))
+fi
+
+printf '  [tlc] %-28s ' "RunloomComposite (Route)"
+if run_tlc compr -deadlock -config RunloomComposite_route.cfg RunloomComposite.tla | grep -q "Temporal properties were violated"; then
+    echo "PASS -- correctly DETECTS the wake-misrouting hang (external wake to the wrong hub) -> NoHang violated"; pass=$((pass+1))
+else
+    echo "FAIL -- misrouting an external wake should hang"; fail=$((fail+1))
+fi
+
 "$(command -v safe-rm || echo rm)" -rf "$META"
 echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
