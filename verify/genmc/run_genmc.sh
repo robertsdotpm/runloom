@@ -58,17 +58,22 @@ else
     fi
 fi
 
-# --- park_safe/wake_safe cross-thread handshake (runloom_sched.c) --------------
+# --- park_safe/wake_safe cross-thread handshake (runloom_sched*) ---------------
 # Drift-guard: the harness's correct default assumes the source has the two
 # StoreLoad seq_cst fences (added after GenMC found a lost wakeup in the
 # fence-free version).  If the source loses a fence, the harness no longer
 # mirrors it -- fail loudly so it gets re-synced rather than silently passing.
-SCHED_C="$HERE/../../src/runloom_c/runloom_sched.c"
+# The C-layout refactor split runloom_sched.c into runloom_sched_*.c.inc
+# modules (the park/wake fences now live in runloom_sched_parkwake.c.inc), so
+# count across the whole module set rather than one filename.
+SRCDIR="$HERE/../../src/runloom_c"
 printf '  [genmc] %-30s ' "park/wake SC-fence drift-guard"
-if [ -f "$SCHED_C" ] && [ "$(grep -c '__atomic_thread_fence(__ATOMIC_SEQ_CST)' "$SCHED_C")" -ge 2 ]; then
-    green "PASS"; echo " -- runloom_sched.c park/wake retains its StoreLoad fences"; pass=$((pass+1))
+nfence=$(grep -h '__atomic_thread_fence(__ATOMIC_SEQ_CST)' \
+            "$SRCDIR"/runloom_sched.c "$SRCDIR"/runloom_sched_*.c.inc 2>/dev/null | wc -l)
+if [ "$nfence" -ge 2 ]; then
+    green "PASS"; echo " -- runloom_sched* park/wake retains its StoreLoad fences"; pass=$((pass+1))
 else
-    red "FAIL"; echo " -- runloom_sched.c lost a seq_cst fence; re-sync sched_parkwake.c"; fail=$((fail+1))
+    red "FAIL"; echo " -- runloom_sched* lost a seq_cst fence; re-sync sched_parkwake.c"; fail=$((fail+1))
 fi
 
 printf '  [genmc] %-30s ' "sched_parkwake.c"
@@ -96,15 +101,17 @@ done
 # CAS on op->wait.  If io_uring.c drops the handshake or weakens those orders,
 # fail loudly so iouring_waitcommit.c gets re-synced rather than silently
 # passing against a stale model.
-IOU_C="$HERE/../../src/runloom_c/io_uring.c"
+# The refactor split io_uring.c into io_uring*.c.inc modules (the op->wait
+# markers + exchanges now live in io_uring_l_{ring,buf,...}.c.inc), so check
+# the whole io_uring module set rather than one filename.
+IOU_SRCS=( "$HERE"/../../src/runloom_c/io_uring.c "$HERE"/../../src/runloom_c/io_uring*.c.inc )
 printf '  [genmc] %-30s ' "iouring wait-commit drift-guard"
-if [ -f "$IOU_C" ] \
-   && grep -q "RUNLOOM_IOURING_WAIT_PARKED" "$IOU_C" \
-   && grep -q "RUNLOOM_IOURING_WAIT_DONE" "$IOU_C" \
-   && [ "$(grep -c '__atomic_exchange_n(&op->wait' "$IOU_C")" -ge 2 ]; then
-    green "PASS"; echo " -- io_uring.c retains the op->wait commit handshake (drain + ring)"; pass=$((pass+1))
+if grep -qh "RUNLOOM_IOURING_WAIT_PARKED" "${IOU_SRCS[@]}" 2>/dev/null \
+   && grep -qh "RUNLOOM_IOURING_WAIT_DONE" "${IOU_SRCS[@]}" 2>/dev/null \
+   && [ "$(grep -h '__atomic_exchange_n(&op->wait' "${IOU_SRCS[@]}" 2>/dev/null | wc -l)" -ge 2 ]; then
+    green "PASS"; echo " -- io_uring* retains the op->wait commit handshake (drain + ring)"; pass=$((pass+1))
 else
-    red "FAIL"; echo " -- io_uring.c changed the op->wait handshake; re-sync iouring_waitcommit.c"; fail=$((fail+1))
+    red "FAIL"; echo " -- io_uring* changed the op->wait handshake; re-sync iouring_waitcommit.c"; fail=$((fail+1))
 fi
 
 printf '  [genmc] %-30s ' "iouring_waitcommit.c"

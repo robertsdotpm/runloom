@@ -59,8 +59,13 @@ hr() { printf '\n========== %s ==========\n' "$1"; }
 for ph in "${phases[@]}"; do
   case "$ph" in
     tests)
-      hr "Python test suite"
-      "$PYTHON" -m pytest tests/ -q -p no:cacheprovider || rc=1
+      hr "Python test suite (per-file subprocesses)"
+      # Use run_isolated.py (one file per subprocess), NOT in-process
+      # `pytest tests/`: the latter accumulates cross-file state leaks -- a
+      # prior file can leave an M:N runtime / threads wedged on a lock -- and
+      # deadlocks the whole run (observed: an 11-hour hang on this phase).
+      # run_isolated starts each file clean, so a real hang is one file's.
+      PYTHON_GIL=0 PYTHONPATH=src "$PYTHON" tests/run_isolated.py || rc=1
       ;;
     mn)
       hr "M:N scheduler fuzzer (stable gate)"
