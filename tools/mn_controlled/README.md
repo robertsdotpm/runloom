@@ -122,6 +122,59 @@ the baton. The TLA+ model's `Preempt=FALSE` control reproduces exactly this
 unset (the controlled path is gated behind `runloom_mn_ctrl.enabled`); the only
 default-path change is one predictable-false branch.
 
+## PCT — bug-depth-guaranteed search (`RUNLOOM_MN_PCT=<depth d>`)
+
+Deterministic replay pins one schedule per seed; **which** schedules a seed sweep
+explores was, until now, the baton's *uniform-random* grant order
+(`runloom_mn_ctrl_choose`'s else branch) — fine for shallow bugs, but with **no
+guarantee** of reaching a deep one. `RUNLOOM_MN_PCT=d` upgrades the grant order to
+the **PCT algorithm** (Probabilistic Concurrency Testing, Burckhardt et al.,
+ASPLOS 2010), which adds a *provable* probabilistic guarantee parameterized by
+**bug depth** — the number of ordering constraints a bug needs:
+
+- every hub gets a distinct random **base priority**; the controller always grants
+  the baton to the **highest-priority waiting hub** (the barrier's complete
+  requester set is PCT's "enabled" set — so PCT requires the barrier, default on);
+- **d-1 seeded priority change points** are planted at grant-step indices in
+  `[1, k]` (`RUNLOOM_MN_PCT_STEPS`, default 4096); reaching one **demotes** the hub
+  that ran that step below all base priorities. The d-1 demotions are exactly the
+  d-1 ordering inversions a depth-d bug needs.
+
+Any bug of depth ≤ d is then hit with probability **≥ 1/(n·k^(d-1))** per seed —
+a lower bound the uniform draw has no analogue of. Sweep seeds; the bound says how
+many you need. A separate PRNG stream drives PCT, so a run with `RUNLOOM_MN_PCT`
+**unset is bit-identical** to before the feature; the pick stays a pure function of
+(seed, schedule), so **replay determinism is preserved** (`repro_probe.py` is 8/8
+stable with PCT on as well as off).
+
+*Why it's safe.* PCT only changes **which** waiting hub the (already TLA-verified)
+grant protocol hands the baton to — and the TLA `Grant(h)` action
+(`verify/tla/PygoMNControl.tla`) already leaves that a **free nondeterministic
+choice**. `MutualExclusion`, `DeterministicGrant`, `AllRun` and `DeterministicTick`
+constrain *when* a grant fires (barrier / quiescence) and that exactly one hub
+runs — never *which* one — so replacing the selection function refines a choice
+the model already abstracts over. No re-verification needed; the properties hold
+by construction.
+
+*Validated* (`pct_find.py`) on a deliberately **narrow** order-dependent bug —
+goroutine B must observe a shared counter at a *late* value, an interleaving
+uniform scheduling is biased away from (it runs B's read early). With 80 seeds,
+n=2, k=14: **depth-1** (0 change points) finds it **0/80** (a fixed priority order
+cannot sandwich B → the bug is genuinely order-dependent); **uniform** finds it
+**0/80** (random misses the narrow window); **PCT depth-2** finds it **3/80**, an
+empirical rate (0.037) landing on the bound 1/(n·k)=0.036 — and a finding seed
+**replays the bug 12/12**, a permanent deterministic regression repro.
+
+**Scope (honest).** PCT here schedules over **hubs** (the OS threads), so it
+targets the **order-dependent** bug class — lost wakeups, cross-hub wake ordering,
+deadlocks, ordering-sensitive logic — which is exactly the class the baton
+serializes and can replay. It is **not** the tool for **true-simultaneity** memory
+races (e.g. the free-threaded gc-churn UAFs): the baton keeps **one** Python
+thread-state attached at a time, removing the very parallelism those need. Those
+stay the province of TSan + the flight recorder (`RUNLOOM_DEBUG=ring`) + delay
+injection (`RUNLOOM_DELAY`) under genuinely parallel execution. PCT and those
+tools are complementary, not substitutes.
+
 ## Demo / probe
 
 ```sh
@@ -134,8 +187,13 @@ PYTHON_GIL=0 …/python3 tools/mn_controlled/repro_select.py 10 8   # select + s
 PYTHON_GIL=0 …/python3 tools/mn_controlled/repro_timer.py 10 8    # sched_sleep timers
 RUNLOOM_MN_BARRIER=0 … repro_probe.py 12 8      # A/B: reverts to nondeterministic
 
+# PCT bug-depth-guaranteed search (depth-1 misses an order-dependent bug,
+# PCT depth-2 finds + replays it; empirical hit rate matches the 1/(n*k) bound):
+PYTHON_GIL=0 …/python3 tools/mn_controlled/pct_find.py 80
+
 # tunables:
 RUNLOOM_MN_PREEMPT_FRAMES=1024 …   # frame budget before a CPU-bound g yields the baton
+RUNLOOM_MN_PCT=3 RUNLOOM_MN_PCT_STEPS=64 …   # PCT depth d + change-point step bound k
 RUNLOOM_MN_SEED=1 RUNLOOM_MN_TRACE=/tmp/g.txt …   # grant trace: one hub-id per baton grant
 ```
 `mn_stress` (select + coordinator close) also runs clean under controlled mode —

@@ -100,6 +100,30 @@ typedef struct {
     size_t       tracecap;
     size_t       tracelen;
     char         tracepath[256];
+    /* PCT (RUNLOOM_MN_PCT=<depth d>) -- the seeded grant order is upgraded from
+     * uniform-random (runloom_mn_ctrl_choose's else branch) to the PCT algorithm
+     * of Burckhardt et al. (ASPLOS 2010): every hub gets a distinct random
+     * base priority, the controller always grants to the highest-priority WANTING
+     * hub, and d-1 seeded "priority change points" (placed at grant-step indices
+     * in [1, pct_k]) demote the hub that ran that step below all base priorities.
+     * d-1 demotions force the d-1 ordering inversions a depth-d bug needs, so any
+     * such bug is hit with probability >= 1/(n * pct_k^(d-1)) per seed -- a
+     * provable bound the uniform draw has no analogue of.  The pick stays a pure
+     * function of (seed, schedule), so determinism / DeterministicGrant are
+     * untouched: PCT only refines WHICH waiting hub the already-verified grant
+     * protocol hands the baton to (the TLA Grant action leaves that a free
+     * choice).  Requires the barrier (the complete requester set = PCT's enabled
+     * set); off unless RUNLOOM_MN_PCT is set, then the baton's own RNG is unused
+     * for choose.  A separate pct_rng stream keeps non-PCT seeds bit-identical. */
+    int          pct_enabled;
+    int          pct_depth;       /* d */
+    uint64_t     pct_k;           /* step bound change points are drawn from */
+    uint64_t     pct_rng;         /* distinct stream: priorities + change points */
+    uint64_t     pct_step;        /* completed segments (= PCT steps) so far */
+    int         *pct_prio;        /* per-hub current priority (higher = first) */
+    int          pct_ncp;         /* number of change points (= d-1) */
+    uint64_t    *pct_change_at;   /* sorted step indices that trigger a demotion */
+    int         *pct_change_prio; /* demotion target priority for each (d-1..1) */
 } runloom_mn_ctrl_t;
 static runloom_mn_ctrl_t runloom_mn_ctrl;
 
@@ -111,10 +135,122 @@ static uint64_t runloom_mn_ctrl_rand(void)      /* xorshift64 */
     return x;
 }
 
-/* lock held: pick a requesting hub by seed, or -1 if none requesting */
+/* PCT draws from a SEPARATE xorshift stream so enabling PCT never perturbs the
+ * baton's own seeded grant RNG -- a run with RUNLOOM_MN_PCT unset stays
+ * bit-identical to before this feature existed. */
+static uint64_t runloom_mn_pct_rand(void)
+{
+    uint64_t x = runloom_mn_ctrl.pct_rng;
+    x ^= x << 13; x ^= x >> 7; x ^= x << 17;
+    runloom_mn_ctrl.pct_rng = x;
+    return x;
+}
+
+/* Set up the PCT priority schedule from the baton seed.  Called by
+ * runloom_mn_ctrl_init AFTER the barrier flag is decided (PCT needs the barrier
+ * -- the complete requester set is its "enabled" set -- so it stays off when the
+ * barrier is off).  No-op unless RUNLOOM_MN_PCT=<depth d> is set.  On OOM PCT
+ * stays off and the baton's uniform-random choose is used (still a valid run). */
+static void runloom_mn_pct_init(uint64_t seed, int n)
+{
+    const char *pct = getenv("RUNLOOM_MN_PCT");
+    const char *kss = getenv("RUNLOOM_MN_PCT_STEPS");
+    int d, i, ncp;
+    runloom_mn_ctrl.pct_enabled = 0;
+    runloom_mn_ctrl.pct_prio = NULL;
+    runloom_mn_ctrl.pct_change_at = NULL;
+    runloom_mn_ctrl.pct_change_prio = NULL;
+    runloom_mn_ctrl.pct_ncp = 0;
+    runloom_mn_ctrl.pct_step = 0;
+    if (pct == NULL || pct[0] == '\0' || !runloom_mn_ctrl.barrier || n <= 0)
+        return;
+    d = atoi(pct);
+    if (d < 1) d = 1;
+    ncp = d - 1;
+    runloom_mn_ctrl.pct_depth = d;
+    runloom_mn_ctrl.pct_k = (kss != NULL && kss[0] != '\0')
+                          ? strtoull(kss, NULL, 10) : 4096;
+    if (runloom_mn_ctrl.pct_k < 1) runloom_mn_ctrl.pct_k = 1;
+    /* need >= ncp distinct step indices in [1, k] for the change points */
+    if (runloom_mn_ctrl.pct_k < (uint64_t)ncp) runloom_mn_ctrl.pct_k = (uint64_t)ncp;
+    /* distinct PRNG stream, derived from the baton seed by a fixed mix */
+    runloom_mn_ctrl.pct_rng = seed ^ 0xD1B54A32D192ED03ULL;
+    if (runloom_mn_ctrl.pct_rng == 0) runloom_mn_ctrl.pct_rng = 0x2545F4914F6CDD1DULL;
+
+    runloom_mn_ctrl.pct_prio = (int *)PyMem_Calloc((size_t)n, sizeof(int));
+    if (ncp > 0) {
+        runloom_mn_ctrl.pct_change_at =
+            (uint64_t *)PyMem_Calloc((size_t)ncp, sizeof(uint64_t));
+        runloom_mn_ctrl.pct_change_prio =
+            (int *)PyMem_Calloc((size_t)ncp, sizeof(int));
+    }
+    if (runloom_mn_ctrl.pct_prio == NULL ||
+        (ncp > 0 && (runloom_mn_ctrl.pct_change_at == NULL ||
+                     runloom_mn_ctrl.pct_change_prio == NULL))) {
+        PyMem_Free(runloom_mn_ctrl.pct_prio);        runloom_mn_ctrl.pct_prio = NULL;
+        PyMem_Free(runloom_mn_ctrl.pct_change_at);   runloom_mn_ctrl.pct_change_at = NULL;
+        PyMem_Free(runloom_mn_ctrl.pct_change_prio); runloom_mn_ctrl.pct_change_prio = NULL;
+        return;                                      /* OOM -> PCT off, baton still runs */
+    }
+
+    /* Base priorities: a seeded Fisher-Yates permutation of {d, d+1, ..., d+n-1}
+     * -- all >= d, hence above every change priority (which live in [1, d-1]).
+     * Distinct, so highest-priority-wanter is a well-defined, tie-free pick. */
+    for (i = 0; i < n; i++) runloom_mn_ctrl.pct_prio[i] = d + i;
+    for (i = n - 1; i > 0; i--) {
+        int j = (int)(runloom_mn_pct_rand() % (uint64_t)(i + 1));
+        int t = runloom_mn_ctrl.pct_prio[i];
+        runloom_mn_ctrl.pct_prio[i] = runloom_mn_ctrl.pct_prio[j];
+        runloom_mn_ctrl.pct_prio[j] = t;
+    }
+
+    /* d-1 DISTINCT change points in [1, k]; sort ascending so the i-th one
+     * reached gets change-priority (d-1-i) -> the descending sequence d-1, d-2,
+     * ..., 1.  All < d (demoted hub sinks below every base hub) and mutually
+     * distinct (demoted hubs stay strictly ordered) => choose() never ties. */
+    for (i = 0; i < ncp; i++) {
+        uint64_t cp;
+        int dup, t;
+        do {
+            cp = 1 + (runloom_mn_pct_rand() % runloom_mn_ctrl.pct_k);
+            dup = 0;
+            for (t = 0; t < i; t++)
+                if (runloom_mn_ctrl.pct_change_at[t] == cp) { dup = 1; break; }
+        } while (dup);
+        runloom_mn_ctrl.pct_change_at[i] = cp;
+    }
+    for (i = 1; i < ncp; i++) {                       /* insertion sort (ncp tiny) */
+        uint64_t key = runloom_mn_ctrl.pct_change_at[i];
+        int j = i - 1;
+        while (j >= 0 && runloom_mn_ctrl.pct_change_at[j] > key) {
+            runloom_mn_ctrl.pct_change_at[j + 1] = runloom_mn_ctrl.pct_change_at[j];
+            j--;
+        }
+        runloom_mn_ctrl.pct_change_at[j + 1] = key;
+    }
+    for (i = 0; i < ncp; i++)
+        runloom_mn_ctrl.pct_change_prio[i] = (d - 1) - i;   /* d-1, d-2, ..., 1 */
+    runloom_mn_ctrl.pct_ncp = ncp;
+    runloom_mn_ctrl.pct_enabled = 1;
+}
+
+/* lock held: pick a requesting hub, or -1 if none requesting.  PCT mode picks the
+ * highest-priority wanter (the priority schedule is the seed); otherwise a single
+ * seeded uniform draw over the wanters (the original behavior). */
 static int runloom_mn_ctrl_choose(void)
 {
     int cnt = 0, i, k;
+    if (runloom_mn_ctrl.pct_enabled) {
+        int best = -1, bestp = 0;
+        for (i = 0; i < runloom_mn_ctrl.n; i++) {
+            if (!runloom_mn_ctrl.want[i]) continue;
+            if (best < 0 || runloom_mn_ctrl.pct_prio[i] > bestp) {
+                bestp = runloom_mn_ctrl.pct_prio[i];
+                best = i;
+            }
+        }
+        return best;                /* -1 if none wanting; priorities are distinct */
+    }
     for (i = 0; i < runloom_mn_ctrl.n; i++) cnt += runloom_mn_ctrl.want[i];
     if (cnt == 0) return -1;
     k = (int)(runloom_mn_ctrl_rand() % (uint64_t)cnt);
@@ -215,6 +351,10 @@ static void runloom_mn_ctrl_init(int n)
     }
     runloom_mn_ctrl.rng = strtoull(seed, NULL, 10);
     if (runloom_mn_ctrl.rng == 0) runloom_mn_ctrl.rng = 0x9E3779B97F4A7C15ULL;
+    /* PCT priority schedule (RUNLOOM_MN_PCT=<depth>): refines choose() from the
+     * uniform draw above to a bug-depth-guaranteed order.  Needs the barrier
+     * (decided just above), so init it here. */
+    runloom_mn_pct_init(strtoull(seed, NULL, 10), n);
     if (trc != NULL && trc[0] != '\0') {             /* opt-in grant trace */
         runloom_mn_ctrl.tracecap = 1u << 20;            /* 1 MiB of grants */
         runloom_mn_ctrl.tracebuf = (char *)PyMem_Malloc(runloom_mn_ctrl.tracecap);
@@ -246,6 +386,13 @@ static void runloom_mn_ctrl_fini(void)
     runloom_mn_ctrl.want = NULL;
     PyMem_Free(runloom_mn_ctrl.seen);
     runloom_mn_ctrl.seen = NULL;
+    PyMem_Free(runloom_mn_ctrl.pct_prio);
+    runloom_mn_ctrl.pct_prio = NULL;
+    PyMem_Free(runloom_mn_ctrl.pct_change_at);
+    runloom_mn_ctrl.pct_change_at = NULL;
+    PyMem_Free(runloom_mn_ctrl.pct_change_prio);
+    runloom_mn_ctrl.pct_change_prio = NULL;
+    runloom_mn_ctrl.pct_enabled = 0;
     if (runloom_mn_ctrl.tracebuf != NULL) {
         if (runloom_mn_ctrl.tracepath[0] != '\0') {
             FILE *f = fopen(runloom_mn_ctrl.tracepath, "w");
@@ -289,6 +436,16 @@ static void runloom_mn_ctrl_release(int hub)
     if (!runloom_mn_ctrl.enabled || hub < 0 || hub >= runloom_mn_ctrl.n) return;
     runloom_mutex_lock(&runloom_mn_ctrl.lock);
     if (runloom_mn_ctrl.current == hub) runloom_mn_ctrl.current = -1;
+    /* PCT: this hub just finished one execution segment = one PCT step.  If the
+     * step index is a change point, demote this hub below all base priorities so
+     * a different hub wins the next choose() -- the seeded ordering inversion. */
+    if (runloom_mn_ctrl.pct_enabled) {
+        int j;
+        runloom_mn_ctrl.pct_step++;
+        for (j = 0; j < runloom_mn_ctrl.pct_ncp; j++)
+            if (runloom_mn_ctrl.pct_change_at[j] == runloom_mn_ctrl.pct_step)
+                runloom_mn_ctrl.pct_prio[hub] = runloom_mn_ctrl.pct_change_prio[j];
+    }
     /* Open the next census round.  Hubs still blocked in acquire (want[]) are
      * carried forward as already-checked-in; the hub that just ran, and any
      * idle hub, must re-check-in for the new round before the next grant -- the
