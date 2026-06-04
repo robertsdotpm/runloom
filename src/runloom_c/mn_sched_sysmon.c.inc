@@ -60,10 +60,11 @@ static RUNLOOM_THREAD_RET runloom_sysmon_main(void *arg)
              * resume (seq changed) or finished resuming (start cleared). */
             if (w_seq[i] != 0 && (seq != w_seq[i] || start == 0)) {
                 long pend = __atomic_load_n(&h->pending, __ATOMIC_RELAXED);
-                fprintf(stderr,
-                    "[RUNLOOM_SYSMON] hub %d RECOVERED after ~%.1f ms "
-                    "(pending=%ld)\n",
-                    i, (double)(now - w_start[i]) / 1e6, pend);
+                if (!runloom_sysmon_quiet)
+                    fprintf(stderr,
+                        "[RUNLOOM_SYSMON] hub %d RECOVERED after ~%.1f ms "
+                        "(pending=%ld)\n",
+                        i, (double)(now - w_start[i]) / 1e6, pend);
                 w_seq[i] = 0;
             }
             /* Start of a wedge episode: this resume has overrun the budget and
@@ -82,12 +83,13 @@ static RUNLOOM_THREAD_RET runloom_sysmon_main(void *arg)
                     tss == RUNLOOM_TS_ATTACHED  ? "ATTACHED (CPU/raw-syscall: needs preemption)" :
                     tss == RUNLOOM_TS_SUSPENDED ? "SUSPENDED (stop-the-world)" :
                                                "?";
-                fprintf(stderr,
-                    "[RUNLOOM_SYSMON] hub %d WEDGED %.1f ms in g=%p tstate=%s -- "
-                    "%ld g(s) stranded on this hub\n",
-                    i, (double)(now - start) / 1e6,
-                    (void *)__atomic_load_n((void **)&h->resume_g, __ATOMIC_RELAXED), cls,
-                    pend > 0 ? pend - 1 : 0);
+                if (!runloom_sysmon_quiet)
+                    fprintf(stderr,
+                        "[RUNLOOM_SYSMON] hub %d WEDGED %.1f ms in g=%p tstate=%s -- "
+                        "%ld g(s) stranded on this hub\n",
+                        i, (double)(now - start) / 1e6,
+                        (void *)__atomic_load_n((void **)&h->resume_g, __ATOMIC_RELAXED), cls,
+                        pend > 0 ? pend - 1 : 0);
                 w_seq[i]   = seq;
                 w_start[i] = start;
             }
@@ -174,8 +176,10 @@ static void runloom_sysmon_config(void)
 {
     const char *e = getenv("RUNLOOM_SYSMON");
     const char *ho = getenv("RUNLOOM_HANDOFF");
+    const char *q = getenv("RUNLOOM_SYSMON_QUIET");
     const char *ms;
     runloom_sysmon_enabled = (e != NULL && e[0] != '0') ? 1 : 0;
+    runloom_sysmon_quiet = (q != NULL && q[0] != '0') ? 1 : 0;
     /* The handoff rescue depends on the sysmon detector: its per-resume
      * instrumentation (resume_start_ns) is what spots the DETACHED wedge and
      * the watchdog is what dispatches it.  RUNLOOM_HANDOFF=1 therefore forces the

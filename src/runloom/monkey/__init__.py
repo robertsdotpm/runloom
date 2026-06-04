@@ -192,12 +192,18 @@ _orig_runloom_c_go = None
 _orig_runloom_c_mn_go = None
 
 
-def _patched_runloom_c_go(fn, **kwargs):
-    return _orig_runloom_c_go(_wrap_goroutine_callable(fn), **kwargs)
+def _patched_runloom_c_go(fn, stack_size=0, **kwargs):
+    # runloom.runtime.go() calls runloom_c.go(target, stack_size) with the
+    # stack size as a 2nd POSITIONAL arg, so this wrapper must accept and
+    # forward it.  A bare (fn, **kwargs) signature raised TypeError and broke
+    # every runloom.go() once monkey.patch() was applied (worst under M:N,
+    # where runtime.go always passes the grow-down stack size).
+    return _orig_runloom_c_go(_wrap_goroutine_callable(fn), stack_size, **kwargs)
 
 
-def _patched_runloom_c_mn_go(fn, **kwargs):
-    return _orig_runloom_c_mn_go(_wrap_goroutine_callable(fn), **kwargs)
+def _patched_runloom_c_mn_go(fn, stack_size=0, **kwargs):
+    return _orig_runloom_c_mn_go(_wrap_goroutine_callable(fn), stack_size,
+                                 **kwargs)
 
 
 def _install_go_wrapper():

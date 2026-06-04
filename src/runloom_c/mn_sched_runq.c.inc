@@ -242,6 +242,10 @@ RUNLOOM_INLINE int runloom_tstate_attach_state(PyThreadState *ts)
 #endif
 
 static int       runloom_sysmon_enabled = 0;
+static int       runloom_sysmon_quiet = 0;   /* RUNLOOM_SYSMON_QUIET: suppress
+                                              * the per-wedge WEDGED/RECOVERED
+                                              * diagnostic spam (detector +
+                                              * handoff/preempt stay fully on) */
 static long long runloom_sysmon_wedge_ns = 50LL * 1000000LL;   /* 50 ms default */
 static long long runloom_sysmon_tick_ns  = 10LL * 1000000LL;   /* scan every 10 ms */
 static runloom_thread_t runloom_sysmon_thread;
