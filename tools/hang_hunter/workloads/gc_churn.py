@@ -12,6 +12,11 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "..", "src"))
 import runloom_c
 
+import os as _crashos
+if _crashos.environ.get("RUNLOOM_CRASH"):
+    runloom_c.install_crash_handler(_crashos.environ["RUNLOOM_CRASH"],
+                                 _crashos.environ.get("RUNLOOM_CRASH_FILE"))
+
 NHUB = int(os.environ.get("HH_NHUB", "4"))
 NWORK = int(os.environ.get("HH_NWORK", "48"))
 ROUNDS = int(os.environ.get("HH_ROUNDS", "200"))

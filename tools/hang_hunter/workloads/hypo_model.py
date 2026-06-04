@@ -19,6 +19,11 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "..", "src"))
 import runloom_c
 
+import os as _crashos
+if _crashos.environ.get("RUNLOOM_CRASH"):
+    runloom_c.install_crash_handler(_crashos.environ["RUNLOOM_CRASH"],
+                                 _crashos.environ.get("RUNLOOM_CRASH_FILE"))
+
 from hypothesis import given, settings, seed as hseed, strategies as st, HealthCheck
 
 # op codes

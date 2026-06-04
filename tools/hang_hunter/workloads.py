@@ -33,7 +33,10 @@ class Job(object):
 
 def _knobs(rng):
     """Random scheduler env knobs -- exercise the recovery machinery on and off."""
-    env = {"PYTHON_GIL": "0", "RUNLOOM_GIL": "0"}
+    # Flight recorder (#1): record the scheduler event ring and install the
+    # crash handler so any crash carries its recent per-thread timeline.
+    env = {"PYTHON_GIL": "0", "RUNLOOM_GIL": "0",
+           "RUNLOOM_DEBUG": "ring", "RUNLOOM_CRASH": "on"}
     for k in ("RUNLOOM_SYSMON", "RUNLOOM_PREEMPT", "RUNLOOM_HANDOFF"):
         if rng.random() < 0.3:
             env[k] = "0"
@@ -82,6 +85,7 @@ def stress_job(rng, py):
 def hypo_job(rng, py):
     sd = rng.randrange(1, 2 ** 31)
     env = {"PYTHON_GIL": "0", "RUNLOOM_GIL": "0",
+           "RUNLOOM_DEBUG": "ring", "RUNLOOM_CRASH": "on",
            "HH_MAX_EXAMPLES": str(rng.choice([50, 100, 150]))}
     argv = [py, os.path.join(WL, "hypo_model.py"), str(sd)]
     repro = "HH_MAX_EXAMPLES={0}  {1} {2} {3}".format(
