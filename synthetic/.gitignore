@@ -1,0 +1,7 @@
+# run artifacts (regenerate with run_all.py)
+results.json
+__pycache__/
+*.pyc
+# self-signed localhost test cert -- regenerate with `python synthetic/gen.py`
+# (kept out of the repo; never commit private keys)
+_assets/
