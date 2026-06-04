@@ -479,7 +479,7 @@ class Harness(object):
         while self.exited < self.expected and REAL_MONO() < until:
             runloom.sleep(0.05)
 
-    def run(self, body, setup=None):
+    def run(self, body, setup=None, post=None):
         """The single entry point a project calls.
 
         setup(H): optional, runs inside the root before the workload (bind
@@ -487,6 +487,10 @@ class Harness(object):
                   registered with H.register_close().
         body(H):  spawns the worker pool(s) and returns; the harness then
                   waits out the duration, marks done, and drains.
+        post(H):  optional, runs in the MAIN process after the scheduler has
+                  fully drained (all goroutines done) and before the verdict is
+                  computed -- the place for end-of-run conservation checks that
+                  need the final aggregated state.
         """
         self.start_watchdog()
 
@@ -518,6 +522,12 @@ class Harness(object):
         finally:
             self.finished = True
         self.fd_end = count_fds()
+        if post is not None:
+            try:
+                post(self)
+            except Exception as exc:        # noqa: BLE001
+                self.fail("post-check raised: {0}: {1}".format(
+                    type(exc).__name__, exc))
         return self.finish()
 
     def finish(self):
@@ -566,7 +576,7 @@ class Harness(object):
         return self.exit_code
 
 
-def main(name, body, setup=None, default_funcs=10000, describe="",
+def main(name, body, setup=None, post=None, default_funcs=10000, describe="",
          add_args=None):
     """Convenience entry point for a project module.
 
@@ -575,5 +585,5 @@ def main(name, body, setup=None, default_funcs=10000, describe="",
     """
     H = Harness(name, default_funcs=default_funcs, describe=describe,
                 add_args=add_args)
-    code = H.run(body, setup=setup)
+    code = H.run(body, setup=setup, post=post)
     sys.exit(code)
