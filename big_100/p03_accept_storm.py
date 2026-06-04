@@ -17,7 +17,6 @@ import netutil
 def setup(H):
     srv = netutil.listen_tcp(backlog=8192)
     H.state = {"port": srv.getsockname()[1]}
-    H.register_close(srv)
     H.counters = {"accepted": 0, "closed": 0, "live": 0, "max_live": 0}
     H.clock = threading.Lock()
 
@@ -44,16 +43,11 @@ def setup(H):
             bump("live", -1)
             bump("closed", 1)
 
-    def accept_loop():
-        while H.running():
-            try:
-                conn, _ = srv.accept()
-            except OSError:
-                break
-            bump("accepted", 1)
-            H.go(handler, conn)
+    def on_conn(conn, addr):
+        bump("accepted", 1)
+        H.go(handler, conn)
 
-    H.go(accept_loop)
+    H.go(netutil.serve_forever, H, srv, on_conn)
 
 
 def client(H, wid, rng, state):

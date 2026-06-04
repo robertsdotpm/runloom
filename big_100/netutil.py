@@ -36,7 +36,50 @@ def listen_tcp(host="127.0.0.1", port=0, backlog=4096, family=socket.AF_INET):
     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     s.bind((host, port))
     s.listen(backlog)
+    s.setblocking(False)
     return s
+
+
+def accept_timeout(srv, timeout_ms=200):
+    """Cooperative accept that returns None on timeout.
+
+    runloom's close() does NOT wake a goroutine parked in the monkey-patched
+    socket.accept() (FINDINGS BUG #5), so a server that relies on closing the
+    listener to break its accept loop hangs at teardown.  We instead wait_fd
+    with a timeout ourselves and do the RAW non-blocking _accept (unpatched),
+    so the loop can re-check running() every timeout_ms and never parks
+    without a deadline."""
+    import runloom_c
+    try:
+        fd = srv.fileno()
+    except (OSError, ValueError):
+        return None
+    if fd < 0 or not (runloom_c.wait_fd(fd, 1, timeout_ms) & 1):
+        return None
+    try:
+        cfd, addr = srv._accept()
+    except (BlockingIOError, InterruptedError):
+        return None
+    except OSError:
+        return None
+    conn = socket.socket(srv.family, srv.type, srv.proto, fileno=cfd)
+    conn.setblocking(False)
+    return conn, addr
+
+
+def serve_forever(H, srv, on_conn):
+    """Run an accept loop that self-terminates when H.running() goes false
+    (no reliance on close() waking accept), spawning on_conn(conn, addr) per
+    connection.  Closes srv on exit."""
+    try:
+        while H.running():
+            res = accept_timeout(srv, 200)
+            if res is None:
+                continue
+            conn, addr = res
+            on_conn(conn, addr)
+    finally:
+        close_quiet(srv)
 
 
 def udp_socket(host="127.0.0.1", port=0, family=socket.AF_INET):
@@ -51,7 +94,6 @@ def start_echo_server(H, host="127.0.0.1"):
     loop, and return the listening port.  Handlers echo until EOF."""
     srv = listen_tcp(host)
     port = srv.getsockname()[1]
-    H.register_close(srv)
 
     def handler(conn):
         try:
@@ -68,15 +110,7 @@ def start_echo_server(H, host="127.0.0.1"):
             except OSError:
                 pass
 
-    def accept_loop():
-        while H.running():
-            try:
-                conn, _addr = srv.accept()
-            except OSError:
-                break
-            H.go(handler, conn)
-
-    H.go(accept_loop)
+    H.go(serve_forever, H, srv, lambda conn, addr: H.go(handler, conn))
     return port
 
 

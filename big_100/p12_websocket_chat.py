@@ -52,7 +52,6 @@ def setup(H):
     srv = netutil.listen_tcp()
     H.state = {"port": srv.getsockname()[1],
                "rooms": [Room() for _ in range(NROOMS)]}
-    H.register_close(srv)
 
     def serve(sock):
         outbound = runloom.Chan(64)
@@ -105,15 +104,8 @@ def setup(H):
                 writer_done.recv()
             netutil.close_quiet(sock)
 
-    def accept_loop():
-        while H.running():
-            try:
-                conn, _ = srv.accept()
-            except OSError:
-                break
-            H.go(serve, conn)
-
-    H.go(accept_loop)
+    H.go(netutil.serve_forever, H, srv,
+         lambda conn, addr: H.go(serve, conn))
 
 
 def client(H, wid, rng, state):

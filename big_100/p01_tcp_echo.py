@@ -10,17 +10,9 @@ many short-lived connections.
 import socket
 
 import harness
+import netutil
 
-
-def recv_exact(sock, n):
-    """Read exactly n bytes or raise on EOF."""
-    buf = bytearray()
-    while len(buf) < n:
-        chunk = sock.recv(n - len(buf))
-        if not chunk:
-            raise OSError("connection closed mid-message")
-        buf += chunk
-    return bytes(buf)
+recv_exact = netutil.recv_exact
 
 
 def echo_handler(H, conn):
@@ -33,29 +25,14 @@ def echo_handler(H, conn):
     except OSError:
         pass
     finally:
-        try:
-            conn.close()
-        except OSError:
-            pass
-
-
-def accept_loop(H, srv):
-    while H.running():
-        try:
-            conn, _addr = srv.accept()
-        except OSError:
-            break
-        H.go(echo_handler, H, conn)
+        netutil.close_quiet(conn)
 
 
 def setup(H):
-    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    srv.bind(("127.0.0.1", 0))
-    srv.listen(4096)
+    srv = netutil.listen_tcp()
     H.state = {"port": srv.getsockname()[1]}
-    H.register_close(srv)
-    H.go(accept_loop, H, srv)
+    H.go(netutil.serve_forever, H, srv,
+         lambda conn, addr: H.go(echo_handler, H, conn))
 
 
 def client(H, wid, rng, state):

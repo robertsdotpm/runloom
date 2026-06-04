@@ -37,7 +37,6 @@ def render(n, seed):
 def setup(H):
     srv = netutil.listen_tcp()
     H.state = {"port": srv.getsockname()[1], "seed": H.seed}
-    H.register_close(srv)
 
     def handler(conn):
         try:
@@ -59,15 +58,8 @@ def setup(H):
         finally:
             netutil.close_quiet(conn)
 
-    def accept_loop():
-        while H.running():
-            try:
-                conn, _ = srv.accept()
-            except OSError:
-                break
-            H.go(handler, conn)
-
-    H.go(accept_loop)
+    H.go(netutil.serve_forever, H, srv,
+         lambda conn, addr: H.go(handler, conn))
 
 
 def fetch(H, port, page, keep_alive=False):

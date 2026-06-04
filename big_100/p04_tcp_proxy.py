@@ -61,18 +61,10 @@ def setup(H):
 
     pxy = netutil.listen_tcp()
     proxy_port = pxy.getsockname()[1]
-    H.register_close(pxy)
     H.state = {"proxy_port": proxy_port}
 
-    def accept_loop():
-        while H.running():
-            try:
-                conn, _ = pxy.accept()
-            except OSError:
-                break
-            H.go(proxy_conn, H, conn, backend_addr)
-
-    H.go(accept_loop)
+    H.go(netutil.serve_forever, H, pxy,
+         lambda conn, addr: H.go(proxy_conn, H, conn, backend_addr))
 
 
 def client(H, wid, rng, state):

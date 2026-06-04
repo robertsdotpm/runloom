@@ -15,42 +15,33 @@ import netutil
 import runloom
 
 
+def echo_handle(conn):
+    try:
+        while True:
+            d = conn.recv(4096)
+            if not d:
+                break
+            conn.sendall(d)
+    except OSError:
+        pass
+    finally:
+        netutil.close_quiet(conn)
+
+
 def setup(H):
     state = {"v4": None, "v6": None}
     srv4 = netutil.listen_tcp("127.0.0.1", family=socket.AF_INET)
     state["v4"] = srv4.getsockname()[:2]
-    H.register_close(srv4)
-    H.go(accept_echo, H, srv4)
+    H.go(netutil.serve_forever, H, srv4,
+         lambda conn, addr: H.go(echo_handle, conn))
     try:
         srv6 = netutil.listen_tcp("::1", family=socket.AF_INET6)
         state["v6"] = srv6.getsockname()[:2]
-        H.register_close(srv6)
-        H.go(accept_echo, H, srv6)
+        H.go(netutil.serve_forever, H, srv6,
+             lambda conn, addr: H.go(echo_handle, conn))
     except OSError:
         state["v6"] = None      # no IPv6 loopback on this box -> v4 always wins
     H.state = state
-
-
-def accept_echo(H, srv):
-    while H.running():
-        try:
-            conn, _ = srv.accept()
-        except OSError:
-            break
-
-        def handle(conn=conn):
-            try:
-                while True:
-                    d = conn.recv(4096)
-                    if not d:
-                        break
-                    conn.sendall(d)
-            except OSError:
-                pass
-            finally:
-                netutil.close_quiet(conn)
-
-        H.go(handle)
 
 
 def connector(family, addr, jitter, result):

@@ -32,17 +32,9 @@ def server_handler(conn):
 def setup(H):
     srv = netutil.listen_tcp()
     H.state = {"port": srv.getsockname()[1]}
-    H.register_close(srv)
 
-    def accept_loop():
-        while H.running():
-            try:
-                conn, _ = srv.accept()
-            except OSError:
-                break
-            H.go(server_handler, conn)
-
-    H.go(accept_loop)
+    H.go(netutil.serve_forever, H, srv,
+         lambda conn, addr: H.go(server_handler, conn))
 
 
 def fast_client(H, wid, rng, state):
