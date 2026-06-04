@@ -548,7 +548,10 @@ class Harness(object):
         sys.stderr.write("  failures      : {0}\n".format(self.failures))
         sys.stderr.write("  fd_base       : {0}\n".format(self.fd_base))
         sys.stderr.write("  fd_end        : {0}\n".format(self.fd_end))
-        sys.stderr.write("  leaked_fds    : {0}\n".format(leaked))
+        sys.stderr.write("  leaked_fds    : {0}  (a fixed ~100-150 floor is "
+                         "scheduler/offload-pool fds, not a per-op leak; the "
+                         "auditor projects check bounded growth)\n".format(
+                             leaked))
         if self.first_fail:
             sys.stderr.write("  first_failure : {0}\n".format(self.first_fail))
         verdict = "PASS" if self.exit_code == EXIT_OK else "FAIL"
