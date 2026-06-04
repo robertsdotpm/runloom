@@ -115,6 +115,24 @@ else
     echo "FAIL -- re-attaching a suspended tstate mid-STW should violate STWExclusive"; fail=$((fail+1))
 fi
 
+# ---- M4: the GILState-TSS binding (RunloomGilstate): the teardown contract C6,
+# the bug the --with-pydebug oracle found (pystate.c:345).  Correct = each hub
+# deletes its own tstate on its own thread.  Negative control deletes hub tstates
+# from the main thread -> the assert fires + the binding is corrupted.
+printf '  [tlc] %-28s ' "RunloomGilstate (correct)"
+if run_tlc gilok -config RunloomGilstate.cfg RunloomGilstate.tla | grep -q "No error has been found"; then
+    echo "PASS -- GilstateContract + GilBindingConsistent hold (hub deletes its own tstate on its own thread)"; pass=$((pass+1))
+else
+    echo "FAIL -- correct gilstate teardown should hold"; fail=$((fail+1))
+fi
+
+printf '  [tlc] %-28s ' "RunloomGilstate (wrong thread)"
+if run_tlc gilbug -deadlock -config RunloomGilstate_bug.cfg RunloomGilstate.tla | grep -q "is violated"; then
+    echo "PASS -- correctly DETECTS the pystate.c:345 abort (deleting a hub tstate from the main thread) -> GilstateContract violated"; pass=$((pass+1))
+else
+    echo "FAIL -- deleting a gilstate-bound tstate from the wrong thread should violate the contract"; fail=$((fail+1))
+fi
+
 "$(command -v safe-rm || echo rm)" -rf "$META"
 echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
