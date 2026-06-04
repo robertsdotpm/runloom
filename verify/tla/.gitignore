@@ -1,3 +1,5 @@
 tla2tools.jar
 states/
 *.toolbox
+RunloomGilstateTrace.tla
+RunloomGilstateTrace.cfg

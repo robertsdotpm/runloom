@@ -174,6 +174,17 @@ int  runloom_delay_enabled(void);   /* 1 if RUNLOOM_DELAY is set */
  * (flag off) pays nothing.  Does not return. */
 void runloom_invariant_fail(const char *msg, const void *p1, const void *p2);
 
+
+/* ---- gilstate-lifecycle trace (TLA+ trace conformance) ----
+ *
+ * When RUNLOOM_GILSTATE_TRACE=<path> is set, the hub-tstate create/delete sites
+ * append one ndjson event per line ({"a":<action>,"h":<hub id>,"d":<acting/
+ * deleter thread, -1 = main>}).  tools/gen_trace_spec.py turns the file into a
+ * RunloomGilstateTrace.tla that TLC validates against the REAL RunloomGilstate
+ * actions -- i.e. it runs the model against the actual extension.  Off (and
+ * zero-cost) unless the env var is set.  Cold path; takes a private lock. */
+void runloom_gilstate_trace(const char *action, int hub, int deleter);
+
 #ifdef __cplusplus
 }
 #endif

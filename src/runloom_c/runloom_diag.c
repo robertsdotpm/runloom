@@ -391,12 +391,36 @@ int runloom_self_check(int verbose)
 
 static int runloom_diag_inited = 0;
 
+/* ---- gilstate-lifecycle trace (TLA+ trace conformance, RUNLOOM_GILSTATE_TRACE) ----
+ * Opened once in runloom_diag_init (single-thread module load); the emit is a
+ * cold path (once per hub tstate create/delete) so a mutex + line append is fine.
+ * No-op when the file is NULL (env unset). */
+static FILE           *runloom_gil_trace_fp = NULL;
+static runloom_mutex_t runloom_gil_trace_lock;
+
+void runloom_gilstate_trace(const char *action, int hub, int deleter)
+{
+    if (runloom_gil_trace_fp == NULL) return;
+    runloom_mutex_lock(&runloom_gil_trace_lock);
+    fprintf(runloom_gil_trace_fp,
+            "{\"a\":\"%s\",\"h\":%d,\"d\":%d}\n", action, hub, deleter);
+    fflush(runloom_gil_trace_fp);
+    runloom_mutex_unlock(&runloom_gil_trace_lock);
+}
+
 void runloom_diag_init(void)
 {
     if (runloom_diag_inited) return;
     runloom_mutex_init(&runloom_ring_list_lock);
     runloom_ring_list_lock_inited = 1;
     parse_runloom_debug_env();
+    {
+        const char *gt = getenv("RUNLOOM_GILSTATE_TRACE");
+        if (gt != NULL && gt[0] != '\0') {
+            runloom_mutex_init(&runloom_gil_trace_lock);
+            runloom_gil_trace_fp = fopen(gt, "w");
+        }
+    }
     runloom_diag_inited = 1;
 }
 

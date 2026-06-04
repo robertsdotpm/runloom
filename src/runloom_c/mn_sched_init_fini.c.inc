@@ -233,6 +233,10 @@ void runloom_mn_fini(void)
          * best-effort fallback.  Hubs are joined by now, so this is unraced. */
         PyThreadState *hts = runloom_hubs[i].tstate;
         if (hts != NULL) {
+            /* trace conformance: deleter is the MAIN thread (-1).  Normally
+             * unreached (hubs self-delete); fires under the negative-control
+             * RUNLOOM_GILSTATE_DELETE_ON_MAIN, the pre-c28e5ca bug path. */
+            runloom_gilstate_trace("Delete", i, -1);
             PyThreadState_Clear(hts);
             PyThreadState_Delete(hts);
         }

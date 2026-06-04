@@ -125,6 +125,8 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
         RUNLOOM_THREAD_RETURN(NULL);
     }
     __atomic_store_n(&h->tstate, hts, __ATOMIC_RELEASE);
+    /* trace conformance: this thread just created + gilstate-bound its tstate */
+    runloom_gilstate_trace("Create", h->id, h->id);
     PyEval_RestoreThread(hts);
     /* Per-OS-thread coro-backend setup.  On Windows Fibers this calls
      * ConvertThreadToFiber so SwitchToFiber works on this thread; on
@@ -807,8 +809,18 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
      * (pystate.c:345 asserts tstate == this thread's gilstate tstate).  Clearing
      * + deleting here, where gilstate_tss == hts, satisfies the contract; we
      * publish h->tstate = NULL first so the mn_fini sweep skips this slot. */
-    PyThreadState_Clear(hts);
-    __atomic_store_n(&h->tstate, NULL, __ATOMIC_RELEASE);
-    PyThreadState_DeleteCurrent();
+    if (getenv("RUNLOOM_GILSTATE_DELETE_ON_MAIN") == NULL) {
+        /* trace conformance: deleter is this hub's OWN thread (the fix) */
+        runloom_gilstate_trace("Delete", h->id, h->id);
+        PyThreadState_Clear(hts);
+        __atomic_store_n(&h->tstate, NULL, __ATOMIC_RELEASE);
+        PyThreadState_DeleteCurrent();
+    } else {
+        /* NEGATIVE CONTROL (test-only): reproduce the pre-c28e5ca bug -- leave
+         * the tstate alive for runloom_mn_fini to delete from the MAIN thread.
+         * Trips pystate.c:345 under --with-pydebug, and the emitted trace shows a
+         * Delete with deleter=main that the TLA trace check flags. */
+        PyEval_SaveThread();
+    }
     RUNLOOM_THREAD_RETURN(NULL);
 }
