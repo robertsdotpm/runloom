@@ -67,6 +67,7 @@ static void runloom_mn_world_yield_if_monopolizing(runloom_hub_t *h)
                 __atomic_store_n(&yield_ns, pause_ns, __ATOMIC_RELAXED);
             }
             if (pause_ns == 0) return;
+            runloom_delay_inject(RUNLOOM_DLY_WORLD_YIELD);
             yts = PyEval_SaveThread();
             runloom_sleep_ns(pause_ns);
             PyEval_RestoreThread(yts);

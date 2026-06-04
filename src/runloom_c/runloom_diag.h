@@ -118,6 +118,37 @@ int runloom_self_check(int verbose);
  * Exposed only for tests / sanity asserts. */
 int runloom_diag_registered_thread_count(void);
 
+
+/* ---- Determinism tooling #2: seeded delay injection ----
+ *
+ * OFF unless the RUNLOOM_DELAY env var is set; its value is the PRNG seed
+ * (decimal or 0x...).  At each instrumented scheduler transition site,
+ * runloom_delay_inject() sleeps a deterministic-per-(seed, site, per-site call
+ * count) interval in [0, RUNLOOM_DELAY_MAX_NS] (default 50 us).  This widens
+ * the narrow race windows -- STW / calibration-freeze / coro-reuse /
+ * handoff-adopt / snap -- that the fuzzer otherwise hits ~1/56k, turning
+ * "statistically findable" into "reliably reproducible".  Under the controlled
+ * (serial) M:N scheduler the per-site call order is deterministic, so a given
+ * seed replays the same schedule; under parallel execution it is seeded stress
+ * (amplifies, not bit-reproducible).  Sites are dense; add at the end. */
+typedef enum runloom_delay_site {
+    RUNLOOM_DLY_PAINT = 0,          /* around the (now no-op) HWM paint */
+    RUNLOOM_DLY_CAL_FREEZE,         /* the calibration freeze transition */
+    RUNLOOM_DLY_CORO_ACQUIRE,       /* a coro/stack taken from the pool */
+    RUNLOOM_DLY_CORO_RELEASE,       /* a coro/stack returned to the pool */
+    RUNLOOM_DLY_HANDOFF_ADOPT,      /* rescue thread adopts a hub tstate */
+    RUNLOOM_DLY_WORLD_YIELD,        /* the monopoly world-yield detach */
+    RUNLOOM_DLY_SNAP_SAVE,          /* pystate snap (g yields) */
+    RUNLOOM_DLY_SNAP_LOAD,          /* pystate load (g resumes) */
+    RUNLOOM_DLY_G_ENTRY,            /* a goroutine starts running */
+    RUNLOOM_DLY_G_COMPLETE,         /* a goroutine completes */
+    RUNLOOM_DLY_HUB_RESUME,         /* a hub picks a g to resume */
+    RUNLOOM_DLY_NSITES
+} runloom_delay_site_t;
+
+void runloom_delay_inject(runloom_delay_site_t site);
+int  runloom_delay_enabled(void);   /* 1 if RUNLOOM_DELAY is set */
+
 #ifdef __cplusplus
 }
 #endif

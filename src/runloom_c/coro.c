@@ -8,6 +8,7 @@
 
 #include "coro.h"
 #include "runloom_crash.h"
+#include "runloom_diag.h"   /* runloom_delay_inject (determinism tooling #2) */
 
 #include <stdlib.h>
 #include <string.h>
@@ -521,6 +522,7 @@ runloom_coro_t *runloom_coro_new(size_t stack_size,
         runloom_coro_pool = c->pool_next;
         runloom_coro_pool_size--;
         c->pool_next = NULL;
+        runloom_delay_inject(RUNLOOM_DLY_CORO_ACQUIRE);   /* widen reuse window */
         /* Stack was poisoned when this coro was recycled (see destroy);
          * unpoison before the goroutine runs on it again. */
         RUNLOOM_UNPOISON(c->stack, rounded);
@@ -577,6 +579,7 @@ void runloom_coro_destroy(runloom_coro_t *c)
         /* Poison the attached stack while the coro sits in the pool so ASan
          * flags any use-after-recycle of it; unpoisoned on reuse. */
         RUNLOOM_POISON(c->stack, c->stack_size);
+        runloom_delay_inject(RUNLOOM_DLY_CORO_RELEASE);   /* widen reuse window */
         return;
     }
     if (c->stack != NULL) {

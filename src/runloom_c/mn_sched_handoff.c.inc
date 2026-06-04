@@ -42,6 +42,7 @@ static void runloom_handoff_rescue(runloom_hub_t *h)
                 runloom_tstate_attach_state(hts) != RUNLOOM_TS_DETACHED) {
                 return;   /* wedge gone / not a DETACHED block -> nothing to do */
             }
+            runloom_delay_inject(RUNLOOM_DLY_HANDOFF_ADOPT);
             PyEval_RestoreThread(hts);     /* attach hub_ts to THIS thread */
             runloom_tls_hub = h;
             /* Capture g_block's live slice; every handback restores it so the

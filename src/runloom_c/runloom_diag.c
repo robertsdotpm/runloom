@@ -385,3 +385,68 @@ void runloom_diag_fini(void)
     runloom_diag_inited = 0;
     runloom_tls_ring = NULL;   /* don't free TLS rings on fini: they're freed above */
 }
+
+
+/* ====================================================================== *
+ * Determinism tooling #2: seeded delay injection                          *
+ * ====================================================================== */
+
+/* -1 = env not yet read, 0 = off, 1 = on. */
+static int                runloom_delay_on      = -1;
+static unsigned long long runloom_delay_seed    = 0;
+static long long          runloom_delay_max_ns  = 50000;   /* 50 us default */
+/* Per-site monotonic call counter.  Under the controlled (serial) scheduler
+ * the increment order is deterministic, so (seed, site, count) -> the same
+ * delay every run == replayable.  Under parallel execution the count a given
+ * call observes is racy, so it is seeded stress (still amplifies the window). */
+static unsigned long long runloom_delay_ctr[RUNLOOM_DLY_NSITES];
+
+static unsigned long long runloom_splitmix64(unsigned long long x)
+{
+    x += 0x9E3779B97F4A7C15ULL;
+    x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9ULL;
+    x = (x ^ (x >> 27)) * 0x94D049BB133111EBULL;
+    return x ^ (x >> 31);
+}
+
+static void runloom_delay_init_once(void)
+{
+    const char *e = getenv("RUNLOOM_DELAY");
+    if (e == NULL || e[0] == '\0') {
+        __atomic_store_n(&runloom_delay_on, 0, __ATOMIC_RELEASE);
+        return;
+    }
+    runloom_delay_seed = strtoull(e, NULL, 0);
+    {
+        const char *m = getenv("RUNLOOM_DELAY_MAX_NS");
+        if (m != NULL && m[0] != '\0') {
+            long long v = atoll(m);
+            if (v >= 0) runloom_delay_max_ns = v;
+        }
+    }
+    __atomic_store_n(&runloom_delay_on, 1, __ATOMIC_RELEASE);
+}
+
+void runloom_delay_inject(runloom_delay_site_t site)
+{
+    int on = __atomic_load_n(&runloom_delay_on, __ATOMIC_ACQUIRE);
+    unsigned long long n, h;
+    long long ns;
+    if (on < 0) { runloom_delay_init_once(); on = __atomic_load_n(&runloom_delay_on, __ATOMIC_ACQUIRE); }
+    if (on != 1 || (int)site < 0 || site >= RUNLOOM_DLY_NSITES) return;
+    if (runloom_delay_max_ns <= 0) return;
+    n = __atomic_fetch_add(&runloom_delay_ctr[site], 1ULL, __ATOMIC_RELAXED);
+    /* Mix seed, site and the per-site count into a uniform delay. */
+    h = runloom_splitmix64(runloom_delay_seed
+                        ^ ((unsigned long long)site << 56)
+                        ^ runloom_splitmix64(n));
+    ns = (long long)(h % (unsigned long long)(runloom_delay_max_ns + 1));
+    if (ns > 0) runloom_sleep_ns(ns);
+}
+
+int runloom_delay_enabled(void)
+{
+    int on = __atomic_load_n(&runloom_delay_on, __ATOMIC_ACQUIRE);
+    if (on < 0) { runloom_delay_init_once(); on = __atomic_load_n(&runloom_delay_on, __ATOMIC_ACQUIRE); }
+    return on == 1;
+}
