@@ -28,6 +28,9 @@ typedef struct {
     size_t key;        /* 0 = empty slot */
     size_t max_hwm;    /* deepest stack use seen for this kind */
     size_t reserved;   /* stack size the most recent sample ran with */
+    size_t cold_floor; /* prescan cold-start size if a heuristic/fat-frame
+                        * symbol matched (0 = none); learn-down never shrinks
+                        * this kind below it */
     long   samples;
     char   name[112];  /* "module.qualname (file:line)" */
 } runloom_advice_entry_t;
@@ -110,6 +113,26 @@ int runloom_advice_autosize_enabled(void)
     return __atomic_load_n(&runloom_autosize_on, __ATOMIC_ACQUIRE);
 }
 
+/* Follow __wrapped__ to the REAL underlying callable so a goroutine's kind (and
+ * its prescan scan) is keyed on the user's function, not a wrapper.  runloom.go's
+ * arg-binding lambda sets __wrapped__ to the target, and functools.wraps sets it
+ * on decorated functions -- both should attribute to the wrapped function, not
+ * the wrapper's code location.  Returns a NEW reference (the input incref'd when
+ * there is no wrapper); bounded so a self-referential __wrapped__ can't spin. */
+static PyObject *runloom_advice_unwrap(PyObject *callable)
+{
+    PyObject *cur = callable;
+    int i;
+    Py_INCREF(cur);
+    for (i = 0; i < 8; i++) {
+        PyObject *w = PyObject_GetAttrString(cur, "__wrapped__");
+        if (w == NULL) { PyErr_Clear(); break; }
+        Py_DECREF(cur);
+        cur = w;            /* new ref */
+    }
+    return cur;
+}
+
 /* Cold-start optimizer: loosely scan the entry callable's bytecode names for a
  * fat-frame symbol (Decimal arithmetic, ...) and, if present, return a stack big
  * enough to hold that single frame plus headroom for the call chain reaching it.
@@ -118,12 +141,14 @@ int runloom_advice_autosize_enabled(void)
  * unchanged when nothing heavy is referenced or the callable has no code. */
 static size_t runloom_advice_cold_start(PyObject *callable, size_t generic)
 {
-    PyObject *code, *names;
+    PyObject *real, *code, *names;
     Py_ssize_t i, n;
     size_t worst = 0, want;
 
     if (callable == NULL) return generic;
-    code = PyObject_GetAttrString(callable, "__code__");
+    real = runloom_advice_unwrap(callable);
+    code = PyObject_GetAttrString(real, "__code__");
+    Py_DECREF(real);
     if (code == NULL) { PyErr_Clear(); return generic; }
     names = PyObject_GetAttrString(code, "co_names");
     Py_DECREF(code);
@@ -172,14 +197,32 @@ size_t runloom_advice_size_for(size_t key, PyObject *callable, size_t fallback)
             learned = runloom_advice_pow2(e->max_hwm * RUNLOOM_ADVICE_SAFETY);
             if (learned < RUNLOOM_ADVICE_MIN) learned = RUNLOOM_ADVICE_MIN;
             if (learned > RUNLOOM_ADVICE_MAX) learned = RUNLOOM_ADVICE_MAX;
+            /* Heuristic / fat-frame floor: a kind that matched a prescan symbol
+             * (crypto, Decimal) never learns DOWN below its cold-start size --
+             * matching is itself a signal the kind CAN go deep, so a run of
+             * shallow inputs must not shrink it under the size that protects the
+             * deep path it didn't happen to exercise. */
+            if (learned < e->cold_floor) learned = e->cold_floor;
         }
     }
     runloom_mutex_unlock(&runloom_advice_lock);
     if (sampled) return learned;
     /* Unseen kind: start large; the cold-start optimizer (prescan) can raise it
-     * to cover a fat single frame the code is about to call. */
-    if (__atomic_load_n(&runloom_prescan_on, __ATOMIC_RELAXED))
-        return runloom_advice_cold_start(callable, runloom_autosize_start);
+     * to cover a fat single frame / heuristic class the code is about to call. */
+    if (__atomic_load_n(&runloom_prescan_on, __ATOMIC_RELAXED)) {
+        size_t cs = runloom_advice_cold_start(callable, runloom_autosize_start);
+        if (cs > runloom_autosize_start) {
+            /* A prescan symbol matched -> remember the floor so learn-down keeps
+             * this kind roomy even if its measured samples turn out shallow. */
+            runloom_mutex_lock(&runloom_advice_lock);
+            {
+                runloom_advice_entry_t *e = runloom_advice_find(key);
+                if (e != NULL && cs > e->cold_floor) e->cold_floor = cs;
+            }
+            runloom_mutex_unlock(&runloom_advice_lock);
+        }
+        return cs;
+    }
     return runloom_autosize_start;
 }
 
@@ -196,9 +239,10 @@ static size_t runloom_advice_hash(const char *s)
 /* Build "module.qualname (basename:line)" for a callable.  GIL held. */
 static void runloom_advice_name_of(PyObject *callable, char *out, size_t outsz)
 {
-    PyObject *qn  = PyObject_GetAttrString(callable, "__qualname__");
-    PyObject *mod = PyObject_GetAttrString(callable, "__module__");
-    PyObject *code = PyObject_GetAttrString(callable, "__code__");
+    PyObject *real = runloom_advice_unwrap(callable);
+    PyObject *qn  = PyObject_GetAttrString(real, "__qualname__");
+    PyObject *mod = PyObject_GetAttrString(real, "__module__");
+    PyObject *code = PyObject_GetAttrString(real, "__code__");
     PyObject *fnobj = NULL, *lnobj = NULL;
     const char *q = (qn  && PyUnicode_Check(qn))  ? PyUnicode_AsUTF8(qn)  : NULL;
     const char *m = (mod && PyUnicode_Check(mod)) ? PyUnicode_AsUTF8(mod) : NULL;
@@ -220,6 +264,7 @@ static void runloom_advice_name_of(PyObject *callable, char *out, size_t outsz)
     else
         snprintf(out, outsz, "%s.%s", m ? m : "?", q ? q : "<callable>");
 
+    Py_DECREF(real);
     Py_XDECREF(qn);
     Py_XDECREF(mod);
     Py_XDECREF(code);

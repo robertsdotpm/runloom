@@ -122,6 +122,56 @@ def test_explicit_stack_size_wins():
     assert _row(heavy)["reserved"] == 128 * 1024   # autosizer did not touch it
 
 
+def pinned_worker():
+    return 1
+
+
+def test_friendly_go_honors_stack_size():
+    # runloom.go(fn, stack_size=N) must PIN the goroutine stack, not forward
+    # stack_size into fn (regression: the friendly wrapper used to swallow it
+    # into **kwargs and pass it to the target, leaving the goroutine on the
+    # default stack).  Covers both the single-thread and M:N spawn paths.
+    out = {}
+
+    def main():
+        runloom.inspect.enable_stack_advice(True)
+        runloom.go(pinned_worker, stack_size=128 * 1024)
+        runloom.sleep(0.02)
+        out["reserved"] = _row(pinned_worker)["reserved"]
+
+    runloom.run(4, main)
+    assert out["reserved"] == 128 * 1024
+
+
+def crypto_with_arg(x):
+    _ = (encrypt, sign)        # crypto names; arg-bearing -> goes via the wrapper
+    return x
+
+
+def plain_with_arg(x):
+    return x
+
+
+def test_friendly_go_with_args_preserves_kind_and_prescan():
+    # runloom.go(fn, arg) wraps fn in an arg-binding lambda; __wrapped__ must
+    # make the auto-sizer key on fn (not the shared wrapper), so distinct targets
+    # are distinct kinds AND the crypto prescan reaches them through the wrapper.
+    def main():
+        runloom.inspect.enable_stack_autosize(True, prescan=True)
+        for i in range(10):
+            runloom.go(crypto_with_arg, i)
+            runloom.go(plain_with_arg, i)
+        runloom.sleep(0.05)
+
+    runloom.run(2, main)
+    # not collapsed into the wrapper lambda -> each target is its own kind
+    assert _row(crypto_with_arg) is not None
+    assert _row(plain_with_arg) is not None
+    # and the crypto prescan reached the wrapped function
+    assert _row(crypto_with_arg)["reserved"] == CRYPTO_COLD
+    assert _row(plain_with_arg)["reserved"] == START
+
+
 def test_env_start_size(monkeypatch):
     monkeypatch.setenv("RUNLOOM_STACK_AUTOSIZE_START", str(64 * 1024))
     runloom.inspect.enable_stack_autosize(True)   # reads the env at enable time
@@ -159,15 +209,17 @@ def test_prescan_does_not_bump_plain_kind():
     assert _row(heavy)["reserved"] == START
 
 
-def test_prescan_learns_down_after_first_run():
+def test_prescan_floor_holds_decimal():
+    # Heuristic floor: a prescan-matched kind never learns DOWN below its
+    # cold-start size, even when its measured samples are shallow -- the deep
+    # path the symbol signals stays protected (a Decimal kind that did a small
+    # op this time could do a big-integer pow next time).
     runloom.inspect.enable_stack_autosize(True, prescan=True)
-    _batch([decimal_kind], 20)                  # batch 1: cold-start big
+    _batch([decimal_kind], 20)                  # batch 1: cold-start 512 KiB
     assert _row(decimal_kind)["reserved"] == DECIMAL_COLD
-    hwm = _row(decimal_kind)["max_hwm"]
-    _batch([decimal_kind], 20)                  # batch 2: measured -> learned down
-    learned = _row(decimal_kind)["reserved"]
-    assert learned < DECIMAL_COLD               # shrank once measured
-    assert learned >= hwm
+    assert _row(decimal_kind)["max_hwm"] * 4 < DECIMAL_COLD   # really used far less
+    _batch([decimal_kind], 20)                  # batch 2: would shrink -> floored
+    assert _row(decimal_kind)["reserved"] == DECIMAL_COLD     # held at the floor
 
 
 # Crypto cold start: signing / verification / encryption route through deep
@@ -212,12 +264,25 @@ def test_prescan_crypto_outranks_decimal():
     assert _row(crypto_and_decimal)["reserved"] == CRYPTO_COLD
 
 
-def test_prescan_crypto_learns_down():
+def test_prescan_floor_holds_crypto():
+    # The crypto heuristic floors at 1 MiB: a crypto kind that measures shallow
+    # this run does NOT shrink below it, because the next op (bigger key, AEAD,
+    # a different algorithm) may need the depth it didn't exercise.
     runloom.inspect.enable_stack_autosize(True, prescan=True)
     _batch([crypto_kind], 20)                   # batch 1: cold-start 1 MiB
     assert _row(crypto_kind)["reserved"] == CRYPTO_COLD
-    _batch([crypto_kind], 20)                   # batch 2: measured -> learned down
-    assert _row(crypto_kind)["reserved"] < CRYPTO_COLD
+    assert _row(crypto_kind)["max_hwm"] * 4 < CRYPTO_COLD     # really used far less
+    _batch([crypto_kind], 20)                   # batch 2: would shrink -> floored
+    assert _row(crypto_kind)["reserved"] == CRYPTO_COLD       # held at the floor
+
+
+def test_non_prescan_kind_still_learns_down():
+    # The floor is prescan-specific: a kind with no heavy-frame symbol still
+    # shrinks toward its real usage (the floor is 0 for it).
+    runloom.inspect.enable_stack_autosize(True, prescan=True)
+    _batch([heavy], 20)
+    _batch([heavy], 20)
+    assert _row(heavy)["reserved"] < START
 
 
 def test_autosize_under_mn():

@@ -344,13 +344,26 @@ first call. Those libraries aren't in the stdlib profile (their binaries vary by
 version/platform/build, are usually stripped, and the cost is call *depth*, not
 one fat frame), so prescan treats them **heuristically**: a kind whose bytecode
 references a crypto symbol (`encrypt`, `decrypt`, `sign`, `verify`, `Cipher`,
-`Fernet`, `Ed25519PrivateKey`, `HKDF`, ...) cold-starts at **1 MiB**, and
-learn-down then measures the real per-deployment usage on the actual installed
-binary and shrinks it. The symbol list is in
-`tools/heavy_frames/gen_heavy_frames.py` (a *name* list, not a measured-size
-table -- it needs no third-party installs and covers libraries runloom has never
-seen); keep additions crypto-specific so a false match only over-provisions
-virtual stack the auto-sizer reclaims.
+`Fernet`, `Ed25519PrivateKey`, `HKDF`, ...) cold-starts at **1 MiB**. The symbol
+list is in `tools/heavy_frames/gen_heavy_frames.py` (a *name* list, not a
+measured-size table -- it needs no third-party installs and covers libraries
+runloom has never seen); keep additions crypto-specific so a false match only
+over-provisions virtual stack.
+
+**Heuristic floor.** Unlike ordinary kinds, a prescan-matched kind (crypto,
+`Decimal`) never learns *down* below its cold-start size, even if its measured
+runs are shallow. Matching the symbol is itself the signal that the kind *can*
+go deep, so a run of small inputs must not shrink it under the size that
+protects the deep path it didn't happen to exercise this time (a small RSA sign
+now, a 4096-bit one later). Learn-down still right-sizes everything else; the
+floor only pins the classes whose depth is most likely to surprise you. To
+reclaim that memory anyway, pin the kind explicitly with
+`runloom.go(fn, stack_size=...)` -- an explicit size always wins, floor and all.
+
+> Arg-bearing spawns are keyed correctly too: `runloom.go(fn, x)` wraps `fn` in
+> a binding lambda, but the auto-sizer follows `__wrapped__` to `fn`, so the
+> per-kind size and the prescan scan apply to *your* function, not the wrapper.
+> (Decorated functions with `functools.wraps` get the same treatment.)
 
 #### Writing stack-predictable goroutines
 

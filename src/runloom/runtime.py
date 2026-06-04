@@ -110,6 +110,10 @@ def go(callable_, *args, **kwargs):
     """Spawn a goroutine.  Mirrors Go's `go fn(a, b)`: schedules
     fn(*args, **kwargs) to run cooperatively and returns immediately.
 
+    Pass `stack_size=<bytes>` to pin this goroutine's C stack (it is consumed
+    here, never forwarded to fn); an explicit size always wins over the
+    auto-sizer.  Omit it (the default) to let the default / auto-sizer choose.
+
     Dispatches on the active scheduler so the same call works in both modes:
       - single-thread (run(1, ...)): spawns on this thread's scheduler and
         returns a Goroutine handle.
@@ -123,15 +127,27 @@ def go(callable_, *args, **kwargs):
     M:N pending-counter accounting that mn_run() joins on, so this dispatch
     is required for correctness, not just convenience.
     """
+    # stack_size= is OUR keyword (the per-goroutine C stack), not an argument
+    # for the target -- pop it before binding args so it pins the goroutine's
+    # stack instead of being forwarded into the call.  0 = use the default /
+    # auto-sizer.  An explicit value always wins over the auto-sizer.
+    stack_size = kwargs.pop("stack_size", 0)
     if args or kwargs:
         target = lambda: callable_(*args, **kwargs)
         target.__name__ = getattr(callable_, "__name__", "goroutine")
+        # The auto-sizer keys a goroutine's "kind" (and its crypto/fat-frame
+        # prescan) on the callable's code identity.  Without this, every
+        # arg-bearing go() would look like the SAME kind -- this wrapper lambda
+        # -- so they'd share one stack size and the prescan would scan the
+        # wrapper, not the target.  __wrapped__ points the auto-sizer at the
+        # real function (runloom_advice_unwrap follows it).
+        target.__wrapped__ = callable_
     else:
         target = callable_
     if runloom_c.mn_hub_count() > 0:
-        runloom_c.mn_go(target)
+        runloom_c.mn_go(target, stack_size)
         return None
-    g = runloom_c.go(target)
+    g = runloom_c.go(target, stack_size)
     return Goroutine(g, name=getattr(target, "__name__", "goroutine"))
 
 

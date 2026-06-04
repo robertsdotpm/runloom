@@ -305,10 +305,14 @@ static void crash_handler(int sig, siginfo_t *si, void *uctx)
                 "[runloom]     goroutine g%lld ran off the low end of its %u KiB C stack\n",
                 gid, skib);
             crash_emit(
-                "[runloom]     (the fault hit the guard page just below it).\n"
-                "[runloom]     Fix: give it a bigger stack -- runloom_c.go(fn, stack_size=N),\n"
-                "[runloom]     RUNLOOM_AIO_IO_STACK for the asyncio bridge, or the scheduler\n"
-                "[runloom]     default -- or reduce the C-recursion depth running on it.\n");
+                "[runloom]     -- the fault hit the guard page just below it: a CLEAN trap,\n"
+                "[runloom]     not memory corruption.\n"
+                "[runloom]     Fix: pin a bigger stack with runloom.go(fn, stack_size=N)\n"
+                "[runloom]     (an explicit size ALWAYS wins over the auto-sizer), or flatten\n"
+                "[runloom]     the deep native recursion to a heap stack / offload it.  If this\n"
+                "[runloom]     goroutine's depth varies with INPUT, pin it -- the auto-sizer\n"
+                "[runloom]     sizes from the runs it has seen and can under-size a deeper path\n"
+                "[runloom]     a later input reaches.  See docs/stack-sizing.md.\n");
         } else if (kind == 2) {
             crash_emitf(
                 "[runloom] fault is INSIDE goroutine g%lld's %u KiB stack (not the guard\n",
