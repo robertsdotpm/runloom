@@ -132,7 +132,8 @@ from ._base import *  # noqa: F401,F403  (stdlib re-exports, Parker, backend, of
 # dispatch to each section module.
 from .timers import _patch_time, _unpatch_time
 from .sockets import _patch_socket, _unpatch_socket
-from .osio import _patch_os, _unpatch_os, _patch_stdio, _unpatch_stdio
+from .osio import (_patch_os, _unpatch_os, _patch_stdio, _unpatch_stdio,
+                   _patch_getpass, _unpatch_getpass)
 from .files import (_patch_file, _unpatch_file, _patch_syscalls,
                     _unpatch_syscalls, _patch_fcntl, _unpatch_fcntl)
 from .polling import (_patch_select, _unpatch_select,
@@ -221,8 +222,8 @@ def _uninstall_go_wrapper():
         _orig_runloom_c_mn_go = None
 
 
-_DEFAULTS = ("socket", "time", "os", "select", "selectors", "stdio", "ssl",
-             "subprocess", "process", "threading", "queue", "futures",
+_DEFAULTS = ("socket", "time", "os", "select", "selectors", "stdio", "getpass",
+             "ssl", "subprocess", "process", "threading", "queue", "futures",
              "multiprocessing", "file", "syscalls", "fcntl", "signal",
              "heavy", "compile", "dns")
 
@@ -233,6 +234,7 @@ _PATCHERS = {
     "select":     (_patch_select,     _unpatch_select),
     "selectors":  (_patch_selectors,  _unpatch_selectors),
     "stdio":      (_patch_stdio,      _unpatch_stdio),
+    "getpass":    (_patch_getpass,    _unpatch_getpass),
     "ssl":        (_patch_ssl,        _unpatch_ssl),
     "subprocess": (_patch_subprocess, _unpatch_subprocess),
     "process":    (_patch_process,    _unpatch_process),

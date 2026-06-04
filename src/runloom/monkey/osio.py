@@ -191,3 +191,38 @@ def _unpatch_stdio():
             sys.stdin.readline = _orig_stdin_readline
         except (AttributeError, TypeError):
             pass
+
+
+# ============================================================
+# getpass.getpass -- offload the blocking tty password read
+# ============================================================
+# Unlike input(), getpass reads from /dev/tty (opened internally, with echo
+# turned off via termios), so we can't simply wait_fd on a known stdin fd.  It
+# is rare and human-latency-bound, so offload the whole call to a pool worker,
+# parking the goroutine.  The tty/termios work is thread-agnostic (no
+# per-object thread affinity like sqlite), so running it on a worker is fine.
+_orig_getpass = None
+
+
+def _patched_getpass(prompt="Password: ", stream=None):
+    if not _in_goroutine():
+        return _orig_getpass(prompt, stream)
+    return offload(_orig_getpass, prompt, stream)
+
+
+def _patch_getpass():
+    global _orig_getpass
+    if _orig_getpass is not None:
+        return
+    import getpass as _gp
+    _orig_getpass = _gp.getpass
+    _gp.getpass = _patched_getpass
+
+
+def _unpatch_getpass():
+    global _orig_getpass
+    if _orig_getpass is None:
+        return
+    import getpass as _gp
+    _gp.getpass = _orig_getpass
+    _orig_getpass = None

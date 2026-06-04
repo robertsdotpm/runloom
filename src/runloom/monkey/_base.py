@@ -407,7 +407,15 @@ def offload(fn, *args, **kwargs):
     database drivers, CPU-bound hashing/compression, etc.
 
         data = runloom.monkey.offload(f.read, 65536)
-        rows = runloom.monkey.offload(cursor.execute, sql, params)
+
+    sqlite3 is NOT auto-patched: a Connection is thread-affine (it raises
+    "SQLite objects created in a thread can only be used in that same thread"),
+    and the pool runs the call on a worker thread.  To offload sqlite, open the
+    connection with ``check_same_thread=False`` and keep your own access to it
+    serialized -- one in-flight DB call at a time per connection::
+
+        conn = sqlite3.connect(path, check_same_thread=False)
+        rows = runloom.monkey.offload(conn.execute, sql, params).fetchall()
     """
     return _blocking_call(fn, *args, **kwargs)
 
