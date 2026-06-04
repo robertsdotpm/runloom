@@ -15,6 +15,20 @@ import pytest
 import runloom
 import runloom_c
 
+import os as _hwm_os
+import pytest as _hwm_pytest
+# Stack high-water-mark is precise only on a POSIX guard-page backend
+# (fcontext-asm / ucontext) with 4 KB pages.  Windows Fibers have no guard page,
+# and macOS 16 KB pages make the mincore-based HWM over-report (it reports the
+# whole stack resident), so these HWM/advice/sizing tests can't measure precisely
+# there -- skip them (the diagnostic itself just over-reserves, which is safe).
+_RELIABLE_HWM = (_hwm_os.name == "posix"
+                 and runloom_c.backend() in ("fcontext-asm", "ucontext")
+                 and _hwm_os.sysconf("SC_PAGESIZE") == 4096)
+pytestmark = _hwm_pytest.mark.skipif(
+    not _RELIABLE_HWM,
+    reason="stack HWM is reliable only on a POSIX guard-page backend with 4 KB pages")
+
 
 def _nested(depth):
     root = []
