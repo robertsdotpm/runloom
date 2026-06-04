@@ -326,14 +326,10 @@ static size_t runloom_round_to_page(size_t size)
 /* Stack painting / high-water-mark scan                              */
 /* ------------------------------------------------------------------ */
 
-/* Sentinel value used to fill unused stack memory.  Picked so that
- * the byte sequence is unlikely to appear naturally in compiler-
- * emitted code or Python interpreter state.  The 8-byte alignment of
- * the chunk lets the paint/scan loop run at memory bandwidth. */
-static const uint64_t RUNLOOM_STACK_SENTINEL = 0x504AE6B7C9D1F2A3ULL;
-
-/* Global toggle.  Disabled after calibration finishes so steady-state
- * spawns don't pay the paint cost. */
+/* Global toggle for stack high-water-mark MEASUREMENT.  On during the
+ * calibration window, disabled once it freezes so steady-state spawns pay
+ * nothing.  (Kept named "paint" for ABI / stats / test compatibility; the
+ * measurement itself is now paint-free -- see runloom_stack_hwm_scan.) */
 static int runloom_stack_paint_on = 1;
 
 void runloom_coro_paint_set(int enabled) { runloom_stack_paint_on = enabled ? 1 : 0; }
@@ -368,33 +364,54 @@ static void runloom_stack_scrub(void *stack, size_t size)
 }
 
 #if defined(RUNLOOM_HAVE_FCONTEXT) || defined(RUNLOOM_HAVE_UCONTEXT)
-/* Paint every 8-byte chunk of the stack body with the sentinel.
- * Skip the first 16 bytes (reserved for the pool's free-list header)
- * and the last 256 bytes (asm_make_ctx writes the initial register
- * frame there; that area is rewritten by every resume so painting
- * it just inflates the HWM scan). */
+/* No-op, retained as a spawn-path call site.  An earlier design filled the
+ * unused stack body with a sentinel WORD (0x504AE6B7C9D1F2A3) so the HWM scan
+ * could find the deepest overwritten slot.  That sentinel is a fake pointer,
+ * and in a rare calibration-window timing it ended up on the interpreter's
+ * value stack where a live object pointer belongs -- FOR_ITER then ran
+ * `Py_TYPE(iter)->tp_iternext(iter)` on it, i.e. CALLED the fake pointer as a
+ * function -> jump to a garbage address -> SIGSEGV (the gc-churn crash the
+ * hang-hunter found; all 6 cores deref the sentinel).  The HWM is now measured
+ * paint-free via resident pages (runloom_stack_hwm_scan below), so no marker is
+ * ever written into stack memory and nothing can leak into live frames. */
 static void runloom_stack_paint(void *stack, size_t size)
 {
-    uint64_t *p, *end;
-    if (!runloom_stack_paint_on) return;
-    p   = (uint64_t *)((uintptr_t)stack + 16);
-    end = (uint64_t *)((uintptr_t)stack + size - 256);
-    while (p < end) *p++ = RUNLOOM_STACK_SENTINEL;
+    (void)stack; (void)size;
 }
 
-/* Scan low->high; the first non-sentinel word marks the deepest write.
- * Stack grows DOWN, so deepest write == lowest address; reported HWM
- * is (top - deepest_addr) bytes. */
+/* Stack high-water-mark via resident pages (mincore) -- page-granular, which
+ * is ample since calibration rounds to next_pow2.  A goroutine grows its stack
+ * DOWN from the top, faulting pages as it deepens; those pages stay resident
+ * until the stack is released (MADV_DONTNEED).  So the contiguous run of
+ * resident pages measured DOWN from the top is the deepest the goroutine ever
+ * reached.  The lone resident pool-header page at the very bottom sits below
+ * the untouched gap, so the top-down scan stops before it.  Writes nothing
+ * (companion to the datastack resident-page accounting in
+ * runloom_sched_datastack.c.inc).  Returns 0 where mincore is unavailable. */
 static size_t runloom_stack_hwm_scan(void *stack, size_t size)
 {
-    uint64_t *p, *end;
-    uintptr_t deepest;
-    p   = (uint64_t *)((uintptr_t)stack + 16);
-    end = (uint64_t *)((uintptr_t)stack + size - 256);
-    while (p < end && *p == RUNLOOM_STACK_SENTINEL) p++;
-    if (p >= end) return 0;
-    deepest = (uintptr_t)p;
-    return (size_t)(((uintptr_t)stack + size) - deepest);
+#if !defined(_WIN32)
+    long ps = sysconf(_SC_PAGESIZE);
+    size_t page = (ps > 0) ? (size_t)ps : 4096;
+    size_t npages = (page > 0) ? size / page : 0;
+    size_t used = 0, hi = npages;
+    unsigned char vec[512];                 /* 512 pages == 2 MiB per batch */
+    if (npages == 0) return 0;
+    while (hi > 0) {
+        size_t batch = (hi > sizeof(vec)) ? sizeof(vec) : hi;
+        size_t lo = hi - batch, i;
+        if (mincore((char *)stack + lo * page, batch * page, vec) != 0) break;
+        for (i = batch; i-- > 0; ) {
+            if (vec[i] & 1) used += page;
+            else return used;               /* untouched gap -> deepest found */
+        }
+        hi = lo;
+    }
+    return used;
+#else
+    (void)stack; (void)size;
+    return 0;
+#endif
 }
 #endif
 
