@@ -352,6 +352,39 @@ table -- it needs no third-party installs and covers libraries runloom has never
 seen); keep additions crypto-specific so a false match only over-provisions
 virtual stack the auto-sizer reclaims.
 
+#### Writing stack-predictable goroutines
+
+The auto-sizer is sound exactly when a kind's **stack depth is a function of the
+code, not the input**: it measures the high-water mark of the runs it sees and
+reserves `next_pow2(worst_seen * 4)`, so a future run that goes more than ~4x
+deeper than anything observed can still overflow (it fails safe on the guard
+page — a clean classified crash, never corruption — but it is a crash). The
+one-line rule that keeps you out of that case:
+
+> **Keep stack depth bounded and input-independent — iterate or heap-stack
+> instead of recursing through native code.**
+
+Concretely:
+
+* **Recursion that stays in pure Python is already safe** — it runs on runloom's
+  *growable* datastack (proven to ~1M deep) and degrades to a clean
+  `RecursionError`, never a stack-overflow SEGV. Depth here is not the
+  auto-sizer's concern.
+* **Recursion that bounces through C at each level** (a native parser, `ast`/
+  `compile`, crypto, regex) consumes the small *C* stack the auto-sizer manages,
+  and its depth is usually a function of the *input* (how nested the document
+  is). That is the case the headroom cannot guarantee.
+* The fix is algorithmic, not stylistic: convert call-stack recursion into an
+  explicit **heap-allocated stack/queue** (`while work: node = work.pop(); ...`).
+  The depth then lives in heap memory and the C stack stays flat — the
+  auto-sizer and the guard page never see it, regardless of how adversarial the
+  input is.
+
+For a kind whose native-recursion depth is genuinely input-driven and you can't
+flatten it (a third-party recursive parser on untrusted data), don't let it
+learn down — pin it with an explicit `stack_size=` (which always wins over the
+auto-sizer) or offload the deep call.
+
 ## Putting it all together
 
 For a production service:
