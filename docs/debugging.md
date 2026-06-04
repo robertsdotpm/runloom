@@ -99,6 +99,61 @@ loops) and old `sleep` goroutines (tickers), so narrow `states` / raise
 * The **currently-running** goroutine has no *saved* stack — use the normal
   `traceback` / `sys._getframe` for your own frames.
 
+## What is each hub doing? (`hubs()`)
+
+`goroutines()` is the per-goroutine view; `runloom.inspect.hubs()` (or
+`runloom.hubs()`) is the per-**hub** view — the M:N scheduler threads — and the
+first thing to look at when the answer to "it hung" is *which* hub and *on
+what*:
+
+```python
+import runloom
+from runloom import inspect as gi
+gi.print_hubs()          # one row per hub; wedged hubs flagged
+hs = gi.hubs()           # the same data as a list of dicts
+```
+
+```
+=== runloom hubs (4) ===
+ id  label       running_g  dwell_ms pend  what
+  0  running             1         0    1
+  1  WEDGED/io        1025       150    1  cursor.execute (db.py:88)
+  2  idle                -         -    0
+  3  idle                -         -    0
+
+1 hub(s) wedged.  Full C+Python stack of every thread:
+    py-spy dump --pid 33187
+```
+
+Each dict has:
+
+| field | meaning |
+| --- | --- |
+| `id` | dense hub index |
+| `state` | `detached` (released its tstate — a blocking call **or** idle), `attached` (running Python / CPU-bound), `suspended` (a stop-the-world is in progress) |
+| `running_g` | goid being resumed, or `None` when idle |
+| `dwell_ms` | how long the **current resume** has run; a large value with `detached` is a hub wedged in a blocking call |
+| `pending` | goroutines owned + queued on this hub |
+| `preempt_requested` | sysmon has asked this hub to yield (a CPU wedge) |
+| `instrumented` | whether sysmon resume-tracking is live (it is by default on free-threaded 3.13t; `running_g`/`dwell_ms`/`blocked_at` need it) |
+| `blocked_at` | best-effort Python call site of a **DETACHED-wedged** hub's blocking call, e.g. `cursor.execute (db.py:88)`, else `None` |
+| `stack_cmd` | a ready-to-run `py-spy dump --pid <PID>` for **this** process — the always-safe, out-of-process full C+Python stack of every thread |
+
+**`blocked_at` is best-effort.** It is read from another hub's thread-state, so
+it only fills for a hub that is *stably* DETACHED (a goroutine parked in a
+blocking syscall — the owner thread won't touch its frames until the call
+returns) and only when the handoff rescue isn't mid-adoption of that hub. For an
+**ATTACHED** (CPU) wedge, or when the read can't be taken safely, it is `None` —
+fall back to `stack_cmd`. `py-spy` reads the process out-of-process, so it
+always works and gives the **complete** C + Python stack of *every* thread (the
+one truly-stuck thread included); use it whenever `blocked_at` is `None` or you
+want the full picture. (`dwell_ms` reflects the *current* resume — a hub rapidly
+cycling through short resumes shows a small dwell even when busy; a genuinely
+stuck hub's dwell climbs.)
+
+Returns `[]` outside an M:N run (`n=1` / before `run()`). All fields are
+lock-free atomic reads, so `hubs()` is cheap enough to poll from a watchdog.
+
 ## Dumping a hung process (`kill -QUIT`)
 
 ```python

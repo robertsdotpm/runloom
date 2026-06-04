@@ -90,6 +90,32 @@ int runloom_mn_yield_current(void);
  * never called or after mn_fini). */
 int runloom_mn_hub_count(void);
 
+/* ---- per-hub diagnostic snapshot (runloom.inspect.hubs()) ----
+ * A point-in-time view of every hub's scheduler state, for answering
+ * "what is each hub doing / is any hub wedged, on what, for how long".
+ * Every field is a lock-free read of a per-hub atomic; for a hub that is
+ * DETACHED-wedged (a goroutine inside a non-cooperative blocking call) it
+ * ALSO best-effort fills `blocked_at` with the running goroutine's top
+ * Python frame -- the blocking call site -- read under a handoff-rescue
+ * lockout (see mn_sched_hubinfo.c.inc for the safety argument). */
+typedef struct runloom_hub_info {
+    int       id;                 /* dense hub index 0..count-1 */
+    long long running_g;          /* goid of the g currently being resumed */
+    int       has_running_g;      /* 0 if idle / sysmon instrumentation off */
+    double    dwell_ms;           /* how long the current resume has run, or 0 */
+    int       attach_state;       /* RUNLOOM_TS_DETACHED/ATTACHED/SUSPENDED, -1 unknown */
+    long      pending;            /* gs owned + queued on this hub */
+    int       preempt_requested;  /* sysmon has asked this hub to yield */
+    int       instrumented;       /* 1 if sysmon resume-tracking is live */
+    char      blocked_at[192];    /* "qualname (file:line)" best-effort, or "" */
+} runloom_hub_info_t;
+
+/* Snapshot every live hub.  Returns a malloc'd array of `*count_out` entries
+ * (caller frees with free()), or NULL with *count_out=0 when the M:N
+ * scheduler is not running.  Normal interpreter context only -- it may touch
+ * Python frame objects to fill blocked_at. */
+runloom_hub_info_t *runloom_mn_hub_snapshot(long *count_out);
+
 /* Return an opaque handle to the hub running on this thread (or NULL
  * if the calling thread isn't a hub).  Used by netpoll to record where
  * to route a parked g when it becomes ready. */

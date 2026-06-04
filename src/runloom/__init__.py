@@ -76,6 +76,7 @@ mn_go = _core.mn_go
 mn_run = _core.mn_run
 mn_fini = _core.mn_fini
 mn_hub_count = _core.mn_hub_count
+mn_hub_states = _core.mn_hub_states   # per-hub diagnostic snapshot (see inspect.hubs)
 
 # Lower-level C primitives, surfaced here so `runloom_c` never needs importing
 # directly for normal use.  (The raw module stays available as `runloom_c` for
@@ -138,6 +139,7 @@ if _autosize_env in ("1", "on", "true", "prescan"):
 from . import inspect  # noqa: E402,F401
 goroutines = inspect.goroutines
 dump = inspect.dump
+hubs = inspect.hubs
 
 # Feature packages, imported eagerly so that `import runloom` is the ONLY
 # import statement you ever need.  Importing them has no side effects -- in
@@ -157,7 +159,8 @@ __all__ = [
     # channels
     "Chan", "select",
     # M:N (free-threaded 3.13t)
-    "mn_init", "mn_go", "mn_run", "mn_fini", "mn_hub_count",
+    "mn_init", "mn_go", "mn_run", "mn_fini", "mn_hub_count", "mn_hub_states",
+    "hubs",
     # low-level I/O primitives
     "TCPConn", "Coro", "G", "wait_fd", "WAIT_FD_CANCELLED",
     "tcp_recv", "tcp_send", "iouring_available",

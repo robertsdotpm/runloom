@@ -41,6 +41,7 @@ Notes on the Python stack (``stack`` / ``stacks=True``):
   * The currently-running goroutine has no *saved* stack; use the normal
     ``traceback`` / ``sys._getframe`` for your own frames.
 """
+import os
 import sys
 
 import runloom_c as _core
@@ -407,4 +408,91 @@ def dump(file=None, stacks=True):
         file = sys.stderr
     file.write(format(stacks=stacks))
     file.write("\n")
+    file.flush()
+
+
+def hubs():
+    """A snapshot of every M:N hub as a list of dicts -- the "what is each hub
+    doing right now" view, the hub-level companion to goroutines().
+
+    Each entry has:
+        id            -- dense hub index
+        state         -- 'detached' (released its tstate: a blocking call or
+                         idle), 'attached' (running Python / CPU-bound),
+                         'suspended' (a stop-the-world is in progress)
+        running_g     -- goid of the goroutine being resumed, or None if idle
+        dwell_ms      -- how long the current resume has run (None if idle); a
+                         large value with state 'detached' is a wedged hub
+        pending       -- goroutines owned + queued on this hub
+        preempt_requested -- sysmon has asked this hub to yield (a CPU wedge)
+        instrumented  -- whether sysmon resume-tracking is live (it is by
+                         default on free-threaded 3.13t; running_g / dwell_ms /
+                         blocked_at need it)
+        blocked_at    -- best-effort Python call site of a DETACHED-wedged hub's
+                         blocking call, e.g. 'cursor.execute (db.py:88)', or None
+        stack_cmd     -- a ready-to-run command that dumps the full C+Python
+                         stack of every thread in THIS process, out-of-process
+                         and always safe: 'py-spy dump --pid <PID>'.  Use it when
+                         blocked_at is None (a CPU wedge, or the frame could not
+                         be read safely) or when you want the complete stack.
+
+    Returns [] when the M:N scheduler is not running (n=1 / outside run())."""
+    cmd = "py-spy dump --pid {0}".format(os.getpid())
+    hs = _core.mn_hub_states()
+    for h in hs:
+        h["stack_cmd"] = cmd
+    return hs
+
+
+# A hub past the ~50 ms sysmon wedge budget is stuck, not merely busy.
+WEDGE_MS = 50.0
+
+
+def _hub_label(h):
+    """A one-word health label for a hub row."""
+    if not h["instrumented"]:
+        return h["state"]
+    if h["running_g"] is None:
+        return "idle"
+    if (h["dwell_ms"] or 0.0) >= WEDGE_MS:
+        if h["state"] == "detached":
+            return "WEDGED/io"
+        if h["state"] == "attached":
+            return "WEDGED/cpu"
+        return "WEDGED"
+    return "running"
+
+
+def print_hubs(file=None):
+    """Write a human-readable hubs() table to ``file`` (default stderr).
+
+    One row per hub; wedged hubs are flagged and, when known, show the blocking
+    call site, with a py-spy command for the full stack of every thread."""
+    if file is None:
+        file = sys.stderr
+    hs = hubs()
+    if not hs:
+        file.write("no hubs (the M:N scheduler is not running -- "
+                   "use run(n>1, ...) or mn_init)\n")
+        file.flush()
+        return
+
+    file.write("=== runloom hubs ({0}) ===\n".format(len(hs)))
+    file.write("{0:>3}  {1:<10} {2:>10} {3:>9} {4:>4}  what\n".format(
+        "id", "label", "running_g", "dwell_ms", "pend"))
+    wedged = []
+    for h in sorted(hs, key=lambda x: x["id"]):
+        label = _hub_label(h)
+        rg, dwell = h["running_g"], h["dwell_ms"]
+        file.write("{0:>3}  {1:<10} {2:>10} {3:>9} {4:>4}  {5}\n".format(
+            h["id"], label,
+            "-" if rg is None else rg,
+            "-" if dwell is None else "{0:.0f}".format(dwell),
+            h["pending"], h["blocked_at"] or ""))
+        if label.startswith("WEDGED"):
+            wedged.append(h)
+
+    if wedged:
+        file.write("\n{0} hub(s) wedged.  Full C+Python stack of every "
+                   "thread:\n    {1}\n".format(len(wedged), wedged[0]["stack_cmd"]))
     file.flush()

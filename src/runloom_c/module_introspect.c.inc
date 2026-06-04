@@ -87,6 +87,83 @@ static PyObject *m_goroutine_count(PyObject *self, PyObject *unused)
     return PyLong_FromLong(runloom_goroutine_count());
 }
 
+/* Build one {...} dict for a hub snapshot entry (runloom.inspect.hubs()).
+ * Returns a new ref or NULL (exception set). */
+static PyObject *runloom_hub_info_to_dict(const runloom_hub_info_t *o)
+{
+    PyObject *d = PyDict_New();
+    PyObject *v = NULL;
+    const char *state;
+    if (d == NULL) return NULL;
+
+#define SET(key, expr) do {                                               \
+        v = (expr);                                                       \
+        if (v == NULL || PyDict_SetItemString(d, (key), v) < 0) {         \
+            Py_XDECREF(v); Py_DECREF(d); return NULL;                     \
+        }                                                                 \
+        Py_DECREF(v);                                                     \
+    } while (0)
+
+    /* attach_state mirrors RUNLOOM_TS_* (0 DETACHED / 1 ATTACHED / 2 SUSPENDED;
+     * -1 unknown, e.g. pre-3.13).  DETACHED with a long dwell == a blocking-IO
+     * wedge; ATTACHED == CPU-bound; the dwell tells idle from stuck. */
+    switch (o->attach_state) {
+        case 0:  state = "detached";  break;
+        case 1:  state = "attached";  break;
+        case 2:  state = "suspended"; break;
+        default: state = "unknown";   break;
+    }
+
+    SET("id",      PyLong_FromLong((long)o->id));
+    SET("state",   PyUnicode_FromString(state));
+    SET("pending", PyLong_FromLong(o->pending));
+    SET("preempt_requested", PyBool_FromLong(o->preempt_requested));
+    SET("instrumented",      PyBool_FromLong(o->instrumented));
+
+    if (o->has_running_g) {
+        SET("running_g", PyLong_FromUnsignedLongLong((unsigned long long)o->running_g));
+        SET("dwell_ms",  PyFloat_FromDouble(o->dwell_ms));
+    } else {
+        SET("running_g", Py_NewRef(Py_None));
+        SET("dwell_ms",  Py_NewRef(Py_None));
+    }
+
+    if (o->blocked_at[0] != '\0') {
+        SET("blocked_at", PyUnicode_FromString(o->blocked_at));
+    } else {
+        SET("blocked_at", Py_NewRef(Py_None));
+    }
+
+#undef SET
+    return d;
+}
+
+static PyObject *m_mn_hub_states(PyObject *self, PyObject *unused)
+{
+    runloom_hub_info_t *arr;
+    long n = 0, i;
+    PyObject *list;
+    (void)self; (void)unused;
+
+    arr = runloom_mn_hub_snapshot(&n);
+    if (arr == NULL || n == 0) {
+        free(arr);                 /* free(NULL) is a no-op */
+        return PyList_New(0);      /* not running / no hubs -> [] */
+    }
+    list = PyList_New(0);
+    if (list == NULL) { free(arr); return NULL; }
+    for (i = 0; i < n; i++) {
+        PyObject *d = runloom_hub_info_to_dict(&arr[i]);
+        if (d == NULL || PyList_Append(list, d) < 0) {
+            Py_XDECREF(d); Py_DECREF(list); free(arr);
+            return NULL;
+        }
+        Py_DECREF(d);
+    }
+    free(arr);
+    return list;
+}
+
 static PyObject *m_dump_goroutines(PyObject *self, PyObject *args)
 {
     int fd = 2;

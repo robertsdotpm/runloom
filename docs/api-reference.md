@@ -190,6 +190,17 @@ One dict per live goroutine: `id`, `state` (`running` / `runnable` /
 
 Number of live goroutines.
 
+#### `mn_hub_states() → list[dict]`
+
+One dict per M:N hub — the per-**hub** view: `id`, `state` (`detached` /
+`attached` / `suspended`), `running_g` (goid being resumed, or `None`),
+`dwell_ms` (how long that resume has run), `pending`, `preempt_requested`,
+`instrumented`, and `blocked_at` (best-effort Python call site of a
+DETACHED-wedged hub's blocking call).  Lock-free atomic reads; `[]` when the M:N
+scheduler isn't running.  The friendly wrapper `runloom.inspect.hubs()` adds a
+`stack_cmd` (`py-spy dump --pid <PID>`) per row, and `runloom.inspect.print_hubs()`
+renders the table — see [debugging.md](debugging.md#what-is-each-hub-doing-hubs).
+
 #### `goroutine_stack(id) → (callable_repr, [(file, line, func), ...])`
 
 Best-effort reconstructed Python stack of one goroutine (deepest first).

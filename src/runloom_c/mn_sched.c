@@ -177,4 +177,5 @@ static volatile long runloom_mn_pending_global = 0;
 #include "mn_sched_mn_api.c.inc"
 #include "mn_sched_sysmon.c.inc"
 #include "mn_sched_handoff.c.inc"
+#include "mn_sched_hubinfo.c.inc"
 #include "mn_sched_init_fini.c.inc"

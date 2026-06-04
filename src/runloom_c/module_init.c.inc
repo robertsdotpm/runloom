@@ -163,6 +163,13 @@ static PyMethodDef module_methods[] = {
      "mn_hub_count(): number of M:N hubs currently running (0 if mn_init "
      "was never called or after mn_fini).  Lets the runloom.go() wrapper "
      "dispatch to mn_go inside an M:N run."},
+    {"mn_hub_states", m_mn_hub_states, METH_NOARGS,
+     "mn_hub_states() -> list[dict].  A snapshot of every M:N hub: id, state "
+     "('detached'/'attached'/'suspended'), running_g (goid being resumed, or "
+     "None), dwell_ms (how long that resume has run), pending (gs on the hub), "
+     "preempt_requested, instrumented, and blocked_at (the Python call site of "
+     "a DETACHED-wedged hub's blocking call, best-effort).  Lock-free atomic "
+     "reads; see runloom.inspect.hubs() for the friendly view + a py-spy command."},
     {"preempt_init", m_preempt_init, METH_VARARGS,
      "preempt_init(quantum_us=10000): start the time-sliced preemption "
      "timer.  3.13t only.  Goroutines without explicit sched_yield "
