@@ -741,11 +741,14 @@ static PyObject *runloom_preempt_eval_frame(PyThreadState *ts,
  * eval-frame wrapper, NOT runloom_mn_yield_current (whose fast path would bail here
  * -- this hub's own queues are empty, the spinner is the only local g, and the
  * other hubs are blocked in acquire, not in our queues).  Posted by the sysmon
- * only when a controlled-mode resume wedges past the watchdog threshold, so it
- * never fires for frame-bearing code (frame-count preempt resolves that first,
- * deterministically); only a genuine single-frame loop trips it -- trading
- * determinism for liveness in exactly the pathological case that otherwise
- * hangs.  No-op when no goroutine is running on this hub. */
+ * whenever a resume wedges past the watchdog threshold (default scheduler as
+ * well as controlled -- a single-frame loop on the only runnable hub starves
+ * its siblings no matter the mode).  Frame-bearing code is already broken off
+ * by the eval-frame wrapper before its frames re-enter, so in practice only a
+ * genuine single-frame loop is still spinning when this rides its backward-jump
+ * check; if it does fire for frame-bearing code the extra yield is harmless (the
+ * g was about to yield at the wrapper anyway).  No-op when no goroutine is
+ * running on this hub. */
 /* Per-thread pending call (flags=0 -> runs on ANY thread's eval-breaker, not
  * just the main thread's, which is what the public Py_AddPendingCall is pinned
  * to in 3.13 -- and the main thread is parked in mn_run, so it would never

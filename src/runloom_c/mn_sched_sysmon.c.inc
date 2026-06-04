@@ -117,19 +117,23 @@ static RUNLOOM_THREAD_RET runloom_sysmon_main(void *arg)
                 (now - start) > runloom_sysmon_wedge_ns &&
                 tss == RUNLOOM_TS_ATTACHED) {
                 __atomic_store_n(&h->preempt_requested, 1, __ATOMIC_RELAXED);
-                /* Controlled-replay liveness backstop (Feature 1): the eval-frame
-                 * flag above only fires at a Python FRAME boundary, so it cannot
-                 * break a single-frame `while: pass` -- which, serialized under
-                 * the baton, would hold it forever.  Post an eval-breaker pending
-                 * call too; it rides backward-jump checks INSIDE the frame and
-                 * yields the baton holder (runloom_mn_liveness_pending_cb).  Gated to
-                 * controlled+barrier: the default scheduler survives single-frame
-                 * loops via parallelism, and frame-bearing code never reaches this
-                 * branch (frame-count preempt resolves it first), so this fires
-                 * only for the genuine single-frame deadlock case. */
+                /* Single-frame liveness backstop: the eval-frame flag above only
+                 * fires at a Python FRAME boundary, so it cannot break a
+                 * single-frame `while: pass` (no calls -> no frame entry).  Post
+                 * an eval-breaker pending call too; it rides backward-jump checks
+                 * INSIDE the frame and yields the running g (flags=0 -> runs on
+                 * the wedged HUB thread, not the parked main thread).  This is
+                 * needed in the DEFAULT scheduler as well, not only the controlled
+                 * one: at H=1 (or any time the single sibling shares the wedged
+                 * hub) there is no parallel hub to make progress while a
+                 * single-frame loop spins, so without this the sibling starves
+                 * (test_preemption_busy_loop_yields_to_sibling at H=1 hung on a
+                 * scheduling order that ran the busy loop first).  Frame-bearing
+                 * code is already broken off by the wrapper above; the extra
+                 * pending call there only yields a g that is anyway about to
+                 * yield, which is harmless. */
 #ifdef RUNLOOM_MN_LIVENESS_BACKSTOP
-                if (runloom_mn_ctrl.enabled && runloom_mn_ctrl.barrier &&
-                    runloom_mn_interp != NULL) {
+                if (runloom_mn_interp != NULL) {
                     _PyEval_AddPendingCall(runloom_mn_interp,
                                            runloom_mn_liveness_pending_cb, NULL, 0);
                 }
