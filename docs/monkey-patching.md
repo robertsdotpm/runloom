@@ -52,7 +52,8 @@ enable/disable:
 | `subprocess` | `Popen.wait` / `communicate` poll the child's exit cooperatively. |
 | `threading` | `threading.Event`, `threading.Lock` (when used inside a goroutine) park instead of locking. |
 | `queue` | `queue.Queue.get/put` cooperate when called from a goroutine. |
-| `stdio` | `sys.stdin.readline()` and friends park on the underlying fd. |
+| `stdio` | `sys.stdin.readline()` / `input()` park on the underlying fd. |
+| `getpass` | `getpass.getpass()` (a blocking `/dev/tty` read) is offloaded to a worker so the goroutine parks instead of wedging its hub. |
 | `dns` | `socket.getaddrinfo` runs in parallel for A/AAAA records. |
 
 All default to enabled.  Opt out with kwargs:

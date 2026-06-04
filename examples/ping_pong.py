@@ -9,7 +9,12 @@ Run:
     python3 examples/ping_pong.py
 """
 
+import os
+
 import runloom
+
+# Free-threaded build: fan goroutines across all cores (M:N scheduler).
+HUBS = os.cpu_count() or 4
 
 ROUNDS = 5
 
@@ -35,4 +40,4 @@ def main():
     runloom.go(pong, a, b)
 
 if __name__ == "__main__":
-    runloom.run(1, main)
+    runloom.run(HUBS, main)

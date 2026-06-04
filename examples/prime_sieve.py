@@ -10,7 +10,12 @@ Run:
     python3 examples/prime_sieve.py
 """
 
+import os
+
 import runloom
+
+# Free-threaded build: fan goroutines across all cores (M:N scheduler).
+HUBS = os.cpu_count() or 4
 
 LIMIT = 60
 
@@ -43,4 +48,4 @@ def main():
     print(" ".join(str(p) for p in primes))
 
 if __name__ == "__main__":
-    runloom.run(1, main)
+    runloom.run(HUBS, main)

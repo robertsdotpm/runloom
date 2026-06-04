@@ -10,7 +10,12 @@ Run:
     python3 examples/select_demo.py
 """
 
+import os
+
 import runloom
+
+# Free-threaded build: fan goroutines across all cores (M:N scheduler).
+HUBS = os.cpu_count() or 4
 
 def main():
     a = runloom.Chan(1)
@@ -40,4 +45,4 @@ def main():
     print("default fired" if idx == -1 else "got a value")
 
 if __name__ == "__main__":
-    runloom.run(1, main)
+    runloom.run(HUBS, main)

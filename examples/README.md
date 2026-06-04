@@ -1,15 +1,20 @@
 # runloom examples
 
 Small, self-contained programs — each one demonstrates a single aspect of
-runloom. They run on a normal (GIL) build except where noted; `mn_parallel.py`
-needs free-threaded 3.13t for the parallelism payoff.
+runloom. They run goroutines across all your cores via the M:N scheduler
+(`run(HUBS, ...)`), so they need **free-threaded CPython 3.13t with the GIL
+off** — runloom is a free-threaded runtime, and `run(n>1)` deliberately raises
+on a GIL build rather than pretend.
 
 Install runloom first — `pip install runloom`, or `pip install -e .` from a
-clone — then run any example:
+clone — then run any example with the GIL off:
 
 ```bash
-python3 examples/hello_goroutines.py
+PYTHON_GIL=0 ~/.pyenv/versions/3.13.13t/bin/python3 examples/hello_goroutines.py
 ```
+
+(On a stock GIL build the M:N examples raise a clear error telling you to use
+`run(1, ...)`; only `asyncio_bridge.py` is single-loop by nature.)
 
 For raw performance numbers and the measurement harness, see [`../bench/`](../bench/).
 
@@ -58,6 +63,7 @@ For raw performance numbers and the measurement harness, see [`../bench/`](../be
 | --- | --- |
 | [offload_blocking.py](offload_blocking.py) | `runloom.blocking` keeps a hub alive across a non-cooperative call |
 | [mn_parallel.py](mn_parallel.py) | the M:N scheduler scaling across cores (free-threaded 3.13t) |
+| [segfault_dump.py](segfault_dump.py) | `install_crash_handler()` turns a goroutine stack overflow into a classified dump |
 | [asyncio_bridge.py](asyncio_bridge.py) | run existing `async`/`await` code on runloom via `runloom.aio.run` |
 
 ### Free-threaded run (for `mn_parallel.py`)

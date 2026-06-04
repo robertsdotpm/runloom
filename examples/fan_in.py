@@ -8,7 +8,12 @@ Run:
     python3 examples/fan_in.py
 """
 
+import os
+
 import runloom
+
+# Free-threaded build: fan goroutines across all cores (M:N scheduler).
+HUBS = os.cpu_count() or 4
 
 NUM_PRODUCERS = 4
 ITEMS_EACH = 5
@@ -27,4 +32,4 @@ def main():
         print("from producer {0}: item {1}".format(pid, item))
 
 if __name__ == "__main__":
-    runloom.run(1, main)
+    runloom.run(HUBS, main)

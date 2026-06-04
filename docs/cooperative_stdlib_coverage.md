@@ -28,6 +28,8 @@ routes through it cooperates transparently.  e.g. `urllib`/`http.client`/
 | pollable-fd file objects (pipes: `Popen.stdout`, `os.popen`) | **COOP** | `open`/`io.open` route pollable fds through `_pyio` on cooperative `os.read` |
 | `subprocess` run/communicate/wait | **COOP** | pidfd + cooperative selectors/os |
 | `os.waitpid`/`wait*`, `os.system` | **COOP** | pidfd / offload |
+| `sys.stdin` / `input()` | **COOP** | park on stdin's fd, then read |
+| `getpass.getpass()` | **COOP** | offloaded to a worker (its `/dev/tty` read is opened internally) |
 | `time.sleep`, `time.After`/`Tick`/`Timer`/`Ticker` | **COOP** | timers spawn on the active scheduler |
 | `signal.sigwait`/`sigtimedwait`/`pause` | **COOP** | |
 | `threading` Lock/RLock/Event/Condition/Semaphore/Barrier | **COOP** | M:N-safe (Lock backed by `runloom_c.Mutex`) |

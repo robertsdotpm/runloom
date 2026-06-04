@@ -9,7 +9,12 @@ Run:
     python3 examples/timeout.py
 """
 
+import os
+
 import runloom
+
+# Free-threaded build: fan goroutines across all cores (M:N scheduler).
+HUBS = os.cpu_count() or 4
 
 def slow_op(out, delay):
     runloom.sleep(delay)
@@ -31,4 +36,4 @@ def main():
     print(with_timeout(delay=0.30, limit=0.10))   # times out
 
 if __name__ == "__main__":
-    runloom.run(1, main)
+    runloom.run(HUBS, main)

@@ -13,7 +13,12 @@ Run:
 """
 import socket
 
+import os
+
 import runloom
+
+# Free-threaded build: fan goroutines across all cores (M:N scheduler).
+HUBS = os.cpu_count() or 4
 
 runloom.monkey.patch()
 
@@ -89,4 +94,4 @@ def main():
     runloom.go(client, proxy_addr)
 
 if __name__ == "__main__":
-    runloom.run(1, main)
+    runloom.run(HUBS, main)

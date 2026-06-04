@@ -14,7 +14,12 @@ To bench:
 """
 import socket
 
+import os
+
 import runloom
+
+# Free-threaded build: fan goroutines across all cores (M:N scheduler).
+HUBS = os.cpu_count() or 4
 
 HOST = "127.0.0.1"
 PORT = 9000
@@ -47,7 +52,7 @@ def main():
             conn, addr = listener.accept()
             runloom.go(lambda c=conn, a=addr: handle(c, a))
 
-    runloom.run(1, accept_loop)
+    runloom.run(HUBS, accept_loop)
 
 if __name__ == "__main__":
     main()

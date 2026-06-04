@@ -209,9 +209,12 @@ def run(n, main_fn=None):
         return runloom_c.run()
     if gil_enabled():
         raise RuntimeError(
-            "run(n={0}) needs a free-threaded build with the GIL off, but "
-            "the GIL is enabled. Use n=1 for single-thread, or run on "
-            "CPython 3.13t with PYTHON_GIL=0 for real M:N parallelism."
+            "run(n={0}) needs free-threaded CPython with the GIL off "
+            "(3.13t + PYTHON_GIL=0) for M:N parallelism, but the GIL is "
+            "enabled here.\n"
+            "  -> Use run(1, ...) to run single-threaded under the GIL.\n"
+            "  -> Or run on CPython 3.13t with PYTHON_GIL=0 for real "
+            "multi-core parallelism with n>1."
             .format(n))
     prewarm_stdlib()
     runloom_c.mn_init(n)

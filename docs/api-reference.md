@@ -238,6 +238,37 @@ when unset.
 
 Park-age tracking (enables the `age` field + `runloom.inspect.leaked()`).
 
+### Crash reporting & stack tuning
+
+Exposed as friendlier wrappers on `runloom.inspect` (also as raw `runloom_c`
+functions).  See the [Debugging guide](debugging.md#crash-reporting-sigsegv--sigbus)
+and [Stack sizing](stack-sizing.md).
+
+#### `inspect.install_crash_handler(level=None, file=None)` / `uninstall_crash_handler()` / `crash_handler_installed() → bool`
+
+Install a fatal-signal handler (SIGSEGV/SIGBUS/...) that, on a crash, classifies
+the fault against the per-goroutine guard pages -- a goroutine stack overflow is
+named and distinguished from a wild pointer -- and dumps the live-goroutine
+registry, then chains to the default handler.  `level`:
+`on`/`all`/`backtrace`/`pystack`/`wait`/`gdb`/`off` (default from `RUNLOOM_CRASH`).
+`file` also appends the report there.  POSIX has the rich path; Windows uses a
+Vectored Exception Handler.
+
+#### `inspect.enable_stack_advice(on=True)` / `stack_advice() → list[dict]` / `print_stack_advice(file=None)`
+
+Per-goroutine-kind stack profiler.  While on, each kind's real C-stack
+high-water mark is measured; `stack_advice()` returns `{kind, samples, max_hwm,
+reserved, suggested}` per kind so you can right-size `stack_size=`.  Advisory
+only -- it never changes a stack size.  Off by default (zero cost).
+
+#### `inspect.enable_stack_autosize(on=True, prescan=False)`
+
+Adaptive auto-sizer: each goroutine kind starts large and, once measured, its
+later goroutines start at the learned size ("start large, learn down").
+In-memory only -- never persisted.  `prescan=True` also runs the cold-start
+optimizer (a deep-frame kind like `Decimal` starts big enough to survive its
+first run).  An explicit `stack_size=` always wins.  Also `RUNLOOM_STACK_AUTOSIZE=1`.
+
 ### Thread setup
 
 #### `thread_init()` / `thread_fini()`

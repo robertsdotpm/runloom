@@ -3,7 +3,12 @@ import socket
 import sys
 import time
 
+import os
+
 import runloom
+
+# Free-threaded build: fan goroutines across all cores (M:N scheduler).
+HUBS = os.cpu_count() or 4
 
 HOST = "127.0.0.1"
 PORT = 9000
@@ -36,7 +41,7 @@ def main():
         for i in range(n_clients):
             runloom.go(lambda i=i: client(i, n_msgs, payload))
     t0 = time.perf_counter()
-    runloom.run(1, spawn)
+    runloom.run(HUBS, spawn)
     t = time.perf_counter() - t0
     total = n_clients * n_msgs
     print("{0} round-trips in {1:.2f}s -- {2:.0f} req/s, {3:.1f} us/RT".format(

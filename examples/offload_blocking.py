@@ -15,7 +15,12 @@ Run:
     python3 examples/offload_blocking.py
 """
 
+import os
+
 import runloom
+
+# Free-threaded build: fan goroutines across all cores (M:N scheduler).
+HUBS = os.cpu_count() or 4
 
 def crunch(rounds):
     # A tight, yield-free loop — exactly what would otherwise stall a hub.
@@ -49,4 +54,4 @@ def main():
     print("crunch result:", result)
 
 if __name__ == "__main__":
-    runloom.run(1, main)
+    runloom.run(HUBS, main)

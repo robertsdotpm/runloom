@@ -9,7 +9,12 @@ Run:
     python3 examples/waitgroup.py
 """
 
+import os
+
 import runloom
+
+# Free-threaded build: fan goroutines across all cores (M:N scheduler).
+HUBS = os.cpu_count() or 4
 
 class WaitGroup(object):
     """Minimal sync.WaitGroup built on a channel."""
@@ -45,4 +50,4 @@ def main():
     print("all {0} tasks done".format(num_tasks))
 
 if __name__ == "__main__":
-    runloom.run(1, main)
+    runloom.run(HUBS, main)

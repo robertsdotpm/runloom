@@ -8,7 +8,12 @@ Run:
     python3 examples/pipeline.py
 """
 
+import os
+
 import runloom
+
+# Free-threaded build: fan goroutines across all cores (M:N scheduler).
+HUBS = os.cpu_count() or 4
 
 def generate(out, n):
     for i in range(1, n + 1):
@@ -38,4 +43,4 @@ def main():
     print("sum of squares 1..10 =", result.recv()[0])   # 385
 
 if __name__ == "__main__":
-    runloom.run(1, main)
+    runloom.run(HUBS, main)

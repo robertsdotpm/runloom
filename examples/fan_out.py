@@ -8,7 +8,12 @@ Run:
     python3 examples/fan_out.py
 """
 
+import os
+
 import runloom
+
+# Free-threaded build: fan goroutines across all cores (M:N scheduler).
+HUBS = os.cpu_count() or 4
 
 NUM_CONSUMERS = 4
 NUM_ITEMS = 40
@@ -40,4 +45,4 @@ def main():
     print("total handled:", total)            # == NUM_ITEMS
 
 if __name__ == "__main__":
-    runloom.run(1, main)
+    runloom.run(HUBS, main)

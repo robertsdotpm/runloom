@@ -8,7 +8,12 @@ Run:
     python3 examples/hello_goroutines.py
 """
 
+import os
+
 import runloom
+
+# Free-threaded build: fan goroutines across all cores (M:N scheduler).
+HUBS = os.cpu_count() or 4
 
 def greeter(name, steps):
     for i in range(steps):
@@ -26,6 +31,6 @@ def main():
     runloom.go(napper)
 
 if __name__ == "__main__":
-    # runloom.run(1, main) spawns main() first, then drains the scheduler —
+    # runloom.run(HUBS, main) spawns main() first, then drains the scheduler —
     # the moral equivalent of Go's func main().
-    runloom.run(1, main)
+    runloom.run(HUBS, main)

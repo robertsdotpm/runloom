@@ -8,26 +8,19 @@ every core in one process. Hand-rolled asm context switch + C work-stealing
 scheduler + netpoll, built for **free-threaded Python 3.13t** (GIL off).
 
 ```python
-import socket, threading, runloom
+import threading, runloom
+from urllib.request import urlopen
 runloom.monkey.patch()
 
-def crawl(host):
-    # blocking-looking socket calls park the goroutine; one fetch per goroutine
-    s = socket.create_connection((host, 80), timeout=10)
-    req = b"GET / HTTP/1.0\r\nHost: %b\r\nConnection: close\r\n\r\n"
-    s.sendall(req % host.encode())
-    body = b""
-    while True:
-        chunk = s.recv(4096)
-        if not chunk:
-            break
-        body += chunk
-    s.close()
+def crawl(url):
+    # urlopen() looks blocking -- but monkey.patch() parks the goroutine on the
+    # socket instead of the OS thread, so all 64 fetches overlap on real cores.
+    body = urlopen(url, timeout=10).read()
     print(threading.get_native_id(), len(body))
 
 def main():
     for _ in range(64):
-        runloom.go(crawl, "example.com")
+        runloom.go(crawl, "http://example.com")
 
 runloom.run(8, main) # 8 hub threads -> real cores on 3.13t (GIL off)
 ```

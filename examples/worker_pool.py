@@ -9,7 +9,12 @@ Run:
     python3 examples/worker_pool.py
 """
 
+import os
+
 import runloom
+
+# Free-threaded build: fan goroutines across all cores (M:N scheduler).
+HUBS = os.cpu_count() or 4
 
 NUM_WORKERS = 4
 NUM_JOBS = 20
@@ -34,4 +39,4 @@ def main():
         print("worker {0}: {1}^2 = {2}".format(wid, job, square))
 
 if __name__ == "__main__":
-    runloom.run(1, main)
+    runloom.run(HUBS, main)
