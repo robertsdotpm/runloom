@@ -31,7 +31,7 @@ from importlib.metadata import version, PackageNotFoundError
 try:
     __version__ = version("runloom")
 except PackageNotFoundError:        # running from an uninstalled source tree
-    __version__ = "0.1.0"
+    __version__ = "0.2.0"
 del version, PackageNotFoundError
 
 import sys as _sys
