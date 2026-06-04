@@ -170,6 +170,56 @@ def test_prescan_learns_down_after_first_run():
     assert learned >= hwm
 
 
+# Crypto cold start: signing / verification / encryption route through deep
+# OpenSSL / libsodium native math that can overflow a small goroutine stack on
+# the first call.  These are HEURISTIC symbols (not measured): a crypto-
+# referencing kind cold-starts at 1 MiB, then the auto-sizer learns it down.
+encrypt = None      # module-level placeholders so the names land in a kind's
+sign = None         # co_names (LOAD_GLOBAL) without importing a crypto library
+
+CRYPTO_COLD = 1024 * 1024   # next_pow2(512K * 1.5) -- the crypto cold start
+
+
+def crypto_kind():
+    _ = (encrypt, sign)         # crypto symbol names -> cold-start bump
+    return 1
+
+
+def crypto_and_decimal():
+    _ = (encrypt,)              # crypto -> 512K effective frame (the bigger one)
+    return Decimal(2) ** 8      # Decimal -> 256K frame; MAX must pick crypto
+
+
+def test_prescan_crypto_cold_start_is_1mib():
+    runloom.inspect.enable_stack_autosize(True, prescan=True)
+    _batch([crypto_kind, light], 20)
+    assert _row(crypto_kind)["reserved"] == CRYPTO_COLD   # signing/encryption -> 1 MiB
+    assert _row(light)["reserved"] == START                # a plain kind is untouched
+
+
+def test_prescan_crypto_needs_prescan():
+    # without the prescan arg the crypto heuristic does not fire
+    runloom.inspect.enable_stack_autosize(True)
+    _batch([crypto_kind], 20)
+    assert _row(crypto_kind)["reserved"] == START
+
+
+def test_prescan_crypto_outranks_decimal():
+    # a kind referencing BOTH a fat-frame symbol (Decimal, 256K) and a crypto
+    # symbol gets the MAX cold start (crypto's 1 MiB), never the sum
+    runloom.inspect.enable_stack_autosize(True, prescan=True)
+    _batch([crypto_and_decimal], 20)
+    assert _row(crypto_and_decimal)["reserved"] == CRYPTO_COLD
+
+
+def test_prescan_crypto_learns_down():
+    runloom.inspect.enable_stack_autosize(True, prescan=True)
+    _batch([crypto_kind], 20)                   # batch 1: cold-start 1 MiB
+    assert _row(crypto_kind)["reserved"] == CRYPTO_COLD
+    _batch([crypto_kind], 20)                   # batch 2: measured -> learned down
+    assert _row(crypto_kind)["reserved"] < CRYPTO_COLD
+
+
 def test_autosize_under_mn():
     # Under M:N the hubs run concurrently with spawning, so a kind learns down
     # within a batch; use a second batch for a deterministic learned size.

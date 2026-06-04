@@ -336,6 +336,22 @@ starts at the normal default. The scan is one-level and name-based, so it is a
 loose heuristic, not a guarantee -- the guard page and crash reporter still
 backstop anything it misses.
 
+**Cryptography** is the other cold-start class, handled the same way but for a
+different reason. Signing, verification, AEAD encryption and KDFs route through
+deep, *cumulative* native call chains in third-party C (`cryptography`/OpenSSL,
+PyNaCl/libsodium, PyCryptodome) -- enough to overflow the small default on the
+first call. Those libraries aren't in the stdlib profile (their binaries vary by
+version/platform/build, are usually stripped, and the cost is call *depth*, not
+one fat frame), so prescan treats them **heuristically**: a kind whose bytecode
+references a crypto symbol (`encrypt`, `decrypt`, `sign`, `verify`, `Cipher`,
+`Fernet`, `Ed25519PrivateKey`, `HKDF`, ...) cold-starts at **1 MiB**, and
+learn-down then measures the real per-deployment usage on the actual installed
+binary and shrinks it. The symbol list is in
+`tools/heavy_frames/gen_heavy_frames.py` (a *name* list, not a measured-size
+table -- it needs no third-party installs and covers libraries runloom has never
+seen); keep additions crypto-specific so a false match only over-provisions
+virtual stack the auto-sizer reclaims.
+
 ## Putting it all together
 
 For a production service:

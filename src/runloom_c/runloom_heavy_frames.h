@@ -3,8 +3,10 @@
  * Python-visible symbols whose C implementation has an unusually fat SINGLE
  * stack frame (from the stdlib .eh_frame profile, 3.13.13t).
  * The cold-start optimizer bumps a goroutine's first-incarnation stack to
- * hold the fat frame when its code references one of these.  Sizes are the
- * largest fat frame in the symbol's module. */
+ * hold the fat frame when its code references one of these.  Stdlib sizes are
+ * the largest fat frame in the symbol's module; `heuristic:crypto` entries are
+ * NOT measured -- they give signing/verification/encryption a roomy cold start
+ * (512 KiB -> 1 MiB) that the runtime auto-sizer then learns down. */
 #ifndef RUNLOOM_HEAVY_FRAMES_H
 #define RUNLOOM_HEAVY_FRAMES_H
 #include <stddef.h>
@@ -12,6 +14,40 @@
 typedef struct { const char *sym; size_t frame_bytes; } runloom_heavy_frame_t;
 
 static const runloom_heavy_frame_t runloom_heavy_frames[] = {
+    {"AESCCM", 524288},   /* heuristic:crypto */
+    {"AESGCM", 524288},   /* heuristic:crypto */
+    {"ChaCha20Poly1305", 524288},   /* heuristic:crypto */
+    {"Cipher", 524288},   /* heuristic:crypto */
+    {"DSAPrivateKey", 524288},   /* heuristic:crypto */
+    {"Ed25519PrivateKey", 524288},   /* heuristic:crypto */
+    {"Ed448PrivateKey", 524288},   /* heuristic:crypto */
+    {"EllipticCurvePrivateKey", 524288},   /* heuristic:crypto */
+    {"Fernet", 524288},   /* heuristic:crypto */
+    {"HKDF", 524288},   /* heuristic:crypto */
+    {"PBKDF2HMAC", 524288},   /* heuristic:crypto */
+    {"PKCS1_OAEP", 524288},   /* heuristic:crypto */
+    {"RSAPrivateKey", 524288},   /* heuristic:crypto */
+    {"Scrypt", 524288},   /* heuristic:crypto */
+    {"SealedBox", 524288},   /* heuristic:crypto */
+    {"SecretBox", 524288},   /* heuristic:crypto */
+    {"SigningKey", 524288},   /* heuristic:crypto */
+    {"VerifyKey", 524288},   /* heuristic:crypto */
+    {"X25519PrivateKey", 524288},   /* heuristic:crypto */
+    {"decrypt", 524288},   /* heuristic:crypto */
+    {"eddsa", 524288},   /* heuristic:crypto */
+    {"encrypt", 524288},   /* heuristic:crypto */
+    {"generate_private_key", 524288},   /* heuristic:crypto */
+    {"gensalt", 524288},   /* heuristic:crypto */
+    {"hashpw", 524288},   /* heuristic:crypto */
+    {"load_der_private_key", 524288},   /* heuristic:crypto */
+    {"load_pem_private_key", 524288},   /* heuristic:crypto */
+    {"load_ssh_private_key", 524288},   /* heuristic:crypto */
+    {"pbkdf2_hmac", 524288},   /* heuristic:crypto */
+    {"pkcs1_15", 524288},   /* heuristic:crypto */
+    {"pss", 524288},   /* heuristic:crypto */
+    {"scrypt", 524288},   /* heuristic:crypto */
+    {"sign", 524288},   /* heuristic:crypto */
+    {"verify", 524288},   /* heuristic:crypto */
     {"Context", 262376},   /* _decimal */
     {"Decimal", 262376},   /* _decimal */
     {"getcontext", 262376},   /* _decimal */
