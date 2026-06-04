@@ -38,6 +38,7 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import triage          # noqa: E402
 import workloads       # noqa: E402
+import rr_capture      # noqa: E402  (determinism tooling #5)
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
@@ -73,6 +74,12 @@ class Hunter(object):
             self.engines = list(workloads.ENGINES)
         self.rng = random.Random(args.seed)
         self.report_dir = os.path.abspath(args.report_dir)
+        self.rr_ok = False
+        if getattr(args, "rr", False):
+            ok, reason = rr_capture.rr_available()
+            self.rr_ok = ok
+            sys.stderr.write("[hang-hunter] rr capture: {0} -- {1}\n".format(
+                "ENABLED" if ok else "disabled", reason))
         self.core_dir = os.path.join(self.report_dir, "cores")
         os.makedirs(self.core_dir, exist_ok=True)
         self.status_path = os.path.join(self.report_dir, "status.txt")
@@ -144,6 +151,30 @@ class Hunter(object):
         self.sigs[sig] = {"count": 1, "kind": kind, "repro": repro, "report": fname}
         sys.stderr.write("[hang-hunter] NEW {0} sig={1} -> {2}\n   repro: {3}\n".format(
             kind, sig, fname, repro))
+        if self.rr_ok and kind == "CRASH":
+            self._rr_recapture(path, repro)
+
+    def _rr_recapture(self, report_path, repro):
+        """Best-effort: re-run the repro under rr to get a deterministic,
+        reverse-debuggable recording; note it in the report.  Never raises."""
+        try:
+            toks = repro.split()
+            wl = next((t for t in toks if t.endswith(".py")), None)
+            if wl is None:
+                return
+            env = dict(t.split("=", 1) for t in toks
+                       if "=" in t and not t.startswith("/"))
+            tdir = os.path.join(self.report_dir, "rr_traces")
+            rc, trace, _out = rr_capture.capture(wl, env, tdir, py=self.py)
+            note = ("\n[rr] recaptured under rr (rc={0}); replay:\n    {1}\n"
+                    if (rc < 0 or rc >= 128 or rc == 124) else
+                    "\n[rr] re-run under rr did NOT reproduce (rc={0}); trace {1}\n")
+            with open(report_path, "a") as fh:
+                fh.write(note.format(rc, rr_capture.replay_hint(trace)
+                                     if (rc < 0 or rc >= 128 or rc == 124) else trace))
+            sys.stderr.write("[hang-hunter] rr recapture rc={0} trace={1}\n".format(rc, trace))
+        except Exception as e:  # noqa: BLE001
+            sys.stderr.write("[hang-hunter] rr recapture failed: {0!r}\n".format(e))
 
     def on_hang(self, slot):
         pid = slot["proc"].pid
@@ -274,6 +305,9 @@ class Hunter(object):
 def main():
     ap = argparse.ArgumentParser(description="autonomous runloom hang/crash hunter")
     ap.add_argument("--engines", default="stress,hypo")
+    ap.add_argument("--rr", action="store_true",
+                    help="on a CRASH finding, recapture the repro under rr "
+                         "(record-and-replay) when the host supports it")
     ap.add_argument("--jobs", type=int, default=0, help="parallel jobs (0=auto)")
     ap.add_argument("--once", type=int, default=0, help="run ~N jobs then exit")
     ap.add_argument("--duration", type=int, default=0, help="hunt for N seconds")
