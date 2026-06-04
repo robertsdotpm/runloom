@@ -8,7 +8,7 @@ Everyday API -- `import runloom` is all you need:
                                   build raises).  Collapses mn_init/mn_go/
                                   mn_run/mn_fini.  main_fn optional -> drain only.
     runloom.sleep(seconds)        sleep without blocking the OS thread
-    runloom.yield_()              cooperative yield
+    runloom.yield_now()           cooperative yield (give other goroutines a turn)
     runloom.Chan(capacity=0)      Go-style channel
     runloom.select(cases, ...)    wait on multiple channel ops
     runloom.blocking(fn, ...)     offload a blocking/CPU call off the hub
@@ -38,7 +38,7 @@ import sys as _sys
 
 # CPython's per-thread recursion counter is not swapped across our
 # ucontext stack switch (v0 -- properly handled in the M:N C path
-# planned for phase 3).  Each runloom.yield_() permanently decrements the
+# planned for phase 3).  Each runloom.yield_now() permanently decrements the
 # counter on the OS thread, so a long runloom.run() eventually hits
 # RecursionError.  Bumping the limit makes the leak tolerable for
 # anything short of a multi-hour service; the proper fix is to
@@ -49,7 +49,8 @@ if _sys.getrecursionlimit() < 1_000_000:
 
 from .runtime import (
     go,
-    yield_,
+    yield_now,
+    yield_,        # deprecated alias for yield_now (keyword-dodge name)
     sleep,
     blocking,
     run,
@@ -63,7 +64,7 @@ netpoll_backend = _core.netpoll_backend
 
 # Re-export the core scheduler + channel primitives so `import runloom` is all
 # everyday code needs -- no separate `import runloom_c`.  (go / run / sleep /
-# yield_ / blocking / current above are the friendly wrappers from .runtime.)
+# yield_now / blocking / current above are the friendly wrappers from .runtime.)
 Chan = _core.Chan
 select = _core.select
 
@@ -153,7 +154,7 @@ from . import aio      # noqa: E402,F401  – run async/await on the scheduler
 
 __all__ = [
     # scheduler
-    "go", "run", "sleep", "yield_", "blocking", "current",
+    "go", "run", "sleep", "yield_now", "yield_", "blocking", "current",
     "Goroutine", "go_noyield", "warmup", "thread_init", "thread_fini",
     "preempt_init", "preempt_fini",
     # channels

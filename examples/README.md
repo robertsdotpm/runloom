@@ -22,7 +22,7 @@ For raw performance numbers and the measurement harness, see [`../bench/`](../be
 
 | Example | Shows |
 | --- | --- |
-| [hello_goroutines.py](hello_goroutines.py) | `go` / `run` / `yield_` / `sleep` — the basics |
+| [hello_goroutines.py](hello_goroutines.py) | `go` / `run` / `yield_now` / `sleep` — the basics |
 | [channels.py](channels.py) | buffered vs unbuffered channels, `close`, `for v in ch` |
 | [select_demo.py](select_demo.py) | `select` over recv/send cases, plus non-blocking `default` |
 | [ping_pong.py](ping_pong.py) | two goroutines synchronised purely by channels |

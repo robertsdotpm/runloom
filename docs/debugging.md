@@ -292,7 +292,7 @@ while True:
         runloom.go(handle, conn)
         break
     except RuntimeError:
-        runloom.yield_()            # let some finish, then retry
+        runloom.yield_now()         # let some finish, then retry
 ```
 
 `gi.live_goroutines()` reports the current count under the cap.  The gate has

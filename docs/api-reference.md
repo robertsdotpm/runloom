@@ -317,7 +317,7 @@ Top-level package.  Re-exports a Go-style API from `runloom.runtime`
 import runloom
 
 runloom.go(fn)            # spawn (uses the C scheduler under the hood)
-runloom.yield_()          # cooperative yield
+runloom.yield_now()       # cooperative yield (give other goroutines a turn)
 runloom.sleep(seconds)    # cooperative sleep
 runloom.run(n, main_fn=None)  # THE entry point. run main_fn with n hubs:
                           #   n=1 single-thread, n>1 M:N parallel across n

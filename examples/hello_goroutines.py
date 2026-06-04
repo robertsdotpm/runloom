@@ -18,7 +18,7 @@ HUBS = os.cpu_count() or 4
 def greeter(name, steps):
     for i in range(steps):
         print("{0}: step {1}".format(name, i))
-        runloom.yield_()          # hand the CPU to the other goroutines
+        runloom.yield_now()       # hand the CPU to the other goroutines
 
 def napper():
     runloom.sleep(0.01)           # cooperative sleep — others run meanwhile

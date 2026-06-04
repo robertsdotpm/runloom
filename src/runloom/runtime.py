@@ -8,7 +8,7 @@ multiple concurrent goroutines, crashing the process on Windows Fibers.
 The C scheduler does per-g tstate snapshots which is the only correct
 way to multiplex Python frames across stacks.
 
-The public API (runloom.go, .yield_, .sleep, .run, .current) is preserved
+The public API (runloom.go, .yield_now, .sleep, .run, .current) is preserved
 so existing code keeps working.
 """
 import sys
@@ -135,9 +135,18 @@ def go(callable_, *args, **kwargs):
     return Goroutine(g, name=getattr(target, "__name__", "goroutine"))
 
 
-def yield_():
-    """Cooperative yield -- equivalent to runtime.Gosched()."""
+def yield_now():
+    """Cooperatively yield the hub so other goroutines run, then resume here.
+
+    The goroutine analogue of ``await asyncio.sleep(0)`` -- a scheduling point
+    you drop into a long CPU loop so siblings get a turn.  Equivalent to Go's
+    ``runtime.Gosched()``."""
     runloom_c.sched_yield_classic()
+
+
+# Backwards-compatible alias for the original keyword-dodge name (`yield` is a
+# reserved word, hence the historical trailing underscore).  Prefer yield_now().
+yield_ = yield_now
 
 
 def sleep(seconds):
