@@ -760,7 +760,20 @@ runloom_coro_t *runloom_coro_new(size_t stack_size,
     if (c == NULL) return NULL;
     c->entry = entry;
     c->user = user;
-    c->fiber = CreateFiber(stack_size, runloom_fiber_entry, c);
+    /* CreateFiberEx, not CreateFiber: CreateFiber COMMITS the whole stack_size
+     * (Windows charges committed pages against the commit limit = RAM+pagefile
+     * at commit time, and does NOT overcommit), so a generous stack_size would
+     * cost its full size per goroutine even untouched -- measured 1000x1MiB =
+     * ~1017 MiB commit.  CreateFiberEx reserves stack_size but commits only a
+     * small floor, growing on demand via the stack guard page -- the same
+     * "reserve big, pay for what you touch" behaviour as the POSIX mmap path
+     * (measured: same 1000x1MiB = ~76 MiB commit).  Commit floor = min(stack,
+     * 64 KiB); a deeper stack grows committed automatically (MSVC _chkstk
+     * probes each page). */
+    {
+        SIZE_T commit = (stack_size < (64 * 1024)) ? stack_size : (64 * 1024);
+        c->fiber = CreateFiberEx(commit, stack_size, 0, runloom_fiber_entry, c);
+    }
     if (c->fiber == NULL) { free(c); return NULL; }
     return c;
 }
