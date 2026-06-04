@@ -81,6 +81,20 @@
   this by rerouting preemption through the eval-breaker / pending-call boundary —
   the merge's dealloc→callback→eval re-enters `_Py_HandlePending` nested, so a
   pending-call preempt still fires inside the destructor.
+- **Cooperative primitives must be FOREIGN-OS-THREAD-safe.** `monkey.patch()`
+  replaces `threading`/`select`/… globally, so a cooperative primitive can be
+  invoked from a thread that is NOT a goroutine and NOT a hub — most commonly a
+  stdlib-internal daemon thread (a `multiprocessing.Queue` `_feed` thread, a
+  `concurrent.futures` worker) that takes a patched `Lock`/`Condition`. Such a
+  thread has no goroutine, no hub, and no per-thread scheduler. Any primitive it
+  can reach must detect this (`_in_goroutine()` is False / a TLS *peek* is NULL)
+  and fall back to **real OS blocking**, never (a) park a goroutine that doesn't
+  exist (`runloom_c.wait_fd` / `_Parker.park` → block the thread on the wake fd
+  with raw `select` instead), nor (b) lazily allocate scheduler state
+  (`current_g()` must `runloom_sched_peek_current()`, never `runloom_sched_get()`,
+  which mallocs a sched + arms the wake-pump). Violating this raced → SIGSEGV /
+  UAF under M:N (free-threaded mp.Queue). Regression net: the synthetic
+  multiprocessing corpus under `run(8)` + `monkey.patch()` (stress many copies).
 
 ## aio bridge invariants (src/runloom/aio/)
 - `runloom.aio` is a package (`src/runloom/aio/`): the shared foundation is
