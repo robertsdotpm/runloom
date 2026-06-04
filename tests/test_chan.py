@@ -344,6 +344,66 @@ class TestSelect(unittest.TestCase):
         self.assertIn(("fired", 0), log)
         self.assertIn(("got-a", "to-a"), log)
 
+    def test_select_send_on_full_buffer_parks(self):
+        """select(send) on a FULL buffered channel must PARK until a receiver
+        frees a slot -- it must NOT treat the channel as ready and spin.
+
+        Guards the SEND-park recheck `ch->cap > 0 && ch->len < ch->cap` in
+        chan_select_main.c.inc: flipping that `&&` to `||` makes a full buffer
+        (cap>0, len==cap) look sendable, so the select aborts the park, re-scans,
+        finds it still full, re-parks, and loops to the 10M-retry RuntimeError
+        instead of blocking cleanly.  Without the mutation this completes and the
+        buffered value flows."""
+        ch = runloom_c.Chan(1)
+        log = []
+
+        def sender():
+            ch.send("fill")                              # buffer now full (len==cap==1)
+            i, _ = runloom_c.select([("send", ch, "second")])   # MUST park (full)
+            log.append(("sent", i))
+
+        def drainer():
+            runloom_c.sched_yield()                      # let sender fill + park
+            v, ok = ch.recv()                            # frees the slot -> wakes select-send
+            log.append(("drained", v, ok))
+            v2, ok2 = ch.recv()                          # now drains "second"
+            log.append(("got", v2, ok2))
+
+        _run_in_sched(sender, drainer)
+        # the select-send fired on case 0 (did not spin/raise) and "second" flowed
+        self.assertIn(("sent", 0), log)
+        self.assertIn(("drained", "fill", True), log)
+        self.assertIn(("got", "second", True), log)
+
+    def test_select_send_recv_abort_no_value_leak(self):
+        """A select with a SEND case AND a ready RECV case fires the RECV and
+        aborts the SEND install -- the abort path must DECREF the SEND value it
+        pinned, exactly once.  Exercises the SEND-value ref-drop loops in the
+        abort paths (chan_select_main.c.inc) and asserts no refcount leak across
+        many iterations."""
+        import sys
+        marker = ["payload"]                             # the object we select-send
+        base = sys.getrefcount(marker)
+        log = []
+
+        def runner():
+            ready = runloom_c.Chan(1)
+            for _ in range(200):
+                ready.send(1)                            # make the RECV case ready
+                # SEND case (unbuffered, no peer) loses to the ready RECV case;
+                # the select fires RECV and must drop the pinned SEND value.
+                idx, _ = runloom_c.select([
+                    ("send", runloom_c.Chan(), marker),
+                    ("recv", ready),
+                ])
+                log.append(idx)
+
+        _run_in_sched(runner)
+        # every iteration fired the ready RECV case (index 1), never the dead SEND
+        self.assertEqual(log, [1] * 200)
+        # the select-send pinned + dropped `marker` each iteration with no net leak
+        self.assertEqual(sys.getrefcount(marker), base)
+
 
 if __name__ == "__main__":
     unittest.main()
