@@ -52,8 +52,8 @@ static void runloom_mn_world_yield_if_monopolizing(runloom_hub_t *h)
         /* Acquire load: a sibling hub publishes its tstate on its own thread
          * (runloom_hub_main); NULL during that startup window -> attach-state
          * -1 -> neither branch below fires (skip). */
-        tss  = runloom_tstate_attach_state(
-                   __atomic_load_n(&runloom_hubs[i].tstate, __ATOMIC_ACQUIRE));
+        tss  = runloom_tstate_attach_state((PyThreadState *)
+                   __atomic_load_n((void **)&runloom_hubs[i].tstate, __ATOMIC_ACQUIRE));
         pend = __atomic_load_n(&runloom_hubs[i].pending, __ATOMIC_RELAXED);
         if (tss == RUNLOOM_TS_SUSPENDED ||
             (tss == RUNLOOM_TS_DETACHED && pend > 0)) {
@@ -124,7 +124,7 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
         __atomic_store_n(&h->stopping, 1, __ATOMIC_RELEASE);
         RUNLOOM_THREAD_RETURN(NULL);
     }
-    __atomic_store_n(&h->tstate, hts, __ATOMIC_RELEASE);
+    __atomic_store_n((void **)&h->tstate, (void *)hts, __ATOMIC_RELEASE);
     /* trace conformance: this thread just created + gilstate-bound its tstate */
     runloom_gilstate_trace("Create", h->id, h->id);
     PyEval_RestoreThread(hts);
@@ -813,7 +813,7 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
         /* trace conformance: deleter is this hub's OWN thread (the fix) */
         runloom_gilstate_trace("Delete", h->id, h->id);
         PyThreadState_Clear(hts);
-        __atomic_store_n(&h->tstate, NULL, __ATOMIC_RELEASE);
+        __atomic_store_n((void **)&h->tstate, (void *)NULL, __ATOMIC_RELEASE);
         PyThreadState_DeleteCurrent();
     } else {
         /* NEGATIVE CONTROL (test-only): reproduce the pre-c28e5ca bug -- leave

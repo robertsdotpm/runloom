@@ -89,8 +89,8 @@ runloom_hub_info_t *runloom_mn_hub_snapshot(long *count_out)
     for (i = 0; i < n; i++) {
         runloom_hub_t *h = &runloom_hubs[i];
         long long      start = __atomic_load_n(&h->resume_start_ns, __ATOMIC_RELAXED);
-        runloom_g_t   *rg    = __atomic_load_n(&h->resume_g, __ATOMIC_RELAXED);
-        PyThreadState *hts   = __atomic_load_n(&h->tstate, __ATOMIC_ACQUIRE);
+        runloom_g_t   *rg    = (runloom_g_t *)__atomic_load_n((void **)&h->resume_g, __ATOMIC_RELAXED);
+        PyThreadState *hts   = (PyThreadState *)__atomic_load_n((void **)&h->tstate, __ATOMIC_ACQUIRE);
         int            tss   = runloom_tstate_attach_state(hts);
         runloom_hub_info_t *o = &arr[i];
 

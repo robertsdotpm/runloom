@@ -223,6 +223,8 @@
    static __forceinline int       runloom_atomic_fetch_add_i (volatile int       *p, int v)       { return (int)_InterlockedExchangeAdd((volatile LONG *)p, (LONG)v); }
    static __forceinline long      runloom_atomic_fetch_add_l (volatile long      *p, long v)      { return (long)_InterlockedExchangeAdd((volatile LONG *)p, (LONG)v); }
    static __forceinline long long runloom_atomic_fetch_add_ll(volatile long long *p, long long v) { return (long long)_InterlockedExchangeAdd64((volatile __int64 *)p, (__int64)v); }
+   static __forceinline unsigned int       runloom_atomic_fetch_add_u  (volatile unsigned int       *p, unsigned int v)       { return (unsigned int)_InterlockedExchangeAdd((volatile LONG *)p, (LONG)v); }
+   static __forceinline unsigned long long runloom_atomic_fetch_add_ull(volatile unsigned long long *p, unsigned long long v) { return (unsigned long long)_InterlockedExchangeAdd64((volatile __int64 *)p, (__int64)v); }
 
 #  define __atomic_fetch_add(p, v, ord)                               \
        _Generic((p),                                                  \
@@ -231,7 +233,11 @@
            long *:          runloom_atomic_fetch_add_l,                  \
            volatile long *: runloom_atomic_fetch_add_l,                  \
            long long *:           runloom_atomic_fetch_add_ll,           \
-           volatile long long *:  runloom_atomic_fetch_add_ll            \
+           volatile long long *:  runloom_atomic_fetch_add_ll,           \
+           unsigned int *:                 runloom_atomic_fetch_add_u,   \
+           volatile unsigned int *:        runloom_atomic_fetch_add_u,   \
+           unsigned long long *:           runloom_atomic_fetch_add_ull, \
+           volatile unsigned long long *:  runloom_atomic_fetch_add_ull  \
        )((p), (v))
 
    /* ---- exchange_n: store v, return the OLD value (GCC contract).

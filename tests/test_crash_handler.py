@@ -28,6 +28,12 @@ requires_guard = pytest.mark.skipif(
     reason="crash classification needs a POSIX guard-page backend (got %s)" % BACKEND,
 )
 
+# A fatal memory fault is SIGSEGV on Linux but SIGBUS on macOS arm64 -- a stack
+# guard-page hit / misaligned access is delivered as SIGBUS there.  Accept either:
+# every assertion below only cares that the process died from a fatal fault the
+# crash handler chained to the default handler, not which of the two it was.
+FAULT_RCS = {-signal.SIGSEGV} | ({-signal.SIGBUS} if hasattr(signal, "SIGBUS") else set())
+
 
 def run_child(body, extra_env=None, timeout=60):
     """Run `body` as a fresh child Python process; return (returncode, output).
@@ -123,7 +129,7 @@ def test_overflow_classified_single_thread():
         runloom_c.go(boom, 16384)                  # small 16 KiB stack
         runloom_c.run()
     """)
-    assert rc == -signal.SIGSEGV, (rc, out)          # chained to default -> cored
+    assert rc in FAULT_RCS, (rc, out)          # chained to default -> cored
     assert "GOROUTINE STACK OVERFLOW" in out, out
     assert "16 KiB" in out, out                       # named its stack size
     assert "goroutine g" in out, out
@@ -142,7 +148,7 @@ def test_overflow_classified_under_mn_scheduler():
         runloom_c.mn_go(boom)
         runloom_c.mn_run()
     """)
-    assert rc == -signal.SIGSEGV, (rc, out)
+    assert rc in FAULT_RCS, (rc, out)
     assert "GOROUTINE STACK OVERFLOW" in out, out
     assert "this thread was executing goroutine g" in out, out
 
@@ -159,7 +165,7 @@ def test_wild_pointer_not_classified_as_overflow():
         runloom_c.go(boom)
         runloom_c.run()
     """)
-    assert rc == -signal.SIGSEGV, (rc, out)
+    assert rc in FAULT_RCS, (rc, out)
     assert "not in any goroutine stack" in out, out
     assert "GOROUTINE STACK OVERFLOW" not in out, out
     assert "=== runloom goroutine dump" in out, out
@@ -177,7 +183,7 @@ def test_pystack_chains_python_traceback():
         runloom_c.go(boom)
         runloom_c.run()
     """)
-    assert rc == -signal.SIGSEGV, (rc, out)
+    assert rc in FAULT_RCS, (rc, out)
     assert "runloom crash" in out, out                 # our dump ran first
     # ... then faulthandler printed the Python traceback and re-raised default.
     assert "Fatal Python error" in out, out
@@ -197,7 +203,7 @@ def test_report_written_to_file(tmp_path):
         runloom_c.go(boom, 16384)
         runloom_c.run()
     """ % str(report))
-    assert rc == -signal.SIGSEGV, (rc, out)
+    assert rc in FAULT_RCS, (rc, out)
     assert report.exists(), "report file not created"
     text = report.read_text()
     assert "runloom crash" in text, text
@@ -232,5 +238,5 @@ def test_env_autoinstall_actually_catches_crash():
         runloom_c.go(boom, 16384)
         runloom_c.run()
     """, extra_env={"RUNLOOM_CRASH": "on"})
-    assert rc == -signal.SIGSEGV, (rc, out)
+    assert rc in FAULT_RCS, (rc, out)
     assert "GOROUTINE STACK OVERFLOW" in out, out

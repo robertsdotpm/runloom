@@ -38,7 +38,7 @@ static RUNLOOM_THREAD_RET runloom_sysmon_main(void *arg)
             /* Acquire load: the hub publishes its tstate on its own thread; a
              * racy/NULL read here is fine -- attach-state -1 classifies as "?"
              * and gates every handoff/preempt dispatch closed. */
-            PyThreadState *hts = __atomic_load_n(&h->tstate, __ATOMIC_ACQUIRE);
+            PyThreadState *hts = (PyThreadState *)__atomic_load_n((void **)&h->tstate, __ATOMIC_ACQUIRE);
             int tss = runloom_tstate_attach_state(hts);
             /* Track how long this hub has been continuously DETACHED-while-wedged.
              * A genuine blocking call (Py_BEGIN_ALLOW_THREADS) holds the tstate
@@ -86,7 +86,7 @@ static RUNLOOM_THREAD_RET runloom_sysmon_main(void *arg)
                     "[RUNLOOM_SYSMON] hub %d WEDGED %.1f ms in g=%p tstate=%s -- "
                     "%ld g(s) stranded on this hub\n",
                     i, (double)(now - start) / 1e6,
-                    (void *)__atomic_load_n(&h->resume_g, __ATOMIC_RELAXED), cls,
+                    (void *)__atomic_load_n((void **)&h->resume_g, __ATOMIC_RELAXED), cls,
                     pend > 0 ? pend - 1 : 0);
                 w_seq[i]   = seq;
                 w_start[i] = start;

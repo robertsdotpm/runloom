@@ -267,7 +267,7 @@ void runloom_evt_crash_dump(int fd, unsigned max_per_thread)
 {
     static const char banner[] =
         "\n[runloom] flight recorder -- recent scheduler events (newest first):\n";
-    runloom_ring_t *r = __atomic_load_n(&runloom_ring_list, __ATOMIC_ACQUIRE);
+    runloom_ring_t *r = (runloom_ring_t *)__atomic_load_n((void **)&runloom_ring_list, __ATOMIC_ACQUIRE);
     if (r == NULL) return;   /* ring never enabled / no events */
     emit(fd, banner, sizeof banner - 1);
     for (; r != NULL; r = r->next) {

@@ -36,7 +36,7 @@ static void runloom_handoff_rescue(runloom_hub_t *h)
             long long now = runloom_monotonic_ns();
             /* Acquire load: the hub publishes its tstate on its own thread.
              * NULL during that startup window -> fail closed (return). */
-            PyThreadState *hts = __atomic_load_n(&h->tstate, __ATOMIC_ACQUIRE);
+            PyThreadState *hts = (PyThreadState *)__atomic_load_n((void **)&h->tstate, __ATOMIC_ACQUIRE);
             if (hts == NULL || start == 0 ||
                 (now - start) <= runloom_sysmon_wedge_ns ||
                 runloom_tstate_attach_state(hts) != RUNLOOM_TS_DETACHED) {
@@ -109,8 +109,8 @@ static void runloom_handoff_rescue(runloom_hub_t *h)
                                               __ATOMIC_RELAXED);
             long long now = runloom_monotonic_ns();
             if (start == 0 || (now - start) <= runloom_sysmon_wedge_ns ||
-                runloom_tstate_attach_state(
-                    __atomic_load_n(&h->tstate, __ATOMIC_ACQUIRE))
+                runloom_tstate_attach_state((PyThreadState *)
+                    __atomic_load_n((void **)&h->tstate, __ATOMIC_ACQUIRE))
                     != RUNLOOM_TS_DETACHED) {
                 return;   /* block ended or owner/STW reclaimed -> released */
             }

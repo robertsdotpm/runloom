@@ -9,6 +9,7 @@
 #include "coro.h"
 #include "runloom_crash.h"
 #include "runloom_diag.h"   /* runloom_delay_inject (determinism tooling #2) */
+#include "plat_atomic.h"    /* __atomic_*/__ATOMIC_* shim for MSVC (Windows build) */
 
 #include <stdlib.h>
 #include <string.h>

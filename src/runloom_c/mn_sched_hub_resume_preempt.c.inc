@@ -593,7 +593,7 @@ RUNLOOM_INLINE void runloom_hub_resume_begin(runloom_hub_t *h, runloom_g_t *g)
     if (__builtin_expect(runloom_sysmon_enabled, 0)) {
         /* Relaxed-atomic like its two siblings below: the sysmon thread reads
          * resume_g concurrently for the wedge log (best-effort sample). */
-        __atomic_store_n(&h->resume_g, g, __ATOMIC_RELAXED);
+        __atomic_store_n((void **)&h->resume_g, (void *)g, __ATOMIC_RELAXED);
         __atomic_add_fetch(&h->resume_seq, 1, __ATOMIC_RELAXED);
         __atomic_store_n(&h->resume_start_ns, runloom_monotonic_ns(),
                          __ATOMIC_RELAXED);
