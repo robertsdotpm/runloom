@@ -82,10 +82,17 @@ static void runloom_handoff_rescue(runloom_hub_t *h)
             }
         }
 
-        g = runloom_sched_ready_pop(&h->sched);          /* local yielded/woken */
-        if (g == NULL) {
-            g = (runloom_g_t *)runloom_cldeque_pop(&h->deque);  /* own fresh */
-        }
+        /* Run ONLY fresh (never-run) gs from the deque.  A resumed/woken g -- the
+         * ready FIFO, snap.valid -- has a coro C-stack baked to the OWNER hub's
+         * OS thread; resuming it on the rescue thread is a cross-hub migration
+         * that is unsafe in free-threaded mode and crashes on macOS/arm64 (a
+         * stale-tstate read -> SIGSEGV at a low offset inside the eval loop;
+         * root-caused via the flight recorder + crash classifier).  Leave such gs
+         * in the hub's ready FIFO for the OWNER to resume on its own thread once
+         * the wedge clears.  Fresh deque gs carry no baked frame, so the rescue
+         * starts them safely -- this keeps the handoff's progress benefit for new
+         * work behind a blocking g while removing the migration hazard. */
+        g = (runloom_g_t *)runloom_cldeque_pop(&h->deque);  /* fresh only */
 
         if (g != NULL) {
             runloom_handoff_resume_g(h, g, &rescue_base);
