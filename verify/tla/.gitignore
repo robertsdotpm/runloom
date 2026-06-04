@@ -3,3 +3,5 @@ states/
 *.toolbox
 RunloomGilstateTrace.tla
 RunloomGilstateTrace.cfg
+RunloomMNControlTrace.tla
+RunloomMNControlTrace.cfg

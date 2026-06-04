@@ -298,6 +298,8 @@ static void runloom_mn_ctrl_try_grant(void)
         return;
     }
     runloom_mn_ctrl.current = c;
+    /* trace conformance: the baton is granted to waiting hub c (waiting->running) */
+    runloom_mn_trace_event("Grant", c);
     /* Grant trace (opt-in, RUNLOOM_MN_TRACE): one byte into an in-memory ring, no
      * syscall on the hot path; dumped to the file at fini.  NB the residual
      * sub-segment tail race is a Heisenbug -- even this byte-write perturbs it,
@@ -416,6 +418,10 @@ static void runloom_mn_ctrl_acquire(int hub)
     runloom_mutex_lock(&runloom_mn_ctrl.lock);
     runloom_mn_ctrl.want[hub] = 1;
     runloom_mn_ctrl.seen[hub] = runloom_mn_ctrl.round;     /* checked in (wanting) */
+    /* trace conformance: idle -> arriving -> waiting (acquire is atomic here, so
+     * the two model steps are logged back-to-back). */
+    runloom_mn_trace_event("Arrive", hub);
+    runloom_mn_trace_event("Rendezvous", hub);
     runloom_mn_ctrl_try_grant();
     if (runloom_mn_ctrl.current != hub) {
         PyThreadState *ts = PyEval_SaveThread();   /* detach while we block */
@@ -435,7 +441,11 @@ static void runloom_mn_ctrl_release(int hub)
     int i;
     if (!runloom_mn_ctrl.enabled || hub < 0 || hub >= runloom_mn_ctrl.n) return;
     runloom_mutex_lock(&runloom_mn_ctrl.lock);
-    if (runloom_mn_ctrl.current == hub) runloom_mn_ctrl.current = -1;
+    if (runloom_mn_ctrl.current == hub) {
+        runloom_mn_ctrl.current = -1;
+        /* trace conformance: the holder releases the baton (running->idle) */
+        runloom_mn_trace_event("Release", hub);
+    }
     /* PCT: this hub just finished one execution segment = one PCT step.  If the
      * step index is a change point, demote this hub below all base priorities so
      * a different hub wins the next choose() -- the seeded ordering inversion. */

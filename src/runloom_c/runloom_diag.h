@@ -185,6 +185,13 @@ void runloom_invariant_fail(const char *msg, const void *p1, const void *p2);
  * zero-cost) unless the env var is set.  Cold path; takes a private lock. */
 void runloom_gilstate_trace(const char *action, int hub, int deleter);
 
+
+/* ---- controlled-baton event trace (TLA+ trace conformance, RUNLOOM_MN_EVENTS) ----
+ * Emits one ndjson line per baton protocol transition ({"a":<Arrive|Rendezvous|
+ * Grant|Release>,"h":<hub id>}); tools/tla_trace_conform.py drives RunloomMNControl
+ * directly from it under TLC.  Off (zero-cost) unless the env var is set. */
+void runloom_mn_trace_event(const char *action, int hub);
+
 #ifdef __cplusplus
 }
 #endif

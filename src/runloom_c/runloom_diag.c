@@ -408,6 +408,25 @@ void runloom_gilstate_trace(const char *action, int hub, int deleter)
     runloom_mutex_unlock(&runloom_gil_trace_lock);
 }
 
+/* ---- controlled-baton event trace (TLA+ trace conformance, RUNLOOM_MN_EVENTS) ----
+ * Emits the baton protocol events (Arrive/Rendezvous/Grant/Release, hub id) so
+ * tools/tla_trace_conform.py can drive RunloomMNControl's OWN actions from a real
+ * run and have TLC check MutualExclusion + the grant/release protocol against the
+ * code.  Opened once in runloom_diag_init; no-op when the file is NULL.  Cold-ish
+ * (per baton transition); a mutex + line append is fine -- analysis mode, the
+ * slight perturbation just yields a different (still legal) schedule. */
+static FILE           *runloom_mn_trace_fp = NULL;
+static runloom_mutex_t runloom_mn_trace_lock;
+
+void runloom_mn_trace_event(const char *action, int hub)
+{
+    if (runloom_mn_trace_fp == NULL) return;
+    runloom_mutex_lock(&runloom_mn_trace_lock);
+    fprintf(runloom_mn_trace_fp, "{\"a\":\"%s\",\"h\":%d}\n", action, hub);
+    fflush(runloom_mn_trace_fp);
+    runloom_mutex_unlock(&runloom_mn_trace_lock);
+}
+
 void runloom_diag_init(void)
 {
     if (runloom_diag_inited) return;
@@ -419,6 +438,13 @@ void runloom_diag_init(void)
         if (gt != NULL && gt[0] != '\0') {
             runloom_mutex_init(&runloom_gil_trace_lock);
             runloom_gil_trace_fp = fopen(gt, "w");
+        }
+        {
+            const char *mt = getenv("RUNLOOM_MN_EVENTS");
+            if (mt != NULL && mt[0] != '\0') {
+                runloom_mutex_init(&runloom_mn_trace_lock);
+                runloom_mn_trace_fp = fopen(mt, "w");
+            }
         }
     }
     runloom_diag_inited = 1;
