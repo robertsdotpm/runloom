@@ -27,6 +27,7 @@ static void runloom_cal_record(runloom_g_t *g)
     runloom_cal_completed++;
     if (runloom_cal_completed >= RUNLOOM_CAL_TARGET) {
         runloom_delay_inject(RUNLOOM_DLY_CAL_FREEZE);   /* widen freeze transition */
+        RUNLOOM_EVT(RUNLOOM_EVT_CAL_FREEZE, 0, 0, (long long)runloom_cal_max_hwm);
         size_t bound = runloom_cal_max_hwm * RUNLOOM_CAL_SAFETY;
         size_t chosen = runloom_next_pow2(bound);
         if (chosen < RUNLOOM_MIN_STACK_SIZE) chosen = RUNLOOM_MIN_STACK_SIZE;

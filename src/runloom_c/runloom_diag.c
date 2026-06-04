@@ -188,6 +188,13 @@ static const char *op_name(unsigned int op)
     case RUNLOOM_EVT_G_COMPLETE:     return "G_COMPLETE";
     case RUNLOOM_EVT_CHAN_PARK:      return "CHAN_PARK";
     case RUNLOOM_EVT_CHAN_WAKE:      return "CHAN_WAKE";
+    case RUNLOOM_EVT_CORO_ACQUIRE:   return "CORO_ACQUIRE";
+    case RUNLOOM_EVT_CORO_RELEASE:   return "CORO_RELEASE";
+    case RUNLOOM_EVT_CAL_FREEZE:     return "CAL_FREEZE";
+    case RUNLOOM_EVT_HANDOFF_ADOPT:  return "HANDOFF_ADOPT";
+    case RUNLOOM_EVT_WORLD_YIELD:    return "WORLD_YIELD";
+    case RUNLOOM_EVT_SNAP_SAVE:      return "SNAP_SAVE";
+    case RUNLOOM_EVT_SNAP_LOAD:      return "SNAP_LOAD";
     default:                      return "?";
     }
 }
@@ -245,6 +252,45 @@ void runloom_diag_dump(int fd)
         }
     }
     runloom_mutex_unlock(&runloom_ring_list_lock);
+}
+
+
+/* Determinism tooling #1: flight-recorder dump for the fatal-signal handler.
+ * The most recent `max_per_thread` events of every thread's ring, newest-first
+ * -- the schedule that led to the crash.  Unlike runloom_diag_dump this takes
+ * NO lock (the registry is append-at-head under the creation lock; a torn read
+ * at worst garbles one line) and is bounded, so it is safe enough to call from
+ * the crash handler on the sigaltstack.  No-op if the ring was never enabled
+ * (RUNLOOM_DEBUG=ring).  The full 1024-event rings remain in the core for
+ * offline inspection via runloom_diag_dump / a gdb script. */
+void runloom_evt_crash_dump(int fd, unsigned max_per_thread)
+{
+    static const char banner[] =
+        "\n[runloom] flight recorder -- recent scheduler events (newest first):\n";
+    runloom_ring_t *r = __atomic_load_n(&runloom_ring_list, __ATOMIC_ACQUIRE);
+    if (r == NULL) return;   /* ring never enabled / no events */
+    emit(fd, banner, sizeof banner - 1);
+    for (; r != NULL; r = r->next) {
+        unsigned long head  = r->head;
+        unsigned long count = head < RUNLOOM_RING_CAP ? head : RUNLOOM_RING_CAP;
+        unsigned long i;
+        char hdr[96];
+        int n;
+        if (count == 0) continue;
+        if (count > max_per_thread) count = max_per_thread;
+        n = snprintf(hdr, sizeof hdr, "[runloom]   tid=%u (last %lu of %lu):\n",
+                     r->tid, count, head);
+        if (n > 0) emit(fd, hdr, (size_t)n);
+        for (i = 0; i < count; i++) {
+            unsigned long idx = (head - 1 - i) & RUNLOOM_RING_MASK;
+            const runloom_evt_t *e = &r->slots[idx];
+            char line[160];
+            int m = snprintf(line, sizeof line,
+                "[runloom]     %-13s p1=%p p2=%p aux=%lld\n",
+                op_name(e->op), (void *)e->p1, (void *)e->p2, e->aux);
+            if (m > 0) emit(fd, line, (size_t)m);
+        }
+    }
 }
 
 

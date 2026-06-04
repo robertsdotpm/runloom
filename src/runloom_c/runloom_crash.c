@@ -7,6 +7,7 @@
 #include <Python.h>
 
 #include "runloom_crash.h"
+#include "runloom_diag.h"   /* runloom_evt_crash_dump (flight recorder) */
 #include "runloom_introspect.h"
 #include "mn_sched.h"
 #include "coro.h"
@@ -348,6 +349,12 @@ static void crash_handler(int sig, siginfo_t *si, void *uctx)
             backtrace_symbols_fd(bt, n, runloom_crash_report_fd);
     }
 #endif
+
+    /* Flight recorder (determinism tooling #1): the recent scheduler-transition
+     * timeline that led here.  No-op unless RUNLOOM_DEBUG=ring was enabled. */
+    runloom_evt_crash_dump(2, 24);
+    if (runloom_crash_report_fd >= 0)
+        runloom_evt_crash_dump(runloom_crash_report_fd, 24);
 
     if (runloom_crash_flags_v & RUNLOOM_CRASH_GDB)  crash_spawn_gdb();
     if (runloom_crash_flags_v & RUNLOOM_CRASH_WAIT) crash_wait_for_debugger();

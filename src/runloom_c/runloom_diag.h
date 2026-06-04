@@ -74,6 +74,15 @@ typedef enum runloom_evt_op {
     RUNLOOM_EVT_G_COMPLETE        = 11,
     RUNLOOM_EVT_CHAN_PARK         = 12,
     RUNLOOM_EVT_CHAN_WAKE         = 13,
+    /* Determinism tooling #1: scheduler transition events for the flight
+     * recorder.  aux carries a site-specific scalar where useful. */
+    RUNLOOM_EVT_CORO_ACQUIRE      = 14,  /* p1=coro p2=stack aux=size */
+    RUNLOOM_EVT_CORO_RELEASE      = 15,  /* p1=coro p2=stack aux=size */
+    RUNLOOM_EVT_CAL_FREEZE        = 16,  /* aux=chosen stack size */
+    RUNLOOM_EVT_HANDOFF_ADOPT     = 17,  /* p1=hub p2=tstate */
+    RUNLOOM_EVT_WORLD_YIELD       = 18,  /* p1=hub aux=pause_ns */
+    RUNLOOM_EVT_SNAP_SAVE         = 19,  /* p1=g */
+    RUNLOOM_EVT_SNAP_LOAD         = 20,  /* p1=g */
     RUNLOOM_EVT__LAST
 } runloom_evt_op_t;
 
@@ -94,6 +103,12 @@ void runloom_evt_log_(runloom_evt_op_t op,
  * list stable, but each ring is read non-blocking (we snapshot the head
  * index and walk backwards). */
 void runloom_diag_dump(int fd);
+
+/* Flight-recorder dump for the fatal-signal handler (determinism tooling #1):
+ * the most recent `max_per_thread` events of every thread's ring, newest-first.
+ * Lock-free + bounded, so it is safe to call from the crash handler.  No-op
+ * unless RUNLOOM_DEBUG=ring was enabled. */
+void runloom_evt_crash_dump(int fd, unsigned max_per_thread);
 
 
 /* ---- self check ----
