@@ -19,8 +19,9 @@ for liveness — see below). Off by default; zero cost when unset.
 Same `RUNLOOM_MN_SEED` ⇒ **identical execution**, run to run — verified by
 `repro_probe.py` (single channel: 16/16 seeds identical, seed 1 identical over
 500/500 reps under heavy CPU load), `repro_select.py` (select over multiple
-channels + mid-run goroutine spawn: 10/10), and `repro_timer.py` (same-delay +
-staggered `sched_sleep`: 10/10). Distinct seeds still explore distinct
+channels + mid-run goroutine spawn: 8/8 over 16 seeds × 30 reps, and 8/8 under
+16 CPU hogs + `setarch -R` — see lever 7), and `repro_timer.py` (same-delay +
+staggered `sched_sleep`: 8/8). Distinct seeds still explore distinct
 interleavings. The baton alone is *not* enough — it serializes who runs, but the
 requester set, the goroutine each hub holds, the preemption point, and timer
 firing all still raced OS timing. Six levers, gated together behind
@@ -72,8 +73,9 @@ timing-dependent exploration for A/B):
    they never trip it (natural, reproducible schedule); a CPU-bound goroutine that
    keeps calling functions hits the count and yields (liveness), at a *reproducible*
    frame: a `while not check(): n+=1` spinner stops at the same `n` every run
-   (e.g. seed 8 → 20478 = 5·4096−2, 8/8 reps). This is what made the select +
-   mid-run-spawn workload go from 7/8 to 10/10 stable.
+   (e.g. seed 8 → 20478 = 5·4096−2, 8/8 reps). This removed the wall-clock tie in
+   the select + mid-run-spawn workload; the *remaining* residual there was the
+   partial-publish race that lever 7 closes.
 
    *Frame granularity + a liveness backstop.* Frame-count preemption (like the
    wall-clock trigger it replaces) acts only at a Python frame boundary, so it
@@ -99,6 +101,30 @@ timing-dependent exploration for A/B):
    run. Same-delay timers — whose order is *purely* scheduling-decided — go from
    3-distinct/20 to one signature per seed; overlapping periodic sleeps replay
    identically and never hang (the clock keeps advancing to the next deadline).
+
+7. **Atomic deferred publish at release.** Levers 2 and 4 assume the model in
+   their own words — *"work created later (by a running segment) is published at
+   that segment's release"* — but the code used to publish **immediately**: a
+   cross-hub `mn_go` / channel-wake pushed onto the target's `sub_list` mid-segment
+   (`runloom_mn_hub_submit`). A target draining its `sub_list` at loop entry could
+   then catch a **partial** snapshot of an in-flight segment's submits — e.g. a
+   `boot` segment that spawns producers `[1025, 1028]` onto hub 0: if hub 0's drain
+   landed between the two pushes it saw only `1025`, otherwise both, so hub 0's
+   runq *front* at its (deterministically-granted) segment was a function of
+   `sub_lock` race timing, not the schedule. The grant sequence was byte-identical
+   across reps; only *which goroutine ran in a given grant slot* differed — the
+   long-standing `repro_select` residual (was ~4/8). Fix: in barrier mode a
+   cross-hub submit made **during** a running segment is staged per target on the
+   spawning hub and spliced onto the target's `sub_list` in **one** lock-held
+   operation at the segment's **release** (`runloom_mn_ctrl_stage_flush`, before the
+   baton release). The target then drains either the whole batch or none — never a
+   partial set — and lever 4's existing "re-test under the controller lock after
+   observing the round" guarantees the complete batch is seen at the round
+   boundary. Same-hub submits (no cross-thread race), non-segment producers (the
+   idle pump, pre-run placement), and the entire default scheduler fall through to
+   the immediate push (zero cost; `stage_head` is `NULL`). With it `repro_select`
+   is **8/8** (16 seeds × 30 reps; 8/8 under 16 CPU hogs + `setarch -R`), and the
+   buffered-channel + spawn variant is stable too.
 
 **Scope.** This pins *all scheduling* nondeterminism for **closed** workloads —
 CPU + channel/lock/sync among the goroutines themselves (including CPU-bound

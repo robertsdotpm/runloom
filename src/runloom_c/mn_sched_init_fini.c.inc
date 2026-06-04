@@ -74,6 +74,23 @@ int runloom_mn_init(int n_threads)
         runloom_cldeque_init(&h->deque);
         runloom_mutex_init(&h->sub_lock);
         h->sub_head = h->sub_tail = NULL;
+        /* Controlled-replay deferred-publish staging (barrier mode only): one
+         * per-target list so a segment's cross-hub submits flush atomically at
+         * release.  PyMem_Calloc zeroes; OOM -> NULL -> hub_submit falls back to
+         * the immediate (non-deterministic) push, still correct. */
+        h->stage_head = NULL;
+        h->stage_tail = NULL;
+        h->stage_pending = 0;
+        if (runloom_mn_ctrl.enabled && runloom_mn_ctrl.barrier) {
+            h->stage_head = (runloom_g_t **)PyMem_Calloc((size_t)n_threads,
+                                                         sizeof(runloom_g_t *));
+            h->stage_tail = (runloom_g_t **)PyMem_Calloc((size_t)n_threads,
+                                                         sizeof(runloom_g_t *));
+            if (h->stage_head == NULL || h->stage_tail == NULL) {
+                PyMem_Free(h->stage_head); h->stage_head = NULL;
+                PyMem_Free(h->stage_tail); h->stage_tail = NULL;
+            }
+        }
         /* h->tstate is created BY THE HUB THREAD (in runloom_hub_main), NOT
          * here.  PyThreadState_New eagerly binds the tstate to the CALLING
          * thread: bind_tstate() -> _Py_brc_init_thread() + the mimalloc bind,
@@ -158,6 +175,23 @@ static void runloom_mn_hub_drain_leftovers(runloom_hub_t *h)
         runloom_g_decref(sub);
         sub = next;
     }
+    /* Residual deferred-publish staging (barrier mode): a segment always flushes
+     * at release, so these are normally empty -- drain defensively for an
+     * abort/early-exit path so a staged g's hub ref is not leaked. */
+    if (h->stage_head != NULL) {
+        int t;
+        for (t = 0; t < runloom_hub_count; t++) {
+            runloom_g_t *s = h->stage_head[t];
+            h->stage_head[t] = h->stage_tail[t] = NULL;
+            while (s != NULL) {
+                runloom_g_t *next = s->next;
+                s->next = NULL;
+                runloom_g_decref(s);
+                s = next;
+            }
+        }
+        h->stage_pending = 0;
+    }
     while ((g = runloom_sched_ready_pop(&h->sched)) != NULL) {
         runloom_g_decref(g);
     }
@@ -241,6 +275,10 @@ void runloom_mn_fini(void)
             PyThreadState_Delete(hts);
         }
         runloom_mutex_destroy(&runloom_hubs[i].sub_lock);
+        PyMem_Free(runloom_hubs[i].stage_head);
+        runloom_hubs[i].stage_head = NULL;
+        PyMem_Free(runloom_hubs[i].stage_tail);
+        runloom_hubs[i].stage_tail = NULL;
     }
     PyMem_Free(runloom_hubs);
     runloom_hubs = NULL;

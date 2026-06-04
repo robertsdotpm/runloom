@@ -91,6 +91,22 @@ typedef struct runloom_hub {
     runloom_mutex_t sub_lock;
     runloom_g_t *sub_head;
     runloom_g_t *sub_tail;
+    /* Controlled-replay deferred publish (barrier mode only).  A cross-hub
+     * submit made DURING this hub's execution segment (mn_go / channel-wake from
+     * a running goroutine) is staged here per TARGET hub, then spliced onto the
+     * target's sub_list ATOMICALLY at this segment's release -- so a target's
+     * loop-top drain sees the COMPLETE set a segment sent it, never a partial
+     * mid-segment snapshot.  This makes the implementation match the documented
+     * model (README sec.2 / RunloomMNControl.tla): "work created later by a
+     * running segment is published at that segment's release."  Without it the
+     * partial snapshot left a target's runq front a function of sub_lock race
+     * timing, not the schedule (the deterministic-replay residual).  Indexed by
+     * target hub id, touched ONLY by this hub's own thread (no lock).  Allocated
+     * to hub_count entries iff the controlled barrier is active; NULL otherwise
+     * (the default scheduler never stages -- zero cost). */
+    runloom_g_t **stage_head;
+    runloom_g_t **stage_tail;
+    long          stage_pending;   /* staged gs awaiting release-flush; 0 = skip */
     /* Per-hub io_uring ring.  Created at hub_main entry with
      * IORING_SETUP_SINGLE_ISSUER (and DEFER_TASKRUN if the kernel
      * supports it).  Eventfd registered with the shared netpoll pump.
