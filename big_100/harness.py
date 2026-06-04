@@ -204,6 +204,8 @@ class Harness(object):
 
         # resources to close at shutdown so parked accept()/recv() unblock
         self.closeables = []
+        # callables run once at the very end (e.g. shutil.rmtree a temp dir)
+        self.cleanups = []
 
         # fd accounting
         self.fd_base = -1
@@ -330,6 +332,19 @@ class Harness(object):
         accept()/recv() unblocks and its server loop can exit."""
         self.closeables.append(obj)
         return obj
+
+    def add_cleanup(self, fn):
+        """Register a callable to run once at the very end (after metrics),
+        e.g. to remove a temp directory."""
+        self.cleanups.append(fn)
+
+    def make_tmpdir(self, prefix="big100_"):
+        """Create a temp dir that is shutil.rmtree'd at the end."""
+        import tempfile
+        import shutil
+        d = tempfile.mkdtemp(prefix=prefix)
+        self.add_cleanup(lambda: shutil.rmtree(d, ignore_errors=True))
+        return d
 
     def run_pool(self, n, worker_fn, *extra):
         """Spawn n worker goroutines, each running
@@ -540,6 +555,11 @@ class Harness(object):
         sys.stderr.write("  VERDICT       : {0} (exit {1})\n".format(
             verdict, self.exit_code))
         sys.stderr.flush()
+        for fn in self.cleanups:
+            try:
+                fn()
+            except Exception:
+                pass
         return self.exit_code
 
 
