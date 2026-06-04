@@ -125,8 +125,18 @@ static PyObject *runloom_advice_unwrap(PyObject *callable)
     int i;
     Py_INCREF(cur);
     for (i = 0; i < 8; i++) {
-        PyObject *w = PyObject_GetAttrString(cur, "__wrapped__");
+        PyObject *w = NULL;
+        /* NON-raising lookup: the common case (no __wrapped__) must NOT set and
+         * clear an AttributeError.  This runs once per profiled spawn (and per
+         * prescan), and the exception churn was the dominant autosize-on
+         * overhead -- measured larger than the table+lock work it precedes. */
+#if PY_VERSION_HEX >= 0x030D0000
+        int r = PyObject_GetOptionalAttrString(cur, "__wrapped__", &w);
+        if (r <= 0) { if (r < 0) PyErr_Clear(); break; }
+#else
+        w = PyObject_GetAttrString(cur, "__wrapped__");
         if (w == NULL) { PyErr_Clear(); break; }
+#endif
         Py_DECREF(cur);
         cur = w;            /* new ref */
     }
