@@ -95,6 +95,26 @@ else
     echo "FAIL -- no logical clock should violate DeterministicTick"; fail=$((fail+1))
 fi
 
+# ---- CPython STW boundary (RunloomCPythonSTW): the contract between runloom's
+# hubs and free-threaded CPython's stop-the-world machinery (M1 attach/detach +
+# M2 stop_the_world, read from Python/pystate.c -- see docs/dev/cpython_boundary.md).
+# Correct = STWExclusive (no non-requester hub is ATTACHED while the world is
+# stopped).  Negative control models bug 2 / contract C3: re-attaching a SUSPENDED
+# tstate without the wait_attach gate -> a hub attached during a stopped world.
+printf '  [tlc] %-28s ' "RunloomCPythonSTW (correct)"
+if run_tlc stwok -config RunloomCPythonSTW.cfg RunloomCPythonSTW.tla | grep -q "No error has been found"; then
+    echo "PASS -- STWExclusive + RequesterAttached hold (STW reclaims with all others suspended)"; pass=$((pass+1))
+else
+    echo "FAIL -- correct STW-boundary spec should hold"; fail=$((fail+1))
+fi
+
+printf '  [tlc] %-28s ' "RunloomCPythonSTW (Bypass=T)"
+if run_tlc stwbug -deadlock -config RunloomCPythonSTW_bug.cfg RunloomCPythonSTW.tla | grep -q "is violated"; then
+    echo "PASS -- correctly DETECTS the handoff re-attach (a hub ATTACHED while the world is stopped) -> STWExclusive violated"; pass=$((pass+1))
+else
+    echo "FAIL -- re-attaching a suspended tstate mid-STW should violate STWExclusive"; fail=$((fail+1))
+fi
+
 "$(command -v safe-rm || echo rm)" -rf "$META"
 echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
