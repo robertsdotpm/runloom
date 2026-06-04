@@ -329,6 +329,10 @@ class _ThreadPoolBackend(_BlockingBackend):
                 box[0] = fn(*args, **kwargs)
             except BaseException as e:
                 box[1] = e
+            # Publish the done flag BEFORE the wake so a submit() that
+            # observes box[2] (with or without parking) always sees the
+            # result/exception too.
+            box[2] = True
             parker.unpark()
 
     def submit(self, fn, args, kwargs):
@@ -336,11 +340,19 @@ class _ThreadPoolBackend(_BlockingBackend):
         if kwargs is None:
             kwargs = {}
         p = _Parker()
-        box = [None, None]
+        # box = [result, exception, done].  The done flag is essential:
+        # a pooled _Parker can carry a stale wake byte and runloom_c.wait_fd
+        # can wake spuriously, so a single park() may return BEFORE the
+        # worker has stored the result -- which made submit() return box[0]
+        # (None) intermittently under M:N.  Looping until done makes the
+        # wakeup edge-insensitive: we only return once the worker actually
+        # finished (any stale byte is then drained by release()).
+        box = [None, None, False]
         with self._lock:
             self._items.append((fn, args, kwargs, box, p))
             self._cond.notify()
-        p.park()
+        while not box[2]:
+            p.park()
         p.release()
         if box[1] is not None:
             raise box[1]
