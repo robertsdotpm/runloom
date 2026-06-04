@@ -90,10 +90,11 @@ def _learned(hwm):
 # --------------------------------------------------------------------------- #
 def test_off_by_default():
     assert runloom_c.stack_autosize_enabled() is False
-    # measure-only (no autosize): kinds run at the normal small default, not 256K
+    # measure-only (no autosize): kinds run at the fixed program default, not a
+    # per-kind started/learned size
     runloom.inspect.enable_stack_advice(True)
     _batch([heavy], 20)
-    assert _row(heavy)["reserved"] < START      # not started large
+    assert _row(heavy)["reserved"] == runloom_c.get_stack_size()
 
 
 def test_enable_implies_measurement():

@@ -501,21 +501,25 @@ runloom_g_t *runloom_sched_sleep_pop(runloom_sched_t *s)
 
 /* ---- Stack calibration ----
  *
- * Default: 32 KB.  Empirically the test suite passes at 16 KB on
- * CPython 3.13t and 8 KB on 3.12; the deepest path is
- * socket.getaddrinfo, which lazy-loads the encodings codec on first
- * call.  32 KB doubles the worst measured floor and keeps 1M gs at
- * 32 GB VM (256 KB would be 256 GB).  Demand-paging means the unused
- * tail consumes no physical RAM until touched.  Calibration adapts
- * UP for stack-hungry programs: after RUNLOOM_CAL_TARGET completions we
- * freeze to next_pow2(max_hwm * RUNLOOM_CAL_SAFETY).  Programs with deep
- * frames in the first 1000 gs (before freeze) should call
- * runloom_sched_set_default_stack_size() -- stacks have no guard page.
+ * Default: 512 KB.  This covers everything a goroutine realistically does --
+ * the deepest stdlib single frame (`_decimal` squaretrans_pow2, 256 KB), full
+ * TLS/SSH crypto in a callback (the aio bridge runs asyncssh's kex + OpenSSL on
+ * 512 KB), nested parsers -- so ordinary code never hits the guard page.  It's
+ * cheap: stacks are demand-paged (the unused tail consumes no physical RAM until
+ * touched -- VM, not RSS, verified on Linux/macOS mmap and Windows CreateFiberEx
+ * reserve), so the cost is virtual address space, not memory.  Calibration adapts
+ * UP for stack-hungry programs (freeze to next_pow2(max_hwm * RUNLOOM_CAL_SAFETY)
+ * after RUNLOOM_CAL_TARGET completions) but is FLOORED at this default -- it never
+ * auto-shrinks below the safe size and re-exposes the deep cases.  Reclaiming the
+ * tail for huge goroutine counts is the per-kind auto-sizer's job (opt-in
+ * "grow down"; runloom.inspect.enable_stack_autosize), not calibration's.  A true
+ * outlier deeper than 512 KB is a clean guard-page crash + a one-line pin
+ * (runloom.go(fn, stack_size=...)), never corruption.
  *
  * Reads/writes are plain (single-threaded scheduler in v0); when
  * Phase C arrives these will move under the scheduler lock. */
-#define RUNLOOM_DEFAULT_STACK_SIZE   (32  * 1024)
-#define RUNLOOM_MIN_STACK_SIZE       (16  * 1024)   /* 3.13t hard floor */
+#define RUNLOOM_DEFAULT_STACK_SIZE   (512 * 1024)
+#define RUNLOOM_MIN_STACK_SIZE       (16  * 1024)   /* 3.13t hard floor (explicit override) */
 #define RUNLOOM_MAX_STACK_SIZE       (8   * 1024 * 1024)
 #define RUNLOOM_CAL_TARGET           1000     /* gs before freeze */
 #define RUNLOOM_CAL_SAFETY           4        /* multiply HWM by this */

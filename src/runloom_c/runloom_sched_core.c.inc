@@ -30,7 +30,11 @@ static void runloom_cal_record(runloom_g_t *g)
         RUNLOOM_EVT(RUNLOOM_EVT_CAL_FREEZE, 0, 0, (long long)runloom_cal_max_hwm);
         size_t bound = runloom_cal_max_hwm * RUNLOOM_CAL_SAFETY;
         size_t chosen = runloom_next_pow2(bound);
-        if (chosen < RUNLOOM_MIN_STACK_SIZE) chosen = RUNLOOM_MIN_STACK_SIZE;
+        /* Floor auto-calibration at the safe default: it adapts UP for
+         * stack-hungry programs but never shrinks below 512 KB (which would
+         * re-expose Decimal/crypto/deep frames).  Explicit
+         * set_default_stack_size() can still go down to RUNLOOM_MIN_STACK_SIZE. */
+        if (chosen < RUNLOOM_DEFAULT_STACK_SIZE) chosen = RUNLOOM_DEFAULT_STACK_SIZE;
         if (chosen > RUNLOOM_MAX_STACK_SIZE) chosen = RUNLOOM_MAX_STACK_SIZE;
         runloom_cal_default = chosen;
         runloom_cal_frozen = 1;

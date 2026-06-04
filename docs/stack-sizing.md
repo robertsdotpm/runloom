@@ -7,11 +7,17 @@ goroutines at once without burning memory.
 
 ## The mechanisms in one paragraph
 
-runloom defaults to **256 KB** per goroutine but auto-calibrates: every
-fresh stack is painted with a sentinel pattern, every completed
-goroutine's high-water mark is scanned, and after 1 000 completions
-the default is locked to `next_pow2(max_hwm × 4)` clamped to
-`[16 KB, 8 MB]`.  When a goroutine finishes, its stack returns to a
+runloom defaults to **512 KB** per goroutine -- enough to cover everything a
+goroutine realistically does (the deepest stdlib frame, `_decimal` at 256 KB;
+full TLS/SSH crypto in a callback; nested parsers) without hitting the guard
+page.  It's cheap because stacks are demand-paged (virtual, not resident -- the
+unused tail costs no RAM until touched).  Calibration scans completed
+goroutines' high-water marks and after 1 000 completions can adapt the default
+**up** to `next_pow2(max_hwm × 4)` (clamped at 8 MB) for stack-hungry programs --
+but it is **floored at 512 KB** and never auto-shrinks below it.  (Reclaiming
+the tail for huge goroutine counts is the opt-in per-kind auto-sizer's job; an
+explicit `set_stack_size()` can still go down to 16 KB.)  When a goroutine
+finishes, its stack returns to a
 per-thread pool with `MADV_DONTNEED` applied -- the kernel reclaims the
 physical pages while keeping the virtual mapping.  Net effect: 10 000
 idle goroutines cost about as much RAM as their actual stack usage,
@@ -119,8 +125,9 @@ the scheduler calibrated to.
 
 ## Locking a known-good size
 
-If you don't want to spend the first 1 000 goroutines running at the
-generous default, lock the size up-front:
+Running **millions** of shallow goroutines and want to reclaim the 512 KB
+default's virtual footprint? Lock a smaller size up-front (an explicit size
+overrides the default and its floor, down to the 16 KB hard minimum):
 
 ```python
 import runloom

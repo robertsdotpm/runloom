@@ -225,28 +225,33 @@ class TestStdlibFrameFootprint(unittest.TestCase):
                 "entry, like select.select".format(name, hwm, budget, default))
 
     def test_select_is_the_known_fat_frame(self):
-        # Documents WHY select needs the cooperative path: its raw frame
-        # exceeds the default stack.  If a CPython change ever shrinks it under
-        # the default, the cooperative path is then optional (not a failure --
-        # just update this expectation).
+        # select.select's raw frame is the fattest stdlib single frame (~51 KB:
+        # three pylist[FD_SETSIZE+1] arrays).  At the 512 KB default it FITS, so
+        # the cooperative path (monkey/polling.py) is no longer needed to avoid
+        # an overflow -- it stays because it makes select PARK on netpoll instead
+        # of blocking the hub.  Still assert it's the known-fat frame so a CPython
+        # change is noticed; and that it now fits the default.
         hwm = self._measure_hwm("import select; select.select([], [], [], 0)")
         default = runloom_c.get_stack_size()
-        self.assertGreater(
-            hwm, default,
-            "select's frame ({0} B) no longer exceeds the {1} B default; the "
-            "cooperative-select rationale may need revisiting".format(hwm, default))
+        self.assertGreater(hwm, 32 * 1024,
+            "select's frame ({0} B) is no longer fat; re-check the measurement"
+            .format(hwm))
+        self.assertLess(hwm, default,
+            "select's frame ({0} B) exceeds the {1} B default -- it would need a "
+            "bigger default or stay an overflow risk".format(hwm, default))
 
     def test_first_ssl_use_is_fat(self):
-        # The OTHER fat frame: the first _ssl use in a process drives a ~40 KB
-        # OpenSSL init that overflows the default goroutine stack.  Documented
-        # here so it isn't forgotten; mitigation verified by the next test.
+        # The OTHER fat frame: the first _ssl use drives a ~40 KB OpenSSL init.
+        # At the 512 KB default it fits, so ssl-warming-on-main-thread is no
+        # longer needed to avoid an overflow -- it stays as a cheap one-time init
+        # prepay.  Documented/measured here so it isn't forgotten.
         hwm = self._measure_hwm(
             "import ssl; ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)")
         default = runloom_c.get_stack_size()
-        self.assertGreater(
-            hwm, default,
-            "first ssl use ({0} B) no longer exceeds the {1} B default".format(
-                hwm, default))
+        self.assertGreater(hwm, 32 * 1024,
+            "first ssl use ({0} B) is no longer fat; re-check".format(hwm))
+        self.assertLess(hwm, default,
+            "first ssl use ({0} B) exceeds the {1} B default".format(hwm, default))
 
     def test_ssl_warmed_on_main_thread_so_goroutine_is_safe(self):
         # Mitigation: runloom.monkey imports ssl on the main thread and
