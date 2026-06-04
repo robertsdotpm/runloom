@@ -366,8 +366,20 @@ class TestBufferedPipeMN(unittest.TestCase):
             runloom_c.mn_go(reader)
             return canary, state
         canary, state = _drive_mn(body, nhubs=1)   # 1 hub: a hub-block freezes the canary
+        # The child's full output comes back on every platform.
         self.assertEqual(state.get("data"), b"done")
-        self.assertGreater(canary["ticks"], 5)     # cooperative: canary kept ticking
+        if os.name == "nt":
+            # Windows anonymous pipes can't be put in non-blocking mode and
+            # netpoll-selected the way POSIX fds can, so proc.stdout.read() does
+            # a genuine blocking read that wedges the hub.  The handoff rescuer
+            # recovers it -- the data still arrives and the body completes with
+            # no deadlock (mn_run would hang on a stranded canary otherwise) --
+            # but the read does NOT park, so the same-hub canary can't keep
+            # ticking.  Assert the Windows guarantee (handoff recovery: the
+            # reader finished and signalled the canary to stop) instead.
+            self.assertTrue(canary["stop"])
+        else:
+            self.assertGreater(canary["ticks"], 5)     # cooperative: canary kept ticking
 
 
 # ----------------------------------------------------------- select / poll
@@ -405,6 +417,9 @@ class TestSelectPollMN(unittest.TestCase):
         self._multi_fd(use_poll=False)
 
     def test_poll_multifd_no_crash(self):
+        import select as _sel
+        if not hasattr(_sel, "poll"):
+            self.skipTest("select.poll is Unix-only (absent on Windows)")
         self._multi_fd(use_poll=True)
 
 
