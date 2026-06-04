@@ -115,6 +115,20 @@ else
     echo "FAIL -- re-attaching a suspended tstate mid-STW should violate STWExclusive"; fail=$((fail+1))
 fi
 
+printf '  [tlc] %-28s ' "RunloomCPythonSTW (liveness)"
+if run_tlc stwlive -config RunloomCPythonSTW_live.cfg RunloomCPythonSTW.tla | grep -q "No error has been found"; then
+    echo "PASS -- STWCompletes: every requested stop-the-world eventually completes"; pass=$((pass+1))
+else
+    echo "FAIL -- a correctly-detaching system should always complete STW"; fail=$((fail+1))
+fi
+
+printf '  [tlc] %-28s ' "RunloomCPythonSTW (BlockAttach)"
+if run_tlc stwlb -deadlock -config RunloomCPythonSTW_livebug.cfg RunloomCPythonSTW.tla | grep -q "Temporal properties were violated"; then
+    echo "PASS -- correctly DETECTS the STW-monopoly hang (a hub blocks while attached) -> STWCompletes violated"; pass=$((pass+1))
+else
+    echo "FAIL -- a hub blocked-while-attached should wedge stop-the-world"; fail=$((fail+1))
+fi
+
 # ---- M4: the GILState-TSS binding (RunloomGilstate): the teardown contract C6,
 # the bug the --with-pydebug oracle found (pystate.c:345).  Correct = each hub
 # deletes its own tstate on its own thread.  Negative control deletes hub tstates
