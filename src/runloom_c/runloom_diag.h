@@ -164,6 +164,16 @@ typedef enum runloom_delay_site {
 void runloom_delay_inject(runloom_delay_site_t site);
 int  runloom_delay_enabled(void);   /* 1 if RUNLOOM_DELAY is set */
 
+
+/* ---- Determinism tooling #3: invariant sanitizer ----
+ *
+ * Report a violated runtime invariant at the point it breaks (message +
+ * flight-recorder dump + abort), so a lifecycle/ownership bug surfaces as a
+ * clean, located abort instead of a confusing downstream crash.  Call only
+ * from checks gated on RUNLOOM_DBG_ON(RUNLOOM_DBG_INVARIANTS) so production
+ * (flag off) pays nothing.  Does not return. */
+void runloom_invariant_fail(const char *msg, const void *p1, const void *p2);
+
 #ifdef __cplusplus
 }
 #endif

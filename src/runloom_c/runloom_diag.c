@@ -496,3 +496,28 @@ int runloom_delay_enabled(void)
     if (on < 0) { runloom_delay_init_once(); on = __atomic_load_n(&runloom_delay_on, __ATOMIC_ACQUIRE); }
     return on == 1;
 }
+
+
+/* ====================================================================== *
+ * Determinism tooling #3: invariant sanitizer                             *
+ * ====================================================================== */
+
+/* Report a violated runtime invariant LOUDLY and at the point it breaks --
+ * print the message, dump the flight recorder (the schedule that led here),
+ * and abort with a core -- instead of letting the corruption it implies turn
+ * into a confusing crash later.  Called from gated checks (RUNLOOM_DBG_ON(
+ * RUNLOOM_DBG_INVARIANTS)); never on a hot path when the flag is off. */
+void runloom_invariant_fail(const char *msg, const void *p1, const void *p2)
+{
+    char buf[256];
+    int n = snprintf(buf, sizeof buf,
+        "\n[runloom-invariant] FATAL: %s (p1=%p p2=%p)\n"
+        "[runloom-invariant] this is a runtime-invariant violation caught at the\n"
+        "[runloom-invariant] point it occurred; the flight recorder below shows the\n"
+        "[runloom-invariant] schedule that led here.\n",
+        msg != NULL ? msg : "(no message)", p1, p2);
+    if (n > 0) emit(2, buf, (size_t)n);   /* fd 2 directly: immediate, abort() won't flush stdio */
+    runloom_evt_crash_dump(2, 32);
+    runloom_diag_dump(2);
+    abort();
+}

@@ -73,6 +73,11 @@ struct runloom_coro {
     runloom_entry_fn entry;
     void *user;
     int done;
+    /* Invariant sanitizer (#3): 1 while a thread is actively swapped INTO this
+     * coro (between resume's swap-in and swap-out).  Written only when
+     * RUNLOOM_DBG_INVARIANTS is on; checked on release/reacquire to catch a
+     * coro/stack being recycled while a goroutine still executes on it. */
+    int dbg_running;
     /* Free-list link for the per-thread coro recycle pool.  When the
      * coro is in use, this is undefined; when on the pool free list,
      * it points to the next pooled coro. */
@@ -152,6 +157,18 @@ const char *runloom_coro_backend(void)
 #else
     return "unknown";
 #endif
+}
+
+/* Invariant sanitizer (#3): a coro about to be recycled to the pool, released,
+ * or reacquired must NOT have a thread executing on it.  If it does, a live
+ * goroutine stack is being recycled -- the use-after-free class behind the
+ * gc-churn crashes.  Fires loudly (message + flight recorder + abort) at the
+ * point of the violation.  No-op unless RUNLOOM_DBG_INVARIANTS. */
+static void runloom_coro_assert_idle(runloom_coro_t *c, const char *where)
+{
+    if (!RUNLOOM_DBG_ON(RUNLOOM_DBG_INVARIANTS) || c == NULL) return;
+    if (__atomic_load_n(&c->dbg_running, __ATOMIC_ACQUIRE) != 0)
+        runloom_invariant_fail(where, c, runloom_coro_stack_base(c));
 }
 
 /* ------------------------------------------------------------------ */
@@ -524,6 +541,7 @@ runloom_coro_t *runloom_coro_new(size_t stack_size,
         c->pool_next = NULL;
         runloom_delay_inject(RUNLOOM_DLY_CORO_ACQUIRE);   /* widen reuse window */
         RUNLOOM_EVT(RUNLOOM_EVT_CORO_ACQUIRE, c, c->stack, (long long)rounded);
+        runloom_coro_assert_idle(c, "coro REACQUIRED while a goroutine is still executing on it");
         /* Stack was poisoned when this coro was recycled (see destroy);
          * unpoison before the goroutine runs on it again. */
         RUNLOOM_UNPOISON(c->stack, rounded);
@@ -559,6 +577,7 @@ runloom_coro_t *runloom_coro_new(size_t stack_size,
 void runloom_coro_destroy(runloom_coro_t *c)
 {
     if (c == NULL) return;
+    runloom_coro_assert_idle(c, "coro RELEASED while a goroutine is executing on it");
     /* Security scrub (opt-in): wipe the stack before it is recycled OR
      * released, so a later goroutine reusing it sees zero, not this
      * goroutine's leftovers.  Covers both the coro-pool fast path (which
@@ -693,7 +712,11 @@ void runloom_coro_resume(runloom_coro_t *c)
     runloom_coro_t *prev = runloom_tls_current;
     runloom_coro_maybe_grow(c);     /* Path-A copy-grow at the resume boundary */
     runloom_tls_current = c;
+    if (RUNLOOM_DBG_ON(RUNLOOM_DBG_INVARIANTS))
+        __atomic_store_n(&c->dbg_running, 1, __ATOMIC_RELEASE);
     runloom_asm_swap(&c->asm_coro.caller, &c->asm_coro.self);
+    if (RUNLOOM_DBG_ON(RUNLOOM_DBG_INVARIANTS))
+        __atomic_store_n(&c->dbg_running, 0, __ATOMIC_RELEASE);
     runloom_tls_current = prev;
 }
 
