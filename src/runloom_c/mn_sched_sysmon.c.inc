@@ -3,6 +3,20 @@
  * these definitions depend on. */
 
 
+/* Called from the fatal-signal crash handler (runloom_crash.c) on the faulting
+ * hub thread, the instant it becomes the crash owner.  Stops the sysmon and
+ * handoff watchdog loops so neither marks this hub a recoverable wedge nor has
+ * the rescue pool adopt its goroutines mid-dump -- the faulting g must stay put
+ * so the handler's chain-out re-faults and cores cleanly.  Async-signal-safe:
+ * just stores to the loop-stop flags + the preempt enable flag (no locks, no
+ * malloc, no Python C-API). */
+void runloom_sched_freeze_for_crash(void)
+{
+    __atomic_store_n(&runloom_sysmon_stop, 1, __ATOMIC_RELEASE);
+    __atomic_store_n(&runloom_handoff_stop, 1, __ATOMIC_RELEASE);
+    runloom_preempt_enabled = 0;
+}
+
 /* sysmon watchdog thread.  Holds NO GIL and NO tstate -- it only reads
  * per-hub atomics and writes to stderr, never touching the Python C-API.
  * Scans every runloom_sysmon_tick_ns; logs a hub whose current runloom_coro_resume

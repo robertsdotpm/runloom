@@ -172,4 +172,13 @@ void runloom_mn_sweep_claim_release(runloom_g_t *g);
  * global ring's mutex-protected submit + legacy spin-drain. */
 struct runloom_iouring_ring *runloom_mn_current_iouring_ring(void);
 
+/* Halt the M:N watchdog threads (sysmon preemption + handoff rescue) from
+ * inside the fatal-signal crash handler.  Async-signal-safe: only atomic/plain
+ * stores to the loop-stop flags.  A hub thread that has faulted and is driving
+ * the crash dump must NOT be treated as a recoverable wedge -- otherwise the
+ * handoff rescue adopts its goroutines and steals the faulting g away before
+ * the handler's chain-out re-faults and cores, leaving the process limping
+ * (service dead, no core).  See runloom_crash.c / crash_handler. */
+void runloom_sched_freeze_for_crash(void);
+
 #endif /* RUNLOOM_MN_SCHED_H */
