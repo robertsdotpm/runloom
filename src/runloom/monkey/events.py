@@ -212,9 +212,18 @@ class CoSemaphore(object):
                 if timeout is not None and time.monotonic() - t0 >= timeout:
                     return False
                 _raw_time_sleep(0.0001)
+        # Must park.  Build the parker with the guard RELEASED first: _Parker()
+        # can YIELD (on Windows the socketpair wake-fd handshake runs through
+        # the cooperative socket path and parks the goroutine).  Yielding while
+        # holding the real guard lets the goroutine we yield to block its hub
+        # thread on that held guard -- and the holder, now parked behind it, can
+        # never resume to release it: deadlock (this hung CoSemaphore on Windows
+        # the moment a 2nd waiter showed up).  Same parker-before-guard order as
+        # CoEvent.wait above.  Re-acquire + re-check afterward: a permit may have
+        # appeared (or been handed straight to a waiter) while we built it.
+        self._guard.release()
         p = _Parker()
-        # Re-check under the guard: a permit may have appeared while we built
-        # the parker.  Claim it directly if so.
+        self._guard.acquire()
         if self._value > 0:
             self._value -= 1
             self._guard.release()
