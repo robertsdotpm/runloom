@@ -794,6 +794,21 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
     /* Reverse runloom_coro_thread_init for clean exit on Windows
      * (ConvertFiberToThread); no-op elsewhere. */
     runloom_coro_thread_fini();
-    PyEval_SaveThread();
+    /* Delete this hub's tstate ON THIS (owning) THREAD, not later in
+     * runloom_mn_fini on the main thread.  PyThreadState_New (above) gilstate-
+     * bound it to THIS thread's gilstate-TSS slot -- _PyThreadState_NewBound
+     * binds the new tstate as the thread's gilstate tstate when that slot is
+     * empty, which it always is for a fresh hub OS thread -- and the delete path
+     * (tstate_delete_common -> unbind_gilstate_tstate) clears the CALLING
+     * thread's slot.  Deleting from runloom_mn_fini on the main thread would
+     * therefore clear the MAIN thread's gilstate binding instead of this hub's,
+     * corrupting it: a latent fault for any later PyGILState_Ensure on the main
+     * thread, and a hard abort under a --with-pydebug free-threaded CPython
+     * (pystate.c:345 asserts tstate == this thread's gilstate tstate).  Clearing
+     * + deleting here, where gilstate_tss == hts, satisfies the contract; we
+     * publish h->tstate = NULL first so the mn_fini sweep skips this slot. */
+    PyThreadState_Clear(hts);
+    __atomic_store_n(&h->tstate, NULL, __ATOMIC_RELEASE);
+    PyThreadState_DeleteCurrent();
     RUNLOOM_THREAD_RETURN(NULL);
 }

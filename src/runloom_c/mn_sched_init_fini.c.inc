@@ -224,9 +224,13 @@ void runloom_mn_fini(void)
         }
     }
     for (i = 0; i < runloom_hub_count; i++) {
-        /* Created on the hub thread (see runloom_mn_init); NULL if that hub
-         * never started or failed its own PyThreadState_New.  Hubs are joined
-         * by now, so a non-NULL tstate is detached and safe to delete here. */
+        /* A hub that ran deletes its OWN tstate on its own thread at hub_main
+         * exit (it was gilstate-bound to that thread; a cross-thread delete from
+         * here corrupts the main thread's gilstate binding -- see the comment in
+         * mn_sched_hub_main.c.inc), publishing tstate = NULL, so this is normally
+         * NULL.  Non-NULL only for a hub that allocated a tstate but never
+         * reached its self-delete (a crash/abort path); clear it here as a
+         * best-effort fallback.  Hubs are joined by now, so this is unraced. */
         PyThreadState *hts = runloom_hubs[i].tstate;
         if (hts != NULL) {
             PyThreadState_Clear(hts);
