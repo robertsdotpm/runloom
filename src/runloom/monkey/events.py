@@ -126,18 +126,23 @@ class CoCondition(object):
             timed_out = False
         else:
             deadline = time.monotonic() + timeout
-            done = [False]
-            def waker(parker=p, dl=deadline):
-                while not done[0]:
-                    remaining = dl - time.monotonic()
-                    if remaining <= 0:
-                        parker.unpark()
-                        return
-                    _co_sleep(min(remaining, 0.05))
             if _in_goroutine():
+                # Cooperative: a waker goroutine unparks us at the deadline.
+                done = [False]
+                def waker(parker=p, dl=deadline):
+                    while not done[0]:
+                        remaining = dl - time.monotonic()
+                        if remaining <= 0:
+                            parker.unpark()
+                            return
+                        _co_sleep(min(remaining, 0.05))
                 _spawn(waker)
-            p.park()
-            done[0] = True
+                p.park()
+                done[0] = True
+            else:
+                # Foreign OS thread: no goroutine to run a waker -- let the
+                # parker's real select() time out directly.
+                p.park(max(0.0, deadline - time.monotonic()))
             timed_out = time.monotonic() >= deadline
         p.release()
         self._lock.acquire()

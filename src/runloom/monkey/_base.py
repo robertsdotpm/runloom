@@ -55,6 +55,11 @@ _raw_time_sleep = time.sleep
 # forever on a non-blocking recv that returns BlockingIOError).
 _raw_sock_recv = socket.socket.recv
 _raw_sock_send = socket.socket.send
+# Raw select (before polling.py installs the cooperative select).  A _Parker on
+# a FOREIGN OS thread (not a goroutine) blocks the thread on its wake fd with
+# this -- the patched select would re-enter the cooperative path on a thread
+# with no goroutine/hub.
+_raw_select = _select_mod.select
 # Raw os.sendfile (before _patch_syscalls offloads it to the pool).  The
 # cooperative socket.sendfile drives this directly in non-blocking mode and
 # parks on wait_fd, rather than blocking a pool worker for the whole transfer.
@@ -195,8 +200,20 @@ class _Parker(object):
             self.w = w
             self._sockets = None
 
-    def park(self):
-        runloom_c.wait_fd(self.r, READ)
+    def park(self, timeout=None):
+        if _in_goroutine():
+            runloom_c.wait_fd(self.r, READ)     # cooperative goroutine park
+        else:
+            # FOREIGN OS thread (e.g. a multiprocessing.Queue _feed daemon
+            # thread taking a monkey-patched threading.Condition): block the
+            # THREAD on the wake fd with a real select.  runloom_c.wait_fd parks
+            # a GOROUTINE on a hub's netpoll -- there is no goroutine/hub on this
+            # thread, so calling it here is undefined and raced -> SIGSEGV under
+            # M:N.  timeout=None blocks until unpark() writes the wake byte.
+            try:
+                _raw_select([self.r], [], [], timeout)
+            except (OSError, ValueError):
+                pass
         if self._sockets is not None:
             try:
                 _raw_sock_recv(self._sockets[0], 64)
