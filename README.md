@@ -193,11 +193,14 @@ safe: deep recursion raises `RecursionError` (not a crash), stacks grow on
 demand, every stack has a guard page so an overflow faults cleanly instead of
 corrupting a neighbour, and CPython's stack-hungry error paths can't blow a
 goroutine. For a native call that needs a big stack in one shot, pass
-`stack_size=`.[^bridgestack] To find which goroutine kinds are over- or
-under-reserving, `runloom.inspect.enable_stack_advice()` then
-`print_stack_advice()` measures real per-kind stack use and suggests sizes; or
-`enable_stack_autosize()` lets runloom size each kind for you (start large, learn
-down, in-memory only). Details: [docs/stack-sizing.md](https://github.com/robertsdotpm/runloom/blob/main/docs/stack-sizing.md#defending-against-overflow).
+`stack_size=`.[^bridgestack] And under M:N (`run(n>1)`) runloom **learns each
+function's real stack need and reserves only that, on by default** -- the
+function-bound *grow-down* (512 KB cold start → ~16 KB for a trivial handler,
+in-memory only); turn it off with `runloom.set_grow_down(False)` or
+`RUNLOOM_GROW_DOWN=0`, or pin a `stack_size=` to opt one function out. To find
+which goroutine kinds are over- or under-reserving, `runloom.inspect.enable_stack_advice()`
+then `print_stack_advice()` measures real per-kind stack use and suggests sizes.
+Details: [docs/stack-sizing.md](https://github.com/robertsdotpm/runloom/blob/main/docs/stack-sizing.md#automatic-grow-down-on-by-default-mn).
 
 ## Ways to use it
 

@@ -77,6 +77,24 @@ Current per-goroutine default stack size, in bytes.
 Override the default and freeze calibration.  Clamped to
 `[16 KB, 8 MB]`.  Disables stack painting.
 
+#### `current_g_hwm() → int`
+
+The currently-running goroutine's stack high-water-mark in bytes
+(page-granular, paint-free via `mincore`), or `0` outside a goroutine or
+where the backend has no introspectable stack (Windows Fibers).  The read
+half of the function-bound grow-down auto-sizer.
+
+#### `set_grow_down(enabled=True)` / `grow_down_enabled() → bool`
+
+(On `runloom`, not `runloom_c`.) Toggle the function-bound stack **grow-down**
+auto-sizer, which learns each `runloom.go()`-spawned function's real stack need
+and reserves only that.  **On by default**, active under M:N (`run(n>1)`) only;
+single-thread `run(1)` keeps the fixed default.  Also disabled by
+`RUNLOOM_GROW_DOWN=0` in the environment.  A per-call `runloom.go(fn,
+stack_size=N)` pin always wins, and grow-down defers to the opt-in
+`enable_stack_autosize()` when that is explicitly enabled.  See
+[docs/stack-sizing.md](stack-sizing.md#automatic-grow-down-on-by-default-mn).
+
 ### Channels
 
 #### `Chan(capacity)`

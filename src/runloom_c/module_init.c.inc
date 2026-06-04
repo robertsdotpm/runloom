@@ -105,6 +105,11 @@ static PyMethodDef module_methods[] = {
      "if called outside one.  Used together with park_self/G.wake to "
      "implement lightweight per-task wake primitives without the "
      "overhead of a Chan."},
+    {"current_g_hwm", m_current_g_hwm, METH_NOARGS,
+     "Return the current goroutine's stack high-water-mark in bytes "
+     "(page-granular, paint-free via mincore), or 0 outside a goroutine "
+     "or where the backend has no introspectable stack.  Read half of the "
+     "function-bound grow-down auto-sizer."},
     {"run",         m_run,         METH_NOARGS,
      "Drive the C scheduler until all goroutines finish.  Returns count."},
     {"run_ready",   m_run_ready,   METH_NOARGS,

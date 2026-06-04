@@ -230,6 +230,30 @@ static PyObject *m_current_g(PyObject *self, PyObject *unused)
     return (PyObject *)handle;
 }
 
+/* Stack high-water-mark (bytes) of the currently-running goroutine, page-
+ * granular, measured paint-free via mincore (runloom_coro_scan_hwm).  Returns
+ * 0 outside a goroutine, or where the backend has no introspectable stack
+ * (Windows Fibers) -- callers treat 0 as "unknown, keep the current size".
+ *
+ * This is the read half of the function-bound grow-down: a goroutine calls it
+ * just before returning to learn how deep it actually went, then writes the
+ * derived size back onto its own callable so the next spawn reserves less. */
+static PyObject *m_current_g_hwm(PyObject *self, PyObject *unused)
+{
+    runloom_g_t *g;
+    (void)self; (void)unused;
+
+    if (runloom_mn_current_hub_opaque() != NULL) {
+        g = runloom_mn_tls_current_g();
+    } else {
+        g = runloom_sched_peek_current();
+    }
+    if (g == NULL) {
+        return PyLong_FromLong(0);
+    }
+    return PyLong_FromSize_t(runloom_coro_scan_hwm(g->coro));
+}
+
 /* Vectorcall fast-dispatch version of sched_yield.
  *
  * METH_NOARGS for a module-level function in CPython 3.12+ specializes

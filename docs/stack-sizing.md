@@ -15,13 +15,65 @@ unused tail costs no RAM until touched).  Calibration scans completed
 goroutines' high-water marks and after 1 000 completions can adapt the default
 **up** to `next_pow2(max_hwm × 4)` (clamped at 8 MB) for stack-hungry programs --
 but it is **floored at 512 KB** and never auto-shrinks below it.  (Reclaiming
-the tail for huge goroutine counts is the opt-in per-kind auto-sizer's job; an
-explicit `set_stack_size()` can still go down to 16 KB.)  When a goroutine
-finishes, its stack returns to a
+the tail per function is the **grow-down**'s job -- on by default under M:N, see
+the next section; an explicit `set_stack_size()` can still go down to 16 KB.)
+When a goroutine finishes, its stack returns to a
 per-thread pool with `MADV_DONTNEED` applied -- the kernel reclaims the
 physical pages while keeping the virtual mapping.  Net effect: 10 000
 idle goroutines cost about as much RAM as their actual stack usage,
 not their reservation.
+
+## Automatic grow-down (on by default, M:N)
+
+Under M:N scheduling (`run(n)` with `n > 1`) runloom **learns each function's
+real stack need and reserves only that** -- automatically, no setup. This is the
+function-bound *grow-down*, and it is **on by default**.
+
+The first time you `runloom.go(fn)` a function, its goroutine starts at the safe
+default stack (a "cold start" -- a size the function is known to complete on),
+measures its real C-stack high-water mark on return, and writes a derived size
+back onto the function itself (`fn.__dict__["runloom_stack"]` -- the function
+*is* the lookup row). The next spawn of that same function reserves only
+`next_pow2(measured_hwm × 4)`, floored at 16 KB. The stored size is the running
+**max** over the first 64 spawns, then frozen -- after that, spawning is a single
+dict lookup with no measurement overhead. A trivial handler settles at 16 KB
+instead of 512 KB (a 32× cut); a `json.dumps`-heavy one at ~64 KB.
+
+It only ever shrinks *from* the cold start -- a size the function already ran on
+-- so it never reserves **more** than a known-safe amount. The one residual
+risk, an input that drives the function deeper than any of the first 64 sampled
+runs, lands on the guard page as a clean classified crash (never corruption) and
+re-learns next process. The learned size is **in-memory only, never persisted**:
+a remembered-small size would be a foot-gun across restarts -- the run that
+finally gets the deep input would load a too-small size.
+
+### Turning it off
+
+```python
+import runloom
+
+runloom.set_grow_down(False)     # reserve the fixed default for every goroutine
+runloom.grow_down_enabled()      # -> current state
+```
+
+or set `RUNLOOM_GROW_DOWN=0` in the environment before `import runloom`. A
+per-call `runloom.go(fn, stack_size=N)` pin always wins regardless -- use it to
+opt a single function out and choose its exact size. The grow-down also steps
+aside automatically when you explicitly enable the opt-in C auto-sizer
+([below](#letting-runloom-size-them-for-you)) -- the sizer you turned on by hand
+wins, since it may *deliberately* over-reserve (the crypto prescan's 1 MiB
+margin) where grow-down would measure-and-shrink.
+
+### Scope
+
+- **M:N only.** Single-thread `run(1)` (the GIL/compat path) keeps the fixed
+  default -- there the per-spawn learning is pure overhead (a tight spawn loop
+  runs nothing until it finishes, so the sampler can't amortise) and the memory
+  win, which only pays off at scale, isn't on the table.
+- **Per `runloom.go()`-spawned function.** Goroutines spawned through the raw C
+  entry points (`runloom_c.mn_go`) use the plain default; the learning lives in
+  the friendly `runloom.go()` wrapper. Arg-bearing `runloom.go(fn, x)` binds the
+  size to `fn` (shared across all its arg variants), not the per-call wrapper.
 
 ## Why goroutines have stacks at all
 
@@ -433,4 +485,5 @@ inspect `stats()` afterwards.
 - Guard page (`mprotect PROT_NONE` on the lowest page) + `SIGSEGV` handler
   that raises a clean `StackOverflowError` instead of crashing.
 - Per-thread calibration so M:N hubs converge independently.
-- Adaptive shrink (currently only grows during calibration).
+- ~~Adaptive shrink~~ -- shipped: the default-on [grow-down](#automatic-grow-down-on-by-default-mn)
+  shrinks each function to its measured need under M:N.

@@ -56,6 +56,8 @@ from .runtime import (
     run,
     current,
     Goroutine,
+    set_grow_down,      # toggle the default-on function-bound stack grow-down
+    grow_down_enabled,
 )
 import runloom_c as _core  # noqa: F401  – C extension lives at top level
 

@@ -11,12 +11,139 @@ way to multiplex Python frames across stacks.
 The public API (runloom.go, .yield_now, .sleep, .run, .current) is preserved
 so existing code keeps working.
 """
+import os
 import sys
 import time
 import runloom_c
 
 
 _prewarmed = False
+
+
+# --- function-bound stack grow-down (auto-size-down), default-on under M:N --
+#
+# Every goroutine reserves a C stack.  A fixed default (512 KiB) is safe but
+# wasteful: most goroutines touch only a few KiB, so 99% of the reservation is
+# never paged in.  The grow-down learns each function's real need and reserves
+# only that, bound to the function itself rather than a side table -- "the
+# function IS the database row".
+#
+# Active under M:N (run(n>1)) only; single-thread run(1) keeps the fixed default
+# (see the dispatch in go() for why).
+#
+# On the first runloom.go(fn, ...) spawn we let the C side use the default
+# stack (a "cold start" we know is safe -- the function completes on it).  The
+# goroutine measures its real C-stack high-water-mark on return (page-granular,
+# paint-free via mincore) and writes a derived, smaller size back onto fn's
+# __dict__.  The next spawn of that same function reads it and reserves only
+# next_pow2(hwm * MARGIN).  The stored size is the monotone MAX over the first
+# GROW_DOWN_SAMPLES measured runs (so one shallow run can't under-provision a
+# function that sometimes goes deep), then frozen -- after that, spawning is a
+# single dict lookup with zero measurement overhead.
+#
+# We freeze by SPAWN count, not completion count: a tight loop that spawns a
+# burst of goroutines before any of them runs (common single-thread pattern)
+# would otherwise wrap and mincore-measure every one of them, since no
+# completion ever bumps a completion-based counter mid-burst.  Counting at spawn
+# time caps the measured/wrapped goroutines at GROW_DOWN_SAMPLES regardless of
+# when they run, so the steady state is always a plain dict lookup.
+#
+# Safety: the learned size only ever SHRINKS from the cold start, a size that
+# already ran the function, so it never reserves more than a known-safe amount.
+# The one residual risk -- an input deeper than every sampled run, hitting the
+# now-smaller stack -- lands on the PROT_NONE guard page as a clean crash (a
+# classified overflow, never silent corruption), and re-learns next process.
+# Pin an exact size with runloom.go(fn, stack_size=N) to opt a function out
+# entirely; disable globally with RUNLOOM_GROW_DOWN=0 or set_grow_down(False).
+#
+# Free-threaded note: the learned size lives in a 2-element list on fn.__dict__,
+# read/written under free-threaded CPython's per-object locks.  Concurrent
+# completions of the same function race only on the max-update; a lost update
+# just delays convergence by one spawn (and is bounded below by the guard page),
+# so no lock is needed on the hot path.
+GROW_DOWN_KEY = "runloom_stack"      # key stamped on each learned callable's __dict__
+GROW_DOWN_SAMPLES = 64               # measure this many runs of a function, then freeze
+GROW_DOWN_MARGIN = 4                 # reserve next_pow2(measured_hwm * MARGIN)
+GROW_DOWN_MIN = 16 * 1024            # never reserve below this (matches C MIN_STACK_SIZE)
+
+grow_down_active = (
+    os.environ.get("RUNLOOM_GROW_DOWN", "").strip().lower()
+    not in ("0", "off", "false", "no")
+)
+
+
+def set_grow_down(enabled=True):
+    """Enable/disable the function-bound stack grow-down auto-sizer.
+
+    On by default, and active under M:N scheduling (run(n>1)) only -- single-
+    thread run(1) always uses the fixed default stack.  When off, runloom.go()
+    reserves the fixed default stack for every goroutine (no per-function
+    learning).  Also settable at import via the RUNLOOM_GROW_DOWN=0 environment
+    variable.  Per-call ``stack_size=`` pins always win regardless of this
+    setting."""
+    global grow_down_active
+    grow_down_active = bool(enabled)
+
+
+def grow_down_enabled():
+    """True if the function-bound stack grow-down is currently active."""
+    return grow_down_active
+
+
+def _next_pow2(n):
+    if n <= GROW_DOWN_MIN:
+        return GROW_DOWN_MIN
+    p = GROW_DOWN_MIN
+    while p < n:
+        p <<= 1
+    return p
+
+
+def grow_down_prepare(real_fn, target):
+    """Return (stack_size, target') for a grow-down-managed spawn of real_fn.
+
+    stack_size is 0 (let the C side use its default cold start) until real_fn
+    has been measured, then its learned size.  target' is either the original
+    target (frozen -- enough samples collected) or a thin wrapper that measures
+    the goroutine's stack high-water-mark on return and updates the learned
+    size bound to real_fn.  Functions with no writable __dict__ (most C
+    builtins) can't carry a learned size, so they fall back to the cold start
+    with no wrapper."""
+    d = getattr(real_fn, "__dict__", None)
+    if d is None:
+        return 0, target                      # not introspectable: cold start, no learning
+    store = d.get(GROW_DOWN_KEY)
+    if store is None:
+        store = [0, 0]                         # [learned_size_bytes, spawns_measured]
+        try:
+            d[GROW_DOWN_KEY] = store
+        except (TypeError, AttributeError):
+            return 0, target                   # read-only mapping proxy etc.
+    size = store[0]                            # 0 on first spawn -> C cold start
+    if store[1] >= GROW_DOWN_SAMPLES:
+        return size, target                    # frozen: spawn at learned size, no wrapper
+    store[1] += 1                              # count at SPAWN time (see freeze note above)
+
+    def measured():
+        try:
+            return target()
+        finally:
+            hwm = runloom_c.current_g_hwm()
+            if hwm:
+                want = _next_pow2(hwm * GROW_DOWN_MARGIN)
+                ceiling = runloom_c.get_stack_size()   # known-safe cold start
+                if want > ceiling:
+                    want = ceiling
+                if want > store[0]:
+                    store[0] = want
+
+    # Keep the wrapper transparent to the (opt-in) C-side autosizer and to
+    # diagnostics: __wrapped__ lets runloom_advice_unwrap see through `measured`
+    # to the real callable so its kind/prescan keying still works when both
+    # sizers are enabled, and __name__ keeps inspect/dumps readable.
+    measured.__wrapped__ = target
+    measured.__name__ = getattr(target, "__name__", "goroutine")
+    return size, measured
 
 
 def gil_enabled():
@@ -132,10 +259,11 @@ def go(callable_, *args, **kwargs):
     # stack instead of being forwarded into the call.  0 = use the default /
     # auto-sizer.  An explicit value always wins over the auto-sizer.
     stack_size = kwargs.pop("stack_size", 0)
+    name = getattr(callable_, "__name__", "goroutine")
     if args or kwargs:
         target = lambda: callable_(*args, **kwargs)
-        target.__name__ = getattr(callable_, "__name__", "goroutine")
-        # The auto-sizer keys a goroutine's "kind" (and its crypto/fat-frame
+        target.__name__ = name
+        # The C auto-sizer keys a goroutine's "kind" (and its crypto/fat-frame
         # prescan) on the callable's code identity.  Without this, every
         # arg-bearing go() would look like the SAME kind -- this wrapper lambda
         # -- so they'd share one stack size and the prescan would scan the
@@ -144,11 +272,33 @@ def go(callable_, *args, **kwargs):
         target.__wrapped__ = callable_
     else:
         target = callable_
-    if runloom_c.mn_hub_count() > 0:
+
+    # Function-bound grow-down (default-on under M:N): unless the caller pinned
+    # an exact stack_size, learn callable_'s real stack need and reserve only
+    # that.  The learned size binds to callable_ (the real function), so every
+    # spawn of it -- with or without args -- shares one size.  An explicit
+    # stack_size always wins and skips the auto-sizer.  See grow_down_prepare.
+    #
+    # Restricted to M:N (run(n>1)): single-thread run(1) is the GIL/compat path
+    # with modest goroutine counts, where the per-spawn learning is pure overhead
+    # (a tight spawn loop runs nothing until it finishes, so the sampler never
+    # amortises) and the memory win -- which only pays off at scale -- isn't on
+    # the table.  mn_hub_count() also selects the spawn path below, so read once.
+    #
+    # Defer to the opt-in C autosizer when it's explicitly enabled: it may
+    # DELIBERATELY over-reserve (e.g. the crypto/fat-frame prescan reserves 1 MiB
+    # by name as a safety margin), and grow-down's measured shrink would silently
+    # override that conservative choice.  Two sizers shouldn't fight -- the one
+    # the user explicitly turned on wins.
+    mn = runloom_c.mn_hub_count()
+    if (mn > 0 and stack_size <= 0 and grow_down_active
+            and not runloom_c.stack_autosize_enabled()):
+        stack_size, target = grow_down_prepare(callable_, target)
+    if mn > 0:
         runloom_c.mn_go(target, stack_size)
         return None
     g = runloom_c.go(target, stack_size)
-    return Goroutine(g, name=getattr(target, "__name__", "goroutine"))
+    return Goroutine(g, name=name)
 
 
 def yield_now():
