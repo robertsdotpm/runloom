@@ -19,8 +19,8 @@ import time
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 import runloom_c
 
-ROUNDS = 8
-WORKERS_PER_ROUND = 200
+ROUNDS = int(os.environ.get("ROUNDS", "8"))
+WORKERS_PER_ROUND = int(os.environ.get("WORKERS", "200"))
 
 
 def maps_count():
