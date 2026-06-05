@@ -277,21 +277,24 @@ static void runloom_sysmon_stop_join(void)
 
 /* ---- Group B rescue loop (RUNLOOM_HANDOFF) ----
  *
- * Resume ONE default-mode g on the currently-adopted hub tstate, using
- * `base` (the captured g_block slice) as the per-g register window exactly as
- * hub_main uses hub_snap.  A faithful copy of hub_main's DEFAULT branch
- * (mn_sched.c resume block) MINUS the per-g-tstate / global-runq paths (the
- * handoff is default mode) and MINUS the sysmon resume_begin/end instrument
- * (that field tracks the OWNER's g_block wedge; the rescue's own resumes are
- * unwatched).  Kept as a separate routine per the project ethos: do NOT
- * refactor hub_main, so the default scheduler path stays byte-unchanged.
+ * Resume ONE fresh goroutine on the rescue thread's OWN tstate, using `base`
+ * (a snap of the rescue tstate's clean initial state) as the per-g register
+ * window exactly as hub_main uses hub_snap.  A faithful copy of hub_main's
+ * DEFAULT branch MINUS the per-g-tstate / global-runq paths, MINUS the sysmon
+ * resume_begin/end (that field tracks the OWNER's g_block wedge, not ours),
+ * and MINUS h->sched.current writes (hub-private field; writing it from the
+ * rescue thread while hub_main may concurrently write it on the hub thread
+ * at goroutine completion = data race -- hub diagnostics show g_block's value
+ * during the rescue period, which is fine).
  *
- * tstate-safety: every g in hub h's sub_list/FIFO/deque either is fresh (no
- * tstate affinity) or parked while running on hub h (its parker recorded
- * h->id, so a wake routes it back to h -- a g stolen to another hub records
- * THAT hub and never lands here).  So resuming on hub_ts is always the
- * same-tstate resume the H>=2 bug requires.  The rescue therefore NEVER steals
- * from a neighbour (that g parked on a different tstate). */
+ * The BUG #2 tstate-adoption race is eliminated: `base` is snapped from the
+ * RESCUE THREAD's tstate (not the hub's), so the hub owner can re-attach its
+ * own tstate at any time without racing us on _PyThreadState_Attach.
+ *
+ * The rescue ONLY handles FRESH (snap.valid==0) goroutines stolen from the
+ * Chase-Lev deque.  Woken goroutines (snap.valid==1) have C-stack state baked
+ * to the hub OS thread and must not migrate; they are left in the hub's
+ * ready FIFO / sub_list for the owner to drain when it wakes. */
 static void runloom_handoff_resume_g(runloom_hub_t *h, runloom_g_t *g,
                                   runloom_pystate_snap_t *base)
 {
@@ -308,7 +311,10 @@ static void runloom_handoff_resume_g(runloom_hub_t *h, runloom_g_t *g,
         }
 #endif
     }
-    h->sched.current = g;
+    /* DO NOT write h->sched.current from the rescue thread: that is a
+     * hub-private field the hub owner also writes (at goroutine completion /
+     * park in hub_main), causing a data race.  TLS runloom_tls_current_g is
+     * per-OS-thread and therefore safe. */
     runloom_tls_current_g = g;
     runloom_tls_self_queued = 0;
     runloom_tls_parked_offqueue = 0;
@@ -316,7 +322,6 @@ static void runloom_handoff_resume_g(runloom_hub_t *h, runloom_g_t *g,
     RUNLOOM_G_ASSERT_NOT(g, RUNLOOM_GST_BIT(RUNLOOM_GST_FREED));
     RUNLOOM_EVT(RUNLOOM_EVT_G_POP, g, h, 0);
     if (g->coro == NULL || __atomic_load_n(&g->done, __ATOMIC_ACQUIRE)) {
-        h->sched.current = NULL;
         runloom_tls_current_g = NULL;
         return;
     }
@@ -327,7 +332,6 @@ static void runloom_handoff_resume_g(runloom_hub_t *h, runloom_g_t *g,
     runloom_tls_self_queued = 0;
     runloom_tls_parked_offqueue = 0;
     runloom_tls_current_g = NULL;
-    h->sched.current = NULL;
 
     if (runloom_coro_done(g->coro)) {
         runloom_drain_g_datastack();
@@ -337,13 +341,17 @@ static void runloom_handoff_resume_g(runloom_hub_t *h, runloom_g_t *g,
         runloom_g_decref(g);               /* scheduler ref */
         runloom_pystate_snap(base);
     } else if (!self_queued) {
-        /* Raw runloom_coro_yield(): keep it runnable, hub-pinned. */
-        runloom_sched_ready_push(&h->sched, g);
+        /* Raw runloom_coro_yield(): snap the goroutine's Python state from the
+         * rescue tstate and re-submit via the sub_list (mutex-protected, safe
+         * from any thread).  A direct ready-ring push would race the hub owner's
+         * concurrent pop on that single-producer-single-consumer ring. */
+        runloom_pystate_snap(&g->snap);
+        runloom_mn_hub_submit(h, g);
     } else if (runloom_g_state_in(g, RUNLOOM_GST_MASK_PARKED)) {
-        /* Parked off-queue (netpoll/chan/sleep): a wake_g routes it back to
-         * THIS hub's sub_list.  Drop its idle stack pages (no-op unless
+        /* Parked off-queue (netpoll/chan/sleep): wake_g routes it back to
+         * THIS hub's sub_list.  Drop idle stack pages (no-op unless
          * RUNLOOM_STACK_PARK_DONTNEED=1). */
         runloom_coro_park(g->coro);
     }
-    /* else: cooperative sched_yield already re-queued itself on the FIFO. */
+    /* else: cooperative sched_yield already re-queued itself on the ready FIFO. */
 }

@@ -3,138 +3,163 @@
  * these definitions depend on. */
 
 
-/* Drive a single adopt -> drain-to-empty -> handback cycle for the wedged hub,
- * repeating until the wedge clears.  Runs on the rescue OS thread. */
-static void runloom_handoff_rescue(runloom_hub_t *h)
+/* Drive fresh-goroutine rescue for a wedged hub.  The rescue thread uses its
+ * OWN PyThreadState (never the hub's) so the hub owner can re-attach its own
+ * tstate at any time without racing on _PyThreadState_Attach.
+ *
+ * BUG #2 FIX.  The old approach called PyEval_RestoreThread(hub_tstate) to
+ * adopt the hub's tstate.  Between the "is-DETACHED?" check and that call, the
+ * hub's goroutine could unblock (Py_END_ALLOW_THREADS) → both the hub owner
+ * and the rescue thread would simultaneously call _PyThreadState_Attach on the
+ * SAME tstate.  CPython only ever mutates _status from one owner; two threads
+ * racing there corrupts the biased-refcount ob_tid, tstate TLS binding, and
+ * the _status field → use-after-free (SIGSEGV/SIGBUS under heavy I/O load).
+ *
+ * New design:
+ *   • rescue_ts is this thread's OWN PyThreadState (created at spawn, TID-bound
+ *     to this OS thread's biased-refcount heap — see runloom_handoff_main).
+ *   • The hub's hts is NEVER touched; the hub owner can freely re-attach it.
+ *   • We steal ONLY from the hub's Chase-Lev deque (steal() is the safe
+ *     multi-thread interface; pop() is owner-only and would race hub_main if
+ *     the hub's goroutine unblocks while we are in mid-steal).
+ *   • We do NOT drain the sub_list or the sleep heap: both require
+ *     deque-push / ready-push (hub-private single-consumer operations) that
+ *     would race hub_main.  Sub_list / sleepers drain naturally when the hub
+ *     wakes.  The rescue benefit is running goroutines already in the deque
+ *     (queued before the wedge) while the hub is blocked. */
+static void runloom_handoff_rescue(runloom_hub_t *h, PyThreadState *rescue_ts)
 {
     runloom_pystate_snap_t rescue_base;
-    int attached = 0;
+    int base_valid = 0;    /* rescue_base snapped once per session, while attached */
     long drained = 0;
 
     for (;;) {
         runloom_g_t *g;
 
-        if (__atomic_load_n(&runloom_handoff_stop, __ATOMIC_ACQUIRE)) {
-            if (attached) {
-                runloom_pystate_load(&rescue_base);
-                runloom_tls_hub = NULL;
-                PyEval_SaveThread();
-            }
-            return;
-        }
+        if (__atomic_load_n(&runloom_handoff_stop, __ATOMIC_ACQUIRE))
+            return;   /* rescue_ts is DETACHED here; nothing to clean up */
 
-        if (!attached) {
-            /* Adopt only a genuinely DETACHED, still-active wedge.  The racy
-             * resume_start_ns + state checks keep us off (a) an idle-sleeping
-             * owner (resume_start_ns==0 -- it briefly detaches at idle), and
-             * (b) an owner actively in the hub loop (state==ATTACHED).  A lost
-             * race (owner re-grabs, or a STW sets SUSPENDED, between the check
-             * and the attach) makes PyEval_RestoreThread block until it can
-             * attach -- bounded and safe; we re-verify the wedge after. */
+        /* Quality-of-dispatch check.  All reads from hub fields are safe while
+         * DETACHED (pure C atomics/reads; no Python C-API).  This is NOT a
+         * safety gate -- the BUG #2 race is gone because rescue_ts is the
+         * rescue's OWN tstate and the hub's tstate is never touched. */
+        {
             long long start = __atomic_load_n(&h->resume_start_ns,
                                               __ATOMIC_RELAXED);
             long long now = runloom_monotonic_ns();
-            /* Acquire load: the hub publishes its tstate on its own thread.
-             * NULL during that startup window -> fail closed (return). */
-            PyThreadState *hts = (PyThreadState *)__atomic_load_n((void **)&h->tstate, __ATOMIC_ACQUIRE);
+            PyThreadState *hts = (PyThreadState *)__atomic_load_n(
+                (void **)&h->tstate, __ATOMIC_ACQUIRE);
             if (hts == NULL || start == 0 ||
                 (now - start) <= runloom_sysmon_wedge_ns ||
                 runloom_tstate_attach_state(hts) != RUNLOOM_TS_DETACHED) {
-                return;   /* wedge gone / not a DETACHED block -> nothing to do */
+                return;
             }
-            runloom_delay_inject(RUNLOOM_DLY_HANDOFF_ADOPT);
-            RUNLOOM_EVT(RUNLOOM_EVT_HANDOFF_ADOPT, h, hts, 0);
-            PyEval_RestoreThread(hts);     /* attach hub_ts to THIS thread */
-            runloom_tls_hub = h;
-            /* Capture g_block's live slice; every handback restores it so the
-             * owner's END_ALLOW_THREADS re-attach finds it intact. */
-            runloom_pystate_snap(&rescue_base);
-            attached = 1;
-            if (runloom_handoff_debug)
-                fprintf(stderr, "[RUNLOOM_HANDOFF] adopt hub %d\n", h->id);
         }
 
-        /* ---- one drain pass (mirror hub_main, default-only, NO steal) ---- */
-        /* Drain submission list into deque (fresh) / local FIFO (woken). */
-        runloom_mutex_lock(&h->sub_lock);
-        {
-            runloom_g_t *sub = h->sub_head;
-            h->sub_head = h->sub_tail = NULL;
-            runloom_mutex_unlock(&h->sub_lock);
-            while (sub != NULL) {
-                runloom_g_t *next = sub->next;
-                sub->next = NULL;
-                if (sub->snap.valid) {
-                    runloom_sched_ready_push(&h->sched, sub);
-                } else if (runloom_cldeque_push(&h->deque, sub) != 0) {
-                    runloom_sched_ready_push(&h->sched, sub);
+        /* Steal ONE fresh goroutine from the hub's deque.  steal() is safe from
+         * any thread; it does NOT require being the deque's owner.  Done WHILE
+         * DETACHED so the rescue thread imposes no stop-the-world load between
+         * goroutine runs (see the attach/detach cycle below). */
+        g = (runloom_g_t *)runloom_cldeque_steal(&h->deque);
+
+        if (g == NULL) {
+            if (runloom_handoff_debug && base_valid)
+                fprintf(stderr, "[RUNLOOM_HANDOFF] hub %d deque empty "
+                                "(drained=%ld)\n", h->id, drained);
+            /* Deque empty.  Still wedged? If so, wait briefly and re-check. */
+            {
+                long long start = __atomic_load_n(&h->resume_start_ns,
+                                                  __ATOMIC_RELAXED);
+                long long now = runloom_monotonic_ns();
+                if (start == 0 || (now - start) <= runloom_sysmon_wedge_ns ||
+                    runloom_tstate_attach_state((PyThreadState *)
+                        __atomic_load_n((void **)&h->tstate, __ATOMIC_ACQUIRE))
+                        != RUNLOOM_TS_DETACHED) {
+                    return;
                 }
-                sub = next;
             }
-        }
-        /* Expired sleepers -> local FIFO (default branch). */
-        if (h->sched.sleep_size > 0) {
-            double now = runloom_sched_monotonic_seconds();
-            while (h->sched.sleep_size > 0 &&
-                   runloom_sched_sleep_peek(&h->sched)->wake_at <= now) {
-                runloom_sched_ready_push(&h->sched,
-                                      runloom_sched_sleep_pop(&h->sched));
-            }
+            runloom_sleep_ns(200000LL);
+            continue;
         }
 
-        /* Run ONLY fresh (never-run) gs from the deque.  A resumed/woken g -- the
-         * ready FIFO, snap.valid -- has a coro C-stack baked to the OWNER hub's
-         * OS thread; resuming it on the rescue thread is a cross-hub migration
-         * that is unsafe in free-threaded mode and crashes on macOS/arm64 (a
-         * stale-tstate read -> SIGSEGV at a low offset inside the eval loop;
-         * root-caused via the flight recorder + crash classifier).  Leave such gs
-         * in the hub's ready FIFO for the OWNER to resume on its own thread once
-         * the wedge clears.  Fresh deque gs carry no baked frame, so the rescue
-         * starts them safely -- this keeps the handoff's progress benefit for new
-         * work behind a blocking g while removing the migration hazard. */
-        g = (runloom_g_t *)runloom_cldeque_pop(&h->deque);  /* fresh only */
-
-        if (g != NULL) {
-            runloom_handoff_resume_g(h, g, &rescue_base);
-            drained++;
-            continue;                                 /* try for more work */
+        /* We have a fresh goroutine.  Attach rescue_ts ONLY for this resume.
+         *
+         * Key: PyEval_RestoreThread blocks if a GC stop-the-world is pending
+         * before attaching.  This means:
+         *  a) we give the GC a safe window BETWEEN goroutine runs (we are
+         *     DETACHED while checking/stealing above, so STW can complete then);
+         *  b) the actual goroutine run proceeds only when the world is running.
+         * WITHOUT this detach-reattach cycle, the rescue thread stays ATTACHED
+         * through all the C code between goroutine runs, and a GC stop-the-world
+         * that fires during that window can never complete (the rescue thread
+         * never checks the eval-breaker in C code) ->
+         * test_mn_iouring_fileread_under_gc deadlock. */
+        runloom_delay_inject(RUNLOOM_DLY_HANDOFF_ADOPT);
+        RUNLOOM_EVT(RUNLOOM_EVT_HANDOFF_ADOPT, h, h->tstate, 0);
+        PyEval_RestoreThread(rescue_ts);   /* attach; blocks during STW */
+        runloom_tls_hub = h;
+        if (!base_valid) {
+            /* Snap the clean base state of rescue_ts once per session.
+             * Restored between goroutine runs (just below) and at final detach.
+             * Goroutine Python state (context, exc, etc.) rides g->snap. */
+            runloom_pystate_snap(&rescue_base);
+            base_valid = 1;
+            if (runloom_handoff_debug)
+                fprintf(stderr, "[RUNLOOM_HANDOFF] adopt hub %d (own tstate)\n",
+                        h->id);
         }
 
-        if (runloom_handoff_debug)
-            fprintf(stderr, "[RUNLOOM_HANDOFF] hub %d drain pass empty "
-                            "(drained=%ld so far)\n", h->id, drained);
-        /* Runq empty: restore g_block's slice, detach so the owner can reclaim
-         * the instant its block ends, then re-verify.  Still DETACHED-wedged ->
-         * loop re-adopts (after a short sleep that bounds the added latency for
-         * gs woken into the sub_list during the block); otherwise released. */
+        runloom_handoff_resume_g(h, g, &rescue_base);
+        drained++;
+
+        /* Restore clean rescue state, then DETACH immediately.  This is the
+         * critical STW-safety point: by detaching after every goroutine, we
+         * guarantee rescue_ts is NOT ATTACHED during the C code between runs,
+         * so a concurrent GC stop-the-world can complete.  The next iteration's
+         * PyEval_RestoreThread will then block until the STW ends. */
         runloom_pystate_load(&rescue_base);
         runloom_tls_hub = NULL;
         PyEval_SaveThread();
-        attached = 0;
-        {
-            long long start = __atomic_load_n(&h->resume_start_ns,
-                                              __ATOMIC_RELAXED);
-            long long now = runloom_monotonic_ns();
-            if (start == 0 || (now - start) <= runloom_sysmon_wedge_ns ||
-                runloom_tstate_attach_state((PyThreadState *)
-                    __atomic_load_n((void **)&h->tstate, __ATOMIC_ACQUIRE))
-                    != RUNLOOM_TS_DETACHED) {
-                return;   /* block ended or owner/STW reclaimed -> released */
-            }
-        }
-        runloom_sleep_ns(200000LL);   /* 0.2 ms re-poll for wakes during the block */
     }
 }
 
-/* Rescue M main loop.  One of a pool of standby threads; scans the per-hub
- * claim slots for a PENDING wedge, CASes it PENDING->OWNED to take exclusive
- * ownership of that hub's rescue (so two threads never rescue the same hub),
- * rescues it, then stores OWNED->FREE.  At most one rescue per scan pass, then
- * re-scan from the top for fairness across hubs.  Holds no tstate while idle. */
+/* Rescue M main loop.  One of a pool of standby threads; scans per-hub claim
+ * slots for a PENDING wedge, CASes PENDING->OWNED (at most one rescuer per hub),
+ * rescues, then OWNED->FREE.  One rescue per pass, then re-scan from the top
+ * for fairness.  Creates its own PyThreadState at startup (used during rescues;
+ * detached while idle) -- the tstate is TID-bound to this OS thread's
+ * biased-refcount heap, so Python objects allocated during rescues are correctly
+ * accounted. */
+/* index counter: monotonic, rescue threads claim slots 0, 1, 2, ... */
+static volatile int runloom_rescue_thread_next = 0;
+
 static RUNLOOM_THREAD_RET runloom_handoff_main(void *arg)
 {
+    PyThreadState *rescue_ts;
+    int my_idx;
     (void)arg;
-    runloom_coro_thread_init();   /* per-OS-thread coro backend (no-op on POSIX) */
+    runloom_coro_thread_init();
+
+    /* Claim a slot in the rescue_tstates array.  Threads spawn serially so the
+     * counter never races in practice; ACQ_REL makes it sound under any order. */
+    my_idx = __atomic_fetch_add(&runloom_rescue_thread_next, 1, __ATOMIC_ACQ_REL);
+
+    /* Create OWN tstate ON THIS THREAD so biased-refcount ob_tid binds to this
+     * OS thread's TID -- same serialised construction hub threads use. */
+    runloom_mutex_lock(&runloom_hub_tstate_lock);
+    rescue_ts = PyThreadState_New(runloom_mn_interp);
+    runloom_mutex_unlock(&runloom_hub_tstate_lock);
+    if (rescue_ts == NULL) {
+        runloom_coro_thread_fini();
+        RUNLOOM_THREAD_RETURN(NULL);
+    }
+    /* Publish tstate for stop_join to delete -- see runloom_rescue_tstates comment.
+     * RELEASE: pairs with stop_join's post-join read (which gets a happens-before
+     * via the pthread_join). */
+    __atomic_store_n(&runloom_rescue_tstates[my_idx], rescue_ts, __ATOMIC_RELEASE);
+
+    /* Keep tstate DETACHED while idle; attach only during an active rescue
+     * (PyEval_RestoreThread is called per goroutine in runloom_handoff_rescue). */
     while (!__atomic_load_n(&runloom_handoff_stop, __ATOMIC_ACQUIRE)) {
         int i, claimed = 0;
         for (i = 0; i < runloom_hub_count; i++) {
@@ -143,15 +168,22 @@ static RUNLOOM_THREAD_RET runloom_handoff_main(void *arg)
                                             RUNLOOM_HANDOFF_OWNED, 0,
                                             __ATOMIC_ACQ_REL,
                                             __ATOMIC_RELAXED)) {
-                runloom_handoff_rescue(&runloom_hubs[i]);
+                runloom_handoff_rescue(&runloom_hubs[i], rescue_ts);
                 __atomic_store_n(&runloom_handoff_claim[i], RUNLOOM_HANDOFF_FREE,
                                  __ATOMIC_RELEASE);
                 claimed = 1;
-                break;   /* one rescue per pass; re-scan from the top */
+                break;
             }
         }
-        if (!claimed) runloom_sleep_ns(500000LL);   /* 0.5 ms idle poll */
+        if (!claimed) runloom_sleep_ns(500000LL);
     }
+
+    /* Exit with rescue_ts DETACHED (PyEval_SaveThread at the end of each rescue
+     * cycle; never re-attached while idle).  Do NOT call PyThreadState_Delete here:
+     * during mn_fini the GC gcer thread may still be running a stop-the-world;
+     * PyThreadState_Delete interacts with that bookkeeping and deadlocks when
+     * called from the rescue thread while the main thread blocks in pthread_join.
+     * Deletion is done by stop_join from the main thread after all rescuers join. */
     runloom_coro_thread_fini();
     RUNLOOM_THREAD_RETURN(NULL);
 }
@@ -164,14 +196,23 @@ static void runloom_handoff_spawn(void)
     int k;
     if (!runloom_handoff_enabled) return;
     runloom_handoff_stop = 0;
+    runloom_rescue_thread_next = 0;
     runloom_handoff_claim = (int *)calloc((size_t)(runloom_hub_count > 0 ?
                                                 runloom_hub_count : 1), sizeof(int));
     runloom_handoff_threads = (runloom_thread_t *)calloc(
         (size_t)(runloom_handoff_pool > 0 ? runloom_handoff_pool : 1),
         sizeof(runloom_thread_t));
-    if (runloom_handoff_claim == NULL || runloom_handoff_threads == NULL) {
+    /* Per-rescue-thread tstate pointers: set by each rescue thread, deleted by
+     * stop_join after all threads are joined.  Zeroed so stop_join can skip
+     * threads that failed to create a tstate. */
+    runloom_rescue_tstates = (PyThreadState **)calloc(
+        (size_t)(runloom_handoff_pool > 0 ? runloom_handoff_pool : 1),
+        sizeof(PyThreadState *));
+    if (runloom_handoff_claim == NULL || runloom_handoff_threads == NULL
+        || runloom_rescue_tstates == NULL) {
         free(runloom_handoff_claim);   runloom_handoff_claim = NULL;
         free(runloom_handoff_threads); runloom_handoff_threads = NULL;
+        free(runloom_rescue_tstates);  runloom_rescue_tstates = NULL;
         runloom_handoff_enabled = 0;
         fprintf(stderr, "[RUNLOOM_HANDOFF] alloc failed; stalled-hub recovery "
                         "disabled\n");
@@ -179,8 +220,6 @@ static void runloom_handoff_spawn(void)
     }
     runloom_handoff_running = 0;
     for (k = 0; k < runloom_handoff_pool; k++) {
-        /* Pack successfully-created handles at [0, running) so stop_join joins
-         * exactly the threads that started. */
         if (runloom_thread_create(&runloom_handoff_threads[runloom_handoff_running],
                                runloom_handoff_main, NULL) == 0) {
             runloom_handoff_running++;
@@ -189,6 +228,7 @@ static void runloom_handoff_spawn(void)
     if (runloom_handoff_running == 0) {
         free(runloom_handoff_claim);   runloom_handoff_claim = NULL;
         free(runloom_handoff_threads); runloom_handoff_threads = NULL;
+        free(runloom_rescue_tstates);  runloom_rescue_tstates = NULL;
         runloom_handoff_enabled = 0;
         fprintf(stderr, "[RUNLOOM_HANDOFF] no rescue threads spawned; "
                         "stalled-hub recovery disabled\n");
@@ -205,6 +245,27 @@ static void runloom_handoff_stop_join(void)
     __atomic_store_n(&runloom_handoff_stop, 1, __ATOMIC_RELEASE);
     for (k = 0; k < runloom_handoff_running; k++) {
         runloom_thread_join(runloom_handoff_threads[k]);
+    }
+    /* Delete rescue tstates from this (main) thread now that all rescue OS
+     * threads have exited.  The pthread_join above provides the happens-before
+     * that makes the rescue threads' tstate-pointer stores visible here.
+     * Done here (not in each rescue thread) to avoid the STW-interaction
+     * deadlock: PyThreadState_Delete acquires HEAD_LOCK; if a GC stop-the-world
+     * is active when a rescue thread calls it, the interaction deadlocks because
+     * the main thread (which holds the GC lock) is blocked in pthread_join. */
+    if (runloom_rescue_tstates != NULL) {
+        runloom_mutex_lock(&runloom_hub_tstate_lock);
+        for (k = 0; k < runloom_handoff_running; k++) {
+            PyThreadState *rts = __atomic_load_n(&runloom_rescue_tstates[k],
+                                                  __ATOMIC_ACQUIRE);
+            if (rts != NULL) {
+                PyThreadState_Clear(rts);
+                PyThreadState_Delete(rts);
+            }
+        }
+        runloom_mutex_unlock(&runloom_hub_tstate_lock);
+        free(runloom_rescue_tstates);
+        runloom_rescue_tstates = NULL;
     }
     runloom_handoff_running = 0;
     free(runloom_handoff_threads); runloom_handoff_threads = NULL;
