@@ -10,6 +10,7 @@
 #include "runloom_crash.h"
 #include "runloom_diag.h"   /* runloom_delay_inject (determinism tooling #2) */
 #include "plat_atomic.h"    /* __atomic_*/__ATOMIC_* shim for MSVC (Windows build) */
+#include "plat_compat.h"    /* runloom_mutex_t for the shared stack depot */
 
 #include <stdlib.h>
 #include <string.h>
@@ -202,6 +203,27 @@ static void runloom_coro_assert_idle(runloom_coro_t *c, const char *where)
 #define RUNLOOM_STACK_HDR_SIZE  1
 
 static RUNLOOM_TLS void **runloom_tls_stack_pool = NULL;
+static RUNLOOM_TLS int    runloom_tls_stack_pool_n = 0;
+
+/* Shared global stack depot (magazine model).  The TLS pool above is a
+ * lock-free per-thread cache for the common balanced case; but under an
+ * acceptor->worker fan-out (one goroutine mn_go's many handlers that complete
+ * across all hubs) stacks drain out of the acceptor thread's cache and pile
+ * into the worker threads' caches, which the acceptor can never reach -- so the
+ * acceptor re-mmaps forever and the worker caches grow without bound.  When a
+ * thread's cache exceeds RUNLOOM_STACK_TLS_CAP it flushes the excess down to
+ * this shared depot; when a thread's cache is empty it refills a batch from the
+ * depot before mmap'ing.  A stack freed on any hub is thus reusable on any
+ * other, and total mappings are bounded (depot past its cap -> munmap).  The
+ * depot is touched only on cache overflow/underflow, so the balanced fast path
+ * stays lock-free.  POSIX-only block, so the mutex can be statically inited. */
+#define RUNLOOM_STACK_TLS_CAP      64    /* per-thread cache high-water */
+#define RUNLOOM_STACK_TLS_KEEP     32    /* keep this many local on a flush */
+#define RUNLOOM_STACK_GLOBAL_CAP   1024  /* depot bound; beyond -> munmap */
+#define RUNLOOM_STACK_REFILL_BATCH 32    /* pulled from depot on underflow */
+static runloom_mutex_t runloom_global_stack_lock = RUNLOOM_MUTEX_STATIC_INIT;
+static void **runloom_global_stack_pool = NULL;
+static int    runloom_global_stack_n = 0;
 
 /* Guard page below each coroutine stack.  A push past the low end of
  * the usable region lands in this PROT_NONE page -> SIGSEGV, instead of
@@ -251,36 +273,92 @@ static void runloom_stack_unmap_guarded(void *usable, size_t usable_size)
     munmap((char *)usable - guard, guard + usable_size);
 }
 
-static void *runloom_stack_acquire(size_t size)
+/* Pop a matching-size stack from the TLS cache, munmapping any size-mismatched
+ * entries at the head (bounded work in the rare mixed-size case).  Returns NULL
+ * if the cache holds no matching stack. */
+static void *runloom_stack_pop_local(size_t size)
 {
     void **head = runloom_tls_stack_pool;
-    if (head != NULL) {
-        size_t pooled_size = (size_t)head[RUNLOOM_STACK_HDR_SIZE];
-        if (pooled_size == size) {
-            runloom_tls_stack_pool = (void **)head[RUNLOOM_STACK_HDR_NEXT];
-            /* Caller will overwrite the header bytes as the stack
-             * grows; the new coroutine doesn't observe them. */
-            RUNLOOM_UNPOISON((void *)head, size);
-            return (void *)head;
-        }
-        /* Size mismatch (different stack_size requested than what the
-         * pool has).  Don't walk -- just munmap pooled stacks until
-         * the head matches or pool is empty.  Bounded work in the
-         * pathological mixed-size case. */
-        while (head != NULL && (size_t)head[RUNLOOM_STACK_HDR_SIZE] != size) {
-            void **next = (void **)head[RUNLOOM_STACK_HDR_NEXT];
-            runloom_stack_unmap_guarded((void *)head,
-                                     (size_t)head[RUNLOOM_STACK_HDR_SIZE]);
-            head = next;
-        }
-        runloom_tls_stack_pool = head;
-        if (head != NULL) {
-            runloom_tls_stack_pool = (void **)head[RUNLOOM_STACK_HDR_NEXT];
-            RUNLOOM_UNPOISON((void *)head, size);
-            return (void *)head;
-        }
+    while (head != NULL && (size_t)head[RUNLOOM_STACK_HDR_SIZE] != size) {
+        void **next = (void **)head[RUNLOOM_STACK_HDR_NEXT];
+        runloom_tls_stack_pool_n--;
+        runloom_stack_unmap_guarded((void *)head,
+                                    (size_t)head[RUNLOOM_STACK_HDR_SIZE]);
+        head = next;
     }
-    return runloom_stack_map_guarded(size);
+    runloom_tls_stack_pool = head;
+    if (head == NULL) return NULL;
+    runloom_tls_stack_pool = (void **)head[RUNLOOM_STACK_HDR_NEXT];
+    runloom_tls_stack_pool_n--;
+    RUNLOOM_UNPOISON((void *)head, size);
+    return (void *)head;
+}
+
+/* Refill the TLS cache with up to RUNLOOM_STACK_REFILL_BATCH matching-size
+ * stacks from the shared depot.  Size-mismatched depot entries are dropped
+ * (munmap).  Called only when the TLS cache underflows. */
+static void runloom_stack_refill_from_global(size_t size)
+{
+    int moved = 0;
+    runloom_mutex_lock(&runloom_global_stack_lock);
+    while (moved < RUNLOOM_STACK_REFILL_BATCH && runloom_global_stack_pool != NULL) {
+        void **g = runloom_global_stack_pool;
+        runloom_global_stack_pool = (void **)g[RUNLOOM_STACK_HDR_NEXT];
+        runloom_global_stack_n--;
+        if ((size_t)g[RUNLOOM_STACK_HDR_SIZE] != size) {
+            /* Wrong size for this thread's request: drop rather than cache it
+             * (mixed-size workloads are rare; depot stays single-size in steady
+             * state). */
+            runloom_stack_unmap_guarded((void *)g,
+                                        (size_t)g[RUNLOOM_STACK_HDR_SIZE]);
+            continue;
+        }
+        g[RUNLOOM_STACK_HDR_NEXT] = (void *)runloom_tls_stack_pool;
+        runloom_tls_stack_pool = g;
+        runloom_tls_stack_pool_n++;
+        moved++;
+    }
+    runloom_mutex_unlock(&runloom_global_stack_lock);
+}
+
+/* Move all-but-KEEP entries from the TLS cache down to the shared depot.
+ * Past the depot cap, munmap (the bound that makes total mappings finite). */
+static void runloom_stack_flush_to_global(void)
+{
+    void **keep_tail, **move_head;
+    int i;
+    if (runloom_tls_stack_pool_n <= RUNLOOM_STACK_TLS_KEEP) return;
+    keep_tail = runloom_tls_stack_pool;
+    for (i = 1; i < RUNLOOM_STACK_TLS_KEEP; i++)
+        keep_tail = (void **)keep_tail[RUNLOOM_STACK_HDR_NEXT];
+    move_head = (void **)keep_tail[RUNLOOM_STACK_HDR_NEXT];
+    keep_tail[RUNLOOM_STACK_HDR_NEXT] = NULL;            /* cut local list at KEEP */
+    runloom_tls_stack_pool_n = RUNLOOM_STACK_TLS_KEEP;
+
+    runloom_mutex_lock(&runloom_global_stack_lock);
+    while (move_head != NULL) {
+        void **next = (void **)move_head[RUNLOOM_STACK_HDR_NEXT];
+        if (runloom_global_stack_n < RUNLOOM_STACK_GLOBAL_CAP) {
+            move_head[RUNLOOM_STACK_HDR_NEXT] = (void *)runloom_global_stack_pool;
+            runloom_global_stack_pool = move_head;
+            runloom_global_stack_n++;
+        } else {
+            runloom_stack_unmap_guarded((void *)move_head,
+                                        (size_t)move_head[RUNLOOM_STACK_HDR_SIZE]);
+        }
+        move_head = next;
+    }
+    runloom_mutex_unlock(&runloom_global_stack_lock);
+}
+
+static void *runloom_stack_acquire(size_t size)
+{
+    void *s = runloom_stack_pop_local(size);     /* lock-free fast path */
+    if (s != NULL) return s;
+    runloom_stack_refill_from_global(size);       /* balance across hubs */
+    s = runloom_stack_pop_local(size);
+    if (s != NULL) return s;
+    return runloom_stack_map_guarded(size);       /* truly out of stock */
 }
 
 static void runloom_stack_release(void *stack, size_t size)
@@ -309,11 +387,19 @@ static void runloom_stack_release(void *stack, size_t size)
     hdr[RUNLOOM_STACK_HDR_NEXT] = (void *)runloom_tls_stack_pool;
     hdr[RUNLOOM_STACK_HDR_SIZE] = (void *)size;
     runloom_tls_stack_pool = hdr;
+    runloom_tls_stack_pool_n++;
     /* Poison the body (skip the 16-byte pool header read by the next
      * runloom_stack_acquire) so ASan flags any access to this stack while it
      * sits free in the pool. Unpoisoned again on acquire. */
     if (size > 16) {
         RUNLOOM_POISON((char *)stack + 16, size - 16);
+    }
+    /* Overflowed this thread's cache -> flush the older entries down to the
+     * shared depot so another hub can reuse them (and so an imbalanced producer
+     * thread can't hoard stacks unboundedly).  Keeps RUNLOOM_STACK_TLS_KEEP for
+     * this thread's own fast path. */
+    if (runloom_tls_stack_pool_n > RUNLOOM_STACK_TLS_CAP) {
+        runloom_stack_flush_to_global();
     }
 }
 
@@ -514,8 +600,17 @@ static void runloom_fcontext_entry(void *user)
  * stack bottom), return.  Net win: ~150-250 ns / spawn.
  *
  * Size cap so we don't hoard 100k * (~140 KB stacks) after a burst.
+ *
+ * Kept modest (not thousands): this is a per-thread cache that keeps the
+ * stack ATTACHED, so under an acceptor->worker fan-out the worker threads
+ * would otherwise hoard up to CAP attached stacks each that the acceptor can
+ * never reuse.  Overflow beyond CAP releases the stack to the shared,
+ * cross-hub-balanced stack depot (see runloom_stack_release), so a low cap
+ * bounds per-thread hoarding while the depot recycles across hubs.  The
+ * balanced steady state (occupancy = live goroutines) sits well under CAP, so
+ * the lock-free coro-reuse fast path is unaffected.
  */
-#define RUNLOOM_CORO_POOL_CAP 4096
+#define RUNLOOM_CORO_POOL_CAP 512
 static RUNLOOM_TLS runloom_coro_t *runloom_coro_pool = NULL;
 static RUNLOOM_TLS int runloom_coro_pool_size = 0;
 
