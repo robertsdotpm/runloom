@@ -81,6 +81,13 @@ one-thread-per-unit-of-concurrency assumption. The bug-reproducing knobs are
 preserved (e.g. `--handoff`, higher `--funcs`) so each finding stays
 demonstrable.
 
+**Running the orchestrator at high `--jobs` is the strongest BUG #4 reproducer**
+— the filesystem / subprocess / TLS projects hang at the watchdog deadline once
+the box is loaded (each passes in isolation at moderate scale). That is the
+campaign's headline result, not a runner defect; the default `--jobs 8` keeps it
+manageable, and a clean multi-hour soak of those specific projects needs BUG #4
+fixed (or low `--funcs`).
+
 ## Project list
 
 See the docstring at the top of each `pNN_*.py`. Numbering follows the original

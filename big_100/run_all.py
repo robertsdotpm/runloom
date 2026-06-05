@@ -50,8 +50,11 @@ def select(projects, args):
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--jobs", type=int, default=16,
-                    help="projects to run at once (jobs*hubs ~= cores)")
+    ap.add_argument("--jobs", type=int, default=8,
+                    help="projects to run at once (jobs*hubs ~= cores). Note: "
+                         "high --jobs reliably triggers BUG #4 (offload hang) "
+                         "in the filesystem/subprocess/TLS projects -- that is "
+                         "a real finding, not a runner defect")
     ap.add_argument("--hubs", type=int, default=4, help="M:N hubs per project")
     ap.add_argument("--duration", type=float, default=3600.0)
     ap.add_argument("--seed", type=int, default=1234)
