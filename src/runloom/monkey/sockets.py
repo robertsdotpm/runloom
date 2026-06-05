@@ -316,19 +316,33 @@ def _patched_sendfile(self, file, offset=0, count=None):
 _orig_close   = None
 _orig_detach  = None
 _netpoll_unregister = getattr(runloom_c, "netpoll_unregister", None)
+_netpoll_cancel_fd = getattr(runloom_c, "netpoll_cancel_fd", None)
 
 
 def _patched_close(self):
-    """Clear the netpoll registration bit before closing so an fd
-    reuse re-registers cleanly under the ET register-once scheme."""
-    if _netpoll_unregister is not None:
+    """Clear the netpoll registration bit before closing (so an fd reuse
+    re-registers cleanly under the ET register-once scheme), then -- AFTER the
+    close -- wake any goroutine parked in accept()/recv()/connect() on this fd.
+    The woken op retries on the now-closed (fileno == -1) socket, gets EBADF and
+    unwinds, instead of being stranded forever when another goroutine closed the
+    socket out from under it (BUG #5)."""
+    fd = -1
+    try:
+        fd = self.fileno()
+    except (OSError, ValueError):
+        fd = -1
+    if _netpoll_unregister is not None and fd >= 0:
         try:
-            fd = self.fileno()
-            if fd >= 0:
-                _netpoll_unregister(fd)
+            _netpoll_unregister(fd)
         except (OSError, ValueError):
             pass
-    return _orig_close(self)
+    result = _orig_close(self)
+    if _netpoll_cancel_fd is not None and fd >= 0:
+        try:
+            _netpoll_cancel_fd(fd)
+        except (OSError, ValueError):
+            pass
+    return result
 
 
 def _patched_detach(self):

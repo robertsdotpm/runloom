@@ -114,6 +114,12 @@ int runloom_netpoll_cancel_g(struct runloom_g *g);
  * Safe to call on unknown fds (no-op). */
 void runloom_netpoll_unregister(int fd);
 
+/* Wake every goroutine parked in wait_fd on `fd` (returning
+ * RUNLOOM_NETPOLL_CANCELLED) -- the socket close hook calls this AFTER closing
+ * the fd so a cross-goroutine close unblocks a parked accept()/recv()/connect()
+ * instead of stranding it forever (BUG #5).  Safe on unknown fds (no-op). */
+void runloom_netpoll_cancel_fd(int fd);
+
 /* One-time init / cleanup. */
 int runloom_netpoll_init(void);
 void runloom_netpoll_fini(void);

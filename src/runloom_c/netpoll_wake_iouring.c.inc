@@ -83,6 +83,54 @@ int runloom_netpoll_cancel_g(runloom_g_t *g)
     return woke;
 }
 
+/* Cancel EVERY goroutine parked in runloom_netpoll_wait_fd on `fd` -- used by
+ * the socket close hook so a goroutine parked in accept()/recv()/connect() on a
+ * socket that ANOTHER goroutine closes is woken instead of stranded forever
+ * (BUG #5: epoll silently drops a closed fd, so the parked waiter never gets an
+ * event).  Each woken waiter returns RUNLOOM_NETPOLL_CANCELLED and the monkey
+ * socket op retries on the now-closed (fileno == -1) socket, getting EBADF.
+ * Same per-parker claim/unlink/wake as runloom_netpoll_cancel_g, walked over the
+ * pool's per-fd bucket; we save next_by_fd before unlink since the cancel
+ * removes the parker from that chain. */
+void runloom_netpoll_cancel_fd(int fd)
+{
+    int i;
+    if (fd < 0) return;
+    for (i = 0; i < RUNLOOM_PARKER_POOL_MAX; i++) {
+        runloom_parker_pool_t *pool = &runloom_pools[i];
+        runloom_parked_t *p, *next;
+        runloom_mutex_lock(&pool->lock);
+        if ((size_t)fd < pool->by_fd_cap) {
+            p = pool->by_fd[fd];
+            while (p != NULL) {
+                int cur;
+                next = p->next_by_fd;           /* save: cancel unlinks p */
+                for (;;) {
+                    cur = __atomic_load_n(&p->commit, __ATOMIC_ACQUIRE);
+                    if (cur == RUNLOOM_PARK_WOKEN) break;
+                    if (__atomic_compare_exchange_n(&p->commit, &cur,
+                            RUNLOOM_PARK_WOKEN, 0,
+                            __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+                        break;
+                }
+                if (cur != RUNLOOM_PARK_WOKEN) {
+                    if (p->ready_out != NULL)
+                        *p->ready_out = RUNLOOM_NETPOLL_CANCELLED;
+                    runloom_parker_unlink(pool, p);
+                    if (cur == RUNLOOM_PARK_PARKED) {
+                        if (p->hub != NULL) runloom_mn_wake_g(p->hub, p->g);
+                        else                runloom_sched_wake(p->g);
+                    }
+                    RUNLOOM_EVT(RUNLOOM_EVT_PARKER_FORCE, p, p->g,
+                                (long long)p->fd);
+                }
+                p = next;
+            }
+        }
+        runloom_mutex_unlock(&pool->lock);
+    }
+}
+
 int runloom_netpoll_add_iouring_eventfd(int fd)
 {
 #if defined(RUNLOOM_HAVE_EPOLL)

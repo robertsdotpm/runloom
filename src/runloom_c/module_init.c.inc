@@ -136,6 +136,11 @@ static PyMethodDef module_methods[] = {
      "netpoll_unregister(fd): clear the netpoll registration cache "
      "bit for fd.  Call from socket close so fd reuse re-registers "
      "cleanly under the edge-triggered register-once scheme."},
+    {"netpoll_cancel_fd", m_netpoll_cancel_fd, METH_O,
+     "netpoll_cancel_fd(fd): wake every goroutine parked in wait_fd on "
+     "fd (with the cancelled sentinel).  Call from the socket close hook "
+     "AFTER closing so a cross-goroutine close unblocks a parked "
+     "accept()/recv()/connect() (BUG #5)."},
     {"stats",       m_stats,       METH_NOARGS,
      "Return a dict of scheduler counters: ready, sleeping, "
      "netpoll_parked, completed, running, plus backend names.  "
