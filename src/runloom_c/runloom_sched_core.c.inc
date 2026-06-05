@@ -231,19 +231,34 @@ void runloom_g_entry(void *user)
         int py_limit = Py_GetRecursionLimit();
 #if PY_VERSION_HEX >= 0x030C0000
         ts->py_recursion_remaining = py_limit;
-        /* C-recursion budget for a goroutine.  Kept at the conservative flat 200
-         * (what a 128KB stack safely holds).  NOTE: scaling this UP with the
-         * goroutine's stack size -- the obvious way to let big-stack goroutines
-         * recurse deeper -- is NOT safe in this runtime: deeper Python recursion
-         * builds deeper RecursionError tracebacks, and deallocating a deep
-         * traceback re-recurses and re-engages CPython's trashcan WHILE the
-         * preemption machinery / a concurrent stop-the-world GC can yield the
-         * goroutine mid-destruction -> use-after-free SIGSEGV (~30% under
-         * big_100/p70 stress).  The achievable ceiling is bounded by that UAF,
-         * not by stack size; raising it must wait until the preempt-in-
-         * destruction guard covers the deep inline-traceback-dealloc path (see
-         * big_100/FINDINGS BUG #6).  Flat 200 is crash-free (15/15 under p70). */
-        ts->c_recursion_remaining = 200;
+        /* Scale the C-recursion budget to THIS goroutine's actual C stack so a
+         * big-stack goroutine can recurse as deep as it has room for (nested
+         * JSON, copy.deepcopy, recursive-descent parsers).  The old hard-coded
+         * 200 (sized for a 128KB stack) capped EVERY goroutine at ~88 Python
+         * frames regardless of stack size (BUG #6).  Give the goroutine the same
+         * per-byte budget CPython gives the 8MB main thread (Py_C_RECURSION_LIMIT
+         * already carries CPython's safety margin), floor 200, ceiling the
+         * platform limit.
+         *
+         * Raising this used to SIGSEGV ~30% under deep-recursion stress -- but
+         * the real cause was a snapshot bug, NOT the depth: the per-goroutine
+         * snap Py_XINCREF'd tstate->delete_later (the trashcan's deferred-dealloc
+         * chain), and on free-threaded builds Py_INCREF reads op->ob_tid to pick
+         * the refcount path -- but delete_later repurposes ob_tid as its
+         * next-pointer, so the INCREF scrambled the dying objects -> UAF when the
+         * trashcan destroyed them.  That bit only deep recursion (the one case
+         * that leaves delete_later non-NULL at a yield).  With delete_later now
+         * carried as a raw pointer (see runloom_pystate_snap), the scaled budget
+         * is crash-free (p70 20/20 + freethread_stress). */
+        if (g->coro != NULL) {
+            size_t stk = runloom_coro_stack_size(g->coro);
+            long b = (long)Py_C_RECURSION_LIMIT * (long)stk / (8L*1024*1024);
+            if (b < 200) b = 200;
+            if (b > Py_C_RECURSION_LIMIT) b = Py_C_RECURSION_LIMIT;
+            ts->c_recursion_remaining = (int)b;
+        } else {
+            ts->c_recursion_remaining = 200;
+        }
 #else
         ts->recursion_remaining = py_limit;
 #endif

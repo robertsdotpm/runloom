@@ -164,8 +164,21 @@ void runloom_pystate_snap(runloom_pystate_snap_t *snap)
 #if PY_VERSION_HEX >= 0x030D0000
     /* 3.13: cframe is gone; current_frame is directly on tstate. */
     snap->current_frame = ts->current_frame;
-    Py_XINCREF(ts->delete_later);
+    /* delete_later is the trashcan's deferred-dealloc chain: objects that are
+     * DYING (refcount 0) and linked through op->ob_tid (repurposed as the
+     * next-pointer, see CPython _PyTrash_begin).  It MUST be carried
+     * per-goroutine as a RAW pointer and NEVER Py_INCREF'd: on free-threaded
+     * builds Py_INCREF reads op->ob_tid to pick the local-vs-shared refcount
+     * path, but here ob_tid is a heap next-pointer, so an INCREF mutates the
+     * dying object's shared refcount and scrambles the chain -> use-after-free
+     * when the trashcan later destroys it.  (Py_XINCREF(NULL) is a no-op, which
+     * is why this stayed latent: delete_later is almost always NULL at a yield;
+     * only DEEP recursion -- BUG #6 -- leaves it non-NULL across a yield.)
+     * Transfer ownership of the chain to the snap and clear ts so the chain is
+     * private to this goroutine and the shared hub tstate never carries another
+     * goroutine's half-built destroy list. */
     snap->delete_later = ts->delete_later;
+    ts->delete_later = NULL;
 #endif
 
     snap->valid = 1;
@@ -323,12 +336,13 @@ void runloom_pystate_load(runloom_pystate_snap_t *snap)
 
 #if PY_VERSION_HEX >= 0x030D0000
     ts->current_frame = snap->current_frame;
-    {
-        PyObject *old = ts->delete_later;
-        ts->delete_later = snap->delete_later;
-        snap->delete_later = NULL;
-        Py_XDECREF(old);
-    }
+    /* Restore this goroutine's deferred-dealloc chain as a RAW pointer (see the
+     * snap side -- never refcount a delete_later chain).  ts->delete_later is
+     * NULL here: the goroutine that ran before us cleared it on its own snap,
+     * and hub_main runs no Python (so creates no deferred deallocs) between
+     * swaps -- so there is nothing to drop. */
+    ts->delete_later = snap->delete_later;
+    snap->delete_later = NULL;
 #endif
 
     snap->valid = 0;
@@ -355,7 +369,12 @@ void runloom_pystate_snap_clear(runloom_pystate_snap_t *snap)
     Py_CLEAR(snap->c_traceobj);
 #endif
 #if PY_VERSION_HEX >= 0x030D0000
-    Py_CLEAR(snap->delete_later);
+    /* delete_later is a raw chain of DYING objects linked via ob_tid, never
+     * refcounted (see runloom_pystate_snap).  A goroutine destroyed while parked
+     * mid-trashcan-deferral is extremely rare; rather than risk corrupting those
+     * dying objects with a DECREF, just drop the reference -- a small bounded
+     * leak of a few already-dead objects beats a use-after-free. */
+    snap->delete_later = NULL;
 #endif
     snap->valid = 0;
 }
