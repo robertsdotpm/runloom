@@ -91,6 +91,20 @@ typedef struct runloom_hub {
     runloom_mutex_t sub_lock;
     runloom_g_t *sub_head;
     runloom_g_t *sub_tail;
+    /* BUG #10 throughput: monotonic submission generation, bumped (RELEASE) by
+     * runloom_mn_hub_submit right after a push.  An idle hub that owns parked gs
+     * (cooperative-lock / channel waiters a cross-hub unlock will hub_submit to
+     * it) waits on its per-hub idle condvar (below) before sleeping, so a
+     * hand-off signals it awake in ~us instead of after idle_ns (~100us) -- the
+     * cap that held the contended cooperative Lock at ~10K ops/s.  Targeted:
+     * each hub has its OWN condvar, so there is no shared wake / thundering
+     * herd.  sub_gen is the monotonic submit counter (RELEASE-bumped by submit);
+     * idle_waiting (set only while parked in the timed wait) is the lock-free
+     * hint that lets a submit skip the signal lock when no one is waiting. */
+    volatile unsigned sub_gen;
+    runloom_mutex_t   idle_lock;
+    runloom_cond_t    idle_cond;
+    volatile int      idle_waiting;
     /* Controlled-replay deferred publish (barrier mode only).  A cross-hub
      * submit made DURING this hub's execution segment (mn_go / channel-wake from
      * a running goroutine) is staged here per TARGET hub, then spliced onto the
@@ -147,6 +161,25 @@ typedef struct runloom_hub {
 static runloom_hub_t *runloom_hubs = NULL;
 static int runloom_hub_count = 0;
 static volatile long runloom_mn_spawn_counter = 0;
+
+/* BUG #10 throughput: is the per-hub idle condvar wake enabled?  Default ON; set
+ * RUNLOOM_HUB_IDLE_WAKE=0 to fall back to the plain idle nanosleep (A/B / escape
+ * hatch).  An idle hub that owns parked gs waits on its per-hub condvar instead
+ * of a plain nanosleep, so a cross-hub hub_submit signals it awake in ~us
+ * instead of stranding the woken g for idle_ns (the cap that held the contended
+ * cooperative Lock at ~10K ops/s).  The wait is TIMED (idle_ns), so a missed
+ * signal degrades to the old latency for one hand-off -- never a hang. */
+static int runloom_hub_idle_wake_enabled(void)
+{
+    static int v = -1;
+    int cur = __atomic_load_n(&v, __ATOMIC_RELAXED);
+    if (cur < 0) {
+        const char *e = getenv("RUNLOOM_HUB_IDLE_WAKE");
+        cur = (e != NULL && e[0] == '0') ? 0 : 1;
+        __atomic_store_n(&v, cur, __ATOMIC_RELAXED);
+    }
+    return cur;
+}
 
 /* Serializes the hubs' one-time PyThreadState_New at startup.  Each hub creates
  * its OWN tstate on its OWN thread (so biased-refcount + mimalloc bind to the

@@ -74,6 +74,11 @@ int runloom_mn_init(int n_threads)
         runloom_cldeque_init(&h->deque);
         runloom_mutex_init(&h->sub_lock);
         h->sub_head = h->sub_tail = NULL;
+        /* BUG #10 per-hub idle wake (see mn_sched.c sub_gen). */
+        h->sub_gen = 0;
+        runloom_mutex_init(&h->idle_lock);
+        runloom_cond_init(&h->idle_cond);
+        h->idle_waiting = 0;
         /* Controlled-replay deferred-publish staging (barrier mode only): one
          * per-target list so a segment's cross-hub submits flush atomically at
          * release.  PyMem_Calloc zeroes; OOM -> NULL -> hub_submit falls back to
@@ -136,6 +141,8 @@ int runloom_mn_init(int n_threads)
                     PyThreadState_Delete(hts);
                 }
                 runloom_mutex_destroy(&runloom_hubs[j].sub_lock);
+                runloom_mutex_destroy(&runloom_hubs[j].idle_lock);
+                runloom_cond_destroy(&runloom_hubs[j].idle_cond);
             }
             PyMem_Free(runloom_hubs);
             runloom_hubs = NULL;
@@ -217,6 +224,12 @@ void runloom_mn_fini(void)
     runloom_handoff_stop_join();
     for (i = 0; i < runloom_hub_count; i++) {
         __atomic_store_n(&runloom_hubs[i].stopping, 1, __ATOMIC_RELEASE);
+        /* BUG #10 idle wake: a hub parked in its idle condvar must observe the
+         * stop promptly instead of waiting out idle_ns.  Signal under the lock
+         * so it can't slip between the hub's stopping re-check and its wait. */
+        runloom_mutex_lock(&runloom_hubs[i].idle_lock);
+        runloom_cond_signal(&runloom_hubs[i].idle_cond);
+        runloom_mutex_unlock(&runloom_hubs[i].idle_lock);
     }
     {
         PyThreadState *saved = PyEval_SaveThread();
@@ -275,6 +288,8 @@ void runloom_mn_fini(void)
             PyThreadState_Delete(hts);
         }
         runloom_mutex_destroy(&runloom_hubs[i].sub_lock);
+        runloom_mutex_destroy(&runloom_hubs[i].idle_lock);
+        runloom_cond_destroy(&runloom_hubs[i].idle_cond);
         PyMem_Free(runloom_hubs[i].stage_head);
         runloom_hubs[i].stage_head = NULL;
         PyMem_Free(runloom_hubs[i].stage_tail);
