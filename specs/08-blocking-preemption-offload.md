@@ -75,9 +75,15 @@ Surfaced to users three ways:
   inline (zero cost); only the genuinely-long C loops, which nothing can preempt,
   go to the pool.
 - **The `compile` patch** — `builtins.compile` (and thus `ast.parse` + source
-  imports) offloads when called inside a goroutine, because `compile`'s ~1.5 KB/level
-  C recursion overflows a 32 KB g-stack before CPython's recursion counter fires;
-  the pool thread's full-size stack runs it safely (spec 10).
+  imports) offloads when called inside a goroutine, because `compile`'s
+  ~1.5 KB/level C recursion overflows a *small* g-stack before the per-goroutine
+  C-recursion counter (reset to 200 frames at entry, spec 10) fires. The arithmetic:
+  200 × 1.5 KB ≈ 300 KB, so on the **512 KB default** compile fits and degrades to
+  a clean `RecursionError`; but a grown-down (16 KB, M:N) or raw-`Coro` (128 KB)
+  stack overflows at ~10–85 frames — well under 200 — and SEGVs. The pool thread's
+  full-size stack runs it safely (spec 10). (`docs/cooperative_stdlib_coverage.md`
+  frames this against a "32 KB g-stack" — that was the default before it was raised
+  to 512 KB; the offload now matters for the *small-stack* paths, not the default.)
 
 ### io_uring — the cooperative form of file/socket I/O on Linux
 

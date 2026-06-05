@@ -18,10 +18,17 @@ strategies so the common case is small without you thinking about it.
 A goroutine running low on stack is defended the way the main thread is, scaled
 down:
 
-1. **Deep recursion raises `RecursionError`, not a crash.** CPython's
-   C-recursion counter is tracked *per goroutine* (saved/restored in the snapshot,
-   spec 03), so unbounded Python *or* C recursion (`json`, `re`, nested calls) hits
-   a catchable `RecursionError` well before the stack overflows.
+1. **Deep recursion raises `RecursionError`, not a crash.** At goroutine entry
+   the per-tstate recursion counters are *reset for this goroutine* —
+   `py_recursion_remaining = Py_GetRecursionLimit()` and
+   `c_recursion_remaining = 200` (the comment: "200 frames matches what a 128 KB
+   stack can safely hold") — and then **saved/restored across yields** in the
+   snapshot (spec 03). So unbounded Python *or* C recursion (`json`, `re`, nested
+   calls) hits a catchable `RecursionError` well before the stack overflows.
+   ([runloom_sched_core.c.inc:226-239](../src/runloom_c/runloom_sched_core.c.inc#L226))
+   Note this contradicts `docs/cooperative_stdlib_coverage.md`, which says the C
+   counter is "NOT lowered per goroutine" — that doc is stale; the code lowers it
+   to 200 at entry.
 2. **Stacks grow on demand** (copy-grow / Path A, spec 01). A goroutine that
    gradually deepens *across yields* is copied onto a 2× stack at the resume
    boundary. `RUNLOOM_STACK_GROW=0` disables.
@@ -30,10 +37,16 @@ down:
 4. **The crash reporter classifies the guard fault** (spec 11) into "goroutine N
    overflowed its K-KiB stack" instead of a bare segfault.
 5. **CPython's stack-hungry error paths are neutralized.** A missing-attribute
-   lookup on a *module* makes CPython 3.13 reserve a 32 KB buffer just to build a
-   "did you shadow a stdlib module?" hint — larger than a default g-stack. runloom
-   skips that hint while on a goroutine (the `AttributeError` is otherwise
-   unchanged), so `getattr`/`hasattr` misses on a module can't blow the stack.
+   lookup on a *module* makes CPython 3.13's `_PyModule_IsPossiblyShadowing`
+   reserve **~32 KB of C stack** (two `wchar_t[MAXPATHLEN]` path buffers) just to
+   build a "did you shadow a stdlib module?" hint — larger than a *small* g-stack
+   (the grown-down/raw sizes below). runloom overrides `PyModule_Type.tp_getattro`
+   to raise the plain `AttributeError` without that hint *only while on a
+   goroutine* (off-goroutine the stock hint is byte-for-byte preserved), so
+   `getattr`/`hasattr` misses on a module can't blow the stack.
+   ([module_init.c.inc:334-419](../src/runloom_c/module_init.c.inc#L334)) (This
+   ~32 KB is the *hint buffer*, not the goroutine stack default — see the next
+   section; do not confuse them.)
 
 The **residual**: a *single native/FFI C frame larger than the whole goroutine
 stack* — a non-probing extension that jumps the guard in one allocation. That's
@@ -74,14 +87,36 @@ C and need the caller's namespace, so they're the documented residual (use
 
 There are several, layered, with an explicit precedence:
 
+**The numbers, from the code** (not the docs — `docs/cooperative_stdlib_coverage.md`
+still says "32 KB default" everywhere, which is **stale by a prior default change**;
+the true values are in `runloom_sched_datastack.c.inc:521-525`):
+
+| constant | value | where |
+|---|---|---|
+| `RUNLOOM_DEFAULT_STACK_SIZE` (scheduler default) | **512 KB** | [datastack.inc:521](../src/runloom_c/runloom_sched_datastack.c.inc#L521) |
+| `RUNLOOM_MIN_STACK_SIZE` (floor, explicit override only) | 16 KB | [datastack.inc:522](../src/runloom_c/runloom_sched_datastack.c.inc#L522) |
+| `RUNLOOM_MAX_STACK_SIZE` (cap) | 8 MB | [datastack.inc:523](../src/runloom_c/runloom_sched_datastack.c.inc#L523) |
+| calibration target / safety | 1000 completions / ×4 | [datastack.inc:524-525](../src/runloom_c/runloom_sched_datastack.c.inc#L524) |
+| raw `runloom_c.Coro()` / `TCPConn` constructor default | 128 KB | [module_coro.inc:37](../src/runloom_c/module_coro.c.inc#L37), [module_tcp.inc:46](../src/runloom_c/module_tcp.c.inc#L46) |
+| `runloom_c.go` (stack_size=-1) / `mn_go` (stack_size=0) | resolve to the 512 KB scheduler default (via `advice_size_for`) | [module_go.inc:56](../src/runloom_c/module_go.c.inc#L56), [mn_sched_init_fini.inc:385](../src/runloom_c/mn_sched_init_fini.c.inc#L385) |
+| aio task / io goroutine (`_TASK_STACK`/`_IO_STACK`) | 512 KB | [aio/_base.py:56](../src/runloom/aio/_base.py#L56) |
+
+So the default a normal `go()`/`mn_go()` goroutine gets is **512 KB** (or the
+grow-down learned size under M:N), *not* 32 KB. The only real 32 KB in the system
+is the CPython module-hint buffer above.
+
 **Precedence (highest wins):** explicit `runloom.go(fn, stack_size=N)` > the opt-in
 C auto-sizer (if you turned it on) > the default-on grow-down (M:N) > the
 process-wide calibrated default.
 
-1. **Calibration** (`runloom_sched.c`). The first ~1000 goroutines run on a generous
-   default; their HWMs are scanned (mincore, paint-free); then the scheduler locks
-   the default to `next_pow2(max_hwm × 4)` (floored 512 KB, capped 8 MB) and turns
-   off measurement. A process-wide single default.
+1. **Calibration** ([runloom_sched_core.c.inc:17-47](../src/runloom_c/runloom_sched_core.c.inc#L17)).
+   The first 1000 goroutines run on the 512 KB default; their HWMs are scanned
+   (mincore, paint-free); then the scheduler locks the default to
+   `next_pow2(max_hwm × 4)` and turns off measurement. **It only ever adapts
+   *up*** — `if (chosen < RUNLOOM_DEFAULT_STACK_SIZE) chosen = ...DEFAULT` floors
+   it at 512 KB so it never re-exposes the deep (`Decimal`/crypto) cases; the
+   "trivial → 16 KB calibrated" rows in `docs/stack-sizing.md` are *grow-down*,
+   not calibration. A process-wide single default.
 2. **Function-bound grow-down** (`runtime.py`, **default-on under M:N**). "The
    function IS the database row": the first `go(fn)` runs on the safe cold-start
    default, measures the real HWM on return, and writes `next_pow2(hwm × 4)`

@@ -159,9 +159,13 @@ quiescence. This is the primitive the aio loop's `_run_once` is built on.
 The introspection registry (spec 11) wants to walk every live g without taking a
 lock on the hot spawn path. The trick: the registry links a g **once**, when its
 struct is first OS-allocated, and unlinks only when returned to the OS. A recycled
-(slab-cached) g **stays linked**. The slab reuse path bulk-clears a g only up to
-`offsetof(runloom_g, id)` — so the `reg_prev`/`reg_next` links (placed *last* in
-the struct, after `id`) survive recycling untouched. Result: link/unlink happen
+(slab-cached) g **stays linked**. The slab reuse path memsets a g only up to
+`offsetof(runloom_g_t, state)` ([runloom_sched_core.c.inc:329](../src/runloom_c/runloom_sched_core.c.inc#L329)),
+then re-initializes `state` with an atomic store and resets `id`/`park_fd` at
+spawn — so the `reg_prev`/`reg_next` links (placed *last* in the struct, after the
+`state`/`id` introspection block) survive recycling untouched. (The header comment
+says "up to `offsetof(id)`"; the code actually stops one block earlier, at
+`state` — same effect, the links are after both.) Result: link/unlink happen
 only on the cold slab-miss/overflow paths; the hot spawn/complete path takes no
 registry lock and touches no shared atomic. **A re-implementer must keep the
 registry links as the final struct members and stop the reuse memset before
