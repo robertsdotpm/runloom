@@ -137,7 +137,10 @@ incident_crash() {
         echo "## runloom crash report ($crashf)"; echo '```'; tail -80 "$crashf" 2>/dev/null; echo '```'
         if [ -n "$core" ]; then
             echo "## core: $core ($(du -h "$core" 2>/dev/null | cut -f1))"
-            echo "## gdb backtrace"; echo '```'; bash "$HERE/gdb_dump.sh" core "$core" 2>&1 | head -120; echo '```'
+            local full="${f%.md}.gdb.txt"
+            bash "$HERE/gdb_dump.sh" core "$core" > "$full" 2>&1
+            echo "## gdb backtrace -- full in $(basename "$full")"
+            echo '```'; cat "$full"; echo '```'
         else
             echo "## core: (none found)"
         fi
@@ -162,8 +165,18 @@ incident_hang() {
         if [ -f "$RUN/health.json" ]; then
             echo "## last heartbeat (run/health.json)"; echo '```'; cat "$RUN/health.json" 2>/dev/null; echo '```'
         fi
-        echo "## live gdb backtrace (all threads)"
-        echo '```'; bash "$HERE/gdb_dump.sh" pid "$pid" 2>&1 | head -160; echo '```'
+        # Snapshot the WEDGED process to a core BEFORE we touch it, so the full
+        # state (every goroutine frame, the holder of any contended lock, the
+        # CPython critical-section stacks) is recoverable offline with py-bt.
+        local core="$CORES/hang.$pid.$(date +%s)"
+        if gcore -o "$core" "$pid" >/dev/null 2>&1; then
+            echo "## gcore: ${core}.${pid}"
+        fi
+        # Full, UNTRUNCATED live backtrace (all threads, C + py-bt) -> sidecar.
+        local full="${f%.md}.gdb.txt"
+        bash "$HERE/gdb_dump.sh" pid "$pid" > "$full" 2>&1
+        echo "## live gdb backtrace (all threads) -- full in $(basename "$full")"
+        echo '```'; cat "$full"; echo '```'
     } > "$f"
     log "HANG incident -> $f"
     touch "$RUN/NEW_INCIDENT"
