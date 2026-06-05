@@ -114,6 +114,29 @@ def start_echo_server(H, host="127.0.0.1"):
     return port
 
 
+TIMEOUT = object()      # sentinel returned by recv_line_timeout on no-data
+
+
+def recv_line_timeout(sock, timeout_ms, buf):
+    """Read one newline-terminated line with a timeout, keeping leftover bytes
+    in the `buf` bytearray across calls.  Returns the line (without the \\n),
+    netutil.TIMEOUT if none arrived in time, or raises OSError on EOF.  Lets a
+    single-goroutine client drain a server without a second goroutine parked on
+    the fd."""
+    import runloom_c
+    while b"\n" not in buf:
+        if not (runloom_c.wait_fd(sock.fileno(), 1, timeout_ms) & 1):
+            return TIMEOUT
+        chunk = sock.recv(4096)
+        if not chunk:
+            raise OSError("eof")
+        buf += chunk
+    nl = buf.index(b"\n")
+    line = bytes(buf[:nl])
+    del buf[:nl + 1]
+    return line
+
+
 def udp_recvfrom_timeout(sock, n, timeout_ms):
     """recvfrom with a real timeout under the cooperative scheduler.
 
