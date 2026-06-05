@@ -253,6 +253,31 @@ void runloom_g_entry(void *user)
 #endif
     }
 
+#if PY_VERSION_HEX >= 0x030B0000
+    /* Per-goroutine contextvars context.  In the default shared-hub-tstate mode
+     * every goroutine starts on the SAME ts->context object, so one goroutine's
+     * ContextVar.set() mutates it for every sibling -- the per-g swap saves and
+     * restores the context POINTER, not a private copy of the contents.  Give
+     * each goroutine its own copy of the spawn-time context, exactly as asyncio
+     * runs each Task in copy_context(), so a set() stays goroutine-local.
+     * Skipped under per-g-tstate mode, where each goroutine already owns a
+     * distinct tstate (and thus a distinct context) -- copying there is a pure
+     * waste.  On OOM we leave the shared context in place (leaky across
+     * siblings, but correct for this goroutine and never a crash). */
+    if (!runloom_get_per_g_tstate_mode()) {
+        PyThreadState *cts = PyThreadState_GET();
+        PyObject *ctx = PyContext_CopyCurrent();
+        if (ctx != NULL) {
+            PyObject *old = cts->context;
+            cts->context = ctx;          /* steals the new ref from CopyCurrent */
+            cts->context_ver++;
+            Py_XDECREF(old);
+        } else {
+            PyErr_Clear();
+        }
+    }
+#endif
+
     runloom_delay_inject(RUNLOOM_DLY_G_ENTRY);
     res = PyObject_CallNoArgs(g->callable);
     if (res == NULL) {
