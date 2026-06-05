@@ -279,6 +279,12 @@ class _Parker(object):
 # ============================================================
 _real_Lock_for_backend      = _th.Lock         # captured before any patch
 _real_Condition_for_backend = _th.Condition
+# The raw C SimpleQueue (the `_queue` module attribute is never monkey-patched;
+# only `queue.SimpleQueue` is swapped for the cooperative shim).  Its put() is
+# a single non-blocking atomic C call and get() blocks in C.
+import _queue as _real_queue_mod              # noqa: E402
+_real_SimpleQueue_for_backend = _real_queue_mod.SimpleQueue
+_BACKEND_SHUTDOWN = object()
 
 
 class _BlockingBackend(object):
@@ -290,9 +296,21 @@ class _BlockingBackend(object):
 
 
 class _ThreadPoolBackend(_BlockingBackend):
-    """Pre-started worker pool with real Lock/Condition.  Each submitted
-    task gets a self-pipe (from the Parker pool) for wakeup -- the
-    goroutine parks on wait_fd, the worker writes a byte when done."""
+    """Pre-started worker pool.  Each submitted task gets a self-pipe (from the
+    Parker pool) for wakeup -- the goroutine parks on wait_fd, the worker
+    writes a byte when done.
+
+    Uses a raw C `_queue.SimpleQueue` (never monkey-patched) as the job queue.
+    Why not a Lock/Condition + deque: a goroutine that took a real
+    threading.Lock here could be PREEMPTED (sysmon) while holding it, which
+    parked it; every sibling on its hub then trying submit() would block the
+    hub's OS thread on Lock.acquire() -- a real lock blocks the whole thread --
+    waiting on a lock held by a goroutine only that frozen hub can resume.
+    Under heavy offload every hub froze simultaneously (big_100 BUG #4).
+    SimpleQueue.put() is a single atomic C call; runloom only preempts at
+    Python frame boundaries, so a goroutine can never be parked mid-put
+    holding the queue's internal lock.  Workers block in .get() on a real OS
+    thread -- exactly the point of the pool."""
     name = "thread-pool"
 
     def __init__(self, size=None):
@@ -302,29 +320,36 @@ class _ThreadPoolBackend(_BlockingBackend):
             except Exception:
                 size = 4
         self.size = max(1, size)
-        self._lock = _real_Lock_for_backend()
-        self._cond = _real_Condition_for_backend(self._lock)
-        self._items = collections.deque()
-        self._closed = False
-        self._started = 0
-
-    def _ensure_workers(self):
-        if self._started >= self.size:
-            return
-        # First touch -- start the whole pool at once so warm-up is paid
-        # once, not amortised across the first N submissions.
-        while self._started < self.size:
+        # Raw C SimpleQueue.  Why not a Lock/Condition + deque: a goroutine that
+        # took a real threading.Lock here and was PREEMPTED while holding it
+        # would have every sibling on its hub block the hub OS-thread on
+        # Lock.acquire(), freezing the hub on a lock only that frozen hub can
+        # release -- under heavy offload every hub froze at once (big_100
+        # BUG #4).  A cooperative try+backoff acquire avoids the freeze but
+        # collapses throughput under contention.  SimpleQueue.put() is instead
+        # a single atomic C call: runloom only preempts at Python frame
+        # boundaries, so a goroutine can NEVER be parked mid-put holding the
+        # queue's internal lock, and that lock is held only nanoseconds -- the
+        # hub is never frozen.  put() never blocks (unbounded); workers block
+        # in get() on a real OS thread, which is exactly the point of the pool.
+        self._q = _real_SimpleQueue_for_backend()
+        self._started = self.size
+        # Start workers eagerly in __init__ -- we are not yet inside any
+        # goroutine (the backend is built on first offload, called from the
+        # scheduler root goroutine), so there is no concurrent goroutine
+        # racing on _started.  Eager start avoids the lazy-start race: if
+        # 8000 goroutines all call submit() concurrently on the first touch,
+        # each would see _started < size and could spawn duplicate or zero
+        # workers depending on preemption timing.
+        for _ in range(self.size):
             _thread.start_new_thread(self._worker_loop, ())
-            self._started += 1
 
     def _worker_loop(self):
         while True:
-            with self._lock:
-                while not self._items and not self._closed:
-                    self._cond.wait()
-                if self._closed and not self._items:
-                    return
-                fn, args, kwargs, box, parker = self._items.popleft()
+            item = self._q.get()           # real C blocking get on a real thread
+            if item is _BACKEND_SHUTDOWN:
+                return
+            fn, args, kwargs, box, parker = item
             try:
                 box[0] = fn(*args, **kwargs)
             except BaseException as e:
@@ -336,7 +361,6 @@ class _ThreadPoolBackend(_BlockingBackend):
             parker.unpark()
 
     def submit(self, fn, args, kwargs):
-        self._ensure_workers()
         if kwargs is None:
             kwargs = {}
         p = _Parker()
@@ -348,9 +372,7 @@ class _ThreadPoolBackend(_BlockingBackend):
         # wakeup edge-insensitive: we only return once the worker actually
         # finished (any stale byte is then drained by release()).
         box = [None, None, False]
-        with self._lock:
-            self._items.append((fn, args, kwargs, box, p))
-            self._cond.notify()
+        self._q.put((fn, args, kwargs, box, p))   # atomic C call; never freezes the hub
         while not box[2]:
             p.park()
         p.release()
@@ -359,9 +381,9 @@ class _ThreadPoolBackend(_BlockingBackend):
         return box[0]
 
     def fini(self):
-        with self._lock:
-            self._closed = True
-            self._cond.notify_all()
+        # One shutdown sentinel per started worker; each get()s it and exits.
+        for _ in range(self._started):
+            self._q.put(_BACKEND_SHUTDOWN)
 
 
 _backend = None
