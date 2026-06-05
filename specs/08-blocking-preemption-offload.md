@@ -24,12 +24,37 @@ is unchanged); opt out with `RUNLOOM_HANDOFF=0` / `RUNLOOM_PREEMPT=0`.
 
 ## Fix 1 — Preemption (CPU-bound Python loops)
 
-`docs/preemption.md`. CPython checks an `eval_breaker` flag between bytecodes. A
-sysmon timer thread (or a per-quantum `Py_AddPendingCall`) sets a flag; at the
-next bytecode boundary CPython runs a callback that calls
-`runloom_sched_yield()` on the running goroutine, so the hub round-robins. Cost:
-~300 ns per quantum + one yield; at 100 Hz that's ~0.003% overhead, and the
-**hot path between yields pays nothing**.
+There are **two distinct preemption mechanisms** — don't conflate them (the code
+keeps them in separate files):
+
+1. **Default-on sysmon wedge-preemption** (`RUNLOOM_PREEMPT`,
+   `mn_sched_sysmon.c.inc`). Default **on** for free-threaded 3.13+ (the
+   `runloom_flag_default_on` gate; the in-code "default OFF" comments are the stale
+   *static-init* view — `runloom_sysmon_config` flips it on). It is **reactive**:
+   the sysmon watchdog only acts after a hub has been wedged in one `coro_resume`
+   for `> runloom_sysmon_wedge_ns` (**50 ms** default, `RUNLOOM_SYSMON_MS`) *and*
+   classified `ATTACHED` (CPU-bound, not a DETACHED blocking call → that's the
+   handoff's job). It then sets `h->preempt_requested`; a **chained eval-frame
+   function** (installed only when `RUNLOOM_PREEMPT` is on, since it costs CPython's
+   `_PyEval_EvalFrameDefault` fast path) reads the flag at the next Python *frame*
+   boundary and `runloom_coro_yield()`s the running g — plus a **single-frame
+   liveness backstop** (`_PyEval_AddPendingCall`) that rides backward-jump checks
+   *inside* a frame so a tight `while: pass` (no calls → no frame entry) is still
+   broken. So: dormant under normal load, fires only on a genuine CPU monopoly.
+   ([mn_sched_sysmon.c.inc:124-155](../src/runloom_c/mn_sched_sysmon.c.inc#L124),
+   [mn_sched_runq.c.inc:306-328](../src/runloom_c/mn_sched_runq.c.inc#L306))
+2. **Explicit `preempt_init(quantum_us)` time-slicer** (default **off**,
+   `runloom_sched_preempt.c.inc`; the `docs/preemption.md` API). A timer thread
+   posts `Py_AddPendingCall(yield_cb)` every quantum; CPython's `eval_breaker`
+   runs it at the next bytecode boundary and it `runloom_sched_yield()`s the running
+   g — Go-1.14 round-robin slicing. Cost: ~300 ns/quantum + one yield (~0.003% at
+   100 Hz); the **hot path between yields pays nothing**. This is opt-in fair
+   interleaving, unconditional (no 50 ms wedge gate).
+
+Mechanism summary: both ride CPython's between-bytecode/frame `eval_breaker`; (1)
+is a default-on safety net that fires only on a >50 ms CPU wedge, (2) is an opt-in
+quantum slicer. `docs/preemption.md` documents only (2) and says "the default is
+no preemption" — true *for the quantum slicer*, but (1) is on by default on 3.13t.
 
 The hard limitations (both real, both in the spec because they bound the design):
 
@@ -75,9 +100,15 @@ Surfaced to users three ways:
   inline (zero cost); only the genuinely-long C loops, which nothing can preempt,
   go to the pool.
 - **The `compile` patch** — `builtins.compile` (and thus `ast.parse` + source
-  imports) offloads when called inside a goroutine, because `compile`'s ~1.5 KB/level
-  C recursion overflows a 32 KB g-stack before CPython's recursion counter fires;
-  the pool thread's full-size stack runs it safely (spec 10).
+  imports) offloads when called inside a goroutine, because `compile`'s
+  ~1.5 KB/level C recursion overflows a *small* g-stack before the per-goroutine
+  C-recursion counter (reset to 200 frames at entry, spec 10) fires. The arithmetic:
+  200 × 1.5 KB ≈ 300 KB, so on the **512 KB default** compile fits and degrades to
+  a clean `RecursionError`; but a grown-down (16 KB, M:N) or raw-`Coro` (128 KB)
+  stack overflows at ~10–85 frames — well under 200 — and SEGVs. The pool thread's
+  full-size stack runs it safely (spec 10). (`docs/cooperative_stdlib_coverage.md`
+  frames this against a "32 KB g-stack" — that was the default before it was raised
+  to 512 KB; the offload now matters for the *small-stack* paths, not the default.)
 
 ### io_uring — the cooperative form of file/socket I/O on Linux
 
@@ -124,7 +155,13 @@ How it works, and the safety gates that make it sound:
   is a cross-hub migration that crashes (spec 03/05). It drains to empty, restores
   the owner's saved tstate slice, `PyEval_SaveThread`s (so the owner reclaims the
   instant its block ends), re-verifies the wedge, and either re-adopts or releases.
-- **Several wedged hubs recover in parallel** (a pool of rescuers, one per hub).
+- **Several wedged hubs recover in parallel** — a pool of `min(hub_count, 4)`
+  rescue threads by default (`RUNLOOM_HANDOFF_POOL`), each owning a distinct hub via
+  the FREE→PENDING→OWNED claim slot. Dispatch requires `RUNLOOM_HANDOFF_DETACH_TICKS`
+  (= 2) consecutive DETACHED ticks first (the stable-detach gate, contract C3). The
+  blocking-offload pool (Fix 2) defaults to 8 workers (`RUNLOOM_BLOCKPOOL_WORKERS`,
+  max 64). ([mn_sched_sysmon.c.inc:205-222](../src/runloom_c/mn_sched_sysmon.c.inc#L205),
+  [runloom_blockpool.c:42-43](../src/runloom_c/runloom_blockpool.c#L42))
 
 ### The monopoly world-yield (a sibling case)
 

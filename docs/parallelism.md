@@ -130,10 +130,12 @@ runloom.mn_fini()
 
 ## Network I/O on M:N
 
-Each hub has its own netpoll (epoll/kqueue) -- goroutines parked on
-I/O wake on the hub that submitted the parking call.  This means
-your accept loop and connection handlers stay on the same hub by
-default, which is good for cache locality:
+netpoll uses a **single shared** epoll/kqueue/IOCP handle (created once); what is
+per-hub is the parker bookkeeping (the per-hub parker pool) and the per-hub
+io_uring ring.  Goroutines parked on I/O wake on the hub that submitted the
+parking call -- the parker records its origin hub and the pump routes the wake
+back there.  This means your accept loop and connection handlers stay on the same
+hub by default, which is good for cache locality:
 
 ```python
 import socket, runloom

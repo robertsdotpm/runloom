@@ -357,22 +357,31 @@ iteration, or that drives timers by mocking the clock, or that runs several
 loops on one OS thread.  When they do bite, they bite *loudly* (a failing test
 or a hang), never as silent data corruption.
 
-### 1. Future done-callbacks may fire synchronously, not deferred
+### 1. Two internal done-callbacks fire synchronously; everything else defers
+
+> **Note (corrected):** an earlier version of this doc said runloom "fires most
+> callbacks inline."  That is **no longer true** — the bridge was changed to
+> defer (to fix the falcon / uvicorn / aiojobs ordering bugs), so the live
+> behaviour matches asyncio's ordering far more closely than the old text
+> implied.  See `_fire_callbacks` in `src/runloom/aio/futures.py`.
 
 asyncio schedules every future done-callback through `loop.call_soon`, so the
-code that completed the future finishes its synchronous run *before* any
-callback fires.  runloom fires most callbacks **inline** from `set_result` /
-`set_exception` / `cancel` (a deliberate performance choice -- it avoids a
-goroutine spawn per callback and is a large part of why the bridge is fast at
-high fan-out).  Stock-`asyncio.Task` wakeups *are* deferred (so eager
-`asyncio.Task()` consumers, e.g. uvicorn's websocket close path, behave
-correctly), but library done-callbacks are not.
+code that completed the future finishes its synchronous run *before* any callback
+fires.  runloom now does the same — `_fire_callbacks` **defers every done-callback
+through `loop.call_soon`** to preserve asyncio's order — with exactly two
+synchronous exceptions: (a) `RunloomTask._wake_unpark`, runloom's own await-wake
+primitive (firing it inline only readies the goroutine, which stays FIFO-after an
+already-readied waiter, so ordering holds; deferring it would spawn a goroutine
+per `await`); and (b) callbacks tagged `_runloom_fire_sync` (the run loop's own
+`_stop_on_done` control hook).  Stock `asyncio.Task` wakeups are **deferred**
+through a trampoline.  An `add_done_callback` on an already-done future is always
+scheduled via `call_soon`, never inline.
 
-Affects you only if a done-callback's effect is ordering-sensitive relative to
-the completer's continued synchronous code, *with no `await` in between* -- e.g.
-a coroutine that does `fut.set_result(x)` and then keeps running, where another
-party's done-callback must not observe the in-between state.  Normal code
-`await`s, and the distinction washes out.
+So the residual difference from asyncio is narrow: only those two runloom-internal
+callbacks fire in the same turn rather than the next tick.  It can affect you only
+if their effect is ordering-sensitive relative to the completer's continued
+synchronous code *with no `await` in between* — and normal code `await`s, so the
+distinction washes out.
 
 ### 2. Timers are real wall-clock, on a per-OS-thread scheduler
 

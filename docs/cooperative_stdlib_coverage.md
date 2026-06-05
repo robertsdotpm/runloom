@@ -46,9 +46,19 @@ the hub goes DETACHED, a rescue thread adopts it (~50 ms), other goroutines run.
 
 ## Fat C frames vs the goroutine stack (select, ssl)
 
-A goroutine runs on a small fixed C stack (default **32 KB**, with a PROT_NONE
-guard page).  CPython's own C code assumes the main thread's ~8 MB stack, and a
-few functions allocate **a single fat C frame** that overflows 32 KB — the
+> **Note (corrected):** the figures in this section were measured when the
+> default goroutine stack was **32 KB**.  The default is now **512 KB**
+> (`RUNLOOM_DEFAULT_STACK_SIZE`; see [stack-sizing.md](stack-sizing.md)), so these
+> overflow cases only bite a *small* stack today — a grown-down (16 KB under M:N)
+> or raw-`Coro`/`TCPConn` (128 KB) or explicitly-pinned stack.  The analysis
+> stands as a **conservative lower bound**: anything shown to fit 32 KB fits
+> 512 KB with room to spare.  The "32 KB" below should be read as "a small
+> goroutine stack."
+
+A goroutine can run on a small fixed C stack (the grown-down / raw sizes above;
+historically the default was 32 KB).  Every stack has a PROT_NONE guard page.
+CPython's own C code assumes the main thread's ~8 MB stack, and a few functions
+allocate **a single fat C frame** that overflows a small stack — the
 `-fstack-clash-protection` probe then walks straight into the guard page →
 deterministic SIGSEGV (a clean crash, not corruption, thanks to the guard).
 This is *not* a depth problem: Python→Python recursion lives on runloom's
@@ -102,11 +112,12 @@ runloom.mn_init(2); GO(worker); runloom.mn_run(); runloom.mn_fini()
 ### Deep C-recursion residual (`ast` / `compile`)
 
 A second, narrower stack class is *depth*, not a single frame.  A goroutine's
-C-recursion guard is CPython 3.13's fixed `c_recursion_remaining` counter, which
-is calibrated for the main thread's 8 MB stack and is NOT lowered per goroutine
-(it has no stack-pointer check; that arrives in 3.14).  So whether deeply-nested
-input gives a clean `RecursionError` or a SEGV on a 32 KB goroutine depends on
-how much C stack each recursion level costs:
+C-recursion guard is CPython 3.13's `c_recursion_remaining` counter, which **is
+reset to 200 per goroutine at entry** (`runloom_g_entry`,
+`src/runloom_c/runloom_sched_core.c.inc`) — the counter has no stack-pointer
+check (that arrives in 3.14), so whether deeply-nested input gives a clean
+`RecursionError` or a SEGV depends on how much C stack each of those ≤200 levels
+costs versus the goroutine's stack size:
 
 | op | C stack / level | result at depth in a 32 KB g |
 | --- | --- | --- |

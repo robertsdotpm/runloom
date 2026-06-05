@@ -50,9 +50,12 @@ The exact set is version-gated; conceptually:
   a freed object on resume → segfault in the next exception cascade (e.g. an async
   function's `StopIteration` on return). Forgetting this field is a real crash.
 - **recursion counters** — 3.11 has one (`recursion_remaining`); 3.12+ split into
-  `py_recursion_remaining` + `c_recursion_remaining`. Saving these per goroutine
-  is what makes deep recursion raise a catchable `RecursionError` *per goroutine*
-  instead of leaking the counter across the OS thread (spec 10).
+  `py_recursion_remaining` + `c_recursion_remaining`. They are **reset at
+  goroutine entry** (`py_recursion_remaining = Py_GetRecursionLimit()`,
+  `c_recursion_remaining = 200`, [runloom_sched_core.c.inc:226-239](../src/runloom_c/runloom_sched_core.c.inc#L226))
+  and then saved/restored per goroutine here — together that makes deep recursion
+  raise a catchable `RecursionError` *per goroutine* instead of leaking the
+  counter across the OS thread (spec 10).
 - **the current frame** — 3.11/3.12 thread a `_PyCFrame` on the C stack;
   3.13 removed `cframe` and put `current_frame` directly on tstate. Gated
   accordingly. Also `delete_later` (the trashcan chain, owned) and

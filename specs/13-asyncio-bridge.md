@@ -102,11 +102,18 @@ solely by `exc.args[0]`. `cancelling()`/`uncancel()` track the counter
 Task drivers and the transport I/O goroutines run **arbitrary user code that can
 recurse deep into C** (a TLS/SSH handshake runs an OpenSSL key exchange
 synchronously inside `data_received`; first-time imports of pydantic etc. are deep
-C-recursive). The scheduler's small default g-stack overflows → SEGV (stock asyncio
-runs callbacks on the 8 MB main stack). So every such goroutine is spawned via
-`_go_io` / with `_TASK_STACK` (512 KB default, virtual + pooled, only the bridge
-pays it; `RUNLOOM_AIO_{IO,TASK}_STACK`). **Do not revert these to a bare
-`runloom_c.go`** — it's a documented invariant.
+C-recursive), which overflows a *small* g-stack → SEGV (stock asyncio runs
+callbacks on the 8 MB main stack). So every such goroutine is spawned via `_go_io`
+/ with `_TASK_STACK` — an **explicit 512 KB pin** ([aio/_base.py:50-86](../src/runloom/aio/_base.py#L50)),
+virtual + pooled, only the bridge pays it; `RUNLOOM_AIO_{IO,TASK}_STACK`. The pin
+matters because it holds the 512 KB *regardless of the scheduler default,
+calibration, or the M:N grow-down* (which can shrink an unpinned goroutine toward
+16 KB) — an explicit `stack_size=` always wins. **Do not revert these to a bare
+`runloom_c.go`** — it's a documented invariant. (The code comments here say "the
+default 32 KB g-stack"; that reflects the pre-512 KB default era — see spec 10 for
+the current numbers. The "(M:N paths keep 128 KB)" note in `CLAUDE.md` is likewise
+stale: M:N's unpinned default is the 512 KB calibrated `h->sched.stack_size`,
+[mn_sched_init_fini.c.inc:385](../src/runloom_c/mn_sched_init_fini.c.inc#L385).)
 
 ## The loop (`loop*.py`, composed mixins)
 
@@ -132,17 +139,27 @@ callback on one FIFO ready-queue driven by `loop._run_once` — a thin slice of 
 that pins on asyncio's *exact scheduler mechanics* can observe a difference. They
 bite **loudly** (a failing test or a hang), never as silent corruption:
 
-1. **Future done-callbacks may fire synchronously, not deferred.** asyncio defers
-   every done-callback via `call_soon`; runloom fires most **inline** from
-   `set_result`/`set_exception`/`cancel` (a deliberate perf choice — it avoids a
-   goroutine spawn per callback). The exceptions are precise and load-bearing
-   (`CLAUDE.md`): a `RunloomTask._wake_unpark` is fired inline (it only readies the
-   g, FIFO-after an already-readied waiter), a `_runloom_fire_sync`-tagged callback
-   (the run loop's `_stop_on_done`) fires synchronously, and **stock `asyncio.Task`
-   wakeups *are* deferred** (so eager `asyncio.Task()` consumers like uvicorn's
-   websocket-close path behave). Firing library callbacks synchronously inverted
-   the order and broke falcon/uvicorn websocket-close ordering — hence the careful
-   carve-out.
+1. **Done-callbacks defer through `call_soon` to match asyncio order — with two
+   synchronous exceptions.** *(Corrected against the code:
+   [futures.py:228-296](../src/runloom/aio/futures.py#L228). The `docs/asyncio.md`
+   claim that runloom "fires most callbacks inline" is **stale** — it describes a
+   pre-change behavior. The bridge was changed to defer, precisely to fix the
+   ordering bugs below; the live code matches asyncio more closely than that doc
+   admits, and matches the `CLAUDE.md` invariant.)* `_fire_callbacks` (the
+   PENDING→done transition) **defers every callback via `loop.call_soon`** *except*:
+   (a) `RunloomTask._wake_unpark` — runloom's own await-wake primitive, fired inline
+   because it only readies the g (FIFO-after an already-readied waiter, so ordering
+   still holds) and deferring it would spawn a goroutine per await; and (b)
+   callbacks tagged `_runloom_fire_sync` (the run loop's `_stop_on_done`, which must
+   stop the drive in the same turn). **Stock `asyncio.Task`/`_PyTask` wakeups are
+   deferred** through the `_run_stock_task_cb` trampoline (firing them inline
+   re-enters the C task machinery unsafely). Separately, `add_done_callback` on an
+   *already-done* future always routes through `call_soon`, never inline
+   ([futures.py:195-220](../src/runloom/aio/futures.py#L195)). Firing library
+   callbacks synchronously is exactly what *broke* falcon/uvicorn websocket-close
+   ordering and aiojobs — which is why the default is now deferral. (So the residual
+   "difference" from asyncio here is narrow: only the two internal sync exceptions,
+   not a wholesale inline policy.)
 2. **Timers are real wall-clock, on a per-OS-thread scheduler.** `call_later`/
    `call_at`/`asyncio.sleep` are real `sched_sleep` goroutine sleeps, not a per-loop
    timer heap compared against `loop.time()`. Consequence: **mocking `loop.time()`

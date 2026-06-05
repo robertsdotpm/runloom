@@ -22,11 +22,23 @@ between threads (which is unsafe — spec 01, 03).
   ├────────────┤   ├────────────┤   ├────────────┤
   │ local FIFO │   │ local FIFO │   │ local FIFO │   yielded/woken gs (hub-pinned)
   │ sleep heap │   │ sleep heap │   │ sleep heap │
-  │ netpoll    │   │ netpoll    │   │ netpoll    │   per-hub poller + per-hub
-  │ tstate     │   │ tstate     │   │ tstate     │   PyThreadState
+  │ parkerpool │   │ parkerpool │   │ parkerpool │   per-hub parker pool + io_uring
+  │ io_uring   │   │ io_uring   │   │ io_uring   │   ring; per-hub PyThreadState
+  │ tstate     │   │ tstate     │   │ tstate     │
   └────────────┘   └────────────┘   └────────────┘
          ▲ MPSC submission queue (sub_head) per hub: external mn_go / cross-hub wakes
+         ▼ ONE shared netpoll (epoll/kqueue/IOCP) created once; the pump runs on
+           whichever hub is idle and routes each wake back to the parker's origin hub
 ```
+
+> **Correction (verified in code):** the *kernel poller* is a **single shared**
+> `epoll`/`kqueue`/`IOCP` handle, created exactly once under the pool lock
+> ([netpoll_init.c.inc:184,209](../src/runloom_c/netpoll_init.c.inc#L184)). What is
+> *per-hub* is the **parker pool** (`by_fd`/head/deadline-heap, for lock locality)
+> and the **io_uring ring** (`SINGLE_ISSUER`). Goroutines parked on I/O are routed
+> back to their **origin hub** on wake via the parker's recorded `hub`, *not* via a
+> per-hub poller. (`docs/parallelism.md` and an older mn_sched.c comment say "each
+> hub has its own netpoll" — that's the stale view; spec 06 states it correctly.)
 
 `runloom_mn_init(n)` starts n hub threads; `mn_go(fn)` spawns onto a hub;
 `mn_run()` waits for all queues to drain; `mn_fini()` tears down. `runloom.run(n,

@@ -20,12 +20,18 @@ A global intrusive doubly-linked list of every live `runloom_g` *struct*. The
 clever part (the same field-ordering contract as spec 02): a g is linked **once**
 when its struct is first OS-allocated and unlinked only when returned to the OS; a
 **slab-recycled g stays linked** (the dump skips `FREED` entries). Because the slab
-reuse path clears a g only up to `offsetof(id)` and the `reg_prev/reg_next` links
-sit *after* `id`, recycling preserves them. So link/unlink touch the registry lock
+reuse path memsets a g only up to `offsetof(runloom_g_t, state)`
+([runloom_sched_core.c.inc:329](../src/runloom_c/runloom_sched_core.c.inc#L329))
+and the `reg_prev/reg_next` links sit *after* the `state`/`id` block, recycling
+preserves them. So link/unlink touch the registry lock
 only on the cold slab-miss/overflow paths — **the hot spawn/complete path pays
-nothing** (no lock, no shared atomic). The goid (`runloom_next_goid`) is minted from
-a per-thread counter ORed with a per-thread base, so spawning on many hubs never
-touches a shared cacheline.
+nothing** (no lock, no shared atomic). The goid (`runloom_next_goid`) is
+**block-allocated**: each thread grabs a block of 1024 ids
+(`RUNLOOM_GOID_BLOCK`) from a global atomic and hands them out locally, so the
+shared cacheline is touched once per 1024 spawns and ids stay compact + roughly
+monotonic ([runloom_introspect.c:57-71](../src/runloom_c/runloom_introspect.c#L57)).
+(The header comment's "a per-thread counter ORed with a per-thread base" describes
+an older scheme; the code block-batches.)
 
 ## Three dump paths, by safety level
 
