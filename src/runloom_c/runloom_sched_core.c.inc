@@ -231,23 +231,19 @@ void runloom_g_entry(void *user)
         int py_limit = Py_GetRecursionLimit();
 #if PY_VERSION_HEX >= 0x030C0000
         ts->py_recursion_remaining = py_limit;
-        /* Scale the C-recursion budget to THIS goroutine's actual C stack.
-         * The old hard-coded 200 (sized for a 128KB stack) capped recursion at
-         * ~88 frames no matter how large the stack -- so a goroutine on a 4MB
-         * stack still RecursionError'd at ~88, breaking moderately recursive
-         * code (nested JSON, deepcopy, recursive parsers).  Give the goroutine
-         * the SAME per-byte budget CPython gives the 8MB main thread
-         * (Py_C_RECURSION_LIMIT, which already carries CPython's own safety
-         * margin via recursion_headroom); never go below the old 200. */
-        {
-            size_t stk = (g->coro != NULL)
-                       ? runloom_coro_stack_size(g->coro) : (size_t)131072;
-            long budget = (long)Py_C_RECURSION_LIMIT
-                        * (long)stk / (8L * 1024 * 1024);
-            if (budget < 200) budget = 200;
-            if (budget > Py_C_RECURSION_LIMIT) budget = Py_C_RECURSION_LIMIT;
-            ts->c_recursion_remaining = (int)budget;
-        }
+        /* C-recursion budget for a goroutine.  Kept at the conservative flat 200
+         * (what a 128KB stack safely holds).  NOTE: scaling this UP with the
+         * goroutine's stack size -- the obvious way to let big-stack goroutines
+         * recurse deeper -- is NOT safe in this runtime: deeper Python recursion
+         * builds deeper RecursionError tracebacks, and deallocating a deep
+         * traceback re-recurses and re-engages CPython's trashcan WHILE the
+         * preemption machinery / a concurrent stop-the-world GC can yield the
+         * goroutine mid-destruction -> use-after-free SIGSEGV (~30% under
+         * big_100/p70 stress).  The achievable ceiling is bounded by that UAF,
+         * not by stack size; raising it must wait until the preempt-in-
+         * destruction guard covers the deep inline-traceback-dealloc path (see
+         * big_100/FINDINGS BUG #6).  Flat 200 is crash-free (15/15 under p70). */
+        ts->c_recursion_remaining = 200;
 #else
         ts->recursion_remaining = py_limit;
 #endif
