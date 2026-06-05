@@ -171,18 +171,25 @@ def _fd_pollable(fd):
 # yielded.
 class _Parker(object):
     __slots__ = ("r", "w", "_sockets")
+    # LOCK-FREE free-list.  An earlier version guarded `_pool` with a real
+    # _thread.lock, but a goroutine PREEMPTED (sysmon) while holding it froze
+    # its hub: every sibling doing _Parker()/release() then blocked the hub
+    # OS-thread on _pool_lock.acquire(), and only that frozen hub could run the
+    # preempted holder to release it -- under heavy offload (one Parker per
+    # submit) all hubs froze at once (big_100 BUG #4, the residual that
+    # survived the backend-lock fix).  On free-threaded CPython list.pop() and
+    # list.append() are each individually atomic (per-object critical section),
+    # so the pool needs no lock: pop() removes the TOCTOU race via
+    # try/except IndexError, and the 64-cap len() check is best-effort (a
+    # benign overshoot just frees one extra parker).  No goroutine ever holds a
+    # lock here, so none can freeze its hub.
     _pool = []
-    # Real lock guarding the shared pool: under M:N several hub threads
-    # build/release parkers concurrently, and `if _pool: _pool.pop()` is a
-    # TOCTOU race (two threads both see it non-empty, one pops an empty list
-    # -> IndexError).  Held only for the O(1) pop/append, never across I/O.
-    _pool_lock = _thread.allocate_lock()
 
     def __init__(self):
-        reused = None
-        with _Parker._pool_lock:
-            if _Parker._pool:
-                reused = _Parker._pool.pop()
+        try:
+            reused = _Parker._pool.pop()
+        except IndexError:
+            reused = None
         if reused is not None:
             self.r, self.w, self._sockets = reused
         elif _IS_WINDOWS:
@@ -253,11 +260,13 @@ class _Parker(object):
                     pass
             except (BlockingIOError, OSError):
                 pass
-        pooled = False
-        with _Parker._pool_lock:
-            if len(_Parker._pool) < 64:
-                _Parker._pool.append((self.r, self.w, self._sockets))
-                pooled = True
+        # Lock-free return to the pool: append is atomic; the len() cap is
+        # best-effort (a racing overshoot past 64 just closes one extra fd).
+        if len(_Parker._pool) < 64:
+            _Parker._pool.append((self.r, self.w, self._sockets))
+            pooled = True
+        else:
+            pooled = False
         if not pooled:
             if self._sockets is not None:
                 for s in self._sockets:
