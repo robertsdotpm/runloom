@@ -175,6 +175,34 @@ RUNLOOM_INLINE void runloom_cond_signal(runloom_cond_t *c)    { pthread_cond_sig
 RUNLOOM_INLINE void runloom_cond_broadcast(runloom_cond_t *c) { pthread_cond_broadcast(c); }
 #endif
 
+/* Timed wait: block on `c` (releasing `m`) until signalled or `rel_ns` elapses.
+ * The caller re-evaluates its predicate on return, so the signal-vs-timeout
+ * distinction is irrelevant -- no return value, no errno dependency.  Used by
+ * the BUG #10 per-hub idle wake: a TIMED wait means a missed signal degrades to
+ * the old idle_ns latency, never a hang. */
+#if defined(RUNLOOM_OS_WINDOWS)
+RUNLOOM_INLINE void runloom_cond_timedwait_ns(runloom_cond_t *c, runloom_mutex_t *m,
+                                              long long rel_ns) {
+    DWORD ms = (DWORD)(rel_ns / 1000000LL);
+    if (ms == 0 && rel_ns > 0) ms = 1;     /* don't busy-return on sub-ms waits */
+    SleepConditionVariableCS(c, m, ms);
+}
+#else
+RUNLOOM_INLINE void runloom_cond_timedwait_ns(runloom_cond_t *c, runloom_mutex_t *m,
+                                              long long rel_ns) {
+    struct timespec ts;
+    long long ns;
+    /* Default pthread_cond uses CLOCK_REALTIME for its deadline; a sub-ms wait
+     * is immune to wall-clock jumps in practice. */
+    clock_gettime(CLOCK_REALTIME, &ts);
+    if (rel_ns < 0) rel_ns = 0;
+    ns = (long long)ts.tv_nsec + rel_ns;
+    ts.tv_sec  += (time_t)(ns / 1000000000LL);
+    ts.tv_nsec  = (long)(ns % 1000000000LL);
+    pthread_cond_timedwait(c, m, &ts);
+}
+#endif
+
 /* ============================================================ */
 /* monotonic clock                                              */
 /* ============================================================ */

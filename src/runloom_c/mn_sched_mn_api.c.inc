@@ -111,6 +111,20 @@ static void runloom_mn_hub_submit(runloom_hub_t *h, runloom_g_t *g)
     runloom_mutex_unlock(&h->sub_lock);
     RUNLOOM_EVT(RUNLOOM_EVT_G_SUBMIT, g, h, 0);
     runloom_g_state_set(g, RUNLOOM_GST_SUBMITTED);
+    /* BUG #10 throughput: bump the submit generation, then signal the target hub
+     * if it is parked in its idle condvar (it owns parked gs and nothing else to
+     * run), so the woken g is drained in ~us instead of stranded for idle_ns
+     * (~100us).  RELEASE bump pairs with the waiter's predicate re-read.  The
+     * idle_waiting hint is a lock-free fast path: when the hub is NOT waiting
+     * (the common busy case) we skip the lock entirely.  A signal that races the
+     * hub entering/leaving the wait is harmless -- the wait is TIMED, so a
+     * (rare) missed signal just falls back to the idle_ns poll, never a hang. */
+    __atomic_add_fetch(&h->sub_gen, 1, __ATOMIC_RELEASE);
+    if (__atomic_load_n(&h->idle_waiting, __ATOMIC_ACQUIRE)) {
+        runloom_mutex_lock(&h->idle_lock);
+        runloom_cond_signal(&h->idle_cond);
+        runloom_mutex_unlock(&h->idle_lock);
+    }
 }
 
 void runloom_mn_wake_g(void *hub_opaque, runloom_g_t *g)

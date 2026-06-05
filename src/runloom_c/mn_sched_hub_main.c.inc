@@ -449,9 +449,57 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
                         runloom_netpoll_pump(pump_ns);
                     } else {
                         if (idle_ns <= 0) idle_ns = 1;
-                        saved = PyEval_SaveThread();
-                        runloom_sleep_ns(idle_ns);
-                        PyEval_RestoreThread(saved);
+                        /* BUG #10 throughput: this hub has no netpoll/iouring work
+                         * but OWNS parked gs (pending>0) -- cooperative-lock /
+                         * channel waiters a cross-hub unlock will hub_submit to
+                         * us.  Wait on our per-hub idle condvar (TIMED at idle_ns)
+                         * instead of a plain nanosleep, so that submit signals us
+                         * awake in ~us rather than stranding the woken g for
+                         * idle_ns (the ~100us cap that held the contended
+                         * cooperative Lock at ~10K ops/s).  Per-hub condvar =>
+                         * targeted wake, no shared-pump thundering herd; TIMED =>
+                         * a missed signal degrades to the old idle_ns latency for
+                         * one hand-off, never a hang. */
+                        long hub_pending = __atomic_load_n(&h->pending,
+                                                           __ATOMIC_RELAXED);
+                        if (hub_pending > 0 && runloom_hub_idle_wake_enabled()) {
+                            int waited = 0;
+                            runloom_mutex_lock(&h->idle_lock);
+                            /* Announce BEFORE the final sub_head re-check so a
+                             * submit that races our announce either lands in
+                             * sub_head (we see it -> skip the wait) or observes
+                             * idle_waiting=1 (it signals us).  The push in
+                             * hub_submit happens-before its sub_gen bump + signal;
+                             * we hold idle_lock across the check+wait so a signal
+                             * can't slip into the gap. */
+                            __atomic_store_n(&h->idle_waiting, 1, __ATOMIC_RELEASE);
+                            int have_sub;
+                            runloom_mutex_lock(&h->sub_lock);
+                            have_sub = (h->sub_head != NULL);
+                            runloom_mutex_unlock(&h->sub_lock);
+                            if (!have_sub) {
+                                /* Detach BEFORE the wait so a concurrent
+                                 * stop-the-world sees this hub already stopped and
+                                 * the cond wait holds no tstate. */
+                                saved = PyEval_SaveThread();
+                                runloom_cond_timedwait_ns(&h->idle_cond,
+                                                          &h->idle_lock, idle_ns);
+                                waited = 1;
+                            }
+                            __atomic_store_n(&h->idle_waiting, 0, __ATOMIC_RELEASE);
+                            runloom_mutex_unlock(&h->idle_lock);
+                            /* Re-attach OUTSIDE idle_lock.  PyEval_RestoreThread
+                             * blocks until any in-progress stop-the-world ends;
+                             * holding idle_lock across that block would stall a
+                             * hub_submit trying to signal us and could wedge STW
+                             * progress (test_gc_stw_under_goroutine_churn hung
+                             * ~2/3 with the re-attach inside the lock). */
+                            if (waited) PyEval_RestoreThread(saved);
+                        } else {
+                            saved = PyEval_SaveThread();
+                            runloom_sleep_ns(idle_ns);
+                            PyEval_RestoreThread(saved);
+                        }
                     }
                 }
                 (void)saved;
