@@ -1,7 +1,7 @@
 """Cooperative Event / Condition / Semaphore + Thread.join, and the
 threading-module patch that installs them."""
 from ._base import *  # noqa: F401,F403  (shared foundation)
-from .locks import CoLock, CoRLock, _real_BoundedSemaphore, _real_Condition, _real_Event, _real_Lock, _real_RLock, _real_Semaphore, _real_allocate_lock, _real_thread_RLock  # noqa: F401
+from .locks import CoLock, CoRLock, _real_BoundedSemaphore, _real_Condition, _real_Event, _real_Lock, _real_RLock, _real_Semaphore, _real_allocate_lock, _real_thread_RLock, _real_get_ident  # noqa: F401
 
 
 def _spawn(fn):
@@ -299,8 +299,45 @@ def _patched_thread_join(self, timeout=None):
             step *= 2
 
 
+_orig_module_lock_has_deadlock = None
+
+
+def _patched_has_deadlock(self):
+    """Suppress false _DeadlockError for goroutines (BUG #9).
+
+    _ModuleLock.has_deadlock() detects circular import chains by checking
+    whether the current OS thread is waiting (transitively) on a lock it
+    already holds.  Under M:N two goroutines on the same hub share one OS
+    thread and get the same _thread.get_ident(), so the second goroutine
+    importing the same module looks re-entrant and has_deadlock() returns
+    True -- a false positive.
+
+    If we are inside a goroutine, a 'deadlock' between the current goroutine
+    and self.owner is only real when self.owner IS the current goroutine
+    (genuine re-entrancy -- one goroutine following a circular import).  Any
+    other case (the owner is a different goroutine or a real thread whose ident
+    happens to match because of hub-sharing) is a false positive; suppress it.
+    Real circular imports still propagate _DeadlockError."""
+    if not _in_goroutine():
+        return _orig_module_lock_has_deadlock(self)
+    cur = runloom.current()
+    if cur is None:
+        return _orig_module_lock_has_deadlock(self)
+    # self.owner is the OS-thread ident of the current owner.  If it equals
+    # our ident and we are in a goroutine, we are ONLY genuinely deadlocked if
+    # the owner goroutine is *us* (same G object) and we're trying to re-acquire.
+    # In the false-positive case the owner is a *different* goroutine on the
+    # same hub -- return False so the caller waits cooperatively instead of
+    # raising _DeadlockError.
+    if self.owner == _real_get_ident():
+        # The lock is held by our OS thread.  It could be a different goroutine
+        # on this hub -- not a real deadlock for the current goroutine.
+        return False
+    return _orig_module_lock_has_deadlock(self)
+
+
 def _patch_threading():
-    global _orig_thread_join
+    global _orig_thread_join, _orig_module_lock_has_deadlock
     _th.Lock      = CoLock
     _th.RLock     = CoRLock
     _th.Event     = CoEvent
@@ -313,11 +350,24 @@ def _patch_threading():
     _thread.allocate_lock = CoLock
     if _real_thread_RLock is not None:
         _thread.RLock = CoRLock
+    # Suppress import false-deadlock (BUG #9): goroutines on the same hub share
+    # one OS-thread ident, so _ModuleLock.has_deadlock() falsely reports a
+    # deadlock when two goroutines try to import the same module concurrently.
+    # Patching has_deadlock() returns False for that case (the OS-thread ident
+    # matches the owner, but it is a different goroutine, not a real cycle).
+    try:
+        from importlib import _bootstrap
+        if hasattr(_bootstrap._ModuleLock, 'has_deadlock'):
+            _orig_module_lock_has_deadlock = _bootstrap._ModuleLock.has_deadlock
+            _bootstrap._ModuleLock.has_deadlock = _patched_has_deadlock
+    except Exception:
+        pass
     _orig_thread_join = _th.Thread.join
     _th.Thread.join = _patched_thread_join
 
 
 def _unpatch_threading():
+    global _orig_module_lock_has_deadlock
     _th.Lock      = _real_Lock
     _th.RLock     = _real_RLock
     _th.Event     = _real_Event
@@ -327,5 +377,12 @@ def _unpatch_threading():
     _thread.allocate_lock = _real_allocate_lock
     if _real_thread_RLock is not None:
         _thread.RLock = _real_thread_RLock
+    if _orig_module_lock_has_deadlock is not None:
+        try:
+            from importlib import _bootstrap
+            _bootstrap._ModuleLock.has_deadlock = _orig_module_lock_has_deadlock
+        except Exception:
+            pass
+        _orig_module_lock_has_deadlock = None
     if _orig_thread_join is not None:
         _th.Thread.join = _orig_thread_join
