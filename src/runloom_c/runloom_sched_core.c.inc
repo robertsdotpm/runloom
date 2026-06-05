@@ -231,8 +231,23 @@ void runloom_g_entry(void *user)
         int py_limit = Py_GetRecursionLimit();
 #if PY_VERSION_HEX >= 0x030C0000
         ts->py_recursion_remaining = py_limit;
-        /* 200 frames matches what a 128KB stack can safely hold. */
-        ts->c_recursion_remaining  = 200;
+        /* Scale the C-recursion budget to THIS goroutine's actual C stack.
+         * The old hard-coded 200 (sized for a 128KB stack) capped recursion at
+         * ~88 frames no matter how large the stack -- so a goroutine on a 4MB
+         * stack still RecursionError'd at ~88, breaking moderately recursive
+         * code (nested JSON, deepcopy, recursive parsers).  Give the goroutine
+         * the SAME per-byte budget CPython gives the 8MB main thread
+         * (Py_C_RECURSION_LIMIT, which already carries CPython's own safety
+         * margin via recursion_headroom); never go below the old 200. */
+        {
+            size_t stk = (g->coro != NULL)
+                       ? runloom_coro_stack_size(g->coro) : (size_t)131072;
+            long budget = (long)Py_C_RECURSION_LIMIT
+                        * (long)stk / (8L * 1024 * 1024);
+            if (budget < 200) budget = 200;
+            if (budget > Py_C_RECURSION_LIMIT) budget = Py_C_RECURSION_LIMIT;
+            ts->c_recursion_remaining = (int)budget;
+        }
 #else
         ts->recursion_remaining = py_limit;
 #endif
