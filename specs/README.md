@@ -43,8 +43,9 @@ Read in order for the full model; jump by subsystem if you know what you want.
 | 12 | [public API + sync/time/context](12-public-api.md) | `go`/`run`, the Go-style facades |
 | 13 | [the asyncio bridge](13-asyncio-bridge.md) | `RunloomTask`, the future protocol, the documented semantic diffs |
 | 14 | [monkey-patched cooperative stdlib](14-monkey-cooperative-stdlib.md) | The leaf-primitive principle, the Parker, foreign-thread safety |
-| 15 | [verification + testing](15-verification-and-testing.md) | How the invariants are actually proven/checked, with teeth |
+| 15 | [verification + testing + the whole QA apparatus](15-verification-and-testing.md) | The `check_all.sh` driver, the 16 machine-checked proofs (each with teeth), the full `tools/` inventory, profiling, conformance, and the bugs each caught |
 | 16 | [portability](16-portability.md) | Platform/arch/compiler detection, backend selection, build knobs |
+| 17 | [how the asyncio bridge was derived](17-asyncio-bridge-derivation.md) | The empirical method: run 222 name-brand asyncio suites + CPython's own `test_asyncio` under the loop, fix every failure — the invariant catalog is that record |
 
 ## The five things to understand first
 

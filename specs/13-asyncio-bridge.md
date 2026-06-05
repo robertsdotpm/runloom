@@ -19,6 +19,15 @@ Ground truth: `runloom/aio/` — `_base.py` (foundation), `tasks.py`
 **high-fidelity bridge, not a bit-exact emulator** — and the places it differs are
 documented precisely (below), because they are *design choices*, not bugs.
 
+> **How this spec's invariants were found:** the bridge was **derived
+> empirically** — by running the test suites of 222 name-brand asyncio projects
+> (plus CPython's own `test_asyncio`) under `RunloomEventLoop` and fixing every
+> behavioral failure. The "compatibility-invariant catalog" below *is* that
+> forensic record (each entry names the project whose test it fixed). **Read
+> [spec 17](17-asyncio-bridge-derivation.md) for the method** — a re-implementer
+> who builds from this spec alone will get a bridge that looks right and breaks
+> aiohttp; the corpus + the conformance harness are part of the spec.
+
 ## `RunloomTask` — the heart (`tasks.py`)
 
 A real `asyncio.Task` subclass (so `isinstance(x, asyncio.Task)` holds) but driven
