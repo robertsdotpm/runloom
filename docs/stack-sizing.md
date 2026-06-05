@@ -94,9 +94,12 @@ exactly what this page is about minimising.
 
 ## Auto-calibration
 
-The first 1 000 goroutines run with the generous default (256 KB) and
-get their stacks painted on creation, scanned on completion.  After
-the calibration window:
+The first 1 000 goroutines run with the generous default (**512 KB** --
+`RUNLOOM_DEFAULT_STACK_SIZE`, `src/runloom_c/runloom_sched_datastack.c.inc`) and
+get their stacks measured (resident-page high-water mark) on completion.  After
+the calibration window the default is locked to `next_pow2(max_hwm × 4)` but
+**floored at 512 KB** -- calibration only ever adapts *up*, never below the safe
+default.  After:
 
 ```python
 import runloom
@@ -109,9 +112,11 @@ print(s["stack_calibrated"])       # 1 once frozen
 print(s["stack_painting"])         # 0 once painting is disabled
 ```
 
-Typical numbers:
+Typical numbers (these are the **per-function grow-down** sizes -- the default-on
+M:N auto-sizer that shrinks each function to its measured need; *calibration*
+itself never goes below the 512 KB floor, see above):
 
-| Workload | Calibrated default |
+| Workload | Grown-down size |
 | --- | --- |
 | Trivial Python (`count += 1`) | 16 KB |
 | Stdlib socket I/O loops | 16 KB |

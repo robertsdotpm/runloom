@@ -108,12 +108,18 @@
   `datagram_received` (and anything dispatched through `call_soon` / `call_at` /
   the keepalive) run on a goroutine's swapped C stack, and user code there can
   recurse deep into C (e.g. asyncssh runs a full SSH kex + chacha20/OpenSSL
-  encrypt inside `data_received`). The scheduler's default 32 KB g-stack
-  overflows the guard page → SEGV (stock asyncio runs callbacks on the 8 MB
-  main-thread stack). Spawn every such goroutine via `_go_io` (`_IO_STACK`,
+  encrypt inside `data_received`). On a *small* g-stack (a grown-down or pinned
+  size) this overflows the guard page → SEGV (stock asyncio runs callbacks on the
+  8 MB main-thread stack). Spawn every such goroutine via `_go_io` (`_IO_STACK`,
   default 512 KB, env `RUNLOOM_AIO_IO_STACK`) — the same reason task drivers use
-  `_TASK_STACK`. Do NOT revert these to a bare `runloom_c.go`. The 512 KB is
-  virtual + pooled; only the asyncio bridge is affected (M:N paths keep 128 KB).
+  `_TASK_STACK`. The explicit pin matters because it holds 512 KB regardless of
+  the scheduler default / calibration / the M:N grow-down (which can shrink an
+  unpinned goroutine toward 16 KB). Do NOT revert these to a bare `runloom_c.go`.
+  The 512 KB is virtual + pooled; only the asyncio bridge pins it. (NB: the
+  scheduler's *unpinned* default is `RUNLOOM_DEFAULT_STACK_SIZE` = 512 KB on both
+  the single-thread and M:N paths — `mn_sched_init_fini.c.inc` resolves to
+  `h->sched.stack_size`; the older "32 KB default" / "M:N keep 128 KB" figures
+  here were stale.)
 - **A timer goroutine must read its callback THROUGH the handle, never via
   closure capture.** call_at/call_later run a goroutine that `sched_sleep`s to
   the deadline then fires `handle._callback`. `asyncio.Handle.cancel()` nulls
