@@ -283,6 +283,13 @@ static void crash_handler(int sig, siginfo_t *si, void *uctx)
         for (;;) pause();
     }
 
+    /* We are the crash owner.  Freeze the M:N watchdogs FIRST -- before the
+     * (potentially slow) dump dwells long enough for sysmon to flag this hub
+     * wedged and the handoff pool to adopt + steal the faulting goroutine,
+     * which would stop the chain-out from re-faulting and coring (the process
+     * would limp on with a stranded hub instead of dying cleanly). */
+    runloom_sched_freeze_for_crash();
+
     crash_emit("\n======================== runloom crash ========================\n");
     if (sig == SIGSEGV || sig == SIGBUS)
         crash_emitf("[runloom] fatal %s at address %p", crash_sig_name(sig), addr);
@@ -388,6 +395,16 @@ static void crash_handler(int sig, siginfo_t *si, void *uctx)
 int runloom_crash_install(int flags, const char *report_path)
 {
     int i;
+    /* Idempotent re-install: a second runloom_crash_install (e.g. runloom's
+     * package __init__ auto-installs from $RUNLOOM_CRASH, then the app calls
+     * install_crash_handler() to set a level/file) must NOT re-capture the
+     * "previous" dispositions -- doing so saves OUR OWN crash_handler as the
+     * chain-out target, so on a real fault the handler restores itself and
+     * re-faults straight back into its re-entrancy pause() guard: the process
+     * wedges (a stranded hub, no core) instead of coring + dying.  Keep the
+     * dispositions captured by the FIRST install (the true originals, normally
+     * SIG_DFL / faulthandler). */
+    int already = __atomic_load_n(&runloom_crash_on, __ATOMIC_ACQUIRE);
     if (flags == 0) flags = RUNLOOM_CRASH_DEFAULT;
 
     if (report_path != NULL && report_path[0] != '\0') {
@@ -429,7 +446,7 @@ int runloom_crash_install(int flags, const char *report_path)
     }
 #endif
 
-    if (flags & RUNLOOM_CRASH_WAIT) {
+    if ((flags & RUNLOOM_CRASH_WAIT) && !runloom_crash_cont_saved) {
         struct sigaction sc;
         memset(&sc, 0, sizeof sc);
         sc.sa_handler = crash_cont_handler;
@@ -452,7 +469,10 @@ int runloom_crash_install(int flags, const char *report_path)
         for (j = 0; j < RUNLOOM_CRASH_NSIG; j++)
             sigaddset(&sa.sa_mask, runloom_crash_signals[j]);
         sa.sa_flags = SA_SIGINFO | SA_ONSTACK | SA_RESTART;
-        (void)sigaction(runloom_crash_signals[i], &sa, &runloom_crash_prev[i]);
+        /* Only capture the previous disposition on the FIRST install (see the
+         * `already` note above); a re-install must preserve it. */
+        (void)sigaction(runloom_crash_signals[i], &sa,
+                        already ? NULL : &runloom_crash_prev[i]);
     }
 
     __atomic_store_n(&runloom_crash_on, 1, __ATOMIC_RELEASE);

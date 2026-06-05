@@ -29,6 +29,7 @@
 #include "plat_compat.h"
 #include "runloom_sched.h"
 #include "mn_sched.h"
+#include "runloom_iframe.h"   /* runloom_critsec_suspend / _restore */
 #include "netpoll.h"
 #include "io_uring.h"
 #include "runloom_blockpool.h"

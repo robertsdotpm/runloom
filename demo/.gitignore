@@ -1,0 +1,4 @@
+# Runtime artifacts -- logs, db, cores, incidents, pids.
+run/
+__pycache__/
+*.pyc
