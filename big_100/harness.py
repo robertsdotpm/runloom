@@ -146,6 +146,9 @@ class Harness(object):
                         help="number of lightweight goroutines")
         ap.add_argument("--hang-timeout", type=float, default=60.0,
                         help="watchdog: fail if no progress for this long")
+        ap.add_argument("--drain-timeout", type=float, default=120.0,
+                        help="seconds allowed for post-deadline drain/teardown"
+                             " (hard_deadline = deadline + drain_timeout)")
         ap.add_argument("--log-interval", type=float, default=5.0,
                         help="seconds between progress log lines")
         ap.add_argument("--fd-limit", type=int, default=1048576,
@@ -179,6 +182,7 @@ class Harness(object):
         self.hubs = self.args.hubs
         self.funcs = self.args.funcs
         self.hang_timeout = self.args.hang_timeout
+        self.drain_timeout = self.args.drain_timeout
         self.log_interval = self.args.log_interval
         self.fail_fast = self.args.fail_fast
 
@@ -410,7 +414,7 @@ class Harness(object):
     def _watchdog(self):
         last = self.progress_signal()
         last_change = REAL_MONO()
-        hard_deadline = self.deadline + max(120.0, 0.15 * self.duration)
+        hard_deadline = self.deadline + max(self.drain_timeout, 0.15 * self.duration)
         while not self.finished:
             REAL_SLEEP(2.0)
             if self.finished:

@@ -11,10 +11,21 @@ Constructing the Popen off-goroutine via `runloom.blocking` runs that fstat on
 a pool thread (where `_in_goroutine()` is False, so no nested offload) and
 sidesteps the deadlock.  The returned Popen's `communicate()` / `wait()` are
 still used cooperatively from the goroutine.
+
+SPAWN RATE LIMIT: glibc posix_spawn with a very large FD table (100k
+goroutines each holding pipe FDs) crashes with many simultaneous callers on
+3.13t.  The semaphore keeps concurrent Popen() calls to at most MAX_CONCURRENT
+at any time.  threading.Semaphore is monkey-patched to a cooperative goroutine
+semaphore when running inside runloom, so goroutines park rather than OS-block.
 """
 import subprocess
+import threading
+
+MAX_CONCURRENT = 32
+_spawn_sem = threading.Semaphore(MAX_CONCURRENT)
 
 
 def popen(*args, **kwargs):
     import runloom
-    return runloom.blocking(subprocess.Popen, *args, **kwargs)
+    with _spawn_sem:
+        return runloom.blocking(subprocess.Popen, *args, **kwargs)

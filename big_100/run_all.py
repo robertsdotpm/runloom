@@ -67,6 +67,8 @@ def main():
     ap.add_argument("--to", type=int, default=None)
     ap.add_argument("--python", default=DEFAULT_PY)
     ap.add_argument("--hang-timeout", type=float, default=120.0)
+    ap.add_argument("--drain-timeout", type=float, default=120.0,
+                    help="post-deadline drain cap passed to each program")
     args = ap.parse_args()
 
     projects = select(discover(), args)
@@ -84,7 +86,8 @@ def main():
                "--duration", str(args.duration),
                "--seed", str(args.seed),
                "--hubs", str(args.hubs),
-               "--hang-timeout", str(args.hang_timeout)]
+               "--hang-timeout", str(args.hang_timeout),
+               "--drain-timeout", str(args.drain_timeout)]
         if args.funcs is not None:
             cmd += ["--funcs", str(args.funcs)]
         if args.handoff:
