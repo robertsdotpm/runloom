@@ -93,6 +93,17 @@ struct runloom_pystate_snap {
     int py_recursion_remaining;
     int c_recursion_remaining;
 #endif
+#if PY_VERSION_HEX >= 0x030B0000
+    /* Per-goroutine sys.setprofile / sys.settrace hooks (BUG #11).  These are
+     * tstate-global, so without snap/restore a hook one goroutine installs
+     * leaks onto every other goroutine sharing the hub (and is cleared from
+     * under it on resume).  Saved/restored so each goroutine carries its own. */
+    Py_tracefunc c_profilefunc;
+    Py_tracefunc c_tracefunc;
+    PyObject *c_profileobj;                   /* owned ref while suspended */
+    PyObject *c_traceobj;                     /* owned ref while suspended */
+    int tracing;
+#endif
 #if PY_VERSION_HEX >= 0x030B0000 && PY_VERSION_HEX < 0x030D0000
     /* 3.11 and 3.12: cframe lives on the C stack, threaded through
      * the linked list.  3.13 removed cframe; current_frame lives

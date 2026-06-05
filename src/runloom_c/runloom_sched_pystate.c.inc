@@ -80,6 +80,18 @@ void runloom_pystate_snap(runloom_pystate_snap_t *snap)
     snap->recursion_remaining = ts->recursion_remaining;
 #  endif
 
+    /* Per-goroutine sys.setprofile/settrace hooks (BUG #11): tstate-global, so
+     * without snap/restore one goroutine's hook leaks onto siblings sharing the
+     * hub and is cleared from under it on resume.  Hold a ref to the hook
+     * objects while suspended; all NULL (free) in the common no-hook case. */
+    snap->c_profilefunc = ts->c_profilefunc;
+    snap->c_tracefunc = ts->c_tracefunc;
+    snap->c_profileobj = ts->c_profileobj;
+    snap->c_traceobj = ts->c_traceobj;
+    snap->tracing = ts->tracing;
+    Py_XINCREF(snap->c_profileobj);
+    Py_XINCREF(snap->c_traceobj);
+
     snap->datastack_chunk = ts->datastack_chunk;
     snap->datastack_top = ts->datastack_top;
     snap->datastack_limit = ts->datastack_limit;
@@ -215,6 +227,23 @@ void runloom_pystate_load(runloom_pystate_snap_t *snap)
     ts->recursion_remaining = snap->recursion_remaining;
 #  endif
 
+    /* Restore this goroutine's own profile/trace hooks (BUG #11).  Transfer the
+     * refs the snap holds back onto ts and drop ts's previous ones.  All NULL
+     * in the common no-hook case, so the DECREFs are no-ops. */
+    ts->c_profilefunc = snap->c_profilefunc;
+    ts->c_tracefunc = snap->c_tracefunc;
+    ts->tracing = snap->tracing;
+    {
+        PyObject *oldp = ts->c_profileobj;
+        PyObject *oldt = ts->c_traceobj;
+        ts->c_profileobj = snap->c_profileobj;
+        ts->c_traceobj = snap->c_traceobj;
+        snap->c_profileobj = NULL;
+        snap->c_traceobj = NULL;
+        Py_XDECREF(oldp);
+        Py_XDECREF(oldt);
+    }
+
     /* Datastack fast path: in tight loops that yield without pushing
      * Python frames, the chunk pointers are unchanged across the
      * yield.  Skip 3 stores when chunk matches -- top and limit are
@@ -302,6 +331,8 @@ void runloom_pystate_snap_clear(runloom_pystate_snap_t *snap)
     Py_CLEAR(snap->exc_state.exc_value);
     snap->exc_info = NULL;
     Py_CLEAR(snap->current_exception);
+    Py_CLEAR(snap->c_profileobj);            /* BUG #11: drop held hook refs */
+    Py_CLEAR(snap->c_traceobj);
 #endif
 #if PY_VERSION_HEX >= 0x030D0000
     Py_CLEAR(snap->delete_later);
