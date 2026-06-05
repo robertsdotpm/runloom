@@ -62,11 +62,16 @@ The direct-handoff path (`send` → waiting receiver, or `recv` → waiting send
 moves the ref straight across with **no copy and no buffer touch** — that's what
 makes unbuffered ping-pong ~560 ns (within 7% of Go 1.22 on the same box).
 
-### The waiter as a stack local
+### The waiter as a stack local (plain ops) / heap array (select)
 
-A parked sender/receiver is a small `runloom_chan_waiter_t` **on the parking
-goroutine's own stack** (`park_waiter` links it, releases the lock, snaps, yields;
-the waker fills `value`/`ok`/`send_result` and wakes). This is safe (unlike the
+For a **plain** `send`/`recv`, the waiter is a small `runloom_chan_waiter_t` **on
+the parking goroutine's own stack** (`park_waiter` links it, releases the lock,
+snaps, yields; the waker fills `value`/`ok`/`send_result` and wakes —
+[chan_ops.c.inc:52-68](../src/runloom_c/chan_ops.c.inc#L52)). A **`select`**
+instead heap-allocates an `n`-entry waiter array (`PyMem_Calloc`,
+[chan_select_main.c.inc:37](../src/runloom_c/chan_select_main.c.inc#L37)) whose
+lifetime is bounded by the select call, and pins every case's channel with an
+incref across the park+eviction phase. The stack-local form is safe (unlike the
 netpoll parker, spec 06) because the waiter is consumed before the goroutine
 resumes — the goroutine is suspended exactly at the park, so its stack frame
 holding the waiter is stable until wake.
