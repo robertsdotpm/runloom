@@ -301,9 +301,11 @@ static void runloom_mn_ctrl_try_grant(void)
     /* trace conformance: the baton is granted to waiting hub c (waiting->running) */
     runloom_mn_trace_event("Grant", c);
     /* Grant trace (opt-in, RUNLOOM_MN_TRACE): one byte into an in-memory ring, no
-     * syscall on the hot path; dumped to the file at fini.  NB the residual
-     * sub-segment tail race is a Heisenbug -- even this byte-write perturbs it,
-     * so a clean trace does not certify a clean run. */
+     * syscall on the hot path; dumped to the file at fini.  (Historically the
+     * grant sequence could be byte-identical yet a run still varied -- the
+     * partial-publish residual, where which g ran in a grant slot depended on
+     * sub_list drain timing; that is closed by the deferred-publish-at-release
+     * staging, runloom_mn_ctrl_stage_flush.) */
     if (runloom_mn_ctrl.tracebuf != NULL &&
         runloom_mn_ctrl.tracelen + 1 < runloom_mn_ctrl.tracecap)
         runloom_mn_ctrl.tracebuf[runloom_mn_ctrl.tracelen++] = (char)('0' + (c % 10));
@@ -557,9 +559,11 @@ static void runloom_mn_ctrl_wait_armed(void)
 /* True in deterministic-replay mode (controlled + barrier): hub_main then skips
  * cross-hub work-stealing.  mn_go placement is deterministic (spawn_counter %
  * hub_count) and wake-routing is hub-pinned, so with no steal each hub's
- * execution stream is a fixed function of the schedule -- the last residual
- * that made an identical grant sequence still produce different goroutine
- * orderings.  Steal is a lock-free, sub-segment CAS race; it is covered by the
+ * execution stream is a fixed function of the schedule -- closing one way an
+ * identical grant sequence could still produce different goroutine orderings
+ * (the other, partial cross-hub publish, is closed by the deferred-publish
+ * staging, runloom_mn_ctrl_stage_flush).  Steal is a lock-free, sub-segment CAS
+ * race; it is covered by the
  * memory-model tools (GenMC / herd7 / lincheck), not by segment-granularity
  * replay, so dropping it here loses no coverage that lives at this level. */
 RUNLOOM_INLINE int runloom_mn_ctrl_no_steal(void)
@@ -588,6 +592,36 @@ double runloom_mn_logical_now_or(double fallback)
  * frames.  Reset at each resume_begin, bumped in the eval-frame wrapper. */
 static RUNLOOM_TLS int runloom_mn_preempt_ctr = 0;
 
+/* Publish this hub's deferred cross-hub submits (barrier-mode deterministic
+ * replay).  A cross-hub submit made DURING a running segment was staged per
+ * target on the spawning hub (runloom_mn_hub_submit) instead of pushed
+ * immediately; here we splice each target's staged list onto its sub_list in ONE
+ * lock-held operation, so the target's loop-top drain observes the COMPLETE set
+ * the segment produced -- never a partial mid-segment snapshot.  Called at
+ * resume_end BEFORE the baton release, so the work is published (and visible via
+ * the target's sub_lock acquire) before the round that release opens.  No-op
+ * (one predicted-not-taken branch) when nothing was staged -- i.e. always in the
+ * default scheduler, where stage_head is NULL. */
+static void runloom_mn_ctrl_stage_flush(runloom_hub_t *h)
+{
+    int t;
+    if (h->stage_head == NULL || h->stage_pending == 0) return;
+    for (t = 0; t < runloom_hub_count; t++) {
+        runloom_g_t *head = h->stage_head[t];
+        runloom_g_t *tail = h->stage_tail[t];
+        runloom_hub_t *tgt;
+        if (head == NULL) continue;
+        h->stage_head[t] = h->stage_tail[t] = NULL;
+        tgt = &runloom_hubs[t];
+        runloom_mutex_lock(&tgt->sub_lock);
+        if (tgt->sub_tail != NULL) tgt->sub_tail->next = head;
+        else                       tgt->sub_head = head;
+        tgt->sub_tail = tail;
+        runloom_mutex_unlock(&tgt->sub_lock);
+    }
+    h->stage_pending = 0;
+}
+
 RUNLOOM_INLINE void runloom_hub_resume_begin(runloom_hub_t *h, runloom_g_t *g)
 {
     if (__builtin_expect(runloom_sysmon_enabled, 0)) {
@@ -610,6 +644,11 @@ RUNLOOM_INLINE void runloom_hub_resume_end(runloom_hub_t *h)
     if (__builtin_expect(runloom_sysmon_enabled, 0)) {
         __atomic_store_n(&h->resume_start_ns, 0, __ATOMIC_RELAXED);
     }
+    /* Publish this segment's deferred cross-hub submits ATOMICALLY (per target)
+     * before releasing the baton, so the next round sees a complete batch -- the
+     * deterministic-replay fix for the partial-snapshot residual.  No-op (NULL
+     * stage) in the default scheduler. */
+    runloom_mn_ctrl_stage_flush(h);
     /* controlled mode: hand the baton to the next hub (seeded) */
     runloom_mn_ctrl_release(h->id);
 }

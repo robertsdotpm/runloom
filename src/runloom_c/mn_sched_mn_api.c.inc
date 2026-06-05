@@ -70,6 +70,36 @@ static void runloom_mn_hub_submit(runloom_hub_t *h, runloom_g_t *g)
          * will pick up whatever state the g has when hub_main gets to it. */
         return;
     }
+    /* Controlled-replay deferred publish: a cross-hub submit made DURING a
+     * running segment (the spawning hub holds the baton and is running a g) is
+     * staged on the SPAWNING hub per target, then flushed onto the target's
+     * sub_list atomically at this segment's release (runloom_mn_ctrl_stage_flush in
+     * resume_end).  That makes the target's drain observe the complete set the
+     * segment produced rather than a partial mid-segment snapshot -- the
+     * deterministic-replay fix.  Gated tight so it is inert otherwise: barrier
+     * active, the caller is a hub (runloom_tls_hub) running a goroutine
+     * (runloom_tls_current_g) targeting a DIFFERENT hub, and staging is allocated.
+     * Same-hub submits, non-segment producers (idle pump / pre-run placement),
+     * and the entire default scheduler fall straight through to the immediate
+     * push below (zero added cost there). */
+    {
+        runloom_hub_t *cur = runloom_tls_hub;
+        if (runloom_mn_ctrl.enabled && runloom_mn_ctrl.barrier &&
+            cur != NULL && cur != h && cur->stage_head != NULL &&
+            runloom_tls_current_g != NULL &&
+            h->id >= 0 && h->id < runloom_hub_count) {
+            g->next = NULL;
+            if (cur->stage_tail[h->id] != NULL)
+                cur->stage_tail[h->id]->next = g;
+            else
+                cur->stage_head[h->id] = g;
+            cur->stage_tail[h->id] = g;
+            cur->stage_pending++;
+            RUNLOOM_EVT(RUNLOOM_EVT_G_SUBMIT, g, h, 0);
+            runloom_g_state_set(g, RUNLOOM_GST_SUBMITTED);
+            return;
+        }
+    }
     runloom_mutex_lock(&h->sub_lock);
     g->next = NULL;
     if (h->sub_tail != NULL) {
