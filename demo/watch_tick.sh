@@ -33,7 +33,8 @@ if [ -n "$sp" ] && kill -0 "$sp" 2>/dev/null; then
     rss=$(awk '/VmRSS/{print $2" "$3}' /proc/"$sp"/status 2>/dev/null)
     fds=$(ls /proc/"$sp"/fd 2>/dev/null | wc -l | tr -d ' ')
     thr=$(awk '/Threads/{print $2}' /proc/"$sp"/status 2>/dev/null)
-    echo "server pid=$sp RSS=$rss FDs=$fds threads=$thr"
+    maps=$(wc -l < /proc/"$sp"/maps 2>/dev/null | tr -d ' ')
+    echo "server pid=$sp RSS=$rss FDs=$fds threads=$thr maps=$maps"
 fi
 curl -s --max-time 4 http://127.0.0.1:8080/stats 2>/dev/null | python3 -c "
 import sys,json
