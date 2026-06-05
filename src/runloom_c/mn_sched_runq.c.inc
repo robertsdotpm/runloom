@@ -306,6 +306,15 @@ static int         *runloom_handoff_claim   = NULL; /* per-hub FREE/PENDING/OWNE
 static runloom_thread_t *runloom_handoff_threads = NULL;
 static int          runloom_handoff_running = 0;     /* count of spawned rescue threads */
 static int          runloom_handoff_debug   = 0;     /* RUNLOOM_HANDOFF_DEBUG: trace adopts/drains */
+/* BUG #2 fix: each rescue thread's own PyThreadState.  Created by the rescue
+ * thread on its own OS thread (so biased-refcount ob_tid binds to that TID).
+ * Stored here (indexed [0..running-1]) so stop_join can delete them from the
+ * MAIN thread after joining -- same pattern as hub tstates in mn_sched_init_fini.
+ * A rescue thread must NEVER call PyThreadState_Delete itself: doing so while a
+ * GC stop-the-world is in progress (the gcer fires during mn_fini) deadlocks
+ * because Delete interacts with STW bookkeeping, and the main thread (the only
+ * one that safely drives that interaction) is blocked in thread_join. */
+static PyThreadState **runloom_rescue_tstates = NULL;
 
 /* ---- Group B step (a): ATTACHED/CPU preemption (RUNLOOM_PREEMPT, default OFF) ----
  *
