@@ -56,14 +56,30 @@ end and the orchestrator exits nonzero if any project failed.
 
 ## Findings
 
-Building the campaign surfaced real bugs in the extension — see
-[FINDINGS.md](FINDINGS.md):
+Building and running the campaign surfaced **10 real bugs/limitations** in the
+extension — see [FINDINGS.md](FINDINGS.md) for the full writeups with repros.
+Headlines:
 
-- **BUG #1 (fixed):** `monkey.patch()` broke every `runloom.go()` (wrapper
-  dropped the stack-size positional).
-- **BUG #2 (open):** the handoff rescue corrupts memory under high socket
-  concurrency (SIGSEGV/SIGBUS). The harness disables it by default
-  (`RUNLOOM_HANDOFF=0`); pass `--handoff` to reproduce.
+- **#1 (fixed):** `monkey.patch()` broke every `runloom.go()` (the wrapper
+  dropped the stack-size positional arg). Fixed in `src/runloom/monkey/`.
+- **#2:** the handoff rescue corrupts memory under high socket concurrency
+  (SIGSEGV/SIGBUS). The harness disables it by default (`RUNLOOM_HANDOFF=0`);
+  pass `--handoff` to reproduce.
+- **#4:** high-rate `runloom.blocking` / subprocess offload deadlocks (a lost
+  wakeup in the offload-result wait); worked around with `procutil`.
+- **#5:** `close()` doesn't wake a goroutine parked in `accept()` (latent server
+  teardown hang); worked around with `netutil.serve_forever`.
+- **#6:** a goroutine can only recurse ~50–80 frames before `RecursionError`
+  (the C recursion budget isn't reset for the goroutine).
+- **#7:** `contextvars` / `threading.local` leak between goroutines (hub-local,
+  not goroutine-local).
+- **#8/#9/#10:** greenlet can't interleave with goroutine switches; concurrent
+  same-module imports false-deadlock; a cooperative lock in `__del__` aborts.
+
+Several of these share one root cause: M:N parallelism breaks CPython's
+one-thread-per-unit-of-concurrency assumption. The bug-reproducing knobs are
+preserved (e.g. `--handoff`, higher `--funcs`) so each finding stays
+demonstrable.
 
 ## Project list
 
