@@ -56,6 +56,12 @@ typedef struct runloom_pystate_snap runloom_pystate_snap_t;
  */
 struct runloom_pystate_snap {
     int valid;
+    /* CPython per-object critical-section chain held by this g when it parked
+     * (free-threaded 3.13t only; 0 otherwise).  Saved + the mutexes released on
+     * snap, restored + re-locked on load -- so a g that parks mid-critical-
+     * section (e.g. inside a dict key __eq__) does not strand the dict's mutex
+     * locked across the swap and deadlock every other hub.  See snap/load. */
+    uintptr_t critical_section;
 #if PY_VERSION_HEX >= 0x030B0000
     /* 3.11+ common fields.  All of: contextvars, datastack arena
      * pointers, exc state, exist on 3.11/3.12/3.13. */

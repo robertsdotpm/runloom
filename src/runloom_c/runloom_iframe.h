@@ -45,6 +45,23 @@ int runloom_iframe_walk(void *top, int max, runloom_iframe_cb cb, void *ctx);
  * pre-3.13 / non-core builds. */
 int runloom_tstate_in_destruction(PyThreadState *ts);
 
+/* Critical-section suspend/restore across a goroutine swap (free-threaded
+ * 3.13t only; no-op on GIL / pre-3.13 builds).  A goroutine can park while
+ * holding a CPython per-object critical section (e.g. a dict's ma_mutex held
+ * during a key __eq__ that yields).  runloom runs many goroutines on one hub
+ * tstate and a cooperative park swaps the C stack WITHOUT detaching the
+ * tstate, so unless we mirror CPython's detach-time behaviour the held mutex
+ * stays locked while the g is parked -- every other hub then deadlocks on it,
+ * and the shared tstate's critical-section chain leaks across goroutines.
+ *   suspend(): release all CS mutexes held on `tstate`, return the saved chain
+ *              (tagged inactive) and clear tstate->critical_section.
+ *   restore(): put the saved chain back and re-lock the top section.
+ * These live in this Py_BUILD_CORE-isolated TU because _PyCriticalSection_*
+ * are internal.  Args are void* PyThreadState to keep the core/non-core ABI
+ * boundary clean.  See runloom_sched_pystate.c.inc (snap/load). */
+uintptr_t runloom_critsec_suspend(void *tstate);
+void      runloom_critsec_restore(void *tstate, uintptr_t saved);
+
 #ifdef __cplusplus
 }
 #endif

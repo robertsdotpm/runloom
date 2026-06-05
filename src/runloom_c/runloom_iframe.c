@@ -25,6 +25,8 @@
 #  include "internal/pycore_pystate.h"     /* _PyThreadStateImpl */
 #  ifdef Py_GIL_DISABLED
 #    include "internal/pycore_brc.h"        /* struct _brc_thread_state */
+#    include "internal/pycore_critical_section.h"  /* _PyCriticalSection_* */
+#    define RUNLOOM_CRITSEC_HAVE 1
 #  endif
 #  define RUNLOOM_DESTRUCT_HAVE 1
 #endif
@@ -83,5 +85,46 @@ int runloom_iframe_walk(void *top, int max, runloom_iframe_cb cb, void *ctx)
 #else
     (void)top; (void)max; (void)cb; (void)ctx;
     return 0;
+#endif
+}
+
+/* ---- critical-section suspend/restore across a goroutine swap ----
+ * See the header for why this is needed.  Mirrors what CPython does in
+ * _PyThreadState_Detach / _Attach, but driven manually at runloom's park
+ * boundary (runloom never detaches the tstate on a cooperative park). */
+uintptr_t runloom_critsec_suspend(void *tstate_v)
+{
+#if defined(RUNLOOM_CRITSEC_HAVE)
+    PyThreadState *ts = (PyThreadState *)tstate_v;
+    uintptr_t saved = ts->critical_section;
+    if (saved != 0) {
+        /* Unlocks every CS mutex held on this tstate and tags the chain
+         * inactive (chain pointer stays in ts->critical_section). */
+        _PyCriticalSection_SuspendAll(ts);
+        saved = ts->critical_section;   /* re-read: now tagged inactive */
+        ts->critical_section = 0;       /* hand the next goroutine a clean chain */
+    }
+    return saved;
+#else
+    (void)tstate_v;
+    return 0;
+#endif
+}
+
+void runloom_critsec_restore(void *tstate_v, uintptr_t saved)
+{
+#if defined(RUNLOOM_CRITSEC_HAVE)
+    if (saved != 0) {
+        PyThreadState *ts = (PyThreadState *)tstate_v;
+        ts->critical_section = saved;
+        /* Re-lock the top section (it was tagged inactive by SuspendAll).
+         * Nested inner sections stay inactive until popped, each Pop resuming
+         * the next -- exactly CPython's attach-time behaviour. */
+        if (!_PyCriticalSection_IsActive(saved)) {
+            _PyCriticalSection_Resume(ts);
+        }
+    }
+#else
+    (void)tstate_v; (void)saved;
 #endif
 }

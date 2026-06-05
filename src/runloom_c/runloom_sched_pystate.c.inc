@@ -49,6 +49,14 @@ void runloom_pystate_snap(runloom_pystate_snap_t *snap)
      * cross-hub mismatch.  Cheap unconditional store (one word). */
     snap->origin_tstate = ts;
 
+    /* Suspend any CPython critical section this g holds (free-threaded 3.13t):
+     * release the held per-object mutexes and save the chain so load can
+     * re-lock them on resume.  Common case (no CS held at a park point) is one
+     * predicted-not-taken branch inside the helper.  Without this, a g that
+     * parks mid-critical-section strands that mutex locked across the swap and
+     * every other hub deadlocks on it (the routes-dict hang). */
+    snap->critical_section = runloom_critsec_suspend(ts);
+
     /* No memset: every field is assigned below.  Saves ~80B of
      * unnecessary writes on the hot per-yield path. */
 
@@ -160,6 +168,13 @@ void runloom_pystate_load(runloom_pystate_snap_t *snap)
         return;
     }
     ts = PyThreadState_GET();
+
+    /* Re-acquire any critical section this g held when it parked (see snap).
+     * Must run on the tstate this g is being resumed onto -- ts -- which is
+     * exactly the chain the held PyCriticalSection structs (on g's preserved
+     * coro stack) point through.  No-op when none were held. */
+    runloom_critsec_restore(ts, snap->critical_section);
+    snap->critical_section = 0;
 
     /* DIAG (RUNLOOM_DIAG_MIGRATE=1): detect the H>=2 cross-hub corruption at its
      * SOURCE.  When we load a snap onto a tstate that differs from the one the
@@ -297,6 +312,11 @@ void runloom_pystate_snap_clear(runloom_pystate_snap_t *snap)
     if (!snap->valid) {
         return;
     }
+    /* A g destroyed while parked: its held CS mutexes were already released on
+     * snap (suspend), and the PyCriticalSection structs live on the g's own
+     * coro stack (freed with it), so there is nothing to unlock -- just drop
+     * the saved chain. */
+    snap->critical_section = 0;
 #if PY_VERSION_HEX >= 0x030B0000
     Py_CLEAR(snap->context);
     Py_CLEAR(snap->exc_state.exc_value);
