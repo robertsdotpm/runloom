@@ -37,6 +37,26 @@ def send_response(sock, body, status="200 OK", keep_alive=True,
     sock.sendall("\r\n".join(hdrs).encode("latin-1") + body)
 
 
+def read_response(sock):
+    """Read a Content-Length-framed response already sent.  Returns
+    (status_code, body)."""
+    raw = netutil.recv_until(sock, b"\r\n\r\n", limit=65536)
+    head, rest = raw.split(b"\r\n\r\n", 1)
+    lines = head.decode("latin-1").split("\r\n")
+    status_code = int(lines[0].split(" ")[1])
+    clen = 0
+    for ln in lines[1:]:
+        if ln.lower().startswith("content-length:"):
+            clen = int(ln.split(":", 1)[1].strip())
+    body = bytearray(rest)
+    while len(body) < clen:
+        chunk = sock.recv(clen - len(body))
+        if not chunk:
+            raise OSError("eof reading body")
+        body += chunk
+    return status_code, bytes(body)
+
+
 def get(sock, path, host="127.0.0.1", keep_alive=True):
     """Send a GET and read the full response.  Returns (status_code, body).
 
