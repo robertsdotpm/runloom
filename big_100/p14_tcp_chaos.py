@@ -29,14 +29,10 @@ def server_handler(conn):
         netutil.close_quiet(conn)
 
 
-# Dedicated loopback: p13 runs concurrently with JOBS=2 and 100k sockets from
-# the neighbour program can exhaust 127.0.0.1's ephemeral pool at setup time.
-_HOST = "127.0.0.14"
-
-
 def setup(H):
-    srv = netutil.listen_tcp(host=_HOST)
-    H.state = {"port": srv.getsockname()[1], "host": _HOST}
+    host = H.net_ips[0]
+    srv = netutil.listen_tcp(host=host)
+    H.state = {"port": srv.getsockname()[1], "host": host}
 
     H.go(netutil.serve_forever, H, srv,
          lambda conn, addr: H.go(server_handler, conn))

@@ -55,16 +55,11 @@ def proxy_conn(H, client_sock):
         netutil.close_quiet(backend)
 
 
-# Use a dedicated loopback address so the concurrent soak program can't
-# exhaust 127.0.0.1's ephemeral port pool and cause EADDRINUSE on our
-# bind(host, 0) calls.
-_HOST = "127.0.0.15"
-
-
 def setup(H):
-    backend_port = netutil.start_echo_server(H, host=_HOST)
-    pxy = netutil.listen_tcp(host=_HOST)
-    H.state = {"host": _HOST, "proxy_port": pxy.getsockname()[1],
+    host = H.net_ips[0]
+    backend_port = netutil.start_echo_server(H, host=host)
+    pxy = netutil.listen_tcp(host=host)
+    H.state = {"host": host, "proxy_port": pxy.getsockname()[1],
                "backend_port": backend_port}
 
     H.go(netutil.serve_forever, H, pxy,

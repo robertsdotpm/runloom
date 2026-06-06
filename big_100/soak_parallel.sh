@@ -2,14 +2,19 @@
 # Parallel soak: run all 100 projects with auto-computed concurrency.
 #
 # Sizing logic (can be overridden by env vars):
-#   HUBS    M:N hubs per program  (default: min(8, cores/4))
-#   JOBS    programs in parallel  (default: floor(cores/HUBS), capped at 8 for
-#                                  large-funcs runs to avoid memory/FD pressure)
+#   HUBS    M:N hubs per program  (default: 4, giving each job 4 hub threads)
+#   JOBS    programs in parallel  (default: (cores - RESERVE_CORES) / 4)
 #   FUNCS   goroutines per prog   (default: 100000)
 #   DUR     seconds per run       (default: 30)
 #   HT      hang-timeout          (default: 90)
 #   WALL    per-program wall cap  (default: DUR+120)
 #   LOOP    0=single pass, 1=loop forever (default: 1)
+#
+# IP isolation:
+#   Each concurrent job gets a unique /24 subnet from the 127/8 loopback block
+#   so their 28k-port ephemeral pools don't collide.  The base slot counter
+#   advances monotonically across passes (stored in /tmp/soak_ip_slot_ctr) to
+#   avoid TIME_WAIT collisions between passes.
 #
 # Examples:
 #   ./soak_parallel.sh                              # defaults
@@ -39,30 +44,28 @@ FUNCS=${FUNCS:-100000}
 # RESERVE_CORES: leave this many cores idle (for VS Code / system).
 RESERVE_CORES=${RESERVE_CORES:-10}
 _USABLE=$(( CORES - RESERVE_CORES < 4 ? 4 : CORES - RESERVE_CORES ))
-HUBS=${HUBS:-$(( _USABLE > 32 ? 8 : (_USABLE > 16 ? 6 : 4) ))}
+
+# Fixed 4 hubs per job; formula: JOBS = (usable_cores) / 4
+HUBS=${HUBS:-4}
 DUR=${DUR:-30}
 HT=${HT:-90}
 DRAIN=${DRAIN:-120}
 LOOP=${LOOP:-1}
 
-# Jobs: cores/hubs, but cap lower for large funcs to avoid OOM.
-# 100k funcs ~ 200-500MB RSS per program (lazy stacks).  With 70GB available,
-# we can run ~8-16 concurrently before RAM becomes the binding constraint.
-# Network programs also need FDs: 100k goroutines x 2 FDs = 200k FDs per prog.
-# At JOBS=4 that's 800k FDs; at JOBS=8 it's 1.6M.  We raise the per-process
-# limit below; system-wide fs.file-max is usually >>1M.
+# Jobs = usable_cores / HUBS, floored at 1, capped at 32.
+# Each job gets 4 hubs, so JOBS * 4 ~= usable cores.
 _raw_jobs=$(( _USABLE / HUBS ))
-_mem_cap=$(( RAM_GB / 2 ))   # ~500MB/prog headroom
-_fd_cap=8                    # above 8 progs, FD pressure becomes real at 100k
-if   [ "$FUNCS" -ge 100000 ]; then JOBS=${JOBS:-$(( _raw_jobs < _fd_cap  ? _raw_jobs : _fd_cap  ))}
-elif [ "$FUNCS" -ge  50000 ]; then JOBS=${JOBS:-$(( _raw_jobs < 12       ? _raw_jobs : 12       ))}
-else                                JOBS=${JOBS:-$_raw_jobs}
-fi
-# Floor at 1, cap at 16
+JOBS=${JOBS:-$_raw_jobs}
 [ "$JOBS" -lt 1  ] && JOBS=1
-[ "$JOBS" -gt 16 ] && JOBS=16
+[ "$JOBS" -gt 32 ] && JOBS=32
 
 WALL=${WALL:-$(( DUR + 120 ))}
+
+# ---- monotonic IP slot counter (across passes, survives restart) -----------
+# Each pass uses JOBS consecutive slots starting at IP_SLOT_BASE.
+# Slots are stored in /tmp/soak_ip_slot_ctr so passes don't reuse addresses
+# until the 127/8 space wraps (~254 * 254 = 64516 subnets available).
+IP_SLOT_CTR=/tmp/soak_ip_slot_ctr
 
 # ---- raise FD limit -------------------------------------------------------
 # Each program with 100k goroutines can open up to ~200k FDs (network).
@@ -74,7 +77,7 @@ if [ "$_cur" -lt "$_needed" ] && [ "$_cur" != "unlimited" ]; then
     ulimit -n 1048576   2>/dev/null || true
 fi
 
-export RUNLOOM_SYSMON_QUIET=1 PYTHON_GIL=0
+export RUNLOOM_SYSMON_QUIET=1 PYTHON_GIL=0 HUBS JOBS FUNCS DUR
 
 echo "=====================================================================" | tee -a "$SOAK_LOG"
 echo "soak_parallel: cores=$CORES  reserved=$RESERVE_CORES  usable=$_USABLE  available_RAM=${RAM_GB}GB" | tee -a "$SOAK_LOG"
@@ -86,8 +89,21 @@ pass=1
 
 run_pass() {
     local t0=$SECONDS
+
+    # Advance the monotonic slot counter atomically.  Each pass consumes JOBS
+    # slots; the counter file holds the NEXT free slot.
+    local slot_base
+    if [ -f "$IP_SLOT_CTR" ]; then
+        slot_base=$(cat "$IP_SLOT_CTR" 2>/dev/null || echo 0)
+    else
+        slot_base=0
+    fi
+    # Advance by JOBS; wrap at 32767 (well under 127/8's 64k subnets)
+    local next_slot=$(( (slot_base + JOBS) % 32767 ))
+    echo "$next_slot" > "$IP_SLOT_CTR"
+
     echo "" | tee -a "$SOAK_LOG"
-    echo "===== PASS $pass  $(date '+%H:%M:%S')  load=$(cut -d' ' -f1 /proc/loadavg) =====" | tee -a "$SOAK_LOG"
+    echo "===== PASS $pass  $(date '+%H:%M:%S')  load=$(cut -d' ' -f1 /proc/loadavg)  ip-slot-base=$slot_base =====" | tee -a "$SOAK_LOG"
 
     "$PY" run_all.py \
         --jobs "$JOBS" \
@@ -96,6 +112,7 @@ run_pass() {
         --funcs "$FUNCS" \
         --hang-timeout "$HT" \
         --drain-timeout "$DRAIN" \
+        --ip-slot-base "$slot_base" \
         2>&1
     local rc=$?
 

@@ -16,10 +16,6 @@ import netutil
 
 NFILES = 16
 
-# Dedicated loopback avoids port exhaustion from concurrent neighbour.
-# Semaphore cap: 100k goroutines all doing offload file I/O simultaneously
-# overwhelms the parker pool and causes SIGSEGV in _worker_loop.
-_HOST = "127.0.0.82"
 MAX_CLIENTS = 2000
 
 
@@ -39,9 +35,10 @@ def setup(H):
         with open(path, "wb") as f:
             f.write(data)
         files[k] = (path, size)
-    srv = netutil.listen_tcp(host=_HOST)
+    host = H.net_ips[0]
+    srv = netutil.listen_tcp(host=host)
     sem = threading.Semaphore(MAX_CLIENTS)
-    H.state = {"port": srv.getsockname()[1], "files": files, "sem": sem}
+    H.state = {"port": srv.getsockname()[1], "host": host, "files": files, "sem": sem}
 
     def handle(conn):
         try:
@@ -107,6 +104,7 @@ def read_response(sock):
 
 def client(H, wid, rng, state):
     port = state["port"]
+    host = state["host"]
     files = state["files"]
     sem = state["sem"]
     H.sleep(rng.random() * 0.5)
@@ -116,7 +114,7 @@ def client(H, wid, rng, state):
         sock = None
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.connect((_HOST, port))
+            sock.connect((host, port))
             idx = rng.randrange(NFILES)
             _path, size = files[idx]
             full = content(idx, size)

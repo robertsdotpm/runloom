@@ -167,6 +167,10 @@ class Harness(object):
                              "the campaign found it corrupts memory under high "
                              "socket concurrency -- see FINDINGS.md BUG #2; "
                              "pass this to reproduce that crash)")
+        ap.add_argument("--ip-slot", type=int, default=0,
+                        help="IP isolation slot; slot N uses 127.(N+1).0.x "
+                             "so concurrent jobs never share loopback addresses "
+                             "and cannot exhaust each other's ephemeral ports")
         if add_args is not None:
             add_args(ap)
         self.args = ap.parse_args()
@@ -185,6 +189,17 @@ class Harness(object):
         self.drain_timeout = self.args.drain_timeout
         self.log_interval = self.args.log_interval
         self.fail_fast = self.args.fail_fast
+
+        # IP isolation: slot N -> subnet 127.(N+1).0.0/24
+        # 8 IPs per slot; slot 0 = 127.1.0.1..8 (never 127.0.0.1 to avoid
+        # colliding with the default loopback used outside the soak)
+        _slot = max(0, self.args.ip_slot)
+        self.net_ips = [
+            "127.{0}.0.{1}".format(_slot + 1, i + 1) for i in range(8)
+        ]
+        # Expose primary IP as env var so netutil defaults pick it up without
+        # requiring every test to read H.net_ips explicitly.
+        os.environ["SOAK_HOST_IP"] = self.net_ips[0]
 
         # timing
         self.t0 = REAL_MONO()
@@ -349,6 +364,10 @@ class Harness(object):
         """Register a callable to run once at the very end (after metrics),
         e.g. to remove a temp directory."""
         self.cleanups.append(fn)
+
+    def net_ip(self, n=0):
+        """Return the nth IP in this job's isolated loopback subnet."""
+        return self.net_ips[n]
 
     def make_tmpdir(self, prefix="big100_"):
         """Create a temp dir that is shutil.rmtree'd at the end."""

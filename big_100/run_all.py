@@ -69,6 +69,10 @@ def main():
     ap.add_argument("--hang-timeout", type=float, default=120.0)
     ap.add_argument("--drain-timeout", type=float, default=120.0,
                     help="post-deadline drain cap passed to each program")
+    ap.add_argument("--ip-slot-base", type=int, default=0,
+                    help="first IP slot to assign; concurrent jobs get "
+                         "slot-base, slot-base+1, ... so each uses a unique "
+                         "127.(slot+1).0.0/24 subnet")
     args = ap.parse_args()
 
     projects = select(discover(), args)
@@ -81,13 +85,19 @@ def main():
     env["PYTHON_GIL"] = "0"
     env.setdefault("RUNLOOM_SYSMON_QUIET", "1")
 
-    def build_cmd(path):
+    # Track which IP slots are free.  We cycle through JOBS slots; when a job
+    # finishes its slot is returned to the pool for the next pending job.
+    free_slots = list(range(args.ip_slot_base,
+                            args.ip_slot_base + args.jobs))
+
+    def build_cmd(path, ip_slot):
         cmd = [args.python, path,
                "--duration", str(args.duration),
                "--seed", str(args.seed),
                "--hubs", str(args.hubs),
                "--hang-timeout", str(args.hang_timeout),
-               "--drain-timeout", str(args.drain_timeout)]
+               "--drain-timeout", str(args.drain_timeout),
+               "--ip-slot", str(ip_slot)]
         if args.funcs is not None:
             cmd += ["--funcs", str(args.funcs)]
         if args.handoff:
@@ -96,27 +106,29 @@ def main():
 
     sys.stderr.write(
         "big_100: {0} projects, {1} at a time, {2} hubs each, "
-        "{3:.0f}s duration\n".format(
-            len(projects), args.jobs, args.hubs, args.duration))
+        "{3:.0f}s duration, ip-slot-base={4}\n".format(
+            len(projects), args.jobs, args.hubs, args.duration,
+            args.ip_slot_base))
     sys.stderr.flush()
 
     pending = list(projects)
-    running = {}        # popen -> (num, path, logf, t0)
+    running = {}        # popen -> (num, path, logf, t0, ip_slot)
     results = {}        # num -> (verdict, exit_code, seconds)
     t_start = time.monotonic()
 
     def launch(num, path):
+        ip_slot = free_slots.pop(0)
         logpath = os.path.join(LOGDIR, "p{0:02d}.log".format(num))
         logf = open(logpath, "wb")
-        proc = subprocess.Popen(build_cmd(path), stdout=logf, stderr=logf,
-                                env=env, cwd=HERE)
-        running[proc] = (num, path, logf, time.monotonic())
+        proc = subprocess.Popen(build_cmd(path, ip_slot), stdout=logf,
+                                stderr=logf, env=env, cwd=HERE)
+        running[proc] = (num, path, logf, time.monotonic(), ip_slot)
         sys.stderr.write("  launch p{0:02d} {1}\n".format(
             num, os.path.basename(path)))
         sys.stderr.flush()
 
     while pending or running:
-        while pending and len(running) < args.jobs:
+        while pending and len(running) < args.jobs and free_slots:
             num, path = pending.pop(0)
             launch(num, path)
         time.sleep(0.5)
@@ -124,7 +136,8 @@ def main():
             rc = proc.poll()
             if rc is None:
                 continue
-            num, path, logf, t0 = running.pop(proc)
+            num, path, logf, t0, ip_slot = running.pop(proc)
+            free_slots.append(ip_slot)
             logf.close()
             secs = time.monotonic() - t0
             verdict = classify(os.path.join(LOGDIR, "p{0:02d}.log".format(num)),
