@@ -15,8 +15,10 @@ import runloom
 
 
 def setup(H):
+    # consumed: one slot per consumer goroutine (indexed by wid) to avoid the
+    # data race when 97 goroutines share a slot under GIL=0.
     H.state = {"cond": threading.Condition(), "work": [],
-               "produced": [0], "consumed": [0] * 1024, "done": [False]}
+               "produced": [0], "consumed": [0] * H.funcs, "done": [False]}
 
 
 def producer(H, wid, rng, state):
@@ -52,7 +54,7 @@ def consumer(H, wid, rng, state):
             elif state["done"][0]:
                 break
         H.op(wid)
-    state["consumed"][wid & 1023] += got
+    state["consumed"][wid] += got
 
 
 def body(H):

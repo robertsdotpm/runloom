@@ -14,9 +14,11 @@ import runloom
 
 
 def setup(H):
+    # produced/consumed: one slot per goroutine (indexed by wid) — no two
+    # goroutines share a slot, eliminating the data race under GIL=0.
     H.state = {"ch": runloom.Chan(2), "lock": threading.Lock(),
-               "prod_done": [0], "produced": [0] * 1024,
-               "consumed": [0] * 1024, "nproducers": [0]}
+               "prod_done": [0], "produced": [0] * H.funcs,
+               "consumed": [0] * H.funcs, "nproducers": [0]}
 
 
 def producer(H, wid, rng, state):
@@ -26,7 +28,7 @@ def producer(H, wid, rng, state):
         ch.send(1)              # blocks while the tiny buffer is full
         n += 1
         H.op(wid)
-    state["produced"][wid & 1023] += n
+    state["produced"][wid] += n
     with state["lock"]:
         state["prod_done"][0] += 1
 
@@ -40,7 +42,7 @@ def consumer(H, wid, rng, state):
             break
         n += 1
         runloom.sleep(0.001)        # slow consumer
-    state["consumed"][wid & 1023] += n
+    state["consumed"][wid] += n
 
 
 def body(H):

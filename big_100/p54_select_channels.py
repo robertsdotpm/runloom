@@ -17,8 +17,10 @@ NCHAN = 8
 
 
 def setup(H):
+    # sent_sum/recv_sum: one slot per goroutine (indexed by wid) — no sharing,
+    # no data race under GIL=0.
     H.state = {"chans": [runloom.Chan(16) for _ in range(NCHAN)],
-               "sent_sum": [0] * 1024, "recv_sum": [0] * 1024}
+               "sent_sum": [0] * H.funcs, "recv_sum": [0] * H.funcs}
 
 
 def producer(H, wid, rng, state):
@@ -34,7 +36,7 @@ def producer(H, wid, rng, state):
         s += v
         v += 1
         H.op(wid)
-    state["sent_sum"][wid & 1023] += s
+    state["sent_sum"][wid] += s
 
 
 def consumer(H, wid, rng, state):
@@ -52,7 +54,7 @@ def consumer(H, wid, rng, state):
         val, ok = payload
         if ok:
             s += val
-    state["recv_sum"][wid & 1023] += s
+    state["recv_sum"][wid] += s
 
 
 def body(H):
