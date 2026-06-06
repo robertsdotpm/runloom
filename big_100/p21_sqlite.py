@@ -23,7 +23,7 @@ import harness
 import runloom
 
 CYCLE = 64        # rows inserted before a worker deletes its set and restarts
-MAX_ACTIVE = 2000 # max concurrent active sqlite connections
+MAX_ACTIVE = 500  # keep concurrent offload calls low to avoid _Parker pool race
 
 
 def setup(H):

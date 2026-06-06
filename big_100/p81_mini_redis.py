@@ -107,10 +107,14 @@ def body(H):
 
 def post(H):
     # The store dict outlives the (now torn-down) server, so read it directly.
+    # val: server's actual INCR count (atomic under lock).
+    # total: client-confirmed INCRs (only tallied after receiving "INT" reply).
+    # val >= total always: server processed INCR before replying, so a dropped
+    # reply leaves val ahead of total.  val < total would mean double-counting.
     total = sum(H.state["incrs"])
     val = int(H.state["store"].get(SHARED, b"0"))
-    H.check(val == total,
-            "INCR not atomic: counter {0} != total INCRs {1}".format(
+    H.check(val >= total,
+            "INCR not atomic: counter {0} < total INCRs {1}".format(
                 val, total))
     H.log("shared_counter={0} total_incrs={1}".format(val, total))
 
