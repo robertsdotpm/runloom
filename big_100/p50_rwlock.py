@@ -20,11 +20,14 @@ class RWLock(object):
         self._readers = 0
         self._writer = False
 
-    def racquire(self):
+    def racquire(self, running=None):
         with self._c:
             while self._writer:
-                self._c.wait()
+                if running is not None and not running():
+                    return False
+                self._c.wait(timeout=0.05)
             self._readers += 1
+            return True
 
     def rrelease(self):
         with self._c:
@@ -32,11 +35,14 @@ class RWLock(object):
             if self._readers == 0:
                 self._c.notify_all()
 
-    def wacquire(self):
+    def wacquire(self, running=None):
         with self._c:
             while self._writer or self._readers > 0:
-                self._c.wait()
+                if running is not None and not running():
+                    return False
+                self._c.wait(timeout=0.05)
             self._writer = True
+            return True
 
     def wrelease(self):
         with self._c:
@@ -45,8 +51,10 @@ class RWLock(object):
 
 
 # Same drain problem as p43: 100k goroutines competing for a single Condition
-# → drain time = O(N / throughput) >> 120s.  Cap concurrent contenders and use
+# => drain time = O(N / throughput) >> 120s.  Cap concurrent contenders and use
 # a cancel-watcher to wake parked goroutines immediately when the run ends.
+# wacquire/racquire take a running= arg and use wait(timeout=0.05) so goroutines
+# parked inside the condition can escape without explicit cancel_all on Condition.
 MAX_ACTIVE = 2000
 
 
@@ -67,14 +75,16 @@ def reader(H, wid, rng, state):
         if not sem.acquire():
             break
         try:
-            rw.racquire()
-            try:
-                v = data["v"]
-                s = data["sum"]
-            finally:
-                rw.rrelease()
+            acquired = rw.racquire(running=H.running)
         finally:
             sem.release()
+        if not acquired:
+            break
+        try:
+            v = data["v"]
+            s = data["sum"]
+        finally:
+            rw.rrelease()
         if not H.check(s == checksum(v),
                        "torn read: v={0} sum={1} != {2} wid={3}".format(
                            v, s, checksum(v), wid)):
@@ -90,16 +100,18 @@ def writer(H, wid, rng, state):
         if not sem.acquire():
             break
         try:
-            rw.wacquire()
-            try:
-                nv = rng.randint(0, 1 << 30)
-                data["v"] = nv
-                runloom.yield_now()         # widen the window an unguarded reader could hit
-                data["sum"] = checksum(nv)
-            finally:
-                rw.wrelease()
+            acquired = rw.wacquire(running=H.running)
         finally:
             sem.release()
+        if not acquired:
+            break
+        try:
+            nv = rng.randint(0, 1 << 30)
+            data["v"] = nv
+            runloom.yield_now()         # widen the window an unguarded reader could hit
+            data["sum"] = checksum(nv)
+        finally:
+            rw.wrelease()
         H.op(wid)
         H.task_done(wid)
 

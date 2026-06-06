@@ -52,10 +52,11 @@ def worker(H, wid, rng, state):
             break
         try:
             things = []
+            refs = []
             k = rng.randint(4, 20)
             for i in range(k):
                 t = Thing(i)
-                weakref.ref(t, callback)
+                refs.append(weakref.ref(t, callback))
                 things.append(t)
             with lock:
                 state["created"][0] += k
