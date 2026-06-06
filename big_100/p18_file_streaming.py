@@ -10,9 +10,15 @@ Stresses: file reads at offset, channels + backpressure, scheduler fairness,
 the reader/verifier split across hubs.
 """
 import os
+import threading
 
 import harness
 import runloom
+
+# Limit concurrent file opens: 100k goroutines each opening a 2MiB file
+# overwhelms the page cache and can SIGSEGV under free-threaded 3.13t's parker
+# pool.  Cap at MAX_READERS concurrent opens; the rest park on the semaphore.
+MAX_READERS = 1024
 
 NFILES = 8
 FILESIZE = 2 << 20      # 2 MiB each
@@ -34,16 +40,20 @@ def setup(H):
         with open(p, "wb") as f:
             f.write(tile)
         paths.append(p)
-    H.state = {"paths": paths, "queue": runloom.Chan(4096)}
+    sem = threading.Semaphore(MAX_READERS)
+    H.state = {"paths": paths, "queue": runloom.Chan(4096), "sem": sem}
 
 
 def reader(H, wid, rng, state):
     paths = state["paths"]
     queue = state["queue"]
+    sem = state["sem"]
     H.sleep(rng.random() * 0.5)
     while H.running():
         path = rng.choice(paths)
         offset = rng.randrange(0, FILESIZE - CHUNK)
+        if not sem.acquire():
+            break
         try:
             with open(path, "rb") as f:
                 f.seek(offset)
@@ -52,6 +62,8 @@ def reader(H, wid, rng, state):
             if not H.running():
                 break
             continue
+        finally:
+            sem.release()
         queue.send((offset, chunk))
         H.op(wid)
 

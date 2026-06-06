@@ -45,13 +45,15 @@ def reader(H, wid, rng, state):
     try:
         while H.running():
             f.seek(offset)
-            data = f.read()
+            data = f.read(65536)
             offset = f.tell()
             if not data:
                 H.sleep(0.01)
                 continue
             buf += data
             while b"\n" in buf:
+                if not H.running():
+                    break
                 line, buf = buf.split(b"\n", 1)
                 if not line:
                     continue

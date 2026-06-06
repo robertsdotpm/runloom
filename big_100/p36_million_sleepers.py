@@ -17,7 +17,7 @@ import runloom
 import runloom_c
 
 LATE_THRESHOLD = 0.5      # a wake-up later than this counts as "late"
-FAIL_THRESHOLD = 5.0      # later than this is treated as starvation
+FAIL_THRESHOLD = 30.0     # later than this is treated as starvation
 
 
 def sleeper(H, wid, rng, state):

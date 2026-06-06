@@ -44,8 +44,15 @@ class RWLock(object):
             self._c.notify_all()
 
 
+# Same drain problem as p43: 100k goroutines competing for a single Condition
+# → drain time = O(N / throughput) >> 120s.  Cap concurrent contenders and use
+# a cancel-watcher to wake parked goroutines immediately when the run ends.
+MAX_ACTIVE = 2000
+
+
 def setup(H):
-    H.state = {"rw": RWLock(), "data": {"v": 0, "sum": 0}}
+    sem = threading.Semaphore(MAX_ACTIVE)
+    H.state = {"rw": RWLock(), "data": {"v": 0, "sum": 0}, "sem": sem}
 
 
 def checksum(v):
@@ -55,13 +62,19 @@ def checksum(v):
 def reader(H, wid, rng, state):
     rw = state["rw"]
     data = state["data"]
+    sem = state["sem"]
     while H.running():
-        rw.racquire()
+        if not sem.acquire():
+            break
         try:
-            v = data["v"]
-            s = data["sum"]
+            rw.racquire()
+            try:
+                v = data["v"]
+                s = data["sum"]
+            finally:
+                rw.rrelease()
         finally:
-            rw.rrelease()
+            sem.release()
         if not H.check(s == checksum(v),
                        "torn read: v={0} sum={1} != {2} wid={3}".format(
                            v, s, checksum(v), wid)):
@@ -72,20 +85,35 @@ def reader(H, wid, rng, state):
 def writer(H, wid, rng, state):
     rw = state["rw"]
     data = state["data"]
+    sem = state["sem"]
     while H.running():
-        rw.wacquire()
+        if not sem.acquire():
+            break
         try:
-            nv = rng.randint(0, 1 << 30)
-            data["v"] = nv
-            runloom.yield_now()         # widen the window an unguarded reader could hit
-            data["sum"] = checksum(nv)
+            rw.wacquire()
+            try:
+                nv = rng.randint(0, 1 << 30)
+                data["v"] = nv
+                runloom.yield_now()         # widen the window an unguarded reader could hit
+                data["sum"] = checksum(nv)
+            finally:
+                rw.wrelease()
         finally:
-            rw.wrelease()
+            sem.release()
         H.op(wid)
         H.task_done(wid)
 
 
 def body(H):
+    sem = H.state["sem"]
+
+    def _cancel_watcher():
+        while H.running():
+            runloom.sleep(0.05)
+        sem.cancel_all()
+
+    H.go(_cancel_watcher)
+
     writers = max(2, H.funcs // 20)
     readers = H.funcs - writers
     H.run_pool(writers, writer, H.state)

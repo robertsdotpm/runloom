@@ -15,21 +15,28 @@ import harness
 import netutil
 
 
+# Dedicated loopback: p12 runs concurrently with JOBS=2 and its 100k sockets
+# exhaust 127.0.0.1's ~28k ephemeral ports, causing bind(port=0) in setup to
+# fail with EADDRINUSE.  127.0.0.13 has its own fresh ephemeral pool on Linux.
+_HOST = "127.0.0.13"
+
+
 def setup(H):
-    port = netutil.start_echo_server(H)
-    H.state = {"port": port}
+    port = netutil.start_echo_server(H, host=_HOST)
+    H.state = {"port": port, "host": _HOST}
     H.refused = [0]
     H.fd_ceiling = 0
 
 
 def client(H, wid, rng, state):
     port = state["port"]
+    host = state["host"]
     H.sleep(rng.random() * 0.3)
     while H.running():
         sock = None
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.connect(("127.0.0.1", port))
+            sock.connect((host, port))
             # Touch the connection so it actually establishes, then drop it.
             sock.sendall(b"x")
             sock.recv(16)

@@ -29,9 +29,14 @@ def server_handler(conn):
         netutil.close_quiet(conn)
 
 
+# Dedicated loopback: p13 runs concurrently with JOBS=2 and 100k sockets from
+# the neighbour program can exhaust 127.0.0.1's ephemeral pool at setup time.
+_HOST = "127.0.0.14"
+
+
 def setup(H):
-    srv = netutil.listen_tcp()
-    H.state = {"port": srv.getsockname()[1]}
+    srv = netutil.listen_tcp(host=_HOST)
+    H.state = {"port": srv.getsockname()[1], "host": _HOST}
 
     H.go(netutil.serve_forever, H, srv,
          lambda conn, addr: H.go(server_handler, conn))
@@ -72,6 +77,7 @@ def chaos(H, sock, rng):
 
 def client(H, wid, rng, state):
     port = state["port"]
+    host = state["host"]
     # ~40% of clients are always well-behaved -> their requests must succeed.
     good = (wid % 5) < 2
     H.sleep(rng.random() * 0.5)
@@ -79,7 +85,7 @@ def client(H, wid, rng, state):
         sock = None
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.connect(("127.0.0.1", port))
+            sock.connect((host, port))
             if good:
                 well_behaved(H, sock, rng, wid)
             else:

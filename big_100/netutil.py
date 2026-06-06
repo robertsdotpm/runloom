@@ -6,6 +6,12 @@ goroutines on the M:N scheduler.
 """
 import socket
 
+# Save the real (pre-monkey-patch) recvfrom.  udp_recvfrom_timeout calls
+# wait_fd with a timeout first, then calls recvfrom; the monkey-patched version
+# loops on wait_fd forever on EAGAIN (a spurious wake), so we must call the
+# original directly here so a spurious readiness signal doesn't wedge the goroutine.
+_real_socket_recvfrom = socket.socket.recvfrom
+
 
 def recv_exact(sock, n):
     """Read exactly n bytes; raise OSError on premature EOF."""
@@ -151,7 +157,10 @@ def udp_recvfrom_timeout(sock, n, timeout_ms):
     if not (ready & 1):
         return (None, None)
     try:
-        return sock.recvfrom(n)
+        # Use the real (pre-monkey-patch) recvfrom: the patched version loops
+        # on wait_fd with no timeout, so a spurious readiness signal would
+        # wedge the goroutine indefinitely.
+        return _real_socket_recvfrom(sock, n)
     except (BlockingIOError, InterruptedError):
         return (None, None)
 

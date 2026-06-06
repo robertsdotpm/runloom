@@ -45,6 +45,8 @@ def worker(H, wid, rng, state):
                     H.fail("bad CSV header in {0}".format(p))
                     return
                 for line in f:
+                    if not H.running():
+                        break
                     line = line.rstrip("\n")
                     if not line:
                         continue

@@ -12,6 +12,7 @@ recorded, replayable operation history.
 """
 import collections
 import sys
+import threading
 
 import harness
 import runloom
@@ -20,43 +21,55 @@ NACCOUNTS = 512
 START = 1000
 TOTAL = NACCOUNTS * START
 
+# 30% of transfers call yield_now() inside the lock, so lock hold time scales
+# with ready-ring depth (~N/hubs ticks).  At 100k goroutines: ~12.5ms hold,
+# throughput ~80/s, drain ~1250s.  Cap concurrent workers + cancel watcher.
+MAX_WORKERS = 2000
+
 
 def setup(H):
+    sem = threading.Semaphore(MAX_WORKERS)
     H.state = {"acct": [START] * NACCOUNTS, "lock": runloom.sync.Lock(),
-               "broke": [False]}
+               "broke": [False], "sem": sem}
 
 
 def worker(H, wid, rng, state):
     acct = state["acct"]
     lock = state["lock"]
+    sem = state["sem"]
     oplog = collections.deque(maxlen=32)
     while H.running():
-        a = rng.randrange(NACCOUNTS)
-        b = rng.randrange(NACCOUNTS)
-        amt = rng.randint(1, 50)
-        op = rng.randrange(3)               # 0 transfer, 1 swap, 2 noop-check
-        oplog.append((op, a, b, amt))
-        if op == 0 and a != b:
-            with lock:
-                if acct[a] >= amt:
-                    acct[a] -= amt
-                    if rng.random() < 0.3:
-                        runloom.yield_now()  # widen the race window
-                    acct[b] += amt
-        elif op == 1 and a != b:
-            with lock:
-                acct[a], acct[b] = acct[b], acct[a]
-        else:
-            with lock:
-                total = sum(acct)
-            if total != TOTAL and not state["broke"][0]:
-                state["broke"][0] = True
-                dump_replay(H, wid, oplog, total)
-                H.fail("invariant broken: total={0} != {1}".format(
-                    total, TOTAL))
-                return
-        H.op(wid)
-        H.task_done(wid)
+        if not sem.acquire():
+            break
+        try:
+            a = rng.randrange(NACCOUNTS)
+            b = rng.randrange(NACCOUNTS)
+            amt = rng.randint(1, 50)
+            op = rng.randrange(3)               # 0 transfer, 1 swap, 2 noop-check
+            oplog.append((op, a, b, amt))
+            if op == 0 and a != b:
+                with lock:
+                    if acct[a] >= amt:
+                        acct[a] -= amt
+                        if rng.random() < 0.3:
+                            runloom.yield_now()  # widen the race window
+                        acct[b] += amt
+            elif op == 1 and a != b:
+                with lock:
+                    acct[a], acct[b] = acct[b], acct[a]
+            else:
+                with lock:
+                    total = sum(acct)
+                if total != TOTAL and not state["broke"][0]:
+                    state["broke"][0] = True
+                    dump_replay(H, wid, oplog, total)
+                    H.fail("invariant broken: total={0} != {1}".format(
+                        total, TOTAL))
+                    return
+            H.op(wid)
+            H.task_done(wid)
+        finally:
+            sem.release()
 
 
 def dump_replay(H, wid, oplog, total):
@@ -73,6 +86,14 @@ def dump_replay(H, wid, oplog, total):
 
 
 def body(H):
+    sem = H.state["sem"]
+
+    def _cancel_watcher():
+        while H.running():
+            runloom.sleep(0.05)
+        sem.cancel_all()
+
+    H.go(_cancel_watcher)
     H.run_pool(H.funcs, worker, H.state)
 
     def auditor():

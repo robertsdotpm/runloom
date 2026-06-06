@@ -55,16 +55,24 @@ def proxy_conn(H, client_sock):
         netutil.close_quiet(backend)
 
 
+# Use a dedicated loopback address so the concurrent soak program can't
+# exhaust 127.0.0.1's ephemeral port pool and cause EADDRINUSE on our
+# bind(host, 0) calls.
+_HOST = "127.0.0.15"
+
+
 def setup(H):
-    backend_port = netutil.start_echo_server(H)
-    pxy = netutil.listen_tcp()
-    H.state = {"proxy_port": pxy.getsockname()[1], "backend_port": backend_port}
+    backend_port = netutil.start_echo_server(H, host=_HOST)
+    pxy = netutil.listen_tcp(host=_HOST)
+    H.state = {"host": _HOST, "proxy_port": pxy.getsockname()[1],
+               "backend_port": backend_port}
 
     H.go(netutil.serve_forever, H, pxy,
          lambda conn, addr: H.go(proxy_conn, H, conn))
 
 
 def client(H, wid, rng, state):
+    host = state["host"]
     pport = state["proxy_port"]
     bport = state["backend_port"]
     H.sleep(rng.random() * 0.5)
@@ -72,9 +80,10 @@ def client(H, wid, rng, state):
         sock = None
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.connect(("127.0.0.1", pport))
+            sock.bind((host, 0))
+            sock.connect((host, pport))
             sock.sendall(
-                "CONNECT 127.0.0.1:{0} HTTP/1.1\r\n\r\n".format(bport)
+                "CONNECT {0}:{1} HTTP/1.1\r\n\r\n".format(host, bport)
                 .encode("latin-1"))
             resp = netutil.recv_until(sock, b"\r\n\r\n")
             if not H.check(b" 200 " in resp,
