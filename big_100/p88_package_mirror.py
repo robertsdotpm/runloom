@@ -68,7 +68,7 @@ def setup(H):
          lambda conn, addr: H.go(handle, conn))
 
 
-def fetch(H, port, path):
+def fetch(H, host, port, path):
     """GET path with retries; returns (status, body) or None after giving up."""
     for _attempt in range(8):
         if not H.running():
@@ -92,13 +92,13 @@ def client(H, wid, rng, state):
     H.sleep(rng.random() * 0.5)
     while H.running():
         idx = rng.randrange(NPKGS)
-        meta = fetch(H, port, "/meta/{0}".format(idx))
+        meta = fetch(H, host, port, "/meta/{0}".format(idx))
         if meta is None:
             continue
         if not H.check(meta[0] == 200 and str(idx).encode() in meta[1],
                        "bad metadata wid={0} idx={1}".format(wid, idx)):
             return
-        tb = fetch(H, port, "/tarball/{0}".format(idx))
+        tb = fetch(H, host, port, "/tarball/{0}".format(idx))
         if tb is None:
             continue
         if not H.check(

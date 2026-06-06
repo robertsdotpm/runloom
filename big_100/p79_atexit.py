@@ -10,9 +10,11 @@ Stresses: interpreter shutdown order, atexit under the M:N runtime.
 """
 import os
 import subprocess
+import threading
 
 import harness
 import procutil
+import runloom
 
 CHILD = r'''
 import sys
@@ -35,6 +37,9 @@ sys.stdout.write("MAIN-EXIT\n"); sys.stdout.flush()
 '''
 
 
+MAX_WORKERS = 32   # subprocess concurrency cap; avoids FD explosion + offload-pool crash
+
+
 def setup(H):
     import sys
     src = os.path.join(os.path.dirname(os.path.dirname(
@@ -42,20 +47,27 @@ def setup(H):
     script = os.path.join(H.make_tmpdir("big100_atexit_"), "child.py")
     with open(script, "w") as f:
         f.write(CHILD.format(src=src))
-    H.state = {"py": sys.executable, "script": script}
+    sem = threading.Semaphore(MAX_WORKERS)
+    H.state = {"py": sys.executable, "script": script, "sem": sem}
 
 
 def worker(H, wid, rng, state):
+    sem = state["sem"]
     while H.running():
-        try:
-            env = dict(os.environ)
-            env["PYTHON_GIL"] = "0"
-            proc = procutil.popen([state["py"], state["script"]],
-                                  stdout=subprocess.PIPE, env=env,
-                                  running=H.running)
-        except OSError:
+        if not sem.acquire():
             break
-        out, _ = proc.communicate()
+        try:
+            try:
+                env = dict(os.environ)
+                env["PYTHON_GIL"] = "0"
+                proc = procutil.popen([state["py"], state["script"]],
+                                      stdout=subprocess.PIPE, env=env,
+                                      running=H.running)
+            except OSError:
+                break
+            out, _ = proc.communicate()
+        finally:
+            sem.release()
         if not H.check(proc.returncode == 0,
                        "child exited {0} wid={1}".format(
                            proc.returncode, wid)):
@@ -69,6 +81,14 @@ def worker(H, wid, rng, state):
 
 
 def body(H):
+    sem = H.state["sem"]
+
+    def _cancel_watcher():
+        while H.running():
+            runloom.sleep(0.05)
+        sem.cancel_all()
+
+    H.go(_cancel_watcher)
     H.run_pool(H.funcs, worker, H.state)
 
 

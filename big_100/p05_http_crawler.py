@@ -62,7 +62,7 @@ def setup(H):
          lambda conn, addr: H.go(handler, conn))
 
 
-def fetch(H, port, page, keep_alive=False):
+def fetch(H, host, port, page, keep_alive=False):
     sock = None
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -86,7 +86,7 @@ def crawler(H, wid, rng, state):
                 if not H.running() or not frontier:
                     break
                 page = frontier.pop()
-                status, body = fetch(H, port, page)
+                status, body = fetch(H, host, port, page)
                 if not H.check(status == 200,
                                "status {0} for page {1}".format(status, page)):
                     return
