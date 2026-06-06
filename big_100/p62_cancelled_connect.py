@@ -36,7 +36,7 @@ def connect_timeout(addr, timeout_ms):
 def setup(H):
     # Backlog 1, never accept -> the queue fills and later connects hang.
     srv = netutil.listen_tcp(backlog=1)
-    H.state = {"addr": ("127.0.0.1", srv.getsockname()[1]), "srv": srv,
+    H.state = {"addr": (srv.getsockname()[0], srv.getsockname()[1]), "srv": srv,
                "cancelled": [0] * 1024, "connected": [0] * 1024}
     H.add_cleanup(lambda: netutil.close_quiet(srv))
     H.fd_ceiling = 0

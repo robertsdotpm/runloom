@@ -36,7 +36,7 @@ def render(n, seed):
 
 def setup(H):
     srv = netutil.listen_tcp()
-    H.state = {"port": srv.getsockname()[1], "seed": H.seed}
+    H.state = {"port": srv.getsockname()[1], "host": srv.getsockname()[0], "seed": H.seed}
 
     def handler(conn):
         try:
@@ -66,7 +66,7 @@ def fetch(H, port, page, keep_alive=False):
     sock = None
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.connect(("127.0.0.1", port))
+        sock.connect((host, port))
         status, body = httputil.get(sock, "/page/{0}".format(page),
                                     keep_alive=keep_alive)
         return status, body
@@ -76,6 +76,8 @@ def fetch(H, port, page, keep_alive=False):
 
 def crawler(H, wid, rng, state):
     port = state["port"]
+
+    host = state["host"]
     H.sleep(rng.random() * 0.5)
     while H.running():
         try:

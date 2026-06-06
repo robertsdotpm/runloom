@@ -81,9 +81,6 @@ def body(H):
             runloom.sleep(0.05)
         sem.cancel_all()
 
-    H.go(_cancel_watcher)
-    H.run_pool(H.funcs, worker, H.state)
-
     def gc_driver():
         while H.running():
             H.sleep(0.2)
@@ -91,7 +88,9 @@ def body(H):
         H.log("created={0} finalized={1}".format(
             H.state["created"][0], H.state["finalized"][0]))
 
+    H.go(_cancel_watcher)
     H.go(gc_driver)
+    H.run_pool(H.funcs, worker, H.state)
 
 
 def post(H):

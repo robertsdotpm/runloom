@@ -38,7 +38,7 @@ def setup(H):
     cctx.verify_mode = ssl.CERT_NONE
 
     srv = netutil.listen_tcp()
-    H.state = {"port": srv.getsockname()[1], "cctx": cctx}
+    H.state = {"port": srv.getsockname()[1], "host": srv.getsockname()[0], "cctx": cctx}
     H.register_close(srv)
 
     def handler(raw):
@@ -71,13 +71,15 @@ def setup(H):
 
 def client(H, wid, rng, state):
     port = state["port"]
+
+    host = state["host"]
     cctx = state["cctx"]
     H.sleep(rng.random() * 0.8)
     while H.running():
         tls = None
         try:
             raw = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            raw.connect(("127.0.0.1", port))
+            raw.connect((host, port))
             tls = cctx.wrap_socket(raw, server_hostname="localhost")
             for _ in range(rng.randint(1, 4)):
                 if not H.running():

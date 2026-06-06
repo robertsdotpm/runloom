@@ -16,7 +16,7 @@ import netutil
 
 def setup(H):
     srv = netutil.listen_tcp(backlog=8192)
-    H.state = {"port": srv.getsockname()[1]}
+    H.state = {"port": srv.getsockname()[1], "host": srv.getsockname()[0]}
     H.counters = {"accepted": 0, "closed": 0, "live": 0, "max_live": 0}
     H.clock = threading.Lock()
 
@@ -52,12 +52,14 @@ def setup(H):
 
 def client(H, wid, rng, state):
     port = state["port"]
+
+    host = state["host"]
     H.sleep(rng.random() * 0.3)
     while H.running():
         sock = None
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.connect(("127.0.0.1", port))
+            sock.connect((host, port))
             if rng.random() < 0.5:
                 sock.sendall(b"hi")
             H.op(wid)

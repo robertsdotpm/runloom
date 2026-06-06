@@ -23,7 +23,7 @@ def op_socket(H, rng, state, wid=0):
     sock = None
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.connect(("127.0.0.1", state["echo_port"]))
+        sock.connect((state["echo_host"], state["echo_port"]))
         payload = rng.randbytes(rng.randint(1, 256))
         sock.sendall(payload)
         got = netutil.recv_exact(sock, len(payload))
@@ -91,6 +91,7 @@ def op_sleep(H, rng, state, wid=0):
 
 def setup(H):
     H.state = {"echo_port": netutil.start_echo_server(H),
+               "echo_host": netutil._DEFAULT_HOST,
                "base": H.make_tmpdir("big100_blkfuzz_")}
     H.fd_ceiling = 0
 

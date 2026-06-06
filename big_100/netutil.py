@@ -7,10 +7,6 @@ goroutines on the M:N scheduler.
 import os
 import socket
 
-# When running under the soak harness, SOAK_HOST_IP is set to the job's
-# isolated loopback address (127.{slot+1}.0.1).  Standalone runs fall back
-# to plain 127.0.0.1.  This default is read once at import time so programs
-# that don't pass an explicit host= automatically get port isolation.
 _DEFAULT_HOST = os.environ.get("SOAK_HOST_IP", "127.0.0.1")
 
 # Save the real (pre-monkey-patch) recvfrom.  udp_recvfrom_timeout calls
@@ -97,7 +93,9 @@ def serve_forever(H, srv, on_conn):
         close_quiet(srv)
 
 
-def udp_socket(host="127.0.0.1", port=0, family=socket.AF_INET):
+def udp_socket(host=None, port=0, family=socket.AF_INET):
+    if host is None:
+        host = _DEFAULT_HOST
     s = socket.socket(family, socket.SOCK_DGRAM)
     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     s.bind((host, port))

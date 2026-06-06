@@ -51,6 +51,7 @@ class Room(object):
 def setup(H):
     srv = netutil.listen_tcp()
     H.state = {"port": srv.getsockname()[1],
+               "host": srv.getsockname()[0],
                "rooms": [Room() for _ in range(NROOMS)]}
 
     def serve(sock):
@@ -111,13 +112,14 @@ def setup(H):
 def client(H, wid, rng, state):
     import socket
     port = state["port"]
+    host = state["host"]
     room = "room{0}".format(wid % NROOMS)
     H.sleep(rng.random() * 1.0)
     while H.running():
         sock = None
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.connect(("127.0.0.1", port))
+            sock.connect((host, port))
             wsutil.client_handshake(sock)
             wsutil.send_text(sock, room, mask=True)
             # Single goroutine: send a message, then briefly drain any

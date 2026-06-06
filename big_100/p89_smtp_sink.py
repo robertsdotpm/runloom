@@ -19,8 +19,8 @@ import netutil
 
 def setup(H):
     srv = netutil.listen_tcp()
-    H.state = {"port": srv.getsockname()[1], "lock": threading.Lock(),
-               "accepted": [0], "corrupt": [0]}
+    H.state = {"port": srv.getsockname()[1], "host": srv.getsockname()[0],
+               "lock": threading.Lock(), "accepted": [0], "corrupt": [0]}
 
     def handle(conn):
         buf = bytearray()
@@ -86,13 +86,14 @@ def expect(sock, code, buf):
 
 def client(H, wid, rng, state):
     port = state["port"]
+    host = state["host"]
     H.sleep(rng.random() * 0.5)
     while H.running():
         sock = None
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(2.0)
-            sock.connect(("127.0.0.1", port))
+            sock.connect((host, port))
             buf = bytearray()
             if not expect(sock, b"220", buf):
                 return

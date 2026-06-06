@@ -25,7 +25,7 @@ CALC = "import sys; n=int(sys.argv[1]); print(n*n)"
 def setup(H):
     import sys
     srv = netutil.listen_tcp()
-    H.state = {"port": srv.getsockname()[1], "py": sys.executable}
+    H.state = {"port": srv.getsockname()[1], "host": srv.getsockname()[0], "py": sys.executable}
     py = sys.executable
 
     def handler(conn):
@@ -53,12 +53,14 @@ def setup(H):
 
 def client(H, wid, rng, state):
     port = state["port"]
+
+    host = state["host"]
     H.sleep(rng.random() * 0.5)
     while H.running():
         sock = None
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.connect(("127.0.0.1", port))
+            sock.connect((host, port))
             for _ in range(rng.randint(1, 4)):
                 if not H.running():
                     break

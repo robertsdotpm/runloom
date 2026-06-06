@@ -31,7 +31,7 @@ def server_handler(conn):
 
 def setup(H):
     srv = netutil.listen_tcp()
-    H.state = {"port": srv.getsockname()[1]}
+    H.state = {"port": srv.getsockname()[1], "host": srv.getsockname()[0]}
 
     H.go(netutil.serve_forever, H, srv,
          lambda conn, addr: H.go(server_handler, conn))
@@ -39,12 +39,14 @@ def setup(H):
 
 def fast_client(H, wid, rng, state):
     port = state["port"]
+
+    host = state["host"]
     H.sleep(rng.random() * 0.5)
     while H.running():
         sock = None
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.connect(("127.0.0.1", port))
+            sock.connect((host, port))
             for _ in range(rng.randint(1, 20)):
                 if not H.running():
                     break
@@ -70,12 +72,14 @@ def fast_client(H, wid, rng, state):
 
 def slow_client(H, wid, rng, state):
     port = state["port"]
+
+    host = state["host"]
     H.sleep(rng.random() * 1.0)
     while H.running():
         sock = None
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.connect(("127.0.0.1", port))
+            sock.connect((host, port))
             # Dribble a never-completed request: one byte every few seconds.
             for _ in range(rng.randint(20, 60)):
                 if not H.running():

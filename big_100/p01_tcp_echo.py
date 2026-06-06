@@ -30,13 +30,15 @@ def echo_handler(H, conn):
 
 def setup(H):
     srv = netutil.listen_tcp()
-    H.state = {"port": srv.getsockname()[1]}
+    H.state = {"port": srv.getsockname()[1], "host": srv.getsockname()[0]}
     H.go(netutil.serve_forever, H, srv,
          lambda conn, addr: H.go(echo_handler, H, conn))
 
 
 def client(H, wid, rng, state):
     port = state["port"]
+
+    host = state["host"]
     # Spread the initial connect storm deterministically so 10k clients don't
     # all SYN in the same instant (still a storm, just not a thundering one).
     H.sleep(rng.random() * 0.5)
@@ -45,7 +47,7 @@ def client(H, wid, rng, state):
         did = 0
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.connect(("127.0.0.1", port))
+            sock.connect((host, port))
             rounds = rng.randint(1, 8)
             for _ in range(rounds):
                 if not H.running():

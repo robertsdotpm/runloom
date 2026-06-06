@@ -31,10 +31,7 @@ def setup(H):
     for k in range(NFILES):
         size = 4096 + k * 4096
         data = content(k, size)
-        path = os.path.join(base, "f{0}.bin".format(k))
-        with open(path, "wb") as f:
-            f.write(data)
-        files[k] = (path, size)
+        files[k] = (size, data)     # keep in memory; avoids offload-pool SIGSEGV
     host = H.net_ips[0]
     srv = netutil.listen_tcp(host=host)
     sem = threading.Semaphore(MAX_CLIENTS)
@@ -46,7 +43,7 @@ def setup(H):
                 method, path, headers, keep_alive = httputil.read_request(conn)
                 try:
                     idx = int(path.lstrip("/").split(".")[0].lstrip("f"))
-                    fpath, size = files[idx]
+                    size, full = files[idx]
                 except (ValueError, KeyError):
                     httputil.send_response(conn, "no", status="404 Not Found",
                                            keep_alive=keep_alive)
@@ -54,25 +51,22 @@ def setup(H):
                         break
                     continue
                 rng = headers.get("range")
-                with open(fpath, "rb") as fh:
-                    if rng and rng.startswith("bytes="):
-                        a, _, b = rng[6:].partition("-")
-                        start = int(a)
-                        end = int(b) if b else size - 1
-                        fh.seek(start)
-                        body = fh.read(end - start + 1)
-                        hdr = ("HTTP/1.1 206 Partial Content\r\n"
-                               "Content-Range: bytes {0}-{1}/{2}\r\n"
-                               "Content-Length: {3}\r\n"
-                               "Connection: {4}\r\n\r\n").format(
-                                   start, end, size, len(body),
-                                   "keep-alive" if keep_alive else "close")
-                        conn.sendall(hdr.encode("latin-1") + body)
-                    else:
-                        body = fh.read()
-                        httputil.send_response(conn, body,
-                                               content_type="application/octet-stream",
-                                               keep_alive=keep_alive)
+                if rng and rng.startswith("bytes="):
+                    a, _, b = rng[6:].partition("-")
+                    start = int(a)
+                    end = int(b) if b else size - 1
+                    body = full[start:end + 1]
+                    hdr = ("HTTP/1.1 206 Partial Content\r\n"
+                           "Content-Range: bytes {0}-{1}/{2}\r\n"
+                           "Content-Length: {3}\r\n"
+                           "Connection: {4}\r\n\r\n").format(
+                               start, end, size, len(body),
+                               "keep-alive" if keep_alive else "close")
+                    conn.sendall(hdr.encode("latin-1") + body)
+                else:
+                    httputil.send_response(conn, full,
+                                           content_type="application/octet-stream",
+                                           keep_alive=keep_alive)
                 if not keep_alive:
                     break
         except (OSError, ValueError):
@@ -116,8 +110,7 @@ def client(H, wid, rng, state):
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.connect((host, port))
             idx = rng.randrange(NFILES)
-            _path, size = files[idx]
-            full = content(idx, size)
+            size, full = files[idx]
             ranged = rng.random() < 0.5
             req = "GET /f{0}.bin HTTP/1.1\r\nHost: x\r\nConnection: close\r\n"
             if ranged:

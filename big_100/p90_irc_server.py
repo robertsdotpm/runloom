@@ -21,7 +21,8 @@ def setup(H):
     srv = netutil.listen_tcp()
     chans = [set() for _ in range(NCHAN)]
     lock = threading.Lock()
-    H.state = {"port": srv.getsockname()[1], "missed_pong": [0]}
+    H.state = {"port": srv.getsockname()[1], "host": srv.getsockname()[0],
+               "missed_pong": [0]}
 
     def serve(conn):
         outbound = runloom.Chan(128)
@@ -99,6 +100,7 @@ def setup(H):
 
 def bot(H, wid, rng, state):
     port = state["port"]
+    host = state["host"]
     chan = "#{0}".format(wid % NCHAN).encode()
     nick = "bot{0}".format(wid).encode()
     H.sleep(rng.random() * 1.0)
@@ -107,7 +109,7 @@ def bot(H, wid, rng, state):
         buf = bytearray()
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.connect(("127.0.0.1", port))
+            sock.connect((host, port))
             sock.sendall(b"NICK " + nick + b"\r\n")
             sock.sendall(b"JOIN " + chan + b"\r\n")
             for _ in range(rng.randint(4, 25)):

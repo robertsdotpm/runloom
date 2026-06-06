@@ -22,6 +22,7 @@ def setup(H):
     srv = netutil.listen_tcp()
     state = {
         "port": srv.getsockname()[1],
+        "host": srv.getsockname()[0],
         "lock": threading.Lock(),
         "ready": [],            # list of job ids ready to claim
         "leased": {},           # id -> lease-deadline
@@ -94,12 +95,13 @@ def rpc(sock, line):
 
 def worker(H, wid, rng, state):
     port = state["port"]
+    host = state["host"]
     H.sleep(rng.random() * 0.5)
     while H.running():
         sock = None
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.connect(("127.0.0.1", port))
+            sock.connect((host, port))
             for _ in range(rng.randint(2, 8)):
                 if not H.running():
                     break

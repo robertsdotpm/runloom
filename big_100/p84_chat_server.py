@@ -24,7 +24,7 @@ def setup(H):
     rooms = [set() for _ in range(NROOMS)]    # each: set of outbound Chan
     nicks = {}                                # nick -> outbound Chan
     lock = threading.Lock()
-    H.state = {"port": srv.getsockname()[1]}
+    H.state = {"port": srv.getsockname()[1], "host": srv.getsockname()[0]}
 
     def serve(conn):
         outbound = runloom.Chan(128)
@@ -105,6 +105,8 @@ def setup(H):
 
 def client(H, wid, rng, state):
     port = state["port"]
+
+    host = state["host"]
     room = wid % NROOMS
     nick = "u{0}".format(wid).encode()
     H.sleep(rng.random() * 1.0)
@@ -113,7 +115,7 @@ def client(H, wid, rng, state):
         buf = bytearray()
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.connect(("127.0.0.1", port))
+            sock.connect((host, port))
             sock.sendall(b"JOIN " + str(room).encode() + b" " + nick + b"\n")
             for _ in range(rng.randint(4, 30)):
                 if not H.running():

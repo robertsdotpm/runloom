@@ -27,6 +27,7 @@ def setup(H):
     half = H.funcs // 2
     state = {
         "tcp_port": tcp.getsockname()[1],
+        "tcp_host": tcp.getsockname()[0],
         "udp_addr": udp.getsockname(),
         "lock": threading.Lock(),
         "tcp_sum": [0], "tcp_sent": [0] * half,
@@ -100,12 +101,13 @@ def setup(H):
 
 def tcp_client(H, wid, rng, state):
     port = state["tcp_port"]
+    host = state["tcp_host"]
     H.sleep(rng.random() * 0.5)
     while H.running():
         sock = None
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.connect(("127.0.0.1", port))
+            sock.connect((host, port))
             buf = bytearray()
             for _ in range(rng.randint(5, 40)):
                 if not H.running():

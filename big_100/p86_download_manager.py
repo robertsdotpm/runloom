@@ -35,7 +35,7 @@ def setup(H):
             f.write(data)
         files[k] = (path, size, hashlib.sha256(data).hexdigest())
     srv = netutil.listen_tcp()
-    H.state = {"port": srv.getsockname()[1], "files": files}
+    H.state = {"port": srv.getsockname()[1], "host": srv.getsockname()[0], "files": files}
 
     def handle(conn):
         try:
@@ -73,13 +73,13 @@ def setup(H):
          lambda conn, addr: H.go(handle, conn))
 
 
-def fetch_range(H, port, idx, start, end, result_idx, out):
+def fetch_range(H, host, port, idx, start, end, result_idx, out):
     data = None
     for _attempt in range(4):
         sock = None
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.connect(("127.0.0.1", port))
+            sock.connect((host, port))
             req = ("GET /f{0} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n"
                    "Range: bytes={1}-{2}\r\n\r\n").format(idx, start, end)
             sock.sendall(req.encode("latin-1"))
@@ -96,6 +96,7 @@ def fetch_range(H, port, idx, start, end, result_idx, out):
 
 def client(H, wid, rng, state):
     port = state["port"]
+    host = state["host"]
     files = state["files"]
     H.sleep(rng.random() * 0.5)
     while H.running():
@@ -111,7 +112,7 @@ def client(H, wid, rng, state):
                 ranges.append((start, end))
         out = runloom.Chan(len(ranges))
         for ri, (s, e) in enumerate(ranges):
-            H.go(fetch_range, H, port, idx, s, e, ri, out)
+            H.go(fetch_range, H, host, port, idx, s, e, ri, out)
         parts = [None] * len(ranges)
         ok = True
         for _ in range(len(ranges)):

@@ -12,8 +12,10 @@ import gc
 import itertools
 import os
 import socket
+import threading
 
 import harness
+import runloom
 
 
 class Res(object):
@@ -55,32 +57,47 @@ class Res(object):
         self.close()
 
 
+MAX_WORKERS = 2000
+
+
 def setup(H):
     base = H.make_tmpdir("big100_reslife_")
+    sem = threading.Semaphore(MAX_WORKERS)
     H.state = {"base": base, "acquired": [0], "released": [0],
-               "counter": itertools.count()}
+               "counter": itertools.count(), "sem": sem}
     H.fd_ceiling = 0
 
 
 def worker(H, wid, rng, state):
     kinds = ["file", "pipe", "socketpair"]
+    sem = state["sem"]
     while H.running():
-        batch = [Res(rng.choice(kinds), state) for _ in
-                 range(rng.randint(2, 10))]
-        for r in batch:
-            roll = rng.random()
-            if roll < 0.5:
-                r.close()                   # explicit close
-            # else: drop the reference -> __del__ closes it
-        del batch
-        if rng.random() < 0.05:
-            gc.collect()
-        H.op(wid)
-        H.task_done(wid)
+        if not sem.acquire():
+            break
+        try:
+            batch = [Res(rng.choice(kinds), state) for _ in
+                     range(rng.randint(2, 10))]
+            for r in batch:
+                roll = rng.random()
+                if roll < 0.5:
+                    r.close()                   # explicit close
+                # else: drop the reference -> __del__ closes it
+            del batch
+            if rng.random() < 0.05:
+                gc.collect()
+            H.op(wid)
+            H.task_done(wid)
+        finally:
+            sem.release()
 
 
 def body(H):
-    H.run_pool(H.funcs, worker, H.state)
+    sem = H.state["sem"]
+
+    def _cancel_watcher():
+        while H.running():
+            runloom.sleep(0.05)
+        sem.cancel_all()
 
     def auditor():
         base = harness.count_fds()
@@ -92,7 +109,9 @@ def body(H):
             H.sleep(1.0)
             gc.collect()
 
+    H.go(_cancel_watcher)
     H.go(auditor)
+    H.run_pool(H.funcs, worker, H.state)
 
 
 def post(H):

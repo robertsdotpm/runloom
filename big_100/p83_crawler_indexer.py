@@ -35,6 +35,7 @@ def render(n):
 def setup(H):
     srv = netutil.listen_tcp()
     H.state = {"port": srv.getsockname()[1],
+               "host": srv.getsockname()[0],
                "index": {}, "lock": threading.Lock()}
 
     def handle(conn):
@@ -61,6 +62,7 @@ def setup(H):
 
 def crawler(H, wid, rng, state):
     port = state["port"]
+    host = state["host"]
     index = state["index"]
     lock = state["lock"]
     H.sleep(rng.random() * 0.5)
@@ -69,7 +71,7 @@ def crawler(H, wid, rng, state):
         sock = None
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.connect(("127.0.0.1", port))
+            sock.connect((host, port))
             status, body = httputil.get(sock, "/page/{0}".format(page),
                                         keep_alive=False)
             if not H.check(status == 200, "status {0}".format(status)):

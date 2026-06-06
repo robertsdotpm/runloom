@@ -27,8 +27,8 @@ def tarball(idx):
 def setup(H):
     digests = {i: hashlib.sha256(tarball(i)).hexdigest() for i in range(NPKGS)}
     srv = netutil.listen_tcp()
-    H.state = {"port": srv.getsockname()[1], "digests": digests,
-               "drops": [0] * 1024}
+    H.state = {"port": srv.getsockname()[1], "host": srv.getsockname()[0],
+               "digests": digests, "drops": [0] * 1024}
 
     def handle(conn):
         import random
@@ -76,7 +76,7 @@ def fetch(H, port, path):
         sock = None
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.connect(("127.0.0.1", port))
+            sock.connect((host, port))
             return httputil.get(sock, path, keep_alive=False)
         except OSError:
             runloom.sleep(0.003)        # dropped/flaky -> retry
@@ -87,6 +87,7 @@ def fetch(H, port, path):
 
 def client(H, wid, rng, state):
     port = state["port"]
+    host = state["host"]
     digests = state["digests"]
     H.sleep(rng.random() * 0.5)
     while H.running():

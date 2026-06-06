@@ -118,10 +118,15 @@ def main():
 
     def launch(num, path):
         ip_slot = free_slots.pop(0)
+        # Primary slot IP is 127.(slot+1).0.1; set it BEFORE Popen so the
+        # subprocess reads the right value from os.environ at import time.
+        slot_ip = "127.{0}.0.1".format(ip_slot + 1)
+        job_env = dict(env)
+        job_env["SOAK_HOST_IP"] = slot_ip
         logpath = os.path.join(LOGDIR, "p{0:02d}.log".format(num))
         logf = open(logpath, "wb")
         proc = subprocess.Popen(build_cmd(path, ip_slot), stdout=logf,
-                                stderr=logf, env=env, cwd=HERE)
+                                stderr=logf, env=job_env, cwd=HERE)
         running[proc] = (num, path, logf, time.monotonic(), ip_slot)
         sys.stderr.write("  launch p{0:02d} {1}\n".format(
             num, os.path.basename(path)))
