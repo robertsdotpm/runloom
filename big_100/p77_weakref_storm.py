@@ -8,8 +8,8 @@ scheduled count must track the fired count.
 
 Stresses: weakref callback reentrancy, callbacks running during GC under M:N.
 """
-import _thread as _realthread
 import gc
+import threading
 import weakref
 
 import harness
@@ -23,20 +23,24 @@ class Thing(object):
         self.n = n
 
 
+# At 100k goroutines, all calling del things simultaneously, 100k weakref
+# callbacks try to acquire the same CoLock => drain takes hours.
+# Cap to 2000 active workers + cancel_watcher pattern.
+# Note: _thread.allocate_lock is patched to CoLock by monkey.patch(), so
+# we use threading.Lock() directly (also a CoLock after patching).
+MAX_WORKERS = 2000
+
+
 def setup(H):
-    # Use a real OS lock: weakref callbacks fire inside tp_dealloc (destructor
-    # chain) when goroutines call `del things`.  With 100k goroutines all
-    # deleting a batch on their final iteration simultaneously, a CoLock here
-    # serialises 100k * k ≈ 1.2M acquisitions at cooperative speed (~276/s)
-    # → many minutes to drain.  A real OS mutex takes <1µs per acquire and
-    # never parks a goroutine or blocks a hub thread.
-    H.state = {"lock": _realthread.allocate_lock(), "fired": [0], "created": [0],
-               "queue": []}
+    sem = threading.Semaphore(MAX_WORKERS)
+    H.state = {"lock": threading.Lock(), "fired": [0], "created": [0],
+               "queue": [], "sem": sem}
 
 
 def worker(H, wid, rng, state):
     lock = state["lock"]
     queue = state["queue"]
+    sem = state["sem"]
 
     def callback(ref):
         with lock:
@@ -44,27 +48,38 @@ def worker(H, wid, rng, state):
             queue.append(1)             # "schedule work"
 
     while H.running():
-        refs = []
-        things = []
-        k = rng.randint(4, 20)
-        for i in range(k):
-            t = Thing(i)
-            refs.append(weakref.ref(t, callback))
-            things.append(t)
-        with lock:
-            state["created"][0] += k
-        del things                      # drop strong refs -> callbacks fire
-        if rng.random() < 0.05:
-            gc.collect()
-        # Drain a few scheduled tokens (the "work").
-        with lock:
-            drained = len(queue)
-            queue.clear()
-        H.op(wid, max(1, drained))
-        H.task_done(wid)
+        if not sem.acquire():
+            break
+        try:
+            things = []
+            k = rng.randint(4, 20)
+            for i in range(k):
+                t = Thing(i)
+                weakref.ref(t, callback)
+                things.append(t)
+            with lock:
+                state["created"][0] += k
+            del things                  # drop strong refs -> callbacks fire
+            if rng.random() < 0.05:
+                gc.collect()
+            with lock:
+                drained = len(queue)
+                queue.clear()
+            H.op(wid, max(1, drained))
+            H.task_done(wid)
+        finally:
+            sem.release()
 
 
 def body(H):
+    sem = H.state["sem"]
+
+    def _cancel_watcher():
+        while H.running():
+            runloom.sleep(0.05)
+        sem.cancel_all()
+
+    H.go(_cancel_watcher)
     H.run_pool(H.funcs, worker, H.state)
 
     def gc_driver():

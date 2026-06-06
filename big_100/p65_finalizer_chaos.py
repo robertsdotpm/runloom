@@ -31,34 +31,57 @@ class Noisy(object):
             raise RuntimeError("boom in __del__ {0}".format(self.idx))
 
 
+# At 100k goroutines, each iteration acquires state["lock"] ONCE for
+# `created` AND the Noisy.__del__ finalizers each acquire it too.  With
+# 100k goroutines competing for a single CoLock, throughput ≈ 80/s and
+# drain ≈ 100k/80 ≈ 1250s >> 120s.  Cap concurrent workers + cancel watcher.
+MAX_WORKERS = 2000
+
+
 def worker(H, wid, rng, state):
+    sem = state["sem"]
     i = 0
     while H.running():
-        # Build a small batch, including a reference cycle, then drop it.
-        batch = []
-        for _ in range(rng.randint(4, 16)):
-            o = Noisy(i, state)
-            o2 = Noisy(i + 1, state)
-            o.peer = o2          # mutual reference cycle -> needs the GC
-            o2.peer = o
-            batch.append(o)
-            i += 2
-        with state["lock"]:
-            state["created"][0] += len(batch)
-        del batch
-        if rng.random() < 0.02:
-            gc.collect()
-        H.op(wid)
-        H.task_done(wid)
-        if rng.random() < 0.1:
-            runloom.yield_now()
+        if not sem.acquire():
+            break
+        try:
+            # Build a small batch, including a reference cycle, then drop it.
+            batch = []
+            for _ in range(rng.randint(4, 16)):
+                o = Noisy(i, state)
+                o2 = Noisy(i + 1, state)
+                o.peer = o2          # mutual reference cycle -> needs the GC
+                o2.peer = o
+                batch.append(o)
+                i += 2
+            with state["lock"]:
+                state["created"][0] += len(batch)
+            del batch
+            if rng.random() < 0.02:
+                gc.collect()
+            H.op(wid)
+            H.task_done(wid)
+            if rng.random() < 0.1:
+                runloom.yield_now()
+        finally:
+            sem.release()
 
 
 def setup(H):
-    H.state = {"lock": threading.Lock(), "finalized": [0], "created": [0]}
+    sem = threading.Semaphore(MAX_WORKERS)
+    H.state = {"lock": threading.Lock(), "finalized": [0], "created": [0],
+               "sem": sem}
 
 
 def body(H):
+    sem = H.state["sem"]
+
+    def _cancel_watcher():
+        while H.running():
+            runloom.sleep(0.05)
+        sem.cancel_all()
+
+    H.go(_cancel_watcher)
     H.run_pool(H.funcs, worker, H.state)
 
     def gc_driver():

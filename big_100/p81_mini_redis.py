@@ -15,15 +15,21 @@ import netutil
 
 SHARED = b"shared:counter"
 
+# Dedicated loopback: concurrent neighbour's 100k sockets can exhaust
+# 127.0.0.1's ephemeral pool, causing INCR connections to drop mid-reply.
+# When the server processes INCR but the client misses the reply, the
+# server counter ends up higher than the client-tracked total.
+_HOST = "127.0.0.81"
+
 
 def setup(H):
-    srv = netutil.listen_tcp()
+    srv = netutil.listen_tcp(host=_HOST)
     store = {}
     lock = threading.Lock()
     # One slot per goroutine (indexed by wid) to avoid the data race that
     # loses updates when multiple goroutines share a slot under GIL=0.
-    H.state = {"port": srv.getsockname()[1], "incrs": [0] * H.funcs,
-               "store": store}
+    H.state = {"port": srv.getsockname()[1], "host": _HOST,
+               "incrs": [0] * H.funcs, "store": store}
 
     def handle(conn):
         try:
@@ -63,12 +69,13 @@ def setup(H):
 def client(H, wid, rng, state):
     import socket
     port = state["port"]
+    host = state["host"]
     H.sleep(rng.random() * 0.5)
     while H.running():
         sock = None
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.connect(("127.0.0.1", port))
+            sock.connect((host, port))
             # private-key round-trip
             key = "c{0}:{1}".format(wid, rng.randint(0, 99)).encode()
             val = str(rng.randint(0, 1 << 30)).encode()
