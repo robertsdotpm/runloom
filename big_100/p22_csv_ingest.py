@@ -46,7 +46,7 @@ def worker(H, wid, rng, state):
                     return
                 for line in f:
                     if not H.running():
-                        break
+                        return      # partial parse; skip invariant check
                     line = line.rstrip("\n")
                     if not line:
                         continue

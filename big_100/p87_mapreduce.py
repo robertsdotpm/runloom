@@ -11,6 +11,7 @@ import os
 import threading
 
 import harness
+import runloom
 
 VOCAB = ["alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta"]
 
@@ -40,7 +41,11 @@ def setup(H):
         path = os.path.join(base, "doc{0}.txt".format(k))
         counts = gen_file(path, 1000 + k * 200, seedrng)
         files[k] = (path, counts)
-    H.state = {"files": files, "global": {}, "lock": threading.Lock()}
+    # Cap concurrent workers: with lock: dict-update over ~1200 keys while
+    # 100k goroutines all compete => hold time amplified => drain >> 120s.
+    sem = threading.Semaphore(2000)
+    H.state = {"files": files, "global": {}, "lock": threading.Lock(),
+               "sem": sem}
 
 
 def map_file(path):
@@ -56,23 +61,37 @@ def worker(H, wid, rng, state):
     files = state["files"]
     glob = state["global"]
     lock = state["lock"]
+    sem = state["sem"]
     while H.running():
-        k = rng.randrange(len(files))
-        path, expected = files[k]
-        mapped = map_file(path)
-        # Map result must equal the file's known word counts.
-        if not H.check(mapped == expected,
-                       "map result wrong for doc{0} wid={1}".format(k, wid)):
-            return
-        # Reduce into the shared global table.
-        with lock:
-            for w, c in mapped.items():
-                glob[w] = glob.get(w, 0) + c
-        H.op(wid, sum(mapped.values()))
-        H.task_done(wid)
+        if not sem.acquire():
+            break
+        try:
+            k = rng.randrange(len(files))
+            path, expected = files[k]
+            mapped = map_file(path)
+            # Map result must equal the file's known word counts.
+            if not H.check(mapped == expected,
+                           "map result wrong for doc{0} wid={1}".format(k, wid)):
+                return
+            # Reduce into the shared global table.
+            with lock:
+                for w, c in mapped.items():
+                    glob[w] = glob.get(w, 0) + c
+            H.op(wid, sum(mapped.values()))
+            H.task_done(wid)
+        finally:
+            sem.release()
 
 
 def body(H):
+    sem = H.state["sem"]
+
+    def _cancel_watcher():
+        while H.running():
+            runloom.sleep(0.05)
+        sem.cancel_all()
+
+    H.go(_cancel_watcher)
     H.run_pool(H.funcs, worker, H.state)
 
 
