@@ -16,7 +16,15 @@ LIMIT = 32
 
 
 def setup(H):
-    H.state = {"sem": runloom.sync.Semaphore(LIMIT),
+    sem = runloom.sync.Semaphore(LIMIT)
+
+    def _cancel_watcher(r=H.running, s=sem):
+        while r():
+            runloom.sleep(0.05)
+        s.cancel_all()
+
+    H.go(_cancel_watcher)
+    H.state = {"sem": sem,
                "active": [0], "lock": threading.Lock(), "maxactive": [0]}
 
 
@@ -25,7 +33,14 @@ def worker(H, wid, rng, state):
     lock = state["lock"]
     active = state["active"]
     while H.running():
-        with sem:
+        # Explicit acquire so we can detect cancel_all() returning False and
+        # exit without touching the active counter (avoids spurious LIMIT breach).
+        if not sem.acquire():
+            break  # drain started, cancel_all() fired
+        if not H.running():
+            sem.release()
+            break
+        try:
             with lock:
                 active[0] += 1
                 if active[0] > state["maxactive"][0]:
@@ -40,6 +55,8 @@ def worker(H, wid, rng, state):
             runloom.sleep(rng.uniform(0.0, 0.002))
             with lock:
                 active[0] -= 1
+        finally:
+            sem.release()
         H.op(wid)
         H.task_done(wid)
 

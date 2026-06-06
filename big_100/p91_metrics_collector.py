@@ -21,11 +21,15 @@ def setup(H):
     udp = netutil.udp_socket()
     udp.setblocking(False)
     summary = os.path.join(H.make_tmpdir("big100_metrics_"), "summary.txt")
+    # tcp_sent: one slot per goroutine (indexed by wid) so no two TCP clients
+    # ever share a slot.  Avoids the data race that loses updates when goroutines
+    # share a slot under GIL=0 (free-threaded list[i] += x is not atomic).
+    half = H.funcs // 2
     state = {
         "tcp_port": tcp.getsockname()[1],
         "udp_addr": udp.getsockname(),
         "lock": threading.Lock(),
-        "tcp_sum": [0], "tcp_sent": [0] * 1024,
+        "tcp_sum": [0], "tcp_sent": [0] * half,
         "udp_count": [0], "summary": summary,
     }
     H.state = state
@@ -111,7 +115,7 @@ def tcp_client(H, wid, rng, state):
                 # Wait for the ACK -> the server has counted this metric.
                 if netutil.recv_line_timeout(sock, 2000, buf) is netutil.TIMEOUT:
                     break
-                state["tcp_sent"][wid & 1023] += v
+                state["tcp_sent"][wid] += v
                 H.op(wid)
             H.task_done(wid)
         except OSError:

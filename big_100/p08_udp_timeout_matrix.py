@@ -10,14 +10,22 @@ Stresses: timeout handling, scheduler wakeups, ICMP-unreachable error delivery.
 import harness
 import netutil
 
+# At 100k goroutines each worker opens 2 UDP sockets, producing 200k sockets
+# all binding to 127.0.0.1.  The default ephemeral port range is only ~28k
+# ports, so the kernel runs out and starts reusing the dead_addr port, causing
+# phantom replies.  Use 127.0.0.2-9 (8 separate loopback addresses each with
+# their own 28k-port pool) so workers never consume 127.0.0.1's port space and
+# dead_addr (on 127.0.0.1) can never be accidentally auto-assigned to a worker.
+_CLIENT_BIND_ADDRS = ["127.0.0.{0}".format(i) for i in range(2, 10)]
+
 
 def setup(H):
     live = netutil.udp_socket()
     live.setblocking(False)
     live_addr = live.getsockname()
 
-    # A dead address: bind a socket to grab a port, then close it.  Nothing
-    # listens there now, so datagrams sent to it never get a reply.
+    # A dead address: bind a socket to grab a port on 127.0.0.1, then close it.
+    # Workers bind to 127.0.0.2-9, so this port is never auto-recycled to them.
     dead = netutil.udp_socket()
     dead_addr = dead.getsockname()
     dead.close()
@@ -44,10 +52,13 @@ def client(H, wid, rng, state):
     # Connected UDP sockets: each only ever receives from its own peer, so a
     # delayed live echo can never pollute a dead-port read (and the dead socket
     # surfaces the ICMP unreachable as ECONNREFUSED on recv, never as bytes).
-    live = netutil.udp_socket()
+    # Bind to a distributed loopback address (127.0.0.2-9) so workers don't
+    # deplete 127.0.0.1's port pool — see _CLIENT_BIND_ADDRS comment above.
+    bind_host = _CLIENT_BIND_ADDRS[wid % len(_CLIENT_BIND_ADDRS)]
+    live = netutil.udp_socket(host=bind_host)
     live.setblocking(False)
     live.connect(state["live"])
-    dead = netutil.udp_socket()
+    dead = netutil.udp_socket(host=bind_host)
     dead.setblocking(False)
     dead.connect(state["dead"])
     try:

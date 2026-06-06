@@ -8,13 +8,22 @@ only on its own rows so the result is deterministic and checkable.
 
 Stresses: C-extension blocking through the offload pool, database locks,
 busy-timeout retries.
+
+SCALE NOTE: SQLite WAL supports at most ~2000 concurrent writers cleanly before
+lock contention and connection-create time make drain time explode.  At 100k
+goroutines we cap concurrent ACTIVE workers at MAX_ACTIVE via a CoSemaphore
+(same pattern as procutil.py).  Goroutines waiting in the semaphore exit
+immediately when drain starts via cancel_all(); only the MAX_ACTIVE in-flight
+ones need to close their connections, which completes in a few seconds.
 """
 import sqlite3
+import threading
 
 import harness
 import runloom
 
-CYCLE = 64      # rows inserted before a worker deletes its set and restarts
+CYCLE = 64        # rows inserted before a worker deletes its set and restarts
+MAX_ACTIVE = 2000 # max concurrent active sqlite connections
 
 
 def setup(H):
@@ -27,11 +36,25 @@ def setup(H):
     con.execute("CREATE INDEX kv_wid ON kv(wid)")
     con.commit()
     con.close()
-    H.state = {"db": db}
+    sem = threading.Semaphore(MAX_ACTIVE)
+
+    def _cancel_watcher(r=H.running, s=sem):
+        while r():
+            runloom.sleep(0.05)
+        s.cancel_all()
+
+    H.go(_cancel_watcher)
+    H.state = {"db": db, "sem": sem}
 
 
 def worker(H, wid, rng, state):
     db = state["db"]
+    sem = state["sem"]
+
+    # Limit concurrent active workers so drain stays within the timeout even
+    # at 100k goroutines.  Waiters exit immediately when drain fires cancel_all.
+    if not sem.acquire():
+        return  # drain started before we got a slot
 
     def connect():
         c = sqlite3.connect(db, timeout=30, check_same_thread=False)
@@ -75,6 +98,7 @@ def worker(H, wid, rng, state):
                     H.sleep(0.005)
     finally:
         runloom.blocking(con.close)
+        sem.release()
 
 
 def body(H):

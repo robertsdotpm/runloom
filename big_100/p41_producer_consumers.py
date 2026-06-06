@@ -7,17 +7,19 @@ nothing duplicated).
 
 Stresses: channel fairness, consumer wake-ups, producer/consumer contention.
 """
-import threading
-
 import harness
 import runloom
 
 
 def setup(H):
+    # consumed_sum/consumed_n are each written exactly once per consumer (at the
+    # end of its loop) by the consumer whose wid == index.  Allocate one slot
+    # per goroutine so no two consumers ever share a slot, eliminating the data
+    # race that silently lost updates at 100k goroutines (97 sharers/slot at the
+    # old 1024 shards; free-threaded list[i] += x is not atomic under GIL=0).
     H.state = {"ch": runloom.Chan(8192),
                "produced_sum": [0], "produced_n": [0],
-               "consumed_sum": [0] * 1024, "consumed_n": [0] * 1024,
-               "plock": threading.Lock()}
+               "consumed_sum": [0] * H.funcs, "consumed_n": [0] * H.funcs}
 
 
 def producer(H, state):
@@ -49,8 +51,8 @@ def consumer(H, wid, rng, state):
         s += val
         n += 1
         H.op(wid)
-    state["consumed_sum"][wid & 1023] += s
-    state["consumed_n"][wid & 1023] += n
+    state["consumed_sum"][wid] += s
+    state["consumed_n"][wid] += n
 
 
 def body(H):

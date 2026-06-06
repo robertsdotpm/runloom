@@ -8,8 +8,8 @@ scheduled count must track the fired count.
 
 Stresses: weakref callback reentrancy, callbacks running during GC under M:N.
 """
+import _thread as _realthread
 import gc
-import threading
 import weakref
 
 import harness
@@ -24,7 +24,13 @@ class Thing(object):
 
 
 def setup(H):
-    H.state = {"lock": threading.Lock(), "fired": [0], "created": [0],
+    # Use a real OS lock: weakref callbacks fire inside tp_dealloc (destructor
+    # chain) when goroutines call `del things`.  With 100k goroutines all
+    # deleting a batch on their final iteration simultaneously, a CoLock here
+    # serialises 100k * k ≈ 1.2M acquisitions at cooperative speed (~276/s)
+    # → many minutes to drain.  A real OS mutex takes <1µs per acquire and
+    # never parks a goroutine or blocks a hub thread.
+    H.state = {"lock": _realthread.allocate_lock(), "fired": [0], "created": [0],
                "queue": []}
 
 

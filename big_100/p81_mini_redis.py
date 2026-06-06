@@ -20,7 +20,9 @@ def setup(H):
     srv = netutil.listen_tcp()
     store = {}
     lock = threading.Lock()
-    H.state = {"port": srv.getsockname()[1], "incrs": [0] * 1024,
+    # One slot per goroutine (indexed by wid) to avoid the data race that
+    # loses updates when multiple goroutines share a slot under GIL=0.
+    H.state = {"port": srv.getsockname()[1], "incrs": [0] * H.funcs,
                "store": store}
 
     def handle(conn):
@@ -87,7 +89,7 @@ def client(H, wid, rng, state):
             if not H.check(r.startswith(b"INT "),
                            "INCR reply bad wid={0}: {1!r}".format(wid, r)):
                 return
-            state["incrs"][wid & 1023] += 1
+            state["incrs"][wid] += 1
             H.op(wid)
             H.task_done(wid)
         except (OSError, ValueError):

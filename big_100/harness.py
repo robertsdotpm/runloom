@@ -201,6 +201,14 @@ class Harness(object):
         self.first_fail = None           # (msg) of the first invariant break
         self.errors = []                 # sample of (wid, repr) error strings
 
+        # Real OS lock for exited: at 100k goroutines all finishing simultaneously
+        # a CoLock would serialize 100k cooperative handoffs (~1s each at scale),
+        # making drain take minutes.  A real OS lock takes <1µs per acquire for
+        # this tiny critical section (`self.exited += 1`) and never parks a
+        # goroutine or blocks a hub thread for more than a microsecond.
+        # _real_thread is imported before monkey.patch(), so it is never replaced.
+        self._exit_lock = _real_thread.allocate_lock()
+
         # control flags
         self.failed = False              # invariant violated -> nonzero exit
         self.done_flag = False           # workload finished -> shut down
@@ -368,7 +376,7 @@ class Harness(object):
             if self.running() or not isinstance(exc, OSError):
                 self.error(wid, exc)
         finally:
-            with self.lock:
+            with self._exit_lock:
                 self.exited += 1
 
     # ---------------- progress logging ----------------
@@ -502,9 +510,31 @@ class Harness(object):
             self.lock = runloom.sync.Lock()
             self.go(self.progress_loop)
             if setup is not None:
-                setup(self)
+                try:
+                    setup(self)
+                except BaseException as exc:
+                    self.failed = True
+                    if self.first_fail is None:
+                        self.first_fail = "setup() raised: {0}: {1}".format(
+                            type(exc).__name__, exc)
+                    sys.stderr.write("[{0}] SETUP FAILED:\n".format(self.name))
+                    sys.stderr.write(traceback.format_exc())
+                    sys.stderr.flush()
+                    self.exit_code = EXIT_ERROR
+                    return  # let deadline/drain finish naturally
             self.snapshot_fds()
-            body(self)
+            try:
+                body(self)
+            except BaseException as exc:
+                self.failed = True
+                if self.first_fail is None:
+                    self.first_fail = "body() raised: {0}: {1}".format(
+                        type(exc).__name__, exc)
+                sys.stderr.write("[{0}] BODY FAILED:\n".format(self.name))
+                sys.stderr.write(traceback.format_exc())
+                sys.stderr.flush()
+                self.exit_code = EXIT_ERROR
+                return  # let deadline/drain finish naturally
             self.wait_for_deadline()
             self.mark_done()
             self.drain_workers()
@@ -526,7 +556,7 @@ class Harness(object):
         finally:
             self.finished = True
         self.fd_end = count_fds()
-        if post is not None:
+        if post is not None and self.exit_code != EXIT_ERROR:
             try:
                 post(self)
             except Exception as exc:        # noqa: BLE001
