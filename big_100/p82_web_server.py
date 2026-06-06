@@ -31,7 +31,7 @@ def setup(H):
     for k in range(NFILES):
         size = 4096 + k * 4096
         data = content(k, size)
-        files[k] = (size, data)     # keep in memory; avoids offload-pool SIGSEGV
+        files[k] = (size, data)
     host = H.net_ips[0]
     srv = netutil.listen_tcp(host=host)
     sem = threading.Semaphore(MAX_CLIENTS)

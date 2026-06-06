@@ -171,19 +171,14 @@ def _fd_pollable(fd):
 # yielded.
 class _Parker(object):
     __slots__ = ("r", "w", "_sockets")
-    # LOCK-FREE free-list.  An earlier version guarded `_pool` with a real
-    # _thread.lock, but a goroutine PREEMPTED (sysmon) while holding it froze
-    # its hub: every sibling doing _Parker()/release() then blocked the hub
-    # OS-thread on _pool_lock.acquire(), and only that frozen hub could run the
-    # preempted holder to release it -- under heavy offload (one Parker per
-    # submit) all hubs froze at once (big_100 BUG #4, the residual that
-    # survived the backend-lock fix).  On free-threaded CPython list.pop() and
-    # list.append() are each individually atomic (per-object critical section),
-    # so the pool needs no lock: pop() removes the TOCTOU race via
-    # try/except IndexError, and the 64-cap len() check is best-effort (a
-    # benign overshoot just frees one extra parker).  No goroutine ever holds a
-    # lock here, so none can freeze its hub.
+    # Free-list of reusable (r, w, _sockets) tuples.  The pool lock uses a
+    # NON-BLOCKING acquire so that no goroutine ever waits for it (blocking
+    # would freeze the goroutine's hub if sysmon preempted the holder).  A
+    # goroutine that finds the lock contended skips pooling and closes its FDs
+    # instead -- never blocks, never freezes the hub.  list.pop() in __init__
+    # still races lock-free via try/except IndexError.
     _pool = []
+    _pool_lock = _thread.allocate_lock()   # captured pre-patch → real OS mutex
 
     def __init__(self):
         try:
@@ -260,13 +255,17 @@ class _Parker(object):
                     pass
             except (BlockingIOError, OSError):
                 pass
-        # Lock-free return to the pool: append is atomic; the len() cap is
-        # best-effort (a racing overshoot past 64 just closes one extra fd).
-        if len(_Parker._pool) < 64:
-            _Parker._pool.append((self.r, self.w, self._sockets))
-            pooled = True
-        else:
-            pooled = False
+        # Non-blocking try: if another goroutine is in release() concurrently,
+        # skip pooling and close the FDs.  acquire(False) never blocks, so the
+        # hub is never frozen even if sysmon preempts the lock holder.
+        pooled = False
+        if _Parker._pool_lock.acquire(False):
+            try:
+                if len(_Parker._pool) < 64:
+                    _Parker._pool.append((self.r, self.w, self._sockets))
+                    pooled = True
+            finally:
+                _Parker._pool_lock.release()
         if not pooled:
             if self._sockets is not None:
                 for s in self._sockets:
@@ -382,9 +381,11 @@ class _ThreadPoolBackend(_BlockingBackend):
         # finished (any stale byte is then drained by release()).
         box = [None, None, False]
         self._q.put((fn, args, kwargs, box, p))   # atomic C call; never freezes the hub
-        while not box[2]:
-            p.park()
-        p.release()
+        try:
+            while not box[2]:
+                p.park()
+        finally:
+            p.release()
         if box[1] is not None:
             raise box[1]
         return box[0]
@@ -425,6 +426,7 @@ def _after_fork_child():
     global _backend
     _backend = None
     _Parker._pool = []
+    _Parker._pool_lock = _thread.allocate_lock()   # fresh lock; fork may have copied a held one
 
 
 if hasattr(os, "register_at_fork"):

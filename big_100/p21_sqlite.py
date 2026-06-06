@@ -11,10 +11,11 @@ busy-timeout retries.
 
 SCALE NOTE: SQLite WAL supports at most ~2000 concurrent writers cleanly before
 lock contention and connection-create time make drain time explode.  At 100k
-goroutines we cap concurrent ACTIVE workers at MAX_ACTIVE via a CoSemaphore
-(same pattern as procutil.py).  Goroutines waiting in the semaphore exit
-immediately when drain starts via cancel_all(); only the MAX_ACTIVE in-flight
-ones need to close their connections, which completes in a few seconds.
+goroutines we cap concurrent ACTIVE workers at MAX_ACTIVE=2000 via a
+CoSemaphore (same pattern as procutil.py).  Goroutines waiting in the semaphore
+exit immediately when drain starts via cancel_all(); only the MAX_ACTIVE
+in-flight ones need to close their connections, which completes in a few
+seconds.
 """
 import sqlite3
 import threading
@@ -23,7 +24,7 @@ import harness
 import runloom
 
 CYCLE = 64        # rows inserted before a worker deletes its set and restarts
-MAX_ACTIVE = 500  # keep concurrent offload calls low to avoid _Parker pool race
+MAX_ACTIVE = 2000
 
 
 def setup(H):
