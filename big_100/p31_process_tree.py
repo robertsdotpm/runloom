@@ -28,7 +28,8 @@ def worker(H, wid, rng, state):
         try:
             proc = procutil.popen(
                 [py, "-c", PARENT.format(n)],
-                start_new_session=True)             # own process group
+                start_new_session=True,
+                running=H.running)             # own process group
             # Let the child come up and spawn its grandchildren.
             H.sleep(0.05 + rng.random() * 0.1)
             # Kill the whole group, then reap the direct child.

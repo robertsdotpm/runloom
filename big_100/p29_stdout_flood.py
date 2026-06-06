@@ -27,7 +27,8 @@ def worker(H, wid, rng, state):
         expected = blocks * 4096
         try:
             proc = procutil.popen([py, "-c", FLOOD.format(blocks)],
-                                    stdout=subprocess.PIPE)
+                                    stdout=subprocess.PIPE,
+                                    running=H.running)
             out, _ = proc.communicate()
             if not H.check(len(out) == expected,
                            "flood short read wid={0}: {1} != {2}".format(

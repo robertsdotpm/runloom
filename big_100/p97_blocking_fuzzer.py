@@ -19,7 +19,7 @@ import procutil
 import runloom
 
 
-def op_socket(H, rng, state):
+def op_socket(H, rng, state, wid=0):
     sock = None
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -34,8 +34,8 @@ def op_socket(H, rng, state):
         netutil.close_quiet(sock)
 
 
-def op_file(H, rng, state):
-    path = os.path.join(state["base"], "ff{0}".format(rng.getrandbits(20)))
+def op_file(H, rng, state, wid=0):
+    path = os.path.join(state["base"], "ff{0}_{1}".format(wid, rng.getrandbits(32)))
     data = rng.randbytes(rng.randint(1, 4096))
     try:
         with open(path, "wb") as f:
@@ -50,7 +50,7 @@ def op_file(H, rng, state):
             pass
 
 
-def op_pipe(H, rng, state):
+def op_pipe(H, rng, state, wid=0):
     r, w = os.pipe()
     try:
         msg = rng.randbytes(rng.randint(1, 4000))
@@ -73,15 +73,15 @@ def op_pipe(H, rng, state):
                     pass
 
 
-def op_subprocess(H, rng, state):
+def op_subprocess(H, rng, state, wid=0):
     payload = rng.randbytes(rng.randint(1, 1024))
     proc = procutil.popen(["cat"], stdin=subprocess.PIPE,
-                          stdout=subprocess.PIPE)
+                          stdout=subprocess.PIPE, running=H.running)
     out, _ = proc.communicate(payload)
     return H.check(out == payload, "subprocess echo mismatch")
 
 
-def op_sleep(H, rng, state):
+def op_sleep(H, rng, state, wid=0):
     ctx, cancel = cancelutil.WithTimeout(cancelutil.Background(),
                                          rng.uniform(0.001, 0.01))
     cancelutil.cancellable_sleep(ctx, rng.uniform(0.0, 0.02))
@@ -107,7 +107,7 @@ def worker(H, wid, rng, state):
         else:
             op = rng.choice(ops)
         try:
-            if not op(H, rng, state):
+            if not op(H, rng, state, wid=wid):
                 return
         except OSError:
             if not H.running():

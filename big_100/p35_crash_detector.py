@@ -30,7 +30,7 @@ def worker(H, wid, rng, state):
             cmd = ["sh", "-c", "kill -ABRT $$"]
             expected = -signal.SIGABRT
         try:
-            proc = procutil.popen(cmd)
+            proc = procutil.popen(cmd, running=H.running)
             proc.wait()
             if not H.check(proc.returncode == expected,
                            "misclassified wid={0}: rc={1} expected={2} "

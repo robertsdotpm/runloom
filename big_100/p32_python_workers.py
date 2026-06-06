@@ -23,7 +23,8 @@ def worker(H, wid, rng, state):
         expected = n * (n - 1) // 2
         try:
             proc = procutil.popen([py, "-c", CALC, str(n)],
-                                    stdout=subprocess.PIPE)
+                                    stdout=subprocess.PIPE,
+                                    running=H.running)
             out, _ = proc.communicate()
             if not H.check(int(out.strip()) == expected,
                            "calc wrong wid={0}: {1} != {2}".format(

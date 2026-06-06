@@ -24,7 +24,12 @@ def cancellable_wait(H, ctx, proc, poll=0.01):
 
 def worker(H, wid, rng, state):
     while H.running():
-        proc = procutil.popen(["sleep", "{0:.2f}".format(rng.uniform(0.02, 0.3))])
+        try:
+            proc = procutil.popen(
+                ["sleep", "{0:.2f}".format(rng.uniform(0.02, 0.3))],
+                running=H.running)
+        except OSError:
+            break
         ctx, cancel = cancelutil.WithTimeout(cancelutil.Background(),
                                              rng.uniform(0.0, 0.2))
         exited = cancellable_wait(H, ctx, proc)

@@ -47,10 +47,14 @@ def setup(H):
 
 def worker(H, wid, rng, state):
     while H.running():
-        env = dict(os.environ)
-        env["PYTHON_GIL"] = "0"
-        proc = procutil.popen([state["py"], state["script"]],
-                              stdout=subprocess.PIPE, env=env)
+        try:
+            env = dict(os.environ)
+            env["PYTHON_GIL"] = "0"
+            proc = procutil.popen([state["py"], state["script"]],
+                                  stdout=subprocess.PIPE, env=env,
+                                  running=H.running)
+        except OSError:
+            break
         out, _ = proc.communicate()
         if not H.check(proc.returncode == 0,
                        "child exited {0} wid={1}".format(

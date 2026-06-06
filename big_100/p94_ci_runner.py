@@ -17,19 +17,23 @@ import procutil
 
 def run_clean(H):
     proc = procutil.popen(["sh", "-c", "printf done; exit 0"],
-                          stdout=subprocess.PIPE)
+                          stdout=subprocess.PIPE, running=H.running)
     out, _ = proc.communicate()
     return proc.returncode == 0 and out == b"done"
 
 
 def run_fail(H, code):
-    proc = procutil.popen(["sh", "-c", "exit {0}".format(code)])
+    proc = procutil.popen(["sh", "-c", "exit {0}".format(code)], running=H.running)
     proc.wait()
     return proc.returncode == code
 
 
 def run_timeout(H, rng):
-    proc = procutil.popen(["sleep", "10"])
+    # "sleep 3600" ensures the process is still alive regardless of scheduling
+    # latency -- at 100k goroutines H.sleep(0.01) can take 15-30s of real time,
+    # so "sleep 10" exits naturally before the goroutine wakes, making
+    # proc.poll() return non-None and causing a false "not killed" classification.
+    proc = procutil.popen(["sleep", "3600"], running=H.running)
     deadline = time.monotonic() + 0.2
     while time.monotonic() < deadline and H.running():
         if proc.poll() is not None:

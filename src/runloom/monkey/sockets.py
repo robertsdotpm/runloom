@@ -41,15 +41,23 @@ def _patched_recv(self, bufsize, flags=0):
     if not _in_goroutine():
         return _orig_recv(self, bufsize, flags)
     _make_nonblocking(self)
-    if _tcp_recv_alloc is not None:
+    t = self.gettimeout()
+    if _tcp_recv_alloc is not None and t is None:
         return _tcp_recv_alloc(self.fileno(), bufsize, flags)
+    if t is not None:
+        timeout_ms = max(1, int(t * 1000))
+        while True:
+            try:
+                return _orig_recv(self, bufsize, flags)
+            except (BlockingIOError, InterruptedError):
+                r = runloom_c.wait_fd(self.fileno(), READ, timeout_ms)
+                if r == 0:
+                    raise socket.timeout("timed out")
     while True:
         try:
             return _orig_recv(self, bufsize, flags)
         except (BlockingIOError, InterruptedError):
-            r = runloom_c.wait_fd(self.fileno(), READ)
-            if r == 0:
-                raise socket.timeout("recv timed out")
+            runloom_c.wait_fd(self.fileno(), READ)
 
 
 def _patched_recv_into(self, buffer, nbytes=0, flags=0):
@@ -60,16 +68,24 @@ def _patched_recv_into(self, buffer, nbytes=0, flags=0):
     if not _in_goroutine():
         return _orig_recv_into(self, buffer, nbytes, flags)
     _make_nonblocking(self)
-    if _tcp_recv is not None:
+    t = self.gettimeout()
+    if _tcp_recv is not None and t is None:
         n = nbytes if nbytes else len(buffer)
         return _tcp_recv(self.fileno(), buffer, n, flags)
+    if t is not None:
+        timeout_ms = max(1, int(t * 1000))
+        while True:
+            try:
+                return _orig_recv_into(self, buffer, nbytes, flags)
+            except (BlockingIOError, InterruptedError):
+                r = runloom_c.wait_fd(self.fileno(), READ, timeout_ms)
+                if r == 0:
+                    raise socket.timeout("timed out")
     while True:
         try:
             return _orig_recv_into(self, buffer, nbytes, flags)
         except (BlockingIOError, InterruptedError):
-            r = runloom_c.wait_fd(self.fileno(), READ)
-            if r == 0:
-                raise socket.timeout("recv_into timed out")
+            runloom_c.wait_fd(self.fileno(), READ)
 
 
 def _patched_send(self, data, flags=0):
@@ -134,8 +150,15 @@ def _patched_connect(self, address):
     # what asyncio's selector loop uses), and OSError(err, ...) maps to the
     # right subclass -- ConnectionRefusedError etc. -- on Linux AND Windows
     # (where errno.ECONNREFUSED is the WSA code).
+    t = self.gettimeout()
+    timeout_ms = max(1, int(t * 1000)) if t is not None else None
     while True:
-        runloom_c.wait_fd(self.fileno(), WRITE)
+        if timeout_ms is not None:
+            r = runloom_c.wait_fd(self.fileno(), WRITE, timeout_ms)
+            if r == 0:
+                raise socket.timeout("connect timed out")
+        else:
+            runloom_c.wait_fd(self.fileno(), WRITE)
         err = self.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
         if err == 0:
             return

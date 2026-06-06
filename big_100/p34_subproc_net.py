@@ -38,7 +38,8 @@ def setup(H):
                     continue
                 n = int(parts[1])
                 proc = procutil.popen([py, "-c", CALC, str(n)],
-                                      stdout=subprocess.PIPE)
+                                      stdout=subprocess.PIPE,
+                                      running=H.running)
                 out, _ = proc.communicate()
                 conn.sendall(out.strip() + b"\n")
         except (OSError, ValueError):

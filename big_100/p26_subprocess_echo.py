@@ -20,7 +20,8 @@ def worker(H, wid, rng, state):
         payload = rng.randbytes(rng.randint(16, 4096))
         try:
             proc = procutil.popen(["cat"], stdin=subprocess.PIPE,
-                                    stdout=subprocess.PIPE)
+                                    stdout=subprocess.PIPE,
+                                    running=H.running)
             out, _ = proc.communicate(payload)
             if not H.check(out == payload,
                            "cat echo mismatch wid={0}: {1} != {2} bytes"

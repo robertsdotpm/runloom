@@ -179,16 +179,25 @@ class CoCondition(object):
 
 
 class CoSemaphore(object):
-    # _guard: real lock making the value + waiter-queue bookkeeping atomic
-    # across M:N hubs (held only for the O(1) bookkeeping, never across a park).
-    __slots__ = ("_value", "_waiters", "_guard", "__weakref__")
+    # _guard: CoLock (cooperative) making _value + _waiters bookkeeping atomic.
+    # Must be a cooperative lock, NOT a real OS mutex:
+    #   A goroutine can be preempted at any Python opcode (eval-breaker fires at
+    #   every bytecode boundary in free-threaded 3.13t).  If it holds a real OS
+    #   mutex when preempted, every other hub thread that tries to acquire it
+    #   BLOCKS.  With all 8 hubs blocked and the holder in the submission deque,
+    #   no hub is free to dispatch the holder -> deadlock.  With a CoLock, a
+    #   contending goroutine parks cooperatively (yields its hub thread), so hubs
+    #   remain free to dispatch the preempted holder; it releases the lock and
+    #   wakes the waiters.  Same parker-before-guard order as CoEvent.wait.
+    __slots__ = ("_value", "_waiters", "_guard", "_cancelled", "__weakref__")
 
     def __init__(self, value=1):
         if value < 0:
             raise ValueError("semaphore initial value must be >= 0")
-        self._value   = value
-        self._waiters = collections.deque()
-        self._guard   = _real_allocate_lock()
+        self._value     = value
+        self._waiters   = collections.deque()
+        self._guard     = CoLock()
+        self._cancelled = False
 
     def acquire(self, blocking=True, timeout=None):
         self._guard.acquire()
@@ -197,6 +206,9 @@ class CoSemaphore(object):
             self._guard.release()
             return True
         if not blocking:
+            self._guard.release()
+            return False
+        if self._cancelled:
             self._guard.release()
             return False
         if not _in_goroutine():
@@ -214,38 +226,83 @@ class CoSemaphore(object):
                 _raw_time_sleep(0.0001)
         # Must park.  Build the parker with the guard RELEASED first: _Parker()
         # can YIELD (on Windows the socketpair wake-fd handshake runs through
-        # the cooperative socket path and parks the goroutine).  Yielding while
-        # holding the real guard lets the goroutine we yield to block its hub
-        # thread on that held guard -- and the holder, now parked behind it, can
-        # never resume to release it: deadlock (this hung CoSemaphore on Windows
-        # the moment a 2nd waiter showed up).  Same parker-before-guard order as
-        # CoEvent.wait above.  Re-acquire + re-check afterward: a permit may have
-        # appeared (or been handed straight to a waiter) while we built it.
+        # the cooperative socket path and parks the goroutine).  Re-acquire +
+        # re-check afterward: a permit may have appeared while we built it, or
+        # cancel_all() may have fired (TOCTOU: goroutine was between guard-release
+        # and guard-re-acquire when cancel_all snapshotted the queue and missed it;
+        # the _cancelled flag catches this and prevents a permanent park).
         self._guard.release()
         p = _Parker()
+        # Waiter state: [parker, active, got_permit]
+        # active     = True while live; set to False by the timeout waker
+        # got_permit = set to True by release() when it hands this waiter a slot
+        w = [p, True, False]
         self._guard.acquire()
         if self._value > 0:
             self._value -= 1
             self._guard.release()
             p.release()
             return True
-        self._waiters.append(p)
+        if self._cancelled:
+            self._guard.release()
+            p.release()
+            return False
+        self._waiters.append(w)
         self._guard.release()
-        p.park()
+        if timeout is not None:
+            # Spawn a single goroutine that sleeps for the full timeout period.
+            # Using the full duration (not 0.05s increments like CoCondition) keeps
+            # the timer-event rate at 1/goroutine per timeout interval instead of
+            # 20+/goroutine, avoiding a thundering herd at 100k goroutines.
+            done = [False]
+            def _waker(waiter=w, t=timeout, flag=done):
+                _co_sleep(t)
+                if not flag[0]:
+                    waiter[1] = False   # mark timed out
+                    waiter[0].unpark()
+            _spawn(_waker)
+            p.park()
+            done[0] = True
+        else:
+            p.park()
         p.release()
-        # release() of the producer transferred a permit to us.
-        return True
+        # w[2] is True if release() handed us a permit; False if cancelled/timed out.
+        return w[2]
 
     def release(self, n=1):
         for _ in range(n):
             self._guard.acquire()
-            if self._waiters:
-                p = self._waiters.popleft()
-                self._guard.release()
-                p.unpark()
-            else:
+            found = False
+            while self._waiters:
+                w = self._waiters.popleft()
+                if w[1]:    # active (not timed out)?
+                    w[2] = True   # got_permit
+                    self._guard.release()
+                    w[0].unpark()
+                    found = True
+                    break
+                # Stale timed-out waiter: discard (goroutine drains its own parker)
+            if not found:
                 self._value += 1
                 self._guard.release()
+
+    def cancel_all(self):
+        """Unpark all waiting goroutines WITHOUT giving them permits.
+        acquire() returns False for each woken goroutine.  Used by procutil to
+        abort all goroutines queued behind _spawn_sem when the harness stops.
+        _cancelled is set FIRST so goroutines that miss the waiter snapshot
+        (in the window between guard-release and guard-re-acquire) bail out
+        at the _cancelled check instead of parking forever.
+        """
+        self._guard.acquire()
+        self._cancelled = True
+        waiters = list(self._waiters)
+        self._waiters = collections.deque()
+        self._guard.release()
+        for w in waiters:
+            if w[1]:   # active (not already timed out)
+                w[1] = False   # mark inactive — no permit
+                w[0].unpark()
 
     def __enter__(self):
         self.acquire(); return self

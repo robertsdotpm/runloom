@@ -91,6 +91,7 @@ def client(H, wid, rng, state):
         sock = None
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(2.0)
             sock.connect(("127.0.0.1", port))
             buf = bytearray()
             if not expect(sock, b"220", buf):

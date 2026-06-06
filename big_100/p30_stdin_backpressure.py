@@ -33,7 +33,8 @@ def worker(H, wid, rng, state):
         payload = b"x" * size
         try:
             proc = procutil.popen([py, "-c", SINK], stdin=subprocess.PIPE,
-                                    stdout=subprocess.PIPE)
+                                    stdout=subprocess.PIPE,
+                                    running=H.running)
             out, _ = proc.communicate(payload)      # cooperative write+read
             if not H.check(out.strip() == str(size).encode(),
                            "child got {0!r}, expected {1} wid={2}".format(

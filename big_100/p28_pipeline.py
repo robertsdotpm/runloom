@@ -34,9 +34,11 @@ def worker(H, wid, rng, state):
         p1 = p2 = None
         try:
             p1 = procutil.popen([py, "-c", PRODUCE.format(n)],
-                                  stdout=subprocess.PIPE)
+                                  stdout=subprocess.PIPE,
+                                  running=H.running)
             p2 = procutil.popen([py, "-c", FILTER],
-                                  stdin=p1.stdout, stdout=subprocess.PIPE)
+                                  stdin=p1.stdout, stdout=subprocess.PIPE,
+                                  running=H.running)
             p1.stdout.close()       # let p2 own the read end
             # communicate() drains p2.stdout via a cooperative selector;
             # a raw .read() would bypass monkey and wedge the hub.
