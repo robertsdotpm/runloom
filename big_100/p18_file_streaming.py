@@ -64,7 +64,12 @@ def reader(H, wid, rng, state):
             continue
         finally:
             sem.release()
-        queue.send((offset, chunk))
+        while H.running():
+            if queue.try_send((offset, chunk)):
+                break
+            runloom.sleep(0.002)
+        else:
+            break
         H.op(wid)
 
 
@@ -92,6 +97,14 @@ def verifier(H, wid, rng, state):
 
 
 def body(H):
+    sem = H.state["sem"]
+
+    def _cancel_watcher():
+        while H.running():
+            runloom.sleep(0.05)
+        sem.cancel_all()
+
+    H.go(_cancel_watcher)
     nverif = max(2, H.hubs * 2)
     H.run_pool(nverif, verifier, H.state)
     nread = max(1, H.funcs - nverif)
