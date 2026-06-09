@@ -32,6 +32,41 @@
 - Run the suite via `tests/run_isolated.py` (one file per subprocess); the
   in-process `pytest tests/` flakes under cross-file state leaks.
 
+## fd limits at scale (the prlimit gotcha)
+- **Every shell spawned by the agent reverts `RLIMIT_NOFILE` to a HARD cap of
+  4096**, even though systemd's `DefaultLimitNOFILE` and the editor process
+  itself are 1M+. This is NOT a system policy you can fix in
+  `/etc/security/limits.conf` or systemd: the VS Code / agent host explicitly
+  `setrlimit(NOFILE, 4096)` on each shell it forks, *after* any OS policy
+  applies. A process can't raise its own hard limit without privilege, so a
+  fresh shell is stuck at 4096 — which silently strangles any socket bench past
+  ~2000 connections with `EMFILE` (it looks like a hang / super-linear slowdown,
+  not an error).
+- **Fix per command block** (the only thing that works): raise this shell's
+  ceiling first, in the SAME block as the run —
+  `sudo -n prlimit --pid $$ --nofile=8388608:8388608`. It does NOT persist to
+  the next block (each is a fresh shell). The scale benches wrap this for you:
+  `tests_c/scale_bench.sh` raises its own `$$` then execs.
+- Kernel ceilings (raised, persist until reboot): `fs.nr_open`,
+  `vm.max_map_count` (~2 VMAs/goroutine — the first to bite at N≫100K),
+  `net.core.somaxconn`. `sudo -n sysctl -w ...` to bump them.
+- The shell also runs with `set -e` from the sourced snapshot, so a command
+  that exits nonzero (e.g. `pkill` matching nothing) aborts the whole block.
+  Prefix multi-step blocks with `set +e`.
+
+## Steady-state throughput benching (don't measure the harness)
+- A connection bench that uses ONE accept loop, a synchronized connect storm,
+  and 1 round-trip/conn measures *connection setup*, not the runtime. For a real
+  throughput number: parallel acceptors (`SO_REUSEPORT`, separate listener fds —
+  many accept goroutines on ONE fd thunder-herd on its EPOLLONESHOT netpoll
+  reg), establish all N first, then count round-trips over a fixed window.
+- **Race-free counters are mandatory with the GIL off.** A shared `counter += 1`
+  from N goroutines LOSES increments (read-modify-write race), which silently
+  under-counts — e.g. a ramp barrier that never reaches N and stalls to a
+  timeout. Use one distinct slot per goroutine (`bytearray(N)`, single writer
+  each) and sum at the boundary. Cost decomposition vs Go:
+  `tests_c/bench_throughput_py.py` + `bench/bench_throughput_go.go`.
+
 ## Concurrency tooling (tools/)
 - `run_sanitizers.sh` (deque ASan/TSan/UBSan), `run_sanitizers_ext.sh` (whole
   ext under TSan via preloaded libtsan + `setarch -R`), `lincheck/` (Porcupine

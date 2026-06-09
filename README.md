@@ -100,6 +100,29 @@ All measured; figures label whether the handler is Python or C.
   CPython's refcount-contention ceiling). A **Python** handler is another
   ~2.2× slower than the C path. See *Current limitations* for why.
 
+- **Python-goroutine throughput vs Go** -- the actual *blocking-code* path
+  (`go(fn)` + `monkey.patch()` + plain `recv`/`send`, no async/await, a Python
+  `def` handler per connection), measured **steady-state**: every connection is
+  established *before* the timing window, so the number reflects the scheduler +
+  netpoller, not connection setup. Go uses its canonical max-concurrency idiom
+  (goroutine-per-conn + `SO_REUSEPORT` acceptors). Both at 8 hubs /
+  `GOMAXPROCS=8`, 8-byte round-trips:
+
+  | conns | runloom req/s | Go req/s | runloom RSS | Go RSS | runloom ramp | Go ramp |
+  | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+  | 1,024  | 57 K | 148 K |  66 MB |  19 MB | 0.21 s | 0.13 s |
+  | 16,384 | 47 K |  99 K | 505 MB | 211 MB | **0.38 s** | 1.27 s |
+  | 65,536 | 53 K |  95 K | 1.9 GB | 811 MB | **1.38 s** | 3.30 s |
+
+  Go is **~2× the throughput** -- the cost of running the `recv`/`send` wrapper
+  as CPython bytecode instead of compiled code -- and **~2–3× leaner**
+  (~28 KB vs ~12 KB per connection). But runloom **establishes connections as
+  fast or faster** at scale. That is Python running *real blocking I/O* at half
+  of native Go's throughput with the GIL off -- an honest, steady-state number,
+  not a setup-bound or single-accept-loop artifact. Benches:
+  [tests_c/bench_throughput_py.py](https://github.com/robertsdotpm/runloom/blob/main/tests_c/bench_throughput_py.py),
+  [bench/bench_throughput_go.go](https://github.com/robertsdotpm/runloom/blob/main/bench/bench_throughput_go.go).
+
 - **vs the async ecosystem** -- same TCP echo (N=1000 keepalive conns, 1 ms
   simulated backend I/O), Python handler, one core, on **GIL'd 3.13** so every
   runtime is single-core and comparable (gevent/uvloop don't run on

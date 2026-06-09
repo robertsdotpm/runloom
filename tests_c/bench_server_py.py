@@ -175,7 +175,15 @@ def accept_loop():
         except OSError:
             break
         # Drain the accept backlog in a tight loop before re-parking, so
-        # a burst of N SYNs doesn't overflow the listen queue.
+        # a burst of N SYNs doesn't overflow the listen queue.  Yield
+        # cooperatively every BATCH accepts: without it, a sustained SYN
+        # flood lets this single accept-loop goroutine run unbounded, which
+        # the sysmon watchdog (correctly) flags as a >50 ms CPU monopoly and
+        # forcibly hands off every 50 ms -- gating connection setup to ~60/s.
+        # A periodic yield keeps the loop cooperative so accept throughput is
+        # bound by the kernel, not the wedge/handoff cycle.
+        BATCH = 256
+        since_yield = 0
         while True:
             conn.setblocking(False)
             cfd = conn.fileno()
@@ -189,6 +197,10 @@ def accept_loop():
             runloom_c.mn_go(lambda c=conn: echo_handler(c))
             if accepted >= N:
                 break
+            since_yield += 1
+            if since_yield >= BATCH:
+                since_yield = 0
+                runloom_c.sched_yield()
             try:
                 conn, _addr = listen_sock.accept()
             except (BlockingIOError, InterruptedError):
