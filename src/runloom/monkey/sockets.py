@@ -31,6 +31,29 @@ _tcp_send_once  = getattr(runloom_c, "tcp_send_once", None)
 _tcp_send_all   = getattr(runloom_c, "tcp_send", None)
 
 
+def _coop_timeout(sock):
+    """The cooperative deadline for an I/O op, or None for "block forever".
+
+    Under monkey.patch() every socket is forced to the OS-level non-blocking
+    mode (`_make_nonblocking` -> setblocking(False)), so `gettimeout()` reads
+    back as 0.0 even on a plain blocking socket the caller never touched.  A
+    0.0 here is therefore NOT "the caller asked for a non-blocking, deadline-of-
+    zero socket" -- it is the internal non-blocking flag that makes _orig_recv
+    raise BlockingIOError so we can park on the netpoll.  Treating it as a real
+    timeout meant `max(1, int(0.0*1000)) == 1` -- a 1 MILLISECOND deadline on
+    every recv/send/connect, so any round trip slower than 1 ms (i.e. anything
+    under real concurrency) died with socket.timeout, shredding connections.
+
+    So: a falsy timeout (None or 0.0) means "no deadline, block cooperatively";
+    only a POSITIVE timeout imposes a real cooperative deadline.  This matches
+    gevent/eventlet, where blocking sockets are the norm and the cooperative
+    layer supplies the blocking.  (A caller wanting genuinely-non-blocking,
+    raise-immediately semantics is not distinguishable here because the flag is
+    always forced on; that was already true before this change.)"""
+    t = sock.gettimeout()
+    return t if t else None
+
+
 def _patched_recv(self, bufsize, flags=0):
     """Cooperative recv.  Routes to the C primitive when available
     (saves the BlockingIOError raise/catch on every EAGAIN plus the
@@ -41,7 +64,7 @@ def _patched_recv(self, bufsize, flags=0):
     if not _in_goroutine():
         return _orig_recv(self, bufsize, flags)
     _make_nonblocking(self)
-    t = self.gettimeout()
+    t = _coop_timeout(self)
     if _tcp_recv_alloc is not None and t is None:
         return _tcp_recv_alloc(self.fileno(), bufsize, flags)
     if t is not None:
@@ -68,7 +91,7 @@ def _patched_recv_into(self, buffer, nbytes=0, flags=0):
     if not _in_goroutine():
         return _orig_recv_into(self, buffer, nbytes, flags)
     _make_nonblocking(self)
-    t = self.gettimeout()
+    t = _coop_timeout(self)
     if _tcp_recv is not None and t is None:
         n = nbytes if nbytes else len(buffer)
         return _tcp_recv(self.fileno(), buffer, n, flags)
@@ -150,7 +173,7 @@ def _patched_connect(self, address):
     # what asyncio's selector loop uses), and OSError(err, ...) maps to the
     # right subclass -- ConnectionRefusedError etc. -- on Linux AND Windows
     # (where errno.ECONNREFUSED is the WSA code).
-    t = self.gettimeout()
+    t = _coop_timeout(self)
     timeout_ms = max(1, int(t * 1000)) if t is not None else None
     while True:
         if timeout_ms is not None:
