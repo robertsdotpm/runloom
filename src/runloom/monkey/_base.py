@@ -109,18 +109,27 @@ def _make_nonblocking(sock):
     Without it, Nagle + delayed-ack stalls the loopback echo path by
     up to 40 ms per round trip -- which is what made the README's
     116 us/RT number look respectable when native Go does ~50 us.
+
+    Called at the top of EVERY recv/send/accept/connect, so the per-op cost
+    here is hot.  A fresh socket reads back gettimeout() != 0.0 (sockets are
+    created blocking); after we flip it non-blocking it reads 0.0 forever, so
+    that one check doubles as the "first time we've seen this socket" guard --
+    we do the setblocking AND the TCP_NODELAY setsockopt under it, exactly once
+    per socket.  (TCP_NODELAY used to sit OUTSIDE the guard, firing a redundant
+    setsockopt syscall + sock.type/sock.family attribute lookups on every
+    single recv/send -- a measurable chunk of the steady-state hot path.)
     """
     if sock.gettimeout() != 0.0:
         sock.setblocking(False)
-    # Flip TCP_NODELAY on stream sockets.  Cheap (sets a flag), safe
-    # (request-response apps benefit unconditionally), and matches Go
-    # / asyncio's default behaviour for low-latency TCP.
-    try:
-        if sock.type == socket.SOCK_STREAM and \
-           sock.family in (socket.AF_INET, socket.AF_INET6):
-            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-    except (OSError, AttributeError):
-        pass
+        # First sighting of this socket -> flip TCP_NODELAY once.  Cheap (sets
+        # a flag), safe (request-response apps benefit unconditionally), and
+        # matches Go / asyncio's default for low-latency TCP.
+        try:
+            if sock.type == socket.SOCK_STREAM and \
+               sock.family in (socket.AF_INET, socket.AF_INET6):
+                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        except (OSError, AttributeError):
+            pass
 
 
 def _fd_pollable(fd):
