@@ -4,7 +4,10 @@ Every one of the 100 stress projects is a thin workload on top of this
 module.  The harness owns all the cross-cutting requirements so the
 project files stay focused on the thing they actually stress:
 
-  * --duration   run for N seconds (default 1 hour; 1-2h is the design point)
+  * --rounds     iterations per worker goroutine (default 1; 0 = run until
+                 --duration like the old behaviour)
+  * --duration   max run time in seconds (default 3600; with --rounds 1 the
+                 run exits as soon as all workers finish their rounds)
   * --seed       deterministic per-worker RNG derivation for replay
   * --hubs       number of M:N scheduler hubs (REQUIRED > 1; this whole
                  campaign runs runloom in M:N parallel mode, never the aio
@@ -89,6 +92,32 @@ def count_fds():
         return -1
 
 
+def count_sockets():
+    """Count open socket FDs for this process.  -1 if unknown."""
+    try:
+        n = 0
+        for name in os.listdir("/proc/self/fd"):
+            try:
+                if os.readlink("/proc/self/fd/" + name).startswith("socket:"):
+                    n += 1
+            except OSError:
+                pass
+        return n
+    except OSError:
+        return -1
+
+
+def rss_mb():
+    """Process RSS in MB from /proc/self/status.  -1 if unknown."""
+    try:
+        with open("/proc/self/status") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1]) // 1024
+    except Exception:
+        return -1
+
+
 def raise_fd_limit(target):
     """Best-effort raise of RLIMIT_NOFILE so tens of thousands of sockets fit.
 
@@ -136,8 +165,17 @@ class Harness(object):
             description=describe or name,
             formatter_class=argparse.ArgumentDefaultsHelpFormatter,
         )
+        ap.add_argument("--rounds", type=int, default=1,
+                        help="iterations per worker goroutine.  0 = run until "
+                             "--duration expires (old behaviour).  With the "
+                             "default of 1 the harness exits as soon as all "
+                             "workers finish one round, giving a fast "
+                             "latency-at-scale measurement instead of a "
+                             "sustained throughput soak.")
         ap.add_argument("--duration", type=float, default=3600.0,
-                        help="seconds to run (design point 3600-7200)")
+                        help="max run time; with --rounds>0 the run also "
+                             "exits when all workers are done, whichever "
+                             "comes first")
         ap.add_argument("--seed", type=int, default=1234,
                         help="master seed for deterministic per-worker RNG")
         ap.add_argument("--hubs", type=int, default=8,
@@ -180,10 +218,14 @@ class Harness(object):
                              "unlimited.  Programs with hard resource limits "
                              "(PTY count, socket FDs) may apply a tighter cap "
                              "via run_pool(max_concurrent=N).")
-        ap.add_argument("--ip-slot", type=int, default=0,
-                        help="IP isolation slot; slot N uses 127.(N+1).0.x "
-                             "so concurrent jobs never share loopback addresses "
-                             "and cannot exhaust each other's ephemeral ports")
+        ap.add_argument("--ip-start", type=int, default=1,
+                        help="first 127.X.0.1 address index for this program's "
+                             "loopback IP range.  Concurrent jobs use non-"
+                             "overlapping ranges so they don't share ports.")
+        ap.add_argument("--ip-end", type=int, default=8,
+                        help="last 127.X.0.1 address index (inclusive). "
+                             "Programs that need many server IPs raise this. "
+                             "127.X.0.1 for X in [ip-start, ip-end].")
         if add_args is not None:
             add_args(ap)
         self.args = ap.parse_args()
@@ -196,6 +238,7 @@ class Harness(object):
 
         self.seed = self.args.seed
         self.duration = self.args.duration
+        self.rounds = max(0, self.args.rounds)
         self.hubs = self.args.hubs
         self.funcs = self.args.funcs
         self._max_funcs = None   # set by harness.main(max_funcs=) to cap H.funcs
@@ -217,12 +260,13 @@ class Harness(object):
         self.log_interval = self.args.log_interval
         self.fail_fast = self.args.fail_fast
 
-        # IP isolation: slot N -> subnet 127.(N+1).0.0/24
-        # 8 IPs per slot; slot 0 = 127.1.0.1..8 (never 127.0.0.1 to avoid
-        # colliding with the default loopback used outside the soak)
-        _slot = max(0, self.args.ip_slot)
+        # IP range: --ip-start/--ip-end define 127.X.0.1 for X in [start, end].
+        # Concurrent soak jobs use non-overlapping ranges so they never share
+        # ephemeral ports. Default start=1, end=8 gives 8 IPs (127.1.0.1..8).
+        _start = max(1, self.args.ip_start)
+        _end = max(_start, self.args.ip_end)
         self.net_ips = [
-            "127.{0}.0.{1}".format(_slot + 1, i + 1) for i in range(8)
+            "127.{0}.0.1".format(x) for x in range(_start, _end + 1)
         ]
         # Expose primary IP as env var so netutil defaults pick it up without
         # requiring every test to read H.net_ips explicitly.
@@ -316,6 +360,19 @@ class Harness(object):
         """True while workers should keep doing work."""
         return (not self.failed and not self.done_flag
                 and REAL_MONO() < self.deadline)
+
+    def round_range(self):
+        """Yield once per round.  Use instead of `while H.running():` in
+        worker functions so --rounds controls iteration count.  With the
+        default --rounds 1 the body executes exactly once per goroutine."""
+        if self.rounds == 0:
+            while self.running():
+                yield
+        else:
+            for _ in range(self.rounds):
+                if not self.running():
+                    return
+                yield
 
     def sleep(self, seconds):
         runloom.sleep(seconds)
@@ -535,9 +592,10 @@ class Harness(object):
                 pass
 
     def wait_for_deadline(self, poll=0.2):
-        """Block the root goroutine until the duration elapses (or an
-        invariant fails).  Workers run on the hubs meanwhile."""
+        """Block until the deadline, all workers done, or a failure."""
         while self.running():
+            if self.expected > 0 and self.exited >= self.expected:
+                break
             runloom.sleep(poll)
 
     def drain_workers(self, grace=30.0):
@@ -652,6 +710,9 @@ class Harness(object):
                          "scheduler/offload-pool fds, not a per-op leak; the "
                          "auditor projects check bounded growth)\n".format(
                              leaked))
+        sys.stderr.write("  peak_goroutines: {0}\n".format(self.expected))
+        sys.stderr.write("  sockets_end   : {0}\n".format(count_sockets()))
+        sys.stderr.write("  mem_rss_mb    : {0}\n".format(rss_mb()))
         if self.first_fail:
             sys.stderr.write("  first_failure : {0}\n".format(self.first_fail))
         verdict = "PASS" if self.exit_code == EXIT_OK else "FAIL"

@@ -29,27 +29,29 @@ def echo_handler(H, conn):
 
 
 def setup(H):
-    srv = netutil.listen_tcp()
-    H.state = {"port": srv.getsockname()[1], "host": srv.getsockname()[0]}
-    H.go(netutil.serve_forever, H, srv,
-         lambda conn, addr: H.go(echo_handler, H, conn))
+    servers = []
+    for ip in H.net_ips:
+        srv = netutil.listen_tcp(host=ip)
+        H.register_close(srv)
+        H.go(netutil.serve_forever, H, srv,
+             lambda conn, addr: H.go(echo_handler, H, conn))
+        servers.append((ip, srv.getsockname()[1]))
+    H.state = {"servers": servers}
 
 
 def client(H, wid, rng, state):
-    port = state["port"]
-
-    host = state["host"]
-    # Spread the initial connect storm deterministically so 10k clients don't
-    # all SYN in the same instant (still a storm, just not a thundering one).
+    servers = state["servers"]
+    # Spread the initial connect storm deterministically.
     H.sleep(rng.random() * 0.5)
-    while H.running():
+    for _ in H.round_range():
         sock = None
         did = 0
+        host, port = servers[rng.randrange(len(servers))]
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.connect((host, port))
-            rounds = rng.randint(1, 8)
-            for _ in range(rounds):
+            n = rng.randint(1, 8)
+            for _ in range(n):
                 if not H.running():
                     break
                 payload = rng.randbytes(rng.randint(1, 512))
@@ -66,8 +68,6 @@ def client(H, wid, rng, state):
         except OSError:
             if not H.running():
                 break
-            # Connect storms hit backlog limits -> brief backoff and retry.
-            H.sleep(0.005)
         finally:
             if sock is not None:
                 try:
