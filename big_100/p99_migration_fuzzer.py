@@ -18,14 +18,6 @@ import threading
 import harness
 import runloom
 
-# `with lock: ...; yield_now()` holds the lock for O(N/hubs) scheduler ticks.
-# At 100k goroutines that is ~12.5ms/hold → throughput ~80/s → drain 1250s.
-# max_concurrent=MAX_WORKERS spawns only MAX_WORKERS goroutines, each looping
-# -- no CoSemaphore needed (which would create one pipe-pair per waiting
-# goroutine and blow the FD limit at 1M funcs).
-MAX_WORKERS = 2000
-
-
 def setup(H):
     H.state = {"lock": threading.Lock(), "counter": [0]}
 
@@ -66,7 +58,7 @@ def worker(H, wid, rng, state):
 
 
 def body(H):
-    H.run_pool(H.funcs, worker, H.state, max_concurrent=MAX_WORKERS)
+    H.run_pool(H.funcs, worker, H.state)
 
 
 def post(H):

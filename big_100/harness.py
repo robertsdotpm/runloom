@@ -151,8 +151,10 @@ class Harness(object):
                              " (hard_deadline = deadline + drain_timeout)")
         ap.add_argument("--log-interval", type=float, default=5.0,
                         help="seconds between progress log lines")
-        ap.add_argument("--fd-limit", type=int, default=1048576,
-                        help="raise RLIMIT_NOFILE to this (sudo prlimit)")
+        ap.add_argument("--fd-limit", type=int, default=8388608,
+                        help="raise RLIMIT_NOFILE to this (sudo prlimit). "
+                             "Defaults to 8M; the kernel fs.nr_open ceiling "
+                             "is typically 1M-8M depending on sysctl.")
         ap.add_argument("--stack-kb", type=int, default=512,
                         help="per-goroutine C stack in KB (default 512: the "
                              "128KB default overflows under Python socket load "
@@ -167,6 +169,17 @@ class Harness(object):
                              "the campaign found it corrupts memory under high "
                              "socket concurrency -- see FINDINGS.md BUG #2; "
                              "pass this to reproduce that crash)")
+        ap.add_argument("--max-concurrent", type=int, default=None,
+                        metavar="K",
+                        help="limit goroutines per run_pool call to K.  "
+                             "Useful when yield_now()/sleep() inside a lock "
+                             "makes drain time scale with goroutine count: "
+                             "with K goroutines the lock can't be held for "
+                             ">K/hubs scheduler ticks.  Defaults to "
+                             "RUNLOOM_MAX_CONCURRENT env var if set, else "
+                             "unlimited.  Programs with hard resource limits "
+                             "(PTY count, socket FDs) may apply a tighter cap "
+                             "via run_pool(max_concurrent=N).")
         ap.add_argument("--ip-slot", type=int, default=0,
                         help="IP isolation slot; slot N uses 127.(N+1).0.x "
                              "so concurrent jobs never share loopback addresses "
@@ -186,6 +199,19 @@ class Harness(object):
         self.hubs = self.args.hubs
         self.funcs = self.args.funcs
         self._max_funcs = None   # set by harness.main(max_funcs=) to cap H.funcs
+
+        # Global concurrent-goroutine cap per run_pool call.
+        # Programs with hard resource limits may override with a lower value
+        # passed directly to run_pool(max_concurrent=N).
+        _env_mc = os.environ.get("RUNLOOM_MAX_CONCURRENT", "")
+        _arg_mc = getattr(self.args, "max_concurrent", None)
+        if _arg_mc is not None:
+            self.max_concurrent = _arg_mc
+        elif _env_mc.strip().isdigit():
+            self.max_concurrent = int(_env_mc.strip())
+        else:
+            self.max_concurrent = None   # unlimited
+
         self.hang_timeout = self.args.hang_timeout
         self.drain_timeout = self.args.drain_timeout
         self.log_interval = self.args.log_interval
@@ -381,13 +407,14 @@ class Harness(object):
     def run_pool(self, n, worker_fn, *extra, **kw):
         """Spawn worker goroutines, each running worker_fn(H, wid, rng, *extra).
 
-        max_concurrent=K   spawn only min(n, K) goroutines.  Use this instead of
-                           a CoSemaphore inside the worker: CoSemaphore creates
-                           one pipe-pair per waiting goroutine, so at 1M funcs
-                           with max_concurrent=2000 you'd need ~2M pipe FDs.
-                           With max_concurrent, only K goroutines are ever alive.
+        max_concurrent=K   spawn only min(n, K) goroutines instead of n.
+                           Overrides H.max_concurrent for this pool.
+                           Use for hard resource limits (PTY count, socket FDs).
+                           Most programs should omit this and let H.max_concurrent
+                           (set via --max-concurrent / RUNLOOM_MAX_CONCURRENT) do
+                           the job.
         """
-        max_concurrent = kw.pop("max_concurrent", None)
+        max_concurrent = kw.pop("max_concurrent", self.max_concurrent)
         if kw:
             raise TypeError("unexpected keyword arguments: " + ", ".join(kw))
         actual = n if (max_concurrent is None or max_concurrent >= n) else max_concurrent

@@ -56,13 +56,6 @@ class Res(object):
         self.close()
 
 
-# max_concurrent caps goroutines so only MAX_WORKERS are alive at once; no
-# CoSemaphore needed (which would create one pipe-pair per waiting goroutine
-# and blow the FD limit at 1M funcs).  The fd auditor bound uses MAX_WORKERS
-# since that is the actual concurrent worker count regardless of H.funcs.
-MAX_WORKERS = 2000
-
-
 def setup(H):
     base = H.make_tmpdir("big100_reslife_")
     H.state = {"base": base, "acquired": [0], "released": [0],
@@ -89,17 +82,18 @@ def worker(H, wid, rng, state):
 
 def body(H):
     def auditor():
+        cap = H.max_concurrent if H.max_concurrent is not None else H.funcs
         base = harness.count_fds()
         while H.running():
             fds = harness.count_fds()
             H.fd_ceiling = max(H.fd_ceiling, fds)
-            H.check(fds < base + MAX_WORKERS * 8 + 6000,
+            H.check(fds < base + cap * 8 + 6000,
                     "fd leak: {0} open (base {1})".format(fds, base))
             H.sleep(1.0)
             gc.collect()
 
     H.go(auditor)
-    H.run_pool(H.funcs, worker, H.state, max_concurrent=MAX_WORKERS)
+    H.run_pool(H.funcs, worker, H.state)
 
 
 def post(H):

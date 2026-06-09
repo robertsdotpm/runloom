@@ -106,9 +106,8 @@ def writer(H, wid, rng, state):
 def body(H):
     writers = max(2, H.funcs // 20)
     readers = H.funcs - writers
-    H.run_pool(writers, writer, H.state, max_concurrent=max(2, MAX_ACTIVE // 20))
-    H.run_pool(readers, reader, H.state,
-               max_concurrent=MAX_ACTIVE - max(2, MAX_ACTIVE // 20))
+    H.run_pool(writers, writer, H.state)
+    H.run_pool(readers, reader, H.state)
 
 
 if __name__ == "__main__":

@@ -31,14 +31,6 @@ class Noisy(object):
             raise RuntimeError("boom in __del__ {0}".format(self.idx))
 
 
-# At 100k goroutines, each iteration acquires state["lock"] ONCE for
-# `created` AND the Noisy.__del__ finalizers each acquire it too.  With
-# 100k goroutines competing for a single CoLock, throughput ≈ 80/s and
-# drain ≈ 100k/80 ≈ 1250s >> 120s.  max_concurrent caps goroutines so only
-# MAX_WORKERS compete; drain stays well within bounds.
-MAX_WORKERS = 2000
-
-
 def worker(H, wid, rng, state):
     i = 0
     while H.running():
@@ -74,7 +66,7 @@ def body(H):
             H.state["created"][0], H.state["finalized"][0]))
 
     H.go(gc_driver)
-    H.run_pool(H.funcs, worker, H.state, max_concurrent=MAX_WORKERS)
+    H.run_pool(H.funcs, worker, H.state)
 
 
 def post(H):

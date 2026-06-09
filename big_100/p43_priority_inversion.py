@@ -56,8 +56,8 @@ def high_pri(H, wid, rng, state):
 def body(H):
     lows = H.funcs // 2
     highs = H.funcs - lows
-    H.run_pool(lows, low_pri, H.state, max_concurrent=MAX_CONTENDERS)
-    H.run_pool(highs, high_pri, H.state, max_concurrent=MAX_CONTENDERS)
+    H.run_pool(lows, low_pri, H.state)
+    H.run_pool(highs, high_pri, H.state)
 
 
 def post(H):

@@ -15,12 +15,6 @@ import netutil
 
 NFILES = 16
 
-# max_concurrent=MAX_CLIENTS spawns only MAX_CLIENTS goroutines, each looping.
-# No CoSemaphore needed (which would create one pipe-pair per waiting goroutine
-# and blow the FD limit at 1M funcs).
-MAX_CLIENTS = 2000
-
-
 def content(idx, size):
     # Deterministic bytes: byte j of file idx = (idx*131 + j) % 251
     base = (idx * 131) & 0xFF
@@ -139,7 +133,7 @@ def client(H, wid, rng, state):
 
 
 def body(H):
-    H.run_pool(H.funcs, client, H.state, max_concurrent=MAX_CLIENTS)
+    H.run_pool(H.funcs, client, H.state)
 
 
 if __name__ == "__main__":

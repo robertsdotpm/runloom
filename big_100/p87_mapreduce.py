@@ -41,10 +41,6 @@ def setup(H):
         path = os.path.join(base, "doc{0}.txt".format(k))
         counts = gen_file(path, 1000 + k * 200, seedrng)
         files[k] = (path, counts)
-    # max_concurrent caps goroutines: with lock: dict-update over ~1200 keys
-    # while 100k goroutines all compete => hold time amplified => drain >> 120s.
-    # max_concurrent=MAX_WORKERS spawns only MAX_WORKERS goroutines, each
-    # looping -- no CoSemaphore needed.
     H.state = {"files": files, "global": {}, "lock": threading.Lock()}
 
 
@@ -55,9 +51,6 @@ def map_file(path):
             for w in line.split():
                 counts[w] = counts.get(w, 0) + 1
     return counts
-
-
-MAX_WORKERS = 2000
 
 
 def worker(H, wid, rng, state):
@@ -81,7 +74,7 @@ def worker(H, wid, rng, state):
 
 
 def body(H):
-    H.run_pool(H.funcs, worker, H.state, max_concurrent=MAX_WORKERS)
+    H.run_pool(H.funcs, worker, H.state)
 
 
 def post(H):

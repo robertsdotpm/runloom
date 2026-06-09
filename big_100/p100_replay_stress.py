@@ -20,13 +20,6 @@ NACCOUNTS = 512
 START = 1000
 TOTAL = NACCOUNTS * START
 
-# 30% of transfers call yield_now() inside the lock, so lock hold time scales
-# with ready-ring depth (~N/hubs ticks).  At 100k goroutines: ~12.5ms hold,
-# throughput ~80/s, drain ~1250s.  max_concurrent caps goroutines so only
-# MAX_WORKERS compete; drain stays well within bounds.
-MAX_WORKERS = 2000
-
-
 def setup(H):
     H.state = {"acct": [START] * NACCOUNTS, "lock": runloom.sync.Lock(),
                "broke": [False]}
@@ -79,7 +72,7 @@ def dump_replay(H, wid, oplog, total):
 
 
 def body(H):
-    H.run_pool(H.funcs, worker, H.state, max_concurrent=MAX_WORKERS)
+    H.run_pool(H.funcs, worker, H.state)
 
     def auditor():
         acct = H.state["acct"]

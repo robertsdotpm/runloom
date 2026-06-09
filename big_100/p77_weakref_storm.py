@@ -23,16 +23,6 @@ class Thing(object):
         self.n = n
 
 
-# At 100k goroutines, all calling del things simultaneously, 100k weakref
-# callbacks try to acquire the same CoLock => drain takes hours.
-# max_concurrent=MAX_WORKERS spawns only MAX_WORKERS goroutines, each looping
-# -- no CoSemaphore needed (which would create one pipe-pair per waiting
-# goroutine and blow the FD limit at 1M funcs).
-# Note: _thread.allocate_lock is patched to CoLock by monkey.patch(), so
-# we use threading.Lock() directly (also a CoLock after patching).
-MAX_WORKERS = 2000
-
-
 def setup(H):
     H.state = {"lock": threading.Lock(), "fired": [0], "created": [0],
                "queue": []}
@@ -74,7 +64,7 @@ def body(H):
             gc.collect()
 
     H.go(gc_driver)
-    H.run_pool(H.funcs, worker, H.state, max_concurrent=MAX_WORKERS)
+    H.run_pool(H.funcs, worker, H.state)
 
 
 def post(H):

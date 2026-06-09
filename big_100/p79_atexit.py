@@ -36,13 +36,6 @@ sys.stdout.write("MAIN-EXIT\n"); sys.stdout.flush()
 '''
 
 
-# max_concurrent caps goroutines so only MAX_WORKERS are alive at once, each
-# looping.  procutil.popen() has its own internal semaphore (MAX_CONCURRENT=32)
-# that limits concurrent Popen() calls.  Together: at most 32 goroutines exist,
-# each running at most one subprocess at a time via procutil's cap.
-MAX_WORKERS = 32
-
-
 def setup(H):
     import sys
     src = os.path.join(os.path.dirname(os.path.dirname(
@@ -77,7 +70,7 @@ def worker(H, wid, rng, state):
 
 
 def body(H):
-    H.run_pool(H.funcs, worker, H.state, max_concurrent=MAX_WORKERS)
+    H.run_pool(H.funcs, worker, H.state)
 
 
 if __name__ == "__main__":
