@@ -6,7 +6,6 @@ and verify the bytes against the deterministic content.
 
 Stresses: file + socket I/O together, Range handling, partial responses.
 """
-import os
 import socket
 import threading
 
@@ -16,6 +15,9 @@ import netutil
 
 NFILES = 16
 
+# max_concurrent=MAX_CLIENTS spawns only MAX_CLIENTS goroutines, each looping.
+# No CoSemaphore needed (which would create one pipe-pair per waiting goroutine
+# and blow the FD limit at 1M funcs).
 MAX_CLIENTS = 2000
 
 
@@ -34,8 +36,7 @@ def setup(H):
         files[k] = (size, data)
     host = H.net_ips[0]
     srv = netutil.listen_tcp(host=host)
-    sem = threading.Semaphore(MAX_CLIENTS)
-    H.state = {"port": srv.getsockname()[1], "host": host, "files": files, "sem": sem}
+    H.state = {"port": srv.getsockname()[1], "host": host, "files": files}
 
     def handle(conn):
         try:
@@ -100,11 +101,8 @@ def client(H, wid, rng, state):
     port = state["port"]
     host = state["host"]
     files = state["files"]
-    sem = state["sem"]
     H.sleep(rng.random() * 0.5)
     while H.running():
-        if not sem.acquire():
-            break
         sock = None
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -138,20 +136,10 @@ def client(H, wid, rng, state):
             H.sleep(0.005)
         finally:
             netutil.close_quiet(sock)
-            sem.release()
 
 
 def body(H):
-    sem = H.state["sem"]
-
-    def _cancel_watcher():
-        while H.running():
-            runloom.sleep(0.05)
-        sem.cancel_all()
-
-    import runloom
-    H.go(_cancel_watcher)
-    H.run_pool(H.funcs, client, H.state)
+    H.run_pool(H.funcs, client, H.state, max_concurrent=MAX_CLIENTS)
 
 
 if __name__ == "__main__":

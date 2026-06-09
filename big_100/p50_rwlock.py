@@ -51,16 +51,15 @@ class RWLock(object):
 
 
 # Same drain problem as p43: 100k goroutines competing for a single Condition
-# => drain time = O(N / throughput) >> 120s.  Cap concurrent contenders and use
-# a cancel-watcher to wake parked goroutines immediately when the run ends.
+# => drain time = O(N / throughput) >> 120s.  max_concurrent caps goroutines
+# per pool so only MAX_ACTIVE compete total; drain stays well within bounds.
 # wacquire/racquire take a running= arg and use wait(timeout=0.05) so goroutines
 # parked inside the condition can escape without explicit cancel_all on Condition.
 MAX_ACTIVE = 2000
 
 
 def setup(H):
-    sem = threading.Semaphore(MAX_ACTIVE)
-    H.state = {"rw": RWLock(), "data": {"v": 0, "sum": 0}, "sem": sem}
+    H.state = {"rw": RWLock(), "data": {"v": 0, "sum": 0}}
 
 
 def checksum(v):
@@ -70,14 +69,8 @@ def checksum(v):
 def reader(H, wid, rng, state):
     rw = state["rw"]
     data = state["data"]
-    sem = state["sem"]
     while H.running():
-        if not sem.acquire():
-            break
-        try:
-            acquired = rw.racquire(running=H.running)
-        finally:
-            sem.release()
+        acquired = rw.racquire(running=H.running)
         if not acquired:
             break
         try:
@@ -95,14 +88,8 @@ def reader(H, wid, rng, state):
 def writer(H, wid, rng, state):
     rw = state["rw"]
     data = state["data"]
-    sem = state["sem"]
     while H.running():
-        if not sem.acquire():
-            break
-        try:
-            acquired = rw.wacquire(running=H.running)
-        finally:
-            sem.release()
+        acquired = rw.wacquire(running=H.running)
         if not acquired:
             break
         try:
@@ -117,19 +104,11 @@ def writer(H, wid, rng, state):
 
 
 def body(H):
-    sem = H.state["sem"]
-
-    def _cancel_watcher():
-        while H.running():
-            runloom.sleep(0.05)
-        sem.cancel_all()
-
-    H.go(_cancel_watcher)
-
     writers = max(2, H.funcs // 20)
     readers = H.funcs - writers
-    H.run_pool(writers, writer, H.state)
-    H.run_pool(readers, reader, H.state)
+    H.run_pool(writers, writer, H.state, max_concurrent=max(2, MAX_ACTIVE // 20))
+    H.run_pool(readers, reader, H.state,
+               max_concurrent=MAX_ACTIVE - max(2, MAX_ACTIVE // 20))
 
 
 if __name__ == "__main__":

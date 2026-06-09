@@ -13,10 +13,10 @@ import runloom_c
 BRANCH = 3
 DEPTH = 8           # 3^(8+1)-1)/(3-1) = 9841 nodes per tree
 
-# At 100k workers each potentially running a 9841-node tree, the concurrent
-# goroutine count explodes.  Cap concurrent trees: 200 * 9841 ≈ 2M goroutines
-# is feasible; workers that can't get a slot exit immediately at drain time
-# when cancel_all() fires.
+# max_concurrent=MAX_TREES spawns only MAX_TREES worker goroutines, each
+# looping.  Each active worker spawns a full 9841-node tree, so peak
+# goroutines ≈ MAX_TREES * 9841 ≈ 2M -- feasible and well within runloom's
+# tested range.  No CoSemaphore needed.
 MAX_TREES = 200
 
 
@@ -36,26 +36,12 @@ def spawn_tree(H, depth, done):
 
 
 def setup(H):
-    sem = runloom.sync.Semaphore(MAX_TREES)
-
-    def _cancel_watcher(r=H.running, s=sem):
-        while r():
-            runloom.sleep(0.05)
-        s.cancel_all()
-
-    H.go(_cancel_watcher)
-    H.state = {"sem": sem}
+    H.state = {}
 
 
 def worker(H, wid, rng, state):
-    sem = state["sem"]
     total = expected_nodes()
     while H.running():
-        if not sem.acquire():
-            break   # drain: cancel_all() fired
-        if not H.running():
-            sem.release()
-            break
         done = runloom.Chan(total)
         H.go(spawn_tree, H, DEPTH, done)
         seen = 0
@@ -63,7 +49,6 @@ def worker(H, wid, rng, state):
             done.recv()
             seen += 1
             H.op(wid)
-        sem.release()
         if not H.check(seen == total,
                        "node count {0} != {1} wid={2}".format(
                            seen, total, wid)):
@@ -75,7 +60,7 @@ def body(H):
     # Tree nodes are many and shallow (each is its own goroutine, no deep C
     # recursion), so a small stack keeps the wide fan-out affordable.
     runloom_c.set_stack_size(96 * 1024)
-    H.run_pool(H.funcs, worker, H.state)
+    H.run_pool(H.funcs, worker, H.state, max_concurrent=MAX_TREES)
 
 
 if __name__ == "__main__":

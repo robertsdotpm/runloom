@@ -49,7 +49,7 @@ def setup(H):
 
 
 def body(H):
-    H.run_pool(H.funcs, worker, H.state)
+    H.run_pool(H.funcs, worker, H.state, max_concurrent=400)
 
 
 if __name__ == "__main__":

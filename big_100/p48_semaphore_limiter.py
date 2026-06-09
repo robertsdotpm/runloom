@@ -62,7 +62,9 @@ def worker(H, wid, rng, state):
 
 
 def body(H):
-    H.run_pool(H.funcs, worker, H.state)
+    # max_concurrent bounds goroutines waiting in sem.acquire(), which each
+    # hold a pipe-pair (2 FDs).  At 1M funcs without this cap: ~2M pipe FDs.
+    H.run_pool(H.funcs, worker, H.state, max_concurrent=4000)
 
 
 def post(H):

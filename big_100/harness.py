@@ -185,6 +185,7 @@ class Harness(object):
         self.duration = self.args.duration
         self.hubs = self.args.hubs
         self.funcs = self.args.funcs
+        self._max_funcs = None   # set by harness.main(max_funcs=) to cap H.funcs
         self.hang_timeout = self.args.hang_timeout
         self.drain_timeout = self.args.drain_timeout
         self.log_interval = self.args.log_interval
@@ -377,12 +378,21 @@ class Harness(object):
         self.add_cleanup(lambda: shutil.rmtree(d, ignore_errors=True))
         return d
 
-    def run_pool(self, n, worker_fn, *extra):
-        """Spawn n worker goroutines, each running
-        worker_fn(H, wid, rng, *extra).  worker_fn is expected to loop on
-        H.running().  Completion + exceptions are tracked automatically."""
-        self.expected += n
-        for wid in range(n):
+    def run_pool(self, n, worker_fn, *extra, **kw):
+        """Spawn worker goroutines, each running worker_fn(H, wid, rng, *extra).
+
+        max_concurrent=K   spawn only min(n, K) goroutines.  Use this instead of
+                           a CoSemaphore inside the worker: CoSemaphore creates
+                           one pipe-pair per waiting goroutine, so at 1M funcs
+                           with max_concurrent=2000 you'd need ~2M pipe FDs.
+                           With max_concurrent, only K goroutines are ever alive.
+        """
+        max_concurrent = kw.pop("max_concurrent", None)
+        if kw:
+            raise TypeError("unexpected keyword arguments: " + ", ".join(kw))
+        actual = n if (max_concurrent is None or max_concurrent >= n) else max_concurrent
+        self.expected += actual
+        for wid in range(actual):
             rng = self.derive("pool", worker_fn.__name__, wid)
             self.go(self._worker_wrap, worker_fn, wid, rng, extra)
 
@@ -630,13 +640,17 @@ class Harness(object):
 
 
 def main(name, body, setup=None, post=None, default_funcs=10000, describe="",
-         add_args=None):
+         add_args=None, max_funcs=None):
     """Convenience entry point for a project module.
 
-        if __name__ == "__main__":
-            harness.main("p01_tcp_echo", body, setup=setup)
+    max_funcs   hard ceiling on H.funcs regardless of --funcs.  Use for
+                programs that are resource-constrained (subprocesses, PTYs,
+                file handles) and must not be driven at 1M goroutines even
+                when the soak script passes --funcs 1000000.
     """
     H = Harness(name, default_funcs=default_funcs, describe=describe,
                 add_args=add_args)
+    if max_funcs is not None and H.funcs > max_funcs:
+        H.funcs = max_funcs
     code = H.run(body, setup=setup, post=post)
     sys.exit(code)

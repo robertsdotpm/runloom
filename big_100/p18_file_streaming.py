@@ -10,14 +10,14 @@ Stresses: file reads at offset, channels + backpressure, scheduler fairness,
 the reader/verifier split across hubs.
 """
 import os
-import threading
 
 import harness
 import runloom
 
-# Limit concurrent file opens: 100k goroutines each opening a 2MiB file
-# overwhelms the page cache and can SIGSEGV under free-threaded 3.13t's parker
-# pool.  Cap at MAX_READERS concurrent opens; the rest park on the semaphore.
+# Limit concurrent file opens: at 1M goroutines each opening a 2MiB file
+# overwhelms the page cache.  max_concurrent=MAX_READERS spawns only
+# MAX_READERS goroutines, each looping -- no CoSemaphore needed (which would
+# create one pipe-pair per waiting goroutine and blow the FD limit at 1M funcs).
 MAX_READERS = 1024
 
 NFILES = 8
@@ -40,20 +40,16 @@ def setup(H):
         with open(p, "wb") as f:
             f.write(tile)
         paths.append(p)
-    sem = threading.Semaphore(MAX_READERS)
-    H.state = {"paths": paths, "queue": runloom.Chan(4096), "sem": sem}
+    H.state = {"paths": paths, "queue": runloom.Chan(4096)}
 
 
 def reader(H, wid, rng, state):
     paths = state["paths"]
     queue = state["queue"]
-    sem = state["sem"]
     H.sleep(rng.random() * 0.5)
     while H.running():
         path = rng.choice(paths)
         offset = rng.randrange(0, FILESIZE - CHUNK)
-        if not sem.acquire():
-            break
         try:
             with open(path, "rb") as f:
                 f.seek(offset)
@@ -62,8 +58,6 @@ def reader(H, wid, rng, state):
             if not H.running():
                 break
             continue
-        finally:
-            sem.release()
         while H.running():
             if queue.try_send((offset, chunk)):
                 break
@@ -97,18 +91,10 @@ def verifier(H, wid, rng, state):
 
 
 def body(H):
-    sem = H.state["sem"]
-
-    def _cancel_watcher():
-        while H.running():
-            runloom.sleep(0.05)
-        sem.cancel_all()
-
-    H.go(_cancel_watcher)
     nverif = max(2, H.hubs * 2)
     H.run_pool(nverif, verifier, H.state)
     nread = max(1, H.funcs - nverif)
-    H.run_pool(nread, reader, H.state)
+    H.run_pool(nread, reader, H.state, max_concurrent=MAX_READERS)
 
 
 if __name__ == "__main__":

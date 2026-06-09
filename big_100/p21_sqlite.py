@@ -10,15 +10,12 @@ Stresses: C-extension blocking through the offload pool, database locks,
 busy-timeout retries.
 
 SCALE NOTE: SQLite WAL supports at most ~2000 concurrent writers cleanly before
-lock contention and connection-create time make drain time explode.  At 100k
-goroutines we cap concurrent ACTIVE workers at MAX_ACTIVE=2000 via a
-CoSemaphore (same pattern as procutil.py).  Goroutines waiting in the semaphore
-exit immediately when drain starts via cancel_all(); only the MAX_ACTIVE
-in-flight ones need to close their connections, which completes in a few
-seconds.
+lock contention and connection-create time make drain time explode.
+run_pool(max_concurrent=MAX_ACTIVE) keeps exactly MAX_ACTIVE goroutines alive
+(no CoSemaphore needed, which would create one pipe-pair per waiting goroutine
+and blow the FD limit at 1M funcs).
 """
 import sqlite3
-import threading
 
 import harness
 import runloom
@@ -37,25 +34,11 @@ def setup(H):
     con.execute("CREATE INDEX kv_wid ON kv(wid)")
     con.commit()
     con.close()
-    sem = threading.Semaphore(MAX_ACTIVE)
-
-    def _cancel_watcher(r=H.running, s=sem):
-        while r():
-            runloom.sleep(0.05)
-        s.cancel_all()
-
-    H.go(_cancel_watcher)
-    H.state = {"db": db, "sem": sem}
+    H.state = {"db": db}
 
 
 def worker(H, wid, rng, state):
     db = state["db"]
-    sem = state["sem"]
-
-    # Limit concurrent active workers so drain stays within the timeout even
-    # at 100k goroutines.  Waiters exit immediately when drain fires cancel_all.
-    if not sem.acquire():
-        return  # drain started before we got a slot
 
     def connect():
         c = sqlite3.connect(db, timeout=30, check_same_thread=False)
@@ -63,7 +46,6 @@ def worker(H, wid, rng, state):
         return c
 
     con = runloom.blocking(connect)
-    H.sleep(rng.random() * 0.5)
     try:
         seq = 0
         while H.running():
@@ -99,11 +81,10 @@ def worker(H, wid, rng, state):
                     H.sleep(0.005)
     finally:
         runloom.blocking(con.close)
-        sem.release()
 
 
 def body(H):
-    H.run_pool(H.funcs, worker, H.state)
+    H.run_pool(H.funcs, worker, H.state, max_concurrent=MAX_ACTIVE)
 
 
 if __name__ == "__main__":

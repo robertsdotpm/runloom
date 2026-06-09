@@ -40,7 +40,7 @@ CORES=$(nproc 2>/dev/null || echo 4)
 RAM_GB=$(awk '/MemAvailable/{printf "%d", $2/1024/1024}' /proc/meminfo 2>/dev/null || echo 8)
 
 # ---- tunables with env-var overrides --------------------------------------
-FUNCS=${FUNCS:-100000}
+FUNCS=${FUNCS:-1000000}
 # RESERVE_CORES: leave this many cores idle (for VS Code / system).
 RESERVE_CORES=${RESERVE_CORES:-10}
 _USABLE=$(( CORES - RESERVE_CORES < 4 ? 4 : CORES - RESERVE_CORES ))
@@ -68,13 +68,16 @@ WALL=${WALL:-$(( DUR + 120 ))}
 IP_SLOT_CTR=/tmp/soak_ip_slot_ctr
 
 # ---- raise FD limit -------------------------------------------------------
-# Each program with 100k goroutines can open up to ~200k FDs (network).
-# JOBS programs in parallel => JOBS * 200k.  Raise per-process nofile.
-_needed=$(( JOBS * FUNCS * 2 + 4096 ))
+# Most programs now use max_concurrent to cap live goroutines regardless of
+# --funcs, so per-program FD usage is bounded by max_concurrent * ~5, not by
+# FUNCS.  Network programs without explicit caps still churn sockets fast (open
+# then close), so peak open sockets << H.funcs.  Request 1M FDs as a generous
+# ceiling (the kernel cap on most systems); JOBS doesn't matter much here since
+# each job's FD namespace is shared with the parent shell.
+_needed=1048576
 _cur=$(ulimit -n)
 if [ "$_cur" -lt "$_needed" ] && [ "$_cur" != "unlimited" ]; then
-    ulimit -n "$_needed" 2>/dev/null || \
-    ulimit -n 1048576   2>/dev/null || true
+    ulimit -n "$_needed" 2>/dev/null || true
 fi
 
 export RUNLOOM_SYSMON_QUIET=1 PYTHON_GIL=0 HUBS JOBS FUNCS DUR

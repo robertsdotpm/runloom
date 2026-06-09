@@ -47,7 +47,7 @@ def worker(H, wid, rng, state):
 
 
 def body(H):
-    H.run_pool(H.funcs, worker, None)
+    H.run_pool(H.funcs, worker, None, max_concurrent=600)
 
 
 if __name__ == "__main__":

@@ -12,7 +12,6 @@ import gc
 import itertools
 import os
 import socket
-import threading
 
 import harness
 import runloom
@@ -57,61 +56,50 @@ class Res(object):
         self.close()
 
 
+# max_concurrent caps goroutines so only MAX_WORKERS are alive at once; no
+# CoSemaphore needed (which would create one pipe-pair per waiting goroutine
+# and blow the FD limit at 1M funcs).  The fd auditor bound uses MAX_WORKERS
+# since that is the actual concurrent worker count regardless of H.funcs.
 MAX_WORKERS = 2000
 
 
 def setup(H):
     base = H.make_tmpdir("big100_reslife_")
-    sem = threading.Semaphore(MAX_WORKERS)
     H.state = {"base": base, "acquired": [0], "released": [0],
-               "counter": itertools.count(), "sem": sem}
+               "counter": itertools.count()}
     H.fd_ceiling = 0
 
 
 def worker(H, wid, rng, state):
     kinds = ["file", "pipe", "socketpair"]
-    sem = state["sem"]
     while H.running():
-        if not sem.acquire():
-            break
-        try:
-            batch = [Res(rng.choice(kinds), state) for _ in
-                     range(rng.randint(2, 10))]
-            for r in batch:
-                roll = rng.random()
-                if roll < 0.5:
-                    r.close()                   # explicit close
-                # else: drop the reference -> __del__ closes it
-            del batch
-            if rng.random() < 0.05:
-                gc.collect()
-            H.op(wid)
-            H.task_done(wid)
-        finally:
-            sem.release()
+        batch = [Res(rng.choice(kinds), state) for _ in
+                 range(rng.randint(2, 10))]
+        for r in batch:
+            roll = rng.random()
+            if roll < 0.5:
+                r.close()                   # explicit close
+            # else: drop the reference -> __del__ closes it
+        del batch
+        if rng.random() < 0.05:
+            gc.collect()
+        H.op(wid)
+        H.task_done(wid)
 
 
 def body(H):
-    sem = H.state["sem"]
-
-    def _cancel_watcher():
-        while H.running():
-            runloom.sleep(0.05)
-        sem.cancel_all()
-
     def auditor():
         base = harness.count_fds()
         while H.running():
             fds = harness.count_fds()
             H.fd_ceiling = max(H.fd_ceiling, fds)
-            H.check(fds < base + H.funcs * 8 + 6000,
+            H.check(fds < base + MAX_WORKERS * 8 + 6000,
                     "fd leak: {0} open (base {1})".format(fds, base))
             H.sleep(1.0)
             gc.collect()
 
-    H.go(_cancel_watcher)
     H.go(auditor)
-    H.run_pool(H.funcs, worker, H.state)
+    H.run_pool(H.funcs, worker, H.state, max_concurrent=MAX_WORKERS)
 
 
 def post(H):

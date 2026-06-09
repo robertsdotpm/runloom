@@ -18,10 +18,10 @@ HAVE_PTY = hasattr(os, "openpty")
 if HAVE_PTY:
     import tty
 
-# At 100k goroutines, each PTY session holds master+slave (2 FDs) + a cat
-# process.  The kernel defaults /proc/sys/kernel/pty/max to 4096 and glibc
-# posix_spawn crashes when forking with a huge FD table (BUG #4).  Cap
-# concurrent sessions so total PTY FDs stay well under the system limit.
+# At 1M goroutines each holding master+slave (2 FDs) + a cat process, the
+# kernel /proc/sys/kernel/pty/max (default 4096) and glibc posix_spawn FD-table
+# crash kick in.  max_concurrent=MAX_SESSIONS spawns only MAX_SESSIONS goroutines,
+# each looping -- no CoSemaphore needed.
 MAX_SESSIONS = 512
 
 
@@ -36,26 +36,12 @@ def read_exact_fd(fd, n):
 
 
 def setup(H):
-    sem = runloom.sync.Semaphore(MAX_SESSIONS)
-
-    def _cancel_watcher(r=H.running, s=sem):
-        while r():
-            runloom.sleep(0.05)
-        s.cancel_all()
-
-    H.go(_cancel_watcher)
-    H.state = {"sem": sem}
+    H.state = {}
 
 
 def worker(H, wid, rng, state):
-    sem = state["sem"]
     H.sleep(rng.random() * 0.5)
     while H.running():
-        if not sem.acquire():
-            break
-        if not H.running():
-            sem.release()
-            break
         master = slave = -1
         proc = None
         try:
@@ -82,7 +68,6 @@ def worker(H, wid, rng, state):
             if not H.running():
                 break
         finally:
-            sem.release()
             if proc is not None:
                 try:
                     proc.kill()
@@ -101,7 +86,7 @@ def body(H):
     if not HAVE_PTY:
         H.log("no pty support on this platform -- nothing to do")
         return
-    H.run_pool(H.funcs, worker, H.state)
+    H.run_pool(H.funcs, worker, H.state, max_concurrent=MAX_SESSIONS)
 
 
 if __name__ == "__main__":

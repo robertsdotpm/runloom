@@ -25,22 +25,22 @@ class Thing(object):
 
 # At 100k goroutines, all calling del things simultaneously, 100k weakref
 # callbacks try to acquire the same CoLock => drain takes hours.
-# Cap to 2000 active workers + cancel_watcher pattern.
+# max_concurrent=MAX_WORKERS spawns only MAX_WORKERS goroutines, each looping
+# -- no CoSemaphore needed (which would create one pipe-pair per waiting
+# goroutine and blow the FD limit at 1M funcs).
 # Note: _thread.allocate_lock is patched to CoLock by monkey.patch(), so
 # we use threading.Lock() directly (also a CoLock after patching).
 MAX_WORKERS = 2000
 
 
 def setup(H):
-    sem = threading.Semaphore(MAX_WORKERS)
     H.state = {"lock": threading.Lock(), "fired": [0], "created": [0],
-               "queue": [], "sem": sem}
+               "queue": []}
 
 
 def worker(H, wid, rng, state):
     lock = state["lock"]
     queue = state["queue"]
-    sem = state["sem"]
 
     def callback(ref):
         with lock:
@@ -48,47 +48,33 @@ def worker(H, wid, rng, state):
             queue.append(1)             # "schedule work"
 
     while H.running():
-        if not sem.acquire():
-            break
-        try:
-            things = []
-            refs = []
-            k = rng.randint(4, 20)
-            for i in range(k):
-                t = Thing(i)
-                refs.append(weakref.ref(t, callback))
-                things.append(t)
-            with lock:
-                state["created"][0] += k
-            del things                  # drop strong refs -> callbacks fire
-            if rng.random() < 0.05:
-                gc.collect()
-            with lock:
-                drained = len(queue)
-                queue.clear()
-            H.op(wid, max(1, drained))
-            H.task_done(wid)
-        finally:
-            sem.release()
+        things = []
+        refs = []
+        k = rng.randint(4, 20)
+        for i in range(k):
+            t = Thing(i)
+            refs.append(weakref.ref(t, callback))
+            things.append(t)
+        with lock:
+            state["created"][0] += k
+        del things                  # drop strong refs -> callbacks fire
+        if rng.random() < 0.05:
+            gc.collect()
+        with lock:
+            drained = len(queue)
+            queue.clear()
+        H.op(wid, max(1, drained))
+        H.task_done(wid)
 
 
 def body(H):
-    sem = H.state["sem"]
-
-    def _cancel_watcher():
-        while H.running():
-            runloom.sleep(0.05)
-        sem.cancel_all()
-
-    H.go(_cancel_watcher)
-    H.run_pool(H.funcs, worker, H.state)
-
     def gc_driver():
         while H.running():
             H.sleep(0.1)
             gc.collect()
 
     H.go(gc_driver)
+    H.run_pool(H.funcs, worker, H.state, max_concurrent=MAX_WORKERS)
 
 
 def post(H):

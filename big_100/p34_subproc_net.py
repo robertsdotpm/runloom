@@ -82,7 +82,7 @@ def client(H, wid, rng, state):
 
 
 def body(H):
-    H.run_pool(H.funcs, client, H.state)
+    H.run_pool(H.funcs, client, H.state, max_concurrent=120)
 
 
 if __name__ == "__main__":
