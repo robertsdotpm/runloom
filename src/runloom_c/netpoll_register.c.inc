@@ -23,62 +23,62 @@
 static int runloom_netpoll_register(int fd, int events)
 {
 #if defined(RUNLOOM_HAVE_EPOLL)
-    int need_register;
+    int cur, target, need;
     struct epoll_event ev;
 
-    /* T1.5 lost-wake fix: arm ONLY the requested direction,
-     * LEVEL-triggered + EPOLLONESHOT, re-arming on every park.
+    /* LEVEL register-PER-DIRECTION-once.  Arm each fd LEVEL-triggered (NO
+     * EPOLLET, NO EPOLLONESHOT) for whichever directions have an active waiter,
+     * and skip epoll_ctl on any re-park whose direction is already armed.
+     * Because LEVEL re-reports a still-ready fd on EVERY epoll_wait, a parker
+     * that links after an edge -- or that partially consumes and re-parks -- is
+     * still delivered (no edge-drop, no pending-bitmap dependency).  The hot
+     * path is a READ socket re-parking recv-after-recv: IN stays armed, so it
+     * costs ZERO syscalls -- the win over the old LEVEL+EPOLLONESHOT scheme's
+     * one epoll_ctl/park.
      *
-     * The old scheme (register once, both arms, EPOLLET|EPOLLEXCLUSIVE,
-     * never re-armed) lost readiness wakeups under concurrency -- a g
-     * could sit parked on READ forever with its socket Recv-Q > 0
-     * (data waiting), all hubs idle.  Two mechanisms:
-     *   - EPOLLEXCLUSIVE + EPOLLET drops an edge whose single exclusive
-     *     wakeup lands on a hub not currently inside epoll_wait;
-     *   - EPOLLET never refires once an edge is missed, and register-once
-     *     never re-armed, so the parker was never woken.
-     * The cure, which is also the standard multi-threaded epoll pattern:
-     *   - LEVEL-triggered: EPOLL_CTL_MOD re-evaluates readiness and
-     *     reports an fd ready *now*, so data that arrived before the
-     *     parker linked is delivered (EPOLLET would NOT re-report it --
-     *     verified: EPOLLET+ONESHOT+re-arm hung 96/96);
-     *   - EPOLLONESHOT: exactly one delivery per arm, so no thundering
-     *     herd (EPOLLEXCLUSIVE unneeded) and the always-ready OUT side
-     *     can't busy-loop the pump;
-     *   - per-DIRECTION arming: with both IN+OUT one-shot, the always-
-     *     writable OUT would consume the single delivery before a READ
-     *     waiter's data arrived -- so arm exactly what this wait needs.
-     * Cost: one epoll_ctl per park (the bitmap now only distinguishes
-     * ADD from MOD).  Correctness over the saved syscall. */
-    ev.events = EPOLLONESHOT;
-    if (events & RUNLOOM_NETPOLL_READ)  ev.events |= EPOLLIN | EPOLLRDHUP;
-    if (events & RUNLOOM_NETPOLL_WRITE) ev.events |= EPOLLOUT;
-    ev.data.fd = fd;
+     * EPOLLONESHOT is gone, so the always-writable OUT could level-busy-loop
+     * the pump; OUT is armed only when a WRITE waiter exists (and a long-lived
+     * WRITE-heavy fd's lazy OUT-disarm is a documented follow-up -- the READ
+     * hot path never arms OUT; short WRITE waits drop their registration on
+     * close).  IN never busy-loops (a not-readable socket produces no IN
+     * event), so IN is safe register-once.  EPOLLEXCLUSIVE stays OFF.
+     *
+     * The arm mask (runloom_fd_armed) doubles as registration state: armed==0
+     * means "not in the epoll set" (-> ADD), armed!=0 means "already ADDed"
+     * (-> MOD to widen the direction set). */
+    need = events & (RUNLOOM_NETPOLL_READ | RUNLOOM_NETPOLL_WRITE);
 
     runloom_mutex_lock(&runloom_pool.lock);
-    need_register = !runloom_fd_bit_get(fd);
-    if (need_register && runloom_fd_bit_set(fd) != 0) {
+    cur = runloom_fd_armed_get(fd);
+    target = cur | need;
+    if (cur != 0 && target == cur) {
+        runloom_mutex_unlock(&runloom_pool.lock);
+        return 0;                               /* already armed -> 0 syscalls */
+    }
+    if (runloom_fd_armed_set(fd, target) != 0) {
         runloom_mutex_unlock(&runloom_pool.lock);
         errno = ENOMEM;
         return -1;
     }
     runloom_mutex_unlock(&runloom_pool.lock);
 
-    if (need_register) {
+    ev.events = 0;
+    if (target & RUNLOOM_NETPOLL_READ)  ev.events |= EPOLLIN | EPOLLRDHUP;
+    if (target & RUNLOOM_NETPOLL_WRITE) ev.events |= EPOLLOUT;
+    ev.data.fd = fd;
+
+    if (cur == 0) {
         if (epoll_ctl(runloom_epoll_fd, EPOLL_CTL_ADD, fd, &ev) == 0) return 0;
-        /* Stale registration (dup'd fd / missed close-hook): re-arm. */
         if (errno == EEXIST &&
             epoll_ctl(runloom_epoll_fd, EPOLL_CTL_MOD, fd, &ev) == 0) return 0;
     } else {
-        /* Re-arm the one-shot for this park; MOD re-checks readiness. */
         if (epoll_ctl(runloom_epoll_fd, EPOLL_CTL_MOD, fd, &ev) == 0) return 0;
-        /* ENOENT = fd dropped from epoll (close/reuse race); ADD. */
         if (errno == ENOENT &&
             epoll_ctl(runloom_epoll_fd, EPOLL_CTL_ADD, fd, &ev) == 0) return 0;
     }
-    /* Failed: drop the bit so a future caller can retry. */
+    /* Failed: roll the arm mask back so a future caller can retry. */
     runloom_mutex_lock(&runloom_pool.lock);
-    runloom_fd_bit_clear(fd);
+    runloom_fd_armed_set(fd, cur);
     runloom_mutex_unlock(&runloom_pool.lock);
     return -1;
 #elif defined(RUNLOOM_HAVE_KQUEUE)
@@ -138,6 +138,10 @@ void runloom_netpoll_unregister(int fd)
 #if defined(RUNLOOM_HAVE_EPOLL) || defined(RUNLOOM_HAVE_KQUEUE)
     runloom_mutex_lock(&runloom_pool.lock);
     runloom_fd_bit_clear(fd);
+    /* Reset the epoll LEVEL arm mask: a reused fd number with a stale "armed"
+     * mask would skip its EPOLL_CTL_ADD and never be re-armed (a hang).  All
+     * real close paths call this hook, so the mask tracks fd identity. */
+    runloom_fd_armed_set(fd, 0);
     runloom_mutex_unlock(&runloom_pool.lock);
     /* No kernel syscall: epoll/kqueue auto-remove the fd when the
      * last reference closes.  Calling EPOLL_CTL_DEL after close

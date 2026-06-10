@@ -54,6 +54,30 @@ TIMEOUT_MS = int(os.environ.get("RUNLOOM_ARMING_TIMEOUT_MS", "4000"))
 BACKEND = runloom_c.netpoll_backend()
 
 
+@pytest.fixture(autouse=True)
+def _reset_netpoll_registration():
+    """Clear the per-fd 'registered' cache between tests.
+
+    These tests drive raw ``runloom_c.wait_fd`` on raw ``socket.socketpair``s and
+    close them with a bare ``socket.close()`` -- which bypasses the
+    ``netpoll_unregister`` that ALL real runloom close paths (monkey sockets,
+    the aio bridge, TCPConn, osio/polling/sync) perform.  Under EPOLLET
+    register-once that unregister is load-bearing: a reused fd NUMBER whose
+    stale registration bit is still set would skip its ``EPOLL_CTL_ADD`` and the
+    new socket would never be armed (a hang).  Real code never leaks this (it
+    unregisters on close); these tests must mimic that, so reset the residue
+    between tests.  (Internal scheduler fds -- the epoll fd, self-pipe,
+    io_uring eventfd -- are added to epoll directly, not through the
+    registration-bit path, so clearing the bit range does not touch them.)
+    """
+    yield
+    for fd in range(3, 1024):
+        try:
+            runloom_c.netpoll_unregister(fd)
+        except Exception:       # noqa: BLE001
+            pass
+
+
 def _drain(sock):
     """Read everything currently readable from a non-blocking socket."""
     total = 0

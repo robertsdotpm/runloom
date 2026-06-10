@@ -63,6 +63,28 @@ class TestNetpollConformance(unittest.TestCase):
     def setUp(self):
         # Surface which backend is under test in failure output.
         self.backend = runloom_c.netpoll_backend()
+        self._reset_netpoll_registration()
+
+    def tearDown(self):
+        self._reset_netpoll_registration()
+
+    @staticmethod
+    def _reset_netpoll_registration():
+        """Clear the per-fd 'registered' cache around each test.
+
+        These tests raw-``close()`` their socketpairs, bypassing the
+        ``netpoll_unregister`` that all real runloom close paths perform.  Under
+        EPOLLET register-once that unregister is load-bearing -- a reused fd
+        number with a stale registration bit would skip its ``EPOLL_CTL_ADD``
+        and hang.  Real code never leaks this; mimic it here.  Internal
+        scheduler fds (epoll fd, self-pipe, io_uring eventfd) are added to epoll
+        directly, not via the registration-bit path, so this does not touch
+        them."""
+        for fd in range(3, 1024):
+            try:
+                runloom_c.netpoll_unregister(fd)
+            except Exception:       # noqa: BLE001
+                pass
 
     # -- ready BEFORE park: an already-readable fd returns immediately --------
     def test_ready_before_park(self):

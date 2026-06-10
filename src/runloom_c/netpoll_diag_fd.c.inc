@@ -176,6 +176,14 @@ static size_t         runloom_fd_registered_cap_bytes = 0;
 static unsigned char *runloom_fd_pending_wake = NULL;
 static size_t         runloom_fd_pending_wake_cap = 0;
 
+/* Per-fd epoll LEVEL arm mask (RUNLOOM_NETPOLL_READ | RUNLOOM_NETPOLL_WRITE
+ * bits): which direction(s) the fd is currently armed for.  The epoll backend
+ * arms each fd LEVEL-triggered, register-PER-DIRECTION-once -- a re-park whose
+ * direction is already armed skips epoll_ctl entirely (the read-park hot path
+ * costs zero syscalls).  Shares the pending-wake fd index space + cap.
+ * Accessed only under runloom_pool.lock, like the registration bitmap. */
+static unsigned char *runloom_fd_armed = NULL;
+
 /* Upper/lower bounds on the preallocated fd capacity.  4M fds = 4MB
  * pending-wake array + 512KB registration bitmap, worst case. */
 #define RUNLOOM_FD_CAP_MIN   1024u
@@ -219,19 +227,22 @@ static size_t runloom_fd_cap_target(void)
 static void runloom_fd_arrays_init(void)
 {
     size_t cap_fds, bm_bytes;
-    unsigned char *pw, *bm;
+    unsigned char *pw, *bm, *am;
     if (runloom_fd_pending_wake != NULL) return;
     cap_fds  = runloom_fd_cap_target();
     bm_bytes = (cap_fds + 7u) >> 3;
     pw = (unsigned char *)calloc(cap_fds, 1);
     bm = (unsigned char *)calloc(bm_bytes, 1);
-    if (pw == NULL || bm == NULL) {
+    am = (unsigned char *)calloc(cap_fds, 1);
+    if (pw == NULL || bm == NULL || am == NULL) {
         free(pw);
         free(bm);
+        free(am);
         return;   /* caps stay 0; set/consume/bit_* bounds-check to no-ops */
     }
     runloom_fd_registered_bm        = bm;
     runloom_fd_registered_cap_bytes = bm_bytes;
+    runloom_fd_armed                = am;
     /* Publish base before cap so the lock-free consumer that loads cap
      * (ACQUIRE) and sees it non-zero is guaranteed to see this base. */
     __atomic_store_n(&runloom_fd_pending_wake, pw, __ATOMIC_RELEASE);
@@ -318,6 +329,23 @@ static void runloom_fd_bit_clear(int fd)
     size_t byte = (size_t)fd >> 3;
     if (byte >= runloom_fd_registered_cap_bytes) return;
     runloom_fd_registered_bm[byte] &= (unsigned char)~(1u << (fd & 7));
+}
+
+/* Per-fd epoll LEVEL arm mask accessors.  Caller MUST hold runloom_pool.lock. */
+static int runloom_fd_armed_get(int fd)
+{
+    if (fd < 0 || runloom_fd_armed == NULL) return 0;
+    if ((size_t)fd >= runloom_fd_pending_wake_cap) return 0;
+    return runloom_fd_armed[fd];
+}
+
+static int runloom_fd_armed_set(int fd, int mask)
+{
+    if (fd < 0 || runloom_fd_armed == NULL) return -1;
+    if ((size_t)fd >= runloom_fd_pending_wake_cap) return -1;
+    runloom_fd_armed[fd] = (unsigned char)(mask & (RUNLOOM_NETPOLL_READ |
+                                                   RUNLOOM_NETPOLL_WRITE));
+    return 0;
 }
 
 #if defined(RUNLOOM_HAVE_EPOLL)
