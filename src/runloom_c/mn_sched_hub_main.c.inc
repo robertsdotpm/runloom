@@ -135,6 +135,31 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
     runloom_coro_thread_init();
     runloom_tls_hub = h;
 
+#if defined(__linux__)
+    /* Lever #2: pin each hub thread to a fixed CPU core (RUNLOOM_HUB_AFFINITY=1,
+     * opt-in, default off).  Keeps the hub's working set -- and a pinned
+     * connection's data -- hot in one core's cache instead of letting the OS
+     * migrate the thread.  hub id -> core (id % ncpu).  On loopback only the
+     * cache-locality half is measurable; the NIC-RX-steering half needs a real
+     * NIC.  Best-effort: a failed pin just leaves the thread unpinned. */
+    {
+        static int aff_mode = -1;
+        if (aff_mode < 0) {
+            const char *e = getenv("RUNLOOM_HUB_AFFINITY");
+            aff_mode = (e != NULL && *e != '0') ? 1 : 0;
+        }
+        if (aff_mode) {
+            long ncpu = sysconf(_SC_NPROCESSORS_ONLN);
+            if (ncpu > 0) {
+                cpu_set_t set;
+                CPU_ZERO(&set);
+                CPU_SET((int)((long)h->id % ncpu), &set);
+                (void)pthread_setaffinity_np(pthread_self(), sizeof(set), &set);
+            }
+        }
+    }
+#endif
+
     /* Create the hub's per-thread io_uring ring.  Try
      * SINGLE_ISSUER (Linux 5.18+) + DEFER_TASKRUN (6.1+); the create
      * call downgrades gracefully on older kernels.  With
