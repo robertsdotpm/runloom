@@ -16,7 +16,10 @@
 #if !defined(RUNLOOM_OS_WINDOWS)
 #  include <sys/socket.h>
 #  include <netinet/in.h>
+#  include <netinet/tcp.h>
 #  include <unistd.h>
+#  include <errno.h>
+#  include <stdint.h>
 #endif
 
 /* Lazily-resolved helpers (set on first serve()). */
@@ -117,6 +120,79 @@ static int runloom_io_listener_port(PyObject *listener)
 #endif
 }
 
+/* ---- All-C echo path (handler=None): tstate-free C goroutines ----
+ * serve(..., handler=None) runs each connection entirely in C, spawned via
+ * runloom_mn_go_c -- a C-entry goroutine carries NO Python tstate and NO root
+ * frame, so the per-swap PyThreadState save/restore that a Python-callable
+ * goroutine pays on every park/wake is SKIPPED.  Pure C recv/send loop,
+ * cooperative via runloom_netpoll_wait_fd (same pattern module_tcp / TCPConn
+ * already use).  This is the "written + integrated the right way" fast path:
+ * zero PyObjects in the hot loop, zero tstate juggle per round-trip. */
+#if !defined(RUNLOOM_OS_WINDOWS)
+static void runloom_io_c_echo(void *arg)
+{
+    int fd = (int)(intptr_t)arg;
+    char buf[64];
+    for (;;) {
+        ssize_t n;
+        for (;;) {
+            n = recv(fd, buf, 8, 0);
+            if (n >= 0) break;
+            if (errno == EINTR) continue;
+            if (errno != EAGAIN && errno != EWOULDBLOCK) { close(fd); return; }
+            if (runloom_netpoll_wait_fd(fd, RUNLOOM_NETPOLL_READ, -1LL) < 0) { close(fd); return; }
+        }
+        if (n == 0) { close(fd); return; }      /* peer closed */
+        {
+            ssize_t sent = 0;
+            while (sent < n) {
+                ssize_t s = send(fd, buf + sent, (size_t)(n - sent), 0);
+                if (s > 0) { sent += s; continue; }
+                if (s < 0 && errno == EINTR) continue;
+                if (s < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+                    if (runloom_netpoll_wait_fd(fd, RUNLOOM_NETPOLL_WRITE, -1LL) < 0) { close(fd); return; }
+                    continue;
+                }
+                close(fd); return;              /* hard error */
+            }
+        }
+    }
+}
+
+static void runloom_io_c_acceptor(void *arg)
+{
+    int lfd = (int)(intptr_t)arg;
+    for (;;) {
+        int cfd = accept4(lfd, NULL, NULL, SOCK_NONBLOCK);
+        if (cfd < 0) {
+            if (errno == EINTR || errno == ECONNABORTED) continue;
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                if (runloom_netpoll_wait_fd(lfd, RUNLOOM_NETPOLL_READ, -1LL) < 0) return;
+                continue;
+            }
+            return;                              /* listener closed / hard error */
+        }
+        {
+            int on = 1;
+            (void)setsockopt(cfd, IPPROTO_TCP, TCP_NODELAY, &on, sizeof(on));
+        }
+        if (runloom_mn_go_c(runloom_io_c_echo, (void *)(intptr_t)cfd) < 0)
+            close(cfd);
+    }
+}
+
+/* Bound listen fd of a TCPConn listener via fileno(). */
+static int runloom_io_listener_fd(PyObject *listener)
+{
+    PyObject *fo = PyObject_CallMethod(listener, "fileno", NULL);
+    int fd;
+    if (fo == NULL) return -1;
+    fd = (int)PyLong_AsLong(fo);
+    Py_DECREF(fo);
+    return fd;
+}
+#endif
+
 /* runloom_c.serve(host, port, handler, acceptors=1, backlog=128)
  *     -> (bound_port, [listeners])
  *
@@ -138,8 +214,19 @@ static PyObject *m_serve(PyObject *self, PyObject *args, PyObject *kw)
                                      &host, &port, &handler,
                                      &acceptors, &backlog))
         return NULL;
-    if (!PyCallable_Check(handler)) {
-        PyErr_SetString(PyExc_TypeError, "serve(): handler must be callable");
+    if (handler != Py_None && !PyCallable_Check(handler)) {
+        PyErr_SetString(PyExc_TypeError,
+                        "serve(): handler must be callable, or None for the built-in all-C echo");
+        return NULL;
+    }
+    /* serve() hosts each accept loop on an M:N hub (runloom_mn_go / mn_go_c).
+     * Single-thread mode -- runloom.run(1, ...) -- has no hubs (hub_count==0),
+     * so the spawns fail with a cryptic "mn_init must be called first".  Fail
+     * fast with an actionable message instead, before any listener is bound. */
+    if (runloom_mn_hub_count() < 1) {
+        PyErr_SetString(PyExc_RuntimeError,
+                        "serve(): requires the M:N runtime -- call runloom.run(n, ...) "
+                        "with n >= 2; single-thread mode has no hubs to host the accept loops");
         return NULL;
     }
     if (acceptors < 1) acceptors = 1;
@@ -164,6 +251,22 @@ static PyObject *m_serve(PyObject *self, PyObject *args, PyObject *kw)
         if (PyList_Append(listeners, ln) < 0) {
             Py_DECREF(ln); Py_DECREF(listeners); return NULL;
         }
+#if !defined(RUNLOOM_OS_WINDOWS)
+        if (handler == Py_None) {
+            /* All-C path: tstate-free C accept loop (mn_go_c) on the raw listen
+             * fd; it spawns a C echo goroutine per connection.  The listener
+             * object stays alive in `listeners` (returned to Python). */
+            int lfd = runloom_io_listener_fd(ln);
+            Py_DECREF(ln);
+            if (lfd < 0) { Py_DECREF(listeners); return NULL; }
+            if (runloom_mn_go_c(runloom_io_c_acceptor, (void *)(intptr_t)lfd) < 0) {
+                Py_DECREF(listeners);
+                PyErr_SetString(PyExc_RuntimeError, "serve(): mn_go_c failed");
+                return NULL;
+            }
+            continue;
+        }
+#endif
         /* Spawn the accept loop: partial(_serve_acceptor, ln, handler)(). */
         part = PyObject_CallFunctionObjArgs(runloom_io_partial,
                                             runloom_io_acceptor_fn,
