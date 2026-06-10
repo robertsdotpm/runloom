@@ -129,6 +129,7 @@ RUNLOOM_INLINE void runloom_tstate_restore(const RunloomTstateSnapshot *s)
  * --------------------------------------------------------------------------- */
 #include "module_coro.c.inc"
 #include "module_tcp.c.inc"
+#include "module_io.c.inc"
 #include "module_fdio.c.inc"
 #include "module_g.c.inc"
 #include "module_chan.c.inc"

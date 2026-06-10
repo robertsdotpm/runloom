@@ -65,6 +65,10 @@ static void RunloomTCPConn_dealloc(RunloomTCPConn *self)
             self->ms = NULL;
         }
 #endif
+        /* Wake any goroutine parked in accept()/recv()/send() on this fd so it
+         * sees the close and exits, instead of hanging forever on a fd that
+         * will never fire again (mirrors the monkey socket close hook). */
+        runloom_netpoll_cancel_fd(self->fd);
         runloom_netpoll_unregister(self->fd);
         runloom_closesock((RUNLOOM_SOCK_T)self->fd);
         self->fd = -1;
@@ -86,6 +90,10 @@ static PyObject *RunloomTCPConn_close(RunloomTCPConn *self, PyObject *unused)
             self->ms = NULL;
         }
 #endif
+        /* Wake any goroutine parked in accept()/recv()/send() on this fd so it
+         * sees the close and exits, instead of hanging forever on a fd that
+         * will never fire again (mirrors the monkey socket close hook). */
+        runloom_netpoll_cancel_fd(self->fd);
         runloom_netpoll_unregister(self->fd);
         runloom_closesock((RUNLOOM_SOCK_T)self->fd);
         self->fd = -1;

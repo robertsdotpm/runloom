@@ -12,7 +12,8 @@ static PyObject *RunloomTCPConn_listen_cls(PyTypeObject *cls, PyObject *args, Py
     const char *host;
     int port;
     int backlog = 128;
-    static char *kwlist[] = {"host", "port", "backlog", NULL};
+    int reuseport = 0;
+    static char *kwlist[] = {"host", "port", "backlog", "reuseport", NULL};
     struct sockaddr_storage addr;
     socklen_t addrlen = 0;
     int family = 0;
@@ -20,8 +21,8 @@ static PyObject *RunloomTCPConn_listen_cls(PyTypeObject *cls, PyObject *args, Py
     int on = 1;
     RunloomTCPConn *result;
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwds, "si|i", kwlist,
-                                     &host, &port, &backlog))
+    if (!PyArg_ParseTupleAndKeywords(args, kwds, "si|ip", kwlist,
+                                     &host, &port, &backlog, &reuseport))
         return NULL;
 
     if (runloom_resolve(host, port, /*passive*/1, &addr, &addrlen, &family) != 0)
@@ -49,6 +50,10 @@ static PyObject *RunloomTCPConn_listen_cls(PyTypeObject *cls, PyObject *args, Py
                     : socket(family, SOCK_STREAM, IPPROTO_TCP); }
     if (fd < 0) return PyErr_SetFromErrno(PyExc_OSError);
     (void)setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on));
+#if defined(SO_REUSEPORT)
+    if (reuseport)
+        (void)setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &on, sizeof(on));
+#endif
     if (bind(fd, (struct sockaddr *)&addr, addrlen) < 0 ||
         listen(fd, backlog) < 0) {
         int saved = errno;

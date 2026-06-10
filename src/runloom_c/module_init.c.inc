@@ -316,6 +316,11 @@ static PyMethodDef module_methods[] = {
      "not overflow on its first run before being measured.  Off by default."},
     {"stack_autosize_enabled", m_stack_autosize_enabled, METH_NOARGS,
      "stack_autosize_enabled() -> bool."},
+    {"serve", (PyCFunction)m_serve, METH_VARARGS | METH_KEYWORDS,
+     "serve(host, port, handler, acceptors=1, backlog=128) -> (port, listeners). "
+     "C server scaffold: N SO_REUSEPORT listeners + C accept loops; spawns a "
+     "handler(conn) goroutine per connection (conn is a TCPConn). Close the "
+     "returned listeners to stop."},
     {NULL, NULL, 0, NULL}
 };
 
