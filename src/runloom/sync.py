@@ -307,6 +307,15 @@ def wake(g):
 # ALWAYS released before park_self, so a waker never blocks on a parked waiter.
 # Each is the lean equivalent of a Chan(1)-per-result fan-in, without a channel
 # buffer or a select loop per await.
+#
+# Scope: a park_self-parked waiter is NOT counted as keeping a SINGLE-THREAD
+# run() alive (same as a channel park -- see chan_waiters.c.inc park_waiter
+# FINDING).  Under M:N (run(N) / mn_run, the primary mode) the hubs stay alive
+# while a waiter is parked, so a waker on ANY thread -- including a foreign OS
+# thread -- works.  Under SINGLE-THREAD run(), keep the waker a goroutine: if the
+# only remaining work is a park_self waiter whose waker is a foreign thread, run()
+# can exit and abandon it.  (A foreign-thread-wakeable Event must park on a
+# netpoll fd instead -- that is why monkey's CoEvent uses _Parker, not park_self.)
 # --------------------------------------------------------------------
 class WaitGroup(object):
     """Go-style sync.WaitGroup: wait for a set of goroutines to finish.
