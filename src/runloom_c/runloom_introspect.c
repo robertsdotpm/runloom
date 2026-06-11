@@ -70,6 +70,15 @@ long long runloom_next_goid(void)
     return runloom_tls_goid_next++;
 }
 
+/* Reserve a contiguous block of n goids in ONE atomic; returns the first.
+ * The bulk-spawn loop then assigns base+0..base+n-1 inline (no per-g call). */
+long long runloom_next_goid_block(long n)
+{
+    long long base = __atomic_fetch_add(&runloom_goid_global,
+                                        (long long)n, __ATOMIC_RELAXED);
+    return base;
+}
+
 /* ---------------------------------------------------------------- *
  *  State name tables                                               *
  * ---------------------------------------------------------------- */
@@ -181,9 +190,24 @@ void runloom_introspect_fini(void)
     runloom_mutex_unlock(&runloom_greg_lock);
 }
 
+/* TEMP ablation gate (RUNLOOM_GREG_OFF=1): skip the global registry to measure
+ * its lock-contention cost on spawn-heavy workloads.  Remove after diagnosis. */
+static int runloom_greg_off(void)
+{
+    static int v = -1;
+    int cur = __atomic_load_n(&v, __ATOMIC_RELAXED);
+    if (cur < 0) {
+        const char *e = getenv("RUNLOOM_GREG_OFF");
+        cur = (e != NULL && *e != '0' && *e != '\0') ? 1 : 0;
+        __atomic_store_n(&v, cur, __ATOMIC_RELAXED);
+    }
+    return cur;
+}
+
 void runloom_greg_link(runloom_g_t *g)
 {
     if (g == NULL || !runloom_greg_inited) return;
+    if (runloom_greg_off()) return;
     runloom_mutex_lock(&runloom_greg_lock);
     g->reg_prev = NULL;
     g->reg_next = runloom_greg_head;
@@ -196,6 +220,7 @@ void runloom_greg_link(runloom_g_t *g)
 void runloom_greg_unlink(runloom_g_t *g)
 {
     if (g == NULL || !runloom_greg_inited) return;
+    if (runloom_greg_off()) return;
     runloom_mutex_lock(&runloom_greg_lock);
     /* Defensive: only unlink a g that is actually linked.  A g whose
      * reg_next/reg_prev are both NULL AND is not the head was never

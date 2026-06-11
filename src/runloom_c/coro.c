@@ -89,6 +89,13 @@ struct runloom_coro {
     void *stack;
     size_t stack_size;
     int grown;             /* 1 if copy-grow enlarged this stack */
+    /* Bulk fresh-flag (go_n): 1 if the initial fcontext frame has NOT yet been
+     * written to the stack top.  bulk_init can defer that write (the per-g page
+     * fault) off the single spawner thread; runloom_coro_resume materializes it
+     * lazily on the OWNING hub at first resume, then clears the flag.  Moves the
+     * 1M scattered stack faults onto the H hubs, in parallel, overlapped with the
+     * run.  0 for every non-bulk coro (eager asm_make_ctx). */
+    int fresh;
 #elif defined(RUNLOOM_HAVE_FIBERS)
     void *fiber;
 #elif defined(RUNLOOM_HAVE_UCONTEXT)
@@ -351,8 +358,76 @@ static void runloom_stack_flush_to_global(void)
     runloom_mutex_unlock(&runloom_global_stack_lock);
 }
 
+/* TEST (RUNLOOM_STACK_ARENA=1): carve every stack as a slice of ONE big
+ * pre-mmap'd arena -- lock-free (a single atomic bump), no per-stack mmap, no
+ * global depot lock.  Each goroutine still gets a DISTINCT stack (its own
+ * slice), so nothing corrupts and nothing crashes; this isolates whether the
+ * stack-acquire path (mmap + depot lock) is the spawn bottleneck.  Test-only:
+ * no per-slice guard page, and arena slices are never reclaimed.  Slices match
+ * the existing layout: a guard prefix then the usable region; we return the
+ * usable base.  Size-mismatched requests / arena exhaustion fall back. */
+#ifndef MAP_NORESERVE
+#define MAP_NORESERVE 0
+#endif
+static char  *runloom_arena_base = NULL;
+static size_t runloom_arena_slot = 0;
+static size_t runloom_arena_cap  = 0;
+static size_t runloom_arena_next = 0;
+static runloom_mutex_t runloom_arena_init_lock = RUNLOOM_MUTEX_STATIC_INIT;
+
+static int runloom_stack_arena_on(void)
+{
+    static int v = -1;
+    int cur = __atomic_load_n(&v, __ATOMIC_RELAXED);
+    if (cur < 0) {
+        const char *e = getenv("RUNLOOM_STACK_ARENA");
+        cur = (e != NULL && *e != '0' && *e != '\0') ? 1 : 0;
+        __atomic_store_n(&v, cur, __ATOMIC_RELAXED);
+    }
+    return cur;
+}
+
+static void *runloom_stack_arena_carve(size_t size)
+{
+    size_t guard = runloom_stack_guard();
+    size_t slot  = guard + size;
+    size_t idx;
+    if (__atomic_load_n(&runloom_arena_base, __ATOMIC_ACQUIRE) == NULL) {
+        runloom_mutex_lock(&runloom_arena_init_lock);
+        if (runloom_arena_base == NULL) {
+            const char *n = getenv("RUNLOOM_STACK_ARENA_N");
+            size_t cap = (n != NULL && *n) ? (size_t)strtoull(n, NULL, 0) : 1200000;
+            void *base = mmap(NULL, cap * slot, PROT_READ | PROT_WRITE,
+                              MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+            if (base != MAP_FAILED) {
+                runloom_arena_slot = slot;
+                runloom_arena_cap  = cap;
+                __atomic_store_n(&runloom_arena_base, (char *)base, __ATOMIC_RELEASE);
+            }
+        }
+        runloom_mutex_unlock(&runloom_arena_init_lock);
+    }
+    if (runloom_arena_base == NULL || slot != runloom_arena_slot) return NULL;
+    idx = __atomic_fetch_add(&runloom_arena_next, 1, __ATOMIC_RELAXED);
+    if (idx >= runloom_arena_cap) return NULL;            /* exhausted -> fallback */
+    return runloom_arena_base + idx * runloom_arena_slot + guard;
+}
+
+/* Is a usable-base pointer a slice of the test arena? (so release skips it) */
+static int runloom_stack_in_arena(void *usable)
+{
+    char *base = __atomic_load_n(&runloom_arena_base, __ATOMIC_ACQUIRE);
+    char *p = (char *)usable;
+    return base != NULL && p >= base &&
+           p < base + runloom_arena_cap * runloom_arena_slot;
+}
+
 static void *runloom_stack_acquire(size_t size)
 {
+    if (runloom_stack_arena_on()) {
+        void *a = runloom_stack_arena_carve(size);
+        if (a != NULL) return a;
+    }
     void *s = runloom_stack_pop_local(size);     /* lock-free fast path */
     if (s != NULL) return s;
     runloom_stack_refill_from_global(size);       /* balance across hubs */
@@ -364,6 +439,16 @@ static void *runloom_stack_acquire(size_t size)
 static void runloom_stack_release(void *stack, size_t size)
 {
     void **hdr;
+    /* TEST arena slices are never reclaimed/pooled (they belong to the one big
+     * arena mapping); just drop them.  No-op when the arena is off. */
+    if (runloom_stack_arena_on() && runloom_stack_in_arena(stack)) {
+#if defined(MADV_DONTNEED)
+        long ps = sysconf(_SC_PAGESIZE);
+        size_t page = (ps > 0) ? (size_t)ps : (size_t)4096;
+        if (size > page) (void)madvise((char *)stack + page, size - page, MADV_DONTNEED);
+#endif
+        return;
+    }
     /* Drop physical pages back to the OS *before* writing the header.
      * MADV_DONTNEED keeps the VA reservation but lets the kernel reclaim
      * the page frames; next touch re-faults a fresh zero page.  We have
@@ -644,6 +729,7 @@ runloom_coro_t *runloom_coro_new(size_t stack_size,
         c->entry = entry;
         c->user = user;
         c->done = 0;
+        c->fresh = 0;
         c->asm_coro.entry = runloom_fcontext_entry;
         c->asm_coro.user = c;
         c->asm_coro.done = 0;
@@ -668,6 +754,151 @@ runloom_coro_t *runloom_coro_new(size_t stack_size,
     runloom_asm_make_ctx(&c->asm_coro, stack_top);
 
     return c;
+}
+
+/* ---- bulk/arena fast path (go_n) ---------------------------------------- *
+ * Placement coro: initialise a coroutine in CALLER-PROVIDED memory `mem`
+ * (>= runloom_coro_struct_size() bytes) on a CALLER-PROVIDED `stack` (lowest
+ * usable byte, `stack_size` usable bytes).  No malloc, no stack-acquire, no
+ * pool, no lock -- a straight-line set of stores + asm_make_ctx.  Used by the
+ * bulk-spawn path where g-structs, coro-structs and stacks all come from
+ * pre-allocated arenas.  The caller owns `mem` and `stack`; do NOT call
+ * runloom_coro_destroy on a placement coro (it would pool/free arena memory)
+ * -- the arena is reclaimed wholesale. */
+runloom_coro_t *runloom_coro_init_at(void *mem, size_t stack_size, void *stack,
+                                     runloom_entry_fn entry, void *user)
+{
+    runloom_coro_t *c = (runloom_coro_t *)mem;
+    size_t rounded;
+    if (stack_size < 4096) stack_size = 4096;
+    rounded = runloom_round_to_page(stack_size);
+    c->entry = entry;
+    c->user = user;
+    c->done = 0;
+    c->dbg_running = 0;
+    c->pool_next = NULL;
+    c->stack = stack;
+    c->stack_size = rounded;
+    c->grown = 0;
+    c->fresh = 0;
+    c->asm_coro.entry = runloom_fcontext_entry;
+    c->asm_coro.user = c;
+    c->asm_coro.done = 0;
+    runloom_asm_make_ctx(&c->asm_coro, (void *)((uintptr_t)stack + rounded));
+    return c;
+}
+
+/* Bytes a placement coro needs. */
+size_t runloom_coro_struct_size(void) { return sizeof(runloom_coro_t); }
+
+/* Bulk coro init: fill an ENTIRE coro arena (n structs) inline, each on its own
+ * stack carved from one reserved arena block, and write each g's coro pointer.
+ * ONE call for all N -- the per-coro work (field stores + asm_make_ctx) is
+ * inlined here (same TU), so the caller's spawn loop makes ZERO per-g function
+ * calls into the coro layer.  The only irreducible per-g cost left is the
+ * asm_make_ctx stack write (the page fault).  g_arena/g_stride/g_coro_off
+ * locate each g and its `coro` field so we can set g->coro = &coro_arena[i].
+ * Returns 0, or -1 if the stack arena is off/exhausted/size-mismatched (caller
+ * falls back to the per-g path).  fcontext backend only. */
+int runloom_coro_bulk_init(void *coro_arena, size_t coro_stride,
+                           void *g_arena, size_t g_stride, size_t g_coro_off,
+                           size_t stack_size, long n, runloom_entry_fn entry,
+                           void **stk_block_out, size_t *stk_bytes_out)
+{
+    size_t guard, rounded, slot, start;
+    char *sbase;
+    long i;
+    /* Fresh-flag deferral gate (RUNLOOM_GON_FRESH=1): skip the per-g
+     * asm_make_ctx stack write here and mark each coro `fresh`, so the owning
+     * hub materializes the frame at first resume (faults move off the spawner,
+     * onto the H hubs in parallel).  Read once, cached. */
+    static int fresh_defer = -1;
+    int defer = __atomic_load_n(&fresh_defer, __ATOMIC_RELAXED);
+    if (defer < 0) {
+        const char *e = getenv("RUNLOOM_GON_FRESH");
+        defer = (e != NULL && *e == '1') ? 1 : 0;
+        __atomic_store_n(&fresh_defer, defer, __ATOMIC_RELAXED);
+    }
+    if (stack_size < 4096) stack_size = 4096;
+    rounded = runloom_round_to_page(stack_size);
+    guard = runloom_stack_guard();
+    slot = guard + rounded;
+    /* Lazy-init the arena (sized to this slot), then reserve a contiguous
+     * block of n slots with ONE atomic. */
+    if (__atomic_load_n(&runloom_arena_base, __ATOMIC_ACQUIRE) == NULL) {
+        runloom_mutex_lock(&runloom_arena_init_lock);
+        if (runloom_arena_base == NULL) {
+            const char *e = getenv("RUNLOOM_STACK_ARENA_N");
+            size_t cap = (e != NULL && *e) ? (size_t)strtoull(e, NULL, 0) : 1200000;
+            void *base = mmap(NULL, cap * slot, PROT_READ | PROT_WRITE,
+                              MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+            if (base != MAP_FAILED) {
+                runloom_arena_slot = slot;
+                runloom_arena_cap  = cap;
+                __atomic_store_n(&runloom_arena_base, (char *)base, __ATOMIC_RELEASE);
+            }
+        }
+        runloom_mutex_unlock(&runloom_arena_init_lock);
+    }
+    if (runloom_arena_base == NULL || slot != runloom_arena_slot) return -1;
+    start = __atomic_fetch_add(&runloom_arena_next, (size_t)n, __ATOMIC_RELAXED);
+    if (start + (size_t)n > runloom_arena_cap) {
+        __atomic_fetch_sub(&runloom_arena_next, (size_t)n, __ATOMIC_RELAXED);
+        return -1;                                  /* not enough arena -> fallback */
+    }
+    sbase = runloom_arena_base + start * slot + guard;   /* usable base of slot 0 */
+    /* Report the whole reserved stack block (incl. guards) so the caller's batch
+     * teardown can MADV_DONTNEED it wholesale when the last goroutine finishes. */
+    if (stk_block_out) *stk_block_out = runloom_arena_base + start * slot;
+    if (stk_bytes_out) *stk_bytes_out = (size_t)n * slot;
+    for (i = 0; i < n; i++) {
+        runloom_coro_t *c = (runloom_coro_t *)((char *)coro_arena + (size_t)i * coro_stride);
+        char *g = (char *)g_arena + (size_t)i * g_stride;
+        char *stk = sbase + (size_t)i * slot;
+        c->entry = entry;
+        c->user = g;
+        c->done = 0;
+        c->dbg_running = 0;
+        c->pool_next = NULL;
+        c->stack = stk;
+        c->stack_size = rounded;
+        c->grown = 0;
+        c->asm_coro.entry = runloom_fcontext_entry;
+        c->asm_coro.user = c;
+        c->asm_coro.done = 0;
+        c->fresh = defer;
+        if (!defer)                                 /* eager: write frame now */
+            runloom_asm_make_ctx(&c->asm_coro, (void *)((uintptr_t)stk + rounded));
+        /* deferred: leave self.sp/caller.sp zero (calloc); resume materializes */
+        *(void **)(g + g_coro_off) = c;             /* g->coro = c */
+    }
+    return 0;
+}
+
+/* Release the physical pages of a bulk stack block back to the OS without
+ * unmapping the arena (the virtual reservation stays for later reuse).  Called
+ * by the go_n batch teardown when the last goroutine in a batch finishes.  The
+ * block stays PROT_READ|WRITE; the next fault into it gets a fresh zero page --
+ * which is exactly what the fresh-flag path wants (a zero stack reads back as a
+ * not-yet-materialised frame). */
+void runloom_coro_arena_release(void *block, size_t bytes)
+{
+    if (block == NULL || bytes == 0) return;
+#if defined(MADV_DONTNEED)
+    madvise(block, bytes, MADV_DONTNEED);
+#else
+    (void)block; (void)bytes;
+#endif
+}
+
+/* Carve one stack (lowest usable byte) from the bulk arena, NULL if the arena
+ * is off/exhausted/size-mismatched.  Rounds like coro_new so sizes match. */
+void *runloom_coro_arena_stack(size_t stack_size)
+{
+    size_t rounded;
+    if (stack_size < 4096) stack_size = 4096;
+    rounded = runloom_round_to_page(stack_size);
+    return runloom_stack_arena_carve(rounded);
 }
 
 void runloom_coro_destroy(runloom_coro_t *c)
@@ -806,6 +1037,19 @@ static int runloom_coro_maybe_grow(runloom_coro_t *c)
 void runloom_coro_resume(runloom_coro_t *c)
 {
     runloom_coro_t *prev = runloom_tls_current;
+    if (c->fresh) {
+        /* Deferred bulk init (go_n fresh-flag): bulk_init skipped the initial
+         * fcontext frame write at spawn to keep the 1M scattered stack-top page
+         * faults OFF the single spawner thread.  Materialize it now, on the
+         * OWNING hub, just before the first swap -- so those faults land on the
+         * H hubs in parallel, overlapped with the run.  First resume only; the
+         * flag self-clears.  asm_make_ctx (re)sets self.sp/caller.sp/done; the
+         * calloc'd arena left them zero, which maybe_grow below treats as
+         * "no headroom info" (no-op) -- but we run before it anyway. */
+        runloom_asm_make_ctx(&c->asm_coro,
+                             (void *)((uintptr_t)c->stack + c->stack_size));
+        c->fresh = 0;
+    }
     runloom_coro_maybe_grow(c);     /* Path-A copy-grow at the resume boundary */
     runloom_tls_current = c;
     if (RUNLOOM_DBG_ON(RUNLOOM_DBG_INVARIANTS))

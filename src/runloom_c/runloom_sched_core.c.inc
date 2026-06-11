@@ -382,10 +382,18 @@ runloom_g_t *runloom_g_slab_alloc(void)
                          __ATOMIC_RELEASE);
         return g;
     }
-    /* Cold path: a brand-new struct from the OS.  PyMem_Calloc zeroes
-     * everything (incl. the registry links + id); link it into the
-     * global registry exactly once for the struct's whole lifetime. */
-    g = (runloom_g_t *)PyMem_Calloc(1, sizeof(*g));
+    /* Cold path: a brand-new struct from the OS.  Use libc calloc, NOT
+     * PyMem_Calloc: under a cold burst of millions of spawns the slab freelist
+     * (cap RUNLOOM_G_SLAB_CAP) is empty, so this runs ~1M times, and pymalloc
+     * services that by mmap'ing fresh arenas (_PyMem_ArenaAlloc) -- every mmap
+     * takes the process's single mmap_lock, which the 8 hub threads + the
+     * spawner then serialize on (a kernel-lock storm that scales WORSE with hub
+     * count; perf-confirmed).  libc calloc serves a small fixed struct from the
+     * per-thread heap (no per-alloc mmap, no shared lock), removing the storm.
+     * The g-struct is a plain C struct (not a PyObject), so it never needed
+     * pymalloc.  calloc zeroes everything (registry links + id); link it into
+     * the global registry exactly once for the struct's whole lifetime. */
+    g = (runloom_g_t *)calloc(1, sizeof(*g));
     if (g != NULL) runloom_greg_link(g);
     return g;
 }
@@ -395,9 +403,10 @@ void runloom_g_slab_free(runloom_g_t *g)
     runloom_g_state_set(g, RUNLOOM_GST_FREED);
     if (runloom_g_slab_size >= RUNLOOM_G_SLAB_CAP) {
         /* Struct is leaving for the OS -- drop it from the registry
-         * first so the dump never walks freed memory. */
+         * first so the dump never walks freed memory.  free (not PyMem_Free)
+         * to match the libc calloc in slab_alloc's cold path. */
         runloom_greg_unlink(g);
-        PyMem_Free(g);
+        free(g);
         return;
     }
     g->next = runloom_g_slab;
@@ -446,6 +455,23 @@ void runloom_g_decref(runloom_g_t *g)
             PyThreadState_Clear(g->tstate);
             PyThreadState_Delete(g->tstate);
             g->tstate = NULL;
+        }
+        if (g->arena) {
+            /* Bulk-arena g: the g, its coro and its stack are slices of a batch
+             * (one calloc / one mmap), NOT individually allocated.  Do NOT
+             * runloom_coro_destroy (it would pool/free an arena coro) nor
+             * runloom_g_slab_free (it would free an arena g) -- either corrupts
+             * the heap.  Drop the Python refs (g_entry already Py_CLEAR'd
+             * callable; result/error are normally NULL for go_n workers), then
+             * decrement the batch; the last finisher reclaims the whole batch.
+             * Bulk gs are never admitted under the max-goroutines limit, so
+             * limit_counted is 0 -- nothing to release. */
+            Py_XDECREF(g->callable);
+            Py_XDECREF(g->result);
+            Py_XDECREF(g->error);
+            runloom_g_state_set(g, RUNLOOM_GST_FREED);
+            runloom_gon_batch_finish_one(g->batch);
+            return;
         }
         if (g->coro != NULL) {
             runloom_coro_destroy(g->coro);

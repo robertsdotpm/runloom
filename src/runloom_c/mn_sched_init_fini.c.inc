@@ -409,7 +409,7 @@ static int runloom_mn_go_core(PyObject *callable, runloom_c_entry_fn c_fn,
             PyErr_NoMemory();
         }
         runloom_greg_unlink(g);
-        PyMem_Free(g);
+        free(g);                  /* match libc calloc in slab_alloc cold path */
         errno = ENOMEM;
         return -1;
     }
@@ -456,6 +456,220 @@ PyObject *runloom_mn_go(PyObject *callable, size_t stack_size)
         return NULL;
     }
     Py_RETURN_NONE;
+}
+
+/* Bulk-spawn: create `n` goroutines, ALL running the same Python `callable`,
+ * by looping the spawn core in C.  This removes the n Python->C call dispatches
+ * + per-call PyArg parsing that a Python `for i: mn_go(fn)` loop pays -- the
+ * goroutines still run the Python callable (each gets its own g + tstate slot
+ * and invokes `callable()` when scheduled).  Returns 0 on success, or -1 with a
+ * Python error set if a spawn fails partway (the already-created goroutines are
+ * live and will run; the caller decides whether to treat a partial as fatal).
+ * Must be called from inside the M:N runtime (root or a goroutine). */
+/* Read RUNLOOM_GON_BULK once: 1 = go_n uses the bulk-arena fast path. */
+static int runloom_gon_bulk_enabled(void)
+{
+    static int v = -1;
+    int cur = __atomic_load_n(&v, __ATOMIC_RELAXED);
+    if (cur < 0) {
+        const char *e = getenv("RUNLOOM_GON_BULK");
+        cur = (e != NULL && *e != '0' && *e != '\0') ? 1 : 0;
+        __atomic_store_n(&v, cur, __ATOMIC_RELAXED);
+    }
+    return cur;
+}
+
+/* ---- go_n bulk-arena batch lifecycle ----
+ * One descriptor per go_n() call.  Owns the two contiguous arenas (g + coro)
+ * and the reserved stack block; `live` starts at N and is decremented by each
+ * goroutine's final decref.  The decrement that reaches 0 is the last finisher,
+ * which reclaims everything wholesale -- the safe answer to "you can't free a
+ * slice of a calloc/mmap individually".  No per-slot freelist yet: a batch is
+ * reclaimed all-or-nothing, which is exact for go_n's "spawn N, they all run"
+ * shape; partial slot reuse is a later refinement. */
+struct runloom_gon_batch {
+    void  *garena;       /* calloc'd g-struct arena   (one free) */
+    void  *carena;       /* calloc'd coro-struct arena (one free) */
+    void  *stk_block;    /* reserved stack block in the stack arena (MADV target) */
+    size_t stk_bytes;    /* its size in bytes */
+    long   live;         /* goroutines not yet finished; atomic */
+};
+
+void runloom_gon_batch_finish_one(struct runloom_gon_batch *b)
+{
+    if (b == NULL) return;
+    if (__atomic_sub_fetch(&b->live, 1, __ATOMIC_ACQ_REL) == 0) {
+        /* Last finisher: tear the whole batch down.  No other thread can touch
+         * these arenas now -- every g that lived in them has completed. */
+        free(b->garena);
+        free(b->carena);
+        runloom_coro_arena_release(b->stk_block, b->stk_bytes);
+        free(b);
+    }
+}
+
+/* Bulk-arena spawn (the "ultra-fast alloc path"): allocate the N g-structs and
+ * N coro-structs as TWO contiguous calloc'd arenas (one allocation each, no
+ * per-g malloc), carve each stack from the stack arena (lock-free), build each
+ * goroutine with a straight line of stores (the calloc-zeroed arena IS the
+ * template; only the few non-zero fields are written) + a placement coro init,
+ * then SPLICE each hub's whole batch onto its sub-list under ONE lock and bump
+ * pending once.  Zero function-call depth in the hot loop, no per-g lock, no
+ * per-g mmap.  PROTOTYPE: arena g/coro/stacks are never individually freed
+ * (the free path is not yet taught about arena memory), so this is only valid
+ * for workloads whose goroutines do NOT complete during the measured window
+ * (e.g. long-parked workers) -- guarded by RUNLOOM_GON_BULK so the default
+ * go_n (loop) stays the safe path. */
+static int runloom_mn_go_n_bulk(PyObject *callable, long n, size_t stack_size)
+{
+    int H = runloom_hub_count;
+    size_t gsz = sizeof(runloom_g_t);
+    size_t csz = runloom_coro_struct_size();
+    size_t hub_stack;
+    int use_grunq = runloom_use_global_runq();
+    char *garena, *carena;
+    runloom_g_t *heads[64], *tails[64];
+    long counts[64];
+    int hub;
+    long i;
+    long long goid_base;
+    struct runloom_gon_batch *batch = NULL;       /* arena lifecycle, real path only */
+    void  *stk_block = NULL;                       /* reserved stack block (MADV target) */
+    size_t stk_bytes = 0;
+
+    if (H > 64) return -1;                       /* fixed per-hub list cap */
+    garena = (char *)calloc((size_t)n, gsz);
+    carena = (char *)calloc((size_t)n, csz);
+    if (garena == NULL || carena == NULL) { free(garena); free(carena);
+                                            PyErr_NoMemory(); return -1; }
+    hub_stack = (stack_size > 0) ? stack_size
+                                 : (size_t)runloom_hubs[0].sched.stack_size;
+
+    goid_base = runloom_next_goid_block(n);       /* reserve N ids in one atomic */
+    for (hub = 0; hub < H; hub++) { heads[hub] = tails[hub] = NULL; counts[hub] = 0; }
+
+    /* TEMPLATE: bake the common g fields ONCE; the loop memcpy's this whole
+     * struct per slot, then sets the few per-g fields (owner, id, link).  This
+     * is the "one buffer, memcpy in a loop" form.  RUNLOOM_GON_NOFIELDS=1 skips
+     * the g build entirely (isolates the coro/asm/fault cost); NOSUBMIT=1 builds
+     * but never publishes (isolates build from submit + run). */
+    {
+        static int nofields = -1, nosub = -1;
+        const char *e;
+        runloom_g_t tmpl;
+        if (nofields < 0) { e = getenv("RUNLOOM_GON_NOFIELDS"); nofields = (e && *e!='0' && *e)?1:0; }
+        if (nosub < 0)    { e = getenv("RUNLOOM_GON_NOSUBMIT"); nosub    = (e && *e!='0' && *e)?1:0; }
+
+        /* Real (submitting) path: allocate the batch descriptor so each g can
+         * carry an arena-ownership marker + back-pointer.  Skipped for the
+         * nofields/nosub benchmark gates (they never run, so never tear down). */
+        if (!nofields && !nosub) {
+            batch = (struct runloom_gon_batch *)calloc(1, sizeof *batch);
+            if (batch == NULL) { free(garena); free(carena); PyErr_NoMemory(); return -1; }
+        }
+
+        memset(&tmpl, 0, sizeof tmpl);
+        tmpl.callable     = callable;             /* refs batched below */
+        tmpl.refcount     = 1;
+        tmpl.park_fd      = -1;
+        tmpl.in_sub_queue = 1;
+        tmpl.state        = (unsigned char)RUNLOOM_GST_SUBMITTED;
+        tmpl.arena        = (batch != NULL);      /* arena-owned: skip individual free */
+        tmpl.batch        = batch;                /* final decref -> batch_finish_one */
+        if (use_grunq) tmpl.wake_state = RUNLOOM_WS_RUNNING;
+
+        if (!nofields) {
+            for (i = 0; i < n; i++) {
+                runloom_g_t *g = (runloom_g_t *)(garena + (size_t)i * gsz);
+                hub = (int)(i % H);
+                memcpy(g, &tmpl, gsz);            /* <-- template memcpy */
+                g->owner = &runloom_hubs[hub].sched;
+                g->id    = goid_base + (long long)i;
+                g->next  = NULL;
+                if (tails[hub] != NULL) tails[hub]->next = g; else heads[hub] = g;
+                tails[hub] = g;
+                counts[hub]++;
+            }
+        }
+
+        /* Fill the coro arena + set each g->coro.  MUST run after the memcpy
+         * (which would otherwise clobber g->coro).  On arena failure, fall back
+         * to the per-g path. */
+        if (runloom_coro_bulk_init(carena, csz, garena, gsz,
+                                   offsetof(runloom_g_t, coro),
+                                   hub_stack, n, runloom_g_entry,
+                                   &stk_block, &stk_bytes) != 0) {
+            free(garena); free(carena); free(batch);
+            for (i = 0; i < n; i++)
+                if (runloom_mn_go_core(callable, NULL, NULL, stack_size) < 0) return -1;
+            return 0;
+        }
+
+        if (nofields || nosub) { free(garena); free(carena); free(batch); return 0; }
+    }
+
+    /* Hand the arenas + reserved stack block to the batch; arm its live count.
+     * From here, each goroutine's final decref calls runloom_gon_batch_finish_one,
+     * and the Nth reclaims all three allocations. */
+    batch->garena    = garena;
+    batch->carena    = carena;
+    batch->stk_block = stk_block;
+    batch->stk_bytes = stk_bytes;
+    __atomic_store_n(&batch->live, n, __ATOMIC_RELEASE);
+
+    /* ===== bookkeeping, LAST ===== */
+    /* All N callable references taken here, in one place (the new gs hold them). */
+    {
+        static int norefcnt = -1;
+        if (norefcnt < 0) { const char *e = getenv("RUNLOOM_GON_NOREFCNT");
+                            norefcnt = (e && *e != '0' && *e) ? 1 : 0; }
+        if (!norefcnt) for (i = 0; i < n; i++) Py_INCREF(callable);
+    }
+
+    /* Splice each hub's whole batch onto its sub-list under ONE lock. */
+    for (hub = 0; hub < H; hub++) {
+        runloom_hub_t *h;
+        if (heads[hub] == NULL) continue;
+        h = &runloom_hubs[hub];
+        runloom_mutex_lock(&h->sub_lock);
+        if (h->sub_tail != NULL) h->sub_tail->next = heads[hub];
+        else                     h->sub_head = heads[hub];
+        h->sub_tail = tails[hub];
+        runloom_mutex_unlock(&h->sub_lock);
+        __atomic_add_fetch(&h->pending, counts[hub], __ATOMIC_ACQ_REL);
+        /* GLOBAL pending too: mn_run polls runloom_mn_pending_global, not the
+         * per-hub fields.  The per-g spawn path does this via runloom_mn_pending_inc;
+         * the bulk path must add its whole batch here or mn_run sees 0 and exits
+         * before the goroutines run.  Each g's completion (runloom_mn_pending_complete)
+         * decrements it, so the count balances. */
+        __atomic_add_fetch(&runloom_mn_pending_global, counts[hub], __ATOMIC_ACQ_REL);
+        __atomic_add_fetch(&h->sub_gen, 1, __ATOMIC_RELEASE);
+        if (__atomic_load_n(&h->idle_waiting, __ATOMIC_ACQUIRE)) {
+            runloom_mutex_lock(&h->idle_lock);
+            runloom_cond_signal(&h->idle_cond);
+            runloom_mutex_unlock(&h->idle_lock);
+        }
+    }
+    return 0;
+}
+
+int runloom_mn_go_n(PyObject *callable, long n, size_t stack_size)
+{
+    long i;
+    if (runloom_hubs == NULL) {
+        PyErr_SetString(PyExc_RuntimeError,
+                        "runloom_mn_init() must be called first");
+        return -1;
+    }
+    if (n > 0 && runloom_gon_bulk_enabled()) {
+        return runloom_mn_go_n_bulk(callable, n, stack_size);
+    }
+    for (i = 0; i < n; i++) {
+        if (runloom_mn_go_core(callable, NULL, NULL, stack_size) < 0) {
+            return -1;
+        }
+    }
+    return 0;
 }
 
 Py_ssize_t runloom_mn_run(void)

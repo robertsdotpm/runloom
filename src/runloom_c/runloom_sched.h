@@ -301,6 +301,18 @@ struct runloom_g {
      * per transition. */
     unsigned char state;
 
+    /* ---- bulk-arena ownership (go_n) ----
+     * When `arena` is set, this g, its coro, and its stack are SLICES of a bulk
+     * arena (one calloc / one mmap for the whole batch), NOT individually
+     * malloc'd.  Its final decref must therefore NOT runloom_coro_destroy the coro
+     * nor runloom_g_slab_free the g (either would free()/pool a slice -> heap
+     * corruption).  Instead it decrements the owning batch's live count; the
+     * LAST goroutine to finish tears the whole batch down (free the g/coro
+     * arenas, MADV_DONTNEED the stack block).  0 for every normal goroutine.
+     * Both live BEFORE the id introspection block so slab reuse clears them. */
+    unsigned char arena;
+    struct runloom_gon_batch *batch;
+
     /* ---- introspection block (runloom_introspect.c) ----
      * These fields are deliberately the LAST members of runloom_g_t.  The
      * per-thread slab reuse path (runloom_g_slab_alloc) bulk-clears a g only
@@ -358,6 +370,13 @@ void runloom_sched_wake_safe(runloom_g_t *g);
 /* Lifetime helpers. */
 void runloom_g_incref(runloom_g_t *g);
 void runloom_g_decref(runloom_g_t *g);
+
+/* go_n bulk-arena batch teardown: called by an arena g's final decref instead
+ * of free()ing the g/coro/stack slices individually.  Decrements the batch's
+ * live count; the LAST goroutine to finish frees the g + coro arenas and
+ * MADV_DONTNEEDs the stack block.  Defined in mn_sched_init_fini.c.inc. */
+struct runloom_gon_batch;
+void runloom_gon_batch_finish_one(struct runloom_gon_batch *b);
 
 /* Acquire a reference ONLY if the g is still live (refcount > 0).  Returns
  * 1 on success (caller now owns a ref, must decref), 0 if the g is already

@@ -165,6 +165,10 @@ static PyMethodDef module_methods[] = {
      "stack_size>0 overrides the hub's small default C-stack (bytes) for a g "
      "that runs a deep non-yielding C burst.  "
      "v1 only supports run-to-completion gs (no yield)."},
+    {"go_n",        (PyCFunction)m_go_n, METH_VARARGS | METH_KEYWORDS,
+     "go_n(fn, n, stack_size=0): bulk-spawn n goroutines all running fn(), "
+     "looping the spawn core in C (skips n Python->C dispatches).  fn still "
+     "runs as Python in each goroutine."},
     {"mn_run",      m_mn_run,      METH_NOARGS,
      "mn_run(): wait for all gs to complete.  Returns total completed."},
     {"mn_fini",     m_mn_fini,     METH_NOARGS,

@@ -289,6 +289,32 @@ static PyObject *m_mn_go(PyObject *self, PyObject *args, PyObject *kw)
     return runloom_mn_go(callable, stack_size > 0 ? (size_t)stack_size : 0);
 }
 
+/* go_n(fn, n, stack_size=0): bulk-spawn n goroutines all running fn(), looping
+ * the spawn core in C to skip n Python->C dispatches.  fn still runs as Python
+ * in each goroutine. */
+static PyObject *m_go_n(PyObject *self, PyObject *args, PyObject *kw)
+{
+    static char *kwlist[] = {"fn", "n", "stack_size", NULL};
+    PyObject *callable;
+    long n;
+    Py_ssize_t stack_size = 0;
+    (void)self;
+    if (!PyArg_ParseTupleAndKeywords(args, kw, "Ol|n", kwlist,
+                                     &callable, &n, &stack_size)) {
+        return NULL;
+    }
+    if (!PyCallable_Check(callable)) {
+        PyErr_SetString(PyExc_TypeError, "go_n(): fn must be callable");
+        return NULL;
+    }
+    if (n < 0) n = 0;
+    if (runloom_mn_go_n(callable, n,
+                        stack_size > 0 ? (size_t)stack_size : 0) < 0) {
+        return NULL;
+    }
+    Py_RETURN_NONE;
+}
+
 static PyObject *m_mn_run(PyObject *self, PyObject *unused)
 {
     Py_ssize_t completed;

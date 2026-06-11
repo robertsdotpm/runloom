@@ -75,6 +75,8 @@ void runloom_greg_unlink(runloom_g_t *g);
  * a per-thread counter ORed with a per-thread base, so spawning on many
  * hubs never touches a shared cacheline.  Unique for the process life. */
 long long runloom_next_goid(void);
+/* Reserve a contiguous block of n goids in one atomic; returns the first. */
+long long runloom_next_goid_block(long n);
 
 /* Number of live (non-FREED) goroutines.  Takes runloom_greg_lock. */
 long runloom_goroutine_count(void);
