@@ -18,8 +18,8 @@ for prog in "$@"; do
   # -k 10: if it ignores SIGTERM at the timeout, SIGKILL 10s later -> never hangs.
   out=$(env PYTHON_GIL=0 PYTHONPATH=../src $GON timeout -k 10 "$tmo" "$PY" "$prog.py" \
         --funcs 1000000 --duration 5 --rounds 0 --hubs 8 $extra 2>&1)
-  pkill -9 -f "$prog.py" 2>/dev/null    # belt-and-braces: reap any stragglers
   rc=$?
+  pkill -9 -f "$prog.py" 2>/dev/null    # belt-and-braces: reap any stragglers
   dt=$(( $(date +%s) - t0 ))
   verdict=$(printf '%s\n' "$out" | grep -oE "VERDICT +: [A-Z]+" | head -1 | grep -oE "[A-Z]+$")
   funcs=$(printf '%s\n' "$out"  | grep -oE "funcs +: [0-9]+" | head -1 | grep -oE "[0-9]+$")
