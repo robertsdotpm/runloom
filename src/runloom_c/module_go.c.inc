@@ -230,6 +230,64 @@ static PyObject *m_current_g(PyObject *self, PyObject *unused)
     return (PyObject *)handle;
 }
 
+/* unpark_many(handles) -> list[int] : directly wake a batch of goroutines parked
+ * in wait_fd (the wake side of a fan-in primitive -- Event.set / notify_all /
+ * Semaphore.release).  `handles` is a sequence of G objects (each a waiter's
+ * current_g()).  Claims+re-queues each parked g in one C call, replacing the
+ * per-waiter os.write(pipe) -> epoll -> drain round-trip.  Returns the list of
+ * INDICES into `handles` that could NOT be direct-woken (the waiter has not yet
+ * committed its wait_fd park -- the edge-before-park window); the caller falls
+ * back to a pipe-write for exactly those.  A G whose ->g already completed is
+ * skipped (not reported missed). */
+static PyObject *m_unpark_many(PyObject *self, PyObject *seq)
+{
+    Py_ssize_t n, i;
+    runloom_g_t **gs;
+    int *missed;
+    int nmissed;
+    PyObject *fast, *result;
+    (void)self;
+
+    fast = PySequence_Fast(seq, "unpark_many() requires a sequence of G handles");
+    if (fast == NULL) return NULL;
+    n = PySequence_Fast_GET_SIZE(fast);
+    if (n == 0) {
+        Py_DECREF(fast);
+        return PyList_New(0);
+    }
+    gs = (runloom_g_t **)PyMem_Malloc((size_t)n * sizeof(runloom_g_t *));
+    missed = (int *)PyMem_Malloc((size_t)n * sizeof(int));
+    if (gs == NULL || missed == NULL) {
+        PyMem_Free(gs); PyMem_Free(missed); Py_DECREF(fast);
+        return PyErr_NoMemory();
+    }
+    for (i = 0; i < n; i++) {
+        PyObject *item = PySequence_Fast_GET_ITEM(fast, i);   /* borrowed */
+        if (!PyObject_TypeCheck(item, &RunloomGType)) {
+            PyMem_Free(gs); PyMem_Free(missed); Py_DECREF(fast);
+            PyErr_SetString(PyExc_TypeError,
+                            "unpark_many() items must be G handles");
+            return NULL;
+        }
+        gs[i] = ((RunloomG *)item)->g;   /* NULL if g completed -> skipped */
+    }
+    /* No GIL juggling: the wake path's mutual exclusion is the per-pool
+     * runloom_mutex (taken inside unpark_many), the same locks the pump uses
+     * independent of the GIL; under free-threaded 3.13t there is no GIL anyway. */
+    nmissed = runloom_netpoll_unpark_many(gs, (int)n, missed);
+
+    result = PyList_New(nmissed);
+    if (result != NULL) {
+        for (i = 0; i < nmissed; i++) {
+            PyObject *idx = PyLong_FromLong((long)missed[i]);
+            if (idx == NULL) { Py_CLEAR(result); break; }
+            PyList_SET_ITEM(result, i, idx);   /* steals idx */
+        }
+    }
+    PyMem_Free(gs); PyMem_Free(missed); Py_DECREF(fast);
+    return result;
+}
+
 /* Stack high-water-mark (bytes) of the currently-running goroutine, page-
  * granular, measured paint-free via mincore (runloom_coro_scan_hwm).  Returns
  * 0 outside a goroutine, or where the backend has no introspectable stack

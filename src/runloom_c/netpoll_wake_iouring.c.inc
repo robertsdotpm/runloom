@@ -37,6 +37,50 @@ void runloom_netpoll_force_unlink_g_parker(runloom_g_t *g)
     if (p != NULL) runloom_parker_pool_release(p);
 }
 
+/* Lock the parker pool that currently owns g's wait_fd parker, defending against
+ * RE-PARK MIGRATION.  g->netpoll_parker can change to a parker on a DIFFERENT hub
+ * (hence a different pool) between the lock-free hub read and the lock acquire --
+ * if the g is woken by another claimer and re-parks elsewhere in that window.
+ * cancel_g and unpark_many both wake a g that WILL resume and may re-park, so
+ * they must re-validate the pool under the lock; the pump/deadline sweep reach a
+ * parker by walking the pool's OWN structures (so they always hold the right
+ * lock), and force_unlink acts on a COMPLETING g (which never re-parks) -- only
+ * these two need this guard.
+ *
+ * On success returns 1 holding *pool_out->lock with *p_out == g->netpoll_parker
+ * living in *pool_out, so the caller has exclusive UNLINK rights on it (a
+ * concurrent pump/timeout claimer can still CAS its commit lock-free, which the
+ * caller's own claim CAS then loses cleanly -> exactly-once preserved).  Returns
+ * 0 with NO lock held if g is not parked (parker NULL: not yet committed the
+ * park, or already woken+unlinked). */
+static int runloom_netpoll_lock_g_pool(runloom_g_t *g,
+                                       runloom_parked_t **p_out,
+                                       runloom_parker_pool_t **pool_out)
+{
+    for (;;) {
+        runloom_parked_t *p = (runloom_parked_t *)g->netpoll_parker;
+        runloom_parker_pool_t *pool;
+        if (p == NULL) return 0;
+        pool = runloom_parker_pool_for_hub(p->hub);
+        runloom_mutex_lock(&pool->lock);
+        /* Re-read under the lock: a pump/timeout/force-unlink may have cleared
+         * it, OR the g may have re-parked on a different pool. */
+        p = (runloom_parked_t *)g->netpoll_parker;
+        if (p == NULL) { runloom_mutex_unlock(&pool->lock); return 0; }
+        if (runloom_parker_pool_for_hub(p->hub) != pool) {
+            /* g re-parked on a different pool in the lock-acquire window; the
+             * lock we hold is the WRONG one -- drop it and retry with the fresh
+             * pool.  Bounded: a re-park needs a prior wake, and once our claim
+             * below wins, no further re-wake/re-park can occur. */
+            runloom_mutex_unlock(&pool->lock);
+            continue;
+        }
+        *p_out = p;
+        *pool_out = pool;
+        return 1;
+    }
+}
+
 /* Cancel a goroutine parked in runloom_netpoll_wait_fd.  Unlike force_unlink
  * (g-completion: unlink + release, no wake), the g here WILL resume in wait_fd,
  * so we WAKE it instead of releasing -- wait_fd's own resume path releases the
@@ -49,38 +93,90 @@ int runloom_netpoll_cancel_g(runloom_g_t *g)
     runloom_parker_pool_t *pool;
     int cur, woke = 0;
     if (g == NULL) return 0;
-    if (g->netpoll_parker == NULL) return 0;   /* not parked in wait_fd */
-    p = (runloom_parked_t *)g->netpoll_parker;
-    pool = runloom_parker_pool_for_hub(p->hub);
-    runloom_mutex_lock(&pool->lock);
-    /* Re-read under the lock (a pump/timeout/force-unlink may have cleared it
-     * between the cheap check and the lock acquire). */
-    p = (runloom_parked_t *)g->netpoll_parker;
-    if (p != NULL) {
+    if (g->netpoll_parker == NULL) return 0;   /* cheap path: not parked */
+    if (!runloom_netpoll_lock_g_pool(g, &p, &pool)) return 0;
+    /* holds pool->lock; p == g->netpoll_parker, living in pool */
+    for (;;) {
+        cur = __atomic_load_n(&p->commit, __ATOMIC_ACQUIRE);
+        if (cur == RUNLOOM_PARK_WOKEN) break;       /* pump/timeout won */
+        if (__atomic_compare_exchange_n(&p->commit, &cur, RUNLOOM_PARK_WOKEN, 0,
+                                        __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+            break;
+    }
+    if (cur != RUNLOOM_PARK_WOKEN) {
+        if (p->ready_out != NULL) *p->ready_out = RUNLOOM_NETPOLL_CANCELLED;
+        runloom_parker_unlink(pool, p);   /* clears g->netpoll_parker */
+        /* Re-queue only a committed (PARKED) g; an ARMED g hasn't yielded
+         * yet -- it sees WOKEN at its own commit CAS, aborts the park, and
+         * returns RUNLOOM_NETPOLL_CANCELLED itself (re-queueing would double-
+         * resume it). */
+        if (cur == RUNLOOM_PARK_PARKED) {
+            if (p->hub != NULL) runloom_mn_wake_g(p->hub, p->g);
+            else                runloom_sched_wake(p->g);
+        }
+        woke = 1;
+        RUNLOOM_EVT(RUNLOOM_EVT_PARKER_FORCE, p, p->g, (long long)p->fd);
+    }
+    runloom_mutex_unlock(&pool->lock);
+    return woke;
+}
+
+/* Directly wake a BATCH of goroutines parked in wait_fd -- the wake side of a
+ * fan-in primitive (Event.set / Condition.notify_all / Semaphore.release).  Each
+ * g is claimed + ready_out=UNPARKED + unlinked + re-queued, identical to cancel_g
+ * (UNPARKED instead of CANCELLED), one g at a time under the right pool lock via
+ * the re-validating lock helper.  A g whose parker is NULL -- it appended itself
+ * to the primitive's wait list but has not yet committed the wait_fd park (the
+ * edge-before-park window), or it was already woken+unlinked -- cannot be
+ * direct-woken; its index goes into missed_out so the caller falls back to the
+ * pipe-write backstop (a stray byte for the already-woken sub-case is harmless:
+ * drained on parker release / discarded by the wait_fd poll() re-check).  This
+ * replaces N os.write syscalls + N epoll edges + N pump drains with N in-process
+ * claims.  Returns the count of missed indices written to missed_out[0..ret). */
+int runloom_netpoll_unpark_many(runloom_g_t **gs, int n, int *missed_out)
+{
+    int i, missed = 0;
+    for (i = 0; i < n; i++) {
+        runloom_g_t *g = gs[i];
+        runloom_parked_t *p;
+        runloom_parker_pool_t *pool;
+        int cur;
+        if (g == NULL) continue;               /* skipped, not missed */
+        if (g->netpoll_parker == NULL) {        /* cheap path: not parked yet */
+            missed_out[missed++] = i;
+            continue;
+        }
+        if (!runloom_netpoll_lock_g_pool(g, &p, &pool)) {
+            /* parker raced to NULL -> edge-before-park backstop via pipe-write. */
+            missed_out[missed++] = i;
+            continue;
+        }
+        /* holds pool->lock; p == g->netpoll_parker, living in pool */
         for (;;) {
             cur = __atomic_load_n(&p->commit, __ATOMIC_ACQUIRE);
-            if (cur == RUNLOOM_PARK_WOKEN) break;       /* pump/timeout won */
+            if (cur == RUNLOOM_PARK_WOKEN) break;       /* pump/timeout/cancel won */
             if (__atomic_compare_exchange_n(&p->commit, &cur, RUNLOOM_PARK_WOKEN, 0,
                                             __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
                 break;
         }
         if (cur != RUNLOOM_PARK_WOKEN) {
-            if (p->ready_out != NULL) *p->ready_out = RUNLOOM_NETPOLL_CANCELLED;
+            if (p->ready_out != NULL) *p->ready_out = RUNLOOM_NETPOLL_UNPARKED;
             runloom_parker_unlink(pool, p);   /* clears g->netpoll_parker */
-            /* Re-queue only a committed (PARKED) g; an ARMED g hasn't yielded
-             * yet -- it sees WOKEN at its own commit CAS, aborts the park, and
-             * returns RUNLOOM_NETPOLL_CANCELLED itself (re-queueing would double-
-             * resume it). */
+            /* Re-queue only a committed (PARKED) g; an ARMED g hasn't yielded --
+             * waking it would double-resume.  It sees WOKEN at its own commit CAS,
+             * aborts the park, and returns RUNLOOM_NETPOLL_UNPARKED itself. */
             if (cur == RUNLOOM_PARK_PARKED) {
                 if (p->hub != NULL) runloom_mn_wake_g(p->hub, p->g);
                 else                runloom_sched_wake(p->g);
             }
-            woke = 1;
             RUNLOOM_EVT(RUNLOOM_EVT_PARKER_FORCE, p, p->g, (long long)p->fd);
         }
+        /* cur==WOKEN: lost the claim to another waker -> the g is already being
+         * resumed by that winner; NOT missed (a pipe-write would be a stray byte
+         * we do not want). */
+        runloom_mutex_unlock(&pool->lock);
     }
-    runloom_mutex_unlock(&pool->lock);
-    return woke;
+    return missed;
 }
 
 /* Cancel EVERY goroutine parked in runloom_netpoll_wait_fd on `fd` -- used by

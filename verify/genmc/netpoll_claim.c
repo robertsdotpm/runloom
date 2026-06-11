@@ -40,10 +40,12 @@
 #define R_UNSET  0
 #define R_MASK   1   /* fd-ready claimer's value   */
 #define R_CANCEL 3   /* cancel claimer's value     */
+#define R_UNPARK 5   /* unpark_many claimer's value (RUNLOOM_NETPOLL_UNPARKED) */
 
 #define NONE   0
 #define FD     1
 #define CANCEL 3
+#define UNPARK 5
 
 static atomic_int commit;           /* park->commit                          */
 static atomic_int woken;            /* claimer re-queued the parked g         */
@@ -53,7 +55,9 @@ static atomic_int resumes;          /* re-queue count (exactly-once)          */
 static pthread_mutex_t pool_lock;
 
 #define VALUE_OK(r, w) \
-    (((w) == FD && (r) == R_MASK) || ((w) == CANCEL && (r) == R_CANCEL))
+    (((w) == FD     && (r) == R_MASK)   || \
+     ((w) == CANCEL && (r) == R_CANCEL) || \
+     ((w) == UNPARK && (r) == R_UNPARK))
 
 /* A claimer: runloom_pump_claim under pool->lock, publish, re-queue if PARKED. */
 static void claim(int who, int val)
@@ -81,6 +85,11 @@ static void claim(int who, int val)
 
 static void *fd_claimer(void *_)     { (void)_; claim(FD, R_MASK);     return 0; }
 static void *cancel_claimer(void *_) { (void)_; claim(CANCEL, R_CANCEL); return 0; }
+/* runloom_netpoll_unpark_many's per-g claim is byte-for-byte cancel_g's, only the
+ * published value differs (UNPARKED, not CANCELLED).  Modelling it as a 4th
+ * claimer proves exactly-once + value-correctness still hold in the full
+ * {pump fd-ready, timeout sweep, cancel, unpark} race. */
+static void *unpark_claimer(void *_) { (void)_; claim(UNPARK, R_UNPARK); return 0; }
 
 /* The parking goroutine: runloom_netpoll_wait_fd's commit + abort/resume. */
 static void *parker(void *_)
@@ -119,7 +128,7 @@ static void *parker(void *_)
 
 int main(void)
 {
-    pthread_t tp, tf, tc;
+    pthread_t tp, tf, tc, tu;
     pthread_mutex_init(&pool_lock, 0);
     atomic_init(&commit, ARMED);
     atomic_init(&woken, 0);
@@ -130,8 +139,10 @@ int main(void)
     pthread_create(&tp, 0, parker, 0);
     pthread_create(&tf, 0, fd_claimer, 0);
     pthread_create(&tc, 0, cancel_claimer, 0);
+    pthread_create(&tu, 0, unpark_claimer, 0);
     pthread_join(tp, 0);
     pthread_join(tf, 0);
     pthread_join(tc, 0);
+    pthread_join(tu, 0);
     return 0;
 }

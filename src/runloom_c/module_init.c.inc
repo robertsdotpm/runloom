@@ -110,6 +110,12 @@ static PyMethodDef module_methods[] = {
      "(page-granular, paint-free via mincore), or 0 outside a goroutine "
      "or where the backend has no introspectable stack.  Read half of the "
      "function-bound grow-down auto-sizer."},
+    {"unpark_many", m_unpark_many, METH_O,
+     "unpark_many(handles) -> list[int]: directly wake a batch of goroutines "
+     "parked in wait_fd (the wake side of a fan-in primitive).  handles is a "
+     "sequence of G objects; returns the indices that could not be direct-woken "
+     "(not yet parked -- caller pipe-writes those).  Replaces N os.write syscalls "
+     "with one batched in-process claim+re-queue."},
     {"run",         m_run,         METH_NOARGS,
      "Drive the C scheduler until all goroutines finish.  Returns count."},
     {"run_ready",   m_run_ready,   METH_NOARGS,

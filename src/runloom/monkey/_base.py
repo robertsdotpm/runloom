@@ -179,7 +179,7 @@ def _fd_pollable(fd):
 # mode the parker can't be signalled until the parking goroutine has
 # yielded.
 class _Parker(object):
-    __slots__ = ("r", "w", "_sockets")
+    __slots__ = ("r", "w", "_sockets", "_g_handle")
     # Free-list of reusable (r, w, _sockets) tuples.  The pool lock uses a
     # NON-BLOCKING acquire so that no goroutine ever waits for it (blocking
     # would freeze the goroutine's hub if sysmon preempted the holder).  A
@@ -210,9 +210,22 @@ class _Parker(object):
             self.r = r
             self.w = w
             self._sockets = None
+        # The handle of the goroutine parked here, set by park() in the goroutine
+        # branch and read by _unpark_all -> runloom_c.unpark_many for a batched
+        # DIRECT wake (no per-waiter os.write).  None means "no goroutine to wake
+        # directly" -> foreign-thread waiter, use the pipe-write path.
+        self._g_handle = None
 
     def park(self, timeout=None):
+        # Clear FIRST: a _Parker object reused for a second park must not carry
+        # the previous park's goroutine handle (a stale handle would let a setter
+        # direct-wake the WRONG g -> this waiter hangs).  The foreign-thread
+        # branch leaves it None, which is exactly the "no direct wake" marker.
+        self._g_handle = None
         if _in_goroutine():
+            # Publish our goroutine handle so a fan-in setter can wake us via the
+            # batched runloom_c.unpark_many instead of an os.write per waiter.
+            self._g_handle = runloom_c.current_g()
             # Pass the deadline straight to the netpoll wait: wait_fd returns on
             # the unpark byte OR at timeout_ms, so a TIMED wait needs no separate
             # waker goroutine + heap timer (the old per-primitive _spawn(waker)
@@ -256,6 +269,10 @@ class _Parker(object):
                 pass
 
     def release(self):
+        # Drop the goroutine handle (and its g incref): the wait is over, so this
+        # parker is no longer wakeable.  Also a stale-handle guard for the pooled
+        # fd-tuple's next user.
+        self._g_handle = None
         # Drain any stale wake bytes before returning to the pool.  Must
         # use raw recv/read -- the patched versions would park forever
         # on BlockingIOError instead of returning empty.
@@ -292,6 +309,46 @@ class _Parker(object):
                 except OSError: pass
                 try: os.close(self.w)
                 except OSError: pass
+
+
+def _unpark_all(parkers):
+    """Wake a batch of waiters (the fan-in wake side of Event/Condition/
+    Semaphore).  GOROUTINE waiters are woken by ONE batched runloom_c.unpark_many
+    (a direct claim+re-queue per g, no per-waiter os.write -> epoll -> drain
+    round-trip -- ~85% of the fan-in cost at scale); FOREIGN-thread waiters (no
+    goroutine handle) keep the os.write path.  unpark_many returns the indices it
+    could not direct-wake -- a waiter that appended itself but has not yet
+    committed its wait_fd park (the edge-before-park window) -- and those fall
+    back to the pipe-write backstop so the wake is never lost."""
+    if not _in_goroutine():
+        # FOREIGN OS-thread setter (e.g. Thread.start()'s self._started.set()
+        # from the real worker thread, or a multiprocessing feeder thread):
+        # a direct unpark_many here is NOT race-safe.  unpark_many unlinks the
+        # parker (netpoll_parked--) then re-queues the g, but on a foreign thread
+        # those are not serialized against run()'s drain loop -- it can observe
+        # netpoll_parked==0 with the ready-push not yet visible and EXIT, dropping
+        # the wake.  os.write IS race-free: the pump does the unlink+wake on
+        # run()'s OWN thread.  (This is the whole reason waiters park on an fd --
+        # see CoEvent's class comment / chan_waiters.c.inc park_waiter FINDING.)
+        for p in parkers:
+            p.unpark()
+        return
+    gor = None
+    gor_parkers = None
+    for p in parkers:
+        h = p._g_handle
+        if h is not None:
+            if gor is None:
+                gor = []
+                gor_parkers = []
+            gor.append(h)
+            gor_parkers.append(p)
+        else:
+            p.unpark()                        # foreign thread: one os.write
+    if gor:
+        missed = runloom_c.unpark_many(gor)   # one C call for all goroutines
+        for idx in missed:
+            gor_parkers[idx].unpark()         # edge-before-park byte backstop
 
 
 # ============================================================

@@ -49,8 +49,7 @@ class CoEvent(object):
         self._flag = True
         waiters, self._waiters = list(self._waiters), collections.deque()
         self._guard.release()
-        for p in waiters:
-            p.unpark()
+        _unpark_all(waiters)   # batched direct wake (no os.write per waiter)
 
     def clear(self):
         with self._guard:
@@ -160,16 +159,19 @@ class CoCondition(object):
         return result
 
     def notify(self, n=1):
+        woke = None
         for _ in range(n):
             if not self._waiters:
-                return
-            p = self._waiters.popleft()
-            p.unpark()
+                break
+            if woke is None:
+                woke = []
+            woke.append(self._waiters.popleft())
+        if woke:
+            _unpark_all(woke)   # one batched wake for the n popped waiters
 
     def notify_all(self):
         waiters, self._waiters = list(self._waiters), collections.deque()
-        for p in waiters:
-            p.unpark()
+        _unpark_all(waiters)   # batched direct wake (no os.write per waiter)
     notifyAll = notify_all
 
 
@@ -262,21 +264,26 @@ class CoSemaphore(object):
         return w[2]
 
     def release(self, n=1):
+        woke = None
         for _ in range(n):
             self._guard.acquire()
             found = False
             while self._waiters:
                 w = self._waiters.popleft()
                 if w[1]:    # active (not timed out)?
-                    w[2] = True   # got_permit
+                    w[2] = True   # got_permit (set under guard, before unpark)
                     self._guard.release()
-                    w[0].unpark()
+                    if woke is None:
+                        woke = []
+                    woke.append(w[0])   # batch the wake, hand-off stays per-permit
                     found = True
                     break
                 # Stale timed-out waiter: discard (goroutine drains its own parker)
             if not found:
                 self._value += 1
                 self._guard.release()
+        if woke:
+            _unpark_all(woke)   # one batched wake for all handed permits
 
     def cancel_all(self):
         """Unpark all waiting goroutines WITHOUT giving them permits.
@@ -291,10 +298,15 @@ class CoSemaphore(object):
         waiters = list(self._waiters)
         self._waiters = collections.deque()
         self._guard.release()
+        woke = None
         for w in waiters:
             if w[1]:   # active (not already timed out)
                 w[1] = False   # mark inactive — no permit
-                w[0].unpark()
+                if woke is None:
+                    woke = []
+                woke.append(w[0])
+        if woke:
+            _unpark_all(woke)   # batched direct wake
 
     def __enter__(self):
         self.acquire(); return self

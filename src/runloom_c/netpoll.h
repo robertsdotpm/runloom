@@ -41,6 +41,32 @@
  * event mask nor the 0/-1/CANCELLED returns. */
 #define RUNLOOM_NETPOLL_SIGNALED 0x20000000
 
+/* Sentinel stored in a parker's ready_out by runloom_netpoll_unpark_many when a
+ * cooperative primitive (Event.set / Condition.notify_all / Semaphore.release)
+ * wakes a batch of goroutine waiters DIRECTLY -- claiming each parker and
+ * re-queuing its g, bypassing the per-waiter pipe-write -> epoll -> drain
+ * round-trip.  Like CANCELLED/SIGNALED it is a distinct high bit that can never
+ * be a real event mask (0x1/0x2) nor the 0/-1 timeout/error returns; the
+ * _Parker/events.py side treats ANY wait_fd return as "woke, re-check the
+ * predicate", so the distinct value is informational (FV/debug, and lets a
+ * caller tell an explicit unpark from a deadline-0). */
+#define RUNLOOM_NETPOLL_UNPARKED 0x10000000
+
+/* Directly wake up to `n` goroutines parked in runloom_netpoll_wait_fd (each via
+ * its g->netpoll_parker), as a batch -- the wake side of a fan-in primitive.
+ * Claims each parker through the SAME commit CAS the pump uses (so the
+ * {pump, timeout, cancel, unpark} race resolves to exactly one winner), stores
+ * RUNLOOM_NETPOLL_UNPARKED into its ready_out, unlinks it, and re-queues a
+ * committed (PARKED) g.  A g whose parker is still NULL (it appended itself to
+ * the primitive's wait list but has not yet committed the wait_fd park -- the
+ * edge-before-park window) cannot be direct-woken; its index is written into
+ * `missed_out` (caller-provided, capacity >= n) so the caller can fall back to
+ * the pipe-write backstop for exactly those.  Returns the number of missed
+ * indices (written to missed_out[0..ret)).  gs[i] may be NULL (skipped, not
+ * counted as missed). */
+struct runloom_g;   /* forward decl (full type lives in runloom_sched.h) */
+int runloom_netpoll_unpark_many(struct runloom_g **gs, int n, int *missed_out);
+
 /* Park the current goroutine until fd is ready for any of `events`,
  * or timeout_ns nanoseconds have passed (-1 = wait forever).
  * Returns the ready events mask (subset of `events`), 0 on timeout,

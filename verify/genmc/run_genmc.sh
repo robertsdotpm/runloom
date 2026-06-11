@@ -76,6 +76,22 @@ else
     red "FAIL"; echo " -- runloom_sched* lost a seq_cst fence; re-sync sched_parkwake.c"; fail=$((fail+1))
 fi
 
+# --- netpoll data-fd LEVEL-arming drift-guard --------------------------------
+# Two correctness arguments depend on the epoll data-fd staying LEVEL-triggered
+# (EPOLLIN|EPOLLRDHUP, NO EPOLLET): (1) runloom_fd_pending_wake_consume's poll()
+# re-check (a stale stash is discarded because LEVEL re-fires a genuine edge);
+# (2) runloom_netpoll_unpark_many / cancel_g NOT disarming the fd after a direct
+# wake (a later level re-fire is harmlessly stashed + poll-rechecked).  Switching
+# to EPOLLET would silently break both -- so fail loudly if the arm changes.
+printf '  [genmc] %-30s ' "netpoll LEVEL-arming drift-guard"
+REG="$SRCDIR/netpoll_register.c.inc"
+if grep -q 'ev\.events |= EPOLLIN | EPOLLRDHUP' "$REG" \
+   && ! grep -q 'ev\.events.*EPOLLET' "$REG"; then
+    green "PASS"; echo " -- netpoll data-fd arms LEVEL (no EPOLLET); poll re-check + unpark no-disarm stay sound"; pass=$((pass+1))
+else
+    red "FAIL"; echo " -- netpoll_register arming changed; re-audit pending_wake poll() + unpark_many no-disarm"; fail=$((fail+1))
+fi
+
 printf '  [genmc] %-30s ' "sched_parkwake.c"
 if "$G" -- "$HERE/sched_parkwake.c" >"$HERE/.genmc.pos.log" 2>&1 \
         && grep -q "No errors were detected" "$HERE/.genmc.pos.log"; then
