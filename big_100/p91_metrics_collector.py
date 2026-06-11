@@ -17,7 +17,6 @@ import netutil
 
 
 def setup(H):
-    tcp = netutil.listen_tcp()
     udp = netutil.udp_socket()
     udp.setblocking(False)
     summary = os.path.join(H.make_tmpdir("big100_metrics_"), "summary.txt")
@@ -26,8 +25,6 @@ def setup(H):
     # share a slot under GIL=0 (free-threaded list[i] += x is not atomic).
     half = H.funcs // 2
     state = {
-        "tcp_port": tcp.getsockname()[1],
-        "tcp_host": tcp.getsockname()[0],
         "udp_addr": udp.getsockname(),
         "lock": threading.Lock(),
         "tcp_sum": [0], "tcp_sent": [0] * half,
@@ -67,8 +64,8 @@ def setup(H):
         finally:
             netutil.close_quiet(conn)
 
-    H.go(netutil.serve_forever, H, tcp,
-         lambda conn, addr: H.go(tcp_handle, conn))
+    state["servers"] = netutil.listen_all(
+        H, lambda conn, addr: H.go(tcp_handle, conn))
 
     def udp_server():
         try:
@@ -100,12 +97,11 @@ def setup(H):
 
 
 def tcp_client(H, wid, rng, state):
-    port = state["tcp_port"]
-    host = state["tcp_host"]
     H.sleep(rng.random() * 0.5)
     while H.running():
         sock = None
         try:
+            host, port = netutil.pick_server(state["servers"], rng)
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.connect((host, port))
             buf = bytearray()

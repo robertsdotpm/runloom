@@ -34,9 +34,6 @@ def setup(H):
         with open(path, "wb") as f:
             f.write(data)
         files[k] = (path, size, hashlib.sha256(data).hexdigest())
-    srv = netutil.listen_tcp()
-    H.state = {"port": srv.getsockname()[1], "host": srv.getsockname()[0], "files": files}
-
     def handle(conn):
         try:
             while True:
@@ -69,8 +66,8 @@ def setup(H):
         finally:
             netutil.close_quiet(conn)
 
-    H.go(netutil.serve_forever, H, srv,
-         lambda conn, addr: H.go(handle, conn))
+    servers = netutil.listen_all(H, lambda conn, addr: H.go(handle, conn))
+    H.state = {"servers": servers, "files": files}
 
 
 def fetch_range(H, host, port, idx, start, end, result_idx, out):
@@ -95,8 +92,7 @@ def fetch_range(H, host, port, idx, start, end, result_idx, out):
 
 
 def client(H, wid, rng, state):
-    port = state["port"]
-    host = state["host"]
+    servers = state["servers"]
     files = state["files"]
     H.sleep(rng.random() * 0.5)
     while H.running():
@@ -112,6 +108,7 @@ def client(H, wid, rng, state):
                 ranges.append((start, end))
         out = runloom.Chan(len(ranges))
         for ri, (s, e) in enumerate(ranges):
+            host, port = netutil.pick_server(servers, rng)
             H.go(fetch_range, H, host, port, idx, s, e, ri, out)
         parts = [None] * len(ranges)
         ok = True

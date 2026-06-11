@@ -15,8 +15,6 @@ import netutil
 
 
 def setup(H):
-    srv = netutil.listen_tcp(backlog=8192)
-    H.state = {"port": srv.getsockname()[1], "host": srv.getsockname()[0]}
     H.counters = {"accepted": 0, "closed": 0, "live": 0, "max_live": 0}
     H.clock = threading.Lock()
 
@@ -47,16 +45,16 @@ def setup(H):
         bump("accepted", 1)
         H.go(handler, conn)
 
-    H.go(netutil.serve_forever, H, srv, on_conn)
+    servers = netutil.listen_all(H, on_conn, backlog=8192)
+    H.state = {"servers": servers}
 
 
 def client(H, wid, rng, state):
-    port = state["port"]
-
-    host = state["host"]
+    servers = state["servers"]
     H.sleep(rng.random() * 0.3)
     while H.running():
         sock = None
+        host, port = netutil.pick_server(servers, rng)
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.connect((host, port))

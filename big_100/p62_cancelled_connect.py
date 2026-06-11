@@ -35,16 +35,30 @@ def connect_timeout(addr, timeout_ms):
 
 def setup(H):
     # Backlog 1, never accept -> the queue fills and later connects hang.
-    srv = netutil.listen_tcp(backlog=1)
-    H.state = {"addr": (srv.getsockname()[0], srv.getsockname()[1]), "srv": srv,
+    # One such server per loopback IP so the connect storm spreads across
+    # them; clients pick a server per connect.  We deliberately do NOT use
+    # netutil.listen_all here: it spawns an accept loop, which would drain the
+    # queue and defeat this test's whole premise (connects must hang to be
+    # cancelled).
+    ips = getattr(H, "net_ips", None) or [None]
+    srvs = []
+    servers = []
+    for ip in ips:
+        srv = netutil.listen_tcp(host=ip, backlog=1)
+        srvs.append(srv)
+        name = srv.getsockname()
+        servers.append((name[0], name[1]))
+    H.state = {"servers": servers, "srvs": srvs,
                "cancelled": [0] * 1024, "connected": [0] * 1024}
-    H.add_cleanup(lambda: netutil.close_quiet(srv))
+    for srv in srvs:
+        H.add_cleanup(lambda s=srv: netutil.close_quiet(s))
     H.fd_ceiling = 0
 
 
 def worker(H, wid, rng, state):
-    addr = state["addr"]
+    servers = state["servers"]
     while H.running():
+        addr = netutil.pick_server(servers, rng)
         outcome = connect_timeout(addr, int(rng.uniform(5, 40)))
         if outcome == "cancelled":
             state["cancelled"][wid & 1023] += 1

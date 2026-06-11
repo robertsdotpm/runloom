@@ -35,9 +35,6 @@ def render(n, seed):
 
 
 def setup(H):
-    srv = netutil.listen_tcp()
-    H.state = {"port": srv.getsockname()[1], "host": srv.getsockname()[0], "seed": H.seed}
-
     def handler(conn):
         try:
             while True:
@@ -58,8 +55,9 @@ def setup(H):
         finally:
             netutil.close_quiet(conn)
 
-    H.go(netutil.serve_forever, H, srv,
-         lambda conn, addr: H.go(handler, conn))
+    servers = netutil.listen_all(
+        H, lambda conn, addr: H.go(handler, conn))
+    H.state = {"servers": servers, "seed": H.seed}
 
 
 def fetch(H, host, port, page, keep_alive=False):
@@ -75,9 +73,7 @@ def fetch(H, host, port, page, keep_alive=False):
 
 
 def crawler(H, wid, rng, state):
-    port = state["port"]
-
-    host = state["host"]
+    servers = state["servers"]
     H.sleep(rng.random() * 0.5)
     while H.running():
         try:
@@ -86,6 +82,7 @@ def crawler(H, wid, rng, state):
                 if not H.running() or not frontier:
                     break
                 page = frontier.pop()
+                host, port = netutil.pick_server(servers, rng)
                 status, body = fetch(H, host, port, page)
                 if not H.check(status == 200,
                                "status {0} for page {1}".format(status, page)):

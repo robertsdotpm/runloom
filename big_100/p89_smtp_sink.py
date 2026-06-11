@@ -18,10 +18,6 @@ import netutil
 
 
 def setup(H):
-    srv = netutil.listen_tcp()
-    H.state = {"port": srv.getsockname()[1], "host": srv.getsockname()[0],
-               "lock": threading.Lock(), "accepted": [0], "corrupt": [0]}
-
     def handle(conn):
         buf = bytearray()
 
@@ -75,8 +71,9 @@ def setup(H):
         finally:
             netutil.close_quiet(conn)
 
-    H.go(netutil.serve_forever, H, srv,
-         lambda conn, addr: H.go(handle, conn))
+    servers = netutil.listen_all(H, lambda conn, addr: H.go(handle, conn))
+    H.state = {"servers": servers,
+               "lock": threading.Lock(), "accepted": [0], "corrupt": [0]}
 
 
 def expect(sock, code, buf):
@@ -85,11 +82,11 @@ def expect(sock, code, buf):
 
 
 def client(H, wid, rng, state):
-    port = state["port"]
-    host = state["host"]
+    servers = state["servers"]
     H.sleep(rng.random() * 0.5)
     while H.running():
         sock = None
+        host, port = netutil.pick_server(servers, rng)
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(2.0)

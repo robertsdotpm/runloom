@@ -33,11 +33,6 @@ def render(n):
 
 
 def setup(H):
-    srv = netutil.listen_tcp()
-    H.state = {"port": srv.getsockname()[1],
-               "host": srv.getsockname()[0],
-               "index": {}, "lock": threading.Lock()}
-
     def handle(conn):
         try:
             while True:
@@ -56,19 +51,20 @@ def setup(H):
         finally:
             netutil.close_quiet(conn)
 
-    H.go(netutil.serve_forever, H, srv,
-         lambda conn, addr: H.go(handle, conn))
+    servers = netutil.listen_all(H, lambda conn, addr: H.go(handle, conn))
+    H.state = {"servers": servers,
+               "index": {}, "lock": threading.Lock()}
 
 
 def crawler(H, wid, rng, state):
-    port = state["port"]
-    host = state["host"]
+    servers = state["servers"]
     index = state["index"]
     lock = state["lock"]
     H.sleep(rng.random() * 0.5)
     while H.running():
         page = rng.randrange(NPAGES)
         sock = None
+        host, port = netutil.pick_server(servers, rng)
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.connect((host, port))

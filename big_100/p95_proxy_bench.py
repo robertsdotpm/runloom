@@ -50,23 +50,22 @@ def proxy_conn(H, client_sock, backend_addr):
 
 
 def setup(H):
-    backend_port = netutil.start_echo_server(H)
-    pxy = netutil.listen_tcp()
-    host = pxy.getsockname()[0]
-    H.state = {"proxy_port": pxy.getsockname()[1], "host": host,
+    backend_host = netutil._DEFAULT_HOST
+    backend_port = netutil.start_echo_server(H, host=backend_host)
+    backend_addr = (backend_host, backend_port)
+    servers = netutil.listen_all(
+        H, lambda conn, addr: H.go(proxy_conn, H, conn, backend_addr))
+    H.state = {"servers": servers,
                "lat_sum": [0.0], "lat_max": [0.0], "lat_n": [0],
                "buckets": [0] * 1024}
-    H.go(netutil.serve_forever, H, pxy,
-         lambda conn, addr: H.go(proxy_conn, H, conn,
-                                 (host, backend_port)))
 
 
 def client(H, wid, rng, state):
-    port = state["proxy_port"]
-    host = state["host"]
+    servers = state["servers"]
     H.sleep(rng.random() * 0.5)
     while H.running():
         sock = None
+        host, port = netutil.pick_server(servers, rng)
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.connect((host, port))

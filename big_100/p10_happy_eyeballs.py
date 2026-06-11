@@ -29,11 +29,11 @@ def echo_handle(conn):
 
 
 def setup(H):
-    state = {"v4": None, "v6": None}
-    srv4 = netutil.listen_tcp("127.0.0.1", family=socket.AF_INET)
-    state["v4"] = srv4.getsockname()[:2]
-    H.go(netutil.serve_forever, H, srv4,
-         lambda conn, addr: H.go(echo_handle, conn))
+    state = {"v4_servers": None, "v6": None}
+    # Spread the IPv4 side across one listener per loopback IP so accepts don't
+    # serialize under the connect storm; clients pick a v4 server per attempt.
+    state["v4_servers"] = netutil.listen_all(
+        H, lambda conn, addr: H.go(echo_handle, conn))
     try:
         srv6 = netutil.listen_tcp("::1", family=socket.AF_INET6)
         state["v6"] = srv6.getsockname()[:2]
@@ -67,7 +67,8 @@ def client(H, wid, rng, state):
         result = runloom.Chan(2)
         j4 = rng.random() * 0.01
         j6 = rng.random() * 0.01
-        H.go(connector, socket.AF_INET, state["v4"], j4, result)
+        v4addr = netutil.pick_server(state["v4_servers"], rng)
+        H.go(connector, socket.AF_INET, v4addr, j4, result)
         H.go(connector, socket.AF_INET6, state["v6"], j6, result)
 
         winner = None

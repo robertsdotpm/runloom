@@ -26,9 +26,6 @@ def tarball(idx):
 
 def setup(H):
     digests = {i: hashlib.sha256(tarball(i)).hexdigest() for i in range(NPKGS)}
-    srv = netutil.listen_tcp()
-    H.state = {"port": srv.getsockname()[1], "host": srv.getsockname()[0],
-               "digests": digests, "drops": [0] * 1024}
 
     def handle(conn):
         import random
@@ -64,8 +61,8 @@ def setup(H):
         finally:
             netutil.close_quiet(conn)
 
-    H.go(netutil.serve_forever, H, srv,
-         lambda conn, addr: H.go(handle, conn))
+    servers = netutil.listen_all(H, lambda conn, addr: H.go(handle, conn))
+    H.state = {"servers": servers, "digests": digests, "drops": [0] * 1024}
 
 
 def fetch(H, host, port, path):
@@ -86,18 +83,19 @@ def fetch(H, host, port, path):
 
 
 def client(H, wid, rng, state):
-    port = state["port"]
-    host = state["host"]
+    servers = state["servers"]
     digests = state["digests"]
     H.sleep(rng.random() * 0.5)
     while H.running():
         idx = rng.randrange(NPKGS)
+        host, port = netutil.pick_server(servers, rng)
         meta = fetch(H, host, port, "/meta/{0}".format(idx))
         if meta is None:
             continue
         if not H.check(meta[0] == 200 and str(idx).encode() in meta[1],
                        "bad metadata wid={0} idx={1}".format(wid, idx)):
             return
+        host, port = netutil.pick_server(servers, rng)
         tb = fetch(H, host, port, "/tarball/{0}".format(idx))
         if tb is None:
             continue
