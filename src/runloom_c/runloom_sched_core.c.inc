@@ -3,6 +3,33 @@
  * these definitions depend on. */
 
 static int       runloom_cal_frozen = 0;
+/* The stack-calibration globals (runloom_cal_frozen/max_hwm/completed/default)
+ * are written by runloom_cal_record, which runs on EVERY goroutine completion
+ * during the brief startup calibration window -- concurrently across M:N hubs.
+ * Guard them with a lock (self-initialising so it needs no PyInit hook on
+ * Windows, where CRITICAL_SECTION can't be statically initialised).  Cost is
+ * zero in steady state: once frozen, cal_record early-returns on the atomic
+ * frozen flag and never touches the lock. */
+static runloom_mutex_t runloom_cal_lock = RUNLOOM_MUTEX_STATIC_INIT;
+static int runloom_cal_lock_inited = 0;
+
+static void runloom_cal_ensure_lock(void)
+{
+#if defined(RUNLOOM_OS_WINDOWS)
+    int st = __atomic_load_n(&runloom_cal_lock_inited, __ATOMIC_ACQUIRE);
+    if (st == 2) return;
+    if (st == 0 &&
+        __atomic_compare_exchange_n(&runloom_cal_lock_inited, &st, 1, 0,
+                                    __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+        runloom_mutex_init(&runloom_cal_lock);
+        __atomic_store_n(&runloom_cal_lock_inited, 2, __ATOMIC_RELEASE);
+        return;
+    }
+    while (__atomic_load_n(&runloom_cal_lock_inited, __ATOMIC_ACQUIRE) != 2) { }
+#else
+    (void)runloom_cal_lock_inited;   /* POSIX: PTHREAD_MUTEX_INITIALIZER suffices */
+#endif
+}
 
 static size_t runloom_next_pow2(size_t v)
 {
@@ -17,19 +44,30 @@ static size_t runloom_next_pow2(size_t v)
 static void runloom_cal_record(runloom_g_t *g)
 {
     size_t hwm;
+    int freeze_now = 0;
+    size_t chosen = 0;
     if (g == NULL || g->coro == NULL) return;
     /* Stack-advice profiler: fold this g's HWM into its kind, independent of
      * whether the global calibration window has frozen. */
     runloom_advice_record_g(g);
-    if (runloom_cal_frozen || !runloom_coro_paint_enabled()) return;
+    /* Fast path: once frozen, skip the lock entirely (steady state). */
+    if (__atomic_load_n(&runloom_cal_frozen, __ATOMIC_ACQUIRE) ||
+        !runloom_coro_paint_enabled()) return;
     hwm = runloom_coro_scan_hwm(g->coro);
+    runloom_cal_ensure_lock();
+    runloom_mutex_lock(&runloom_cal_lock);
+    if (runloom_cal_frozen) {                 /* lost the freeze race -- done */
+        runloom_mutex_unlock(&runloom_cal_lock);
+        return;
+    }
     if (hwm > runloom_cal_max_hwm) runloom_cal_max_hwm = hwm;
     runloom_cal_completed++;
     if (runloom_cal_completed >= RUNLOOM_CAL_TARGET) {
+        size_t bound;
         runloom_delay_inject(RUNLOOM_DLY_CAL_FREEZE);   /* widen freeze transition */
         RUNLOOM_EVT(RUNLOOM_EVT_CAL_FREEZE, 0, 0, (long long)runloom_cal_max_hwm);
-        size_t bound = runloom_cal_max_hwm * RUNLOOM_CAL_SAFETY;
-        size_t chosen = runloom_next_pow2(bound);
+        bound = runloom_cal_max_hwm * RUNLOOM_CAL_SAFETY;
+        chosen = runloom_next_pow2(bound);
         /* Floor auto-calibration at the safe default: it adapts UP for
          * stack-hungry programs but never shrinks below 512 KB (which would
          * re-expose Decimal/crypto/deep frames).  Explicit
@@ -37,11 +75,16 @@ static void runloom_cal_record(runloom_g_t *g)
         if (chosen < RUNLOOM_DEFAULT_STACK_SIZE) chosen = RUNLOOM_DEFAULT_STACK_SIZE;
         if (chosen > RUNLOOM_MAX_STACK_SIZE) chosen = RUNLOOM_MAX_STACK_SIZE;
         runloom_cal_default = chosen;
-        runloom_cal_frozen = 1;
+        __atomic_store_n(&runloom_cal_frozen, 1, __ATOMIC_RELEASE);
+        freeze_now = 1;
+    }
+    runloom_mutex_unlock(&runloom_cal_lock);
+    if (freeze_now) {
         runloom_coro_paint_set(0);
         /* cal_record runs inside drain on this thread's own sched; bump it so
          * the freeze takes effect immediately here.  Other threads' scheds pick
-         * up runloom_cal_default when they spawn their next g. */
+         * up runloom_cal_default when they spawn their next g.  Done OUTSIDE the
+         * cal lock to avoid holding it across coro_paint_set / sched_get. */
         runloom_sched_get()->stack_size = (Py_ssize_t)chosen;
     }
 }
@@ -50,8 +93,11 @@ void runloom_sched_set_default_stack_size(size_t bytes)
 {
     if (bytes < RUNLOOM_MIN_STACK_SIZE) bytes = RUNLOOM_MIN_STACK_SIZE;
     if (bytes > RUNLOOM_MAX_STACK_SIZE) bytes = RUNLOOM_MAX_STACK_SIZE;
+    runloom_cal_ensure_lock();
+    runloom_mutex_lock(&runloom_cal_lock);
     runloom_cal_default = bytes;
-    runloom_cal_frozen = 1;
+    __atomic_store_n(&runloom_cal_frozen, 1, __ATOMIC_RELEASE);
+    runloom_mutex_unlock(&runloom_cal_lock);
     runloom_coro_paint_set(0);
     /* Update the calling thread's sched immediately; other threads pick up
      * runloom_cal_default on their next spawn. */
@@ -60,16 +106,24 @@ void runloom_sched_set_default_stack_size(size_t bytes)
 
 size_t runloom_sched_get_default_stack_size(void)
 {
-    return runloom_cal_default;
+    size_t v;
+    runloom_cal_ensure_lock();
+    runloom_mutex_lock(&runloom_cal_lock);
+    v = runloom_cal_default;
+    runloom_mutex_unlock(&runloom_cal_lock);
+    return v;
 }
 
 void runloom_sched_stack_stats(runloom_stack_stats_t *out)
 {
     if (out == NULL) return;
+    runloom_cal_ensure_lock();
+    runloom_mutex_lock(&runloom_cal_lock);
     out->default_size = runloom_cal_default;
     out->max_hwm      = runloom_cal_max_hwm;
     out->completed    = runloom_cal_completed;
     out->calibrated   = runloom_cal_frozen;
+    runloom_mutex_unlock(&runloom_cal_lock);
     out->painting     = runloom_coro_paint_enabled();
 }
 
@@ -558,6 +612,11 @@ static PyObject *spawn_common(runloom_sched_t *s, PyObject *callable,
               ? NULL : runloom_coro_new(stack_size, runloom_g_entry, g);
     if (g->coro == NULL) {
         Py_DECREF(g->callable);
+        g->callable = NULL;
+        if (g->limit_counted) {             /* release the admission slot we took */
+            runloom_goroutine_release();
+            g->limit_counted = 0;
+        }
         runloom_g_slab_free(g);
         PyErr_SetString(PyExc_MemoryError, "runloom_coro_new failed");
         return NULL;

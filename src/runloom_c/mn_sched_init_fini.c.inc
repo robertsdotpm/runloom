@@ -410,10 +410,14 @@ static int runloom_mn_go_core(PyObject *callable, runloom_c_entry_fn c_fn,
     if (g->coro == NULL) {
         if (callable != NULL) {
             Py_DECREF(callable);
+            g->callable = NULL;             /* don't leave a dangling ref on the slab */
             PyErr_NoMemory();
         }
-        runloom_greg_unlink(g);
-        free(g);                  /* match libc calloc in slab_alloc cold path */
+        if (g->limit_counted) {             /* release the admission slot we took */
+            runloom_goroutine_release();
+            g->limit_counted = 0;
+        }
+        runloom_g_slab_free(g);             /* return to slab (handles greg + free) */
         errno = ENOMEM;
         return -1;
     }
@@ -433,12 +437,20 @@ static int runloom_mn_go_core(PyObject *callable, runloom_c_entry_fn c_fn,
         g->tstate = PyThreadState_New(runloom_mn_interp);
         if (g->tstate == NULL) {
             runloom_coro_destroy(g->coro);
+            g->coro = NULL;
             if (callable != NULL) {
                 Py_DECREF(callable);
+                g->callable = NULL;
                 PyErr_NoMemory();
             }
-            runloom_greg_unlink(g);
-            PyMem_Free(g);
+            if (g->limit_counted) {         /* release the admission slot */
+                runloom_goroutine_release();
+                g->limit_counted = 0;
+            }
+            /* slab_free, NOT PyMem_Free: the g came from runloom_g_slab_alloc
+             * whose cold path is libc calloc -- PyMem_Free here was an allocator
+             * mismatch (heap corruption risk), and it also leaked the limit. */
+            runloom_g_slab_free(g);
             errno = ENOMEM;
             return -1;
         }
