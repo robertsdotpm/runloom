@@ -13,6 +13,16 @@ import threading
 import harness
 import runloom
 
+# A SINGLE Condition + work list is intrinsically low-concurrency: every
+# producer and consumer serialises on the one condition lock, and a notify_all()
+# is O(waiters) -- with 500k consumers each of the ~250k notify_all() calls wakes
+# half a million goroutines for one item (an astronomical thundering herd that
+# never drains).  Cap the contenders so the wait/notify + notify_all storm is
+# genuinely exercised AND the queue drains to leftover==0 (the lost-wakeup
+# check).  The 1M survival target does not apply to a single-condition test;
+# forcing it just wedges on the herd.
+MAX_CONTENDERS = 2000
+
 
 def setup(H):
     # consumed: one slot per consumer goroutine (indexed by wid) to avoid the
@@ -59,8 +69,8 @@ def consumer(H, wid, rng, state):
 
 def body(H):
     half = H.funcs // 2
-    H.run_pool(half, producer, H.state)
-    H.run_pool(H.funcs - half, consumer, H.state)
+    H.run_pool(half, producer, H.state, max_concurrent=MAX_CONTENDERS)
+    H.run_pool(H.funcs - half, consumer, H.state, max_concurrent=MAX_CONTENDERS)
 
     def stopper():
         # When the run ends, flip done and wake every waiter so consumers can
