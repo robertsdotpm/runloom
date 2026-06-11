@@ -338,7 +338,7 @@ void runloom_mn_reset_after_fork(void)
  * not both.  Returns 0 on success, -1 on failure (errno set).  Python
  * error is also set on failure when callable != NULL. */
 static int runloom_mn_go_core(PyObject *callable, runloom_c_entry_fn c_fn,
-                           void *c_arg, size_t stack_size)
+                           void *c_arg, size_t stack_size, long py_index)
 {
     long n;
     int hub_idx;
@@ -379,6 +379,10 @@ static int runloom_mn_go_core(PyObject *callable, runloom_c_entry_fn c_fn,
         g->callable = callable;
         /* Stack-advice: note the kind at spawn (0 unless profiling on). */
         g->advice_key = runloom_advice_note_spawn(callable);
+        if (py_index >= 0) {                 /* go_n(indexed=True): call fn(index) */
+            g->pass_index = 1;
+            g->c_arg = (void *)(intptr_t)py_index;
+        }
     } else {
         g->c_entry = c_fn;
         g->c_arg   = c_arg;
@@ -447,12 +451,12 @@ static int runloom_mn_go_core(PyObject *callable, runloom_c_entry_fn c_fn,
 int runloom_mn_go_c(runloom_c_entry_fn fn, void *arg)
 {
     if (fn == NULL) { errno = EINVAL; return -1; }
-    return runloom_mn_go_core(NULL, fn, arg, 0);
+    return runloom_mn_go_core(NULL, fn, arg, 0, -1);
 }
 
 PyObject *runloom_mn_go(PyObject *callable, size_t stack_size)
 {
-    if (runloom_mn_go_core(callable, NULL, NULL, stack_size) < 0) {
+    if (runloom_mn_go_core(callable, NULL, NULL, stack_size, -1) < 0) {
         return NULL;
     }
     Py_RETURN_NONE;
@@ -490,8 +494,8 @@ static int runloom_gon_bulk_enabled(void)
 struct runloom_gon_batch {
     void  *garena;       /* calloc'd g-struct arena   (one free) */
     void  *carena;       /* calloc'd coro-struct arena (one free) */
-    void  *stk_block;    /* reserved stack block in the stack arena (MADV target) */
-    size_t stk_bytes;    /* its size in bytes */
+    size_t start_slot;   /* first stack-arena slot of this batch's block */
+    long   nslots;       /* slots in the block (== N) -- for MADV + slot return */
     long   live;         /* goroutines not yet finished; atomic */
 };
 
@@ -500,10 +504,11 @@ void runloom_gon_batch_finish_one(struct runloom_gon_batch *b)
     if (b == NULL) return;
     if (__atomic_sub_fetch(&b->live, 1, __ATOMIC_ACQ_REL) == 0) {
         /* Last finisher: tear the whole batch down.  No other thread can touch
-         * these arenas now -- every g that lived in them has completed. */
+         * these arenas now -- every g that lived in them has completed.  The
+         * stack block is MADV'd back AND its slots returned for reuse. */
         free(b->garena);
         free(b->carena);
-        runloom_coro_arena_release(b->stk_block, b->stk_bytes);
+        runloom_coro_arena_release(b->start_slot, b->nslots);
         free(b);
     }
 }
@@ -520,7 +525,8 @@ void runloom_gon_batch_finish_one(struct runloom_gon_batch *b)
  * for workloads whose goroutines do NOT complete during the measured window
  * (e.g. long-parked workers) -- guarded by RUNLOOM_GON_BULK so the default
  * go_n (loop) stays the safe path. */
-static int runloom_mn_go_n_bulk(PyObject *callable, long n, size_t stack_size)
+static int runloom_mn_go_n_bulk(PyObject *callable, long n, size_t stack_size,
+                                int indexed)
 {
     int H = runloom_hub_count;
     size_t gsz = sizeof(runloom_g_t);
@@ -534,8 +540,7 @@ static int runloom_mn_go_n_bulk(PyObject *callable, long n, size_t stack_size)
     long i;
     long long goid_base;
     struct runloom_gon_batch *batch = NULL;       /* arena lifecycle, real path only */
-    void  *stk_block = NULL;                       /* reserved stack block (MADV target) */
-    size_t stk_bytes = 0;
+    size_t start_slot = 0;                         /* this batch's stack-arena block start */
 
     if (H > 64) return -1;                       /* fixed per-hub list cap */
     garena = (char *)calloc((size_t)n, gsz);
@@ -576,6 +581,7 @@ static int runloom_mn_go_n_bulk(PyObject *callable, long n, size_t stack_size)
         tmpl.state        = (unsigned char)RUNLOOM_GST_SUBMITTED;
         tmpl.arena        = (batch != NULL);      /* arena-owned: skip individual free */
         tmpl.batch        = batch;                /* final decref -> batch_finish_one */
+        tmpl.pass_index   = (unsigned char)(indexed != 0);  /* go_n(indexed=True): fn(i) */
         if (use_grunq) tmpl.wake_state = RUNLOOM_WS_RUNNING;
 
         if (!nofields) {
@@ -585,6 +591,7 @@ static int runloom_mn_go_n_bulk(PyObject *callable, long n, size_t stack_size)
                 memcpy(g, &tmpl, gsz);            /* <-- template memcpy */
                 g->owner = &runloom_hubs[hub].sched;
                 g->id    = goid_base + (long long)i;
+                g->c_arg = (void *)(intptr_t)i;   /* go_n index (read iff pass_index) */
                 g->next  = NULL;
                 if (tails[hub] != NULL) tails[hub]->next = g; else heads[hub] = g;
                 tails[hub] = g;
@@ -598,10 +605,11 @@ static int runloom_mn_go_n_bulk(PyObject *callable, long n, size_t stack_size)
         if (runloom_coro_bulk_init(carena, csz, garena, gsz,
                                    offsetof(runloom_g_t, coro),
                                    hub_stack, n, runloom_g_entry,
-                                   &stk_block, &stk_bytes) != 0) {
+                                   &start_slot) != 0) {
             free(garena); free(carena); free(batch);
             for (i = 0; i < n; i++)
-                if (runloom_mn_go_core(callable, NULL, NULL, stack_size) < 0) return -1;
+                if (runloom_mn_go_core(callable, NULL, NULL, stack_size,
+                                       indexed ? i : -1) < 0) return -1;
             return 0;
         }
 
@@ -611,10 +619,10 @@ static int runloom_mn_go_n_bulk(PyObject *callable, long n, size_t stack_size)
     /* Hand the arenas + reserved stack block to the batch; arm its live count.
      * From here, each goroutine's final decref calls runloom_gon_batch_finish_one,
      * and the Nth reclaims all three allocations. */
-    batch->garena    = garena;
-    batch->carena    = carena;
-    batch->stk_block = stk_block;
-    batch->stk_bytes = stk_bytes;
+    batch->garena     = garena;
+    batch->carena     = carena;
+    batch->start_slot = start_slot;
+    batch->nslots     = n;
     __atomic_store_n(&batch->live, n, __ATOMIC_RELEASE);
 
     /* ===== bookkeeping, LAST ===== */
@@ -653,7 +661,7 @@ static int runloom_mn_go_n_bulk(PyObject *callable, long n, size_t stack_size)
     return 0;
 }
 
-int runloom_mn_go_n(PyObject *callable, long n, size_t stack_size)
+int runloom_mn_go_n(PyObject *callable, long n, size_t stack_size, int indexed)
 {
     long i;
     if (runloom_hubs == NULL) {
@@ -662,10 +670,11 @@ int runloom_mn_go_n(PyObject *callable, long n, size_t stack_size)
         return -1;
     }
     if (n > 0 && runloom_gon_bulk_enabled()) {
-        return runloom_mn_go_n_bulk(callable, n, stack_size);
+        return runloom_mn_go_n_bulk(callable, n, stack_size, indexed);
     }
     for (i = 0; i < n; i++) {
-        if (runloom_mn_go_core(callable, NULL, NULL, stack_size) < 0) {
+        if (runloom_mn_go_core(callable, NULL, NULL, stack_size,
+                               indexed ? i : -1) < 0) {
             return -1;
         }
     }

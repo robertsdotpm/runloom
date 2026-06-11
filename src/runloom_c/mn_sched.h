@@ -59,9 +59,11 @@ int runloom_mn_init(int n_threads);
  * imports, terminfo/OpenSSL init) that the copy-grow can't rescue mid-burst. */
 PyObject *runloom_mn_go(PyObject *callable, size_t stack_size);
 /* Bulk-spawn n goroutines all running `callable`, looping the spawn core in C
- * (skips n Python->C dispatches + per-call arg parsing).  Returns 0, or -1 with
- * a Python error set on partial failure (already-created goroutines still run). */
-int runloom_mn_go_n(PyObject *callable, long n, size_t stack_size);
+ * (skips n Python->C dispatches + per-call arg parsing).  indexed != 0 calls
+ * each as callable(i) for i in 0..n-1 (per-goroutine arg); 0 calls callable().
+ * Returns 0, or -1 with a Python error set on partial failure (already-created
+ * goroutines still run). */
+int runloom_mn_go_n(PyObject *callable, long n, size_t stack_size, int indexed);
 /* C-only spawn: no Python callable, just a function + arg.  Distributes
  * goroutines across hubs round-robin (same as runloom_mn_go).  Returns 0 on
  * success, -1 with errno on failure (ENOMEM, EINVAL). */

@@ -289,18 +289,21 @@ static PyObject *m_mn_go(PyObject *self, PyObject *args, PyObject *kw)
     return runloom_mn_go(callable, stack_size > 0 ? (size_t)stack_size : 0);
 }
 
-/* go_n(fn, n, stack_size=0): bulk-spawn n goroutines all running fn(), looping
- * the spawn core in C to skip n Python->C dispatches.  fn still runs as Python
- * in each goroutine. */
+/* go_n(fn, n, stack_size=0, indexed=False): bulk-spawn n goroutines all running
+ * fn(), looping the spawn core in C to skip n Python->C dispatches.  fn still
+ * runs as Python in each goroutine.  indexed=True calls fn(i) for i in 0..n-1
+ * (the goroutine's index) instead of fn() -- the per-goroutine arg that lets a
+ * shared worker distinguish itself (wid). */
 static PyObject *m_go_n(PyObject *self, PyObject *args, PyObject *kw)
 {
-    static char *kwlist[] = {"fn", "n", "stack_size", NULL};
+    static char *kwlist[] = {"fn", "n", "stack_size", "indexed", NULL};
     PyObject *callable;
     long n;
     Py_ssize_t stack_size = 0;
+    int indexed = 0;
     (void)self;
-    if (!PyArg_ParseTupleAndKeywords(args, kw, "Ol|n", kwlist,
-                                     &callable, &n, &stack_size)) {
+    if (!PyArg_ParseTupleAndKeywords(args, kw, "Ol|np", kwlist,
+                                     &callable, &n, &stack_size, &indexed)) {
         return NULL;
     }
     if (!PyCallable_Check(callable)) {
@@ -309,7 +312,7 @@ static PyObject *m_go_n(PyObject *self, PyObject *args, PyObject *kw)
     }
     if (n < 0) n = 0;
     if (runloom_mn_go_n(callable, n,
-                        stack_size > 0 ? (size_t)stack_size : 0) < 0) {
+                        stack_size > 0 ? (size_t)stack_size : 0, indexed) < 0) {
         return NULL;
     }
     Py_RETURN_NONE;

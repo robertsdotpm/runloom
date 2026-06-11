@@ -41,9 +41,11 @@ runloom_coro_t *runloom_coro_init_at(void *mem, size_t stack_size, void *stack,
 size_t runloom_coro_struct_size(void);
 /* Carve one stack from the bulk arena (NULL if off/exhausted/size-mismatch). */
 void *runloom_coro_arena_stack(size_t stack_size);
-/* MADV_DONTNEED a bulk stack block (returns physical pages, keeps the virtual
- * reservation).  Called by the go_n batch teardown.  No-op off-POSIX. */
-void runloom_coro_arena_release(void *block, size_t bytes);
+/* Release a bulk stack block (n slots from start_slot): MADV_DONTNEED the pages
+ * (keeps the virtual reservation) AND return the slots to the allocator for
+ * reuse.  Called by the go_n batch teardown.  No-op off-POSIX (slots still
+ * returned). */
+void runloom_coro_arena_release(size_t start_slot, long n);
 /* Fill an entire coro arena (n structs) inline, one stack each from one reserved
  * arena block, and set each g's coro pointer (g_arena[i] + g_coro_off).  One
  * call for all N: zero per-g calls into the coro layer.  0 ok, -1 on arena
@@ -51,7 +53,7 @@ void runloom_coro_arena_release(void *block, size_t bytes);
 int runloom_coro_bulk_init(void *coro_arena, size_t coro_stride,
                            void *g_arena, size_t g_stride, size_t g_coro_off,
                            size_t stack_size, long n, runloom_entry_fn entry,
-                           void **stk_block_out, size_t *stk_bytes_out);
+                           size_t *start_slot_out);
 
 /* Switch into the coroutine.  Must be called from the same OS thread on
  * which runloom_coro_new was called.  Returns when the coroutine yields or

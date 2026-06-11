@@ -274,8 +274,22 @@ void runloom_g_entry(void *user)
      * Skipped under per-g-tstate mode, where each goroutine already owns a
      * distinct tstate (and thus a distinct context) -- copying there is a pure
      * waste.  On OOM we leave the shared context in place (leaky across
-     * siblings, but correct for this goroutine and never a crash). */
-    if (!runloom_get_per_g_tstate_mode()) {
+     * siblings, but correct for this goroutine and never a crash).
+     *
+     * RUNLOOM_NO_CTX_COPY=1 skips this entirely: the copy is one PyContext
+     * alloc + gc-track PER goroutine (the freelist drains after a handful, so a
+     * 1M fan-out pays ~1M real allocs), and a workload that never calls
+     * ContextVar.set() in a goroutine sees zero behavioural difference.  Opt-in
+     * because skipping it DOES break contextvar isolation for code that relies
+     * on it (asyncio Task semantics) -- so it's a per-run promise, not a default.
+     * Read once, cached. */
+    {
+    static int ctx_copy = -1;
+    if (ctx_copy < 0) {
+        const char *e = getenv("RUNLOOM_NO_CTX_COPY");
+        __atomic_store_n(&ctx_copy, (e && *e == '1') ? 0 : 1, __ATOMIC_RELAXED);
+    }
+    if (ctx_copy && !runloom_get_per_g_tstate_mode()) {
         PyThreadState *cts = PyThreadState_GET();
         PyObject *ctx = PyContext_CopyCurrent();
         if (ctx != NULL) {
@@ -287,10 +301,24 @@ void runloom_g_entry(void *user)
             PyErr_Clear();
         }
     }
+    }
 #endif
 
     runloom_delay_inject(RUNLOOM_DLY_G_ENTRY);
-    res = PyObject_CallNoArgs(g->callable);
+    if (g->pass_index) {
+        /* go_n(indexed=True): call fn(index).  The index rode in c_arg as a raw
+         * integer; mint the PyLong here on the hub (parallel, overlapped).  Use
+         * CallFunctionObjArgs for portability across Python versions. */
+        PyObject *idx = PyLong_FromSsize_t((Py_ssize_t)(intptr_t)g->c_arg);
+        if (idx != NULL) {
+            res = PyObject_CallFunctionObjArgs(g->callable, idx, NULL);
+            Py_DECREF(idx);
+        } else {
+            res = NULL;                       /* OOM minting the index */
+        }
+    } else {
+        res = PyObject_CallNoArgs(g->callable);
+    }
     if (res == NULL) {
         PyObject *type, *value, *tb;
         PyErr_Fetch(&type, &value, &tb);

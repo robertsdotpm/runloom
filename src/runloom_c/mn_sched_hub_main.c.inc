@@ -612,9 +612,14 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
                     runloom_advice_record_g(g);   /* fold stack HWM (profiling) */
                     runloom_g_state_set(g, RUNLOOM_GST_DONE);
                     runloom_netpoll_force_unlink_g_parker(g);
-                    runloom_mn_pending_complete(h);
                     runloom_g_decref(g);                  /* scheduler ref */
                     if (from_runq) runloom_g_decref(g);   /* queue ref */
+                    /* pending_complete LAST: the final decref may run a go_n
+                     * batch teardown (arena cursor reset).  mn_run returns when
+                     * global pending hits 0, so only mark complete AFTER teardown
+                     * -- else the next go_n's arena alloc races a not-yet-reset
+                     * cursor and falls back to the slow per-g path. */
+                    runloom_mn_pending_complete(h);
                 } else if (parked_offqueue) {
                     /* Parked off-queue (netpoll/chan/sleep): a wake_g will route
                      * the g back here.  End ownership now -- AFTER the tstate
@@ -756,9 +761,12 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
                  * resurrect this just-freed g via a future pump
                  * dispatch.  This call covers that gap. */
                 runloom_netpoll_force_unlink_g_parker(g);
-                runloom_mn_pending_complete(h);
                 runloom_g_decref(g);                  /* scheduler ref */
                 if (from_runq) runloom_g_decref(g);   /* queue ref */
+                /* pending_complete LAST -- see the sibling completion site:
+                 * the final decref may run a go_n batch teardown (arena reset),
+                 * which must be visible before mn_run observes pending == 0. */
+                runloom_mn_pending_complete(h);
                 runloom_pystate_snap(&hub_snap);
             } else if (runloom_use_global_runq()) {
                 /* Steal-woken release via the wake-state machine -- a near-exact

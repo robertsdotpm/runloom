@@ -372,7 +372,8 @@ static void runloom_stack_flush_to_global(void)
 static char  *runloom_arena_base = NULL;
 static size_t runloom_arena_slot = 0;
 static size_t runloom_arena_cap  = 0;
-static size_t runloom_arena_next = 0;
+static size_t runloom_arena_next = 0;   /* bump cursor (slots); guarded by the lock */
+static size_t runloom_arena_live = 0;   /* slots currently allocated; guarded too */
 static runloom_mutex_t runloom_arena_init_lock = RUNLOOM_MUTEX_STATIC_INIT;
 
 static int runloom_stack_arena_on(void)
@@ -387,30 +388,65 @@ static int runloom_stack_arena_on(void)
     return cur;
 }
 
+/* Lazy-mmap the arena sized to `slot`.  Caller holds runloom_arena_init_lock.
+ * 0 = ready for this slot size; -1 = mmap failed or a size mismatch (all slots
+ * in one arena must share a size). */
+static int runloom_arena_ensure_locked(size_t slot)
+{
+    if (runloom_arena_base == NULL) {
+        const char *n = getenv("RUNLOOM_STACK_ARENA_N");
+        size_t cap = (n != NULL && *n) ? (size_t)strtoull(n, NULL, 0) : 1200000;
+        void *base = mmap(NULL, cap * slot, PROT_READ | PROT_WRITE,
+                          MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+        if (base == MAP_FAILED) return -1;
+        runloom_arena_slot = slot;
+        runloom_arena_cap  = cap;
+        __atomic_store_n(&runloom_arena_base, (char *)base, __ATOMIC_RELEASE);
+    }
+    return (slot == runloom_arena_slot) ? 0 : -1;
+}
+
+/* Reserve n contiguous slots; 0 + *start on success, -1 on exhaustion/mismatch.
+ * LOCKED, but called once per go_n / per single carve -- NEVER per goroutine --
+ * so it's off the hot path.  The bump cursor is rewound on free (and fully
+ * reset when the arena drains to empty), so repeated spawn->drain->spawn cycles
+ * reuse the same address space instead of marching the cursor to the cap. */
+static int runloom_arena_alloc(long n, size_t slot, size_t *start_out)
+{
+    int rc = -1;
+    runloom_mutex_lock(&runloom_arena_init_lock);
+    if (runloom_arena_ensure_locked(slot) == 0 &&
+        runloom_arena_next + (size_t)n <= runloom_arena_cap) {
+        *start_out = runloom_arena_next;
+        runloom_arena_next += (size_t)n;
+        runloom_arena_live += (size_t)n;
+        rc = 0;
+    }
+    runloom_mutex_unlock(&runloom_arena_init_lock);
+    return rc;
+}
+
+/* Return n slots starting at `start`.  Full-reset the cursor to 0 when the arena
+ * drains to empty (the common batch-spawn / drain / respawn pattern -> total
+ * reuse), else rewind it if this range sits at the very top (LIFO completion).
+ * An out-of-order partial range that is neither is reclaimed at the next full
+ * drain; no general free-list yet (a later refinement if fragmentation bites). */
+static void runloom_arena_free(size_t start, long n)
+{
+    runloom_mutex_lock(&runloom_arena_init_lock);
+    if (runloom_arena_live >= (size_t)n) runloom_arena_live -= (size_t)n;
+    if (runloom_arena_live == 0)                       runloom_arena_next = 0;
+    else if (start + (size_t)n == runloom_arena_next)  runloom_arena_next = start;
+    runloom_mutex_unlock(&runloom_arena_init_lock);
+}
+
 static void *runloom_stack_arena_carve(size_t size)
 {
     size_t guard = runloom_stack_guard();
     size_t slot  = guard + size;
-    size_t idx;
-    if (__atomic_load_n(&runloom_arena_base, __ATOMIC_ACQUIRE) == NULL) {
-        runloom_mutex_lock(&runloom_arena_init_lock);
-        if (runloom_arena_base == NULL) {
-            const char *n = getenv("RUNLOOM_STACK_ARENA_N");
-            size_t cap = (n != NULL && *n) ? (size_t)strtoull(n, NULL, 0) : 1200000;
-            void *base = mmap(NULL, cap * slot, PROT_READ | PROT_WRITE,
-                              MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
-            if (base != MAP_FAILED) {
-                runloom_arena_slot = slot;
-                runloom_arena_cap  = cap;
-                __atomic_store_n(&runloom_arena_base, (char *)base, __ATOMIC_RELEASE);
-            }
-        }
-        runloom_mutex_unlock(&runloom_arena_init_lock);
-    }
-    if (runloom_arena_base == NULL || slot != runloom_arena_slot) return NULL;
-    idx = __atomic_fetch_add(&runloom_arena_next, 1, __ATOMIC_RELAXED);
-    if (idx >= runloom_arena_cap) return NULL;            /* exhausted -> fallback */
-    return runloom_arena_base + idx * runloom_arena_slot + guard;
+    size_t start;
+    if (runloom_arena_alloc(1, slot, &start) != 0) return NULL;
+    return runloom_arena_base + start * slot + guard;
 }
 
 /* Is a usable-base pointer a slice of the test arena? (so release skips it) */
@@ -442,11 +478,16 @@ static void runloom_stack_release(void *stack, size_t size)
     /* TEST arena slices are never reclaimed/pooled (they belong to the one big
      * arena mapping); just drop them.  No-op when the arena is off. */
     if (runloom_stack_arena_on() && runloom_stack_in_arena(stack)) {
+        size_t guard = runloom_stack_guard();
+        size_t slot  = guard + size;
+        char  *base  = __atomic_load_n(&runloom_arena_base, __ATOMIC_ACQUIRE);
+        size_t start = ((size_t)((char *)stack - guard - base)) / slot;
 #if defined(MADV_DONTNEED)
         long ps = sysconf(_SC_PAGESIZE);
         size_t page = (ps > 0) ? (size_t)ps : (size_t)4096;
         if (size > page) (void)madvise((char *)stack + page, size - page, MADV_DONTNEED);
 #endif
+        runloom_arena_free(start, 1);     /* return the slot for reuse */
         return;
     }
     /* Drop physical pages back to the OS *before* writing the header.
@@ -803,7 +844,7 @@ size_t runloom_coro_struct_size(void) { return sizeof(runloom_coro_t); }
 int runloom_coro_bulk_init(void *coro_arena, size_t coro_stride,
                            void *g_arena, size_t g_stride, size_t g_coro_off,
                            size_t stack_size, long n, runloom_entry_fn entry,
-                           void **stk_block_out, size_t *stk_bytes_out)
+                           size_t *start_slot_out)
 {
     size_t guard, rounded, slot, start;
     char *sbase;
@@ -823,34 +864,13 @@ int runloom_coro_bulk_init(void *coro_arena, size_t coro_stride,
     rounded = runloom_round_to_page(stack_size);
     guard = runloom_stack_guard();
     slot = guard + rounded;
-    /* Lazy-init the arena (sized to this slot), then reserve a contiguous
-     * block of n slots with ONE atomic. */
-    if (__atomic_load_n(&runloom_arena_base, __ATOMIC_ACQUIRE) == NULL) {
-        runloom_mutex_lock(&runloom_arena_init_lock);
-        if (runloom_arena_base == NULL) {
-            const char *e = getenv("RUNLOOM_STACK_ARENA_N");
-            size_t cap = (e != NULL && *e) ? (size_t)strtoull(e, NULL, 0) : 1200000;
-            void *base = mmap(NULL, cap * slot, PROT_READ | PROT_WRITE,
-                              MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
-            if (base != MAP_FAILED) {
-                runloom_arena_slot = slot;
-                runloom_arena_cap  = cap;
-                __atomic_store_n(&runloom_arena_base, (char *)base, __ATOMIC_RELEASE);
-            }
-        }
-        runloom_mutex_unlock(&runloom_arena_init_lock);
-    }
-    if (runloom_arena_base == NULL || slot != runloom_arena_slot) return -1;
-    start = __atomic_fetch_add(&runloom_arena_next, (size_t)n, __ATOMIC_RELAXED);
-    if (start + (size_t)n > runloom_arena_cap) {
-        __atomic_fetch_sub(&runloom_arena_next, (size_t)n, __ATOMIC_RELAXED);
-        return -1;                                  /* not enough arena -> fallback */
-    }
+    /* Reserve a contiguous block of n slots via the locked allocator (lazy-inits
+     * the arena, reuses freed space).  Report the start slot so the caller's
+     * batch teardown can MADV + return the whole block when the last g finishes. */
+    if (runloom_arena_alloc(n, slot, &start) != 0)
+        return -1;                                  /* off/exhausted -> fallback */
     sbase = runloom_arena_base + start * slot + guard;   /* usable base of slot 0 */
-    /* Report the whole reserved stack block (incl. guards) so the caller's batch
-     * teardown can MADV_DONTNEED it wholesale when the last goroutine finishes. */
-    if (stk_block_out) *stk_block_out = runloom_arena_base + start * slot;
-    if (stk_bytes_out) *stk_bytes_out = (size_t)n * slot;
+    if (start_slot_out) *start_slot_out = start;
     for (i = 0; i < n; i++) {
         runloom_coro_t *c = (runloom_coro_t *)((char *)coro_arena + (size_t)i * coro_stride);
         char *g = (char *)g_arena + (size_t)i * g_stride;
@@ -875,20 +895,33 @@ int runloom_coro_bulk_init(void *coro_arena, size_t coro_stride,
     return 0;
 }
 
-/* Release the physical pages of a bulk stack block back to the OS without
- * unmapping the arena (the virtual reservation stays for later reuse).  Called
- * by the go_n batch teardown when the last goroutine in a batch finishes.  The
- * block stays PROT_READ|WRITE; the next fault into it gets a fresh zero page --
- * which is exactly what the fresh-flag path wants (a zero stack reads back as a
- * not-yet-materialised frame). */
-void runloom_coro_arena_release(void *block, size_t bytes)
+/* Release a bulk stack block (n slots from start_slot): drop its physical pages
+ * back to the OS (MADV_DONTNEED -- the virtual reservation stays) AND return the
+ * slots to the allocator for reuse.  Called by the go_n batch teardown when the
+ * last goroutine in a batch finishes.  The block stays PROT_READ|WRITE; the next
+ * fault into it gets a fresh zero page -- exactly what the fresh-flag path wants
+ * (a zero stack reads back as a not-yet-materialised frame). */
+void runloom_coro_arena_release(size_t start_slot, long n)
 {
-    if (block == NULL || bytes == 0) return;
+    char  *base = __atomic_load_n(&runloom_arena_base, __ATOMIC_ACQUIRE);
+    size_t slot = runloom_arena_slot;
+    if (base == NULL || n <= 0) return;
 #if defined(MADV_DONTNEED)
-    madvise(block, bytes, MADV_DONTNEED);
-#else
-    (void)block; (void)bytes;
+    /* MADV is OPT-IN (RUNLOOM_GON_TRIM=1).  By default we KEEP the pages warm:
+     * the fresh-flag WRITES each stack frame at resume (never reads-as-zero), so
+     * zeroing buys no correctness, and since reset-when-empty reuses the SAME
+     * address range, the next batch would just re-fault every page we dropped --
+     * pure waste (madvise of a 1M-slot block is a ~2s page-table walk).  RSS is
+     * already bounded by the live working set via the cursor reset.  Trim is for
+     * the spawn-a-burst-then-go-idle case where returning RSS matters more. */
+    static int trim = -1;
+    if (trim < 0) {
+        const char *e = getenv("RUNLOOM_GON_TRIM");
+        __atomic_store_n(&trim, (e && *e == '1') ? 1 : 0, __ATOMIC_RELAXED);
+    }
+    if (trim) madvise(base + start_slot * slot, (size_t)n * slot, MADV_DONTNEED);
 #endif
+    runloom_arena_free(start_slot, n);
 }
 
 /* Carve one stack (lowest usable byte) from the bulk arena, NULL if the arena

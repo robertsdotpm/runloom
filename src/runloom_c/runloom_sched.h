@@ -313,6 +313,12 @@ struct runloom_g {
     unsigned char arena;
     struct runloom_gon_batch *batch;
 
+    /* go_n(indexed=True): call the entry as fn(index) rather than fn().  The
+     * index is stashed in c_arg (a void*, unused on the Python-callable path
+     * since c_entry is NULL there); g_entry builds the PyLong lazily on the hub.
+     * 0 = fn() (slab-cleared default). */
+    unsigned char pass_index;
+
     /* ---- introspection block (runloom_introspect.c) ----
      * These fields are deliberately the LAST members of runloom_g_t.  The
      * per-thread slab reuse path (runloom_g_slab_alloc) bulk-clears a g only
