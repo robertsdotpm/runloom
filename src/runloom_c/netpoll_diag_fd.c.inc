@@ -297,7 +297,61 @@ static int runloom_fd_pending_wake_consume(int fd, int events)
         unsigned char prev =
             __atomic_fetch_and(&base[fd],
                                (unsigned char)~take, __ATOMIC_ACQ_REL);
-        return prev & events;
+        int pending = prev & events;
+#if defined(RUNLOOM_HAVE_EPOLL)
+        /* A claimed pending bit may be a STALE level re-fire, not a real
+         * wake-up owed to us.  epoll is LEVEL-triggered (netpoll_register
+         * arms EPOLLIN|EPOLLRDHUP, no EPOLLET/EPOLLONESHOT), so an undrained
+         * byte re-fires the pump while no parker is linked; that 2nd fire
+         * stashes here (netpoll_pump dispatch-miss).  The parker the 1st fire
+         * woke then DRAINS the byte AFTER wait_fd returns, and on fd REUSE the
+         * next wait_fd would consume this now-stale stash and wake spuriously
+         * (the reuse_iso double-count).  Ground-truth the stash against the
+         * kernel's ACTUAL readiness with a non-blocking poll -- NOT a read():
+         * `fd` is the app's real socket, so reading it would discard payload.
+         *
+         * Soundness: this only filters the redundant bitmap fast-path.  When we
+         * return 0 the parker is NOT unlinked in wait_fd (the unlink runs only
+         * on a non-zero pending) -- it falls through to register (the LEVEL arm)
+         * and parks still LINKED + ARMED, so any genuinely-still-present
+         * readiness re-fires to it on the next epoll_wait.  Discarding a stale
+         * stash therefore can only force a correct re-park, never drop a real
+         * edge; the level arm is the authoritative carrier and stays untouched.
+         *
+         * Key ONLY on the direction bits plus POLLHUP/POLLERR (which the kernel
+         * auto-co-reports on a dead / half-closed socket -- a real readiness we
+         * must consume), and EXCLUDE POLLNVAL: a closed-but-reused fd number
+         * polls rc=1 with revents=POLLNVAL, so trusting poll's RETURN COUNT as
+         * "ready" would re-admit the very double-count we are killing.  Gated to
+         * epoll: kqueue (EV_ONESHOT) and IOCP/WSAPoll (per-parker IRPs) never
+         * stash, so `pending` is always 0 there and this block is dead anyway. */
+        if (pending != 0) {
+            struct pollfd pfd;
+            int pr;
+            pfd.fd = fd;
+            pfd.events = 0;
+            if (events & RUNLOOM_NETPOLL_READ)  pfd.events |= POLLIN;
+            if (events & RUNLOOM_NETPOLL_WRITE) pfd.events |= POLLOUT;
+            do {
+                pfd.revents = 0;
+                pr = poll(&pfd, 1, 0);
+            } while (pr < 0 && errno == EINTR);
+            if (pr <= 0) {
+                /* Not ready (the stash was stale) or a poll error -> park.  A
+                 * genuine readiness is still LEVEL-armed + linked and re-fires. */
+                return 0;
+            }
+            {
+                int ready = 0;     /* POLLNVAL deliberately omitted */
+                if (pfd.revents & (POLLIN  | POLLHUP | POLLERR))
+                    ready |= RUNLOOM_NETPOLL_READ;
+                if (pfd.revents & (POLLOUT | POLLERR | POLLHUP))
+                    ready |= RUNLOOM_NETPOLL_WRITE;
+                return ready & events;
+            }
+        }
+#endif
+        return pending;
     }
 }
 

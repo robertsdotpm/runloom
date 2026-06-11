@@ -47,6 +47,7 @@
 #  include <sys/eventfd.h>
 #  include <stdint.h>
 #  include <unistd.h>
+#  include <poll.h>        /* pending_wake_consume re-checks real fd readiness */
 #elif defined(RUNLOOM_HAVE_KQUEUE)
 #  include <sys/event.h>
 #  include <sys/time.h>
