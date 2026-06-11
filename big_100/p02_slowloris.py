@@ -30,20 +30,18 @@ def server_handler(conn):
 
 
 def setup(H):
-    srv = netutil.listen_tcp()
-    H.state = {"port": srv.getsockname()[1], "host": srv.getsockname()[0]}
-
-    H.go(netutil.serve_forever, H, srv,
-         lambda conn, addr: H.go(server_handler, conn))
+    # One server per loopback IP so the connect storm spreads across many accept
+    # loops (a single accept loop serializes and wedges under a large storm).
+    servers = netutil.listen_all(H, lambda conn, addr: H.go(server_handler, conn))
+    H.state = {"servers": servers}
 
 
 def fast_client(H, wid, rng, state):
-    port = state["port"]
-
-    host = state["host"]
+    servers = state["servers"]
     H.sleep(rng.random() * 0.5)
     while H.running():
         sock = None
+        host, port = netutil.pick_server(servers, rng)
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.connect((host, port))
@@ -71,12 +69,11 @@ def fast_client(H, wid, rng, state):
 
 
 def slow_client(H, wid, rng, state):
-    port = state["port"]
-
-    host = state["host"]
+    servers = state["servers"]
     H.sleep(rng.random() * 1.0)
     while H.running():
         sock = None
+        host, port = netutil.pick_server(servers, rng)
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.connect((host, port))

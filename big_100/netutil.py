@@ -93,6 +93,31 @@ def serve_forever(H, srv, on_conn):
         close_quiet(srv)
 
 
+def listen_all(H, on_conn, backlog=4096, family=socket.AF_INET):
+    """Bind ONE TCP server per H.net_ips IP, register each for shutdown, and
+    spawn an accept loop for each.  Returns [(host, port), ...] for clients to
+    pick from with pick_server().
+
+    The multi-server pattern: a single accept loop can't drain a large connect
+    storm (it serializes), so spreading servers across the loopback IP range
+    scales ACCEPT load.  Use --ip-start-offset/--ip-end-offset to dial the
+    number of server IPs.  Falls back to one default server if H has no net_ips."""
+    ips = getattr(H, "net_ips", None) or [None]
+    servers = []
+    for ip in ips:
+        srv = listen_tcp(host=ip, backlog=backlog, family=family)
+        H.register_close(srv)
+        name = srv.getsockname()
+        H.go(serve_forever, H, srv, on_conn)
+        servers.append((name[0], name[1]))
+    return servers
+
+
+def pick_server(servers, rng):
+    """Pick one (host, port) from a listen_all() list deterministically."""
+    return servers[rng.randrange(len(servers))]
+
+
 def udp_socket(host=None, port=0, family=socket.AF_INET):
     if host is None:
         host = _DEFAULT_HOST
