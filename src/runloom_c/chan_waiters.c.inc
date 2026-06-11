@@ -170,7 +170,31 @@ static PyObject *buf_pop(runloom_chan_t *ch)
  * to the channel can decref to 0 while we are yielded, freeing the
  * channel (including runloom_mutex_destroy on a lock we may yet release
  * from the wake path) and orphaning every waiter.  The decref after
- * wake balances the incref taken here. */
+ * wake balances the incref taken here.
+ *
+ * FINDING -- a chan park does NOT keep runloom_c.run() alive, and that is
+ * DELIBERATE.  A chan-parked g is not counted in netpoll_parked / sleep_size /
+ * etc., so the single-thread drain loop (runloom_sched_drain) returns and
+ * ABANDONS chan-parked leftovers once nothing else is runnable.  Programs +
+ * tests rely on this: they spawn a recv-er to prove "recv blocks", then expect
+ * run() to return.  Consequence: a channel CANNOT back a FOREIGN-OS-THREAD-
+ * wakeable primitive (a monkey-patched Event/Lock/Semaphore set/released from a
+ * real worker thread, e.g. threading.Thread.start()'s self._started.set()):
+ *   (a) the foreign wake can race the recv-park and land AFTER run() has already
+ *       exited -> lost wakeup (run()'s wake_list push + pump kick hit a dead
+ *       loop); and
+ *   (b) making chan-parks keep run() alive (a chan_parked counter on the sched)
+ *       fixes (a) but breaks the leftover-abandon above -- the two requirements
+ *       are in tension and run() cannot tell an in-flight foreign wake from a
+ *       true leftover.
+ * So foreign-wakeable cooperative primitives must park on a NETPOLL FD via a
+ * _Parker (src/runloom/monkey/_base.py), NOT recv on a channel: the netpoll fd
+ * keeps run() alive (netpoll_parked++), os.write() is a race-free foreign wake,
+ * and tests don't strand _Parkers.  (Tried + reverted 2026-06: a CoEvent-on-
+ * channel rewrite hung Thread.start(); both a bare rewrite and the chan_parked
+ * fix failed for the two reasons above.)  A real channel-broadcast win would
+ * need a netpoll change -- one shared (level-triggered/multishot) eventfd per
+ * Event so set() wakes all waiters in ONE write -- not a thin channel wrapper. */
 static void park_waiter(runloom_chan_t *ch,
                         runloom_chan_waiter_t **head,
                         runloom_chan_waiter_t **tail,

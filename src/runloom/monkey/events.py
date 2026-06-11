@@ -15,6 +15,17 @@ def _spawn(fn):
 
 
 class CoEvent(object):
+    # Waiters park on a _Parker -- an OS pipe/socketpair fd -- NOT on a
+    # runloom_c.Chan.  This looks like overhead (set() does one os.write per
+    # waiter), and a channel close() would broadcast in one call, BUT a channel
+    # recv-park is not foreign-thread-wakeable: threading.Thread.start() does
+    # self._started.set() from the real WORKER thread, and a channel wake racing
+    # a single-thread recv-park is lost (the chan park does not keep run() alive,
+    # so run() exits and the foreign wake lands on a dead loop).  The fd park
+    # keeps run() alive (netpoll_parked) and os.write() is a race-free foreign
+    # wake.  See the FINDING in src/runloom_c/chan_waiters.c.inc park_waiter.
+    # (Tried CoEvent-on-channel 2026-06, reverted -- it hung Thread.start().)
+    #
     # _guard: a real lock making the flag + waiter-queue bookkeeping atomic
     # across M:N hub threads (held only for the O(1) bookkeeping, never across
     # a park).  Without it set()'s waiter snapshot races a concurrent wait()'s
