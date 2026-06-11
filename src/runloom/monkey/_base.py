@@ -213,7 +213,14 @@ class _Parker(object):
 
     def park(self, timeout=None):
         if _in_goroutine():
-            runloom_c.wait_fd(self.r, READ)     # cooperative goroutine park
+            # Pass the deadline straight to the netpoll wait: wait_fd returns on
+            # the unpark byte OR at timeout_ms, so a TIMED wait needs no separate
+            # waker goroutine + heap timer (the old per-primitive _spawn(waker)
+            # cost that sat behind every Event/Condition/Semaphore timed wait).
+            # -1 == block forever.  max(1, ...) so a sub-ms timeout still waits a
+            # tick rather than busy-returning.
+            timeout_ms = -1 if timeout is None else max(1, int(timeout * 1000))
+            runloom_c.wait_fd(self.r, READ, timeout_ms)
         else:
             # FOREIGN OS thread (e.g. a multiprocessing.Queue _feed daemon
             # thread taking a monkey-patched threading.Condition): block the

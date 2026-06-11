@@ -81,22 +81,19 @@ class CoEvent(object):
             return True
         self._waiters.append(p)
         self._guard.release()
-        if timeout is None:
-            p.park()
-        else:
-            # Race park against a wakeup timer (spawned on the active scheduler).
-            deadline = time.monotonic() + timeout
-            done = [False]
-            def waker(parker=p, dl=deadline):
-                while not done[0]:
-                    remaining = dl - time.monotonic()
-                    if remaining <= 0:
-                        parker.unpark()
-                        return
-                    _co_sleep(min(remaining, 0.05))
-            _spawn(waker)
-            p.park()
-            done[0] = True
+        # set() unparks us, OR the deadline fires inside the netpoll wait -- no
+        # waker goroutine + heap timer per timed wait (see _Parker.park).  self._flag
+        # is authoritative: a spurious/raced wake just re-reads it.
+        p.park(timeout)
+        # If we TIMED OUT, our parker is still queued; remove it so a later set()
+        # never unparks this (now pooled/reused) parker -> spurious wake.  Under
+        # the guard so it is serialized with set()'s waiter snapshot; a no-op
+        # (ValueError) if set() already claimed us.
+        with self._guard:
+            try:
+                self._waiters.remove(p)
+            except ValueError:
+                pass
         p.release()
         return self._flag
 
@@ -137,23 +134,10 @@ class CoCondition(object):
             timed_out = False
         else:
             deadline = time.monotonic() + timeout
-            if _in_goroutine():
-                # Cooperative: a waker goroutine unparks us at the deadline.
-                done = [False]
-                def waker(parker=p, dl=deadline):
-                    while not done[0]:
-                        remaining = dl - time.monotonic()
-                        if remaining <= 0:
-                            parker.unpark()
-                            return
-                        _co_sleep(min(remaining, 0.05))
-                _spawn(waker)
-                p.park()
-                done[0] = True
-            else:
-                # Foreign OS thread: no goroutine to run a waker -- let the
-                # parker's real select() time out directly.
-                p.park(max(0.0, deadline - time.monotonic()))
+            # notify()/notify_all() unparks us, OR the deadline fires inside the
+            # park (wait_fd for a goroutine, select for a foreign thread) -- no
+            # per-wait waker goroutine + heap timer (see _Parker.park).
+            p.park(timeout)
             timed_out = time.monotonic() >= deadline
         p.release()
         self._lock.acquire()
@@ -260,22 +244,19 @@ class CoSemaphore(object):
             return False
         self._waiters.append(w)
         self._guard.release()
+        # release() unparks us (handing a permit), OR the deadline fires inside
+        # the park (wait_fd for a goroutine, select for a foreign thread) -- no
+        # per-acquire waker goroutine + heap timer (see _Parker.park).
+        p.park(timeout)
         if timeout is not None:
-            # Spawn a single goroutine that sleeps for the full timeout period.
-            # Using the full duration (not 0.05s increments like CoCondition) keeps
-            # the timer-event rate at 1/goroutine per timeout interval instead of
-            # 20+/goroutine, avoiding a thundering herd at 100k goroutines.
-            done = [False]
-            def _waker(waiter=w, t=timeout, flag=done):
-                _co_sleep(t)
-                if not flag[0]:
-                    waiter[1] = False   # mark timed out
-                    waiter[0].unpark()
-            _spawn(_waker)
-            p.park()
-            done[0] = True
-        else:
-            p.park()
+            # If we did NOT get a permit, we timed out: mark the waiter inactive
+            # under the guard so a racing release() skips us (a later release()
+            # lazily discards inactive entries) rather than handing a permit to a
+            # parker we've abandoned.  If release() already set w[2] (gave us a
+            # permit) we keep it -- the guard serializes the two.
+            with self._guard:
+                if not w[2]:
+                    w[1] = False
         p.release()
         # w[2] is True if release() handed us a permit; False if cancelled/timed out.
         return w[2]
