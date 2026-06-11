@@ -15,74 +15,79 @@ def _spawn(fn):
 
 
 class CoEvent(object):
-    """Cooperative threading.Event, backed by the C channel's close-broadcast.
-
-    A closed channel IS "the event is set".  wait() recv()s (parks until close,
-    returns immediately once closed); set() close()s the channel ONCE, which
-    wakes every parked receiver in-process in a single call -- no per-waiter
-    pipe + no per-waiter syscall (the old _Parker design did N os.write()s on
-    set(), the p47-class amplifier).  clear() swaps in a fresh open channel.
-
-    Race-safety without a guard lock: a waiter snapshots self._ch then recv()s
-    it; recv() on a closed channel returns IMMEDIATELY, so even if set() fires
-    between the snapshot and the recv(), the waiter never hangs.  clear() only
-    swaps the channel when it is already closed, so a waiter parked on an open
-    channel is always the same channel a subsequent set() closes -> no lost
-    wakeup.
-    """
-    __slots__ = ("_ch", "__weakref__")
+    # _guard: a real lock making the flag + waiter-queue bookkeeping atomic
+    # across M:N hub threads (held only for the O(1) bookkeeping, never across
+    # a park).  Without it set()'s waiter snapshot races a concurrent wait()'s
+    # append -> a lost wakeup (the appended waiter parks forever).
+    __slots__ = ("_flag", "_waiters", "_guard", "__weakref__")
 
     def __init__(self):
-        self._ch = runloom_c.Chan(0)        # unbuffered; closed() == set
+        self._flag    = False
+        self._waiters = collections.deque()
+        self._guard   = _real_allocate_lock()
 
     def is_set(self):
-        return self._ch.closed
+        return self._flag
     isSet = is_set
 
     def set(self):
-        ch = self._ch
-        if not ch.closed:
-            try:
-                ch.close()                  # ONE call wakes ALL parked receivers
-            except ValueError:
-                pass                        # raced another set() -> already closed
+        self._guard.acquire()
+        if self._flag:
+            self._guard.release()
+            return
+        self._flag = True
+        waiters, self._waiters = list(self._waiters), collections.deque()
+        self._guard.release()
+        for p in waiters:
+            p.unpark()
 
     def clear(self):
-        if self._ch.closed:
-            self._ch = runloom_c.Chan(0)
+        with self._guard:
+            self._flag = False
 
     def _at_fork_reinit(self):
-        # The set/clear state survives a fork; the parent's parked waiters do not.
-        was_set = self._ch.closed
-        self._ch = runloom_c.Chan(0)
-        if was_set:
-            self._ch.close()
+        # The flag survives a fork; the parent's parked waiters do not.
+        self._guard = _real_allocate_lock()
+        self._waiters.clear()
 
     def wait(self, timeout=None):
-        ch = self._ch
-        if ch.closed:
+        if self._flag:
             return True
         if not _in_goroutine():
-            # Foreign OS thread: cannot park a goroutine -> spin on the flag.
+            # No cooperative scheduler to wake us; degrade to spin.
             t0 = time.monotonic()
-            while not ch.closed:
+            while not self._flag:
                 _raw_time_sleep(0.001)
                 if timeout is not None and time.monotonic() - t0 >= timeout:
-                    return ch.closed
+                    return self._flag
             return True
+        p = _Parker()
+        self._guard.acquire()
+        if self._flag:
+            # set() fired while we were building the parker.
+            self._guard.release()
+            p.release()
+            return True
+        self._waiters.append(p)
+        self._guard.release()
         if timeout is None:
-            ch.recv()                       # parks until close (broadcast wake)
-            return True
-        # Timed wait: cooperative poll.  Timed waits are rarer and not the
-        # high-fan-in path, so this avoids a per-wait waker goroutine; the small
-        # cap bounds both the poll rate and the post-set() wake latency.
-        deadline = time.monotonic() + timeout
-        while not ch.closed:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                return False
-            _co_sleep(min(remaining, 0.005))
-        return True
+            p.park()
+        else:
+            # Race park against a wakeup timer (spawned on the active scheduler).
+            deadline = time.monotonic() + timeout
+            done = [False]
+            def waker(parker=p, dl=deadline):
+                while not done[0]:
+                    remaining = dl - time.monotonic()
+                    if remaining <= 0:
+                        parker.unpark()
+                        return
+                    _co_sleep(min(remaining, 0.05))
+            _spawn(waker)
+            p.park()
+            done[0] = True
+        p.release()
+        return self._flag
 
 
 class CoCondition(object):
