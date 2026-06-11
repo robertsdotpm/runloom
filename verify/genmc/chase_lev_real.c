@@ -22,6 +22,7 @@ typedef struct { int unused; } pthread_cond_t;
 static int pthread_cond_init(pthread_cond_t *c, void *a);
 static int pthread_cond_destroy(pthread_cond_t *c);
 static int pthread_cond_wait(pthread_cond_t *c, void *m);
+static int pthread_cond_timedwait(pthread_cond_t *c, void *m, void *ts);
 static int pthread_cond_signal(pthread_cond_t *c);
 static int pthread_cond_broadcast(pthread_cond_t *c);
 
