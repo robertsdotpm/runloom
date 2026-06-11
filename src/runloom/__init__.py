@@ -152,6 +152,7 @@ from . import monkey   # noqa: E402,F401  – cooperative stdlib (manual .patch(
 from . import time     # noqa: E402,F401  – After / Tick / Timer / Ticker
 from . import context  # noqa: E402,F401  – Background / WithCancel / WithTimeout
 from . import sync     # noqa: E402,F401  – blocking-style sockets + sync prims
+from .sync import WaitGroup, Future, gather  # noqa: E402,F401  – fan-in primitives
 from . import aio      # noqa: E402,F401  – run async/await on the scheduler
 
 __all__ = [
@@ -161,6 +162,8 @@ __all__ = [
     "preempt_init", "preempt_fini",
     # channels
     "Chan", "select",
+    # fan-in primitives
+    "WaitGroup", "Future", "gather",
     # M:N (free-threaded 3.13t)
     "mn_init", "mn_go", "mn_run", "mn_fini", "mn_hub_count", "mn_hub_states",
     "hubs",

@@ -295,3 +295,166 @@ def wake(g):
     """Wake a goroutine handle returned by go()."""
     if g is not None:
         g.wake()
+
+
+# --------------------------------------------------------------------
+# Fan-in primitives -- WaitGroup / Future / gather.
+#
+# Built directly on the GenMC-verified park_self / G.wake handshake (G.wake is
+# runloom_sched_wake_safe; "safe to call before the park" -- the wake_state CAS
+# absorbs a wake that races the park).  A runloom_c.Mutex (an M:N-safe cooperative
+# goroutine mutex) guards the O(1) counter/slot + waiter-list bookkeeping and is
+# ALWAYS released before park_self, so a waker never blocks on a parked waiter.
+# Each is the lean equivalent of a Chan(1)-per-result fan-in, without a channel
+# buffer or a select loop per await.
+# --------------------------------------------------------------------
+class WaitGroup(object):
+    """Go-style sync.WaitGroup: wait for a set of goroutines to finish.
+
+    add(n) before spawning n goroutines, done() (or add(-1)) as each finishes,
+    wait() blocks until the counter returns to zero.  Multiple goroutines may
+    wait(); all are woken when the count hits zero.  Reusable once the count is
+    back at zero."""
+
+    def __init__(self):
+        self._n = 0
+        self._waiters = []          # current_g() handles parked in wait()
+        self._mu = runloom_c.Mutex()
+
+    def add(self, delta=1):
+        self._mu.lock()
+        self._n += delta
+        if self._n < 0:
+            self._mu.unlock()
+            raise ValueError("WaitGroup counter went negative")
+        if self._n == 0 and self._waiters:
+            waiters, self._waiters = self._waiters, []
+            self._mu.unlock()
+            for g in waiters:
+                g.wake()
+        else:
+            self._mu.unlock()
+
+    def done(self):
+        self.add(-1)
+
+    def wait(self):
+        g = runloom_c.current_g()
+        if g is None:
+            # Foreign OS thread: no goroutine to park, poll the counter.
+            while True:
+                self._mu.lock()
+                n = self._n
+                self._mu.unlock()
+                if n == 0:
+                    return
+                _time.sleep(0.0005)
+        while True:
+            self._mu.lock()
+            if self._n == 0:
+                self._mu.unlock()
+                return
+            self._waiters.append(g)
+            self._mu.unlock()
+            runloom_c.park_self()       # woken by the add() that reaches zero;
+            # loop re-checks the count under the lock (absorbs a pre-park wake).
+
+
+class Future(object):
+    """A one-shot result/exception slot any number of goroutines can await.
+
+    set_result()/set_exception() resolve it once and wake every current awaiter;
+    a later result() on a resolved Future returns (or raises) immediately.  The
+    lean fan-in primitive a gather / as_completed builds on -- no Chan buffer."""
+
+    def __init__(self):
+        self._done = False
+        self._result = None
+        self._exc = None
+        self._waiters = []
+        self._mu = runloom_c.Mutex()
+
+    def done(self):
+        self._mu.lock()
+        d = self._done
+        self._mu.unlock()
+        return d
+
+    def _resolve(self, result, exc):
+        self._mu.lock()
+        if self._done:
+            self._mu.unlock()
+            raise RuntimeError("Future already resolved")
+        self._done = True
+        self._result = result
+        self._exc = exc
+        waiters, self._waiters = self._waiters, []
+        self._mu.unlock()
+        for g in waiters:
+            g.wake()
+
+    def set_result(self, value):
+        self._resolve(value, None)
+
+    def set_exception(self, exc):
+        if isinstance(exc, type):
+            exc = exc()
+        self._resolve(None, exc)
+
+    def result(self):
+        g = runloom_c.current_g()
+        while True:
+            self._mu.lock()
+            if self._done:
+                exc, res = self._exc, self._result
+                self._mu.unlock()
+                if exc is not None:
+                    raise exc
+                return res
+            if g is None:
+                # Foreign OS thread: poll until resolved.
+                self._mu.unlock()
+                _time.sleep(0.0005)
+                continue
+            self._waiters.append(g)
+            self._mu.unlock()
+            runloom_c.park_self()       # woken by _resolve()
+
+
+def gather(*callables):
+    """Run `callables` as goroutines concurrently and block until all finish,
+    returning their results in argument order.  If any raises, the first
+    exception (by argument order) is re-raised after all have completed.  Each
+    runner writes its own result slot (one writer per slot), so there is no
+    shared-counter race even with the GIL off."""
+    n = len(callables)
+    if n == 0:
+        return []
+    results = [None] * n
+    errs = [None] * n
+    wg = WaitGroup()
+    wg.add(n)
+
+    def _runner(i, fn):
+        try:
+            results[i] = fn()
+        except BaseException as e:   # noqa: BLE001  (propagated below)
+            errs[i] = e
+        finally:
+            wg.done()
+
+    # Spawn on whichever scheduler is live: mn_go under M:N (run/mn_run), else
+    # the single-thread go.  A runner spawned via runloom_c.go never runs under
+    # mn_run, so wg.wait() would hang -- same routing as monkey's _spawn helper.
+    mn = runloom_c.mn_hub_count() > 0
+    for i, fn in enumerate(callables):
+        target = (lambda i=i, fn=fn: _runner(i, fn))
+        if mn:
+            runloom_c.mn_go(target)
+        else:
+            runloom_c.go(target)
+    wg.wait()
+    for e in errs:
+        if e is not None:
+            raise e
+    return results
