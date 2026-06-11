@@ -69,21 +69,10 @@ class CoSimpleQueue(object):
             p.release()
             return self._items.popleft()
         self._waiters.append(p)
-        if timeout is None:
-            p.park()
-        else:
-            deadline = time.monotonic() + timeout
-            done = [False]
-            def waker(parker=p, dl=deadline):
-                while not done[0]:
-                    remaining = dl - time.monotonic()
-                    if remaining <= 0:
-                        parker.unpark()
-                        return
-                    _co_sleep(min(remaining, 0.05))
-            _spawn(waker)
-            p.park()
-            done[0] = True
+        # Pass the deadline straight to the netpoll wait (see _Parker.park / the
+        # #1 timeout work): wait_fd wakes on a producer's unpark OR at the
+        # deadline, so a timed get() needs no waker goroutine + heap timer.
+        p.park(timeout)
         p.release()
         if self._items:
             return self._items.popleft()
