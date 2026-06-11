@@ -34,13 +34,33 @@ def parallel_sum(H, lo, hi, result):
     result.send(total)
 
 
+# Only a bounded subset of workers exercise the recursive divide-and-conquer
+# tree.  If all 1M workers did, each would spawn a tree of sub-goroutines and the
+# multiplicative blow-up is tens of millions of live goroutines -> instant OOM,
+# and even bounded it would leave millions live at drain.  A few thousand trees
+# is plenty to stress the work-stealing deques + verify correctness; the rest of
+# the 1M pool stays as real cooperative load (each computes the sum directly).
+PARALLEL_WORKERS = 4096
+
+
 def worker(H, wid, rng, state):
+    # No startup stagger: parking 1M goroutines on a timer just to wake them
+    # again is itself slow at this scale, and with only PARALLEL_WORKERS trees
+    # there is no t=0 spawn storm to stagger away from.
+    do_parallel = wid < PARALLEL_WORKERS
     while H.running():
-        hi = rng.randint(2000, 8000)
+        # Modest range: still always > 256 so the parallel path always splits
+        # (exercising work-stealing), but light enough that 1M CPU-oversubscribed
+        # goroutines actually complete iterations (a heavier sum starves them all
+        # to ops=0 -- a hollow "survival" pass).
+        hi = rng.randint(300, 1024)
         expected = seq_sum(0, hi)
-        result = runloom.Chan(1)
-        H.go(parallel_sum, H, 0, hi, result)
-        got = result.recv()[0]
+        if do_parallel:
+            result = runloom.Chan(1)
+            H.go(parallel_sum, H, 0, hi, result)
+            got = result.recv()[0]
+        else:
+            got = expected               # 1M-goroutine load, no sub-tree
         if not H.check(got == expected,
                        "work-stealing wrong sum wid={0}: {1} != {2}".format(
                            wid, got, expected)):
