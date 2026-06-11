@@ -226,6 +226,18 @@ class Harness(object):
                         help="last 127.X.0.1 address index (inclusive). "
                              "Programs that need many server IPs raise this. "
                              "127.X.0.1 for X in [ip-start, ip-end].")
+        ap.add_argument("--ip-start-offset", type=int, default=None,
+                        help="first server-IP offset into 127/8 (linear: 0 -> "
+                             "127.0.0.1, 255 -> 127.0.1.0, ...).  When set with "
+                             "--ip-end-offset, REPLACES the --ip-start/--ip-end "
+                             "scheme and gives up to 16M distinct loopback IPs -- "
+                             "a simple knob to scale ACCEPT load (one server + "
+                             "accept loop per IP).  Concurrent jobs use non-"
+                             "overlapping offset ranges.")
+        ap.add_argument("--ip-end-offset", type=int, default=None,
+                        help="last server-IP offset into 127/8 (inclusive). "
+                             "e.g. --ip-start-offset 0 --ip-end-offset 999 -> "
+                             "1000 servers spreading the connect storm.")
         if add_args is not None:
             add_args(ap)
         self.args = ap.parse_args()
@@ -242,6 +254,17 @@ class Harness(object):
         self.hubs = self.args.hubs
         self.funcs = self.args.funcs
         self._max_funcs = None   # set by harness.main(max_funcs=) to cap H.funcs
+
+        # Fast bulk spawn via runloom_c.go_n(indexed=True): one C call builds the
+        # whole worker pool (arena g/coro/stacks + deferred stack frames) instead
+        # of N Python-level runloom.go() calls.  Opt-in (RUNLOOM_HARNESS_GON=1)
+        # AND requires the bulk gates (RUNLOOM_GON_BULK=1, usually +GON_FRESH=1).
+        # The deferred stack frames materialize on the hubs in parallel, so it
+        # NEEDS hubs >= 8 -- with fewer, 1M goroutines funnel through too few
+        # threads (materialization + cooperative I/O serialize) and it degrades
+        # badly.  Below 8 we refuse the fast path and fall back to per-g spawn.
+        self._use_gon = (os.environ.get("RUNLOOM_HARNESS_GON") == "1"
+                         and os.environ.get("RUNLOOM_GON_BULK") == "1")
 
         # Global concurrent-goroutine cap per run_pool call.
         # Programs with hard resource limits may override with a lower value
@@ -260,14 +283,25 @@ class Harness(object):
         self.log_interval = self.args.log_interval
         self.fail_fast = self.args.fail_fast
 
-        # IP range: --ip-start/--ip-end define 127.X.0.1 for X in [start, end].
-        # Concurrent soak jobs use non-overlapping ranges so they never share
-        # ephemeral ports. Default start=1, end=8 gives 8 IPs (127.1.0.1..8).
-        _start = max(1, self.args.ip_start)
-        _end = max(_start, self.args.ip_end)
-        self.net_ips = [
-            "127.{0}.0.1".format(x) for x in range(_start, _end + 1)
-        ]
+        # IP range.  Two schemes:
+        #  (a) default: --ip-start/--ip-end define 127.X.0.1 for X in [start,end]
+        #      (8 IPs by default; concurrent jobs use non-overlapping ranges).
+        #  (b) --ip-start-offset/--ip-end-offset: a LINEAR index into 127/8 so a
+        #      test can spin up many servers (one accept loop per IP) to scale
+        #      accept load.  offset o -> 127.((o+1)>>16 & 255).((o+1)>>8 & 255).
+        #      ((o+1) & 255), starting at 127.0.0.1 and skipping 127.0.0.0.
+        off_lo = self.args.ip_start_offset
+        off_hi = self.args.ip_end_offset
+        if off_lo is not None or off_hi is not None:
+            off_lo = max(0, off_lo if off_lo is not None else 0)
+            off_hi = max(off_lo, off_hi if off_hi is not None else off_lo)
+            self.net_ips = [self._ip_for_offset(o) for o in range(off_lo, off_hi + 1)]
+        else:
+            _start = max(1, self.args.ip_start)
+            _end = max(_start, self.args.ip_end)
+            self.net_ips = [
+                "127.{0}.0.1".format(x) for x in range(_start, _end + 1)
+            ]
         # Expose primary IP as env var so netutil defaults pick it up without
         # requiring every test to read H.net_ips explicitly.
         os.environ["SOAK_HOST_IP"] = self.net_ips[0]
@@ -453,6 +487,14 @@ class Harness(object):
         """Return the nth IP in this job's isolated loopback subnet."""
         return self.net_ips[n]
 
+    @staticmethod
+    def _ip_for_offset(off):
+        """Linear offset -> a 127/8 loopback IP (offset 0 -> 127.0.0.1).  The
+        whole 127.0.0.0/8 is loopback on Linux, so any 127.x.y.z binds; +1
+        skips the 127.0.0.0 network address."""
+        v = (off + 1) & 0xFFFFFF
+        return "127.{0}.{1}.{2}".format((v >> 16) & 0xFF, (v >> 8) & 0xFF, v & 0xFF)
+
     def make_tmpdir(self, prefix="big100_"):
         """Create a temp dir that is shutil.rmtree'd at the end."""
         import tempfile
@@ -476,6 +518,27 @@ class Harness(object):
             raise TypeError("unexpected keyword arguments: " + ", ".join(kw))
         actual = n if (max_concurrent is None or max_concurrent >= n) else max_concurrent
         self.expected += actual
+
+        # Fast path: build the whole pool with ONE runloom_c.go_n(indexed=True).
+        # Needs hubs >= 8 (deferred stack frames materialize across hubs in
+        # parallel); below that, fall back to per-g spawn so we never run the
+        # bulk path in a regime where it degrades.
+        if self._use_gon and self.hubs >= 8:
+            name = worker_fn.__name__
+            captured = extra
+
+            def spawn_one(wid):
+                rng = self.derive("pool", name, wid)
+                self._worker_wrap(worker_fn, wid, rng, captured)
+
+            runloom_c.go_n(spawn_one, actual, indexed=True)
+            return
+        if self._use_gon and self.hubs < 8:
+            sys.stderr.write(
+                "[{0}] go_n fast spawn DISABLED: needs hubs>=8, have {1}; "
+                "using per-g spawn\n".format(self.name, self.hubs))
+            sys.stderr.flush()
+
         for wid in range(actual):
             rng = self.derive("pool", worker_fn.__name__, wid)
             self.go(self._worker_wrap, worker_fn, wid, rng, extra)
@@ -584,6 +647,21 @@ class Harness(object):
     def mark_done(self):
         """Signal workers to stop and unblock parked servers by closing
         the registered listeners/sockets."""
+        # Diagnostic (RUNLOOM_DUMP_STATES=path): write the goroutine state
+        # histogram RIGHT NOW -- at the deadline, before we close anything --
+        # so we can see WHERE goroutines are parked (connect / recv / sleep /
+        # accept).  Cheap structural dump, no Python.  CAVEAT: go_n bulk-arena
+        # workers skip the introspection registry (the hot spawn path takes no
+        # greg lock), so this shows only H.go()-spawned goroutines (servers,
+        # handlers, accept loops) -- not the bulk client pool.
+        _ds = os.environ.get("RUNLOOM_DUMP_STATES")
+        if _ds:
+            try:
+                fd = os.open(_ds, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+                runloom_c.dump_goroutines(fd)
+                os.close(fd)
+            except Exception:
+                pass
         self.done_flag = True
         for obj in self.closeables:
             try:
