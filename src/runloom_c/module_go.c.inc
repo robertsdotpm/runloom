@@ -200,13 +200,38 @@ static PyObject *m_park_self(PyObject *self, PyObject *unused)
  * alive for a foreign-OS-thread waker.  No-op outside a goroutine. */
 static PyObject *m_park(PyObject *self, PyObject *args, PyObject *kw)
 {
-    static char *kwlist[] = {"foreign_wakeable", NULL};
+    static char *kwlist[] = {"foreign_wakeable", "timeout", NULL};
     int fw = 0;
+    PyObject *timeout_obj = Py_None;
     (void)self;
-    if (!PyArg_ParseTupleAndKeywords(args, kw, "|p", kwlist, &fw))
+    if (!PyArg_ParseTupleAndKeywords(args, kw, "|pO", kwlist, &fw, &timeout_obj))
         return NULL;
-    runloom_park_generic(fw);
-    Py_RETURN_NONE;
+    if (timeout_obj == Py_None) {
+        /* Untimed in-memory park (0 fds).  Returns None (backward compatible). */
+        runloom_park_generic(fw);
+        Py_RETURN_NONE;
+    }
+    {
+        /* Timed in-memory park (0 fds): wake at a real (monotonic) deadline OR on
+         * g.wake().  Returns True if it timed out, False if woken.  A spurious
+         * early False is possible (real wake / a stale timer entry); the caller
+         * re-checks its own deadline, exactly as the wait_fd(timeout) path did. */
+        double timeout = PyFloat_AsDouble(timeout_obj);
+        double deadline;
+        int r;
+        if (timeout == -1.0 && PyErr_Occurred()) return NULL;
+        if (timeout < 0.0) timeout = 0.0;
+        deadline = runloom_sched_monotonic_seconds() + timeout;
+        r = runloom_park_generic_timed(fw, deadline);
+        if (r < 0) {
+            if (PyErr_Occurred()) return NULL;          /* OOM (PyErr set) */
+            PyErr_SetString(PyExc_RuntimeError,
+                            "park(timeout=...): not running on a goroutine");
+            return NULL;
+        }
+        if (r) Py_RETURN_TRUE;                          /* timed out */
+        Py_RETURN_FALSE;                                /* woken */
+    }
 }
 
 /* Return a G handle to the currently-running goroutine, or None if

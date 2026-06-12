@@ -176,6 +176,78 @@ int runloom_park_generic(int foreign_wakeable)
     }
 }
 
+int runloom_park_generic_timed(int foreign_wakeable, double deadline)
+{
+    void *hub = runloom_mn_current_hub_opaque();
+    runloom_sched_t *target;
+    runloom_g_t *g;
+    double now = runloom_sched_monotonic_seconds();
+
+    if (hub != NULL) {
+        target = runloom_mn_current_sched();
+        g = runloom_mn_tls_current_g();
+    } else {
+        target = runloom_sched_get();
+        g = (target != NULL) ? target->current : NULL;
+    }
+    if (g == NULL || target == NULL) return -1;
+    if (deadline <= now) return 1;          /* already expired -> don't park */
+
+    /* Push the TIMER entry BEFORE the Dekker park, onto the sched/hub the g runs
+     * on, so that sched's drain (single-thread runloom_sched_drain / the M:N
+     * hub_main) fires it.  The drain only runs AFTER the g yields below (same
+     * thread/hub), so the entry is in the heap before it can be popped.  An early
+     * Dekker abort (a wake landed before the park committed) leaves the entry
+     * stale -- harmless: when popped it CASes parked_safe and, if the g is not
+     * parked, the CAS fails and it is discarded; if the g re-parked, it is at most
+     * one spurious wake the caller's deadline loop absorbs. */
+    if (runloom_timer_push(target, deadline, g) < 0) {
+        return -1;                          /* OOM (PyErr_NoMemory set) */
+    }
+
+    /* The SAME Dekker park as runloom_park_generic -- a real wake (wake_safe) and
+     * the timer-drain are exclusive claimers of the one parked_safe CAS, so the
+     * wake-vs-timeout race is resolved exactly once with no new lost-wake window.
+     * On resume, the parker itself decides the result from the CLOCK (the timer
+     * NEVER writes a result flag), so there is no cross-thread result to publish
+     * and no premature timeout from a stale entry. */
+    runloom_park_generic(foreign_wakeable);
+
+    return (runloom_sched_monotonic_seconds() >= deadline) ? 1 : 0;
+}
+
+/* Fire all TIMER-heap entries on sched s whose deadline has passed (<= now).
+ * Called from the single-thread drain and the M:N hub_main, ON s's OWN thread,
+ * alongside the sleep-heap drain.  Each due entry is claimed via the SAME
+ * parked_safe CAS as runloom_sched_wake_safe, so a timeout racing a real wake of
+ * the same g resolves to EXACTLY ONE enqueue (the loser's CAS fails).  The timer
+ * writes NO result flag -- the parker reads the clock on resume -- so a stale
+ * entry (the g already woken / re-parked) is harmless: it either loses the CAS
+ * and is discarded, or wins and delivers one spurious wake the caller's deadline
+ * loop absorbs.  A single-thread parker re-queues same-thread (ready_push, we ARE
+ * s's drain); an M:N parker routes via its recorded park_hub (mn_wake_g). */
+void runloom_sched_drain_timers(runloom_sched_t *s, double now)
+{
+    while (s->timer_size > 0) {
+        runloom_timer_entry_t *top = runloom_timer_peek(s);
+        runloom_timer_entry_t e;
+        int expected = 1;
+        if (top->deadline > now) break;          /* min-heap: nothing else due */
+        runloom_timer_pop(s, &e);
+        if (__atomic_compare_exchange_n(&e.g->parked_safe, &expected, 0, 0,
+                                        __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+            void *ph = __atomic_load_n(&e.g->park_hub, __ATOMIC_ACQUIRE);
+            runloom_g_state_set(e.g, RUNLOOM_GST_RUNNABLE);
+            if (ph != NULL) {
+                runloom_mn_wake_g(ph, e.g);      /* M:N: route to its hub */
+            } else {
+                runloom_ready_push(s, e.g);      /* single-thread: same-thread */
+            }
+        }
+        /* CAS failed: a real wake already claimed this park -> discard. */
+    }
+}
+
 void runloom_sched_wake(runloom_g_t *g)
 {
     runloom_sched_t *self, *owner;

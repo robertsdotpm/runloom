@@ -63,6 +63,7 @@ Py_ssize_t runloom_sched_drain(runloom_sched_t *s)
 
     while (!s->stopping && (!runloom_sched_ready_empty(s) ||
                             s->sleep_size > 0 ||
+                            s->timer_size > 0 ||
                             __atomic_load_n(&s->netpoll_parked, __ATOMIC_ACQUIRE) > 0 ||
                             runloom_iouring_inflight() > 0 ||
                             runloom_blockpool_inflight() > 0 ||
@@ -89,6 +90,13 @@ Py_ssize_t runloom_sched_drain(runloom_sched_t *s)
             if (pk->wake_at > clk) break;
             runloom_ready_push(s, runloom_sleep_pop(s));
         }
+        /* Fire any due in-memory TIMED parks (runloom_c.park(timeout)).  Their
+         * deadlines are REAL (monotonic), like sleep_real -- never the logical
+         * clock.  Claims each via the parked_safe CAS (exactly-once vs a real
+         * wake). */
+        if (s->timer_size > 0) {
+            runloom_sched_drain_timers(s, runloom_sched_monotonic_seconds());
+        }
         /* Quiescence checkpoint: if nothing else is immediately runnable
          * (ready ring empty after draining wakes + due sleepers), resume the
          * run_ready() waiters NOW -- before we would block on netpoll/timers.
@@ -105,6 +113,7 @@ Py_ssize_t runloom_sched_drain(runloom_sched_t *s)
          * the ready queue. */
         if (runloom_sched_ready_empty(s) &&
             (__atomic_load_n(&s->netpoll_parked, __ATOMIC_ACQUIRE) > 0 || s->sleep_size > 0 ||
+             s->timer_size > 0 ||
              runloom_iouring_inflight() > 0 || runloom_blockpool_inflight() > 0 ||
              runloom_foreign_park_inflight() > 0)) {
             long long timeout_ns = -1;
@@ -114,6 +123,17 @@ Py_ssize_t runloom_sched_drain(runloom_sched_t *s)
                 if (gap > 60.0) gap = 60.0;
                 timeout_ns = (long long)(gap * 1e9);
             }
+            /* In-memory TIMED parks have REAL (monotonic) deadlines: bound the
+             * upcoming block by the nearest so the timer drain at the loop top
+             * fires it on time.  min() with any sleep gap above. */
+            {
+                double tdl = runloom_sched_timer_next_deadline(s);
+                if (tdl >= 0.0) {
+                    double tgap = tdl - runloom_sched_monotonic_seconds();
+                    long long t_ns = tgap <= 0.0 ? 0 : (long long)(tgap * 1e9);
+                    if (timeout_ns < 0 || t_ns < timeout_ns) timeout_ns = t_ns;
+                }
+            }
             /* iouring goroutines wake when the pump observes a CQE on
              * the registered eventfd; blocking-pool goroutines wake when
              * a worker pokes the pump-interrupt eventfd -- both ride the
@@ -122,7 +142,8 @@ Py_ssize_t runloom_sched_drain(runloom_sched_t *s)
             if (__atomic_load_n(&s->netpoll_parked, __ATOMIC_ACQUIRE) > 0 ||
                 runloom_iouring_inflight() > 0 ||
                 runloom_blockpool_inflight() > 0 ||
-                runloom_foreign_park_inflight() > 0) {
+                runloom_foreign_park_inflight() > 0 ||
+                s->timer_size > 0) {
                 /* Logical-clock mode: timeout_ns is a LOGICAL gap, meaningless
                  * as a real I/O wait, so cap it to a short real re-poll.  The
                  * logical clock advances only at full quiescence (the else-if

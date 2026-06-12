@@ -140,6 +140,9 @@ void runloom_sched_init(runloom_sched_t *s)
     s->sleep_heap = NULL;
     s->sleep_size = 0;
     s->sleep_cap = 0;
+    s->timer_heap = NULL;
+    s->timer_size = 0;
+    s->timer_cap = 0;
     s->stack_size = (Py_ssize_t)runloom_cal_default;
     s->completed = 0;
     s->stopping = 0;

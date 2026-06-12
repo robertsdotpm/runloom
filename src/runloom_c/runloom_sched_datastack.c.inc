@@ -494,6 +494,85 @@ runloom_g_t *runloom_sched_sleep_pop(runloom_sched_t *s)
 #define runloom_sleep_peek runloom_sched_sleep_peek
 #define runloom_sleep_pop  runloom_sched_sleep_pop
 
+/* ---- Timer heap (min-heap by deadline) -- in-memory TIMED parks ----
+ * By-VALUE entries { deadline, g } (no g->wake_at reuse, so a g may hold several
+ * stale entries across re-parks).  Drained alongside the sleep heap; the drain
+ * fires a due entry by CASing the g's parked_safe (the same exactly-once arbiter
+ * as wake_safe).  See runloom_park_generic_timed. */
+static int runloom_timer_grow(runloom_sched_t *s)
+{
+    Py_ssize_t new_cap = s->timer_cap ? s->timer_cap * 2 : 16;
+    runloom_timer_entry_t *nh = (runloom_timer_entry_t *)PyMem_Realloc(
+        s->timer_heap, sizeof(runloom_timer_entry_t) * (size_t)(new_cap + 1));
+    if (nh == NULL) {
+        PyErr_NoMemory();
+        return -1;
+    }
+    s->timer_heap = nh;
+    s->timer_cap = new_cap;
+    return 0;
+}
+
+static int runloom_timer_push(runloom_sched_t *s, double deadline, runloom_g_t *g)
+{
+    Py_ssize_t i;
+    runloom_timer_entry_t e;
+    if (s->timer_size + 1 > s->timer_cap) {
+        if (runloom_timer_grow(s) < 0) return -1;
+    }
+    e.deadline = deadline;
+    e.g = g;
+    s->timer_size++;
+    i = s->timer_size;
+    while (i > 1 && s->timer_heap[i / 2].deadline > deadline) {  /* sift up */
+        s->timer_heap[i] = s->timer_heap[i / 2];
+        i /= 2;
+    }
+    s->timer_heap[i] = e;
+    return 0;
+}
+
+/* Peek the earliest deadline (valid until the next push/pop), or NULL if empty. */
+static runloom_timer_entry_t *runloom_timer_peek(runloom_sched_t *s)
+{
+    if (s->timer_size == 0) return NULL;
+    return &s->timer_heap[1];
+}
+
+/* Pop the earliest entry into *out; returns 1 if popped, 0 if the heap is empty. */
+static int runloom_timer_pop(runloom_sched_t *s, runloom_timer_entry_t *out)
+{
+    runloom_timer_entry_t last;
+    Py_ssize_t i, child;
+    if (s->timer_size == 0) return 0;
+    *out = s->timer_heap[1];
+    last = s->timer_heap[s->timer_size];
+    s->timer_size--;
+    if (s->timer_size == 0) return 1;
+    i = 1;
+    while (1) {                                                 /* sift down */
+        child = i * 2;
+        if (child > s->timer_size) break;
+        if (child + 1 <= s->timer_size &&
+            s->timer_heap[child + 1].deadline < s->timer_heap[child].deadline) {
+            child++;
+        }
+        if (s->timer_heap[child].deadline >= last.deadline) break;
+        s->timer_heap[i] = s->timer_heap[child];
+        i = child;
+    }
+    s->timer_heap[i] = last;
+    return 1;
+}
+
+/* Earliest timer deadline (monotonic seconds) on s, or -1.0 if no timers.
+ * Used by the drain / hub idle-wait to bound the block so a due timer fires. */
+double runloom_sched_timer_next_deadline(runloom_sched_t *s)
+{
+    if (s->timer_size == 0) return -1.0;
+    return s->timer_heap[1].deadline;
+}
+
 /* ---- Scheduler lifecycle ---- */
 /* Phase C: per-thread schedulers (see runloom_sched_get below).  runloom_cal_default
  * holds the calibrated default stack size that each new thread's sched is

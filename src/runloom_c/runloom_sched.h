@@ -406,6 +406,18 @@ runloom_g_t *runloom_g_slab_alloc(void);
 void runloom_g_slab_free(runloom_g_t *g);
 
 /* Per-OS-thread scheduler. */
+/* One entry in a sched's TIMER heap: an in-memory timed park (runloom_c.park
+ * with a timeout) that must be woken at `deadline` (monotonic seconds) if a real
+ * wake_safe has not already done so.  Self-contained by VALUE (no g->wake_at
+ * reuse, unlike the sleep heap), so a g may have several STALE entries in flight
+ * across re-parks -- a stale entry that pops just causes at most ONE spurious
+ * wake (the parker re-checks the clock and re-parks), never a premature timeout:
+ * the parker decides timed-out from the clock on resume, NOT from the timer. */
+typedef struct {
+    double       deadline;   /* monotonic-seconds wake deadline */
+    runloom_g_t *g;          /* the timed-parked goroutine */
+} runloom_timer_entry_t;
+
 struct runloom_sched {
     /* Ready FIFO -- ring buffer of g pointers.  Previously a linked
      * list threaded through g->next, which meant every pop dereffed
@@ -427,6 +439,13 @@ struct runloom_sched {
     Py_ssize_t sleep_size;
     Py_ssize_t sleep_cap;
     uint64_t   sleep_seq_ctr;  /* monotonic counter for sleep_seq FIFO tiebreak */
+    /* Timer heap -- min-heap by deadline for in-memory TIMED parks
+     * (runloom_park_generic_timed).  Separate from the sleep heap so a g can hold
+     * multiple stale entries safely (by-value entries, no g->wake_at reuse).
+     * 1-indexed; index 0 unused.  Drained alongside the sleep heap. */
+    runloom_timer_entry_t *timer_heap;
+    Py_ssize_t timer_size;
+    Py_ssize_t timer_cap;
     /* Default stack size for new gs. */
     Py_ssize_t stack_size;
     /* Goroutines completed since the last sched_drain. */
@@ -551,6 +570,26 @@ void runloom_sched_park_current(void);
  * run()'s exit.  This is the M:N-correct replacement for park_self (which busy-
  * loops on a hub). */
 int runloom_park_generic(int foreign_wakeable);
+
+/* Timed variant of runloom_park_generic: park the current goroutine IN MEMORY (0
+ * fds) until a wake_safe OR the monotonic-seconds `deadline`, whichever first.
+ * Same Dekker handshake as runloom_park_generic; the deadline is a TIMER-heap
+ * entry on the current sched/hub that the drain fires by CASing parked_safe (the
+ * SAME exactly-once arbiter as wake_safe).  The parker decides the result from
+ * the CLOCK on resume -- returns 1 if monotonic() >= deadline (timed out), else 0
+ * (woken); -1 if not in a goroutine.  A spurious early return is possible (a
+ * real wake, or a stale timer entry from a prior re-park); the caller must
+ * re-check its own deadline, exactly as the fd-backed wait_fd(timeout) path did. */
+int runloom_park_generic_timed(int foreign_wakeable, double deadline);
+
+/* Fire all due TIMER-heap entries on s (deadline <= now), claiming each via the
+ * parked_safe CAS.  Called by the single-thread drain + the M:N hub_main on s's
+ * own thread, alongside the sleep-heap drain. */
+void runloom_sched_drain_timers(runloom_sched_t *s, double now);
+
+/* Earliest pending timer deadline on s (monotonic seconds), or -1.0 if none --
+ * lets the drain / hub idle-wait bound its block so a due timer fires on time. */
+double runloom_sched_timer_next_deadline(runloom_sched_t *s);
 
 /* Shared (process-wide) run-alive anchor for foreign-wakeable in-memory parkers:
  * an in-memory park leaves no fd/sleep/inflight footprint, so without this a

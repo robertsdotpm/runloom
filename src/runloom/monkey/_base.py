@@ -238,7 +238,16 @@ class _Parker(object):
             # park_generic Dekker makes a wake that beats this commit a no-op
             # (returns immediately) -- no lost wakeup.  The caller's flag loop
             # re-parks on a spurious return.  No fd byte to drain.
-            runloom_c.park(foreign_wakeable=True)
+            #
+            # A TIMED wait passes the deadline straight to the C park: it wakes at
+            # the monotonic deadline via the scheduler's per-hub timer heap (the
+            # SAME parked_safe CAS, exactly-once vs a real wake) -- still 0 fds, no
+            # waker goroutine.  The caller re-checks its own deadline (a spurious
+            # early return is possible), exactly as the old wait_fd(timeout) did.
+            if timeout is None:
+                runloom_c.park(foreign_wakeable=True)
+            else:
+                runloom_c.park(foreign_wakeable=True, timeout=timeout)
             return
         # Clear FIRST: a _Parker object reused for a second park must not carry
         # the previous park's goroutine handle (a stale handle would let a setter

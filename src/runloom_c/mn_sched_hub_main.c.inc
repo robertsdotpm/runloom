@@ -293,6 +293,13 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
                 }
             }
         }
+        /* Fire any due in-memory TIMED parks on this hub (runloom_c.park(timeout)).
+         * REAL (monotonic) deadlines -- NOT the logical clock used for sleepers
+         * above; each is claimed via the parked_safe CAS (exactly-once vs a real
+         * wake_safe), routed back to its hub by runloom_sched_drain_timers. */
+        if (h->sched.timer_size > 0) {
+            runloom_sched_drain_timers(&h->sched, runloom_sched_monotonic_seconds());
+        }
 
         /* Pick the next g.  Normal order: ready ring (yielded/woken -- "hot")
          * before the deque (fresh, never-run gs), which keeps woken I/O
@@ -385,6 +392,15 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
                     if (gap_ns < 0) gap_ns = 0;
                     if (gap_ns < idle_ns) idle_ns = gap_ns;
                 }
+                /* Likewise cap by the nearest in-memory TIMED-park deadline on
+                 * this hub so we wake to fire it (REAL/monotonic, always). */
+                if (h->sched.timer_size > 0) {
+                    double now = runloom_sched_monotonic_seconds();
+                    double gap = runloom_sched_timer_next_deadline(&h->sched) - now;
+                    long long gap_ns = (long long)(gap * 1e9);
+                    if (gap_ns < 0) gap_ns = 0;
+                    if (gap_ns < idle_ns) idle_ns = gap_ns;
+                }
                 parked = runloom_netpoll_parked_count();
                 /* Hub-idle dwell-based stack reclaim (opt-in,
                  * RUNLOOM_STACK_PARK_SWEEP=1; threshold ms via
@@ -456,8 +472,9 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
                     int iouring_total = runloom_iouring_inflight();
                     if (parked > 0 || iouring_total > 0) {
                         long long pump_ns = 1000000LL;
-                        if (h->sched.sleep_size > 0 && idle_ns < pump_ns) {
-                            pump_ns = idle_ns;
+                        if ((h->sched.sleep_size > 0 || h->sched.timer_size > 0) &&
+                            idle_ns < pump_ns) {
+                            pump_ns = idle_ns;      /* idle_ns already timer-bounded */
                         }
                         /* DEFER_TASKRUN heartbeat: if this hub's ring
                          * was created with that flag, completions on
