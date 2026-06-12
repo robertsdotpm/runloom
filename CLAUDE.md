@@ -194,6 +194,24 @@
   long-lived loop (per-test loop reset hides it). Regression guard:
   `runloom_compat/goroutine_leak_char.py` (parked stays 0 across cycles).
 
+- **Low-level `loop.sock_*` must release the fd's netpoll registration on
+  completion.** They operate on a USER-OWNED socket the caller closes with a plain
+  `socket.close()`, which does NOT run the `_close_sock` / monkey netpoll-
+  unregister hook (only sockets the bridge itself owns do). Without releasing, the
+  single-thread netpoll's per-fd LEVEL arm cache (`runloom_fd_armed[fd]`) stays
+  sticky for the closed fd; when the OS reuses that fd NUMBER, `netpoll_register`'s
+  already-armed skip (`cur != 0 && target == cur` -> 0 syscalls) sees the stale
+  mask and never `EPOLL_CTL_ADD`s the new fd -> its `wait_fd` parks forever (the
+  old intermittent `test_recvfrom` / fast-churn hang; deterministic on the first
+  fd reuse). Each `sock_*` carries `@_release_fd_after`, which calls
+  `runloom_c.netpoll_release_if_idle(fd)` -- DEL + clear the arm IFF no goroutine
+  is parked on it (a no-op otherwise; all under `runloom_pool.lock`, the lock
+  `wait_fd`/`register` use, so a concurrent park can't have its arm DEL'd). Do NOT
+  drop the decorator, and do NOT "fix" this by removing the register-once skip --
+  the skip is the monkey/transport throughput hot path (removing it cost ~10% on
+  the echo bench; `release_if_idle` leaves it untouched). Regression guard:
+  `tests/test_aio_fd_reuse.py`.
+
 - **Future done-callbacks defer through call_soon, in asyncio order.**
   `Future.__schedule_callbacks` in asyncio defers EVERY done-callback via
   `loop.call_soon` -- a waiting Task's `__wakeup` AND library/user done-callbacks
