@@ -111,7 +111,7 @@ def run_file(name, pytest_args):
     # traceback to stderr -> captured below.  Turns an opaque 300s TIMEOUT into a
     # diagnosable stack (e.g. which hub is wedged where on a lost netpoll arm).
     env["PYTHONFAULTHANDLER"] = "1"
-    cmd = [sys.executable, "-m", "pytest", path, "-q",
+    cmd = [sys.executable, "-m", "pytest", path, "-v",
            "-p", "no:cacheprovider"] + list(pytest_args)
     t0 = time.monotonic()
     p = subprocess.Popen(cmd, cwd=REPO, env=env,
@@ -121,8 +121,8 @@ def run_file(name, pytest_args):
         out, _ = p.communicate(timeout=timeout)
         rc = p.returncode
     except subprocess.TimeoutExpired:
-        # Hung.  SIGABRT -> the child's faulthandler dumps every thread's stack;
-        # collect it (give it a few seconds), then make sure the child is dead.
+        # Hung.  Extract which test was running (last one mentioned in -v output),
+        # SIGABRT to dump stacks, then kill if needed.
         try:
             p.send_signal(signal.SIGABRT)
         except Exception:
@@ -133,9 +133,20 @@ def run_file(name, pytest_args):
             p.kill()
             out, _ = p.communicate()
         rc = 124
+        # Find the last test name in the verbose output (the one that hung).
+        last_test = "(unknown test)"
+        for line in reversed((out or "").splitlines()):
+            if "::" in line and not line.startswith("="):
+                # Extract test name from lines like:
+                # "tests/test_X.py::Class::test_name PASSED"
+                # or just "tests/test_X.py::Class::test_name" (still running when hung)
+                parts = line.split()
+                if parts:
+                    last_test = parts[0]
+                    break
         out = (out or "") + (
-            "\n[run_isolated: TIMED OUT after {0}s; SIGABRT faulthandler "
-            "dump (if any) is above]".format(timeout))
+            "\n[run_isolated: TIMED OUT after {0}s on {1}; SIGABRT faulthandler "
+            "dump (if any) is above]".format(timeout, last_test))
     return rc, out, time.monotonic() - t0
 
 
