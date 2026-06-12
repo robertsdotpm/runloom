@@ -82,12 +82,25 @@ class CoEvent(object):
         self._guard.release()
         # set() unparks us, OR the deadline fires inside the netpoll wait -- no
         # waker goroutine + heap timer per timed wait (see _Parker.park).  self._flag
-        # is authoritative: a spurious/raced wake just re-reads it.
-        p.park(timeout)
-        # If we TIMED OUT, our parker is still queued; remove it so a later set()
-        # never unparks this (now pooled/reused) parker -> spurious wake.  Under
-        # the guard so it is serialized with set()'s waiter snapshot; a no-op
-        # (ValueError) if set() already claimed us.
+        # is authoritative -- so RE-PARK on a spurious/raced wake instead of
+        # trusting a single park() return.  A spurious wake (a stale pooled-parker
+        # byte; a kqueue re-arm where the poll() re-check does not apply) before
+        # set() would otherwise make wait() return False prematurely -- wrong for a
+        # no-timeout wait, which must only ever return True.  Mirrors the
+        # while-not-done loop _ThreadPoolBackend.submit already uses.
+        if timeout is None:
+            while not self._flag:
+                p.park(None)
+        else:
+            deadline = time.monotonic() + timeout
+            while not self._flag:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                p.park(remaining)
+        # Remove our parker so a later set() never unparks this (now pooled/reused)
+        # parker -> spurious wake.  Under the guard so it is serialized with set()'s
+        # snapshot; a no-op (ValueError) if set() already claimed us.
         with self._guard:
             try:
                 self._waiters.remove(p)
@@ -249,16 +262,38 @@ class CoSemaphore(object):
         # release() unparks us (handing a permit), OR the deadline fires inside
         # the park (wait_fd for a goroutine, select for a foreign thread) -- no
         # per-acquire waker goroutine + heap timer (see _Parker.park).
-        p.park(timeout)
-        if timeout is not None:
-            # If we did NOT get a permit, we timed out: mark the waiter inactive
-            # under the guard so a racing release() skips us (a later release()
-            # lazily discards inactive entries) rather than handing a permit to a
-            # parker we've abandoned.  If release() already set w[2] (gave us a
-            # permit) we keep it -- the guard serializes the two.
-            with self._guard:
-                if not w[2]:
-                    w[1] = False
+        if timeout is None:
+            # Blocking, no deadline: park may return SPURIOUSLY -- a pooled
+            # _Parker can carry a stale wake byte (a foreign set()/release()
+            # os.write that raced the previous user's release()-drain and landed
+            # after it pooled the fds; _base.py release() notes this), so
+            # wait_fd can wake before release() actually hands us a permit.
+            # w[2] (set under the guard by release()) is the authoritative
+            # permit flag -- loop until it is set rather than returning a
+            # spurious False from a BLOCKING acquire (a contract violation that
+            # also strands the permit release() handed us).
+            while not w[2]:
+                p.park(None)
+        else:
+            # Same spurious-wake hazard as the blocking branch above, plus a
+            # deadline: RE-PARK on a spurious wake with the REMAINING time (re-arming
+            # the full timeout each spin would let acquire() wait up to N*timeout)
+            # rather than returning a premature False.  w[2] (got_permit, set under
+            # the guard by release()) is authoritative.
+            deadline = time.monotonic() + timeout
+            while not w[2]:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    # Timed out: mark the waiter inactive under the guard so a
+                    # racing release() skips us (a later release() lazily discards
+                    # inactive entries) rather than handing a permit to a parker
+                    # we've abandoned.  If release() set w[2] at the last moment we
+                    # keep it -- the guard serializes the two.
+                    with self._guard:
+                        if not w[2]:
+                            w[1] = False
+                    break
+                p.park(remaining)
         p.release()
         # w[2] is True if release() handed us a permit; False if cancelled/timed out.
         return w[2]
