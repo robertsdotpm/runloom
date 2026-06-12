@@ -1,10 +1,16 @@
 """runloom.sync fan-in primitives: WaitGroup / Future / gather.
 
-These ride directly on the GenMC-verified park_self / G.wake (wake_safe) handshake
-with a runloom_c.Mutex guard held only for O(1) bookkeeping.  The tests pin the
-contract AND -- the failure mode that matters for a park/wake primitive -- a lost
-wakeup under repeated high fan-in across M:N hubs (a hang, caught by the timeout).
+These ride directly on the GenMC-verified park() / G.wake (wake_safe) handshake
+with a runloom_c.Mutex guard held only for O(1) bookkeeping.  park() (NOT park_self,
+which busy-spins on an M:N hub) means an awaiter genuinely blocks.  The tests pin
+the contract, the goroutine-resolution contract (foreign-thread resolve raises a
+clean error, never a SIGSEGV), that an await does not peg a hub, AND -- the failure
+mode that matters for a park/wake primitive -- a lost wakeup under repeated high
+fan-in across M:N hubs (a hang, caught by the timeout).
 """
+import resource
+import threading
+
 import pytest
 
 import runloom
@@ -204,3 +210,84 @@ def test_repeated_fanin_no_lost_wakeup():
             total += sum(sync.gather(*[(lambda k=k: k) for k in range(1)]))
         return total
     assert _drive(body) == 15 * 120
+
+
+# ---- Phase 2a: park() (not park_self) + goroutine-resolution contract -----
+
+def test_sync_park_is_mn_park():
+    # The fan-in primitives must use the M:N park (blocks on a hub), not park_self
+    # (busy-spins on a hub).  Pin the export so a regression to park_self is loud.
+    assert sync.park is runloom_c.park
+    assert sync.park is not runloom_c.park_self
+
+
+def test_future_resolution_from_foreign_thread_raises():
+    """A foreign OS thread resolving a Future gets a clean RuntimeError, NOT a
+    SIGSEGV.  The guard (runloom_c.Mutex) wakes a contending goroutine awaiter via
+    mn_wake_g, which a foreign thread can't route safely; _resolve rejects the
+    foreign caller BEFORE taking the guard (current_g() is a lock-free peek)."""
+    def body():
+        fut = sync.Future()
+        err = []
+        def foreign():
+            try:
+                fut.set_result(1)
+            except RuntimeError as e:
+                err.append(str(e))
+        t = threading.Thread(target=foreign)
+        t.start(); t.join()
+        # the Future is still unresolved -- a goroutine can resolve it cleanly
+        fut.set_result(2)
+        return err, fut.result()
+    err, val = _drive(body)
+    assert len(err) == 1 and "foreign OS thread" in err[0]
+    assert val == 2
+
+
+def test_waitgroup_done_from_foreign_thread_raises():
+    """WaitGroup.done()/add(negative) is the WAKE side; a foreign-thread done()
+    that would wake a parked waiter raises cleanly instead of crashing.  A positive
+    setup add() from a foreign thread is allowed (it never wakes)."""
+    def body():
+        wg = sync.WaitGroup()
+        wg.add(1)
+        err = []
+        def foreign():
+            try:
+                wg.done()                       # add(-1): wake side -> must raise
+            except RuntimeError as e:
+                err.append(str(e))
+        t = threading.Thread(target=foreign)
+        t.start(); t.join()
+        wg.done()                                # proper done from the goroutine
+        wg.wait()                                # counter is 0 -> returns
+        return err
+    err = _drive(body)
+    assert len(err) == 1 and "goroutine" in err[0]
+
+
+def test_future_await_does_not_peg_a_hub():
+    """The #4 bug: Future.result looped park_self(), which returns immediately on
+    an M:N hub, so the awaiter busy-spun a hub at 100% CPU (sysmon flagged it
+    WEDGED).  park() blocks for real.  Measured via user-CPU: a busy-looped hub
+    adds ~a full core of utime over the run window; a parked awaiter adds ~none.
+    Calibrated against an idle run so the bound tracks the box's idle-hub
+    overhead, not a fixed guess (busy-loop diff ~+0.28s, parked ~0)."""
+    def utime():
+        return resource.getrusage(resource.RUSAGE_SELF).ru_utime
+
+    a = utime()
+    runloom.run(8, lambda: runloom.sleep(0.3))   # idle baseline, same window
+    base = utime() - a
+
+    def runner():
+        fut = sync.Future()
+        runloom.go(lambda: fut.result())         # awaiter parks for the window
+        runloom.sleep(0.3)
+        fut.set_result(1)
+        runloom.sleep(0.02)
+    a = utime()
+    runloom.run(8, runner)
+    got = utime() - a
+
+    assert got - base < 0.15, (base, got)        # busy-loop would be ~+0.28

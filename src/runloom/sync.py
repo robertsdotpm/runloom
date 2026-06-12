@@ -288,7 +288,14 @@ from runloom.monkey import CoCondition as Condition
 # --------------------------------------------------------------------
 # Park / wake -- exposed for callers building their own primitives
 # --------------------------------------------------------------------
-park = runloom_c.park_self
+# park() is the generic M:N in-memory park: it routes by hub (park_current+yield
+# on a hub, park_safe on a single thread) so it BLOCKS on an M:N hub instead of
+# busy-spinning -- park_self only parks the single-thread scheduler, so a loop
+# around it spins on a hub (the bug the fan-in primitives hit).  Both share the
+# GenMC-verified Dekker, so a wake racing the park is never lost.  park_self stays
+# reachable for single-thread-only callers.
+park = runloom_c.park
+park_self = runloom_c.park_self
 
 
 def wake(g):
@@ -300,22 +307,32 @@ def wake(g):
 # --------------------------------------------------------------------
 # Fan-in primitives -- WaitGroup / Future / gather.
 #
-# Built directly on the GenMC-verified park_self / G.wake handshake (G.wake is
-# runloom_sched_wake_safe; "safe to call before the park" -- the wake_state CAS
-# absorbs a wake that races the park).  A runloom_c.Mutex (an M:N-safe cooperative
-# goroutine mutex) guards the O(1) counter/slot + waiter-list bookkeeping and is
-# ALWAYS released before park_self, so a waker never blocks on a parked waiter.
-# Each is the lean equivalent of a Chan(1)-per-result fan-in, without a channel
-# buffer or a select loop per await.
+# Built directly on the GenMC-verified park() / G.wake handshake (G.wake is
+# runloom_sched_wake_safe; "safe to call before the park" -- the Dekker absorbs a
+# wake that races the park, on both the single-thread and M:N hub paths).  park()
+# (NOT park_self -- which busy-spins on a hub) means a waiter BLOCKS under M:N,
+# zero fds per waiter.  A runloom_c.Mutex (a cooperative goroutine mutex) guards
+# the O(1) counter/slot + waiter-list bookkeeping and is ALWAYS released before
+# park(), so a waker never blocks on a parked waiter.  Each is the lean equivalent
+# of a Chan(1)-per-result fan-in, without a channel buffer or a select per await.
 #
-# Scope: a park_self-parked waiter is NOT counted as keeping a SINGLE-THREAD
-# run() alive (same as a channel park -- see chan_waiters.c.inc park_waiter
-# FINDING).  Under M:N (run(N) / mn_run, the primary mode) the hubs stay alive
-# while a waiter is parked, so a waker on ANY thread -- including a foreign OS
-# thread -- works.  Under SINGLE-THREAD run(), keep the waker a goroutine: if the
-# only remaining work is a park_self waiter whose waker is a foreign thread, run()
-# can exit and abandon it.  (A foreign-thread-wakeable Event must park on a
-# netpoll fd instead -- that is why monkey's CoEvent uses _Parker, not park_self.)
+# RESOLUTION CONTRACT -- resolve from a goroutine, not a foreign OS thread.  The
+# guard's wake path (runloom_c.Mutex unlock -> mn_wake_g) is NOT foreign-OS-thread
+# safe: a foreign-thread done() / set_result that contends the guard with an
+# awaiting goroutine would re-queue it onto a garbage hub (SIGSEGV).  So the WAKE
+# side (WaitGroup.done()/add(negative); Future.set_result/set_exception) raises a
+# clean RuntimeError when current_g() is None, BEFORE taking the guard -- the same
+# contract as asyncio (resolve on the loop thread; cross-thread goes through
+# call_soon_threadsafe).  Setup (add(positive), await) is allowed from anywhere.
+# (Full foreign-thread resolution awaits the park-based foreign-safe Mutex.)
+#
+# Scope: a park()-parked waiter is NOT counted as keeping a SINGLE-THREAD run()
+# alive (same as a channel park -- see chan_waiters.c.inc park_waiter FINDING).
+# Under M:N (run(N) / mn_run, the primary mode) the hubs stay alive while a waiter
+# is parked.  Because resolution is goroutine-only, the resolving goroutine keeps
+# run() alive until it fires the wake, so single-thread run() works too.  (A
+# foreign-thread-wakeable Event must park on a netpoll fd instead -- that is why
+# monkey's CoEvent uses _Parker, not park().)
 # --------------------------------------------------------------------
 class WaitGroup(object):
     """Go-style sync.WaitGroup: wait for a set of goroutines to finish.
@@ -331,6 +348,18 @@ class WaitGroup(object):
         self._mu = runloom_c.Mutex()
 
     def add(self, delta=1):
+        # done()/add(negative) is the WAKE side; it must come from a goroutine.
+        # The guard is a runloom_c.Mutex whose wake path is not foreign-OS-thread-
+        # safe, so a foreign-thread done() that wakes a parked waiter would crash.
+        # Reject it BEFORE taking the guard (current_g() is a lock-free peek), so
+        # there is no SIGSEGV -- only a clean error.  A positive add() never wakes
+        # (the count only reaches zero via a decrement), so setup add(n) is allowed
+        # from anywhere.  (Foreign-thread resolution will be supported once the
+        # fan-in primitives move to a park-based foreign-safe guard.)
+        if delta < 0 and runloom_c.current_g() is None:
+            raise RuntimeError(
+                "WaitGroup.done() / add(negative) must be called from a "
+                "goroutine, not a foreign OS thread")
         self._mu.lock()
         self._n += delta
         if self._n < 0:
@@ -365,8 +394,12 @@ class WaitGroup(object):
                 return
             self._waiters.append(g)
             self._mu.unlock()
-            runloom_c.park_self()       # woken by the add() that reaches zero;
-            # loop re-checks the count under the lock (absorbs a pre-park wake).
+            runloom_c.park()            # M:N-correct in-memory park (park_self
+                                        # busy-loops on a hub).  Woken by the add()
+                                        # that reaches zero; the wake-before-park
+                                        # race in the [unlock .. park] window is
+                                        # consumed by park()'s Dekker, not lost.
+            # loop re-checks the count under the lock.
 
 
 class Future(object):
@@ -390,6 +423,16 @@ class Future(object):
         return d
 
     def _resolve(self, result, exc):
+        # Resolving wakes parked awaiters; the guard is a runloom_c.Mutex whose
+        # wake path is not foreign-OS-thread-safe, so a foreign-thread resolve that
+        # contends the guard with an awaiter would crash.  Reject it BEFORE taking
+        # the guard (current_g() is a lock-free peek) -- a clean error, no SIGSEGV.
+        # This matches asyncio (resolve from the loop thread; cross-thread goes
+        # through call_soon_threadsafe).  Full foreign-thread support arrives with
+        # the park-based foreign-safe guard.
+        if runloom_c.current_g() is None:
+            raise RuntimeError(
+                "Future must be resolved from a goroutine, not a foreign OS thread")
         self._mu.lock()
         if self._done:
             self._mu.unlock()
@@ -427,7 +470,8 @@ class Future(object):
                 continue
             self._waiters.append(g)
             self._mu.unlock()
-            runloom_c.park_self()       # woken by _resolve()
+            runloom_c.park()            # M:N-correct in-memory park (park_self
+                                        # busy-loops on a hub); woken by _resolve()
 
 
 def gather(*callables):
