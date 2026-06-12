@@ -238,6 +238,12 @@ void runloom_mn_fini(void)
         }
         PyEval_RestoreThread(saved);
     }
+    /* Now both the rescue threads (joined at runloom_handoff_stop_join above) AND
+     * the hubs are joined, so no thread can hold runloom_hub_tstate_lock across a
+     * startup stop-the-world: safe to delete the rescue tstates here, attached.
+     * (Deferred from runloom_handoff_stop_join to dodge the STW deadlock -- see
+     * the note there.) */
+    runloom_handoff_delete_tstates();
     /* controlled-mode baton: all hubs joined, nobody can acquire/release now */
     runloom_mn_ctrl_fini();
     /* Uninstall the preempt wrapper now that every hub thread is joined (no one

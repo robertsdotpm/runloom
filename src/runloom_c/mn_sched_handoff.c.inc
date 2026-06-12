@@ -243,16 +243,46 @@ static void runloom_handoff_stop_join(void)
     int k;
     if (runloom_handoff_running <= 0) return;
     __atomic_store_n(&runloom_handoff_stop, 1, __ATOMIC_RELEASE);
-    for (k = 0; k < runloom_handoff_running; k++) {
-        runloom_thread_join(runloom_handoff_threads[k]);
+    /* Join the rescue threads with the MAIN THREAD DETACHED -- mirrors the hub
+     * join in runloom_mn_fini.  A rescue thread may still be in its STARTUP
+     * PyThreadState_New (handoff_main): on free-threaded 3.13t the qsbr-slot
+     * reservation does a stop-the-world, which waits for EVERY other attached
+     * thread to reach a safe point.  pthread_join is NOT a safe point and leaves
+     * the main tstate attached, so joining while attached deadlocks -- the STW
+     * waits for the main thread while the main thread waits for the rescue thread
+     * to exit (observed: trivial-workload mn_run() returns before a rescue thread
+     * finishes starting, then mn_fini joins it mid-STW -> ~80% hang).  Detaching
+     * parks the main thread at a safe point so the STW completes and the rescue
+     * thread reaches its stop check and exits.  Re-attach before the tstate
+     * deletion below (PyThreadState_Clear/Delete run Python decrefs). */
+    {
+        PyThreadState *saved = PyEval_SaveThread();
+        for (k = 0; k < runloom_handoff_running; k++) {
+            runloom_thread_join(runloom_handoff_threads[k]);
+        }
+        PyEval_RestoreThread(saved);
     }
-    /* Delete rescue tstates from this (main) thread now that all rescue OS
-     * threads have exited.  The pthread_join above provides the happens-before
-     * that makes the rescue threads' tstate-pointer stores visible here.
-     * Done here (not in each rescue thread) to avoid the STW-interaction
-     * deadlock: PyThreadState_Delete acquires HEAD_LOCK; if a GC stop-the-world
-     * is active when a rescue thread calls it, the interaction deadlocks because
-     * the main thread (which holds the GC lock) is blocked in pthread_join. */
+    /* The rescue THREADS are joined, but do NOT delete their tstates here.
+     * Deletion acquires runloom_hub_tstate_lock and runs Python decrefs (must be
+     * ATTACHED) -- yet a HUB may still be in its OWN startup PyThreadState_New
+     * (free-threaded qsbr-slot reservation = a stop-the-world) while HOLDING
+     * runloom_hub_tstate_lock (the serialised hub-tstate construction).  An
+     * attached main thread blocking on that lock is not at a safe point, so the
+     * hub's STW never completes -> deadlock (the ~2% residual after the join was
+     * moved off-thread).  Defer deletion to runloom_handoff_delete_tstates(),
+     * called from mn_fini AFTER the hubs are joined: by then no hub can hold the
+     * lock or be mid-STW.  The pthread_join above gives the happens-before that
+     * makes the rescue threads' tstate-pointer stores visible to that deletion. */
+}
+
+/* Delete the rescue tstates + free the pool arrays.  MUST be called on the MAIN
+ * thread AFTER both the rescue threads AND the hubs are joined (see the deadlock
+ * note in runloom_handoff_stop_join): only then can no other thread hold
+ * runloom_hub_tstate_lock across a startup stop-the-world.  Safe to call even when
+ * handoff was disabled / no threads spawned (arrays are NULL). */
+static void runloom_handoff_delete_tstates(void)
+{
+    int k;
     if (runloom_rescue_tstates != NULL) {
         runloom_mutex_lock(&runloom_hub_tstate_lock);
         for (k = 0; k < runloom_handoff_running; k++) {
