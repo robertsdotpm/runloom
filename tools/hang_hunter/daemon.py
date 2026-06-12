@@ -33,6 +33,7 @@ import re
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -117,6 +118,9 @@ class Hunter(object):
     def child_env(self, job):
         env = dict(os.environ)
         env["PYTHONPATH"] = os.path.join(REPO, "src")
+        # Enable faulthandler so a hang dumps all thread stacks to stderr before
+        # gdb attaches; this gives a fast C+Python backtrace without needing ptrace.
+        env["PYTHONFAULTHANDLER"] = "1"
         env.update(job.env)
         return env
 
@@ -131,10 +135,16 @@ class Hunter(object):
                 os.nice(10)
         except Exception:
             preexec = None
+        # Capture stderr to a temp file so faulthandler dumps on hang are included
+        # in the report (they go to stderr when SIGABRT fires).
+        stderr_file = tempfile.NamedTemporaryFile(mode="w+", delete=False, dir=self.report_dir)
+        stderr_path = stderr_file.name
+        stderr_file.close()
         p = subprocess.Popen(job.argv, cwd=REPO, env=self.child_env(job),
-                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                             stdout=subprocess.DEVNULL, stderr=open(stderr_path, "w"),
                              preexec_fn=preexec)
-        self.running.append({"proc": p, "job": job, "start": time.time()})
+        self.running.append({"proc": p, "job": job, "start": time.time(),
+                             "stderr_path": stderr_path})
         self.totals["launched"] += 1
 
     def record(self, kind, sig, key, repro, report_text):
@@ -178,35 +188,83 @@ class Hunter(object):
 
     def on_hang(self, slot):
         pid = slot["proc"].pid
+        job = slot["job"]
+        buf = []
+        # Workload context: engine, repro command, timeout.
+        buf.append("WORKLOAD: {0}\nREPRO: {1}\nTIMEOUT: {2}s\n\n".format(
+            job.engine, job.repro, job.timeout))
         # Sample completion progress across ~2s purely as CONTEXT in the report
         # (a human can see whether goroutines are completing or truly stranded);
         # it is not used to gate the report (see reap()).
         p0 = self.read_pending(pid)
         time.sleep(2.0)
         p1 = self.read_pending(pid) if slot["proc"].poll() is None else None
-        buf = []
         buf.append("PROGRESS: pending_global {0} -> {1} over 2s "
                    "(unchanged => goroutines stranded)\n\n".format(p0, p1))
+        # Send SIGABRT to trigger faulthandler dump of all thread stacks to stderr,
+        # giving a fast C+Python backtrace without needing gdb/ptrace.  Wait for
+        # stderr to flush, then read it into the report.
+        try:
+            slot["proc"].send_signal(signal.SIGABRT)
+        except OSError:
+            pass
+        time.sleep(1.0)
+        # Read the faulthandler dump from stderr (if any).
+        stderr_path = slot.get("stderr_path")
+        if stderr_path:
+            try:
+                with open(stderr_path, "r") as f:
+                    stderr_text = f.read()
+                    if stderr_text.strip():
+                        buf.append("=== FAULTHANDLER DUMP ===\n{0}\n\n".format(stderr_text))
+            except OSError:
+                pass
+        # gdb triage adds the all-thread backtrace + scheduler state + queue snapshot.
         triage.triage_hang(pid, buf.append)
         text = "".join(buf)
         sig, key = triage.signature(text)
         self.totals["hang"] += 1
-        self.record("HANG", sig, key, slot["job"].repro, text)
+        self.record("HANG", sig, key, job.repro, text)
         try:
             slot["proc"].kill()
         except OSError:
             pass
+        # Clean up stderr temp file.
+        if stderr_path:
+            try:
+                os.unlink(stderr_path)
+            except OSError:
+                pass
 
     def on_crash(self, slot, rc):
         pid = slot["proc"].pid
+        job = slot["job"]
         core = os.path.join(self.core_dir, "core.{0}".format(pid))
         if not os.path.exists(core):
             core = None
         buf = []
+        # Workload context.
+        buf.append("WORKLOAD: {0}\nREPRO: {1}\n(rc={2})\n\n".format(
+            job.engine, job.repro, rc))
+        # Read any faulthandler dump from stderr (e.g., signals triggered by the crash).
+        stderr_path = slot.get("stderr_path")
+        if stderr_path:
+            try:
+                with open(stderr_path, "r") as f:
+                    stderr_text = f.read()
+                    if stderr_text.strip():
+                        buf.append("=== STDERR / FAULTHANDLER ===\n{0}\n\n".format(stderr_text))
+            except OSError:
+                pass
         sig, key = triage.triage_crash(self.py, core, buf.append)
         self.totals["crash"] += 1
-        self.record("CRASH", sig, key,
-                    slot["job"].repro + "  (rc={0})".format(rc), "".join(buf))
+        self.record("CRASH", sig, key, job.repro + "  (rc={0})".format(rc), "".join(buf))
+        # Clean up stderr temp file.
+        if stderr_path:
+            try:
+                os.unlink(stderr_path)
+            except OSError:
+                pass
 
     def read_pending(self, pid):
         """runloom_mn_pending_global = goroutines ever-pushed minus completed.
@@ -248,6 +306,13 @@ class Hunter(object):
                     still.append(slot)
             elif rc == 0:
                 self.totals["ok"] += 1
+                # Clean up stderr temp file on success.
+                stderr_path = slot.get("stderr_path")
+                if stderr_path:
+                    try:
+                        os.unlink(stderr_path)
+                    except OSError:
+                        pass
             else:
                 self.on_crash(slot, rc)           # nonzero exit / signal -> CRASH
         self.running = still
