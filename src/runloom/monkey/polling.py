@@ -27,18 +27,18 @@ _CO_EPOLL_OK = _real_select_epoll is not None and _EPOLLIN is not None
 # wait_fd, drain with a non-blocking poll(0), and map the events back to the
 # three result lists.  This:
 #   * never calls CPython's select_select_impl (whose three pylist[FD_SETSIZE+1]
-#     arrays are a ~51 KB single C frame that overflows the goroutine stack --
+#     arrays are a ~51 KB single C frame that overflows the fiber stack --
 #     the only stdlib leaf that does; see docs/cooperative_stdlib_coverage.md),
-#   * consumes NO pool thread -- the goroutine parks on netpoll like every
+#   * consumes NO pool thread -- the fiber parks on netpoll like every
 #     other socket, so it scales to a million concurrent waiters, and
 #   * keeps the hub free (cooperative) without the heavier offload fallback.
 #
 # Fallback to a pool-thread offload (the blocking OS select runs on a real
-# 8 MB thread stack, the goroutine merely parks on the offload) ONLY when there
+# 8 MB thread stack, the fiber merely parks on the offload) ONLY when there
 # is no usable epoll -- a non-epollable fd (regular file/char device, which
 # select treats as always-ready but epoll rejects) or a platform without epoll
 # (Windows; *BSD/macOS could grow a kqueue path later).  The offload never runs
-# select inline on the goroutine stack, so the fat frame is never an issue.
+# select inline on the fiber stack, so the fat frame is never an issue.
 # ============================================================
 _orig_select_select = None
 
@@ -124,7 +124,7 @@ def _co_select_via_epoll(rlist, wlist, xlist, timeout):
 
 
 def _patched_select(rlist, wlist, xlist, timeout=None):
-    if not _in_goroutine():
+    if not _in_fiber():
         return _orig_select_select(rlist, wlist, xlist, timeout)
 
     # select.select() accepts ANY iterable of fds, and selectors.SelectSelector
@@ -155,8 +155,8 @@ def _patched_select(rlist, wlist, xlist, timeout=None):
 
     # Fallback (no epoll / non-epollable fd): run the blocking OS select on a
     # pool thread (8 MB stack -- the fat frame is fine there) and PARK this
-    # goroutine on the offload.  We never call _orig_select_select inline: its
-    # ~51 KB frame overflows the goroutine's C stack.  A normalised timeout<=0
+    # fiber on the offload.  We never call _orig_select_select inline: its
+    # ~51 KB frame overflows the fiber's C stack.  A normalised timeout<=0
     # stays non-blocking on the pool thread.
     pool_timeout = 0 if (timeout is not None and timeout <= 0) else timeout
     return _get_backend().submit(
@@ -193,11 +193,11 @@ def _unpatch_select():
 #     epoll/kqueue fd is itself pollable -- it signals readable exactly when
 #     it has >=1 ready event.  So we park on wait_fd(self.fileno(), READ)
 #     and then drain with a non-blocking poll(0).  Fully event-driven, no
-#     busy-poll, no goroutine fan-out, no leaked parkers.
+#     busy-poll, no fiber fan-out, no leaked parkers.
 #   poll: select.poll has no backing fd, so we fall back to a non-blocking
 #     poll(0) + cooperative yield loop (same shape as multi-fd select.select).
 #
-# Outside a goroutine every wrapper degrades to the real blocking call, so
+# Outside a fiber every wrapper degrades to the real blocking call, so
 # helper threads keep working after patch().
 # (_real_select_poll / _real_select_epoll / _real_select_kqueue are captured
 # once at the top of this module.)
@@ -244,14 +244,14 @@ class CoPoll(object):
 
     def poll(self, timeout=None):
         # poll() timeout is in MILLISECONDS; None or negative == infinite.
-        if not _in_goroutine():
+        if not _in_fiber():
             return self._r.poll(timeout)
         # A poll object has no kernel fd of its own to park on, so (unlike
         # epoll/kqueue, which park on their backing fd, and select.select,
         # which parks on a transient epoll fd) there's no clean netpoll target.
         # The old form busy-polled poll(0) + _co_sleep on the hub; instead we
         # offload the blocking poll to a pool thread and PARK on the offload --
-        # the goroutine yields, other goroutines run, no hub spin.  (poll's C
+        # the fiber yields, other fibers run, no hub spin.  (poll's C
         # frame is heap-backed, so this is about cooperation, not the
         # select_select_impl stack-frame issue.)  Backs selectors.PollSelector.
         return _get_backend().submit(self._r.poll, (timeout,), {})
@@ -276,7 +276,7 @@ class CoEpoll(object):
     def poll(self, timeout=None, maxevents=-1):
         # epoll.poll() timeout is in SECONDS (float); None or negative ==
         # infinite.  maxevents -1 == unlimited.
-        if not _in_goroutine():
+        if not _in_fiber():
             return self._r.poll(timeout, maxevents)
         if timeout is None or timeout < 0:
             deadline = None
@@ -339,7 +339,7 @@ class CoKqueue(object):
 
     def control(self, changelist, max_events, timeout=None):
         # max_events == 0 means register-only (never waits) -- pass through.
-        if not _in_goroutine() or not max_events:
+        if not _in_fiber() or not max_events:
             return self._r.control(changelist, max_events, timeout)
         if changelist:
             self._r.control(changelist, 0)          # apply, retrieve nothing

@@ -4,7 +4,7 @@ from .transport_stream_io import _StreamIOMixin  # noqa: F401
 
 class _StreamTransport(_StreamIOMixin, asyncio.Transport):
     """Thin TCP transport over a socket.  Drives the protocol's
-    data_received via a recv goroutine; transports its write() through
+    data_received via a recv fiber; transports its write() through
     cooperative sendall."""
 
     def __init__(self, sock, protocol, *, loop=None, call_connection_made=True,
@@ -17,7 +17,7 @@ class _StreamTransport(_StreamIOMixin, asyncio.Transport):
         # protocol callbacks (connection_made / data_received / eof_received /
         # connection_lost) inside the context captured when its reader Handle
         # was registered -- i.e. the context active in create_server's accept
-        # callback (or create_connection's caller).  runloom's recv goroutine
+        # callback (or create_connection's caller).  runloom's recv fiber
         # otherwise runs them in the bare scheduler context, so any contextvar
         # set before the server/connection was created (request-id middleware,
         # uvicorn's "context preserved by default") is invisible inside the
@@ -73,17 +73,17 @@ class _StreamTransport(_StreamIOMixin, asyncio.Transport):
         self._conn_lost_called = False  # connection_lost fires exactly once
         self._in_context = False    # re-entrancy guard for _run_cb (see below)
         # ---- write buffering (single ordered buffer, drained by the ONE io
-        # goroutine) ----  runloom's netpoll arms one direction per fd one-shot, so
-        # a separate write goroutine parking EPOLLOUT would clobber the recv
-        # goroutine's EPOLLIN arm and strand the read under full-duplex
-        # backpressure (verified).  So recv AND drain share a single goroutine
+        # fiber) ----  runloom's netpoll arms one direction per fd one-shot, so
+        # a separate write fiber parking EPOLLOUT would clobber the recv
+        # fiber's EPOLLIN arm and strand the read under full-duplex
+        # backpressure (verified).  So recv AND drain share a single fiber
         # that parks on the UNION mask, exactly like add_reader/add_writer's
-        # _pg_io_runner.  write() appends here and kicks that goroutine.
+        # _pg_io_runner.  write() appends here and kicks that fiber.
         self._write_buf = bytearray()
         self._protocol_paused = False   # did we call protocol.pause_writing()?
         # Explicit write-side flow control: transport._ssl_protocol.pause_writing()
         # (white-box TLS tests, e.g. test_ssl test_flush_before_shutdown) stops
-        # the io goroutine from draining _write_buf so app writes accumulate;
+        # the io fiber from draining _write_buf so app writes accumulate;
         # resume_writing() flushes.  A close() always clears it (a graceful close
         # must flush the buffer regardless).  Distinct from _paused (read side).
         self._write_paused = False
@@ -99,24 +99,24 @@ class _StreamTransport(_StreamIOMixin, asyncio.Transport):
             pass
         # Graceful close: close() with data still queued flushes the buffer
         # before tearing down (asyncio semantics -- a write()+close() must not
-        # drop the write).  The io goroutine's _drain_step fires the teardown
+        # drop the write).  The io fiber's _drain_step fires the teardown
         # once the buffer empties.
         self._close_when_drained = False
         self._close_exc = None
         self._close_deliver_cl = False
         # A plaintext non-blocking socket's send() never parks, so write() can
-        # fast-path an immediate send from the caller's goroutine.  A _TLSSock
+        # fast-path an immediate send from the caller's fiber.  A _TLSSock
         # send() can park EPOLLOUT (and clobber the recv arm), so TLS writes
-        # ALWAYS go through the buffer + single io goroutine.
+        # ALWAYS go through the buffer + single io fiber.
         self._sock_is_plain = getattr(sock, "ssl_object", None) is None
         # _io_g must exist BEFORE connection_made: a protocol that WRITES inside
         # connection_made (e.g. aiocoap sends its initial CSM, SMTP its greeting)
         # reaches _kick_io, which reads self._io_g.  Over TLS every write goes
-        # through the buffer + io goroutine (a _TLSSock send can park EPOLLOUT),
+        # through the buffer + io fiber (a _TLSSock send can park EPOLLOUT),
         # so the write can't fast-path -- it kicks, and an undefined _io_g raised
-        # AttributeError.  Seed it None; _kick_io then SPAWNS the io goroutine,
+        # AttributeError.  Seed it None; _kick_io then SPAWNS the io fiber,
         # and the post-connection_made spawn below becomes a no-op (must not
-        # double-spawn -- two io goroutines on one fd corrupt the netpoll arm).
+        # double-spawn -- two io fibers on one fd corrupt the netpoll arm).
         self._io_g = None
         # start_tls reuses an already-connected protocol, so it suppresses the
         # re-fire (asyncio doesn't call connection_made again on TLS upgrade).
@@ -138,13 +138,13 @@ class _StreamTransport(_StreamIOMixin, asyncio.Transport):
         self._closed = True
         # A graceful close must flush queued output even if writing was paused
         # via _ssl_protocol.pause_writing() -- asyncio drains the buffer before
-        # connection_lost.  Lift the pause so the io goroutine can drain.
+        # connection_lost.  Lift the pause so the io fiber can drain.
         self._write_paused = False
         deliver_cl = not self._conn_lost_called
         if deliver_cl:
             self._conn_lost_called = True
         if exc is None and self._write_buf:
-            # Graceful close with data queued: let the io goroutine drain the
+            # Graceful close with data queued: let the io fiber drain the
             # buffer; its _drain_step fires the teardown (and our close_notify)
             # once empty (asyncio flushes the write buffer before
             # connection_lost).
@@ -168,7 +168,7 @@ class _StreamTransport(_StreamIOMixin, asyncio.Transport):
         # they expect).  Defer the shutdown+close to the loop turn that delivers
         # connection_lost.
         self._stopping = True
-        # Wake the io goroutine if parked so it sees _stopping and exits now.
+        # Wake the io fiber if parked so it sees _stopping and exits now.
         g = self._io_g
         if g is not None:
             try:
@@ -281,7 +281,7 @@ class _StreamTransport(_StreamIOMixin, asyncio.Transport):
         if not self._paused:
             return
         self._paused = False
-        # The io goroutine may have exited (mask 0) or be parked WRITE-only;
+        # The io fiber may have exited (mask 0) or be parked WRITE-only;
         # kick it so READ re-enters its interest mask.
         self._kick_io()
 
@@ -303,7 +303,7 @@ class _StreamTransport(_StreamIOMixin, asyncio.Transport):
             return
         if self._write_buf:
             # Defer the half-close until the buffer drains (asyncio flushes the
-            # write buffer before shutting the write side); the io goroutine's
+            # write buffer before shutting the write side); the io fiber's
             # _drain_step does the SHUT_WR once the buffer empties.
             self._eof_pending = True
             return
@@ -314,7 +314,7 @@ class _StreamTransport(_StreamIOMixin, asyncio.Transport):
             pass
 
     # ---- write-buffer flow control ----  A single ordered buffer drained by
-    # the io goroutine, with real high/low watermarks driving the protocol's
+    # the io fiber, with real high/low watermarks driving the protocol's
     # pause_writing/resume_writing (so a slow peer applies backpressure instead
     # of unbounded memory growth) and an accurate get_write_buffer_size.
     def set_write_buffer_limits(self, high=None, low=None):
@@ -341,7 +341,7 @@ class _StreamTransport(_StreamIOMixin, asyncio.Transport):
         # sslproto.py) to QUEUE data without an immediate flush -- simulating a
         # filled write backlog so tests can exercise trailing-data delivery
         # after a remote shutdown.  With our single ordered write buffer it maps
-        # cleanly: append (preserving order) and let the io goroutine drain it.
+        # cleanly: append (preserving order) and let the io fiber drain it.
         if not data:
             return
         self._write_buf += bytes(data)

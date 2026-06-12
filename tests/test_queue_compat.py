@@ -8,8 +8,8 @@ needs the dedicated CoSimpleQueue replacement.  These tests cover:
   * the Empty / Full return-code contract (get_nowait / put_nowait,
     timeouts);
   * FIFO / LIFO / priority ordering preserved by the cooperative shims;
-  * blocking get()/put() actually parking the goroutine and being woken by
-    the matching put()/get() in a sibling goroutine (cooperative, not a
+  * blocking get()/put() actually parking the fiber and being woken by
+    the matching put()/get() in a sibling fiber (cooperative, not a
     busy-poll, not a scheduler freeze);
   * conservation under many producers + many consumers: every item is
     delivered exactly once (no loss, no duplication, no lost wakeups).

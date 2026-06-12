@@ -4,7 +4,7 @@ Run a subset by default; the full suite (RUNLOOM_RUN_STRESS=1) exercises
 patterns that take seconds to minutes and are kept out of the normal
 unit run so CI stays fast.  These tests are how we catch:
 
-  * goroutine / coro / chan / Future leaks (RSS climbs)
+  * fiber / coro / chan / Future leaks (RSS climbs)
   * scheduler starvation under load
   * channel send/recv head-tail desync at high throughput
   * use-after-free across yield boundaries at scale
@@ -40,7 +40,7 @@ def _rss_mb():
 class TestSchedulerStress(unittest.TestCase):
     def test_spawn_drain_100k(self):
         """100,000 spawn/drain cycles (10 batches of 10k).  Catches
-        goroutine slab / stack pool leaks."""
+        fiber slab / stack pool leaks."""
         for batch in range(10):
             for _ in range(10_000):
                 runloom_c.go(lambda: None)
@@ -59,7 +59,7 @@ class TestSchedulerStress(unittest.TestCase):
                                    stats["netpoll_parked"]), 0)
 
     def test_deep_yield_chain(self):
-        """One goroutine doing 100k yields.  Catches snap/load drift
+        """One fiber doing 100k yields.  Catches snap/load drift
         in the loop body."""
         counter = [0]
         def w():
@@ -86,7 +86,7 @@ class TestSchedulerStress(unittest.TestCase):
         self.assertTrue(all(c == K for c in counters))
 
     def test_sleeper_storm(self):
-        """1000 goroutines all sleeping with staggered wake times.
+        """1000 fibers all sleeping with staggered wake times.
         Catches sleep-heap heap-invariant bugs."""
         N = 1000
         wakes = [None] * N

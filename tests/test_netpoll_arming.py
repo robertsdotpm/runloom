@@ -3,7 +3,7 @@
 This mirrors the Linux kernel's own approach to verifying epoll wakeup
 semantics (``tools/testing/selftests/filesystems/epoll/epoll_wakeup_test.c``):
 drive an fd's readiness from *outside* the scheduler -- a real OS thread doing
-real socket I/O -- and assert the EXACT number of times a goroutine parked in
+real socket I/O -- and assert the EXACT number of times a fiber parked in
 ``runloom_c.wait_fd`` wakes, not merely "does it eventually make progress".
 
 That exact-wake-count level is where the historical arming bugs lived.  runloom's
@@ -19,7 +19,7 @@ Determinism without timing guesses
 A stream socket coalesces: two quick ``send``\\s before the reader consumes look
 like a single readable state, and a naive test would then "see" a dropped edge
 that never happened.  We remove the race with a cross-thread *handshake*: a
-second socketpair carries an ACK from the waiter goroutine back to the feeder
+second socketpair carries an ACK from the waiter fiber back to the feeder
 thread, so the feeder only produces edge N+1 after the waiter has consumed edge
 N and is about to re-arm.  One feeder send == exactly one readable edge ==
 exactly one expected wake.
@@ -103,7 +103,7 @@ def _pair_nonblocking_read():
 # ---------------------------------------------------------------------------
 
 def _run_rearm(n_edges, timeout_ms=TIMEOUT_MS):
-    """Wake a single goroutine exactly `n_edges` times, one readable edge each,
+    """Wake a single fiber exactly `n_edges` times, one readable edge each,
     sequenced by a cross-thread ACK so edges never coalesce.  Returns the list
     of wait_fd return values (expected: [READ] * n_edges)."""
     data_r, data_w = _pair_nonblocking_read()
@@ -228,7 +228,7 @@ def test_never_ready_times_out():
 # ---------------------------------------------------------------------------
 
 def test_peer_close_wakes_reader():
-    """Closing the write end while a goroutine is parked on the read end is a
+    """Closing the write end while a fiber is parked on the read end is a
     readable (EOF) edge -- the parked wait_fd must wake, not hang to timeout."""
     data_r, data_w = _pair_nonblocking_read()
     woke = []
@@ -260,7 +260,7 @@ def test_peer_close_wakes_reader():
 # ---------------------------------------------------------------------------
 
 def test_close_armed_fd_degrades_to_timeout():
-    """If the very fd a goroutine is parked on is closed out from under it, the
+    """If the very fd a fiber is parked on is closed out from under it, the
     kernel drops it from the poll set and no event ever comes; the park must
     still terminate via its timeout (bounded), not hang or crash.
 
@@ -296,7 +296,7 @@ def test_close_armed_fd_degrades_to_timeout():
 # ---------------------------------------------------------------------------
 
 def test_concurrent_distinct_fds_thundering():
-    """N goroutines each parked on their own fd, all made readable at once.
+    """N fibers each parked on their own fd, all made readable at once.
     Every waiter must wake exactly once -- batch delivery + per-fd bucket
     dispatch must not miss or cross-deliver."""
     N = 16

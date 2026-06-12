@@ -73,7 +73,7 @@ class TestSpawnSoak(unittest.TestCase):
 @unittest.skipUnless(_RUN, "set RUNLOOM_RUN_SOAK=1 to enable")
 class TestChannelSoak(unittest.TestCase):
     def test_chan_ping_pong_100k(self):
-        """100k ping-pong cycles between two goroutines through a
+        """100k ping-pong cycles between two fibers through a
         single channel.  Catches g/snap-block growth in the C path."""
         ch_a = runloom_c.Chan(0)
         ch_b = runloom_c.Chan(0)

@@ -6,7 +6,7 @@ pollable fd (pipe/socket) they park on wait_fd; on a regular file they offload
 to the backend pool.  Adapted from CPython Lib/test/test_os.py
 (ReadvWritevTests / test_readv / test_writev).
 
-offload() runs a blocking callable on the backend pool, parking the goroutine
+offload() runs a blocking callable on the backend pool, parking the fiber
 -- the sanctioned escape hatch for blocking calls runloom can't transparently make
 cooperative (buffered FileIO on slow media, C DB drivers, CPU-bound work).
 """
@@ -62,7 +62,7 @@ class TestVectoredIO(unittest.TestCase):
         self.assertEqual(data, b"hello vectored world")
 
     def test_readv_blocks_then_yields(self):
-        """A goroutine blocked in os.readv on a pipe must let a sibling run."""
+        """A fiber blocked in os.readv on a pipe must let a sibling run."""
         def body():
             r, w = os.pipe()
             ticks, stop = [], {"v": False}
@@ -113,7 +113,7 @@ class TestVectoredIO(unittest.TestCase):
 
 class TestOffload(unittest.TestCase):
     def test_offload_returns_value_and_yields(self):
-        """offload() runs the callable on the pool and parks the goroutine; a
+        """offload() runs the callable on the pool and parks the fiber; a
         sibling keeps running, and the result/exception propagate."""
         def slow_double(x):
             time.sleep(0.05)                # real blocking sleep on a worker

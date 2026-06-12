@@ -9,8 +9,8 @@ of bug just fixed in 7a93a3e.  These are the standing regressions for it.
 
 Each workload runs in a fresh free-threaded subprocess (PYTHON_GIL=0) so the
 hubs run in genuine parallel.  The dominant failure signal is the subprocess
-TIMEOUT: mn_run() only returns when every goroutine has finished, so a starved
-or never-scheduled goroutine wedges mn_run forever -> rc 124 -> clean failure
+TIMEOUT: mn_run() only returns when every fiber has finished, so a starved
+or never-scheduled fiber wedges mn_run forever -> rc 124 -> clean failure
 (not a hung pytest).
 
 Go originals (golang/go, src/runtime/proc_test.go):
@@ -21,7 +21,7 @@ What is asserted vs. what Go asserts:
   * Fairness/no-starvation -> completion (no timeout), same as Go.
   * Parallelism -> work observably runs on >1 hub OS-thread (Go uses a tighter
     in-loop check; the OS-thread spread is the robust, non-flaky proxy).
-  * Preemption -> a goroutine in a tight loop with NO explicit yield still lets
+  * Preemption -> a fiber in a tight loop with NO explicit yield still lets
     a sibling run.  Requires runloom's eval-wrapper preemption (default-on);
     skipped only if RUNLOOM_PREEMPT=0 is set explicitly.
 """
@@ -62,12 +62,12 @@ def assert_pass(code, timeout=30):
 
 
 # ---------------------------------------------------------------------------
-# TestYieldProgress -- many goroutines all yielding must each make full
+# TestYieldProgress -- many fibers all yielding must each make full
 # progress; none is starved.  (mn_run only returns when ALL finish, so a hang
 # == starvation.)  Single- and multi-hub.
 # ---------------------------------------------------------------------------
 def test_yield_round_robin_all_progress():
-    """N goroutines each loop `incr; sched_yield` for R rounds.  All must
+    """N fibers each loop `incr; sched_yield` for R rounds.  All must
     complete and each must have run exactly R times.  Exercises the optimized
     yield fast path (the one the fairness fix bounded) under heavy contention,
     at H=1 (pure round-robin) and H=4 (cross-hub)."""
@@ -107,7 +107,7 @@ print("PASS")
 # N-worker form of test_mn.test_sched_yield_no_starvation_*.)
 # ---------------------------------------------------------------------------
 def test_spinners_dont_starve_workers():
-    """8 goroutines busy-looping on sched_yield, spawned FIRST, must not
+    """8 fibers busy-looping on sched_yield, spawned FIRST, must not
     prevent a batch of real workers spawned afterward from running to
     completion.  A starved worker => done barrier never fills => mn_run hangs
     => timeout.  This is the multi-worker generalization of the sched_yield
@@ -146,12 +146,12 @@ print("PASS")
 
 
 # ---------------------------------------------------------------------------
-# TestGoroutineParallelism -- goroutines genuinely run in parallel across hubs.
-# Robust proxy: record which OS-thread (hub) each goroutine ran on; with 4 hubs
+# TestGoroutineParallelism -- fibers genuinely run in parallel across hubs.
+# Robust proxy: record which OS-thread (hub) each fiber ran on; with 4 hubs
 # the work must land on >1 thread, and no single hub may hog nearly all of it.
 # ---------------------------------------------------------------------------
 def test_work_distributed_across_hubs():
-    """A burst of CPU-bound goroutines under 4 hubs must execute on more than
+    """A burst of CPU-bound fibers under 4 hubs must execute on more than
     one hub OS-thread (genuine parallelism, not a silently-serialized M:N),
     and the busiest hub must not run ~everything (real distribution / work
     stealing, not one hub draining its deque while three idle)."""
@@ -189,14 +189,14 @@ print("PASS", len(seen), max(seen.values()))
 
 
 # ---------------------------------------------------------------------------
-# TestPreemption -- a goroutine in a tight loop with NO explicit yield point
+# TestPreemption -- a fiber in a tight loop with NO explicit yield point
 # still yields the hub so a sibling can run.  Relies on runloom's eval-wrapper
 # preemption (default-on).  Failure => infinite busy loop => timeout.
 # ---------------------------------------------------------------------------
 @pytest.mark.skipif(os.environ.get("RUNLOOM_PREEMPT") == "0",
                     reason="preemption explicitly disabled (RUNLOOM_PREEMPT=0)")
 def test_preemption_busy_loop_yields_to_sibling():
-    """A goroutine running `while not flag: pass` with NO sched_yield must
+    """A fiber running `while not flag: pass` with NO sched_yield must
     still be preempted so the sibling that sets `flag` gets to run.  Tested at
     H=1 (the hardest: one hub, the busy loop owns it) and H=2.  No escape valve
     in the loop -- if preemption is broken this hangs and the subprocess times

@@ -1,7 +1,7 @@
-"""Tests for the per-goroutine-kind stack-usage advisory profiler
+"""Tests for the per-fiber-kind stack-usage advisory profiler
 (runloom_stackadvice.c / inspect.enable_stack_advice / stack_advice).
 
-The profiler MEASURES each goroutine kind's real C-stack high-water mark and
+The profiler MEASURES each fiber kind's real C-stack high-water mark and
 recommends a stack_size; it never changes or persists sizes itself.  Note that
 on 3.13 pure-Python recursion lives on the datastack, so it barely touches the
 C stack -- real C-stack depth comes from C-extension recursion (json/repr/

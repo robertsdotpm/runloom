@@ -19,8 +19,8 @@ double runloom_sched_monotonic_seconds(void)
  * combined.  Each PY_VERSION_HEX gate matches greenlet's GREENLET_PY*
  * branches.
  */
-/* Per-goroutine PyThreadState mode (RUNLOOM_PER_G_TSTATE).  When the M:N
- * scheduler runs in this mode, each goroutine owns its own PyThreadState,
+/* Per-fiber PyThreadState mode (RUNLOOM_PER_G_TSTATE).  When the M:N
+ * scheduler runs in this mode, each fiber owns its own PyThreadState,
  * so the per-g "snap" (which swaps execution-state fields in/out of a
  * shared per-hub tstate) is redundant and MUST NOT run -- snapping would
  * clear context/top_frame/exc out of the g's own live tstate.  Making
@@ -88,8 +88,8 @@ void runloom_pystate_snap(runloom_pystate_snap_t *snap)
     snap->recursion_remaining = ts->recursion_remaining;
 #  endif
 
-    /* Per-goroutine sys.setprofile/settrace hooks (BUG #11): tstate-global, so
-     * without snap/restore one goroutine's hook leaks onto siblings sharing the
+    /* Per-fiber sys.setprofile/settrace hooks (BUG #11): tstate-global, so
+     * without snap/restore one fiber's hook leaks onto siblings sharing the
      * hub and is cleared from under it on resume.  Hold a ref to the hook
      * objects while suspended; all NULL (free) in the common no-hook case. */
     snap->c_profilefunc = ts->c_profilefunc;
@@ -140,7 +140,7 @@ void runloom_pystate_snap(runloom_pystate_snap_t *snap)
         }
     }
     /* current_exception is the in-flight raised-but-not-yet-caught
-     * exception.  Save with our own ref so another goroutine can't
+     * exception.  Save with our own ref so another fiber can't
      * free it during our suspension. */
     snap->current_exception = ts->current_exception;
     Py_XINCREF(snap->current_exception);
@@ -167,7 +167,7 @@ void runloom_pystate_snap(runloom_pystate_snap_t *snap)
     /* delete_later is the trashcan's deferred-dealloc chain: objects that are
      * DYING (refcount 0) and linked through op->ob_tid (repurposed as the
      * next-pointer, see CPython _PyTrash_begin).  It MUST be carried
-     * per-goroutine as a RAW pointer and NEVER Py_INCREF'd: on free-threaded
+     * per-fiber as a RAW pointer and NEVER Py_INCREF'd: on free-threaded
      * builds Py_INCREF reads op->ob_tid to pick the local-vs-shared refcount
      * path, but here ob_tid is a heap next-pointer, so an INCREF mutates the
      * dying object's shared refcount and scrambles the chain -> use-after-free
@@ -175,8 +175,8 @@ void runloom_pystate_snap(runloom_pystate_snap_t *snap)
      * is why this stayed latent: delete_later is almost always NULL at a yield;
      * only DEEP recursion -- BUG #6 -- leaves it non-NULL across a yield.)
      * Transfer ownership of the chain to the snap and clear ts so the chain is
-     * private to this goroutine and the shared hub tstate never carries another
-     * goroutine's half-built destroy list. */
+     * private to this fiber and the shared hub tstate never carries another
+     * fiber's half-built destroy list. */
     snap->delete_later = ts->delete_later;
     ts->delete_later = NULL;
 #endif
@@ -255,7 +255,7 @@ void runloom_pystate_load(runloom_pystate_snap_t *snap)
     ts->recursion_remaining = snap->recursion_remaining;
 #  endif
 
-    /* Restore this goroutine's own profile/trace hooks (BUG #11).  Transfer the
+    /* Restore this fiber's own profile/trace hooks (BUG #11).  Transfer the
      * refs the snap holds back onto ts and drop ts's previous ones.  All NULL
      * in the common no-hook case, so the DECREFs are no-ops. */
     ts->c_profilefunc = snap->c_profilefunc;
@@ -336,9 +336,9 @@ void runloom_pystate_load(runloom_pystate_snap_t *snap)
 
 #if PY_VERSION_HEX >= 0x030D0000
     ts->current_frame = snap->current_frame;
-    /* Restore this goroutine's deferred-dealloc chain as a RAW pointer (see the
+    /* Restore this fiber's deferred-dealloc chain as a RAW pointer (see the
      * snap side -- never refcount a delete_later chain).  ts->delete_later is
-     * NULL here: the goroutine that ran before us cleared it on its own snap,
+     * NULL here: the fiber that ran before us cleared it on its own snap,
      * and hub_main runs no Python (so creates no deferred deallocs) between
      * swaps -- so there is nothing to drop. */
     ts->delete_later = snap->delete_later;
@@ -370,7 +370,7 @@ void runloom_pystate_snap_clear(runloom_pystate_snap_t *snap)
 #endif
 #if PY_VERSION_HEX >= 0x030D0000
     /* delete_later is a raw chain of DYING objects linked via ob_tid, never
-     * refcounted (see runloom_pystate_snap).  A goroutine destroyed while parked
+     * refcounted (see runloom_pystate_snap).  A fiber destroyed while parked
      * mid-trashcan-deferral is extremely rare; rather than risk corrupting those
      * dying objects with a DECREF, just drop the reference -- a small bounded
      * leak of a few already-dead objects beats a use-after-free. */
@@ -381,8 +381,8 @@ void runloom_pystate_snap_clear(runloom_pystate_snap_t *snap)
 
 /* Per-OS-thread datastack chunk pool.
  *
- * Each goroutine starts with tstate->datastack_chunk = NULL so PyEval
- * allocates a fresh chunk for it from the arena.  When the goroutine
+ * Each fiber starts with tstate->datastack_chunk = NULL so PyEval
+ * allocates a fresh chunk for it from the arena.  When the fiber
  * completes we used to arena-free that chunk; profiling on spawn-heavy
  * workloads showed ~200 ns alloc + ~200 ns free per g lifetime spent
  * round-tripping through the arena.
@@ -425,7 +425,7 @@ static _PyStackChunk *runloom_chunk_pool_get(void)
      * _PyThreadState_PopFrame_ChunkEmpty would walk into the next
      * pool chunk via this pointer, arena-free THAT chunk, and corrupt
      * the pool.  Manifests as random use-after-free in exception
-     * state once ~25+ goroutines are alive at once. */
+     * state once ~25+ fibers are alive at once. */
     c->previous = NULL;
     c->top = 0;
     return c;

@@ -3,7 +3,7 @@
  * these definitions depend on. */
 
 
-/* Forcibly wake the CALLING thread's parked goroutines with ready_mask=-1
+/* Forcibly wake the CALLING thread's parked fibers with ready_mask=-1
  * (cancelled).  Each waiter's runloom_netpoll_wait_fd call returns -1; callers
  * (server accept loops, etc.) see that and exit their loops.  Returns count
  * woken.
@@ -72,16 +72,16 @@ int runloom_netpoll_drain_parked(void)
  * thread's scheduler ->signal_exc) to ONE wait_fd parker owned by that
  * scheduler: claim it, store the RUNLOOM_NETPOLL_SIGNALED sentinel in its
  * ready_out, and re-queue it.  On resume runloom_netpoll_wait_fd sees the sentinel,
- * restores ->signal_exc into the goroutine's tstate, and returns -1 -- so the
+ * restores ->signal_exc into the fiber's tstate, and returns -1 -- so the
  * exception propagates out of the cooperative blocking call (recv/accept/
- * select/...) through THAT goroutine's stack, where its own try/except sees it,
+ * select/...) through THAT fiber's stack, where its own try/except sees it,
  * exactly as a signal interrupting a real recv()/select() does.  This is what
  * lets the verbatim CPython test_select_interrupt_exc pass instead of the
  * scheduler swallowing the signal or carrying it out of run().  Returns 1 if a
  * parker took it, 0 if none were eligible (the scheduler then carries the
  * exception out of run_forever()/run_until_complete -- the sleep-only/idle
  * fallback).  Called only from the scheduler grab, which has already verified
- * (via PyErr_CheckSignals) that a handler actually raised -- so a goroutine is
+ * (via PyErr_CheckSignals) that a handler actually raised -- so a fiber is
  * never woken spuriously (an EINTR with no pending Python signal wakes no one). */
 int runloom_netpoll_signal_wake(void)
 {
@@ -152,7 +152,7 @@ int runloom_netpoll_wait_fd(int fd, int events, long long timeout_ns)
     }
 
     /* Pick the parker pool by current hub.  Per-hub pools mean a
-     * goroutine parked on hub H links into pool[H].head + pool[H]
+     * fiber parked on hub H links into pool[H].head + pool[H]
      * .by_fd[fd] + pool[H].dh_arr; another hub's wait_fd contends
      * only on its own pool's lock.  Single-thread sched + non-hub
      * callers fall back to pool[DEFAULT]. */
@@ -198,7 +198,7 @@ int runloom_netpoll_wait_fd(int fd, int events, long long timeout_ns)
     runloom_mutex_unlock(&pool->lock);
     if (current_g != NULL) {
         /* Record what we're blocked on as plain data ON the g, so the
-         * goroutine dump can report "fd=N R/W" without ever dereferencing
+         * fiber dump can report "fd=N R/W" without ever dereferencing
          * the (pool-recycled) parker.  Set before the state flip so a dump
          * that sees PARKED_NETPOLL also sees a matching fd. */
         __atomic_store_n(&current_g->park_fd, fd, __ATOMIC_RELAXED);
@@ -345,8 +345,8 @@ int runloom_netpoll_wait_fd(int fd, int events, long long timeout_ns)
      * -> KeyboardInterrupt, an alarm handler, ...): it ran the handler in its
      * own tstate, stashed the raised exception on our owner scheduler, and woke
      * us with this sentinel (runloom_netpoll_signal_wake).  Restore it into THIS
-     * goroutine's tstate and return -1 so it propagates out of the cooperative
-     * blocking call (recv/accept/select/...) through this goroutine's own stack
+     * fiber's tstate and return -1 so it propagates out of the cooperative
+     * blocking call (recv/accept/select/...) through this fiber's own stack
      * -- where its try/except sees it -- instead of out of run().  Callers treat
      * a -1 with a Python error already set as "propagate", not OSError. */
     if (ready_mask == RUNLOOM_NETPOLL_SIGNALED) {

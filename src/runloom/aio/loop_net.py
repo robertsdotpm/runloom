@@ -280,7 +280,7 @@ class _LoopNetMixin(object):
         transport._stopping = True
         transport._conn_lost_called = True
         transport._closed = True
-        # The old io goroutine is parked in _wait_fd on this fd; a bare sleep(0)
+        # The old io fiber is parked in _wait_fd on this fd; a bare sleep(0)
         # won't wake it, so it would linger parked and STEAL the post-handshake
         # data wakeup meant for the new TLS transport (then exit), stranding the
         # read -> b''.  Cancel its park so it observes _stopping and exits NOW.
@@ -316,7 +316,7 @@ class _LoopNetMixin(object):
         # the server's _conns set and its connection_lost would _detach it -- but
         # we suppressed that connection_lost for the upgrade, so without moving
         # the registration the old transport lingers in _conns forever (it is
-        # also pinned by its parked io goroutine) and the new transport never
+        # also pinned by its parked io fiber) and the new transport never
         # detaches, so server.wait_closed() blocks for good (the scheduler then
         # drains to empty -> "event loop stopped before Future completed").
         srv = getattr(transport, "_pg_server", None)

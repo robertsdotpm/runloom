@@ -63,11 +63,11 @@ static PyObject *m_run(PyObject *self, PyObject *unused)
 }
 
 /* runloom_c.run_ready() -> None.  Quiescence-barrier yield: parks the calling
- * goroutine until no other goroutine is immediately runnable (every currently-
+ * fiber until no other fiber is immediately runnable (every currently-
  * ready g, including freshly-woken ones, has run to its next park or to
  * completion), then resumes -- before the scheduler would block on I/O/timers.
  * asyncio's "run the ready callbacks for this loop iteration" boundary,
- * iterated to quiescence.  Must be called from inside a goroutine (no-op
+ * iterated to quiescence.  Must be called from inside a fiber (no-op
  * otherwise). */
 static PyObject *m_run_ready(PyObject *self, PyObject *unused)
 {
@@ -158,11 +158,11 @@ static PyObject *m_netpoll_poll(PyObject *self, PyObject *unused)
 {
     (void)self; (void)unused;
     /* Non-blocking netpoll drain: deliver any ready fd readiness by waking
-     * the parked goroutines (it only enqueues them; it never runs them), then
+     * the parked fibers (it only enqueues them; it never runs them), then
      * return.  runloom.aio calls this on a bare `yield` (asyncio.sleep(0)) so a
      * sleep(0) advances pending socket I/O the way stock asyncio's per-loop-
      * iteration selector poll does.  Without it, sleep(0) loops never deliver
-     * I/O on parked goroutines because sched_yield bypasses the scheduler
+     * I/O on parked fibers because sched_yield bypasses the scheduler
      * drain loop's idle pump (and the aio keepalive keeps it from going idle).
      * runloom_netpoll_pump handles the GIL around the syscall itself. */
     runloom_netpoll_pump(0);
@@ -197,7 +197,7 @@ static PyObject *m_stats(PyObject *self, PyObject *unused)
     /* netpoll_parked is the GLOBAL count (all scheds/threads).  netpoll_parked_self
      * is THIS thread's sched only -- the right metric for "did the work I ran on
      * this thread leak a parker", immune to parkers stranded on a dead/other
-     * thread's sched (e.g. a thread that exited with a goroutine still parked;
+     * thread's sched (e.g. a thread that exited with a fiber still parked;
      * the per-thread sched is intentionally leaked at thread exit). */
     RUNLOOM_STATS_SET("netpoll_parked", runloom_netpoll_parked_count());
     RUNLOOM_STATS_SET("netpoll_parked_self",
@@ -299,10 +299,10 @@ static PyObject *m_mn_go(PyObject *self, PyObject *args, PyObject *kw)
     return runloom_mn_go(callable, stack_size > 0 ? (size_t)stack_size : 0);
 }
 
-/* go_n(fn, n, stack_size=0, indexed=False): bulk-spawn n goroutines all running
+/* go_n(fn, n, stack_size=0, indexed=False): bulk-spawn n fibers all running
  * fn(), looping the spawn core in C to skip n Python->C dispatches.  fn still
- * runs as Python in each goroutine.  indexed=True calls fn(i) for i in 0..n-1
- * (the goroutine's index) instead of fn() -- the per-goroutine arg that lets a
+ * runs as Python in each fiber.  indexed=True calls fn(i) for i in 0..n-1
+ * (the fiber's index) instead of fn() -- the per-fiber arg that lets a
  * shared worker distinguish itself (wid). */
 static PyObject *m_go_n(PyObject *self, PyObject *args, PyObject *kw)
 {

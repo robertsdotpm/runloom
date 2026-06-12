@@ -1,5 +1,5 @@
 """Shared foundation for the runloom monkey-patch package: stdlib
-re-exports, goroutine-context detection, the self-pipe Parker, the
+re-exports, fiber-context detection, the self-pipe Parker, the
 blocking-call backend, and cooperative sleep.  Every section module
 does `from ._base import *`."""
 
@@ -56,9 +56,9 @@ _raw_time_sleep = time.sleep
 _raw_sock_recv = socket.socket.recv
 _raw_sock_send = socket.socket.send
 # Raw select (before polling.py installs the cooperative select).  A _Parker on
-# a FOREIGN OS thread (not a goroutine) blocks the thread on its wake fd with
+# a FOREIGN OS thread (not a fiber) blocks the thread on its wake fd with
 # this -- the patched select would re-enter the cooperative path on a thread
-# with no goroutine/hub.
+# with no fiber/hub.
 _raw_select = _select_mod.select
 # Raw os.sendfile (before _patch_syscalls offloads it to the pool).  The
 # cooperative socket.sendfile drives this directly in non-blocking mode and
@@ -66,8 +66,8 @@ _raw_select = _select_mod.select
 _raw_os_sendfile = getattr(os, "sendfile", None)
 
 
-# ---------- goroutine-context detection ----------
-# runloom_c (C scheduler) does not expose a "current goroutine"
+# ---------- fiber-context detection ----------
+# runloom_c (C scheduler) does not expose a "current fiber"
 # accessor, so we wrap runloom_c.go / mn_go and bump a thread-local
 # counter for the duration of every user callable.  The Python
 # scheduler still uses runloom.current() (which works there).
@@ -78,7 +78,7 @@ def _bump_in(value):
     _g_state.count = getattr(_g_state, "count", 0) + value
 
 
-def _wrap_goroutine_callable(fn):
+def _wrap_fiber_callable(fn):
     def wrapper():
         _bump_in(1)
         try:
@@ -88,8 +88,8 @@ def _wrap_goroutine_callable(fn):
     return wrapper
 
 
-def _in_goroutine():
-    """True when called from inside a running goroutine.
+def _in_fiber():
+    """True when called from inside a running fiber.
 
     Handles both the C scheduler (via the thread-local counter set by
     our runloom_c.go wrapper) and the Python scheduler (via
@@ -176,25 +176,25 @@ def _fd_pollable(fd):
 #
 # Either way, the Parker is single-thread cooperative -- the
 # unpark()-before-park() race is not handled because in cooperative
-# mode the parker can't be signalled until the parking goroutine has
+# mode the parker can't be signalled until the parking fiber has
 # yielded.
 class _Parker(object):
     __slots__ = ("r", "w", "_sockets", "_g_handle", "_via_park")
     # Free-list of reusable (r, w, _sockets) tuples.  The pool lock uses a
-    # NON-BLOCKING acquire so that no goroutine ever waits for it (blocking
-    # would freeze the goroutine's hub if sysmon preempted the holder).  A
-    # goroutine that finds the lock contended skips pooling and closes its FDs
+    # NON-BLOCKING acquire so that no fiber ever waits for it (blocking
+    # would freeze the fiber's hub if sysmon preempted the holder).  A
+    # fiber that finds the lock contended skips pooling and closes its FDs
     # instead -- never blocks, never freezes the hub.  list.pop() in __init__
     # still races lock-free via try/except IndexError.
     _pool = []
     _pool_lock = _thread.allocate_lock()   # captured pre-patch → real OS mutex
 
     def __init__(self, inmem=False):
-        # The handle of the goroutine parked here.  In FD mode it is read by
+        # The handle of the fiber parked here.  In FD mode it is read by
         # _unpark_all -> runloom_c.unpark_many for a batched netpoll DIRECT wake (no
         # per-waiter os.write); None means a foreign-thread waiter -> pipe-write.
         # In IN-MEMORY mode (inmem=True) it is the WAKE HOLDER itself: g.wake()
-        # re-queues the goroutine parked via runloom_c.park(), and it is set HERE,
+        # re-queues the fiber parked via runloom_c.park(), and it is set HERE,
         # before the parker is published to setters, so a set() that races the park
         # still finds it (the park_generic Dekker then catches a pre-commit wake).
         self._g_handle = None
@@ -202,7 +202,7 @@ class _Parker(object):
         # process-wide run-alive anchor).  Opt-in ONLY for callers that wake via
         # the _via_park-aware _unpark_all (Event/Condition/Semaphore) -- callers
         # that wake via a direct p.unpark() (queues/dns/threadpool) must NOT pass
-        # inmem (os.write needs the fd).  Requires a goroutine context.
+        # inmem (os.write needs the fd).  Requires a fiber context.
         self._via_park = bool(inmem)
         if self._via_park:
             self._g_handle = runloom_c.current_g()
@@ -242,7 +242,7 @@ class _Parker(object):
             # A TIMED wait passes the deadline straight to the C park: it wakes at
             # the monotonic deadline via the scheduler's per-hub timer heap (the
             # SAME parked_safe CAS, exactly-once vs a real wake) -- still 0 fds, no
-            # waker goroutine.  The caller re-checks its own deadline (a spurious
+            # waker fiber.  The caller re-checks its own deadline (a spurious
             # early return is possible), exactly as the old wait_fd(timeout) did.
             if timeout is None:
                 runloom_c.park(foreign_wakeable=True)
@@ -250,17 +250,17 @@ class _Parker(object):
                 runloom_c.park(foreign_wakeable=True, timeout=timeout)
             return
         # Clear FIRST: a _Parker object reused for a second park must not carry
-        # the previous park's goroutine handle (a stale handle would let a setter
+        # the previous park's fiber handle (a stale handle would let a setter
         # direct-wake the WRONG g -> this waiter hangs).  The foreign-thread
         # branch leaves it None, which is exactly the "no direct wake" marker.
         self._g_handle = None
-        if _in_goroutine():
-            # Publish our goroutine handle so a fan-in setter can wake us via the
+        if _in_fiber():
+            # Publish our fiber handle so a fan-in setter can wake us via the
             # batched runloom_c.unpark_many instead of an os.write per waiter.
             self._g_handle = runloom_c.current_g()
             # Pass the deadline straight to the netpoll wait: wait_fd returns on
             # the unpark byte OR at timeout_ms, so a TIMED wait needs no separate
-            # waker goroutine + heap timer (the old per-primitive _spawn(waker)
+            # waker fiber + heap timer (the old per-primitive _spawn(waker)
             # cost that sat behind every Event/Condition/Semaphore timed wait).
             # -1 == block forever.  max(1, ...) so a sub-ms timeout still waits a
             # tick rather than busy-returning.
@@ -270,7 +270,7 @@ class _Parker(object):
             # FOREIGN OS thread (e.g. a multiprocessing.Queue _feed daemon
             # thread taking a monkey-patched threading.Condition): block the
             # THREAD on the wake fd with a real select.  runloom_c.wait_fd parks
-            # a GOROUTINE on a hub's netpoll -- there is no goroutine/hub on this
+            # a GOROUTINE on a hub's netpoll -- there is no fiber/hub on this
             # thread, so calling it here is undefined and raced -> SIGSEGV under
             # M:N.  timeout=None blocks until unpark() writes the wake byte.
             try:
@@ -290,7 +290,7 @@ class _Parker(object):
 
     def unpark(self):
         if self._via_park:
-            # In-memory parker: no fd to write -- re-queue the goroutine directly.
+            # In-memory parker: no fd to write -- re-queue the fiber directly.
             # Defensive: _via_park parkers are normally woken via _unpark_all's
             # batched g.wake path, but a direct unpark() must still work.
             h = self._g_handle
@@ -309,7 +309,7 @@ class _Parker(object):
                 pass
 
     def release(self):
-        # Drop the goroutine handle (and its g incref): the wait is over, so this
+        # Drop the fiber handle (and its g incref): the wait is over, so this
         # parker is no longer wakeable.  Also a stale-handle guard for the pooled
         # fd-tuple's next user.
         self._g_handle = None
@@ -330,7 +330,7 @@ class _Parker(object):
                     pass
             except (BlockingIOError, OSError):
                 pass
-        # Non-blocking try: if another goroutine is in release() concurrently,
+        # Non-blocking try: if another fiber is in release() concurrently,
         # skip pooling and close the FDs.  acquire(False) never blocks, so the
         # hub is never frozen even if sysmon preempts the lock holder.
         pooled = False
@@ -358,7 +358,7 @@ def _unpark_all(parkers):
     Semaphore).  GOROUTINE waiters are woken by ONE batched runloom_c.unpark_many
     (a direct claim+re-queue per g, no per-waiter os.write -> epoll -> drain
     round-trip -- ~85% of the fan-in cost at scale); FOREIGN-thread waiters (no
-    goroutine handle) keep the os.write path.  unpark_many returns the indices it
+    fiber handle) keep the os.write path.  unpark_many returns the indices it
     could not direct-wake -- a waiter that appended itself but has not yet
     committed its wait_fd park (the edge-before-park window) -- and those fall
     back to the pipe-write backstop so the wake is never lost.
@@ -387,7 +387,7 @@ def _unpark_all(parkers):
             h.wake()
     if not rest:
         return
-    if not _in_goroutine():
+    if not _in_fiber():
         # FOREIGN OS-thread setter (e.g. Thread.start()'s self._started.set()
         # from the real worker thread, or a multiprocessing feeder thread):
         # a direct unpark_many here is NOT race-safe.  unpark_many unlinks the
@@ -413,7 +413,7 @@ def _unpark_all(parkers):
         else:
             p.unpark()                        # foreign thread: one os.write
     if gor:
-        missed = runloom_c.unpark_many(gor)   # one C call for all goroutines
+        missed = runloom_c.unpark_many(gor)   # one C call for all fibers
         for idx in missed:
             gor_parkers[idx].unpark()         # edge-before-park byte backstop
 
@@ -445,18 +445,18 @@ class _BlockingBackend(object):
 
 class _ThreadPoolBackend(_BlockingBackend):
     """Pre-started worker pool.  Each submitted task gets a self-pipe (from the
-    Parker pool) for wakeup -- the goroutine parks on wait_fd, the worker
+    Parker pool) for wakeup -- the fiber parks on wait_fd, the worker
     writes a byte when done.
 
     Uses a raw C `_queue.SimpleQueue` (never monkey-patched) as the job queue.
-    Why not a Lock/Condition + deque: a goroutine that took a real
+    Why not a Lock/Condition + deque: a fiber that took a real
     threading.Lock here could be PREEMPTED (sysmon) while holding it, which
     parked it; every sibling on its hub then trying submit() would block the
     hub's OS thread on Lock.acquire() -- a real lock blocks the whole thread --
-    waiting on a lock held by a goroutine only that frozen hub can resume.
+    waiting on a lock held by a fiber only that frozen hub can resume.
     Under heavy offload every hub froze simultaneously (big_100 BUG #4).
     SimpleQueue.put() is a single atomic C call; runloom only preempts at
-    Python frame boundaries, so a goroutine can never be parked mid-put
+    Python frame boundaries, so a fiber can never be parked mid-put
     holding the queue's internal lock.  Workers block in .get() on a real OS
     thread -- exactly the point of the pool."""
     name = "thread-pool"
@@ -468,7 +468,7 @@ class _ThreadPoolBackend(_BlockingBackend):
             except Exception:
                 size = 4
         self.size = max(1, size)
-        # Raw C SimpleQueue.  Why not a Lock/Condition + deque: a goroutine that
+        # Raw C SimpleQueue.  Why not a Lock/Condition + deque: a fiber that
         # took a real threading.Lock here and was PREEMPTED while holding it
         # would have every sibling on its hub block the hub OS-thread on
         # Lock.acquire(), freezing the hub on a lock only that frozen hub can
@@ -476,17 +476,17 @@ class _ThreadPoolBackend(_BlockingBackend):
         # BUG #4).  A cooperative try+backoff acquire avoids the freeze but
         # collapses throughput under contention.  SimpleQueue.put() is instead
         # a single atomic C call: runloom only preempts at Python frame
-        # boundaries, so a goroutine can NEVER be parked mid-put holding the
+        # boundaries, so a fiber can NEVER be parked mid-put holding the
         # queue's internal lock, and that lock is held only nanoseconds -- the
         # hub is never frozen.  put() never blocks (unbounded); workers block
         # in get() on a real OS thread, which is exactly the point of the pool.
         self._q = _real_SimpleQueue_for_backend()
         self._started = self.size
         # Start workers eagerly in __init__ -- we are not yet inside any
-        # goroutine (the backend is built on first offload, called from the
-        # scheduler root goroutine), so there is no concurrent goroutine
+        # fiber (the backend is built on first offload, called from the
+        # scheduler root fiber), so there is no concurrent fiber
         # racing on _started.  Eager start avoids the lazy-start race: if
-        # 8000 goroutines all call submit() concurrently on the first touch,
+        # 8000 fibers all call submit() concurrently on the first touch,
         # each would see _started < size and could spawn duplicate or zero
         # workers depending on preemption timing.
         for _ in range(self.size):
@@ -574,17 +574,17 @@ if hasattr(os, "register_at_fork"):
 
 
 def _blocking_call(fn, *args, **kwargs):
-    """Run fn(*args, **kwargs) off-scheduler.  In a goroutine, dispatch
-    to the backend (other goroutines keep running).  Outside a
-    goroutine, call inline -- no dispatch overhead."""
-    if not _in_goroutine():
+    """Run fn(*args, **kwargs) off-scheduler.  In a fiber, dispatch
+    to the backend (other fibers keep running).  Outside a
+    fiber, call inline -- no dispatch overhead."""
+    if not _in_fiber():
         return fn(*args, **kwargs)
     return _get_backend().submit(fn, args, kwargs)
 
 
 def offload(fn, *args, **kwargs):
     """Run a blocking callable on the backend thread pool, parking the current
-    goroutine until it returns (run inline when not in a goroutine).
+    fiber until it returns (run inline when not in a fiber).
 
     The sanctioned escape hatch for blocking calls runloom cannot transparently
     make cooperative: buffered file .read()/.write() on slow media (io.FileIO /
@@ -611,7 +611,7 @@ def _co_sleep(seconds):
 
     Inside the C scheduler (thread-local count > 0) call
     runloom_c.sched_sleep directly -- runloom.sleep there would route to
-    the Python scheduler, see no current goroutine, and call time.sleep
+    the Python scheduler, see no current fiber, and call time.sleep
     again (us), recursing.  Inside the Python scheduler use runloom.sleep.
     """
     if getattr(_g_state, "count", 0) > 0:

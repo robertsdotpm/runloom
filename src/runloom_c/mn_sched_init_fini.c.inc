@@ -31,7 +31,7 @@ int runloom_mn_init(int n_threads)
          * for Python workloads -- atomic-refcount cache-line contention,
          * the same ceiling threads/asyncio hit.  16 is the right default
          * for Python; an explicit runloom_mn_init(H>16) is still honored
-         * (worthwhile only for pure-C goroutine workloads). */
+         * (worthwhile only for pure-C fiber workloads). */
         n_threads = runloom_cpu_count();
         if (n_threads <= 0) n_threads = 4;
         if (n_threads > 16) n_threads = 16;
@@ -45,7 +45,7 @@ int runloom_mn_init(int n_threads)
     main_ts = PyThreadState_Get();
     interp = main_ts->interp;
     /* Per-g-tstate mode: capture the interp for PyThreadState_New and stand
-     * the snap down BEFORE any hub thread starts running goroutines. */
+     * the snap down BEFORE any hub thread starts running fibers. */
     runloom_mn_interp = interp;
     runloom_set_per_g_tstate_mode(runloom_per_g_tstate_flag());
     /* Configure the sysmon watchdog (enable + threshold) BEFORE the hubs
@@ -361,19 +361,19 @@ static int runloom_mn_go_core(PyObject *callable, runloom_c_entry_fn c_fn,
     n = __atomic_fetch_add(&runloom_mn_spawn_counter, 1, __ATOMIC_RELAXED);
     hub_idx = (int)(n % runloom_hub_count);
     h = &runloom_hubs[hub_idx];
-    {   /* Backpressure: admit under the max-goroutines limit. */
-        int adm = runloom_goroutine_admit();
+    {   /* Backpressure: admit under the max-fibers limit. */
+        int adm = runloom_fiber_admit();
         if (adm == 0) {
             if (callable != NULL)
                 PyErr_Format(PyExc_RuntimeError,
-                             "runloom: goroutine limit (%ld) exceeded",
-                             runloom_get_max_goroutines());
+                             "runloom: fiber limit (%ld) exceeded",
+                             runloom_get_max_fibers());
             errno = EAGAIN;
             return -1;
         }
         g = runloom_g_slab_alloc();
         if (g == NULL) {
-            if (adm == 2) runloom_goroutine_release();
+            if (adm == 2) runloom_fiber_release();
             if (callable != NULL) PyErr_NoMemory();
             errno = ENOMEM;
             return -1;
@@ -392,10 +392,10 @@ static int runloom_mn_go_core(PyObject *callable, runloom_c_entry_fn c_fn,
     } else {
         g->c_entry = c_fn;
         g->c_arg   = c_arg;
-        g->advice_key = 0;   /* C-entry goroutines aren't profiled */
+        g->advice_key = 0;   /* C-entry fibers aren't profiled */
     }
     g->refcount = 1;
-    g->owner = &h->sched;   /* owning hub's sched -- groups goroutines in the dump */
+    g->owner = &h->sched;   /* owning hub's sched -- groups fibers in the dump */
     __atomic_store_n(&g->id, runloom_next_goid(), __ATOMIC_RELAXED);
     g->park_fd = -1;
     /* Stack size, in precedence order:
@@ -404,7 +404,7 @@ static int runloom_mn_go_core(PyObject *callable, runloom_c_entry_fn c_fn,
      *     readline/terminfo init, a doctest, OpenSSL) asks for a roomy stack up
      *     front; the resume-boundary copy-grow only rescues stacks that deepen
      *     ACROSS yields, not a single-frame burst;
-     *  2. otherwise the adaptive autosizer -- this goroutine-kind's learned
+     *  2. otherwise the adaptive autosizer -- this fiber-kind's learned
      *     size (start-large default for an unseen kind), which itself falls
      *     back to the hub default when autosize is off. */
     g->coro = runloom_coro_new(
@@ -420,7 +420,7 @@ static int runloom_mn_go_core(PyObject *callable, runloom_c_entry_fn c_fn,
             PyErr_NoMemory();
         }
         if (g->limit_counted) {             /* release the admission slot we took */
-            runloom_goroutine_release();
+            runloom_fiber_release();
             g->limit_counted = 0;
         }
         runloom_g_slab_free(g);             /* return to slab (handles greg + free) */
@@ -450,7 +450,7 @@ static int runloom_mn_go_core(PyObject *callable, runloom_c_entry_fn c_fn,
                 PyErr_NoMemory();
             }
             if (g->limit_counted) {         /* release the admission slot */
-                runloom_goroutine_release();
+                runloom_fiber_release();
                 g->limit_counted = 0;
             }
             /* slab_free, NOT PyMem_Free: the g came from runloom_g_slab_alloc
@@ -480,14 +480,14 @@ PyObject *runloom_mn_go(PyObject *callable, size_t stack_size)
     Py_RETURN_NONE;
 }
 
-/* Bulk-spawn: create `n` goroutines, ALL running the same Python `callable`,
+/* Bulk-spawn: create `n` fibers, ALL running the same Python `callable`,
  * by looping the spawn core in C.  This removes the n Python->C call dispatches
  * + per-call PyArg parsing that a Python `for i: mn_go(fn)` loop pays -- the
- * goroutines still run the Python callable (each gets its own g + tstate slot
+ * fibers still run the Python callable (each gets its own g + tstate slot
  * and invokes `callable()` when scheduled).  Returns 0 on success, or -1 with a
- * Python error set if a spawn fails partway (the already-created goroutines are
+ * Python error set if a spawn fails partway (the already-created fibers are
  * live and will run; the caller decides whether to treat a partial as fatal).
- * Must be called from inside the M:N runtime (root or a goroutine). */
+ * Must be called from inside the M:N runtime (root or a fiber). */
 /* Read RUNLOOM_GON_BULK once: 1 = go_n uses the bulk-arena fast path. */
 static int runloom_gon_bulk_enabled(void)
 {
@@ -504,7 +504,7 @@ static int runloom_gon_bulk_enabled(void)
 /* ---- go_n bulk-arena batch lifecycle ----
  * One descriptor per go_n() call.  Owns the two contiguous arenas (g + coro)
  * and the reserved stack block; `live` starts at N and is decremented by each
- * goroutine's final decref.  The decrement that reaches 0 is the last finisher,
+ * fiber's final decref.  The decrement that reaches 0 is the last finisher,
  * which reclaims everything wholesale -- the safe answer to "you can't free a
  * slice of a calloc/mmap individually".  No per-slot freelist yet: a batch is
  * reclaimed all-or-nothing, which is exact for go_n's "spawn N, they all run"
@@ -514,7 +514,7 @@ struct runloom_gon_batch {
     void  *carena;       /* calloc'd coro-struct arena (one free) */
     size_t start_slot;   /* first stack-arena slot of this batch's block */
     long   nslots;       /* slots in the block (== N) -- for MADV + slot return */
-    long   live;         /* goroutines not yet finished; atomic */
+    long   live;         /* fibers not yet finished; atomic */
 };
 
 void runloom_gon_batch_finish_one(struct runloom_gon_batch *b)
@@ -534,13 +534,13 @@ void runloom_gon_batch_finish_one(struct runloom_gon_batch *b)
 /* Bulk-arena spawn (the "ultra-fast alloc path"): allocate the N g-structs and
  * N coro-structs as TWO contiguous calloc'd arenas (one allocation each, no
  * per-g malloc), carve each stack from the stack arena (lock-free), build each
- * goroutine with a straight line of stores (the calloc-zeroed arena IS the
+ * fiber with a straight line of stores (the calloc-zeroed arena IS the
  * template; only the few non-zero fields are written) + a placement coro init,
  * then SPLICE each hub's whole batch onto its sub-list under ONE lock and bump
  * pending once.  Zero function-call depth in the hot loop, no per-g lock, no
  * per-g mmap.  PROTOTYPE: arena g/coro/stacks are never individually freed
  * (the free path is not yet taught about arena memory), so this is only valid
- * for workloads whose goroutines do NOT complete during the measured window
+ * for workloads whose fibers do NOT complete during the measured window
  * (e.g. long-parked workers) -- guarded by RUNLOOM_GON_BULK so the default
  * go_n (loop) stays the safe path. */
 static int runloom_mn_go_n_bulk(PyObject *callable, long n, size_t stack_size,
@@ -635,7 +635,7 @@ static int runloom_mn_go_n_bulk(PyObject *callable, long n, size_t stack_size,
     }
 
     /* Hand the arenas + reserved stack block to the batch; arm its live count.
-     * From here, each goroutine's final decref calls runloom_gon_batch_finish_one,
+     * From here, each fiber's final decref calls runloom_gon_batch_finish_one,
      * and the Nth reclaims all three allocations. */
     batch->garena     = garena;
     batch->carena     = carena;
@@ -666,7 +666,7 @@ static int runloom_mn_go_n_bulk(PyObject *callable, long n, size_t stack_size,
         /* GLOBAL pending too: mn_run polls runloom_mn_pending_global, not the
          * per-hub fields.  The per-g spawn path does this via runloom_mn_pending_inc;
          * the bulk path must add its whole batch here or mn_run sees 0 and exits
-         * before the goroutines run.  Each g's completion (runloom_mn_pending_complete)
+         * before the fibers run.  Each g's completion (runloom_mn_pending_complete)
          * decrements it, so the count balances. */
         __atomic_add_fetch(&runloom_mn_pending_global, counts[hub], __ATOMIC_ACQ_REL);
         __atomic_add_fetch(&h->sub_gen, 1, __ATOMIC_RELEASE);

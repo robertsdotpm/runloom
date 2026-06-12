@@ -2,7 +2,7 @@
 
 A real crash kills the process, so every crash-trigger test runs in a child
 process and asserts on its exit signal and captured stderr.  The classification
-(goroutine stack overflow vs wild pointer vs non-goroutine) and the per-thread
+(fiber stack overflow vs wild pointer vs non-fiber) and the per-thread
 sigaltstack (so the handler survives the overflow it is reporting) are the
 behaviours under test.
 """
@@ -19,7 +19,7 @@ import runloom_c
 
 POSIX = os.name == "posix"
 BACKEND = runloom_c.backend()
-# The address->goroutine guard-page mapping only exists on the POSIX stack
+# The address->fiber guard-page mapping only exists on the POSIX stack
 # backends; Windows Fibers have no introspectable stack / guard page.
 HAS_GUARD = BACKEND in ("fcontext-asm", "ucontext")
 
@@ -132,8 +132,8 @@ def test_overflow_classified_single_thread():
     assert rc in FAULT_RCS, (rc, out)          # chained to default -> cored
     assert "GOROUTINE STACK OVERFLOW" in out, out
     assert "16 KiB" in out, out                       # named its stack size
-    assert "goroutine g" in out, out
-    assert "=== runloom goroutine dump" in out, out   # full registry dump too
+    assert "fiber g" in out, out
+    assert "=== runloom fiber dump" in out, out   # full registry dump too
 
 
 @requires_guard
@@ -150,7 +150,7 @@ def test_overflow_classified_under_mn_scheduler():
     """)
     assert rc in FAULT_RCS, (rc, out)
     assert "GOROUTINE STACK OVERFLOW" in out, out
-    assert "this thread was executing goroutine g" in out, out
+    assert "this thread was executing fiber g" in out, out
 
 
 # --------------------------------------------------------------------------- #
@@ -166,9 +166,9 @@ def test_wild_pointer_not_classified_as_overflow():
         runloom_c.run()
     """)
     assert rc in FAULT_RCS, (rc, out)
-    assert "not in any goroutine stack" in out, out
+    assert "not in any fiber stack" in out, out
     assert "GOROUTINE STACK OVERFLOW" not in out, out
-    assert "=== runloom goroutine dump" in out, out
+    assert "=== runloom fiber dump" in out, out
 
 
 # --------------------------------------------------------------------------- #

@@ -1,16 +1,16 @@
 """Windows netpoll fault-injection workload (driven by
 test_win_netpoll_faultinject.py).
 
-Parks a goroutine on a never-readable socket with a deadline.  The pump polls
+Parks a fiber on a never-readable socket with a deadline.  The pump polls
 that socket every iteration, so an injected poll/submit fault (RUNLOOM_FAULT_<SITE>,
-see netpoll.c) lands on a LIVE code path.  The goroutine wakes via its deadline
+see netpoll.c) lands on a LIVE code path.  The fiber wakes via its deadline
 regardless of the fault, so the workload always terminates -- the point is the
 runtime's RESPONSE to the fault (retry / 1 ms backoff / clean error), measured
 by how many times the fault fired (_fault_count).
 
 Prints sentinels for the harness:
   BACKEND=<name>   the netpoll backend actually selected
-  RESULT=<repr>    what the parked goroutine's wait_fd returned/raised
+  RESULT=<repr>    what the parked fiber's wait_fd returned/raised
   FAULTS=<n>       times the injection site fired during the run
   DONE
 """
@@ -34,7 +34,7 @@ TIMEOUT_MS = int(os.environ.get("FAULT_TIMEOUT_MS", "800"))
 
 def main():
     # A UDP socket bound to an ephemeral port is never readable (nothing is
-    # sent to it), so the parked goroutine can only wake via its deadline --
+    # sent to it), so the parked fiber can only wake via its deadline --
     # which it must do even while the poll syscall is being faulted.
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     s.bind(("127.0.0.1", 0))

@@ -36,7 +36,7 @@ if HAVE_CPYTHON_TESTS:
     # select() and expects the exception to propagate out of the call.  Through
     # the cooperative wait_fd park this works on every backend: when a signal
     # EINTRs the scheduler's idle pump, the scheduler runs the pending handler
-    # and, if it raises, hands the exception to the parked goroutine (which
+    # and, if it raises, hands the exception to the parked fiber (which
     # restores it on resume and returns out of select()), instead of swallowing
     # it or carrying it out of run().  That delivery path is in the backend-
     # independent scheduler/wait_fd core (runloom_netpoll_signal_wake +

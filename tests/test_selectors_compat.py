@@ -6,7 +6,7 @@ prove that runloom.monkey's `selectors` category makes the high-level selector
 API cooperative *without changing its observable contract*: the same
 (key, events) return shape, the same EVENT_READ / EVENT_WRITE / POLLHUP
 return codes, the same KeyError / ValueError fault behaviour -- but a
-goroutine blocked in select() now yields the OS thread to its siblings
+fiber blocked in select() now yields the OS thread to its siblings
 instead of freezing the scheduler.
 
 Run under the C scheduler (runloom_c.go / runloom_c.run), which is the path
@@ -29,7 +29,7 @@ _IS_WINDOWS = platform.system() == "Windows"
 
 
 def _drive(fn):
-    """Run fn() as a goroutine, return its value (or re-raise)."""
+    """Run fn() as a fiber, return its value (or re-raise)."""
     box = [None, None]
 
     def runner():
@@ -160,7 +160,7 @@ class TestSelectorsReadiness(unittest.TestCase):
             self.assertEqual(data, b"payload")
             # Woke on the event, not on a busy-poll timeout.
             self.assertLess(dt, 1.5)
-            # The writer goroutine ran *while* select() was parked.
+            # The writer fiber ran *while* select() was parked.
             self.assertEqual(order, ["write", "woke"])
         _drive(body)
 
@@ -233,7 +233,7 @@ class TestSelectorsReadiness(unittest.TestCase):
 
 
 class TestSelectorsConcurrency(unittest.TestCase):
-    """Two goroutines parked in select() must overlap, not serialize."""
+    """Two fibers parked in select() must overlap, not serialize."""
 
     def test_parallel_selects_overlap(self):
         def body():
@@ -258,7 +258,7 @@ class TestSelectorsConcurrency(unittest.TestCase):
             g_done = []
             for i in range(2):
                 runloom_c.go(lambda i=i: (one(i), g_done.append(1)))
-            # Spin the driving goroutine until both children finish.
+            # Spin the driving fiber until both children finish.
             while len(g_done) < 2:
                 runloom.sleep(0.005)
             return time.monotonic() - t0

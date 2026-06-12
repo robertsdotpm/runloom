@@ -1,12 +1,12 @@
 """Tests for the adaptive stack auto-sizer (inspect.enable_stack_autosize).
 
-Each goroutine kind starts large the first time it is seen and, once its real
-C-stack use is measured, later goroutines of that kind start at the learned size
+Each fiber kind starts large the first time it is seen and, once its real
+C-stack use is measured, later fibers of that kind start at the learned size
 ("start large, learn down"). In-memory only -- no persistence. An explicit
 stack_size= always wins.
 
 The observable is the advice report's `reserved` field (the stack size a kind's
-goroutines actually ran with), which the auto-sizer drives.
+fibers actually ran with), which the auto-sizer drives.
 """
 import json
 import os
@@ -106,7 +106,7 @@ def test_enable_implies_measurement():
 def test_unseen_kind_starts_large():
     runloom.inspect.enable_stack_autosize(True)
     _batch([heavy], 30)
-    # every goroutine in this first batch was spawned before any completed,
+    # every fiber in this first batch was spawned before any completed,
     # so they all started at the large default
     assert _row(heavy)["reserved"] == START
 
@@ -142,9 +142,9 @@ def pinned_worker():
 
 
 def test_friendly_go_honors_stack_size():
-    # runloom.go(fn, stack_size=N) must PIN the goroutine stack, not forward
+    # runloom.go(fn, stack_size=N) must PIN the fiber stack, not forward
     # stack_size into fn (regression: the friendly wrapper used to swallow it
-    # into **kwargs and pass it to the target, leaving the goroutine on the
+    # into **kwargs and pass it to the target, leaving the fiber on the
     # default stack).  Covers both the single-thread and M:N spawn paths.
     out = {}
 
@@ -242,7 +242,7 @@ def test_prescan_floor_holds_decimal():
 
 
 # Crypto cold start: signing / verification / encryption route through deep
-# OpenSSL / libsodium native math that can overflow a small goroutine stack on
+# OpenSSL / libsodium native math that can overflow a small fiber stack on
 # the first call.  These are HEURISTIC symbols (not measured): a crypto-
 # referencing kind cold-starts at 1 MiB, then the auto-sizer learns it down.
 encrypt = None      # module-level placeholders so the names land in a kind's

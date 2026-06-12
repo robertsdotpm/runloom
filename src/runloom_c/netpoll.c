@@ -11,12 +11,12 @@
  *   else            -> select() POSIX fallback
  *
  * Park mechanics:
- *   - the current goroutine snapshot tstate, gets pushed onto an internal
+ *   - the current fiber snapshot tstate, gets pushed onto an internal
  *     "parked" list with (fd, events, deadline) metadata.  yields via
  *     runloom_coro_yield.
  *   - the scheduler's drain loop, when ready queue is empty, calls
  *     runloom_netpoll_pump(timeout) instead of sleeping the OS thread.
- *   - pump waits for I/O / timeout, wakes parked goroutines, returns.
+ *   - pump waits for I/O / timeout, wakes parked fibers, returns.
  */
 #if !defined(_WIN32)
 #  define _POSIX_C_SOURCE 200809L
@@ -64,8 +64,8 @@
 #endif
 
 /* ---- internal park record ----
- * Allocated on the parked goroutine's C stack inside runloom_netpoll_wait_fd
- * (the stack stays alive across yield because the goroutine isn't
+ * Allocated on the parked fiber's C stack inside runloom_netpoll_wait_fd
+ * (the stack stays alive across yield because the fiber isn't
  * destroyed until it completes).
  *
  * Two intrusive links:
@@ -134,7 +134,7 @@ typedef struct runloom_parked {
 #define RUNLOOM_PARK_PARKED 1
 #define RUNLOOM_PARK_WOKEN  2
 
-/* Forcibly wake all parked goroutines with a cancelled marker.
+/* Forcibly wake all parked fibers with a cancelled marker.
  * Returns count of waiters woken.  Used by sched_reset() so paio.run
  * cleanup doesn't leave the next runloom_c.run() blocking on parked
  * accept loops / tickers / etc. */

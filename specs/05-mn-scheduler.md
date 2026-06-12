@@ -85,16 +85,16 @@ The memory orderings are load-bearing and proven (spec 15):
 > to check disjointness + taken-once. This is the single most heavily verified
 > piece of the system.
 
-### Why steal only *fresh* goroutines
+### Why steal only *fresh* fibers
 
-A goroutine that has **run** has a live C stack with absolute pointers bound to
+A fiber that has **run** has a live C stack with absolute pointers bound to
 one OS thread, and its CPython eval frame caches that hub's tstate (spec 03).
 Resuming it on another thread is a cross-hub migration that is unsound in
 free-threaded mode (and crashes on macOS/arm64 with a stale-tstate SIGSEGV). So:
 
-- The **deque holds only fresh, never-run goroutines** — no stack to migrate, so
+- The **deque holds only fresh, never-run fibers** — no stack to migrate, so
   a thief can safely start one.
-- **Yielded/woken goroutines live in the hub's local FIFO**, which is *never
+- **Yielded/woken fibers live in the hub's local FIFO**, which is *never
   stolen*, and wakes route them **back to their origin hub** (`runloom_mn_wake_g`).
 
 This is the design's central trade: **locality and correctness over perfect load
@@ -159,9 +159,9 @@ thread** at exit (contract C6).
 
 ## Invariants
 
-1. **Only fresh, never-run goroutines are stealable.** Live stacks never migrate
+1. **Only fresh, never-run fibers are stealable.** Live stacks never migrate
    in per-hub-tstate mode.
-2. **Woken/yielded goroutines route to their origin hub** via the MPSC
+2. **Woken/yielded fibers route to their origin hub** via the MPSC
    submission queue; the local FIFO is never stolen.
 3. **A hub creates *and deletes* its own tstate on its own thread**, serialized
    across hubs (contracts C1/C6, spec 09).

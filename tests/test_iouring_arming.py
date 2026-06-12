@@ -2,14 +2,14 @@
 
 Same philosophy as test_netpoll_arming.py, adapted to io_uring's completion
 model.  For netpoll the unit of delivery is an fd-readiness edge; for io_uring
-it is a CQE whose result must be routed back to the EXACT goroutine that
+it is a CQE whose result must be routed back to the EXACT fiber that
 submitted it -- including ERROR completions, where the kernel reports the op's
 errno as cqe->res = -errno (not via the errno of any syscall) and the runtime
 must turn that into a clean OSError.
 
 This pins down the completion contract: correct result and byte payload on
 success, the correct errno on every failure mode, EOF as a zero-length read,
-and -- the concurrency-critical part -- that N goroutines submitting at once
+and -- the concurrency-critical part -- that N fibers submitting at once
 each get their OWN completion back (the multi-drainer cq_head CAS must not
 cross-deliver or double-consume a CQE).
 
@@ -32,8 +32,8 @@ pytestmark = pytest.mark.skipif(
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
-def _read_via_goroutine(fd, n, offset=0):
-    """file_read `n` bytes from `fd` inside a goroutine; return (data|None, errno|None)."""
+def _read_via_fiber(fd, n, offset=0):
+    """file_read `n` bytes from `fd` inside a fiber; return (data|None, errno|None)."""
     out = {}
 
     def worker():
@@ -76,7 +76,7 @@ def test_roundtrip_write_then_read():
         runloom_c.run()
         assert out["written"] == len(data)
 
-        got = _read_via_goroutine(fd, len(data), 0)
+        got = _read_via_fiber(fd, len(data), 0)
         assert got.get("data") == data, got
     finally:
         os.close(fd)
@@ -87,7 +87,7 @@ def test_eof_reads_zero():
     path = _tmpfile(b"abc")
     fd = os.open(path, os.O_RDONLY)
     try:
-        got = _read_via_goroutine(fd, 16, 100)   # offset past EOF
+        got = _read_via_fiber(fd, 16, 100)   # offset past EOF
         assert got.get("n") == 0, got
     finally:
         os.close(fd)
@@ -98,7 +98,7 @@ def test_partial_read():
     path = _tmpfile(b"abcdefghij")
     fd = os.open(path, os.O_RDONLY)
     try:
-        got = _read_via_goroutine(fd, 5, 0)
+        got = _read_via_fiber(fd, 5, 0)
         assert got.get("data") == b"abcde", got
     finally:
         os.close(fd)
@@ -113,7 +113,7 @@ def test_error_completion_closed_fd():
     """A read submitted on a stale (closed) fd completes with res=-EBADF."""
     fd = os.open(os.devnull, os.O_RDONLY)
     os.close(fd)
-    got = _read_via_goroutine(fd, 16, 0)
+    got = _read_via_fiber(fd, 16, 0)
     assert got.get("errno") == errno.EBADF, got
 
 
@@ -122,7 +122,7 @@ def test_error_completion_read_on_writeonly():
     path = _tmpfile(b"x")
     fd = os.open(path, os.O_WRONLY)
     try:
-        got = _read_via_goroutine(fd, 4, 0)
+        got = _read_via_fiber(fd, 4, 0)
         assert got.get("errno") == errno.EBADF, got
     finally:
         os.close(fd)
@@ -134,7 +134,7 @@ def test_error_completion_isdir():
     d = tempfile.mkdtemp()
     fd = os.open(d, os.O_RDONLY)
     try:
-        got = _read_via_goroutine(fd, 16, 0)
+        got = _read_via_fiber(fd, 16, 0)
         assert got.get("errno") == errno.EISDIR, got
     finally:
         os.close(fd)
@@ -142,12 +142,12 @@ def test_error_completion_isdir():
 
 
 # ---------------------------------------------------------------------------
-# Concurrent submitters: every goroutine gets ITS OWN completion back.
+# Concurrent submitters: every fiber gets ITS OWN completion back.
 # ---------------------------------------------------------------------------
 
 def test_concurrent_distinct_files_single_thread():
-    """N goroutines each read a file with distinct content; the per-op result
-    routing (user_data) must give each goroutine exactly its own bytes."""
+    """N fibers each read a file with distinct content; the per-op result
+    routing (user_data) must give each fiber exactly its own bytes."""
     N = 24
     paths = [_tmpfile(("file-%03d-" % i).encode() * 40) for i in range(N)]
     fds = [os.open(p, os.O_RDONLY) for p in paths]
@@ -177,7 +177,7 @@ def test_concurrent_distinct_files_single_thread():
 
 
 def _mn_fileread_snippet(hubs, n):
-    """A self-contained snippet: spawn `n` goroutines across `hubs` M:N hubs,
+    """A self-contained snippet: spawn `n` fibers across `hubs` M:N hubs,
     each file_read'ing its own file, and PASS iff every byte payload is right."""
     code = r'''
 import sys; sys.path.insert(0, __SRCPATH__)
@@ -234,9 +234,9 @@ def test_mn_iouring_fileread_single_hub():
     """Regression for the M:N io_uring completion-wake corruption.  Under the
     M:N scheduler a file_read's own CQE drain called runloom_mn_wake_g on the
     RUNNING, spin-draining submitter; in the default (non-global-runq) mode that
-    re-submits the goroutine to its hub while it is running and about to
+    re-submits the fiber to its hub while it is running and about to
     complete, corrupting the hub run-queue/pending accounting and stranding
-    other queued goroutines -- an intermittent hang reproducible even with ONE
+    other queued fibers -- an intermittent hang reproducible even with ONE
     hub.  Fixed by not waking hub SINGLE ops (the spinner observes op->result
     directly).  Heavy single-hub stress, repeated, in fresh subprocesses
     (mn_init installs process-global hubs)."""
@@ -249,7 +249,7 @@ def test_mn_iouring_fileread_single_hub():
 
 def _mn_concurrent_init_snippet(hubs, n):
     """Like _mn_fileread_snippet but WITHOUT a prior single-threaded
-    iouring_available() call, so the goroutines are the FIRST io_uring users
+    iouring_available() call, so the fibers are the FIRST io_uring users
     and several hubs race the lazy ring init.  Regression for the multi-hub
     "lost completion" hang: concurrent runloom_iouring_available() first-callers
     each ran lazy_init -> multiple io_uring_setup() rings raced the shared
@@ -260,7 +260,7 @@ def _mn_concurrent_init_snippet(hubs, n):
 import sys; sys.path.insert(0, __SRCPATH__)
 import os, tempfile
 import runloom_c
-# NB: NO runloom_c.iouring_available() here -- the goroutines below are the
+# NB: NO runloom_c.iouring_available() here -- the fibers below are the
 # first io_uring users, exercising concurrent lazy init across hubs.
 N = __N__; H = __H__
 paths, fds, expected, results = [], [], [], [None] * N
@@ -379,7 +379,7 @@ def test_mn_iouring_fileread_under_gc():
 
 def _mn_sockpair_recv_gc_snippet(hubs, n):
     """N pre-connected socketpairs (NO listen/accept/connect -- isolates the
-    recv path) recv'd by goroutines across `hubs` M:N hubs, with a FEEDER
+    recv path) recv'd by fibers across `hubs` M:N hubs, with a FEEDER
     thread writing the peer ends STAGGERED (so each recv genuinely BLOCKS until
     data arrives) and a concurrent thread hammering gc.collect().  This is the
     socket analogue of the forced-async file_read+feeder test: it reproduces
@@ -396,7 +396,7 @@ N = __N__; H = __H__
 results = [None] * N
 stop = [False]
 peer_fds = []   # the feeder-side raw fd per pair
-recv_fds = []   # the goroutine-side raw fd per pair
+recv_fds = []   # the fiber-side raw fd per pair
 PAYLOAD = b"ms-recv-payload-0123456789abcdef"   # 32 bytes
 for i in range(N):
     a, b = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)

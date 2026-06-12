@@ -6,7 +6,7 @@
 /* Called from the fatal-signal crash handler (runloom_crash.c) on the faulting
  * hub thread, the instant it becomes the crash owner.  Stops the sysmon and
  * handoff watchdog loops so neither marks this hub a recoverable wedge nor has
- * the rescue pool adopt its goroutines mid-dump -- the faulting g must stay put
+ * the rescue pool adopt its fibers mid-dump -- the faulting g must stay put
  * so the handler's chain-out re-faults and cores cleanly.  Async-signal-safe:
  * just stores to the loop-stop flags + the preempt enable flag (no locks, no
  * malloc, no Python C-API). */
@@ -277,22 +277,22 @@ static void runloom_sysmon_stop_join(void)
 
 /* ---- Group B rescue loop (RUNLOOM_HANDOFF) ----
  *
- * Resume ONE fresh goroutine on the rescue thread's OWN tstate, using `base`
+ * Resume ONE fresh fiber on the rescue thread's OWN tstate, using `base`
  * (a snap of the rescue tstate's clean initial state) as the per-g register
  * window exactly as hub_main uses hub_snap.  A faithful copy of hub_main's
  * DEFAULT branch MINUS the per-g-tstate / global-runq paths, MINUS the sysmon
  * resume_begin/end (that field tracks the OWNER's g_block wedge, not ours),
  * and MINUS h->sched.current writes (hub-private field; writing it from the
  * rescue thread while hub_main may concurrently write it on the hub thread
- * at goroutine completion = data race -- hub diagnostics show g_block's value
+ * at fiber completion = data race -- hub diagnostics show g_block's value
  * during the rescue period, which is fine).
  *
  * The BUG #2 tstate-adoption race is eliminated: `base` is snapped from the
  * RESCUE THREAD's tstate (not the hub's), so the hub owner can re-attach its
  * own tstate at any time without racing us on _PyThreadState_Attach.
  *
- * The rescue ONLY handles FRESH (snap.valid==0) goroutines stolen from the
- * Chase-Lev deque.  Woken goroutines (snap.valid==1) have C-stack state baked
+ * The rescue ONLY handles FRESH (snap.valid==0) fibers stolen from the
+ * Chase-Lev deque.  Woken fibers (snap.valid==1) have C-stack state baked
  * to the hub OS thread and must not migrate; they are left in the hub's
  * ready FIFO / sub_list for the owner to drain when it wakes. */
 static void runloom_handoff_resume_g(runloom_hub_t *h, runloom_g_t *g,
@@ -312,7 +312,7 @@ static void runloom_handoff_resume_g(runloom_hub_t *h, runloom_g_t *g,
 #endif
     }
     /* DO NOT write h->sched.current from the rescue thread: that is a
-     * hub-private field the hub owner also writes (at goroutine completion /
+     * hub-private field the hub owner also writes (at fiber completion /
      * park in hub_main), causing a data race.  TLS runloom_tls_current_g is
      * per-OS-thread and therefore safe. */
     runloom_tls_current_g = g;
@@ -341,7 +341,7 @@ static void runloom_handoff_resume_g(runloom_hub_t *h, runloom_g_t *g,
         runloom_g_decref(g);               /* scheduler ref */
         runloom_pystate_snap(base);
     } else if (!self_queued) {
-        /* Raw runloom_coro_yield(): snap the goroutine's Python state from the
+        /* Raw runloom_coro_yield(): snap the fiber's Python state from the
          * rescue tstate and re-submit via the sub_list (mutex-protected, safe
          * from any thread).  A direct ready-ring push would race the hub owner's
          * concurrent pop on that single-producer-single-consumer ring. */

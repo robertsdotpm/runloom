@@ -20,8 +20,8 @@ def _bound_port(listener):
     return port
 
 
-def _drive(*goroutines):
-    """Spawn each callable as a goroutine, run scheduler."""
+def _drive(*fibers):
+    """Spawn each callable as a fiber, run scheduler."""
     box = []
     def wrap(fn):
         def runner():
@@ -30,7 +30,7 @@ def _drive(*goroutines):
             except BaseException as e:
                 box.append(e)
         return runner
-    for g in goroutines:
+    for g in fibers:
         runloom_c.go(wrap(g))
     runloom_c.run()
     if box:
@@ -196,8 +196,8 @@ class TestCloseSemantics(unittest.TestCase):
 
 
 class TestRecvBlocksUntilData(unittest.TestCase):
-    """A TCPConn.recv parks the goroutine and resumes when data arrives.
-    Concurrent goroutines making progress prove the recv didn't busy-wait."""
+    """A TCPConn.recv parks the fiber and resumes when data arrives.
+    Concurrent fibers making progress prove the recv didn't busy-wait."""
 
     def test_recv_yields(self):
         port_holder = [None]

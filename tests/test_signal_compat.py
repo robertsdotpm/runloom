@@ -8,7 +8,7 @@ tests).  The contract a cooperative version must keep:
     so they queue as pending; the wait reaps the pending signal and returns
     its number / siginfo;
   * sigtimedwait returns None when the timeout elapses with nothing pending;
-  * a blocked wait yields the scheduler -- a sibling goroutine keeps running;
+  * a blocked wait yields the scheduler -- a sibling fiber keeps running;
   * pause() returns once a handled signal is caught.
 
 These run under the single-threaded scheduler (runloom_c.go/run on the main
@@ -66,7 +66,7 @@ def tearDownModule():
 @unittest.skipUnless(_HAVE_SIGWAIT, "no sigwait")
 # sigwait/sigwaitinfo are only made *cooperative* via a zero-timeout
 # sigtimedwait poll; without sigtimedwait (e.g. macOS) the shim falls back to
-# the blocking sigwait, which can't yield to the goroutine that sends the
+# the blocking sigwait, which can't yield to the fiber that sends the
 # signal -- so the cooperative tests only apply where sigtimedwait exists.
 @unittest.skipUnless(_HAVE_SIGTIMEDWAIT, "no sigtimedwait (sigwait not cooperative)")
 class TestSigwait(unittest.TestCase):
@@ -212,7 +212,7 @@ class TestSigtimedwait(unittest.TestCase):
 class TestPause(unittest.TestCase):
     def test_pause_returns_on_handled_signal_and_yields(self):
         """pause() must return once a handled signal is caught, while a
-        sibling goroutine keeps running in the meantime."""
+        sibling fiber keeps running in the meantime."""
         caught = {"n": 0}
 
         def handler(signum, frame):

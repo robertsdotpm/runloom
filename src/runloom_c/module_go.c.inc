@@ -27,9 +27,9 @@ static PyObject *m_blocking(PyObject *self, PyObject *args, PyObject *kw)
     job.result   = NULL;
     job.exc_type = job.exc_value = job.exc_tb = NULL;
 
-    /* Parks the goroutine and runs py_blocking_worker on a pool thread;
+    /* Parks the fiber and runs py_blocking_worker on a pool thread;
      * returns once the worker has produced a result or exception.  Inline
-     * fallback (not on a goroutine / pool unavailable) runs it here. */
+     * fallback (not on a fiber / pool unavailable) runs it here. */
     runloom_blocking_call(py_blocking_worker, &job);
 
     Py_DECREF(call_args);
@@ -122,7 +122,7 @@ static PyObject *m_sched_yield(PyObject *self, PyObject *unused)
 /* Signal the C scheduler to exit its drain loop at the next safe
  * point.  Used by runloom.aio.RunloomEventLoop.run_until_complete to bail
  * out when the user-visible future is done, even if there are still
- * background goroutines parked on I/O (accept loops, etc). */
+ * background fibers parked on I/O (accept loops, etc). */
 static PyObject *m_sched_stop(PyObject *self, PyObject *unused)
 {
     runloom_sched_t *s = runloom_sched_get();
@@ -132,15 +132,15 @@ static PyObject *m_sched_stop(PyObject *self, PyObject *unused)
 }
 
 /* Forcibly drop everything from the scheduler: clears the ready queue,
- * sleep heap, and (best-effort) any netpoll-parked goroutines.  Used
+ * sleep heap, and (best-effort) any netpoll-parked fibers.  Used
  * by paio.run's cleanup after the main future completes, so leftover
- * call_later runners / accept loops / ticker goroutines don't block
+ * call_later runners / accept loops / ticker fibers don't block
  * the next runloom_c.run() with a sleep heap that won't drain for
  * minutes.  Goroutines being dropped have their coros marked done +
  * freed; any user-visible Python references (G handles) will report
  * done=True.
  *
- * NOTE: per-frame localsplus refs on the goroutines' datastack chunks
+ * NOTE: per-frame localsplus refs on the fibers' datastack chunks
  * are not unwound.  A correct unwind would either walk the frame
  * chain and call _PyFrame_Clear on each (CPython internal API; layout
  * changes per minor version), or inject SystemExit and resume the
@@ -157,7 +157,7 @@ static PyObject *m_sched_reset(PyObject *self, PyObject *unused)
     int n_ready = 0, n_sleep = 0, n_parked;
     (void)self; (void)unused;
 
-    /* Wake netpoll-parked goroutines with ready_mask=-1 first.  This
+    /* Wake netpoll-parked fibers with ready_mask=-1 first.  This
      * pushes them back to ready; we then drain ready below. */
     n_parked = runloom_netpoll_drain_parked();
 
@@ -182,7 +182,7 @@ static PyObject *m_sched_reset(PyObject *self, PyObject *unused)
     return Py_BuildValue("(iii)", n_ready, n_sleep, n_parked);
 }
 
-/* Park the current goroutine until G.wake() is called on it.
+/* Park the current fiber until G.wake() is called on it.
  * Race-safe: a wake that arrives before the park (sync callback firing
  * from add_done_callback) makes this a no-op.  Used by runloom.aio's
  * RunloomTask to replace the per-task Chan(1) wake mechanism. */
@@ -193,11 +193,11 @@ static PyObject *m_park_self(PyObject *self, PyObject *unused)
     Py_RETURN_NONE;
 }
 
-/* park(foreign_wakeable=False): park the current goroutine in memory (NO fd),
+/* park(foreign_wakeable=False): park the current fiber in memory (NO fd),
  * M:N-correctly.  Unlike park_self (single-thread sched only -- it busy-loops on
  * a hub), this routes by hub presence.  Woken by the g's handle .wake() (which
  * routes by how it parked).  foreign_wakeable=True keeps a single-thread run()
- * alive for a foreign-OS-thread waker.  No-op outside a goroutine. */
+ * alive for a foreign-OS-thread waker.  No-op outside a fiber. */
 static PyObject *m_park(PyObject *self, PyObject *args, PyObject *kw)
 {
     static char *kwlist[] = {"foreign_wakeable", "timeout", NULL};
@@ -226,7 +226,7 @@ static PyObject *m_park(PyObject *self, PyObject *args, PyObject *kw)
         if (r < 0) {
             if (PyErr_Occurred()) return NULL;          /* OOM (PyErr set) */
             PyErr_SetString(PyExc_RuntimeError,
-                            "park(timeout=...): not running on a goroutine");
+                            "park(timeout=...): not running on a fiber");
             return NULL;
         }
         if (r) Py_RETURN_TRUE;                          /* timed out */
@@ -234,8 +234,8 @@ static PyObject *m_park(PyObject *self, PyObject *args, PyObject *kw)
     }
 }
 
-/* Return a G handle to the currently-running goroutine, or None if
- * called outside any goroutine.  Used by runloom.aio's RunloomTask driver
+/* Return a G handle to the currently-running fiber, or None if
+ * called outside any fiber.  Used by runloom.aio's RunloomTask driver
  * to capture its own handle for wake-from-callback. */
 static PyObject *m_current_g(PyObject *self, PyObject *unused)
 {
@@ -243,7 +243,7 @@ static PyObject *m_current_g(PyObject *self, PyObject *unused)
     RunloomG *handle;
     (void)self; (void)unused;
 
-    /* On an M:N hub the running goroutine lives in the hub's TLS, NOT in
+    /* On an M:N hub the running fiber lives in the hub's TLS, NOT in
      * the single-thread scheduler's ->current -- check it first so
      * current_g() works under mn_run too.  Without this it returned None
      * on every hub, which broke CoRLock owner identity (self-deadlock) and
@@ -253,11 +253,11 @@ static PyObject *m_current_g(PyObject *self, PyObject *unused)
     } else {
         /* Foreign-thread-safe PEEK, never runloom_sched_get(): current_g() is
          * reached from arbitrary OS threads via the monkey shims'
-         * _in_goroutine() (e.g. a multiprocessing.Queue feeder thread taking a
+         * _in_fiber() (e.g. a multiprocessing.Queue feeder thread taking a
          * patched threading.Lock).  runloom_sched_get() would lazily malloc a
          * single-thread scheduler AND arm the netpoll wake-pump on that foreign
          * thread -- unsafe under concurrent M:N (raced -> SIGSEGV) and a leak.
-         * A thread with no scheduler has no running goroutine, so NULL is the
+         * A thread with no scheduler has no running fiber, so NULL is the
          * correct, allocation-free answer. */
         g = runloom_sched_peek_current();
     }
@@ -271,7 +271,7 @@ static PyObject *m_current_g(PyObject *self, PyObject *unused)
     return (PyObject *)handle;
 }
 
-/* unpark_many(handles) -> list[int] : directly wake a batch of goroutines parked
+/* unpark_many(handles) -> list[int] : directly wake a batch of fibers parked
  * in wait_fd (the wake side of a fan-in primitive -- Event.set / notify_all /
  * Semaphore.release).  `handles` is a sequence of G objects (each a waiter's
  * current_g()).  Claims+re-queues each parked g in one C call, replacing the
@@ -329,12 +329,12 @@ static PyObject *m_unpark_many(PyObject *self, PyObject *seq)
     return result;
 }
 
-/* Stack high-water-mark (bytes) of the currently-running goroutine, page-
+/* Stack high-water-mark (bytes) of the currently-running fiber, page-
  * granular, measured paint-free via mincore (runloom_coro_scan_hwm).  Returns
- * 0 outside a goroutine, or where the backend has no introspectable stack
+ * 0 outside a fiber, or where the backend has no introspectable stack
  * (Windows Fibers) -- callers treat 0 as "unknown, keep the current size".
  *
- * This is the read half of the function-bound grow-down: a goroutine calls it
+ * This is the read half of the function-bound grow-down: a fiber calls it
  * just before returning to learn how deep it actually went, then writes the
  * derived size back onto its own callable so the next spawn reserves less. */
 static PyObject *m_current_g_hwm(PyObject *self, PyObject *unused)

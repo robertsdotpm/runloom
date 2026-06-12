@@ -2,16 +2,16 @@
  *
  * A bounded set of worker OS threads drain an MPSC job queue (mutex +
  * condvar).  runloom_blocking_call enqueues one job (allocated on the
- * caller goroutine's own coroutine stack -- alive across the park),
- * parks the goroutine, and a worker runs the job and wakes it.
+ * caller fiber's own coroutine stack -- alive across the park),
+ * parks the fiber, and a worker runs the job and wakes it.
  *
  * Waking it integrates with BOTH schedulers exactly like an io_uring
  * completion does:
- *   - the worker re-queues the specific goroutine via runloom_mn_wake_g
+ *   - the worker re-queues the specific fiber via runloom_mn_wake_g
  *     (hub) or runloom_sched_wake_safe (single-thread sched);
  *   - an `inflight` counter keeps the single-thread drain loop from
  *     exiting or busy-spinning while a job is outstanding (a park_safe'd
- *     goroutine has no netpoll/iouring footprint of its own);
+ *     fiber has no netpoll/iouring footprint of its own);
  *   - for the single-thread sched -- which, unlike the busy-polling hubs,
  *     blocks in epoll_wait with no timeout -- the worker also pokes the
  *     netpoll pump-interrupt eventfd so the otherwise-idle scheduler
@@ -42,17 +42,17 @@
 #define RUNLOOM_BLOCKPOOL_MAX     64
 #define RUNLOOM_BLOCKPOOL_DEFAULT 8
 
-/* One offloaded job.  Lives on the calling goroutine's coroutine stack,
+/* One offloaded job.  Lives on the calling fiber's coroutine stack,
  * which stays mapped across the park, so no heap alloc is needed. */
 typedef struct runloom_block_job {
     void *(*fn)(void *);
     void *arg;
     void *result;
-    runloom_g_t *g;                  /* the parked goroutine */
+    runloom_g_t *g;                  /* the parked fiber */
     void *hub;                    /* its hub, or NULL for the single-thread sched */
     int done;                     /* set (release) once the worker is fully
                                    * finished touching this job; the parked
-                                   * goroutine spins on it so a spurious wake
+                                   * fiber spins on it so a spurious wake
                                    * (e.g. task.cancel() -> G.wake()) can't
                                    * return and free the stack job mid-worker. */
     struct runloom_block_job *next;
@@ -126,9 +126,9 @@ static RUNLOOM_THREAD_RET runloom_blockpool_worker(void *arg)
         runloom_mutex_unlock(&bp_lock);
 
         /* Snapshot the wake target BEFORE publishing `done`.  Once `done` is
-         * set, the parked goroutine may resume and free its stack `job` at any
+         * set, the parked fiber may resume and free its stack `job` at any
          * instant, so neither the wake below nor anything after it may read
-         * job->.  (The goroutine can be resumed early by a spurious wake --
+         * job->.  (The fiber can be resumed early by a spurious wake --
          * task.cancel() -> G.wake() -- which is exactly the use-after-free that
          * crashed here: it returned from runloom_blocking_call and unwound while
          * this worker was still about to call job->fn.) */
@@ -139,15 +139,15 @@ static RUNLOOM_THREAD_RET runloom_blockpool_worker(void *arg)
             /* Run the blocking work off the hub.  No GIL is held here. */
             job->result = job->fn(job->arg);
 
-            /* Publish completion: release-store so the resumed goroutine sees
+            /* Publish completion: release-store so the resumed fiber sees
              * job->result, and a marker that the worker is done with job-> .
              * After this line the worker touches ONLY locals + statics. */
             __atomic_store_n(&job->done, 1, __ATOMIC_RELEASE);
 
-            /* Re-queue the goroutine, then (single-thread only) kick the pump
+            /* Re-queue the fiber, then (single-thread only) kick the pump
              * so an idle scheduler wakes.  Re-queue BEFORE decrementing
              * inflight so the drain loop, which stays alive while inflight>0,
-             * sees the goroutine on its wake_list the moment inflight hits 0. */
+             * sees the fiber on its wake_list the moment inflight hits 0. */
             if (hub != NULL) {
                 runloom_mn_wake_g(hub, g);
             } else {
@@ -238,7 +238,7 @@ void runloom_blockpool_fini(void)
  * reset to "not started" so the next offload re-creates the pool fresh.  The
  * child is single-threaded here: re-init the sync objects (a dead worker may
  * have held bp_lock at fork), drop the inherited job queue (its jobs point at
- * parent goroutines), and zero the counters. */
+ * parent fibers), and zero the counters. */
 void runloom_blockpool_reset_after_fork(void)
 {
     runloom_mutex_init(&bp_lock);
@@ -269,7 +269,7 @@ void *runloom_blocking_call(void *(*fn)(void *), void *arg)
         runloom_sched_t *s = runloom_sched_get();
         g = (s != NULL) ? s->current : NULL;
     }
-    /* Must be inside a goroutine to park.  Also fall back to inline when
+    /* Must be inside a fiber to park.  Also fall back to inline when
      * the pool can't start, or -- for the single-thread sched only --
      * when the pump interrupt isn't available (no way to wake an idle
      * pump on this backend yet).  Hubs busy-poll, so they never need it. */
@@ -299,7 +299,7 @@ void *runloom_blocking_call(void *(*fn)(void *), void *arg)
     runloom_mutex_unlock(&bp_lock);
 
     /* Park until the WORKER signals completion (job.done).  Re-park on any
-     * other wake: a task.cancel() delivers G.wake() to this goroutine while it
+     * other wake: a task.cancel() delivers G.wake() to this fiber while it
      * is parked here, and returning then would free the stack `job` while the
      * worker still references it (use-after-free SIGSEGV).  The worker always
      * runs the job and wakes us, so the loop always terminates; cancellation is

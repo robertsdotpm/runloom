@@ -1,6 +1,6 @@
 """runloom_c.unpark_many + the _unpark_all batched fan-in wake path.
 
-unpark_many wakes a batch of goroutines parked in wait_fd DIRECTLY (claim the
+unpark_many wakes a batch of fibers parked in wait_fd DIRECTLY (claim the
 parker + re-queue the g, bypassing the per-waiter os.write -> epoll -> drain
 round-trip that dominates fan-in cost).  events.py routes Event.set /
 Condition.notify_all / Semaphore.release through it (via _unpark_all), with two
@@ -49,7 +49,7 @@ def _drive(fn):
 # ---- direct C API ---------------------------------------------------------
 
 def test_unpark_many_wakes_all_parked():
-    """N goroutines parked in wait_fd are all woken by one unpark_many, each
+    """N fibers parked in wait_fd are all woken by one unpark_many, each
     returning the UNPARKED sentinel, with nothing reported missed."""
     def main():
         r, w = os.pipe()
@@ -79,10 +79,10 @@ def test_unpark_many_wakes_all_parked():
 
 
 def test_unpark_many_reports_unparked_g_as_missed():
-    """A handle whose goroutine is NOT parked in wait_fd (it is running) cannot
+    """A handle whose fiber is NOT parked in wait_fd (it is running) cannot
     be direct-woken -> unpark_many returns its index as missed."""
     def main():
-        # current_g() of the running main goroutine: it is RUNNING, not parked,
+        # current_g() of the running main fiber: it is RUNNING, not parked,
         # so its netpoll_parker is NULL -> must be reported missed.
         me = runloom_c.current_g()
         return runloom_c.unpark_many([me])
@@ -102,8 +102,8 @@ def test_unpark_many_empty_and_nonhandle():
 
 # ---- via the cooperative primitives --------------------------------------
 
-def test_event_set_goroutine_setter_wakes_all():
-    """Event.set() from a GOROUTINE wakes every goroutine waiter True (the
+def test_event_set_fiber_setter_wakes_all():
+    """Event.set() from a GOROUTINE wakes every fiber waiter True (the
     batched direct path)."""
     def main():
         ev = threading.Event()
@@ -122,7 +122,7 @@ def test_event_set_goroutine_setter_wakes_all():
 
 
 def test_event_set_foreign_thread_setter_wakes_all():
-    """Event.set() from a REAL worker thread wakes goroutine waiters (the
+    """Event.set() from a REAL worker thread wakes fiber waiters (the
     foreign-setter os.write fallback -- a direct wake here would race run()'s
     exit and be lost; this is the test_join_cooperative failure, generalized)."""
     def main():
@@ -144,8 +144,8 @@ def test_event_set_foreign_thread_setter_wakes_all():
     assert _drive(main) == 50
 
 
-def test_event_mixed_goroutine_and_foreign_waiters():
-    """One Event with BOTH goroutine waiters (direct-woken) and a foreign-thread
+def test_event_mixed_fiber_and_foreign_waiters():
+    """One Event with BOTH fiber waiters (direct-woken) and a foreign-thread
     waiter (os.write-woken): set() wakes them all."""
     box = {"foreign": None, "gor": None}
 
@@ -168,7 +168,7 @@ def test_event_mixed_goroutine_and_foreign_waiters():
         ft.start()
 
         runloom.sleep(0.2)
-        ev.set()                                # goroutine setter: batch + write
+        ev.set()                                # fiber setter: batch + write
         runloom.sleep(0.2)
         ft.join()
         box["gor"] = sum(gout)

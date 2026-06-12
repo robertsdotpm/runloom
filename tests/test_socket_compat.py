@@ -12,7 +12,7 @@ is the parts a cooperative re-implementation can get wrong:
   * fault injection: ECONNRESET on a reset peer, BrokenPipeError on write to
     a closed peer, OSError/EBADF on a closed socket;
   * the new recvmsg/sendmsg path actually moves data + ancillary SCM_RIGHTS
-    file descriptors between goroutines;
+    file descriptors between fibers;
   * a blocked recv/accept yields the OS thread so siblings run.
 """
 import array
@@ -68,7 +68,7 @@ def _tcp_server():
 
 class TestTCPEcho(unittest.TestCase):
     def test_connect_accept_echo(self):
-        """libuv-style echo: connect, server accepts in a goroutine, round
+        """libuv-style echo: connect, server accepts in a fiber, round
         trip a payload.  Proves accept()/connect()/recv()/sendall() all park
         cooperatively and hand control back and forth."""
         def body():
@@ -397,7 +397,7 @@ class TestSendfile(unittest.TestCase):
     and drives os.sendfile with its own selector; the cooperative version
     must move the whole file (zero-copy os.sendfile fast path), honour
     offset/count, fall back to read()+send() for non-regular files, and park
-    on wait_fd throughout so a sibling goroutine keeps running.
+    on wait_fd throughout so a sibling fiber keeps running.
     """
 
     # 256 KiB -- larger than the kernel send buffer, so the transfer is
@@ -483,7 +483,7 @@ class TestSendfile(unittest.TestCase):
             os.unlink(path)
 
     def test_sendfile_blocked_yields_to_sibling(self):
-        """A goroutine pushing a file far larger than the send buffer must park
+        """A fiber pushing a file far larger than the send buffer must park
         on wait_fd and let a sibling run WHILE blocked -- not spin.  The payload
         is big enough that EAGAIN is sustained, so a non-parking sendfile would
         busy-loop, starve the (sibling) server that drains the socket, and hang.

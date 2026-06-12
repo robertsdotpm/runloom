@@ -8,7 +8,7 @@ from ._base import *  # noqa: F401,F403  (shared foundation)
 # Network: open_connection / start_server with StreamReader/Writer.
 #
 # We bypass asyncio's Transport/Protocol stack entirely.  Each connection
-# is a runloom goroutine doing cooperative socket I/O via wait_fd.  The
+# is a runloom fiber doing cooperative socket I/O via wait_fd.  The
 # StreamReader/Writer classes we hand to user code present the standard
 # asyncio API surface (read / readline / readuntil / readexactly /
 # write / drain / close) so existing async TCP code Just Works.

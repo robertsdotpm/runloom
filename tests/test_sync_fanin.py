@@ -3,7 +3,7 @@
 These ride directly on the GenMC-verified park() / G.wake (wake_safe) handshake
 with a runloom_c.Mutex guard held only for O(1) bookkeeping.  park() (NOT park_self,
 which busy-spins on an M:N hub) means an awaiter genuinely blocks.  The tests pin
-the contract, the goroutine-resolution contract (foreign-thread resolve raises a
+the contract, the fiber-resolution contract (foreign-thread resolve raises a
 clean error, never a SIGSEGV), that an await does not peg a hub, AND -- the failure
 mode that matters for a park/wake primitive -- a lost wakeup under repeated high
 fan-in across M:N hubs (a hang, caught by the timeout).
@@ -123,7 +123,7 @@ def test_future_exception():
         fut.set_exception(ValueError("boom"))
         with pytest.raises(ValueError, match="boom"):
             fut.result()
-        # a goroutine awaiter also sees it
+        # a fiber awaiter also sees it
         seen = []
         def aw():
             try:
@@ -212,7 +212,7 @@ def test_repeated_fanin_no_lost_wakeup():
     assert _drive(body) == 15 * 120
 
 
-# ---- Phase 2a: park() (not park_self) + goroutine-resolution contract -----
+# ---- Phase 2a: park() (not park_self) + fiber-resolution contract -----
 
 def test_sync_park_is_mn_park():
     # The fan-in primitives must use the M:N park (blocks on a hub), not park_self
@@ -223,7 +223,7 @@ def test_sync_park_is_mn_park():
 
 def test_future_resolution_from_foreign_thread_raises():
     """A foreign OS thread resolving a Future gets a clean RuntimeError, NOT a
-    SIGSEGV.  The guard (runloom_c.Mutex) wakes a contending goroutine awaiter via
+    SIGSEGV.  The guard (runloom_c.Mutex) wakes a contending fiber awaiter via
     mn_wake_g, which a foreign thread can't route safely; _resolve rejects the
     foreign caller BEFORE taking the guard (current_g() is a lock-free peek)."""
     def body():
@@ -236,7 +236,7 @@ def test_future_resolution_from_foreign_thread_raises():
                 err.append(str(e))
         t = threading.Thread(target=foreign)
         t.start(); t.join()
-        # the Future is still unresolved -- a goroutine can resolve it cleanly
+        # the Future is still unresolved -- a fiber can resolve it cleanly
         fut.set_result(2)
         return err, fut.result()
     err, val = _drive(body)
@@ -259,11 +259,11 @@ def test_waitgroup_done_from_foreign_thread_raises():
                 err.append(str(e))
         t = threading.Thread(target=foreign)
         t.start(); t.join()
-        wg.done()                                # proper done from the goroutine
+        wg.done()                                # proper done from the fiber
         wg.wait()                                # counter is 0 -> returns
         return err
     err = _drive(body)
-    assert len(err) == 1 and "goroutine" in err[0]
+    assert len(err) == 1 and "fiber" in err[0]
 
 
 def test_future_await_does_not_peg_a_hub():

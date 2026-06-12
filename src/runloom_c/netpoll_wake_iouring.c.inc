@@ -81,7 +81,7 @@ static int runloom_netpoll_lock_g_pool(runloom_g_t *g,
     }
 }
 
-/* Cancel a goroutine parked in runloom_netpoll_wait_fd.  Unlike force_unlink
+/* Cancel a fiber parked in runloom_netpoll_wait_fd.  Unlike force_unlink
  * (g-completion: unlink + release, no wake), the g here WILL resume in wait_fd,
  * so we WAKE it instead of releasing -- wait_fd's own resume path releases the
  * parker.  We claim via the same commit CAS the pump uses, so the
@@ -121,7 +121,7 @@ int runloom_netpoll_cancel_g(runloom_g_t *g)
     return woke;
 }
 
-/* Directly wake a BATCH of goroutines parked in wait_fd -- the wake side of a
+/* Directly wake a BATCH of fibers parked in wait_fd -- the wake side of a
  * fan-in primitive (Event.set / Condition.notify_all / Semaphore.release).  Each
  * g is claimed + ready_out=UNPARKED + unlinked + re-queued, identical to cancel_g
  * (UNPARKED instead of CANCELLED), one g at a time under the right pool lock via
@@ -179,9 +179,9 @@ int runloom_netpoll_unpark_many(runloom_g_t **gs, int n, int *missed_out)
     return missed;
 }
 
-/* Cancel EVERY goroutine parked in runloom_netpoll_wait_fd on `fd` -- used by
- * the socket close hook so a goroutine parked in accept()/recv()/connect() on a
- * socket that ANOTHER goroutine closes is woken instead of stranded forever
+/* Cancel EVERY fiber parked in runloom_netpoll_wait_fd on `fd` -- used by
+ * the socket close hook so a fiber parked in accept()/recv()/connect() on a
+ * socket that ANOTHER fiber closes is woken instead of stranded forever
  * (BUG #5: epoll silently drops a closed fd, so the parked waiter never gets an
  * event).  Each woken waiter returns RUNLOOM_NETPOLL_CANCELLED and the monkey
  * socket op retries on the now-closed (fileno == -1) socket, getting EBADF.
@@ -312,7 +312,7 @@ int runloom_netpoll_wake_pump_arm(void)
      *
      * Init FIRST: runloom_win_use_iocp is 0 until backend selection runs, and
      * a blocking-offload caller may arm before any socket I/O has triggered
-     * netpoll init (e.g. a goroutine that only does runloom.blocking()). */
+     * netpoll init (e.g. a fiber that only does runloom.blocking()). */
     if (runloom_netpoll_init() != 0) return -1;
     if (runloom_win_use_iocp && runloom_iocp_wake_armed()) return 0;
     return -1;

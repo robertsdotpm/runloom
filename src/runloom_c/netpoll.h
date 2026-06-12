@@ -1,7 +1,7 @@
 /* netpoll.h -- portable I/O multiplexing for the scheduler.
  *
  *   runloom_netpoll_wait_fd(fd, READ | WRITE, timeout_ns)
- *     park the current goroutine until the fd is ready or timeout expires.
+ *     park the current fiber until the fd is ready or timeout expires.
  *     Returns READY mask, 0 on timeout, -1 on error (errno set).
  *
  * Backend per OS:
@@ -24,7 +24,7 @@
 #define RUNLOOM_NETPOLL_READ  0x1
 #define RUNLOOM_NETPOLL_WRITE 0x2
 
-/* Sentinel returned by runloom_netpoll_wait_fd when the parked goroutine was
+/* Sentinel returned by runloom_netpoll_wait_fd when the parked fiber was
  * cancelled out-of-band via runloom_netpoll_cancel_g (a task.cancel() targeting a
  * g parked in a C wait_fd, where there is no coro await-point to throw into).
  * A high positive bit that can never be a real event mask (0x1/0x2) nor the
@@ -33,9 +33,9 @@
 #define RUNLOOM_NETPOLL_CANCELLED 0x40000000
 
 /* Sentinel stored in a parker's ready_out by runloom_netpoll_signal_wake when the
- * scheduler hands a raised Python signal-handler exception to a goroutine
+ * scheduler hands a raised Python signal-handler exception to a fiber
  * parked in wait_fd (so it propagates out of the cooperative blocking call
- * through that goroutine's own stack, not out of run()).  On resume wait_fd
+ * through that fiber's own stack, not out of run()).  On resume wait_fd
  * restores the exception the scheduler stashed on this g's owner scheduler
  * (->signal_exc) and returns -1 with it set.  A distinct high bit, never a real
  * event mask nor the 0/-1/CANCELLED returns. */
@@ -43,7 +43,7 @@
 
 /* Sentinel stored in a parker's ready_out by runloom_netpoll_unpark_many when a
  * cooperative primitive (Event.set / Condition.notify_all / Semaphore.release)
- * wakes a batch of goroutine waiters DIRECTLY -- claiming each parker and
+ * wakes a batch of fiber waiters DIRECTLY -- claiming each parker and
  * re-queuing its g, bypassing the per-waiter pipe-write -> epoll -> drain
  * round-trip.  Like CANCELLED/SIGNALED it is a distinct high bit that can never
  * be a real event mask (0x1/0x2) nor the 0/-1 timeout/error returns; the
@@ -52,7 +52,7 @@
  * caller tell an explicit unpark from a deadline-0). */
 #define RUNLOOM_NETPOLL_UNPARKED 0x10000000
 
-/* Directly wake up to `n` goroutines parked in runloom_netpoll_wait_fd (each via
+/* Directly wake up to `n` fibers parked in runloom_netpoll_wait_fd (each via
  * its g->netpoll_parker), as a batch -- the wake side of a fan-in primitive.
  * Claims each parker through the SAME commit CAS the pump uses (so the
  * {pump, timeout, cancel, unpark} race resolves to exactly one winner), stores
@@ -67,25 +67,25 @@
 struct runloom_g;   /* forward decl (full type lives in runloom_sched.h) */
 int runloom_netpoll_unpark_many(struct runloom_g **gs, int n, int *missed_out);
 
-/* Park the current goroutine until fd is ready for any of `events`,
+/* Park the current fiber until fd is ready for any of `events`,
  * or timeout_ns nanoseconds have passed (-1 = wait forever).
  * Returns the ready events mask (subset of `events`), 0 on timeout,
- * -1 on error.  Must be called from inside a goroutine. */
+ * -1 on error.  Must be called from inside a fiber. */
 int runloom_netpoll_wait_fd(int fd, int events, long long timeout_ns);
 
-/* Drive netpoll once.  Returns the number of goroutines woken.
+/* Drive netpoll once.  Returns the number of fibers woken.
  * Called by the scheduler when its ready queue is empty but at
- * least one goroutine is parked. */
+ * least one fiber is parked. */
 int runloom_netpoll_pump(long long timeout_ns);
 
-/* How many goroutines are currently parked.  Scheduler uses this
+/* How many fibers are currently parked.  Scheduler uses this
  * to decide whether to call pump or exit. */
 int runloom_netpoll_parked_count(void);
 
 /* DIAG: dump every parked parker (fd/g/hub/commit) to stderr. */
 void runloom_netpoll_dump_parkers(void);
 
-/* Introspection: read a goroutine's active netpoll parker (g->netpoll_parker,
+/* Introspection: read a fiber's active netpoll parker (g->netpoll_parker,
  * an opaque void* from the g's view) into plain fields for the dump.  Each
  * out-pointer may be NULL.  Returns 1 if `parker` was non-NULL (fields
  * written), 0 otherwise (fields left untouched).  A bare struct field read;
@@ -100,7 +100,7 @@ int runloom_netpoll_parker_info(void *parker, int *fd_out, int *events_out,
  * hub while idle (see the netpoll.c definition).  Returns # reclaimed. */
 int runloom_netpoll_sweep_idle(void *hub_opaque, long long threshold_ns);
 
-/* Forcibly wake every parked goroutine with ready_mask=-1.  Used by
+/* Forcibly wake every parked fiber with ready_mask=-1.  Used by
  * sched_reset() on paio.run cleanup so leftover accept loops /
  * tickers don't block the next runloom_c.run(). */
 int runloom_netpoll_drain_parked(void);
@@ -108,10 +108,10 @@ int runloom_netpoll_drain_parked(void);
 /* Wake ONE wait_fd parker owned by the calling thread's scheduler with a
  * benign (ready_mask=0) result, so it resumes and runs PyErr_CheckSignals in
  * its own tstate.  Called by the idle pump when its blocking wait returned
- * EINTR (a signal interrupted it): the woken goroutine delivers the pending
+ * EINTR (a signal interrupted it): the woken fiber delivers the pending
  * Python signal handler in-context, so a handler that raises propagates out of
  * the cooperative blocking call (recv/accept/select/...) through that
- * goroutine's stack -- where its own try/except sees it -- instead of the
+ * fiber's stack -- where its own try/except sees it -- instead of the
  * scheduler swallowing it or carrying it out of run().  Returns 1 if a parker
  * was woken, 0 if none were eligible (the scheduler then handles the signal
  * itself and carries a raised exception out of run_forever()). */
@@ -124,7 +124,7 @@ int runloom_netpoll_signal_wake(void);
 struct runloom_g;
 void runloom_netpoll_force_unlink_g_parker(struct runloom_g *g);
 
-/* Cancel a goroutine parked in runloom_netpoll_wait_fd: claim its parker (the
+/* Cancel a fiber parked in runloom_netpoll_wait_fd: claim its parker (the
  * same commit-CAS the pump uses, so exactly one of {pump, timeout, cancel}
  * wins), make its wait_fd return RUNLOOM_NETPOLL_CANCELLED, and re-queue it to its
  * owner scheduler.  Returns 1 if a parked g was woken, 0 if g had no live
@@ -140,7 +140,7 @@ int runloom_netpoll_cancel_g(struct runloom_g *g);
  * Safe to call on unknown fds (no-op). */
 void runloom_netpoll_unregister(int fd);
 
-/* Drop an OPEN fd's epoll registration IFF no goroutine is parked on it (any
+/* Drop an OPEN fd's epoll registration IFF no fiber is parked on it (any
  * pool).  Unlike unregister, issues EPOLL_CTL_DEL (the fd is still open, so the
  * kernel won't auto-remove it).  The aio bridge calls this after each low-level
  * loop.sock_* op on a user socket -- those close via a plain socket.close() that
@@ -148,9 +148,9 @@ void runloom_netpoll_unregister(int fd);
  * arm and hangs.  epoll-only (kqueue re-arms per park; select needs no reg). */
 void runloom_netpoll_release_if_idle(int fd);
 
-/* Wake every goroutine parked in wait_fd on `fd` (returning
+/* Wake every fiber parked in wait_fd on `fd` (returning
  * RUNLOOM_NETPOLL_CANCELLED) -- the socket close hook calls this AFTER closing
- * the fd so a cross-goroutine close unblocks a parked accept()/recv()/connect()
+ * the fd so a cross-fiber close unblocks a parked accept()/recv()/connect()
  * instead of stranding it forever (BUG #5).  Safe on unknown fds (no-op). */
 void runloom_netpoll_cancel_fd(int fd);
 
@@ -195,7 +195,7 @@ enum {
  * The SPAWN_* sites are injected on every platform (in-process alloc faults). */
 int runloom_fault_inject(int site);
 
-/* Cached "is any RUNLOOM_FAULT_SPAWN_* env set" check, so the goroutine-spawn
+/* Cached "is any RUNLOOM_FAULT_SPAWN_* env set" check, so the fiber-spawn
  * alloc sites pay only a branch when OOM injection is not armed. */
 int runloom_spawn_fault_armed(void);
 #define RUNLOOM_SPAWN_FINJ(site) \

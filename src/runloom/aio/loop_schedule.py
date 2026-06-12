@@ -10,7 +10,7 @@ class _LoopScheduleMixin(object):
         self._check_closed()
         if self._can_spawn_here():
             return self._pg_make_task(coro, name, context, kwargs)
-        # Foreign thread: RunloomTask.__init__ spawns a goroutine, which would land
+        # Foreign thread: RunloomTask.__init__ spawns a fiber, which would land
         # on the CALLING thread's sched (never drained by this loop).  Marshal
         # the creation onto the loop's own thread via its thread-safe queue and
         # block for the task (mirrors asyncio.run_coroutine_threadsafe).
@@ -35,7 +35,7 @@ class _LoopScheduleMixin(object):
         # factory is called WITHOUT name (context only when non-None), then
         # task.set_name(name) applies the name -- so a factory installing a
         # plain asyncio.Task / Task subclass works exactly as on stock.  No
-        # factory => our own RunloomTask (the default, goroutine-driven path).
+        # factory => our own RunloomTask (the default, fiber-driven path).
         factory = self._task_factory
         if factory is not None:
             if context is not None:
@@ -116,7 +116,7 @@ class _LoopScheduleMixin(object):
         # (and the sync_to_async(thread_sensitive=True) deadlock).
         self._check_closed()
         # Thread-safe: may be called from ANY OS thread.  Enqueue under the
-        # lock; the keepalive goroutine on the loop thread drains and runs it.
+        # lock; the keepalive fiber on the loop thread drains and runs it.
         # We do NOT runloom_c.go() here -- from a foreign thread that would
         # spawn onto that thread's own (never-drained) scheduler.
         # _Handle captures copy_context() HERE on the calling thread (or honours
@@ -130,7 +130,7 @@ class _LoopScheduleMixin(object):
 
     def _drain_ts_queue(self):
         """Run all callbacks enqueued via call_soon_threadsafe.  Called from
-        the keepalive goroutine on the loop thread."""
+        the keepalive fiber on the loop thread."""
         with self._ts_lock:
             if not self._ts_queue:
                 return
@@ -149,13 +149,13 @@ class _LoopScheduleMixin(object):
                     {"message": "call_soon_threadsafe callback", "exception": e})
 
     def _spawn_keepalive(self):
-        """Spawn the goroutine that drains the thread-safe queue and keeps the
+        """Spawn the fiber that drains the thread-safe queue and keeps the
         scheduler alive while the run is in progress.  Idempotent per run."""
         stop = [False]
         self._ka_stop_box = stop
         def _keepalive(stop=stop):
             # Poll the cross-thread queue.  sched_sleep keeps sleep_size>0 so
-            # runloom_sched_drain stays in its loop (a bare-parked goroutine alone
+            # runloom_sched_drain stays in its loop (a bare-parked fiber alone
             # would let it return idle) and re-checks the cross-thread wake list
             # each wake.  2ms bounds foreign-wake latency; cheap for a test run.
             # `stop` is this run's private box -- a later run can't revive us.
@@ -170,15 +170,15 @@ class _LoopScheduleMixin(object):
                 # task.cancel() loop aiosmtpd queues alongside loop.stop()) runs.
                 self._drain_ts_queue()
             except BaseException as e:
-                # An async signal handler fired in THIS goroutine's eval loop:
+                # An async signal handler fired in THIS fiber's eval loop:
                 # SIGINT's default handler raises KeyboardInterrupt (Ctrl-C),
                 # sys.exit raises SystemExit, and a custom handler (e.g.
                 # pytest-timeout's SIGALRM) may raise anything.  The keepalive
                 # runs Python every ~2ms while the loop is otherwise idle, so
-                # it's the goroutine that most often catches a signal during a
+                # it's the fiber that most often catches a signal during a
                 # parked run_forever() -- the only Python making progress.
                 # CPython delivers the pending handler at a bytecode boundary on
-                # the main thread regardless of which goroutine is current; if
+                # the main thread regardless of which fiber is current; if
                 # we just let the keepalive die, an idle loop with any still-
                 # parked task would hang forever (the signal never reaches
                 # run_forever).  _drain_ts_queue() already swallows ordinary
@@ -226,7 +226,7 @@ class _LoopScheduleMixin(object):
                 try:
                     # Read the callback/args THROUGH the handle, never via closure
                     # capture: asyncio.Handle.cancel() nulls handle._callback /
-                    # handle._args, so a cancelled timer's still-sleeping goroutine
+                    # handle._args, so a cancelled timer's still-sleeping fiber
                     # then holds NO reference to the callback (or anything it closes
                     # over).  Capturing `callback`/`args` directly here kept them --
                     # and e.g. an aiocoap retransmit's whole message/transport --
@@ -245,19 +245,19 @@ class _LoopScheduleMixin(object):
         if self._can_spawn_here():
             _go_io(runner)
         else:
-            # Foreign thread: spawn the timer goroutine on the loop's own thread.
+            # Foreign thread: spawn the timer fiber on the loop's own thread.
             self.call_soon_threadsafe(lambda: _go_io(runner))
         return handle
 
     # ---- I/O readers / writers (level-triggered, matches selector loops) ----
     # Stock asyncio keeps ONE selector key per fd carrying a COMBINED event mask
     # (READ|WRITE) and services both directions from a single readiness check.
-    # runloom MUST mirror that with ONE goroutine per fd: a separate goroutine per
+    # runloom MUST mirror that with ONE fiber per fd: a separate fiber per
     # direction would park the SAME fd in netpoll twice, and the arm is one-shot
     # per fd -- so the second registration's direction silently overwrites the
     # first's.  A reader AND a writer on one fd (e.g. tornado IOStream: an
     # add_writer to detect connect completion + an add_reader for the response,
     # both live at once) then lose one direction's wakeups: the connect-write
     # event never fires, the queued request never flushes, the peer hangs.  So a
-    # single per-fd goroutine parks on the UNION mask and dispatches by the
+    # single per-fd fiber parks on the UNION mask and dispatches by the
     # ready mask wait_fd returns; interest changes wake it to re-evaluate.

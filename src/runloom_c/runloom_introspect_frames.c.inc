@@ -17,7 +17,7 @@
  *     accessors.  This is the runloom.aio case (asyncio is single-loop), and
  *     asyncio tasks additionally expose their full stack via the stock
  *     Task.get_stack(), so the top frame is the useful add for the raw
- *     goroutines (channels, pump, accept loops) all_tasks() never sees.
+ *     fibers (channels, pump, accept loops) all_tasks() never sees.
  *
  *   - default M:N with hubs running and no per-g tstate: a parked g can be
  *     resumed by its owning hub concurrently, and we hold no claim that
@@ -28,7 +28,7 @@
  * runloom_g_try_incref), so the struct + its owned objects cannot be freed
  * mid-walk. */
 
-/* Max frames to report per goroutine -- deep enough for real stacks,
+/* Max frames to report per fiber -- deep enough for real stacks,
  * bounded so a corrupt chain can't spin. */
 #define RUNLOOM_FRAMES_MAX 256
 
@@ -67,7 +67,7 @@ static void frames_walk(void *top_iframe, PyObject *list)
     runloom_iframe_walk(top_iframe, RUNLOOM_FRAMES_MAX, frames_cb, list);
 }
 
-PyObject *runloom_goroutine_frames_by_id(long long id)
+PyObject *runloom_fiber_frames_by_id(long long id)
 {
     runloom_g_t *g, *found = NULL;
     PyObject *frames, *repr = NULL, *result;
@@ -90,7 +90,7 @@ PyObject *runloom_goroutine_frames_by_id(long long id)
     }
 
     if (!got) {
-        /* Unknown id, or the goroutine is being torn down. */
+        /* Unknown id, or the fiber is being torn down. */
         result = PyTuple_Pack(2, Py_None, frames);
         Py_DECREF(frames);
         return result;

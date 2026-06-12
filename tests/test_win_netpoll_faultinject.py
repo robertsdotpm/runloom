@@ -13,11 +13,11 @@ error contracts, not memory-model races:
     (1 ms), so the injection rate is bounded by wall-clock, not by the CPU.
     This is the Windows analogue of the Linux EBADF n<0 busy-spin guard, which
     the Windows wsapoll/select paths previously LACKED (added alongside this);
-  * an AFD-poll SUBMIT failure must surface cleanly to the parked goroutine --
-    no crash, no stranded goroutine.
+  * an AFD-poll SUBMIT failure must surface cleanly to the parked fiber --
+    no crash, no stranded fiber.
 
 Each backend (wsapoll / select / iocp-afd) is forced via RUNLOOM_NETPOLL; the
-workload (netpoll_inproc_fault_workload.py) parks a goroutine on a socket so the
+workload (netpoll_inproc_fault_workload.py) parks a fiber on a socket so the
 fault hits a live pump and the deadline still wakes it.  Windows-only.
 """
 import os
@@ -97,8 +97,8 @@ def test_transient_poll_error_tolerated(backend, site):
 
 
 # ---------------------------------------------------------------------------
-# IOCP-AFD: a SUBMIT failure must surface cleanly to the goroutine (no crash,
-# no stranded goroutine -- the parker's wait_fd returns/raises and the run
+# IOCP-AFD: a SUBMIT failure must surface cleanly to the fiber (no crash,
+# no stranded fiber -- the parker's wait_fd returns/raises and the run
 # completes).
 # ---------------------------------------------------------------------------
 def test_iocp_submit_failure_surfaces_clean():
@@ -107,7 +107,7 @@ def test_iocp_submit_failure_surfaces_clean():
     assert "DONE" in p.stdout, p.stdout
     assert _field(p.stdout, "BACKEND") == "iocp-afd", p.stdout
     assert int(_field(p.stdout, "FAULTS")) == 1, p.stdout
-    # The goroutine recorded SOME outcome (didn't hang): an OSError or a value.
+    # The fiber recorded SOME outcome (didn't hang): an OSError or a value.
     assert _field(p.stdout, "RESULT") not in (None, "[]"), p.stdout
 
 

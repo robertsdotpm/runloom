@@ -1,17 +1,17 @@
 """Cooperative CPU-heavy stdlib calls: size-gated auto-offload (`heavy`).
 
 hashlib.sha*/md5/blake2 and zlib/gzip/bz2/lzma compress/decompress burn CPU in
-a tight C loop with no yield point -- a goroutine can't hand off mid-sha256 and
+a tight C loop with no yield point -- a fiber can't hand off mid-sha256 and
 the sysmon preemptor can't interrupt a frameless C loop, so it pins the
 scheduler.  runloom.monkey can't make these cooperative, only RELOCATE them: above
 RUNLOOM_OFFLOAD_BYTES (default 256 KiB) the call runs on the backend pool so the
-goroutine parks and its siblings keep running.  KDFs (pbkdf2_hmac / scrypt) are
+fiber parks and its siblings keep running.  KDFs (pbkdf2_hmac / scrypt) are
 always offloaded (cost is iterations, not size).
 
 The point is that developers don't have to remember to wrap the common heavy
 ones -- it just happens.  These tests pin: bit-identical results vs stock,
 that a big call yields to a sibling, round-trips through compress/decompress,
-small calls stay inline, and non-goroutine callers pass straight through.
+small calls stay inline, and non-fiber callers pass straight through.
 
 Adapted from CPython Lib/test (test_hashlib, test_zlib, test_gzip, test_bz2,
 test_lzma) -- the same vectors, asserted to match under auto-offload.
@@ -179,8 +179,8 @@ class TestCompressionOffload(unittest.TestCase):
 
 
 class TestPassthrough(unittest.TestCase):
-    def test_outside_goroutine_runs_inline(self):
-        # No goroutine context -> straight through to the original, correct.
+    def test_outside_fiber_runs_inline(self):
+        # No fiber context -> straight through to the original, correct.
         self.assertEqual(hashlib.sha256(DATA).hexdigest(), REF["sha256"])
         self.assertEqual(zlib.compress(DATA, 6), REF["zlib"])
 

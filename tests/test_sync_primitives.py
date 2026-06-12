@@ -2,7 +2,7 @@
 once_func, singleflight Group, Watch, JoinSet.
 
 All ride the GenMC-verified park()/g.wake() handshake + the runloom_c.Mutex guard +
-the goroutine-resolution contract.  These pin the contract AND the failure mode
+the fiber-resolution contract.  These pin the contract AND the failure mode
 that matters for a park/wake primitive -- a lost wakeup / wrong-mutual-exclusion
 under M:N -- which would hang (caught by the timeout) or miscount (caught by an
 assert).

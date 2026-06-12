@@ -17,7 +17,7 @@ class _TLSSock(object):
     CoLock serialises every SSLObject call.  Crucially the lock is RELEASED
     across every wait_fd, so a read parked waiting for inbound bytes never
     blocks a concurrent write (full-duplex keeps working).  Holding a real
-    OS lock here would be wrong -- runloom can switch goroutines at a bytecode
+    OS lock here would be wrong -- runloom can switch fibers at a bytecode
     boundary while one holds it, deadlocking the hub; CoLock is switch-safe.
     """
 
@@ -61,7 +61,7 @@ class _TLSSock(object):
     def do_handshake(self, timeout=None):
         # timeout (seconds) bounds the WHOLE handshake (asyncio's
         # ssl_handshake_timeout); a peer that stalls mid-handshake must not
-        # park this goroutine forever.  None = wait indefinitely.
+        # park this fiber forever.  None = wait indefinitely.
         fd = self._ssl.fileno()
         deadline = None if timeout is None else (_time.monotonic() + timeout)
         while True:
@@ -102,10 +102,10 @@ class _TLSSock(object):
     def recv_nb(self, n):
         # SINGLE non-blocking recv attempt: returns decrypted bytes, b'' on EOF,
         # or raises BlockingIOError if no application data is ready yet.  Never
-        # parks -- the merged _StreamTransport io goroutine must not block in
-        # recv (it would stall the write drain on the SAME goroutine, a
+        # parks -- the merged _StreamTransport io fiber must not block in
+        # recv (it would stall the write drain on the SAME fiber, a
         # full-duplex deadlock).  The cooperative parking recv() below is for
-        # callers that own a dedicated read goroutine.
+        # callers that own a dedicated read fiber.
         if self._closed:
             return b""
         with self._lock:

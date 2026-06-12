@@ -3,12 +3,12 @@
 Same surface, no coroutines.  Lets you port async code to straight-line
 synchronous code without giving up the runloom scheduler.  Two styles:
 
-  Style A: blocking-style I/O inside a goroutine.
+  Style A: blocking-style I/O inside a fiber.
     runloom.sync.start()                # opens an implicit scheduler
     sock = runloom.sync.tcp_connect(...)
     sock.sendall(b'...')              # cooperative
     data = sock.recv(...)
-    runloom.sync.go(other_worker)        # other goroutines run concurrently
+    runloom.sync.go(other_worker)        # other fibers run concurrently
     runloom.sync.stop()
 
   Style B: drive a "main" function as the entry point.
@@ -17,7 +17,7 @@ synchronous code without giving up the runloom scheduler.  Two styles:
         ...
     runloom.sync.run(main)               # spawns main + drains
 
-Behind the scenes everything is still cooperative goroutines.  The
+Behind the scenes everything is still cooperative fibers.  The
 sockets we return are normal Python sockets in non-blocking mode that
 park cooperatively via wait_fd.
 
@@ -38,13 +38,13 @@ from runloom.runtime import prewarm_stdlib as _prewarm_stdlib
 # Scheduler control
 # --------------------------------------------------------------------
 def go(callable_, *args, **kwargs):
-    """Spawn a goroutine.  Returns a G handle (has .done / .result /
+    """Spawn a fiber.  Returns a G handle (has .done / .result /
     .wake / .stack).  Equivalent of asyncio.create_task minus the
     coroutine layer."""
     # Warm the deep, non-yielding stdlib imports getaddrinfo triggers
     # (encodings.idna -> stringprep -> unicodedata) here, on the main
     # thread's large stack -- but only when NOT already inside a
-    # goroutine, since prewarm itself does a getaddrinfo and would
+    # fiber, since prewarm itself does a getaddrinfo and would
     # overflow the small coroutine stack it is meant to protect.
     if runloom_c.current_g() is None:
         _prewarm_stdlib()
@@ -58,7 +58,7 @@ def go(callable_, *args, **kwargs):
 def run(main_fn=None):
     """Drive the scheduler until idle.  Optionally spawn main_fn first."""
     # Same prewarm as runloom.runtime.run(): resolve getaddrinfo's lazy codec
-    # import on the big stack before any goroutine runs on a small one.
+    # import on the big stack before any fiber runs on a small one.
     _prewarm_stdlib()
     if main_fn is not None:
         runloom_c.go(main_fn)
@@ -66,9 +66,9 @@ def run(main_fn=None):
 
 
 def sleep(seconds):
-    """Cooperative sleep -- other goroutines run while this one waits.
+    """Cooperative sleep -- other fibers run while this one waits.
 
-    Outside any goroutine, falls back to time.sleep."""
+    Outside any fiber, falls back to time.sleep."""
     if runloom_c.current_g() is None:
         _time.sleep(seconds)
         return
@@ -81,7 +81,7 @@ def yield_now():
 
 
 def current():
-    """Return a G handle to the currently-running goroutine, or None."""
+    """Return a G handle to the currently-running fiber, or None."""
     return runloom_c.current_g()
 
 
@@ -101,11 +101,11 @@ class Socket(object):
     Same API as socket.socket for the methods we care about (recv,
     send, sendall, recvfrom, sendto, connect, accept, bind, listen,
     close, getsockname, getpeername, setsockopt, setblocking, fileno,
-    shutdown).  Blocking calls park the current goroutine via wait_fd
-    so other goroutines keep running.
+    shutdown).  Blocking calls park the current fiber via wait_fd
+    so other fibers keep running.
 
-    NOT thread-safe -- one Socket per goroutine.  For send/recv from
-    multiple goroutines onto the same fd, use a channel-based fan-in.
+    NOT thread-safe -- one Socket per fiber.  For send/recv from
+    multiple fibers onto the same fd, use a channel-based fan-in.
     """
 
     def __init__(self, family=_socket.AF_INET, type=_socket.SOCK_STREAM,
@@ -299,7 +299,7 @@ park_self = runloom_c.park_self
 
 
 def wake(g):
-    """Wake a goroutine handle returned by go()."""
+    """Wake a fiber handle returned by go()."""
     if g is not None:
         g.wake()
 
@@ -311,15 +311,15 @@ def wake(g):
 # runloom_sched_wake_safe; "safe to call before the park" -- the Dekker absorbs a
 # wake that races the park, on both the single-thread and M:N hub paths).  park()
 # (NOT park_self -- which busy-spins on a hub) means a waiter BLOCKS under M:N,
-# zero fds per waiter.  A runloom_c.Mutex (a cooperative goroutine mutex) guards
+# zero fds per waiter.  A runloom_c.Mutex (a cooperative fiber mutex) guards
 # the O(1) counter/slot + waiter-list bookkeeping and is ALWAYS released before
 # park(), so a waker never blocks on a parked waiter.  Each is the lean equivalent
 # of a Chan(1)-per-result fan-in, without a channel buffer or a select per await.
 #
-# RESOLUTION CONTRACT -- resolve from a goroutine, not a foreign OS thread.  The
+# RESOLUTION CONTRACT -- resolve from a fiber, not a foreign OS thread.  The
 # guard's wake path (runloom_c.Mutex unlock -> mn_wake_g) is NOT foreign-OS-thread
 # safe: a foreign-thread done() / set_result that contends the guard with an
-# awaiting goroutine would re-queue it onto a garbage hub (SIGSEGV).  So the WAKE
+# awaiting fiber would re-queue it onto a garbage hub (SIGSEGV).  So the WAKE
 # side (WaitGroup.done()/add(negative); Future.set_result/set_exception) raises a
 # clean RuntimeError when current_g() is None, BEFORE taking the guard -- the same
 # contract as asyncio (resolve on the loop thread; cross-thread goes through
@@ -329,16 +329,16 @@ def wake(g):
 # Scope: a park()-parked waiter is NOT counted as keeping a SINGLE-THREAD run()
 # alive (same as a channel park -- see chan_waiters.c.inc park_waiter FINDING).
 # Under M:N (run(N) / mn_run, the primary mode) the hubs stay alive while a waiter
-# is parked.  Because resolution is goroutine-only, the resolving goroutine keeps
+# is parked.  Because resolution is fiber-only, the resolving fiber keeps
 # run() alive until it fires the wake, so single-thread run() works too.  (A
 # foreign-thread-wakeable Event must park on a netpoll fd instead -- that is why
 # monkey's CoEvent uses _Parker, not park().)
 # --------------------------------------------------------------------
 class WaitGroup(object):
-    """Go-style sync.WaitGroup: wait for a set of goroutines to finish.
+    """Go-style sync.WaitGroup: wait for a set of fibers to finish.
 
-    add(n) before spawning n goroutines, done() (or add(-1)) as each finishes,
-    wait() blocks until the counter returns to zero.  Multiple goroutines may
+    add(n) before spawning n fibers, done() (or add(-1)) as each finishes,
+    wait() blocks until the counter returns to zero.  Multiple fibers may
     wait(); all are woken when the count hits zero.  Reusable once the count is
     back at zero."""
 
@@ -348,7 +348,7 @@ class WaitGroup(object):
         self._mu = runloom_c.Mutex()
 
     def add(self, delta=1):
-        # done()/add(negative) is the WAKE side; it must come from a goroutine.
+        # done()/add(negative) is the WAKE side; it must come from a fiber.
         # The guard is a runloom_c.Mutex whose wake path is not foreign-OS-thread-
         # safe, so a foreign-thread done() that wakes a parked waiter would crash.
         # Reject it BEFORE taking the guard (current_g() is a lock-free peek), so
@@ -359,7 +359,7 @@ class WaitGroup(object):
         if delta < 0 and runloom_c.current_g() is None:
             raise RuntimeError(
                 "WaitGroup.done() / add(negative) must be called from a "
-                "goroutine, not a foreign OS thread")
+                "fiber, not a foreign OS thread")
         self._mu.lock()
         self._n += delta
         if self._n < 0:
@@ -379,7 +379,7 @@ class WaitGroup(object):
     def wait(self):
         g = runloom_c.current_g()
         if g is None:
-            # Foreign OS thread: no goroutine to park, poll the counter.
+            # Foreign OS thread: no fiber to park, poll the counter.
             while True:
                 self._mu.lock()
                 n = self._n
@@ -403,7 +403,7 @@ class WaitGroup(object):
 
 
 class Future(object):
-    """A one-shot result/exception slot any number of goroutines can await.
+    """A one-shot result/exception slot any number of fibers can await.
 
     set_result()/set_exception() resolve it once and wake every current awaiter;
     a later result() on a resolved Future returns (or raises) immediately.  The
@@ -432,7 +432,7 @@ class Future(object):
         # the park-based foreign-safe guard.
         if runloom_c.current_g() is None:
             raise RuntimeError(
-                "Future must be resolved from a goroutine, not a foreign OS thread")
+                "Future must be resolved from a fiber, not a foreign OS thread")
         self._mu.lock()
         if self._done:
             self._mu.unlock()
@@ -455,7 +455,7 @@ class Future(object):
 
     def result(self, timeout=None):
         # timeout (seconds, optional): raise TimeoutError if unresolved by the
-        # deadline.  A goroutine parks via park(timeout=) (0 fds); a foreign thread
+        # deadline.  A fiber parks via park(timeout=) (0 fds); a foreign thread
         # polls.  Re-checks _done on every (possibly spurious) wake -- the flag is
         # authoritative, never a single park() return.
         g = runloom_c.current_g()
@@ -519,7 +519,7 @@ class Future(object):
 
 
 def gather(*callables):
-    """Run `callables` as goroutines concurrently and block until all finish,
+    """Run `callables` as fibers concurrently and block until all finish,
     returning their results in argument order.  If any raises, the first
     exception (by argument order) is re-raised after all have completed.  Each
     runner writes its own result slot (one writer per slot), so there is no
@@ -575,12 +575,12 @@ def gather(*callables):
 # foreign WAITER poll.
 # ====================================================================
 
-def _resolve_from_goroutine(what):
+def _resolve_from_fiber(what):
     """Raise (before any guard) if a WAKE/resolve op runs on a foreign OS thread --
     the guard's wake path (mn_wake_g) is not foreign-thread-safe."""
     if runloom_c.current_g() is None:
         raise RuntimeError(
-            "%s must be called from a goroutine, not a foreign OS thread" % what)
+            "%s must be called from a fiber, not a foreign OS thread" % what)
 
 
 class RWMutex(object):
@@ -606,7 +606,7 @@ class RWMutex(object):
         self._mu = runloom_c.Mutex()
 
     def rlock(self):
-        _resolve_from_goroutine("RWMutex.rlock()")
+        _resolve_from_fiber("RWMutex.rlock()")
         g = runloom_c.current_g()
         self._mu.lock()
         if not self._writer and not self._wwait:    # writer-preference: a waiting
@@ -625,7 +625,7 @@ class RWMutex(object):
                 return
 
     def runlock(self):
-        _resolve_from_goroutine("RWMutex.runlock()")
+        _resolve_from_fiber("RWMutex.runlock()")
         self._mu.lock()
         if self._readers <= 0:
             self._mu.unlock()
@@ -641,7 +641,7 @@ class RWMutex(object):
             self._mu.unlock()
 
     def lock(self):
-        _resolve_from_goroutine("RWMutex.lock()")
+        _resolve_from_fiber("RWMutex.lock()")
         g = runloom_c.current_g()
         self._mu.lock()
         if not self._writer and self._readers == 0:
@@ -660,7 +660,7 @@ class RWMutex(object):
                 return
 
     def unlock(self):
-        _resolve_from_goroutine("RWMutex.unlock()")
+        _resolve_from_fiber("RWMutex.unlock()")
         self._mu.lock()
         if not self._writer:
             self._mu.unlock()
@@ -721,7 +721,7 @@ class Semaphore(object):
             raise ValueError("Semaphore.acquire(n): n must be >= 0")
         if n > self._limit:
             raise ValueError("Semaphore.acquire(%d) exceeds limit %d" % (n, self._limit))
-        _resolve_from_goroutine("Semaphore.acquire()")
+        _resolve_from_fiber("Semaphore.acquire()")
         deadline = None if timeout is None else _time.monotonic() + timeout
         g = runloom_c.current_g()
         self._mu.lock()
@@ -760,7 +760,7 @@ class Semaphore(object):
     def try_acquire(self, n=1):
         if n < 0:
             raise ValueError("n must be >= 0")
-        _resolve_from_goroutine("Semaphore.try_acquire()")   # goroutine-only contract
+        _resolve_from_fiber("Semaphore.try_acquire()")   # fiber-only contract
         self._mu.lock()
         if not self._waiters and self._held + n <= self._limit:
             self._held += n
@@ -772,7 +772,7 @@ class Semaphore(object):
     def release(self, n=1):
         if n < 0:
             raise ValueError("Semaphore.release(n): n must be >= 0")
-        _resolve_from_goroutine("Semaphore.release()")
+        _resolve_from_fiber("Semaphore.release()")
         self._mu.lock()
         self._held -= n
         if self._held < 0:
@@ -810,7 +810,7 @@ class Once(object):
     no-op.  The FIRST executor sees fn's exception; later callers do NOT (Go
     semantics -- use once_value to cache+re-raise it).  A panicking fn still
     completes the Once.  A foreign OS thread may WAIT (poll) but may not be the
-    first executor (it would wake parked goroutines)."""
+    first executor (it would wake parked fibers)."""
 
     __slots__ = ("_done", "_running", "_waiters", "_mu")
 
@@ -837,7 +837,7 @@ class Once(object):
             if g is None:
                 self._mu.unlock()
                 raise RuntimeError(
-                    "Once.do() first call must be from a goroutine, not a foreign "
+                    "Once.do() first call must be from a fiber, not a foreign "
                     "OS thread")
             self._running = True
             self._mu.unlock()
@@ -910,7 +910,7 @@ class Group(object):
     """singleflight.Group (golang.org/x/sync/singleflight): do(key, fn) dedupes
     concurrent calls with the same key -- the first caller runs fn; concurrent
     callers with the same key WAIT and SHARE its result/exception.  Returns
-    (value, shared: bool).  The first caller for a key must be a goroutine (it
+    (value, shared: bool).  The first caller for a key must be a fiber (it
     resolves the shared Future)."""
 
     __slots__ = ("_calls", "_mu")
@@ -931,7 +931,7 @@ class Group(object):
             self._mu.unlock()
             raise RuntimeError(
                 "singleflight.Group.do() first call for a key must be from a "
-                "goroutine, not a foreign OS thread")
+                "fiber, not a foreign OS thread")
         fut = Future()
         self._calls[key] = fut
         self._mu.unlock()
@@ -963,7 +963,7 @@ class Group(object):
 class Watch(object):
     """tokio::sync::watch: a single latest-value cell many observers watch for
     CHANGES.  set(v) updates the value + a version counter + wakes ALL waiters
-    (goroutine-only).  get()/version() read; wait_changed(seen, timeout=None) blocks
+    (fiber-only).  get()/version() read; wait_changed(seen, timeout=None) blocks
     until version > seen and returns (value, version), or None on timeout."""
 
     __slots__ = ("_value", "_version", "_waiters", "_mu")
@@ -993,7 +993,7 @@ class Watch(object):
         return r
 
     def set(self, value):
-        _resolve_from_goroutine("Watch.set()")
+        _resolve_from_fiber("Watch.set()")
         self._mu.lock()
         self._value = value
         self._version += 1                  # increment UNDER the guard (no lost wake)
@@ -1056,7 +1056,7 @@ class Watch(object):
 
 class JoinSet(object):
     """Structured concurrency (Tokio JoinSet / trio nursery): spawn(fn, *a, **kw)
-    runs fn as a goroutine tracked by the set; join_all() waits for ALL, returns
+    runs fn as a fiber tracked by the set; join_all() waits for ALL, returns
     results in SPAWN order, and (after all finish) raises the FIRST exception by
     spawn order -- like gather.  Single-use; spawn from ONE place before join_all().
     Also a context manager: `with JoinSet() as js: js.spawn(...)` joins on exit."""
@@ -1070,7 +1070,7 @@ class JoinSet(object):
         self._n       = 0
 
     def spawn(self, fn, *args, **kwargs):
-        """Spawn fn as a tracked goroutine.  Returns its index (spawn order).
+        """Spawn fn as a tracked fiber.  Returns its index (spawn order).
         Each runner writes only its OWN result/err slot -> no shared-counter race
         even with the GIL off."""
         i = self._n

@@ -1,10 +1,10 @@
 """Event/Condition/Semaphore waits park IN MEMORY (0 per-waiter fds), via
 runloom_c.park()[/park(timeout=...)] + g.wake(), instead of one OS pipe/socketpair
 per waiter.  A million coroutines on event.wait() previously cost ~2M fds; now ~1
-(the shared run-alive anchor).  TIMED goroutine waits are ALSO fd-free: they ride
+(the shared run-alive anchor).  TIMED fiber waits are ALSO fd-free: they ride
 the scheduler's per-hub timer heap (runloom_park_generic_timed -- the same
 parked_safe CAS, exactly-once vs a real wake; FV: verify/spin/park_generic_timed).
-Only a FOREIGN-thread wait keeps an fd (park can't serve a non-goroutine).
+Only a FOREIGN-thread wait keeps an fd (park can't serve a non-fiber).
 
 Guards the fd reduction AND the load-bearing correctness: wake-before-park, a
 foreign-thread setter, the timed-park exactly-once race, and the timed paths.
@@ -215,7 +215,7 @@ def test_timed_wake_vs_timeout_exactly_once():
             runloom.sleep(dl * (0.5 + (i % 7) / 7.0))
             ev.set()
             # Wait for the waiter to actually resume before classifying.  A woken
-            # goroutine under 8-hub load may not be SCHEDULED to write box for many
+            # fiber under 8-hub load may not be SCHEDULED to write box for many
             # ms after its wake commits -- a fixed tiny wait races that and reads a
             # not-yet-written box as a false "never resumed" (the overnight flake:
             # bad=1 with not_once=0, i.e. it DID resume exactly once, just later).

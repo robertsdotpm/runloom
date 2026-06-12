@@ -15,7 +15,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* Recycle-hygiene checker (security): runloom pools and reuses goroutine stacks
+/* Recycle-hygiene checker (security): runloom pools and reuses fiber stacks
  * in raw mmap'd memory that ASan treats as always-valid, so a use-after-
  * recycle of a stack (the S1 leak class, generalized) is invisible to ASan.
  * Manually poison a stack while it sits in a pool and unpoison it on reuse --
@@ -78,7 +78,7 @@ struct runloom_coro {
     /* Invariant sanitizer (#3): 1 while a thread is actively swapped INTO this
      * coro (between resume's swap-in and swap-out).  Written only when
      * RUNLOOM_DBG_INVARIANTS is on; checked on release/reacquire to catch a
-     * coro/stack being recycled while a goroutine still executes on it. */
+     * coro/stack being recycled while a fiber still executes on it. */
     int dbg_running;
     /* Free-list link for the per-thread coro recycle pool.  When the
      * coro is in use, this is undefined; when on the pool free list,
@@ -107,7 +107,7 @@ struct runloom_coro {
 };
 
 /* Stack size in bytes for this coro, or 0 on backends without an
- * introspectable stack (Fibers).  Used by the goroutine dump. */
+ * introspectable stack (Fibers).  Used by the fiber dump. */
 size_t runloom_coro_stack_size(const runloom_coro_t *c)
 {
     if (c == NULL) return 0;
@@ -170,7 +170,7 @@ const char *runloom_coro_backend(void)
 
 /* Invariant sanitizer (#3): a coro about to be recycled to the pool, released,
  * or reacquired must NOT have a thread executing on it.  If it does, a live
- * goroutine stack is being recycled -- the use-after-free class behind the
+ * fiber stack is being recycled -- the use-after-free class behind the
  * gc-churn crashes.  Fires loudly (message + flight recorder + abort) at the
  * point of the violation.  No-op unless RUNLOOM_DBG_INVARIANTS. */
 static void runloom_coro_assert_idle(runloom_coro_t *c, const char *where)
@@ -214,7 +214,7 @@ static RUNLOOM_TLS int    runloom_tls_stack_pool_n = 0;
 
 /* Shared global stack depot (magazine model).  The TLS pool above is a
  * lock-free per-thread cache for the common balanced case; but under an
- * acceptor->worker fan-out (one goroutine mn_go's many handlers that complete
+ * acceptor->worker fan-out (one fiber mn_go's many handlers that complete
  * across all hubs) stacks drain out of the acceptor thread's cache and pile
  * into the worker threads' caches, which the acceptor can never reach -- so the
  * acceptor re-mmaps forever and the worker caches grow without bound.  When a
@@ -360,7 +360,7 @@ static void runloom_stack_flush_to_global(void)
 
 /* TEST (RUNLOOM_STACK_ARENA=1): carve every stack as a slice of ONE big
  * pre-mmap'd arena -- lock-free (a single atomic bump), no per-stack mmap, no
- * global depot lock.  Each goroutine still gets a DISTINCT stack (its own
+ * global depot lock.  Each fiber still gets a DISTINCT stack (its own
  * slice), so nothing corrupts and nothing crashes; this isolates whether the
  * stack-acquire path (mmap + depot lock) is the spawn bottleneck.  Test-only:
  * no per-slice guard page, and arena slices are never reclaimed.  Slices match
@@ -407,7 +407,7 @@ static int runloom_arena_ensure_locked(size_t slot)
 }
 
 /* Reserve n contiguous slots; 0 + *start on success, -1 on exhaustion/mismatch.
- * LOCKED, but called once per go_n / per single carve -- NEVER per goroutine --
+ * LOCKED, but called once per go_n / per single carve -- NEVER per fiber --
  * so it's off the hot path.  The bump cursor is rewound on free (and fully
  * reset when the arena drains to empty), so repeated spawn->drain->spawn cycles
  * reuse the same address space instead of marching the cursor to the cap. */
@@ -566,12 +566,12 @@ static int runloom_stack_paint_on = 1;
 void runloom_coro_paint_set(int enabled) { runloom_stack_paint_on = enabled ? 1 : 0; }
 int  runloom_coro_paint_enabled(void)    { return runloom_stack_paint_on; }
 
-/* Security: wipe a goroutine's stack when it is recycled, so the next
- * goroutine to reuse that stack can't read this one's leftovers (TLS keys,
+/* Security: wipe a fiber's stack when it is recycled, so the next
+ * fiber to reuse that stack can't read this one's leftovers (TLS keys,
  * request bodies -- the aio bridge runs OpenSSL on these stacks). OFF by
- * default: it costs one stack-sized memset per goroutine completion, and the
+ * default: it costs one stack-sized memset per fiber completion, and the
  * leftover is only reachable via a C extension reading uninitialised stack
- * (Python objects live on the heap, not the goroutine C stack). Enable for
+ * (Python objects live on the heap, not the fiber C stack). Enable for
  * security-sensitive workloads via RUNLOOM_STACK_SCRUB=1 or set_stack_scrub(True).
  * (Painting would also overwrite the data, but it is calibrated off for
  * performance after the first few spawns -- so it can't be relied on.) */
@@ -579,7 +579,7 @@ static int runloom_stack_scrub_on = 0;
 void runloom_coro_scrub_set(int enabled) { runloom_stack_scrub_on = enabled ? 1 : 0; }
 int  runloom_coro_scrub_enabled(void)    { return runloom_stack_scrub_on; }
 
-/* Wipe a whole goroutine stack.  On Linux, MADV_DONTNEED frees the page
+/* Wipe a whole fiber stack.  On Linux, MADV_DONTNEED frees the page
  * frames and the next touch re-faults a zero page -- a complete scrub that
  * costs an O(1) syscall instead of a stack-sized memset (a 512 KB memset
  * was ~60x the spawn cost in measurement; this is ~flat).  Elsewhere
@@ -611,10 +611,10 @@ static void runloom_stack_paint(void *stack, size_t size)
 }
 
 /* Stack high-water-mark via resident pages (mincore) -- page-granular, which
- * is ample since calibration rounds to next_pow2.  A goroutine grows its stack
+ * is ample since calibration rounds to next_pow2.  A fiber grows its stack
  * DOWN from the top, faulting pages as it deepens; those pages stay resident
  * until the stack is released (MADV_DONTNEED).  So the contiguous run of
- * resident pages measured DOWN from the top is the deepest the goroutine ever
+ * resident pages measured DOWN from the top is the deepest the fiber ever
  * reached.  The lone resident pool-header page at the very bottom sits below
  * the untouched gap, so the top-down scan stops before it.  Writes nothing
  * (companion to the datastack resident-page accounting in
@@ -661,7 +661,7 @@ int runloom_coro_thread_init(void)
     }
 #endif
     /* Arm this OS thread's sigaltstack so the crash handler can run even when
-     * the fault is a goroutine stack overflow.  No-op unless installed. */
+     * the fault is a fiber stack overflow.  No-op unless installed. */
     runloom_crash_thread_arm();
     return 0;
 }
@@ -733,7 +733,7 @@ static void runloom_fcontext_entry(void *user)
  * never reuse.  Overflow beyond CAP releases the stack to the shared,
  * cross-hub-balanced stack depot (see runloom_stack_release), so a low cap
  * bounds per-thread hoarding while the depot recycles across hubs.  The
- * balanced steady state (occupancy = live goroutines) sits well under CAP, so
+ * balanced steady state (occupancy = live fibers) sits well under CAP, so
  * the lock-free coro-reuse fast path is unaffected.
  */
 #define RUNLOOM_CORO_POOL_CAP 512
@@ -763,9 +763,9 @@ runloom_coro_t *runloom_coro_new(size_t stack_size,
         c->pool_next = NULL;
         runloom_delay_inject(RUNLOOM_DLY_CORO_ACQUIRE);   /* widen reuse window */
         RUNLOOM_EVT(RUNLOOM_EVT_CORO_ACQUIRE, c, c->stack, (long long)rounded);
-        runloom_coro_assert_idle(c, "coro REACQUIRED while a goroutine is still executing on it");
+        runloom_coro_assert_idle(c, "coro REACQUIRED while a fiber is still executing on it");
         /* Stack was poisoned when this coro was recycled (see destroy);
-         * unpoison before the goroutine runs on it again. */
+         * unpoison before the fiber runs on it again. */
         RUNLOOM_UNPOISON(c->stack, rounded);
         c->entry = entry;
         c->user = user;
@@ -898,7 +898,7 @@ int runloom_coro_bulk_init(void *coro_arena, size_t coro_stride,
 /* Release a bulk stack block (n slots from start_slot): drop its physical pages
  * back to the OS (MADV_DONTNEED -- the virtual reservation stays) AND return the
  * slots to the allocator for reuse.  Called by the go_n batch teardown when the
- * last goroutine in a batch finishes.  The block stays PROT_READ|WRITE; the next
+ * last fiber in a batch finishes.  The block stays PROT_READ|WRITE; the next
  * fault into it gets a fresh zero page -- exactly what the fresh-flag path wants
  * (a zero stack reads back as a not-yet-materialised frame). */
 void runloom_coro_arena_release(size_t start_slot, long n)
@@ -937,10 +937,10 @@ void *runloom_coro_arena_stack(size_t stack_size)
 void runloom_coro_destroy(runloom_coro_t *c)
 {
     if (c == NULL) return;
-    runloom_coro_assert_idle(c, "coro RELEASED while a goroutine is executing on it");
+    runloom_coro_assert_idle(c, "coro RELEASED while a fiber is executing on it");
     /* Security scrub (opt-in): wipe the stack before it is recycled OR
-     * released, so a later goroutine reusing it sees zero, not this
-     * goroutine's leftovers.  Covers both the coro-pool fast path (which
+     * released, so a later fiber reusing it sees zero, not this
+     * fiber's leftovers.  Covers both the coro-pool fast path (which
      * keeps the stack attached, unscrubbed) and the stack-pool path. */
     if (runloom_stack_scrub_on && c->stack != NULL) {
         runloom_stack_scrub(c->stack, c->stack_size);
@@ -1034,7 +1034,7 @@ static int runloom_coro_grow(runloom_coro_t *c, size_t new_usable)
 /* Grow heuristic, checked at every resume.  If the suspended coro is
  * using more than ~3/4 of its usable stack (little headroom below
  * self.sp), double it (page-rounded, capped at RUNLOOM_STACK_GROW_MAX).
- * This is the Path-A safe-point grow: it grows goroutines that
+ * This is the Path-A safe-point grow: it grows fibers that
  * legitimately deepen ACROSS yields, which is what lets us ship a small
  * default stack.  It cannot rescue a deep NON-yielding burst between
  * two yields -- that overflows into the guard page (clean SIGSEGV, not
@@ -1135,7 +1135,7 @@ runloom_coro_t *runloom_coro_new(size_t stack_size,
     /* CreateFiberEx, not CreateFiber: CreateFiber COMMITS the whole stack_size
      * (Windows charges committed pages against the commit limit = RAM+pagefile
      * at commit time, and does NOT overcommit), so a generous stack_size would
-     * cost its full size per goroutine even untouched -- measured 1000x1MiB =
+     * cost its full size per fiber even untouched -- measured 1000x1MiB =
      * ~1017 MiB commit.  CreateFiberEx reserves stack_size but commits only a
      * small floor, growing on demand via the stack guard page -- the same
      * "reserve big, pay for what you touch" behaviour as the POSIX mmap path
@@ -1317,7 +1317,7 @@ void runloom_coro_madvise_idle(runloom_coro_t *c)
 
 /* Programmatic override for park-time idle-page reclaim, in addition to the
  * RUNLOOM_STACK_PARK_DONTNEED env.  The stack auto-sizer turns this on when it
- * starts goroutines large (so the large idle pages are returned on park),
+ * starts fibers large (so the large idle pages are returned on park),
  * making "start large, learn down" RSS-free without a global env flip. */
 static int runloom_park_reclaim_forced = 0;
 void runloom_coro_park_reclaim_set(int on)

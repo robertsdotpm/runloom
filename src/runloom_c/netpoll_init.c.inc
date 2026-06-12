@@ -332,7 +332,7 @@ void runloom_netpoll_fini(void)
  * I/O would cross-contaminate the parent's readiness -- it must get its
  * own.  Single-threaded here, so no lock is taken; we only re-init the per-
  * pool locks (a dead hub may have held one at fork) and drop the inherited
- * parker bookkeeping (it references parent goroutines that don't exist in
+ * parker bookkeeping (it references parent fibers that don't exist in
  * the child).  runloom_netpoll_fini() closes the inherited fds + marks uninit
  * (it is itself lock-free); the next wait_fd re-creates a fresh poller. */
 void runloom_netpoll_reset_after_fork(void)

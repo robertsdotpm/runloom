@@ -150,10 +150,10 @@ static size_t         runloom_fd_registered_cap_bytes = 0;
 /* ---- per-fd pending-wakeup bitmap ----
  * Closes the M:N + free-threaded race where an epoll edge fires for
  * an fd whose parker hasn't been linked yet (or whose previous
- * parker was just unlinked by a wake but the goroutine hasn't
+ * parker was just unlinked by a wake but the fiber hasn't
  * called wait_fd again).  Without this, the pump finds an empty
  * runloom_pool.by_fd[fd] bucket and silently drops the event; with
- * EPOLLET the kernel won't refire and the goroutine waits forever.
+ * EPOLLET the kernel won't refire and the fiber waits forever.
  *
  * Each fd gets one byte holding a mask of RUNLOOM_NETPOLL_READ /
  * RUNLOOM_NETPOLL_WRITE bits.  Pump sets bits when it can't find a
@@ -409,7 +409,7 @@ static int runloom_epoll_fd = -1;
 static int runloom_iouring_eventfd_in_epoll = -1;
 /* Generic cross-thread pump interrupt.  An eventfd in the shared epoll
  * whose only job is to break an idle epoll_wait from another thread, so a
- * waker that re-queues a goroutine via the scheduler's lists (not via a
+ * waker that re-queues a fiber via the scheduler's lists (not via a
  * netpoll fd event) can still wake a scheduler blocked in the pump.  Used
  * by the blocking-offload pool to wake the single-thread scheduler, which
  * (unlike the busy-polling hubs) blocks in epoll_wait with no timeout.

@@ -1,13 +1,13 @@
 """Subprocess workload for the fd_read/fd_write (module.c) fault harness.
 
-Drives cooperative runloom_c.fd_read / fd_write over an os.pipe() as goroutines,
+Drives cooperative runloom_c.fd_read / fd_write over an os.pipe() as fibers,
 so an injected read()/write() error lands on the live EINTR-continue /
 EAGAIN-park / surface-OSError loop.  Modes:
   echo      -- writer sends b"ping", reader reads it; must print "OK ping".
   readfail  -- data pre-written; a single fd_read with an injected hard error
-               must surface OSError (no writer goroutine, so it can't hang).
+               must surface OSError (no writer fiber, so it can't hang).
   writefail -- a single fd_write with an injected hard error must surface
-               OSError (no reader goroutine).
+               OSError (no reader fiber).
 Prints one status line (exit 0=OK, 42=clean OSError) + FAULTS=<n> when
 FAULT_SITE is set.  no-gil only.
 """
@@ -19,7 +19,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(
 import runloom_c
 
 
-def _drive(*goroutines):
+def _drive(*fibers):
     box = []
 
     def wrap(fn):
@@ -30,7 +30,7 @@ def _drive(*goroutines):
                 box.append(e)
         return runner
 
-    for g in goroutines:
+    for g in fibers:
         runloom_c.go(wrap(g))
     runloom_c.run()
     return box

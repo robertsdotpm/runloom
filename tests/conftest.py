@@ -11,7 +11,7 @@ test body, asserts two things about the C runtime:
      it never false-positives on a legitimately-busy background loop thread.
 
   2. No *leaked* netpoll parker.  We snapshot ``stats()['netpoll_parked']``
-     before the test and re-read it after; a goroutine that parked in
+     before the test and re-read it after; a fiber that parked in
      ``wait_fd`` and never got woken (the cross-thread-drain / leaked-parker
      class of bug) shows up as a count that never settles back.  A short
      settle window absorbs teardown races where a background thread is about
@@ -132,7 +132,7 @@ def runloom_invariants(request):
     if delta > 0:
         msg = ("leaked {0} netpoll parker(s): netpoll_parked was {1} before "
                "the test and {2} after (did not drain within {3}s). A "
-               "goroutine parked in wait_fd was never woken -- mark the test "
+               "fiber parked in wait_fd was never woken -- mark the test "
                "@pytest.mark.runloom_leaky if that is intentional.".format(
                    delta, baseline, after, _SETTLE_DEADLINE_S))
         if _REPORT_ONLY:

@@ -19,7 +19,7 @@
  * to steal a g from a neighbour's deque.  Stolen gs are by
  * construction fresh (never run), so no migration concerns.
  *
- * Phase C v2 (this file): yield support inside hubs.  A goroutine
+ * Phase C v2 (this file): yield support inside hubs.  A fiber
  * running on hub H can call sched_yield(); the call routes through
  * runloom_mn_yield_current() which pushes the g back to H's local FIFO,
  * snapshots the per-g PythonState, and asm-yields back to hub_main
@@ -107,7 +107,7 @@ typedef struct runloom_hub {
     volatile int      idle_waiting;
     /* Controlled-replay deferred publish (barrier mode only).  A cross-hub
      * submit made DURING this hub's execution segment (mn_go / channel-wake from
-     * a running goroutine) is staged here per TARGET hub, then spliced onto the
+     * a running fiber) is staged here per TARGET hub, then spliced onto the
      * target's sub_list ATOMICALLY at this segment's release -- so a target's
      * loop-top drain sees the COMPLETE set a segment sent it, never a partial
      * mid-segment snapshot.  This makes the implementation match the documented
@@ -149,7 +149,7 @@ typedef struct runloom_hub {
     volatile long        resume_seq;
     runloom_g_t            *resume_g;
     /* RUNLOOM_PREEMPT: set by the sysmon watchdog when this hub is ATTACHED-wedged
-     * (a CPU-bound / non-yielding goroutine the DETACHED handoff can't take).
+     * (a CPU-bound / non-yielding fiber the DETACHED handoff can't take).
      * runloom's installed eval-frame wrapper reads it at the next Python frame
      * boundary on THIS hub's owner thread and yields the running g back to the
      * scheduler -- Go pre-1.14 cooperative preemption.  Written rarely (only

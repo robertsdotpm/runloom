@@ -361,7 +361,7 @@ class TestLockCondition(unittest.TestCase):
 class TestFastPath(unittest.TestCase):
     def test_await_done_future_no_park(self):
         """await on an already-done future should resolve without
-        actually parking the goroutine."""
+        actually parking the fiber."""
         async def main():
             loop = asyncio.get_running_loop()
             fut = loop.create_future()

@@ -16,7 +16,7 @@ Cases (each a separate test so a failure is attributable):
       allows.  This is the regression test for the n<0 busy-spin fix; with the
       backoff removed the same workload issued ~14x more epoll_wait calls.
   ENOMEM on epoll_ctl               -- register fails; surfaces as a clean
-      OSError(errno=ENOMEM) to the parked goroutine, never a crash or hang.
+      OSError(errno=ENOMEM) to the parked fiber, never a crash or hang.
   EINVAL on epoll_ctl               -- likewise a clean OSError(errno=EINVAL).
 
 Skipped unless: Linux + epoll backend + a strace that supports -e inject=.
@@ -104,7 +104,7 @@ def _count_calls(strace_c_summary, *names):
 
 def test_epoll_wait_eintr_is_retried():
     """A signal-interrupted epoll_wait (EINTR) must be transparently retried --
-    the parked goroutine still wakes on the real edge."""
+    the parked fiber still wakes on the real edge."""
     rc, out, err = _run_under_strace(
         WAIT_SYSCALLS + ":error=EINTR:when=1..3", "happy")
     assert rc == 0, "EINTR should be retried, not fatal: rc=%d\n%s\n%s" % (
@@ -136,7 +136,7 @@ def test_epoll_wait_ebadf_does_not_busy_spin():
 
 def test_epoll_ctl_enomem_surfaces_as_oserror():
     """epoll_ctl ENOMEM at register time must surface as a clean OSError to the
-    parked goroutine -- not crash, not silently strand the goroutine."""
+    parked fiber -- not crash, not silently strand the fiber."""
     rc, out, err = _run_under_strace(
         "epoll_ctl:error=ENOMEM:when=1+", "happy")
     assert rc == 42, "expected clean OSERROR exit(42): rc=%d\n%s\n%s" % (

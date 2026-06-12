@@ -12,7 +12,7 @@ reduces to:
 
 > The **parker** decides to go to sleep. The **waker** decides to wake it. These
 > two decisions race. If the waker fires *just before* the parker commits to
-> sleeping, and nobody notices, the goroutine sleeps **forever** (a lost wakeup).
+> sleeping, and nobody notices, the fiber sleeps **forever** (a lost wakeup).
 
 The classic fix is "publish that I'm parked, then re-check whether a wake already
 arrived; symmetrically, the waker bumps a flag, then checks whether I'm parked."

@@ -30,9 +30,9 @@ READ = 1
 WRITE = 2
 
 
-def _drive(*goroutines):
-    """Spawn each callable as a goroutine, run the single-thread scheduler,
-    re-raise the first exception any goroutine hit (so asserts surface)."""
+def _drive(*fibers):
+    """Spawn each callable as a fiber, run the single-thread scheduler,
+    re-raise the first exception any fiber hit (so asserts surface)."""
     box = []
 
     def wrap(fn):
@@ -43,7 +43,7 @@ def _drive(*goroutines):
                 box.append(e)
         return runner
 
-    for g in goroutines:
+    for g in fibers:
         runloom_c.go(wrap(g))
     runloom_c.run()
     if box:

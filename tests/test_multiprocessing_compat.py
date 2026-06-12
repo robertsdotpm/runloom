@@ -20,7 +20,7 @@ them to the cooperative versions.  This file imports multiprocessing at the top
 fix.
 
 Coverage is intentionally IN-PROCESS -- a Pipe's two ends used by two
-goroutines -- because that isolates exactly what runloom is responsible for (a
+fibers -- because that isolates exactly what runloom is responsible for (a
 blocked recv parks on the cooperative os.read and yields), with no fork.
 
 CAVEAT (not tested here): cross-process multiprocessing works, but only with
@@ -96,7 +96,7 @@ class TestDefaultArgRebind(unittest.TestCase):
 
 @unittest.skipIf(_IS_WINDOWS, "POSIX Connection (os.read) path")
 class TestConnectionInProcess(unittest.TestCase):
-    """A Pipe's two ends, driven by two goroutines in one process.  Exercises
+    """A Pipe's two ends, driven by two fibers in one process.  Exercises
     the real Connection.recv/send/poll code path with no fork."""
 
     def test_send_recv_roundtrip(self):
@@ -109,8 +109,8 @@ class TestConnectionInProcess(unittest.TestCase):
         self.assertEqual(_drive(body), ("hello", [1, 2, 3]))
 
     def test_recv_blocks_then_yields(self):
-        """A goroutine blocked in Connection.recv must let a sibling run while
-        another goroutine prepares the message -- proves recv parks on the
+        """A fiber blocked in Connection.recv must let a sibling run while
+        another fiber prepares the message -- proves recv parks on the
         cooperative os.read, not a blocking read that freezes the scheduler."""
         def body():
             a, b = multiprocessing.Pipe()

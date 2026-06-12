@@ -20,7 +20,7 @@ static PyMethodDef module_methods[] = {
      "warmup(n, stack_size=131072) -> int: pre-mmap n stacks of "
      "stack_size bytes into the per-thread stack pool, eliminating "
      "first-spawn mmap latency for servers that know they're about "
-     "to spawn N goroutines.  Returns the number actually allocated."},
+     "to spawn N fibers.  Returns the number actually allocated."},
     {"tcp_recv", m_tcp_recv, METH_VARARGS,
      "tcp_recv(fd, writable_buffer, n, flags=0) -> bytes_received.  "
      "C-level recv into a pre-allocated buffer with cooperative "
@@ -55,30 +55,30 @@ static PyMethodDef module_methods[] = {
      "True if the io_uring kernel interface is usable (Linux 5.1+)."},
     /* C-scheduler fast path. */
     {"go",          (PyCFunction)m_go, METH_VARARGS | METH_KEYWORDS,
-     "go(fn, stack_size=None): spawn a goroutine via the C scheduler.\n"
+     "go(fn, stack_size=None): spawn a fiber via the C scheduler.\n"
      "Returns a G handle.  stack_size overrides the scheduler default\n"
-     "(post-calibration) for this one goroutine -- use when the entry\n"
+     "(post-calibration) for this one fiber -- use when the entry\n"
      "function is known to recurse deeply or call into a C extension\n"
      "that consumes large amounts of C stack."},
     {"blocking",    (PyCFunction)m_blocking, METH_VARARGS | METH_KEYWORDS,
      "blocking(fn, *args, **kwargs): run fn(*args, **kwargs) on the\n"
-     "blocking-offload thread pool, parking the calling goroutine until it\n"
+     "blocking-offload thread pool, parking the calling fiber until it\n"
      "returns.  Use for non-preemptible blocking calls (DNS, blocking\n"
      "sockets/files, GIL-releasing C extensions) that would otherwise wedge\n"
-     "the goroutine's hub and strand everything queued behind it.  fn runs\n"
-     "off any goroutine and must not call runloom scheduler ops."},
+     "the fiber's hub and strand everything queued behind it.  fn runs\n"
+     "off any fiber and must not call runloom scheduler ops."},
     {"go_noyield",  m_go_noyield,  METH_O,
-     "Spawn a goroutine that the caller promises will run to "
+     "Spawn a fiber that the caller promises will run to "
      "completion without yielding.  Skips the per-g datastack/snap/"
      "load-sched dance -- ~150-400 ns/g faster than go() for pure-"
      "compute callables.  If the callable does yield (sched_yield, "
      "sched_sleep, wait_fd, monkey-patched I/O), behaviour is "
      "undefined.  Use only when you know the work is CPU-bound."},
     {"sched_yield_classic", m_sched_yield, METH_NOARGS,
-     "Yield the current goroutine (METH_NOARGS PyCFunction form, kept "
+     "Yield the current fiber (METH_NOARGS PyCFunction form, kept "
      "for benchmarking against the vectorcall singleton)."},
     {"sched_sleep", m_sched_sleep, METH_O,
-     "Sleep the current goroutine for N seconds (C scheduler aware)."},
+     "Sleep the current fiber for N seconds (C scheduler aware)."},
     {"sched_sleep_real", m_sched_sleep_real, METH_O,
      "Like sched_sleep but a REAL wall-clock sleep even under "
      "RUNLOOM_LOGICAL_CLOCK (for the aio keepalive heartbeat)."},
@@ -88,52 +88,52 @@ static PyMethodDef module_methods[] = {
      "monotonic.  Used by runloom.aio loop.time()."},
     {"sched_stop",  m_sched_stop,  METH_NOARGS,
      "Signal the C scheduler to exit its drain loop at the next safe "
-     "point.  Background goroutines parked on netpoll/sleep/wake will "
+     "point.  Background fibers parked on netpoll/sleep/wake will "
      "be left in their parked state; cleanup happens when the wrapping "
      "Python objects are gc'd."},
     {"sched_reset", m_sched_reset, METH_NOARGS,
      "Drop everything from the scheduler (ready + sleep heap).  Used "
-     "by paio.run's cleanup so leftover background goroutines don't "
+     "by paio.run's cleanup so leftover background fibers don't "
      "block the next runloom_c.run() with a sleep heap that won't "
      "drain for minutes.  Returns (n_ready_dropped, n_sleep_dropped)."},
     {"park_self",   m_park_self,   METH_NOARGS,
-     "Park the current goroutine until G.wake() is called on its "
+     "Park the current fiber until G.wake() is called on its "
      "handle.  Race-safe: a wake that arrives before the park is "
      "consumed and the park returns immediately.  SINGLE-THREAD run() "
      "only -- on an M:N hub it busy-loops; use park() instead."},
     {"park",        (PyCFunction)m_park, METH_VARARGS | METH_KEYWORDS,
-     "park(foreign_wakeable=False): park the current goroutine in memory "
+     "park(foreign_wakeable=False): park the current fiber in memory "
      "(no fd), M:N-correctly (routes to the hub park under run(N), the "
      "single-thread park otherwise).  Woken by its G handle's .wake().  "
      "foreign_wakeable=True keeps a single-thread run() alive for a "
      "foreign-OS-thread waker.  The fd-free park the fan-in/Event "
      "primitives build on."},
     {"current_g",   m_current_g,   METH_NOARGS,
-     "Return a G handle to the currently-running goroutine, or None "
+     "Return a G handle to the currently-running fiber, or None "
      "if called outside one.  Used together with park_self/G.wake to "
      "implement lightweight per-task wake primitives without the "
      "overhead of a Chan."},
     {"current_g_hwm", m_current_g_hwm, METH_NOARGS,
-     "Return the current goroutine's stack high-water-mark in bytes "
-     "(page-granular, paint-free via mincore), or 0 outside a goroutine "
+     "Return the current fiber's stack high-water-mark in bytes "
+     "(page-granular, paint-free via mincore), or 0 outside a fiber "
      "or where the backend has no introspectable stack.  Read half of the "
      "function-bound grow-down auto-sizer."},
     {"unpark_many", m_unpark_many, METH_O,
-     "unpark_many(handles) -> list[int]: directly wake a batch of goroutines "
+     "unpark_many(handles) -> list[int]: directly wake a batch of fibers "
      "parked in wait_fd (the wake side of a fan-in primitive).  handles is a "
      "sequence of G objects; returns the indices that could not be direct-woken "
      "(not yet parked -- caller pipe-writes those).  Replaces N os.write syscalls "
      "with one batched in-process claim+re-queue."},
     {"run",         m_run,         METH_NOARGS,
-     "Drive the C scheduler until all goroutines finish.  Returns count."},
+     "Drive the C scheduler until all fibers finish.  Returns count."},
     {"run_ready",   m_run_ready,   METH_NOARGS,
-     "run_ready(): quiescence-barrier yield.  Park the calling goroutine "
-     "until no other goroutine is immediately runnable (every ready g, "
+     "run_ready(): quiescence-barrier yield.  Park the calling fiber "
+     "until no other fiber is immediately runnable (every ready g, "
      "including freshly-woken ones, has run to its next park/completion), "
      "then resume -- before the scheduler blocks on I/O/timers.  asyncio's "
      "one-loop-iteration boundary, iterated to quiescence."},
     {"wait_fd",     m_wait_fd,     METH_VARARGS,
-     "wait_fd(fd, events, timeout_ms=-1): park the current goroutine "
+     "wait_fd(fd, events, timeout_ms=-1): park the current fiber "
      "until fd is ready.  events is a bitmask: 1=read, 2=write."},
     {"netpoll_backend", m_netpoll_backend, METH_NOARGS,
      "Return active netpoll backend name (\"epoll\", \"kqueue\", \"select\")."},
@@ -144,51 +144,51 @@ static PyMethodDef module_methods[] = {
      "_fault_reset(): test-only.  Clear all Windows fault-injection counters."},
     {"netpoll_poll", m_netpoll_poll, METH_NOARGS,
      "netpoll_poll(): non-blocking netpoll drain -- deliver any ready fd "
-     "readiness by waking parked goroutines, then return.  Used by runloom.aio "
+     "readiness by waking parked fibers, then return.  Used by runloom.aio "
      "so asyncio.sleep(0) advances pending I/O like a stock loop iteration."},
     {"netpoll_unregister", m_netpoll_unregister, METH_O,
      "netpoll_unregister(fd): clear the netpoll registration cache "
      "bit for fd.  Call from socket close so fd reuse re-registers "
      "cleanly under the edge-triggered register-once scheme."},
     {"netpoll_release_if_idle", m_netpoll_release_if_idle, METH_O,
-     "netpoll_release_if_idle(fd): if no goroutine is parked on fd, "
+     "netpoll_release_if_idle(fd): if no fiber is parked on fd, "
      "EPOLL_CTL_DEL it and clear its arm cache.  The aio bridge calls this "
      "after each low-level loop.sock_* op on a user-owned socket (closed via a "
      "plain socket.close() that bypasses the unregister hook) so a reused fd "
      "re-registers instead of inheriting a stale arm and hanging."},
     {"netpoll_cancel_fd", m_netpoll_cancel_fd, METH_O,
-     "netpoll_cancel_fd(fd): wake every goroutine parked in wait_fd on "
+     "netpoll_cancel_fd(fd): wake every fiber parked in wait_fd on "
      "fd (with the cancelled sentinel).  Call from the socket close hook "
-     "AFTER closing so a cross-goroutine close unblocks a parked "
+     "AFTER closing so a cross-fiber close unblocks a parked "
      "accept()/recv()/connect() (BUG #5)."},
     {"stats",       m_stats,       METH_NOARGS,
      "Return a dict of scheduler counters: ready, sleeping, "
      "netpoll_parked, completed, running, plus backend names.  "
-     "Cheap; safe to poll from a watchdog goroutine in production."},
+     "Cheap; safe to poll from a watchdog fiber in production."},
     {"set_stack_size", m_set_stack_size, METH_O,
-     "set_stack_size(bytes): override the per-goroutine default stack\n"
+     "set_stack_size(bytes): override the per-fiber default stack\n"
      "size and freeze calibration.  Use to lock in a known-good size\n"
      "before spawning, or to bump after seeing a near-overflow."},
     {"get_stack_size", m_get_stack_size, METH_NOARGS,
-     "Return the current per-goroutine default stack size in bytes."},
+     "Return the current per-fiber default stack size in bytes."},
     {"set_stack_scrub", m_set_stack_scrub, METH_O,
-     "set_stack_scrub(bool): when True, zero each goroutine's stack as it is\n"
-     "recycled so the next goroutine to reuse it can't read the previous\n"
+     "set_stack_scrub(bool): when True, zero each fiber's stack as it is\n"
+     "recycled so the next fiber to reuse it can't read the previous\n"
      "one's leftovers (TLS keys, request bodies).  Off by default (costs a\n"
-     "stack-sized memset per goroutine completion).  Also via RUNLOOM_STACK_SCRUB=1."},
+     "stack-sized memset per fiber completion).  Also via RUNLOOM_STACK_SCRUB=1."},
     {"get_stack_scrub", m_get_stack_scrub, METH_NOARGS,
      "Return whether recycled-stack scrubbing is enabled."},
     {"mn_init",     m_mn_init,     METH_VARARGS,
      "mn_init(n=cpus): start N hub threads.  Returns count."},
     {"mn_go",       (PyCFunction)m_mn_go, METH_VARARGS | METH_KEYWORDS,
-     "mn_go(callable, stack_size=0): spawn a goroutine on a round-robin hub.  "
+     "mn_go(callable, stack_size=0): spawn a fiber on a round-robin hub.  "
      "stack_size>0 overrides the hub's small default C-stack (bytes) for a g "
      "that runs a deep non-yielding C burst.  "
      "v1 only supports run-to-completion gs (no yield)."},
     {"go_n",        (PyCFunction)m_go_n, METH_VARARGS | METH_KEYWORDS,
-     "go_n(fn, n, stack_size=0): bulk-spawn n goroutines all running fn(), "
+     "go_n(fn, n, stack_size=0): bulk-spawn n fibers all running fn(), "
      "looping the spawn core in C (skips n Python->C dispatches).  fn still "
-     "runs as Python in each goroutine."},
+     "runs as Python in each fiber."},
     {"mn_run",      m_mn_run,      METH_NOARGS,
      "mn_run(): wait for all gs to complete.  Returns total completed."},
     {"mn_fini",     m_mn_fini,     METH_NOARGS,
@@ -222,30 +222,30 @@ static PyMethodDef module_methods[] = {
     {"_dump_parkers", m_dump_parkers, METH_NOARGS,
      "_dump_parkers() -> None.  Dump every parked netpoll parker "
      "(fd/g/hub/commit) to stderr.  Diagnostic."},
-    {"goroutines",  m_goroutines,  METH_NOARGS,
-     "goroutines() -> list[dict].  A snapshot of every live goroutine: "
+    {"fibers",  m_fibers,  METH_NOARGS,
+     "fibers() -> list[dict].  A snapshot of every live fiber: "
      "id, state ('io-wait'/'sleep'/'chan-wait'/'running'/...), blocked_on "
      "class, fd + events (when io-wait), wake_in (when sleeping), age (when "
      "RUNLOOM_INTROSPECT_TIME tracking is on), refcount, noyield, owner.  "
-     "Cheap; safe to poll from a watchdog goroutine."},
-    {"goroutine_count", m_goroutine_count, METH_NOARGS,
-     "goroutine_count() -> int.  Number of live goroutines."},
-    {"dump_goroutines", m_dump_goroutines, METH_VARARGS,
-     "dump_goroutines(fd=2) -> None.  Write a Go-style structural dump of "
-     "every live goroutine (state histogram + per-goroutine line) to fd "
+     "Cheap; safe to poll from a watchdog fiber."},
+    {"fiber_count", m_fiber_count, METH_NOARGS,
+     "fiber_count() -> int.  Number of live fibers."},
+    {"dump_fibers", m_dump_fibers, METH_VARARGS,
+     "dump_fibers(fd=2) -> None.  Write a Go-style structural dump of "
+     "every live fiber (state histogram + per-fiber line) to fd "
      "using only write(2).  Async-signal-safe-ish: try-locks the registry, "
      "touches no Python objects, so it is usable from a SIGQUIT handler and "
      "when the interpreter is wedged."},
-    {"goroutine_stack", m_goroutine_stack, METH_O,
-     "goroutine_stack(id) -> (callable_repr, [(file, line, func), ...]).  "
-     "Best-effort reconstructed Python stack of one goroutine (deepest "
+    {"fiber_stack", m_fiber_stack, METH_O,
+     "fiber_stack(id) -> (callable_repr, [(file, line, func), ...]).  "
+     "Best-effort reconstructed Python stack of one fiber (deepest "
      "first).  Full stack under per-g-tstate; top frame under the single-"
      "thread (runloom.aio) loop; empty under default M:N (no safe claim).  "
-     "Safe: the goroutine is pinned + claimed so it can't resume/free "
+     "Safe: the fiber is pinned + claimed so it can't resume/free "
      "mid-walk."},
     {"set_introspect_timestamps", m_introspect_timestamps, METH_O,
-     "set_introspect_timestamps(bool): when True, stamp each goroutine's "
-     "park time so goroutines()/dump report 'age' (how long it has been "
+     "set_introspect_timestamps(bool): when True, stamp each fiber's "
+     "park time so fibers()/dump report 'age' (how long it has been "
      "wedged).  Off by default (one vDSO clock read per park); also via "
      "RUNLOOM_INTROSPECT_TIME=1."},
     {"reset_after_fork", m_reset_after_fork, METH_NOARGS,
@@ -258,9 +258,9 @@ static PyMethodDef module_methods[] = {
     {"get_introspect_timestamps", m_get_introspect_timestamps, METH_NOARGS,
      "get_introspect_timestamps() -> bool.  Whether park-age tracking is on."},
     {"set_deadlock_mode", m_set_deadlock_mode, METH_O,
-     "set_deadlock_mode(0|1|2): 0=off, 1=warn (print the goroutine dump), "
-     "2=raise RuntimeError when the scheduler quiesces with goroutines still "
-     "blocked on channels/parks (Go's 'all goroutines are asleep - deadlock!'). "
+     "set_deadlock_mode(0|1|2): 0=off, 1=warn (print the fiber dump), "
+     "2=raise RuntimeError when the scheduler quiesces with fibers still "
+     "blocked on channels/parks (Go's 'all fibers are asleep - deadlock!'). "
      "Default 1; also via RUNLOOM_DEADLOCK=off|warn|raise.  Single-thread "
      "scheduler only; aio's clean stop is excluded."},
     {"get_deadlock_mode", m_get_deadlock_mode, METH_NOARGS,
@@ -268,19 +268,19 @@ static PyMethodDef module_methods[] = {
     {"count_deadlocked", m_count_deadlocked, METH_NOARGS,
      "count_deadlocked() -> int.  Goroutines currently parked on a "
      "channel/park (the set that deadlocks if the scheduler quiesces)."},
-    {"set_max_goroutines", m_set_max_goroutines, METH_O,
-     "set_max_goroutines(n): cap the number of live goroutines (0 = unlimited, "
+    {"set_max_fibers", m_set_max_fibers, METH_O,
+     "set_max_fibers(n): cap the number of live fibers (0 = unlimited, "
      "the default).  Over the cap, go()/spawn raises RuntimeError -- an "
      "admission gate so an unbounded spawn loop can't OOM the process.  Zero "
      "hot-path cost when unset.  Also via RUNLOOM_MAX_GOROUTINES."},
-    {"get_max_goroutines", m_get_max_goroutines, METH_NOARGS,
-     "get_max_goroutines() -> int.  Current cap (0 = unlimited)."},
-    {"live_goroutines", m_live_goroutines, METH_NOARGS,
-     "live_goroutines() -> int.  Goroutines admitted under the cap and not yet "
+    {"get_max_fibers", m_get_max_fibers, METH_NOARGS,
+     "get_max_fibers() -> int.  Current cap (0 = unlimited)."},
+    {"live_fibers", m_live_fibers, METH_NOARGS,
+     "live_fibers() -> int.  Goroutines admitted under the cap and not yet "
      "finished (0 when no cap is set)."},
     {"install_traceback_signal", m_install_traceback_signal, METH_VARARGS,
      "install_traceback_signal(signum=SIGQUIT) -> int.  Install a RAW C "
-     "handler that writes the goroutine dump to stderr -- Go's GOTRACEBACK.  "
+     "handler that writes the fiber dump to stderr -- Go's GOTRACEBACK.  "
      "On POSIX it's `kill -QUIT` (a signal handler that works even when the "
      "interpreter is wedged, unlike a Python signal handler).  On Windows it's "
      "Ctrl+Break / CTRL_BREAK_EVENT via a console control handler (signum is "
@@ -295,11 +295,11 @@ static PyMethodDef module_methods[] = {
      METH_VARARGS | METH_KEYWORDS,
      "install_crash_handler(level=None, file=None) -> int.  Install a "
      "fatal-signal (SIGSEGV/SIGBUS/SIGILL/SIGFPE/SIGABRT) handler that, on a "
-     "crash, classifies the fault against the per-goroutine guard pages "
-     "(goroutine stack overflow vs wild pointer), dumps the live-goroutine "
+     "crash, classifies the fault against the per-fiber guard pages "
+     "(fiber stack overflow vs wild pointer), dumps the live-fiber "
      "registry, and chains to the default handler so a core / Python traceback "
      "still follows.  level: 'on'|'all'|'backtrace'|'pystack'|'wait'|'gdb' "
-     "(comma-separated; default from RUNLOOM_CRASH env, else goroutine dump).  "
+     "(comma-separated; default from RUNLOOM_CRASH env, else fiber dump).  "
      "file: also append the report there.  Returns the flag bitmask installed."},
     {"uninstall_crash_handler", m_uninstall_crash_handler, METH_NOARGS,
      "uninstall_crash_handler() -> None.  Restore the previous signal "
@@ -312,17 +312,17 @@ static PyMethodDef module_methods[] = {
      "automatically for runloom's own threads)."},
     {"_crash_selftest_overflow", m_crash_selftest_overflow, METH_NOARGS,
      "_crash_selftest_overflow() -> None.  TEST ONLY: overflow the current C "
-     "stack via real-C recursion (does not return).  Run inside a goroutine to "
+     "stack via real-C recursion (does not return).  Run inside a fiber to "
      "fault into its guard page."},
     {"enable_stack_advice", m_enable_stack_advice, METH_VARARGS,
-     "enable_stack_advice(on=True) -> None.  Turn the per-goroutine-kind stack "
+     "enable_stack_advice(on=True) -> None.  Turn the per-fiber-kind stack "
      "profiler on/off.  While on, each kind's actual C-stack high-water mark is "
      "measured so stack_advice() can recommend a stack_size.  Advisory only -- "
      "it never changes or persists stack sizes itself.  Off by default."},
     {"stack_advice_enabled", m_stack_advice_enabled, METH_NOARGS,
      "stack_advice_enabled() -> bool."},
     {"stack_advice", m_stack_advice, METH_NOARGS,
-     "stack_advice() -> list[dict].  Per goroutine kind: {kind, samples, "
+     "stack_advice() -> list[dict].  Per fiber kind: {kind, samples, "
      "max_hwm, reserved, suggested} -- the deepest stack used vs reserved, and "
      "a suggested stack_size (next_pow2(max_hwm*4))."},
     {"reset_stack_advice", m_reset_stack_advice, METH_NOARGS,
@@ -330,8 +330,8 @@ static PyMethodDef module_methods[] = {
     {"enable_stack_autosize", (PyCFunction)m_enable_stack_autosize,
      METH_VARARGS | METH_KEYWORDS,
      "enable_stack_autosize(on=True, prescan=False) -> None.  Turn the adaptive "
-     "stack auto-sizer on/off.  Each goroutine kind starts large when first seen "
-     "and, once its real stack use is measured, later goroutines of that kind "
+     "stack auto-sizer on/off.  Each fiber kind starts large when first seen "
+     "and, once its real stack use is measured, later fibers of that kind "
      "start at the learned size (start large, learn down).  In-memory only -- "
      "never persisted.  Implies measurement + park-time reclaim.  An explicit "
      "stack_size= always wins.  prescan=True also runs the cold-start optimizer: "
@@ -343,7 +343,7 @@ static PyMethodDef module_methods[] = {
     {"serve", (PyCFunction)m_serve, METH_VARARGS | METH_KEYWORDS,
      "serve(host, port, handler, acceptors=1, backlog=128) -> (port, listeners). "
      "C server scaffold: N SO_REUSEPORT listeners + C accept loops; spawns a "
-     "handler(conn) goroutine per connection (conn is a TCPConn). Close the "
+     "handler(conn) fiber per connection (conn is a TCPConn). Close the "
      "returned listeners to stop."},
     {NULL, NULL, 0, NULL}
 };
@@ -371,22 +371,22 @@ static struct PyModuleDef runloom_c_module = {
  * CPython 3.13's module getattr, on a *missing* attribute, calls
  * _PyModule_IsPossiblyShadowing to append a "did you shadow a stdlib module?"
  * hint to the AttributeError.  That helper reserves ~32 KB of C stack (two
- * wchar_t[MAXPATHLEN] path buffers) -- more than a whole default goroutine
+ * wchar_t[MAXPATHLEN] path buffers) -- more than a whole default fiber
  * stack -- so an ordinary attribute miss (hasattr(mod, x) == False, a
- * namespace __getattr__ proxy, ...) inside a goroutine overflows the stack and
+ * namespace __getattr__ proxy, ...) inside a fiber overflows the stack and
  * crashes (the only thing the hint adds is a nicer error string).
  *
  * Replace PyModule_Type's getattr slot with a thin wrapper: do the normal
  * lookup (every hit, plus a proper AttributeError on miss), honour a
- * module-level __getattr__, and then -- only when running on a goroutine's
+ * module-level __getattr__, and then -- only when running on a fiber's
  * small swapped stack -- raise that AttributeError directly, skipping the
- * 32 KB hint.  Off-goroutine we defer to the stock implementation, so the hint
+ * 32 KB hint.  Off-fiber we defer to the stock implementation, so the hint
  * and every other behaviour are byte-for-byte preserved on the main thread.
  * -------------------------------------------------------------------------- */
 static getattrofunc runloom_orig_module_getattro = NULL;
 static PyObject    *runloom_str_dunder_getattr   = NULL;   /* interned "__getattr__" */
 
-static int runloom_running_in_goroutine(void)
+static int runloom_running_in_fiber(void)
 {
     /* Both are non-allocating thread-local peeks (never runloom_sched_get). */
     if (runloom_mn_tls_current_g() != NULL) return 1;       /* M:N hub path        */
@@ -416,7 +416,7 @@ static PyObject *runloom_module_getattro(PyObject *m, PyObject *name)
         Py_DECREF(getattr);
         return r;
     }
-    if (runloom_running_in_goroutine()) {
+    if (runloom_running_in_fiber()) {
         PyErr_SetRaisedException(exc);                   /* plain AttributeError */
         return NULL;                                     /* ...no 32 KB hint    */
     }
@@ -457,14 +457,14 @@ PyMODINIT_FUNC PyInit_runloom_c(void)
     PyObject *m;
     const char *scrub_env;
     runloom_diag_init();          /* parses RUNLOOM_DEBUG once; cheap; idempotent */
-    runloom_introspect_init();    /* goroutine registry lock; reads RUNLOOM_INTROSPECT_TIME */
+    runloom_introspect_init();    /* fiber registry lock; reads RUNLOOM_INTROSPECT_TIME */
     runloom_timer_res_init();     /* Windows: 1ms timer resolution (no-op POSIX) */
     scrub_env = getenv("RUNLOOM_STACK_SCRUB");   /* opt-in recycled-stack wipe */
     if (scrub_env && scrub_env[0] && scrub_env[0] != '0') {
         runloom_coro_scrub_set(1);
     }
     {
-        /* GOTRACEBACK-style goroutine dump: SIGQUIT on POSIX, Ctrl+Break
+        /* GOTRACEBACK-style fiber dump: SIGQUIT on POSIX, Ctrl+Break
          * (CTRL_BREAK_EVENT) on Windows. */
         const char *tb_env = getenv("RUNLOOM_TRACEBACK");
         if (tb_env && tb_env[0] && tb_env[0] != '0') {
@@ -480,11 +480,11 @@ PyMODINIT_FUNC PyInit_runloom_c(void)
 #endif
         }
     }
-    runloom_install_module_getattro();   /* goroutine-safe module attr lookup */
+    runloom_install_module_getattro();   /* fiber-safe module attr lookup */
     if (PyType_Ready(&RunloomCoroType) < 0) return NULL;
     /* Set by hand rather than in the positional initializer, whose long run
      * of zero slots is easy to miscount: identity-free equality/hash so a
-     * goroutine recognises its own current_g() handle across calls. */
+     * fiber recognises its own current_g() handle across calls. */
     RunloomGType.tp_richcompare = RunloomG_richcompare;
     RunloomGType.tp_hash = RunloomG_hash;
     if (PyType_Ready(&RunloomGType) < 0) return NULL;

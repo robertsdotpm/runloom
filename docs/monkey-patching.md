@@ -1,7 +1,7 @@
 # Monkey-patching the stdlib
 
 `runloom.monkey.patch()` replaces blocking stdlib calls with cooperative
-equivalents that park the current goroutine instead of blocking the OS
+equivalents that park the current fiber instead of blocking the OS
 thread.  After the patch, ordinary `socket.recv`, `time.sleep`,
 `select.select`, `ssl.read`, file I/O, `subprocess` waits, DNS lookups,
 and several `threading` primitives all yield instead of stalling the
@@ -28,7 +28,7 @@ def worker():
     s = socket.socket()
     s.connect(("example.com", 80))     # cooperative: parks during the TCP handshake
     s.sendall(b"GET / HTTP/1.0\r\n\r\n")
-    time.sleep(0.5)                    # cooperative: only this goroutine sleeps
+    time.sleep(0.5)                    # cooperative: only this fiber sleeps
     data = s.recv(8192)                # cooperative: parks until data arrives
     s.close()
     return data
@@ -47,13 +47,13 @@ enable/disable:
 | `socket` | `socket.socket`'s `connect`, `recv`, `send`, `sendall`, `accept`, `recv_into`, `recvfrom`, `sendto` park on `wait_fd` instead of blocking. |
 | `time` | `time.sleep` becomes cooperative (uses scheduler's sleep heap). |
 | `select` | `select.select`, `select.poll`, `selectors.*` rerouted through runloom's netpoll. |
-| `os` | `os.read`, `os.write` on regular files dispatch to a worker thread (`run_in_executor`-style) so the goroutine doesn't block. |
+| `os` | `os.read`, `os.write` on regular files dispatch to a worker thread (`run_in_executor`-style) so the fiber doesn't block. |
 | `ssl` | `ssl.SSLSocket` reads/writes park on `wait_fd`; handshake is cooperative. |
 | `subprocess` | `Popen.wait` / `communicate` poll the child's exit cooperatively. |
-| `threading` | `threading.Event`, `threading.Lock` (when used inside a goroutine) park instead of locking. |
-| `queue` | `queue.Queue.get/put` cooperate when called from a goroutine. |
+| `threading` | `threading.Event`, `threading.Lock` (when used inside a fiber) park instead of locking. |
+| `queue` | `queue.Queue.get/put` cooperate when called from a fiber. |
 | `stdio` | `sys.stdin.readline()` / `input()` park on the underlying fd. |
-| `getpass` | `getpass.getpass()` (a blocking `/dev/tty` read) is offloaded to a worker so the goroutine parks instead of wedging its hub. |
+| `getpass` | `getpass.getpass()` (a blocking `/dev/tty` read) is offloaded to a worker so the fiber parks instead of wedging its hub. |
 | `dns` | `socket.getaddrinfo` runs in parallel for A/AAAA records. |
 
 All default to enabled.  Opt out with kwargs:
@@ -158,7 +158,7 @@ still gets the patched version because we rebind the class attribute.
 
 ### `threading.Thread` is not replaced
 
-Patching doesn't turn `threading.Thread` into a goroutine -- it would
+Patching doesn't turn `threading.Thread` into a fiber -- it would
 break too many assumptions.  If you spawn an OS thread, it runs
 independently of the runloom scheduler.
 
@@ -170,7 +170,7 @@ For "I want runloom, not threads," use `runloom.go(fn)` or
 The Linux io_uring backend (when available) lets us do truly async
 file I/O, but the default path is a small executor that runs the
 read/write off the scheduler's OS thread.  This means file I/O won't
-*block* your goroutines, but it does pay a thread-hop on each call.
+*block* your fibers, but it does pay a thread-hop on each call.
 See [io_uring](https://github.com/robertsdotpm/runloom/blob/main/src/runloom_c/io_uring.c)
 for direct ring access.
 

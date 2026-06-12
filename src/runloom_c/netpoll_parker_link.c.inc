@@ -6,7 +6,7 @@
 /* Link p into both pool->head and pool's per-fd bucket.  Caller
  * holds pool->lock.
  *
- * Stack-pooling note: runloom_parked_t lives on the calling goroutine's
+ * Stack-pooling note: runloom_parked_t lives on the calling fiber's
  * coroutine stack (see runloom_netpoll_wait_fd).  Stacks are returned to
  * a per-hub TLS pool when a g completes (runloom_stack_release) and
  * re-issued to the next g spawned on that hub.  The new g's wait_fd

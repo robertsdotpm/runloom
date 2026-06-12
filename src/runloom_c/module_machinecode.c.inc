@@ -13,8 +13,8 @@
  * Calling the object does a REAL native call into the page: the CPU's
  * instruction pointer jumps straight to your bytes and the silicon executes
  * them -- there is no interpreter, no VM, no dispatch loop (unlike CPython
- * bytecode).  It runs on the CALLER's stack, so inside a goroutine it uses the
- * goroutine's small, guard-paged C stack: the same fat-frame rule applies, and
+ * bytecode).  It runs on the CALLER's stack, so inside a fiber it uses the
+ * fiber's small, guard-paged C stack: the same fat-frame rule applies, and
  * it cannot yield/park or be preempted mid-blob (keep blobs short, or run a
  * heavy kernel via runloom.monkey.offload() so it lands on a pool thread).
  *
@@ -251,7 +251,7 @@ static PyTypeObject RunloomMachineCodeType = {
         "  intptr_t f(intptr_t a0, ..., a5)   (0..6 int/pointer args; x86-64\n"
         "  SysV args rdi,rsi,...; arm64 x0..x5; return in rax/x0).\n"
         "Calling jumps the CPU straight into the bytes (no interpreter).  It\n"
-        "runs on the caller's stack -- inside a goroutine that's the small,\n"
+        "runs on the caller's stack -- inside a fiber that's the small,\n"
         "guard-paged g-stack, and it can't yield or be preempted mid-blob.\n"
         "Mapped W^X; .address/.size expose the page; close()/with free it.",
     .tp_methods = runloom_mc_methods,

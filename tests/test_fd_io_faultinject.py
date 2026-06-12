@@ -62,7 +62,7 @@ def test_write_retryable_round_trips(err):
     assert _faults(p.stdout) == 1, p.stdout
 
 
-# ---- non-retryable: a clean OSError, never a crash or a stranded goroutine ---
+# ---- non-retryable: a clean OSError, never a crash or a stranded fiber ---
 
 @pytest.mark.parametrize("err", [E.EIO, E.EBADF], ids=["EIO", "EBADF"])
 def test_read_hard_error_surfaces_oserror(err):

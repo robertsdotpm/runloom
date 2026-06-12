@@ -2,11 +2,11 @@
 
 Run STANDALONE (not collected by pytest) under ``strace -e inject=`` by
 test_iouring_faultinject.py.  Exercises the io_uring file-I/O path
-(runloom_c.file_read / file_write) from inside a goroutine so an error injected
+(runloom_c.file_read / file_write) from inside a fiber so an error injected
 into io_uring_setup / io_uring_enter hits a real submit + completion path.
 
 Modes (argv[1]):
-  fileread -- write known bytes, then file_read them back from a goroutine;
+  fileread -- write known bytes, then file_read them back from a fiber;
               must round-trip and print "OK <n>".
   badfd    -- file_read on a closed fd; the CQE must complete with res<0 and
               surface as a clean OSError (print "OSERROR errno=<e>").

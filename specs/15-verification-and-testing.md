@@ -89,7 +89,7 @@ and CBMC; **Nidhugg** — a second weak-memory SMC; **rr-chaos**.)
 | `mn_stress.py` | seeded M:N fuzzer: producers push a known multiset into a channel pool, consumers (`recv` + `select`) drain — **every token received exactly once**, `_self_check` clean between iters, under the watchdog so a hang prints its repro seed |
 | `watchdog.py` | turns a silent hang into a full dump (every thread's stack via faulthandler + scheduler/netpoll `_self_check` + `stats()` + the lifecycle event ring) — `run_guarded` / `watchdog()` ctx-mgr / on-demand `hang_dump` |
 | `hang_hunter/` | targeted workloads that reproduce specific hang classes (found the sentinel-pointer gc-churn SEGV) |
-| `lincheck/` | **linearizability**: real producers/consumers as goroutines on the M:N scheduler (overlapping real-time intervals, GIL off) → **Porcupine** (Go) decides whether some linearization satisfies the FIFO-channel spec; a stateful Hypothesis `RuleBasedStateMachine` generates op sequences with shrinking |
+| `lincheck/` | **linearizability**: real producers/consumers as fibers on the M:N scheduler (overlapping real-time intervals, GIL off) → **Porcupine** (Go) decides whether some linearization satisfies the FIFO-channel spec; a stateful Hypothesis `RuleBasedStateMachine` generates op sequences with shrinking |
 | `dst/` | **deterministic simulation**: a seeded oracle chooses yield points → a failing run reduces to one integer seed; modes `determinism`/`sweep`/`pct` (PCT bounded, Burckhardt ASPLOS'10); `selftest` confirms a broken invariant is caught + reproduces |
 | `pct/` | the single-hub PCT controlled scheduler (runtime hook in `ready_pop`, env-gated, zero-cost off) + explorer |
 | `mn_controlled/` | the **controlled M:N scheduler + deterministic replay** (the 6 levers: barrier census, startup gate, no-steal, census-idle guard, deterministic preemption, logical clock) + `repro_*` probes |
@@ -99,7 +99,7 @@ and CBMC; **Nidhugg** — a second weak-memory SMC; **rr-chaos**.)
 | `run_pydebug.sh` | the **`--with-pydebug --disable-gil` oracle** — CPython's own asserts fire at a boundary violation point instead of a release UAF later (earned contract C6, spec 09) |
 | `mutate/` | mutation testing — a test that passes against a mutant is weak (found+fixed 2 weak blocking-shim tests) |
 | `coverage.sh` + `cov_summary.py` | gcov, reported worst-first with the uncovered **error/cleanup** lines itemized (the fault-injection targets) |
-| `leak_check.py` | FD / goroutine / parked-parker leak balance across cycles |
+| `leak_check.py` | FD / fiber / parked-parker leak balance across cycles |
 | `combinatorial/` | covering arrays over the `RUNLOOM_*` config matrix (backend × GIL × handoff × preempt × …) — all t-way interactions in few runs (isolated the `STEAL_WOKEN=1` SIGSEGV on day one) |
 | `racerd.sh` / `static_analysis.sh` | Infer/RacerD compositional static race detection + `gcc -fanalyzer` gate + cppcheck (advisory/skip-clean) |
 | `security/` | the bridge fuzzer + a refcount-race probe + a signal-storm probe + the stack-scrub helper + a valgrind smoke (see `FINDINGS.md`, e.g. the S1 stack-leak that motivated the aio stack-scrub) |

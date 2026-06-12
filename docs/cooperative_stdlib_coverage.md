@@ -1,10 +1,10 @@
 # Cooperative stdlib coverage under the M:N scheduler
 
-What of the Python standard library cooperates (parks the goroutine) vs blocks
+What of the Python standard library cooperates (parks the fiber) vs blocks
 an OS hub, under `runloom.monkey.patch()` + the M:N scheduler (`mn_init`/
 `mn_go`/`mn_run`, free-threaded 3.13t, GIL off).  Built by scanning CPython
 `Lib/` for the leaf blocking primitives and empirically probing each under a
-single-hub canary (a 5 ms ticker goroutine: if the op parks the canary keeps
+single-hub canary (a 5 ms ticker fiber: if the op parks the canary keeps
 ticking → COOP; if it blocks the hub the canary freezes → STALL).
 
 ## Principle
@@ -39,23 +39,23 @@ routes through it cooperates transparently.  e.g. `urllib`/`http.client`/
 | GIL-releasing C blockers (`sqlite3`, `ctypes` I/O, `getrandom`) | **COOP*** | rescued by the sysmon handoff after ~50 ms; use `offload()` to avoid the latency |
 | GIL-holding CPU (pure-Python loops, CPython-C aggregations) | **STALL** | fundamental — relocate via `offload()`/the `heavy` pattern |
 | `multiprocessing` fork start-method | **deadlock** | use `spawn`/`forkserver` |
-| `concurrent.futures.ProcessPoolExecutor` | **unsupported** | use the goroutine-backed `ThreadPoolExecutor` |
+| `concurrent.futures.ProcessPoolExecutor` | **unsupported** | use the fiber-backed `ThreadPoolExecutor` |
 
 `*` Handoff makes GIL-releasing C calls cooperative without an explicit patch:
-the hub goes DETACHED, a rescue thread adopts it (~50 ms), other goroutines run.
+the hub goes DETACHED, a rescue thread adopts it (~50 ms), other fibers run.
 
-## Fat C frames vs the goroutine stack (select, ssl)
+## Fat C frames vs the fiber stack (select, ssl)
 
 > **Note (corrected):** the figures in this section were measured when the
-> default goroutine stack was **32 KB**.  The default is now **512 KB**
+> default fiber stack was **32 KB**.  The default is now **512 KB**
 > (`RUNLOOM_DEFAULT_STACK_SIZE`; see [stack-sizing.md](stack-sizing.md)), so these
 > overflow cases only bite a *small* stack today — a grown-down (16 KB under M:N)
 > or raw-`Coro`/`TCPConn` (128 KB) or explicitly-pinned stack.  The analysis
 > stands as a **conservative lower bound**: anything shown to fit 32 KB fits
 > 512 KB with room to spare.  The "32 KB" below should be read as "a small
-> goroutine stack."
+> fiber stack."
 
-A goroutine can run on a small fixed C stack (the grown-down / raw sizes above;
+A fiber can run on a small fixed C stack (the grown-down / raw sizes above;
 historically the default was 32 KB).  Every stack has a PROT_NONE guard page.
 CPython's own C code assumes the main thread's ~8 MB stack, and a few functions
 allocate **a single fat C frame** that overflows a small stack — the
@@ -75,28 +75,28 @@ has just two:
 * **first `ssl` use — ~40 KB** (OpenSSL's one-time library init, on first
   `import _ssl` / first context).
 
-**Fix — keep the 32 KB stack; remove the fat frame from the goroutine path:**
+**Fix — keep the 32 KB stack; remove the fat frame from the fiber path:**
 
 * `select.select` is **reimplemented cooperatively** (`monkey/polling.py`):
   register the fds on a transient epoll, park on the epoll's *own* fd via
   `wait_fd`, drain with a non-blocking `poll(0)`, map back to the (r, w, x)
-  lists.  CPython's `select_select_impl` is never called from a goroutine, so
-  the 50.9 KB frame never exists there — and the goroutine parks on netpoll
+  lists.  CPython's `select_select_impl` is never called from a fiber, so
+  the 50.9 KB frame never exists there — and the fiber parks on netpoll
   like any other socket (no pool thread, scales to a million waiters), instead
   of the heavier offload.  Falls back to a pool-thread offload only on a
   non-epollable fd (regular file) or a no-epoll platform (Windows; `*BSD`/macOS
   could grow a kqueue path).  `select.poll` (no backing fd) stays on offload.
 * first `ssl` use is **warmed on the main thread**: `runloom.monkey` imports
   `ssl` on the main thread and `_patch_ssl` forces OpenSSL init there (8 MB
-  stack), so the fat init is pre-paid off any goroutine.
+  stack), so the fat init is pre-paid off any fiber.
 
 No global stack raise is needed.  Regression guards: `tests/test_stack_frames.py`
 — cooperative-select correctness + a sibling-runs-while-one-parks cooperation
 check, a measured **C-frame-footprint guard** (every non-allowlisted stdlib
 leaf must fit the default stack, so a *new* fat frame is caught), and the
-ssl-warmed-so-goroutine-is-safe check.  A goroutine that calls into arbitrary
+ssl-warmed-so-fiber-is-safe check.  A fiber that calls into arbitrary
 third-party C with a single >32 KB frame remains the one residual: it fails as
-a clean guard-page crash and is fixed by sizing that goroutine
+a clean guard-page crash and is fixed by sizing that fiber
 (`runloom_c.go(fn, stack_size=…)`) or offloading it.
 
 Reproducer (now exits cleanly; SEGV'd before the fix):
@@ -111,13 +111,13 @@ runloom.mn_init(2); GO(worker); runloom.mn_run(); runloom.mn_fini()
 
 ### Deep C-recursion residual (`ast` / `compile`)
 
-A second, narrower stack class is *depth*, not a single frame.  A goroutine's
+A second, narrower stack class is *depth*, not a single frame.  A fiber's
 C-recursion guard is CPython 3.13's `c_recursion_remaining` counter, which **is
-reset to 200 per goroutine at entry** (`runloom_g_entry`,
+reset to 200 per fiber at entry** (`runloom_g_entry`,
 `src/runloom_c/runloom_sched_core.c.inc`) — the counter has no stack-pointer
 check (that arrives in 3.14), so whether deeply-nested input gives a clean
 `RecursionError` or a SEGV depends on how much C stack each of those ≤200 levels
-costs versus the goroutine's stack size:
+costs versus the fiber's stack size:
 
 | op | C stack / level | result at depth in a 32 KB g |
 | --- | --- | --- |
@@ -125,25 +125,25 @@ costs versus the goroutine's stack size:
 | `ast.parse` / `compile()` | ~1.5 KB | **SEGV at ~20 levels** — the stack is gone before the counter fires |
 
 So the common, DoS-relevant cases (parsing untrusted nested JSON/pickle in a
-goroutine) are **safe** — they degrade to `RecursionError` exactly like on the
+fiber) are **safe** — they degrade to `RecursionError` exactly like on the
 main thread.  `ast`/`compile` would be the exception (they SEGV past ~18-deep,
 before the counter fires), so they are **auto-offloaded**: the `compile` patch
 (`monkey/heavy.py`) routes `builtins.compile` to the backend pool's full-size
-thread stack when called inside a goroutine, where the recursion fits and
+thread stack when called inside a fiber, where the recursion fits and
 degrades to a clean `RecursionError` like the main thread.  This covers
 `compile()`, `ast.parse()` (it calls `builtins.compile`), and source imports.
-It's a no-op off-goroutine (where compiles normally happen), so import-time
+It's a no-op off-fiber (where compiles normally happen), so import-time
 compilation is untouched.
 
 There is no clean shared-counter fix that would make this general (lowering the
 counter to make `ast` safe would force `json`/`pickle` to `RecursionError` at
 ~14, breaking ordinary nested data); the general fix is CPython 3.14's
 stack-pointer-based recursion check, at which point runloom can set each
-goroutine's `c_stack_*` bounds and drop the offload.
+fiber's `c_stack_*` bounds and drop the offload.
 
 **Residual:** `eval(str)`/`exec(str)` compile *internally in C* (not via
 `builtins.compile`) and need the caller's namespace, so they are not offloaded.
-A goroutine that `eval`/`exec`s deeply-nested untrusted source should use
+A fiber that `eval`/`exec`s deeply-nested untrusted source should use
 `runloom.monkey.offload()` / `runloom_c.blocking()` for the compile, or a
 roomier g-stack (`runloom_c.go(fn, stack_size=…)`).
 

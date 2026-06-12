@@ -1,6 +1,6 @@
 """Tests for the function-bound stack grow-down (runloom.set_grow_down).
 
-The grow-down is the default-on, M:N-only auto-sizer: each goroutine starts at
+The grow-down is the default-on, M:N-only auto-sizer: each fiber starts at
 the fixed default stack ("cold start"), measures its real C-stack high-water-mark
 on return, and writes a derived, smaller size back onto the callable itself
 (fn.__dict__[GROW_DOWN_KEY] = [learned_bytes, spawns_measured]).  The next spawn
@@ -65,7 +65,7 @@ def test_light_learns_to_floor():
     _spawn_mn(worker, 80)
     store = worker.__dict__.get(GROW_DOWN_KEY)
     assert store is not None
-    # a do-nothing goroutine touches ~1 page -> shrinks to the floor
+    # a do-nothing fiber touches ~1 page -> shrinks to the floor
     assert store[0] == GROW_DOWN_MIN
 
 

@@ -1,26 +1,26 @@
 # Stack sizing & memory
 
-Each goroutine in runloom owns a private C stack -- this is what enables
+Each fiber in runloom owns a private C stack -- this is what enables
 the "looks-like-a-thread, costs-like-a-callback" cooperative model.
 This page explains how runloom manages that stack so you can run a lot of
-goroutines at once without burning memory.
+fibers at once without burning memory.
 
 ## The mechanisms in one paragraph
 
-runloom defaults to **512 KB** per goroutine -- enough to cover everything a
-goroutine realistically does (the deepest stdlib frame, `_decimal` at 256 KB;
+runloom defaults to **512 KB** per fiber -- enough to cover everything a
+fiber realistically does (the deepest stdlib frame, `_decimal` at 256 KB;
 full TLS/SSH crypto in a callback; nested parsers) without hitting the guard
 page.  It's cheap because stacks are demand-paged (virtual, not resident -- the
 unused tail costs no RAM until touched).  Calibration scans completed
-goroutines' high-water marks and after 1 000 completions can adapt the default
+fibers' high-water marks and after 1 000 completions can adapt the default
 **up** to `next_pow2(max_hwm × 4)` (clamped at 8 MB) for stack-hungry programs --
 but it is **floored at 512 KB** and never auto-shrinks below it.  (Reclaiming
 the tail per function is the **grow-down**'s job -- on by default under M:N, see
 the next section; an explicit `set_stack_size()` can still go down to 16 KB.)
-When a goroutine finishes, its stack returns to a
+When a fiber finishes, its stack returns to a
 per-thread pool with `MADV_DONTNEED` applied -- the kernel reclaims the
 physical pages while keeping the virtual mapping.  Net effect: 10 000
-idle goroutines cost about as much RAM as their actual stack usage,
+idle fibers cost about as much RAM as their actual stack usage,
 not their reservation.
 
 ## Automatic grow-down (on by default, M:N)
@@ -29,7 +29,7 @@ Under M:N scheduling (`run(n)` with `n > 1`) runloom **learns each function's
 real stack need and reserves only that** -- automatically, no setup. This is the
 function-bound *grow-down*, and it is **on by default**.
 
-The first time you `runloom.go(fn)` a function, its goroutine starts at the safe
+The first time you `runloom.go(fn)` a function, its fiber starts at the safe
 default stack (a "cold start" -- a size the function is known to complete on),
 measures its real C-stack high-water mark on return, and writes a derived size
 back onto the function itself (`fn.__dict__["runloom_stack"]` -- the function
@@ -52,7 +52,7 @@ finally gets the deep input would load a too-small size.
 ```python
 import runloom
 
-runloom.set_grow_down(False)     # reserve the fixed default for every goroutine
+runloom.set_grow_down(False)     # reserve the fixed default for every fiber
 runloom.grow_down_enabled()      # -> current state
 ```
 
@@ -75,7 +75,7 @@ margin) where grow-down would measure-and-shrink.
   the friendly `runloom.go()` wrapper. Arg-bearing `runloom.go(fn, x)` binds the
   size to `fn` (shared across all its arg variants), not the per-call wrapper.
 
-## Why goroutines have stacks at all
+## Why fibers have stacks at all
 
 Stackful coroutines (runloom, greenlet, gevent, Go) keep the C stack
 *per coroutine*.  Switching between them is a single `swap` instruction
@@ -89,12 +89,12 @@ allocating frame state and walking back through the event loop.
 
 Both models are valid; runloom picks stackful because the switch cost is
 ~22× lower and the user code can be ordinary blocking-style without
-async/await colour.  The cost is *per-goroutine memory* -- which is
+async/await colour.  The cost is *per-fiber memory* -- which is
 exactly what this page is about minimising.
 
 ## Auto-calibration
 
-The first 1 000 goroutines run with the generous default (**512 KB** --
+The first 1 000 fibers run with the generous default (**512 KB** --
 `RUNLOOM_DEFAULT_STACK_SIZE`, `src/runloom_c/runloom_sched_datastack.c.inc`) and
 get their stacks measured (resident-page high-water mark) on completion.  After
 the calibration window the default is locked to `next_pow2(max_hwm × 4)` but
@@ -106,8 +106,8 @@ import runloom
 
 s = runloom.stats()
 print(s["stack_size_default"])    # the new default (post-calibration)
-print(s["stack_hwm"])              # max bytes any goroutine actually used
-print(s["stack_completed"])        # how many goroutines were measured
+print(s["stack_hwm"])              # max bytes any fiber actually used
+print(s["stack_completed"])        # how many fibers were measured
 print(s["stack_calibrated"])       # 1 once frozen
 print(s["stack_painting"])         # 0 once painting is disabled
 ```
@@ -124,17 +124,17 @@ itself never goes below the 512 KB floor, see above):
 | `re.match` on big inputs | 32–64 KB |
 
 The 4× safety factor means actual usage stays well under the
-calibrated value; you'd need a 4× spike from one goroutine to the
+calibrated value; you'd need a 4× spike from one fiber to the
 next to risk overflow.
 
 ### What's measured
 
-The scan walks the goroutine's stack memory in 8-byte chunks looking
+The scan walks the fiber's stack memory in 8-byte chunks looking
 for the deepest non-sentinel word.  This catches anything the
-goroutine actually wrote -- including local C variables, frame
+fiber actually wrote -- including local C variables, frame
 linkage, saved registers, deep Python recursion.
 
-What it *misses*: a goroutine that allocates a 50 KB local C buffer,
+What it *misses*: a fiber that allocates a 50 KB local C buffer,
 writes through it briefly, and then returns before yielding.  The
 peak is real but transient -- the sentinel scan only sees what was
 still in memory at the moment we ran it.  In practice this rarely
@@ -142,7 +142,7 @@ matters because the safety factor (4×) covers reasonable transients.
 
 ## `MADV_DONTNEED` on pool release
 
-When a goroutine finishes, its stack returns to a per-thread free
+When a fiber finishes, its stack returns to a per-thread free
 list capped at 4 096 entries.  Without `MADV_DONTNEED` that would
 mean **4 096 × stack_size** resident memory -- at the default 256 KB
 that's 1 GB just for idle pool entries.
@@ -150,12 +150,12 @@ that's 1 GB just for idle pool entries.
 The release path calls `madvise(addr, size, MADV_DONTNEED)` on
 everything except the first 4 KB (which holds the pool's
 linked-list pointer).  The kernel reclaims the page frames; the
-mapping itself stays.  Next time the stack is reused, the goroutine
+mapping itself stays.  Next time the stack is reused, the fiber
 faults in fresh zero pages as it writes -- same correctness as a brand
 new mmap, but no syscall.
 
-Measured: after a burst of 5 000 goroutines × 1 MB stacks, RSS lands
-at ~21 MB (one page per pool entry + the goroutines' actual usage,
+Measured: after a burst of 5 000 fibers × 1 MB stacks, RSS lands
+at ~21 MB (one page per pool entry + the fibers' actual usage,
 mostly headers).  Without `MADV_DONTNEED` that workload would hold
 ~5 GB.
 
@@ -177,12 +177,12 @@ runloom.go(tight_loop,  stack_size=8 * 1024)
 The `stack_size=N` kwarg overrides the calibrated default for that
 single spawn.  The default is unaffected.
 
-Use this for the rare outlier -- most goroutines should use whatever
+Use this for the rare outlier -- most fibers should use whatever
 the scheduler calibrated to.
 
 ## Locking a known-good size
 
-Running **millions** of shallow goroutines and want to reclaim the 512 KB
+Running **millions** of shallow fibers and want to reclaim the 512 KB
 default's virtual footprint? Lock a smaller size up-front (an explicit size
 overrides the default and its floor, down to the 16 KB hard minimum):
 
@@ -192,7 +192,7 @@ import runloom
 # Before any runloom.go() call:
 runloom.set_stack_size(32 * 1024)
 
-# Subsequent goroutines use exactly 32 KB:
+# Subsequent fibers use exactly 32 KB:
 runloom.go(worker)
 ```
 
@@ -215,7 +215,7 @@ Bounds: `[16 KB, 8 MB]`.  Below or above is silently clamped.
 
 ## What's a "safe" stack size?
 
-A pure-Python goroutine doing socket I/O typically uses **< 1 KB** of
+A pure-Python fiber doing socket I/O typically uses **< 1 KB** of
 C stack -- Python's interpreter loop stores frames in the *datastack*
 (a separate arena), not the C stack.  C extensions that recurse on
 the C stack (`json.dumps`, `re`, nested function calls in extension
@@ -260,43 +260,43 @@ startup and the high-water mark periodically.
 
 ## Defending against overflow
 
-A goroutine running low on stack is defended in layers -- the same kind of
-protection the main thread gets, scaled to the goroutine's smaller stack:
+A fiber running low on stack is defended in layers -- the same kind of
+protection the main thread gets, scaled to the fiber's smaller stack:
 
 - **Deep recursion raises `RecursionError`, not a crash.** CPython's
-  C-recursion counter is tracked per goroutine (saved and restored across
+  C-recursion counter is tracked per fiber (saved and restored across
   yields), so unbounded Python *or* C recursion (`json`, `re`, deeply nested
   calls) hits a catchable `RecursionError` well before the stack overflows.
-- **Stacks grow on demand.** At each resume boundary a goroutine whose headroom
+- **Stacks grow on demand.** At each resume boundary a fiber whose headroom
   has dropped below a quarter of its stack is copied onto a stack twice as big
-  (`RUNLOOM_STACK_GROW`, default on; `RUNLOOM_STACK_GROW=0` disables). A goroutine
+  (`RUNLOOM_STACK_GROW`, default on; `RUNLOOM_STACK_GROW=0` disables). A fiber
   that gradually deepens grows with it.
 - **Every stack has a guard page.** A `PROT_NONE` page sits just below each
-  goroutine stack (the OS provides one on the Windows Fibers backend). An
+  fiber stack (the OS provides one on the Windows Fibers backend). An
   overflow faults *immediately and cleanly* at the guard rather than silently
   scribbling over a neighbouring stack. With the crash reporter installed
   (`runloom.inspect.install_crash_handler()` or `RUNLOOM_CRASH=on`) that fault
-  is turned into a classified message that *names the overflowing goroutine and
+  is turned into a classified message that *names the overflowing fiber and
   its stack size* instead of a bare segfault -- see
   [Crash reporting](debugging.md#crash-reporting-sigsegv--sigbus).
 - **CPython's stack-hungry error paths are neutralised.** A missing-attribute
   lookup on a module makes CPython 3.13 reserve a 32 KB path buffer just to
   build a "did you shadow a stdlib module?" hint -- on its own larger than a
-  default goroutine stack. runloom skips that hint while on a goroutine (the
+  default fiber stack. runloom skips that hint while on a fiber (the
   `AttributeError` is otherwise unchanged), so `getattr`/`hasattr` misses on a
   module can't blow the stack, by any lookup path.
 
 Between them those cover everything that's actually come up in practice. The
-residual is a **single native/FFI C frame larger than the whole goroutine
+residual is a **single native/FFI C frame larger than the whole fiber
 stack** -- a deeply-nested C-extension call that bypasses CPython's recursion
 counter and is big enough to jump the guard page in one allocation. With
 `-fstack-clash`-compiled code (CPython itself) that still faults cleanly at the
-guard; a non-probing extension could corrupt. If you have such a goroutine,
+guard; a non-probing extension could corrupt. If you have such a fiber,
 give it a bigger stack up front:
 
 ```python
 runloom.set_stack_size(128 * 1024)        # process-wide default floor
-# or just the suspicious goroutine:
+# or just the suspicious fiber:
 runloom.go(work, stack_size=512 * 1024)
 ```
 
@@ -307,10 +307,10 @@ call.
 
 ## Right-sizing with the advisory profiler
 
-The calibrator picks one global default from the deepest goroutine it sees, and
+The calibrator picks one global default from the deepest fiber it sees, and
 the layers above stop overflow turning into corruption. But to know whether a
-*particular* goroutine kind is over-reserving (wasting address space at high
-goroutine counts) or running close to its limit (a candidate for an explicit
+*particular* fiber kind is over-reserving (wasting address space at high
+fiber counts) or running close to its limit (a candidate for an explicit
 bigger `stack_size`), measure it directly:
 
 ```python
@@ -329,8 +329,8 @@ samples  max_use  reserved  suggested  kind
     980      11K       32K        16K   app.parse_json (codec.py:55)
 ```
 
-Each row is one **goroutine kind** (its entry callable), with the deepest C
-stack any goroutine of that kind actually used (`max_use`) versus what it
+Each row is one **fiber kind** (its entry callable), with the deepest C
+stack any fiber of that kind actually used (`max_use`) versus what it
 reserved, plus a `suggested` `stack_size` that covers the observed peak with
 margin. `runloom.inspect.stack_advice()` returns the same data as a list of
 dicts (`kind`, `samples`, `max_hwm`, `reserved`, `suggested`).
@@ -357,10 +357,10 @@ If you'd rather not read the table and apply sizes by hand, turn on the
 runloom.inspect.enable_stack_autosize()    # or RUNLOOM_STACK_AUTOSIZE=1
 ```
 
-It works by **starting large and learning down**: the first time a goroutine
-kind is seen its goroutines start at a generous size (256 KiB by default,
+It works by **starting large and learning down**: the first time a fiber
+kind is seen its fibers start at a generous size (256 KiB by default,
 `RUNLOOM_STACK_AUTOSIZE_START`); once runloom has measured how much C stack that
-kind really uses, its later goroutines start at the learned size
+kind really uses, its later fibers start at the learned size
 (`next_pow2(peak * 4)`). A kind that turns out shallow shrinks toward the floor;
 a deep one settles at a roomy size. Because over-sizing the first few is cheap
 (the idle pages are returned to the OS on park -- the auto-sizer turns park-time
@@ -378,7 +378,7 @@ before the runtime starts so kinds are sized from their first spawn.
 
 #### Cold-start scan (`prescan=True`)
 
-The auto-sizer's one weak moment is a kind's *first* goroutine: it starts at the
+The auto-sizer's one weak moment is a kind's *first* fiber: it starts at the
 generic large default before anything has been measured, so a kind that needs
 more than that on its very first run can overflow before learn-down ever sees
 it. The standout offender is `Decimal` arithmetic -- a single
@@ -429,7 +429,7 @@ reclaim that memory anyway, pin the kind explicitly with
 > per-kind size and the prescan scan apply to *your* function, not the wrapper.
 > (Decorated functions with `functools.wraps` get the same treatment.)
 
-#### Writing stack-predictable goroutines
+#### Writing stack-predictable fibers
 
 The auto-sizer is sound exactly when a kind's **stack depth is a function of the
 code, not the input**: it measures the high-water mark of the runs it sees and

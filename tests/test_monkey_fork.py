@@ -5,7 +5,7 @@ the forking thread, so the offload thread-pool's workers are dead in the child
 and the self-pipe parkers are shared with the parent.  monkey._after_fork_child
 (registered via os.register_at_fork) nulls the backend and drops the pooled
 parkers; this hammers that reset adversarially -- fork with the pool live, with
-goroutines having run, repeatedly -- and asserts the child can still run
+fibers having run, repeatedly -- and asserts the child can still run
 cooperative work, the parent survives, and nothing hangs or leaks fds.
 
 POSIX-only (needs os.fork); skipped elsewhere.
@@ -31,7 +31,7 @@ CHILD_TIMEOUT = float(os.environ.get("RUNLOOM_FORK_TIMEOUT", "15"))
 
 
 def _coop(workload):
-    """Run workload() inside a goroutine, return its result."""
+    """Run workload() inside a fiber, return its result."""
     box = []
     runloom_c.go(lambda: box.append(workload()), stack_size=8 << 20)
     runloom_c.run()
@@ -64,7 +64,7 @@ def _file_offload():
 
 
 def _run_child_workload_under_fork(child_workload):
-    """Fork; run child_workload() (a cooperative goroutine workload) in the
+    """Fork; run child_workload() (a cooperative fiber workload) in the
     child; return the child's exit code, or raise on hang."""
     pid = os.fork()
     if pid == 0:                       # ---- child ----
@@ -101,8 +101,8 @@ def test_fork_after_offload_pool_started():
     assert _run_child_workload_under_fork(_file_offload) == 0
 
 
-def test_fork_after_goroutines_ran():
-    """Fork after goroutines have run in the parent (scheduler state populated).
+def test_fork_after_fibers_ran():
+    """Fork after fibers have run in the parent (scheduler state populated).
     The child gets only the forking thread; it must still drive a fresh run."""
     for _ in range(5):
         _coop(_socketpair_roundtrip)

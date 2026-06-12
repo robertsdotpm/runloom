@@ -8,9 +8,9 @@ sys.path.insert(0, "src")
 import runloom_c
 
 
-def _run_in_sched(*goroutines):
+def _run_in_sched(*fibers):
     """Spawn each callable, run scheduler to completion."""
-    for g in goroutines:
+    for g in fibers:
         runloom_c.go(g)
     runloom_c.run()
 
@@ -188,7 +188,7 @@ class TestNonBlocking(unittest.TestCase):
 
 
 class TestPingPong(unittest.TestCase):
-    """End-to-end test of the actual concurrency: two goroutines
+    """End-to-end test of the actual concurrency: two fibers
     bouncing values through a channel."""
     def test_ping_pong(self):
         a = runloom_c.Chan()
@@ -303,7 +303,7 @@ class TestSelect(unittest.TestCase):
         self.assertEqual(out, [0, (99, True)])
 
     def test_blocking_two_chans(self):
-        """One goroutine selects on two channels; another writes to
+        """One fiber selects on two channels; another writes to
         the second one.  The select should fire on case 1."""
         a = runloom_c.Chan()
         b = runloom_c.Chan()

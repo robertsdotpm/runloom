@@ -9,19 +9,19 @@ kevent(2)/kqueue(2) man pages permit:
 
   KQUEUE_CREATE -- kqueue() at netpoll init.  A hard init failure (ENOMEM /
       EMFILE / ENFILE) must surface as a clean OSError to the first parked
-      goroutine -- never crash, never hang the scheduler.
+      fiber -- never crash, never hang the scheduler.
   KQUEUE_CTL    -- the registration kevent() (EV_ADD a watched fd).  A
       failure (ENOMEM / EINVAL / EACCES / EBADF) must surface as a clean
-      OSError to the goroutine that asked to park on the fd; the fd-bit is
+      OSError to the fiber that asked to park on the fd; the fd-bit is
       rolled back, so nothing is left half-registered.
   KQUEUE_WAIT   -- the event-loop kevent().  EINTR is transient (retried;
       the wake still arrives).  EVERY hard error (EBADF teardown race,
       EINVAL/ENOMEM/EFAULT/EACCES/ENOENT) must BACK OFF, not busy-spin --
-      the parked goroutine still wakes via its deadline and the injected
+      the parked fiber still wakes via its deadline and the injected
       count is bounded by the 1 ms backoff in runloom_netpoll_wait_failed,
       not the CPU.
 
-The workload (netpoll_inproc_fault_workload.py) parks a goroutine on a
+The workload (netpoll_inproc_fault_workload.py) parks a fiber on a
 never-readable UDP socket with a deadline, so init + register + wait all run
 on a live path; it prints BACKEND / RESULT / FAULTS / DONE.  no-gil only.
 """
@@ -79,7 +79,7 @@ def _assert_terminated(p):
 
 def test_wait_eintr_is_retried():
     """A signal-interrupted kevent() (EINTR, once) is retried transparently;
-    the parked goroutine still wakes on its deadline."""
+    the parked fiber still wakes on its deadline."""
     p = _run("KQUEUE_WAIT", "once:%d" % EINTR)
     _assert_terminated(p)
     assert int(_field(p.stdout, "FAULTS")) == 1, p.stdout
@@ -108,8 +108,8 @@ def test_wait_persistent_error_backs_off(errno_):
     ids=["ENOMEM", "EINVAL", "EACCES", "EBADF"])
 def test_register_error_surfaces_as_oserror(errno_):
     """A failing registration kevent() (EV_ADD on the watched fd) must surface
-    as a clean OSError(errno) to the goroutine that parked on the fd -- never a
-    crash and never a silently-stranded goroutine."""
+    as a clean OSError(errno) to the fiber that parked on the fd -- never a
+    crash and never a silently-stranded fiber."""
     p = _run("KQUEUE_CTL", "always:%d" % errno_)
     _assert_terminated(p)
     assert int(_field(p.stdout, "FAULTS")) > 0, "CTL fault never fired:\n%s" % p.stdout
@@ -124,7 +124,7 @@ def test_register_error_surfaces_as_oserror(errno_):
     ids=["ENOMEM", "EMFILE", "ENFILE"])
 def test_kqueue_create_failure_surfaces_cleanly(errno_):
     """kqueue() failing at netpoll init must surface as a clean OSError to the
-    first parked goroutine and let the scheduler unwind -- not crash, not hang
+    first parked fiber and let the scheduler unwind -- not crash, not hang
     (the subprocess timeout in _run catches a hang)."""
     p = _run("KQUEUE_CREATE", "once:%d" % errno_)
     _assert_terminated(p)

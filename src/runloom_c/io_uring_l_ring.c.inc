@@ -190,7 +190,7 @@ void runloom_iouring_ring_drain(runloom_iouring_ring_t *r)
      * not CQ drain.  The netpoll pump (running on whichever hub goes
      * idle) can race with this ring's owning hub doing its own inline
      * drain.  Without the CAS both would process the same CQE and
-     * runloom_mn_wake_g would push the goroutine onto the submission
+     * runloom_mn_wake_g would push the fiber onto the submission
      * list twice -> a second resume after the first one already
      * advanced the coro, corrupting the stack. */
     for (;;) {
@@ -248,7 +248,7 @@ void runloom_iouring_ring_get_events(runloom_iouring_ring_t *r)
 }
 
 /* Common submit-and-park for hub-ring recv/send.  Caller must be a
- * goroutine running on the hub that owns r.  Returns bytes or -1
+ * fiber running on the hub that owns r.  Returns bytes or -1
  * with errno. */
 static runloom_iouring_ssize_t runloom_iouring_ring_do(runloom_iouring_ring_t *r,
                                                  struct io_uring_sqe sqe)

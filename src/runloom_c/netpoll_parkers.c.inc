@@ -11,7 +11,7 @@ int runloom_netpoll_drain_parked(void);
  * from there or mallocs, release pushes back (capped, then free).
  *
  * Why heap, not stack: stack-allocated parkers shared the address
- * space of the goroutine's coroutine stack.  Stacks are returned to
+ * space of the fiber's coroutine stack.  Stacks are returned to
  * a TLS pool on g completion and reissued to the next g, so a missed
  * unlink path leaves the global / per-fd structures pointing at a
  * byte-identical address the new occupant just claimed.  Heap-pool
@@ -169,7 +169,7 @@ typedef struct runloom_parker_pool {
 static runloom_parker_pool_t runloom_pools[RUNLOOM_PARKER_POOL_MAX];
 
 /* Convenience pointer to the default pool.  Used by paths that don't
- * have a goroutine context handy (e.g., backend init, drain_parked
+ * have a fiber context handy (e.g., backend init, drain_parked
  * iteration uses the array directly). */
 #define runloom_pool (runloom_pools[RUNLOOM_PARKER_POOL_DEFAULT])
 

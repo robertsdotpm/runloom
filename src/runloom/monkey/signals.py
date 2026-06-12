@@ -11,10 +11,10 @@ from ._base import *  # noqa: F401,F403  (shared foundation)
 # a backoff via _co_sleep instead of blocking the OS thread.
 #
 # pause() has no pending-signal form: it returns once any *handled* signal is
-# caught.  When the goroutine is running on the interpreter's main thread (the
+# caught.  When the fiber is running on the interpreter's main thread (the
 # single-threaded scheduler), signal.set_wakeup_fd lets us turn "a signal was
 # caught" into a pollable event -- park on a pipe the signal machinery writes
-# to, then restore the previous wakeup fd.  Under the M:N scheduler a goroutine
+# to, then restore the previous wakeup fd.  Under the M:N scheduler a fiber
 # runs on a hub thread (set_wakeup_fd is main-thread-only), so there we offload
 # the real blocking pause().  Caveat for that fallback: a process-directed
 # signal delivered to another thread won't interrupt the worker's pause(); code
@@ -35,7 +35,7 @@ _orig_signal_pause   = None
 
 
 def _patched_sigwait(sigset):
-    if not _in_goroutine() or not _HAVE_SIGTIMEDWAIT:
+    if not _in_fiber() or not _HAVE_SIGTIMEDWAIT:
         return _orig_sigwait(sigset)
     step = 0.0005
     while True:
@@ -52,7 +52,7 @@ def _patched_sigwait(sigset):
 
 def _patched_sigwaitinfo(sigset):
     # Like sigwait but returns the full struct_siginfo (no timeout form).
-    if not _in_goroutine() or not _HAVE_SIGTIMEDWAIT:
+    if not _in_fiber() or not _HAVE_SIGTIMEDWAIT:
         return _orig_sigwaitinfo(sigset)
     step = 0.0005
     while True:
@@ -68,7 +68,7 @@ def _patched_sigwaitinfo(sigset):
 
 
 def _patched_sigtimedwait(sigset, timeout):
-    if not _in_goroutine():
+    if not _in_fiber():
         return _orig_sigtimedwait(sigset, timeout)
     deadline = None if timeout is None else time.monotonic() + max(0.0, timeout)
     step = 0.0005
@@ -91,7 +91,7 @@ def _patched_sigtimedwait(sigset, timeout):
 
 
 def _patched_signal_pause():
-    if not _in_goroutine():
+    if not _in_fiber():
         return _orig_signal_pause()
     # M:N hub thread: set_wakeup_fd would raise -- offload the blocking pause.
     if _th.current_thread() is not _th.main_thread():

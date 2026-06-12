@@ -4,7 +4,7 @@ Covers the API changes that made the monkey layer + feature modules work under
 the M:N scheduler (mn_init/mn_go/mn_run, free-threaded 3.13t, GIL off):
 
   * runloom_c.Mutex                 -- new C-level M:N-safe mutex
-  * current_g() under M:N           -- returns the hub's running goroutine
+  * current_g() under M:N           -- returns the hub's running fiber
   * threading.Lock / RLock          -- mutual exclusion across hubs (CoLock on Mutex)
   * queue.Queue                     -- producer/consumer conservation across hubs
   * time.After / context.WithTimeout-- timers fire under mn_run (active-scheduler spawn)
@@ -14,10 +14,10 @@ the M:N scheduler (mn_init/mn_go/mn_run, free-threaded 3.13t, GIL off):
   * buffered pipe read              -- subprocess.stdout.read() parks (no hub wedge)
   * select.select / select.poll     -- multi-fd cooperative, no SIGSEGV
 
-Each test drives a goroutine tree under mn_init and asserts the result AFTER
-mn_run (goroutine exceptions are swallowed, so results go through shared state
+Each test drives a fiber tree under mn_init and asserts the result AFTER
+mn_run (fiber exceptions are swallowed, so results go through shared state
 / a runloom.Chan and are checked on the main thread).  mn_run only returns when
-every goroutine finishes, so a dropped/stranded goroutine shows up as a hang
+every fiber finishes, so a dropped/stranded fiber shows up as a hang
 (the isolated runner's timeout) -> a clean failure.
 """
 import os
@@ -46,7 +46,7 @@ def tearDownModule():
 
 
 def _drive_mn(main_fn, nhubs=NHUBS):
-    """Run main_fn as the root goroutine on an N-hub M:N scheduler."""
+    """Run main_fn as the root fiber on an N-hub M:N scheduler."""
     box = [None, None]
 
     def runner():
@@ -97,7 +97,7 @@ class TestMutex(unittest.TestCase):
                     mu.unlock()
             for _ in range(n):
                 runloom_c.mn_go(worker)
-            # the root goroutine also contends, then we read after mn_run
+            # the root fiber also contends, then we read after mn_run
             return (ctr, n * k)
         ctr, want = _drive_mn(body)
         self.assertEqual(ctr["n"], want)   # exact total => real mutual exclusion

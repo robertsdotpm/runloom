@@ -30,8 +30,8 @@ Read in order for the full model; jump by subsystem if you know what you want.
 |---|------|-------------------|
 | 00 | [overview](00-overview.md) | The north-star, the M:N:G model, the layering, the trade-offs |
 | 01 | [stackful coroutines](01-stackful-coroutines.md) | The asm context switch, stacks, guard pages, pooling, copy-grow |
-| 02 | [goroutine + single-thread scheduler](02-goroutine-and-scheduler.md) | The `G`, the ready ring, sleep heap, yield, drain, quiescence |
-| 03 | [CPython per-goroutine state](03-cpython-state-snapshot.md) | Why a stack swap isn't enough; the tstate snapshot/restore dance |
+| 02 | [fiber + single-thread scheduler](02-fiber-and-scheduler.md) | The `G`, the ready ring, sleep heap, yield, drain, quiescence |
+| 03 | [CPython per-fiber state](03-cpython-state-snapshot.md) | Why a stack swap isn't enough; the tstate snapshot/restore dance |
 | 04 | [park / wake protocol](04-park-wake-protocol.md) | The lost-wake-free primitive (the Dekker fence), cross-thread wakes |
 | 05 | [M:N scheduler](05-mn-scheduler.md) | Hubs, work-stealing, origin-hub routing, the `wake_state` machine |
 | 06 | [netpoll](06-netpoll.md) | The 3-state park-commit, backends, parker pool, signals, cancel |
@@ -39,7 +39,7 @@ Read in order for the full model; jump by subsystem if you know what you want.
 | 08 | [blocking, preemption, offload](08-blocking-preemption-offload.md) | The three stall classes and their three fixes |
 | 09 | [the free-threaded CPython boundary](09-cpython-freethreaded-boundary.md) | The 5 internal state machines and the 6 contracts (every bug lived here) |
 | 10 | [stack safety + sizing](10-stack-safety-and-sizing.md) | Guard page, RecursionError, grow-down, calibration, prescan |
-| 11 | [crash + introspection](11-crash-and-introspection.md) | Fault classification, the goroutine registry/dump, hub snapshot |
+| 11 | [crash + introspection](11-crash-and-introspection.md) | Fault classification, the fiber registry/dump, hub snapshot |
 | 12 | [public API + sync/time/context](12-public-api.md) | `go`/`run`, the Go-style facades |
 | 13 | [the asyncio bridge](13-asyncio-bridge.md) | `RunloomTask`, the future protocol, the documented semantic diffs |
 | 14 | [monkey-patched cooperative stdlib](14-monkey-cooperative-stdlib.md) | The leaf-primitive principle, the Parker, foreign-thread safety |
@@ -51,7 +51,7 @@ Read in order for the full model; jump by subsystem if you know what you want.
 
 If you read nothing else, these are the load-bearing ideas the rest hang off:
 
-1. **A goroutine is a real C stack + a CPython thread-state snapshot.** The asm
+1. **A fiber is a real C stack + a CPython thread-state snapshot.** The asm
    `swap` moves the C stack; a manual save/restore of ~12 `PyThreadState` fields
    moves the Python execution context. Neither alone is enough (spec 01, 03).
 
@@ -63,7 +63,7 @@ If you read nothing else, these are the load-bearing ideas the rest hang off:
 3. **The default scheduler runs one OS thread; M:N is the same scheduler, N
    times, with a work-stealing deque and origin-hub routing** (spec 02, 05).
    Goroutines are *pinned* to their origin hub once started, because a live coro
-   stack is bound to one OS thread. Only *fresh, never-run* goroutines are
+   stack is bound to one OS thread. Only *fresh, never-run* fibers are
    stealable.
 
 4. **Every hard bug lived on the CPython free-threaded boundary, not in

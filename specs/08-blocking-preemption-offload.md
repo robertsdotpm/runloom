@@ -7,7 +7,7 @@ Ground truth: `runloom_blockpool.{h,c}`, `mn_sched_sysmon.c.inc`,
 
 ## The problem, stated precisely
 
-A cooperative scheduler assumes goroutines yield. Three things break that
+A cooperative scheduler assumes fibers yield. Three things break that
 assumption, and **they are three different problems with three different fixes**.
 A spec that lumps them as "blocking" is wrong. The thing to internalize:
 
@@ -58,7 +58,7 @@ no preemption" — true *for the quantum slicer*, but (1) is on by default on 3.
 
 The hard limitations (both real, both in the spec because they bound the design):
 
-- **Bytecode boundaries only.** A goroutine inside a tight pure-C call (numpy, a
+- **Bytecode boundaries only.** A fiber inside a tight pure-C call (numpy, a
   multi-MB `hashlib`, a third-party extension) isn't running Python, so the check
   never fires — preemption hits when the C call returns. Same as Go with cgo.
   This is what `heavy`/`offload` (Fix 3) exists to cover.
@@ -77,9 +77,9 @@ The hard limitations (both real, both in the spec because they bound the design)
 ## Fix 2 — Offload (opaque blocking C, the proactive form)
 
 `runloom_blockpool.c`. Run the blocking call on a **small dedicated pool of OS
-threads** and **park the calling goroutine** until it finishes — turning a
+threads** and **park the calling fiber** until it finishes — turning a
 hub-wedging blocking call into an ordinary cooperative park. The hub keeps
-scheduling other goroutines; only the pool threads block. Pool size bounds blocking
+scheduling other fibers; only the pool threads block. Pool size bounds blocking
 concurrency (extra callers park on the job queue), exactly like a resolver pool.
 The wake travels the **same race-safe path as everything else** (`wake_safe` /
 `runloom_mn_wake_g`), so a worker finishing before the caller has parked is handled
@@ -87,7 +87,7 @@ by the park/wake counter (spec 04).
 
 The pool worker runs `fn(arg)` on a plain OS thread **with no GIL**; `fn` must not
 touch Python objects (acquire the GIL itself if it must) and must not call
-scheduler ops. If the caller isn't on a goroutine, `fn` runs inline (correct — it
+scheduler ops. If the caller isn't on a fiber, `fn` runs inline (correct — it
 just blocks the caller as before).
 
 Surfaced to users three ways:
@@ -100,8 +100,8 @@ Surfaced to users three ways:
   inline (zero cost); only the genuinely-long C loops, which nothing can preempt,
   go to the pool.
 - **The `compile` patch** — `builtins.compile` (and thus `ast.parse` + source
-  imports) offloads when called inside a goroutine, because `compile`'s
-  ~1.5 KB/level C recursion overflows a *small* g-stack before the per-goroutine
+  imports) offloads when called inside a fiber, because `compile`'s
+  ~1.5 KB/level C recursion overflows a *small* g-stack before the per-fiber
   C-recursion counter (reset to 200 frames at entry, spec 10) fires. The arithmetic:
   200 × 1.5 KB ≈ 300 KB, so on the **512 KB default** compile fits and degrades to
   a clean `RecursionError`; but a grown-down (16 KB, M:N) or raw-`Coro` (128 KB)
@@ -116,10 +116,10 @@ For file I/O (and optionally the TCP hot path), `io_uring.c` provides truly asyn
 I/O instead of a thread-hop: submit an SQE referencing a per-op record on the
 caller's stack, park via `park_safe`, and the kernel signals a registered
 **eventfd** on each completion; the netpoll pump drains the CQ ring and wakes the
-parked goroutine. Under M:N each **hub owns a `SINGLE_ISSUER` ring** (no submission
+parked fiber. Under M:N each **hub owns a `SINGLE_ISSUER` ring** (no submission
 lock) whose eventfd is in the shared pump; the global ring keeps the multishot +
 provided-buffer-ring path. This is a drop-in faster backend behind the same "park
-the goroutine" contract — `monkey`'s `os.read`/`write` on regular files use the
+the fiber" contract — `monkey`'s `os.read`/`write` on regular files use the
 pool by default and io_uring when available, with no caller change.
 
 ## Fix 3 — P-handoff rescue (opaque blocking C, the reactive form)
@@ -127,10 +127,10 @@ pool by default and io_uring when available, with no caller change.
 `mn_sched_handoff.c.inc` + `mn_sched_sysmon.c.inc`. The offload pool only helps
 calls runloom *anticipated*. For an **unanticipated** blocking call (a third-party
 C driver you didn't patch), the hub goes DETACHED (the call released its tstate via
-`Py_BEGIN_ALLOW_THREADS`) and its queued goroutines are stranded — work-stealing
+`Py_BEGIN_ALLOW_THREADS`) and its queued fibers are stranded — work-stealing
 can't reach a wedged hub's local FIFO. The fix is **Go's `entersyscallblock`
 P-handoff**: a standby **rescue thread adopts the stalled hub's tstate and drains
-its stranded goroutines** while the original thread is stuck in the syscall.
+its stranded fibers** while the original thread is stuck in the syscall.
 
 How it works, and the safety gates that make it sound:
 
@@ -150,7 +150,7 @@ How it works, and the safety gates that make it sound:
 - **The rescue adopts, drains, hands back.** A pool of standby threads CASes a
   per-hub claim slot (so two threads never rescue the same hub),
   `PyEval_RestoreThread`s the hub's tstate, and runs **one drain pass that resumes
-  ONLY fresh deque goroutines** — never a resumed/woken g, because that g's coro
+  ONLY fresh deque fibers** — never a resumed/woken g, because that g's coro
   stack is baked to the *owner* hub's OS thread and resuming it on the rescue thread
   is a cross-hub migration that crashes (spec 03/05). It drains to empty, restores
   the owner's saved tstate slice, `PyEval_SaveThread`s (so the owner reclaims the
@@ -165,7 +165,7 @@ How it works, and the safety gates that make it sound:
 
 ### The monopoly world-yield (a sibling case)
 
-`mn_sched_sysmon.c.inc`'s `world_yield_if_monopolizing`: a goroutine that loops a
+`mn_sched_sysmon.c.inc`'s `world_yield_if_monopolizing`: a fiber that loops a
 *stop-the-world* op (a tight `gc.collect()` loop) while it's the sole runnable g on
 its hub holds the world stopped ~100% of the time, starving hub-pinned work on
 *other* hubs (which can't re-attach to drain). The fix: when a hub is about to
@@ -178,10 +178,10 @@ a couple of relaxed loads.
 ## How the three fixes compose (the decision a hub makes)
 
 ```
-  goroutine parks on an fd/timer/channel/future  -> netpoll/sleep/chan/park (no hub cost)
-  goroutine runs a long Python loop              -> sysmon flags, preempt at bytecode boundary
-  goroutine runs a known heavy C call            -> heavy/offload moves it to the pool (park)
-  goroutine runs an UNanticipated blocking C call-> hub goes DETACHED ~50ms,
+  fiber parks on an fd/timer/channel/future  -> netpoll/sleep/chan/park (no hub cost)
+  fiber runs a long Python loop              -> sysmon flags, preempt at bytecode boundary
+  fiber runs a known heavy C call            -> heavy/offload moves it to the pool (park)
+  fiber runs an UNanticipated blocking C call-> hub goes DETACHED ~50ms,
                                                     rescue thread adopts + drains it
 ```
 
@@ -200,7 +200,7 @@ blockers (sqlite3, ctypes I/O, getrandom) are **COOP\*** (rescued by handoff aft
 ~50 ms; use `offload()` to avoid the latency); **GIL-holding pure-Python/CPython-C
 aggregation is STALL** — fundamental, relocate via `offload()`/`heavy`; `mp` *fork*
 start-method **deadlocks** (use spawn/forkserver); `ProcessPoolExecutor` is
-**unsupported** (use the goroutine-backed `ThreadPoolExecutor`).
+**unsupported** (use the fiber-backed `ThreadPoolExecutor`).
 
 ## Invariants
 
@@ -208,7 +208,7 @@ start-method **deadlocks** (use spawn/forkserver); `ProcessPoolExecutor` is
    offload + handoff (opaque C). Don't conflate them.
 2. **Never preempt-yield mid-`tp_dealloc`** (`runloom_tstate_in_destruction` gate,
    contract C5). Defer with the trigger armed.
-3. **The handoff rescue resumes ONLY fresh deque goroutines** — never a g with a
+3. **The handoff rescue resumes ONLY fresh deque fibers** — never a g with a
    baked coro stack (no cross-hub migration), and **only after a stable DETACHED
    streak** (contract C3).
 4. **Offloaded `fn` runs GIL-less and must not touch Python or scheduler ops**;

@@ -50,7 +50,7 @@ void runloom_chan_decref(runloom_chan_t *ch);
 /* Send a value.  Steals NOTHING -- caller still owns its reference.
  *   on success: returns 0; the channel now holds an INCREF'd ref.
  *   on closed-send: returns -1, PyErr set to ValueError.
- *   in a goroutine: may park (yield) until a receiver appears or buffer
+ *   in a fiber: may park (yield) until a receiver appears or buffer
  *   has room.
  */
 int runloom_chan_send(runloom_chan_t *ch, PyObject *value);
@@ -71,7 +71,7 @@ int runloom_chan_try_send(runloom_chan_t *ch, PyObject *value);
  *                       the value is the channel's zero -- here None.)
  *   on error: returns NULL with PyErr set.
  *
- * In a goroutine: may park until a sender appears.
+ * In a fiber: may park until a sender appears.
  */
 PyObject *runloom_chan_recv(runloom_chan_t *ch, int *ok);
 

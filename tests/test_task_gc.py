@@ -1,6 +1,6 @@
-"""Regression tests for goroutine/task lifetime under GC.
+"""Regression tests for fiber/task lifetime under GC.
 
-A runloom.aio task owns a goroutine whose callable is the task's own bound
+A runloom.aio task owns a fiber whose callable is the task's own bound
 `_driver` method, so the C-level runloom_g_t holds  g->callable -> _driver ->
 task.  Combined with task._g (a RunloomG wrapping that same runloom_g_t) this is a
 reference cycle:
@@ -10,7 +10,7 @@ reference cycle:
 runloom_g_t is a plain C struct, invisible to cyclic GC, and RunloomG has no
 tp_traverse, so the collector cannot see the g->callable edge.  Before the fix
 a *completed* task therefore leaked forever.  The fix releases g->callable the
-moment the goroutine finishes (it is never called again), cutting the cycle at
+moment the fiber finishes (it is never called again), cutting the cycle at
 the source so the task collects by plain refcounting.
 """
 import gc
@@ -77,9 +77,9 @@ class TestTaskGC(unittest.TestCase):
         self.assertIsNone(box["w"](), "completed task was not collected (leak)")
 
     def test_callable_released_breaks_self_referential_closure(self):
-        """A goroutine whose callable closes over its own handle (the same
+        """A fiber whose callable closes over its own handle (the same
         shape as the task<->driver cycle) is reclaimed once it completes,
-        because the goroutine releases its callable at completion."""
+        because the fiber releases its callable at completion."""
         import weakref
         import runloom_c
         box = {}
@@ -100,7 +100,7 @@ class TestTaskGC(unittest.TestCase):
 
         run_once()
         gc.collect()
-        self.assertIsNone(box["w"](), "goroutine callable leaked (cycle held)")
+        self.assertIsNone(box["w"](), "fiber callable leaked (cycle held)")
 
 
 if __name__ == "__main__":

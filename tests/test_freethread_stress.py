@@ -1,13 +1,13 @@
 """Free-threading stress, in the spirit of CPython's Lib/test/test_free_threading,
-with runloom goroutines layered in.
+with runloom fibers layered in.
 
 CPython's free-threading tests hammer shared list/dict/GC from many OS threads
 with the GIL off and assert no loss / no corruption / no crash.  runloom's whole
-correctness story is 3.13t, and its goroutines run *on* those GIL-free hub
-threads -- so the meaningful version of those tests has goroutines doing the
+correctness story is 3.13t, and its fibers run *on* those GIL-free hub
+threads -- so the meaningful version of those tests has fibers doing the
 hammering: shared-container mutation across hubs, a read-modify-write guarded by
 a channel-mutex, and -- most pointed for runloom -- gc.collect() stop-the-world
-firing while goroutines are live on every hub (the exact shape behind the
+firing while fibers are live on every hub (the exact shape behind the
 io_uring STW deadlock and the Group-B handoff work).
 
 Each workload runs in a fresh subprocess with PYTHON_GIL=0 so the hubs really
@@ -52,10 +52,10 @@ def assert_pass(code, timeout=60):
 # ---------------------------------------------------------------------------
 # test_free_threading/test_list.py: concurrent list.append loses nothing and
 # corrupts nothing under the free-threaded interpreter -- here driven by many
-# goroutines across hubs rather than OS threads.
+# fibers across hubs rather than OS threads.
 # ---------------------------------------------------------------------------
 def test_concurrent_list_append_no_loss():
-    """N goroutines each append K distinct ints to ONE shared list, in
+    """N fibers each append K distinct ints to ONE shared list, in
     parallel across 4 hubs (GIL off).  list.append is atomic on 3.13t, so the
     final list must contain every item exactly once -- no torn writes, no lost
     appends, no crash."""
@@ -92,7 +92,7 @@ print("PASS", len(shared))
 # (the resize-under-concurrent-writers hazard) keeps every key/value.
 # ---------------------------------------------------------------------------
 def test_concurrent_dict_distinct_keys():
-    """N goroutines each insert K distinct keys into ONE shared dict in
+    """N fibers each insert K distinct keys into ONE shared dict in
     parallel; the dict must end up with every key mapping to its value
     (free-threaded dict insert + resize under concurrent writers)."""
     assert_pass(r"""
@@ -130,7 +130,7 @@ print("PASS", len(shared))
 # contention.
 # ---------------------------------------------------------------------------
 def test_channel_mutex_guarded_counter_exact():
-    """Many goroutines each do `box[0] += 1` (a non-atomic read-modify-write)
+    """Many fibers each do `box[0] += 1` (a non-atomic read-modify-write)
     K times, serialised by a single-token channel mutex.  With true parallel
     hubs the count is exact only if the mutex actually excludes -- a lost
     update would make the total < NG*K."""
@@ -163,13 +163,13 @@ print("PASS", box[0])
 
 
 # ---------------------------------------------------------------------------
-# THE runloom-pointed one: gc.collect() stop-the-world while goroutines are live
+# THE runloom-pointed one: gc.collect() stop-the-world while fibers are live
 # on every hub, all churning cyclic garbage.  This is the STW-vs-running-hubs
 # shape behind the io_uring STW deadlock and the Group-B handoff; it must run
 # to completion with no crash, no hang, and a clean self-check.
 # ---------------------------------------------------------------------------
-def test_gc_stw_under_goroutine_churn():
-    """Workers churn reference cycles while a dedicated goroutine repeatedly
+def test_gc_stw_under_fiber_churn():
+    """Workers churn reference cycles while a dedicated fiber repeatedly
     forces a full gc.collect() (stop-the-world).  A STW that can't complete
     because a hub is wedged in a syscall, or a handoff that races re-attach,
     would hang (timeout) or crash; correct behavior finishes clean."""
@@ -212,13 +212,13 @@ print("PASS")
 
 
 # ---------------------------------------------------------------------------
-# BUG-002 regression guard: preemption must never freeze a goroutine mid
-# object-destruction.  A goroutine owns a big WeakKeyDictionary (so the hub
+# BUG-002 regression guard: preemption must never freeze a fiber mid
+# object-destruction.  A fiber owns a big WeakKeyDictionary (so the hub
 # tstate owns the keys under biased refcounting) and stays in the eval loop
 # copying it, draining cross-thread refcount merges at every eval-breaker --
 # while a native thread drops the last key references (queuing those merges)
 # and STW-collects.  Before the fix, the wall-clock preemptor would yield the
-# goroutine at a Python-frame entry nested inside an in-flight tp_dealloc
+# fiber at a Python-frame entry nested inside an in-flight tp_dealloc
 # (a weakref callback driven by the merge), freezing a half-finished destructor
 # at a GC-safe point -> the native gc.collect() reclaimed the partially-
 # destroyed objects -> use-after-free SIGSEGV.  Mirror of
@@ -226,7 +226,7 @@ print("PASS")
 # pre-fix, clean after (commit fixing runloom_tstate_in_destruction gating).
 # ---------------------------------------------------------------------------
 def test_no_preempt_during_weakref_destruction():
-    """A goroutine churning a WeakKeyDictionary while a native thread GC-collects
+    """A fiber churning a WeakKeyDictionary while a native thread GC-collects
     its keys must not be preempted mid tp_dealloc (free-threaded use-after-free).
     Runs on a roomy stack so the deep cold-import C burst (the unrelated stack-
     policy issue) can't confound the result."""

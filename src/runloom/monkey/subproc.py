@@ -39,7 +39,7 @@ _orig_popen_wait = None
 
 
 def _patched_popen_wait(self, timeout=None):
-    if not _in_goroutine() or self.returncode is not None:
+    if not _in_fiber() or self.returncode is not None:
         return _orig_popen_wait(self, timeout)
     deadline = None if timeout is None else time.monotonic() + timeout
     # Fast path (POSIX, Linux 5.3+): park on a pidfd until the child exits,
@@ -67,7 +67,7 @@ def _patched_popen_wait(self, timeout=None):
         finally:
             os.close(pfd)
     # Fallback: portable WNOHANG poll loop (Windows, or no pidfd).  _co_sleep
-    # yields to other goroutines, so this is cooperatively safe.
+    # yields to other fibers, so this is cooperatively safe.
     step = 0.001
     while True:
         rc = self.poll()
@@ -115,7 +115,7 @@ _HAVE_WNOHANG = hasattr(os, "WNOHANG")
 
 
 def _patched_os_waitpid(pid, options):
-    if not _in_goroutine():
+    if not _in_fiber():
         return _orig_os_waitpid(pid, options)
     if not _HAVE_WNOHANG:
         # Windows: no polling form -- offload the blocking wait.
@@ -149,14 +149,14 @@ def _patched_os_waitpid(pid, options):
 
 
 def _patched_os_wait():
-    if not _in_goroutine() or not _HAVE_WNOHANG:
+    if not _in_fiber() or not _HAVE_WNOHANG:
         return _orig_os_wait()
     # os.wait() == waitpid(-1, 0): wait for any child.
     return _patched_os_waitpid(-1, 0)
 
 
 def _patched_os_waitid(idtype, id, options):
-    if not _in_goroutine():
+    if not _in_fiber():
         return _orig_os_waitid(idtype, id, options)
     if options & os.WNOHANG:
         return _orig_os_waitid(idtype, id, options)
@@ -187,7 +187,7 @@ def _patched_os_waitid(idtype, id, options):
 
 def _patched_os_wait4(pid, options):
     # wait4(pid, options) -> (pid, status, rusage); like waitpid + rusage.
-    if not _in_goroutine() or not _HAVE_WNOHANG:
+    if not _in_fiber() or not _HAVE_WNOHANG:
         return _orig_os_wait4(pid, options)
     if options & os.WNOHANG:
         return _orig_os_wait4(pid, options)
@@ -215,13 +215,13 @@ def _patched_os_wait4(pid, options):
 
 def _patched_os_wait3(options):
     # wait3(options) == wait4(-1, options): any child, with rusage.
-    if not _in_goroutine() or not _HAVE_WNOHANG:
+    if not _in_fiber() or not _HAVE_WNOHANG:
         return _orig_os_wait3(options)
     return _patched_os_wait4(-1, options)
 
 
 def _patched_os_system(command):
-    # No non-blocking form; run it on the backend pool so the goroutine
+    # No non-blocking form; run it on the backend pool so the fiber
     # parks instead of freezing the scheduler for the child's lifetime.
     return _blocking_call(_orig_os_system, command)
 

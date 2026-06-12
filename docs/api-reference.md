@@ -13,7 +13,7 @@ The low-level scheduler API.  Most user code calls `runloom.go` and
 
 #### `go(fn, *, stack_size=None) → G`
 
-Spawn a goroutine running `fn`.  Returns a [`G`](#g) handle.
+Spawn a fiber running `fn`.  Returns a [`G`](#g) handle.
 
 - `fn` -- a zero-arg callable.  Bind arguments with `lambda` or
   `functools.partial`.
@@ -29,8 +29,8 @@ yields.**  Use only for pure-compute callables.
 
 #### `run() → int`
 
-Drive the scheduler until every goroutine has finished.  Returns the
-count of completed goroutines.
+Drive the scheduler until every fiber has finished.  Returns the
+count of completed fibers.
 
 #### `sched_yield()` / `sched_yield_classic()`
 
@@ -40,8 +40,8 @@ for benchmarking, otherwise identical).
 
 #### `sched_sleep(seconds)`
 
-Park the current goroutine until at least `seconds` have elapsed.
-Other goroutines run in the meantime.
+Park the current fiber until at least `seconds` have elapsed.
+Other fibers run in the meantime.
 
 #### `sched_stop()`
 
@@ -56,21 +56,21 @@ netpoll-parked).  Returns `(n_ready, n_sleep, n_parked)`.  Used by
 
 #### `park_self()`
 
-Park the current goroutine until `g.wake()` is called on its handle.
+Park the current fiber until `g.wake()` is called on its handle.
 Race-safe -- a wake that arrives before the park is consumed and the
 park returns immediately.  Use with `current_g()` to capture the
 handle before parking.
 
 #### `current_g() → G | None`
 
-Return a handle to the currently-running goroutine, or `None` if
-called from outside any goroutine.
+Return a handle to the currently-running fiber, or `None` if
+called from outside any fiber.
 
 ### Stack sizing
 
 #### `get_stack_size() → int`
 
-Current per-goroutine default stack size, in bytes.
+Current per-fiber default stack size, in bytes.
 
 #### `set_stack_size(bytes)`
 
@@ -79,8 +79,8 @@ Override the default and freeze calibration.  Clamped to
 
 #### `current_g_hwm() → int`
 
-The currently-running goroutine's stack high-water-mark in bytes
-(page-granular, paint-free via `mincore`), or `0` outside a goroutine or
+The currently-running fiber's stack high-water-mark in bytes
+(page-granular, paint-free via `mincore`), or `0` outside a fiber or
 where the backend has no introspectable stack (Windows Fibers).  The read
 half of the function-bound grow-down auto-sizer.
 
@@ -128,7 +128,7 @@ Multi-way wait.  Each case is `("recv", chan)` or `("send", chan, value)`.
 
 #### `wait_fd(fd, events, timeout_ms=-1) → int`
 
-Park the current goroutine until `fd` is ready.  `events` is a
+Park the current fiber until `fd` is ready.  `events` is a
 bitmask: `1 = read`, `2 = write`.  Returns the ready bitmask.
 `timeout_ms=-1` for no timeout; 0 to poll without parking.
 
@@ -170,7 +170,7 @@ See [Preemption](preemption.md).
 
 #### `warmup(n, stack_size=None)`
 
-Pre-allocate `n` goroutine stacks so the first `n` spawns skip mmap.
+Pre-allocate `n` fiber stacks so the first `n` spawns skip mmap.
 
 ### Diagnostics
 
@@ -193,20 +193,20 @@ Snapshot of scheduler counters.  Keys: `ready`, `sleeping`,
 
 ### Goroutine introspection
 
-A Go-style goroutine dump -- which goroutines exist, what each is blocked
+A Go-style fiber dump -- which fibers exist, what each is blocked
 on, and where in your code.  See the [Debugging guide](debugging.md) for
 the full picture (and the friendlier `runloom.inspect` wrappers).
 
-#### `goroutines() → list[dict]`
+#### `fibers() → list[dict]`
 
-One dict per live goroutine: `id`, `state` (`running` / `runnable` /
+One dict per live fiber: `id`, `state` (`running` / `runnable` /
 `io-wait` / `sleep` / `chan-wait` / `park` / ...), `blocked_on`, `fd` +
 `events` (when `io-wait`), `wake_in` (when `sleep`), `age`, `refcount`,
 `noyield`, `owner`.  Cheap; safe from a watchdog.
 
-#### `goroutine_count() → int`
+#### `fiber_count() → int`
 
-Number of live goroutines.
+Number of live fibers.
 
 #### `mn_hub_states() → list[dict]`
 
@@ -219,27 +219,27 @@ scheduler isn't running.  The friendly wrapper `runloom.inspect.hubs()` adds a
 `stack_cmd` (`py-spy dump --pid <PID>`) per row, and `runloom.inspect.print_hubs()`
 renders the table — see [debugging.md](debugging.md#what-is-each-hub-doing-hubs).
 
-#### `goroutine_stack(id) → (callable_repr, [(file, line, func), ...])`
+#### `fiber_stack(id) → (callable_repr, [(file, line, func), ...])`
 
-Best-effort reconstructed Python stack of one goroutine (deepest first).
+Best-effort reconstructed Python stack of one fiber (deepest first).
 Full stack under the single-thread scheduler (`runloom.aio`) and per-g-tstate
 M:N; withheld under default M:N (no safe way to freeze a hub-resumable
-goroutine).
+fiber).
 
-#### `dump_goroutines(fd=2) → None`
+#### `dump_fibers(fd=2) → None`
 
-Write an async-signal-safe structural dump (state histogram + per-goroutine
+Write an async-signal-safe structural dump (state histogram + per-fiber
 line, no Python objects) to `fd`.  The SIGQUIT path -- usable from a signal
 handler and when the interpreter is wedged.
 
 #### `set_introspect_timestamps(bool)`
 
-Track each goroutine's park time so `goroutines()`/dumps report `age`.  Off
+Track each fiber's park time so `fibers()`/dumps report `age`.  Off
 by default (one clock read per park); also via `RUNLOOM_INTROSPECT_TIME=1`.
 
 #### `install_traceback_signal(signum=SIGQUIT) → int`
 
-Install a raw-C signal handler that dumps all goroutines to stderr -- Go's
+Install a raw-C signal handler that dumps all fibers to stderr -- Go's
 `GOTRACEBACK` / `kill -QUIT`.  Also via `RUNLOOM_TRACEBACK=1`.  POSIX only.
 
 #### `reset_after_fork() → None`
@@ -253,13 +253,13 @@ guide](debugging.md#fork-safety).
 #### `set_deadlock_mode(0|1|2)` / `get_deadlock_mode() → int` / `count_deadlocked() → int`
 
 Deadlock detection: when the single-thread scheduler quiesces with
-goroutines still blocked on channels/parks, mode 0=off, 1=warn (print the
+fibers still blocked on channels/parks, mode 0=off, 1=warn (print the
 dump, default), 2=raise `RuntimeError`.  Also `RUNLOOM_DEADLOCK=off|warn|raise`.
 `count_deadlocked()` is the current chan/park-blocked count.
 
-#### `set_max_goroutines(n)` / `get_max_goroutines() → int` / `live_goroutines() → int`
+#### `set_max_fibers(n)` / `get_max_fibers() → int` / `live_fibers() → int`
 
-Backpressure: cap the live-goroutine count (0 = unlimited).  Over the cap,
+Backpressure: cap the live-fiber count (0 = unlimited).  Over the cap,
 spawn raises `RuntimeError`.  Also `RUNLOOM_MAX_GOROUTINES`.  Zero hot-path cost
 when unset.
 
@@ -276,8 +276,8 @@ and [Stack sizing](stack-sizing.md).
 #### `inspect.install_crash_handler(level=None, file=None)` / `uninstall_crash_handler()` / `crash_handler_installed() → bool`
 
 Install a fatal-signal handler (SIGSEGV/SIGBUS/...) that, on a crash, classifies
-the fault against the per-goroutine guard pages -- a goroutine stack overflow is
-named and distinguished from a wild pointer -- and dumps the live-goroutine
+the fault against the per-fiber guard pages -- a fiber stack overflow is
+named and distinguished from a wild pointer -- and dumps the live-fiber
 registry, then chains to the default handler.  `level`:
 `on`/`all`/`backtrace`/`pystack`/`wait`/`gdb`/`off` (default from `RUNLOOM_CRASH`).
 `file` also appends the report there.  POSIX has the rich path; Windows uses a
@@ -285,15 +285,15 @@ Vectored Exception Handler.
 
 #### `inspect.enable_stack_advice(on=True)` / `stack_advice() → list[dict]` / `print_stack_advice(file=None)`
 
-Per-goroutine-kind stack profiler.  While on, each kind's real C-stack
+Per-fiber-kind stack profiler.  While on, each kind's real C-stack
 high-water mark is measured; `stack_advice()` returns `{kind, samples, max_hwm,
 reserved, suggested}` per kind so you can right-size `stack_size=`.  Advisory
 only -- it never changes a stack size.  Off by default (zero cost).
 
 #### `inspect.enable_stack_autosize(on=True, prescan=False)`
 
-Adaptive auto-sizer: each goroutine kind starts large and, once measured, its
-later goroutines start at the learned size ("start large, learn down").
+Adaptive auto-sizer: each fiber kind starts large and, once measured, its
+later fibers start at the learned size ("start large, learn down").
 In-memory only -- never persisted.  `prescan=True` also runs the cold-start
 optimizer (a deep-frame kind like `Decimal` starts big enough to survive its
 first run).  An explicit `stack_size=` always wins.  Also `RUNLOOM_STACK_AUTOSIZE=1`.
@@ -311,13 +311,13 @@ manually if you're embedding runloom in a non-main thread.
 
 Goroutine handle.  Attributes:
 
-- `done` -- `True` once the goroutine has returned.
+- `done` -- `True` once the fiber has returned.
 - `result` -- return value (or `None` until done).
-- `error` -- exception object if the goroutine raised, else `None`.
-- `wake()` -- re-queue a parked goroutine; race-safe with
+- `error` -- exception object if the fiber raised, else `None`.
+- `wake()` -- re-queue a parked fiber; race-safe with
   `park_self()`.
 - `stack(limit=None)` -- return a list of `(filename, lineno, name)`
-  frames for the goroutine's current Python stack.
+  frames for the fiber's current Python stack.
 
 #### `Coro`
 
@@ -335,7 +335,7 @@ Top-level package.  Re-exports a Go-style API from `runloom.runtime`
 import runloom
 
 runloom.go(fn)            # spawn (uses the C scheduler under the hood)
-runloom.yield_now()       # cooperative yield (give other goroutines a turn)
+runloom.yield_now()       # cooperative yield (give other fibers a turn)
 runloom.sleep(seconds)    # cooperative sleep
 runloom.run(n, main_fn=None)  # THE entry point. run main_fn with n hubs:
                           #   n=1 single-thread, n>1 M:N parallel across n
@@ -352,17 +352,17 @@ For new code, prefer `runloom_c` (faster) or `runloom.sync` (richer API).
 
 ## `runloom.inspect`
 
-Runtime introspection -- the friendly wrappers over the goroutine
-registry.  `goroutines(stacks=)`, `count()`, `stack(id)`, `format(stacks=)`
+Runtime introspection -- the friendly wrappers over the fiber
+registry.  `fibers(stacks=)`, `count()`, `stack(id)`, `format(stacks=)`
 (a human dump as a string), `dump(file=, stacks=)`, `enable_timestamps()`,
 `install_dump_signal()`, `leaked(min_age, states)` / `watch_leaks(...)`
 (leak detection), `set_deadlock_mode("off"/"warn"/"raise")`,
-`set_max_goroutines(n)` / `live_goroutines()` (backpressure).  See the
+`set_max_fibers(n)` / `live_fibers()` (backpressure).  See the
 [Debugging guide](debugging.md).
 
 ```python
 import runloom
-print(gi.format(stacks=True))   # which goroutines, and where they're stuck
+print(gi.format(stacks=True))   # which fibers, and where they're stuck
 gi.install_dump_signal()        # kill -QUIT <pid> -> dump
 ```
 
@@ -387,7 +387,7 @@ Classes:
 - `RunloomFuture` -- duck-typed Future with synchronous done-callback
   dispatch.
 - `RunloomTask` -- `asyncio.Task` replacement that drives the coroutine
-  inside a goroutine.
+  inside a fiber.
 - `StreamReader` / `StreamWriter` -- asyncio-compatible stream
   interface, backed by `wait_fd`.
 - `DatagramTransport` -- UDP transport for
@@ -502,6 +502,6 @@ Available even without `patch()`:
 - `CoCondition` -- `wait` releases the lock cooperatively.
 - `CoSemaphore`, `CoBoundedSemaphore` -- counting semaphores.
 
-These implement the `threading.*` interface but park goroutines
+These implement the `threading.*` interface but park fibers
 instead of OS threads.  Useful when you want sync primitives but
 don't want to install the full monkey patch.

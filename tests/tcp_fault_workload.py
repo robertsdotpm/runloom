@@ -2,7 +2,7 @@
 
 Run STANDALONE (not collected by pytest) under ``strace -e inject=`` by
 test_tcp_faultinject.py.  Drives a real loopback TCPConn echo (connect / accept
-/ recv / send) as two cooperative goroutines, so an error injected into one of
+/ recv / send) as two cooperative fibers, so an error injected into one of
 those syscalls hits the live non-blocking + netpoll-retry loop.
 
 Modes (argv[1]):
@@ -21,7 +21,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(
 import runloom_c
 
 
-def _drive(*goroutines):
+def _drive(*fibers):
     box = []
 
     def wrap(fn):
@@ -32,7 +32,7 @@ def _drive(*goroutines):
                 box.append(e)
         return runner
 
-    for g in goroutines:
+    for g in fibers:
         runloom_c.go(wrap(g))
     runloom_c.run()
     return box
@@ -111,7 +111,7 @@ def mode_connectrefused():
 def mode_connectonly():
     # A PASSIVE listener (listen, never accept): the kernel completes the
     # 3-way handshake into the accept queue, so TCPConn.connect succeeds without
-    # any server goroutine -- a connect failure thus surfaces directly instead
+    # any server fiber -- a connect failure thus surfaces directly instead
     # of stranding a server in accept().  Used for the connect-path injection.
     lsock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     lsock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -173,7 +173,7 @@ def mode_recvonce():
 def mode_sendonce():
     # One socket connected to a PASSIVE listener (never accepted): a single
     # send with an injected non-retryable error must surface as OSError.  No
-    # peer goroutine parks, so an injected send failure cannot hang the run.
+    # peer fiber parks, so an injected send failure cannot hang the run.
     lsock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     lsock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     lsock.bind(("127.0.0.1", 0))
@@ -201,7 +201,7 @@ def mode_sendonce():
 
 def mode_acceptfail():
     # A real (raw) client fills the accept queue, then a single accept() with an
-    # injected non-retryable error must surface as OSError -- no peer goroutine
+    # injected non-retryable error must surface as OSError -- no peer fiber
     # parks, so the workload cannot hang.
     listener = runloom_c.TCPConn.listen("127.0.0.1", 0)
     target_port = _port(listener)

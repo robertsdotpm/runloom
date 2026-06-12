@@ -8,9 +8,9 @@ Ground truth: `runloom/aio/` — `_base.py` (foundation), `tasks.py`
 
 ## The idea in one line
 
-> Implement asyncio's event-loop protocol on top of goroutines: **each
-> `asyncio.Task` becomes a runloom goroutine that drives `coro.send()` itself, and
-> `await fut` parks that goroutine** on the park/wake primitive (spec 04). Existing
+> Implement asyncio's event-loop protocol on top of fibers: **each
+> `asyncio.Task` becomes a runloom fiber that drives `coro.send()` itself, and
+> `await fut` parks that fiber** on the park/wake primitive (spec 04). Existing
 > `async def` code runs unchanged on runloom's scheduler.
 
 `runloom.aio.run(coro)` ≈ `asyncio.run`. The win is amortizing setup across many
@@ -31,7 +31,7 @@ documented precisely (below), because they are *design choices*, not bugs.
 ## `RunloomTask` — the heart (`tasks.py`)
 
 A real `asyncio.Task` subclass (so `isinstance(x, asyncio.Task)` holds) but driven
-by a goroutine instead of CPython's C task machinery. The critical construction
+by a fiber instead of CPython's C task machinery. The critical construction
 move: **initialize only the `Future` half** (`asyncio.Future.__init__`), NOT
 `Task.__init__` — which would schedule the C task-step and *double-drive* the
 coroutine (the C step is a C callable you can't shadow from Python). The C Task's
@@ -43,7 +43,7 @@ underlying C Future so `Task.__del__` doesn't warn "destroyed but pending."
 
 ```
 _driver():
-  self._self_g = current goroutine          # so cancel/done-cb can wake us
+  self._self_g = current fiber          # so cancel/done-cb can wake us
   loop:
     set _CURRENT_TASKS[loop] = self          # current_task() correctness
     try:
@@ -87,7 +87,7 @@ a re-implementer *will* hit the same ones:
   send/throw (so `asyncio.current_task()`/`timeout`/`wait_for` work). And the
   *socket-wait* version of this (`_wait_fd` in `_base.py`) snapshots and restores
   the slot across a C `wait_fd` park, because a coroutine that parks for socket I/O
-  suspends the goroutine *mid-send* — its driver's `finally` can't run until the
+  suspends the fiber *mid-send* — its driver's `finally` can't run until the
   send returns, and meanwhile other tasks' drivers mutate the shared slot.
 
 ### Cancellation — into the awaited future, with a one-shot fallback
@@ -99,24 +99,24 @@ task is suspended on a future/task, propagate the cancel **into** `_pgfutwaiter`
 surfaces. If it can't take the cancel (already cancelling/done), set a one-shot
 `_pgmustcancel` and let its existing done-callback wake us — do **not** wake now (a
 premature unpark would abandon the wait and leak the future half-cancelled). If the
-goroutine is parked in a C `wait_fd` (a `sock_recv`/`accept`/`connect` with no coro
+fiber is parked in a C `wait_fd` (a `sock_recv`/`accept`/`connect` with no coro
 await-point to throw into), use **`cancel_wait_fd()`** (spec 06) — `G.wake()` only
 wakes `park_self` parkers, so it would hang. The cancel **message** is preserved
 (`_pgcancelmsg`) because anyio's cancel scopes recognize their own cancellation
 solely by `exc.args[0]`. `cancelling()`/`uncancel()` track the counter
 `asyncio.timeout`/`TaskGroup` need.
 
-### Roomy stacks for user-callback goroutines
+### Roomy stacks for user-callback fibers
 
-Task drivers and the transport I/O goroutines run **arbitrary user code that can
+Task drivers and the transport I/O fibers run **arbitrary user code that can
 recurse deep into C** (a TLS/SSH handshake runs an OpenSSL key exchange
 synchronously inside `data_received`; first-time imports of pydantic etc. are deep
 C-recursive), which overflows a *small* g-stack → SEGV (stock asyncio runs
-callbacks on the 8 MB main stack). So every such goroutine is spawned via `_go_io`
+callbacks on the 8 MB main stack). So every such fiber is spawned via `_go_io`
 / with `_TASK_STACK` — an **explicit 512 KB pin** ([aio/_base.py:50-86](../src/runloom/aio/_base.py#L50)),
 virtual + pooled, only the bridge pays it; `RUNLOOM_AIO_{IO,TASK}_STACK`. The pin
 matters because it holds the 512 KB *regardless of the scheduler default,
-calibration, or the M:N grow-down* (which can shrink an unpinned goroutine toward
+calibration, or the M:N grow-down* (which can shrink an unpinned fiber toward
 16 KB) — an explicit `stack_size=` always wins. **Do not revert these to a bare
 `runloom_c.go`** — it's a documented invariant. (The code comments here say "the
 default 32 KB g-stack"; that reflects the pre-512 KB default era — see spec 10 for
@@ -143,7 +143,7 @@ hypercorn, websockets, anyio test suites green under the bridge.
 
 ## The documented semantic differences (design, not bugs)
 
-Because a task is a stackful goroutine ordered by runloom's scheduler — not a
+Because a task is a stackful fiber ordered by runloom's scheduler — not a
 callback on one FIFO ready-queue driven by `loop._run_once` — a thin slice of code
 that pins on asyncio's *exact scheduler mechanics* can observe a difference. They
 bite **loudly** (a failing test or a hang), never as silent corruption:
@@ -158,7 +158,7 @@ bite **loudly** (a failing test or a hang), never as silent corruption:
    PENDING→done transition) **defers every callback via `loop.call_soon`** *except*:
    (a) `RunloomTask._wake_unpark` — runloom's own await-wake primitive, fired inline
    because it only readies the g (FIFO-after an already-readied waiter, so ordering
-   still holds) and deferring it would spawn a goroutine per await; and (b)
+   still holds) and deferring it would spawn a fiber per await; and (b)
    callbacks tagged `_runloom_fire_sync` (the run loop's `_stop_on_done`, which must
    stop the drive in the same turn). **Stock `asyncio.Task`/`_PyTask` wakeups are
    deferred** through the `_run_stock_task_cb` trampoline (firing them inline
@@ -170,7 +170,7 @@ bite **loudly** (a failing test or a hang), never as silent corruption:
    "difference" from asyncio here is narrow: only the two internal sync exceptions,
    not a wholesale inline policy.)
 2. **Timers are real wall-clock, on a per-OS-thread scheduler.** `call_later`/
-   `call_at`/`asyncio.sleep` are real `sched_sleep` goroutine sleeps, not a per-loop
+   `call_at`/`asyncio.sleep` are real `sched_sleep` fiber sleeps, not a per-loop
    timer heap compared against `loop.time()`. Consequence: **mocking `loop.time()`
    to fast-forward a timer does not advance runloom's timers** (drive such tests
    with real short durations); and two loops on one OS thread share the scheduler,
@@ -191,13 +191,13 @@ bite **loudly** (a failing test or a hang), never as silent corruption:
 ## The compatibility-invariant catalog (in `CLAUDE.md`, summarized)
 
 The bridge accreted a set of must-hold invariants, each a fixed real-world crash —
-keep them or the corresponding framework breaks: timer goroutines read the callback
+keep them or the corresponding framework breaks: timer fibers read the callback
 **through the handle** (so a cancelled timer leaks nothing); `_StreamTransport`
 seeds `_io_g = None` before `connection_made` (so a write-in-`connection_made` over
 TLS doesn't drop the connection); loop-level callbacks run with **no current task
 active** (`_pg_run_loop_cb`, so a deferred stock-Task wakeup doesn't hit
 enter_task's "another task is running"); `server.close()` wakes its accept-loop
-goroutines via `cancel_wait_fd` (no per-server leak). Each names the framework it
+fibers via `cancel_wait_fd` (no per-server leak). Each names the framework it
 fixed and ships a regression guard under `runloom_compat/`.
 
 ## Invariants
@@ -206,7 +206,7 @@ fixed and ships a regression guard under `runloom_compat/`.
    double-drive).
 2. **The driver sends `None`, throws on cancel/error**, and pumps netpoll before
    yielding/parking.
-3. **User-callback goroutines get a roomy (512 KB) stack** (`_go_io`/`_TASK_STACK`).
+3. **User-callback fibers get a roomy (512 KB) stack** (`_go_io`/`_TASK_STACK`).
 4. **`cancel()` propagates into the awaited future first**; `cancel_wait_fd` for a
    C-parked g; the cancel message is preserved.
 5. **The three documented semantic diffs are intentional**; the inline-callback

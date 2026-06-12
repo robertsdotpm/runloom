@@ -2,7 +2,7 @@
 
 Run STANDALONE (not collected by pytest) under ``strace -e inject=`` by
 test_netpoll_faultinject.py.  It exercises the netpoll happy path -- a
-goroutine parks in runloom_c.wait_fd and a feeder OS thread makes the fd
+fiber parks in runloom_c.wait_fd and a feeder OS thread makes the fd
 readable -- so that an error injected into the underlying epoll_wait/epoll_ctl
 syscall hits a real park/wake, not a no-op.
 
@@ -36,7 +36,7 @@ def mode_happy():
     err = []
 
     def feeder():
-        # give the goroutine time to park, then produce one readable edge
+        # give the fiber time to park, then produce one readable edge
         import time
         time.sleep(0.05)
         try:
@@ -49,7 +49,7 @@ def mode_happy():
 
     def waiter():
         # Catch AT the park site: an injected epoll_ctl failure surfaces here
-        # as OSError, and a goroutine that dies with an unhandled exception
+        # as OSError, and a fiber that dies with an unhandled exception
         # leaves run() returning with an empty `got` -- indistinguishable from
         # a silent hang.  Recording the errno proves the error path is clean.
         try:

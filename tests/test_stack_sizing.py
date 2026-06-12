@@ -1,4 +1,4 @@
-"""Tests for the per-goroutine stack sizing machinery:
+"""Tests for the per-fiber stack sizing machinery:
 
   * runloom_c.go(fn, stack_size=N): per-call override
   * runloom_c.set_stack_size(N) / get_stack_size(): program-wide default
@@ -83,7 +83,7 @@ class TestStackSizeOverride(unittest.TestCase):
         self.assertEqual(runloom_c.get_stack_size(), original)
 
     def test_per_call_huge_stack_works(self):
-        """Spawn a goroutine with a 2 MB stack; verify it runs to completion.
+        """Spawn a fiber with a 2 MB stack; verify it runs to completion.
         Catches off-by-one in the size clamp / paint loop."""
         out = []
         def w():
@@ -105,7 +105,7 @@ class TestCalibrationStats(unittest.TestCase):
         self.assertIn("stack_painting", s)
 
     def test_stats_hwm_increments(self):
-        """After running goroutines that touch a known stack amount, HWM
+        """After running fibers that touch a known stack amount, HWM
         should be > 0 (assuming painting is still on)."""
         original = runloom_c.get_stack_size()
         try:

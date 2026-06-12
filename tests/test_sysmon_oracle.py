@@ -2,14 +2,14 @@
 cooperative property end-to-end.
 
 The M:N scheduler ships a sysmon watchdog (default-on on free-threaded 3.13t)
-that logs `[RUNLOOM_SYSMON] hub N WEDGED ...` when a goroutine pins a hub past the
+that logs `[RUNLOOM_SYSMON] hub N WEDGED ...` when a fiber pins a hub past the
 budget without yielding.  We use that as a test oracle:
 
   * a workload that does NOT cooperate (unwrapped CPU-heavy hashing inline)
     WEDGES -- which also proves the detector itself works, so a "no WEDGE" is
     meaningful;
   * the SAME workload with `heavy` auto-offload on does NOT wedge -- the hashes
-    relocate to the pool and the goroutines park, so no hub is ever pinned;
+    relocate to the pool and the fibers park, so no hub is ever pinned;
   * a purely cooperative workload (cooperative sleeps) never wedges (no false
     positives).
 
@@ -82,7 +82,7 @@ class TestSysmonOracle(unittest.TestCase):
 
     def test_heavy_autooffload_prevents_wedge(self):
         """The money test: with `heavy` on (default), the same hashing
-        auto-offloads to the pool, the goroutines park, and NO hub wedges."""
+        auto-offloads to the pool, the fibers park, and NO hub wedges."""
         out = _run(_HASH_WORKLOAD.format(heavy="True"))
         self.assertNotIn("WEDGED", out,
                          "auto-offloaded hashing should never pin a hub:\n" + out)

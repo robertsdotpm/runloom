@@ -9,10 +9,10 @@ from ._base import *  # noqa: F401,F403  (shared foundation)
 # (you cannot epoll a file lock).  So the cooperative form acquires with the
 # non-blocking variant (LOCK_NB) and, on contention, parks via _co_sleep and
 # retries on a backoff.  This keeps the scheduler thread free and stays
-# cancel-friendly (a cancelled goroutine just stops retrying), rather than
+# cancel-friendly (a cancelled fiber just stops retrying), rather than
 # pinning a backend-pool worker on an uninterruptible blocking lock.
 #
-# Pass-through (no cooperative loop) when: outside a goroutine, the caller
+# Pass-through (no cooperative loop) when: outside a fiber, the caller
 # already asked for LOCK_NB (wants the immediate raise), or the op is an
 # unlock (LOCK_UN -- never blocks).
 # ============================================================
@@ -55,7 +55,7 @@ def _co_lock_acquire(call, op, nb_bit, lock_bits):
 
 def _patched_flock(fd, operation):
     lock_bits = _fcntl_mod.LOCK_SH | _fcntl_mod.LOCK_EX
-    if not _in_goroutine() or (operation & _fcntl_mod.LOCK_NB) or \
+    if not _in_fiber() or (operation & _fcntl_mod.LOCK_NB) or \
             not (operation & lock_bits):
         return _orig_flock(fd, operation)
     return _co_lock_acquire(lambda op: _orig_flock(fd, op),
@@ -64,7 +64,7 @@ def _patched_flock(fd, operation):
 
 def _patched_lockf(fd, cmd, length=0, start=0, whence=0):
     lock_bits = _fcntl_mod.LOCK_SH | _fcntl_mod.LOCK_EX
-    if not _in_goroutine() or (cmd & _fcntl_mod.LOCK_NB) or \
+    if not _in_fiber() or (cmd & _fcntl_mod.LOCK_NB) or \
             not (cmd & lock_bits):
         return _orig_lockf(fd, cmd, length, start, whence)
     return _co_lock_acquire(
@@ -98,7 +98,7 @@ def _unpatch_fcntl():
 # file -- builtins.open dispatched through the backend
 #
 # Wrapping open() covers the open syscall itself (cold-inode lookups, NFS,
-# FUSE, slow disk) so the goroutine doesn't freeze the scheduler waiting on
+# FUSE, slow disk) so the fiber doesn't freeze the scheduler waiting on
 # it.  NOTE: the returned file object's later .read()/.write() do NOT go
 # through our os.read/os.write patches -- io.FileIO issues the read()/write()
 # syscalls directly in C, bypassing the os module entirely.  For local,
@@ -123,12 +123,12 @@ def _patched_open(file, *args, **kwargs):
     # footgun -- routes through pure-Python _pyio, whose FileIO uses the
     # cooperative os.read/os.write (park on wait_fd) instead of the immutable
     # C BufferedReader's raw blocking syscall.  So a buffered read on a pipe
-    # parks the goroutine rather than wedging the hub.  Regular files keep the
+    # parks the fiber rather than wedging the hub.  Regular files keep the
     # fast C path (their buffered reads don't block on local disk; the open
-    # syscall itself is offloaded when called from a goroutine).
+    # syscall itself is offloaded when called from a fiber).
     if isinstance(file, int) and _fd_pollable(file):
         return _pyio.open(file, *args, **kwargs)
-    if not _in_goroutine():
+    if not _in_fiber():
         return _orig_open(file, *args, **kwargs)
     return _get_backend().submit(_orig_open, (file,) + args, kwargs)
 
@@ -165,7 +165,7 @@ _SYSCALL_NAMES = (
     "utime",
     "open", "sendfile", "pread", "pwrite",
     # splice / copy_file_range: Linux zero-copy fd-to-fd moves.  Two fds + a
-    # length; the simplest cooperative form is a backend offload (the goroutine
+    # length; the simplest cooperative form is a backend offload (the fiber
     # parks while a pool worker runs the blocking move), like os.system.
     "splice", "copy_file_range",
 )
@@ -175,7 +175,7 @@ _orig_syscalls = {}
 
 def _make_pool_patch(orig):
     def patched(*args, **kwargs):
-        if not _in_goroutine():
+        if not _in_fiber():
             return orig(*args, **kwargs)
         return _get_backend().submit(orig, args, kwargs)
     patched.__name__ = getattr(orig, "__name__", "patched_syscall")

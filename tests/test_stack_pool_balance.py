@@ -1,7 +1,7 @@
-"""Regression: goroutine-stack pools must not grow unboundedly under an
+"""Regression: fiber-stack pools must not grow unboundedly under an
 acceptor->worker fan-out.
 
-One acceptor goroutine mn_go's many short-lived workers per round; the workers
+One acceptor fiber mn_go's many short-lived workers per round; the workers
 run and complete spread across all hubs.  The stack recycle pools are
 per-thread, so stacks drain out of the acceptor hub's pool into the worker
 hubs' pools.  Before the fix (a shared global stack depot below the per-thread

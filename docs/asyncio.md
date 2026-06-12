@@ -2,8 +2,8 @@
 
 `runloom.aio` lets you run existing `async def` code on the runloom
 scheduler.  It implements the asyncio event-loop protocol on top of
-goroutines: every `asyncio.Task` becomes a runloom goroutine driving the
-coroutine, and `await fut` parks the goroutine on a per-task wake
+fibers: every `asyncio.Task` becomes a runloom fiber driving the
+coroutine, and `await fut` parks the fiber on a per-task wake
 primitive.
 
 ## When to use this
@@ -110,7 +110,7 @@ runloom.aio.run(main())
 
 The server runs at full speed using runloom's netpoll (epoll on Linux,
 kqueue on BSD/macOS, WSAPoll/IOCP on Windows).  Per-connection
-overhead is one goroutine -- by default 16 KB of stack after
+overhead is one fiber -- by default 16 KB of stack after
 [calibration](stack-sizing.md).
 
 ### Client
@@ -291,14 +291,14 @@ total = 0
 for i in range(1000):
     total += await worker(i)
 
-# Fast -- 1000 concurrent goroutines
+# Fast -- 1000 concurrent fibers
 results = await asyncio.gather(*(worker(i) for i in range(1000)))
 total = sum(results)
 ```
 
 ### Avoid making a new task for trivial work
 
-A `RunloomTask` allocates a 16 KB goroutine stack.  For something that's
+A `RunloomTask` allocates a 16 KB fiber stack.  For something that's
 basically "return a value", just call the function:
 
 ```python
@@ -316,7 +316,7 @@ import runloom
 runloom.monkey.patch()    # makes socket / time / ssl cooperative
 
 async def main():
-    # This blocks the goroutine, not the OS thread:
+    # This blocks the fiber, not the OS thread:
     response = requests.get("http://example.com").content
     return len(response)
 
@@ -330,9 +330,9 @@ This lets you use libraries that don't support `async` -- `requests`,
 
 | | vanilla asyncio | `runloom.aio` |
 | --- | --- | --- |
-| Task storage | callback chains in `_callbacks` lists | per-task goroutine + 1-call-deep stack |
+| Task storage | callback chains in `_callbacks` lists | per-task fiber + 1-call-deep stack |
 | Context switch | `loop._run_once` + `selector.select` | C `swap` instruction |
-| `await fut` | adds callback, returns control to loop | parks goroutine on per-task wake |
+| `await fut` | adds callback, returns control to loop | parks fiber on per-task wake |
 | Per-task memory | ~5 KB (interpreter frame + Task object) | ~16 KB (stack) + ~250 B (G + Task) |
 | Switch cost | ~1800 ns | ~80 ns |
 
@@ -346,7 +346,7 @@ collecting the speed benefit.
 `runloom.aio` is a high-fidelity bridge for real-world async code -- it runs
 aiohttp, uvicorn, starlette, hypercorn, websockets, anyio and friends -- but it
 is **not** a bit-exact emulator of asyncio's *scheduler semantics*.  Because a
-task is a stackful goroutine ordered by runloom's M:N scheduler (not a callback on
+task is a stackful fiber ordered by runloom's M:N scheduler (not a callback on
 a single FIFO ready-queue driven by `loop._run_once`), a thin slice of code that
 depends on asyncio's exact callback/timer ordering can observe a difference.
 
@@ -370,8 +370,8 @@ code that completed the future finishes its synchronous run *before* any callbac
 fires.  runloom now does the same — `_fire_callbacks` **defers every done-callback
 through `loop.call_soon`** to preserve asyncio's order — with exactly two
 synchronous exceptions: (a) `RunloomTask._wake_unpark`, runloom's own await-wake
-primitive (firing it inline only readies the goroutine, which stays FIFO-after an
-already-readied waiter, so ordering holds; deferring it would spawn a goroutine
+primitive (firing it inline only readies the fiber, which stays FIFO-after an
+already-readied waiter, so ordering holds; deferring it would spawn a fiber
 per `await`); and (b) callbacks tagged `_runloom_fire_sync` (the run loop's own
 `_stop_on_done` control hook).  Stock `asyncio.Task` wakeups are **deferred**
 through a trampoline.  An `add_done_callback` on an already-done future is always
@@ -387,7 +387,7 @@ distinction washes out.
 
 asyncio keeps a per-loop timer heap and fires timers by comparing `loop.time()`
 inside `_run_once`.  runloom schedules `call_later`/`call_at`/`asyncio.sleep` as
-real wall-clock goroutine sleeps on the scheduler shared by every loop on that
+real wall-clock fiber sleeps on the scheduler shared by every loop on that
 OS thread.  Two consequences:
 
 - **`loop.time()` is not consulted for firing.**  Mocking `loop.time()` to
@@ -405,7 +405,7 @@ OS thread.  Two consequences:
 
 asyncio runs coroutine-steps, `call_soon` callbacks and task wakeups as entries
 in one strict-FIFO ready deque, one batch per iteration.  runloom runs them as
-goroutines ordered by the M:N scheduler (ready-ring + work-stealing deque +
+fibers ordered by the M:N scheduler (ready-ring + work-stealing deque +
 wake-state machine).  The *set* of work that runs is the same; the exact
 interleaving between a just-woken task and a freshly scheduled callback can
 differ.  Again: only code that pins on that sub-iteration ordering notices.
@@ -426,4 +426,4 @@ mechanism?**
 
 If asyncio-exact scheduler semantics ever become a hard requirement for your use
 case, that's a deeper change to the bridge's ready-queue/timer model (and a
-trade against the performance the goroutine model buys) -- open an issue.
+trade against the performance the fiber model buys) -- open an issue.

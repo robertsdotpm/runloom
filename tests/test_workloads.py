@@ -255,11 +255,11 @@ class TestUdpEcho(unittest.TestCase):
 
 
 # ====================================================================
-# Mixed asyncio + raw goroutine
+# Mixed asyncio + raw fiber
 # ====================================================================
 class TestMixedExecution(unittest.TestCase):
-    def test_goroutine_feeds_into_asyncio_chan(self):
-        """A raw goroutine produces values; an asyncio task consumes
+    def test_fiber_feeds_into_asyncio_chan(self):
+        """A raw fiber produces values; an asyncio task consumes
         them via Chan."""
         ch = runloom_c.Chan(50)
         N = 30

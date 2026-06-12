@@ -54,7 +54,7 @@ static PyObject *m_crash_thread_arm(PyObject *self, PyObject *unused)
 }
 
 /* Test-only: deliberately overflow the current C stack (does not return).
- * Call inside a goroutine to fault into its guard page. */
+ * Call inside a fiber to fault into its guard page. */
 static PyObject *m_crash_selftest_overflow(PyObject *self, PyObject *unused)
 {
     (void)self; (void)unused;

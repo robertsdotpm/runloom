@@ -1,4 +1,4 @@
-/* runloom_stackadvice.c -- per-goroutine-kind stack-usage profiler.
+/* runloom_stackadvice.c -- per-fiber-kind stack-usage profiler.
  * See runloom_stackadvice.h. */
 
 #if !defined(_WIN32)
@@ -113,7 +113,7 @@ int runloom_advice_autosize_enabled(void)
     return __atomic_load_n(&runloom_autosize_on, __ATOMIC_ACQUIRE);
 }
 
-/* Follow __wrapped__ to the REAL underlying callable so a goroutine's kind (and
+/* Follow __wrapped__ to the REAL underlying callable so a fiber's kind (and
  * its prescan scan) is keyed on the user's function, not a wrapper.  runloom.go's
  * arg-binding lambda sets __wrapped__ to the target, and functools.wraps sets it
  * on decorated functions -- both should attribute to the wrapped function, not

@@ -155,8 +155,8 @@ typedef enum runloom_delay_site {
     RUNLOOM_DLY_WORLD_YIELD,        /* the monopoly world-yield detach */
     RUNLOOM_DLY_SNAP_SAVE,          /* pystate snap (g yields) */
     RUNLOOM_DLY_SNAP_LOAD,          /* pystate load (g resumes) */
-    RUNLOOM_DLY_G_ENTRY,            /* a goroutine starts running */
-    RUNLOOM_DLY_G_COMPLETE,         /* a goroutine completes */
+    RUNLOOM_DLY_G_ENTRY,            /* a fiber starts running */
+    RUNLOOM_DLY_G_COMPLETE,         /* a fiber completes */
     RUNLOOM_DLY_HUB_RESUME,         /* a hub picks a g to resume */
     RUNLOOM_DLY_NSITES
 } runloom_delay_site_t;

@@ -158,7 +158,7 @@ def test_recv_hard_error_surfaces_oserror(errno_):
 @pytest.mark.parametrize("errno_", [EMFILE, ENFILE], ids=["EMFILE", "ENFILE"])
 def test_accept_hard_error_surfaces_oserror(errno_):
     """accept() fd-exhaustion (EMFILE/ENFILE) surfaces as a clean OSError to the
-    accepting goroutine -- the listener is unharmed, no crash, no hang."""
+    accepting fiber -- the listener is unharmed, no crash, no hang."""
     p = _run("TCP_ACCEPT", "once:%d" % errno_, "acceptfail")
     assert p.returncode == 42, (errno_, p.stdout, p.stderr)
     assert "errno=%d" % errno_ in p.stdout, p.stdout

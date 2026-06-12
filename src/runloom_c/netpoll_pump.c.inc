@@ -51,7 +51,7 @@ int runloom_netpoll_pump(long long timeout_ns)
                 int fd = evs[i].data.fd;
                 int mask = 0;
                 /* io_uring eventfd (global ring): drain its counter
-                 * and walk the CQ ring to wake parked goroutines via
+                 * and walk the CQ ring to wake parked fibers via
                  * their per-op record.  Not a normal fd-park entry;
                  * skip the parker dispatch.  No pool lock needed --
                  * iouring drain is independent of parker pools. */
@@ -63,7 +63,7 @@ int runloom_netpoll_pump(long long timeout_ns)
                 /* Generic pump-interrupt eventfd: a cross-thread waker
                  * (blocking-offload pool) poked it only to break this
                  * epoll_wait.  Drain its counter to clear the level and
-                 * loop -- the re-queued goroutine is already on the
+                 * loop -- the re-queued fiber is already on the
                  * scheduler's wake_list/ready, picked up by the drain. */
                 if (__atomic_load_n(&runloom_pump_wake_fd, __ATOMIC_ACQUIRE) == fd
                     && fd >= 0) {
@@ -117,7 +117,7 @@ int runloom_netpoll_pump(long long timeout_ns)
                     woke++;
                 } else if (mask != 0) {
                     /* No parker for this fd (either not linked yet,
-                     * or already woken once and the goroutine
+                     * or already woken once and the fiber
                      * hasn't called wait_fd again).  Stash the
                      * event mask in the per-fd pending bitmap so
                      * the next wait_fd on this fd consumes it

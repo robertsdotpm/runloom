@@ -1,4 +1,4 @@
-"""Cooperative concurrent.futures: goroutine-backed ThreadPoolExecutor and the
+"""Cooperative concurrent.futures: fiber-backed ThreadPoolExecutor and the
 Future.result() / wait() / as_completed() surface.
 
 Adapted from CPython Lib/test/test_concurrent_futures (ExecutorTest,
@@ -6,8 +6,8 @@ ThreadPoolExecutorTest, WaitTests, AsCompletedTests, FutureTests).
 
 The stock ThreadPoolExecutor runs work on OS threads and notifies each
 Future's threading.Condition from the worker thread; after patch() that
-Condition is cooperative and a cross-thread notify of a goroutine waiter would
-deadlock.  runloom.monkey makes ThreadPoolExecutor goroutine-backed, so submitted
+Condition is cooperative and a cross-thread notify of a fiber waiter would
+deadlock.  runloom.monkey makes ThreadPoolExecutor fiber-backed, so submitted
 work runs on the cooperative scheduler and Future.result()/wait()/
 as_completed() resolve in-domain.  These tests pin down result delivery,
 exception propagation, map ordering, wait()/as_completed() semantics, cancel,
@@ -48,7 +48,7 @@ def tearDownModule():
 
 
 class TestThreadPoolExecutor(unittest.TestCase):
-    def test_is_goroutine_backed(self):
+    def test_is_fiber_backed(self):
         self.assertEqual(cf.ThreadPoolExecutor.__name__, "CoThreadPoolExecutor")
 
     def test_submit_result(self):
@@ -113,7 +113,7 @@ class TestThreadPoolExecutor(unittest.TestCase):
         self.assertLessEqual(_drive(body), 3)
 
     def test_result_blocks_then_yields(self):
-        """A goroutine blocked in future.result() lets a sibling run."""
+        """A fiber blocked in future.result() lets a sibling run."""
         def body():
             ticks = []
             done = {"v": False}

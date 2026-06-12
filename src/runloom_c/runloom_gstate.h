@@ -1,4 +1,4 @@
-/* runloom_gstate.h -- observational goroutine state machine.
+/* runloom_gstate.h -- observational fiber state machine.
  *
  * Records WHERE in its lifecycle a g is.  Independent of (but
  * consistent with) the existing CAS-gated membership flags

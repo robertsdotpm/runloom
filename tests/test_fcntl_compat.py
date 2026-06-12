@@ -5,7 +5,7 @@ test_lockf_exclusive / test_lockf_share) and the lock-ownership semantics in
 the flock(2) and fcntl(2) F_SETLKW man pages:
 
   * flock locks are tied to the *open file description*, so two independent
-    open()s in the same process contend -- exercised with two goroutines;
+    open()s in the same process contend -- exercised with two fibers;
   * POSIX fcntl/lockf locks are owned by the *process*, so contention needs a
     second process -- exercised with a forked child;
   * a blocked acquire must yield the scheduler (a sibling keeps ticking),
@@ -89,7 +89,7 @@ class TestFlock(unittest.TestCase):
 
     def test_flock_contention_blocks_until_release_and_yields(self):
         """Two open descriptions contend.  The waiter must block until the
-        holder unlocks, and a ticker goroutine must run meanwhile."""
+        holder unlocks, and a ticker fiber must run meanwhile."""
         def body():
             order = []
             ticks = []
@@ -170,11 +170,11 @@ class TestLockf(unittest.TestCase):
         self.assertTrue(_drive(body))
 
     @unittest.skipUnless(hasattr(os, "fork"), "no os.fork")
-    @unittest.skipIf(_IS_DARWIN, "fork-from-goroutine in a multi-threaded "
+    @unittest.skipIf(_IS_DARWIN, "fork-from-fiber in a multi-threaded "
                      "process is unsafe on macOS (EBADF); use spawn/forkserver")
     def test_lockf_cross_process_contention_yields(self):
         """POSIX locks are per-process: a forked child holds the lock, the
-        parent's lockf blocks until the child exits, and a sibling goroutine
+        parent's lockf blocks until the child exits, and a sibling fiber
         keeps running while the parent is blocked."""
         def body():
             fd = os.open(self.path, os.O_RDWR)
@@ -205,7 +205,7 @@ class TestLockf(unittest.TestCase):
         self.assertTrue(acquired)
         self.assertGreaterEqual(ticks, 1)
 
-    @unittest.skipIf(_IS_DARWIN, "fork-from-goroutine unsafe on macOS (EBADF)")
+    @unittest.skipIf(_IS_DARWIN, "fork-from-fiber unsafe on macOS (EBADF)")
     def test_lockf_nb_passthrough_raises(self):
         """A second process holds the lock; LOCK_NB must raise immediately."""
         if not hasattr(os, "fork"):

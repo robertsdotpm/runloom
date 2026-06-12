@@ -1,8 +1,8 @@
 """runloom.aio -- async/await on the runloom scheduler.
 
-Approach: each asyncio.Task gets its own runloom goroutine.  The goroutine
+Approach: each asyncio.Task gets its own runloom fiber.  The fiber
 drives `coro.send()` itself; when the coro yields a pending Future,
-the goroutine parks via a 1-buffered channel and resumes when the
+the fiber parks via a 1-buffered channel and resumes when the
 Future's done_callback fires.  Cooperative switching between tasks is
 a stack swap (~80 ns).
 
@@ -77,7 +77,7 @@ def __getattr__(name):
     """Resolve a section-internal name (runloom.aio._wait_fd, _PG_ALL_TASKS, ...)
     live against the submodules -- preserving the old flat module's read
     surface.  PEP 562 function form on purpose; see runloom.monkey for why a
-    __class__-swapped module subclass crashes inside a goroutine."""
+    __class__-swapped module subclass crashes inside a fiber."""
     for section in _SECTIONS:
         try:
             return getattr(section, name)

@@ -56,7 +56,7 @@ typedef enum {
     RUNLOOM_IOURING_OP_CANCEL    = 2,    /* fire-and-forget */
 } runloom_iouring_op_type_t;
 
-/* SINGLE-op park/wake handshake for hub (M:N) callers.  A hub goroutine
+/* SINGLE-op park/wake handshake for hub (M:N) callers.  A hub fiber
  * that submits a SINGLE op PARKS (coro_yield) instead of blocking the OS
  * thread; a drainer (the idle-hub netpoll pump) wakes it when the CQE
  * arrives.  Without a handshake the INLINE drain -- which runs ON the
@@ -135,7 +135,7 @@ static volatile long runloom_iouring_lock_inited = 0;
 
 /* Inflight counter: incremented after a successful submit, decremented
  * by drain when a CQE is consumed.  Read by runloom_iouring_inflight()
- * so the scheduler drain loop knows not to exit while a goroutine is
+ * so the scheduler drain loop knows not to exit while a fiber is
  * parked on an iouring op. */
 static volatile int runloom_iouring_inflight_count = 0;
 

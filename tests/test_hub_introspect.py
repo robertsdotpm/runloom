@@ -1,5 +1,5 @@
 """runloom.inspect.hubs() / runloom_c.mn_hub_states() -- the per-hub diagnostic
-snapshot (the hub-level companion to goroutines()).
+snapshot (the hub-level companion to fibers()).
 
 Covers the reliable contract:
   * [] outside an M:N run; one dict per hub inside, with the full key set and a
@@ -33,7 +33,7 @@ HUB_KEYS = {"id", "state", "running_g", "dwell_ms", "pending",
             "preempt_requested", "instrumented", "blocked_at"}
 
 # A blocking (non-cooperative) C call, long enough to outlast the ~50 ms sysmon
-# wedge budget while a sampler goroutine inspects the hubs.
+# wedge budget while a sampler fiber inspects the hubs.
 def blocking_sleep_worker():
     import time
     time.sleep(0.30)            # raw time.sleep -> DETACHED hub wedge

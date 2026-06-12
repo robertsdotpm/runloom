@@ -10,7 +10,7 @@ _orig_os_write = None
 
 
 def _patched_os_read(fd, n):
-    if not _in_goroutine():
+    if not _in_fiber():
         return _orig_os_read(fd, n)
     if _fd_pollable(fd):
         try:
@@ -27,7 +27,7 @@ def _patched_os_read(fd, n):
 
 
 def _patched_os_write(fd, data):
-    if not _in_goroutine():
+    if not _in_fiber():
         return _orig_os_write(fd, data)
     if _fd_pollable(fd):
         try:
@@ -49,7 +49,7 @@ _orig_os_writev = None
 def _patched_os_readv(fd, buffers):
     # Vectored read -- the readv analogue of read: cooperative on pollable
     # fds, pool offload on regular files.
-    if not _in_goroutine():
+    if not _in_fiber():
         return _orig_os_readv(fd, buffers)
     if _fd_pollable(fd):
         try:
@@ -65,7 +65,7 @@ def _patched_os_readv(fd, buffers):
 
 
 def _patched_os_writev(fd, buffers):
-    if not _in_goroutine():
+    if not _in_fiber():
         return _orig_os_writev(fd, buffers)
     if _fd_pollable(fd):
         try:
@@ -129,7 +129,7 @@ _orig_stdin_readline = None
 
 
 def _patched_input(prompt=""):
-    if not _in_goroutine():
+    if not _in_fiber():
         return _orig_input(prompt)
     if prompt:
         sys.stdout.write(prompt)
@@ -144,7 +144,7 @@ def _patched_input(prompt=""):
 
 
 def _patched_stdin_read(*args):
-    if _in_goroutine():
+    if _in_fiber():
         try:
             fd = sys.stdin.fileno()
             if _fd_pollable(fd):
@@ -155,7 +155,7 @@ def _patched_stdin_read(*args):
 
 
 def _patched_stdin_readline(*args):
-    if _in_goroutine():
+    if _in_fiber():
         try:
             fd = sys.stdin.fileno()
             if _fd_pollable(fd):
@@ -199,13 +199,13 @@ def _unpatch_stdio():
 # Unlike input(), getpass reads from /dev/tty (opened internally, with echo
 # turned off via termios), so we can't simply wait_fd on a known stdin fd.  It
 # is rare and human-latency-bound, so offload the whole call to a pool worker,
-# parking the goroutine.  The tty/termios work is thread-agnostic (no
+# parking the fiber.  The tty/termios work is thread-agnostic (no
 # per-object thread affinity like sqlite), so running it on a worker is fine.
 _orig_getpass = None
 
 
 def _patched_getpass(prompt="Password: ", stream=None):
-    if not _in_goroutine():
+    if not _in_fiber():
         return _orig_getpass(prompt, stream)
     return offload(_orig_getpass, prompt, stream)
 

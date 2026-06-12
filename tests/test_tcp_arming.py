@@ -5,7 +5,7 @@ error contract of connect/accept/recv/send.  runloom_tcp runs the classic
 non-blocking loop: try the syscall; on EAGAIN/EWOULDBLOCK/EINTR park on netpoll
 and retry; on any other errno raise OSError.  These tests pin the observable
 end of that contract over real loopback sockets, driven as cooperative
-goroutines on the single-thread scheduler.
+fibers on the single-thread scheduler.
 
 Deterministic error-CODE coverage (ECONNRESET/EPIPE/EINTR retries) lives in
 test_tcp_faultinject.py via strace injection; here we cover the real-socket
@@ -21,8 +21,8 @@ import pytest
 import runloom_c
 
 
-def _drive(*goroutines):
-    """Run callables as goroutines; re-raise the first exception they hit."""
+def _drive(*fibers):
+    """Run callables as fibers; re-raise the first exception they hit."""
     box = []
 
     def wrap(fn):
@@ -33,7 +33,7 @@ def _drive(*goroutines):
                 box.append(e)
         return runner
 
-    for g in goroutines:
+    for g in fibers:
         runloom_c.go(wrap(g))
     runloom_c.run()
     if box:

@@ -65,15 +65,15 @@ makes unbuffered ping-pong ~560 ns (within 7% of Go 1.22 on the same box).
 ### The waiter as a stack local (plain ops) / heap array (select)
 
 For a **plain** `send`/`recv`, the waiter is a small `runloom_chan_waiter_t` **on
-the parking goroutine's own stack** (`park_waiter` links it, releases the lock,
+the parking fiber's own stack** (`park_waiter` links it, releases the lock,
 snaps, yields; the waker fills `value`/`ok`/`send_result` and wakes —
 [chan_ops.c.inc:52-68](../src/runloom_c/chan_ops.c.inc#L52)). A **`select`**
 instead heap-allocates an `n`-entry waiter array (`PyMem_Calloc`,
 [chan_select_main.c.inc:37](../src/runloom_c/chan_select_main.c.inc#L37)) whose
 lifetime is bounded by the select call, and pins every case's channel with an
 incref across the park+eviction phase. The stack-local form is safe (unlike the
-netpoll parker, spec 06) because the waiter is consumed before the goroutine
-resumes — the goroutine is suspended exactly at the park, so its stack frame
+netpoll parker, spec 06) because the waiter is consumed before the fiber
+resumes — the fiber is suspended exactly at the park, so its stack frame
 holding the waiter is stable until wake.
 
 ## `select` — the multi-way wait
@@ -108,7 +108,7 @@ model with shrinking. (spec 15)
 ## Higher-level uses
 
 Channels are the substrate for several front-ends: `runloom.time.After/Tick/Timer/
-Ticker` are channels driven by a sleeping goroutine (spec 12); `runloom.context`'s
+Ticker` are channels driven by a sleeping fiber (spec 12); `runloom.context`'s
 cancellation is a never-/eventually-closed channel (spec 12); the original aio
 per-task wake was a `Chan(1)` before it was replaced by the cheaper `park_safe`
 primitive (spec 04).

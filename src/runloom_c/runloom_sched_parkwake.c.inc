@@ -33,7 +33,7 @@ void runloom_sched_yield(runloom_sched_t *s)
      * routes through wake_safe, which appends to the cross-thread
      * wake_list rather than the ready ring.  The wake_list is normally
      * drained only inside the drain loop, so a wake() issued by THIS
-     * goroutine immediately before `await asyncio.sleep(0)` was invisible
+     * fiber immediately before `await asyncio.sleep(0)` was invisible
      * to this yield: the woken g sat in the wake_list (so the ready-empty
      * fast path returned without ever entering the drain loop), and even
      * when the drain loop ran it, we had already pushed ourselves first
@@ -97,7 +97,7 @@ void runloom_sched_park_current(void)
 /* ---- generic in-memory park + the foreign-wakeable run-alive anchor --------
  * An in-memory park (park_current/park_safe, no fd) leaves NO footprint in the
  * single-thread drain loop's exit condition, so run() would exit and abandon a
- * goroutine a foreign thread is about to wake (chan_waiters.c.inc park_waiter
+ * fiber a foreign thread is about to wake (chan_waiters.c.inc park_waiter
  * FINDING).  Under M:N the hubs stay alive regardless.  Mirror the blockpool:
  * ONE process-wide counter, decref'd on the PARKER side after it resumes, keeps
  * run() alive while any foreign-wakeable parker is parked; the shared wake-pump
@@ -286,12 +286,12 @@ void runloom_sched_wake(runloom_g_t *g)
 
 /* Race-safe park/wake.  Used by runloom.aio.RunloomTask to replace its
  * per-task Chan(1) wake mechanism.  Saves the Chan alloc + try_send/
- * recv path -- about 5 us per parked goroutine at fan-out time.
+ * recv path -- about 5 us per parked fiber at fan-out time.
  *
  * Cross-thread correctness: wake_safe may be called from a thread
  * other than the sched owner (e.g., an iouring CQE callback running
  * on a hub thread invokes a done-callback that resolves a future a
- * main-thread goroutine is awaiting via park_safe).  The handoff is
+ * main-thread fiber is awaiting via park_safe).  The handoff is
  * coordinated by an atomic parked_safe flag on g:
  *
  *   park_safe (parker):                wake_safe (waker):
@@ -368,7 +368,7 @@ void runloom_sched_wake_safe(runloom_g_t *g)
             runloom_sched_t *s = g->owner ? g->owner : runloom_sched_get();
             if (cur != NULL && s == cur) {
                 /* Same-thread wake -- the single-hub asyncio bridge's common
-                 * case: a future completed by a goroutine on the loop's own
+                 * case: a future completed by a fiber on the loop's own
                  * thread wakes a RunloomTask parked on that future.  Push straight
                  * onto our cooperative ready ring (exactly what runloom_sched_wake
                  * does for owner==self) so the wake is FIFO-ordered with the
@@ -529,7 +529,7 @@ void runloom_sched_sleep_until_real(runloom_sched_t *s, double wake_at)
  *
  * Park the current g on the quiescence list; the drain loop resumes it at the
  * next quiescence point -- when the ready ring is empty and it would otherwise
- * block on netpoll/timers (runloom_sched_drain).  Net effect: every goroutine
+ * block on netpoll/timers (runloom_sched_drain).  Net effect: every fiber
  * that is runnable *now* (including ones just woken) runs to its next park or
  * to completion before run_ready() returns, matching asyncio's "drain the
  * ready callbacks for this loop iteration" boundary.  Single-thread sched
@@ -544,7 +544,7 @@ void runloom_sched_run_ready(runloom_sched_t *s)
         return;
     }
     g = s->current;
-    if (g == NULL) return;            /* not inside a goroutine: no-op */
+    if (g == NULL) return;            /* not inside a fiber: no-op */
     /* FIFO append onto the quiescence list (threaded through g->next). */
     g->next = NULL;
     if (s->quiescence_tail != NULL) {

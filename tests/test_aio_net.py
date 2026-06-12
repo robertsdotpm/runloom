@@ -163,11 +163,11 @@ class TestThreadedServerLoop(unittest.TestCase):
                 box["server"] = server
                 ready.set()
 
-            loop.run_until_complete(setup())   # listening; accept goroutine parked
+            loop.run_until_complete(setup())   # listening; accept fiber parked
             box["loop"] = loop
             loop.run_forever()                 # serve on THIS (non-main) thread
             # Clean teardown on THIS thread after stop(): close the server so
-            # its accept goroutine is unparked (a leaked parked goroutine would
+            # its accept fiber is unparked (a leaked parked fiber would
             # otherwise linger in the shared netpoll), then close the loop.
             box["server"].close()
             loop.run_until_complete(box["server"].wait_closed())
@@ -194,7 +194,7 @@ class TestThreadedServerLoop(unittest.TestCase):
 
 
 class TestCancelWaitFd(unittest.TestCase):
-    """task.cancel() must interrupt a goroutine parked in a C netpoll wait_fd
+    """task.cancel() must interrupt a fiber parked in a C netpoll wait_fd
     (loop.sock_recv / sock_accept / sock_connect).  There is no coro
     await-point while blocked in the syscall, and G.wake() only wakes a
     park_self parker -- so before the cancel_wait_fd primitive these hung
@@ -279,7 +279,7 @@ class TestCancelWaitFd(unittest.TestCase):
 
 
 class TestLeakedParkerCrossThread(unittest.TestCase):
-    """A goroutine left parked in netpoll on one OS thread (e.g. a loop thread
+    """A fiber left parked in netpoll on one OS thread (e.g. a loop thread
     that stopped without cancelling/closing -- a leaked accept/recv) must NOT
     keep ANOTHER thread's runloom_c.run() alive.  The single-thread drain
     counts only THIS sched's parkers (g->owner == this sched), not the global
@@ -308,7 +308,7 @@ class TestLeakedParkerCrossThread(unittest.TestCase):
 
             loop.run_until_complete(setup())
             # Leak: return without cancelling the parked task or closing -- the
-            # goroutine stays parked in the shared netpoll, owned by this
+            # fiber stays parked in the shared netpoll, owned by this
             # (about-to-exit) thread's scheduler.
 
         t = threading.Thread(target=leaker)

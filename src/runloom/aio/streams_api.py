@@ -60,7 +60,7 @@ async def open_connection(host=None, port=None, *, family=0, proto=0,
 
 class _Server(object):
     """asyncio.Server compatible: keeps the listening socket alive and
-    the accept-loop goroutine running until close() is called."""
+    the accept-loop fiber running until close() is called."""
 
     def __init__(self, sock, client_connected_cb, *, limit=2**16,
                  ssl_context=None, ssl_handshake_timeout=None):
@@ -104,10 +104,10 @@ class _Server(object):
         reader = StreamReader(sock, limit=self._limit)
         writer = StreamWriter(sock, reader=reader)
         # Build the connection coroutine and drive it directly as a RunloomTask.
-        # We're already inside a non-task goroutine (the accept loop or a
-        # per-conn TLS goroutine); creating RunloomTask directly here -- the
+        # We're already inside a non-task fiber (the accept loop or a
+        # per-conn TLS fiber); creating RunloomTask directly here -- the
         # earlier "wrap in runloom_c.go then RunloomTask inside" added a second
-        # goroutine spawn for no real benefit.
+        # fiber spawn for no real benefit.
         coro = self._cb(reader, writer)
         if asyncio.iscoroutine(coro):
             RunloomTask(coro, loop=asyncio.get_event_loop())
@@ -132,7 +132,7 @@ class _Server(object):
         if self._closed:
             return
         self._closed = True
-        # shutdown() before close() wakes any goroutine parked on this
+        # shutdown() before close() wakes any fiber parked on this
         # fd via wait_fd -- epoll/kqueue/IOCP all signal POLLIN+POLLHUP
         # on the listen socket, which our netpoll routes back to the
         # accept_loop's wait_fd call.  close() alone doesn't reliably
@@ -155,7 +155,7 @@ class _Server(object):
 # ====================================================================
 # UDP: DatagramTransport + create_datagram_endpoint.
 #
-# Datagram socket goroutine: one g per endpoint runs the recv loop,
+# Datagram socket fiber: one g per endpoint runs the recv loop,
 # delivering each packet to the protocol's datagram_received().
 # send_to bypasses the loop entirely -- just non-blocking sendto with
 # wait_fd on EAGAIN.

@@ -78,7 +78,7 @@ class _SubprocessTransport(asyncio.SubprocessTransport):
 
     def _start_reaper(self):
         # Reap the child COOPERATIVELY via its pidfd (Linux 5.3+ / py3.9+): a
-        # goroutine parks on the pidfd -- which becomes readable exactly when the
+        # fiber parks on the pidfd -- which becomes readable exactly when the
         # child exits -- instead of burning a dedicated OS thread blocked in
         # Popen.wait().  This is the asyncio-bridge equivalent of runloom.monkey's
         # cooperative os.waitpid.  Falls back to the wait thread where pidfd_open
@@ -106,7 +106,7 @@ class _SubprocessTransport(asyncio.SubprocessTransport):
                 except OSError:
                     pass
             # The child has exited: Popen.wait() reaps it immediately (no block),
-            # and we are on the loop thread (this goroutine), so deliver inline.
+            # and we are on the loop thread (this fiber), so deliver inline.
             try:
                 rc = self._proc.wait()
             except Exception:

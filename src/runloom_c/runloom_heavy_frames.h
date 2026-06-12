@@ -2,7 +2,7 @@
  *
  * Python-visible symbols whose C implementation has an unusually fat SINGLE
  * stack frame (from the stdlib .eh_frame profile, 3.13.13t).
- * The cold-start optimizer bumps a goroutine's first-incarnation stack to
+ * The cold-start optimizer bumps a fiber's first-incarnation stack to
  * hold the fat frame when its code references one of these.  Stdlib sizes are
  * the largest fat frame in the symbol's module; `heuristic:crypto` entries are
  * NOT measured -- they give signing/verification/encryption a roomy cold start

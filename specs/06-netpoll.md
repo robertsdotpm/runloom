@@ -1,4 +1,4 @@
-# 06 — netpoll: parking goroutines on fd readiness
+# 06 — netpoll: parking fibers on fd readiness
 
 Ground truth: `netpoll.{h,c}` and its includes — `netpoll_parkers.c.inc`
 (parker pool), `netpoll_wait_fd.c.inc` (the park path + 3-state commit),
@@ -8,18 +8,18 @@ Ground truth: `netpoll.{h,c}` and its includes — `netpoll_parkers.c.inc`
 
 ## The problem
 
-A goroutine doing `recv` on a not-yet-ready socket must **park** (let other
-goroutines run) and resume when the fd is readable — with no busy-poll, scaling to
+A fiber doing `recv` on a not-yet-ready socket must **park** (let other
+fibers run) and resume when the fd is readable — with no busy-poll, scaling to
 a million parked waiters, and **without losing a wake** when an event fires in the
-narrow window while the goroutine is committing to park. Under M:N a *different*
+narrow window while the fiber is committing to park. Under M:N a *different*
 hub's pump may observe the event, so the protocol is cross-thread.
 
 ## The simple model
 
-`runloom_netpoll_wait_fd(fd, events, timeout_ns)` parks the current goroutine
+`runloom_netpoll_wait_fd(fd, events, timeout_ns)` parks the current fiber
 until `fd` is ready (or timeout/signal/cancel) and returns the ready mask. One
 shared kernel poller per backend (`epoll`/`kqueue`/`IOCP`/`WSAPoll`/`select`); a
-**pump** drains ready events and routes each to the parked goroutine's owner.
+**pump** drains ready events and routes each to the parked fiber's owner.
 
 ```
   wait_fd: register interest, park the g, yield.
@@ -59,7 +59,7 @@ Why this exact order (both halves are war stories):
   instead of parking. This closes the cross-hub window.
 - **The commit CAS (step 5)** closes the *residual* window between the last
   pending re-check and the `coro_yield`. If a pump claims the parker (CAS it to
-  WOKEN) after step 4 but before the goroutine sleeps, the goroutine's own
+  WOKEN) after step 4 but before the fiber sleeps, the fiber's own
   `ARMED → PARKED` CAS fails, it sees WOKEN, and it returns the readiness directly
   without ever sleeping. **Exactly one of {pump, timeout, cancel, signal} wins the
   commit CAS** — that's the linearization point. (Verified in
@@ -72,7 +72,7 @@ poller.
 
 A parker is **heap-allocated from a per-thread pool**, never stack-allocated.
 
-> Why heap, not stack: a stack-allocated parker shares the goroutine's coro stack
+> Why heap, not stack: a stack-allocated parker shares the fiber's coro stack
 > address space, which is returned to a pool and reissued to the next g. A missed
 > unlink would then leave a global/per-fd pointer aimed at a byte-identical
 > address the new occupant just claimed — a use-after-free that resurrects a freed
@@ -87,7 +87,7 @@ Each parker pool groups its state under one lock + cache line:
 - **deadline min-heap** (`dh_*`, O(log N) timeout management).
 
 There is **one pool per hub** (plus one default for the single-thread sched), so a
-goroutine parking on hub H contends only on pool[H]'s lock — per-hub locality.
+fiber parking on hub H contends only on pool[H]'s lock — per-hub locality.
 (Gated to the kernel by-fd backends epoll/kqueue/IOCP; WSAPoll/select fall back to
 the single default pool because they rebuild fdsets by walking `head`.)
 
@@ -120,12 +120,12 @@ committed g) and route to the owner:
    in a C `wait_fd` where there is **no coro await-point to throw into**. Claims
    the parker, makes `wait_fd` return the `RUNLOOM_NETPOLL_CANCELLED` sentinel; the
    aio `_wait_fd` wrapper turns it into `CancelledError`. This is what lets a
-   `task.cancel()` interrupt a goroutine stuck in `sock_recv`/`accept`/`connect`
+   `task.cancel()` interrupt a fiber stuck in `sock_recv`/`accept`/`connect`
    (the root of the aiosmtpd/anyio teardown hangs — see memory).
 3. **Signal delivery** (`runloom_netpoll_signal_wake` + `RUNLOOM_NETPOLL_SIGNALED`)
    — see below.
 
-## Signal delivery: into the parked goroutine, never via the scheduler
+## Signal delivery: into the parked fiber, never via the scheduler
 
 A core invariant (`CLAUDE.md`): a Python signal handler that **raises** during a
 cooperative blocking call (`recv`/`select`/`accept`/…) must propagate **out of
@@ -134,7 +134,7 @@ a real `recv()` does. So when the idle pump's wait returns `EINTR` and
 `PyErr_CheckSignals` confirms a handler raised, the scheduler stashes the raised
 exception on the g's owner sched (`->signal_exc`) and `signal_wake` re-queues
 *one* parked g with the `SIGNALED` sentinel. On resume `wait_fd` restores the
-exception into *that goroutine's* tstate and returns -1 with it set. Only when
+exception into *that fiber's* tstate and returns -1 with it set. Only when
 **nothing is parked** to receive it does the scheduler carry a `KeyboardInterrupt`
 out of `run()` (the idle/sleep-only Ctrl-C case). Backend-independent.
 
@@ -147,10 +147,10 @@ a completion API).
 
 One subtlety from `docs/cooperative_stdlib_coverage.md`: `select.select`'s CPython
 C impl allocates a **50.9 KB single frame** (three `pylist[FD_SETSIZE+1]`), which
-overflows a small goroutine stack. The fix is *not* a bigger stack — it's to
+overflows a small fiber stack. The fix is *not* a bigger stack — it's to
 **reimplement `select.select` cooperatively** in `monkey/polling.py` (register fds
 on a transient epoll, park on the epoll's *own* fd via `wait_fd`) so CPython's fat
-frame is never reached from a goroutine (spec 14).
+frame is never reached from a fiber (spec 14).
 
 ## Invariants
 
@@ -162,5 +162,5 @@ frame is never reached from a goroutine (spec 14).
 3. **Parkers are heap-pool, never stack** (no aliasing with recycled coro stacks).
 4. **A woken g routes to its origin hub.** Blocked-on info lives as plain data on
    the g, not via the parker pointer.
-5. **Signals deliver into the parked goroutine's own stack**, never carried out of
+5. **Signals deliver into the parked fiber's own stack**, never carried out of
    `run()` while something is parked to receive them.

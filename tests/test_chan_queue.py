@@ -33,8 +33,8 @@ import runloom_c
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
-def _run(*goroutines):
-    for g in goroutines:
+def _run(*fibers):
+    for g in fibers:
         runloom_c.go(g)
     runloom_c.run()
 
@@ -170,7 +170,7 @@ class TestShutdownIsClose(unittest.TestCase):
 
     def test_shutdown_wakes_blocked_getter(self):
         """q.shutdown() wakes a thread blocked in get() with ShutDown ->
-        close() wakes a goroutine parked in recv() with (None, False)."""
+        close() wakes a fiber parked in recv() with (None, False)."""
         ch = runloom_c.Chan()
         log = []
 
@@ -186,7 +186,7 @@ class TestShutdownIsClose(unittest.TestCase):
 
     def test_shutdown_wakes_blocked_putter(self):
         """q.shutdown() wakes a thread blocked in put() with ShutDown ->
-        close() wakes a goroutine parked in send() with ValueError."""
+        close() wakes a fiber parked in send() with ValueError."""
         ch = runloom_c.Chan()            # unbuffered: send parks immediately
         log = []
 

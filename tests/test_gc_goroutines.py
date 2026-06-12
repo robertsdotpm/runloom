@@ -1,14 +1,14 @@
-"""Free-threaded cyclic GC x parked goroutines.
+"""Free-threaded cyclic GC x parked fibers.
 
-A parked goroutine holds its Python locals on a SWAPPED-OUT stack: the
+A parked fiber holds its Python locals on a SWAPPED-OUT stack: the
 suspended interpreter frames are NOT on the scheduler thread's current-frame
 chain, so the cyclic GC never traverses them as roots.  If the GC's
 reachability accounting (which on free-threaded 3.13t also involves deferred
 / biased refcounting) failed to keep alive a reference cycle held only by
-such a parked goroutine, gc.collect() would free live objects -> a
-use-after-free when the goroutine resumes.
+such a parked fiber, gc.collect() would free live objects -> a
+use-after-free when the fiber resumes.
 
-This hammers gc.collect() while many goroutines are parked (across every
+This hammers gc.collect() while many fibers are parked (across every
 park type: sleep, channel, park_self) holding reference cycles on their
 stacks, then verifies every cycle survived intact.  Run it under ASan to
 turn any premature free into a hard error.
@@ -68,7 +68,7 @@ class TestGCWithParkedGoroutines(unittest.TestCase):
         runloom.run(1, main)
         self.assertEqual(len(results), N)
         self.assertTrue(all(results.values()),
-                        "a cycle held by a parked goroutine was collected")
+                        "a cycle held by a parked fiber was collected")
 
     def test_control_unheld_cycle_is_collected(self):
         # Sanity: the cycles we build ARE collectable (so the tests above are
@@ -114,7 +114,7 @@ class TestGCWithParkedGoroutines(unittest.TestCase):
         runloom.run(1, main)
         self.assertEqual(len(results), N)
         self.assertTrue(all(results.values()),
-                        "a cycle held by a chan-parked goroutine was collected")
+                        "a cycle held by a chan-parked fiber was collected")
 
     def test_park_self(self):
         handles = {}
@@ -139,7 +139,7 @@ class TestGCWithParkedGoroutines(unittest.TestCase):
             oks = 0
             for _ in range(N):
                 oks += done.recv()[0]
-            self.assertEqual(oks, N, "a cycle held by a park_self goroutine was collected")
+            self.assertEqual(oks, N, "a cycle held by a park_self fiber was collected")
 
         runloom.run(1, main)
 

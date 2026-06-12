@@ -1,21 +1,21 @@
 """Cooperative select.select, and a guard on stdlib C-frame footprint.
 
-Background: a goroutine runs on a small fixed C stack (default 32 KB, with a
+Background: a fiber runs on a small fixed C stack (default 32 KB, with a
 PROT_NONE guard page).  CPython's `select_select_impl` declares three
 `pylist[FD_SETSIZE + 1]` arrays -- ~51 KB in a single C frame, the only stdlib
-leaf that overflows 32 KB -- so calling it inline in a goroutine SEGV'd.  The
+leaf that overflows 32 KB -- so calling it inline in a fiber SEGV'd.  The
 fix is NOT a bigger stack: `select.select` is reimplemented cooperatively on a
 transient epoll (register the fds, park on the epoll's own fd via netpoll, map
-results back), so the fat frame is never allocated on the goroutine stack and
-the goroutine parks like any other socket waiter -- no pool thread, scales.
+results back), so the fat frame is never allocated on the fiber stack and
+the fiber parks like any other socket waiter -- no pool thread, scales.
 
 Two things are tested here:
-  * TestCooperativeSelect -- select in a goroutine doesn't crash, returns the
-    right ready sets, and (the point) stays cooperative: a sibling goroutine
+  * TestCooperativeSelect -- select in a fiber doesn't crash, returns the
+    right ready sets, and (the point) stays cooperative: a sibling fiber
     keeps running while one parks in select.
   * TestStdlibFrameFootprint -- a regression guard that measures the C-stack
     high-water mark of the deepest-known stdlib leaves and asserts they fit the
-    default goroutine stack, so a NEW fat-framed C function (a future stdlib
+    default fiber stack, so a NEW fat-framed C function (a future stdlib
     addition) that would silently re-arm the SEGV is caught.  select is the
     one allowlisted exception precisely because it's handled cooperatively and
     never runs inline.
@@ -144,7 +144,7 @@ print("PASS")
 """)
 
     def test_stays_cooperative_sibling_runs(self):
-        # THE point: while one goroutine parks in select, a sibling keeps
+        # THE point: while one fiber parks in select, a sibling keeps
         # running on the same hub.  If select wedged the hub (blocking inline
         # or busy-poll), the canary would barely tick.  M:1 (one thread) is the
         # strictest check.
@@ -172,7 +172,7 @@ print("PASS ticks=%d" % ticks[0])
 
 class TestStdlibFrameFootprint(unittest.TestCase):
     """Measure the C-stack high-water mark of the deepest-known stdlib leaves
-    and assert they fit the default goroutine stack.  Catches a NEW fat-framed
+    and assert they fit the default fiber stack.  Catches a NEW fat-framed
     C function before it can re-arm the guard-page SEGV."""
 
     # Raw (unpatched) C-stack high-water marks, free-threaded 3.13t:
@@ -221,7 +221,7 @@ class TestStdlibFrameFootprint(unittest.TestCase):
             self.assertLess(
                 hwm, budget,
                 "{0} uses {1} B of C stack (> {2} B budget of the {3} B default "
-                "goroutine stack); it needs a cooperative path or an allowlist "
+                "fiber stack); it needs a cooperative path or an allowlist "
                 "entry, like select.select".format(name, hwm, budget, default))
 
     def test_select_is_the_known_fat_frame(self):
@@ -253,23 +253,23 @@ class TestStdlibFrameFootprint(unittest.TestCase):
         self.assertLess(hwm, default,
             "first ssl use ({0} B) exceeds the {1} B default".format(hwm, default))
 
-    def test_ssl_warmed_on_main_thread_so_goroutine_is_safe(self):
+    def test_ssl_warmed_on_main_thread_so_fiber_is_safe(self):
         # Mitigation: runloom.monkey imports ssl on the main thread and
-        # _patch_ssl forces OpenSSL init there, off any goroutine stack.  So a
-        # goroutine that is the first to create an SSLContext must NOT crash.
+        # _patch_ssl forces OpenSSL init there, off any fiber stack.  So a
+        # fiber that is the first to create an SSLContext must NOT crash.
         # (Guard against a future refactor that lazy-imports ssl -> re-arms the
-        # 40 KB init on a 32 KB goroutine stack.)
+        # 40 KB init on a 32 KB fiber stack.)
         assert_pass(r"""
 import ssl
 def w():
-    ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)   # first context, on a goroutine
+    ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)   # first context, on a fiber
 runloom_c.go(w); runloom_c.run()
 print("PASS")
 """)
 
 
 class TestDeepRecursionSafety(unittest.TestCase):
-    """Deeply-nested input to C-recursive stdlib ops must not SEGV a goroutine.
+    """Deeply-nested input to C-recursive stdlib ops must not SEGV a fiber.
 
     Two mechanisms keep it safe:
       * json/pickle/marshal/copy.deepcopy (~60-80 B of C stack per level)
@@ -277,7 +277,7 @@ class TestDeepRecursionSafety(unittest.TestCase):
         (~150 levels ~ 12 KB) well within the 32 KB default stack.
       * ast/compile (~1.5 KB per level, which WOULD SEGV past ~18 deep before
         the counter fires) are auto-offloaded to the backend pool's full-size
-        thread stack when called inside a goroutine (the `compile` patch).
+        thread stack when called inside a fiber (the `compile` patch).
     eval(str)/exec(str) compile internally in C (not via builtins.compile) and
     are the documented residual -- use offload()/a roomier g-stack.
     """
@@ -300,7 +300,7 @@ print("PASS")
         assert_pass(r"""
 import pickle
 def w():
-    # build the nesting in-goroutine (pure-Python loop -> datastack, safe);
+    # build the nesting in-fiber (pure-Python loop -> datastack, safe);
     # pickle.dumps then C-recurses and must hit a clean RecursionError, not SEGV.
     x = []; cur = x
     for _ in range(5000):
@@ -321,7 +321,7 @@ print("PASS")
         assert_pass(r"""
 SRC = "(" * 100 + "1" + ")" * 100
 def w():
-    code = compile(SRC, "<s>", "eval")   # auto-offloaded inside a goroutine
+    code = compile(SRC, "<s>", "eval")   # auto-offloaded inside a fiber
     assert eval(code) == 1
 runloom_c.go(w); runloom_c.run()
 print("PASS")
@@ -339,8 +339,8 @@ runloom_c.go(w); runloom_c.run()
 print("PASS")
 """)
 
-    def test_compile_passthrough_off_goroutine(self):
-        # Off any goroutine, compile must be the plain builtin (no offload).
+    def test_compile_passthrough_off_fiber(self):
+        # Off any fiber, compile must be the plain builtin (no offload).
         assert_pass(r"""
 assert eval(compile("6*7", "<s>", "eval")) == 42
 print("PASS")

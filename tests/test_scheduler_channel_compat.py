@@ -1,13 +1,13 @@
 """Scheduler fairness + channel concurrency *under cooperative blocking I/O*.
 
-Adapted from the Go runtime's src/runtime/proc_test.go (scheduler/goroutine
+Adapted from the Go runtime's src/runtime/proc_test.go (scheduler/fiber
 progress and fairness) and src/runtime/chan_test.go (channel produce/consume,
 fan-in/fan-out, select), plus the many-handles concurrency shape of libuv's
 test/test-tcp-* and test/test-timer.c.
 
 test_chan.py already covers channels in isolation.  The point *here* is that
 the blocking-API patches and the channel/scheduler primitives compose: many
-goroutines parked on real socket I/O all make progress, data sourced from
+fibers parked on real socket I/O all make progress, data sourced from
 blocking reads flows through native channels in a pipeline, and runloom_c's
 select() picks among channels fed by blocking I/O -- with no starvation, no
 lost items, and genuine overlap rather than serialization.
@@ -47,7 +47,7 @@ def tearDownModule():
 
 def _echo_pair():
     """A connected socketpair with one end acting as an echo responder
-    goroutine; returns the client end."""
+    fiber; returns the client end."""
     a, b = socket.socketpair()
     a.setblocking(False)
     b.setblocking(False)
@@ -56,7 +56,7 @@ def _echo_pair():
 
 class TestSchedulerFairness(unittest.TestCase):
     def test_many_blocked_io_all_progress(self):
-        """proc_test-style: N goroutines each block on a socket recv; once a
+        """proc_test-style: N fibers each block on a socket recv; once a
         single broadcast wakes them, every one must make progress (no
         starvation / lost wakeup), and they overlap on one OS thread."""
         def body():
@@ -252,7 +252,7 @@ class TestChannelPipeline(unittest.TestCase):
 
 class TestSelectWithIO(unittest.TestCase):
     def test_select_among_io_fed_channels(self):
-        """Go select{}: wait on two channels, each fed by a goroutine doing a
+        """Go select{}: wait on two channels, each fed by a fiber doing a
         blocking socket read first.  select must return the one that becomes
         ready, and over repeated rounds both sources get serviced."""
         def body():

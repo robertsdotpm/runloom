@@ -18,8 +18,8 @@
  *   conn.fileno() -> int
  *   conn.close()
  *
- * All recv/send methods park the calling goroutine via the netpoll
- * on EAGAIN.  All methods must be called from inside a goroutine.
+ * All recv/send methods park the calling fiber via the netpoll
+ * on EAGAIN.  All methods must be called from inside a fiber.
  */
 #ifndef RUNLOOM_TCP_H
 #define RUNLOOM_TCP_H

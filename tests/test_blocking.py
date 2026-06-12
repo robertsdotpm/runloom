@@ -1,9 +1,9 @@
 """Tests for runloom.blocking / runloom_c.blocking -- the blocking-offload pool.
 
-A goroutine that makes a non-preemptible blocking call (DNS, blocking
+A fiber that makes a non-preemptible blocking call (DNS, blocking
 sockets, GIL-releasing C extensions) must not wedge the OS thread it
-shares with other goroutines.  blocking() offloads the call to a thread
-pool and parks the goroutine, so the others keep running.
+shares with other fibers.  blocking() offloads the call to a thread
+pool and parks the fiber, so the others keep running.
 """
 import time
 import unittest
@@ -40,7 +40,7 @@ class TestBlocking(unittest.TestCase):
         self.assertEqual(out, [15])
 
     def test_exception_propagates(self):
-        """An exception in the offloaded call is re-raised in the goroutine."""
+        """An exception in the offloaded call is re-raised in the fiber."""
         seen = []
 
         def boom():
@@ -58,7 +58,7 @@ class TestBlocking(unittest.TestCase):
         self.assertEqual(seen, ["kaboom"])
 
     def test_does_not_wedge_the_hub(self):
-        """N goroutines each offloading a blocking sleep run CONCURRENTLY
+        """N fibers each offloading a blocking sleep run CONCURRENTLY
         on one OS thread -- wall time ~= one sleep, not N sleeps."""
         N, NAP = 8, 0.2
         done = []
@@ -86,8 +86,8 @@ class TestBlocking(unittest.TestCase):
                 "netpoll backend %r has no pump-wake; blocking() runs inline"
                 % runloom_c.netpoll_backend())
 
-    def test_inline_outside_goroutine(self):
-        """Called outside any goroutine, blocking() just runs fn inline."""
+    def test_inline_outside_fiber(self):
+        """Called outside any fiber, blocking() just runs fn inline."""
         self.assertEqual(runloom_c.blocking(lambda x: x * 2, 21), 42)
 
 

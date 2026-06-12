@@ -6,7 +6,7 @@ int runloom_iouring_available(void)
 {
     if (__atomic_load_n(&runloom_iouring_state.initialised, __ATOMIC_ACQUIRE) == 0) {
         /* Serialize lazy init.  Concurrent first-callers -- e.g. several M:N
-         * hubs each running a goroutine that touches io_uring at the same
+         * hubs each running a fiber that touches io_uring at the same
          * instant, with no prior single-threaded available() call -- must NOT
          * each run lazy_init: that io_uring_setup()s multiple rings and races
          * the shared ring-state pointers (ring_fd / sq_tail / sqes / ...), so
@@ -160,7 +160,7 @@ void runloom_iouring_drain(void)
      * they only serialise at Python-level boundaries which most of
      * this function doesn't cross.  Without a CAS on cq_head two
      * drainers could load the same head, process the same CQE
-     * (double-wake the goroutine, free a cancel record twice), and
+     * (double-wake the fiber, free a cancel record twice), and
      * each blindly store head+1 -- a single CQE consumed twice with
      * inflight decremented twice.  Pre-fix this manifested as
      * gradual M:N hangs (the spurious wake left the g in a "ready

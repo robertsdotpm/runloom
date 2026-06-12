@@ -162,15 +162,15 @@ print("PASS")
 
 
 # ---------------------------------------------------------------------------
-# TestSelfSelect -- a goroutine selecting send AND recv on the SAME channel
+# TestSelfSelect -- a fiber selecting send AND recv on the SAME channel
 # must never satisfy its own send with its own recv (unbuffered), and the
 # whole thing must make progress (no deadlock).
 # ---------------------------------------------------------------------------
 def test_self_select_no_self_pairing():
-    """Go TestSelfSelect: two goroutines, each looping
+    """Go TestSelfSelect: two fibers, each looping
     `select { case c<-id: ; case v:=<-c: }` on a SHARED channel.  For an
-    UNBUFFERED channel a goroutine's own select-send must rendezvous with the
-    OTHER goroutine's select-recv, never its own (v != id); progress must be
+    UNBUFFERED channel a fiber's own select-send must rendezvous with the
+    OTHER fiber's select-recv, never its own (v != id); progress must be
     made for both cap 0 and cap 1.  (Probed: runloom holds this -- selfpair=0.)"""
     assert_pass(r"""
 def run_cap(cap, n):
@@ -192,7 +192,7 @@ def run_cap(cap, n):
     runloom_c.mn_run()
     a = done.try_recv(); b = done.try_recv()
     runloom_c.mn_fini()
-    assert a is not None and b is not None, "deadlock: a goroutine never finished"
+    assert a is not None and b is not None, "deadlock: a fiber never finished"
     assert selfpair[0] == 0, ("unbuffered self-select self-paired", cap, selfpair[0])
     assert runloom_c._self_check(0) == 0
 

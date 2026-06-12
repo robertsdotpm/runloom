@@ -2,7 +2,7 @@
 from ._base import *  # noqa: F401,F403  (shared foundation)
 
 class _ReadPipeTransport(asyncio.ReadTransport):
-    """connect_read_pipe transport: a goroutine parks on the pipe fd via wait_fd
+    """connect_read_pipe transport: a fiber parks on the pipe fd via wait_fd
     (cooperative, no OS thread) and feeds protocol.data_received; EOF ->
     eof_received + connection_lost."""
     def __init__(self, loop, pipe, protocol):
@@ -94,7 +94,7 @@ class _ReadPipeTransport(asyncio.ReadTransport):
         g = self._read_g
         if g is not None:
             try:
-                g.cancel_wait_fd()   # wake the parked read goroutine so it exits
+                g.cancel_wait_fd()   # wake the parked read fiber so it exits
             except Exception:
                 pass
         try:
@@ -143,7 +143,7 @@ class _ReadPipeTransport(asyncio.ReadTransport):
 
 
 class _WritePipeTransport(asyncio.WriteTransport):
-    """connect_write_pipe transport: a goroutine drains the write buffer to the
+    """connect_write_pipe transport: a fiber drains the write buffer to the
     pipe fd via wait_fd (cooperative, no OS thread); connection_lost fires on
     close/EOF/error.  Implements the asyncio watermark flow-control contract so
     StreamWriter.drain() blocks until the backlog flushes or the pipe breaks."""
@@ -170,9 +170,9 @@ class _WritePipeTransport(asyncio.WriteTransport):
             self._report(e, "connection_made")
 
     def _kick(self):
-        # Wake/spawn the drain goroutine after write()/write_eof changed the
+        # Wake/spawn the drain fiber after write()/write_eof changed the
         # buffer.  write() and the drain both run on the loop thread, so there is
-        # no cross-thread queue -- just one bytearray + one goroutine.
+        # no cross-thread queue -- just one bytearray + one fiber.
         if self._drain_g is None:
             if not self._closing:
                 # Roomy stack: the drain side runs protocol.resume_writing (user
@@ -274,7 +274,7 @@ class _WritePipeTransport(asyncio.WriteTransport):
             return
         self._eof_requested = True
         # Drain whatever is queued, then finish.  If nothing is queued and no
-        # drain goroutine is running, finish inline now.
+        # drain fiber is running, finish inline now.
         if self._drain_g is None and not self._buf:
             self._finish(None)
         else:

@@ -449,7 +449,7 @@ class TestClosedLoopRaises(unittest.TestCase):
 class TestTaskExceptionRefcycle(unittest.TestCase):
     """A finished task that captured an exception must not be pinned by a
     refcycle through its own driver frame.  runloom runs the task driver as a
-    Python goroutine, so an exception unwinding through it puts the driver
+    Python fiber, so an exception unwinding through it puts the driver
     frame (which holds the task as a local) into the exception's traceback:
     task -> _pgexc -> __traceback__ -> driver frame -> task.  That cycle
     survives REFCOUNTING (only gc.collect breaks it), keeping the finished

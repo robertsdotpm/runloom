@@ -5,11 +5,11 @@ from ._base import *  # noqa: F401,F403  (shared foundation)
 # heavy -- size-gated auto-offload of CPU-bound stdlib C calls
 #
 # hashlib.sha*/md5/blake2 + zlib/gzip/bz2/lzma compress/decompress burn CPU in
-# a tight C loop with no yield point: a goroutine can't hand off mid-sha256, so
+# a tight C loop with no yield point: a fiber can't hand off mid-sha256, so
 # it pins the scheduler thread until the call returns (and -- being a C loop
 # with no Python frames -- the sysmon preemptor can't interrupt it either).
 # These can't be made cooperative, only RELOCATED: run them on the backend pool
-# so the goroutine parks and its siblings keep running (and under free-threaded
+# so the fiber parks and its siblings keep running (and under free-threaded
 # 3.13t the offload is real parallelism).
 #
 # The catch is overhead vs benefit: offloading a 32-byte hash is pure loss.  So
@@ -72,7 +72,7 @@ def _heavy_len(x):
 
 def _make_heavy(orig, data_index, data_kwnames, always):
     def wrapper(*args, **kwargs):
-        if not _in_goroutine():
+        if not _in_fiber():
             return orig(*args, **kwargs)
         if always:
             return _blocking_call(orig, *args, **kwargs)
@@ -127,26 +127,26 @@ def _unpatch_heavy():
 
 
 # ============================================================
-# compile -- offload the parse/compile of a goroutine's source
+# compile -- offload the parse/compile of a fiber's source
 #
 # compile() (and ast.parse(), which calls builtins.compile) recurse one C-stack
 # frame per nesting level of the SOURCE, ~1.5 KB/level -- enough to overflow a
-# goroutine's 32 KB C stack past ~18-deep nesting (a guard-page SEGV), and it
+# fiber's 32 KB C stack past ~18-deep nesting (a guard-page SEGV), and it
 # happens BEFORE CPython's recursion counter (sized for the 8 MB main stack)
 # can fire a clean RecursionError.  This is the one C-recursion the stdlib has
-# that crashes a goroutine rather than raising: json/pickle/marshal/deepcopy
+# that crashes a fiber rather than raising: json/pickle/marshal/deepcopy
 # cost only ~60-80 B/level, so their counter fires first and they stay safe (see
 # docs/cooperative_stdlib_coverage.md).  compile is pure -- source in, code
 # object out, no thread affinity -- so relocate it (like the heavy table above)
-# to the backend pool's full-size thread stack when called inside a goroutine:
-# the deep recursion runs where it fits and the goroutine parks.
+# to the backend pool's full-size thread stack when called inside a fiber:
+# the deep recursion runs where it fits and the fiber parks.
 #
 # Cheap: compiles overwhelmingly happen at import on the MAIN thread, where
-# _in_goroutine() is false -> straight passthrough; only an in-goroutine compile
+# _in_fiber() is false -> straight passthrough; only an in-fiber compile
 # takes the pool round-trip.  Covers builtins.compile directly, ast.parse()
 # (bare `compile` -> builtins), and source imports that compile via the builtin.
 # NOT covered: eval(str)/exec(str), which compile internally in C (not via
-# builtins.compile) and need the caller's namespace -- a goroutine that evals/
+# builtins.compile) and need the caller's namespace -- a fiber that evals/
 # execs deeply-nested untrusted source should use runloom.monkey.offload() (or a
 # roomier g-stack via runloom_c.go(fn, stack_size=...)).
 # ============================================================
@@ -154,7 +154,7 @@ _orig_compile = None
 
 
 def _patched_compile(*args, **kwargs):
-    if not _in_goroutine():
+    if not _in_fiber():
         return _orig_compile(*args, **kwargs)
     return _get_backend().submit(_orig_compile, args, kwargs)
 

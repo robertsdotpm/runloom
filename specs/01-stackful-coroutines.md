@@ -5,9 +5,9 @@ Ground truth: `src/runloom_c/coro.{h,c}`, `fcontext.{h,c}`,
 
 ## The problem
 
-A goroutine must be able to *suspend mid-function* (inside `recv`, inside a deep
+A fiber must be able to *suspend mid-function* (inside `recv`, inside a deep
 call chain) and resume later exactly where it left off, with no syscall and no
-`async`/`await` coloring. That means each goroutine needs **its own C stack** and
+`async`/`await` coloring. That means each fiber needs **its own C stack** and
 a way to **swap between stacks** cheaply.
 
 ## The simple model
@@ -52,7 +52,7 @@ force the fallback so it gets exercised on asm-capable hosts.
   every switch. The asm `swap` touches only callee-saved registers + SP — no
   kernel. ~20×.
 - **vs greenlet**: greenlet copies stack bytes on every switch (one shared
-  stack). runloom keeps each goroutine on its **own** stack and only swaps the SP
+  stack). runloom keeps each fiber on its **own** stack and only swaps the SP
   — faster *and* it enables guard pages and copy-grow, which a copying design
   can't have.
 
@@ -64,7 +64,7 @@ coro just yields back, never runs into garbage).
 
 ## The stack, and why its lifecycle is most of `coro.c`
 
-A goroutine stack is the thing you pay for a million times, so its memory
+A fiber stack is the thing you pay for a million times, so its memory
 discipline *is* the feasibility argument (spec 10 covers sizing policy; here is
 the mechanism).
 
@@ -74,7 +74,7 @@ Every stack is `mmap`'d as `[ guard page PROT_NONE | usable RW ]`. The usable
 base handed to the rest of the code is `region_base + guard`, so a stack that
 grows down past its low end lands in the `PROT_NONE` page → immediate SIGSEGV,
 instead of silently scribbling on a neighbor. The crash handler (spec 11) maps
-that fault back to "goroutine N overflowed its K-KiB stack."
+that fault back to "fiber N overflowed its K-KiB stack."
 
 > Decision: **deliberately NOT `MAP_STACK`.** On FreeBSD/macOS `MAP_STACK` asks
 > for a kernel grow-down stack whose lower pages are inaccessible until grown
@@ -101,13 +101,13 @@ push/pop with zero allocator traffic:
 ### Park-time reclaim and the high-water-mark scan (no painting)
 
 - `runloom_coro_park(c)` / `madvise_idle(c)` drop the idle pages *below the saved
-  SP* of a suspended coro (`MADV_DONTNEED`), so a long-parked goroutine holding a
+  SP* of a suspended coro (`MADV_DONTNEED`), so a long-parked fiber holding a
   big stack costs only the pages it actually touched. Strict M:N safety contract:
   only the **owning hub** runs this, only while the coro is **suspended** (saved
   SP valid). Off by default (madvise+refault hurts short-park churn); the
   auto-sizer turns it on so "start large, learn down" stays RSS-free.
 - HWM measurement is **paint-free**: it counts the run of resident pages
-  (`mincore`) down from the top of the stack. A goroutine faults pages as it
+  (`mincore`) down from the top of the stack. A fiber faults pages as it
   deepens; the deepest resident page is the high-water mark.
 
 > War story baked into the design: an earlier version *painted* the stack with a
@@ -126,14 +126,14 @@ interior stack-pointers are relocated by the fixed delta, and the saved SP is
 patched. Safe because at a swap boundary the coro's entire live state is the
 fcontext frame at SP plus the chain above it — no volatile registers to fix
 (unlike a signal handler). This is what lets runloom **ship a small default
-stack**: a goroutine that legitimately deepens *across yields* grows with it. It
+stack**: a fiber that legitimately deepens *across yields* grows with it. It
 **cannot** rescue a deep *non-yielding* burst between two yields — that overflows
 into the guard page (clean SIGSEGV); such code sets `stack_size=` explicitly.
 
 ## Invariants a re-implementer must keep
 
 1. **`resume`/`yield`/`new`/`destroy` for a coro all happen on one OS thread.**
-   The saved SP and the asm frame are thread-bound. (This is why goroutines pin
+   The saved SP and the asm frame are thread-bound. (This is why fibers pin
    to their origin hub — spec 05.)
 2. **A guard page sits below every stack** (where the backend allows). Overflow
    must fault, never corrupt a neighbor.

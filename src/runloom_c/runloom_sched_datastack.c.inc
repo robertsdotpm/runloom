@@ -19,7 +19,7 @@ void runloom_first_run_install_datastack(void)
 
 /* ---- Datastack-tail idle reclaim (companion to the C-stack sweep) ----
  *
- * A Python goroutine parked deep in CPython (e.g. in recv inside the eval
+ * A Python fiber parked deep in CPython (e.g. in recv inside the eval
  * loop) holds a _PyStackChunk with its live frames in [chunk, datastack_top)
  * and unpushed free space in [datastack_top, datastack_limit).  The dwell
  * stack-sweep madvises the C stack below SP but NEVER this chunk, so the
@@ -147,7 +147,7 @@ void runloom_sched_datastack_sweep_stats(unsigned long long *tail_bytes,
 /* Drain the datastack-chunk chain currently attached to tstate,
  * returning tstate's datastack pointers to NULL.
  *
- * Called after a goroutine completes, BEFORE we restore the scheduler
+ * Called after a fiber completes, BEFORE we restore the scheduler
  * or hub snapshot (which would overwrite tstate->datastack_chunk with
  * the scheduler's saved value and leak g's chain).
  *
@@ -178,16 +178,16 @@ void runloom_drain_g_datastack(void)
 #endif
 }
 
-/* Install an initial root for the goroutine's Python frame chain.  Run
- * inside runloom_g_entry, on the goroutine's own stack, BEFORE we call any
+/* Install an initial root for the fiber's Python frame chain.  Run
+ * inside runloom_g_entry, on the fiber's own stack, BEFORE we call any
  * user Python code.
  *
  * The point: when user code calls PyEval_EvalFrameDefault, the new
  * interpreter frame's `previous` field is linked to whatever was at
  * tstate's "top of chain" pointer.  If we don't sever the chain, that
  * "top" is whoever ran most recently on this OS thread -- the
- * scheduler, or worse, another goroutine.  Then traceback walks and
- * recursion checks pull in every frame across every goroutine.
+ * scheduler, or worse, another fiber.  Then traceback walks and
+ * recursion checks pull in every frame across every fiber.
  *
  * On 3.12, we put a fresh _PyCFrame at the bottom of g's stack, point its
  * previous to tstate->root_cframe (the per-thread sentinel), AND null its
@@ -273,8 +273,8 @@ void runloom_sched_ready_push(runloom_sched_t *s, runloom_g_t *g)
  * Burckhardt, Kothari, Musuvathi, Nagarakatte, "A Randomized Scheduler with
  * Probabilistic Guarantees of Finding Bugs", ASPLOS 2010.  When RUNLOOM_PCT_SEED
  * is set, the single-hub ready-pop stops being FIFO and instead always runs
- * the highest-priority ready goroutine; goroutines get random priorities and
- * d-1 random "priority change points" demote a goroutine mid-run.  This gives
+ * the highest-priority ready fiber; fibers get random priorities and
+ * d-1 random "priority change points" demote a fiber mid-run.  This gives
  * a probabilistic lower bound of finding any depth-d bug.
  *
  * SCOPE: meaningful ONLY for the single-hub cooperative run() path, where the
@@ -347,7 +347,7 @@ static void runloom_pct_init(void)
 /* Find the logical ring index of the highest-priority ready g, assigning a
  * fresh random high priority to any g that doesn't have one yet.
  *
- * FIFO goroutines (pct_fifo, the aio bridge's call_soon/task gs) must keep their
+ * FIFO fibers (pct_fifo, the aio bridge's call_soon/task gs) must keep their
  * relative spawn order: only the OLDEST ready FIFO g is a candidate; younger
  * ones are skipped until it has run.  So PCT may still interleave reorderable
  * (raw) gs freely and may even defer the oldest FIFO g behind one, but it can
@@ -580,7 +580,7 @@ double runloom_sched_timer_next_deadline(runloom_sched_t *s)
 
 /* ---- Stack calibration ----
  *
- * Default: 512 KB.  This covers everything a goroutine realistically does --
+ * Default: 512 KB.  This covers everything a fiber realistically does --
  * the deepest stdlib single frame (`_decimal` squaretrans_pow2, 256 KB), full
  * TLS/SSH crypto in a callback (the aio bridge runs asyncssh's kex + OpenSSL on
  * 512 KB), nested parsers -- so ordinary code never hits the guard page.  It's
@@ -590,7 +590,7 @@ double runloom_sched_timer_next_deadline(runloom_sched_t *s)
  * UP for stack-hungry programs (freeze to next_pow2(max_hwm * RUNLOOM_CAL_SAFETY)
  * after RUNLOOM_CAL_TARGET completions) but is FLOORED at this default -- it never
  * auto-shrinks below the safe size and re-exposes the deep cases.  Reclaiming the
- * tail for huge goroutine counts is the per-kind auto-sizer's job (opt-in
+ * tail for huge fiber counts is the per-kind auto-sizer's job (opt-in
  * "grow down"; runloom.inspect.enable_stack_autosize), not calibration's.  A true
  * outlier deeper than 512 KB is a clean guard-page crash + a one-line pin
  * (runloom.go(fn, stack_size=...)), never corruption.

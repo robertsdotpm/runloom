@@ -1,22 +1,22 @@
-# 02 — The goroutine and the single-thread scheduler
+# 02 — The fiber and the single-thread scheduler
 
 Ground truth: `src/runloom_c/runloom_sched.{h,c}`,
 `runloom_sched_core.c.inc`, `runloom_sched_drain.c.inc`,
 `runloom_sched_parkwake.c.inc`, `runloom_gstate.{h,c}`.
 
-This spec covers the **N=1 scheduler** — one OS thread driving many goroutines
+This spec covers the **N=1 scheduler** — one OS thread driving many fibers
 cooperatively. The M:N scheduler (spec 05) is this, replicated per hub, plus a
 work-stealing deque. Understand this one first.
 
-## The `G` — one goroutine
+## The `G` — one fiber
 
 `struct runloom_g` is the unit of work. The fields that matter conceptually:
 
 - `coro` — its stackful coroutine (spec 01).
-- `callable` (Python) **or** `c_entry`/`c_arg` (a pure-C goroutine, no Python —
+- `callable` (Python) **or** `c_entry`/`c_arg` (a pure-C fiber, no Python —
   used by the C test harness and `TCPConn` handlers for Go-parity memory).
 - `snap` — the CPython thread-state snapshot, **valid only while suspended**
-  (spec 03). This is the other half of "a goroutine is a stack + a tstate snap."
+  (spec 03). This is the other half of "a fiber is a stack + a tstate snap."
 - `result` / `error`, `done`, `refcount`.
 - `owner` — the scheduler that owns it (the thread it was spawned on). A
   cross-thread wake must route the g back to *this* scheduler, not the waker's.
@@ -56,13 +56,13 @@ Four data structures and a couple of cross-thread inboxes:
 4. **`completed`**, **`stopping`** — drain bookkeeping.
 5. **Cross-thread wake list** — an MPSC list (`wake_list_head/tail` under
    `wake_list_lock`, threaded through `g->wake_next`). A foreign thread that wakes
-   one of *our* goroutines pushes here; our drain consumes it once per iteration.
+   one of *our* fibers pushes here; our drain consumes it once per iteration.
    This keeps foreign wakers off the single-consumer ready ring (spec 04).
-6. **Quiescence list** — goroutines parked by `run_ready()` (the asyncio
+6. **Quiescence list** — fibers parked by `run_ready()` (the asyncio
    "one loop iteration" barrier; see below).
 
 `netpoll_parked` is a *per-sched* count of this thread's netpoll parkers, so a
-goroutine parked on another (or dead) OS thread can't keep this thread's `run()`
+fiber parked on another (or dead) OS thread can't keep this thread's `run()`
 alive forever.
 
 ## The core operations
@@ -92,7 +92,7 @@ Two design points worth lifting:
   exists, yielding is pure bookkeeping that hands control right back, so skip the
   whole snap+swap+resume cycle. Cuts the tight-yield baseline from ~230 ns to
   <10 ns.
-- **Draining the wake list *before* re-queuing self.** A goroutine that calls
+- **Draining the wake list *before* re-queuing self.** A fiber that calls
   `g.wake()` on a peer (via the aio bridge) and then `await sleep(0)` must let the
   woken g run first, like asyncio's `sleep(0)` = one loop iteration. So yield
   folds the cross-thread wake list into the ready ring before pushing itself,
@@ -141,15 +141,15 @@ loop:
 
 The drain is what makes `runloom.run(1, main)` go: spawn `main`, drain to
 quiescence, return the completed count. It also runs a **deadlock detector**: if
-it would block with goroutines still parked on channels/`park_safe` and nothing
-can wake them, it reports (Go's "all goroutines are asleep — deadlock!"); mode is
+it would block with fibers still parked on channels/`park_safe` and nothing
+can wake them, it reports (Go's "all fibers are asleep — deadlock!"); mode is
 off/warn/raise (`RUNLOOM_DEADLOCK`).
 
 ### The quiescence barrier (`run_ready`)
 
 `run_ready()` parks the caller on a separate FIFO that the drain flushes back to
 ready **only at a quiescence point** — when the ready ring is empty, just before
-it would block on netpoll/timers. Net effect: every goroutine runnable *now*
+it would block on netpoll/timers. Net effect: every fiber runnable *now*
 (including freshly woken ones) runs to its next park before `run_ready` returns —
 exactly asyncio's "drain this iteration's ready callbacks" semantics, iterated to
 quiescence. This is the primitive the aio loop's `_run_once` is built on.

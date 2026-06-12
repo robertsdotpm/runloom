@@ -1,7 +1,7 @@
 # 14 — Monkey-patched cooperative stdlib
 
 Ground truth: `runloom/monkey/` — `__init__.py` (categories + patch/unpatch),
-`_base.py` (foundation: goroutine detection, the Parker, the backend),
+`_base.py` (foundation: fiber detection, the Parker, the backend),
 `sockets.py`, `osio.py`, `files.py`, `polling.py`, `tls.py`, `subproc.py`,
 `signals.py`, `locks.py`, `events.py`, `queues.py`, `executors.py`, `dns.py`,
 `dns_proto.py`, `heavy.py`; `docs/monkey-patching.md`,
@@ -11,7 +11,7 @@ FOREIGN-OS-THREAD-safe` invariant in `CLAUDE.md`.
 ## The idea
 
 `runloom.monkey.patch()` replaces blocking stdlib calls with cooperative ones that
-**park the goroutine instead of blocking the OS thread**. After it, ordinary
+**park the fiber instead of blocking the OS thread**. After it, ordinary
 `socket.recv`, `time.sleep`, `ssl.read`, file I/O, `subprocess` waits, DNS, and
 several `threading` primitives all yield — so any synchronous library (`requests`,
 `pymysql`, `urllib`, `psycopg2`) becomes cooperative *unchanged*. It is the
@@ -52,13 +52,13 @@ Representative mechanisms:
   (event-driven); `poll` has no backing fd so it's offloaded.
 - **select.select** — reimplemented cooperatively (register fds on a transient
   epoll, park on the epoll's own fd) so CPython's 50.9 KB `select_select_impl`
-  frame is never reached from a goroutine (spec 06/10).
+  frame is never reached from a fiber (spec 06/10).
 - **subprocess/process** — park on a **pidfd** (Linux 5.3+) until the child exits,
   then reap; busy-poll fallback otherwise.
 - **threading** — `Lock`/`RLock`/`Event`/`Condition`/`Semaphore`/`Barrier` made
   cooperative (Lock backed by `runloom_c.Mutex`); `queue` builds on them.
-- **futures** — `ThreadPoolExecutor` is **goroutine-backed** (work runs as
-  goroutines so `Future.result`/`as_completed` resolve in-domain; a real-threaded
+- **futures** — `ThreadPoolExecutor` is **fiber-backed** (work runs as
+  fibers so `Future.result`/`as_completed` resolve in-domain; a real-threaded
   executor would notify a cooperative Condition cross-thread and deadlock the
   waiter). `ProcessPoolExecutor` is unsupported (its manager thread + forkserver
   machinery is nondeterministic under the cooperative scheduler).
@@ -68,18 +68,18 @@ Representative mechanisms:
 
 ## The foundation (`_base.py`) — three load-bearing pieces
 
-### 1. Goroutine-context detection (`_in_goroutine`)
+### 1. Goroutine-context detection (`_in_fiber`)
 
-`runloom_c` doesn't expose a "current goroutine" accessor cheaply, so `monkey`
+`runloom_c` doesn't expose a "current fiber" accessor cheaply, so `monkey`
 wraps `runloom_c.go`/`mn_go` to bump a **thread-local counter** for the duration of
-each user callable; `_in_goroutine()` is `count > 0` (plus the Python-scheduler's
-`runloom.current()`). Every cooperative patch branches on this: in a goroutine →
+each user callable; `_in_fiber()` is `count > 0` (plus the Python-scheduler's
+`runloom.current()`). Every cooperative patch branches on this: in a fiber →
 park cooperatively; outside one → fall back to real blocking. This is why the same
-patched code is safe whether or not you're on a goroutine.
+patched code is safe whether or not you're on a fiber.
 
 ### 2. The self-pipe Parker (`_Parker`)
 
-A goroutine that has no readiness fd to wait on (a Condition, a pool-completion
+A fiber that has no readiness fd to wait on (a Condition, a pool-completion
 wake) parks on a **self-pipe**: POSIX `os.pipe()` (kernel fd ints all backends can
 poll) or, on Windows, `socket.socketpair()` (Win `select` only polls SOCKET
 handles, not pipe fds). `park()` waits on the read end; `unpark()` writes a byte.
@@ -96,22 +96,22 @@ Parker can carry a stale wake byte and `wait_fd` can wake spuriously, so submit
 **loops until `done`** to be edge-insensitive. The backend interface is one method
 (`submit`), so a Linux **io_uring** backend (spec 08) slots in with no caller
 change. `offload(fn, …)` is the public form. `_blocking_call` runs inline when not
-on a goroutine (zero dispatch overhead).
+on a fiber (zero dispatch overhead).
 
 ## The FOREIGN-OS-THREAD-safety invariant (the one that crashed under M:N)
 
 `patch()` replaces `threading`/`select`/… **globally**, so a cooperative primitive
-can be invoked from a thread that is **not a goroutine and not a hub** — most often
+can be invoked from a thread that is **not a fiber and not a hub** — most often
 a stdlib-internal daemon thread (a `multiprocessing.Queue._feed` thread, a
 `concurrent.futures` worker) that takes a patched `Lock`/`Condition`. Such a thread
-has no goroutine, no hub, no per-thread scheduler. Any primitive it can reach must
-detect this (`_in_goroutine()` is False / a TLS peek is NULL) and **fall back to
+has no fiber, no hub, no per-thread scheduler. Any primitive it can reach must
+detect this (`_in_fiber()` is False / a TLS peek is NULL) and **fall back to
 real OS blocking**, never:
 
-- **(a)** park a goroutine that doesn't exist — the `_Parker` on a foreign thread
+- **(a)** park a fiber that doesn't exist — the `_Parker` on a foreign thread
   blocks the *thread* on its wake fd with a **raw `select`** (`_raw_select`,
   captured before the cooperative patch), not `runloom_c.wait_fd` (which parks a
-  goroutine on a hub's netpoll — undefined on a thread with no goroutine/hub →
+  fiber on a hub's netpoll — undefined on a thread with no fiber/hub →
   SIGSEGV under M:N);
 - **(b)** lazily allocate scheduler state — `current_g()` must
   `runloom_sched_peek_current()`, never `runloom_sched_get()` (which mallocs a sched
@@ -135,7 +135,7 @@ cooperative sockets removes the most common reason to need the offload pool.
 
 - **Patch early** — a library that does `from socket import socket` and caches the
   class at import time keeps the original if you patch after; patch-then-import.
-- **`threading.Thread` is NOT replaced** — turning it into a goroutine would break
+- **`threading.Thread` is NOT replaced** — turning it into a fiber would break
   too many assumptions; use `runloom.go`.
 - **Buffered file `.read()/.write()` can't be patched** — `io.FileIO`/`io.Buffered*`
   are immutable C types; use `os.read`/`os.write` on the raw fd, or `offload()`.
@@ -148,8 +148,8 @@ Both `monkey` and `aio` were once flat modules; tools/tests read their internals
 directly. To preserve that read surface after the split, `__init__.py` uses a
 **PEP 562 module-level `__getattr__` function** that resolves a name against the
 section modules — *not* a `ModuleType` subclass with `__getattr__`. The reason is a
-real crash (memory: "Module `__getattr__` goroutine SEGV"): a `__class__`-swapped
-module subclass's `__getattr__` read **inside a goroutine** segfaults; the plain
+real crash (memory: "Module `__getattr__` fiber SEGV"): a `__class__`-swapped
+module subclass's `__getattr__` read **inside a fiber** segfaults; the plain
 PEP-562 function form works. To *write* a section internal, assign to the section
 module directly.
 
@@ -157,7 +157,7 @@ module directly.
 
 1. **Patch leaves cooperative; everything routing through them cooperates** — the
    leaf-primitive principle keeps the surface small.
-2. **Every cooperative path branches on `_in_goroutine()`** — park in a goroutine,
+2. **Every cooperative path branches on `_in_fiber()`** — park in a fiber,
    real-block otherwise.
 3. **A foreign OS thread reaching a cooperative primitive falls back to real
    blocking** — raw `select`, never `wait_fd`; peek the sched, never allocate one.
@@ -165,4 +165,4 @@ module directly.
 4. **The blocking backend's submit loops until `done`** (edge-insensitive to
    spurious/stale Parker wakes).
 5. **Use a PEP-562 function `__getattr__`, never a module-subclass `__getattr__`**
-   (the latter SEGVs inside a goroutine).
+   (the latter SEGVs inside a fiber).

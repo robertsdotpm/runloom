@@ -45,7 +45,7 @@ runloom.run(1)
 ## Pipeline (3-stage)
 
 Stage 1 emits values; stage 2 transforms; stage 3 aggregates.  Each
-stage is its own goroutine connected by channels.
+stage is its own fiber connected by channels.
 
 ```python
 import runloom
@@ -203,7 +203,7 @@ For asyncio code, just use `asyncio.wait_for(coro, timeout=N)` --
 
 ## Graceful shutdown
 
-Pattern: a main goroutine kicks off workers, then waits for a `done`
+Pattern: a main fiber kicks off workers, then waits for a `done`
 event (e.g. SIGINT, an admin endpoint, a finite job list).  On
 shutdown signal, close the input channel and wait for workers to
 finish.
@@ -262,7 +262,7 @@ for t in threads: t.start()
 for t in threads: t.join()
 ```
 
-Each thread runs its own scheduler with its own goroutines.  Channels
+Each thread runs its own scheduler with its own fibers.  Channels
 are not shared across thread schedulers in this mode -- that's what
 M:N is for.
 
@@ -291,7 +291,7 @@ for _ in range(20):
 runloom.run(1)
 ```
 
-20 goroutines compete for 4 tokens; at most 4 ever run simultaneously.
+20 fibers compete for 4 tokens; at most 4 ever run simultaneously.
 
 ## Channel-of-channels
 
@@ -326,7 +326,7 @@ runloom.run(1)
 
 ## Echo server with per-connection cancellation
 
-A complete server: each connection gets a goroutine; closing the
+A complete server: each connection gets a fiber; closing the
 listener cancels every active connection cleanly.
 
 ```python
@@ -368,7 +368,7 @@ runloom.run(1)
 ## Replacing `threading.Thread` for I/O-bound work
 
 If your code is `Thread(target=fn).start()` and `fn` does I/O,
-swapping the thread for a goroutine is a one-line change:
+swapping the thread for a fiber is a one-line change:
 
 ```python
 # Before
@@ -381,13 +381,13 @@ import runloom
 g = runloom.go(worker)             # plus runloom.run(1) at top level
 ```
 
-You go from 8 MB per thread (Linux default) to ~16 KB per goroutine.
+You go from 8 MB per thread (Linux default) to ~16 KB per fiber.
 Spawn rate goes from ~10k/sec to ~1.7M/sec.
 
 ## Bridging runloom with `asyncio` libraries
 
 You can call `runloom.go(fn)` from inside an async coroutine -- the
-goroutine runs concurrently with the awaiting code:
+fiber runs concurrently with the awaiting code:
 
 ```python
 import asyncio, runloom
@@ -399,11 +399,11 @@ def background_worker():
 
 async def main():
     runloom.go(background_worker)
-    # ... your async code runs in parallel with the background goroutine ...
+    # ... your async code runs in parallel with the background fiber ...
     await asyncio.sleep(5)
 
 runloom.aio.run(main())
 ```
 
-The async coroutine and the raw goroutine share the same scheduler;
+The async coroutine and the raw fiber share the same scheduler;
 both yield cooperatively.

@@ -1,13 +1,13 @@
 /* runloom_sched.h -- C-level cooperative scheduler.
  *
- * The Python-side `runloom.go(fn)` ultimately creates a goroutine here.
+ * The Python-side `runloom.go(fn)` ultimately creates a fiber here.
  * yield, sleep, run -- all do their bookkeeping in C, calling into
  * Python only to invoke the user's entry function.
  *
  * Single OS thread per scheduler in v0.  Multi-thread is Phase C
  * (free-threaded Python with one scheduler per OS thread, work-stealing).
  *
- * Phase B (this file): per-goroutine snapshot of the CPython thread
+ * Phase B (this file): per-fiber snapshot of the CPython thread
  * state fields that a raw C-stack swap doesn't preserve.  Algorithm
  * copied from greenlet (MIT licensed; see TPythonState.cpp).
  */
@@ -42,7 +42,7 @@ typedef struct runloom_pystate_snap runloom_pystate_snap_t;
 #define RUNLOOM_WS_SWEEPING       4
 #define RUNLOOM_WS_SWEEPING_WOKEN 5
 
-/* Per-goroutine CPython thread state snapshot.
+/* Per-fiber CPython thread state snapshot.
  *
  * Fields here are everything the interpreter keeps on PyThreadState that
  * a raw asm stack switch cannot preserve on its own.  Each save copies
@@ -75,8 +75,8 @@ struct runloom_pystate_snap {
      * Set when PyErr_SetObject is mid-call and an exception object has
      * been associated with the tstate but not yet raised through the
      * eval loop.  Critical to save/restore: at high concurrency,
-     * goroutines yield while their current_exception is non-NULL and
-     * other goroutines overwrite it, causing tstate to read a freed/
+     * fibers yield while their current_exception is non-NULL and
+     * other fibers overwrite it, causing tstate to read a freed/
      * stale object on resume.  Manifests as a segfault in
      * _PyErr_SetObject during the next exception cascade (e.g., async
      * function's StopIteration on return). */
@@ -100,10 +100,10 @@ struct runloom_pystate_snap {
     int c_recursion_remaining;
 #endif
 #if PY_VERSION_HEX >= 0x030B0000
-    /* Per-goroutine sys.setprofile / sys.settrace hooks (BUG #11).  These are
-     * tstate-global, so without snap/restore a hook one goroutine installs
-     * leaks onto every other goroutine sharing the hub (and is cleared from
-     * under it on resume).  Saved/restored so each goroutine carries its own. */
+    /* Per-fiber sys.setprofile / sys.settrace hooks (BUG #11).  These are
+     * tstate-global, so without snap/restore a hook one fiber installs
+     * leaks onto every other fiber sharing the hub (and is cleared from
+     * under it on resume).  Saved/restored so each fiber carries its own. */
     Py_tracefunc c_profilefunc;
     Py_tracefunc c_tracefunc;
     PyObject *c_profileobj;                   /* owned ref while suspended */
@@ -131,7 +131,7 @@ struct runloom_pystate_snap {
     PyThreadState *origin_tstate;
 };
 
-/* One goroutine (the "G" in Go's M:P:G nomenclature).
+/* One fiber (the "G" in Go's M:P:G nomenclature).
  *
  * Lifetime: refcounted.  Two parties hold refs:
  *   - the scheduler, while g is in the ready queue or sleep heap
@@ -171,7 +171,7 @@ struct runloom_g {
     runloom_sched_t *owner;
     int done;
     int refcount;
-    /* Caller-asserted "this goroutine will never yield".  Spawned via
+    /* Caller-asserted "this fiber will never yield".  Spawned via
      * runloom_sched_spawn_noyield (Python: runloom_c.go_noyield(fn)).
      * When set, drain skips the per-g datastack install + drain +
      * sched_snap load/resnap dance, because g runs to completion
@@ -181,7 +181,7 @@ struct runloom_g {
      *
      * If a noyield-marked g actually yields (calls sched_yield,
      * sched_sleep, wait_fd, or any monkey-patched I/O), the result
-     * is undefined -- frames will alias across goroutines.  Use
+     * is undefined -- frames will alias across fibers.  Use
      * only for pure-compute callables. */
     int noyield;
     /* PCT (Probabilistic Concurrency Testing) priority -- 0 = unassigned;
@@ -190,11 +190,11 @@ struct runloom_g {
     int pct_prio;
     /* PCT FIFO marker: when set, PCT must NOT reorder this g relative to other
      * FIFO-marked gs -- it preserves their spawn (ready-ring) order.  The aio
-     * bridge marks every _go_io goroutine (call_soon callbacks, task steps,
+     * bridge marks every _go_io fiber (call_soon callbacks, task steps,
      * io/timer drivers) so PCT respects asyncio's call_soon-FIFO contract
      * instead of permuting it (which was a false positive, not a bug -- asyncio
      * scheduling has no legal reordering freedom).  PCT still freely interleaves
-     * un-marked raw goroutines/channels in a mixed program.  Slab-zeroed to 0
+     * un-marked raw fibers/channels in a mixed program.  Slab-zeroed to 0
      * (reorderable) by default; testing-only, zero cost when PCT is off. */
     int pct_fifo;
     /* This sleep uses the WALL clock even when the logical clock is on (set per
@@ -280,13 +280,13 @@ struct runloom_g {
      * wake_safe to observe it.  Replaces the original s->current
      * check, which read tstate state across threads -- a cross-thread
      * wake_safe (e.g., from a hub thread processing an iouring CQE
-     * for a goroutine parked on the single-thread sched) could
+     * for a fiber parked on the single-thread sched) could
      * observe s->current==g (still set by drain) and skip the push,
      * losing the wake.  The CAS-based handoff is independent of any
      * tstate observation and gives wake_safe a deterministic "did we
      * own the wake?" answer regardless of caller thread. */
     int parked_safe;
-    /* Hub the goroutine was parked on by runloom_park_generic (the generic
+    /* Hub the fiber was parked on by runloom_park_generic (the generic
      * in-memory park), or NULL if parked on the single-thread sched.  Read
      * (ACQUIRE) by RunloomG.wake to route the wake: a non-NULL hub -> the M:N
      * runloom_mn_wake_g re-queue; NULL -> the single-thread runloom_sched_wake_safe.
@@ -314,8 +314,8 @@ struct runloom_g {
      * malloc'd.  Its final decref must therefore NOT runloom_coro_destroy the coro
      * nor runloom_g_slab_free the g (either would free()/pool a slice -> heap
      * corruption).  Instead it decrements the owning batch's live count; the
-     * LAST goroutine to finish tears the whole batch down (free the g/coro
-     * arenas, MADV_DONTNEED the stack block).  0 for every normal goroutine.
+     * LAST fiber to finish tears the whole batch down (free the g/coro
+     * arenas, MADV_DONTNEED the stack block).  0 for every normal fiber.
      * Both live BEFORE the id introspection block so slab reuse clears them. */
     unsigned char arena;
     struct runloom_gon_batch *batch;
@@ -331,13 +331,13 @@ struct runloom_g {
      * per-thread slab reuse path (runloom_g_slab_alloc) bulk-clears a g only
      * up to offsetof(runloom_g_t, id) -- i.e. everything BEFORE this block --
      * so reg_prev/reg_next survive recycling untouched.  That is what
-     * keeps the global goroutine registry walkable without taking the
+     * keeps the global fiber registry walkable without taking the
      * registry lock on the (hot) spawn path: the only writers of reg_prev/
      * reg_next are runloom_greg_link/unlink, both under runloom_greg_lock, on the
      * cold OS-alloc / slab-overflow-free paths.  See the reuse branch in
      * runloom_sched_core.c.inc and the field-ordering contract there. */
 
-    /* Per-incarnation goroutine id (Go's goid analogue).  Assigned fresh
+    /* Per-incarnation fiber id (Go's goid analogue).  Assigned fresh
      * at each spawn from a block-batched global counter; unique + always
      * positive for the life of the process.  Read by the dump, written at
      * spawn with an atomic store.  0 until first spawned.  `long long` (not
@@ -347,7 +347,7 @@ struct runloom_g {
     /* Monotonic-ns timestamp of the last state transition into a PARKED_*
      * state, stamped only when introspection timestamping is enabled
      * (runloom_introspect_set_timestamps / RUNLOOM_INTROSPECT_TIME).  Lets the
-     * dump report "parked for 45.2s" to spot a wedged goroutine.  -1 when
+     * dump report "parked for 45.2s" to spot a wedged fiber.  -1 when
      * never stamped / tracking off. */
     long long state_since_ns;
     /* "What am I blocked on" summary, kept as plain data ON THE G so the
@@ -358,8 +358,8 @@ struct runloom_g {
      * park_fd defaults to -1. */
     int park_fd;
     int park_events;
-    /* Set to 1 at spawn when this goroutine was admitted under an active
-     * max-goroutines limit, so its final decref knows to release the slot.
+    /* Set to 1 at spawn when this fiber was admitted under an active
+     * max-fibers limit, so its final decref knows to release the slot.
      * Travels with the g so toggling the limit can't unbalance the counter. */
     unsigned char limit_counted;
     /* Intrusive doubly-linked global registry of every live g STRUCT
@@ -373,10 +373,10 @@ struct runloom_g {
 /* Park current g until runloom_sched_wake_g(g) is called.  Race-safe:
  * a wake that arrives BEFORE the park (because the future fires
  * synchronously, e.g. add_done_callback on an already-done future)
- * makes the park a no-op and the goroutine continues. */
+ * makes the park a no-op and the fiber continues. */
 void runloom_sched_park_safe(void);
 
-/* Wake a goroutine previously parked via runloom_sched_park_safe.  Safe
+/* Wake a fiber previously parked via runloom_sched_park_safe.  Safe
  * to call before park (wake_pending counter records the arrival). */
 void runloom_sched_wake_safe(runloom_g_t *g);
 
@@ -386,14 +386,14 @@ void runloom_g_decref(runloom_g_t *g);
 
 /* go_n bulk-arena batch teardown: called by an arena g's final decref instead
  * of free()ing the g/coro/stack slices individually.  Decrements the batch's
- * live count; the LAST goroutine to finish frees the g + coro arenas and
+ * live count; the LAST fiber to finish frees the g + coro arenas and
  * MADV_DONTNEEDs the stack block.  Defined in mn_sched_init_fini.c.inc. */
 struct runloom_gon_batch;
 void runloom_gon_batch_finish_one(struct runloom_gon_batch *b);
 
 /* Acquire a reference ONLY if the g is still live (refcount > 0).  Returns
  * 1 on success (caller now owns a ref, must decref), 0 if the g is already
- * being torn down (refcount reached 0).  CAS loop; used by the goroutine
+ * being torn down (refcount reached 0).  CAS loop; used by the fiber
  * dump to pin a g found via the registry without resurrecting one that a
  * concurrent final decref is mid-freeing. */
 int runloom_g_try_incref(runloom_g_t *g);
@@ -415,7 +415,7 @@ void runloom_g_slab_free(runloom_g_t *g);
  * the parker decides timed-out from the clock on resume, NOT from the timer. */
 typedef struct {
     double       deadline;   /* monotonic-seconds wake deadline */
-    runloom_g_t *g;          /* the timed-parked goroutine */
+    runloom_g_t *g;          /* the timed-parked fiber */
 } runloom_timer_entry_t;
 
 struct runloom_sched {
@@ -453,15 +453,15 @@ struct runloom_sched {
     /* When set, sched_drain returns. */
     int stopping;
     /* A Python signal-handler exception (normalized, traceback attached) the
-     * idle scheduler grab ran and is handing to a goroutine parked in wait_fd:
+     * idle scheduler grab ran and is handing to a fiber parked in wait_fd:
      * set just before runloom_netpoll_signal_wake re-queues that g, consumed (taken
      * + cleared) by runloom_netpoll_wait_fd when it resumes on the
      * RUNLOOM_NETPOLL_SIGNALED sentinel.  Owned ref while set; NULL otherwise. */
     PyObject *signal_exc;
-    /* Count of THIS sched's goroutines currently parked in netpoll (non-hub
+    /* Count of THIS sched's fibers currently parked in netpoll (non-hub
      * parkers whose g->owner == this sched).  Bumped in runloom_parker_link /
      * unlink.  The drain loop uses this -- NOT the global parked count -- so a
-     * goroutine parked on another (or a dead) OS thread can't keep this
+     * fiber parked on another (or a dead) OS thread can't keep this
      * thread's runloom_c.run() alive forever.  Accessed atomically: a pump on
      * another thread may unlink (decrement) one of our parkers cross-thread. */
     int netpoll_parked;
@@ -474,13 +474,13 @@ struct runloom_sched {
     runloom_mutex_t wake_list_lock;
     runloom_g_t *wake_list_head;
     runloom_g_t *wake_list_tail;
-    /* Quiescence-barrier wait list (single-thread sched only) -- goroutines
+    /* Quiescence-barrier wait list (single-thread sched only) -- fibers
      * parked by runloom_sched_run_ready().  FIFO, threaded through g->next (free
      * for a live g on this sched; the slab free-list and M:N hub queues are
      * the only other users of g->next and neither overlaps here).  The drain
      * loop flushes the WHOLE list back to ready at the next quiescence point
      * (ready empty, just before it would block on netpoll/timers), giving
-     * "resume me once no other goroutine is immediately runnable" -- asyncio's
+     * "resume me once no other fiber is immediately runnable" -- asyncio's
      * one-loop-iteration semantics, iterated to quiescence. */
     runloom_g_t *quiescence_head;
     runloom_g_t *quiescence_tail;
@@ -498,11 +498,11 @@ runloom_sched_t *runloom_sched_get(void);
 /* Non-allocating: the g running on this thread's single-thread sched, or NULL. */
 runloom_g_t *runloom_sched_peek_current(void);
 
-/* Spawn a new goroutine.  Returns a NEW reference to a RunloomG Python
+/* Spawn a new fiber.  Returns a NEW reference to a RunloomG Python
  * object (the wrapper around runloom_g_t).  Stealing the callable. */
 PyObject *runloom_sched_spawn(runloom_sched_t *s, PyObject *callable);
 
-/* Spawn a goroutine marked as "noyield" -- caller asserts the
+/* Spawn a fiber marked as "noyield" -- caller asserts the
  * callable will run to completion without calling sched_yield,
  * sched_sleep, wait_fd, or any monkey-patched I/O.  The drain path
  * skips the per-g datastack install / drain / sched_snap load+
@@ -527,7 +527,7 @@ PyObject *runloom_sched_spawn_sized(runloom_sched_t *s, PyObject *callable,
  * naturally drain.
  *
  * Override-on-set: runloom_sched_set_default_stack_size also freezes
- * calibration; subsequent goroutines spawn at the requested size. */
+ * calibration; subsequent fibers spawn at the requested size. */
 void   runloom_sched_set_default_stack_size(size_t bytes);
 size_t runloom_sched_get_default_stack_size(void);
 
@@ -553,7 +553,7 @@ void runloom_sched_sleep_until(runloom_sched_t *s, double wake_at);
 void runloom_sched_sleep_until_real(runloom_sched_t *s, double wake_at);
 
 /* Park the current g on the quiescence-barrier list; the drain loop resumes
- * it once no other goroutine is immediately runnable (ready empty), before
+ * it once no other fiber is immediately runnable (ready empty), before
  * blocking on netpoll/timers.  asyncio "one loop iteration" iterated to
  * quiescence.  Single-thread sched only; a no-op if not inside a g. */
 void runloom_sched_run_ready(runloom_sched_t *s);
@@ -562,22 +562,22 @@ void runloom_sched_run_ready(runloom_sched_t *s);
  * Caller must then yield via runloom_coro_yield. */
 void runloom_sched_park_current(void);
 
-/* Generic in-memory park: park the current goroutine with NO fd, routing to the
+/* Generic in-memory park: park the current fiber with NO fd, routing to the
  * M:N hub park (park_current + coro_yield) or the single-thread park_safe by hub
  * presence, and recording g->park_hub so RunloomG.wake routes the wake.  Returns
- * 0 on success, -1 if not in a goroutine.  foreign_wakeable arms the shared
+ * 0 on success, -1 if not in a fiber.  foreign_wakeable arms the shared
  * run-alive anchor so a foreign-OS-thread waker cannot race a single-thread
  * run()'s exit.  This is the M:N-correct replacement for park_self (which busy-
  * loops on a hub). */
 int runloom_park_generic(int foreign_wakeable);
 
-/* Timed variant of runloom_park_generic: park the current goroutine IN MEMORY (0
+/* Timed variant of runloom_park_generic: park the current fiber IN MEMORY (0
  * fds) until a wake_safe OR the monotonic-seconds `deadline`, whichever first.
  * Same Dekker handshake as runloom_park_generic; the deadline is a TIMER-heap
  * entry on the current sched/hub that the drain fires by CASing parked_safe (the
  * SAME exactly-once arbiter as wake_safe).  The parker decides the result from
  * the CLOCK on resume -- returns 1 if monotonic() >= deadline (timed out), else 0
- * (woken); -1 if not in a goroutine.  A spurious early return is possible (a
+ * (woken); -1 if not in a fiber.  A spurious early return is possible (a
  * real wake, or a stale timer entry from a prior re-park); the caller must
  * re-check its own deadline, exactly as the fd-backed wait_fd(timeout) path did. */
 int runloom_park_generic_timed(int foreign_wakeable, double deadline);
@@ -593,7 +593,7 @@ double runloom_sched_timer_next_deadline(runloom_sched_t *s);
 
 /* Shared (process-wide) run-alive anchor for foreign-wakeable in-memory parkers:
  * an in-memory park leaves no fd/sleep/inflight footprint, so without this a
- * single-thread run() would exit and abandon a goroutine a foreign thread is
+ * single-thread run() would exit and abandon a fiber a foreign thread is
  * about to wake.  acquire (before park) / release (after resume) bracket the
  * park; inflight() is read by the single-thread drain loop's exit condition.
  * One counter + the shared wake-pump eventfd, never per-waiter. */
@@ -605,7 +605,7 @@ long runloom_foreign_park_inflight(void);
 void runloom_sched_wake(runloom_g_t *g);
 
 /* Drive the scheduler until ready+sleep queues are empty.  Returns
- * the number of completed goroutines. */
+ * the number of completed fibers. */
 Py_ssize_t runloom_sched_drain(runloom_sched_t *s);
 
 /* Free all allocated state in the scheduler (does not destroy gs
@@ -623,18 +623,18 @@ void runloom_pystate_snap(runloom_pystate_snap_t *snap);
 void runloom_pystate_load(runloom_pystate_snap_t *snap);
 void runloom_pystate_snap_clear(runloom_pystate_snap_t *snap);
 
-/* Per-goroutine-tstate mode (RUNLOOM_PER_G_TSTATE).  When on, runloom_pystate_snap
+/* Per-fiber-tstate mode (RUNLOOM_PER_G_TSTATE).  When on, runloom_pystate_snap
  * no-ops so each g's own tstate is never swapped out; mn_sched runs the
  * tstate-attach/detach path instead.  Set by mn_init, cleared by mn_fini. */
 void runloom_set_per_g_tstate_mode(int on);
 int  runloom_get_per_g_tstate_mode(void);
 
-/* The user's callable trampoline for a goroutine; installs an initial
+/* The user's callable trampoline for a fiber; installs an initial
  * root cframe / current_frame on g's own stack, then runs g->callable.
  * Exposed so mn_sched.c can reuse the same entry (Phase B correct). */
 void runloom_g_entry(void *user);
 
-/* Free the datastack-chunk chain owned by the just-completed goroutine.
+/* Free the datastack-chunk chain owned by the just-completed fiber.
  * Call AFTER runloom_coro_resume returns done=true and BEFORE loading any
  * other snapshot back into tstate (which would overwrite the chunk
  * pointers and leak the g's allocation).  Matches greenlet's did_finish.
@@ -649,7 +649,7 @@ void runloom_drain_g_datastack(void);
  * fields NULL so PyEval will arena-allocate.  Either is correct. */
 void runloom_first_run_install_datastack(void);
 
-/* Reclaim the idle tail of a parked Python goroutine's datastack chunk.
+/* Reclaim the idle tail of a parked Python fiber's datastack chunk.
  * The companion of runloom_coro_madvise_idle (which drops the C stack below
  * SP): here we MADV_DONTNEED the free pages of g's CURRENT _PyStackChunk
  * above the live frontier (snap->datastack_top) up to the chunk end
@@ -696,8 +696,8 @@ double runloom_sched_logical_now_or(double fallback);
  * Start a timer thread that posts a Py_AddPendingCall every quantum_us
  * microseconds.  CPython's eval loop checks the pending queue at
  * bytecode back-edges and function calls; when our pending call fires,
- * it invokes runloom_sched_yield() on whichever goroutine is currently
- * running.  Lets goroutines without explicit sched_yield() calls still
+ * it invokes runloom_sched_yield() on whichever fiber is currently
+ * running.  Lets fibers without explicit sched_yield() calls still
  * cooperate -- the Go 1.14 model translated to CPython terms.
  *
  * Returns 0 on success, -1 on error (with a Python exception set).

@@ -17,16 +17,16 @@ import runloom.inspect as gi
 # #if !defined(_WIN32)); the C functions aren't built on Windows, so skip
 # wherever the API is absent rather than hardcoding a platform.
 pytestmark = pytest.mark.skipif(
-    not hasattr(runloom_c, "goroutine_count"),
-    reason="goroutine introspection is POSIX-only (not built on this platform)")
+    not hasattr(runloom_c, "fiber_count"),
+    reason="fiber introspection is POSIX-only (not built on this platform)")
 
 
 class TestCountAndRegistry(unittest.TestCase):
     def test_count_zero_when_idle(self):
-        self.assertEqual(runloom_c.goroutine_count(), 0)
-        self.assertEqual(runloom_c.goroutines(), [])
+        self.assertEqual(runloom_c.fiber_count(), 0)
+        self.assertEqual(runloom_c.fibers(), [])
 
-    def test_count_tracks_live_goroutines(self):
+    def test_count_tracks_live_fibers(self):
         seen = {}
 
         def sleeper():
@@ -36,15 +36,15 @@ class TestCountAndRegistry(unittest.TestCase):
             for _ in range(5):
                 runloom.go(sleeper)
             runloom.sleep(0.005)            # let them park
-            seen["count"] = runloom_c.goroutine_count()
-            seen["states"] = [g["state"] for g in runloom_c.goroutines()]
+            seen["count"] = runloom_c.fiber_count()
+            seen["states"] = [g["state"] for g in runloom_c.fibers()]
 
         runloom.run(1, main)
         # 5 sleepers + main itself
         self.assertEqual(seen["count"], 6)
         self.assertEqual(seen["states"].count("sleep"), 5)
         # everything drained -> registry reports zero live again
-        self.assertEqual(runloom_c.goroutine_count(), 0)
+        self.assertEqual(runloom_c.fiber_count(), 0)
 
     def test_registry_balances_under_churn(self):
         def noop():
@@ -56,7 +56,7 @@ class TestCountAndRegistry(unittest.TestCase):
                 runloom.yield_()
 
         runloom.run(1, main)
-        self.assertEqual(runloom_c.goroutine_count(), 0)
+        self.assertEqual(runloom_c.fiber_count(), 0)
 
     def test_ids_are_unique(self):
         ids = {}
@@ -68,7 +68,7 @@ class TestCountAndRegistry(unittest.TestCase):
             for _ in range(8):
                 runloom.go(sleeper)
             runloom.sleep(0.005)
-            ids["set"] = [g["id"] for g in runloom_c.goroutines()]
+            ids["set"] = [g["id"] for g in runloom_c.fibers()]
 
         runloom.run(1, main)
         got = ids["set"]
@@ -86,7 +86,7 @@ class TestStates(unittest.TestCase):
         def main():
             runloom.go(sleeper)
             runloom.sleep(0.005)
-            g = [x for x in runloom_c.goroutines() if x["state"] == "sleep"][0]
+            g = [x for x in runloom_c.fibers() if x["state"] == "sleep"][0]
             cap["wake_in"] = g["wake_in"]
             cap["blocked_on"] = g["blocked_on"]
 
@@ -109,7 +109,7 @@ class TestStates(unittest.TestCase):
             def main():
                 runloom.go(waiter)
                 runloom.sleep(0.01)
-                iow = [g for g in runloom_c.goroutines()
+                iow = [g for g in runloom_c.fibers()
                        if g["state"] == "io-wait"]
                 cap["iow"] = iow
                 os.write(w, b"x")               # wake it -> drains
@@ -129,7 +129,7 @@ class TestStackReconstruction(unittest.TestCase):
     @pytest.mark.skipif(sys.version_info < (3, 13),
                         reason="interpreter-frame stack reconstruction needs "
                                "3.13+ (the PyUnstable frame API / internal walk)")
-    def test_full_stack_of_parked_goroutine(self):
+    def test_full_stack_of_parked_fiber(self):
         cap = {}
 
         def leaf():
@@ -144,7 +144,7 @@ class TestStackReconstruction(unittest.TestCase):
         def main():
             runloom.go(top)
             runloom.sleep(0.01)
-            gid = [g for g in runloom_c.goroutines()
+            gid = [g for g in runloom_c.fibers()
                    if g["state"] == "sleep"][0]["id"]
             cap["frames"] = gi.stack(gid)
             cap["entry"] = gi.entry(gid)
@@ -172,7 +172,7 @@ class TestAge(unittest.TestCase):
             def main():
                 runloom.go(sleeper)
                 runloom.sleep(0.02)
-                g = [x for x in runloom_c.goroutines()
+                g = [x for x in runloom_c.fibers()
                      if x["state"] == "sleep"][0]
                 cap["age"] = g["age"]
 
@@ -184,7 +184,7 @@ class TestAge(unittest.TestCase):
 
 
 class TestDump(unittest.TestCase):
-    def test_dump_goroutines_fd_writes(self):
+    def test_dump_fibers_fd_writes(self):
         # C structural dump to a temp fd (the signal-safe path).
         out = {}
 
@@ -196,14 +196,14 @@ class TestDump(unittest.TestCase):
             runloom.sleep(0.005)
             fd, path = tempfile.mkstemp()
             out["path"] = path
-            runloom_c.dump_goroutines(fd)
+            runloom_c.dump_fibers(fd)
             os.close(fd)
 
         runloom.run(1, main)
         with open(out["path"]) as f:
             text = f.read()
         os.unlink(out["path"])
-        self.assertIn("goroutine dump", text)
+        self.assertIn("fiber dump", text)
         self.assertIn("sleep", text)
 
     def test_inspect_format_string(self):
@@ -218,7 +218,7 @@ class TestDump(unittest.TestCase):
             cap["text"] = gi.format(stacks=True)
 
         runloom.run(1, main)
-        self.assertIn("runloom goroutines:", cap["text"])
+        self.assertIn("runloom fibers:", cap["text"])
         self.assertIn("sleep", cap["text"])
 
     def test_dump_to_file_object(self):
@@ -235,7 +235,7 @@ class TestDump(unittest.TestCase):
             cap["text"] = buf.getvalue()
 
         runloom.run(1, main)
-        self.assertIn("goroutine", cap["text"])
+        self.assertIn("fiber", cap["text"])
 
 
 import subprocess
@@ -243,7 +243,7 @@ import subprocess
 
 def _run_script(code, env_extra=None):
     """Run `code` in a fresh interpreter (full isolation: a deadlock leaves
-    goroutines parked, which mustn't pollute the test process).  Returns
+    fibers parked, which mustn't pollute the test process).  Returns
     (returncode, stdout+stderr)."""
     env = dict(os.environ)
     env["PYTHON_GIL"] = "0"
@@ -355,13 +355,13 @@ class TestLeakWatchdog(unittest.TestCase):
 
 class TestMaxGoroutines(unittest.TestCase):
     def tearDown(self):
-        gi.set_max_goroutines(0)
+        gi.set_max_fibers(0)
 
     def test_admission_gate_rejects_over_cap(self):
         cap = {}
 
         def main():
-            gi.set_max_goroutines(5)
+            gi.set_max_fibers(5)
             spawned = rejected = 0
             def parker():
                 runloom_c.park_self()       # occupies a slot
@@ -373,22 +373,22 @@ class TestMaxGoroutines(unittest.TestCase):
                     rejected += 1
             cap["spawned"] = spawned
             cap["rejected"] = rejected
-            cap["live"] = gi.live_goroutines()
+            cap["live"] = gi.live_fibers()
             runloom_c.sched_reset()         # finish the parkers -> free slots
 
         runloom.run(1, main)
         self.assertEqual(cap["spawned"], 5)
         self.assertEqual(cap["rejected"], 15)
         self.assertEqual(cap["live"], 5)
-        self.assertEqual(gi.live_goroutines(), 0)   # counter balanced
+        self.assertEqual(gi.live_fibers(), 0)   # counter balanced
 
     def test_counter_no_drift_over_recycling(self):
-        # spawn many short-lived goroutines under a small cap; slots must
+        # spawn many short-lived fibers under a small cap; slots must
         # recycle (all run) and the live counter must return to 0.
         ran = {"n": 0}
 
         def main():
-            gi.set_max_goroutines(8)
+            gi.set_max_fibers(8)
             def quick():
                 ran["n"] += 1
             for _ in range(500):
@@ -397,19 +397,19 @@ class TestMaxGoroutines(unittest.TestCase):
 
         runloom.run(1, main)
         self.assertEqual(ran["n"], 500)
-        self.assertEqual(gi.live_goroutines(), 0)
+        self.assertEqual(gi.live_fibers(), 0)
 
     def test_unlimited_by_default(self):
-        self.assertEqual(gi.max_goroutines(), 0)
-        self.assertEqual(gi.live_goroutines(), 0)
+        self.assertEqual(gi.max_fibers(), 0)
+        self.assertEqual(gi.live_fibers(), 0)
 
 
 class TestOutsideGoroutine(unittest.TestCase):
     def test_apis_safe_when_idle(self):
         # No scheduler running: must not crash.
-        self.assertEqual(runloom_c.goroutine_count(), 0)
-        self.assertEqual(runloom_c.goroutines(), [])
-        rep, frames = runloom_c.goroutine_stack(999999)
+        self.assertEqual(runloom_c.fiber_count(), 0)
+        self.assertEqual(runloom_c.fibers(), [])
+        rep, frames = runloom_c.fiber_stack(999999)
         self.assertIsNone(rep)
         self.assertEqual(frames, [])
 

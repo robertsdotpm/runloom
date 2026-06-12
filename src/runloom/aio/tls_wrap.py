@@ -15,7 +15,7 @@ def _tls_wrap_client(raw, ssl_arg, server_hostname, host, handshake_timeout=None
 
 
 # Python's per-thread C recursion counter is shared across all
-# goroutines on the OS thread.  Phase B saves/restores it per-g, but
+# fibers on the OS thread.  Phase B saves/restores it per-g, but
 # the absolute limit is still global -- spawning thousands of tasks
 # can hit RecursionError just from the depth of asyncio's frame chain
 # (Task.__step -> coro.send -> awaitable.__await__ -> Future.__await__).

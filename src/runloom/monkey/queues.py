@@ -6,7 +6,7 @@ from ._base import *  # noqa: F401,F403  (shared foundation)
 # queue.SimpleQueue is a C type (_queue.SimpleQueue) whose .get(block=True)
 # parks on a C lock the scheduler can't wake, so it needs a cooperative
 # replacement.  SimpleQueue is used by logging.handlers.QueueHandler /
-# QueueListener and by ThreadPoolExecutor's work queue, so goroutine code
+# QueueListener and by ThreadPoolExecutor's work queue, so fiber code
 # bumps into it more than you'd expect.
 # ============================================================
 import queue as _queue_mod
@@ -15,7 +15,7 @@ _real_SimpleQueue = _queue_mod.SimpleQueue
 
 
 def _spawn(fn):
-    """Spawn a helper goroutine on whichever scheduler is active: mn_go under
+    """Spawn a helper fiber on whichever scheduler is active: mn_go under
     M:N (mn_hub_count() > 0), else the single-thread go.  A waker spawned via
     the single-thread go() never runs under mn_run, so a timed get() would hang
     until something is put."""
@@ -29,7 +29,7 @@ class CoSimpleQueue(object):
 
     put() never blocks (SimpleQueue is unbounded), so the block/timeout
     args are accepted and ignored exactly as the C type does.  get() parks
-    the goroutine on a parker when empty; a producer hands the next item to
+    the fiber on a parker when empty; a producer hands the next item to
     the longest-waiting getter."""
     __slots__ = ("_items", "_waiters")
 
@@ -54,8 +54,8 @@ class CoSimpleQueue(object):
             return self._items.popleft()
         if not block:
             raise _queue_mod.Empty
-        if not _in_goroutine():
-            # No goroutine to park; spin + yield to the OS so a producer on
+        if not _in_fiber():
+            # No fiber to park; spin + yield to the OS so a producer on
             # a real thread can fill us.
             t0 = time.monotonic()
             while not self._items:
@@ -71,7 +71,7 @@ class CoSimpleQueue(object):
         self._waiters.append(p)
         # Pass the deadline straight to the netpoll wait (see _Parker.park / the
         # #1 timeout work): wait_fd wakes on a producer's unpark OR at the
-        # deadline, so a timed get() needs no waker goroutine + heap timer.
+        # deadline, so a timed get() needs no waker fiber + heap timer.
         p.park(timeout)
         p.release()
         if self._items:

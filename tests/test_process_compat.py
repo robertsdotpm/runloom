@@ -13,7 +13,7 @@ Coverage:
     WIFSIGNALED/WTERMSIG from os.waitpid;
   * fault injection: nonzero exit, death by signal (SIGKILL), TimeoutExpired,
     ECHILD with no children, WNOHANG when the child is still running;
-  * cooperation: a sibling goroutine keeps running while run()/wait()/system()
+  * cooperation: a sibling fiber keeps running while run()/wait()/system()
     are in flight (they do not freeze the scheduler).
 
 POSIX-only where the API is POSIX-only.
@@ -59,7 +59,7 @@ def tearDownModule():
 
 
 def _sibling_counter(store, n=4, step=0.005):
-    """Spawn a goroutine that ticks while the test blocks, so we can prove
+    """Spawn a fiber that ticks while the test blocks, so we can prove
     the blocking call yielded the scheduler."""
     def sib():
         for _ in range(n):
@@ -289,7 +289,7 @@ class TestPidfdReaping(unittest.TestCase):
 
     def test_pidfd_wait_yields_to_sibling(self):
         """os.waitpid(pid, 0) on a child that exits after a delay must let a
-        sibling goroutine make progress -- i.e. it parks, never spins."""
+        sibling fiber make progress -- i.e. it parks, never spins."""
         def body():
             pid = os.fork()
             if pid == 0:

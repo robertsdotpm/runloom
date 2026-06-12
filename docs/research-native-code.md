@@ -1,4 +1,4 @@
-# Research: executing native machine code from a goroutine
+# Research: executing native machine code from a fiber
 
 > **Status: research / experimental.** `runloom_c.MachineCode` is a toy-grade
 > primitive kept for exploration and demonstration. It is **not** a supported,
@@ -8,13 +8,13 @@
 
 ## The idea
 
-A runloom goroutine is not an interpreter task. It is a **real C stack** that a
+A runloom fiber is not an interpreter task. It is a **real C stack** that a
 **real OS thread** executes with a hand-written assembly context switch. The CPU
-running a goroutine is running native instructions on silicon, exactly as it
-runs libc or the Python binary itself — the "goroutine" is just which stack
+running a fiber is running native instructions on silicon, exactly as it
+runs libc or the Python binary itself — the "fiber" is just which stack
 `rsp` points at.
 
-Follow that to its conclusion: if a goroutine already executes native code on a
+Follow that to its conclusion: if a fiber already executes native code on a
 real stack, then you can hand it **arbitrary native code at runtime** and have
 it jump straight in. Map a blob of machine-code bytes as executable, take its
 address as a function pointer, and call it. The CPU's instruction pointer moves
@@ -24,9 +24,9 @@ processor — the same bare-metal path as any compiled function.
 
 So you can go from a Python `bytes` object all the way down to *the CPU eating
 those bytes*, from inside a green thread, and — under the M:N scheduler — across
-many goroutines in genuine parallel, each on its own swapped stack. That is the
+many fibers in genuine parallel, each on its own swapped stack. That is the
 interesting part: it collapses the whole abstraction tower in one move and shows
-concretely that runloom's goroutines are first-class native execution contexts,
+concretely that runloom's fibers are first-class native execution contexts,
 not bytecode-interpreter coroutines.
 
 Contrast with CPython bytecode (`LOAD_FAST`, `BINARY_OP`): that *is* interpreted
@@ -64,10 +64,10 @@ runloom_c.MachineCode(ADD)(20, 22)    # -> 42
 Pass an address (a Python int, e.g. the address of a `ctypes`/`array` buffer) to
 hand the blob memory for richer inputs/outputs.
 
-### From a goroutine
+### From a fiber
 
-It runs on the **caller's** stack, so inside a goroutine it executes on that
-goroutine's stack — and under M:N, many goroutines run their blobs in parallel:
+It runs on the **caller's** stack, so inside a fiber it executes on that
+fiber's stack — and under M:N, many fibers run their blobs in parallel:
 
 ```python
 import runloom, runloom_c
@@ -75,7 +75,7 @@ SQ = bytes([0x48, 0x89, 0xf8, 0x48, 0x0f, 0xaf, 0xc7, 0xc3])  # f(x) = x*x
 
 def worker(n, ch):
     with runloom_c.MachineCode(SQ) as fn:
-        ch.send((n, fn(n)))          # native imul, on this goroutine's stack
+        ch.send((n, fn(n)))          # native imul, on this fiber's stack
 
 def main():
     ch = runloom_c.Chan()
@@ -109,13 +109,13 @@ architecture-specific:
 
 ## Caveats (these are the whole story)
 
-Because the blob runs on the goroutine's stack and is opaque native code, it
-inherits the goroutine model's hard edges:
+Because the blob runs on the fiber's stack and is opaque native code, it
+inherits the fiber model's hard edges:
 
-- **Small stack.** It runs on the goroutine's C stack (default 32 KB with a
+- **Small stack.** It runs on the fiber's C stack (default 32 KB with a
   PROT_NONE guard page). The same fat-frame rule as the rest of runloom applies:
   a blob that pushes a large frame or recurses deeply overflows into the guard
-  page → a clean SIGSEGV. For a big compute kernel, give that goroutine a roomy
+  page → a clean SIGSEGV. For a big compute kernel, give that fiber a roomy
   stack: `runloom_c.go(fn, stack_size=...)`.
 - **No cooperation.** Raw machine code knows nothing about the scheduler — it
   can't park, yield, or do I/O cooperatively, and the sysmon preemptor (which
@@ -131,9 +131,9 @@ inherits the goroutine model's hard edges:
 ## Directions worth exploring (so the idea isn't lost)
 
 - **Tiny JITs.** Compile a hot predicate / filter / arithmetic expression to a
-  blob once, call it per row from each goroutine — a per-connection JIT with no
+  blob once, call it per row from each fiber — a per-connection JIT with no
   GIL contention under 3.13t.
-- **Hand-rolled SIMD kernels** (AVX2/AVX-512/NEON) called from goroutines for
+- **Hand-rolled SIMD kernels** (AVX2/AVX-512/NEON) called from fibers for
   number-crunching that the interpreter is too slow for and that's awkward to
   ship as a separate `.so`.
 - **An assembler layer.** Wrap `keystone` (or shell out to `as`) so callers
@@ -143,12 +143,12 @@ inherits the goroutine model's hard edges:
 - **Cross-arch blob sets.** Ship x86-64 + arm64 encodings of the same kernel and
   pick by `platform.machine()`.
 - **Measurement.** Quantify the call overhead vs a `ctypes` call and vs a
-  goroutine switch — how cheap is "native call from a green thread" really?
+  fiber switch — how cheap is "native call from a green thread" really?
 - **Calling back into Python from a blob** (advanced, dangerous): a blob that
   invokes a C function pointer which re-enters the interpreter — needs a valid
   `PyThreadState` and great care; mostly a curiosity.
 
 The PoC that started this lives at `_mntests/asm_poc.py` (pure `ctypes`, no
-extension changes — proof that the goroutine, not the wrapper, is what makes it
+extension changes — proof that the fiber, not the wrapper, is what makes it
 work). The supported-shaped version is `runloom_c.MachineCode`
 (`src/runloom_c/module_machinecode.c.inc`); tests in `tests/test_machinecode.py`.

@@ -22,7 +22,7 @@ import runloom_c
 
 
 def _drive(fn):
-    """Spawn fn as a goroutine, run scheduler, return its return value."""
+    """Spawn fn as a fiber, run scheduler, return its return value."""
     box = [None, None]
     def runner():
         try:
@@ -45,7 +45,7 @@ def tearDownModule():
     same pytest process.  On POSIX the leak is benign, but on Windows the
     leaked cooperative threading.Condition deadlocks pytest's fd-capture
     teardown (a real OS thread parks on a primitive that only a running
-    goroutine scheduler can wake), which intermittently wedges the whole
+    fiber scheduler can wake), which intermittently wedges the whole
     suite.  Restoring stdlib here keeps the run deterministic everywhere."""
     runloom.monkey.unpatch()
 
@@ -78,7 +78,7 @@ class TestTimeSleep(unittest.TestCase):
 
 
 class TestThreadingLock(unittest.TestCase):
-    def test_lock_excludes_goroutines(self):
+    def test_lock_excludes_fibers(self):
         runloom.monkey.patch()
         lock = threading.Lock()
         log = []
@@ -265,7 +265,7 @@ class TestFile(unittest.TestCase):
             os.unlink(path)
 
     def test_concurrent_file_reads_interleave(self):
-        # Two goroutines reading files should overlap via the thread
+        # Two fibers reading files should overlap via the thread
         # pool -- the scheduler must not be blocked while one reads.
         import tempfile
         runloom.monkey.patch()

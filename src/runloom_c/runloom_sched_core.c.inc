@@ -4,7 +4,7 @@
 
 static int       runloom_cal_frozen = 0;
 /* The stack-calibration globals (runloom_cal_frozen/max_hwm/completed/default)
- * are written by runloom_cal_record, which runs on EVERY goroutine completion
+ * are written by runloom_cal_record, which runs on EVERY fiber completion
  * during the brief startup calibration window -- concurrently across M:N hubs.
  * Guard them with a lock (self-initialising so it needs no PyInit hook on
  * Windows, where CRITICAL_SECTION can't be statically initialised).  Cost is
@@ -240,7 +240,7 @@ runloom_sched_t *runloom_sched_get(void)
     return s;
 }
 
-/* Non-allocating peek at the goroutine currently running on THIS thread's
+/* Non-allocating peek at the fiber currently running on THIS thread's
  * single-thread scheduler (NULL if none / no sched here yet).  Unlike
  * runloom_sched_get() it never lazily mallocs a sched, so it is safe to call from
  * any thread / hot path.  The M:N path tracks its current g separately
@@ -288,17 +288,17 @@ void runloom_g_entry(void *user)
         int py_limit = Py_GetRecursionLimit();
 #if PY_VERSION_HEX >= 0x030C0000
         ts->py_recursion_remaining = py_limit;
-        /* Scale the C-recursion budget to THIS goroutine's actual C stack so a
-         * big-stack goroutine can recurse as deep as it has room for (nested
+        /* Scale the C-recursion budget to THIS fiber's actual C stack so a
+         * big-stack fiber can recurse as deep as it has room for (nested
          * JSON, copy.deepcopy, recursive-descent parsers).  The old hard-coded
-         * 200 (sized for a 128KB stack) capped EVERY goroutine at ~88 Python
-         * frames regardless of stack size (BUG #6).  Give the goroutine the same
+         * 200 (sized for a 128KB stack) capped EVERY fiber at ~88 Python
+         * frames regardless of stack size (BUG #6).  Give the fiber the same
          * per-byte budget CPython gives the 8MB main thread (Py_C_RECURSION_LIMIT
          * already carries CPython's safety margin), floor 200, ceiling the
          * platform limit.
          *
          * Raising this used to SIGSEGV ~30% under deep-recursion stress -- but
-         * the real cause was a snapshot bug, NOT the depth: the per-goroutine
+         * the real cause was a snapshot bug, NOT the depth: the per-fiber
          * snap Py_XINCREF'd tstate->delete_later (the trashcan's deferred-dealloc
          * chain), and on free-threaded builds Py_INCREF reads op->ob_tid to pick
          * the refcount path -- but delete_later repurposes ob_tid as its
@@ -322,21 +322,21 @@ void runloom_g_entry(void *user)
     }
 
 #if PY_VERSION_HEX >= 0x030B0000
-    /* Per-goroutine contextvars context.  In the default shared-hub-tstate mode
-     * every goroutine starts on the SAME ts->context object, so one goroutine's
+    /* Per-fiber contextvars context.  In the default shared-hub-tstate mode
+     * every fiber starts on the SAME ts->context object, so one fiber's
      * ContextVar.set() mutates it for every sibling -- the per-g swap saves and
      * restores the context POINTER, not a private copy of the contents.  Give
-     * each goroutine its own copy of the spawn-time context, exactly as asyncio
-     * runs each Task in copy_context(), so a set() stays goroutine-local.
-     * Skipped under per-g-tstate mode, where each goroutine already owns a
+     * each fiber its own copy of the spawn-time context, exactly as asyncio
+     * runs each Task in copy_context(), so a set() stays fiber-local.
+     * Skipped under per-g-tstate mode, where each fiber already owns a
      * distinct tstate (and thus a distinct context) -- copying there is a pure
      * waste.  On OOM we leave the shared context in place (leaky across
-     * siblings, but correct for this goroutine and never a crash).
+     * siblings, but correct for this fiber and never a crash).
      *
      * RUNLOOM_NO_CTX_COPY=1 skips this entirely: the copy is one PyContext
-     * alloc + gc-track PER goroutine (the freelist drains after a handful, so a
+     * alloc + gc-track PER fiber (the freelist drains after a handful, so a
      * 1M fan-out pays ~1M real allocs), and a workload that never calls
-     * ContextVar.set() in a goroutine sees zero behavioural difference.  Opt-in
+     * ContextVar.set() in a fiber sees zero behavioural difference.  Opt-in
      * because skipping it DOES break contextvar isolation for code that relies
      * on it (asyncio Task semantics) -- so it's a per-run promise, not a default.
      * Read once, cached. */
@@ -393,7 +393,7 @@ void runloom_g_entry(void *user)
     } else {
         g->result = res;
     }
-    /* The goroutine has run to completion; g->callable is never invoked
+    /* The fiber has run to completion; g->callable is never invoked
      * again.  Release it NOW rather than waiting for the g's last decref --
      * otherwise a runloom.aio task, whose callable is the task's own bound
      * _driver method, is kept alive forever by an unbreakable cycle:
@@ -445,7 +445,7 @@ runloom_g_t *runloom_g_slab_alloc(void)
 {
     runloom_g_t *g = runloom_g_slab;
     /* OOM fault injection (test-only; inert unless RUNLOOM_FAULT_SPAWN_G is set):
-     * simulate "can't allocate a goroutine struct" regardless of the slab
+     * simulate "can't allocate a fiber struct" regardless of the slab
      * cache, so the spawn error paths get exercised. */
     if (RUNLOOM_SPAWN_FINJ(RUNLOOM_FAULT_SPAWN_G)) return NULL;
     if (g != NULL) {
@@ -549,7 +549,7 @@ void runloom_g_decref(runloom_g_t *g)
              * the heap.  Drop the Python refs (g_entry already Py_CLEAR'd
              * callable; result/error are normally NULL for go_n workers), then
              * decrement the batch; the last finisher reclaims the whole batch.
-             * Bulk gs are never admitted under the max-goroutines limit, so
+             * Bulk gs are never admitted under the max-fibers limit, so
              * limit_counted is 0 -- nothing to release. */
             Py_XDECREF(g->callable);
             Py_XDECREF(g->result);
@@ -566,7 +566,7 @@ void runloom_g_decref(runloom_g_t *g)
         Py_XDECREF(g->result);
         Py_XDECREF(g->error);
         if (g->limit_counted) {           /* release the admission slot */
-            runloom_goroutine_release();
+            runloom_fiber_release();
             g->limit_counted = 0;
         }
         runloom_g_slab_free(g);
@@ -580,19 +580,19 @@ static PyObject *spawn_common(runloom_sched_t *s, PyObject *callable,
     runloom_g_t *g;
     if (__builtin_expect(!runloom_pct.inited, 0))
         runloom_pct_init();   /* read RUNLOOM_PCT_SEED once, before any ready-pop */
-    /* Backpressure: admit under the max-goroutines limit before allocating.
+    /* Backpressure: admit under the max-fibers limit before allocating.
      * adm: 0 rejected, 1 admitted (no limit), 2 admitted+counted. */
     {
-        int adm = runloom_goroutine_admit();
+        int adm = runloom_fiber_admit();
         if (adm == 0) {
             PyErr_Format(PyExc_RuntimeError,
-                         "runloom: goroutine limit (%ld) exceeded",
-                         runloom_get_max_goroutines());
+                         "runloom: fiber limit (%ld) exceeded",
+                         runloom_get_max_fibers());
             return NULL;
         }
         g = runloom_g_slab_alloc();
         if (g == NULL) {
-            if (adm == 2) runloom_goroutine_release();
+            if (adm == 2) runloom_fiber_release();
             PyErr_NoMemory();
             return NULL;
         }
@@ -606,7 +606,7 @@ static PyObject *spawn_common(runloom_sched_t *s, PyObject *callable,
     g->noyield = noyield;
     __atomic_store_n(&g->id, runloom_next_goid(), __ATOMIC_RELAXED);
     g->park_fd = -1;   /* not parked on any fd yet (reset after slab reuse) */
-    g->pct_prio = 0;   /* fresh goroutine: unassigned PCT priority (slab reuse) */
+    g->pct_prio = 0;   /* fresh fiber: unassigned PCT priority (slab reuse) */
     g->pct_fifo = 0;   /* default reorderable; m_go(fifo=True) sets it after spawn */
     /* OOM fault injection (test-only): simulate a stack-allocation failure
      * (mmap ENOMEM) by forcing coro_new to "fail", exercising the existing
@@ -617,7 +617,7 @@ static PyObject *spawn_common(runloom_sched_t *s, PyObject *callable,
         Py_DECREF(g->callable);
         g->callable = NULL;
         if (g->limit_counted) {             /* release the admission slot we took */
-            runloom_goroutine_release();
+            runloom_fiber_release();
             g->limit_counted = 0;
         }
         runloom_g_slab_free(g);

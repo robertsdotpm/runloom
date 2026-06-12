@@ -39,8 +39,8 @@ class TestIouring(unittest.TestCase):
             os.close(fd)
             os.unlink(path)
 
-    def test_from_goroutine(self):
-        """file_read/write work the same from inside a goroutine."""
+    def test_from_fiber(self):
+        """file_read/write work the same from inside a fiber."""
         out = []
 
         def worker(path):
@@ -61,10 +61,10 @@ class TestIouring(unittest.TestCase):
         self.assertEqual(out, [b"hello world"])
 
     def test_cooperative_park(self):
-        """While one goroutine is parked on an iouring read, other
-        goroutines must still run.  This is the central invariant of
+        """While one fiber is parked on an iouring read, other
+        fibers must still run.  This is the central invariant of
         the async path -- if the OS thread blocked in io_uring_enter
-        the second goroutine couldn't make progress."""
+        the second fiber couldn't make progress."""
         path = tempfile.mktemp()
         with open(path, "wb") as f:
             f.write(b"x" * 4096)

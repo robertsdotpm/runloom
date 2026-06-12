@@ -9,25 +9,25 @@ class _LoopCoreMixin(object):
         self._closed  = False
         _PG_OPEN_LOOPS.add(self)
         # fd -> {"r": reader _Handle|None, "w": writer _Handle|None,
-        #        "g": the single per-fd I/O goroutine}.  See add_reader.
+        #        "g": the single per-fd I/O fiber}.  See add_reader.
         self._io = {}
         self._exception_handler = None
         # Thread-safe callback queue + keepalive flag.  call_soon_threadsafe
         # (called from FOREIGN OS threads -- run_in_executor pool workers,
         # aiosqlite's per-Connection thread, etc.) appends here under the lock
         # instead of spawning on the calling thread's scheduler (which is never
-        # drained).  A keepalive goroutine spawned in run_until_complete/
+        # drained).  A keepalive fiber spawned in run_until_complete/
         # run_forever drains this queue and keeps the single-thread scheduler
-        # from going idle while a goroutine is parked awaiting an external wake.
+        # from going idle while a fiber is parked awaiting an external wake.
         self._ts_lock = _threading.Lock()
         self._ts_queue = []
         # Per-run keepalive stop flag, as a 1-element box.  Each
         # run_until_complete gets a FRESH box so a previous run's keepalive
-        # goroutine (which may still be parked in the sleep queue when
+        # fiber (which may still be parked in the sleep queue when
         # sched_stop broke the drain) can never be revived by a later run
         # resetting a shared bool.  None until the first run.
         self._ka_stop_box = None
-        # Set by stop(); observed by the keepalive goroutine (which runs on the
+        # Set by stop(); observed by the keepalive fiber (which runs on the
         # loop thread) to break run_forever()/run_until_complete's runloom_c.run().
         self._stopping = False
         # A KeyboardInterrupt / SystemExit raised inside a callback or task must
@@ -72,14 +72,14 @@ class _LoopCoreMixin(object):
     def set_debug(self, enabled):  self._debug = bool(enabled)
     def _timer_handle_cancelled(self, handle):
         # asyncio.TimerHandle.cancel() calls this for the loop's timer-heap
-        # bookkeeping; runloom schedules timers as goroutines, so it's a no-op.
+        # bookkeeping; runloom schedules timers as fibers, so it's a no-op.
         pass
     def close(self):
         # The asyncio.run / Runner.close cleanup point (NOT
         # run_until_complete -- that must leave background tasks + parked
-        # goroutines alive between calls, e.g. for IsolatedAsyncioTestCase's
+        # fibers alive between calls, e.g. for IsolatedAsyncioTestCase's
         # asyncSetUp -> test -> asyncTearDown on one loop).  Stop the
-        # keepalive and tear down outstanding tasks + parked goroutines
+        # keepalive and tear down outstanding tasks + parked fibers
         # (accept/recv loops, call_later runners) so they don't leak.
         if self._closed:
             return

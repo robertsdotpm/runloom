@@ -1,10 +1,10 @@
-/* runloom_introspect.h -- goroutine registry + developer-facing dump.
+/* runloom_introspect.h -- fiber registry + developer-facing dump.
  *
- * Go has a SIGQUIT goroutine dump and runtime.Stack(); asyncio has
+ * Go has a SIGQUIT fiber dump and runtime.Stack(); asyncio has
  * asyncio.all_tasks().  runloom had neither: a wedged process gave the
  * operator nothing to look at.  This module is the answer.
  *
- *   1. A global registry of every live goroutine STRUCT.  A g is linked
+ *   1. A global registry of every live fiber STRUCT.  A g is linked
  *      once, when its struct is first allocated from the OS, and
  *      unlinked only when the struct is returned to the OS.  Because
  *      runloom recycles g structs through a per-thread slab, a cached
@@ -15,7 +15,7 @@
  *      field-ordering contract on runloom_g_t::id and the reuse branch in
  *      runloom_sched_core.c.inc.
  *
- *   2. runloom_dump_goroutines_fd(fd): an async-signal-safe-ish structural
+ *   2. runloom_dump_fibers_fd(fd): an async-signal-safe-ish structural
  *      dump -- id / state / what-it's-blocked-on (fd, channel, sleep
  *      deadline) / owner thread / age / refcount / stack size -- written
  *      with nothing but snprintf + write(2).  This is the hung-process
@@ -24,11 +24,11 @@
  *      deadlock.  No Python is touched, so it is safe even when the
  *      interpreter is wedged.
  *
- *   3. runloom_goroutine_snapshot(): the rich path for runloom.goroutines() --
- *      a point-in-time copy of every live goroutine's structural fields
+ *   3. runloom_fiber_snapshot(): the rich path for runloom.fibers() --
+ *      a point-in-time copy of every live fiber's structural fields
  *      plus a strong ref to its entry callable, built for the Python
  *      layer to format (and, on request, augment with a reconstructed
- *      Python stack via runloom_goroutine_frames_by_id).  Runs only in
+ *      Python stack via runloom_fiber_frames_by_id).  Runs only in
  *      normal (non-signal) interpreter context.
  *
  * Threading: the registry list is guarded by runloom_greg_lock.  The id
@@ -71,35 +71,35 @@ void runloom_introspect_reset_after_fork(void);
 void runloom_greg_link(runloom_g_t *g);
 void runloom_greg_unlink(runloom_g_t *g);
 
-/* Per-incarnation goroutine id, Go's goid analogue.  Contention-free:
+/* Per-incarnation fiber id, Go's goid analogue.  Contention-free:
  * a per-thread counter ORed with a per-thread base, so spawning on many
  * hubs never touches a shared cacheline.  Unique for the process life. */
 long long runloom_next_goid(void);
 /* Reserve a contiguous block of n goids in one atomic; returns the first. */
 long long runloom_next_goid_block(long n);
 
-/* Number of live (non-FREED) goroutines.  Takes runloom_greg_lock. */
-long runloom_goroutine_count(void);
+/* Number of live (non-FREED) fibers.  Takes runloom_greg_lock. */
+long runloom_fiber_count(void);
 
-/* Count goroutines owned by `owner` (a runloom_sched_t*; NULL = any) parked on a
+/* Count fibers owned by `owner` (a runloom_sched_t*; NULL = any) parked on a
  * channel or via park_safe -- the deadlockable set.  Used by the drain's
  * deadlock detector. */
-long runloom_count_deadlockable_goroutines(const void *owner);
+long runloom_count_deadlockable_fibers(const void *owner);
 
-/* Deadlock-detection mode: 0=off, 1=warn (print the goroutine dump), 2=raise
+/* Deadlock-detection mode: 0=off, 1=warn (print the fiber dump), 2=raise
  * a RuntimeError.  Default 1; also via RUNLOOM_DEADLOCK=off|warn|raise. */
 int  runloom_deadlock_mode(void);
 void runloom_set_deadlock_mode(int mode);
 
-/* ---- max-goroutines admission gate (backpressure) ----
+/* ---- max-fibers admission gate (backpressure) ----
  * 0 = unlimited (default; zero hot-path cost).  Also via RUNLOOM_MAX_GOROUTINES. */
-long runloom_get_max_goroutines(void);
-void runloom_set_max_goroutines(long n);
-long runloom_live_goroutines(void);
+long runloom_get_max_fibers(void);
+void runloom_set_max_fibers(long n);
+long runloom_live_fibers(void);
 /* Spawn paths: admit before allocating (1=ok + mark the g limit_counted;
  * 0=over the limit, raise), release at the g's final decref iff counted. */
-int  runloom_goroutine_admit(void);
-void runloom_goroutine_release(void);
+int  runloom_fiber_admit(void);
+void runloom_fiber_release(void);
 
 /* RUNLOOM_GST_* -> short stable name ("running", "io-wait", ...).  Never
  * NULL (returns "?" for an out-of-range value). */
@@ -123,38 +123,38 @@ void runloom_introspect_note_transition(runloom_g_t *g, unsigned int to);
 long long runloom_introspect_monotonic_ns(void);
 
 /* ---- structural dump (async-signal-safe-ish) ----
- * Dump every live goroutine to fd (fd < 0 -> stderr) using only
+ * Dump every live fiber to fd (fd < 0 -> stderr) using only
  * snprintf + write.  try-locks the registry; on contention prints a
  * note and the parker pool's own dump instead of blocking.  Touches NO
  * Python objects, so it is safe from a signal handler and when the
  * interpreter is wedged. */
-void runloom_dump_goroutines_fd(int fd);
+void runloom_dump_fibers_fd(int fd);
 
 /* ---- crash-handler helpers ----
- * runloom_goroutine_for_addr: find the live goroutine whose stack region (its
+ * runloom_fiber_for_addr: find the live fiber whose stack region (its
  * usable stack or the guard page below it) contains `addr`.  Returns its goid
  * (>0) and sets *kind to 1 if addr is in the guard page (a STACK OVERFLOW), 2
  * if in the usable stack (a wild pointer / UAF on that g), or 0 if no match;
- * *stack_kib is set to that goroutine's stack size in KiB.  Try-locks the
+ * *stack_kib is set to that fiber's stack size in KiB.  Try-locks the
  * registry (returns 0 / kind 0 if busy or unmatched).  Reads g->coro -- only
  * call from the crash path, where best-effort is acceptable.
  *
  * runloom_g_id: the goid of a g (acquire/relaxed read), or -1 if NULL.  A tiny
  * accessor so the crash handler can name the running g without the full
  * runloom_sched.h struct layout. */
-long long runloom_goroutine_for_addr(const void *addr, int *kind,
+long long runloom_fiber_for_addr(const void *addr, int *kind,
                                      unsigned *stack_kib);
 long long runloom_g_id(const runloom_g_t *g);
 
 /* ---- rich snapshot (Python context only) ----
  * Every field is PLAIN DATA copied out of the g struct under the registry
  * lock.  Deliberately no owned-object pointers (callable / coro / parker):
- * those are freed by goroutine teardown, which does NOT take the registry
+ * those are freed by fiber teardown, which does NOT take the registry
  * lock, so dereferencing them in the dump would be a use-after-free.  The
  * "what is it blocked on" detail rides on POD fields the g maintains
  * itself (park_fd) or that are values not pointers (wake_at).  Callable
  * identity + Python stack come from the claim-protected
- * runloom_goroutine_frames_by_id path instead. */
+ * runloom_fiber_frames_by_id path instead. */
 typedef struct runloom_g_info {
     long long     id;
     unsigned int  state;        /* runloom_g_state_t */
@@ -167,24 +167,24 @@ typedef struct runloom_g_info {
     const void   *owner;        /* owning runloom_sched_t (opaque thread id) */
 } runloom_g_info_t;
 
-/* Snapshot every live goroutine.  Returns a malloc'd array (caller frees
- * via runloom_goroutine_snapshot_free) and sets *count_out.  Returns NULL
+/* Snapshot every live fiber.  Returns a malloc'd array (caller frees
+ * via runloom_fiber_snapshot_free) and sets *count_out.  Returns NULL
  * with *count_out = 0 on OOM or before init.  Holds the registry lock only
  * for the POD copy, never while building Python objects. */
-runloom_g_info_t *runloom_goroutine_snapshot(long *count_out);
-void runloom_goroutine_snapshot_free(runloom_g_info_t *arr, long count);
+runloom_g_info_t *runloom_fiber_snapshot(long *count_out);
+void runloom_fiber_snapshot_free(runloom_g_info_t *arr, long count);
 
 /* Reconstruct the Python call stack (and entry-callable repr) of the
- * goroutine with the given id.  Returns a NEW tuple
+ * fiber with the given id.  Returns a NEW tuple
  *   (callable_repr_or_None, [ (filename, lineno, funcname), ... ])
- * with frames deepest-first, or (None, []) if the goroutine is gone /
+ * with frames deepest-first, or (None, []) if the fiber is gone /
  * running / unclaimable / has no reconstructable frame.  Safe: under the
- * M:N scheduler it CLAIMS the goroutine via the sweeper handshake (so it
+ * M:N scheduler it CLAIMS the fiber via the sweeper handshake (so it
  * can neither resume nor tear down mid-walk); under the single-thread
  * scheduler the calling thread already owns it.  Normal interpreter
  * context only.  Returns NULL with a Python exception set only on a hard
  * error (OOM). */
-PyObject *runloom_goroutine_frames_by_id(long long id);
+PyObject *runloom_fiber_frames_by_id(long long id);
 
 #ifdef __cplusplus
 }

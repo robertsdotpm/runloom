@@ -1,15 +1,15 @@
 # Quickstart
 
-This page gets you from zero to a running goroutine, then through the
+This page gets you from zero to a running fiber, then through the
 core primitives: channels, sleep, fan-out, and a tiny TCP echo server.
 
-## Your first goroutine
+## Your first fiber
 
 ```python
 import runloom
 
 def hello():
-    print("hello from a goroutine!")
+    print("hello from a fiber!")
 
 runloom.go(hello)        # spawn -- doesn't run yet
 runloom.run(1)            # drive the scheduler until everyone finishes
@@ -18,14 +18,14 @@ runloom.run(1)            # drive the scheduler until everyone finishes
 Output:
 
 ```
-hello from a goroutine!
+hello from a fiber!
 ```
 
 `go(fn)` queues `fn` for execution on the runloom scheduler.  Nothing
 runs until you call `runloom.run(1)` -- that's the scheduler's main
 loop, equivalent of Go's program-startup runtime.
 
-## Many goroutines
+## Many fibers
 
 ```python
 import runloom
@@ -49,12 +49,12 @@ worker 9
 ```
 
 The `lambda i=i:` is the standard Python late-binding workaround for
-closures over a loop variable.  Each goroutine captures its own `i`.
+closures over a loop variable.  Each fiber captures its own `i`.
 
 ## Cooperative sleep
 
-`runloom.sched_sleep(seconds)` suspends the current goroutine for at
-least `seconds`, letting other goroutines run in the meantime.  This is
+`runloom.sched_sleep(seconds)` suspends the current fiber for at
+least `seconds`, letting other fibers run in the meantime.  This is
 not `time.sleep` -- `time.sleep` would block the whole OS thread.
 
 ```python
@@ -83,7 +83,7 @@ end   1716901234.503
 ```
 
 All three sleeps ran in parallel because the scheduler parked each
-goroutine on a min-heap of wake times.
+fiber on a min-heap of wake times.
 
 ## Channels
 

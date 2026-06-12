@@ -7,7 +7,7 @@ parker the 1st fire woke then DRAINS the byte after wait_fd returns -- and on fd
 REUSE the next wait_fd would consume the now-stale stash and return early with no
 byte present (a spurious wake).  runloom_fd_pending_wake_consume now ground-truths
 every claimed stash against the kernel's ACTUAL readiness (a non-blocking poll,
-never a read), so a stale stash is discarded and the goroutine parks correctly.
+never a read), so a stale stash is discarded and the fiber parks correctly.
 
 Both scenarios reproduced reliably before the fix (reuse: 20/20 no-write cycles
 returned early; high-fan-in Event: a growing number of waiters woke False) and go
@@ -69,7 +69,7 @@ def test_fd_reuse_no_spurious_wait_fd_return():
 
 
 def test_high_fanin_event_no_spurious_false():
-    """500 goroutines wait on one monkey-patched Event; set() must wake them all
+    """500 fibers wait on one monkey-patched Event; set() must wake them all
     True -- none may time out / wake False off a stale stash.  Repeated trials
     because the stale-stash leak grew across trials before the fix."""
     from runloom import monkey

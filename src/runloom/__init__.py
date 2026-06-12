@@ -1,14 +1,14 @@
 """runloom -- Go-style coroutines in Python.
 
 Everyday API -- `import runloom` is all you need:
-    runloom.go(fn, *args, **kw)   spawn a goroutine
+    runloom.go(fn, *args, **kw)   spawn a fiber
     runloom.run(n, main_fn)       THE entry point. run main_fn with n hubs:
                                   n=1 single-thread, n>1 M:N parallel across n
                                   cores (needs 3.13t + GIL off; n>1 on a GIL
                                   build raises).  Collapses mn_init/mn_go/
                                   mn_run/mn_fini.  main_fn optional -> drain only.
     runloom.sleep(seconds)        sleep without blocking the OS thread
-    runloom.yield_now()           cooperative yield (give other goroutines a turn)
+    runloom.yield_now()           cooperative yield (give other fibers a turn)
     runloom.Chan(capacity=0)      Go-style channel
     runloom.select(cases, ...)    wait on multiple channel ops
     runloom.blocking(fn, ...)     offload a blocking/CPU call off the hub
@@ -86,8 +86,8 @@ mn_hub_states = _core.mn_hub_states   # per-hub diagnostic snapshot (see inspect
 # deep internals: sched_*, park_self, the get_/set_ tuning knobs, etc.)
 TCPConn = _core.TCPConn                # C-level TCP connection (Go-parity perf)
 Coro = _core.Coro                      # raw stackful coroutine handle
-G = _core.G                            # goroutine handle type
-wait_fd = _core.wait_fd                # park the current goroutine on fd readiness
+G = _core.G                            # fiber handle type
+wait_fd = _core.wait_fd                # park the current fiber on fd readiness
 WAIT_FD_CANCELLED = _core.WAIT_FD_CANCELLED
 tcp_recv = _core.tcp_recv
 tcp_send = _core.tcp_send
@@ -111,8 +111,8 @@ if hasattr(_os, "register_at_fork"):
     _os.register_at_fork(after_in_child=_core.reset_after_fork)
 
 # Opt-in crash reporter: set RUNLOOM_CRASH (on/all/wait/gdb/backtrace/pystack)
-# to install a fatal-signal handler at import, so a SIGSEGV (e.g. a goroutine
-# stack overflow) prints a classified goroutine dump instead of dying silently.
+# to install a fatal-signal handler at import, so a SIGSEGV (e.g. a fiber
+# stack overflow) prints a classified fiber dump instead of dying silently.
 # Off by default -- we don't hijack process-wide signal handlers unless asked.
 # Installed here, before the runtime starts, so the scheduler hubs are armed as
 # they spawn.  See runloom.inspect.install_crash_handler() to install in code.
@@ -126,7 +126,7 @@ if _os.environ.get("RUNLOOM_CRASH", "").strip().lower() not in ("", "0", "off"):
         pass
 
 # Opt-in adaptive stack auto-sizer: RUNLOOM_STACK_AUTOSIZE=1 starts each
-# goroutine kind large and learns its real size down over its first runs (in
+# fiber kind large and learns its real size down over its first runs (in
 # memory only, never persisted).  Off by default -- it changes per-kind stack
 # sizes.  See runloom.inspect.enable_stack_autosize().
 _autosize_env = _os.environ.get("RUNLOOM_STACK_AUTOSIZE", "").strip().lower()
@@ -136,11 +136,11 @@ if _autosize_env in ("1", "on", "true", "prescan"):
     except Exception:
         pass
 
-# Runtime introspection -- `runloom.inspect.dump()`, goroutines(), stack(), etc.
+# Runtime introspection -- `runloom.inspect.dump()`, fibers(), stack(), etc.
 # See runloom/inspect.py.  Exposed as a submodule plus a couple of top-level
-# conveniences (the common "what are all my goroutines doing" calls).
+# conveniences (the common "what are all my fibers doing" calls).
 from . import inspect  # noqa: E402,F401
-goroutines = inspect.goroutines
+fibers = inspect.fibers
 dump = inspect.dump
 hubs = inspect.hubs
 
@@ -171,7 +171,7 @@ __all__ = [
     "TCPConn", "Coro", "G", "wait_fd", "WAIT_FD_CANCELLED",
     "tcp_recv", "tcp_send", "iouring_available",
     # introspection
-    "backend", "netpoll_backend", "goroutines", "dump", "inspect",
+    "backend", "netpoll_backend", "fibers", "dump", "inspect",
     # feature packages
     "monkey", "time", "context", "sync", "aio",
     "__version__",

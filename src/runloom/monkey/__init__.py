@@ -1,8 +1,8 @@
 """runloom monkey-patches for blocking Python APIs.
 
 Replaces stdlib calls that would block the OS thread with versions that
-park the current goroutine via runloom_c.wait_fd / runloom.sleep / a
-self-pipe parker.  Other goroutines keep running while one is "blocked".
+park the current fiber via runloom_c.wait_fd / runloom.sleep / a
+self-pipe parker.  Other fibers keep running while one is "blocked".
 
 Apply once at startup:
     import runloom, runloom.monkey
@@ -45,8 +45,8 @@ Categories (all default True):
     queue        queue.SimpleQueue -> cooperative CoSimpleQueue.  queue.Queue
                  needs nothing extra: it builds on threading.Condition, which
                  is already cooperative once `threading` is patched.
-    futures      concurrent.futures.ThreadPoolExecutor -> goroutine-backed
-                 (work runs as goroutines so Future.result/wait/as_completed
+    futures      concurrent.futures.ThreadPoolExecutor -> fiber-backed
+                 (work runs as fibers so Future.result/wait/as_completed
                  resolve in-domain; a real-threaded executor would notify a
                  CoCondition cross-thread and deadlock the cooperative waiter).
     multiprocessing  (1) rebind Connection._recv/_send/_close's captured
@@ -76,7 +76,7 @@ Categories (all default True):
                  cooperatively-patched UDP sockets, parallel A/AAAA,
                  60s result cache.  No threads.
     compile      builtins.compile offloaded to the pool when called inside a
-                 goroutine (covers ast.parse + source imports too).  compile's
+                 fiber (covers ast.parse + source imports too).  compile's
                  ~1.5 KB/level recursion on nested source overflows a 32 KB
                  g-stack before CPython's recursion counter fires; the pool
                  thread's full-size stack runs it safely.  No-op on the main
@@ -109,7 +109,7 @@ Limitations:
     * concurrent.futures.ProcessPoolExecutor is not supported: its result is
       delivered by an internal manager *thread* coordinating worker processes
       over multiprocessing queues, and that real-thread/forkserver machinery is
-      nondeterministic under the cooperative scheduler.  Use the (goroutine-
+      nondeterministic under the cooperative scheduler.  Use the (fiber-
       backed) ThreadPoolExecutor, or drive multiprocessing directly.
 
 Platform notes:
@@ -174,7 +174,7 @@ def __getattr__(name):
 
     (This is a module-level function on purpose: swapping the module's __class__
     to a ModuleType subclass with __getattr__ segfaults the C scheduler when the
-    lookup happens inside a goroutine.  To *write* a section internal -- the
+    lookup happens inside a fiber.  To *write* a section internal -- the
     fault-injection tests do -- assign to the section module directly, e.g.
     runloom.monkey.files._orig_flock, which is also where the patched code reads.)"""
     for section in _SECTIONS:
@@ -198,17 +198,17 @@ def _patched_runloom_c_go(fn, stack_size=0, **kwargs):
     # forward it.  A bare (fn, **kwargs) signature raised TypeError and broke
     # every runloom.go() once monkey.patch() was applied (worst under M:N,
     # where runtime.go always passes the grow-down stack size).
-    return _orig_runloom_c_go(_wrap_goroutine_callable(fn), stack_size, **kwargs)
+    return _orig_runloom_c_go(_wrap_fiber_callable(fn), stack_size, **kwargs)
 
 
 def _patched_runloom_c_mn_go(fn, stack_size=0, **kwargs):
-    return _orig_runloom_c_mn_go(_wrap_goroutine_callable(fn), stack_size,
+    return _orig_runloom_c_mn_go(_wrap_fiber_callable(fn), stack_size,
                                  **kwargs)
 
 
 def _install_go_wrapper():
     """Wrap runloom_c.go / mn_go so user callables run with the
-    goroutine-context flag set.  Idempotent."""
+    fiber-context flag set.  Idempotent."""
     global _orig_runloom_c_go, _orig_runloom_c_mn_go
     if _orig_runloom_c_go is None:
         _orig_runloom_c_go = runloom_c.go

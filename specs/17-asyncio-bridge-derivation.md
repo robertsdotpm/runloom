@@ -84,16 +84,16 @@ the regression guard*:
 
 | Symptom (the failing project) | Root cause | Fix | Guard |
 |---|---|---|---|
-| asyncssh `data_received` SEGV | TLS/SSH kex recurses deep into C on a small g-stack | spawn callback goroutines on a 512 KB `_IO_STACK` | — |
-| aiohttp `web.AppKey` `UnboundLocalError` | `AppKey` walks `f_back` to a `<module>` frame the goroutine root severs | run the driver under a real `<module>`-named frame | `aiohttp_*` |
-| aiocoap strict gc-leak teardown fails | a cancelled timer's goroutine captured the callback in its closure | timer reads the callback **through the handle** (cancel nulls it) | `timer_leak.py` |
+| asyncssh `data_received` SEGV | TLS/SSH kex recurses deep into C on a small g-stack | spawn callback fibers on a 512 KB `_IO_STACK` | — |
+| aiohttp `web.AppKey` `UnboundLocalError` | `AppKey` walks `f_back` to a `<module>` frame the fiber root severs | run the driver under a real `<module>`-named frame | `aiohttp_*` |
+| aiocoap strict gc-leak teardown fails | a cancelled timer's fiber captured the callback in its closure | timer reads the callback **through the handle** (cancel nulls it) | `timer_leak.py` |
 | aiohttp connector `_wait_for_close` deadlock | a deferred stock-Task wakeup hit a stale current-task slot | clear `_CURRENT_TASKS[loop]` for loop-level callbacks (`_pg_run_loop_cb`) | `aiohttp_leak_probe.py` |
 | falcon/uvicorn websocket close 1012≠1001; aiojobs | library done-callbacks fired synchronously inverted asyncio order | **defer** done-callbacks via `call_soon`; only `_wake_unpark`/`_runloom_fire_sync` sync | `ws_close_order_repro.py` |
 | asyncssh channel-open-vs-close crash | a same-thread future wake routed through the batch wake_list landed out of FIFO | same-thread `wake_safe` pushes straight to the ready ring | `call_soon_fifo.py` |
 | aiocsv `_Parser` "no attribute 'send'" | the driver injected `future.result()` into a custom awaitable-iterator | driver always `coro.send(None)` | `aiocsv_repro.py` |
 | aiocoap CSM / SMTP banner dropped connection | a write inside `connection_made` reached `_kick_io` before `_io_g` was seeded | seed `self._io_g = None` before `connection_made` | `tls_connection_made_write.py` |
 | aiosmtpd/anyio teardown hang | `task.cancel()` of a g parked in a C `wait_fd` had no await-point | `cancel_wait_fd()` (netpoll cancel sentinel, spec 06) | — |
-| long-lived server accept-loop leak | `server.close()` left accept goroutines parked on the listen fd | `close()` `cancel_wait_fd()`s them | `goroutine_leak_char.py` |
+| long-lived server accept-loop leak | `server.close()` left accept fibers parked on the listen fd | `close()` `cancel_wait_fd()`s them | `fiber_leak_char.py` |
 
 (The C-side cancel sentinel, the `current_task()` save/restore across `_wait_fd`,
 and the module-root frame are also in this set — see spec 13. The point is the

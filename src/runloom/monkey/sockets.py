@@ -58,10 +58,10 @@ def _patched_recv(self, bufsize, flags=0):
     """Cooperative recv.  Routes to the C primitive when available
     (saves the BlockingIOError raise/catch on every EAGAIN plus the
     Python frame around _orig_recv), falls back to the old loop
-    otherwise.  Outside a goroutine, falls through to the raw
-    blocking recv so non-goroutine threads (e.g. helper threads in
+    otherwise.  Outside a fiber, falls through to the raw
+    blocking recv so non-fiber threads (e.g. helper threads in
     tests / fixtures) still work after monkey.patch()."""
-    if not _in_goroutine():
+    if not _in_fiber():
         return _orig_recv(self, bufsize, flags)
     _make_nonblocking(self)
     t = _coop_timeout(self)
@@ -88,7 +88,7 @@ def _patched_recv_into(self, buffer, nbytes=0, flags=0):
     every call.  Callers that already own a buffer (high-throughput
     proxies, line readers, framing layers) save one heap allocation
     and one memcpy per recv -- typically 10-20 us / call at 4 KB."""
-    if not _in_goroutine():
+    if not _in_fiber():
         return _orig_recv_into(self, buffer, nbytes, flags)
     _make_nonblocking(self)
     t = _coop_timeout(self)
@@ -112,7 +112,7 @@ def _patched_recv_into(self, buffer, nbytes=0, flags=0):
 
 
 def _patched_send(self, data, flags=0):
-    if not _in_goroutine():
+    if not _in_fiber():
         return _orig_send(self, data, flags)
     _make_nonblocking(self)
     if _tcp_send_once is not None:
@@ -125,7 +125,7 @@ def _patched_send(self, data, flags=0):
 
 
 def _patched_sendall(self, data, flags=0):
-    if not _in_goroutine():
+    if not _in_fiber():
         return _orig_sendall(self, data, flags)
     _make_nonblocking(self)
     if _tcp_send_all is not None:
@@ -143,7 +143,7 @@ def _patched_sendall(self, data, flags=0):
 
 
 def _patched_accept(self):
-    if not _in_goroutine():
+    if not _in_fiber():
         return _orig_accept(self)
     _make_nonblocking(self)
     while True:
@@ -154,7 +154,7 @@ def _patched_accept(self):
 
 
 def _patched_connect(self, address):
-    if not _in_goroutine():
+    if not _in_fiber():
         return _orig_connect(self, address)
     _make_nonblocking(self)
     # connect_ex returns the errno instead of raising, so a synchronous
@@ -190,7 +190,7 @@ def _patched_connect(self, address):
 
 
 def _patched_recvfrom(self, bufsize, flags=0):
-    if not _in_goroutine():
+    if not _in_fiber():
         return _orig_recvfrom(self, bufsize, flags)
     _make_nonblocking(self)
     while True:
@@ -201,7 +201,7 @@ def _patched_recvfrom(self, bufsize, flags=0):
 
 
 def _patched_sendto(self, data, *args):
-    if not _in_goroutine():
+    if not _in_fiber():
         return _orig_sendto(self, data, *args)
     _make_nonblocking(self)
     while True:
@@ -215,7 +215,7 @@ def _patched_recvmsg(self, bufsize, ancbufsize=0, flags=0):
     """Cooperative recvmsg.  Same EAGAIN -> wait_fd loop as recv, but
     carries the ancillary-data tuple (data, ancdata, msg_flags, address)
     that SCM_RIGHTS fd-passing and IP_PKTINFO callers rely on."""
-    if not _in_goroutine():
+    if not _in_fiber():
         return _orig_recvmsg(self, bufsize, ancbufsize, flags)
     _make_nonblocking(self)
     while True:
@@ -226,7 +226,7 @@ def _patched_recvmsg(self, bufsize, ancbufsize=0, flags=0):
 
 
 def _patched_recvmsg_into(self, buffers, ancbufsize=0, flags=0):
-    if not _in_goroutine():
+    if not _in_fiber():
         return _orig_recvmsg_into(self, buffers, ancbufsize, flags)
     _make_nonblocking(self)
     while True:
@@ -237,7 +237,7 @@ def _patched_recvmsg_into(self, buffers, ancbufsize=0, flags=0):
 
 
 def _patched_sendmsg(self, buffers, ancdata=(), flags=0, address=None):
-    if not _in_goroutine():
+    if not _in_fiber():
         return _orig_sendmsg(self, buffers, ancdata, flags, address)
     _make_nonblocking(self)
     while True:
@@ -251,7 +251,7 @@ def _patched_recvfrom_into(self, buffer, nbytes=0, flags=0):
     """Zero-alloc datagram receive -- the recvfrom analogue of recv_into.
     UDP servers that own a reusable buffer save the bytes allocation per
     packet that plain recvfrom() pays."""
-    if not _in_goroutine():
+    if not _in_fiber():
         return _orig_recvfrom_into(self, buffer, nbytes, flags)
     _make_nonblocking(self)
     while True:
@@ -265,7 +265,7 @@ def _patched_recvfrom_into(self, buffer, nbytes=0, flags=0):
 #
 # Stock socket.sendfile refuses non-blocking sockets (raises ValueError) and
 # drives the os.sendfile loop with its own selectors.PollSelector.  Our
-# goroutine sockets are non-blocking by construction, so we reimplement both
+# fiber sockets are non-blocking by construction, so we reimplement both
 # halves of the stdlib's two-strategy sendfile -- the zero-copy os.sendfile
 # fast path and the read()+send() fallback -- parking on wait_fd instead of a
 # selector.  Faithful to Lib/socket.py: same _check_sendfile_params validation,
@@ -348,7 +348,7 @@ def _patched_sendfile(self, file, offset=0, count=None):
     """Cooperative socket.sendfile.  Zero-copy os.sendfile fast path, with the
     stdlib's read()+send() fallback for non-regular files -- both parking on
     wait_fd so the whole transfer doesn't pin a scheduler thread."""
-    if not _in_goroutine():
+    if not _in_fiber():
         return _orig_sendfile(self, file, offset, count)
     _make_nonblocking(self)
     if _raw_os_sendfile is not None:
@@ -368,9 +368,9 @@ _netpoll_cancel_fd = getattr(runloom_c, "netpoll_cancel_fd", None)
 def _patched_close(self):
     """Clear the netpoll registration bit before closing (so an fd reuse
     re-registers cleanly under the ET register-once scheme), then -- AFTER the
-    close -- wake any goroutine parked in accept()/recv()/connect() on this fd.
+    close -- wake any fiber parked in accept()/recv()/connect() on this fd.
     The woken op retries on the now-closed (fileno == -1) socket, gets EBADF and
-    unwinds, instead of being stranded forever when another goroutine closed the
+    unwinds, instead of being stranded forever when another fiber closed the
     socket out from under it (BUG #5)."""
     fd = -1
     try:

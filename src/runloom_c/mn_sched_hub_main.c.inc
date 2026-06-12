@@ -5,17 +5,17 @@
 
 /* gc-stop-the-world fairness (free-threaded 3.13+ only).
  *
- * A goroutine that loops a stop-the-world operation -- a tight `gc.collect()`
+ * A fiber that loops a stop-the-world operation -- a tight `gc.collect()`
  * loop is the canonical case -- while it is the SOLE runnable g on its hub gets
  * re-run back-to-back by the loop below, holding the world stopped ~100% of the
- * time.  That starves goroutines stranded on OTHER hubs: in default (per-hub-
- * tstate) mode a started goroutine is hub-pinned (its suspended eval frame caches
+ * time.  That starves fibers stranded on OTHER hubs: in default (per-hub-
+ * tstate) mode a started fiber is hub-pinned (its suspended eval frame caches
  * its origin tstate via the snap dance, so it is NOT stealable) and lives in its
  * hub's local ready ring; if that hub is held SUSPENDED for the world-stop it can
  * never re-attach to drain the ring -> the stranded work never finishes -> the
  * stop-the-world looper never sees its exit condition -> whole-process deadlock.
  * (Observed as the intermittent hang in test_freethread_stress::
- * test_gc_stw_under_goroutine_churn.)
+ * test_gc_stw_under_fiber_churn.)
  *
  * A cooperative turn should relinquish to the whole system, not just respin the
  * same g.  When this hub is about to re-run its sole runnable g AND a sibling hub
@@ -25,7 +25,7 @@
  * world again.
  *
  * "Not running its work" = the sibling tstate is SUSPENDED (stopped for an active
- * world-stop) OR DETACHED with pending goroutines (it just got released by a
+ * world-stop) OR DETACHED with pending fibers (it just got released by a
  * start-the-world and is trying to re-attach, or is otherwise blocked off-CPU with
  * work owed).  The DETACHED-with-work case is essential: right after THIS hub's own
  * gc.collect() returns (its start-the-world set the siblings DETACHED), the sibling
@@ -192,7 +192,7 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
 
     /* sched_yield fairness (see the pick block below).  ready_streak counts
      * consecutive ready-ring services; after starve_bound of them we force one
-     * deque turn so a busy sched_yield loop can't starve never-run goroutines.
+     * deque turn so a busy sched_yield loop can't starve never-run fibers.
      * Hub-local (this thread only).  starve_bound resolved once from env;
      * default 64, 0 disables (legacy ready-before-deque).  First touch across
      * hubs is a relaxed-atomic lazy-static loaded into the loop-invariant local
@@ -210,7 +210,7 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
     }
 
     /* Controlled-replay startup rendezvous: wait until mn_run has placed all
-     * initial goroutines before this hub starts scheduling, so the first
+     * initial fibers before this hub starts scheduling, so the first
      * requester set is complete (no-op unless RUNLOOM_MN_SEED + barrier). */
     runloom_mn_ctrl_wait_armed();
 
@@ -303,7 +303,7 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
 
         /* Pick the next g.  Normal order: ready ring (yielded/woken -- "hot")
          * before the deque (fresh, never-run gs), which keeps woken I/O
-         * goroutines low-latency.  BUT a goroutine busy-looping on sched_yield
+         * fibers low-latency.  BUT a fiber busy-looping on sched_yield
          * re-enters the ready ring every time, so pure ready-before-deque lets
          * it starve every fresh g forever (they never get a first run -- the
          * sched_yield-fairness bug).  Bound it: after starve_bound consecutive
@@ -363,7 +363,7 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
                 PyThreadState *saved;
                 int parked;
                 long long idle_ns;
-                /* No goroutine to run: check in as IDLE for the controlled-
+                /* No fiber to run: check in as IDLE for the controlled-
                  * scheduler census round so the barrier-rendezvous grant isn't
                  * blocked waiting on a hub that has nothing to request.  No-op
                  * unless RUNLOOM_MN_SEED + barrier are on.  Returns 1 if a wake
@@ -534,7 +534,7 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
                              * blocks until any in-progress stop-the-world ends;
                              * holding idle_lock across that block would stall a
                              * hub_submit trying to signal us and could wedge STW
-                             * progress (test_gc_stw_under_goroutine_churn hung
+                             * progress (test_gc_stw_under_fiber_churn hung
                              * ~2/3 with the re-attach inside the lock). */
                             if (waited) PyEval_RestoreThread(saved);
                         } else {

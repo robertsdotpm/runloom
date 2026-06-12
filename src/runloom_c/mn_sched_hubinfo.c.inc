@@ -1,7 +1,7 @@
 /* Part of mn_sched.c -- #included into that TU.  Per-hub diagnostic snapshot
  * for runloom.inspect.hubs(); see the runloom_hub_info_t contract in mn_sched.h.
  *
- * The interesting part is `blocked_at` -- the Python call site of a goroutine
+ * The interesting part is `blocked_at` -- the Python call site of a fiber
  * wedged inside a non-cooperative blocking C call.  Reading another execution
  * context's top frame from the snapshotting thread is a use-after-free in
  * general (frames mutate as code runs), so we restrict it to the ONE
@@ -12,7 +12,7 @@
  *     the hub's bound tstate, which looks permanently DETACHED there), so the
  *     hub-tstate frame would be meaningless -- skip it.
  *   - the hub's bound tstate must be DETACHED and the resume must have overrun
- *     the wedge budget: a goroutine that did Py_BEGIN_ALLOW_THREADS and is now
+ *     the wedge budget: a fiber that did Py_BEGIN_ALLOW_THREADS and is now
  *     parked in a blocking syscall.  The owner thread will NOT touch
  *     current_frame until END_ALLOW_THREADS re-attaches (the very property that
  *     lets the handoff rescue adopt the tstate), so the frame chain is pinned

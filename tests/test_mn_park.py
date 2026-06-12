@@ -77,11 +77,11 @@ def _wake_case(hubs, foreign, fw):
     return box == ["woke"]
 
 
-def test_mn_goroutine_wake():
+def test_mn_fiber_wake():
     assert _wake_case(8, foreign=False, fw=False)
 
 
-def test_single_goroutine_wake():
+def test_single_fiber_wake():
     assert _wake_case(1, foreign=False, fw=False)
 
 

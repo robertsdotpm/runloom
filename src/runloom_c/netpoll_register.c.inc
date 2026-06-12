@@ -116,7 +116,7 @@ static int runloom_netpoll_register(int fd, int events)
             EV_SET(&kev[n++], fd, EVFILT_WRITE, EV_ADD | EV_ONESHOT, 0, 0, NULL);
         if (n == 0) return 0;
         {   /* test-only: force the registration kevent() to fail; the error
-             * surfaces as OSError(errno) to the goroutine parking on this fd
+             * surfaces as OSError(errno) to the fiber parking on this fd
              * (the fd-bit is rolled back below). */
             int finj = runloom_fault_inject(RUNLOOM_FAULT_KQUEUE_CTL);
             if (finj) errno = finj;
@@ -151,7 +151,7 @@ void runloom_netpoll_unregister(int fd)
 #endif
 }
 
-/* Release an fd's epoll registration IFF no goroutine is currently parked on it.
+/* Release an fd's epoll registration IFF no fiber is currently parked on it.
  *
  * The aio bridge's low-level loop.sock_* operate on USER-OWNED sockets that the
  * caller closes with a plain socket.close() -- which does NOT run the monkey /
@@ -213,7 +213,7 @@ int runloom_netpoll_parked_count(void)
 
 /* Hub-idle dwell-based stack reclaim (RUNLOOM_STACK_PARK_SWEEP).  Walk the
  * CALLING hub's parker pool and madvise the below-SP idle stack pages of
- * goroutines whose current park has already exceeded threshold_ns.
+ * fibers whose current park has already exceeded threshold_ns.
  *
  * SAFE under M:N: every parker in pool[hub] is owned by `hub` (wakes
  * route to p->hub and land in that hub's non-stealable local FIFO, so

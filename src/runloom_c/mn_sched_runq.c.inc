@@ -148,7 +148,7 @@ static runloom_g_t *runloom_mn_global_runq_pull(void)
     return g;
 }
 
-/* RUNLOOM_PER_G_TSTATE (default OFF, experimental): give each goroutine its
+/* RUNLOOM_PER_G_TSTATE (default OFF, experimental): give each fiber its
  * own PyThreadState so its Python execution state is migratable across
  * hubs.  A stolen woken g then resumes on ANY hub without the cross-hub
  * corruption that per-hub-tstate + snap migration hits (the snap bakes the
@@ -202,7 +202,7 @@ static int runloom_use_global_runq(void)
  * RUNLOOM_SYSMON (default OFF): spawn one extra OS thread that periodically
  * scans every hub's resume_start_ns and logs a hub stuck inside a single
  * runloom_coro_resume longer than RUNLOOM_SYSMON_MS (the unanticipated-block
- * signature -- a goroutine occupying its hub's OS thread with a
+ * signature -- a fiber occupying its hub's OS thread with a
  * non-yielding blocking C call that Group A's offload never wrapped).
  *
  * This first cut is DETECT-ONLY (log the wedge + how many gs it strands);
@@ -255,7 +255,7 @@ static volatile int runloom_sysmon_stop = 0;
 /* ---- Group B: stalled-hub tstate handoff (RUNLOOM_HANDOFF, default OFF) ----
  *
  * One standby "rescue" OS thread adopts a hub's DETACHED bound tstate -- a
- * goroutine inside a Py_BEGIN_ALLOW_THREADS blocking call left it free -- and
+ * fiber inside a Py_BEGIN_ALLOW_THREADS blocking call left it free -- and
  * drains THAT hub's stranded runnable gs, handing the tstate back when the
  * block ends.  This is the DETACHED-class wedge the sysmon detector classifies
  * as handoff-recoverable (a well-behaved blocking-IO call), the asyncio-killer
@@ -266,7 +266,7 @@ static volatile int runloom_sysmon_stop = 0;
  * the invariant the H>=2 cross-hub snap migration violated (a stackful coro's
  * suspended eval-loop C frame caches its origin tstate; only resuming on that
  * exact tstate is correct).  The rescue moves the *tstate* (to its own OS
- * thread) rather than the goroutine, so the cached pointer stays valid.
+ * thread) rather than the fiber, so the cached pointer stays valid.
  *
  * Single-runner safety = the tstate attach state itself.  PyEval_RestoreThread
  * CASes the bound tstate DETACHED->ATTACHED; at most one thread holds it
@@ -319,9 +319,9 @@ static PyThreadState **runloom_rescue_tstates = NULL;
 /* ---- Group B step (a): ATTACHED/CPU preemption (RUNLOOM_PREEMPT, default OFF) ----
  *
  * The DETACHED handoff above can't recover an ATTACHED wedge (a CPU-bound or
- * raw-tstate-holding goroutine -- it never releases its hub's tstate).  The
+ * raw-tstate-holding fiber -- it never releases its hub's tstate).  The
  * answer is preemption: make the offending g yield so the hub round-robins its
- * other gs, exactly as Go time-slices a long-running goroutine.
+ * other gs, exactly as Go time-slices a long-running fiber.
  *
  * Mechanism = a chained eval-frame function (the only exported, build-stable
  * hook; `_PyEval_AddPendingCall` can't target a specific thread, and runloom

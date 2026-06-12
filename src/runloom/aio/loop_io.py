@@ -1,4 +1,4 @@
-"""RunloomEventLoop: add/remove reader+writer, the io-runner goroutine, and
+"""RunloomEventLoop: add/remove reader+writer, the io-runner fiber, and
 the low-level sock_* operations."""
 import functools as _functools
 
@@ -96,7 +96,7 @@ class _LoopIOMixin(object):
         return True
 
     def _pg_kick_io(self, fd, st):
-        # Wake the fd's I/O goroutine (if parked) so it re-reads the interest
+        # Wake the fd's I/O fiber (if parked) so it re-reads the interest
         # mask after a reader/writer was added/removed; spawn it if none runs.
         g = st["g"]
         if g is not None:

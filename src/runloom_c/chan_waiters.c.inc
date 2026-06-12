@@ -56,7 +56,7 @@ static int waiter_claim(runloom_chan_waiter_t *w)
  * case for a ready counterparty; counting its OWN already-installed waiter (a
  * self-select: send AND recv on one channel) as that counterparty makes the
  * install abort and retry -- forever under serial execution, where no other
- * goroutine can interleave to consume it (the GIL-on / controlled-scheduler
+ * fiber can interleave to consume it (the GIL-on / controlled-scheduler
  * self-select livelock).  Only a FOREIGN waiter -- a plain channel op, or a
  * different select -- is a real rendezvous, so the readiness re-check uses this
  * instead of a bare non-NULL test.  Go avoids the issue structurally by checking
@@ -83,7 +83,7 @@ static runloom_chan_waiter_t *waiter_pop_claimable(runloom_chan_waiter_t **head,
         if (waiter_claim(w)) return w;
         /* Tombstone -- skip.  No wake; the winning channel already
          * woke the g.  Memory ownership: select-waiter storage lives
-         * on the goroutine's stack frame, so we don't free it here. */
+         * on the fiber's stack frame, so we don't free it here. */
     }
 }
 
@@ -159,9 +159,9 @@ static PyObject *buf_pop(runloom_chan_t *ch)
     return v;
 }
 
-/* Park the current goroutine in the given waiter queue.  Must be
+/* Park the current fiber in the given waiter queue.  Must be
  * called WITH the channel lock held; the lock is released BEFORE
- * yielding, then the goroutine yields via runloom_coro_yield.  Wake
+ * yielding, then the fiber yields via runloom_coro_yield.  Wake
  * happens via runloom_sched_wake / runloom_mn_wake_g from the producer/
  * consumer side.
  *

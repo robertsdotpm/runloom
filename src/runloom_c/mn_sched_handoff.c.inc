@@ -3,13 +3,13 @@
  * these definitions depend on. */
 
 
-/* Drive fresh-goroutine rescue for a wedged hub.  The rescue thread uses its
+/* Drive fresh-fiber rescue for a wedged hub.  The rescue thread uses its
  * OWN PyThreadState (never the hub's) so the hub owner can re-attach its own
  * tstate at any time without racing on _PyThreadState_Attach.
  *
  * BUG #2 FIX.  The old approach called PyEval_RestoreThread(hub_tstate) to
  * adopt the hub's tstate.  Between the "is-DETACHED?" check and that call, the
- * hub's goroutine could unblock (Py_END_ALLOW_THREADS) → both the hub owner
+ * hub's fiber could unblock (Py_END_ALLOW_THREADS) → both the hub owner
  * and the rescue thread would simultaneously call _PyThreadState_Attach on the
  * SAME tstate.  CPython only ever mutates _status from one owner; two threads
  * racing there corrupts the biased-refcount ob_tid, tstate TLS binding, and
@@ -21,11 +21,11 @@
  *   • The hub's hts is NEVER touched; the hub owner can freely re-attach it.
  *   • We steal ONLY from the hub's Chase-Lev deque (steal() is the safe
  *     multi-thread interface; pop() is owner-only and would race hub_main if
- *     the hub's goroutine unblocks while we are in mid-steal).
+ *     the hub's fiber unblocks while we are in mid-steal).
  *   • We do NOT drain the sub_list or the sleep heap: both require
  *     deque-push / ready-push (hub-private single-consumer operations) that
  *     would race hub_main.  Sub_list / sleepers drain naturally when the hub
- *     wakes.  The rescue benefit is running goroutines already in the deque
+ *     wakes.  The rescue benefit is running fibers already in the deque
  *     (queued before the wedge) while the hub is blocked. */
 static void runloom_handoff_rescue(runloom_hub_t *h, PyThreadState *rescue_ts)
 {
@@ -56,10 +56,10 @@ static void runloom_handoff_rescue(runloom_hub_t *h, PyThreadState *rescue_ts)
             }
         }
 
-        /* Steal ONE fresh goroutine from the hub's deque.  steal() is safe from
+        /* Steal ONE fresh fiber from the hub's deque.  steal() is safe from
          * any thread; it does NOT require being the deque's owner.  Done WHILE
          * DETACHED so the rescue thread imposes no stop-the-world load between
-         * goroutine runs (see the attach/detach cycle below). */
+         * fiber runs (see the attach/detach cycle below). */
         g = (runloom_g_t *)runloom_cldeque_steal(&h->deque);
 
         if (g == NULL) {
@@ -82,15 +82,15 @@ static void runloom_handoff_rescue(runloom_hub_t *h, PyThreadState *rescue_ts)
             continue;
         }
 
-        /* We have a fresh goroutine.  Attach rescue_ts ONLY for this resume.
+        /* We have a fresh fiber.  Attach rescue_ts ONLY for this resume.
          *
          * Key: PyEval_RestoreThread blocks if a GC stop-the-world is pending
          * before attaching.  This means:
-         *  a) we give the GC a safe window BETWEEN goroutine runs (we are
+         *  a) we give the GC a safe window BETWEEN fiber runs (we are
          *     DETACHED while checking/stealing above, so STW can complete then);
-         *  b) the actual goroutine run proceeds only when the world is running.
+         *  b) the actual fiber run proceeds only when the world is running.
          * WITHOUT this detach-reattach cycle, the rescue thread stays ATTACHED
-         * through all the C code between goroutine runs, and a GC stop-the-world
+         * through all the C code between fiber runs, and a GC stop-the-world
          * that fires during that window can never complete (the rescue thread
          * never checks the eval-breaker in C code) ->
          * test_mn_iouring_fileread_under_gc deadlock. */
@@ -100,7 +100,7 @@ static void runloom_handoff_rescue(runloom_hub_t *h, PyThreadState *rescue_ts)
         runloom_tls_hub = h;
         if (!base_valid) {
             /* Snap the clean base state of rescue_ts once per session.
-             * Restored between goroutine runs (just below) and at final detach.
+             * Restored between fiber runs (just below) and at final detach.
              * Goroutine Python state (context, exc, etc.) rides g->snap. */
             runloom_pystate_snap(&rescue_base);
             base_valid = 1;
@@ -113,7 +113,7 @@ static void runloom_handoff_rescue(runloom_hub_t *h, PyThreadState *rescue_ts)
         drained++;
 
         /* Restore clean rescue state, then DETACH immediately.  This is the
-         * critical STW-safety point: by detaching after every goroutine, we
+         * critical STW-safety point: by detaching after every fiber, we
          * guarantee rescue_ts is NOT ATTACHED during the C code between runs,
          * so a concurrent GC stop-the-world can complete.  The next iteration's
          * PyEval_RestoreThread will then block until the STW ends. */
@@ -159,7 +159,7 @@ static RUNLOOM_THREAD_RET runloom_handoff_main(void *arg)
     __atomic_store_n(&runloom_rescue_tstates[my_idx], rescue_ts, __ATOMIC_RELEASE);
 
     /* Keep tstate DETACHED while idle; attach only during an active rescue
-     * (PyEval_RestoreThread is called per goroutine in runloom_handoff_rescue). */
+     * (PyEval_RestoreThread is called per fiber in runloom_handoff_rescue). */
     while (!__atomic_load_n(&runloom_handoff_stop, __ATOMIC_ACQUIRE)) {
         int i, claimed = 0;
         for (i = 0; i < runloom_hub_count; i++) {

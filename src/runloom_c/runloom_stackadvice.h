@@ -1,6 +1,6 @@
-/* runloom_stackadvice.h -- per-goroutine-kind stack-usage profiler (advisory).
+/* runloom_stackadvice.h -- per-fiber-kind stack-usage profiler (advisory).
  *
- * An OPT-IN diagnostic.  When enabled it measures each goroutine kind's actual
+ * An OPT-IN diagnostic.  When enabled it measures each fiber kind's actual
  * C-stack high-water mark (keyed by the entry callable's identity) and reports,
  * per kind, "used X of the Y you reserved -- consider stack_size=Z".  It does
  * NOT change any stack size itself: the runtime never auto-redefines or
@@ -28,9 +28,9 @@ void   runloom_advice_set_enabled(int on);
 int    runloom_advice_enabled(void);
 
 /* Auto-sizer: in addition to measuring, actually APPLY the learned per-kind
- * size to the next goroutine of that kind.  "Start large, learn down": an
- * unseen kind's first goroutines start at a generous size, and once measured
- * the kind's later goroutines start at next_pow2(observed_max * 4) (clamped).
+ * size to the next fiber of that kind.  "Start large, learn down": an
+ * unseen kind's first fibers start at a generous size, and once measured
+ * the kind's later fibers start at next_pow2(observed_max * 4) (clamped).
  * In-memory only -- never persisted (a remembered-small size is only a lower
  * bound on what a future input needs; the guard page + grow + crash reporter
  * stay the safety net).  Enabling autosize implies measurement, forces painting
@@ -38,7 +38,7 @@ int    runloom_advice_enabled(void);
  * RSS-free).  Off by default. */
 /* `prescan`: also run the cold-start optimizer -- loosely scan an unseen kind's
  * bytecode for symbols whose C implementation has a fat single stack frame
- * (e.g. Decimal arithmetic at 256 KiB) and start its first goroutines big
+ * (e.g. Decimal arithmetic at 256 KiB) and start its first fibers big
  * enough to hold that frame, so they don't overflow before being measured.
  * Off within autosize unless requested. */
 void   runloom_advice_set_autosize(int on, int prescan);
@@ -57,11 +57,11 @@ size_t runloom_advice_size_for(size_t key, PyObject *callable, size_t fallback);
  * the callable is NULL, or the table is full. */
 size_t runloom_advice_note_spawn(PyObject *callable);
 
-/* At completion (no Python objects touched): fold one goroutine's stack HWM
+/* At completion (no Python objects touched): fold one fiber's stack HWM
  * (and the size it ran with) into its kind. */
 void   runloom_advice_record(size_t key, size_t hwm, size_t reserved);
 
-/* Convenience: fold a completed goroutine's HWM into its kind, scanning its
+/* Convenience: fold a completed fiber's HWM into its kind, scanning its
  * coro stack.  No-op unless profiling is on and the g carries a kind key.  Call
  * at any completion point while g->coro is still valid (the single-sched drain
  * and the M:N hub both use it). */

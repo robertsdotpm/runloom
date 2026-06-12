@@ -102,7 +102,7 @@ class TestChannelChaos(_Seeded):
 
             done = [False]
             def closer():
-                # Wait for all producer goroutines to finish.  We don't
+                # Wait for all producer fibers to finish.  We don't
                 # have a join primitive here -- approximate by sleeping
                 # a tiny bit then closing.  If consumers haven't drained,
                 # they will (loop on recv).

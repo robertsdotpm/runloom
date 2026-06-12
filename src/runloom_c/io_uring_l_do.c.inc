@@ -39,7 +39,7 @@ static runloom_iouring_ssize_t runloom_iouring_do(struct io_uring_sqe sqe)
          * wait, which deadlocks any stop-the-world (free-threaded GC, the
          * per-g-tstate attach protocol) whose completion depends on a thread
          * frozen at the STW barrier -- and it monopolizes the hub so its
-         * other goroutines can't run.  Yield instead: the hub returns to its
+         * other fibers can't run.  Yield instead: the hub returns to its
          * (STW-safe, handoff-compatible) main loop, and when idle pumps the
          * shared ring's eventfd; a drainer wakes us via the wait handshake.
          * The inline drain above already completed us inline in the common
@@ -70,7 +70,7 @@ static runloom_iouring_ssize_t runloom_iouring_do(struct io_uring_sqe sqe)
          * via runloom_coro_yield; on resume we eat the pending wake. */
         runloom_sched_park_safe();
     } else {
-        /* Not inside a goroutine (plain thread / main thread calling
+        /* Not inside a fiber (plain thread / main thread calling
          * file_read directly).  Block, but RELEASE the tstate around the
          * wait so a stop-the-world isn't held off by this syscall. */
         while (__atomic_load_n(&op.result, __ATOMIC_ACQUIRE) == INT32_MIN) {
@@ -150,7 +150,7 @@ struct runloom_iouring_ms {
     uint32_t          inflight_off;
     uint32_t          inflight_len;
 
-    /* Single waiter (most TCPConns have one consumer goroutine). */
+    /* Single waiter (most TCPConns have one consumer fiber). */
     runloom_g_t         *waiter_g;
     void             *waiter_hub;
 
@@ -200,7 +200,7 @@ runloom_iouring_ms_t *runloom_iouring_ms_open(int fd)
 /* Drain handler.  Called from runloom_iouring_drain when a CQE arrives
  * with user_data pointing to a multishot handle.  Appends the
  * delivered buffer to the handle's ready queue and wakes any
- * parked consumer goroutine.  If the multishot ended (no F_MORE),
+ * parked consumer fiber.  If the multishot ended (no F_MORE),
  * clears the armed flag so the next recv re-submits. */
 static void runloom_iouring_ms_on_cqe(runloom_iouring_ms_t *h,
                                    int32_t res, uint32_t flags)

@@ -22,11 +22,11 @@ class _StreamIOMixin(object):
             self._in_context = False
 
     def _io_loop(self):
-        # The ONE goroutine for this fd.  Parks on the union of the directions
+        # The ONE fiber for this fd.  Parks on the union of the directions
         # we currently need (READ unless paused / read-EOF'd, WRITE while the
         # write buffer is non-empty) and services whichever is ready.  Merging
-        # recv and drain into one goroutine is mandatory on runloom's netpoll: a
-        # second goroutine parking the other direction on the same fd clobbers
+        # recv and drain into one fiber is mandatory on runloom's netpoll: a
+        # second fiber parking the other direction on the same fd clobbers
         # this one's arm (one-shot per fd) and strands it.
         sock = self._sock
         while not self._stopping:
@@ -36,7 +36,7 @@ class _StreamIOMixin(object):
             # it a peer doing a clean ssl.SSLSocket.unwrap() blocks forever
             # waiting for our close_notify (test_remote_shutdown trailing-data:
             # its server reads our data, then ends its read loop only on our
-            # close_notify).  Fire once, here in the io goroutine (send may park).
+            # close_notify).  Fire once, here in the io fiber (send may park).
             if (self._read_eof and not self._write_buf and not self._closed
                     and not self._sock_is_plain and not self._tls_shutdown_sent):
                 self._send_tls_close_notify()
@@ -111,7 +111,7 @@ class _StreamIOMixin(object):
                     and not self._stopping:
                 if not self._recv_step():
                     return
-            # Hand the scheduler to any goroutine a data_received just woke (a
+            # Hand the scheduler to any fiber a data_received just woke (a
             # protocol coroutine awaiting this read) BEFORE we recv() again.
             # Without this yield the loop can drain the whole response AND the
             # EOF/close in one burst, firing connection_lost (-> protocol state
@@ -123,9 +123,9 @@ class _StreamIOMixin(object):
 
     def _recv_step(self):
         # One NON-BLOCKING recv + dispatch.  Returns True to keep looping, False
-        # to stop the io goroutine (transport closed).  Must not park: a
+        # to stop the io fiber (transport closed).  Must not park: a
         # plaintext socket.recv raises BlockingIOError when dry; a _TLSSock's
-        # parking recv() would stall the write drain on this same goroutine, so
+        # parking recv() would stall the write drain on this same fiber, so
         # use its single-shot recv_nb instead.
         #
         # BufferedProtocol path: ask the protocol for a buffer and recv straight
@@ -167,7 +167,7 @@ class _StreamIOMixin(object):
     def _handle_read_eof(self):
         # EOF: peer half-closed its write side; recv() now returns b'' forever,
         # so stop READING (a `continue` here would busy-spin at 100% CPU).  Keep
-        # the transport (and this goroutine, for our own writes) only if the
+        # the transport (and this fiber, for our own writes) only if the
         # protocol asked (eof_received() -> True).  Shared by the data_received
         # and BufferedProtocol read paths.
         try:
@@ -182,11 +182,11 @@ class _StreamIOMixin(object):
             # remote-shutdown-with-trailing-data case
             # (test_remote_shutdown_receives_trailing_data, where the peer reads
             # 4MB AFTER sending close_notify).  close() deferred teardown to
-            # flush that backlog (_close_when_drained); KEEP this io goroutine
+            # flush that backlog (_close_when_drained); KEEP this io fiber
             # alive to drain it -- _closed now masks READ off so we only pump
             # WRITE, and _drain_step fires the teardown (and our close_notify)
             # once empty.  With nothing queued, close() tore down already ->
-            # stop the goroutine.
+            # stop the fiber.
             return self._close_when_drained
         self._read_eof = True   # mask drops READ; loop stays for writes
         return True
@@ -281,7 +281,7 @@ class _StreamIOMixin(object):
                                               self._close_deliver_cl)
 
     def _kick_io(self):
-        # Re-evaluate the io goroutine's interest mask after write()/resume_
+        # Re-evaluate the io fiber's interest mask after write()/resume_
         # reading() changed it: wake it if parked, or respawn it if it had
         # exited (mask was 0).
         if self._stopping:
@@ -323,9 +323,9 @@ class _StreamIOMixin(object):
             return
         if not self._write_buf and self._sock_is_plain:
             # Fast path: nothing queued and a plaintext non-blocking socket whose
-            # send() never parks -- send straight from the caller's goroutine.
+            # send() never parks -- send straight from the caller's fiber.
             # (A _TLSSock send() can park EPOLLOUT and clobber the recv arm, so
-            # TLS skips this and always buffers + lets the io goroutine drain.)
+            # TLS skips this and always buffers + lets the io fiber drain.)
             try:
                 n = self._sock.send(data)
             except (BlockingIOError, InterruptedError):
@@ -339,7 +339,7 @@ class _StreamIOMixin(object):
             if n >= len(data):
                 return                          # fully sent, no buffer needed
             data = memoryview(data)[n:]         # buffer the remainder, in order
-        # Queue (preserving order) and hand off to the single io goroutine,
+        # Queue (preserving order) and hand off to the single io fiber,
         # which drains EPOLLOUT on the SAME union-mask park as the recv side.
         self._write_buf += bytes(data)
         self._maybe_pause_writing()

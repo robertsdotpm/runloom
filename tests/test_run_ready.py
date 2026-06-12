@@ -1,13 +1,13 @@
 """runloom_c.run_ready() -- quiescence-barrier yield.
 
-run_ready() parks the calling goroutine until no other goroutine is
+run_ready() parks the calling fiber until no other fiber is
 immediately runnable (every ready g, including ones just woken, has run to its
 next park or to completion), then resumes -- before the scheduler would block
 on netpoll/timers.  This is asyncio's "run the ready callbacks for this loop
 iteration" boundary, iterated to quiescence.
 
-Motivating case (uvicorn websocket teardown): a client-close goroutine (A)
-wakes the server-connection goroutine (B = run_asgi, which removes the
+Motivating case (uvicorn websocket teardown): a client-close fiber (A)
+wakes the server-connection fiber (B = run_asgi, which removes the
 connection from server_state), then crosses a *synchronous* boundary
 (server.shutdown()).  Under stock asyncio every ready callback runs each
 iteration, so B finishes before A's shutdown; under a plain run-to-next-park
@@ -77,7 +77,7 @@ class TestRunReady(unittest.TestCase):
         self.assertEqual(order, ["B", "A", "C"])
 
     def test_multiple_callers_resume_fifo_no_hang(self):
-        """Two goroutines both park on the barrier; both resume (FIFO) after
+        """Two fibers both park on the barrier; both resume (FIFO) after
         the rest drains -- no lost wake, no hang."""
         order = []
         def W(): order.append("W")
@@ -101,7 +101,7 @@ class TestRunReady(unittest.TestCase):
         runloom_c.run()
         self.assertEqual(order, ["A"])
 
-    def test_outside_goroutine_is_noop(self):
+    def test_outside_fiber_is_noop(self):
         """Called from the main thread (no current g): safe no-op."""
         runloom_c.run_ready()
         self.assertEqual(runloom_c._self_check(0), 0)

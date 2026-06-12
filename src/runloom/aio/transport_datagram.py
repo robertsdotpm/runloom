@@ -6,7 +6,7 @@ class DatagramTransport(object):
 
     Wires a UDP socket to a user-supplied DatagramProtocol.  The
     protocol's datagram_received(data, addr) / error_received(exc) /
-    connection_lost(exc) methods are called from our recv goroutine.
+    connection_lost(exc) methods are called from our recv fiber.
     """
 
     def __init__(self, sock, protocol, *, loop=None):

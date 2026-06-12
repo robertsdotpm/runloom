@@ -59,7 +59,7 @@ class TestCoroPrimitive(unittest.TestCase):
 
 
 class TestScheduler(unittest.TestCase):
-    def test_three_goroutines_interleave(self):
+    def test_three_fibers_interleave(self):
         log = []
         def worker(name, n):
             for i in range(n):

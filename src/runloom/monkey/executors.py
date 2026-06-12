@@ -5,7 +5,7 @@ from . import osio  # _orig_os_read/_orig_os_write are rebound at patch-time -> 
 
 
 def _spawn(fn):
-    """Spawn the worker goroutine on whichever scheduler is active: mn_go under
+    """Spawn the worker fiber on whichever scheduler is active: mn_go under
     M:N (mn_hub_count() > 0), else the single-thread go.  A task spawned via the
     single-thread go() never runs under mn_run, so future.result() would hang."""
     if runloom_c.mn_hub_count() > 0:
@@ -13,26 +13,26 @@ def _spawn(fn):
     return runloom_c.go(fn)
 
 # ============================================================
-# concurrent.futures -- goroutine-backed ThreadPoolExecutor
+# concurrent.futures -- fiber-backed ThreadPoolExecutor
 #
 # The stock ThreadPoolExecutor runs work on real OS threads and resolves each
 # Future by notifying its threading.Condition from the worker thread.  After
 # patch() that Condition is a CoCondition, and a cross-thread notify of a
-# cooperative waiter does not wake it -- a goroutine calling future.result()
+# cooperative waiter does not wake it -- a fiber calling future.result()
 # deadlocks (and the worker's work_queue.get() blocks on a CoSimpleQueue from
-# a non-goroutine thread).  Real-threaded executors are fundamentally at odds
-# with cooperative primitives: the worker side needs real locks, the goroutine
+# a non-fiber thread).  Real-threaded executors are fundamentally at odds
+# with cooperative primitives: the worker side needs real locks, the fiber
 # caller side needs cooperative ones, and Future._condition cannot be both.
 #
-# So make ThreadPoolExecutor goroutine-backed: submitted work runs as a
-# goroutine on the cooperative scheduler.  Both the setter (the task) and the
-# waiter (future.result()/wait()/as_completed()) are then in the goroutine
+# So make ThreadPoolExecutor fiber-backed: submitted work runs as a
+# fiber on the cooperative scheduler.  Both the setter (the task) and the
+# waiter (future.result()/wait()/as_completed()) are then in the fiber
 # domain, so the stock Future's CoCondition works.  Work is cooperative rather
 # than parallel; a task that makes a truly-blocking call still offloads via the
 # patched blocking APIs.  max_workers bounds concurrency with a CoSemaphore.
 #
 # Future.result/wait/as_completed themselves need no patch -- they already
-# cooperate whenever the Future is completed from within a goroutine.
+# cooperate whenever the Future is completed from within a fiber.
 # ============================================================
 _orig_ThreadPoolExecutor = None
 _co_tpe_cls = None
@@ -42,7 +42,7 @@ def _build_co_tpe():
     import concurrent.futures as cf
 
     class CoThreadPoolExecutor(cf.Executor):
-        """ThreadPoolExecutor that runs submitted callables as goroutines."""
+        """ThreadPoolExecutor that runs submitted callables as fibers."""
 
         def __init__(self, max_workers=None, thread_name_prefix="",
                      initializer=None, initargs=()):
@@ -160,14 +160,14 @@ _orig_semlock_make_methods = None
 
 
 def _co_semlock_acquire(semlock):
-    """Cooperative SemLock.acquire.  A blocking acquire from a goroutine does a
+    """Cooperative SemLock.acquire.  A blocking acquire from a fiber does a
     non-blocking sem_trywait + _co_sleep backoff instead of sem_wait, so a
     contended cross-process Lock/Semaphore/Event/Condition/Barrier doesn't
     freeze the scheduler thread.  Real threads and explicit non-blocking
     acquires fall straight through to the C call.  (POSIX semaphores have no
     readiness fd, so this is a backoff poll -- same shape as the fcntl shim.)"""
     def acquire(block=True, timeout=None):
-        if not block or not _in_goroutine():
+        if not block or not _in_fiber():
             return semlock.acquire(block, timeout)
         deadline = None if timeout is None else time.monotonic() + timeout
         step = 0.0005

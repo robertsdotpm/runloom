@@ -83,7 +83,7 @@ ch.try_recv()                 # ("first", True)
 ch.try_recv()                 # None  -- buffer empty
 ```
 
-These never park the goroutine -- useful for polling, watchdog probes,
+These never park the fiber -- useful for polling, watchdog probes,
 or "drain whatever's available without waiting."
 
 ## Unbuffered (rendezvous)
@@ -114,7 +114,7 @@ sent
 ```
 
 Unbuffered channels are how Go expresses synchronisation as well as
-data flow -- pair them with a goroutine and they become the equivalent
+data flow -- pair them with a fiber and they become the equivalent
 of a mailbox/actor.
 
 ## `select`
@@ -209,16 +209,16 @@ re-opened (matches Go's semantics -- you'd create a new channel).
 Channels are best when you need *synchronisation*, not just storage.
 Use a channel when:
 
-- Multiple goroutines produce; one or many consume.  Channel's send/
+- Multiple fibers produce; one or many consume.  Channel's send/
   recv pairing replaces locks.
-- A goroutine should wait until something is ready (work item, event,
+- A fiber should wait until something is ready (work item, event,
   cancellation signal).
 - You want backpressure -- a slow consumer naturally slows the producer
   via channel-full blocking.
 
 Use a `list` or `dict` (no synchronisation needed) when you're on one
-goroutine and just want a queue.  Channels add overhead per
-send/recv that's wasted if you never actually cross goroutine
+fiber and just want a queue.  Channels add overhead per
+send/recv that's wasted if you never actually cross fiber
 boundaries.
 
 ## Performance
@@ -227,8 +227,8 @@ Linux 3.12, x86_64, single thread:
 
 | Operation | Cost |
 | --- | --- |
-| Buffered send + recv (same goroutine) | ~90 ns |
-| Unbuffered ping-pong (two goroutines) | ~560 ns / round-trip |
+| Buffered send + recv (same fiber) | ~90 ns |
+| Unbuffered ping-pong (two fibers) | ~560 ns / round-trip |
 | `select` over 2 ready cases | ~120 ns |
 
 Unbuffered ping-pong is within 7% of Go 1.22's `BenchmarkPingPong` on
@@ -260,7 +260,7 @@ if not ok:
 
 ### Don't share a closed-channel object across `run()` calls
 
-`runloom.run(1)` returns when all goroutines are done.  If you keep a
+`runloom.run(1)` returns when all fibers are done.  If you keep a
 closed channel as a module-level singleton across multiple `run()`
 calls, you'll see `close on closed channel` errors on the second
 iteration.  Create channels inside the entry point.

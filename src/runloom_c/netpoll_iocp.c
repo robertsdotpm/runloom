@@ -28,7 +28,7 @@
  * Memory: each in-flight poll holds an AFD_POLL_INFO + an
  * IO_STATUS_BLOCK + an OVERLAPPED slot.  We allocate these per
  * request and free on completion.  At steady state the count
- * equals the number of currently-parked goroutines.
+ * equals the number of currently-parked fibers.
  *
  * AFD struct definitions: cribbed verbatim from wepoll and libuv.
  * Both projects have been doing this since ~2015 with no Windows
@@ -191,7 +191,7 @@ static ULONG runloom_to_afd_events(int events)
                 AFD_POLL_RECEIVE_EXPEDITED;
     if (events & RUNLOOM_NETPOLL_WRITE)
         mask |= AFD_POLL_SEND | AFD_POLL_CONNECT_FAIL;
-    /* LOCAL_CLOSE is always interesting -- the parked goroutine
+    /* LOCAL_CLOSE is always interesting -- the parked fiber
      * needs to be woken if the socket gets closed by another thread. */
     mask |= AFD_POLL_LOCAL_CLOSE;
     return mask;

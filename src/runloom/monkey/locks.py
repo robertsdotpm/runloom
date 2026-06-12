@@ -14,8 +14,8 @@ _real_get_ident = _th.get_ident
 # Low-level _thread primitives.  stdlib internals capture these DIRECTLY
 # (e.g. tempfile: `from _thread import allocate_lock`), bypassing threading.*,
 # so patching only threading.Lock leaves those internal locks real -- and a
-# real lock held by one goroutine across a yielding (offloaded) call while
-# another goroutine blocks on it FREEZES the single scheduler thread (deadlock).
+# real lock held by one fiber across a yielding (offloaded) call while
+# another fiber blocks on it FREEZES the single scheduler thread (deadlock).
 _real_allocate_lock = _thread.allocate_lock
 _real_thread_RLock  = getattr(_thread, "RLock", None)
 
@@ -27,14 +27,14 @@ class CoLock(object):
     unlocked).  The channel's formally-verified cross-hub park/wake gives
     real mutual exclusion across M:N hub threads -- the previous non-atomic
     ``if not self._locked: self._locked = True`` lost updates / deadlocked
-    once goroutines ran on several hubs in parallel.
+    once fibers ran on several hubs in parallel.
 
-    Parking is only legal from a goroutine, so:
-      * goroutine, blocking, no timeout -> Mutex.lock() (parks on contention);
+    Parking is only legal from a fiber, so:
+      * fiber, blocking, no timeout -> Mutex.lock() (parks on contention);
       * non-blocking / timeout / a foreign OS thread (e.g. the
         multiprocessing.Queue feeder) -> try_lock(), spinning cooperatively
-        (goroutine) or with a raw sleep (foreign thread) -- never parks a
-        non-goroutine.
+        (fiber) or with a raw sleep (foreign thread) -- never parks a
+        non-fiber.
     """
     # __weakref__: stdlib _thread.lock is weakref-able; without this slot a
     # weakref.ref(threading.Lock()) raises TypeError under monkey (found by the
@@ -47,11 +47,11 @@ class CoLock(object):
     def acquire(self, blocking=True, timeout=-1):
         if not blocking:
             return self._mu.try_lock()
-        if _in_goroutine():
+        if _in_fiber():
             if timeout is None or timeout < 0:
                 self._mu.lock()             # parks on contention (cooperative)
                 return True
-            # Timed acquire inside a goroutine: cooperative try + sleep so we
+            # Timed acquire inside a fiber: cooperative try + sleep so we
             # never park past the deadline.
             deadline = time.monotonic() + timeout
             while not self._mu.try_lock():
@@ -59,7 +59,7 @@ class CoLock(object):
                     return False
                 runloom.sleep(0.0005)
             return True
-        # Foreign / non-goroutine thread: cannot park; spin on try_lock.
+        # Foreign / non-fiber thread: cannot park; spin on try_lock.
         t0 = time.monotonic()
         while not self._mu.try_lock():
             if timeout is not None and timeout >= 0:
@@ -84,7 +84,7 @@ class CoLock(object):
 
     def _at_fork_reinit(self):
         # Mirror _thread.lock._at_fork_reinit: the child inherits none of the
-        # parent's goroutines, so reset to a fresh unlocked mutex.  Called via
+        # parent's fibers, so reset to a fresh unlocked mutex.  Called via
         # os.register_at_fork by stdlib modules (concurrent.futures.thread,
         # logging, ...) that build a module-global Lock at import time.
         self._mu = runloom_c.Mutex()
@@ -105,7 +105,7 @@ class CoRLock(object):
         self._count = 0
 
     def acquire(self, blocking=True, timeout=-1):
-        cur = runloom.current() if _in_goroutine() else _real_get_ident()
+        cur = runloom.current() if _in_fiber() else _real_get_ident()
         # `self._owner is not None` guard: a fresh/released lock has owner
         # None, and a caller whose identity is also None (e.g. the forked
         # child running threading._after_fork, where no scheduler is live so
@@ -122,7 +122,7 @@ class CoRLock(object):
         return ok
 
     def release(self):
-        cur = runloom.current() if _in_goroutine() else _real_get_ident()
+        cur = runloom.current() if _in_fiber() else _real_get_ident()
         if self._owner != cur:
             # In a forked child runloom.current() returns a different G each
             # call, so a legitimate acquire/release pair (e.g. the CoRLock
@@ -146,7 +146,7 @@ class CoRLock(object):
     # recursively-held lock across a wait; multiprocessing.resource_tracker
     # asserts _recursion_count() > 0.  Without them those paths AttributeError.
     def _is_owned(self):
-        cur = runloom.current() if _in_goroutine() else _real_get_ident()
+        cur = runloom.current() if _in_fiber() else _real_get_ident()
         return self._owner is not None and self._owner == cur
 
     def _recursion_count(self):

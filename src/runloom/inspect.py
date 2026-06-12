@@ -1,23 +1,23 @@
-"""runloom.inspect -- see what every goroutine is doing.
+"""runloom.inspect -- see what every fiber is doing.
 
-The runtime equivalent of Go's `kill -QUIT` goroutine dump and
+The runtime equivalent of Go's `kill -QUIT` fiber dump and
 ``runtime.Stack`` -- the thing you reach for when a process is hung and
-you need to know *which* goroutines are stuck and *where* in your code.
+you need to know *which* fibers are stuck and *where* in your code.
 
     import runloom.inspect as gi
 
-    gi.count()                 # how many goroutines are live
-    gi.goroutines()            # list of per-goroutine dicts
-    gi.goroutines(stacks=True) # ... each with a reconstructed Python stack
-    gi.stack(gid)              # one goroutine's Python stack
+    gi.count()                 # how many fibers are live
+    gi.fibers()            # list of per-fiber dicts
+    gi.fibers(stacks=True) # ... each with a reconstructed Python stack
+    gi.stack(gid)              # one fiber's Python stack
     print(gi.format(stacks=True))   # a formatted, human dump (a string)
     gi.dump()                  # write that dump to stderr
 
-    gi.enable_timestamps()     # track how long each goroutine has been parked
+    gi.enable_timestamps()     # track how long each fiber has been parked
     gi.install_dump_signal()   # SIGQUIT -> dump (works even when wedged)
 
-Each goroutine dict has:
-    id          int        per-goroutine id (Go's goid)
+Each fiber dict has:
+    id          int        per-fiber id (Go's goid)
     state       str        running | runnable | io-wait | sleep |
                            chan-wait | park | done | ...
     blocked_on  str        coarse class: io | timer | chan | sync | running
@@ -27,18 +27,18 @@ Each goroutine dict has:
     age         float|None seconds in the current parked state, if tracking on
     refcount    int
     noyield     bool
-    owner       int        owning OS-thread scheduler (group goroutines by it)
+    owner       int        owning OS-thread scheduler (group fibers by it)
 
 Notes on the Python stack (``stack`` / ``stacks=True``):
   * Under the single-thread scheduler -- which is what ``runloom.aio`` uses --
-    the full stack of any parked goroutine is reconstructed.  asyncio
+    the full stack of any parked fiber is reconstructed.  asyncio
     Tasks additionally expose their own stack via ``Task.get_stack()``;
-    this fills in the raw goroutines (channel ops, the netpoll pump,
+    this fills in the raw fibers (channel ops, the netpoll pump,
     accept loops) that ``asyncio.all_tasks()`` never sees.
-  * Under the default M:N scheduler a parked goroutine can be resumed by
+  * Under the default M:N scheduler a parked fiber can be resumed by
     its hub at any instant, so its stack is withheld (there is no safe way
     to freeze it) -- the structural fields above still tell the story.
-  * The currently-running goroutine has no *saved* stack; use the normal
+  * The currently-running fiber has no *saved* stack; use the normal
     ``traceback`` / ``sys._getframe`` for your own frames.
 """
 import os
@@ -48,43 +48,43 @@ import runloom_c as _core
 
 
 def count():
-    """Number of live goroutines."""
-    return _core.goroutine_count()
+    """Number of live fibers."""
+    return _core.fiber_count()
 
 
 def stack(gid):
-    """Reconstructed Python stack of goroutine `gid`, deepest frame first.
+    """Reconstructed Python stack of fiber `gid`, deepest frame first.
 
     Returns a list of (filename, lineno, funcname) tuples (possibly empty;
     see the module docstring for when a stack is available)."""
-    _repr, frames = _core.goroutine_stack(int(gid))
+    _repr, frames = _core.fiber_stack(int(gid))
     return frames
 
 
 def entry(gid):
-    """repr() of goroutine `gid`'s entry callable, or None if unavailable."""
-    rep, _frames = _core.goroutine_stack(int(gid))
+    """repr() of fiber `gid`'s entry callable, or None if unavailable."""
+    rep, _frames = _core.fiber_stack(int(gid))
     return rep
 
 
-def goroutines(stacks=False):
-    """A snapshot of every live goroutine as a list of dicts.
+def fibers(stacks=False):
+    """A snapshot of every live fiber as a list of dicts.
 
     With stacks=True each dict also gets:
         entry  str|None             the entry callable's repr
         stack  list[(file,line,fn)] deepest frame first
     """
-    gs = _core.goroutines()
+    gs = _core.fibers()
     if stacks:
         for g in gs:
-            rep, frames = _core.goroutine_stack(g["id"])
+            rep, frames = _core.fiber_stack(g["id"])
             g["entry"] = rep
             g["stack"] = frames
     return gs
 
 
 def enable_timestamps(on=True):
-    """Track how long each goroutine has been parked (enables the 'age'
+    """Track how long each fiber has been parked (enables the 'age'
     field).  Costs one monotonic-clock read per park; off by default."""
     _core.set_introspect_timestamps(bool(on))
 
@@ -94,11 +94,11 @@ DEADLOCK_MODES = {"off": 0, "warn": 1, "raise": 2}
 
 def set_deadlock_mode(mode):
     """Control deadlock detection when the single-thread scheduler quiesces
-    with goroutines still blocked on channels/parks (Go's "all goroutines
+    with fibers still blocked on channels/parks (Go's "all fibers
     are asleep - deadlock!").
 
         "off"    do nothing
-        "warn"   print the goroutine dump (default; non-fatal)
+        "warn"   print the fiber dump (default; non-fatal)
         "raise"  raise RuntimeError out of run()
 
     Also settable via env RUNLOOM_DEADLOCK=off|warn|raise.  aio's clean loop
@@ -115,23 +115,23 @@ def deadlock_mode():
     return inv.get(_core.get_deadlock_mode(), "warn")
 
 
-def set_max_goroutines(n):
-    """Cap the number of live goroutines (0 = unlimited, the default).  Over
+def set_max_fibers(n):
+    """Cap the number of live fibers (0 = unlimited, the default).  Over
     the cap, runloom.go / spawn raises RuntimeError -- an admission gate so an
     unbounded spawn loop can't OOM the process.  The caller applies
     backpressure (retry / shed load) on the rejection.  Zero hot-path cost
     when unset; also via env RUNLOOM_MAX_GOROUTINES."""
-    _core.set_max_goroutines(int(n))
+    _core.set_max_fibers(int(n))
 
 
-def max_goroutines():
-    """The current live-goroutine cap (0 = unlimited)."""
-    return _core.get_max_goroutines()
+def max_fibers():
+    """The current live-fiber cap (0 = unlimited)."""
+    return _core.get_max_fibers()
 
 
-def live_goroutines():
+def live_fibers():
     """Goroutines admitted under the cap and not yet finished (0 if no cap)."""
-    return _core.live_goroutines()
+    return _core.live_fibers()
 
 
 PARKED_STATES = ("io-wait", "chan-wait", "park", "sleep")
@@ -147,14 +147,14 @@ def leaked(min_age=60.0, states=PARKED_STATES):
     the first call right after enabling returns nothing useful -- run it from
     a periodic watchdog.
 
-    A long-lived server legitimately has old io-wait goroutines (its accept
-    loops) and old sleep goroutines (tickers); narrow `states` or raise
+    A long-lived server legitimately has old io-wait fibers (its accept
+    loops) and old sleep fibers (tickers); narrow `states` or raise
     `min_age` to suit, e.g. leaked(min_age=300, states=('chan-wait','park'))
-    for "stuck waiting on another goroutine for 5 minutes"."""
+    for "stuck waiting on another fiber for 5 minutes"."""
     if not _core.get_introspect_timestamps():
         enable_timestamps(True)
     out = []
-    for g in goroutines():
+    for g in fibers():
         if (g["state"] in states and g["age"] is not None
                 and g["age"] >= min_age):
             out.append(g)
@@ -162,10 +162,10 @@ def leaked(min_age=60.0, states=PARKED_STATES):
 
 
 def watch_leaks(min_age=60.0, interval=30.0, states=PARKED_STATES, on_leak=None):
-    """Spawn a goroutine that every `interval` seconds reports goroutines
+    """Spawn a fiber that every `interval` seconds reports fibers
     parked longer than `min_age` (see leaked()).  `on_leak(list_of_dicts)`
     is called with any hits; the default logs a one-line summary + the dump
-    to stderr.  Returns the watchdog's goroutine handle.
+    to stderr.  Returns the watchdog's fiber handle.
 
     Run this inside your scheduler (runloom.run / runloom.aio); it uses cooperative
     sleep, so it never blocks an OS thread."""
@@ -175,10 +175,10 @@ def watch_leaks(min_age=60.0, interval=30.0, states=PARKED_STATES, on_leak=None)
 
     def report(hits):
         sys.stderr.write(
-            "runloom: {0} goroutine(s) parked > {1:.0f}s (possible leak):\n"
+            "runloom: {0} fiber(s) parked > {1:.0f}s (possible leak):\n"
             .format(len(hits), min_age))
         for g in hits:
-            sys.stderr.write("    goroutine {0} [{1}{2}]\n".format(
+            sys.stderr.write("    fiber {0} [{1}{2}]\n".format(
                 g["id"], g["state"], _detail(g)))
         sys.stderr.flush()
 
@@ -195,7 +195,7 @@ def watch_leaks(min_age=60.0, interval=30.0, states=PARKED_STATES, on_leak=None)
 
 
 def install_dump_signal(sig=None):
-    """Install a SIGQUIT (or `sig`) handler that dumps all goroutines to
+    """Install a SIGQUIT (or `sig`) handler that dumps all fibers to
     stderr -- Go's GOTRACEBACK / `kill -QUIT <pid>`.
 
     Uses a RAW C handler so the dump fires even when the interpreter is
@@ -210,17 +210,17 @@ def install_crash_handler(level=None, file=None):
     """Install a fatal-signal handler (SIGSEGV / SIGBUS / SIGILL / SIGFPE /
     SIGABRT) that turns a crash into a structured dump instead of a silent core.
 
-    On a fault it CLASSIFIES the faulting address against the per-goroutine
-    guard pages -- a goroutine stack overflow is named and distinguished from a
-    wild pointer -- then dumps the full live-goroutine registry, optionally a
+    On a fault it CLASSIFIES the faulting address against the per-fiber
+    guard pages -- a fiber stack overflow is named and distinguished from a
+    wild pointer -- then dumps the full live-fiber registry, optionally a
     native backtrace and the Python traceback, and finally chains to the default
     handler so a core dump / correct exit code still follow.
 
     `level` selects behaviour (comma/space separated; default from the
-    RUNLOOM_CRASH env var, else just the goroutine dump):
+    RUNLOOM_CRASH env var, else just the fiber dump):
 
-        on / goroutines  dump the goroutine registry (the default)
-        all              goroutines + native backtrace + Python traceback
+        on / fibers  dump the fiber registry (the default)
+        all              fibers + native backtrace + Python traceback
         backtrace        add a native C backtrace (needs execinfo)
         pystack          add the Python traceback (enables faulthandler)
         wait             after the dump, BLOCK for a debugger to attach
@@ -248,9 +248,9 @@ def crash_handler_installed():
 
 
 def enable_stack_advice(on=True):
-    """Turn the per-goroutine-kind stack-usage profiler on or off.
+    """Turn the per-fiber-kind stack-usage profiler on or off.
 
-    While on, every goroutine's actual C-stack high-water mark is measured and
+    While on, every fiber's actual C-stack high-water mark is measured and
     grouped by its entry function, so stack_advice() can tell you how much of
     each kind's reserved stack it really uses and suggest a stack_size.
 
@@ -269,11 +269,11 @@ def stack_advice_enabled():
 
 
 def enable_stack_autosize(on=True, prescan=False):
-    """Turn on the adaptive per-goroutine-kind stack auto-sizer.
+    """Turn on the adaptive per-fiber-kind stack auto-sizer.
 
-    Each goroutine kind (its entry callable) starts *large* the first time it is
+    Each fiber kind (its entry callable) starts *large* the first time it is
     seen; once runloom has measured how much C stack it actually uses, later
-    goroutines of that kind start at the learned size -- "start large, learn
+    fibers of that kind start at the learned size -- "start large, learn
     down". This right-sizes stacks per kind without you setting `stack_size=` by
     hand, while keeping the high-concurrency memory profile (the large first
     starts are returned to the OS on park, so they cost address space, not RSS).
@@ -311,10 +311,10 @@ def reset_stack_advice():
 
 
 def stack_advice():
-    """Return per-goroutine-kind stack usage as a list of dicts, each with:
+    """Return per-fiber-kind stack usage as a list of dicts, each with:
 
         kind       -- "module.qualname (file:line)" of the entry callable
-        samples    -- goroutines of this kind measured
+        samples    -- fibers of this kind measured
         max_hwm    -- deepest C-stack bytes any of them actually used
         reserved   -- the stack_size they ran with
         suggested  -- a stack_size that covers the observed max with margin
@@ -370,16 +370,16 @@ def _detail(g):
 
 
 def format(stacks=True):
-    """Render a human-readable dump of every live goroutine as a string.
+    """Render a human-readable dump of every live fiber as a string.
 
-    The state histogram first, then one block per goroutine (with its
+    The state histogram first, then one block per fiber (with its
     Python stack when stacks=True and one is available)."""
-    gs = sorted(_core.goroutines(), key=lambda g: g["id"])
+    gs = sorted(_core.fibers(), key=lambda g: g["id"])
     lines = []
     hist = {}
     for g in gs:
         hist[g["state"]] = hist.get(g["state"], 0) + 1
-    lines.append("=== runloom goroutines: {0} live ===".format(len(gs)))
+    lines.append("=== runloom fibers: {0} live ===".format(len(gs)))
     for state in sorted(hist):
         lines.append("  {0:<11}{1}".format(state, hist[state]))
     lines.append("")
@@ -387,8 +387,8 @@ def format(stacks=True):
         rep = None
         frames = []
         if stacks:
-            rep, frames = _core.goroutine_stack(g["id"])
-        head = "goroutine {0} [{1}{2}]".format(g["id"], g["state"], _detail(g))
+            rep, frames = _core.fiber_stack(g["id"])
+        head = "fiber {0} [{1}{2}]".format(g["id"], g["state"], _detail(g))
         if rep:
             head += "  {0}".format(rep)
         lines.append(head + ":")
@@ -402,7 +402,7 @@ def dump(file=None, stacks=True):
 
     This is the rich, Python-formatted dump.  For a dump that is safe to
     take from a signal handler / when the interpreter is wedged, use the C
-    primitive ``runloom_c.dump_goroutines(fd)`` (which is what the SIGQUIT
+    primitive ``runloom_c.dump_fibers(fd)`` (which is what the SIGQUIT
     handler from install_dump_signal() runs)."""
     if file is None:
         file = sys.stderr
@@ -413,17 +413,17 @@ def dump(file=None, stacks=True):
 
 def hubs():
     """A snapshot of every M:N hub as a list of dicts -- the "what is each hub
-    doing right now" view, the hub-level companion to goroutines().
+    doing right now" view, the hub-level companion to fibers().
 
     Each entry has:
         id            -- dense hub index
         state         -- 'detached' (released its tstate: a blocking call or
                          idle), 'attached' (running Python / CPU-bound),
                          'suspended' (a stop-the-world is in progress)
-        running_g     -- goid of the goroutine being resumed, or None if idle
+        running_g     -- goid of the fiber being resumed, or None if idle
         dwell_ms      -- how long the current resume has run (None if idle); a
                          large value with state 'detached' is a wedged hub
-        pending       -- goroutines owned + queued on this hub
+        pending       -- fibers owned + queued on this hub
         preempt_requested -- sysmon has asked this hub to yield (a CPU wedge)
         instrumented  -- whether sysmon resume-tracking is live (it is by
                          default on free-threaded 3.13t; running_g / dwell_ms /

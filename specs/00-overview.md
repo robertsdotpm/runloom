@@ -11,7 +11,7 @@ CPython gives you three ways to do concurrency and none of them is what Go has:
   kernel scheduling) caps you at thousands, and the GIL serializes them anyway.
 - **processes** — true parallelism, but heavyweight and isolated.
 
-Go's goroutines are the missing fourth quadrant: **blocking-style code, a
+Go's fibers are the missing fourth quadrant: **blocking-style code, a
 million of them, across every core, cheap to spawn.** runloom builds that for
 Python — specifically for **free-threaded CPython 3.13t** (the GIL-off build),
 where multi-core Python is finally possible.
@@ -21,29 +21,29 @@ no `async`/`await` — and run a million of them in one process across all cores
 
 ## What it is, in one sentence
 
-> A hand-rolled **M:N work-stealing scheduler** (M goroutines on N OS-thread
-> hubs) written in C, where each goroutine is a **stackful coroutine** (its own
+> A hand-rolled **M:N work-stealing scheduler** (M fibers on N OS-thread
+> hubs) written in C, where each fiber is a **stackful coroutine** (its own
 > C stack, switched by an assembly `swap`) carrying a **snapshot of CPython's
-> per-thread execution state**, with a **netpoll** layer that parks goroutines
+> per-thread execution state**, with a **netpoll** layer that parks fibers
 > on fd readiness — plus Python front-ends (`sync`, `monkey`, `aio`) that make
 > existing code run on it unchanged.
 
 ## The M:N:G model (borrowed from Go's runtime)
 
-- **G — goroutine.** A unit of work: a C stack + a CPython tstate snapshot +
+- **G — fiber.** A unit of work: a C stack + a CPython tstate snapshot +
   scheduling bookkeeping (`struct runloom_g`). Refcounted.
 - **Hub (Go's M+P fused).** One OS thread running one scheduler instance: a
-  work-stealing deque of fresh goroutines, a local FIFO of yielded ones, a sleep
+  work-stealing deque of fresh fibers, a local FIFO of yielded ones, a sleep
   heap, and a netpoll. On a free-threaded build, N hubs run Python *in parallel*.
 - **The single-thread scheduler is the degenerate case N=1** — same data
   structures, one thread, no stealing. This is the GIL-build / compatibility
   path and what the asyncio bridge uses.
 
-A goroutine is **created on a hub and pinned to it once it has run**, because a
+A fiber is **created on a hub and pinned to it once it has run**, because a
 suspended coroutine's C stack holds absolute pointers tied to one OS thread (and
 its CPython eval frame caches that thread's tstate). Work-stealing therefore
-steals only **fresh, never-run** goroutines (no live stack yet); woken/yielded
-goroutines route **back to their origin hub**. This trades some load balance for
+steals only **fresh, never-run** fibers (no live stack yet); woken/yielded
+fibers route **back to their origin hub**. This trades some load balance for
 the ability to exist at all — see spec 05.
 
 ## The layer cake
@@ -64,14 +64,14 @@ the ability to exist at all — see spec 05.
   └──────────────────────────────────────────────────────────┘
 ```
 
-Everything above the C line is *optional sugar over the same goroutines*. The
+Everything above the C line is *optional sugar over the same fibers*. The
 three front-ends share one scheduler and can be mixed in one process:
 
 - **`runloom.sync`** — Go-style straight-line code: `go(fn)`, `Chan`, `select`,
   cooperative sockets. No async coloring. (spec 12)
 - **`runloom.monkey`** — `patch()` replaces blocking stdlib leaf calls with
   cooperative ones, so `requests`/`pymysql`/`urllib` run unchanged. (spec 14)
-- **`runloom.aio`** — an asyncio event-loop implementation on top of goroutines,
+- **`runloom.aio`** — an asyncio event-loop implementation on top of fibers,
   so existing `async def` code runs on runloom's scheduler. (spec 13)
 
 ## What you actually get, and what you don't
@@ -84,12 +84,12 @@ The honest trade-offs (these belong in the spec because they shaped the design):
   cannot do. The scheduler itself is Go-class (~47–80 ns/yield); the ceiling is
   the interpreter.
 - **The multi-core win needs 3.13t** (GIL off). On a normal GIL build runloom
-  still runs — cheap spawn, the goroutine model, netpoll — but single-core like
+  still runs — cheap spawn, the fiber model, netpoll — but single-core like
   asyncio. The frame-snapshot also needs the 3.11+ tstate layout.
-- **Memory per goroutine is higher than Go** (~26 KB with a Python handler vs
+- **Memory per fiber is higher than Go** (~26 KB with a Python handler vs
   Go's ~2.5–13 KB) — the CPython object tax (every `socket`/`bytes`/frame carries
   a PyObject header). A pure-C handler (`TCPConn`, `mn_go_c`) hits Go parity.
-- **Preemption only fires at Python bytecode boundaries.** A goroutine inside a
+- **Preemption only fires at Python bytecode boundaries.** A fiber inside a
   tight pure-C call (numpy, a third-party extension) is not preemptible until it
   returns — the same limitation Go has with cgo. The `heavy` monkey category and
   `offload()` are the escape hatches (spec 08).
@@ -98,15 +98,15 @@ The honest trade-offs (these belong in the spec because they shaped the design):
 
 - **Stackful, not stackless.** A stackless design (like asyncio) keeps state in
   heap frame objects and needs `async`/`await` coloring. Stackful keeps a real C
-  stack per goroutine, so user code is ordinary blocking Python and a switch is
-  one `swap` (~22× cheaper than an asyncio loop step). The cost is per-goroutine
+  stack per fiber, so user code is ordinary blocking Python and a switch is
+  one `swap` (~22× cheaper than an asyncio loop step). The cost is per-fiber
   memory, which spec 10 is entirely about minimizing. (spec 01)
 - **Custom asm switch, not greenlet.** greenlet copies the stack on every switch;
-  runloom keeps each goroutine on its own mmap'd stack and swaps the stack
+  runloom keeps each fiber on its own mmap'd stack and swaps the stack
   pointer — ~1.6× faster real switches, and the separate stacks are what make
   guard-page overflow detection and copy-grow possible. (spec 01)
 - **C scheduler, not Python.** An earlier version implemented the scheduler in
-  Python over raw coroutines. It worked for one goroutine but tangled CPython's
+  Python over raw coroutines. It worked for one fiber but tangled CPython's
   `tstate.cframe` chain across stacks and crashed. Multiplexing Python frames
   across C stacks *requires* the per-g tstate snapshot, which must be C. (spec 03)
 - **Free-threaded target, not GIL tricks.** The whole point is real parallelism.

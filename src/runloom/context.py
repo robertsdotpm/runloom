@@ -34,9 +34,9 @@ import runloom_c
 
 
 def _spawn(fn):
-    """Spawn the deadline goroutine on whichever scheduler is active.
+    """Spawn the deadline fiber on whichever scheduler is active.
 
-    WithDeadline/WithTimeout arm a goroutine that fires when the deadline
+    WithDeadline/WithTimeout arm a fiber that fires when the deadline
     passes; it must run under the M:N scheduler (mn_run) too, not only the
     single-thread one -- otherwise the deadline silently never fires under
     mn_run.  mn_hub_count() > 0 means mn_init() is in effect."""
@@ -55,7 +55,7 @@ DEADLINE_EXCEEDED = "deadline_exceeded"
 class _BackgroundCtx(object):
     """The root context.  Never cancelled, never has a deadline.  Used
     as the parent for the first WithCancel/WithTimeout call at the top
-    of a goroutine tree."""
+    of a fiber tree."""
     __slots__ = ("done",)
 
     def __init__(self):
@@ -164,7 +164,7 @@ def WithDeadline(parent, deadline_monotonic):
     def cancel():
         ctx._cancel(CANCELED)
 
-    # Already past?  Cancel synchronously and return; no goroutine.
+    # Already past?  Cancel synchronously and return; no fiber.
     now = _time.monotonic()
     if now >= deadline_monotonic:
         ctx._cancel(DEADLINE_EXCEEDED)

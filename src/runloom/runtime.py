@@ -1,10 +1,10 @@
-"""runloom runtime: scheduler + goroutine helpers.
+"""runloom runtime: scheduler + fiber helpers.
 
 This module delegates to the C scheduler (runloom_c.go / .run / .sched_*)
-for all goroutine state management.  An earlier version implemented the
+for all fiber state management.  An earlier version implemented the
 scheduler in Python on top of raw runloom_c.Coro -- that worked for one
-goroutine at a time but tangled Python's tstate.cframe chain across
-multiple concurrent goroutines, crashing the process on Windows Fibers.
+fiber at a time but tangled Python's tstate.cframe chain across
+multiple concurrent fibers, crashing the process on Windows Fibers.
 The C scheduler does per-g tstate snapshots which is the only correct
 way to multiplex Python frames across stacks.
 
@@ -22,8 +22,8 @@ _prewarmed = False
 
 # --- function-bound stack grow-down (auto-size-down), default-on under M:N --
 #
-# Every goroutine reserves a C stack.  A fixed default (512 KiB) is safe but
-# wasteful: most goroutines touch only a few KiB, so 99% of the reservation is
+# Every fiber reserves a C stack.  A fixed default (512 KiB) is safe but
+# wasteful: most fibers touch only a few KiB, so 99% of the reservation is
 # never paged in.  The grow-down learns each function's real need and reserves
 # only that, bound to the function itself rather than a side table -- "the
 # function IS the database row".
@@ -33,7 +33,7 @@ _prewarmed = False
 #
 # On the first runloom.go(fn, ...) spawn we let the C side use the default
 # stack (a "cold start" we know is safe -- the function completes on it).  The
-# goroutine measures its real C-stack high-water-mark on return (page-granular,
+# fiber measures its real C-stack high-water-mark on return (page-granular,
 # paint-free via mincore) and writes a derived, smaller size back onto fn's
 # __dict__.  The next spawn of that same function reads it and reserves only
 # next_pow2(hwm * MARGIN).  The stored size is the monotone MAX over the first
@@ -42,10 +42,10 @@ _prewarmed = False
 # single dict lookup with zero measurement overhead.
 #
 # We freeze by SPAWN count, not completion count: a tight loop that spawns a
-# burst of goroutines before any of them runs (common single-thread pattern)
+# burst of fibers before any of them runs (common single-thread pattern)
 # would otherwise wrap and mincore-measure every one of them, since no
 # completion ever bumps a completion-based counter mid-burst.  Counting at spawn
-# time caps the measured/wrapped goroutines at GROW_DOWN_SAMPLES regardless of
+# time caps the measured/wrapped fibers at GROW_DOWN_SAMPLES regardless of
 # when they run, so the steady state is always a plain dict lookup.
 #
 # Safety: the learned size only ever SHRINKS from the cold start, a size that
@@ -77,7 +77,7 @@ def set_grow_down(enabled=True):
 
     On by default, and active under M:N scheduling (run(n>1)) only -- single-
     thread run(1) always uses the fixed default stack.  When off, runloom.go()
-    reserves the fixed default stack for every goroutine (no per-function
+    reserves the fixed default stack for every fiber (no per-function
     learning).  Also settable at import via the RUNLOOM_GROW_DOWN=0 environment
     variable.  Per-call ``stack_size=`` pins always win regardless of this
     setting."""
@@ -105,7 +105,7 @@ def grow_down_prepare(real_fn, target):
     stack_size is 0 (let the C side use its default cold start) until real_fn
     has been measured, then its learned size.  target' is either the original
     target (frozen -- enough samples collected) or a thin wrapper that measures
-    the goroutine's stack high-water-mark on return and updates the learned
+    the fiber's stack high-water-mark on return and updates the learned
     size bound to real_fn.  Functions with no writable __dict__ (most C
     builtins) can't carry a learned size, so they fall back to the cold start
     with no wrapper."""
@@ -142,7 +142,7 @@ def grow_down_prepare(real_fn, target):
     # to the real callable so its kind/prescan keying still works when both
     # sizers are enabled, and __name__ keeps inspect/dumps readable.
     measured.__wrapped__ = target
-    measured.__name__ = getattr(target, "__name__", "goroutine")
+    measured.__name__ = getattr(target, "__name__", "fiber")
     return size, measured
 
 
@@ -163,22 +163,22 @@ def gil_enabled():
 
 def prewarm_stdlib():
     """Resolve lazy, deep, *synchronous* stdlib imports on the main
-    thread's (large) stack once, before any goroutine runs on a small
+    thread's (large) stack once, before any fiber runs on a small
     stack.
 
     The motivating case: ``socket.getaddrinfo``'s first call lazily
     imports an ``encodings`` codec through the import machinery
     (``encodings.__init__.search_function`` -> ``importlib._bootstrap``).
     That is a deep, non-yielding C-stack burst -- and because it never
-    yields, the goroutine copy-grow path (which only grows at yield
-    points) cannot rescue it; a small-stack goroutine that hit it cold
+    yields, the fiber copy-grow path (which only grows at yield
+    points) cannot rescue it; a small-stack fiber that hit it cold
     would overflow into the guard page and die.  Resolving it here caches
-    the codec + bootstrap state process-wide, so the path a goroutine
+    the codec + bootstrap state process-wide, so the path a fiber
     later takes through ``getaddrinfo`` is shallow.
 
     Idempotent and best-effort: never raises into the caller.  Called
     from runloom.run() and the aio loop before the scheduler drives any
-    goroutine.  This is the enabler for small default goroutine stacks."""
+    fiber.  This is the enabler for small default fiber stacks."""
     global _prewarmed
     if _prewarmed:
         return
@@ -204,7 +204,7 @@ def prewarm_stdlib():
 
 
 class Goroutine(object):
-    """Public-facing handle for a spawned goroutine.
+    """Public-facing handle for a spawned fiber.
 
     Backed by a runloom_c.G; the .coro property exposes the underlying
     coroutine.  Compat: older code reads .coro.done, .coro.result, etc."""
@@ -212,7 +212,7 @@ class Goroutine(object):
 
     def __init__(self, g, name=None):
         self._g = g
-        self.name = name or "goroutine"
+        self.name = name or "fiber"
 
     @property
     def done(self):
@@ -234,10 +234,10 @@ class Goroutine(object):
 
 
 def go(callable_, *args, **kwargs):
-    """Spawn a goroutine.  Mirrors Go's `go fn(a, b)`: schedules
+    """Spawn a fiber.  Mirrors Go's `go fn(a, b)`: schedules
     fn(*args, **kwargs) to run cooperatively and returns immediately.
 
-    Pass `stack_size=<bytes>` to pin this goroutine's C stack (it is consumed
+    Pass `stack_size=<bytes>` to pin this fiber's C stack (it is consumed
     here, never forwarded to fn); an explicit size always wins over the
     auto-sizer.  Omit it (the default) to let the default / auto-sizer choose.
 
@@ -248,22 +248,22 @@ def go(callable_, *args, **kwargs):
         run-to-completion with no join handle, so this returns None.
 
     The dispatch uses runloom_c.mn_hub_count() rather than a mode flag, so a
-    go() called from anywhere -- inside a hub goroutine or from the main
+    go() called from anywhere -- inside a hub fiber or from the main
     thread while hubs run -- routes correctly (mn_go round-robins a non-hub
     caller).  Spawning via the plain scheduler inside a hub would skip the
     M:N pending-counter accounting that mn_run() joins on, so this dispatch
     is required for correctness, not just convenience.
     """
-    # stack_size= is OUR keyword (the per-goroutine C stack), not an argument
-    # for the target -- pop it before binding args so it pins the goroutine's
+    # stack_size= is OUR keyword (the per-fiber C stack), not an argument
+    # for the target -- pop it before binding args so it pins the fiber's
     # stack instead of being forwarded into the call.  0 = use the default /
     # auto-sizer.  An explicit value always wins over the auto-sizer.
     stack_size = kwargs.pop("stack_size", 0)
-    name = getattr(callable_, "__name__", "goroutine")
+    name = getattr(callable_, "__name__", "fiber")
     if args or kwargs:
         target = lambda: callable_(*args, **kwargs)
         target.__name__ = name
-        # The C auto-sizer keys a goroutine's "kind" (and its crypto/fat-frame
+        # The C auto-sizer keys a fiber's "kind" (and its crypto/fat-frame
         # prescan) on the callable's code identity.  Without this, every
         # arg-bearing go() would look like the SAME kind -- this wrapper lambda
         # -- so they'd share one stack size and the prescan would scan the
@@ -280,7 +280,7 @@ def go(callable_, *args, **kwargs):
     # stack_size always wins and skips the auto-sizer.  See grow_down_prepare.
     #
     # Restricted to M:N (run(n>1)): single-thread run(1) is the GIL/compat path
-    # with modest goroutine counts, where the per-spawn learning is pure overhead
+    # with modest fiber counts, where the per-spawn learning is pure overhead
     # (a tight spawn loop runs nothing until it finishes, so the sampler never
     # amortises) and the memory win -- which only pays off at scale -- isn't on
     # the table.  mn_hub_count() also selects the spawn path below, so read once.
@@ -302,9 +302,9 @@ def go(callable_, *args, **kwargs):
 
 
 def yield_now():
-    """Cooperatively yield the hub so other goroutines run, then resume here.
+    """Cooperatively yield the hub so other fibers run, then resume here.
 
-    The goroutine analogue of ``await asyncio.sleep(0)`` -- a scheduling point
+    The fiber analogue of ``await asyncio.sleep(0)`` -- a scheduling point
     you drop into a long CPU loop so siblings get a turn.  Equivalent to Go's
     ``runtime.Gosched()``."""
     runloom_c.sched_yield_classic()
@@ -316,9 +316,9 @@ yield_ = yield_now
 
 
 def sleep(seconds):
-    """Sleep without blocking the OS thread (other goroutines run).
+    """Sleep without blocking the OS thread (other fibers run).
 
-    Outside a goroutine, falls back to time.sleep so callers can use the
+    Outside a fiber, falls back to time.sleep so callers can use the
     same name in either context."""
     if runloom_c.current_g() is None:
         time.sleep(seconds)
@@ -327,16 +327,16 @@ def sleep(seconds):
 
 
 def blocking(fn, *args, **kwargs):
-    """Run a blocking call without wedging the goroutine's OS thread.
+    """Run a blocking call without wedging the fiber's OS thread.
 
     Offloads fn(*args, **kwargs) to a thread pool and parks the calling
-    goroutine until it returns, so a non-preemptible blocking call (DNS,
+    fiber until it returns, so a non-preemptible blocking call (DNS,
     blocking sockets/files, a GIL-releasing C extension) doesn't strand the
-    other goroutines sharing its hub.  fn runs off any goroutine and must
+    other fibers sharing its hub.  fn runs off any fiber and must
     not call runloom scheduler ops (yield/sleep/channels/wait_fd).
 
     Delegates to runloom_c.blocking, which runs fn inline when the caller
-    isn't on a goroutine -- so the same call is safe in either context."""
+    isn't on a fiber -- so the same call is safe in either context."""
     return runloom_c.blocking(fn, *args, **kwargs)
 
 
@@ -350,25 +350,25 @@ def current():
 
 
 def run(n, main_fn=None):
-    """Run the scheduler on n OS-thread hubs until every goroutine finishes.
+    """Run the scheduler on n OS-thread hubs until every fiber finishes.
 
     The one and only entry point:
 
         run(1, main)   single-thread (M:1): cooperative concurrency, no two
-                       goroutines run Python at once (asyncio / Go GOMAXPROCS=1).
-        run(8, main)   M:N: goroutines spread across 8 hub threads with the GIL
+                       fibers run Python at once (asyncio / Go GOMAXPROCS=1).
+        run(8, main)   M:N: fibers spread across 8 hub threads with the GIL
                        off -> real multi-core parallelism.  Needs a free-threaded
                        build (CPython 3.13t, PYTHON_GIL=0); n > 1 with the GIL on
                        raises rather than silently running serial.
-        run(n)         main_fn omitted -> just drain goroutines you've already
+        run(n)         main_fn omitted -> just drain fibers you've already
                        go()'d (n == 1 is the common drain-only case).
 
-    n is required and explicit: M:N is a different correctness model (goroutines
+    n is required and explicit: M:N is a different correctness model (fibers
     execute Python in parallel, so shared state can race), opted into by typing
     the number -- never by accident or by which interpreter is free-threaded.
-    main_fn, when given, is the root goroutine and may go() more (those dispatch
+    main_fn, when given, is the root fiber and may go() more (those dispatch
     to the hubs automatically).  Collapses the raw mn_init / mn_go / mn_run /
-    mn_fini envelope.  Returns the number of goroutines completed.
+    mn_fini envelope.  Returns the number of fibers completed.
     """
     if isinstance(n, bool) or not isinstance(n, int) or n < 1:
         raise ValueError(

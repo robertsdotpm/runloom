@@ -1,7 +1,7 @@
 /* mn_sched.h -- M:N scheduler skeleton for Phase C.
  *
  * Target: free-threaded Python 3.13t.  N OS threads, each owning a
- * scheduler hub; goroutines created on any thread go into a hub's
+ * scheduler hub; fibers created on any thread go into a hub's
  * local ring queue.  When a hub's ready queue is empty, it tries to
  * steal from a neighbouring hub's queue tail (Chase-Lev work-stealing
  * deque).  Multiple hubs run Python code in parallel because the
@@ -19,7 +19,7 @@
  *   (lock-free); thieves pop the head with CAS.  Standard work-
  *   stealing primitive; ~150 LoC of careful atomics in C.
  *
- *   Global goroutine pool: thread-safe stack of fresh G structs so
+ *   Global fiber pool: thread-safe stack of fresh G structs so
  *   runloom_mn_go from outside any hub can place a g without contending.
  *
  *   Sleep heap: still per-hub.  Sleep duration includes a check for
@@ -34,7 +34,7 @@
  *   tie them to a single OS thread.  Migration would need to suspend,
  *   re-create on the target thread, restore -- doable but adds
  *   overhead Go doesn't pay.  Work-stealing here actually steals
- *   READY goroutines (which haven't run yet, so no stack to migrate)
+ *   READY fibers (which haven't run yet, so no stack to migrate)
  *   rather than active ones.
  *
  *   Wake interrupts: when a hub steals work, it needs to inform other
@@ -54,18 +54,18 @@
 struct runloom_iouring_ring;
 
 int runloom_mn_init(int n_threads);
-/* stack_size: per-goroutine C-stack override in bytes; 0 = the hub default.
+/* stack_size: per-fiber C-stack override in bytes; 0 = the hub default.
  * Use a larger value for a g that runs a deep, non-yielding C burst (cold
  * imports, terminfo/OpenSSL init) that the copy-grow can't rescue mid-burst. */
 PyObject *runloom_mn_go(PyObject *callable, size_t stack_size);
-/* Bulk-spawn n goroutines all running `callable`, looping the spawn core in C
+/* Bulk-spawn n fibers all running `callable`, looping the spawn core in C
  * (skips n Python->C dispatches + per-call arg parsing).  indexed != 0 calls
- * each as callable(i) for i in 0..n-1 (per-goroutine arg); 0 calls callable().
+ * each as callable(i) for i in 0..n-1 (per-fiber arg); 0 calls callable().
  * Returns 0, or -1 with a Python error set on partial failure (already-created
- * goroutines still run). */
+ * fibers still run). */
 int runloom_mn_go_n(PyObject *callable, long n, size_t stack_size, int indexed);
 /* C-only spawn: no Python callable, just a function + arg.  Distributes
- * goroutines across hubs round-robin (same as runloom_mn_go).  Returns 0 on
+ * fibers across hubs round-robin (same as runloom_mn_go).  Returns 0 on
  * success, -1 with errno on failure (ENOMEM, EINVAL). */
 int runloom_mn_go_c(runloom_c_entry_fn fn, void *arg);
 Py_ssize_t runloom_mn_run(void);
@@ -100,8 +100,8 @@ int runloom_mn_hub_count(void);
  * A point-in-time view of every hub's scheduler state, for answering
  * "what is each hub doing / is any hub wedged, on what, for how long".
  * Every field is a lock-free read of a per-hub atomic; for a hub that is
- * DETACHED-wedged (a goroutine inside a non-cooperative blocking call) it
- * ALSO best-effort fills `blocked_at` with the running goroutine's top
+ * DETACHED-wedged (a fiber inside a non-cooperative blocking call) it
+ * ALSO best-effort fills `blocked_at` with the running fiber's top
  * Python frame -- the blocking call site -- read under a handoff-rescue
  * lockout (see mn_sched_hubinfo.c.inc for the safety argument). */
 typedef struct runloom_hub_info {
@@ -133,7 +133,7 @@ void *runloom_mn_current_hub_opaque(void);
  * parker pool selector to look up the right pool. */
 int runloom_mn_hub_id_of(void *hub_opaque);
 
-/* Return the goroutine currently running on this thread's hub (or
+/* Return the fiber currently running on this thread's hub (or
  * NULL if not in a hub or no g is running).  Netpoll's wait_fd uses
  * this -- it can't read runloom_sched_t::current because that's the
  * single-thread sched's slot, not the per-hub slot. */
@@ -182,7 +182,7 @@ struct runloom_iouring_ring *runloom_mn_current_iouring_ring(void);
  * inside the fatal-signal crash handler.  Async-signal-safe: only atomic/plain
  * stores to the loop-stop flags.  A hub thread that has faulted and is driving
  * the crash dump must NOT be treated as a recoverable wedge -- otherwise the
- * handoff rescue adopts its goroutines and steals the faulting g away before
+ * handoff rescue adopts its fibers and steals the faulting g away before
  * the handler's chain-out re-faults and cores, leaving the process limping
  * (service dead, no core).  See runloom_crash.c / crash_handler. */
 void runloom_sched_freeze_for_crash(void);

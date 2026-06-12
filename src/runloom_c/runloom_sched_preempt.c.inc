@@ -10,7 +10,7 @@ static int runloom_preempt_yield_cb(void *user)
     (void)user;
     /* If we're in a hub, yield via M:N path.  Otherwise check the
      * single-thread global scheduler.  Either way, this is a no-op
-     * when no goroutine is currently running on this tstate. */
+     * when no fiber is currently running on this tstate. */
     if (runloom_mn_yield_current()) {
         return 0;
     }

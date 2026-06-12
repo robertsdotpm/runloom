@@ -1,5 +1,5 @@
 /* Part of module.c -- #included into that translation unit.  Python
- * bindings for the goroutine registry / dump (runloom_introspect.c). */
+ * bindings for the fiber registry / dump (runloom_introspect.c). */
 
 /* Build one {...} dict for a snapshot entry.  Returns a new ref or NULL
  * (exception set). */
@@ -52,7 +52,7 @@ static PyObject *runloom_g_info_to_dict(const runloom_g_info_t *o, double now)
     return d;
 }
 
-static PyObject *m_goroutines(PyObject *self, PyObject *unused)
+static PyObject *m_fibers(PyObject *self, PyObject *unused)
 {
     runloom_g_info_t *arr;
     long n = 0, i;
@@ -60,31 +60,31 @@ static PyObject *m_goroutines(PyObject *self, PyObject *unused)
     double now;
     (void)self; (void)unused;
 
-    arr = runloom_goroutine_snapshot(&n);
+    arr = runloom_fiber_snapshot(&n);
     if (arr == NULL && n == 0) {
         /* Empty (or not yet initialised) -- return [], not an error. */
         return PyList_New(0);
     }
     now = runloom_sched_monotonic_seconds();
     list = PyList_New(0);
-    if (list == NULL) { runloom_goroutine_snapshot_free(arr, n); return NULL; }
+    if (list == NULL) { runloom_fiber_snapshot_free(arr, n); return NULL; }
     for (i = 0; i < n; i++) {
         PyObject *d = runloom_g_info_to_dict(&arr[i], now);
         if (d == NULL || PyList_Append(list, d) < 0) {
             Py_XDECREF(d); Py_DECREF(list);
-            runloom_goroutine_snapshot_free(arr, n);
+            runloom_fiber_snapshot_free(arr, n);
             return NULL;
         }
         Py_DECREF(d);
     }
-    runloom_goroutine_snapshot_free(arr, n);
+    runloom_fiber_snapshot_free(arr, n);
     return list;
 }
 
-static PyObject *m_goroutine_count(PyObject *self, PyObject *unused)
+static PyObject *m_fiber_count(PyObject *self, PyObject *unused)
 {
     (void)self; (void)unused;
-    return PyLong_FromLong(runloom_goroutine_count());
+    return PyLong_FromLong(runloom_fiber_count());
 }
 
 /* Build one {...} dict for a hub snapshot entry (runloom.inspect.hubs()).
@@ -164,24 +164,24 @@ static PyObject *m_mn_hub_states(PyObject *self, PyObject *unused)
     return list;
 }
 
-static PyObject *m_dump_goroutines(PyObject *self, PyObject *args)
+static PyObject *m_dump_fibers(PyObject *self, PyObject *args)
 {
     int fd = 2;
     (void)self;
     if (!PyArg_ParseTuple(args, "|i", &fd)) return NULL;
     Py_BEGIN_ALLOW_THREADS
-    runloom_dump_goroutines_fd(fd);
+    runloom_dump_fibers_fd(fd);
     Py_END_ALLOW_THREADS
     Py_RETURN_NONE;
 }
 
-static PyObject *m_goroutine_stack(PyObject *self, PyObject *arg)
+static PyObject *m_fiber_stack(PyObject *self, PyObject *arg)
 {
     long long id;
     (void)self;
     id = PyLong_AsLongLong(arg);
     if (id == -1 && PyErr_Occurred()) return NULL;
-    return runloom_goroutine_frames_by_id(id);
+    return runloom_fiber_frames_by_id(id);
 }
 
 static PyObject *m_introspect_timestamps(PyObject *self, PyObject *arg)
@@ -219,32 +219,32 @@ static PyObject *m_get_deadlock_mode(PyObject *self, PyObject *unused)
 static PyObject *m_count_deadlocked(PyObject *self, PyObject *unused)
 {
     (void)self; (void)unused;
-    return PyLong_FromLong(runloom_count_deadlockable_goroutines(NULL));
+    return PyLong_FromLong(runloom_count_deadlockable_fibers(NULL));
 }
 
-static PyObject *m_set_max_goroutines(PyObject *self, PyObject *arg)
+static PyObject *m_set_max_fibers(PyObject *self, PyObject *arg)
 {
     long n;
     (void)self;
     n = PyLong_AsLong(arg);
     if (n == -1 && PyErr_Occurred()) return NULL;
-    runloom_set_max_goroutines(n);
+    runloom_set_max_fibers(n);
     Py_RETURN_NONE;
 }
 
-static PyObject *m_get_max_goroutines(PyObject *self, PyObject *unused)
+static PyObject *m_get_max_fibers(PyObject *self, PyObject *unused)
 {
     (void)self; (void)unused;
-    return PyLong_FromLong(runloom_get_max_goroutines());
+    return PyLong_FromLong(runloom_get_max_fibers());
 }
 
-static PyObject *m_live_goroutines(PyObject *self, PyObject *unused)
+static PyObject *m_live_fibers(PyObject *self, PyObject *unused)
 {
     (void)self; (void)unused;
-    return PyLong_FromLong(runloom_live_goroutines());
+    return PyLong_FromLong(runloom_live_fibers());
 }
 
-/* ---- SIGQUIT-style goroutine dump (Go's GOTRACEBACK) ----
+/* ---- SIGQUIT-style fiber dump (Go's GOTRACEBACK) ----
  *
  * A RAW C signal handler so the dump works even when the interpreter is
  * wedged (a Python signal.signal handler only runs at a bytecode boundary,
@@ -255,7 +255,7 @@ static PyObject *m_live_goroutines(PyObject *self, PyObject *unused)
 static void runloom_traceback_signal_handler(int sig)
 {
     (void)sig;
-    runloom_dump_goroutines_fd(2);
+    runloom_dump_fibers_fd(2);
 }
 #else
 /* Windows analog of the SIGQUIT dump: a console control handler that fires on
@@ -266,7 +266,7 @@ static void runloom_traceback_signal_handler(int sig)
 static BOOL WINAPI runloom_console_ctrl_handler(DWORD ctrl_type)
 {
     if (ctrl_type == CTRL_BREAK_EVENT) {
-        runloom_dump_goroutines_fd(2);
+        runloom_dump_fibers_fd(2);
         return TRUE;
     }
     return FALSE;   /* leave Ctrl-C / close / logoff / shutdown to the default */

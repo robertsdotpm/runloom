@@ -1,4 +1,4 @@
-"""getpass.getpass is offloaded to a pool worker inside a goroutine (so the
+"""getpass.getpass is offloaded to a pool worker inside a fiber (so the
 human-latency-bound tty read doesn't wedge the hub), and runs inline otherwise.
 
 The real getpass reads /dev/tty, which we can't drive in a test, so we stand a
@@ -32,7 +32,7 @@ def _with_fake(body):
         _getpass_mod.getpass = real
 
 
-def test_offloaded_in_goroutine():
+def test_offloaded_in_fiber():
     main_tid = threading.get_ident()
 
     def body(seen):
@@ -50,12 +50,12 @@ def test_offloaded_in_goroutine():
     _with_fake(body)
 
 
-def test_inline_outside_goroutine():
+def test_inline_outside_fiber():
     main_tid = threading.get_ident()
 
     def body(seen):
         assert _getpass_mod.getpass("p") == "s3cret"
-        assert seen["tid"] == main_tid       # inline -- no offload off a goroutine
+        assert seen["tid"] == main_tid       # inline -- no offload off a fiber
 
     _with_fake(body)
 

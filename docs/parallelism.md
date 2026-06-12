@@ -1,22 +1,22 @@
 # M:N parallelism
 
-The default runloom scheduler runs **all** goroutines on a single OS
+The default runloom scheduler runs **all** fibers on a single OS
 thread.  This is the right model for I/O-bound work -- there's no
 contention, no synchronisation, no cache-line ping-pong, and context
 switches are 80 ns of asm.
 
-But if you have CPU-bound goroutines that you want to spread across
+But if you have CPU-bound fibers that you want to spread across
 multiple cores, you need OS threads.  runloom's **M:N scheduler** (M
-goroutines, N hub threads, work-stealing) gives you that on
+fibers, N hub threads, work-stealing) gives you that on
 free-threaded Python 3.13t.
 
 ## When to use M:N
 
 **Use it when:**
 
-- You're running CPU-bound goroutines (hashing, parsing, computation)
+- You're running CPU-bound fibers (hashing, parsing, computation)
   and have a free-threaded 3.13t build.
-- You want goroutine-cheap parallelism without thread-pool ceremony.
+- You want fiber-cheap parallelism without thread-pool ceremony.
 
 **Skip it when:**
 
@@ -33,7 +33,7 @@ import runloom
 runloom.mn_init(n=8)         # start 8 hub threads
                                 # n defaults to cpu_count() if omitted
 
-runloom.mn_go(fn)            # spawn a goroutine on a round-robin hub
+runloom.mn_go(fn)            # spawn a fiber on a round-robin hub
                                 # returns a G handle
 
 runloom.mn_run()             # wait for everyone; returns total completed
@@ -77,19 +77,19 @@ Measured on 3.13t (GIL disabled, Linux x86_64, 8 cores):
 
 For comparison: `threading.Thread` × 8 on the same hardware hits
 2.24 M ops/s.  runloom matches that within ~5% while keeping the
-goroutine model (cheap spawn, no per-thread overhead).
+fiber model (cheap spawn, no per-thread overhead).
 
 ## How it works
 
 Each hub thread:
 
 - Owns a Chase-Lev work-stealing deque (`cldeque.c`).
-- Pushes new goroutines locally; other hubs **steal** from the
+- Pushes new fibers locally; other hubs **steal** from the
   bottom when their own deque is empty.
 - Has a per-hub MPSC submission queue for external producers
   (so `mn_go` from outside any hub doesn't race the deque owner).
-- Routes goroutines back to the originating hub on yield/sleep/I/O
-  wake -- this preserves locality (the goroutine's per-thread cache
+- Routes fibers back to the originating hub on yield/sleep/I/O
+  wake -- this preserves locality (the fiber's per-thread cache
   warms one hub, not all of them).
 
 When a hub has no work and no other hub does either, the hub
@@ -173,12 +173,12 @@ by four different hub threads simultaneously (subject to scheduling).
   MPSC queue + work-steal-eligible push.  Comparable to single-thread
   `go`.
 - **Yield**: per-hub yield is the same ~80 ns swap.  No cross-thread
-  synchronisation on yield since goroutines stay on their origin hub.
+  synchronisation on yield since fibers stay on their origin hub.
 - **Steal**: ~1 µs to steal from another hub's deque (atomic CAS on
   the deque bottom).  Happens only when the local deque is empty.
 - **Wake**: ~3 µs to wake a hub blocked on its CV.
 
-For workloads with strong locality (a goroutine that does
+For workloads with strong locality (a fiber that does
 all-the-things on one connection), most of the cost stays per-hub
 and steals are rare.  For workloads that fan out to many small tasks
 (microservice-style), steals are more frequent but the cost is still
@@ -187,7 +187,7 @@ dominated by the actual work.
 ## Pairing with preemption
 
 [Time-sliced preemption](preemption.md) works with M:N -- each hub has
-its own preemption timer.  If you've got a goroutine that doesn't
+its own preemption timer.  If you've got a fiber that doesn't
 yield naturally, preemption applies on whichever hub it's running on
 without affecting the others.
 
@@ -217,7 +217,7 @@ sends to, you'll see scaling fall off.  Mitigations:
 
 ### Goroutine routing back to origin hub
 
-If goroutine A on hub 1 parks for I/O, and the I/O wake fires while
+If fiber A on hub 1 parks for I/O, and the I/O wake fires while
 hub 1 is busy, A waits for hub 1 to be free -- even if hub 2 is idle.
 This preserves locality at the cost of some load balance.  In
 practice this evens out under steady load.

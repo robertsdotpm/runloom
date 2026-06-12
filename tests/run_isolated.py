@@ -39,7 +39,7 @@ REPO = os.path.dirname(HERE)
 # trips this and is reported as TIMEOUT rather than blocking the whole run.
 DEFAULT_TIMEOUT = int(os.environ.get("RUNLOOM_TEST_TIMEOUT", "300"))
 
-# Files that need a longer ceiling (soak / stress spin many goroutines).
+# Files that need a longer ceiling (soak / stress spin many fibers).
 SLOW_FILES = {
     "test_soak.py": 900,
     "test_stress.py": 600,

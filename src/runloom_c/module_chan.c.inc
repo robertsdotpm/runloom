@@ -174,7 +174,7 @@ static PyTypeObject RunloomChanType = {
 };
 
 /* ============================================================ */
-/* RunloomMutex -- an M:N-safe goroutine mutex.                    */
+/* RunloomMutex -- an M:N-safe fiber mutex.                    */
 /*                                                                */
 /* A buffered channel of capacity 1 holding one token IS a mutex: */
 /*   unlocked = the token sits in the buffer                      */
@@ -187,7 +187,7 @@ static PyTypeObject RunloomChanType = {
 /* (Spin/CBMC/GenMC) cross-hub park/wake + publish ordering rather */
 /* than hand-rolling a second lock-free primitive.  acquire() only */
 /* ever BLOCKS (chan_recv) when the Python wrapper knows it runs   */
-/* inside a goroutine; foreign OS threads must use try_lock (which */
+/* inside a fiber; foreign OS threads must use try_lock (which */
 /* never parks).  A bare-CAS uncontended fast path is a possible   */
 /* follow-up -- it would need its own GenMC harness to land.       */
 /* ============================================================ */
@@ -224,7 +224,7 @@ static void RunloomMutex_dealloc(RunloomMutex *self)
 }
 
 /* lock(): take the token, blocking until available.  MUST be called from a
- * goroutine (it can park).  The Python wrapper guarantees that; a foreign
+ * fiber (it can park).  The Python wrapper guarantees that; a foreign
  * thread uses try_lock instead. */
 static PyObject *RunloomMutex_lock(RunloomMutex *self, PyObject *unused)
 {
@@ -289,7 +289,7 @@ static PyObject *RunloomMutex_exit(RunloomMutex *self, PyObject *args)
 
 static PyMethodDef RunloomMutex_methods[] = {
     {"lock",     (PyCFunction)RunloomMutex_lock,     METH_NOARGS,
-     "Acquire, blocking until available.  Call only from a goroutine."},
+     "Acquire, blocking until available.  Call only from a fiber."},
     {"try_lock", (PyCFunction)RunloomMutex_try_lock, METH_NOARGS,
      "Try to acquire without blocking.  Returns True/False.  Foreign-thread safe."},
     {"unlock",   (PyCFunction)RunloomMutex_unlock,   METH_NOARGS,
@@ -307,7 +307,7 @@ static PyTypeObject RunloomMutexType = {
     .tp_basicsize = sizeof(RunloomMutex),
     .tp_dealloc = (destructor)RunloomMutex_dealloc,
     .tp_flags = Py_TPFLAGS_DEFAULT,
-    .tp_doc = "M:N-safe goroutine mutex (channel-backed).  lock/unlock/"
+    .tp_doc = "M:N-safe fiber mutex (channel-backed).  lock/unlock/"
               "try_lock/locked.",
     .tp_methods = RunloomMutex_methods,
     .tp_init = (initproc)RunloomMutex_init,
@@ -317,14 +317,14 @@ static PyTypeObject RunloomMutexType = {
 /* ---- blocking(): run a Python callable on the blocking-offload pool ----
  *
  * Generalises the C-level getaddrinfo offload to any user-named blocking
- * call: blocking(fn, *args, **kwargs) parks the calling goroutine and runs
+ * call: blocking(fn, *args, **kwargs) parks the calling fiber and runs
  * fn(*args, **kwargs) on a pool thread, so a blocking stdlib/C-extension
- * call doesn't wedge the goroutine's hub.  The pool worker has no thread
+ * call doesn't wedge the fiber's hub.  The pool worker has no thread
  * state of its own, so it PyGILState_Ensure()s one to run fn; fn's own
  * blocking section releases the GIL (as socket / time.sleep / blocking C
- * extensions do), which is what lets other goroutines keep running.
+ * extensions do), which is what lets other fibers keep running.
  *
- * fn runs OFF any goroutine, so it must not call runloom scheduler ops
+ * fn runs OFF any fiber, so it must not call runloom scheduler ops
  * (sched_yield, channels, wait_fd, ...) -- it is for plain blocking work. */
 typedef struct {
     PyObject *fn;

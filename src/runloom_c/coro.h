@@ -70,12 +70,12 @@ void runloom_coro_yield(void);
 int runloom_coro_done(const runloom_coro_t *c);
 
 /* This coro's stack size in bytes, or 0 if the backend has no
- * introspectable stack (Fibers).  Used by the goroutine dump. */
+ * introspectable stack (Fibers).  Used by the fiber dump. */
 size_t runloom_coro_stack_size(const runloom_coro_t *c);
 
 /* Lowest usable byte of this coro's stack (the PROT_NONE guard page is the page
  * immediately below it), or NULL on backends with no introspectable stack.
- * Used by the crash handler to map a faulting address back to a goroutine. */
+ * Used by the crash handler to map a faulting address back to a fiber. */
 void *runloom_coro_stack_base(const runloom_coro_t *c);
 
 /* Size in bytes of the guard page below each coro stack (0 if the backend
@@ -84,7 +84,7 @@ size_t runloom_coro_guard_size(void);
 
 /* Force park-time idle-page reclaim on/off programmatically (in addition to the
  * RUNLOOM_STACK_PARK_DONTNEED env).  The stack auto-sizer enables it so that
- * starting goroutines large stays RSS-free. */
+ * starting fibers large stays RSS-free. */
 void runloom_coro_park_reclaim_set(int on);
 
 /* Backend identifier ("fibers", "ucontext"); useful for tests. */
@@ -97,14 +97,14 @@ void runloom_coro_thread_fini(void);
 
 /* Pre-warm the stack pool with n pre-mmaped stacks of the given
  * size.  Eliminates the first-spawn mmap stall for servers that
- * know they're about to spawn a known number of goroutines.
+ * know they're about to spawn a known number of fibers.
  * No-op on the Fibers backend (CreateFiber handles its own pool).
  * No-op if n <= 0.  Returns the number actually pre-allocated. */
 int runloom_coro_warmup(size_t stack_size, int n);
 
 /* Drop the physical page frames of c's currently-idle (low) stack
  * region without releasing the stack -- the coro stays bound to its
- * goroutine.  The scheduler calls this when a g parks on a waiter
+ * fiber.  The scheduler calls this when a g parks on a waiter
  * (netpoll/chan/sleep/park_safe); the next resume re-faults the few
  * touched pages (~one page fault).  MUST be called only while c is
  * SUSPENDED (so its saved stack pointer is valid).  No-op unless
@@ -146,7 +146,7 @@ void runloom_coro_madvise_idle(runloom_coro_t *c);
 void runloom_coro_paint_set(int enabled);
 int  runloom_coro_paint_enabled(void);
 
-/* Opt-in security scrub of recycled goroutine stacks (default off). */
+/* Opt-in security scrub of recycled fiber stacks (default off). */
 void runloom_coro_scrub_set(int enabled);
 int  runloom_coro_scrub_enabled(void);
 

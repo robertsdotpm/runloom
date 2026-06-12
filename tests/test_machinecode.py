@@ -1,9 +1,9 @@
 """runloom_c.MachineCode -- execute runtime-provided native machine code.
 
-A goroutine runs on a real C stack, so a JIT'd blob can be called straight from
+A fiber runs on a real C stack, so a JIT'd blob can be called straight from
 one: MachineCode maps the bytes W^X and a call jumps the CPU directly into them
 (no interpreter).  These tests assemble tiny x86-64 blobs by hand and check the
-results from the main thread and from goroutines (M:1 and M:N).
+results from the main thread and from fibers (M:1 and M:N).
 
 Execution is x86-64-only (the blobs are architecture-specific machine code); on
 other arches the type is still checked but execution is skipped.  x86-64 has TWO
@@ -90,7 +90,7 @@ class TestMachineCodeExec(unittest.TestCase):
             with self.assertRaises(TypeError):
                 fn(1, 2, 3, 4, 5, 6, 7)
 
-    def test_runs_in_single_goroutine(self):
+    def test_runs_in_single_fiber(self):
         box = []
 
         def g():
@@ -102,8 +102,8 @@ class TestMachineCodeExec(unittest.TestCase):
         runloom_c.run()
         self.assertEqual(box, [144])
 
-    def test_runs_across_mn_goroutines(self):
-        # Each goroutine JITs + calls native code on its own swapped C stack,
+    def test_runs_across_mn_fibers(self):
+        # Each fiber JITs + calls native code on its own swapped C stack,
         # in genuine parallel under M:N.  Results come back over a Chan.
         N = 8
         ch = runloom_c.Chan()

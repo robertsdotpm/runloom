@@ -10,12 +10,12 @@ real cooperative-semantics bug in the monkey layer, found by code we didn't
 write to be kind to it.  This mirrors ``tests/test_asyncio_*_conformance.py``,
 which runs CPython's ``test_asyncio`` against ``RunloomEventLoop``.
 
-Mechanics: each CPython test method is run inside its own runloom goroutine (the
+Mechanics: each CPython test method is run inside its own runloom fiber (the
 ``monkey`` patches only cooperate under the C scheduler) with a LARGE stack.
 The large stack is required, not cosmetic: CPython test bodies do deep,
 non-yielding imports (e.g. ``mock.patch`` -> ``importlib._find_and_load``) and
 C-stack-heavy work; a non-yielding burst can't be rescued by the copy-grow
-path (which only grows at yield points), so on a default small goroutine stack
+path (which only grows at yield points), so on a default small fiber stack
 it overflows into the guard page and SIGSEGVs.  ``stack_size=`` is the
 documented knob for exactly this ("entry function known to recurse deeply or
 call into a C extension that consumes large C stack").
@@ -45,7 +45,7 @@ STACK = int(os.environ.get("RUNLOOM_STDLIB_STACK", str(8 << 20)))
 
 # Some CPython stdlib test modules (threading lock_tests, queue, socket) drive
 # their blocking primitives from REAL OS threads -- the producer/consumer or
-# client/server is a `threading.Thread`, not a goroutine.  Under the cooperative
+# client/server is a `threading.Thread`, not a fiber.  Under the cooperative
 # model that's "best-effort coordination with real OS threads" (monkey's own
 # words), and those tests can DEADLOCK: a real thread blocked in a cooperative
 # primitive needs the single-thread scheduler to wake it, but the scheduler is
@@ -63,8 +63,8 @@ class MonkeyHosted(object):
     """Mixin -- put FIRST in the MRO, before the CPython TestCase.
 
     Overrides ``run`` so each test method executes inside its own big-stack
-    runloom goroutine on the MAIN thread (setUp / the test / tearDown all in the
-    one goroutine), driven by the C scheduler the way real ``runloom.monkey``
+    runloom fiber on the MAIN thread (setUp / the test / tearDown all in the
+    one fiber), driven by the C scheduler the way real ``runloom.monkey``
     users drive their code.  Main-thread (not a per-test worker) on purpose:
     CPython's own tests run a thread-leak detector in tearDown, and a per-test
     helper thread would dangle and trip it with false failures.  A genuine

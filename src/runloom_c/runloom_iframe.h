@@ -2,7 +2,7 @@
  *
  * The public C API can read the TOP interpreter frame of a suspended
  * execution context (PyUnstable_InterpreterFrame_GetCode/GetLine) but
- * exposes no way to walk to the previous frame -- so a goroutine dump
+ * exposes no way to walk to the previous frame -- so a fiber dump
  * could only ever show one line of stack.  This tiny module reaches into
  * the internal frame layout (internal/pycore_frame.h) to walk the whole
  * chain, and is compiled as its OWN translation unit so the Py_BUILD_CORE
@@ -10,7 +10,7 @@
  *
  * The walk itself is unsafe in general (frames mutate as code runs); the
  * caller is responsible for stability -- runloom_introspect_frames claims the
- * goroutine (M:N) or relies on single-thread ownership before calling. */
+ * fiber (M:N) or relies on single-thread ownership before calling. */
 #ifndef RUNLOOM_IFRAME_H
 #define RUNLOOM_IFRAME_H
 
@@ -34,10 +34,10 @@ typedef int (*runloom_iframe_cb)(PyCodeObject *code, int line, void *ctx);
 int runloom_iframe_walk(void *top, int max, runloom_iframe_cb cb, void *ctx);
 
 /* True when `ts` is currently executing CPython object-destruction machinery
- * that must not be interrupted by a goroutine switch -- a tp_dealloc and its
+ * that must not be interrupted by a fiber switch -- a tp_dealloc and its
  * weakref callbacks / finalizers, driven by either the trashcan unwind
  * (tstate->delete_later) or the free-threaded biased-refcount cross-thread
- * merge drain (brc.local_objects_to_merge).  Suspending a goroutine here would
+ * merge drain (brc.local_objects_to_merge).  Suspending a fiber here would
  * freeze a half-finished destructor on its coro stack while the hub thread
  * reaches a GC-safe point, letting a concurrent stop-the-world GC / QSBR
  * reclaim corrupt the partially-destroyed objects.  Reaches into internal
@@ -45,14 +45,14 @@ int runloom_iframe_walk(void *top, int max, runloom_iframe_cb cb, void *ctx);
  * pre-3.13 / non-core builds. */
 int runloom_tstate_in_destruction(PyThreadState *ts);
 
-/* Critical-section suspend/restore across a goroutine swap (free-threaded
- * 3.13t only; no-op on GIL / pre-3.13 builds).  A goroutine can park while
+/* Critical-section suspend/restore across a fiber swap (free-threaded
+ * 3.13t only; no-op on GIL / pre-3.13 builds).  A fiber can park while
  * holding a CPython per-object critical section (e.g. a dict's ma_mutex held
- * during a key __eq__ that yields).  runloom runs many goroutines on one hub
+ * during a key __eq__ that yields).  runloom runs many fibers on one hub
  * tstate and a cooperative park swaps the C stack WITHOUT detaching the
  * tstate, so unless we mirror CPython's detach-time behaviour the held mutex
  * stays locked while the g is parked -- every other hub then deadlocks on it,
- * and the shared tstate's critical-section chain leaks across goroutines.
+ * and the shared tstate's critical-section chain leaks across fibers.
  *   suspend(): release all CS mutexes held on `tstate`, return the saved chain
  *              (tagged inactive) and clear tstate->critical_section.
  *   restore(): put the saved chain back and re-lock the top section.

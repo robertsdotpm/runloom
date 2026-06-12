@@ -77,14 +77,14 @@ class _LoopRunMixin(object):
             else:
                 raise TypeError("argument must be a Future or coroutine")
         # Resolve deep, non-yielding stdlib imports (e.g. getaddrinfo's
-        # first-call codec import) before any goroutine runs them on a small
+        # first-call codec import) before any fiber runs them on a small
         # stack -- see prewarm_stdlib.
         _runtime.prewarm_stdlib()
         # Clear any stale stop request from a prior run on this loop.
         self._stopping = False
         if not future.done():
             # When the user-visible future completes, break our drain (matches
-            # asyncio.run -- don't block on background accept/ticker goroutines
+            # asyncio.run -- don't block on background accept/ticker fibers
             # the user didn't join).
             def _stop_on_done(_fut):
                 box = self._ka_stop_box
@@ -113,7 +113,7 @@ class _LoopRunMixin(object):
             finally:
                 future.remove_done_callback(_stop_on_done)
         # IMPORTANT: do NOT cancel outstanding tasks / sched_reset here.
-        # run_until_complete must leave other tasks + parked goroutines ALIVE
+        # run_until_complete must leave other tasks + parked fibers ALIVE
         # (IsolatedAsyncioTestCase / asyncio.Runner reuse one loop across
         # asyncSetUp / test / asyncTearDown).  asyncio.run-style teardown
         # lives in close().
@@ -124,8 +124,8 @@ class _LoopRunMixin(object):
     def _cancel_outstanding_tasks(self):
         """Cancel every RunloomTask still alive on this loop and clear
         the scheduler's leftover state.  Called from run_until_complete
-        after the main future resolves so background goroutines
-        (call_later runners, accept loops, ticker goroutines) don't
+        after the main future resolves so background fibers
+        (call_later runners, accept loops, ticker fibers) don't
         leak into the next paio.run.
 
         Strategy: cancel all known tasks (best-effort -- not all are
@@ -147,7 +147,7 @@ class _LoopRunMixin(object):
         # Only drain the shared per-thread scheduler if NO sibling loop still
         # has live tasks on it.  The runloom scheduler is one-per-OS-thread, shared
         # by every RunloomEventLoop on the thread; a blind sched_reset here would
-        # bulldoze another loop's still-needed goroutines -- e.g. a background
+        # bulldoze another loop's still-needed fibers -- e.g. a background
         # server task's in-flight asyncio.sleep sitting in the shared sleep heap
         # -- deadlocking that loop when it is next driven (the hypercorn /
         # pytest-asyncio fixture-vs-test multi-loop case).
@@ -155,10 +155,10 @@ class _LoopRunMixin(object):
             (t._loop is not self and not t.done()) for t in list(_PG_ALL_TASKS))
         # sched_reset() bulldozes the SHARED per-thread scheduler (ready ring +
         # sleep heap).  Any OTHER open loop on this thread may have live work
-        # sitting there -- including raw call_later timer goroutines (a server
+        # sitting there -- including raw call_later timer fibers (a server
         # handler's in-flight asyncio.sleep) that the _PG_ALL_TASKS task guard
         # cannot see.  So only reset when we are the LAST open loop; otherwise a
-        # sibling's pending sleep is silently dropped and the goroutine awaiting
+        # sibling's pending sleep is silently dropped and the fiber awaiting
         # it hangs forever (aiohttp's streaming-handler teardown deadlock).
         other_loop_open = any(
             (lp is not self and not lp._closed) for lp in list(_PG_OPEN_LOOPS))
@@ -171,14 +171,14 @@ class _LoopRunMixin(object):
     def run_forever(self):
         self._check_running()
         # Resolve deep, non-yielding stdlib imports (e.g. getaddrinfo's
-        # first-call codec import) before any goroutine runs them on a small
+        # first-call codec import) before any fiber runs them on a small
         # stack -- see prewarm_stdlib.
         _runtime.prewarm_stdlib()
         # Do NOT reset self._stopping here.  asyncio honors a stop() issued
         # BEFORE run_forever() -- it runs one iteration and returns (stock checks
         # self._stopping at the top of each loop pass and only clears it on
         # EXIT).  Resetting it at entry wipes that request, so the keepalive
-        # goroutine never sees the stop and spins sched_sleep forever -- the
+        # fiber never sees the stop and spins sched_sleep forever -- the
         # `loop.stop(); loop.run_forever()` cleanup idiom (aiohttp's synchronous
         # test_streams/test_web_app default-loop tests) hangs.  When _stopping is
         # already True the keepalive calls sched_stop() on its first pass and the
@@ -192,7 +192,7 @@ class _LoopRunMixin(object):
     def stop(self):
         # asyncio contract: request the loop stop after the current iteration.
         # Setting the flag is thread-safe (a plain bool store); the keepalive
-        # goroutine -- which runs on the loop thread -- observes it and calls
+        # fiber -- which runs on the loop thread -- observes it and calls
         # runloom_c.sched_stop() to return from run_forever()'s runloom_c.run().
         # Works whether stop() is called directly on the loop thread or, per
         # asyncio's rules, via call_soon_threadsafe() from another thread.
@@ -206,7 +206,7 @@ class _LoopRunMixin(object):
         handler, but re-raises (KeyboardInterrupt, SystemExit) out of the loop
         (Handle._run / Task.__step re-raise them) so Ctrl-C and sys.exit abort
         run_until_complete / run_forever.  We can't unwind the C drain through a
-        goroutine's raise, so we stash the first such exception here and call
+        fiber's raise, so we stash the first such exception here and call
         sched_stop() to return from runloom_c.run(); _drive re-raises it.
 
         Always called on the loop thread (every callback/task runner runs

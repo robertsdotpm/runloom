@@ -155,7 +155,7 @@ class TestForkUnderLoad(unittest.TestCase):
 class TestIntrospectionInChild(unittest.TestCase):
     def test_dump_works_in_child(self):
         def child():
-            # registry was reset -> starts empty, populates with child goroutines
+            # registry was reset -> starts empty, populates with child fibers
             out = []
             def w():
                 runloom.sleep(0.02)
@@ -163,7 +163,7 @@ class TestIntrospectionInChild(unittest.TestCase):
                 for _ in range(3):
                     runloom.go(w)
                 runloom.sleep(0.005)
-                out.append(runloom_c.goroutine_count())
+                out.append(runloom_c.fiber_count())
             runloom.run(1, main)
             return 0 if out and out[0] == 4 else 6
 

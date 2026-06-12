@@ -32,10 +32,10 @@ class _ProtocolServer(object):
         # Track live client transports so close()/abort_clients() can tear
         # them down.  Without this, stopping the server (e.g. aiosmtpd's
         # Controller.stop()) leaves accepted connections' sockets open with no
-        # goroutine servicing them -- a peer mid-request (a client between DATA
+        # fiber servicing them -- a peer mid-request (a client between DATA
         # and the terminating dot) then blocks forever waiting for a reply that
         # never comes.  WeakSet so a finished connection's transport is pruned
-        # once its recv goroutine ends and drops the last reference.
+        # once its recv fiber ends and drops the last reference.
         self._conns = _weakref.WeakSet()
         # asyncio.Server.wait_closed(): block until the server is closed AND
         # every accepted connection has finished.  _waiters is a list while
@@ -86,7 +86,7 @@ class _ProtocolServer(object):
                 return
             conn.setblocking(False)
             if self._ssl_context is not None:
-                # Finish the TLS handshake in its own goroutine so a slow or
+                # Finish the TLS handshake in its own fiber so a slow or
                 # stalled client never blocks accepting new connections.
                 _go_io(lambda c=conn: self._setup_tls_conn(c))
             else:
@@ -139,10 +139,10 @@ class _ProtocolServer(object):
         if self._closed: return
         self._closed = True
         self._serving = False
-        # Wake the accept-loop goroutines parked in _wait_fd so they observe
+        # Wake the accept-loop fibers parked in _wait_fd so they observe
         # _closed and EXIT.  Without this they stay parked forever on the
         # listening fd we're about to close (no readability event ever comes) --
-        # a goroutine leak that accumulates one-per-server in a long-lived loop
+        # a fiber leak that accumulates one-per-server in a long-lived loop
         # that opens many servers (a test suite's per-test loop reset hid it).
         for g in self._accept_gs:
             try: g.cancel_wait_fd()
@@ -157,7 +157,7 @@ class _ProtocolServer(object):
         # frame; if we'd already torn the transport down that frame is dropped
         # and the peer sees an abnormal 1006 close.  (We used to close clients
         # here to dodge the cancel-can't-interrupt-wait_fd hang; that's fixed in
-        # the C core now, so the recv goroutines get cleaned up on loop teardown.)
+        # the C core now, so the recv fibers get cleaned up on loop teardown.)
         for sock in self._sockets:
             try: sock.shutdown(_socket.SHUT_RDWR)
             except OSError: pass

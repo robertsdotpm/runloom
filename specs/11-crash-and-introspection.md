@@ -6,15 +6,15 @@ Ground truth: `runloom_crash.{h,c}`, `runloom_introspect.{h,c}`,
 
 ## The problem
 
-A custom scheduler that hides a million goroutines on a few OS threads is opaque
+A custom scheduler that hides a million fibers on a few OS threads is opaque
 when something hangs or crashes: a stack trace shows the hub thread, not the
-goroutine. Go answers this with `kill -QUIT` goroutine dumps + `runtime.Stack`;
+fiber. Go answers this with `kill -QUIT` fiber dumps + `runtime.Stack`;
 asyncio has `all_tasks()`. runloom had neither. This subsystem is the answer, and
 its hard constraint is **it must work when the process is wedged or faulting** —
 i.e. without taking locks that might be held and without touching Python (which
 may be mid-collection).
 
-## The goroutine registry (and its zero-hot-path-cost design)
+## The fiber registry (and its zero-hot-path-cost design)
 
 A global intrusive doubly-linked list of every live `runloom_g` *struct*. The
 clever part (the same field-ordering contract as spec 02): a g is linked **once**
@@ -37,23 +37,23 @@ an older scheme; the code block-batches.)
 
 Each is matched to how broken the process is:
 
-1. **Structural dump, async-signal-safe-ish** (`runloom_dump_goroutines_fd`). id /
+1. **Structural dump, async-signal-safe-ish** (`runloom_dump_fibers_fd`). id /
    state / what-it's-blocked-on (fd, channel, sleep deadline) / owner thread / age
    / refcount / stack size, written with **only `snprintf` + `write(2)`**. It
    **try-locks** the registry — on contention it prints a note and the parker
    pool's own dump rather than deadlocking. **Touches no Python**, so it is safe
    from a signal handler and when the interpreter is wedged. This is the SIGQUIT
    handler (`install_dump_signal`) and the crash-handler path.
-2. **Rich snapshot** (`runloom_goroutine_snapshot`, Python context only). Every
+2. **Rich snapshot** (`runloom_fiber_snapshot`, Python context only). Every
    field is **plain data copied under the registry lock** — deliberately *no
    owned-object pointers* (callable/coro/parker), because those are freed by
-   goroutine teardown which does *not* take the registry lock, so dereferencing
+   fiber teardown which does *not* take the registry lock, so dereferencing
    them in the dump would be a UAF. "Blocked on" detail rides POD fields the g
    maintains itself (`park_fd`) or values not pointers (`wake_at`).
-3. **Reconstructed Python stack** (`runloom_goroutine_frames_by_id`). Walks the
+3. **Reconstructed Python stack** (`runloom_fiber_frames_by_id`). Walks the
    suspended interpreter-frame chain (`runloom_iframe_walk`, deepest-first, skipping
    C-trampoline shims). The frame walk is unsafe in general (frames mutate as code
-   runs), so the caller must **claim** the goroutine first: under M:N via the
+   runs), so the caller must **claim** the fiber first: under M:N via the
    sweeper handshake (`PARKED→SWEEPING`, so it can neither resume nor tear down
    mid-walk), under single-thread by owning the thread. Withheld under M:N for a g
    that a hub could resume at any instant (no safe way to freeze it) — the
@@ -63,40 +63,40 @@ Each is matched to how broken the process is:
 
 `runloom_crash.c` turns a SIGSEGV/SIGBUS (optionally SIGILL/FPE/ABRT) into a
 structured dump instead of a silent core. The key trick: **map the faulting
-address onto the per-goroutine guard pages** (spec 01) to classify it —
+address onto the per-fiber guard pages** (spec 01) to classify it —
 
-- fault **in a guard page** → "GOROUTINE STACK OVERFLOW," naming the goroutine and
+- fault **in a guard page** → "GOROUTINE STACK OVERFLOW," naming the fiber and
   its stack size;
-- fault **inside a usable goroutine stack** → a wild pointer / UAF on that g;
-- otherwise → a non-goroutine fault.
+- fault **inside a usable fiber stack** → a wild pointer / UAF on that g;
+- otherwise → a non-fiber fault.
 
-Then it dumps the live-goroutine registry (path 1 above), optionally a native C
+Then it dumps the live-fiber registry (path 1 above), optionally a native C
 backtrace (`execinfo`) and the Python traceback (by chaining out to `faulthandler`),
 and can **wait for a debugger** or `fork+exec gdb` before chaining to the default
 disposition (so a core is still produced and the exit code stays correct).
 
 Two robustness details that are easy to miss and load-bearing:
 
-- **Survives a blown goroutine stack:** every runloom OS thread installs its own
+- **Survives a blown fiber stack:** every runloom OS thread installs its own
   `sigaltstack` (`runloom_crash_thread_arm`, wired into `coro_thread_init` and the
   blockpool workers), so the handler runs even when the fault *is* the stack
   overflow (the normal stack is gone).
 - **Freezes the watchdogs first.** The faulting hub, on becoming crash owner, calls
   `runloom_sched_freeze_for_crash` (async-signal-safe: just stores to the sysmon /
   handoff stop flags + the preempt flag). Otherwise the handoff rescue would adopt
-  the faulting hub's goroutines and *steal the faulting g away* before the handler's
+  the faulting hub's fibers and *steal the faulting g away* before the handler's
   chain-out re-faults and cores — leaving a limping process and no core.
 
 On Windows the rich POSIX path isn't available; a Vectored Exception Handler does
-the goroutine dump and continues the search (the OS still produces the crash).
+the fiber dump and continues the search (the OS still produces the crash).
 
 ## Hub introspection (`runloom.inspect.hubs()` / `mn_hub_snapshot`)
 
-The hub-level companion to the goroutine dump — "what is each hub doing right
+The hub-level companion to the fiber dump — "what is each hub doing right
 now": id, attach-state (detached/attached/suspended), the running goid, dwell-ms
 (how long the current resume has run — a large dwell + detached = a wedged hub),
 pending count, whether sysmon requested a preempt. For a **DETACHED-wedged** hub it
-best-effort fills `blocked_at` with the running goroutine's top Python frame (the
+best-effort fills `blocked_at` with the running fiber's top Python frame (the
 blocking call site, e.g. `cursor.execute (db.py:88)`), read under a handoff-rescue
 lockout. The Python layer (`inspect.py`) labels each hub (`WEDGED/io`, `WEDGED/cpu`,
 `idle`, `running`) and prints a `py-spy dump --pid <PID>` command for the full
@@ -104,14 +104,14 @@ C+Python stack of every thread — the always-safe out-of-process fallback.
 
 ## Other introspection surfaces (`inspect.py`)
 
-- **`goroutines()` / `stack(gid)` / `dump()`** — the Python-formatted dumps.
+- **`fibers()` / `stack(gid)` / `dump()`** — the Python-formatted dumps.
 - **Park-age tracking** (opt-in, `enable_timestamps`): a g's `state_since_ns` is
   stamped on each park, so the dump reports "parked 45.2s" — and **`leaked()` /
-  `watch_leaks()`** surface goroutines parked too long (an orphaned accept loop, a
+  `watch_leaks()`** surface fibers parked too long (an orphaned accept loop, a
   never-awaited task, a stuck timer).
 - **Deadlock mode** (`set_deadlock_mode`, off/warn/raise): the single-thread drain
-  detecting "all goroutines asleep" (spec 02).
-- **Max-goroutines admission gate** (`set_max_goroutines`): backpressure — over the
+  detecting "all fibers asleep" (spec 02).
+- **Max-fibers admission gate** (`set_max_fibers`): backpressure — over the
   cap, `go`/spawn raises so an unbounded spawn loop can't OOM; zero hot-path cost
   when unset.
 
@@ -134,7 +134,7 @@ off the same module.
    from a signal handler / when wedged; never blocks.
 2. **The rich snapshot copies only POD under the registry lock** — never derefs an
    owned object teardown could free without that lock.
-3. **A frame walk requires claiming the goroutine** (sweeper handshake under M:N).
+3. **A frame walk requires claiming the fiber** (sweeper handshake under M:N).
 4. **The crash handler classifies faults by the guard pages**, runs on a
    `sigaltstack` (survives stack overflow), and **freezes the watchdogs first** so
    the faulting g isn't stolen before the core.

@@ -12,16 +12,16 @@
  * seeded exploration of the REAL hub/deque/steal/wake path (where single-hub
  * PCT, RUNLOOM_PCT_SEED, cannot reach).
  *
- * When RUNLOOM_MN_SEED is set, goroutine *execution segments* across all hubs are
- * serialized through one baton: a hub may run a goroutine (runloom_coro_resume)
+ * When RUNLOOM_MN_SEED is set, fiber *execution segments* across all hubs are
+ * serialized through one baton: a hub may run a fiber (runloom_coro_resume)
  * only while it holds the baton (gated in resume_begin/end below), and a seeded
  * controller picks which waiting hub gets it next.  This trades real
  * parallelism for reproducibility + control: scheduling-order bugs (lost
  * wakeups, cross-hub wake ordering, deadlocks) become reproducible and seed-
  * sweepable on the real M:N code.
  *
- * A goroutine that parks/yields/finishes returns to hub_main, which releases
- * the baton, so cooperative blocking never deadlocks it.  A CPU-bound goroutine
+ * A fiber that parks/yields/finishes returns to hub_main, which releases
+ * the baton, so cooperative blocking never deadlocks it.  A CPU-bound fiber
  * that does not yield is broken off by PREEMPTION (which must stay ON -- see
  * runloom_mn_ctrl_init); disabling it wedges the baton.  While waiting a hub
  * DETACHES its tstate (PyEval_SaveThread) so it sits at a GC safepoint.
@@ -69,13 +69,13 @@ typedef struct {
     int          armed;       /* mn_run reached: hubs may begin + grants may fire */
     /* Deterministic preemption (RUNLOOM_MN_PREEMPT_FRAMES, >0 under the barrier).
      * The wall-clock sysmon preempt trigger is the one remaining nondeterministic
-     * input to the schedule: it fires a runaway goroutine's yield at a *timing*-
+     * input to the schedule: it fires a runaway fiber's yield at a *timing*-
      * decided frame boundary, which perturbs the grant order (observable e.g. as
      * different mn_go spawn-counter interleavings).  In barrier mode we ignore it
      * and instead preempt after a fixed COUNT of Python frame entries on the
-     * baton -- a deterministic function of the goroutine's own execution.
-     * Cooperative goroutines park long before the count, so they never preempt
-     * (natural, deterministic schedule); a CPU-bound goroutine that keeps calling
+     * baton -- a deterministic function of the fiber's own execution.
+     * Cooperative fibers park long before the count, so they never preempt
+     * (natural, deterministic schedule); a CPU-bound fiber that keeps calling
      * functions hits the count and yields the baton (liveness).  Same frame-entry
      * granularity as the wall-clock trigger (neither can break a single-frame
      * tight loop), but reproducible. */
@@ -343,9 +343,9 @@ static void runloom_mn_ctrl_init(int n)
      * reverts to the timing-dependent immediate handoff for A/B comparison. */
     runloom_mn_ctrl.barrier = (bar == NULL || bar[0] != '0');
     /* Deterministic frame-count preemption: on (default 4096) under the barrier,
-     * off (0 -> wall-clock) without it.  A cooperative goroutine parks in far
+     * off (0 -> wall-clock) without it.  A cooperative fiber parks in far
      * fewer than 4096 frame entries, so it never trips; the value only sets how
-     * promptly a CPU-bound goroutine yields the baton. */
+     * promptly a CPU-bound fiber yields the baton. */
     if (runloom_mn_ctrl.barrier) {
         const char *pf = getenv("RUNLOOM_MN_PREEMPT_FRAMES");
         runloom_mn_ctrl.preempt_frames = (pf != NULL) ? atoi(pf) : 4096;
@@ -367,14 +367,14 @@ static void runloom_mn_ctrl_init(int n)
         runloom_mn_ctrl.tracepath[sizeof(runloom_mn_ctrl.tracepath) - 1] = '\0';
     }
     runloom_mn_ctrl.enabled = 1;
-    /* Handoff MUST stay off: its rescue thread resumes a goroutine OFF the
+    /* Handoff MUST stay off: its rescue thread resumes a fiber OFF the
      * baton (bypasses resume_begin/end), which would break serialization. */
     runloom_handoff_enabled = 0;
     /* Preemption stays ON (liveness backstop, proven necessary by
-     * verify/tla/RunloomMNControl.tla's Preempt=FALSE control): a goroutine that
+     * verify/tla/RunloomMNControl.tla's Preempt=FALSE control): a fiber that
      * runs Python without yielding would otherwise hold the baton forever and
      * wedge every other hub.  Under the barrier the trigger is the DETERMINISTIC
-     * frame counter above (not the wall-clock watchdog), so a runaway goroutine
+     * frame counter above (not the wall-clock watchdog), so a runaway fiber
      * is still broken off -- at a reproducible frame -> resume_end -> baton
      * released -> progress.  The eval-frame wrapper must be installed for this,
      * so leave runloom_preempt_enabled as the sysmon config set it (default on). */
@@ -473,7 +473,7 @@ static void runloom_mn_ctrl_release(int hub)
 
 /* Check in as IDLE for the current round (called from hub_main's no-work
  * branch).  A no-op without the barrier.  Lets the census complete when a hub
- * has no goroutine to run this round, so the grant isn't held hostage to a hub
+ * has no fiber to run this round, so the grant isn't held hostage to a hub
  * that will never want the baton.
  *
  * Returns 1 if the hub actually has undrained work after all (caller must
@@ -481,7 +481,7 @@ static void runloom_mn_ctrl_release(int hub)
  * replay deterministic at sub-segment granularity: a wake from the just-ended
  * segment can land on this hub's sub_list AFTER this iteration's drain but
  * BEFORE this check-in.  Declaring idle then would let the census complete
- * without this hub and run its woken goroutine a round late -- a timing-decided
+ * without this hub and run its woken fiber a round late -- a timing-decided
  * (hence nondeterministic) outcome, the ~1% tail Heisenbug.  We re-test the
  * sub_list under sub_lock WHILE HOLDING the controller lock: having observed the
  * current round (set under the controller lock by the release that opened it),
@@ -519,7 +519,7 @@ static int runloom_mn_ctrl_census_idle(runloom_hub_t *h)
 }
 
 /* Startup rendezvous.  Without it, the main thread places the initial
- * goroutines (mn_go) CONCURRENTLY with hubs that are already spinning, so a hub
+ * fibers (mn_go) CONCURRENTLY with hubs that are already spinning, so a hub
  * can check in idle for round 1 before its share of the work lands -> the first
  * census completes over a partial requester set and the grant is timing-
  * dependent (the very nondeterminism the barrier exists to remove, but at
@@ -560,7 +560,7 @@ static void runloom_mn_ctrl_wait_armed(void)
  * cross-hub work-stealing.  mn_go placement is deterministic (spawn_counter %
  * hub_count) and wake-routing is hub-pinned, so with no steal each hub's
  * execution stream is a fixed function of the schedule -- closing one way an
- * identical grant sequence could still produce different goroutine orderings
+ * identical grant sequence could still produce different fiber orderings
  * (the other, partial cross-hub publish, is closed by the deferred-publish
  * staging, runloom_mn_ctrl_stage_flush).  Steal is a lock-free, sub-segment CAS
  * race; it is covered by the
@@ -712,7 +712,7 @@ static PyObject *runloom_preempt_eval_frame(PyThreadState *ts,
         do_preempt = (h != NULL &&
                       __atomic_load_n(&h->preempt_requested, __ATOMIC_RELAXED));
     }
-    /* Never yield the goroutine while CPython is mid object-destruction on this
+    /* Never yield the fiber while CPython is mid object-destruction on this
      * tstate -- a tp_dealloc and its weakref callbacks / finalizers, driven by
      * the trashcan unwind (tstate->delete_later) or the free-threaded biased-
      * refcount cross-thread merge drain (brc.local_objects_to_merge).
@@ -770,13 +770,13 @@ static PyObject *runloom_preempt_eval_frame(PyThreadState *ts,
 
 /* Controlled-scheduler liveness backstop (Feature 1, single-frame loops).
  * Frame-count preemption (lever 5) and the eval-frame wrapper both act only at a
- * Python FRAME boundary, so neither can break a goroutine spinning in ONE frame
+ * Python FRAME boundary, so neither can break a fiber spinning in ONE frame
  * with no calls (`while not flag: pass`).  Under serialization (no parallel
- * sibling) such a goroutine holds the baton forever and deadlocks every other
+ * sibling) such a fiber holds the baton forever and deadlocks every other
  * hub.  This Py_AddPendingCall callback rides CPython's eval-breaker -- checked
  * on BACKWARD JUMPS *inside* a frame -- so it interrupts even a call-less loop.
  * It runs on the baton holder (the only thread executing Python in controlled
- * mode) and yields that goroutine UNCONDITIONALLY: the same body as the
+ * mode) and yields that fiber UNCONDITIONALLY: the same body as the
  * eval-frame wrapper, NOT runloom_mn_yield_current (whose fast path would bail here
  * -- this hub's own queues are empty, the spinner is the only local g, and the
  * other hubs are blocked in acquire, not in our queues).  Posted by the sysmon
@@ -786,7 +786,7 @@ static PyObject *runloom_preempt_eval_frame(PyThreadState *ts,
  * by the eval-frame wrapper before its frames re-enter, so in practice only a
  * genuine single-frame loop is still spinning when this rides its backward-jump
  * check; if it does fire for frame-bearing code the extra yield is harmless (the
- * g was about to yield at the wrapper anyway).  No-op when no goroutine is
+ * g was about to yield at the wrapper anyway).  No-op when no fiber is
  * running on this hub. */
 /* Per-thread pending call (flags=0 -> runs on ANY thread's eval-breaker, not
  * just the main thread's, which is what the public Py_AddPendingCall is pinned
@@ -825,7 +825,7 @@ static int runloom_mn_liveness_pending_cb(void *arg)
 
 /* Install/uninstall the preemption eval-frame wrapper on `interp`.  Install
  * runs in mn_init after runloom_sysmon_config (so runloom_preempt_enabled is set) and
- * BEFORE any goroutine runs Python; uninstall runs in mn_fini.  No-ops unless
+ * BEFORE any fiber runs Python; uninstall runs in mn_fini.  No-ops unless
  * RUNLOOM_PREEMPT (and 3.13+).  Capturing the previous func means we chain rather
  * than clobber a wrapper someone else installed. */
 static void runloom_preempt_install(PyInterpreterState *interp)

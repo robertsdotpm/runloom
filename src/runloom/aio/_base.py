@@ -1,5 +1,5 @@
 """Shared foundation for the runloom asyncio bridge: stdlib re-exports,
-_go_io (roomy-stack goroutine spawn), module-root capture, blocking
+_go_io (roomy-stack fiber spawn), module-root capture, blocking
 helpers, cooperative _wait_fd, the lazy CoLock, and the current-task
 registry.  Every submodule does `from ._base import *`."""
 
@@ -23,11 +23,11 @@ from .. import runtime as _runtime
 
 
 # Security: the bridge runs user protocol callbacks -- including TLS handshakes
-# and OpenSSL key material -- on goroutine stacks that are pooled and reused.
+# and OpenSSL key material -- on fiber stacks that are pooled and reused.
 # By default those stacks are not scrubbed on recycle, so a later connection's
-# goroutine could read the previous one's leftovers off a shared stack (see
+# fiber could read the previous one's leftovers off a shared stack (see
 # tools/security/FINDINGS.md, S1). Enable scrubbing by default for the bridge:
-# its goroutines are long-lived (per connection / per task), so the per-recycle
+# its fibers are long-lived (per connection / per task), so the per-recycle
 # cost (MADV_DONTNEED, ~8 us) is negligible. Opt out with RUNLOOM_STACK_SCRUB=0.
 # No-op on a runloom_c too old to expose the API.
 if _os.environ.get("RUNLOOM_STACK_SCRUB") != "0":
@@ -57,8 +57,8 @@ try:
 except ValueError:
     _TASK_STACK = 512 * 1024
 
-# Per-connection I/O goroutine stack size (bytes).  The transport read /
-# datagram / accept goroutines invoke arbitrary user protocol callbacks
+# Per-connection I/O fiber stack size (bytes).  The transport read /
+# datagram / accept fibers invoke arbitrary user protocol callbacks
 # (data_received, connection_made, datagram_received, ...) SYNCHRONOUSLY on
 # their own swapped C stack -- and those callbacks can run deep C-recursive
 # code (e.g. asyncssh runs a full crypto key-exchange + chacha20/OpenSSL chain
@@ -73,25 +73,25 @@ except ValueError:
 
 
 def _go_io(fn):
-    """Spawn a goroutine that synchronously runs user protocol callbacks,
+    """Spawn a fiber that synchronously runs user protocol callbacks,
     on the roomier _IO_STACK (falls back to the scheduler default if disabled).
 
-    fifo=True marks the goroutine so the PCT controlled scheduler (RUNLOOM_PCT_SEED)
-    keeps it in spawn order relative to other aio goroutines -- the aio bridge
-    delivers call_soon callbacks / task steps as goroutines, and asyncio
+    fifo=True marks the fiber so the PCT controlled scheduler (RUNLOOM_PCT_SEED)
+    keeps it in spawn order relative to other aio fibers -- the aio bridge
+    delivers call_soon callbacks / task steps as fibers, and asyncio
     guarantees them call_soon-FIFO, so permuting them is a false positive, not a
-    bug.  No effect when PCT is off; PCT still freely interleaves raw goroutines."""
+    bug.  No effect when PCT is off; PCT still freely interleaves raw fibers."""
     if _IO_STACK:
         return runloom_c.go(fn, stack_size=_IO_STACK, fifo=True)
     return runloom_c.go(fn, fifo=True)
 
 
 # ------------------------------------------------------------------
-# Module-root frame for task-driver goroutines.
+# Module-root frame for task-driver fibers.
 #
-# A RunloomTask drives its coroutine on the goroutine's own swapped C stack,
-# whose Python frame chain runloom_c deliberately severs at the goroutine
-# root (so tracebacks / recursion don't bleed across goroutines).  Stock
+# A RunloomTask drives its coroutine on the fiber's own swapped C stack,
+# whose Python frame chain runloom_c deliberately severs at the fiber
+# root (so tracebacks / recursion don't bleed across fibers).  Stock
 # asyncio instead runs a Task's coro synchronously nested under
 # _run_once -> run_forever -> ... -> "<module>" on ONE stack, so a library
 # that derives its module name by walking frame.f_back to the first
@@ -102,13 +102,13 @@ def _go_io(fn):
 # Fix: run the driver coroutine *underneath* a real "<module>"-named frame.
 # compile(src, name, "exec") yields a top code object whose co_name is
 # literally "<module>"; exec'ing it with a globals dict carrying the right
-# __name__ seats a genuine, lifecycle-correct module frame at the goroutine
+# __name__ seats a genuine, lifecycle-correct module frame at the fiber
 # root.  No hand-built _PyInterpreterFrame, and crucially no cross-stack
 # f_back link to the spawner (that would dangle the moment the spawner's
 # stack is swapped away or returns, and would be a lie -- the spawner is
-# concurrent, not on the goroutine's call stack).  Only task-driver
-# goroutines are wrapped; raw runloom_c.go() goroutines (netpoll pump,
-# keepalive, timers) are untouched, so the per-goroutine cost stays off the
+# concurrent, not on the fiber's call stack).  Only task-driver
+# fibers are wrapped; raw runloom_c.go() fibers (netpoll pump,
+# keepalive, timers) are untouched, so the per-fiber cost stays off the
 # scale-out path.  Disable with RUNLOOM_AIO_MODULE_ROOT=0.
 _PG_MODULE_ROOT_ON = _os.environ.get("RUNLOOM_AIO_MODULE_ROOT", "1") != "0"
 _PG_ROOT_CODE = compile("__runloom_body__()", "<runloom-task-root>", "exec")
@@ -161,7 +161,7 @@ def _blocking(fn, *args):
     """runloom_c.blocking (offload fn to the blocking-pool), but deliver a
     cancellation requested WHILE we were in the call.
 
-    runloom_c.blocking parks the goroutine in C with no driver await-point, so
+    runloom_c.blocking parks the fiber in C with no driver await-point, so
     task.cancel() cannot interrupt it -- it only sets the task's one-shot
     _pgmustcancel and wakes us (which runloom_c.blocking now ignores until the
     worker is done, to avoid freeing the in-flight job).  Stock asyncio resolves
@@ -178,8 +178,8 @@ def _blocking(fn, *args):
 
 def _resolve(host, port, family, type_, proto, flags):
     """getaddrinfo via the blocking-offload pool, so DNS doesn't wedge the
-    goroutine's hub (it is a non-preemptible blocking C call).  Runs inline
-    when not on a goroutine -- safe in either context."""
+    fiber's hub (it is a non-preemptible blocking C call).  Runs inline
+    when not on a fiber -- safe in either context."""
     return _blocking(_socket.getaddrinfo, host, port,
                      family, type_, proto, flags)
 
@@ -222,9 +222,9 @@ def _reject_subprocess_text_mode(kwargs):
         raise ValueError("bufsize must be 0")
 
 
-# A cooperative mutex (parks the goroutine, not the OS thread) imported lazily
+# A cooperative mutex (parks the fiber, not the OS thread) imported lazily
 # to keep the import graph acyclic.  Used to serialise access to one SSLSocket
-# shared by a connection's recv goroutine and concurrent writers under M:N.
+# shared by a connection's recv fiber and concurrent writers under M:N.
 _CoLock = None
 
 
@@ -240,7 +240,7 @@ def _get_colock():
 _WAIT_READ = 1
 _WAIT_WRITE = 2
 
-# Sentinel runloom_c.wait_fd returns when the parked goroutine was cancelled
+# Sentinel runloom_c.wait_fd returns when the parked fiber was cancelled
 # out-of-band via G.cancel_wait_fd() -- a task.cancel() that targets a g blocked
 # in a socket recv/accept/connect, where there's no coro await-point to throw
 # CancelledError into.  _wait_fd turns it back into CancelledError so it unwinds
@@ -261,7 +261,7 @@ def _wait_fd(fd, events, timeout_ms=-1):
     Also preserves asyncio's "current task" across the park.  The RunloomTask
     driver sets _CURRENT_TASKS[loop] = self around each coro.send and restores
     it in a finally -- but a coroutine that parks HERE for socket I/O suspends
-    the goroutine MID-send, so that finally can't run until the send eventually
+    the fiber MID-send, so that finally can't run until the send eventually
     returns.  While we're parked, other tasks run and their drivers mutate the
     single shared per-loop slot (and pop it back to whatever preceded them), so
     on resume the slot may name the wrong task or be empty -- breaking

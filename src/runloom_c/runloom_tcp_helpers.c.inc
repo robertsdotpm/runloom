@@ -100,7 +100,7 @@ static int runloom_is_intr(void)
  * On error sets a Python exception and returns -1.
  * ============================================================ */
 /* getaddrinfo offloaded to the blocking pool.  Job lives on the
- * resolving goroutine's coroutine stack (alive across the park); the
+ * resolving fiber's coroutine stack (alive across the park); the
  * worker runs getaddrinfo with no GIL. */
 typedef struct {
     const char *host;
@@ -125,7 +125,7 @@ static int runloom_resolve(const char *host, int port, int want_passive,
     char portbuf[16];
     int rc;
     runloom_sched_t *sched;
-    int in_goroutine;
+    int in_fiber;
 
     memset(&hints, 0, sizeof(hints));
     hints.ai_family   = AF_UNSPEC;
@@ -138,18 +138,18 @@ static int runloom_resolve(const char *host, int port, int want_passive,
     snprintf(portbuf, sizeof(portbuf), "%d", port);
 
     /* getaddrinfo is a non-preemptible blocking C call.  If we are
-     * running inside a goroutine, offload it to the blocking pool and
-     * park -- otherwise it would wedge the goroutine's hub (or the
+     * running inside a fiber, offload it to the blocking pool and
+     * park -- otherwise it would wedge the fiber's hub (or the
      * single-thread scheduler), stranding everything queued behind it.
      * The worker runs getaddrinfo with no GIL, so we must NOT bracket
      * the offload in Py_BEGIN_ALLOW_THREADS (you cannot yield a
-     * coroutine across that macro pair).  Outside a goroutine there is
+     * coroutine across that macro pair).  Outside a fiber there is
      * nothing to park, so fall back to the classic inline lookup with
      * the GIL released. */
     sched = runloom_sched_get();
-    in_goroutine = (runloom_mn_current_hub_opaque() != NULL) ||
+    in_fiber = (runloom_mn_current_hub_opaque() != NULL) ||
                    (sched != NULL && sched->current != NULL);
-    if (in_goroutine) {
+    if (in_fiber) {
         runloom_resolve_job_t job;
         job.host = host; job.portbuf = portbuf; job.hints = &hints;
         job.res = NULL;  job.rc = 0;

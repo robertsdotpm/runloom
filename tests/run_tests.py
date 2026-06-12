@@ -3,7 +3,7 @@
 We don't use unittest here.  CPython tracks frame chain + recursion
 counters in thread-state; the legacy `runloom.runtime` Python scheduler
 only swaps recursion counters (the C scheduler in `runloom_c.go`
-does the full Phase B snap).  Multi-goroutine tests therefore go
+does the full Phase B snap).  Multi-fiber tests therefore go
 through `runloom_c.*` directly so the production path is exercised.
 
 The two single-coro Coro tests still use `runloom_c.Coro` + the raw
@@ -63,8 +63,8 @@ def test_exception_propagates():
     assert c.done
 
 
-# ── Test 4: three goroutines interleave round-robin ────────────────
-def test_three_goroutines_interleave():
+# ── Test 4: three fibers interleave round-robin ────────────────
+def test_three_fibers_interleave():
     log = []
     def make_worker(name, n):
         def w():
@@ -109,7 +109,7 @@ def main():
         test_backend_name,
         test_yield_resume_chain,
         test_exception_propagates,
-        test_three_goroutines_interleave,
+        test_three_fibers_interleave,
         test_sleep_lets_others_run,
     ]
     failed = 0

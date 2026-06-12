@@ -81,7 +81,7 @@ works and one that UAFs ~1 in 50k.
 | **C2** | only the owning thread attaches/detaches *itself* | structural — honored by construction | `Py_FatalError` if violated. |
 | **C3** | never re-attach a tstate another thread may have SUSPENDED mid-STW | bug 2: handoff rescue adopted a *transiently*-detached tstate | the owner re-attaching/STW-suspending on the same `_status` (which CPython only touches from the single owner) → UAF. **Fix: require a stable DETACHED streak before adopting** (spec 08). |
 | **C4** | detach before any blocking wait, so STW can complete | honored — the controlled scheduler / world-yield `SaveThread` before blocking | else STW hangs. |
-| **C5** | never suspend/yield a goroutine mid-`tp_dealloc` | would-be preempt bug | a concurrent STW/QSBR reclaim corrupts the half-destroyed objects → UAF (crashed `test_weakref`). **Fix: `runloom_tstate_in_destruction` gate on both yield sites** (spec 08). |
+| **C5** | never suspend/yield a fiber mid-`tp_dealloc` | would-be preempt bug | a concurrent STW/QSBR reclaim corrupts the half-destroyed objects → UAF (crashed `test_weakref`). **Fix: `runloom_tstate_in_destruction` gate on both yield sites** (spec 08). |
 | **C6** | a gilstate-bound tstate is deleted on its owning thread | the gilstate bug: hub tstates deleted from **main** in `mn_fini` | `pystate.c:345` abort under `--with-pydebug`; release builds hid it. **Fix: the hub deletes its own tstate on its own thread** (spec 05). |
 
 C1, C2, C3, C5 were learned from the gc-churn crashes + the preempt guard. **C6

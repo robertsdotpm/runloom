@@ -52,8 +52,8 @@ def _run_stock_task_cb(loop, cb, fut):
     # keeps _current_tasks[loop] = self across the whole send/throw, and a task
     # that parks mid-step on a RAW scheduler primitive (runloom's transport I/O
     # does sock_recv/connect via runloom_c.wait_fd, not by yielding a future)
-    # leaves its entry in place while the goroutine is switched out -- so this
-    # deferred callback, scheduled onto another goroutine, would see a stale
+    # leaves its entry in place while the fiber is switched out -- so this
+    # deferred callback, scheduled onto another fiber, would see a stale
     # "current" RunloomTask and the stock Task.__wakeup would raise instead of
     # delivering the cancellation (the body-writer hangs forever).
     #
@@ -94,7 +94,7 @@ _PG_ALL_TASKS = _weakref.WeakSet()
 # Every RunloomEventLoop that has been constructed and not yet close()'d, across
 # the process.  close()'s sched_reset() bulldozes the SHARED per-thread sleep
 # heap + ready ring, which would drop another still-open loop's in-flight work
-# -- and not just its tasks: a raw call_later timer goroutine (an asyncio.sleep
+# -- and not just its tasks: a raw call_later timer fiber (an asyncio.sleep
 # that a server handler on a sibling loop is parked on) lives in that shared
 # sleep heap too, invisible to the _PG_ALL_TASKS task guard.  So close() only
 # resets when it is the LAST open loop (see _cancel_outstanding_tasks).  WeakSet
@@ -107,7 +107,7 @@ _PG_OPEN_LOOPS = _weakref.WeakSet()
 # ====================================================================
 class _Handle(asyncio.Handle):
     """asyncio.Handle subclass, but created OUTSIDE the loop's call queue --
-    runloom fires the callback from a goroutine after consulting `_cancelled`
+    runloom fires the callback from a fiber after consulting `_cancelled`
     (which asyncio.Handle.cancel() sets).  Subclassing the real type so that
     `isinstance(h, asyncio.Handle)` holds -- libraries (e.g. aiocache) assert
     that loop.call_*() returns an asyncio.Handle."""
@@ -117,7 +117,7 @@ class _Handle(asyncio.Handle):
 
 class _TimerHandle(asyncio.TimerHandle):
     """asyncio.TimerHandle subclass (see _Handle).  `when` is informational --
-    runloom schedules via a goroutine sched_sleep, not the loop's timer heap."""
+    runloom schedules via a fiber sched_sleep, not the loop's timer heap."""
     def __init__(self, cb, args, loop, when=0, context=None):
         super().__init__(when, cb, args, loop, context)
 
@@ -128,12 +128,12 @@ class _TimerHandle(asyncio.TimerHandle):
 # method overrides); duck-types the future protocol asyncio uses.
 #
 # Why this exists: stock asyncio.Future.set_result schedules every
-# done_callback through loop.call_soon -- one goroutine spawn per
-# callback in our model.  At 10k concurrent tasks that's 30k+ goroutine
+# done_callback through loop.call_soon -- one fiber spawn per
+# callback in our model.  At 10k concurrent tasks that's 30k+ fiber
 # spawns, more than asyncio's tight C-deque path can be beaten by.
 #
-# In a goroutine model the defer is unnecessary -- the callbacks we
-# register are just "wake the parked goroutine" via try_send, which is
+# In a fiber model the defer is unnecessary -- the callbacks we
+# register are just "wake the parked fiber" via try_send, which is
 # reentrant-safe.  Firing inline turns the bridge from ~5x slower than
 # asyncio (at high fan-out) into a real win.
 #

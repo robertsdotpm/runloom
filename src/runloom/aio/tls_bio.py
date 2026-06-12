@@ -17,7 +17,7 @@ class _MemoryBIOTLS(object):
 
     Presents the SAME socket surface (fileno/recv/recv_nb/recv_into/send/sendall/
     shutdown/close/getpeername/...) the transport already drives, so it is a
-    drop-in for _TLSSock.  Runs inside the transport's single io goroutine, so
+    drop-in for _TLSSock.  Runs inside the transport's single io fiber, so
     blocking helpers may park; recv_nb never parks for inbound data.  One CoLock
     serialises SSLObject calls (released across every wait_fd)."""
 
@@ -46,7 +46,7 @@ class _MemoryBIOTLS(object):
     # waits; SSLObject calls are serialised by self._lock) ----
     def _pump_out(self):
         # Drain the outgoing BIO to the raw socket, parking on WRITE until every
-        # queued encrypted byte is on the wire.  Runs in the io goroutine, so
+        # queued encrypted byte is on the wire.  Runs in the io fiber, so
         # parking is safe.  Returns False if the socket died.
         data = self._out.read()
         if not data:
@@ -387,4 +387,4 @@ class _SSLProtocolView(object):
         tr = getattr(self._tls, "_pg_transport", None)
         if tr is not None and tr._write_paused:
             tr._write_paused = False
-            tr._kick_io()   # respawn/wake the io goroutine to flush _write_buf
+            tr._kick_io()   # respawn/wake the io fiber to flush _write_buf

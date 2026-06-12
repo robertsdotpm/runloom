@@ -100,16 +100,16 @@ Py_ssize_t runloom_sched_drain(runloom_sched_t *s)
         /* Quiescence checkpoint: if nothing else is immediately runnable
          * (ready ring empty after draining wakes + due sleepers), resume the
          * run_ready() waiters NOW -- before we would block on netpoll/timers.
-         * This is the "no goroutine is immediately runnable" boundary the
+         * This is the "no fiber is immediately runnable" boundary the
          * primitive promises; do it before the netpoll-pump block below so a
          * waiter never waits on I/O.  Re-loop to pop them as ready. */
         if (runloom_sched_ready_empty(s) && s->quiescence_head != NULL) {
             runloom_sched_flush_quiescence(s);
             continue;
         }
-        /* Pump netpoll: if any goroutines are parked, wait for I/O up
+        /* Pump netpoll: if any fibers are parked, wait for I/O up
          * to the next sleep deadline (or forever if none).  Drives
-         * runloom_sched_wake which moves ready I/O goroutines back to
+         * runloom_sched_wake which moves ready I/O fibers back to
          * the ready queue. */
         if (runloom_sched_ready_empty(s) &&
             (__atomic_load_n(&s->netpoll_parked, __ATOMIC_ACQUIRE) > 0 || s->sleep_size > 0 ||
@@ -134,8 +134,8 @@ Py_ssize_t runloom_sched_drain(runloom_sched_t *s)
                     if (timeout_ns < 0 || t_ns < timeout_ns) timeout_ns = t_ns;
                 }
             }
-            /* iouring goroutines wake when the pump observes a CQE on
-             * the registered eventfd; blocking-pool goroutines wake when
+            /* iouring fibers wake when the pump observes a CQE on
+             * the registered eventfd; blocking-pool fibers wake when
              * a worker pokes the pump-interrupt eventfd -- both ride the
              * netpoll pump, so the pump call covers netpoll parkers,
              * iouring waiters AND blocking-pool waiters in one syscall. */
@@ -182,11 +182,11 @@ Py_ssize_t runloom_sched_drain(runloom_sched_t *s)
             /* We just blocked on I/O/timers with NO Python on this thread's
              * stack.  An async signal (Ctrl-C -> SIGINT) that fired during the
              * block left a pending Python handler but only EINTR'd the syscall
-             * -- CPython's eval breaker runs handlers only inside a goroutine's
+             * -- CPython's eval breaker runs handlers only inside a fiber's
              * eval loop, so without this the loop would re-block forever.  Run
              * pending handlers NOW, in the scheduler's tstate, BEFORE looping
-             * back to resume any woken goroutine: the scheduler must WIN the
-             * race to catch the signal (whichever goroutine's eval loop catches
+             * back to resume any woken fiber: the scheduler must WIN the
+             * race to catch the signal (whichever fiber's eval loop catches
              * it first would just swallow it -> hang).  A raised exception
              * (KeyboardInterrupt / a custom handler's) then propagates out of
              * run_forever().  PyErr_CheckSignals is a cheap no-op when nothing
@@ -223,8 +223,8 @@ Py_ssize_t runloom_sched_drain(runloom_sched_t *s)
              * thread that can run Python signal handlers (the loop thread); the
              * idle blocking syscall above EINTR'd on a signal but ran no handler
              * (no Python on the C scheduler's stack).  Run pending handlers NOW.
-             * If one RAISES, hand the exception to a goroutine parked in wait_fd
-             * (runloom_netpoll_signal_wake) so it propagates out of that goroutine's
+             * If one RAISES, hand the exception to a fiber parked in wait_fd
+             * (runloom_netpoll_signal_wake) so it propagates out of that fiber's
              * cooperative blocking call -- where a user try/except sees it,
              * exactly as a signal interrupting a real recv()/select() does (the
              * verbatim CPython test_select_interrupt_exc contract).  Only when no
@@ -236,10 +236,10 @@ Py_ssize_t runloom_sched_drain(runloom_sched_t *s)
                 PyErr_NormalizeException(&sig_t, &sig_v, &sig_b);
                 if (sig_v != NULL && sig_b != NULL)
                     PyException_SetTraceback(sig_v, sig_b);
-                /* Prefer in-goroutine delivery: stash the raised exception and
+                /* Prefer in-fiber delivery: stash the raised exception and
                  * wake one wait_fd parker to pick it up (see signal_wake /
                  * wait_fd).  signal_wake is called only here, after a handler
-                 * actually raised -- never on a bare EINTR -- so a goroutine is
+                 * actually raised -- never on a bare EINTR -- so a fiber is
                  * never woken spuriously. */
                 if (s->signal_exc == NULL && sig_v != NULL) {
                     s->signal_exc = sig_v;
@@ -326,7 +326,7 @@ Py_ssize_t runloom_sched_drain(runloom_sched_t *s)
                  *     g1's live frames -> segfault on g1 resume.
                  *   - g would inherit current_frame from the scheduler,
                  *     linking g's frame chain back into shared frames
-                 *     across all goroutines (the original cliff).
+                 *     across all fibers (the original cliff).
                  *
                  * Install a chunk from the per-thread pool (or NULL the
                  * datastack pointers so PyEval allocates fresh).  For
@@ -396,27 +396,27 @@ Py_ssize_t runloom_sched_drain(runloom_sched_t *s)
     runloom_pystate_load(&sched_snap);
     /* Deadlock detection.  The loop above exited; if it exited because the
      * scheduler went QUIESCENT (not because of a clean sched_stop) yet
-     * goroutines remain parked on a channel / via park_safe, those goroutines
+     * fibers remain parked on a channel / via park_safe, those fibers
      * are blocked on each other with no event source left to wake them (every
      * netpoll/timer/io/blockpool source was empty -- that's the loop's own exit
-     * condition).  That is Go's "all goroutines are asleep - deadlock!".  Report
+     * condition).  That is Go's "all fibers are asleep - deadlock!".  Report
      * it instead of returning silently with the work unfinished.  aio shuts its
      * loop down via sched_stop (s->stopping), so a clean aio teardown with
      * pending background tasks is excluded.  Single-thread only (M:N hubs have
      * their own liveness, and the registry count is process-global). */
     if (!s->stopping && !sig_break && runloom_mn_hub_count() == 0 &&
         runloom_deadlock_mode() != 0) {
-        long ndead = runloom_count_deadlockable_goroutines((const void *)s);
+        long ndead = runloom_count_deadlockable_fibers((const void *)s);
         if (ndead > 0) {
             fprintf(stderr,
                 "\nrunloom: DEADLOCK -- the scheduler ran out of work with %ld "
-                "goroutine(s) still blocked on a channel/park and no way to "
+                "fiber(s) still blocked on a channel/park and no way to "
                 "wake them:\n", ndead);
             fflush(stderr);
-            runloom_dump_goroutines_fd(2);
+            runloom_dump_fibers_fd(2);
             if (runloom_deadlock_mode() == 2) {
                 PyErr_Format(PyExc_RuntimeError,
-                    "runloom: all goroutines are blocked -- deadlock "
+                    "runloom: all fibers are blocked -- deadlock "
                     "(%ld parked, none runnable)", ndead);
             }
         }
@@ -427,7 +427,7 @@ Py_ssize_t runloom_sched_drain(runloom_sched_t *s)
     if (sig_break) {
         PyErr_Restore(sig_t, sig_v, sig_b);
     }
-    /* Defensive: a signal exception stashed for in-goroutine delivery should
+    /* Defensive: a signal exception stashed for in-fiber delivery should
      * have been consumed by the woken parker's wait_fd resume before we return.
      * If the drain somehow exits first (e.g. a concurrent sched_stop), don't
      * leak it -- and don't carry it out silently either; drop it (the parker it
@@ -444,11 +444,11 @@ Py_ssize_t runloom_sched_drain(runloom_sched_t *s)
  * a pending call via Py_AddPendingCall.  CPython's eval loop checks
  * its pending queue at bytecode back-edges and call instructions; when
  * the call fires, runloom_preempt_yield_cb runs on whatever tstate the
- * eval loop is in, sees a current goroutine (via the M:N TLS or the
+ * eval loop is in, sees a current fiber (via the M:N TLS or the
  * single-thread sched), and yields cooperatively through the existing
  * snap + asm-yield path.
  *
- * Net effect: a goroutine that never calls sched_yield() still gets
+ * Net effect: a fiber that never calls sched_yield() still gets
  * preempted every quantum_us, so it can't starve other gs.  This is
  * Go's runtime preemption model (since 1.14) ported to CPython.  Zero
  * hot-path overhead -- the eval_breaker bit is already checked by

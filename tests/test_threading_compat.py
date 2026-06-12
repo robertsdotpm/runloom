@@ -9,7 +9,7 @@ wait/wake pair must never drop a wakeup").
 
 These run the cooperative shims under the C scheduler.  Where the contract
 differs from real OS-thread locks it is because the single-thread
-cooperative model is the design target (e.g. a goroutine that takes a lock
+cooperative model is the design target (e.g. a fiber that takes a lock
 never preempts mid-critical-section), which is exactly the property the
 mutual-exclusion tests assert.
 """
@@ -102,7 +102,7 @@ class TestLock(unittest.TestCase):
             self.assertEqual(log[i][0], log[i + 1][0])
 
     def test_counter_no_lost_updates(self):
-        """N goroutines each do M lock-guarded increments of a shared
+        """N fibers each do M lock-guarded increments of a shared
         counter; the total must be exact (no lost read-modify-write)."""
         def body():
             lk = threading.Lock()
@@ -127,7 +127,7 @@ class TestLock(unittest.TestCase):
 
 
 class TestRLock(unittest.TestCase):
-    def test_reentrant_same_goroutine(self):
+    def test_reentrant_same_fiber(self):
         def body():
             rl = threading.RLock()
             rl.acquire()
@@ -139,7 +139,7 @@ class TestRLock(unittest.TestCase):
             return True
         self.assertTrue(_drive(body))
 
-    def test_excludes_other_goroutine(self):
+    def test_excludes_other_fiber(self):
         def body():
             rl = threading.RLock()
             log = []
@@ -363,7 +363,7 @@ class TestSemaphore(unittest.TestCase):
         _drive(body)
 
     def test_limits_concurrency(self):
-        """A Semaphore(K) must cap the number of goroutines in the region to
+        """A Semaphore(K) must cap the number of fibers in the region to
         K at any instant."""
         def body():
             K = 3
@@ -391,7 +391,7 @@ class TestSemaphore(unittest.TestCase):
 
 class TestThreadJoin(unittest.TestCase):
     def test_join_cooperative(self):
-        """A goroutine joining a real worker thread keeps siblings running."""
+        """A fiber joining a real worker thread keeps siblings running."""
         def body():
             log = []
 
@@ -517,7 +517,7 @@ class TestBarrier(unittest.TestCase):
                 except threading.BrokenBarrierError:
                     broken["n"] += 1
 
-            # only two of three parties ever arrive; a third goroutine aborts
+            # only two of three parties ever arrive; a third fiber aborts
             runloom_c.go(worker)
             runloom_c.go(worker)
 

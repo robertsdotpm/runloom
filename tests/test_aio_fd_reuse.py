@@ -10,7 +10,7 @@ test_asyncio_conformance::test_recvfrom flake (and a hang for any asyncio progra
 doing low-level sock_* + close + fd reuse).
 
 The fix: loop.sock_* call runloom_c.netpoll_release_if_idle(fd) on completion,
-which DELs + clears the arm for an fd no goroutine is parked on, so a later raw
+which DELs + clears the arm for an fd no fiber is parked on, so a later raw
 close + reuse re-registers cleanly.  A regression HANGS here (caught by the suite
 timeout); a clean finish IS the assertion.  Mirrors the deterministic repro: each
 round closes its sockets and the next round reuses the fd numbers.

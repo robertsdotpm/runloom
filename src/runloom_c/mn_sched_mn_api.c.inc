@@ -77,7 +77,7 @@ static void runloom_mn_hub_submit(runloom_hub_t *h, runloom_g_t *g)
      * resume_end).  That makes the target's drain observe the complete set the
      * segment produced rather than a partial mid-segment snapshot -- the
      * deterministic-replay fix.  Gated tight so it is inert otherwise: barrier
-     * active, the caller is a hub (runloom_tls_hub) running a goroutine
+     * active, the caller is a hub (runloom_tls_hub) running a fiber
      * (runloom_tls_current_g) targeting a DIFFERENT hub, and staging is allocated.
      * Same-hub submits, non-segment producers (idle pump / pre-run placement),
      * and the entire default scheduler fall straight through to the immediate
@@ -264,7 +264,7 @@ int runloom_mn_yield_current(void)
          * and checking it lock-free on this hot path is fragile.  But that
          * means a g looping on sched_yield with momentarily-empty local queues
          * would spin forever and NEVER return to hub_main to drain sub_head, so
-         * a goroutine later mn_go'd / woken onto this hub starves (the multi-hub
+         * a fiber later mn_go'd / woken onto this hub starves (the multi-hub
          * sched_yield-fairness bug).  Bound it: after RUNLOOM_YIELD_FASTPATH_BOUND
          * consecutive trivial fast-paths, fall through to a real yield so
          * hub_main drains sub_head (under sub_lock, as always) + re-polls. */

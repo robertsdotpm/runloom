@@ -7,7 +7,7 @@ stream-order integrity), and they map directly onto runloom's TCPConn (the
 io_uring/netpoll recv/send paths just hardened) and runloom.sync.Socket.
 
 These run in-process on the single-thread scheduler (the test_tcpconn.py idiom:
-server + client goroutines cooperate, recv/send park on netpoll readiness).
+server + client fibers cooperate, recv/send park on netpoll readiness).
 The conftest invariant fixture then checks self_check + parker leak after each.
 
 libuv originals (libuv/libuv, test/):
@@ -32,8 +32,8 @@ import runloom.sync as psync
 # (encodings.idna -> stringprep -> unicodedata) on the MAIN thread, with its
 # full C stack.  runloom.sync.run()/runloom.runtime.run() do this for you; these
 # tests drive the low-level runloom_c.go/run() path directly, which does not,
-# so the first getaddrinfo inside a goroutine would otherwise overflow the
-# (small) goroutine stack and crash.  See runloom/sync.py prewarm comment.
+# so the first getaddrinfo inside a fiber would otherwise overflow the
+# (small) fiber stack and crash.  See runloom/sync.py prewarm comment.
 socket.getaddrinfo("127.0.0.1", 0, socket.AF_INET, socket.SOCK_STREAM)
 
 
@@ -46,9 +46,9 @@ def _bound_port(listener):
     return port
 
 
-def _drive(*goroutines):
-    """Spawn each callable as a goroutine, run the scheduler, re-raise the
-    first exception any goroutine hit."""
+def _drive(*fibers):
+    """Spawn each callable as a fiber, run the scheduler, re-raise the
+    first exception any fiber hit."""
     box = []
 
     def wrap(fn):
@@ -59,7 +59,7 @@ def _drive(*goroutines):
                 box.append(e)
         return runner
 
-    for g in goroutines:
+    for g in fibers:
         runloom_c.go(wrap(g))
     runloom_c.run()
     if box:
@@ -250,7 +250,7 @@ class TestHalfClose(unittest.TestCase):
 
 class TestManyConcurrentConnections(unittest.TestCase):
     """libuv test-tcp-many-accepts: a server accepts many connections that are
-    all live at once, each handled by its own goroutine, and every client gets
+    all live at once, each handled by its own fiber, and every client gets
     its own correct echo.  Conservation across all connections."""
 
     def test_many_concurrent_echo(self):
@@ -270,7 +270,7 @@ class TestManyConcurrentConnections(unittest.TestCase):
             port_holder[0] = _bound_port(listener)
             for _ in range(N):
                 conn = listener.accept()
-                runloom_c.go(handler(conn))   # one goroutine per connection
+                runloom_c.go(handler(conn))   # one fiber per connection
             listener.close()
 
         def make_client(i):

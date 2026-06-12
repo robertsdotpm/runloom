@@ -6,7 +6,7 @@ will be plain `pip install runloom`; until then build from source.
 
 ## Requirements
 
-- **Python 3.11 or newer.**  The per-goroutine `PyThreadState`
+- **Python 3.11 or newer.**  The per-fiber `PyThreadState`
   snapshot uses 3.11+ tstate fields (`cframe`, `datastack_chunk`,
   `exc_state`).  Pre-3.11 used a different frame model that runloom
   doesn't cover.
@@ -76,7 +76,7 @@ print("netpoll:", runloom.netpoll_backend())    # e.g. epoll
 print("stack default:", runloom.get_stack_size(), "bytes")
 
 def hello():
-    print("hello from a goroutine!")
+    print("hello from a fiber!")
 runloom.go(hello)
 runloom.run(1)
 ```

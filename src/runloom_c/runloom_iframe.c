@@ -88,7 +88,7 @@ int runloom_iframe_walk(void *top, int max, runloom_iframe_cb cb, void *ctx)
 #endif
 }
 
-/* ---- critical-section suspend/restore across a goroutine swap ----
+/* ---- critical-section suspend/restore across a fiber swap ----
  * See the header for why this is needed.  Mirrors what CPython does in
  * _PyThreadState_Detach / _Attach, but driven manually at runloom's park
  * boundary (runloom never detaches the tstate on a cooperative park). */
@@ -102,7 +102,7 @@ uintptr_t runloom_critsec_suspend(void *tstate_v)
          * inactive (chain pointer stays in ts->critical_section). */
         _PyCriticalSection_SuspendAll(ts);
         saved = ts->critical_section;   /* re-read: now tagged inactive */
-        ts->critical_section = 0;       /* hand the next goroutine a clean chain */
+        ts->critical_section = 0;       /* hand the next fiber a clean chain */
     }
     return saved;
 #else

@@ -1,11 +1,11 @@
-"""RunloomTask: the asyncio.Task <-> goroutine bridge (heart of the bridge)."""
+"""RunloomTask: the asyncio.Task <-> fiber bridge (heart of the bridge)."""
 from ._base import *  # noqa: F401,F403  (shared foundation)
 from .futures import _RunloomFutureMixin, _fut_cancelled_error  # noqa: F401
 from .handles import _PG_ALL_TASKS, _REGISTER_TASK, _TASK_NAME_COUNTER  # noqa: F401
 
 class RunloomTask(_RunloomFutureMixin, asyncio.Task):
     """A real asyncio.Task subclass (isinstance(x, asyncio.Task) holds) driven
-    by a runloom goroutine instead of the C task machinery.
+    by a runloom fiber instead of the C task machinery.
 
     We initialise only the Future half of the C object (asyncio.Future.__init__)
     -- NOT Task.__init__, which would schedule the C task-step and double-drive
@@ -70,7 +70,7 @@ class RunloomTask(_RunloomFutureMixin, asyncio.Task):
         # Run the driver under a "<module>" root frame so libraries that derive
         # their module by walking frame.f_back (aiohttp web.AppKey) reach one,
         # matching asyncio.  Capture the creator's module name HERE (we're on
-        # its live stack) before the goroutine swaps stacks.  See
+        # its live stack) before the fiber swaps stacks.  See
         # _pg_run_with_module_root.  Clearing g->callable at completion still
         # breaks the task<->g cycle: the closure's only strong ref to self is
         # the bound self._driver it carries, dropped when the closure is.
@@ -80,19 +80,19 @@ class RunloomTask(_RunloomFutureMixin, asyncio.Task):
             _body = lambda: _pg_run_with_module_root(_driver, _modname)
         else:
             _body = self._driver
-        # Driver goroutines run arbitrary user async code (deep C-recursive
+        # Driver fibers run arbitrary user async code (deep C-recursive
         # first-time imports overflow the default 32 KB g-stack and SEGV), so
         # give them a roomier stack.  Override with RUNLOOM_AIO_TASK_STACK.
         # fifo=True: task STEPS are scheduled call_soon-FIFO in asyncio, so the
         # PCT controlled scheduler must keep this driver in order with the loop's
-        # other call_soon goroutines (else a sleep(0) resume can race ahead of a
+        # other call_soon fibers (else a sleep(0) resume can race ahead of a
         # call_soon callback -- a false positive, not a bug).  See pct_fifo.
         self._g = runloom_c.go(_body, stack_size=_TASK_STACK, fifo=True) \
             if _TASK_STACK else runloom_c.go(_body, fifo=True)
 
     def _pg_settle_c(self):
         # Settle the underlying C Future to FINISHED so asyncio.Task.__del__
-        # doesn't warn "Task was destroyed but it is pending" -- our goroutine
+        # doesn't warn "Task was destroyed but it is pending" -- our fiber
         # drives the coro, so the C task machinery never settles its own state.
         # The C Future has no C callbacks (asyncio uses our add_done_callback),
         # so this fires nothing.
@@ -101,16 +101,16 @@ class RunloomTask(_RunloomFutureMixin, asyncio.Task):
                 asyncio.Future.set_result(self, None)
         except BaseException:
             pass
-        # Drop our goroutine handles at completion.  The driver frame (still on
-        # the goroutine's stack here) holds `self` as a local, so as long as the
-        # task references its goroutine via _g / _self_g there is a cycle
+        # Drop our fiber handles at completion.  The driver frame (still on
+        # the fiber's stack here) holds `self` as a local, so as long as the
+        # task references its fiber via _g / _self_g there is a cycle
         # task -> _g/_self_g -> g -> retained driver frame -> self that survives
         # REFCOUNTING -- it only clears on the next gc.collect().  That keeps a
         # finished task (and its captured _pgexc + traceback) alive longer than
         # stock asyncio, which a well-behaved teardown -- and anyio's
         # TestRefcycles -- relies on NOT happening.  c9e1db2 cleared g->callable
         # in C; this clears the Python-side frame path.  Both _g and _self_g
-        # wrap the SAME goroutine, so clearing the Python refs (rather than
+        # wrap the SAME fiber, so clearing the Python refs (rather than
         # adding tp_traverse to the shared G type, which double-counts the one
         # g->callable across the two wrappers) is the safe break.  cancel() and
         # _wake_unpark only touch _self_g while pending, so dropping it now (the
@@ -190,13 +190,13 @@ class RunloomTask(_RunloomFutureMixin, asyncio.Task):
         # wait_fd): deliver a one-shot cancel at the next driver step.
         self._pgmustcancel = True
         if self._self_g is not None:
-            # If the goroutine is parked in runloom_c.wait_fd (sock_recv /
+            # If the fiber is parked in runloom_c.wait_fd (sock_recv /
             # sock_accept / sock_connect / a transport recv loop), there is NO
             # coro await-point for the driver to throw into, and G.wake() only
             # wakes park_self parkers -- so it would hang forever.  cancel_wait_fd
             # wakes the netpoll parker: wait_fd returns the CANCELLED sentinel,
             # _wait_fd raises CancelledError, and the driver settles us cancelled.
-            # Falls back to wake() for a running / park_self goroutine.
+            # Falls back to wake() for a running / park_self fiber.
             woke = False
             cwf = getattr(self._self_g, "cancel_wait_fd", None)
             if cwf is not None:
@@ -238,7 +238,7 @@ class RunloomTask(_RunloomFutureMixin, asyncio.Task):
     def _fut_waiter(self):
         return self._pgfutwaiter
 
-    # ---- driver: the per-task goroutine body ----
+    # ---- driver: the per-task fiber body ----
     def _driver(self):
         # Capture our own G handle so cancel/done_callback can wake us.
         self._self_g = runloom_c.current_g()
@@ -315,10 +315,10 @@ class RunloomTask(_RunloomFutureMixin, asyncio.Task):
                 # cooperative checkpoint).  Stock asyncio's sleep(0) runs one
                 # full loop iteration, which INCLUDES a selector poll that
                 # delivers pending socket I/O.  runloom's sched_yield only
-                # round-robins ready goroutines and bypasses the drain loop's
+                # round-robins ready fibers and bypasses the drain loop's
                 # idle netpoll pump (and the aio keepalive keeps it from going
                 # idle), so without an explicit poll here a sleep(0) loop never
-                # advances I/O parked on other goroutines (e.g. a peer's recv
+                # advances I/O parked on other fibers (e.g. a peer's recv
                 # loop) -- breaking the common `await asyncio.sleep(0)` idiom
                 # used to let pending reads land.  Deliver ready I/O first,
                 # then round-trip through the scheduler so other tasks run.
@@ -367,7 +367,7 @@ class RunloomTask(_RunloomFutureMixin, asyncio.Task):
                     throw_exc = e
                 continue
 
-            # Slow path: park the goroutine until the future fires.
+            # Slow path: park the fiber until the future fires.
             # Register the wake callback FIRST then call park_self --
             # the race where the future fires synchronously inside
             # add_done_callback is handled by park_safe / wake_safe
@@ -376,7 +376,7 @@ class RunloomTask(_RunloomFutureMixin, asyncio.Task):
             self._pgfutwaiter = yielded
             # select-before-wait: deliver any already-ready socket I/O before we
             # park.  Stock asyncio runs one selector poll per loop iteration, so
-            # a peer goroutine parked in wait_fd advances even while this side
+            # a peer fiber parked in wait_fd advances even while this side
             # has ready work; runloom only pumps netpoll when its ready ring drains
             # to empty, so without this an `await` that parks here can leave a
             # peer's recv loop starved (e.g. a server's run_asgi never sees a

@@ -6,7 +6,7 @@ extension into a temp dir once, then drives netpoll_inproc_fault_workload.py
 against it with RUNLOOM_FAULT_SELECT armed (the same compiled-in mechanism the
 kqueue/Windows pumps use).  Asserts the POSIX select pump:
 
-  EINTR (once)       -> retried; the parked goroutine still wakes.
+  EINTR (once)       -> retried; the parked fiber still wakes.
   EBADF (persistent) -> BACKS OFF, not a busy-spin.  Regression test for the
       missing select-path backoff: runloom_netpoll_wait_failed was gated to
       epoll/kqueue and never compiled on a select build, so a persistent

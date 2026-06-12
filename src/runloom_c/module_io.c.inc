@@ -2,12 +2,12 @@
  * standalone.  See module.c for the includes/typedefs/file-scope state.
  *
  * runloom_c.serve(): a reusable C server scaffold.  Opens N SO_REUSEPORT
- * listeners, runs N accept-loop goroutines in C, and spawns one handler
- * goroutine per accepted connection -- the handler receives a TCPConn (the
+ * listeners, runs N accept-loop fibers in C, and spawns one handler
+ * fiber per accepted connection -- the handler receives a TCPConn (the
  * all-C socket type, with C recv/recv_into/send_all + io_uring fast paths), so
  * the per-request I/O path is C and only the user's handler logic is Python.
  *
- * The accept loop runs as a *callable* goroutine (so it has a proper tstate +
+ * The accept loop runs as a *callable* fiber (so it has a proper tstate +
  * root frame to construct objects and spawn), and reuses the Python-level
  * TCPConn API (TCPConn.listen / .accept) because RunloomTCPConn_alloc is static
  * to runloom_tcp.c's translation unit.  Per-connection cost (accept method call
@@ -27,14 +27,14 @@ static PyObject *runloom_io_partial      = NULL;   /* functools.partial */
 static PyObject *runloom_io_tcpconn_type = NULL;   /* runloom_c.TCPConn */
 static PyObject *runloom_io_acceptor_fn  = NULL;   /* PyCFunction wrapping the accept loop */
 
-/* Default handler-goroutine stack: user request handlers can recurse deep into
- * C (TLS, parsers), like the aio bridge's I/O goroutines -- pin 512 KB
+/* Default handler-fiber stack: user request handlers can recurse deep into
+ * C (TLS, parsers), like the aio bridge's I/O fibers -- pin 512 KB
  * (virtual, pooled) rather than risk the grow-down shrinking it. */
 #define RUNLOOM_SERVE_HANDLER_STACK (512u * 1024u)
 
-/* The accept loop, run as one goroutine per listener.  args = (listener,
+/* The accept loop, run as one fiber per listener.  args = (listener,
  * handler).  Loops: accept a connection (cooperative, C inside TCPConn.accept),
- * then spawn a handler goroutine running partial(handler, conn).  Exits cleanly
+ * then spawn a handler fiber running partial(handler, conn).  Exits cleanly
  * when the listener is closed (accept raises) -- that is how serve() is
  * stopped.  Never propagates a per-connection error out of the loop. */
 static PyObject *m_serve_acceptor(PyObject *self, PyObject *args)
@@ -52,7 +52,7 @@ static PyObject *m_serve_acceptor(PyObject *self, PyObject *args)
             PyErr_Clear();
             break;
         }
-        /* Spawn the handler goroutine: partial(handler, conn)().  partial holds
+        /* Spawn the handler fiber: partial(handler, conn)().  partial holds
          * its own ref to conn; we drop ours. */
         part = PyObject_CallFunctionObjArgs(runloom_io_partial, handler, conn, NULL);
         Py_DECREF(conn);
@@ -120,11 +120,11 @@ static int runloom_io_listener_port(PyObject *listener)
 #endif
 }
 
-/* ---- All-C echo path (handler=None): tstate-free C goroutines ----
+/* ---- All-C echo path (handler=None): tstate-free C fibers ----
  * serve(..., handler=None) runs each connection entirely in C, spawned via
- * runloom_mn_go_c -- a C-entry goroutine carries NO Python tstate and NO root
+ * runloom_mn_go_c -- a C-entry fiber carries NO Python tstate and NO root
  * frame, so the per-swap PyThreadState save/restore that a Python-callable
- * goroutine pays on every park/wake is SKIPPED.  Pure C recv/send loop,
+ * fiber pays on every park/wake is SKIPPED.  Pure C recv/send loop,
  * cooperative via runloom_netpoll_wait_fd (same pattern module_tcp / TCPConn
  * already use).  This is the "written + integrated the right way" fast path:
  * zero PyObjects in the hot loop, zero tstate juggle per round-trip. */
@@ -196,9 +196,9 @@ static int runloom_io_listener_fd(PyObject *listener)
 /* runloom_c.serve(host, port, handler, acceptors=1, backlog=128)
  *     -> (bound_port, [listeners])
  *
- * Spawns `acceptors` accept-loop goroutines over SO_REUSEPORT listeners on one
+ * Spawns `acceptors` accept-loop fibers over SO_REUSEPORT listeners on one
  * port (port=0 picks one; the rest bind to it).  Each accepted connection is
- * handed to a fresh goroutine running handler(conn), conn being a TCPConn.  To
+ * handed to a fresh fiber running handler(conn), conn being a TCPConn.  To
  * stop the server, close the returned listeners (the accept loops then exit).
  * Must be called from inside the M:N runtime (runloom.run / mn_run). */
 static PyObject *m_serve(PyObject *self, PyObject *args, PyObject *kw)
@@ -254,7 +254,7 @@ static PyObject *m_serve(PyObject *self, PyObject *args, PyObject *kw)
 #if !defined(RUNLOOM_OS_WINDOWS)
         if (handler == Py_None) {
             /* All-C path: tstate-free C accept loop (mn_go_c) on the raw listen
-             * fd; it spawns a C echo goroutine per connection.  The listener
+             * fd; it spawns a C echo fiber per connection.  The listener
              * object stays alive in `listeners` (returned to Python). */
             int lfd = runloom_io_listener_fd(ln);
             Py_DECREF(ln);

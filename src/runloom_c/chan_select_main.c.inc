@@ -134,10 +134,10 @@ select_retry:
                     /* Retry the whole scan-then-park.  Do NOT return
                      * select_try_each() directly: it can come back -1
                      * (the channel that looked ready raced away to
-                     * another goroutine), and a bare -1 for a BLOCKING
+                     * another fiber), and a bare -1 for a BLOCKING
                      * select becomes PyLong(-1) in m_select -> the
                      * caller's `v, ok = select(...)` unpack raises
-                     * TypeError and the goroutine dies, dropping work.
+                     * TypeError and the fiber dies, dropping work.
                      * select_retry re-scans and, if still nothing is
                      * ready, re-parks (or returns -1 only when a default
                      * case actually exists). */
@@ -206,7 +206,7 @@ select_retry:
          * having claimed our park (e.g. a stale hub-submission entry left
          * by a wake that raced our park).  Returning -2 here made m_select
          * hand back NULL with no exception -> CPython SystemError -> the
-         * goroutine died mid-loop, dropping every value it had received.
+         * fiber died mid-loop, dropping every value it had received.
          *
          * On an apparent spurious wake we cannot just free + retry: a
          * delivery could be claiming a still-installed waiter right now,

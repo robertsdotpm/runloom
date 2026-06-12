@@ -1,19 +1,19 @@
 """A Python signal handler that raises during a cooperative blocking call must
-propagate out of THAT call, into the goroutine's own try/except -- exactly as a
+propagate out of THAT call, into the fiber's own try/except -- exactly as a
 signal interrupting a real recv()/select() does -- not get swallowed by the
 scheduler or carried out of runloom_c.run().
 
 Regression test for the scheduler-grab bypass bug: commit 34efeb5 ("make
 run_forever interruptible by signals") taught the idle scheduler to run a
 pending Python signal handler and carry a raised exception out of run().  That
-is right for an idle run_forever (Ctrl-C), but it also fired for a goroutine
+is right for an idle run_forever (Ctrl-C), but it also fired for a fiber
 actively parked in a cooperative select()/recv()/accept(), stealing the
-exception before the goroutine's own eval loop -- and its try/except -- ever
+exception before the fiber's own eval loop -- and its try/except -- ever
 saw it (CPython's verbatim test_select_interrupt_exc went red on epoll).
 
-The fix delivers the raised handler exception INTO the parked goroutine (it
+The fix delivers the raised handler exception INTO the parked fiber (it
 restores it on resume from wait_fd and returns out of the blocking call), and
-only carries it out of run() when no parked goroutine can carry it (the idle /
+only carries it out of run() when no parked fiber can carry it (the idle /
 sleep-only Ctrl-C case).  The delivery path is backend-independent, so these
 run on epoll / kqueue / select alike.
 """
@@ -35,10 +35,10 @@ class _Raise(Exception):
     pass
 
 
-def _run_goroutine(body):
-    """Run `body` as a single goroutine to completion; return whatever it put
+def _run_fiber(body):
+    """Run `body` as a single fiber to completion; return whatever it put
     in the one-element list it is handed.  Surfaces an exception that escaped
-    the goroutine (and thus out of run()) as `escaped`."""
+    the fiber (and thus out of run()) as `escaped`."""
     box = {"result": None, "escaped": None}
 
     def wrapper():
@@ -68,9 +68,9 @@ class TestSignalInterruptsCooperativeCall(unittest.TestCase):
     def _handler(signum, frame):
         raise _Raise
 
-    def test_select_interrupted_raises_into_goroutine(self):
+    def test_select_interrupted_raises_into_fiber(self):
         """A SIGALRM during a cooperative selectors.EpollSelector-style poll on
-        a never-ready fd raises INTO the goroutine (bounded re-probe wait)."""
+        a never-ready fd raises INTO the fiber (bounded re-probe wait)."""
         import selectors
 
         def body(box):
@@ -89,16 +89,16 @@ class TestSignalInterruptsCooperativeCall(unittest.TestCase):
                 box["result"] = "caught"
                 box["dt"] = time.time() - t
 
-        box = _run_goroutine(body)
+        box = _run_fiber(body)
         self.assertEqual(box["result"], "caught",
-                         "signal did not raise into the goroutine's try/except "
+                         "signal did not raise into the fiber's try/except "
                          "(escaped=%r)" % (box["escaped"],))
         self.assertIsNone(box["escaped"], "exception escaped out of run()")
         self.assertLess(box.get("dt", 99), 5.0)
 
-    def test_recv_interrupted_raises_into_goroutine(self):
+    def test_recv_interrupted_raises_into_fiber(self):
         """A SIGALRM during a cooperative socket.recv() on a never-ready socket
-        (infinite wait, no re-probe timer) raises INTO the goroutine."""
+        (infinite wait, no re-probe timer) raises INTO the fiber."""
         def body(box):
             rd, wr = socket.socketpair()
             self.addCleanup(rd.close)
@@ -110,15 +110,15 @@ class TestSignalInterruptsCooperativeCall(unittest.TestCase):
             except _Raise:
                 box["result"] = "caught"
 
-        box = _run_goroutine(body)
+        box = _run_fiber(body)
         self.assertEqual(box["result"], "caught",
                          "signal did not raise into recv() (escaped=%r)"
                          % (box["escaped"],))
         self.assertIsNone(box["escaped"], "exception escaped out of run()")
 
-    def test_accept_interrupted_raises_into_goroutine(self):
+    def test_accept_interrupted_raises_into_fiber(self):
         """A SIGALRM during a cooperative socket.accept() (infinite wait) raises
-        INTO the goroutine rather than out of run()."""
+        INTO the fiber rather than out of run()."""
         def body(box):
             srv = socket.socket()
             srv.bind(("127.0.0.1", 0))
@@ -131,7 +131,7 @@ class TestSignalInterruptsCooperativeCall(unittest.TestCase):
             except _Raise:
                 box["result"] = "caught"
 
-        box = _run_goroutine(body)
+        box = _run_fiber(body)
         self.assertEqual(box["result"], "caught",
                          "signal did not raise into accept() (escaped=%r)"
                          % (box["escaped"],))
@@ -139,9 +139,9 @@ class TestSignalInterruptsCooperativeCall(unittest.TestCase):
 
     def test_idle_signal_still_carried_out_of_run(self):
         """The complementary contract (the 34efeb5 feature): when NOTHING is
-        parked in a cooperative wait to carry it -- a goroutine busy in a
+        parked in a cooperative wait to carry it -- a fiber busy in a
         cooperative sleep -- a raised signal handler still surfaces (here, out
-        of the goroutine).  Guards against over-correcting the bypass fix into
+        of the fiber).  Guards against over-correcting the bypass fix into
         swallowing signals on the genuinely-idle path."""
         def body(box):
             signal.alarm(1)
@@ -152,8 +152,8 @@ class TestSignalInterruptsCooperativeCall(unittest.TestCase):
             except _Raise:
                 box["result"] = "caught"
 
-        box = _run_goroutine(body)
-        # Either delivered into the goroutine's try/except, or carried out of
+        box = _run_fiber(body)
+        # Either delivered into the fiber's try/except, or carried out of
         # run() -- both are "the signal was not lost".  It must not hang or be
         # swallowed.
         self.assertTrue(box["result"] == "caught" or isinstance(box["escaped"], _Raise),

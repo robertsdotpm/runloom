@@ -141,10 +141,10 @@ class _RunloomFutureMixin(object):
 
     def __del__(self):
         # "exception was never retrieved" warning, now that a completed task is
-        # collectable (upstream c9e1db2 releases g->callable at goroutine
+        # collectable (upstream c9e1db2 releases g->callable at fiber
         # completion, breaking the task->_g->callable->task cycle).  Keep it
         # side-effect-free: for a fire-and-forget task whose only ref is
-        # g->callable, this runs in the goroutine's own completion context, so
+        # g->callable, this runs in the fiber's own completion context, so
         # we must NOT re-enter the scheduler -- a plain call_exception_handler
         # (logging) is fine.
         if not self._pglogtb or self._pgexc is None:
@@ -239,7 +239,7 @@ class _RunloomFutureMixin(object):
             # asyncio order: the awaiter that was scheduled first (by an earlier
             # set_result) resumes BEFORE the future's other, later done-callbacks.
             # runloom keeps exactly ONE callback synchronous: RunloomTask._wake_unpark,
-            # its own await-wake primitive -- deferring it would spawn a goroutine
+            # its own await-wake primitive -- deferring it would spawn a fiber
             # per await and break park/unpark (it only readies the g, which is
             # itself FIFO-after an already-readied waiter, so ordering still
             # holds). A runloom-internal control callback may opt back into sync via

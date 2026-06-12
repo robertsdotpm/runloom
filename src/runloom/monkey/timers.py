@@ -9,7 +9,7 @@ _orig_time_sleep = None
 
 
 def _patched_time_sleep(seconds):
-    if _in_goroutine():
+    if _in_fiber():
         _co_sleep(seconds)
     else:
         _orig_time_sleep(seconds)

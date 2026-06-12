@@ -1,15 +1,15 @@
-"""Regression: a module attribute MISS inside a goroutine must raise a clean
+"""Regression: a module attribute MISS inside a fiber must raise a clean
 AttributeError, never crash.
 
 CPython 3.13's module getattr, on a miss, calls _PyModule_IsPossiblyShadowing to
 append a "did you shadow a stdlib module?" hint to the AttributeError.  That
 helper reserves ~32 KB of C stack (two wchar_t[MAXPATHLEN] path buffers) -- more
-than a whole default goroutine stack -- so an ordinary attribute miss
+than a whole default fiber stack -- so an ordinary attribute miss
 (hasattr / getattr feature-detection, a namespace __getattr__ proxy) inside a
-goroutine used to overflow the stack and SIGSEGV.
+fiber used to overflow the stack and SIGSEGV.
 
 runloom replaces PyModule_Type's getattr slot to skip that hint while running on a
-goroutine's small stack (the AttributeError itself -- type, .name/.obj, message
+fiber's small stack (the AttributeError itself -- type, .name/.obj, message
 core -- is unchanged).  See src/runloom_c/module_init.c.inc.
 """
 import os
@@ -24,7 +24,7 @@ MODNAME = "runloom_modmiss_mod"
 
 
 def _drive(fn):
-    """Run fn() inside a single-thread goroutine; re-raise anything it raised."""
+    """Run fn() inside a single-thread fiber; re-raise anything it raised."""
     box = [None, None]
 
     def runner():
@@ -43,7 +43,7 @@ def _drive(fn):
 class TestModuleGetattrGoroutine(unittest.TestCase):
     def setUp(self):
         # A module WITH a __file__ is what makes CPython attempt the 32 KB
-        # shadowing hint on a miss (the path that overflows the goroutine stack).
+        # shadowing hint on a miss (the path that overflows the fiber stack).
         fd, self.path = tempfile.mkstemp(suffix=".py", prefix="runloom_modmiss_")
         os.close(fd)
         self.mod = types.ModuleType(MODNAME)
@@ -58,21 +58,21 @@ class TestModuleGetattrGoroutine(unittest.TestCase):
         except OSError:
             pass
 
-    def test_miss_in_goroutine_raises_attributeerror(self):
+    def test_miss_in_fiber_raises_attributeerror(self):
         def body():
             with self.assertRaises(AttributeError):
                 getattr(self.mod, "definitely_missing")
             return "ok"
         self.assertEqual(_drive(body), "ok")
 
-    def test_hit_in_goroutine_still_works(self):
+    def test_hit_in_fiber_still_works(self):
         self.assertEqual(_drive(lambda: getattr(self.mod, "present")), 123)
 
-    def test_hasattr_miss_in_goroutine(self):
+    def test_hasattr_miss_in_fiber(self):
         self.assertIs(_drive(lambda: hasattr(self.mod, "nope")), False)
 
     def test_module_level_getattr_function_honoured(self):
-        # PEP 562 module __getattr__ must still be called on a miss (in-goroutine).
+        # PEP 562 module __getattr__ must still be called on a miss (in-fiber).
         seen = []
 
         def mod_getattr(name):

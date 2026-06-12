@@ -64,7 +64,7 @@ RUNLOOM_INLINE void runloom_mutex_lock(runloom_mutex_t *m) {
     EnterCriticalSection(m);
 }
 /* 0 = acquired, nonzero = contended (would block).  Used by the
- * signal-safe goroutine dump so a contended lock degrades to a partial
+ * signal-safe fiber dump so a contended lock degrades to a partial
  * dump instead of deadlocking a SIGQUIT handler. */
 RUNLOOM_INLINE int runloom_mutex_trylock(runloom_mutex_t *m) {
     return TryEnterCriticalSection(m) ? 0 : -1;
@@ -89,7 +89,7 @@ RUNLOOM_INLINE void runloom_mutex_lock(runloom_mutex_t *m) {
     pthread_mutex_lock(m);
 }
 /* 0 = acquired, nonzero = contended (would block).  Used by the
- * signal-safe goroutine dump so a contended lock degrades to a partial
+ * signal-safe fiber dump so a contended lock degrades to a partial
  * dump instead of deadlocking a SIGQUIT handler. */
 RUNLOOM_INLINE int runloom_mutex_trylock(runloom_mutex_t *m) {
     return pthread_mutex_trylock(m);
@@ -223,7 +223,7 @@ RUNLOOM_INLINE long long runloom_monotonic_ns(void) {
      * `ticks * 1e9 / freq` overflows int64 once ticks exceed ~9.2e9 (at
      * 10 MHz, ~15 minutes of uptime), wrapping to a negative/garbage time.
      * Difference-based scheduler math mostly cancels the wrap, but any
-     * absolute-timestamp consumer (e.g. goroutine park-age tracking) saw
+     * absolute-timestamp consumer (e.g. fiber park-age tracking) saw
      * bogus values.  This form keeps the product small. */
     sec = (long long)(now.QuadPart / freq.QuadPart);
     rem = (long long)(now.QuadPart % freq.QuadPart);

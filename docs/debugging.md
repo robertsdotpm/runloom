@@ -1,8 +1,8 @@
 # Debugging & introspection
 
 When a runloom program hangs or misbehaves, the first question is always
-*which goroutines exist and what is each one waiting on?*  runloom answers it
-the way Go does — a goroutine dump — plus a structured API you can call
+*which fibers exist and what is each one waiting on?*  runloom answers it
+the way Go does — a fiber dump — plus a structured API you can call
 from your own code or a watchdog.
 
 ## Quick look
@@ -10,53 +10,53 @@ from your own code or a watchdog.
 ```python
 import runloom
 
-gi.count()                 # how many goroutines are live
+gi.count()                 # how many fibers are live
 print(gi.format(stacks=True))   # a formatted dump (string) -> log it
 gi.dump()                  # write that dump to stderr
 ```
 
 `gi.format(stacks=True)` prints a state histogram and one block per
-goroutine, with the Python stack pinpointing where in *your* code it is
+fiber, with the Python stack pinpointing where in *your* code it is
 parked:
 
 ```
-=== runloom goroutines: 3 live ===
+=== runloom fibers: 3 live ===
   running    1
   sleep      2
 
-goroutine 1 [running]  <function main at 0x...>:
-goroutine 2 [sleep, wake_in=4.98s, age=0.0s]  <function handler at 0x...>:
+fiber 1 [running]  <function main at 0x...>:
+fiber 2 [sleep, wake_in=4.98s, age=0.0s]  <function handler at 0x...>:
     sleep (runtime.py:121)
     db_query (app/db.py:42)
     handler (app/server.py:88)
-goroutine 3 [io-wait, fd=12 R, age=30.1s]  <function accept_loop at 0x...>:
+fiber 3 [io-wait, fd=12 R, age=30.1s]  <function accept_loop at 0x...>:
     ...
 ```
 
 ## The structured API
 
-`runloom.inspect.goroutines()` (or `runloom.goroutines()`) returns a list of
-dicts, one per live goroutine:
+`runloom.inspect.fibers()` (or `runloom.fibers()`) returns a list of
+dicts, one per live fiber:
 
 | key          | meaning |
 |--------------|---------|
-| `id`         | per-goroutine id (Go's *goid*) |
+| `id`         | per-fiber id (Go's *goid*) |
 | `state`      | `running` / `runnable` / `io-wait` / `sleep` / `chan-wait` / `park` / `done` |
 | `blocked_on` | coarse class: `io` / `timer` / `chan` / `sync` / `running` |
 | `fd`,`events`| the fd and `R`/`W`/`RW`, when `io-wait` |
 | `wake_in`    | seconds until wakeup, when `sleep` |
 | `age`        | seconds in the current parked state (needs timestamps on, below) |
-| `refcount`, `noyield`, `owner` | internals; `owner` groups goroutines by OS-thread scheduler |
+| `refcount`, `noyield`, `owner` | internals; `owner` groups fibers by OS-thread scheduler |
 
 ```python
-gi.goroutines(stacks=True)   # each dict also gets 'entry' (repr) + 'stack'
-gi.stack(gid)                # one goroutine's stack: [(file, line, func), ...]
+gi.fibers(stacks=True)   # each dict also gets 'entry' (repr) + 'stack'
+gi.stack(gid)                # one fiber's stack: [(file, line, func), ...]
 ```
 
 ### Park age ("stuck for how long")
 
 Off by default (it costs one clock read per park).  Turn it on to populate
-`age` and spot a wedged goroutine:
+`age` and spot a wedged fiber:
 
 ```python
 gi.enable_timestamps()       # or env RUNLOOM_INTROSPECT_TIME=1
@@ -64,14 +64,14 @@ gi.enable_timestamps()       # or env RUNLOOM_INTROSPECT_TIME=1
 
 ### Leak watchdog
 
-A goroutine parked far longer than expected is usually a leak — an orphaned
+A fiber parked far longer than expected is usually a leak — an orphaned
 accept loop, a never-awaited task, a waiter whose waker is gone.  `leaked()`
 finds them (it turns on age tracking for you):
 
 ```python
 gi.leaked(min_age=60)                                  # parked > 60s
 gi.leaked(min_age=300, states=("chan-wait", "park"))   # stuck on another
-                                                       # goroutine for 5 min
+                                                       # fiber for 5 min
 ```
 
 Or run a periodic watchdog inside your scheduler:
@@ -80,28 +80,28 @@ Or run a periodic watchdog inside your scheduler:
 gi.watch_leaks(min_age=120, interval=30)   # logs anything parked > 2 min
 ```
 
-A long-lived server legitimately has old `io-wait` goroutines (its accept
-loops) and old `sleep` goroutines (tickers), so narrow `states` / raise
+A long-lived server legitimately has old `io-wait` fibers (its accept
+loops) and old `sleep` fibers (tickers), so narrow `states` / raise
 `min_age` to match what *you* consider stuck.
 
 ### When is the Python stack available?
 
 * **Single-thread scheduler (`runloom.aio`, the common case):** the full stack
-  of any parked goroutine is reconstructed.  asyncio Tasks also expose
+  of any parked fiber is reconstructed.  asyncio Tasks also expose
   their own stack via the stock `Task.get_stack()`; runloom fills in the *raw*
-  goroutines (channel ops, the netpoll pump, accept loops) that
+  fibers (channel ops, the netpoll pump, accept loops) that
   `asyncio.all_tasks()` never sees.
-* **Default M:N scheduler:** a parked goroutine can be resumed by its hub at
+* **Default M:N scheduler:** a parked fiber can be resumed by its hub at
   any instant, so its stack is withheld (there is no safe way to freeze it);
   the structural fields above still tell the story.  Run with
-  `RUNLOOM_PER_G_TSTATE=1` to get full stacks under M:N (each goroutine then
+  `RUNLOOM_PER_G_TSTATE=1` to get full stacks under M:N (each fiber then
   owns a thread-state that can be claimed for the walk).
-* The **currently-running** goroutine has no *saved* stack — use the normal
+* The **currently-running** fiber has no *saved* stack — use the normal
   `traceback` / `sys._getframe` for your own frames.
 
 ## What is each hub doing? (`hubs()`)
 
-`goroutines()` is the per-goroutine view; `runloom.inspect.hubs()` (or
+`fibers()` is the per-fiber view; `runloom.inspect.hubs()` (or
 `runloom.hubs()`) is the per-**hub** view — the M:N scheduler threads — and the
 first thing to look at when the answer to "it hung" is *which* hub and *on
 what*:
@@ -133,14 +133,14 @@ Each dict has:
 | `state` | `detached` (released its tstate — a blocking call **or** idle), `attached` (running Python / CPU-bound), `suspended` (a stop-the-world is in progress) |
 | `running_g` | goid being resumed, or `None` when idle |
 | `dwell_ms` | how long the **current resume** has run; a large value with `detached` is a hub wedged in a blocking call |
-| `pending` | goroutines owned + queued on this hub |
+| `pending` | fibers owned + queued on this hub |
 | `preempt_requested` | sysmon has asked this hub to yield (a CPU wedge) |
 | `instrumented` | whether sysmon resume-tracking is live (it is by default on free-threaded 3.13t; `running_g`/`dwell_ms`/`blocked_at` need it) |
 | `blocked_at` | best-effort Python call site of a **DETACHED-wedged** hub's blocking call, e.g. `cursor.execute (db.py:88)`, else `None` |
 | `stack_cmd` | a ready-to-run `py-spy dump --pid <PID>` for **this** process — the always-safe, out-of-process full C+Python stack of every thread |
 
 **`blocked_at` is best-effort.** It is read from another hub's thread-state, so
-it only fills for a hub that is *stably* DETACHED (a goroutine parked in a
+it only fills for a hub that is *stably* DETACHED (a fiber parked in a
 blocking syscall — the owner thread won't touch its frames until the call
 returns) and only when the handoff rescue isn't mid-adoption of that hub. For an
 **ATTACHED** (CPU) wedge, or when the read can't be taken safely, it is `None` —
@@ -157,7 +157,7 @@ lock-free atomic reads, so `hubs()` is cheap enough to poll from a watchdog.
 ## Dumping a hung process (`kill -QUIT`)
 
 ```python
-gi.install_dump_signal()     # SIGQUIT -> goroutine dump on stderr
+gi.install_dump_signal()     # SIGQUIT -> fiber dump on stderr
 # or set env RUNLOOM_TRACEBACK=1 before import
 ```
 
@@ -172,20 +172,20 @@ bytecode boundary, which a fully-stalled process never reaches).  On
 kill -QUIT <pid>
 ```
 
-writes a structural dump (state histogram + per-goroutine line, no Python
+writes a structural dump (state histogram + per-fiber line, no Python
 stacks — touching Python objects from a signal handler is not safe) to
 stderr and lets the process continue.  The underlying primitive is
-`runloom.dump_goroutines(fd)`, which is async-signal-safe-ish (it
+`runloom.dump_fibers(fd)`, which is async-signal-safe-ish (it
 try-locks the registry and uses only `write(2)`).
 
 ## Crash reporting (`SIGSEGV` / `SIGBUS`)
 
-A goroutine runs on a small, fixed C stack with a `PROT_NONE` **guard page**
-just below it, so the commonest hard crash in runloom is a **goroutine stack
+A fiber runs on a small, fixed C stack with a `PROT_NONE` **guard page**
+just below it, so the commonest hard crash in runloom is a **fiber stack
 overflow** — deep C recursion (a big `repr`, an OpenSSL/regex/JSON call, a
 recursive protocol callback) running off the low end of that stack and into the
 guard page.  By default that is a bare `Segmentation fault` with no clue which
-goroutine or why.
+fiber or why.
 
 The crash reporter turns it into a classified dump:
 
@@ -200,24 +200,24 @@ On a fault it maps the faulting address onto the guard pages and prints, e.g.:
 ======================== runloom crash ========================
 [runloom] fatal SIGSEGV at address 0x7622eca18f30  (pid 48681, thread 0x7622ebbff6c0)
 [runloom] >>> GOROUTINE STACK OVERFLOW <<<
-[runloom]     goroutine g1 ran off the low end of its 128 KiB C stack
+[runloom]     fiber g1 ran off the low end of its 128 KiB C stack
 [runloom]     (the fault hit the guard page just below it).
 [runloom]     Fix: give it a bigger stack -- runloom_c.go(fn, stack_size=N), ...
-[runloom] this thread was executing goroutine g1.
-=== runloom goroutine dump: 1 live (default stack 128 KiB) ===
+[runloom] this thread was executing fiber g1.
+=== runloom fiber dump: 1 live (default stack 128 KiB) ===
   ...
 ```
 
-A fault **inside** a goroutine stack is reported as a likely wild pointer / UAF
-on that goroutine; anything else (main/hub stack, heap, a stray pointer) is
-flagged as a non-goroutine fault.  After the dump it **chains to the previous
+A fault **inside** a fiber stack is reported as a likely wild pointer / UAF
+on that fiber; anything else (main/hub stack, heap, a stray pointer) is
+flagged as a non-fiber fault.  After the dump it **chains to the previous
 handler** so a core dump / correct exit code still follow.
 
 `level` (or the `RUNLOOM_CRASH` env value) selects behaviour, comma-separated:
 
 | level        | effect                                                           |
 |--------------|------------------------------------------------------------------|
-| `on`         | classified goroutine dump (the default)                          |
+| `on`         | classified fiber dump (the default)                          |
 | `all`        | `+ backtrace + pystack`                                          |
 | `backtrace`  | add a native C backtrace (`execinfo`)                            |
 | `pystack`    | add the Python traceback (enables `faulthandler` and chains to it) |
@@ -231,28 +231,28 @@ the runtime so the scheduler hubs are armed as they spawn.
 
 It survives the very overflow it reports because every runloom OS thread (the
 main thread, each scheduler hub, the blocking-offload workers) installs its own
-`sigaltstack`, so the handler runs on a separate stack when the goroutine stack
+`sigaltstack`, so the handler runs on a separate stack when the fiber stack
 is exhausted.  Off by default — it does not hijack process-wide signal handlers
 unless asked.  **Windows** uses a Vectored Exception Handler that dumps the
-goroutine registry and continues the search (the rich path is POSIX).
+fiber registry and continues the search (the rich path is POSIX).
 
 ## Deadlock detection
 
-Go reports `fatal error: all goroutines are asleep - deadlock!` when the
-scheduler runs out of runnable work but goroutines are still blocked on each
+Go reports `fatal error: all fibers are asleep - deadlock!` when the
+scheduler runs out of runnable work but fibers are still blocked on each
 other.  runloom does the same: if the single-thread scheduler quiesces — nothing
-runnable, no timers, no I/O, no offload in flight — while goroutines are still
-parked on a channel or a `park`, those goroutines can never be woken, so it
-reports the deadlock with a goroutine dump:
+runnable, no timers, no I/O, no offload in flight — while fibers are still
+parked on a channel or a `park`, those fibers can never be woken, so it
+reports the deadlock with a fiber dump:
 
 ```
-runloom: DEADLOCK -- the scheduler ran out of work with 2 goroutine(s) still
+runloom: DEADLOCK -- the scheduler ran out of work with 2 fiber(s) still
 blocked on a channel/park and no way to wake them:
 
-=== runloom goroutines: 2 live ===
+=== runloom fibers: 2 live ===
   chan-wait  2
-goroutine 1 [chan-wait] ...
-goroutine 2 [chan-wait] ...
+fiber 1 [chan-wait] ...
+fiber 2 [chan-wait] ...
 ```
 
 Three modes (default **warn**):
@@ -270,16 +270,16 @@ goes through `sched_stop`, which is **excluded**, so a normal loop teardown
 with pending background tasks never trips the detector — only a genuine
 "everyone is blocked, nothing can make progress" quiescence does.
 
-## Bounding goroutines (backpressure)
+## Bounding fibers (backpressure)
 
 Goroutines are cheap, but `go()` is unbounded — a runaway spawn loop (a
 fan-out with no limit, an accept loop that spawns per connection under a
 flood) can still exhaust memory.  An optional admission gate caps the number
-of live goroutines:
+of live fibers:
 
 ```python
 import runloom
-gi.set_max_goroutines(100_000)   # 0 = unlimited (default); env RUNLOOM_MAX_GOROUTINES
+gi.set_max_fibers(100_000)   # 0 = unlimited (default); env RUNLOOM_MAX_GOROUTINES
 ```
 
 Over the cap, `runloom.go` / the spawn raises `RuntimeError`, so the caller can
@@ -295,16 +295,16 @@ while True:
         runloom.yield_now()         # let some finish, then retry
 ```
 
-`gi.live_goroutines()` reports the current count under the cap.  The gate has
+`gi.live_fibers()` reports the current count under the cap.  The gate has
 **zero hot-path cost** when no cap is set (the live counter is only touched
 while a limit is active).
 
 ## Cost
 
-The registry that powers all of this has **no hot-path cost**: a goroutine
+The registry that powers all of this has **no hot-path cost**: a fiber
 is registered only when its struct is first allocated from the OS and
 unlinked only when returned, so the common slab-recycled spawn/complete
-path never touches the registry.  `goroutines()` and `dump()` take a brief
+path never touches the registry.  `fibers()` and `dump()` take a brief
 lock to snapshot; call them from a watchdog as often as you like.
 
 ## Fork safety

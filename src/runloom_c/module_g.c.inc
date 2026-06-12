@@ -38,13 +38,13 @@ static PyObject *RunloomG_result_get(RunloomG *self, void *closure)
     return r;
 }
 
-/* Wake a goroutine parked via runloom_c.park_self() or runloom_c.park().  Safe to
+/* Wake a fiber parked via runloom_c.park_self() or runloom_c.park().  Safe to
  * call before the park (race-handled inside the wake primitives) and from a
  * foreign OS thread.  ROUTES BY HOW THE g PARKED: a g parked on an M:N hub
  * (park_hub != NULL, set by runloom_park_generic) must be re-queued via
  * runloom_mn_wake_g -- runloom_sched_wake_safe only handles the single-thread
  * park_safe handshake (it CASes parked_safe, which the M:N park never sets, so it
- * would silently drop the wake and strand the goroutine).  The hub pointer is the
+ * would silently drop the wake and strand the fiber).  The hub pointer is the
  * one RECORDED on the g (stable for the process lifetime); never pass a hub from
  * the foreign caller (a stale hub is the documented SIGSEGV).  The pump kick
  * breaks an idle single-thread run() epoll_wait(-1) so a cross-thread wake is
@@ -66,10 +66,10 @@ static PyObject *RunloomG_wake(RunloomG *self, PyObject *unused)
     Py_RETURN_NONE;
 }
 
-/* Cancel this goroutine if it is parked in runloom_c.wait_fd: its wait_fd
+/* Cancel this fiber if it is parked in runloom_c.wait_fd: its wait_fd
  * returns the WAIT_FD_CANCELLED sentinel and the g is re-queued.  Returns True
  * if it was netpoll-parked (and woken), False otherwise (running, or parked via
- * park_self -- use wake() for that).  This is the cancel path for a goroutine
+ * park_self -- use wake() for that).  This is the cancel path for a fiber
  * blocked in a socket recv/accept/connect, which has no coro await-point for
  * the driver to throw CancelledError into. */
 static PyObject *RunloomG_cancel_wait_fd(RunloomG *self, PyObject *unused)
@@ -83,7 +83,7 @@ static PyObject *RunloomG_cancel_wait_fd(RunloomG *self, PyObject *unused)
     Py_RETURN_FALSE;
 }
 
-/* Return a small introspection dict for a parked goroutine:
+/* Return a small introspection dict for a parked fiber:
  *   {"state": "done"|"running"|"parked"|"fresh",
  *    "has_snap": bool}
  *
@@ -92,7 +92,7 @@ static PyObject *RunloomG_cancel_wait_fd(RunloomG *self, PyObject *unused)
  * patch releases (3.11/3.12/3.13 all differ), so walking it from a
  * stable C extension would require pinning to the internal-API build
  * flag -- something we deliberately avoid for portability.  This
- * minimal version still lets a watchdog goroutine answer "what state
+ * minimal version still lets a watchdog fiber answer "what state
  * is task X in?" without paying the internal-header dependency. */
 static PyObject *RunloomG_stack(RunloomG *self, PyObject *unused)
 {
@@ -125,9 +125,9 @@ static PyObject *RunloomG_stack(RunloomG *self, PyObject *unused)
     return d;
 }
 
-/* Two G handles compare equal iff they wrap the same underlying goroutine.
+/* Two G handles compare equal iff they wrap the same underlying fiber.
  * runloom_c.current_g() mints a fresh RunloomG on every call (a new PyObject
- * wrapping the same runloom_g_t*), so identity-based '==' would make a goroutine
+ * wrapping the same runloom_g_t*), so identity-based '==' would make a fiber
  * fail to recognise its own handle across calls -- breaking, e.g., a
  * reentrant cooperative lock that records the owner as current_g().  Compare
  * by the wrapped pointer, and hash to match so G works as a dict/set key. */
@@ -153,10 +153,10 @@ static Py_hash_t RunloomG_hash(PyObject *self)
 
 static PyMethodDef RunloomG_methods[] = {
     {"wake", (PyCFunction)RunloomG_wake, METH_NOARGS,
-     "Wake this goroutine if parked via park_self().  Safe to call "
+     "Wake this fiber if parked via park_self().  Safe to call "
      "before park_self (race-handled)."},
     {"cancel_wait_fd", (PyCFunction)RunloomG_cancel_wait_fd, METH_NOARGS,
-     "Cancel this goroutine if parked in wait_fd: its wait_fd returns the "
+     "Cancel this fiber if parked in wait_fd: its wait_fd returns the "
      "WAIT_FD_CANCELLED sentinel and it is re-queued.  Returns True if it was "
      "netpoll-parked, else False (use wake() for park_self parkers)."},
     {"stack", (PyCFunction)RunloomG_stack, METH_NOARGS,

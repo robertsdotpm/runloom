@@ -10,7 +10,7 @@ from .dns_proto import _DNS_PORT, _QTYPE_A, _QTYPE_AAAA, _build_query, _is_ip_li
 # /etc/hosts at first use, send UDP queries via the cooperatively
 # patched socket layer (so recvfrom parks on wait_fd, not a thread),
 # parse A/AAAA records.  Result cache amortises repeat lookups to
-# microseconds.  A and AAAA queries fire in parallel goroutines so
+# microseconds.  A and AAAA queries fire in parallel fibers so
 # dual-stack hosts get both families in one round-trip.
 # ============================================================
 
@@ -23,7 +23,7 @@ _dns_result_cache = {}    # (lowername, qtype) -> (addrs, expire_ts)
 
 
 def _spawn(fn):
-    """Spawn a resolver goroutine on whichever scheduler is active: mn_go under
+    """Spawn a resolver fiber on whichever scheduler is active: mn_go under
     M:N (mn_hub_count() > 0), else the single-thread go.  A runner spawned via
     the single-thread go() never runs under mn_run, so the parker.park() in
     _resolve_dual would hang forever (the M:N getaddrinfo deadlock)."""
@@ -145,7 +145,7 @@ def _query_nameserver(packet, txn, ns, timeout):
 
 def _resolve_via_libc(name, qtype):
     """Fall back to the platform getaddrinfo, dispatched through the
-    blocking-call backend so other goroutines keep running while libc's
+    blocking-call backend so other fibers keep running while libc's
     blocking resolver is in flight.  Used when we have no usable
     /etc/resolv.conf (Windows; chrooted POSIX without DNS config)."""
     af = socket.AF_INET if qtype == _QTYPE_A else socket.AF_INET6
@@ -205,7 +205,7 @@ def _resolve_dual(name, want_v4, want_v6):
         return [(socket.AF_INET,  a) for a in _resolve_qtype(name, _QTYPE_A)]
     if want_v6 and not want_v4:
         return [(socket.AF_INET6, a) for a in _resolve_qtype(name, _QTYPE_AAAA)]
-    # Both -- fire in parallel goroutines, gather via Parker
+    # Both -- fire in parallel fibers, gather via Parker
     results = [None, None]
     parker = _Parker()
     remaining = [2]

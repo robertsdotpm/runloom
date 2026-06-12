@@ -55,7 +55,7 @@ static int runloom_crash_report_fd = -1;   /* extra report file, or -1 */
 #if !defined(_WIN32)
 
 /* The fatal signals we install on.  SIGSEGV / SIGBUS are the headline (a
- * goroutine stack overflow lands in a guard page -> SIGSEGV); the rest are
+ * fiber stack overflow lands in a guard page -> SIGSEGV); the rest are
  * crashes worth a dump.  SIGABRT is special on the chain-out (re-raise, the
  * faulting-instruction re-execution trick does not apply to a raised signal). */
 static const int runloom_crash_signals[] = {
@@ -285,7 +285,7 @@ static void crash_handler(int sig, siginfo_t *si, void *uctx)
 
     /* We are the crash owner.  Freeze the M:N watchdogs FIRST -- before the
      * (potentially slow) dump dwells long enough for sysmon to flag this hub
-     * wedged and the handoff pool to adopt + steal the faulting goroutine,
+     * wedged and the handoff pool to adopt + steal the faulting fiber,
      * which would stop the chain-out from re-faulting and coring (the process
      * would limp on with a stranded hub instead of dying cleanly). */
     runloom_sched_freeze_for_crash();
@@ -298,18 +298,18 @@ static void crash_handler(int sig, siginfo_t *si, void *uctx)
     crash_emitf("  (pid %ld, thread 0x%lx)\n",
                 (long)getpid(), (unsigned long)pthread_self());
 
-    /* Classify the fault against the per-goroutine guard pages. */
+    /* Classify the fault against the per-fiber guard pages. */
     {
         int kind = 0;
         unsigned skib = 0;
         long long gid = (addr != NULL)
-                      ? runloom_goroutine_for_addr(addr, &kind, &skib) : 0;
+                      ? runloom_fiber_for_addr(addr, &kind, &skib) : 0;
         if (kind == 1) {
             /* The long lines go through crash_emit (strlen + write, no fixed
              * buffer); only the goid line needs the formatting buffer. */
             crash_emit("[runloom] >>> GOROUTINE STACK OVERFLOW <<<\n");
             crash_emitf(
-                "[runloom]     goroutine g%lld ran off the low end of its %u KiB C stack\n",
+                "[runloom]     fiber g%lld ran off the low end of its %u KiB C stack\n",
                 gid, skib);
             crash_emit(
                 "[runloom]     -- the fault hit the guard page just below it: a CLEAN trap,\n"
@@ -317,19 +317,19 @@ static void crash_handler(int sig, siginfo_t *si, void *uctx)
                 "[runloom]     Fix: pin a bigger stack with runloom.go(fn, stack_size=N)\n"
                 "[runloom]     (an explicit size ALWAYS wins over the auto-sizer), or flatten\n"
                 "[runloom]     the deep native recursion to a heap stack / offload it.  If this\n"
-                "[runloom]     goroutine's depth varies with INPUT, pin it -- the auto-sizer\n"
+                "[runloom]     fiber's depth varies with INPUT, pin it -- the auto-sizer\n"
                 "[runloom]     sizes from the runs it has seen and can under-size a deeper path\n"
                 "[runloom]     a later input reaches.  See docs/stack-sizing.md.\n");
         } else if (kind == 2) {
             crash_emitf(
-                "[runloom] fault is INSIDE goroutine g%lld's %u KiB stack (not the guard\n",
+                "[runloom] fault is INSIDE fiber g%lld's %u KiB stack (not the guard\n",
                 gid, skib);
             crash_emit(
                 "[runloom]     page) -- likely a wild pointer / use-after-free in code\n"
-                "[runloom]     running on that goroutine.\n");
+                "[runloom]     running on that fiber.\n");
         } else {
             crash_emit(
-                "[runloom] fault is not in any goroutine stack (main/hub stack, the heap,\n"
+                "[runloom] fault is not in any fiber stack (main/hub stack, the heap,\n"
                 "[runloom]     or a wild pointer).\n");
         }
     }
@@ -339,15 +339,15 @@ static void crash_handler(int sig, siginfo_t *si, void *uctx)
     {
         runloom_g_t *cur = runloom_mn_tls_current_g();
         if (cur != NULL)
-            crash_emitf("[runloom] this thread was executing goroutine g%lld.\n",
+            crash_emitf("[runloom] this thread was executing fiber g%lld.\n",
                         (long long)runloom_g_id(cur));
     }
 
-    /* Full goroutine registry dump (async-signal-safe; try-locked). */
+    /* Full fiber registry dump (async-signal-safe; try-locked). */
     if (runloom_crash_flags_v & RUNLOOM_CRASH_GOROUTINES) {
-        runloom_dump_goroutines_fd(2);
+        runloom_dump_fibers_fd(2);
         if (runloom_crash_report_fd >= 0)
-            runloom_dump_goroutines_fd(runloom_crash_report_fd);
+            runloom_dump_fibers_fd(runloom_crash_report_fd);
     }
 
 #if defined(RUNLOOM_HAVE_EXECINFO)
@@ -422,7 +422,7 @@ int runloom_crash_install(int flags, const char *report_path)
     }
 
     /* Option D: enable faulthandler FIRST so our handler -- installed after,
-     * hence outermost -- runs the goroutine dump and then chains out to
+     * hence outermost -- runs the fiber dump and then chains out to
      * faulthandler for the Python traceback. */
     if (flags & RUNLOOM_CRASH_PYSTACK) {
         PyObject *fh = PyImport_ImportModule("faulthandler");
@@ -499,7 +499,7 @@ void runloom_crash_uninstall(void)
 
 #else /* _WIN32 ----------------------------------------------------- */
 
-/* Minimal Windows path: a Vectored Exception Handler that dumps the goroutine
+/* Minimal Windows path: a Vectored Exception Handler that dumps the fiber
  * registry on an access violation / stack overflow, then continues the search
  * so the OS still produces the crash.  (No sigaltstack equivalent yet, so a
  * true stack overflow may be unable to run this; the rich path is POSIX.) */
@@ -510,7 +510,7 @@ static LONG WINAPI runloom_crash_veh(EXCEPTION_POINTERS *ep)
     DWORD code = (ep && ep->ExceptionRecord) ? ep->ExceptionRecord->ExceptionCode : 0;
     if (code == EXCEPTION_ACCESS_VIOLATION || code == EXCEPTION_STACK_OVERFLOW) {
         if (runloom_crash_flags_v & RUNLOOM_CRASH_GOROUTINES)
-            runloom_dump_goroutines_fd(2);
+            runloom_dump_fibers_fd(2);
     }
     return EXCEPTION_CONTINUE_SEARCH;
 }
@@ -572,7 +572,7 @@ int runloom_crash_parse_flags(const char *s)
     buf[i] = '\0';
     if (strstr(buf, "off") != NULL || strcmp(buf, "0") == 0) return -1;
     if (strstr(buf, "all") != NULL)        f |= RUNLOOM_CRASH_ALL;
-    if (strstr(buf, "goroutine") != NULL)  f |= RUNLOOM_CRASH_GOROUTINES;
+    if (strstr(buf, "fiber") != NULL)  f |= RUNLOOM_CRASH_GOROUTINES;
     if (strstr(buf, "backtrace") != NULL ||
         strstr(buf, "native") != NULL)     f |= RUNLOOM_CRASH_BACKTRACE;
     if (strstr(buf, "py") != NULL)         f |= RUNLOOM_CRASH_PYSTACK;
@@ -590,7 +590,7 @@ int runloom_crash_parse_flags(const char *s)
  *  real-C recursion -- unlike Python recursion (which CPython's own *
  *  C-recursion guard catches with a RecursionError), this runs off  *
  *  the low end of the stack and into the guard page.  Run from      *
- *  inside a goroutine to exercise the per-goroutine-overflow path.  *
+ *  inside a fiber to exercise the per-fiber-overflow path.  *
  *  Used only by tests/test_crash_handler.py.                       *
  * ---------------------------------------------------------------- */
 volatile char runloom_crash_selftest_sink = 0;

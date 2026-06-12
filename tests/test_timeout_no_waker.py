@@ -1,10 +1,10 @@
 """Timed waits on Event / Condition / Semaphore must time out and wake
-correctly WITHOUT spawning a per-wait waker goroutine.
+correctly WITHOUT spawning a per-wait waker fiber.
 
 Before: each timed Event.wait/Condition.wait/Semaphore.acquire spawned a helper
-goroutine that slept to the deadline then unparked the waiter.  Now _Parker.park
+fiber that slept to the deadline then unparked the waiter.  Now _Parker.park
 passes the deadline straight to wait_fd (which wakes on the unpark byte OR at the
-timeout), so a timed wait costs no extra goroutine + heap timer.
+timeout), so a timed wait costs no extra fiber + heap timer.
 
 NOTE: kept modest-scale on purpose -- a SEPARATE, pre-existing spurious-wake race
 in the _Parker primitives shows up only under repeated high-fan-in set()/notify()
@@ -97,17 +97,17 @@ def test_semaphore_timeout_then_wake():
     assert _drive(body)
 
 
-def test_timed_waits_spawn_no_waker_goroutines():
-    """N concurrent timed waits must not balloon the live-goroutine count with
-    one waker goroutine each (the old design spawned ~N extra)."""
+def test_timed_waits_spawn_no_waker_fibers():
+    """N concurrent timed waits must not balloon the live-fiber count with
+    one waker fiber each (the old design spawned ~N extra)."""
     def body():
         ev = threading.Event()
-        base = runloom_c.live_goroutines()
+        base = runloom_c.live_fibers()
         n = 200
         for _ in range(n):
             runloom.go(lambda: ev.wait(5.0))
         runloom.sleep(0.2)            # all parked on their timed wait
-        peak = runloom_c.live_goroutines()
+        peak = runloom_c.live_fibers()
         ev.set()
         runloom.sleep(0.2)
         # Old: ~n waiters + ~n wakers.  New: ~n.  Allow slack but well under 2n.

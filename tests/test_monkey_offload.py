@@ -1,10 +1,10 @@
-"""Regression: many goroutines doing offloaded I/O concurrently must not
+"""Regression: many fibers doing offloaded I/O concurrently must not
 deadlock (single-thread AND multi-hub M:N).
 
 Before the _thread.allocate_lock fix this froze the scheduler: file work goes
 through tempfile.gettempdir(), whose `_once_lock` was a REAL _thread lock (only
 threading.Lock was patched).  Goroutine A held it across the yielding offloaded
-probe while goroutine B blocked on the real lock on the same scheduler thread
+probe while fiber B blocked on the real lock on the same scheduler thread
 -> deadlock.  A hung run is caught by run_isolated's per-file timeout.
 """
 import os

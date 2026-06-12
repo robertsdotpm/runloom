@@ -14,7 +14,7 @@ channels must satisfy:
                   value, or -1 iff no case is ready.
 
 The single-thread scheduler is process-global, so each example spawns its
-goroutines and drains to completion before the next.
+fibers and drains to completion before the next.
 """
 import sys
 

@@ -7,7 +7,7 @@ coroutines, no event loop ceremony.
 This exists because many libraries (and many users) don't want their
 public API to be `async def`-coloured.  With `runloom.sync` you get
 cooperative concurrency that *looks* like threaded code but actually
-runs as a single OS thread of goroutines.
+runs as a single OS thread of fibers.
 
 ## Hello world
 
@@ -15,17 +15,17 @@ runs as a single OS thread of goroutines.
 import runloom
 
 def main():
-    print("hello from a goroutine")
+    print("hello from a fiber")
     ps.sleep(0.1)
     print("woke up")
 
 ps.run(main)
 ```
 
-`ps.run(main)` spawns `main` as a goroutine, drives the scheduler
+`ps.run(main)` spawns `main` as a fiber, drives the scheduler
 until everything's done, and returns.
 
-## Spawning goroutines
+## Spawning fibers
 
 ```python
 import runloom
@@ -42,16 +42,16 @@ ps.run(main)
 ```
 
 `ps.go(fn, *args, **kwargs)` is like `threading.Thread(target=...).start()`
-except the "thread" is a goroutine -- cheap to create, cooperatively
+except the "thread" is a fiber -- cheap to create, cooperatively
 scheduled.
 
 ## Cooperative sleep
 
 ```python
-ps.sleep(0.5)            # this goroutine sleeps; others keep running
+ps.sleep(0.5)            # this fiber sleeps; others keep running
 ```
 
-Outside any goroutine (e.g. at module top-level before `run()`),
+Outside any fiber (e.g. at module top-level before `run()`),
 `ps.sleep` falls back to `time.sleep`.
 
 ## Channels
@@ -84,7 +84,7 @@ See [Channels](channels.md) for the full API.
 
 ### Future: one-shot value passing
 
-`Future` is a single-use slot for passing a value between goroutines:
+`Future` is a single-use slot for passing a value between fibers:
 
 ```python
 import runloom
@@ -94,7 +94,7 @@ def main():
     
     def sender():
         runloom.sleep(0.1)
-        fut.set_result("hello")          # goroutine-only
+        fut.set_result("hello")          # fiber-only
     
     def receiver():
         result = fut.result(timeout=1.0)  # blocks until result arrives or timeout
@@ -111,7 +111,7 @@ the value doesn't arrive in time.
 
 ### JoinSet: structured concurrency
 
-`JoinSet` is a collection of spawned goroutines that are all joined before
+`JoinSet` is a collection of spawned fibers that are all joined before
 proceeding (like Go's `sync.WaitGroup` but with built-in result collection):
 
 ```python
@@ -139,7 +139,7 @@ def main():
 runloom.run(main)
 ```
 
-If any spawned goroutine raises an exception, `join_all()` raises the *first*
+If any spawned fiber raises an exception, `join_all()` raises the *first*
 exception (by spawn order).
 
 ### gather: async-style concurrent result collection
@@ -163,9 +163,9 @@ runloom.run(main)
 
 Non-future values are passed through as-is.
 
-### WaitGroup: goroutine barrier
+### WaitGroup: fiber barrier
 
-`WaitGroup` waits for a set of goroutines to complete:
+`WaitGroup` waits for a set of fibers to complete:
 
 ```python
 def main():
@@ -223,7 +223,7 @@ runloom.run(main)
 
 ### Semaphore: weighted concurrency limit
 
-`Semaphore` limits the number of goroutines executing a critical section:
+`Semaphore` limits the number of fibers executing a critical section:
 
 ```python
 def main():
@@ -275,7 +275,7 @@ def main():
         runloom.sleep(0.05)
     
     def worker():
-        once.do(init)  # only one goroutine runs init, others wait
+        once.do(init)  # only one fiber runs init, others wait
         print("using initialized state")
     
     for i in range(5):
@@ -342,7 +342,7 @@ next call to `key` to re-execute.
 
 ### Watch: broadcast notifications
 
-`Watch` lets multiple goroutines wait for a value to change and be notified:
+`Watch` lets multiple fibers wait for a value to change and be notified:
 
 ```python
 def main():
@@ -374,10 +374,10 @@ runloom.run(main)
 
 ### Thread safety
 
-All primitives in `runloom.sync` are **goroutine-only** (meant for
-goroutine-to-goroutine synchronization). For synchronizing real OS threads
-with goroutines, use the `runloom.monkey` patched versions (`threading.Lock`,
-`threading.Event`, etc.) which detect whether they're called from a goroutine
+All primitives in `runloom.sync` are **fiber-only** (meant for
+fiber-to-fiber synchronization). For synchronizing real OS threads
+with fibers, use the `runloom.monkey` patched versions (`threading.Lock`,
+`threading.Event`, etc.) which detect whether they're called from a fiber
 or a foreign thread and adapt accordingly.
 
 ## TCP server (straight-line style)
@@ -409,7 +409,7 @@ ps.run(main)
 
 The socket returned by `tcp_listen` is a `ps.Socket` wrapper -- same
 interface as `socket.socket`, but `recv`/`accept`/`sendall` park the
-goroutine on `wait_fd` instead of blocking the OS thread.
+fiber on `wait_fd` instead of blocking the OS thread.
 
 ### Outbound TCP
 
@@ -453,7 +453,7 @@ def waiter():
 
 def main():
     ps.go(waiter)
-    # Later, from another goroutine: ps.wake(g)  -- or g.wake()
+    # Later, from another fiber: ps.wake(g)  -- or g.wake()
 ```
 
 This is what `runloom.aio` uses internally as the per-task wake mechanism
@@ -465,7 +465,7 @@ in place of a `Chan(1)` per task.  Same idea is available to user code.
 
 - You're writing new code and want it to *look* synchronous -- easier
   to read, easier to debug, no callback colour.
-- You're porting Go code (each `goroutine` in Go is a `runloom.sync.go` here).
+- You're porting Go code (each `fiber` in Go is a `runloom.sync.go` here).
 - You want a library API that doesn't require its callers to be in an
   `async def`.
 
@@ -513,5 +513,5 @@ ps.run(main)
 ```
 
 Straight-line code, no `async`, fully concurrent (each fetch runs
-independently -- `tcp_connect` and `recv` park the goroutine while
+independently -- `tcp_connect` and `recv` park the fiber while
 others make progress).

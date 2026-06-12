@@ -1,4 +1,4 @@
-"""Allocation-failure (OOM) injection at the goroutine-spawn alloc sites.
+"""Allocation-failure (OOM) injection at the fiber-spawn alloc sites.
 
 The netpoll/syscall fault campaign never exercised the *allocator*.  These
 sites are where a real out-of-memory bites a spawn -- the g-struct calloc and
@@ -42,17 +42,17 @@ except MemoryError:
     print('OOM_RAISED')
 c.go(lambda: ran.append('y'))   # fault was once -> succeeds
 runloom.run(1)
-print('RECOVERED' if ran == ['y'] and c.goroutine_count() == 0 else 'BAD')
+print('RECOVERED' if ran == ['y'] and c.fiber_count() == 0 else 'BAD')
 """
 
-# Many always-failing spawns, then confirm no goroutine leaked.
+# Many always-failing spawns, then confirm no fiber leaked.
 _NOLEAK = """
 import runloom_c as c
 fails = 0
 for _ in range(3000):
     try: c.go(lambda: None)
     except MemoryError: fails += 1
-print('NOLEAK' if fails == 3000 and c.goroutine_count() == 0 else 'BAD:%d:%d' % (fails, c.goroutine_count()))
+print('NOLEAK' if fails == 3000 and c.fiber_count() == 0 else 'BAD:%d:%d' % (fails, c.fiber_count()))
 """
 
 

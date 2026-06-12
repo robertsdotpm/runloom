@@ -52,16 +52,16 @@ class _LoopSignalMixin(object):
         self._signal_wakeup_setup = True
 
     def _read_signal_wakeup(self):
-        # This runs in the per-fd I/O goroutine that watches the signal
+        # This runs in the per-fd I/O fiber that watches the signal
         # self-pipe.  set_wakeup_fd writes EVERY caught signum to the pipe, so
-        # this goroutine wakes and runs Python on the loop thread whenever any
+        # this fiber wakes and runs Python on the loop thread whenever any
         # signal fires -- which means CPython delivers a pending Python signal
         # handler (e.g. pytest-timeout's SIGALRM raising, or a user SIGUSR1
         # handler) at a bytecode boundary INSIDE this body.  Everything below is
         # exception-safe on its own (recv errors handled; call_soon guarded), so
         # any BaseException reaching the outer handler is an async signal-handler
         # raise -> route it out of run_forever() via the fatal path, exactly as
-        # the keepalive does (otherwise this goroutine swallows it and an idle
+        # the keepalive does (otherwise this fiber swallows it and an idle
         # loop hangs -- the reason aiosmtpd's main() under pytest-timeout hung).
         try:
             try:

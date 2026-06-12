@@ -2,7 +2,7 @@
 exercises).
 
 runloom's channels, select, sleep, and work-stealing all behave differently
-once goroutines are spread across N OS-thread hubs on free-threaded
+once fibers are spread across N OS-thread hubs on free-threaded
 CPython -- that is where cross-hub channel handoff, work-stealing, and
 the per-g wake machinery actually run in parallel.  None of the other
 test modules call mn_init/mn_go/mn_run, so this fills that gap.
@@ -67,7 +67,7 @@ def assert_pass(code, timeout=60):
 # Stable workloads -- these must always pass.
 # ---------------------------------------------------------------------------
 def test_spawn_drain_compute():
-    """Many pure-compute goroutines across hubs; every one runs to
+    """Many pure-compute fibers across hubs; every one runs to
     completion and the scheduler drains cleanly."""
     assert_pass(r"""
 N = 2000
@@ -93,11 +93,11 @@ print("PASS", len(results))
 
 
 def test_sched_yield_no_starvation_multi_hub():
-    """sched_yield must not let a busy-spinning goroutine starve a never-run
+    """sched_yield must not let a busy-spinning fiber starve a never-run
     one.  Before the fairness fix, hub_main served the ready ring (yielded gs)
     strictly before the deque (fresh gs), AND the yield fast path spun without
-    returning to hub_main to drain sub_head -- so a goroutine looping
-    `while not flag: sched_yield()` waiting for a goroutine spawned afterwards
+    returning to hub_main to drain sub_head -- so a fiber looping
+    `while not flag: sched_yield()` waiting for a fiber spawned afterwards
     (or onto an already-busy hub) would spin forever.  Fixed by bounding both
     (hub_main forces a deque turn after N ready services; the fast path forces
     a real yield after N trivial spins).  A hang here = subprocess timeout."""
@@ -111,7 +111,7 @@ def setter():
 runloom_c.mn_init(4)
 for _ in range(8):          # 8 spinners monopolizing the hubs first ...
     runloom_c.mn_go(waiter)
-runloom_c.mn_go(setter)     # ... then the never-run goroutine they wait on
+runloom_c.mn_go(setter)     # ... then the never-run fiber they wait on
 runloom_c.mn_run()
 runloom_c.mn_fini()
 assert flag[0]
@@ -190,7 +190,7 @@ print("PASS")
 
 
 def test_pingpong_unbuffered_pairs():
-    """Many pairs of goroutines bouncing values through unbuffered
+    """Many pairs of fibers bouncing values through unbuffered
     channels (direct cross-hub handoff, no buffer)."""
     assert_pass(r"""
 NPAIRS, ROUNDS = 16, 100
@@ -328,7 +328,7 @@ print("PASS")
 
 
 def test_select_send_and_recv_mixed():
-    """select with BOTH send and recv cases under M:N: a relay goroutine
+    """select with BOTH send and recv cases under M:N: a relay fiber
     selects to either forward into `out` (send) or pull from `in_` (recv);
     conservation across a chain of relays.  Exercises the select SEND
     install/abort/park path that the RECV tests don't."""

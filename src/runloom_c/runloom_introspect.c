@@ -1,4 +1,4 @@
-/* runloom_introspect.c -- goroutine registry + developer-facing dump.
+/* runloom_introspect.c -- fiber registry + developer-facing dump.
  * See runloom_introspect.h for the contract and the lifetime reasoning. */
 
 #if !defined(_WIN32)
@@ -43,7 +43,7 @@ long long runloom_introspect_monotonic_ns(void)
 }
 
 /* ---------------------------------------------------------------- *
- *  Per-incarnation goroutine id (Go's goid)                        *
+ *  Per-incarnation fiber id (Go's goid)                        *
  *                                                                  *
  *  Contention-free: each thread grabs a block of ids from the      *
  *  global counter and hands them out locally, so the shared        *
@@ -173,7 +173,7 @@ void runloom_introspect_init(void)
     env = getenv("RUNLOOM_MAX_GOROUTINES");
     if (env != NULL && env[0]) {
         long n = atol(env);
-        if (n > 0) runloom_set_max_goroutines(n);
+        if (n > 0) runloom_set_max_fibers(n);
     }
 }
 
@@ -237,8 +237,8 @@ void runloom_greg_unlink(runloom_g_t *g)
 }
 
 /* Reset the registry in a forked child: re-init the lock (a dead thread may
- * have held it at fork) and drop the inherited goroutine list -- the parent's
- * goroutines don't exist in the child.  Single-thread child only. */
+ * have held it at fork) and drop the inherited fiber list -- the parent's
+ * fibers don't exist in the child.  Single-thread child only. */
 void runloom_introspect_reset_after_fork(void)
 {
     runloom_mutex_init(&runloom_greg_lock);
@@ -247,7 +247,7 @@ void runloom_introspect_reset_after_fork(void)
     runloom_greg_inited = 1;
 }
 
-long runloom_goroutine_count(void)
+long runloom_fiber_count(void)
 {
     long n = 0;
     runloom_g_t *g;
@@ -261,11 +261,11 @@ long runloom_goroutine_count(void)
     return n;
 }
 
-/* Count goroutines owned by `owner` parked on a channel or via park_safe --
+/* Count fibers owned by `owner` parked on a channel or via park_safe --
  * the "blocked on each other" set.  At a quiescent drain exit (no ready /
  * sleep / netpoll / io / blockpool work left) these are unwakeable: a
- * deadlock.  owner==NULL counts every sched's such goroutines. */
-long runloom_count_deadlockable_goroutines(const void *owner)
+ * deadlock.  owner==NULL counts every sched's such fibers. */
+long runloom_count_deadlockable_fibers(const void *owner)
 {
     long n = 0;
     runloom_g_t *g;
@@ -281,35 +281,35 @@ long runloom_count_deadlockable_goroutines(const void *owner)
     return n;
 }
 
-/* ---- max-goroutines admission gate (backpressure) ----
- * 0 = unlimited (default).  When set, the spawn paths call runloom_goroutine_admit
+/* ---- max-fibers admission gate (backpressure) ----
+ * 0 = unlimited (default).  When set, the spawn paths call runloom_fiber_admit
  * before allocating; over the limit it returns 0 and the spawn raises.  The
  * live counter is maintained ONLY while a limit is active (admit increments,
- * the g's final decref releases via runloom_goroutine_release iff it was counted)
+ * the g's final decref releases via runloom_fiber_release iff it was counted)
  * -- so an unset limit costs nothing on the hot path. */
 static long runloom_max_g  = 0;
-static long runloom_live_g = 0;   /* admitted-but-not-yet-released goroutines */
+static long runloom_live_g = 0;   /* admitted-but-not-yet-released fibers */
 
-long runloom_get_max_goroutines(void)
+long runloom_get_max_fibers(void)
 {
     return __atomic_load_n(&runloom_max_g, __ATOMIC_RELAXED);
 }
 
-void runloom_set_max_goroutines(long n)
+void runloom_set_max_fibers(long n)
 {
     if (n < 0) n = 0;
     __atomic_store_n(&runloom_max_g, n, __ATOMIC_RELAXED);
 }
 
-long runloom_live_goroutines(void)
+long runloom_live_fibers(void)
 {
     return __atomic_load_n(&runloom_live_g, __ATOMIC_RELAXED);
 }
 
-/* Try to admit one goroutine.  Returns 0 = rejected (over the limit; caller
+/* Try to admit one fiber.  Returns 0 = rejected (over the limit; caller
  * raises), 1 = admitted but NOT counted (no limit active), 2 = admitted AND
  * counted (caller sets g->limit_counted so the final decref releases it). */
-int runloom_goroutine_admit(void)
+int runloom_fiber_admit(void)
 {
     long max = __atomic_load_n(&runloom_max_g, __ATOMIC_RELAXED);
     long now;
@@ -322,7 +322,7 @@ int runloom_goroutine_admit(void)
     return 2;
 }
 
-void runloom_goroutine_release(void)
+void runloom_fiber_release(void)
 {
     __atomic_sub_fetch(&runloom_live_g, 1, __ATOMIC_ACQ_REL);
 }
@@ -366,7 +366,7 @@ static void emit(int fd, const char *buf, size_t len)
 #endif
 }
 
-void runloom_dump_goroutines_fd(int fd)
+void runloom_dump_fibers_fd(int fd)
 {
     char buf[256];
     int  m;
@@ -378,7 +378,7 @@ void runloom_dump_goroutines_fd(int fd)
     size_t i;
 
     if (!runloom_greg_inited) {
-        emit(fd, "[runloom] goroutine dump: registry not initialised\n", 48);
+        emit(fd, "[runloom] fiber dump: registry not initialised\n", 48);
         return;
     }
     for (i = 0; i < (size_t)RUNLOOM_GST__LAST; i++) counts[i] = 0;
@@ -388,7 +388,7 @@ void runloom_dump_goroutines_fd(int fd)
         /* Contended -- almost certainly a spawn/teardown holding the lock
          * for a few instructions.  Do NOT fall back to any blocking lock
          * (this runs from a SIGQUIT handler); just report and bail. */
-        emit(fd, "[runloom] goroutine dump: registry busy, retry\n", 44);
+        emit(fd, "[runloom] fiber dump: registry busy, retry\n", 44);
         return;
     }
 
@@ -400,7 +400,7 @@ void runloom_dump_goroutines_fd(int fd)
     }
 
     m = snprintf(buf, sizeof buf,
-        "\n=== runloom goroutine dump: %ld live (default stack %zu KiB) ===\n",
+        "\n=== runloom fiber dump: %ld live (default stack %zu KiB) ===\n",
         live, runloom_sched_get_default_stack_size() / 1024u);
     if (m > 0) emit(fd, buf, (size_t)m);
     for (i = 0; i < (size_t)RUNLOOM_GST__LAST; i++) {
@@ -442,15 +442,15 @@ void runloom_dump_goroutines_fd(int fd)
             (void *)g->owner, detail);
         if (m > 0) emit(fd, buf, (size_t)m);
     }
-    emit(fd, "=== end goroutine dump ===\n", 27);
+    emit(fd, "=== end fiber dump ===\n", 27);
     runloom_mutex_unlock(&runloom_greg_lock);
 }
 
 /* ---------------------------------------------------------------- *
  *  Crash-handler helpers                                           *
  *                                                                  *
- *  runloom_goroutine_for_addr maps a faulting address onto a live    *
- *  goroutine's stack region.  Unlike the dump it DOES read g->coro   *
+ *  runloom_fiber_for_addr maps a faulting address onto a live    *
+ *  fiber's stack region.  Unlike the dump it DOES read g->coro   *
  *  (to recover the stack base/size) -- acceptable only because the   *
  *  caller is the crash path, where a nested fault is caught by the   *
  *  handler's in-progress latch and the process is dying anyway.      *
@@ -461,7 +461,7 @@ long long runloom_g_id(const runloom_g_t *g)
     return (long long)__atomic_load_n(&g->id, __ATOMIC_RELAXED);
 }
 
-long long runloom_goroutine_for_addr(const void *addr, int *kind,
+long long runloom_fiber_for_addr(const void *addr, int *kind,
                                      unsigned *stack_kib)
 {
     runloom_g_t *g;
@@ -505,7 +505,7 @@ long long runloom_goroutine_for_addr(const void *addr, int *kind,
 /* ---------------------------------------------------------------- *
  *  Rich snapshot (POD copy under the lock)                         *
  * ---------------------------------------------------------------- */
-runloom_g_info_t *runloom_goroutine_snapshot(long *count_out)
+runloom_g_info_t *runloom_fiber_snapshot(long *count_out)
 {
     runloom_g_info_t *arr;
     runloom_g_t *g;
@@ -547,7 +547,7 @@ runloom_g_info_t *runloom_goroutine_snapshot(long *count_out)
     return arr;
 }
 
-void runloom_goroutine_snapshot_free(runloom_g_info_t *arr, long count)
+void runloom_fiber_snapshot_free(runloom_g_info_t *arr, long count)
 {
     (void)count;
     free(arr);
@@ -565,7 +565,7 @@ void runloom_goroutine_snapshot_free(runloom_g_info_t *arr, long count)
  *  run runloom afresh (single-thread, or a fresh runloom_mn_init).  The   *
  *  child is single-threaded here, so the resets take no locks; they *
  *  only re-init the global locks (to clear any inherited-held       *
- *  state) and drop bookkeeping that named the parent's goroutines.  *
+ *  state) and drop bookkeeping that named the parent's fibers.  *
  *  Registered as an os.register_at_fork(after_in_child=...) handler *
  *  by runloom/__init__.py.                                            *
  * ---------------------------------------------------------------- */
@@ -581,7 +581,7 @@ void runloom_after_fork_child(void)
 }
 
 /* ---------------------------------------------------------------- *
- *  Per-goroutine Python stack reconstruction (claim-protected)     *
+ *  Per-fiber Python stack reconstruction (claim-protected)     *
  *                                                                  *
  *  Implemented in runloom_introspect_frames.c.inc to keep the         *
  *  CPython-internal frame-walk gated by #if PY_VERSION_HEX in one   *

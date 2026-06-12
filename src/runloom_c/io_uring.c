@@ -4,11 +4,11 @@
  * work cooperatively through epoll -- regular file fds always report
  * "ready" so wait_fd is a no-op and the actual read/write blocks the
  * OS thread.  io_uring submits the read/write asynchronously to the
- * kernel; we park the goroutine and let other gs run while the kernel
+ * kernel; we park the fiber and let other gs run while the kernel
  * processes the op.  When a completion is posted the kernel signals
  * an eventfd registered with the ring; the netpoll pump observes that
  * eventfd (epoll-registered), drains the CQ ring, and wakes the
- * goroutine that submitted each op.
+ * fiber that submitted each op.
  *
  * What we DON'T do: liburing.  Adding a build-time dependency on a
  * native library would compromise runloom's "pip install . just works"
@@ -28,7 +28,7 @@
  *   - Drain runs lock-free over the CQ ring; wakes are routed via
  *     runloom_sched_wake_safe (global sched g) or runloom_mn_wake_g (hub g)
  *     based on the per-op record's hub pointer.
- *   - The op record lives on the submitter's C stack.  The goroutine
+ *   - The op record lives on the submitter's C stack.  The fiber
  *     doesn't get torn down while parked, so the stack stays alive
  *     through to drain.
  *
@@ -101,7 +101,7 @@
  * trade is acceptable for the high-concurrency workloads that
  * actually benefit from multishot.  Smaller pools risk -ENOBUFS
  * storms where the kernel ends a multishot mid-stream, the conn's
- * consumer goroutine has to re-arm, and another conn may grab the
+ * consumer fiber has to re-arm, and another conn may grab the
  * buffer first -- with enough conns this stalls progress entirely. */
 #define RUNLOOM_IOURING_PBUF_COUNT    4096
 #define RUNLOOM_IOURING_PBUF_SIZE     2048

@@ -7,11 +7,11 @@
  * What's _not_ here (yet):
  *   - work-stealing across threads (Phase C v1 is in mn_sched.c)
  *
- * Phase B: per-goroutine snapshot of CPython tstate.  Algorithm copied
- * from greenlet (MIT) -- src/greenlet/TPythonState.cpp.  Each goroutine
+ * Phase B: per-fiber snapshot of CPython tstate.  Algorithm copied
+ * from greenlet (MIT) -- src/greenlet/TPythonState.cpp.  Each fiber
  * gets its own slice of cframe / current_frame / datastack_chunk / etc,
  * so frames from different gs do not link into one shared C-stack chain.
- * Lifts the ~200 concurrent yielded goroutine cliff.
+ * Lifts the ~200 concurrent yielded fiber cliff.
  *
  * The Python side talks to us through a tiny Python type defined in
  * module.c (RunloomG).  The user-visible API is `runloom.go / yield_ /
