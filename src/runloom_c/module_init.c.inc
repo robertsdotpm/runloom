@@ -99,7 +99,15 @@ static PyMethodDef module_methods[] = {
     {"park_self",   m_park_self,   METH_NOARGS,
      "Park the current goroutine until G.wake() is called on its "
      "handle.  Race-safe: a wake that arrives before the park is "
-     "consumed and the park returns immediately."},
+     "consumed and the park returns immediately.  SINGLE-THREAD run() "
+     "only -- on an M:N hub it busy-loops; use park() instead."},
+    {"park",        (PyCFunction)m_park, METH_VARARGS | METH_KEYWORDS,
+     "park(foreign_wakeable=False): park the current goroutine in memory "
+     "(no fd), M:N-correctly (routes to the hub park under run(N), the "
+     "single-thread park otherwise).  Woken by its G handle's .wake().  "
+     "foreign_wakeable=True keeps a single-thread run() alive for a "
+     "foreign-OS-thread waker.  The fd-free park the fan-in/Event "
+     "primitives build on."},
     {"current_g",   m_current_g,   METH_NOARGS,
      "Return a G handle to the currently-running goroutine, or None "
      "if called outside one.  Used together with park_self/G.wake to "

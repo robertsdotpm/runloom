@@ -38,13 +38,30 @@ static PyObject *RunloomG_result_get(RunloomG *self, void *closure)
     return r;
 }
 
-/* Wake a goroutine that's parked via runloom_c.park_self().  Safe to
- * call before the park (race-handled inside runloom_sched_wake_safe). */
+/* Wake a goroutine parked via runloom_c.park_self() or runloom_c.park().  Safe to
+ * call before the park (race-handled inside the wake primitives) and from a
+ * foreign OS thread.  ROUTES BY HOW THE g PARKED: a g parked on an M:N hub
+ * (park_hub != NULL, set by runloom_park_generic) must be re-queued via
+ * runloom_mn_wake_g -- runloom_sched_wake_safe only handles the single-thread
+ * park_safe handshake (it CASes parked_safe, which the M:N park never sets, so it
+ * would silently drop the wake and strand the goroutine).  The hub pointer is the
+ * one RECORDED on the g (stable for the process lifetime); never pass a hub from
+ * the foreign caller (a stale hub is the documented SIGSEGV).  The pump kick
+ * breaks an idle single-thread run() epoll_wait(-1) so a cross-thread wake is
+ * delivered promptly; harmless (level-triggered drain) on the same-thread path. */
 static PyObject *RunloomG_wake(RunloomG *self, PyObject *unused)
 {
     (void)unused;
     if (self->g != NULL) {
+        /* ALWAYS go through wake_safe: it drives the parked_safe / wake_pending
+         * Dekker (so a wake that races the park is never lost) and routes the
+         * re-queue by g->park_hub -- runloom_mn_wake_g for an M:N hub parker,
+         * the single-thread ready_push/wake_list otherwise.  (An earlier version
+         * called mn_wake_g directly for hub parkers and BYPASSED the Dekker, which
+         * lost a wake-before-park.)  The pump kick breaks an idle single-thread
+         * run() epoll_wait(-1); harmless on the same-thread / hub path. */
         runloom_sched_wake_safe(self->g);
+        runloom_netpoll_wake_pump();
     }
     Py_RETURN_NONE;
 }

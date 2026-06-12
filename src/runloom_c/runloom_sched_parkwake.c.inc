@@ -94,6 +94,88 @@ void runloom_sched_park_current(void)
      * the g until it calls runloom_sched_wake / runloom_mn_wake_g. */
 }
 
+/* ---- generic in-memory park + the foreign-wakeable run-alive anchor --------
+ * An in-memory park (park_current/park_safe, no fd) leaves NO footprint in the
+ * single-thread drain loop's exit condition, so run() would exit and abandon a
+ * goroutine a foreign thread is about to wake (chan_waiters.c.inc park_waiter
+ * FINDING).  Under M:N the hubs stay alive regardless.  Mirror the blockpool:
+ * ONE process-wide counter, decref'd on the PARKER side after it resumes, keeps
+ * run() alive while any foreign-wakeable parker is parked; the shared wake-pump
+ * eventfd (armed here, idempotent) lets the foreign wake break an idle pump.
+ * 0 fds per waiter -- one counter + the one shared pump eventfd. */
+static volatile long runloom_foreign_park_count = 0;
+
+void runloom_foreign_park_acquire(void)
+{
+    /* Arm the shared pump eventfd so a foreign wake can break run()'s idle
+     * epoll_wait(-1); idempotent (fast-path once armed). */
+    runloom_netpoll_wake_pump_arm();
+    __atomic_add_fetch(&runloom_foreign_park_count, 1, __ATOMIC_ACQ_REL);
+}
+
+void runloom_foreign_park_release(void)
+{
+    __atomic_sub_fetch(&runloom_foreign_park_count, 1, __ATOMIC_ACQ_REL);
+}
+
+long runloom_foreign_park_inflight(void)
+{
+    return __atomic_load_n(&runloom_foreign_park_count, __ATOMIC_ACQUIRE);
+}
+
+int runloom_park_generic(int foreign_wakeable)
+{
+    void *hub = runloom_mn_current_hub_opaque();
+    if (hub != NULL) {
+        runloom_g_t *g = runloom_mn_tls_current_g();
+        if (g == NULL) return -1;
+        /* Record the hub so wake_safe routes the re-queue via runloom_mn_wake_g. */
+        __atomic_store_n(&g->park_hub, hub, __ATOMIC_RELEASE);
+        if (foreign_wakeable) runloom_foreign_park_acquire();
+        /* The park_safe Dekker handshake (parked_safe / wake_pending + SC fence),
+         * but yielding via the M:N hub path -- WITHOUT it a wake() that lands
+         * after we record our handle but BEFORE we commit the park is lost (the
+         * window the Future/WaitGroup primitives hit).  park_safe itself can't be
+         * used: it reads the single-thread sched->current (NULL on a hub).  The
+         * wake side (wake_safe) drives the SAME flags and routes the enqueue by
+         * park_hub. */
+        if (__atomic_load_n(&g->wake_pending, __ATOMIC_ACQUIRE) > 0) {
+            __atomic_sub_fetch(&g->wake_pending, 1, __ATOMIC_ACQ_REL);
+            if (foreign_wakeable) runloom_foreign_park_release();
+            return 0;                                /* a wake already arrived */
+        }
+        g->wake_next = NULL;
+        __atomic_store_n(&g->parked_safe, 1, __ATOMIC_RELEASE);
+        __atomic_thread_fence(__ATOMIC_SEQ_CST);     /* StoreLoad; pairs w/ wake_safe */
+        if (__atomic_load_n(&g->wake_pending, __ATOMIC_ACQUIRE) > 0) {
+            int expected = 1;
+            if (__atomic_compare_exchange_n(&g->parked_safe, &expected, 0, 0,
+                                            __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+                __atomic_sub_fetch(&g->wake_pending, 1, __ATOMIC_ACQ_REL);
+                if (foreign_wakeable) runloom_foreign_park_release();
+                return 0;                            /* we aborted the park */
+            }
+            /* Lost the CAS: wake_safe claimed us + mn_wake_g'd us -> yield, the
+             * hub resumes us from the re-queue. */
+        }
+        runloom_sched_park_current();   /* mark off-queue + snap */
+        runloom_g_state_set(g, RUNLOOM_GST_PARKED_SAFE);
+        runloom_coro_yield();           /* hub_main resumes here on re-queue */
+        if (foreign_wakeable) runloom_foreign_park_release();
+        return 0;
+    } else {
+        runloom_sched_t *s = runloom_sched_get();
+        runloom_g_t *g = s->current;
+        if (g == NULL) return -1;
+        /* Single-thread: wake routes via runloom_sched_wake_safe. */
+        __atomic_store_n(&g->park_hub, NULL, __ATOMIC_RELEASE);
+        if (foreign_wakeable) runloom_foreign_park_acquire();
+        runloom_sched_park_safe();      /* full Dekker handshake + SC fence + yield */
+        if (foreign_wakeable) runloom_foreign_park_release();
+        return 0;
+    }
+}
+
 void runloom_sched_wake(runloom_g_t *g)
 {
     runloom_sched_t *self, *owner;
@@ -185,6 +267,17 @@ void runloom_sched_wake_safe(runloom_g_t *g)
         if (__atomic_compare_exchange_n(&g->parked_safe, &expected, 0,
                                         0, __ATOMIC_ACQ_REL,
                                         __ATOMIC_ACQUIRE)) {
+            /* A g parked via runloom_park_generic on an M:N hub recorded its hub
+             * in park_hub.  We won the Dekker CAS, so re-queue it via the M:N
+             * path (runloom_mn_wake_g), NOT the single-thread ready_push/wake_list
+             * below -- the g lives on a hub sub-list / runq, not a single-thread
+             * sched.  mn_wake_g is foreign-thread-safe with the RECORDED hub
+             * (stable for the process lifetime). */
+            void *ph = __atomic_load_n(&g->park_hub, __ATOMIC_ACQUIRE);
+            if (ph != NULL) {
+                runloom_mn_wake_g(ph, g);
+                return;
+            }
             /* Route to the g's OWNER sched (the thread that spawned it),
              * not the waker's thread -- the waker may be a foreign thread
              * (run_in_executor pool worker, iouring CQE) whose own sched is

@@ -193,6 +193,22 @@ static PyObject *m_park_self(PyObject *self, PyObject *unused)
     Py_RETURN_NONE;
 }
 
+/* park(foreign_wakeable=False): park the current goroutine in memory (NO fd),
+ * M:N-correctly.  Unlike park_self (single-thread sched only -- it busy-loops on
+ * a hub), this routes by hub presence.  Woken by the g's handle .wake() (which
+ * routes by how it parked).  foreign_wakeable=True keeps a single-thread run()
+ * alive for a foreign-OS-thread waker.  No-op outside a goroutine. */
+static PyObject *m_park(PyObject *self, PyObject *args, PyObject *kw)
+{
+    static char *kwlist[] = {"foreign_wakeable", NULL};
+    int fw = 0;
+    (void)self;
+    if (!PyArg_ParseTupleAndKeywords(args, kw, "|p", kwlist, &fw))
+        return NULL;
+    runloom_park_generic(fw);
+    Py_RETURN_NONE;
+}
+
 /* Return a G handle to the currently-running goroutine, or None if
  * called outside any goroutine.  Used by runloom.aio's RunloomTask driver
  * to capture its own handle for wake-from-callback. */

@@ -66,6 +66,7 @@ Py_ssize_t runloom_sched_drain(runloom_sched_t *s)
                             __atomic_load_n(&s->netpoll_parked, __ATOMIC_ACQUIRE) > 0 ||
                             runloom_iouring_inflight() > 0 ||
                             runloom_blockpool_inflight() > 0 ||
+                            runloom_foreign_park_inflight() > 0 ||
                             s->quiescence_head != NULL ||
                             __atomic_load_n(&s->wake_list_head,
                                             __ATOMIC_ACQUIRE) != NULL)) {
@@ -104,7 +105,8 @@ Py_ssize_t runloom_sched_drain(runloom_sched_t *s)
          * the ready queue. */
         if (runloom_sched_ready_empty(s) &&
             (__atomic_load_n(&s->netpoll_parked, __ATOMIC_ACQUIRE) > 0 || s->sleep_size > 0 ||
-             runloom_iouring_inflight() > 0 || runloom_blockpool_inflight() > 0)) {
+             runloom_iouring_inflight() > 0 || runloom_blockpool_inflight() > 0 ||
+             runloom_foreign_park_inflight() > 0)) {
             long long timeout_ns = -1;
             if (s->sleep_size > 0) {
                 double gap = runloom_sleep_peek(s)->wake_at - now;
@@ -119,7 +121,8 @@ Py_ssize_t runloom_sched_drain(runloom_sched_t *s)
              * iouring waiters AND blocking-pool waiters in one syscall. */
             if (__atomic_load_n(&s->netpoll_parked, __ATOMIC_ACQUIRE) > 0 ||
                 runloom_iouring_inflight() > 0 ||
-                runloom_blockpool_inflight() > 0) {
+                runloom_blockpool_inflight() > 0 ||
+                runloom_foreign_park_inflight() > 0) {
                 /* Logical-clock mode: timeout_ns is a LOGICAL gap, meaningless
                  * as a real I/O wait, so cap it to a short real re-poll.  The
                  * logical clock advances only at full quiescence (the else-if

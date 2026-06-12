@@ -286,6 +286,13 @@ struct runloom_g {
      * tstate observation and gives wake_safe a deterministic "did we
      * own the wake?" answer regardless of caller thread. */
     int parked_safe;
+    /* Hub the goroutine was parked on by runloom_park_generic (the generic
+     * in-memory park), or NULL if parked on the single-thread sched.  Read
+     * (ACQUIRE) by RunloomG.wake to route the wake: a non-NULL hub -> the M:N
+     * runloom_mn_wake_g re-queue; NULL -> the single-thread runloom_sched_wake_safe.
+     * Set only by runloom_park_generic; a g never park_generic'd leaves it NULL
+     * (it is woken by its own parker -- netpoll/chan -- not via this field). */
+    void *park_hub;
     /* MPSC link for the home sched's cross-thread wake list.  Used
      * only while g is parked via park_safe AND a cross-thread wake
      * is in flight (between wake_safe's enqueue and drain's
@@ -535,6 +542,25 @@ void runloom_sched_run_ready(runloom_sched_t *s);
 /* Mark current g as parked (no ready_push); netpoll/sleep saves snap.
  * Caller must then yield via runloom_coro_yield. */
 void runloom_sched_park_current(void);
+
+/* Generic in-memory park: park the current goroutine with NO fd, routing to the
+ * M:N hub park (park_current + coro_yield) or the single-thread park_safe by hub
+ * presence, and recording g->park_hub so RunloomG.wake routes the wake.  Returns
+ * 0 on success, -1 if not in a goroutine.  foreign_wakeable arms the shared
+ * run-alive anchor so a foreign-OS-thread waker cannot race a single-thread
+ * run()'s exit.  This is the M:N-correct replacement for park_self (which busy-
+ * loops on a hub). */
+int runloom_park_generic(int foreign_wakeable);
+
+/* Shared (process-wide) run-alive anchor for foreign-wakeable in-memory parkers:
+ * an in-memory park leaves no fd/sleep/inflight footprint, so without this a
+ * single-thread run() would exit and abandon a goroutine a foreign thread is
+ * about to wake.  acquire (before park) / release (after resume) bracket the
+ * park; inflight() is read by the single-thread drain loop's exit condition.
+ * One counter + the shared wake-pump eventfd, never per-waiter. */
+void runloom_foreign_park_acquire(void);
+void runloom_foreign_park_release(void);
+long runloom_foreign_park_inflight(void);
 
 /* Re-queue a previously-parked g onto the ready list. */
 void runloom_sched_wake(runloom_g_t *g);
