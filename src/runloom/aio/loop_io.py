@@ -1,7 +1,39 @@
 """RunloomEventLoop: add/remove reader+writer, the io-runner goroutine, and
 the low-level sock_* operations."""
+import functools as _functools
+
 from ._base import *  # noqa: F401,F403  (shared foundation)
 from .handles import _Handle  # noqa: F401
+
+
+def _release_fd_after(method):
+    """Drop a low-level sock_* op's netpoll registration once the op is done.
+
+    The low-level loop.sock_* take a USER-OWNED socket which the caller closes
+    with a plain socket.close() -- that does NOT run the _close_sock /
+    monkey.close unregister hook (only sockets the bridge itself owns do).
+    Without dropping the per-fd arm cache, a reused fd NUMBER inherits the stale
+    "armed" mask and netpoll's register-once skip never re-arms it -> the new
+    socket's wait_fd parks forever (the long-standing test_recvfrom / fast-churn
+    hang).  netpoll_release_if_idle is a no-op while another op is still parked on
+    the fd (it only DELs an idle fd), so it is safe to call unconditionally on
+    exit.  Monkey + the transports are untouched -- they keep the register-once
+    fast path and clear the cache via their own close hooks, so the throughput
+    hot path pays nothing.  asyncio's selector loop does the same thing
+    (remove_reader/writer after each sock op)."""
+    @_functools.wraps(method)
+    async def wrapper(self, sock, *args, **kwargs):
+        try:
+            return await method(self, sock, *args, **kwargs)
+        finally:
+            try:
+                fd = sock.fileno()
+            except (OSError, ValueError, AttributeError):
+                fd = -1
+            if fd >= 0:
+                runloom_c.netpoll_release_if_idle(fd)
+    return wrapper
+
 
 class _LoopIOMixin(object):
     def _pg_fileobj_to_fd(self, fileobj):
@@ -111,6 +143,7 @@ class _LoopIOMixin(object):
         if self._debug and sock.gettimeout() != 0:
             raise ValueError("the socket must be non-blocking")
 
+    @_release_fd_after
     async def sock_connect(self, sock, address):
         self._check_sock_nonblocking(sock)
         sock.setblocking(False)
@@ -122,6 +155,7 @@ class _LoopIOMixin(object):
             if err != 0:
                 raise OSError(err, "connect failed")
 
+    @_release_fd_after
     async def sock_accept(self, sock):
         self._check_sock_nonblocking(sock)
         sock.setblocking(False)
@@ -133,6 +167,7 @@ class _LoopIOMixin(object):
             except (BlockingIOError, InterruptedError):
                 _wait_fd(sock.fileno(), 1)
 
+    @_release_fd_after
     async def sock_recv(self, sock, nbytes):
         self._check_sock_nonblocking(sock)
         sock.setblocking(False)
@@ -142,6 +177,7 @@ class _LoopIOMixin(object):
             except (BlockingIOError, InterruptedError):
                 _wait_fd(sock.fileno(), 1)
 
+    @_release_fd_after
     async def sock_recv_into(self, sock, buf):
         self._check_sock_nonblocking(sock)
         sock.setblocking(False)
@@ -151,6 +187,7 @@ class _LoopIOMixin(object):
             except (BlockingIOError, InterruptedError):
                 _wait_fd(sock.fileno(), 1)
 
+    @_release_fd_after
     async def sock_recvfrom(self, sock, bufsize):
         self._check_sock_nonblocking(sock)
         sock.setblocking(False)
@@ -160,6 +197,7 @@ class _LoopIOMixin(object):
             except (BlockingIOError, InterruptedError):
                 _wait_fd(sock.fileno(), 1)
 
+    @_release_fd_after
     async def sock_recvfrom_into(self, sock, buf, nbytes=0):
         # asyncio 3.11+ API; base class raises NotImplementedError.
         self._check_sock_nonblocking(sock)
@@ -178,6 +216,7 @@ class _LoopIOMixin(object):
         raise asyncio.SendfileNotAvailableError(
             "sock_sendfile syscall path is not available on runloom")
 
+    @_release_fd_after
     async def sock_sendall(self, sock, data):
         self._check_sock_nonblocking(sock)
         sock.setblocking(False)
@@ -190,6 +229,7 @@ class _LoopIOMixin(object):
             except (BlockingIOError, InterruptedError):
                 _wait_fd(sock.fileno(), 2)
 
+    @_release_fd_after
     async def sock_sendto(self, sock, data, address):
         self._check_sock_nonblocking(sock)
         sock.setblocking(False)
@@ -204,6 +244,7 @@ class _LoopIOMixin(object):
     # socket.recvmsg/sendmsg cooperative and the bridge (monkey OFF) needs an
     # equivalent -- same EAGAIN -> wait_fd loop as the other sock_* ops.
     if hasattr(_socket.socket, "recvmsg"):
+        @_release_fd_after
         async def sock_recvmsg(self, sock, bufsize, ancbufsize=0, flags=0):
             self._check_sock_nonblocking(sock)
             sock.setblocking(False)
@@ -213,6 +254,7 @@ class _LoopIOMixin(object):
                 except (BlockingIOError, InterruptedError):
                     _wait_fd(sock.fileno(), 1)
 
+        @_release_fd_after
         async def sock_recvmsg_into(self, sock, buffers, ancbufsize=0, flags=0):
             self._check_sock_nonblocking(sock)
             sock.setblocking(False)
@@ -222,6 +264,7 @@ class _LoopIOMixin(object):
                 except (BlockingIOError, InterruptedError):
                     _wait_fd(sock.fileno(), 1)
 
+        @_release_fd_after
         async def sock_sendmsg(self, sock, buffers, ancdata=(), flags=0,
                                address=None):
             self._check_sock_nonblocking(sock)

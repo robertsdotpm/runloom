@@ -150,6 +150,12 @@ static PyMethodDef module_methods[] = {
      "netpoll_unregister(fd): clear the netpoll registration cache "
      "bit for fd.  Call from socket close so fd reuse re-registers "
      "cleanly under the edge-triggered register-once scheme."},
+    {"netpoll_release_if_idle", m_netpoll_release_if_idle, METH_O,
+     "netpoll_release_if_idle(fd): if no goroutine is parked on fd, "
+     "EPOLL_CTL_DEL it and clear its arm cache.  The aio bridge calls this "
+     "after each low-level loop.sock_* op on a user-owned socket (closed via a "
+     "plain socket.close() that bypasses the unregister hook) so a reused fd "
+     "re-registers instead of inheriting a stale arm and hanging."},
     {"netpoll_cancel_fd", m_netpoll_cancel_fd, METH_O,
      "netpoll_cancel_fd(fd): wake every goroutine parked in wait_fd on "
      "fd (with the cancelled sentinel).  Call from the socket close hook "

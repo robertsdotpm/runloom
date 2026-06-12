@@ -140,6 +140,14 @@ int runloom_netpoll_cancel_g(struct runloom_g *g);
  * Safe to call on unknown fds (no-op). */
 void runloom_netpoll_unregister(int fd);
 
+/* Drop an OPEN fd's epoll registration IFF no goroutine is parked on it (any
+ * pool).  Unlike unregister, issues EPOLL_CTL_DEL (the fd is still open, so the
+ * kernel won't auto-remove it).  The aio bridge calls this after each low-level
+ * loop.sock_* op on a user socket -- those close via a plain socket.close() that
+ * never reaches the unregister hook, so without this a reused fd inherits a stale
+ * arm and hangs.  epoll-only (kqueue re-arms per park; select needs no reg). */
+void runloom_netpoll_release_if_idle(int fd);
+
 /* Wake every goroutine parked in wait_fd on `fd` (returning
  * RUNLOOM_NETPOLL_CANCELLED) -- the socket close hook calls this AFTER closing
  * the fd so a cross-goroutine close unblocks a parked accept()/recv()/connect()

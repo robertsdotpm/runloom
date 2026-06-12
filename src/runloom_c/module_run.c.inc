@@ -110,6 +110,16 @@ static PyObject *m_netpoll_unregister(PyObject *self, PyObject *arg)
     Py_RETURN_NONE;
 }
 
+static PyObject *m_netpoll_release_if_idle(PyObject *self, PyObject *arg)
+{
+    long fd;
+    (void)self;
+    fd = PyLong_AsLong(arg);
+    if (fd == -1 && PyErr_Occurred()) return NULL;
+    runloom_netpoll_release_if_idle((int)fd);
+    Py_RETURN_NONE;
+}
+
 static PyObject *m_netpoll_cancel_fd(PyObject *self, PyObject *arg)
 {
     long fd;

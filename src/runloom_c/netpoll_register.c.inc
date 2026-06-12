@@ -151,6 +151,56 @@ void runloom_netpoll_unregister(int fd)
 #endif
 }
 
+/* Release an fd's epoll registration IFF no goroutine is currently parked on it.
+ *
+ * The aio bridge's low-level loop.sock_* operate on USER-OWNED sockets that the
+ * caller closes with a plain socket.close() -- which does NOT run the monkey /
+ * _close_sock unregister hook (only the bridge's OWN sockets go through that).
+ * Without clearing the per-fd LEVEL arm cache, a reused fd NUMBER inherits the
+ * stale "armed" mask and runloom_netpoll_register's already-armed skip path never
+ * re-arms it in the kernel -> the new socket's wait_fd parks forever (the
+ * long-standing test_recvfrom / fast-socket-churn hang).  The bridge calls this
+ * after each low-level sock_* op so the registration is dropped once the op is
+ * done, and a later raw close + fd reuse re-registers cleanly.
+ *
+ * Guarded on "no parker remains on this fd in ANY pool": a concurrent waiter on
+ * the same fd (e.g. a WRITE parker while a READ op finishes) keeps its arm -- we
+ * never EPOLL_CTL_DEL out from under a live direction, and never drop a wakeup.
+ * Unlike unregister this DOES issue EPOLL_CTL_DEL (the fd is still OPEN here, so
+ * the kernel will not auto-remove it; leaving it LEVEL-armed with no parker would
+ * busy-report on every epoll_wait).  Monkey and the bridge transports are
+ * untouched -- they keep the register-once fast path and clear the cache via
+ * their own close hooks, so the throughput hot path pays zero extra syscalls. */
+void runloom_netpoll_release_if_idle(int fd)
+{
+#if defined(RUNLOOM_HAVE_EPOLL)
+    if (fd < 0) return;
+    /* Scoped to runloom_pool, the single-thread / DEFAULT parker pool the aio
+     * bridge runs on (run_until_complete drives a single-thread scheduler, whose
+     * wait_fd links into runloom_pool via runloom_parker_pool_for_hub(NULL)).  The
+     * "no parker on fd" check, the arm-cache clear, AND the EPOLL_CTL_DEL all run
+     * under runloom_pool.lock -- the SAME lock wait_fd takes to link a parker and
+     * register() takes to set the arm.  So a wait_fd that links+arms cannot slip
+     * between the idle check and the DEL (which would DEL an fd it just armed -> a
+     * lost wake): either it links first (we see the parker, no-op) or we DEL first
+     * (an idle fd with no waiter) and its later register() re-ADDs fresh
+     * (armed==0).  (M:N hub pools are not in play -- only the bridge calls this,
+     * and it never shares an fd with a concurrently-running hub.) */
+    runloom_mutex_lock(&runloom_pool.lock);
+    if (((size_t)fd >= runloom_pool.by_fd_cap || runloom_pool.by_fd[fd] == NULL)
+        && runloom_fd_armed_get(fd) != 0) {
+        runloom_fd_armed_set(fd, 0);
+        runloom_fd_bit_clear(fd);
+        epoll_ctl(runloom_epoll_fd, EPOLL_CTL_DEL, fd, NULL);
+    }
+    runloom_mutex_unlock(&runloom_pool.lock);
+#else
+    /* kqueue re-arms ONE-SHOT on every park (no persistent arm to go stale) and
+     * select needs no pre-registration, so neither has the epoll fd-reuse bug. */
+    (void)fd;
+#endif
+}
+
 int runloom_netpoll_parked_count(void)
 {
     int total = 0;
