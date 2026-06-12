@@ -80,6 +80,306 @@ ps.run(main)
 
 See [Channels](channels.md) for the full API.
 
+## Concurrency primitives
+
+### Future: one-shot value passing
+
+`Future` is a single-use slot for passing a value between goroutines:
+
+```python
+import runloom
+
+def main():
+    fut = runloom.sync.Future()
+    
+    def sender():
+        runloom.sleep(0.1)
+        fut.set_result("hello")          # goroutine-only
+    
+    def receiver():
+        result = fut.result(timeout=1.0)  # blocks until result arrives or timeout
+        print("got:", result)
+    
+    runloom.go(sender)
+    runloom.go(receiver)
+
+runloom.run(main)
+```
+
+Receivers can optionally specify a timeout; `result()` raises `TimeoutError` if
+the value doesn't arrive in time.
+
+### JoinSet: structured concurrency
+
+`JoinSet` is a collection of spawned goroutines that are all joined before
+proceeding (like Go's `sync.WaitGroup` but with built-in result collection):
+
+```python
+def main():
+    js = runloom.sync.JoinSet()
+    
+    for i in range(5):
+        js.spawn(lambda i=i: i * 10)
+    
+    results = js.join_all()  # wait for all, return results in spawn order
+    print(results)           # [0, 10, 20, 30, 40]
+
+runloom.run(main)
+```
+
+Also works as a context manager (auto-joins on exit):
+
+```python
+def main():
+    with runloom.sync.JoinSet() as js:
+        for i in range(5):
+            js.spawn(lambda i=i: i * 10)
+        # auto-joins on __exit__
+
+runloom.run(main)
+```
+
+If any spawned goroutine raises an exception, `join_all()` raises the *first*
+exception (by spawn order).
+
+### gather: async-style concurrent result collection
+
+`gather(*futures_or_values)` waits for all futures to complete and returns
+their results in order (like `asyncio.gather`):
+
+```python
+def main():
+    f1 = runloom.sync.Future()
+    f2 = runloom.sync.Future()
+    
+    runloom.go(lambda: f1.set_result(10))
+    runloom.go(lambda: f2.set_result(20))
+    
+    results = runloom.sync.gather(f1, f2)
+    print(results)  # [10, 20]
+
+runloom.run(main)
+```
+
+Non-future values are passed through as-is.
+
+### WaitGroup: goroutine barrier
+
+`WaitGroup` waits for a set of goroutines to complete:
+
+```python
+def main():
+    wg = runloom.sync.WaitGroup()
+    
+    def worker(i):
+        runloom.sleep(0.01 * i)
+        print("worker", i, "done")
+    
+    for i in range(5):
+        wg.add(1)
+        runloom.go(lambda i=i: (worker(i), wg.done()))
+    
+    wg.wait()  # blocks until all Done() calls
+    print("all done")
+
+runloom.run(main)
+```
+
+Call `wg.add(N)` to increment the count, `wg.done()` to decrement, and
+`wg.wait()` to block until the count reaches zero.
+
+### RWMutex: reader-writer lock
+
+`RWMutex` allows multiple concurrent readers OR a single exclusive writer:
+
+```python
+def main():
+    mu = runloom.sync.RWMutex()
+    data = [0]
+    
+    def reader(i):
+        with mu.rlock():  # shared lock
+            print("reader", i, "sees", data[0])
+            runloom.sleep(0.01)
+    
+    def writer(i):
+        with mu.lock():   # exclusive lock
+            data[0] += 1
+            print("writer", i, "set to", data[0])
+            runloom.sleep(0.01)
+    
+    for i in range(3):
+        runloom.go(reader, i)
+        runloom.go(writer, i)
+    
+    runloom.sleep(0.2)
+
+runloom.run(main)
+```
+
+- `mu.rlock()` / `runlock()` — acquire/release a read lock (shared, multiple allowed)
+- `mu.lock()` / `unlock()` — acquire/release a write lock (exclusive)
+- Context manager support: `with mu.rlock():` / `with mu.lock():`
+
+### Semaphore: weighted concurrency limit
+
+`Semaphore` limits the number of goroutines executing a critical section:
+
+```python
+def main():
+    sem = runloom.sync.Semaphore(2)  # max 2 concurrent
+    
+    def worker(i):
+        sem.acquire()
+        try:
+            print("worker", i, "running")
+            runloom.sleep(0.1)
+        finally:
+            sem.release()
+    
+    for i in range(6):
+        runloom.go(worker, i)
+    
+    runloom.sleep(0.4)
+
+runloom.run(main)
+```
+
+Semaphores support weighted permits (default 1):
+
+```python
+sem = runloom.sync.Semaphore(10)
+sem.acquire(3)   # acquire 3 permits
+sem.release(3)
+```
+
+Optional timeout on `acquire()`:
+
+```python
+ok = sem.acquire(timeout=1.0)  # raises TimeoutError if not acquired
+try_ok = sem.try_acquire()     # returns True/False without blocking
+```
+
+### Once: run-once initialization
+
+`Once` ensures a function runs exactly once, even under concurrent calls:
+
+```python
+def main():
+    once = runloom.sync.Once()
+    init_called = [0]
+    
+    def init():
+        init_called[0] += 1
+        print("initializing...")
+        runloom.sleep(0.05)
+    
+    def worker():
+        once.do(init)  # only one goroutine runs init, others wait
+        print("using initialized state")
+    
+    for i in range(5):
+        runloom.go(worker)
+    
+    runloom.sleep(0.2)
+    print("init was called", init_called[0], "times")  # 1
+
+runloom.run(main)
+```
+
+Use `once_value(fn)` to get a result that's computed once and cached:
+
+```python
+expensive_result = runloom.sync.once_value(lambda: compute_something())
+# First call computes; subsequent calls return the cached result
+```
+
+Use `once_func(fn)` to decorate a function for one-time execution:
+
+```python
+@runloom.sync.once_func
+def setup():
+    print("setup")
+
+setup()  # prints "setup"
+setup()  # no-op
+setup()  # no-op
+```
+
+### Group (singleflight): deduplication
+
+`Group` deduplicates concurrent calls to the same function, ensuring only one
+call runs and all callers share the result:
+
+```python
+def main():
+    group = runloom.sync.Group()
+    call_count = [0]
+    
+    def expensive(key):
+        call_count[0] += 1
+        runloom.sleep(0.05)
+        return "result for " + key
+    
+    def caller(key):
+        result = group.do(key, expensive, key)
+        print(result)
+    
+    # All 5 calls with the same key share one execution
+    for i in range(5):
+        runloom.go(caller, "x")
+    
+    runloom.sleep(0.2)
+    print("expensive was called", call_count[0], "times")  # 1
+
+runloom.run(main)
+```
+
+`group.do(key, fn, *args, **kwargs)` runs `fn(*args, **kwargs)` if it's the
+first call for `key`; subsequent concurrent calls wait for the result.
+Different keys execute independently. Call `group.forget(key)` to allow the
+next call to `key` to re-execute.
+
+### Watch: broadcast notifications
+
+`Watch` lets multiple goroutines wait for a value to change and be notified:
+
+```python
+def main():
+    watch = runloom.sync.Watch()
+    
+    def setter(i):
+        runloom.sleep(0.01 * (i + 1))
+        watch.notify(i)
+        print("notified with", i)
+    
+    def waiter(name):
+        for expected in [0, 1, 2]:
+            value = watch.wait_changed(timeout=1.0)  # blocks until value changes
+            print(name, "got", value)
+    
+    runloom.go(setter, 0)
+    runloom.go(setter, 1)
+    runloom.go(setter, 2)
+    for name in ["w1", "w2"]:
+        runloom.go(waiter, name)
+    
+    runloom.sleep(0.2)
+
+runloom.run(main)
+```
+
+- `watch.notify(value)` — broadcast a new value to all waiters
+- `watch.wait_changed(timeout=None)` — block until the value changes
+
+### Thread safety
+
+All primitives in `runloom.sync` are **goroutine-only** (meant for
+goroutine-to-goroutine synchronization). For synchronizing real OS threads
+with goroutines, use the `runloom.monkey` patched versions (`threading.Lock`,
+`threading.Event`, etc.) which detect whether they're called from a goroutine
+or a foreign thread and adapt accordingly.
+
 ## TCP server (straight-line style)
 
 `runloom.sync` ships helper wrappers `tcp_connect` and `tcp_listen` that
