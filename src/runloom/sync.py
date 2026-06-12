@@ -570,7 +570,7 @@ def gather(*callables):
 #     parker steals a later wake.
 # Foreign-OS-thread rule: locks (RWMutex, Semaphore) are GOROUTINE-ONLY (a foreign
 # thread raises -- use threading.Lock/Semaphore under monkey for foreign-safe
-# locking).  Resolution primitives (Once/Watch/oneshot/singleflight) raise on the
+# locking).  Resolution primitives (Once/Watch/Future/singleflight) raise on the
 # WAKE/resolve side from a foreign thread (Future.set_result style) and let a
 # foreign WAITER poll.
 # ====================================================================
@@ -1054,53 +1054,12 @@ class Watch(object):
             # spurious wake -> still queued -> re-park
 
 
-class Promise(Future):
-    """A Future with producer/consumer naming: resolve(v)/reject(exc)/result().
-    (A Future is already a settable one-shot slot; Promise is the clean alias.)"""
-
-    def resolve(self, value):
-        self.set_result(value)
-
-    def reject(self, exc):
-        self.set_exception(exc)
-
-
-class _OneshotSender(object):
-    __slots__ = ("_fut",)
-    def __init__(self, fut):
-        self._fut = fut
-    def send(self, value):
-        """Send the single value (goroutine-only).  Raises if already sent."""
-        self._fut.set_result(value)
-    def is_received_pending(self):
-        return not self._fut.done()
-
-
-class _OneshotReceiver(object):
-    __slots__ = ("_fut",)
-    def __init__(self, fut):
-        self._fut = fut
-    def recv(self, timeout=None):
-        """Block until the sender sends (or raise TimeoutError after timeout secs)."""
-        return self._fut.result(timeout)
-    def done(self):
-        return self._fut.done()
-
-
-def oneshot():
-    """A single-use one-way value transfer (tokio::sync::oneshot): returns
-    (sender, receiver).  sender.send(v) once; receiver.recv(timeout=None) blocks
-    until sent.  A thin pair over Future."""
-    fut = Future()
-    return (_OneshotSender(fut), _OneshotReceiver(fut))
-
-
 class JoinSet(object):
     """Structured concurrency (Tokio JoinSet / trio nursery): spawn(fn, *a, **kw)
     runs fn as a goroutine tracked by the set; join_all() waits for ALL, returns
     results in SPAWN order, and (after all finish) raises the FIRST exception by
     spawn order -- like gather.  Single-use; spawn from ONE place before join_all().
-    Also a context manager (see nursery)."""
+    Also a context manager: `with JoinSet() as js: js.spawn(...)` joins on exit."""
 
     __slots__ = ("_wg", "_results", "_errs", "_n")
 
@@ -1156,9 +1115,3 @@ class JoinSet(object):
                 if e is not None:
                     raise e
         return False                     # never suppress a body exception
-
-
-def nursery():
-    """A trio-style nursery: `with sync.nursery() as n: n.spawn(...)` waits for all
-    spawned goroutines on block exit and propagates the first error."""
-    return JoinSet()

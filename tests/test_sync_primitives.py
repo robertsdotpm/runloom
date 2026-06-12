@@ -1,5 +1,5 @@
 """Phase 3 runloom.sync primitives: RWMutex, weighted Semaphore, Once/once_value/
-once_func, singleflight Group, Watch, oneshot/Promise, JoinSet/nursery.
+once_func, singleflight Group, Watch, JoinSet.
 
 All ride the GenMC-verified park()/g.wake() handshake + the runloom_c.Mutex guard +
 the goroutine-resolution contract.  These pin the contract AND the failure mode
@@ -399,56 +399,7 @@ def test_watch_no_missed_change_and_timeout():
     assert r2 is None and 0.04 < dt < 0.4  # nothing changed -> timeout
 
 
-# ---- oneshot / Promise ---------------------------------------------------
-
-def test_oneshot_send_recv():
-    def body():
-        snd, rcv = sync.oneshot()
-        got = []
-        runloom.go(lambda: got.append(rcv.recv()))
-        runloom.sleep(0.02)
-        snd.send("hello")
-        runloom.sleep(0.02)
-        return got
-    assert _drive(body) == ["hello"]
-
-
-def test_oneshot_recv_timeout():
-    def body():
-        snd, rcv = sync.oneshot()
-        t0 = time.monotonic()
-        try:
-            rcv.recv(timeout=0.06)
-            return ("no-timeout", 0)
-        except TimeoutError:
-            return ("timeout", time.monotonic() - t0)
-    kind, dt = _drive(body)
-    assert kind == "timeout" and 0.04 < dt < 0.4
-
-
-def test_promise_resolve_reject():
-    def body():
-        p = sync.Promise()
-        got = []
-        runloom.go(lambda: got.append(p.result()))
-        runloom.sleep(0.02)
-        p.resolve(7)
-        runloom.sleep(0.02)
-
-        p2 = sync.Promise()
-        runloom.go(lambda: p2.reject(ValueError("nope")))
-        runloom.sleep(0.02)
-        try:
-            p2.result()
-            raised = False
-        except ValueError:
-            raised = True
-        return got, raised
-    got, raised = _drive(body)
-    assert got == [7] and raised
-
-
-# ---- JoinSet / nursery ---------------------------------------------------
+# ---- JoinSet -------------------------------------------------------------
 
 def test_joinset_order_and_results():
     def body():
@@ -474,10 +425,10 @@ def test_joinset_first_exception_by_spawn_order():
     assert _drive(body)
 
 
-def test_nursery_context_manager():
+def test_joinset_context_manager():
     def body():
         out = []
-        with sync.nursery() as n:
+        with sync.JoinSet() as n:
             for i in range(4):
                 n.spawn(lambda i=i: out.append(i))
         # block-exit joined all spawned tasks
@@ -485,12 +436,12 @@ def test_nursery_context_manager():
     assert _drive(body) == [0, 1, 2, 3]
 
 
-def test_nursery_propagates_task_error():
+def test_joinset_context_manager_propagates_task_error():
     def body():
         def boom():
             raise ValueError("task")
         with pytest.raises(ValueError):
-            with sync.nursery() as n:
+            with sync.JoinSet() as n:
                 n.spawn(lambda: 1)
                 n.spawn(boom)
         return True
