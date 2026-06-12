@@ -184,7 +184,11 @@ def test_friendly_go_with_args_preserves_kind_and_prescan():
     assert _row(plain_with_arg) is not None
     # and the crypto prescan reached the wrapped function
     assert _row(crypto_with_arg)["reserved"] == CRYPTO_COLD
-    assert _row(plain_with_arg)["reserved"] == START
+    # plain was NOT prescan-bumped (the point under test): it stays at the default
+    # or below.  The auto-sizer may legitimately SHRINK a trivial-stack target
+    # toward the floor once it samples its tiny HWM, so assert "not bumped" (<=
+    # START) rather than "exactly START" -- the latter raced the shrink (saw 16K).
+    assert _row(plain_with_arg)["reserved"] <= START
 
 
 def test_env_start_size(monkeypatch):

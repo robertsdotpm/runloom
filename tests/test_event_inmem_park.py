@@ -214,14 +214,22 @@ def test_timed_wake_vs_timeout_exactly_once():
             runloom.go(waiter)
             runloom.sleep(dl * (0.5 + (i % 7) / 7.0))
             ev.set()
-            runloom.sleep(0.003)
+            # Wait for the waiter to actually resume before classifying.  A woken
+            # goroutine under 8-hub load may not be SCHEDULED to write box for many
+            # ms after its wake commits -- a fixed tiny wait races that and reads a
+            # not-yet-written box as a false "never resumed" (the overnight flake:
+            # bad=1 with not_once=0, i.e. it DID resume exactly once, just later).
+            # Poll to a generous ceiling; only a genuine no-resume past it is a bug.
+            deadline = time.monotonic() + 0.5
+            while box.get("rd") is None and time.monotonic() < deadline:
+                runloom.sleep(0.002)
             rd = box.get("rd")
             if rd is None:
-                bad[0] += 1                            # never resumed
+                bad[0] += 1                            # never resumed (real bug)
             else:
                 r, dt = rd
                 if r is False and dt < dl * 0.7:
-                    bad[0] += 1                        # premature timeout
+                    bad[0] += 1                        # premature timeout (real bug)
 
         for i in range(rounds):
             one(i)

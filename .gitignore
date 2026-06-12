@@ -20,3 +20,6 @@ scripts/release_hosts.env
 
 # hang-hunter generated reports
 hang_hunter_reports/
+
+# overnight flake-hunt loop output (transient, local)
+overnight_suite_results.log

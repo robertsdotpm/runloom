@@ -99,17 +99,28 @@ class HubIntrospectTest(unittest.TestCase):
         out = {}
 
         def main():
-            runloom.go(blocking_sleep_worker)
-            runloom.sleep(0.10)
-            buf = io.StringIO()
-            gi.print_hubs(file=buf)
-            out["text"] = buf.getvalue()
+            runloom.go(blocking_sleep_worker)   # blocks 300ms -> a DETACHED wedge
+            # The py-spy hint fires when a hub's DISPLAYED dwell >= WEDGE_MS (50ms).
+            # A single 100ms snapshot can race a dwell-counter reset (sysmon
+            # resume/handoff bookkeeping momentarily shows the wedged hub at dwell
+            # 0 -> no hint; the overnight flake), so sample across the blocking
+            # window and accept the hint in ANY snapshot.
+            texts = []
+            for _ in range(20):
+                runloom.sleep(0.012)            # 20 * 12ms = 240ms < the 300ms wedge
+                buf = io.StringIO()
+                gi.print_hubs(file=buf)
+                texts.append(buf.getvalue())
+            out["texts"] = texts
 
         runloom.run(4, main)
-        text = out["text"]
-        self.assertIn("runloom hubs", text)
-        # A wedge was present, so the py-spy hint is emitted.
-        self.assertIn("py-spy dump --pid", text)
+        texts = out["texts"]
+        self.assertTrue(any("runloom hubs" in t for t in texts))
+        # A wedge was present during the window, so the py-spy hint is emitted.
+        self.assertTrue(
+            any("py-spy dump --pid" in t for t in texts),
+            "no py-spy hint in any of {0} snapshots; last:\n{1}".format(
+                len(texts), texts[-1] if texts else "<none>"))
 
     def test_handoff_on_lockout_path(self):
         # Re-enable the rescue: the snapshot must take its CAS-lockout path

@@ -27,6 +27,7 @@ Usage:
 Exit status is non-zero if any file failed, timed out, or crashed.
 """
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -105,20 +106,36 @@ def run_file(name, pytest_args):
     # Keep the in-tree .so importable regardless of how the runner was invoked.
     src = os.path.join(REPO, "src")
     env["PYTHONPATH"] = src + os.pathsep + env.get("PYTHONPATH", "")
+    # Enable faulthandler so a hang can be DUMPED (not just killed): on timeout we
+    # send SIGABRT, which faulthandler turns into a full all-thread (hub) Python+C
+    # traceback to stderr -> captured below.  Turns an opaque 300s TIMEOUT into a
+    # diagnosable stack (e.g. which hub is wedged where on a lost netpoll arm).
+    env["PYTHONFAULTHANDLER"] = "1"
     cmd = [sys.executable, "-m", "pytest", path, "-q",
            "-p", "no:cacheprovider"] + list(pytest_args)
     t0 = time.monotonic()
+    p = subprocess.Popen(cmd, cwd=REPO, env=env,
+                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                         text=True)
     try:
-        p = subprocess.run(cmd, cwd=REPO, env=env, timeout=timeout,
-                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                           text=True)
-        rc, out = p.returncode, p.stdout
-    except subprocess.TimeoutExpired as e:
-        out = (e.stdout or "")
-        if isinstance(out, bytes):
-            out = out.decode("utf-8", "replace")
+        out, _ = p.communicate(timeout=timeout)
+        rc = p.returncode
+    except subprocess.TimeoutExpired:
+        # Hung.  SIGABRT -> the child's faulthandler dumps every thread's stack;
+        # collect it (give it a few seconds), then make sure the child is dead.
+        try:
+            p.send_signal(signal.SIGABRT)
+        except Exception:
+            pass
+        try:
+            out, _ = p.communicate(timeout=15)
+        except subprocess.TimeoutExpired:
+            p.kill()
+            out, _ = p.communicate()
         rc = 124
-        out += "\n[run_isolated: TIMED OUT after {0}s]".format(timeout)
+        out = (out or "") + (
+            "\n[run_isolated: TIMED OUT after {0}s; SIGABRT faulthandler "
+            "dump (if any) is above]".format(timeout))
     return rc, out, time.monotonic() - t0
 
 
