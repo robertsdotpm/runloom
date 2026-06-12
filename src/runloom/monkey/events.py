@@ -15,16 +15,21 @@ def _spawn(fn):
 
 
 class CoEvent(object):
-    # Waiters park on a _Parker -- an OS pipe/socketpair fd -- NOT on a
-    # runloom_c.Chan.  This looks like overhead (set() does one os.write per
-    # waiter), and a channel close() would broadcast in one call, BUT a channel
-    # recv-park is not foreign-thread-wakeable: threading.Thread.start() does
-    # self._started.set() from the real WORKER thread, and a channel wake racing
-    # a single-thread recv-park is lost (the chan park does not keep run() alive,
-    # so run() exits and the foreign wake lands on a dead loop).  The fd park
-    # keeps run() alive (netpoll_parked) and os.write() is a race-free foreign
-    # wake.  See the FINDING in src/runloom_c/chan_waiters.c.inc park_waiter.
-    # (Tried CoEvent-on-channel 2026-06, reverted -- it hung Thread.start().)
+    # Waiters park on a _Parker, NOT a runloom_c.Chan: a channel recv-park is not
+    # foreign-thread-wakeable (threading.Thread.start() does self._started.set()
+    # from the real WORKER thread; a channel wake racing a single-thread recv-park
+    # is lost -- the chan park does not keep run() alive, so run() exits and the
+    # foreign wake lands on a dead loop).  See the FINDING in
+    # src/runloom_c/chan_waiters.c.inc park_waiter.  (Tried CoEvent-on-channel
+    # 2026-06, reverted -- it hung Thread.start().)
+    #
+    # _Parker picks the park mechanism (see _base.py): an UNTIMED goroutine wait
+    # parks IN MEMORY (runloom_c.park, ZERO per-waiter fds; the common "wait until
+    # set" case -- a million waiters cost ~1 shared anchor fd, not ~2 each), woken
+    # by g.wake().  A TIMED wait or a FOREIGN-thread wait keeps an OS pipe/
+    # socketpair fd (park() has no deadline and can't serve a non-goroutine), woken
+    # by os.write.  set() -> _unpark_all wakes both kinds; the run-alive anchor +
+    # g.wake() make a foreign SETTER race-free for the in-memory waiters too.
     #
     # _guard: a real lock making the flag + waiter-queue bookkeeping atomic
     # across M:N hub threads (held only for the O(1) bookkeeping, never across
@@ -71,7 +76,11 @@ class CoEvent(object):
                 if timeout is not None and time.monotonic() - t0 >= timeout:
                     return self._flag
             return True
-        p = _Parker()
+        # Untimed waits park IN MEMORY (0 fds; the run-alive anchor + g.wake()),
+        # the common "wait until set, however long" case -- a million waiters cost
+        # ~1 shared fd instead of ~2 each.  A TIMED wait keeps the fd-backed park
+        # (the netpoll deadline; no waker goroutine).  set() wakes both kinds.
+        p = _Parker(inmem=(timeout is None))
         self._guard.acquire()
         if self._flag:
             # set() fired while we were building the parker.
@@ -133,7 +142,9 @@ class CoCondition(object):
         self._waiters.clear()
 
     def wait(self, timeout=None):
-        p = _Parker()
+        # Untimed goroutine waits park in memory (0 fds); a timed wait, or a wait
+        # from a foreign thread, keeps the fd-backed park.  notify wakes both.
+        p = _Parker(inmem=(timeout is None and _in_goroutine()))
         self._waiters.append(p)
         # Release inner lock while parked.
         owned_recursion = None
@@ -242,7 +253,10 @@ class CoSemaphore(object):
         # and guard-re-acquire when cancel_all snapshotted the queue and missed it;
         # the _cancelled flag catches this and prevents a permanent park).
         self._guard.release()
-        p = _Parker()
+        # Untimed waits park in memory (0 fds); timed waits keep the fd-backed
+        # park (the netpoll deadline).  release()/cancel_all() wake both via
+        # _unpark_all.  (Past the foreign-thread guard above -> always a goroutine.)
+        p = _Parker(inmem=(timeout is None))
         # Waiter state: [parker, active, got_permit]
         # active     = True while live; set to False by the timeout waker
         # got_permit = set to True by release() when it hands this waiter a slot

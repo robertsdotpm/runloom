@@ -179,7 +179,7 @@ def _fd_pollable(fd):
 # mode the parker can't be signalled until the parking goroutine has
 # yielded.
 class _Parker(object):
-    __slots__ = ("r", "w", "_sockets", "_g_handle")
+    __slots__ = ("r", "w", "_sockets", "_g_handle", "_via_park")
     # Free-list of reusable (r, w, _sockets) tuples.  The pool lock uses a
     # NON-BLOCKING acquire so that no goroutine ever waits for it (blocking
     # would freeze the goroutine's hub if sysmon preempted the holder).  A
@@ -189,7 +189,26 @@ class _Parker(object):
     _pool = []
     _pool_lock = _thread.allocate_lock()   # captured pre-patch → real OS mutex
 
-    def __init__(self):
+    def __init__(self, inmem=False):
+        # The handle of the goroutine parked here.  In FD mode it is read by
+        # _unpark_all -> runloom_c.unpark_many for a batched netpoll DIRECT wake (no
+        # per-waiter os.write); None means a foreign-thread waiter -> pipe-write.
+        # In IN-MEMORY mode (inmem=True) it is the WAKE HOLDER itself: g.wake()
+        # re-queues the goroutine parked via runloom_c.park(), and it is set HERE,
+        # before the parker is published to setters, so a set() that races the park
+        # still finds it (the park_generic Dekker then catches a pre-commit wake).
+        self._g_handle = None
+        # In-memory park: ZERO per-waiter fds (woken by g.wake(); shares the one
+        # process-wide run-alive anchor).  Opt-in ONLY for callers that wake via
+        # the _via_park-aware _unpark_all (Event/Condition/Semaphore) -- callers
+        # that wake via a direct p.unpark() (queues/dns/threadpool) must NOT pass
+        # inmem (os.write needs the fd).  Requires a goroutine context.
+        self._via_park = bool(inmem)
+        if self._via_park:
+            self._g_handle = runloom_c.current_g()
+            self.r = self.w = -1
+            self._sockets = None
+            return
         try:
             reused = _Parker._pool.pop()
         except IndexError:
@@ -210,13 +229,17 @@ class _Parker(object):
             self.r = r
             self.w = w
             self._sockets = None
-        # The handle of the goroutine parked here, set by park() in the goroutine
-        # branch and read by _unpark_all -> runloom_c.unpark_many for a batched
-        # DIRECT wake (no per-waiter os.write).  None means "no goroutine to wake
-        # directly" -> foreign-thread waiter, use the pipe-write path.
-        self._g_handle = None
 
     def park(self, timeout=None):
+        if self._via_park:
+            # In-memory M:N park: 0 fds.  Woken by g.wake() (from _unpark_all).
+            # foreign_wakeable=True arms the shared run-alive anchor so a foreign
+            # SETTER's g.wake() can't race a single-thread run()'s exit.  The
+            # park_generic Dekker makes a wake that beats this commit a no-op
+            # (returns immediately) -- no lost wakeup.  The caller's flag loop
+            # re-parks on a spurious return.  No fd byte to drain.
+            runloom_c.park(foreign_wakeable=True)
+            return
         # Clear FIRST: a _Parker object reused for a second park must not carry
         # the previous park's goroutine handle (a stale handle would let a setter
         # direct-wake the WRONG g -> this waiter hangs).  The foreign-thread
@@ -257,6 +280,14 @@ class _Parker(object):
                 pass
 
     def unpark(self):
+        if self._via_park:
+            # In-memory parker: no fd to write -- re-queue the goroutine directly.
+            # Defensive: _via_park parkers are normally woken via _unpark_all's
+            # batched g.wake path, but a direct unpark() must still work.
+            h = self._g_handle
+            if h is not None:
+                h.wake()
+            return
         if self._sockets is not None:
             try:
                 _raw_sock_send(self._sockets[1], b"\x01")
@@ -273,6 +304,8 @@ class _Parker(object):
         # parker is no longer wakeable.  Also a stale-handle guard for the pooled
         # fd-tuple's next user.
         self._g_handle = None
+        if self._via_park:
+            return                     # in-memory parker: no fd to drain / pool
         # Drain any stale wake bytes before returning to the pool.  Must
         # use raw recv/read -- the patched versions would park forever
         # on BlockingIOError instead of returning empty.
@@ -319,7 +352,32 @@ def _unpark_all(parkers):
     goroutine handle) keep the os.write path.  unpark_many returns the indices it
     could not direct-wake -- a waiter that appended itself but has not yet
     committed its wait_fd park (the edge-before-park window) -- and those fall
-    back to the pipe-write backstop so the wake is never lost."""
+    back to the pipe-write backstop so the wake is never lost.
+
+    IN-MEMORY (park()-based, 0-fd) waiters are re-queued via g.wake() -- the only
+    wake that works for them (no fd to write) and the only one safe for a FOREIGN
+    SETTER (g.wake = wake_safe + pump kick; the waiter's foreign_wakeable park
+    armed the run-alive anchor so run() can't exit out from under it).  The
+    park_generic Dekker makes a g.wake() that beats the park commit a no-op, so no
+    backstop is needed for these."""
+    inmem_gs = None
+    rest = None
+    for p in parkers:
+        if p._via_park:
+            h = p._g_handle
+            if h is not None:
+                if inmem_gs is None:
+                    inmem_gs = []
+                inmem_gs.append(h)
+        else:
+            if rest is None:
+                rest = []
+            rest.append(p)
+    if inmem_gs:
+        for h in inmem_gs:                    # in-memory: g.wake() (foreign-safe)
+            h.wake()
+    if not rest:
+        return
     if not _in_goroutine():
         # FOREIGN OS-thread setter (e.g. Thread.start()'s self._started.set()
         # from the real worker thread, or a multiprocessing feeder thread):
@@ -328,14 +386,14 @@ def _unpark_all(parkers):
         # those are not serialized against run()'s drain loop -- it can observe
         # netpoll_parked==0 with the ready-push not yet visible and EXIT, dropping
         # the wake.  os.write IS race-free: the pump does the unlink+wake on
-        # run()'s OWN thread.  (This is the whole reason waiters park on an fd --
+        # run()'s OWN thread.  (This is the whole reason FD waiters park on an fd --
         # see CoEvent's class comment / chan_waiters.c.inc park_waiter FINDING.)
-        for p in parkers:
+        for p in rest:
             p.unpark()
         return
     gor = None
     gor_parkers = None
-    for p in parkers:
+    for p in rest:
         h = p._g_handle
         if h is not None:
             if gor is None:
