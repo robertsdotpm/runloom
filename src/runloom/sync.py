@@ -453,9 +453,60 @@ class Future(object):
             exc = exc()
         self._resolve(None, exc)
 
-    def result(self):
+    def result(self, timeout=None):
+        # timeout (seconds, optional): raise TimeoutError if unresolved by the
+        # deadline.  A goroutine parks via park(timeout=) (0 fds); a foreign thread
+        # polls.  Re-checks _done on every (possibly spurious) wake -- the flag is
+        # authoritative, never a single park() return.
         g = runloom_c.current_g()
+        deadline = None if timeout is None else _time.monotonic() + timeout
+        self._mu.lock()
+        if self._done:
+            exc, res = self._exc, self._result
+            self._mu.unlock()
+            if exc is not None:
+                raise exc
+            return res
+        if g is None:
+            # Foreign OS thread: poll until resolved (cannot park).
+            self._mu.unlock()
+            while True:
+                self._mu.lock()
+                if self._done:
+                    exc, res = self._exc, self._result
+                    self._mu.unlock()
+                    if exc is not None:
+                        raise exc
+                    return res
+                self._mu.unlock()
+                if deadline is not None and _time.monotonic() >= deadline:
+                    raise TimeoutError("Future.result timed out")
+                _time.sleep(0.0005)
+        # Append our handle ONCE (not per-iteration): a spurious park() return
+        # leaves us in _waiters, so re-parking needs no re-append -- re-appending
+        # would queue a DUPLICATE that _resolve()'s wake-all then wakes repeatedly.
+        self._waiters.append(g)
+        self._mu.unlock()
         while True:
+            if deadline is None:
+                runloom_c.park()        # woken by _resolve() (wake-all + clear)
+            else:
+                remaining = deadline - _time.monotonic()
+                if remaining <= 0:
+                    self._mu.lock()
+                    try:
+                        self._waiters.remove(g)   # de-queue on timeout
+                    except ValueError:
+                        pass
+                    if self._done:                # resolved at the last moment
+                        exc, res = self._exc, self._result
+                        self._mu.unlock()
+                        if exc is not None:
+                            raise exc
+                        return res
+                    self._mu.unlock()
+                    raise TimeoutError("Future.result timed out")
+                runloom_c.park(timeout=remaining)
             self._mu.lock()
             if self._done:
                 exc, res = self._exc, self._result
@@ -463,15 +514,8 @@ class Future(object):
                 if exc is not None:
                     raise exc
                 return res
-            if g is None:
-                # Foreign OS thread: poll until resolved.
-                self._mu.unlock()
-                _time.sleep(0.0005)
-                continue
-            self._waiters.append(g)
             self._mu.unlock()
-            runloom_c.park()            # M:N-correct in-memory park (park_self
-                                        # busy-loops on a hub); woken by _resolve()
+            # spurious wake -> still queued in _waiters -> re-park
 
 
 def gather(*callables):
@@ -511,3 +555,610 @@ def gather(*callables):
         if e is not None:
             raise e
     return results
+
+
+# ====================================================================
+# Phase 3 primitives -- all on the GenMC-verified park() / g.wake() handshake +
+# the runloom_c.Mutex guard, following the same rules as WaitGroup / Future:
+#   * guarded state under self._mu, held ONLY for O(1) bookkeeping;
+#   * a GOROUTINE waiter parks via park() (or park(timeout=) for a timed wait) and
+#     RE-CHECKS its condition under the guard on each wake -- park() may return
+#     spuriously, so the condition (never a single park() return) is authoritative;
+#   * the guard is ALWAYS released BEFORE g.wake() (the Mutex wake path is not
+#     foreign-OS-thread-safe -- wake while holding it can SIGSEGV);
+#   * a timed waiter REMOVES itself from the waiter list on timeout, else a stale
+#     parker steals a later wake.
+# Foreign-OS-thread rule: locks (RWMutex, Semaphore) are GOROUTINE-ONLY (a foreign
+# thread raises -- use threading.Lock/Semaphore under monkey for foreign-safe
+# locking).  Resolution primitives (Once/Watch/oneshot/singleflight) raise on the
+# WAKE/resolve side from a foreign thread (Future.set_result style) and let a
+# foreign WAITER poll.
+# ====================================================================
+
+def _resolve_from_goroutine(what):
+    """Raise (before any guard) if a WAKE/resolve op runs on a foreign OS thread --
+    the guard's wake path (mn_wake_g) is not foreign-thread-safe."""
+    if runloom_c.current_g() is None:
+        raise RuntimeError(
+            "%s must be called from a goroutine, not a foreign OS thread" % what)
+
+
+class RWMutex(object):
+    """Go-style sync.RWMutex: many readers OR one writer, WRITER-PREFERENCE (a
+    pending writer blocks NEW readers so writers are not starved by a reader
+    stream).  Goroutine-only; NOT reentrant.  Use as a context manager for the
+    write lock (`with rw:`), or `with rw.rlocked():` for the read lock."""
+
+    # HANDOFF design: a waiter appends a [g, [granted]] cell ONCE, parks, and loops
+    # on `granted` (re-parking on a spurious wake -- it does NOT re-append, which
+    # would create a duplicate that unlock's pop-one could waste, stranding a real
+    # waiter).  unlock/runlock TRANSFER the lock directly: they set the next
+    # waiter's granted flag (and the reader/writer counters) under the guard, then
+    # wake -- so the lock is never "released and raced", and a fresh acquirer that
+    # arrives mid-handoff sees the lock held and queues behind.
+    __slots__ = ("_readers", "_writer", "_rwait", "_wwait", "_mu")
+
+    def __init__(self):
+        self._readers = 0        # active read-lock holders
+        self._writer  = False    # a write lock is held
+        self._rwait   = []       # parked reader cells [g, [granted]]
+        self._wwait   = []       # parked writer cells [g, [granted]] (FIFO)
+        self._mu = runloom_c.Mutex()
+
+    def rlock(self):
+        _resolve_from_goroutine("RWMutex.rlock()")
+        g = runloom_c.current_g()
+        self._mu.lock()
+        if not self._writer and not self._wwait:    # writer-preference: a waiting
+            self._readers += 1                       # writer blocks new readers
+            self._mu.unlock()
+            return
+        cell = [g, [False]]
+        self._rwait.append(cell)
+        self._mu.unlock()
+        while True:
+            runloom_c.park()
+            self._mu.lock()
+            granted = cell[1][0]
+            self._mu.unlock()
+            if granted:                              # _readers already bumped for us
+                return
+
+    def runlock(self):
+        _resolve_from_goroutine("RWMutex.runlock()")
+        self._mu.lock()
+        if self._readers <= 0:
+            self._mu.unlock()
+            raise RuntimeError("RWMutex.runlock(): read lock not held")
+        self._readers -= 1
+        if self._readers == 0 and self._wwait:      # last reader hands off to a writer
+            cell = self._wwait.pop(0)
+            self._writer = True
+            cell[1][0] = True
+            self._mu.unlock()
+            cell[0].wake()
+        else:
+            self._mu.unlock()
+
+    def lock(self):
+        _resolve_from_goroutine("RWMutex.lock()")
+        g = runloom_c.current_g()
+        self._mu.lock()
+        if not self._writer and self._readers == 0:
+            self._writer = True
+            self._mu.unlock()
+            return
+        cell = [g, [False]]
+        self._wwait.append(cell)
+        self._mu.unlock()
+        while True:
+            runloom_c.park()
+            self._mu.lock()
+            granted = cell[1][0]
+            self._mu.unlock()
+            if granted:                              # _writer already True for us
+                return
+
+    def unlock(self):
+        _resolve_from_goroutine("RWMutex.unlock()")
+        self._mu.lock()
+        if not self._writer:
+            self._mu.unlock()
+            raise RuntimeError("RWMutex.unlock(): write lock not held")
+        if self._wwait:                              # WRITER-PREFERENCE: a writer first
+            cell = self._wwait.pop(0)                #   keep _writer True (handoff)
+            cell[1][0] = True
+            self._mu.unlock()
+            cell[0].wake()
+        elif self._rwait:                            # else hand off to ALL readers
+            self._writer = False
+            readers, self._rwait = self._rwait, []
+            self._readers = len(readers)
+            for cell in readers:
+                cell[1][0] = True
+            self._mu.unlock()
+            for cell in readers:
+                cell[0].wake()
+        else:
+            self._writer = False
+            self._mu.unlock()
+
+    def __enter__(self):
+        self.lock(); return self
+    def __exit__(self, *a):
+        self.unlock()
+
+    def rlocked(self):
+        """Context manager for the READ lock: `with rw.rlocked(): ...`."""
+        return _RWReadCtx(self)
+
+
+class _RWReadCtx(object):
+    __slots__ = ("_rw",)
+    def __init__(self, rw): self._rw = rw
+    def __enter__(self): self._rw.rlock(); return self._rw
+    def __exit__(self, *a): self._rw.runlock()
+
+
+class Semaphore(object):
+    """Weighted semaphore (golang.org/x/sync/semaphore.Weighted): acquire(n) blocks
+    until n permits are free, FIFO so a large-n waiter is never starved by a stream
+    of small-n acquirers.  Goroutine-only.  Distinct from monkey's counting
+    threading.Semaphore (one permit per waiter)."""
+
+    __slots__ = ("_limit", "_held", "_waiters", "_mu")
+
+    def __init__(self, value):
+        if value < 0:
+            raise ValueError("Semaphore value must be >= 0")
+        self._limit   = value
+        self._held    = 0        # permits currently held
+        self._waiters = []       # FIFO: each [g, n, [granted_bool]]
+        self._mu = runloom_c.Mutex()
+
+    def acquire(self, n=1, timeout=None):
+        if n < 0:
+            raise ValueError("Semaphore.acquire(n): n must be >= 0")
+        if n > self._limit:
+            raise ValueError("Semaphore.acquire(%d) exceeds limit %d" % (n, self._limit))
+        _resolve_from_goroutine("Semaphore.acquire()")
+        deadline = None if timeout is None else _time.monotonic() + timeout
+        g = runloom_c.current_g()
+        self._mu.lock()
+        # Fast path: permits free AND nobody ahead (FIFO -- never jump the queue).
+        if not self._waiters and self._held + n <= self._limit:
+            self._held += n
+            self._mu.unlock()
+            return True
+        w = [g, n, [False]]                          # granted flag set by release()
+        self._waiters.append(w)
+        self._mu.unlock()
+        while True:
+            if deadline is None:
+                runloom_c.park()
+            else:
+                remaining = deadline - _time.monotonic()
+                if remaining <= 0:
+                    self._mu.lock()
+                    if w[2][0]:                      # granted at the last moment
+                        self._mu.unlock()
+                        return True
+                    try:
+                        self._waiters.remove(w)
+                    except ValueError:
+                        pass
+                    self._mu.unlock()
+                    return False
+                runloom_c.park(timeout=remaining)
+            self._mu.lock()
+            granted = w[2][0]
+            self._mu.unlock()
+            if granted:
+                return True
+            # spurious / not yet our turn -> loop and re-park
+
+    def try_acquire(self, n=1):
+        if n < 0:
+            raise ValueError("n must be >= 0")
+        _resolve_from_goroutine("Semaphore.try_acquire()")   # goroutine-only contract
+        self._mu.lock()
+        if not self._waiters and self._held + n <= self._limit:
+            self._held += n
+            self._mu.unlock()
+            return True
+        self._mu.unlock()
+        return False
+
+    def release(self, n=1):
+        if n < 0:
+            raise ValueError("Semaphore.release(n): n must be >= 0")
+        _resolve_from_goroutine("Semaphore.release()")
+        self._mu.lock()
+        self._held -= n
+        if self._held < 0:
+            self._held = 0
+            self._mu.unlock()
+            raise ValueError("Semaphore.release: released more than held")
+        # Grant FIFO while the FRONT waiter fits (a too-big front waiter blocks the
+        # rest -> no starvation; granted+held set under the guard BEFORE the wake).
+        woke = None
+        while self._waiters:
+            w = self._waiters[0]
+            if self._held + w[1] <= self._limit:
+                self._held += w[1]
+                w[2][0] = True
+                self._waiters.pop(0)
+                if woke is None:
+                    woke = []
+                woke.append(w[0])
+            else:
+                break
+        self._mu.unlock()
+        if woke:
+            for g in woke:
+                g.wake()
+
+    def __enter__(self):
+        self.acquire(); return self
+    def __exit__(self, *a):
+        self.release()
+
+
+class Once(object):
+    """Go sync.Once: do(fn) runs fn EXACTLY ONCE; concurrent callers block until it
+    finishes, then return without re-running; after completion every call is a
+    no-op.  The FIRST executor sees fn's exception; later callers do NOT (Go
+    semantics -- use once_value to cache+re-raise it).  A panicking fn still
+    completes the Once.  A foreign OS thread may WAIT (poll) but may not be the
+    first executor (it would wake parked goroutines)."""
+
+    __slots__ = ("_done", "_running", "_waiters", "_mu")
+
+    def __init__(self):
+        self._done    = False
+        self._running = False
+        self._waiters = []
+        self._mu = runloom_c.Mutex()
+
+    def done(self):
+        self._mu.lock()
+        d = self._done
+        self._mu.unlock()
+        return d
+
+    def do(self, fn):
+        g = runloom_c.current_g()
+        self._mu.lock()
+        if self._done:
+            self._mu.unlock()
+            return
+        if not self._running:
+            # We are the executor.
+            if g is None:
+                self._mu.unlock()
+                raise RuntimeError(
+                    "Once.do() first call must be from a goroutine, not a foreign "
+                    "OS thread")
+            self._running = True
+            self._mu.unlock()
+            try:
+                fn()
+            finally:
+                # Mark done + wake waiters even if fn raised (Go: a panic still
+                # completes the Once).  Snapshot+clear under the guard, wake AFTER.
+                self._mu.lock()
+                self._done = True
+                self._running = False
+                waiters, self._waiters = self._waiters, []
+                self._mu.unlock()
+                for w in waiters:
+                    w.wake()
+            return
+        # A waiter: block until the executor finishes.  Guard is held here.
+        if g is None:
+            self._mu.unlock()
+            while True:
+                _time.sleep(0.0005)
+                self._mu.lock()
+                d = self._done
+                self._mu.unlock()
+                if d:
+                    return
+        while True:
+            self._waiters.append(g)
+            self._mu.unlock()
+            runloom_c.park()
+            self._mu.lock()
+            if self._done:
+                self._mu.unlock()
+                return
+            # spurious wake -> re-append + re-park
+
+
+def once_value(fn):
+    """Return a 0-arg callable that runs fn() once and returns its result on EVERY
+    call (Go 1.21 sync.OnceValue).  Caches the result OR the exception and re-raises
+    it to ALL callers (unlike Once.do, which shows the exception only to the
+    executor)."""
+    once = Once()
+    box = {}
+
+    def caller():
+        def run():
+            try:
+                box["v"] = fn()
+            except BaseException as e:   # noqa: BLE001  (cached + re-raised below)
+                box["e"] = e
+        once.do(run)
+        if "e" in box:
+            raise box["e"]
+        return box.get("v")
+    return caller
+
+
+def once_func(fn):
+    """Return a 0-arg callable that runs fn() exactly once (Go 1.21 sync.OnceFunc),
+    caching + re-raising any exception to all callers."""
+    inner = once_value(fn)
+
+    def caller():
+        inner()
+    return caller
+
+
+class Group(object):
+    """singleflight.Group (golang.org/x/sync/singleflight): do(key, fn) dedupes
+    concurrent calls with the same key -- the first caller runs fn; concurrent
+    callers with the same key WAIT and SHARE its result/exception.  Returns
+    (value, shared: bool).  The first caller for a key must be a goroutine (it
+    resolves the shared Future)."""
+
+    __slots__ = ("_calls", "_mu")
+
+    def __init__(self):
+        self._calls = {}        # key -> Future (in-flight)
+        self._mu = runloom_c.Mutex()
+
+    def do(self, key, fn):
+        g = runloom_c.current_g()
+        self._mu.lock()
+        fut = self._calls.get(key)
+        if fut is not None:
+            # Waiter: share the in-flight result (Future.result blocks + re-raises).
+            self._mu.unlock()
+            return (fut.result(), True)
+        if g is None:
+            self._mu.unlock()
+            raise RuntimeError(
+                "singleflight.Group.do() first call for a key must be from a "
+                "goroutine, not a foreign OS thread")
+        fut = Future()
+        self._calls[key] = fut
+        self._mu.unlock()
+        try:
+            v = fn()
+        except BaseException as e:   # noqa: BLE001  (shared to all waiters + re-raised)
+            # Delete the entry BEFORE resolving, so a freshly-arriving do(key) after
+            # this starts a NEW call instead of joining the finished one.
+            self._mu.lock()
+            if self._calls.get(key) is fut:
+                del self._calls[key]
+            self._mu.unlock()
+            fut.set_exception(e)
+            raise
+        self._mu.lock()
+        if self._calls.get(key) is fut:
+            del self._calls[key]
+        self._mu.unlock()
+        fut.set_result(v)
+        return (v, False)
+
+    def forget(self, key):
+        """Drop any in-flight call for key, so the next do(key) starts fresh."""
+        self._mu.lock()
+        self._calls.pop(key, None)
+        self._mu.unlock()
+
+
+class Watch(object):
+    """tokio::sync::watch: a single latest-value cell many observers watch for
+    CHANGES.  set(v) updates the value + a version counter + wakes ALL waiters
+    (goroutine-only).  get()/version() read; wait_changed(seen, timeout=None) blocks
+    until version > seen and returns (value, version), or None on timeout."""
+
+    __slots__ = ("_value", "_version", "_waiters", "_mu")
+
+    def __init__(self, value=None):
+        self._value   = value
+        self._version = 0
+        self._waiters = []
+        self._mu = runloom_c.Mutex()
+
+    def get(self):
+        self._mu.lock()
+        v = self._value
+        self._mu.unlock()
+        return v
+
+    def version(self):
+        self._mu.lock()
+        ver = self._version
+        self._mu.unlock()
+        return ver
+
+    def get_versioned(self):
+        self._mu.lock()
+        r = (self._value, self._version)
+        self._mu.unlock()
+        return r
+
+    def set(self, value):
+        _resolve_from_goroutine("Watch.set()")
+        self._mu.lock()
+        self._value = value
+        self._version += 1                  # increment UNDER the guard (no lost wake)
+        waiters, self._waiters = self._waiters, []
+        self._mu.unlock()
+        for w in waiters:                   # broadcast: wake every current observer
+            w.wake()
+
+    def wait_changed(self, seen_version, timeout=None):
+        g = runloom_c.current_g()
+        deadline = None if timeout is None else _time.monotonic() + timeout
+        if g is None:
+            while True:
+                self._mu.lock()
+                if self._version > seen_version:
+                    r = (self._value, self._version)
+                    self._mu.unlock()
+                    return r
+                self._mu.unlock()
+                if deadline is not None and _time.monotonic() >= deadline:
+                    return None
+                _time.sleep(0.0005)
+        self._mu.lock()
+        if self._version > seen_version:
+            r = (self._value, self._version)
+            self._mu.unlock()
+            return r
+        self._waiters.append(g)          # ONCE: a spurious wake leaves us queued,
+        self._mu.unlock()                # so re-parking needs no re-append (a
+        while True:                      # duplicate would be re-woken by set()).
+            if deadline is None:
+                runloom_c.park()
+            else:
+                remaining = deadline - _time.monotonic()
+                if remaining <= 0:
+                    self._mu.lock()
+                    try:
+                        self._waiters.remove(g)
+                    except ValueError:
+                        pass
+                    if self._version > seen_version:   # changed at the last moment
+                        r = (self._value, self._version)
+                        self._mu.unlock()
+                        return r
+                    self._mu.unlock()
+                    return None
+                runloom_c.park(timeout=remaining)
+            self._mu.lock()
+            if self._version > seen_version:
+                try:
+                    self._waiters.remove(g)            # done -> de-queue ourselves
+                except ValueError:
+                    pass
+                r = (self._value, self._version)
+                self._mu.unlock()
+                return r
+            self._mu.unlock()
+            # spurious wake -> still queued -> re-park
+
+
+class Promise(Future):
+    """A Future with producer/consumer naming: resolve(v)/reject(exc)/result().
+    (A Future is already a settable one-shot slot; Promise is the clean alias.)"""
+
+    def resolve(self, value):
+        self.set_result(value)
+
+    def reject(self, exc):
+        self.set_exception(exc)
+
+
+class _OneshotSender(object):
+    __slots__ = ("_fut",)
+    def __init__(self, fut):
+        self._fut = fut
+    def send(self, value):
+        """Send the single value (goroutine-only).  Raises if already sent."""
+        self._fut.set_result(value)
+    def is_received_pending(self):
+        return not self._fut.done()
+
+
+class _OneshotReceiver(object):
+    __slots__ = ("_fut",)
+    def __init__(self, fut):
+        self._fut = fut
+    def recv(self, timeout=None):
+        """Block until the sender sends (or raise TimeoutError after timeout secs)."""
+        return self._fut.result(timeout)
+    def done(self):
+        return self._fut.done()
+
+
+def oneshot():
+    """A single-use one-way value transfer (tokio::sync::oneshot): returns
+    (sender, receiver).  sender.send(v) once; receiver.recv(timeout=None) blocks
+    until sent.  A thin pair over Future."""
+    fut = Future()
+    return (_OneshotSender(fut), _OneshotReceiver(fut))
+
+
+class JoinSet(object):
+    """Structured concurrency (Tokio JoinSet / trio nursery): spawn(fn, *a, **kw)
+    runs fn as a goroutine tracked by the set; join_all() waits for ALL, returns
+    results in SPAWN order, and (after all finish) raises the FIRST exception by
+    spawn order -- like gather.  Single-use; spawn from ONE place before join_all().
+    Also a context manager (see nursery)."""
+
+    __slots__ = ("_wg", "_results", "_errs", "_n")
+
+    def __init__(self):
+        self._wg      = WaitGroup()
+        self._results = []
+        self._errs    = []
+        self._n       = 0
+
+    def spawn(self, fn, *args, **kwargs):
+        """Spawn fn as a tracked goroutine.  Returns its index (spawn order).
+        Each runner writes only its OWN result/err slot -> no shared-counter race
+        even with the GIL off."""
+        i = self._n
+        self._n += 1
+        self._results.append(None)
+        self._errs.append(None)
+        self._wg.add(1)
+
+        def runner():
+            try:
+                self._results[i] = fn(*args, **kwargs)
+            except BaseException as e:   # noqa: BLE001  (propagated by join_all)
+                self._errs[i] = e
+            finally:
+                self._wg.done()
+
+        if runloom_c.mn_hub_count() > 0:
+            runloom_c.mn_go(runner)
+        else:
+            runloom_c.go(runner)
+        return i
+
+    def join_all(self):
+        """Wait for every spawned task, then return results in spawn order, or
+        raise the first exception (by spawn order)."""
+        self._wg.wait()
+        for e in self._errs:
+            if e is not None:
+                raise e
+        return list(self._results)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        # Structured concurrency: always wait for the spawned tasks on exit.  If the
+        # body raised, let THAT propagate (don't mask it); else propagate the first
+        # task error.
+        self._wg.wait()
+        if exc_type is None:
+            for e in self._errs:
+                if e is not None:
+                    raise e
+        return False                     # never suppress a body exception
+
+
+def nursery():
+    """A trio-style nursery: `with sync.nursery() as n: n.spawn(...)` waits for all
+    spawned goroutines on block exit and propagates the first error."""
+    return JoinSet()

@@ -208,19 +208,20 @@ def test_timed_wake_vs_timeout_exactly_once():
             def waiter():
                 t0 = time.monotonic()
                 r = ev.wait(dl)
-                box["r"] = r
-                box["dt"] = time.monotonic() - t0
-                resumes[i] += 1
+                box["rd"] = (r, time.monotonic() - t0)   # single atomic write (no
+                resumes[i] += 1                          # torn read of r vs dt)
 
             runloom.go(waiter)
             runloom.sleep(dl * (0.5 + (i % 7) / 7.0))
             ev.set()
             runloom.sleep(0.003)
-            r = box.get("r")
-            if r is None:
+            rd = box.get("rd")
+            if rd is None:
                 bad[0] += 1                            # never resumed
-            elif r is False and box.get("dt", 0) < dl * 0.7:
-                bad[0] += 1                            # premature timeout
+            else:
+                r, dt = rd
+                if r is False and dt < dl * 0.7:
+                    bad[0] += 1                        # premature timeout
 
         for i in range(rounds):
             one(i)
