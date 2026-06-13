@@ -884,6 +884,85 @@ int runloom_coro_prewarm(size_t stack_size, int n, int background)
 #endif
 }
 
+/* Continuous background prewarm daemon: keeps the GLOBAL depot topped to `target`
+ * so there is ALWAYS a backlog of ready stacks (refilling as a spawn burst drains
+ * it -- unlike the one-shot runloom_coro_prewarm above).  One daemon per process;
+ * runloom_coro_prewarm_keep starts it (or just RE-TARGETS a running one), and
+ * runloom_coro_prewarm_stop halts + joins it.  It only mmaps while the depot is
+ * BELOW target, in small batches that yield the mmap_lock between them; once the
+ * backlog is full it idles (no syscalls, no contention).  A single daemon thread
+ * cannot out-pace 8 hubs draining the pool under SUSTAINED high spawn -- it tops
+ * up during lulls, which is what a "ready backlog" wants. */
+#if !defined(_WIN32) && (defined(RUNLOOM_HAVE_FCONTEXT) || defined(RUNLOOM_HAVE_UCONTEXT))
+static runloom_thread_t runloom_prewarm_daemon_thread;
+static int    runloom_prewarm_daemon_running = 0;   /* atomic: a daemon exists  */
+static int    runloom_prewarm_daemon_stop    = 0;   /* atomic: asked to stop    */
+static int    runloom_prewarm_daemon_target  = 0;   /* atomic: desired depth    */
+static size_t runloom_prewarm_daemon_size    = 0;   /* fixed before thread start */
+
+static void *runloom_prewarm_daemon_main(void *arg)
+{
+    (void)arg;
+    while (!__atomic_load_n(&runloom_prewarm_daemon_stop, __ATOMIC_ACQUIRE)) {
+        int target = __atomic_load_n(&runloom_prewarm_daemon_target, __ATOMIC_RELAXED);
+        int cur;
+        runloom_mutex_lock(&runloom_global_stack_lock);
+        cur = runloom_global_stack_n;
+        runloom_mutex_unlock(&runloom_global_stack_lock);
+        if (cur < target) {
+            int want = target - cur;
+            if (want > 256) want = 256;                 /* small batch */
+            runloom_stack_prewarm_global(runloom_prewarm_daemon_size, want);
+            runloom_sleep_ns(200LL * 1000);             /* 200us: yield mmap_lock */
+        } else {
+            runloom_sleep_ns(5LL * 1000 * 1000);        /* 5ms: backlog full, idle */
+        }
+    }
+    return NULL;
+}
+
+void runloom_coro_prewarm_stop(void)
+{
+    if (__atomic_load_n(&runloom_prewarm_daemon_running, __ATOMIC_ACQUIRE) == 0)
+        return;
+    __atomic_store_n(&runloom_prewarm_daemon_stop, 1, __ATOMIC_RELEASE);
+    runloom_thread_join(runloom_prewarm_daemon_thread);
+    __atomic_store_n(&runloom_prewarm_daemon_running, 0, __ATOMIC_RELEASE);
+}
+
+int runloom_coro_prewarm_keep(size_t stack_size, int target)
+{
+    if (target <= 0) { runloom_coro_prewarm_stop(); return 0; }
+    /* Retarget first so an already-running daemon picks it up immediately. */
+    __atomic_store_n(&runloom_prewarm_daemon_target, target, __ATOMIC_RELAXED);
+    if (__atomic_exchange_n(&runloom_prewarm_daemon_running, 1, __ATOMIC_ACQ_REL) == 1)
+        return 0;                                        /* already running */
+    runloom_prewarm_daemon_size =
+        runloom_round_to_page(stack_size < 4096 ? 4096 : stack_size);
+    __atomic_store_n(&runloom_prewarm_daemon_stop, 0, __ATOMIC_RELEASE);
+    if (runloom_thread_create(&runloom_prewarm_daemon_thread,
+                              runloom_prewarm_daemon_main, NULL) != 0) {
+        __atomic_store_n(&runloom_prewarm_daemon_running, 0, __ATOMIC_RELEASE);
+        return -1;
+    }
+    return 0;
+}
+
+/* fork() child: the daemon thread did NOT survive, but the flags were copied.
+ * Zero them (NO join -- the thread is gone) so a later keep() can restart and a
+ * later stop() doesn't join a dead handle. */
+void runloom_coro_prewarm_reset_after_fork(void)
+{
+    __atomic_store_n(&runloom_prewarm_daemon_running, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&runloom_prewarm_daemon_stop, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&runloom_prewarm_daemon_target, 0, __ATOMIC_RELAXED);
+}
+#else
+int  runloom_coro_prewarm_keep(size_t stack_size, int target) { (void)stack_size; (void)target; return 0; }
+void runloom_coro_prewarm_stop(void) { }
+void runloom_coro_prewarm_reset_after_fork(void) { }
+#endif
+
 /* ================================================================== */
 /* Backend: fcontext (inline asm)                                     */
 /* ================================================================== */

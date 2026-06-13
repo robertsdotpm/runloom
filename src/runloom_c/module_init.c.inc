@@ -30,6 +30,15 @@ static PyMethodDef module_methods[] = {
      "ahead of demand); background=False runs synchronously and returns the "
      "count retained.  Bounded by the depot cap -- set RUNLOOM_STACK_DEPOT_CAP "
      "near the target for a large prewarm."},
+    {"prewarm_keep", (PyCFunction)m_prewarm_keep, METH_VARARGS | METH_KEYWORDS,
+     "prewarm_keep(target, stack_size=524288) -> int: start (or re-target) a "
+     "background daemon that CONTINUOUSLY keeps the global stack depot topped to "
+     "`target` ready stacks, refilling as spawns drain it and idling when full -- "
+     "so a burst always finds a backlog.  One daemon per process; target<=0 stops "
+     "it.  Bounded by RUNLOOM_STACK_DEPOT_CAP.  Returns 0 ok / -1 if it couldn't "
+     "start.  Call prewarm_stop() to halt it."},
+    {"prewarm_stop", m_prewarm_stop, METH_NOARGS,
+     "prewarm_stop(): stop and join the continuous prewarm daemon (no-op if none)."},
     {"tcp_recv", m_tcp_recv, METH_VARARGS,
      "tcp_recv(fd, writable_buffer, n, flags=0) -> bytes_received.  "
      "C-level recv into a pre-allocated buffer with cooperative "

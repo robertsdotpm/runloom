@@ -110,6 +110,16 @@ int runloom_coro_warmup(size_t stack_size, int n);
  * for a large prewarm.  No-op on the Windows Fibers backend. */
 int runloom_coro_prewarm(size_t stack_size, int n, int background);
 
+/* CONTINUOUS prewarm daemon: keep the GLOBAL depot topped to `target` stacks so a
+ * spawn burst always finds a ready backlog (it refills as the pool drains, idling
+ * when full).  One daemon per process: _keep starts it or re-targets a running
+ * one (target<=0 stops it); _stop halts + joins it.  Returns 0 ok / -1 if the
+ * thread couldn't start.  No-op on Windows Fibers.  _reset_after_fork zeroes the
+ * (copied, threadless) daemon state in a fork child. */
+int  runloom_coro_prewarm_keep(size_t stack_size, int target);
+void runloom_coro_prewarm_stop(void);
+void runloom_coro_prewarm_reset_after_fork(void);
+
 /* Drop the physical page frames of c's currently-idle (low) stack
  * region without releasing the stack -- the coro stays bound to its
  * fiber.  The scheduler calls this when a g parks on a waiter

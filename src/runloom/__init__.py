@@ -95,6 +95,8 @@ go_noyield = _core.go_noyield          # faster spawn for run-to-completion work
 warmup = _core.warmup                  # pre-allocate the per-thread stack pool
 prewarm = _core.prewarm                # opt-in: pre-fill the GLOBAL stack depot
                                        # (call it yourself; never on by default)
+prewarm_keep = _core.prewarm_keep      # opt-in: CONTINUOUS background top-up daemon
+prewarm_stop = _core.prewarm_stop      # stop the continuous daemon
 thread_init = _core.thread_init
 thread_fini = _core.thread_fini
 preempt_init = _core.preempt_init
@@ -160,7 +162,8 @@ from . import aio      # noqa: E402,F401  – run async/await on the scheduler
 __all__ = [
     # scheduler
     "go", "run", "sleep", "yield_now", "yield_", "blocking", "current",
-    "Goroutine", "go_noyield", "warmup", "prewarm", "thread_init", "thread_fini",
+    "Goroutine", "go_noyield", "warmup", "prewarm", "prewarm_keep", "prewarm_stop",
+    "thread_init", "thread_fini",
     "preempt_init", "preempt_fini",
     # channels
     "Chan", "select",

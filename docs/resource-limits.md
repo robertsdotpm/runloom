@@ -117,7 +117,7 @@ These environment variables interact with the limits above:
 | `RUNLOOM_DEFAULT_STACK_SIZE` | `524288` (512 KiB) | bigger stacks → more virtual space + RSS per fiber |
 | `RUNLOOM_STACK_DEPOT_CAP` | `1024` | retained pooled stacks → **VMAs held when idle**; raise it (near your peak) only alongside `vm.max_map_count` |
 | `RUNLOOM_STACK_MADV` | `free` | `free` = lazy RSS (cheaper CPU); `dontneed` = eager RSS reclaim; `off` = keep resident |
-| `prewarm(n, stack_size, background)` | — | pre-maps `n` stacks → consumes `~2n` VMAs up front; needs `vm.max_map_count` + `RUNLOOM_STACK_DEPOT_CAP` budgeted for `n` |
+| `prewarm(n, ...)` / `prewarm_keep(target, ...)` | — | pre-maps `n`/`target` stacks → consumes `~2n` VMAs; needs `vm.max_map_count` + `RUNLOOM_STACK_DEPOT_CAP` budgeted for it (see [stack-sizing.md](stack-sizing.md#prewarming-the-stack-pool-burst-servers)) |
 
 ---
 

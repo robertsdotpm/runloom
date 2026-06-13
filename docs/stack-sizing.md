@@ -140,27 +140,84 @@ peak is real but transient -- the sentinel scan only sees what was
 still in memory at the moment we ran it.  In practice this rarely
 matters because the safety factor (4×) covers reasonable transients.
 
-## `MADV_DONTNEED` on pool release
+## Stack reclaim on pool release (`MADV_FREE`)
 
-When a fiber finishes, its stack returns to a per-thread free
-list capped at 4 096 entries.  Without `MADV_DONTNEED` that would
-mean **4 096 × stack_size** resident memory -- at the default 256 KB
-that's 1 GB just for idle pool entries.
+When a fiber finishes, its stack returns to a free list (a per-thread
+cache that overflows to a shared cross-hub depot, bounded by
+`RUNLOOM_STACK_DEPOT_CAP`, default 1024). The release path reclaims the
+stack body's physical pages so idle pool entries don't pin
+**capacity × stack_size** of RAM.
 
-The release path calls `madvise(addr, size, MADV_DONTNEED)` on
-everything except the first 4 KB (which holds the pool's
-linked-list pointer).  The kernel reclaims the page frames; the
-mapping itself stays.  Next time the stack is reused, the fiber
-faults in fresh zero pages as it writes -- same correctness as a brand
-new mmap, but no syscall.
+By **default it uses `madvise(MADV_FREE)`** (Go's scavenger choice): the
+kernel reclaims the pages lazily, only under memory pressure, and the
+page-table mappings stay intact -- so reusing the stack before the kernel
+reclaims pays **no re-fault**. Measured ~2.3× cheaper per call than
+`MADV_DONTNEED`, and ~1.8× faster wall / −26% sys-time on a fiber-churn
+workload (mass spawn+complete). The cost is *lazy* RSS: freed pages stay
+counted until pressure, so RSS can look higher than the live set.
 
-Measured: after a burst of 5 000 fibers × 1 MB stacks, RSS lands
-at ~21 MB (one page per pool entry + the fibers' actual usage,
-mostly headers).  Without `MADV_DONTNEED` that workload would hold
-~5 GB.
+Tune it with `RUNLOOM_STACK_MADV`:
 
-This is a Linux/POSIX optimisation.  On Windows (Fibers backend) the
-OS manages stacks differently -- runloom lets it.
+| value | behaviour |
+|---|---|
+| `free` (default) | lazy reclaim, cheapest CPU, RSS counted until pressure |
+| `dontneed` | eager reclaim (the old behaviour) -- tighter RSS, more CPU |
+| `off` | no reclaim -- pooled stacks stay fully resident |
+
+The first 4 KB (the pool's linked-list header) is never reclaimed. This is
+a Linux/POSIX optimisation; on Windows (Fibers backend) the OS manages
+stacks and runloom lets it. The security scrub (`RUNLOOM_STACK_SCRUB`)
+stays on `MADV_DONTNEED` for its zero-on-next-touch guarantee.
+
+## Prewarming the stack pool (burst servers)
+
+A *cold* spawn burst of **long-lived** fibers (e.g. 200k clients connecting
+at once, each spawning a handler that stays alive) pays one `mmap` per
+fiber on the latency-critical path, because the pool can't refill from
+completions. Prewarming moves that `mmap` cost **off the spawn path** so the
+burst pops ready stacks instead. Measured: a 200k long-lived burst spawned
+in ~5.9 s cold vs ~1.6 s prewarmed (**~3.7×**).
+
+> Prewarming only helps **long-lived** bursts. For spawn-and-complete churn
+> the pool self-refills from completions, so prewarming is a wash. And it is
+> **opt-in** -- nothing prewarms unless you call one of these.
+
+Three forms, smallest commitment first:
+
+```python
+import runloom
+
+# 1. One-shot, per-hub (synchronous): fills the CALLING thread's cache.
+runloom.warmup(50_000, stack_size=512 * 1024)
+
+# 2. One-shot, GLOBAL (cross-hub).  background=True (default) fills it on a
+#    detached helper thread and returns instantly -- prefetch ahead of demand.
+runloom.prewarm(200_000)                       # returns 0 immediately
+runloom.prewarm(200_000, background=False)     # blocks; returns count retained
+
+# 3. CONTINUOUS daemon: keeps the global pool topped to `target`, refilling as
+#    bursts drain it and idling when full -- "always a backlog ready".
+runloom.prewarm_keep(200_000)                  # start (or re-target) the daemon
+# ... serve traffic; bursts always find a ready backlog ...
+runloom.prewarm_stop()                         # halt + join the daemon
+```
+
+**Sizing:** prewarmed/pooled stacks are bounded by the depot cap, so raise it
+near your target -- and budget `vm.max_map_count` for the extra VMAs (each
+prewarmed stack costs ~2 VMAs; freshly-mapped stacks are lazy, so **0 RSS until
+first touched**):
+
+```sh
+RUNLOOM_STACK_DEPOT_CAP=220000 python your_server.py   # see resource-limits.md
+```
+
+Notes: `prewarm_keep` runs **one daemon per process** (a second call just
+re-targets it; `target<=0` stops it). The daemon only `mmap`s while below
+target, in small batches that yield the `mmap_lock`, so it idles once the
+backlog is full -- a single daemon can't out-pace many hubs under *sustained*
+high spawn, but it tops up during lulls, which is what a ready backlog wants.
+Call `prewarm_stop()` on shutdown. The daemon does not survive `fork()` (a
+child starts with none).
 
 ## Per-call override
 

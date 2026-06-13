@@ -337,6 +337,7 @@ void runloom_mn_reset_after_fork(void)
     __atomic_store_n(&runloom_global_runq_len, 0, __ATOMIC_RELAXED);
     runloom_tls_hub = NULL;        /* the surviving thread is no longer a hub */
     runloom_tls_current_g = NULL;
+    runloom_coro_prewarm_reset_after_fork();   /* daemon thread didn't survive */
 }
 
 /* Internal core: pick hub, alloc g, set up coro, submit, bump counters.
