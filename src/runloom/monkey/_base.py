@@ -511,7 +511,17 @@ class _ThreadPoolBackend(_BlockingBackend):
     def submit(self, fn, args, kwargs):
         if kwargs is None:
             kwargs = {}
-        p = _Parker()
+        # Inmem parker (0 fds, woken by g.wake()) instead of FD-mode (pipe pair +
+        # epoll ADD/DEL + write/read + fd close per offload).  At high offload
+        # concurrency the 64-slot pipe pool can't keep up, so each offload churned
+        # ~10 syscalls -> offload throughput capped at ~52K/s (=~150us/op for a 1us
+        # syscall), which made file-offload-heavy workloads (p17 @ 1M) blow the
+        # drain watchdog.  The inmem park passes foreign_wakeable=True, which is
+        # built precisely for a foreign blockpool worker's g.wake() to wake the
+        # parked fiber without racing run() exit.  submit() is only reached from a
+        # fiber (_blocking_call runs inline off-fiber), so current_g() is valid.
+        # RUNLOOM_BLOCKPOOL_FD=1 forces the old FD-mode parker (escape hatch).
+        p = _Parker(inmem=(os.environ.get("RUNLOOM_BLOCKPOOL_FD") != "1"))
         # box = [result, exception, done].  The done flag is essential:
         # a pooled _Parker can carry a stale wake byte and runloom_c.wait_fd
         # can wake spuriously, so a single park() may return BEFORE the
