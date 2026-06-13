@@ -148,6 +148,8 @@ fibers = inspect.fibers
 dump = inspect.dump
 hubs = inspect.hubs
 
+from ._optimize import optimize  # noqa: E402,F401  – one call, named trade-offs
+
 # Feature packages, imported eagerly so that `import runloom` is the ONLY
 # import statement you ever need.  Importing them has no side effects -- in
 # particular monkey patches the stdlib only when you call runloom.monkey.patch().
@@ -163,6 +165,7 @@ __all__ = [
     # scheduler
     "go", "run", "sleep", "yield_now", "yield_", "blocking", "current",
     "Goroutine", "go_noyield", "warmup", "prewarm", "prewarm_keep", "prewarm_stop",
+    "optimize",
     "thread_init", "thread_fini",
     "preempt_init", "preempt_fini",
     # channels
