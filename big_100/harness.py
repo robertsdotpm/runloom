@@ -644,6 +644,13 @@ class Harness(object):
         self.fd_base = count_fds()
 
     # ---------------- lifecycle ----------------
+    def _profile_mark(self, label):
+        """Emit an absolute CLOCK_MONOTONIC marker for correlating perf samples
+        with the drain/teardown phases (env-gated; no-op normally)."""
+        if os.environ.get("RUNLOOM_PROFILE_MARKS"):
+            sys.stderr.write("PROFILE_MARK {0} {1:.6f}\n".format(label, REAL_MONO()))
+            sys.stderr.flush()
+
     def mark_done(self):
         """Signal workers to stop and unblock parked servers by closing
         the registered listeners/sockets."""
@@ -728,12 +735,15 @@ class Harness(object):
                 self.exit_code = EXIT_ERROR
                 return  # let deadline/drain finish naturally
             self.wait_for_deadline()
+            self._profile_mark("deadline")     # drain begins (workers told to stop)
             self.mark_done()
             self.drain_workers()
+            self._profile_mark("drain_done")   # worker goroutines returned
 
         runloom.monkey.patch()
         try:
             runloom.run(self.hubs, root)
+            self._profile_mark("run_returned")  # mn_run join + mn_fini complete
         except SystemExit:
             raise
         except BaseException as exc:        # noqa: BLE001

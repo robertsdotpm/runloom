@@ -226,11 +226,35 @@ static RUNLOOM_TLS int    runloom_tls_stack_pool_n = 0;
  * stays lock-free.  POSIX-only block, so the mutex can be statically inited. */
 #define RUNLOOM_STACK_TLS_CAP      64    /* per-thread cache high-water */
 #define RUNLOOM_STACK_TLS_KEEP     32    /* keep this many local on a flush */
-#define RUNLOOM_STACK_GLOBAL_CAP   1024  /* depot bound; beyond -> munmap */
+#define RUNLOOM_STACK_GLOBAL_CAP   1024  /* default depot bound; beyond -> munmap */
 #define RUNLOOM_STACK_REFILL_BATCH 32    /* pulled from depot on underflow */
 static runloom_mutex_t runloom_global_stack_lock = RUNLOOM_MUTEX_STATIC_INIT;
 static void **runloom_global_stack_pool = NULL;
 static int    runloom_global_stack_n = 0;
+
+/* The depot cap bounds retained cross-hub mappings (past it -> munmap, which on
+ * a drain BURST of N>>cap completing fibers becomes a munmap+TLB-shootdown storm).
+ * 1024 is sized for BALANCED churn; a server that drains fibers in waves wants it
+ * near its live-fiber high-water-mark so the burst pools instead of unmapping.
+ * Tunable via RUNLOOM_STACK_DEPOT_CAP (in stacks).  Each retained stack costs ~2
+ * VMAs (guard+usable) + its MADV_FREE'd (lazy) pages, so raising it trades idle
+ * VMA/RSS footprint for far fewer drain munmaps.  Resolved lazily; concurrent
+ * first-callers converge on the same value (idempotent getenv+atol). */
+static int runloom_global_stack_cap_v = 0;   /* 0 = unresolved */
+static int runloom_global_stack_cap(void)
+{
+    int c = __atomic_load_n(&runloom_global_stack_cap_v, __ATOMIC_RELAXED);
+    if (c == 0) {
+        const char *e = getenv("RUNLOOM_STACK_DEPOT_CAP");
+        c = RUNLOOM_STACK_GLOBAL_CAP;
+        if (e != NULL) {
+            long v = atol(e);
+            if (v > 0 && v < (1L << 24)) c = (int)v;
+        }
+        __atomic_store_n(&runloom_global_stack_cap_v, c, __ATOMIC_RELAXED);
+    }
+    return c;
+}
 
 /* Guard page below each coroutine stack.  A push past the low end of
  * the usable region lands in this PROT_NONE page -> SIGSEGV, instead of
@@ -342,10 +366,12 @@ static void runloom_stack_flush_to_global(void)
     keep_tail[RUNLOOM_STACK_HDR_NEXT] = NULL;            /* cut local list at KEEP */
     runloom_tls_stack_pool_n = RUNLOOM_STACK_TLS_KEEP;
 
+    {
+    int cap = runloom_global_stack_cap();
     runloom_mutex_lock(&runloom_global_stack_lock);
     while (move_head != NULL) {
         void **next = (void **)move_head[RUNLOOM_STACK_HDR_NEXT];
-        if (runloom_global_stack_n < RUNLOOM_STACK_GLOBAL_CAP) {
+        if (runloom_global_stack_n < cap) {
             move_head[RUNLOOM_STACK_HDR_NEXT] = (void *)runloom_global_stack_pool;
             runloom_global_stack_pool = move_head;
             runloom_global_stack_n++;
@@ -356,6 +382,7 @@ static void runloom_stack_flush_to_global(void)
         move_head = next;
     }
     runloom_mutex_unlock(&runloom_global_stack_lock);
+    }
 }
 
 /* TEST (RUNLOOM_STACK_ARENA=1): carve every stack as a slice of ONE big
@@ -472,6 +499,74 @@ static void *runloom_stack_acquire(size_t size)
     return runloom_stack_map_guarded(size);       /* truly out of stock */
 }
 
+/* RSS reclaim of a POOLED (about-to-be-reused) stack body.  Prefer MADV_FREE
+ * (Linux 4.5+), Go's scavenger choice (sysUnused).
+ *
+ * MEASURED, not assumed: MADV_FREE is ~2.3x cheaper per call than MADV_DONTNEED
+ * on a multi-hub process (25us vs 59us / 256KB).  The win is NOT fewer TLB
+ * shootdowns -- both flush the range's TLB on a multi-thread mm, and the
+ * shootdown sample count was flat in profiling.  The win is that MADV_FREE skips
+ * the EAGER page reclaim AND, if the stack is reacquired before the kernel
+ * reclaims under pressure, the pages revalidate with NO re-fault (MADV_DONTNEED
+ * zaps the pages, forcing a zero-fill fault on the next touch).  On a stack-churn
+ * workload (1M bare fibers spawned+completed) this cut wall ~1.8x and sys-time
+ * ~26%.  On a socket-I/O-bound workload (p01) it is negligible -- stack reclaim
+ * is a rounding error against the socket syscalls there.  So this helps mass
+ * fiber spawn/complete, not request/response servers.
+ *
+ * Probed lazily: under GIL-off the first few concurrent hubs may each probe
+ * MADV_FREE on their OWN region and store the flag (RELAXED) -- harmless, they
+ * converge on the same value.  Falls back to MADV_DONTNEED where MADV_FREE is
+ * unsupported.  Env RUNLOOM_STACK_MADV forces it: "free" (default), an
+ * unrecognized value also taking the default; "dontneed" (eager reclaim /
+ * tighter RSS / the old behaviour), or "off" (no reclaim -- keep pages resident).
+ * Used for BOTH the pool release path AND the park idle-sweep
+ * (runloom_coro_madvise_idle).  The only cost vs DONTNEED is lazy RSS: pages stay
+ * counted until pressure -- set RUNLOOM_STACK_MADV=dontneed if RSS metrics matter
+ * more than the spawn/complete CPU.
+ *
+ * Unlike MADV_DONTNEED, MADV_FREE does NOT zero the pages -- a pooled stack keeps
+ * the prior fiber's bytes until overwritten.  Same trust domain, and the security
+ * scrub (RUNLOOM_STACK_SCRUB) is a SEPARATE path that deliberately stays on
+ * MADV_DONTNEED for its zero-on-next-touch guarantee. */
+static int runloom_stack_madv_flag = -1;      /* -1 unknown; 0 = off; else flag */
+static void runloom_stack_madv_reclaim(void *addr, size_t len)
+{
+#if defined(__linux__)
+    int flag = __atomic_load_n(&runloom_stack_madv_flag, __ATOMIC_RELAXED);
+    if (flag == -1) {
+        const char *e = getenv("RUNLOOM_STACK_MADV");
+        if (e != NULL && strcmp(e, "off") == 0) {
+            flag = 0;
+        } else if (e != NULL && strcmp(e, "dontneed") == 0) {
+#if defined(MADV_DONTNEED)
+            flag = MADV_DONTNEED;
+#else
+            flag = 0;
+#endif
+        } else {
+#if defined(MADV_FREE)
+            /* Default: probe MADV_FREE on this first call (EINVAL => kernel too
+             * old).  On success the region is already reclaimed -> remember + return. */
+            if (madvise(addr, len, MADV_FREE) == 0) {
+                __atomic_store_n(&runloom_stack_madv_flag, MADV_FREE, __ATOMIC_RELAXED);
+                return;
+            }
+#endif
+#if defined(MADV_DONTNEED)
+            flag = MADV_DONTNEED;
+#else
+            flag = 0;
+#endif
+        }
+        __atomic_store_n(&runloom_stack_madv_flag, flag, __ATOMIC_RELAXED);
+    }
+    if (flag != 0) (void)madvise(addr, len, flag);
+#else
+    (void)addr; (void)len;
+#endif
+}
+
 static void runloom_stack_release(void *stack, size_t size)
 {
     void **hdr;
@@ -482,11 +577,11 @@ static void runloom_stack_release(void *stack, size_t size)
         size_t slot  = guard + size;
         char  *base  = __atomic_load_n(&runloom_arena_base, __ATOMIC_ACQUIRE);
         size_t start = ((size_t)((char *)stack - guard - base)) / slot;
-#if defined(MADV_DONTNEED)
-        long ps = sysconf(_SC_PAGESIZE);
-        size_t page = (ps > 0) ? (size_t)ps : (size_t)4096;
-        if (size > page) (void)madvise((char *)stack + page, size - page, MADV_DONTNEED);
-#endif
+        {
+            long ps = sysconf(_SC_PAGESIZE);
+            size_t page = (ps > 0) ? (size_t)ps : (size_t)4096;
+            if (size > page) runloom_stack_madv_reclaim((char *)stack + page, size - page);
+        }
         runloom_arena_free(start, 1);     /* return the slot for reuse */
         return;
     }
@@ -496,19 +591,19 @@ static void runloom_stack_release(void *stack, size_t size)
      * to skip the first page so the pool linkage survives -- the header
      * lives in the first 16 bytes of the stack.
      *
-     * Net effect: pool entries hold 4 KB resident each instead of the
-     * full stack_size.  At 4096 pool entries that's 16 MB instead of
-     * (4096 * stack_size).  Across pool churn, the deepest-used pages
-     * keep faulting fresh, so RSS scales with active gs, not capacity. */
-#if defined(MADV_DONTNEED)
+     * Net effect with MADV_DONTNEED: pool entries hold 4 KB resident each
+     * instead of the full stack_size.  With the default MADV_FREE the reclaim is
+     * LAZY (pages stay counted until pressure, then drop) -- we trade a little
+     * apparent RSS for killing the per-release synchronous TLB shootdown, exactly
+     * like Go.  Either way the deepest-used pages re-fault/re-validate on reuse,
+     * so steady-state RSS still tracks active gs, not capacity. */
     {
         long ps = sysconf(_SC_PAGESIZE);
         size_t page = (ps > 0) ? (size_t)ps : (size_t)4096;
         if (size > page) {
-            (void)madvise((char *)stack + page, size - page, MADV_DONTNEED);
+            runloom_stack_madv_reclaim((char *)stack + page, size - page);
         }
     }
-#endif
     hdr = (void **)stack;
     hdr[RUNLOOM_STACK_HDR_NEXT] = (void *)runloom_tls_stack_pool;
     hdr[RUNLOOM_STACK_HDR_SIZE] = (void *)size;
@@ -1307,7 +1402,10 @@ void runloom_coro_madvise_idle(runloom_coro_t *c)
         lo = base + page;                       /* keep first page (pool hdr) */
         hi = sp & ~(uintptr_t)(page - 1);       /* page-align DOWN below sp */
         if (hi > lo) {
-            (void)madvise((void *)lo, (size_t)(hi - lo), MADV_DONTNEED);
+            /* MADV_FREE (default): ~2.3x cheaper than DONTNEED and no re-fault if
+             * this parked fiber resumes before reclaim -- the request/response
+             * recv-park case.  Env RUNLOOM_STACK_MADV=dontneed forces eager. */
+            runloom_stack_madv_reclaim((void *)lo, (size_t)(hi - lo));
         }
     }
 #else
