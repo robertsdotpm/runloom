@@ -118,9 +118,21 @@ def test_wake_before_park_race_stress():
                 done[0] = True
 
             runloom.go(waiter)
+            # Wait until the waiter has recorded its handle.  The waiter may be
+            # round-robined onto THIS goroutine's OWN hub, in which case it
+            # cannot start until we yield -- a bare non-yielding spin then races
+            # async preemption, and on a fast core (arm64) the spin can give up
+            # before the waiter ever runs, KeyError on hb["g"], and strand a
+            # never-woken parker (run() hangs joining on it).  Spin first (so the
+            # wake still lands in the pre-park window when the waiter is already
+            # running on another hub), and yield only if it is slow to appear.
+            # The wake-before-park race this test guards is unchanged: once the
+            # handle is visible we wake immediately, just before park() commits.
             spins = 0
-            while "g" not in hb and spins < 1000000:   # busy-wait, NO yield
+            while "g" not in hb:
                 spins += 1
+                if spins % 4096 == 0:
+                    runloom.sleep(0)                    # yield: let it start
             hb["g"].wake()                              # often lands before park()
             for _ in range(200):
                 if done[0]:
