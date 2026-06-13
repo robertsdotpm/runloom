@@ -38,6 +38,7 @@ _GOAL_ENV = {
         "RUNLOOM_TCPCONN_IOURING_THRESHOLD": "512",
         "RUNLOOM_BLOCKPOOL_WORKERS":         "16",      # more blocking-offload workers
         "RUNLOOM_GON_BULK":                  "1",       # bulk-arena spawn for big go_n
+        "RUNLOOM_PREWARM_KEEP":              "1",       # continuous depot top-up daemon
         # depot pool size is now AUTO -- it sizes itself to the live-fiber
         # high-water (vm.max_map_count- and RAM-clamped), so no static cap here.
     },
