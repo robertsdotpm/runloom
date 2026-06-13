@@ -156,6 +156,9 @@ static RUNLOOM_THREAD_RET runloom_sysmon_main(void *arg)
 #endif
             }
         }
+        /* Piggyback the depot auto-cap recompute on the watchdog tick: decay the
+         * live-stack watermark, resize the pool cap.  Cheap, off the hot path. */
+        runloom_stack_autocap_tick();
         runloom_sleep_ns(runloom_sysmon_tick_ns);
     }
     free(w_seq);

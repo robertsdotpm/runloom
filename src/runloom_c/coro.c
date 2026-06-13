@@ -14,6 +14,7 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>      /* /proc reads for the depot auto-cap (init only) */
 
 /* Recycle-hygiene checker (security): runloom pools and reuses fiber stacks
  * in raw mmap'd memory that ASan treats as always-valid, so a use-after-
@@ -232,28 +233,50 @@ static runloom_mutex_t runloom_global_stack_lock = RUNLOOM_MUTEX_STATIC_INIT;
 static void **runloom_global_stack_pool = NULL;
 static int    runloom_global_stack_n = 0;
 
-/* The depot cap bounds retained cross-hub mappings (past it -> munmap, which on
- * a drain BURST of N>>cap completing fibers becomes a munmap+TLB-shootdown storm).
- * 1024 is sized for BALANCED churn; a server that drains fibers in waves wants it
- * near its live-fiber high-water-mark so the burst pools instead of unmapping.
- * Tunable via RUNLOOM_STACK_DEPOT_CAP (in stacks).  Each retained stack costs ~2
- * VMAs (guard+usable) + its MADV_FREE'd (lazy) pages, so raising it trades idle
- * VMA/RSS footprint for far fewer drain munmaps.  Resolved lazily; concurrent
- * first-callers converge on the same value (idempotent getenv+atol). */
-static int runloom_global_stack_cap_v = 0;   /* 0 = unresolved */
+/* The depot cap bounds retained cross-hub mappings (past it -> munmap, a
+ * TLB-shootdown storm on a drain burst).  A static 1024 is wrong for runloom's
+ * scale: a server with N>>1024 live fibers wants the pool near its working set so
+ * completions POOL instead of munmap-churning.  Rather than make the user type a
+ * number, the DEFAULT is AUTO: the cap sizes itself to the live-stack high-water-
+ * mark, recomputed once per sysmon tick (runloom_stack_autocap_tick below).
+ *
+ * HONEST BOUND: this caps the depot's VMA (mapping) count to ~1.5x the live-stack
+ * high-water, clamped to SAFE_MAX = min(VMA budget, RAM budget) and squeezed so
+ * live + pool VMAs stay under vm.max_map_count.  It does NOT bound RSS directly --
+ * idle entries hold MADV_FREE'd (reclaimable-under-pressure) pages; only
+ * RUNLOOM_STACK_MADV=off keeps them resident.  An explicit RUNLOOM_STACK_DEPOT_CAP
+ * forces a static cap (override wins). */
+static int  runloom_stack_cap_mode      = -1;  /* -1 unresolved, 0 static(env), 1 auto */
+static int  runloom_stack_cap_static    = 0;   /* the env value, when mode==static */
+static int  runloom_stack_cap_cached    = 0;   /* AUTO: recomputed per tick (0 = no tick yet) */
+static int  runloom_stack_live          = 0;   /* atomic: depot-backed stacks IN USE */
+static long runloom_stack_live_hwm      = 0;   /* atomic: decaying live high-water */
+static long runloom_stack_max_map_count = 0;   /* read once at init (0 = unknown) */
+static int  runloom_stack_safe_max      = 8192;/* min(VMA, RAM) ceiling, resolved at init */
+static long runloom_stack_autocap_last_ns = 0; /* wall-clock decay timestamp */
+
 static int runloom_global_stack_cap(void)
 {
-    int c = __atomic_load_n(&runloom_global_stack_cap_v, __ATOMIC_RELAXED);
-    if (c == 0) {
+    int mode = __atomic_load_n(&runloom_stack_cap_mode, __ATOMIC_RELAXED);
+    if (mode < 0) {
         const char *e = getenv("RUNLOOM_STACK_DEPOT_CAP");
-        c = RUNLOOM_STACK_GLOBAL_CAP;
+        mode = 1;                                   /* default AUTO */
         if (e != NULL) {
             long v = atol(e);
-            if (v > 0 && v < (1L << 24)) c = (int)v;
+            if (v > 0 && v < (1L << 24)) {
+                runloom_stack_cap_static = (int)v;
+                mode = 0;                           /* explicit override -> static */
+            }
         }
-        __atomic_store_n(&runloom_global_stack_cap_v, c, __ATOMIC_RELAXED);
+        __atomic_store_n(&runloom_stack_cap_mode, mode, __ATOMIC_RELAXED);
     }
-    return c;
+    if (mode == 0) return runloom_stack_cap_static;
+    {
+        /* AUTO: bare atomic load -- no arithmetic/syscall on the hot lock path.
+         * 0 means sysmon hasn't ticked yet (or isn't running) -> the old default. */
+        int c = __atomic_load_n(&runloom_stack_cap_cached, __ATOMIC_RELAXED);
+        return c > 0 ? c : RUNLOOM_STACK_GLOBAL_CAP;
+    }
 }
 
 /* Guard page below each coroutine stack.  A push past the low end of
@@ -489,7 +512,15 @@ static void *runloom_stack_acquire(size_t size)
 {
     if (runloom_stack_arena_on()) {
         void *a = runloom_stack_arena_carve(size);
-        if (a != NULL) return a;
+        if (a != NULL) return a;                 /* arena stacks are NOT depot-backed */
+    }
+    /* Count this depot-backed stack as live and bump the watermark the auto-cap
+     * sizes to.  Racy max is fine (a missed update is caught next sysmon tick). */
+    {
+        int live = __atomic_add_fetch(&runloom_stack_live, 1, __ATOMIC_RELAXED);
+        long h = __atomic_load_n(&runloom_stack_live_hwm, __ATOMIC_RELAXED);
+        if ((long)live > h)
+            __atomic_store_n(&runloom_stack_live_hwm, (long)live, __ATOMIC_RELAXED);
     }
     void *s = runloom_stack_pop_local(size);     /* lock-free fast path */
     if (s != NULL) return s;
@@ -583,8 +614,10 @@ static void runloom_stack_release(void *stack, size_t size)
             if (size > page) runloom_stack_madv_reclaim((char *)stack + page, size - page);
         }
         runloom_arena_free(start, 1);     /* return the slot for reuse */
-        return;
+        return;                           /* arena: not counted in runloom_stack_live */
     }
+    /* This depot-backed stack is no longer live (balances the acquire fetch_add). */
+    __atomic_fetch_sub(&runloom_stack_live, 1, __ATOMIC_RELAXED);
     /* Drop physical pages back to the OS *before* writing the header.
      * MADV_DONTNEED keeps the VA reservation but lets the kernel reclaim
      * the page frames; next touch re-faults a fresh zero page.  We have
@@ -962,6 +995,111 @@ int  runloom_coro_prewarm_keep(size_t stack_size, int target) { (void)stack_size
 void runloom_coro_prewarm_stop(void) { }
 void runloom_coro_prewarm_reset_after_fork(void) { }
 #endif
+
+/* ---------------- depot auto-cap: init / per-tick / reset ----------------
+ * All state is file-static above; sysmon drives the tick, mn_init/_fini/_fork
+ * the lifecycle.  Keeping it here (not cross-TU) avoids extern atomics: the
+ * getter and the acquire/release counters all touch the same file-statics. */
+
+/* Resolve SAFE_MAX once: min(VMA budget, RAM budget).  Conservative -- the cap is
+ * only a ceiling; the live-set squeeze in the tick is what tracks the real load. */
+void runloom_stack_autocap_init(void)
+{
+    long mmc = 0, memkb = 0;
+    FILE *f = fopen("/proc/sys/vm/max_map_count", "r");
+    if (f != NULL) { if (fscanf(f, "%ld", &mmc) != 1) mmc = 0; fclose(f); }
+    __atomic_store_n(&runloom_stack_max_map_count, mmc, __ATOMIC_RELAXED);
+    f = fopen("/proc/meminfo", "r");
+    if (f != NULL) {
+        char line[256];
+        while (fgets(line, sizeof line, f) != NULL)
+            if (sscanf(line, "MemTotal: %ld kB", &memkb) == 1) break;
+        fclose(f);
+    }
+    {
+        /* VMA budget: spend at most 40% of vm.max_map_count on the pool (2 VMAs/stack). */
+        long vma_based = (mmc > 0) ? (mmc * 40 / 100 / 2) : 8192;
+        /* RAM budget: ~12% of RAM, ~64 KiB resident estimate per pooled stack.  This is
+         * what actually bounds bytes on a raised-max_map_count host (where vma_based is
+         * vestigial), so AUTO can never pool hundreds of GB. */
+        long ram_based = 8192;
+        if (memkb > 0)
+            ram_based = (long)((double)memkb * 1024.0 * 0.12 / (64.0 * 1024.0));
+        long sm = vma_based < ram_based ? vma_based : ram_based;
+        if (sm < RUNLOOM_STACK_GLOBAL_CAP) sm = RUNLOOM_STACK_GLOBAL_CAP;
+        if (sm > (1L << 24)) sm = (1L << 24);
+        __atomic_store_n(&runloom_stack_safe_max, (int)sm, __ATOMIC_RELAXED);
+    }
+    __atomic_store_n(&runloom_stack_autocap_last_ns, 0, __ATOMIC_RELAXED);
+}
+
+/* Once per sysmon tick: wall-clock-decay the watermark, recompute the cached cap.
+ * Wall-clock (not per-tick) decay makes retention independent of RUNLOOM_SYSMON_MS.
+ *
+ * Design rationale (validated against jemalloc/Go prior art -- read before "fixing"):
+ *  - TAU controls how long a recent burst's pool stays warm, i.e. it trades
+ *    re-mmap/fault churn on the NEXT burst against idle VMA headroom.  It is NOT a
+ *    purge pacer: we MADV_FREE once at release and the tick issues ZERO syscalls,
+ *    so jemalloc's dirty_decay_ms=10s (which paces madvise volume) is the wrong
+ *    axis -- do not anchor TAU to it, and never re-set a jemalloc decay_ms per tick
+ *    (that forces a synchronous bulk-purge storm).
+ *  - The tick does no work that scales with reclaimed bytes, so Go's CPU-budgeted
+ *    PI-controller scavenger is unnecessary; a fixed 10ms scalar update is free.
+ *  - NO active trim: when the cap decays below the depot's size, nothing is munmap'd
+ *    here -- munmap only happens on a flush OVERFLOW, which only occurs during a
+ *    burst when the cap is high.  An idle trough is silent, so the decaying cap is
+ *    naturally immune to the cap-chatter a down-side hysteresis band would guard
+ *    (measured: a 1s-period 3k sawtooth -> 53 munmaps vs 12,980 at a static cap).
+ *  - Posture = jemalloc `muzzy`/`-1`-decay / Go pre-1.16: front-load MADV_FREE, no
+ *    timed escalation; "idle RSS looks high until pressure" is EXPECTED.  If a
+ *    cgroup memory.max / observability requirement ever appears, the prior-art
+ *    escape hatch is an OPTIONAL watchdog-driven MADV_DONTNEED 2nd stage (Go 1.16's
+ *    default) -- not a shorter TAU, not a pacer. */
+void runloom_stack_autocap_tick(void)
+{
+    long now  = (long)runloom_monotonic_ns();
+    long last = runloom_stack_autocap_last_ns;
+    int  live = __atomic_load_n(&runloom_stack_live, __ATOMIC_RELAXED);
+    long hwm  = __atomic_load_n(&runloom_stack_live_hwm, __ATOMIC_RELAXED);
+    if (last != 0 && now > last) {
+        double dt = (double)(now - last) / 1e9;     /* seconds */
+        double factor = 1.0 - dt / 1.5;             /* TAU=1.5s; linear ~ exp(-dt/TAU) */
+        if (factor < 0.0) factor = 0.0;
+        hwm = (long)((double)hwm * factor);
+    }
+    if ((long)live > hwm) hwm = live;
+    __atomic_store_n(&runloom_stack_live_hwm, hwm, __ATOMIC_RELAXED);
+    runloom_stack_autocap_last_ns = now;
+    {
+        long cap   = hwm * 3 / 2;                    /* 1.5x slack */
+        long floor = 0;                              /* active prewarm target (POSIX only) */
+#if !defined(_WIN32) && (defined(RUNLOOM_HAVE_FCONTEXT) || defined(RUNLOOM_HAVE_UCONTEXT))
+        floor = __atomic_load_n(&runloom_prewarm_daemon_target, __ATOMIC_RELAXED);
+#endif
+        long safe  = __atomic_load_n(&runloom_stack_safe_max, __ATOMIC_RELAXED);
+        long mmc   = __atomic_load_n(&runloom_stack_max_map_count, __ATOMIC_RELAXED);
+        if (floor > cap) cap = floor;               /* never below an active prewarm target */
+        if (mmc > 0) {                               /* squeeze: leave room for live VMAs */
+            long live_room = mmc / 2 - (long)live * 2;
+            if (live_room < 0) live_room = 0;
+            if (live_room < safe) safe = live_room;
+        }
+        if (cap < RUNLOOM_STACK_GLOBAL_CAP) cap = RUNLOOM_STACK_GLOBAL_CAP;
+        if (cap > safe) cap = safe;
+        if (cap < 1) cap = 1;
+        __atomic_store_n(&runloom_stack_cap_cached, (int)cap, __ATOMIC_RELAXED);
+    }
+}
+
+/* mn_fini / fork-child: forget the watermark + cached cap so the next session (or
+ * a sysmon-less / forked context) falls back to the static default, never a stale
+ * peak.  runloom_stack_live is self-correcting (acquire/release), so leave it. */
+void runloom_stack_autocap_reset(void)
+{
+    __atomic_store_n(&runloom_stack_live_hwm, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&runloom_stack_cap_cached, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&runloom_stack_autocap_last_ns, 0, __ATOMIC_RELAXED);
+}
 
 /* ================================================================== */
 /* Backend: fcontext (inline asm)                                     */

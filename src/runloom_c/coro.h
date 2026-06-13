@@ -120,6 +120,14 @@ int  runloom_coro_prewarm_keep(size_t stack_size, int target);
 void runloom_coro_prewarm_stop(void);
 void runloom_coro_prewarm_reset_after_fork(void);
 
+/* Depot auto-cap: the stack pool sizes itself to the live-stack high-water-mark
+ * (no RUNLOOM_STACK_DEPOT_CAP needed).  _init resolves SAFE_MAX once (mn_init);
+ * _tick decays the watermark + recomputes the cap (called once per sysmon tick);
+ * _reset forgets the watermark (mn_fini + fork child). */
+void runloom_stack_autocap_init(void);
+void runloom_stack_autocap_tick(void);
+void runloom_stack_autocap_reset(void);
+
 /* Drop the physical page frames of c's currently-idle (low) stack
  * region without releasing the stack -- the coro stays bound to its
  * fiber.  The scheduler calls this when a g parks on a waiter

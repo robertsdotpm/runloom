@@ -29,8 +29,10 @@ def test_memory_bundle():
 def test_throughput_bundle():
     applied = runloom.optimize("throughput")
     assert applied["RUNLOOM_TCPCONN_IOURING"] == "auto"
-    assert applied["RUNLOOM_STACK_DEPOT_CAP"] == "8192"       # bigger pool (max_map_count-safe)
-    # throughput must NOT disable reclaim (that's the keep-alive OOM footgun)
+    assert applied["RUNLOOM_GON_BULK"] == "1"
+    # pool size is AUTO now (sizes to live high-water) -- throughput sets no static cap,
+    # and must NOT disable reclaim (the keep-alive OOM footgun)
+    assert "RUNLOOM_STACK_DEPOT_CAP" not in applied
     assert "RUNLOOM_STACK_MADV" not in applied
 
 

@@ -29,7 +29,7 @@ model:
 
 | goal | buys you | spends |
 |---|---|---|
-| **`"throughput"`** | max req/s — io_uring engages early, bigger offload pool, bulk spawn, an 8× stack pool (fewer unmaps) | RAM (the bigger pool) |
+| **`"throughput"`** | max req/s — io_uring engages early, bigger offload pool, bulk spawn (the stack pool already self-sizes) | a little RAM |
 | **`"memory"`** | tightest RSS — eager page reclaim, and idle parked-fiber stack pages handed back now | some throughput (more reclaim syscalls) |
 | **`"latency"`** | sharp tail — tighter stall detection so a wedged hub recovers faster | a little CPU (extra watchdog wakeups) |
 | **`"secure"`** | hardened — recycled stacks are wiped before reuse (no leftover TLS keys / request bodies) | a little speed |
@@ -43,10 +43,12 @@ setting that can OOM-kill a RAM-tight host. The sharpest expert tricks (e.g.
 pressure-relief*) stay raw env vars with their own warnings; a friendly name
 should never hide a footgun.
 
-> **`"throughput"` at very high fiber counts:** the 8× pool holds ~16K memory
-> mappings, safe under the stock `vm.max_map_count` (65530). Past ~30K concurrent
-> fibers, raise `vm.max_map_count` (see [resource-limits](resource-limits.md)) —
-> or wait for the auto-sized pool (it sizes itself to your live-fiber high-water).
+> **The stack pool sizes itself.** Out of the box (any preset, or none) the depot
+> auto-caps to ~1.5× your live-fiber high-water-mark — clamped by `vm.max_map_count`
+> *and* RAM so it can't ENOMEM or balloon — so completions pool instead of churning,
+> with no number to set. `RUNLOOM_STACK_DEPOT_CAP` still forces a static cap if you
+> insist. (See [resource-limits](resource-limits.md) for raising `vm.max_map_count`
+> past ~30K concurrent fibers on a stock host.)
 
 ## Composing
 

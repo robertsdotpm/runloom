@@ -152,6 +152,9 @@ int runloom_mn_init(int n_threads)
         }
     }
     PyEval_RestoreThread(saved);
+    /* Resolve the depot auto-cap's SAFE_MAX (reads /proc once) before the watchdog,
+     * whose tick will recompute the cap from the live-stack watermark. */
+    runloom_stack_autocap_init();
     /* Hubs are up; start the watchdog (no-op unless RUNLOOM_SYSMON / RUNLOOM_HANDOFF
      * is set) and the rescue thread (no-op unless RUNLOOM_HANDOFF is set). */
     runloom_sysmon_spawn();
@@ -311,6 +314,9 @@ void runloom_mn_fini(void)
     /* Stand the snap back up for any later single-thread scheduler use. */
     runloom_set_per_g_tstate_mode(0);
     runloom_mn_interp = NULL;
+    /* Sysmon is joined -> no more auto-cap ticks; forget the watermark so the next
+     * session (or a sysmon-less context) falls back to the static default. */
+    runloom_stack_autocap_reset();
 }
 
 /* Reset the M:N scheduler in a forked CHILD.  After fork() only the
@@ -338,6 +344,7 @@ void runloom_mn_reset_after_fork(void)
     runloom_tls_hub = NULL;        /* the surviving thread is no longer a hub */
     runloom_tls_current_g = NULL;
     runloom_coro_prewarm_reset_after_fork();   /* daemon thread didn't survive */
+    runloom_stack_autocap_reset();             /* sysmon gone -> forget the watermark */
 }
 
 /* Internal core: pick hub, alloc g, set up coro, submit, bump counters.
