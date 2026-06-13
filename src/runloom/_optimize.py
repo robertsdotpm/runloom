@@ -51,6 +51,7 @@ _GOAL_ENV = {
     "memory": {
         "RUNLOOM_STACK_MADV":                "dontneed",  # eager reclaim, tightest RSS
         "RUNLOOM_STACK_PARK_DONTNEED":       "1",          # return idle parked-fiber pages now
+        "RUNLOOM_GROW_DOWN":                 "1",          # per-function stack learning (M:N)
     },
     "secure": {
         "RUNLOOM_STACK_SCRUB":               "1",       # wipe recycled stacks (TLS keys/bodies)
