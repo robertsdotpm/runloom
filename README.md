@@ -182,8 +182,9 @@ in-process, ~4 M coexisting goroutines, C echo handlers), clean exit:
 (The wall time is connection-setup-bound at 1 round-trip/conn, not a
 throughput number -- see Speed above for req/s.) These are **C handlers**; a
 Python handler is ~26 KB/g, so 2 M-with-Python is RAM-bound, not proven.
-Large-N needs raised kernel limits -- see [docs](https://github.com/robertsdotpm/runloom/tree/main/docs/) (`vm.max_map_count`
-is the one that bites first).
+Large-N needs raised kernel limits -- see
+[Resource limits & kernel tuning](https://github.com/robertsdotpm/runloom/blob/main/docs/resource-limits.md)
+(`vm.max_map_count` is the one that bites first).
 
 ## Stall recovery (default ON, free-threaded 3.13t)
 

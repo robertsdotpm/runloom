@@ -51,6 +51,23 @@ static PyObject *m_warmup(PyObject *self, PyObject *args)
     return PyLong_FromLong(actual);
 }
 
+static PyObject *m_prewarm(PyObject *self, PyObject *args, PyObject *kwds)
+{
+    int n;
+    Py_ssize_t stack_size = 512 * 1024;     /* match the default fiber stack */
+    int background = 1;
+    int r;
+    static char *kw[] = {"n", "stack_size", "background", NULL};
+    (void)self;
+    if (!PyArg_ParseTupleAndKeywords(args, kwds, "i|np", kw,
+                                     &n, &stack_size, &background))
+        return NULL;
+    Py_BEGIN_ALLOW_THREADS
+    r = runloom_coro_prewarm((size_t)stack_size, n, background);
+    Py_END_ALLOW_THREADS
+    return PyLong_FromLong(r);
+}
+
 /* Native C TCP recv into a writable buffer.  Equivalent to
  *   sock.recv_into(buf)  with cooperative blocking, but bypasses
  *   the Python socket.recv_into method dispatch (saves ~3-5 us per

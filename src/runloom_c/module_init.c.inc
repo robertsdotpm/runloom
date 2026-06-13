@@ -21,6 +21,15 @@ static PyMethodDef module_methods[] = {
      "stack_size bytes into the per-thread stack pool, eliminating "
      "first-spawn mmap latency for servers that know they're about "
      "to spawn N fibers.  Returns the number actually allocated."},
+    {"prewarm", (PyCFunction)m_prewarm, METH_VARARGS | METH_KEYWORDS,
+     "prewarm(n, stack_size=524288, background=True) -> int: fill the "
+     "GLOBAL cross-hub stack depot with n stacks so a later spawn BURST "
+     "pops instead of mmap'ing on the latency-critical path (measured ~4x "
+     "faster spawn for a 200k long-lived-fiber burst).  background=True "
+     "runs it on a detached OS thread and returns 0 immediately (prefetch "
+     "ahead of demand); background=False runs synchronously and returns the "
+     "count retained.  Bounded by the depot cap -- set RUNLOOM_STACK_DEPOT_CAP "
+     "near the target for a large prewarm."},
     {"tcp_recv", m_tcp_recv, METH_VARARGS,
      "tcp_recv(fd, writable_buffer, n, flags=0) -> bytes_received.  "
      "C-level recv into a pre-allocated buffer with cooperative "

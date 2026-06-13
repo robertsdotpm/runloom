@@ -596,7 +596,12 @@ static void runloom_stack_release(void *stack, size_t size)
      * LAZY (pages stay counted until pressure, then drop) -- we trade a little
      * apparent RSS for killing the per-release synchronous TLB shootdown, exactly
      * like Go.  Either way the deepest-used pages re-fault/re-validate on reuse,
-     * so steady-state RSS still tracks active gs, not capacity. */
+     * so steady-state RSS still tracks active gs, not capacity.
+     *
+     * (Tried "optimization A" -- mincore the resident depth and madvise only the
+     * touched range -- but MEASURED it as a net LOSS: with MADV_FREE the madvise
+     * of never-resident pages is already nearly free, so the per-release mincore
+     * cost +6s sys / 1M fibers for no wall win.  Reverted; left as a warning.) */
     {
         long ps = sysconf(_SC_PAGESIZE);
         size_t page = (ps > 0) ? (size_t)ps : (size_t)4096;
@@ -787,6 +792,94 @@ int runloom_coro_warmup(size_t stack_size, int n)
      * would just round-trip Create+Delete which doesn't actually
      * pre-warm anything. */
     (void)stack_size;
+    return 0;
+#endif
+}
+
+/* B (background prewarm): fill the GLOBAL depot directly with up to n stacks of
+ * `size`, so a later spawn BURST pops them instead of mmap'ing on the latency-
+ * critical path.  Measured: a cold burst of 200k long-lived fibers spent ~5.6s
+ * in spawn (one mmap each); prewarmed it was ~1.5s (~4x) -- the mmap cost moved
+ * off the spawn path.  Unlike runloom_coro_warmup (which fills the CALLING
+ * thread's TLS cache -- unreachable from a non-hub background thread), this pushes
+ * straight to the shared depot under its lock, bounded by the depot cap (so a big
+ * prewarm needs RUNLOOM_STACK_DEPOT_CAP raised near the target).  Freshly mmap'd
+ * stacks are lazy -- 0 RSS until first touched -- so a deep prewarm costs address
+ * space + VMAs, not memory.  Returns the count retained. */
+#if defined(RUNLOOM_HAVE_FCONTEXT) || defined(RUNLOOM_HAVE_UCONTEXT)
+static int runloom_stack_prewarm_global(size_t size, int n)
+{
+    int cap = runloom_global_stack_cap();
+    int made = 0;
+    while (made < n) {
+        void *s;
+        int full;
+        runloom_mutex_lock(&runloom_global_stack_lock);
+        full = (runloom_global_stack_n >= cap);
+        runloom_mutex_unlock(&runloom_global_stack_lock);
+        if (full) break;                          /* depot at cap -> stop */
+        s = runloom_stack_map_guarded(size);
+        if (s == NULL) break;                     /* mmap exhausted (ENOMEM/VMA cap) */
+        runloom_mutex_lock(&runloom_global_stack_lock);
+        if (runloom_global_stack_n < cap) {
+            ((void **)s)[RUNLOOM_STACK_HDR_NEXT] = (void *)runloom_global_stack_pool;
+            ((void **)s)[RUNLOOM_STACK_HDR_SIZE] = (void *)size;
+            runloom_global_stack_pool = (void **)s;
+            runloom_global_stack_n++;
+            made++;
+            runloom_mutex_unlock(&runloom_global_stack_lock);
+        } else {
+            runloom_mutex_unlock(&runloom_global_stack_lock);
+            runloom_stack_unmap_guarded(s, size); /* lost the cap race -> give back */
+            break;
+        }
+    }
+    return made;
+}
+#if !defined(_WIN32)
+typedef struct { size_t size; int n; } runloom_prewarm_arg_t;
+static void *runloom_prewarm_thread_main(void *arg)
+{
+    runloom_prewarm_arg_t *a = (runloom_prewarm_arg_t *)arg;
+    runloom_stack_prewarm_global(a->size, a->n);
+    free(a);
+    return NULL;
+}
+#endif
+#endif
+
+/* Public: prewarm `n` stacks into the global depot.  background=1 (default for
+ * the Python binding) runs it on a detached OS thread and returns 0 immediately
+ * -- the "tray of clean cups refilled in the background" so a later spawn burst
+ * never walks to the kernel.  background=0 runs synchronously and returns the
+ * count retained.  Returns -1 if the background thread could not be started. */
+int runloom_coro_prewarm(size_t stack_size, int n, int background)
+{
+    if (n <= 0) return 0;
+#if defined(RUNLOOM_HAVE_FCONTEXT) || defined(RUNLOOM_HAVE_UCONTEXT)
+    {
+        size_t rounded = runloom_round_to_page(stack_size < 4096 ? 4096 : stack_size);
+        if (!background) return runloom_stack_prewarm_global(rounded, n);
+#if !defined(_WIN32)
+        {
+            runloom_prewarm_arg_t *a =
+                (runloom_prewarm_arg_t *)malloc(sizeof(*a));
+            runloom_thread_t t;
+            if (a == NULL) return -1;
+            a->size = rounded; a->n = n;
+            if (runloom_thread_create(&t, runloom_prewarm_thread_main, a) != 0) {
+                free(a);
+                return -1;
+            }
+            pthread_detach(t);                    /* fire-and-forget */
+            return 0;
+        }
+#else
+        return runloom_stack_prewarm_global(rounded, n);  /* no bg thread here */
+#endif
+    }
+#else
+    (void)stack_size; (void)n; (void)background;
     return 0;
 #endif
 }

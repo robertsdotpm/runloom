@@ -102,6 +102,14 @@ void runloom_coro_thread_fini(void);
  * No-op if n <= 0.  Returns the number actually pre-allocated. */
 int runloom_coro_warmup(size_t stack_size, int n);
 
+/* Prewarm `n` stacks into the GLOBAL depot (cross-hub, unlike warmup's per-thread
+ * cache).  background=1 runs it on a detached OS thread and returns 0 immediately
+ * (the spawn burst then pops instead of mmap'ing); background=0 runs synchronously
+ * and returns the count retained (-1 if a background thread couldn't start).
+ * Bounded by the depot cap (RUNLOOM_STACK_DEPOT_CAP) -- raise it near the target
+ * for a large prewarm.  No-op on the Windows Fibers backend. */
+int runloom_coro_prewarm(size_t stack_size, int n, int background);
+
 /* Drop the physical page frames of c's currently-idle (low) stack
  * region without releasing the stack -- the coro stays bound to its
  * fiber.  The scheduler calls this when a g parks on a waiter
