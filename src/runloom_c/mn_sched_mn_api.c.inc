@@ -125,6 +125,20 @@ static void runloom_mn_hub_submit(runloom_hub_t *h, runloom_g_t *g)
         runloom_cond_signal(&h->idle_cond);
         runloom_mutex_unlock(&h->idle_lock);
     }
+    /* Cross-hub wake latency fix: the idle_cond signal above ONLY reaches a hub
+     * parked in the parked==0 idle-condvar branch.  But `parked` is the GLOBAL
+     * netpoll-parked count, so whenever ANY fiber anywhere is parked on I/O
+     * (a server, file I/O, a timer, even the harness progress loop), every idle
+     * hub instead blocks in netpoll_pump -> epoll_wait(idle_ns) and the cond
+     * signal hits nobody.  The submitted g then waits up to the full pump
+     * timeout (~1ms) before the hub loops back to drain sub_head -- which pins
+     * cross-hub lock/channel handoff throughput to ~700/s (big_100 p87/p43/p47).
+     * Kick the shared pump-wake eventfd (registered in the epoll set) so a
+     * pumping hub returns from epoll_wait NOW; it drains the eventfd and re-loops
+     * to pick up sub_head/global-runq work.  Level-triggered + non-exclusive, so
+     * every blocked hub wakes (the target among them drains sub_head; the rest
+     * find nothing and re-pump).  No-op if the eventfd isn't armed. */
+    runloom_netpoll_wake_pump();
 }
 
 void runloom_mn_wake_g(void *hub_opaque, runloom_g_t *g)
@@ -174,6 +188,11 @@ void runloom_mn_wake_g(void *hub_opaque, runloom_g_t *g)
                                                 __ATOMIC_ACQUIRE)) {
                     runloom_g_incref(g);   /* queue ref, dropped when consumed */
                     runloom_mn_global_runq_push(g);
+                    /* Same cross-hub wake-latency fix as hub_submit: any hub can
+                     * drain the global runq, but an idle one is blocked in
+                     * epoll_wait -- kick the pump so it wakes now (no-op if not
+                     * armed; the pump drains the eventfd and re-loops). */
+                    runloom_netpoll_wake_pump();
                     return;
                 }
                 /* lost: st reloaded to the current state; re-evaluate */

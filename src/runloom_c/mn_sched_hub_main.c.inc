@@ -488,6 +488,13 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
                          * on OUR own ring -- under SINGLE_ISSUER each
                          * ring's GETEVENTS must come from its owner. */
                         runloom_iouring_ring_get_events(h->iouring_ring);
+                        /* Ensure the shared pump-wake eventfd is registered in
+                         * the epoll set BEFORE we block here, so a cross-hub
+                         * runloom_mn_hub_submit/wake_g can break this epoll_wait
+                         * immediately (else the woken g waits the full pump
+                         * timeout -- the ~1ms cross-hub handoff latency).
+                         * Idempotent + atomic-guarded: a no-op once armed. */
+                        runloom_netpoll_wake_pump_arm();
                         runloom_netpoll_pump(pump_ns);
                     } else {
                         if (idle_ns <= 0) idle_ns = 1;
