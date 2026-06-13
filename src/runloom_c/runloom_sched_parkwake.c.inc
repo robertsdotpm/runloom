@@ -233,7 +233,10 @@ void runloom_sched_drain_timers(runloom_sched_t *s, double now)
         runloom_timer_entry_t e;
         int expected = 1;
         if (top->deadline > now) break;          /* min-heap: nothing else due */
-        runloom_timer_pop(s, &e);
+        /* Guard on the pop return so e (and e.g) is provably initialized before
+         * use -- size>0 here means it always pops, but -fanalyzer can't prove the
+         * invariant and warned "uninitialized e.g" at the CAS below. */
+        if (!runloom_timer_pop(s, &e)) break;
         if (__atomic_compare_exchange_n(&e.g->parked_safe, &expected, 0, 0,
                                         __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
             void *ph = __atomic_load_n(&e.g->park_hub, __ATOMIC_ACQUIRE);

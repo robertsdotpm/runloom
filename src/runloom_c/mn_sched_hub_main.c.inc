@@ -143,12 +143,16 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
      * cache-locality half is measurable; the NIC-RX-steering half needs a real
      * NIC.  Best-effort: a failed pin just leaves the thread unpinned. */
     {
+        /* Atomic load+store: hub threads race to first-init this static; the
+         * plain read/write was a (benign, same-value) TSan data race. */
         static int aff_mode = -1;
-        if (aff_mode < 0) {
+        int am = __atomic_load_n(&aff_mode, __ATOMIC_RELAXED);
+        if (am < 0) {
             const char *e = getenv("RUNLOOM_HUB_AFFINITY");
-            aff_mode = (e != NULL && *e != '0') ? 1 : 0;
+            am = (e != NULL && *e != '0') ? 1 : 0;
+            __atomic_store_n(&aff_mode, am, __ATOMIC_RELAXED);
         }
-        if (aff_mode) {
+        if (am) {
             long ncpu = sysconf(_SC_NPROCESSORS_ONLN);
             if (ncpu > 0) {
                 cpu_set_t set;

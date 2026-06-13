@@ -341,12 +341,17 @@ void runloom_g_entry(void *user)
      * on it (asyncio Task semantics) -- so it's a per-run promise, not a default.
      * Read once, cached. */
     {
+    /* Atomic load too (store was already atomic): the plain `ctx_copy < 0` /
+     * `ctx_copy` reads raced the store across hub threads first-init'ing it
+     * (benign same-value, but a TSan data race at runloom_g_entry). */
     static int ctx_copy = -1;
-    if (ctx_copy < 0) {
+    int cc = __atomic_load_n(&ctx_copy, __ATOMIC_RELAXED);
+    if (cc < 0) {
         const char *e = getenv("RUNLOOM_NO_CTX_COPY");
-        __atomic_store_n(&ctx_copy, (e && *e == '1') ? 0 : 1, __ATOMIC_RELAXED);
+        cc = (e && *e == '1') ? 0 : 1;
+        __atomic_store_n(&ctx_copy, cc, __ATOMIC_RELAXED);
     }
-    if (ctx_copy && !runloom_get_per_g_tstate_mode()) {
+    if (cc && !runloom_get_per_g_tstate_mode()) {
         PyThreadState *cts = PyThreadState_GET();
         PyObject *ctx = PyContext_CopyCurrent();
         if (ctx != NULL) {

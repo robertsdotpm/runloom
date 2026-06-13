@@ -52,7 +52,14 @@ static PyObject *RunloomG_result_get(RunloomG *self, void *closure)
 static PyObject *RunloomG_wake(RunloomG *self, PyObject *unused)
 {
     (void)unused;
-    if (self->g != NULL) {
+    /* ACQUIRE-load self->g: pairs with the RELEASE store at handle creation
+     * (module_go.c.inc handle->g = g).  The handle is published to Python via
+     * refcount before any cross-thread wake, but the half-instrumented TSan
+     * build can't see CPython's refcount/allocator synchronization, so a plain
+     * read here racing a creation-store at a reused object address was flagged
+     * as a (benign) data race. */
+    runloom_g_t *wg = __atomic_load_n(&self->g, __ATOMIC_ACQUIRE);
+    if (wg != NULL) {
         /* ALWAYS go through wake_safe: it drives the parked_safe / wake_pending
          * Dekker (so a wake that races the park is never lost) and routes the
          * re-queue by g->park_hub -- runloom_mn_wake_g for an M:N hub parker,
@@ -60,7 +67,7 @@ static PyObject *RunloomG_wake(RunloomG *self, PyObject *unused)
          * called mn_wake_g directly for hub parkers and BYPASSED the Dekker, which
          * lost a wake-before-park.)  The pump kick breaks an idle single-thread
          * run() epoll_wait(-1); harmless on the same-thread / hub path. */
-        runloom_sched_wake_safe(self->g);
+        runloom_sched_wake_safe(wg);
         runloom_netpoll_wake_pump();
     }
     Py_RETURN_NONE;
