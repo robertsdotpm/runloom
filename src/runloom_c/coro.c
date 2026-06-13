@@ -1001,6 +1001,11 @@ void runloom_coro_prewarm_reset_after_fork(void) { }
  * the lifecycle.  Keeping it here (not cross-TU) avoids extern atomics: the
  * getter and the acquire/release counters all touch the same file-statics. */
 
+#if defined(RUNLOOM_HAVE_FCONTEXT) || defined(RUNLOOM_HAVE_UCONTEXT)
+/* The depot + its auto-cap state live in the POSIX stack-pool block above
+ * (same #if).  The Windows Fibers backend has no such pool, so the autocap is
+ * inert there -- see the no-op stubs in the #else below. */
+
 /* Resolve SAFE_MAX once: min(VMA budget, RAM budget).  Conservative -- the cap is
  * only a ceiling; the live-set squeeze in the tick is what tracks the real load. */
 void runloom_stack_autocap_init(void)
@@ -1100,6 +1105,13 @@ void runloom_stack_autocap_reset(void)
     __atomic_store_n(&runloom_stack_cap_cached, 0, __ATOMIC_RELAXED);
     __atomic_store_n(&runloom_stack_autocap_last_ns, 0, __ATOMIC_RELAXED);
 }
+#else
+/* Windows Fibers backend: no POSIX stack depot, so the depot auto-cap is inert.
+ * Stubs keep the symbols (sysmon / mn_init call them cross-TU). */
+void runloom_stack_autocap_init(void)  { }
+void runloom_stack_autocap_tick(void)  { }
+void runloom_stack_autocap_reset(void) { }
+#endif
 
 /* ================================================================== */
 /* Backend: fcontext (inline asm)                                     */
@@ -1511,6 +1523,32 @@ int runloom_coro_done(const runloom_coro_t *c)
 }
 
 #endif  /* RUNLOOM_HAVE_FCONTEXT */
+
+#if !defined(RUNLOOM_HAVE_FCONTEXT)
+/* Bulk coro arena (placement-init N coro structs in one allocation, carve every
+ * stack from one mmap'd block) is an fcontext-backend optimization.  On the
+ * Windows Fibers and the generic ucontext backends it is unavailable, so report
+ * "arena off" (-1): runloom_mn_go_n_bulk then falls back to the per-g spawn path.
+ * The bulk path is opt-in via RUNLOOM_GON_BULK; the default go_n loop never calls
+ * these.  Stubs keep the symbols that mn_sched references regardless of backend. */
+size_t runloom_coro_struct_size(void) { return sizeof(runloom_coro_t); }
+
+int runloom_coro_bulk_init(void *coro_arena, size_t coro_stride,
+                           void *g_arena, size_t g_stride, size_t g_coro_off,
+                           size_t stack_size, long n, runloom_entry_fn entry,
+                           size_t *start_slot_out)
+{
+    (void)coro_arena; (void)coro_stride; (void)g_arena; (void)g_stride;
+    (void)g_coro_off; (void)stack_size; (void)n; (void)entry;
+    if (start_slot_out != NULL) *start_slot_out = 0;
+    return -1;   /* arena unavailable -> caller uses the per-g path */
+}
+
+void runloom_coro_arena_release(size_t start_slot, long n)
+{
+    (void)start_slot; (void)n;
+}
+#endif  /* !RUNLOOM_HAVE_FCONTEXT */
 
 /* ================================================================== */
 /* Backend: Windows Fibers                                            */
