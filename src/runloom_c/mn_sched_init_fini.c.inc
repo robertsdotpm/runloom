@@ -299,6 +299,14 @@ void runloom_mn_fini(void)
         runloom_mutex_destroy(&runloom_hubs[i].sub_lock);
         runloom_mutex_destroy(&runloom_hubs[i].idle_lock);
         runloom_cond_destroy(&runloom_hubs[i].idle_cond);
+        /* Release the g-refs held by this hub's still-pending timer entries
+         * (future-deadline timed parks that never fired) so they don't leak,
+         * then free the timer-heap buffer (otherwise leaked -- it was never
+         * freed). */
+        runloom_sched_release_timers(&runloom_hubs[i].sched);
+        PyMem_Free(runloom_hubs[i].sched.timer_heap);
+        runloom_hubs[i].sched.timer_heap = NULL;
+        runloom_hubs[i].sched.timer_cap = 0;
         PyMem_Free(runloom_hubs[i].stage_head);
         runloom_hubs[i].stage_head = NULL;
         PyMem_Free(runloom_hubs[i].stage_tail);

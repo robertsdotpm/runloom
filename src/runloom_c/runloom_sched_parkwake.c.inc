@@ -245,7 +245,25 @@ void runloom_sched_drain_timers(runloom_sched_t *s, double now)
             }
         }
         /* CAS failed: a real wake already claimed this park -> discard. */
+        runloom_g_decref(e.g);   /* release the entry's ref (paired with the
+                                  * incref in runloom_timer_push).  A woken-or-
+                                  * stranded g is now safely freeable; a g we just
+                                  * re-queued is kept alive by the queue/run ref. */
     }
+}
+
+/* Teardown sweep: release the g-ref held by every timer entry still on the heap
+ * (entries with future deadlines that never fired) and empty the heap.  Without
+ * this, those refs leak -> the gs they pin are never freed.  Called from mn_fini
+ * (per hub sched, before the hubs are freed) and at single-thread run end. */
+void runloom_sched_release_timers(runloom_sched_t *s)
+{
+    Py_ssize_t j;
+    if (s == NULL || s->timer_heap == NULL) return;
+    for (j = 1; j <= s->timer_size; j++) {
+        runloom_g_decref(s->timer_heap[j].g);
+    }
+    s->timer_size = 0;
 }
 
 void runloom_sched_wake(runloom_g_t *g)

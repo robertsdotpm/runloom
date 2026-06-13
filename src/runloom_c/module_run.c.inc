@@ -53,6 +53,10 @@ static PyObject *m_run(PyObject *self, PyObject *unused)
     Py_ssize_t completed;
     (void)self; (void)unused;
     completed = runloom_sched_drain(runloom_sched_get());
+    /* Release g-refs held by any leftover timed-park entries (a g woken early by
+     * a real wake leaves a future-deadline entry the run never fired); the
+     * timer_push incref would otherwise pin those gs past run end. */
+    runloom_sched_release_timers(runloom_sched_get());
     /* drain may have run a pending Python signal handler that RAISED
      * (Ctrl-C -> KeyboardInterrupt); surface it instead of a result so it
      * aborts run_forever()/run_until_complete like stock asyncio. */

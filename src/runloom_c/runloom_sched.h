@@ -586,6 +586,9 @@ int runloom_park_generic_timed(int foreign_wakeable, double deadline);
  * parked_safe CAS.  Called by the single-thread drain + the M:N hub_main on s's
  * own thread, alongside the sleep-heap drain. */
 void runloom_sched_drain_timers(runloom_sched_t *s, double now);
+/* Release the g-ref held by every still-pending timer entry + empty the heap.
+ * Call at teardown so future-deadline entries don't leak their pinned gs. */
+void runloom_sched_release_timers(runloom_sched_t *s);
 
 /* Earliest pending timer deadline on s (monotonic seconds), or -1.0 if none --
  * lets the drain / hub idle-wait bound its block so a due timer fires on time. */

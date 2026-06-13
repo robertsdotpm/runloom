@@ -520,6 +520,15 @@ static int runloom_timer_push(runloom_sched_t *s, double deadline, runloom_g_t *
     if (s->timer_size + 1 > s->timer_cap) {
         if (runloom_timer_grow(s) < 0) return -1;
     }
+    /* The timer entry holds a REFERENCE to g.  Without it, a g woken early (by a
+     * real wake, not the timeout) can complete and be FREED (coros beyond the
+     * pool cap are munmap'd) while its stale entry lingers on the heap until its
+     * deadline; runloom_sched_drain_timers then CASes e.g->parked_safe on freed
+     * memory -> use-after-free SEGV (flaky, fired by p49_barrier_stress @ 1M with
+     * its timeout=10 barrier waits; the -fanalyzer "uninitialized e.g" warning
+     * pointed here).  Balanced by a decref at every pop in drain_timers and a
+     * runloom_sched_release_timers() sweep at teardown. */
+    runloom_g_incref(g);
     e.deadline = deadline;
     e.g = g;
     s->timer_size++;
