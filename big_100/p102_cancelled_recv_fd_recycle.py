@@ -23,23 +23,29 @@ import struct
 import harness
 import netutil
 import runloom
+import runloom_c
+
+WAIT_CEILING_MS = 2000          # bound so a lost cancel-wakeup backstops, no hang
 
 
 def parked_reader(sock, ready, done):
-    """Park in recv on `sock` (no data queued); the owner's close cancels it.
-    Announce through `ready` before parking so the owner closes only once we are
-    genuinely blocked (closing before the park races the wakeup -- see FINDINGS);
-    report through `done` when we wake."""
+    """Park for readability on `sock` (no data queued) with a BOUNDED wait; the
+    owner's close cancels it.  Announce through `ready` before parking so the
+    owner closes only once we are genuinely blocked (closing before the park
+    races the wakeup -- see FINDINGS); the 2s ceiling backstops a lost cancel so
+    teardown never wedges.  Report through `done` when we wake."""
     ready.send(True)
     try:
-        sock.recv(4096)            # parks; closing sock from the owner wakes us
-    except OSError:
+        fd = sock.fileno()
+    except (OSError, ValueError):
+        done.send(True)
+        return
+    if fd >= 0:
+        runloom_c.wait_fd(fd, 1, WAIT_CEILING_MS)   # parks; close cancels it
+    try:
+        done.send(True)            # report we woke (1:1 with the worker loop)
+    except Exception:
         pass
-    finally:
-        try:
-            done.send(True)        # report we woke (1:1 with the worker loop)
-        except Exception:
-            pass
 
 
 def worker(H, wid, rng):
