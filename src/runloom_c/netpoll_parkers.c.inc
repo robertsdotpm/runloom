@@ -124,6 +124,18 @@ typedef struct runloom_parker_pool {
     runloom_mutex_t lock;
     volatile long lock_inited;          /* 0 = not yet, 1 = in flight, 2 = ready */
 
+    /* Per-hub kqueue backend (BSD/macOS).  Each hub polls its OWN kqueue +
+     * self-pipe so register/collect/wake never serialise across hubs on the
+     * kernel's single per-kqueue lock -- the shared-kqueue kq_lock contention
+     * that collapsed connect throughput super-linearly with hub count.  Created
+     * lazily in runloom_parker_pool_lock_ensure_inited (kqueue builds only);
+     * -1 until then.  Unused on epoll/Windows/select (one shared backend handle
+     * + the global self-pipe).  Load-balancing (a busy hub draining its own
+     * events) is restored by hub_main's PERIODIC non-blocking self-pump. */
+    int kqueue_fd;                      /* this pool's kqueue; -1 = none */
+    int selfpipe_r;                     /* pump-wake self-pipe read end (in kqueue) */
+    int selfpipe_w;                     /* pump-wake self-pipe write end */
+
     runloom_parked_t *head;
     int total;                          /* read with __atomic_load_n */
 

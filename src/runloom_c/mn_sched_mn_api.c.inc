@@ -136,9 +136,10 @@ static void runloom_mn_hub_submit(runloom_hub_t *h, runloom_g_t *g)
      * Kick the shared pump-wake eventfd (registered in the epoll set) so a
      * pumping hub returns from epoll_wait NOW; it drains the eventfd and re-loops
      * to pick up sub_head/global-runq work.  Level-triggered + non-exclusive, so
-     * every blocked hub wakes (the target among them drains sub_head; the rest
-     * find nothing and re-pump).  No-op if the eventfd isn't armed. */
-    runloom_netpoll_wake_pump();
+     * Per-hub kqueue: kick ONLY the target hub `h`'s own pump (its self-pipe),
+     * not a broadcast -- this is the hot cross-hub handoff path.  Shared-handle
+     * backends (epoll/IOCP/select) ignore the arg. */
+    runloom_netpoll_wake_pump((void *)h);
 }
 
 void runloom_mn_wake_g(void *hub_opaque, runloom_g_t *g)
@@ -191,8 +192,10 @@ void runloom_mn_wake_g(void *hub_opaque, runloom_g_t *g)
                     /* Same cross-hub wake-latency fix as hub_submit: any hub can
                      * drain the global runq, but an idle one is blocked in
                      * epoll_wait -- kick the pump so it wakes now (no-op if not
-                     * armed; the pump drains the eventfd and re-loops). */
-                    runloom_netpoll_wake_pump();
+                     * armed; the pump drains the eventfd and re-loops).  NULL =
+                     * default pool; global runq is drained by ANY hub (steal mode,
+                     * default-off) which re-polls on its bounded timeout. */
+                    runloom_netpoll_wake_pump(NULL);
                     return;
                 }
                 /* lost: st reloaded to the current state; re-evaluate */

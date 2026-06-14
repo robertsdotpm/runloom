@@ -430,18 +430,12 @@ static int                       runloom_iouring_ring_efds[RUNLOOM_IOURING_RINGS
 static struct runloom_iouring_ring *runloom_iouring_ring_ptrs[RUNLOOM_IOURING_RINGS_MAX];
 static int                       runloom_iouring_ring_count = 0;
 #elif defined(RUNLOOM_HAVE_KQUEUE)
-static int runloom_kqueue_fd = -1;
-/* kqueue cross-thread pump wake: a self-pipe whose read end is registered
- * in the kqueue (EVFILT_READ | EV_CLEAR).  Any thread pokes the write end
- * via runloom_netpoll_wake_pump() to break an idle kevent() so a cross-thread
- * re-queue (e.g. a blocking-offload worker) wakes a scheduler parked in the
- * pump -- the kqueue analogue of the epoll eventfd / select self-pipe.
- * Same names as the select() branch on purpose: the backends are mutually
- * exclusive so only one set ever compiles, and the shared
- * wake_pump_arm()/wake_pump() #else paths then work unchanged on kqueue.
- * -1 = unarmed.  Created once in runloom_netpoll_init under runloom_pool.lock. */
-static int runloom_selfpipe_r = -1;
-static int runloom_selfpipe_w = -1;
+/* Per-hub kqueue: there is NO process-wide kqueue handle or self-pipe.  Each
+ * parker pool owns its own kqueue + pump-wake self-pipe
+ * (runloom_parker_pool.kqueue_fd / selfpipe_r / selfpipe_w), created in
+ * runloom_pool_backend_create() at pool lazy-init.  A single shared kqueue
+ * serialised every hub's register/collect/wake on the kernel's per-kqueue lock
+ * and collapsed connect throughput super-linearly with hub count. */
 #elif defined(RUNLOOM_OS_WINDOWS)
 #  include "netpoll_iocp.h"
 /* Runtime-selected Windows backend.  Tier order:

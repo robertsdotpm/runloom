@@ -134,6 +134,15 @@ int runloom_netpoll_pump(long long timeout_ns)
         struct timespec ts;
         struct timespec *tsp = NULL;
         int n;
+        /* PER-HUB kqueue: poll THIS hub's own kqueue (the pool wait_fd/register
+         * on this thread used).  Each hub draining its own kqueue removes the
+         * shared-kqueue kq_lock contention; dispatch_event still searches every
+         * pool's by_fd, so a delivered fd resolves to its parker regardless.
+         * hub_main also calls this with timeout 0 PERIODICALLY while busy, so a
+         * hub that never idles still drains its own events (load balancing). */
+        runloom_parker_pool_t *kpool =
+            runloom_parker_pool_for_hub(runloom_mn_current_hub_opaque());
+        runloom_parker_pool_lock_ensure_inited(kpool);   /* create backend if first touch */
         if (timeout_ns >= 0) {
             ts.tv_sec = (time_t)(timeout_ns / 1000000000LL);
             ts.tv_nsec = (long)(timeout_ns % 1000000000LL);
@@ -143,9 +152,14 @@ int runloom_netpoll_pump(long long timeout_ns)
             int finj = runloom_fault_inject(RUNLOOM_FAULT_KQUEUE_WAIT);
             if (finj) {
                 n = -1; errno = finj;      /* short-circuit kevent */
+            } else if (kpool->kqueue_fd < 0) {
+                /* Backend creation failed (OOM/fd exhaustion): don't spin on a
+                 * bad fd -- sleep out the timeout so the hub idles, then re-loop. */
+                if (timeout_ns > 0) runloom_sleep_ns(timeout_ns);
+                n = 0;
             } else {
                 Py_BEGIN_ALLOW_THREADS
-                n = kevent(runloom_kqueue_fd, NULL, 0, evs, 64, tsp);
+                n = kevent(kpool->kqueue_fd, NULL, 0, evs, 64, tsp);
                 Py_END_ALLOW_THREADS
             }
         }
@@ -160,9 +174,9 @@ int runloom_netpoll_pump(long long timeout_ns)
                  * re-queue already placed the g on the scheduler wake_list,
                  * the byte's only job was to break this idle kevent().
                  * Drain it (EV_CLEAR already reset the edge) and move on. */
-                if (runloom_selfpipe_r >= 0 && fd == runloom_selfpipe_r) {
+                if (kpool->selfpipe_r >= 0 && fd == kpool->selfpipe_r) {
                     char drain[64];
-                    while (read(runloom_selfpipe_r, drain, sizeof drain) > 0) { }
+                    while (read(kpool->selfpipe_r, drain, sizeof drain) > 0) { }
                     continue;
                 }
                 mask = (evs[i].filter == EVFILT_READ) ?

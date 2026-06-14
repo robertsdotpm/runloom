@@ -218,6 +218,10 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
      * requester set is complete (no-op unless RUNLOOM_MN_SEED + barrier). */
     runloom_mn_ctrl_wait_armed();
 
+    /* Per-hub kqueue load-balancing: cadence counter for the periodic
+     * non-blocking self-pump below (see the loop top). */
+    unsigned int self_pump_ctr = 0;
+    (void)self_pump_ctr;
     while (!__atomic_load_n(&h->stopping, __ATOMIC_ACQUIRE)) {
         runloom_g_t *g;
         /* Set when g came from the global run-queue: it then carries a queue
@@ -226,6 +230,19 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
          * steal are single-owner by construction (already RUNNING) and skip
          * both. */
         int from_runq = 0;
+#if defined(RUNLOOM_HAVE_KQUEUE)
+        /* PERIODIC NON-BLOCKING SELF-PUMP (per-hub kqueue load balancing).
+         * Each hub polls its OWN kqueue; the blocking pump below only runs when
+         * this hub goes idle.  Under load a hub stays busy running ready gs and
+         * never idles, so its OWN parkers' readiness (events sitting in its
+         * kqueue) would starve -- idle hubs can't help, the kqueue is private.
+         * Drain it with a non-blocking kevent(timeout=0) every N loop turns so a
+         * busy hub keeps its parkers flowing; woken gs land in sub_head/ready and
+         * are picked up immediately below.  This is the netpoll cadence Go's
+         * scheduler runs in findrunnable.  Cheap (one kevent per N turns) and
+         * compiled only on the per-hub-kqueue backend. */
+        if ((++self_pump_ctr & 0x3fu) == 0) (void)runloom_netpoll_pump(0);
+#endif
         /* Drain the submission list into the deque first.  Pushing to
          * the deque is owner-only, so we (the hub) move fresh gs from
          * external producers onto our deque before anyone else looks. */

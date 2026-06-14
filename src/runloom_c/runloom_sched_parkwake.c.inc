@@ -302,7 +302,8 @@ void runloom_sched_wake(runloom_g_t *g)
     }
     owner->wake_list_tail = g;
     runloom_mutex_unlock(&owner->wake_list_lock);
-    runloom_netpoll_wake_pump();
+    /* Single-thread / owner-sched path: NULL -> default pool (M:N uses mn_wake_g). */
+    runloom_netpoll_wake_pump(NULL);
 }
 
 /* Race-safe park/wake.  Used by runloom.aio.RunloomTask to replace its

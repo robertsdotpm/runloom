@@ -6,6 +6,44 @@
 /* Initialise pool->lock once, regardless of platform.  POSIX could use
  * PTHREAD_MUTEX_INITIALIZER and skip this, but Windows CRITICAL_SECTION
  * has no static-init form so the lazy-init pattern is uniform. */
+/* Per-pool kqueue + pump-wake self-pipe (BSD/macOS).  Each hub's pool gets its
+ * OWN kqueue so register/collect/wake never contend on the kernel's single
+ * per-kqueue lock across hubs.  Best-effort: on any failure the field stays -1
+ * and the caller (register/pump) reports an error or degrades to a re-poll, but
+ * never crashes.  Called once per pool from lock_ensure_inited under the
+ * once-init CAS, so no extra locking is needed here. */
+static void runloom_pool_backend_create(runloom_parker_pool_t *pool)
+{
+    pool->kqueue_fd = -1;
+    pool->selfpipe_r = -1;
+    pool->selfpipe_w = -1;
+#if defined(RUNLOOM_HAVE_KQUEUE)
+    pool->kqueue_fd = kqueue();
+    if (pool->kqueue_fd < 0) return;
+    {   /* self-pipe registered in THIS pool's kqueue (EV_CLEAR) so a cross-hub
+         * wake_pump can break this hub's idle kevent().  Best effort. */
+        int pfd[2];
+        if (pipe(pfd) == 0) {
+            int k;
+            struct kevent kev;
+            for (k = 0; k < 2; k++) {
+                int fl = fcntl(pfd[k], F_GETFL, 0);
+                if (fl >= 0) (void)fcntl(pfd[k], F_SETFL, fl | O_NONBLOCK);
+                (void)fcntl(pfd[k], F_SETFD, FD_CLOEXEC);
+            }
+            EV_SET(&kev, pfd[0], EVFILT_READ, EV_ADD | EV_CLEAR, 0, 0, NULL);
+            if (kevent(pool->kqueue_fd, &kev, 1, NULL, 0, NULL) == 0) {
+                pool->selfpipe_r = pfd[0];
+                pool->selfpipe_w = pfd[1];
+            } else {
+                close(pfd[0]);
+                close(pfd[1]);
+            }
+        }
+    }
+#endif
+}
+
 static void runloom_parker_pool_lock_ensure_inited(runloom_parker_pool_t *pool)
 {
 #if defined(RUNLOOM_OS_WINDOWS)
@@ -13,6 +51,7 @@ static void runloom_parker_pool_lock_ensure_inited(runloom_parker_pool_t *pool)
      * first caller transitions 0 -> 1 and runs the init. */
     if (InterlockedCompareExchange(&pool->lock_inited, 1, 0) == 0) {
         runloom_mutex_init(&pool->lock);
+        runloom_pool_backend_create(pool);
     } else {
         /* Spin briefly while another thread finishes init.  In practice
          * the init is one InitializeCriticalSection call (~100 ns), so
@@ -29,6 +68,7 @@ static void runloom_parker_pool_lock_ensure_inited(runloom_parker_pool_t *pool)
     if (__atomic_compare_exchange_n(&pool->lock_inited, &expected, 1,
                                     0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
         runloom_mutex_init(&pool->lock);
+        runloom_pool_backend_create(pool);
         __atomic_store_n(&pool->lock_inited, 2, __ATOMIC_RELEASE);
     } else {
         while (__atomic_load_n(&pool->lock_inited, __ATOMIC_ACQUIRE) != 2)
@@ -209,41 +249,22 @@ int runloom_netpoll_init(void)
     runloom_epoll_fd = epoll_create1(EPOLL_CLOEXEC);
     if (runloom_epoll_fd < 0) { runloom_mutex_unlock(&runloom_pool.lock); return -1; }
 #elif defined(RUNLOOM_HAVE_KQUEUE)
-    runloom_kqueue_fd = kqueue();
-    {   /* test-only: force kqueue() to fail so the init-error path is covered.
-         * A hard init failure must surface as a clean OSError to the first
-         * parker (via the -1 return below), never crash or hang. */
+    /* Per-hub kqueue: the default pool's kqueue + self-pipe were already created
+     * by the lock_ensure_inited(&runloom_pool) call above; each per-hub pool
+     * creates its OWN lazily on first use (runloom_pool_backend_create).  No
+     * single shared kqueue exists anymore -- that was the kq_lock contention
+     * source.  Validate the default pool's handle here so a hard kqueue()
+     * failure surfaces as a clean init error, exactly like the epoll branch. */
+    {   /* test-only: simulate the kqueue() init-failure path on the default pool. */
         int finj = runloom_fault_inject(RUNLOOM_FAULT_KQUEUE_CREATE);
         if (finj) {
-            if (runloom_kqueue_fd >= 0) close(runloom_kqueue_fd);
-            runloom_kqueue_fd = -1;
+            if (runloom_pool.kqueue_fd  >= 0) { close(runloom_pool.kqueue_fd);  runloom_pool.kqueue_fd  = -1; }
+            if (runloom_pool.selfpipe_r >= 0) { close(runloom_pool.selfpipe_r); runloom_pool.selfpipe_r = -1; }
+            if (runloom_pool.selfpipe_w >= 0) { close(runloom_pool.selfpipe_w); runloom_pool.selfpipe_w = -1; }
             errno = finj;
         }
     }
-    if (runloom_kqueue_fd < 0) { runloom_mutex_unlock(&runloom_pool.lock); return -1; }
-    /* Cross-thread pump wake: a self-pipe registered in the kqueue.  Best
-     * effort -- if pipe()/fcntl()/kevent() fail the pump still re-polls on
-     * its bounded timeout, so wake latency degrades but nothing wedges. */
-    {
-        int pfd[2];
-        if (pipe(pfd) == 0) {
-            int k;
-            struct kevent kev;
-            for (k = 0; k < 2; k++) {
-                int fl = fcntl(pfd[k], F_GETFL, 0);
-                if (fl >= 0) (void)fcntl(pfd[k], F_SETFL, fl | O_NONBLOCK);
-                (void)fcntl(pfd[k], F_SETFD, FD_CLOEXEC);
-            }
-            EV_SET(&kev, pfd[0], EVFILT_READ, EV_ADD | EV_CLEAR, 0, 0, NULL);
-            if (kevent(runloom_kqueue_fd, &kev, 1, NULL, 0, NULL) == 0) {
-                runloom_selfpipe_r = pfd[0];
-                runloom_selfpipe_w = pfd[1];
-            } else {
-                close(pfd[0]);
-                close(pfd[1]);
-            }
-        }
-    }
+    if (runloom_pool.kqueue_fd < 0) { runloom_mutex_unlock(&runloom_pool.lock); return -1; }
 #elif defined(RUNLOOM_OS_WINDOWS)
     /* Bring up Winsock once.  Idempotent via plat_compat's
      * InterlockedCompareExchange guard. */
@@ -308,10 +329,16 @@ void runloom_netpoll_fini(void)
 #if defined(RUNLOOM_HAVE_EPOLL)
     if (runloom_epoll_fd >= 0) { close(runloom_epoll_fd); runloom_epoll_fd = -1; }
 #elif defined(RUNLOOM_HAVE_KQUEUE)
-    if (runloom_kqueue_fd >= 0) { close(runloom_kqueue_fd); runloom_kqueue_fd = -1; }
-    /* Self-pipe wake teardown (see runloom_netpoll_init kqueue branch). */
-    if (runloom_selfpipe_r >= 0) { close(runloom_selfpipe_r); runloom_selfpipe_r = -1; }
-    if (runloom_selfpipe_w >= 0) { close(runloom_selfpipe_w); runloom_selfpipe_w = -1; }
+    /* Per-hub teardown: close every pool's own kqueue + self-pipe. */
+    {
+        size_t i;
+        for (i = 0; i < (size_t)RUNLOOM_PARKER_POOL_MAX; i++) {
+            runloom_parker_pool_t *p = &runloom_pools[i];
+            if (p->kqueue_fd  >= 0) { close(p->kqueue_fd);  p->kqueue_fd  = -1; }
+            if (p->selfpipe_r >= 0) { close(p->selfpipe_r); p->selfpipe_r = -1; }
+            if (p->selfpipe_w >= 0) { close(p->selfpipe_w); p->selfpipe_w = -1; }
+        }
+    }
 #elif defined(RUNLOOM_OS_WINDOWS)
     if (runloom_win_use_iocp) {
         runloom_iocp_fini();
@@ -353,6 +380,12 @@ void runloom_netpoll_reset_after_fork(void)
         p->link_count = 0;
         p->churn_last_links = 0;
         p->churn_last_ns = 0;
+        /* Fresh per-hub kqueue + self-pipe for the child: fork shares the
+         * parent's kernel kqueue, so the inherited handles (closed by fini above,
+         * set -1) must not be reused.  lock_inited is set to 2 directly here, so
+         * the lazy backend path is skipped -- create it explicitly.  No-op on
+         * epoll/Windows/select. */
+        runloom_pool_backend_create(p);
     }
     /* The per-fd registration bitmap says "fd X is already armed in the
      * poller"; against the child's BRAND-NEW poller every such bit is a lie
