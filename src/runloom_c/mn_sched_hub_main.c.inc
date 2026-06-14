@@ -838,16 +838,14 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
                  * this is a wrong / never-initialized g pointer, NOT a missing
                  * barrier -- skipping is correct (the connect-storm finishes
                  * pend=0).  Dump identity for source-hunting. */
-                char dbuf[256];
+                /* Raw first 8 words of *g to identify what g actually points to
+                 * (real g vs coro vs stack vs freed slab slot) -- the source hunt. */
+                unsigned long long *w = (unsigned long long *)g;
+                char dbuf[320];
                 int dm = snprintf(dbuf, sizeof dbuf,
-                    "[BADG] g=%p id=%lld coro=%p done=%d rc=%d st=%d ws=%d fr=%d owner=%p call=%p centry=%p\n",
-                    (void *)g, (long long)g->id, (void *)cp,
-                    (int)__atomic_load_n(&g->done, __ATOMIC_ACQUIRE),
-                    (int)__atomic_load_n(&g->refcount, __ATOMIC_ACQUIRE),
-                    (int)__atomic_load_n(&g->state, __ATOMIC_ACQUIRE),
-                    (int)__atomic_load_n(&g->wake_state, __ATOMIC_ACQUIRE),
-                    from_runq, (void *)g->owner, (void *)g->callable,
-                    (void *)g->c_entry);
+                    "[BADG] g=%p fr=%d w0=%llx w1=%llx w2=%llx w3=%llx w4=%llx w5=%llx w6=%llx w7=%llx\n",
+                    (void *)g, from_runq,
+                    w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7]);
                 if (dm > 0) (void)write(2, dbuf, (size_t)dm);
 #endif
                 h->sched.current = NULL;
