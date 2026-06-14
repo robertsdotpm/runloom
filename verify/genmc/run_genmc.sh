@@ -112,6 +112,43 @@ for ctl in BUG_NO_SC_FENCE BUG_NO_RECHECK BUG_NO_BUMP; do
     fi
 done
 
+# --- SEAM: the two park/wake protocols composed on one migratable fiber -------
+# The Dekker handshake (sched_parkwake.c) and the wake_state machine
+# (iouring/global-runq) are each proven in isolation; this checks their
+# COMPOSITION -- a park that commits via Dekker then the wake_state CAS, racing
+# wake_g -- holds no-lost-wake + enqueued-at-most-once under RC11.  Gate this
+# BEFORE promoting RUNLOOM_STEAL_WOKEN / RUNLOOM_PER_G_TSTATE toward default.
+printf '  [genmc] %-30s ' "sched_parkwake_seam.c"
+if "$G" -- "$HERE/sched_parkwake_seam.c" >"$HERE/.genmc.pos.log" 2>&1 \
+        && grep -q "No errors were detected" "$HERE/.genmc.pos.log"; then
+    green "PASS"; echo " -- Dekker+wake_state seam: no lost / at-most-once under RC11"; pass=$((pass+1))
+else
+    red "FAIL"; echo " -- see $HERE/.genmc.pos.log"; fail=$((fail+1))
+fi
+printf '  [genmc] %-30s ' "sched_parkwake_seam.c(-DBUG_NO_RUNNING_WOKEN_REQUEUE)"
+if "$G" -- "-DBUG_NO_RUNNING_WOKEN_REQUEUE" "$HERE/sched_parkwake_seam.c" >"$HERE/.genmc.neg.log" 2>&1; then
+    red "FAIL"; echo " (expected a lost wake) -- see $HERE/.genmc.neg.log"; fail=$((fail+1))
+else
+    if grep -qiE "violation|error" "$HERE/.genmc.neg.log"; then
+        green "PASS"; echo " -- correctly DETECTS the lost wakeup (blind PARKED store)"; pass=$((pass+1))
+    else
+        red "FAIL"; echo " (errored but no violation) -- see $HERE/.genmc.neg.log"; fail=$((fail+1))
+    fi
+fi
+# Informational probe (not a gate): -DSEAM_MIX_DEKKER asks whether waking ONE
+# migratable fiber via BOTH routes (wake_safe + wake_g) can double-enqueue.  If
+# it reports a violation, the constraint "migratable fibers are woken via wake_g
+# ONLY" is load-bearing -- keep it enforced in the wake routing.
+if [ "${RUNLOOM_GENMC_SEAM_MIX:-}" = "1" ]; then
+    printf '  [genmc] %-30s ' "sched_parkwake_seam.c(-DSEAM_MIX_DEKKER,info)"
+    if "$G" -- "-DSEAM_MIX_DEKKER" "$HERE/sched_parkwake_seam.c" >"$HERE/.genmc.mix.log" 2>&1 \
+            && grep -q "No errors were detected" "$HERE/.genmc.mix.log"; then
+        echo "mixing both wake routes is safe"
+    else
+        echo "mixing both wake routes DOUBLE-ENQUEUES -> keep wake_g-only invariant (see .genmc.mix.log)"
+    fi
+fi
+
 # --- io_uring SINGLE-op park/wake commit handshake (io_uring.c op->wait) -----
 # Drift-guard: the harness mirrors the RELEASE result-store + ACQ_REL exchange /
 # CAS on op->wait.  If io_uring.c drops the handshake or weakens those orders,
