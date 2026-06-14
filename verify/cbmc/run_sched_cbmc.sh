@@ -33,6 +33,14 @@ want_bug sched_readyring_cbmc.c "-DBUG_NO_CAPCHECK"   "push skips full check -> 
 want_ok  sched_pystate_cbmc.c ""
 want_bug sched_pystate_cbmc.c "-DBUG_DROP_FIELD" "load forgets a field -> cross-g leak"
 
+# per-g tstate snapshot REFERENCE OWNERSHIP (companion to the completeness proof):
+# every owned ref snap acquires is released exactly once by load XOR clear; the
+# immortal-context skip and the raw delete_later chain are the bug-prone cases.
+want_ok  snap_refown_cbmc.c ""
+want_bug snap_refown_cbmc.c "-DBUG_LOAD_FORGETS_FIELD"      "load forgets to release a field -> leak"
+want_bug snap_refown_cbmc.c "-DBUG_INCREF_IMMORTAL"        "snap increfs an immortal context -> the no-op decref can't release it -> leak"
+want_bug snap_refown_cbmc.c "-DBUG_DELETE_LATER_REFCOUNTED" "the raw delete_later chain is refcounted -> dying-object corruption"
+
 # g slab recycle field-clear: every pre-id byte is cleared/overwritten by the
 # two-part scrub (no stale pass_index/arena/wake_state across recycling).  The
 # coverage loop runs offsetof(id) (~88) iterations, so it needs a larger unwind
