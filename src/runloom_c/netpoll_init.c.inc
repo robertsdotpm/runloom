@@ -94,6 +94,20 @@ const char *runloom_netpoll_backend(void)
 #endif
 }
 
+/* The shared epoll fd, for the io_uring-as-loop backend to poll-add into a hub
+ * ring so existing wait_fd readiness still works while the hub blocks in the
+ * ring.  -1 on non-epoll backends or before init.  Forces init so the fd is
+ * live for the caller (the hub arms its loop at startup). */
+int runloom_netpoll_epoll_fd(void)
+{
+#if defined(RUNLOOM_HAVE_EPOLL)
+    if (runloom_netpoll_init() != 0) return -1;
+    return runloom_epoll_fd;
+#else
+    return -1;
+#endif
+}
+
 /* ---- netpoll syscall fault injection (test-only) ----------------------- *
  * Where strace's `-e inject=` drives the Linux epoll campaign, the platforms
  * WITHOUT a syscall-injecting tracer (Windows; FreeBSD/macOS kqueue) gate IN

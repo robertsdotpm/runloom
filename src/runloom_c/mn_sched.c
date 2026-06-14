@@ -131,6 +131,16 @@ typedef struct runloom_hub {
      * failed -- callers fall back to the global ring path. */
     runloom_iouring_ring_t *iouring_ring;
     int                  iouring_eventfd;  /* cached for unregister at fini */
+    /* io_uring-as-loop backend (RUNLOOM_IOURING_LOOP=1, default off).  When
+     * the loop backend is active the hub blocks DIRECTLY in its ring via
+     * io_uring_submit_and_wait_timeout instead of epoll_wait, so cross-hub
+     * submits (and foreign wakes) must interrupt the ring wait rather than the
+     * idle condvar.  loop_wake_fd is a per-hub eventfd poll-added (multishot)
+     * into the ring; ring_waiting is the lock-free hint (set only while blocked
+     * in the ring wait) that lets a submit skip the eventfd write when the hub
+     * is busy.  Both are -1/0 and untouched unless the loop backend is on. */
+    int                  loop_wake_fd;
+    volatile int         ring_waiting;
     /* Last time this hub ran the idle stack-reclaim sweep (seconds, 0 at
      * init -> first idle sweep fires immediately).  Rate-limits the
      * O(parked) walk under RUNLOOM_STACK_PARK_SWEEP. */

@@ -26,6 +26,17 @@ struct runloom_iouring_ring {
      * pump-vs-sleep so the hub keeps spinning the pump while any of
      * its iouring ops are outstanding. */
     volatile int inflight;
+
+    /* io_uring-as-loop backend (RUNLOOM_IOURING_LOOP=1).  When the hub blocks
+     * directly in this ring, SQEs are written but submission is BATCHED into
+     * the submit_and_wait_timeout call: sq_submitted_tail tracks how far the
+     * kernel has consumed (everything < it is submitted, [it, sq_tail) is
+     * pending).  loop_wake_fd / loop_epoll_fd are the fds armed as persistent
+     * multishot POLL_ADDs on this ring (cached so a dead multishot poll can be
+     * re-armed).  All 0/-1 and unused unless the loop backend is on. */
+    unsigned sq_submitted_tail;
+    int loop_wake_fd;
+    int loop_epoll_fd;
 };
 
 /* Hub-ring init.  Tries SINGLE_ISSUER + (optionally) DEFER_TASKRUN;
@@ -45,6 +56,7 @@ runloom_iouring_ring_t *runloom_iouring_ring_create(int defer_taskrun)
     r = (runloom_iouring_ring_t *)calloc(1, sizeof(*r));
     if (r == NULL) { errno = ENOMEM; return NULL; }
     r->ring_fd = r->eventfd_fd = -1;
+    r->loop_wake_fd = r->loop_epoll_fd = -1;   /* loop backend: armed later */
 
     /* Attempt full flag set; downgrade on EINVAL. */
     flags = IORING_SETUP_SINGLE_ISSUER;

@@ -203,15 +203,34 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
      * deferred work flushes in time. */
     h->iouring_ring = runloom_iouring_ring_create(1 /*defer_taskrun*/);
     if (h->iouring_ring != NULL) {
-        h->iouring_eventfd = runloom_iouring_ring_eventfd(h->iouring_ring);
-        if (runloom_netpoll_add_iouring_ring(h->iouring_eventfd,
-                                          h->iouring_ring) != 0) {
-            /* Registration failed (most likely no epoll backend, but
-             * this build path is Linux-only so it'd be unusual).
-             * Discard the ring; hub-bound iouring calls fall through. */
-            runloom_iouring_ring_destroy(h->iouring_ring);
-            h->iouring_ring     = NULL;
-            h->iouring_eventfd  = -1;
+        if (runloom_iouring_loop_enabled()) {
+            /* io_uring-as-loop: the hub will block DIRECTLY in this ring (see
+             * the idle path below).  Arm the per-hub wake eventfd + a multishot
+             * poll on the shared epoll fd ON the ring, instead of registering
+             * the ring's eventfd into the epoll pump -- there is no bridge in
+             * loop mode.  On arm failure, discard the ring and fall back to the
+             * epoll pump (loop_wake_fd stays -1 so the idle path won't loop). */
+            int wfd = runloom_iouring_loop_hub_arm(h->iouring_ring,
+                                                   runloom_netpoll_epoll_fd());
+            if (wfd >= 0) {
+                h->loop_wake_fd    = wfd;
+                h->iouring_eventfd = -1;
+            } else {
+                runloom_iouring_ring_destroy(h->iouring_ring);
+                h->iouring_ring    = NULL;
+                h->iouring_eventfd = -1;
+            }
+        } else {
+            h->iouring_eventfd = runloom_iouring_ring_eventfd(h->iouring_ring);
+            if (runloom_netpoll_add_iouring_ring(h->iouring_eventfd,
+                                              h->iouring_ring) != 0) {
+                /* Registration failed (most likely no epoll backend, but
+                 * this build path is Linux-only so it'd be unusual).
+                 * Discard the ring; hub-bound iouring calls fall through. */
+                runloom_iouring_ring_destroy(h->iouring_ring);
+                h->iouring_ring     = NULL;
+                h->iouring_eventfd  = -1;
+            }
         }
     } else {
         h->iouring_eventfd = -1;
@@ -590,6 +609,66 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
                             h->last_sweep_s = now_s;
                         }
                     }
+                }
+                /* io_uring-as-loop idle path (RUNLOOM_IOURING_LOOP=1).  The hub
+                 * blocks DIRECTLY in its ring -- which multiplexes ALL wake
+                 * sources: io_uring op completions (Stage-2 proactor), the
+                 * shared epoll fd (poll-added -> F_EPOLL -> pump(0) drains the
+                 * ready fds into their parkers), the per-hub wake eventfd
+                 * (cross-hub submit -> F_WAKE; the sub list is re-drained at the
+                 * loop top regardless), and the idle-tick timeout (idle_ns,
+                 * which already accounts for the next local sleeper/timer).
+                 * ring_waiting is the lock-free hint hub_submit reads to write
+                 * the wake eventfd; the announce + sub_head re-check below close
+                 * the announce/submit race, and the TIMED wait makes a (rare)
+                 * lost wake degrade to one idle_ns of latency, never a hang --
+                 * the same guarantee the idle-condvar path gives.  loop_wait's
+                 * io_uring_enter(GETEVENTS) also flushes this ring's
+                 * DEFER_TASKRUN task work, so completions materialise here (no
+                 * separate ring_get_events needed).  GIL released across the
+                 * blocking enter, then re-held for pump(0). */
+                if (runloom_iouring_loop_enabled() && h->iouring_ring != NULL) {
+                    int lflags = 0;
+                    int have_sub;
+                    __atomic_store_n(&h->ring_waiting, 1, __ATOMIC_RELEASE);
+                    /* SEQ_CST so the ring_waiting store is ordered before the
+                     * sub_head load against hub_submit's push-then-read-
+                     * ring_waiting (a Dekker handshake); without the fence the
+                     * store/load could reorder and lose the wake for one tick
+                     * (the timeout still bounds it, but the fence keeps the
+                     * common path latency-free). */
+                    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+                    RUNLOOM_RLOCK(&h->sub_lock, RUNLOOM_RANK_HUB_SUB);
+                    have_sub = (h->sub_head != NULL);
+                    RUNLOOM_RUNLOCK(&h->sub_lock, RUNLOOM_RANK_HUB_SUB);
+                    if (!have_sub) {
+                        if (idle_ns <= 0) idle_ns = 1;
+                        saved = PyEval_SaveThread();
+                        runloom_iouring_loop_wait(h->iouring_ring, idle_ns,
+                                                  &lflags);
+                        PyEval_RestoreThread(saved);
+                    }
+                    __atomic_store_n(&h->ring_waiting, 0, __ATOMIC_RELEASE);
+                    if (lflags & RUNLOOM_LOOP_F_EPOLL) {
+                        /* epoll fd readable: drain ready fds -> wake parkers
+                         * (GIL held; pump(0) is non-blocking). */
+                        runloom_netpoll_pump(0);
+                    }
+                    /* Reap GLOBAL-ring completions.  Cooperative file I/O
+                     * (runloom_iouring_pread/pwrite via runloom_iouring_do) lives on
+                     * the process-global ring, NOT this hub ring.  Its eventfd
+                     * is in the shared epoll with EPOLLEXCLUSIVE, whose readiness
+                     * does NOT reliably propagate to a poll-on-the-epoll-fd (the
+                     * UD_EPOLL bridge) -- so F_EPOLL can miss it and a fiber
+                     * parked in file_read would hang.  Drain the global ring
+                     * directly here: a cheap no-op when it is uninitialised (the
+                     * pure-network serve path never touches it) or its CQ is
+                     * empty; otherwise it reaps the CQEs and wakes the reader via
+                     * the op->wait handshake.  The idle_ns timeout bounds the
+                     * latency on the (rare) ticks where UD_EPOLL didn't fire. */
+                    runloom_iouring_drain();
+                    (void)saved;
+                    continue;
                 }
                 {
                     /* Also drive the pump when ANY iouring ring (this
@@ -1135,7 +1214,14 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
      * still had inflight ops we'd leak the underlying CQEs (kernel
      * frees them on close). */
     if (h->iouring_ring != NULL) {
-        runloom_netpoll_remove_iouring_ring(h->iouring_eventfd);
+        if (h->loop_wake_fd >= 0) {
+            /* Loop backend: no eventfd was registered in the epoll pump; just
+             * close the wake eventfd (the multishot polls die with the ring). */
+            runloom_iouring_loop_hub_disarm(h->iouring_ring);
+            h->loop_wake_fd = -1;
+        } else {
+            runloom_netpoll_remove_iouring_ring(h->iouring_eventfd);
+        }
         runloom_iouring_ring_destroy(h->iouring_ring);
         h->iouring_ring    = NULL;
         h->iouring_eventfd = -1;

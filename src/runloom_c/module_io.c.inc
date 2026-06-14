@@ -134,20 +134,41 @@ static void runloom_io_c_echo(void *arg)
 {
     int fd = (int)(intptr_t)arg;
     char buf[64];
+    /* Under the io_uring-as-loop backend, drive recv/send as proactor ring ops
+     * (IORING_OP_RECV/SEND on the owning hub's ring): the data op runs in the
+     * kernel and the fiber parks until the CQE arrives, drained inline by the
+     * hub's loop_wait -- no readiness round trip, no epoll bridge.  Off the loop
+     * backend (or with no hub ring), fall back to the readiness path (raw
+     * recv/send + cooperative wait_fd). */
+    runloom_iouring_ring_t *ring = runloom_iouring_loop_enabled()
+                                       ? runloom_mn_current_iouring_ring()
+                                       : NULL;
     for (;;) {
         ssize_t n;
-        for (;;) {
-            n = recv(fd, buf, 8, 0);
-            if (n >= 0) break;
-            if (errno == EINTR) continue;
-            if (errno != EAGAIN && errno != EWOULDBLOCK) { close(fd); return; }
-            if (runloom_netpoll_wait_fd(fd, RUNLOOM_NETPOLL_READ, -1LL) < 0) { close(fd); return; }
+        if (ring != NULL) {
+            n = runloom_iouring_loop_recv(ring, fd, buf, 8, 0);
+            if (n < 0) { close(fd); return; }    /* errno set; hard error */
+        } else {
+            for (;;) {
+                n = recv(fd, buf, 8, 0);
+                if (n >= 0) break;
+                if (errno == EINTR) continue;
+                if (errno != EAGAIN && errno != EWOULDBLOCK) { close(fd); return; }
+                if (runloom_netpoll_wait_fd(fd, RUNLOOM_NETPOLL_READ, -1LL) < 0) { close(fd); return; }
+            }
         }
         if (n == 0) { close(fd); return; }      /* peer closed */
         {
             ssize_t sent = 0;
             while (sent < n) {
-                ssize_t s = send(fd, buf + sent, (size_t)(n - sent), 0);
+                ssize_t s;
+                if (ring != NULL) {
+                    s = runloom_iouring_loop_send(ring, fd, buf + sent,
+                                                  (size_t)(n - sent), 0);
+                    if (s > 0) { sent += s; continue; }
+                    close(fd); return;           /* EOF/error on a proactor send */
+                }
+                s = send(fd, buf + sent, (size_t)(n - sent), 0);
                 if (s > 0) { sent += s; continue; }
                 if (s < 0 && errno == EINTR) continue;
                 if (s < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {

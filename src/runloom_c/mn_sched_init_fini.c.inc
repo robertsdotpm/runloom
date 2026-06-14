@@ -96,6 +96,10 @@ int runloom_mn_init(int n_threads)
         runloom_mutex_init(&h->idle_lock);
         runloom_cond_init(&h->idle_cond);
         h->idle_waiting = 0;
+        /* io_uring-as-loop: the wake eventfd is created by the hub thread in
+         * runloom_hub_main only when the loop backend is on; -1 = absent. */
+        h->loop_wake_fd = -1;
+        h->ring_waiting = 0;
         /* Controlled-replay deferred-publish staging (barrier mode only): one
          * per-target list so a segment's cross-hub submits flush atomically at
          * release.  PyMem_Calloc zeroes; OOM -> NULL -> hub_submit falls back to

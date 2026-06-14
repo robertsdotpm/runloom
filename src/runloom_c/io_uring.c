@@ -46,6 +46,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/io_uring.h>
+#include <poll.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -140,6 +141,7 @@ struct runloom_iouring_buf_reg {
 #include "io_uring_l_do.c.inc"
 #include "io_uring_l_msclose.c.inc"
 #include "io_uring_l_ring.c.inc"
+#include "io_uring_l_loop.c.inc"
 #else  /* !__linux__ */
 
 #include <errno.h>

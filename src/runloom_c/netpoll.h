@@ -166,6 +166,10 @@ void runloom_netpoll_reset_after_fork(void);
 /* Backend name for diagnostics: "epoll" / "kqueue" / "select". */
 const char *runloom_netpoll_backend(void);
 
+/* The shared epoll fd (Linux), for the io_uring-as-loop backend to poll-add
+ * into a hub ring.  -1 on non-epoll backends.  Forces netpoll init. */
+int runloom_netpoll_epoll_fd(void);
+
 /* Test-only Windows netpoll fault-injection introspection (see netpoll.c).
  * runloom_fault_count returns how many times the named site ("WSAPOLL"/"SELECT"/
  * "IOCP_WAIT"/"IOCP_SUBMIT") injected an error (-1 for an unknown name / a

@@ -203,4 +203,49 @@ runloom_iouring_ssize_t runloom_iouring_ring_send(runloom_iouring_ring_t *r,
                                             int fd, const void *buf,
                                             size_t n, int flags);
 
+/* ============================================================
+ * io_uring-as-loop backend (RUNLOOM_IOURING_LOOP=1, default off).
+ *
+ * The hub blocks DIRECTLY in its per-hub ring (io_uring_submit_and_wait_timeout)
+ * instead of epoll_wait, eliminating the eventfd->epoll->pump bridge.  Two
+ * non-io_uring wake sources are bridged in as persistent multishot POLL_ADDs:
+ * a per-hub wake eventfd (cross-hub submit interrupt) and the shared netpoll
+ * epoll fd (so existing wait_fd readiness still works, drained via a
+ * non-blocking pump(0) when the loop reports it ready).
+ * ============================================================ */
+
+/* 1 if the loop backend is enabled (RUNLOOM_IOURING_LOOP set, read once). */
+int runloom_iouring_loop_enabled(void);
+
+/* Bits set by loop_wait in *flags_out. */
+#define RUNLOOM_LOOP_F_EPOLL   0x1   /* epoll fd readable: caller should pump(0) */
+#define RUNLOOM_LOOP_F_WAKE    0x2   /* wake eventfd fired (sub list re-drained) */
+
+/* Arm the loop on a hub's ring: create the wake eventfd, poll-add it + the
+ * shared epoll fd (may be -1) as persistent multishot polls.  Returns the wake
+ * fd (>=0) on success, -1 on failure (caller discards the ring). */
+int runloom_iouring_loop_hub_arm(runloom_iouring_ring_t *r, int epoll_fd);
+
+/* Block the owning hub in its ring until >=1 completion or timeout_ns (<0 =
+ * forever), draining the whole CQE batch.  *flags_out accumulates the F_* bits. */
+void runloom_iouring_loop_wait(runloom_iouring_ring_t *r, long long timeout_ns,
+                               int *flags_out);
+
+/* Stage-2 proactor I/O: submit an IORING_OP_RECV/SEND on the current hub's
+ * ring (deferred -- batched into the next loop_wait), park the fiber, and
+ * return bytes (0 = EOF, -1 + errno on error).  Must run on a fiber whose
+ * hub owns r.  Used by the all-C serve path under the loop backend. */
+runloom_iouring_ssize_t runloom_iouring_loop_recv(runloom_iouring_ring_t *r,
+                                                  int fd, void *buf, size_t n,
+                                                  int flags);
+runloom_iouring_ssize_t runloom_iouring_loop_send(runloom_iouring_ring_t *r,
+                                                  int fd, const void *buf,
+                                                  size_t n, int flags);
+
+/* Write a hub's wake eventfd to interrupt its ring wait (cross-hub submit). */
+void runloom_iouring_loop_wake(int wake_fd);
+
+/* Close the wake eventfd (the polls die with the ring at destroy). */
+void runloom_iouring_loop_hub_disarm(runloom_iouring_ring_t *r);
+
 #endif

@@ -141,6 +141,18 @@ static void runloom_mn_hub_submit(runloom_hub_t *h, runloom_g_t *g)
      * hub entering/leaving the wait is harmless -- the wait is TIMED, so a
      * (rare) missed signal just falls back to the idle_ns poll, never a hang. */
     __atomic_add_fetch(&h->sub_gen, 1, __ATOMIC_RELEASE);
+    /* io_uring-as-loop: if the target hub is blocked in its ring (not the idle
+     * condvar), interrupt that wait by writing its per-hub wake eventfd.  The
+     * SEQ_CST fence pairs with the hub's ring_waiting store + sub_head re-check
+     * (a Dekker handshake): we pushed to sub_head above, so either the hub sees
+     * it on its re-check and skips the wait, or it is blocked and we wake it
+     * here.  ring_waiting is 0 unless the loop backend is on, so the default
+     * path skips straight to the idle_cond signal below. */
+    if (__atomic_load_n(&h->ring_waiting, __ATOMIC_RELAXED)) {
+        __atomic_thread_fence(__ATOMIC_SEQ_CST);
+        if (__atomic_load_n(&h->ring_waiting, __ATOMIC_ACQUIRE))
+            runloom_iouring_loop_wake(h->loop_wake_fd);
+    }
     if (__atomic_load_n(&h->idle_waiting, __ATOMIC_ACQUIRE)) {
         RUNLOOM_RLOCK(&h->idle_lock, RUNLOOM_RANK_HUB_IDLE);
         runloom_cond_signal(&h->idle_cond);
