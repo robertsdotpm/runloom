@@ -123,6 +123,20 @@ long runloom_foreign_park_inflight(void)
     return __atomic_load_n(&runloom_foreign_park_count, __ATOMIC_ACQUIRE);
 }
 
+/* Set the wait-reason hint for the current fiber; consumed (and cleared) at its
+ * next park_safe so the deadlock/wedge dump can say WHY it is blocked.  A no-op
+ * off a fiber.  Peeks the current g (never lazily allocates a sched -- safe on a
+ * foreign thread).  Diagnostic only. */
+void runloom_set_current_wait_reason(int reason)
+{
+    runloom_g_t *g = (runloom_mn_current_hub_opaque() != NULL)
+                     ? runloom_mn_tls_current_g()
+                     : runloom_sched_peek_current();
+    if (g == NULL) return;
+    if (reason < 0 || reason >= RUNLOOM_WR__LAST) reason = RUNLOOM_WR_SYNC;
+    g->wait_reason_hint = (unsigned char)reason;
+}
+
 int runloom_park_generic(int foreign_wakeable)
 {
     void *hub = runloom_mn_current_hub_opaque();
@@ -159,6 +173,11 @@ int runloom_park_generic(int foreign_wakeable)
              * hub resumes us from the re-queue. */
         }
         runloom_sched_park_current();   /* mark off-queue + snap */
+        /* Consume the wait-reason hint (set by the higher-level primitive);
+         * default SYNC.  Cleared so it can't leak to a later park. */
+        g->wait_reason = (g->wait_reason_hint != (unsigned char)RUNLOOM_WR_NONE)
+                         ? g->wait_reason_hint : (unsigned char)RUNLOOM_WR_SYNC;
+        g->wait_reason_hint = (unsigned char)RUNLOOM_WR_NONE;
         runloom_g_state_set(g, RUNLOOM_GST_PARKED_SAFE);
         runloom_coro_yield();           /* hub_main resumes here on re-queue */
         if (foreign_wakeable) runloom_foreign_park_release();
@@ -484,6 +503,11 @@ void runloom_sched_park_safe(void)
          * dequeue g on its next iteration. */
     }
 
+    /* Consume the wait-reason hint (set by the higher-level primitive); default
+     * SYNC.  Cleared so it can't leak to a later park. */
+    g->wait_reason = (g->wait_reason_hint != (unsigned char)RUNLOOM_WR_NONE)
+                     ? g->wait_reason_hint : (unsigned char)RUNLOOM_WR_SYNC;
+    g->wait_reason_hint = (unsigned char)RUNLOOM_WR_NONE;
     runloom_pystate_snap(&g->snap);
     runloom_g_state_set(g, RUNLOOM_GST_PARKED_SAFE);
     runloom_coro_yield();

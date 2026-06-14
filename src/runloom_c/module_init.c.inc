@@ -286,6 +286,10 @@ static PyMethodDef module_methods[] = {
     {"count_deadlocked", m_count_deadlocked, METH_NOARGS,
      "count_deadlocked() -> int.  Goroutines currently parked on a "
      "channel/park (the set that deadlocks if the scheduler quiesces)."},
+    {"set_wait_reason", m_set_wait_reason, METH_O,
+     "set_wait_reason(n): tag the current fiber's next park with a wait "
+     "reason (a runloom wait-reason code) so the deadlock/wedge dump can say "
+     "WHY it is blocked.  No-op off a fiber.  Diagnostic only."},
     {"set_max_fibers", m_set_max_fibers, METH_O,
      "set_max_fibers(n): cap the number of live fibers (0 = unlimited, "
      "the default).  Over the cap, go()/spawn raises RuntimeError -- an "
@@ -561,6 +565,21 @@ PyMODINIT_FUNC PyInit_runloom_c(void)
      * runloom.aio turns it into CancelledError. */
     if (PyModule_AddIntConstant(m, "WAIT_FD_CANCELLED",
                                 RUNLOOM_NETPOLL_CANCELLED) < 0) {
+        Py_DECREF(m);
+        return NULL;
+    }
+    /* Wait-reason codes for set_wait_reason() (see runloom_wait_reason). */
+    if (PyModule_AddIntConstant(m, "WR_SYNC",      RUNLOOM_WR_SYNC)      < 0 ||
+        PyModule_AddIntConstant(m, "WR_FUTURE",    RUNLOOM_WR_FUTURE)    < 0 ||
+        PyModule_AddIntConstant(m, "WR_WAITGROUP", RUNLOOM_WR_WAITGROUP) < 0 ||
+        PyModule_AddIntConstant(m, "WR_LOCK",      RUNLOOM_WR_LOCK)      < 0 ||
+        PyModule_AddIntConstant(m, "WR_EVENT",     RUNLOOM_WR_EVENT)     < 0 ||
+        PyModule_AddIntConstant(m, "WR_CONDITION", RUNLOOM_WR_CONDITION) < 0 ||
+        PyModule_AddIntConstant(m, "WR_BARRIER",   RUNLOOM_WR_BARRIER)   < 0 ||
+        PyModule_AddIntConstant(m, "WR_SELECT",    RUNLOOM_WR_SELECT)    < 0 ||
+        PyModule_AddIntConstant(m, "WR_EXECUTOR",  RUNLOOM_WR_EXECUTOR)  < 0 ||
+        PyModule_AddIntConstant(m, "WR_SEMAPHORE", RUNLOOM_WR_SEMAPHORE) < 0 ||
+        PyModule_AddIntConstant(m, "WR_QUEUE",     RUNLOOM_WR_QUEUE)     < 0) {
         Py_DECREF(m);
         return NULL;
     }

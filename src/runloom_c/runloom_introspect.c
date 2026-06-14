@@ -101,6 +101,24 @@ const char *runloom_g_state_name(unsigned int s)
     }
 }
 
+const char *runloom_wait_reason_name(unsigned char r)
+{
+    switch ((runloom_wait_reason_t)r) {
+    case RUNLOOM_WR_SYNC:      return "sync";
+    case RUNLOOM_WR_FUTURE:    return "future";
+    case RUNLOOM_WR_WAITGROUP: return "waitgroup";
+    case RUNLOOM_WR_LOCK:      return "lock";
+    case RUNLOOM_WR_EVENT:     return "event";
+    case RUNLOOM_WR_CONDITION: return "condition";
+    case RUNLOOM_WR_BARRIER:   return "barrier";
+    case RUNLOOM_WR_SELECT:    return "select";
+    case RUNLOOM_WR_EXECUTOR:  return "executor";
+    case RUNLOOM_WR_SEMAPHORE: return "semaphore";
+    case RUNLOOM_WR_QUEUE:     return "queue";
+    default:                   return NULL;   /* WR_NONE -> no suffix */
+    }
+}
+
 const char *runloom_g_state_blockclass(unsigned int s)
 {
     switch ((runloom_g_state_t)s) {
@@ -436,10 +454,22 @@ void runloom_dump_fibers_fd(int fd)
                      (double)(now - since) / 1e9);
             strncat(detail, age, sizeof detail - strlen(detail) - 1);
         }
-        m = snprintf(buf, sizeof buf,
-            "  g%-8llu %-10s rc=%d owner=%p%s\n",
-            (unsigned long long)id, runloom_g_state_name(st), rc,
-            (void *)g->owner, detail);
+        {
+            /* For PARKED_SAFE, subdivide the opaque "park" with the fiber's
+             * wait reason (future / waitgroup / lock / ...) so the dump says
+             * WHY it is blocked. */
+            const char *sname = runloom_g_state_name(st);
+            const char *wr = (st == RUNLOOM_GST_PARKED_SAFE)
+                             ? runloom_wait_reason_name(g->wait_reason) : NULL;
+            char stlabel[28];
+            if (wr != NULL) {
+                snprintf(stlabel, sizeof stlabel, "%s:%s", sname, wr);
+                sname = stlabel;
+            }
+            m = snprintf(buf, sizeof buf,
+                "  g%-8llu %-12s rc=%d owner=%p%s\n",
+                (unsigned long long)id, sname, rc, (void *)g->owner, detail);
+        }
         if (m > 0) emit(fd, buf, (size_t)m);
     }
     emit(fd, "=== end fiber dump ===\n", 27);

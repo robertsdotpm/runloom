@@ -326,6 +326,14 @@ struct runloom_g {
      * 0 = fn() (slab-cleared default). */
     unsigned char pass_index;
 
+    /* Wait-reason taxonomy (see runloom_wait_reason in runloom_gstate.h).  Both
+     * live in the slab-cleared range so a recycled fiber starts at WR_NONE.
+     * `wait_reason` is the active reason read by the dump while parked;
+     * `wait_reason_hint` is the pending reason a higher-level primitive sets
+     * before parking, consumed (and cleared) at park_safe.  Diagnostic only. */
+    unsigned char wait_reason;
+    unsigned char wait_reason_hint;
+
     /* ---- introspection block (runloom_introspect.c) ----
      * These fields are deliberately the LAST members of runloom_g_t.  The
      * per-thread slab reuse path (runloom_g_slab_alloc) clears a g only up to
