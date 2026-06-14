@@ -484,6 +484,9 @@ runloom_g_t *runloom_g_slab_alloc(void)
                          __ATOMIC_RELEASE);
         memset((char *)g + offsetof(runloom_g_t, arena), 0,
                offsetof(runloom_g_t, id) - offsetof(runloom_g_t, arena));
+#ifdef RUNLOOM_DBG_BADCORO
+        g->magic = 0x600DC0DEu;   /* source-hunt: live-g canary (reuse path) */
+#endif
         return g;
     }
     /* Cold path: a brand-new struct from the OS.  Use libc calloc, NOT
@@ -498,12 +501,20 @@ runloom_g_t *runloom_g_slab_alloc(void)
      * pymalloc.  calloc zeroes everything (registry links + id); link it into
      * the global registry exactly once for the struct's whole lifetime. */
     g = (runloom_g_t *)calloc(1, sizeof(*g));
-    if (g != NULL) runloom_greg_link(g);
+    if (g != NULL) {
+        runloom_greg_link(g);
+#ifdef RUNLOOM_DBG_BADCORO
+        g->magic = 0x600DC0DEu;   /* source-hunt: live-g canary (cold path) */
+#endif
+    }
     return g;
 }
 
 void runloom_g_slab_free(runloom_g_t *g)
 {
+#ifdef RUNLOOM_DBG_BADCORO
+    g->magic = 0xDEADu;   /* source-hunt: freed-g marker (distinguishes UAF from reuse) */
+#endif
     runloom_g_state_set(g, RUNLOOM_GST_FREED);
     if (runloom_g_slab_size >= RUNLOOM_G_SLAB_CAP) {
         /* Struct is leaving for the OS -- drop it from the registry

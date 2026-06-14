@@ -312,17 +312,16 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
                          * linked); if last_wval != sub, prev->next was overwritten
                          * AFTER the recorded write -> a wild write (the recorded
                          * site/seq bounds when the last legit write happened). */
-                        char dbuf[420];
+                        char dbuf[460];
                         int dm = snprintf(dbuf, sizeof dbuf,
-                            "[DRAINBAD] sub=%p bad <- prev=%p id=%lld coro=%p owner=%p rc=%d insub=%d snapv=%d || prevNEXT wsite=%d wval=%p wseq=%llu (wval==sub? %d)\n",
-                            (void *)sub, (void *)prev,
+                            "[DRAINBAD] sub=%p submagic=%x bad <- prev=%p pmagic=%x id=%lld owner=%p rc=%d snapv=%d || prevNEXT wsite=%d wval=%p (wval==sub? %d)\n",
+                            (void *)sub, sub->magic,
+                            (void *)prev, prev ? prev->magic : 0,
                             prev ? (long long)prev->id : -1,
-                            prev ? (void *)prev->coro : NULL,
                             prev ? (void *)prev->owner : NULL,
                             prev ? (int)__atomic_load_n(&prev->refcount, __ATOMIC_ACQUIRE) : -1,
-                            prev ? (int)__atomic_load_n(&prev->in_sub_queue, __ATOMIC_ACQUIRE) : -1,
                             prev ? prev->snap.valid : -1,
-                            last_wsite, last_wval, last_wseq,
+                            last_wsite, last_wval,
                             (last_wval == (void *)sub) ? 1 : 0);
                         if (dm > 0) (void)write(2, dbuf, (size_t)dm);
                         break;

@@ -147,6 +147,13 @@ typedef void (*runloom_c_entry_fn)(void *);
 
 struct runloom_g {
     runloom_coro_t *coro;
+#ifdef RUNLOOM_DBG_BADCORO
+    /* Source-hunt canary (offset 8, in the corrupted region).  Set 0x600DC0DE
+     * by slab_alloc, 0xDEAD by slab_free.  At the drain a `sub` reading
+     * 0x600DC0DE is a live g; 0xDEAD is a freed-but-not-reused g (UAF);
+     * anything else is reused memory (e.g. a coro stack overwrote it). */
+    unsigned int magic;
+#endif
     /* Stack-advice kind key (FNV hash of the entry callable's identity), or 0.
      * Set at spawn only while stack-advice profiling is enabled; read at
      * completion to fold this g's C-stack HWM into its kind.  See

@@ -33,5 +33,13 @@ want_bug sched_readyring_cbmc.c "-DBUG_NO_CAPCHECK"   "push skips full check -> 
 want_ok  sched_pystate_cbmc.c ""
 want_bug sched_pystate_cbmc.c "-DBUG_DROP_FIELD" "load forgets a field -> cross-g leak"
 
+# default-path queue-membership + refcount: a stale wake racing completion must
+# not leave a queue entry pointing at a freed g (the per-hub-kqueue arm64 UAF).
+# The FIX (try_incref before touching g) is correct; BOTH the naive queue ref
+# (incref AFTER the in_sub_queue CAS) and the original no-ref code have the UAF.
+want_ok  sched_qref_cbmc.c ""
+want_bug sched_qref_cbmc.c "-DBUG_INCREF_AFTER_CAS" "naive queue ref (incref after CAS) -> stale-wake UAF window"
+want_bug sched_qref_cbmc.c "-DBUG_NO_QUEUE_REF"     "no queue ref -> stale-wake-after-completion UAF (original)"
+
 echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
