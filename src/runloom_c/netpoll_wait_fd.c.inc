@@ -25,7 +25,7 @@ int runloom_netpoll_drain_parked(void)
         runloom_parker_pool_t *pool = &runloom_pools[pi];
         runloom_parked_t *p;
         if (__atomic_load_n(&pool->lock_inited, __ATOMIC_ACQUIRE) != 2) continue;
-        runloom_mutex_lock(&pool->lock);
+        RUNLOOM_RLOCK(&pool->lock, RUNLOOM_RANK_PARKER_POOL);
         p = pool->head;
         while (p != NULL) {
             runloom_parked_t *next = p->next;   /* capture before unlink splices p out */
@@ -63,7 +63,7 @@ int runloom_netpoll_drain_parked(void)
             }
             p = next;
         }
-        runloom_mutex_unlock(&pool->lock);
+        RUNLOOM_RUNLOCK(&pool->lock, RUNLOOM_RANK_PARKER_POOL);
     }
     return n;
 }
@@ -91,7 +91,7 @@ int runloom_netpoll_signal_wake(void)
         runloom_parker_pool_t *pool = &runloom_pools[pi];
         runloom_parked_t *p;
         if (__atomic_load_n(&pool->lock_inited, __ATOMIC_ACQUIRE) != 2) continue;
-        runloom_mutex_lock(&pool->lock);
+        RUNLOOM_RLOCK(&pool->lock, RUNLOOM_RANK_PARKER_POOL);
         for (p = pool->head; p != NULL; p = p->next) {
             int cur;
             if (p->g == NULL || p->g->owner != owner) continue;
@@ -114,10 +114,10 @@ int runloom_netpoll_signal_wake(void)
             runloom_parker_unlink(pool, p);
             if (p->hub != NULL) runloom_mn_wake_g(p->hub, p->g);
             else                runloom_sched_wake(p->g);
-            runloom_mutex_unlock(&pool->lock);
+            RUNLOOM_RUNLOCK(&pool->lock, RUNLOOM_RANK_PARKER_POOL);
             return 1;
         }
-        runloom_mutex_unlock(&pool->lock);
+        RUNLOOM_RUNLOCK(&pool->lock, RUNLOOM_RANK_PARKER_POOL);
     }
     return 0;
 }
@@ -194,7 +194,7 @@ int runloom_netpoll_wait_fd(int fd, int events, long long timeout_ns)
      * the parker was visible; (b) edges fired during the gap between
      * a previous parker being unlinked-on-wake and a new one being
      * linked. */
-    runloom_mutex_lock(&pool->lock);
+    RUNLOOM_RLOCK(&pool->lock, RUNLOOM_RANK_PARKER_POOL);
     {
         /* Cross-hub poller-break (Go's wakeNetPoller, when < pollUntil).  If
          * this parker arms the pool's new EARLIEST deadline, a sibling hub
@@ -209,7 +209,7 @@ int runloom_netpoll_wait_fd(int fd, int events, long long timeout_ns)
         new_earliest_deadline = (park->deadline_ns >= 0 &&
                                  (prev_min < 0 || park->deadline_ns < prev_min));
     }
-    runloom_mutex_unlock(&pool->lock);
+    RUNLOOM_RUNLOCK(&pool->lock, RUNLOOM_RANK_PARKER_POOL);
     if (new_earliest_deadline) runloom_netpoll_wake_pump();
     if (current_g != NULL) {
         /* Record what we're blocked on as plain data ON the g, so the
@@ -228,9 +228,9 @@ int runloom_netpoll_wait_fd(int fd, int events, long long timeout_ns)
     {
         int pending = runloom_fd_pending_wake_consume(fd, events);
         if (pending != 0) {
-            runloom_mutex_lock(&pool->lock);
+            RUNLOOM_RLOCK(&pool->lock, RUNLOOM_RANK_PARKER_POOL);
             runloom_parker_unlink(pool, park);
-            runloom_mutex_unlock(&pool->lock);
+            RUNLOOM_RUNLOCK(&pool->lock, RUNLOOM_RANK_PARKER_POOL);
             if (current_g != NULL) runloom_g_state_set(current_g, RUNLOOM_GST_RUNNING);
             runloom_parker_pool_release(park);
             return pending;
@@ -246,26 +246,26 @@ int runloom_netpoll_wait_fd(int fd, int events, long long timeout_ns)
          * in flight on a simulated failure; the parker is cleanly unlinked. */
         int finj = runloom_fault_inject(RUNLOOM_FAULT_IOCP_SUBMIT);
         if (finj || runloom_iocp_submit(fd, events, timeout_ns) != 0) {
-            runloom_mutex_lock(&pool->lock);
+            RUNLOOM_RLOCK(&pool->lock, RUNLOOM_RANK_PARKER_POOL);
             runloom_parker_unlink(pool, park);
-            runloom_mutex_unlock(&pool->lock);
+            RUNLOOM_RUNLOCK(&pool->lock, RUNLOOM_RANK_PARKER_POOL);
             runloom_parker_pool_release(park);
             return -1;
         }
     } else {
         if (runloom_netpoll_register(fd, events) != 0) {
-            runloom_mutex_lock(&pool->lock);
+            RUNLOOM_RLOCK(&pool->lock, RUNLOOM_RANK_PARKER_POOL);
             runloom_parker_unlink(pool, park);
-            runloom_mutex_unlock(&pool->lock);
+            RUNLOOM_RUNLOCK(&pool->lock, RUNLOOM_RANK_PARKER_POOL);
             runloom_parker_pool_release(park);
             return -1;
         }
     }
 #else
     if (runloom_netpoll_register(fd, events) != 0) {
-        runloom_mutex_lock(&pool->lock);
+        RUNLOOM_RLOCK(&pool->lock, RUNLOOM_RANK_PARKER_POOL);
         runloom_parker_unlink(pool, park);
-        runloom_mutex_unlock(&pool->lock);
+        RUNLOOM_RUNLOCK(&pool->lock, RUNLOOM_RANK_PARKER_POOL);
         runloom_parker_pool_release(park);
         return -1;
     }
@@ -279,9 +279,9 @@ int runloom_netpoll_wait_fd(int fd, int events, long long timeout_ns)
     {
         int pending = runloom_fd_pending_wake_consume(fd, events);
         if (pending != 0) {
-            runloom_mutex_lock(&pool->lock);
+            RUNLOOM_RLOCK(&pool->lock, RUNLOOM_RANK_PARKER_POOL);
             runloom_parker_unlink(pool, park);
-            runloom_mutex_unlock(&pool->lock);
+            RUNLOOM_RUNLOCK(&pool->lock, RUNLOOM_RANK_PARKER_POOL);
             runloom_parker_pool_release(park);
             return pending;
         }
@@ -304,9 +304,9 @@ int runloom_netpoll_wait_fd(int fd, int events, long long timeout_ns)
              * never committed to parking, so it keeps running; its wake_state
              * stays RUNNING (the pump claimed an ARMED parker and so did NOT
              * call wake_g -- nothing to undo). */
-            runloom_mutex_lock(&pool->lock);
+            RUNLOOM_RLOCK(&pool->lock, RUNLOOM_RANK_PARKER_POOL);
             runloom_parker_unlink(pool, park);   /* no-op if pump unlinked */
-            runloom_mutex_unlock(&pool->lock);
+            RUNLOOM_RUNLOCK(&pool->lock, RUNLOOM_RANK_PARKER_POOL);
             if (current_g != NULL)
                 runloom_g_state_set(current_g, RUNLOOM_GST_RUNNING);
             if (current_g != NULL && current_g->netpoll_parker == park)
@@ -346,9 +346,9 @@ int runloom_netpoll_wait_fd(int fd, int events, long long timeout_ns)
                 (park->fd >= 0 && (size_t)park->fd < pool->by_fd_cap)
                     ? (void *)pool->by_fd[park->fd] : NULL);
 #endif
-        runloom_mutex_lock(&pool->lock);
+        RUNLOOM_RLOCK(&pool->lock, RUNLOOM_RANK_PARKER_POOL);
         runloom_parker_unlink(pool, park);
-        runloom_mutex_unlock(&pool->lock);
+        RUNLOOM_RUNLOCK(&pool->lock, RUNLOOM_RANK_PARKER_POOL);
     }
     /* Clear g->netpoll_parker before release so completion's force-
      * unlink cannot dereference a freelist entry. */

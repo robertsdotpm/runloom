@@ -20,7 +20,7 @@ int runloom_netpoll_inspect_for_self_check(struct runloom_self_check_stats *out)
         return 0;
     }
     runloom_parker_pool_lock_ensure_inited(pool);
-    runloom_mutex_lock(&pool->lock);
+    RUNLOOM_RLOCK(&pool->lock, RUNLOOM_RANK_PARKER_POOL);
 
     /* Floyd cycle detection on the global list, with a safety cap. */
     slow = pool->head;
@@ -82,7 +82,7 @@ int runloom_netpoll_inspect_for_self_check(struct runloom_self_check_stats *out)
         }
     }
 
-    runloom_mutex_unlock(&pool->lock);
+    RUNLOOM_RUNLOCK(&pool->lock, RUNLOOM_RANK_PARKER_POOL);
     runloom_self_check_stats_set(out, global_count, global_cycle,
                               parked_atomic, bucket_total, bucket_self,
                               bucket_unreach);
@@ -104,7 +104,7 @@ void runloom_netpoll_dump_parkers(void)
         return;
     }
     runloom_parker_pool_lock_ensure_inited(pool);
-    runloom_mutex_lock(&pool->lock);
+    RUNLOOM_RLOCK(&pool->lock, RUNLOOM_RANK_PARKER_POOL);
     m = snprintf(buf, sizeof buf, "[parker-dump] total=%d head=%p\n",
                  __atomic_load_n(&pool->total, __ATOMIC_ACQUIRE), (void *)pool->head);
     (void)write(2, buf, (size_t)m);
@@ -118,7 +118,7 @@ void runloom_netpoll_dump_parkers(void)
         n++;
         p = p->next;
     }
-    runloom_mutex_unlock(&pool->lock);
+    RUNLOOM_RUNLOCK(&pool->lock, RUNLOOM_RANK_PARKER_POOL);
 }
 
 /* Introspection accessor: read a parker's plain fields.  See netpoll.h. */

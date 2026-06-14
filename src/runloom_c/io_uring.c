@@ -58,6 +58,7 @@
 #include "mn_sched.h"
 #include "netpoll.h"
 #include "plat_compat.h"
+#include "runloom_lockrank.h"
 #include "runloom_sched.h"
 
 /* IORING_REGISTER_EVENTFD opcode for io_uring_register.  Value is a

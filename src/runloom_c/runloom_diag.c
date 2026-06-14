@@ -9,6 +9,7 @@
 #include "runloom_diag.h"
 #include "plat.h"
 #include "plat_compat.h"
+#include "runloom_lockrank.h"
 #include "plat_atomic.h"
 
 #include <stdio.h>
@@ -133,11 +134,11 @@ static runloom_ring_t *ring_acquire(void)
     if (r != NULL) return r;
     r = (runloom_ring_t *)calloc(1, sizeof(*r));
     if (r == NULL) return NULL;
-    runloom_mutex_lock(&runloom_ring_list_lock);
+    RUNLOOM_RLOCK(&runloom_ring_list_lock, RUNLOOM_RANK_RING_LIST);
     r->tid  = ++runloom_ring_next_tid;
     r->next = runloom_ring_list;
     runloom_ring_list = r;
-    runloom_mutex_unlock(&runloom_ring_list_lock);
+    RUNLOOM_RUNLOCK(&runloom_ring_list_lock, RUNLOOM_RANK_RING_LIST);
     runloom_tls_ring = r;
     return r;
 }
@@ -166,9 +167,9 @@ int runloom_diag_registered_thread_count(void)
     int n = 0;
     runloom_ring_t *r;
     if (!runloom_ring_list_lock_inited) return 0;
-    runloom_mutex_lock(&runloom_ring_list_lock);
+    RUNLOOM_RLOCK(&runloom_ring_list_lock, RUNLOOM_RANK_RING_LIST);
     for (r = runloom_ring_list; r != NULL; r = r->next) n++;
-    runloom_mutex_unlock(&runloom_ring_list_lock);
+    RUNLOOM_RUNLOCK(&runloom_ring_list_lock, RUNLOOM_RANK_RING_LIST);
     return n;
 }
 
@@ -229,7 +230,7 @@ void runloom_diag_dump(int fd)
         (unsigned)RUNLOOM_RING_CAP);
     if (n > 0) emit(fd, hdr, (size_t)n);
 
-    runloom_mutex_lock(&runloom_ring_list_lock);
+    RUNLOOM_RLOCK(&runloom_ring_list_lock, RUNLOOM_RANK_RING_LIST);
     for (r = runloom_ring_list; r != NULL; r = r->next) {
         unsigned long head = r->head;
         unsigned long count = head < RUNLOOM_RING_CAP ? head : RUNLOOM_RING_CAP;
@@ -251,7 +252,7 @@ void runloom_diag_dump(int fd)
             if (m > 0) emit(fd, line, (size_t)m);
         }
     }
-    runloom_mutex_unlock(&runloom_ring_list_lock);
+    RUNLOOM_RUNLOCK(&runloom_ring_list_lock, RUNLOOM_RANK_RING_LIST);
 }
 
 
@@ -401,11 +402,11 @@ static runloom_mutex_t runloom_gil_trace_lock;
 void runloom_gilstate_trace(const char *action, int hub, int deleter)
 {
     if (runloom_gil_trace_fp == NULL) return;
-    runloom_mutex_lock(&runloom_gil_trace_lock);
+    RUNLOOM_RLOCK(&runloom_gil_trace_lock, RUNLOOM_RANK_TRACE);
     fprintf(runloom_gil_trace_fp,
             "{\"a\":\"%s\",\"h\":%d,\"d\":%d}\n", action, hub, deleter);
     fflush(runloom_gil_trace_fp);
-    runloom_mutex_unlock(&runloom_gil_trace_lock);
+    RUNLOOM_RUNLOCK(&runloom_gil_trace_lock, RUNLOOM_RANK_TRACE);
 }
 
 /* ---- controlled-baton event trace (TLA+ trace conformance, RUNLOOM_MN_EVENTS) ----
@@ -421,10 +422,10 @@ static runloom_mutex_t runloom_mn_trace_lock;
 void runloom_mn_trace_event(const char *action, int hub)
 {
     if (runloom_mn_trace_fp == NULL) return;
-    runloom_mutex_lock(&runloom_mn_trace_lock);
+    RUNLOOM_RLOCK(&runloom_mn_trace_lock, RUNLOOM_RANK_TRACE);
     fprintf(runloom_mn_trace_fp, "{\"a\":\"%s\",\"h\":%d}\n", action, hub);
     fflush(runloom_mn_trace_fp);
-    runloom_mutex_unlock(&runloom_mn_trace_lock);
+    RUNLOOM_RUNLOCK(&runloom_mn_trace_lock, RUNLOOM_RANK_TRACE);
 }
 
 void runloom_diag_init(void)
@@ -467,10 +468,10 @@ void runloom_diag_fini(void)
 {
     runloom_ring_t *r, *next;
     if (!runloom_diag_inited) return;
-    runloom_mutex_lock(&runloom_ring_list_lock);
+    RUNLOOM_RLOCK(&runloom_ring_list_lock, RUNLOOM_RANK_RING_LIST);
     r = runloom_ring_list;
     runloom_ring_list = NULL;
-    runloom_mutex_unlock(&runloom_ring_list_lock);
+    RUNLOOM_RUNLOCK(&runloom_ring_list_lock, RUNLOOM_RANK_RING_LIST);
     while (r != NULL) {
         next = r->next;
         free(r);
@@ -571,3 +572,31 @@ void runloom_invariant_fail(const char *msg, const void *p1, const void *p2)
     runloom_diag_dump(2);
     abort();
 }
+
+/* ---- lock-rank checker storage (debug-only) ---- */
+#ifdef RUNLOOM_LOCKRANK
+#include "runloom_lockrank.h"
+RUNLOOM_TLS int runloom_lockrank_held[RUNLOOM_LOCKRANK_DEPTH];
+RUNLOOM_TLS int runloom_lockrank_depth = 0;
+
+void runloom_lockrank_violation(int held, int acquired)
+{
+    /* Report each offending (held, acquired) pair once per process so a suite
+     * run reveals the whole out-of-order set in one pass.  A small fixed table
+     * is plenty -- the lock graph has a handful of classes. */
+    static int seen_held[64];
+    static int seen_acq[64];
+    static int seen_n = 0;
+    int i;
+    for (i = 0; i < seen_n; i++)
+        if (seen_held[i] == held && seen_acq[i] == acquired) return;
+    if (seen_n < 64) { seen_held[seen_n] = held; seen_acq[seen_n] = acquired; seen_n++; }
+    fprintf(stderr, "[runloom-lockrank] OUT-OF-ORDER: acquiring rank %d while "
+                    "holding rank %d (locks must be taken in increasing rank "
+                    "order)\n", acquired, held);
+    fflush(stderr);
+#ifdef RUNLOOM_LOCKRANK_ABORT
+    abort();
+#endif
+}
+#endif

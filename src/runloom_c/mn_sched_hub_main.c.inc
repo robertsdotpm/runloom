@@ -113,9 +113,9 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
      * gc.immortalize check-then-act outside its HEAD_LOCK when several threads
      * create tstates at once (see runloom_hub_tstate_lock).  The lock's
      * release/acquire also publishes the immortalize-flag write to later hubs. */
-    runloom_mutex_lock(&runloom_hub_tstate_lock);
+    RUNLOOM_RLOCK(&runloom_hub_tstate_lock, RUNLOOM_RANK_HUB_TSTATE);
     hts = PyThreadState_New(runloom_mn_interp);
-    runloom_mutex_unlock(&runloom_hub_tstate_lock);
+    RUNLOOM_RUNLOCK(&runloom_hub_tstate_lock, RUNLOOM_RANK_HUB_TSTATE);
     if (hts == NULL) {
         /* Astronomically unlikely (a small allocation).  This hub cannot run
          * Python; mark it stopping so the scheduler stops counting on it and
@@ -229,11 +229,11 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
         /* Drain the submission list into the deque first.  Pushing to
          * the deque is owner-only, so we (the hub) move fresh gs from
          * external producers onto our deque before anyone else looks. */
-        runloom_mutex_lock(&h->sub_lock);
+        RUNLOOM_RLOCK(&h->sub_lock, RUNLOOM_RANK_HUB_SUB);
         {
             runloom_g_t *sub = h->sub_head;
             h->sub_head = h->sub_tail = NULL;
-            runloom_mutex_unlock(&h->sub_lock);
+            RUNLOOM_RUNLOCK(&h->sub_lock, RUNLOOM_RANK_HUB_SUB);
             while (sub != NULL) {
                 runloom_g_t *next = sub->next;
                 sub->next = NULL;
@@ -517,7 +517,7 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
                                                            __ATOMIC_RELAXED);
                         if (hub_pending > 0 && runloom_hub_idle_wake_enabled()) {
                             int waited = 0;
-                            runloom_mutex_lock(&h->idle_lock);
+                            RUNLOOM_RLOCK(&h->idle_lock, RUNLOOM_RANK_HUB_IDLE);
                             /* Announce BEFORE the final sub_head re-check so a
                              * submit that races our announce either lands in
                              * sub_head (we see it -> skip the wait) or observes
@@ -527,9 +527,9 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
                              * can't slip into the gap. */
                             __atomic_store_n(&h->idle_waiting, 1, __ATOMIC_RELEASE);
                             int have_sub;
-                            runloom_mutex_lock(&h->sub_lock);
+                            RUNLOOM_RLOCK(&h->sub_lock, RUNLOOM_RANK_HUB_SUB);
                             have_sub = (h->sub_head != NULL);
-                            runloom_mutex_unlock(&h->sub_lock);
+                            RUNLOOM_RUNLOCK(&h->sub_lock, RUNLOOM_RANK_HUB_SUB);
                             if (!have_sub) {
                                 /* Detach BEFORE the wait so a concurrent
                                  * stop-the-world sees this hub already stopped and
@@ -540,7 +540,7 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
                                 waited = 1;
                             }
                             __atomic_store_n(&h->idle_waiting, 0, __ATOMIC_RELEASE);
-                            runloom_mutex_unlock(&h->idle_lock);
+                            RUNLOOM_RUNLOCK(&h->idle_lock, RUNLOOM_RANK_HUB_IDLE);
                             /* Re-attach OUTSIDE idle_lock.  PyEval_RestoreThread
                              * blocks until any in-progress stop-the-world ends;
                              * holding idle_lock across that block would stall a

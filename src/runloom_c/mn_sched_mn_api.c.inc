@@ -100,7 +100,7 @@ static void runloom_mn_hub_submit(runloom_hub_t *h, runloom_g_t *g)
             return;
         }
     }
-    runloom_mutex_lock(&h->sub_lock);
+    RUNLOOM_RLOCK(&h->sub_lock, RUNLOOM_RANK_HUB_SUB);
     g->next = NULL;
     if (h->sub_tail != NULL) {
         h->sub_tail->next = g;
@@ -108,7 +108,7 @@ static void runloom_mn_hub_submit(runloom_hub_t *h, runloom_g_t *g)
         h->sub_head = g;
     }
     h->sub_tail = g;
-    runloom_mutex_unlock(&h->sub_lock);
+    RUNLOOM_RUNLOCK(&h->sub_lock, RUNLOOM_RANK_HUB_SUB);
     RUNLOOM_EVT(RUNLOOM_EVT_G_SUBMIT, g, h, 0);
     runloom_g_state_set(g, RUNLOOM_GST_SUBMITTED);
     /* BUG #10 throughput: bump the submit generation, then signal the target hub
@@ -121,9 +121,9 @@ static void runloom_mn_hub_submit(runloom_hub_t *h, runloom_g_t *g)
      * (rare) missed signal just falls back to the idle_ns poll, never a hang. */
     __atomic_add_fetch(&h->sub_gen, 1, __ATOMIC_RELEASE);
     if (__atomic_load_n(&h->idle_waiting, __ATOMIC_ACQUIRE)) {
-        runloom_mutex_lock(&h->idle_lock);
+        RUNLOOM_RLOCK(&h->idle_lock, RUNLOOM_RANK_HUB_IDLE);
         runloom_cond_signal(&h->idle_cond);
-        runloom_mutex_unlock(&h->idle_lock);
+        RUNLOOM_RUNLOCK(&h->idle_lock, RUNLOOM_RANK_HUB_IDLE);
     }
     /* Cross-hub wake latency fix: the idle_cond signal above ONLY reaches a hub
      * parked in the parked==0 idle-condvar branch.  But `parked` is the GLOBAL

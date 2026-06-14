@@ -197,17 +197,17 @@ int runloom_netpoll_init(void)
      * waiting (Recv-Q>0), forever.  That was the ~0.1% startup-window
      * lost-wake residual.  Creating the handle exactly once, under the
      * lock, with a re-checked `inited`, closes it. */
-    runloom_mutex_lock(&runloom_pool.lock);
+    RUNLOOM_RLOCK(&runloom_pool.lock, RUNLOOM_RANK_PARKER_POOL);
     /* Re-check under the lock: a racing thread may have finished the
      * whole init while we waited to acquire it. */
     if (__atomic_load_n(&runloom_netpoll_inited, __ATOMIC_ACQUIRE)) {
-        runloom_mutex_unlock(&runloom_pool.lock);
+        RUNLOOM_RUNLOCK(&runloom_pool.lock, RUNLOOM_RANK_PARKER_POOL);
         return 0;
     }
     runloom_fd_arrays_init();
 #if defined(RUNLOOM_HAVE_EPOLL)
     runloom_epoll_fd = epoll_create1(EPOLL_CLOEXEC);
-    if (runloom_epoll_fd < 0) { runloom_mutex_unlock(&runloom_pool.lock); return -1; }
+    if (runloom_epoll_fd < 0) { RUNLOOM_RUNLOCK(&runloom_pool.lock, RUNLOOM_RANK_PARKER_POOL); return -1; }
 #elif defined(RUNLOOM_HAVE_KQUEUE)
     runloom_kqueue_fd = kqueue();
     {   /* test-only: force kqueue() to fail so the init-error path is covered.
@@ -220,7 +220,7 @@ int runloom_netpoll_init(void)
             errno = finj;
         }
     }
-    if (runloom_kqueue_fd < 0) { runloom_mutex_unlock(&runloom_pool.lock); return -1; }
+    if (runloom_kqueue_fd < 0) { RUNLOOM_RUNLOCK(&runloom_pool.lock, RUNLOOM_RANK_PARKER_POOL); return -1; }
     /* Cross-thread pump wake: a self-pipe registered in the kqueue.  Best
      * effort -- if pipe()/fcntl()/kevent() fail the pump still re-polls on
      * its bounded timeout, so wake latency degrades but nothing wedges. */
@@ -299,7 +299,7 @@ int runloom_netpoll_init(void)
      * so a racing init that lost the re-check above never observes a
      * half-built backend. */
     __atomic_store_n(&runloom_netpoll_inited, 1, __ATOMIC_RELEASE);
-    runloom_mutex_unlock(&runloom_pool.lock);
+    RUNLOOM_RUNLOCK(&runloom_pool.lock, RUNLOOM_RANK_PARKER_POOL);
     return 0;
 }
 

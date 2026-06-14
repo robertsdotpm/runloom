@@ -35,6 +35,7 @@
 
 #include "plat.h"
 #include "plat_compat.h"
+#include "runloom_lockrank.h"
 #include "chan.h"
 #include "coro.h"
 #include "runloom_sched.h"

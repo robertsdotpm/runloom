@@ -107,7 +107,7 @@ static volatile long runloom_global_runq_len  = 0;
  * on this queue at most once -- no re-push, no duplicate. */
 static void runloom_mn_global_runq_push(runloom_g_t *g)
 {
-    runloom_mutex_lock(&runloom_global_runq_lock);
+    RUNLOOM_RLOCK(&runloom_global_runq_lock, RUNLOOM_RANK_GLOBAL_RUNQ);
     g->next = NULL;
     if (runloom_global_runq_tail != NULL) {
         runloom_global_runq_tail->next = g;
@@ -116,7 +116,7 @@ static void runloom_mn_global_runq_push(runloom_g_t *g)
     }
     runloom_global_runq_tail = g;
     __atomic_add_fetch(&runloom_global_runq_len, 1, __ATOMIC_RELAXED);
-    runloom_mutex_unlock(&runloom_global_runq_lock);
+    RUNLOOM_RUNLOCK(&runloom_global_runq_lock, RUNLOOM_RANK_GLOBAL_RUNQ);
     RUNLOOM_EVT(RUNLOOM_EVT_G_SUBMIT, g, NULL, 0);
     runloom_g_state_set(g, RUNLOOM_GST_SUBMITTED);
 }
@@ -134,7 +134,7 @@ static runloom_g_t *runloom_mn_global_runq_pull(void)
     if (__atomic_load_n(&runloom_global_runq_len, __ATOMIC_ACQUIRE) == 0) {
         return NULL;
     }
-    runloom_mutex_lock(&runloom_global_runq_lock);
+    RUNLOOM_RLOCK(&runloom_global_runq_lock, RUNLOOM_RANK_GLOBAL_RUNQ);
     g = runloom_global_runq_head;
     if (g != NULL) {
         runloom_global_runq_head = g->next;
@@ -144,7 +144,7 @@ static runloom_g_t *runloom_mn_global_runq_pull(void)
         g->next = NULL;
         __atomic_sub_fetch(&runloom_global_runq_len, 1, __ATOMIC_RELAXED);
     }
-    runloom_mutex_unlock(&runloom_global_runq_lock);
+    RUNLOOM_RUNLOCK(&runloom_global_runq_lock, RUNLOOM_RANK_GLOBAL_RUNQ);
     return g;
 }
 

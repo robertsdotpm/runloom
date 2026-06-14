@@ -310,7 +310,7 @@ void runloom_sched_wake(runloom_g_t *g)
      * so an idle epoll_wait wakes to drain the list.  Same mechanism as
      * runloom_sched_wake_safe; the kick eventfd is level-triggered + non-exclusive
      * so every blocked pumper wakes and drains its own wake_list. */
-    runloom_mutex_lock(&owner->wake_list_lock);
+    RUNLOOM_RLOCK(&owner->wake_list_lock, RUNLOOM_RANK_WAKE_LIST);
     g->wake_next = NULL;
     if (owner->wake_list_tail != NULL) {
         owner->wake_list_tail->wake_next = g;
@@ -320,7 +320,7 @@ void runloom_sched_wake(runloom_g_t *g)
         __atomic_store_n(&owner->wake_list_head, g, __ATOMIC_RELEASE);
     }
     owner->wake_list_tail = g;
-    runloom_mutex_unlock(&owner->wake_list_lock);
+    RUNLOOM_RUNLOCK(&owner->wake_list_lock, RUNLOOM_RANK_WAKE_LIST);
     runloom_netpoll_wake_pump();
 }
 
@@ -427,7 +427,7 @@ void runloom_sched_wake_safe(runloom_g_t *g)
                  * pool worker, iouring CQE).  Our ready ring is single-consumer
                  * and not cross-thread-safe; route to the owner's thread-safe
                  * wake_list, which its own drain consumes. */
-                runloom_mutex_lock(&s->wake_list_lock);
+                RUNLOOM_RLOCK(&s->wake_list_lock, RUNLOOM_RANK_WAKE_LIST);
                 g->wake_next = NULL;
                 if (s->wake_list_tail != NULL) {
                     s->wake_list_tail->wake_next = g;
@@ -439,7 +439,7 @@ void runloom_sched_wake_safe(runloom_g_t *g)
                     __atomic_store_n(&s->wake_list_head, g, __ATOMIC_RELEASE);
                 }
                 s->wake_list_tail = g;
-                runloom_mutex_unlock(&s->wake_list_lock);
+                RUNLOOM_RUNLOCK(&s->wake_list_lock, RUNLOOM_RANK_WAKE_LIST);
             }
         }
         /* CAS failed: g was either running (parked_safe==0 already)

@@ -55,9 +55,9 @@ static void runloom_cal_record(runloom_g_t *g)
         !runloom_coro_paint_enabled()) return;
     hwm = runloom_coro_scan_hwm(g->coro);
     runloom_cal_ensure_lock();
-    runloom_mutex_lock(&runloom_cal_lock);
+    RUNLOOM_RLOCK(&runloom_cal_lock, RUNLOOM_RANK_CAL);
     if (runloom_cal_frozen) {                 /* lost the freeze race -- done */
-        runloom_mutex_unlock(&runloom_cal_lock);
+        RUNLOOM_RUNLOCK(&runloom_cal_lock, RUNLOOM_RANK_CAL);
         return;
     }
     if (hwm > runloom_cal_max_hwm) runloom_cal_max_hwm = hwm;
@@ -78,7 +78,7 @@ static void runloom_cal_record(runloom_g_t *g)
         __atomic_store_n(&runloom_cal_frozen, 1, __ATOMIC_RELEASE);
         freeze_now = 1;
     }
-    runloom_mutex_unlock(&runloom_cal_lock);
+    RUNLOOM_RUNLOCK(&runloom_cal_lock, RUNLOOM_RANK_CAL);
     if (freeze_now) {
         runloom_coro_paint_set(0);
         /* cal_record runs inside drain on this thread's own sched; bump it so
@@ -94,10 +94,10 @@ void runloom_sched_set_default_stack_size(size_t bytes)
     if (bytes < RUNLOOM_MIN_STACK_SIZE) bytes = RUNLOOM_MIN_STACK_SIZE;
     if (bytes > RUNLOOM_MAX_STACK_SIZE) bytes = RUNLOOM_MAX_STACK_SIZE;
     runloom_cal_ensure_lock();
-    runloom_mutex_lock(&runloom_cal_lock);
+    RUNLOOM_RLOCK(&runloom_cal_lock, RUNLOOM_RANK_CAL);
     runloom_cal_default = bytes;
     __atomic_store_n(&runloom_cal_frozen, 1, __ATOMIC_RELEASE);
-    runloom_mutex_unlock(&runloom_cal_lock);
+    RUNLOOM_RUNLOCK(&runloom_cal_lock, RUNLOOM_RANK_CAL);
     runloom_coro_paint_set(0);
     /* Update the calling thread's sched immediately; other threads pick up
      * runloom_cal_default on their next spawn. */
@@ -108,9 +108,9 @@ size_t runloom_sched_get_default_stack_size(void)
 {
     size_t v;
     runloom_cal_ensure_lock();
-    runloom_mutex_lock(&runloom_cal_lock);
+    RUNLOOM_RLOCK(&runloom_cal_lock, RUNLOOM_RANK_CAL);
     v = runloom_cal_default;
-    runloom_mutex_unlock(&runloom_cal_lock);
+    RUNLOOM_RUNLOCK(&runloom_cal_lock, RUNLOOM_RANK_CAL);
     return v;
 }
 
@@ -118,12 +118,12 @@ void runloom_sched_stack_stats(runloom_stack_stats_t *out)
 {
     if (out == NULL) return;
     runloom_cal_ensure_lock();
-    runloom_mutex_lock(&runloom_cal_lock);
+    RUNLOOM_RLOCK(&runloom_cal_lock, RUNLOOM_RANK_CAL);
     out->default_size = runloom_cal_default;
     out->max_hwm      = runloom_cal_max_hwm;
     out->completed    = runloom_cal_completed;
     out->calibrated   = runloom_cal_frozen;
-    runloom_mutex_unlock(&runloom_cal_lock);
+    RUNLOOM_RUNLOCK(&runloom_cal_lock, RUNLOOM_RANK_CAL);
     out->painting     = runloom_coro_paint_enabled();
 }
 
@@ -163,14 +163,14 @@ void runloom_sched_init(runloom_sched_t *s)
 static void runloom_sched_drain_wake_list(runloom_sched_t *s)
 {
     runloom_g_t *head;
-    runloom_mutex_lock(&s->wake_list_lock);
+    RUNLOOM_RLOCK(&s->wake_list_lock, RUNLOOM_RANK_WAKE_LIST);
     head = s->wake_list_head;
     /* RELEASE atomic: this clear is read by the owner's lock-free ACQUIRE peek
      * (the under-lock read above doesn't race -- producers write under the same
      * lock). */
     __atomic_store_n(&s->wake_list_head, NULL, __ATOMIC_RELEASE);
     s->wake_list_tail = NULL;
-    runloom_mutex_unlock(&s->wake_list_lock);
+    RUNLOOM_RUNLOCK(&s->wake_list_lock, RUNLOOM_RANK_WAKE_LIST);
     while (head != NULL) {
         runloom_g_t *next = head->wake_next;
         head->wake_next = NULL;

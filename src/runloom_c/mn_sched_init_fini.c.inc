@@ -673,11 +673,11 @@ static int runloom_mn_go_n_bulk(PyObject *callable, long n, size_t stack_size,
         runloom_hub_t *h;
         if (heads[hub] == NULL) continue;
         h = &runloom_hubs[hub];
-        runloom_mutex_lock(&h->sub_lock);
+        RUNLOOM_RLOCK(&h->sub_lock, RUNLOOM_RANK_HUB_SUB);
         if (h->sub_tail != NULL) h->sub_tail->next = heads[hub];
         else                     h->sub_head = heads[hub];
         h->sub_tail = tails[hub];
-        runloom_mutex_unlock(&h->sub_lock);
+        RUNLOOM_RUNLOCK(&h->sub_lock, RUNLOOM_RANK_HUB_SUB);
         __atomic_add_fetch(&h->pending, counts[hub], __ATOMIC_ACQ_REL);
         /* GLOBAL pending too: mn_run polls runloom_mn_pending_global, not the
          * per-hub fields.  The per-g spawn path does this via runloom_mn_pending_inc;
@@ -687,9 +687,9 @@ static int runloom_mn_go_n_bulk(PyObject *callable, long n, size_t stack_size,
         __atomic_add_fetch(&runloom_mn_pending_global, counts[hub], __ATOMIC_ACQ_REL);
         __atomic_add_fetch(&h->sub_gen, 1, __ATOMIC_RELEASE);
         if (__atomic_load_n(&h->idle_waiting, __ATOMIC_ACQUIRE)) {
-            runloom_mutex_lock(&h->idle_lock);
+            RUNLOOM_RLOCK(&h->idle_lock, RUNLOOM_RANK_HUB_IDLE);
             runloom_cond_signal(&h->idle_cond);
-            runloom_mutex_unlock(&h->idle_lock);
+            RUNLOOM_RUNLOCK(&h->idle_lock, RUNLOOM_RANK_HUB_IDLE);
         }
     }
     return 0;
@@ -771,9 +771,9 @@ static void runloom_mn_kick_all_hubs(void)
     int i;
     for (i = 0; i < runloom_hub_count; i++) {
         runloom_hub_t *h = &runloom_hubs[i];
-        runloom_mutex_lock(&h->idle_lock);
+        RUNLOOM_RLOCK(&h->idle_lock, RUNLOOM_RANK_HUB_IDLE);
         runloom_cond_signal(&h->idle_cond);
-        runloom_mutex_unlock(&h->idle_lock);
+        RUNLOOM_RUNLOCK(&h->idle_lock, RUNLOOM_RANK_HUB_IDLE);
     }
 }
 

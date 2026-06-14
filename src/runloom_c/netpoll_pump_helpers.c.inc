@@ -44,7 +44,7 @@ static int runloom_pump_dispatch_event(int fd, int mask)
     for (pi = 0; pi < RUNLOOM_PARKER_POOL_MAX; pi++) {
         runloom_parker_pool_t *pool = &runloom_pools[pi];
         if (__atomic_load_n(&pool->lock_inited, __ATOMIC_ACQUIRE) != 2) continue;
-        runloom_mutex_lock(&pool->lock);
+        RUNLOOM_RLOCK(&pool->lock, RUNLOOM_RANK_PARKER_POOL);
         if ((size_t)fd < pool->by_fd_cap) {
             runloom_parked_t *p = pool->by_fd[fd];
             while (p != NULL) {
@@ -75,13 +75,13 @@ static int runloom_pump_dispatch_event(int fd, int mask)
                     if (cur == RUNLOOM_PARK_PARKED) {
                         runloom_mn_wake_g(p->hub, p->g);
                     }
-                    runloom_mutex_unlock(&pool->lock);
+                    RUNLOOM_RUNLOCK(&pool->lock, RUNLOOM_RANK_PARKER_POOL);
                     return 1;
                 }
                 p = next_p;
             }
         }
-        runloom_mutex_unlock(&pool->lock);
+        RUNLOOM_RUNLOCK(&pool->lock, RUNLOOM_RANK_PARKER_POOL);
     }
     return 0;
 }
@@ -98,7 +98,7 @@ static int runloom_pump_drain_expired(long long now)
     for (pi = 0; pi < RUNLOOM_PARKER_POOL_MAX; pi++) {
         runloom_parker_pool_t *pool = &runloom_pools[pi];
         if (__atomic_load_n(&pool->lock_inited, __ATOMIC_ACQUIRE) != 2) continue;
-        runloom_mutex_lock(&pool->lock);
+        RUNLOOM_RLOCK(&pool->lock, RUNLOOM_RANK_PARKER_POOL);
         while (pool->dh_size > 0 && pool->dh_arr[0]->deadline_ns <= now) {
             runloom_parked_t *p = pool->dh_arr[0];
             int cur;
@@ -125,7 +125,7 @@ static int runloom_pump_drain_expired(long long now)
                 RUNLOOM_EVT(RUNLOOM_EVT_PARKER_TIMEOUT, p, p->g, (long long)p->fd);
             }
         }
-        runloom_mutex_unlock(&pool->lock);
+        RUNLOOM_RUNLOCK(&pool->lock, RUNLOOM_RANK_PARKER_POOL);
     }
     return woke;
 }
@@ -140,9 +140,9 @@ static long long runloom_dh_peek_deadline_global(void)
         runloom_parker_pool_t *pool = &runloom_pools[pi];
         long long d;
         if (__atomic_load_n(&pool->lock_inited, __ATOMIC_ACQUIRE) != 2) continue;
-        runloom_mutex_lock(&pool->lock);
+        RUNLOOM_RLOCK(&pool->lock, RUNLOOM_RANK_PARKER_POOL);
         d = runloom_dh_peek_deadline(pool);
-        runloom_mutex_unlock(&pool->lock);
+        RUNLOOM_RUNLOCK(&pool->lock, RUNLOOM_RANK_PARKER_POOL);
         if (d >= 0 && (earliest < 0 || d < earliest)) earliest = d;
     }
     return earliest;
