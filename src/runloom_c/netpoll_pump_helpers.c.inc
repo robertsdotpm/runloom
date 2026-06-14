@@ -181,13 +181,31 @@ static long long runloom_dh_peek_deadline_global(void)
 static int runloom_netpoll_wait_failed(int n)
 {
     static int warned;            /* relaxed: a few duplicate logs are harmless */
+    static unsigned eintr_run;    /* consecutive EINTRs (signal-storm throttle) */
     int err = errno;
-    if (n >= 0 || err == EINTR) return n < 0;   /* EINTR: retry, no backoff */
-    if (!__atomic_exchange_n(&warned, 1, __ATOMIC_RELAXED)) {
-        fprintf(stderr,
-                "[runloom] netpoll pump: blocking wait failed (errno=%d); "
-                "backing off to avoid a busy-spin -- the poll fd is likely "
-                "closed (teardown race) or corrupt\n", err);
+    if (n >= 0) return 0;                        /* not an error (defensive) */
+    if (err == EINTR) {
+        /* EINTR is transient -> retry immediately (POSIX / libuv convention;
+         * the common case is a preemption signal interrupting an idle
+         * epoll_wait/kevent).  But a PERSISTENT EINTR storm (a signal flood, or
+         * the synthetic always:EINTR fault) would busy-spin the idle pump at
+         * 100% CPU until a deadline fires -- surfaced by test_kqueue_faults_ext.
+         * After a long run of CONSECUTIVE EINTRs, fall through to the same 1 ms
+         * backoff the hard-error path uses, bounding the spin into a throttled
+         * slow-loop without penalizing ordinary transient EINTR (the threshold
+         * is far above any normal burst; relaxed counter -- approximate is fine
+         * for a throttle, and a multi-hub storm just trips it sooner). */
+        if (__atomic_add_fetch(&eintr_run, 1, __ATOMIC_RELAXED) < 64u)
+            return 1;
+        __atomic_store_n(&eintr_run, 0, __ATOMIC_RELAXED);
+    } else {
+        __atomic_store_n(&eintr_run, 0, __ATOMIC_RELAXED);
+        if (!__atomic_exchange_n(&warned, 1, __ATOMIC_RELAXED)) {
+            fprintf(stderr,
+                    "[runloom] netpoll pump: blocking wait failed (errno=%d); "
+                    "backing off to avoid a busy-spin -- the poll fd is likely "
+                    "closed (teardown race) or corrupt\n", err);
+        }
     }
     {
         struct timespec backoff = { 0, 1000000L };   /* 1 ms */
