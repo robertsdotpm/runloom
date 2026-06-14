@@ -148,13 +148,16 @@ static runloom_g_t *runloom_mn_global_runq_pull(void)
     return g;
 }
 
-/* RUNLOOM_PER_G_TSTATE (default OFF, experimental): give each fiber its
+/* RUNLOOM_PER_G_TSTATE (default OFF, experimental, GATED): give each fiber its
  * own PyThreadState so its Python execution state is migratable across
  * hubs.  A stolen woken g then resumes on ANY hub without the cross-hub
  * corruption that per-hub-tstate + snap migration hits (the snap bakes the
- * owning hub's tstate into the suspended frames).  Read once; mn_init
- * copies it into runloom_set_per_g_tstate_mode (which stands the snap down).
- * Trades memory (a tstate per g) for a closeable p99.9 tail. */
+ * owning hub's tstate into the suspended frames).  Trades memory (a tstate per
+ * g) for a closeable p99.9 tail.  KNOWN CRASH under churn at H>=2 (the per-g
+ * tstate's mimalloc heap migrates across hub threads -> SEGV; see the "KNOWN
+ * BUG" block in runloom_sched_core.c.inc and docs/dev/STEAL_WOKEN_CLEANUP.md), so
+ * mn_init runs this flag through runloom_resolve_migratable_mode: it activates
+ * ONLY with RUNLOOM_ALLOW_UNSAFE_MIGRATION=1, else warns + stays off.  Read once. */
 static int runloom_per_g_tstate_flag(void)
 {
     static int v = -1;
@@ -178,10 +181,13 @@ static int runloom_per_g_tstate_flag(void)
  * current_exception -> SEGV; H>=2 only).  See docs/dev/STEAL_WOKEN_CLEANUP.md.
  *
  * The flag is therefore REDIRECTED: mn_init enables RUNLOOM_PER_G_TSTATE when this
- * is set (see mn_sched_init_fini.c.inc), so RUNLOOM_STEAL_WOKEN=1 now runs the
- * SOUND per-g-tstate migration (each fiber owns a migratable tstate) and the snap-
- * migration branch in hub_main is never taken.  When OFF the default scheduler is
- * byte-unchanged. */
+ * is set (see mn_sched_init_fini.c.inc), so RUNLOOM_STEAL_WOKEN=1 runs the per-g-
+ * tstate migration (each fiber owns a migratable tstate) and the snap-migration
+ * branch in hub_main is never taken.  per-g-tstate has its OWN known crash, so the
+ * redirect is GATED: it activates only with RUNLOOM_ALLOW_UNSAFE_MIGRATION=1 (see
+ * runloom_resolve_migratable_mode), else warns + runs the default scheduler -- which
+ * also keeps a gated request OUT of the unsound snap branch.  When OFF the default
+ * scheduler is byte-unchanged. */
 static int runloom_steal_woken_flag(void)
 {
     static int v = -1;
@@ -194,12 +200,58 @@ static int runloom_steal_woken_flag(void)
     return cur;
 }
 
+/* Safety interlock for the migratable modes.  BOTH RUNLOOM_PER_G_TSTATE and
+ * RUNLOOM_STEAL_WOKEN (which redirects to per-g-tstate) carry a KNOWN crash:
+ * per-g-tstate migrates a PyThreadState's mimalloc heap + QSBR state across OS
+ * hub threads, which corrupts under allocation churn at H>=2 (intermittent SEGV
+ * in PyThreadState_Clear -> _mi_page_retire; see runloom_sched_core.c.inc's
+ * "KNOWN BUG" block at the per-g tstate teardown, and docs/dev/
+ * STEAL_WOKEN_CLEANUP.md).  So setting either flag alone is GATED OFF (warn +
+ * run the default scheduler); activation additionally requires
+ * RUNLOOM_ALLOW_UNSAFE_MIGRATION=1 -- the deliberate "I am developing / fuzzing
+ * this and accept the crash" escape hatch (used by tools/combinatorial). */
+static int runloom_unsafe_migration_acked(void)
+{
+    static int v = -1;
+    int cur = __atomic_load_n(&v, __ATOMIC_RELAXED);
+    if (cur < 0) {
+        const char *e = getenv("RUNLOOM_ALLOW_UNSAFE_MIGRATION");
+        cur = (e != NULL && e[0] != '0' && e[0] != '\0') ? 1 : 0;
+        __atomic_store_n(&v, cur, __ATOMIC_RELAXED);
+    }
+    return cur;
+}
+
+/* Resolve the migratable-mode request through the interlock.  Returns 1 (enable
+ * per-g-tstate) only if a migratable flag is set AND the unsafe ack is present;
+ * otherwise 0.  Warns once when a flag was requested but the ack is missing, so a
+ * silent fallback to the default scheduler is visible.  Called once from mn_init;
+ * its result feeds runloom_set_per_g_tstate_mode, so a gated-off request leaves
+ * per_g_tstate_mode == 0 and runloom_use_global_runq() false -> default scheduler
+ * (and, crucially, NOT the unsound snap-migration branch). */
+static int runloom_resolve_migratable_mode(void)
+{
+    int want = runloom_per_g_tstate_flag() || runloom_steal_woken_flag();
+    if (!want) return 0;
+    if (runloom_unsafe_migration_acked()) return 1;
+    fprintf(stderr,
+        "[runloom] RUNLOOM_PER_G_TSTATE / RUNLOOM_STEAL_WOKEN are GATED OFF: the "
+        "migratable mode has a known crash (a per-g PyThreadState's mimalloc heap "
+        "migrates across hub threads -> SEGV under churn at H>=2; see docs/dev/"
+        "STEAL_WOKEN_CLEANUP.md). Running the default (per-hub-tstate) scheduler "
+        "instead. Set RUNLOOM_ALLOW_UNSAFE_MIGRATION=1 to enable anyway.\n");
+    return 0;
+}
+
 /* True when woken gs route to the global stealable run-queue + wake-state
- * machine: either per-g-tstate (migrates via a per-g tstate) or steal-woken
- * (migrates via the per-g snap onto the hub's tstate). */
+ * machine.  Derived from the RESOLVED mode (runloom_get_per_g_tstate_mode), which
+ * the interlock above has already gated -- so a gated-off RUNLOOM_STEAL_WOKEN
+ * leaves this false and the default scheduler runs, rather than falling into the
+ * unsound snap branch (which is reachable only when use_global_runq is true while
+ * per_g_tstate_mode is false). */
 static int runloom_use_global_runq(void)
 {
-    return runloom_get_per_g_tstate_mode() || runloom_steal_woken_flag();
+    return runloom_get_per_g_tstate_mode();
 }
 
 /* ---- sysmon watchdog (Group B: stalled-hub detection) ----

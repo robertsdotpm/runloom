@@ -58,8 +58,12 @@ int runloom_mn_init(int n_threads)
      * broken snap-migration branch in hub_main is never taken (dead for both
      * flags; removable in a follow-up). */
     runloom_mn_interp = interp;
-    runloom_set_per_g_tstate_mode(runloom_per_g_tstate_flag() ||
-                                  runloom_steal_woken_flag());
+    /* Through the safety interlock (runloom_resolve_migratable_mode): a migratable
+     * flag activates per-g-tstate ONLY with RUNLOOM_ALLOW_UNSAFE_MIGRATION=1; else
+     * it warns + stays off (default scheduler).  Gating here also keeps a flagged-
+     * but-gated RUNLOOM_STEAL_WOKEN out of the unsound snap branch -- see
+     * runloom_use_global_runq. */
+    runloom_set_per_g_tstate_mode(runloom_resolve_migratable_mode());
     /* Configure the sysmon watchdog (enable + threshold) BEFORE the hubs
      * spawn so the per-resume progress instrumentation is live immediately. */
     runloom_sysmon_config();

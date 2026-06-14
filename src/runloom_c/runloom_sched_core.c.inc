@@ -552,7 +552,38 @@ void runloom_g_decref(runloom_g_t *g)
              * datastack/frames/exc.  Mirrors mn_fini's hub-tstate teardown,
              * which also clears non-current tstates with the caller's tstate
              * held -- runloom_g_decref's contexts (hub completion, drain, RunloomG
-             * dealloc) all run with some other tstate current. */
+             * dealloc) all run with some other tstate current.
+             *
+             * ============================ KNOWN BUG ============================
+             * If you arrived here from a SEGV backtrace that goes
+             *   PyThreadState_Clear -> _PyMem_AbandonDelayed -> ... -> _mi_page_retire
+             * STOP -- this is a CHARACTERIZED, NOT-YET-FIXED bug.  Do not re-derive
+             * it; read docs/dev/STEAL_WOKEN_CLEANUP.md ("Tracked bug" + "Fix design").
+             *
+             * What it is: this Clear is NOT the cause.  Under RUNLOOM_PER_G_TSTATE
+             * (and RUNLOOM_STEAL_WOKEN, which redirects to it) a fiber's per-g
+             * PyThreadState -- carrying its OWN mimalloc heap + QSBR delayed-free
+             * state -- migrates across OS hub threads as the fiber moves hub->hub.
+             * Free-threaded CPython binds a tstate's allocator to ONE OS thread
+             * (PyThreadState_Bind; mimalloc keys page ownership on _Py_ThreadId).
+             * Migrating it without the mimalloc segment abandon/adopt handshake
+             * leaves the heap's per-thread bookkeeping inconsistent; the corruption
+             * just SURFACES here, when Clear abandons the delayed-free queue and
+             * retires an already-inconsistent page.
+             *
+             * Fingerprint: intermittent SEGV, ONLY at H>=2 (needs real migration --
+             * H=1 is always clean), ONLY under allocation churn (e.g.
+             * test_chan_queue MPMC).  The DEFAULT scheduler (both flags off) never
+             * takes this path and is unaffected.
+             *
+             * Do NOT try to "fix" it here (teardown) or by reordering Clear/Delete
+             * or making g->tstate current first -- the pages are already corrupt by
+             * the time we get here.  The only real fix is the mimalloc + brc + qsbr
+             * thread abandon/adopt handshake at each park/resume boundary (see the
+             * hub_main per-g-tstate branch + the "Fix design" doc section); it is a
+             * dedicated, validated effort, not a patch.  Until then the migratable
+             * modes stay opt-in / experimental.
+             * ==================================================================*/
             PyThreadState_Clear(g->tstate);
             PyThreadState_Delete(g->tstate);
             g->tstate = NULL;
