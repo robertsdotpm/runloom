@@ -832,15 +832,20 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
                 cp == NULL || ((uintptr_t)cp >> 47) != 0 ||
                 ((uintptr_t)cp & 0xf) != 0 || (uintptr_t)cp < 0x10000) {
 #ifdef RUNLOOM_DBG_BADCORO
+                /* These entries are PERMANENTLY invalid, not a publication delay:
+                 * a 200k acquire-fenced re-read spin never saw owner/coro resolve
+                 * (owner stays NULL, coro stays a non-canonical arena value).  So
+                 * this is a wrong / never-initialized g pointer, NOT a missing
+                 * barrier -- skipping is correct (the connect-storm finishes
+                 * pend=0).  Dump identity for source-hunting. */
                 char dbuf[256];
                 int dm = snprintf(dbuf, sizeof dbuf,
-                    "[BADG] g=%p id=%lld coro=%p done=%d rc=%d st=%d ws=%d insub=%d fr=%d owner=%p call=%p centry=%p\n",
+                    "[BADG] g=%p id=%lld coro=%p done=%d rc=%d st=%d ws=%d fr=%d owner=%p call=%p centry=%p\n",
                     (void *)g, (long long)g->id, (void *)cp,
                     (int)__atomic_load_n(&g->done, __ATOMIC_ACQUIRE),
                     (int)__atomic_load_n(&g->refcount, __ATOMIC_ACQUIRE),
                     (int)__atomic_load_n(&g->state, __ATOMIC_ACQUIRE),
                     (int)__atomic_load_n(&g->wake_state, __ATOMIC_ACQUIRE),
-                    (int)__atomic_load_n(&g->in_sub_queue, __ATOMIC_ACQUIRE),
                     from_runq, (void *)g->owner, (void *)g->callable,
                     (void *)g->c_entry);
                 if (dm > 0) (void)write(2, dbuf, (size_t)dm);
