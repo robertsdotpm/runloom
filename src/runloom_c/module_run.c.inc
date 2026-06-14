@@ -134,6 +134,14 @@ static PyObject *m_netpoll_cancel_fd(PyObject *self, PyObject *arg)
     Py_RETURN_NONE;
 }
 
+static PyObject *m_netpoll_cancel_all_parked(PyObject *self, PyObject *unused)
+{
+    int n;
+    (void)self; (void)unused;
+    n = runloom_netpoll_cancel_all_parked();
+    return PyLong_FromLong((long)n);
+}
+
 static PyObject *m_netpoll_backend(PyObject *self, PyObject *unused)
 {
     (void)self; (void)unused;

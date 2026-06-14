@@ -30,6 +30,27 @@ _tcp_recv       = getattr(runloom_c, "tcp_recv", None)
 _tcp_send_once  = getattr(runloom_c, "tcp_send_once", None)
 _tcp_send_all   = getattr(runloom_c, "tcp_send", None)
 
+_raw_wait_fd = runloom_c.wait_fd
+_WAIT_FD_CANCELLED = getattr(runloom_c, "WAIT_FD_CANCELLED", 0x40000000)
+
+
+def _wait_fd_coop(fd, ev, timeout_ms=-1):
+    """wait_fd for the cooperative socket loops below, honouring cancellation.
+
+    A cancellation -- a cross-fiber close (runloom_netpoll_cancel_fd) or the
+    teardown backstop (runloom_c.cancel_all_parked, audit finding B3) -- makes
+    the raw wait_fd return the POSITIVE RUNLOOM_NETPOLL_CANCELLED sentinel.  The
+    loops below ignore wait_fd's return and just retry the op, so on a still-OPEN
+    socket a cancelled waiter would re-park forever (the close path only unwinds
+    because the fd is then closed and the retry hits EBADF).  Raise
+    OSError(ECANCELED) instead so the parked op unwinds; the harness swallows
+    OSError during teardown.  Returns the wait_fd result otherwise (0 == timeout
+    on the timed paths)."""
+    r = _raw_wait_fd(fd, ev, timeout_ms) if timeout_ms >= 0 else _raw_wait_fd(fd, ev)
+    if r == _WAIT_FD_CANCELLED:
+        raise OSError(errno.ECANCELED, "wait_fd cancelled")
+    return r
+
 
 def _coop_timeout(sock):
     """The cooperative deadline for an I/O op, or None for "block forever".
@@ -73,14 +94,14 @@ def _patched_recv(self, bufsize, flags=0):
             try:
                 return _orig_recv(self, bufsize, flags)
             except (BlockingIOError, InterruptedError):
-                r = runloom_c.wait_fd(self.fileno(), READ, timeout_ms)
+                r = _wait_fd_coop(self.fileno(), READ, timeout_ms)
                 if r == 0:
                     raise socket.timeout("timed out")
     while True:
         try:
             return _orig_recv(self, bufsize, flags)
         except (BlockingIOError, InterruptedError):
-            runloom_c.wait_fd(self.fileno(), READ)
+            _wait_fd_coop(self.fileno(), READ)
 
 
 def _patched_recv_into(self, buffer, nbytes=0, flags=0):
@@ -101,14 +122,14 @@ def _patched_recv_into(self, buffer, nbytes=0, flags=0):
             try:
                 return _orig_recv_into(self, buffer, nbytes, flags)
             except (BlockingIOError, InterruptedError):
-                r = runloom_c.wait_fd(self.fileno(), READ, timeout_ms)
+                r = _wait_fd_coop(self.fileno(), READ, timeout_ms)
                 if r == 0:
                     raise socket.timeout("timed out")
     while True:
         try:
             return _orig_recv_into(self, buffer, nbytes, flags)
         except (BlockingIOError, InterruptedError):
-            runloom_c.wait_fd(self.fileno(), READ)
+            _wait_fd_coop(self.fileno(), READ)
 
 
 def _patched_send(self, data, flags=0):
@@ -121,7 +142,7 @@ def _patched_send(self, data, flags=0):
         try:
             return _orig_send(self, data, flags)
         except (BlockingIOError, InterruptedError):
-            runloom_c.wait_fd(self.fileno(), WRITE)
+            _wait_fd_coop(self.fileno(), WRITE)
 
 
 def _patched_sendall(self, data, flags=0):
@@ -139,7 +160,7 @@ def _patched_sendall(self, data, flags=0):
             if n:
                 sent += n
         except (BlockingIOError, InterruptedError):
-            runloom_c.wait_fd(self.fileno(), WRITE)
+            _wait_fd_coop(self.fileno(), WRITE)
 
 
 def _patched_accept(self):
@@ -150,7 +171,7 @@ def _patched_accept(self):
         try:
             return _orig_accept(self)
         except (BlockingIOError, InterruptedError):
-            runloom_c.wait_fd(self.fileno(), READ)
+            _wait_fd_coop(self.fileno(), READ)
 
 
 def _patched_connect(self, address):
@@ -177,11 +198,11 @@ def _patched_connect(self, address):
     timeout_ms = max(1, int(t * 1000)) if t is not None else None
     while True:
         if timeout_ms is not None:
-            r = runloom_c.wait_fd(self.fileno(), WRITE, timeout_ms)
+            r = _wait_fd_coop(self.fileno(), WRITE, timeout_ms)
             if r == 0:
                 raise socket.timeout("connect timed out")
         else:
-            runloom_c.wait_fd(self.fileno(), WRITE)
+            _wait_fd_coop(self.fileno(), WRITE)
         err = self.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
         if err == 0:
             return
@@ -197,7 +218,7 @@ def _patched_recvfrom(self, bufsize, flags=0):
         try:
             return _orig_recvfrom(self, bufsize, flags)
         except (BlockingIOError, InterruptedError):
-            runloom_c.wait_fd(self.fileno(), READ)
+            _wait_fd_coop(self.fileno(), READ)
 
 
 def _patched_sendto(self, data, *args):
@@ -208,7 +229,7 @@ def _patched_sendto(self, data, *args):
         try:
             return _orig_sendto(self, data, *args)
         except (BlockingIOError, InterruptedError):
-            runloom_c.wait_fd(self.fileno(), WRITE)
+            _wait_fd_coop(self.fileno(), WRITE)
 
 
 def _patched_recvmsg(self, bufsize, ancbufsize=0, flags=0):
@@ -222,7 +243,7 @@ def _patched_recvmsg(self, bufsize, ancbufsize=0, flags=0):
         try:
             return _orig_recvmsg(self, bufsize, ancbufsize, flags)
         except (BlockingIOError, InterruptedError):
-            runloom_c.wait_fd(self.fileno(), READ)
+            _wait_fd_coop(self.fileno(), READ)
 
 
 def _patched_recvmsg_into(self, buffers, ancbufsize=0, flags=0):
@@ -233,7 +254,7 @@ def _patched_recvmsg_into(self, buffers, ancbufsize=0, flags=0):
         try:
             return _orig_recvmsg_into(self, buffers, ancbufsize, flags)
         except (BlockingIOError, InterruptedError):
-            runloom_c.wait_fd(self.fileno(), READ)
+            _wait_fd_coop(self.fileno(), READ)
 
 
 def _patched_sendmsg(self, buffers, ancdata=(), flags=0, address=None):
@@ -244,7 +265,7 @@ def _patched_sendmsg(self, buffers, ancdata=(), flags=0, address=None):
         try:
             return _orig_sendmsg(self, buffers, ancdata, flags, address)
         except (BlockingIOError, InterruptedError):
-            runloom_c.wait_fd(self.fileno(), WRITE)
+            _wait_fd_coop(self.fileno(), WRITE)
 
 
 def _patched_recvfrom_into(self, buffer, nbytes=0, flags=0):
@@ -258,7 +279,7 @@ def _patched_recvfrom_into(self, buffer, nbytes=0, flags=0):
         try:
             return _orig_recvfrom_into(self, buffer, nbytes, flags)
         except (BlockingIOError, InterruptedError):
-            runloom_c.wait_fd(self.fileno(), READ)
+            _wait_fd_coop(self.fileno(), READ)
 
 
 # ---------- cooperative sendfile ----------
@@ -296,7 +317,7 @@ def _co_sendfile_use_sendfile(self, file, offset, count):
             try:
                 sent = _raw_os_sendfile(sockno, fileno, offset, blocksize)
             except (BlockingIOError, InterruptedError):
-                runloom_c.wait_fd(sockno, WRITE)
+                _wait_fd_coop(sockno, WRITE)
                 continue
             except OSError as err:
                 if total_sent == 0:

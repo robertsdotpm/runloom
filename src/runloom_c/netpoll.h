@@ -154,6 +154,12 @@ void runloom_netpoll_release_if_idle(int fd);
  * instead of stranding it forever (BUG #5).  Safe on unknown fds (no-op). */
 void runloom_netpoll_cancel_fd(int fd);
 
+/* Cancel every fiber parked on ANY fd across all pools (returning
+ * RUNLOOM_NETPOLL_CANCELLED) -- a teardown backstop so a fiber left parked on an
+ * idle-but-open socket cannot wedge mn_run's join-on-pending (audit B3).
+ * Returns the count cancelled; cheap no-op when nothing is parked. */
+int runloom_netpoll_cancel_all_parked(void);
+
 /* One-time init / cleanup. */
 int runloom_netpoll_init(void);
 void runloom_netpoll_fini(void);

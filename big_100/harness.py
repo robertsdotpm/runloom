@@ -754,6 +754,24 @@ class Harness(object):
             self._profile_mark("deadline")     # drain begins (workers told to stop)
             self.mark_done()
             self.drain_workers()
+            # Teardown backstop (kqueue audit finding B3): after the normal drain
+            # (workers told to stop + registered listeners closed), any fiber
+            # still parked on an IDLE-but-OPEN socket -- e.g. a client mid-recv
+            # of a reply that never came, or a proxy pipe parked on a peer that
+            # went idle -- will never make progress, yet mn_run joins on the
+            # pending goroutine count, so even one strands the whole run (the
+            # macOS teardown-tail hangs; parker dumps show readyParked=0).
+            # Force-cancel every still-parked fiber so the join can complete; the
+            # cancelled op raises OSError, which _worker_wrap swallows when the
+            # run is over.  No-op (cancels 0) on a clean drain.
+            try:
+                n = runloom_c.cancel_all_parked()
+                if n:
+                    self.log("teardown: force-cancelled {0} stranded "
+                             "parker(s)".format(n))
+                    self.drain_workers(grace=10)
+            except Exception:
+                pass
             self._profile_mark("drain_done")   # worker goroutines returned
 
         runloom.monkey.patch()

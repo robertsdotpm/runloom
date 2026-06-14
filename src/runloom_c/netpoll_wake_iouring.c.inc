@@ -240,6 +240,60 @@ void runloom_netpoll_cancel_fd(int fd)
     }
 }
 
+/* Cancel EVERY fiber parked on ANY fd, across all pools -- a teardown backstop
+ * (audit finding B3).  After the normal shutdown (close registered listeners +
+ * drain grace), a fiber still parked in recv()/connect() on an IDLE-but-OPEN
+ * socket will never make progress (the run is ending), yet mn_run joins on the
+ * pending goroutine count -- so even one such fiber wedges the whole run (the
+ * macOS teardown-tail hangs; the parker dump shows readyParked=0 because the fd
+ * genuinely has no data and was never closed).  Force-wake each with
+ * RUNLOOM_NETPOLL_CANCELLED; the cooperative op observes the cancel and unwinds
+ * (the C fast paths via runloom_netpoll_wait_fd_coop -> OSError(ECANCELED); the
+ * aio bridge -> CancelledError).  Same per-parker claim/unlink/wake as
+ * runloom_netpoll_cancel_fd, walked over every by_fd bucket of every pool.
+ * Returns the number of parkers cancelled.  Idempotent and cheap when nothing
+ * is parked (the common clean-drain case). */
+int runloom_netpoll_cancel_all_parked(void)
+{
+    int i;
+    int n = 0;
+    for (i = 0; i < RUNLOOM_PARKER_POOL_MAX; i++) {
+        runloom_parker_pool_t *pool = &runloom_pools[i];
+        size_t f;
+        if (__atomic_load_n(&pool->lock_inited, __ATOMIC_ACQUIRE) != 2) continue;
+        RUNLOOM_RLOCK(&pool->lock, RUNLOOM_RANK_PARKER_POOL);
+        for (f = 0; f < pool->by_fd_cap; f++) {
+            runloom_parked_t *p = pool->by_fd[f];
+            while (p != NULL) {
+                int cur;
+                runloom_parked_t *next = p->next_by_fd;   /* save: cancel unlinks p */
+                for (;;) {
+                    cur = __atomic_load_n(&p->commit, __ATOMIC_ACQUIRE);
+                    if (cur == RUNLOOM_PARK_WOKEN) break;
+                    if (__atomic_compare_exchange_n(&p->commit, &cur,
+                            RUNLOOM_PARK_WOKEN, 0,
+                            __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+                        break;
+                }
+                if (cur != RUNLOOM_PARK_WOKEN) {
+                    if (p->ready_out != NULL)
+                        *p->ready_out = RUNLOOM_NETPOLL_CANCELLED;
+                    runloom_parker_unlink(pool, p);
+                    if (cur == RUNLOOM_PARK_PARKED) {
+                        if (p->hub != NULL) runloom_mn_wake_g(p->hub, p->g);
+                        else                runloom_sched_wake(p->g);
+                    }
+                    RUNLOOM_EVT(RUNLOOM_EVT_PARKER_FORCE, p, p->g, (long long)p->fd);
+                    n++;
+                }
+                p = next;
+            }
+        }
+        RUNLOOM_RUNLOCK(&pool->lock, RUNLOOM_RANK_PARKER_POOL);
+    }
+    return n;
+}
+
 int runloom_netpoll_add_iouring_eventfd(int fd)
 {
 #if defined(RUNLOOM_HAVE_EPOLL)

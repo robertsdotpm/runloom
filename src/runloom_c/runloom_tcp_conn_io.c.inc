@@ -211,7 +211,7 @@ static PyObject *RunloomTCPConn_recv(RunloomTCPConn *self, PyObject *args)
             return PyErr_SetFromErrno(PyExc_OSError);
         }
 #endif
-        if (runloom_netpoll_wait_fd(fd, RUNLOOM_NETPOLL_READ, -1LL) < 0) {
+        if (runloom_netpoll_wait_fd_coop(fd, RUNLOOM_NETPOLL_READ, -1LL) < 0) {
             Py_DECREF(result);
             /* wait_fd may have run a Python signal handler that raised (e.g. an
              * alarm handler / Ctrl-C) -> propagate it; don't overwrite with OSError. */
@@ -285,7 +285,7 @@ static PyObject *RunloomTCPConn_recv_into(RunloomTCPConn *self, PyObject *args)
             return PyErr_SetFromErrno(PyExc_OSError);
         }
 #endif
-        if (runloom_netpoll_wait_fd(fd, RUNLOOM_NETPOLL_READ, -1LL) < 0) {
+        if (runloom_netpoll_wait_fd_coop(fd, RUNLOOM_NETPOLL_READ, -1LL) < 0) {
             PyBuffer_Release(&buf);
             /* wait_fd may have run a Python signal handler that raised (e.g. an
              * alarm handler / Ctrl-C) -> propagate it; don't overwrite with OSError. */

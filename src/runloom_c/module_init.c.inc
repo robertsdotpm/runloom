@@ -179,6 +179,11 @@ static PyMethodDef module_methods[] = {
      "fd (with the cancelled sentinel).  Call from the socket close hook "
      "AFTER closing so a cross-fiber close unblocks a parked "
      "accept()/recv()/connect() (BUG #5)."},
+    {"cancel_all_parked", m_netpoll_cancel_all_parked, METH_NOARGS,
+     "cancel_all_parked() -> int: wake EVERY fiber parked on any fd (with the "
+     "cancelled sentinel) and return the count.  A teardown backstop -- call "
+     "after the normal drain so a fiber left parked on an idle-but-open socket "
+     "cannot wedge mn_run's join-on-pending (audit B3)."},
     {"stats",       m_stats,       METH_NOARGS,
      "Return a dict of scheduler counters: ready, sleeping, "
      "netpoll_parked, completed, running, plus backend names.  "

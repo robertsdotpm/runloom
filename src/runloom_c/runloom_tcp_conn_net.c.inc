@@ -111,7 +111,7 @@ static PyObject *RunloomTCPConn_accept(RunloomTCPConn *self, PyObject *unused)
             return PyErr_SetFromErrno(PyExc_OSError);
         }
 #endif
-        if (runloom_netpoll_wait_fd(self->fd, RUNLOOM_NETPOLL_READ, -1LL) < 0) {
+        if (runloom_netpoll_wait_fd_coop(self->fd, RUNLOOM_NETPOLL_READ, -1LL) < 0) {
             /* wait_fd may have run a Python signal handler that raised (e.g. an
              * alarm handler / Ctrl-C) -> propagate it; don't overwrite with OSError. */
             return PyErr_Occurred() ? NULL : PyErr_SetFromErrno(PyExc_OSError);
@@ -177,7 +177,7 @@ static PyObject *RunloomTCPConn_connect_cls(PyTypeObject *cls, PyObject *args, P
     if (rc == SOCKET_ERROR) {
         int err = WSAGetLastError();
         if (err == WSAEWOULDBLOCK) {
-            if (runloom_netpoll_wait_fd(fd, RUNLOOM_NETPOLL_WRITE, -1LL) < 0) {
+            if (runloom_netpoll_wait_fd_coop(fd, RUNLOOM_NETPOLL_WRITE, -1LL) < 0) {
                 int saved = errno;
                 closesocket((SOCKET)fd);
                 errno = saved;
@@ -215,7 +215,7 @@ static PyObject *RunloomTCPConn_connect_cls(PyTypeObject *cls, PyObject *args, P
          * spuriously failed the connection with OSError(EINTR) -- confirmed by
          * fault injection (strace -e inject=connect:error=EINTR:when=1). */
         if (errno == EINPROGRESS || errno == EAGAIN || errno == EINTR) {
-            if (runloom_netpoll_wait_fd(fd, RUNLOOM_NETPOLL_WRITE, -1LL) < 0) {
+            if (runloom_netpoll_wait_fd_coop(fd, RUNLOOM_NETPOLL_WRITE, -1LL) < 0) {
                 int saved = errno;
                 close(fd);
                 errno = saved;
