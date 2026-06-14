@@ -147,6 +147,26 @@ else
     echo "FAIL -- deleting a gilstate-bound tstate from the wrong thread should violate the contract"; fail=$((fail+1))
 fi
 
+# ---- Tier-1 #2: the per-g tstate / mimalloc-heap MIGRATION hazard
+# (RunloomTstateMigration): models mimalloc's per-PAGE owner thread and proves
+# the abandon-on-detach + adopt-on-attach handshake is NECESSARY to migrate a
+# tstate hub->hub without a cross-thread page op (the SEGV gated off in 70e6ddb).
+# Correct = the handshake keeps owner == operating thread; the negative control
+# drops it -> a page allocated on hub A is operated on hub B.
+printf '  [tlc] %-28s ' "RunloomTstateMigration (handshake)"
+if run_tlc mig -config RunloomTstateMigration.cfg RunloomTstateMigration.tla | grep -q "No error has been found"; then
+    echo "PASS -- NoCrossThreadPageOp + NoForeignOwnerWhileAttached hold (abandon/adopt keeps page owner == operating hub)"; pass=$((pass+1))
+else
+    echo "FAIL -- the abandon/adopt handshake spec should hold"; fail=$((fail+1))
+fi
+
+printf '  [tlc] %-28s ' "RunloomTstateMigration (no h/shake)"
+if run_tlc migbug -deadlock -config RunloomTstateMigration_bug.cfg RunloomTstateMigration.tla | grep -q "is violated"; then
+    echo "PASS -- correctly DETECTS the mimalloc heap migrating hub->hub (a page owned by hub A operated on hub B) -> NoForeignOwnerWhileAttached violated"; pass=$((pass+1))
+else
+    echo "FAIL -- migrating a tstate without the abandon/adopt handshake should violate page ownership"; fail=$((fail+1))
+fi
+
 # ---- WHOLE-PROGRAM LIVENESS (RunloomComposite): the scheduler + every wake
 # source (channels / netpoll / timers / foreign) composed, checked for NoHang
 # (every goroutine eventually completes).  Real hangs live in the seams between
