@@ -281,6 +281,7 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
             runloom_g_t *sub = h->sub_head;
 #ifdef RUNLOOM_DBG_BADCORO
             runloom_g_t *prev = NULL;   /* source-hunt: g whose ->next we follow */
+            int last_wsite = -1; void *last_wval = NULL; unsigned long long last_wseq = 0;
 #endif
             h->sub_head = h->sub_tail = NULL;
             RUNLOOM_RUNLOCK(&h->sub_lock, RUNLOOM_RANK_HUB_SUB);
@@ -296,28 +297,39 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
                         (sub->callable == NULL && sub->c_entry == NULL) ||
                         sc == NULL || ((uintptr_t)sc >> 47) != 0 ||
                         ((uintptr_t)sc & 0xf) != 0) {
-                        char dbuf[360];
+                        /* last_w* describe how prev->next (== this bad sub) was
+                         * written: site (1=submit 2=drain 3=slabfree 5=staging),
+                         * the value written, and its seq.  If last_wval == sub the
+                         * bad value came straight from that site (a non-g was
+                         * linked); if last_wval != sub, prev->next was overwritten
+                         * AFTER the recorded write -> a wild write (the recorded
+                         * site/seq bounds when the last legit write happened). */
+                        char dbuf[420];
                         int dm = snprintf(dbuf, sizeof dbuf,
-                            "[DRAINBAD] sub=%p bad <- prev=%p id=%lld coro=%p owner=%p call=%p centry=%p rc=%d insub=%d ws=%d st=%d snapv=%d next=%p\n",
+                            "[DRAINBAD] sub=%p bad <- prev=%p id=%lld coro=%p owner=%p rc=%d insub=%d snapv=%d || prevNEXT wsite=%d wval=%p wseq=%llu (wval==sub? %d)\n",
                             (void *)sub, (void *)prev,
                             prev ? (long long)prev->id : -1,
                             prev ? (void *)prev->coro : NULL,
                             prev ? (void *)prev->owner : NULL,
-                            prev ? (void *)prev->callable : NULL,
-                            prev ? (void *)prev->c_entry : NULL,
                             prev ? (int)__atomic_load_n(&prev->refcount, __ATOMIC_ACQUIRE) : -1,
                             prev ? (int)__atomic_load_n(&prev->in_sub_queue, __ATOMIC_ACQUIRE) : -1,
-                            prev ? (int)__atomic_load_n(&prev->wake_state, __ATOMIC_ACQUIRE) : -1,
-                            prev ? (int)__atomic_load_n(&prev->state, __ATOMIC_ACQUIRE) : -1,
                             prev ? prev->snap.valid : -1,
-                            (void *)sub);
+                            last_wsite, last_wval, last_wseq,
+                            (last_wval == (void *)sub) ? 1 : 0);
                         if (dm > 0) (void)write(2, dbuf, (size_t)dm);
                         break;
                     }
                 }
 #endif
                 next = sub->next;
-                sub->next = NULL;
+#ifdef RUNLOOM_DBG_BADCORO
+                /* Capture how THIS sub's ->next was written, BEFORE we clear it,
+                 * so the next iteration (if `next` is bad) can attribute it. */
+                last_wsite = sub->next_wsite;
+                last_wval  = sub->next_wval;
+                last_wseq  = sub->next_wseq;
+#endif
+                RUNLOOM_NEXT_SET(sub, NULL, 2);   /* drain clear */
                 /* Route by state: fresh (no snap) -> Chase-Lev deque
                  * (stealable by other hubs); woken (snap.valid) ->
                  * local FIFO (hub-pinned, the netpoll-wake path).

@@ -88,9 +88,9 @@ static void runloom_mn_hub_submit(runloom_hub_t *h, runloom_g_t *g)
             cur != NULL && cur != h && cur->stage_head != NULL &&
             runloom_tls_current_g != NULL &&
             h->id >= 0 && h->id < runloom_hub_count) {
-            g->next = NULL;
+            RUNLOOM_NEXT_SET(g, NULL, 5);   /* staging (controlled mode) */
             if (cur->stage_tail[h->id] != NULL)
-                cur->stage_tail[h->id]->next = g;
+                RUNLOOM_NEXT_SET(cur->stage_tail[h->id], g, 5);
             else
                 cur->stage_head[h->id] = g;
             cur->stage_tail[h->id] = g;
@@ -101,9 +101,9 @@ static void runloom_mn_hub_submit(runloom_hub_t *h, runloom_g_t *g)
         }
     }
     RUNLOOM_RLOCK(&h->sub_lock, RUNLOOM_RANK_HUB_SUB);
-    g->next = NULL;
+    RUNLOOM_NEXT_SET(g, NULL, 1);   /* hub_submit: new tail's next */
     if (h->sub_tail != NULL) {
-        h->sub_tail->next = g;
+        RUNLOOM_NEXT_SET(h->sub_tail, g, 1);   /* link old tail -> g */
     } else {
         h->sub_head = g;
     }

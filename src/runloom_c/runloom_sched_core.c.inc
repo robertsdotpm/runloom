@@ -445,6 +445,9 @@ void runloom_g_entry(void *user)
 #define RUNLOOM_G_SLAB_CAP 4096
 static RUNLOOM_TLS runloom_g_t *runloom_g_slab = NULL;
 static RUNLOOM_TLS int runloom_g_slab_size = 0;
+#ifdef RUNLOOM_DBG_BADCORO
+unsigned long long runloom_next_wseq_ctr = 0;   /* source-hunt: ->next write seq */
+#endif
 
 runloom_g_t *runloom_g_slab_alloc(void)
 {
@@ -510,7 +513,7 @@ void runloom_g_slab_free(runloom_g_t *g)
         free(g);
         return;
     }
-    g->next = runloom_g_slab;
+    RUNLOOM_NEXT_SET(g, runloom_g_slab, 3);   /* slab freelist link */
     runloom_g_slab = g;
     runloom_g_slab_size++;
 }
