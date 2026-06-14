@@ -79,6 +79,14 @@ want_bug fiber_admit_cbmc.c "-DBUG_NO_BACKOUT"     "over-limit admit doesn't bac
 want_bug fiber_admit_cbmc.c "-DBUG_DOUBLE_RELEASE" "release ignores limit_counted -> an uncounted fiber underflows the slot"
 want_bug fiber_admit_cbmc.c "-DBUG_BULK_COUNTED"   "a bulk go_n fiber wrongly counted -> phantom release / underflow"
 
+# channel PyObject ref conservation: a sent value takes one Py_INCREF and is
+# released exactly once -- recv-consume / close-drop (parked sender) / free-drain
+# (buffer) -- never leaked, never over-freed.
+want_ok  chan_refflow_cbmc.c ""
+want_bug chan_refflow_cbmc.c "-DBUG_CLOSE_NO_SENDER_DROP" "close forgets the parked-sender Py_DECREF -> value leaks"
+want_bug chan_refflow_cbmc.c "-DBUG_FREE_NO_BUFFER_DRAIN" "final decref frees without draining the buffer -> values leak"
+want_bug chan_refflow_cbmc.c "-DBUG_DOUBLE_CONSUME"       "a consumed value is dropped again -> refcount negative (over-free)"
+
 # Drift-guard: the proof (and the real scrub's part-2 start) assume `arena`
 # immediately follows the atomic `state` byte -- a field inserted into that gap
 # would silently leak across recycling (the stale-pass_index class).  Fail if a

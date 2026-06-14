@@ -84,6 +84,28 @@ for bug in BUG_FIBER_NO_DONE_WAIT BUG_WORKER_LATE_READ; do
     fi
 done
 
+# --- channel refcount free protocol (chan_waiters.c.inc) ----------------------
+# Two hubs hold a ref to a shared channel.  incref is RELAXED (held across); decref
+# is ACQ_REL so the decrement-to-0 orders the runloom_mutex_destroy + PyMem_Free
+# after every holder's last use -- no use-after-free, freed once.
+printf '  [genmc] %-30s ' "chan_refcount.c"
+if "$G" -- "$HERE/chan_refcount.c" >"$HERE/.genmc.pos.log" 2>&1 \
+        && grep -q "No errors were detected" "$HERE/.genmc.pos.log"; then
+    n="$(sed -n 's/.*complete executions explored: \([0-9]*\).*/\1/p' "$HERE/.genmc.pos.log" | tail -1)"
+    green "PASS"; echo " -- channel freed once, no use-after-free under RC11 (${n:-?} execs)"; pass=$((pass+1))
+else
+    red "FAIL"; echo " -- see $HERE/.genmc.pos.log"; fail=$((fail+1))
+fi
+
+printf '  [genmc] %-30s ' "chan_refcount.c(-DBUG_DECREF_RELAXED)"
+if "$G" -- -DBUG_DECREF_RELAXED "$HERE/chan_refcount.c" >"$HERE/.genmc.neg.log" 2>&1; then
+    red "FAIL"; echo " (expected a UAF race) -- see $HERE/.genmc.neg.log"; fail=$((fail+1))
+elif grep -qiE "race|error|violation" "$HERE/.genmc.neg.log"; then
+    green "PASS"; echo " -- correctly DETECTS the free vs field-access data race (relaxed decref)"; pass=$((pass+1))
+else
+    red "FAIL"; echo " (errored but no race reported) -- see $HERE/.genmc.neg.log"; fail=$((fail+1))
+fi
+
 # --- park_safe/wake_safe cross-thread handshake (runloom_sched*) ---------------
 # Drift-guard: the harness's correct default assumes the source has the two
 # StoreLoad seq_cst fences (added after GenMC found a lost wakeup in the
