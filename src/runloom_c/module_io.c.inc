@@ -143,9 +143,18 @@ static void runloom_io_c_echo(void *arg)
     runloom_iouring_ring_t *ring = runloom_iouring_loop_enabled()
                                        ? runloom_mn_current_iouring_ring()
                                        : NULL;
+    /* Stage-3: one persistent multishot recv per connection on the hub ring
+     * (RUNLOOM_IOURING_MS=1).  Falls back to single-shot proactor recv when the
+     * pool isn't available (ms==NULL).  Send stays single-shot proactor. */
+    void *ms = (ring != NULL && runloom_iouring_loop_ms_enabled())
+                   ? runloom_iouring_loop_ms_open(ring, fd)
+                   : NULL;
     for (;;) {
         ssize_t n;
-        if (ring != NULL) {
+        if (ms != NULL) {
+            n = runloom_iouring_loop_ms_recv(ms, buf, 8);
+            if (n < 0) { runloom_iouring_loop_ms_close(ms); close(fd); return; }
+        } else if (ring != NULL) {
             n = runloom_iouring_loop_recv(ring, fd, buf, 8, 0);
             if (n < 0) { close(fd); return; }    /* errno set; hard error */
         } else {
@@ -157,7 +166,10 @@ static void runloom_io_c_echo(void *arg)
                 if (runloom_netpoll_wait_fd(fd, RUNLOOM_NETPOLL_READ, -1LL) < 0) { close(fd); return; }
             }
         }
-        if (n == 0) { close(fd); return; }      /* peer closed */
+        if (n == 0) {                           /* peer closed */
+            if (ms != NULL) runloom_iouring_loop_ms_close(ms);
+            close(fd); return;
+        }
         {
             ssize_t sent = 0;
             while (sent < n) {
@@ -166,6 +178,7 @@ static void runloom_io_c_echo(void *arg)
                     s = runloom_iouring_loop_send(ring, fd, buf + sent,
                                                   (size_t)(n - sent), 0);
                     if (s > 0) { sent += s; continue; }
+                    if (ms != NULL) runloom_iouring_loop_ms_close(ms);
                     close(fd); return;           /* EOF/error on a proactor send */
                 }
                 s = send(fd, buf + sent, (size_t)(n - sent), 0);

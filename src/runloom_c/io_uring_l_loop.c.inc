@@ -57,6 +57,152 @@ int runloom_iouring_loop_enabled(void)
     return cur;
 }
 
+/* ======================= Stage-3 multishot recv ===========================
+ * One persistent IORING_OP_RECV | MULTISHOT | BUFFER_SELECT SQE per connection
+ * delivers a CQE per chunk into a PER-HUB provided buffer ring -- no re-submit
+ * and no submit/park per recv, amortising the per-op cost the single-shot
+ * Stage-2 path pays.  Everything here runs ONLY on the ring's owning hub
+ * thread: it is the sole SQE issuer (SINGLE_ISSUER), the sole CQE reaper
+ * (loop_drain), and the sole buffer-returner -- the echo fibers are
+ * hub-pinned (a woken fiber routes to the hub-local FIFO, never the stealable
+ * deque, so it never migrates off the hub its multishot is armed on).  Hence
+ * NO LOCKS: the fiber and loop_drain are the same OS thread and never run
+ * concurrently.  Gated behind RUNLOOM_IOURING_MS (requires the loop backend),
+ * default off. */
+
+#ifndef RUNLOOM_LOOP_MS_BGID
+#  define RUNLOOM_LOOP_MS_BGID 0
+#endif
+#define RUNLOOM_LOOP_MS_PBUF_COUNT_DEFAULT 1024
+#define RUNLOOM_LOOP_MS_PBUF_SIZE          2048
+/* user_data sentinel for the ASYNC_CANCEL loop_ms_close submits; its own
+ * completion CQE is discarded by loop_drain (op records are 8-byte-aligned
+ * pointers, never this tiny value, alongside UD_WAKE=1 / UD_EPOLL=2). */
+#define RUNLOOM_LOOP_UD_MSCANCEL  ((uint64_t)3)
+
+typedef struct runloom_loop_ms runloom_loop_ms_t;
+static void runloom_loop_ms_on_cqe(runloom_loop_ms_t *h,
+                                   int32_t res, uint32_t flags);
+
+/* 1 if the multishot recv path is enabled (RUNLOOM_IOURING_MS set); read once.
+ * Only consulted on the loop backend. */
+int runloom_iouring_loop_ms_enabled(void)
+{
+    static int v = -1;
+    int cur = __atomic_load_n(&v, __ATOMIC_RELAXED);
+    if (cur < 0) {
+        const char *e = getenv("RUNLOOM_IOURING_MS");
+        cur = (e != NULL && *e != '0' && *e != '\0') ? 1 : 0;
+        __atomic_store_n(&v, cur, __ATOMIC_RELAXED);
+    }
+    return cur;
+}
+
+/* Per-hub provided buffer ring count (env RUNLOOM_IOURING_MS_BUFS, default
+ * 1024).  Rounded up to a power of two, clamped to [16, 65536] (bid is 16-bit). */
+static unsigned runloom_loop_ms_pbuf_count(void)
+{
+    static int v = -1;
+    int cur = __atomic_load_n(&v, __ATOMIC_RELAXED);
+    if (cur < 0) {
+        const char *e = getenv("RUNLOOM_IOURING_MS_BUFS");
+        long n = (e != NULL) ? atol(e) : RUNLOOM_LOOP_MS_PBUF_COUNT_DEFAULT;
+        unsigned p = 16;
+        if (n < 16) n = 16;
+        if (n > 65536) n = 65536;
+        while (p < (unsigned)n) p <<= 1;
+        cur = (int)p;
+        __atomic_store_n(&v, cur, __ATOMIC_RELAXED);
+    }
+    return (unsigned)cur;
+}
+
+/* Register a provided buffer ring on THIS hub ring (bgid RUNLOOM_LOOP_MS_BGID).
+ * Returns 0 on success, -1 on failure (caller leaves ms_pool NULL -> multishot
+ * ms_open returns NULL -> the echo falls back to single-shot).  Mirrors the
+ * process-global pool setup in io_uring_l_sys.c.inc, but per-ring and lock-free
+ * (the owning hub is the sole tail producer). */
+static int runloom_iouring_loop_ms_pbuf_setup(runloom_iouring_ring_t *r)
+{
+    struct runloom_iouring_buf_reg reg;
+    struct runloom_iouring_buf *bufs;
+    unsigned count = runloom_loop_ms_pbuf_count();
+    unsigned size  = RUNLOOM_LOOP_MS_PBUF_SIZE;
+    size_t pool_total = (size_t)count * size;
+    size_t bring_size = sizeof(struct runloom_iouring_buf) * count;
+    long page = sysconf(_SC_PAGESIZE);
+    void *pool = NULL, *bring = NULL;
+    unsigned i;
+    if (page <= 0) page = 4096;
+    if (posix_memalign(&pool, (size_t)page, pool_total) != 0)  pool = NULL;
+    if (posix_memalign(&bring, (size_t)page, bring_size) != 0) bring = NULL;
+    if (pool == NULL || bring == NULL) { free(pool); free(bring); return -1; }
+    memset(bring, 0, bring_size);
+    memset(&reg, 0, sizeof(reg));
+    reg.ring_addr    = (uintptr_t)bring;
+    reg.ring_entries = count;
+    reg.bgid         = RUNLOOM_LOOP_MS_BGID;
+    reg.flags        = 0;
+    if (sys_io_uring_register(r->ring_fd, IORING_REGISTER_PBUF_RING,
+                              &reg, 1) != 0) {
+        free(pool); free(bring); return -1;
+    }
+    bufs = (struct runloom_iouring_buf *)bring;
+    for (i = 0; i < count; i++) {
+        bufs[i].addr = (uintptr_t)((char *)pool + (size_t)i * size);
+        bufs[i].len  = size;
+        bufs[i].bid  = (uint16_t)i;
+        bufs[i].resv = 0;
+    }
+    /* Kernel tail overlays bufs[0].resv; release so it sees all descriptors. */
+    __atomic_store_n(&bufs[0].resv, (uint16_t)count, __ATOMIC_RELEASE);
+    r->ms_pool  = pool;
+    r->ms_bring = bring;
+    r->ms_count = count;
+    r->ms_size  = size;
+    r->ms_mask  = count - 1;
+    return 0;
+}
+
+static void runloom_iouring_loop_ms_pbuf_teardown(runloom_iouring_ring_t *r)
+{
+    struct runloom_iouring_buf_reg reg;
+    if (r == NULL || r->ms_pool == NULL) return;
+    /* Unregister BEFORE freeing so the kernel drops its reference to bring/pool
+     * (the ring fd is closed right after, which would also drop it, but the
+     * close happens in ring_destroy after this returns). */
+    memset(&reg, 0, sizeof(reg));
+    reg.bgid = RUNLOOM_LOOP_MS_BGID;
+    sys_io_uring_register(r->ring_fd, IORING_UNREGISTER_PBUF_RING, &reg, 1);
+    free(r->ms_pool);  r->ms_pool  = NULL;
+    free(r->ms_bring); r->ms_bring = NULL;
+    r->ms_count = r->ms_size = r->ms_mask = 0;
+}
+
+static void *runloom_iouring_loop_ms_buf_addr(runloom_iouring_ring_t *r,
+                                              unsigned bid)
+{
+    if (r->ms_pool == NULL || bid >= r->ms_count) return NULL;
+    return (char *)r->ms_pool + (size_t)bid * r->ms_size;
+}
+
+/* Return a consumed buffer to this hub's ring (lock-free: the owning hub is the
+ * sole tail producer). */
+static void runloom_iouring_loop_ms_buf_return(runloom_iouring_ring_t *r,
+                                               unsigned bid)
+{
+    struct runloom_iouring_buf *bufs;
+    uint16_t tail, idx;
+    if (r->ms_pool == NULL || bid >= r->ms_count) return;
+    bufs = (struct runloom_iouring_buf *)r->ms_bring;
+    tail = __atomic_load_n(&bufs[0].resv, __ATOMIC_ACQUIRE);
+    idx  = (uint16_t)(tail & r->ms_mask);
+    bufs[idx].addr = (uintptr_t)((char *)r->ms_pool + (size_t)bid * r->ms_size);
+    bufs[idx].len  = r->ms_size;
+    bufs[idx].bid  = (uint16_t)bid;
+    __atomic_store_n(&bufs[0].resv, (uint16_t)(tail + 1), __ATOMIC_RELEASE);
+}
+
 /* Write one multishot POLL_ADD(fd, POLLIN) SQE into the SQ with `ud` as
  * user_data.  Does NOT enter the kernel (deferred); the next loop_wait submits
  * it.  Does NOT touch the inflight counter -- these polls are infrastructure,
@@ -124,12 +270,33 @@ static void runloom_iouring_loop_drain(runloom_iouring_ring_t *r, int *flags_out
                                                   RUNLOOM_LOOP_UD_EPOLL);
             continue;
         }
-        /* Op record (Stage-2 proactor recv/send/etc).  Single-reaper, so no
-         * CAS on the CQ -- but the op->wait handshake still gates the wake so a
-         * not-yet-parked submitter (impossible same-thread, but kept for the
-         * shared-ring safety contract) isn't double-resumed. */
+        if (ud == RUNLOOM_LOOP_UD_MSCANCEL) {
+            /* ASYNC_CANCEL completion from loop_ms_close: nothing to do -- the
+             * cancelled multishot's own terminal (no-F_MORE) CQE is what clears
+             * its handle.  Did not bump inflight, so don't decrement. */
+            continue;
+        }
+        /* Op record (Stage-2 proactor recv/send, or a Stage-3 multishot recv).
+         * Single-reaper, so no CAS on the CQ -- but the op->wait handshake still
+         * gates the SINGLE wake so a not-yet-parked submitter (impossible
+         * same-thread, but kept for the shared-ring safety contract) isn't
+         * double-resumed. */
         {
             runloom_iouring_op_t *op = (runloom_iouring_op_t *)(uintptr_t)ud;
+            if (op != NULL && op->type == RUNLOOM_IOURING_OP_MULTISHOT) {
+                /* Stage-3 multishot recv: deliver the buffer / EOF / error to
+                 * the per-connection handle (op is its first field).  The op
+                 * stays armed on the SAME SQE across chunks (F_MORE); only its
+                 * terminal CQE (no F_MORE) ends it, so decrement inflight just
+                 * then -- submit and each re-submit bumped it once. */
+                runloom_loop_ms_on_cqe((runloom_loop_ms_t *)op, res, cflags);
+                if (!(cflags & IORING_CQE_F_MORE)) {
+                    __atomic_sub_fetch(&r->inflight, 1, __ATOMIC_ACQ_REL);
+                    __atomic_sub_fetch(&runloom_iouring_inflight_count, 1,
+                                       __ATOMIC_ACQ_REL);
+                }
+                continue;
+            }
             if (op != NULL) {
                 __atomic_store_n(&op->result, res, __ATOMIC_RELEASE);
                 if (op->hub != NULL) {
@@ -175,6 +342,11 @@ int runloom_iouring_loop_hub_arm(runloom_iouring_ring_t *r, int epoll_fd)
         r->loop_wake_fd = r->loop_epoll_fd = -1;
         return -1;
     }
+    /* Stage-3: register this hub's provided buffer ring for multishot recv.
+     * Best-effort -- on failure ms_pool stays NULL and ms_open returns NULL, so
+     * the echo falls back to the single-shot Stage-2 path (no hard failure). */
+    if (runloom_iouring_loop_ms_enabled())
+        runloom_iouring_loop_ms_pbuf_setup(r);
     return wfd;
 }
 
@@ -334,6 +506,231 @@ void runloom_iouring_loop_wake(int wake_fd)
 void runloom_iouring_loop_hub_disarm(runloom_iouring_ring_t *r)
 {
     if (r == NULL) return;
+    runloom_iouring_loop_ms_pbuf_teardown(r);   /* unregister + free the pool */
     if (r->loop_wake_fd >= 0) { close(r->loop_wake_fd); r->loop_wake_fd = -1; }
     r->loop_epoll_fd = -1;
+}
+
+/* ---- Stage-3 multishot recv handle (per connection) ----------------------
+ * Heap-allocated (opaque void* to the caller in module_io's all-C echo, which
+ * lives in a different translation unit).  Accessed ONLY by the owning hub
+ * thread -- the echo fiber AND loop_drain are that one thread and never run
+ * concurrently (the fiber is hub-pinned once armed) -- so no locks. */
+struct runloom_loop_ms {
+    runloom_iouring_op_t op;        /* FIRST: SQE user_data; op.type==MULTISHOT */
+    runloom_iouring_ring_t *ring;
+    int fd;
+    int armed;                      /* 1 while a multishot SQE is in flight */
+    int eof;                        /* peer closed (a res==0 CQE) */
+    int err;                        /* sticky -errno (NOT ENOBUFS / ECANCELED) */
+    runloom_g_t *waiter_g;          /* set while the fiber is parked for data */
+    void *waiter_hub;
+    /* FIFO of delivered-but-unconsumed buffers.  Capacity q_cap == ms_count, so
+     * it can never overflow: the pool holds at most ms_count buffers total, so
+     * a single handle can hold at most that many un-returned.  q_bid/q_len point
+     * into the one allocation that backs this handle (no per-recv malloc). */
+    uint16_t *q_bid;
+    uint16_t *q_len;
+    unsigned  q_cap, q_head, q_count;
+    /* partially-consumed head buffer */
+    int      cur_bid;               /* -1 = none */
+    unsigned cur_off, cur_len;
+};
+
+/* Write the persistent multishot recv SQE into the hub ring SQ (deferred;
+ * loop_wait submits the batch).  Bumps inflight so the hub keeps reaping while
+ * armed.  Marks the handle armed.  Returns 0 (always succeeds: SQ-full is
+ * resolved by flush+drain, single issuer). */
+static int runloom_iouring_loop_ms_submit(runloom_loop_ms_t *h)
+{
+    runloom_iouring_ring_t *r = h->ring;
+    unsigned tail, head, idx;
+    struct io_uring_sqe *sqe;
+    for (;;) {
+        tail = __atomic_load_n(r->sq_tail, __ATOMIC_RELAXED);
+        head = __atomic_load_n(r->sq_head, __ATOMIC_ACQUIRE);
+        if ((tail - head) < r->sq_entries) break;
+        runloom_iouring_loop_flush(r);
+        runloom_iouring_loop_drain(r, NULL);
+    }
+    idx = tail & r->sq_mask;
+    sqe = &r->sqes[idx];
+    memset(sqe, 0, sizeof(*sqe));
+    sqe->opcode    = IORING_OP_RECV;
+    sqe->fd        = h->fd;
+    sqe->ioprio    = IORING_RECV_MULTISHOT;
+    sqe->flags     = IOSQE_BUFFER_SELECT;
+    sqe->buf_group = RUNLOOM_LOOP_MS_BGID;
+    sqe->user_data = (uint64_t)(uintptr_t)&h->op;
+    r->sq_array[idx] = idx;
+    __atomic_store_n(r->sq_tail, tail + 1, __ATOMIC_RELEASE);
+    __atomic_add_fetch(&r->inflight, 1, __ATOMIC_ACQ_REL);
+    __atomic_add_fetch(&runloom_iouring_inflight_count, 1, __ATOMIC_ACQ_REL);
+    h->armed = 1;
+    return 0;
+}
+
+/* Drain handler: a multishot CQE delivered a buffer / EOF / error / de-arm.
+ * Runs on the hub thread inside loop_drain while the consumer fiber is parked
+ * (same thread -> no lock).  Pushes data into the ready FIFO and wakes the
+ * fiber if it is waiting. */
+static void runloom_loop_ms_on_cqe(runloom_loop_ms_t *h, int32_t res,
+                                   uint32_t flags)
+{
+    if (res > 0 && (flags & IORING_CQE_F_BUFFER)) {
+        unsigned bid = (unsigned)(flags >> IORING_CQE_BUFFER_SHIFT);
+        if (h->q_count < h->q_cap) {       /* invariant: cannot exceed the pool */
+            unsigned slot = (h->q_head + h->q_count) % h->q_cap;
+            h->q_bid[slot] = (uint16_t)bid;
+            h->q_len[slot] = (uint16_t)res;
+            h->q_count++;
+        } else {
+            /* Should be unreachable (depth bounded by pool size).  Don't corrupt
+             * memory: return the buffer instead of enqueuing (drops the chunk). */
+            runloom_iouring_loop_ms_buf_return(h->ring, bid);
+        }
+    } else if (res == 0) {
+        h->eof = 1;                        /* orderly peer close */
+    } else if (res < 0) {
+        int e = -res;
+        if (e != ENOBUFS && e != ECANCELED && h->err == 0)
+            h->err = e;                    /* a real, sticky error */
+        /* ENOBUFS (pool momentarily empty) / ECANCELED (close): not sticky;
+         * the multishot de-arms and recv re-submits when it next needs data. */
+    }
+    if (!(flags & IORING_CQE_F_MORE))
+        h->armed = 0;                      /* terminated; recv re-arms if needed */
+    if (h->waiter_g != NULL) {
+        runloom_g_t *g = h->waiter_g;
+        void *hub = h->waiter_hub;
+        h->waiter_g = NULL; h->waiter_hub = NULL;
+        if (hub != NULL) runloom_mn_wake_g(hub, g);
+        else             runloom_sched_wake_safe(g);
+    }
+}
+
+/* Open a multishot recv stream on fd on ring r.  Returns an opaque handle, or
+ * NULL if multishot isn't available on this hub ring (no pbuf pool / alloc
+ * failure) -- the caller then falls back to single-shot recv.  Arms the
+ * persistent SQE immediately. */
+void *runloom_iouring_loop_ms_open(runloom_iouring_ring_t *r, int fd)
+{
+    runloom_loop_ms_t *h;
+    unsigned cap;
+    size_t need;
+    if (r == NULL || r->ms_pool == NULL) return NULL;
+    cap  = r->ms_count;
+    need = sizeof(*h) + (size_t)cap * 2u * sizeof(uint16_t);
+    h = (runloom_loop_ms_t *)malloc(need);
+    if (h == NULL) return NULL;
+    memset(&h->op, 0, sizeof(h->op));
+    h->op.type = RUNLOOM_IOURING_OP_MULTISHOT;
+    h->op.ring = r;
+    h->ring = r; h->fd = fd;
+    h->armed = 0; h->eof = 0; h->err = 0;
+    h->waiter_g = NULL; h->waiter_hub = NULL;
+    h->q_bid = (uint16_t *)(h + 1);
+    h->q_len = h->q_bid + cap;
+    h->q_cap = cap; h->q_head = 0; h->q_count = 0;
+    h->cur_bid = -1; h->cur_off = 0; h->cur_len = 0;
+    runloom_iouring_loop_ms_submit(h);
+    return h;
+}
+
+/* Cooperatively read up to n bytes.  Returns bytes (>0), 0 on EOF, or -1 with
+ * errno on error.  Serves from buffered data first, parks for more if needed. */
+runloom_iouring_ssize_t runloom_iouring_loop_ms_recv(void *handle,
+                                                     void *buf, size_t n)
+{
+    runloom_loop_ms_t *h = (runloom_loop_ms_t *)handle;
+    runloom_iouring_ring_t *r = h->ring;
+    for (;;) {
+        /* 1. Serve from the partially-consumed current buffer. */
+        if (h->cur_bid >= 0) {
+            unsigned avail = h->cur_len - h->cur_off;
+            unsigned take  = (avail < n) ? avail : (unsigned)n;
+            char *src = (char *)runloom_iouring_loop_ms_buf_addr(
+                            r, (unsigned)h->cur_bid);
+            if (src != NULL && take > 0)
+                memcpy(buf, src + h->cur_off, take);
+            h->cur_off += take;
+            if (h->cur_off >= h->cur_len) {
+                runloom_iouring_loop_ms_buf_return(r, (unsigned)h->cur_bid);
+                h->cur_bid = -1; h->cur_off = h->cur_len = 0;
+            }
+            if (take > 0) return (runloom_iouring_ssize_t)take;
+            /* a zero-length buffer: drop it and keep going */
+            continue;
+        }
+        /* 2. Promote the next queued buffer to current. */
+        if (h->q_count > 0) {
+            h->cur_bid = (int)h->q_bid[h->q_head];
+            h->cur_len = h->q_len[h->q_head];
+            h->cur_off = 0;
+            h->q_head  = (h->q_head + 1) % h->q_cap;
+            h->q_count--;
+            continue;
+        }
+        /* 3. No buffered data: report terminal conditions. */
+        if (h->eof) return 0;
+        if (h->err) { errno = h->err; return -1; }
+        /* Re-arm if the multishot de-armed (ENOBUFS / kernel ended it). */
+        if (!h->armed)
+            runloom_iouring_loop_ms_submit(h);
+        /* 4. Park until loop_drain delivers a buffer / EOF / error.  Same thread
+         * as the drainer, so publishing the waiter BEFORE coro_yield is
+         * race-free (the drain cannot run until we yield). */
+        h->waiter_g   = runloom_mn_tls_current_g();
+        h->waiter_hub = runloom_mn_current_hub_opaque();
+        runloom_sched_park_current();
+        runloom_coro_yield();
+        h->waiter_g = NULL; h->waiter_hub = NULL;
+    }
+}
+
+/* Close a multishot stream.  If still armed (a mid-stream close, e.g. a send
+ * error), cancel the SQE and park until its terminal CQE clears the handle, so
+ * no in-flight completion dereferences freed memory.  Returns all held buffers
+ * to the pool and frees the handle. */
+void runloom_iouring_loop_ms_close(void *handle)
+{
+    runloom_loop_ms_t *h = (runloom_loop_ms_t *)handle;
+    runloom_iouring_ring_t *r;
+    if (h == NULL) return;
+    r = h->ring;
+    if (h->armed) {
+        unsigned tail, head, idx;
+        struct io_uring_sqe *sqe;
+        for (;;) {
+            tail = __atomic_load_n(r->sq_tail, __ATOMIC_RELAXED);
+            head = __atomic_load_n(r->sq_head, __ATOMIC_ACQUIRE);
+            if ((tail - head) < r->sq_entries) break;
+            runloom_iouring_loop_flush(r);
+            runloom_iouring_loop_drain(r, NULL);
+        }
+        idx = tail & r->sq_mask;
+        sqe = &r->sqes[idx];
+        memset(sqe, 0, sizeof(*sqe));
+        sqe->opcode    = IORING_OP_ASYNC_CANCEL;
+        sqe->addr      = (uint64_t)(uintptr_t)&h->op;   /* cancel by user_data */
+        sqe->user_data = RUNLOOM_LOOP_UD_MSCANCEL;       /* drain discards it */
+        r->sq_array[idx] = idx;
+        __atomic_store_n(r->sq_tail, tail + 1, __ATOMIC_RELEASE);
+        while (h->armed) {
+            h->waiter_g   = runloom_mn_tls_current_g();
+            h->waiter_hub = runloom_mn_current_hub_opaque();
+            runloom_sched_park_current();
+            runloom_coro_yield();
+            h->waiter_g = NULL; h->waiter_hub = NULL;
+        }
+    }
+    /* Reclaim every buffer still held so the pool doesn't leak across conns. */
+    if (h->cur_bid >= 0)
+        runloom_iouring_loop_ms_buf_return(r, (unsigned)h->cur_bid);
+    while (h->q_count > 0) {
+        runloom_iouring_loop_ms_buf_return(r, h->q_bid[h->q_head]);
+        h->q_head = (h->q_head + 1) % h->q_cap;
+        h->q_count--;
+    }
+    free(h);
 }

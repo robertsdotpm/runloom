@@ -248,4 +248,32 @@ void runloom_iouring_loop_wake(int wake_fd);
 /* Close the wake eventfd (the polls die with the ring at destroy). */
 void runloom_iouring_loop_hub_disarm(runloom_iouring_ring_t *r);
 
+/* ---- Stage-3 multishot recv (RUNLOOM_IOURING_MS=1, requires the loop) ----
+ *
+ * ONE persistent IORING_OP_RECV | MULTISHOT | BUFFER_SELECT SQE per connection
+ * delivers a CQE per chunk into the owning hub's provided buffer ring, with no
+ * re-submit and no submit/park per recv.  Used by the all-C serve path.  Handle
+ * access is single-hub-thread (the echo fiber is hub-pinned), so it is lock-free.
+ */
+
+/* 1 if the multishot recv path is enabled (RUNLOOM_IOURING_MS set; read once). */
+int runloom_iouring_loop_ms_enabled(void);
+
+/* Open a multishot recv stream on fd on the current hub's ring r.  Returns an
+ * opaque handle, or NULL if multishot isn't available (no per-hub buffer pool /
+ * alloc failure) -- the caller then falls back to single-shot loop_recv.  Must
+ * run on a fiber whose hub owns r; the fiber must stay on that hub for the
+ * stream's lifetime (guaranteed: a woken fiber is hub-pinned). */
+void *runloom_iouring_loop_ms_open(runloom_iouring_ring_t *r, int fd);
+
+/* Cooperatively read up to n bytes from the stream into buf.  Returns bytes
+ * (>0), 0 on EOF, or -1 with errno on error.  Parks the fiber until data
+ * arrives. */
+runloom_iouring_ssize_t runloom_iouring_loop_ms_recv(void *handle,
+                                                     void *buf, size_t n);
+
+/* Close the stream: cancel an armed SQE, wait for its terminal CQE, reclaim
+ * held buffers, free the handle.  Do not touch the handle afterwards. */
+void runloom_iouring_loop_ms_close(void *handle);
+
 #endif

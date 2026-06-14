@@ -37,6 +37,18 @@ struct runloom_iouring_ring {
     unsigned sq_submitted_tail;
     int loop_wake_fd;
     int loop_epoll_fd;
+
+    /* Stage-3 multishot recv (RUNLOOM_IOURING_MS=1): a per-hub provided buffer
+     * ring registered on THIS ring fd (bgid RUNLOOM_LOOP_MS_BGID).  The hub
+     * thread is the sole issuer (SINGLE_ISSUER), sole reaper (loop_drain), and
+     * sole buffer-returner (its pinned echo fibers), so the tail publish needs
+     * NO lock -- unlike the process-global pool, which several hubs share.
+     * ms_pool/ms_bring are NULL unless the multishot path armed on this ring. */
+    void    *ms_pool;        /* buffer pool base (ms_count * ms_size bytes) */
+    void    *ms_bring;       /* io_uring_buf_ring descriptors (ms_count) */
+    unsigned ms_count;       /* buffer count (power of two) */
+    unsigned ms_size;        /* per-buffer size */
+    unsigned ms_mask;        /* ms_count - 1 */
 };
 
 /* Hub-ring init.  Tries SINGLE_ISSUER + (optionally) DEFER_TASKRUN;
