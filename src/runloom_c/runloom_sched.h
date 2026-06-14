@@ -510,9 +510,19 @@ struct runloom_sched {
     runloom_g_t *quiescence_tail;
 };
 
-/* Is the ready queue empty?  Hot-path predicate; inline-friendly. */
+/* Is the ready queue empty?  Hot-path predicate; inline-friendly.
+ * ready_head/ready_tail are written non-atomically by the OWNING hub
+ * (ready_push/ready_pop), but this predicate is also read CROSS-THREAD by the
+ * deadlock-quiescence census (runloom_mn_has_wakeable_work, on the main thread),
+ * so the indices are relaxed-atomic -- the lone plain access among that census's
+ * atomic siblings (resume_start_ns / sub_head / global_runq_len), matching the
+ * missing-atomic-qualifier fixes in tools/README Finding C.  Found by
+ * tools/lifefuzz under the gold-standard TSan ext (datastack:267/403 vs sched.h
+ * here).  RELAXED: single-writer per ring; the census only needs a non-torn
+ * value (its deadlock streak + re-kick absorb staleness).  Zero-cost on x86. */
 RUNLOOM_INLINE int runloom_sched_ready_empty(const runloom_sched_t *s) {
-    return s->ready_head == s->ready_tail;
+    return __atomic_load_n(&s->ready_head, __ATOMIC_RELAXED)
+        == __atomic_load_n(&s->ready_tail, __ATOMIC_RELAXED);
 }
 
 /* Module-level: one sched per OS thread once Phase C lands.  For now

@@ -770,10 +770,18 @@ static int runloom_mn_has_wakeable_work(void)
          * mn_go + wake_g submission list. */
         if (!runloom_sched_ready_empty(&h->sched))                  return 1;
         if (runloom_cldeque_size(&h->deque) != 0)                   return 1;
+        /* KNOWN same-class race (tools/lifefuzz TSan, hub_main:273 sub_head): this
+         * lock-free ACQUIRE read pairs with sub_head WRITES that are still PLAIN
+         * (under sub_lock) at the 6 producer/handoff/drain sites -- a multi-writer
+         * pointer needing RELEASE stores, deferred as a focused hot-wake-path pass.
+         * Benign on x86 (aligned word); see docs/dev/LIFECYCLE_INVARIANTS.md. */
         if (__atomic_load_n(&h->sub_head, __ATOMIC_ACQUIRE) != NULL) return 1;
-        /* A sleeper / timer that will fire and wake a fiber. */
-        if (h->sched.sleep_size != 0)                               return 1;
-        if (h->sched.timer_size != 0)                               return 1;
+        /* A sleeper / timer that will fire and wake a fiber.  RELAXED-atomic: the
+         * owning hub writes these non-atomically (sleep_push/pop, timer_push/pop),
+         * so this cross-thread read is the lone plain access otherwise -- match the
+         * atomic siblings above (the ready_head/tail fix in runloom_sched_ready_empty). */
+        if (__atomic_load_n(&h->sched.sleep_size, __ATOMIC_RELAXED) != 0) return 1;
+        if (__atomic_load_n(&h->sched.timer_size, __ATOMIC_RELAXED) != 0) return 1;
     }
     return 0;
 }

@@ -69,8 +69,11 @@ static void runloom_mn_world_yield_if_monopolizing(runloom_hub_t *h)
 #if PY_VERSION_HEX >= 0x030D0000
     int i;
     if (__atomic_load_n(&h->stopping, __ATOMIC_ACQUIRE)) return;
-    /* Sole runnable g: exactly one in the ready ring and the own deque empty. */
-    if ((h->sched.ready_tail - h->sched.ready_head) != 1) return;
+    /* Sole runnable g: exactly one in the ready ring and the own deque empty.
+     * Relaxed loads (as documented above): own-thread here, but the indices are
+     * relaxed-atomic for the cross-thread census -- keep every reader consistent. */
+    if ((__atomic_load_n(&h->sched.ready_tail, __ATOMIC_RELAXED)
+         - __atomic_load_n(&h->sched.ready_head, __ATOMIC_RELAXED)) != 1) return;
     if (runloom_cldeque_size(&h->deque) != 0) return;
     for (i = 0; i < runloom_hub_count; i++) {
         int tss;
