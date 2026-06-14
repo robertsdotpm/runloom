@@ -53,6 +53,24 @@ want_bug_slab() {
 want_ok_slab
 want_bug_slab
 
+# datastack chunk-pool alias: runloom's pool reuses _PyStackChunk.previous as its
+# free-list link -- the SAME field CPython's data-stack chain walks + frees.  A
+# pooled chunk must never be reachable from the live datastack_chunk via ->previous
+# (else PopFrame arena-frees / re-owns a pooled chunk = double-owned UAF).  Two
+# guards: pool_get SEVERs `previous`, pool_install ROOT-SKIPs to data[1].
+want_ok  chunk_pool_alias_cbmc.c ""
+want_bug chunk_pool_alias_cbmc.c "-DBUG_NO_SEVER"     "pool_get keeps the free-list link -> live chain walks into the pool"
+want_bug chunk_pool_alias_cbmc.c "-DBUG_NO_ROOT_SKIP" "install starts at data[0] -> the root chunk is popped -> walk-to-previous fires"
+
+# max-fibers admission slot: every counted admit is released exactly once across the
+# spawn exit paths (rejected/uncounted/coro-fail/tstate-fail/success) -> live_g back
+# to 0 at quiescence, never above the cap.  Overlapping in-flight fibers exercise the
+# rejection path (where a missed back-out leaks a slot).
+want_ok  fiber_admit_cbmc.c ""
+want_bug fiber_admit_cbmc.c "-DBUG_NO_BACKOUT"     "over-limit admit doesn't back out -> live_g leaks (cap ratchets down)"
+want_bug fiber_admit_cbmc.c "-DBUG_DOUBLE_RELEASE" "release ignores limit_counted -> an uncounted fiber underflows the slot"
+want_bug fiber_admit_cbmc.c "-DBUG_BULK_COUNTED"   "a bulk go_n fiber wrongly counted -> phantom release / underflow"
+
 # Drift-guard: the proof (and the real scrub's part-2 start) assume `arena`
 # immediately follows the atomic `state` byte -- a field inserted into that gap
 # would silently leak across recycling (the stale-pass_index class).  Fail if a
