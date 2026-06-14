@@ -247,7 +247,14 @@ static int       runloom_sysmon_quiet = 0;   /* RUNLOOM_SYSMON_QUIET: suppress
                                               * diagnostic spam (detector +
                                               * handoff/preempt stay fully on) */
 static long long runloom_sysmon_wedge_ns = 50LL * 1000000LL;   /* 50 ms default */
-static long long runloom_sysmon_tick_ns  = 10LL * 1000000LL;   /* scan every 10 ms */
+/* ATTACHED-preempt threshold, split from the DETACHED-handoff/wedge threshold
+ * above so a CPU-bound time-slice (fairness) tunes independently of the
+ * blocking-call rescue latency.  Defaults to wedge_ns (backward compatible);
+ * RUNLOOM_PREEMPT_MS overrides.  (Go uses forcePreemptNS=10 ms for the CPU
+ * time-slice, much larger than its ~20 us syscall retake.) */
+static long long runloom_sysmon_preempt_ns = 50LL * 1000000LL;
+static long long runloom_sysmon_tick_ns  = 10LL * 1000000LL;   /* scan every 10 ms (base) */
+static long long runloom_sysmon_tick_base_ns = 10LL * 1000000LL; /* unbacked-off tick */
 static runloom_thread_t runloom_sysmon_thread;
 static int       runloom_sysmon_running = 0;   /* 1 once the thread is spawned */
 static volatile int runloom_sysmon_stop = 0;
