@@ -58,6 +58,11 @@ int runloom_iouring_inflight(void);
 struct runloom_g;
 int runloom_iouring_cancel_g(struct runloom_g *g);
 
+/* Submit an ASYNC_CANCEL for a hub-ring op (a runloom_iouring_op_t*, void* here)
+ * on ITS ring.  Called by the op's OWNING hub -- the ring's single issuer --
+ * after it drains its cancel mailbox (runloom_mn_hub_request_iouring_cancel). */
+void runloom_iouring_submit_cancel_for_op(void *op);
+
 /* Submit a pread, park the calling fiber cooperatively, return
  * bytes read or -1 with errno set. */
 runloom_iouring_ssize_t runloom_iouring_pread(int fd, void *buf, size_t n,

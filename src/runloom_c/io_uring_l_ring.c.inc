@@ -374,14 +374,13 @@ int runloom_iouring_cancel_g(runloom_g_t *g)
     if (__atomic_load_n(&op->wait, __ATOMIC_ACQUIRE) != RUNLOOM_IOURING_WAIT_PARKED)
         return 0;
     /* Hub rings are SINGLE_ISSUER: only the owning hub thread may submit to
-     * them, so a cross-thread cancel CANNOT push the ASYNC_CANCEL there (it
-     * would race the hub's own submissions).  Only the global ring (multi-issuer
-     * under sub_lock) accepts a cross-thread submit, so cancel covers global-
-     * ring ops (file pread/pwrite + the non-hub recv/send fallback).  Cancelling
-     * a hub-ring recv/send needs the owning hub to submit on its own ring -- a
-     * deeper hub-cancel-mailbox design left as future work; for those the fiber
-     * still unblocks when the op completes/errors normally. */
-    if (op->ring != NULL) return 0;
+     * them, so a cross-thread cancel CANNOT push the ASYNC_CANCEL there
+     * directly.  Route it through the owning hub's cancel mailbox; the hub
+     * submits on its own ring at its loop top (runloom_iouring_submit_cancel_
+     * for_op).  Global-ring ops (file pread/pwrite + the non-hub recv/send
+     * fallback) are multi-issuer under sub_lock and submit inline below. */
+    if (op->ring != NULL)
+        return runloom_mn_hub_request_iouring_cancel(op->hub, op);
     cancel_op = (runloom_iouring_op_t *)calloc(1, sizeof(*cancel_op));
     if (cancel_op == NULL) return 0;
     cancel_op->type = RUNLOOM_IOURING_OP_CANCEL;
@@ -392,4 +391,29 @@ int runloom_iouring_cancel_g(runloom_g_t *g)
     rc = runloom_iouring_submit_sqe(sqe, cancel_op);   /* global ring (sub_lock) */
     if (rc != 0) { free(cancel_op); return 0; }
     return 1;
+}
+
+/* Submit the ASYNC_CANCEL for a hub-ring op deposited in this hub's cancel
+ * mailbox.  Runs ON the owning hub (the ring's single issuer), drained at the
+ * hub loop top -- so the SINGLE_ISSUER contract holds.  Best-effort: if the op
+ * already completed (wait != PARKED) it is a no-op; a stale target yields
+ * -ECANCELED/-ENOENT harmlessly. */
+void runloom_iouring_submit_cancel_for_op(void *opv)
+{
+    runloom_iouring_op_t *op = (runloom_iouring_op_t *)opv;
+    runloom_iouring_op_t *cancel_op;
+    struct io_uring_sqe sqe;
+    if (op == NULL || op->ring == NULL) return;
+    if (__atomic_load_n(&op->wait, __ATOMIC_ACQUIRE) != RUNLOOM_IOURING_WAIT_PARKED)
+        return;
+    cancel_op = (runloom_iouring_op_t *)calloc(1, sizeof(*cancel_op));
+    if (cancel_op == NULL) return;
+    cancel_op->type = RUNLOOM_IOURING_OP_CANCEL;
+    memset(&sqe, 0, sizeof(sqe));
+    sqe.opcode = IORING_OP_ASYNC_CANCEL;
+    sqe.addr   = (uint64_t)(uintptr_t)op;   /* match the original SQE by user_data */
+    sqe.fd     = -1;
+    if (runloom_iouring_ring_submit_sqe((runloom_iouring_ring_t *)op->ring,
+                                        sqe, cancel_op) != 0)
+        free(cancel_op);
 }
