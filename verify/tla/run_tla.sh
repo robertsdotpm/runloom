@@ -187,6 +187,25 @@ else
     echo "FAIL -- a lost queue-ref decref should violate the refcount ledger"; fail=$((fail+1))
 fi
 
+# ---- Tier-2 #9: the mn_fini TEARDOWN stop-signal handshake (RunloomMnFini).  The
+# known flaky mn_fini hang: a hub idle-parked in its condvar misses the stop signal
+# -> pthread_join blocks.  Correct = signal idle_cond UNDER idle_lock (no lost
+# wakeup); the control signals without the lock -> the wakeup is lost -> the hub
+# waits forever (JoinCompletes liveness violated).
+printf '  [tlc] %-28s ' "RunloomMnFini (under lock)"
+if run_tlc finiok -config RunloomMnFini.cfg RunloomMnFini.tla | grep -q "No error has been found"; then
+    echo "PASS -- MutexOK + JoinCompletes hold (under-lock stop signal -> join always completes)"; pass=$((pass+1))
+else
+    echo "FAIL -- the under-lock teardown signal should always join"; fail=$((fail+1))
+fi
+
+printf '  [tlc] %-28s ' "RunloomMnFini (no lock)"
+if run_tlc finibug -deadlock -config RunloomMnFini_bug.cfg RunloomMnFini.tla | grep -q "Temporal properties were violated"; then
+    echo "PASS -- correctly DETECTS the lost stop-signal (signal without idle_lock) -> hub waits forever -> JoinCompletes violated"; pass=$((pass+1))
+else
+    echo "FAIL -- signalling without the lock should lose the wakeup and hang the join"; fail=$((fail+1))
+fi
+
 # ---- WHOLE-PROGRAM LIVENESS (RunloomComposite): the scheduler + every wake
 # source (channels / netpoll / timers / foreign) composed, checked for NoHang
 # (every goroutine eventually completes).  Real hangs live in the seams between
