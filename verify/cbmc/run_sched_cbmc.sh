@@ -33,5 +33,39 @@ want_bug sched_readyring_cbmc.c "-DBUG_NO_CAPCHECK"   "push skips full check -> 
 want_ok  sched_pystate_cbmc.c ""
 want_bug sched_pystate_cbmc.c "-DBUG_DROP_FIELD" "load forgets a field -> cross-g leak"
 
+# g slab recycle field-clear: every pre-id byte is cleared/overwritten by the
+# two-part scrub (no stale pass_index/arena/wake_state across recycling).  The
+# coverage loop runs offsetof(id) (~88) iterations, so it needs a larger unwind
+# than the shared default; the bound is a compile-time constant so the unwinding
+# assertion still holds.  Negative control inserts a field into the [state,arena)
+# gap that the scrub misses.
+SLAB_UNWIND=256
+want_ok_slab()  {
+  printf '  [cbmc] %-44s ' "g_slab_recycle_cbmc.c (expect SUCCESSFUL)"
+  if cbmc "$HERE/g_slab_recycle_cbmc.c" --unwind "$SLAB_UNWIND" --unwinding-assertions 2>&1 \
+        | grep -q "VERIFICATION SUCCESSFUL"; then echo PASS; pass=$((pass+1));
+  else echo FAIL; fail=$((fail+1)); fi; }
+want_bug_slab() {
+  printf '  [cbmc] %-44s ' "g_slab_recycle_cbmc.c -DBUG_GAP_AFTER_STATE (gap leaks a stale byte)"
+  if cbmc "$HERE/g_slab_recycle_cbmc.c" -DBUG_GAP_AFTER_STATE --unwind "$SLAB_UNWIND" --unwinding-assertions 2>&1 \
+        | grep -q "VERIFICATION FAILED"; then echo "PASS (correctly trips)"; pass=$((pass+1));
+  else echo "FAIL (bug not caught!)"; fail=$((fail+1)); fi; }
+want_ok_slab
+want_bug_slab
+
+# Drift-guard: the proof (and the real scrub's part-2 start) assume `arena`
+# immediately follows the atomic `state` byte -- a field inserted into that gap
+# would silently leak across recycling (the stale-pass_index class).  Fail if a
+# field declaration appears between `state` and `arena` in the real header.
+ROOT="$(cd "$HERE/../.." && pwd)"
+HDR="$ROOT/src/runloom_c/runloom_sched.h"
+printf '  [cbmc] %-44s ' "drift-guard: state->arena adjacency in struct"
+if [ -f "$HDR" ]; then
+  gap="$(awk '/unsigned char state;/{f=1;next} /unsigned char arena;/{f=0} f' "$HDR" \
+         | grep -E '^[[:space:]]+[A-Za-z_].*;[[:space:]]*$' | grep -vE '^[[:space:]]*(\*|/\*|//)')"
+  if [ -z "$gap" ]; then echo "PASS (no field inserted in [state,arena) gap)"; pass=$((pass+1));
+  else echo "FAIL (field inserted between state and arena -- update the proof!)"; echo "$gap"; fail=$((fail+1)); fi
+else echo "SKIP (header not found)"; fi
+
 echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
