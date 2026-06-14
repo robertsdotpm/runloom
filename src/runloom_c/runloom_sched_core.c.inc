@@ -456,20 +456,31 @@ runloom_g_t *runloom_g_slab_alloc(void)
     if (g != NULL) {
         runloom_g_slab = g->next;
         runloom_g_slab_size--;
-        /* Reuse path (HOT).  Clear only the fields up to the
-         * introspection block -- everything from `state` onward (the
-         * state byte, id, state_since_ns, park_fd/events, reg_prev/next)
-         * is left untouched: reg_prev/reg_next MUST survive recycling
-         * (the g stays linked in the global registry, see
-         * runloom_introspect.c) and they are only ever written under the
-         * registry lock, never here.  `state` is re-initialised
-         * atomically below so a concurrent dump's atomic load never
-         * races a non-atomic memset.  id / park_fd are reset at spawn.
-         * spawn always overwrites callable, coro, refcount; we only
-         * need to clear the rest. */
+        /* Reuse path (HOT).  The scrub is in TWO parts so the load-bearing
+         * `state` byte can be re-initialised atomically in between -- a
+         * concurrent registry dump reads `state` with an atomic load and must
+         * never race a non-atomic memset of it.
+         *   part 1: clear everything BEFORE `state`.
+         *   part 2: clear the fields AFTER `state` up to the introspection
+         *           block (arena/batch/pass_index).  These are NOT preserved
+         *           on purpose and are NOT all reset at spawn -- pass_index is
+         *           set only on the indexed go_n path, so without this clear a
+         *           recycled g carries a stale pass_index and mis-calls
+         *           fn(stale index) instead of fn() (a real wrong-result bug),
+         *           and any FUTURE field added in this gap would leak the same
+         *           way.  This is what makes the "everything before the
+         *           introspection block is cleared" contract on runloom_g_t
+         *           actually hold.
+         * The introspection block (id, state_since_ns, park_fd/events,
+         * reg_prev/next) is left untouched: reg_prev/reg_next MUST survive
+         * recycling (the g stays linked in the global registry, written only
+         * under the registry lock); id / park_fd are reset at spawn.  spawn
+         * always overwrites callable, coro, refcount. */
         memset(g, 0, offsetof(runloom_g_t, state));
         __atomic_store_n(&g->state, (unsigned char)RUNLOOM_GST_INIT,
                          __ATOMIC_RELEASE);
+        memset((char *)g + offsetof(runloom_g_t, arena), 0,
+               offsetof(runloom_g_t, id) - offsetof(runloom_g_t, arena));
         return g;
     }
     /* Cold path: a brand-new struct from the OS.  Use libc calloc, NOT

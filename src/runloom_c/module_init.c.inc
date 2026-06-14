@@ -167,7 +167,7 @@ static PyMethodDef module_methods[] = {
     {"netpoll_unregister", m_netpoll_unregister, METH_O,
      "netpoll_unregister(fd): clear the netpoll registration cache "
      "bit for fd.  Call from socket close so fd reuse re-registers "
-     "cleanly under the edge-triggered register-once scheme."},
+     "cleanly under the LEVEL-triggered per-direction scheme."},
     {"netpoll_release_if_idle", m_netpoll_release_if_idle, METH_O,
      "netpoll_release_if_idle(fd): if no fiber is parked on fd, "
      "EPOLL_CTL_DEL it and clear its arm cache.  The aio bridge calls this "

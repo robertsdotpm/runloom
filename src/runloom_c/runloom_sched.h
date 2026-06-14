@@ -328,9 +328,10 @@ struct runloom_g {
 
     /* ---- introspection block (runloom_introspect.c) ----
      * These fields are deliberately the LAST members of runloom_g_t.  The
-     * per-thread slab reuse path (runloom_g_slab_alloc) bulk-clears a g only
-     * up to offsetof(runloom_g_t, id) -- i.e. everything BEFORE this block --
-     * so reg_prev/reg_next survive recycling untouched.  That is what
+     * per-thread slab reuse path (runloom_g_slab_alloc) clears a g only up to
+     * offsetof(runloom_g_t, id) -- i.e. everything BEFORE this block -- in two
+     * memsets straddling the atomic `state` byte (see the reuse branch), so
+     * reg_prev/reg_next survive recycling untouched.  That is what
      * keeps the global fiber registry walkable without taking the
      * registry lock on the (hot) spawn path: the only writers of reg_prev/
      * reg_next are runloom_greg_link/unlink, both under runloom_greg_lock, on the

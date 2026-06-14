@@ -4,17 +4,26 @@
 
 
 /* ---- registration ----
- * Edge-triggered, register-once.  On epoll/kqueue the fd is ADDed
- * exactly once with both READ and WRITE arms in ET mode.  All
- * subsequent wait_fd calls just consult the bitmap and skip the
- * epoll_ctl/kevent syscall -- the kernel keeps reporting edges
- * until the fd closes.
+ * LEVEL-triggered, NOT edge-triggered.  (The per-backend comments in the body
+ * are the authoritative contract; this header only summarises them.)
+ *   epoll:  each fd is ADDed LEVEL-triggered (EPOLLIN|EPOLLRDHUP / EPOLLOUT,
+ *           NO EPOLLET, NO EPOLLONESHOT), armed once per direction; a re-park
+ *           whose direction is already armed skips the epoll_ctl entirely
+ *           (0 syscalls on the recv-after-recv hot path).  Because LEVEL
+ *           re-reports a still-ready fd on every epoll_wait, a parker that
+ *           links late -- or partially consumes and re-parks -- is never
+ *           edge-dropped.
+ *   kqueue: each requested direction is armed EV_ADD|EV_ONESHOT and re-armed
+ *           on EVERY park (NOT EV_CLEAR -- EV_CLEAR is edge-triggered and would
+ *           edge-drop a wakeup missed in the EV_ADD..kevent window).
+ * Do NOT "restore" an EPOLLET / EV_CLEAR register-once arm here: that was the
+ * OLD scheme and it reintroduced exactly the edge-drop hangs the body comments
+ * describe (caught by test_netpoll_conformance's fd-reuse case).
  *
- * Safety: the caller MUST try the operation first and only call
- * wait_fd after EAGAIN.  That serialises the "kernel observed not-
- * ready" state with our parking, so the next not-ready->ready
- * transition is guaranteed to deliver an edge.  This is the same
- * pattern Go's netpoll uses.
+ * Caller contract: try the operation first and only call wait_fd after EAGAIN.
+ * This is required for correctness regardless of trigger mode -- it serialises
+ * the "kernel observed not-ready" state with our parking.  (A full
+ * drain-to-EAGAIN is NOT required under LEVEL; it would be under ET.)
  *
  * Stale-fd recovery: socket close auto-clears the kernel
  * registration when the last fd reference goes away.  monkey.py's
