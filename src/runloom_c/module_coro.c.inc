@@ -43,6 +43,14 @@ static int RunloomCoro_init(RunloomCoro *self, PyObject *args, PyObject *kw)
         PyErr_SetString(PyExc_TypeError, "callable must be callable");
         return -1;
     }
+    if (stack_size < 0) {
+        /* A negative size casts to a huge size_t and overflows the guard-page
+         * arithmetic in runloom_coro_new -> an undersized mapping + OOB write
+         * (SIGSEGV).  go() / set_stack_size() reject non-positive sizes; Coro
+         * must validate too rather than crash on a bad argument. */
+        PyErr_SetString(PyExc_ValueError, "stack_size must be non-negative");
+        return -1;
+    }
     Py_INCREF(callable);
     self->callable = callable;
     self->result = NULL;
