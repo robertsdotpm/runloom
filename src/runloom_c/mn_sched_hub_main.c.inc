@@ -257,6 +257,9 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
          * steal are single-owner by construction (already RUNNING) and skip
          * both. */
         int from_runq = 0;
+#ifdef RUNLOOM_DBG_BADCORO
+        int gsrc = 0, gvic = -1;   /* source-hunt: which queue delivered g */
+#endif
 #if defined(RUNLOOM_HAVE_KQUEUE)
         /* PERIODIC NON-BLOCKING SELF-PUMP (per-hub kqueue load balancing).
          * Each hub polls its OWN kqueue; the blocking pump below only runs when
@@ -276,10 +279,44 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
         RUNLOOM_RLOCK(&h->sub_lock, RUNLOOM_RANK_HUB_SUB);
         {
             runloom_g_t *sub = h->sub_head;
+#ifdef RUNLOOM_DBG_BADCORO
+            runloom_g_t *prev = NULL;   /* source-hunt: g whose ->next we follow */
+#endif
             h->sub_head = h->sub_tail = NULL;
             RUNLOOM_RUNLOCK(&h->sub_lock, RUNLOOM_RANK_HUB_SUB);
             while (sub != NULL) {
-                runloom_g_t *next = sub->next;
+                runloom_g_t *next;
+#ifdef RUNLOOM_DBG_BADCORO
+                /* Validate `sub` BEFORE pushing.  If it is not a real g, the
+                 * PREVIOUS g's ->next was corrupted between hub_submit and here:
+                 * dump that g's full identity + state, then stop (rest is junk). */
+                {
+                    runloom_coro_t *sc = sub->coro;
+                    if (sub->owner == NULL ||
+                        (sub->callable == NULL && sub->c_entry == NULL) ||
+                        sc == NULL || ((uintptr_t)sc >> 47) != 0 ||
+                        ((uintptr_t)sc & 0xf) != 0) {
+                        char dbuf[360];
+                        int dm = snprintf(dbuf, sizeof dbuf,
+                            "[DRAINBAD] sub=%p bad <- prev=%p id=%lld coro=%p owner=%p call=%p centry=%p rc=%d insub=%d ws=%d st=%d snapv=%d next=%p\n",
+                            (void *)sub, (void *)prev,
+                            prev ? (long long)prev->id : -1,
+                            prev ? (void *)prev->coro : NULL,
+                            prev ? (void *)prev->owner : NULL,
+                            prev ? (void *)prev->callable : NULL,
+                            prev ? (void *)prev->c_entry : NULL,
+                            prev ? (int)__atomic_load_n(&prev->refcount, __ATOMIC_ACQUIRE) : -1,
+                            prev ? (int)__atomic_load_n(&prev->in_sub_queue, __ATOMIC_ACQUIRE) : -1,
+                            prev ? (int)__atomic_load_n(&prev->wake_state, __ATOMIC_ACQUIRE) : -1,
+                            prev ? (int)__atomic_load_n(&prev->state, __ATOMIC_ACQUIRE) : -1,
+                            prev ? prev->snap.valid : -1,
+                            (void *)sub);
+                        if (dm > 0) (void)write(2, dbuf, (size_t)dm);
+                        break;
+                    }
+                }
+#endif
+                next = sub->next;
                 sub->next = NULL;
                 /* Route by state: fresh (no snap) -> Chase-Lev deque
                  * (stealable by other hubs); woken (snap.valid) ->
@@ -305,6 +342,9 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
                      * via the first-run install path. */
                     runloom_sched_ready_push(&h->sched, sub);
                 }
+#ifdef RUNLOOM_DBG_BADCORO
+                prev = sub;
+#endif
                 sub = next;
             }
         }
@@ -364,14 +404,23 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
         if (sbound && ready_streak >= (unsigned)sbound) {
             ready_streak = 0;
             g = (runloom_g_t *)runloom_cldeque_pop(&h->deque);  /* forced fresh turn */
+#ifdef RUNLOOM_DBG_BADCORO
+            if (g) gsrc = 1;   /* sbound forced own-deque pop */
+#endif
         }
         if (g == NULL) {
             g = runloom_sched_ready_pop(&h->sched);     /* local yielded/woken */
             if (g != NULL) {
                 ready_streak++;
+#ifdef RUNLOOM_DBG_BADCORO
+                gsrc = 2;      /* local ready FIFO */
+#endif
             } else {
                 g = (runloom_g_t *)runloom_cldeque_pop(&h->deque);  /* own fresh */
                 ready_streak = 0;
+#ifdef RUNLOOM_DBG_BADCORO
+                if (g) gsrc = 3;   /* own-deque pop */
+#endif
             }
         }
         if (g == NULL) {
@@ -382,7 +431,12 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
              * the resume block to claim the g (QUEUED->RUNNING) and to drop the
              * entry's queue ref when the resume ends. */
             g = runloom_mn_global_runq_pull();
-            if (g != NULL) from_runq = 1;
+            if (g != NULL) {
+                from_runq = 1;
+#ifdef RUNLOOM_DBG_BADCORO
+                gsrc = 4;      /* global run-queue */
+#endif
+            }
         }
         if (g == NULL) {
           if (!runloom_mn_ctrl_no_steal() && runloom_hub_count >= 2) {
@@ -398,6 +452,9 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
                 if (i == h->id) continue;
                 g = (runloom_g_t *)runloom_cldeque_steal(&runloom_hubs[i].deque);
                 if (g != NULL) {
+#ifdef RUNLOOM_DBG_BADCORO
+                    gsrc = 5; gvic = i;   /* stole from hub i's deque */
+#endif
                     /* ACQ_REL pair: mn_run's polling loop reads
                      * hubs[*].pending with ACQUIRE; under
                      * free-threaded Python the RELAXED pair we used
@@ -843,9 +900,9 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
                 unsigned long long *w = (unsigned long long *)g;
                 char dbuf[320];
                 int dm = snprintf(dbuf, sizeof dbuf,
-                    "[BADG] g=%p fr=%d w0=%llx w1=%llx w2=%llx w3=%llx w4=%llx w5=%llx w6=%llx w7=%llx\n",
-                    (void *)g, from_runq,
-                    w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7]);
+                    "[BADG] g=%p src=%d vic=%d fr=%d w0=%llx w1=%llx w2=%llx w3=%llx w4=%llx w5=%llx\n",
+                    (void *)g, gsrc, gvic, from_runq,
+                    w[0], w[1], w[2], w[3], w[4], w[5]);
                 if (dm > 0) (void)write(2, dbuf, (size_t)dm);
 #endif
                 h->sched.current = NULL;
