@@ -659,6 +659,43 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
                 }
                 hub_ts = PyEval_SaveThread();        /* detach hub tstate */
                 PyEval_RestoreThread(g->tstate);      /* attach g's own tstate */
+                /* Deep-surface migration oracle (RUNLOOM_DBG_MIGRATE; zero-cost
+                 * otherwise).  The per-g tstate's mimalloc heap / brc / QSBR are
+                 * bound to the OS thread that first used them; running it on a
+                 * DIFFERENT hub thread without the abandon/adopt re-bind handshake
+                 * is the precise, early signature of the deferred _mi_page_retire
+                 * corruption that RunloomTstateMigration.tla proves the handshake
+                 * prevents.  Warn ONCE (don't abort -- this is a gated experimental
+                 * mode) with both thread ids so the missing re-bind is pinpointed
+                 * instead of surfacing as a random teardown SEGV.  A correct
+                 * handshake would update tstate_owner_tid on adopt, keeping it quiet. */
+                {
+                    static int dbg = -1;
+                    if (dbg < 0) {
+                        const char *e = getenv("RUNLOOM_DBG_MIGRATE");
+                        dbg = (e != NULL && e[0] != '0' && e[0] != '\0') ? 1 : 0;
+                    }
+                    if (dbg) {
+                        unsigned long tid = (unsigned long)PyThread_get_thread_ident();
+                        if (g->tstate_owner_tid == 0) {
+                            g->tstate_owner_tid = tid;        /* first use: binds here */
+                        } else if (g->tstate_owner_tid != tid) {
+                            static int warned = 0;
+                            if (!warned) {
+                                warned = 1;
+                                fprintf(stderr,
+                                    "[RUNLOOM_DBG_MIGRATE] per-g PyThreadState used on "
+                                    "thread %lu but bound to %lu WITHOUT a mimalloc "
+                                    "abandon/adopt handshake -> _mi_page_retire "
+                                    "corruption is imminent (g id=%lld). See "
+                                    "docs/dev/STEAL_WOKEN_CLEANUP.md.\n",
+                                    tid, g->tstate_owner_tid, (long long)g->id);
+                                fflush(stderr);
+                            }
+                            g->tstate_owner_tid = tid;        /* track the move */
+                        }
+                    }
+                }
                 h->sched.current = g;
                 runloom_tls_current_g = g;
                 runloom_tls_self_queued = 0;

@@ -339,6 +339,16 @@ struct runloom_g {
     unsigned char wait_reason;
     unsigned char wait_reason_hint;
 
+    /* Deep-surface migration oracle (RUNLOOM_DBG_MIGRATE; per-g-tstate only).  The
+     * OS-thread id whose mimalloc heap / brc / QSBR the per-g PyThreadState is
+     * currently bound to (0 = not yet bound).  Each per-g attach checks it against
+     * the running hub's thread id: a mismatch means the tstate migrated hub->hub
+     * WITHOUT the mimalloc abandon/adopt re-bind handshake -- the precise, early
+     * signature of the deferred _mi_page_retire corruption (RunloomTstateMigration.tla
+     * proves the handshake necessary; this is its runtime fidelity oracle).  In the
+     * slab-cleared [arena,id) range so a recycled g starts unbound. */
+    unsigned long tstate_owner_tid;
+
     /* ---- introspection block (runloom_introspect.c) ----
      * These fields are deliberately the LAST members of runloom_g_t.  The
      * per-thread slab reuse path (runloom_g_slab_alloc) clears a g only up to
