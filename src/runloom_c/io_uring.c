@@ -225,4 +225,47 @@ runloom_iouring_ssize_t runloom_iouring_ring_send(runloom_iouring_ring_t *r,
     return -1;
 }
 
+/* io_uring-as-loop backend stubs (Linux-only feature).  enabled()/ms_enabled()
+ * return 0 so the hub idle path and the all-C echo never take the loop path on
+ * these platforms; the rest are unreachable no-ops kept for linking, since
+ * mn_sched.c / module_io.c.inc reference them unconditionally (runtime-gated). */
+int runloom_iouring_loop_enabled(void)    { return 0; }
+int runloom_iouring_loop_ms_enabled(void) { return 0; }
+int runloom_iouring_loop_hub_arm(runloom_iouring_ring_t *r, int epoll_fd)
+{
+    (void)r; (void)epoll_fd; return -1;
+}
+void runloom_iouring_loop_wait(runloom_iouring_ring_t *r, long long timeout_ns,
+                               int *flags_out)
+{
+    (void)r; (void)timeout_ns; (void)flags_out;
+}
+void runloom_iouring_loop_wake(int wake_fd) { (void)wake_fd; }
+void runloom_iouring_loop_hub_disarm(runloom_iouring_ring_t *r) { (void)r; }
+runloom_iouring_ssize_t runloom_iouring_loop_recv(runloom_iouring_ring_t *r,
+                                                  int fd, void *buf, size_t n,
+                                                  int flags)
+{
+    (void)r; (void)fd; (void)buf; (void)n; (void)flags;
+    errno = ENOSYS; return -1;
+}
+runloom_iouring_ssize_t runloom_iouring_loop_send(runloom_iouring_ring_t *r,
+                                                  int fd, const void *buf,
+                                                  size_t n, int flags)
+{
+    (void)r; (void)fd; (void)buf; (void)n; (void)flags;
+    errno = ENOSYS; return -1;
+}
+void *runloom_iouring_loop_ms_open(runloom_iouring_ring_t *r, int fd)
+{
+    (void)r; (void)fd; return NULL;
+}
+runloom_iouring_ssize_t runloom_iouring_loop_ms_recv(void *handle,
+                                                     void *buf, size_t n)
+{
+    (void)handle; (void)buf; (void)n;
+    errno = ENOSYS; return -1;
+}
+void runloom_iouring_loop_ms_close(void *handle) { (void)handle; }
+
 #endif
