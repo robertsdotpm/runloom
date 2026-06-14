@@ -58,8 +58,12 @@ int runloom_mn_init(int n_threads)
      * broken snap-migration branch in hub_main is never taken (dead for both
      * flags; removable in a follow-up). */
     runloom_mn_interp = interp;
-    runloom_set_per_g_tstate_mode(runloom_per_g_tstate_flag() ||
-                                  runloom_steal_woken_flag());
+    /* Through the safety interlock (runloom_resolve_migratable_mode): a migratable
+     * flag activates per-g-tstate ONLY with RUNLOOM_ALLOW_UNSAFE_MIGRATION=1; else
+     * it warns + stays off (default scheduler).  Gating here also keeps a flagged-
+     * but-gated RUNLOOM_STEAL_WOKEN out of the unsound snap branch -- see
+     * runloom_use_global_runq. */
+    runloom_set_per_g_tstate_mode(runloom_resolve_migratable_mode());
     /* Configure the sysmon watchdog (enable + threshold) BEFORE the hubs
      * spawn so the per-resume progress instrumentation is live immediately. */
     runloom_sysmon_config();
@@ -85,7 +89,8 @@ int runloom_mn_init(int n_threads)
         runloom_sched_init(&h->sched);
         runloom_cldeque_init(&h->deque);
         runloom_mutex_init(&h->sub_lock);
-        h->sub_head = h->sub_tail = NULL;
+        h->sub_tail = NULL;
+        __atomic_store_n(&h->sub_head, (runloom_g_t *)NULL, __ATOMIC_RELAXED);
         /* BUG #10 per-hub idle wake (see mn_sched.c sub_gen). */
         h->sub_gen = 0;
         runloom_mutex_init(&h->idle_lock);
@@ -201,7 +206,8 @@ static void runloom_mn_hub_drain_leftovers(runloom_hub_t *h)
             runloom_g_decref(gp);                                             \
     } while (0)
     sub = h->sub_head;
-    h->sub_head = h->sub_tail = NULL;
+    h->sub_tail = NULL;
+    __atomic_store_n(&h->sub_head, (runloom_g_t *)NULL, __ATOMIC_RELAXED);  /* census x-thread read */
     while (sub != NULL) {
         runloom_g_t *next = sub->next;
         sub->next = NULL;
@@ -707,7 +713,8 @@ static int runloom_mn_go_n_bulk(PyObject *callable, long n, size_t stack_size,
         h = &runloom_hubs[hub];
         RUNLOOM_RLOCK(&h->sub_lock, RUNLOOM_RANK_HUB_SUB);
         if (h->sub_tail != NULL) h->sub_tail->next = heads[hub];
-        else                     h->sub_head = heads[hub];
+        else /* RELEASE: publishes to the census ACQUIRE read (Finding D #4) */
+            __atomic_store_n(&h->sub_head, heads[hub], __ATOMIC_RELEASE);
         h->sub_tail = tails[hub];
         RUNLOOM_RUNLOCK(&h->sub_lock, RUNLOOM_RANK_HUB_SUB);
         __atomic_add_fetch(&h->pending, counts[hub], __ATOMIC_ACQ_REL);
@@ -786,10 +793,18 @@ static int runloom_mn_has_wakeable_work(void)
          * mn_go + wake_g submission list. */
         if (!runloom_sched_ready_empty(&h->sched))                  return 1;
         if (runloom_cldeque_size(&h->deque) != 0)                   return 1;
+        /* Lock-free ACQUIRE read of the submission list head, paired with RELEASE
+         * stores at the 6 sub_head WRITE sites (mn_api / hub_main / hub_resume /
+         * init): a publish (store g) is RELEASE so this read sees a non-NULL head
+         * with g's fields visible; a clear (store NULL) is RELAXED.  Closes the
+         * tools/lifefuzz TSan race (hub_main:273); tools/README Finding D #4. */
         if (__atomic_load_n(&h->sub_head, __ATOMIC_ACQUIRE) != NULL) return 1;
-        /* A sleeper / timer that will fire and wake a fiber. */
-        if (h->sched.sleep_size != 0)                               return 1;
-        if (h->sched.timer_size != 0)                               return 1;
+        /* A sleeper / timer that will fire and wake a fiber.  RELAXED-atomic: the
+         * owning hub writes these non-atomically (sleep_push/pop, timer_push/pop),
+         * so this cross-thread read is the lone plain access otherwise -- match the
+         * atomic siblings above (the ready_head/tail fix in runloom_sched_ready_empty). */
+        if (__atomic_load_n(&h->sched.sleep_size, __ATOMIC_RELAXED) != 0) return 1;
+        if (__atomic_load_n(&h->sched.timer_size, __ATOMIC_RELAXED) != 0) return 1;
     }
     return 0;
 }

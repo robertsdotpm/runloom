@@ -615,7 +615,8 @@ static void runloom_mn_ctrl_stage_flush(runloom_hub_t *h)
         tgt = &runloom_hubs[t];
         RUNLOOM_RLOCK(&tgt->sub_lock, RUNLOOM_RANK_HUB_SUB);
         if (tgt->sub_tail != NULL) tgt->sub_tail->next = head;
-        else                       tgt->sub_head = head;
+        else /* RELEASE: publishes to the census ACQUIRE read (Finding D #4) */
+            __atomic_store_n(&tgt->sub_head, head, __ATOMIC_RELEASE);
         tgt->sub_tail = tail;
         RUNLOOM_RUNLOCK(&tgt->sub_lock, RUNLOOM_RANK_HUB_SUB);
     }

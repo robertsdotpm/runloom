@@ -124,7 +124,9 @@ static void runloom_mn_hub_submit(runloom_hub_t *h, runloom_g_t *g)
     if (h->sub_tail != NULL) {
         RUNLOOM_NEXT_SET(h->sub_tail, g, 1);   /* link old tail -> g */
     } else {
-        h->sub_head = g;
+        /* RELEASE: publishes g to the lock-free deadlock census's ACQUIRE read of
+         * sub_head (mn_has_wakeable_work) -- tools/README Finding D #4. */
+        __atomic_store_n(&h->sub_head, g, __ATOMIC_RELEASE);
     }
     h->sub_tail = g;
     RUNLOOM_RUNLOCK(&h->sub_lock, RUNLOOM_RANK_HUB_SUB);

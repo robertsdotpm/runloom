@@ -256,6 +256,12 @@ void runloom_sched_drain_timers(runloom_sched_t *s, double now)
          * use -- size>0 here means it always pops, but -fanalyzer can't prove the
          * invariant and warned "uninitialized e.g" at the CAS below. */
         if (!runloom_timer_pop(s, &e)) break;
+        /* Life-cycle oracle (RUNLOOM_DBG_GSTATE; zero-cost otherwise): the timer
+         * entry holds a ref to e.g (incref at runloom_timer_push, decref below), so
+         * e.g MUST still be live here -- CASing parked_safe on a DONE/FREED g is the
+         * timer-entry UAF class (the p49_barrier_stress flake the entry-ref fix
+         * closed).  Catch a regression that drops the entry ref early, at the CAS. */
+        RUNLOOM_G_ASSERT_NOT(e.g, RUNLOOM_GST_MASK_DEAD);
         if (__atomic_compare_exchange_n(&e.g->parked_safe, &expected, 0, 0,
                                         __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
             void *ph = __atomic_load_n(&e.g->park_hub, __ATOMIC_ACQUIRE);

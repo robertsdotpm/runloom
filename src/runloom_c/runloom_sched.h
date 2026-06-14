@@ -346,6 +346,16 @@ struct runloom_g {
     unsigned char wait_reason;
     unsigned char wait_reason_hint;
 
+    /* Deep-surface migration oracle (RUNLOOM_DBG_MIGRATE; per-g-tstate only).  The
+     * OS-thread id whose mimalloc heap / brc / QSBR the per-g PyThreadState is
+     * currently bound to (0 = not yet bound).  Each per-g attach checks it against
+     * the running hub's thread id: a mismatch means the tstate migrated hub->hub
+     * WITHOUT the mimalloc abandon/adopt re-bind handshake -- the precise, early
+     * signature of the deferred _mi_page_retire corruption (RunloomTstateMigration.tla
+     * proves the handshake necessary; this is its runtime fidelity oracle).  In the
+     * slab-cleared [arena,id) range so a recycled g starts unbound. */
+    unsigned long tstate_owner_tid;
+
     /* ---- introspection block (runloom_introspect.c) ----
      * These fields are deliberately the LAST members of runloom_g_t.  The
      * per-thread slab reuse path (runloom_g_slab_alloc) clears a g only up to
@@ -531,9 +541,19 @@ struct runloom_sched {
     runloom_g_t *quiescence_tail;
 };
 
-/* Is the ready queue empty?  Hot-path predicate; inline-friendly. */
+/* Is the ready queue empty?  Hot-path predicate; inline-friendly.
+ * ready_head/ready_tail are written non-atomically by the OWNING hub
+ * (ready_push/ready_pop), but this predicate is also read CROSS-THREAD by the
+ * deadlock-quiescence census (runloom_mn_has_wakeable_work, on the main thread),
+ * so the indices are relaxed-atomic -- the lone plain access among that census's
+ * atomic siblings (resume_start_ns / sub_head / global_runq_len), matching the
+ * missing-atomic-qualifier fixes in tools/README Finding C.  Found by
+ * tools/lifefuzz under the gold-standard TSan ext (datastack:267/403 vs sched.h
+ * here).  RELAXED: single-writer per ring; the census only needs a non-torn
+ * value (its deadlock streak + re-kick absorb staleness).  Zero-cost on x86. */
 RUNLOOM_INLINE int runloom_sched_ready_empty(const runloom_sched_t *s) {
-    return s->ready_head == s->ready_tail;
+    return __atomic_load_n(&s->ready_head, __ATOMIC_RELAXED)
+        == __atomic_load_n(&s->ready_tail, __ATOMIC_RELAXED);
 }
 
 /* Module-level: one sched per OS thread once Phase C lands.  For now

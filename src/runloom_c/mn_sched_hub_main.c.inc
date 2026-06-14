@@ -69,8 +69,11 @@ static void runloom_mn_world_yield_if_monopolizing(runloom_hub_t *h)
 #if PY_VERSION_HEX >= 0x030D0000
     int i;
     if (__atomic_load_n(&h->stopping, __ATOMIC_ACQUIRE)) return;
-    /* Sole runnable g: exactly one in the ready ring and the own deque empty. */
-    if ((h->sched.ready_tail - h->sched.ready_head) != 1) return;
+    /* Sole runnable g: exactly one in the ready ring and the own deque empty.
+     * Relaxed loads (as documented above): own-thread here, but the indices are
+     * relaxed-atomic for the cross-thread census -- keep every reader consistent. */
+    if ((__atomic_load_n(&h->sched.ready_tail, __ATOMIC_RELAXED)
+         - __atomic_load_n(&h->sched.ready_head, __ATOMIC_RELAXED)) != 1) return;
     if (runloom_cldeque_size(&h->deque) != 0) return;
     for (i = 0; i < runloom_hub_count; i++) {
         int tss;
@@ -291,7 +294,10 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
             runloom_g_t *prev = NULL;   /* source-hunt: g whose ->next we follow */
             int last_wsite = -1; void *last_wval = NULL; unsigned long long last_wseq = 0;
 #endif
-            h->sub_head = h->sub_tail = NULL;
+            h->sub_tail = NULL;
+            /* RELAXED-atomic clear: closes the lock-free census's ACQUIRE read race
+             * on sub_head (Finding D #4 -- the TSan hub_main:273 report). */
+            __atomic_store_n(&h->sub_head, (runloom_g_t *)NULL, __ATOMIC_RELAXED);
             RUNLOOM_RUNLOCK(&h->sub_lock, RUNLOOM_RANK_HUB_SUB);
             while (sub != NULL) {
                 runloom_g_t *next;
@@ -744,6 +750,43 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
                 }
                 hub_ts = PyEval_SaveThread();        /* detach hub tstate */
                 PyEval_RestoreThread(g->tstate);      /* attach g's own tstate */
+                /* Deep-surface migration oracle (RUNLOOM_DBG_MIGRATE; zero-cost
+                 * otherwise).  The per-g tstate's mimalloc heap / brc / QSBR are
+                 * bound to the OS thread that first used them; running it on a
+                 * DIFFERENT hub thread without the abandon/adopt re-bind handshake
+                 * is the precise, early signature of the deferred _mi_page_retire
+                 * corruption that RunloomTstateMigration.tla proves the handshake
+                 * prevents.  Warn ONCE (don't abort -- this is a gated experimental
+                 * mode) with both thread ids so the missing re-bind is pinpointed
+                 * instead of surfacing as a random teardown SEGV.  A correct
+                 * handshake would update tstate_owner_tid on adopt, keeping it quiet. */
+                {
+                    static int dbg = -1;
+                    if (dbg < 0) {
+                        const char *e = getenv("RUNLOOM_DBG_MIGRATE");
+                        dbg = (e != NULL && e[0] != '0' && e[0] != '\0') ? 1 : 0;
+                    }
+                    if (dbg) {
+                        unsigned long tid = (unsigned long)PyThread_get_thread_ident();
+                        if (g->tstate_owner_tid == 0) {
+                            g->tstate_owner_tid = tid;        /* first use: binds here */
+                        } else if (g->tstate_owner_tid != tid) {
+                            static int warned = 0;
+                            if (!warned) {
+                                warned = 1;
+                                fprintf(stderr,
+                                    "[RUNLOOM_DBG_MIGRATE] per-g PyThreadState used on "
+                                    "thread %lu but bound to %lu WITHOUT a mimalloc "
+                                    "abandon/adopt handshake -> _mi_page_retire "
+                                    "corruption is imminent (g id=%lld). See "
+                                    "docs/dev/STEAL_WOKEN_CLEANUP.md.\n",
+                                    tid, g->tstate_owner_tid, (long long)g->id);
+                                fflush(stderr);
+                            }
+                            g->tstate_owner_tid = tid;        /* track the move */
+                        }
+                    }
+                }
                 h->sched.current = g;
                 runloom_tls_current_g = g;
                 runloom_tls_self_queued = 0;
