@@ -38,9 +38,10 @@ static inline int runloom_pump_claim(runloom_parked_t *p)
  * loop drops each pool's lock before moving on.  Same ordering as
  * runloom_pump_drain_expired below so the two are deadlock-free against
  * each other. */
-static int runloom_pump_dispatch_event(int fd, int mask)
+static int runloom_pump_dispatch_event(int fd, int mask, int wake_all)
 {
     int pi;
+    int woke = 0;
     for (pi = 0; pi < RUNLOOM_PARKER_POOL_MAX; pi++) {
         runloom_parker_pool_t *pool = &runloom_pools[pi];
         if (__atomic_load_n(&pool->lock_inited, __ATOMIC_ACQUIRE) != 2) continue;
@@ -75,15 +76,26 @@ static int runloom_pump_dispatch_event(int fd, int mask)
                     if (cur == RUNLOOM_PARK_PARKED) {
                         runloom_mn_wake_g(p->hub, p->g);
                     }
-                    RUNLOOM_RUNLOCK(&pool->lock, RUNLOOM_RANK_PARKER_POOL);
-                    return 1;
+                    woke++;
+                    /* wake_all (kqueue one-shot path): keep walking this fd's
+                     * bucket so EVERY same-direction parker is woken.  The
+                     * single (ident,filter) one-shot knote stood in for all of
+                     * them and will not re-report, so a first-match-only wake
+                     * strands the siblings forever (no re-arm path) -- audit
+                     * finding B2.  The level-triggered epoll/IOCP pumps pass
+                     * wake_all=0 and keep first-match: they re-report a
+                     * still-ready fd until each waiter is served. */
+                    if (!wake_all) {
+                        RUNLOOM_RUNLOCK(&pool->lock, RUNLOOM_RANK_PARKER_POOL);
+                        return 1;
+                    }
                 }
                 p = next_p;
             }
         }
         RUNLOOM_RUNLOCK(&pool->lock, RUNLOOM_RANK_PARKER_POOL);
     }
-    return 0;
+    return woke;
 }
 
 /* Drain expired-deadline parkers from every pool.  Returns count

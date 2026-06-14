@@ -20,6 +20,10 @@ static void runloom_pool_backend_create(runloom_parker_pool_t *pool)
 #if defined(RUNLOOM_HAVE_KQUEUE)
     pool->kqueue_fd = kqueue();
     if (pool->kqueue_fd < 0) return;
+    /* Don't leak the kqueue fd into exec'd subprocesses (parity with the
+     * self-pipe below and every other poller fd) -- audit finding B8.  A
+     * kqueue fd is meaningless in a child anyway; CLOEXEC drops it at execve. */
+    (void)fcntl(pool->kqueue_fd, F_SETFD, FD_CLOEXEC);
     {   /* self-pipe registered in THIS pool's kqueue (EV_CLEAR) so a cross-hub
          * wake_pump can break this hub's idle kevent().  Best effort. */
         int pfd[2];

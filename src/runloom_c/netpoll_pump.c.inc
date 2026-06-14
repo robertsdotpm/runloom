@@ -113,7 +113,7 @@ int runloom_netpoll_pump(long long timeout_ns)
                  * pool (its owning hub's), so the loop short-circuits
                  * on first match.  Sub-microsecond per event at
                  * realistic hub counts. */
-                if (runloom_pump_dispatch_event(fd, mask)) {
+                if (runloom_pump_dispatch_event(fd, mask, 0)) {
                     woke++;
                 } else if (mask != 0) {
                     /* No parker for this fd (either not linked yet,
@@ -201,7 +201,18 @@ int runloom_netpoll_pump(long long timeout_ns)
                 }
                 mask = (evs[i].filter == EVFILT_READ) ?
                        RUNLOOM_NETPOLL_READ : RUNLOOM_NETPOLL_WRITE;
-                if (runloom_pump_dispatch_event(fd, mask)) woke++;
+                /* Fold EOF/error into BOTH directions, mirroring the epoll
+                 * branch above (and Go/libuv/mio).  kqueue arms only the
+                 * requested direction one-shot, so a peer RST / half-close
+                 * reported as EV_EOF / EV_ERROR on a filter no surviving waiter
+                 * is armed on would otherwise be undeliverable -> lost wakeup
+                 * (audit finding B1, the strongest teardown-tail-hang
+                 * candidate).  Waking both directions makes every waiter on the
+                 * dead fd runnable so its next syscall observes the error. */
+                if (evs[i].flags & (EV_EOF | EV_ERROR))
+                    mask |= RUNLOOM_NETPOLL_READ | RUNLOOM_NETPOLL_WRITE;
+                /* wake_all=1: one-shot knote -> wake every same-dir waiter (B2). */
+                woke += runloom_pump_dispatch_event(fd, mask, 1);
             }
             drained += n;
             /* Stop when the batch was short (kqueue drained) or the per-pump
@@ -248,7 +259,7 @@ int runloom_netpoll_pump(long long timeout_ns)
             if (rc < 0) { iocp_err = WSAGetLastError(); break; }
             if (rc == 0) break;             /* timeout: nothing ready */
             local_woke++;
-            if (runloom_pump_dispatch_event(fd, evs)) woke++;
+            if (runloom_pump_dispatch_event(fd, evs, 0)) woke++;
         }
         /* A hard completion-wait error must not busy-spin the idle loop. */
         if (iocp_err) runloom_netpoll_win_wait_failed(iocp_err);
