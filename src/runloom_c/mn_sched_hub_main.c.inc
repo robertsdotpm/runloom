@@ -776,9 +776,55 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
                 if (from_runq) runloom_g_decref(g);   /* queue ref */
                 continue;
             }
+            {
+            runloom_coro_t *cp = g->coro;   /* snapshot at the guard; resume THIS */
+#ifdef RUNLOOM_DBG_BADCORO
+            /* DIAG (temp): classify the mac/arm64 cross-hub crash.  A real coro
+             * is a 16-aligned, canonical (<2^47) heap pointer.  WILD = the field
+             * is garbage already at the guard.  Detect without dereferencing,
+             * dump g's identity, skip-not-crash so the bench survives + samples. */
+            if (cp == NULL || ((uintptr_t)cp >> 47) != 0 ||
+                ((uintptr_t)cp & 0xf) != 0 || (uintptr_t)cp < 0x10000) {
+                char dbuf[256];
+                int dm = snprintf(dbuf, sizeof dbuf,
+                    "[BADCORO-WILD] g=%p id=%lld coro=%p done=%d rc=%d st=%d ws=%d insub=%d from_runq=%d owner=%p call=%p\n",
+                    (void *)g, (long long)g->id, (void *)cp,
+                    (int)__atomic_load_n(&g->done, __ATOMIC_ACQUIRE),
+                    (int)__atomic_load_n(&g->refcount, __ATOMIC_ACQUIRE),
+                    (int)__atomic_load_n(&g->state, __ATOMIC_ACQUIRE),
+                    (int)__atomic_load_n(&g->wake_state, __ATOMIC_ACQUIRE),
+                    (int)__atomic_load_n(&g->in_sub_queue, __ATOMIC_ACQUIRE),
+                    from_runq, (void *)g->owner, (void *)g->callable);
+                if (dm > 0) (void)write(2, dbuf, (size_t)dm);
+                h->sched.current = NULL;
+                runloom_tls_current_g = NULL;
+                if (from_runq) runloom_g_decref(g);
+                continue;
+            }
+#endif
             runloom_g_state_set(g, RUNLOOM_GST_RUNNING);   /* observational: now on-CPU */
             runloom_hub_resume_begin(h, g);
-            runloom_coro_resume(g->coro);
+#ifdef RUNLOOM_DBG_BADCORO
+            /* CHANGED = g->coro field was overwritten between the guard snapshot
+             * and here (a concurrent writer = double-ownership / recycle race). */
+            {
+                runloom_coro_t *cp2 = g->coro;
+                if (cp2 != cp) {
+                    char dbuf[256];
+                    int dm = snprintf(dbuf, sizeof dbuf,
+                        "[BADCORO-CHANGED] g=%p id=%lld cp=%p cp2=%p done=%d rc=%d st=%d ws=%d from_runq=%d\n",
+                        (void *)g, (long long)g->id, (void *)cp, (void *)cp2,
+                        (int)__atomic_load_n(&g->done, __ATOMIC_ACQUIRE),
+                        (int)__atomic_load_n(&g->refcount, __ATOMIC_ACQUIRE),
+                        (int)__atomic_load_n(&g->state, __ATOMIC_ACQUIRE),
+                        (int)__atomic_load_n(&g->wake_state, __ATOMIC_ACQUIRE),
+                        from_runq);
+                    if (dm > 0) (void)write(2, dbuf, (size_t)dm);
+                }
+            }
+#endif
+            runloom_coro_resume(cp);
+            }
             runloom_hub_resume_end(h);
             self_queued = runloom_tls_self_queued;
             parked_offqueue = runloom_tls_parked_offqueue;

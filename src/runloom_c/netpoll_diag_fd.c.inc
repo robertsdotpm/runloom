@@ -93,32 +93,50 @@ int runloom_netpoll_inspect_for_self_check(struct runloom_self_check_stats *out)
  * stderr.  Used to identify a leaked netpoll parker (cross-file flake). */
 void runloom_netpoll_dump_parkers(void)
 {
-    runloom_parker_pool_t *pool = &runloom_pool;
-    runloom_parked_t *p;
-    int n = 0;
     char buf[256];
     int m;
+    int pi;
     if (!__atomic_load_n(&runloom_netpoll_inited, __ATOMIC_ACQUIRE)) {
         m = snprintf(buf, sizeof buf, "[parker-dump] netpoll not inited\n");
         (void)write(2, buf, (size_t)m);
         return;
     }
-    runloom_parker_pool_lock_ensure_inited(pool);
-    runloom_mutex_lock(&pool->lock);
-    m = snprintf(buf, sizeof buf, "[parker-dump] total=%d head=%p\n",
-                 __atomic_load_n(&pool->total, __ATOMIC_ACQUIRE), (void *)pool->head);
-    (void)write(2, buf, (size_t)m);
-    p = pool->head;
-    while (p != NULL && n < 64) {
+    /* Walk EVERY pool (per-hub kqueue: parkers live in per-hub pools, not the
+     * default).  Summarize per pool by event mask, then list a sample. */
+    for (pi = 0; pi < RUNLOOM_PARKER_POOL_MAX; pi++) {
+        runloom_parker_pool_t *pool = &runloom_pools[pi];
+        runloom_parked_t *p;
+        int total = __atomic_load_n(&pool->total, __ATOMIC_ACQUIRE);
+        int n = 0, rd = 0, wr = 0, rdwr = 0, other = 0;
+        if (total == 0) continue;
+        runloom_parker_pool_lock_ensure_inited(pool);
+        runloom_mutex_lock(&pool->lock);
+        for (p = pool->head; p != NULL && n < 200000; p = p->next, n++) {
+            int e = p->events & (RUNLOOM_NETPOLL_READ | RUNLOOM_NETPOLL_WRITE);
+            if (e == RUNLOOM_NETPOLL_READ) rd++;
+            else if (e == RUNLOOM_NETPOLL_WRITE) wr++;
+            else if (e == (RUNLOOM_NETPOLL_READ | RUNLOOM_NETPOLL_WRITE)) rdwr++;
+            else other++;
+        }
         m = snprintf(buf, sizeof buf,
-            "[parker-dump]  #%d parker=%p fd=%d events=%d g=%p hub=%p commit=%d gen=%u deadline_ns=%lld\n",
-            n, (void *)p, p->fd, p->events, (void *)p->g, (void *)p->hub,
-            p->commit, p->gen, (long long)p->deadline_ns);
+            "[parker-dump] pool#%d total=%d walked=%d READ=%d WRITE=%d RW=%d other=%d kq=%d\n",
+            pi, total, n, rd, wr, rdwr, other,
+#if defined(RUNLOOM_HAVE_KQUEUE)
+            pool->kqueue_fd
+#else
+            -1
+#endif
+            );
         (void)write(2, buf, (size_t)m);
-        n++;
-        p = p->next;
+        n = 0;
+        for (p = pool->head; p != NULL && n < 8; p = p->next, n++) {
+            m = snprintf(buf, sizeof buf,
+                "[parker-dump]   pool#%d sample fd=%d events=%d g=%p hub=%p commit=%d gen=%u\n",
+                pi, p->fd, p->events, (void *)p->g, (void *)p->hub, p->commit, p->gen);
+            (void)write(2, buf, (size_t)m);
+        }
+        runloom_mutex_unlock(&pool->lock);
     }
-    runloom_mutex_unlock(&pool->lock);
 }
 
 /* Introspection accessor: read a parker's plain fields.  See netpoll.h. */
