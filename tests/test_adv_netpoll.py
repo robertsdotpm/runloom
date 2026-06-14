@@ -100,16 +100,19 @@ def test_wait_fd_readable_and_writable():
         assert _run_single(f) == "ok"
 
 
-@pytest.mark.skipif(rc.netpoll_backend() == "select", reason=(
-    "FINDING (surfaced by building RUNLOOM_NETPOLL=select on Linux): the select "
-    "backend does not validate the fd before FD_SET, so wait_fd(-1) hits glibc's "
-    "_FORTIFY_SOURCE __fdelt_chk and ABORTS the process, where epoll/kqueue raise "
-    "a clean OSError(EBADF). The select path should reject fd<0 / fd>=FD_SETSIZE "
-    "with OSError before FD_SET."))
 def test_wait_fd_invalid_fd_raises_not_hangs():
+    # Regression (was findings): the select backend used to FD_SET(-1) -> glibc
+    # _FORTIFY_SOURCE __fdelt_chk -> process abort; and a huge fd grew the per-fd
+    # parker array to fd-size (a multi-GB zero-fill that HUNG).  wait_fd now
+    # rejects fd<0 (EBADF), fd>=FD_SETSIZE on select (EINVAL), and fd>=RLIMIT_NOFILE
+    # (EBADF) up front -- on every backend, no abort, no hang.
     def f():
         with pytest.raises(OSError):
             rc.wait_fd(-1, READ, 1000)
+        with pytest.raises(OSError):
+            rc.wait_fd(2048, READ, 1000)         # out-of-range: EBADF / EINVAL
+        with pytest.raises(OSError):
+            rc.wait_fd(1 << 30, READ, 1000)      # huge fd: must error fast, not hang
         return "ok"
     with hang_guard(10, "wait_fd invalid fd"):
         assert _run_single(f) == "ok"

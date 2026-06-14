@@ -12,7 +12,6 @@ error.  monkey's os.read patch sets non-blocking first; a raw fd_read caller who
 forgets gets a hung scheduler.
 """
 import os
-import subprocess
 import sys
 import tempfile
 
@@ -124,46 +123,32 @@ def test_fd_read_write_nonblocking_pipe_cooperative():
 
 
 # --------------------------------------------------------------------------
-# FINDING: fd_read on a BLOCKING fd wedges the scheduler (no O_NONBLOCK -> no
-# EAGAIN -> read() blocks the OS thread).  Demonstrated in a subprocess (it would
-# hang the suite); encoded as the ideal (should cooperate or raise EWOULDBLOCK).
+# Regression (was a finding): fd_read/fd_write on a BLOCKING fd used to wedge the
+# whole scheduler -- they park on EAGAIN but never set O_NONBLOCK, so read()/
+# write() blocked the OS thread.  They now set the fd non-blocking themselves.
 # --------------------------------------------------------------------------
-_WEDGE_SCRIPT = r'''
-import sys, os; sys.path.insert(0, "src")
-import runloom_c as rc
-def main():
-    r, w = os.pipe()                 # BLOCKING by default (no O_NONBLOCK)
-    def sib():
-        # a sibling that would run IF fd_read parked cooperatively
-        for _ in range(5): rc.sched_yield()
-        os.write(w, b"X")
-    rc.go(sib)
-    buf = bytearray(1)
-    rc.fd_read(r, buf, 1)            # blocks the OS thread -> sib never runs
-    sys.stdout.write("READ_RETURNED\n")
-rc.go(main); rc.run()
-sys.stdout.write("DONE\n")
-'''
-
-
 @pytest.mark.skipif(not POSIX, reason="POSIX fd model")
-@pytest.mark.xfail(strict=False, reason=(
-    "FINDING: fd_read/fd_write rely on EAGAIN to park but never set O_NONBLOCK. "
-    "On a BLOCKING fd, read() blocks the whole scheduler OS thread instead of "
-    "cooperatively parking -- a silent wedge, not an error. It should either set "
-    "non-blocking, or raise/detect a blocking fd, rather than deadlock the "
-    "scheduler. (monkey's os.read patch sets non-blocking first, so high-level "
-    "users are safe; the raw primitive is the footgun.)"))
-def test_fd_read_on_blocking_fd_should_not_wedge():
-    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    env = dict(os.environ, PYTHON_GIL="0", PYTHONPATH="src")
-    # If fd_read cooperates/returns, the subprocess prints READ_RETURNED quickly.
-    # If it wedges (current behaviour), subprocess.run raises TimeoutExpired,
-    # which xfail records as the expected failure.
-    p = subprocess.run([sys.executable, "-c", _WEDGE_SCRIPT], cwd=repo, env=env,
-                       capture_output=True, text=True, timeout=5)
-    assert "READ_RETURNED" in p.stdout, (
-        "fd_read on a blocking fd did not cooperate (out=%r)" % p.stdout)
+def test_fd_read_on_blocking_fd_cooperates():
+    out = {}
+    hold = {}
+    def main():
+        r, w = os.pipe()                       # BLOCKING by default (no O_NONBLOCK)
+        hold["fds"] = (r, w)
+        def sib():
+            for _ in range(5):
+                rc.sched_yield()               # only runs if fd_read PARKED
+            os.write(w, b"X")
+        rc.go(sib)
+        def reader():
+            buf = bytearray(1)
+            out["n"] = rc.fd_read(r, buf, 1)   # must park cooperatively, not wedge
+            out["buf"] = bytes(buf)
+        rc.go(reader)
+    with hang_guard(10, "fd_read blocking fd"):
+        rc.go(main); rc.run()
+    r, w = hold["fds"]
+    rc.netpoll_unregister(r); os.close(r); os.close(w)
+    assert out.get("buf") == b"X", "fd_read wedged or lost data on a blocking fd"
 
 
 if __name__ == "__main__":
