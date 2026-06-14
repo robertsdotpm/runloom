@@ -63,23 +63,42 @@ FINDING_PATTERNS = (
 #  Spec generation: a program is a pure function of its seed.                  #
 # --------------------------------------------------------------------------- #
 def build_spec(seed):
-    """Deterministically derive a program spec from an integer seed."""
+    """Deterministically derive a program spec from an integer seed.
+
+    Two program KINDS:
+      core -- runloom_c goroutines + channels + select + timers (the default).
+      aio  -- a small asyncio program under runloom.aio (queue + create_task +
+              cancel + call_later + run_in_executor) -- reaches the timer-leak,
+              task-cancel, and blockpool-job seams the core path can't.
+    A `scale` draw (~12%) inflates the core counts to stress the stack-depot /
+    fiber-admission at scale (model #1 / #7)."""
     rng = random.Random(seed)
+    kind = rng.choice(["core", "core", "core", "aio"])   # ~25% aio
+    scale = (rng.random() < 0.12)
     mode = rng.choice(["mn", "mn", "st"])           # bias toward the M:N path
-    nchan = rng.randint(1, 5)
-    ncons = rng.randint(1, 6)
+    if scale and kind == "core":
+        nprod = rng.randint(20, 60)
+        per_prod = rng.randint(80, 350)
+        ncons = rng.randint(8, 24)
+        nest = rng.randint(0, 5)
+    else:
+        nprod = rng.randint(1, 8)
+        per_prod = rng.randint(3, 30)
+        ncons = rng.randint(1, 6)
+        nest = rng.randint(0, 3)
     # Every channel needs >=1 range-consumer covering it or its tokens are never
     # drained; cap nchan at ncons (mirrors mn_stress 'stable' coverage rule).
-    nchan = min(nchan, ncons)
-    nprod = rng.randint(1, 8)
+    nchan = min(rng.randint(1, 6 if scale else 5), ncons)
     spec = {
         "seed": seed,
+        "kind": kind,
+        "scale": scale,
         "mode": mode,
-        "nhubs": rng.choice([2, 3, 4]) if mode == "mn" else 1,
+        "nhubs": rng.choice([2, 3, 4, 6, 8] if scale else [2, 3, 4]) if mode == "mn" else 1,
         "nchan": nchan,
         "caps": [rng.choice(CHAN_CAPS) for _ in range(nchan)],
         "nprod": nprod,
-        "per_prod": rng.randint(3, 30),
+        "per_prod": per_prod,
         "ncons": ncons,
         # consumer styles: range (for v in ch) drains one channel; select drains
         # across all (exercises the select+close lifecycle / Finding A class).
@@ -89,7 +108,7 @@ def build_spec(seed):
         "cons_stacks": [rng.choice(STACK_CHOICES) for _ in range(ncons)],
         # nested child goroutines spawned from inside a producer (snap/migration
         # under M:N + more stack-depot traffic).
-        "nest": rng.randint(0, 3),
+        "nest": nest,
         # timed parks between sends -> deadline heap + park/wake + the freed-state
         # timer oracle.  Kept tiny so the program still terminates promptly.
         "timer_us": rng.choice([0, 0, 50, 200, 800]),
@@ -98,6 +117,13 @@ def build_spec(seed):
         # FREE_NO_BUFFER_DRAIN).
         "scratch": rng.randint(0, 4),
         "yield_mask": rng.choice([0, 1, 3, 7]),     # sched_yield every (n & mask)==0
+        # --- aio-bridge program fields (used when kind == "aio") ---
+        "aio_prod": rng.randint(1, 6),
+        "aio_per": rng.randint(2, 20) * (8 if scale else 1),
+        "aio_decoys": rng.randint(0, 4),            # tasks cancelled mid-flight
+        "aio_timers": rng.randint(0, 4),            # call_later, all cancelled (leak seam)
+        "aio_executor": (rng.random() < 0.5),       # run_in_executor (blockpool job)
+        "aio_sleep_us": rng.choice([0, 0, 50, 200]),
     }
     return spec
 
@@ -130,6 +156,9 @@ def run_program(spec, timeout=20.0):
     TimeoutError (via the watchdog) on a hang."""
     import runloom_c
     from tools.watchdog import run_guarded
+
+    if spec.get("kind") == "aio":
+        return run_aio_program(spec, timeout=timeout)
 
     mode = spec["mode"]
     nchan = spec["nchan"]
@@ -289,6 +318,85 @@ def run_program(spec, timeout=20.0):
     if v != 0:
         runloom_c._self_check(1)
         return False, "SELF_CHECK violations={0}".format(v)
+    return True, "ok"
+
+
+def run_aio_program(spec, timeout=20.0):
+    """Build + run a small asyncio program under runloom.aio, checked against the
+    same life-cycle oracles.  Reaches the seams the core path can't: call_later +
+    cancel (timer-leak), task cancel mid-flight (task lifecycle / cancel-of-wait_fd),
+    and run_in_executor (the blockpool stack-job, model #3).  Always-terminating:
+    producers put a known token multiset on an asyncio.Queue, a consumer drains
+    exactly that many; decoy tasks + timers are cancelled and carry no tokens."""
+    import asyncio
+    import runloom.aio as paio
+    import runloom_c
+    from tools.watchdog import run_guarded
+
+    P = spec["aio_prod"]
+    N = spec["aio_per"]
+    sleep_s = spec["aio_sleep_us"] / 1e6
+    expected_count = P * N
+    expected_sum = sum(p * 100000 + i for p in range(P) for i in range(N))
+
+    async def main():
+        q = asyncio.Queue()
+        loop = asyncio.get_event_loop()
+
+        async def producer(pid):
+            for i in range(N):
+                if sleep_s:
+                    await asyncio.sleep(sleep_s)
+                await q.put(pid * 100000 + i)
+
+        async def decoy():
+            # cancelled mid-flight: exercises task teardown + cancel-of-a-parked-wait
+            await asyncio.sleep(1000)
+
+        prods = [asyncio.create_task(producer(p)) for p in range(P)]
+        decoys = [asyncio.create_task(decoy()) for _ in range(spec["aio_decoys"])]
+        # call_later timers, all cancelled before firing -> the timer-leak seam
+        # (a cancelled timer's goroutine must hold no ref to its callback graph).
+        for _ in range(spec["aio_timers"]):
+            loop.call_later(1000, lambda: None).cancel()
+
+        got = []
+        while len(got) < expected_count:
+            got.append(await q.get())
+        for t in prods:
+            await t
+        for d in decoys:
+            d.cancel()
+        for d in decoys:
+            try:
+                await d
+            except asyncio.CancelledError:
+                pass
+        executor_ok = True
+        if spec["aio_executor"]:
+            r = await loop.run_in_executor(None, lambda: sum(range(2000)))
+            executor_ok = (r == sum(range(2000)))
+        return sum(got), len(got), executor_ok
+
+    def work():
+        res = paio.run(main())
+        # snapshot oracles on THIS (worker) thread, where the loop's sched lives
+        return res, dict(runloom_c.stats()), runloom_c._self_check(0)
+
+    (got_sum, got_count, executor_ok), st, sc = run_guarded(
+        work, seconds=timeout, label="lifefuzz-aio seed={0}".format(spec["seed"]))
+
+    if (got_count, got_sum) != (expected_count, expected_sum):
+        return False, ("AIO_CONSERVATION expected=({0},{1}) got=({2},{3})"
+                       .format(expected_count, expected_sum, got_count, got_sum))
+    if not executor_ok:
+        return False, "AIO_EXECUTOR wrong result"
+    parked = st.get("sleeping", 0) + st.get("netpoll_parked", 0)
+    if parked != 0:
+        return False, ("AIO_PARKED_LEAK sleeping={0} netpoll_parked={1}"
+                       .format(st.get("sleeping"), st.get("netpoll_parked")))
+    if sc != 0:
+        return False, "AIO_SELF_CHECK violations={0}".format(sc)
     return True, "ok"
 
 

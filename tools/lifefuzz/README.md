@@ -43,6 +43,24 @@ back to a proven (or gated) invariant:
 | `cons_select` + closer (select racing close) | the select + close life-cycle | tools/README Finding A, `cbmc/fiber_admit` |
 | `timer_us` (`sched_sleep` between sends) | deadline heap + park/wake + freed-state timer entry | timer-entry oracle (`RUNLOOM_DBG_GSTATE`) |
 | `nprod`/`ncons`/spawn counts | fiber-admission slot conservation | `cbmc/fiber_admit_cbmc.c` (#7) |
+| `scale` (×8–20 counts, up to 8 hubs) | stack-depot recycle + admission *at scale* | `spin/stack_depot.pml` (#1), `cbmc/fiber_admit` (#7) |
+
+### Program kinds
+
+Two kinds are generated (the seed picks; `kind` in `gen`):
+
+- **core** (default, ~75%) — `runloom_c` goroutines + channels + select + timers,
+  the table above.
+- **aio** (~25%) — a small asyncio program under `runloom.aio` (`paio.run`): a
+  known token multiset over an `asyncio.Queue`, `create_task` + **task cancel**
+  mid-flight, **`call_later` timers cancelled** before firing, and optional
+  **`run_in_executor`**. Reaches the seams the core path can't:
+
+| aio knob | exercises | model / invariant |
+|---|---|---|
+| `aio_timers` (call_later + cancel) | a cancelled timer's goroutine holds no ref to its callback graph | aio `timer_leak.py` invariant |
+| `aio_decoys` (task cancel mid-flight) | task teardown + cancel of a parked wait | `project_pygo_cancel_wait_fd` |
+| `aio_executor` (run_in_executor) | the blockpool stack-`job` cross-thread lifetime | `genmc/blockpool_job.c` (#3) |
 
 ## The oracles (the net)
 
