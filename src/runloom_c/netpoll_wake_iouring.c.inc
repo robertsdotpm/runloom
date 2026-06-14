@@ -192,6 +192,19 @@ void runloom_netpoll_cancel_fd(int fd)
 {
     int i;
     if (fd < 0) return;
+#if defined(RUNLOOM_OS_WINDOWS)
+    /* IOCP-AFD: every wait_fd submits an AFD_POLL whose mask ALWAYS includes
+     * AFD_POLL_LOCAL_CLOSE (see runloom_to_afd_events), so closing the socket
+     * itself fires a completion that the pump dispatches to wake the parked
+     * fiber.  Calling cancel_fd from the close hook on IOCP therefore adds a
+     * SECOND, concurrent waker for the same parker -- it races the LOCAL_CLOSE
+     * completion drained on another hub (both claim+unlink+free the same
+     * stack-allocated parker) -> use-after-free / access violation under M:N
+     * free-threading (crashed every big_100 socket program at scale; POSIX has
+     * no such auto-wake on close so cancel_fd is the sole, race-free waker
+     * there).  Skip it on IOCP; LOCAL_CLOSE is the race-free close-waker. */
+    if (runloom_win_use_iocp) return;
+#endif
     for (i = 0; i < RUNLOOM_PARKER_POOL_MAX; i++) {
         runloom_parker_pool_t *pool = &runloom_pools[i];
         runloom_parked_t *p, *next;
