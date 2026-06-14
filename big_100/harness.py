@@ -86,6 +86,8 @@ SHARD_MASK = NSHARDS - 1
 
 def count_fds():
     """Open file descriptors for this process (Linux).  -1 if unknown."""
+    if not sys.platform.startswith("linux"):
+        return -1   # no /proc; skip (and don't offload a doomed listdir)
     try:
         return len(os.listdir("/proc/self/fd"))
     except OSError:
@@ -94,6 +96,8 @@ def count_fds():
 
 def count_sockets():
     """Count open socket FDs for this process.  -1 if unknown."""
+    if not sys.platform.startswith("linux"):
+        return -1
     try:
         n = 0
         for name in os.listdir("/proc/self/fd"):
@@ -125,8 +129,15 @@ def raise_fd_limit(target):
     hard limit on this box defaults to 4096, far below the system ceiling
     (fs.nr_open ~8M).  We raise the hard limit via `sudo -n prlimit` on our own
     pid (uid is unchanged), then pull the soft limit up to it.  If sudo isn't
-    available we still raise soft->hard.  Returns the resulting (soft, hard)."""
-    import resource
+    available we still raise soft->hard.  Returns the resulting (soft, hard).
+
+    Windows has no `resource` module and no per-process descriptor rlimit (the
+    practical socket ceiling is governed by non-paged pool / ephemeral ports,
+    not a setrlimit-style cap), so this is a no-op there."""
+    try:
+        import resource
+    except ImportError:
+        return (target, target)   # Windows: no RLIMIT_NOFILE concept
     try:
         soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
     except Exception:

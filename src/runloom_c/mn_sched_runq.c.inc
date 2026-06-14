@@ -288,7 +288,25 @@ static int runloom_use_global_runq(void)
 #if PY_VERSION_HEX >= 0x030D0000
 RUNLOOM_INLINE int runloom_tstate_attach_state(PyThreadState *ts)
 {
-    return ts != NULL ? __atomic_load_n(&ts->state, __ATOMIC_ACQUIRE) : -1;
+    if (ts == NULL) return -1;
+#if defined(RUNLOOM_OS_WINDOWS)
+    /* This read is DELIBERATELY racy: the sysmon / handoff / hub-snapshot
+     * threads read h->tstate->state without owning the tstate (see callers).
+     * On POSIX a tstate freed under us leaves its page mapped, so the stale
+     * read returns garbage harmlessly.  On Windows the allocator (mimalloc)
+     * UNMAPS freed pages, so the same race faults with an access violation
+     * (reproduced by big_100 under M:N free-threading).  Wrap the read in SEH:
+     * a faulting read means the tstate was freed concurrently -> report -1
+     * ("unknown"), identical to the NULL case, so every attach-state gate
+     * fails closed and no rescue/adopt fires on a dead hub. */
+    __try {
+        return __atomic_load_n(&ts->state, __ATOMIC_ACQUIRE);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return -1;
+    }
+#else
+    return __atomic_load_n(&ts->state, __ATOMIC_ACQUIRE);
+#endif
 }
 #else
 RUNLOOM_INLINE int runloom_tstate_attach_state(PyThreadState *ts)
