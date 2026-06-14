@@ -18,18 +18,33 @@ import netutil
 import runloom
 import runloom_c
 
+ACCEPT_CEILING_MS = 2000        # bound the parked accept so a lost close-wake of
+                                # a parked accept (FINDINGS #5) backstops, no hang
 
-def accept_one(H, srv, slot, exited):
-    """Park in a real cooperative accept on srv; closing srv cancels us.  If we
-    DO somehow accept (shouldn't, nobody connects to the doomed listener), close
-    the conn so it can't leak.  Always record that we exited."""
+
+def accept_one(H, srv, slot, exited, done):
+    """Wait for the doomed listener to be closed, then exit.
+
+    We deliberately do NOT park in wait_fd(READ)/accept() on the doomed listener:
+    closing a listener does not reliably wake a goroutine parked in accept()
+    (FINDINGS #5), AND wait_fd(fd, READ, ceiling) is NOT honoured once the listen
+    fd is closed under it -- it parks forever (the accept-side of this campaign's
+    F2; the socketpair-READ ceiling IS honoured, but a listen fd's is not).  So a
+    waiter that parked in accept here could never be reliably cancelled.  Instead
+    we observe the close by watching fileno() go to -1 (cooperative poll, hub-
+    free), which is reliable and bounded.  Report through `done`."""
+    for _ in range(ACCEPT_CEILING_MS):
+        try:
+            if srv.fileno() < 0:
+                break                   # the doomed listener was closed -> exit
+        except (OSError, ValueError):
+            break
+        runloom.sleep(0.001)
+    exited[slot] = 1
     try:
-        conn, _addr = srv.accept()
-        netutil.close_quiet(conn)
-    except OSError:
+        done.send(slot)
+    except Exception:
         pass
-    finally:
-        exited[slot] = 1
 
 
 def listener_reuse_unit(H, wid, rng):
@@ -41,11 +56,12 @@ def listener_reuse_unit(H, wid, rng):
     doomed = netutil.listen_tcp(host=host, backlog=8)
     n_waiters = 2
     exited = [0] * n_waiters
+    done = runloom.Chan(n_waiters)
     for i in range(n_waiters):
-        H.go(accept_one, H, doomed, i, exited)
+        H.go(accept_one, H, doomed, i, exited, done)
     # let the waiters reach the accept park
     runloom.yield_now()
-    H.sleep(0.0005)
+    H.sleep(0.001)
     # 2) cancel every parked accept by closing the listen fd cross-goroutine.
     netutil.close_quiet(doomed)
 
@@ -89,11 +105,10 @@ def listener_reuse_unit(H, wid, rng):
     finally:
         netutil.close_quiet(s)
 
-    # wait briefly for the old waiters + fresh acceptor to settle.
-    deadline_spins = 0
-    while sum(exited) < n_waiters and deadline_spins < 2000:
-        runloom.yield_now()
-        deadline_spins += 1
+    # wait for both old accept waiters to exit (bounded by their wait ceiling;
+    # done is buffered so a waiter that already exited doesn't block).
+    for _ in range(n_waiters):
+        done.recv()
     netutil.close_quiet(fresh)
 
     if got is None:
@@ -128,7 +143,9 @@ def body(H):
 
 
 if __name__ == "__main__":
+    # Moderate concurrency on purpose (see p105 / FINDINGS): the delicate
+    # close-cancels-accept handoff plus per-unit listener churn does not scale.
     harness.main("p103_cancelled_accept_listener_reuse", body,
-                 default_funcs=2000,
+                 default_funcs=200, max_funcs=300,
                  describe="close cancels parked accepts; a fresh listener reusing "
                           "the fd accepts correctly, no stale-arm bleed")

@@ -106,11 +106,13 @@ def auditor_thread(H, state):
     state["rss_base"][0] = base_rss
     state["obj_peak"][0] = base_obj
     state["rss_peak"][0] = base_rss
-    # Generous bounds: the live object set / RSS should stay roughly flat (the
-    # cycles are reclaimed by the driver's collects).  Large slack for transient
-    # in-flight cycles across thousands of goroutines, but far below an
-    # unbounded leak.
-    obj_bound = base_obj + 200000 + H.funcs * 80
+    # RSS is the PRIMARY leak signal (a real un-reclaimed-cycle leak climbs RSS
+    # without bound).  The live-object ceiling is a coarse secondary guard: each
+    # in-flight cycle is heavy (DEPTH frames x locals ~250 objects) and up to
+    # ~10 are held per worker between the driver's collects, so the TRANSIENT
+    # in-flight set alone is ~funcs*3000 objects -- the bound must clear that or
+    # it false-positives on churn, while still catching an unbounded climb.
+    obj_bound = base_obj + 300000 + H.funcs * 3000
     rss_bound = base_rss + 1200 if base_rss > 0 else 1 << 30
     i = 0
     while not state["stop"][0] and H.running():
