@@ -167,6 +167,26 @@ else
     echo "FAIL -- migrating a tstate without the abandon/adopt handshake should violate page ownership"; fail=$((fail+1))
 fi
 
+# ---- Tier-2 #6: the runloom_g_t REFCOUNT LEDGER composed with the wake_state
+# machine (RunloomGRefcount).  wake_state.pml proves the entry/owner discipline;
+# this proves the integer refcount stays consistent with it (rc == scheduler ref +
+# the 0/1 global-runq queue ref), so a g is freed exactly once and never while a
+# queue entry could still resume it.  Negative control drops the QUEUED->RUNNING
+# decref (a consumed queue ref leaked).
+printf '  [tlc] %-28s ' "RunloomGRefcount (correct)"
+if run_tlc grcok -config RunloomGRefcount.cfg RunloomGRefcount.tla | grep -q "No error has been found"; then
+    echo "PASS -- Ledger + RcNonNeg + FreedConsistent hold (refcount tracks the wake_state)"; pass=$((pass+1))
+else
+    echo "FAIL -- the refcount-ledger spec should hold"; fail=$((fail+1))
+fi
+
+printf '  [tlc] %-28s ' "RunloomGRefcount (lost decref)"
+if run_tlc grcbug -deadlock -config RunloomGRefcount_bug.cfg RunloomGRefcount.tla | grep -q "is violated"; then
+    echo "PASS -- correctly DETECTS a consumed global-runq entry that forgets runloom_g_decref -> the queue ref leaks (Ledger violated, g never freed)"; pass=$((pass+1))
+else
+    echo "FAIL -- a lost queue-ref decref should violate the refcount ledger"; fail=$((fail+1))
+fi
+
 # ---- WHOLE-PROGRAM LIVENESS (RunloomComposite): the scheduler + every wake
 # source (channels / netpoll / timers / foreign) composed, checked for NoHang
 # (every goroutine eventually completes).  Real hangs live in the seams between
