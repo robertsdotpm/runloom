@@ -87,49 +87,60 @@ def test_current_g_none_outside_fiber():
 # --------------------------------------------------------------------------
 # FINDING: unhandled goroutine exceptions vanish silently
 # --------------------------------------------------------------------------
-def test_run_does_not_raise_goroutine_exception_behavior_lock():
-    # Behavior lock: run() returns normally even though the goroutine raised.
-    # (Documents the swallow so a future surfacing change updates it here too.)
-    def boom():
-        raise ValueError("unhandled in goroutine")
-    g = rc.go(boom)
-    n = rc.run()
-    assert n >= 1
-    assert g.done is True
-    assert g.result is None        # the exception is NOT exposed on the handle
-
-
-@pytest.mark.xfail(strict=False, reason=(
-    "FINDING: a bare runloom_c.go goroutine's unhandled exception is captured "
-    "into g->error but never surfaced -- not via G.result, not via run(), and "
-    "NOT written to stderr / sys.unraisablehook. A Go-parity runtime should at "
-    "least make a goroutine panic observable."))
-def test_goroutine_exception_is_observable_somewhere():
-    marker = "RUNLOOM_GOROUTINE_PANIC_MARKER_XYZ"
+def test_goroutine_exception_is_reported_and_retrievable():
+    # Regression for the swallowed-exception FINDING (now fixed): an unhandled
+    # goroutine exception is reported via sys.unraisablehook (default
+    # RUNLOOM_GOROUTINE_PANIC=print) AND retrievable on G.exception.  run() still
+    # does NOT raise it (report, not propagate) and G.result stays None.
+    # NB: PyErr_WriteUnraisable calls sys.unraisablehook, so we capture there --
+    # pytest installs its own hook (turning unraisables into warnings), so an
+    # fd-2 capture would see nothing under pytest.
+    marker = "RUNLOOM_PANIC_MARKER_ABC"
     def boom():
         raise ValueError(marker)
-
-    # Capture fd-level stderr (a C-level write would bypass sys.stderr).
-    r, w = os.pipe()
-    saved = os.dup(2)
-    os.dup2(w, 2)
-    unraised = []
+    recorded = []
     prev_hook = sys.unraisablehook
-    sys.unraisablehook = lambda u: unraised.append(u)
+    sys.unraisablehook = lambda u: recorded.append(u)
     try:
-        rc.go(boom)
-        rc.run()
+        g = rc.go(boom)
+        n = rc.run()
     finally:
-        os.dup2(saved, 2)
-        os.close(w)
-        captured = os.read(r, 1 << 16).decode("utf-8", "replace")
-        os.close(r)
-        os.close(saved)
         sys.unraisablehook = prev_hook
+    assert n >= 1
+    assert g.done is True
+    assert g.result is None                        # value channel unchanged
+    assert isinstance(g.exception, ValueError)     # now retrievable on the handle
+    assert marker in str(g.exception)
+    assert any(marker in str(getattr(u, "exc_value", "")) for u in recorded), \
+        "goroutine exception was not reported via the unraisable hook"
 
-    observable = (marker in captured) or any(
-        marker in str(getattr(u, "exc_value", "")) for u in unraised)
-    assert observable, "goroutine exception was completely silent"
+
+_SILENT_SCRIPT = r'''
+import sys, os; sys.path.insert(0, "src")
+import runloom_c as rc
+def boom():
+    raise ValueError("SILENT_MARKER_X")
+g = rc.go(boom)
+r, w = os.pipe(); saved = os.dup(2); os.dup2(w, 2)
+rc.run()
+os.dup2(saved, 2); os.close(w)
+cap = os.read(r, 1 << 16).decode(); os.close(r); os.close(saved)
+sys.stdout.write("PRINTED\n" if "SILENT_MARKER_X" in cap else "QUIET\n")
+sys.stdout.write("RETRIEVABLE\n" if isinstance(g.exception, ValueError) else "LOST\n")
+'''
+
+
+def test_goroutine_exception_silent_mode_opt_out():
+    # RUNLOOM_GOROUTINE_PANIC=silent restores no-report (still retrievable).
+    # Subprocess: the mode is cached process-wide.
+    import subprocess
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    env = dict(os.environ, RUNLOOM_GOROUTINE_PANIC="silent",
+               PYTHON_GIL="0", PYTHONPATH="src")
+    p = subprocess.run([sys.executable, "-c", _SILENT_SCRIPT], cwd=repo, env=env,
+                       capture_output=True, text=True, timeout=30)
+    assert "QUIET" in p.stdout, "silent mode still printed:\n%s%s" % (p.stdout, p.stderr)
+    assert "RETRIEVABLE" in p.stdout, "G.exception lost in silent mode"
 
 
 # --------------------------------------------------------------------------

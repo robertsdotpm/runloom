@@ -223,6 +223,13 @@ class Goroutine(object):
         return self._g.result
 
     @property
+    def exception(self):
+        # Unhandled exception that escaped the goroutine body, or None.  Also
+        # reported via the unraisable hook at completion unless
+        # RUNLOOM_GOROUTINE_PANIC=silent.
+        return self._g.exception
+
+    @property
     def coro(self):
         # Compat shim: callers used to do `g.coro.done` / `g.coro.result`.
         # The C-scheduler G already exposes these directly, so we just

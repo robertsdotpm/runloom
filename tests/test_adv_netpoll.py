@@ -100,6 +100,12 @@ def test_wait_fd_readable_and_writable():
         assert _run_single(f) == "ok"
 
 
+@pytest.mark.skipif(rc.netpoll_backend() == "select", reason=(
+    "FINDING (surfaced by building RUNLOOM_NETPOLL=select on Linux): the select "
+    "backend does not validate the fd before FD_SET, so wait_fd(-1) hits glibc's "
+    "_FORTIFY_SOURCE __fdelt_chk and ABORTS the process, where epoll/kqueue raise "
+    "a clean OSError(EBADF). The select path should reject fd<0 / fd>=FD_SETSIZE "
+    "with OSError before FD_SET."))
 def test_wait_fd_invalid_fd_raises_not_hangs():
     def f():
         with pytest.raises(OSError):

@@ -257,6 +257,34 @@ runloom_g_t *runloom_sched_peek_current(void)
  * lifetime of g.  We exploit that by allocating the initial _PyCFrame
  * here (3.12 only) so its address remains valid for as long as we
  * might switch back to g. */
+
+/* RUNLOOM_GOROUTINE_PANIC: how an unhandled exception that escapes a goroutine
+ * body is surfaced.  Without it the exception is captured into g->error but
+ * never raised out of run()/mn_run(), never on G.result, and never printed -- a
+ * silent failure (and most goroutines, every mn_go included, expose no handle
+ * to inspect at all).  Modes:
+ *   silent : the legacy behaviour -- capture into g->error, no report
+ *   print  : (default) report via PyErr_WriteUnraisable -> sys.unraisablehook /
+ *            stderr, naming the goroutine callable.  The exception is STILL kept
+ *            on g->error for runloom_c.G.exception; this is memory-NEUTRAL --
+ *            g->error is already retained until the g's final decref either way.
+ *   abort  : Go-style -- report, then abort() the process.
+ * Read once (cached).  Only the error path pays anything; the success path is
+ * untouched. */
+static int runloom_goroutine_panic_mode(void)
+{
+    static int v = -1;
+    int cur = __atomic_load_n(&v, __ATOMIC_RELAXED);
+    if (cur < 0) {
+        const char *e = getenv("RUNLOOM_GOROUTINE_PANIC");
+        cur = (e != NULL && e[0] == 's') ? 0 :     /* silent */
+              (e != NULL && e[0] == 'a') ? 2 :     /* abort  */
+              1;                                    /* print (default) */
+        __atomic_store_n(&v, cur, __ATOMIC_RELAXED);
+    }
+    return cur;
+}
+
 void runloom_g_entry(void *user)
 {
     runloom_g_t *g = (runloom_g_t *)user;
@@ -395,6 +423,24 @@ void runloom_g_entry(void *user)
         }
         Py_XDECREF(type);
         g->error = value;
+        /* Surface the otherwise-swallowed goroutine exception.  Report through
+         * the unraisable hook WITHOUT consuming our g->error ref: hand
+         * WriteUnraisable its OWN incref'd error indicator, which it then clears,
+         * leaving g->error intact for runloom_c.G.exception. */
+        {
+            int panic = runloom_goroutine_panic_mode();
+            if (panic != 0 && value != Py_None) {
+                PyObject *tb2 = PyException_GetTraceback(value);  /* new ref/NULL */
+                PyObject *ty = (PyObject *)Py_TYPE(value);
+                Py_INCREF(ty);
+                Py_INCREF(value);
+                PyErr_Restore(ty, value, tb2);        /* steals all three */
+                PyErr_WriteUnraisable(g->callable);   /* prints + clears indicator */
+                if (panic == 2) {
+                    abort();                          /* Go-style crash-on-panic */
+                }
+            }
+        }
     } else {
         g->result = res;
     }
