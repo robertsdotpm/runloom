@@ -2,6 +2,10 @@
  * standalone.  See netpoll.c for the includes/typedefs/file-scope state
  * these definitions depend on. */
 
+#if !defined(RUNLOOM_OS_WINDOWS)
+#include <poll.h>   /* runloom_netpoll_dump_parkers ready-but-parked probe */
+#endif
+
 
 int runloom_netpoll_inspect_for_self_check(struct runloom_self_check_stats *out)
 {
@@ -108,6 +112,7 @@ void runloom_netpoll_dump_parkers(void)
         runloom_parked_t *p;
         int total = __atomic_load_n(&pool->total, __ATOMIC_ACQUIRE);
         int n = 0, rd = 0, wr = 0, rdwr = 0, other = 0;
+        int rdyp = 0;   /* ready-but-parked: fd IS OS-ready yet g still parked */
         if (total == 0) continue;
         runloom_parker_pool_lock_ensure_inited(pool);
         RUNLOOM_RLOCK(&pool->lock, RUNLOOM_RANK_PARKER_POOL);
@@ -117,10 +122,25 @@ void runloom_netpoll_dump_parkers(void)
             else if (e == RUNLOOM_NETPOLL_WRITE) wr++;
             else if (e == (RUNLOOM_NETPOLL_READ | RUNLOOM_NETPOLL_WRITE)) rdwr++;
             else other++;
+#if !defined(RUNLOOM_OS_WINDOWS)
+            /* Diagnostic readiness probe (lost-wakeup detector): is this fd
+             * ACTUALLY ready right now while its g is still parked?  If many are
+             * ready-but-parked the wedge is a lost netpoll wakeup; if few/none
+             * the gs are genuinely waiting on I/O that never arrives. */
+            {
+                struct pollfd pfd;
+                short want = 0;
+                if (p->events & RUNLOOM_NETPOLL_READ)  want |= POLLIN;
+                if (p->events & RUNLOOM_NETPOLL_WRITE) want |= POLLOUT;
+                pfd.fd = p->fd; pfd.events = want; pfd.revents = 0;
+                if (poll(&pfd, 1, 0) > 0 &&
+                    (pfd.revents & (want | POLLHUP | POLLERR))) rdyp++;
+            }
+#endif
         }
         m = snprintf(buf, sizeof buf,
-            "[parker-dump] pool#%d total=%d walked=%d READ=%d WRITE=%d RW=%d other=%d kq=%d\n",
-            pi, total, n, rd, wr, rdwr, other,
+            "[parker-dump] pool#%d total=%d walked=%d READ=%d WRITE=%d RW=%d other=%d readyParked=%d kq=%d\n",
+            pi, total, n, rd, wr, rdwr, other, rdyp,
 #if defined(RUNLOOM_HAVE_KQUEUE)
             pool->kqueue_fd
 #else
