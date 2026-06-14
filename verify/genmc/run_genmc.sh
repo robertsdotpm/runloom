@@ -236,7 +236,48 @@ for ctl in BUG_PARK_PLAIN_STORE BUG_EXCHANGE_RELAXED BUG_WOKE_RELAXED BUG_LOAD_R
     fi
 done
 
-rm -f "$HERE/.genmc.pos.log" "$HERE/.genmc.neg.log" 2>/dev/null
+# --- LIFECYCLE migration-drain trio: the per-g-tstate hub->hub MIGRATION drain ---
+# The weak-memory fidelity layer the RunloomTstateMigration.tla PLACEMENT proof
+# defers to (LIFECYCLE_INVARIANTS.md "deep CPython surfaces").  Three orthogonal
+# drains a correct mimalloc-heap migration must run, each proven as the data race
+# the drain prevents under RC11:
+#   mimalloc_page_free.c -- WHO may touch a page (per-page xthread_id abandon/adopt)
+#   qsbr_drain.c         -- WHEN a deferred free may run (QSBR grace period)
+#   brc_merge.c          -- WHO may merge a refcount (biased-refcount owner drain)
+# Each is gated off in the shipping runtime (RUNLOOM_ALLOW_UNSAFE_MIGRATION); these
+# are the SPEC a candidate abandon/adopt handshake must satisfy before it is trusted.
+genmc_model() {                 # name  correct-grep  "BUG1 BUG2 ..."  blurb
+    local f="$1" posgrep="$2" bugs="$3" blurb="$4"
+    printf '  [genmc] %-30s ' "$f"
+    if "$G" -- "$HERE/$f" >"$HERE/.genmc.pos.log" 2>&1 \
+            && grep -q "$posgrep" "$HERE/.genmc.pos.log"; then
+        n="$(sed -n 's/.*complete executions explored: \([0-9]*\).*/\1/p' "$HERE/.genmc.pos.log" | tail -1)"
+        green "PASS"; echo " -- $blurb (${n:-?} RC11 execs)"; pass=$((pass+1))
+    else
+        red "FAIL"; echo " -- see $HERE/.genmc.pos.log"; fail=$((fail+1))
+    fi
+    for bug in $bugs; do
+        printf '  [genmc] %-30s ' "$f(-D$bug)"
+        if "$G" -- "-D$bug" "$HERE/$f" >"$HERE/.genmc.neg.log" 2>&1; then
+            red "FAIL"; echo " (expected a race/violation) -- see $HERE/.genmc.neg.log"; fail=$((fail+1))
+        elif grep -qiE "race|error|violation|assert" "$HERE/.genmc.neg.log"; then
+            green "PASS"; echo " -- correctly DETECTS the undrained-migration hazard"; pass=$((pass+1))
+        else
+            red "FAIL"; echo " (errored but no race/violation) -- see $HERE/.genmc.neg.log"; fail=$((fail+1))
+        fi
+    done
+}
+genmc_model mimalloc_page_free.c "No errors were detected" \
+    "BUG_LOCAL_ON_STALE BUG_ADOPT_RELAXED" \
+    "per-page xthread_id abandon/adopt orders the owner-only heap-queue path -- no race"
+genmc_model qsbr_drain.c "No errors were detected" \
+    "BUG_NO_GRACE BUG_POLL_RELAXED" \
+    "QSBR grace poll orders the deferred free after every reader's quiescent state"
+genmc_model brc_merge.c "No errors were detected" \
+    "BUG_MERGE_AFTER_MIGRATE" \
+    "biased-refcount merge drained on the owner thread -- no cross-thread ob_ref_local race"
+
+rm -f "$HERE/.genmc.pos.log" "$HERE/.genmc.neg.log" "$HERE/.genmc.mix.log" 2>/dev/null
 echo "  $pass passed, $fail failed"
 
 # Chase-Lev work-stealing deque oracle -- its own harness (single-element
