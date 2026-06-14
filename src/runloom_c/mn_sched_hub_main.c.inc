@@ -258,9 +258,10 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
          * deposited an op targeting THIS hub's SINGLE_ISSUER ring; submit the
          * ASYNC_CANCEL here, where we are the ring's sole issuer. */
         {
-            void *cop = __atomic_exchange_n(&h->iouring_cancel_op, NULL,
-                                            __ATOMIC_ACQ_REL);
-            if (cop != NULL) runloom_iouring_submit_cancel_for_op(cop);
+            /* MSVC atomics don't support void ** in _Generic; cast to intptr_t. */
+            intptr_t cop = __atomic_exchange_n((intptr_t *)&h->iouring_cancel_op, 0,
+                                              __ATOMIC_ACQ_REL);
+            if (cop != 0) runloom_iouring_submit_cancel_for_op((void *)cop);
         }
         /* Set when g came from the global run-queue: it then carries a queue
          * ref this iteration must release, and its resume must claim it with the

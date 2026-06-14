@@ -245,9 +245,11 @@ void runloom_mn_wake_g(void *hub_opaque, runloom_g_t *g)
 int runloom_mn_hub_request_iouring_cancel(void *hub_opaque, void *op)
 {
     runloom_hub_t *h = (runloom_hub_t *)hub_opaque;
-    void *expected = NULL;
+    /* MSVC atomics don't support void ** in _Generic; cast to intptr_t. */
+    intptr_t expected = 0;
+    intptr_t cop = (intptr_t)op;
     if (h == NULL || op == NULL) return 0;
-    if (!__atomic_compare_exchange_n(&h->iouring_cancel_op, &expected, op, 0,
+    if (!__atomic_compare_exchange_n((intptr_t *)&h->iouring_cancel_op, &expected, cop, 0,
                                      __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
         return 0;   /* a cancel is already pending for this hub (best-effort) */
     /* Wake the hub if idle-parked so it drains the mailbox promptly. */
