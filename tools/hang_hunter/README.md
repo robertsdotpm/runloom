@@ -49,6 +49,23 @@ Shipped (run on this box today):
 - **hypo** — Hypothesis-generated *always-terminating* programs (random op
   sequences across random hub counts); any hang is therefore a real bug, and
   Hypothesis shrinks assertion failures to a minimal repro.
+- **lifefuzz** — one generative *life-cycle* program from `tools/lifefuzz` per job
+  (varied-stack goroutines, channel ref churn, nested spawn/migration, timed parks,
+  select+close, undrained buffers). Always-terminating, so a hang is a real lost
+  wakeup; a nonzero exit (crash / life-cycle-oracle violation) is a bug. Each job
+  pins a `RUNLOOM_MN_SEED` so the daemon's repro replays the exact execution, and
+  the worker's internal watchdog is set high so a true wedge reaches the daemon's
+  gdb-on-live-process triage.
+
+Auto-selected when the ext is **TSan-built**:
+
+- **lifefuzz-tsan** — the same generative programs under the gold-standard TSan ext
+  (`setarch -R` + `LD_PRELOAD=libtsan` + the runloom suppressions); a non-suppressed
+  data race exits 86 → CRASH triage. This is the engine that found the deadlock-
+  census race cluster (`tools/README.md` Finding D). Because a TSan-linked ext can
+  only load with `libtsan` preloaded, this engine **replaces** the normal set when
+  the built ext links libtsan — build it via `tools/run_sanitizers_ext.sh`, then run
+  the daemon (it auto-detects).
 
 Hooks for engines that need installs not present here:
 
@@ -56,8 +73,6 @@ Hooks for engines that need installs not present here:
   build against free-threaded 3.13t).
 - **afl / libFuzzer** — a C harness over the deque / chan / select primitives
   (needs clang).
-- **tsan-rotation** — periodic runs under the gold-standard TSan interpreter
-  (`tools/build_tsan_cpython.sh`) to attribute races crossing into CPython.
 
 Add one by writing a `*_job(rng, py) -> Job` function in `workloads.py` and
 registering it in `ENGINES`.
