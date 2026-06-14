@@ -147,6 +147,65 @@ else
     echo "FAIL -- deleting a gilstate-bound tstate from the wrong thread should violate the contract"; fail=$((fail+1))
 fi
 
+# ---- Tier-1 #2: the per-g tstate / mimalloc-heap MIGRATION hazard
+# (RunloomTstateMigration): models mimalloc's per-PAGE owner thread and proves
+# the abandon-on-detach + adopt-on-attach handshake is NECESSARY to migrate a
+# tstate hub->hub without a cross-thread page op (the SEGV gated off in 70e6ddb).
+# Correct = the handshake keeps owner == operating thread; the negative control
+# drops it -> a page allocated on hub A is operated on hub B.
+printf '  [tlc] %-28s ' "RunloomTstateMigration (handshake)"
+if run_tlc mig -config RunloomTstateMigration.cfg RunloomTstateMigration.tla | grep -q "No error has been found"; then
+    echo "PASS -- NoCrossThreadPageOp + NoForeignOwnerWhileAttached hold (abandon/adopt keeps page owner == operating hub)"; pass=$((pass+1))
+else
+    echo "FAIL -- the abandon/adopt handshake spec should hold"; fail=$((fail+1))
+fi
+
+printf '  [tlc] %-28s ' "RunloomTstateMigration (no h/shake)"
+if run_tlc migbug -deadlock -config RunloomTstateMigration_bug.cfg RunloomTstateMigration.tla | grep -q "is violated"; then
+    echo "PASS -- correctly DETECTS the mimalloc heap migrating hub->hub (a page owned by hub A operated on hub B) -> NoForeignOwnerWhileAttached violated"; pass=$((pass+1))
+else
+    echo "FAIL -- migrating a tstate without the abandon/adopt handshake should violate page ownership"; fail=$((fail+1))
+fi
+
+# ---- Tier-2 #6: the runloom_g_t REFCOUNT LEDGER composed with the wake_state
+# machine (RunloomGRefcount).  wake_state.pml proves the entry/owner discipline;
+# this proves the integer refcount stays consistent with it (rc == scheduler ref +
+# the 0/1 global-runq queue ref), so a g is freed exactly once and never while a
+# queue entry could still resume it.  Negative control drops the QUEUED->RUNNING
+# decref (a consumed queue ref leaked).
+printf '  [tlc] %-28s ' "RunloomGRefcount (correct)"
+if run_tlc grcok -config RunloomGRefcount.cfg RunloomGRefcount.tla | grep -q "No error has been found"; then
+    echo "PASS -- Ledger + RcNonNeg + FreedConsistent hold (refcount tracks the wake_state)"; pass=$((pass+1))
+else
+    echo "FAIL -- the refcount-ledger spec should hold"; fail=$((fail+1))
+fi
+
+printf '  [tlc] %-28s ' "RunloomGRefcount (lost decref)"
+if run_tlc grcbug -deadlock -config RunloomGRefcount_bug.cfg RunloomGRefcount.tla | grep -q "is violated"; then
+    echo "PASS -- correctly DETECTS a consumed global-runq entry that forgets runloom_g_decref -> the queue ref leaks (Ledger violated, g never freed)"; pass=$((pass+1))
+else
+    echo "FAIL -- a lost queue-ref decref should violate the refcount ledger"; fail=$((fail+1))
+fi
+
+# ---- Tier-2 #9: the mn_fini TEARDOWN stop-signal handshake (RunloomMnFini).  The
+# known flaky mn_fini hang: a hub idle-parked in its condvar misses the stop signal
+# -> pthread_join blocks.  Correct = signal idle_cond UNDER idle_lock (no lost
+# wakeup); the control signals without the lock -> the wakeup is lost -> the hub
+# waits forever (JoinCompletes liveness violated).
+printf '  [tlc] %-28s ' "RunloomMnFini (under lock)"
+if run_tlc finiok -config RunloomMnFini.cfg RunloomMnFini.tla | grep -q "No error has been found"; then
+    echo "PASS -- MutexOK + JoinCompletes hold (under-lock stop signal -> join always completes)"; pass=$((pass+1))
+else
+    echo "FAIL -- the under-lock teardown signal should always join"; fail=$((fail+1))
+fi
+
+printf '  [tlc] %-28s ' "RunloomMnFini (no lock)"
+if run_tlc finibug -deadlock -config RunloomMnFini_bug.cfg RunloomMnFini.tla | grep -q "Temporal properties were violated"; then
+    echo "PASS -- correctly DETECTS the lost stop-signal (signal without idle_lock) -> hub waits forever -> JoinCompletes violated"; pass=$((pass+1))
+else
+    echo "FAIL -- signalling without the lock should lose the wakeup and hang the join"; fail=$((fail+1))
+fi
+
 # ---- WHOLE-PROGRAM LIVENESS (RunloomComposite): the scheduler + every wake
 # source (channels / netpoll / timers / foreign) composed, checked for NoHang
 # (every goroutine eventually completes).  Real hangs live in the seams between

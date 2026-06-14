@@ -45,6 +45,33 @@ static int sys_io_uring_submit_eintr(int ring_fd, unsigned to_submit)
     return n;
 }
 
+/* CQ-ring overflow recovery (mapped from the SQ ring's flags word).
+ *
+ * If more completions arrive than the CQ ring can hold, the kernel sets
+ * IORING_SQ_CQ_OVERFLOW and (on IORING_FEAT_NODROP kernels, >= 5.5) keeps the
+ * overflowed CQEs in a kernel-side list rather than dropping them.  A drainer
+ * that only walks the visible CQ ring never sees those completions -- so the
+ * fibers parked on them are NEVER woken (a permanent hang) and the inflight
+ * counter never balances.  A GETEVENTS enter flushes the kernel list back into
+ * the ring; the drain loop's fresh cq_tail read then picks them up.
+ *
+ * Go never adopted io_uring, so there is no upstream reference for this -- it is
+ * a runloom-native-backend invariant: a completion must never be silently
+ * dropped.  This is structurally avoided for SINGLE-shot ops (submit_sqe
+ * spin-drains the CQ when the SQ is full) but multishot recv can post many CQEs
+ * the submitter is not synchronously draining, which is where overflow bites. */
+#ifndef IORING_SQ_CQ_OVERFLOW
+#define IORING_SQ_CQ_OVERFLOW (1U << 1)
+#endif
+static void runloom_iouring_flush_cq_overflow(unsigned *sq_flags, int ring_fd)
+{
+    if (sq_flags == NULL || ring_fd < 0) return;
+    if (__atomic_load_n(sq_flags, __ATOMIC_ACQUIRE) & IORING_SQ_CQ_OVERFLOW) {
+        /* Best-effort: a re-issued GETEVENTS just re-flushes if it raced. */
+        (void)sys_io_uring_enter(ring_fd, 0, 0, IORING_ENTER_GETEVENTS, NULL, 0);
+    }
+}
+
 /* Per-op record.  user_data on the SQE points to one of these so
  * drain can route the completion back to the right waiter.  For
  * "single" ops the record lives on the submitter's C stack across
@@ -81,6 +108,10 @@ typedef struct runloom_iouring_op {
     void     *hub;           /* opaque hub_t* or NULL for global sched */
     int32_t   result;        /* SINGLE: CQE res field; valid after wake */
     int       wait;          /* SINGLE hub op: park/wake commit (see above) */
+    void     *ring;          /* SINGLE: the runloom_iouring_ring_t* this op was
+                              * submitted to, or NULL for the global ring; lets
+                              * runloom_iouring_cancel_g submit the ASYNC_CANCEL
+                              * to the SAME ring the op lives in. */
 } runloom_iouring_op_t;
 
 /* Forward-declare for the drain handler. */
@@ -100,6 +131,7 @@ typedef struct {
     unsigned *sq_head;     unsigned *sq_tail;
     unsigned  sq_mask;     unsigned  sq_entries;
     unsigned *sq_array;
+    unsigned *sq_flags;    /* SQ ring flags word -- IORING_SQ_CQ_OVERFLOW */
     struct io_uring_sqe *sqes;
     size_t sqe_mmap_size;
     void  *sqe_mmap;
@@ -249,6 +281,7 @@ static int runloom_iouring_lazy_init(void)
     runloom_iouring_state.sq_mask    = *(unsigned *)((char *)sq_map + p.sq_off.ring_mask);
     runloom_iouring_state.sq_entries = *(unsigned *)((char *)sq_map + p.sq_off.ring_entries);
     runloom_iouring_state.sq_array   = (unsigned *)((char *)sq_map + p.sq_off.array);
+    runloom_iouring_state.sq_flags   = (unsigned *)((char *)sq_map + p.sq_off.flags);
     runloom_iouring_state.sqes       = (struct io_uring_sqe *)sqe_map;
 
     runloom_iouring_state.cq_head    = (unsigned *)((char *)cq_map + p.cq_off.head);

@@ -100,15 +100,17 @@ static void runloom_mn_hub_submit(runloom_hub_t *h, runloom_g_t *g)
             return;
         }
     }
-    runloom_mutex_lock(&h->sub_lock);
+    RUNLOOM_RLOCK(&h->sub_lock, RUNLOOM_RANK_HUB_SUB);
     g->next = NULL;
     if (h->sub_tail != NULL) {
         h->sub_tail->next = g;
     } else {
-        h->sub_head = g;
+        /* RELEASE: publishes g to the lock-free deadlock census's ACQUIRE read of
+         * sub_head (mn_has_wakeable_work) -- tools/README Finding D #4. */
+        __atomic_store_n(&h->sub_head, g, __ATOMIC_RELEASE);
     }
     h->sub_tail = g;
-    runloom_mutex_unlock(&h->sub_lock);
+    RUNLOOM_RUNLOCK(&h->sub_lock, RUNLOOM_RANK_HUB_SUB);
     RUNLOOM_EVT(RUNLOOM_EVT_G_SUBMIT, g, h, 0);
     runloom_g_state_set(g, RUNLOOM_GST_SUBMITTED);
     /* BUG #10 throughput: bump the submit generation, then signal the target hub
@@ -121,10 +123,24 @@ static void runloom_mn_hub_submit(runloom_hub_t *h, runloom_g_t *g)
      * (rare) missed signal just falls back to the idle_ns poll, never a hang. */
     __atomic_add_fetch(&h->sub_gen, 1, __ATOMIC_RELEASE);
     if (__atomic_load_n(&h->idle_waiting, __ATOMIC_ACQUIRE)) {
-        runloom_mutex_lock(&h->idle_lock);
+        RUNLOOM_RLOCK(&h->idle_lock, RUNLOOM_RANK_HUB_IDLE);
         runloom_cond_signal(&h->idle_cond);
-        runloom_mutex_unlock(&h->idle_lock);
+        RUNLOOM_RUNLOCK(&h->idle_lock, RUNLOOM_RANK_HUB_IDLE);
     }
+    /* Cross-hub wake latency fix: the idle_cond signal above ONLY reaches a hub
+     * parked in the parked==0 idle-condvar branch.  But `parked` is the GLOBAL
+     * netpoll-parked count, so whenever ANY fiber anywhere is parked on I/O
+     * (a server, file I/O, a timer, even the harness progress loop), every idle
+     * hub instead blocks in netpoll_pump -> epoll_wait(idle_ns) and the cond
+     * signal hits nobody.  The submitted g then waits up to the full pump
+     * timeout (~1ms) before the hub loops back to drain sub_head -- which pins
+     * cross-hub lock/channel handoff throughput to ~700/s (big_100 p87/p43/p47).
+     * Kick the shared pump-wake eventfd (registered in the epoll set) so a
+     * pumping hub returns from epoll_wait NOW; it drains the eventfd and re-loops
+     * to pick up sub_head/global-runq work.  Level-triggered + non-exclusive, so
+     * every blocked hub wakes (the target among them drains sub_head; the rest
+     * find nothing and re-pump).  No-op if the eventfd isn't armed. */
+    runloom_netpoll_wake_pump();
 }
 
 void runloom_mn_wake_g(void *hub_opaque, runloom_g_t *g)
@@ -174,6 +190,11 @@ void runloom_mn_wake_g(void *hub_opaque, runloom_g_t *g)
                                                 __ATOMIC_ACQUIRE)) {
                     runloom_g_incref(g);   /* queue ref, dropped when consumed */
                     runloom_mn_global_runq_push(g);
+                    /* Same cross-hub wake-latency fix as hub_submit: any hub can
+                     * drain the global runq, but an idle one is blocked in
+                     * epoll_wait -- kick the pump so it wakes now (no-op if not
+                     * armed; the pump drains the eventfd and re-loops). */
+                    runloom_netpoll_wake_pump();
                     return;
                 }
                 /* lost: st reloaded to the current state; re-evaluate */
@@ -197,6 +218,23 @@ void runloom_mn_wake_g(void *hub_opaque, runloom_g_t *g)
         }
     }
     runloom_mn_hub_submit((runloom_hub_t *)hub_opaque, g);
+}
+
+int runloom_mn_hub_request_iouring_cancel(void *hub_opaque, void *op)
+{
+    runloom_hub_t *h = (runloom_hub_t *)hub_opaque;
+    void *expected = NULL;
+    if (h == NULL || op == NULL) return 0;
+    if (!__atomic_compare_exchange_n(&h->iouring_cancel_op, &expected, op, 0,
+                                     __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+        return 0;   /* a cancel is already pending for this hub (best-effort) */
+    /* Wake the hub if idle-parked so it drains the mailbox promptly. */
+    if (__atomic_load_n(&h->idle_waiting, __ATOMIC_ACQUIRE)) {
+        RUNLOOM_RLOCK(&h->idle_lock, RUNLOOM_RANK_HUB_IDLE);
+        runloom_cond_signal(&h->idle_cond);
+        RUNLOOM_RUNLOCK(&h->idle_lock, RUNLOOM_RANK_HUB_IDLE);
+    }
+    return 1;
 }
 
 /* Idle-stack-sweep handshake (RUNLOOM_PER_G_TSTATE).  An idle hub about to

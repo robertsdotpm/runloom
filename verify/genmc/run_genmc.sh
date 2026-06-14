@@ -58,6 +58,54 @@ else
     fi
 fi
 
+# --- blocking-offload job lifetime (runloom_blockpool.c) ----------------------
+# The offload job lives on the PARKED FIBER's coroutine stack (freed when the
+# fiber returns), yet a worker OS thread touches it -- and a spurious wake
+# (task.cancel -> G.wake) can resume + free it while the worker still runs.  The
+# `done` release/acquire handshake (worker snapshots its wake target BEFORE done
+# and touches nothing after; fiber waits for done before freeing) closes the UAF.
+printf '  [genmc] %-30s ' "blockpool_job.c"
+if "$G" -- "$HERE/blockpool_job.c" >"$HERE/.genmc.pos.log" 2>&1 \
+        && grep -q "No errors were detected" "$HERE/.genmc.pos.log"; then
+    n="$(sed -n 's/.*complete executions explored: \([0-9]*\).*/\1/p' "$HERE/.genmc.pos.log" | tail -1)"
+    green "PASS"; echo " -- no use-after-free of the stack job / result-seen (${n:-?} RC11 execs)"; pass=$((pass+1))
+else
+    red "FAIL"; echo " -- see $HERE/.genmc.pos.log"; fail=$((fail+1))
+fi
+
+for bug in BUG_FIBER_NO_DONE_WAIT BUG_WORKER_LATE_READ; do
+    printf '  [genmc] %-30s ' "blockpool_job.c(-D$bug)"
+    if "$G" -- "-D$bug" "$HERE/blockpool_job.c" >"$HERE/.genmc.neg.log" 2>&1; then
+        red "FAIL"; echo " (expected a UAF) -- see $HERE/.genmc.neg.log"; fail=$((fail+1))
+    elif grep -qiE "violation|error|assert" "$HERE/.genmc.neg.log"; then
+        green "PASS"; echo " -- correctly DETECTS the stack-job use-after-free"; pass=$((pass+1))
+    else
+        red "FAIL"; echo " (errored but no UAF reported) -- see $HERE/.genmc.neg.log"; fail=$((fail+1))
+    fi
+done
+
+# --- channel refcount free protocol (chan_waiters.c.inc) ----------------------
+# Two hubs hold a ref to a shared channel.  incref is RELAXED (held across); decref
+# is ACQ_REL so the decrement-to-0 orders the runloom_mutex_destroy + PyMem_Free
+# after every holder's last use -- no use-after-free, freed once.
+printf '  [genmc] %-30s ' "chan_refcount.c"
+if "$G" -- "$HERE/chan_refcount.c" >"$HERE/.genmc.pos.log" 2>&1 \
+        && grep -q "No errors were detected" "$HERE/.genmc.pos.log"; then
+    n="$(sed -n 's/.*complete executions explored: \([0-9]*\).*/\1/p' "$HERE/.genmc.pos.log" | tail -1)"
+    green "PASS"; echo " -- channel freed once, no use-after-free under RC11 (${n:-?} execs)"; pass=$((pass+1))
+else
+    red "FAIL"; echo " -- see $HERE/.genmc.pos.log"; fail=$((fail+1))
+fi
+
+printf '  [genmc] %-30s ' "chan_refcount.c(-DBUG_DECREF_RELAXED)"
+if "$G" -- -DBUG_DECREF_RELAXED "$HERE/chan_refcount.c" >"$HERE/.genmc.neg.log" 2>&1; then
+    red "FAIL"; echo " (expected a UAF race) -- see $HERE/.genmc.neg.log"; fail=$((fail+1))
+elif grep -qiE "race|error|violation" "$HERE/.genmc.neg.log"; then
+    green "PASS"; echo " -- correctly DETECTS the free vs field-access data race (relaxed decref)"; pass=$((pass+1))
+else
+    red "FAIL"; echo " (errored but no race reported) -- see $HERE/.genmc.neg.log"; fail=$((fail+1))
+fi
+
 # --- park_safe/wake_safe cross-thread handshake (runloom_sched*) ---------------
 # Drift-guard: the harness's correct default assumes the source has the two
 # StoreLoad seq_cst fences (added after GenMC found a lost wakeup in the
@@ -112,6 +160,43 @@ for ctl in BUG_NO_SC_FENCE BUG_NO_RECHECK BUG_NO_BUMP; do
     fi
 done
 
+# --- SEAM: the two park/wake protocols composed on one migratable fiber -------
+# The Dekker handshake (sched_parkwake.c) and the wake_state machine
+# (iouring/global-runq) are each proven in isolation; this checks their
+# COMPOSITION -- a park that commits via Dekker then the wake_state CAS, racing
+# wake_g -- holds no-lost-wake + enqueued-at-most-once under RC11.  Gate this
+# BEFORE promoting RUNLOOM_STEAL_WOKEN / RUNLOOM_PER_G_TSTATE toward default.
+printf '  [genmc] %-30s ' "sched_parkwake_seam.c"
+if "$G" -- "$HERE/sched_parkwake_seam.c" >"$HERE/.genmc.pos.log" 2>&1 \
+        && grep -q "No errors were detected" "$HERE/.genmc.pos.log"; then
+    green "PASS"; echo " -- Dekker+wake_state seam: no lost / at-most-once under RC11"; pass=$((pass+1))
+else
+    red "FAIL"; echo " -- see $HERE/.genmc.pos.log"; fail=$((fail+1))
+fi
+printf '  [genmc] %-30s ' "sched_parkwake_seam.c(-DBUG_NO_RUNNING_WOKEN_REQUEUE)"
+if "$G" -- "-DBUG_NO_RUNNING_WOKEN_REQUEUE" "$HERE/sched_parkwake_seam.c" >"$HERE/.genmc.neg.log" 2>&1; then
+    red "FAIL"; echo " (expected a lost wake) -- see $HERE/.genmc.neg.log"; fail=$((fail+1))
+else
+    if grep -qiE "violation|error" "$HERE/.genmc.neg.log"; then
+        green "PASS"; echo " -- correctly DETECTS the lost wakeup (blind PARKED store)"; pass=$((pass+1))
+    else
+        red "FAIL"; echo " (errored but no violation) -- see $HERE/.genmc.neg.log"; fail=$((fail+1))
+    fi
+fi
+# Informational probe (not a gate): -DSEAM_MIX_DEKKER asks whether waking ONE
+# migratable fiber via BOTH routes (wake_safe + wake_g) can double-enqueue.  If
+# it reports a violation, the constraint "migratable fibers are woken via wake_g
+# ONLY" is load-bearing -- keep it enforced in the wake routing.
+if [ "${RUNLOOM_GENMC_SEAM_MIX:-}" = "1" ]; then
+    printf '  [genmc] %-30s ' "sched_parkwake_seam.c(-DSEAM_MIX_DEKKER,info)"
+    if "$G" -- "-DSEAM_MIX_DEKKER" "$HERE/sched_parkwake_seam.c" >"$HERE/.genmc.mix.log" 2>&1 \
+            && grep -q "No errors were detected" "$HERE/.genmc.mix.log"; then
+        echo "mixing both wake routes is safe"
+    else
+        echo "mixing both wake routes DOUBLE-ENQUEUES -> keep wake_g-only invariant (see .genmc.mix.log)"
+    fi
+fi
+
 # --- io_uring SINGLE-op park/wake commit handshake (io_uring.c op->wait) -----
 # Drift-guard: the harness mirrors the RELEASE result-store + ACQ_REL exchange /
 # CAS on op->wait.  If io_uring.c drops the handshake or weakens those orders,
@@ -151,7 +236,48 @@ for ctl in BUG_PARK_PLAIN_STORE BUG_EXCHANGE_RELAXED BUG_WOKE_RELAXED BUG_LOAD_R
     fi
 done
 
-rm -f "$HERE/.genmc.pos.log" "$HERE/.genmc.neg.log" 2>/dev/null
+# --- LIFECYCLE migration-drain trio: the per-g-tstate hub->hub MIGRATION drain ---
+# The weak-memory fidelity layer the RunloomTstateMigration.tla PLACEMENT proof
+# defers to (LIFECYCLE_INVARIANTS.md "deep CPython surfaces").  Three orthogonal
+# drains a correct mimalloc-heap migration must run, each proven as the data race
+# the drain prevents under RC11:
+#   mimalloc_page_free.c -- WHO may touch a page (per-page xthread_id abandon/adopt)
+#   qsbr_drain.c         -- WHEN a deferred free may run (QSBR grace period)
+#   brc_merge.c          -- WHO may merge a refcount (biased-refcount owner drain)
+# Each is gated off in the shipping runtime (RUNLOOM_ALLOW_UNSAFE_MIGRATION); these
+# are the SPEC a candidate abandon/adopt handshake must satisfy before it is trusted.
+genmc_model() {                 # name  correct-grep  "BUG1 BUG2 ..."  blurb
+    local f="$1" posgrep="$2" bugs="$3" blurb="$4"
+    printf '  [genmc] %-30s ' "$f"
+    if "$G" -- "$HERE/$f" >"$HERE/.genmc.pos.log" 2>&1 \
+            && grep -q "$posgrep" "$HERE/.genmc.pos.log"; then
+        n="$(sed -n 's/.*complete executions explored: \([0-9]*\).*/\1/p' "$HERE/.genmc.pos.log" | tail -1)"
+        green "PASS"; echo " -- $blurb (${n:-?} RC11 execs)"; pass=$((pass+1))
+    else
+        red "FAIL"; echo " -- see $HERE/.genmc.pos.log"; fail=$((fail+1))
+    fi
+    for bug in $bugs; do
+        printf '  [genmc] %-30s ' "$f(-D$bug)"
+        if "$G" -- "-D$bug" "$HERE/$f" >"$HERE/.genmc.neg.log" 2>&1; then
+            red "FAIL"; echo " (expected a race/violation) -- see $HERE/.genmc.neg.log"; fail=$((fail+1))
+        elif grep -qiE "race|error|violation|assert" "$HERE/.genmc.neg.log"; then
+            green "PASS"; echo " -- correctly DETECTS the undrained-migration hazard"; pass=$((pass+1))
+        else
+            red "FAIL"; echo " (errored but no race/violation) -- see $HERE/.genmc.neg.log"; fail=$((fail+1))
+        fi
+    done
+}
+genmc_model mimalloc_page_free.c "No errors were detected" \
+    "BUG_LOCAL_ON_STALE BUG_ADOPT_RELAXED" \
+    "per-page xthread_id abandon/adopt orders the owner-only heap-queue path -- no race"
+genmc_model qsbr_drain.c "No errors were detected" \
+    "BUG_NO_GRACE BUG_POLL_RELAXED" \
+    "QSBR grace poll orders the deferred free after every reader's quiescent state"
+genmc_model brc_merge.c "No errors were detected" \
+    "BUG_MERGE_AFTER_MIGRATE" \
+    "biased-refcount merge drained on the owner thread -- no cross-thread ob_ref_local race"
+
+rm -f "$HERE/.genmc.pos.log" "$HERE/.genmc.neg.log" "$HERE/.genmc.mix.log" 2>/dev/null
 echo "  $pass passed, $fail failed"
 
 # Chase-Lev work-stealing deque oracle -- its own harness (single-element

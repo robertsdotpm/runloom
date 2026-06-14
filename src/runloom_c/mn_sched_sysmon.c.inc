@@ -41,13 +41,16 @@ static RUNLOOM_THREAD_RET runloom_sysmon_main(void *arg)
         free(w_seq); free(w_start); free(d_streak);
         RUNLOOM_THREAD_RETURN(NULL);
     }
+    long idle_streak = 0;   /* consecutive ticks with NO hub resuming a fiber */
     while (!__atomic_load_n(&runloom_sysmon_stop, __ATOMIC_ACQUIRE)) {
         long long now = runloom_monotonic_ns();
         int i;
+        int any_busy = 0;   /* a hub is mid-resume this tick -> a wedge can form */
         for (i = 0; i < n; i++) {
             runloom_hub_t *h = &runloom_hubs[i];
             long long start = __atomic_load_n(&h->resume_start_ns,
                                               __ATOMIC_RELAXED);
+            if (start != 0) any_busy = 1;
             long seq = __atomic_load_n(&h->resume_seq, __ATOMIC_RELAXED);
             /* Acquire load: the hub publishes its tstate on its own thread; a
              * racy/NULL read here is fine -- attach-state -1 classifies as "?"
@@ -130,7 +133,7 @@ static RUNLOOM_THREAD_RET runloom_sysmon_main(void *arg)
              * periodic time-slicing.  Independent of the handoff above (that is
              * DETACHED-only). */
             if (runloom_preempt_enabled && start != 0 &&
-                (now - start) > runloom_sysmon_wedge_ns &&
+                (now - start) > runloom_sysmon_preempt_ns &&
                 tss == RUNLOOM_TS_ATTACHED) {
                 __atomic_store_n(&h->preempt_requested, 1, __ATOMIC_RELAXED);
                 /* Single-frame liveness backstop: the eval-frame flag above only
@@ -159,6 +162,20 @@ static RUNLOOM_THREAD_RET runloom_sysmon_main(void *arg)
         /* Piggyback the depot auto-cap recompute on the watchdog tick: decay the
          * live-stack watermark, resize the pool cap.  Cheap, off the hot path. */
         runloom_stack_autocap_tick();
+        /* Adaptive tick (Go's sysmon deep-sleep when idle): no hub is resuming
+         * a fiber, so no wedge can form -- back off the scan to cut idle wakeups.
+         * Reset to the base tick the instant a hub goes busy.  The backoff is
+         * capped well under the wedge budget so a fresh wedge after the system
+         * wakes is still caught within ~wedge_ns. */
+        if (any_busy) {
+            idle_streak = 0;
+            runloom_sysmon_tick_ns = runloom_sysmon_tick_base_ns;
+        } else if (idle_streak < 1024) {
+            long long cap = runloom_sysmon_wedge_ns / 2;
+            idle_streak++;
+            runloom_sysmon_tick_ns = runloom_sysmon_tick_base_ns << (idle_streak < 3 ? (int)idle_streak : 3);
+            if (cap > 0 && runloom_sysmon_tick_ns > cap) runloom_sysmon_tick_ns = cap;
+        }
         runloom_sleep_ns(runloom_sysmon_tick_ns);
     }
     free(w_seq);
@@ -247,11 +264,22 @@ static void runloom_sysmon_config(void)
         long long v = atoll(ms);
         if (v > 0) runloom_sysmon_wedge_ns = v * 1000000LL;
     }
+    /* ATTACHED-preempt threshold: defaults to the wedge budget; RUNLOOM_PREEMPT_MS
+     * tunes the CPU time-slice independently of the blocking-call rescue. */
+    runloom_sysmon_preempt_ns = runloom_sysmon_wedge_ns;
+    {
+        const char *pm = getenv("RUNLOOM_PREEMPT_MS");
+        if (pm != NULL) {
+            long long v = atoll(pm);
+            if (v > 0) runloom_sysmon_preempt_ns = v * 1000000LL;
+        }
+    }
     /* Scan ~5x faster than the wedge budget (cap 10 ms) so detection latency
      * is a small fraction of the threshold without busy-spinning. */
     runloom_sysmon_tick_ns = runloom_sysmon_wedge_ns / 5;
     if (runloom_sysmon_tick_ns > 10000000LL) runloom_sysmon_tick_ns = 10000000LL;
     if (runloom_sysmon_tick_ns < 1000000LL)  runloom_sysmon_tick_ns = 1000000LL;
+    runloom_sysmon_tick_base_ns = runloom_sysmon_tick_ns;
 }
 
 /* Spawn the watchdog thread (after hubs exist).  Enabled-gated; a spawn

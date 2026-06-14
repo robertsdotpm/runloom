@@ -146,9 +146,9 @@ static RUNLOOM_THREAD_RET runloom_handoff_main(void *arg)
 
     /* Create OWN tstate ON THIS THREAD so biased-refcount ob_tid binds to this
      * OS thread's TID -- same serialised construction hub threads use. */
-    runloom_mutex_lock(&runloom_hub_tstate_lock);
+    RUNLOOM_RLOCK(&runloom_hub_tstate_lock, RUNLOOM_RANK_HUB_TSTATE);
     rescue_ts = PyThreadState_New(runloom_mn_interp);
-    runloom_mutex_unlock(&runloom_hub_tstate_lock);
+    RUNLOOM_RUNLOCK(&runloom_hub_tstate_lock, RUNLOOM_RANK_HUB_TSTATE);
     if (rescue_ts == NULL) {
         runloom_coro_thread_fini();
         RUNLOOM_THREAD_RETURN(NULL);
@@ -156,7 +156,8 @@ static RUNLOOM_THREAD_RET runloom_handoff_main(void *arg)
     /* Publish tstate for stop_join to delete -- see runloom_rescue_tstates comment.
      * RELEASE: pairs with stop_join's post-join read (which gets a happens-before
      * via the pthread_join). */
-    __atomic_store_n(&runloom_rescue_tstates[my_idx], rescue_ts, __ATOMIC_RELEASE);
+    __atomic_store_n((void **)&runloom_rescue_tstates[my_idx], (void *)rescue_ts,
+                     __ATOMIC_RELEASE);
 
     /* Keep tstate DETACHED while idle; attach only during an active rescue
      * (PyEval_RestoreThread is called per fiber in runloom_handoff_rescue). */
@@ -284,16 +285,17 @@ static void runloom_handoff_delete_tstates(void)
 {
     int k;
     if (runloom_rescue_tstates != NULL) {
-        runloom_mutex_lock(&runloom_hub_tstate_lock);
+        RUNLOOM_RLOCK(&runloom_hub_tstate_lock, RUNLOOM_RANK_HUB_TSTATE);
         for (k = 0; k < runloom_handoff_running; k++) {
-            PyThreadState *rts = __atomic_load_n(&runloom_rescue_tstates[k],
-                                                  __ATOMIC_ACQUIRE);
+            PyThreadState *rts = (PyThreadState *)__atomic_load_n(
+                                      (void **)&runloom_rescue_tstates[k],
+                                      __ATOMIC_ACQUIRE);
             if (rts != NULL) {
                 PyThreadState_Clear(rts);
                 PyThreadState_Delete(rts);
             }
         }
-        runloom_mutex_unlock(&runloom_hub_tstate_lock);
+        RUNLOOM_RUNLOCK(&runloom_hub_tstate_lock, RUNLOOM_RANK_HUB_TSTATE);
         free(runloom_rescue_tstates);
         runloom_rescue_tstates = NULL;
     }

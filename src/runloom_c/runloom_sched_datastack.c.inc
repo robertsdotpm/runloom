@@ -252,8 +252,10 @@ static int runloom_ready_grow(runloom_sched_t *s)
     s->ready_ring = new_ring;
     s->ready_cap = new_cap;
     s->ready_mask = new_cap - 1;
-    s->ready_head = 0;
-    s->ready_tail = tail - head;
+    /* relaxed-atomic: the cross-thread deadlock census (ready_empty) may read
+     * these while grow runs on the owner -- see runloom_sched_ready_empty. */
+    __atomic_store_n(&s->ready_head, (size_t)0, __ATOMIC_RELAXED);
+    __atomic_store_n(&s->ready_tail, tail - head, __ATOMIC_RELAXED);
     return 0;
 }
 
@@ -264,7 +266,10 @@ void runloom_sched_ready_push(runloom_sched_t *s, runloom_g_t *g)
                                                  * caller checks PyErr */
     }
     s->ready_ring[s->ready_tail & s->ready_mask] = g;
-    s->ready_tail++;
+    /* relaxed-atomic store: races the cross-thread deadlock census's read of
+     * ready_tail (ready_empty); single-writer, so a plain owner read on the RHS
+     * is fine.  Zero-cost on x86. */
+    __atomic_store_n(&s->ready_tail, s->ready_tail + 1, __ATOMIC_RELAXED);
 }
 
 /* ====================================================================
@@ -400,7 +405,9 @@ runloom_g_t *runloom_sched_ready_pop(runloom_sched_t *s)
     if (__builtin_expect(runloom_pct.enabled, 0))
         return runloom_pct_pick(s);
     g = s->ready_ring[s->ready_head & s->ready_mask];
-    s->ready_head++;
+    /* relaxed-atomic store: races the cross-thread deadlock census's read of
+     * ready_head (ready_empty); single-writer.  Zero-cost on x86. */
+    __atomic_store_n(&s->ready_head, s->ready_head + 1, __ATOMIC_RELAXED);
     /* Note: we deliberately do NOT clear g->next here -- the linked-
      * list `next` field is now repurposed by the g_slab as the free-
      * list link and by the M:N submission list.  Whichever consumer
@@ -444,7 +451,9 @@ static int runloom_sleep_push(runloom_sched_t *s, runloom_g_t *g)
     if (s->sleep_size + 1 > s->sleep_cap) {
         if (runloom_sleep_grow(s) < 0) return -1;
     }
-    s->sleep_size++;
+    /* relaxed-atomic: the deadlock census (mn_has_wakeable_work) reads sleep_size
+     * cross-thread; single-writer (the owning hub).  See runloom_sched_ready_empty. */
+    __atomic_store_n(&s->sleep_size, s->sleep_size + 1, __ATOMIC_RELAXED);
     i = s->sleep_size;
     /* Assign the FIFO tiebreak sequence at push time. */
     g->sleep_seq = s->sleep_seq_ctr++;
@@ -472,7 +481,7 @@ runloom_g_t *runloom_sched_sleep_pop(runloom_sched_t *s)
     if (s->sleep_size == 0) return NULL;
     top = s->sleep_heap[1];
     last = s->sleep_heap[s->sleep_size];
-    s->sleep_size--;
+    __atomic_store_n(&s->sleep_size, s->sleep_size - 1, __ATOMIC_RELAXED);  /* census reads x-thread */
     if (s->sleep_size == 0) return top;
     i = 1;
     while (1) {
@@ -520,9 +529,18 @@ static int runloom_timer_push(runloom_sched_t *s, double deadline, runloom_g_t *
     if (s->timer_size + 1 > s->timer_cap) {
         if (runloom_timer_grow(s) < 0) return -1;
     }
+    /* The timer entry holds a REFERENCE to g.  Without it, a g woken early (by a
+     * real wake, not the timeout) can complete and be FREED (coros beyond the
+     * pool cap are munmap'd) while its stale entry lingers on the heap until its
+     * deadline; runloom_sched_drain_timers then CASes e.g->parked_safe on freed
+     * memory -> use-after-free SEGV (flaky, fired by p49_barrier_stress @ 1M with
+     * its timeout=10 barrier waits; the -fanalyzer "uninitialized e.g" warning
+     * pointed here).  Balanced by a decref at every pop in drain_timers and a
+     * runloom_sched_release_timers() sweep at teardown. */
+    runloom_g_incref(g);
     e.deadline = deadline;
     e.g = g;
-    s->timer_size++;
+    __atomic_store_n(&s->timer_size, s->timer_size + 1, __ATOMIC_RELAXED);  /* census reads x-thread */
     i = s->timer_size;
     while (i > 1 && s->timer_heap[i / 2].deadline > deadline) {  /* sift up */
         s->timer_heap[i] = s->timer_heap[i / 2];
@@ -547,7 +565,7 @@ static int runloom_timer_pop(runloom_sched_t *s, runloom_timer_entry_t *out)
     if (s->timer_size == 0) return 0;
     *out = s->timer_heap[1];
     last = s->timer_heap[s->timer_size];
-    s->timer_size--;
+    __atomic_store_n(&s->timer_size, s->timer_size - 1, __ATOMIC_RELAXED);  /* census reads x-thread */
     if (s->timer_size == 0) return 1;
     i = 1;
     while (1) {                                                 /* sift down */

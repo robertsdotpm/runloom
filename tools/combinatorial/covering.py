@@ -139,6 +139,13 @@ def run_config(values, iters, factors):
     env = dict(os.environ)
     env["PYTHON_GIL"] = "0"
     env["PYTHONPATH"] = os.path.join(ROOT, "src")
+    # The migratable modes (RUNLOOM_PER_G_TSTATE / RUNLOOM_STEAL_WOKEN) are gated
+    # OFF at runtime behind RUNLOOM_ALLOW_UNSAFE_MIGRATION (a known mimalloc-
+    # migration crash; see docs/dev/STEAL_WOKEN_CLEANUP.md).  This fuzzer is
+    # exactly the "developing / fuzzing this" caller, so it sets the ack -- else
+    # its experimental configs would silently fall back to the default scheduler
+    # and the covering array would test nothing new.
+    env["RUNLOOM_ALLOW_UNSAFE_MIGRATION"] = "1"
     for (name, _), v in zip(factors, values):
         env[name] = v
     cmd = [sys.executable, os.path.join(ROOT, "tools", "mn_stress.py"),

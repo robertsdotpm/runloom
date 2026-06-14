@@ -45,9 +45,25 @@ int runloom_mn_init(int n_threads)
     main_ts = PyThreadState_Get();
     interp = main_ts->interp;
     /* Per-g-tstate mode: capture the interp for PyThreadState_New and stand
-     * the snap down BEFORE any hub thread starts running fibers. */
+     * the snap down BEFORE any hub thread starts running fibers.
+     *
+     * RUNLOOM_STEAL_WOKEN REDIRECTS here: its original snap-migration mechanism
+     * is structurally unsound (a suspended fiber's eval frames bake in the origin
+     * hub's tstate pointer, which the snap cannot re-root, so a migrated fiber
+     * drives the origin hub's tstate from a foreign OS thread -- TSan-proven data
+     * race -> SEGV; see docs/dev/STEAL_WOKEN_CLEANUP.md).  Per-g-tstate delivers
+     * the SAME goal (any idle hub may resume a wedged hub's woken fiber, closing
+     * the wedged-hub strand) CORRECTLY -- each fiber owns a migratable tstate that
+     * is valid on any hub.  So RUNLOOM_STEAL_WOKEN now enables per-g-tstate and the
+     * broken snap-migration branch in hub_main is never taken (dead for both
+     * flags; removable in a follow-up). */
     runloom_mn_interp = interp;
-    runloom_set_per_g_tstate_mode(runloom_per_g_tstate_flag());
+    /* Through the safety interlock (runloom_resolve_migratable_mode): a migratable
+     * flag activates per-g-tstate ONLY with RUNLOOM_ALLOW_UNSAFE_MIGRATION=1; else
+     * it warns + stays off (default scheduler).  Gating here also keeps a flagged-
+     * but-gated RUNLOOM_STEAL_WOKEN out of the unsound snap branch -- see
+     * runloom_use_global_runq. */
+    runloom_set_per_g_tstate_mode(runloom_resolve_migratable_mode());
     /* Configure the sysmon watchdog (enable + threshold) BEFORE the hubs
      * spawn so the per-resume progress instrumentation is live immediately. */
     runloom_sysmon_config();
@@ -73,7 +89,8 @@ int runloom_mn_init(int n_threads)
         runloom_sched_init(&h->sched);
         runloom_cldeque_init(&h->deque);
         runloom_mutex_init(&h->sub_lock);
-        h->sub_head = h->sub_tail = NULL;
+        h->sub_tail = NULL;
+        __atomic_store_n(&h->sub_head, (runloom_g_t *)NULL, __ATOMIC_RELAXED);
         /* BUG #10 per-hub idle wake (see mn_sched.c sub_gen). */
         h->sub_gen = 0;
         runloom_mutex_init(&h->idle_lock);
@@ -178,7 +195,8 @@ static void runloom_mn_hub_drain_leftovers(runloom_hub_t *h)
     runloom_g_t *sub;
     runloom_g_t *g;
     sub = h->sub_head;
-    h->sub_head = h->sub_tail = NULL;
+    h->sub_tail = NULL;
+    __atomic_store_n(&h->sub_head, (runloom_g_t *)NULL, __ATOMIC_RELAXED);  /* census x-thread read */
     while (sub != NULL) {
         runloom_g_t *next = sub->next;
         sub->next = NULL;
@@ -299,6 +317,14 @@ void runloom_mn_fini(void)
         runloom_mutex_destroy(&runloom_hubs[i].sub_lock);
         runloom_mutex_destroy(&runloom_hubs[i].idle_lock);
         runloom_cond_destroy(&runloom_hubs[i].idle_cond);
+        /* Release the g-refs held by this hub's still-pending timer entries
+         * (future-deadline timed parks that never fired) so they don't leak,
+         * then free the timer-heap buffer (otherwise leaked -- it was never
+         * freed). */
+        runloom_sched_release_timers(&runloom_hubs[i].sched);
+        PyMem_Free(runloom_hubs[i].sched.timer_heap);
+        runloom_hubs[i].sched.timer_heap = NULL;
+        runloom_hubs[i].sched.timer_cap = 0;
         PyMem_Free(runloom_hubs[i].stage_head);
         runloom_hubs[i].stage_head = NULL;
         PyMem_Free(runloom_hubs[i].stage_tail);
@@ -665,11 +691,12 @@ static int runloom_mn_go_n_bulk(PyObject *callable, long n, size_t stack_size,
         runloom_hub_t *h;
         if (heads[hub] == NULL) continue;
         h = &runloom_hubs[hub];
-        runloom_mutex_lock(&h->sub_lock);
+        RUNLOOM_RLOCK(&h->sub_lock, RUNLOOM_RANK_HUB_SUB);
         if (h->sub_tail != NULL) h->sub_tail->next = heads[hub];
-        else                     h->sub_head = heads[hub];
+        else /* RELEASE: publishes to the census ACQUIRE read (Finding D #4) */
+            __atomic_store_n(&h->sub_head, heads[hub], __ATOMIC_RELEASE);
         h->sub_tail = tails[hub];
-        runloom_mutex_unlock(&h->sub_lock);
+        RUNLOOM_RUNLOCK(&h->sub_lock, RUNLOOM_RANK_HUB_SUB);
         __atomic_add_fetch(&h->pending, counts[hub], __ATOMIC_ACQ_REL);
         /* GLOBAL pending too: mn_run polls runloom_mn_pending_global, not the
          * per-hub fields.  The per-g spawn path does this via runloom_mn_pending_inc;
@@ -679,9 +706,9 @@ static int runloom_mn_go_n_bulk(PyObject *callable, long n, size_t stack_size,
         __atomic_add_fetch(&runloom_mn_pending_global, counts[hub], __ATOMIC_ACQ_REL);
         __atomic_add_fetch(&h->sub_gen, 1, __ATOMIC_RELEASE);
         if (__atomic_load_n(&h->idle_waiting, __ATOMIC_ACQUIRE)) {
-            runloom_mutex_lock(&h->idle_lock);
+            RUNLOOM_RLOCK(&h->idle_lock, RUNLOOM_RANK_HUB_IDLE);
             runloom_cond_signal(&h->idle_cond);
-            runloom_mutex_unlock(&h->idle_lock);
+            RUNLOOM_RUNLOCK(&h->idle_lock, RUNLOOM_RANK_HUB_IDLE);
         }
     }
     return 0;
@@ -707,6 +734,94 @@ int runloom_mn_go_n(PyObject *callable, long n, size_t stack_size, int indexed)
     return 0;
 }
 
+/* ---- M:N deadlock census (Go's checkdead analogue) -------------------------
+ *
+ * runloom_mn_run() polls runloom_mn_pending_global and returns when it reaches
+ * 0 (every fiber finished).  If the count instead stays > 0 while the WHOLE
+ * system is quiescent -- every hub idle, no runnable / stealable work anywhere,
+ * no sleeper or timer due, and nothing in flight on netpoll / blockpool /
+ * io_uring / a foreign park -- then the remaining fibers are blocked on a
+ * channel / lock / await with no event that can ever wake them.  That is Go's
+ * "all goroutines are asleep - deadlock!".  Without this census mn_run would
+ * spin the 1 ms poll forever: a silent hang with no diagnostic.  This is the
+ * M:N analogue of the single-thread detector at drain exit (which self-disables
+ * once hubs exist -- runloom_sched_drain.c.inc). */
+
+/* True if any source could still wake a parked fiber.  Reads only process-
+ * global + per-hub atomics (no GIL / tstate), exactly like the sysmon watchdog.
+ * A racy read is fine: the verdict requires this to stay false for many
+ * consecutive polls, and a real wake (microseconds) resets the streak. */
+static int runloom_mn_has_wakeable_work(void)
+{
+    int i;
+    /* Cross-thread / external wake sources: an fd that may become readable, an
+     * executor or io_uring completion, or a foreign (non-fiber) thread parked
+     * on a runloom primitive that another thread will release.  Any of these
+     * can wake a parked fiber -> not a deadlock (Go's checkdead likewise
+     * excludes netpollWaiters and syscall/cgo threads). */
+    if (runloom_netpoll_parked_count()  != 0) return 1;
+    if (runloom_blockpool_inflight()    != 0) return 1;
+    if (runloom_iouring_inflight()      != 0) return 1;
+    if (runloom_foreign_park_inflight() != 0) return 1;
+    if (runloom_use_global_runq() &&
+        __atomic_load_n(&runloom_global_runq_len, __ATOMIC_ACQUIRE) != 0) return 1;
+    for (i = 0; i < runloom_hub_count; i++) {
+        runloom_hub_t *h = &runloom_hubs[i];
+        /* Mid-resume: the hub is running a fiber right now. */
+        if (__atomic_load_n(&h->resume_start_ns, __ATOMIC_RELAXED) != 0) return 1;
+        /* Runnable work queued on this hub: ready ring / steal deque / the
+         * mn_go + wake_g submission list. */
+        if (!runloom_sched_ready_empty(&h->sched))                  return 1;
+        if (runloom_cldeque_size(&h->deque) != 0)                   return 1;
+        /* Lock-free ACQUIRE read of the submission list head, paired with RELEASE
+         * stores at the 6 sub_head WRITE sites (mn_api / hub_main / hub_resume /
+         * init): a publish (store g) is RELEASE so this read sees a non-NULL head
+         * with g's fields visible; a clear (store NULL) is RELAXED.  Closes the
+         * tools/lifefuzz TSan race (hub_main:273); tools/README Finding D #4. */
+        if (__atomic_load_n(&h->sub_head, __ATOMIC_ACQUIRE) != NULL) return 1;
+        /* A sleeper / timer that will fire and wake a fiber.  RELAXED-atomic: the
+         * owning hub writes these non-atomically (sleep_push/pop, timer_push/pop),
+         * so this cross-thread read is the lone plain access otherwise -- match the
+         * atomic siblings above (the ready_head/tail fix in runloom_sched_ready_empty). */
+        if (__atomic_load_n(&h->sched.sleep_size, __ATOMIC_RELAXED) != 0) return 1;
+        if (__atomic_load_n(&h->sched.timer_size, __ATOMIC_RELAXED) != 0) return 1;
+    }
+    return 0;
+}
+
+/* Wake every hub out of its idle timed-wait so it re-polls its submission list
+ * + neighbours.  A recovery nudge for a fiber made runnable whose hub somehow
+ * missed the wakeup (lost-wakeup safety net); harmless when there is nothing to
+ * find (the hub re-checks, finds no work, and re-parks). */
+static void runloom_mn_kick_all_hubs(void)
+{
+    int i;
+    for (i = 0; i < runloom_hub_count; i++) {
+        runloom_hub_t *h = &runloom_hubs[i];
+        RUNLOOM_RLOCK(&h->idle_lock, RUNLOOM_RANK_HUB_IDLE);
+        runloom_cond_signal(&h->idle_cond);
+        RUNLOOM_RUNLOCK(&h->idle_lock, RUNLOOM_RANK_HUB_IDLE);
+    }
+}
+
+/* RUNLOOM_DEADLOCK_MS: consecutive-quiescent-millisecond budget mn_run requires
+ * before declaring a deadlock (0 disables the census).  Generous default so a
+ * brief all-hubs-idle window -- e.g. while a foreign thread computes a value it
+ * will send into a channel -- does not trip it; a genuine deadlock stays
+ * quiescent forever.  Read once. */
+static long runloom_mn_deadlock_ms(void)
+{
+    static long v = -1;
+    long cur = __atomic_load_n(&v, __ATOMIC_RELAXED);
+    if (cur < 0) {
+        const char *e = getenv("RUNLOOM_DEADLOCK_MS");
+        cur = (e != NULL && *e != '\0') ? atol(e) : 200;
+        if (cur < 0) cur = 0;
+        __atomic_store_n(&v, cur, __ATOMIC_RELAXED);
+    }
+    return cur;
+}
+
 Py_ssize_t runloom_mn_run(void)
 {
     int i;
@@ -719,21 +834,77 @@ Py_ssize_t runloom_mn_run(void)
      * startup gate so their first census is over the complete requester set. */
     runloom_mn_ctrl_arm();
     saved = PyEval_SaveThread();
-    for (;;) {
-        /* Read the GLOBAL pending counter, not the per-hub fields.
-         * The per-hub fields race during work-stealing (source dec
-         * before dest inc); the global counter is only touched on
-         * spawn + completion, so it's monotonic across the lifecycle
-         * of each g and reliably reaches 0 iff all gs are done. */
-        long total = __atomic_load_n(&runloom_mn_pending_global,
-                                     __ATOMIC_ACQUIRE);
-        if (total == 0) break;
-        runloom_sleep_ns(1000000LL);   /* 1 ms poll */
+    {
+        long thresh   = runloom_mn_deadlock_ms();   /* quiescent-ms budget; 0 = off */
+        long quiet    = 0;                          /* consecutive quiescent polls */
+        int  kicked   = 0;                          /* lost-wakeup re-kick fired? */
+        int  reported = 0;                          /* diagnostic already dumped? */
+        int  raise    = 0;                          /* RUNLOOM_DEADLOCK=raise verdict */
+        for (;;) {
+            /* Read the GLOBAL pending counter, not the per-hub fields.
+             * The per-hub fields race during work-stealing (source dec
+             * before dest inc); the global counter is only touched on
+             * spawn + completion, so it's monotonic across the lifecycle
+             * of each g and reliably reaches 0 iff all gs are done. */
+            long total = __atomic_load_n(&runloom_mn_pending_global,
+                                         __ATOMIC_ACQUIRE);
+            if (total == 0) break;
+
+            if (thresh > 0 && runloom_deadlock_mode() != 0 &&
+                !runloom_mn_has_wakeable_work()) {
+                quiet++;
+                /* Partway through the stall, re-kick the idle hubs once: if a
+                 * fiber was made runnable but its hub missed the wakeup, this
+                 * recovers it and the next poll resets the streak. */
+                if (!kicked && quiet == thresh / 4 + 1) {
+                    runloom_mn_kick_all_hubs();
+                    kicked = 1;
+                }
+                if (quiet >= thresh) {
+                    /* Stable quiescence with live fibers and no wake source,
+                     * even after a re-kick: deadlock (or, if none are parked on
+                     * a channel / park_safe, a lost wakeup / accounting leak). */
+                    long ndead = runloom_count_deadlockable_fibers(NULL);
+                    if (!reported) {
+                        if (ndead > 0)
+                            fprintf(stderr,
+                                "\nrunloom: DEADLOCK -- %ld fiber(s) blocked on a "
+                                "channel/lock/await with every hub idle and no I/O, "
+                                "timer, or runnable work left to wake them:\n", ndead);
+                        else
+                            fprintf(stderr,
+                                "\nrunloom: STALL -- %ld live fiber(s) but the M:N "
+                                "scheduler is quiescent with no wake source "
+                                "(possible lost wakeup):\n", total);
+                        fflush(stderr);
+                        runloom_dump_fibers_fd(2);
+                        reported = 1;
+                    }
+                    if (runloom_deadlock_mode() == 2) { raise = 1; break; }
+                    /* warn (default): do NOT abandon the fibers -- keep polling
+                     * so a correct program whose quiescence was a false alarm
+                     * (e.g. a slow foreign feeder) still resumes.  The
+                     * diagnostic has been surfaced; a real deadlock now hangs
+                     * VISIBLY instead of silently. */
+                }
+            } else {
+                quiet = 0; kicked = 0; reported = 0;
+            }
+            runloom_sleep_ns(1000000LL);   /* 1 ms poll */
+        }
+        /* Silence the unused-variable warning that the per-hub loop used
+         * to consume. */
+        (void)i;
+        PyEval_RestoreThread(saved);
+        if (raise) {
+            long ndead = runloom_count_deadlockable_fibers(NULL);
+            PyErr_Format(PyExc_RuntimeError,
+                "runloom: deadlock -- %ld fiber(s) blocked on a channel/lock/await "
+                "with no way to wake (RUNLOOM_DEADLOCK=raise)",
+                ndead > 0 ? ndead : 0);
+            return -1;
+        }
     }
-    /* Silence the unused-variable warning that the per-hub loop used
-     * to consume. */
-    (void)i;
-    PyEval_RestoreThread(saved);
     for (i = 0; i < runloom_hub_count; i++) {
         total_completed += __atomic_load_n(&runloom_hubs[i].sched.completed,
                                            __ATOMIC_ACQUIRE);

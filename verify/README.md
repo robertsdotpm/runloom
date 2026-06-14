@@ -435,6 +435,66 @@ round-trip; GenMC reports a **non-atomic race** on `ready_out` (the read races
 the claimer's publish) -- the same gap §15's `commit_cas_then_publish` isolates,
 here on the real protocol. Run with `genmc/run_genmc.sh` (needs `genmc`).
 
+### 17. netpoll kqueue arm (BSD/macOS) -- `spin/netpoll_kqueue.pml`
+
+The BSD/macOS counterpart of the epoll arming model (#9). The parker-claim
+commit (#8) and the per-fd pending-wake bitmap are the **same C code on every
+backend** -- only the arm differs -- so this model isolates the kqueue arm and
+proves it closes the *same* not-yet-linked window. Source:
+`netpoll_register.c.inc:85-123`.
+
+runloom arms only the requested direction(s) with **`EV_ADD | EV_ONESHOT`,
+re-issued on every park, strictly after linking the parker**. `EV_ADD`
+re-checks readiness *now* (kqueue reports a level-ready fd at add time), so a
+still-ready fd queues a fresh delivery generated after the link -- the kqueue
+analogue of epoll's `EPOLL_CTL_MOD` level re-report. `EV_ONESHOT` delivers once
+then the kernel **auto-deletes the knote**, so the next park must `EV_ADD`
+again (re-*add*), not merely re-enable.
+
+* **No lost wake** -- the g always becomes runnable; the reachability profile
+  is identical to #9 (the bitmap is provably never needed in the positive case).
+
+Two negative controls, each making Spin find the lost wake:
+* `-DBUG_EV_CLEAR` -- the **old scheme** the source documents (register once
+  with `EV_CLEAR`, edge-triggered, and skip the kevent on re-park): a pre-link
+  edge the pump drained never refires. The kqueue form of #9's `EPOLLET` trap.
+* `-DBUG_REENABLE_NOT_READD` -- **kqueue-specific, no epoll analogue**: re-arm
+  via `EV_ENABLE` (modify an existing knote) instead of `EV_ADD`. `EV_ONESHOT`
+  auto-deleted the knote on the prior delivery, so `EV_ENABLE` hits `ENOENT`
+  and silently arms nothing -> the post-link re-check never happens -> lost wake
+  even though the fd is level-ready.
+
+### 18. netpoll IOCP+AFD poll-context lifetime (Windows) -- `spin/netpoll_afd.pml`
+
+Unlike epoll/kqueue (whose hazard is a lost wake from a mis-armed fd), the
+Windows AFD backend's hazard is a **use-after-free / double-free** of the
+per-poll heap context, because real completions and the cross-thread pump-wake
+share **one IOCP queue**. Source: `netpoll_iocp.c` (submit :367-420, wait
+:422-489, wake :509-513).
+
+The context (`runloom_poll_ctx_t`, `OVERLAPPED` first field) is `calloc`'d in
+`submit`. On `STATUS_SUCCESS`/`STATUS_PENDING` the kernel posts **exactly one**
+completion carrying it (we don't pass `FILE_SKIP_COMPLETION_PORT_ON_SUCCESS`),
+and it must live until that completion is consumed; on a hard error no
+completion is queued and `submit` frees it immediately. `wait` distinguishes a
+real completion (`ov != NULL` -> `CONTAINING_RECORD` -> read -> free **exactly
+once**) from a `runloom_iocp_wake()` pump-wake (`ov == NULL`, recognised *before*
+`CONTAINING_RECORD` and freeing nothing).
+
+The model runs one submit + an optional shared-IOCP wake + one pump and proves:
+
+* **No use-after-free** -- a completion is never consumed against a freed ctx.
+* **Freed exactly once** -- no double free, and (end state) no leak.
+* The NULL-overlapped wake is **never** dereferenced/freed as a ctx.
+
+Two negative controls, each producing an assertion violation:
+* `-DBUG_FREE_ON_PENDING` -- `submit` frees the ctx on `STATUS_PENDING` (as if
+  pending were an error) while the kernel still delivers the completion -> `wait`
+  consumes a freed ctx (`uaf`).
+* `-DBUG_WAKE_AS_COMPLETION` -- `wait` omits the `ov == NULL` check, so the
+  pump-wake is `CONTAINING_RECORD`'d and freed as a ctx -> wild free
+  (`wildfree`).
+
 ## Scope & honesty
 
 * Spin models are **sequentially consistent**: they prove the algorithm
@@ -482,6 +542,17 @@ here on the real protocol. Run with `genmc/run_genmc.sh` (needs `genmc`).
   lifetime (the `on_cqe`/`ms_close` free vs a parked `ms_recv`) is now modelled
   by `iouring_msclose.pml` (§11) -- memory-safe under the single-owner
   convention, a use-after-free without it.
+* **Every event backend's arm/lifetime is now modelled, not just epoll's.**
+  The shared parker-claim commit (#8) and pending-wake bitmap are
+  backend-independent C; the per-backend surface is the arm (epoll/kqueue) or
+  the completion-context lifetime (AFD). epoll's `EPOLL_CTL_MOD` re-arm is #9,
+  the kqueue `EV_ADD|EV_ONESHOT` re-add is `netpoll_kqueue.pml` (§17), and the
+  Windows IOCP+AFD poll-context use-after-free surface is `netpoll_afd.pml`
+  (§18). The `select` backend's claim is `select_claim.pml` (§4). This closes
+  the prior gap where only the Linux-default arm had a model -- the macOS- and
+  Windows-default backends now each have one. (These remain SC interleaving
+  models of the *protocol*; faithfulness to the live `kevent`/AFD syscalls is
+  carried by the on-box TSan / netpoll fault-injection runs, not by Spin.)
 
 ## Layout
 
@@ -502,6 +573,8 @@ verify/
     iouring_msclose.pml    io_uring multishot handle lifetime, recv vs close (+ BUG_CONCURRENT_CLOSE)
     netpoll_deadline.pml   netpoll fd-dispatch vs timeout vs cancel claim race (+ BUG_SWEEP_NO_COMMIT, BUG_CANCEL_NO_COMMIT)
     netpoll_forceunlink.pml netpoll force_unlink vs pump, exactly-once release / no UAF (+ BUG_NO_RECHECK)
+    netpoll_kqueue.pml     netpoll kqueue arm (BSD/macOS): EV_ADD|EV_ONESHOT re-add (+ BUG_EV_CLEAR, BUG_REENABLE_NOT_READD)
+    netpoll_afd.pml        netpoll IOCP+AFD poll-ctx lifetime (Windows): free-exactly-once / no UAF (+ BUG_FREE_ON_PENDING, BUG_WAKE_AS_COMPLETION)
     cross_thread_wake.pml  Phase C per-thread-sched owner-routed wake_safe (+ BUG_ROUTE_TO_WAKER)
   cbmc/
     cldeque_cbmc.c         harness over the real cldeque.c

@@ -19,6 +19,7 @@ static runloom_iouring_ssize_t runloom_iouring_do(struct io_uring_sqe sqe)
                               : runloom_sched_get()->current;
     op.result = INT32_MIN;        /* sentinel: not yet completed */
     op.wait   = RUNLOOM_IOURING_WAIT_INFLIGHT;
+    op.ring   = NULL;             /* global ring */
 
     if (runloom_iouring_submit_sqe(sqe, &op) != 0) return -1;
 
@@ -57,8 +58,16 @@ static runloom_iouring_ssize_t runloom_iouring_do(struct io_uring_sqe sqe)
                  * the wake routes it back onto the hub sub-list, and the
                  * in_sub_queue CAS in hub_submit dedups a wake that races
                  * our coro_yield. */
+                /* Publish the op so a cross-thread task.cancel can target it
+                 * with an ASYNC_CANCEL (runloom_iouring_cancel_g).  Set after the
+                 * PARKED CAS so the canceller's wait==PARKED gate is consistent;
+                 * cleared on resume before the op leaves scope. */
+                if (op.g != NULL)
+                    __atomic_store_n(&op.g->iouring_op, &op, __ATOMIC_RELEASE);
                 runloom_sched_park_current();
                 runloom_coro_yield();
+                if (op.g != NULL)
+                    __atomic_store_n(&op.g->iouring_op, NULL, __ATOMIC_RELEASE);
             }
             /* else prev == DONE: a concurrent drainer completed the op
              * between the load and the CAS; op.result is set, fall through. */
@@ -186,14 +195,14 @@ runloom_iouring_ms_t *runloom_iouring_ms_open(int fd)
     h->inflight_bid = -1;
     runloom_mutex_init(&h->lock);
 
-    runloom_mutex_lock(&h->lock);
+    RUNLOOM_RLOCK(&h->lock, RUNLOOM_RANK_HUB);
     if (runloom_iouring_ms_submit(h) != 0) {
-        runloom_mutex_unlock(&h->lock);
+        RUNLOOM_RUNLOCK(&h->lock, RUNLOOM_RANK_HUB);
         runloom_mutex_destroy(&h->lock);
         free(h);
         return NULL;
     }
-    runloom_mutex_unlock(&h->lock);
+    RUNLOOM_RUNLOCK(&h->lock, RUNLOOM_RANK_HUB);
     return h;
 }
 
@@ -211,7 +220,7 @@ static void runloom_iouring_ms_on_cqe(runloom_iouring_ms_t *h,
     void     *wake_hub = NULL;
     int       was_closing;
 
-    runloom_mutex_lock(&h->lock);
+    RUNLOOM_RLOCK(&h->lock, RUNLOOM_RANK_HUB);
 
     if (has_buffer && res > 0) {
         ms_entry_t *e = (ms_entry_t *)malloc(sizeof(*e));
@@ -247,7 +256,7 @@ static void runloom_iouring_ms_on_cqe(runloom_iouring_ms_t *h,
     h->waiter_g = NULL;
 
     was_closing = h->closing;
-    runloom_mutex_unlock(&h->lock);
+    RUNLOOM_RUNLOCK(&h->lock, RUNLOOM_RANK_HUB);
 
     if (wake_g != NULL) {
         if (wake_hub) runloom_mn_wake_g(wake_hub, wake_g);
@@ -281,7 +290,7 @@ runloom_iouring_ssize_t runloom_iouring_ms_recv(runloom_iouring_ms_t *h,
     if (h == NULL) { errno = EINVAL; return -1; }
     if (n == 0)    return 0;
 
-    runloom_mutex_lock(&h->lock);
+    RUNLOOM_RLOCK(&h->lock, RUNLOOM_RANK_HUB);
     for (;;) {
         /* 1. Drain any partially-consumed in-flight buffer first. */
         if (h->inflight_bid >= 0) {
@@ -302,7 +311,7 @@ runloom_iouring_ssize_t runloom_iouring_ms_recv(runloom_iouring_ms_t *h,
                 h->inflight_len = 0;
             }
             if (out_off >= n) {
-                runloom_mutex_unlock(&h->lock);
+                RUNLOOM_RUNLOCK(&h->lock, RUNLOOM_RANK_HUB);
                 return (runloom_iouring_ssize_t)out_off;
             }
             /* User wants more.  Loop to grab another buffer. */
@@ -322,18 +331,18 @@ runloom_iouring_ssize_t runloom_iouring_ms_recv(runloom_iouring_ms_t *h,
 
         /* 3. No data right now.  If we already copied some, return. */
         if (out_off > 0) {
-            runloom_mutex_unlock(&h->lock);
+            RUNLOOM_RUNLOCK(&h->lock, RUNLOOM_RANK_HUB);
             return (runloom_iouring_ssize_t)out_off;
         }
 
         /* 4. EOF / sticky error. */
         if (h->eof) {
-            runloom_mutex_unlock(&h->lock);
+            RUNLOOM_RUNLOCK(&h->lock, RUNLOOM_RANK_HUB);
             return 0;
         }
         if (h->err) {
             int e = h->err;
-            runloom_mutex_unlock(&h->lock);
+            RUNLOOM_RUNLOCK(&h->lock, RUNLOOM_RANK_HUB);
             errno = e;
             return -1;
         }
@@ -342,7 +351,7 @@ runloom_iouring_ssize_t runloom_iouring_ms_recv(runloom_iouring_ms_t *h,
         if (!h->armed) {
             if (runloom_iouring_ms_submit(h) != 0) {
                 int e = errno;
-                runloom_mutex_unlock(&h->lock);
+                RUNLOOM_RUNLOCK(&h->lock, RUNLOOM_RANK_HUB);
                 errno = e;
                 return -1;
             }
@@ -354,7 +363,7 @@ runloom_iouring_ssize_t runloom_iouring_ms_recv(runloom_iouring_ms_t *h,
             h->waiter_hub = hub;
             h->waiter_g   = (hub != NULL) ? runloom_mn_tls_current_g()
                                           : runloom_sched_get()->current;
-            runloom_mutex_unlock(&h->lock);
+            RUNLOOM_RUNLOCK(&h->lock, RUNLOOM_RANK_HUB);
             if (hub != NULL) {
                 /* PARK -- do NOT spin-drain.  A blocking io_uring_enter here
                  * holds this hub's tstate ATTACHED across the wait, which
@@ -376,7 +385,7 @@ runloom_iouring_ssize_t runloom_iouring_ms_recv(runloom_iouring_ms_t *h,
             } else {
                 runloom_sched_park_safe();
             }
-            runloom_mutex_lock(&h->lock);
+            RUNLOOM_RLOCK(&h->lock, RUNLOOM_RANK_HUB);
             /* Loop back to top to consume whatever drain delivered. */
         }
     }

@@ -83,7 +83,10 @@ static PyObject *m_go(PyObject *self, PyObject *args, PyObject *kw)
         return NULL;
     }
     runloom_g_incref(g);   /* second ref for the Python wrapper */
-    handle->g = g;
+    /* RELEASE: pairs with the ACQUIRE load in RunloomG_wake/done/result so a
+     * cross-thread reader of a reused object slot is properly synchronized
+     * (silences the half-instrumented-TSan allocator-reuse false positive). */
+    __atomic_store_n(&handle->g, g, __ATOMIC_RELEASE);
     return (PyObject *)handle;
 }
 
@@ -108,7 +111,10 @@ static PyObject *m_go_noyield(PyObject *self, PyObject *callable)
     handle = PyObject_New(RunloomG, &RunloomGType);
     if (handle == NULL) return NULL;
     runloom_g_incref(g);
-    handle->g = g;
+    /* RELEASE: pairs with the ACQUIRE load in RunloomG_wake/done/result so a
+     * cross-thread reader of a reused object slot is properly synchronized
+     * (silences the half-instrumented-TSan allocator-reuse false positive). */
+    __atomic_store_n(&handle->g, g, __ATOMIC_RELEASE);
     return (PyObject *)handle;
 }
 
@@ -267,7 +273,10 @@ static PyObject *m_current_g(PyObject *self, PyObject *unused)
     handle = PyObject_New(RunloomG, &RunloomGType);
     if (handle == NULL) return NULL;
     runloom_g_incref(g);
-    handle->g = g;
+    /* RELEASE: pairs with the ACQUIRE load in RunloomG_wake/done/result so a
+     * cross-thread reader of a reused object slot is properly synchronized
+     * (silences the half-instrumented-TSan allocator-reuse false positive). */
+    __atomic_store_n(&handle->g, g, __ATOMIC_RELEASE);
     return (PyObject *)handle;
 }
 

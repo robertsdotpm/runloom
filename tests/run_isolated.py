@@ -153,6 +153,13 @@ def run_file(name, pytest_args):
 def classify(rc):
     if rc == 0:
         return "PASS"
+    if rc == 5:
+        # pytest exit 5 = "no tests collected".  For this suite that means the
+        # file skipped at MODULE level (e.g. a Linux-only test on macOS/Windows
+        # doing `pytest.skip(..., allow_module_level=True)` -> 0 items collected).
+        # That is a skip, not a failure.  (A real collection/import error exits 2,
+        # not 5, so this does not mask broken files.)
+        return "SKIP"
     if rc == 124:
         return "TIMEOUT"
     if rc < 0:
@@ -232,7 +239,8 @@ def main(argv):
         rc, out, dt = run_file(name, passthru)
         record(name, rc, out, dt)
 
-    bad = [r for r in results if r[1] != "PASS"]
+    bad = [r for r in results if r[1] not in ("PASS", "SKIP")]
+    nskip = len([r for r in results if r[1] == "SKIP"])
     print("-" * 60)
     if bad:
         print("FAILURES ({0}):".format(len(bad)))
@@ -240,9 +248,9 @@ def main(argv):
             print("\n### {0}  [{1}]".format(name, verdict))
             tail = out.splitlines()[-30:]
             print("\n".join(tail))
-    npass = len(results) - len(bad)
-    print("\n== {0} passed, {1} not-passed ({2}) ==".format(
-        npass, len(bad), ", ".join(r[0] for r in bad) if bad else "all green"))
+    npass = len(results) - len(bad) - nskip
+    print("\n== {0} passed, {1} skipped, {2} not-passed ({3}) ==".format(
+        npass, nskip, len(bad), ", ".join(r[0] for r in bad) if bad else "all green"))
     return 1 if bad else 0
 
 

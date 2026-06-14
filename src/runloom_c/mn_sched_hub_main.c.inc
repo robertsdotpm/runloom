@@ -3,6 +3,33 @@
  * these definitions depend on. */
 
 
+/* ---- randomized work-stealing victim order (Go's randomOrder) ----
+ * A fixed linear scan that always starts at hub 0 makes K idle hubs collide on
+ * hub 0's single-element steal CAS simultaneously, then advance together to hub
+ * 1, repeating the convoy -- thundering-herd CAS contention + load asymmetry at
+ * high hub counts.  Instead each hub enumerates victims in a DISTINCT order:
+ * start at its own id and step by a stride coprime with the hub count (so the
+ * full residue set 0..count-1 is visited exactly once).  The start + stride are
+ * derived deterministically from h->id, so the order is fixed per hub (no
+ * wall-clock entropy) and the controlled-replay schedule is unchanged -- and in
+ * replay mode steal is disabled anyway (runloom_mn_ctrl_no_steal). */
+static int runloom_steal_gcd(int a, int b)
+{
+    while (b != 0) { int t = a % b; a = b; b = t; }
+    return a;
+}
+
+/* A stride in [1, n-1] coprime with n, varied by the hub id.  Always returns
+ * (s==1 is coprime with every n, and 1 is in the 1..n-1 cycle, so it
+ * terminates).  Caller guarantees n >= 2. */
+static int runloom_steal_stride(int n, int id)
+{
+    int s;
+    if (n < 3) return 1;                          /* n==2: stride 1 is the only option */
+    for (s = 1 + (id % (n - 1)); ; s = (s % (n - 1)) + 1)
+        if (runloom_steal_gcd(s, n) == 1) return s;
+}
+
 /* gc-stop-the-world fairness (free-threaded 3.13+ only).
  *
  * A fiber that loops a stop-the-world operation -- a tight `gc.collect()`
@@ -42,8 +69,11 @@ static void runloom_mn_world_yield_if_monopolizing(runloom_hub_t *h)
 #if PY_VERSION_HEX >= 0x030D0000
     int i;
     if (__atomic_load_n(&h->stopping, __ATOMIC_ACQUIRE)) return;
-    /* Sole runnable g: exactly one in the ready ring and the own deque empty. */
-    if ((h->sched.ready_tail - h->sched.ready_head) != 1) return;
+    /* Sole runnable g: exactly one in the ready ring and the own deque empty.
+     * Relaxed loads (as documented above): own-thread here, but the indices are
+     * relaxed-atomic for the cross-thread census -- keep every reader consistent. */
+    if ((__atomic_load_n(&h->sched.ready_tail, __ATOMIC_RELAXED)
+         - __atomic_load_n(&h->sched.ready_head, __ATOMIC_RELAXED)) != 1) return;
     if (runloom_cldeque_size(&h->deque) != 0) return;
     for (i = 0; i < runloom_hub_count; i++) {
         int tss;
@@ -113,9 +143,9 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
      * gc.immortalize check-then-act outside its HEAD_LOCK when several threads
      * create tstates at once (see runloom_hub_tstate_lock).  The lock's
      * release/acquire also publishes the immortalize-flag write to later hubs. */
-    runloom_mutex_lock(&runloom_hub_tstate_lock);
+    RUNLOOM_RLOCK(&runloom_hub_tstate_lock, RUNLOOM_RANK_HUB_TSTATE);
     hts = PyThreadState_New(runloom_mn_interp);
-    runloom_mutex_unlock(&runloom_hub_tstate_lock);
+    RUNLOOM_RUNLOCK(&runloom_hub_tstate_lock, RUNLOOM_RANK_HUB_TSTATE);
     if (hts == NULL) {
         /* Astronomically unlikely (a small allocation).  This hub cannot run
          * Python; mark it stopping so the scheduler stops counting on it and
@@ -143,12 +173,16 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
      * cache-locality half is measurable; the NIC-RX-steering half needs a real
      * NIC.  Best-effort: a failed pin just leaves the thread unpinned. */
     {
+        /* Atomic load+store: hub threads race to first-init this static; the
+         * plain read/write was a (benign, same-value) TSan data race. */
         static int aff_mode = -1;
-        if (aff_mode < 0) {
+        int am = __atomic_load_n(&aff_mode, __ATOMIC_RELAXED);
+        if (am < 0) {
             const char *e = getenv("RUNLOOM_HUB_AFFINITY");
-            aff_mode = (e != NULL && *e != '0') ? 1 : 0;
+            am = (e != NULL && *e != '0') ? 1 : 0;
+            __atomic_store_n(&aff_mode, am, __ATOMIC_RELAXED);
         }
-        if (aff_mode) {
+        if (am) {
             long ncpu = sysconf(_SC_NPROCESSORS_ONLN);
             if (ncpu > 0) {
                 cpu_set_t set;
@@ -216,6 +250,14 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
 
     while (!__atomic_load_n(&h->stopping, __ATOMIC_ACQUIRE)) {
         runloom_g_t *g;
+        /* Drain the io_uring single-op cancel mailbox: a foreign task.cancel
+         * deposited an op targeting THIS hub's SINGLE_ISSUER ring; submit the
+         * ASYNC_CANCEL here, where we are the ring's sole issuer. */
+        {
+            void *cop = __atomic_exchange_n(&h->iouring_cancel_op, NULL,
+                                            __ATOMIC_ACQ_REL);
+            if (cop != NULL) runloom_iouring_submit_cancel_for_op(cop);
+        }
         /* Set when g came from the global run-queue: it then carries a queue
          * ref this iteration must release, and its resume must claim it with the
          * QUEUED->RUNNING CAS.  Gs from the local FIFO / own deque / a neighbour
@@ -225,11 +267,14 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
         /* Drain the submission list into the deque first.  Pushing to
          * the deque is owner-only, so we (the hub) move fresh gs from
          * external producers onto our deque before anyone else looks. */
-        runloom_mutex_lock(&h->sub_lock);
+        RUNLOOM_RLOCK(&h->sub_lock, RUNLOOM_RANK_HUB_SUB);
         {
             runloom_g_t *sub = h->sub_head;
-            h->sub_head = h->sub_tail = NULL;
-            runloom_mutex_unlock(&h->sub_lock);
+            h->sub_tail = NULL;
+            /* RELAXED-atomic clear: closes the lock-free census's ACQUIRE read race
+             * on sub_head (Finding D #4 -- the TSan hub_main:273 report). */
+            __atomic_store_n(&h->sub_head, (runloom_g_t *)NULL, __ATOMIC_RELAXED);
+            RUNLOOM_RUNLOCK(&h->sub_lock, RUNLOOM_RANK_HUB_SUB);
             while (sub != NULL) {
                 runloom_g_t *next = sub->next;
                 sub->next = NULL;
@@ -337,8 +382,16 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
             if (g != NULL) from_runq = 1;
         }
         if (g == NULL) {
-            int i;
-            for (i = 0; !runloom_mn_ctrl_no_steal() && i < runloom_hub_count; i++) {
+          if (!runloom_mn_ctrl_no_steal() && runloom_hub_count >= 2) {
+            /* Randomized coprime-stride victim order (see runloom_steal_stride):
+             * each hub starts at its own id and steps by a coprime stride, so K
+             * idle hubs don't all hammer hub 0's steal CAS in lockstep. */
+            int n = runloom_hub_count;
+            int stride = runloom_steal_stride(n, h->id);
+            int pos = h->id;
+            int k;
+            for (k = 0; k < n; k++, pos += stride) {
+                int i = pos % n;
                 if (i == h->id) continue;
                 g = (runloom_g_t *)runloom_cldeque_steal(&runloom_hubs[i].deque);
                 if (g != NULL) {
@@ -357,6 +410,7 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
                     break;
                 }
             }
+          }
             if (g == NULL) {
                 long total = 0;
                 int j;
@@ -488,6 +542,13 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
                          * on OUR own ring -- under SINGLE_ISSUER each
                          * ring's GETEVENTS must come from its owner. */
                         runloom_iouring_ring_get_events(h->iouring_ring);
+                        /* Ensure the shared pump-wake eventfd is registered in
+                         * the epoll set BEFORE we block here, so a cross-hub
+                         * runloom_mn_hub_submit/wake_g can break this epoll_wait
+                         * immediately (else the woken g waits the full pump
+                         * timeout -- the ~1ms cross-hub handoff latency).
+                         * Idempotent + atomic-guarded: a no-op once armed. */
+                        runloom_netpoll_wake_pump_arm();
                         runloom_netpoll_pump(pump_ns);
                     } else {
                         if (idle_ns <= 0) idle_ns = 1;
@@ -506,7 +567,7 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
                                                            __ATOMIC_RELAXED);
                         if (hub_pending > 0 && runloom_hub_idle_wake_enabled()) {
                             int waited = 0;
-                            runloom_mutex_lock(&h->idle_lock);
+                            RUNLOOM_RLOCK(&h->idle_lock, RUNLOOM_RANK_HUB_IDLE);
                             /* Announce BEFORE the final sub_head re-check so a
                              * submit that races our announce either lands in
                              * sub_head (we see it -> skip the wait) or observes
@@ -516,9 +577,9 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
                              * can't slip into the gap. */
                             __atomic_store_n(&h->idle_waiting, 1, __ATOMIC_RELEASE);
                             int have_sub;
-                            runloom_mutex_lock(&h->sub_lock);
+                            RUNLOOM_RLOCK(&h->sub_lock, RUNLOOM_RANK_HUB_SUB);
                             have_sub = (h->sub_head != NULL);
-                            runloom_mutex_unlock(&h->sub_lock);
+                            RUNLOOM_RUNLOCK(&h->sub_lock, RUNLOOM_RANK_HUB_SUB);
                             if (!have_sub) {
                                 /* Detach BEFORE the wait so a concurrent
                                  * stop-the-world sees this hub already stopped and
@@ -529,7 +590,7 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
                                 waited = 1;
                             }
                             __atomic_store_n(&h->idle_waiting, 0, __ATOMIC_RELEASE);
-                            runloom_mutex_unlock(&h->idle_lock);
+                            RUNLOOM_RUNLOCK(&h->idle_lock, RUNLOOM_RANK_HUB_IDLE);
                             /* Re-attach OUTSIDE idle_lock.  PyEval_RestoreThread
                              * blocks until any in-progress stop-the-world ends;
                              * holding idle_lock across that block would stall a
@@ -604,6 +665,43 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
                 }
                 hub_ts = PyEval_SaveThread();        /* detach hub tstate */
                 PyEval_RestoreThread(g->tstate);      /* attach g's own tstate */
+                /* Deep-surface migration oracle (RUNLOOM_DBG_MIGRATE; zero-cost
+                 * otherwise).  The per-g tstate's mimalloc heap / brc / QSBR are
+                 * bound to the OS thread that first used them; running it on a
+                 * DIFFERENT hub thread without the abandon/adopt re-bind handshake
+                 * is the precise, early signature of the deferred _mi_page_retire
+                 * corruption that RunloomTstateMigration.tla proves the handshake
+                 * prevents.  Warn ONCE (don't abort -- this is a gated experimental
+                 * mode) with both thread ids so the missing re-bind is pinpointed
+                 * instead of surfacing as a random teardown SEGV.  A correct
+                 * handshake would update tstate_owner_tid on adopt, keeping it quiet. */
+                {
+                    static int dbg = -1;
+                    if (dbg < 0) {
+                        const char *e = getenv("RUNLOOM_DBG_MIGRATE");
+                        dbg = (e != NULL && e[0] != '0' && e[0] != '\0') ? 1 : 0;
+                    }
+                    if (dbg) {
+                        unsigned long tid = (unsigned long)PyThread_get_thread_ident();
+                        if (g->tstate_owner_tid == 0) {
+                            g->tstate_owner_tid = tid;        /* first use: binds here */
+                        } else if (g->tstate_owner_tid != tid) {
+                            static int warned = 0;
+                            if (!warned) {
+                                warned = 1;
+                                fprintf(stderr,
+                                    "[RUNLOOM_DBG_MIGRATE] per-g PyThreadState used on "
+                                    "thread %lu but bound to %lu WITHOUT a mimalloc "
+                                    "abandon/adopt handshake -> _mi_page_retire "
+                                    "corruption is imminent (g id=%lld). See "
+                                    "docs/dev/STEAL_WOKEN_CLEANUP.md.\n",
+                                    tid, g->tstate_owner_tid, (long long)g->id);
+                                fflush(stderr);
+                            }
+                            g->tstate_owner_tid = tid;        /* track the move */
+                        }
+                    }
+                }
                 h->sched.current = g;
                 runloom_tls_current_g = g;
                 runloom_tls_self_queued = 0;

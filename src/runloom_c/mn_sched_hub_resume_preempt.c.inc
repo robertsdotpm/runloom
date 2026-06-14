@@ -417,7 +417,7 @@ static void runloom_mn_ctrl_fini(void)
 static void runloom_mn_ctrl_acquire(int hub)
 {
     if (!runloom_mn_ctrl.enabled || hub < 0 || hub >= runloom_mn_ctrl.n) return;
-    runloom_mutex_lock(&runloom_mn_ctrl.lock);
+    RUNLOOM_RLOCK(&runloom_mn_ctrl.lock, RUNLOOM_RANK_MN_CTRL);
     runloom_mn_ctrl.want[hub] = 1;
     runloom_mn_ctrl.seen[hub] = runloom_mn_ctrl.round;     /* checked in (wanting) */
     /* trace conformance: idle -> arriving -> waiting (acquire is atomic here, so
@@ -430,19 +430,19 @@ static void runloom_mn_ctrl_acquire(int hub)
         while (runloom_mn_ctrl.current != hub)
             runloom_cond_wait(&runloom_mn_ctrl.cond, &runloom_mn_ctrl.lock);
         runloom_mn_ctrl.want[hub] = 0;                 /* now running, not waiting */
-        runloom_mutex_unlock(&runloom_mn_ctrl.lock);
+        RUNLOOM_RUNLOCK(&runloom_mn_ctrl.lock, RUNLOOM_RANK_MN_CTRL);
         PyEval_RestoreThread(ts);
         return;
     }
     runloom_mn_ctrl.want[hub] = 0;
-    runloom_mutex_unlock(&runloom_mn_ctrl.lock);
+    RUNLOOM_RUNLOCK(&runloom_mn_ctrl.lock, RUNLOOM_RANK_MN_CTRL);
 }
 
 static void runloom_mn_ctrl_release(int hub)
 {
     int i;
     if (!runloom_mn_ctrl.enabled || hub < 0 || hub >= runloom_mn_ctrl.n) return;
-    runloom_mutex_lock(&runloom_mn_ctrl.lock);
+    RUNLOOM_RLOCK(&runloom_mn_ctrl.lock, RUNLOOM_RANK_MN_CTRL);
     if (runloom_mn_ctrl.current == hub) {
         runloom_mn_ctrl.current = -1;
         /* trace conformance: the holder releases the baton (running->idle) */
@@ -468,7 +468,7 @@ static void runloom_mn_ctrl_release(int hub)
         if (runloom_mn_ctrl.want[i]) runloom_mn_ctrl.seen[i] = runloom_mn_ctrl.round;
     runloom_mn_ctrl_try_grant();                       /* hand to next by seed */
     runloom_cond_broadcast(&runloom_mn_ctrl.cond);        /* wake idle re-check-ins */
-    runloom_mutex_unlock(&runloom_mn_ctrl.lock);
+    RUNLOOM_RUNLOCK(&runloom_mn_ctrl.lock, RUNLOOM_RANK_MN_CTRL);
 }
 
 /* Check in as IDLE for the current round (called from hub_main's no-work
@@ -493,14 +493,14 @@ static int runloom_mn_ctrl_census_idle(runloom_hub_t *h)
     int hub = h->id, has_work;
     if (!runloom_mn_ctrl.enabled || !runloom_mn_ctrl.barrier ||
         hub < 0 || hub >= runloom_mn_ctrl.n) return 0;
-    runloom_mutex_lock(&runloom_mn_ctrl.lock);
+    RUNLOOM_RLOCK(&runloom_mn_ctrl.lock, RUNLOOM_RANK_MN_CTRL);
     if (runloom_mn_ctrl.seen[hub] == runloom_mn_ctrl.round) {
-        runloom_mutex_unlock(&runloom_mn_ctrl.lock);       /* already in for this round */
+        RUNLOOM_RUNLOCK(&runloom_mn_ctrl.lock, RUNLOOM_RANK_MN_CTRL);       /* already in for this round */
         return 0;
     }
-    runloom_mutex_lock(&h->sub_lock);
+    RUNLOOM_RLOCK(&h->sub_lock, RUNLOOM_RANK_HUB_SUB);
     has_work = (h->sub_head != NULL);
-    runloom_mutex_unlock(&h->sub_lock);
+    RUNLOOM_RUNLOCK(&h->sub_lock, RUNLOOM_RANK_HUB_SUB);
     if (!has_work) {
         runloom_mn_ctrl.seen[hub] = runloom_mn_ctrl.round;   /* checked in (idle) */
         /* Report this hub's earliest pending timer so a quiescent census can
@@ -514,7 +514,7 @@ static int runloom_mn_ctrl_census_idle(runloom_hub_t *h)
         }
         runloom_mn_ctrl_try_grant();
     }
-    runloom_mutex_unlock(&runloom_mn_ctrl.lock);
+    RUNLOOM_RUNLOCK(&runloom_mn_ctrl.lock, RUNLOOM_RANK_MN_CTRL);
     return has_work;
 }
 
@@ -532,11 +532,11 @@ static int runloom_mn_ctrl_census_idle(runloom_hub_t *h)
 static void runloom_mn_ctrl_arm(void)
 {
     if (!runloom_mn_ctrl.enabled || !runloom_mn_ctrl.barrier) return;
-    runloom_mutex_lock(&runloom_mn_ctrl.lock);
+    RUNLOOM_RLOCK(&runloom_mn_ctrl.lock, RUNLOOM_RANK_MN_CTRL);
     runloom_mn_ctrl.armed = 1;
     runloom_mn_ctrl_try_grant();                 /* in case all hubs already waiting */
     runloom_cond_broadcast(&runloom_mn_ctrl.cond);  /* release the entry gate */
-    runloom_mutex_unlock(&runloom_mn_ctrl.lock);
+    RUNLOOM_RUNLOCK(&runloom_mn_ctrl.lock, RUNLOOM_RANK_MN_CTRL);
 }
 
 /* Block a hub at loop entry until armed.  Detaches the Python thread state
@@ -544,16 +544,16 @@ static void runloom_mn_ctrl_arm(void)
 static void runloom_mn_ctrl_wait_armed(void)
 {
     if (!runloom_mn_ctrl.enabled || !runloom_mn_ctrl.barrier) return;
-    runloom_mutex_lock(&runloom_mn_ctrl.lock);
+    RUNLOOM_RLOCK(&runloom_mn_ctrl.lock, RUNLOOM_RANK_MN_CTRL);
     if (!runloom_mn_ctrl.armed) {
         PyThreadState *ts = PyEval_SaveThread();
         while (!runloom_mn_ctrl.armed)
             runloom_cond_wait(&runloom_mn_ctrl.cond, &runloom_mn_ctrl.lock);
-        runloom_mutex_unlock(&runloom_mn_ctrl.lock);
+        RUNLOOM_RUNLOCK(&runloom_mn_ctrl.lock, RUNLOOM_RANK_MN_CTRL);
         PyEval_RestoreThread(ts);
         return;
     }
-    runloom_mutex_unlock(&runloom_mn_ctrl.lock);
+    RUNLOOM_RUNLOCK(&runloom_mn_ctrl.lock, RUNLOOM_RANK_MN_CTRL);
 }
 
 /* True in deterministic-replay mode (controlled + barrier): hub_main then skips
@@ -580,9 +580,9 @@ double runloom_mn_logical_now_or(double fallback)
 {
     double v;
     if (!(runloom_mn_ctrl.enabled && runloom_mn_ctrl.barrier)) return fallback;
-    runloom_mutex_lock(&runloom_mn_ctrl.lock);
+    RUNLOOM_RLOCK(&runloom_mn_ctrl.lock, RUNLOOM_RANK_MN_CTRL);
     v = runloom_mn_ctrl.logical_now;
-    runloom_mutex_unlock(&runloom_mn_ctrl.lock);
+    RUNLOOM_RUNLOCK(&runloom_mn_ctrl.lock, RUNLOOM_RANK_MN_CTRL);
     return v;
 }
 
@@ -613,11 +613,12 @@ static void runloom_mn_ctrl_stage_flush(runloom_hub_t *h)
         if (head == NULL) continue;
         h->stage_head[t] = h->stage_tail[t] = NULL;
         tgt = &runloom_hubs[t];
-        runloom_mutex_lock(&tgt->sub_lock);
+        RUNLOOM_RLOCK(&tgt->sub_lock, RUNLOOM_RANK_HUB_SUB);
         if (tgt->sub_tail != NULL) tgt->sub_tail->next = head;
-        else                       tgt->sub_head = head;
+        else /* RELEASE: publishes to the census ACQUIRE read (Finding D #4) */
+            __atomic_store_n(&tgt->sub_head, head, __ATOMIC_RELEASE);
         tgt->sub_tail = tail;
-        runloom_mutex_unlock(&tgt->sub_lock);
+        RUNLOOM_RUNLOCK(&tgt->sub_lock, RUNLOOM_RANK_HUB_SUB);
     }
     h->stage_pending = 0;
 }

@@ -301,6 +301,13 @@ class CoSemaphore(object):
             # spurious False from a BLOCKING acquire (a contract violation that
             # also strands the permit release() handed us).
             while not w[2]:
+                if self._cancelled:
+                    # cancel_all() woke us WITHOUT a permit (w[2] stays False) and
+                    # set _cancelled under the guard before unparking. Without this
+                    # check the loop only tests w[2], so a cancel-wake re-parks
+                    # forever -- the procutil/subprocess teardown hang (a blocking,
+                    # untimed acquire never escapes; timed ones only via deadline).
+                    break
                 p.park(None)
         else:
             # Same spurious-wake hazard as the blocking branch above, plus a
@@ -310,6 +317,8 @@ class CoSemaphore(object):
             # the guard by release()) is authoritative.
             deadline = time.monotonic() + timeout
             while not w[2]:
+                if self._cancelled:
+                    break    # cancel_all() woke us without a permit (see above)
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     # Timed out: mark the waiter inactive under the guard so a

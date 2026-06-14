@@ -29,6 +29,7 @@
 
 #include "plat.h"
 #include "plat_compat.h"
+#include "runloom_lockrank.h"
 #include "runloom_blockpool.h"
 #include "runloom_sched.h"
 #include "mn_sched.h"
@@ -112,18 +113,18 @@ static RUNLOOM_THREAD_RET runloom_blockpool_worker(void *arg)
     runloom_crash_thread_arm();
     for (;;) {
         runloom_block_job_t *job;
-        runloom_mutex_lock(&bp_lock);
+        RUNLOOM_RLOCK(&bp_lock, RUNLOOM_RANK_BLOCKPOOL);
         while (bp_head == NULL && !bp_stopping) {
             runloom_cond_wait(&bp_cond, &bp_lock);
         }
         if (bp_head == NULL) {            /* woken only to stop */
-            runloom_mutex_unlock(&bp_lock);
+            RUNLOOM_RUNLOCK(&bp_lock, RUNLOOM_RANK_BLOCKPOOL);
             break;
         }
         job = bp_head;
         bp_head = job->next;
         if (bp_head == NULL) bp_tail = NULL;
-        runloom_mutex_unlock(&bp_lock);
+        RUNLOOM_RUNLOCK(&bp_lock, RUNLOOM_RANK_BLOCKPOOL);
 
         /* Snapshot the wake target BEFORE publishing `done`.  Once `done` is
          * set, the parked fiber may resume and free its stack `job` at any
@@ -169,9 +170,9 @@ int runloom_blockpool_init(int n_workers)
     if (__atomic_load_n(&bp_failed, __ATOMIC_ACQUIRE)) return -1;
 
     bp_lock_ensure();               /* Windows: make bp_lock usable */
-    runloom_mutex_lock(&bp_lock);
-    if (bp_inited) { runloom_mutex_unlock(&bp_lock); return 0; }
-    if (bp_failed) { runloom_mutex_unlock(&bp_lock); return -1; }
+    RUNLOOM_RLOCK(&bp_lock, RUNLOOM_RANK_BLOCKPOOL);
+    if (bp_inited) { RUNLOOM_RUNLOCK(&bp_lock, RUNLOOM_RANK_BLOCKPOOL); return 0; }
+    if (bp_failed) { RUNLOOM_RUNLOCK(&bp_lock, RUNLOOM_RANK_BLOCKPOOL); return -1; }
 
     if (n_workers <= 0) {
         const char *e = getenv("RUNLOOM_BLOCKPOOL_WORKERS");
@@ -182,7 +183,7 @@ int runloom_blockpool_init(int n_workers)
 
     if (runloom_cond_init(&bp_cond) != 0) {
         __atomic_store_n(&bp_failed, 1, __ATOMIC_RELEASE);
-        runloom_mutex_unlock(&bp_lock);
+        RUNLOOM_RUNLOCK(&bp_lock, RUNLOOM_RANK_BLOCKPOOL);
         return -1;
     }
     bp_stopping = 0;
@@ -202,12 +203,12 @@ int runloom_blockpool_init(int n_workers)
     if (started == 0) {
         runloom_cond_destroy(&bp_cond);
         __atomic_store_n(&bp_failed, 1, __ATOMIC_RELEASE);
-        runloom_mutex_unlock(&bp_lock);
+        RUNLOOM_RUNLOCK(&bp_lock, RUNLOOM_RANK_BLOCKPOOL);
         return -1;
     }
     bp_n_workers = started;
     __atomic_store_n(&bp_inited, 1, __ATOMIC_RELEASE);
-    runloom_mutex_unlock(&bp_lock);
+    RUNLOOM_RUNLOCK(&bp_lock, RUNLOOM_RANK_BLOCKPOOL);
     return 0;
 }
 
@@ -215,22 +216,22 @@ void runloom_blockpool_fini(void)
 {
     int i, n;
     bp_lock_ensure();               /* Windows: make bp_lock usable */
-    runloom_mutex_lock(&bp_lock);
-    if (!bp_inited) { runloom_mutex_unlock(&bp_lock); return; }
+    RUNLOOM_RLOCK(&bp_lock, RUNLOOM_RANK_BLOCKPOOL);
+    if (!bp_inited) { RUNLOOM_RUNLOCK(&bp_lock, RUNLOOM_RANK_BLOCKPOOL); return; }
     bp_stopping = 1;
     n = bp_n_workers;
     runloom_cond_broadcast(&bp_cond);
-    runloom_mutex_unlock(&bp_lock);
+    RUNLOOM_RUNLOCK(&bp_lock, RUNLOOM_RANK_BLOCKPOOL);
 
     for (i = 0; i < n; i++) runloom_thread_join(bp_threads[i]);
 
-    runloom_mutex_lock(&bp_lock);
+    RUNLOOM_RLOCK(&bp_lock, RUNLOOM_RANK_BLOCKPOOL);
     runloom_cond_destroy(&bp_cond);
     bp_inited = 0;
     bp_n_workers = 0;
     bp_stopping = 0;
     bp_head = bp_tail = NULL;
-    runloom_mutex_unlock(&bp_lock);
+    RUNLOOM_RUNLOCK(&bp_lock, RUNLOOM_RANK_BLOCKPOOL);
 }
 
 /* Reset the blocking-offload pool in a forked CHILD.  The worker OS threads
@@ -291,12 +292,12 @@ void *runloom_blocking_call(void *(*fn)(void *), void *arg)
      * and the worker re-queueing us, which would exit the loop early. */
     __atomic_add_fetch(&bp_inflight, 1, __ATOMIC_ACQ_REL);
 
-    runloom_mutex_lock(&bp_lock);
+    RUNLOOM_RLOCK(&bp_lock, RUNLOOM_RANK_BLOCKPOOL);
     if (bp_tail != NULL) bp_tail->next = &job;
     else                 bp_head = &job;
     bp_tail = &job;
     runloom_cond_signal(&bp_cond);
-    runloom_mutex_unlock(&bp_lock);
+    RUNLOOM_RUNLOCK(&bp_lock, RUNLOOM_RANK_BLOCKPOOL);
 
     /* Park until the WORKER signals completion (job.done).  Re-park on any
      * other wake: a task.cancel() delivers G.wake() to this fiber while it

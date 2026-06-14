@@ -275,6 +275,11 @@ struct runloom_g {
      * defense against missed unlink paths under M:N + free-threaded
      * that would otherwise have pump waking a freed g. */
     void *netpoll_parker;   /* really runloom_parked_t *, void* to avoid include cycle */
+    /* Set to the in-flight single io_uring op (runloom_iouring_op_t *, void* to
+     * avoid include cycle) while this fiber is parked on it under M:N, so a
+     * task.cancel can submit an ASYNC_CANCEL targeting it.  Cleared on resume.
+     * In the slab-cleared pre-state range. */
+    void *iouring_op;
     /* park_safe / wake_safe lost-wake guard.  Set to 1 by park_safe
      * just before runloom_coro_yield; CAS'd back to 0 by the first
      * wake_safe to observe it.  Replaces the original s->current
@@ -326,11 +331,30 @@ struct runloom_g {
      * 0 = fn() (slab-cleared default). */
     unsigned char pass_index;
 
+    /* Wait-reason taxonomy (see runloom_wait_reason in runloom_gstate.h).  Both
+     * live in the slab-cleared range so a recycled fiber starts at WR_NONE.
+     * `wait_reason` is the active reason read by the dump while parked;
+     * `wait_reason_hint` is the pending reason a higher-level primitive sets
+     * before parking, consumed (and cleared) at park_safe.  Diagnostic only. */
+    unsigned char wait_reason;
+    unsigned char wait_reason_hint;
+
+    /* Deep-surface migration oracle (RUNLOOM_DBG_MIGRATE; per-g-tstate only).  The
+     * OS-thread id whose mimalloc heap / brc / QSBR the per-g PyThreadState is
+     * currently bound to (0 = not yet bound).  Each per-g attach checks it against
+     * the running hub's thread id: a mismatch means the tstate migrated hub->hub
+     * WITHOUT the mimalloc abandon/adopt re-bind handshake -- the precise, early
+     * signature of the deferred _mi_page_retire corruption (RunloomTstateMigration.tla
+     * proves the handshake necessary; this is its runtime fidelity oracle).  In the
+     * slab-cleared [arena,id) range so a recycled g starts unbound. */
+    unsigned long tstate_owner_tid;
+
     /* ---- introspection block (runloom_introspect.c) ----
      * These fields are deliberately the LAST members of runloom_g_t.  The
-     * per-thread slab reuse path (runloom_g_slab_alloc) bulk-clears a g only
-     * up to offsetof(runloom_g_t, id) -- i.e. everything BEFORE this block --
-     * so reg_prev/reg_next survive recycling untouched.  That is what
+     * per-thread slab reuse path (runloom_g_slab_alloc) clears a g only up to
+     * offsetof(runloom_g_t, id) -- i.e. everything BEFORE this block -- in two
+     * memsets straddling the atomic `state` byte (see the reuse branch), so
+     * reg_prev/reg_next survive recycling untouched.  That is what
      * keeps the global fiber registry walkable without taking the
      * registry lock on the (hot) spawn path: the only writers of reg_prev/
      * reg_next are runloom_greg_link/unlink, both under runloom_greg_lock, on the
@@ -486,9 +510,19 @@ struct runloom_sched {
     runloom_g_t *quiescence_tail;
 };
 
-/* Is the ready queue empty?  Hot-path predicate; inline-friendly. */
+/* Is the ready queue empty?  Hot-path predicate; inline-friendly.
+ * ready_head/ready_tail are written non-atomically by the OWNING hub
+ * (ready_push/ready_pop), but this predicate is also read CROSS-THREAD by the
+ * deadlock-quiescence census (runloom_mn_has_wakeable_work, on the main thread),
+ * so the indices are relaxed-atomic -- the lone plain access among that census's
+ * atomic siblings (resume_start_ns / sub_head / global_runq_len), matching the
+ * missing-atomic-qualifier fixes in tools/README Finding C.  Found by
+ * tools/lifefuzz under the gold-standard TSan ext (datastack:267/403 vs sched.h
+ * here).  RELAXED: single-writer per ring; the census only needs a non-torn
+ * value (its deadlock streak + re-kick absorb staleness).  Zero-cost on x86. */
 RUNLOOM_INLINE int runloom_sched_ready_empty(const runloom_sched_t *s) {
-    return s->ready_head == s->ready_tail;
+    return __atomic_load_n(&s->ready_head, __ATOMIC_RELAXED)
+        == __atomic_load_n(&s->ready_tail, __ATOMIC_RELAXED);
 }
 
 /* Module-level: one sched per OS thread once Phase C lands.  For now
@@ -586,6 +620,9 @@ int runloom_park_generic_timed(int foreign_wakeable, double deadline);
  * parked_safe CAS.  Called by the single-thread drain + the M:N hub_main on s's
  * own thread, alongside the sleep-heap drain. */
 void runloom_sched_drain_timers(runloom_sched_t *s, double now);
+/* Release the g-ref held by every still-pending timer entry + empty the heap.
+ * Call at teardown so future-deadline entries don't leak their pinned gs. */
+void runloom_sched_release_timers(runloom_sched_t *s);
 
 /* Earliest pending timer deadline on s (monotonic seconds), or -1.0 if none --
  * lets the drain / hub idle-wait bound its block so a due timer fires on time. */

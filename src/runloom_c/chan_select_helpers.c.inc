@@ -16,11 +16,11 @@ static int select_try_each(runloom_select_case_t *cases, int n)
     for (i = 0; i < n; i++) {
         runloom_select_case_t *c = &cases[i];
         runloom_chan_t *ch = c->ch;
-        runloom_mutex_lock(&ch->lock);
+        RUNLOOM_RLOCK(&ch->lock, RUNLOOM_RANK_CHAN);
         if (c->op == RUNLOOM_SELECT_SEND) {
             runloom_chan_waiter_t *rx;
             if (ch->closed) {
-                runloom_mutex_unlock(&ch->lock);
+                RUNLOOM_RUNLOCK(&ch->lock, RUNLOOM_RANK_CHAN);
                 PyErr_SetString(PyExc_ValueError, "select send on closed channel");
                 return -2;
             }
@@ -30,13 +30,13 @@ static int select_try_each(runloom_select_case_t *cases, int n)
                 rx->value = c->send_value;
                 rx->ok = 1;
                 wake_waiter(rx);
-                runloom_mutex_unlock(&ch->lock);
+                RUNLOOM_RUNLOCK(&ch->lock, RUNLOOM_RANK_CHAN);
                 return i;
             }
             if (ch->cap > 0 && ch->len < ch->cap) {
                 Py_INCREF(c->send_value);
                 buf_push(ch, c->send_value);
-                runloom_mutex_unlock(&ch->lock);
+                RUNLOOM_RUNLOCK(&ch->lock, RUNLOOM_RANK_CHAN);
                 return i;
             }
         } else {  /* RECV */
@@ -51,7 +51,7 @@ static int select_try_each(runloom_select_case_t *cases, int n)
                     tx->send_result = 0;
                     wake_waiter(tx);
                 }
-                runloom_mutex_unlock(&ch->lock);
+                RUNLOOM_RUNLOCK(&ch->lock, RUNLOOM_RANK_CHAN);
                 return i;
             }
             tx = waiter_pop_claimable(&ch->senders, &ch->senders_tail);
@@ -61,18 +61,18 @@ static int select_try_each(runloom_select_case_t *cases, int n)
                 tx->send_result = 0;
                 wake_waiter(tx);
                 c->recv_ok = 1;
-                runloom_mutex_unlock(&ch->lock);
+                RUNLOOM_RUNLOCK(&ch->lock, RUNLOOM_RANK_CHAN);
                 return i;
             }
             if (ch->closed) {
                 Py_INCREF(Py_None);
                 c->recv_value = Py_None;
                 c->recv_ok = 0;
-                runloom_mutex_unlock(&ch->lock);
+                RUNLOOM_RUNLOCK(&ch->lock, RUNLOOM_RANK_CHAN);
                 return i;
             }
         }
-        runloom_mutex_unlock(&ch->lock);
+        RUNLOOM_RUNLOCK(&ch->lock, RUNLOOM_RANK_CHAN);
     }
     return -1;
 }
@@ -102,7 +102,7 @@ static void select_evict_self(runloom_select_case_t *cases, int n,
         head = (cases[i].op == RUNLOOM_SELECT_SEND) ? &ch->senders : &ch->receivers;
         tail = (cases[i].op == RUNLOOM_SELECT_SEND) ? &ch->senders_tail : &ch->receivers_tail;
 
-        runloom_mutex_lock(&ch->lock);
+        RUNLOOM_RLOCK(&ch->lock, RUNLOOM_RANK_CHAN);
         pp = head;
         while (*pp != NULL) {
             if (*pp == target) {
@@ -123,6 +123,6 @@ static void select_evict_self(runloom_select_case_t *cases, int n,
         } else {
             *tail = NULL;
         }
-        runloom_mutex_unlock(&ch->lock);
+        RUNLOOM_RUNLOCK(&ch->lock, RUNLOOM_RANK_CHAN);
     }
 }

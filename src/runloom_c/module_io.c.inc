@@ -20,6 +20,7 @@
 #  include <unistd.h>
 #  include <errno.h>
 #  include <stdint.h>
+#  include <fcntl.h>      /* non-Linux accept(): O_NONBLOCK via fcntl */
 #endif
 
 /* Lazily-resolved helpers (set on first serve()). */
@@ -163,7 +164,13 @@ static void runloom_io_c_acceptor(void *arg)
 {
     int lfd = (int)(intptr_t)arg;
     for (;;) {
+#if defined(__linux__)
         int cfd = accept4(lfd, NULL, NULL, SOCK_NONBLOCK);
+#else
+        /* BSD/macOS have no accept4(): plain accept() + set non-blocking
+         * explicitly (matches runloom_tcp_conn_net's accept path). */
+        int cfd = accept(lfd, NULL, NULL);
+#endif
         if (cfd < 0) {
             if (errno == EINTR || errno == ECONNABORTED) continue;
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
@@ -172,6 +179,12 @@ static void runloom_io_c_acceptor(void *arg)
             }
             return;                              /* listener closed / hard error */
         }
+#if !defined(__linux__)
+        {
+            int fl = fcntl(cfd, F_GETFL, 0);
+            if (fl >= 0) (void)fcntl(cfd, F_SETFL, fl | O_NONBLOCK);
+        }
+#endif
         {
             int on = 1;
             (void)setsockopt(cfd, IPPROTO_TCP, TCP_NODELAY, &on, sizeof(on));

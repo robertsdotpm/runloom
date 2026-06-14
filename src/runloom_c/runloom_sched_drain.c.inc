@@ -378,6 +378,17 @@ Py_ssize_t runloom_sched_drain(runloom_sched_t *s)
                 runloom_pystate_load(&sched_snap);
                 s->completed++;
                 runloom_cal_record(g);
+                /* Force-unlink any wait_fd parker this g left linked (it can
+                 * complete WHILE parked -- e.g. an accept/recv loop torn down
+                 * by close()/cancel, or run() exiting on a parked g).  The
+                 * parker is pool-allocated and its by_fd/heap links point at
+                 * p->g; without this the parker stays linked after the g is
+                 * decref'd/freed, and the next pump or netpoll_cancel_fd
+                 * dereferences freed memory -> use-after-free.  Silent on glibc
+                 * (freed heap still mapped) but a hard access violation on
+                 * Windows -- the single-thread analogue of the M:N hub_main
+                 * completion-path cleanup (mn_sched_hub_main.c.inc). */
+                runloom_netpoll_force_unlink_g_parker(g);
                 runloom_g_decref(g);
                 runloom_pystate_snap(&sched_snap);
             } else if (runloom_g_state_in(g, RUNLOOM_GST_MASK_PARKED)) {

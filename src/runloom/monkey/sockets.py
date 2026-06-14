@@ -367,7 +367,7 @@ _netpoll_cancel_fd = getattr(runloom_c, "netpoll_cancel_fd", None)
 
 def _patched_close(self):
     """Clear the netpoll registration bit before closing (so an fd reuse
-    re-registers cleanly under the ET register-once scheme), then -- AFTER the
+    re-registers cleanly under the LEVEL-triggered per-direction scheme), then -- AFTER the
     close -- wake any fiber parked in accept()/recv()/connect() on this fd.
     The woken op retries on the now-closed (fileno == -1) socket, gets EBADF and
     unwinds, instead of being stranded forever when another fiber closed the

@@ -11,6 +11,7 @@
 #include "runloom_diag.h"   /* runloom_delay_inject (determinism tooling #2) */
 #include "plat_atomic.h"    /* __atomic_*/__ATOMIC_* shim for MSVC (Windows build) */
 #include "plat_compat.h"    /* runloom_mutex_t for the shared stack depot */
+#include "runloom_lockrank.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -354,7 +355,7 @@ static void *runloom_stack_pop_local(size_t size)
 static void runloom_stack_refill_from_global(size_t size)
 {
     int moved = 0;
-    runloom_mutex_lock(&runloom_global_stack_lock);
+    RUNLOOM_RLOCK(&runloom_global_stack_lock, RUNLOOM_RANK_GLOBAL_STACK);
     while (moved < RUNLOOM_STACK_REFILL_BATCH && runloom_global_stack_pool != NULL) {
         void **g = runloom_global_stack_pool;
         runloom_global_stack_pool = (void **)g[RUNLOOM_STACK_HDR_NEXT];
@@ -372,7 +373,7 @@ static void runloom_stack_refill_from_global(size_t size)
         runloom_tls_stack_pool_n++;
         moved++;
     }
-    runloom_mutex_unlock(&runloom_global_stack_lock);
+    RUNLOOM_RUNLOCK(&runloom_global_stack_lock, RUNLOOM_RANK_GLOBAL_STACK);
 }
 
 /* Move all-but-KEEP entries from the TLS cache down to the shared depot.
@@ -391,7 +392,7 @@ static void runloom_stack_flush_to_global(void)
 
     {
     int cap = runloom_global_stack_cap();
-    runloom_mutex_lock(&runloom_global_stack_lock);
+    RUNLOOM_RLOCK(&runloom_global_stack_lock, RUNLOOM_RANK_GLOBAL_STACK);
     while (move_head != NULL) {
         void **next = (void **)move_head[RUNLOOM_STACK_HDR_NEXT];
         if (runloom_global_stack_n < cap) {
@@ -404,7 +405,7 @@ static void runloom_stack_flush_to_global(void)
         }
         move_head = next;
     }
-    runloom_mutex_unlock(&runloom_global_stack_lock);
+    RUNLOOM_RUNLOCK(&runloom_global_stack_lock, RUNLOOM_RANK_GLOBAL_STACK);
     }
 }
 
@@ -464,7 +465,7 @@ static int runloom_arena_ensure_locked(size_t slot)
 static int runloom_arena_alloc(long n, size_t slot, size_t *start_out)
 {
     int rc = -1;
-    runloom_mutex_lock(&runloom_arena_init_lock);
+    RUNLOOM_RLOCK(&runloom_arena_init_lock, RUNLOOM_RANK_ARENA_INIT);
     if (runloom_arena_ensure_locked(slot) == 0 &&
         runloom_arena_next + (size_t)n <= runloom_arena_cap) {
         *start_out = runloom_arena_next;
@@ -472,7 +473,7 @@ static int runloom_arena_alloc(long n, size_t slot, size_t *start_out)
         runloom_arena_live += (size_t)n;
         rc = 0;
     }
-    runloom_mutex_unlock(&runloom_arena_init_lock);
+    RUNLOOM_RUNLOCK(&runloom_arena_init_lock, RUNLOOM_RANK_ARENA_INIT);
     return rc;
 }
 
@@ -483,11 +484,11 @@ static int runloom_arena_alloc(long n, size_t slot, size_t *start_out)
  * drain; no general free-list yet (a later refinement if fragmentation bites). */
 static void runloom_arena_free(size_t start, long n)
 {
-    runloom_mutex_lock(&runloom_arena_init_lock);
+    RUNLOOM_RLOCK(&runloom_arena_init_lock, RUNLOOM_RANK_ARENA_INIT);
     if (runloom_arena_live >= (size_t)n) runloom_arena_live -= (size_t)n;
     if (runloom_arena_live == 0)                       runloom_arena_next = 0;
     else if (start + (size_t)n == runloom_arena_next)  runloom_arena_next = start;
-    runloom_mutex_unlock(&runloom_arena_init_lock);
+    RUNLOOM_RUNLOCK(&runloom_arena_init_lock, RUNLOOM_RANK_ARENA_INIT);
 }
 
 static void *runloom_stack_arena_carve(size_t size)
@@ -847,22 +848,22 @@ static int runloom_stack_prewarm_global(size_t size, int n)
     while (made < n) {
         void *s;
         int full;
-        runloom_mutex_lock(&runloom_global_stack_lock);
+        RUNLOOM_RLOCK(&runloom_global_stack_lock, RUNLOOM_RANK_GLOBAL_STACK);
         full = (runloom_global_stack_n >= cap);
-        runloom_mutex_unlock(&runloom_global_stack_lock);
+        RUNLOOM_RUNLOCK(&runloom_global_stack_lock, RUNLOOM_RANK_GLOBAL_STACK);
         if (full) break;                          /* depot at cap -> stop */
         s = runloom_stack_map_guarded(size);
         if (s == NULL) break;                     /* mmap exhausted (ENOMEM/VMA cap) */
-        runloom_mutex_lock(&runloom_global_stack_lock);
+        RUNLOOM_RLOCK(&runloom_global_stack_lock, RUNLOOM_RANK_GLOBAL_STACK);
         if (runloom_global_stack_n < cap) {
             ((void **)s)[RUNLOOM_STACK_HDR_NEXT] = (void *)runloom_global_stack_pool;
             ((void **)s)[RUNLOOM_STACK_HDR_SIZE] = (void *)size;
             runloom_global_stack_pool = (void **)s;
             runloom_global_stack_n++;
             made++;
-            runloom_mutex_unlock(&runloom_global_stack_lock);
+            RUNLOOM_RUNLOCK(&runloom_global_stack_lock, RUNLOOM_RANK_GLOBAL_STACK);
         } else {
-            runloom_mutex_unlock(&runloom_global_stack_lock);
+            RUNLOOM_RUNLOCK(&runloom_global_stack_lock, RUNLOOM_RANK_GLOBAL_STACK);
             runloom_stack_unmap_guarded(s, size); /* lost the cap race -> give back */
             break;
         }
@@ -939,9 +940,9 @@ static void *runloom_prewarm_daemon_main(void *arg)
     while (!__atomic_load_n(&runloom_prewarm_daemon_stop, __ATOMIC_ACQUIRE)) {
         int target = __atomic_load_n(&runloom_prewarm_daemon_target, __ATOMIC_RELAXED);
         int cur;
-        runloom_mutex_lock(&runloom_global_stack_lock);
+        RUNLOOM_RLOCK(&runloom_global_stack_lock, RUNLOOM_RANK_GLOBAL_STACK);
         cur = runloom_global_stack_n;
-        runloom_mutex_unlock(&runloom_global_stack_lock);
+        RUNLOOM_RUNLOCK(&runloom_global_stack_lock, RUNLOOM_RANK_GLOBAL_STACK);
         if (cur < target) {
             int want = target - cur;
             if (want > 256) want = 256;                 /* small batch */
@@ -1000,6 +1001,11 @@ void runloom_coro_prewarm_reset_after_fork(void) { }
  * All state is file-static above; sysmon drives the tick, mn_init/_fini/_fork
  * the lifecycle.  Keeping it here (not cross-TU) avoids extern atomics: the
  * getter and the acquire/release counters all touch the same file-statics. */
+
+#if defined(RUNLOOM_HAVE_FCONTEXT) || defined(RUNLOOM_HAVE_UCONTEXT)
+/* The depot + its auto-cap state live in the POSIX stack-pool block above
+ * (same #if).  The Windows Fibers backend has no such pool, so the autocap is
+ * inert there -- see the no-op stubs in the #else below. */
 
 /* Resolve SAFE_MAX once: min(VMA budget, RAM budget).  Conservative -- the cap is
  * only a ceiling; the live-set squeeze in the tick is what tracks the real load. */
@@ -1100,6 +1106,13 @@ void runloom_stack_autocap_reset(void)
     __atomic_store_n(&runloom_stack_cap_cached, 0, __ATOMIC_RELAXED);
     __atomic_store_n(&runloom_stack_autocap_last_ns, 0, __ATOMIC_RELAXED);
 }
+#else
+/* Windows Fibers backend: no POSIX stack depot, so the depot auto-cap is inert.
+ * Stubs keep the symbols (sysmon / mn_init call them cross-TU). */
+void runloom_stack_autocap_init(void)  { }
+void runloom_stack_autocap_tick(void)  { }
+void runloom_stack_autocap_reset(void) { }
+#endif
 
 /* ================================================================== */
 /* Backend: fcontext (inline asm)                                     */
@@ -1511,6 +1524,32 @@ int runloom_coro_done(const runloom_coro_t *c)
 }
 
 #endif  /* RUNLOOM_HAVE_FCONTEXT */
+
+#if !defined(RUNLOOM_HAVE_FCONTEXT)
+/* Bulk coro arena (placement-init N coro structs in one allocation, carve every
+ * stack from one mmap'd block) is an fcontext-backend optimization.  On the
+ * Windows Fibers and the generic ucontext backends it is unavailable, so report
+ * "arena off" (-1): runloom_mn_go_n_bulk then falls back to the per-g spawn path.
+ * The bulk path is opt-in via RUNLOOM_GON_BULK; the default go_n loop never calls
+ * these.  Stubs keep the symbols that mn_sched references regardless of backend. */
+size_t runloom_coro_struct_size(void) { return sizeof(runloom_coro_t); }
+
+int runloom_coro_bulk_init(void *coro_arena, size_t coro_stride,
+                           void *g_arena, size_t g_stride, size_t g_coro_off,
+                           size_t stack_size, long n, runloom_entry_fn entry,
+                           size_t *start_slot_out)
+{
+    (void)coro_arena; (void)coro_stride; (void)g_arena; (void)g_stride;
+    (void)g_coro_off; (void)stack_size; (void)n; (void)entry;
+    if (start_slot_out != NULL) *start_slot_out = 0;
+    return -1;   /* arena unavailable -> caller uses the per-g path */
+}
+
+void runloom_coro_arena_release(size_t start_slot, long n)
+{
+    (void)start_slot; (void)n;
+}
+#endif  /* !RUNLOOM_HAVE_FCONTEXT */
 
 /* ================================================================== */
 /* Backend: Windows Fibers                                            */

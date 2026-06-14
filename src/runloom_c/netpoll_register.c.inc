@@ -4,17 +4,26 @@
 
 
 /* ---- registration ----
- * Edge-triggered, register-once.  On epoll/kqueue the fd is ADDed
- * exactly once with both READ and WRITE arms in ET mode.  All
- * subsequent wait_fd calls just consult the bitmap and skip the
- * epoll_ctl/kevent syscall -- the kernel keeps reporting edges
- * until the fd closes.
+ * LEVEL-triggered, NOT edge-triggered.  (The per-backend comments in the body
+ * are the authoritative contract; this header only summarises them.)
+ *   epoll:  each fd is ADDed LEVEL-triggered (EPOLLIN|EPOLLRDHUP / EPOLLOUT,
+ *           NO EPOLLET, NO EPOLLONESHOT), armed once per direction; a re-park
+ *           whose direction is already armed skips the epoll_ctl entirely
+ *           (0 syscalls on the recv-after-recv hot path).  Because LEVEL
+ *           re-reports a still-ready fd on every epoll_wait, a parker that
+ *           links late -- or partially consumes and re-parks -- is never
+ *           edge-dropped.
+ *   kqueue: each requested direction is armed EV_ADD|EV_ONESHOT and re-armed
+ *           on EVERY park (NOT EV_CLEAR -- EV_CLEAR is edge-triggered and would
+ *           edge-drop a wakeup missed in the EV_ADD..kevent window).
+ * Do NOT "restore" an EPOLLET / EV_CLEAR register-once arm here: that was the
+ * OLD scheme and it reintroduced exactly the edge-drop hangs the body comments
+ * describe (caught by test_netpoll_conformance's fd-reuse case).
  *
- * Safety: the caller MUST try the operation first and only call
- * wait_fd after EAGAIN.  That serialises the "kernel observed not-
- * ready" state with our parking, so the next not-ready->ready
- * transition is guaranteed to deliver an edge.  This is the same
- * pattern Go's netpoll uses.
+ * Caller contract: try the operation first and only call wait_fd after EAGAIN.
+ * This is required for correctness regardless of trigger mode -- it serialises
+ * the "kernel observed not-ready" state with our parking.  (A full
+ * drain-to-EAGAIN is NOT required under LEVEL; it would be under ET.)
  *
  * Stale-fd recovery: socket close auto-clears the kernel
  * registration when the last fd reference goes away.  monkey.py's
@@ -48,19 +57,19 @@ static int runloom_netpoll_register(int fd, int events)
      * (-> MOD to widen the direction set). */
     need = events & (RUNLOOM_NETPOLL_READ | RUNLOOM_NETPOLL_WRITE);
 
-    runloom_mutex_lock(&runloom_pool.lock);
+    RUNLOOM_RLOCK(&runloom_pool.lock, RUNLOOM_RANK_PARKER_POOL);
     cur = runloom_fd_armed_get(fd);
     target = cur | need;
     if (cur != 0 && target == cur) {
-        runloom_mutex_unlock(&runloom_pool.lock);
+        RUNLOOM_RUNLOCK(&runloom_pool.lock, RUNLOOM_RANK_PARKER_POOL);
         return 0;                               /* already armed -> 0 syscalls */
     }
     if (runloom_fd_armed_set(fd, target) != 0) {
-        runloom_mutex_unlock(&runloom_pool.lock);
+        RUNLOOM_RUNLOCK(&runloom_pool.lock, RUNLOOM_RANK_PARKER_POOL);
         errno = ENOMEM;
         return -1;
     }
-    runloom_mutex_unlock(&runloom_pool.lock);
+    RUNLOOM_RUNLOCK(&runloom_pool.lock, RUNLOOM_RANK_PARKER_POOL);
 
     ev.events = 0;
     if (target & RUNLOOM_NETPOLL_READ)  ev.events |= EPOLLIN | EPOLLRDHUP;
@@ -77,9 +86,9 @@ static int runloom_netpoll_register(int fd, int events)
             epoll_ctl(runloom_epoll_fd, EPOLL_CTL_ADD, fd, &ev) == 0) return 0;
     }
     /* Failed: roll the arm mask back so a future caller can retry. */
-    runloom_mutex_lock(&runloom_pool.lock);
+    RUNLOOM_RLOCK(&runloom_pool.lock, RUNLOOM_RANK_PARKER_POOL);
     runloom_fd_armed_set(fd, cur);
-    runloom_mutex_unlock(&runloom_pool.lock);
+    RUNLOOM_RUNLOCK(&runloom_pool.lock, RUNLOOM_RANK_PARKER_POOL);
     return -1;
 #elif defined(RUNLOOM_HAVE_KQUEUE)
     /* Arm ONLY the requested direction(s), ONE-SHOT (NOT EV_CLEAR), re-arming
@@ -100,13 +109,13 @@ static int runloom_netpoll_register(int fd, int events)
      * and EV_ONESHOT delivers once then auto-disables (no thundering herd; the
      * always-writable OUT can't busy-loop the pump).  The bitmap is still kept
      * in sync for unregister, but no longer gates the kevent. */
-    runloom_mutex_lock(&runloom_pool.lock);
+    RUNLOOM_RLOCK(&runloom_pool.lock, RUNLOOM_RANK_PARKER_POOL);
     if (runloom_fd_bit_set(fd) != 0) {
-        runloom_mutex_unlock(&runloom_pool.lock);
+        RUNLOOM_RUNLOCK(&runloom_pool.lock, RUNLOOM_RANK_PARKER_POOL);
         errno = ENOMEM;
         return -1;
     }
-    runloom_mutex_unlock(&runloom_pool.lock);
+    RUNLOOM_RUNLOCK(&runloom_pool.lock, RUNLOOM_RANK_PARKER_POOL);
     {
         struct kevent kev[2];
         int n = 0;
@@ -123,9 +132,9 @@ static int runloom_netpoll_register(int fd, int events)
             else if (kevent(runloom_kqueue_fd, kev, n, NULL, 0, NULL) == 0) return 0;
         }
     }
-    runloom_mutex_lock(&runloom_pool.lock);
+    RUNLOOM_RLOCK(&runloom_pool.lock, RUNLOOM_RANK_PARKER_POOL);
     runloom_fd_bit_clear(fd);
-    runloom_mutex_unlock(&runloom_pool.lock);
+    RUNLOOM_RUNLOCK(&runloom_pool.lock, RUNLOOM_RANK_PARKER_POOL);
     return -1;
 #else
     (void)fd;
@@ -136,13 +145,13 @@ static int runloom_netpoll_register(int fd, int events)
 void runloom_netpoll_unregister(int fd)
 {
 #if defined(RUNLOOM_HAVE_EPOLL) || defined(RUNLOOM_HAVE_KQUEUE)
-    runloom_mutex_lock(&runloom_pool.lock);
+    RUNLOOM_RLOCK(&runloom_pool.lock, RUNLOOM_RANK_PARKER_POOL);
     runloom_fd_bit_clear(fd);
     /* Reset the epoll LEVEL arm mask: a reused fd number with a stale "armed"
      * mask would skip its EPOLL_CTL_ADD and never be re-armed (a hang).  All
      * real close paths call this hook, so the mask tracks fd identity. */
     runloom_fd_armed_set(fd, 0);
-    runloom_mutex_unlock(&runloom_pool.lock);
+    RUNLOOM_RUNLOCK(&runloom_pool.lock, RUNLOOM_RANK_PARKER_POOL);
     /* No kernel syscall: epoll/kqueue auto-remove the fd when the
      * last reference closes.  Calling EPOLL_CTL_DEL after close
      * would race with fd reuse anyway. */
@@ -186,14 +195,14 @@ void runloom_netpoll_release_if_idle(int fd)
      * (an idle fd with no waiter) and its later register() re-ADDs fresh
      * (armed==0).  (M:N hub pools are not in play -- only the bridge calls this,
      * and it never shares an fd with a concurrently-running hub.) */
-    runloom_mutex_lock(&runloom_pool.lock);
+    RUNLOOM_RLOCK(&runloom_pool.lock, RUNLOOM_RANK_PARKER_POOL);
     if (((size_t)fd >= runloom_pool.by_fd_cap || runloom_pool.by_fd[fd] == NULL)
         && runloom_fd_armed_get(fd) != 0) {
         runloom_fd_armed_set(fd, 0);
         runloom_fd_bit_clear(fd);
         epoll_ctl(runloom_epoll_fd, EPOLL_CTL_DEL, fd, NULL);
     }
-    runloom_mutex_unlock(&runloom_pool.lock);
+    RUNLOOM_RUNLOCK(&runloom_pool.lock, RUNLOOM_RANK_PARKER_POOL);
 #else
     /* kqueue re-arms ONE-SHOT on every park (no persistent arm to go stale) and
      * select needs no pre-registration, so neither has the epoll fd-reuse bug. */
@@ -259,7 +268,7 @@ int runloom_netpoll_sweep_idle(void *hub_opaque, long long threshold_ns)
         return 0;
     }
     now = monotonic_ns();
-    runloom_mutex_lock(&pool->lock);
+    RUNLOOM_RLOCK(&pool->lock, RUNLOOM_RANK_PARKER_POOL);
     /* Churn throttle.  Compute this pool's arrival rate since the last
      * sweep eval; if it exceeds RUNLOOM_SWEEP_MAX_CHURN links/sec, skip the
      * walk entirely.  Rationale (perf-confirmed): the active-churn tail
@@ -292,7 +301,7 @@ int runloom_netpoll_sweep_idle(void *hub_opaque, long long threshold_ns)
             pool->churn_last_links = links;
             pool->churn_last_ns = now;
             if (throttle) {
-                runloom_mutex_unlock(&pool->lock);
+                RUNLOOM_RUNLOCK(&pool->lock, RUNLOOM_RANK_PARKER_POOL);
                 return 0;
             }
         }
@@ -333,7 +342,7 @@ int runloom_netpoll_sweep_idle(void *hub_opaque, long long threshold_ns)
         pool->sweep_cursor = p;                 /* NULL at end -> next resets to head */
         pool->sweep_cursor_gen = (p != NULL) ? p->gen : 0;
     }
-    runloom_mutex_unlock(&pool->lock);
+    RUNLOOM_RUNLOCK(&pool->lock, RUNLOOM_RANK_PARKER_POOL);
     for (i = 0; i < n; i++) {
         runloom_coro_madvise_idle(batch[i]->coro);
         /* Companion reclaim: drop the parked Python g's idle datastack-

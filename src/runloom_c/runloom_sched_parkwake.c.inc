@@ -123,6 +123,20 @@ long runloom_foreign_park_inflight(void)
     return __atomic_load_n(&runloom_foreign_park_count, __ATOMIC_ACQUIRE);
 }
 
+/* Set the wait-reason hint for the current fiber; consumed (and cleared) at its
+ * next park_safe so the deadlock/wedge dump can say WHY it is blocked.  A no-op
+ * off a fiber.  Peeks the current g (never lazily allocates a sched -- safe on a
+ * foreign thread).  Diagnostic only. */
+void runloom_set_current_wait_reason(int reason)
+{
+    runloom_g_t *g = (runloom_mn_current_hub_opaque() != NULL)
+                     ? runloom_mn_tls_current_g()
+                     : runloom_sched_peek_current();
+    if (g == NULL) return;
+    if (reason < 0 || reason >= RUNLOOM_WR__LAST) reason = RUNLOOM_WR_SYNC;
+    g->wait_reason_hint = (unsigned char)reason;
+}
+
 int runloom_park_generic(int foreign_wakeable)
 {
     void *hub = runloom_mn_current_hub_opaque();
@@ -159,6 +173,11 @@ int runloom_park_generic(int foreign_wakeable)
              * hub resumes us from the re-queue. */
         }
         runloom_sched_park_current();   /* mark off-queue + snap */
+        /* Consume the wait-reason hint (set by the higher-level primitive);
+         * default SYNC.  Cleared so it can't leak to a later park. */
+        g->wait_reason = (g->wait_reason_hint != (unsigned char)RUNLOOM_WR_NONE)
+                         ? g->wait_reason_hint : (unsigned char)RUNLOOM_WR_SYNC;
+        g->wait_reason_hint = (unsigned char)RUNLOOM_WR_NONE;
         runloom_g_state_set(g, RUNLOOM_GST_PARKED_SAFE);
         runloom_coro_yield();           /* hub_main resumes here on re-queue */
         if (foreign_wakeable) runloom_foreign_park_release();
@@ -233,7 +252,16 @@ void runloom_sched_drain_timers(runloom_sched_t *s, double now)
         runloom_timer_entry_t e;
         int expected = 1;
         if (top->deadline > now) break;          /* min-heap: nothing else due */
-        runloom_timer_pop(s, &e);
+        /* Guard on the pop return so e (and e.g) is provably initialized before
+         * use -- size>0 here means it always pops, but -fanalyzer can't prove the
+         * invariant and warned "uninitialized e.g" at the CAS below. */
+        if (!runloom_timer_pop(s, &e)) break;
+        /* Life-cycle oracle (RUNLOOM_DBG_GSTATE; zero-cost otherwise): the timer
+         * entry holds a ref to e.g (incref at runloom_timer_push, decref below), so
+         * e.g MUST still be live here -- CASing parked_safe on a DONE/FREED g is the
+         * timer-entry UAF class (the p49_barrier_stress flake the entry-ref fix
+         * closed).  Catch a regression that drops the entry ref early, at the CAS. */
+        RUNLOOM_G_ASSERT_NOT(e.g, RUNLOOM_GST_MASK_DEAD);
         if (__atomic_compare_exchange_n(&e.g->parked_safe, &expected, 0, 0,
                                         __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
             void *ph = __atomic_load_n(&e.g->park_hub, __ATOMIC_ACQUIRE);
@@ -245,7 +273,25 @@ void runloom_sched_drain_timers(runloom_sched_t *s, double now)
             }
         }
         /* CAS failed: a real wake already claimed this park -> discard. */
+        runloom_g_decref(e.g);   /* release the entry's ref (paired with the
+                                  * incref in runloom_timer_push).  A woken-or-
+                                  * stranded g is now safely freeable; a g we just
+                                  * re-queued is kept alive by the queue/run ref. */
     }
+}
+
+/* Teardown sweep: release the g-ref held by every timer entry still on the heap
+ * (entries with future deadlines that never fired) and empty the heap.  Without
+ * this, those refs leak -> the gs they pin are never freed.  Called from mn_fini
+ * (per hub sched, before the hubs are freed) and at single-thread run end. */
+void runloom_sched_release_timers(runloom_sched_t *s)
+{
+    Py_ssize_t j;
+    if (s == NULL || s->timer_heap == NULL) return;
+    for (j = 1; j <= s->timer_size; j++) {
+        runloom_g_decref(s->timer_heap[j].g);
+    }
+    s->timer_size = 0;
 }
 
 void runloom_sched_wake(runloom_g_t *g)
@@ -270,7 +316,7 @@ void runloom_sched_wake(runloom_g_t *g)
      * so an idle epoll_wait wakes to drain the list.  Same mechanism as
      * runloom_sched_wake_safe; the kick eventfd is level-triggered + non-exclusive
      * so every blocked pumper wakes and drains its own wake_list. */
-    runloom_mutex_lock(&owner->wake_list_lock);
+    RUNLOOM_RLOCK(&owner->wake_list_lock, RUNLOOM_RANK_WAKE_LIST);
     g->wake_next = NULL;
     if (owner->wake_list_tail != NULL) {
         owner->wake_list_tail->wake_next = g;
@@ -280,7 +326,7 @@ void runloom_sched_wake(runloom_g_t *g)
         __atomic_store_n(&owner->wake_list_head, g, __ATOMIC_RELEASE);
     }
     owner->wake_list_tail = g;
-    runloom_mutex_unlock(&owner->wake_list_lock);
+    RUNLOOM_RUNLOCK(&owner->wake_list_lock, RUNLOOM_RANK_WAKE_LIST);
     runloom_netpoll_wake_pump();
 }
 
@@ -387,7 +433,7 @@ void runloom_sched_wake_safe(runloom_g_t *g)
                  * pool worker, iouring CQE).  Our ready ring is single-consumer
                  * and not cross-thread-safe; route to the owner's thread-safe
                  * wake_list, which its own drain consumes. */
-                runloom_mutex_lock(&s->wake_list_lock);
+                RUNLOOM_RLOCK(&s->wake_list_lock, RUNLOOM_RANK_WAKE_LIST);
                 g->wake_next = NULL;
                 if (s->wake_list_tail != NULL) {
                     s->wake_list_tail->wake_next = g;
@@ -399,7 +445,7 @@ void runloom_sched_wake_safe(runloom_g_t *g)
                     __atomic_store_n(&s->wake_list_head, g, __ATOMIC_RELEASE);
                 }
                 s->wake_list_tail = g;
-                runloom_mutex_unlock(&s->wake_list_lock);
+                RUNLOOM_RUNLOCK(&s->wake_list_lock, RUNLOOM_RANK_WAKE_LIST);
             }
         }
         /* CAS failed: g was either running (parked_safe==0 already)
@@ -463,6 +509,11 @@ void runloom_sched_park_safe(void)
          * dequeue g on its next iteration. */
     }
 
+    /* Consume the wait-reason hint (set by the higher-level primitive); default
+     * SYNC.  Cleared so it can't leak to a later park. */
+    g->wait_reason = (g->wait_reason_hint != (unsigned char)RUNLOOM_WR_NONE)
+                     ? g->wait_reason_hint : (unsigned char)RUNLOOM_WR_SYNC;
+    g->wait_reason_hint = (unsigned char)RUNLOOM_WR_NONE;
     runloom_pystate_snap(&g->snap);
     runloom_g_state_set(g, RUNLOOM_GST_PARKED_SAFE);
     runloom_coro_yield();

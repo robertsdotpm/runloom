@@ -19,11 +19,11 @@ int runloom_iouring_available(void)
          * it across init so no submit_sqe (also sub_lock) sees a half-built
          * ring. */
         runloom_iouring_lock_ensure_inited();
-        runloom_mutex_lock(&runloom_iouring_state.sub_lock);
+        RUNLOOM_RLOCK(&runloom_iouring_state.sub_lock, RUNLOOM_RANK_IOURING_SUB);
         if (runloom_iouring_state.initialised == 0) {
             runloom_iouring_lazy_init();
         }
-        runloom_mutex_unlock(&runloom_iouring_state.sub_lock);
+        RUNLOOM_RUNLOCK(&runloom_iouring_state.sub_lock, RUNLOOM_RANK_IOURING_SUB);
     }
     return __atomic_load_n(&runloom_iouring_state.initialised, __ATOMIC_ACQUIRE) == 1;
 }
@@ -72,7 +72,7 @@ void runloom_iouring_pbuf_return(unsigned bid)
     if (bid >= s->pool_n) return;
     bufs = (struct runloom_iouring_buf *)s->bring_mem;
 
-    runloom_mutex_lock(&s->bring_lock);
+    RUNLOOM_RLOCK(&s->bring_lock, RUNLOOM_RANK_IOURING_BRING);
     /* The kernel's tail is overlaid on bufs[0].resv.  Load with
      * acquire so we observe consumer-side advancement (the kernel
      * advances head as it takes buffers, but tail is purely producer-
@@ -90,7 +90,7 @@ void runloom_iouring_pbuf_return(unsigned bid)
      * below so the kernel sees the new entry. */
     __atomic_store_n(&bufs[0].resv,
                      (uint16_t)(tail + 1), __ATOMIC_RELEASE);
-    runloom_mutex_unlock(&s->bring_lock);
+    RUNLOOM_RUNLOCK(&s->bring_lock, RUNLOOM_RANK_IOURING_BRING);
 }
 
 /* Submit one SQE.  Caller has filled sqe_template (opcode/fd/addr/len/
@@ -103,7 +103,7 @@ static int runloom_iouring_submit_sqe(struct io_uring_sqe sqe_template,
     unsigned tail, head, idx;
     int n;
 
-    runloom_mutex_lock(&s->sub_lock);
+    RUNLOOM_RLOCK(&s->sub_lock, RUNLOOM_RANK_IOURING_SUB);
 
     /* Wait for a free SQE slot.  Ring is 64 deep; in practice we
      * never spin here for the workloads runloom targets, but if every
@@ -116,9 +116,9 @@ static int runloom_iouring_submit_sqe(struct io_uring_sqe sqe_template,
         head = __atomic_load_n(s->sq_head, __ATOMIC_ACQUIRE);
         if ((tail - head) < s->sq_entries) break;
         /* Ring full -- spin-drain CQ to free slots. */
-        runloom_mutex_unlock(&s->sub_lock);
+        RUNLOOM_RUNLOCK(&s->sub_lock, RUNLOOM_RANK_IOURING_SUB);
         runloom_iouring_drain();
-        runloom_mutex_lock(&s->sub_lock);
+        RUNLOOM_RLOCK(&s->sub_lock, RUNLOOM_RANK_IOURING_SUB);
     }
 
     idx = tail & s->sq_mask;
@@ -131,7 +131,7 @@ static int runloom_iouring_submit_sqe(struct io_uring_sqe sqe_template,
      * return immediately.  The CQE will arrive whenever the op
      * completes; the eventfd notifies the netpoll pump. */
     n = sys_io_uring_submit_eintr(s->ring_fd, 1);   /* retry on EINTR */
-    runloom_mutex_unlock(&s->sub_lock);
+    RUNLOOM_RUNLOCK(&s->sub_lock, RUNLOOM_RANK_IOURING_SUB);
     if (n < 0) return -1;
     __atomic_add_fetch(&runloom_iouring_inflight_count, 1, __ATOMIC_ACQ_REL);
     return 0;
@@ -168,6 +168,10 @@ void runloom_iouring_drain(void)
      * free).  The CAS turns the head advance into a per-CQE claim:
      * exactly one drainer succeeds for each CQE; the loser re-loads
      * and retries. */
+    /* Pull any kernel-side overflowed completions back into the ring before
+     * draining -- multishot recv can post more CQEs than the ring holds, and a
+     * dropped completion permanently strands the parked fiber. */
+    runloom_iouring_flush_cq_overflow(s->sq_flags, s->ring_fd);
     for (;;) {
         unsigned head = __atomic_load_n(s->cq_head, __ATOMIC_ACQUIRE);
         unsigned ct   = __atomic_load_n(s->cq_tail, __ATOMIC_ACQUIRE);

@@ -511,7 +511,16 @@ class _ThreadPoolBackend(_BlockingBackend):
     def submit(self, fn, args, kwargs):
         if kwargs is None:
             kwargs = {}
-        p = _Parker()
+        # Parker mode.  DEFAULT = FD-mode (pipe + netpoll): correct but each
+        # offload churns ~10 syscalls, so throughput caps near ~52K/s under high
+        # concurrency.  RUNLOOM_BLOCKPOOL_INMEM=1 opts into an inmem parker (0 fds,
+        # woken by g.wake()) -> ~169K/s (3.2x), BUT an inmem park is NOT on the
+        # netpoll, so it loses the wait_fd signal-interrupt delivery: a signal
+        # handler that RAISES while parked on an offloaded blocking call no longer
+        # propagates out of the call (breaks EINTR-during-offload semantics, e.g.
+        # test_select_interrupt_exc).  So inmem stays opt-in for offload-heavy
+        # workloads that don't rely on signal-interrupting a blocking offload.
+        p = _Parker(inmem=(os.environ.get("RUNLOOM_BLOCKPOOL_INMEM") == "1"))
         # box = [result, exception, done].  The done flag is essential:
         # a pooled _Parker can carry a stale wake byte and runloom_c.wait_fd
         # can wake spuriously, so a single park() may return BEFORE the
