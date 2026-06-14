@@ -897,36 +897,43 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
             /* Resume the value we validate (one load of g->coro, never a reload
              * at the call site).  A validly-spawned, validly-queued g ALWAYS has
              * owner set + an entry fn (callable or c_entry) + a 16-aligned
-             * canonical coro.  On weakly-ordered arm64 under M:N high spawn/steal
-             * churn a STALE / half-published queue entry can surface here: the g
-             * reads back calloc-zero (owner=NULL, no entry fn) with a stale,
-             * often non-canonical coro -> resuming it SIGSEGVs in coro_resume.
-             * Such an entry is a phantom -- the real g ran via its valid entry,
-             * so skipping causes no lost work / hang (verified: the connect-storm
-             * completes with pend=0 when these are skipped).  Treat it exactly
-             * like the coro==NULL / done case above: drop the queue ref and skip
-             * rather than crash.  SAFETY NET: the root cross-hub g-publication
-             * race is tracked separately for an FV-gated barrier fix. */
+             * canonical coro.
+             *
+             * DEFENSE-IN-DEPTH (proven non-load-bearing): the arm64 crash this
+             * once caught -- a queue entry pointing at a FREED-then-reused g
+             * struct (owner=NULL / garbage coro -> SIGSEGV in coro_resume) -- is
+             * now eliminated at the source.  The crasher was a stale wake_g (the
+             * netpoll dup-wake) reaching hub_submit with a pointer to an already-
+             * freed g whose struct had been returned to the OS and reused by a
+             * non-runloom malloc (the [BADG] dumps showed garbage magic, not the
+             * live/dead runloom canaries).  Two fixes close it: (1) hub_submit takes
+             * the queue ref via runloom_g_try_incref BEFORE touching the g, so a
+             * stale wake on a still-VALID freed g (refcount 0) bails [CBMC:
+             * verify/cbmc/sched_qref_cbmc.c]; (2) runloom_g_slab_free no longer
+             * frees g STRUCTS to the OS, so try_incref always reads a real
+             * refcount instead of garbage on reused memory.  Validated: 0/16
+             * connect-storm crashes on arm64 with this block compiled OUT, BADG
+             * dumps drop from 3/10 dangerous cases to 0/10.  The block is kept as
+             * a cheap (a few comparisons) crash-resistance assert for any future
+             * weak-memory regression; on the happy path it never fires.  Skipping
+             * a flagged entry is safe (drop the queue ref + continue, like the
+             * coro==NULL / done case above): a real g ran via its valid entry. */
             runloom_coro_t *cp = g->coro;
             if (g->owner == NULL ||
                 (g->callable == NULL && g->c_entry == NULL) ||
                 cp == NULL || ((uintptr_t)cp >> 47) != 0 ||
                 ((uintptr_t)cp & 0xf) != 0 || (uintptr_t)cp < 0x10000) {
 #ifdef RUNLOOM_DBG_BADCORO
-                /* These entries are PERMANENTLY invalid, not a publication delay:
-                 * a 200k acquire-fenced re-read spin never saw owner/coro resolve
-                 * (owner stays NULL, coro stays a non-canonical arena value).  So
-                 * this is a wrong / never-initialized g pointer, NOT a missing
-                 * barrier -- skipping is correct (the connect-storm finishes
-                 * pend=0).  Dump identity for source-hunting. */
-                /* Raw first 8 words of *g to identify what g actually points to
-                 * (real g vs coro vs stack vs freed slab slot) -- the source hunt. */
-                unsigned long long *w = (unsigned long long *)g;
-                char dbuf[320];
+                /* Source-hunt dump (off by default).  Post-fix this should never
+                 * print; magic distinguishes live (600dc0de) / slab-freed (dead)
+                 * / OS-reused (other) memory, done splits completed (benign) from
+                 * the once-dangerous non-completed case. */
+                char dbuf[256];
                 int dm = snprintf(dbuf, sizeof dbuf,
-                    "[BADG] g=%p src=%d vic=%d fr=%d w0=%llx w1=%llx w2=%llx w3=%llx w4=%llx w5=%llx\n",
-                    (void *)g, gsrc, gvic, from_runq,
-                    w[0], w[1], w[2], w[3], w[4], w[5]);
+                    "[BADG] done=%d magic=%x owner=%p coro=%p call=%p centry=%p src=%d g=%p\n",
+                    (int)__atomic_load_n(&g->done, __ATOMIC_ACQUIRE), g->magic,
+                    (void *)g->owner, (void *)cp, (void *)g->callable,
+                    (void *)g->c_entry, gsrc, (void *)g);
                 if (dm > 0) (void)write(2, dbuf, (size_t)dm);
 #endif
                 h->sched.current = NULL;
