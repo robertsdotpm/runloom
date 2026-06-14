@@ -3,6 +3,33 @@
  * these definitions depend on. */
 
 
+/* ---- randomized work-stealing victim order (Go's randomOrder) ----
+ * A fixed linear scan that always starts at hub 0 makes K idle hubs collide on
+ * hub 0's single-element steal CAS simultaneously, then advance together to hub
+ * 1, repeating the convoy -- thundering-herd CAS contention + load asymmetry at
+ * high hub counts.  Instead each hub enumerates victims in a DISTINCT order:
+ * start at its own id and step by a stride coprime with the hub count (so the
+ * full residue set 0..count-1 is visited exactly once).  The start + stride are
+ * derived deterministically from h->id, so the order is fixed per hub (no
+ * wall-clock entropy) and the controlled-replay schedule is unchanged -- and in
+ * replay mode steal is disabled anyway (runloom_mn_ctrl_no_steal). */
+static int runloom_steal_gcd(int a, int b)
+{
+    while (b != 0) { int t = a % b; a = b; b = t; }
+    return a;
+}
+
+/* A stride in [1, n-1] coprime with n, varied by the hub id.  Always returns
+ * (s==1 is coprime with every n, and 1 is in the 1..n-1 cycle, so it
+ * terminates).  Caller guarantees n >= 2. */
+static int runloom_steal_stride(int n, int id)
+{
+    int s;
+    if (n < 3) return 1;                          /* n==2: stride 1 is the only option */
+    for (s = 1 + (id % (n - 1)); ; s = (s % (n - 1)) + 1)
+        if (runloom_steal_gcd(s, n) == 1) return s;
+}
+
 /* gc-stop-the-world fairness (free-threaded 3.13+ only).
  *
  * A fiber that loops a stop-the-world operation -- a tight `gc.collect()`
@@ -341,8 +368,16 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
             if (g != NULL) from_runq = 1;
         }
         if (g == NULL) {
-            int i;
-            for (i = 0; !runloom_mn_ctrl_no_steal() && i < runloom_hub_count; i++) {
+          if (!runloom_mn_ctrl_no_steal() && runloom_hub_count >= 2) {
+            /* Randomized coprime-stride victim order (see runloom_steal_stride):
+             * each hub starts at its own id and steps by a coprime stride, so K
+             * idle hubs don't all hammer hub 0's steal CAS in lockstep. */
+            int n = runloom_hub_count;
+            int stride = runloom_steal_stride(n, h->id);
+            int pos = h->id;
+            int k;
+            for (k = 0; k < n; k++, pos += stride) {
+                int i = pos % n;
                 if (i == h->id) continue;
                 g = (runloom_g_t *)runloom_cldeque_steal(&runloom_hubs[i].deque);
                 if (g != NULL) {
@@ -361,6 +396,7 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
                     break;
                 }
             }
+          }
             if (g == NULL) {
                 long total = 0;
                 int j;
