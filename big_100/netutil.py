@@ -43,6 +43,16 @@ def recv_until(sock, delim=b"\n", limit=65536):
 def listen_tcp(host=None, port=0, backlog=4096, family=socket.AF_INET):
     if host is None:
         host = _DEFAULT_HOST
+    # A connect storm larger than the aggregate listen backlog (servers *
+    # min(backlog, somaxconn)) overflows the kernel SYN queue: excess SYNs are
+    # dropped, so those connects park in slow SYN-retransmit backoff (no error,
+    # just stalled) and the run can't drain within its time budget -> watchdog
+    # HANG.  For high-N runs raise BOTH this and kern.ipc.somaxconn (Linux:
+    # net.core.somaxconn) above the peak concurrent connect count.  Default is
+    # unchanged; BIG100_BACKLOG overrides it.
+    bl = os.environ.get("BIG100_BACKLOG")
+    if bl and bl.strip().isdigit():
+        backlog = int(bl)
     s = socket.socket(family, socket.SOCK_STREAM)
     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     s.bind((host, port))
@@ -81,14 +91,45 @@ def accept_timeout(srv, timeout_ms=200):
 def serve_forever(H, srv, on_conn):
     """Run an accept loop that self-terminates when H.running() goes false
     (no reliance on close() waking accept), spawning on_conn(conn, addr) per
-    connection.  Closes srv on exit."""
+    connection.  Closes srv on exit.
+
+    Edge-triggered DRAIN accept: per readiness wakeup we accept the WHOLE
+    pending backlog (loop until EAGAIN) before parking again.  Accepting just
+    one connection per wait_fd park caps accept throughput at the netpoll pump
+    cadence -- which under a heavy connect storm collapses: the kernel backlog
+    fills faster than one-accept-per-wakeup drains it, so thousands of clients
+    connect (SYN-ACK from the backlog) but are never accept()ed, pile up parked
+    on recv waiting for an echo that never comes, and the run wedges at
+    teardown.  Draining the backlog each wakeup lifts accept to the
+    accept()-syscall rate (tens of thousands/s) and keeps the pipeline flowing.
+    """
+    import runloom_c
+    try:
+        fd = srv.fileno()
+    except (OSError, ValueError):
+        return
     try:
         while H.running():
-            res = accept_timeout(srv, 200)
-            if res is None:
-                continue
-            conn, addr = res
-            on_conn(conn, addr)
+            got_one = False
+            while H.running():
+                try:
+                    cfd, addr = srv._accept()
+                except (BlockingIOError, InterruptedError):
+                    break          # backlog drained -> park below
+                except OSError:
+                    break
+                conn = socket.socket(srv.family, srv.type, srv.proto,
+                                     fileno=cfd)
+                conn.setblocking(False)
+                on_conn(conn, addr)
+                got_one = True
+            if not got_one:
+                # Nothing pending: park until the listen fd is readable, with a
+                # 200ms re-probe so running() is re-checked at teardown (close()
+                # does not wake a parked accept -- FINDINGS BUG #5).
+                if fd < 0:
+                    break
+                runloom_c.wait_fd(fd, 1, 200)
     finally:
         close_quiet(srv)
 

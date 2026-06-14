@@ -17,6 +17,13 @@ _EPOLLHUP = getattr(_select_mod, "EPOLLHUP", 0)
 # The cooperative path needs a real epoll AND its event constants (Linux).
 _CO_EPOLL_OK = _real_select_epoll is not None and _EPOLLIN is not None
 
+# kqueue constants for the cooperative select.select reimplementation (macOS/BSD).
+_KQ_FILTER_READ = getattr(_select_mod, "KQ_FILTER_READ", 0)
+_KQ_FILTER_WRITE = getattr(_select_mod, "KQ_FILTER_WRITE", 2)
+_KQ_EV_ADD = getattr(_select_mod, "KQ_EV_ADD", 1)
+_KQ_EV_ERROR = getattr(_select_mod, "KQ_EV_ERROR", 0x4000)
+_CO_KQUEUE_OK = _real_select_kqueue is not None
+
 # ============================================================
 # select.select -- cooperative, on netpoll
 #
@@ -123,6 +130,78 @@ def _co_select_via_epoll(rlist, wlist, xlist, timeout):
         ep.close()
 
 
+def _co_select_via_kqueue(rlist, wlist, xlist, timeout):
+    """Cooperative select on a transient kqueue; raises _SelectFallback if any
+    fd can't be registered (caller then offloads the whole call).  macOS/BSD."""
+    rfds = {}; wfds = {}; xfds = {}
+    for o in rlist:
+        fd = _fd_of(o); rfds[fd] = o
+    for o in wlist:
+        fd = _fd_of(o); wfds[fd] = o
+    for o in xlist:
+        fd = _fd_of(o); xfds[fd] = o
+
+    kq = _real_select_kqueue()
+    try:
+        changelist = []
+        for fd in rfds:
+            changelist.append(_select_mod.kevent(fd, _KQ_FILTER_READ, _KQ_EV_ADD))
+        for fd in wfds:
+            changelist.append(_select_mod.kevent(fd, _KQ_FILTER_WRITE, _KQ_EV_ADD))
+        # xlist (exceptional conditions) don't have a direct kqueue mapping;
+        # skip them (matches the epolling behavior for non-standard events).
+
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while True:
+            # Non-blocking drain: apply changelist (register only) and collect events.
+            try:
+                ready = kq.control(changelist, 1000, 0)  # max 1000 events per drain
+                changelist = []  # Only apply changes on first iteration
+            except (OSError, ValueError):
+                raise _SelectFallback()
+            if ready:
+                # Map kqueue events back to select's (r, w, x) lists.
+                r = []; w = []; x = []
+                for ev in ready:
+                    fd = ev.ident
+                    if ev.flags & _KQ_EV_ERROR:
+                        # Error on this fd: report in all requested lists (like epoll).
+                        if fd in rfds:
+                            r.append(rfds[fd])
+                        if fd in wfds:
+                            w.append(wfds[fd])
+                        if fd in xfds:
+                            x.append(xfds[fd])
+                    else:
+                        if ev.filter == _KQ_FILTER_READ and fd in rfds:
+                            r.append(rfds[fd])
+                        elif ev.filter == _KQ_FILTER_WRITE and fd in wfds:
+                            w.append(wfds[fd])
+                return r, w, x
+            if timeout is not None and timeout <= 0:
+                return [], [], []
+            if deadline is None:
+                wait_ms = 50  # reprobe frequently on macOS (kqueue fd wake is reliable)
+            else:
+                rem = deadline - time.monotonic()
+                if rem <= 0:
+                    return [], [], []
+                wait_ms = max(1, int(min(0.05, rem) * 1000))
+            try:
+                runloom_c.wait_fd(kq.fileno(), READ, wait_ms)  # park on kqueue fd
+            except OSError:
+                raise _SelectFallback()
+    finally:
+        try:
+            if _netpoll_unregister is not None:
+                fd = kq.fileno()
+                if fd >= 0:
+                    _netpoll_unregister(fd)
+        except (OSError, ValueError):
+            pass
+        kq.close()
+
+
 def _patched_select(rlist, wlist, xlist, timeout=None):
     if not _in_fiber():
         return _orig_select_select(rlist, wlist, xlist, timeout)
@@ -145,16 +224,22 @@ def _patched_select(rlist, wlist, xlist, timeout=None):
             _co_sleep(timeout)
         return [], [], []
 
-    # Cooperative path: register the fds on a transient epoll and park on ITS
-    # fd via netpoll -- no select_select_impl fat frame, no pool thread.
+    # Cooperative path: register the fds on a transient epoll/kqueue and park
+    # on ITS fd via netpoll -- no select_select_impl fat frame, no pool thread.
     if _CO_EPOLL_OK:
         try:
             return _co_select_via_epoll(rlist, wlist, xlist, timeout)
         except _SelectFallback:
             pass
 
-    # Fallback (no epoll / non-epollable fd): run the blocking OS select on a
-    # pool thread (8 MB stack -- the fat frame is fine there) and PARK this
+    if _CO_KQUEUE_OK:
+        try:
+            return _co_select_via_kqueue(rlist, wlist, xlist, timeout)
+        except _SelectFallback:
+            pass
+
+    # Fallback (no epoll/kqueue / non-epollable fd): run the blocking OS select
+    # on a pool thread (8 MB stack -- the fat frame is fine there) and PARK this
     # fiber on the offload.  We never call _orig_select_select inline: its
     # ~51 KB frame overflows the fiber's C stack.  A normalised timeout<=0
     # stays non-blocking on the pool thread.
