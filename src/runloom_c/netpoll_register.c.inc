@@ -29,6 +29,38 @@
  * registration when the last fd reference goes away.  monkey.py's
  * close hook calls runloom_netpoll_unregister so the bitmap stays in
  * sync with the kernel for fd reuse. */
+
+#if defined(RUNLOOM_HAVE_EPOLL)
+/* RUNLOOM_DBG_NETPOLL -- a debug-gated tripwire for the stale-arm / fd-reuse
+ * hazard.  The per-fd arm cache (runloom_fd_armed) is PROCESS-GLOBAL and is
+ * cleared only by netpoll_unregister.  An fd closed WITHOUT unregister leaves
+ * the cache saying "armed" while the kernel has already dropped the
+ * registration; the most common way to hit this is NOT a raw wait_fd user but
+ * a socket DROPPED TO THE GC -- CPython's socket C-dealloc closes the raw fd
+ * directly, bypassing the monkey-patched close() that calls unregister.  The
+ * next wait_fd on that fd NUMBER then takes register's already-armed skip,
+ * never re-ADDs, and parks until its timeout (forever on an untimed wait) even
+ * though data is ready.
+ *
+ * When this flag is set, the skip path VALIDATES itself with a single
+ * EPOLL_CTL_MOD: ENOENT proves the arm is stale (fd not in the epoll set), so
+ * we warn -- naming the fd -- and self-heal by re-ADDing, turning a silent
+ * hang into a loud, pinpointed diagnostic.  OFF by default, so the
+ * recv-after-recv hot path keeps its zero-syscall skip and this never runs in
+ * production. */
+static int runloom_netpoll_dbg_stale_check(void)
+{
+    static int v = -1;
+    int cur = __atomic_load_n(&v, __ATOMIC_RELAXED);
+    if (cur < 0) {
+        const char *e = getenv("RUNLOOM_DBG_NETPOLL");
+        cur = (e != NULL && e[0] != '\0' && e[0] != '0') ? 1 : 0;
+        __atomic_store_n(&v, cur, __ATOMIC_RELAXED);
+    }
+    return cur;
+}
+#endif
+
 static int runloom_netpoll_register(int fd, int events)
 {
 #if defined(RUNLOOM_HAVE_EPOLL)
@@ -62,6 +94,28 @@ static int runloom_netpoll_register(int fd, int events)
     target = cur | need;
     if (cur != 0 && target == cur) {
         RUNLOOM_RUNLOCK(&runloom_pool.lock, RUNLOOM_RANK_PARKER_POOL);
+        if (runloom_netpoll_dbg_stale_check()) {
+            /* Validate the zero-syscall skip: MOD the already-armed direction
+             * set; ENOENT means the fd is NOT actually in the epoll set -- a
+             * stale arm from an fd closed without unregister (commonly a GC'd
+             * socket).  Warn + self-heal so the wait does not silently hang. */
+            struct epoll_event chk;
+            chk.events = 0;
+            if (cur & RUNLOOM_NETPOLL_READ)  chk.events |= EPOLLIN | EPOLLRDHUP;
+            if (cur & RUNLOOM_NETPOLL_WRITE) chk.events |= EPOLLOUT;
+            chk.data.fd = fd;
+            if (epoll_ctl(runloom_epoll_fd, EPOLL_CTL_MOD, fd, &chk) != 0 &&
+                errno == ENOENT) {
+                fprintf(stderr,
+                    "[runloom-netpoll] STALE ARM on fd %d (armed mask 0x%x) -- "
+                    "fd is not in the epoll set: it was closed WITHOUT "
+                    "netpoll_unregister (a socket dropped to the GC bypasses "
+                    "the monkey close hook). Re-ADDing to self-heal; the "
+                    "wait_fd would otherwise park until timeout.\n",
+                    fd, (unsigned)cur);
+                (void)epoll_ctl(runloom_epoll_fd, EPOLL_CTL_ADD, fd, &chk);
+            }
+        }
         return 0;                               /* already armed -> 0 syscalls */
     }
     if (runloom_fd_armed_set(fd, target) != 0) {
