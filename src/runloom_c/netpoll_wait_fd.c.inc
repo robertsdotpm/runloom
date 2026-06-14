@@ -128,6 +128,7 @@ int runloom_netpoll_wait_fd(int fd, int events, long long timeout_ns)
     runloom_parked_t *park;
     runloom_sched_t *s;
     int ready_mask = 0;
+    int new_earliest_deadline = 0;
     void *hub_opaque;
     runloom_g_t *current_g;
     runloom_parker_pool_t *pool;
@@ -194,8 +195,22 @@ int runloom_netpoll_wait_fd(int fd, int events, long long timeout_ns)
      * a previous parker being unlinked-on-wake and a new one being
      * linked. */
     runloom_mutex_lock(&pool->lock);
-    runloom_parker_link(pool, park);
+    {
+        /* Cross-hub poller-break (Go's wakeNetPoller, when < pollUntil).  If
+         * this parker arms the pool's new EARLIEST deadline, a sibling hub
+         * already blocked in the pump's epoll_wait/kevent computed its timeout
+         * from a LATER deadline and would oversleep this one.  Note whether we
+         * are the new minimum, then break the poller AFTER dropping the lock so
+         * it re-reads the global min-deadline and re-clamps.  Guarded on "new
+         * pool min" so an ordinary later-deadline park does not thundering-herd
+         * the pump; a no-op on the single-thread scheduler (wake fd unarmed). */
+        long long prev_min = runloom_dh_peek_deadline(pool);
+        runloom_parker_link(pool, park);
+        new_earliest_deadline = (park->deadline_ns >= 0 &&
+                                 (prev_min < 0 || park->deadline_ns < prev_min));
+    }
     runloom_mutex_unlock(&pool->lock);
+    if (new_earliest_deadline) runloom_netpoll_wake_pump();
     if (current_g != NULL) {
         /* Record what we're blocked on as plain data ON the g, so the
          * fiber dump can report "fd=N R/W" without ever dereferencing

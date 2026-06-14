@@ -168,6 +168,10 @@ void runloom_iouring_drain(void)
      * free).  The CAS turns the head advance into a per-CQE claim:
      * exactly one drainer succeeds for each CQE; the loser re-loads
      * and retries. */
+    /* Pull any kernel-side overflowed completions back into the ring before
+     * draining -- multishot recv can post more CQEs than the ring holds, and a
+     * dropped completion permanently strands the parked fiber. */
+    runloom_iouring_flush_cq_overflow(s->sq_flags, s->ring_fd);
     for (;;) {
         unsigned head = __atomic_load_n(s->cq_head, __ATOMIC_ACQUIRE);
         unsigned ct   = __atomic_load_n(s->cq_tail, __ATOMIC_ACQUIRE);
