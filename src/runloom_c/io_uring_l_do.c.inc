@@ -19,6 +19,7 @@ static runloom_iouring_ssize_t runloom_iouring_do(struct io_uring_sqe sqe)
                               : runloom_sched_get()->current;
     op.result = INT32_MIN;        /* sentinel: not yet completed */
     op.wait   = RUNLOOM_IOURING_WAIT_INFLIGHT;
+    op.ring   = NULL;             /* global ring */
 
     if (runloom_iouring_submit_sqe(sqe, &op) != 0) return -1;
 
@@ -57,8 +58,16 @@ static runloom_iouring_ssize_t runloom_iouring_do(struct io_uring_sqe sqe)
                  * the wake routes it back onto the hub sub-list, and the
                  * in_sub_queue CAS in hub_submit dedups a wake that races
                  * our coro_yield. */
+                /* Publish the op so a cross-thread task.cancel can target it
+                 * with an ASYNC_CANCEL (runloom_iouring_cancel_g).  Set after the
+                 * PARKED CAS so the canceller's wait==PARKED gate is consistent;
+                 * cleared on resume before the op leaves scope. */
+                if (op.g != NULL)
+                    __atomic_store_n(&op.g->iouring_op, &op, __ATOMIC_RELEASE);
                 runloom_sched_park_current();
                 runloom_coro_yield();
+                if (op.g != NULL)
+                    __atomic_store_n(&op.g->iouring_op, NULL, __ATOMIC_RELEASE);
             }
             /* else prev == DONE: a concurrent drainer completed the op
              * between the load and the CAS; op.result is set, fall through. */

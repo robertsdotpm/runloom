@@ -46,6 +46,7 @@ static inline int PyDict_GetItemRef(PyObject *d, PyObject *key, PyObject **resul
 #include "coro.h"
 #include "runloom_sched.h"
 #include "netpoll.h"
+#include "io_uring.h"   /* runloom_iouring_cancel_g for the cancel path */
 #include <stdlib.h>   /* getenv -- the test-only fd-fault guard below */
 #include "mn_sched.h"
 #include "chan.h"

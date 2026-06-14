@@ -108,6 +108,10 @@ typedef struct runloom_iouring_op {
     void     *hub;           /* opaque hub_t* or NULL for global sched */
     int32_t   result;        /* SINGLE: CQE res field; valid after wake */
     int       wait;          /* SINGLE hub op: park/wake commit (see above) */
+    void     *ring;          /* SINGLE: the runloom_iouring_ring_t* this op was
+                              * submitted to, or NULL for the global ring; lets
+                              * runloom_iouring_cancel_g submit the ASYNC_CANCEL
+                              * to the SAME ring the op lives in. */
 } runloom_iouring_op_t;
 
 /* Forward-declare for the drain handler. */

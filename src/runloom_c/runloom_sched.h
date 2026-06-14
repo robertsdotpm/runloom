@@ -275,6 +275,11 @@ struct runloom_g {
      * defense against missed unlink paths under M:N + free-threaded
      * that would otherwise have pump waking a freed g. */
     void *netpoll_parker;   /* really runloom_parked_t *, void* to avoid include cycle */
+    /* Set to the in-flight single io_uring op (runloom_iouring_op_t *, void* to
+     * avoid include cycle) while this fiber is parked on it under M:N, so a
+     * task.cancel can submit an ASYNC_CANCEL targeting it.  Cleared on resume.
+     * In the slab-cleared pre-state range. */
+    void *iouring_op;
     /* park_safe / wake_safe lost-wake guard.  Set to 1 by park_safe
      * just before runloom_coro_yield; CAS'd back to 0 by the first
      * wake_safe to observe it.  Replaces the original s->current
