@@ -58,6 +58,32 @@ else
     fi
 fi
 
+# --- blocking-offload job lifetime (runloom_blockpool.c) ----------------------
+# The offload job lives on the PARKED FIBER's coroutine stack (freed when the
+# fiber returns), yet a worker OS thread touches it -- and a spurious wake
+# (task.cancel -> G.wake) can resume + free it while the worker still runs.  The
+# `done` release/acquire handshake (worker snapshots its wake target BEFORE done
+# and touches nothing after; fiber waits for done before freeing) closes the UAF.
+printf '  [genmc] %-30s ' "blockpool_job.c"
+if "$G" -- "$HERE/blockpool_job.c" >"$HERE/.genmc.pos.log" 2>&1 \
+        && grep -q "No errors were detected" "$HERE/.genmc.pos.log"; then
+    n="$(sed -n 's/.*complete executions explored: \([0-9]*\).*/\1/p' "$HERE/.genmc.pos.log" | tail -1)"
+    green "PASS"; echo " -- no use-after-free of the stack job / result-seen (${n:-?} RC11 execs)"; pass=$((pass+1))
+else
+    red "FAIL"; echo " -- see $HERE/.genmc.pos.log"; fail=$((fail+1))
+fi
+
+for bug in BUG_FIBER_NO_DONE_WAIT BUG_WORKER_LATE_READ; do
+    printf '  [genmc] %-30s ' "blockpool_job.c(-D$bug)"
+    if "$G" -- "-D$bug" "$HERE/blockpool_job.c" >"$HERE/.genmc.neg.log" 2>&1; then
+        red "FAIL"; echo " (expected a UAF) -- see $HERE/.genmc.neg.log"; fail=$((fail+1))
+    elif grep -qiE "violation|error|assert" "$HERE/.genmc.neg.log"; then
+        green "PASS"; echo " -- correctly DETECTS the stack-job use-after-free"; pass=$((pass+1))
+    else
+        red "FAIL"; echo " (errored but no UAF reported) -- see $HERE/.genmc.neg.log"; fail=$((fail+1))
+    fi
+done
+
 # --- park_safe/wake_safe cross-thread handshake (runloom_sched*) ---------------
 # Drift-guard: the harness's correct default assumes the source has the two
 # StoreLoad seq_cst fences (added after GenMC found a lost wakeup in the
