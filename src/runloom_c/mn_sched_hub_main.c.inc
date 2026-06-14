@@ -858,8 +858,12 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
             /* Clear queued flag right before resume so a wake_g that
              * fires during this g's execution (e.g., a netpoll pump
              * processing an event for the parker g is about to link
-             * inside wait_fd) can enqueue g via submit. */
-            __atomic_store_n(&g->in_sub_queue, 0, __ATOMIC_RELEASE);
+             * inside wait_fd) can enqueue g via submit.  The 1->0 exchange
+             * also tells us whether THIS entry held the default-path queue
+             * ref (taken in hub_submit) so we can drop it exactly once when
+             * the entry is fully consumed below. */
+            int had_qref = (__atomic_exchange_n(&g->in_sub_queue, 0,
+                                                __ATOMIC_ACQ_REL) == 1);
             /* Defensive: pop a stale queue entry?  Two failure modes
              * for the queue under M:N + free-threaded:
              *
@@ -885,7 +889,8 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
                 __atomic_load_n(&g->done, __ATOMIC_ACQUIRE)) {
                 h->sched.current = NULL;
                 runloom_tls_current_g = NULL;
-                if (from_runq) runloom_g_decref(g);   /* queue ref */
+                if (from_runq) runloom_g_decref(g);   /* global-runq queue ref */
+                if (had_qref) runloom_g_decref(g);    /* default queue ref */
                 continue;
             }
             {
@@ -926,7 +931,8 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
 #endif
                 h->sched.current = NULL;
                 runloom_tls_current_g = NULL;
-                if (from_runq) runloom_g_decref(g);
+                if (from_runq) runloom_g_decref(g);   /* global-runq queue ref */
+                if (had_qref) runloom_g_decref(g);    /* default queue ref */
                 continue;
             }
             runloom_g_state_set(g, RUNLOOM_GST_RUNNING);   /* observational: now on-CPU */
@@ -940,6 +946,16 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
             runloom_tls_parked_offqueue = 0;
             runloom_tls_current_g = NULL;
             h->sched.current = NULL;
+
+            /* Drop THIS entry's default queue ref now that the entry is fully
+             * consumed (the g was resumed).  One site covers every post-resume
+             * outcome below (done / parked / yielded / re-queued): a g that
+             * re-queued itself during the resume took a NEW queue ref via its
+             * fresh hub_submit, so this drops only the old entry's ref.  Drops to
+             * the spawn ref (not zero) for a still-live g, so the reads below are
+             * safe; the done branch's scheduler decref then frees it.  from_runq
+             * (global-runq) gs have had_qref==0 and keep their own accounting. */
+            if (had_qref) runloom_g_decref(g);
 
             if (runloom_coro_done(g->coro)) {
                 runloom_advice_record_g(g);   /* fold stack HWM (profiling) */
