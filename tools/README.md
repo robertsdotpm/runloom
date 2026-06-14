@@ -209,16 +209,17 @@ qualified.  The lone-plain-among-atomic-siblings pattern of Finding C, recurring
    (`datastack:454/482`).  **FIXED** -- relaxed-atomic.
 3. **`timer_size`** read plain (census) vs `timer_push`/`timer_pop` writes
    (`datastack:541/566`).  **FIXED** -- relaxed-atomic.
-4. **`sub_head`** -- the census already ACQUIRE-reads it lock-free, but the 6
+4. **`sub_head`** -- the census ACQUIRE-reads it lock-free; the 6
    producer/handoff/drain WRITES (`mn_api:108`, `hub_main:273`, `hub_resume:618`,
-   `init:92/197/694`) are still PLAIN (under `sub_lock`, which the lock-free census
-   does not take).  **DEFERRED** -- a multi-writer pointer needing RELEASE stores
-   on the hot wake-routing path; a focused, separately-reviewed pass (flagged
-   in-code at `mn_sched_init_fini.c.inc` and in `docs/dev/LIFECYCLE_INVARIANTS.md`).
+   `init:92/197/694`) were PLAIN under `sub_lock` (which the lock-free census does
+   not take).  **FIXED** -- a publish (store g) is now `__atomic_store_n(...,
+   RELEASE)` so the census sees a non-NULL head with g's fields visible; a clear
+   (store NULL) is `RELAXED`.  A multi-writer pointer, so RELEASE (not relaxed) on
+   the publishes.
 
 All are benign on x86/TSO (aligned word access) but UB in C11 and stale-prone on
 weak memory; the census is best-effort (its deadlock streak + re-kick absorb a
-stale read), so severity is low.  Verified: after the three fixes, the only TSan
-race remaining across `lifefuzz` seeds 1-12 is the documented `sub_head` one; the
-default suite stays green.  Repro: `tools/lifefuzz/lifefuzz.py repro 3 --mn-seed 900002`
-under the TSan ext (see `tools/lifefuzz/README.md`).
+stale read), so severity is low.  Verified: after all four fixes, **no** TSan race
+remains across `lifefuzz` seeds 1-12; the default suite stays green.  Repro:
+`tools/lifefuzz/lifefuzz.py repro 3 --mn-seed 900002` under the TSan ext (see
+`tools/lifefuzz/README.md`).

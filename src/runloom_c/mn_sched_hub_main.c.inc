@@ -270,7 +270,10 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
         RUNLOOM_RLOCK(&h->sub_lock, RUNLOOM_RANK_HUB_SUB);
         {
             runloom_g_t *sub = h->sub_head;
-            h->sub_head = h->sub_tail = NULL;
+            h->sub_tail = NULL;
+            /* RELAXED-atomic clear: closes the lock-free census's ACQUIRE read race
+             * on sub_head (Finding D #4 -- the TSan hub_main:273 report). */
+            __atomic_store_n(&h->sub_head, (runloom_g_t *)NULL, __ATOMIC_RELAXED);
             RUNLOOM_RUNLOCK(&h->sub_lock, RUNLOOM_RANK_HUB_SUB);
             while (sub != NULL) {
                 runloom_g_t *next = sub->next;

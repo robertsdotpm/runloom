@@ -89,7 +89,8 @@ int runloom_mn_init(int n_threads)
         runloom_sched_init(&h->sched);
         runloom_cldeque_init(&h->deque);
         runloom_mutex_init(&h->sub_lock);
-        h->sub_head = h->sub_tail = NULL;
+        h->sub_tail = NULL;
+        __atomic_store_n(&h->sub_head, (runloom_g_t *)NULL, __ATOMIC_RELAXED);
         /* BUG #10 per-hub idle wake (see mn_sched.c sub_gen). */
         h->sub_gen = 0;
         runloom_mutex_init(&h->idle_lock);
@@ -194,7 +195,8 @@ static void runloom_mn_hub_drain_leftovers(runloom_hub_t *h)
     runloom_g_t *sub;
     runloom_g_t *g;
     sub = h->sub_head;
-    h->sub_head = h->sub_tail = NULL;
+    h->sub_tail = NULL;
+    __atomic_store_n(&h->sub_head, (runloom_g_t *)NULL, __ATOMIC_RELAXED);  /* census x-thread read */
     while (sub != NULL) {
         runloom_g_t *next = sub->next;
         sub->next = NULL;
@@ -691,7 +693,8 @@ static int runloom_mn_go_n_bulk(PyObject *callable, long n, size_t stack_size,
         h = &runloom_hubs[hub];
         RUNLOOM_RLOCK(&h->sub_lock, RUNLOOM_RANK_HUB_SUB);
         if (h->sub_tail != NULL) h->sub_tail->next = heads[hub];
-        else                     h->sub_head = heads[hub];
+        else /* RELEASE: publishes to the census ACQUIRE read (Finding D #4) */
+            __atomic_store_n(&h->sub_head, heads[hub], __ATOMIC_RELEASE);
         h->sub_tail = tails[hub];
         RUNLOOM_RUNLOCK(&h->sub_lock, RUNLOOM_RANK_HUB_SUB);
         __atomic_add_fetch(&h->pending, counts[hub], __ATOMIC_ACQ_REL);
@@ -770,11 +773,11 @@ static int runloom_mn_has_wakeable_work(void)
          * mn_go + wake_g submission list. */
         if (!runloom_sched_ready_empty(&h->sched))                  return 1;
         if (runloom_cldeque_size(&h->deque) != 0)                   return 1;
-        /* KNOWN same-class race (tools/lifefuzz TSan, hub_main:273 sub_head): this
-         * lock-free ACQUIRE read pairs with sub_head WRITES that are still PLAIN
-         * (under sub_lock) at the 6 producer/handoff/drain sites -- a multi-writer
-         * pointer needing RELEASE stores, deferred as a focused hot-wake-path pass.
-         * Benign on x86 (aligned word); see docs/dev/LIFECYCLE_INVARIANTS.md. */
+        /* Lock-free ACQUIRE read of the submission list head, paired with RELEASE
+         * stores at the 6 sub_head WRITE sites (mn_api / hub_main / hub_resume /
+         * init): a publish (store g) is RELEASE so this read sees a non-NULL head
+         * with g's fields visible; a clear (store NULL) is RELAXED.  Closes the
+         * tools/lifefuzz TSan race (hub_main:273); tools/README Finding D #4. */
         if (__atomic_load_n(&h->sub_head, __ATOMIC_ACQUIRE) != NULL) return 1;
         /* A sleeper / timer that will fire and wake a fiber.  RELAXED-atomic: the
          * owning hub writes these non-atomically (sleep_push/pop, timer_push/pop),
