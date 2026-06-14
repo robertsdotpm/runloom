@@ -75,6 +75,23 @@
   GenMC/herd7). See `tools/README.md`.
 
 ## Scheduler invariants
+- **A freed `runloom_g` STRUCT must never be returned to the OS.**
+  `runloom_g_slab_free` keeps every freed g struct in the per-thread slab
+  (valid, refcount 0, magic=DEAD) — it does NOT `free()` past
+  `RUNLOOM_G_SLAB_CAP` (the cap is a soft hint). Reason: a stale `wake_g` (the
+  netpoll dup-wake) can reach `hub_submit` with a pointer to an already-freed g
+  AFTER completion freed it; `hub_submit` decides whether to re-queue by reading
+  `g->refcount` via `runloom_g_try_incref` (incref-iff-refcount>0), which is only
+  sound while the struct is still a valid g (try_incref reads 0 → bails). If the
+  struct were freed to the OS and its memory reused by a non-runloom malloc,
+  try_incref reads a garbage refcount, spuriously succeeds, and enqueues garbage
+  → SIGSEGV in `runloom_coro_resume` on arm64 (weak memory; x86-TSO hid it). The
+  g's coro/stack ARE still released at completion — only the small struct is
+  retained, bounded by peak concurrency. Pairs with the try_incref-before-CAS
+  queue ref in `hub_submit` (the CAS-then-incref order has a UAF window;
+  CBMC-proven in `verify/cbmc/sched_qref_cbmc.c`). A bounded QSBR/quarantine
+  reclaim (free only once no wake can reference the struct) is the follow-up for
+  huge burst-then-idle RSS; do NOT reintroduce an eager `free()`.
 - **Signals deliver INTO the parked goroutine, never via the scheduler.** A
   Python signal handler that raises during a cooperative blocking call
   (`select`/`poll`/`recv`/`accept`/…) must propagate out of *that call* into the
