@@ -45,9 +45,21 @@ int runloom_mn_init(int n_threads)
     main_ts = PyThreadState_Get();
     interp = main_ts->interp;
     /* Per-g-tstate mode: capture the interp for PyThreadState_New and stand
-     * the snap down BEFORE any hub thread starts running fibers. */
+     * the snap down BEFORE any hub thread starts running fibers.
+     *
+     * RUNLOOM_STEAL_WOKEN REDIRECTS here: its original snap-migration mechanism
+     * is structurally unsound (a suspended fiber's eval frames bake in the origin
+     * hub's tstate pointer, which the snap cannot re-root, so a migrated fiber
+     * drives the origin hub's tstate from a foreign OS thread -- TSan-proven data
+     * race -> SEGV; see docs/dev/STEAL_WOKEN_CLEANUP.md).  Per-g-tstate delivers
+     * the SAME goal (any idle hub may resume a wedged hub's woken fiber, closing
+     * the wedged-hub strand) CORRECTLY -- each fiber owns a migratable tstate that
+     * is valid on any hub.  So RUNLOOM_STEAL_WOKEN now enables per-g-tstate and the
+     * broken snap-migration branch in hub_main is never taken (dead for both
+     * flags; removable in a follow-up). */
     runloom_mn_interp = interp;
-    runloom_set_per_g_tstate_mode(runloom_per_g_tstate_flag());
+    runloom_set_per_g_tstate_mode(runloom_per_g_tstate_flag() ||
+                                  runloom_steal_woken_flag());
     /* Configure the sysmon watchdog (enable + threshold) BEFORE the hubs
      * spawn so the per-resume progress instrumentation is live immediately. */
     runloom_sysmon_config();

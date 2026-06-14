@@ -221,6 +221,23 @@ void runloom_mn_wake_g(void *hub_opaque, runloom_g_t *g)
     runloom_mn_hub_submit((runloom_hub_t *)hub_opaque, g);
 }
 
+int runloom_mn_hub_request_iouring_cancel(void *hub_opaque, void *op)
+{
+    runloom_hub_t *h = (runloom_hub_t *)hub_opaque;
+    void *expected = NULL;
+    if (h == NULL || op == NULL) return 0;
+    if (!__atomic_compare_exchange_n(&h->iouring_cancel_op, &expected, op, 0,
+                                     __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+        return 0;   /* a cancel is already pending for this hub (best-effort) */
+    /* Wake the hub if idle-parked so it drains the mailbox promptly. */
+    if (__atomic_load_n(&h->idle_waiting, __ATOMIC_ACQUIRE)) {
+        RUNLOOM_RLOCK(&h->idle_lock, RUNLOOM_RANK_HUB_IDLE);
+        runloom_cond_signal(&h->idle_cond);
+        RUNLOOM_RUNLOCK(&h->idle_lock, RUNLOOM_RANK_HUB_IDLE);
+    }
+    return 1;
+}
+
 /* Idle-stack-sweep handshake (RUNLOOM_PER_G_TSTATE).  An idle hub about to
  * MADV_DONTNEED a long-parked g's below-SP stack pages must hold the g
  * un-resumable for the madvise's duration, or another hub could pull a wake and

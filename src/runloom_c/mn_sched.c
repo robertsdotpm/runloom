@@ -157,6 +157,14 @@ typedef struct runloom_hub {
      * while wedged); read every frame only when RUNLOOM_PREEMPT installed the
      * wrapper (opt-in, so default mode never touches it). */
     volatile int         preempt_requested;
+    /* Cross-thread io_uring single-op cancel mailbox.  A hub ring is
+     * SINGLE_ISSUER, so a foreign task.cancel cannot submit the ASYNC_CANCEL
+     * itself -- it deposits the target op here (CAS NULL->op) and signals
+     * idle_cond; THIS hub (the ring's sole issuer) drains it at its loop top
+     * and submits the cancel on its own ring.  Single slot: a second concurrent
+     * cancel for the same hub is dropped (best-effort -- that fiber still
+     * unblocks when its op completes).  See runloom_iouring_cancel_g. */
+    void                *iouring_cancel_op;
 } runloom_hub_t;
 
 static runloom_hub_t *runloom_hubs = NULL;

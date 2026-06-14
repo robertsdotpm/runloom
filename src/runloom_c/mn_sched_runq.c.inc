@@ -167,16 +167,21 @@ static int runloom_per_g_tstate_flag(void)
     return cur;
 }
 
-/* RUNLOOM_STEAL_WOKEN (default OFF, experimental; Fix B): in the DEFAULT
- * per-hub-tstate scheduler, route a woken g through the global stealable
- * run-queue + the same wake-state machine per-g-tstate uses, so ANY idle hub
- * can resume it -- migrating the g's interpreter state via its `snap` onto the
- * stealing hub's single bound tstate.  Unlike RUNLOOM_PER_G_TSTATE this needs NO
- * extra PyThreadState per g (so it does NOT violate free-threaded CPython's
- * one-tstate-per-OS-thread stop-the-world protocol -- see memory
- * project_runloom_per_g_python_crash); it relies on snap portability (the exc
- * chain is re-rooted onto the target hub's tstate in runloom_pystate_load).  When
- * OFF the default scheduler is byte-unchanged. */
+/* RUNLOOM_STEAL_WOKEN (default OFF, experimental; Fix B): originally a snap-
+ * migration mode -- route a woken g through the global stealable run-queue and
+ * migrate its interpreter state via the per-g `snap` onto the stealing hub's
+ * single bound tstate, needing NO extra PyThreadState per g.  That mechanism is
+ * UNSOUND: a suspended fiber's eval frames bake in the ORIGIN hub's tstate
+ * pointer (in registers / C locals on the coro stack), which the snap cannot
+ * re-root; the migrated fiber then drives the origin hub's tstate from a foreign
+ * OS thread (TSan-proven data race on datastack_chunk / c_recursion_remaining /
+ * current_exception -> SEGV; H>=2 only).  See docs/dev/STEAL_WOKEN_CLEANUP.md.
+ *
+ * The flag is therefore REDIRECTED: mn_init enables RUNLOOM_PER_G_TSTATE when this
+ * is set (see mn_sched_init_fini.c.inc), so RUNLOOM_STEAL_WOKEN=1 now runs the
+ * SOUND per-g-tstate migration (each fiber owns a migratable tstate) and the snap-
+ * migration branch in hub_main is never taken.  When OFF the default scheduler is
+ * byte-unchanged. */
 static int runloom_steal_woken_flag(void)
 {
     static int v = -1;

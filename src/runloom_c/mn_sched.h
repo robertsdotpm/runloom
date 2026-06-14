@@ -127,6 +127,12 @@ runloom_hub_info_t *runloom_mn_hub_snapshot(long *count_out);
  * to route a parked g when it becomes ready. */
 void *runloom_mn_current_hub_opaque(void);
 
+/* Deposit an io_uring single-op cancel request (the target op, a void* across
+ * the TU boundary) into the owning hub's mailbox + wake it, so the hub -- the
+ * SINGLE_ISSUER of its ring -- submits the ASYNC_CANCEL at its loop top.
+ * Returns 1 if accepted, 0 if the slot is busy (best-effort, dropped). */
+int runloom_mn_hub_request_iouring_cancel(void *hub_opaque, void *op);
+
 /* Map a hub_opaque (as returned by runloom_mn_current_hub_opaque, or
  * stashed on a parker/g) to the dense 0..hub_count-1 hub id.  Returns
  * -1 for NULL (single-thread sched).  Used by netpoll's per-hub
