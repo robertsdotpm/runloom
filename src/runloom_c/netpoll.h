@@ -224,7 +224,10 @@ void runloom_netpoll_remove_iouring_ring(int eventfd_fd);
  * scheduler blocked in the pump re-checks its ready/wake lists.  Used by
  * the blocking-offload pool to wake the single-thread scheduler. */
 int  runloom_netpoll_wake_pump_arm(void);
-void runloom_netpoll_wake_pump(void);
+/* hub_opaque names the hub whose pump to wake (its own kqueue, per-hub kqueue
+ * backend).  NULL = default/single-thread pool.  Ignored on the shared-handle
+ * backends (epoll eventfd / Windows IOCP / select self-pipe). */
+void runloom_netpoll_wake_pump(void *hub_opaque);
 
 /* Does any registered iouring source (global or per-hub) have an
  * in-flight SQE?  Hub_main uses this to decide pump vs sleep when no

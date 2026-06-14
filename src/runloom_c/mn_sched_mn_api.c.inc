@@ -60,14 +60,33 @@ struct runloom_iouring_ring *runloom_mn_current_iouring_ring(void)
 static void runloom_mn_hub_submit(runloom_hub_t *h, runloom_g_t *g)
 {
     int expected = 0;
-    /* Defence-in-depth: a submitted g must not already be DONE/FREED.
-     * If this fires, the in_sub_queue CAS below would still no-op but
-     * the diag ring + abort give a precise place to look. */
+    int per_g = runloom_get_per_g_tstate_mode();
+    /* QUEUE REF, taken via TRY_INCREF *before* touching g->in_sub_queue.
+     *
+     * A queued g used to be held only by its spawn ref, so a STALE wake_g racing
+     * the g's completion (the duplicate-wake the comment above describes) could
+     * re-reference a g that completion had already freed -> use-after-free (the
+     * arm64 per-hub-kqueue crash: a freed g, magic 0xDEAD, re-submitted into a
+     * hub's sub_head and resumed).
+     *
+     * The ref MUST be a refcount>0-gated try_incref taken up front, not a plain
+     * incref after the CAS: CBMC (verify/cbmc/sched_qref_cbmc.c) shows the latter
+     * still has a window where completion frees the g between the CAS and the
+     * incref (it resurrects a freed g).  try_incref FAILS if the g is already
+     * freeing (refcount 0), so a stale wake on a completed g bails here, and on
+     * success the g is pinned for the lifetime of THIS queue entry -- hub_main
+     * drops it exactly once when it consumes the entry (the in_sub_queue 1->0
+     * exchange).  Per-g-tstate mode uses the global-runq from_runq ref instead,
+     * so it keeps the original path. */
+    if (!per_g && !runloom_g_try_incref(g))
+        return;                          /* g is freeing -> drop the stale wake */
+    /* Defence-in-depth (debug): a live g must not already be DONE/FREED. */
     RUNLOOM_G_ASSERT_NOT(g, RUNLOOM_GST_MASK_DEAD);
     if (!__atomic_compare_exchange_n(&g->in_sub_queue, &expected, 1,
                                      0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
-        /* Already queued; no need to enqueue again.  The pending resume
-         * will pick up whatever state the g has when hub_main gets to it. */
+        /* Already queued -> drop the ref we just took and bail.  The pending
+         * resume picks up whatever state the g has when hub_main reaches it. */
+        if (!per_g) runloom_g_decref(g);
         return;
     }
     /* Controlled-replay deferred publish: a cross-hub submit made DURING a
@@ -88,9 +107,9 @@ static void runloom_mn_hub_submit(runloom_hub_t *h, runloom_g_t *g)
             cur != NULL && cur != h && cur->stage_head != NULL &&
             runloom_tls_current_g != NULL &&
             h->id >= 0 && h->id < runloom_hub_count) {
-            g->next = NULL;
+            RUNLOOM_NEXT_SET(g, NULL, 5);   /* staging (controlled mode) */
             if (cur->stage_tail[h->id] != NULL)
-                cur->stage_tail[h->id]->next = g;
+                RUNLOOM_NEXT_SET(cur->stage_tail[h->id], g, 5);
             else
                 cur->stage_head[h->id] = g;
             cur->stage_tail[h->id] = g;
@@ -101,9 +120,9 @@ static void runloom_mn_hub_submit(runloom_hub_t *h, runloom_g_t *g)
         }
     }
     RUNLOOM_RLOCK(&h->sub_lock, RUNLOOM_RANK_HUB_SUB);
-    g->next = NULL;
+    RUNLOOM_NEXT_SET(g, NULL, 1);   /* hub_submit: new tail's next */
     if (h->sub_tail != NULL) {
-        h->sub_tail->next = g;
+        RUNLOOM_NEXT_SET(h->sub_tail, g, 1);   /* link old tail -> g */
     } else {
         /* RELEASE: publishes g to the lock-free deadlock census's ACQUIRE read of
          * sub_head (mn_has_wakeable_work) -- tools/README Finding D #4. */
@@ -138,9 +157,10 @@ static void runloom_mn_hub_submit(runloom_hub_t *h, runloom_g_t *g)
      * Kick the shared pump-wake eventfd (registered in the epoll set) so a
      * pumping hub returns from epoll_wait NOW; it drains the eventfd and re-loops
      * to pick up sub_head/global-runq work.  Level-triggered + non-exclusive, so
-     * every blocked hub wakes (the target among them drains sub_head; the rest
-     * find nothing and re-pump).  No-op if the eventfd isn't armed. */
-    runloom_netpoll_wake_pump();
+     * Per-hub kqueue: kick ONLY the target hub `h`'s own pump (its self-pipe),
+     * not a broadcast -- this is the hot cross-hub handoff path.  Shared-handle
+     * backends (epoll/IOCP/select) ignore the arg. */
+    runloom_netpoll_wake_pump((void *)h);
 }
 
 void runloom_mn_wake_g(void *hub_opaque, runloom_g_t *g)
@@ -193,8 +213,10 @@ void runloom_mn_wake_g(void *hub_opaque, runloom_g_t *g)
                     /* Same cross-hub wake-latency fix as hub_submit: any hub can
                      * drain the global runq, but an idle one is blocked in
                      * epoll_wait -- kick the pump so it wakes now (no-op if not
-                     * armed; the pump drains the eventfd and re-loops). */
-                    runloom_netpoll_wake_pump();
+                     * armed; the pump drains the eventfd and re-loops).  NULL =
+                     * default pool; global runq is drained by ANY hub (steal mode,
+                     * default-off) which re-polls on its bounded timeout. */
+                    runloom_netpoll_wake_pump(NULL);
                     return;
                 }
                 /* lost: st reloaded to the current state; re-evaluate */

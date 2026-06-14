@@ -636,6 +636,11 @@ class Harness(object):
             runloom.dump()
         except Exception:
             pass
+        try:
+            import runloom_c as _rc
+            _rc._dump_parkers()    # readyParked = lost-wakeup detector
+        except Exception as _e:
+            sys.stderr.write("[{0}] parker dump err: {1}\n".format(self.name, _e))
         sys.stderr.flush()
         os._exit(EXIT_HANG)
 

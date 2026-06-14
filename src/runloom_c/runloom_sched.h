@@ -147,6 +147,13 @@ typedef void (*runloom_c_entry_fn)(void *);
 
 struct runloom_g {
     runloom_coro_t *coro;
+#ifdef RUNLOOM_DBG_BADCORO
+    /* Source-hunt canary (offset 8, in the corrupted region).  Set 0x600DC0DE
+     * by slab_alloc, 0xDEAD by slab_free.  At the drain a `sub` reading
+     * 0x600DC0DE is a live g; 0xDEAD is a freed-but-not-reused g (UAF);
+     * anything else is reused memory (e.g. a coro stack overwrote it). */
+    unsigned int magic;
+#endif
     /* Stack-advice kind key (FNV hash of the entry callable's identity), or 0.
      * Set at spawn only while stack-advice profiling is enabled; read at
      * completion to fold this g's C-stack HWM into its kind.  See
@@ -392,7 +399,31 @@ struct runloom_g {
      * (RUNLOOM_GST_FREED) g stays linked; the dump skips FREED entries. */
     runloom_g_t *reg_prev;
     runloom_g_t *reg_next;
+#ifdef RUNLOOM_DBG_BADCORO
+    /* Source-hunt: track the last writer of ->next so a corrupt chain link can
+     * be attributed to a code site (1=hub_submit, 2=drain clear, 3=slab_free,
+     * 4=init drain) and a post-write WILD overwrite distinguished (recorded
+     * next_wval != the value actually observed in ->next). */
+    int                next_wsite;
+    void              *next_wval;
+    unsigned long long next_wseq;
+#endif
 };
+
+#ifdef RUNLOOM_DBG_BADCORO
+extern unsigned long long runloom_next_wseq_ctr;
+#define RUNLOOM_NEXT_SET(gp, val, site) do {                                  \
+        runloom_g_t *runloom_ns_g = (gp);                                     \
+        void        *runloom_ns_v = (void *)(val);                            \
+        runloom_ns_g->next       = (runloom_g_t *)runloom_ns_v;               \
+        runloom_ns_g->next_wsite = (site);                                    \
+        runloom_ns_g->next_wval  = runloom_ns_v;                              \
+        runloom_ns_g->next_wseq  =                                            \
+            __atomic_add_fetch(&runloom_next_wseq_ctr, 1, __ATOMIC_RELAXED);  \
+    } while (0)
+#else
+#define RUNLOOM_NEXT_SET(gp, val, site) ((gp)->next = (runloom_g_t *)(val))
+#endif
 
 /* Park current g until runloom_sched_wake_g(g) is called.  Race-safe:
  * a wake that arrives BEFORE the park (because the future fires

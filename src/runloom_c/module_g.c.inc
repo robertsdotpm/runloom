@@ -68,7 +68,9 @@ static PyObject *RunloomG_wake(RunloomG *self, PyObject *unused)
          * lost a wake-before-park.)  The pump kick breaks an idle single-thread
          * run() epoll_wait(-1); harmless on the same-thread / hub path. */
         runloom_sched_wake_safe(wg);
-        runloom_netpoll_wake_pump();
+        /* Per-hub kqueue: kick the pump of the hub this g parked on. */
+        runloom_netpoll_wake_pump((void *)__atomic_load_n(&wg->park_hub,
+                                                          __ATOMIC_ACQUIRE));
     }
     Py_RETURN_NONE;
 }

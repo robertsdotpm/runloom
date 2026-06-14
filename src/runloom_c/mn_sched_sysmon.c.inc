@@ -349,11 +349,16 @@ static void runloom_handoff_resume_g(runloom_hub_t *h, runloom_g_t *g,
     runloom_tls_current_g = g;
     runloom_tls_self_queued = 0;
     runloom_tls_parked_offqueue = 0;
-    __atomic_store_n(&g->in_sub_queue, 0, __ATOMIC_RELEASE);
+    /* Default queue ref (handoff runs only in non-per-g mode, so a 1->0
+     * exchange here implies hub_submit took the ref).  Drop it once this entry
+     * is consumed -- mirrors hub_main's default-block accounting. */
+    int had_qref = (__atomic_exchange_n(&g->in_sub_queue, 0,
+                                        __ATOMIC_ACQ_REL) == 1);
     RUNLOOM_G_ASSERT_NOT(g, RUNLOOM_GST_BIT(RUNLOOM_GST_FREED));
     RUNLOOM_EVT(RUNLOOM_EVT_G_POP, g, h, 0);
     if (g->coro == NULL || __atomic_load_n(&g->done, __ATOMIC_ACQUIRE)) {
         runloom_tls_current_g = NULL;
+        if (had_qref) runloom_g_decref(g);
         return;
     }
     /* NB: no runloom_hub_resume_begin/end -- the rescue must not write
@@ -363,6 +368,11 @@ static void runloom_handoff_resume_g(runloom_hub_t *h, runloom_g_t *g,
     runloom_tls_self_queued = 0;
     runloom_tls_parked_offqueue = 0;
     runloom_tls_current_g = NULL;
+
+    /* Entry consumed: drop the default queue ref once (covers done / re-submit /
+     * park).  A re-submit below takes a fresh ref; for a done g this drops to the
+     * scheduler ref, which the done branch then releases. */
+    if (had_qref) runloom_g_decref(g);
 
     if (runloom_coro_done(g->coro)) {
         runloom_drain_g_datastack();

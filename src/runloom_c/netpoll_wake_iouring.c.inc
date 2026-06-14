@@ -316,6 +316,17 @@ int runloom_netpoll_wake_pump_arm(void)
     if (runloom_netpoll_init() != 0) return -1;
     if (runloom_win_use_iocp && runloom_iocp_wake_armed()) return 0;
     return -1;
+#elif defined(RUNLOOM_HAVE_KQUEUE)
+    /* Per-hub kqueue: each pool's self-pipe is created with its kqueue in
+     * runloom_pool_backend_create (lock_ensure_inited).  Ensure THIS hub's pool
+     * and report armed iff its pipe came up. */
+    if (runloom_netpoll_init() != 0) return -1;
+    {
+        runloom_parker_pool_t *pool =
+            runloom_parker_pool_for_hub(runloom_mn_current_hub_opaque());
+        runloom_parker_pool_lock_ensure_inited(pool);
+        return (pool->selfpipe_r >= 0) ? 0 : -1;
+    }
 #else
     /* select() fallback: the self-pipe created in runloom_netpoll_init is
      * the wake primitive.  Report armed iff the pipe came up, so the
@@ -329,24 +340,43 @@ int runloom_netpoll_wake_pump_arm(void)
 /* Break an idle pump (epoll_wait / GetQueuedCompletionStatus) from any
  * thread so the scheduler wakes to drain its wake_list.  A no-op if not
  * armed. */
-void runloom_netpoll_wake_pump(void)
+void runloom_netpoll_wake_pump(void *hub_opaque)
 {
 #if defined(RUNLOOM_HAVE_EPOLL)
     int fd = __atomic_load_n(&runloom_pump_wake_fd, __ATOMIC_ACQUIRE);
+    (void)hub_opaque;                       /* one shared eventfd for all pumps */
     if (fd >= 0) {
         uint64_t one = 1;
         ssize_t w = write(fd, &one, sizeof one);
         (void)w;
     }
 #elif defined(RUNLOOM_OS_WINDOWS)
+    (void)hub_opaque;                       /* one shared IOCP for all pumps */
     if (runloom_win_use_iocp) {
         runloom_iocp_wake();
+    }
+#elif defined(RUNLOOM_HAVE_KQUEUE)
+    /* Per-hub kqueue: poke the TARGET hub's pool self-pipe so its (and only its)
+     * idle kevent() breaks -- no cross-hub thundering herd.  NULL routes to the
+     * default/single-thread pool.  Guard on lock_inited==2 (ACQUIRE, pairs with
+     * backend_create's publish) so we never read a never-touched pool's still-
+     * zero selfpipe_w and write to fd 0.  No-op when the target pool's pipe isn't
+     * up -- that hub re-polls on its bounded pump timeout / periodic self-pump. */
+    runloom_parker_pool_t *pool = runloom_parker_pool_for_hub(hub_opaque);
+    if (__atomic_load_n(&pool->lock_inited, __ATOMIC_ACQUIRE) == 2) {
+        int fd = pool->selfpipe_w;
+        if (fd >= 0) {
+            char b = 1;
+            ssize_t w = write(fd, &b, 1);
+            (void)w;
+        }
     }
 #else
     /* select() fallback: poke the self-pipe to break an idle select().
      * write() to a pipe is thread-safe and needs no lock; EAGAIN (pipe
      * already has unread bytes) is fine -- select will still fire. */
     int fd = __atomic_load_n(&runloom_selfpipe_w, __ATOMIC_ACQUIRE);
+    (void)hub_opaque;
     if (fd >= 0) {
         char b = 1;
         ssize_t w = write(fd, &b, 1);

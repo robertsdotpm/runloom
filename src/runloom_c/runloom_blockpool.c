@@ -153,7 +153,7 @@ static RUNLOOM_THREAD_RET runloom_blockpool_worker(void *arg)
                 runloom_mn_wake_g(hub, g);
             } else {
                 runloom_sched_wake_safe(g);
-                runloom_netpoll_wake_pump();
+                runloom_netpoll_wake_pump(NULL);   /* single-thread owner -> default pool */
             }
             __atomic_sub_fetch(&bp_inflight, 1, __ATOMIC_ACQ_REL);
         }

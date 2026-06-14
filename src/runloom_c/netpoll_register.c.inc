@@ -108,7 +108,17 @@ static int runloom_netpoll_register(int fd, int events)
      * time, so data that arrived before the parker linked is still delivered),
      * and EV_ONESHOT delivers once then auto-disables (no thundering herd; the
      * always-writable OUT can't busy-loop the pump).  The bitmap is still kept
-     * in sync for unregister, but no longer gates the kevent. */
+     * in sync for unregister, but no longer gates the kevent.
+     *
+     * PER-HUB kqueue: the kevent goes to the CURRENT hub's OWN kqueue, the same
+     * pool wait_fd links the parker into (pool_for_hub(current hub), this thread)
+     * -- so register and link agree, and the event is collected by THIS hub's
+     * pump (or its periodic non-blocking self-pump while busy).  Per-hub kqueues
+     * remove the shared-kqueue kq_lock contention that collapsed throughput with
+     * hub count. */
+    {
+    runloom_parker_pool_t *kpool =
+        runloom_parker_pool_for_hub(runloom_mn_current_hub_opaque());
     RUNLOOM_RLOCK(&runloom_pool.lock, RUNLOOM_RANK_PARKER_POOL);
     if (runloom_fd_bit_set(fd) != 0) {
         RUNLOOM_RUNLOCK(&runloom_pool.lock, RUNLOOM_RANK_PARKER_POOL);
@@ -116,6 +126,13 @@ static int runloom_netpoll_register(int fd, int events)
         return -1;
     }
     RUNLOOM_RUNLOCK(&runloom_pool.lock, RUNLOOM_RANK_PARKER_POOL);
+    if (kpool->kqueue_fd < 0) {                  /* pool backend never came up */
+        RUNLOOM_RLOCK(&runloom_pool.lock, RUNLOOM_RANK_PARKER_POOL);
+        runloom_fd_bit_clear(fd);
+        RUNLOOM_RUNLOCK(&runloom_pool.lock, RUNLOOM_RANK_PARKER_POOL);
+        errno = EINVAL;
+        return -1;
+    }
     {
         struct kevent kev[2];
         int n = 0;
@@ -129,13 +146,14 @@ static int runloom_netpoll_register(int fd, int events)
              * (the fd-bit is rolled back below). */
             int finj = runloom_fault_inject(RUNLOOM_FAULT_KQUEUE_CTL);
             if (finj) errno = finj;
-            else if (kevent(runloom_kqueue_fd, kev, n, NULL, 0, NULL) == 0) return 0;
+            else if (kevent(kpool->kqueue_fd, kev, n, NULL, 0, NULL) == 0) return 0;
         }
     }
     RUNLOOM_RLOCK(&runloom_pool.lock, RUNLOOM_RANK_PARKER_POOL);
     runloom_fd_bit_clear(fd);
     RUNLOOM_RUNLOCK(&runloom_pool.lock, RUNLOOM_RANK_PARKER_POOL);
     return -1;
+    }
 #else
     (void)fd;
     return 0;  /* select doesn't need pre-registration */

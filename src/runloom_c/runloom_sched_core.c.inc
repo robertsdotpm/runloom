@@ -445,6 +445,9 @@ void runloom_g_entry(void *user)
 #define RUNLOOM_G_SLAB_CAP 4096
 static RUNLOOM_TLS runloom_g_t *runloom_g_slab = NULL;
 static RUNLOOM_TLS int runloom_g_slab_size = 0;
+#ifdef RUNLOOM_DBG_BADCORO
+unsigned long long runloom_next_wseq_ctr = 0;   /* source-hunt: ->next write seq */
+#endif
 
 runloom_g_t *runloom_g_slab_alloc(void)
 {
@@ -481,6 +484,9 @@ runloom_g_t *runloom_g_slab_alloc(void)
                          __ATOMIC_RELEASE);
         memset((char *)g + offsetof(runloom_g_t, arena), 0,
                offsetof(runloom_g_t, id) - offsetof(runloom_g_t, arena));
+#ifdef RUNLOOM_DBG_BADCORO
+        g->magic = 0x600DC0DEu;   /* source-hunt: live-g canary (reuse path) */
+#endif
         return g;
     }
     /* Cold path: a brand-new struct from the OS.  Use libc calloc, NOT
@@ -495,22 +501,36 @@ runloom_g_t *runloom_g_slab_alloc(void)
      * pymalloc.  calloc zeroes everything (registry links + id); link it into
      * the global registry exactly once for the struct's whole lifetime. */
     g = (runloom_g_t *)calloc(1, sizeof(*g));
-    if (g != NULL) runloom_greg_link(g);
+    if (g != NULL) {
+        runloom_greg_link(g);
+#ifdef RUNLOOM_DBG_BADCORO
+        g->magic = 0x600DC0DEu;   /* source-hunt: live-g canary (cold path) */
+#endif
+    }
     return g;
 }
 
 void runloom_g_slab_free(runloom_g_t *g)
 {
+#ifdef RUNLOOM_DBG_BADCORO
+    g->magic = 0xDEADu;   /* source-hunt: freed-g marker (distinguishes UAF from reuse) */
+#endif
     runloom_g_state_set(g, RUNLOOM_GST_FREED);
-    if (runloom_g_slab_size >= RUNLOOM_G_SLAB_CAP) {
-        /* Struct is leaving for the OS -- drop it from the registry
-         * first so the dump never walks freed memory.  free (not PyMem_Free)
-         * to match the libc calloc in slab_alloc's cold path. */
-        runloom_greg_unlink(g);
-        free(g);
-        return;
-    }
-    g->next = runloom_g_slab;
+    /* Do NOT return the g STRUCT to the OS.  A stale wake_g (the netpoll
+     * dup-wake) can reach hub_submit with a pointer to an already-freed g;
+     * hub_submit's try_incref reads g->refcount to decide whether to re-queue,
+     * which is only sound while g is still a VALID g struct (refcount 0).  If the
+     * struct were freed to the OS and its memory reused, try_incref reads garbage
+     * and spuriously resurrects a non-g -> the arm64 crash residual (a reused g:
+     * magic != 0x600DC0DE, owner=NULL, garbage coro, reaching coro_resume from
+     * the ready FIFO).  The g's coro/stack are still released at completion; only
+     * the small g STRUCT is retained, cached in the per-thread slab forever so
+     * the try_incref read stays sound.  Memory is bounded by peak concurrency
+     * (the max-fibers admission cap); RUNLOOM_G_SLAB_CAP is now a soft hint (we
+     * keep caching past it rather than free).  A bounded QSBR/quarantine reclaim
+     * that frees only after no wake can reference the struct is a later
+     * refinement. */
+    RUNLOOM_NEXT_SET(g, runloom_g_slab, 3);   /* slab freelist link */
     runloom_g_slab = g;
     runloom_g_slab_size++;
 }

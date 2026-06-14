@@ -130,29 +130,63 @@ int runloom_netpoll_pump(long long timeout_ns)
     }
 #elif defined(RUNLOOM_HAVE_KQUEUE)
     {
-        struct kevent evs[64];
+        /* Larger batch (vs 64): fewer kevent syscalls per pump under a high
+         * parked count.  256 * sizeof(struct kevent) ~= 8 KB, fine on the hub
+         * OS-thread stack. */
+        struct kevent evs[256];
         struct timespec ts;
         struct timespec *tsp = NULL;
         int n;
+        int drained = 0;
+        /* PER-HUB kqueue: poll THIS hub's own kqueue (the pool wait_fd/register
+         * on this thread used).  Each hub draining its own kqueue removes the
+         * shared-kqueue kq_lock contention; dispatch_event still searches every
+         * pool's by_fd, so a delivered fd resolves to its parker regardless.
+         * hub_main also calls this with timeout 0 PERIODICALLY while busy, so a
+         * hub that never idles still drains its own events (load balancing). */
+        runloom_parker_pool_t *kpool =
+            runloom_parker_pool_for_hub(runloom_mn_current_hub_opaque());
+        runloom_parker_pool_lock_ensure_inited(kpool);   /* create backend if first touch */
         if (timeout_ns >= 0) {
             ts.tv_sec = (time_t)(timeout_ns / 1000000000LL);
             ts.tv_nsec = (long)(timeout_ns % 1000000000LL);
             tsp = &ts;
         }
-        {
-            int finj = runloom_fault_inject(RUNLOOM_FAULT_KQUEUE_WAIT);
+        /* DRAIN-UNTIL-EMPTY: the first kevent honors the caller's timeout
+         * (blocking when the hub is idle); once events flow we keep draining
+         * NON-BLOCKING until the kqueue empties (a short batch) or a per-pump
+         * cap.  Draining only one batch per call left the rest of a hub's ready
+         * set waiting for the next 64-turn periodic pump, which throttled
+         * wakeup delivery (and thus throughput) under high parked counts -- a
+         * 3-hop proxy / many-socket-per-task workload at 50k+ wedged on it.
+         * The cap stops a flood from starving g execution.  EV_ONESHOT arm
+         * discipline is unchanged, so the kqueue FV model still holds. */
+        for (;;) {
+            int i;
+            /* Fault injection only on the first (blocking) pass, matching the
+             * original single-kevent semantics. */
+            int finj = (drained == 0)
+                       ? runloom_fault_inject(RUNLOOM_FAULT_KQUEUE_WAIT) : 0;
             if (finj) {
                 n = -1; errno = finj;      /* short-circuit kevent */
+            } else if (kpool->kqueue_fd < 0) {
+                /* Backend creation failed (OOM/fd exhaustion): don't spin on a
+                 * bad fd -- sleep out the timeout so the hub idles, then re-loop. */
+                if (timeout_ns > 0 && drained == 0) runloom_sleep_ns(timeout_ns);
+                n = 0;
             } else {
+                struct timespec zero = {0, 0};
+                /* First pass: caller timeout.  Later passes: non-blocking. */
+                struct timespec *passtsp = (drained == 0) ? tsp : &zero;
                 Py_BEGIN_ALLOW_THREADS
-                n = kevent(runloom_kqueue_fd, NULL, 0, evs, 64, tsp);
+                n = kevent(kpool->kqueue_fd, NULL, 0, evs, 256, passtsp);
                 Py_END_ALLOW_THREADS
             }
-        }
-        if (n < 0) {
-            runloom_netpoll_wait_failed(n);   /* EINTR -> retry; else log+backoff */
-        } else if (n > 0) {
-            int i;
+            if (n < 0) {
+                runloom_netpoll_wait_failed(n);   /* EINTR -> retry; else log+backoff */
+                break;
+            }
+            if (n == 0) break;                    /* timeout / nothing ready */
             for (i = 0; i < n; i++) {
                 int fd = (int)evs[i].ident;
                 int mask;
@@ -160,15 +194,19 @@ int runloom_netpoll_pump(long long timeout_ns)
                  * re-queue already placed the g on the scheduler wake_list,
                  * the byte's only job was to break this idle kevent().
                  * Drain it (EV_CLEAR already reset the edge) and move on. */
-                if (runloom_selfpipe_r >= 0 && fd == runloom_selfpipe_r) {
+                if (kpool->selfpipe_r >= 0 && fd == kpool->selfpipe_r) {
                     char drain[64];
-                    while (read(runloom_selfpipe_r, drain, sizeof drain) > 0) { }
+                    while (read(kpool->selfpipe_r, drain, sizeof drain) > 0) { }
                     continue;
                 }
                 mask = (evs[i].filter == EVFILT_READ) ?
                        RUNLOOM_NETPOLL_READ : RUNLOOM_NETPOLL_WRITE;
                 if (runloom_pump_dispatch_event(fd, mask)) woke++;
             }
+            drained += n;
+            /* Stop when the batch was short (kqueue drained) or the per-pump
+             * cap is hit (don't let a flood starve g execution). */
+            if (n < 256 || drained >= 4096) break;
         }
     }
 #elif defined(RUNLOOM_OS_WINDOWS)

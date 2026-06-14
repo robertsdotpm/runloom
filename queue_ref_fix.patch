@@ -1,0 +1,181 @@
+diff --git a/src/runloom_c/mn_sched_hub_main.c.inc b/src/runloom_c/mn_sched_hub_main.c.inc
+index fb5912a..d90afc7 100644
+--- a/src/runloom_c/mn_sched_hub_main.c.inc
++++ b/src/runloom_c/mn_sched_hub_main.c.inc
+@@ -859,8 +859,12 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
+             /* Clear queued flag right before resume so a wake_g that
+              * fires during this g's execution (e.g., a netpoll pump
+              * processing an event for the parker g is about to link
+-             * inside wait_fd) can enqueue g via submit. */
+-            __atomic_store_n(&g->in_sub_queue, 0, __ATOMIC_RELEASE);
++             * inside wait_fd) can enqueue g via submit.  The 1->0 exchange
++             * also tells us whether THIS entry held the default-path queue
++             * ref (taken in hub_submit) so we can drop it exactly once when
++             * the entry is fully consumed below. */
++            int had_qref = (__atomic_exchange_n(&g->in_sub_queue, 0,
++                                                __ATOMIC_ACQ_REL) == 1);
+             /* Defensive: pop a stale queue entry?  Two failure modes
+              * for the queue under M:N + free-threaded:
+              *
+@@ -886,7 +890,8 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
+                 __atomic_load_n(&g->done, __ATOMIC_ACQUIRE)) {
+                 h->sched.current = NULL;
+                 runloom_tls_current_g = NULL;
+-                if (from_runq) runloom_g_decref(g);   /* queue ref */
++                if (from_runq) runloom_g_decref(g);   /* global-runq queue ref */
++                if (had_qref) runloom_g_decref(g);    /* default queue ref */
+                 continue;
+             }
+             {
+@@ -927,7 +932,8 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
+ #endif
+                 h->sched.current = NULL;
+                 runloom_tls_current_g = NULL;
+-                if (from_runq) runloom_g_decref(g);
++                if (from_runq) runloom_g_decref(g);   /* global-runq queue ref */
++                if (had_qref) runloom_g_decref(g);    /* default queue ref */
+                 continue;
+             }
+             runloom_g_state_set(g, RUNLOOM_GST_RUNNING);   /* observational: now on-CPU */
+@@ -942,6 +948,16 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
+             runloom_tls_current_g = NULL;
+             h->sched.current = NULL;
+ 
++            /* Drop THIS entry's default queue ref now that the entry is fully
++             * consumed (the g was resumed).  One site covers every post-resume
++             * outcome below (done / parked / yielded / re-queued): a g that
++             * re-queued itself during the resume took a NEW queue ref via its
++             * fresh hub_submit, so this drops only the old entry's ref.  Drops to
++             * the spawn ref (not zero) for a still-live g, so the reads below are
++             * safe; the done branch's scheduler decref then frees it.  from_runq
++             * (global-runq) gs have had_qref==0 and keep their own accounting. */
++            if (had_qref) runloom_g_decref(g);
++
+             if (runloom_coro_done(g->coro)) {
+                 runloom_advice_record_g(g);   /* fold stack HWM (profiling) */
+                 runloom_g_state_set(g, RUNLOOM_GST_DONE);
+diff --git a/src/runloom_c/mn_sched_init_fini.c.inc b/src/runloom_c/mn_sched_init_fini.c.inc
+index 7edf9d6..3229073 100644
+--- a/src/runloom_c/mn_sched_init_fini.c.inc
++++ b/src/runloom_c/mn_sched_init_fini.c.inc
+@@ -189,11 +189,23 @@ static void runloom_mn_hub_drain_leftovers(runloom_hub_t *h)
+ {
+     runloom_g_t *sub;
+     runloom_g_t *g;
++    /* A still-queued g (in_sub_queue==1) in the default path also holds the
++     * queue ref hub_submit took; drop it in addition to the spawn ref the
++     * existing single decref releases.  Self-gated by the 1->0 exchange; skipped
++     * in per-g-tstate mode (no queue ref there).  RUNLOOM_DROP_QREF is a no-op
++     * for sleep-heap / raw-yield gs (in_sub_queue==0). */
++    int per_g_qref = !runloom_get_per_g_tstate_mode();
++#define RUNLOOM_DROP_QREF(gp) do {                                            \
++        if (per_g_qref &&                                                     \
++            __atomic_exchange_n(&(gp)->in_sub_queue, 0, __ATOMIC_ACQ_REL) == 1) \
++            runloom_g_decref(gp);                                             \
++    } while (0)
+     sub = h->sub_head;
+     h->sub_head = h->sub_tail = NULL;
+     while (sub != NULL) {
+         runloom_g_t *next = sub->next;
+         sub->next = NULL;
++        RUNLOOM_DROP_QREF(sub);
+         runloom_g_decref(sub);
+         sub = next;
+     }
+@@ -208,6 +220,7 @@ static void runloom_mn_hub_drain_leftovers(runloom_hub_t *h)
+             while (s != NULL) {
+                 runloom_g_t *next = s->next;
+                 s->next = NULL;
++                RUNLOOM_DROP_QREF(s);
+                 runloom_g_decref(s);
+                 s = next;
+             }
+@@ -215,15 +228,18 @@ static void runloom_mn_hub_drain_leftovers(runloom_hub_t *h)
+         h->stage_pending = 0;
+     }
+     while ((g = runloom_sched_ready_pop(&h->sched)) != NULL) {
++        RUNLOOM_DROP_QREF(g);
+         runloom_g_decref(g);
+     }
+     while ((g = (runloom_g_t *)runloom_cldeque_pop(&h->deque)) != NULL) {
++        RUNLOOM_DROP_QREF(g);
+         runloom_g_decref(g);
+     }
+     while (h->sched.sleep_size > 0) {
+         g = runloom_sched_sleep_pop(&h->sched);
+-        if (g != NULL) runloom_g_decref(g);
++        if (g != NULL) { RUNLOOM_DROP_QREF(g); runloom_g_decref(g); }
+     }
++#undef RUNLOOM_DROP_QREF
+ }
+ 
+ void runloom_mn_fini(void)
+@@ -621,7 +637,11 @@ static int runloom_mn_go_n_bulk(PyObject *callable, long n, size_t stack_size,
+ 
+         memset(&tmpl, 0, sizeof tmpl);
+         tmpl.callable     = callable;             /* refs batched below */
+-        tmpl.refcount     = 1;
++        /* refcount = spawn ref (+ the default queue ref implied by
++         * in_sub_queue=1, which hub_main drops when it consumes the entry --
++         * mirrors the runloom_g_incref in hub_submit).  Per-g-tstate mode uses
++         * the global-runq from_runq ref instead, so it needs only the spawn ref. */
++        tmpl.refcount     = runloom_get_per_g_tstate_mode() ? 1 : 2;
+         tmpl.park_fd      = -1;
+         tmpl.in_sub_queue = 1;
+         tmpl.state        = (unsigned char)RUNLOOM_GST_SUBMITTED;
+diff --git a/src/runloom_c/mn_sched_mn_api.c.inc b/src/runloom_c/mn_sched_mn_api.c.inc
+index 5404129..ddcc8e8 100644
+--- a/src/runloom_c/mn_sched_mn_api.c.inc
++++ b/src/runloom_c/mn_sched_mn_api.c.inc
+@@ -70,6 +70,17 @@ static void runloom_mn_hub_submit(runloom_hub_t *h, runloom_g_t *g)
+          * will pick up whatever state the g has when hub_main gets to it. */
+         return;
+     }
++    /* QUEUE REF (default / non-per-g path).  A queued g was previously held
++     * only by its spawn ref, so a stale wake_g racing the g's completion (the
++     * duplicate-entry case the hub_main resume comment describes) could free the
++     * g while a sub_head/deque entry still pointed at it -> use-after-free
++     * (the arm64 cross-hub resume SIGSEGV).  Pin the g for the lifetime of THIS
++     * queue entry; hub_main drops it exactly once when it consumes the entry
++     * (the in_sub_queue 1->0 exchange).  Per-g-tstate mode uses the global-runq
++     * from_runq ref instead (runloom_use_global_runq path), so skip it there to
++     * keep that accounting untouched. */
++    if (!runloom_get_per_g_tstate_mode())
++        runloom_g_incref(g);
+     /* Controlled-replay deferred publish: a cross-hub submit made DURING a
+      * running segment (the spawning hub holds the baton and is running a g) is
+      * staged on the SPAWNING hub per target, then flushed onto the target's
+diff --git a/src/runloom_c/mn_sched_sysmon.c.inc b/src/runloom_c/mn_sched_sysmon.c.inc
+index a85994b..4870a30 100644
+--- a/src/runloom_c/mn_sched_sysmon.c.inc
++++ b/src/runloom_c/mn_sched_sysmon.c.inc
+@@ -349,11 +349,16 @@ static void runloom_handoff_resume_g(runloom_hub_t *h, runloom_g_t *g,
+     runloom_tls_current_g = g;
+     runloom_tls_self_queued = 0;
+     runloom_tls_parked_offqueue = 0;
+-    __atomic_store_n(&g->in_sub_queue, 0, __ATOMIC_RELEASE);
++    /* Default queue ref (handoff runs only in non-per-g mode, so a 1->0
++     * exchange here implies hub_submit took the ref).  Drop it once this entry
++     * is consumed -- mirrors hub_main's default-block accounting. */
++    int had_qref = (__atomic_exchange_n(&g->in_sub_queue, 0,
++                                        __ATOMIC_ACQ_REL) == 1);
+     RUNLOOM_G_ASSERT_NOT(g, RUNLOOM_GST_BIT(RUNLOOM_GST_FREED));
+     RUNLOOM_EVT(RUNLOOM_EVT_G_POP, g, h, 0);
+     if (g->coro == NULL || __atomic_load_n(&g->done, __ATOMIC_ACQUIRE)) {
+         runloom_tls_current_g = NULL;
++        if (had_qref) runloom_g_decref(g);
+         return;
+     }
+     /* NB: no runloom_hub_resume_begin/end -- the rescue must not write
+@@ -364,6 +369,11 @@ static void runloom_handoff_resume_g(runloom_hub_t *h, runloom_g_t *g,
+     runloom_tls_parked_offqueue = 0;
+     runloom_tls_current_g = NULL;
+ 
++    /* Entry consumed: drop the default queue ref once (covers done / re-submit /
++     * park).  A re-submit below takes a fresh ref; for a done g this drops to the
++     * scheduler ref, which the done branch then releases. */
++    if (had_qref) runloom_g_decref(g);
++
+     if (runloom_coro_done(g->coro)) {
+         runloom_drain_g_datastack();
+         runloom_pystate_load(base);

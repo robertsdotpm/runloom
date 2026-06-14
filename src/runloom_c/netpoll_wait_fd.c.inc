@@ -210,7 +210,10 @@ int runloom_netpoll_wait_fd(int fd, int events, long long timeout_ns)
                                  (prev_min < 0 || park->deadline_ns < prev_min));
     }
     RUNLOOM_RUNLOCK(&pool->lock, RUNLOOM_RANK_PARKER_POOL);
-    if (new_earliest_deadline) runloom_netpoll_wake_pump();
+    /* Per-hub kqueue: the parker + its deadline live in `pool`, owned by
+     * hub_opaque, so break THAT pump (NULL on the single-thread sched -> default
+     * pool, matching the old single-pump behaviour). */
+    if (new_earliest_deadline) runloom_netpoll_wake_pump(hub_opaque);
     if (current_g != NULL) {
         /* Record what we're blocked on as plain data ON the g, so the
          * fiber dump can report "fd=N R/W" without ever dereferencing

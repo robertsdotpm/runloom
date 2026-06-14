@@ -248,6 +248,10 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
      * requester set is complete (no-op unless RUNLOOM_MN_SEED + barrier). */
     runloom_mn_ctrl_wait_armed();
 
+    /* Per-hub kqueue load-balancing: cadence counter for the periodic
+     * non-blocking self-pump below (see the loop top). */
+    unsigned int self_pump_ctr = 0;
+    (void)self_pump_ctr;
     while (!__atomic_load_n(&h->stopping, __ATOMIC_ACQUIRE)) {
         runloom_g_t *g;
         /* Drain the io_uring single-op cancel mailbox: a foreign task.cancel
@@ -264,20 +268,81 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
          * steal are single-owner by construction (already RUNNING) and skip
          * both. */
         int from_runq = 0;
+#ifdef RUNLOOM_DBG_BADCORO
+        int gsrc = 0, gvic = -1;   /* source-hunt: which queue delivered g */
+#endif
+#if defined(RUNLOOM_HAVE_KQUEUE)
+        /* PERIODIC NON-BLOCKING SELF-PUMP (per-hub kqueue load balancing).
+         * Each hub polls its OWN kqueue; the blocking pump below only runs when
+         * this hub goes idle.  Under load a hub stays busy running ready gs and
+         * never idles, so its OWN parkers' readiness (events sitting in its
+         * kqueue) would starve -- idle hubs can't help, the kqueue is private.
+         * Drain it with a non-blocking kevent(timeout=0) every N loop turns so a
+         * busy hub keeps its parkers flowing; woken gs land in sub_head/ready and
+         * are picked up immediately below.  This is the netpoll cadence Go's
+         * scheduler runs in findrunnable.  Cheap (one kevent per N turns) and
+         * compiled only on the per-hub-kqueue backend. */
+        if ((++self_pump_ctr & 0x3fu) == 0) (void)runloom_netpoll_pump(0);
+#endif
         /* Drain the submission list into the deque first.  Pushing to
          * the deque is owner-only, so we (the hub) move fresh gs from
          * external producers onto our deque before anyone else looks. */
         RUNLOOM_RLOCK(&h->sub_lock, RUNLOOM_RANK_HUB_SUB);
         {
             runloom_g_t *sub = h->sub_head;
+#ifdef RUNLOOM_DBG_BADCORO
+            runloom_g_t *prev = NULL;   /* source-hunt: g whose ->next we follow */
+            int last_wsite = -1; void *last_wval = NULL; unsigned long long last_wseq = 0;
+#endif
             h->sub_tail = NULL;
             /* RELAXED-atomic clear: closes the lock-free census's ACQUIRE read race
              * on sub_head (Finding D #4 -- the TSan hub_main:273 report). */
             __atomic_store_n(&h->sub_head, (runloom_g_t *)NULL, __ATOMIC_RELAXED);
             RUNLOOM_RUNLOCK(&h->sub_lock, RUNLOOM_RANK_HUB_SUB);
             while (sub != NULL) {
-                runloom_g_t *next = sub->next;
-                sub->next = NULL;
+                runloom_g_t *next;
+#ifdef RUNLOOM_DBG_BADCORO
+                /* Validate `sub` BEFORE pushing.  If it is not a real g, the
+                 * PREVIOUS g's ->next was corrupted between hub_submit and here:
+                 * dump that g's full identity + state, then stop (rest is junk). */
+                {
+                    runloom_coro_t *sc = sub->coro;
+                    if (sub->owner == NULL ||
+                        (sub->callable == NULL && sub->c_entry == NULL) ||
+                        sc == NULL || ((uintptr_t)sc >> 47) != 0 ||
+                        ((uintptr_t)sc & 0xf) != 0) {
+                        /* last_w* describe how prev->next (== this bad sub) was
+                         * written: site (1=submit 2=drain 3=slabfree 5=staging),
+                         * the value written, and its seq.  If last_wval == sub the
+                         * bad value came straight from that site (a non-g was
+                         * linked); if last_wval != sub, prev->next was overwritten
+                         * AFTER the recorded write -> a wild write (the recorded
+                         * site/seq bounds when the last legit write happened). */
+                        char dbuf[460];
+                        int dm = snprintf(dbuf, sizeof dbuf,
+                            "[DRAINBAD] sub=%p submagic=%x bad <- prev=%p pmagic=%x id=%lld owner=%p rc=%d snapv=%d || prevNEXT wsite=%d wval=%p (wval==sub? %d)\n",
+                            (void *)sub, sub->magic,
+                            (void *)prev, prev ? prev->magic : 0,
+                            prev ? (long long)prev->id : -1,
+                            prev ? (void *)prev->owner : NULL,
+                            prev ? (int)__atomic_load_n(&prev->refcount, __ATOMIC_ACQUIRE) : -1,
+                            prev ? prev->snap.valid : -1,
+                            last_wsite, last_wval,
+                            (last_wval == (void *)sub) ? 1 : 0);
+                        if (dm > 0) (void)write(2, dbuf, (size_t)dm);
+                        break;
+                    }
+                }
+#endif
+                next = sub->next;
+#ifdef RUNLOOM_DBG_BADCORO
+                /* Capture how THIS sub's ->next was written, BEFORE we clear it,
+                 * so the next iteration (if `next` is bad) can attribute it. */
+                last_wsite = sub->next_wsite;
+                last_wval  = sub->next_wval;
+                last_wseq  = sub->next_wseq;
+#endif
+                RUNLOOM_NEXT_SET(sub, NULL, 2);   /* drain clear */
                 /* Route by state: fresh (no snap) -> Chase-Lev deque
                  * (stealable by other hubs); woken (snap.valid) ->
                  * local FIFO (hub-pinned, the netpoll-wake path).
@@ -302,6 +367,9 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
                      * via the first-run install path. */
                     runloom_sched_ready_push(&h->sched, sub);
                 }
+#ifdef RUNLOOM_DBG_BADCORO
+                prev = sub;
+#endif
                 sub = next;
             }
         }
@@ -361,14 +429,23 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
         if (sbound && ready_streak >= (unsigned)sbound) {
             ready_streak = 0;
             g = (runloom_g_t *)runloom_cldeque_pop(&h->deque);  /* forced fresh turn */
+#ifdef RUNLOOM_DBG_BADCORO
+            if (g) gsrc = 1;   /* sbound forced own-deque pop */
+#endif
         }
         if (g == NULL) {
             g = runloom_sched_ready_pop(&h->sched);     /* local yielded/woken */
             if (g != NULL) {
                 ready_streak++;
+#ifdef RUNLOOM_DBG_BADCORO
+                gsrc = 2;      /* local ready FIFO */
+#endif
             } else {
                 g = (runloom_g_t *)runloom_cldeque_pop(&h->deque);  /* own fresh */
                 ready_streak = 0;
+#ifdef RUNLOOM_DBG_BADCORO
+                if (g) gsrc = 3;   /* own-deque pop */
+#endif
             }
         }
         if (g == NULL) {
@@ -379,7 +456,12 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
              * the resume block to claim the g (QUEUED->RUNNING) and to drop the
              * entry's queue ref when the resume ends. */
             g = runloom_mn_global_runq_pull();
-            if (g != NULL) from_runq = 1;
+            if (g != NULL) {
+                from_runq = 1;
+#ifdef RUNLOOM_DBG_BADCORO
+                gsrc = 4;      /* global run-queue */
+#endif
+            }
         }
         if (g == NULL) {
           if (!runloom_mn_ctrl_no_steal() && runloom_hub_count >= 2) {
@@ -395,6 +477,9 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
                 if (i == h->id) continue;
                 g = (runloom_g_t *)runloom_cldeque_steal(&runloom_hubs[i].deque);
                 if (g != NULL) {
+#ifdef RUNLOOM_DBG_BADCORO
+                    gsrc = 5; gvic = i;   /* stole from hub i's deque */
+#endif
                     /* ACQ_REL pair: mn_run's polling loop reads
                      * hubs[*].pending with ACQUIRE; under
                      * free-threaded Python the RELAXED pair we used
@@ -816,8 +901,12 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
             /* Clear queued flag right before resume so a wake_g that
              * fires during this g's execution (e.g., a netpoll pump
              * processing an event for the parker g is about to link
-             * inside wait_fd) can enqueue g via submit. */
-            __atomic_store_n(&g->in_sub_queue, 0, __ATOMIC_RELEASE);
+             * inside wait_fd) can enqueue g via submit.  The 1->0 exchange
+             * also tells us whether THIS entry held the default-path queue
+             * ref (taken in hub_submit) so we can drop it exactly once when
+             * the entry is fully consumed below. */
+            int had_qref = (__atomic_exchange_n(&g->in_sub_queue, 0,
+                                                __ATOMIC_ACQ_REL) == 1);
             /* Defensive: pop a stale queue entry?  Two failure modes
              * for the queue under M:N + free-threaded:
              *
@@ -843,12 +932,63 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
                 __atomic_load_n(&g->done, __ATOMIC_ACQUIRE)) {
                 h->sched.current = NULL;
                 runloom_tls_current_g = NULL;
-                if (from_runq) runloom_g_decref(g);   /* queue ref */
+                if (from_runq) runloom_g_decref(g);   /* global-runq queue ref */
+                if (had_qref) runloom_g_decref(g);    /* default queue ref */
+                continue;
+            }
+            {
+            /* Resume the value we validate (one load of g->coro, never a reload
+             * at the call site).  A validly-spawned, validly-queued g ALWAYS has
+             * owner set + an entry fn (callable or c_entry) + a 16-aligned
+             * canonical coro.
+             *
+             * DEFENSE-IN-DEPTH (proven non-load-bearing): the arm64 crash this
+             * once caught -- a queue entry pointing at a FREED-then-reused g
+             * struct (owner=NULL / garbage coro -> SIGSEGV in coro_resume) -- is
+             * now eliminated at the source.  The crasher was a stale wake_g (the
+             * netpoll dup-wake) reaching hub_submit with a pointer to an already-
+             * freed g whose struct had been returned to the OS and reused by a
+             * non-runloom malloc (the [BADG] dumps showed garbage magic, not the
+             * live/dead runloom canaries).  Two fixes close it: (1) hub_submit takes
+             * the queue ref via runloom_g_try_incref BEFORE touching the g, so a
+             * stale wake on a still-VALID freed g (refcount 0) bails [CBMC:
+             * verify/cbmc/sched_qref_cbmc.c]; (2) runloom_g_slab_free no longer
+             * frees g STRUCTS to the OS, so try_incref always reads a real
+             * refcount instead of garbage on reused memory.  Validated: 0/16
+             * connect-storm crashes on arm64 with this block compiled OUT, BADG
+             * dumps drop from 3/10 dangerous cases to 0/10.  The block is kept as
+             * a cheap (a few comparisons) crash-resistance assert for any future
+             * weak-memory regression; on the happy path it never fires.  Skipping
+             * a flagged entry is safe (drop the queue ref + continue, like the
+             * coro==NULL / done case above): a real g ran via its valid entry. */
+            runloom_coro_t *cp = g->coro;
+            if (g->owner == NULL ||
+                (g->callable == NULL && g->c_entry == NULL) ||
+                cp == NULL || ((uintptr_t)cp >> 47) != 0 ||
+                ((uintptr_t)cp & 0xf) != 0 || (uintptr_t)cp < 0x10000) {
+#ifdef RUNLOOM_DBG_BADCORO
+                /* Source-hunt dump (off by default).  Post-fix this should never
+                 * print; magic distinguishes live (600dc0de) / slab-freed (dead)
+                 * / OS-reused (other) memory, done splits completed (benign) from
+                 * the once-dangerous non-completed case. */
+                char dbuf[256];
+                int dm = snprintf(dbuf, sizeof dbuf,
+                    "[BADG] done=%d magic=%x owner=%p coro=%p call=%p centry=%p src=%d g=%p\n",
+                    (int)__atomic_load_n(&g->done, __ATOMIC_ACQUIRE), g->magic,
+                    (void *)g->owner, (void *)cp, (void *)g->callable,
+                    (void *)g->c_entry, gsrc, (void *)g);
+                if (dm > 0) (void)write(2, dbuf, (size_t)dm);
+#endif
+                h->sched.current = NULL;
+                runloom_tls_current_g = NULL;
+                if (from_runq) runloom_g_decref(g);   /* global-runq queue ref */
+                if (had_qref) runloom_g_decref(g);    /* default queue ref */
                 continue;
             }
             runloom_g_state_set(g, RUNLOOM_GST_RUNNING);   /* observational: now on-CPU */
             runloom_hub_resume_begin(h, g);
-            runloom_coro_resume(g->coro);
+            runloom_coro_resume(cp);
+            }
             runloom_hub_resume_end(h);
             self_queued = runloom_tls_self_queued;
             parked_offqueue = runloom_tls_parked_offqueue;
@@ -856,6 +996,16 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
             runloom_tls_parked_offqueue = 0;
             runloom_tls_current_g = NULL;
             h->sched.current = NULL;
+
+            /* Drop THIS entry's default queue ref now that the entry is fully
+             * consumed (the g was resumed).  One site covers every post-resume
+             * outcome below (done / parked / yielded / re-queued): a g that
+             * re-queued itself during the resume took a NEW queue ref via its
+             * fresh hub_submit, so this drops only the old entry's ref.  Drops to
+             * the spawn ref (not zero) for a still-live g, so the reads below are
+             * safe; the done branch's scheduler decref then frees it.  from_runq
+             * (global-runq) gs have had_qref==0 and keep their own accounting. */
+            if (had_qref) runloom_g_decref(g);
 
             if (runloom_coro_done(g->coro)) {
                 runloom_advice_record_g(g);   /* fold stack HWM (profiling) */

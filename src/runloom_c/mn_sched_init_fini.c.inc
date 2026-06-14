@@ -194,12 +194,24 @@ static void runloom_mn_hub_drain_leftovers(runloom_hub_t *h)
 {
     runloom_g_t *sub;
     runloom_g_t *g;
+    /* A still-queued g (in_sub_queue==1) in the default path also holds the
+     * queue ref hub_submit took; drop it in addition to the spawn ref the
+     * existing single decref releases.  Self-gated by the 1->0 exchange; skipped
+     * in per-g-tstate mode (no queue ref there).  RUNLOOM_DROP_QREF is a no-op
+     * for sleep-heap / raw-yield gs (in_sub_queue==0). */
+    int per_g_qref = !runloom_get_per_g_tstate_mode();
+#define RUNLOOM_DROP_QREF(gp) do {                                            \
+        if (per_g_qref &&                                                     \
+            __atomic_exchange_n(&(gp)->in_sub_queue, 0, __ATOMIC_ACQ_REL) == 1) \
+            runloom_g_decref(gp);                                             \
+    } while (0)
     sub = h->sub_head;
     h->sub_tail = NULL;
     __atomic_store_n(&h->sub_head, (runloom_g_t *)NULL, __ATOMIC_RELAXED);  /* census x-thread read */
     while (sub != NULL) {
         runloom_g_t *next = sub->next;
         sub->next = NULL;
+        RUNLOOM_DROP_QREF(sub);
         runloom_g_decref(sub);
         sub = next;
     }
@@ -214,6 +226,7 @@ static void runloom_mn_hub_drain_leftovers(runloom_hub_t *h)
             while (s != NULL) {
                 runloom_g_t *next = s->next;
                 s->next = NULL;
+                RUNLOOM_DROP_QREF(s);
                 runloom_g_decref(s);
                 s = next;
             }
@@ -221,15 +234,18 @@ static void runloom_mn_hub_drain_leftovers(runloom_hub_t *h)
         h->stage_pending = 0;
     }
     while ((g = runloom_sched_ready_pop(&h->sched)) != NULL) {
+        RUNLOOM_DROP_QREF(g);
         runloom_g_decref(g);
     }
     while ((g = (runloom_g_t *)runloom_cldeque_pop(&h->deque)) != NULL) {
+        RUNLOOM_DROP_QREF(g);
         runloom_g_decref(g);
     }
     while (h->sched.sleep_size > 0) {
         g = runloom_sched_sleep_pop(&h->sched);
-        if (g != NULL) runloom_g_decref(g);
+        if (g != NULL) { RUNLOOM_DROP_QREF(g); runloom_g_decref(g); }
     }
+#undef RUNLOOM_DROP_QREF
 }
 
 void runloom_mn_fini(void)
@@ -627,7 +643,11 @@ static int runloom_mn_go_n_bulk(PyObject *callable, long n, size_t stack_size,
 
         memset(&tmpl, 0, sizeof tmpl);
         tmpl.callable     = callable;             /* refs batched below */
-        tmpl.refcount     = 1;
+        /* refcount = spawn ref (+ the default queue ref implied by
+         * in_sub_queue=1, which hub_main drops when it consumes the entry --
+         * mirrors the runloom_g_incref in hub_submit).  Per-g-tstate mode uses
+         * the global-runq from_runq ref instead, so it needs only the spawn ref. */
+        tmpl.refcount     = runloom_get_per_g_tstate_mode() ? 1 : 2;
         tmpl.park_fd      = -1;
         tmpl.in_sub_queue = 1;
         tmpl.state        = (unsigned char)RUNLOOM_GST_SUBMITTED;

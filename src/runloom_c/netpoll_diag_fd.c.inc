@@ -2,6 +2,10 @@
  * standalone.  See netpoll.c for the includes/typedefs/file-scope state
  * these definitions depend on. */
 
+#if !defined(RUNLOOM_OS_WINDOWS)
+#include <poll.h>   /* runloom_netpoll_dump_parkers ready-but-parked probe */
+#endif
+
 
 int runloom_netpoll_inspect_for_self_check(struct runloom_self_check_stats *out)
 {
@@ -93,32 +97,66 @@ int runloom_netpoll_inspect_for_self_check(struct runloom_self_check_stats *out)
  * stderr.  Used to identify a leaked netpoll parker (cross-file flake). */
 void runloom_netpoll_dump_parkers(void)
 {
-    runloom_parker_pool_t *pool = &runloom_pool;
-    runloom_parked_t *p;
-    int n = 0;
     char buf[256];
     int m;
+    int pi;
     if (!__atomic_load_n(&runloom_netpoll_inited, __ATOMIC_ACQUIRE)) {
         m = snprintf(buf, sizeof buf, "[parker-dump] netpoll not inited\n");
         (void)write(2, buf, (size_t)m);
         return;
     }
-    runloom_parker_pool_lock_ensure_inited(pool);
-    RUNLOOM_RLOCK(&pool->lock, RUNLOOM_RANK_PARKER_POOL);
-    m = snprintf(buf, sizeof buf, "[parker-dump] total=%d head=%p\n",
-                 __atomic_load_n(&pool->total, __ATOMIC_ACQUIRE), (void *)pool->head);
-    (void)write(2, buf, (size_t)m);
-    p = pool->head;
-    while (p != NULL && n < 64) {
+    /* Walk EVERY pool (per-hub kqueue: parkers live in per-hub pools, not the
+     * default).  Summarize per pool by event mask, then list a sample. */
+    for (pi = 0; pi < RUNLOOM_PARKER_POOL_MAX; pi++) {
+        runloom_parker_pool_t *pool = &runloom_pools[pi];
+        runloom_parked_t *p;
+        int total = __atomic_load_n(&pool->total, __ATOMIC_ACQUIRE);
+        int n = 0, rd = 0, wr = 0, rdwr = 0, other = 0;
+        int rdyp = 0;   /* ready-but-parked: fd IS OS-ready yet g still parked */
+        if (total == 0) continue;
+        runloom_parker_pool_lock_ensure_inited(pool);
+        RUNLOOM_RLOCK(&pool->lock, RUNLOOM_RANK_PARKER_POOL);
+        for (p = pool->head; p != NULL && n < 200000; p = p->next, n++) {
+            int e = p->events & (RUNLOOM_NETPOLL_READ | RUNLOOM_NETPOLL_WRITE);
+            if (e == RUNLOOM_NETPOLL_READ) rd++;
+            else if (e == RUNLOOM_NETPOLL_WRITE) wr++;
+            else if (e == (RUNLOOM_NETPOLL_READ | RUNLOOM_NETPOLL_WRITE)) rdwr++;
+            else other++;
+#if !defined(RUNLOOM_OS_WINDOWS)
+            /* Diagnostic readiness probe (lost-wakeup detector): is this fd
+             * ACTUALLY ready right now while its g is still parked?  If many are
+             * ready-but-parked the wedge is a lost netpoll wakeup; if few/none
+             * the gs are genuinely waiting on I/O that never arrives. */
+            {
+                struct pollfd pfd;
+                short want = 0;
+                if (p->events & RUNLOOM_NETPOLL_READ)  want |= POLLIN;
+                if (p->events & RUNLOOM_NETPOLL_WRITE) want |= POLLOUT;
+                pfd.fd = p->fd; pfd.events = want; pfd.revents = 0;
+                if (poll(&pfd, 1, 0) > 0 &&
+                    (pfd.revents & (want | POLLHUP | POLLERR))) rdyp++;
+            }
+#endif
+        }
         m = snprintf(buf, sizeof buf,
-            "[parker-dump]  #%d parker=%p fd=%d events=%d g=%p hub=%p commit=%d gen=%u deadline_ns=%lld\n",
-            n, (void *)p, p->fd, p->events, (void *)p->g, (void *)p->hub,
-            p->commit, p->gen, (long long)p->deadline_ns);
+            "[parker-dump] pool#%d total=%d walked=%d READ=%d WRITE=%d RW=%d other=%d readyParked=%d kq=%d\n",
+            pi, total, n, rd, wr, rdwr, other, rdyp,
+#if defined(RUNLOOM_HAVE_KQUEUE)
+            pool->kqueue_fd
+#else
+            -1
+#endif
+            );
         (void)write(2, buf, (size_t)m);
-        n++;
-        p = p->next;
+        n = 0;
+        for (p = pool->head; p != NULL && n < 8; p = p->next, n++) {
+            m = snprintf(buf, sizeof buf,
+                "[parker-dump]   pool#%d sample fd=%d events=%d g=%p hub=%p commit=%d gen=%u\n",
+                pi, p->fd, p->events, (void *)p->g, (void *)p->hub, p->commit, p->gen);
+            (void)write(2, buf, (size_t)m);
+        }
+        RUNLOOM_RUNLOCK(&pool->lock, RUNLOOM_RANK_PARKER_POOL);
     }
-    RUNLOOM_RUNLOCK(&pool->lock, RUNLOOM_RANK_PARKER_POOL);
 }
 
 /* Introspection accessor: read a parker's plain fields.  See netpoll.h. */
@@ -430,18 +468,12 @@ static int                       runloom_iouring_ring_efds[RUNLOOM_IOURING_RINGS
 static struct runloom_iouring_ring *runloom_iouring_ring_ptrs[RUNLOOM_IOURING_RINGS_MAX];
 static int                       runloom_iouring_ring_count = 0;
 #elif defined(RUNLOOM_HAVE_KQUEUE)
-static int runloom_kqueue_fd = -1;
-/* kqueue cross-thread pump wake: a self-pipe whose read end is registered
- * in the kqueue (EVFILT_READ | EV_CLEAR).  Any thread pokes the write end
- * via runloom_netpoll_wake_pump() to break an idle kevent() so a cross-thread
- * re-queue (e.g. a blocking-offload worker) wakes a scheduler parked in the
- * pump -- the kqueue analogue of the epoll eventfd / select self-pipe.
- * Same names as the select() branch on purpose: the backends are mutually
- * exclusive so only one set ever compiles, and the shared
- * wake_pump_arm()/wake_pump() #else paths then work unchanged on kqueue.
- * -1 = unarmed.  Created once in runloom_netpoll_init under runloom_pool.lock. */
-static int runloom_selfpipe_r = -1;
-static int runloom_selfpipe_w = -1;
+/* Per-hub kqueue: there is NO process-wide kqueue handle or self-pipe.  Each
+ * parker pool owns its own kqueue + pump-wake self-pipe
+ * (runloom_parker_pool.kqueue_fd / selfpipe_r / selfpipe_w), created in
+ * runloom_pool_backend_create() at pool lazy-init.  A single shared kqueue
+ * serialised every hub's register/collect/wake on the kernel's per-kqueue lock
+ * and collapsed connect throughput super-linearly with hub count. */
 #elif defined(RUNLOOM_OS_WINDOWS)
 #  include "netpoll_iocp.h"
 /* Runtime-selected Windows backend.  Tier order:
