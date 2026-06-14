@@ -337,8 +337,12 @@ def worker_env(seed, mn_seed, knobs=True, unsafe_migrate=False, extra=None):
 def run_worker_subprocess(seed, mn_seed, timeout, unsafe_migrate=False, spec_file=None):
     """Run one program as an isolated subprocess.  Returns a finding dict or None."""
     py = sys.executable
-    argv = [py, os.path.abspath(__file__), "worker", str(seed),
-            str(mn_seed if mn_seed is not None else -1), str(timeout)]
+    # Optional per-worker exec wrapper (e.g. LIFEFUZZ_WORKER_WRAP="setarch x86_64 -R"
+    # to pin ADDR_NO_RANDOMIZE for each TSan worker -- the personality does not
+    # survive the ThreadPoolExecutor -> subprocess hop, so wrap every worker).
+    wrap = os.environ.get("LIFEFUZZ_WORKER_WRAP", "").split()
+    argv = wrap + [py, os.path.abspath(__file__), "worker", str(seed),
+                   str(mn_seed if mn_seed is not None else -1), str(timeout)]
     if spec_file:
         argv += ["--spec-file", spec_file]
     env = worker_env(seed, mn_seed, unsafe_migrate=unsafe_migrate)
