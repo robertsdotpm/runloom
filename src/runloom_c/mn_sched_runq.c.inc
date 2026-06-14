@@ -107,7 +107,7 @@ static volatile long runloom_global_runq_len  = 0;
  * on this queue at most once -- no re-push, no duplicate. */
 static void runloom_mn_global_runq_push(runloom_g_t *g)
 {
-    runloom_mutex_lock(&runloom_global_runq_lock);
+    RUNLOOM_RLOCK(&runloom_global_runq_lock, RUNLOOM_RANK_GLOBAL_RUNQ);
     g->next = NULL;
     if (runloom_global_runq_tail != NULL) {
         runloom_global_runq_tail->next = g;
@@ -116,7 +116,7 @@ static void runloom_mn_global_runq_push(runloom_g_t *g)
     }
     runloom_global_runq_tail = g;
     __atomic_add_fetch(&runloom_global_runq_len, 1, __ATOMIC_RELAXED);
-    runloom_mutex_unlock(&runloom_global_runq_lock);
+    RUNLOOM_RUNLOCK(&runloom_global_runq_lock, RUNLOOM_RANK_GLOBAL_RUNQ);
     RUNLOOM_EVT(RUNLOOM_EVT_G_SUBMIT, g, NULL, 0);
     runloom_g_state_set(g, RUNLOOM_GST_SUBMITTED);
 }
@@ -134,7 +134,7 @@ static runloom_g_t *runloom_mn_global_runq_pull(void)
     if (__atomic_load_n(&runloom_global_runq_len, __ATOMIC_ACQUIRE) == 0) {
         return NULL;
     }
-    runloom_mutex_lock(&runloom_global_runq_lock);
+    RUNLOOM_RLOCK(&runloom_global_runq_lock, RUNLOOM_RANK_GLOBAL_RUNQ);
     g = runloom_global_runq_head;
     if (g != NULL) {
         runloom_global_runq_head = g->next;
@@ -144,7 +144,7 @@ static runloom_g_t *runloom_mn_global_runq_pull(void)
         g->next = NULL;
         __atomic_sub_fetch(&runloom_global_runq_len, 1, __ATOMIC_RELAXED);
     }
-    runloom_mutex_unlock(&runloom_global_runq_lock);
+    RUNLOOM_RUNLOCK(&runloom_global_runq_lock, RUNLOOM_RANK_GLOBAL_RUNQ);
     return g;
 }
 
@@ -247,7 +247,14 @@ static int       runloom_sysmon_quiet = 0;   /* RUNLOOM_SYSMON_QUIET: suppress
                                               * diagnostic spam (detector +
                                               * handoff/preempt stay fully on) */
 static long long runloom_sysmon_wedge_ns = 50LL * 1000000LL;   /* 50 ms default */
-static long long runloom_sysmon_tick_ns  = 10LL * 1000000LL;   /* scan every 10 ms */
+/* ATTACHED-preempt threshold, split from the DETACHED-handoff/wedge threshold
+ * above so a CPU-bound time-slice (fairness) tunes independently of the
+ * blocking-call rescue latency.  Defaults to wedge_ns (backward compatible);
+ * RUNLOOM_PREEMPT_MS overrides.  (Go uses forcePreemptNS=10 ms for the CPU
+ * time-slice, much larger than its ~20 us syscall retake.) */
+static long long runloom_sysmon_preempt_ns = 50LL * 1000000LL;
+static long long runloom_sysmon_tick_ns  = 10LL * 1000000LL;   /* scan every 10 ms (base) */
+static long long runloom_sysmon_tick_base_ns = 10LL * 1000000LL; /* unbacked-off tick */
 static runloom_thread_t runloom_sysmon_thread;
 static int       runloom_sysmon_running = 0;   /* 1 once the thread is spawned */
 static volatile int runloom_sysmon_stop = 0;

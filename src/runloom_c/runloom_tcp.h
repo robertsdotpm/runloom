@@ -2,7 +2,8 @@
  *
  * A thin C-side TCP connection that bypasses socket.socket entirely.
  * The fd lives in the struct, the netpoll registration is cached on
- * connect/accept (ET register-once), and the recv/send hot path is a
+ * connect/accept (LEVEL-triggered, armed once per direction), and the
+ * recv/send hot path is a
  * single C call -- no BlockingIOError raise/catch, no Python frame
  * dispatch through socket.socket methods.
  *

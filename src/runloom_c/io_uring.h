@@ -51,6 +51,13 @@ void runloom_iouring_drain(void);
  * parked waiting for a CQE.  Includes ops in hub-spin-drain. */
 int runloom_iouring_inflight(void);
 
+/* Cancel a fiber parked on a single (global-ring) io_uring op: submit an
+ * ASYNC_CANCEL so the kernel completes it -ECANCELED and the drain wakes the
+ * fiber.  Returns 1 if a cancel was submitted, 0 otherwise (not parked on a
+ * cancellable op).  Forward-declared g to avoid a runloom_sched.h include cycle. */
+struct runloom_g;
+int runloom_iouring_cancel_g(struct runloom_g *g);
+
 /* Submit a pread, park the calling fiber cooperatively, return
  * bytes read or -1 with errno set. */
 runloom_iouring_ssize_t runloom_iouring_pread(int fd, void *buf, size_t n,

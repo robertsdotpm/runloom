@@ -394,6 +394,7 @@ class WaitGroup(object):
                 return
             self._waiters.append(g)
             self._mu.unlock()
+            runloom_c.set_wait_reason(runloom_c.WR_WAITGROUP)
             runloom_c.park()            # M:N-correct in-memory park (park_self
                                         # busy-loops on a hub).  Woken by the add()
                                         # that reaches zero; the wake-before-park
@@ -487,6 +488,7 @@ class Future(object):
         # would queue a DUPLICATE that _resolve()'s wake-all then wakes repeatedly.
         self._waiters.append(g)
         self._mu.unlock()
+        runloom_c.set_wait_reason(runloom_c.WR_FUTURE)
         while True:
             if deadline is None:
                 runloom_c.park()        # woken by _resolve() (wake-all + clear)
@@ -616,6 +618,7 @@ class RWMutex(object):
         cell = [g, [False]]
         self._rwait.append(cell)
         self._mu.unlock()
+        runloom_c.set_wait_reason(runloom_c.WR_LOCK)
         while True:
             runloom_c.park()
             self._mu.lock()
@@ -651,6 +654,7 @@ class RWMutex(object):
         cell = [g, [False]]
         self._wwait.append(cell)
         self._mu.unlock()
+        runloom_c.set_wait_reason(runloom_c.WR_LOCK)
         while True:
             runloom_c.park()
             self._mu.lock()
@@ -733,6 +737,7 @@ class Semaphore(object):
         w = [g, n, [False]]                          # granted flag set by release()
         self._waiters.append(w)
         self._mu.unlock()
+        runloom_c.set_wait_reason(runloom_c.WR_SEMAPHORE)
         while True:
             if deadline is None:
                 runloom_c.park()

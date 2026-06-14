@@ -17,7 +17,7 @@ void runloom_netpoll_force_unlink_g_parker(runloom_g_t *g)
      * p->hub is sufficient to find the right lock here even though
      * we're not in the parker's owning hub. */
     pool = runloom_parker_pool_for_hub(p->hub);
-    runloom_mutex_lock(&pool->lock);
+    RUNLOOM_RLOCK(&pool->lock, RUNLOOM_RANK_PARKER_POOL);
     /* Re-read p inside the lock in case g->netpoll_parker was
      * cleared by a concurrent unlink between the check above and
      * the lock acquire. */
@@ -30,7 +30,7 @@ void runloom_netpoll_force_unlink_g_parker(runloom_g_t *g)
         g->netpoll_parker = NULL;
         RUNLOOM_EVT(RUNLOOM_EVT_PARKER_FORCE, p, g, (long long)p->gen);
     }
-    runloom_mutex_unlock(&pool->lock);
+    RUNLOOM_RUNLOCK(&pool->lock, RUNLOOM_RANK_PARKER_POOL);
     /* The g is completing and its wait_fd will never resume to call
      * pool_release, so we release here.  Safe: parker is unlinked
      * above so no other thread holds a reference. */
@@ -62,17 +62,17 @@ static int runloom_netpoll_lock_g_pool(runloom_g_t *g,
         runloom_parker_pool_t *pool;
         if (p == NULL) return 0;
         pool = runloom_parker_pool_for_hub(p->hub);
-        runloom_mutex_lock(&pool->lock);
+        RUNLOOM_RLOCK(&pool->lock, RUNLOOM_RANK_PARKER_POOL);
         /* Re-read under the lock: a pump/timeout/force-unlink may have cleared
          * it, OR the g may have re-parked on a different pool. */
         p = (runloom_parked_t *)g->netpoll_parker;
-        if (p == NULL) { runloom_mutex_unlock(&pool->lock); return 0; }
+        if (p == NULL) { RUNLOOM_RUNLOCK(&pool->lock, RUNLOOM_RANK_PARKER_POOL); return 0; }
         if (runloom_parker_pool_for_hub(p->hub) != pool) {
             /* g re-parked on a different pool in the lock-acquire window; the
              * lock we hold is the WRONG one -- drop it and retry with the fresh
              * pool.  Bounded: a re-park needs a prior wake, and once our claim
              * below wins, no further re-wake/re-park can occur. */
-            runloom_mutex_unlock(&pool->lock);
+            RUNLOOM_RUNLOCK(&pool->lock, RUNLOOM_RANK_PARKER_POOL);
             continue;
         }
         *p_out = p;
@@ -117,7 +117,7 @@ int runloom_netpoll_cancel_g(runloom_g_t *g)
         woke = 1;
         RUNLOOM_EVT(RUNLOOM_EVT_PARKER_FORCE, p, p->g, (long long)p->fd);
     }
-    runloom_mutex_unlock(&pool->lock);
+    RUNLOOM_RUNLOCK(&pool->lock, RUNLOOM_RANK_PARKER_POOL);
     return woke;
 }
 
@@ -174,7 +174,7 @@ int runloom_netpoll_unpark_many(runloom_g_t **gs, int n, int *missed_out)
         /* cur==WOKEN: lost the claim to another waker -> the g is already being
          * resumed by that winner; NOT missed (a pipe-write would be a stray byte
          * we do not want). */
-        runloom_mutex_unlock(&pool->lock);
+        RUNLOOM_RUNLOCK(&pool->lock, RUNLOOM_RANK_PARKER_POOL);
     }
     return missed;
 }
@@ -195,7 +195,7 @@ void runloom_netpoll_cancel_fd(int fd)
     for (i = 0; i < RUNLOOM_PARKER_POOL_MAX; i++) {
         runloom_parker_pool_t *pool = &runloom_pools[i];
         runloom_parked_t *p, *next;
-        runloom_mutex_lock(&pool->lock);
+        RUNLOOM_RLOCK(&pool->lock, RUNLOOM_RANK_PARKER_POOL);
         if ((size_t)fd < pool->by_fd_cap) {
             p = pool->by_fd[fd];
             while (p != NULL) {
@@ -223,7 +223,7 @@ void runloom_netpoll_cancel_fd(int fd)
                 p = next;
             }
         }
-        runloom_mutex_unlock(&pool->lock);
+        RUNLOOM_RUNLOCK(&pool->lock, RUNLOOM_RANK_PARKER_POOL);
     }
 }
 
@@ -282,13 +282,13 @@ int runloom_netpoll_wake_pump_arm(void)
      * for once-init globals.  Without it two hub threads arming concurrently
      * each create+register an eventfd and one leaks (registered, never fired),
      * besides the read/write data race TSan flagged. */
-    runloom_mutex_lock(&runloom_pool.lock);
+    RUNLOOM_RLOCK(&runloom_pool.lock, RUNLOOM_RANK_PARKER_POOL);
     if (__atomic_load_n(&runloom_pump_wake_fd, __ATOMIC_RELAXED) >= 0) {
-        runloom_mutex_unlock(&runloom_pool.lock);
+        RUNLOOM_RUNLOCK(&runloom_pool.lock, RUNLOOM_RANK_PARKER_POOL);
         return 0;
     }
     fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
-    if (fd < 0) { runloom_mutex_unlock(&runloom_pool.lock); return -1; }
+    if (fd < 0) { RUNLOOM_RUNLOCK(&runloom_pool.lock, RUNLOOM_RANK_PARKER_POOL); return -1; }
     /* Level-triggered, NOT exclusive: the single-thread scheduler is the
      * only pumper that blocks indefinitely, so there is no thundering
      * herd; the pump drains it on fire to clear the level. */
@@ -296,11 +296,11 @@ int runloom_netpoll_wake_pump_arm(void)
     ev.data.fd = fd;
     if (epoll_ctl(runloom_epoll_fd, EPOLL_CTL_ADD, fd, &ev) < 0 && errno != EEXIST) {
         close(fd);
-        runloom_mutex_unlock(&runloom_pool.lock);
+        RUNLOOM_RUNLOCK(&runloom_pool.lock, RUNLOOM_RANK_PARKER_POOL);
         return -1;
     }
     __atomic_store_n(&runloom_pump_wake_fd, fd, __ATOMIC_RELEASE);
-    runloom_mutex_unlock(&runloom_pool.lock);
+    RUNLOOM_RUNLOCK(&runloom_pool.lock, RUNLOOM_RANK_PARKER_POOL);
     return 0;
 #elif defined(RUNLOOM_OS_WINDOWS)
     /* IOCP: PostQueuedCompletionStatus wakes an idle
@@ -393,25 +393,25 @@ int runloom_netpoll_add_iouring_ring(int eventfd_fd,
     int i;
     if (eventfd_fd < 0 || ring == NULL) return -1;
     if (runloom_netpoll_init() != 0) return -1;
-    runloom_mutex_lock(&runloom_pool.lock);
+    RUNLOOM_RLOCK(&runloom_pool.lock, RUNLOOM_RANK_PARKER_POOL);
     /* Idempotent: re-registering the same eventfd just updates the
      * ring pointer (cheap; the eventfd is already in epoll). */
     for (i = 0; i < runloom_iouring_ring_count; i++) {
         if (runloom_iouring_ring_efds[i] == eventfd_fd) {
             runloom_iouring_ring_ptrs[i] = ring;
-            runloom_mutex_unlock(&runloom_pool.lock);
+            RUNLOOM_RUNLOCK(&runloom_pool.lock, RUNLOOM_RANK_PARKER_POOL);
             return 0;
         }
     }
     if (runloom_iouring_ring_count >= RUNLOOM_IOURING_RINGS_MAX) {
-        runloom_mutex_unlock(&runloom_pool.lock);
+        RUNLOOM_RUNLOCK(&runloom_pool.lock, RUNLOOM_RANK_PARKER_POOL);
         errno = ENOSPC;
         return -1;
     }
     runloom_iouring_ring_efds[runloom_iouring_ring_count] = eventfd_fd;
     runloom_iouring_ring_ptrs[runloom_iouring_ring_count] = ring;
     runloom_iouring_ring_count++;
-    runloom_mutex_unlock(&runloom_pool.lock);
+    RUNLOOM_RUNLOCK(&runloom_pool.lock, RUNLOOM_RANK_PARKER_POOL);
 
     /* EPOLLEXCLUSIVE: see comment in runloom_netpoll_register.  Kernel
      * wakes exactly one waiter per ring-eventfd hit instead of all
@@ -427,7 +427,7 @@ int runloom_netpoll_add_iouring_ring(int eventfd_fd,
         }
         if (rc < 0 && errno != EEXIST) {
             /* Undo the table insert. */
-            runloom_mutex_lock(&runloom_pool.lock);
+            RUNLOOM_RLOCK(&runloom_pool.lock, RUNLOOM_RANK_PARKER_POOL);
             for (i = 0; i < runloom_iouring_ring_count; i++) {
                 if (runloom_iouring_ring_efds[i] == eventfd_fd) {
                     runloom_iouring_ring_efds[i] =
@@ -438,7 +438,7 @@ int runloom_netpoll_add_iouring_ring(int eventfd_fd,
                     break;
                 }
             }
-            runloom_mutex_unlock(&runloom_pool.lock);
+            RUNLOOM_RUNLOCK(&runloom_pool.lock, RUNLOOM_RANK_PARKER_POOL);
             return -1;
         }
     }
@@ -454,7 +454,7 @@ void runloom_netpoll_remove_iouring_ring(int eventfd_fd)
 #if defined(RUNLOOM_HAVE_EPOLL)
     int i;
     if (eventfd_fd < 0) return;
-    runloom_mutex_lock(&runloom_pool.lock);
+    RUNLOOM_RLOCK(&runloom_pool.lock, RUNLOOM_RANK_PARKER_POOL);
     for (i = 0; i < runloom_iouring_ring_count; i++) {
         if (runloom_iouring_ring_efds[i] == eventfd_fd) {
             runloom_iouring_ring_efds[i] =
@@ -465,7 +465,7 @@ void runloom_netpoll_remove_iouring_ring(int eventfd_fd)
             break;
         }
     }
-    runloom_mutex_unlock(&runloom_pool.lock);
+    RUNLOOM_RUNLOCK(&runloom_pool.lock, RUNLOOM_RANK_PARKER_POOL);
     /* Caller is about to close the eventfd; epoll auto-removes when
      * the last fd reference is closed, so no EPOLL_CTL_DEL syscall. */
 #else
@@ -482,12 +482,12 @@ int runloom_netpoll_any_iouring_inflight(void)
     /* Per-hub rings.  Read snapshot under the lock (matching add/remove)
      * but the inflight load itself is atomic so we don't hold the lock
      * over the loop. */
-    runloom_mutex_lock(&runloom_pool.lock);
+    RUNLOOM_RLOCK(&runloom_pool.lock, RUNLOOM_RANK_PARKER_POOL);
     {
         struct runloom_iouring_ring *snapshot[RUNLOOM_IOURING_RINGS_MAX];
         int n = runloom_iouring_ring_count;
         for (i = 0; i < n; i++) snapshot[i] = runloom_iouring_ring_ptrs[i];
-        runloom_mutex_unlock(&runloom_pool.lock);
+        RUNLOOM_RUNLOCK(&runloom_pool.lock, RUNLOOM_RANK_PARKER_POOL);
         for (i = 0; i < n; i++) {
             total += runloom_iouring_ring_inflight(snapshot[i]);
         }

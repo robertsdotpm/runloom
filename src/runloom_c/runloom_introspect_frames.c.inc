@@ -77,7 +77,7 @@ PyObject *runloom_fiber_frames_by_id(long long id)
     if (frames == NULL) return NULL;
 
     if (runloom_greg_inited) {
-        runloom_mutex_lock(&runloom_greg_lock);
+        RUNLOOM_RLOCK(&runloom_greg_lock, RUNLOOM_RANK_GREG);
         for (g = runloom_greg_head; g != NULL; g = g->reg_next) {
             unsigned int st = __atomic_load_n(&g->state, __ATOMIC_ACQUIRE);
             if (st == RUNLOOM_GST_FREED) continue;
@@ -86,7 +86,7 @@ PyObject *runloom_fiber_frames_by_id(long long id)
                 break;
             }
         }
-        runloom_mutex_unlock(&runloom_greg_lock);
+        RUNLOOM_RUNLOCK(&runloom_greg_lock, RUNLOOM_RANK_GREG);
     }
 
     if (!got) {

@@ -244,7 +244,7 @@ int runloom_netpoll_pump(long long timeout_ns)
         int rc;
         runloom_parked_t *p;
 
-        runloom_mutex_lock(&runloom_pool.lock);
+        RUNLOOM_RLOCK(&runloom_pool.lock, RUNLOOM_RANK_PARKER_POOL);
         /* Two passes: count, then fill (grows the heap buffer if the
          * stack one isn't big enough).  Worst case we re-malloc once. */
         {
@@ -253,7 +253,7 @@ int runloom_netpoll_pump(long long timeout_ns)
             if (need > fds_cap) {
                 fds = (WSAPOLLFD *)malloc(sizeof(WSAPOLLFD) * need);
                 if (fds == NULL) {
-                    runloom_mutex_unlock(&runloom_pool.lock);
+                    RUNLOOM_RUNLOCK(&runloom_pool.lock, RUNLOOM_RANK_PARKER_POOL);
                     goto post_wait;   /* skip wait; deadlines still get checked */
                 }
                 fds_cap = need;
@@ -316,7 +316,7 @@ int runloom_netpoll_pump(long long timeout_ns)
             }
         }
         if (fds != fds_stack) free(fds);
-        runloom_mutex_unlock(&runloom_pool.lock);
+        RUNLOOM_RUNLOCK(&runloom_pool.lock, RUNLOOM_RANK_PARKER_POOL);
         /* Back off OUTSIDE the pool lock: a persistent WSAPoll error (a polled
          * socket closed under us) must not busy-spin the idle pump. */
         if (win_poll_err) runloom_netpoll_win_wait_failed(win_poll_err);
@@ -332,7 +332,7 @@ int runloom_netpoll_pump(long long timeout_ns)
         struct timeval tv, *tvp = NULL;
 
         FD_ZERO(&rfds); FD_ZERO(&wfds); FD_ZERO(&efds);
-        runloom_mutex_lock(&runloom_pool.lock);
+        RUNLOOM_RLOCK(&runloom_pool.lock, RUNLOOM_RANK_PARKER_POOL);
         for (p = runloom_pool.head; p != NULL; p = p->next) {
             if (p->events & RUNLOOM_NETPOLL_READ)  FD_SET((SOCKET)p->fd, &rfds);
             if (p->events & RUNLOOM_NETPOLL_WRITE) FD_SET((SOCKET)p->fd, &wfds);
@@ -376,7 +376,7 @@ int runloom_netpoll_pump(long long timeout_ns)
                 p = next_p;
             }
         }
-        runloom_mutex_unlock(&runloom_pool.lock);
+        RUNLOOM_RUNLOCK(&runloom_pool.lock, RUNLOOM_RANK_PARKER_POOL);
         /* Persistent select() error must back off, not busy-spin. */
         if (win_poll_err) runloom_netpoll_win_wait_failed(win_poll_err);
     }
@@ -400,13 +400,13 @@ post_wait:
          * wedge against this thread, which holds the lock and needs the
          * GIL back at Py_END_ALLOW_THREADS.  epoll/kqueue likewise don't
          * hold the lock across their wait. */
-        runloom_mutex_lock(&runloom_pool.lock);
+        RUNLOOM_RLOCK(&runloom_pool.lock, RUNLOOM_RANK_PARKER_POOL);
         for (p = runloom_pool.head; p != NULL; p = p->next) {
             if (p->fd > max_fd) max_fd = p->fd;
             if (p->events & RUNLOOM_NETPOLL_READ)  FD_SET(p->fd, &rfds);
             if (p->events & RUNLOOM_NETPOLL_WRITE) FD_SET(p->fd, &wfds);
         }
-        runloom_mutex_unlock(&runloom_pool.lock);
+        RUNLOOM_RUNLOCK(&runloom_pool.lock, RUNLOOM_RANK_PARKER_POOL);
         /* Self-pipe read end: a cross-thread runloom_netpoll_wake_pump (a
          * blocking-offload worker re-queueing a g, or any waker that
          * re-queues via the scheduler lists rather than a netpoll fd
@@ -451,7 +451,7 @@ post_wait:
              * isn't in the set (woken next cycle); a spurious match just
              * makes the g re-check its fd and re-park -- both tolerated by
              * wait_fd's park/re-check loop. */
-            runloom_mutex_lock(&runloom_pool.lock);
+            RUNLOOM_RLOCK(&runloom_pool.lock, RUNLOOM_RANK_PARKER_POOL);
             p = runloom_pool.head;
             while (p != NULL) {
                 runloom_parked_t *next_p = p->next;
@@ -471,7 +471,7 @@ post_wait:
                 }
                 p = next_p;
             }
-            runloom_mutex_unlock(&runloom_pool.lock);
+            RUNLOOM_RUNLOCK(&runloom_pool.lock, RUNLOOM_RANK_PARKER_POOL);
         } else if (rc < 0) {
             /* Persistent select() error (e.g. EBADF: a parked fd closed under
              * us, a teardown race) must back off, not busy-spin the idle pump

@@ -7,9 +7,10 @@
  *   2. on EAGAIN, park on netpoll via runloom_netpoll_wait_fd
  *   3. loop
  *
- * The netpoll registration is ET register-once (see netpoll.c) so
- * the first wait_fd call on a fd costs one epoll_ctl ADD and every
- * subsequent call is zero syscalls.
+ * The netpoll registration is LEVEL-triggered, armed once per direction on
+ * epoll (EV_ONESHOT re-armed per park on kqueue) -- see netpoll_register.c.inc.
+ * The first wait_fd call on a fd costs one epoll_ctl ADD and every subsequent
+ * same-direction call is zero syscalls.
  *
  * Platform notes:
  *   POSIX: recv()/send()/accept4()/connect() with non-blocking fds.

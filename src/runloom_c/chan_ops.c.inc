@@ -17,7 +17,7 @@ static int chan_send_locked(runloom_chan_t *ch, PyObject *value, int blocking)
     runloom_chan_waiter_t *rx;
 
     if (ch->closed) {
-        runloom_mutex_unlock(&ch->lock);
+        RUNLOOM_RUNLOCK(&ch->lock, RUNLOOM_RANK_CHAN);
         PyErr_SetString(PyExc_ValueError, "send on closed channel");
         return -1;
     }
@@ -29,7 +29,7 @@ static int chan_send_locked(runloom_chan_t *ch, PyObject *value, int blocking)
         rx->value = value;
         rx->ok = 1;
         wake_waiter(rx);
-        runloom_mutex_unlock(&ch->lock);
+        RUNLOOM_RUNLOCK(&ch->lock, RUNLOOM_RANK_CHAN);
         return 0;
     }
 
@@ -37,13 +37,13 @@ static int chan_send_locked(runloom_chan_t *ch, PyObject *value, int blocking)
     if (ch->cap > 0 && ch->len < ch->cap) {
         Py_INCREF(value);
         buf_push(ch, value);
-        runloom_mutex_unlock(&ch->lock);
+        RUNLOOM_RUNLOCK(&ch->lock, RUNLOOM_RANK_CHAN);
         return 0;
     }
 
     /* Full / unbuffered + no receivers. */
     if (!blocking) {
-        runloom_mutex_unlock(&ch->lock);
+        RUNLOOM_RUNLOCK(&ch->lock, RUNLOOM_RANK_CHAN);
         return 1;
     }
 
@@ -70,13 +70,13 @@ static int chan_send_locked(runloom_chan_t *ch, PyObject *value, int blocking)
 
 int runloom_chan_send(runloom_chan_t *ch, PyObject *value)
 {
-    runloom_mutex_lock(&ch->lock);
+    RUNLOOM_RLOCK(&ch->lock, RUNLOOM_RANK_CHAN);
     return chan_send_locked(ch, value, 1);
 }
 
 int runloom_chan_try_send(runloom_chan_t *ch, PyObject *value)
 {
-    runloom_mutex_lock(&ch->lock);
+    RUNLOOM_RLOCK(&ch->lock, RUNLOOM_RANK_CHAN);
     return chan_send_locked(ch, value, 0);
 }
 
@@ -109,7 +109,7 @@ static PyObject *chan_recv_locked(runloom_chan_t *ch, int *ok, int blocking)
             tx->send_result = 0;
             wake_waiter(tx);
         }
-        runloom_mutex_unlock(&ch->lock);
+        RUNLOOM_RUNLOCK(&ch->lock, RUNLOOM_RANK_CHAN);
         *ok = 1;
         return result;
     }
@@ -121,21 +121,21 @@ static PyObject *chan_recv_locked(runloom_chan_t *ch, int *ok, int blocking)
         tx->value = NULL;
         tx->send_result = 0;
         wake_waiter(tx);
-        runloom_mutex_unlock(&ch->lock);
+        RUNLOOM_RUNLOCK(&ch->lock, RUNLOOM_RANK_CHAN);
         *ok = 1;
         return result;
     }
 
     /* Empty + no senders. */
     if (ch->closed) {
-        runloom_mutex_unlock(&ch->lock);
+        RUNLOOM_RUNLOCK(&ch->lock, RUNLOOM_RANK_CHAN);
         Py_INCREF(Py_None);
         *ok = 0;
         return Py_None;
     }
 
     if (!blocking) {
-        runloom_mutex_unlock(&ch->lock);
+        RUNLOOM_RUNLOCK(&ch->lock, RUNLOOM_RANK_CHAN);
         *ok = -1;
         return NULL;
     }
@@ -160,13 +160,13 @@ static PyObject *chan_recv_locked(runloom_chan_t *ch, int *ok, int blocking)
 
 PyObject *runloom_chan_recv(runloom_chan_t *ch, int *ok)
 {
-    runloom_mutex_lock(&ch->lock);
+    RUNLOOM_RLOCK(&ch->lock, RUNLOOM_RANK_CHAN);
     return chan_recv_locked(ch, ok, 1);
 }
 
 int runloom_chan_try_recv(runloom_chan_t *ch, PyObject **out, int *ok)
 {
-    runloom_mutex_lock(&ch->lock);
+    RUNLOOM_RLOCK(&ch->lock, RUNLOOM_RANK_CHAN);
     *out = chan_recv_locked(ch, ok, 0);
     if (*out == NULL && PyErr_Occurred()) return -1;
     return 0;
@@ -175,9 +175,9 @@ int runloom_chan_try_recv(runloom_chan_t *ch, PyObject **out, int *ok)
 /* ---- close ------------------------------------------------------- */
 int runloom_chan_close(runloom_chan_t *ch)
 {
-    runloom_mutex_lock(&ch->lock);
+    RUNLOOM_RLOCK(&ch->lock, RUNLOOM_RANK_CHAN);
     if (ch->closed) {
-        runloom_mutex_unlock(&ch->lock);
+        RUNLOOM_RUNLOCK(&ch->lock, RUNLOOM_RANK_CHAN);
         PyErr_SetString(PyExc_ValueError, "close on closed channel");
         return -1;
     }
@@ -199,7 +199,7 @@ int runloom_chan_close(runloom_chan_t *ch)
         rx->ok = 0;
         wake_waiter(rx);
     }
-    runloom_mutex_unlock(&ch->lock);
+    RUNLOOM_RUNLOCK(&ch->lock, RUNLOOM_RANK_CHAN);
     return 0;
 }
 
@@ -207,18 +207,18 @@ int runloom_chan_close(runloom_chan_t *ch)
 int runloom_chan_is_closed(runloom_chan_t *ch)
 {
     int c;
-    runloom_mutex_lock(&ch->lock);
+    RUNLOOM_RLOCK(&ch->lock, RUNLOOM_RANK_CHAN);
     c = ch->closed;
-    runloom_mutex_unlock(&ch->lock);
+    RUNLOOM_RUNLOCK(&ch->lock, RUNLOOM_RANK_CHAN);
     return c;
 }
 
 Py_ssize_t runloom_chan_len(runloom_chan_t *ch)
 {
     Py_ssize_t n;
-    runloom_mutex_lock(&ch->lock);
+    RUNLOOM_RLOCK(&ch->lock, RUNLOOM_RANK_CHAN);
     n = ch->len;
-    runloom_mutex_unlock(&ch->lock);
+    RUNLOOM_RUNLOCK(&ch->lock, RUNLOOM_RANK_CHAN);
     return n;
 }
 

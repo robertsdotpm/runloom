@@ -12,6 +12,7 @@ struct runloom_iouring_ring {
     unsigned *sq_head;          unsigned *sq_tail;
     unsigned  sq_mask;          unsigned  sq_entries;
     unsigned *sq_array;
+    unsigned *sq_flags;         /* SQ ring flags word -- IORING_SQ_CQ_OVERFLOW */
     struct io_uring_sqe *sqes;
     void  *sqe_mmap;            size_t sqe_mmap_size;
 
@@ -105,6 +106,7 @@ runloom_iouring_ring_t *runloom_iouring_ring_create(int defer_taskrun)
     r->sq_mask    = *(unsigned *)((char *)sq_map + p.sq_off.ring_mask);
     r->sq_entries = *(unsigned *)((char *)sq_map + p.sq_off.ring_entries);
     r->sq_array   = (unsigned *)((char *)sq_map + p.sq_off.array);
+    r->sq_flags   = (unsigned *)((char *)sq_map + p.sq_off.flags);
     r->sqes       = (struct io_uring_sqe *)sqe_map;
     r->cq_head    = (unsigned *)((char *)cq_map + p.cq_off.head);
     r->cq_tail    = (unsigned *)((char *)cq_map + p.cq_off.tail);
@@ -193,6 +195,11 @@ void runloom_iouring_ring_drain(runloom_iouring_ring_t *r)
      * runloom_mn_wake_g would push the fiber onto the submission
      * list twice -> a second resume after the first one already
      * advanced the coro, corrupting the stack. */
+    /* Pull any kernel-side overflowed completions back into the ring before
+     * draining so a dropped CQE never strands the parked fiber (hub rings carry
+     * single ops, but the GETEVENTS flush is cheap and keeps the invariant
+     * uniform across both rings). */
+    runloom_iouring_flush_cq_overflow(r->sq_flags, r->ring_fd);
     for (;;) {
         unsigned head = __atomic_load_n(r->cq_head, __ATOMIC_ACQUIRE);
         unsigned ct   = __atomic_load_n(r->cq_tail, __ATOMIC_ACQUIRE);
@@ -210,7 +217,13 @@ void runloom_iouring_ring_drain(runloom_iouring_ring_t *r)
                                          __ATOMIC_ACQUIRE)) {
             continue;
         }
-        if (op != NULL) {
+        if (op != NULL && op->type == RUNLOOM_IOURING_OP_CANCEL) {
+            /* ASYNC_CANCEL completion from runloom_iouring_cancel_g (a hub-ring
+             * op was cancelled).  Fire-and-forget: reclaim the record; the
+             * cancelled SINGLE op gets its own -ECANCELED CQE which wakes the
+             * fiber via the branch below. */
+            free(op);
+        } else if (op != NULL) {
             /* Hub rings only carry SINGLE ops -- multishot stays on the
              * global ring.  Same park/wake handshake as the global-ring
              * SINGLE path: publish result, then wake ONLY if the submitter
@@ -269,6 +282,7 @@ static runloom_iouring_ssize_t runloom_iouring_ring_do(runloom_iouring_ring_t *r
     op.g      = runloom_mn_tls_current_g();
     op.result = INT32_MIN;
     op.wait   = RUNLOOM_IOURING_WAIT_INFLIGHT;
+    op.ring   = r;               /* this hub's ring */
 
     if (runloom_iouring_ring_submit_sqe(r, sqe, &op) != 0) return -1;
 
@@ -292,8 +306,13 @@ static runloom_iouring_ssize_t runloom_iouring_ring_do(runloom_iouring_ring_t *r
         if (__atomic_compare_exchange_n(&op.wait, &prev,
                                         RUNLOOM_IOURING_WAIT_PARKED, 0,
                                         __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+            /* Publish for runloom_iouring_cancel_g (see io_uring_l_do.c.inc). */
+            if (op.g != NULL)
+                __atomic_store_n(&op.g->iouring_op, &op, __ATOMIC_RELEASE);
             runloom_sched_park_current();
             runloom_coro_yield();
+            if (op.g != NULL)
+                __atomic_store_n(&op.g->iouring_op, NULL, __ATOMIC_RELEASE);
         }
     }
 
@@ -332,3 +351,45 @@ runloom_iouring_ssize_t runloom_iouring_ring_send(runloom_iouring_ring_t *r,
     return runloom_iouring_ring_do(r, sqe);
 }
 
+
+/* Cancel a fiber parked on a single io_uring op (M:N hub path): submit an
+ * IORING_OP_ASYNC_CANCEL to the op's OWN ring (global or per-hub) targeting its
+ * user_data, so the kernel completes the op with -ECANCELED and the drain wakes
+ * the fiber -- instead of the fiber hanging until the op completes on its own.
+ * Best-effort + idempotent: returns 1 if a cancel was submitted, 0 if the fiber
+ * is not parked on a still-PARKED op.  A stale target (the op was reaped between
+ * our read and the kernel match) just yields -ENOENT; and since this fires only
+ * while the fiber is being torn down, even cancelling its very next op serves
+ * the same intent.  The op record lives on the parked fiber's live C stack, so
+ * reading op->wait/op->ring here is safe while it is genuinely PARKED. */
+int runloom_iouring_cancel_g(runloom_g_t *g)
+{
+    runloom_iouring_op_t *op;
+    runloom_iouring_op_t *cancel_op;
+    struct io_uring_sqe sqe;
+    int rc;
+    if (g == NULL) return 0;
+    op = (runloom_iouring_op_t *)__atomic_load_n(&g->iouring_op, __ATOMIC_ACQUIRE);
+    if (op == NULL || op->g != g) return 0;
+    if (__atomic_load_n(&op->wait, __ATOMIC_ACQUIRE) != RUNLOOM_IOURING_WAIT_PARKED)
+        return 0;
+    /* Hub rings are SINGLE_ISSUER: only the owning hub thread may submit to
+     * them, so a cross-thread cancel CANNOT push the ASYNC_CANCEL there (it
+     * would race the hub's own submissions).  Only the global ring (multi-issuer
+     * under sub_lock) accepts a cross-thread submit, so cancel covers global-
+     * ring ops (file pread/pwrite + the non-hub recv/send fallback).  Cancelling
+     * a hub-ring recv/send needs the owning hub to submit on its own ring -- a
+     * deeper hub-cancel-mailbox design left as future work; for those the fiber
+     * still unblocks when the op completes/errors normally. */
+    if (op->ring != NULL) return 0;
+    cancel_op = (runloom_iouring_op_t *)calloc(1, sizeof(*cancel_op));
+    if (cancel_op == NULL) return 0;
+    cancel_op->type = RUNLOOM_IOURING_OP_CANCEL;
+    memset(&sqe, 0, sizeof(sqe));
+    sqe.opcode = IORING_OP_ASYNC_CANCEL;
+    sqe.addr   = (uint64_t)(uintptr_t)op;   /* match the original SQE by user_data */
+    sqe.fd     = -1;
+    rc = runloom_iouring_submit_sqe(sqe, cancel_op);   /* global ring (sub_lock) */
+    if (rc != 0) { free(cancel_op); return 0; }
+    return 1;
+}

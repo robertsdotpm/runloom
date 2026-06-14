@@ -10,10 +10,10 @@ void runloom_iouring_ms_close(runloom_iouring_ms_t *h)
 
     if (h == NULL) return;
 
-    runloom_mutex_lock(&h->lock);
+    RUNLOOM_RLOCK(&h->lock, RUNLOOM_RANK_HUB);
     h->closing = 1;
     armed_snapshot = h->armed;
-    runloom_mutex_unlock(&h->lock);
+    RUNLOOM_RUNLOCK(&h->lock, RUNLOOM_RANK_HUB);
 
     if (!armed_snapshot) {
         /* Multishot already terminated; safe to free immediately. */

@@ -109,6 +109,14 @@ const char *runloom_g_state_name(unsigned int state);
  * header histogram.  Never NULL. */
 const char *runloom_g_state_blockclass(unsigned int state);
 
+/* RUNLOOM_WR_* -> short name ("future", "waitgroup", "lock", ...) for the dump's
+ * PARKED_SAFE subdivision, or NULL for WR_NONE / out-of-range (no suffix). */
+const char *runloom_wait_reason_name(unsigned char reason);
+
+/* Set the wait-reason hint for the current fiber (a runloom_wait_reason value);
+ * consumed at its next park_safe.  A no-op off a fiber.  Diagnostic only. */
+void runloom_set_current_wait_reason(int reason);
+
 /* ---- age timestamping (opt-in) ----
  * Off by default so the park hot path stays clean.  When on, a g's
  * state_since_ns is stamped each time it enters a PARKED_* state, and

@@ -146,9 +146,9 @@ static RUNLOOM_THREAD_RET runloom_handoff_main(void *arg)
 
     /* Create OWN tstate ON THIS THREAD so biased-refcount ob_tid binds to this
      * OS thread's TID -- same serialised construction hub threads use. */
-    runloom_mutex_lock(&runloom_hub_tstate_lock);
+    RUNLOOM_RLOCK(&runloom_hub_tstate_lock, RUNLOOM_RANK_HUB_TSTATE);
     rescue_ts = PyThreadState_New(runloom_mn_interp);
-    runloom_mutex_unlock(&runloom_hub_tstate_lock);
+    RUNLOOM_RUNLOCK(&runloom_hub_tstate_lock, RUNLOOM_RANK_HUB_TSTATE);
     if (rescue_ts == NULL) {
         runloom_coro_thread_fini();
         RUNLOOM_THREAD_RETURN(NULL);
@@ -285,7 +285,7 @@ static void runloom_handoff_delete_tstates(void)
 {
     int k;
     if (runloom_rescue_tstates != NULL) {
-        runloom_mutex_lock(&runloom_hub_tstate_lock);
+        RUNLOOM_RLOCK(&runloom_hub_tstate_lock, RUNLOOM_RANK_HUB_TSTATE);
         for (k = 0; k < runloom_handoff_running; k++) {
             PyThreadState *rts = (PyThreadState *)__atomic_load_n(
                                       (void **)&runloom_rescue_tstates[k],
@@ -295,7 +295,7 @@ static void runloom_handoff_delete_tstates(void)
                 PyThreadState_Delete(rts);
             }
         }
-        runloom_mutex_unlock(&runloom_hub_tstate_lock);
+        RUNLOOM_RUNLOCK(&runloom_hub_tstate_lock, RUNLOOM_RANK_HUB_TSTATE);
         free(runloom_rescue_tstates);
         runloom_rescue_tstates = NULL;
     }

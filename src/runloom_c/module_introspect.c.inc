@@ -222,6 +222,16 @@ static PyObject *m_count_deadlocked(PyObject *self, PyObject *unused)
     return PyLong_FromLong(runloom_count_deadlockable_fibers(NULL));
 }
 
+static PyObject *m_set_wait_reason(PyObject *self, PyObject *arg)
+{
+    long r;
+    (void)self;
+    r = PyLong_AsLong(arg);
+    if (r == -1 && PyErr_Occurred()) return NULL;
+    runloom_set_current_wait_reason((int)r);
+    Py_RETURN_NONE;
+}
+
 static PyObject *m_set_max_fibers(PyObject *self, PyObject *arg)
 {
     long n;

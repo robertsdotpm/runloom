@@ -13,6 +13,7 @@
 #include "runloom_heavy_frames.h"   /* generated fat-frame symbol table */
 #include "plat.h"
 #include "plat_compat.h"
+#include "runloom_lockrank.h"
 
 #include <string.h>
 
@@ -198,7 +199,7 @@ size_t runloom_advice_size_for(size_t key, PyObject *callable, size_t fallback)
     if (!__atomic_load_n(&runloom_autosize_on, __ATOMIC_RELAXED)) return fallback;
     if (key == 0) return fallback;    /* untracked / table-full: normal default */
     runloom_advice_ensure_lock();
-    runloom_mutex_lock(&runloom_advice_lock);
+    RUNLOOM_RLOCK(&runloom_advice_lock, RUNLOOM_RANK_ADVICE);
     {
         runloom_advice_entry_t *e = runloom_advice_find(key);
         if (e != NULL && e->samples > 0) {
@@ -215,7 +216,7 @@ size_t runloom_advice_size_for(size_t key, PyObject *callable, size_t fallback)
             if (learned < e->cold_floor) learned = e->cold_floor;
         }
     }
-    runloom_mutex_unlock(&runloom_advice_lock);
+    RUNLOOM_RUNLOCK(&runloom_advice_lock, RUNLOOM_RANK_ADVICE);
     if (sampled) return learned;
     /* Unseen kind: start large; the cold-start optimizer (prescan) can raise it
      * to cover a fat single frame / heuristic class the code is about to call. */
@@ -224,12 +225,12 @@ size_t runloom_advice_size_for(size_t key, PyObject *callable, size_t fallback)
         if (cs > runloom_autosize_start) {
             /* A prescan symbol matched -> remember the floor so learn-down keeps
              * this kind roomy even if its measured samples turn out shallow. */
-            runloom_mutex_lock(&runloom_advice_lock);
+            RUNLOOM_RLOCK(&runloom_advice_lock, RUNLOOM_RANK_ADVICE);
             {
                 runloom_advice_entry_t *e = runloom_advice_find(key);
                 if (e != NULL && cs > e->cold_floor) e->cold_floor = cs;
             }
-            runloom_mutex_unlock(&runloom_advice_lock);
+            RUNLOOM_RUNLOCK(&runloom_advice_lock, RUNLOOM_RANK_ADVICE);
         }
         return cs;
     }
@@ -324,9 +325,9 @@ size_t runloom_advice_note_spawn(PyObject *callable)
     runloom_advice_name_of(callable, name, sizeof name);
     key = runloom_advice_hash(name);
     runloom_advice_ensure_lock();
-    runloom_mutex_lock(&runloom_advice_lock);
+    RUNLOOM_RLOCK(&runloom_advice_lock, RUNLOOM_RANK_ADVICE);
     e = runloom_advice_insert(key, name);
-    runloom_mutex_unlock(&runloom_advice_lock);
+    RUNLOOM_RUNLOCK(&runloom_advice_lock, RUNLOOM_RANK_ADVICE);
     return e ? key : 0;
 }
 
@@ -346,22 +347,22 @@ void runloom_advice_record(size_t key, size_t hwm, size_t reserved)
     if (key == 0) return;
     if (!__atomic_load_n(&runloom_advice_on, __ATOMIC_RELAXED)) return;
     runloom_advice_ensure_lock();
-    runloom_mutex_lock(&runloom_advice_lock);
+    RUNLOOM_RLOCK(&runloom_advice_lock, RUNLOOM_RANK_ADVICE);
     e = runloom_advice_find(key);
     if (e != NULL) {
         if (hwm > e->max_hwm) e->max_hwm = hwm;
         e->reserved = reserved;
         e->samples++;
     }
-    runloom_mutex_unlock(&runloom_advice_lock);
+    RUNLOOM_RUNLOCK(&runloom_advice_lock, RUNLOOM_RANK_ADVICE);
 }
 
 void runloom_advice_reset(void)
 {
     runloom_advice_ensure_lock();
-    runloom_mutex_lock(&runloom_advice_lock);
+    RUNLOOM_RLOCK(&runloom_advice_lock, RUNLOOM_RANK_ADVICE);
     memset(runloom_advice_tbl, 0, sizeof runloom_advice_tbl);
-    runloom_mutex_unlock(&runloom_advice_lock);
+    RUNLOOM_RUNLOCK(&runloom_advice_lock, RUNLOOM_RANK_ADVICE);
 }
 
 void runloom_advice_reset_after_fork(void)
@@ -377,7 +378,7 @@ PyObject *runloom_advice_report(void)
     runloom_advice_ensure_lock();
     list = PyList_New(0);
     if (list == NULL) return NULL;
-    runloom_mutex_lock(&runloom_advice_lock);
+    RUNLOOM_RLOCK(&runloom_advice_lock, RUNLOOM_RANK_ADVICE);
     for (i = 0; i < RUNLOOM_ADVICE_CAP; i++) {
         runloom_advice_entry_t *e = &runloom_advice_tbl[i];
         size_t sug;
@@ -393,18 +394,18 @@ PyObject *runloom_advice_report(void)
                           "reserved", (Py_ssize_t)e->reserved,
                           "suggested", (Py_ssize_t)sug);
         if (d == NULL) {
-            runloom_mutex_unlock(&runloom_advice_lock);
+            RUNLOOM_RUNLOCK(&runloom_advice_lock, RUNLOOM_RANK_ADVICE);
             Py_DECREF(list);
             return NULL;
         }
         if (PyList_Append(list, d) != 0) {
             Py_DECREF(d);
-            runloom_mutex_unlock(&runloom_advice_lock);
+            RUNLOOM_RUNLOCK(&runloom_advice_lock, RUNLOOM_RANK_ADVICE);
             Py_DECREF(list);
             return NULL;
         }
         Py_DECREF(d);
     }
-    runloom_mutex_unlock(&runloom_advice_lock);
+    RUNLOOM_RUNLOCK(&runloom_advice_lock, RUNLOOM_RANK_ADVICE);
     return list;
 }

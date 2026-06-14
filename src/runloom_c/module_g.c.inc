@@ -87,6 +87,11 @@ static PyObject *RunloomG_cancel_wait_fd(RunloomG *self, PyObject *unused)
     (void)unused;
     if (self->g != NULL) {
         woke = runloom_netpoll_cancel_g(self->g);
+        /* Also cover a fiber parked on a single (global-ring) io_uring op:
+         * submit an ASYNC_CANCEL so the kernel completes it -ECANCELED and the
+         * fiber unblocks, instead of hanging until the op finishes on its own.
+         * Returns 1 if a cancel was submitted (the wake is async, via the CQE). */
+        if (!woke) woke = runloom_iouring_cancel_g(self->g);
     }
     if (woke) Py_RETURN_TRUE;
     Py_RETURN_FALSE;

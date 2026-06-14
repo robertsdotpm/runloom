@@ -26,6 +26,7 @@
 
 #include "plat.h"
 #include "plat_compat.h"
+#include "runloom_lockrank.h"
 #include "netpoll.h"
 #include "coro.h"
 #include "runloom_sched.h"

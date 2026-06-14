@@ -50,6 +50,7 @@
 
 #include "plat.h"
 #include "plat_compat.h"
+#include "runloom_lockrank.h"
 #include "mn_sched.h"
 #include "runloom_sched.h"
 #include "netpoll.h"

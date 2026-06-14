@@ -20,7 +20,7 @@ int runloom_netpoll_inspect_for_self_check(struct runloom_self_check_stats *out)
         return 0;
     }
     runloom_parker_pool_lock_ensure_inited(pool);
-    runloom_mutex_lock(&pool->lock);
+    RUNLOOM_RLOCK(&pool->lock, RUNLOOM_RANK_PARKER_POOL);
 
     /* Floyd cycle detection on the global list, with a safety cap. */
     slow = pool->head;
@@ -82,7 +82,7 @@ int runloom_netpoll_inspect_for_self_check(struct runloom_self_check_stats *out)
         }
     }
 
-    runloom_mutex_unlock(&pool->lock);
+    RUNLOOM_RUNLOCK(&pool->lock, RUNLOOM_RANK_PARKER_POOL);
     runloom_self_check_stats_set(out, global_count, global_cycle,
                               parked_atomic, bucket_total, bucket_self,
                               bucket_unreach);
@@ -110,7 +110,7 @@ void runloom_netpoll_dump_parkers(void)
         int n = 0, rd = 0, wr = 0, rdwr = 0, other = 0;
         if (total == 0) continue;
         runloom_parker_pool_lock_ensure_inited(pool);
-        runloom_mutex_lock(&pool->lock);
+        RUNLOOM_RLOCK(&pool->lock, RUNLOOM_RANK_PARKER_POOL);
         for (p = pool->head; p != NULL && n < 200000; p = p->next, n++) {
             int e = p->events & (RUNLOOM_NETPOLL_READ | RUNLOOM_NETPOLL_WRITE);
             if (e == RUNLOOM_NETPOLL_READ) rd++;
@@ -135,7 +135,7 @@ void runloom_netpoll_dump_parkers(void)
                 pi, p->fd, p->events, (void *)p->g, (void *)p->hub, p->commit, p->gen);
             (void)write(2, buf, (size_t)m);
         }
-        runloom_mutex_unlock(&pool->lock);
+        RUNLOOM_RUNLOCK(&pool->lock, RUNLOOM_RANK_PARKER_POOL);
     }
 }
 

@@ -86,13 +86,13 @@ select_retry:
          * the park, not the channel locks. */
         for (i = 0; i < n; i++) {
             runloom_chan_t *ch = cases[i].ch;
-            runloom_mutex_lock(&ch->lock);
+            RUNLOOM_RLOCK(&ch->lock, RUNLOOM_RANK_CHAN);
             /* It's possible the channel went ready/closed since
              * phase-1.  Re-check before parking. */
             if (cases[i].op == RUNLOOM_SELECT_SEND) {
                 if (ch->closed || (ch->cap > 0 && ch->len < ch->cap) ||
                     waiter_has_foreign(ch->receivers, &park)) {
-                    runloom_mutex_unlock(&ch->lock);
+                    RUNLOOM_RUNLOCK(&ch->lock, RUNLOOM_RANK_CHAN);
                     /* Race: someone freed space / opened a slot.
                      * Tear down what we've installed and retry try-each. */
                     /* Mark park as fired-by-us-on-this-case so other
@@ -149,13 +149,13 @@ select_retry:
                     goto select_retry;
                 }
                 waiter_push(&ch->senders, &ch->senders_tail, &waiters[i]);
-                runloom_mutex_unlock(&ch->lock);
+                RUNLOOM_RUNLOCK(&ch->lock, RUNLOOM_RANK_CHAN);
                 continue;
             }
             if (cases[i].op == RUNLOOM_SELECT_RECV) {
                 if (ch->closed || ch->len > 0 ||
                     waiter_has_foreign(ch->senders, &park)) {
-                    runloom_mutex_unlock(&ch->lock);
+                    RUNLOOM_RUNLOCK(&ch->lock, RUNLOOM_RANK_CHAN);
                     {
                         int expected = -1;
                         if (!__atomic_compare_exchange_n(&park.fired_case,
@@ -190,7 +190,7 @@ select_retry:
                 }
                 waiter_push(&ch->receivers, &ch->receivers_tail, &waiters[i]);
             }
-            runloom_mutex_unlock(&ch->lock);
+            RUNLOOM_RUNLOCK(&ch->lock, RUNLOOM_RANK_CHAN);
         }
 
         /* All installed.  Park self (snap tstate) and yield. */

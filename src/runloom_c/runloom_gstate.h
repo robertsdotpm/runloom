@@ -65,6 +65,28 @@ typedef enum runloom_g_state {
 #define RUNLOOM_GST_MASK_DEAD     (RUNLOOM_GST_BIT(RUNLOOM_GST_DONE) \
                                 | RUNLOOM_GST_BIT(RUNLOOM_GST_FREED))
 
+/* Wait-reason taxonomy.  The g state distinguishes the broad block class
+ * (chan / netpoll / sleep / safe); this byte subdivides the otherwise-opaque
+ * PARKED_SAFE class so the deadlock/wedge dump can say WHY a fiber is blocked
+ * (a Future await vs a WaitGroup vs a lock vs an executor handoff).  Append-only
+ * (0 = unset); set by the higher-level primitive before it parks, consumed at
+ * park_safe.  A diagnostic aid only -- never load-bearing. */
+typedef enum runloom_wait_reason {
+    RUNLOOM_WR_NONE      = 0,   /* unset -> park_safe defaults to SYNC */
+    RUNLOOM_WR_SYNC      = 1,   /* generic park_safe, no finer reason given */
+    RUNLOOM_WR_FUTURE    = 2,   /* awaiting a Future / Task result */
+    RUNLOOM_WR_WAITGROUP = 3,   /* WaitGroup.wait */
+    RUNLOOM_WR_LOCK      = 4,   /* mutex / RLock acquire */
+    RUNLOOM_WR_EVENT     = 5,   /* Event.wait */
+    RUNLOOM_WR_CONDITION = 6,   /* Condition.wait */
+    RUNLOOM_WR_BARRIER   = 7,   /* Barrier.wait */
+    RUNLOOM_WR_SELECT    = 8,   /* channel select */
+    RUNLOOM_WR_EXECUTOR  = 9,   /* run_in_executor / blockpool handoff */
+    RUNLOOM_WR_SEMAPHORE = 10,  /* Semaphore.acquire */
+    RUNLOOM_WR_QUEUE     = 11,  /* Queue get/put */
+    RUNLOOM_WR__LAST     = 12
+} runloom_wait_reason_t;
+
 /* Forward; the actual unsigned char field lives on runloom_g_t. */
 struct runloom_g;
 

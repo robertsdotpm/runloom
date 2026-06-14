@@ -20,6 +20,7 @@
 #include "runloom_stackadvice.h"
 #include "plat.h"
 #include "plat_compat.h"
+#include "runloom_lockrank.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -98,6 +99,24 @@ const char *runloom_g_state_name(unsigned int s)
     case RUNLOOM_GST_DONE:           return "done";
     case RUNLOOM_GST_FREED:          return "freed";
     default:                      return "?";
+    }
+}
+
+const char *runloom_wait_reason_name(unsigned char r)
+{
+    switch ((runloom_wait_reason_t)r) {
+    case RUNLOOM_WR_SYNC:      return "sync";
+    case RUNLOOM_WR_FUTURE:    return "future";
+    case RUNLOOM_WR_WAITGROUP: return "waitgroup";
+    case RUNLOOM_WR_LOCK:      return "lock";
+    case RUNLOOM_WR_EVENT:     return "event";
+    case RUNLOOM_WR_CONDITION: return "condition";
+    case RUNLOOM_WR_BARRIER:   return "barrier";
+    case RUNLOOM_WR_SELECT:    return "select";
+    case RUNLOOM_WR_EXECUTOR:  return "executor";
+    case RUNLOOM_WR_SEMAPHORE: return "semaphore";
+    case RUNLOOM_WR_QUEUE:     return "queue";
+    default:                   return NULL;   /* WR_NONE -> no suffix */
     }
 }
 
@@ -184,10 +203,10 @@ void runloom_introspect_fini(void)
      * structs linked would be a dangling-list bug after PyMem_Free, but
      * fini runs at interpreter teardown when nothing walks the list. */
     if (!runloom_greg_inited) return;
-    runloom_mutex_lock(&runloom_greg_lock);
+    RUNLOOM_RLOCK(&runloom_greg_lock, RUNLOOM_RANK_GREG);
     runloom_greg_head = NULL;
     runloom_greg_total = 0;
-    runloom_mutex_unlock(&runloom_greg_lock);
+    RUNLOOM_RUNLOCK(&runloom_greg_lock, RUNLOOM_RANK_GREG);
 }
 
 /* TEMP ablation gate (RUNLOOM_GREG_OFF=1): skip the global registry to measure
@@ -208,20 +227,20 @@ void runloom_greg_link(runloom_g_t *g)
 {
     if (g == NULL || !runloom_greg_inited) return;
     if (runloom_greg_off()) return;
-    runloom_mutex_lock(&runloom_greg_lock);
+    RUNLOOM_RLOCK(&runloom_greg_lock, RUNLOOM_RANK_GREG);
     g->reg_prev = NULL;
     g->reg_next = runloom_greg_head;
     if (runloom_greg_head != NULL) runloom_greg_head->reg_prev = g;
     runloom_greg_head = g;
     runloom_greg_total++;
-    runloom_mutex_unlock(&runloom_greg_lock);
+    RUNLOOM_RUNLOCK(&runloom_greg_lock, RUNLOOM_RANK_GREG);
 }
 
 void runloom_greg_unlink(runloom_g_t *g)
 {
     if (g == NULL || !runloom_greg_inited) return;
     if (runloom_greg_off()) return;
-    runloom_mutex_lock(&runloom_greg_lock);
+    RUNLOOM_RLOCK(&runloom_greg_lock, RUNLOOM_RANK_GREG);
     /* Defensive: only unlink a g that is actually linked.  A g whose
      * reg_next/reg_prev are both NULL AND is not the head was never
      * linked (e.g. allocated before init); skip it. */
@@ -233,7 +252,7 @@ void runloom_greg_unlink(runloom_g_t *g)
         g->reg_next = NULL;
         runloom_greg_total--;
     }
-    runloom_mutex_unlock(&runloom_greg_lock);
+    RUNLOOM_RUNLOCK(&runloom_greg_lock, RUNLOOM_RANK_GREG);
 }
 
 /* Reset the registry in a forked child: re-init the lock (a dead thread may
@@ -252,12 +271,12 @@ long runloom_fiber_count(void)
     long n = 0;
     runloom_g_t *g;
     if (!runloom_greg_inited) return 0;
-    runloom_mutex_lock(&runloom_greg_lock);
+    RUNLOOM_RLOCK(&runloom_greg_lock, RUNLOOM_RANK_GREG);
     for (g = runloom_greg_head; g != NULL; g = g->reg_next) {
         unsigned int st = __atomic_load_n(&g->state, __ATOMIC_ACQUIRE);
         if (st != RUNLOOM_GST_FREED) n++;
     }
-    runloom_mutex_unlock(&runloom_greg_lock);
+    RUNLOOM_RUNLOCK(&runloom_greg_lock, RUNLOOM_RANK_GREG);
     return n;
 }
 
@@ -270,14 +289,14 @@ long runloom_count_deadlockable_fibers(const void *owner)
     long n = 0;
     runloom_g_t *g;
     if (!runloom_greg_inited) return 0;
-    runloom_mutex_lock(&runloom_greg_lock);
+    RUNLOOM_RLOCK(&runloom_greg_lock, RUNLOOM_RANK_GREG);
     for (g = runloom_greg_head; g != NULL; g = g->reg_next) {
         unsigned int st = __atomic_load_n(&g->state, __ATOMIC_ACQUIRE);
         if (st != RUNLOOM_GST_PARKED_CHAN && st != RUNLOOM_GST_PARKED_SAFE) continue;
         if (owner != NULL && (const void *)g->owner != owner) continue;
         n++;
     }
-    runloom_mutex_unlock(&runloom_greg_lock);
+    RUNLOOM_RUNLOCK(&runloom_greg_lock, RUNLOOM_RANK_GREG);
     return n;
 }
 
@@ -436,14 +455,26 @@ void runloom_dump_fibers_fd(int fd)
                      (double)(now - since) / 1e9);
             strncat(detail, age, sizeof detail - strlen(detail) - 1);
         }
-        m = snprintf(buf, sizeof buf,
-            "  g%-8llu %-10s rc=%d owner=%p%s\n",
-            (unsigned long long)id, runloom_g_state_name(st), rc,
-            (void *)g->owner, detail);
+        {
+            /* For PARKED_SAFE, subdivide the opaque "park" with the fiber's
+             * wait reason (future / waitgroup / lock / ...) so the dump says
+             * WHY it is blocked. */
+            const char *sname = runloom_g_state_name(st);
+            const char *wr = (st == RUNLOOM_GST_PARKED_SAFE)
+                             ? runloom_wait_reason_name(g->wait_reason) : NULL;
+            char stlabel[28];
+            if (wr != NULL) {
+                snprintf(stlabel, sizeof stlabel, "%s:%s", sname, wr);
+                sname = stlabel;
+            }
+            m = snprintf(buf, sizeof buf,
+                "  g%-8llu %-12s rc=%d owner=%p%s\n",
+                (unsigned long long)id, sname, rc, (void *)g->owner, detail);
+        }
         if (m > 0) emit(fd, buf, (size_t)m);
     }
     emit(fd, "=== end fiber dump ===\n", 27);
-    runloom_mutex_unlock(&runloom_greg_lock);
+    RUNLOOM_RUNLOCK(&runloom_greg_lock, RUNLOOM_RANK_GREG);
 }
 
 /* ---------------------------------------------------------------- *
@@ -486,7 +517,7 @@ long long runloom_fiber_for_addr(const void *addr, int *kind,
             long long id = __atomic_load_n(&g->id, __ATOMIC_RELAXED);
             if (kind != NULL) *kind = 2;
             if (stack_kib != NULL) *stack_kib = (unsigned)(size / 1024u);
-            runloom_mutex_unlock(&runloom_greg_lock);
+            RUNLOOM_RUNLOCK(&runloom_greg_lock, RUNLOOM_RANK_GREG);
             return id;
         }
         if (guard > 0 &&
@@ -494,11 +525,11 @@ long long runloom_fiber_for_addr(const void *addr, int *kind,
             long long id = __atomic_load_n(&g->id, __ATOMIC_RELAXED);
             if (kind != NULL) *kind = 1;
             if (stack_kib != NULL) *stack_kib = (unsigned)(size / 1024u);
-            runloom_mutex_unlock(&runloom_greg_lock);
+            RUNLOOM_RUNLOCK(&runloom_greg_lock, RUNLOOM_RANK_GREG);
             return id;
         }
     }
-    runloom_mutex_unlock(&runloom_greg_lock);
+    RUNLOOM_RUNLOCK(&runloom_greg_lock, RUNLOOM_RANK_GREG);
     return 0;
 }
 
@@ -515,11 +546,11 @@ runloom_g_info_t *runloom_fiber_snapshot(long *count_out)
     if (!runloom_greg_inited) return NULL;
 
     now = runloom_introspect_monotonic_ns();
-    runloom_mutex_lock(&runloom_greg_lock);
+    RUNLOOM_RLOCK(&runloom_greg_lock, RUNLOOM_RANK_GREG);
     cap = runloom_greg_total > 0 ? runloom_greg_total : 1;
     arr = (runloom_g_info_t *)malloc((size_t)cap * sizeof(*arr));
     if (arr == NULL) {
-        runloom_mutex_unlock(&runloom_greg_lock);
+        RUNLOOM_RUNLOCK(&runloom_greg_lock, RUNLOOM_RANK_GREG);
         return NULL;
     }
     for (g = runloom_greg_head; g != NULL && n < cap; g = g->reg_next) {
@@ -542,7 +573,7 @@ runloom_g_info_t *runloom_fiber_snapshot(long *count_out)
         o->noyield     = g->noyield;
         o->owner       = (const void *)g->owner;
     }
-    runloom_mutex_unlock(&runloom_greg_lock);
+    RUNLOOM_RUNLOCK(&runloom_greg_lock, RUNLOOM_RANK_GREG);
     if (count_out != NULL) *count_out = n;
     return arr;
 }

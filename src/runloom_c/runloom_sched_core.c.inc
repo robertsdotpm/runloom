@@ -55,9 +55,9 @@ static void runloom_cal_record(runloom_g_t *g)
         !runloom_coro_paint_enabled()) return;
     hwm = runloom_coro_scan_hwm(g->coro);
     runloom_cal_ensure_lock();
-    runloom_mutex_lock(&runloom_cal_lock);
+    RUNLOOM_RLOCK(&runloom_cal_lock, RUNLOOM_RANK_CAL);
     if (runloom_cal_frozen) {                 /* lost the freeze race -- done */
-        runloom_mutex_unlock(&runloom_cal_lock);
+        RUNLOOM_RUNLOCK(&runloom_cal_lock, RUNLOOM_RANK_CAL);
         return;
     }
     if (hwm > runloom_cal_max_hwm) runloom_cal_max_hwm = hwm;
@@ -78,7 +78,7 @@ static void runloom_cal_record(runloom_g_t *g)
         __atomic_store_n(&runloom_cal_frozen, 1, __ATOMIC_RELEASE);
         freeze_now = 1;
     }
-    runloom_mutex_unlock(&runloom_cal_lock);
+    RUNLOOM_RUNLOCK(&runloom_cal_lock, RUNLOOM_RANK_CAL);
     if (freeze_now) {
         runloom_coro_paint_set(0);
         /* cal_record runs inside drain on this thread's own sched; bump it so
@@ -94,10 +94,10 @@ void runloom_sched_set_default_stack_size(size_t bytes)
     if (bytes < RUNLOOM_MIN_STACK_SIZE) bytes = RUNLOOM_MIN_STACK_SIZE;
     if (bytes > RUNLOOM_MAX_STACK_SIZE) bytes = RUNLOOM_MAX_STACK_SIZE;
     runloom_cal_ensure_lock();
-    runloom_mutex_lock(&runloom_cal_lock);
+    RUNLOOM_RLOCK(&runloom_cal_lock, RUNLOOM_RANK_CAL);
     runloom_cal_default = bytes;
     __atomic_store_n(&runloom_cal_frozen, 1, __ATOMIC_RELEASE);
-    runloom_mutex_unlock(&runloom_cal_lock);
+    RUNLOOM_RUNLOCK(&runloom_cal_lock, RUNLOOM_RANK_CAL);
     runloom_coro_paint_set(0);
     /* Update the calling thread's sched immediately; other threads pick up
      * runloom_cal_default on their next spawn. */
@@ -108,9 +108,9 @@ size_t runloom_sched_get_default_stack_size(void)
 {
     size_t v;
     runloom_cal_ensure_lock();
-    runloom_mutex_lock(&runloom_cal_lock);
+    RUNLOOM_RLOCK(&runloom_cal_lock, RUNLOOM_RANK_CAL);
     v = runloom_cal_default;
-    runloom_mutex_unlock(&runloom_cal_lock);
+    RUNLOOM_RUNLOCK(&runloom_cal_lock, RUNLOOM_RANK_CAL);
     return v;
 }
 
@@ -118,12 +118,12 @@ void runloom_sched_stack_stats(runloom_stack_stats_t *out)
 {
     if (out == NULL) return;
     runloom_cal_ensure_lock();
-    runloom_mutex_lock(&runloom_cal_lock);
+    RUNLOOM_RLOCK(&runloom_cal_lock, RUNLOOM_RANK_CAL);
     out->default_size = runloom_cal_default;
     out->max_hwm      = runloom_cal_max_hwm;
     out->completed    = runloom_cal_completed;
     out->calibrated   = runloom_cal_frozen;
-    runloom_mutex_unlock(&runloom_cal_lock);
+    RUNLOOM_RUNLOCK(&runloom_cal_lock, RUNLOOM_RANK_CAL);
     out->painting     = runloom_coro_paint_enabled();
 }
 
@@ -163,14 +163,14 @@ void runloom_sched_init(runloom_sched_t *s)
 static void runloom_sched_drain_wake_list(runloom_sched_t *s)
 {
     runloom_g_t *head;
-    runloom_mutex_lock(&s->wake_list_lock);
+    RUNLOOM_RLOCK(&s->wake_list_lock, RUNLOOM_RANK_WAKE_LIST);
     head = s->wake_list_head;
     /* RELEASE atomic: this clear is read by the owner's lock-free ACQUIRE peek
      * (the under-lock read above doesn't race -- producers write under the same
      * lock). */
     __atomic_store_n(&s->wake_list_head, NULL, __ATOMIC_RELEASE);
     s->wake_list_tail = NULL;
-    runloom_mutex_unlock(&s->wake_list_lock);
+    RUNLOOM_RUNLOCK(&s->wake_list_lock, RUNLOOM_RANK_WAKE_LIST);
     while (head != NULL) {
         runloom_g_t *next = head->wake_next;
         head->wake_next = NULL;
@@ -456,20 +456,31 @@ runloom_g_t *runloom_g_slab_alloc(void)
     if (g != NULL) {
         runloom_g_slab = g->next;
         runloom_g_slab_size--;
-        /* Reuse path (HOT).  Clear only the fields up to the
-         * introspection block -- everything from `state` onward (the
-         * state byte, id, state_since_ns, park_fd/events, reg_prev/next)
-         * is left untouched: reg_prev/reg_next MUST survive recycling
-         * (the g stays linked in the global registry, see
-         * runloom_introspect.c) and they are only ever written under the
-         * registry lock, never here.  `state` is re-initialised
-         * atomically below so a concurrent dump's atomic load never
-         * races a non-atomic memset.  id / park_fd are reset at spawn.
-         * spawn always overwrites callable, coro, refcount; we only
-         * need to clear the rest. */
+        /* Reuse path (HOT).  The scrub is in TWO parts so the load-bearing
+         * `state` byte can be re-initialised atomically in between -- a
+         * concurrent registry dump reads `state` with an atomic load and must
+         * never race a non-atomic memset of it.
+         *   part 1: clear everything BEFORE `state`.
+         *   part 2: clear the fields AFTER `state` up to the introspection
+         *           block (arena/batch/pass_index).  These are NOT preserved
+         *           on purpose and are NOT all reset at spawn -- pass_index is
+         *           set only on the indexed go_n path, so without this clear a
+         *           recycled g carries a stale pass_index and mis-calls
+         *           fn(stale index) instead of fn() (a real wrong-result bug),
+         *           and any FUTURE field added in this gap would leak the same
+         *           way.  This is what makes the "everything before the
+         *           introspection block is cleared" contract on runloom_g_t
+         *           actually hold.
+         * The introspection block (id, state_since_ns, park_fd/events,
+         * reg_prev/next) is left untouched: reg_prev/reg_next MUST survive
+         * recycling (the g stays linked in the global registry, written only
+         * under the registry lock); id / park_fd are reset at spawn.  spawn
+         * always overwrites callable, coro, refcount. */
         memset(g, 0, offsetof(runloom_g_t, state));
         __atomic_store_n(&g->state, (unsigned char)RUNLOOM_GST_INIT,
                          __ATOMIC_RELEASE);
+        memset((char *)g + offsetof(runloom_g_t, arena), 0,
+               offsetof(runloom_g_t, id) - offsetof(runloom_g_t, arena));
         return g;
     }
     /* Cold path: a brand-new struct from the OS.  Use libc calloc, NOT

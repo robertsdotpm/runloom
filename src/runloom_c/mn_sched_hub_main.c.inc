@@ -3,6 +3,33 @@
  * these definitions depend on. */
 
 
+/* ---- randomized work-stealing victim order (Go's randomOrder) ----
+ * A fixed linear scan that always starts at hub 0 makes K idle hubs collide on
+ * hub 0's single-element steal CAS simultaneously, then advance together to hub
+ * 1, repeating the convoy -- thundering-herd CAS contention + load asymmetry at
+ * high hub counts.  Instead each hub enumerates victims in a DISTINCT order:
+ * start at its own id and step by a stride coprime with the hub count (so the
+ * full residue set 0..count-1 is visited exactly once).  The start + stride are
+ * derived deterministically from h->id, so the order is fixed per hub (no
+ * wall-clock entropy) and the controlled-replay schedule is unchanged -- and in
+ * replay mode steal is disabled anyway (runloom_mn_ctrl_no_steal). */
+static int runloom_steal_gcd(int a, int b)
+{
+    while (b != 0) { int t = a % b; a = b; b = t; }
+    return a;
+}
+
+/* A stride in [1, n-1] coprime with n, varied by the hub id.  Always returns
+ * (s==1 is coprime with every n, and 1 is in the 1..n-1 cycle, so it
+ * terminates).  Caller guarantees n >= 2. */
+static int runloom_steal_stride(int n, int id)
+{
+    int s;
+    if (n < 3) return 1;                          /* n==2: stride 1 is the only option */
+    for (s = 1 + (id % (n - 1)); ; s = (s % (n - 1)) + 1)
+        if (runloom_steal_gcd(s, n) == 1) return s;
+}
+
 /* gc-stop-the-world fairness (free-threaded 3.13+ only).
  *
  * A fiber that loops a stop-the-world operation -- a tight `gc.collect()`
@@ -113,9 +140,9 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
      * gc.immortalize check-then-act outside its HEAD_LOCK when several threads
      * create tstates at once (see runloom_hub_tstate_lock).  The lock's
      * release/acquire also publishes the immortalize-flag write to later hubs. */
-    runloom_mutex_lock(&runloom_hub_tstate_lock);
+    RUNLOOM_RLOCK(&runloom_hub_tstate_lock, RUNLOOM_RANK_HUB_TSTATE);
     hts = PyThreadState_New(runloom_mn_interp);
-    runloom_mutex_unlock(&runloom_hub_tstate_lock);
+    RUNLOOM_RUNLOCK(&runloom_hub_tstate_lock, RUNLOOM_RANK_HUB_TSTATE);
     if (hts == NULL) {
         /* Astronomically unlikely (a small allocation).  This hub cannot run
          * Python; mark it stopping so the scheduler stops counting on it and
@@ -246,11 +273,11 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
         /* Drain the submission list into the deque first.  Pushing to
          * the deque is owner-only, so we (the hub) move fresh gs from
          * external producers onto our deque before anyone else looks. */
-        runloom_mutex_lock(&h->sub_lock);
+        RUNLOOM_RLOCK(&h->sub_lock, RUNLOOM_RANK_HUB_SUB);
         {
             runloom_g_t *sub = h->sub_head;
             h->sub_head = h->sub_tail = NULL;
-            runloom_mutex_unlock(&h->sub_lock);
+            RUNLOOM_RUNLOCK(&h->sub_lock, RUNLOOM_RANK_HUB_SUB);
             while (sub != NULL) {
                 runloom_g_t *next = sub->next;
                 sub->next = NULL;
@@ -358,8 +385,16 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
             if (g != NULL) from_runq = 1;
         }
         if (g == NULL) {
-            int i;
-            for (i = 0; !runloom_mn_ctrl_no_steal() && i < runloom_hub_count; i++) {
+          if (!runloom_mn_ctrl_no_steal() && runloom_hub_count >= 2) {
+            /* Randomized coprime-stride victim order (see runloom_steal_stride):
+             * each hub starts at its own id and steps by a coprime stride, so K
+             * idle hubs don't all hammer hub 0's steal CAS in lockstep. */
+            int n = runloom_hub_count;
+            int stride = runloom_steal_stride(n, h->id);
+            int pos = h->id;
+            int k;
+            for (k = 0; k < n; k++, pos += stride) {
+                int i = pos % n;
                 if (i == h->id) continue;
                 g = (runloom_g_t *)runloom_cldeque_steal(&runloom_hubs[i].deque);
                 if (g != NULL) {
@@ -378,6 +413,7 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
                     break;
                 }
             }
+          }
             if (g == NULL) {
                 long total = 0;
                 int j;
@@ -534,7 +570,7 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
                                                            __ATOMIC_RELAXED);
                         if (hub_pending > 0 && runloom_hub_idle_wake_enabled()) {
                             int waited = 0;
-                            runloom_mutex_lock(&h->idle_lock);
+                            RUNLOOM_RLOCK(&h->idle_lock, RUNLOOM_RANK_HUB_IDLE);
                             /* Announce BEFORE the final sub_head re-check so a
                              * submit that races our announce either lands in
                              * sub_head (we see it -> skip the wait) or observes
@@ -544,9 +580,9 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
                              * can't slip into the gap. */
                             __atomic_store_n(&h->idle_waiting, 1, __ATOMIC_RELEASE);
                             int have_sub;
-                            runloom_mutex_lock(&h->sub_lock);
+                            RUNLOOM_RLOCK(&h->sub_lock, RUNLOOM_RANK_HUB_SUB);
                             have_sub = (h->sub_head != NULL);
-                            runloom_mutex_unlock(&h->sub_lock);
+                            RUNLOOM_RUNLOCK(&h->sub_lock, RUNLOOM_RANK_HUB_SUB);
                             if (!have_sub) {
                                 /* Detach BEFORE the wait so a concurrent
                                  * stop-the-world sees this hub already stopped and
@@ -557,7 +593,7 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
                                 waited = 1;
                             }
                             __atomic_store_n(&h->idle_waiting, 0, __ATOMIC_RELEASE);
-                            runloom_mutex_unlock(&h->idle_lock);
+                            RUNLOOM_RUNLOCK(&h->idle_lock, RUNLOOM_RANK_HUB_IDLE);
                             /* Re-attach OUTSIDE idle_lock.  PyEval_RestoreThread
                              * blocks until any in-progress stop-the-world ends;
                              * holding idle_lock across that block would stall a

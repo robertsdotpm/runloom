@@ -227,7 +227,7 @@ static void park_waiter(runloom_chan_t *ch,
 
     /* Critical: release the channel lock BEFORE yielding.  Otherwise
      * the wake-side would deadlock trying to acquire it. */
-    runloom_mutex_unlock(&ch->lock);
+    RUNLOOM_RUNLOCK(&ch->lock, RUNLOOM_RANK_CHAN);
 
     runloom_coro_yield();
     /* On wake, the producer has already filled w->value / w->ok /

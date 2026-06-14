@@ -275,6 +275,11 @@ struct runloom_g {
      * defense against missed unlink paths under M:N + free-threaded
      * that would otherwise have pump waking a freed g. */
     void *netpoll_parker;   /* really runloom_parked_t *, void* to avoid include cycle */
+    /* Set to the in-flight single io_uring op (runloom_iouring_op_t *, void* to
+     * avoid include cycle) while this fiber is parked on it under M:N, so a
+     * task.cancel can submit an ASYNC_CANCEL targeting it.  Cleared on resume.
+     * In the slab-cleared pre-state range. */
+    void *iouring_op;
     /* park_safe / wake_safe lost-wake guard.  Set to 1 by park_safe
      * just before runloom_coro_yield; CAS'd back to 0 by the first
      * wake_safe to observe it.  Replaces the original s->current
@@ -326,11 +331,20 @@ struct runloom_g {
      * 0 = fn() (slab-cleared default). */
     unsigned char pass_index;
 
+    /* Wait-reason taxonomy (see runloom_wait_reason in runloom_gstate.h).  Both
+     * live in the slab-cleared range so a recycled fiber starts at WR_NONE.
+     * `wait_reason` is the active reason read by the dump while parked;
+     * `wait_reason_hint` is the pending reason a higher-level primitive sets
+     * before parking, consumed (and cleared) at park_safe.  Diagnostic only. */
+    unsigned char wait_reason;
+    unsigned char wait_reason_hint;
+
     /* ---- introspection block (runloom_introspect.c) ----
      * These fields are deliberately the LAST members of runloom_g_t.  The
-     * per-thread slab reuse path (runloom_g_slab_alloc) bulk-clears a g only
-     * up to offsetof(runloom_g_t, id) -- i.e. everything BEFORE this block --
-     * so reg_prev/reg_next survive recycling untouched.  That is what
+     * per-thread slab reuse path (runloom_g_slab_alloc) clears a g only up to
+     * offsetof(runloom_g_t, id) -- i.e. everything BEFORE this block -- in two
+     * memsets straddling the atomic `state` byte (see the reuse branch), so
+     * reg_prev/reg_next survive recycling untouched.  That is what
      * keeps the global fiber registry walkable without taking the
      * registry lock on the (hot) spawn path: the only writers of reg_prev/
      * reg_next are runloom_greg_link/unlink, both under runloom_greg_lock, on the
