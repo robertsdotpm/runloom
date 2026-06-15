@@ -33,6 +33,48 @@ static int runloom_per_g_tstate_mode = 0;
 void runloom_set_per_g_tstate_mode(int on) { runloom_per_g_tstate_mode = on ? 1 : 0; }
 int  runloom_get_per_g_tstate_mode(void)   { return runloom_per_g_tstate_mode; }
 
+/* ---- DEBUG: exception-state object validator (RUNLOOM_DBG_EXCSTATE) ----
+ *
+ * The p69_traceback_integrity crash is a wild-pointer deref in _PyErr_SetObject
+ * reading a STALE exc_value (see docs/dev/BIG100_100K_MAC.md).  The downstream
+ * SIGSEGV is RARE (it needs the freed object's memory to also be unmapped /
+ * reused), so it takes ~an hour of 100k runtime to surface.  This validator
+ * catches the corruption at its SOURCE -- the moment a non-exception / freed
+ * object is snapped out of, or restored into, the tstate's exception fields --
+ * which happens far more often than the rare fault, turning a multi-hour repro
+ * into a prompt, precisely-located abort (the RUNLOOM_CRASH handler then prints
+ * the C backtrace + Python stack at the detection point).  current_exception and
+ * exc_state.exc_value are ALWAYS NULL or a live PyExceptionInstance by CPython
+ * invariant, so a value that fails PyExceptionInstance_Check is corruption.
+ * Zero cost unless RUNLOOM_DBG_EXCSTATE is set (one cached relaxed-load branch). */
+static int runloom_dbg_excstate(void)
+{
+    static int v = -1;
+    int cur = __atomic_load_n(&v, __ATOMIC_RELAXED);
+    if (__builtin_expect(cur < 0, 0)) {
+        const char *e = getenv("RUNLOOM_DBG_EXCSTATE");
+        cur = (e != NULL && e[0] != '0') ? 1 : 0;
+        __atomic_store_n(&v, cur, __ATOMIC_RELAXED);
+    }
+    return cur;
+}
+
+static void runloom_dbg_check_excobj(PyObject *o, const char *where)
+{
+    if (o == NULL) return;
+    /* A live exception value's ob_type must be readable and an exception class.
+     * A freed/garbage object trips this (or faults inside the check -- equally
+     * useful, it lands at the detection point with the crash handler armed). */
+    if (!PyExceptionInstance_Check(o)) {
+        fprintf(stderr,
+            "[RUNLOOM_DBG_EXCSTATE] %s: exc object %p is NOT an exception "
+            "instance (ob_type=%p refcnt=%zd) -- STALE/CORRUPT exception state\n",
+            where, (void *)o, (void *)Py_TYPE(o), (Py_ssize_t)Py_REFCNT(o));
+        fflush(stderr);
+        abort();   /* RUNLOOM_CRASH handler (if armed) dumps C + Python stack here */
+    }
+}
+
 __attribute__((hot))
 void runloom_pystate_snap(runloom_pystate_snap_t *snap)
 {
@@ -144,6 +186,35 @@ void runloom_pystate_snap(runloom_pystate_snap_t *snap)
      * free it during our suspension. */
     snap->current_exception = ts->current_exception;
     Py_XINCREF(snap->current_exception);
+    if (__builtin_expect(runloom_dbg_excstate(), 0)) {
+        if (snap->exc_info != NULL)
+            runloom_dbg_check_excobj(snap->exc_state.exc_value, "snap.exc_value");
+        runloom_dbg_check_excobj(snap->current_exception, "snap.current_exception");
+    }
+    /* Leave the SHARED per-hub tstate's exception CHAIN HEAD neutral after
+     * saving (it is now safely in `snap`; load restores it for THIS fiber).
+     *
+     * Why: a fiber preempted mid-exception-handling can have ts->exc_info
+     * pointing NOT at &ts->exc_state but INTO a generator's gi_exc_state -- e.g.
+     * traceback.extract_tb runs the internal _extract_from_extended_frame_gen
+     * generator, which pushes its own exc item while iterating with the caught
+     * exception live.  snap captures that pointer, but the COPY-not-move design
+     * left it in the shared ts.  The NEXT fiber resumed on this hub via the
+     * FIRST-RUN path does NO pystate_load (it only installs a fresh datastack),
+     * so it inherits ts->exc_info pointing into that generator.  When the
+     * generator is later freed its gi_exc_state memory is reused (observed as
+     * linecache path-string data), and the inheriting fiber's next `raise` walks
+     * the dangling exc_info in _PyErr_GetTopmostException -> wild deref of
+     * path-string bytes (the p69_traceback_integrity / p69b SIGSEGV, only with
+     * RUNLOOM_PREEMPT on -- cooperative yields never fire mid-extract_tb).
+     *
+     * Resetting the HEAD to the tstate-embedded base (a stable, never-freed
+     * address) makes a non-loading inheritor walk a sane chain.  Ref-neutral:
+     * exc_info / previous_item are borrowed links, not owned refs; exc_value's
+     * ref dance is unchanged (load still restores snap->exc_info for this
+     * fiber, and the next loader still drops ts->exc_state.exc_value as before). */
+    ts->exc_info = &ts->exc_state;
+    ts->exc_state.previous_item = NULL;
 #endif
 
 #if PY_VERSION_HEX >= 0x030B0000 && PY_VERSION_HEX < 0x030D0000
@@ -193,6 +264,19 @@ void runloom_pystate_load(runloom_pystate_snap_t *snap)
         return;
     }
     ts = PyThreadState_GET();
+
+    /* DEBUG: validate the exception objects this snap is about to restore into
+     * the shared tstate BEFORE they can poison _PyErr_SetObject (the p69 crash).
+     * Also validate what is currently in ts (the previous g left it) -- a stale
+     * value there means the corruption happened on the OTHER g's path. */
+    if (__builtin_expect(runloom_dbg_excstate(), 0)) {
+        runloom_dbg_check_excobj(ts->current_exception, "load.ts.current_exception(pre)");
+        if (ts->exc_info == &ts->exc_state)
+            runloom_dbg_check_excobj(ts->exc_state.exc_value, "load.ts.exc_value(pre)");
+        if (snap->exc_info != NULL)
+            runloom_dbg_check_excobj(snap->exc_state.exc_value, "load.snap.exc_value");
+        runloom_dbg_check_excobj(snap->current_exception, "load.snap.current_exception");
+    }
 
     /* Re-acquire any critical section this g held when it parked (see snap).
      * Must run on the tstate this g is being resumed onto -- ts -- which is
