@@ -32,22 +32,49 @@ GROUPS = {
 }
 
 
-def excluded_lines(stem):
-    """Set of 1-based line numbers in src/runloom_c/<stem> marked LCOV_EXCL."""
-    p = os.path.join(SRC, stem)
-    ex = set()
-    if not os.path.exists(p):
+MANIFEST = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "coverage_exclusions.txt")
+
+
+def _load_manifest():
+    """frag_basename -> set of excluded line numbers, from coverage_exclusions.txt."""
+    ex = {}
+    if not os.path.exists(MANIFEST):
         return ex
-    in_block = False
-    for i, raw in enumerate(open(p, errors="replace"), start=1):
-        if "LCOV_EXCL_START" in raw:
-            in_block = True
-        if in_block:
-            ex.add(i)
-        if "LCOV_EXCL_STOP" in raw:
-            in_block = False
-        if "LCOV_EXCL_LINE" in raw:
-            ex.add(i)
+    for raw in open(MANIFEST, errors="replace"):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split(None, 3)
+        if len(parts) < 3:
+            continue
+        frag, rng = parts[0], parts[1]
+        try:
+            a, b = (int(x) for x in rng.split("-"))
+        except ValueError:
+            continue
+        ex.setdefault(frag, set()).update(range(a, b + 1))
+    return ex
+
+
+_MANIFEST = _load_manifest()
+
+
+def excluded_lines(stem):
+    """Excluded line numbers for <stem>: the manifest PLUS any inline LCOV_EXCL."""
+    ex = set(_MANIFEST.get(stem, ()))
+    p = os.path.join(SRC, stem)
+    if os.path.exists(p):
+        in_block = False
+        for i, raw in enumerate(open(p, errors="replace"), start=1):
+            if "LCOV_EXCL_START" in raw:
+                in_block = True
+            if in_block:
+                ex.add(i)
+            if "LCOV_EXCL_STOP" in raw:
+                in_block = False
+            if "LCOV_EXCL_LINE" in raw:
+                ex.add(i)
     return ex
 
 

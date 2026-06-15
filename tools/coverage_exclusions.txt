@@ -1,0 +1,76 @@
+# Coverage exclusion manifest for the M:N scheduler + epoll netpoll.
+#
+# Each line: <fragment>  <start>-<end>  <CATEGORY>  <reason>
+# Read by tools/cov_subsystem.py: excluded lines are removed from BOTH the total
+# and covered counts, so the reported % is coverage of the COVERABLE surface.
+# Every entry is a line that cannot be exercised by a clean-exiting test under
+# this project's rules -- NOT a line we chose not to test.  Categories:
+#   MIGRATION  - per-g-tstate / steal-woken scheduler, gated UNCONDITIONALLY on
+#                RUNLOOM_ALLOW_UNSAFE_MIGRATION (a KNOWN-CRASH mode this project
+#                forbids enabling; the gate is independent of hub count).
+#   OOM        - calloc/PyMem_Calloc failure cleanup; the RUNLOOM_FAULT_* harness
+#                has no allocator-failure site, so these need a malloc interposer.
+#   SPAWNFAIL  - OS-thread / PyThreadState_New failure cleanup; no fault hook.
+#   DEFENSIVE  - "can't happen" corruption/invariant guards (list-cycle, freed-or-
+#                reused queue entry, lost-wake backstop) closed at the source.
+#   PLATFORM   - needs a kernel/rlimit feature absent here (RLIM_INFINITY hard
+#                limit, pre-4.5 kernel EPOLLEXCLUSIVE-EINVAL fold) or a backend not
+#                compiled on Linux (the kqueue-only fd-registration bitmap).
+#   CRASHONLY  - executes ONLY inside the fatal-signal crash handler, which dies
+#                from the re-raised signal -> gcov never flushes those counters.
+#   RACE       - a genuine free-threaded interleaving with no deterministic trigger
+#                (a wake+re-park landing in a sub-microsecond lock-acquire window).
+#
+# (Reachable-but-not-yet-covered lines -- e.g. the idle-hub wakeup at
+# init_fini 742-744, or the io_uring wake CAS path under-counted by a contended
+# measure -- are deliberately NOT listed here.)
+
+# ---- M:N scheduler ----
+mn_sched_hub_main.c.inc        154-155   SPAWNFAIL  hub PyThreadState_New() == NULL cleanup; no fault hook
+mn_sched_hub_main.c.inc        219-221   DEFENSIVE  io_uring hub-ring arm failure cleanup; io_uring present, no fault hook
+mn_sched_hub_main.c.inc        417-422   MIGRATION  woke-sub / global-runq CAS push (ack-gated)
+mn_sched_hub_main.c.inc        480-480   MIGRATION  from_runq set (global stealable runq only)
+mn_sched_hub_main.c.inc        805-942   MIGRATION  per-g-tstate attach + steal/migrate resume block (ack-gated)
+mn_sched_hub_main.c.inc        953-962   MIGRATION  migration resume tail (ack-gated)
+mn_sched_hub_main.c.inc        1013-1017 DEFENSIVE  stale/freed queue-entry skip; closed by try_incref-before-CAS + no-free-to-OS slab
+mn_sched_hub_main.c.inc        1066-1066 DEFENSIVE  bad-coro guard; eliminated-UAF backstop
+mn_sched_hub_main.c.inc        1129-1184 MIGRATION  per-g steal/migrate path (ack-gated)
+mn_sched_init_fini.c.inc       41-42     OOM        PyMem_Calloc(runloom_hubs) failure cleanup
+mn_sched_init_fini.c.inc       116-117   OOM        stage_head/tail PyMem_Calloc failure cleanup (barrier mode)
+mn_sched_init_fini.c.inc       150-151   SPAWNFAIL  thread-spawn-failure stop+join cleanup loop; no thread-create fault hook
+mn_sched_init_fini.c.inc       161-162   SPAWNFAIL  spawn-failure hub-tstate clear; narrow new-but-not-self-deleted window
+mn_sched_init_fini.c.inc       231-235   DEFENSIVE  barrier-mode mid-segment abort STAGE drain; no clean mid-segment teardown
+mn_sched_init_fini.c.inc       314-317   MIGRATION  global-runq fini drain (empty without migration)
+mn_sched_init_fini.c.inc       499-499   MIGRATION  per-g tstate path (ack-gated)
+mn_sched_init_fini.c.inc       506-524   MIGRATION  per-g tstate alloc + its OOM cleanup (ack-gated)
+mn_sched_init_fini.c.inc       630-630   OOM        go_n bulk-arena batch calloc failure cleanup
+mn_sched_init_fini.c.inc       697-697   OOM        go_n bulk-arena alloc-failure fallback-to-loop spawn error path
+mn_sched_init_fini.c.inc       800-800   MIGRATION  global_runq guard short-circuit (false && ...)
+mn_sched_init_fini.c.inc       908-908   DEFENSIVE  STALL diagnostic: pending>0 with zero deadlockable AND zero wakeable (can't-happen accounting leak)
+mn_sched_mn_api.c.inc          214-250   MIGRATION  per-g wake-state machine in runloom_mn_wake_g (runloom_use_global_runq)
+mn_sched_mn_api.c.inc          285-310   MIGRATION  idle-stack-sweep PARKED<->SWEEPING claim/release (per-g gated)
+mn_sched_handoff.c.inc         153-154   SPAWNFAIL  rescue PyThreadState_New() == NULL cleanup; no fault hook
+mn_sched_handoff.c.inc         214-220   OOM        handoff_spawn claim/threads/rescue_tstates calloc failure cleanup
+mn_sched_handoff.c.inc         230-234   DEFENSIVE  handoff no-rescue-thread-spawned disable+free cleanup
+mn_sched_sysmon.c.inc          13-18     CRASHONLY  runloom_sched_freeze_for_crash: only the fatal-signal crash handler calls it (signal-death; gcov can't flush)
+mn_sched_sysmon.c.inc          41-42     OOM        sysmon w_seq/w_start/d_streak calloc failure cleanup
+mn_sched_sysmon.c.inc          294-294   SPAWNFAIL  watchdog-thread spawn-failure fprintf; no thread-create fault hook
+mn_sched_runq.c.inc            108-148   MIGRATION  global_runq push/pop machine (entirely ack-gated)
+mn_sched_hub_resume_preempt.c.inc  190-193  OOM    PCT pct_prio/pct_seen calloc failure cleanup
+mn_sched_hub_resume_preempt.c.inc  329-331  OOM    barrier ctrl want/seen calloc failure cleanup
+mn_sched_hubinfo.c.inc         53-53     DEFENSIVE  co_name fallback for co_qualname==NULL (never NULL on 3.13)
+
+# ---- epoll netpoll ----
+netpoll_wake_iouring.c.inc     13-37     DEFENSIVE  force_unlink_g_parker: lost-wake backstop, empirically unreachable (590 force events, 0 via this path)
+netpoll_wake_iouring.c.inc     75-76     RACE       lock_g_pool re-park-on-different-pool retry; sub-us lock-acquire window, no deterministic trigger
+netpoll_wake_iouring.c.inc     257-262   PLATFORM   add_iouring_eventfd EPOLLEXCLUSIVE-EINVAL fold (pre-4.5 kernel)
+netpoll_wake_iouring.c.inc     311-313   DEFENSIVE  wake_pump_arm epoll_ctl ADD failure (non-EEXIST); no fault hook
+netpoll_wake_iouring.c.inc     414-416   DEFENSIVE  add_iouring_ring idempotent same-eventfd update; no duplicate-register path
+netpoll_wake_iouring.c.inc     438-455   PLATFORM   add_iouring_ring EPOLLEXCLUSIVE-EINVAL fallback + undo-insert (pre-4.5 kernel)
+netpoll_diag_fd.c.inc          40-41     DEFENSIVE  Floyd cycle detect (global list cycle == heap corruption; conftest asserts cycle-free)
+netpoll_diag_fd.c.inc          56-62     DEFENSIVE  cycle-present count walk (corruption guard)
+netpoll_diag_fd.c.inc          75-76     DEFENSIVE  per-fd bucket self-loop detect (corruption guard)
+netpoll_diag_fd.c.inc          264-267   OOM        runloom_fd_arrays_init calloc(pw/bm/am) failure cleanup
+netpoll_diag_fd.c.inc          283-294   PLATFORM   fd_cap_warn_once: register refuses fd>=cap before any ADD, so never reached on epoll
+netpoll_diag_fd.c.inc          384-395   PLATFORM   fd_bit_set: kqueue-only registration bitmap, not compiled-in caller on the epoll backend
+netpoll_register.c.inc         429-429   MIGRATION  sweep_claim_release under if(per_g) (per-g-tstate gated)
