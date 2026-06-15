@@ -1495,21 +1495,14 @@ print("RESULT", r)
         % (proc.stdout, proc.stderr.decode()[-500:]))
 
 
-@pytest.mark.xfail(strict=False, reason=(
-    "FINDING: runloom.blocking(fn) called OUTSIDE any fiber AFTER an M:N "
-    "run(n>1) has completed + torn down (mn_fini) ABORTS the interpreter -- a "
-    "fatal `<no Python frame>` crash inside runloom_c.blocking (runtime.py:347).  "
-    "On a FRESH process the same top-level blocking() runs fn inline and returns "
-    "fine; only the post-mn_fini teardown state poisons the inline path.  "
-    "runloom.blocking documents it 'runs fn inline when the caller isn't on a "
-    "fiber -- so the same call is safe in either context', but that safety does "
-    "not survive an M:N scheduler teardown.  TEARDOWN-ORDER abort / use-after-"
-    "free in the blocking-offload pool reset.  Contained in a subprocess so the "
-    "abort is observed as a crash, not an in-process suite wedge."))
+# REGRESSION (was finding #1): runloom.blocking(fn) called outside any fiber
+# AFTER an M:N run(n>1) torn down used to ABORT ("_PyThreadState_Attach: non-NULL
+# old thread state") -- the inline offload ran py_blocking_worker, which
+# PyGILState_Ensure()d a tstate over the still-current main tstate (the gilstate
+# TSS was desynced by the M:N teardown).  py_blocking_worker now calls directly
+# when a tstate is already attached (the inline case), so it runs fn inline and
+# returns 42 as on a fresh process.
 def test_blocking_outside_fiber_after_mn_run_aborts_FINDING():
-    # CORRECT behavior: blocking() outside a fiber after an M:N run should run
-    # inline and return 42, exactly as on a fresh process.  It currently ABORTS,
-    # so the subprocess returns a signal/abort returncode and this xfails.
     if not needs_free_threading():
         pytest.skip("M:N needs GIL-disabled build")
     script = r"""

@@ -267,8 +267,14 @@ void *runloom_blocking_call(void *(*fn)(void *), void *arg)
     if (hub != NULL) {
         g = runloom_mn_tls_current_g();
     } else {
-        runloom_sched_t *s = runloom_sched_get();
-        g = (s != NULL) ? s->current : NULL;
+        /* PEEK the current fiber -- never runloom_sched_get(), which lazily
+         * allocates a sched + tstate machinery.  Off a fiber (a top-level
+         * blocking() call, or one made AFTER an M:N run() has torn down), there
+         * is no sched on this thread: peek returns NULL and we run fn inline.
+         * Lazy-allocating here aborted the interpreter with
+         * "_PyThreadState_Attach: non-NULL old thread state" when blocking() was
+         * called at top level after an M:N teardown. */
+        g = runloom_sched_peek_current();
     }
     /* Must be inside a fiber to park.  Also fall back to inline when
      * the pool can't start, or -- for the single-thread sched only --

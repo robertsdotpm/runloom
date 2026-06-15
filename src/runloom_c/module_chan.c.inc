@@ -339,9 +339,24 @@ typedef struct {
 static void *py_blocking_worker(void *p)
 {
     py_blocking_job_t *j = (py_blocking_job_t *)p;
-    /* Ensure a thread state for this pool thread (reentrant-safe if the
-     * call ran inline on a thread that already holds the GIL). */
-    PyGILState_STATE st = PyGILState_Ensure();
+    PyGILState_STATE st;
+    /* If this thread already has an attached tstate, the call is running INLINE
+     * (the off-fiber fallback in runloom_blocking_call, e.g. a top-level
+     * blocking()).  Call directly: the tstate is held, so PyObject_Call is
+     * safe, and we MUST NOT PyGILState_Ensure() -- after an M:N run() has torn
+     * down on this thread, the gilstate TSS is desynced from the live tstate,
+     * so Ensure() tries to attach a fresh tstate over the still-current one and
+     * aborts ("_PyThreadState_Attach: non-NULL old thread state").  Only a bare
+     * pool thread (no tstate) needs to Ensure one. */
+    if (PyThreadState_GetUnchecked() != NULL) {
+        j->result = PyObject_Call(j->fn, j->args, j->kwargs);
+        if (j->result == NULL) {
+            PyErr_Fetch(&j->exc_type, &j->exc_value, &j->exc_tb);
+            PyErr_NormalizeException(&j->exc_type, &j->exc_value, &j->exc_tb);
+        }
+        return NULL;
+    }
+    st = PyGILState_Ensure();
     j->result = PyObject_Call(j->fn, j->args, j->kwargs);
     if (j->result == NULL) {
         PyErr_Fetch(&j->exc_type, &j->exc_value, &j->exc_tb);
