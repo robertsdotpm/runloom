@@ -7,6 +7,22 @@ a request.  The server must keep serving the fast clients -- a fast round-trip
 that ever exceeds the fairness bound means the slow clients starved everyone.
 
 Stresses: blocking reads, scheduler fairness, idle sockets, timers.
+
+SCALE NOTE (macOS arm64, 8-core, big_100 100k sweep -- see
+docs/dev/BIG100_100K_MAC.md): this is the ONLY big_100 program with a hard
+WALL-CLOCK latency bound (FAIRNESS_BOUND), so unlike the throughput/correctness
+programs it is HARDWARE-bound, not just goroutine-count-bound.  It PASSES at its
+8k design scale; it FAILS the bound at ~20k+ (10.0s) and 100k (11.8s) on an
+8-core box -- but that is RESOURCE EXHAUSTION, not a scheduler fairness defect:
+~50k FAST clients each needing CPU for a round-trip on 8 cores simply cannot all
+finish a round-trip in <10s (the dribbling SLOW clients barely use CPU -- they're
+parked between dribbles -- so they are NOT what starves the fast ones; the cores
+are).  Widening servers 8->64 at 100k only moved 11.8s->10.2s, confirming it is
+CPU scarcity, not accept-backlog or per-hub wake latency.  So drive this program
+at a scale the box can SERVE (its latency-fairness ceiling is ~10-15k on this
+hardware), distinct from the correctness/scale ceiling (100k+) the other programs
+hit.  The runtime is correct here at every scale (all clients complete, every
+echo matches); only the wall-clock SLO is hardware-relative.
 """
 import socket
 import time
@@ -14,7 +30,11 @@ import time
 import harness
 import netutil
 
-FAIRNESS_BOUND = 10.0   # seconds; a fast round-trip slower than this = starvation
+# Seconds; a fast round-trip slower than this counts as starvation.  HARDWARE-
+# RELATIVE: achievable only while the box can actually service the fast-client
+# population (see the SCALE NOTE above).  Beyond ~2x the 8k design scale on an
+# 8-core box this bound is exceeded by CPU scarcity, not a scheduler defect.
+FAIRNESS_BOUND = 10.0
 
 
 def server_handler(conn):
