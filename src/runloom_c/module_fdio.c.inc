@@ -11,6 +11,23 @@ static int runloom_fdio_fault_armed(void)
 }
 #define RUNLOOM_FDIO_FINJ(site) (runloom_fdio_fault_armed() ? runloom_fault_inject(site) : 0)
 
+#if !defined(RUNLOOM_OS_WINDOWS)
+#include <fcntl.h>
+/* fd_read/fd_write cooperatively PARK on EAGAIN, which REQUIRES a non-blocking
+ * fd: on a BLOCKING fd, read()/write() would block the whole scheduler OS thread
+ * instead of returning EAGAIN to park -- a silent scheduler wedge.  The monkey
+ * os.read/os.write patches set non-blocking first; for the RAW primitive we
+ * ensure it here so a blocking fd can never wedge the scheduler.  (This mutates
+ * the fd's O_NONBLOCK flag, exactly as cooperative socket I/O requires.) */
+static void runloom_fd_set_nonblocking(int fd)
+{
+    int fl = fcntl(fd, F_GETFL, 0);
+    if (fl >= 0 && !(fl & O_NONBLOCK)) {
+        (void)fcntl(fd, F_SETFL, fl | O_NONBLOCK);
+    }
+}
+#endif
+
 static PyObject *m_fd_read(PyObject *self, PyObject *args)
 {
     int fd;
@@ -37,6 +54,7 @@ static PyObject *m_fd_read(PyObject *self, PyObject *args)
         return PyLong_FromLong(r);
     }
 #else
+    runloom_fd_set_nonblocking(fd);   /* cooperative park needs EAGAIN, not a blocked thread */
     while (1) {
         int injerr = RUNLOOM_FDIO_FINJ(RUNLOOM_FAULT_FD_READ);
         ssize_t r = injerr ? (errno = injerr, (ssize_t)-1)
@@ -77,6 +95,7 @@ static PyObject *m_fd_write(PyObject *self, PyObject *args)
         return PyLong_FromLong(r);
     }
 #else
+    runloom_fd_set_nonblocking(fd);   /* cooperative park needs EAGAIN, not a blocked thread */
     while (written < buf.len) {
         int injerr = RUNLOOM_FDIO_FINJ(RUNLOOM_FAULT_FD_WRITE);
         ssize_t r = injerr ? (errno = injerr, (ssize_t)-1)

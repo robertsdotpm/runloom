@@ -97,6 +97,15 @@ class _ReadPipeTransport(asyncio.ReadTransport):
                 g.cancel_wait_fd()   # wake the parked read fiber so it exits
             except Exception:
                 pass
+        # Clear the netpoll arm cache for this fd before closing it: a plain
+        # pipe.close() leaves the single-thread per-fd LEVEL arm sticky, so when
+        # the OS reuses this fd NUMBER (the next subprocess / aio.run), the new
+        # transport's wait_fd skips EPOLL_CTL_ADD and parks forever.  Safe here:
+        # the read fiber was just cancelled, so nothing is validly parked on it.
+        try:
+            runloom_c.netpoll_release_if_idle(self._fd)
+        except (OSError, ValueError, AttributeError):
+            pass
         try:
             self._pipe.close()
         except Exception:
@@ -224,6 +233,13 @@ class _WritePipeTransport(asyncio.WriteTransport):
                 self._report(e, "resume_writing")
 
     def _finish(self, exc):
+        # Clear the netpoll arm cache before close (see _ReadPipeTransport._close)
+        # so a reused fd number re-registers cleanly instead of skipping the
+        # EPOLL_CTL_ADD on the stale arm and parking forever.
+        try:
+            runloom_c.netpoll_release_if_idle(self._fd)
+        except (OSError, ValueError, AttributeError):
+            pass
         try:
             self._pipe.close()
         except Exception:

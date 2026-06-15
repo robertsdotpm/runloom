@@ -147,7 +147,13 @@ class _RunloomFutureMixin(object):
         # g->callable, this runs in the fiber's own completion context, so
         # we must NOT re-enter the scheduler -- a plain call_exception_handler
         # (logging) is fine.
-        if not self._pglogtb or self._pgexc is None:
+        # Defensive against a half-constructed object: RunloomTask.__init__
+        # rejects a non-coroutine with TypeError BEFORE _pg_future_init() sets
+        # these attrs, so a rejected create_task(non_coro) leaves an instance
+        # whose __del__ must not AttributeError at GC ("Exception ignored in
+        # __del__" noise on every bad create_task).  Missing _pglogtb -> nothing
+        # to report.
+        if not getattr(self, "_pglogtb", False) or getattr(self, "_pgexc", None) is None:
             return
         loop = self._loop
         # Read the _closed ATTRIBUTE, not the is_closed() method: asyncio's

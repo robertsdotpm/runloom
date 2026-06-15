@@ -409,11 +409,18 @@ int runloom_crash_install(int flags, const char *report_path)
 
     if (report_path != NULL && report_path[0] != '\0') {
         int fd = open(report_path, O_WRONLY | O_CREAT | O_APPEND, 0644);
-        if (fd >= 0) {
-            if (runloom_crash_report_fd >= 0 && runloom_crash_report_fd != 2)
-                close(runloom_crash_report_fd);
-            runloom_crash_report_fd = fd;
+        if (fd < 0) {
+            /* The caller explicitly asked for a crash report file and we could
+             * not open it (e.g. the parent dir doesn't exist).  Surface the
+             * failure (errno is set by open) rather than silently dropping it
+             * and installing without the file -- m_install_crash_handler turns
+             * the -1 into OSError, matching install_traceback_signal's contract
+             * for a bad argument.  Returned BEFORE touching any signal state. */
+            return -1;
         }
+        if (runloom_crash_report_fd >= 0 && runloom_crash_report_fd != 2)
+            close(runloom_crash_report_fd);
+        runloom_crash_report_fd = fd;
     }
 
     {

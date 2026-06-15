@@ -135,6 +135,37 @@ int runloom_netpoll_wait_fd(int fd, int events, long long timeout_ns)
 
     if (runloom_netpoll_init() != 0) return -1;
 
+    /* fd validity, checked up front (before linking a parker).  A negative fd is
+     * rejected uniformly across backends as OSError(EBADF): epoll_ctl / recv
+     * would reject it too, but the POSIX select pump's FD_SET(fd) is UNDEFINED
+     * for fd < 0 -- glibc's _FORTIFY_SOURCE __fdelt_chk aborts the process.  The
+     * POSIX select backend additionally cannot represent an fd >= FD_SETSIZE in
+     * an fd_set, so reject those too (epoll/kqueue handle high fds fine). */
+    if (fd < 0) { errno = EBADF; return -1; }
+#if !defined(RUNLOOM_HAVE_EPOLL) && !defined(RUNLOOM_HAVE_KQUEUE) && \
+    !defined(RUNLOOM_OS_WINDOWS)
+    if (fd >= FD_SETSIZE) { errno = EINVAL; return -1; }
+#endif
+#if !defined(RUNLOOM_OS_WINDOWS)
+    /* Reject a fd at/above the process's hard max-open-files: it cannot be a
+     * live fd, and indexing the per-fd parker/arm arrays by it (in
+     * runloom_parker_fd_index_ensure / the epoll arm cache) would force a growth
+     * to fd-size -- a multi-GB realloc whose zero-fill hangs the thread under
+     * overcommit.  A bogus huge fd thus errors cleanly instead of wedging. */
+    {
+        static long runloom_max_fd_cap = -1;
+        long cap = __atomic_load_n(&runloom_max_fd_cap, __ATOMIC_RELAXED);
+        if (cap < 0) {
+            struct rlimit rl;
+            cap = (getrlimit(RLIMIT_NOFILE, &rl) == 0 &&
+                   rl.rlim_max != RLIM_INFINITY && rl.rlim_max > 0)
+                  ? (long)rl.rlim_max : (1L << 22);
+            __atomic_store_n(&runloom_max_fd_cap, cap, __ATOMIC_RELAXED);
+        }
+        if ((long)fd >= cap) { errno = EBADF; return -1; }
+    }
+#endif
+
     park = runloom_parker_pool_acquire();
     if (park == NULL) { errno = ENOMEM; return -1; }
 

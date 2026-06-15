@@ -38,6 +38,21 @@ static PyObject *RunloomG_result_get(RunloomG *self, void *closure)
     return r;
 }
 
+static PyObject *RunloomG_exception_get(RunloomG *self, void *closure)
+{
+    PyObject *e;
+    (void)closure;
+    if (self->g == NULL) Py_RETURN_NONE;
+    /* Same done-acquire gate as result_get: an unhandled exception that escaped
+     * the goroutine body is captured here (and also reported per
+     * RUNLOOM_GOROUTINE_PANIC); None if the goroutine returned normally. */
+    if (!__atomic_load_n(&self->g->done, __ATOMIC_ACQUIRE)) Py_RETURN_NONE;
+    e = self->g->error;
+    if (e == NULL) Py_RETURN_NONE;
+    Py_INCREF(e);
+    return e;
+}
+
 /* Wake a fiber parked via runloom_c.park_self() or runloom_c.park().  Safe to
  * call before the park (race-handled inside the wake primitives) and from a
  * foreign OS thread.  ROUTES BY HOW THE g PARKED: a g parked on an M:N hub
@@ -183,6 +198,8 @@ static PyMethodDef RunloomG_methods[] = {
 static PyGetSetDef RunloomG_getset[] = {
     {"done",   (getter)RunloomG_done_get,   NULL, "True after entry returns", NULL},
     {"result", (getter)RunloomG_result_get, NULL, "Return value or None",     NULL},
+    {"exception", (getter)RunloomG_exception_get, NULL,
+     "Unhandled exception that escaped the goroutine body, or None", NULL},
     {NULL, NULL, NULL, NULL, NULL}
 };
 

@@ -130,6 +130,20 @@ static int runloom_io_listener_port(PyObject *listener)
  * already use).  This is the "written + integrated the right way" fast path:
  * zero PyObjects in the hot loop, zero tstate juggle per round-trip. */
 #if !defined(RUNLOOM_OS_WINDOWS)
+/* Close a connection fd from the all-C path, clearing its netpoll arm cache
+ * first.  The readiness fallback parks via runloom_netpoll_wait_fd, which leaves
+ * a process-global per-fd LEVEL arm; a bare close() does NOT clear it, so when
+ * the OS reuses this fd NUMBER for the next connection, netpoll_register's
+ * already-armed skip sees the stale mask and never re-ADDs it -> the new
+ * fiber's wait_fd parks forever (the all-C echo deadlock under concurrent
+ * connect/close churn).  release_if_idle is a no-op if anything is still parked
+ * and harmless for the io_uring paths (the fd was never netpoll-registered). */
+static void runloom_io_c_close(int fd)
+{
+    runloom_netpoll_release_if_idle(fd);
+    close(fd);
+}
+
 static void runloom_io_c_echo(void *arg)
 {
     int fd = (int)(intptr_t)arg;
@@ -153,22 +167,22 @@ static void runloom_io_c_echo(void *arg)
         ssize_t n;
         if (ms != NULL) {
             n = runloom_iouring_loop_ms_recv(ms, buf, 8);
-            if (n < 0) { runloom_iouring_loop_ms_close(ms); close(fd); return; }
+            if (n < 0) { runloom_iouring_loop_ms_close(ms); runloom_io_c_close(fd); return; }
         } else if (ring != NULL) {
             n = runloom_iouring_loop_recv(ring, fd, buf, 8, 0);
-            if (n < 0) { close(fd); return; }    /* errno set; hard error */
+            if (n < 0) { runloom_io_c_close(fd); return; }    /* errno set; hard error */
         } else {
             for (;;) {
                 n = recv(fd, buf, 8, 0);
                 if (n >= 0) break;
                 if (errno == EINTR) continue;
-                if (errno != EAGAIN && errno != EWOULDBLOCK) { close(fd); return; }
-                if (runloom_netpoll_wait_fd(fd, RUNLOOM_NETPOLL_READ, -1LL) < 0) { close(fd); return; }
+                if (errno != EAGAIN && errno != EWOULDBLOCK) { runloom_io_c_close(fd); return; }
+                if (runloom_netpoll_wait_fd(fd, RUNLOOM_NETPOLL_READ, -1LL) < 0) { runloom_io_c_close(fd); return; }
             }
         }
         if (n == 0) {                           /* peer closed */
             if (ms != NULL) runloom_iouring_loop_ms_close(ms);
-            close(fd); return;
+            runloom_io_c_close(fd); return;
         }
         {
             ssize_t sent = 0;
@@ -179,16 +193,16 @@ static void runloom_io_c_echo(void *arg)
                                                   (size_t)(n - sent), 0);
                     if (s > 0) { sent += s; continue; }
                     if (ms != NULL) runloom_iouring_loop_ms_close(ms);
-                    close(fd); return;           /* EOF/error on a proactor send */
+                    runloom_io_c_close(fd); return;  /* EOF/error on a proactor send */
                 }
                 s = send(fd, buf + sent, (size_t)(n - sent), 0);
                 if (s > 0) { sent += s; continue; }
                 if (s < 0 && errno == EINTR) continue;
                 if (s < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-                    if (runloom_netpoll_wait_fd(fd, RUNLOOM_NETPOLL_WRITE, -1LL) < 0) { close(fd); return; }
+                    if (runloom_netpoll_wait_fd(fd, RUNLOOM_NETPOLL_WRITE, -1LL) < 0) { runloom_io_c_close(fd); return; }
                     continue;
                 }
-                close(fd); return;              /* hard error */
+                runloom_io_c_close(fd); return;  /* hard error */
             }
         }
     }

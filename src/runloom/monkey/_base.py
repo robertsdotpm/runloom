@@ -42,6 +42,13 @@ import runloom_c
 READ  = 1
 WRITE = 2
 
+# Per-fd cooperative timeout side table.  socket.socket has no __dict__, so we
+# cannot stash the caller's settimeout() on the instance; _make_nonblocking
+# records it here (keyed by fd) before forcing the socket non-blocking, and
+# _coop_timeout reads it back.  Cleared in the patched close()/detach().  Plain
+# dict ops are thread-safe on the free-threaded build (PEP 703).
+_SOCK_TIMEOUTS = {}
+
 # Snapshots of stdlib primitives that the patches themselves call.
 # Capturing here (at module import time) protects us against the
 # patched versions calling back into themselves.
@@ -120,6 +127,19 @@ def _make_nonblocking(sock):
     single recv/send -- a measurable chunk of the steady-state hot path.)
     """
     if sock.gettimeout() != 0.0:
+        # Record the caller's intended timeout BEFORE setblocking(False) zeroes
+        # it: once forced non-blocking, gettimeout() reads 0.0 forever, so the
+        # cooperative I/O layer would otherwise lose the user's settimeout() and
+        # park with no deadline (a timed socket that never receives hangs the
+        # fiber).  socket.socket has no __dict__, so we keep this in a side
+        # table keyed by fd (see _coop_timeout).  The guard re-fires whenever
+        # the user changes the timeout (gettimeout != 0.0 again), so this tracks
+        # later settimeout() calls AND self-heals a reused fd (a fresh socket's
+        # first sighting overwrites any stale entry).
+        try:
+            _SOCK_TIMEOUTS[sock.fileno()] = sock.gettimeout()
+        except OSError:
+            pass
         sock.setblocking(False)
         # First sighting of this socket -> flip TCP_NODELAY once.  Cheap (sets
         # a flag), safe (request-response apps benefit unconditionally), and

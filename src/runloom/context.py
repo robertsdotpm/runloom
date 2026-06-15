@@ -29,8 +29,31 @@ Cancellation is transitive: when a parent context is cancelled, all
 descendants are cancelled too.  This is the main reason for the
 explicit tree, vs. just passing a channel around.
 """
+import os
 import time as _time
 import runloom_c
+
+_READ = 1   # runloom_c.wait_fd READ direction
+
+
+# A permanent, never-readable, never-closed pipe used purely as a parking
+# target for deadline-waker fibers.  A waker parks in wait_fd(<read end>, READ,
+# remaining_ms): the park is deadline-BOUNDED (the ms timeout) yet WAKEABLE --
+# cancel() calls the waker goroutine's cancel_wait_fd(), so a cancelled
+# context's run() returns at once instead of lingering to the original
+# deadline (Go stops its timer on cancel; we wake the equivalent fiber).  The
+# fd number never changes and is never closed, so it cannot poison the netpoll
+# arm cache (the fd-reuse hazard), and many wakers can park on it at once (each
+# wakes/cancels independently).
+_wake_rfd = None
+_wake_wfd = None
+
+
+def _wake_fd():
+    global _wake_rfd, _wake_wfd
+    if _wake_rfd is None:
+        _wake_rfd, _wake_wfd = os.pipe()
+    return _wake_rfd
 
 
 def _spawn(fn):
@@ -86,14 +109,16 @@ class _CancelCtx(object):
     public API surface (done / err / deadline) matches _BackgroundCtx
     so consumers can treat any context uniformly."""
 
-    __slots__ = ("done", "_parent", "_err", "_children", "_deadline")
+    __slots__ = ("done", "_parent", "_err", "_children", "_deadline",
+                 "_deadline_g")
 
     def __init__(self, parent, deadline=None):
-        self.done      = runloom_c.Chan(1)
-        self._parent   = parent
-        self._err      = None
-        self._children = []
-        self._deadline = deadline
+        self.done        = runloom_c.Chan(1)
+        self._parent     = parent
+        self._err        = None
+        self._children   = []
+        self._deadline   = deadline
+        self._deadline_g = None   # the deadline-waker goroutine, if armed
 
         # Wire ourselves into the parent's cancel fanout.  Background is
         # the only "uncancellable" parent; everyone else exposes
@@ -129,6 +154,18 @@ class _CancelCtx(object):
             # close() on an already-closed channel raises; we treat the
             # window between "cancel called twice concurrently" as benign.
             pass
+        # Wake the deadline-waker fiber (if armed) so it exits immediately
+        # instead of sleeping to the original deadline -- otherwise a cancelled
+        # WithTimeout/WithDeadline keeps a fiber alive (and run() blocked) for
+        # the full timeout.  Covers both direct cancel() and a transitive
+        # cancel from this ctx's parent (this runs in both).
+        g = self._deadline_g
+        if g is not None:
+            self._deadline_g = None
+            try:
+                g.cancel_wait_fd()
+            except Exception:
+                pass
         # Fan cancellation out to all children.  Iterate a snapshot in
         # case a child registers more during their own cancel callbacks
         # (defensive -- our model says children can't add grandchildren
@@ -171,13 +208,19 @@ def WithDeadline(parent, deadline_monotonic):
         return ctx, cancel
 
     def deadline_waker():
-        remaining = deadline_monotonic - _time.monotonic()
-        if remaining > 0:
-            runloom_c.sched_sleep(remaining)
+        # Park bounded by the deadline, but cancellable: if cancel() (or a
+        # transitive parent cancel) fires first it wakes us via cancel_wait_fd
+        # so run() doesn't linger.  The pre-park _err check handles the common
+        # "cancel before this fiber is first scheduled" case with no park at
+        # all.
+        if ctx._err is None:
+            remaining = deadline_monotonic - _time.monotonic()
+            if remaining > 0:
+                runloom_c.wait_fd(_wake_fd(), _READ, int(remaining * 1000) + 1)
         if ctx._err is None:
             ctx._cancel(DEADLINE_EXCEEDED)
 
-    _spawn(deadline_waker)
+    ctx._deadline_g = _spawn(deadline_waker)
     return ctx, cancel
 
 

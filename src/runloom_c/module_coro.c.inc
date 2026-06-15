@@ -43,11 +43,20 @@ static int RunloomCoro_init(RunloomCoro *self, PyObject *args, PyObject *kw)
         PyErr_SetString(PyExc_TypeError, "callable must be callable");
         return -1;
     }
+    if (stack_size < 0) {
+        /* A negative size casts to a huge size_t and overflows the guard-page
+         * arithmetic in runloom_coro_new -> an undersized mapping + OOB write
+         * (SIGSEGV).  go() / set_stack_size() reject non-positive sizes; Coro
+         * must validate too rather than crash on a bad argument. */
+        PyErr_SetString(PyExc_ValueError, "stack_size must be non-negative");
+        return -1;
+    }
     Py_INCREF(callable);
     self->callable = callable;
     self->result = NULL;
     self->error = NULL;
     self->has_run = 0;
+    self->executing = 0;
     self->coro = runloom_coro_new((size_t)stack_size,
                                runloom_coro_python_entry,
                                self);
@@ -74,6 +83,15 @@ static PyObject *RunloomCoro_resume(RunloomCoro *self, PyObject *unused)
 {
     RunloomTstateSnapshot caller_snap;
     (void)unused;
+    if (self->executing) {
+        /* Re-entrant resume: the coro's own body called self.resume() while
+         * still running on the swapped C stack.  Resuming it again would
+         * swapcontext into a context already live on this stack -> a wild
+         * jump / guard-page SIGSEGV.  Reject it cleanly. */
+        PyErr_SetString(PyExc_RuntimeError,
+                        "Coro is already executing (re-entrant resume)");
+        return NULL;
+    }
     if (self->coro == NULL || runloom_coro_done(self->coro)) {
         if (self->error != NULL) {
             PyObject *err = self->error;
@@ -99,7 +117,9 @@ static PyObject *RunloomCoro_resume(RunloomCoro *self, PyObject *unused)
         runloom_tstate_restore(&self->tstate_snap);
     }
 
+    self->executing = 1;
     runloom_coro_resume(self->coro);
+    self->executing = 0;
 
     /* Snapshot the coro's tstate at the yield/return point, then
      * restore the caller's counters. */

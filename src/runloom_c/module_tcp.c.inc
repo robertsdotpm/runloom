@@ -47,6 +47,13 @@ static PyObject *m_warmup(PyObject *self, PyObject *args)
     int actual;
     (void)self;
     if (!PyArg_ParseTuple(args, "i|n", &n, &stack_size)) return NULL;
+    if (stack_size < 0) {
+        /* A negative size casts to a giant size_t; the coro allocator's
+         * guard-page math then underflows -> SIGSEGV.  Reject it the same
+         * way Coro()/go() do. */
+        PyErr_SetString(PyExc_ValueError, "stack_size must be non-negative");
+        return NULL;
+    }
     actual = runloom_coro_warmup((size_t)stack_size, n);
     return PyLong_FromLong(actual);
 }
@@ -62,6 +69,10 @@ static PyObject *m_prewarm(PyObject *self, PyObject *args, PyObject *kwds)
     if (!PyArg_ParseTupleAndKeywords(args, kwds, "i|np", kw,
                                      &n, &stack_size, &background))
         return NULL;
+    if (stack_size < 0) {
+        PyErr_SetString(PyExc_ValueError, "stack_size must be non-negative");
+        return NULL;
+    }
     Py_BEGIN_ALLOW_THREADS
     r = runloom_coro_prewarm((size_t)stack_size, n, background);
     Py_END_ALLOW_THREADS
@@ -77,6 +88,10 @@ static PyObject *m_prewarm_keep(PyObject *self, PyObject *args, PyObject *kwds)
     (void)self;
     if (!PyArg_ParseTupleAndKeywords(args, kwds, "i|n", kw, &target, &stack_size))
         return NULL;
+    if (stack_size < 0) {
+        PyErr_SetString(PyExc_ValueError, "stack_size must be non-negative");
+        return NULL;
+    }
     r = runloom_coro_prewarm_keep((size_t)stack_size, target);
     return PyLong_FromLong(r);
 }

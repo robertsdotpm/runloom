@@ -567,7 +567,14 @@ runloom_g_info_t *runloom_fiber_snapshot(long *count_out)
                          ? __atomic_load_n(&g->park_events, __ATOMIC_RELAXED) : 0;
         o->wake_at     = (st == RUNLOOM_GST_PARKED_SLEEP) ? g->wake_at : 0.0;
         since          = __atomic_load_n(&g->state_since_ns, __ATOMIC_RELAXED);
-        o->age_ns      = (since > 0 && now > 0 && state_is_parked(st))
+        /* Gate on the timestamps flag: note_transition only stamps
+         * state_since_ns while tracking is ON, so a g recycled from the slab
+         * while tracking is OFF carries a STALE state_since_ns from a prior
+         * incarnation -- reporting it as an age would be a nonsensical
+         * cross-incarnation value.  When tracking is on, every park re-stamps,
+         * so `since` is always current. */
+        o->age_ns      = (runloom_introspect_get_timestamps()
+                          && since > 0 && now > 0 && state_is_parked(st))
                          ? (now - since) : -1;
         o->refcount    = __atomic_load_n(&g->refcount, __ATOMIC_RELAXED);
         o->noyield     = g->noyield;
