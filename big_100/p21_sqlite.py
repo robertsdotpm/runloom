@@ -24,6 +24,10 @@ worker; fault 0x1).  The runloom blocking-pool handoff is provably ordered
 worker threads, and the fiber keeps the connection PyObject referenced
 throughout) -- the fault is in libsqlite3's own close under extreme WAL
 connection churn, which the test must not drive past the library's ceiling.
+CONFIRMED by experiment: an own-db-per-goroutine variant (no shared WAL -shm)
+did identical churn (same ops/s, same 2000-concurrent close burst) yet crashed
+0 times in 12x1M runs, vs ~1/6 for this shared-WAL version -- so the trigger is
+sqlite's SHARED-WAL concurrent close, not the runloom blocking pool.
 Cap total connection lifecycles at the level the prior full 100k sweep ran
 cleanly.  (Confine-to-one-thread would also avoid it but the blocking pool has
 no thread-affinity, and a thread-per-connection pool can't scale to MAX_ACTIVE.)
