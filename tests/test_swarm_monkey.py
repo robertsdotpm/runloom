@@ -841,13 +841,13 @@ def _run_forkserver_bootstrap(timeout):
 
 
 @mn_only
-@pytest.mark.xfail(strict=False, reason=(
-    "FINDING: monkey.patch() + multiprocessing forkserver start method HANGS at "
-    "Process.start() -- the forkserver server is forked from the patched parent "
-    "and its bootstrap wedges (a trivial child with no queue never runs). "
-    "spawn works; forkserver does not. Isolated: forkserver works WITHOUT "
-    "monkey.patch(); breaks WITH it. This is the supported forkserver path per "
-    "the QA mandate, so the hang is a real bug."))
+# REGRESSION (was finding #4): monkey.patch() + multiprocessing forkserver no
+# longer hangs at Process.start().  Root cause: _patched_open routed EVERY
+# pollable-fd open through pure-Python _pyio, even off a fiber -- so a forked
+# process with no runloom runtime (the forkserver child) wedged in the _pyio
+# buffered reader while os.fdopen(pipe_fd)-reading its pickled process spec.
+# _patched_open now uses the robust C io.open when not in a fiber (where _pyio
+# gives no benefit anyway); the in-fiber cooperative pipe-read path is unchanged.
 def test_mp_forkserver_bootstrap_should_not_hang():
     if "forkserver" not in __import__("multiprocessing").get_all_start_methods():
         pytest.skip("forkserver unavailable")

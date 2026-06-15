@@ -126,10 +126,16 @@ def _patched_open(file, *args, **kwargs):
     # parks the fiber rather than wedging the hub.  Regular files keep the
     # fast C path (their buffered reads don't block on local disk; the open
     # syscall itself is offloaded when called from a fiber).
+    if not _in_fiber():
+        # Off a fiber there is no scheduler to park on, so the cooperative _pyio
+        # path provides ZERO benefit (its os.read/os.write already fall back to
+        # the real blocking syscalls) -- and it is actively harmful: a forked
+        # process with no runloom runtime (a multiprocessing forkserver / its
+        # children) reading its pickled process spec via os.fdopen(pipe_fd,'rb')
+        # wedges in the _pyio buffered reader.  Use the robust C io.open.
+        return _orig_open(file, *args, **kwargs)
     if isinstance(file, int) and _fd_pollable(file):
         return _pyio.open(file, *args, **kwargs)
-    if not _in_fiber():
-        return _orig_open(file, *args, **kwargs)
     return _get_backend().submit(_orig_open, (file,) + args, kwargs)
 
 
