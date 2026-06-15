@@ -6,6 +6,8 @@ of everything consumed equals the sum of everything produced (nothing dropped,
 nothing duplicated).
 
 Stresses: channel fairness, consumer wake-ups, producer/consumer contention.
+
+SCALE NOTE (memory ceiling, NOT a runloom bug): every func is a long-lived goroutine that PARKS on the channel/work and all resume ~simultaneously at teardown (close wakes every parked waiter -- chan_ops.c.inc). At 1M on a 16 GB box that simultaneous-resume working set exceeds RAM even with macOS compression -> jetsam SIGKILL (137). Verified mem-bound: PASSES at 400k, jetsam at 1M; close correctly wakes all waiters (not a lost-wakeup). Cap funcs to a memory- and drain-budget-safe level.
 """
 import harness
 import runloom
@@ -74,5 +76,5 @@ def finish_check(H):
 
 if __name__ == "__main__":
     harness.main("p41_producer_consumers", body, setup=setup,
-                 post=finish_check, default_funcs=2000,
+                 post=finish_check, default_funcs=2000, max_funcs=400000,
                  describe="one producer, many consumers; conservation")

@@ -6,6 +6,8 @@ The consumer verifies that, per producer, sequence numbers arrive strictly
 increasing with no gaps and no repeats -- nothing dropped, nothing duplicated.
 
 Stresses: channel correctness and contention with one drain point.
+
+SCALE NOTE (memory ceiling, NOT a runloom bug): every func is a long-lived goroutine that PARKS on the channel/work and all resume ~simultaneously at teardown (close wakes every parked waiter -- chan_ops.c.inc). At 1M on a 16 GB box that simultaneous-resume working set exceeds RAM even with macOS compression -> jetsam SIGKILL (137). Verified mem-bound: PASSES at 400k, jetsam at 1M; close correctly wakes all waiters (not a lost-wakeup). Cap funcs to a memory- and drain-budget-safe level.
 """
 import harness
 import runloom
@@ -77,5 +79,5 @@ def post(H):
 
 if __name__ == "__main__":
     harness.main("p42_producers_consumer", body, setup=setup, post=post,
-                 default_funcs=2000,
+                 default_funcs=2000, max_funcs=400000,
                  describe="many producers, one consumer; per-producer ordering")
