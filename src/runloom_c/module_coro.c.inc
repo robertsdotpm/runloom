@@ -56,6 +56,7 @@ static int RunloomCoro_init(RunloomCoro *self, PyObject *args, PyObject *kw)
     self->result = NULL;
     self->error = NULL;
     self->has_run = 0;
+    self->executing = 0;
     self->coro = runloom_coro_new((size_t)stack_size,
                                runloom_coro_python_entry,
                                self);
@@ -82,6 +83,15 @@ static PyObject *RunloomCoro_resume(RunloomCoro *self, PyObject *unused)
 {
     RunloomTstateSnapshot caller_snap;
     (void)unused;
+    if (self->executing) {
+        /* Re-entrant resume: the coro's own body called self.resume() while
+         * still running on the swapped C stack.  Resuming it again would
+         * swapcontext into a context already live on this stack -> a wild
+         * jump / guard-page SIGSEGV.  Reject it cleanly. */
+        PyErr_SetString(PyExc_RuntimeError,
+                        "Coro is already executing (re-entrant resume)");
+        return NULL;
+    }
     if (self->coro == NULL || runloom_coro_done(self->coro)) {
         if (self->error != NULL) {
             PyObject *err = self->error;
@@ -107,7 +117,9 @@ static PyObject *RunloomCoro_resume(RunloomCoro *self, PyObject *unused)
         runloom_tstate_restore(&self->tstate_snap);
     }
 
+    self->executing = 1;
     runloom_coro_resume(self->coro);
+    self->executing = 0;
 
     /* Snapshot the coro's tstate at the yield/return point, then
      * restore the caller's counters. */

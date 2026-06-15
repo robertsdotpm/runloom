@@ -87,6 +87,7 @@ typedef struct {
     PyObject *result;     /* return value of callable, or NULL */
     PyObject *error;      /* unhandled exception caught, or NULL */
     int has_run;
+    int executing;        /* 1 while inside runloom_coro_resume (re-entrancy guard) */
     RunloomTstateSnapshot tstate_snap;  /* captured at yield, restored at resume */
 } RunloomCoro;
 
