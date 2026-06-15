@@ -42,6 +42,14 @@ typedef struct runloom_pystate_snap runloom_pystate_snap_t;
 #define RUNLOOM_WS_SWEEPING       4
 #define RUNLOOM_WS_SWEEPING_WOKEN 5
 
+/* Per-fiber stack bounds for an EXPLICIT size override (go/mn_go(fn, n)): the
+ * caller's size wins over the autosizer but is still clamped to [MIN, MAX].  A
+ * wild size would otherwise fail the mmap with MemoryError on the M:N spawn
+ * path instead of clamping the way the single-thread path does.  Shared here so
+ * both the runloom_sched.c and mn_sched.c translation units agree on one value. */
+#define RUNLOOM_MIN_STACK_SIZE       (16  * 1024)         /* 3.13t hard floor */
+#define RUNLOOM_MAX_STACK_SIZE       (8   * 1024 * 1024)  /* 8 MiB ceiling */
+
 /* Per-fiber CPython thread state snapshot.
  *
  * Fields here are everything the interpreter keeps on PyThreadState that

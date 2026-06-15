@@ -294,15 +294,10 @@ def test_mn_go_stack_arg_edges():
 
 
 @pytest.mark.skipif(not FT, reason="M:N needs GIL-disabled build")
-@pytest.mark.xfail(strict=False, reason=(
-    "FINDING: mn_go(fn, huge) raises MemoryError instead of clamping to "
-    "RUNLOOM_MAX_STACK_SIZE (8 MiB) the way the single-thread go(fn, huge) path "
-    "does. runloom_sched_spawn_sized() clamps stack_size to [MIN,MAX]; the M:N "
-    "spawn core (runloom_mn_go_core) passes an explicit stack_size>0 straight "
-    "to runloom_coro_new with NO clamp, so an absurd size fails the mmap. Both "
-    "paths document 'an explicit size always wins' -- they should clamp it "
-    "identically. Benign (clean MemoryError, no crash) but an inconsistent "
-    "contract across the two spawn APIs."))
+# REGRESSION (was finding #15): mn_go(fn, huge) now clamps an explicit
+# stack_size to [MIN, MAX] (8 MiB) in runloom_mn_go_core, exactly like the
+# single-thread go() path (runloom_sched_spawn_sized) -- so a wild size
+# clamps-and-runs instead of failing runloom_coro_new's mmap with MemoryError.
 def test_mn_go_huge_stack_should_clamp_like_single_thread():
     box = {}
     # Capture the goroutine's unraisable MemoryError so it doesn't leak into the

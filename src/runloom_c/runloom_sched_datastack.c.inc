@@ -616,8 +616,8 @@ double runloom_sched_timer_next_deadline(runloom_sched_t *s)
  * Reads/writes are plain (single-threaded scheduler in v0); when
  * Phase C arrives these will move under the scheduler lock. */
 #define RUNLOOM_DEFAULT_STACK_SIZE   (512 * 1024)
-#define RUNLOOM_MIN_STACK_SIZE       (16  * 1024)   /* 3.13t hard floor (explicit override) */
-#define RUNLOOM_MAX_STACK_SIZE       (8   * 1024 * 1024)
+/* RUNLOOM_MIN_STACK_SIZE / RUNLOOM_MAX_STACK_SIZE now live in runloom_sched.h
+ * (shared with mn_sched.c so the M:N spawn path clamps to the same bounds). */
 #define RUNLOOM_CAL_TARGET           1000     /* gs before freeze */
 #define RUNLOOM_CAL_SAFETY           4        /* multiply HWM by this */
 

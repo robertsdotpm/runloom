@@ -452,6 +452,15 @@ static int runloom_mn_go_core(PyObject *callable, runloom_c_entry_fn c_fn,
     g->owner = &h->sched;   /* owning hub's sched -- groups fibers in the dump */
     __atomic_store_n(&g->id, runloom_next_goid(), __ATOMIC_RELAXED);
     g->park_fd = -1;
+    /* Clamp an explicit per-spawn size to [MIN, MAX], exactly like the
+     * single-thread go() path (runloom_sched_spawn_sized): "the explicit size
+     * wins" means it overrides the autosizer, not that it can exceed the 8 MiB
+     * ceiling -- an unclamped wild size fails runloom_coro_new's mmap with
+     * MemoryError instead of clamping the way single-thread go() does. */
+    if (stack_size > 0) {
+        if (stack_size < RUNLOOM_MIN_STACK_SIZE) stack_size = RUNLOOM_MIN_STACK_SIZE;
+        if (stack_size > RUNLOOM_MAX_STACK_SIZE) stack_size = RUNLOOM_MAX_STACK_SIZE;
+    }
     /* Stack size, in precedence order:
      *  1. an explicit per-spawn override (mn_go(fn, stack_size) > 0) -- a caller
      *     that knows it runs a deep, NON-yielding C burst (cold stdlib import,
