@@ -93,15 +93,6 @@ int runloom_netpoll_parked_count(void);
 /* DIAG: dump every parked parker (fd/g/hub/commit) to stderr. */
 void runloom_netpoll_dump_parkers(void);
 
-/* Introspection: read a fiber's active netpoll parker (g->netpoll_parker,
- * an opaque void* from the g's view) into plain fields for the dump.  Each
- * out-pointer may be NULL.  Returns 1 if `parker` was non-NULL (fields
- * written), 0 otherwise (fields left untouched).  A bare struct field read;
- * the caller must ensure the parker can't be freed under it (it holds the g
- * alive, and a g's parker lives as long as the g is parked). */
-int runloom_netpoll_parker_info(void *parker, int *fd_out, int *events_out,
-                             long long *deadline_ns_out);
-
 /* Hub-idle dwell-based stack reclaim (RUNLOOM_STACK_PARK_SWEEP).  The
  * calling hub madvises the idle stack pages of its OWN parkers whose
  * park has exceeded threshold_ns.  Safe only when called by the owning
@@ -247,10 +238,5 @@ int  runloom_netpoll_wake_pump_arm(void);
  * backend).  NULL = default/single-thread pool.  Ignored on the shared-handle
  * backends (epoll eventfd / Windows IOCP / select self-pipe). */
 void runloom_netpoll_wake_pump(void *hub_opaque);
-
-/* Does any registered iouring source (global or per-hub) have an
- * in-flight SQE?  Hub_main uses this to decide pump vs sleep when no
- * fd-parks are active. */
-int runloom_netpoll_any_iouring_inflight(void);
 
 #endif /* RUNLOOM_NETPOLL_H */

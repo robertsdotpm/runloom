@@ -539,28 +539,3 @@ void runloom_netpoll_remove_iouring_ring(int eventfd_fd)
     (void)eventfd_fd;
 #endif
 }
-
-int runloom_netpoll_any_iouring_inflight(void)
-{
-#if defined(RUNLOOM_HAVE_EPOLL)
-    int i, total;
-    /* Global ring inflight. */
-    total = runloom_iouring_inflight();
-    /* Per-hub rings.  Read snapshot under the lock (matching add/remove)
-     * but the inflight load itself is atomic so we don't hold the lock
-     * over the loop. */
-    RUNLOOM_RLOCK(&runloom_pool.lock, RUNLOOM_RANK_PARKER_POOL);
-    {
-        struct runloom_iouring_ring *snapshot[RUNLOOM_IOURING_RINGS_MAX];
-        int n = runloom_iouring_ring_count;
-        for (i = 0; i < n; i++) snapshot[i] = runloom_iouring_ring_ptrs[i];
-        RUNLOOM_RUNLOCK(&runloom_pool.lock, RUNLOOM_RANK_PARKER_POOL);
-        for (i = 0; i < n; i++) {
-            total += runloom_iouring_ring_inflight(snapshot[i]);
-        }
-    }
-    return total;
-#else
-    return 0;
-#endif
-}

@@ -159,18 +159,6 @@ void runloom_netpoll_dump_parkers(void)
     }
 }
 
-/* Introspection accessor: read a parker's plain fields.  See netpoll.h. */
-int runloom_netpoll_parker_info(void *parker, int *fd_out, int *events_out,
-                             long long *deadline_ns_out)
-{
-    runloom_parked_t *p = (runloom_parked_t *)parker;
-    if (p == NULL) return 0;
-    if (fd_out != NULL)          *fd_out = p->fd;
-    if (events_out != NULL)      *events_out = p->events;
-    if (deadline_ns_out != NULL) *deadline_ns_out = p->deadline_ns;
-    return 1;
-}
-
 /* ---- per-fd registration cache ----
  * One bit per fd; set when we've already issued EPOLL_CTL_ADD (or
  * the kqueue equivalent) for this fd as edge-triggered for both
@@ -391,14 +379,6 @@ static int runloom_fd_pending_wake_consume(int fd, int events)
 #endif
         return pending;
     }
-}
-
-static int runloom_fd_bit_get(int fd)
-{
-    if (fd < 0) return 0;
-    size_t byte = (size_t)fd >> 3;
-    if (byte >= runloom_fd_registered_cap_bytes) return 0;
-    return (runloom_fd_registered_bm[byte] >> (fd & 7)) & 1;
 }
 
 static int runloom_fd_bit_set(int fd)
