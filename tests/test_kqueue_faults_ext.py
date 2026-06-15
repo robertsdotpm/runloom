@@ -401,5 +401,63 @@ def test_heavy_concurrency_ctl_always_oserror(npark):
         "CTL fault fired fewer times than fibers registered:\n%s" % p.stdout)
 
 
+# ===========================================================================
+# 5. KQUEUE_PERHUB always -- a NON-default pool's lazy kqueue create fails, so
+#    the register/pump "kqueue_fd < 0" DEFENSIVE arms become reachable while the
+#    run still starts (the default pool stays intact).  Needs M:N (per-hub pools
+#    only exist under run(n>1)).  Fibers landing on a broken hub get OSError
+#    (register: netpoll_register.c.inc:129-135 EINVAL); the broken hub's pump
+#    takes the kqueue_fd<0 sleep arm (netpoll_pump.c.inc:172-176).  The run must
+#    unwind cleanly -- a crash/hang here would be a real bug.
+#    branch: netpoll_init.c.inc backend_create per-hub fault + register:129 + pump:172
+# ===========================================================================
+
+_PERHUB_CODE = r"""
+import socket, sys
+sys.path.insert(0, "src")
+import runloom, runloom_c
+socks = []
+outcomes = []
+def worker(i):
+    a, b = socket.socketpair(); a.setblocking(False); b.setblocking(False)
+    socks.append((a, b))
+    try:
+        r = runloom_c.wait_fd(a.fileno(), 1, 300)   # READ + 300ms deadline
+        outcomes.append(("ok", r))
+    except OSError as e:
+        outcomes.append(("oserror", e.errno))
+    except BaseException as e:
+        outcomes.append(("err", type(e).__name__))
+def main():
+    for i in range(64):
+        runloom.go(worker, i)
+    runloom.sleep(0.6)
+runloom.run(8, main)
+print("BACKEND=%s" % runloom_c.netpoll_backend())
+print("FAULTS=%d" % runloom_c._fault_count("KQUEUE_PERHUB"))
+print("N=%d" % len(outcomes))
+print("EINVAL=%d" % sum(1 for k, v in outcomes if k == "oserror" and v == 22))
+print("DONE")
+"""
+
+
+@pytest.mark.parametrize("rep", range(2), ids=["a", "b"])
+def test_perhub_kqueue_create_failure(rep):
+    """A per-hub pool whose kqueue() create is faulted leaves kqueue_fd<0; fibers
+    that park on that hub surface OSError(EINVAL) from register and the broken
+    hub's pump takes its kqueue_fd<0 sleep arm -- the M:N run must still unwind
+    cleanly (no crash, no hang)."""
+    p = _run_snippet("KQUEUE_PERHUB", "always:%d" % EINVAL, _PERHUB_CODE)
+    _assert_terminated(p)
+    assert int(_field(p.stdout, "FAULTS")) > 0, (
+        "KQUEUE_PERHUB never fired -- per-hub pools not created / not wired:\n%s"
+        % p.stdout)
+    # At least one fiber landed on a broken hub and got EINVAL from register.
+    assert int(_field(p.stdout, "EINVAL")) > 0, (
+        "no fiber surfaced register's kqueue_fd<0 EINVAL (all on the default "
+        "pool?):\n%s" % p.stdout)
+    assert int(_field(p.stdout, "N")) == 64, "not every worker returned:\n%s" % p.stdout
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))

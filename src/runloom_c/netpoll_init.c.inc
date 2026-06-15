@@ -19,6 +19,16 @@ static void runloom_pool_backend_create(runloom_parker_pool_t *pool)
     pool->selfpipe_w = -1;
 #if defined(RUNLOOM_HAVE_KQUEUE)
     pool->kqueue_fd = kqueue();
+    {   /* test-only (RUNLOOM_FAULT_KQUEUE_PERHUB): force a NON-default pool's
+         * kqueue create to fail, so the register/pump "kqueue_fd < 0" defensive
+         * arms are reachable while the run still starts -- the default pool
+         * (validated by netpoll_init via RUNLOOM_FAULT_KQUEUE_CREATE) stays
+         * intact, and only the per-hub pool a fiber later parks on is broken. */
+        if (pool != &runloom_pool && pool->kqueue_fd >= 0) {
+            int finj = runloom_fault_inject(RUNLOOM_FAULT_KQUEUE_PERHUB);
+            if (finj) { close(pool->kqueue_fd); pool->kqueue_fd = -1; }
+        }
+    }
     if (pool->kqueue_fd < 0) return;
     /* Don't leak the kqueue fd into exec'd subprocesses (parity with the
      * self-pipe below and every other poller fd) -- audit finding B8.  A
@@ -128,7 +138,7 @@ int runloom_netpoll_epoll_fd(void)
 /* Fault-injection site enum lives in netpoll.h (shared with runloom_tcp.c). */
 static const char *const runloom_fault_names[RUNLOOM_FAULT_NSITES] = {
     "WSAPOLL", "SELECT", "IOCP_WAIT", "IOCP_SUBMIT", "KQUEUE_WAIT",
-    "KQUEUE_CREATE", "KQUEUE_CTL",
+    "KQUEUE_CREATE", "KQUEUE_CTL", "KQUEUE_PERHUB",
     "TCP_SOCKET", "TCP_CONNECT", "TCP_ACCEPT", "TCP_RECV", "TCP_SEND",
     "FD_READ", "FD_WRITE",
     "SPAWN_G", "SPAWN_STACK", "SPAWN_TSTATE" };
@@ -160,6 +170,7 @@ static const char *const runloom_fault_envs[RUNLOOM_FAULT_NSITES] = {
     "RUNLOOM_FAULT_WSAPOLL", "RUNLOOM_FAULT_SELECT", "RUNLOOM_FAULT_IOCP_WAIT",
     "RUNLOOM_FAULT_IOCP_SUBMIT", "RUNLOOM_FAULT_KQUEUE_WAIT",
     "RUNLOOM_FAULT_KQUEUE_CREATE", "RUNLOOM_FAULT_KQUEUE_CTL",
+    "RUNLOOM_FAULT_KQUEUE_PERHUB",
     "RUNLOOM_FAULT_TCP_SOCKET", "RUNLOOM_FAULT_TCP_CONNECT", "RUNLOOM_FAULT_TCP_ACCEPT",
     "RUNLOOM_FAULT_TCP_RECV", "RUNLOOM_FAULT_TCP_SEND",
     "RUNLOOM_FAULT_FD_READ", "RUNLOOM_FAULT_FD_WRITE",
