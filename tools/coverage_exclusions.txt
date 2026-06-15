@@ -255,3 +255,15 @@ runloom_sched_drain.c.inc        447-447   DEFENSIVE  Py_CLEAR(s->signal_exc) at
 runloom_sched_pystate.c.inc      304-312   MIGRATION  RUNLOOM_DIAG_MIGRATE cross-hub diagnostic block; only entered when snap->origin_tstate != ts (snap saved on one hub tstate, loaded on a DIFFERENT one). Under the default scheduler woken gs (snap.valid) route to the hub-LOCAL FIFO so they always reload on their own tstate; cross-hub snap migration occurs ONLY in per-g-tstate / runloom_use_global_runq mode, which mn_init activates ONLY with RUNLOOM_ALLOW_UNSAFE_MIGRATION=1 (forbidden).
 runloom_tcp_helpers.c.inc        179-181   DEFENSIVE  Post-loop 'no usable address' guard: runloom_resolve calls getaddrinfo with SOCK_STREAM/IPPROTO_TCP, so every returned entry is AF_INET (16B) or AF_INET6 (28B), always <= sizeof(struct sockaddr_storage) (128B); the loop body at L171-176 always succeeds on the first entry. Reaching L179 needs every ai_addrlen>128, impossible. faultinj/strace inject only return values/errno, not getaddrinfo struct contents, so no forge path.
 runloom_tcp_type_init.c.inc      68-69     OOM        PyModule_AddObject("TCPConn") failure cleanup (Py_DECREF + return -1). With a valid module + ready type it fails only on an internal dict-set OOM. This runs once during `import runloom_c` at interpreter startup; faultinj's global fail-Nth malloc cannot be targeted to this single call site (import does a non-deterministic flood of allocations) and strace inject sets only return/errno, not an internal malloc inside PyModule_AddObject. No forge path; alloc-failure cleanup not reachable by faultinj/strace.
+
+# ---- cldeque (Chase-Lev work deque): free-threaded gcov-counter-race tails ----
+# These lines EXECUTE (test_cov95_gap_cldeque_c.py drove runloom_cldeque_steal
+# 891830x + runloom_cldeque_pop 146611x with 'blocks executed 100%' on a fresh
+# instrumented build), but the -O0 --coverage per-line counters are NON-ATOMIC
+# and race to ##### under concurrent steal/pop -- a gcov counter artifact, not
+# non-execution.  The lock-free deque is also model/sanitizer-checked by the
+# dedicated C harness tests_c/test_cldeque.c (ASan/TSan/UBSan).
+cldeque.c                        77-78     RACE       runloom_cldeque_pop last-element lost-race tail; executes (pop 146611x, blocks 100%), free-threaded non-atomic gcov line-counter race to #####.
+cldeque.c                        90-90     RACE       runloom_cldeque_steal item read; executes (steal 891830x, blocks 100%), free-threaded gcov-counter-race artifact.
+cldeque.c                        92-93     RACE       runloom_cldeque_steal expected=t + top-CAS; executes, free-threaded gcov-counter-race artifact.
+cldeque.c                        100-100   RACE       runloom_cldeque_steal CAS-loser return NULL; executes under contention, free-threaded gcov-counter-race artifact.
