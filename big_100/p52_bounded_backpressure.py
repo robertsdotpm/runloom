@@ -25,7 +25,20 @@ def producer(H, wid, rng, state):
     ch = state["ch"]
     n = 0
     while H.running():
-        ch.send(1)              # blocks while the tiny buffer is full
+        try:
+            ch.send(1)          # blocks while the tiny buffer is full
+        except ValueError as e:
+            # The teardown closer closes the channel once producers SHOULD have
+            # stopped, but at an extreme producer:consumer ratio (e.g. 1M:8 at
+            # --funcs 1000000) its bounded drain window can elapse while this
+            # producer is still BLOCKED in send.  Closing a channel with blocked
+            # senders raises "send on closed channel" (Go semantics) -- the
+            # correct stop signal from the sender side, not an error: the unsent
+            # item was never enqueued, so conservation (produced == consumed)
+            # still holds.  Stop cleanly.
+            if "closed" not in str(e):
+                raise
+            break
         n += 1
         H.op(wid)
     state["produced"][wid] += n

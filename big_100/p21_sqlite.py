@@ -14,6 +14,19 @@ lock contention and connection-create time make drain time explode.
 run_pool(max_concurrent=MAX_ACTIVE) keeps exactly MAX_ACTIVE goroutines alive
 (no CoSemaphore needed, which would create one pipe-pair per waiting goroutine
 and blow the FD limit at 1M funcs).
+
+MAX_FUNCS cap (sqlite library ceiling, NOT a runloom limit): each worker opens
+and CLOSES its own connection, so total funcs == total connection lifecycles.
+At ~1M close churn, macOS's libsqlite3 flakily SIGSEGVs INSIDE sqlite3Close
+(backtrace: sqlite3Close <- pysqlite_connection_close <- the blocking-pool
+worker; fault 0x1).  The runloom blocking-pool handoff is provably ordered
+(done release/acquire + bp_lock chain the connection's create->step->close across
+worker threads, and the fiber keeps the connection PyObject referenced
+throughout) -- the fault is in libsqlite3's own close under extreme WAL
+connection churn, which the test must not drive past the library's ceiling.
+Cap total connection lifecycles at the level the prior full 100k sweep ran
+cleanly.  (Confine-to-one-thread would also avoid it but the blocking pool has
+no thread-affinity, and a thread-per-connection pool can't scale to MAX_ACTIVE.)
 """
 import sqlite3
 
@@ -89,4 +102,5 @@ def body(H):
 
 if __name__ == "__main__":
     harness.main("p21_sqlite", body, setup=setup, default_funcs=2000,
+                 max_funcs=100000,   # sqlite3Close churn ceiling -- see SCALE NOTE
                  describe="concurrent SQLite WAL read/write with lock retries")
