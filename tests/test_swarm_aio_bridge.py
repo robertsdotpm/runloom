@@ -1233,14 +1233,11 @@ print("RESULT", outcome, "%.3f" % el)
     assert el < 2.0, "wait_for on subprocess slow-returned: %.3fs" % el
 
 
-@pytest.mark.xfail(strict=False, reason="FINDING: the SECOND consecutive "
-                   "aio.run() that spawns a subprocess in the same process "
-                   "HANGS in communicate()/wait() -- the child's pidfd reaper "
-                   "fiber (started via runloom_c.go in _SubprocessTransport."
-                   "_start_reaper) never wakes for the second run, so "
-                   "process_exited never fires. Likely the pidfd netpoll arm is "
-                   "not released across the aio.run boundary (stale-arm on fd "
-                   "reuse). First run reaps fine; second run never completes.")
+# REGRESSION (was finding #2): a 2nd consecutive aio.run() spawning a subprocess
+# no longer hangs.  Root cause was stale netpoll arm caches on fd reuse across
+# the aio.run boundary -- BOTH the pidfd (reaper) AND the subprocess stdout/stderr
+# pipe fds.  The reaper and the pipe transports now netpoll_release_if_idle the fd
+# before closing it, so the reused fd numbers re-register cleanly.
 def test_second_subprocess_run_never_reaps_hangs():
     """Two consecutive aio.run()s each spawning + awaiting a trivial child.  The
     CORRECT behavior is both complete; currently the second hangs, so the child

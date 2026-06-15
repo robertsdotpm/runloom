@@ -101,6 +101,17 @@ class _SubprocessTransport(asyncio.SubprocessTransport):
             except BaseException:
                 pass
             finally:
+                # Clear the netpoll arm cache for this fd BEFORE closing it.  The
+                # single-thread netpoll keeps a per-fd LEVEL arm cache that a plain
+                # os.close() does NOT clear; when the OS reuses this pidfd NUMBER
+                # for the NEXT subprocess (e.g. a 2nd aio.run), netpoll_register's
+                # already-armed skip would see the stale mask and never re-ADD it,
+                # so the new reaper's wait_fd parks forever and communicate()/wait()
+                # hangs.  release_if_idle is a no-op if anything is still parked.
+                try:
+                    runloom_c.netpoll_release_if_idle(pidfd)
+                except (OSError, ValueError, AttributeError):
+                    pass
                 try:
                     _os.close(pidfd)
                 except OSError:
