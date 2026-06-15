@@ -649,15 +649,12 @@ def test_gather_first_exception_does_not_swallow_or_hang():
     assert out == ("raised", "boom"), out
 
 
-@pytest.mark.xfail(strict=False, reason="FINDING: after a gather() first-"
-                   "exception cancels still-running siblings, those cancelled "
-                   "tasks linger (un-collected) in the global task registry, so "
-                   "the NEXT aio.run's _cancel_outstanding_tasks sees "
-                   "sibling_busy and SKIPS sched_reset() -- stranding an "
-                   "unrelated streams-server accept-fiber's netpoll parker until "
-                   "a gc.collect() reaps the cancelled tasks. Correct behavior: "
-                   "the second run drains the accept parker regardless of GC "
-                   "timing (parked returns to 0 without an explicit collect).")
+# REGRESSION (was finding #7): after a gather() first-exception cancels its
+# siblings, those zombie tasks linger not-done on the now-closed loop -- they no
+# longer block the NEXT run's sched_reset().  _cancel_outstanding_tasks's
+# sibling_busy check now ignores tasks on a CLOSED loop (they can never be
+# driven), so the accept-fiber parker drains to 0 without a gc.collect() and no
+# longer accumulates per run.  (Open sibling loops stay protected.)
 def test_gather_first_exc_strands_next_run_accept_parker():
     """Deterministic in-subprocess repro of the cross-run parker strand: run a
     gather-first-exception (NO gc), then a streams server create/close in a

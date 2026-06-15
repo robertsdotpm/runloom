@@ -151,8 +151,17 @@ class _LoopRunMixin(object):
         # server task's in-flight asyncio.sleep sitting in the shared sleep heap
         # -- deadlocking that loop when it is next driven (the hypercorn /
         # pytest-asyncio fixture-vs-test multi-loop case).
+        # A task on a CLOSED loop can never be driven again, so it is dead even
+        # if it never reached done() (e.g. a gather() first-exception that
+        # cancelled its siblings but stopped the loop before the cancellation
+        # propagated).  Such zombies must NOT count as "busy" -- otherwise every
+        # subsequent run() skips sched_reset() and strands its own accept-fiber
+        # netpoll parker, which accumulates one per run (finding #7).  Open
+        # sibling loops are still protected, both here and by other_loop_open.
         sibling_busy = any(
-            (t._loop is not self and not t.done()) for t in list(_PG_ALL_TASKS))
+            (t._loop is not self and not t.done()
+             and not getattr(t._loop, "_closed", False))
+            for t in list(_PG_ALL_TASKS))
         # sched_reset() bulldozes the SHARED per-thread scheduler (ready ring +
         # sleep heap).  Any OTHER open loop on this thread may have live work
         # sitting there -- including raw call_later timer fibers (a server
