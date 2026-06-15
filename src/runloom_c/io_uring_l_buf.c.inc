@@ -153,96 +153,100 @@ void runloom_iouring_drain(void)
             { /* drain */ }
     }
 
-    /* Multi-drainer safety: the netpoll pump (whichever hub goes idle)
-     * AND the inline drain after submit AND the hub spin-drain path
-     * all call this without any external mutex.  On free-threaded
-     * Python (3.13t) these can run truly in parallel; under the GIL
-     * they only serialise at Python-level boundaries which most of
-     * this function doesn't cross.  Without a CAS on cq_head two
-     * drainers could load the same head, process the same CQE
-     * (double-wake the fiber, free a cancel record twice), and
-     * each blindly store head+1 -- a single CQE consumed twice with
-     * inflight decremented twice.  Pre-fix this manifested as
-     * gradual M:N hangs (the spurious wake left the g in a "ready
-     * twice" state that drove an unrelated parker into use-after-
-     * free).  The CAS turns the head advance into a per-CQE claim:
-     * exactly one drainer succeeds for each CQE; the loser re-loads
-     * and retries. */
-    /* Pull any kernel-side overflowed completions back into the ring before
-     * draining -- multishot recv can post more CQEs than the ring holds, and a
-     * dropped completion permanently strands the parked fiber. */
-    runloom_iouring_flush_cq_overflow(s->sq_flags, s->ring_fd);
-    for (;;) {
-        unsigned head = __atomic_load_n(s->cq_head, __ATOMIC_ACQUIRE);
-        unsigned ct   = __atomic_load_n(s->cq_tail, __ATOMIC_ACQUIRE);
-        struct io_uring_cqe *cqe;
-        runloom_iouring_op_t *op;
-        int32_t  res;
-        uint32_t flags;
-        int      type;
-        int      cqe_final;
-        unsigned expected;
-        if (head == ct) return;
-        cqe   = &s->cqes[head & s->cq_mask];
-        res   = cqe->res;
-        flags = cqe->flags;
-        op    = (runloom_iouring_op_t *)(uintptr_t)cqe->user_data;
-        type      = (op != NULL) ? op->type : RUNLOOM_IOURING_OP_SINGLE;
-        cqe_final = (type != RUNLOOM_IOURING_OP_MULTISHOT) ||
-                    !(flags & IORING_CQE_F_MORE);
-        /* Claim this CQE via CAS on cq_head.  On contention, the
-         * other drainer wins -- we re-load and try the next CQE.
-         * SEQ_CST so multi-thread observers see a coherent head. */
-        expected = head;
-        if (!__atomic_compare_exchange_n(s->cq_head, &expected, head + 1,
-                                         0, __ATOMIC_ACQ_REL,
-                                         __ATOMIC_ACQUIRE)) {
-            continue;   /* another drainer took it; reload */
-        }
+    /* SINGLE-DRAINER.  Many threads call this without any external mutex -- the
+     * netpoll pump on whichever hub goes idle, the inline drain after submit,
+     * the SQ-full spin-drain, and the sched/hub idle CQ-overflow flush -- and on
+     * free-threaded Python (3.13t) they run truly in parallel.  The previous
+     * per-CQE CAS-claim let two threads claim CONSECUTIVE CQEs and process them
+     * concurrently.  That is harmless for single-shot ops (each result is
+     * independent), but WRONG for MULTISHOT recv, whose CQEs carry a byte
+     * STREAM: an out-of-order ms_on_cqe append reorders the per-handle ready
+     * queue and corrupts the stream (right length, wrong bytes -- a real
+     * many-concurrent-connection bug).  So exactly ONE thread walks the CQ at a
+     * time and appends in head order: win `draining` or return.  After clearing
+     * the flag the winner RE-CHECKS the CQ -- a completion posted after our last
+     * head==ct but before we cleared would be skipped by a concurrent caller
+     * that saw draining==1 and returned, so re-acquire and loop to catch it.
+     * (Exactly-once is now structural: a single walker advances head once per
+     * CQE, so the old double-wake / double-free / double-decrement races are
+     * gone without the CAS.) */
+    if (__atomic_exchange_n(&s->draining, 1, __ATOMIC_ACQ_REL) != 0)
+        return;   /* another thread owns the drain; it processes every CQE */
 
-        if (op != NULL) {
-            switch (type) {
-            case RUNLOOM_IOURING_OP_SINGLE:
-                /* Publish the result BEFORE the wake handshake so a woken
-                 * (or self-recovering) submitter sees it. */
-                __atomic_store_n(&op->result, res, __ATOMIC_RELEASE);
-                if (op->hub != NULL) {
-                    /* Hub (M:N) op: the submitter parks via coro_yield.
-                     * Claim the completion with an exchange and wake ONLY if
-                     * the submitter had already committed to parking
-                     * (wait == PARKED).  If it is still INFLIGHT -- e.g. this
-                     * is the submitter's own INLINE drain, before it parks --
-                     * we must NOT wake: runloom_mn_wake_g would hub-submit a
-                     * still-running g and double-resume it (Bug 1).  The
-                     * submitter will instead observe DONE on its own CAS and
-                     * skip the park entirely. */
-                    int prev = __atomic_exchange_n(&op->wait,
-                                                   RUNLOOM_IOURING_WAIT_DONE,
-                                                   __ATOMIC_ACQ_REL);
-                    if (prev == RUNLOOM_IOURING_WAIT_PARKED) {
-                        runloom_mn_wake_g(op->hub, op->g);
+    for (;;) {
+        /* Pull any kernel-side overflowed completions back into the ring first
+         * -- multishot recv can post more CQEs than the ring holds, and a
+         * dropped completion would permanently strand the parked fiber. */
+        runloom_iouring_flush_cq_overflow(s->sq_flags, s->ring_fd);
+        for (;;) {
+            unsigned head = __atomic_load_n(s->cq_head, __ATOMIC_ACQUIRE);
+            unsigned ct   = __atomic_load_n(s->cq_tail, __ATOMIC_ACQUIRE);
+            struct io_uring_cqe *cqe;
+            runloom_iouring_op_t *op;
+            int32_t  res;
+            uint32_t flags;
+            int      type;
+            int      cqe_final;
+            if (head == ct) break;
+            cqe   = &s->cqes[head & s->cq_mask];
+            res   = cqe->res;
+            flags = cqe->flags;
+            op    = (runloom_iouring_op_t *)(uintptr_t)cqe->user_data;
+            type      = (op != NULL) ? op->type : RUNLOOM_IOURING_OP_SINGLE;
+            cqe_final = (type != RUNLOOM_IOURING_OP_MULTISHOT) ||
+                        !(flags & IORING_CQE_F_MORE);
+            /* Single walker: consume the slot by advancing head in order (no
+             * CAS).  Done after copying res/flags/op out, so the kernel may
+             * reuse the slot while we process from the locals. */
+            __atomic_store_n(s->cq_head, head + 1, __ATOMIC_RELEASE);
+
+            if (op != NULL) {
+                switch (type) {
+                case RUNLOOM_IOURING_OP_SINGLE:
+                    /* Publish the result BEFORE the wake handshake so a woken
+                     * (or self-recovering) submitter sees it. */
+                    __atomic_store_n(&op->result, res, __ATOMIC_RELEASE);
+                    if (op->hub != NULL) {
+                        /* Hub (M:N) op: wake ONLY if the submitter already
+                         * committed to parking (wait == PARKED).  If still
+                         * INFLIGHT -- e.g. the submitter's own inline drain
+                         * before it parks -- do NOT wake (it observes DONE on
+                         * its own CAS and skips the park; waking a still-running
+                         * g would double-resume it). */
+                        int prev = __atomic_exchange_n(&op->wait,
+                                                       RUNLOOM_IOURING_WAIT_DONE,
+                                                       __ATOMIC_ACQ_REL);
+                        if (prev == RUNLOOM_IOURING_WAIT_PARKED) {
+                            runloom_mn_wake_g(op->hub, op->g);
+                        }
+                    } else if (op->g != NULL) {
+                        /* Single-thread sched: race-safe via wake_pending. */
+                        runloom_sched_wake_safe(op->g);
                     }
-                } else if (op->g != NULL) {
-                    /* Single-thread sched: race-safe via wake_pending (if the
-                     * submitter hasn't parked yet park_safe just decrements). */
-                    runloom_sched_wake_safe(op->g);
+                    break;
+                case RUNLOOM_IOURING_OP_MULTISHOT:
+                    runloom_iouring_ms_on_cqe((runloom_iouring_ms_t *)op, res, flags);
+                    break;
+                case RUNLOOM_IOURING_OP_CANCEL:
+                    /* Fire-and-forget: the cancel op record is heap-allocated
+                     * by ms_close; once the CQE arrives it is no longer needed. */
+                    free(op);
+                    break;
                 }
-                break;
-            case RUNLOOM_IOURING_OP_MULTISHOT:
-                runloom_iouring_ms_on_cqe((runloom_iouring_ms_t *)op, res, flags);
-                break;
-            case RUNLOOM_IOURING_OP_CANCEL:
-                /* Fire-and-forget: the cancel op record is heap-
-                 * allocated by ms_close; once the CQE arrives the
-                 * record is no longer needed. */
-                free(op);
-                break;
+            }
+            if (cqe_final) {
+                __atomic_sub_fetch(&runloom_iouring_inflight_count, 1,
+                                   __ATOMIC_ACQ_REL);
             }
         }
-        if (cqe_final) {
-            __atomic_sub_fetch(&runloom_iouring_inflight_count, 1,
-                               __ATOMIC_ACQ_REL);
-        }
+        __atomic_store_n(&s->draining, 0, __ATOMIC_RELEASE);
+        /* Re-check (see header): catch a completion that raced in just as we
+         * released the drain. */
+        if (__atomic_load_n(s->cq_head, __ATOMIC_ACQUIRE)
+                == __atomic_load_n(s->cq_tail, __ATOMIC_ACQUIRE))
+            break;
+        if (__atomic_exchange_n(&s->draining, 1, __ATOMIC_ACQ_REL) != 0)
+            break;   /* another thread became the drainer; it owns the rest */
     }
 }
 

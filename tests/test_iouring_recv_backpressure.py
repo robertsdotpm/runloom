@@ -105,3 +105,60 @@ def test_single_thread_io_uring_backpressure_transfer_completes():
 @requires_iouring
 def test_mn_io_uring_backpressure_transfer_completes():
     _run(_DRIVE_MN)
+
+
+# Integrity: many CONCURRENT connections through io_uring multishot recv under
+# M:N must each receive their EXACT byte stream. They share one global provided-
+# buffer ring and their CQEs are drained by different hubs; a per-CQE CAS-claim
+# drain appended stream buffers out of order -> right length, wrong bytes (only
+# the io_uring drain is now single-drainer so appends stay in CQ order).
+_CONCURRENT = r"""
+import socket, sys
+sys.path.insert(0, "src")
+import runloom_c
+SIZE = 8 * 1024 * 1024; NCONN = 8
+# distinct per-connection payload (position-and-conn dependent)
+pl = [bytes(((k + c * 64) & 0xFF) for k in range(SIZE)) for c in range(NCONN)]
+L = runloom_c.TCPConn.listen("127.0.0.1", 0)
+fd = L.fileno(); sk = socket.socket(fileno=socket.dup(fd))
+PORT = sk.getsockname()[1]; sk.close()
+res = [None] * NCONN
+def drain(i):
+    c = L.accept(); b = bytearray()
+    while True:
+        ch = c.recv(65536)
+        if not ch: break
+        b += ch
+    res[i] = bytes(b); c.close()
+def client(i):
+    c = runloom_c.TCPConn.connect("127.0.0.1", PORT); c.send_all(pl[i]); c.close()
+runloom_c.mn_init(4)
+for i in range(NCONN): runloom_c.mn_go(lambda i=i: drain(i))
+for i in range(NCONN): runloom_c.mn_go(lambda i=i: client(i))
+runloom_c.mn_run(); runloom_c.mn_fini(); L.close()
+# every received stream must equal exactly one distinct payload, all distinct
+used = set()
+for got in res:
+    hit = next((c for c in range(NCONN) if c not in used and got == pl[c]), None)
+    assert hit is not None, ("corrupt/reordered stream",
+                             None if got is None else len(got))
+    used.add(hit)
+assert len(used) == NCONN
+print("CONCURRENT_OK")
+"""
+
+
+@requires_iouring
+def test_mn_concurrent_connections_io_uring_recv_integrity():
+    try:
+        p = subprocess.run(
+            [PY, "-c", _CONCURRENT], cwd=REPO,
+            env=dict(os.environ, PYTHON_GIL="0", PYTHONPATH="src",
+                     RUNLOOM_TCPCONN_IOURING="1"),
+            capture_output=True, text=True, timeout=60)
+    except subprocess.TimeoutExpired:
+        pytest.fail("concurrent io_uring recv HUNG")
+    assert p.returncode == 0, (
+        "concurrent io_uring recv failed rc=%d\nstdout=%s\nstderr=%s"
+        % (p.returncode, p.stdout[-800:], p.stderr[-1500:]))
+    assert "CONCURRENT_OK" in p.stdout, (p.stdout, p.stderr[-800:])

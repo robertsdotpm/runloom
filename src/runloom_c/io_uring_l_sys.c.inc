@@ -142,6 +142,15 @@ typedef struct {
     unsigned  cq_mask;     unsigned  cq_entries;
     struct io_uring_cqe *cqes;
 
+    /* Single-drainer flag.  CQEs (especially MULTISHOT recv stream buffers,
+     * which MUST be appended to the per-handle ready queue in CQ order) are
+     * processed by exactly one thread at a time: concurrent hubs all call
+     * runloom_iouring_drain, but only the one that wins this flag walks the CQ;
+     * the rest return immediately (the winner's post-clear re-check catches any
+     * completion that raced in).  A per-CQE CAS-claim drain would let two hubs
+     * append consecutive multishot buffers out of order -> stream corruption. */
+    int draining;
+
     /* Serialises SQE writes + io_uring_enter calls across threads. */
     runloom_mutex_t sub_lock;
 
