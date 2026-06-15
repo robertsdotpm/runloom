@@ -1712,28 +1712,28 @@ class TestDiagArgValidation:
 #  FINDING: install_crash_handler(file=<unopenable>) silently drops the file
 # ---------------------------------------------------------------------------
 def test_crash_report_file_unopenable_is_silently_ignored():
-    # FINDING (silent failure / unvalidated argument): install_crash_handler
-    # with an explicit report `file=` that CANNOT be opened (parent dir does not
-    # exist) does NOT raise and does NOT report any error -- runloom_crash_install
-    # does `open(...); if (fd >= 0) { ... }` and drops the failure on the floor.
-    # The handler still installs (returns flags) but the requested report file is
-    # silently never written.  A caller who asked for a crash report file gets
-    # neither the file nor an error -- so on the eventual crash the report is lost
-    # with no warning.  Correct behaviour would be to surface OSError (as
-    # install_traceback_signal does for a bad signum) or at least signal failure.
+    # REGRESSION (was finding #19): install_crash_handler with an explicit
+    # report `file=` that CANNOT be opened (parent dir does not exist) now
+    # raises OSError instead of silently dropping the open() failure and
+    # installing without the file -- matching install_traceback_signal's
+    # contract for a bad argument.  The handler must NOT have been installed
+    # (the early return is before any signal state is touched).
     rc2, out = run_child("""
         import runloom
-        # A path whose parent directory does not exist -> open() must fail.
         bad = "/this/parent/does/not/exist/crash_report.txt"
-        flags = runloom.inspect.install_crash_handler("on", bad)
-        print("FLAGS", flags)                       # installs anyway
+        raised = None
+        try:
+            runloom.inspect.install_crash_handler("on", bad)
+        except OSError as e:
+            raised = e
+        print("RAISED_OSERROR", raised is not None)
         print("INSTALLED", runloom_c.crash_handler_installed())
-        print("FILE_EXISTS", os.path.exists(bad))   # never created
-        runloom_c.uninstall_crash_handler()
+        print("FILE_EXISTS", os.path.exists(bad))
     """, timeout=30)
     assert rc2 == 0, out
-    # Current (buggy) behaviour, asserted so a future fix that raises is noticed:
-    assert "FLAGS" in out and "INSTALLED True" in out, out
+    assert "RAISED_OSERROR True" in out, out
+    # the failed install must not have armed the handler, nor created the file
+    assert "INSTALLED False" in out, out
     assert "FILE_EXISTS False" in out, out
 
 
