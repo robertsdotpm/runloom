@@ -880,10 +880,9 @@ def test_readexactly_streamed_in_chunks_with_delay():
         assert aio.run(body()) == b"X" * 20
 
 
-@pytest.mark.xfail(strict=False, reason="FINDING: runloom.aio StreamReader."
-                   "readuntil ignores `limit`; asyncio raises LimitOverrunError "
-                   "when the separator is not found within `limit` bytes. Here a "
-                   "100-byte line with limit=10 is returned whole instead.")
+# REGRESSION (was finding #9): readuntil now honors `limit` -- when the
+# separator is not found within `limit` bytes it raises LimitOverrunError (and
+# leaves the data in the buffer), matching stock asyncio.
 def test_readuntil_limit_overflow_raises_limitoverrun():
     async def body():
         async def handler(r, w):
@@ -908,11 +907,8 @@ def test_readuntil_limit_overflow_raises_limitoverrun():
             "readuntil did not enforce the limit")
 
 
-@pytest.mark.xfail(strict=False, reason="FINDING: runloom.aio StreamReader."
-                   "readuntil does not accept a tuple of separators (asyncio "
-                   "3.13 feature); it passes the tuple to bytearray.find -> "
-                   "TypeError 'argument should be integer or bytes-like object, "
-                   "not tuple'.")
+# REGRESSION (was finding #10): readuntil now accepts a tuple of separators
+# (asyncio 3.13 feature); the shortest match wins.
 def test_readuntil_tuple_separators():
     async def body():
         async def handler(r, w):
@@ -1735,15 +1731,10 @@ def test_remove_done_callback_count_and_effect():
 # ==========================================================================
 # A2. __del__ ROBUSTNESS for a half-constructed task (FINDING).
 # ==========================================================================
-@pytest.mark.xfail(strict=False, reason="FINDING: RunloomTask.__init__ raises "
-                   "TypeError for a non-coroutine arg AFTER asyncio.Future."
-                   "__init__ but BEFORE _pg_future_init(), so the half-built "
-                   "object has no _pglogtb; its inherited _RunloomFutureMixin."
-                   "__del__ then raises AttributeError('_pglogtb') at GC -- an "
-                   "uncontained 'Exception ignored in __del__' on stderr for "
-                   "every rejected create_task(non_coro). Stock asyncio.Task."
-                   "__del__ is robust to a partially-initialised object. The "
-                   "TypeError reject is correct; the __del__ should guard.")
+# REGRESSION (was finding #11): a rejected create_task(non_coro) no longer
+# leaves a half-built object whose __del__ AttributeErrors at GC -- the inherited
+# _RunloomFutureMixin.__del__ now guards its _pglogtb/_pgexc reads with getattr,
+# so stderr stays clean.
 def test_rejected_noncoro_task_del_is_clean():
     """A subprocess that rejects several non-coroutine create_task() calls then
     gc.collect()s.  The CORRECT behavior is a CLEAN stderr (no 'Exception

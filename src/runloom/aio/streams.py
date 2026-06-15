@@ -89,25 +89,80 @@ class StreamReader(object):
 
     async def readuntil(self, separator=b"\n"):
         """Read until separator (inclusive), or raise
-        asyncio.IncompleteReadError on EOF."""
-        seplen = len(separator)
+        asyncio.IncompleteReadError on EOF.
+
+        Honors the configured stream `limit`: if the separator is not found
+        within `limit` bytes, asyncio.LimitOverrunError is raised and the data
+        is LEFT in the buffer (so it can be read again) -- matching stock
+        asyncio.  `separator` may also be a tuple of separators (asyncio 3.13);
+        the shortest match wins.
+        """
+        # Mirror stock asyncio.StreamReader.readuntil: sorted-by-length so the
+        # shortest separator wins on a tie; tuple support; LimitOverrunError.
+        if isinstance(separator, tuple):
+            separator = sorted(separator, key=len)
+        else:
+            separator = [separator]
+        if not separator:
+            raise ValueError("Separator should contain at least one element")
+        min_seplen = len(separator[0])
+        max_seplen = len(separator[-1])
+        if min_seplen == 0:
+            raise ValueError("Separator should be at least one-byte string")
+
+        # `offset` is the count of leading buffer bytes known to contain no
+        # occurrence of any separator (so we don't rescan them each pass).
+        offset = 0
+        match_start = match_end = None
         while True:
-            idx = self._buf.find(separator)
-            if idx >= 0:
-                end = idx + seplen
-                data = bytes(self._buf[:end])
-                del self._buf[:end]
-                return data
-            if not self._fill():
+            buflen = len(self._buf)
+            if buflen - offset >= min_seplen:
+                match_start = match_end = None
+                for sep in separator:
+                    isep = self._buf.find(sep, offset)
+                    if isep != -1:
+                        end = isep + len(sep)
+                        if match_end is None or end < match_end:
+                            match_end = end
+                            match_start = isep
+                if match_end is not None:
+                    break
+                offset = max(0, buflen + 1 - max_seplen)
+                if offset > self._limit:
+                    raise asyncio.LimitOverrunError(
+                        "Separator is not found, and chunk exceed the limit",
+                        offset)
+            # Inspect the buffer BEFORE acting on EOF: the final chunk may have
+            # completed the separator.
+            if self._eof:
                 partial = bytes(self._buf)
                 self._buf.clear()
                 raise asyncio.IncompleteReadError(partial, None)
+            self._fill()
+
+        if match_start > self._limit:
+            raise asyncio.LimitOverrunError(
+                "Separator is found, but chunk is longer than limit",
+                match_start)
+        data = bytes(self._buf[:match_end])
+        del self._buf[:match_end]
+        return data
 
     async def readline(self):
+        sep = b"\n"
+        seplen = len(sep)
         try:
-            return await self.readuntil(b"\n")
+            return await self.readuntil(sep)
         except asyncio.IncompleteReadError as e:
             return e.partial
+        except asyncio.LimitOverrunError as e:
+            # Match stock asyncio: drop the over-limit line (consuming the
+            # separator if present) and raise ValueError.
+            if self._buf.startswith(sep, e.consumed):
+                del self._buf[:e.consumed + seplen]
+            else:
+                self._buf.clear()
+            raise ValueError(e.args[0])
 
 
 class StreamWriter(object):
