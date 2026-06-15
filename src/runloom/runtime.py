@@ -389,6 +389,16 @@ def run(n, main_fn=None):
         if main_fn is not None:
             go(main_fn)
         return runloom_c.run()
+    # An M:N run() cannot nest: re-entering mn_init() while a hub runtime is
+    # already live deadlocks (the nested mn_init/mn_run never makes progress
+    # because the outer hub thread is blocked in run()).  Detect the active
+    # runtime and raise instead of hanging.  (run(1) re-entrancy IS supported --
+    # it re-drives the same single-thread scheduler -- so only n > 1 is guarded.)
+    if runloom_c.mn_hub_count() > 0:
+        raise RuntimeError(
+            "run(n={0}) called while an M:N runtime is already active -- "
+            "run(n>1) cannot be nested inside a running hub.  Spawn more work "
+            "with go()/mn_go() instead of starting a second M:N world.".format(n))
     if gil_enabled():
         raise RuntimeError(
             "run(n={0}) needs free-threaded CPython with the GIL off "

@@ -1290,25 +1290,20 @@ def test_nested_run1_inside_fiber_drives_correctly():
 
 @pytest.mark.skipif(not needs_free_threading(),
                     reason="M:N needs GIL-disabled build")
-@pytest.mark.xfail(strict=False, reason=(
-    "FINDING: runloom.run(n>1, ...) called RE-ENTRANTLY from inside an M:N hub "
-    "fiber HANGS -- a nested mn_init/mn_go/mn_run/mn_fini envelope inside an "
-    "already-running M:N scheduler deadlocks (reproducible: the inner run() never "
-    "returns).  The public run() API does no re-entrancy guard, so instead of a "
-    "clean RuntimeError ('already running M:N') the caller gets an unbounded "
-    "hang.  Demonstrated in a subprocess: a plain `runloom.run(2, inner)` inside "
-    "the hub never reaches its post-run print before the subprocess timeout."))
+# REGRESSION (was finding #3): runloom.run(n>1) called re-entrantly from inside
+# an M:N hub fiber now raises RuntimeError promptly instead of deadlocking on a
+# nested mn_init.  run() guards on mn_hub_count() > 0.  (run(1) re-entrancy stays
+# supported.)
 def test_nested_run_n_inside_mn_hub_hangs_FINDING():
-    # CORRECT behavior: nested run(2) inside a hub should raise (or return)
-    # promptly, never hang.  It currently hangs, so the subprocess times out and
-    # this xfails.  Bounded by a short subprocess timeout so the hang is
-    # contained, not an in-process wedge.
     script = r"""
 import sys, os; sys.path.insert(0, "src")
 import runloom
 def main():
-    runloom.run(2, lambda: None)   # re-entrant mn_init inside a hub
-    print("NESTED_RETURNED")
+    try:
+        runloom.run(2, lambda: None)   # re-entrant mn_init inside a hub
+        print("NESTED_RETURNED")
+    except RuntimeError:
+        print("NESTED_RAISED")
     sys.stdout.flush()
 runloom.run(2, main)
 print("OUTER_DONE")
@@ -1319,10 +1314,10 @@ print("OUTER_DONE")
     except subprocess.TimeoutExpired:
         timed_out = True
         proc = None
-    # CORRECT contract under test: it should NOT hang.
     assert not timed_out and proc is not None, \
-        "nested run(2) inside an M:N hub did not hang (it should be guarded)"
-    assert b"NESTED_RETURNED" in proc.stdout, proc.stdout + proc.stderr
+        "nested run(2) inside an M:N hub hung instead of raising RuntimeError"
+    assert b"NESTED_RAISED" in proc.stdout, proc.stdout + proc.stderr
+    assert b"OUTER_DONE" in proc.stdout, proc.stdout + proc.stderr
 
 
 def test_run_twice_sequentially_resets_state():
