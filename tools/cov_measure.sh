@@ -53,6 +53,13 @@ PYTHON_GIL=0 PYTHONPATH=src "$PYTHON" tools/mn_stress.py --iters 200 --stable \
     >> "$COVOUT/workloads.log" 2>&1
 echo "[cov]   mn_stress rc=$?"
 
+# NB: a global RUNLOOM_TCPCONN_IOURING=1 / RUNLOOM_IOURING_LOOP=1 re-drive was
+# tried to light up the io_uring eventfd/ring/pump lines, but forcing io_uring
+# recv DEADLOCKS a backpressured loopback transfer (see
+# tests/regressions/iouring_recv_backpressure_deadlock.py) -- so those lines
+# cannot be driven by a clean-exit test today. They are handled as BLOCKED
+# exclusions in the manifest instead (see COVERAGE.md).
+
 echo "[cov] collecting gcov (from repo root so .c.inc fragment paths resolve) ..."
 ( cd "$ROOT"
   for src in src/runloom_c/*.c; do
