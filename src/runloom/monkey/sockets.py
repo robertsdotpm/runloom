@@ -387,12 +387,20 @@ _netpoll_cancel_fd = getattr(runloom_c, "netpoll_cancel_fd", None)
 
 
 def _patched_close(self):
-    """Clear the netpoll registration bit before closing (so an fd reuse
-    re-registers cleanly under the LEVEL-triggered per-direction scheme), then -- AFTER the
-    close -- wake any fiber parked in accept()/recv()/connect() on this fd.
-    The woken op retries on the now-closed (fileno == -1) socket, gets EBADF and
-    unwinds, instead of being stranded forever when another fiber closed the
-    socket out from under it (BUG #5)."""
+    """Clear the netpoll registration bit, then wake any fiber parked in
+    accept()/recv()/connect() on this fd, then close.
+
+    The wake (runloom_netpoll_cancel_fd) happens BEFORE _orig_close, while this
+    socket still OWNS fd N (audit finding B6).  Cancelling first closes the
+    cross-hub fd-REUSE window: with the old cancel-AFTER-close order, between
+    _orig_close (which frees N) and cancel_fd(N) another hub could socket()/
+    accept() reusing fd number N and link a fresh parker, which cancel_fd(N) would
+    then spuriously cancel.  Cancelling first is now correct because a cancelled
+    op honours the CANCELLED sentinel and raises OSError(ECANCELED) even on the
+    still-open socket (the wait_fd_coop / _wait_fd_coop change, finding B3) --
+    it no longer relies on the post-close retry hitting EBADF to unwind.  So a
+    cross-fiber close still wakes the parked accept()/recv()/connect() (BUG #5),
+    without the reuse window."""
     fd = -1
     try:
         fd = self.fileno()
@@ -403,13 +411,12 @@ def _patched_close(self):
             _netpoll_unregister(fd)
         except (OSError, ValueError):
             pass
-    result = _orig_close(self)
     if _netpoll_cancel_fd is not None and fd >= 0:
         try:
-            _netpoll_cancel_fd(fd)
+            _netpoll_cancel_fd(fd)        # wake parked waiters BEFORE freeing fd N
         except (OSError, ValueError):
             pass
-    return result
+    return _orig_close(self)
 
 
 def _patched_detach(self):

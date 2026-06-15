@@ -864,6 +864,8 @@ Py_ssize_t runloom_mn_run(void)
         int  kicked   = 0;                          /* lost-wakeup re-kick fired? */
         int  reported = 0;                          /* diagnostic already dumped? */
         int  raise    = 0;                          /* RUNLOOM_DEADLOCK=raise verdict */
+        int  sig_raised = 0;                        /* a Python signal handler raised */
+        unsigned sigpoll = 0;                       /* throttle the signal service */
         for (;;) {
             /* Read the GLOBAL pending counter, not the per-hub fields.
              * The per-hub fields race during work-stealing (source dec
@@ -915,10 +917,31 @@ Py_ssize_t runloom_mn_run(void)
                 quiet = 0; kicked = 0; reported = 0;
             }
             runloom_sleep_ns(1000000LL);   /* 1 ms poll */
+            /* Service Python signal handlers on the MAIN thread (~every 16 ms).
+             * On free-threaded 3.13t ONLY the main thread runs Python signal
+             * handlers, and mn_run otherwise polls with the main tstate detached
+             * (PyEval_SaveThread above) -- so a SIGINT/SIGALRM during an M:N run
+             * was deferred until every fiber finished, i.e. Ctrl-C could not
+             * interrupt a server run (audit finding B5).  Briefly re-attach and
+             * run pending handlers; if one raised, carry it out of mn_run.  The
+             * hub fibers' wait_fd parkers are owned by the HUB scheds, not this
+             * main sched, so runloom_netpoll_signal_wake (keyed on the caller's
+             * sched) finds none eligible from here -- the documented
+             * no-eligible-parker fallback is exactly "carry it out of run()".
+             * The still-running hubs are stopped by the caller's mn_fini, the
+             * same as the RUNLOOM_DEADLOCK=raise early-return path below. */
+            if ((++sigpoll & 0xfu) == 0) {
+                PyEval_RestoreThread(saved);
+                if (PyErr_CheckSignals() < 0) { sig_raised = 1; break; }
+                saved = PyEval_SaveThread();
+            }
         }
         /* Silence the unused-variable warning that the per-hub loop used
          * to consume. */
         (void)i;
+        /* sig_raised broke the loop with the main tstate ALREADY attached and the
+         * handler's exception set -- carry it straight out (don't double-attach). */
+        if (sig_raised) return -1;
         PyEval_RestoreThread(saved);
         if (raise) {
             long ndead = runloom_count_deadlockable_fibers(NULL);
