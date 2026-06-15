@@ -1923,12 +1923,13 @@ print("RESULT", out)
 '''
 
 
-@pytest.mark.xfail(strict=False, reason=(
-    "FINDING: socket.recvfrom/sendto/recvmsg/sendmsg ignore the socket timeout "
-    "(settimeout) -- they park on a bare wait_fd with no deadline, so a datagram "
-    "recvfrom on a timed socket that never receives HANGS the fiber forever "
-    "instead of raising socket.timeout.  recv/recv_into/send/sendall/connect/"
-    "accept honor the timeout; the datagram + msg variants do not."))
+# REGRESSION (was finding #5): the cooperative socket layer now honors
+# settimeout across recvfrom/sendto/recvmsg/recvmsg_into/sendmsg/recvfrom_into
+# (and accept).  Root cause was deeper than the datagram methods: _make_nonblocking's
+# setblocking(False) zeroed the live gettimeout() before any op read it (socket.socket
+# has no __dict__ to stash on), so the WHOLE layer ignored settimeout.  Fixed by a
+# per-fd side table populated before setblocking(False) and read by _coop_timeout;
+# the datagram/msg/accept ops route their park through the timeout-aware _wait_io.
 def test_udp_recvfrom_honors_socket_timeout_bounded():
     import tempfile
     fd, path = tempfile.mkstemp(suffix="_udpto.py")
