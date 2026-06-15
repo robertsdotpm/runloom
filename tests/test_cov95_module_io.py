@@ -32,11 +32,12 @@ and each names the exact source lines it drives + the gate it makes true.
     Signals are main-thread only, so these run on the SINGLE-THREAD scheduler
     (rc.run()), where the parked fiber lives on the main OS thread.
 
- 3. all-C echo cooperative WRITE park + IPv6 bound-port lookup, in-process under
-    the M:N runtime (serve requires hubs):
+ 3. all-C echo cooperative path + IPv6 bound-port lookup, each in its own
+    clean-exit subprocess under the M:N runtime (serve requires hubs):
       io L115-116  (AF_INET6 branch of the bound-port getsockname, via serve("::1",0,...))
-      io L200-203  (echo send() EAGAIN -> WRITE park, via a client that floods
-                    then stops reading so the echo's send buffer backs up)
+      io L200-201,L205 (echo send() returns 0/hard-error or EAGAIN-evaluated;
+                    L205 hard-error covered by the RST storm in class 5)
+    (io L202-203, the EAGAIN->WRITE-park->continue, is RACE -- see exclusions.)
 
  4. SPAWN-FAILURE branches, driven by the RUNLOOM_FAULT_SPAWN_G OOM hook (the
     g-slab alloc returns NULL).  The hook is armed at process start (so the
@@ -57,6 +58,14 @@ Excluded (see the structured report):
   * io   L110-111  -- getsockname() failing on a freshly-bound, valid listener
                       fd: DEFENSIVE (no in-process way to make getsockname fail
                       on a good fd; no fault hook on that path).
+  * io   L202-203  -- the all-C echo send()-EAGAIN -> WRITE-park -> continue:
+                      RACE.  The accepted echo socket's SNDBUF auto-tunes up to
+                      tcp_wmem-max (~4 MB) and serve() exposes no way to clamp
+                      it, so forcing send() to return EAGAIN deterministically
+                      from the client side is not possible without root (sysctl)
+                      -- which must not be touched on this shared box.  L200/201
+                      (the EAGAIN/EINTR checks) and L205 (hard error) ARE covered
+                      (RST storm); only the park-and-retry pair is racy.
   * io   L313      -- PyList_Append() failing: OOM-only, no fault hook.
   * fdio L181      -- the read()/pread() FALLBACK arm of file_read; reached only
                       when runloom_iouring_available() is false.  io_uring IS
@@ -305,29 +314,39 @@ import socket, time, threading, sys
 sys.path.insert(0, "src")
 import runloom_c as rc, runloom
 RealThread = threading.Thread
+TOTAL = 1024 * 1024
 result = {}
 def main():
     port, listeners = rc.serve("127.0.0.1", 0, None, 1, 64)   # all-C echo
     result["port"] = port
     def client():
+        # A tiny RCVBUF clamps the TCP receive window so the echo's send()
+        # backs up (window closed) -> EAGAIN -> WRITE park.  Send and drain
+        # CONCURRENTLY (non-blocking) over one socket so the pipeline never
+        # deadlocks: the echo can park WRITE and still make progress as we read.
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            # A tiny RCVBUF clamps the TCP receive window so the echo's send()
-            # backs up (window closed) after a few KB -> EAGAIN -> WRITE park.
-            s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1024)
-            s.settimeout(10.0)
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 2048)
             s.connect(("127.0.0.1", port))
-            payload = b"a" * 65536
-            sent = 0
-            for _ in range(32):              # flood: echo's send buffer backs up
-                s.sendall(payload); sent += len(payload)
-            time.sleep(1.0)                  # let the echo hit EAGAIN + park WRITE
-            drained = 0
-            while drained < sent:            # now drain -> WRITE park wakes
-                d = s.recv(65536)
-                if not d: break
-                drained += len(d)
-            result["sent"] = sent; result["drained"] = drained
+            s.setblocking(False)
+            sbuf = b"a" * 65536
+            sent = 0; recd = 0
+            deadline = time.monotonic() + 40.0
+            while recd < TOTAL and time.monotonic() < deadline:
+                if sent < TOTAL:
+                    try:
+                        sent += s.send(sbuf[: min(65536, TOTAL - sent)])
+                    except BlockingIOError:
+                        pass            # our send buffer full -> echo backed up
+                try:
+                    d = s.recv(65536)
+                    if d:
+                        recd += len(d)
+                except BlockingIOError:
+                    time.sleep(0.001)
+                except Exception:
+                    break
+            result["sent"] = sent; result["recd"] = recd
             s.close()
         except Exception as e:
             result["cerr"] = "%s: %s" % (type(e).__name__, e)
@@ -336,11 +355,15 @@ def main():
                 try: L.close()
                 except Exception: pass
     t = RealThread(target=client, daemon=True); t.start()
-    for _ in range(600):
+    for _ in range(3000):
         rc.sched_sleep(0.02)
-        if "sent" in result or "cerr" in result: break
+        if "recd" in result or "cerr" in result: break
 runloom.run(3, main)
-if "cerr" not in result and result.get("sent") == result.get("drained") and result.get("sent", 0) > 0:
+# Assertion: a full, byte-conserving round-trip of TOTAL bytes through the all-C
+# echo under a clamped receive window (no loss, no deadlock).  The send-EAGAIN
+# WRITE park (io L202-203) MAY fire en route -- it is RACE-dependent on TCP
+# SNDBUF auto-tuning (see exclusions) -- but integrity holds either way.
+if "cerr" not in result and result.get("sent") == TOTAL and result.get("recd") == TOTAL:
     print("ECHO_WRITE_PARK_OK"); sys.exit(0)
 print("UNEXPECTED %r" % (result,)); sys.exit(3)
 '''
@@ -397,11 +420,15 @@ def test_serve_ipv6_bound_port_roundtrip():
 
 @pytest.mark.skipif(not FT, reason="serve() needs the M:N runtime (GIL-off build)")
 def test_all_c_echo_send_write_park():
-    """io L200-203: in the all-C (handler=None) echo, a client that floods the
-    connection but stops reading backs up the echo's send buffer until send()
-    returns EAGAIN -- the echo then parks WRITE (cooperative wait_fd) and
-    resumes once the client drains.  A full byte-exact round-trip proves the
-    parked write made forward progress and lost no data."""
+    """io L200-201 (covered) + L202-203 (RACE, best-effort): in the all-C
+    (handler=None) echo, a client whose receive window is clamped backs up the
+    echo's send buffer; if the echo's send() hits EAGAIN it parks WRITE
+    (cooperative wait_fd) and resumes once the client drains.  Whether the park
+    actually fires is RACE-dependent on TCP SNDBUF auto-tuning (the echo's
+    SNDBUF grows to tcp_wmem-max, ~4 MB, so a deterministic buffer-full is not
+    controllable from the client without root); the deterministic assertion is a
+    full, byte-conserving 1 MB round-trip with no loss or deadlock under window
+    pressure."""
     p = _run_subproc(_ECHO_WRITE_PARK, timeout=120)
     assert p.returncode == 0, (
         "rc=%d\nstdout=%s\nstderr=%s" % (p.returncode, p.stdout[-400:], p.stderr[-1200:]))
