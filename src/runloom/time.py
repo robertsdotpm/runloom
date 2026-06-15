@@ -14,7 +14,24 @@ should select on them via runloom_c.select().
 Cancellation: stopping a Timer or Ticker drains its channel and prevents
 further sends.  The backing fiber exits on next tick.
 """
+import numbers
+
 import runloom_c
+
+
+def _check_duration(seconds):
+    """Reject a non-numeric duration eagerly, at the call site.
+
+    Go's time API takes a Duration; passing a non-number should fail where the
+    caller can see it, not lazily inside the detached backing fiber (where the
+    TypeError surfaces only via sys.unraisablehook and the timer silently never
+    fires).  0 and negative durations ARE valid for Timer/After/Sleep (they fire
+    immediately, as in Go), so this is a type check only -- not a positivity
+    check like Ticker's."""
+    if isinstance(seconds, numbers.Real) and not isinstance(seconds, bool):
+        return seconds
+    raise TypeError("duration must be a real number, not %s"
+                    % type(seconds).__name__)
 
 
 def _spawn(fn):
@@ -37,7 +54,7 @@ def Sleep(seconds):
 
     Equivalent to Go's `time.Sleep`.  Just an alias for runloom.sleep so
     `from runloom.time import Sleep` reads naturally."""
-    runloom_c.sched_sleep(seconds)
+    runloom_c.sched_sleep(_check_duration(seconds))
 
 
 def After(seconds):
@@ -54,6 +71,7 @@ def After(seconds):
         if idx == 1:
             raise TimeoutError()
     """
+    _check_duration(seconds)
     ch = runloom_c.Chan(1)
 
     def fire():
@@ -72,12 +90,13 @@ class Timer(object):
     """Fires once after the configured duration.  Reset / Stop control
     it; the C channel `c` is what consumers select on."""
 
-    __slots__ = ("c", "_d", "_stopped", "_gen")
+    __slots__ = ("c", "_d", "_stopped", "_gen", "_fired")
 
     def __init__(self, seconds):
-        self._d       = seconds
+        self._d       = _check_duration(seconds)
         self.c        = runloom_c.Chan(1)
         self._stopped = False
+        self._fired   = False
         self._gen     = 0
         self._spawn(self._gen)
 
@@ -90,13 +109,15 @@ class Timer(object):
             # still the live one.
             if self._stopped or self._gen != gen:
                 return
+            self._fired = True
             self.c.try_send(self._d)
         _spawn(fire)
 
     def Stop(self):
         """Prevent the timer from firing.  Returns True if the call
-        cancelled a still-armed timer, False if it had already fired."""
-        if self._stopped:
+        cancelled a still-armed timer, False if it had already fired or
+        been stopped -- matching Go's time.Timer.Stop()."""
+        if self._stopped or self._fired:
             return False
         self._stopped = True
         # The fire() fiber may still be sleeping; gen bump makes it
@@ -108,10 +129,11 @@ class Timer(object):
         """Re-arm the timer for `seconds` from now.  Stops any in-flight
         fire fiber and spawns a fresh one.  Returns the same boolean
         that Stop() would have returned."""
-        was_active = not self._stopped
+        was_active = not self._stopped and not self._fired
         self._gen += 1
-        self._d = seconds
+        self._d = _check_duration(seconds)
         self._stopped = False
+        self._fired = False
         self._spawn(self._gen)
         return was_active
 
@@ -124,7 +146,7 @@ class Ticker(object):
     __slots__ = ("c", "_d", "_stopped", "_gen")
 
     def __init__(self, seconds):
-        if seconds <= 0:
+        if _check_duration(seconds) <= 0:
             raise ValueError("non-positive ticker interval")
         self._d       = seconds
         self.c        = runloom_c.Chan(1)
@@ -150,7 +172,7 @@ class Ticker(object):
         self._gen += 1
 
     def Reset(self, seconds):
-        if seconds <= 0:
+        if _check_duration(seconds) <= 0:
             raise ValueError("non-positive ticker interval")
         self._gen += 1
         self._d = seconds

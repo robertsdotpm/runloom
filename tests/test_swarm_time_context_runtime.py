@@ -248,12 +248,10 @@ def test_timer_fires_exactly_once_not_repeatedly():
     assert extra == 0, "Timer fired %d extra times (not one-shot)" % extra
 
 
-@pytest.mark.xfail(strict=False, reason=(
-    "FINDING: Timer.Stop() returns True after the timer has already fired; Go's "
-    "time.Timer.Stop() and this Timer's own docstring ('False if it had already "
-    "fired') specify False.  Stop() tracks only _stopped, never whether the "
-    "fire already happened, so the Go-idiomatic `if not t.Stop(): <-t.c` drain "
-    "pattern would block forever draining an empty channel."))
+# REGRESSION (was finding #13): Timer.Stop() now returns False after the timer
+# has already fired, matching Go's time.Timer.Stop() and the docstring -- the
+# Timer tracks a _fired flag set when fire() sends, so the Go-idiomatic
+# `if not t.Stop(): <-t.c` drain pattern is safe.
 def test_timer_stop_after_fire_should_return_false_FINDING():
     def f():
         t = rt.Timer(0.02)
@@ -536,14 +534,11 @@ rc.go(main); rc.run()
     assert el < 2.0, "far-future recv after cancel was slow: %.3fs" % el
 
 
-@pytest.mark.xfail(strict=False, reason=(
-    "FINDING: WithTimeout/WithDeadline cancel() does NOT stop the deadline "
-    "waker fiber -- it lingers in sched_sleep() until the ORIGINAL deadline, "
-    "then no-ops on wake.  So a cancelled 5s-timeout context keeps a fiber "
-    "alive (and run() blocked) for the full 5s, even though the context is "
-    "already done.  Go's context cancel stops the timer immediately (no leaked "
-    "goroutine).  Repro: run() drains the orphan rather than returning when the "
-    "only live fiber's work is logically complete."))
+# REGRESSION (was finding #14): WithTimeout/WithDeadline cancel() now stops the
+# deadline waker fiber immediately -- the waker parks in a cancellable wait_fd
+# (not a bare sched_sleep), and _cancel() wakes it via cancel_wait_fd, so a
+# cancelled context's run() returns at once instead of lingering to the
+# original deadline.
 def test_context_cancel_leaves_deadline_fiber_lingering_FINDING():
     # The CORRECT behavior: after cancel(), run() should return promptly because
     # the deadline fiber was stopped.  It currently lingers for the full timeout,
@@ -1221,15 +1216,11 @@ def test_current_and_sleep_from_foreign_thread():
 
 
 # ----- argument validation: Timer/After accept garbage, defer the error -----
-@pytest.mark.xfail(strict=False, reason=(
-    "FINDING: Timer(d)/After(d) do NO argument validation -- a non-numeric "
-    "duration (None/str/list) is accepted by the constructor, and the TypeError "
-    "is raised lazily INSIDE the detached backing fiber at sched_sleep(d), where "
-    "it surfaces only via sys.unraisablehook.  The timer then silently NEVER "
-    "fires (try_recv() stays None) with no error visible to the caller.  Ticker "
-    "validates its interval eagerly in __init__/Reset; Timer/After/Sleep should "
-    "too -- a bad duration should raise at the CALL site, not vanish into a "
-    "fiber."))
+# REGRESSION (was finding #12): Timer(d)/After(d)/Sleep(d) now validate the
+# duration eagerly via _check_duration() -- a non-numeric duration raises
+# TypeError at the call site instead of vanishing into the backing fiber and
+# leaving the timer silently never firing.  (0/negative remain valid, as in Go;
+# this is a type check, not Ticker's positivity check.)
 def test_timer_nonnumeric_duration_should_raise_at_call_site_FINDING():
     # CORRECT behavior: rt.Timer(None) raises a TypeError at construction.
     # Currently it does not (the error escapes into the backing fiber), so this
@@ -1257,36 +1248,20 @@ def test_timer_nonnumeric_duration_should_raise_at_call_site_FINDING():
 
 
 def test_timer_bad_duration_does_not_crash_only_silently_fails():
-    # The CURRENT (buggy) behavior, asserted as a contained subprocess so the
-    # unraisablehook noise + the never-firing timer are bounded: a bad duration
-    # must at least NOT crash the process and NOT hang -- it degrades to a silent
-    # no-fire.  (Pairs with the xfail above documenting the call-site contract.)
-    script = r"""
-import sys, os; sys.path.insert(0, "src")
-import runloom, runloom_c as rc
-import runloom.time as rt
-sys.unraisablehook = lambda a: None   # swallow the deferred fiber TypeError
-def main():
-    t = rt.Timer("not a number")      # accepted; fire() will TypeError in-fiber
-    fired = None
-    for _ in range(20):
-        rc.sched_yield()
-        v = t.c.try_recv()
-        if v is not None:
-            fired = v
-            break
-    print("FIRED" if fired is not None else "SILENT_NOFIRE")
-rc.go(main); rc.run()
-print("DONE")
-"""
-    proc = _subproc(script, timeout=20)
-    _assert_no_signal(proc, "timer-bad-duration")
-    out = proc.stdout.decode()
-    assert "DONE" in out, "process did not complete: %r / %r" % (
-        out, proc.stderr.decode()[-500:])
-    # A garbage duration must not silently fire a bogus value either.
-    assert "SILENT_NOFIRE" in out, (
-        "Timer with a non-numeric duration produced a value: %r" % out)
+    # REGRESSION (was finding #12, the str-duration variant): a non-numeric
+    # duration is rejected eagerly at the call site with TypeError -- across
+    # Timer, After AND Sleep -- instead of being accepted and TypeError-ing
+    # lazily inside the backing fiber (where it surfaced only via
+    # unraisablehook and the timer silently never fired).
+    # All three validate the duration BEFORE spawning/sleeping, so the
+    # TypeError surfaces synchronously at the call site (no scheduler needed).
+    for bad in ("not a number", None, [1, 2], object()):
+        with pytest.raises(TypeError):
+            rt.Timer(bad)
+        with pytest.raises(TypeError):
+            rt.After(bad)
+        with pytest.raises(TypeError):
+            rt.Sleep(bad)
 
 
 # ----- re-entrant run(): single-thread nests fine; M:N nested HANGS ----------
@@ -1428,7 +1403,10 @@ def test_timer_reset_does_not_drain_buffered_value():
         return was_active, immediate
 
     was_active, immediate = _run_single(f, label="reset-no-drain")
-    assert was_active is True
+    # The timer had already FIRED before Reset, so Reset (like Stop) reports
+    # False -- "true if the timer had been active, false if it had expired"
+    # (Go's contract; consistent with finding #13's Stop fix).
+    assert was_active is False
     assert immediate == (0.01, True), (
         "Reset drained the buffered value (Go's Reset does not drain): %r"
         % (immediate,))
