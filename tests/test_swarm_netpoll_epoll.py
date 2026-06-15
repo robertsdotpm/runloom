@@ -1043,12 +1043,14 @@ sys.stdout.write("ALL_C_ECHO_OK %d\n" % sum(1 for g in got if g is not None))
 
 
 @pytest.mark.skipif(not FT, reason="M:N needs GIL-disabled build")
-@pytest.mark.xfail(strict=False, reason=(
-    "FINDING: serve(handler=None) all-C echo path (mn_go_c C echo fibers + "
-    "io_uring multishot recv) deadlocks/lost-wakes intermittently under "
-    "concurrent M:N connections -- wg.wait() never reaches N and mn_run() hangs; "
-    "the Python-handler serve path with the same load never hangs. Asserts the "
-    "correct (all clients echoed) behavior, which currently fails."))
+# REGRESSION (was finding #6): serve(handler=None) all-C echo no longer deadlocks
+# under concurrent M:N connections.  Root cause was NOT io_uring multishot (that
+# path is off by default) but the fd-reuse stale-arm hazard in the readiness
+# fallback: the C echo worker close()d its connection fd without clearing the
+# process-global netpoll arm cache, so a reused fd number skipped EPOLL_CTL_ADD
+# and the new fiber's wait_fd parked forever.  The deadlock was deterministic
+# (not "intermittent") above ~32 connections, and vanished when clients did not
+# close (no fd reuse).  runloom_io_c_close now release_if_idle's the arm first.
 def test_serve_all_c_echo_concurrent_completes_subprocess():
     # Try a few times: the hang is intermittent, so a single lucky pass would
     # mask it.  If ANY attempt hangs (times out) or under-counts, the finding is
