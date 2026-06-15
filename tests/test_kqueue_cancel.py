@@ -547,6 +547,8 @@ def test_tcpconn_recv_cancel_mn_raises_ecanceled(hubs):
     for _ in range(n):
         a, b = _pair()
         conns.append(runloom_c.TCPConn(a.fileno()))
+        a.detach()                  # TCPConn owns the fd now; detach so a's GC
+                                    # can't close it (-> recv ENOTSOCK/EBADF race)
         socks.append(b)             # keep peer open so the fd stays OPEN
     outcomes = [None] * n
 

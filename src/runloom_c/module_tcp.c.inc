@@ -148,7 +148,7 @@ static PyObject *m_tcp_recv(PyObject *self, PyObject *args)
         }
 #endif
         /* Park on read. */
-        if (runloom_netpoll_wait_fd(fd, /*RUNLOOM_NETPOLL_READ*/ 1, -1LL) < 0) {
+        if (runloom_netpoll_wait_fd_coop(fd, /*RUNLOOM_NETPOLL_READ*/ 1, -1LL) < 0) {
             PyBuffer_Release(&buf);
             /* wait_fd may have run a Python signal handler that raised (e.g. an
              * alarm handler / Ctrl-C) -> propagate it; don't overwrite with OSError. */
@@ -210,7 +210,7 @@ static PyObject *m_tcp_recv_alloc(PyObject *self, PyObject *args)
             return PyErr_SetFromErrno(PyExc_OSError);
         }
 #endif
-        if (runloom_netpoll_wait_fd(fd, /*RUNLOOM_NETPOLL_READ*/ 1, -1LL) < 0) {
+        if (runloom_netpoll_wait_fd_coop(fd, /*RUNLOOM_NETPOLL_READ*/ 1, -1LL) < 0) {
             Py_DECREF(result);
             /* wait_fd may have run a Python signal handler that raised (e.g. an
              * alarm handler / Ctrl-C) -> propagate it; don't overwrite with OSError. */
@@ -258,7 +258,7 @@ static PyObject *m_tcp_send(PyObject *self, PyObject *args)
             return PyErr_SetFromErrno(PyExc_OSError);
         }
 #endif
-        if (runloom_netpoll_wait_fd(fd, /*RUNLOOM_NETPOLL_WRITE*/ 2, -1LL) < 0) {
+        if (runloom_netpoll_wait_fd_coop(fd, /*RUNLOOM_NETPOLL_WRITE*/ 2, -1LL) < 0) {
             PyBuffer_Release(&buf);
             /* wait_fd may have run a Python signal handler that raised (e.g. an
              * alarm handler / Ctrl-C) -> propagate it; don't overwrite with OSError. */
@@ -307,7 +307,7 @@ static PyObject *m_tcp_send_once(PyObject *self, PyObject *args)
             return PyErr_SetFromErrno(PyExc_OSError);
         }
 #endif
-        if (runloom_netpoll_wait_fd(fd, /*RUNLOOM_NETPOLL_WRITE*/ 2, -1LL) < 0) {
+        if (runloom_netpoll_wait_fd_coop(fd, /*RUNLOOM_NETPOLL_WRITE*/ 2, -1LL) < 0) {
             PyBuffer_Release(&buf);
             /* wait_fd may have run a Python signal handler that raised (e.g. an
              * alarm handler / Ctrl-C) -> propagate it; don't overwrite with OSError. */

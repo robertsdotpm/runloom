@@ -380,3 +380,20 @@ int runloom_netpoll_wait_fd(int fd, int events, long long timeout_ns)
     }
     return ready_mask;
 }
+
+/* wait_fd variant for the cooperative SOCKET fast paths (monkey tcp_recv/send,
+ * the TCPConn methods, module_tcp.c.inc): translate a cancellation into
+ * errno=ECANCELED + return -1 so a caller that tests "(wait_fd < 0) -> raise
+ * OSError" unwinds the parked op.  The raw runloom_netpoll_wait_fd returns the
+ * POSITIVE RUNLOOM_NETPOLL_CANCELLED sentinel, which slips a "< 0" test -- the
+ * op then retries on the still-OPEN socket and RE-PARKS (a hang on
+ * cancel_all_parked / a cross-fiber close of an open fd; surfaced by
+ * test_kqueue_cancel::test_monkey_recv_cancel_all_open_socket).  The aio bridge
+ * keeps using the raw wait_fd so it maps the sentinel to its own CancelledError.
+ * Audit finding B3. */
+int runloom_netpoll_wait_fd_coop(int fd, int events, long long timeout_ns)
+{
+    int r = runloom_netpoll_wait_fd(fd, events, timeout_ns);
+    if (r == RUNLOOM_NETPOLL_CANCELLED) { errno = ECANCELED; return -1; }
+    return r;
+}

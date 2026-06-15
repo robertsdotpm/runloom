@@ -148,25 +148,11 @@ static int runloom_tcpconn_use_iouring(RunloomTCPConn *self)
 #define RUNLOOM_NETPOLL_WRITE 0x2
 
 int runloom_netpoll_wait_fd(int fd, int events, long long timeout_ns);
-
-/* Cooperative-socket wait_fd: translate a cancellation into an OSError.  The
- * raw wait_fd returns RUNLOOM_NETPOLL_CANCELLED (0x40000000, POSITIVE) on a
- * cross-fiber close or the teardown backstop (cancel_all_parked); the fast-path
- * callers below test "(wait_fd < 0) -> raise", so the bare positive sentinel
- * slips through, the op retries on the still-open socket -> EAGAIN -> re-park,
- * and the fiber busy-loops / strands.  Map the sentinel to errno=ECANCELED +
- * return -1 so the existing <0 raise path unwinds the parked op cleanly.  (The
- * aio bridge keeps using the raw wait_fd so it can map the sentinel to its own
- * CancelledError.)  Audit finding B3. */
-#ifndef RUNLOOM_NETPOLL_CANCELLED
-#define RUNLOOM_NETPOLL_CANCELLED 0x40000000
-#endif
-static int runloom_netpoll_wait_fd_coop(int fd, int events, long long timeout_ns)
-{
-    int r = runloom_netpoll_wait_fd(fd, events, timeout_ns);
-    if (r == RUNLOOM_NETPOLL_CANCELLED) { errno = ECANCELED; return -1; }
-    return r;
-}
+/* Cooperative-socket wait_fd (maps the CANCELLED sentinel to errno=ECANCELED/-1
+ * so the socket fast paths raise instead of re-parking on cancel).  Defined once
+ * in the netpoll TU (netpoll_wait_fd.c.inc), shared with module_tcp.c.inc so the
+ * monkey tcp_recv/send fast paths honour cancel too.  Audit finding B3. */
+int runloom_netpoll_wait_fd_coop(int fd, int events, long long timeout_ns);
 
 /* ============================================================
  * Type object  (struct definition is above the iouring helpers)

@@ -73,6 +73,14 @@ int runloom_netpoll_unpark_many(struct runloom_g **gs, int n, int *missed_out);
  * -1 on error.  Must be called from inside a fiber. */
 int runloom_netpoll_wait_fd(int fd, int events, long long timeout_ns);
 
+/* Cooperative-socket variant of wait_fd: maps the POSITIVE
+ * RUNLOOM_NETPOLL_CANCELLED sentinel to errno=ECANCELED + return -1, so a
+ * fast-path caller testing "(wait_fd < 0) -> raise OSError" unwinds a cancelled
+ * park instead of re-parking on a still-open fd (audit finding B3).  Used by the
+ * C socket fast paths (module_tcp.c.inc + the TCPConn methods); the aio bridge
+ * keeps the raw wait_fd so it maps the sentinel to its own CancelledError. */
+int runloom_netpoll_wait_fd_coop(int fd, int events, long long timeout_ns);
+
 /* Drive netpoll once.  Returns the number of fibers woken.
  * Called by the scheduler when its ready queue is empty but at
  * least one fiber is parked. */
