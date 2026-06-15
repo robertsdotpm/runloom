@@ -930,16 +930,11 @@ class TestAgeTracking:
         assert rc2 == 0, out
         assert "AGE None" in out, out
 
-    @pytest.mark.xfail(strict=False, reason=(
-        "FINDING: a g that was age-timestamped while introspect timestamps were "
-        "ON, then RECYCLED from the per-thread slab while timestamps are OFF, "
-        "carries a STALE state_since_ns (the recycle scrub in runloom_sched_core."
-        "c.inc deliberately leaves the introspection block, incl. state_since_ns, "
-        "untouched). When such a recycled g next PARKS with tracking OFF, "
-        "note_transition is a no-op, so state_since_ns keeps the prior "
-        "incarnation's value and fibers()[...]['age'] reports a NON-None, "
-        "nonsensical age (a cross-incarnation data leak) even though tracking is "
-        "off. Correct: age must be None whenever timestamps are off."))
+    # REGRESSION (was finding #8): the fiber snapshot now gates `age` on the
+    # introspect-timestamps flag, so a g recycled from the slab while tracking
+    # is OFF -- carrying a stale state_since_ns from a prior ON incarnation --
+    # reports age None instead of a nonsensical cross-incarnation value.  (When
+    # tracking is on, every park re-stamps, so `age` stays accurate.)
     def test_recycled_g_reports_no_stale_age_when_off(self):
         # Deterministic repro in a fresh subprocess: phase 1 ages a sleeper with
         # tracking ON; phase 2 turns tracking OFF and spawns a sleeper that
