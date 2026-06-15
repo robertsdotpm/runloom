@@ -84,17 +84,24 @@ the exclusion only when refutation failed. 12 originally-claimed exclusions were
 **rejected** as actually-coverable and turned into gap-fill tests
 (`tests/test_cov95_gap_*.py`, 34 tests) instead.
 
-## Known limitation — io_uring recv backpressure deadlock
+## io_uring recv backpressure deadlock — FIXED
 
 While driving io_uring coverage we found a real bug: forcing recv through the
-opt-in io_uring backend (`RUNLOOM_TCPCONN_IOURING=1`) **deadlocks a backpressured
-loopback transfer** — the receiver parks in `recv()` mid-transfer and is never
-woken; the default epoll backend is unaffected. Reproducer + analysis:
-`tests/regressions/iouring_recv_backpressure_deadlock.py`. Consequently a few
-io_uring recv/eventfd cleanup lines reachable only by failing a syscall *during an
-active recv* cannot be driven by a clean-exit test and are left uncovered
-(io_uring.c 97.1%) pending a fix. Latent — io_uring recv is opt-in per connection
-and the suite runs default mode.
+opt-in io_uring backend (`RUNLOOM_TCPCONN_IOURING=1`) **deadlocked a backpressured
+loopback transfer**. Under backpressure the kernel CQ ring overflows; excess
+completions go to the kernel's overflow backlog and do NOT re-signal the
+registered eventfd, so the scheduler slept forever in `epoll_wait` waiting for an
+edge that never came (CQ empty + `IORING_SQ_CQ_OVERFLOW` set), stranding the
+receiver whose completion was in overflow. **Fixed**: the single-thread and M:N
+idle paths now drain io_uring (which flushes the CQ-overflow backlog) before
+blocking — `runloom_sched_drain.c.inc` + `mn_sched_hub_main.c.inc`. Regression
+guards: `tests/test_iouring_recv_backpressure.py` (single-thread + M:N) and the
+standalone repro `tests/regressions/iouring_recv_backpressure_deadlock.py`. The
+default epoll backend was never affected.
+
+Separate, still-open: io_uring multishot recv across MANY concurrent connections
+under M:N loses data (not a hang) — the shared global provided-buffer ring across
+hubs. The single-connection io_uring path (the common one) is correct.
 
 ## Notes
 

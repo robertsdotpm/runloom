@@ -714,6 +714,21 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
                          * timeout -- the ~1ms cross-hub handoff latency).
                          * Idempotent + atomic-guarded: a no-op once armed. */
                         runloom_netpoll_wake_pump_arm();
+                        /* GLOBAL-ring CQ-OVERFLOW safety.  TCPConn io_uring recv
+                         * (multishot) and file I/O live on the process-global
+                         * ring, not this hub ring.  When that ring's CQ fills
+                         * under backpressure, excess completions go to the
+                         * kernel's overflow backlog and do NOT re-signal the
+                         * global eventfd -- so the pump below (even bounded to
+                         * pump_ns) would never observe the edge that drains them,
+                         * and the recv fiber whose completion is stranded in
+                         * overflow hangs forever (the only thing that frees CQ
+                         * space is that same fiber).  ring_get_events above only
+                         * flushes THIS hub's ring; drain the global ring here so
+                         * the overflow backlog is flushed + its CQEs processed +
+                         * the waiter woken (cross-hub via mn_wake_g).  Cheap no-op
+                         * when the global ring is uninitialised or its CQ empty. */
+                        runloom_iouring_drain();
                         runloom_netpoll_pump(pump_ns);
                     } else {
                         if (idle_ns <= 0) idle_ns = 1;

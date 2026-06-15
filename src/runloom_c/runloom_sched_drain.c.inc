@@ -134,6 +134,24 @@ Py_ssize_t runloom_sched_drain(runloom_sched_t *s)
                     if (timeout_ns < 0 || t_ns < timeout_ns) timeout_ns = t_ns;
                 }
             }
+            /* io_uring CQ-OVERFLOW safety -- before any blocking pump.
+             * When the kernel CQ ring fills (multishot recv under backpressure,
+             * or many concurrent single-shot completions), excess completions go
+             * to the kernel's overflow backlog and do NOT re-signal the
+             * registered eventfd.  A blocking epoll_wait below would then sleep
+             * forever waiting for an eventfd edge that never comes, stranding the
+             * fiber whose completion is in overflow -- and the only thing that
+             * would free CQ space is that same stranded fiber (a real
+             * backpressure deadlock; observed: CQ empty + IORING_SQ_CQ_OVERFLOW
+             * set + asleep in epoll_wait(-1)).  Drain here first:
+             * runloom_iouring_drain flushes the overflow backlog into the CQ ring,
+             * processes the CQEs, and wakes the waiters.  If that readied a fiber,
+             * re-loop to run it instead of blocking.  Cheap when nothing is
+             * pending (one EAGAIN eventfd read + a flag check). */
+            if (runloom_iouring_inflight() > 0) {
+                runloom_iouring_drain();
+                if (!runloom_sched_ready_empty(s)) continue;
+            }
             /* iouring fibers wake when the pump observes a CQE on
              * the registered eventfd; blocking-pool fibers wake when
              * a worker pokes the pump-interrupt eventfd -- both ride the

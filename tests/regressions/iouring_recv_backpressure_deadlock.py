@@ -19,9 +19,14 @@ unaffected -- but RUNLOOM_TCPCONN_IOURING is therefore NOT a transparent drop-in
 today. Corroboration: forcing the mode also failed test_adv_tcpconn and 3 cases
 in test_cov95_tcp_conn.
 
-Status: NOT fixed (deliberately deferred -- opt-in code). This file is the repro,
-and the reason the io_uring-recv lines in netpoll_wake_iouring.c.inc / io_uring_l_*
-cannot be driven to full coverage by a clean-exit test (see COVERAGE.md).
+Status: FIXED.  Root cause: under backpressure the kernel CQ ring overflows;
+overflowed completions go to the kernel's overflow backlog and do NOT re-signal
+the registered eventfd, so the scheduler slept forever in epoll_wait (CQ empty +
+IORING_SQ_CQ_OVERFLOW set), stranding the receiver whose completion was in
+overflow.  Fix: the single-thread and M:N idle paths now drain io_uring (which
+flushes the CQ-overflow backlog) before blocking -- runloom_sched_drain.c.inc +
+mn_sched_hub_main.c.inc.  This script now COMPLETES under io_uring (run it to
+confirm); the pytest regression guard is tests/test_iouring_recv_backpressure.py.
 
 Run manually (it is self-bounded by a watchdog; NOT part of the default suite):
   PYTHON_GIL=0 PYTHONPATH=src python3 tests/regressions/iouring_recv_backpressure_deadlock.py          # default: OK
