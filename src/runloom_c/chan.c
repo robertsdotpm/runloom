@@ -61,6 +61,15 @@ typedef struct runloom_chan_waiter {
                                       *  0 = closed, -1 = unset */
     /* Result for senders: 0 = delivered, -1 = closed-while-parked. */
     int send_result;
+    /* 1 while this waiter is LINKED in a channel queue; 0 once a producer (or
+     * close) pops it.  park_waiter loops on this: a spurious / foreign wake
+     * (stale dup wake_g, a wake meant for a prior park) can resume the parked
+     * fiber while still queued, and returning then would (a) report a bogus
+     * result and (b) leave this STACK-allocated waiter linked for a later send
+     * to pop -> use-after-free (benign stale-read on POSIX; hard access
+     * violation on Windows, where mimalloc unmaps the freed page).  Written +
+     * read under ch->lock. */
+    int queued;
     /* Non-NULL iff this waiter belongs to a select() set.  When a
      * channel goes to deliver to this waiter it first CASes
      * select->fired_case from -1 to its own case_index; only the

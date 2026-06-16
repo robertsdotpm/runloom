@@ -7,6 +7,7 @@ static void waiter_push(runloom_chan_waiter_t **head,
                         runloom_chan_waiter_t *w)
 {
     w->next = NULL;
+    w->queued = 1;                  /* linked; cleared by waiter_pop */
     if (*tail == NULL) {
         *head = *tail = w;
     } else {
@@ -23,6 +24,7 @@ static runloom_chan_waiter_t *waiter_pop(runloom_chan_waiter_t **head,
     *head = w->next;
     if (*head == NULL) *tail = NULL;
     w->next = NULL;
+    w->queued = 0;                  /* unlinked; park_waiter may now return */
     return w;
 }
 
@@ -215,36 +217,51 @@ static void park_waiter(runloom_chan_t *ch,
      * decref-to-zero from another thread cannot race with our park. */
     runloom_chan_incref(ch);
 
-    waiter_push(head, tail, w);
+    waiter_push(head, tail, w);   /* sets w->queued = 1 */
 
-    /* Snapshot tstate + take g off any ready list.  Same dance as
-     * runloom_netpoll_wait_fd uses. */
-    if (current_g != NULL) {
-        runloom_sched_park_current();
-        runloom_g_state_set(current_g, RUNLOOM_GST_PARKED_CHAN);
-        RUNLOOM_EVT(RUNLOOM_EVT_CHAN_PARK, ch, current_g, 0);
+    /* Park + WAIT-IN-A-LOOP.  A real channel wake is delivered by a producer
+     * (or close) that FIRST pops this waiter (clearing w->queued under the lock)
+     * and THEN unparks the fiber, having filled w->value / w->ok /
+     * w->send_result.  But under M:N free-threading the channel park is NOT the
+     * only thing that can ready this g: a SPURIOUS / foreign wake (a stale dup
+     * wake_g, or a wake meant for a prior park the g did) can resume us while
+     * still queued.  Returning then would (a) make chan_recv report a bogus
+     * "closed" (so a Mutex.lock falsely succeeds -> a later "release unlocked
+     * lock") and (b) leave this STACK-allocated waiter linked in the queue for a
+     * later chan_send to pop -> use-after-free.  On POSIX the freed stack page
+     * stays mapped so the stale read is benign; on Windows mimalloc unmaps it
+     * and the pop's waiter_claim CAS faults (the p34_subproc_net access
+     * violation).  So re-park until a producer actually pops us. */
+    for (;;) {
+        /* Snapshot tstate + take g off any ready list.  Same dance as
+         * runloom_netpoll_wait_fd uses. */
+        if (current_g != NULL) {
+            runloom_sched_park_current();
+            runloom_g_state_set(current_g, RUNLOOM_GST_PARKED_CHAN);
+            RUNLOOM_EVT(RUNLOOM_EVT_CHAN_PARK, ch, current_g, 0);
+        }
+        /* Critical: release the channel lock BEFORE yielding, or the wake side
+         * would deadlock trying to acquire it. */
+        RUNLOOM_RUNLOCK(&ch->lock, RUNLOOM_RANK_CHAN);
+        runloom_coro_yield();
+        if (current_g != NULL) {
+            runloom_g_state_set(current_g, RUNLOOM_GST_RUNNING);
+            RUNLOOM_EVT(RUNLOOM_EVT_CHAN_WAKE, ch, current_g, 0);
+        }
+        /* Re-acquire to read w->queued (lock-protected).  queued == 0 means a
+         * producer/close popped us -> real delivery; queued == 1 means a
+         * spurious wake -> re-park, staying linked (do NOT re-push). */
+        RUNLOOM_RLOCK(&ch->lock, RUNLOOM_RANK_CHAN);
+        if (!w->queued)
+            break;
     }
-
-    /* Critical: release the channel lock BEFORE yielding.  Otherwise
-     * the wake-side would deadlock trying to acquire it. */
     RUNLOOM_RUNLOCK(&ch->lock, RUNLOOM_RANK_CHAN);
 
-    runloom_coro_yield();
-    /* On wake, the producer has already filled w->value / w->ok /
-     * w->send_result before unparking us. */
-    if (current_g != NULL) {
-        runloom_g_state_set(current_g, RUNLOOM_GST_RUNNING);
-        RUNLOOM_EVT(RUNLOOM_EVT_CHAN_WAKE, ch, current_g, 0);
-    }
-
-    /* Drop the pin.  If we were the last reference (rare: caller code
-     * usually still holds a Python wrapper that outlives the park),
-     * the channel is freed here.  We only touch our own waiter struct
-     * after this point, never ch. */
+    /* Drop the pin.  If we were the last reference (rare: caller code usually
+     * still holds a Python wrapper that outlives the park), the channel is
+     * freed here.  We only touch our own waiter struct after this point, never
+     * ch. */
     runloom_chan_decref(ch);
-
-    /* Re-acquire is NOT necessary on this side -- we read our own
-     * waiter struct and return.  The caller does not need the lock. */
 }
 
 /* Wake a parked waiter.  Caller holds the lock; the wake routine
