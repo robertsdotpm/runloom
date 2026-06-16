@@ -31,6 +31,27 @@
 #  define RUNLOOM_DESTRUCT_HAVE 1
 #endif
 
+/* See runloom_iframe.h.  Freezes op's refcount (immortal) so cross-hub
+ * incref/decref become no-ops -- the A1b hub-scaling experiment lever.  We set
+ * the immortal refcount fields directly (mirroring _Py_SetImmortalUntracked):
+ * the real _Py_SetImmortal is internal-link-only (not exported from the shared
+ * libpython), but _Py_IMMORTAL_REFCNT_LOCAL / _Py_UNOWNED_TID are public macros
+ * in object.h.  Leaves the object GC-tracked (immortal objects are skipped by
+ * the collector anyway), which is exactly what _Py_SetImmortalUntracked does. */
+void runloom_immortalize(PyObject *op)
+{
+    if (op == NULL) {
+        return;
+    }
+#if defined(Py_GIL_DISABLED)
+    op->ob_tid       = _Py_UNOWNED_TID;
+    op->ob_ref_local = _Py_IMMORTAL_REFCNT_LOCAL;
+    op->ob_ref_shared = 0;
+#elif defined(_Py_IMMORTAL_REFCNT)
+    op->ob_refcnt    = _Py_IMMORTAL_REFCNT;
+#endif
+}
+
 int runloom_tstate_in_destruction(PyThreadState *ts)
 {
 #if defined(RUNLOOM_DESTRUCT_HAVE)

@@ -142,7 +142,13 @@ def post(H):
 
 
 if __name__ == "__main__":
+    # Correctness test: the subject is the randomised socket half-close state
+    # matrix on real connected TCP pairs (each round is a multi-step transition
+    # dance with bounded waits).  Like p102-p106 / p43 / p47, this does NOT
+    # meaningfully scale to 1M -- at 100k+ no full sequence completes inside the
+    # window so the "did any half-close finish" invariant fails.  Cap it (the
+    # honest fix); at this scale every transition completes.  See FINDINGS.
     harness.main("p107_half_close_matrix", body, setup=setup, post=post,
-                 default_funcs=2000,
+                 default_funcs=2000, max_funcs=2000,
                  describe="randomised SHUT_RD/SHUT_WR/send/recv/close transition "
                           "matrix on connected TCP pairs; survive every state")

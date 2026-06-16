@@ -3,6 +3,62 @@
  * these definitions depend on. */
 
 
+#if defined(RUNLOOM_HAVE_EPOLL)
+/* Handle one ready epoll event: io_uring global/per-ring eventfds drain their
+ * rings, the legacy generic pump-wake eventfd is drained, and a socket fd is
+ * dispatched to its parker (or stashed in the pending-wake bitmap if none is
+ * linked yet).  Shared by the shared-epoll pump and, under RUNLOOM_PERHUB_EPOLL,
+ * by each hub draining its NESTED shared epoll.  Bumps *woke per parker woken. */
+static void runloom_epoll_handle_event(int fd, unsigned int events, int *woke)
+{
+    int mask = 0;
+    /* io_uring eventfd (global ring): drain + walk the CQ; not a parker entry. */
+    if (runloom_iouring_eventfd_in_epoll >= 0 &&
+        fd == runloom_iouring_eventfd_in_epoll) {
+        runloom_iouring_drain();
+        return;
+    }
+    /* Generic pump-interrupt eventfd: a cross-thread waker poked it only to break
+     * an idle epoll_wait; drain the level (the re-queued g is already ready). */
+    if (__atomic_load_n(&runloom_pump_wake_fd, __ATOMIC_ACQUIRE) == fd && fd >= 0) {
+        uint64_t v;
+        ssize_t r = read(fd, &v, sizeof v);
+        (void)r;
+        return;
+    }
+    /* Per-hub iouring rings: dispatch to the matching ring's drain. */
+    {
+        int ri;
+        struct runloom_iouring_ring *match = NULL;
+        for (ri = 0; ri < runloom_iouring_ring_count; ri++) {
+            if (runloom_iouring_ring_efds[ri] == fd) {
+                match = runloom_iouring_ring_ptrs[ri];
+                break;
+            }
+        }
+        if (match != NULL) {
+            runloom_iouring_ring_drain(match);
+            return;
+        }
+    }
+    /* Fold error/hangup into BOTH directions (EPOLLERR/HUP/RDHUP can carry no
+     * IN/OUT bit -- a bare RST / half-close); waking both makes every waiter
+     * observe the error and guarantees mask != 0 so the pending-bitmap fallback
+     * engages.  (See Go's netpoll; mirrors the WSAPoll/select branches.) */
+    if (events & (EPOLLIN | EPOLLRDHUP | EPOLLERR | EPOLLHUP))
+        mask |= RUNLOOM_NETPOLL_READ;
+    if (events & (EPOLLOUT | EPOLLERR | EPOLLHUP))
+        mask |= RUNLOOM_NETPOLL_WRITE;
+    if (runloom_pump_dispatch_event(fd, mask, 0)) {
+        (*woke)++;
+    } else if (mask != 0) {
+        /* No parker linked yet (or already woken once): stash the mask so the
+         * next wait_fd consumes it instead of parking forever. */
+        runloom_fd_pending_wake_set(fd, mask);
+    }
+}
+#endif
+
 int runloom_netpoll_pump(long long timeout_ns)
 {
     long long now;
@@ -40,8 +96,20 @@ int runloom_netpoll_pump(long long timeout_ns)
         int ms = timeout_ns < 0 ? -1 :
                  (timeout_ns > 1000000000LL ? 1000 :
                   (int)((timeout_ns + 999999LL) / 1000000LL));
+        /* RUNLOOM_PERHUB_EPOLL: wait on THIS hub's own epoll (its socket fds +
+         * its targeted wake eventfd; the shared runloom_epoll_fd is NESTED for
+         * the io_uring set).  epool != NULL only on the per-hub path with a live
+         * pool epoll; otherwise wait on the shared epoll exactly as before. */
+        int wait_fd = runloom_epoll_fd;
+        runloom_parker_pool_t *epool = NULL;
+        if (runloom_perhub_epoll()) {
+            epool = runloom_parker_pool_for_hub(runloom_mn_current_hub_opaque());
+            runloom_parker_pool_lock_ensure_inited(epool);
+            if (epool->epoll_fd >= 0) wait_fd = epool->epoll_fd;
+            else epool = NULL;   /* pool epoll create failed -> shared fallback */
+        }
         Py_BEGIN_ALLOW_THREADS
-        n = epoll_wait(runloom_epoll_fd, evs, 64, ms);
+        n = epoll_wait(wait_fd, evs, 64, ms);
         Py_END_ALLOW_THREADS
         if (n < 0) {
             runloom_netpoll_wait_failed(n);   /* EINTR -> retry; else log+backoff */
@@ -49,82 +117,30 @@ int runloom_netpoll_pump(long long timeout_ns)
             int i;
             for (i = 0; i < n; i++) {
                 int fd = evs[i].data.fd;
-                int mask = 0;
-                /* io_uring eventfd (global ring): drain its counter
-                 * and walk the CQ ring to wake parked fibers via
-                 * their per-op record.  Not a normal fd-park entry;
-                 * skip the parker dispatch.  No pool lock needed --
-                 * iouring drain is independent of parker pools. */
-                if (runloom_iouring_eventfd_in_epoll >= 0 &&
-                    fd == runloom_iouring_eventfd_in_epoll) {
-                    runloom_iouring_drain();
-                    continue;
-                }
-                /* Generic pump-interrupt eventfd: a cross-thread waker
-                 * (blocking-offload pool) poked it only to break this
-                 * epoll_wait.  Drain its counter to clear the level and
-                 * loop -- the re-queued fiber is already on the
-                 * scheduler's wake_list/ready, picked up by the drain. */
-                if (__atomic_load_n(&runloom_pump_wake_fd, __ATOMIC_ACQUIRE) == fd
-                    && fd >= 0) {
-                    uint64_t v;
-                    ssize_t r = read(fd, &v, sizeof v);
-                    (void)r;
-                    continue;
-                }
-                /* Per-hub iouring rings.  Dispatch to the matching
-                 * ring's drain.  Ring lookup is a tight scan over a
-                 * 64-entry array; cheap and lock-free for reads. */
-                {
-                    int ri;
-                    struct runloom_iouring_ring *match = NULL;
-                    for (ri = 0; ri < runloom_iouring_ring_count; ri++) {
-                        if (runloom_iouring_ring_efds[ri] == fd) {
-                            match = runloom_iouring_ring_ptrs[ri];
-                            break;
-                        }
+                if (epool != NULL) {
+                    /* This hub's TARGETED wake eventfd: drain the level + loop;
+                     * the re-queued g is already on the scheduler ready list. */
+                    if (fd >= 0 && fd == epool->wake_efd) {
+                        uint64_t v;
+                        ssize_t r = read(fd, &v, sizeof v);
+                        (void)r;
+                        continue;
                     }
-                    if (match != NULL) {
-                        runloom_iouring_ring_drain(match);
+                    /* The NESTED shared epoll fired (io_uring ring eventfds + the
+                     * legacy generic wake live in runloom_epoll_fd).  Drain it
+                     * NON-BLOCKING and run each event through the same handler;
+                     * the shared set never contains itself, so no recursion. */
+                    if (fd >= 0 && fd == runloom_epoll_fd) {
+                        struct epoll_event sevs[64];
+                        int sn, si;
+                        sn = epoll_wait(runloom_epoll_fd, sevs, 64, 0);
+                        for (si = 0; si < (sn < 0 ? 0 : sn); si++)
+                            runloom_epoll_handle_event(sevs[si].data.fd,
+                                                       sevs[si].events, &woke);
                         continue;
                     }
                 }
-                /* Fold error/hangup conditions into BOTH directions.
-                 * EPOLLERR / EPOLLHUP / EPOLLRDHUP can be reported with
-                 * NO IN/OUT bit set (a bare RST, or a SHUT_WR half-close
-                 * after the read side already drained).  The old mapping
-                 * only looked at IN/OUT, so such an event produced
-                 * mask==0: runloom_pump_dispatch_event matched no parker
-                 * (p->events & 0), AND the `mask != 0` bitmap fallback
-                 * below was skipped -- the event was dropped outright,
-                 * and EPOLLONESHOT then left the fd disarmed forever
-                 * (parked g, never woken).  Waking BOTH directions on
-                 * error is correct (a dead fd makes every waiter
-                 * runnable so its next syscall sees the error) and
-                 * guarantees mask != 0 so the fallback also engages.
-                 * Mirrors the WSAPoll (POLLHUP|POLLERR) and select
-                 * (exception set) branches below, and Go's netpoll. */
-                if (evs[i].events & (EPOLLIN | EPOLLRDHUP | EPOLLERR | EPOLLHUP))
-                    mask |= RUNLOOM_NETPOLL_READ;
-                if (evs[i].events & (EPOLLOUT | EPOLLERR | EPOLLHUP))
-                    mask |= RUNLOOM_NETPOLL_WRITE;
-                /* Walk every per-hub pool looking for the parker for
-                 * this fd.  Typically the parker lives in exactly one
-                 * pool (its owning hub's), so the loop short-circuits
-                 * on first match.  Sub-microsecond per event at
-                 * realistic hub counts. */
-                if (runloom_pump_dispatch_event(fd, mask, 0)) {
-                    woke++;
-                } else if (mask != 0) {
-                    /* No parker for this fd (either not linked yet,
-                     * or already woken once and the fiber
-                     * hasn't called wait_fd again).  Stash the
-                     * event mask in the per-fd pending bitmap so
-                     * the next wait_fd on this fd consumes it
-                     * instead of parking forever -- EPOLLET would
-                     * never refire for this transition. */
-                    runloom_fd_pending_wake_set(fd, mask);
-                }
+                runloom_epoll_handle_event(fd, evs[i].events, &woke);
             }
         }
     }

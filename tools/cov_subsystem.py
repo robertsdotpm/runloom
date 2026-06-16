@@ -16,19 +16,63 @@ import os
 import sys
 
 SRC = "src/runloom_c"
+# One group per .c TRANSLATION UNIT: the .c plus the .c.inc fragments it
+# #includes (gcov emits a separate .gcov per fragment).  The "C file" coverable
+# target the campaign reports is the per-TU total here.  netpoll_iocp.c (IOCP)
+# and any kqueue-only paths do not compile on the Linux epoll build, so they
+# emit no .gcov and are silently skipped.
 GROUPS = {
-    "M:N scheduler (mn_sched.c + fragments)": [
+    "mn_sched.c -- M:N scheduler": [
         "mn_sched.c", "mn_sched_init_fini.c.inc", "mn_sched_hub_main.c.inc",
         "mn_sched_hub_resume_preempt.c.inc", "mn_sched_handoff.c.inc",
         "mn_sched_sysmon.c.inc", "mn_sched_hubinfo.c.inc",
         "mn_sched_mn_api.c.inc", "mn_sched_runq.c.inc",
     ],
-    "epoll netpoll (Linux default backend)": [
+    "netpoll.c -- epoll default backend": [
         "netpoll.c", "netpoll_init.c.inc", "netpoll_register.c.inc",
         "netpoll_wait_fd.c.inc", "netpoll_pump.c.inc", "netpoll_pump_helpers.c.inc",
         "netpoll_parkers.c.inc", "netpoll_parker_link.c.inc",
         "netpoll_wake_iouring.c.inc", "netpoll_diag_fd.c.inc",
     ],
+    "module.c -- Python module surface": [
+        "module.c", "module_coro.c.inc", "module_tcp.c.inc", "module_io.c.inc",
+        "module_fdio.c.inc", "module_g.c.inc", "module_chan.c.inc", "module_go.c.inc",
+        "module_run.c.inc", "module_introspect.c.inc", "module_crash.c.inc",
+        "module_advice.c.inc", "module_select.c.inc", "module_machinecode.c.inc",
+        "module_init.c.inc",
+    ],
+    "runloom_sched.c -- single-thread scheduler": [
+        "runloom_sched.c", "runloom_sched_pystate.c.inc", "runloom_sched_datastack.c.inc",
+        "runloom_sched_core.c.inc", "runloom_sched_parkwake.c.inc",
+        "runloom_sched_drain.c.inc", "runloom_sched_preempt.c.inc",
+    ],
+    "runloom_tcp.c -- TCP/conn layer": [
+        "runloom_tcp.c", "runloom_tcp_helpers.c.inc", "runloom_tcp_conn_io.c.inc",
+        "runloom_tcp_conn_send.c.inc", "runloom_tcp_conn_net.c.inc",
+        "runloom_tcp_type_init.c.inc",
+    ],
+    "io_uring.c -- io_uring backend": [
+        "io_uring.c", "io_uring_l_sys.c.inc", "io_uring_l_buf.c.inc",
+        "io_uring_l_do.c.inc", "io_uring_l_msclose.c.inc", "io_uring_l_ring.c.inc",
+        "io_uring_l_loop.c.inc",
+    ],
+    "chan.c -- channels + select": [
+        "chan.c", "chan_waiters.c.inc", "chan_ops.c.inc",
+        "chan_select_helpers.c.inc", "chan_select_main.c.inc",
+    ],
+    "coro.c -- coroutine/stack engine": ["coro.c"],
+    "runloom_introspect.c -- introspection": [
+        "runloom_introspect.c", "runloom_introspect_frames.c.inc",
+    ],
+    "runloom_blockpool.c -- blocking-call offload": ["runloom_blockpool.c"],
+    "runloom_gstate.c -- goroutine state": ["runloom_gstate.c"],
+    "runloom_diag.c -- diagnostics/event ring": ["runloom_diag.c"],
+    "runloom_crash.c -- crash handler": ["runloom_crash.c"],
+    "runloom_stackadvice.c -- stack autosizer": ["runloom_stackadvice.c"],
+    "runloom_iframe.c -- interp-frame helpers": ["runloom_iframe.c"],
+    "cldeque.c -- Chase-Lev work deque": ["cldeque.c"],
+    "fcontext.c -- context-switch trampoline": ["fcontext.c"],
+    "netpoll_iocp.c -- IOCP backend (Windows; not on Linux)": ["netpoll_iocp.c"],
 }
 
 
@@ -105,12 +149,15 @@ def parse_gcov(stem, covdir):
 
 
 def main(covdir):
+    per_tu = []          # (title, total, covered, excl, pct) for the per-file summary
+    XT = XC = XX = 0     # whole-extension coverable totals
     for title, files in GROUPS.items():
         print("=" * 70)
         print(title)
         print("  {0:<40} {1:>6} {2:>6} {3:>7} {4:>5}".format("fragment", "lines", "cov", "pct", "excl"))
         print("  " + "-" * 68)
         gt = gc = gx = 0
+        any_seen = False
         for stem in files:
             r = parse_gcov(stem, covdir)
             if r is None:
@@ -118,14 +165,44 @@ def main(covdir):
             total, covered, excl = r
             if total == 0 and excl == 0:
                 continue
+            any_seen = True
             gt += total; gc += covered; gx += excl
             pct = 100.0 * covered / total if total else 100.0
             print("  {0:<40} {1:>6} {2:>6} {3:>6.1f}% {4:>5}".format(stem, total, covered, pct, excl))
         print("  " + "-" * 68)
-        gpct = 100.0 * gc / gt if gt else 0.0
+        gpct = 100.0 * gc / gt if gt else 100.0
         print("  {0:<40} {1:>6} {2:>6} {3:>6.1f}% {4:>5}".format(
             "COVERABLE TOTAL (excl LCOV_EXCL)", gt, gc, gpct, gx))
         print()
+        if any_seen:
+            per_tu.append((title, gt, gc, gx, gpct))
+            XT += gt; XC += gc; XX += gx
+
+    # ---- per-file (per-TU) summary, sorted worst-first, gate at >=95% ----
+    print("=" * 70)
+    print("PER-FILE (translation-unit) COVERABLE SUMMARY  -- gate: >=95%")
+    print("  {0:<44} {1:>6} {2:>6} {3:>7}  flag".format("translation unit", "lines", "cov", "pct"))
+    print("  " + "-" * 68)
+    below = []
+    for title, gt, gc, gx, gpct in sorted(per_tu, key=lambda x: x[4]):
+        flag = "OK" if gpct >= 95.0 else "<95 !!"
+        if gpct >= 99.95:
+            flag = "100%"
+        if gpct < 95.0:
+            below.append((title, gpct))
+        print("  {0:<44} {1:>6} {2:>6} {3:>6.1f}%  {4}".format(title, gt, gc, gpct, flag))
+    print("  " + "-" * 68)
+    XP = 100.0 * XC / XT if XT else 100.0
+    print("  {0:<44} {1:>6} {2:>6} {3:>6.1f}%".format(
+        "WHOLE EXTENSION (coverable)", XT, XC, XP))
+    if below:
+        print()
+        print("  !! {0} translation unit(s) below 95% coverable:".format(len(below)))
+        for title, gpct in below:
+            print("       {0:<44} {1:>6.1f}%".format(title, gpct))
+    else:
+        print("  ALL translation units >= 95% coverable.")
+    print()
 
 
 if __name__ == "__main__":

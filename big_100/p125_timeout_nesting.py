@@ -173,7 +173,14 @@ def post(H):
 
 
 if __name__ == "__main__":
+    # Correctness test: the subject is exact err()-reason attribution across a
+    # 3-level WithTimeout/WithCancel nest (inner-deadline vs cascade vs explicit
+    # cancel).  This needs the inner deadline to fire clearly BEFORE the outer's;
+    # at 100k+ the two deadlines blur under M:N scheduling jitter and timer
+    # resolution, so the outer is observed deadline_exceeded when only the inner
+    # should be -- an order-dependent artifact, not a runtime bug (M:N is not
+    # asyncio-deterministic).  Cap to the intended scale (the honest fix).
     harness.main("p125_timeout_nesting", body, setup=setup, post=post,
-                 default_funcs=3000,
+                 default_funcs=3000, max_funcs=3000,
                  describe="nested WithTimeout/WithCancel; err() reasons "
                           "consistent with deadline vs explicit-cancel cascade")

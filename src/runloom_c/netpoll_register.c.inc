@@ -66,6 +66,22 @@ static int runloom_netpoll_register(int fd, int events)
 #if defined(RUNLOOM_HAVE_EPOLL)
     int cur, target, need;
     struct epoll_event ev;
+    /* RUNLOOM_PERHUB_EPOLL: route ADD/MOD to THIS hub's own epoll (a fresh fd) or
+     * to the epoll the fd already lives in (a widen of an existing registration).
+     * `ep` is the epoll to ctl against; it defaults to the shared runloom_epoll_fd
+     * and the per-hub path overrides it.  See docs/dev/PERHUB_EPOLL.md. */
+    int perhub = runloom_perhub_epoll();
+    int ep = runloom_epoll_fd;
+    int my_pool_idx = -1;
+    if (perhub) {
+        runloom_parker_pool_t *mp =
+            runloom_parker_pool_for_hub(runloom_mn_current_hub_opaque());
+        runloom_parker_pool_lock_ensure_inited(mp);
+        if (mp->epoll_fd >= 0) {
+            ep = mp->epoll_fd;
+            my_pool_idx = (int)(mp - runloom_pools);
+        }   /* else: pool epoll create failed -> fall back to the shared epoll */
+    }
 
     /* LEVEL register-PER-DIRECTION-once.  Arm each fd LEVEL-triggered (NO
      * EPOLLET, NO EPOLLONESHOT) for whichever directions have an active waiter,
@@ -92,6 +108,34 @@ static int runloom_netpoll_register(int fd, int events)
     RUNLOOM_RLOCK(&runloom_pool.lock, RUNLOOM_RANK_PARKER_POOL);
     cur = runloom_fd_armed_get(fd);
     target = cur | need;
+    if (perhub && cur != 0) {
+        /* Widen: the fd already lives in its OWNER's epoll -- MOD there, not in
+         * this hub's epoll, because that is where it physically is. */
+        int owner = runloom_fd_epoll_pool_get(fd);
+        ep = (owner >= 0) ? runloom_pools[owner].epoll_fd : runloom_epoll_fd;
+        /* CROSS-POOL STALE ARM: the arm cache (runloom_fd_armed / _epoll_pool) is
+         * a process-global keyed by fd NUMBER and is NOT reset when the scheduler
+         * mode changes.  A pooled wake-pipe / reused fd registered into one pool's
+         * epoll (e.g. the DEFAULT pool during a single-thread run()) can be re-used
+         * by a fiber on a DIFFERENT hub in a later M:N run(); the stale arm makes
+         * the "already armed" skip below fire, so the fd is never EPOLL_CTL_ADD'd
+         * into THIS hub's epoll.  It stays only in the old owner's epoll -- which
+         * no current hub waits on -- so its readiness (an os.write wake-byte) is
+         * delivered to nobody and the parked fiber hangs forever (test_monkey_
+         * offload single-thread-then-M:N).  When the recorded owner is not THIS
+         * hub's pool, the registration must MIGRATE: DEL from the old epoll and
+         * re-ADD fresh into ours.  Force the fresh-ADD path by treating it as
+         * unarmed (cur=0) so the ADD + owner record below target my_pool_idx.
+         * owner<0 (shared fallback) is already correct for THIS hub since the
+         * fallback epoll is shared, so only a >=0 owner mismatch migrates. */
+        if (owner >= 0 && owner != my_pool_idx) {
+            (void)epoll_ctl(ep, EPOLL_CTL_DEL, fd, NULL);
+            cur = 0;                 /* stranded in a foreign epoll -> fresh ADD */
+            target = need;
+            ep = (my_pool_idx >= 0) ? runloom_pools[my_pool_idx].epoll_fd
+                                    : runloom_epoll_fd;
+        }
+    }
     if (cur != 0 && target == cur) {
         RUNLOOM_RUNLOCK(&runloom_pool.lock, RUNLOOM_RANK_PARKER_POOL);
         if (runloom_netpoll_dbg_stale_check()) {
@@ -104,7 +148,7 @@ static int runloom_netpoll_register(int fd, int events)
             if (cur & RUNLOOM_NETPOLL_READ)  chk.events |= EPOLLIN | EPOLLRDHUP;
             if (cur & RUNLOOM_NETPOLL_WRITE) chk.events |= EPOLLOUT;
             chk.data.fd = fd;
-            if (epoll_ctl(runloom_epoll_fd, EPOLL_CTL_MOD, fd, &chk) != 0 &&
+            if (epoll_ctl(ep, EPOLL_CTL_MOD, fd, &chk) != 0 &&
                 errno == ENOENT) {
                 fprintf(stderr,
                     "[runloom-netpoll] STALE ARM on fd %d (armed mask 0x%x) -- "
@@ -113,7 +157,7 @@ static int runloom_netpoll_register(int fd, int events)
                     "the monkey close hook). Re-ADDing to self-heal; the "
                     "wait_fd would otherwise park until timeout.\n",
                     fd, (unsigned)cur);
-                (void)epoll_ctl(runloom_epoll_fd, EPOLL_CTL_ADD, fd, &chk);
+                (void)epoll_ctl(ep, EPOLL_CTL_ADD, fd, &chk);
             }
         }
         return 0;                               /* already armed -> 0 syscalls */
@@ -123,6 +167,9 @@ static int runloom_netpoll_register(int fd, int events)
         errno = ENOMEM;
         return -1;
     }
+    /* Fresh ADD: record which hub's epoll now owns this fd (read by a later widen
+     * and by release_if_idle's DEL).  my_pool_idx is -1 on the shared fallback. */
+    if (perhub && cur == 0) runloom_fd_epoll_pool_set(fd, my_pool_idx);
     RUNLOOM_RUNLOCK(&runloom_pool.lock, RUNLOOM_RANK_PARKER_POOL);
 
     ev.events = 0;
@@ -131,17 +178,18 @@ static int runloom_netpoll_register(int fd, int events)
     ev.data.fd = fd;
 
     if (cur == 0) {
-        if (epoll_ctl(runloom_epoll_fd, EPOLL_CTL_ADD, fd, &ev) == 0) return 0;
+        if (epoll_ctl(ep, EPOLL_CTL_ADD, fd, &ev) == 0) return 0;
         if (errno == EEXIST &&
-            epoll_ctl(runloom_epoll_fd, EPOLL_CTL_MOD, fd, &ev) == 0) return 0;
+            epoll_ctl(ep, EPOLL_CTL_MOD, fd, &ev) == 0) return 0;
     } else {
-        if (epoll_ctl(runloom_epoll_fd, EPOLL_CTL_MOD, fd, &ev) == 0) return 0;
+        if (epoll_ctl(ep, EPOLL_CTL_MOD, fd, &ev) == 0) return 0;
         if (errno == ENOENT &&
-            epoll_ctl(runloom_epoll_fd, EPOLL_CTL_ADD, fd, &ev) == 0) return 0;
+            epoll_ctl(ep, EPOLL_CTL_ADD, fd, &ev) == 0) return 0;
     }
     /* Failed: roll the arm mask back so a future caller can retry. */
     RUNLOOM_RLOCK(&runloom_pool.lock, RUNLOOM_RANK_PARKER_POOL);
     runloom_fd_armed_set(fd, cur);
+    if (perhub && cur == 0) runloom_fd_epoll_pool_set(fd, -1);
     RUNLOOM_RUNLOCK(&runloom_pool.lock, RUNLOOM_RANK_PARKER_POOL);
     return -1;
 #elif defined(RUNLOOM_HAVE_KQUEUE)
@@ -223,6 +271,10 @@ void runloom_netpoll_unregister(int fd)
      * mask would skip its EPOLL_CTL_ADD and never be re-armed (a hang).  All
      * real close paths call this hook, so the mask tracks fd identity. */
     runloom_fd_armed_set(fd, 0);
+    /* Clear the per-hub-epoll owner too, so a reused fd NUMBER does not inherit a
+     * stale owning-pool (which would mis-route a later widen/DEL).  No syscall:
+     * close auto-removes the fd from whichever epoll held it. */
+    runloom_fd_epoll_pool_set(fd, -1);
     RUNLOOM_RUNLOCK(&runloom_pool.lock, RUNLOOM_RANK_PARKER_POOL);
     /* No kernel syscall: epoll/kqueue auto-remove the fd when the
      * last reference closes.  Calling EPOLL_CTL_DEL after close
@@ -270,9 +322,18 @@ void runloom_netpoll_release_if_idle(int fd)
     RUNLOOM_RLOCK(&runloom_pool.lock, RUNLOOM_RANK_PARKER_POOL);
     if (((size_t)fd >= runloom_pool.by_fd_cap || runloom_pool.by_fd[fd] == NULL)
         && runloom_fd_armed_get(fd) != 0) {
+        /* DEL from the epoll the fd actually lives in.  Under RUNLOOM_PERHUB_EPOLL
+         * that is its owning hub's epoll (bridge fds are the DEFAULT pool's); the
+         * shared runloom_epoll_fd otherwise.  owner<0 -> shared fallback. */
+        int del_ep = runloom_epoll_fd;
+        if (runloom_perhub_epoll()) {
+            int owner = runloom_fd_epoll_pool_get(fd);
+            if (owner >= 0) del_ep = runloom_pools[owner].epoll_fd;
+            runloom_fd_epoll_pool_set(fd, -1);
+        }
         runloom_fd_armed_set(fd, 0);
         runloom_fd_bit_clear(fd);
-        epoll_ctl(runloom_epoll_fd, EPOLL_CTL_DEL, fd, NULL);
+        epoll_ctl(del_ep, EPOLL_CTL_DEL, fd, NULL);
     }
     RUNLOOM_RUNLOCK(&runloom_pool.lock, RUNLOOM_RANK_PARKER_POOL);
 #else

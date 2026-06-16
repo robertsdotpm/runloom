@@ -121,8 +121,12 @@ def post(H):
 
 
 if __name__ == "__main__":
+    # Each round forks a REAL process, so the scale is intentionally tiny --
+    # cap it (the 1M-sweep's --funcs would otherwise fork ~100k+ processes and
+    # wedge the box).  The subject is fork/reset_after_fork correctness, not
+    # goroutine count.
     harness.main("p111_fork_while_scheduler_active", body, setup=setup,
-                 post=post, default_funcs=60,
+                 post=post, default_funcs=60, max_funcs=60,
                  describe="os.fork() from a goroutine under M:N; child does "
                           "reset_after_fork + write byte + _exit; parent reaps "
                           "and verifies status + byte")

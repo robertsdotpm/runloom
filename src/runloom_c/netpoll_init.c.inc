@@ -17,6 +17,44 @@ static void runloom_pool_backend_create(runloom_parker_pool_t *pool)
     pool->kqueue_fd = -1;
     pool->selfpipe_r = -1;
     pool->selfpipe_w = -1;
+    pool->epoll_fd = -1;
+    pool->wake_efd = -1;
+#if defined(RUNLOOM_HAVE_EPOLL)
+    /* Per-hub epoll (RUNLOOM_PERHUB_EPOLL): this pool's own epoll + a level-
+     * triggered wake eventfd registered in it.  Best-effort: on any failure the
+     * fields stay -1 and the per-hub path's callers fall back / report, never
+     * crash (mirrors the kqueue best-effort below).  See docs/dev/PERHUB_EPOLL.md. */
+    if (runloom_perhub_epoll()) {
+        pool->epoll_fd = epoll_create1(EPOLL_CLOEXEC);
+        if (pool->epoll_fd >= 0) {
+            int efd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+            if (efd >= 0) {
+                struct epoll_event ev;
+                ev.events  = EPOLLIN;        /* level-triggered; pump drains on fire */
+                ev.data.fd = efd;
+                if (epoll_ctl(pool->epoll_fd, EPOLL_CTL_ADD, efd, &ev) == 0) {
+                    pool->wake_efd = efd;
+                } else {
+                    close(efd);
+                }
+            }
+            /* Nest the shared runloom_epoll_fd (io_uring ring eventfds + the
+             * legacy generic wake live there) so this hub's pump drains it too:
+             * a ready fd in the shared set makes runloom_epoll_fd readable in THIS
+             * pool's epoll, and the pump drains it non-blocking.  The shared set
+             * is off the hot socket path (sockets register per-hub directly), so
+             * the bounded herd there is fine.  runloom_netpoll_init nests into
+             * already-created pools too, covering either init order. */
+            if (runloom_epoll_fd >= 0) {
+                struct epoll_event nev;
+                nev.events  = EPOLLIN;
+                nev.data.fd = runloom_epoll_fd;
+                (void)epoll_ctl(pool->epoll_fd, EPOLL_CTL_ADD,
+                                runloom_epoll_fd, &nev);
+            }
+        }
+    }
+#endif
 #if defined(RUNLOOM_HAVE_KQUEUE)
     pool->kqueue_fd = kqueue();
     {   /* test-only (RUNLOOM_FAULT_KQUEUE_PERHUB): force a NON-default pool's
@@ -116,6 +154,29 @@ int runloom_netpoll_epoll_fd(void)
 {
 #if defined(RUNLOOM_HAVE_EPOLL)
     if (runloom_netpoll_init() != 0) return -1;
+    return runloom_epoll_fd;
+#else
+    return -1;
+#endif
+}
+
+/* The epoll fd the CURRENT hub waits on for the io_uring-as-loop F_EPOLL bridge.
+ * Under RUNLOOM_PERHUB_EPOLL the hub's socket fds live in its OWN pool->epoll_fd
+ * (which also NESTS the shared epoll, so io_uring eventfds still reach it), so the
+ * LOOP ring must poll THAT, not the shared runloom_epoll_fd -- polling the shared
+ * one would never see this hub's socket readiness and stall I/O (the LOOP+MS echo
+ * server only accepted/echoed its first connection).  Falls back to the shared
+ * epoll when per-hub is off or the pool epoll didn't come up. */
+int runloom_netpoll_hub_epoll_fd(void)
+{
+#if defined(RUNLOOM_HAVE_EPOLL)
+    if (runloom_netpoll_init() != 0) return -1;
+    if (runloom_perhub_epoll()) {
+        runloom_parker_pool_t *pool =
+            runloom_parker_pool_for_hub(runloom_mn_current_hub_opaque());
+        runloom_parker_pool_lock_ensure_inited(pool);
+        if (pool->epoll_fd >= 0) return pool->epoll_fd;
+    }
     return runloom_epoll_fd;
 #else
     return -1;
@@ -277,6 +338,23 @@ int runloom_netpoll_init(void)
 #if defined(RUNLOOM_HAVE_EPOLL)
     runloom_epoll_fd = epoll_create1(EPOLL_CLOEXEC);
     if (runloom_epoll_fd < 0) { RUNLOOM_RUNLOCK(&runloom_pool.lock, RUNLOOM_RANK_PARKER_POOL); return -1; }
+    /* Per-hub epoll (RUNLOOM_PERHUB_EPOLL): nest the freshly-created shared epoll
+     * into any pool whose own epoll was already built (backend_create can run
+     * lazily before this init), so every hub's pump drains the shared io_uring
+     * set.  Pools created AFTER this nest it themselves in backend_create. */
+    if (runloom_perhub_epoll()) {
+        size_t pi;
+        for (pi = 0; pi < (size_t)RUNLOOM_PARKER_POOL_MAX; pi++) {
+            runloom_parker_pool_t *p = &runloom_pools[pi];
+            if (p->epoll_fd >= 0) {
+                struct epoll_event nev;
+                nev.events  = EPOLLIN;
+                nev.data.fd = runloom_epoll_fd;
+                (void)epoll_ctl(p->epoll_fd, EPOLL_CTL_ADD,
+                                runloom_epoll_fd, &nev);
+            }
+        }
+    }
 #elif defined(RUNLOOM_HAVE_KQUEUE)
     /* Per-hub kqueue: the default pool's kqueue + self-pipe were already created
      * by the lock_ensure_inited(&runloom_pool) call above; each per-hub pool
@@ -361,6 +439,17 @@ void runloom_netpoll_fini(void)
 {
 #if defined(RUNLOOM_HAVE_EPOLL)
     if (runloom_epoll_fd >= 0) { close(runloom_epoll_fd); runloom_epoll_fd = -1; }
+    /* Per-hub epoll teardown (RUNLOOM_PERHUB_EPOLL): close every pool's own epoll
+     * + wake eventfd.  Fields are -1 when the per-hub path was never created, so
+     * this is a no-op under the default (shared) path. */
+    {
+        size_t i;
+        for (i = 0; i < (size_t)RUNLOOM_PARKER_POOL_MAX; i++) {
+            runloom_parker_pool_t *p = &runloom_pools[i];
+            if (p->wake_efd >= 0) { close(p->wake_efd); p->wake_efd = -1; }
+            if (p->epoll_fd >= 0) { close(p->epoll_fd); p->epoll_fd = -1; }
+        }
+    }
 #elif defined(RUNLOOM_HAVE_KQUEUE)
     /* Per-hub teardown: close every pool's own kqueue + self-pipe. */
     {

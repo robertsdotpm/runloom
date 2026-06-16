@@ -136,6 +136,15 @@ typedef struct runloom_parker_pool {
     int selfpipe_r;                     /* pump-wake self-pipe read end (in kqueue) */
     int selfpipe_w;                     /* pump-wake self-pipe write end */
 
+    /* Per-hub epoll backend (Linux), gated on RUNLOOM_PERHUB_EPOLL.  Mirrors the
+     * per-hub kqueue above: each hub polls its OWN epoll + wake eventfd so the
+     * kernel ep->lock and the wake-eventfd thundering herd never serialise across
+     * hubs (Axis B / R1+R2; see docs/dev/PERHUB_EPOLL.md).  Created lazily in
+     * runloom_pool_backend_create; -1 until then.  Unused (the shared
+     * runloom_epoll_fd path stays live) when the flag is off. */
+    int epoll_fd;                       /* this pool's epoll; -1 = none */
+    int wake_efd;                       /* pump-wake eventfd, registered in epoll_fd */
+
     runloom_parked_t *head;
     int total;                          /* read with __atomic_load_n */
 
@@ -219,6 +228,33 @@ static runloom_parker_pool_t *runloom_parker_pool_for_hub(void *hub_opaque)
     (void)hub_opaque;
 #endif
     return &runloom_pools[RUNLOOM_PARKER_POOL_DEFAULT];
+}
+
+/* RUNLOOM_PERHUB_EPOLL: select the per-hub epoll backend (each hub polls its own
+ * epoll + wake eventfd) over the single shared runloom_epoll_fd.  Axis B / R1+R2;
+ * see docs/dev/PERHUB_EPOLL.md.  Resolved once; DEFAULT ON -- a measured +17-28%
+ * saturation win (external loadgen -> isolated server_runloom).
+ * RUNLOOM_PERHUB_EPOLL=0 forces the legacy shared epoll.  Always 0 off the epoll
+ * backend. */
+static int runloom_perhub_epoll(void)
+{
+#if defined(RUNLOOM_HAVE_EPOLL)
+    /* Resolved-once cache, read on the hot path by every hub -> the lazy init
+     * must be atomic (RELAXED is enough: the value is idempotent, so a racing
+     * recompute is harmless; we only need a non-torn read/write).  Matches
+     * runloom_netpoll_dbg_stale_check's pattern. */
+    static int v = -1;
+    int cur = __atomic_load_n(&v, __ATOMIC_RELAXED);
+    if (cur < 0) {
+        const char *e = getenv("RUNLOOM_PERHUB_EPOLL");
+        /* default ON; only an explicit "0" disables. */
+        cur = (e != NULL && e[0] == '0' && e[1] == '\0') ? 0 : 1;
+        __atomic_store_n(&v, cur, __ATOMIC_RELAXED);
+    }
+    return cur;
+#else
+    return 0;
+#endif
 }
 
 static int runloom_netpoll_inited = 0;

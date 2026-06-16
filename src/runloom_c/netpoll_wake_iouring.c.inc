@@ -342,6 +342,18 @@ int runloom_netpoll_wake_pump_arm(void)
     struct epoll_event ev;
     int fd;
     if (runloom_netpoll_init() != 0) return -1;
+    if (runloom_perhub_epoll()) {
+        /* Per-hub: this hub's wake eventfd is created with its epoll in
+         * runloom_pool_backend_create.  Ensure THIS hub's pool is up and report
+         * armed iff its eventfd came up -- that is the targeted wake primitive.
+         * (The shared runloom_pump_wake_fd below is still created as the hub-less
+         * fallback waker, but the per-hub eventfd is the one wake_pump targets.) */
+        runloom_parker_pool_t *pool =
+            runloom_parker_pool_for_hub(runloom_mn_current_hub_opaque());
+        runloom_parker_pool_lock_ensure_inited(pool);
+        if (pool->wake_efd < 0) return -1;
+        /* fall through: also ensure the shared fallback eventfd exists */
+    }
     /* Fast path: already armed.  Acquire-load pairs with the release-store
      * below (and matches the waker's load in runloom_netpoll_wake_pump). */
     if (__atomic_load_n(&runloom_pump_wake_fd, __ATOMIC_ACQUIRE) >= 0) return 0;
@@ -410,12 +422,29 @@ int runloom_netpoll_wake_pump_arm(void)
 void runloom_netpoll_wake_pump(void *hub_opaque)
 {
 #if defined(RUNLOOM_HAVE_EPOLL)
-    int fd = __atomic_load_n(&runloom_pump_wake_fd, __ATOMIC_ACQUIRE);
-    (void)hub_opaque;                       /* one shared eventfd for all pumps */
-    if (fd >= 0) {
-        uint64_t one = 1;
-        ssize_t w = write(fd, &one, sizeof one);
-        (void)w;
+    if (runloom_perhub_epoll()) {
+        /* Per-hub: poke ONLY the target hub's wake eventfd so its (and only its)
+         * idle epoll_wait breaks -- no cross-hub thundering herd.  NULL routes to
+         * the default pool.  Guard on lock_inited==2 (ACQUIRE, pairs with
+         * backend_create's publish) so we never read a never-touched pool's
+         * still-zero wake_efd.  If the target's eventfd isn't up, fall through to
+         * the shared eventfd (nested in every pool epoll) -- correct, just a herd. */
+        runloom_parker_pool_t *pool = runloom_parker_pool_for_hub(hub_opaque);
+        if (__atomic_load_n(&pool->lock_inited, __ATOMIC_ACQUIRE) == 2 &&
+            pool->wake_efd >= 0) {
+            uint64_t one = 1;
+            ssize_t w = write(pool->wake_efd, &one, sizeof one);
+            (void)w;
+            return;
+        }
+    }
+    {
+        int fd = __atomic_load_n(&runloom_pump_wake_fd, __ATOMIC_ACQUIRE);
+        if (fd >= 0) {
+            uint64_t one = 1;
+            ssize_t w = write(fd, &one, sizeof one);
+            (void)w;
+        }
     }
 #elif defined(RUNLOOM_OS_WINDOWS)
     (void)hub_opaque;                       /* one shared IOCP for all pumps */

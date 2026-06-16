@@ -1,0 +1,14 @@
+      32.91%  python3  libpython3.13t.so.1.0                       [.] _PyEval_EvalFrameDefault
+      21.00%  python3  libpython3.13t.so.1.0                       [.] _Py_DecRefSharedDebug
+       8.29%  python3  libpython3.13t.so.1.0                       [.] _PyEval_Vector
+       4.70%  python3  libpython3.13t.so.1.0                       [.] _PyObject_TryGetInstanceAttribute
+       4.14%  python3  libpython3.13t.so.1.0                       [.] _PyFrame_ClearLocals
+       2.71%  python3  libpython3.13t.so.1.0                       [.] _PyObject_GenericGetAttrWithDict
+       2.66%  python3  libpython3.13t.so.1.0                       [.] PyObject_GetAttr
+       2.63%  python3  libpython3.13t.so.1.0                       [.] _PyObject_GetMethod
+       1.57%  python3  [kernel.kallsyms]                           [k] do_syscall_64
+       1.23%  python3  libpython3.13t.so.1.0                       [.] _Py_TryIncrefCompare
+       0.87%  python3  libpython3.13t.so.1.0                       [.] _Py_dict_lookup_threadsafe
+       0.84%  python3  libc.so.6                                   [.] __GI___libc_write
+       0.69%  python3  [kernel.kallsyms]                           [k] __schedule
+       0.58%  python3  libpython3.13t.so.1.0                       [.] _PyObject_MaterializeManagedDict

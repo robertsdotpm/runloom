@@ -393,6 +393,24 @@ void runloom_mn_reset_after_fork(void)
     runloom_stack_autocap_reset();             /* sysmon gone -> forget the watermark */
 }
 
+/* EXPERIMENT (docs/dev/HUB_SCALING.md, A1a): pair-affinity placement.  When
+ * RUNLOOM_PAIR_AFFINITY is set, fiber index i is placed on hub (i>>1)%H instead
+ * of i%H, so an adjacent (2k, 2k+1) goroutine pair co-locates on ONE hub.  This
+ * is the probe for "is the profile's _Py_DecRefShared cost cross-hub object
+ * sharing?": co-locating a producer/consumer pair keeps the handoff object
+ * brc-local (no shared-refcount path).  Forced OFF under RUNLOOM_MN_SEED, whose
+ * controlled-replay barrier relies on the deterministic spawn_counter%H map. */
+static int runloom_pair_affinity_mode(void)
+{
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("RUNLOOM_PAIR_AFFINITY");
+        v = (e && *e && *e != '0') ? 1 : 0;
+        if (v && getenv("RUNLOOM_MN_SEED")) v = 0;
+    }
+    return v;
+}
+
 /* Internal core: pick hub, alloc g, set up coro, submit, bump counters.
  * Either callable (Python path) or c_fn+c_arg (C-only path) must be set,
  * not both.  Returns 0 on success, -1 on failure (errno set).  Python
@@ -413,7 +431,14 @@ static int runloom_mn_go_core(PyObject *callable, runloom_c_entry_fn c_fn,
         return -1;
     }
     n = __atomic_fetch_add(&runloom_mn_spawn_counter, 1, __ATOMIC_RELAXED);
-    hub_idx = (int)(n % runloom_hub_count);
+    if (runloom_pair_affinity_mode()) {
+        /* stride pairs together: prefer the explicit fiber index when present
+         * (go_n indexed / the bulk-path fallback), else the spawn counter. */
+        long key = (py_index >= 0) ? py_index : n;
+        hub_idx = (int)((key >> 1) % runloom_hub_count);
+    } else {
+        hub_idx = (int)(n % runloom_hub_count);
+    }
     h = &runloom_hubs[hub_idx];
     {   /* Backpressure: admit under the max-fibers limit. */
         int adm = runloom_fiber_admit();
@@ -670,9 +695,10 @@ static int runloom_mn_go_n_bulk(PyObject *callable, long n, size_t stack_size,
         if (use_grunq) tmpl.wake_state = RUNLOOM_WS_RUNNING;
 
         if (!nofields) {
+            int pair_aff = runloom_pair_affinity_mode();
             for (i = 0; i < n; i++) {
                 runloom_g_t *g = (runloom_g_t *)(garena + (size_t)i * gsz);
-                hub = (int)(i % H);
+                hub = pair_aff ? (int)((i >> 1) % H) : (int)(i % H);
                 memcpy(g, &tmpl, gsz);            /* <-- template memcpy */
                 g->owner = &runloom_hubs[hub].sched;
                 g->id    = goid_base + (long long)i;

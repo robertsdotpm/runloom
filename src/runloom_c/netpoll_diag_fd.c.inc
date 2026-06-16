@@ -210,6 +210,14 @@ static size_t         runloom_fd_pending_wake_cap = 0;
  * Accessed only under runloom_pool.lock, like the registration bitmap. */
 static unsigned char *runloom_fd_armed = NULL;
 
+/* Per-fd owning parker-pool INDEX for the per-hub epoll backend
+ * (RUNLOOM_PERHUB_EPOLL): which pool's epoll_fd this fd is registered in, so
+ * release_if_idle DELs from the right epoll and a cross-hub re-park MODs the
+ * OWNING epoll (where the fd physically lives), not the current hub's.  0xFF =
+ * none.  Shares the pending-wake fd index space + cap; accessed under
+ * runloom_pool.lock like runloom_fd_armed.  NULL/unused on the shared path. */
+static unsigned char *runloom_fd_epoll_pool = NULL;
+
 /* Upper/lower bounds on the preallocated fd capacity.  4M fds = 4MB
  * pending-wake array + 512KB registration bitmap, worst case. */
 #define RUNLOOM_FD_CAP_MIN   1024u
@@ -260,15 +268,23 @@ static void runloom_fd_arrays_init(void)
     pw = (unsigned char *)calloc(cap_fds, 1);
     bm = (unsigned char *)calloc(bm_bytes, 1);
     am = (unsigned char *)calloc(cap_fds, 1);
-    if (pw == NULL || bm == NULL || am == NULL) {
+    {
+    /* Per-hub epoll ownership map: 0xFF (= "none") default, so calloc's zero
+     * (which is a VALID pool index, hub 0) is not mistaken for an owner. */
+    unsigned char *ep = (unsigned char *)malloc(cap_fds);
+    if (pw == NULL || bm == NULL || am == NULL || ep == NULL) {
         free(pw);
         free(bm);
         free(am);
+        free(ep);
         return;   /* caps stay 0; set/consume/bit_* bounds-check to no-ops */
     }
+    memset(ep, 0xFF, cap_fds);
+    runloom_fd_epoll_pool           = ep;
     runloom_fd_registered_bm        = bm;
     runloom_fd_registered_cap_bytes = bm_bytes;
     runloom_fd_armed                = am;
+    }
     /* Publish base before cap so the lock-free consumer that loads cap
      * (ACQUIRE) and sees it non-zero is guaranteed to see this base. */
     __atomic_store_n(&runloom_fd_pending_wake, pw, __ATOMIC_RELEASE);
@@ -418,6 +434,25 @@ static int runloom_fd_armed_set(int fd, int mask)
     runloom_fd_armed[fd] = (unsigned char)(mask & (RUNLOOM_NETPOLL_READ |
                                                    RUNLOOM_NETPOLL_WRITE));
     return 0;
+}
+
+/* Per-fd owning-pool accessors (RUNLOOM_PERHUB_EPOLL).  Caller MUST hold
+ * runloom_pool.lock, like the arm-mask accessors.  get returns -1 for "none". */
+static int runloom_fd_epoll_pool_get(int fd)
+{
+    if (fd < 0 || runloom_fd_epoll_pool == NULL) return -1;
+    if ((size_t)fd >= runloom_fd_pending_wake_cap) return -1;
+    {
+        unsigned char v = runloom_fd_epoll_pool[fd];
+        return (v == 0xFFu) ? -1 : (int)v;
+    }
+}
+
+static void runloom_fd_epoll_pool_set(int fd, int idx)
+{
+    if (fd < 0 || runloom_fd_epoll_pool == NULL) return;
+    if ((size_t)fd >= runloom_fd_pending_wake_cap) return;
+    runloom_fd_epoll_pool[fd] = (idx < 0 || idx > 0xFE) ? 0xFFu : (unsigned char)idx;
 }
 
 #if defined(RUNLOOM_HAVE_EPOLL)
