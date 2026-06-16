@@ -62,6 +62,16 @@ int runloom_tstate_in_destruction(PyThreadState *ts);
 uintptr_t runloom_critsec_suspend(void *tstate);
 void      runloom_critsec_restore(void *tstate, uintptr_t saved);
 
+/* EXPERIMENT (docs/dev/HUB_SCALING.md, A1b): make `op` immortal so its refcount
+ * is frozen and never touched again.  Cross-hub incref/decref on a shared,
+ * long-lived instance (the harness/channel objects every goroutine calls into)
+ * then become no-ops instead of _Py_TryIncRefShared / _Py_DecRefShared atomics
+ * -- the dominant cross-hub cost the hub-scaling audit measured.  ONLY safe for
+ * objects that live for the whole run (immortal objects are never freed).
+ * No-op on pre-3.13 / non-core builds.  Lives in this Py_BUILD_CORE TU because
+ * _Py_SetImmortal is internal. */
+void runloom_immortalize(PyObject *op);
+
 #ifdef __cplusplus
 }
 #endif

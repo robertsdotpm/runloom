@@ -212,6 +212,10 @@ static PyMethodDef module_methods[] = {
      "go_n(fn, n, stack_size=0): bulk-spawn n fibers all running fn(), "
      "looping the spawn core in C (skips n Python->C dispatches).  fn still "
      "runs as Python in each fiber."},
+    {"immortalize", m_immortalize, METH_O,
+     "immortalize(obj) -> obj: freeze obj's refcount (immortal) so cross-hub "
+     "incref/decref become no-ops.  EXPERIMENT (HUB_SCALING.md A1b); ONLY for "
+     "objects that live the whole run -- immortal objects are never freed."},
     {"mn_run",      m_mn_run,      METH_NOARGS,
      "mn_run(): wait for all gs to complete.  Returns total completed."},
     {"mn_fini",     m_mn_fini,     METH_NOARGS,

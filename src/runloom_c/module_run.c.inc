@@ -340,6 +340,19 @@ static PyObject *m_go_n(PyObject *self, PyObject *args, PyObject *kw)
     Py_RETURN_NONE;
 }
 
+/* EXPERIMENT (docs/dev/HUB_SCALING.md, A1b): immortalize a shared long-lived
+ * object so cross-hub incref/decref on it become no-ops.  Implemented in the
+ * Py_BUILD_CORE iframe TU (declared here locally -- module.c does not pull
+ * runloom_iframe.h). */
+extern void runloom_immortalize(PyObject *op);
+
+static PyObject *m_immortalize(PyObject *self, PyObject *op)
+{
+    (void)self;
+    runloom_immortalize(op);
+    return Py_NewRef(op);
+}
+
 static PyObject *m_mn_run(PyObject *self, PyObject *unused)
 {
     Py_ssize_t completed;
