@@ -75,7 +75,7 @@ def op_pipe(H, rng, state, wid=0):
 
 def op_subprocess(H, rng, state, wid=0):
     payload = rng.randbytes(rng.randint(1, 1024))
-    proc = procutil.popen(["cat"], stdin=subprocess.PIPE,
+    proc = procutil.popen(procutil.CAT, stdin=subprocess.PIPE,
                           stdout=subprocess.PIPE, running=H.running)
     out, _ = proc.communicate(payload)
     return H.check(out == payload, "subprocess echo mismatch")

@@ -7,7 +7,6 @@ signal number.
 
 Stresses: error propagation, wait status decoding, reaping.
 """
-import signal
 import subprocess
 
 import procutil
@@ -20,15 +19,18 @@ def worker(H, wid, rng, state):
     while H.running():
         pick = rng.random()
         if pick < 0.4:
-            cmd = ["sh", "-c", "exit 0"]
+            cmd = procutil.exit_cmd(0)
             expected = 0
         elif pick < 0.8:
             code = rng.randint(1, 120)
-            cmd = ["sh", "-c", "exit {0}".format(code)]
+            cmd = procutil.exit_cmd(code)
             expected = code
         else:
-            cmd = ["sh", "-c", "kill -ABRT $$"]
-            expected = -signal.SIGABRT
+            # Abnormal termination: Unix dies from SIGABRT (rc == -SIGABRT);
+            # Windows has no signals, so abort_cmd models it as a distinguished
+            # nonzero status.  Both return (argv, expected) so the classifier
+            # below stays platform-agnostic.
+            cmd, expected = procutil.abort_cmd()
         try:
             proc = procutil.popen(cmd, running=H.running)
             proc.wait()

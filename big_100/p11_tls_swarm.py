@@ -8,21 +8,51 @@ Stresses: the OpenSSL blocking paths (do_handshake / SSL_read / SSL_write made
 cooperative by monkey), socket+TLS integration, a CPU/I-O mix.
 """
 import os
+import shutil
 import socket
 import ssl
 import subprocess
+import sys
 import tempfile
 
 import harness
 import netutil
 
 
+def find_openssl():
+    """Locate the openssl CLI.  It is on PATH on mac/Linux; on Windows it is
+    usually present only under Git-for-Windows (shipped, but NOT on PATH), so
+    probe there before giving up.  Returns the executable path or None.
+
+    Both Git binaries mint a valid '/CN=localhost' cert with the args below
+    (verified on the Win11 test box); the mingw64 build is the native one and
+    is preferred over the MSYS usr/bin build, whose runtime can rewrite a
+    leading-slash argument via path-conversion."""
+    exe = shutil.which("openssl")
+    if exe:
+        return exe
+    if sys.platform == "win32":
+        for cand in (
+                r"C:\Program Files\Git\mingw64\bin\openssl.exe",
+                r"C:\Program Files\Git\usr\bin\openssl.exe",
+                r"C:\Program Files (x86)\Git\mingw64\bin\openssl.exe",
+                r"C:\Program Files (x86)\Git\usr\bin\openssl.exe"):
+            if os.path.exists(cand):
+                return cand
+    return None
+
+
 def make_cert():
     d = tempfile.mkdtemp(prefix="big100_tls_")
     cert = os.path.join(d, "cert.pem")
     key = os.path.join(d, "key.pem")
+    exe = find_openssl()
+    if exe is None:
+        raise RuntimeError(
+            "openssl CLI not found on PATH or under Git-for-Windows; it is "
+            "needed to mint the self-signed test cert for p11_tls_swarm")
     subprocess.run(
-        ["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+        [exe, "req", "-x509", "-newkey", "rsa:2048", "-nodes",
          "-keyout", key, "-out", cert, "-days", "1",
          "-subj", "/CN=localhost"],
         check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

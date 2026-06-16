@@ -26,7 +26,7 @@ def worker(H, wid, rng, state):
     while H.running():
         try:
             proc = procutil.popen(
-                ["sleep", "{0:.2f}".format(rng.uniform(0.02, 0.3))],
+                procutil.sleep_cmd(rng.uniform(0.02, 0.3)),
                 running=H.running)
         except OSError:
             break

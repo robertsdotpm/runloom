@@ -8,9 +8,18 @@ goroutine forever.
 Stresses: recvfrom/sendto, timeouts via wait_fd, packet loss handling.
 """
 import socket
+import sys
 
 import harness
 import netutil
+
+# Windows' UDP socket ceiling is the non-paged pool (~16k live sockets on the
+# test box before WSAENOBUFS / WinError 10055), NOT an fd rlimit.  Each worker
+# holds its socket for its whole life, so the sweep's --funcs 100000 would open
+# 100k at once and exhaust it.  Cap LIVE workers on Windows to the designed
+# scale; mac/Linux open them all (1M verified), absorbing the over-scale via
+# memory compression / larger buffers.  One socket per worker here.
+_WIN_MAX_LIVE = 8000
 
 
 def setup(H):
@@ -76,7 +85,8 @@ def client(H, wid, rng, state):
 
 
 def body(H):
-    H.run_pool(H.funcs, client, H.state)
+    mc = _WIN_MAX_LIVE if sys.platform == "win32" else H.max_concurrent
+    H.run_pool(H.funcs, client, H.state, max_concurrent=mc)
 
 
 if __name__ == "__main__":

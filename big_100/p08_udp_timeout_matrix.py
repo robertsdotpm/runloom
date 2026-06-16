@@ -7,8 +7,17 @@ dead path must not block the goroutines making progress on the live path.
 
 Stresses: timeout handling, scheduler wakeups, ICMP-unreachable error delivery.
 """
+import sys
+
 import harness
 import netutil
+
+# Windows' UDP socket ceiling is the non-paged pool (~16k live sockets on the
+# test box before WSAENOBUFS / WinError 10055), NOT an fd rlimit.  This worker
+# opens TWO sockets (live + dead), so the sweep's --funcs 100000 would open 200k
+# at once and exhaust it.  Cap LIVE workers on Windows so live-socket count
+# stays well under the ceiling; mac/Linux open them all (1M verified).
+_WIN_MAX_LIVE = 5000
 
 # At 100k goroutines each worker opens 2 UDP sockets, producing 200k sockets
 # all binding to 127.0.0.1.  The default ephemeral port range is only ~28k
@@ -96,7 +105,8 @@ def client(H, wid, rng, state):
 
 
 def body(H):
-    H.run_pool(H.funcs, client, H.state)
+    mc = _WIN_MAX_LIVE if sys.platform == "win32" else H.max_concurrent
+    H.run_pool(H.funcs, client, H.state, max_concurrent=mc)
 
 
 if __name__ == "__main__":

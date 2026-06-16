@@ -19,7 +19,7 @@ def worker(H, wid, rng, state):
     H.sleep(rng.random() * 0.5)
     while H.running():
         try:
-            proc = procutil.popen(["sleep", "3600"], running=H.running)
+            proc = procutil.popen(procutil.sleep_cmd(3600), running=H.running)
         except OSError as e:
             if not H.running():
                 break

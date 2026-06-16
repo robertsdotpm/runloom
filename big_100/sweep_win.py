@@ -36,6 +36,14 @@ def prog_num(path):
 progs = sorted(glob.glob(os.path.join(HERE, "p[0-9]*.py")), key=prog_num)
 progs = [p for p in progs if prog_num(p) <= 100]   # first 100 only
 
+# Optional targeted subset: RUNLOOM_SWEEP_PROGS="7 8 11 26" (space/comma list of
+# program numbers) restricts the run to those, for fast fix-and-recheck cycles
+# without re-running the whole first-100.  Unset -> full first-100.
+_only = os.environ.get("RUNLOOM_SWEEP_PROGS", "").replace(",", " ").split()
+if _only:
+    want = {int(x) for x in _only}
+    progs = [p for p in progs if prog_num(p) in want]
+
 env = dict(os.environ)
 env["PYTHON_GIL"] = "0"
 env["PYTHONPATH"] = os.path.join(ROOT, "src")

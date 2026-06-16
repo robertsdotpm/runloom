@@ -42,7 +42,7 @@ def worker(H, wid, rng, state):
             s1.sendall(b"hi")
             s2.recv(2)
             if rng.random() < 0.1:
-                proc = procutil.popen(["true"], running=H.running)
+                proc = procutil.popen(procutil.TRUE, running=H.running)
             # Randomly explode before the clean close to test the finally path.
             if rng.random() < 0.2:
                 raise Boom()

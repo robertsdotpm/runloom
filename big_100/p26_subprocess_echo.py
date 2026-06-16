@@ -19,7 +19,7 @@ def worker(H, wid, rng, state):
     while H.running():
         payload = rng.randbytes(rng.randint(16, 4096))
         try:
-            proc = procutil.popen(["cat"], stdin=subprocess.PIPE,
+            proc = procutil.popen(procutil.CAT, stdin=subprocess.PIPE,
                                     stdout=subprocess.PIPE,
                                     running=H.running)
             out, _ = proc.communicate(payload)
