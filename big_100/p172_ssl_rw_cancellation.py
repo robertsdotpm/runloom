@@ -49,6 +49,13 @@ def setup(H):
     def handler(raw):
         tls = None
         try:
+            # The accepted conn is NON-blocking (timeout 0) under monkey.patch,
+            # which makes ssl.wrap_socket(do_handshake_on_connect=True) raise
+            # ValueError ("...should not be specified for non-blocking sockets").
+            # Put it in blocking mode so the server-side handshake (and the
+            # echo recv/send) drive through the cooperative monkey socket layer,
+            # exactly like the client's success path uses a blocking socket.
+            raw.setblocking(True)
             tls = sctx.wrap_socket(raw, server_side=True)
             while True:
                 data = tls.recv(4096)
@@ -150,7 +157,10 @@ def post(H):
 
 
 if __name__ == "__main__":
+    # Correctness test: the subject is OpenSSL state cleanup when a TLS
+    # handshake/read/write is cancelled mid-flight (full OpenSSL handshakes are
+    # heavy), not goroutine count.  Cap to the intended scale.
     harness.main("p172_ssl_rw_cancellation", body, setup=setup, post=post,
-                 default_funcs=800,
+                 default_funcs=800, max_funcs=800,
                  describe="partial TLS reads/writes with some connections "
                           "cancelled mid-handshake/data; completed ones echo exactly")

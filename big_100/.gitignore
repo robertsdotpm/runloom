@@ -2,3 +2,4 @@ logs/
 *.log
 __pycache__/
 *.pyc
+_scale_logs/
