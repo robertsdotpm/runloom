@@ -1,0 +1,28 @@
+Create a shell program called `runloom`.
+
+PURPOSE
+  It takes a single argument -- a Python script -- and executes it on the
+  system's free-threaded Python with my `pygo` C extension built and importable.
+
+ONE-TIME SETUP / STORAGE
+  1. I have a GitHub repo called `pygo`. Clone it to a location on my system
+     where coding agents can't touch it (outside my normal working tree).
+  2. Store any metadata the tool needs (e.g. info about installed packages) in
+     that protected location too.
+
+ON EVERY INVOCATION `runloom <script.py>`
+  3. Pull the latest from the `pygo` repo so it's up to date.
+  4. Find the system's free-threaded Python (the current pyenv 3.13t build).
+  5. Build the C extension -- but only rebuild when something actually changed;
+     otherwise reuse the existing build.
+  6. Run the given script with that interpreter, passing all the flags /
+     environment needed to load the built extension.
+
+PACKAGE MANAGEMENT SUBCOMMANDS
+  7. `runloom install <pkg>` -- install <pkg> in editable / developer mode
+     (`pip install -e`) so it's available to all subsequent `runloom` runs.
+     Provide a matching `runloom uninstall <pkg>`.
+  8. Keep installed packages SEPARATE from the global interpreter that runs the
+     tool itself -- they must not conflict with the existing pyenv setup, and
+     they must NOT be loaded when `runloom`'s own machinery runs (only when
+     running a target script).
