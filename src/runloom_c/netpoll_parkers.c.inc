@@ -232,15 +232,18 @@ static runloom_parker_pool_t *runloom_parker_pool_for_hub(void *hub_opaque)
 
 /* RUNLOOM_PERHUB_EPOLL: select the per-hub epoll backend (each hub polls its own
  * epoll + wake eventfd) over the single shared runloom_epoll_fd.  Axis B / R1+R2;
- * see docs/dev/PERHUB_EPOLL.md.  Resolved once; default OFF (shared path stays
- * live until the per-hub path is validated).  Always 0 off the epoll backend. */
+ * see docs/dev/PERHUB_EPOLL.md.  Resolved once; DEFAULT ON -- a measured +17-28%
+ * saturation win (external loadgen -> isolated server_runloom).
+ * RUNLOOM_PERHUB_EPOLL=0 forces the legacy shared epoll.  Always 0 off the epoll
+ * backend. */
 static int runloom_perhub_epoll(void)
 {
 #if defined(RUNLOOM_HAVE_EPOLL)
     static int v = -1;
     if (v < 0) {
         const char *e = getenv("RUNLOOM_PERHUB_EPOLL");
-        v = (e && *e && *e != '0') ? 1 : 0;
+        /* default ON; only an explicit "0" disables. */
+        v = (e != NULL && e[0] == '0' && e[1] == '\0') ? 0 : 1;
     }
     return v;
 #else
