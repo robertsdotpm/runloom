@@ -113,6 +113,28 @@ static int runloom_netpoll_register(int fd, int events)
          * this hub's epoll, because that is where it physically is. */
         int owner = runloom_fd_epoll_pool_get(fd);
         ep = (owner >= 0) ? runloom_pools[owner].epoll_fd : runloom_epoll_fd;
+        /* CROSS-POOL STALE ARM: the arm cache (runloom_fd_armed / _epoll_pool) is
+         * a process-global keyed by fd NUMBER and is NOT reset when the scheduler
+         * mode changes.  A pooled wake-pipe / reused fd registered into one pool's
+         * epoll (e.g. the DEFAULT pool during a single-thread run()) can be re-used
+         * by a fiber on a DIFFERENT hub in a later M:N run(); the stale arm makes
+         * the "already armed" skip below fire, so the fd is never EPOLL_CTL_ADD'd
+         * into THIS hub's epoll.  It stays only in the old owner's epoll -- which
+         * no current hub waits on -- so its readiness (an os.write wake-byte) is
+         * delivered to nobody and the parked fiber hangs forever (test_monkey_
+         * offload single-thread-then-M:N).  When the recorded owner is not THIS
+         * hub's pool, the registration must MIGRATE: DEL from the old epoll and
+         * re-ADD fresh into ours.  Force the fresh-ADD path by treating it as
+         * unarmed (cur=0) so the ADD + owner record below target my_pool_idx.
+         * owner<0 (shared fallback) is already correct for THIS hub since the
+         * fallback epoll is shared, so only a >=0 owner mismatch migrates. */
+        if (owner >= 0 && owner != my_pool_idx) {
+            (void)epoll_ctl(ep, EPOLL_CTL_DEL, fd, NULL);
+            cur = 0;                 /* stranded in a foreign epoll -> fresh ADD */
+            target = need;
+            ep = (my_pool_idx >= 0) ? runloom_pools[my_pool_idx].epoll_fd
+                                    : runloom_epoll_fd;
+        }
     }
     if (cur != 0 && target == cur) {
         RUNLOOM_RUNLOCK(&runloom_pool.lock, RUNLOOM_RANK_PARKER_POOL);
