@@ -38,6 +38,20 @@ static void runloom_pool_backend_create(runloom_parker_pool_t *pool)
                     close(efd);
                 }
             }
+            /* Nest the shared runloom_epoll_fd (io_uring ring eventfds + the
+             * legacy generic wake live there) so this hub's pump drains it too:
+             * a ready fd in the shared set makes runloom_epoll_fd readable in THIS
+             * pool's epoll, and the pump drains it non-blocking.  The shared set
+             * is off the hot socket path (sockets register per-hub directly), so
+             * the bounded herd there is fine.  runloom_netpoll_init nests into
+             * already-created pools too, covering either init order. */
+            if (runloom_epoll_fd >= 0) {
+                struct epoll_event nev;
+                nev.events  = EPOLLIN;
+                nev.data.fd = runloom_epoll_fd;
+                (void)epoll_ctl(pool->epoll_fd, EPOLL_CTL_ADD,
+                                runloom_epoll_fd, &nev);
+            }
         }
     }
 #endif
@@ -301,6 +315,23 @@ int runloom_netpoll_init(void)
 #if defined(RUNLOOM_HAVE_EPOLL)
     runloom_epoll_fd = epoll_create1(EPOLL_CLOEXEC);
     if (runloom_epoll_fd < 0) { RUNLOOM_RUNLOCK(&runloom_pool.lock, RUNLOOM_RANK_PARKER_POOL); return -1; }
+    /* Per-hub epoll (RUNLOOM_PERHUB_EPOLL): nest the freshly-created shared epoll
+     * into any pool whose own epoll was already built (backend_create can run
+     * lazily before this init), so every hub's pump drains the shared io_uring
+     * set.  Pools created AFTER this nest it themselves in backend_create. */
+    if (runloom_perhub_epoll()) {
+        size_t pi;
+        for (pi = 0; pi < (size_t)RUNLOOM_PARKER_POOL_MAX; pi++) {
+            runloom_parker_pool_t *p = &runloom_pools[pi];
+            if (p->epoll_fd >= 0) {
+                struct epoll_event nev;
+                nev.events  = EPOLLIN;
+                nev.data.fd = runloom_epoll_fd;
+                (void)epoll_ctl(p->epoll_fd, EPOLL_CTL_ADD,
+                                runloom_epoll_fd, &nev);
+            }
+        }
+    }
 #elif defined(RUNLOOM_HAVE_KQUEUE)
     /* Per-hub kqueue: the default pool's kqueue + self-pipe were already created
      * by the lock_ensure_inited(&runloom_pool) call above; each per-hub pool
