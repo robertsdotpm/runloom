@@ -208,6 +208,18 @@ void runloom_netpoll_cancel_fd(int fd)
     for (i = 0; i < RUNLOOM_PARKER_POOL_MAX; i++) {
         runloom_parker_pool_t *pool = &runloom_pools[i];
         runloom_parked_t *p, *next;
+        /* Skip pools whose lock was never initialized.  An unused / not-yet-up
+         * pool slot holds a ZERO-initialized mutex; locking that is a benign
+         * no-op on POSIX (a zeroed pthread_mutex_t is valid) but a hard access
+         * violation inside EnterCriticalSection on Windows.  This fires when a
+         * socket is closed EARLY -- e.g. in a project's setup(), before every
+         * parker pool is brought up -- through the monkey close hook while
+         * runloom_win_use_iocp is still 0 (backend selection not finished), so
+         * the IOCP early-return above is skipped and we reach this loop (the p08
+         * setup AV).  Matches the guard runloom_netpoll_cancel_all_parked and
+         * the netpoll pump helpers already use. */
+        if (__atomic_load_n(&pool->lock_inited, __ATOMIC_ACQUIRE) != 2)
+            continue;
         RUNLOOM_RLOCK(&pool->lock, RUNLOOM_RANK_PARKER_POOL);
         if ((size_t)fd < pool->by_fd_cap) {
             p = pool->by_fd[fd];
