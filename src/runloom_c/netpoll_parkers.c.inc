@@ -239,13 +239,19 @@ static runloom_parker_pool_t *runloom_parker_pool_for_hub(void *hub_opaque)
 static int runloom_perhub_epoll(void)
 {
 #if defined(RUNLOOM_HAVE_EPOLL)
+    /* Resolved-once cache, read on the hot path by every hub -> the lazy init
+     * must be atomic (RELAXED is enough: the value is idempotent, so a racing
+     * recompute is harmless; we only need a non-torn read/write).  Matches
+     * runloom_netpoll_dbg_stale_check's pattern. */
     static int v = -1;
-    if (v < 0) {
+    int cur = __atomic_load_n(&v, __ATOMIC_RELAXED);
+    if (cur < 0) {
         const char *e = getenv("RUNLOOM_PERHUB_EPOLL");
         /* default ON; only an explicit "0" disables. */
-        v = (e != NULL && e[0] == '0' && e[1] == '\0') ? 0 : 1;
+        cur = (e != NULL && e[0] == '0' && e[1] == '\0') ? 0 : 1;
+        __atomic_store_n(&v, cur, __ATOMIC_RELAXED);
     }
-    return v;
+    return cur;
 #else
     return 0;
 #endif

@@ -175,6 +175,11 @@ const char *runloom_netpoll_backend(void);
  * into a hub ring.  -1 on non-epoll backends.  Forces netpoll init. */
 int runloom_netpoll_epoll_fd(void);
 
+/* The epoll fd the CURRENT hub waits on: per-hub (pool->epoll_fd) under
+ * RUNLOOM_PERHUB_EPOLL, else the shared one.  The io_uring-as-loop F_EPOLL bridge
+ * must poll THIS so a hub's own socket fds are observed in per-hub mode. */
+int runloom_netpoll_hub_epoll_fd(void);
+
 /* Test-only Windows netpoll fault-injection introspection (see netpoll.c).
  * runloom_fault_count returns how many times the named site ("WSAPOLL"/"SELECT"/
  * "IOCP_WAIT"/"IOCP_SUBMIT") injected an error (-1 for an unknown name / a

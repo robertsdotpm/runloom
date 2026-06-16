@@ -160,6 +160,29 @@ int runloom_netpoll_epoll_fd(void)
 #endif
 }
 
+/* The epoll fd the CURRENT hub waits on for the io_uring-as-loop F_EPOLL bridge.
+ * Under RUNLOOM_PERHUB_EPOLL the hub's socket fds live in its OWN pool->epoll_fd
+ * (which also NESTS the shared epoll, so io_uring eventfds still reach it), so the
+ * LOOP ring must poll THAT, not the shared runloom_epoll_fd -- polling the shared
+ * one would never see this hub's socket readiness and stall I/O (the LOOP+MS echo
+ * server only accepted/echoed its first connection).  Falls back to the shared
+ * epoll when per-hub is off or the pool epoll didn't come up. */
+int runloom_netpoll_hub_epoll_fd(void)
+{
+#if defined(RUNLOOM_HAVE_EPOLL)
+    if (runloom_netpoll_init() != 0) return -1;
+    if (runloom_perhub_epoll()) {
+        runloom_parker_pool_t *pool =
+            runloom_parker_pool_for_hub(runloom_mn_current_hub_opaque());
+        runloom_parker_pool_lock_ensure_inited(pool);
+        if (pool->epoll_fd >= 0) return pool->epoll_fd;
+    }
+    return runloom_epoll_fd;
+#else
+    return -1;
+#endif
+}
+
 /* ---- netpoll syscall fault injection (test-only) ----------------------- *
  * Where strace's `-e inject=` drives the Linux epoll campaign, the platforms
  * WITHOUT a syscall-injecting tracer (Windows; FreeBSD/macOS kqueue) gate IN

@@ -211,7 +211,7 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
              * loop mode.  On arm failure, discard the ring and fall back to the
              * epoll pump (loop_wake_fd stays -1 so the idle path won't loop). */
             int wfd = runloom_iouring_loop_hub_arm(h->iouring_ring,
-                                                   runloom_netpoll_epoll_fd());
+                                                   runloom_netpoll_hub_epoll_fd());
             if (wfd >= 0) {
                 h->loop_wake_fd    = wfd;
                 h->iouring_eventfd = -1;
