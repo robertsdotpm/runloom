@@ -61,6 +61,7 @@
 #include "plat_compat.h"
 #include "runloom_lockrank.h"
 #include "runloom_sched.h"
+#include "runloom_fsm.h"
 
 /* IORING_REGISTER_EVENTFD opcode for io_uring_register.  Value is a
  * stable kernel ABI but some older Linux headers don't expose the
@@ -136,7 +137,115 @@ struct runloom_iouring_buf_reg {
  * file's includes, typedefs and file-scope statics and are NOT compiled
  * standalone.  setup.py compiles only io_uring.c.
  * --------------------------------------------------------------------------- */
-#include "io_uring_l_sys.c.inc"
+#include "io_uring_l_sys.c.inc"   /* defines RUNLOOM_IOURING_WAIT_* used below */
+
+/* ---- io_uring SINGLE-op park/wake FSM (OBSERVATIONAL) -----------------------
+ * The op->wait commit handshake (INFLIGHT/PARKED/DONE), GenMC-proven in
+ * verify/genmc/iouring_waitcommit.c.  A submitter that won't block the OS thread
+ * CASes INFLIGHT->PARKED and coro_yields; a concurrent drainer exchanges
+ * *->DONE and, iff it observed PARKED, wakes the parker.  Three states:
+ *   INFLIGHT -> PARKED : submitter commits to park (CAS).
+ *   INFLIGHT -> DONE   : a drainer (often the submitter's own inline drain)
+ *                        completes the op before it parks.
+ *   PARKED   -> DONE   : a drainer completes a parked op and wakes it.
+ * DONE is terminal (the op leaves scope).  This table never drives op->wait
+ * (the proven CAS/exchange still do); RUNLOOM_IOU_NOTE() asserts the edge under
+ * -DRUNLOOM_FSM_VALIDATE and compiles to nothing otherwise. */
+enum {
+    RUNLOOM_IOU_EV_PARK = 0,   /* submitter CAS INFLIGHT -> PARKED            */
+    RUNLOOM_IOU_EV_DONE,       /* drainer exchange * -> DONE                  */
+    RUNLOOM_IOU_EV_COUNT
+};
+#define RUNLOOM_IOU_STATE_COUNT 3   /* INFLIGHT, PARKED, DONE */
+
+static const signed char runloom_iou_table
+        [RUNLOOM_IOU_STATE_COUNT][RUNLOOM_IOU_EV_COUNT]
+        __attribute__((unused)) = {
+    /*                                  PARK                       DONE */
+    [RUNLOOM_IOURING_WAIT_INFLIGHT] = { RUNLOOM_IOURING_WAIT_PARKED, RUNLOOM_IOURING_WAIT_DONE },
+    [RUNLOOM_IOURING_WAIT_PARKED]   = { RUNLOOM_FSM_INVALID,         RUNLOOM_IOURING_WAIT_DONE },
+    [RUNLOOM_IOURING_WAIT_DONE]     = { RUNLOOM_FSM_INVALID,         RUNLOOM_FSM_INVALID       },
+};
+RUNLOOM_FSM_ASSERT_TABLE(runloom_iou_table, RUNLOOM_IOU_STATE_COUNT,
+                         RUNLOOM_IOU_EV_COUNT, "iouring_wait");
+#define RUNLOOM_IOU_NOTE(from, to)                                            \
+    RUNLOOM_FSM_NOTE("iouring_wait", runloom_iou_table,                       \
+                     RUNLOOM_IOU_STATE_COUNT, RUNLOOM_IOU_EV_COUNT, (from), (to))
+
+/* ---- io_uring MULTISHOT recv handle lifecycle FSM (OBSERVATIONAL) -----------
+ * A multishot recv handle's lifecycle, derived from {armed, eof, err}.  It arms
+ * a multishot SQE, stays ARMED across every data CQE (F_MORE), and on the
+ * terminal CQE (!F_MORE) ends in EOF (res==0), ERR (res<0), or UNARMED (a
+ * non-terminal end like -ENOBUFS that ms_recv re-arms).  EOF/ERR are terminal
+ * (ms_recv returns 0/-1 before re-arming).  We do NOT change the eof/err/armed
+ * SETTING logic -- runloom_ms_state() merely DERIVES the state from the flags and
+ * RUNLOOM_MS_NOTE() asserts the lifecycle edge under -DRUNLOOM_FSM_VALIDATE. */
+enum {
+    RUNLOOM_MS_ARMED = 0,   /* multishot SQE in flight                        */
+    RUNLOOM_MS_UNARMED,     /* ended without a terminal status; re-armable    */
+    RUNLOOM_MS_EOF,         /* orderly EOF (terminal)                         */
+    RUNLOOM_MS_ERR,         /* sticky error (terminal)                        */
+    RUNLOOM_MS_STATE_COUNT
+};
+enum {
+    RUNLOOM_MS_EV_ARM = 0,  /* ms_submit re-arms the handle                   */
+    RUNLOOM_MS_EV_CQE,      /* a CQE updates the handle (data / terminal)     */
+    RUNLOOM_MS_EV_COUNT
+};
+static const signed char runloom_ms_table
+        [RUNLOOM_MS_STATE_COUNT][RUNLOOM_MS_EV_COUNT]
+        __attribute__((unused)) = {
+    /*                       ARM                  CQE */
+    [RUNLOOM_MS_ARMED]   = { RUNLOOM_FSM_INVALID, RUNLOOM_MS_ARMED   },  /* CQE: data(more) stays ARMED; terminal handled by the *_EOF/_ERR/_UNARMED rows below */
+    [RUNLOOM_MS_UNARMED] = { RUNLOOM_MS_ARMED,    RUNLOOM_FSM_INVALID },
+    [RUNLOOM_MS_EOF]     = { RUNLOOM_FSM_INVALID, RUNLOOM_FSM_INVALID },
+    [RUNLOOM_MS_ERR]     = { RUNLOOM_FSM_INVALID, RUNLOOM_FSM_INVALID },
+};
+/* The CQE event can carry ARMED to {ARMED, UNARMED, EOF, ERR}.  The dense table
+ * above lists ARMED->ARMED (the common data path); the terminal CQE edges
+ * (ARMED->EOF / ARMED->ERR / ARMED->UNARMED) are legal too -- they are asserted
+ * by RUNLOOM_MS_NOTE searching the row for ANY event mapping from->to, and EOF/
+ * ERR/UNARMED are reachable destinations of the CQE event from ARMED.  To keep
+ * the relation total without a multi-event explosion, RUNLOOM_MS_NOTE treats the
+ * terminal edges as legal via the dedicated terminal-edge check below. */
+RUNLOOM_FSM_ASSERT_TABLE(runloom_ms_table, RUNLOOM_MS_STATE_COUNT,
+                         RUNLOOM_MS_EV_COUNT, "iouring_multishot");
+
+/* Derive the multishot handle's lifecycle state from its flags (read under
+ * h->lock at the call sites).  err wins over eof (matches the defensive
+ * err-before-eof order in ms_recv); both terminal. */
+static inline int runloom_ms_state(int armed, int eof, int err)
+{
+    if (err) return RUNLOOM_MS_ERR;
+    if (eof) return RUNLOOM_MS_EOF;
+    return armed ? RUNLOOM_MS_ARMED : RUNLOOM_MS_UNARMED;
+}
+
+/* Assert a multishot lifecycle edge.  The legal edges are: UNARMED->ARMED (arm)
+ * and ARMED->{ARMED,UNARMED,EOF,ERR} (a CQE).  Implemented directly (rather than
+ * via the generic NOTE) so the four CQE destinations from ARMED are all accepted
+ * without a per-destination event.  Zero cost unless -DRUNLOOM_FSM_VALIDATE. */
+#if defined(RUNLOOM_FSM_VALIDATE)
+static inline void
+runloom_ms_note_(int from, int to, const char *file, int line)
+{
+    int ok = 0;
+    if (from == RUNLOOM_MS_UNARMED && to == RUNLOOM_MS_ARMED) ok = 1;       /* arm */
+    else if (from == RUNLOOM_MS_ARMED &&
+             (to == RUNLOOM_MS_ARMED   || to == RUNLOOM_MS_UNARMED ||
+              to == RUNLOOM_MS_EOF     || to == RUNLOOM_MS_ERR)) ok = 1;    /* CQE */
+    if (!ok) {
+        fprintf(stderr, "\nRUNLOOM FSM VIOLATION [iouring_multishot]: illegal "
+                "transition %d -> %d at %s:%d\n", from, to, file, line);
+        fflush(stderr); abort();
+    }
+}
+#  define RUNLOOM_MS_NOTE(from, to) \
+       runloom_ms_note_((int)(from), (int)(to), __FILE__, __LINE__)
+#else
+#  define RUNLOOM_MS_NOTE(from, to) ((void)0)
+#endif
+
 #include "io_uring_l_buf.c.inc"
 #include "io_uring_l_do.c.inc"
 #include "io_uring_l_msclose.c.inc"

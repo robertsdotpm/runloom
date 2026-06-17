@@ -303,6 +303,7 @@ static void runloom_iouring_loop_drain(runloom_iouring_ring_t *r, int *flags_out
                     int prev = __atomic_exchange_n(&op->wait,
                                                    RUNLOOM_IOURING_WAIT_DONE,
                                                    __ATOMIC_ACQ_REL);
+                    RUNLOOM_IOU_NOTE(prev, RUNLOOM_IOURING_WAIT_DONE);
                     if (prev == RUNLOOM_IOURING_WAIT_PARKED)
                         runloom_mn_wake_g(op->hub, op->g);
                 } else if (op->g != NULL) {
@@ -452,6 +453,8 @@ static runloom_iouring_ssize_t runloom_iouring_loop_io(runloom_iouring_ring_t *r
         if (__atomic_compare_exchange_n(&op.wait, &prev,
                                         RUNLOOM_IOURING_WAIT_PARKED, 0,
                                         __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+            RUNLOOM_IOU_NOTE(RUNLOOM_IOURING_WAIT_INFLIGHT,
+                             RUNLOOM_IOURING_WAIT_PARKED);
             runloom_sched_park_current();
             runloom_coro_yield();
         }

@@ -52,6 +52,8 @@ static runloom_iouring_ssize_t runloom_iouring_do(struct io_uring_sqe sqe)
                                             RUNLOOM_IOURING_WAIT_PARKED, 0,
                                             __ATOMIC_ACQ_REL,
                                             __ATOMIC_ACQUIRE)) {
+                RUNLOOM_IOU_NOTE(RUNLOOM_IOURING_WAIT_INFLIGHT,
+                                 RUNLOOM_IOURING_WAIT_PARKED);
                 /* Committed to park: any drainer completing the op now
                  * observes PARKED and wakes us.  park_current marks the g
                  * off-queue (hub_main won't re-enqueue on yield-return);
@@ -219,8 +221,14 @@ static void runloom_iouring_ms_on_cqe(runloom_iouring_ms_t *h,
     runloom_g_t *wake_g  = NULL;
     void     *wake_hub = NULL;
     int       was_closing;
+    int       ms_from;
 
     RUNLOOM_RLOCK(&h->lock, RUNLOOM_RANK_HUB);
+
+    /* Observational multishot FSM: capture the lifecycle state BEFORE this CQE
+     * mutates {armed,eof,err}, then NOTE the edge after.  Does not touch the
+     * setting logic below. */
+    ms_from = runloom_ms_state(h->armed, h->eof, h->err);
 
     if (has_buffer && res > 0) {
         ms_entry_t *e = (ms_entry_t *)malloc(sizeof(*e));
@@ -248,6 +256,12 @@ static void runloom_iouring_ms_on_cqe(runloom_iouring_ms_t *h,
     }
 
     if (!more) h->armed = 0;
+
+    /* The CQE has now settled {armed,eof,err}; assert the lifecycle edge.
+     * (void)ms_from keeps it used in a normal build, where RUNLOOM_MS_NOTE is a
+     * no-op and ms_from would otherwise be set-but-unused.) */
+    (void)ms_from;
+    RUNLOOM_MS_NOTE(ms_from, runloom_ms_state(h->armed, h->eof, h->err));
 
     /* Capture the waiter under the lock so we don't double-wake.
      * Actual wake call goes outside the lock for latency. */
@@ -335,19 +349,29 @@ runloom_iouring_ssize_t runloom_iouring_ms_recv(runloom_iouring_ms_t *h,
             return (runloom_iouring_ssize_t)out_off;
         }
 
-        /* 4. EOF / sticky error. */
-        if (h->eof) {
-            RUNLOOM_RUNLOCK(&h->lock, RUNLOOM_RANK_HUB);
-            return 0;
-        }
+        /* 4. Sticky error / EOF.  DEFENSIVE: check `err` BEFORE `eof` so an
+         * error wins.  ms_on_cqe sets exactly one of {eof, err} per CQE -- eof
+         * (res==0 && !more) and err (res<0) are MUTUALLY EXCLUSIVE per CQE (one
+         * CQE has one `res`), and after either terminal the multishot is
+         * un-armed and the kernel posts no further CQEs -- so they cannot
+         * coexist today and this order is not a live-bug fix.  But IF a future
+         * change ever let both be set, surfacing the error (return -1/errno)
+         * strictly beats masking it as a clean EOF (return 0); the err-first
+         * order makes that the invariant by construction. */
         if (h->err) {
             int e = h->err;
             RUNLOOM_RUNLOCK(&h->lock, RUNLOOM_RANK_HUB);
             errno = e;
             return -1;
         }
+        if (h->eof) {
+            RUNLOOM_RUNLOCK(&h->lock, RUNLOOM_RANK_HUB);
+            return 0;
+        }
 
-        /* 5. Re-arm if multishot ended (e.g. earlier -ENOBUFS). */
+        /* 5. Re-arm if multishot ended (e.g. earlier -ENOBUFS).  Reached only
+         * past the err/eof returns above, so the handle is genuinely UNARMED
+         * (not a terminal state) -- a real UNARMED->ARMED lifecycle edge. */
         if (!h->armed) {
             if (runloom_iouring_ms_submit(h) != 0) {
                 int e = errno;
@@ -355,6 +379,7 @@ runloom_iouring_ssize_t runloom_iouring_ms_recv(runloom_iouring_ms_t *h,
                 errno = e;
                 return -1;
             }
+            RUNLOOM_MS_NOTE(RUNLOOM_MS_UNARMED, RUNLOOM_MS_ARMED);
         }
 
         /* 6. Park.  Capture our g under the lock, release, then yield. */

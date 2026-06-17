@@ -216,6 +216,7 @@ void runloom_iouring_drain(void)
                         int prev = __atomic_exchange_n(&op->wait,
                                                        RUNLOOM_IOURING_WAIT_DONE,
                                                        __ATOMIC_ACQ_REL);
+                        RUNLOOM_IOU_NOTE(prev, RUNLOOM_IOURING_WAIT_DONE);
                         if (prev == RUNLOOM_IOURING_WAIT_PARKED) {
                             runloom_mn_wake_g(op->hub, op->g);
                         }
