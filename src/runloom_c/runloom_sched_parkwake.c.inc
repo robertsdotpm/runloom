@@ -2,6 +2,40 @@
  * standalone.  See runloom_sched.c for the includes/typedefs/file-scope state
  * these definitions depend on. */
 
+/* ---- Layer-3 wake-skew injection (test-only; compile-gated) ----------------
+ * The park/wake Dekker handshake (parked_safe / wake_pending + dual SEQ_CST
+ * StoreLoad fences) is correct (GenMC-proven in verify/genmc/sched_parkwake.c),
+ * but a LOGICAL race -- the parker's recheck and the waker's CAS-load racing past
+ * each other -- only manifests when the two threads interleave inside the tiny
+ * store..fence..load window.  In production that window is nanoseconds, so a
+ * (hypothetical) regression would hang ~1-in-a-billion.  RUNLOOM_WAKE_SKEW widens
+ * the window with a few sched_yield()s right at the fence, so any such regression
+ * hangs DETERMINISTICALLY under the wake-skew test policy (tools/wake_skew_test.sh)
+ * instead of rarely in prod.  Compiled to NOTHING unless -DRUNLOOM_WAKE_SKEW, so
+ * release pays zero -- mirrors the runloom_lockrank.h / RUNLOOM_FSM_VALIDATE
+ * "free unless -D" discipline. */
+#if defined(RUNLOOM_WAKE_SKEW)
+#  include <sched.h>
+#  include <stdlib.h>
+static int runloom_wake_skew_n_(void)
+{
+    static int n = -1;
+    if (n < 0) {
+        const char *e = getenv("RUNLOOM_WAKE_SKEW");
+        n = (e && *e) ? atoi(e) : 4;      /* yields per skew point; default 4 */
+        if (n < 0) n = 0;
+    }
+    return n;
+}
+static void runloom_wake_skew(void)
+{
+    int i, n = runloom_wake_skew_n_();
+    for (i = 0; i < n; i++) sched_yield();
+}
+#else
+static inline void runloom_wake_skew(void) { }
+#endif
+
 
 PyObject *runloom_sched_spawn_sized(runloom_sched_t *s, PyObject *callable,
                                  size_t stack_size)
@@ -161,6 +195,7 @@ int runloom_park_generic(int foreign_wakeable)
         g->wake_next = NULL;
         __atomic_store_n(&g->parked_safe, 1, __ATOMIC_RELEASE);
         __atomic_thread_fence(__ATOMIC_SEQ_CST);     /* StoreLoad; pairs w/ wake_safe */
+        runloom_wake_skew();   /* test-only: widen the recheck window (no-op in release) */
         if (__atomic_load_n(&g->wake_pending, __ATOMIC_ACQUIRE) > 0) {
             int expected = 1;
             if (__atomic_compare_exchange_n(&g->parked_safe, &expected, 0, 0,
@@ -375,6 +410,7 @@ void runloom_sched_wake_safe(runloom_g_t *g)
      * necessary + sufficient by verify/genmc/sched_parkwake.c under RC11
      * (x86-TSO is also vulnerable via the store buffer). */
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    runloom_wake_skew();   /* test-only: widen the CAS-load window (no-op in release) */
 
     /* Try to transition parked_safe 1->0.  On success, we own the
      * wake and route g back to its home sched via the thread-safe
