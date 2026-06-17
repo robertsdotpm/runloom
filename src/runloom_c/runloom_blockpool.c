@@ -145,16 +145,29 @@ static RUNLOOM_THREAD_RET runloom_blockpool_worker(void *arg)
              * After this line the worker touches ONLY locals + statics. */
             __atomic_store_n(&job->done, 1, __ATOMIC_RELEASE);
 
-            /* Re-queue the fiber, then (single-thread only) kick the pump
-             * so an idle scheduler wakes.  Re-queue BEFORE decrementing
-             * inflight so the drain loop, which stays alive while inflight>0,
-             * sees the fiber on its wake_list the moment inflight hits 0. */
-            if (hub != NULL) {
-                runloom_mn_wake_g(hub, g);
-            } else {
-                runloom_sched_wake_safe(g);
+            /* Re-queue the fiber via the one audited race-safe waker.  wake_safe
+             * drives the parked_safe/wake_pending Dekker handshake -- WITH the
+             * SEQ_CST StoreLoad fence -- that runloom_park_generic (the waiter
+             * below) waits on, and routes the enqueue by g->park_hub:
+             * runloom_mn_wake_g for an M:N hub, the owner's wake_list for
+             * single-thread.  It is foreign-thread-safe (peeks runloom_tls_sched,
+             * never lazily allocs) -- exactly what THIS blockpool worker is.
+             *
+             * The old M:N branch called runloom_mn_wake_g(hub, g) directly with
+             * NO fence between the done-store above and the wake, paired against
+             * a waiter that hand-rolled park_current()+yield with NO Dekker
+             * recheck -- an unfenced, unbounded handshake (only the single-thread
+             * branch used wake_safe).  Under the wrong interleave the wake and
+             * the park crossed and the fiber parked forever: a lost wakeup, rare
+             * on x86-TSO and masked by cache-line false sharing until per-hub
+             * padding removed the cover.  Both sides now go through the single
+             * primitive proven in verify/genmc/sched_parkwake.c.
+             *
+             * Re-queue BEFORE decrementing inflight so the drain loop, which
+             * stays alive while inflight>0, sees the fiber the moment it hits 0. */
+            runloom_sched_wake_safe(g);
+            if (hub == NULL)
                 runloom_netpoll_wake_pump(NULL);   /* single-thread owner -> default pool */
-            }
             __atomic_sub_fetch(&bp_inflight, 1, __ATOMIC_ACQ_REL);
         }
     }
@@ -313,9 +326,16 @@ void *runloom_blocking_call(void *(*fn)(void *), void *arg)
      * delivered at the next real await-point after we return.  Hub: snap the
      * per-g tstate and yield.  Single-thread: race-safe park_safe/wake_safe. */
     if (hub != NULL) {
+        /* M:N: park via the audited Dekker primitive -- it records park_hub,
+         * sets parked_safe, emits the SEQ_CST fence, and rechecks wake_pending
+         * (aborting the park if wake_safe already fired).  foreign_wakeable=1
+         * because the blockpool WORKER thread that wakes us is a foreign OS
+         * thread.  Pairs with runloom_sched_wake_safe above.  Keep the re-park
+         * loop: a spurious wake (a task.cancel() -> G.wake() landing here while
+         * parked) must NOT return -- that would free the stack `job` the worker
+         * still reads (the use-after-free this loop exists to prevent). */
         while (!__atomic_load_n(&job.done, __ATOMIC_ACQUIRE)) {
-            runloom_sched_park_current();
-            runloom_coro_yield();
+            runloom_park_generic(1);
         }
     } else {
         while (!__atomic_load_n(&job.done, __ATOMIC_ACQUIRE)) {
