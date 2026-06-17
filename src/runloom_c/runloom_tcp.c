@@ -32,6 +32,7 @@
 #include "runloom_blockpool.h"
 #include "mn_sched.h"
 #include "runloom_sched.h"
+#include "runloom_io_fsm.h"   /* the total (rc,errno)->event I/O classifier */
 
 #include <errno.h>
 #include <string.h>

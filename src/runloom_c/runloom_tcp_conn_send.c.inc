@@ -28,21 +28,33 @@ static PyObject *RunloomTCPConn_send(RunloomTCPConn *self, PyObject *args)
 #endif
 
     while (1) {
+        /* Classify through the total I/O FSM; send emits only PROGRESS (>=0,
+         * possibly partial) / WOULDBLOCK_W / INTR / ERROR. */
 #if defined(RUNLOOM_OS_WINDOWS)
-        int r = send((SOCKET)fd, (const char *)buf.buf, (int)buf.len, flags);
-        if (r >= 0) { sent = r; break; }
-        if (!runloom_is_wouldblock() && !runloom_is_intr()) {
+        long long r = (long long)send((SOCKET)fd, (const char *)buf.buf,
+                                      (int)buf.len, flags);
+#else
+        long long r = (long long)send(fd, (const char *)buf.buf,
+                                      (size_t)buf.len, flags);
+#endif
+        RUNLOOM_IO_SWITCH(runloom_io_classify(RUNLOOM_IO_SEND, r, runloom_sock_errno())) {
+        case RUNLOOM_IO_PROGRESS:
+            sent = (Py_ssize_t)r;
+            goto send_done;
+        case RUNLOOM_IO_WOULDBLOCK_W:
+        case RUNLOOM_IO_INTR:
+            break;                      /* not writable -> park on WRITE below */
+        case RUNLOOM_IO_ERROR:
             PyBuffer_Release(&buf);
             return runloom_raise_errno();
-        }
-#else
-        ssize_t r = send(fd, (const char *)buf.buf, (size_t)buf.len, flags);
-        if (r >= 0) { sent = (Py_ssize_t)r; break; }
-        if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
-            PyBuffer_Release(&buf);
-            return PyErr_SetFromErrno(PyExc_OSError);
-        }
-#endif
+        case RUNLOOM_IO_READY:          /* events send cannot emit */
+        case RUNLOOM_IO_EOF:
+        case RUNLOOM_IO_WOULDBLOCK_R:
+        case RUNLOOM_IO_RETRY:
+        case RUNLOOM_IO_EVENT_COUNT:
+            runloom_fsm_violation("runloom_io.send", RUNLOOM_IO_SEND, -1,
+                                  __FILE__, __LINE__);
+        } RUNLOOM_IO_SWITCH_END
         if (runloom_netpoll_wait_fd_coop(fd, RUNLOOM_NETPOLL_WRITE, -1LL) < 0) {
             PyBuffer_Release(&buf);
             /* wait_fd may have run a Python signal handler that raised (e.g. an
@@ -50,6 +62,7 @@ static PyObject *RunloomTCPConn_send(RunloomTCPConn *self, PyObject *args)
             return PyErr_Occurred() ? NULL : PyErr_SetFromErrno(PyExc_OSError);
         }
     }
+send_done:
     PyBuffer_Release(&buf);
     return PyLong_FromSsize_t(sent);
 }
@@ -96,25 +109,36 @@ static PyObject *RunloomTCPConn_send_all(RunloomTCPConn *self, PyObject *args)
 #endif
 
     while (sent < buf.len) {
+        /* Same total-FSM classification; PROGRESS advances `sent` and the loop
+         * re-checks sent < buf.len (a `continue` from inside the switch targets
+         * the enclosing while, not the switch). */
 #if defined(RUNLOOM_OS_WINDOWS)
-        int r = send((SOCKET)fd, (const char *)buf.buf + sent,
-                     (int)(buf.len - sent), flags);
-        if (r >= 0) { sent += r; continue; }
-        if (!runloom_is_wouldblock() && !runloom_is_intr()) {
-            PyBuffer_Release(&buf);
-            return runloom_raise_errno();
-        }
+        long long r = (long long)send((SOCKET)fd, (const char *)buf.buf + sent,
+                                      (int)(buf.len - sent), flags);
 #else
         int injerr = RUNLOOM_TCP_FINJ(RUNLOOM_FAULT_TCP_SEND);
-        ssize_t r = injerr ? (errno = injerr, (ssize_t)-1)
-                           : send(fd, (const char *)buf.buf + sent,
-                                  (size_t)(buf.len - sent), flags);
-        if (r >= 0) { sent += r; continue; }
-        if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
-            PyBuffer_Release(&buf);
-            return PyErr_SetFromErrno(PyExc_OSError);
-        }
+        long long r = injerr ? (errno = injerr, -1LL)
+                             : (long long)send(fd, (const char *)buf.buf + sent,
+                                               (size_t)(buf.len - sent), flags);
 #endif
+        RUNLOOM_IO_SWITCH(runloom_io_classify(RUNLOOM_IO_SEND, r, runloom_sock_errno())) {
+        case RUNLOOM_IO_PROGRESS:
+            sent += (Py_ssize_t)r;
+            continue;                   /* loop re-checks sent < buf.len */
+        case RUNLOOM_IO_WOULDBLOCK_W:
+        case RUNLOOM_IO_INTR:
+            break;                      /* not writable -> park on WRITE below */
+        case RUNLOOM_IO_ERROR:
+            PyBuffer_Release(&buf);
+            return runloom_raise_errno();
+        case RUNLOOM_IO_READY:          /* events send cannot emit */
+        case RUNLOOM_IO_EOF:
+        case RUNLOOM_IO_WOULDBLOCK_R:
+        case RUNLOOM_IO_RETRY:
+        case RUNLOOM_IO_EVENT_COUNT:
+            runloom_fsm_violation("runloom_io.send_all", RUNLOOM_IO_SEND, -1,
+                                  __FILE__, __LINE__);
+        } RUNLOOM_IO_SWITCH_END
         if (runloom_netpoll_wait_fd_coop(fd, RUNLOOM_NETPOLL_WRITE, -1LL) < 0) {
             PyBuffer_Release(&buf);
             /* wait_fd may have run a Python signal handler that raised (e.g. an

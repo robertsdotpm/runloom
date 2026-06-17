@@ -160,4 +160,26 @@ runloom_io_note_(runloom_io_call_t call, runloom_io_event_t ev,
 #  define RUNLOOM_IO_NOTE(call, ev) ((void)0)
 #endif
 
+/* Exhaustive consumer switch on a runloom_io_event_t.  OMITTING any event (a new
+ * return pathway) is a BUILD ERROR -- "the program can't compile if a pathway
+ * isn't handled" -- scoped via pragma so it adds zero global -Wswitch-enum
+ * noise.  Every enumerator (including RUNLOOM_IO_EVENT_COUNT) must have a case.
+ * Usage:
+ *     RUNLOOM_IO_SWITCH(ev) {
+ *     case RUNLOOM_IO_READY: ...; break;
+ *     ...
+ *     case RUNLOOM_IO_EVENT_COUNT:  // impossible sentinel
+ *         runloom_fsm_violation(...);
+ *     } RUNLOOM_IO_SWITCH_END */
+#if defined(__GNUC__) || defined(__clang__)
+#  define RUNLOOM_IO_SWITCH(ev)                              \
+       _Pragma("GCC diagnostic push")                        \
+       _Pragma("GCC diagnostic error \"-Wswitch-enum\"")     \
+       switch (ev)
+#  define RUNLOOM_IO_SWITCH_END _Pragma("GCC diagnostic pop")
+#else
+#  define RUNLOOM_IO_SWITCH(ev) switch (ev)
+#  define RUNLOOM_IO_SWITCH_END /* no scoped diagnostic on this compiler */
+#endif
+
 #endif /* RUNLOOM_IO_FSM_H */

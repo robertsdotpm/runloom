@@ -93,24 +93,40 @@ static PyObject *RunloomTCPConn_accept(RunloomTCPConn *self, PyObject *unused)
     }
 
     while (1) {
+        /* Success is detected with each platform's native idiom (a SOCKET handle
+         * is not a small signed fd); the total I/O FSM then classifies a FAILURE
+         * into park-and-retry (WOULDBLOCK_R / INTR / RETRY) vs raise (ERROR).
+         * RETRY == ECONNABORTED: the peer reset between the SYN and our accept --
+         * a transient, not a listener failure.  Go's netpoll and libuv both retry
+         * it; surfacing it spuriously killed the accept loop.  Routing it through
+         * the shared classifier also applies that retry on the WSA backend
+         * (WSAECONNABORTED), where the old branch raised it. */
+        runloom_io_event_t ev;
 #if defined(RUNLOOM_OS_WINDOWS)
         SOCKET s = accept((SOCKET)self->fd, NULL, NULL);
         if (s != INVALID_SOCKET) { new_fd = (int)s; break; }
-        if (!runloom_is_wouldblock() && !runloom_is_intr()) {
-            return runloom_raise_errno();
-        }
+        ev = runloom_io_classify(RUNLOOM_IO_ACCEPT, -1, runloom_sock_errno());
 #else
         int injerr = RUNLOOM_TCP_FINJ(RUNLOOM_FAULT_TCP_ACCEPT);
         new_fd = injerr ? (errno = injerr, -1) : accept(self->fd, NULL, NULL);
         if (new_fd >= 0) break;
-        /* ECONNABORTED: the peer reset between the SYN and our accept() -- a
-         * transient, not a listener failure.  Go's netpoll and libuv both
-         * retry it; surfacing it spuriously killed the accept loop. */
-        if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR
-            && errno != ECONNABORTED) {
-            return PyErr_SetFromErrno(PyExc_OSError);
-        }
+        ev = runloom_io_classify(RUNLOOM_IO_ACCEPT, -1, errno);
 #endif
+        RUNLOOM_IO_SWITCH(ev) {
+        case RUNLOOM_IO_WOULDBLOCK_R:
+        case RUNLOOM_IO_INTR:
+        case RUNLOOM_IO_RETRY:
+            break;                      /* park on READ + retry below */
+        case RUNLOOM_IO_ERROR:
+            return runloom_raise_errno();
+        case RUNLOOM_IO_READY:          /* success handled above (break), not here */
+        case RUNLOOM_IO_PROGRESS:       /* events accept cannot emit */
+        case RUNLOOM_IO_EOF:
+        case RUNLOOM_IO_WOULDBLOCK_W:
+        case RUNLOOM_IO_EVENT_COUNT:
+            runloom_fsm_violation("runloom_io.accept", RUNLOOM_IO_ACCEPT, -1,
+                                  __FILE__, __LINE__);
+        } RUNLOOM_IO_SWITCH_END
         if (runloom_netpoll_wait_fd_coop(self->fd, RUNLOOM_NETPOLL_READ, -1LL) < 0) {
             /* wait_fd may have run a Python signal handler that raised (e.g. an
              * alarm handler / Ctrl-C) -> propagate it; don't overwrite with OSError. */
@@ -176,6 +192,10 @@ static PyObject *RunloomTCPConn_connect_cls(PyTypeObject *cls, PyObject *args, P
     rc = connect((SOCKET)fd, (struct sockaddr *)&addr, addrlen);
     if (rc == SOCKET_ERROR) {
         int err = WSAGetLastError();
+        /* Observational: same total I/O FSM on the WSA backend (WSAEWOULDBLOCK
+         * -> WOULDBLOCK_W -> park WRITE + SO_ERROR; else ERROR). */
+        RUNLOOM_IO_NOTE(RUNLOOM_IO_CONNECT,
+                        runloom_io_classify(RUNLOOM_IO_CONNECT, -1, runloom_sock_errno()));
         if (err == WSAEWOULDBLOCK) {
             if (runloom_netpoll_wait_fd_coop(fd, RUNLOOM_NETPOLL_WRITE, -1LL) < 0) {
                 int saved = errno;
@@ -206,6 +226,14 @@ static PyObject *RunloomTCPConn_connect_cls(PyTypeObject *cls, PyObject *args, P
         int injerr = RUNLOOM_TCP_FINJ(RUNLOOM_FAULT_TCP_CONNECT);
         if (injerr) { rc = -1; errno = injerr; }
     }
+    /* Observational: route the connect result through the total I/O FSM
+     * (READY | WOULDBLOCK_W | INTR | ERROR).  The one-shot SO_ERROR branch below
+     * is the consumer (too intricate to restructure as a loop); the NOTE asserts
+     * its understanding matches the model under -DRUNLOOM_FSM_VALIDATE.  EINTR is
+     * handled like EINPROGRESS (park WRITE + SO_ERROR), NOT as an error: a
+     * connect() interrupted by a signal continues asynchronously per POSIX. */
+    RUNLOOM_IO_NOTE(RUNLOOM_IO_CONNECT,
+                    runloom_io_classify(RUNLOOM_IO_CONNECT, rc, errno));
     if (rc < 0) {
         /* EINTR is handled like EINPROGRESS, NOT as an error: POSIX says a
          * connect() interrupted by a signal is not aborted -- the connection

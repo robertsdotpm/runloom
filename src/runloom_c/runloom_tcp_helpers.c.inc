@@ -88,6 +88,29 @@ static int runloom_is_intr(void)
 }
 #endif
 
+/* errno-equivalent of the last socket operation, NORMALIZED so the errno-based
+ * I/O-return classifier (runloom_io_fsm.h) spans the Windows/WSA backend too:
+ * on POSIX it is plain errno; on Windows it maps the WSA codes the classifier
+ * cares about onto their errno spelling (everything else passes through, and the
+ * ERROR path still raises via runloom_raise_errno -> the original WSA code). */
+static int runloom_sock_errno(void)
+{
+#if defined(RUNLOOM_OS_WINDOWS)
+    int e = WSAGetLastError();
+    switch (e) {
+    case WSAEWOULDBLOCK:  return EWOULDBLOCK;
+    case WSAEINTR:        return EINTR;
+#ifdef WSAEINPROGRESS
+    case WSAEINPROGRESS:  return EINPROGRESS;
+#endif
+    case WSAECONNABORTED: return ECONNABORTED;
+    default:              return e;
+    }
+#else
+    return errno;
+#endif
+}
+
 /* ============================================================
  * Address parsing -- AF_INET / AF_INET6.
  *

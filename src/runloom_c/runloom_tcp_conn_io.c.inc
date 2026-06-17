@@ -194,23 +194,34 @@ static PyObject *RunloomTCPConn_recv(RunloomTCPConn *self, PyObject *args)
 #endif
 
     while (1) {
+        /* Classify (rc,errno) through the single total I/O FSM; the exhaustive
+         * switch makes an unhandled return pathway a build error.  recv emits
+         * only READY/EOF/WOULDBLOCK_R/INTR/ERROR (the others are impossible). */
 #if defined(RUNLOOM_OS_WINDOWS)
-        int r = recv((SOCKET)fd, out, (int)n_bytes, flags);
-        if (r >= 0) { got = r; break; }
-        if (!runloom_is_wouldblock() && !runloom_is_intr()) {
-            Py_DECREF(result);
-            return runloom_raise_errno();
-        }
+        long long r = (long long)recv((SOCKET)fd, out, (int)n_bytes, flags);
 #else
         int injerr = RUNLOOM_TCP_FINJ(RUNLOOM_FAULT_TCP_RECV);
-        ssize_t r = injerr ? (errno = injerr, (ssize_t)-1)
-                           : recv(fd, out, (size_t)n_bytes, flags);
-        if (r >= 0) { got = (Py_ssize_t)r; break; }
-        if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
-            Py_DECREF(result);
-            return PyErr_SetFromErrno(PyExc_OSError);
-        }
+        long long r = injerr ? (errno = injerr, -1LL)
+                             : (long long)recv(fd, out, (size_t)n_bytes, flags);
 #endif
+        RUNLOOM_IO_SWITCH(runloom_io_classify(RUNLOOM_IO_RECV, r, runloom_sock_errno())) {
+        case RUNLOOM_IO_READY:
+        case RUNLOOM_IO_EOF:
+            got = (Py_ssize_t)r;
+            goto recv_done;             /* >0 data, or 0 = orderly EOF */
+        case RUNLOOM_IO_WOULDBLOCK_R:
+        case RUNLOOM_IO_INTR:
+            break;                      /* not ready -> park on READ below */
+        case RUNLOOM_IO_ERROR:
+            Py_DECREF(result);
+            return runloom_raise_errno();
+        case RUNLOOM_IO_PROGRESS:       /* events recv cannot emit */
+        case RUNLOOM_IO_WOULDBLOCK_W:
+        case RUNLOOM_IO_RETRY:
+        case RUNLOOM_IO_EVENT_COUNT:
+            runloom_fsm_violation("runloom_io.recv", RUNLOOM_IO_RECV, -1,
+                                  __FILE__, __LINE__);
+        } RUNLOOM_IO_SWITCH_END
         if (runloom_netpoll_wait_fd_coop(fd, RUNLOOM_NETPOLL_READ, -1LL) < 0) {
             Py_DECREF(result);
             /* wait_fd may have run a Python signal handler that raised (e.g. an
@@ -219,6 +230,7 @@ static PyObject *RunloomTCPConn_recv(RunloomTCPConn *self, PyObject *args)
         }
     }
 
+recv_done:
     if (got < n_bytes) {
         if (_PyBytes_Resize(&result, got) < 0) return NULL;
     }
