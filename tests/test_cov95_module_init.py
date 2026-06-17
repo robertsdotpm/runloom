@@ -347,12 +347,22 @@ def test_traceback_env_installs_sigquit_handler():
 
 def test_traceback_env_absent_sigquit_kills():
     """Negative control: WITHOUT RUNLOOM_TRACEBACK the install line (L497 guard
-    false) does not run, so the default SIGQUIT disposition terminates the
-    process -- proving the positive test's survival is the handler, not a quirk
-    of how the child sends the signal."""
+    false) does not run, so SIGQUIT terminates the process -- proving the positive
+    test's survival is the handler, not a quirk of how the child sends the signal.
+
+    The child first RESETS SIGQUIT to SIG_DFL, *before* importing runloom_c.  This
+    is load-bearing: a shell that launches the test runner in the BACKGROUND sets
+    SIGINT/SIGQUIT to SIG_IGN for the job (POSIX async-list disposition), and that
+    SIG_IGN is inherited all the way down to this child -- so without the reset the
+    child would ignore its own SIGQUIT and 'SURVIVE' for an environmental reason,
+    not because runloom installed a handler (a false failure seen running check_all
+    via `nohup ... &`).  Resetting to SIG_DFL establishes the real baseline: if the
+    import then leaves it killable, runloom installed no handler; if it survives,
+    runloom DID install one (the bug this guards).  Deterministic in any launch env."""
     src = (
         "import os, sys, signal\n"
         "sys.path.insert(0, 'src')\n"
+        "signal.signal(signal.SIGQUIT, signal.SIG_DFL)\n"  # baseline, pre-import (see docstring)
         "import runloom_c as rc\n"
         "os.kill(os.getpid(), signal.SIGQUIT)\n"
         "sys.stdout.write('SURVIVED\\n')\n"   # must NOT print
