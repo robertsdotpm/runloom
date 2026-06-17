@@ -293,8 +293,18 @@ int runloom_netpoll_pump(long long timeout_ns)
                  (timeout_ns > 1000000000LL ? 1000 :
                   (int)((timeout_ns + 999999LL) / 1000000LL));
         int rc;
+        int win_poll_err = 0;
         runloom_parked_t *p;
 
+        /* SNAPSHOT-ONLY under the lock.  pool.lock must NOT be held across the
+         * Py_BEGIN/END_ALLOW_THREADS below: Py_END_ALLOW_THREADS re-attaches
+         * (re-acquires the GIL / waits out a pending stop-the-world), and every
+         * OTHER pool.lock holder (wait_fd, register/unregister, release_if_idle)
+         * takes it WITH the GIL held.  Holding it across the GIL re-acquire
+         * inverts (GIL -> pool.lock) into (pool.lock -> GIL) -> AB-BA deadlock.
+         * Hold it ONLY for the O(parked) snapshot, drop BEFORE the wait, and let
+         * dispatch re-take it after (mirrors the POSIX select backend + IOCP).
+         * Windows pump lock-order bug. */
         RUNLOOM_RLOCK(&runloom_pool.lock, RUNLOOM_RANK_PARKER_POOL);
         /* Two passes: count, then fill (grows the heap buffer if the
          * stack one isn't big enough).  Worst case we re-malloc once. */
@@ -318,7 +328,7 @@ int runloom_netpoll_pump(long long timeout_ns)
             fds[n_fds].revents = 0;
             n_fds++;
         }
-        int win_poll_err = 0;
+        RUNLOOM_RUNLOCK(&runloom_pool.lock, RUNLOOM_RANK_PARKER_POOL);   /* drop BEFORE the poll + GIL re-acquire */
         if (n_fds > 0) {
             /* Fault injection SHORT-CIRCUITS the real poll so the error is
              * returned immediately (as a closed socket would), reproducing the
@@ -333,43 +343,28 @@ int runloom_netpoll_pump(long long timeout_ns)
             }
             if (rc < 0) win_poll_err = WSAGetLastError();
             if (rc > 0) {
+                /* Dispatch via the shared helper, which re-takes pool.lock
+                 * internally (no GIL crossing under it) and folds POLLHUP/ERR
+                 * into both directions.  We hold the explicit fds[i].fd list,
+                 * so iterate the snapshot and let dispatch resolve each fd.
+                 * wake_all=0: level-triggered, re-reported next poll. */
                 ULONG i;
                 for (i = 0; i < n_fds; i++) {
                     int mask = 0;
                     SHORT re = fds[i].revents;
-                    int fdi = (int)fds[i].fd;
-                    runloom_parked_t *p;
                     if (re & (POLLRDNORM | POLLIN | POLLHUP | POLLERR))
                         mask |= RUNLOOM_NETPOLL_READ;
                     if (re & (POLLWRNORM | POLLOUT | POLLERR))
                         mask |= RUNLOOM_NETPOLL_WRITE;
                     if (mask == 0) continue;
-                    if ((size_t)fdi >= runloom_pool.by_fd_cap) continue;
-                    p = runloom_pool.by_fd[fdi];
-                    while (p != NULL) {
-                        runloom_parked_t *next_p = p->next_by_fd;
-                        if (p->events & mask) {
-                            /* Claim before waking -- same exactly-one-of-
-                             * {waker,g}-wins protocol as the epoll/kqueue
-                             * dispatch path (see runloom_pump_claim). */
-                            int cur = runloom_pump_claim(p);
-                            if (cur == RUNLOOM_PARK_WOKEN) { p = next_p; continue; }
-                            *(p->ready_out) = mask & p->events;
-                            runloom_parker_unlink(&runloom_pool, p);
-                            if (cur == RUNLOOM_PARK_PARKED)
-                                runloom_mn_wake_g(p->hub, p->g);
-                            woke++;
-                            break;
-                        }
-                        p = next_p;
-                    }
+                    if (runloom_pump_dispatch_event((int)fds[i].fd, mask, 0))
+                        woke++;
                 }
             }
         }
         if (fds != fds_stack) free(fds);
-        RUNLOOM_RUNLOCK(&runloom_pool.lock, RUNLOOM_RANK_PARKER_POOL);
-        /* Back off OUTSIDE the pool lock: a persistent WSAPoll error (a polled
-         * socket closed under us) must not busy-spin the idle pump. */
+        /* Back off (pool lock already dropped): a persistent WSAPoll error (a
+         * polled socket closed under us) must not busy-spin the idle pump. */
         if (win_poll_err) runloom_netpoll_win_wait_failed(win_poll_err);
     } else {
         /* --- select() fallback (XP / Server 2003 / no WSAPoll) ---
@@ -383,12 +378,17 @@ int runloom_netpoll_pump(long long timeout_ns)
         struct timeval tv, *tvp = NULL;
 
         FD_ZERO(&rfds); FD_ZERO(&wfds); FD_ZERO(&efds);
+        /* SNAPSHOT the fd sets under the lock, RELEASE before select() + the GIL
+         * re-acquire -- same (GIL -> pool.lock) order as every other site;
+         * never hold pool.lock across the wait (mirrors the WSAPoll fix above
+         * and the POSIX select backend below).  Windows pump lock-order bug. */
         RUNLOOM_RLOCK(&runloom_pool.lock, RUNLOOM_RANK_PARKER_POOL);
         for (p = runloom_pool.head; p != NULL; p = p->next) {
             if (p->events & RUNLOOM_NETPOLL_READ)  FD_SET((SOCKET)p->fd, &rfds);
             if (p->events & RUNLOOM_NETPOLL_WRITE) FD_SET((SOCKET)p->fd, &wfds);
             FD_SET((SOCKET)p->fd, &efds);
         }
+        RUNLOOM_RUNLOCK(&runloom_pool.lock, RUNLOOM_RANK_PARKER_POOL);   /* drop BEFORE select */
         if (timeout_ns >= 0) {
             tv.tv_sec  = (long)(timeout_ns / 1000000000LL);
             tv.tv_usec = (long)((timeout_ns % 1000000000LL) / 1000LL);
@@ -405,7 +405,13 @@ int runloom_netpoll_pump(long long timeout_ns)
         }
         if (rc < 0) win_poll_err = WSAGetLastError();
         if (rc > 0) {
-            runloom_parked_t *p = runloom_pool.head;
+            /* Re-acquire for dispatch; re-walk the parked list testing the
+             * snapshot fd sets (a parker added after the snapshot is served next
+             * cycle; a spurious match re-checks + re-parks -- both tolerated by
+             * wait_fd's park loop and runloom_pump_claim).  Mirrors the POSIX
+             * select reference. */
+            RUNLOOM_RLOCK(&runloom_pool.lock, RUNLOOM_RANK_PARKER_POOL);
+            p = runloom_pool.head;
             while (p != NULL) {
                 runloom_parked_t *next_p = p->next;
                 int mask = 0;
@@ -426,9 +432,9 @@ int runloom_netpoll_pump(long long timeout_ns)
                 }
                 p = next_p;
             }
+            RUNLOOM_RUNLOCK(&runloom_pool.lock, RUNLOOM_RANK_PARKER_POOL);
         }
-        RUNLOOM_RUNLOCK(&runloom_pool.lock, RUNLOOM_RANK_PARKER_POOL);
-        /* Persistent select() error must back off, not busy-spin. */
+        /* Persistent select() error must back off, not busy-spin (lock dropped). */
         if (win_poll_err) runloom_netpoll_win_wait_failed(win_poll_err);
     }
 post_wait:
