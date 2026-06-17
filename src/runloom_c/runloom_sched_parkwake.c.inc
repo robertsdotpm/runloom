@@ -568,10 +568,22 @@ void runloom_sched_park_safe(void)
     runloom_pystate_snap(&g->snap);
     runloom_g_state_set(g, RUNLOOM_GST_PARKED_SAFE);
     runloom_coro_yield();
-    /* On resume, parked_safe has already been cleared by wake_safe's
-     * CAS.  Eat one wake_pending count -- there is at least one (the
-     * wake that delivered us back to ready). */
-    __atomic_sub_fetch(&g->wake_pending, 1, __ATOMIC_ACQ_REL);
+    /* On resume, parked_safe has already been cleared by the claimer's CAS.  Eat
+     * the wake count that delivered us back -- but CONDITIONALLY (iff >0), NOT
+     * unconditionally.  For an UNTIMED park the only claimer is wake_safe, which
+     * always bumps wake_pending (+1), so >0 holds and this is equivalent to the
+     * old unconditional sub.  But park_safe is also the resume point for a
+     * SINGLE-THREAD TIMED park (runloom_park_generic_timed -> runloom_park_generic
+     * hub==NULL -> here, with a timer armed): on a PURE TIMEOUT the claimer is
+     * runloom_sched_drain_timers, which claims parked_safe WITHOUT bumping
+     * wake_pending -- so wake_pending is 0 on resume and an unconditional sub
+     * underflowed it to -1, defeating the >0 coordination predicate on the g's
+     * NEXT park and dropping a later cross-thread wake (a hang).  This mirrors the
+     * conditional eat on the M:N runloom_park_generic path (audit lost-wake #4);
+     * a concurrent waker only increments, so load-then-sub never underflows.
+     * (audit round-2: single-thread timed-park wake_pending underflow.) */
+    if (__atomic_load_n(&g->wake_pending, __ATOMIC_ACQUIRE) > 0)
+        __atomic_sub_fetch(&g->wake_pending, 1, __ATOMIC_ACQ_REL);
     runloom_g_state_set(g, RUNLOOM_GST_RUNNING);
 }
 
