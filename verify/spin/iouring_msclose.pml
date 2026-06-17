@@ -1,101 +1,139 @@
 /*
  * iouring_msclose.pml -- Promela model of the io_uring multishot handle
- * lifetime: the free in runloom_iouring_ms_close / on_cqe (io_uring.c) versus a
- * parked runloom_iouring_ms_recv re-locking the handle.
+ * lifetime: the free in runloom_iouring_ms_close / ms_on_cqe versus a parked
+ * runloom_iouring_ms_recv re-locking the handle (io_uring_l_do.c.inc,
+ * io_uring_l_msclose.c.inc).
  *
- * AUDIT RESULT THIS FORMALISES.  runloom_iouring_ms_recv parks with the handle's
- * waiter_g set, and on wake RE-LOCKS the handle (io_uring.c:999).  on_cqe, on
- * the closing CQE (was_closing && !more), wakes that waiter and then frees the
- * handle OUTSIDE h->lock -- destroying h->lock + free(h) (io_uring.c:878-891);
- * ms_close's !armed branch frees immediately too (:1018-1032).  RunloomTCPConn
- * holds NO lock around self->ms / self->closed (runloom_tcp.c:44-51), so recv and
- * close are unsynchronised.
+ * THE HAZARD.  runloom_iouring_ms_recv parks with the handle's waiter_g set, and
+ * on wake RE-LOCKS the handle.  ms_on_cqe, on the closing CQE (was_closing &&
+ * !more), wakes that waiter and then would free the handle OUTSIDE h->lock
+ * (destroy h->lock + free(h)); ms_close's !armed branch frees too.  RunloomTCPConn
+ * holds no lock around self->ms / self->closed, so on a SHARED conn recv and
+ * close are unsynchronised -- a reader parked in ms_recv while another fiber
+ * close()s the same conn.
  *
- * This is memory-safe ONLY under the single-owner convention: a TCPConn is
- * used by one goroutine, so close() runs after recv() has returned -- there is
- * no consumer parked in ms_recv when the closing CQE frees the handle.
- * (RunloomTCPConn is a standalone primitive; it is NOT used by runloom.aio, and its
- * benches/tests are one-goroutine-per-conn.)  This model proves memory-safety
- * under that convention.
+ * THE FIX (modelled here): a refcount on the handle.  ms_open takes a "live" ref;
+ * an in-progress ms_recv takes a ref for its whole call -- ACROSS its park -- and
+ * the terminal closing CQE / ms_close drop the live ref.  Whoever drops the LAST
+ * ref frees.  So the wake-then-free can no longer free under a resuming recv: the
+ * recv-ref keeps the handle alive until the recv has re-locked and returned.
  *
- * Negative control -DBUG_CONCURRENT_CLOSE lifts the convention (a second task
- * closes the conn while the first is parked in recv -- e.g. a shared TCPConn
- * under RUNLOOM_TCPCONN_IOURING=1 on M:N free-threaded).  Spin then finds the
- * use-after-free: the closing CQE wakes the parked consumer and frees the
- * handle, and the woken consumer re-locks freed memory.
+ *   NO USE-AFTER-FREE -- the consumer never re-locks the handle after it is freed
+ *                        (assert(freed == 0) at the re-lock), even under a
+ *                        concurrent close.
  *
- *   NO USE-AFTER-FREE -- the consumer never re-locks/touches the handle after
- *                        it has been freed (assert(freed == 0) at the re-lock).
+ * Controls:
+ *   -DBUG_CONCURRENT_CLOSE  lift the single-owner convention (close races a parked
+ *                           recv).  WITH the refcount this is now SAFE (the new
+ *                           guarantee) -- it must PASS.
+ *   -DBUG_NO_REFCOUNT       drop the refcount (the OLD code) AND lift the
+ *                           convention -> the closing CQE frees while the recv is
+ *                           parked -> the woken recv re-locks freed memory.  Spin
+ *                           finds the use-after-free.  Must FAIL.
  */
 
-bit h_lock     = 0;     /* h->lock                                        */
-bit freed      = 0;     /* handle freed (lock destroyed + free(h))        */
-bit waiter     = 0;     /* a consumer is parked (h->waiter_g set)         */
-bit woken      = 0;     /* the parked consumer has been woken             */
-bit closing    = 0;     /* ms_close set h->closing                        */
-bit recv_done  = 0;     /* ms_recv returned to its caller                 */
-bit cancel_cqe = 0;     /* the closing/cancel CQE has been delivered      */
+bit  h_lock     = 0;     /* h->lock                                        */
+bit  freed      = 0;     /* handle freed (lock destroyed + free(h))        */
+bit  waiter     = 0;     /* a consumer is parked (h->waiter_g set)         */
+bit  woken      = 0;     /* the parked consumer has been woken             */
+bit  closing    = 0;     /* ms_close set h->closing                        */
+bit  recv_done  = 0;     /* ms_recv returned to its caller                 */
+bit  recv_parked= 0;     /* ms_recv took its ref + parked (never cleared)  */
+bit  cancel_cqe = 0;     /* the closing/cancel CQE has been delivered      */
+byte refcount   = 1;     /* lifetime refcount; the "live" ref from ms_open */
 
 #define LOCK   d_step { (h_lock == 0) -> h_lock = 1 }
 #define UNLOCK h_lock = 0
 
-/* runloom_iouring_ms_recv: no data yet -> register waiter, park, and on wake
- * RE-LOCK the handle (io_uring.c:970-1001). */
+/* runloom_iouring_ms_recv: no data yet -> take a recv-ref, register waiter, park,
+ * and on wake RE-LOCK the handle, then drop the recv-ref (free iff last). */
 active proctype recv()
 {
     LOCK;
-    waiter = 1;                 /* h->waiter_g = current (974) */
-    UNLOCK;                     /* (976) */
-    (woken);                    /* park_safe; wait for the drain to wake us */
-    assert(freed == 0);         /* RE-LOCK the handle (999) -- UAF if freed */
+#ifndef BUG_NO_REFCOUNT
+    refcount = refcount + 1;     /* recv-ref: pins h across the park */
+#endif
+    waiter = 1;                  /* h->waiter_g = current */
+    recv_parked = 1;             /* ref taken + parked (caller held h alive at entry) */
+    UNLOCK;
+    (woken);                     /* park; wait for a drainer to wake us */
+    assert(freed == 0);          /* RE-LOCK the handle -- UAF if freed */
     LOCK;
     recv_done = 1;
+#ifndef BUG_NO_REFCOUNT
+    refcount = refcount - 1;     /* drop recv-ref under the lock (ms_put) */
+    if
+    :: refcount == 0 -> UNLOCK; freed = 1;   /* we were last -> free */
+    :: else          -> UNLOCK;
+    fi;
+#else
     UNLOCK;
+#endif
 }
 
-/* runloom_iouring_ms_close: set closing; armed -> cancel SQE whose CQE frees via
- * on_cqe; this models the armed (cancel) path. */
+/* runloom_iouring_ms_close: set closing; the armed path fires a cancel SQE whose
+ * terminal CQE frees via ms_on_cqe. */
 active proctype close_conn()
 {
-#ifndef BUG_CONCURRENT_CLOSE
-    (recv_done);                /* single-owner: close only after recv returns */
+#if !defined(BUG_CONCURRENT_CLOSE) && !defined(BUG_NO_REFCOUNT)
+    (recv_done);                 /* single-owner: close only after recv returns */
+#else
+    (recv_parked);               /* concurrent: close races a recv that has ALREADY
+                                  * parked (holds its ref) -- the real shared-conn
+                                  * scenario.  A recv that hasn't entered can't race
+                                  * a freed handle: the caller's self->ms=NULL after
+                                  * close stops a NEW recv from entering. */
 #endif
     LOCK;
-    closing = 1;                /* h->closing = 1 (1014) */
+    closing = 1;                 /* h->closing = 1 */
     UNLOCK;
-    /* fire-and-forget cancel SQE; the drain delivers its CQE (cancel_cqe) */
-    cancel_cqe = 1;
+    cancel_cqe = 1;              /* fire-and-forget cancel; drain delivers its CQE */
 }
 
-/* A normal data CQE the drain may deliver, waking a parked consumer with
- * closing clear (no free).  Lets recv make progress in the single-owner flow. */
+/* A normal data CQE the drain may deliver, waking a parked consumer with closing
+ * clear (no free) -- lets recv make progress in the single-owner flow. */
 active proctype drain_data()
 {
-    (waiter);                     /* a data CQE arrives for a parked consumer */
+    /* A data CQE is OPTIONAL -- it need never arrive (the cancel CQE may wake the
+     * consumer instead).  `end_dd` marks this wait as a valid end state so a run
+     * where no data CQE comes is not a (spurious) invalid-end-state. */
+end_dd:
+    (waiter);
     LOCK;
     if
-    :: waiter -> waiter = 0; woken = 1;   /* on_cqe captures+NULLs waiter, wakes */
+    :: waiter -> waiter = 0; woken = 1;   /* ms_on_cqe captures+NULLs waiter, wakes */
     :: else   -> skip;                    /* cancel CQE already took it */
     fi;
     UNLOCK;
-    /* closing not set on a data CQE -> no free */
 }
 
-/* on_cqe for the closing/cancel CQE: wake the captured waiter (outside lock),
- * then -- because closing && !more -- free the handle OUTSIDE h->lock. */
+/* ms_on_cqe for the closing/cancel CQE: wake the captured waiter (outside lock),
+ * then -- because closing && !more -- drop the live ref (ms_put), freeing iff
+ * no recv-ref is still held. */
 active proctype drain_cancel()
 {
     bit w;
     bit was_closing;
-    (cancel_cqe);                /* the cancel CQE arrived */
+    (cancel_cqe);
     LOCK;
-    w = waiter; waiter = 0;       /* capture + NULL waiter_g (864-866) */
-    was_closing = closing;        /* (868) */
-    UNLOCK;                       /* (869) */
-    if :: w -> woken = 1;         /* wake the consumer (871-873) */
+    w = waiter; waiter = 0;       /* capture + NULL waiter_g */
+    was_closing = closing;
+    UNLOCK;
+    if :: w -> woken = 1;         /* wake the consumer */
        :: else -> skip;
     fi;
-    if :: was_closing -> freed = 1;   /* free OUTSIDE the lock (878-891) */
+    if :: was_closing ->
+#ifndef BUG_NO_REFCOUNT
+            LOCK;
+            refcount = refcount - 1;          /* drop the live ref (ms_put) */
+            if
+            :: refcount == 0 -> UNLOCK; freed = 1;
+            :: else          -> UNLOCK;
+            fi;
+#else
+            freed = 1;     /* OLD: free unconditionally outside the lock -> UAF
+                            * if a recv is parked and about to re-lock */
+#endif
        :: else -> skip;
     fi;
 }

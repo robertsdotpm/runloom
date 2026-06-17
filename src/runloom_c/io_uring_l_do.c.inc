@@ -185,8 +185,42 @@ struct runloom_iouring_ms {
     runloom_g_t         *waiter_g;
     void             *waiter_hub;
 
+    /* Lifetime refcount, guarded by `lock`.  Refs: (1) the "live" ref taken at
+     * ms_open and dropped by the terminal closing CQE in ms_on_cqe (or by
+     * ms_close when the multishot already ended); (2) an in-progress ms_recv
+     * holds a ref for its whole call -- crucially ACROSS its park -- so a closing
+     * CQE that wakes the parked recv and drops the live ref cannot free the handle
+     * out from under the recv when it resumes and re-locks; (3) ms_close holds a
+     * ref across its own body.  Whoever drops the LAST ref frees.  This replaces
+     * the old wake-then-free, which UAF'd a resuming parked ms_recv on a shared
+     * conn (reader+closer split).  (audit io_uring multishot ms_close-vs-ms_recv UAF.) */
+    int               refcount;
+
     runloom_mutex_t      lock;
 };
+
+/* Free the handle: drain ready/inflight buffers, destroy the lock, free.  Caller
+ * must hold NO lock and must have observed refcount==0, so no other thread can
+ * reach `h`. */
+static void runloom_iouring_ms_free(runloom_iouring_ms_t *h)
+{
+    ms_entry_t *e = h->ready_head, *next;
+    while (e != NULL) { next = e->next; runloom_iouring_pbuf_return(e->bid); free(e); e = next; }
+    if (h->inflight_bid >= 0)
+        runloom_iouring_pbuf_return((unsigned)h->inflight_bid);
+    runloom_mutex_destroy(&h->lock);
+    free(h);
+}
+
+/* Drop one lifetime ref; free iff it was the last.  Caller must NOT hold h->lock. */
+static void runloom_iouring_ms_put(runloom_iouring_ms_t *h)
+{
+    int last;
+    RUNLOOM_RLOCK(&h->lock, RUNLOOM_RANK_HUB);
+    last = (--h->refcount == 0);
+    RUNLOOM_RUNLOCK(&h->lock, RUNLOOM_RANK_HUB);
+    if (last) runloom_iouring_ms_free(h);
+}
 
 /* Submit a multishot recv SQE for handle h.  Sets h->armed on
  * success.  Caller must hold h->lock. */
@@ -215,6 +249,7 @@ runloom_iouring_ms_t *runloom_iouring_ms_open(int fd)
     h->op.type = RUNLOOM_IOURING_OP_MULTISHOT;
     h->fd      = fd;
     h->inflight_bid = -1;
+    h->refcount = 1;             /* the "live" ref; dropped by the terminal CQE / ms_close */
     runloom_mutex_init(&h->lock);
 
     RUNLOOM_RLOCK(&h->lock, RUNLOOM_RANK_HUB);
@@ -297,21 +332,14 @@ static void runloom_iouring_ms_on_cqe(runloom_iouring_ms_t *h,
         else          runloom_sched_wake_safe(wake_g);
     }
 
-    /* If the handle is closing AND the multishot has ended, this
-     * was the last CQE we'll ever see for it -- safe to free. */
+    /* If the handle is closing AND the multishot has ended, this was the last CQE
+     * we'll ever see for it -- drop the "live" ref.  ms_put frees ONLY if no other
+     * ref is held: a parked ms_recv we just woke holds its own recv-ref (so we do
+     * NOT free under it -- it frees when it resumes, re-locks safely, and returns);
+     * with no in-flight recv, this is the last ref and frees here.  Replaces the
+     * old unconditional free, which raced a resuming parked ms_recv into a UAF. */
     if (was_closing && !more) {
-        ms_entry_t *e, *next;
-        e = h->ready_head;
-        while (e != NULL) {
-            next = e->next;
-            runloom_iouring_pbuf_return(e->bid);
-            free(e);
-            e = next;
-        }
-        if (h->inflight_bid >= 0)
-            runloom_iouring_pbuf_return((unsigned)h->inflight_bid);
-        runloom_mutex_destroy(&h->lock);
-        free(h);
+        runloom_iouring_ms_put(h);
     }
 }
 
@@ -325,6 +353,13 @@ runloom_iouring_ssize_t runloom_iouring_ms_recv(runloom_iouring_ms_t *h,
     if (n == 0)    return 0;
 
     RUNLOOM_RLOCK(&h->lock, RUNLOOM_RANK_HUB);
+    h->refcount++;   /* pin the handle for this whole call -- ACROSS our park --
+                      * so a concurrent ms_close + terminal closing CQE cannot free
+                      * it out from under us when we resume and re-lock (the
+                      * shared-conn reader-vs-closer UAF).  Dropped at `done:`. */
+    {
+    runloom_iouring_ssize_t ret;
+    int saved_errno = 0;
     for (;;) {
         /* 1. Drain any partially-consumed in-flight buffer first. */
         if (h->inflight_bid >= 0) {
@@ -344,10 +379,7 @@ runloom_iouring_ssize_t runloom_iouring_ms_recv(runloom_iouring_ms_t *h,
                 h->inflight_off = 0;
                 h->inflight_len = 0;
             }
-            if (out_off >= n) {
-                RUNLOOM_RUNLOCK(&h->lock, RUNLOOM_RANK_HUB);
-                return (runloom_iouring_ssize_t)out_off;
-            }
+            if (out_off >= n) { ret = (runloom_iouring_ssize_t)out_off; goto done; }
             /* User wants more.  Loop to grab another buffer. */
         }
 
@@ -364,10 +396,7 @@ runloom_iouring_ssize_t runloom_iouring_ms_recv(runloom_iouring_ms_t *h,
         }
 
         /* 3. No data right now.  If we already copied some, return. */
-        if (out_off > 0) {
-            RUNLOOM_RUNLOCK(&h->lock, RUNLOOM_RANK_HUB);
-            return (runloom_iouring_ssize_t)out_off;
-        }
+        if (out_off > 0) { ret = (runloom_iouring_ssize_t)out_off; goto done; }
 
         /* 4. Sticky error / EOF.  DEFENSIVE: check `err` BEFORE `eof` so an
          * error wins.  ms_on_cqe sets exactly one of {eof, err} per CQE -- eof
@@ -378,27 +407,21 @@ runloom_iouring_ssize_t runloom_iouring_ms_recv(runloom_iouring_ms_t *h,
          * change ever let both be set, surfacing the error (return -1/errno)
          * strictly beats masking it as a clean EOF (return 0); the err-first
          * order makes that the invariant by construction. */
-        if (h->err) {
-            int e = h->err;
-            RUNLOOM_RUNLOCK(&h->lock, RUNLOOM_RANK_HUB);
-            errno = e;
-            return -1;
-        }
-        if (h->eof) {
-            RUNLOOM_RUNLOCK(&h->lock, RUNLOOM_RANK_HUB);
-            return 0;
-        }
+        if (h->err) { saved_errno = h->err; ret = -1; goto done; }
+        if (h->eof) { ret = 0; goto done; }
+
+        /* 4b. Closed while we looped/parked -- possibly by ANOTHER fiber on a
+         * shared conn (ms_close set h->closing).  Do NOT re-arm a closing handle
+         * (that would re-submit a multishot on a fd being torn down); report EOF.
+         * Without this, a resumed waiter after the closing terminal CQE would fall
+         * into the re-arm branch below.  (audit io_uring ms_close-vs-ms_recv.) */
+        if (h->closing) { ret = 0; goto done; }
 
         /* 5. Re-arm if multishot ended (e.g. earlier -ENOBUFS).  Reached only
-         * past the err/eof returns above, so the handle is genuinely UNARMED
-         * (not a terminal state) -- a real UNARMED->ARMED lifecycle edge. */
+         * past the err/eof/closing returns above, so the handle is genuinely
+         * UNARMED (not a terminal state) -- a real UNARMED->ARMED lifecycle edge. */
         if (!h->armed) {
-            if (runloom_iouring_ms_submit(h) != 0) {
-                int e = errno;
-                RUNLOOM_RUNLOCK(&h->lock, RUNLOOM_RANK_HUB);
-                errno = e;
-                return -1;
-            }
+            if (runloom_iouring_ms_submit(h) != 0) { saved_errno = errno; ret = -1; goto done; }
             RUNLOOM_MS_NOTE(RUNLOOM_MS_UNARMED, RUNLOOM_MS_ARMED);
         }
 
@@ -433,6 +456,19 @@ runloom_iouring_ssize_t runloom_iouring_ms_recv(runloom_iouring_ms_t *h,
             RUNLOOM_RLOCK(&h->lock, RUNLOOM_RANK_HUB);
             /* Loop back to top to consume whatever drain delivered. */
         }
+    }
+done:
+    /* Drop our recv-ref under the held lock.  If we are the last referencer (the
+     * conn was closed + the terminal CQE dropped the live ref while we ran), free
+     * the handle here; otherwise the owner / a concurrent ms_close still holds a
+     * ref and frees later.  Either way no other thread can touch a refcount==0 h. */
+    {
+        int last = (--h->refcount == 0);
+        RUNLOOM_RUNLOCK(&h->lock, RUNLOOM_RANK_HUB);
+        if (last) runloom_iouring_ms_free(h);
+        if (saved_errno) errno = saved_errno;
+        return ret;
+    }
     }
 }
 

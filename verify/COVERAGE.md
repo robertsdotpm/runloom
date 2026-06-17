@@ -193,7 +193,7 @@ TLA+ `RunloomMnRun`.
 | `netpoll_kqueue.pml` | kqueue `EV_ADD|EV_ONESHOT` re-add arm (BSD/macOS) |
 | `netpoll_afd.pml` | IOCP+AFD poll-ctx lifetime (Windows): no UAF / double-free |
 | `netpoll_iouring_loop.pml` | **NEW** io_uring-as-loop backend Dekker wake + re-arm |
-| `iouring_msclose.pml` | io_uring multishot handle lifetime, recv vs close |
+| `iouring_msclose.pml` | io_uring multishot handle lifetime, recv vs close: **refcount makes concurrent close-vs-parked-recv UAF-safe** (+ `BUG_NO_REFCOUNT` reproduces the old UAF) |
 | `cross_thread_wake.pml` | Phase C per-thread sched owner-routed wake_safe |
 | `tstate_attach_detach.pml` | per-g PyThreadState resume slice attach/detach balance |
 | `stack_depot.pml` | cross-hub coroutine stack-memory pool (size guard + cap) |

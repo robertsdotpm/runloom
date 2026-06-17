@@ -11,35 +11,31 @@ void runloom_iouring_ms_close(runloom_iouring_ms_t *h)
     if (h == NULL) return;
 
     RUNLOOM_RLOCK(&h->lock, RUNLOOM_RANK_HUB);
+    h->refcount++;            /* pin h across this call so a terminal CQE that
+                               * fires mid-close can't free it under us */
     h->closing = 1;
     armed_snapshot = h->armed;
     RUNLOOM_RUNLOCK(&h->lock, RUNLOOM_RANK_HUB);
 
     if (!armed_snapshot) {
-        /* Multishot already terminated; safe to free immediately. */
-        ms_entry_t *e, *next;
-        e = h->ready_head;
-        while (e != NULL) {
-            next = e->next;
-            runloom_iouring_pbuf_return(e->bid);
-            free(e);
-            e = next;
-        }
-        if (h->inflight_bid >= 0)
-            runloom_iouring_pbuf_return((unsigned)h->inflight_bid);
-        runloom_mutex_destroy(&h->lock);
-        free(h);
+        /* Multishot already terminated; no terminal CQE will ever come to drop
+         * the "live" ref, so drop it here in addition to our close ref.  The last
+         * put frees (drains buffers + destroys the lock) -- unless an in-flight
+         * ms_recv still holds a ref, in which case it frees on its return. */
+        runloom_iouring_ms_put(h);    /* close ref */
+        runloom_iouring_ms_put(h);    /* live ref */
         return;
     }
 
-    /* Fire-and-forget cancel.  drain frees the cancel op record when
-     * the cancel CQE arrives; the multishot's final CQE (with
-     * F_MORE clear) triggers the handle free in on_cqe. */
+    /* Fire-and-forget cancel.  drain frees the cancel op record when the cancel
+     * CQE arrives; the multishot's final CQE (F_MORE clear) drops the "live" ref
+     * in ms_on_cqe.  We drop our close ref at the end either way. */
     cancel_op = (runloom_iouring_op_t *)calloc(1, sizeof(*cancel_op));
     if (cancel_op == NULL) {
-        /* OOM: leak the handle; the kernel will eventually deliver
-         * -ECANCELED when the fd closes, and on_cqe with closing=1
-         * will free.  Best-effort. */
+        /* OOM: can't submit the cancel.  The kernel still delivers a terminal
+         * CQE when the fd is closed (-ECANCELED / EOF, !more), and ms_on_cqe with
+         * closing=1 drops the live ref then.  Drop our close ref now. */
+        runloom_iouring_ms_put(h);
         return;
     }
     cancel_op->type = RUNLOOM_IOURING_OP_CANCEL;
@@ -50,6 +46,7 @@ void runloom_iouring_ms_close(runloom_iouring_ms_t *h)
     if (runloom_iouring_submit_sqe(sqe, cancel_op) != 0) {
         free(cancel_op);
     }
+    runloom_iouring_ms_put(h);        /* drop our close ref; terminal CQE drops live */
 }
 
 runloom_iouring_ssize_t runloom_iouring_recv(int fd, void *buf, size_t n, int flags)
