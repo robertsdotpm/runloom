@@ -750,6 +750,15 @@ static PyObject *runloom_preempt_eval_frame(PyThreadState *ts,
          * unconditionally is correct: the watchdog already decided this hub is
          * CPU-wedged, so a yield is always warranted.  hub_main's loop top then
          * drains the sub_list and the g (now at the FIFO back) round-robins. */
+#if defined(RUNLOOM_FSM_VALIDATE)
+        /* Runtime witness of the p69b invariant proven in
+         * verify/cbmc/preempt_defer_cbmc.c: the gate above cleared do_preempt iff
+         * mid-destruction, so this yield is UNREACHABLE while in_destruction.
+         * Abort loudly if that ever fails to hold. */
+        if (runloom_tstate_in_destruction(ts))
+            runloom_fsm_violation("preempt_gate", 1 /*about-to-yield*/, 0,
+                                  __FILE__, __LINE__);
+#endif
         runloom_sched_ready_push(&h->sched, g);
         runloom_pystate_snap(&g->snap);
         runloom_tls_self_queued = 1;
@@ -815,6 +824,14 @@ static int runloom_mn_liveness_pending_cb(void *arg)
         return 0;
     }
     if (h != NULL && (g = runloom_tls_current_g) != NULL) {
+#if defined(RUNLOOM_FSM_VALIDATE)
+        /* Same p69b witness as the eval-frame wrapper: the guard at the top of
+         * this callback returned already if in_destruction, so this is unreachable
+         * mid-destruction (verify/cbmc/preempt_defer_cbmc.c). */
+        if (runloom_tstate_in_destruction(PyThreadState_GET()))
+            runloom_fsm_violation("preempt_gate", 1 /*about-to-yield*/, 0,
+                                  __FILE__, __LINE__);
+#endif
         runloom_sched_ready_push(&h->sched, g);
         runloom_pystate_snap(&g->snap);
         runloom_tls_self_queued = 1;

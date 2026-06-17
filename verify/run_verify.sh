@@ -232,6 +232,26 @@ if have cbmc; then
     else
         red "FAIL"; echo " -- see $WORK/cbmc_ioclassify*.log"; fail=$((fail+1)); FAILED="$FAILED cbmc-ioclassify"
     fi
+
+    # preemption defer-during-destruction gate (the p69b weakref-UAF guard):
+    # SAFETY (never yield mid object-destruction) + NO_LOST_PREEMPT (a deferred
+    # preempt is taken at the first safe frame, never dropped), over arbitrary
+    # (trigger, in_destruction) frame sequences.  Teeth: BUG_YIELD_IN_DEST (yield
+    # anyway -> the p69b UAF) and BUG_DROP_ON_DEFER (lose the preempt) MUST fail.
+    printf '  [cbmc] %-34s ' "preempt defer gate (safety+no-lost)"
+    pd_ok=1
+    cbmc "$CBMC_DIR/preempt_defer_cbmc.c" \
+        >"$WORK/cbmc_preempt.log" 2>&1 || pd_ok=0
+    cbmc "$CBMC_DIR/preempt_defer_cbmc.c" \
+        -DBUG_YIELD_IN_DEST >"$WORK/cbmc_preempt_teeth1.log" 2>&1 && pd_ok=0
+    cbmc "$CBMC_DIR/preempt_defer_cbmc.c" \
+        -DBUG_DROP_ON_DEFER >"$WORK/cbmc_preempt_teeth2.log" 2>&1 && pd_ok=0
+    if [ "$pd_ok" = 1 ]; then
+        green "PASS"; echo " -- gate proven safe+no-lost (+ teeth: BUG_YIELD_IN_DEST, BUG_DROP_ON_DEFER fail)"
+        pass=$((pass+1))
+    else
+        red "FAIL"; echo " -- see $WORK/cbmc_preempt*.log"; fail=$((fail+1)); FAILED="$FAILED cbmc-preempt"
+    fi
 else
     echo "  (cbmc not found -- skipping;  sudo apt-get install cbmc)"
 fi
