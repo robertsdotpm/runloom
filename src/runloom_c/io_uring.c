@@ -62,6 +62,7 @@
 #include "runloom_lockrank.h"
 #include "runloom_sched.h"
 #include "runloom_fsm.h"
+#include "runloom_io_fsm.h"   /* the total (rc,errno)->event I/O classifier */
 
 /* IORING_REGISTER_EVENTFD opcode for io_uring_register.  Value is a
  * stable kernel ABI but some older Linux headers don't expose the

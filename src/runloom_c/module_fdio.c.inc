@@ -59,6 +59,10 @@ static PyObject *m_fd_read(PyObject *self, PyObject *args)
         int injerr = RUNLOOM_FDIO_FINJ(RUNLOOM_FAULT_FD_READ);
         ssize_t r = injerr ? (errno = injerr, (ssize_t)-1)
                            : read(fd, buf.buf, (size_t)n_bytes);
+        /* fd read classifies like recv: READY (>0) / EOF (0) / WOULDBLOCK_R /
+         * INTR / ERROR.  Observational route through the total I/O FSM. */
+        RUNLOOM_IO_NOTE(RUNLOOM_IO_RECV,
+                        runloom_io_classify(RUNLOOM_IO_RECV, (long long)r, errno));
         if (r > 0)  { got = (Py_ssize_t)r; break; }
         if (r == 0) { got = 0; break; }   /* EOF */
         if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
@@ -101,6 +105,10 @@ static PyObject *m_fd_write(PyObject *self, PyObject *args)
         ssize_t r = injerr ? (errno = injerr, (ssize_t)-1)
                            : write(fd, (const char *)buf.buf + written,
                                    (size_t)(buf.len - written));
+        /* fd write classifies like send: PROGRESS (>=0) / WOULDBLOCK_W / INTR /
+         * ERROR.  Observational route through the total I/O FSM. */
+        RUNLOOM_IO_NOTE(RUNLOOM_IO_SEND,
+                        runloom_io_classify(RUNLOOM_IO_SEND, (long long)r, errno));
         if (r >= 0) { written += r; continue; }
         if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
             PyBuffer_Release(&buf);

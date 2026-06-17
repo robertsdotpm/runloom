@@ -174,6 +174,8 @@ static void runloom_io_c_echo(void *arg)
         } else {
             for (;;) {
                 n = recv(fd, buf, 8, 0);
+                RUNLOOM_IO_NOTE(RUNLOOM_IO_RECV,
+                                runloom_io_classify(RUNLOOM_IO_RECV, (long long)n, errno));
                 if (n >= 0) break;
                 if (errno == EINTR) continue;
                 if (errno != EAGAIN && errno != EWOULDBLOCK) { runloom_io_c_close(fd); return; }
@@ -196,6 +198,8 @@ static void runloom_io_c_echo(void *arg)
                     runloom_io_c_close(fd); return;  /* EOF/error on a proactor send */
                 }
                 s = send(fd, buf + sent, (size_t)(n - sent), 0);
+                RUNLOOM_IO_NOTE(RUNLOOM_IO_SEND,
+                                runloom_io_classify(RUNLOOM_IO_SEND, (long long)s, errno));
                 if (s > 0) { sent += s; continue; }
                 if (s < 0 && errno == EINTR) continue;
                 if (s < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
@@ -219,6 +223,8 @@ static void runloom_io_c_acceptor(void *arg)
          * explicitly (matches runloom_tcp_conn_net's accept path). */
         int cfd = accept(lfd, NULL, NULL);
 #endif
+        RUNLOOM_IO_NOTE(RUNLOOM_IO_ACCEPT,
+                        runloom_io_classify(RUNLOOM_IO_ACCEPT, (long long)cfd, errno));
         if (cfd < 0) {
             if (errno == EINTR || errno == ECONNABORTED) continue;
             if (errno == EAGAIN || errno == EWOULDBLOCK) {

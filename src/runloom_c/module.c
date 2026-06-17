@@ -51,6 +51,7 @@ static inline int PyDict_GetItemRef(PyObject *d, PyObject *key, PyObject **resul
 #include "mn_sched.h"
 #include "chan.h"
 #include "runloom_tcp.h"
+#include "runloom_io_fsm.h"   /* the total (rc,errno)->event I/O classifier */
 #include "runloom_blockpool.h"
 #include "runloom_diag.h"
 #include "runloom_gstate.h"

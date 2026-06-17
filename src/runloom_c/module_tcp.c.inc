@@ -155,6 +155,10 @@ static PyObject *m_tcp_recv(PyObject *self, PyObject *args)
         }
 #else
         ssize_t r = recv(fd, (char *)buf.buf, (size_t)n_bytes, flags);
+        /* Route the (rc,errno) decision through the total I/O FSM (observational:
+         * asserts the event is one recv can emit under -DRUNLOOM_FSM_VALIDATE). */
+        RUNLOOM_IO_NOTE(RUNLOOM_IO_RECV,
+                        runloom_io_classify(RUNLOOM_IO_RECV, (long long)r, errno));
         if (r > 0) { got = (Py_ssize_t)r; break; }
         if (r == 0) { got = 0; break; }
         if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
@@ -219,6 +223,8 @@ static PyObject *m_tcp_recv_alloc(PyObject *self, PyObject *args)
         }
 #else
         ssize_t r = recv(fd, out, (size_t)n_bytes, flags);
+        RUNLOOM_IO_NOTE(RUNLOOM_IO_RECV,
+                        runloom_io_classify(RUNLOOM_IO_RECV, (long long)r, errno));
         if (r >= 0) { got = (Py_ssize_t)r; break; }
         if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
             Py_DECREF(result);
@@ -267,6 +273,8 @@ static PyObject *m_tcp_send(PyObject *self, PyObject *args)
 #else
         ssize_t r = send(fd, (const char *)buf.buf + sent,
                          (size_t)(buf.len - sent), flags);
+        RUNLOOM_IO_NOTE(RUNLOOM_IO_SEND,
+                        runloom_io_classify(RUNLOOM_IO_SEND, (long long)r, errno));
         if (r >= 0) { sent += r; continue; }
         if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
             PyBuffer_Release(&buf);
@@ -316,6 +324,8 @@ static PyObject *m_tcp_send_once(PyObject *self, PyObject *args)
         }
 #else
         ssize_t r = send(fd, (const char *)buf.buf, (size_t)buf.len, flags);
+        RUNLOOM_IO_NOTE(RUNLOOM_IO_SEND,
+                        runloom_io_classify(RUNLOOM_IO_SEND, (long long)r, errno));
         if (r >= 0) { sent = (Py_ssize_t)r; break; }
         if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
             PyBuffer_Release(&buf);

@@ -282,21 +282,33 @@ static PyObject *RunloomTCPConn_recv_into(RunloomTCPConn *self, PyObject *args)
 #endif
 
     while (1) {
+        /* recv_into: same total-FSM classification as recv (READY/EOF success,
+         * WOULDBLOCK_R/INTR park, ERROR raise). */
 #if defined(RUNLOOM_OS_WINDOWS)
-        int r = recv((SOCKET)fd, (char *)buf.buf, (int)n_bytes, flags);
-        if (r >= 0) { got = r; break; }
-        if (!runloom_is_wouldblock() && !runloom_is_intr()) {
+        long long r = (long long)recv((SOCKET)fd, (char *)buf.buf,
+                                      (int)n_bytes, flags);
+#else
+        long long r = (long long)recv(fd, (char *)buf.buf,
+                                      (size_t)n_bytes, flags);
+#endif
+        RUNLOOM_IO_SWITCH(runloom_io_classify(RUNLOOM_IO_RECV, r, runloom_sock_errno())) {
+        case RUNLOOM_IO_READY:
+        case RUNLOOM_IO_EOF:
+            got = (Py_ssize_t)r;
+            goto recv_into_done;
+        case RUNLOOM_IO_WOULDBLOCK_R:
+        case RUNLOOM_IO_INTR:
+            break;                      /* not ready -> park on READ below */
+        case RUNLOOM_IO_ERROR:
             PyBuffer_Release(&buf);
             return runloom_raise_errno();
-        }
-#else
-        ssize_t r = recv(fd, (char *)buf.buf, (size_t)n_bytes, flags);
-        if (r >= 0) { got = (Py_ssize_t)r; break; }
-        if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
-            PyBuffer_Release(&buf);
-            return PyErr_SetFromErrno(PyExc_OSError);
-        }
-#endif
+        case RUNLOOM_IO_PROGRESS:       /* events recv cannot emit */
+        case RUNLOOM_IO_WOULDBLOCK_W:
+        case RUNLOOM_IO_RETRY:
+        case RUNLOOM_IO_EVENT_COUNT:
+            runloom_fsm_violation("runloom_io.recv_into", RUNLOOM_IO_RECV, -1,
+                                  __FILE__, __LINE__);
+        } RUNLOOM_IO_SWITCH_END
         if (runloom_netpoll_wait_fd_coop(fd, RUNLOOM_NETPOLL_READ, -1LL) < 0) {
             PyBuffer_Release(&buf);
             /* wait_fd may have run a Python signal handler that raised (e.g. an
@@ -304,6 +316,7 @@ static PyObject *RunloomTCPConn_recv_into(RunloomTCPConn *self, PyObject *args)
             return PyErr_Occurred() ? NULL : PyErr_SetFromErrno(PyExc_OSError);
         }
     }
+recv_into_done:
     PyBuffer_Release(&buf);
     return PyLong_FromSsize_t(got);
 }

@@ -97,6 +97,26 @@ static runloom_iouring_ssize_t runloom_iouring_do(struct io_uring_sqe sqe)
 
     {
         int32_t r = __atomic_load_n(&op.result, __ATOMIC_ACQUIRE);
+#if defined(RUNLOOM_FSM_VALIDATE)
+        /* Route the io_uring CQE completion through the SAME total I/O FSM as the
+         * sync backends (its res<0 is -errno).  One NOTE here covers every
+         * io_uring op; READ/RECV classify like recv, WRITE/SEND like send
+         * (pread/pwrite of regular files share that >=0 / <0-errno shape). */
+        {
+            int io_err = (r < 0) ? -(int)r : 0;
+            switch (sqe.opcode) {
+            case IORING_OP_READ:  case IORING_OP_RECV:
+                RUNLOOM_IO_NOTE(RUNLOOM_IO_RECV,
+                    runloom_io_classify(RUNLOOM_IO_RECV, (long long)r, io_err));
+                break;
+            case IORING_OP_WRITE: case IORING_OP_SEND:
+                RUNLOOM_IO_NOTE(RUNLOOM_IO_SEND,
+                    runloom_io_classify(RUNLOOM_IO_SEND, (long long)r, io_err));
+                break;
+            default: break;   /* other opcodes are not byte-stream I/O */
+            }
+        }
+#endif
         if (r < 0) { errno = -r; return -1; }
         return r;
     }
