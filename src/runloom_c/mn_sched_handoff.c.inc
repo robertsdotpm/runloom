@@ -191,13 +191,31 @@ static RUNLOOM_THREAD_RET runloom_handoff_main(void *arg)
         if (!claimed) runloom_sleep_ns(500000LL);
     }
 
-    /* Exit with rescue_ts DETACHED (PyEval_SaveThread at the end of each rescue
-     * cycle; never re-attached while idle).  Do NOT call PyThreadState_Delete here:
-     * during mn_fini the GC gcer thread may still be running a stop-the-world;
-     * PyThreadState_Delete interacts with that bookkeeping and deadlocks when
-     * called from the rescue thread while the main thread blocks in pthread_join.
-     * Deletion is done by stop_join from the main thread after all rescuers join. */
+    /* rescue_ts is DETACHED here (PyEval_SaveThread ends every rescue cycle).
+     * Delete it ON THIS (owning) thread -- mirror the hub self-delete
+     * (mn_sched_hub_main.c.inc): PyThreadState_New gilstate-bound rescue_ts to
+     * THIS thread's gilstate-TSS slot, so it MUST be cleared/deleted HERE (where
+     * gilstate_tss == rescue_ts).  Deleting it cross-thread from the MAIN thread
+     * (the old runloom_handoff_delete_tstates approach) clears the main thread's
+     * gilstate slot instead -> a hard abort under a --with-pydebug FT CPython
+     * (pystate.c:345 asserts tstate == this thread's gilstate tstate) and silent
+     * main-thread gilstate corruption in release.  The old STW-deadlock worry is
+     * gone: runloom_handoff_stop_join detaches the main thread (PyEval_SaveThread)
+     * BEFORE pthread_join, so a GC stop-the-world completes while we attach to
+     * delete.  NULL the published slot first so the delete_tstates sweep skips it. */
     runloom_coro_thread_fini();
+    if (getenv("RUNLOOM_GILSTATE_DELETE_ON_MAIN") == NULL) {
+        runloom_gilstate_trace("Delete", my_idx, my_idx);   /* deleter = own thread (the fix) */
+        __atomic_store_n((void **)&runloom_rescue_tstates[my_idx], (void *)NULL,
+                         __ATOMIC_RELEASE);
+        PyEval_RestoreThread(rescue_ts);   /* attach; waits out any pending STW */
+        PyThreadState_Clear(rescue_ts);
+        PyThreadState_DeleteCurrent();     /* clears THIS thread's gilstate slot */
+    }
+    /* else NEGATIVE CONTROL (RUNLOOM_GILSTATE_DELETE_ON_MAIN): leave rescue_ts
+     * published + alive for runloom_handoff_delete_tstates to delete from the
+     * MAIN thread, reproducing the pre-fix cross-thread gilstate delete that
+     * aborts at pystate.c:345 under --with-pydebug. */
     RUNLOOM_THREAD_RETURN(NULL);
 }
 
@@ -288,11 +306,17 @@ static void runloom_handoff_stop_join(void)
      * makes the rescue threads' tstate-pointer stores visible to that deletion. */
 }
 
-/* Delete the rescue tstates + free the pool arrays.  MUST be called on the MAIN
- * thread AFTER both the rescue threads AND the hubs are joined (see the deadlock
- * note in runloom_handoff_stop_join): only then can no other thread hold
- * runloom_hub_tstate_lock across a startup stop-the-world.  Safe to call even when
- * handoff was disabled / no threads spawned (arrays are NULL). */
+/* Free the pool arrays + reap any rescue tstate NOT already self-deleted.  In
+ * the DEFAULT path each rescue thread self-deletes its OWN tstate on its own
+ * thread (the gilstate-correct deleter; see runloom_handoff_main) and NULLs its
+ * slot, so this sweep finds all-NULL slots and only frees the arrays.  A
+ * non-NULL slot here means the RUNLOOM_GILSTATE_DELETE_ON_MAIN negative control
+ * deliberately deferred the delete to THIS main thread -- reproducing the pre-fix
+ * cross-thread gilstate delete (aborts at pystate.c:345 under --with-pydebug).
+ * MUST be called on the MAIN thread AFTER both the rescue threads AND the hubs
+ * are joined (the deadlock note in runloom_handoff_stop_join): only then can no
+ * other thread hold runloom_hub_tstate_lock across a startup stop-the-world.
+ * Safe when handoff was disabled / no threads spawned (arrays are NULL). */
 static void runloom_handoff_delete_tstates(void)
 {
     int k;
@@ -303,6 +327,10 @@ static void runloom_handoff_delete_tstates(void)
                                       (void **)&runloom_rescue_tstates[k],
                                       __ATOMIC_ACQUIRE);
             if (rts != NULL) {
+                /* Negative-control / straggler path only (see above): a
+                 * cross-thread delete from MAIN.  Trace deleter=-1 (main) so the
+                 * gilstate TLA trace check flags it, matching the hub control. */
+                runloom_gilstate_trace("Delete", k, -1);
                 PyThreadState_Clear(rts);
                 PyThreadState_Delete(rts);
             }
