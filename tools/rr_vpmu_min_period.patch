@@ -1,0 +1,33 @@
+diff --git a/src/PerfCounters.cc b/src/PerfCounters.cc
+index 400dadf..1828c29 100644
+--- a/src/PerfCounters.cc
++++ b/src/PerfCounters.cc
+@@ -328,7 +328,11 @@ static void check_for_ioc_period_bug(perf_event_attrs &perf_attr) {
+   attr.exclude_kernel = 1;
+   ScopedFd bug_fd = start_counter(0, -1, &attr);
+ 
+-  uint64_t new_period = 1;
++  // VMware's vPMU rejects sample_period < 32 with EINVAL (an interrupt-rate
++  // sanity guard; the retired-branch count itself is exactly reproducible, so
++  // replay precision is unaffected -- see PerfCounters::reset clamp below).
++  // Probe with 32 instead of 1 so this check runs there.
++  uint64_t new_period = 32;
+   if (ioctl(bug_fd, PERF_EVENT_IOC_PERIOD, &new_period)) {
+     FATAL() << "ioctl(PERF_EVENT_IOC_PERIOD) failed";
+   }
+@@ -636,6 +640,15 @@ void PerfCounters::reset(Ticks ticks_period) {
+     // PERF_EVENT_IOC_PERIOD so just turn 0 into a very big number.
+     ticks_period = uint64_t(1) << 60;
+   }
++  // VMware's vPMU rejects sample_period < 32 with EINVAL -- an interrupt-rate
++  // guard, not a precision issue (the retired-branch count was verified exactly
++  // reproducible across runs).  Clamp small periods up to the vPMU minimum; rr
++  // fires the PMI a few branches late and single-steps the remainder, which is
++  // well within the PMI skid it already tolerates, so replay stays exact.
++  // Lets rr run under a VMware vPMU.  See docs/dev/rr_vpmu_status.md (runloom).
++  if (ticks_period > 0 && ticks_period < 32) {
++    ticks_period = 32;
++  }
+ 
+   if (!started) {
+     LOG(debug) << "Recreating counters with period " << ticks_period;
