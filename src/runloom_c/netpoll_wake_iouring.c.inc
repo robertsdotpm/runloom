@@ -100,8 +100,10 @@ int runloom_netpoll_cancel_g(runloom_g_t *g)
         cur = __atomic_load_n(&p->commit, __ATOMIC_ACQUIRE);
         if (cur == RUNLOOM_PARK_WOKEN) break;       /* pump/timeout won */
         if (__atomic_compare_exchange_n(&p->commit, &cur, RUNLOOM_PARK_WOKEN, 0,
-                                        __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+                                        __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+            RUNLOOM_PARK_NOTE(cur, RUNLOOM_PARK_WOKEN);
             break;
+        }
     }
     if (cur != RUNLOOM_PARK_WOKEN) {
         if (p->ready_out != NULL) *p->ready_out = RUNLOOM_NETPOLL_CANCELLED;
@@ -156,8 +158,10 @@ int runloom_netpoll_unpark_many(runloom_g_t **gs, int n, int *missed_out)
             cur = __atomic_load_n(&p->commit, __ATOMIC_ACQUIRE);
             if (cur == RUNLOOM_PARK_WOKEN) break;       /* pump/timeout/cancel won */
             if (__atomic_compare_exchange_n(&p->commit, &cur, RUNLOOM_PARK_WOKEN, 0,
-                                            __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+                                            __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+                RUNLOOM_PARK_NOTE(cur, RUNLOOM_PARK_WOKEN);
                 break;
+            }
         }
         if (cur != RUNLOOM_PARK_WOKEN) {
             if (p->ready_out != NULL) *p->ready_out = RUNLOOM_NETPOLL_UNPARKED;
@@ -231,8 +235,10 @@ void runloom_netpoll_cancel_fd(int fd)
                     if (cur == RUNLOOM_PARK_WOKEN) break;
                     if (__atomic_compare_exchange_n(&p->commit, &cur,
                             RUNLOOM_PARK_WOKEN, 0,
-                            __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+                            __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+                        RUNLOOM_PARK_NOTE(cur, RUNLOOM_PARK_WOKEN);
                         break;
+                    }
                 }
                 if (cur != RUNLOOM_PARK_WOKEN) {
                     if (p->ready_out != NULL)
@@ -284,8 +290,10 @@ int runloom_netpoll_cancel_all_parked(void)
                     if (cur == RUNLOOM_PARK_WOKEN) break;
                     if (__atomic_compare_exchange_n(&p->commit, &cur,
                             RUNLOOM_PARK_WOKEN, 0,
-                            __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+                            __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+                        RUNLOOM_PARK_NOTE(cur, RUNLOOM_PARK_WOKEN);
                         break;
+                    }
                 }
                 if (cur != RUNLOOM_PARK_WOKEN) {
                     if (p->ready_out != NULL)

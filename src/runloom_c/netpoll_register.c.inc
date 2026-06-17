@@ -102,7 +102,16 @@ static int runloom_netpoll_register(int fd, int events)
      *
      * The arm mask (runloom_fd_armed) doubles as registration state: armed==0
      * means "not in the epoll set" (-> ADD), armed!=0 means "already ADDed"
-     * (-> MOD to widen the direction set). */
+     * (-> MOD to widen the direction set).
+     *
+     * FSM SCOPE (RUNLOOM_FSM_VALIDATE): the arm mask is NOT a transition FSM and is
+     * deliberately HARDENED IN PLACE, not converted (FSM_ADOPTION.md tier-3/4).  It
+     * is a monotonically-widened atomic DIRECTION-SET bitmask (target = cur | need),
+     * cleared to 0 on unregister / release_if_idle, all under runloom_pool.lock.
+     * Every cur|need is valid by construction -- there is no enumerable state with
+     * an illegal (state,event) cell for a NOTE to catch -- so the bitmask + the lock
+     * (plus the documented cross-pool stale-arm migration and the stale-arm
+     * self-heal below) ARE the proof; a NOTE-edge here would be ceremony. */
     need = events & (RUNLOOM_NETPOLL_READ | RUNLOOM_NETPOLL_WRITE);
 
     RUNLOOM_RLOCK(&runloom_pool.lock, RUNLOOM_RANK_PARKER_POOL);

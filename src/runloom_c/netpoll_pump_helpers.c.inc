@@ -22,8 +22,10 @@ static inline int runloom_pump_claim(runloom_parked_t *p)
         cur = __atomic_load_n(&p->commit, __ATOMIC_ACQUIRE);
         if (cur == RUNLOOM_PARK_WOKEN) break;            /* already claimed */
         if (__atomic_compare_exchange_n(&p->commit, &cur, RUNLOOM_PARK_WOKEN, 0,
-                                        __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+                                        __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+            RUNLOOM_PARK_NOTE(cur, RUNLOOM_PARK_WOKEN);   /* cur in {ARMED,PARKED} */
             break;
+        }
     }
     return cur;
 }

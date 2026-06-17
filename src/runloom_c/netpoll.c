@@ -34,6 +34,7 @@
 #include "io_uring.h"
 #include "runloom_diag.h"
 #include "runloom_gstate.h"
+#include "runloom_fsm.h"
 
 #include <errno.h>
 #include <stdlib.h>
@@ -134,6 +135,44 @@ typedef struct runloom_parked {
 #define RUNLOOM_PARK_ARMED  0
 #define RUNLOOM_PARK_PARKED 1
 #define RUNLOOM_PARK_WOKEN  2
+
+/* ---- parker-commit FSM transition table (OBSERVATIONAL) ---------------------
+ * The Go-netpollblockcommit claim protocol (GenMC-proven in
+ * verify/genmc/netpoll_claim.c).  Three states (ARMED/PARKED/WOKEN), two events:
+ *   COMMIT -- the parking g commits to parking (the sole ARMED->PARKED writer).
+ *   CLAIM  -- a waker (pump fd-ready / timeout sweep / cancel / unpark) claims
+ *             the parker, CASing it to WOKEN; legal from ARMED (g not yet parked
+ *             -> record readiness, do NOT re-queue) or PARKED (re-queue).
+ * WOKEN is terminal (a claimed parker is released back to its pool).  Exactly
+ * one of {pump, parking g} ever moves commit off ARMED -- the exactly-once-wake
+ * guarantee.  This table never DRIVES commit (the proven CASes still do); it is
+ * consulted only by RUNLOOM_PARK_NOTE() to abort under -DRUNLOOM_FSM_VALIDATE if
+ * a live CAS ever performs an edge the relation does not contain.  Zero cost in
+ * a normal build. */
+enum {
+    RUNLOOM_PARK_EV_COMMIT = 0,   /* g commits to parking: ARMED -> PARKED       */
+    RUNLOOM_PARK_EV_CLAIM,        /* a waker claims the parker -> WOKEN          */
+    RUNLOOM_PARK_EV_COUNT
+};
+#define RUNLOOM_PARK_STATE_COUNT 3   /* ARMED, PARKED, WOKEN */
+
+static const signed char runloom_park_table
+        [RUNLOOM_PARK_STATE_COUNT][RUNLOOM_PARK_EV_COUNT]
+        __attribute__((unused)) = {
+    /*                      COMMIT                CLAIM */
+    [RUNLOOM_PARK_ARMED]  = { RUNLOOM_PARK_PARKED, RUNLOOM_PARK_WOKEN  },
+    [RUNLOOM_PARK_PARKED] = { RUNLOOM_FSM_INVALID, RUNLOOM_PARK_WOKEN  },
+    [RUNLOOM_PARK_WOKEN]  = { RUNLOOM_FSM_INVALID, RUNLOOM_FSM_INVALID },
+};
+RUNLOOM_FSM_ASSERT_TABLE(runloom_park_table, RUNLOOM_PARK_STATE_COUNT,
+                         RUNLOOM_PARK_EV_COUNT, "parker_commit");
+
+/* Convenience: assert the (from->to) edge exists in the parker-commit relation.
+ * Expands to nothing unless -DRUNLOOM_FSM_VALIDATE. */
+#define RUNLOOM_PARK_NOTE(from, to)                                           \
+    RUNLOOM_FSM_NOTE("parker_commit", runloom_park_table,                     \
+                     RUNLOOM_PARK_STATE_COUNT, RUNLOOM_PARK_EV_COUNT,         \
+                     (from), (to))
 
 /* Forcibly wake all parked fibers with a cancelled marker.
  * Returns count of waiters woken.  Used by sched_reset() so paio.run

@@ -39,8 +39,10 @@ int runloom_netpoll_drain_parked(void)
                     if (__atomic_compare_exchange_n(&p->commit, &cur,
                                                     RUNLOOM_PARK_WOKEN, 0,
                                                     __ATOMIC_ACQ_REL,
-                                                    __ATOMIC_ACQUIRE))
+                                                    __ATOMIC_ACQUIRE)) {
+                        RUNLOOM_PARK_NOTE(cur, RUNLOOM_PARK_WOKEN);
                         break;
+                    }
                 }
                 /* Removes p from the global list, per-fd bucket and deadline
                  * heap, decrements pool->total, and clears p->g->netpoll_parker. */
@@ -102,8 +104,10 @@ int runloom_netpoll_signal_wake(void)
                 if (cur == RUNLOOM_PARK_WOKEN) break;
                 if (__atomic_compare_exchange_n(&p->commit, &cur, RUNLOOM_PARK_WOKEN,
                                                 0, __ATOMIC_ACQ_REL,
-                                                __ATOMIC_ACQUIRE))
+                                                __ATOMIC_ACQUIRE)) {
+                    RUNLOOM_PARK_NOTE(cur, RUNLOOM_PARK_WOKEN);
                     break;
+                }
             }
             /* Only a committed (PARKED) g is re-queued here: it has yielded and
              * will resume in wait_fd to pick up the stashed exception.  An ARMED
@@ -334,6 +338,9 @@ int runloom_netpoll_wait_fd(int fd, int events, long long timeout_ns)
         if (!__atomic_compare_exchange_n(&park->commit, &expc,
                                          RUNLOOM_PARK_PARKED, 0,
                                          __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+            /* expc == WOKEN here (the only state a claimer leaves); no NOTE --
+             * this is a FAILED commit, not a transition we performed.  The
+             * successful ARMED->PARKED commit is NOTE'd just below. */
             /* expc == WOKEN: claimed by a pump.  ready_mask is set.  The g
              * never committed to parking, so it keeps running; its wake_state
              * stays RUNNING (the pump claimed an ARMED parker and so did NOT
@@ -348,6 +355,7 @@ int runloom_netpoll_wait_fd(int fd, int events, long long timeout_ns)
             runloom_parker_pool_release(park);
             return ready_mask;
         }
+        RUNLOOM_PARK_NOTE(RUNLOOM_PARK_ARMED, RUNLOOM_PARK_PARKED);
     }
 
     /* Committed to parking: stamp the dwell clock for the hub-idle
