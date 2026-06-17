@@ -210,6 +210,26 @@ if have cbmc; then
     else
         red "FAIL"; echo " -- see $WORK/cbmc_wakestate*.log"; fail=$((fail+1)); FAILED="$FAILED cbmc-wakestate"
     fi
+
+    # I/O-return classifier FSM (runloom_io_fsm.h): totality (every (call,rc,errno)
+    # yields an in-range event, never the violation abort) + mask-soundness (the
+    # event is always one the call kind may emit -- the link to a consumer switch).
+    # rc and errno are fully symbolic.  Teeth: BUG_SEND_EOF (a SEND yields EOF,
+    # outside its mask) and BUG_OOR (out-of-range event) MUST each fail.
+    printf '  [cbmc] %-34s ' "io_classify FSM (totality+mask-sound)"
+    io_ok=1
+    cbmc "$CBMC_DIR/io_classify_cbmc.c" -I "$ROOT/src/runloom_c" \
+        >"$WORK/cbmc_ioclassify.log" 2>&1 || io_ok=0
+    cbmc "$CBMC_DIR/io_classify_cbmc.c" -I "$ROOT/src/runloom_c" \
+        -DBUG_SEND_EOF >"$WORK/cbmc_ioclassify_teeth1.log" 2>&1 && io_ok=0
+    cbmc "$CBMC_DIR/io_classify_cbmc.c" -I "$ROOT/src/runloom_c" \
+        -DBUG_OOR >"$WORK/cbmc_ioclassify_teeth2.log" 2>&1 && io_ok=0
+    if [ "$io_ok" = 1 ]; then
+        green "PASS"; echo " -- classifier proven total+sound (+ teeth: BUG_SEND_EOF, BUG_OOR fail)"
+        pass=$((pass+1))
+    else
+        red "FAIL"; echo " -- see $WORK/cbmc_ioclassify*.log"; fail=$((fail+1)); FAILED="$FAILED cbmc-ioclassify"
+    fi
 else
     echo "  (cbmc not found -- skipping;  sudo apt-get install cbmc)"
 fi
