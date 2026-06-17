@@ -8,6 +8,23 @@ extern int runloom_mn_hub_count(void);   /* defined in mn_sched.c */
 static int runloom_preempt_yield_cb(void *user)
 {
     (void)user;
+    /* Defer the preempt yield while this tstate is mid object-destruction.  This
+     * callback is posted by the time-slicer (runloom_preempt_main, Py_AddPendingCall)
+     * and fires from _Py_HandlePending on whatever frame the eval loop is in --
+     * which can be NESTED inside an in-flight tp_dealloc / finalizer / weakref
+     * callback (the free-threaded biased-refcount merge drain and the trashcan
+     * unwind both re-enter _Py_HandlePending).  Yielding there freezes a
+     * half-finished destructor on the goroutine's coro stack; a concurrent
+     * stop-the-world GC / QSBR reclaim then runs against partially-destroyed
+     * objects -> use-after-free (the test_weakref class the scheduler invariant in
+     * CLAUDE.md forbids).  The two M:N preempt yield sites already gate on this
+     * (mn_sched_hub_resume_preempt.c.inc); the time-slicer reached the yield via a
+     * SEPARATE path with NO gate (audit hang #1).  Leave the trigger armed -- the
+     * next quantum re-posts once destruction unwinds, so it is deferred a few
+     * frames, never lost.  Mirrors the liveness-backstop pending-call gate. */
+    if (runloom_tstate_in_destruction(PyThreadState_GET())) {
+        return 0;
+    }
     /* If we're in a hub, yield via M:N path.  Otherwise check the
      * single-thread global scheduler.  Either way, this is a no-op
      * when no fiber is currently running on this tstate. */

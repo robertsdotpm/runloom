@@ -764,11 +764,23 @@ static int runloom_mn_go_n_bulk(PyObject *callable, long n, size_t stack_size,
          * decrements it, so the count balances. */
         __atomic_add_fetch(&runloom_mn_pending_global, counts[hub], __ATOMIC_ACQ_REL);
         __atomic_add_fetch(&h->sub_gen, 1, __ATOMIC_RELEASE);
+        /* Wake the target hub in WHATEVER wait mode it is in -- this MUST mirror
+         * runloom_mn_hub_submit's full routing, not just the idle_cond signal.  A
+         * bulk batch landing on a hub blocked in its io_uring ring (loop backend)
+         * or in netpoll_pump/epoll_wait (any fiber parked on I/O anywhere makes an
+         * idle hub pump instead of waiting on idle_cond) would otherwise sit un-run
+         * until that wait's idle_ns/pump timeout expires.  (audit lost-wake #5.) */
+        if (__atomic_load_n(&h->ring_waiting, __ATOMIC_RELAXED)) {
+            __atomic_thread_fence(__ATOMIC_SEQ_CST);   /* Dekker vs the hub's re-check */
+            if (__atomic_load_n(&h->ring_waiting, __ATOMIC_ACQUIRE))
+                runloom_iouring_loop_wake(h->loop_wake_fd);
+        }
         if (__atomic_load_n(&h->idle_waiting, __ATOMIC_ACQUIRE)) {
             RUNLOOM_RLOCK(&h->idle_lock, RUNLOOM_RANK_HUB_IDLE);
             runloom_cond_signal(&h->idle_cond);
             RUNLOOM_RUNLOCK(&h->idle_lock, RUNLOOM_RANK_HUB_IDLE);
         }
+        runloom_netpoll_wake_pump((void *)h);   /* pump/epoll-blocked hub */
     }
     return 0;
 }
