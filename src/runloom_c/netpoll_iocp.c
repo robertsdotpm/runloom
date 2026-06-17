@@ -200,12 +200,26 @@ static ULONG runloom_to_afd_events(int events)
 static int runloom_from_afd_events(ULONG afd)
 {
     int events = 0;
-    if (afd & (AFD_POLL_RECEIVE | AFD_POLL_RECEIVE_EXPEDITED |
-               AFD_POLL_DISCONNECT | AFD_POLL_ABORT |
-               AFD_POLL_ACCEPT | AFD_POLL_LOCAL_CLOSE))
+    /* Pure readiness bits stay direction-specific so healthy traffic wakes
+     * only the correct-direction waiter (no spurious cross-direction wakes). */
+    if (afd & (AFD_POLL_RECEIVE | AFD_POLL_RECEIVE_EXPEDITED | AFD_POLL_ACCEPT))
         events |= RUNLOOM_NETPOLL_READ;
-    if (afd & (AFD_POLL_SEND | AFD_POLL_CONNECT_FAIL))
+    if (afd & AFD_POLL_SEND)
         events |= RUNLOOM_NETPOLL_WRITE;
+    /* Teardown / error bits carry no IN/OUT readiness (a bare close, RST, or
+     * failed connect) yet must release waiters in BOTH directions -- a
+     * WRITE-direction (send/connect) parker on a closed fd would otherwise
+     * never be reached by any waker: cancel_fd is a deliberate no-op on IOCP
+     * (netpoll_wake_iouring.c.inc, to avoid a double-wake UAF vs the AFD
+     * auto-completion), so AFD_POLL_LOCAL_CLOSE is the SOLE close-waker here.
+     * Mirror the epoll EPOLLERR/HUP fold and the WSAPoll POLLHUP/POLLERR
+     * branch, which both wake read+write so every waiter observes the close.
+     * Each parker still receives only its OWN direction bit (dispatch masks
+     * with p->events), so this widens who is woken, not what they observe.
+     * Windows bug #2. */
+    if (afd & (AFD_POLL_LOCAL_CLOSE | AFD_POLL_DISCONNECT |
+               AFD_POLL_ABORT | AFD_POLL_CONNECT_FAIL))
+        events |= RUNLOOM_NETPOLL_READ | RUNLOOM_NETPOLL_WRITE;
     return events;
 }
 
