@@ -220,10 +220,25 @@ select_retry:
          * is genuinely spurious and retries (Go's spurious-wakeup path).
          *
          * Acquire-load: fired_case is claimed by waiter_claim's ACQ_REL CAS on
-         * another thread; reading it plain was a data race (TSan) and, on weak
-         * HW, could observe fired_case >= 0 while waiters[fired].value (written
-         * before the release-CAS) was still stale.  The acquire pairs with that
-         * release so the captured value is visible. */
+         * another thread; reading it plain was a data race (TSan), so it is read
+         * atomic-acquire here.
+         *
+         * VALUE VISIBILITY (corrected -- the earlier note mis-credited the CAS):
+         * the producer writes waiters[fired].value/ok/send_result AFTER claiming
+         * the waiter (waiter_pop_claimable -> waiter_claim's CAS), so the claim-CAS
+         * release does NOT order that value write; the acquire-load here therefore
+         * does NOT by itself make the value visible.  What DOES is that this point
+         * is always reached AFTER runloom_coro_yield() above -- i.e. we parked and
+         * a wake re-queued us.  The producer writes the value BEFORE wake_waiter ->
+         * runloom_sched_wake/mn_wake_g, and that wake handoff's release/acquire
+         * (the wake_list / parked_safe handshake, herd7 wakelist_mpsc.litmus +
+         * cross_thread_wake.pml) orders the value write before our resume.  The
+         * synchronous (non-park) deliveries instead read the value under the
+         * channel lock.  So the captured value is always visible; the acquire-load
+         * is only for the fired_case datum itself, not the value ordering.
+         * (2026-06-17: an adversarial audit flagged this as a stale-read because
+         * the value is written after the claim-CAS; it is a false positive -- the
+         * wake handoff, not the CAS, provides the happens-before.) */
         fired = __atomic_load_n(&park.fired_case, __ATOMIC_ACQUIRE);
         if (fired < 0) {
             select_evict_self(cases, n, waiters, /*fired*/-1);
