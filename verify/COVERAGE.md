@@ -85,6 +85,9 @@ of a hypothetical resizable deque (the production deque is fixed-capacity) and i
 | Foreign-OS-thread primitive fallback | `runloom/sync.py`, peek paths | MED | The "not-a-goroutine → real OS block, don't alloc a sched" decision for a monkey-patched `Lock`/`Condition` on a stdlib daemon thread. Largely a control-flow invariant; better as a hardened runtime check + TSan corpus than a model. |
 | `mn_run` *timed* detector tuning | `mn_sched_init_fini.c.inc` | LOW | `RunloomMnRun.tla` (new) covers the census/stall-kick logic; the `RUNLOOM_DEADLOCK_MS` / `RUNLOOM_STALL_KICK_MS` timing thresholds themselves are policy, not modeled. |
 | timer/sleep min-heap mechanics | `runloom_sched_core.c.inc` | LOW | CBMC layout/bounds (single-owner, `pool->lock`-serialized). `netpoll_deadline` covers the claim race, not the sift/`heap_index`-remove. |
+| single-thread scheduler drain + its deadlock detector | `runloom_sched_drain.c.inc` | LOW | Mostly single-threaded (pre-hub / fork-child path); the M:N drain + census is modeled (`RunloomMnRun`), this single-thread analogue is not. |
+
+Not gaps: `netpoll_diag_fd.c.inc` / `netpoll_init.c.inc` (introspection + setup, not a live wake protocol), `runloom_stackadvice.c` (benign racy size hints), the prewarm daemon in `coro.c` (pure-C, no PyThreadState → invisible to STW). The audit found **no** subsystem the map claims as covered but is actually bare — only uncredited *bonus* coverage (now folded into the index above).
 
 ## Documentation debt (found by the 2026-06-17 audit; proofs unaffected)
 
@@ -125,3 +128,114 @@ plus one `check_spin_must_fail <name> <BUG_DEFINE> "<desc>"` per negative contro
 `tla/run_tla.sh` with a correct `.cfg` (expect "No error has been found") and a
 bug `.cfg` (expect a violation). Cite the source by **function name**, not line
 number, so the reference survives the next file split.
+
+## Complete model index
+
+Every model file, by engine (74 total: Spin 23, CBMC 12, GenMC 13, Coq 4,
+Iris 6, TLA+ 10, herd7/litmus 5, Alloy 1). The subsystem-level grouping is the
+**Coverage map** above; this is the exhaustive file list.
+
+### Spin — `spin/*.pml` (23)
+| file | what |
+|---|---|
+| `cldeque.pml` | Chase-Lev deque: no loss / dup / phantom |
+| `wake_state.pml` | per-g wake_state machine: no lost wake / double-resume / dup runq entry |
+| `parked_safe.pml` | park_safe/wake_safe handshake: no lost wake, balanced |
+| `park_generic_timed.pml` | fd-free TIMED in-memory park: enqueued exactly once |
+| `select_claim.pml` | select() cross-channel `fired_case` claim CAS |
+| `select_close.pml` | select() Phase-2 vs send/close (+4 controls) |
+| `hub_submit.pml` | default M:N wake: `in_sub_queue` dedup + done-check |
+| `blockpool.pml` | blocking-offload wake order: re-queue before dec inflight |
+| `netpoll_commit.pml` | netpoll park/wake commit (Go netpollblockcommit) |
+| `netpoll_rearm.pml` | netpoll LT re-arm vs not-yet-linked window (⚠ drift: models replaced EPOLLONESHOT scheme) |
+| `netpoll_multipool.pml` | multi-pool dispatch `pool→sub` lock hierarchy |
+| `netpoll_deadline.pml` | fd-dispatch vs timeout-drain vs cancel claim race |
+| `netpoll_forceunlink.pml` | force_unlink vs pump: exactly-once release / no UAF |
+| `netpoll_kqueue.pml` | kqueue `EV_ADD|EV_ONESHOT` re-add arm (BSD/macOS) |
+| `netpoll_afd.pml` | IOCP+AFD poll-ctx lifetime (Windows): no UAF / double-free |
+| `netpoll_iouring_loop.pml` | **NEW** io_uring-as-loop backend Dekker wake + re-arm |
+| `iouring_msclose.pml` | io_uring multishot handle lifetime, recv vs close |
+| `cross_thread_wake.pml` | Phase C per-thread sched owner-routed wake_safe |
+| `tstate_attach_detach.pml` | per-g PyThreadState resume slice attach/detach balance |
+| `stack_depot.pml` | cross-hub coroutine stack-memory pool (size guard + cap) |
+| `pbuf_bid.pml` | io_uring provided-buffer-ring bid ownership |
+| `live_wake.pml` | LIVENESS: woken g eventually resumed (weak fairness) |
+| `live_deque.pml` | LIVENESS: lock-free steal progress under any schedule |
+
+### CBMC — `cbmc/*_cbmc.c` (12, on real C with real `__atomic`)
+| file | what |
+|---|---|
+| `cldeque_cbmc.c` | the real `cldeque.c`: no loss/dup/phantom (bounded) |
+| `wake_state_fsm_cbmc.c` | per-g wake_state FSM totality + no-lost-wake (+ `BUG_TIMER_CLAIM_DROPS`) |
+| `io_classify_cbmc.c` | **I/O-return classifier FSM** totality + mask-soundness (T5) |
+| `preempt_defer_cbmc.c` | preempt defer-during-destruction gate (p69b) |
+| `sched_qref_cbmc.c` | default-path goroutine queue-membership ref (try_incref-before-CAS) |
+| `sched_readyring_cbmc.c` | per-sched ready FIFO ring |
+| `sched_pystate_cbmc.c` | per-goroutine tstate snapshot harness |
+| `chan_refflow_cbmc.c` | PyObject ref conservation through a channel |
+| `snap_refown_cbmc.c` | tstate-snapshot reference-ownership discipline |
+| `chunk_pool_alias_cbmc.c` | datastack-chunk pool never aliases a live chunk |
+| `g_slab_recycle_cbmc.c` | `runloom_g_t` slab-recycle layout |
+| `fiber_admit_cbmc.c` | max-fibers admission conservation |
+
+### GenMC — `genmc/*.c` (13, real C under RC11)
+| file | what |
+|---|---|
+| `chase_lev.c` / `chase_lev2.c` | Chase-Lev deque oracle (1- and 2-element) |
+| `chase_lev_real.c` | the **unmodified production `cldeque.c`** under RC11 |
+| `chase_lev_resize.c` | *research:* hypothetical resizable deque (not shipped) |
+| `sched_parkwake.c` | park_safe/wake_safe handshake (the SC fence was discovered here) |
+| `sched_parkwake_seam.c` | the seam between runloom's two wake paths |
+| `netpoll_claim.c` | netpoll commit-claim race |
+| `blockpool_job.c` | blocking-offload job lifetime seam |
+| `iouring_waitcommit.c` | io_uring single-op park/wake commit |
+| `chan_refcount.c` | `runloom_chan_t` refcount free protocol |
+| `brc_merge.c` | CPython biased-refcount cross-thread merge (oracle) |
+| `qsbr_drain.c` | CPython QSBR grace-period reclaim (oracle) |
+| `mimalloc_page_free.c` | mimalloc per-page `xthread_id` ownership (oracle) |
+
+### Coq — `coq/*.v` (4, unbounded)
+| file | what |
+|---|---|
+| `Deque.v` | Chase-Lev conservation, unbounded |
+| `WakeState.v` | per-g wake_state machine, unbounded |
+| `Select.v` | select() claim CAS, unbounded |
+| `Blockpool.v` | blocking-offload wake order, unbounded |
+
+### Iris / iRC11 — `iris/**/*.v` (6, separation logic)
+| file | what |
+|---|---|
+| `OneShotWake.v` | CAS-based one-shot wake (HeapLang) |
+| `WakeQueue.v` | wake_state protocol's two-token exclusion |
+| `TreiberStack.v` | lock-free Treiber stack (the stack-pool shape) |
+| `rc11/CommitPublish.v` | Stage-3 iRC11: commit-CAS-then-publish weak-memory |
+| `rc11/WakeListHandoff.v` | Stage-3 iRC11: cross-thread wake_list handoff |
+| `rc11/chase_lev/StealClaim.v` | *experiment:* Chase-Lev steal-claim under iRC11 |
+
+### TLA+ — `tla/*.tla` (10, global temporal; TLC via `tla/run_tla.sh`)
+| file | what |
+|---|---|
+| `RunloomSched.tla` | whole M:N scheduler: NoDoubleRun / DoneIsTerminal + liveness |
+| `RunloomComposite.tla` | composed scheduler hang-freedom (wake/park + dispatch + routing) |
+| `RunloomMnRun.tla` | **NEW** mn_run deadlock-census + stall-kick liveness backstop |
+| `RunloomMnFini.tla` | teardown stop-signal handshake under `idle_lock` |
+| `RunloomHandoff.tla` | wedged-hub rescue/handoff stall recovery |
+| `RunloomMNControl.tla` | controlled-replay baton (acquire/release/timed) |
+| `RunloomCPythonSTW.tla` | CPython free-threaded attach/detach + stop-the-world |
+| `RunloomGilstate.tla` | hub-tstate gilstate create/delete on the owning thread |
+| `RunloomTstateMigration.tla` | per-g tstate migration abandon/adopt page ownership |
+| `RunloomGRefcount.tla` | per-g refcount ledger composed with wake_state |
+
+### herd7 litmus — `litmus/*.litmus` (5, C11/RC11 fence placement)
+| file | what |
+|---|---|
+| `commit_cas_then_publish.litmus` | commit-CAS acquire alone → stale read reachable (Sometimes) |
+| `commit_lock_publish.litmus` | `pool->lock` round-trip closes it (Never) |
+| `wakelist_mpsc.litmus` | cross-thread wake_list handoff ordering (Never) |
+| `parkwake_no_fence.litmus` | park/wake StoreLoad without the SC fence → reorder |
+| `parkwake_sc_fence.litmus` | park/wake with the SC fence → safe |
+
+### Alloy — `alloy/selfcheck.als` (1)
+| file | what |
+|---|---|
+| `selfcheck.als` | netpoll bucket well-formedness ⇒ self_check invariant (+ dangling-bucket control) |
