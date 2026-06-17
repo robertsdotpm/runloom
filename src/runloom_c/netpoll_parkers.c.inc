@@ -4,6 +4,33 @@
 
 int runloom_netpoll_drain_parked(void);
 
+/* ASan poison of released-but-pooled parkers (S5 generalized): a use-after-
+ * release of a freelist parker becomes an ASan use-after-poison error.  Mirrors
+ * coro.c's stack-pool poisoning.  NOTE the deliberate asymmetry with the g-slab:
+ * a freed runloom_g must stay READABLE (runloom_g_slab_free retains it with
+ * magic=0xDEAD so runloom_g_try_incref can read its refcount==0 on a stale wake
+ * -- the documented arm64 UAF guard), so the g-slab is NOT poisoned.  A freelist
+ * parker, by contrast, is never read after release except its pool_next linkage
+ * (which we keep unpoisoned), so poisoning is correct here. */
+#if defined(__SANITIZE_ADDRESS__)
+#  define RUNLOOM_PARKER_ASAN 1
+#elif defined(__has_feature)
+#  if __has_feature(address_sanitizer)
+#    define RUNLOOM_PARKER_ASAN 1
+#  endif
+#endif
+#if defined(RUNLOOM_PARKER_ASAN)
+#  include <sanitizer/asan_interface.h>
+#  define RUNLOOM_PARKER_POISON(p)   do {                                     \
+        ASAN_POISON_MEMORY_REGION((p), sizeof(*(p)));                         \
+        ASAN_UNPOISON_MEMORY_REGION(&(p)->pool_next, sizeof((p)->pool_next)); \
+    } while (0)
+#  define RUNLOOM_PARKER_UNPOISON(p) ASAN_UNPOISON_MEMORY_REGION((p), sizeof(*(p)))
+#else
+#  define RUNLOOM_PARKER_POISON(p)   ((void)0)
+#  define RUNLOOM_PARKER_UNPOISON(p) ((void)0)
+#endif
+
 /* ---- parker heap pool ----
  *
  * Replaces stack-allocated `runloom_parked_t park;` locals.  Each calling
@@ -34,6 +61,7 @@ static runloom_parked_t *runloom_parker_pool_acquire(void)
 {
     runloom_parked_t *p = runloom_parker_pool_head;
     if (p != NULL) {
+        RUNLOOM_PARKER_UNPOISON(p);   /* readable before we touch any field */
         runloom_parker_pool_head = p->pool_next;
         runloom_parker_pool_size--;
         p->pool_next = NULL;
@@ -76,6 +104,9 @@ static void runloom_parker_pool_release(runloom_parked_t *p)
     p->pool_next = runloom_parker_pool_head;
     runloom_parker_pool_head = p;
     runloom_parker_pool_size++;
+    /* Poison the released parker (keeping pool_next readable for the freelist).
+     * A use-after-release now trips ASan instead of silently using stale state. */
+    RUNLOOM_PARKER_POISON(p);
 }
 
 

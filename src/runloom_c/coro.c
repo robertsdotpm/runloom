@@ -39,6 +39,28 @@
 #  define RUNLOOM_UNPOISON(p, n) ((void)0)
 #endif
 
+/* valgrind: register goroutine stacks so memcheck treats the paint + HWM scan
+ * (direct accesses from hub code, far from the hub's own SP) as valid stack
+ * accesses instead of "Invalid read/write" -- removes the S4 suppression need.
+ * Client requests are ~free outside valgrind.  We register on map but do NOT
+ * track per-stack ids to deregister: stacks are pooled + capped (rarely
+ * munmap'd), and a leaked stack registration is valgrind-only and benign -- a
+ * deliberate simplicity-vs-marginal-coverage trade.  No-op where the valgrind
+ * headers are absent (Windows, minimal images). */
+#if defined(__has_include)
+#  if __has_include(<valgrind/valgrind.h>) && __has_include(<valgrind/memcheck.h>)
+#    include <valgrind/valgrind.h>
+#    include <valgrind/memcheck.h>
+#    define RUNLOOM_VG_STACK_REGISTER(p, n) \
+        ((void)VALGRIND_STACK_REGISTER((p), (char *)(p) + (n)))
+#    define RUNLOOM_VG_MEM_DEFINED(p, n)  ((void)VALGRIND_MAKE_MEM_DEFINED((p), (n)))
+#  endif
+#endif
+#ifndef RUNLOOM_VG_STACK_REGISTER
+#  define RUNLOOM_VG_STACK_REGISTER(p, n) ((void)0)
+#  define RUNLOOM_VG_MEM_DEFINED(p, n)    ((void)0)
+#endif
+
 #if defined(RUNLOOM_HAVE_FCONTEXT)
 #  include "fcontext.h"
 #  include <sys/mman.h>
@@ -317,6 +339,7 @@ static void *runloom_stack_map_guarded(size_t usable)
         void *base = mmap(NULL, total, PROT_READ | PROT_WRITE, flags, -1, 0);
         if (base == MAP_FAILED) return NULL;
         (void)mprotect(base, guard, PROT_NONE);
+        RUNLOOM_VG_STACK_REGISTER((char *)base + guard, usable);
         return (char *)base + guard;
     }
 }

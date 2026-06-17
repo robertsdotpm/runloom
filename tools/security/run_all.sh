@@ -29,4 +29,14 @@ else
     echo "  SKIP: valgrind not installed"
 fi
 echo "== S6 bridge network fuzz =="; "$PY" tools/security/fuzz_bridge.py --iters 600
+echo "== S7 TLS bridge fuzz =="
+"$PY" -c 'import cryptography' 2>/dev/null \
+    && "$PY" tools/security/fuzz_tls_bridge.py --iters 300 \
+    || echo "  SKIP: cryptography not installed (pip install cryptography)"
+echo "== S8 C-API adversarial fuzz =="
+# run as a SUBPROCESS so a segfault/abort in argument handling is caught as a
+# non-zero/signal exit (the last CAPI_TRY on stderr is the culprit).
+"$PY" tools/security/fuzz_capi.py --iters 3000 \
+    || { echo "  FAIL: fuzz_capi crashed (last attempt above is the culprit)"; exit 1; }
+echo "== S9 build hardening =="; sh tools/security/check_hardening.sh
 echo "== all security checks passed =="
