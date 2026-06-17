@@ -933,6 +933,11 @@ static int    runloom_prewarm_daemon_running = 0;   /* atomic: a daemon exists  
 static int    runloom_prewarm_daemon_stop    = 0;   /* atomic: asked to stop    */
 static int    runloom_prewarm_daemon_target  = 0;   /* atomic: desired depth    */
 static size_t runloom_prewarm_daemon_size    = 0;   /* fixed before thread start */
+/* Serializes keep()/stop(): without it, keep() sets running=1 BEFORE writing the
+ * thread handle, so a concurrent stop() sees running=1, joins the stale/unwritten
+ * handle, clears running, and the daemon keep() then spawns starts with stop=0 and
+ * never exits (audit round-1 hang).  Cold-path only (not the prewarm loop). */
+static runloom_mutex_t runloom_prewarm_daemon_lock = RUNLOOM_MUTEX_STATIC_INIT;
 
 static void *runloom_prewarm_daemon_main(void *arg)
 {
@@ -957,28 +962,41 @@ static void *runloom_prewarm_daemon_main(void *arg)
 
 void runloom_coro_prewarm_stop(void)
 {
-    if (__atomic_load_n(&runloom_prewarm_daemon_running, __ATOMIC_ACQUIRE) == 0)
+    /* Serialize with keep() so we never join an unwritten handle (audit hang). */
+    runloom_mutex_lock(&runloom_prewarm_daemon_lock);
+    if (__atomic_load_n(&runloom_prewarm_daemon_running, __ATOMIC_ACQUIRE) == 0) {
+        runloom_mutex_unlock(&runloom_prewarm_daemon_lock);
         return;
+    }
     __atomic_store_n(&runloom_prewarm_daemon_stop, 1, __ATOMIC_RELEASE);
     runloom_thread_join(runloom_prewarm_daemon_thread);
     __atomic_store_n(&runloom_prewarm_daemon_running, 0, __ATOMIC_RELEASE);
+    runloom_mutex_unlock(&runloom_prewarm_daemon_lock);
 }
 
 int runloom_coro_prewarm_keep(size_t stack_size, int target)
 {
-    if (target <= 0) { runloom_coro_prewarm_stop(); return 0; }
+    if (target <= 0) { runloom_coro_prewarm_stop(); return 0; }   /* before the lock: stop() takes it */
+    /* Hold the lock from the running-flag exchange THROUGH thread_create, so a
+     * concurrent stop() can never observe running=1 with a stale/unwritten handle
+     * (the round-1 stop/start race that dropped the stop signal -> daemon leak). */
+    runloom_mutex_lock(&runloom_prewarm_daemon_lock);
     /* Retarget first so an already-running daemon picks it up immediately. */
     __atomic_store_n(&runloom_prewarm_daemon_target, target, __ATOMIC_RELAXED);
-    if (__atomic_exchange_n(&runloom_prewarm_daemon_running, 1, __ATOMIC_ACQ_REL) == 1)
+    if (__atomic_exchange_n(&runloom_prewarm_daemon_running, 1, __ATOMIC_ACQ_REL) == 1) {
+        runloom_mutex_unlock(&runloom_prewarm_daemon_lock);
         return 0;                                        /* already running */
+    }
     runloom_prewarm_daemon_size =
         runloom_round_to_page(stack_size < 4096 ? 4096 : stack_size);
     __atomic_store_n(&runloom_prewarm_daemon_stop, 0, __ATOMIC_RELEASE);
     if (runloom_thread_create(&runloom_prewarm_daemon_thread,
                               runloom_prewarm_daemon_main, NULL) != 0) {
         __atomic_store_n(&runloom_prewarm_daemon_running, 0, __ATOMIC_RELEASE);
+        runloom_mutex_unlock(&runloom_prewarm_daemon_lock);
         return -1;
     }
+    runloom_mutex_unlock(&runloom_prewarm_daemon_lock);
     return 0;
 }
 
@@ -990,6 +1008,7 @@ void runloom_coro_prewarm_reset_after_fork(void)
     __atomic_store_n(&runloom_prewarm_daemon_running, 0, __ATOMIC_RELAXED);
     __atomic_store_n(&runloom_prewarm_daemon_stop, 0, __ATOMIC_RELAXED);
     __atomic_store_n(&runloom_prewarm_daemon_target, 0, __ATOMIC_RELAXED);
+    runloom_mutex_init(&runloom_prewarm_daemon_lock);   /* may be inherited held */
 }
 #else
 int  runloom_coro_prewarm_keep(size_t stack_size, int target) { (void)stack_size; (void)target; return 0; }
