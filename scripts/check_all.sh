@@ -86,6 +86,8 @@ for ph in "${phases[@]}"; do
     static)
       hr "Static analysis (gcc -fanalyzer gate + cppcheck advisory)"
       PYTHON="$PYTHON" bash tools/static_analysis.sh || rc=1
+      hr "Wake-protocol lint (every wake_state transition is NOTE-witnessed)"
+      bash scripts/check_wake_protocol.sh || rc=1
       ;;
     lincheck)
       hr "Linearizability (Porcupine + stateful select model)"
