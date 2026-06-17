@@ -78,8 +78,19 @@ static runloom_iouring_ssize_t runloom_iouring_do(struct io_uring_sqe sqe)
         /* Single-thread sched path: park cooperatively.  When the
          * eventfd fires the netpoll pump calls runloom_iouring_drain
          * which calls runloom_sched_wake_safe(op.g).  park_safe yields
-         * via runloom_coro_yield; on resume we eat the pending wake. */
-        runloom_sched_park_safe();
+         * via runloom_coro_yield; on resume we eat the pending wake.
+         *
+         * RE-PARK on a SPURIOUS wake: park_safe returns on ANY wake, but the
+         * generic park can be resumed by a stale/duplicate wake before the CQE
+         * drain has set op.result.  Returning then would hand back the INT32_MIN
+         * sentinel as the result AND leave the real completion's later wake to
+         * land on an unparked g (dropped).  Loop until op.result is actually set
+         * -- the same "park until the condition holds" discipline as the chan /
+         * netpoll / multishot park loops.  park_safe's wake_pending Dekker makes
+         * the recheck-then-re-park race-free.  (audit round-3 single-op lost wake.) */
+        do {
+            runloom_sched_park_safe();
+        } while (__atomic_load_n(&op.result, __ATOMIC_ACQUIRE) == INT32_MIN);
     } else {
         /* Not inside a fiber (plain thread / main thread calling
          * file_read directly).  Block, but RELEASE the tstate around the
