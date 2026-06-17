@@ -232,6 +232,32 @@ else
     echo "FAIL -- misrouting an external wake should hang"; fail=$((fail+1))
 fi
 
+# ---- FV gap #2: the mn_run DEADLOCK CENSUS + STALL-KICK liveness backstop
+# (RunloomMnRun, mn_sched_init_fini.c.inc 937-1072).  Correct = kick_all_hubs()
+# fires ALL THREE wake paths (ring + idle_cond + pump), so a stranded-runnable g
+# is always recovered; the control fires idle_cond ONLY -> a ring/pump-blocked
+# hub is missed -> permanent lost wakeup (the cov_workload --hubs 4 hang).
+printf '  [tlc] %-28s ' "RunloomMnRun (backstop)"
+if run_tlc mrok -config RunloomMnRun.cfg RunloomMnRun.tla | grep -q "No error has been found"; then
+    echo "PASS -- NoFalseDeadlock + SubsetOK + EventuallyRun hold (all-mode kick recovers the stranded g)"; pass=$((pass+1))
+else
+    echo "FAIL -- the all-mode-kick backstop should recover the stranded g"; fail=$((fail+1))
+fi
+
+printf '  [tlc] %-28s ' "RunloomMnRun (idle-only kick)"
+if run_tlc mrbug -deadlock -config RunloomMnRun_bug.cfg RunloomMnRun.tla | grep -q "Temporal properties were violated"; then
+    echo "PASS -- correctly DETECTS the idle_cond-only kick missing a ring/pump-blocked hub -> EventuallyRun violated (permanent lost wakeup)"; pass=$((pass+1))
+else
+    echo "FAIL -- an idle-only kick should strand a ring/pump-blocked hub's g"; fail=$((fail+1))
+fi
+
+printf '  [tlc] %-28s ' "RunloomMnRun (deadlock witness)"
+if run_tlc mrsafe -deadlock -config RunloomMnRun_safety.cfg RunloomMnRun.tla | grep -q "is violated"; then
+    echo "PASS -- census fires a real DEADLOCK verdict only under ~has_wakeable_work (NoFalseDeadlock non-vacuous)"; pass=$((pass+1))
+else
+    echo "FAIL -- the genuine-deadlock branch should reach a verdict (non-vacuous safety)"; fail=$((fail+1))
+fi
+
 "$(command -v safe-rm || echo rm)" -rf "$META"
 echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
