@@ -848,18 +848,54 @@ static int runloom_mn_has_wakeable_work(void)
     return 0;
 }
 
-/* Wake every hub out of its idle timed-wait so it re-polls its submission list
- * + neighbours.  A recovery nudge for a fiber made runnable whose hub somehow
- * missed the wakeup (lost-wakeup safety net); harmless when there is nothing to
- * find (the hub re-checks, finds no work, and re-parks). */
+/* For the mn_run progress-stall watchdog: TRUE iff some hub has a QUEUED runnable
+ * fiber (ready ring / steal deque / submission list / global runq) AND no hub is
+ * currently resuming one.  That is the stranded-runnable signature -- work that
+ * should be executing but nothing is running it and nothing is completing.  It
+ * deliberately EXCLUDES fibers parked on I/O / timers / foreign waits (a
+ * legitimately idle server must NOT be kicked) and the case where a hub is
+ * mid-resume (a long fiber is genuinely executing, not stranded). */
+static int runloom_mn_stalled_with_runnable(void)
+{
+    int i, runnable = 0;
+    for (i = 0; i < runloom_hub_count; i++) {
+        runloom_hub_t *h = &runloom_hubs[i];
+        if (__atomic_load_n(&h->resume_start_ns, __ATOMIC_RELAXED) != 0)
+            return 0;                                   /* a fiber is executing */
+        if (!runnable &&
+            (!runloom_sched_ready_empty(&h->sched) ||
+             runloom_cldeque_size(&h->deque) != 0 ||
+             __atomic_load_n(&h->sub_head, __ATOMIC_ACQUIRE) != NULL))
+            runnable = 1;
+    }
+    if (!runnable && runloom_use_global_runq())
+        runnable = (__atomic_load_n(&runloom_global_runq_len, __ATOMIC_ACQUIRE) != 0);
+    return runnable;
+}
+
+/* Wake every hub out of WHATEVER wait it is in so it re-polls its submission list
+ * + neighbours.  A recovery nudge for a fiber made runnable whose hub missed the
+ * wakeup; harmless when there is nothing to find (the hub re-checks and re-parks).
+ * It MUST mirror the full wake routing in runloom_mn_hub_submit, because a hub can
+ * be blocked three different ways and the idle condvar reaches only one: the
+ * iouring-loop backend blocks in its RING (woken by the per-hub loop_wake_fd
+ * eventfd), a netpoll hub blocks in epoll_wait / the pump (woken by the pump
+ * eventfd), and only a bare idle hub waits on idle_cond.  The old version signalled
+ * idle_cond ONLY -- so a hub stranded in its ring (RUNLOOM_IOURING_LOOP) could not
+ * be recovered at all, and a runnable fiber pinned to it hung forever (the
+ * cov_workload --hubs 4 loop-backend hang; the deadlock census never even fired
+ * because the I/O-parked fibers keep has_wakeable_work() true). */
 static void runloom_mn_kick_all_hubs(void)
 {
     int i;
     for (i = 0; i < runloom_hub_count; i++) {
         runloom_hub_t *h = &runloom_hubs[i];
+        if (h->loop_wake_fd >= 0)
+            runloom_iouring_loop_wake(h->loop_wake_fd);   /* ring-blocked hub */
         RUNLOOM_RLOCK(&h->idle_lock, RUNLOOM_RANK_HUB_IDLE);
-        runloom_cond_signal(&h->idle_cond);
+        runloom_cond_signal(&h->idle_cond);               /* idle-condvar hub */
         RUNLOOM_RUNLOCK(&h->idle_lock, RUNLOOM_RANK_HUB_IDLE);
+        runloom_netpoll_wake_pump((void *)h);             /* pump / epoll hub */
     }
 }
 
@@ -875,6 +911,23 @@ static long runloom_mn_deadlock_ms(void)
     if (cur < 0) {
         const char *e = getenv("RUNLOOM_DEADLOCK_MS");
         cur = (e != NULL && *e != '\0') ? atol(e) : 200;
+        if (cur < 0) cur = 0;
+        __atomic_store_n(&v, cur, __ATOMIC_RELAXED);
+    }
+    return cur;
+}
+
+/* RUNLOOM_STALL_KICK_MS: consecutive no-progress 1ms polls mn_run tolerates before
+ * kicking every hub awake as a liveness backstop (0 disables).  Default 4: a busy
+ * run's pending changes each poll so it never triggers; a genuine stranded-runnable
+ * stall recovers in a few ms instead of hanging.  Read once. */
+static long runloom_mn_stall_kick_polls(void)
+{
+    static long v = -1;
+    long cur = __atomic_load_n(&v, __ATOMIC_RELAXED);
+    if (cur < 0) {
+        const char *e = getenv("RUNLOOM_STALL_KICK_MS");
+        cur = (e != NULL && *e != '\0') ? atol(e) : 4;
         if (cur < 0) cur = 0;
         __atomic_store_n(&v, cur, __ATOMIC_RELAXED);
     }
@@ -901,6 +954,9 @@ Py_ssize_t runloom_mn_run(void)
         int  raise    = 0;                          /* RUNLOOM_DEADLOCK=raise verdict */
         int  sig_raised = 0;                        /* a Python signal handler raised */
         unsigned sigpoll = 0;                       /* throttle the signal service */
+        long last_total  = -1;                      /* stall watchdog: last pending seen */
+        long stall       = 0;                       /* consecutive no-progress polls */
+        long stall_kick  = runloom_mn_stall_kick_polls();  /* flat polls before kick; 0=off */
         for (;;) {
             /* Read the GLOBAL pending counter, not the per-hub fields.
              * The per-hub fields race during work-stealing (source dec
@@ -910,6 +966,27 @@ Py_ssize_t runloom_mn_run(void)
             long total = __atomic_load_n(&runloom_mn_pending_global,
                                          __ATOMIC_ACQUIRE);
             if (total == 0) break;
+
+            /* Progress-stall liveness backstop.  If pending has not moved for
+             * stall_kick consecutive 1ms polls WHILE a queued runnable fiber sits
+             * un-run and no hub is resuming, that fiber is stranded on a hub that
+             * missed its wake -- kick EVERY hub in EVERY wait mode to force a
+             * re-drain.  Independent of the deadlock census below (which only fires
+             * when has_wakeable_work() is FALSE): a stranded-runnable hang keeps
+             * has_wakeable_work() TRUE via the I/O-parked fibers, so the census
+             * never reaches its own kick.  runloom_mn_stalled_with_runnable()
+             * excludes legitimate idle (all fibers parked on I/O) and a running
+             * long fiber, so a correctly-idle server is never kicked. */
+            if (total == last_total && stall_kick > 0 &&
+                runloom_mn_stalled_with_runnable()) {
+                if (++stall >= stall_kick) {
+                    runloom_mn_kick_all_hubs();
+                    stall = 0;
+                }
+            } else {
+                last_total = total;
+                stall = 0;
+            }
 
             if (thresh > 0 && runloom_deadlock_mode() != 0 &&
                 !runloom_mn_has_wakeable_work()) {
