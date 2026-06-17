@@ -649,11 +649,25 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
                         PyEval_RestoreThread(saved);
                     }
                     __atomic_store_n(&h->ring_waiting, 0, __ATOMIC_RELEASE);
-                    if (lflags & RUNLOOM_LOOP_F_EPOLL) {
-                        /* epoll fd readable: drain ready fds -> wake parkers
-                         * (GIL held; pump(0) is non-blocking). */
+                    if (!have_sub) {
+                        /* Drain the per-hub epoll on EVERY idle iteration, not only
+                         * when the ring's F_EPOLL poll fired (lflags & F_EPOLL).  The
+                         * poll-on-the-epoll-fd bridge can MISS a socket-readable edge --
+                         * the SAME unreliability the global-ring drain below works
+                         * around for the EPOLLEXCLUSIVE eventfd.  A missed F_EPOLL then
+                         * leaves a ready socket undrained and its parked reader hung
+                         * forever while every hub just keeps timing out its idle_ns ring
+                         * wait (the cov_workload --hubs 4 loop-backend hang: gdb showed
+                         * all hubs cycling in loop_wait, the reader never woken, and the
+                         * deadlock census blind because the I/O-parked fibers keep
+                         * has_wakeable_work() true).  pump(0) is a non-blocking
+                         * epoll_wait(0): on the common tick where nothing is ready it
+                         * returns at once.  The idle_ns timeout thus bounds netpoll-wake
+                         * latency to one tick instead of risking a lost wake -- the
+                         * Layer-0 "re-check the source of truth on timeout" guarantee. */
                         runloom_netpoll_pump(0);
                     }
+                    (void)lflags;
                     /* Reap GLOBAL-ring completions.  Cooperative file I/O
                      * (runloom_iouring_pread/pwrite via runloom_iouring_do) lives on
                      * the process-global ring, NOT this hub ring.  Its eventfd
