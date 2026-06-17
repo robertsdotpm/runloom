@@ -1,0 +1,35 @@
+C cldeque_sb_no_fence
+(*
+ * THE BUG: the Chase-Lev pop-vs-steal store-buffering (SB / Dekker) hazard when
+ * the OWNER's StoreLoad fence is missing -- exactly what the MSVC plat_atomic.h
+ * shim caused by downgrading the SEQ_CST store of `bottom` to a plain MOV
+ * (cldeque.c:52).  Reduced to its SB core on the two shared words:
+ *
+ *   P0 = owner pop():   store bottom (shrink), then load top   (decide claim)
+ *   P1 = thief steal():  store top   (CAS advance), SC fence, load bottom
+ *
+ * The thief already SC-fences (production cldeque.c:84-88); the owner relied on
+ * the SEQ_CST *store* to supply its StoreLoad.  With that store downgraded the
+ * owner has NO fence between its bottom-store and top-load, so both threads can
+ * read the other's pre-store value:
+ *   0:t=0  -> owner did not see the thief advance top  -> owner claims buf[b]
+ *   1:b=1  -> thief did not see the owner shrink bottom -> thief CAS claims it
+ * => the SAME element (the same runloom_g*) is handed to two hubs: double-resume
+ * / double-free / UAF.  herd7: reachable under C11 release/acquire ALONE ->
+ * Observation Sometimes.  The seq_cst StoreLoad on the owner is required
+ * (see cldeque_sb_sc_fence.litmus).
+ *)
+{
+  bottom = 1;
+  top = 0;
+}
+P0 (atomic_int *bottom, atomic_int *top) {
+  atomic_store_explicit(bottom, 0, memory_order_release);
+  int t = atomic_load_explicit(top, memory_order_acquire);
+}
+P1 (atomic_int *bottom, atomic_int *top) {
+  atomic_store_explicit(top, 1, memory_order_release);
+  atomic_thread_fence(memory_order_seq_cst);
+  int b = atomic_load_explicit(bottom, memory_order_acquire);
+}
+exists (0:t=0 /\ 1:b=1)

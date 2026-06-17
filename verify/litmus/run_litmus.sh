@@ -57,5 +57,14 @@ check parkwake_no_fence Sometimes \
 check parkwake_sc_fence Never \
       "seq_cst StoreLoad fences forbid the park/wake lost wakeup (fence suffices)"
 
+# Chase-Lev pop-vs-steal SB/Dekker: the owner's StoreLoad fence (supplied by the
+# SEQ_CST store of bottom, cldeque.c:52) is load-bearing.  Models the MSVC bug7
+# where plat_atomic.h downgraded that store to a plain MOV and the fix that
+# re-injects the StoreLoad.  Second oracle for verify/genmc chase_lev.
+check cldeque_sb_no_fence Sometimes \
+      "owner missing its StoreLoad (downgraded SEQ_CST store) allows pop/steal to double-claim"
+check cldeque_sb_sc_fence Never \
+      "the re-injected seq_cst StoreLoad on the owner forbids the double-claim"
+
 echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

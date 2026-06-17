@@ -17,9 +17,16 @@
  *
  * Memory-order knobs are honoured semantically:
  *   - x86 / x64: hardware is TSO -- every load is implicitly acquire,
- *     every store is implicitly release, every RMW is SEQ_CST.  We
- *     drop the order argument and let the hardware do the right thing,
- *     using `volatile` to keep the compiler from reordering.
+ *     every store is implicitly release, every RMW is SEQ_CST.  The ONE
+ *     reorder TSO still permits is StoreLoad: a store may be observed
+ *     AFTER a later load to a DIFFERENT address.  So a RELAXED/RELEASE
+ *     store is a bare `volatile` MOV (correct), but a SEQ_CST store must
+ *     additionally DRAIN the store buffer so it is ordered before any
+ *     later SC load -- GCC/Clang emit XCHG or MOV+MFENCE for exactly this.
+ *     __atomic_store_n therefore appends one MemoryBarrier (== the same
+ *     __faststorefence __atomic_thread_fence uses) on SEQ_CST ONLY; the
+ *     order arg is a compile-time literal at every call site so the test
+ *     folds away and non-SC stores stay a bare MOV.  Loads stay plain.
  *   - ARM64 (MSVC): not yet supported; the compiler does provide
  *     _Interlocked*_acq / _rel variants but we'd need an extra round
  *     of typed helpers.  Documented in setup.py as "use clang for
@@ -186,8 +193,21 @@
            void **:                    runloom_atomic_load_ptr           \
        )((p))
 
+   /* A SEQ_CST store needs a StoreLoad barrier AFTER the store so it is
+    * ordered before any later SC load to a DIFFERENT address (x86-TSO's one
+    * legal reorder; GCC emits XCHG / MOV+MFENCE).  A plain volatile MOV does
+    * NOT provide it.  `ord` is a compile-time constant at every call site so
+    * (ord==SEQ_CST) folds: RELAXED/RELEASE stay a bare MOV, SEQ_CST gets one
+    * MemoryBarrier (== __faststorefence on x64, the SAME full fence
+    * __atomic_thread_fence uses below).  The whole macro is a comma
+    * expression so __atomic_store_n stays a valid void statement (no GCC
+    * statement-expressions on MSVC).  Both arms of the ternary are void; the
+    * (void)-cast on the _Generic call pre-empts MSVC /W4 C4548. */
+#  define RUNLOOM_STORELOAD_IF_SC(ord) \
+       ( (void)(((ord) == __ATOMIC_SEQ_CST) ? (MemoryBarrier(), (void)0) : (void)0) )
+
 #  define __atomic_store_n(p, v, ord)                                 \
-       _Generic((p),                                                  \
+     ( (void)_Generic((p),                                            \
            int *:           runloom_atomic_store_i,                      \
            volatile int *:  runloom_atomic_store_i,                      \
            long *:          runloom_atomic_store_l,                      \
@@ -201,7 +221,8 @@
            unsigned char **:         runloom_atomic_store_ptr,           \
            struct runloom_g **:         runloom_atomic_store_ptr,           \
            void **:                  runloom_atomic_store_ptr            \
-       )((p), (v))
+       )((p), (v)),                                                   \
+       RUNLOOM_STORELOAD_IF_SC(ord) )
 
 #  define __atomic_add_fetch(p, v, ord)                               \
        _Generic((p),                                                  \
