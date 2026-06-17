@@ -144,6 +144,12 @@ typedef struct runloom_hub {
     runloom_sched_t sched;
     runloom_cldeque_t deque;
     PyThreadState *tstate;        /* per-hub tstate */
+    /* FSM SCOPE (RUNLOOM_FSM_VALIDATE): tier-3 HARDEN-IN-PLACE (FSM_ADOPTION.md).
+     * A ONE-WAY lifecycle flag: 0 (running) -> 1 (stopping), set once by
+     * runloom_mn_fini / a hub winding down (RELEASE), read ACQUIRE; it never
+     * returns to 0.  A one-way monotonic atomic has no enumerable (state,event)
+     * cell to drop -- the atomic IS the proof; a transition table would be
+     * ceremony. */
     volatile int stopping;
     volatile long pending;        /* gs ever-pushed minus gs-completed */
     /* MPSC submission list.  Chase-Lev's `push` is owner-only (single
