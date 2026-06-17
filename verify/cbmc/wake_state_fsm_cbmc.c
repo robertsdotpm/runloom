@@ -17,6 +17,10 @@
  *   sweeper claim:        PARKED         -> SWEEPING (try; loses to non-PARKED)
  *   sweeper release:      SWEEPING       -> PARKED, or
  *                         SWEEPING_WOKEN -> QUEUED          (deliver remembered)
+ *   hub timer-claim:      PARKED         -> RUNNING (expired sleeper; resumes
+ *                         QUEUED         -> QUEUED   direct -- the only entry into
+ *                                                    RUNNING not via QUEUED; loses
+ *                                                    the CAS if a waker raced it)
  *
  * Because a SINGLE field encodes both "has a runq entry" (== QUEUED) and "is
  * owned" (== RUNNING/SWEEPING), single-entry and single-owner hold by
@@ -34,12 +38,14 @@
  *
  * CBMC explores all event sequences up to the unwind bound.  Default config:
  * VERIFICATION SUCCESSFUL.  Teeth: -DBUG_LOSE_WAKE makes release drop a
- * remembered wake (RUNNING_WOKEN -> PARKED) -> NO_LOST_WAKE fails, proving the
- * harness has teeth.
+ * remembered wake (RUNNING_WOKEN -> PARKED); -DBUG_TIMER_CLAIM_DROPS makes the
+ * timer-claim win the CAS but leave the sleeper PARKED (the timer wake is lost) --
+ * each makes NO_LOST_WAKE fail, proving the harness has teeth on both wake paths.
  *
  * Run via verify/run_verify.sh (cbmc), or directly:
  *   cbmc wake_state_fsm_cbmc.c --unwind 16
- *   cbmc wake_state_fsm_cbmc.c --unwind 16 -DBUG_LOSE_WAKE   (expect FAILED)
+ *   cbmc wake_state_fsm_cbmc.c --unwind 16 -DBUG_LOSE_WAKE          (expect FAILED)
+ *   cbmc wake_state_fsm_cbmc.c --unwind 16 -DBUG_TIMER_CLAIM_DROPS  (expect FAILED)
  */
 
 #define WS_PARKED          0
@@ -56,6 +62,7 @@ enum {
     EV_RELEASE,           /* a hub finishes the resume + releases       */
     EV_SWEEP_CLAIM,       /* a sweeper try-claims for an idle stack sweep */
     EV_SWEEP_RELEASE,     /* a sweeper finishes the madvise + releases  */
+    EV_TIMER_CLAIM,       /* a hub claims an expired sleeper PARKED->RUNNING */
     EV_NEVENTS
 };
 
@@ -111,6 +118,19 @@ static void build_table(void)
     /* sweeper release */
     T[WS_SWEEPING]      [EV_SWEEP_RELEASE] = WS_PARKED;
     T[WS_SWEEPING_WOKEN][EV_SWEEP_RELEASE] = WS_QUEUED; /* deliver remembered */
+
+    /* hub timer-claim of an expired sleeper.  The CAS expects PARKED and drives
+     * PARKED -> RUNNING (the only entry into RUNNING that does not pass through
+     * QUEUED), then resumes the g directly on the local FIFO.  If a waker raced
+     * PARKED -> QUEUED first, the CAS loses and the g stays QUEUED (the waker's
+     * entry resumes it -- do NOT also push, or it schedules twice). */
+#ifdef BUG_TIMER_CLAIM_DROPS
+    T[WS_PARKED]        [EV_TIMER_CLAIM] = WS_PARKED;   /* BUG: claims but never
+                                                        * resumes -> timer wake lost */
+#else
+    T[WS_PARKED]        [EV_TIMER_CLAIM] = WS_RUNNING;
+#endif
+    T[WS_QUEUED]        [EV_TIMER_CLAIM] = WS_QUEUED;
 }
 
 /* An event is ENABLED only when the actor holds the precondition that would let
@@ -126,6 +146,9 @@ static int enabled(int s, int e)
         case EV_SWEEP_RELEASE: return s == WS_SWEEPING || s == WS_SWEEPING_WOKEN;
         case EV_WAKE:          return 1;
         case EV_SWEEP_CLAIM:   return 1;
+        /* a timer-claim only fires for a g still on the sleep queue: PARKED, or
+         * QUEUED if a waker already raced it off PARKED. */
+        case EV_TIMER_CLAIM:   return s == WS_PARKED || s == WS_QUEUED;
         default:               return 0;
     }
 }
@@ -150,10 +173,10 @@ int main(void)
         __CPROVER_assert(ns != INV,
             "wake_state FSM: enabled event has no defined transition");
 
-        if (e == EV_WAKE)
-            pending_wake = 1;             /* a wake is now outstanding */
-        if (ns == WS_QUEUED)
-            pending_wake = 0;             /* enqueued -> the g will be resumed */
+        if (e == EV_WAKE || e == EV_TIMER_CLAIM)
+            pending_wake = 1;             /* an explicit wake or a timer wake is outstanding */
+        if (ns == WS_QUEUED || ns == WS_RUNNING)
+            pending_wake = 0;             /* enqueued, or resumed directly -> the g will run */
 
         /* NO_LOST_WAKE: the g must never go back to sleep (PARKED) while a
          * delivered wake is still outstanding -- that is a permanent hang. */

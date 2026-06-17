@@ -419,6 +419,9 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
                                                     RUNLOOM_WS_RUNNING, 0,
                                                     __ATOMIC_ACQ_REL,
                                                     __ATOMIC_ACQUIRE)) {
+                        /* TIMER_CLAIM won: PARKED -> RUNNING (the sole edge into
+                         * RUNNING that does not pass through QUEUED). */
+                        RUNLOOM_WS_NOTE(RUNLOOM_WS_PARKED, RUNLOOM_WS_RUNNING);
                         runloom_sched_ready_push(&h->sched, woke);
                     }
                 } else {

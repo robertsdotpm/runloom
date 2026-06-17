@@ -204,8 +204,10 @@ if have cbmc; then
     # passes, the harness lost its teeth -> our check fails.
     cbmc "$CBMC_DIR/wake_state_fsm_cbmc.c" --unwind 19 --unwinding-assertions \
         -DBUG_LOSE_WAKE >"$WORK/cbmc_wakestate_teeth.log" 2>&1 && ws_ok=0
+    cbmc "$CBMC_DIR/wake_state_fsm_cbmc.c" --unwind 19 --unwinding-assertions \
+        -DBUG_TIMER_CLAIM_DROPS >"$WORK/cbmc_wakestate_teeth2.log" 2>&1 && ws_ok=0
     if [ "$ws_ok" = 1 ]; then
-        green "PASS"; echo " -- 6-state CAS FSM proven (+ teeth: BUG_LOSE_WAKE fails)"
+        green "PASS"; echo " -- 6-state CAS FSM proven (+ teeth: BUG_LOSE_WAKE, BUG_TIMER_CLAIM_DROPS fail)"
         pass=$((pass+1))
     else
         red "FAIL"; echo " -- see $WORK/cbmc_wakestate*.log"; fail=$((fail+1)); FAILED="$FAILED cbmc-wakestate"
