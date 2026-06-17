@@ -215,6 +215,20 @@ int runloom_park_generic(int foreign_wakeable)
         g->wait_reason_hint = (unsigned char)RUNLOOM_WR_NONE;
         runloom_g_state_set(g, RUNLOOM_GST_PARKED_SAFE);
         runloom_coro_yield();           /* hub_main resumes here on re-queue */
+        /* Eat the wake count that delivered us back, mirroring
+         * runloom_sched_park_safe's resume-decrement (line ~560).  A wake_safe
+         * claimer bumped wake_pending (+1) and deliberately did NOT decrement on
+         * its claim ("the parker will consume it"); WITHOUT eating it here the
+         * count leaks +1 every real-wake cycle, and the g's NEXT park early-outs
+         * on the stale wake_pending>0 and silently skips a park it should make
+         * (audit lost-wake #4).  CONDITIONAL (not park_safe's unconditional sub)
+         * because the TIMED path's other claimer -- the timer-drain
+         * (runloom_sched_drain_timers) -- claims parked_safe WITHOUT bumping
+         * wake_pending, so a pure timeout resumes with wake_pending==0; an
+         * unconditional sub would underflow it.  A concurrent waker can only
+         * INCREMENT, so the load-then-sub never underflows. */
+        if (__atomic_load_n(&g->wake_pending, __ATOMIC_ACQUIRE) > 0)
+            __atomic_sub_fetch(&g->wake_pending, 1, __ATOMIC_ACQ_REL);
         if (foreign_wakeable) runloom_foreign_park_release();
         return 0;
     } else {
