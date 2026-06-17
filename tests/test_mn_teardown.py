@@ -14,6 +14,12 @@ The hang has no FV model (it is a CPython-runtime STW/attach interaction, not a
 runloom lock-free algorithm); the gate is this stress -- a deadlock trips the
 suite timeout, so a green run IS the assertion.
 """
+import os
+import subprocess
+import sys
+
+import pytest
+
 import runloom
 import runloom_c
 
@@ -56,3 +62,51 @@ def test_trivial_mn_teardown_via_run():
 
         runloom.run((i % 4) + 1, main)
         assert box[0] == 1, i
+
+
+# Deterministic version of the same guard: instead of hoping the OS schedules a
+# rescue thread late enough to put its startup PyThreadState_New (qsbr
+# stop-the-world) inside mn_fini's join window, FORCE it there with the test-only
+# RUNLOOM_HANDOFF_STARTUP_DELAY_MS knob (mn_sched_handoff.c.inc).  With the knob
+# set, every cycle's teardown deterministically races a rescue startup-STW, which
+# is exactly what the main-detach + deferred-tstate-deletion fix must survive.
+# Run in a timeout-bounded subprocess so a regression (the STW wedging the join)
+# is a clear failure rather than a silent suite hang.  Documented in
+# docs/dev/mn_fini_hang.md.
+_FORCED_STW_DRIVER = """
+import os, runloom_c
+for i in range(24):
+    nhubs = (i % 4) + 1
+    if nhubs == 3:
+        nhubs = 8
+    runloom_c.mn_init(nhubs)
+    runloom_c.mn_go(lambda: None)
+    runloom_c.mn_run()
+    runloom_c.mn_fini()
+print("OK")
+"""
+
+
+def test_teardown_under_forced_startup_stw():
+    env = dict(os.environ)
+    env["PYTHON_GIL"] = "0"
+    env["RUNLOOM_HANDOFF"] = "1"
+    # 30ms per rescue thread -> its startup PyThreadState_New STW lands squarely
+    # in mn_fini's rescue-join window on every cycle.
+    env["RUNLOOM_HANDOFF_STARTUP_DELAY_MS"] = "30"
+    try:
+        cp = subprocess.run(
+            [sys.executable, "-c", _FORCED_STW_DRIVER],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=90,   # generous: 24 cycles * a few hubs * 30ms is well under 1s of delay
+        )
+    except subprocess.TimeoutExpired:
+        pytest.fail(
+            "mn_fini DEADLOCKED with the rescue startup-STW forced into the "
+            "teardown window (RUNLOOM_HANDOFF_STARTUP_DELAY_MS=30) -- the "
+            "main-detach / deferred-tstate-deletion teardown fix regressed."
+        )
+    assert cp.returncode == 0, (cp.returncode, cp.stdout, cp.stderr)
+    assert "OK" in cp.stdout, (cp.stdout, cp.stderr)

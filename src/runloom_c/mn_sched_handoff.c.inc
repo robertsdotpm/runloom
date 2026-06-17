@@ -144,6 +144,18 @@ static RUNLOOM_THREAD_RET runloom_handoff_main(void *arg)
      * counter never races in practice; ACQ_REL makes it sound under any order. */
     my_idx = __atomic_fetch_add(&runloom_rescue_thread_next, 1, __ATOMIC_ACQ_REL);
 
+    /* TEST-ONLY fault injection (RUNLOOM_HANDOFF_STARTUP_DELAY_MS): delay this
+     * rescue thread's startup PyThreadState_New so its qsbr stop-the-world
+     * reliably lands inside mn_fini's teardown window -- the deterministic repro
+     * for the teardown STW deadlock.  Zero cost when the env var is unset. */
+    {
+        const char *dly = getenv("RUNLOOM_HANDOFF_STARTUP_DELAY_MS");
+        if (dly != NULL && *dly != '\0') {
+            long long dms = atoll(dly);
+            if (dms > 0) runloom_sleep_ns(dms * 1000000LL);
+        }
+    }
+
     /* Create OWN tstate ON THIS THREAD so biased-refcount ob_tid binds to this
      * OS thread's TID -- same serialised construction hub threads use. */
     RUNLOOM_RLOCK(&runloom_hub_tstate_lock, RUNLOOM_RANK_HUB_TSTATE);
