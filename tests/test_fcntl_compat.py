@@ -178,15 +178,20 @@ class TestLockf(unittest.TestCase):
         keeps running while the parent is blocked."""
         def body():
             fd = os.open(self.path, os.O_RDWR)
+            r, w = os.pipe()
             pid = os.fork()
             if pid == 0:
+                os.close(r)
                 cfd = os.open(self.path, os.O_RDWR)
                 try:
                     fcntl.lockf(cfd, fcntl.LOCK_EX)
-                    time.sleep(0.05)
+                    os.write(w, b"x")        # signal: the lock is now held
+                    time.sleep(0.05)         # hold it so the parent contends + blocks
                 finally:
                     os._exit(0)
-            time.sleep(0.02)                # let the child take the lock
+            os.close(w)
+            os.read(r, 1)                    # deterministic: child holds the lock now
+            os.close(r)
             ticks = []
 
             def ticker():
@@ -213,15 +218,23 @@ class TestLockf(unittest.TestCase):
 
         def body():
             fd = os.open(self.path, os.O_RDWR)
+            r, w = os.pipe()
             pid = os.fork()
             if pid == 0:
+                os.close(r)
                 cfd = os.open(self.path, os.O_RDWR)
                 try:
                     fcntl.lockf(cfd, fcntl.LOCK_EX)
-                    time.sleep(0.1)
+                    os.write(w, b"x")        # signal: the lock is now held
+                    time.sleep(0.1)          # keep holding it while the parent probes
                 finally:
                     os._exit(0)
-            time.sleep(0.02)
+            os.close(w)
+            # Deterministic handshake -- NOT a timing guess: block until the child
+            # has actually acquired the lock, so the LOCK_NB probe below is
+            # guaranteed to contend regardless of scheduling/load.
+            os.read(r, 1)
+            os.close(r)
             raised = False
             try:
                 fcntl.lockf(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
