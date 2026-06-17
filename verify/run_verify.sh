@@ -192,6 +192,24 @@ if have cbmc; then
     else
         red "FAIL"; echo " -- see $WORK/cbmc_sched.log"; fail=$((fail+1)); FAILED="$FAILED cbmc-sched"
     fi
+    # per-g wake_state FSM (RUNLOOM_PER_G_TSTATE global runq): totality (every
+    # ENABLED event has a defined transition) + no-lost-wake (a remembered wake
+    # is always enqueued, never returns to PARKED unenqueued).  Teeth: the
+    # -DBUG_LOSE_WAKE config drops a remembered wake at release and MUST fail.
+    printf '  [cbmc] %-34s ' "wake_state FSM (totality+no-lost-wake)"
+    ws_ok=1
+    cbmc "$CBMC_DIR/wake_state_fsm_cbmc.c" --unwind 19 --unwinding-assertions \
+        >"$WORK/cbmc_wakestate.log" 2>&1 || ws_ok=0
+    # teeth: this MUST report VERIFICATION FAILED (cbmc exits non-zero); if it
+    # passes, the harness lost its teeth -> our check fails.
+    cbmc "$CBMC_DIR/wake_state_fsm_cbmc.c" --unwind 19 --unwinding-assertions \
+        -DBUG_LOSE_WAKE >"$WORK/cbmc_wakestate_teeth.log" 2>&1 && ws_ok=0
+    if [ "$ws_ok" = 1 ]; then
+        green "PASS"; echo " -- 6-state CAS FSM proven (+ teeth: BUG_LOSE_WAKE fails)"
+        pass=$((pass+1))
+    else
+        red "FAIL"; echo " -- see $WORK/cbmc_wakestate*.log"; fail=$((fail+1)); FAILED="$FAILED cbmc-wakestate"
+    fi
 else
     echo "  (cbmc not found -- skipping;  sudo apt-get install cbmc)"
 fi
