@@ -842,6 +842,7 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
                         runloom_g_decref(g);   /* queue ref */
                         continue;
                     }
+                    RUNLOOM_WS_NOTE(RUNLOOM_WS_QUEUED, RUNLOOM_WS_RUNNING);
                 }
                 __atomic_store_n(&g->in_sub_queue, 0, __ATOMIC_RELEASE);
                 if (g->coro == NULL || g->tstate == NULL ||
@@ -851,6 +852,7 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
                      * leak-safe: a claimed runq g goes back to PARKED and drops
                      * its queue ref. */
                     if (from_runq) {
+                        RUNLOOM_WS_NOTE(RUNLOOM_WS_RUNNING, RUNLOOM_WS_PARKED);
                         __atomic_store_n(&g->wake_state, RUNLOOM_WS_PARKED,
                                          __ATOMIC_RELEASE);
                         runloom_g_decref(g);   /* queue ref */
@@ -944,11 +946,13 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
                                                     RUNLOOM_WS_PARKED, 0,
                                                     __ATOMIC_ACQ_REL,
                                                     __ATOMIC_ACQUIRE)) {
+                        RUNLOOM_WS_NOTE(RUNLOOM_WS_RUNNING, RUNLOOM_WS_PARKED);
                         if (from_runq) runloom_g_decref(g);   /* old queue ref */
                     } else {
                         /* rexp == RUNNING_WOKEN.  Re-arm a single entry: incref
                          * the new one, drop the old (net zero for from_runq;
                          * first entry for from_runq=0). */
+                        RUNLOOM_WS_NOTE(RUNLOOM_WS_RUNNING_WOKEN, RUNLOOM_WS_QUEUED);
                         __atomic_store_n(&g->wake_state, RUNLOOM_WS_QUEUED,
                                          __ATOMIC_RELEASE);
                         runloom_g_incref(g);                  /* new queue ref */
@@ -963,6 +967,7 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
                      * fire to race it.  yield_current already pushed itself to
                      * the FIFO; a raw yield (self_queued==0) did not, so push it
                      * here. */
+                    RUNLOOM_WS_NOTE(RUNLOOM_WS_RUNNING, RUNLOOM_WS_RUNNING);
                     __atomic_store_n(&g->wake_state, RUNLOOM_WS_RUNNING,
                                      __ATOMIC_RELEASE);
                     if (from_runq) runloom_g_decref(g);       /* old queue ref */
@@ -990,6 +995,7 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
                     runloom_g_decref(g);   /* queue ref */
                     continue;
                 }
+                RUNLOOM_WS_NOTE(RUNLOOM_WS_QUEUED, RUNLOOM_WS_RUNNING);
             }
 
             if (g->snap.valid) {
@@ -1184,11 +1190,13 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
                                                     RUNLOOM_WS_PARKED, 0,
                                                     __ATOMIC_ACQ_REL,
                                                     __ATOMIC_ACQUIRE)) {
+                        RUNLOOM_WS_NOTE(RUNLOOM_WS_RUNNING, RUNLOOM_WS_PARKED);
                         if (from_runq) runloom_g_decref(g);   /* old queue ref */
                     } else {
                         /* rexp == RUNNING_WOKEN: a wake landed during the resume.
                          * Re-arm a single entry and enqueue now (snap is saved),
                          * exactly once -- no lost wake, no duplicate. */
+                        RUNLOOM_WS_NOTE(RUNLOOM_WS_RUNNING_WOKEN, RUNLOOM_WS_QUEUED);
                         __atomic_store_n(&g->wake_state, RUNLOOM_WS_QUEUED,
                                          __ATOMIC_RELEASE);
                         runloom_g_incref(g);                  /* new queue ref */
@@ -1199,6 +1207,7 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
                     /* Cooperative yield (sched_yield: already on local FIFO, or
                      * raw runloom_coro_yield: push it here).  Holds no live parker,
                      * so no wake_g can race -- stays RUNNING, hub-pinned. */
+                    RUNLOOM_WS_NOTE(RUNLOOM_WS_RUNNING, RUNLOOM_WS_RUNNING);
                     __atomic_store_n(&g->wake_state, RUNLOOM_WS_RUNNING,
                                      __ATOMIC_RELEASE);
                     if (from_runq) runloom_g_decref(g);       /* old queue ref */

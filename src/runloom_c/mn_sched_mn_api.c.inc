@@ -220,6 +220,7 @@ void runloom_mn_wake_g(void *hub_opaque, runloom_g_t *g)
                                                 RUNLOOM_WS_QUEUED, 0,
                                                 __ATOMIC_ACQ_REL,
                                                 __ATOMIC_ACQUIRE)) {
+                    RUNLOOM_WS_NOTE(RUNLOOM_WS_PARKED, RUNLOOM_WS_QUEUED);
                     runloom_g_incref(g);   /* queue ref, dropped when consumed */
                     runloom_mn_global_runq_push(g);
                     /* Same cross-hub wake-latency fix as hub_submit: any hub can
@@ -237,6 +238,7 @@ void runloom_mn_wake_g(void *hub_opaque, runloom_g_t *g)
                                                 RUNLOOM_WS_RUNNING_WOKEN, 0,
                                                 __ATOMIC_ACQ_REL,
                                                 __ATOMIC_ACQUIRE)) {
+                    RUNLOOM_WS_NOTE(RUNLOOM_WS_RUNNING, RUNLOOM_WS_RUNNING_WOKEN);
                     return;   /* owner will enqueue at release */
                 }
             } else if (st == RUNLOOM_WS_SWEEPING) {
@@ -244,6 +246,7 @@ void runloom_mn_wake_g(void *hub_opaque, runloom_g_t *g)
                                                 RUNLOOM_WS_SWEEPING_WOKEN, 0,
                                                 __ATOMIC_ACQ_REL,
                                                 __ATOMIC_ACQUIRE)) {
+                    RUNLOOM_WS_NOTE(RUNLOOM_WS_SWEEPING, RUNLOOM_WS_SWEEPING_WOKEN);
                     return;   /* sweeper will enqueue at release */
                 }
             } else {
@@ -285,8 +288,12 @@ int runloom_mn_hub_request_iouring_cancel(void *hub_opaque, void *op)
 int runloom_mn_sweep_try_claim(runloom_g_t *g)
 {
     int st = RUNLOOM_WS_PARKED;
-    return __atomic_compare_exchange_n(&g->wake_state, &st, RUNLOOM_WS_SWEEPING,
-                                       0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+    if (__atomic_compare_exchange_n(&g->wake_state, &st, RUNLOOM_WS_SWEEPING,
+                                    0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+        RUNLOOM_WS_NOTE(RUNLOOM_WS_PARKED, RUNLOOM_WS_SWEEPING);
+        return 1;
+    }
+    return 0;
 }
 
 /* End a sweep claim after the madvise.  SWEEPING -> PARKED if no wake landed.
@@ -300,11 +307,13 @@ void runloom_mn_sweep_claim_release(runloom_g_t *g)
     int st = RUNLOOM_WS_SWEEPING;
     if (__atomic_compare_exchange_n(&g->wake_state, &st, RUNLOOM_WS_PARKED, 0,
                                     __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+        RUNLOOM_WS_NOTE(RUNLOOM_WS_SWEEPING, RUNLOOM_WS_PARKED);
         return;   /* clean release; no wake during the madvise */
     }
     /* The only state try_claim could leave that isn't SWEEPING is
      * SWEEPING_WOKEN (no other actor touches a SWEEPING g except wake_g, which
      * only flips it to SWEEPING_WOKEN).  Re-enqueue the deferred wake. */
+    RUNLOOM_WS_NOTE(RUNLOOM_WS_SWEEPING_WOKEN, RUNLOOM_WS_QUEUED);
     __atomic_store_n(&g->wake_state, RUNLOOM_WS_QUEUED, __ATOMIC_RELEASE);
     runloom_g_incref(g);   /* queue ref, dropped when consumed */
     runloom_mn_global_runq_push(g);

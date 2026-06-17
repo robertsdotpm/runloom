@@ -63,6 +63,7 @@
 #include "runloom_iframe.h"
 #include "runloom_stackadvice.h"
 #include "runloom_blockpool.h"
+#include "runloom_fsm.h"
 
 #include <errno.h>
 #include <stdlib.h>
@@ -84,6 +85,45 @@
 #    define RUNLOOM_CACHELINE 64
 #  endif
 #endif
+
+/* ---- per-g wake_state FSM transition table (OBSERVATIONAL) -------------------
+ * The provably-total transition relation for the RUNLOOM_PER_G_TSTATE global-runq
+ * per-g wake_state (runloom_sched.h:236-285), identical to the CBMC-proven table
+ * in verify/cbmc/wake_state_fsm_cbmc.c.  Six states x five events.  Cells with no
+ * legal transition are RUNLOOM_FSM_INVALID (-1).  This table never DRIVES the
+ * state (the proven atomic CASes still do); it is only consulted by
+ * RUNLOOM_WS_NOTE() to abort loudly under -DRUNLOOM_FSM_VALIDATE if a live CAS/
+ * store ever performs a (from->to) edge the relation does not contain.  Zero cost
+ * in a normal build (RUNLOOM_FSM_NOTE compiles to ((void)0)). */
+enum {
+    RUNLOOM_WS_EV_WAKE = 0,        /* a waker (any thread) fires wake_g            */
+    RUNLOOM_WS_EV_PULL,            /* a hub pulls a queued entry -> resume         */
+    RUNLOOM_WS_EV_RELEASE,        /* a hub finishes the resume + releases         */
+    RUNLOOM_WS_EV_SWEEP_CLAIM,    /* a sweeper try-claims an idle stack sweep     */
+    RUNLOOM_WS_EV_SWEEP_RELEASE,  /* a sweeper finishes the madvise + releases    */
+    RUNLOOM_WS_EV_COUNT
+};
+#define RUNLOOM_WS_STATE_COUNT 6   /* RUNLOOM_WS_PARKED .. RUNLOOM_WS_SWEEPING_WOKEN */
+
+static const signed char runloom_ws_table
+        [RUNLOOM_WS_STATE_COUNT][RUNLOOM_WS_EV_COUNT]
+        __attribute__((unused)) = {
+    /*                       WAKE                       PULL                RELEASE            SWEEP_CLAIM           SWEEP_RELEASE */
+    [RUNLOOM_WS_PARKED]        = { RUNLOOM_WS_QUEUED,        RUNLOOM_FSM_INVALID, RUNLOOM_FSM_INVALID, RUNLOOM_WS_SWEEPING,        RUNLOOM_FSM_INVALID },
+    [RUNLOOM_WS_QUEUED]        = { RUNLOOM_WS_QUEUED,        RUNLOOM_WS_RUNNING,  RUNLOOM_FSM_INVALID, RUNLOOM_WS_QUEUED,          RUNLOOM_FSM_INVALID },
+    [RUNLOOM_WS_RUNNING]       = { RUNLOOM_WS_RUNNING_WOKEN, RUNLOOM_FSM_INVALID, RUNLOOM_WS_PARKED,   RUNLOOM_WS_RUNNING,         RUNLOOM_FSM_INVALID },
+    [RUNLOOM_WS_RUNNING_WOKEN] = { RUNLOOM_WS_RUNNING_WOKEN, RUNLOOM_FSM_INVALID, RUNLOOM_WS_QUEUED,   RUNLOOM_WS_RUNNING_WOKEN,   RUNLOOM_FSM_INVALID },
+    [RUNLOOM_WS_SWEEPING]      = { RUNLOOM_WS_SWEEPING_WOKEN, RUNLOOM_FSM_INVALID, RUNLOOM_FSM_INVALID, RUNLOOM_WS_SWEEPING,        RUNLOOM_WS_PARKED   },
+    [RUNLOOM_WS_SWEEPING_WOKEN]= { RUNLOOM_WS_SWEEPING_WOKEN, RUNLOOM_FSM_INVALID, RUNLOOM_FSM_INVALID, RUNLOOM_WS_SWEEPING_WOKEN,  RUNLOOM_WS_QUEUED   },
+};
+RUNLOOM_FSM_ASSERT_TABLE(runloom_ws_table, RUNLOOM_WS_STATE_COUNT,
+                         RUNLOOM_WS_EV_COUNT, "wake_state");
+
+/* Convenience: assert the (from->to) edge exists in the wake_state relation.
+ * Expands to nothing unless -DRUNLOOM_FSM_VALIDATE. */
+#define RUNLOOM_WS_NOTE(from, to)                                              \
+    RUNLOOM_FSM_NOTE("wake_state", runloom_ws_table,                           \
+                     RUNLOOM_WS_STATE_COUNT, RUNLOOM_WS_EV_COUNT, (from), (to))
 
 /* The hub array is PyMem_Calloc'd contiguously, so without per-element
  * alignment hub k's hot writes (deque bottom, the foreign-written submission
