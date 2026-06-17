@@ -407,3 +407,40 @@ class TestSelect(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestNoGoroutineGuard(unittest.TestCase):
+    """A blocking channel op with NO goroutine context (top-level call or a
+    foreign OS thread) must raise RuntimeError, NOT busy-spin forever.  Audit
+    hang: park_waiter with current_g==NULL spun (its coro_yield is a no-op and
+    wake_waiter can't wake a NULL g).  Matches runloom.sync's
+    current_g()-is-None guard.  Non-blocking ops + ops inside a goroutine are
+    unaffected (covered by the other tests in this module)."""
+
+    def test_toplevel_blocking_recv_raises(self):
+        ch = runloom_c.Chan()
+        with self.assertRaises(RuntimeError):
+            ch.recv()                      # empty + no goroutine -> would block
+
+    def test_toplevel_blocking_send_raises(self):
+        ch = runloom_c.Chan()              # unbuffered, no receiver
+        with self.assertRaises(RuntimeError):
+            ch.send(1)                     # would block, no goroutine
+
+    def test_foreign_thread_blocking_recv_raises(self):
+        import threading
+        ch = runloom_c.Chan()
+        out = {}
+        def f():
+            try:
+                ch.recv()
+                out["r"] = "noerror"
+            except RuntimeError:
+                out["r"] = "RuntimeError"
+            except BaseException as e:  # noqa: BLE001
+                out["r"] = repr(e)
+        t = threading.Thread(target=f)
+        t.start()
+        t.join(timeout=5.0)
+        self.assertFalse(t.is_alive(), "foreign-thread blocking recv hung (busy-spin)")
+        self.assertEqual(out.get("r"), "RuntimeError")

@@ -12,6 +12,21 @@
  *   on success: returns 0, channel holds an INCREF'd ref to value.
  *   on closed: returns -1 + PyErr set + LOCK RELEASED.
  */
+/* True iff there is NO runloom goroutine on this OS thread (a foreign thread, or a
+ * top-level call outside run()).  Such a caller MUST NOT reach park_waiter: it has
+ * no fiber to park, so park_waiter would busy-spin forever (its coro_yield is a
+ * no-op and wake_waiter can't wake a NULL g) -- a CPU-pegging hang.  Detected with
+ * a NON-allocating peek: never runloom_sched_get(), which would malloc a sched +
+ * arm the wake-pump on a foreign thread (the foreign-thread-safety invariant in
+ * CLAUDE.md).  Cooperative channel ops are goroutine-only by design, matching
+ * runloom.sync's "current_g() is None -> RuntimeError" guard. */
+static int chan_no_goroutine(void)
+{
+    if (runloom_mn_current_hub_opaque() != NULL)
+        return runloom_mn_tls_current_g() == NULL;   /* on a hub: in a fiber? */
+    return runloom_sched_peek_current() == NULL;       /* single-thread: a current g? */
+}
+
 static int chan_send_locked(runloom_chan_t *ch, PyObject *value, int blocking)
 {
     runloom_chan_waiter_t *rx;
@@ -45,6 +60,16 @@ static int chan_send_locked(runloom_chan_t *ch, PyObject *value, int blocking)
     if (!blocking) {
         RUNLOOM_RUNLOCK(&ch->lock, RUNLOOM_RANK_CHAN);
         return 1;
+    }
+
+    /* Would block, but no goroutine to park -> reject cleanly instead of letting
+     * park_waiter busy-spin forever (audit hang: park_waiter from a non-fiber). */
+    if (chan_no_goroutine()) {
+        RUNLOOM_RUNLOCK(&ch->lock, RUNLOOM_RANK_CHAN);
+        PyErr_SetString(PyExc_RuntimeError,
+                        "channel send would block, but no goroutine is running "
+                        "(blocking channel ops require a runloom goroutine context)");
+        return -1;
     }
 
     /* Block: park as sender.  We hold our own ref on `value` until
@@ -136,6 +161,17 @@ static PyObject *chan_recv_locked(runloom_chan_t *ch, int *ok, int blocking)
 
     if (!blocking) {
         RUNLOOM_RUNLOCK(&ch->lock, RUNLOOM_RANK_CHAN);
+        *ok = -1;
+        return NULL;
+    }
+
+    /* Would block, but no goroutine to park -> reject cleanly instead of letting
+     * park_waiter busy-spin forever (audit hang: park_waiter from a non-fiber). */
+    if (chan_no_goroutine()) {
+        RUNLOOM_RUNLOCK(&ch->lock, RUNLOOM_RANK_CHAN);
+        PyErr_SetString(PyExc_RuntimeError,
+                        "channel recv would block, but no goroutine is running "
+                        "(blocking channel ops require a runloom goroutine context)");
         *ok = -1;
         return NULL;
     }
