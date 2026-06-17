@@ -36,12 +36,24 @@
 #include "netpoll.h"
 #include "coro.h"
 #include "runloom_crash.h"
+#include "runloom_fsm.h"   /* RUNLOOM_FSM_VALIDATE single-completion witness */
 
 #include <stdlib.h>
 #include <string.h>
 
 #define RUNLOOM_BLOCKPOOL_MAX     64
 #define RUNLOOM_BLOCKPOOL_DEFAULT 8
+
+/* The job-completion handshake is a ONE-WAY 2-state FSM on `done`: a job is
+ * PENDING until the single worker that owns it publishes DONE (release-store)
+ * exactly once; the parked fiber then resumes via the GenMC-proven
+ * park_generic/wake_safe Dekker (verify/genmc/sched_parkwake.c).  Single writer +
+ * one-way + the atomic-is-the-proof => harden-in-place: explicit states + a
+ * single-completion witness under -DRUNLOOM_FSM_VALIDATE, no runtime table. */
+enum {
+    RUNLOOM_BP_JOB_PENDING = 0,   /* worker still touching job-> ; fiber must spin */
+    RUNLOOM_BP_JOB_DONE    = 1    /* worker finished; fiber may resume + free job  */
+};
 
 /* One offloaded job.  Lives on the calling fiber's coroutine stack,
  * which stays mapped across the park, so no heap alloc is needed. */
@@ -143,7 +155,16 @@ static RUNLOOM_THREAD_RET runloom_blockpool_worker(void *arg)
             /* Publish completion: release-store so the resumed fiber sees
              * job->result, and a marker that the worker is done with job-> .
              * After this line the worker touches ONLY locals + statics. */
-            __atomic_store_n(&job->done, 1, __ATOMIC_RELEASE);
+#if defined(RUNLOOM_FSM_VALIDATE)
+            /* Witness the one-way single-completion invariant: a job is published
+             * DONE exactly once (PENDING -> DONE).  A second completion would mean
+             * two workers owned the same job -> the resumed fiber's stack `job`
+             * could be freed under the second store. */
+            if (__atomic_load_n(&job->done, __ATOMIC_RELAXED) != RUNLOOM_BP_JOB_PENDING)
+                runloom_fsm_violation("blockpool_job", RUNLOOM_BP_JOB_DONE,
+                                      RUNLOOM_BP_JOB_DONE, __FILE__, __LINE__);
+#endif
+            __atomic_store_n(&job->done, RUNLOOM_BP_JOB_DONE, __ATOMIC_RELEASE);
 
             /* Re-queue the fiber via the one audited race-safe waker.  wake_safe
              * drives the parked_safe/wake_pending Dekker handshake -- WITH the
@@ -303,7 +324,7 @@ void *runloom_blocking_call(void *(*fn)(void *), void *arg)
     job.result = NULL;
     job.g      = g;
     job.hub    = hub;
-    job.done   = 0;
+    job.done   = RUNLOOM_BP_JOB_PENDING;
     job.next   = NULL;
 
     /* Count the job as outstanding BEFORE enqueueing so the single-thread
