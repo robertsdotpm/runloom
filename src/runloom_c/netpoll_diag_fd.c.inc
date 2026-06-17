@@ -198,7 +198,15 @@ static size_t         runloom_fd_registered_cap_bytes = 0;
  * via ACQ_REL on both, providing a clean happens-before for "kernel
  * event happened" -> "next wait observes it".  The init publish stores
  * the base (RELEASE) before the cap (RELEASE); readers load the cap
- * (ACQUIRE) before the base, so a non-zero cap implies a valid base. */
+ * (ACQUIRE) before the base, so a non-zero cap implies a valid base.
+ *
+ * FSM SCOPE (RUNLOOM_FSM_VALIDATE): tier-4 LEAVE (FSM_ADOPTION.md).  Each byte is
+ * an independent edge-readiness bitmask, not an enumerable (state,event) machine:
+ * the per-byte atomic fetch_or (set) / fetch_and (consume) on a never-realloc'd
+ * buffer IS the optimal proof on this hot, lock-free path (the ACQ_REL pairing
+ * above is the correctness argument).  A transition table / NOTE-edge would be
+ * ceremony with no missing-handler bug to catch.  Backend-agnostic: epoll, kqueue,
+ * select, and WSAPoll all feed it via the same pump -> parker recheck. */
 static unsigned char *runloom_fd_pending_wake = NULL;
 static size_t         runloom_fd_pending_wake_cap = 0;
 
