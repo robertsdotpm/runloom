@@ -1,42 +1,58 @@
 /*
  * netpoll_rearm.pml -- Promela model of the OTHER half of netpoll's lost-wake
  * guard (netpoll_commit.pml models the parker-claim commit; this models the
- * arming discipline): the LEVEL-triggered + EPOLLONESHOT re-arm in
- * runloom_netpoll_register, working with the per-fd pending-wake bitmap.
+ * arming discipline): the LEVEL-triggered REGISTER-PER-DIRECTION-ONCE arm in
+ * runloom_netpoll_register (the "LEVEL register-PER-DIRECTION-once" scheme).
+ *
+ * SHIPPED ARMING (src/runloom_c/netpoll_register.c.inc, runloom_netpoll_register).
+ * Each fd is ADDed LEVEL-triggered (EPOLLIN|EPOLLRDHUP / EPOLLOUT, NO EPOLLET,
+ * NO EPOLLONESHOT) ONCE per direction, and a re-park whose direction is already
+ * armed SKIPS the epoll_ctl entirely (0 syscalls on the recv-after-recv hot
+ * path -- the arm mask runloom_fd_armed doubles as registration state).  The
+ * registration is PERSISTENT: it is not disarmed by a delivery, and it is never
+ * re-MOD'd on a re-park.  OUT is armed only when a WRITE waiter exists (the
+ * always-writable OUT would otherwise level-busy-loop the pump); IN never
+ * busy-loops (a not-readable socket produces no IN event), so IN is safe
+ * register-once.
  *
  * THE NOT-YET-LINKED WINDOW.  An fd can become ready while no parker is linked
  * for it (the g unlinked on its last wake and has not re-linked, or has not
- * reached wait_fd yet).  A pump that processes such a delivery finds no parker
- * and stashes the readiness in the per-fd pending-wake bitmap; the next
- * wait_fd consumes it before parking.  But the bitmap ALONE does not close the
- * window: a pump can be preempted between "found no parker" and the lock-free
- * runloom_fd_pending_wake_set (netpoll.c:2185-2195), letting the g link, consume
- * the (still-empty) bitmap twice, commit, and park BEFORE the bit is set.
+ * reached wait_fd yet).  A pump that processes such a delivery finds no parker;
+ * it stashes the readiness in the per-fd pending-wake bitmap (a belt-and-braces
+ * backstop), but the bitmap is NOT what closes the window here.
  *
- * WHAT ACTUALLY CLOSES IT (the documented T1.5 fix, netpoll.c:1158-1207):
- * arm LEVEL-triggered + EPOLLONESHOT, RE-ARMED via EPOLL_CTL_MOD on EVERY
- * park, strictly AFTER linking the parker (link at 1803, register at 1845).
- * Because MOD is level-triggered it re-reports a still-ready fd, queueing a
- * FRESH delivery -- and that delivery, generated after the link, finds the
- * linked parker and wakes it.  EPOLLONESHOT means the prior arm delivered once
- * and disarmed, so no delivery is in flight before the re-arm: the only
- * delivery this cycle is the post-link one.  Hence the not-yet-linked window
- * is unreachable.
+ * WHAT ACTUALLY CLOSES IT (the LEVEL register-once contract):
+ * because the registration PERSISTS and is LEVEL-triggered, the kernel
+ * RE-REPORTS a still-ready fd on EVERY epoll_wait.  The pump loops on
+ * epoll_wait; so long as the fd stays ready and registered, each loop produces
+ * a fresh delivery.  An early delivery that found no parker is therefore
+ * harmless: the NEXT epoll_wait re-reports the same still-ready fd, and that
+ * later delivery -- arriving after the g has linked -- finds the linked parker
+ * and wakes it.  No re-arm syscall is needed (register is a cached no-op on the
+ * re-park), and there is NO pending-bitmap dependency: LEVEL persistence alone
+ * makes a late-linking parker un-droppable.
+ *
+ * Faithful to wait_fd ordering (runloom_netpoll_wait_fd): link (parker_link) ->
+ * pending_wake_consume #1 -> runloom_netpoll_register (register-once, skip if
+ * already armed) -> pending_wake_consume #2 -> commit CAS ARMED->PARKED.
  *
  * PROVEN (one parking g + one pump, fd ready):
- *   NO LOST WAKE -- the g always becomes runnable.  Under LT+ONESHOT the
- *   re-arm (post-link) delivers to the pump, which finds the linked parker;
- *   the bitmap is provably never even needed.  A lost wake = the g stuck at
- *   its park = a Spin invalid end state.
+ *   NO LOST WAKE -- the g always becomes runnable.  Under register-once LEVEL,
+ *   the persistent registration re-reports the still-ready fd on every
+ *   epoll_wait, so a delivery generated AFTER the link finds the linked parker.
+ *   The bitmap is provably never even needed (the model never relies on it).
+ *   A lost wake = the g stuck at its park = a Spin invalid end state.
  *
  * Negative control -DBUG_EDGE_TRIGGERED models the OLD scheme (item 2 of the
- * lost-wake history: EPOLLET, registered once, never re-armed).  register is a
- * cached no-op and an already-ready fd is NOT re-reported, so a pre-link edge
- * the pump dropped is gone for good.  Spin finds the lost wake: pump consumes
- * the lone edge before the link, is preempted, the g links + double-consumes
- * the empty bitmap + parks, THEN the pump sets the bit -- too late, and no
- * re-arm delivery ever comes.  (Matches "EPOLLET+ONESHOT+re-arm hung 96/96;
- * only LEVEL fixed it".)  This is exactly why the bitmap needs the LT re-arm.
+ * lost-wake history: EPOLLET, registered ONCE, never re-armed -- the
+ * register.c.inc header's "Do NOT restore an EPOLLET register-once arm").
+ * register is the SAME cached register-once no-op, but EPOLLET is
+ * EDGE-triggered: a still-ready fd is reported only on the not-ready->ready
+ * EDGE, NOT on every epoll_wait.  Once a pump drains that lone edge finding no
+ * parker, it never refires.  Spin finds the lost wake: the pump consumes the
+ * pre-link edge, the g then links + parks, and no further delivery ever comes
+ * because LEVEL re-report is exactly what EPOLLET removes.  (Matches the
+ * recorded "EPOLLET register-once hung; only LEVEL fixed it".)
  */
 
 #define ARMED  0
@@ -53,7 +69,12 @@ bit  g_done     = 0;      /* g returned from wait_fd                       */
 
 bit  fd_ready   = 1;      /* level condition: data present this cycle      */
 byte deliv      = 0;      /* epoll deliveries queued to the pump           */
-bit  arm        = 0;      /* epoll arm state (EPOLLONESHOT)                 */
+/* registered: the LEVEL register-PER-DIRECTION-once arm.  The arm mask
+ * (runloom_fd_armed) is PERSISTENT -- ADDed once and NOT disarmed by a delivery
+ * (NO EPOLLONESHOT) and NOT re-MOD'd on a re-park.  Starts 1 here: this fd was
+ * registered LEVEL on a PRIOR park and the registration survived the prior
+ * wake, so this park takes register's already-armed zero-syscall SKIP. */
+bit  registered = 1;
 
 #define LOCK   d_step { (lock == 0) -> lock = 1 }
 #define UNLOCK lock = 0
@@ -63,26 +84,24 @@ active proctype waitfd()
     byte prev;
     bit got;
 
-    LOCK; linked = 1; UNLOCK;                  /* link the parker (1803) */
+    LOCK; linked = 1; UNLOCK;                  /* runloom_parker_link */
 
-    atomic { got = pending; pending = 0; }     /* consume #1 (1812) */
+    atomic { got = pending; pending = 0; }     /* pending_wake_consume #1 */
     if
     :: got -> LOCK; linked = 0; UNLOCK; g_runnable = 1; g_done = 1;
     :: else ->
-#ifndef BUG_EDGE_TRIGGERED
-        /* register = EPOLL_CTL_MOD, LEVEL-triggered + ONESHOT: re-arm AND, the
-         * fd being ready, queue a FRESH delivery -- strictly after the link. */
-        atomic { arm = 1; if :: fd_ready -> deliv++ :: else -> skip; fi; }
-#else
-        /* OLD scheme: EPOLLET, registered once, never re-armed -> cached
-         * no-op; an already-ready fd is NOT re-reported. */
+        /* runloom_netpoll_register: LEVEL register-PER-DIRECTION-once.  This
+         * direction is ALREADY armed (registered == 1) from a prior park, so
+         * register takes its zero-syscall already-armed SKIP -- it issues NO
+         * epoll_ctl and queues NO delivery.  (Under either trigger mode the
+         * re-park register is a cached no-op; the difference is what the
+         * PERSISTENT registration does on the pump's epoll_wait, below.) */
         skip;
-#endif
-        atomic { got = pending; pending = 0; }  /* consume #2 (1860) */
+        atomic { got = pending; pending = 0; }  /* pending_wake_consume #2 */
         if
         :: got -> LOCK; linked = 0; UNLOCK; g_runnable = 1; g_done = 1;
         :: else ->
-            atomic {                            /* commit CAS ARMED->PARKED (1880) */
+            atomic {                            /* commit CAS ARMED->PARKED */
                 prev = commit;
                 if :: commit == ARMED -> commit = PARKED;
                    :: else            -> skip;
@@ -100,13 +119,18 @@ active proctype waitfd()
 active proctype pump()
 {
     byte prior;
-#ifdef BUG_EDGE_TRIGGERED
-    /* EPOLLET: the fd was armed once by a prior wait; a not-ready->ready edge
-     * has fired and is pending.  EPOLLET will not refire it. */
-    atomic { arm = 1; deliv = 1; }
-#endif
+
+    /* The fd is ready and was registered LEVEL on a prior park.  Under the
+     * SHIPPED scheme the persistent LEVEL registration re-reports the
+     * still-ready fd on EVERY epoll_wait, so the first epoll_wait already has a
+     * delivery queued -- and so will every subsequent one while the fd stays
+     * ready and registered.  Under -DBUG_EDGE_TRIGGERED the SAME register-once
+     * arm exists, but EPOLLET reports only the not-ready->ready EDGE: one
+     * delivery, and once drained it never refires. */
+    atomic { deliv = 1; }
+
     do
-    :: atomic { (deliv > 0) -> deliv--; arm = 0; }   /* ONESHOT: delivery disarms */
+    :: atomic { (deliv > 0) -> deliv-- }      /* epoll_wait returns a delivery */
        /* runloom_pump_dispatch_event: walk by_fd under pool->lock */
        LOCK;
        if
@@ -128,6 +152,22 @@ active proctype pump()
        :: else ->
            UNLOCK;
            pending = 1;          /* no parker -> stash (lock-free, post-unlock) */
+#ifndef BUG_EDGE_TRIGGERED
+           /* LEVEL register-once: the registration PERSISTS and re-reports the
+            * still-ready fd on the NEXT epoll_wait.  So a delivery that found no
+            * parker is re-generated by the kernel on the following wait -- this
+            * is exactly what makes a late-linking parker un-droppable, no re-arm
+            * syscall and no pending-bitmap dependency.  Modelled as the
+            * persistent LEVEL arm re-queueing while the fd stays ready. */
+           atomic { if :: (fd_ready && registered) -> deliv++ :: else -> skip fi }
+#else
+           /* EPOLLET register-once: the registration also persists, but
+            * EDGE-triggered means a still-ready fd is NOT re-reported on the
+            * next epoll_wait -- only a fresh not-ready->ready edge would, and
+            * the fd never went un-ready.  The lone edge is gone; nothing
+            * re-queues.  This is the dropped edge that never refires. */
+           skip;
+#endif
        fi;
     :: (g_done) -> break;
     od;

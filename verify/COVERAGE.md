@@ -76,16 +76,52 @@ of a hypothetical resizable deque (the production deque is fixed-capacity) and i
   documented cov_workload --hubs 4 loop-backend hang; safety cfg fires a genuine
   verdict (non-vacuous). Verified with TLC (java 21 / tla2tools 1.7.4).
 
+Second batch (closing the gaps below):
+
+* **`spin/netpoll_parker_link.pml`** — the parker link/unlink list surgery at a
+  REUSED stack address. Proves the global list + per-fd buckets stay **acyclic**
+  (pump walk terminates), the slot-pointer trick stays valid, and `pool->total`
+  is balanced. Controls: `BUG_NO_STALE_CLEAR` (self-cycle → pump wedge),
+  `BUG_DOUBLE_DEC` (under-count → idle mis-sleep). **It also isolated the residual
+  the source hand-waved:** the stale-clear *fully* contains the cycle/UAF, but
+  *cannot* repair a `pool->total` **over-count** a missed prior-life unlink leaves
+  — a benign **over-poll** (the safe direction; opposite to the under-count). The
+  only full elimination is removing the stack-address aliasing at its source (the
+  heap parker freelist, `runloom_parker_pool_acquire`/`release` with a per-acquire
+  `gen`). So the "not fully isolated upstream" comment is now a precise statement.
+* **`spin/chan_buffer.pml`** + **`coq/ChanBuffer.v`** — buffered-channel ring +
+  waiter FIFO: conservation (no value lost/dup), strict FIFO wake, bounds [0,cap],
+  no park-despite-ready. Two configs (cap-2 buffered + `-DUNBUF` cap-0 rendezvous).
+  Controls: `BUG_LIFO_WAITERS`, `BUG_DROP_ON_CLOSE`. Coq gives the unbounded
+  conservation lemma.
+* **`spin/foreign_thread_fallback.pml`** — a monkey-patched cooperative primitive
+  taken by a non-goroutine OS thread real-OS-blocks (never parks a NULL g / allocs
+  a sched); mutual exclusion holds. Control `BUG_FOREIGN_PARKS` (the SIGSEGV/UAF
+  class). (A branch-safety model, not a deep weak-memory one — stated as such.)
+* **`cbmc/timer_heap_cbmc.c`** — the deadline/sleep min-heap mechanics
+  (`dh_sift_up/down`, `dh_insert`, arbitrary-remove-by-`heap_index`, `dh_peek`):
+  heap property + peek-min + index-consistency + bounds after every op. Control
+  `BUG_NO_INDEX_UPDATE` (stale back-pointer corrupts the heap on a later remove).
+* **`spin/sched_drain.pml`** — the single-thread drain census + deadlock detector
+  (the single-thread analogue of `RunloomMnRun`): no premature exit while
+  runnable/wakeable work remains. Control `BUG_EXIT_WITH_WORK` (strands a pending
+  foreign wake's g).
+* **`spin/netpoll_rearm.pml` (re-modeled)** — corrected to the **shipped**
+  register-per-direction-once LEVEL scheme (no `EPOLLONESHOT`-per-park `MOD`);
+  proves LEVEL persistence re-reports a still-ready fd so a late-linking parker is
+  never edge-dropped. Control `BUG_EDGE_TRIGGERED` (old EPOLLET, no re-report).
+  README §9 updated to match. (Resolves Documentation-debt #1 below.)
+
 ## Remaining gaps (prioritized)
+
+_Most of the prior gaps were closed by the second batch above (parker link/unlink,
+buffered-chan ring, foreign-thread fallback, timer min-heap, single-thread drain)._
 
 | Gap | Source | Risk | Suggested |
 |---|---|---|---|
-| Buffered-channel ring send/recv ordering | `chan_ops.c.inc` (`buf_push`/`buf_pop`) | MED | Spin for waiter-wake FIFO + buffer conservation; Coq ∞ for "no value lost/dup across N sends". Currently covered only *by composition* (`ch->lock` + verified primitives). |
-| netpoll parker link/unlink list surgery | `netpoll_parker_link.c.inc` | MED | Spin for list-pointer integrity (slot-pointer trick, `by_fd` splice, stale self-ref detach). **Not** benign straight-line: the source documents a *residual M:N free-threaded race not yet fully isolated* + a previously-shipped double-decrement. `netpoll_multipool`/`netpoll_forceunlink` cover the lock hierarchy + release, not the splice. |
-| Foreign-OS-thread primitive fallback | `runloom/sync.py`, peek paths | MED | The "not-a-goroutine → real OS block, don't alloc a sched" decision for a monkey-patched `Lock`/`Condition` on a stdlib daemon thread. Largely a control-flow invariant; better as a hardened runtime check + TSan corpus than a model. |
-| `mn_run` *timed* detector tuning | `mn_sched_init_fini.c.inc` | LOW | `RunloomMnRun.tla` (new) covers the census/stall-kick logic; the `RUNLOOM_DEADLOCK_MS` / `RUNLOOM_STALL_KICK_MS` timing thresholds themselves are policy, not modeled. |
-| timer/sleep min-heap mechanics | `runloom_sched_core.c.inc` | LOW | CBMC layout/bounds (single-owner, `pool->lock`-serialized). `netpoll_deadline` covers the claim race, not the sift/`heap_index`-remove. |
-| single-thread scheduler drain + its deadlock detector | `runloom_sched_drain.c.inc` | LOW | Mostly single-threaded (pre-hub / fork-child path); the M:N drain + census is modeled (`RunloomMnRun`), this single-thread analogue is not. |
+| `mn_run` *timed* detector tuning | `mn_sched_init_fini.c.inc` | LOW | `RunloomMnRun.tla` covers the census/stall-kick logic; the `RUNLOOM_DEADLOCK_MS` / `RUNLOOM_STALL_KICK_MS` timing thresholds are policy, not modeled. |
+| io_uring-loop F_EPOLL edge-drop root cause | `mn_sched_hub_main.c.inc` (loop idle path) | MED | The reproduced loop-backend hang is *symptom-guarded* by `pump(0)` on every idle tick (bounds it to one `idle_ns`); the underlying reason the poll-on-epoll-fd bridge drops a readable edge is **not isolated**. Worth a focused netpoll/io_uring-loop arm investigation (level-vs-edge / one-shot re-arm of the shared epoll fd on the ring). |
+| parker `pool->total` over-count after a missed unlink | `netpoll_parker_link.c.inc` | LOW | Proven benign (over-poll), but the *clean* fix is the heap parker freelist removing the stack-address aliasing (see `netpoll_parker_link.pml` finding). |
 
 Not gaps: `netpoll_diag_fd.c.inc` / `netpoll_init.c.inc` (introspection + setup, not a live wake protocol), `runloom_stackadvice.c` (benign racy size hints), the prewarm daemon in `coro.c` (pure-C, no PyThreadState → invisible to STW). The audit found **no** subsystem the map claims as covered but is actually bare — only uncredited *bonus* coverage (now folded into the index above).
 
@@ -93,13 +129,11 @@ Not gaps: `netpoll_diag_fd.c.inc` / `netpoll_init.c.inc` (introspection + setup,
 
 These do **not** invalidate any proof — they mis-*describe* what is verified:
 
-1. **`netpoll_rearm.pml` + README §9 model a *replaced* epoll arm scheme** (MED).
-   They describe "LEVEL + `EPOLLONESHOT`, re-armed via `EPOLL_CTL_MOD` per park",
-   but production (`netpoll_register.c.inc`) is now "LEVEL, register-per-direction-
-   once, **no** `EPOLLONESHOT`, skip `epoll_ctl` on re-park". The proven property
-   (LEVEL re-reports a still-ready fd → no edge-drop) still holds; the per-park
-   MOD re-arm detail is stale. Fix: re-model the register-once LEVEL scheme.
-   (The kqueue model #17, `EV_ADD|EV_ONESHOT` re-add, still matches its source.)
+1. **~~`netpoll_rearm.pml` + README §9 model a *replaced* epoll arm scheme~~ —
+   RESOLVED 2026-06-17.** Re-modeled to the shipped register-per-direction-once
+   LEVEL scheme (no `EPOLLONESHOT`-per-park `MOD`); README §9 rewritten to match.
+   `BUG_EDGE_TRIGGERED` retained as the negative control (old EPOLLET, no
+   re-report). See "New this session → second batch".
 2. **Stale source line citations** across model headers + README (MED). The
    code-layout refactor split the monoliths into `*.c.inc`; headers still cite
    `netpoll.c:1158-2195`, `mn_sched.c:1273`, `io_uring.c:999`, etc. Fix: cite
@@ -131,9 +165,14 @@ number, so the reference survives the next file split.
 
 ## Complete model index
 
-Every model file, by engine (74 total: Spin 23, CBMC 12, GenMC 13, Coq 4,
+Every model file, by engine (80 total: Spin 27, CBMC 13, GenMC 13, Coq 5,
 Iris 6, TLA+ 10, herd7/litmus 5, Alloy 1). The subsystem-level grouping is the
 **Coverage map** above; this is the exhaustive file list.
+
+_New 2026-06-17 (this session, both batches):_ Spin `netpoll_iouring_loop`,
+`netpoll_parker_link`, `chan_buffer`, `foreign_thread_fallback`, `sched_drain`
+(+ `netpoll_rearm` re-modeled); CBMC `timer_heap_cbmc`; Coq `ChanBuffer`;
+TLA+ `RunloomMnRun`.
 
 ### Spin — `spin/*.pml` (23)
 | file | what |

@@ -193,37 +193,50 @@ the pump re-queues only if it happens to observe a plain `parked` flag already
 set) and Spin finds the classic lost wake: the pump checks the flag *before*
 the g sets it, declines to wake, and the g parks forever.
 
-### 9. netpoll LT+ONESHOT re-arm -- `spin/netpoll_rearm.pml`
+### 9. netpoll LEVEL register-once arm -- `spin/netpoll_rearm.pml`
 
 The *other* half of the netpoll lost-wake guard (#8 models the parker-claim
 commit; this models the **arming discipline**). An fd can become ready while no
 parker is linked (the g unlinked on its last wake and hasn't re-linked); a pump
 processing that delivery finds no parker and stashes it in the per-fd
-pending-wake bitmap. But the **bitmap alone does not close the window**: the
-pump can be preempted between "found no parker" and the lock-free
-`runloom_fd_pending_wake_set` (netpoll.c:2185-2195), letting the g link, consume
-the still-empty bitmap twice, commit, and park *before* the bit is set.
+pending-wake bitmap as a backstop. But the bitmap is *not* what closes the
+window here -- and the bitmap **alone** would not: a pump can be preempted
+between "found no parker" and the lock-free pending-wake store, letting the g
+link, consume the still-empty bitmap twice, commit, and park *before* the bit is
+set.
 
-What closes it is the documented T1.5 fix (`runloom_netpoll_register`,
-netpoll.c:1158-1207): arm **LEVEL-triggered + `EPOLLONESHOT`, re-armed via
-`EPOLL_CTL_MOD` on every park, strictly after linking the parker** (link 1803,
-register 1845). `MOD` being level-triggered re-reports a still-ready fd,
-queueing a *fresh* delivery -- generated after the link, so it finds the linked
-parker and wakes it. `EPOLLONESHOT` means the prior arm delivered once and
-disarmed, so nothing is in flight before the re-arm.
+What closes it is the shipped **LEVEL register-per-direction-once** arm
+(`runloom_netpoll_register`, the "LEVEL register-PER-DIRECTION-once" comment).
+Each fd is ADDed **LEVEL-triggered (no `EPOLLET`, no `EPOLLONESHOT`)** once per
+direction; a re-park whose direction is already armed **skips the `epoll_ctl`
+entirely** (zero syscalls on the recv-after-recv hot path -- the arm mask
+`runloom_fd_armed` doubles as registration state). The registration is
+**persistent**: it is never disarmed by a delivery and never re-`MOD`'d on a
+re-park. Because LEVEL re-reports a still-ready fd on **every** `epoll_wait`, the
+pump's poll loop keeps producing a fresh delivery as long as the fd stays ready
+and registered. So an early delivery that found no parker is harmless: the *next*
+`epoll_wait` re-reports the same still-ready fd, and that later delivery --
+arriving after the g has linked -- finds the linked parker and wakes it. No
+re-arm syscall is needed, and there is **no pending-bitmap dependency**: LEVEL
+persistence alone makes a late-linking parker un-droppable. (`OUT` is armed only
+when a WRITE waiter exists, since the always-writable `OUT` would otherwise
+level-busy-loop the pump; `IN` never busy-loops, so it is safe register-once.)
 
-* **No lost wake** -- the g always becomes runnable. Under LT+ONESHOT the only
-  delivery is the post-link re-arm one, which finds the linked parker; the
-  bitmap is provably never even needed (the model never sets `pending`).
+* **No lost wake** -- the g always becomes runnable. The persistent LEVEL
+  registration re-reports the still-ready fd on every `epoll_wait`, so a delivery
+  generated after the link finds the linked parker; the bitmap is provably never
+  even needed (the model never relies on `pending`).
 
-Negative control `-DBUG_EDGE_TRIGGERED` models the **old scheme** (EPOLLET,
-registered once, never re-armed): `register` is a cached no-op and an
-already-ready fd is *not* re-reported. Spin finds the lost wake -- the pump
-consumes the lone edge before the link, is preempted, the g links + double-
-consumes the empty bitmap + parks, then the pump sets the bit too late and no
-re-arm delivery ever comes. (Matches the recorded "EPOLLET+ONESHOT+re-arm hung
-96/96; only LEVEL fixed it".) This is precisely *why* the bitmap needs the LT
-re-arm.
+Negative control `-DBUG_EDGE_TRIGGERED` models the **old scheme** the source
+warns against restoring (`EPOLLET`, registered once, never re-armed): `register`
+is the same cached register-once no-op, but `EPOLLET` is **edge-triggered** -- a
+still-ready fd is reported only on the not-ready→ready *edge*, never on a
+subsequent `epoll_wait`. Once the pump drains that lone pre-link edge (finding no
+parker), it never refires. Spin finds the lost wake -- the pump consumes the
+edge, then the g links + double-consumes the empty bitmap + parks, and no further
+delivery ever comes because LEVEL re-report is exactly what `EPOLLET` removes.
+(Matches the recorded "EPOLLET register-once hung; only LEVEL fixed it".) This is
+precisely *why* register-once must be LEVEL, not edge.
 
 ### 10. netpoll multi-pool dispatch -- `spin/netpoll_multipool.pml`
 
@@ -568,7 +581,7 @@ verify/
     hub_submit.pml         default M:N wake dedup (+ BUG_NO_DEDUP control)
     blockpool.pml          blocking-offload wake order (+ BUG_DEC_BEFORE_REQUEUE)
     netpoll_commit.pml     netpoll park/wake commit protocol (+ BUG_NO_COMMIT)
-    netpoll_rearm.pml      netpoll LT+ONESHOT re-arm vs not-yet-linked window (+ BUG_EDGE_TRIGGERED)
+    netpoll_rearm.pml      netpoll LEVEL register-once arm vs not-yet-linked window (+ BUG_EDGE_TRIGGERED)
     netpoll_multipool.pml  netpoll multi-pool dispatch pool->sub lock hierarchy (+ BUG_LOCK_ORDER)
     iouring_msclose.pml    io_uring multishot handle lifetime, recv vs close (+ BUG_CONCURRENT_CLOSE)
     netpoll_deadline.pml   netpoll fd-dispatch vs timeout vs cancel claim race (+ BUG_SWEEP_NO_COMMIT, BUG_CANCEL_NO_COMMIT)

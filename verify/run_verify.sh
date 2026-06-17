@@ -48,6 +48,15 @@ check_spin() {  # name, human-description
     else red "FAIL"; echo " ($r) -- $desc"; fail=$((fail+1)); FAILED="$FAILED $name"; fi
 }
 
+# a SECOND positive config of the same model, selected by a -D define (MUST pass)
+check_spin_variant() {  # name, define, human-description
+    local name="$1" def="$2" desc="$3"
+    printf '  [spin] %-34s ' "$name(-D$def)"
+    local r; r="$(run_spin "$name" "-D$def")"
+    if [ "$r" = OK ]; then green "PASS"; echo " -- $desc"; pass=$((pass+1))
+    else red "FAIL"; echo " ($r) -- $desc"; fail=$((fail+1)); FAILED="$FAILED $name-$def"; fi
+}
+
 # negative control: this model MUST fail (proves the check catches the bug)
 check_spin_must_fail() {  # name, define, human-description
     local name="$1" def="$2" desc="$3"
@@ -104,7 +113,7 @@ if have spin && have cc; then
     check_spin pbuf_bid     "io_uring provided-buffer-ring bid ownership: PARTITION (ring+inflight==1 per bid) + NO-DUP (no double-return) + NO-LOSS (all returned at close)"
     check_spin blockpool    "blocking-offload wake order: re-queue before dec inflight -> no lost wake"
     check_spin netpoll_commit "netpoll park/wake commit (Go netpollblockcommit): no lost wake, resumed at most once"
-    check_spin netpoll_rearm  "netpoll LT+ONESHOT re-arm closes the not-yet-linked window: no lost wake"
+    check_spin netpoll_rearm  "netpoll register-once LEVEL arm (shipped scheme): LEVEL re-reports a still-ready fd so a late-linking parker is never edge-dropped -> no lost wake"
     check_spin netpoll_multipool "netpoll multi-pool dispatch: pool->sub lock hierarchy is deadlock-free, parker claimed once"
     check_spin iouring_msclose "io_uring multishot handle lifetime: no use-after-free under single-owner recv/close"
     check_spin netpoll_iouring_loop "io_uring-as-loop backend wake/re-arm: Dekker ring_waiting handshake (no lost cross-hub wake) + multishot re-arm + at-most-once op resume"
@@ -114,6 +123,11 @@ if have spin && have cc; then
     check_spin park_generic_timed "fd-free timed park: timer-drain + wake_safe both CAS parked_safe -> g enqueued exactly once, no lost wake"
     check_spin netpoll_kqueue "netpoll kqueue arm (BSD/macOS): EV_ADD|EV_ONESHOT re-add per park closes the not-yet-linked window -> no lost wake"
     check_spin netpoll_afd    "netpoll IOCP+AFD (Windows) poll-ctx lifetime: completion frees exactly once, no use-after-free, shared-IOCP wake never freed as a ctx"
+    check_spin netpoll_parker_link "netpoll parker link/unlink surgery at a REUSED stack address: global list + per-fd buckets stay ACYCLIC (pump walk terminates), slot-pointer trick valid, pool->total balanced"
+    check_spin chan_buffer    "buffered-channel ring + waiter FIFO: conservation (no value lost/dup), strict FIFO wake, buffer bounds [0,cap], no park-despite-ready"
+    check_spin_variant chan_buffer UNBUF "cap-0 rendezvous channel: same conservation/FIFO/bounds over the unbuffered handoff + multi-parked-sender path"
+    check_spin foreign_thread_fallback "foreign-OS-thread cooperative primitive: a non-goroutine caller real-OS-blocks (never parks a NULL g / allocs a sched); mutual exclusion holds"
+    check_spin sched_drain    "single-thread drain census + deadlock detector: no premature exit while runnable/wakeable work remains, deadlock declared only at genuine quiescence"
     check_spin_must_fail wake_state  BUGGY_DROP_WAKE   "a wake dropped during RUNNING (classic lost-wakeup)"
     check_spin_must_fail park_generic_timed BUG_TIMER_NO_CAS "timer enqueues without the parked_safe CAS -> double-resume when a real wake also fires"
     check_spin_must_fail hub_submit  BUG_NO_DEDUP      "no in_sub_queue dedup/done-check -> resume of a freed (done) coro"
@@ -124,7 +138,7 @@ if have spin && have cc; then
     check_spin_must_fail pbuf_bid BUG_LOSE_ON_CLOSE "handle close drops inflight buffers without returning them -> bids leak out of the ring"
     check_spin_must_fail blockpool   BUG_DEC_BEFORE_REQUEUE "dec inflight before re-queue -> drain exits, goroutine stranded"
     check_spin_must_fail netpoll_commit BUG_NO_COMMIT     "no park-commit CAS -> pump's parked-check races the park -> lost wake"
-    check_spin_must_fail netpoll_rearm  BUG_EDGE_TRIGGERED "old EPOLLET register-once (no LT re-arm) -> dropped edge never refires -> lost wake"
+    check_spin_must_fail netpoll_rearm  BUG_EDGE_TRIGGERED "old EPOLLET register-once (no LEVEL re-report) -> a pre-link edge is dropped + never refires -> lost wake"
     check_spin_must_fail netpoll_multipool BUG_LOCK_ORDER  "sub_lock-before-pool_lock (reverse hierarchy) -> ABBA deadlock with dispatch"
     check_spin_must_fail iouring_msclose BUG_CONCURRENT_CLOSE "concurrent recv+close on a shared multishot handle -> use-after-free"
     check_spin_must_fail netpoll_iouring_loop BUG_NO_FENCE      "drop the SEQ_CST Dekker fences -> StoreLoad reorder loses the cross-hub kick"
@@ -139,6 +153,12 @@ if have spin && have cc; then
     check_spin_must_fail netpoll_kqueue BUG_REENABLE_NOT_READD "re-arm via EV_ENABLE not EV_ADD -> ENOENT on the ONESHOT-auto-deleted knote -> nothing armed -> lost wake"
     check_spin_must_fail netpoll_afd BUG_FREE_ON_PENDING "submit frees the ctx on STATUS_PENDING while a completion is still queued -> wait consumes a freed ctx -> use-after-free"
     check_spin_must_fail netpoll_afd BUG_WAKE_AS_COMPLETION "wait omits the ov==NULL check -> the NULL-overlapped pump-wake is CONTAINING_RECORD'd + freed as a ctx -> wild free"
+    check_spin_must_fail netpoll_parker_link BUG_NO_STALE_CLEAR "drop the stale self-ref clear in link -> a reused-address parker forms a self-cycle (nxt[p]==p) -> the pump's bounded list walk wedges"
+    check_spin_must_fail netpoll_parker_link BUG_DOUBLE_DEC "unlink decrements pool->total unconditionally (not gated on 'touched') -> an idempotent no-op unlink underflows total while a real parker remains -> idle path mis-sleeps"
+    check_spin_must_fail chan_buffer BUG_LIFO_WAITERS "wake parked waiters LIFO instead of FIFO -> a later waiter is served before an earlier one (FIFO violation)"
+    check_spin_must_fail chan_buffer BUG_DROP_ON_CLOSE "close drops a buffered value instead of letting receivers drain it -> value loss (conservation violation)"
+    check_spin_must_fail foreign_thread_fallback BUG_FOREIGN_PARKS "route the foreign (non-goroutine) caller down the cooperative-park branch -> parks a NULL g / allocs a sched on a foreign thread (the SIGSEGV/UAF class)"
+    check_spin_must_fail sched_drain BUG_EXIT_WITH_WORK "drain exits on empty ready ring without the wakeable-work census -> a pending foreign wake's g is stranded + deadlock declared on live work"
     check_spin_must_fail select_close BUG_CLOSE_NULL   "close-wake delivers NULL instead of closed (the SIGSEGV)"
     check_spin_must_fail select_close BUG_ABORT_NOCASE "abort returns the no-case sentinel for a blocking select"
     check_spin_must_fail select_close BUG_ABORT_DROP   "abort evicts + drops an already-delivered value"
@@ -236,6 +256,21 @@ if have cbmc; then
         pass=$((pass+1))
     else
         red "FAIL"; echo " -- see $WORK/cbmc_ioclassify*.log"; fail=$((fail+1)); FAILED="$FAILED cbmc-ioclassify"
+    fi
+
+    # deadline/sleep MIN-HEAP mechanics (sift + arbitrary-remove-by-heap_index):
+    # heap property + peek-min + index-consistency + bounds after every op.
+    printf '  [cbmc] %-34s ' "timer min-heap (sift+index+bounds)"
+    th_ok=1
+    cbmc "$CBMC_DIR/timer_heap_cbmc.c" --unwind 8 --unwinding-assertions \
+        >"$WORK/cbmc_timerheap.log" 2>&1 || th_ok=0
+    cbmc "$CBMC_DIR/timer_heap_cbmc.c" --unwind 8 --unwinding-assertions \
+        -DBUG_NO_INDEX_UPDATE >"$WORK/cbmc_timerheap_teeth.log" 2>&1 && th_ok=0
+    if [ "$th_ok" = 1 ]; then
+        green "PASS"; echo " -- heap-property/peek/index/bounds proven (+ teeth: BUG_NO_INDEX_UPDATE fails)"
+        pass=$((pass+1))
+    else
+        red "FAIL"; echo " -- see $WORK/cbmc_timerheap*.log"; fail=$((fail+1)); FAILED="$FAILED cbmc-timerheap"
     fi
 
     # preemption defer-during-destruction gate (the p69b weakref-UAF guard):
