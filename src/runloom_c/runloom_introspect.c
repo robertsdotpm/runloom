@@ -616,6 +616,7 @@ void runloom_after_fork_child(void)
     runloom_diag_reset_after_fork();         /* diag ring lock */
     runloom_crash_reset_after_fork();        /* clear crash latch (keep altstack) */
     runloom_advice_reset_after_fork();       /* stack-advice table lock */
+    runloom_cal_reset_after_fork();          /* default-stack calibration lock */
 }
 
 /* ---------------------------------------------------------------- *

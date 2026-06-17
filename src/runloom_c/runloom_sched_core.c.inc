@@ -31,6 +31,20 @@ static void runloom_cal_ensure_lock(void)
 #endif
 }
 
+/* After fork(): the child inherits runloom_cal_lock in whatever state it had at
+ * fork -- possibly LOCKED by a hub/drain thread that did not survive -- so the
+ * next calibration acquire (runloom_cal_record / get/set_default_stack_size /
+ * stack_stats) would deadlock against the dead owner.  Re-init it, exactly as
+ * runloom_mn_reset_after_fork does for runloom_global_runq_lock ("may be inherited
+ * held").  The child is single-threaded at this point, so this is unraced; the
+ * inited=2 store keeps the Windows lazy-init state coherent (fork is POSIX-only,
+ * so that branch is moot there, but the store is harmless). */
+void runloom_cal_reset_after_fork(void)
+{
+    runloom_mutex_init(&runloom_cal_lock);
+    __atomic_store_n(&runloom_cal_lock_inited, 2, __ATOMIC_RELAXED);
+}
+
 static size_t runloom_next_pow2(size_t v)
 {
     size_t p = 1;

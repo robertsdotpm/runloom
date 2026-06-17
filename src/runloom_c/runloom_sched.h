@@ -615,6 +615,14 @@ typedef struct runloom_stack_stats {
 } runloom_stack_stats_t;
 void runloom_sched_stack_stats(runloom_stack_stats_t *out);
 
+/* After fork(): re-init the calibration lock in the child.  The child inherits
+ * runloom_cal_lock in whatever state it had at fork -- possibly LOCKED by a
+ * thread that did not survive -- so any later calibration acquire (cal_record /
+ * get/set_default_stack_size / stack_stats) would deadlock.  Mirrors
+ * runloom_global_runq_lock in runloom_mn_reset_after_fork.  Call from the
+ * after-fork-in-child handler. */
+void runloom_cal_reset_after_fork(void);
+
 /* Yield the current g.  Re-queues on the ready FIFO, swaps back to
  * the scheduler stack.  Must be called from inside a g. */
 void runloom_sched_yield(runloom_sched_t *s);

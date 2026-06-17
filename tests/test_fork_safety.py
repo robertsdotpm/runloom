@@ -151,6 +151,30 @@ class TestAioChildAfterMNParent(unittest.TestCase):
             runloom_c.mn_run()
             runloom_c.mn_fini()
 
+    def test_calibration_lock_usable_in_child(self):
+        # The default-stack CALIBRATION lock (runloom_cal_lock) must be re-inited
+        # in the after-fork-in-child handler, like runloom_global_runq_lock --
+        # else a child that touches it (get/set_stack_size, or the single-thread
+        # drain's cal_record) deadlocks against a parent thread that held it at
+        # fork.  Fork from an ACTIVE M:N parent, then in the single-thread child
+        # exercise the calibration lock + the cal_record drain path.
+        runloom_c.mn_init(4)
+        try:
+            spawn_mn_and_await_started(8)
+
+            def child():
+                runloom_c.get_stack_size()                 # RLOCK(cal_lock)
+                box = bytearray(1)
+                runloom.run(1, lambda: box.__setitem__(0, 1))  # drain -> cal_record
+                runloom_c.set_stack_size(runloom_c.get_stack_size())  # cal_lock again
+                return 0 if box[0] == 1 else 5
+
+            rc = run_child(child, timeout=6.0)
+            self.assertEqual(rc, 0)
+        finally:
+            runloom_c.mn_run()
+            runloom_c.mn_fini()
+
 
 class TestForkUnderLoad(unittest.TestCase):
     def test_repeated_forks_under_mn_load(self):
