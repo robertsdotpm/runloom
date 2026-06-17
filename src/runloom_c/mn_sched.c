@@ -68,13 +68,34 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#include <stdalign.h>   /* alignas for cache-line padding (B4 / R6) */
 
 #if !defined(RUNLOOM_OS_WINDOWS)
 #  include <unistd.h>
 #endif
 
+/* Cache-line size for false-sharing avoidance (B4 / R6).  x86-64 and most ARM
+ * use 64B lines; Apple M-series and some ARM64 use 128B.  Pad to the larger on
+ * arm64 so one layout is false-sharing-free on every target we build for. */
+#ifndef RUNLOOM_CACHELINE
+#  if defined(__aarch64__) || defined(__arm64__) || defined(_M_ARM64)
+#    define RUNLOOM_CACHELINE 128
+#  else
+#    define RUNLOOM_CACHELINE 64
+#  endif
+#endif
+
+/* The hub array is PyMem_Calloc'd contiguously, so without per-element
+ * alignment hub k's hot writes (deque bottom, the foreign-written submission
+ * mailbox) and hub k+1's reads share a cache line -> inter-hub false sharing
+ * that worsens with hub count (R6).  alignas on the first member aligns every
+ * array element to its own line, killing the inter-hub bounce; alignas on
+ * sub_lock and resume_start_ns then splits the two foreign-touched regions
+ * within each hub -- the cross-hub submission mailbox (producers write it on
+ * every cross-hub submit) and the sysmon/cancel signals -- off the
+ * owner-private deque/sched line. */
 typedef struct runloom_hub {
-    int id;
+    alignas(RUNLOOM_CACHELINE) int id;
     runloom_thread_t thread;
     runloom_sched_t sched;
     runloom_cldeque_t deque;
@@ -89,7 +110,7 @@ typedef struct runloom_hub {
      * push to this list under a lock; the hub (the single consumer)
      * drains the list into its own deque each iteration, so all
      * deque pushes are done by the deque's owner thread. */
-    runloom_mutex_t sub_lock;
+    alignas(RUNLOOM_CACHELINE) runloom_mutex_t sub_lock;
     runloom_g_t *sub_head;
     runloom_g_t *sub_tail;
     /* BUG #10 throughput: monotonic submission generation, bumped (RELEASE) by
@@ -156,7 +177,7 @@ typedef struct runloom_hub {
      * Written by the hub only when runloom_sysmon_enabled (predicted-not-taken
      * off the hot path); read RELAXED by the watchdog (a stale read just
      * delays/!duplicates a report -- harmless for a watchdog). */
-    volatile long long   resume_start_ns;
+    alignas(RUNLOOM_CACHELINE) volatile long long   resume_start_ns;
     volatile long        resume_seq;
     runloom_g_t            *resume_g;
     /* RUNLOOM_PREEMPT: set by the sysmon watchdog when this hub is ATTACHED-wedged
@@ -176,6 +197,12 @@ typedef struct runloom_hub {
      * unblocks when its op completes).  See runloom_iouring_cancel_g. */
     void                *iouring_cancel_op;
 } runloom_hub_t;
+
+/* B4/R6: enforce that every hub array element starts on its own cache line, so
+ * no two hubs ever false-share.  If a future field reorder drops the leading
+ * alignas this fails the build rather than silently regressing scaling. */
+_Static_assert(alignof(runloom_hub_t) >= RUNLOOM_CACHELINE,
+               "runloom_hub_t must be cache-line aligned (B4/R6 false-sharing)");
 
 static runloom_hub_t *runloom_hubs = NULL;
 static int runloom_hub_count = 0;
