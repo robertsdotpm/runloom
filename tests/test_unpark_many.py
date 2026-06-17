@@ -65,10 +65,19 @@ def test_unpark_many_wakes_all_parked():
         n = 300
         for i in range(n):
             runloom.go(waiter, i)
-        runloom.sleep(0.15)                    # all parked
+        # Deterministic: wait until ALL n waiters have COMMITTED their wait_fd
+        # park (netpoll_parked == n) before unparking.  A fixed sleep lets a
+        # loaded scheduler leave some still RUNNING, which unpark_many then
+        # reports as `missed`, false-failing `assert missed == []`.
+        _spin = 0
+        while runloom_c.stats()["netpoll_parked"] < n and _spin < 2000000:
+            runloom.sleep(0); _spin += 1
         handles.sort()
         missed = runloom_c.unpark_many([h for _, h in handles])
-        runloom.sleep(0.15)
+        # And wait until every unparked waiter has resumed + recorded its rv.
+        _spin = 0
+        while len(woke) < n and _spin < 2000000:
+            runloom.sleep(0); _spin += 1
         os.close(r); os.close(w)
         return n, len(woke), missed, sorted(set(rv for _, rv in woke))
 

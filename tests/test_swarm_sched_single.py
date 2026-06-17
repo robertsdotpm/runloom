@@ -336,10 +336,17 @@ def test_unpark_many_wakes_wait_fd_parkers_and_reports_running_missed():
         me = rc.current_g()                    # RUNNING main fiber: not wait_fd-parked
         for _ in range(30):
             rc.go(mk())
-        rc.sched_sleep(0.1)                     # all 30 parkers committed
+        # Deterministic: wait until all 30 waiters have COMMITTED their wait_fd
+        # park before unparking.  A fixed sleep lets a loaded scheduler leave
+        # some still RUNNING, which unpark_many then mis-reports as `missed`.
+        _spin = 0
+        while rc.stats()["netpoll_parked"] < 30 and _spin < 2000000:
+            rc.sched_yield(); _spin += 1
         batch = [me] + list(handles)           # index 0 = running, 1..30 = parked
         missed = rc.unpark_many(batch)
-        rc.sched_sleep(0.15)
+        _spin = 0
+        while len(woke) < 30 and _spin < 2000000:
+            rc.sched_yield(); _spin += 1
         rc.netpoll_unregister(r)
         os.close(r); os.close(w)
         return len(woke), missed, set(woke)
