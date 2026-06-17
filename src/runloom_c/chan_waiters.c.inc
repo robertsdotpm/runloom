@@ -24,6 +24,10 @@ static runloom_chan_waiter_t *waiter_pop(runloom_chan_waiter_t **head,
     *head = w->next;
     if (*head == NULL) *tail = NULL;
     w->next = NULL;
+    /* A popped waiter was, by construction, pushed QUEUED first (waiter_push) and
+     * is cleared under ch->lock here -- the one waiter-queued edge with a
+     * known-valid FROM, so it is the only one asserted. */
+    RUNLOOM_WQ_NOTE(RUNLOOM_WQ_QUEUED, RUNLOOM_WQ_NOT_QUEUED);
     w->queued = 0;                  /* unlinked; park_waiter may now return */
     return w;
 }
@@ -47,10 +51,14 @@ static int waiter_claim(runloom_chan_waiter_t *w)
     int expected;
     if (w->select == NULL) return 1;     /* not a select waiter */
     expected = -1;
-    return __atomic_compare_exchange_n(&w->select->fired_case, &expected,
-                                       w->case_index, 0,
-                                       __ATOMIC_ACQ_REL,
-                                       __ATOMIC_ACQUIRE);
+    if (__atomic_compare_exchange_n(&w->select->fired_case, &expected,
+                                    w->case_index, 0,
+                                    __ATOMIC_ACQ_REL,
+                                    __ATOMIC_ACQUIRE)) {
+        RUNLOOM_SEL_NOTE(RUNLOOM_SEL_UNCLAIMED, RUNLOOM_SEL_CLAIMED);
+        return 1;
+    }
+    return 0;   /* lost: a prior winner froze fired_case at its case_index */
 }
 
 /* Lock held.  Does this waiter queue hold any waiter that does NOT belong to

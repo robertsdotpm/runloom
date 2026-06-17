@@ -43,6 +43,7 @@
 #include "netpoll.h"
 #include "runloom_diag.h"
 #include "runloom_gstate.h"
+#include "runloom_fsm.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -95,6 +96,75 @@ struct runloom_chan {
     int closed;
     int refcount;
 };
+
+
+/* ---- channel waiter `queued` FSM (OBSERVATIONAL, partial) -------------------
+ * The waiter `queued` flag is a LOCK-PROTECTED binary lifecycle (written + read
+ * under ch->lock): waiter_push sets it 1 (QUEUED), waiter_pop clears it 0
+ * (NOT_QUEUED), and park_waiter's re-park loop (chan_waiters.c.inc) spins until a
+ * producer/close actually pops it -- which is what already prevents the proven
+ * p34 Windows UAF (a spurious wake returning while still linked left the
+ * stack-allocated waiter for a later send to pop -> use-after-free).  Per the
+ * FSM_ADOPTION.md decision rule this is HARDENED IN PLACE (explicit states +
+ * documented invariant), not full-converted: the lock + the re-park loop already
+ * make a missing-handler gap impossible, and a NOTE at waiter_push would read an
+ * UNINITIALIZED `queued` on a fresh stack waiter (its FROM is garbage before the
+ * first push).  So we NOTE only the ONE edge whose FROM is known-valid:
+ * waiter_pop's QUEUED->NOT_QUEUED (a popped waiter was, by construction, pushed
+ * QUEUED first).  The table documents both edges; only POP is asserted. */
+enum {
+    RUNLOOM_WQ_NOT_QUEUED = 0,   /* unlinked; park_waiter may return            */
+    RUNLOOM_WQ_QUEUED     = 1,    /* linked in a channel queue                   */
+    RUNLOOM_WQ_STATE_COUNT
+};
+enum {
+    RUNLOOM_WQ_EV_PUSH = 0,      /* waiter_push: NOT_QUEUED -> QUEUED (not NOTE'd) */
+    RUNLOOM_WQ_EV_POP,           /* waiter_pop:  QUEUED -> NOT_QUEUED              */
+    RUNLOOM_WQ_EV_COUNT
+};
+static const signed char runloom_wq_table
+        [RUNLOOM_WQ_STATE_COUNT][RUNLOOM_WQ_EV_COUNT]
+        __attribute__((unused)) = {
+    /*                          PUSH                  POP */
+    [RUNLOOM_WQ_NOT_QUEUED] = { RUNLOOM_WQ_QUEUED,     RUNLOOM_FSM_INVALID  },
+    [RUNLOOM_WQ_QUEUED]     = { RUNLOOM_FSM_INVALID,   RUNLOOM_WQ_NOT_QUEUED },
+};
+RUNLOOM_FSM_ASSERT_TABLE(runloom_wq_table, RUNLOOM_WQ_STATE_COUNT,
+                         RUNLOOM_WQ_EV_COUNT, "chan_waiter_queued");
+#define RUNLOOM_WQ_NOTE(from, to)                                             \
+    RUNLOOM_FSM_NOTE("chan_waiter_queued", runloom_wq_table,                  \
+                     RUNLOOM_WQ_STATE_COUNT, RUNLOOM_WQ_EV_COUNT, (from), (to))
+
+/* ---- select `fired_case` claim FSM (OBSERVATIONAL) --------------------------
+ * A select's multi-party claim race (the firing channel's waiter_claim vs the
+ * select's own install-time readiness CAS vs other channels), Spin-verified in
+ * verify/spin/select_claim.pml.  fired_case is -1 (UNCLAIMED) until the FIRST CAS
+ * wins, then frozen at the winner's case_index (CLAIMED); a second claimer's CAS
+ * fails and skips the tombstone -- exactly-once.  Two logical states: the field's
+ * raw value is -1 or a case_index>=0, mapped to UNCLAIMED/CLAIMED for the
+ * relation.  Every claim CAS only succeeds from expected==-1, so the asserted
+ * edge is always UNCLAIMED->CLAIMED; CLAIMED is terminal (frozen). */
+enum {
+    RUNLOOM_SEL_UNCLAIMED = 0,   /* fired_case == -1                            */
+    RUNLOOM_SEL_CLAIMED   = 1,    /* fired_case == some case_index >= 0          */
+    RUNLOOM_SEL_STATE_COUNT
+};
+enum {
+    RUNLOOM_SEL_EV_CLAIM = 0,    /* a channel/select claims the case            */
+    RUNLOOM_SEL_EV_COUNT
+};
+static const signed char runloom_sel_table
+        [RUNLOOM_SEL_STATE_COUNT][RUNLOOM_SEL_EV_COUNT]
+        __attribute__((unused)) = {
+    /*                        CLAIM */
+    [RUNLOOM_SEL_UNCLAIMED] = { RUNLOOM_SEL_CLAIMED  },
+    [RUNLOOM_SEL_CLAIMED]   = { RUNLOOM_FSM_INVALID  },   /* frozen: exactly-once */
+};
+RUNLOOM_FSM_ASSERT_TABLE(runloom_sel_table, RUNLOOM_SEL_STATE_COUNT,
+                         RUNLOOM_SEL_EV_COUNT, "select_fired_case");
+#define RUNLOOM_SEL_NOTE(from, to)                                            \
+    RUNLOOM_FSM_NOTE("select_fired_case", runloom_sel_table,                  \
+                     RUNLOOM_SEL_STATE_COUNT, RUNLOOM_SEL_EV_COUNT, (from), (to))
 
 
 /* ---------------------------------------------------------------------------

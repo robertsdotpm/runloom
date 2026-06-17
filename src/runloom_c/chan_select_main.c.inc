@@ -114,6 +114,7 @@ select_retry:
                                                     __ATOMIC_ACQUIRE)) {
                             break;   /* already fired (expected = winner); go park */
                         }
+                        RUNLOOM_SEL_NOTE(RUNLOOM_SEL_UNCLAIMED, RUNLOOM_SEL_CLAIMED);
                     }
                     /* Already-installed waiters are tombstones; the
                      * channels they're on will skip them.  We need
@@ -165,6 +166,7 @@ select_retry:
                             break;   /* already fired by a delivery: go park
                                       * to drain the wake + return its value */
                         }
+                        RUNLOOM_SEL_NOTE(RUNLOOM_SEL_UNCLAIMED, RUNLOOM_SEL_CLAIMED);
                     }
                     select_evict_self(cases, n, waiters, /*fired*/-1);
                     {
