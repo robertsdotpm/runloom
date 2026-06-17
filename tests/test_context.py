@@ -88,7 +88,13 @@ class TestWithTimeout(unittest.TestCase):
             outcome.append(ctx.err())
 
         def early_cancel():
-            runloom_c.sched_sleep(0.01)
+            # No sleep: cancel() must fire as soon as this goroutine is
+            # scheduled.  The original 0.01s sleep raced the 1.0s deadline
+            # waker -- under CPU starvation a >1.0s scheduling delay let the
+            # timeout fire first (DEADLINE_EXCEEDED), inverting the assertion.
+            # _cancel() is first-writer-wins and done.close() is durable, so a
+            # cancel that lands before the waiter even parks still wins; firing
+            # it immediately removes the load-dependence by construction.
             cancel()
 
         runloom_c.go(waiter)

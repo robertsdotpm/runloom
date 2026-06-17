@@ -192,9 +192,22 @@ def main():
     rc.mn_go(reader)
     while "g" not in hold:
         rc.sched_yield()
-    rc.sched_sleep(0.03)                 # let it commit the park
+    # hold["g"] is set BEFORE wait_fd commits the netpoll park, so we must not
+    # cancel until the park is actually registered -- otherwise the cancel is a
+    # no-op and the reader is stranded.  Poll the real counter (netpoll_parked
+    # rises to 1 once the reader's wait_fd lands on the ring) instead of guessing
+    # with a sleep that load can outrun.  The cap only bounds a hang.
+    i = 0
+    while rc.stats()["netpoll_parked"] < 1 and i < 1000000:
+        rc.sched_yield()
+        i += 1
     res["woke"] = hold["g"].cancel_wait_fd()
-    rc.sched_sleep(0.03)
+    # let the woken reader record res["rv"] before we tear the fd down; poll the
+    # park draining back out rather than sleeping a fixed amount.
+    i = 0
+    while "rv" not in res and i < 1000000:
+        rc.sched_yield()
+        i += 1
     try:
         rc.netpoll_unregister(a.fileno())
     except Exception:

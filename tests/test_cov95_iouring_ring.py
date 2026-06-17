@@ -327,11 +327,20 @@ def main():
             rd["errno"] = e.errno
         rd["done"] = True
     rc.mn_go(reader)
-    for _ in range(2000):
-        if "g" in rd: break
-        runloom.sleep(0.003)
-    runloom.sleep(0.08)                  # ensure committed to the park
-    res["woke"] = rd["g"].cancel_wait_fd()   # -> iouring_cancel_g global path
+    # Deterministic handshake (no sleep-as-sync): cancel_wait_fd() returns True
+    # IFF the reader's io_uring op is published AND wait==PARKED -- i.e. the park
+    # has committed (runloom_iouring_cancel_g returns 0 otherwise).  So retry it
+    # until it actually submits the global-ring ASYNC_CANCEL; the cap only bounds
+    # a hang.  This removes the load-dependent "did 0.08s commit the park?" guess
+    # that could fire the cancel before the read parked (cancel False + the read
+    # then parks forever on the never-written pipe).
+    woke = False
+    for _ in range(2000000):
+        woke = rd["g"].cancel_wait_fd() if "g" in rd else False
+        if woke:
+            break
+        rc.sched_yield()
+    res["woke"] = woke                   # -> iouring_cancel_g global path
     for _ in range(2000):
         if rd.get("done"): break
         runloom.sleep(0.01)
@@ -567,11 +576,20 @@ def main():
         finally:
             wg.done()
     rc.mn_go(reader)
-    for _ in range(2000):
-        if "g" in holder: break
-        runloom.sleep(0.003)
-    runloom.sleep(0.08)                # commit to the park on the ring op
-    res["woke"] = holder["g"].cancel_wait_fd()   # hub mailbox -> submit_cancel_for_op
+    # Deterministic handshake (no sleep-as-sync): cancel_wait_fd() returns True
+    # IFF the reader's hub-ring op is published AND wait==PARKED -- i.e. the park
+    # has committed (runloom_iouring_cancel_g returns 0 / routes nothing before
+    # then).  Retry until it actually requests the hub-ring ASYNC_CANCEL; the cap
+    # only bounds a hang.  This replaces the load-dependent 0.08s "commit to the
+    # park" guess that could fire the cancel before the recv parked (cancel False
+    # + the MSG_PEEK recv on a peer that never sends then parks forever).
+    woke = False
+    for _ in range(2000000):
+        woke = holder["g"].cancel_wait_fd() if "g" in holder else False
+        if woke:
+            break
+        rc.sched_yield()
+    res["woke"] = woke                 # hub mailbox -> submit_cancel_for_op
     wg.wait()                          # the pump's ring_drain MUST wake it
     sc.close(); client.close(); lconn.close()
 runloom.run(2, main)

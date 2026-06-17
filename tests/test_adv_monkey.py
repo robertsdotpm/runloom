@@ -125,10 +125,24 @@ def test_patched_lock_foreign_thread_plus_goroutines():
     # Start the foreign OS thread on the raw _thread API so it is unquestionably
     # NOT a goroutine and NOT a hub.  It hammers the SAME lock while the M:N
     # scheduler runs goroutines that also hammer it.
+    #
+    # Completion handshake: a RAW _thread lock (unpatched -- it comes from the
+    # real _thread module, so it is a true OS lock and adds no cooperative
+    # primitive to the verdict).  We hold it from before the thread starts; the
+    # foreign thread releases it the instant it finishes its last increment.
+    # The main thread then blocks on a real OS acquire -- deterministic, with a
+    # generous cap that only bounds a hang, never the happy path.  This replaces
+    # the old sleep-poll on the deadline, whose 30s timeout could expire under
+    # CPU load and invert the verdict even though the count was correct.
+    done_latch = _real_thread_mod.allocate_lock()
+    done_latch.acquire()
     def foreign_body():
-        for _ in range(FOREIGN_ITERS):
-            with lk:
-                counter[0] += 1
+        try:
+            for _ in range(FOREIGN_ITERS):
+                with lk:
+                    counter[0] += 1
+        finally:
+            done_latch.release()
     _real_thread_mod.start_new_thread(foreign_body, ())
 
     def main():
@@ -147,10 +161,10 @@ def test_patched_lock_foreign_thread_plus_goroutines():
 
     with hang_guard(60, "lock foreign+goroutines"):
         runloom.run(4, main)
-        # let the foreign thread finish its remaining increments
-        deadline = time.monotonic() + 30
-        while counter[0] < GOR * GOR_ITERS + FOREIGN_ITERS and time.monotonic() < deadline:
-            time.sleep(0.005)
+        # Wait for the foreign thread to finish its remaining increments via the
+        # raw-lock latch (deterministic; the 30s cap only bounds a true hang).
+        acquired = done_latch.acquire(timeout=30)
+        assert acquired, "foreign thread never released its completion latch (hang)"
 
     expected = GOR * GOR_ITERS + FOREIGN_ITERS
     assert counter[0] == expected, (

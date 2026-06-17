@@ -400,13 +400,27 @@ def _run_mn_eof_read(hubs):
 
     def main():
         runloom.go(reader, "r")
-        runloom.sleep(0.3)                  # let the round-trip complete
+        # No sleep: runloom.run() waits for ALL goroutines, so the reader's
+        # full round-trip (park -> EOF fold -> recv) completes before run()
+        # returns -- deterministic regardless of load.
     runloom.run(hubs, main)
     return box
 
 
 def _peer_closer(b):
-    runloom.sleep(0.05)                     # let the reader commit its park
+    # Deterministic ordering: the close must land AFTER the sibling fiber has
+    # COMMITTED its wait_fd park, so the EV_EOF/EV_ERROR is delivered through the
+    # kqueue drain loop's fold while a real park exists (the path under test) --
+    # not consumed at registration by a peer that closed first.  Under CPU load a
+    # fixed sleep can let the close win that race, which silently tests the wrong
+    # path and, for a write-blocked parker, can invert the wake (a close-before-
+    # register lost wakeup -> the parker hangs to its deadline).  Poll the GLOBAL
+    # netpoll_parked stat (module_run.c.inc:214, summed across hubs) until the one
+    # socket parker in this run() is committed; the cap only bounds a true hang.
+    i = 0
+    while runloom_c.stats()["netpoll_parked"] < 1 and i < 1000000:
+        runloom_c.sched_yield()
+        i += 1
     b.close()
 
 
@@ -431,7 +445,7 @@ def _run_mn_write_fold(hubs):
 
     def main():
         runloom.go(writer, "w")
-        runloom.sleep(0.3)
+        # No sleep: run() waits for the writer goroutine's full round-trip.
     runloom.run(hubs, main)
     return box
 

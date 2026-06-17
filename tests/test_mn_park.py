@@ -66,13 +66,30 @@ def _wake_case(hubs, foreign, fw):
 
     def main():
         runloom.go(waiter)
-        runloom.sleep(0.08)               # waiter parks
+        # Deterministic: wait until the waiter has RECORDED its handle, not a
+        # fixed nap.  A bare nap is a load-dependent bet that the waiter ran
+        # within 80ms; if it has not recorded hb["g"] when we wake, we either
+        # KeyError or (worse) return without waking and strand a never-woken
+        # parker -> run() hangs joining it.  park()/wake() tolerates
+        # wake-before-park (the wake_pending handshake, proven by
+        # test_wake_before_park_race_stress), so once the handle is visible it
+        # is always safe to wake even if park() has not committed yet.  Yield
+        # (sched_yield) so an M:N waiter round-robined onto this hub can run; the
+        # cap only bounds a hang, the happy path exits in a few iterations.
+        i = 0
+        while "g" not in hb and i < 1_000_000:
+            runloom_c.sched_yield(); i += 1
+        assert "g" in hb, "waiter never recorded its handle"
         if foreign:
             t = threading.Thread(target=lambda: hb["g"].wake())
             t.start(); t.join()
         else:
             hb["g"].wake()
-        runloom.sleep(0.12)
+        # Deterministic completion wait: poll until the waiter woke, not a fixed
+        # nap.  Cap only bounds a lost wake (the failure this test checks for).
+        i = 0
+        while not box and i < 1_000_000:
+            runloom_c.sched_yield(); i += 1
     runloom.run(hubs, main)
     return box == ["woke"]
 
@@ -160,10 +177,21 @@ def test_many_parkers_all_woken():
 
         for i in range(n):
             runloom.go(waiter, i)
-        runloom.sleep(0.15)                # all parked
+        # Deterministic: wait until every waiter has RECORDED its handle, not a
+        # fixed nap.  A 0.15s bet that all 200 fibers ran is load-dependent --
+        # under load some handles[i] are still None, so h.wake() hits None
+        # (AttributeError) or, having skipped a not-yet-recorded waiter, strands
+        # it parked forever -> run() deadlocks joining it.  Cap bounds a hang.
+        i = 0
+        while any(h is None for h in handles) and i < 5_000_000:
+            runloom_c.sched_yield(); i += 1
+        assert all(h is not None for h in handles), "not all waiters recorded"
         for h in handles:
             h.wake()
-        runloom.sleep(0.2)
+        # Deterministic completion wait instead of a fixed nap.
+        i = 0
+        while sum(woke) < n and i < 5_000_000:
+            runloom_c.sched_yield(); i += 1
         main.total = sum(woke)
     runloom.run(8, main)
     assert main.total == 200

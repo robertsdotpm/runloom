@@ -167,10 +167,22 @@ def test_semaphore_weighted_n_and_fifo_no_starvation():
             wg.done()
 
         runloom.go(big)
-        runloom.sleep(0.02)              # ensure big is queued first
+        # Deterministic handshake: spin until big has actually APPENDED itself to
+        # the FIFO waiter queue before spawning the small stream.  A sleep here is
+        # load-dependent -- if big hasn't run sem.acquire(10) yet when the smalls
+        # queue, a small lands at the FIFO front and the order[0]=="big" assertion
+        # inverts.  Polling the real queue length removes that race; the cap only
+        # bounds a hang (the happy path queues in ~100 yields).
+        _spin = 0
+        while len(sem._waiters) < 1 and _spin < 200000:
+            runloom_c.sched_yield(); _spin += 1
         for i in range(5):
             runloom.go(small, i)
-        runloom.sleep(0.02)
+        # And wait until all 6 (big + 5 small) have queued before releasing, so the
+        # release grants strictly in FIFO order from a fully-populated queue.
+        _spin = 0
+        while len(sem._waiters) < 6 and _spin < 200000:
+            runloom_c.sched_yield(); _spin += 1
         sem.release(10)                  # free everything -> big (FIFO front) first
         wg.wait()
         return order

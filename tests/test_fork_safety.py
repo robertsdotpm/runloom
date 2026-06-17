@@ -53,6 +53,40 @@ def run_child(child_fn, timeout=8.0):
         time.sleep(0.01)
 
 
+def spawn_mn_and_await_started(n, cap=5.0):
+    """Spawn `n` M:N goroutines that mark themselves started then sleep, and
+    return only once all `n` have ACTUALLY begun running on the hubs.
+
+    The point of the goroutines is to have the M:N runtime genuinely ACTIVE
+    (hubs dispatching/holding locks) when the caller forks -- that is the
+    fork-while-hub-busy hazard reset_after_fork exists to clear.  A blind
+    time.sleep() to "let them run" is load-dependent: under CPU load the hub
+    threads may not be scheduled in the window, so the fork would capture a
+    quiescent, un-dispatched runtime and the test would pass WITHOUT exercising
+    the hazard.  This handshake is deterministic instead: each goroutine writes
+    its own slot (single writer per index -> race-free with the GIL off) and we
+    block until every slot is set.  The cap only bounds a hang; the happy path
+    returns in ~1 ms.
+    """
+    started = bytearray(n)            # one slot per goroutine, single writer each
+
+    def make(i):
+        def g():
+            started[i] = 1
+            runloom.sleep(0.3)
+        return g
+
+    for i in range(n):
+        runloom_c.mn_go(make(i))
+
+    deadline = time.monotonic() + cap
+    while sum(started) < n and time.monotonic() < deadline:
+        time.sleep(0.0005)
+    if sum(started) < n:
+        raise AssertionError(
+            "only %d/%d M:N goroutines started within %.1fs" % (sum(started), n, cap))
+
+
 class TestSingleThreadChild(unittest.TestCase):
     def test_child_runs_fresh_scheduler(self):
         # Parent exercises the single-thread scheduler (so netpoll is inited),
@@ -81,9 +115,9 @@ class TestAioChildAfterMNParent(unittest.TestCase):
 
         runloom_c.mn_init(4)
         try:
-            for _ in range(8):
-                runloom_c.mn_go(lambda: runloom.sleep(0.3))
-            time.sleep(0.02)
+            # Deterministic: fork only once the 8 goroutines are actually
+            # running on the hubs (not a load-dependent time.sleep guess).
+            spawn_mn_and_await_started(8)
 
             def child():
                 async def main():
@@ -103,9 +137,9 @@ class TestAioChildAfterMNParent(unittest.TestCase):
         # mn_run returns immediately instead of waiting on hubs that don't exist.
         runloom_c.mn_init(4)
         try:
-            for _ in range(8):
-                runloom_c.mn_go(lambda: runloom.sleep(0.3))
-            time.sleep(0.02)
+            # Deterministic: fork only once the 8 goroutines are actually
+            # running on the hubs (not a load-dependent time.sleep guess).
+            spawn_mn_and_await_started(8)
 
             def child():
                 runloom_c.mn_run()   # must return, not hang

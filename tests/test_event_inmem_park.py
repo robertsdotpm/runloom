@@ -69,11 +69,18 @@ def test_event_foreign_thread_setter_wakes_inmem_waiter():
                 done[0] = 1
 
             runloom.go(waiter)
-            runloom.sleep(0.02)                    # waiter parked in memory
+            # Event is sticky: a set() that beats the park is NOT lost (the
+            # wake_pending handshake, proven by test_event_wake_before_park),
+            # so no pre-set sleep is needed to "park first".
             t = threading.Thread(target=ev.set)    # REAL OS thread sets
             t.start()
             t.join()
-            runloom.sleep(0.04)
+            # Deterministically wait for the woken waiter to run and write its
+            # byte, instead of a fixed sleep that a loaded scheduler can outrun.
+            j = 0
+            while not done[0] and j < 1000000:
+                runloom.sleep(0)
+                j += 1
             ok += done[0]
         out["ok"] = ok
 
@@ -115,33 +122,54 @@ def test_timed_and_condition_and_semaphore_still_work():
 
         ev = th.Event()
         got = []
+        # Sticky Event: set() before the timed park is not lost.  Set, then poll
+        # for the result instead of a fixed sleep a loaded scheduler can outrun.
         runloom.go(lambda: got.append(ev.wait(2.0)))
-        runloom.sleep(0.02)
         ev.set()
-        runloom.sleep(0.05)
+        i = 0
+        while not got and i < 1000000:
+            runloom.sleep(0)
+            i += 1
         out["timed_set"] = got                     # [True]
 
         cond = th.Condition()
         cwoke = bytearray(1)
+        cwaiting = bytearray(1)
 
         def cw():
             with cond:
-                cond.wait()
+                cwaiting[0] = 1        # reached the cond block, still holding it
+                cond.wait()            # atomically releases cond as it parks
             cwoke[0] = 1
 
         runloom.go(cw)
-        runloom.sleep(0.03)
+        # Condition has NO sticky pending state (unlike Event/Semaphore): a
+        # notify that beats the park is LOST and the waiter hangs forever.
+        # Deterministic park-before-notify handshake: wait for the waiter to be
+        # inside the cond block, then take the cond lock -- which cannot be
+        # acquired until cond.wait() has released it, i.e. the waiter is parked.
+        i = 0
+        while not cwaiting[0] and i < 1000000:
+            runloom.sleep(0)
+            i += 1
         with cond:
             cond.notify_all()
-        runloom.sleep(0.05)
+        i = 0
+        while not cwoke[0] and i < 1000000:
+            runloom.sleep(0)
+            i += 1
         out["cond"] = cwoke[0]
 
         sem = th.Semaphore(0)
         swoke = bytearray(1)
+        # Sticky counter: release() before acquire() parks is not lost (the
+        # token is banked).  Release, then poll for the result.
         runloom.go(lambda: (sem.acquire(), swoke.__setitem__(0, 1)))
-        runloom.sleep(0.03)
         sem.release()
-        runloom.sleep(0.05)
+        i = 0
+        while not swoke[0] and i < 1000000:
+            runloom.sleep(0)
+            i += 1
         out["sem"] = swoke[0]
 
     runloom.run(8, main)
@@ -180,10 +208,14 @@ def test_timed_wait_woken_before_deadline():
     def main():
         ev = th.Event()
         got = []
+        # Sticky Event + a 5s deadline: set() always wins the wake (never lost,
+        # never a timeout), even if it beats the park.  Poll for the result.
         runloom.go(lambda: got.append(ev.wait(5.0)))
-        runloom.sleep(0.03)
         ev.set()
-        runloom.sleep(0.05)
+        i = 0
+        while not got and i < 1000000:
+            runloom.sleep(0)
+            i += 1
         out["got"] = got                               # [True] -- woken, not timed out
 
     runloom.run(8, main)
@@ -255,16 +287,28 @@ def test_condition_timeout_does_not_steal_a_later_notify():
         out["timed_out"] = (r0 is False)
         # now a live waiter + a single notify
         woke = []
+        waiting = bytearray(1)
 
         def w():
             with cond:
-                woke.append(cond.wait(2.0))
+                waiting[0] = 1                 # inside the cond block, holds it
+                woke.append(cond.wait(2.0))    # releases cond as it parks
 
         runloom.go(w)
-        runloom.sleep(0.03)
+        # Condition notify has no sticky pending state: a notify that beats the
+        # park is LOST.  Deterministic park-before-notify handshake -- wait for
+        # the waiter to enter the cond block, then take the cond lock, which it
+        # cannot hand over until cond.wait() released it (waiter now parked).
+        i = 0
+        while not waiting[0] and i < 1000000:
+            runloom.sleep(0)
+            i += 1
         with cond:
             cond.notify()
-        runloom.sleep(0.05)
+        i = 0
+        while not woke and i < 1000000:
+            runloom.sleep(0)
+            i += 1
         out["woke"] = woke                             # [True] -- notify reached it
 
     runloom.run(8, main)
