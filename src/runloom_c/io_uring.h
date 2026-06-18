@@ -217,6 +217,10 @@ runloom_iouring_ssize_t runloom_iouring_ring_send(runloom_iouring_ring_t *r,
 /* 1 if the loop backend is enabled (RUNLOOM_IOURING_LOOP set, read once). */
 int runloom_iouring_loop_enabled(void);
 
+/* 1 if ANY io_uring feature is opted in (loop / multishot / TCP proactor).  All
+ * default OFF; when none, a hub skips creating its per-hub io_uring ring. */
+int runloom_iouring_any_enabled(void);
+
 /* Bits set by loop_wait in *flags_out. */
 #define RUNLOOM_LOOP_F_EPOLL   0x1   /* epoll fd readable: caller should pump(0) */
 #define RUNLOOM_LOOP_F_WAKE    0x2   /* wake eventfd fired (sub list re-drained) */

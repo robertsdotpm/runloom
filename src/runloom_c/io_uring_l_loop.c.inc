@@ -98,6 +98,25 @@ int runloom_iouring_loop_ms_enabled(void)
     return cur;
 }
 
+/* True iff SOME io_uring feature is opted in -- the loop backend
+ * (RUNLOOM_IOURING_LOOP), multishot recv (RUNLOOM_IOURING_MS, which REQUIRES
+ * loop, so loop_enabled already covers it), or the TCP proactor transport
+ * (RUNLOOM_TCPCONN_IOURING=1|auto).  All default OFF.  When none is set, the
+ * per-hub io_uring ring carries no ops and its periodic GETEVENTS flush is pure
+ * waste, so mn_sched_hub_main skips creating the ring.  Read once. */
+int runloom_iouring_any_enabled(void)
+{
+    static int v = -1;
+    int cur = __atomic_load_n(&v, __ATOMIC_RELAXED);
+    if (cur < 0) {
+        const char *t = getenv("RUNLOOM_TCPCONN_IOURING");
+        int tcp = (t != NULL && (t[0] == '1' || strcmp(t, "auto") == 0)) ? 1 : 0;
+        cur = (runloom_iouring_loop_enabled() || tcp) ? 1 : 0;
+        __atomic_store_n(&v, cur, __ATOMIC_RELAXED);
+    }
+    return cur;
+}
+
 /* Per-hub provided buffer ring count (env RUNLOOM_IOURING_MS_BUFS, default
  * 1024).  Rounded up to a power of two, clamped to [16, 65536] (bid is 16-bit). */
 static unsigned runloom_loop_ms_pbuf_count(void)

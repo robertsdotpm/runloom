@@ -201,7 +201,11 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
      * when this thread next calls io_uring_enter(GETEVENTS); the
      * idle path below issues that call before pumping so the
      * deferred work flushes in time. */
-    h->iouring_ring = runloom_iouring_ring_create(1 /*defer_taskrun*/);
+    /* Skip the ring entirely unless an io_uring feature is opted in: with all
+     * of them off (the default) the ring carries no ops and only costs an
+     * io_uring_setup + register per hub plus a periodic GETEVENTS flush. */
+    h->iouring_ring = runloom_iouring_any_enabled()
+                      ? runloom_iouring_ring_create(1 /*defer_taskrun*/) : NULL;
     if (h->iouring_ring != NULL) {
         if (runloom_iouring_loop_enabled()) {
             /* io_uring-as-loop: the hub will block DIRECTLY in this ring (see

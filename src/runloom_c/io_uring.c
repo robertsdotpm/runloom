@@ -341,6 +341,7 @@ runloom_iouring_ssize_t runloom_iouring_ring_send(runloom_iouring_ring_t *r,
  * mn_sched.c / module_io.c.inc reference them unconditionally (runtime-gated). */
 int runloom_iouring_loop_enabled(void)    { return 0; }
 int runloom_iouring_loop_ms_enabled(void) { return 0; }
+int runloom_iouring_any_enabled(void)     { return 0; }
 int runloom_iouring_loop_hub_arm(runloom_iouring_ring_t *r, int epoll_fd)
 {
     (void)r; (void)epoll_fd; return -1;
