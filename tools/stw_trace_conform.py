@@ -274,7 +274,7 @@ def main():
         return 2
     meta = "/tmp/runloom_stwconf_{}".format(os.getpid())
     proc = subprocess.run(
-        ["java", "-cp", JAR, "tlc2.TLC", "-metadir", meta,
+        ["java", "-Xmx1g", "-cp", JAR, "tlc2.TLC", "-workers", "4", "-metadir", meta,
          "-config", "RunloomCPythonSTWTrace.cfg", "RunloomCPythonSTWTrace.tla"],
         cwd=TLA, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     out = proc.stdout

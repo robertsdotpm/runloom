@@ -24,7 +24,13 @@ fi
 
 pass=0; fail=0
 META="$(mktemp -d /tmp/runloom_tlc.XXXX)"
-run_tlc() { ( cd "$HERE" && java -cp "$JAR" tlc2.TLC -metadir "$META/$1" "${@:2}" 2>&1 ); }
+# -Xmx1g + -workers 4: these models are tiny (<3k states), but TLC's JVM DEFAULT
+# max-heap is 25% of physical RAM (~20g on this box) and it spawns nproc (64)
+# worker threads -- so under the parallel verify pool (VERIFY_JOBS) several heavy
+# jobs at once could OOM-kill a TLC instance, which then emits no result and a
+# negative-control grep spuriously FAILs (a load-only flake; isolated it always
+# passes).  Bounding the footprint makes every check deterministic under load.
+run_tlc() { ( cd "$HERE" && java -Xmx1g -cp "$JAR" tlc2.TLC -workers 4 -metadir "$META/$1" "${@:2}" 2>&1 ); }
 
 printf '  [tlc] %-28s ' "RunloomSched (correct)"
 if run_tlc ok -config RunloomSched.cfg RunloomSched.tla | grep -q "No error has been found"; then
