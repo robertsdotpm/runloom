@@ -32,6 +32,7 @@ import os
 import socket
 import sys
 import tempfile
+import time
 
 import pytest
 
@@ -58,6 +59,41 @@ def _drop(fd):
         pass
 
 
+def _wait_until_parked(n, timeout=6.0):
+    """Block (cooperatively) until at least ``n`` fibers have COMMITTED to a
+    netpoll park, then return True; return False on timeout.
+
+    This replaces a fixed ``sched_sleep`` guess.  These tests spawn N waiter
+    goroutines that ``wait_fd``-park, then wake them and assert all N were
+    parked.  Under load a goroutine may not have been scheduled to reach its
+    park yet when a fixed sleep elapses, and the runtime then CORRECTLY reports
+    that not-yet-parked g as "missed" / leaves it un-stranded (the documented
+    edge-before-park contract of unpark_many/cancel_fd) -- so the fixed-sleep
+    timing assumption, NOT the runtime, was the ~1% flake (proven: 8/640 under
+    16x parallel load, all the same `missed`-barrier assertion).  The
+    process-global ``netpoll_parked`` count is exact here (only this test's
+    waiters park), so polling it is a deterministic barrier.
+
+    The waiters park with a LONG (20s) wait_fd timeout -- comfortably above this
+    barrier -- so an early parker can never self-time-out-and-vanish while the
+    barrier is still waiting for the last straggler to commit (that inversion,
+    5s waiter vs 10s barrier, briefly produced an 'all-missed' failure)."""
+    deadline = time.monotonic() + timeout
+    while rc.stats().get("netpoll_parked", 0) < n and time.monotonic() < deadline:
+        rc.sched_sleep(0.002)
+    return rc.stats().get("netpoll_parked", 0) >= n
+
+
+def _wait_until(pred, timeout=6.0):
+    """Cooperatively poll ``pred`` until true (resume/record completed) or
+    timeout -- the post-wake analogue of _wait_until_parked, so a slow resume
+    under load can't spuriously fail a completion-count assertion either."""
+    deadline = time.monotonic() + timeout
+    while not pred() and time.monotonic() < deadline:
+        rc.sched_sleep(0.002)
+    return pred()
+
+
 # --------------------------------------------------------------------------
 # cancel_g under M:N -> runloom_netpoll_lock_g_pool (L60-64) + the claim CAS
 # loop (L100).  The g is parked on a HUB pool (p->hub != NULL), which the
@@ -75,11 +111,11 @@ def test_mn_cancel_g_wakes_parked_fiber_cancelled():
         hold = {}
         def parker():
             hold["g"] = rc.current_g()
-            res["rv"] = rc.wait_fd(a.fileno(), READ, 5000)
+            res["rv"] = rc.wait_fd(a.fileno(), READ, 20000)
         rc.mn_go(parker)
-        rc.sched_sleep(0.05)                  # let it commit the park (PARKED)
+        _wait_until_parked(1)                 # parker has COMMITTED its park
         res["woke"] = hold["g"].cancel_wait_fd()
-        rc.sched_sleep(0.05)                  # let the woken g resume + record
+        _wait_until(lambda: "rv" in res)      # woken g resumed + recorded
         _drop(a.fileno()); a.close(); b.close()
     with hang_guard(20, "mn cancel_g"):
         runloom.run(4, main)
@@ -125,13 +161,13 @@ def test_mn_unpark_many_batch_wakes_all_and_reports_running_missed():
         rvs = [None] * N
         def waiter(i):
             handles[i] = rc.current_g()
-            rvs[i] = rc.wait_fd(a.fileno(), READ, 5000)
+            rvs[i] = rc.wait_fd(a.fileno(), READ, 20000)
         for i in range(N):
             rc.mn_go(lambda i=i: waiter(i))
-        rc.sched_sleep(0.1)                    # all N committed to park
+        _wait_until_parked(N)                  # all N COMMITTED to park
         me = rc.current_g()                    # running -> must be reported missed
         missed = rc.unpark_many(handles + [me])
-        rc.sched_sleep(0.1)                    # let the woken fibers resume
+        _wait_until(lambda: all(v is not None for v in rvs))  # woken fibers resumed
         res["missed"] = missed
         res["rvs"] = sorted(set(rvs))
         res["woke_n"] = sum(1 for v in rvs if v is not None)
@@ -164,12 +200,12 @@ def test_mn_cancel_fd_wakes_all_parkers_on_one_fd():
         a.setblocking(False); b.setblocking(False)
         rvs = [None] * N
         def waiter(i):
-            rvs[i] = rc.wait_fd(a.fileno(), READ, 5000)
+            rvs[i] = rc.wait_fd(a.fileno(), READ, 20000)
         for i in range(N):
             rc.mn_go(lambda i=i: waiter(i))
-        rc.sched_sleep(0.1)                    # all parked on a.fileno()
+        _wait_until_parked(N)                  # all N parked on a.fileno()
         rc.netpoll_cancel_fd(a.fileno())       # one call wakes the whole bucket
-        rc.sched_sleep(0.1)
+        _wait_until(lambda: all(v is not None for v in rvs))
         res["rvs"] = sorted(set(rvs))
         res["n"] = sum(1 for v in rvs if v == CANCELLED)
         _drop(a.fileno()); a.close(); b.close()
@@ -269,21 +305,21 @@ def test_mn_mixed_wakers_drain_cleanly_under_contention():
         rvB = [None] * 8
         rvC = [None] * 8
         def wA(i):
-            handlesA.append(rc.current_g()); rvA[i] = rc.wait_fd(a1.fileno(), READ, 5000)
+            handlesA.append(rc.current_g()); rvA[i] = rc.wait_fd(a1.fileno(), READ, 20000)
         def wB(i):
-            rvB[i] = rc.wait_fd(a2.fileno(), READ, 5000)
+            rvB[i] = rc.wait_fd(a2.fileno(), READ, 20000)
         def wC(i):
-            handlesC.append(rc.current_g()); rvC[i] = rc.wait_fd(a3.fileno(), READ, 5000)
+            handlesC.append(rc.current_g()); rvC[i] = rc.wait_fd(a3.fileno(), READ, 20000)
         for i in range(8):
             rc.mn_go(lambda i=i: wA(i))
             rc.mn_go(lambda i=i: wB(i))
             rc.mn_go(lambda i=i: wC(i))
-        rc.sched_sleep(0.12)                   # all 24 parked
+        _wait_until_parked(24)                 # all 24 COMMITTED to park
         for h in list(handlesA):
             h.cancel_wait_fd()
         rc.netpoll_cancel_fd(a2.fileno())
         rc.unpark_many(list(handlesC))
-        rc.sched_sleep(0.12)
+        _wait_until(lambda: all(v is not None for v in rvA + rvB + rvC))
         res["A"] = sum(1 for v in rvA if v == CANCELLED)
         res["B"] = sum(1 for v in rvB if v == CANCELLED)
         res["C"] = sum(1 for v in rvC if v == UNPARKED)
@@ -296,6 +332,48 @@ def test_mn_mixed_wakers_drain_cleanly_under_contention():
     assert res.get("A") == 8, "cancel_g group: %r/8 cancelled" % res.get("A")
     assert res.get("B") == 8, "cancel_fd group: %r/8 cancelled" % res.get("B")
     assert res.get("C") == 8, "unpark_many group: %r/8 unparked" % res.get("C")
+
+
+# --------------------------------------------------------------------------
+# REGRESSION: many fibers parking on the SAME fd across MULTIPLE hubs must all
+# commit their park -- none lost.  This is the lost-park bug fixed in
+# netpoll_register.c.inc: per-hub epoll registered the shared fd into ONE hub's
+# epoll and ping-ponged it (DEL+re-ADD) on every cross-hub re-park; under
+# concurrent parks on one fd that churn raced the park/unlink bookkeeping into a
+# LOST PARK -- a committed-PARKED g dropped from its by_fd bucket, never woken,
+# never timed out, then freed (docs/dev/repro/LOST_PARK_FINDING.md).  Repro'd
+# ~1-2% single-copy pre-fix; PERHUB_EPOLL=0 or one-fd-per-waiter was clean.  The
+# fix moves a multi-pool fd ONCE to the shared epoll (nested in every hub's
+# pump), so all hubs deliver its events with no migration churn.  Oracle: with
+# the deterministic netpoll_parked barrier, ALL N must reach the park (the
+# barrier returns True); a lost park leaves it < N and the assert fires.
+# --------------------------------------------------------------------------
+def test_mn_many_parkers_one_fd_across_hubs_none_lost():
+    N = 32
+    res = {}
+    def main():
+        a, b = socket.socketpair()
+        a.setblocking(False); b.setblocking(False)
+        rvs = [None] * N
+        def w(i):
+            rvs[i] = rc.wait_fd(a.fileno(), READ, 20000)
+        for i in range(N):
+            rc.mn_go(lambda i=i: w(i))
+        res["all_parked"] = _wait_until_parked(N)        # the lost-park oracle
+        res["parked_count"] = rc.stats().get("netpoll_parked", 0)
+        rc.netpoll_cancel_fd(a.fileno())                 # wake the whole bucket
+        _wait_until(lambda: all(v is not None for v in rvs))
+        res["woke"] = sum(1 for v in rvs if v == CANCELLED)
+        _drop(a.fileno()); a.close(); b.close()
+    with hang_guard(30, "mn many parkers one fd"):
+        runloom.run(4, main)
+    assert res.get("all_parked") is True, (
+        "lost park: only %r/%d fibers committed to a netpoll park (a parker was "
+        "dropped from its bucket -- the per-hub-epoll same-fd-across-pools "
+        "regression)" % (res.get("parked_count"), N))
+    assert res.get("woke") == N, (
+        "cancel_fd woke %r/%d -- a parker on the shared fd was unreachable"
+        % (res.get("woke"), N))
 
 
 if __name__ == "__main__":

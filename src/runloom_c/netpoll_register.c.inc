@@ -138,11 +138,29 @@ static int runloom_netpoll_register(int fd, int events)
          * owner<0 (shared fallback) is already correct for THIS hub since the
          * fallback epoll is shared, so only a >=0 owner mismatch migrates. */
         if (owner >= 0 && owner != my_pool_idx) {
+            /* MULTI-POOL fd: the SAME fd is now wanted by a second hub's pool.
+             * The old behaviour ping-ponged it between per-hub epolls (DEL from
+             * the owner, fresh ADD into mine) on every cross-hub re-park.  Under
+             * many fibers parking CONCURRENTLY on ONE fd across hubs, that churn
+             * raced the park/unlink bookkeeping (the parker-on-coro-stack reuse
+             * + per-pool by_fd/poolmask) into a LOST PARK: a committed-PARKED g
+             * dropped from its bucket, never woken, never timed out, then freed
+             * -- reproduced ~1% single-copy (docs/dev/repro/LOST_PARK_FINDING.md;
+             * vanished with PERHUB_EPOLL=0 or one-fd-per-waiter).
+             *
+             * Fix: migrate the fd ONCE to the SHARED epoll (runloom_epoll_fd),
+             * which is NESTED inside every per-hub pump drain, so EVERY hub
+             * delivers its events -- no orphan, and crucially NO further
+             * migration (record owner = -1 so later parkers on any pool take the
+             * already-armed skip).  Single-hub fds keep the per-hub fast path;
+             * only a genuinely multi-pool fd falls back to shared.  This still
+             * fixes the original stale-arm hang (test_monkey_offload): the fd
+             * lands in the shared epoll, which IS pumped, never a dead pool. */
             (void)epoll_ctl(ep, EPOLL_CTL_DEL, fd, NULL);
-            cur = 0;                 /* stranded in a foreign epoll -> fresh ADD */
+            cur = 0;                 /* fresh ADD into the shared epoll */
             target = need;
-            ep = (my_pool_idx >= 0) ? runloom_pools[my_pool_idx].epoll_fd
-                                    : runloom_epoll_fd;
+            ep = runloom_epoll_fd;
+            my_pool_idx = -1;        /* record as shared -> no future migration */
         }
     }
     if (cur != 0 && target == cur) {
