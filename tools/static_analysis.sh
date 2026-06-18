@@ -156,13 +156,17 @@ HARDEN="-O2 -Warray-bounds=2 -Wstringop-overflow=4 -Wstringop-truncation \
         -Wformat=2 -Wformat-security -Wnull-dereference -Wuse-after-free=3 \
         -D_FORTIFY_SOURCE=3"
 export HARDEN
-echo "== gcc hardening warnings (advisory; bounds/format/fortify; ${JOBS}-way) =="
-run_parallel harden
-SECW='\[-W(array-bounds|stringop-overflow|stringop-truncation|format-security|format-overflow|format-truncation|null-dereference|use-after-free)'
-sec="$(cat "$TMP"/harden.*.log 2>/dev/null | grep -hE "warning:.*$SECW" || true)"
-if [ -n "$sec" ]; then printf '%s\n' "$sec" | sed 's/^/  /' | head -40
-else echo "  clean -- no bounds/format/fortify warnings"; fi
-echo "  (advisory -- not gating)"
+if command -v "$GCC" >/dev/null 2>&1; then
+    echo "== gcc hardening warnings (advisory; bounds/format/fortify; ${JOBS}-way) =="
+    run_parallel harden
+    SECW='\[-W(array-bounds|stringop-overflow|stringop-truncation|format-security|format-overflow|format-truncation|null-dereference|use-after-free)'
+    sec="$(cat "$TMP"/harden.*.log 2>/dev/null | grep -hE "warning:.*$SECW" || true)"
+    if [ -n "$sec" ]; then printf '%s\n' "$sec" | sed 's/^/  /' | head -40
+    else echo "  clean -- no bounds/format/fortify warnings"; fi
+    echo "  (advisory -- not gating)"
+else
+    echo "== gcc hardening: gcc not available; skipped =="
+fi
 
 # --------------------------------- clang static analyzer (ADVISORY) ----------
 CLANG="${CLANG:-}"; [ -z "$CLANG" ] && { for c in clang-18 clang; do command -v "$c" >/dev/null 2>&1 && { CLANG="$c"; break; }; done; }
