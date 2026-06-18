@@ -1,101 +1,128 @@
 /*
  * netpoll_multipool.pml -- Promela model of runloom_pump_dispatch_event's
- * MULTI-POOL walk and its two-level lock hierarchy (netpoll.c:1977-2023).
+ * MULTI-POOL dispatch, the per-fd POOL BITMASK fast-path, and the two-level
+ * lock hierarchy (netpoll_pump_helpers.c.inc + netpoll_parker_link.c.inc).
  *
  * Per-hub parker pools mean a goroutine parked on hub H links into pool[H].
- * One epoll delivery is processed by ONE pump (EPOLLONESHOT), which does not
- * know which hub owns the parker, so dispatch_event walks EVERY pool:
+ * A delivery is processed by a pump that does not know which hub owns the
+ * parker.  HISTORICALLY dispatch_event walked EVERY pool; now it consults a
+ * per-fd BITMASK -- runloom_fd_poolmask[fd], bit i set => pool i holds a parker
+ * for fd -- and VISITS ONLY the set-bit pools:
  *
- *     for each pool p:  lock p; if a matching parker is here -> claim it
- *       (commit CAS), record readiness, unlink, and wake_g(parker->hub);
- *       unlock p.           // each pool lock is dropped before the next
+ *     fm = poolmask[fd];
+ *     for each pool p:  if (p's bit clear in fm) skip;
+ *                       lock p; if a matching parker is here -> claim it
+ *       (commit CAS), record readiness, unlink, wake_g(parker->hub); unlock p.
  *
- * wake_g routes to the parker's HOME hub and takes that hub's sub_lock
- * (runloom_mn_hub_submit, mn_sched.c:1273) -- WHILE still holding the pool lock.
- * So there are two nested levels, and a strict order the code documents
- * (netpoll.c:1972-1976):
+ * The mask bit is SET in runloom_parker_link (under pool->lock, together with
+ * the by_fd insert) BEFORE the caller arms the backend (runloom_netpoll_
+ * register).  So the arm happens-after the bit, and any pump whose existence is
+ * caused by the fd's event (=> after the arm) is guaranteed to see the bit.
+ * The mask adds NO lock (atomic bit ops only), so the lock hierarchy and its
+ * rank order are unchanged:
  *
  *     pool->lock  <  hub->sub_lock          (always; never the reverse)
  *     at most ONE pool lock held at a time  (dropped before the next pool)
  *
- * Confirmed against the source: the only takers of BOTH locks are
- * dispatch_event and runloom_pump_drain_expired, both pool->sub; every sub_lock
- * region (hub_submit / the hub-drain at mn_sched.c:651) takes the sub lock
- * alone and never a pool lock.
+ * wake_g routes to the parker's HOME hub and takes that hub's sub_lock WHILE
+ * holding the pool lock (the nested pool->sub region).
  *
  * PROVEN (two pumps racing one delivery whose parker lives in pool 1, plus a
  * sub_lock contender = a hub draining its submission list):
- *   NO DEADLOCK    -- with everyone respecting pool-before-sub and one pool at
- *                     a time, no circular wait; every actor terminates (a
- *                     deadlock is a Spin invalid end state).
- *   FOUND ANYWHERE -- the parker is found in whichever pool holds it (here the
- *                     second pool walked), regardless of which pump gets there.
- *   CLAIMED ONCE   -- the commit CAS makes exactly one pump wake the g even
- *                     though both find it (`wakes <= 1`); the loser sees the
- *                     parker already unlinked / WOKEN.
+ *   NO DEADLOCK   -- pool-before-sub, one pool at a time; unchanged by the mask
+ *                    (a Spin invalid end state would flag a circular wait).
+ *   NO LOST WAKE  -- the mask bit is set BEFORE the arm, so a pump gated on the
+ *                    arm always sees the bit and visits the parker's pool; the
+ *                    committed-PARKED g is always made runnable (checker).
+ *   CLAIMED ONCE  -- the commit CAS makes exactly one pump wake the g (wakes<=1).
  *
- * Negative control -DBUG_LOCK_ORDER makes the contender take its locks in the
- * REVERSE order (sub_lock then pool_lock) -- the ABBA a future refactor could
- * introduce.  Spin finds the deadlock: a pump holds pool 1 and waits for
- * sub 1; the contender holds sub 1 and waits for pool 1.
+ * Negative controls:
+ *   -DBUG_LOCK_ORDER     -- contender takes sub then pool (the ABBA a refactor
+ *                           could introduce) -> Spin finds the deadlock.
+ *   -DBUG_MASK_AFTER_ARM -- link arms the backend BEFORE setting the mask bit
+ *                           -> a pump fires on the event, reads the bit as 0,
+ *                           SKIPS the parker's pool, the wake is LOST -> the
+ *                           checker's assert(g_runnable) fails.
  */
 
 #define ARMED  0
 #define PARKED 1
 #define WOKEN  2
 
-/* pool locks for hub 0 / hub 1; sub locks for hub 0 / hub 1 */
+/* pool locks for hub 0 / hub 1; sub lock for hub 1 (the parker's home) */
 bit poolL0 = 0; bit poolL1 = 0;
 bit subL1  = 0;
 
-bit  linked1    = 1;      /* the parker is linked in pool 1 (its home hub) */
-byte commit     = PARKED; /* the g has committed to parking (so the pump that
-                             claims it must wake_g -> take the sub lock) */
+bit  linked1    = 0;      /* parker linked in pool 1 (its home hub) -- set by waiter */
+bit  maskbit1   = 0;      /* dispatch bitmask: pool 1 holds a parker for this fd */
+bit  armed      = 0;      /* fd armed in the backend; a pump (the event) only
+                             fires after this */
+byte commit     = PARKED; /* the g has committed to parking */
 int  wakes      = 0;      /* wake_g calls -- must stay <= 1 */
 bit  g_runnable = 0;
+byte pumps_done = 0;
 
 #define ACQ(L) d_step { (L == 0) -> L = 1 }
 #define REL(L) L = 0
 
-/* dispatch_event: walk pool 0 (no parker), DROP its lock, then pool 1 (find).
- * On find, claim under pool 1's lock and wake_g under sub 1's lock (nested). */
+/* wait_fd: link the parker into pool 1 + set its mask bit, THEN arm the fd. */
+proctype waiter()
+{
+#ifndef BUG_MASK_AFTER_ARM
+    atomic { linked1 = 1; maskbit1 = 1; }   /* link + mask under pool->lock */
+    armed = 1;                               /* arm AFTER -> mask is visible */
+#else
+    linked1 = 1;                             /* BUG: arm BEFORE the mask bit */
+    armed = 1;
+    maskbit1 = 1;                            /* too late: a pump may have skipped */
+#endif
+}
+
+/* dispatch_event with the bitmask: runs because the fd's event fired (gated on
+ * `armed`), then visits ONLY pools whose mask bit is set.  Pool 0's bit is
+ * never set (no parker there) so it is always skipped; pool 1 iff maskbit1. */
 proctype pump()
 {
     byte prior;
 
-    ACQ(poolL0);              /* walk pool 0 */
-    /* no parker in pool 0 */
-    REL(poolL0);              /* drop before taking the next pool lock */
+    armed -> skip;            /* the pump exists because the fd's event fired */
 
-    ACQ(poolL1);              /* walk pool 1 */
     if
-    :: linked1 ->
-        atomic {              /* runloom_pump_claim */
-            prior = commit;
-            if :: commit != WOKEN -> commit = WOKEN;
-               :: else            -> skip;
-            fi;
-        }
+    :: maskbit1 ->            /* mask says pool 1 has a parker -> visit it */
+        ACQ(poolL1);
         if
-        :: prior == WOKEN -> skip;                 /* already claimed: skip */
-        :: else ->
-            linked1 = 0;                           /* unlink (under pool 1) */
+        :: linked1 ->
+            atomic {          /* runloom_pump_claim */
+                prior = commit;
+                if :: commit != WOKEN -> commit = WOKEN;
+                   :: else            -> skip;
+                fi;
+            }
             if
-            :: prior == PARKED ->                  /* wake_g -> sub_lock[home=1] */
-                ACQ(subL1);                        /* NESTED: pool 1 held, take sub 1 */
-                wakes++;
-                assert(wakes <= 1);                /* CLAIMED ONCE */
-                g_runnable = 1;
-                REL(subL1);
-            :: else -> skip;                       /* ARMED claim: g aborts itself */
+            :: prior == WOKEN -> skip;                 /* already claimed: skip */
+            :: else ->
+                linked1 = 0;                           /* unlink (under pool 1) */
+                if
+                :: prior == PARKED ->                  /* wake_g -> sub_lock[home=1] */
+                    ACQ(subL1);                        /* NESTED: pool 1 held, take sub 1 */
+                    wakes++;
+                    assert(wakes <= 1);                /* CLAIMED ONCE */
+                    g_runnable = 1;
+                    REL(subL1);
+                :: else -> skip;                       /* ARMED claim: g aborts itself */
+                fi;
             fi;
+        :: else -> skip;                               /* parker already gone */
         fi;
-    :: else -> skip;                               /* parker already gone */
+        REL(poolL1);
+    :: else -> skip;          /* mask bit clear -> SKIP pool 1 (the fast-path) */
     fi;
-    REL(poolL1);
+
+    pumps_done++;
 }
 
-/* A hub draining its submission list (mn_sched.c:651): takes sub_lock alone. */
+/* A hub draining its submission list: takes sub_lock alone (correct), or the
+ * reverse order under -DBUG_LOCK_ORDER (the ABBA). */
 proctype contender()
 {
 #ifndef BUG_LOCK_ORDER
@@ -109,10 +136,20 @@ proctype contender()
 #endif
 }
 
+/* NO LOST WAKE: once both pumps have run the delivery, the committed-PARKED g
+ * must have been made runnable.  -DBUG_MASK_AFTER_ARM makes a pump skip the
+ * parker's pool, leaving g_runnable == 0 -> this assert fails. */
+proctype checker()
+{
+    (pumps_done == 2) -> assert(g_runnable);
+}
+
 init {
     atomic {
+        run waiter();
         run pump();
         run pump();           /* two pumps race the same delivery */
         run contender();
+        run checker();
     }
 }

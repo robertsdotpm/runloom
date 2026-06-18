@@ -266,6 +266,7 @@ if have spin && have cc; then
     launch netpoll_commit-neg check_spin_must_fail netpoll_commit BUG_NO_COMMIT     "no park-commit CAS -> pump's parked-check races the park -> lost wake"
     launch netpoll_rearm-neg check_spin_must_fail netpoll_rearm  BUG_EDGE_TRIGGERED "old EPOLLET register-once (no LEVEL re-report) -> a pre-link edge is dropped + never refires -> lost wake"
     launch netpoll_multipool-neg check_spin_must_fail netpoll_multipool BUG_LOCK_ORDER  "sub_lock-before-pool_lock (reverse hierarchy) -> ABBA deadlock with dispatch"
+    launch netpoll_multipool-neg2 check_spin_must_fail netpoll_multipool BUG_MASK_AFTER_ARM "dispatch bitmask bit set AFTER the backend arm -> a pump skips the parker's pool -> lost wake"
     launch iouring_msclose-neg check_spin_must_fail iouring_msclose BUG_NO_REFCOUNT "drop the handle refcount (old code) -> the closing CQE frees while a recv is parked -> the woken recv re-locks freed memory (use-after-free)"
     launch netpoll_iouring_loop-neg check_spin_must_fail netpoll_iouring_loop BUG_NO_FENCE      "drop the SEQ_CST Dekker fences -> StoreLoad reorder loses the cross-hub kick"
     launch netpoll_iouring_loop-neg2 check_spin_must_fail netpoll_iouring_loop BUG_NO_RECHECK    "drop the sub_head re-check -> announce/submit race loses the wake even with the fence"

@@ -44,8 +44,21 @@ static int runloom_pump_dispatch_event(int fd, int mask, int wake_all)
 {
     int pi;
     int woke = 0;
+    /* Visit ONLY the hub pools whose dispatch-mask bit is set for this fd.  The
+     * bit is set in runloom_parker_link BEFORE the backend is armed, so any hub
+     * pumping an event for fd sees it -- no lost wake.  fm == ~0 means "fall
+     * back to all hub pools" (fd beyond the mask array, mask not yet allocated,
+     * or genuinely in every pool).  The DEFAULT pool (index 64) is never masked:
+     * the `pi < 64` guard lets it through to its lock_inited check below. */
+    unsigned long long fm = ~0ULL;
+    {
+        unsigned long long *m = __atomic_load_n(&runloom_fd_poolmask, __ATOMIC_ACQUIRE);
+        if (m != NULL && fd >= 0 && (size_t)fd < runloom_fd_poolmask_cap)
+            fm = __atomic_load_n(&m[fd], __ATOMIC_ACQUIRE);
+    }
     for (pi = 0; pi < RUNLOOM_PARKER_POOL_MAX; pi++) {
         runloom_parker_pool_t *pool = &runloom_pools[pi];
+        if (pi < 64 && fm != ~0ULL && !(fm & (1ULL << pi))) continue;
         if (__atomic_load_n(&pool->lock_inited, __ATOMIC_ACQUIRE) != 2) continue;
         RUNLOOM_RLOCK(&pool->lock, RUNLOOM_RANK_PARKER_POOL);
         if ((size_t)fd < pool->by_fd_cap) {
