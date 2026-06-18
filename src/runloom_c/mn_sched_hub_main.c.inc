@@ -240,6 +240,20 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
         h->iouring_eventfd = -1;
     }
 
+    /* Warm this hub's parker-pool wake infrastructure (per-hub epoll + wake
+     * eventfd) eagerly at thread start, independent of io_uring.  The hub WILL
+     * need it the instant a fiber parks; creating it now (a) avoids an
+     * epoll_create + eventfd + epoll_ctl hiccup on the first park under load,
+     * and (b) keeps fd accounting honest -- the per-hub wake fds belong to hub
+     * startup, not to whichever fiber happens to park first.  Idempotent (the
+     * pool's once-init CAS), and a no-op return without per-hub epoll (there all
+     * parkers share the default pool, already inited by netpoll_init).  Until
+     * the io_uring ring was gated off in the default config, registering the
+     * ring eventfd warmed this implicitly; gating the ring moved the per-hub
+     * wake fds from hub startup into the first park -- this makes the warm
+     * explicit and unconditional so it no longer rides on io_uring. */
+    (void)runloom_netpoll_hub_epoll_fd();
+
     /* hub_snap is loop-invariant for the same reason sched_snap is in
      * runloom_sched_drain: hub_main runs no Python work between
      * iterations except via runloom_g_decref's tp_dealloc, where we
