@@ -175,6 +175,8 @@ typedef struct runloom_parker_pool {
      * runloom_epoll_fd path stays live) when the flag is off. */
     int epoll_fd;                       /* this pool's epoll; -1 = none */
     int wake_efd;                       /* pump-wake eventfd, registered in epoll_fd */
+    long wake_pending;                  /* RUNLOOM_WAKE_DEDUP: 1 = a kick write is in
+                                         * flight; coalesce redundant ones */
 
     runloom_parked_t *head;
     int total;                          /* read with __atomic_load_n */
@@ -286,6 +288,27 @@ static int runloom_perhub_epoll(void)
 #else
     return 0;
 #endif
+}
+
+/* Coalesce per-hub wake-eventfd writes (RUNLOOM_WAKE_DEDUP; DEFAULT ON, =0
+ * disables).  A waker writes the kick eventfd only on the 0->1 transition of
+ * pool->wake_pending; the pump clears it when it drains the eventfd -- so a
+ * burst of cross-hub wakes to one hub collapses to a single write.  Measured a
+ * clean win on the saturated echo bench (+~3-5% rps, lower p50/p99) with ~99.98%
+ * fewer wake writes; proven no-lost-kick by verify/spin/netpoll_pump_kick.pml
+ * (Dekker clear-then-recheck), with the bounded pump timeout (idle_ns) as a
+ * further backstop.  Read once. */
+static int runloom_wake_dedup_enabled(void)
+{
+    static int v = -1;
+    int cur = __atomic_load_n(&v, __ATOMIC_RELAXED);
+    if (cur < 0) {
+        const char *e = getenv("RUNLOOM_WAKE_DEDUP");
+        /* default ON; only an explicit "0" disables */
+        cur = (e != NULL && e[0] == '0' && e[1] == '\0') ? 0 : 1;
+        __atomic_store_n(&v, cur, __ATOMIC_RELAXED);
+    }
+    return cur;
 }
 
 static int runloom_netpoll_inited = 0;

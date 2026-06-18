@@ -124,6 +124,12 @@ int runloom_netpoll_pump(long long timeout_ns)
                         uint64_t v;
                         ssize_t r = read(fd, &v, sizeof v);
                         (void)r;
+                        /* Dedup: clear AFTER draining so the next
+                         * waker writes; SEQ_CST pairs with wake_pump's exchange.
+                         * The hub re-checks sub_head at the loop top after this,
+                         * closing the Dekker race. */
+                        if (runloom_wake_dedup_enabled())
+                            __atomic_store_n(&epool->wake_pending, 0, __ATOMIC_SEQ_CST);
                         continue;
                     }
                     /* The NESTED shared epoll fired (io_uring ring eventfds + the

@@ -452,9 +452,18 @@ void runloom_netpoll_wake_pump(void *hub_opaque)
         runloom_parker_pool_t *pool = runloom_parker_pool_for_hub(hub_opaque);
         if (__atomic_load_n(&pool->lock_inited, __ATOMIC_ACQUIRE) == 2 &&
             pool->wake_efd >= 0) {
-            uint64_t one = 1;
-            ssize_t w = write(pool->wake_efd, &one, sizeof one);
-            (void)w;
+            /* Dedup: only the 0->1 transition writes; the pump
+             * clears wake_pending when it drains the eventfd.  SEQ_CST so the
+             * caller's sub_head push (happens-before this) is globally ordered
+             * before the skip decision -- the pump's clear+re-check on the other
+             * side gives the Dekker no-lost-kick guarantee (and the bounded pump
+             * timeout is the backstop regardless). */
+            if (!runloom_wake_dedup_enabled() ||
+                __atomic_exchange_n(&pool->wake_pending, 1, __ATOMIC_SEQ_CST) == 0) {
+                uint64_t one = 1;
+                ssize_t w = write(pool->wake_efd, &one, sizeof one);
+                (void)w;
+            }
             return;
         }
     }
