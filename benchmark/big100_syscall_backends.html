@@ -1,0 +1,1668 @@
+<!doctype html><meta charset=utf-8><title>big_100 syscall profile by backend</title>
+<style>
+ body{font:14px/1.5 system-ui,sans-serif;margin:0;background:#0e1116;color:#e6e6e6}
+ .wrap{max-width:1300px;margin:0 auto;padding:24px} h1{font-size:24px}
+ h2{font-size:18px;margin-top:34px;border-bottom:1px solid #2a3038;padding-bottom:6px}
+ a{color:#58a6ff;text-decoration:none} a:hover{text-decoration:underline}
+ .note{background:#161b22;border:1px solid #2a3038;border-radius:8px;padding:12px 16px;margin:14px 0;color:#c9d1d9}
+ table{border-collapse:collapse;font-size:12.5px} th,td{padding:3px 8px;text-align:right;border-bottom:1px solid #20262e}
+ th{color:#8b949e} td.s,th.s{text-align:left} .muted{color:#8b949e} .na{color:#6e7681}
+ .cols{display:flex;gap:18px;flex-wrap:wrap} .colbox{flex:1;min-width:330px}
+ .pill{display:inline-block;padding:1px 8px;border-radius:10px;font-size:11px;color:#06121f;font-weight:600}
+ .bar{height:9px;border-radius:3px;display:inline-block;vertical-align:middle}
+ code{background:#161b22;padding:1px 5px;border-radius:4px}
+</style><div class=wrap>
+<h1>big_100 &mdash; syscall profile by netpoll backend</h1>
+<div class=note>
+Same workload (<code>--hubs 2 --funcs 150 --duration 3</code>) on the latest
+origin/main, each platform traced with its native facility:
+<b>Linux</b> epoll via <code>strace -c</code>,
+<b>macOS</b> kqueue via <code>ktrace</code> (KDEBUG; SIP blocks dtrace, not this),
+<b>Windows</b> iocp-afd via <code>xperf</code> (NT-kernel SYSCALL + MS symbols).
+Syscalls are bucketed into shared categories so the backends line up; counts are
+the per-syscall call totals (Linux excludes parked time).  Each tracer perturbs
+timing differently, so read the <i>mix</i> across backends, not raw cross-OS magnitudes.
+</div>
+<p>
+<span style="margin-right:16px"><span class=pill style="background:#3fb950">Linux</span> epoll &middot; 23 progs</span>
+<span style="margin-right:16px"><span class=pill style="background:#58a6ff">macOS</span> kqueue &middot; 23 progs</span>
+<span style="margin-right:16px"><span class=pill style="background:#d29922">Windows</span> iocp-afd &middot; 23 progs</span>
+</p>
+<h2>Category mix &mdash; summed over all programs</h2>
+<table><tr><th class=s>category</th>
+<th><span class=pill style="background:#3fb950">Linux</span><br>epoll</th>
+<th><span class=pill style="background:#58a6ff">macOS</span><br>kqueue</th>
+<th><span class=pill style="background:#d29922">Windows</span><br>iocp-afd</th>
+</tr>
+<tr><td class=s>poll/wait</td>
+<td>67,870<span class=muted style="font-size:11px"> 2%</span></td>
+<td>1,006,617<span class=muted style="font-size:11px"> 7%</span></td>
+<td>949,682<span class=muted style="font-size:11px"> 9%</span></td>
+</tr>
+<tr><td class=s>net</td>
+<td>44,717<span class=muted style="font-size:11px"> 2%</span></td>
+<td>1,236,269<span class=muted style="font-size:11px"> 8%</span></td>
+<td>519,757<span class=muted style="font-size:11px"> 5%</span></td>
+</tr>
+<tr><td class=s>sync</td>
+<td>229,765<span class=muted style="font-size:11px"> 8%</span></td>
+<td>2,197,565<span class=muted style="font-size:11px"> 15%</span></td>
+<td>885,949<span class=muted style="font-size:11px"> 8%</span></td>
+</tr>
+<tr><td class=s>yield</td>
+<td>1,772,412<span class=muted style="font-size:11px"> 60%</span></td>
+<td>0<span class=muted style="font-size:11px"> 0%</span></td>
+<td>0<span class=muted style="font-size:11px"> 0%</span></td>
+</tr>
+<tr><td class=s>time</td>
+<td>107,728<span class=muted style="font-size:11px"> 4%</span></td>
+<td>560,893<span class=muted style="font-size:11px"> 4%</span></td>
+<td>3,924,067<span class=muted style="font-size:11px"> 37%</span></td>
+</tr>
+<tr><td class=s>registry</td>
+<td>0<span class=muted style="font-size:11px"> 0%</span></td>
+<td>0<span class=muted style="font-size:11px"> 0%</span></td>
+<td>191,850<span class=muted style="font-size:11px"> 2%</span></td>
+</tr>
+<tr><td class=s>file</td>
+<td>531,989<span class=muted style="font-size:11px"> 18%</span></td>
+<td>9,617,961<span class=muted style="font-size:11px"> 65%</span></td>
+<td>1,977,470<span class=muted style="font-size:11px"> 19%</span></td>
+</tr>
+<tr><td class=s>mem</td>
+<td>124,805<span class=muted style="font-size:11px"> 4%</span></td>
+<td>103,811<span class=muted style="font-size:11px"> 1%</span></td>
+<td>863,573<span class=muted style="font-size:11px"> 8%</span></td>
+</tr>
+<tr><td class=s>proc/thr</td>
+<td>9,591<span class=muted style="font-size:11px"> 0%</span></td>
+<td>74,271<span class=muted style="font-size:11px"> 1%</span></td>
+<td>729,828<span class=muted style="font-size:11px"> 7%</span></td>
+</tr>
+<tr><td class=s>signal</td>
+<td>61,312<span class=muted style="font-size:11px"> 2%</span></td>
+<td>14,469<span class=muted style="font-size:11px"> 0%</span></td>
+<td>0<span class=muted style="font-size:11px"> 0%</span></td>
+</tr>
+<tr><td class=s>other</td>
+<td>25,689<span class=muted style="font-size:11px"> 1%</span></td>
+<td>31,780<span class=muted style="font-size:11px"> 0%</span></td>
+<td>583,149<span class=muted style="font-size:11px"> 5%</span></td>
+</tr>
+</table>
+<h2 id="p01_tcp_echo">p01_tcp_echo</h2>
+<div class=cols>
+<div class=colbox><div><span class=pill style="background:#3fb950">Linux</span> <span class=muted>epoll</span></div>
+<table style="width:100%;margin-top:6px"><tr><th class=s>category</th><th>calls</th><th>%</th></tr>
+<tr><td class=s>poll/wait</td><td>916</td><td class=muted>2</td></tr>
+<tr><td class=s>net</td><td>5,350</td><td class=muted>14</td></tr>
+<tr><td class=s>sync</td><td>577</td><td class=muted>2</td></tr>
+<tr><td class=s>yield</td><td>20,880</td><td class=muted>57</td></tr>
+<tr><td class=s>time</td><td>1,037</td><td class=muted>3</td></tr>
+<tr><td class=s>file</td><td>6,461</td><td class=muted>18</td></tr>
+<tr><td class=s>mem</td><td>1,302</td><td class=muted>4</td></tr>
+<tr><td class=s>proc/thr</td><td>29</td><td class=muted>0</td></tr>
+<tr><td class=s>signal</td><td>186</td><td class=muted>1</td></tr>
+<tr><td class=s>other</td><td>180</td><td class=muted>0</td></tr>
+<tr><td class=s muted>total</td><td>36,918</td><td></td></tr></table>
+<table style="width:100%;margin-top:4px"><tr><th class=s>top syscall</th><th>cat</th><th>calls</th></tr>
+<tr><td class=s>sched_yield</td><td class=muted>yield</td><td>20,880</td></tr>
+<tr><td class=s>recvfrom</td><td class=muted>net</td><td>2,834</td></tr>
+<tr><td class=s>newfstatat</td><td class=muted>file</td><td>1,692</td></tr>
+<tr><td class=s>sendto</td><td class=muted>net</td><td>1,326</td></tr>
+<tr><td class=s>clock_nanosleep</td><td class=muted>time</td><td>1,037</td></tr>
+<tr><td class=s>read</td><td class=muted>file</td><td>948</td></tr>
+<tr><td class=s>fstat</td><td class=muted>file</td><td>771</td></tr>
+<tr><td class=s>close</td><td class=muted>file</td><td>770</td></tr>
+</table></div>
+<div class=colbox><div><span class=pill style="background:#58a6ff">macOS</span> <span class=muted>kqueue</span></div>
+<table style="width:100%;margin-top:6px"><tr><th class=s>category</th><th>calls</th><th>%</th></tr>
+<tr><td class=s>poll/wait</td><td>13,349</td><td class=muted>41</td></tr>
+<tr><td class=s>net</td><td>5,200</td><td class=muted>16</td></tr>
+<tr><td class=s>sync</td><td>2,646</td><td class=muted>8</td></tr>
+<tr><td class=s>time</td><td>945</td><td class=muted>3</td></tr>
+<tr><td class=s>file</td><td>9,741</td><td class=muted>30</td></tr>
+<tr><td class=s>mem</td><td>786</td><td class=muted>2</td></tr>
+<tr><td class=s>proc/thr</td><td>15</td><td class=muted>0</td></tr>
+<tr><td class=s>signal</td><td>43</td><td class=muted>0</td></tr>
+<tr><td class=s>other</td><td>112</td><td class=muted>0</td></tr>
+<tr><td class=s muted>total</td><td>32,837</td><td></td></tr></table>
+<table style="width:100%;margin-top:4px"><tr><th class=s>top syscall</th><th>cat</th><th>calls</th></tr>
+<tr><td class=s>kevent</td><td class=muted>poll/wait</td><td>13,345</td></tr>
+<tr><td class=s>read</td><td class=muted>file</td><td>3,748</td></tr>
+<tr><td class=s>recvfrom</td><td class=muted>net</td><td>2,686</td></tr>
+<tr><td class=s>write</td><td class=muted>file</td><td>1,820</td></tr>
+<tr><td class=s>semwait_signal</td><td class=muted>sync</td><td>1,649</td></tr>
+<tr><td class=s>sendto</td><td class=muted>net</td><td>1,268</td></tr>
+<tr><td class=s>stat64</td><td class=muted>file</td><td>1,071</td></tr>
+<tr><td class=s>ioctl</td><td class=muted>file</td><td>1,031</td></tr>
+</table></div>
+<div class=colbox><div><span class=pill style="background:#d29922">Windows</span> <span class=muted>iocp-afd</span></div>
+<table style="width:100%;margin-top:6px"><tr><th class=s>category</th><th>calls</th><th>%</th></tr>
+<tr><td class=s>poll/wait</td><td>3,820</td><td class=muted>6</td></tr>
+<tr><td class=s>net</td><td>3,830</td><td class=muted>6</td></tr>
+<tr><td class=s>sync</td><td>1,332</td><td class=muted>2</td></tr>
+<tr><td class=s>time</td><td>23,352</td><td class=muted>36</td></tr>
+<tr><td class=s>registry</td><td>7,082</td><td class=muted>11</td></tr>
+<tr><td class=s>file</td><td>9,882</td><td class=muted>15</td></tr>
+<tr><td class=s>mem</td><td>4,359</td><td class=muted>7</td></tr>
+<tr><td class=s>proc/thr</td><td>4,635</td><td class=muted>7</td></tr>
+<tr><td class=s>other</td><td>5,768</td><td class=muted>9</td></tr>
+<tr><td class=s muted>total</td><td>64,060</td><td></td></tr></table>
+<table style="width:100%;margin-top:4px"><tr><th class=s>top syscall</th><th>cat</th><th>calls</th></tr>
+<tr><td class=s>NtDelayExecution</td><td class=muted>time</td><td>23,247</td></tr>
+<tr><td class=s>NtDeviceIoControlFile</td><td class=muted>net</td><td>3,773</td></tr>
+<tr><td class=s>NtQueryKey</td><td class=muted>registry</td><td>3,039</td></tr>
+<tr><td class=s>NtClose</td><td class=muted>file</td><td>2,553</td></tr>
+<tr><td class=s>NtRemoveIoCompletion</td><td class=muted>poll/wait</td><td>2,134</td></tr>
+<tr><td class=s>NtQueryInformationFile</td><td class=muted>file</td><td>1,957</td></tr>
+<tr><td class=s>NtQueryInformationToken</td><td class=muted>proc/thr</td><td>1,954</td></tr>
+<tr><td class=s>NtOpenKeyEx</td><td class=muted>registry</td><td>1,858</td></tr>
+</table></div>
+</div>
+<h2 id="p04_tcp_proxy">p04_tcp_proxy</h2>
+<div class=cols>
+<div class=colbox><div><span class=pill style="background:#3fb950">Linux</span> <span class=muted>epoll</span></div>
+<table style="width:100%;margin-top:6px"><tr><th class=s>category</th><th>calls</th><th>%</th></tr>
+<tr><td class=s>poll/wait</td><td>3,941</td><td class=muted>4</td></tr>
+<tr><td class=s>net</td><td>19,528</td><td class=muted>22</td></tr>
+<tr><td class=s>sync</td><td>609</td><td class=muted>1</td></tr>
+<tr><td class=s>yield</td><td>41,521</td><td class=muted>46</td></tr>
+<tr><td class=s>time</td><td>3,389</td><td class=muted>4</td></tr>
+<tr><td class=s>file</td><td>9,661</td><td class=muted>11</td></tr>
+<tr><td class=s>mem</td><td>10,895</td><td class=muted>12</td></tr>
+<tr><td class=s>proc/thr</td><td>29</td><td class=muted>0</td></tr>
+<tr><td class=s>signal</td><td>186</td><td class=muted>0</td></tr>
+<tr><td class=s>other</td><td>638</td><td class=muted>1</td></tr>
+<tr><td class=s muted>total</td><td>90,397</td><td></td></tr></table>
+<table style="width:100%;margin-top:4px"><tr><th class=s>top syscall</th><th>cat</th><th>calls</th></tr>
+<tr><td class=s>sched_yield</td><td class=muted>yield</td><td>41,521</td></tr>
+<tr><td class=s>recvfrom</td><td class=muted>net</td><td>10,294</td></tr>
+<tr><td class=s>madvise</td><td class=muted>mem</td><td>6,972</td></tr>
+<tr><td class=s>clock_nanosleep</td><td class=muted>time</td><td>3,389</td></tr>
+<tr><td class=s>epoll_ctl</td><td class=muted>poll/wait</td><td>2,897</td></tr>
+<tr><td class=s>mmap</td><td class=muted>mem</td><td>2,480</td></tr>
+<tr><td class=s>close</td><td class=muted>file</td><td>2,453</td></tr>
+<tr><td class=s>ioctl</td><td class=muted>file</td><td>2,333</td></tr>
+</table></div>
+<div class=colbox><div><span class=pill style="background:#58a6ff">macOS</span> <span class=muted>kqueue</span></div>
+<table style="width:100%;margin-top:6px"><tr><th class=s>category</th><th>calls</th><th>%</th></tr>
+<tr><td class=s>poll/wait</td><td>196,238</td><td class=muted>11</td></tr>
+<tr><td class=s>net</td><td>986,185</td><td class=muted>53</td></tr>
+<tr><td class=s>sync</td><td>19,932</td><td class=muted>1</td></tr>
+<tr><td class=s>time</td><td>210</td><td class=muted>0</td></tr>
+<tr><td class=s>file</td><td>651,005</td><td class=muted>35</td></tr>
+<tr><td class=s>mem</td><td>3,682</td><td class=muted>0</td></tr>
+<tr><td class=s>proc/thr</td><td>15</td><td class=muted>0</td></tr>
+<tr><td class=s>signal</td><td>43</td><td class=muted>0</td></tr>
+<tr><td class=s>other</td><td>112</td><td class=muted>0</td></tr>
+<tr><td class=s muted>total</td><td>1,857,422</td><td></td></tr></table>
+<table style="width:100%;margin-top:4px"><tr><th class=s>top syscall</th><th>cat</th><th>calls</th></tr>
+<tr><td class=s>recvfrom</td><td class=muted>net</td><td>521,916</td></tr>
+<tr><td class=s>write</td><td class=muted>file</td><td>336,681</td></tr>
+<tr><td class=s>ioctl</td><td class=muted>file</td><td>197,465</td></tr>
+<tr><td class=s>kevent</td><td class=muted>poll/wait</td><td>196,234</td></tr>
+<tr><td class=s>sys_close</td><td class=muted>file</td><td>98,792</td></tr>
+<tr><td class=s>sendto</td><td class=muted>net</td><td>98,221</td></tr>
+<tr><td class=s>accept</td><td class=muted>net</td><td>70,514</td></tr>
+<tr><td class=s>socket</td><td class=muted>net</td><td>49,385</td></tr>
+</table></div>
+<div class=colbox><div><span class=pill style="background:#d29922">Windows</span> <span class=muted>iocp-afd</span></div>
+<table style="width:100%;margin-top:6px"><tr><th class=s>category</th><th>calls</th><th>%</th></tr>
+<tr><td class=s>poll/wait</td><td>66,620</td><td class=muted>15</td></tr>
+<tr><td class=s>net</td><td>129,760</td><td class=muted>29</td></tr>
+<tr><td class=s>sync</td><td>47,608</td><td class=muted>11</td></tr>
+<tr><td class=s>time</td><td>116,726</td><td class=muted>26</td></tr>
+<tr><td class=s>registry</td><td>4,060</td><td class=muted>1</td></tr>
+<tr><td class=s>file</td><td>23,453</td><td class=muted>5</td></tr>
+<tr><td class=s>mem</td><td>29,578</td><td class=muted>7</td></tr>
+<tr><td class=s>proc/thr</td><td>10,128</td><td class=muted>2</td></tr>
+<tr><td class=s>other</td><td>12,868</td><td class=muted>3</td></tr>
+<tr><td class=s muted>total</td><td>440,801</td><td></td></tr></table>
+<table style="width:100%;margin-top:4px"><tr><th class=s>top syscall</th><th>cat</th><th>calls</th></tr>
+<tr><td class=s>NtDeviceIoControlFile</td><td class=muted>net</td><td>129,735</td></tr>
+<tr><td class=s>NtDelayExecution</td><td class=muted>time</td><td>116,649</td></tr>
+<tr><td class=s>NtRemoveIoCompletion</td><td class=muted>poll/wait</td><td>41,480</td></tr>
+<tr><td class=s>NtSetIoCompletion</td><td class=muted>poll/wait</td><td>24,207</td></tr>
+<tr><td class=s>NtWaitForSingleObject</td><td class=muted>sync</td><td>14,762</td></tr>
+<tr><td class=s>NtAllocateVirtualMemory</td><td class=muted>mem</td><td>14,252</td></tr>
+<tr><td class=s>NtClearEvent</td><td class=muted>sync</td><td>13,647</td></tr>
+<tr><td class=s>NtClose</td><td class=muted>file</td><td>10,941</td></tr>
+</table></div>
+</div>
+<h2 id="p07_udp_storm">p07_udp_storm</h2>
+<div class=cols>
+<div class=colbox><div><span class=pill style="background:#3fb950">Linux</span> <span class=muted>epoll</span></div>
+<table style="width:100%;margin-top:6px"><tr><th class=s>category</th><th>calls</th><th>%</th></tr>
+<tr><td class=s>poll/wait</td><td>8,277</td><td class=muted>11</td></tr>
+<tr><td class=s>net</td><td>13,511</td><td class=muted>19</td></tr>
+<tr><td class=s>sync</td><td>7,795</td><td class=muted>11</td></tr>
+<tr><td class=s>yield</td><td>20,720</td><td class=muted>29</td></tr>
+<tr><td class=s>time</td><td>3,242</td><td class=muted>4</td></tr>
+<tr><td class=s>file</td><td>16,747</td><td class=muted>23</td></tr>
+<tr><td class=s>mem</td><td>1,424</td><td class=muted>2</td></tr>
+<tr><td class=s>proc/thr</td><td>29</td><td class=muted>0</td></tr>
+<tr><td class=s>signal</td><td>186</td><td class=muted>0</td></tr>
+<tr><td class=s>other</td><td>125</td><td class=muted>0</td></tr>
+<tr><td class=s muted>total</td><td>72,056</td><td></td></tr></table>
+<table style="width:100%;margin-top:4px"><tr><th class=s>top syscall</th><th>cat</th><th>calls</th></tr>
+<tr><td class=s>sched_yield</td><td class=muted>yield</td><td>20,720</td></tr>
+<tr><td class=s>epoll_wait</td><td class=muted>poll/wait</td><td>8,047</td></tr>
+<tr><td class=s>futex</td><td class=muted>sync</td><td>7,795</td></tr>
+<tr><td class=s>sendto</td><td class=muted>net</td><td>6,609</td></tr>
+<tr><td class=s>recvfrom</td><td class=muted>net</td><td>6,448</td></tr>
+<tr><td class=s>read</td><td class=muted>file</td><td>6,248</td></tr>
+<tr><td class=s>write</td><td class=muted>file</td><td>5,581</td></tr>
+<tr><td class=s>clock_nanosleep</td><td class=muted>time</td><td>3,242</td></tr>
+</table></div>
+<div class=colbox><div><span class=pill style="background:#58a6ff">macOS</span> <span class=muted>kqueue</span></div>
+<table style="width:100%;margin-top:6px"><tr><th class=s>category</th><th>calls</th><th>%</th></tr>
+<tr><td class=s>poll/wait</td><td>125,992</td><td class=muted>31</td></tr>
+<tr><td class=s>net</td><td>115,638</td><td class=muted>29</td></tr>
+<tr><td class=s>sync</td><td>21,438</td><td class=muted>5</td></tr>
+<tr><td class=s>time</td><td>155</td><td class=muted>0</td></tr>
+<tr><td class=s>file</td><td>139,181</td><td class=muted>35</td></tr>
+<tr><td class=s>mem</td><td>764</td><td class=muted>0</td></tr>
+<tr><td class=s>proc/thr</td><td>15</td><td class=muted>0</td></tr>
+<tr><td class=s>signal</td><td>43</td><td class=muted>0</td></tr>
+<tr><td class=s>other</td><td>112</td><td class=muted>0</td></tr>
+<tr><td class=s muted>total</td><td>403,338</td><td></td></tr></table>
+<table style="width:100%;margin-top:4px"><tr><th class=s>top syscall</th><th>cat</th><th>calls</th></tr>
+<tr><td class=s>kevent</td><td class=muted>poll/wait</td><td>125,988</td></tr>
+<tr><td class=s>read</td><td class=muted>file</td><td>77,249</td></tr>
+<tr><td class=s>write</td><td class=muted>file</td><td>58,230</td></tr>
+<tr><td class=s>sendto</td><td class=muted>net</td><td>57,666</td></tr>
+<tr><td class=s>recvfrom</td><td class=muted>net</td><td>57,518</td></tr>
+<tr><td class=s>semwait_signal</td><td class=muted>sync</td><td>18,316</td></tr>
+<tr><td class=s>psynch_mutexwait</td><td class=muted>sync</td><td>1,439</td></tr>
+<tr><td class=s>psynch_mutexdrop</td><td class=muted>sync</td><td>1,439</td></tr>
+</table></div>
+<div class=colbox><div><span class=pill style="background:#d29922">Windows</span> <span class=muted>iocp-afd</span></div>
+<table style="width:100%;margin-top:6px"><tr><th class=s>category</th><th>calls</th><th>%</th></tr>
+<tr><td class=s>poll/wait</td><td>16,917</td><td class=muted>21</td></tr>
+<tr><td class=s>net</td><td>15,107</td><td class=muted>19</td></tr>
+<tr><td class=s>sync</td><td>602</td><td class=muted>1</td></tr>
+<tr><td class=s>time</td><td>27,197</td><td class=muted>34</td></tr>
+<tr><td class=s>registry</td><td>3,819</td><td class=muted>5</td></tr>
+<tr><td class=s>file</td><td>8,033</td><td class=muted>10</td></tr>
+<tr><td class=s>mem</td><td>1,496</td><td class=muted>2</td></tr>
+<tr><td class=s>proc/thr</td><td>2,739</td><td class=muted>3</td></tr>
+<tr><td class=s>other</td><td>4,041</td><td class=muted>5</td></tr>
+<tr><td class=s muted>total</td><td>79,951</td><td></td></tr></table>
+<table style="width:100%;margin-top:4px"><tr><th class=s>top syscall</th><th>cat</th><th>calls</th></tr>
+<tr><td class=s>NtDelayExecution</td><td class=muted>time</td><td>27,126</td></tr>
+<tr><td class=s>NtDeviceIoControlFile</td><td class=muted>net</td><td>15,088</td></tr>
+<tr><td class=s>NtRemoveIoCompletion</td><td class=muted>poll/wait</td><td>11,080</td></tr>
+<tr><td class=s>NtSetIoCompletion</td><td class=muted>poll/wait</td><td>4,983</td></tr>
+<tr><td class=s>NtClose</td><td class=muted>file</td><td>2,290</td></tr>
+<tr><td class=s>NtQueryInformationFile</td><td class=muted>file</td><td>1,906</td></tr>
+<tr><td class=s>NtQueryKey</td><td class=muted>registry</td><td>1,885</td></tr>
+<tr><td class=s>NtQueryVolumeInformationFile</td><td class=muted>file</td><td>1,199</td></tr>
+</table></div>
+</div>
+<h2 id="p09_dns_stampede">p09_dns_stampede</h2>
+<div class=cols>
+<div class=colbox><div><span class=pill style="background:#3fb950">Linux</span> <span class=muted>epoll</span></div>
+<table style="width:100%;margin-top:6px"><tr><th class=s>category</th><th>calls</th><th>%</th></tr>
+<tr><td class=s>poll/wait</td><td>92</td><td class=muted>0</td></tr>
+<tr><td class=s>sync</td><td>6,909</td><td class=muted>8</td></tr>
+<tr><td class=s>yield</td><td>70,240</td><td class=muted>80</td></tr>
+<tr><td class=s>time</td><td>3,386</td><td class=muted>4</td></tr>
+<tr><td class=s>file</td><td>5,342</td><td class=muted>6</td></tr>
+<tr><td class=s>mem</td><td>972</td><td class=muted>1</td></tr>
+<tr><td class=s>proc/thr</td><td>29</td><td class=muted>0</td></tr>
+<tr><td class=s>signal</td><td>186</td><td class=muted>0</td></tr>
+<tr><td class=s>other</td><td>126</td><td class=muted>0</td></tr>
+<tr><td class=s muted>total</td><td>87,282</td><td></td></tr></table>
+<table style="width:100%;margin-top:4px"><tr><th class=s>top syscall</th><th>cat</th><th>calls</th></tr>
+<tr><td class=s>sched_yield</td><td class=muted>yield</td><td>70,240</td></tr>
+<tr><td class=s>futex</td><td class=muted>sync</td><td>6,909</td></tr>
+<tr><td class=s>clock_nanosleep</td><td class=muted>time</td><td>3,386</td></tr>
+<tr><td class=s>newfstatat</td><td class=muted>file</td><td>1,689</td></tr>
+<tr><td class=s>fstat</td><td class=muted>file</td><td>769</td></tr>
+<tr><td class=s>read</td><td class=muted>file</td><td>701</td></tr>
+<tr><td class=s>lseek</td><td class=muted>file</td><td>632</td></tr>
+<tr><td class=s>openat</td><td class=muted>file</td><td>492</td></tr>
+</table></div>
+<div class=colbox><div><span class=pill style="background:#58a6ff">macOS</span> <span class=muted>kqueue</span></div>
+<table style="width:100%;margin-top:6px"><tr><th class=s>category</th><th>calls</th><th>%</th></tr>
+<tr><td class=s>poll/wait</td><td>29</td><td class=muted>0</td></tr>
+<tr><td class=s>sync</td><td>3,686</td><td class=muted>42</td></tr>
+<tr><td class=s>time</td><td>445</td><td class=muted>5</td></tr>
+<tr><td class=s>file</td><td>3,720</td><td class=muted>42</td></tr>
+<tr><td class=s>mem</td><td>767</td><td class=muted>9</td></tr>
+<tr><td class=s>proc/thr</td><td>31</td><td class=muted>0</td></tr>
+<tr><td class=s>signal</td><td>43</td><td class=muted>0</td></tr>
+<tr><td class=s>other</td><td>113</td><td class=muted>1</td></tr>
+<tr><td class=s muted>total</td><td>8,834</td><td></td></tr></table>
+<table style="width:100%;margin-top:4px"><tr><th class=s>top syscall</th><th>cat</th><th>calls</th></tr>
+<tr><td class=s>semwait_signal</td><td class=muted>sync</td><td>2,661</td></tr>
+<tr><td class=s>stat64</td><td class=muted>file</td><td>1,067</td></tr>
+<tr><td class=s>psynch_cvwait</td><td class=muted>sync</td><td>695</td></tr>
+<tr><td class=s>mmap</td><td class=muted>mem</td><td>505</td></tr>
+<tr><td class=s>gettimeofday</td><td class=muted>time</td><td>445</td></tr>
+<tr><td class=s>ioctl</td><td class=muted>file</td><td>417</td></tr>
+<tr><td class=s>sys_fstat64</td><td class=muted>file</td><td>414</td></tr>
+<tr><td class=s>read</td><td class=muted>file</td><td>382</td></tr>
+</table></div>
+<div class=colbox><div><span class=pill style="background:#d29922">Windows</span> <span class=muted>iocp-afd</span></div>
+<table style="width:100%;margin-top:6px"><tr><th class=s>category</th><th>calls</th><th>%</th></tr>
+<tr><td class=s>poll/wait</td><td>142,960</td><td class=muted>12</td></tr>
+<tr><td class=s>net</td><td>71,337</td><td class=muted>6</td></tr>
+<tr><td class=s>sync</td><td>45,168</td><td class=muted>4</td></tr>
+<tr><td class=s>time</td><td>560,880</td><td class=muted>45</td></tr>
+<tr><td class=s>registry</td><td>46,654</td><td class=muted>4</td></tr>
+<tr><td class=s>file</td><td>87,572</td><td class=muted>7</td></tr>
+<tr><td class=s>mem</td><td>141,428</td><td class=muted>11</td></tr>
+<tr><td class=s>proc/thr</td><td>96,995</td><td class=muted>8</td></tr>
+<tr><td class=s>other</td><td>48,997</td><td class=muted>4</td></tr>
+<tr><td class=s muted>total</td><td>1,241,991</td><td></td></tr></table>
+<table style="width:100%;margin-top:4px"><tr><th class=s>top syscall</th><th>cat</th><th>calls</th></tr>
+<tr><td class=s>NtDelayExecution</td><td class=muted>time</td><td>559,512</td></tr>
+<tr><td class=s>NtRemoveIoCompletion</td><td class=muted>poll/wait</td><td>85,338</td></tr>
+<tr><td class=s>NtDeviceIoControlFile</td><td class=muted>net</td><td>71,192</td></tr>
+<tr><td class=s>NtAllocateVirtualMemory</td><td class=muted>mem</td><td>61,588</td></tr>
+<tr><td class=s>NtClose</td><td class=muted>file</td><td>50,883</td></tr>
+<tr><td class=s>NtQueryVirtualMemory</td><td class=muted>mem</td><td>46,113</td></tr>
+<tr><td class=s>NtSetIoCompletion</td><td class=muted>poll/wait</td><td>45,977</td></tr>
+<tr><td class=s>NtFreeVirtualMemory</td><td class=muted>mem</td><td>30,886</td></tr>
+</table></div>
+</div>
+<h2 id="p11_tls_swarm">p11_tls_swarm</h2>
+<div class=cols>
+<div class=colbox><div><span class=pill style="background:#3fb950">Linux</span> <span class=muted>epoll</span></div>
+<table style="width:100%;margin-top:6px"><tr><th class=s>category</th><th>calls</th><th>%</th></tr>
+<tr><td class=s>poll/wait</td><td>5,551</td><td class=muted>2</td></tr>
+<tr><td class=s>net</td><td>5,653</td><td class=muted>2</td></tr>
+<tr><td class=s>sync</td><td>4,603</td><td class=muted>2</td></tr>
+<tr><td class=s>yield</td><td>191,960</td><td class=muted>69</td></tr>
+<tr><td class=s>time</td><td>13,632</td><td class=muted>5</td></tr>
+<tr><td class=s>file</td><td>48,983</td><td class=muted>18</td></tr>
+<tr><td class=s>mem</td><td>6,992</td><td class=muted>3</td></tr>
+<tr><td class=s>proc/thr</td><td>33</td><td class=muted>0</td></tr>
+<tr><td class=s>signal</td><td>193</td><td class=muted>0</td></tr>
+<tr><td class=s>other</td><td>1,780</td><td class=muted>1</td></tr>
+<tr><td class=s muted>total</td><td>279,380</td><td></td></tr></table>
+<table style="width:100%;margin-top:4px"><tr><th class=s>top syscall</th><th>cat</th><th>calls</th></tr>
+<tr><td class=s>sched_yield</td><td class=muted>yield</td><td>191,960</td></tr>
+<tr><td class=s>clock_nanosleep</td><td class=muted>time</td><td>13,632</td></tr>
+<tr><td class=s>read</td><td class=muted>file</td><td>11,197</td></tr>
+<tr><td class=s>write</td><td class=muted>file</td><td>9,122</td></tr>
+<tr><td class=s>close</td><td class=muted>file</td><td>5,654</td></tr>
+<tr><td class=s>fstat</td><td class=muted>file</td><td>4,788</td></tr>
+<tr><td class=s>madvise</td><td class=muted>mem</td><td>4,758</td></tr>
+<tr><td class=s>ioctl</td><td class=muted>file</td><td>4,684</td></tr>
+</table></div>
+<div class=colbox><div><span class=pill style="background:#58a6ff">macOS</span> <span class=muted>kqueue</span></div>
+<table style="width:100%;margin-top:6px"><tr><th class=s>category</th><th>calls</th><th>%</th></tr>
+<tr><td class=s>poll/wait</td><td>71,491</td><td class=muted>5</td></tr>
+<tr><td class=s>net</td><td>128,571</td><td class=muted>8</td></tr>
+<tr><td class=s>sync</td><td>111,327</td><td class=muted>7</td></tr>
+<tr><td class=s>time</td><td>848</td><td class=muted>0</td></tr>
+<tr><td class=s>file</td><td>1,201,574</td><td class=muted>79</td></tr>
+<tr><td class=s>mem</td><td>2,502</td><td class=muted>0</td></tr>
+<tr><td class=s>proc/thr</td><td>42</td><td class=muted>0</td></tr>
+<tr><td class=s>signal</td><td>45</td><td class=muted>0</td></tr>
+<tr><td class=s>other</td><td>137</td><td class=muted>0</td></tr>
+<tr><td class=s muted>total</td><td>1,516,537</td><td></td></tr></table>
+<table style="width:100%;margin-top:4px"><tr><th class=s>top syscall</th><th>cat</th><th>calls</th></tr>
+<tr><td class=s>write</td><td class=muted>file</td><td>257,476</td></tr>
+<tr><td class=s>read</td><td class=muted>file</td><td>218,014</td></tr>
+<tr><td class=s>ioctl</td><td class=muted>file</td><td>164,331</td></tr>
+<tr><td class=s>lseek</td><td class=muted>file</td><td>148,163</td></tr>
+<tr><td class=s>sys_fstat64</td><td class=muted>file</td><td>98,937</td></tr>
+<tr><td class=s>kevent</td><td class=muted>poll/wait</td><td>71,487</td></tr>
+<tr><td class=s>sys_close</td><td class=muted>file</td><td>66,336</td></tr>
+<tr><td class=s>psynch_cvwait</td><td class=muted>sync</td><td>54,510</td></tr>
+</table></div>
+<div class=colbox><div><span class=pill style="background:#d29922">Windows</span> <span class=muted>iocp-afd</span></div>
+<table style="width:100%;margin-top:6px"><tr><th class=s>category</th><th>calls</th><th>%</th></tr>
+<tr><td class=s>poll/wait</td><td>33,839</td><td class=muted>3</td></tr>
+<tr><td class=s>net</td><td>77,908</td><td class=muted>6</td></tr>
+<tr><td class=s>sync</td><td>175,514</td><td class=muted>14</td></tr>
+<tr><td class=s>time</td><td>670,080</td><td class=muted>52</td></tr>
+<tr><td class=s>registry</td><td>5,326</td><td class=muted>0</td></tr>
+<tr><td class=s>file</td><td>235,169</td><td class=muted>18</td></tr>
+<tr><td class=s>mem</td><td>37,576</td><td class=muted>3</td></tr>
+<tr><td class=s>proc/thr</td><td>8,302</td><td class=muted>1</td></tr>
+<tr><td class=s>other</td><td>45,674</td><td class=muted>4</td></tr>
+<tr><td class=s muted>total</td><td>1,289,388</td><td></td></tr></table>
+<table style="width:100%;margin-top:4px"><tr><th class=s>top syscall</th><th>cat</th><th>calls</th></tr>
+<tr><td class=s>NtDelayExecution</td><td class=muted>time</td><td>669,943</td></tr>
+<tr><td class=s>NtDeviceIoControlFile</td><td class=muted>net</td><td>77,860</td></tr>
+<tr><td class=s>NtSetEvent</td><td class=muted>sync</td><td>65,501</td></tr>
+<tr><td class=s>NtClose</td><td class=muted>file</td><td>43,355</td></tr>
+<tr><td class=s>NtWaitForMultipleObjects</td><td class=muted>sync</td><td>40,351</td></tr>
+<tr><td class=s>NtQueryInformationFile</td><td class=muted>file</td><td>37,953</td></tr>
+<tr><td class=s>NtWriteFile</td><td class=muted>file</td><td>36,565</td></tr>
+<tr><td class=s>NtReadFile</td><td class=muted>file</td><td>32,548</td></tr>
+</table></div>
+</div>
+<h2 id="p16_file_copier">p16_file_copier</h2>
+<div class=cols>
+<div class=colbox><div><span class=pill style="background:#3fb950">Linux</span> <span class=muted>epoll</span></div>
+<table style="width:100%;margin-top:6px"><tr><th class=s>category</th><th>calls</th><th>%</th></tr>
+<tr><td class=s>poll/wait</td><td>2,227</td><td class=muted>2</td></tr>
+<tr><td class=s>sync</td><td>3,643</td><td class=muted>3</td></tr>
+<tr><td class=s>yield</td><td>84,320</td><td class=muted>70</td></tr>
+<tr><td class=s>time</td><td>3,932</td><td class=muted>3</td></tr>
+<tr><td class=s>file</td><td>22,603</td><td class=muted>19</td></tr>
+<tr><td class=s>mem</td><td>2,822</td><td class=muted>2</td></tr>
+<tr><td class=s>proc/thr</td><td>29</td><td class=muted>0</td></tr>
+<tr><td class=s>signal</td><td>186</td><td class=muted>0</td></tr>
+<tr><td class=s>other</td><td>137</td><td class=muted>0</td></tr>
+<tr><td class=s muted>total</td><td>119,899</td><td></td></tr></table>
+<table style="width:100%;margin-top:4px"><tr><th class=s>top syscall</th><th>cat</th><th>calls</th></tr>
+<tr><td class=s>sched_yield</td><td class=muted>yield</td><td>84,320</td></tr>
+<tr><td class=s>read</td><td class=muted>file</td><td>6,550</td></tr>
+<tr><td class=s>clock_nanosleep</td><td class=muted>time</td><td>3,932</td></tr>
+<tr><td class=s>futex</td><td class=muted>sync</td><td>3,643</td></tr>
+<tr><td class=s>write</td><td class=muted>file</td><td>3,413</td></tr>
+<tr><td class=s>fstat</td><td class=muted>file</td><td>2,317</td></tr>
+<tr><td class=s>lseek</td><td class=muted>file</td><td>2,175</td></tr>
+<tr><td class=s>madvise</td><td class=muted>mem</td><td>1,999</td></tr>
+</table></div>
+<div class=colbox><div><span class=pill style="background:#58a6ff">macOS</span> <span class=muted>kqueue</span></div>
+<table style="width:100%;margin-top:6px"><tr><th class=s>category</th><th>calls</th><th>%</th></tr>
+<tr><td class=s>poll/wait</td><td>86,149</td><td class=muted>7</td></tr>
+<tr><td class=s>sync</td><td>172,766</td><td class=muted>13</td></tr>
+<tr><td class=s>time</td><td>529</td><td class=muted>0</td></tr>
+<tr><td class=s>file</td><td>1,019,251</td><td class=muted>80</td></tr>
+<tr><td class=s>mem</td><td>1,209</td><td class=muted>0</td></tr>
+<tr><td class=s>proc/thr</td><td>31</td><td class=muted>0</td></tr>
+<tr><td class=s>signal</td><td>43</td><td class=muted>0</td></tr>
+<tr><td class=s>other</td><td>134</td><td class=muted>0</td></tr>
+<tr><td class=s muted>total</td><td>1,280,112</td><td></td></tr></table>
+<table style="width:100%;margin-top:4px"><tr><th class=s>top syscall</th><th>cat</th><th>calls</th></tr>
+<tr><td class=s>read</td><td class=muted>file</td><td>312,138</td></tr>
+<tr><td class=s>write</td><td class=muted>file</td><td>256,146</td></tr>
+<tr><td class=s>ioctl</td><td class=muted>file</td><td>133,689</td></tr>
+<tr><td class=s>kevent</td><td class=muted>poll/wait</td><td>86,145</td></tr>
+<tr><td class=s>psynch_cvwait</td><td class=muted>sync</td><td>83,293</td></tr>
+<tr><td class=s>sys_fstat64</td><td class=muted>file</td><td>82,892</td></tr>
+<tr><td class=s>lseek</td><td class=muted>file</td><td>82,854</td></tr>
+<tr><td class=s>psynch_cvsignal</td><td class=muted>sync</td><td>82,831</td></tr>
+</table></div>
+<div class=colbox><div><span class=pill style="background:#d29922">Windows</span> <span class=muted>iocp-afd</span></div>
+<table style="width:100%;margin-top:6px"><tr><th class=s>category</th><th>calls</th><th>%</th></tr>
+<tr><td class=s>poll/wait</td><td>18,508</td><td class=muted>2</td></tr>
+<tr><td class=s>net</td><td>26,096</td><td class=muted>3</td></tr>
+<tr><td class=s>sync</td><td>41,461</td><td class=muted>5</td></tr>
+<tr><td class=s>time</td><td>160,111</td><td class=muted>21</td></tr>
+<tr><td class=s>registry</td><td>4,203</td><td class=muted>1</td></tr>
+<tr><td class=s>file</td><td>367,759</td><td class=muted>47</td></tr>
+<tr><td class=s>mem</td><td>27,055</td><td class=muted>3</td></tr>
+<tr><td class=s>proc/thr</td><td>83,515</td><td class=muted>11</td></tr>
+<tr><td class=s>other</td><td>49,844</td><td class=muted>6</td></tr>
+<tr><td class=s muted>total</td><td>778,552</td><td></td></tr></table>
+<table style="width:100%;margin-top:4px"><tr><th class=s>top syscall</th><th>cat</th><th>calls</th></tr>
+<tr><td class=s>NtDelayExecution</td><td class=muted>time</td><td>159,975</td></tr>
+<tr><td class=s>NtClose</td><td class=muted>file</td><td>141,014</td></tr>
+<tr><td class=s>NtOpenSymbolicLinkObject</td><td class=muted>file</td><td>85,417</td></tr>
+<tr><td class=s>NtOpenDirectoryObject</td><td class=muted>file</td><td>84,908</td></tr>
+<tr><td class=s>NtQueryInformationThread</td><td class=muted>proc/thr</td><td>40,324</td></tr>
+<tr><td class=s>NtQuerySymbolicLinkObject</td><td class=muted>other</td><td>28,401</td></tr>
+<tr><td class=s>NtDeviceIoControlFile</td><td class=muted>net</td><td>26,067</td></tr>
+<tr><td class=s>NtWaitForSingleObject</td><td class=muted>sync</td><td>19,040</td></tr>
+</table></div>
+</div>
+<h2 id="p17_tiny_file_storm">p17_tiny_file_storm</h2>
+<div class=cols>
+<div class=colbox><div><span class=pill style="background:#3fb950">Linux</span> <span class=muted>epoll</span></div>
+<table style="width:100%;margin-top:6px"><tr><th class=s>category</th><th>calls</th><th>%</th></tr>
+<tr><td class=s>poll/wait</td><td>1,896</td><td class=muted>2</td></tr>
+<tr><td class=s>sync</td><td>4,776</td><td class=muted>4</td></tr>
+<tr><td class=s>yield</td><td>88,640</td><td class=muted>71</td></tr>
+<tr><td class=s>time</td><td>3,423</td><td class=muted>3</td></tr>
+<tr><td class=s>file</td><td>22,924</td><td class=muted>18</td></tr>
+<tr><td class=s>mem</td><td>3,030</td><td class=muted>2</td></tr>
+<tr><td class=s>proc/thr</td><td>29</td><td class=muted>0</td></tr>
+<tr><td class=s>signal</td><td>186</td><td class=muted>0</td></tr>
+<tr><td class=s>other</td><td>137</td><td class=muted>0</td></tr>
+<tr><td class=s muted>total</td><td>125,041</td><td></td></tr></table>
+<table style="width:100%;margin-top:4px"><tr><th class=s>top syscall</th><th>cat</th><th>calls</th></tr>
+<tr><td class=s>sched_yield</td><td class=muted>yield</td><td>88,640</td></tr>
+<tr><td class=s>read</td><td class=muted>file</td><td>6,144</td></tr>
+<tr><td class=s>futex</td><td class=muted>sync</td><td>4,776</td></tr>
+<tr><td class=s>clock_nanosleep</td><td class=muted>time</td><td>3,423</td></tr>
+<tr><td class=s>write</td><td class=muted>file</td><td>2,787</td></tr>
+<tr><td class=s>newfstatat</td><td class=muted>file</td><td>2,388</td></tr>
+<tr><td class=s>fstat</td><td class=muted>file</td><td>2,266</td></tr>
+<tr><td class=s>madvise</td><td class=muted>mem</td><td>2,205</td></tr>
+</table></div>
+<div class=colbox><div><span class=pill style="background:#58a6ff">macOS</span> <span class=muted>kqueue</span></div>
+<table style="width:100%;margin-top:6px"><tr><th class=s>category</th><th>calls</th><th>%</th></tr>
+<tr><td class=s>poll/wait</td><td>131,739</td><td class=muted>9</td></tr>
+<tr><td class=s>sync</td><td>254,186</td><td class=muted>18</td></tr>
+<tr><td class=s>time</td><td>306</td><td class=muted>0</td></tr>
+<tr><td class=s>file</td><td>1,020,134</td><td class=muted>72</td></tr>
+<tr><td class=s>mem</td><td>779</td><td class=muted>0</td></tr>
+<tr><td class=s>proc/thr</td><td>31</td><td class=muted>0</td></tr>
+<tr><td class=s>signal</td><td>43</td><td class=muted>0</td></tr>
+<tr><td class=s>other</td><td>134</td><td class=muted>0</td></tr>
+<tr><td class=s muted>total</td><td>1,407,352</td><td></td></tr></table>
+<table style="width:100%;margin-top:4px"><tr><th class=s>top syscall</th><th>cat</th><th>calls</th></tr>
+<tr><td class=s>read</td><td class=muted>file</td><td>311,828</td></tr>
+<tr><td class=s>write</td><td class=muted>file</td><td>273,486</td></tr>
+<tr><td class=s>kevent</td><td class=muted>poll/wait</td><td>131,735</td></tr>
+<tr><td class=s>psynch_cvwait</td><td class=muted>sync</td><td>121,132</td></tr>
+<tr><td class=s>psynch_cvsignal</td><td class=muted>sync</td><td>120,822</td></tr>
+<tr><td class=s>ioctl</td><td class=muted>file</td><td>104,209</td></tr>
+<tr><td class=s>sys_fstat64</td><td class=muted>file</td><td>75,100</td></tr>
+<tr><td class=s>lseek</td><td class=muted>file</td><td>74,914</td></tr>
+</table></div>
+<div class=colbox><div><span class=pill style="background:#d29922">Windows</span> <span class=muted>iocp-afd</span></div>
+<table style="width:100%;margin-top:6px"><tr><th class=s>category</th><th>calls</th><th>%</th></tr>
+<tr><td class=s>poll/wait</td><td>55,931</td><td class=muted>5</td></tr>
+<tr><td class=s>net</td><td>69,137</td><td class=muted>6</td></tr>
+<tr><td class=s>sync</td><td>89,945</td><td class=muted>8</td></tr>
+<tr><td class=s>time</td><td>379,894</td><td class=muted>35</td></tr>
+<tr><td class=s>registry</td><td>6,469</td><td class=muted>1</td></tr>
+<tr><td class=s>file</td><td>267,209</td><td class=muted>25</td></tr>
+<tr><td class=s>mem</td><td>51,323</td><td class=muted>5</td></tr>
+<tr><td class=s>proc/thr</td><td>97,858</td><td class=muted>9</td></tr>
+<tr><td class=s>other</td><td>58,673</td><td class=muted>5</td></tr>
+<tr><td class=s muted>total</td><td>1,076,439</td><td></td></tr></table>
+<table style="width:100%;margin-top:4px"><tr><th class=s>top syscall</th><th>cat</th><th>calls</th></tr>
+<tr><td class=s>NtDelayExecution</td><td class=muted>time</td><td>379,763</td></tr>
+<tr><td class=s>NtClose</td><td class=muted>file</td><td>102,739</td></tr>
+<tr><td class=s>NtDeviceIoControlFile</td><td class=muted>net</td><td>69,096</td></tr>
+<tr><td class=s>NtWaitForSingleObject</td><td class=muted>sync</td><td>49,136</td></tr>
+<tr><td class=s>NtQueryInformationThread</td><td class=muted>proc/thr</td><td>48,834</td></tr>
+<tr><td class=s>NtQueryVirtualMemory</td><td class=muted>mem</td><td>37,955</td></tr>
+<tr><td class=s>NtQueryInformationFile</td><td class=muted>file</td><td>36,391</td></tr>
+<tr><td class=s>NtOpenSymbolicLinkObject</td><td class=muted>file</td><td>35,709</td></tr>
+</table></div>
+</div>
+<h2 id="p21_sqlite">p21_sqlite</h2>
+<div class=cols>
+<div class=colbox><div><span class=pill style="background:#3fb950">Linux</span> <span class=muted>epoll</span></div>
+<table style="width:100%;margin-top:6px"><tr><th class=s>category</th><th>calls</th><th>%</th></tr>
+<tr><td class=s>poll/wait</td><td>114</td><td class=muted>0</td></tr>
+<tr><td class=s>sync</td><td>52,791</td><td class=muted>43</td></tr>
+<tr><td class=s>yield</td><td>20,760</td><td class=muted>17</td></tr>
+<tr><td class=s>time</td><td>4,969</td><td class=muted>4</td></tr>
+<tr><td class=s>file</td><td>31,276</td><td class=muted>26</td></tr>
+<tr><td class=s>mem</td><td>8,045</td><td class=muted>7</td></tr>
+<tr><td class=s>proc/thr</td><td>37</td><td class=muted>0</td></tr>
+<tr><td class=s>signal</td><td>210</td><td class=muted>0</td></tr>
+<tr><td class=s>other</td><td>3,342</td><td class=muted>3</td></tr>
+<tr><td class=s muted>total</td><td>121,544</td><td></td></tr></table>
+<table style="width:100%;margin-top:4px"><tr><th class=s>top syscall</th><th>cat</th><th>calls</th></tr>
+<tr><td class=s>futex</td><td class=muted>sync</td><td>52,791</td></tr>
+<tr><td class=s>sched_yield</td><td class=muted>yield</td><td>20,760</td></tr>
+<tr><td class=s>fcntl</td><td class=muted>file</td><td>9,445</td></tr>
+<tr><td class=s>pread64</td><td class=muted>file</td><td>7,323</td></tr>
+<tr><td class=s>clock_nanosleep</td><td class=muted>time</td><td>4,969</td></tr>
+<tr><td class=s>pwrite64</td><td class=muted>file</td><td>4,372</td></tr>
+<tr><td class=s>madvise</td><td class=muted>mem</td><td>3,679</td></tr>
+<tr><td class=s>newfstatat</td><td class=muted>file</td><td>3,217</td></tr>
+</table></div>
+<div class=colbox><div><span class=pill style="background:#58a6ff">macOS</span> <span class=muted>kqueue</span></div>
+<table style="width:100%;margin-top:6px"><tr><th class=s>category</th><th>calls</th><th>%</th></tr>
+<tr><td class=s>poll/wait</td><td>1,074</td><td class=muted>0</td></tr>
+<tr><td class=s>sync</td><td>75,845</td><td class=muted>8</td></tr>
+<tr><td class=s>time</td><td>51,913</td><td class=muted>6</td></tr>
+<tr><td class=s>file</td><td>742,000</td><td class=muted>79</td></tr>
+<tr><td class=s>mem</td><td>62,722</td><td class=muted>7</td></tr>
+<tr><td class=s>proc/thr</td><td>47</td><td class=muted>0</td></tr>
+<tr><td class=s>signal</td><td>43</td><td class=muted>0</td></tr>
+<tr><td class=s>other</td><td>610</td><td class=muted>0</td></tr>
+<tr><td class=s muted>total</td><td>934,254</td><td></td></tr></table>
+<table style="width:100%;margin-top:4px"><tr><th class=s>top syscall</th><th>cat</th><th>calls</th></tr>
+<tr><td class=s>pread</td><td class=muted>file</td><td>443,907</td></tr>
+<tr><td class=s>sys_fcntl</td><td class=muted>file</td><td>188,285</td></tr>
+<tr><td class=s>guarded_pwrite_np</td><td class=muted>file</td><td>72,047</td></tr>
+<tr><td class=s>gettimeofday</td><td class=muted>time</td><td>51,913</td></tr>
+<tr><td class=s>psynch_cvwait</td><td class=muted>sync</td><td>45,724</td></tr>
+<tr><td class=s>mmap</td><td class=muted>mem</td><td>21,470</td></tr>
+<tr><td class=s>write</td><td class=muted>file</td><td>21,274</td></tr>
+<tr><td class=s>munmap</td><td class=muted>mem</td><td>21,021</td></tr>
+</table></div>
+<div class=colbox><div><span class=pill style="background:#d29922">Windows</span> <span class=muted>iocp-afd</span></div>
+<table style="width:100%;margin-top:6px"><tr><th class=s>category</th><th>calls</th><th>%</th></tr>
+<tr><td class=s>poll/wait</td><td>2,849</td><td class=muted>3</td></tr>
+<tr><td class=s>net</td><td>994</td><td class=muted>1</td></tr>
+<tr><td class=s>sync</td><td>6,671</td><td class=muted>6</td></tr>
+<tr><td class=s>time</td><td>24,791</td><td class=muted>23</td></tr>
+<tr><td class=s>registry</td><td>4,086</td><td class=muted>4</td></tr>
+<tr><td class=s>file</td><td>34,854</td><td class=muted>32</td></tr>
+<tr><td class=s>mem</td><td>6,525</td><td class=muted>6</td></tr>
+<tr><td class=s>proc/thr</td><td>8,184</td><td class=muted>8</td></tr>
+<tr><td class=s>other</td><td>18,981</td><td class=muted>18</td></tr>
+<tr><td class=s muted>total</td><td>107,935</td><td></td></tr></table>
+<table style="width:100%;margin-top:4px"><tr><th class=s>top syscall</th><th>cat</th><th>calls</th></tr>
+<tr><td class=s>NtDelayExecution</td><td class=muted>time</td><td>24,646</td></tr>
+<tr><td class=s>NtClose</td><td class=muted>file</td><td>8,346</td></tr>
+<tr><td class=s>NtReadFile</td><td class=muted>file</td><td>7,951</td></tr>
+<tr><td class=s>NtLockFile</td><td class=muted>other</td><td>6,817</td></tr>
+<tr><td class=s>NtUnlockFile</td><td class=muted>other</td><td>5,877</td></tr>
+<tr><td class=s>NtWriteFile</td><td class=muted>file</td><td>4,749</td></tr>
+<tr><td class=s>NtWaitForAlertByThreadId</td><td class=muted>sync</td><td>4,112</td></tr>
+<tr><td class=s>NtOpenSymbolicLinkObject</td><td class=muted>file</td><td>3,155</td></tr>
+</table></div>
+</div>
+<h2 id="p23_jsonl_gzip">p23_jsonl_gzip</h2>
+<div class=cols>
+<div class=colbox><div><span class=pill style="background:#3fb950">Linux</span> <span class=muted>epoll</span></div>
+<table style="width:100%;margin-top:6px"><tr><th class=s>category</th><th>calls</th><th>%</th></tr>
+<tr><td class=s>poll/wait</td><td>2,107</td><td class=muted>2</td></tr>
+<tr><td class=s>sync</td><td>4,651</td><td class=muted>4</td></tr>
+<tr><td class=s>yield</td><td>77,520</td><td class=muted>70</td></tr>
+<tr><td class=s>time</td><td>3,839</td><td class=muted>3</td></tr>
+<tr><td class=s>file</td><td>19,561</td><td class=muted>18</td></tr>
+<tr><td class=s>mem</td><td>3,482</td><td class=muted>3</td></tr>
+<tr><td class=s>proc/thr</td><td>29</td><td class=muted>0</td></tr>
+<tr><td class=s>signal</td><td>186</td><td class=muted>0</td></tr>
+<tr><td class=s>other</td><td>137</td><td class=muted>0</td></tr>
+<tr><td class=s muted>total</td><td>111,512</td><td></td></tr></table>
+<table style="width:100%;margin-top:4px"><tr><th class=s>top syscall</th><th>cat</th><th>calls</th></tr>
+<tr><td class=s>sched_yield</td><td class=muted>yield</td><td>77,520</td></tr>
+<tr><td class=s>read</td><td class=muted>file</td><td>4,963</td></tr>
+<tr><td class=s>futex</td><td class=muted>sync</td><td>4,651</td></tr>
+<tr><td class=s>clock_nanosleep</td><td class=muted>time</td><td>3,839</td></tr>
+<tr><td class=s>madvise</td><td class=muted>mem</td><td>2,646</td></tr>
+<tr><td class=s>fstat</td><td class=muted>file</td><td>2,427</td></tr>
+<tr><td class=s>lseek</td><td class=muted>file</td><td>2,295</td></tr>
+<tr><td class=s>newfstatat</td><td class=muted>file</td><td>1,990</td></tr>
+</table></div>
+<div class=colbox><div><span class=pill style="background:#58a6ff">macOS</span> <span class=muted>kqueue</span></div>
+<table style="width:100%;margin-top:6px"><tr><th class=s>category</th><th>calls</th><th>%</th></tr>
+<tr><td class=s>poll/wait</td><td>23,718</td><td class=muted>6</td></tr>
+<tr><td class=s>sync</td><td>50,605</td><td class=muted>14</td></tr>
+<tr><td class=s>time</td><td>1,971</td><td class=muted>1</td></tr>
+<tr><td class=s>file</td><td>295,782</td><td class=muted>79</td></tr>
+<tr><td class=s>mem</td><td>1,084</td><td class=muted>0</td></tr>
+<tr><td class=s>proc/thr</td><td>31</td><td class=muted>0</td></tr>
+<tr><td class=s>signal</td><td>43</td><td class=muted>0</td></tr>
+<tr><td class=s>other</td><td>134</td><td class=muted>0</td></tr>
+<tr><td class=s muted>total</td><td>373,368</td><td></td></tr></table>
+<table style="width:100%;margin-top:4px"><tr><th class=s>top syscall</th><th>cat</th><th>calls</th></tr>
+<tr><td class=s>read</td><td class=muted>file</td><td>76,526</td></tr>
+<tr><td class=s>write</td><td class=muted>file</td><td>52,574</td></tr>
+<tr><td class=s>ioctl</td><td class=muted>file</td><td>45,229</td></tr>
+<tr><td class=s>sys_fstat64</td><td class=muted>file</td><td>37,158</td></tr>
+<tr><td class=s>lseek</td><td class=muted>file</td><td>37,129</td></tr>
+<tr><td class=s>psynch_cvwait</td><td class=muted>sync</td><td>24,464</td></tr>
+<tr><td class=s>kevent</td><td class=muted>poll/wait</td><td>23,714</td></tr>
+<tr><td class=s>sys_close</td><td class=muted>file</td><td>22,549</td></tr>
+</table></div>
+<div class=colbox><div><span class=pill style="background:#d29922">Windows</span> <span class=muted>iocp-afd</span></div>
+<table style="width:100%;margin-top:6px"><tr><th class=s>category</th><th>calls</th><th>%</th></tr>
+<tr><td class=s>poll/wait</td><td>16,056</td><td class=muted>2</td></tr>
+<tr><td class=s>net</td><td>23,128</td><td class=muted>3</td></tr>
+<tr><td class=s>sync</td><td>31,921</td><td class=muted>5</td></tr>
+<tr><td class=s>time</td><td>192,103</td><td class=muted>29</td></tr>
+<tr><td class=s>registry</td><td>3,939</td><td class=muted>1</td></tr>
+<tr><td class=s>file</td><td>276,437</td><td class=muted>42</td></tr>
+<tr><td class=s>mem</td><td>28,594</td><td class=muted>4</td></tr>
+<tr><td class=s>proc/thr</td><td>53,743</td><td class=muted>8</td></tr>
+<tr><td class=s>other</td><td>36,917</td><td class=muted>6</td></tr>
+<tr><td class=s muted>total</td><td>662,838</td><td></td></tr></table>
+<table style="width:100%;margin-top:4px"><tr><th class=s>top syscall</th><th>cat</th><th>calls</th></tr>
+<tr><td class=s>NtDelayExecution</td><td class=muted>time</td><td>192,018</td></tr>
+<tr><td class=s>NtClose</td><td class=muted>file</td><td>99,494</td></tr>
+<tr><td class=s>NtOpenSymbolicLinkObject</td><td class=muted>file</td><td>55,388</td></tr>
+<tr><td class=s>NtOpenDirectoryObject</td><td class=muted>file</td><td>54,994</td></tr>
+<tr><td class=s>NtQueryInformationFile</td><td class=muted>file</td><td>26,953</td></tr>
+<tr><td class=s>NtQueryInformationThread</td><td class=muted>proc/thr</td><td>25,921</td></tr>
+<tr><td class=s>NtDeviceIoControlFile</td><td class=muted>net</td><td>23,103</td></tr>
+<tr><td class=s>NtQuerySymbolicLinkObject</td><td class=muted>other</td><td>18,400</td></tr>
+</table></div>
+</div>
+<h2 id="p26_subprocess_echo">p26_subprocess_echo</h2>
+<div class=cols>
+<div class=colbox><div><span class=pill style="background:#3fb950">Linux</span> <span class=muted>epoll</span></div>
+<table style="width:100%;margin-top:6px"><tr><th class=s>category</th><th>calls</th><th>%</th></tr>
+<tr><td class=s>poll/wait</td><td>1,594</td><td class=muted>1</td></tr>
+<tr><td class=s>sync</td><td>3,821</td><td class=muted>3</td></tr>
+<tr><td class=s>yield</td><td>68,560</td><td class=muted>52</td></tr>
+<tr><td class=s>time</td><td>3,640</td><td class=muted>3</td></tr>
+<tr><td class=s>file</td><td>23,629</td><td class=muted>18</td></tr>
+<tr><td class=s>mem</td><td>8,578</td><td class=muted>6</td></tr>
+<tr><td class=s>proc/thr</td><td>2,644</td><td class=muted>2</td></tr>
+<tr><td class=s>signal</td><td>17,037</td><td class=muted>13</td></tr>
+<tr><td class=s>other</td><td>3,022</td><td class=muted>2</td></tr>
+<tr><td class=s muted>total</td><td>132,525</td><td></td></tr></table>
+<table style="width:100%;margin-top:4px"><tr><th class=s>top syscall</th><th>cat</th><th>calls</th></tr>
+<tr><td class=s>sched_yield</td><td class=muted>yield</td><td>68,560</td></tr>
+<tr><td class=s>rt_sigaction</td><td class=muted>signal</td><td>16,256</td></tr>
+<tr><td class=s>read</td><td class=muted>file</td><td>5,076</td></tr>
+<tr><td class=s>close</td><td class=muted>file</td><td>4,429</td></tr>
+<tr><td class=s>futex</td><td class=muted>sync</td><td>3,821</td></tr>
+<tr><td class=s>clock_nanosleep</td><td class=muted>time</td><td>3,640</td></tr>
+<tr><td class=s>mmap</td><td class=muted>mem</td><td>3,164</td></tr>
+<tr><td class=s>fstat</td><td class=muted>file</td><td>3,143</td></tr>
+</table></div>
+<div class=colbox><div><span class=pill style="background:#58a6ff">macOS</span> <span class=muted>kqueue</span></div>
+<table style="width:100%;margin-top:6px"><tr><th class=s>category</th><th>calls</th><th>%</th></tr>
+<tr><td class=s>poll/wait</td><td>41,567</td><td class=muted>6</td></tr>
+<tr><td class=s>sync</td><td>71,336</td><td class=muted>11</td></tr>
+<tr><td class=s>time</td><td>814</td><td class=muted>0</td></tr>
+<tr><td class=s>file</td><td>504,803</td><td class=muted>75</td></tr>
+<tr><td class=s>mem</td><td>5,892</td><td class=muted>1</td></tr>
+<tr><td class=s>proc/thr</td><td>28,408</td><td class=muted>4</td></tr>
+<tr><td class=s>signal</td><td>3,581</td><td class=muted>1</td></tr>
+<tr><td class=s>other</td><td>15,560</td><td class=muted>2</td></tr>
+<tr><td class=s muted>total</td><td>671,961</td><td></td></tr></table>
+<table style="width:100%;margin-top:4px"><tr><th class=s>top syscall</th><th>cat</th><th>calls</th></tr>
+<tr><td class=s>sys_close</td><td class=muted>file</td><td>288,213</td></tr>
+<tr><td class=s>read</td><td class=muted>file</td><td>75,886</td></tr>
+<tr><td class=s>write</td><td class=muted>file</td><td>67,777</td></tr>
+<tr><td class=s>kevent</td><td class=muted>poll/wait</td><td>41,563</td></tr>
+<tr><td class=s>ioctl</td><td class=muted>file</td><td>34,345</td></tr>
+<tr><td class=s>psynch_cvwait</td><td class=muted>sync</td><td>27,905</td></tr>
+<tr><td class=s>psynch_cvsignal</td><td class=muted>sync</td><td>27,155</td></tr>
+<tr><td class=s>execve</td><td class=muted>proc/thr</td><td>21,228</td></tr>
+</table></div>
+<div class=colbox><div><span class=pill style="background:#d29922">Windows</span> <span class=muted>iocp-afd</span></div>
+<table style="width:100%;margin-top:6px"><tr><th class=s>category</th><th>calls</th><th>%</th></tr>
+<tr><td class=s>poll/wait</td><td>28,421</td><td class=muted>1</td></tr>
+<tr><td class=s>net</td><td>19,377</td><td class=muted>1</td></tr>
+<tr><td class=s>sync</td><td>115,358</td><td class=muted>6</td></tr>
+<tr><td class=s>time</td><td>1,007,729</td><td class=muted>51</td></tr>
+<tr><td class=s>registry</td><td>31,599</td><td class=muted>2</td></tr>
+<tr><td class=s>file</td><td>390,805</td><td class=muted>20</td></tr>
+<tr><td class=s>mem</td><td>87,835</td><td class=muted>4</td></tr>
+<tr><td class=s>proc/thr</td><td>115,028</td><td class=muted>6</td></tr>
+<tr><td class=s>other</td><td>163,290</td><td class=muted>8</td></tr>
+<tr><td class=s muted>total</td><td>1,959,442</td><td></td></tr></table>
+<table style="width:100%;margin-top:4px"><tr><th class=s>top syscall</th><th>cat</th><th>calls</th></tr>
+<tr><td class=s>NtDelayExecution</td><td class=muted>time</td><td>1,004,453</td></tr>
+<tr><td class=s>NtClose</td><td class=muted>file</td><td>99,635</td></tr>
+<tr><td class=s>NtQueryInformationFile</td><td class=muted>file</td><td>92,985</td></tr>
+<tr><td class=s>NtWaitForSingleObject</td><td class=muted>sync</td><td>77,540</td></tr>
+<tr><td class=s>NtQueryInformationByName</td><td class=muted>other</td><td>66,855</td></tr>
+<tr><td class=s>NtQueryVolumeInformationFile</td><td class=muted>file</td><td>58,638</td></tr>
+<tr><td class=s>NtQueryInformationThread</td><td class=muted>proc/thr</td><td>35,103</td></tr>
+<tr><td class=s>NtReleaseSemaphore</td><td class=muted>sync</td><td>28,637</td></tr>
+</table></div>
+</div>
+<h2 id="p33_pty">p33_pty</h2>
+<div class=cols>
+<div class=colbox><div><span class=pill style="background:#3fb950">Linux</span> <span class=muted>epoll</span></div>
+<table style="width:100%;margin-top:6px"><tr><th class=s>category</th><th>calls</th><th>%</th></tr>
+<tr><td class=s>poll/wait</td><td>2,243</td><td class=muted>2</td></tr>
+<tr><td class=s>sync</td><td>4,117</td><td class=muted>3</td></tr>
+<tr><td class=s>yield</td><td>43,360</td><td class=muted>33</td></tr>
+<tr><td class=s>time</td><td>3,281</td><td class=muted>2</td></tr>
+<tr><td class=s>file</td><td>29,035</td><td class=muted>22</td></tr>
+<tr><td class=s>mem</td><td>11,257</td><td class=muted>9</td></tr>
+<tr><td class=s>proc/thr</td><td>5,049</td><td class=muted>4</td></tr>
+<tr><td class=s>signal</td><td>29,154</td><td class=muted>22</td></tr>
+<tr><td class=s>other</td><td>3,845</td><td class=muted>3</td></tr>
+<tr><td class=s muted>total</td><td>131,341</td><td></td></tr></table>
+<table style="width:100%;margin-top:4px"><tr><th class=s>top syscall</th><th>cat</th><th>calls</th></tr>
+<tr><td class=s>sched_yield</td><td class=muted>yield</td><td>43,360</td></tr>
+<tr><td class=s>rt_sigaction</td><td class=muted>signal</td><td>27,476</td></tr>
+<tr><td class=s>ioctl</td><td class=muted>file</td><td>5,930</td></tr>
+<tr><td class=s>mmap</td><td class=muted>mem</td><td>4,979</td></tr>
+<tr><td class=s>read</td><td class=muted>file</td><td>4,588</td></tr>
+<tr><td class=s>close</td><td class=muted>file</td><td>4,220</td></tr>
+<tr><td class=s>futex</td><td class=muted>sync</td><td>4,117</td></tr>
+<tr><td class=s>execve</td><td class=muted>proc/thr</td><td>3,628</td></tr>
+</table></div>
+<div class=colbox><div><span class=pill style="background:#58a6ff">macOS</span> <span class=muted>kqueue</span></div>
+<table style="width:100%;margin-top:6px"><tr><th class=s>category</th><th>calls</th><th>%</th></tr>
+<tr><td class=s>poll/wait</td><td>12,834</td><td class=muted>1</td></tr>
+<tr><td class=s>sync</td><td>31,867</td><td class=muted>3</td></tr>
+<tr><td class=s>time</td><td>1,570</td><td class=muted>0</td></tr>
+<tr><td class=s>file</td><td>841,504</td><td class=muted>89</td></tr>
+<tr><td class=s>mem</td><td>5,610</td><td class=muted>1</td></tr>
+<tr><td class=s>proc/thr</td><td>42,212</td><td class=muted>4</td></tr>
+<tr><td class=s>signal</td><td>7,072</td><td class=muted>1</td></tr>
+<tr><td class=s>other</td><td>6,355</td><td class=muted>1</td></tr>
+<tr><td class=s muted>total</td><td>949,024</td><td></td></tr></table>
+<table style="width:100%;margin-top:4px"><tr><th class=s>top syscall</th><th>cat</th><th>calls</th></tr>
+<tr><td class=s>sys_close</td><td class=muted>file</td><td>733,463</td></tr>
+<tr><td class=s>ioctl</td><td class=muted>file</td><td>29,627</td></tr>
+<tr><td class=s>execve</td><td class=muted>proc/thr</td><td>28,116</td></tr>
+<tr><td class=s>write</td><td class=muted>file</td><td>24,563</td></tr>
+<tr><td class=s>read</td><td class=muted>file</td><td>22,855</td></tr>
+<tr><td class=s>kevent</td><td class=muted>poll/wait</td><td>12,830</td></tr>
+<tr><td class=s>psynch_cvwait</td><td class=muted>sync</td><td>8,704</td></tr>
+<tr><td class=s>psynch_cvsignal</td><td class=muted>sync</td><td>7,638</td></tr>
+</table></div>
+<div class=colbox><div><span class=pill style="background:#d29922">Windows</span> <span class=muted>iocp-afd</span></div>
+<table style="width:100%;margin-top:6px"><tr><th class=s>category</th><th>calls</th><th>%</th></tr>
+<tr><td class=s>poll/wait</td><td>823</td><td class=muted>2</td></tr>
+<tr><td class=s>net</td><td>361</td><td class=muted>1</td></tr>
+<tr><td class=s>sync</td><td>2,934</td><td class=muted>7</td></tr>
+<tr><td class=s>time</td><td>19,878</td><td class=muted>45</td></tr>
+<tr><td class=s>registry</td><td>3,808</td><td class=muted>9</td></tr>
+<tr><td class=s>file</td><td>7,930</td><td class=muted>18</td></tr>
+<tr><td class=s>mem</td><td>1,449</td><td class=muted>3</td></tr>
+<tr><td class=s>proc/thr</td><td>2,657</td><td class=muted>6</td></tr>
+<tr><td class=s>other</td><td>4,006</td><td class=muted>9</td></tr>
+<tr><td class=s muted>total</td><td>43,846</td><td></td></tr></table>
+<table style="width:100%;margin-top:4px"><tr><th class=s>top syscall</th><th>cat</th><th>calls</th></tr>
+<tr><td class=s>NtDelayExecution</td><td class=muted>time</td><td>19,808</td></tr>
+<tr><td class=s>NtWaitForAlertByThreadId</td><td class=muted>sync</td><td>2,392</td></tr>
+<tr><td class=s>NtClose</td><td class=muted>file</td><td>2,244</td></tr>
+<tr><td class=s>NtQueryInformationFile</td><td class=muted>file</td><td>1,914</td></tr>
+<tr><td class=s>NtQueryKey</td><td class=muted>registry</td><td>1,890</td></tr>
+<tr><td class=s>NtQueryVolumeInformationFile</td><td class=muted>file</td><td>1,198</td></tr>
+<tr><td class=s>NtQueryInformationByName</td><td class=muted>other</td><td>1,185</td></tr>
+<tr><td class=s>NtOpenKeyEx</td><td class=muted>registry</td><td>1,168</td></tr>
+</table></div>
+</div>
+<h2 id="p36_million_sleepers">p36_million_sleepers</h2>
+<div class=cols>
+<div class=colbox><div><span class=pill style="background:#3fb950">Linux</span> <span class=muted>epoll</span></div>
+<table style="width:100%;margin-top:6px"><tr><th class=s>category</th><th>calls</th><th>%</th></tr>
+<tr><td class=s>poll/wait</td><td>85</td><td class=muted>0</td></tr>
+<tr><td class=s>sync</td><td>48,402</td><td class=muted>55</td></tr>
+<tr><td class=s>yield</td><td>20,520</td><td class=muted>23</td></tr>
+<tr><td class=s>time</td><td>12,271</td><td class=muted>14</td></tr>
+<tr><td class=s>file</td><td>5,334</td><td class=muted>6</td></tr>
+<tr><td class=s>mem</td><td>1,039</td><td class=muted>1</td></tr>
+<tr><td class=s>proc/thr</td><td>29</td><td class=muted>0</td></tr>
+<tr><td class=s>signal</td><td>186</td><td class=muted>0</td></tr>
+<tr><td class=s>other</td><td>125</td><td class=muted>0</td></tr>
+<tr><td class=s muted>total</td><td>87,991</td><td></td></tr></table>
+<table style="width:100%;margin-top:4px"><tr><th class=s>top syscall</th><th>cat</th><th>calls</th></tr>
+<tr><td class=s>futex</td><td class=muted>sync</td><td>48,402</td></tr>
+<tr><td class=s>sched_yield</td><td class=muted>yield</td><td>20,520</td></tr>
+<tr><td class=s>clock_nanosleep</td><td class=muted>time</td><td>12,271</td></tr>
+<tr><td class=s>newfstatat</td><td class=muted>file</td><td>1,689</td></tr>
+<tr><td class=s>fstat</td><td class=muted>file</td><td>769</td></tr>
+<tr><td class=s>read</td><td class=muted>file</td><td>696</td></tr>
+<tr><td class=s>lseek</td><td class=muted>file</td><td>632</td></tr>
+<tr><td class=s>mmap</td><td class=muted>mem</td><td>540</td></tr>
+</table></div>
+<div class=colbox><div><span class=pill style="background:#58a6ff">macOS</span> <span class=muted>kqueue</span></div>
+<table style="width:100%;margin-top:6px"><tr><th class=s>category</th><th>calls</th><th>%</th></tr>
+<tr><td class=s>poll/wait</td><td>1,097</td><td class=muted>1</td></tr>
+<tr><td class=s>sync</td><td>70,612</td><td class=muted>54</td></tr>
+<tr><td class=s>time</td><td>54,561</td><td class=muted>42</td></tr>
+<tr><td class=s>file</td><td>3,792</td><td class=muted>3</td></tr>
+<tr><td class=s>mem</td><td>763</td><td class=muted>1</td></tr>
+<tr><td class=s>proc/thr</td><td>15</td><td class=muted>0</td></tr>
+<tr><td class=s>signal</td><td>43</td><td class=muted>0</td></tr>
+<tr><td class=s>other</td><td>110</td><td class=muted>0</td></tr>
+<tr><td class=s muted>total</td><td>130,993</td><td></td></tr></table>
+<table style="width:100%;margin-top:4px"><tr><th class=s>top syscall</th><th>cat</th><th>calls</th></tr>
+<tr><td class=s>gettimeofday</td><td class=muted>time</td><td>54,561</td></tr>
+<tr><td class=s>psynch_cvwait</td><td class=muted>sync</td><td>54,519</td></tr>
+<tr><td class=s>semwait_signal</td><td class=muted>sync</td><td>16,017</td></tr>
+<tr><td class=s>kevent</td><td class=muted>poll/wait</td><td>1,093</td></tr>
+<tr><td class=s>stat64</td><td class=muted>file</td><td>1,073</td></tr>
+<tr><td class=s>mmap</td><td class=muted>mem</td><td>499</td></tr>
+<tr><td class=s>sys_fstat64</td><td class=muted>file</td><td>414</td></tr>
+<tr><td class=s>ioctl</td><td class=muted>file</td><td>413</td></tr>
+</table></div>
+<div class=colbox><div><span class=pill style="background:#d29922">Windows</span> <span class=muted>iocp-afd</span></div>
+<table style="width:100%;margin-top:6px"><tr><th class=s>category</th><th>calls</th><th>%</th></tr>
+<tr><td class=s>poll/wait</td><td>2,396</td><td class=muted>3</td></tr>
+<tr><td class=s>net</td><td>1,124</td><td class=muted>1</td></tr>
+<tr><td class=s>sync</td><td>6,538</td><td class=muted>8</td></tr>
+<tr><td class=s>time</td><td>27,667</td><td class=muted>35</td></tr>
+<tr><td class=s>registry</td><td>4,349</td><td class=muted>5</td></tr>
+<tr><td class=s>file</td><td>16,731</td><td class=muted>21</td></tr>
+<tr><td class=s>mem</td><td>2,270</td><td class=muted>3</td></tr>
+<tr><td class=s>proc/thr</td><td>10,712</td><td class=muted>14</td></tr>
+<tr><td class=s>other</td><td>7,449</td><td class=muted>9</td></tr>
+<tr><td class=s muted>total</td><td>79,236</td><td></td></tr></table>
+<table style="width:100%;margin-top:4px"><tr><th class=s>top syscall</th><th>cat</th><th>calls</th></tr>
+<tr><td class=s>NtDelayExecution</td><td class=muted>time</td><td>27,397</td></tr>
+<tr><td class=s>NtClose</td><td class=muted>file</td><td>6,579</td></tr>
+<tr><td class=s>NtOpenProcess</td><td class=muted>proc/thr</td><td>4,218</td></tr>
+<tr><td class=s>NtWaitForAlertByThreadId</td><td class=muted>sync</td><td>4,083</td></tr>
+<tr><td class=s>NtGdiDdDDIQueryStatistics</td><td class=muted>file</td><td>3,507</td></tr>
+<tr><td class=s>NtQueryKey</td><td class=muted>registry</td><td>1,982</td></tr>
+<tr><td class=s>NtQueryInformationFile</td><td class=muted>file</td><td>1,966</td></tr>
+<tr><td class=s>NtQueryInformationProcess</td><td class=muted>proc/thr</td><td>1,953</td></tr>
+</table></div>
+</div>
+<h2 id="p38_cpu_hog_isolation">p38_cpu_hog_isolation</h2>
+<div class=cols>
+<div class=colbox><div><span class=pill style="background:#3fb950">Linux</span> <span class=muted>epoll</span></div>
+<table style="width:100%;margin-top:6px"><tr><th class=s>category</th><th>calls</th><th>%</th></tr>
+<tr><td class=s>poll/wait</td><td>90</td><td class=muted>0</td></tr>
+<tr><td class=s>sync</td><td>790</td><td class=muted>2</td></tr>
+<tr><td class=s>yield</td><td>22,760</td><td class=muted>68</td></tr>
+<tr><td class=s>time</td><td>3,404</td><td class=muted>10</td></tr>
+<tr><td class=s>file</td><td>5,335</td><td class=muted>16</td></tr>
+<tr><td class=s>mem</td><td>938</td><td class=muted>3</td></tr>
+<tr><td class=s>proc/thr</td><td>29</td><td class=muted>0</td></tr>
+<tr><td class=s>signal</td><td>186</td><td class=muted>1</td></tr>
+<tr><td class=s>other</td><td>125</td><td class=muted>0</td></tr>
+<tr><td class=s muted>total</td><td>33,657</td><td></td></tr></table>
+<table style="width:100%;margin-top:4px"><tr><th class=s>top syscall</th><th>cat</th><th>calls</th></tr>
+<tr><td class=s>sched_yield</td><td class=muted>yield</td><td>22,760</td></tr>
+<tr><td class=s>clock_nanosleep</td><td class=muted>time</td><td>3,404</td></tr>
+<tr><td class=s>newfstatat</td><td class=muted>file</td><td>1,689</td></tr>
+<tr><td class=s>futex</td><td class=muted>sync</td><td>790</td></tr>
+<tr><td class=s>fstat</td><td class=muted>file</td><td>769</td></tr>
+<tr><td class=s>read</td><td class=muted>file</td><td>696</td></tr>
+<tr><td class=s>lseek</td><td class=muted>file</td><td>632</td></tr>
+<tr><td class=s>openat</td><td class=muted>file</td><td>491</td></tr>
+</table></div>
+<div class=colbox><div><span class=pill style="background:#58a6ff">macOS</span> <span class=muted>kqueue</span></div>
+<table style="width:100%;margin-top:6px"><tr><th class=s>category</th><th>calls</th><th>%</th></tr>
+<tr><td class=s>poll/wait</td><td>42</td><td class=muted>0</td></tr>
+<tr><td class=s>sync</td><td>3,833</td><td class=muted>42</td></tr>
+<tr><td class=s>time</td><td>701</td><td class=muted>8</td></tr>
+<tr><td class=s>file</td><td>3,633</td><td class=muted>40</td></tr>
+<tr><td class=s>mem</td><td>660</td><td class=muted>7</td></tr>
+<tr><td class=s>proc/thr</td><td>15</td><td class=muted>0</td></tr>
+<tr><td class=s>signal</td><td>43</td><td class=muted>0</td></tr>
+<tr><td class=s>other</td><td>110</td><td class=muted>1</td></tr>
+<tr><td class=s muted>total</td><td>9,037</td><td></td></tr></table>
+<table style="width:100%;margin-top:4px"><tr><th class=s>top syscall</th><th>cat</th><th>calls</th></tr>
+<tr><td class=s>semwait_signal</td><td class=muted>sync</td><td>3,126</td></tr>
+<tr><td class=s>stat64</td><td class=muted>file</td><td>1,073</td></tr>
+<tr><td class=s>psynch_cvwait</td><td class=muted>sync</td><td>701</td></tr>
+<tr><td class=s>gettimeofday</td><td class=muted>time</td><td>701</td></tr>
+<tr><td class=s>sys_fstat64</td><td class=muted>file</td><td>414</td></tr>
+<tr><td class=s>ioctl</td><td class=muted>file</td><td>413</td></tr>
+<tr><td class=s>mmap</td><td class=muted>mem</td><td>394</td></tr>
+<tr><td class=s>lseek</td><td class=muted>file</td><td>381</td></tr>
+</table></div>
+<div class=colbox><div><span class=pill style="background:#d29922">Windows</span> <span class=muted>iocp-afd</span></div>
+<table style="width:100%;margin-top:6px"><tr><th class=s>category</th><th>calls</th><th>%</th></tr>
+<tr><td class=s>poll/wait</td><td>1,361</td><td class=muted>3</td></tr>
+<tr><td class=s>net</td><td>586</td><td class=muted>1</td></tr>
+<tr><td class=s>sync</td><td>1,458</td><td class=muted>3</td></tr>
+<tr><td class=s>time</td><td>21,490</td><td class=muted>42</td></tr>
+<tr><td class=s>registry</td><td>3,888</td><td class=muted>8</td></tr>
+<tr><td class=s>file</td><td>10,734</td><td class=muted>21</td></tr>
+<tr><td class=s>mem</td><td>1,790</td><td class=muted>3</td></tr>
+<tr><td class=s>proc/thr</td><td>5,284</td><td class=muted>10</td></tr>
+<tr><td class=s>other</td><td>4,997</td><td class=muted>10</td></tr>
+<tr><td class=s muted>total</td><td>51,588</td><td></td></tr></table>
+<table style="width:100%;margin-top:4px"><tr><th class=s>top syscall</th><th>cat</th><th>calls</th></tr>
+<tr><td class=s>NtDelayExecution</td><td class=muted>time</td><td>21,373</td></tr>
+<tr><td class=s>NtClose</td><td class=muted>file</td><td>3,743</td></tr>
+<tr><td class=s>NtQueryKey</td><td class=muted>registry</td><td>1,891</td></tr>
+<tr><td class=s>NtQueryInformationFile</td><td class=muted>file</td><td>1,877</td></tr>
+<tr><td class=s>NtOpenProcess</td><td class=muted>proc/thr</td><td>1,417</td></tr>
+<tr><td class=s>NtQueryInformationByName</td><td class=muted>other</td><td>1,176</td></tr>
+<tr><td class=s>NtQueryVolumeInformationFile</td><td class=muted>file</td><td>1,174</td></tr>
+<tr><td class=s>NtGdiDdDDIQueryStatistics</td><td class=muted>file</td><td>1,169</td></tr>
+</table></div>
+</div>
+<h2 id="p40_work_stealing">p40_work_stealing</h2>
+<div class=cols>
+<div class=colbox><div><span class=pill style="background:#3fb950">Linux</span> <span class=muted>epoll</span></div>
+<table style="width:100%;margin-top:6px"><tr><th class=s>category</th><th>calls</th><th>%</th></tr>
+<tr><td class=s>poll/wait</td><td>102</td><td class=muted>0</td></tr>
+<tr><td class=s>sync</td><td>846</td><td class=muted>1</td></tr>
+<tr><td class=s>yield</td><td>21,600</td><td class=muted>34</td></tr>
+<tr><td class=s>time</td><td>2,919</td><td class=muted>5</td></tr>
+<tr><td class=s>file</td><td>5,333</td><td class=muted>9</td></tr>
+<tr><td class=s>mem</td><td>31,477</td><td class=muted>50</td></tr>
+<tr><td class=s>proc/thr</td><td>29</td><td class=muted>0</td></tr>
+<tr><td class=s>signal</td><td>186</td><td class=muted>0</td></tr>
+<tr><td class=s>other</td><td>125</td><td class=muted>0</td></tr>
+<tr><td class=s muted>total</td><td>62,617</td><td></td></tr></table>
+<table style="width:100%;margin-top:4px"><tr><th class=s>top syscall</th><th>cat</th><th>calls</th></tr>
+<tr><td class=s>madvise</td><td class=muted>mem</td><td>28,964</td></tr>
+<tr><td class=s>sched_yield</td><td class=muted>yield</td><td>21,600</td></tr>
+<tr><td class=s>clock_nanosleep</td><td class=muted>time</td><td>2,919</td></tr>
+<tr><td class=s>newfstatat</td><td class=muted>file</td><td>1,689</td></tr>
+<tr><td class=s>mmap</td><td class=muted>mem</td><td>1,555</td></tr>
+<tr><td class=s>mprotect</td><td class=muted>mem</td><td>929</td></tr>
+<tr><td class=s>futex</td><td class=muted>sync</td><td>846</td></tr>
+<tr><td class=s>fstat</td><td class=muted>file</td><td>769</td></tr>
+</table></div>
+<div class=colbox><div><span class=pill style="background:#58a6ff">macOS</span> <span class=muted>kqueue</span></div>
+<table style="width:100%;margin-top:6px"><tr><th class=s>category</th><th>calls</th><th>%</th></tr>
+<tr><td class=s>poll/wait</td><td>10,135</td><td class=muted>1</td></tr>
+<tr><td class=s>sync</td><td>19,976</td><td class=muted>3</td></tr>
+<tr><td class=s>time</td><td>86</td><td class=muted>0</td></tr>
+<tr><td class=s>file</td><td>676,363</td><td class=muted>95</td></tr>
+<tr><td class=s>mem</td><td>3,816</td><td class=muted>1</td></tr>
+<tr><td class=s>proc/thr</td><td>15</td><td class=muted>0</td></tr>
+<tr><td class=s>signal</td><td>43</td><td class=muted>0</td></tr>
+<tr><td class=s>other</td><td>110</td><td class=muted>0</td></tr>
+<tr><td class=s muted>total</td><td>710,544</td><td></td></tr></table>
+<table style="width:100%;margin-top:4px"><tr><th class=s>top syscall</th><th>cat</th><th>calls</th></tr>
+<tr><td class=s>write</td><td class=muted>file</td><td>647,837</td></tr>
+<tr><td class=s>read</td><td class=muted>file</td><td>25,283</td></tr>
+<tr><td class=s>kevent</td><td class=muted>poll/wait</td><td>10,131</td></tr>
+<tr><td class=s>psynch_mutexwait</td><td class=muted>sync</td><td>8,750</td></tr>
+<tr><td class=s>psynch_mutexdrop</td><td class=muted>sync</td><td>8,748</td></tr>
+<tr><td class=s>semwait_signal</td><td class=muted>sync</td><td>2,359</td></tr>
+<tr><td class=s>mmap</td><td class=muted>mem</td><td>2,323</td></tr>
+<tr><td class=s>mprotect</td><td class=muted>mem</td><td>1,417</td></tr>
+</table></div>
+<div class=colbox><div><span class=pill style="background:#d29922">Windows</span> <span class=muted>iocp-afd</span></div>
+<table style="width:100%;margin-top:6px"><tr><th class=s>category</th><th>calls</th><th>%</th></tr>
+<tr><td class=s>poll/wait</td><td>167,121</td><td class=muted>30</td></tr>
+<tr><td class=s>net</td><td>449</td><td class=muted>0</td></tr>
+<tr><td class=s>sync</td><td>678</td><td class=muted>0</td></tr>
+<tr><td class=s>time</td><td>20,308</td><td class=muted>4</td></tr>
+<tr><td class=s>registry</td><td>4,438</td><td class=muted>1</td></tr>
+<tr><td class=s>file</td><td>8,289</td><td class=muted>1</td></tr>
+<tr><td class=s>mem</td><td>262,032</td><td class=muted>47</td></tr>
+<tr><td class=s>proc/thr</td><td>89,675</td><td class=muted>16</td></tr>
+<tr><td class=s>other</td><td>4,244</td><td class=muted>1</td></tr>
+<tr><td class=s muted>total</td><td>557,234</td><td></td></tr></table>
+<table style="width:100%;margin-top:4px"><tr><th class=s>top syscall</th><th>cat</th><th>calls</th></tr>
+<tr><td class=s>NtAllocateVirtualMemory</td><td class=muted>mem</td><td>173,905</td></tr>
+<tr><td class=s>NtSetIoCompletion</td><td class=muted>poll/wait</td><td>166,247</td></tr>
+<tr><td class=s>NtSetInformationProcess</td><td class=muted>proc/thr</td><td>86,827</td></tr>
+<tr><td class=s>NtFreeVirtualMemory</td><td class=muted>mem</td><td>86,710</td></tr>
+<tr><td class=s>NtDelayExecution</td><td class=muted>time</td><td>20,238</td></tr>
+<tr><td class=s>NtClose</td><td class=muted>file</td><td>2,615</td></tr>
+<tr><td class=s>NtQueryKey</td><td class=muted>registry</td><td>2,037</td></tr>
+<tr><td class=s>NtQueryInformationFile</td><td class=muted>file</td><td>1,877</td></tr>
+</table></div>
+</div>
+<h2 id="p46_immortal">p46_immortal</h2>
+<div class=cols>
+<div class=colbox><div><span class=pill style="background:#3fb950">Linux</span> <span class=muted>epoll</span></div>
+<table style="width:100%;margin-top:6px"><tr><th class=s>category</th><th>calls</th><th>%</th></tr>
+<tr><td class=s>poll/wait</td><td>86</td><td class=muted>0</td></tr>
+<tr><td class=s>sync</td><td>39,145</td><td class=muted>56</td></tr>
+<tr><td class=s>yield</td><td>20,801</td><td class=muted>30</td></tr>
+<tr><td class=s>time</td><td>3,163</td><td class=muted>5</td></tr>
+<tr><td class=s>file</td><td>5,346</td><td class=muted>8</td></tr>
+<tr><td class=s>mem</td><td>1,038</td><td class=muted>1</td></tr>
+<tr><td class=s>proc/thr</td><td>29</td><td class=muted>0</td></tr>
+<tr><td class=s>signal</td><td>186</td><td class=muted>0</td></tr>
+<tr><td class=s>other</td><td>125</td><td class=muted>0</td></tr>
+<tr><td class=s muted>total</td><td>69,919</td><td></td></tr></table>
+<table style="width:100%;margin-top:4px"><tr><th class=s>top syscall</th><th>cat</th><th>calls</th></tr>
+<tr><td class=s>futex</td><td class=muted>sync</td><td>39,145</td></tr>
+<tr><td class=s>sched_yield</td><td class=muted>yield</td><td>20,801</td></tr>
+<tr><td class=s>clock_nanosleep</td><td class=muted>time</td><td>3,163</td></tr>
+<tr><td class=s>newfstatat</td><td class=muted>file</td><td>1,692</td></tr>
+<tr><td class=s>fstat</td><td class=muted>file</td><td>771</td></tr>
+<tr><td class=s>read</td><td class=muted>file</td><td>698</td></tr>
+<tr><td class=s>lseek</td><td class=muted>file</td><td>634</td></tr>
+<tr><td class=s>mmap</td><td class=muted>mem</td><td>538</td></tr>
+</table></div>
+<div class=colbox><div><span class=pill style="background:#58a6ff">macOS</span> <span class=muted>kqueue</span></div>
+<table style="width:100%;margin-top:6px"><tr><th class=s>category</th><th>calls</th><th>%</th></tr>
+<tr><td class=s>poll/wait</td><td>19,819</td><td class=muted>1</td></tr>
+<tr><td class=s>sync</td><td>751,894</td><td class=muted>36</td></tr>
+<tr><td class=s>time</td><td>374,539</td><td class=muted>18</td></tr>
+<tr><td class=s>file</td><td>936,508</td><td class=muted>45</td></tr>
+<tr><td class=s>mem</td><td>760</td><td class=muted>0</td></tr>
+<tr><td class=s>proc/thr</td><td>15</td><td class=muted>0</td></tr>
+<tr><td class=s>signal</td><td>43</td><td class=muted>0</td></tr>
+<tr><td class=s>other</td><td>110</td><td class=muted>0</td></tr>
+<tr><td class=s muted>total</td><td>2,083,688</td><td></td></tr></table>
+<table style="width:100%;margin-top:4px"><tr><th class=s>top syscall</th><th>cat</th><th>calls</th></tr>
+<tr><td class=s>write</td><td class=muted>file</td><td>893,256</td></tr>
+<tr><td class=s>gettimeofday</td><td class=muted>time</td><td>374,539</td></tr>
+<tr><td class=s>psynch_cvwait</td><td class=muted>sync</td><td>374,508</td></tr>
+<tr><td class=s>psynch_cvsignal</td><td class=muted>sync</td><td>374,424</td></tr>
+<tr><td class=s>read</td><td class=muted>file</td><td>39,997</td></tr>
+<tr><td class=s>kevent</td><td class=muted>poll/wait</td><td>19,815</td></tr>
+<tr><td class=s>semwait_signal</td><td class=muted>sync</td><td>2,342</td></tr>
+<tr><td class=s>stat64</td><td class=muted>file</td><td>1,077</td></tr>
+</table></div>
+<div class=colbox><div><span class=pill style="background:#d29922">Windows</span> <span class=muted>iocp-afd</span></div>
+<table style="width:100%;margin-top:6px"><tr><th class=s>category</th><th>calls</th><th>%</th></tr>
+<tr><td class=s>poll/wait</td><td>216,300</td><td class=muted>38</td></tr>
+<tr><td class=s>net</td><td>1,079</td><td class=muted>0</td></tr>
+<tr><td class=s>sync</td><td>204,326</td><td class=muted>35</td></tr>
+<tr><td class=s>time</td><td>58,751</td><td class=muted>10</td></tr>
+<tr><td class=s>registry</td><td>20,065</td><td class=muted>3</td></tr>
+<tr><td class=s>file</td><td>26,963</td><td class=muted>5</td></tr>
+<tr><td class=s>mem</td><td>19,448</td><td class=muted>3</td></tr>
+<tr><td class=s>proc/thr</td><td>15,817</td><td class=muted>3</td></tr>
+<tr><td class=s>other</td><td>12,838</td><td class=muted>2</td></tr>
+<tr><td class=s muted>total</td><td>575,587</td><td></td></tr></table>
+<table style="width:100%;margin-top:4px"><tr><th class=s>top syscall</th><th>cat</th><th>calls</th></tr>
+<tr><td class=s>NtSetIoCompletion</td><td class=muted>poll/wait</td><td>213,716</td></tr>
+<tr><td class=s>NtWaitForAlertByThreadId</td><td class=muted>sync</td><td>94,250</td></tr>
+<tr><td class=s>NtAlertThreadByThreadId</td><td class=muted>sync</td><td>93,721</td></tr>
+<tr><td class=s>NtDelayExecution</td><td class=muted>time</td><td>58,491</td></tr>
+<tr><td class=s>NtClose</td><td class=muted>file</td><td>13,495</td></tr>
+<tr><td class=s>NtWaitForSingleObject</td><td class=muted>sync</td><td>13,358</td></tr>
+<tr><td class=s>NtQueryKey</td><td class=muted>registry</td><td>7,217</td></tr>
+<tr><td class=s>NtReadVirtualMemory</td><td class=muted>mem</td><td>5,082</td></tr>
+</table></div>
+</div>
+<h2 id="p54_select_channels">p54_select_channels</h2>
+<div class=cols>
+<div class=colbox><div><span class=pill style="background:#3fb950">Linux</span> <span class=muted>epoll</span></div>
+<table style="width:100%;margin-top:6px"><tr><th class=s>category</th><th>calls</th><th>%</th></tr>
+<tr><td class=s>poll/wait</td><td>83</td><td class=muted>0</td></tr>
+<tr><td class=s>sync</td><td>9,524</td><td class=muted>22</td></tr>
+<tr><td class=s>yield</td><td>23,440</td><td class=muted>54</td></tr>
+<tr><td class=s>time</td><td>3,341</td><td class=muted>8</td></tr>
+<tr><td class=s>file</td><td>5,333</td><td class=muted>12</td></tr>
+<tr><td class=s>mem</td><td>1,051</td><td class=muted>2</td></tr>
+<tr><td class=s>proc/thr</td><td>29</td><td class=muted>0</td></tr>
+<tr><td class=s>signal</td><td>186</td><td class=muted>0</td></tr>
+<tr><td class=s>other</td><td>125</td><td class=muted>0</td></tr>
+<tr><td class=s muted>total</td><td>43,112</td><td></td></tr></table>
+<table style="width:100%;margin-top:4px"><tr><th class=s>top syscall</th><th>cat</th><th>calls</th></tr>
+<tr><td class=s>sched_yield</td><td class=muted>yield</td><td>23,440</td></tr>
+<tr><td class=s>futex</td><td class=muted>sync</td><td>9,524</td></tr>
+<tr><td class=s>clock_nanosleep</td><td class=muted>time</td><td>3,341</td></tr>
+<tr><td class=s>newfstatat</td><td class=muted>file</td><td>1,689</td></tr>
+<tr><td class=s>fstat</td><td class=muted>file</td><td>769</td></tr>
+<tr><td class=s>read</td><td class=muted>file</td><td>695</td></tr>
+<tr><td class=s>lseek</td><td class=muted>file</td><td>632</td></tr>
+<tr><td class=s>mmap</td><td class=muted>mem</td><td>538</td></tr>
+</table></div>
+<div class=colbox><div><span class=pill style="background:#58a6ff">macOS</span> <span class=muted>kqueue</span></div>
+<table style="width:100%;margin-top:6px"><tr><th class=s>category</th><th>calls</th><th>%</th></tr>
+<tr><td class=s>poll/wait</td><td>828</td><td class=muted>5</td></tr>
+<tr><td class=s>sync</td><td>10,388</td><td class=muted>60</td></tr>
+<tr><td class=s>time</td><td>1,414</td><td class=muted>8</td></tr>
+<tr><td class=s>file</td><td>3,705</td><td class=muted>21</td></tr>
+<tr><td class=s>mem</td><td>762</td><td class=muted>4</td></tr>
+<tr><td class=s>proc/thr</td><td>15</td><td class=muted>0</td></tr>
+<tr><td class=s>signal</td><td>43</td><td class=muted>0</td></tr>
+<tr><td class=s>other</td><td>110</td><td class=muted>1</td></tr>
+<tr><td class=s muted>total</td><td>17,265</td><td></td></tr></table>
+<table style="width:100%;margin-top:4px"><tr><th class=s>top syscall</th><th>cat</th><th>calls</th></tr>
+<tr><td class=s>psynch_mutexwait</td><td class=muted>sync</td><td>3,283</td></tr>
+<tr><td class=s>psynch_mutexdrop</td><td class=muted>sync</td><td>3,283</td></tr>
+<tr><td class=s>semwait_signal</td><td class=muted>sync</td><td>2,382</td></tr>
+<tr><td class=s>gettimeofday</td><td class=muted>time</td><td>1,414</td></tr>
+<tr><td class=s>psynch_cvwait</td><td class=muted>sync</td><td>1,410</td></tr>
+<tr><td class=s>stat64</td><td class=muted>file</td><td>1,073</td></tr>
+<tr><td class=s>kevent</td><td class=muted>poll/wait</td><td>824</td></tr>
+<tr><td class=s>mmap</td><td class=muted>mem</td><td>497</td></tr>
+</table></div>
+<div class=colbox><div><span class=pill style="background:#d29922">Windows</span> <span class=muted>iocp-afd</span></div>
+<table style="width:100%;margin-top:6px"><tr><th class=s>category</th><th>calls</th><th>%</th></tr>
+<tr><td class=s>poll/wait</td><td>978</td><td class=muted>2</td></tr>
+<tr><td class=s>net</td><td>447</td><td class=muted>1</td></tr>
+<tr><td class=s>sync</td><td>771</td><td class=muted>2</td></tr>
+<tr><td class=s>time</td><td>22,812</td><td class=muted>48</td></tr>
+<tr><td class=s>registry</td><td>4,192</td><td class=muted>9</td></tr>
+<tr><td class=s>file</td><td>8,485</td><td class=muted>18</td></tr>
+<tr><td class=s>mem</td><td>1,817</td><td class=muted>4</td></tr>
+<tr><td class=s>proc/thr</td><td>3,173</td><td class=muted>7</td></tr>
+<tr><td class=s>other</td><td>4,458</td><td class=muted>9</td></tr>
+<tr><td class=s muted>total</td><td>47,133</td><td></td></tr></table>
+<table style="width:100%;margin-top:4px"><tr><th class=s>top syscall</th><th>cat</th><th>calls</th></tr>
+<tr><td class=s>NtDelayExecution</td><td class=muted>time</td><td>22,724</td></tr>
+<tr><td class=s>NtClose</td><td class=muted>file</td><td>2,479</td></tr>
+<tr><td class=s>NtQueryKey</td><td class=muted>registry</td><td>2,003</td></tr>
+<tr><td class=s>NtQueryInformationFile</td><td class=muted>file</td><td>1,900</td></tr>
+<tr><td class=s>NtOpenKeyEx</td><td class=muted>registry</td><td>1,295</td></tr>
+<tr><td class=s>NtQueryVolumeInformationFile</td><td class=muted>file</td><td>1,194</td></tr>
+<tr><td class=s>NtQueryInformationByName</td><td class=muted>other</td><td>1,176</td></tr>
+<tr><td class=s>NtQueryInformationToken</td><td class=muted>proc/thr</td><td>1,152</td></tr>
+</table></div>
+</div>
+<h2 id="p56_cancellation_storm">p56_cancellation_storm</h2>
+<div class=cols>
+<div class=colbox><div><span class=pill style="background:#3fb950">Linux</span> <span class=muted>epoll</span></div>
+<table style="width:100%;margin-top:6px"><tr><th class=s>category</th><th>calls</th><th>%</th></tr>
+<tr><td class=s>poll/wait</td><td>1,832</td><td class=muted>2</td></tr>
+<tr><td class=s>sync</td><td>3,812</td><td class=muted>4</td></tr>
+<tr><td class=s>yield</td><td>61,000</td><td class=muted>60</td></tr>
+<tr><td class=s>time</td><td>3,569</td><td class=muted>4</td></tr>
+<tr><td class=s>file</td><td>15,760</td><td class=muted>16</td></tr>
+<tr><td class=s>mem</td><td>15,121</td><td class=muted>15</td></tr>
+<tr><td class=s>proc/thr</td><td>29</td><td class=muted>0</td></tr>
+<tr><td class=s>signal</td><td>186</td><td class=muted>0</td></tr>
+<tr><td class=s>other</td><td>137</td><td class=muted>0</td></tr>
+<tr><td class=s muted>total</td><td>101,446</td><td></td></tr></table>
+<table style="width:100%;margin-top:4px"><tr><th class=s>top syscall</th><th>cat</th><th>calls</th></tr>
+<tr><td class=s>sched_yield</td><td class=muted>yield</td><td>61,000</td></tr>
+<tr><td class=s>madvise</td><td class=muted>mem</td><td>12,445</td></tr>
+<tr><td class=s>read</td><td class=muted>file</td><td>3,865</td></tr>
+<tr><td class=s>futex</td><td class=muted>sync</td><td>3,812</td></tr>
+<tr><td class=s>clock_nanosleep</td><td class=muted>time</td><td>3,569</td></tr>
+<tr><td class=s>write</td><td class=muted>file</td><td>2,261</td></tr>
+<tr><td class=s>newfstatat</td><td class=muted>file</td><td>1,693</td></tr>
+<tr><td class=s>epoll_ctl</td><td class=muted>poll/wait</td><td>1,573</td></tr>
+</table></div>
+<div class=colbox><div><span class=pill style="background:#58a6ff">macOS</span> <span class=muted>kqueue</span></div>
+<table style="width:100%;margin-top:6px"><tr><th class=s>category</th><th>calls</th><th>%</th></tr>
+<tr><td class=s>poll/wait</td><td>77,994</td><td class=muted>10</td></tr>
+<tr><td class=s>sync</td><td>102,536</td><td class=muted>14</td></tr>
+<tr><td class=s>time</td><td>31,801</td><td class=muted>4</td></tr>
+<tr><td class=s>file</td><td>529,680</td><td class=muted>71</td></tr>
+<tr><td class=s>mem</td><td>2,755</td><td class=muted>0</td></tr>
+<tr><td class=s>proc/thr</td><td>31</td><td class=muted>0</td></tr>
+<tr><td class=s>signal</td><td>43</td><td class=muted>0</td></tr>
+<tr><td class=s>other</td><td>134</td><td class=muted>0</td></tr>
+<tr><td class=s muted>total</td><td>744,974</td><td></td></tr></table>
+<table style="width:100%;margin-top:4px"><tr><th class=s>top syscall</th><th>cat</th><th>calls</th></tr>
+<tr><td class=s>write</td><td class=muted>file</td><td>332,724</td></tr>
+<tr><td class=s>read</td><td class=muted>file</td><td>128,962</td></tr>
+<tr><td class=s>kevent</td><td class=muted>poll/wait</td><td>77,990</td></tr>
+<tr><td class=s>psynch_cvwait</td><td class=muted>sync</td><td>49,878</td></tr>
+<tr><td class=s>psynch_cvsignal</td><td class=muted>sync</td><td>35,296</td></tr>
+<tr><td class=s>gettimeofday</td><td class=muted>time</td><td>31,801</td></tr>
+<tr><td class=s>ioctl</td><td class=muted>file</td><td>18,975</td></tr>
+<tr><td class=s>semwait_signal</td><td class=muted>sync</td><td>13,997</td></tr>
+</table></div>
+<div class=colbox><div><span class=pill style="background:#d29922">Windows</span> <span class=muted>iocp-afd</span></div>
+<table style="width:100%;margin-top:6px"><tr><th class=s>category</th><th>calls</th><th>%</th></tr>
+<tr><td class=s>poll/wait</td><td>132,566</td><td class=muted>21</td></tr>
+<tr><td class=s>net</td><td>25,368</td><td class=muted>4</td></tr>
+<tr><td class=s>sync</td><td>53,988</td><td class=muted>9</td></tr>
+<tr><td class=s>time</td><td>117,695</td><td class=muted>19</td></tr>
+<tr><td class=s>registry</td><td>4,059</td><td class=muted>1</td></tr>
+<tr><td class=s>file</td><td>77,589</td><td class=muted>12</td></tr>
+<tr><td class=s>mem</td><td>101,494</td><td class=muted>16</td></tr>
+<tr><td class=s>proc/thr</td><td>87,570</td><td class=muted>14</td></tr>
+<tr><td class=s>other</td><td>28,699</td><td class=muted>5</td></tr>
+<tr><td class=s muted>total</td><td>629,028</td><td></td></tr></table>
+<table style="width:100%;margin-top:4px"><tr><th class=s>top syscall</th><th>cat</th><th>calls</th></tr>
+<tr><td class=s>NtDelayExecution</td><td class=muted>time</td><td>117,601</td></tr>
+<tr><td class=s>NtRemoveIoCompletion</td><td class=muted>poll/wait</td><td>63,512</td></tr>
+<tr><td class=s>NtAllocateVirtualMemory</td><td class=muted>mem</td><td>58,153</td></tr>
+<tr><td class=s>NtSetIoCompletion</td><td class=muted>poll/wait</td><td>57,587</td></tr>
+<tr><td class=s>NtClose</td><td class=muted>file</td><td>33,314</td></tr>
+<tr><td class=s>NtWaitForSingleObject</td><td class=muted>sync</td><td>29,571</td></tr>
+<tr><td class=s>NtFreeVirtualMemory</td><td class=muted>mem</td><td>29,169</td></tr>
+<tr><td class=s>NtSetInformationProcess</td><td class=muted>proc/thr</td><td>28,950</td></tr>
+</table></div>
+</div>
+<h2 id="p69_traceback_integrity">p69_traceback_integrity</h2>
+<div class=cols>
+<div class=colbox><div><span class=pill style="background:#3fb950">Linux</span> <span class=muted>epoll</span></div>
+<table style="width:100%;margin-top:6px"><tr><th class=s>category</th><th>calls</th><th>%</th></tr>
+<tr><td class=s>poll/wait</td><td>3,957</td><td class=muted>3</td></tr>
+<tr><td class=s>sync</td><td>5,726</td><td class=muted>5</td></tr>
+<tr><td class=s>yield</td><td>79,690</td><td class=muted>69</td></tr>
+<tr><td class=s>time</td><td>2,812</td><td class=muted>2</td></tr>
+<tr><td class=s>file</td><td>21,770</td><td class=muted>19</td></tr>
+<tr><td class=s>mem</td><td>1,606</td><td class=muted>1</td></tr>
+<tr><td class=s>proc/thr</td><td>29</td><td class=muted>0</td></tr>
+<tr><td class=s>signal</td><td>186</td><td class=muted>0</td></tr>
+<tr><td class=s>other</td><td>131</td><td class=muted>0</td></tr>
+<tr><td class=s muted>total</td><td>115,907</td><td></td></tr></table>
+<table style="width:100%;margin-top:4px"><tr><th class=s>top syscall</th><th>cat</th><th>calls</th></tr>
+<tr><td class=s>sched_yield</td><td class=muted>yield</td><td>79,690</td></tr>
+<tr><td class=s>read</td><td class=muted>file</td><td>7,766</td></tr>
+<tr><td class=s>futex</td><td class=muted>sync</td><td>5,726</td></tr>
+<tr><td class=s>newfstatat</td><td class=muted>file</td><td>5,092</td></tr>
+<tr><td class=s>epoll_ctl</td><td class=muted>poll/wait</td><td>3,846</td></tr>
+<tr><td class=s>write</td><td class=muted>file</td><td>3,500</td></tr>
+<tr><td class=s>clock_nanosleep</td><td class=muted>time</td><td>2,812</td></tr>
+<tr><td class=s>ioctl</td><td class=muted>file</td><td>1,240</td></tr>
+</table></div>
+<div class=colbox><div><span class=pill style="background:#58a6ff">macOS</span> <span class=muted>kqueue</span></div>
+<table style="width:100%;margin-top:6px"><tr><th class=s>category</th><th>calls</th><th>%</th></tr>
+<tr><td class=s>poll/wait</td><td>174,911</td><td class=muted>13</td></tr>
+<tr><td class=s>sync</td><td>339,752</td><td class=muted>25</td></tr>
+<tr><td class=s>time</td><td>389</td><td class=muted>0</td></tr>
+<tr><td class=s>file</td><td>853,037</td><td class=muted>62</td></tr>
+<tr><td class=s>mem</td><td>768</td><td class=muted>0</td></tr>
+<tr><td class=s>proc/thr</td><td>31</td><td class=muted>0</td></tr>
+<tr><td class=s>signal</td><td>43</td><td class=muted>0</td></tr>
+<tr><td class=s>other</td><td>113</td><td class=muted>0</td></tr>
+<tr><td class=s muted>total</td><td>1,369,044</td><td></td></tr></table>
+<table style="width:100%;margin-top:4px"><tr><th class=s>top syscall</th><th>cat</th><th>calls</th></tr>
+<tr><td class=s>read</td><td class=muted>file</td><td>350,330</td></tr>
+<tr><td class=s>write</td><td class=muted>file</td><td>329,361</td></tr>
+<tr><td class=s>kevent</td><td class=muted>poll/wait</td><td>174,907</td></tr>
+<tr><td class=s>psynch_cvwait</td><td class=muted>sync</td><td>167,924</td></tr>
+<tr><td class=s>psynch_cvsignal</td><td class=muted>sync</td><td>167,527</td></tr>
+<tr><td class=s>stat64</td><td class=muted>file</td><td>165,746</td></tr>
+<tr><td class=s>ioctl</td><td class=muted>file</td><td>3,569</td></tr>
+<tr><td class=s>semwait_signal</td><td class=muted>sync</td><td>2,533</td></tr>
+</table></div>
+<div class=colbox><div><span class=pill style="background:#d29922">Windows</span> <span class=muted>iocp-afd</span></div>
+<table style="width:100%;margin-top:6px"><tr><th class=s>category</th><th>calls</th><th>%</th></tr>
+<tr><td class=s>poll/wait</td><td>32,961</td><td class=muted>8</td></tr>
+<tr><td class=s>net</td><td>48,187</td><td class=muted>12</td></tr>
+<tr><td class=s>sync</td><td>29,531</td><td class=muted>8</td></tr>
+<tr><td class=s>time</td><td>194,953</td><td class=muted>50</td></tr>
+<tr><td class=s>registry</td><td>3,898</td><td class=muted>1</td></tr>
+<tr><td class=s>file</td><td>21,711</td><td class=muted>6</td></tr>
+<tr><td class=s>mem</td><td>32,571</td><td class=muted>8</td></tr>
+<tr><td class=s>proc/thr</td><td>3,286</td><td class=muted>1</td></tr>
+<tr><td class=s>other</td><td>26,592</td><td class=muted>7</td></tr>
+<tr><td class=s muted>total</td><td>393,690</td><td></td></tr></table>
+<table style="width:100%;margin-top:4px"><tr><th class=s>top syscall</th><th>cat</th><th>calls</th></tr>
+<tr><td class=s>NtDelayExecution</td><td class=muted>time</td><td>194,885</td></tr>
+<tr><td class=s>NtDeviceIoControlFile</td><td class=muted>net</td><td>48,166</td></tr>
+<tr><td class=s>NtQueryVirtualMemory</td><td class=muted>mem</td><td>31,121</td></tr>
+<tr><td class=s>NtRemoveIoCompletion</td><td class=muted>poll/wait</td><td>21,312</td></tr>
+<tr><td class=s>NtWaitForSingleObject</td><td class=muted>sync</td><td>14,692</td></tr>
+<tr><td class=s>NtClose</td><td class=muted>file</td><td>14,643</td></tr>
+<tr><td class=s>NtCreateSemaphore</td><td class=muted>other</td><td>12,041</td></tr>
+<tr><td class=s>NtReleaseSemaphore</td><td class=muted>sync</td><td>11,565</td></tr>
+</table></div>
+</div>
+<h2 id="p78_gc_pressure">p78_gc_pressure</h2>
+<div class=cols>
+<div class=colbox><div><span class=pill style="background:#3fb950">Linux</span> <span class=muted>epoll</span></div>
+<table style="width:100%;margin-top:6px"><tr><th class=s>category</th><th>calls</th><th>%</th></tr>
+<tr><td class=s>poll/wait</td><td>82</td><td class=muted>0</td></tr>
+<tr><td class=s>sync</td><td>2,897</td><td class=muted>7</td></tr>
+<tr><td class=s>yield</td><td>28,520</td><td class=muted>70</td></tr>
+<tr><td class=s>time</td><td>2,537</td><td class=muted>6</td></tr>
+<tr><td class=s>file</td><td>5,333</td><td class=muted>13</td></tr>
+<tr><td class=s>mem</td><td>928</td><td class=muted>2</td></tr>
+<tr><td class=s>proc/thr</td><td>29</td><td class=muted>0</td></tr>
+<tr><td class=s>signal</td><td>186</td><td class=muted>0</td></tr>
+<tr><td class=s>other</td><td>125</td><td class=muted>0</td></tr>
+<tr><td class=s muted>total</td><td>40,637</td><td></td></tr></table>
+<table style="width:100%;margin-top:4px"><tr><th class=s>top syscall</th><th>cat</th><th>calls</th></tr>
+<tr><td class=s>sched_yield</td><td class=muted>yield</td><td>28,520</td></tr>
+<tr><td class=s>futex</td><td class=muted>sync</td><td>2,897</td></tr>
+<tr><td class=s>clock_nanosleep</td><td class=muted>time</td><td>2,537</td></tr>
+<tr><td class=s>newfstatat</td><td class=muted>file</td><td>1,689</td></tr>
+<tr><td class=s>fstat</td><td class=muted>file</td><td>769</td></tr>
+<tr><td class=s>read</td><td class=muted>file</td><td>695</td></tr>
+<tr><td class=s>lseek</td><td class=muted>file</td><td>632</td></tr>
+<tr><td class=s>openat</td><td class=muted>file</td><td>491</td></tr>
+</table></div>
+<div class=colbox><div><span class=pill style="background:#58a6ff">macOS</span> <span class=muted>kqueue</span></div>
+<table style="width:100%;margin-top:6px"><tr><th class=s>category</th><th>calls</th><th>%</th></tr>
+<tr><td class=s>poll/wait</td><td>225</td><td class=muted>1</td></tr>
+<tr><td class=s>sync</td><td>17,000</td><td class=muted>70</td></tr>
+<tr><td class=s>time</td><td>2,404</td><td class=muted>10</td></tr>
+<tr><td class=s>file</td><td>3,705</td><td class=muted>15</td></tr>
+<tr><td class=s>mem</td><td>766</td><td class=muted>3</td></tr>
+<tr><td class=s>proc/thr</td><td>15</td><td class=muted>0</td></tr>
+<tr><td class=s>signal</td><td>43</td><td class=muted>0</td></tr>
+<tr><td class=s>other</td><td>110</td><td class=muted>0</td></tr>
+<tr><td class=s muted>total</td><td>24,268</td><td></td></tr></table>
+<table style="width:100%;margin-top:4px"><tr><th class=s>top syscall</th><th>cat</th><th>calls</th></tr>
+<tr><td class=s>psynch_cvwait</td><td class=muted>sync</td><td>8,278</td></tr>
+<tr><td class=s>psynch_cvsignal</td><td class=muted>sync</td><td>5,874</td></tr>
+<tr><td class=s>semwait_signal</td><td class=muted>sync</td><td>2,840</td></tr>
+<tr><td class=s>gettimeofday</td><td class=muted>time</td><td>2,404</td></tr>
+<tr><td class=s>stat64</td><td class=muted>file</td><td>1,071</td></tr>
+<tr><td class=s>mmap</td><td class=muted>mem</td><td>499</td></tr>
+<tr><td class=s>sys_fstat64</td><td class=muted>file</td><td>414</td></tr>
+<tr><td class=s>ioctl</td><td class=muted>file</td><td>413</td></tr>
+</table></div>
+<div class=colbox><div><span class=pill style="background:#d29922">Windows</span> <span class=muted>iocp-afd</span></div>
+<table style="width:100%;margin-top:6px"><tr><th class=s>category</th><th>calls</th><th>%</th></tr>
+<tr><td class=s>poll/wait</td><td>1,314</td><td class=muted>2</td></tr>
+<tr><td class=s>net</td><td>529</td><td class=muted>1</td></tr>
+<tr><td class=s>sync</td><td>7,648</td><td class=muted>11</td></tr>
+<tr><td class=s>time</td><td>24,722</td><td class=muted>35</td></tr>
+<tr><td class=s>registry</td><td>5,946</td><td class=muted>8</td></tr>
+<tr><td class=s>file</td><td>13,285</td><td class=muted>19</td></tr>
+<tr><td class=s>mem</td><td>4,265</td><td class=muted>6</td></tr>
+<tr><td class=s>proc/thr</td><td>5,297</td><td class=muted>8</td></tr>
+<tr><td class=s>other</td><td>7,285</td><td class=muted>10</td></tr>
+<tr><td class=s muted>total</td><td>70,291</td><td></td></tr></table>
+<table style="width:100%;margin-top:4px"><tr><th class=s>top syscall</th><th>cat</th><th>calls</th></tr>
+<tr><td class=s>NtDelayExecution</td><td class=muted>time</td><td>24,587</td></tr>
+<tr><td class=s>NtClose</td><td class=muted>file</td><td>5,848</td></tr>
+<tr><td class=s>NtWaitForSingleObject</td><td class=muted>sync</td><td>4,443</td></tr>
+<tr><td class=s>NtCreateSemaphore</td><td class=muted>other</td><td>2,576</td></tr>
+<tr><td class=s>NtReleaseSemaphore</td><td class=muted>sync</td><td>2,271</td></tr>
+<tr><td class=s>NtQueryKey</td><td class=muted>registry</td><td>2,203</td></tr>
+<tr><td class=s>NtQueryInformationFile</td><td class=muted>file</td><td>2,000</td></tr>
+<tr><td class=s>NtQueryInformationToken</td><td class=muted>proc/thr</td><td>1,785</td></tr>
+</table></div>
+</div>
+<h2 id="p99_migration_fuzzer">p99_migration_fuzzer</h2>
+<div class=cols>
+<div class=colbox><div><span class=pill style="background:#3fb950">Linux</span> <span class=muted>epoll</span></div>
+<table style="width:100%;margin-top:6px"><tr><th class=s>category</th><th>calls</th><th>%</th></tr>
+<tr><td class=s>poll/wait</td><td>92</td><td class=muted>0</td></tr>
+<tr><td class=s>sync</td><td>17,470</td><td class=muted>31</td></tr>
+<tr><td class=s>yield</td><td>20,400</td><td class=muted>36</td></tr>
+<tr><td class=s>time</td><td>12,255</td><td class=muted>22</td></tr>
+<tr><td class=s>file</td><td>5,337</td><td class=muted>9</td></tr>
+<tr><td class=s>mem</td><td>1,043</td><td class=muted>2</td></tr>
+<tr><td class=s>proc/thr</td><td>29</td><td class=muted>0</td></tr>
+<tr><td class=s>signal</td><td>186</td><td class=muted>0</td></tr>
+<tr><td class=s>other</td><td>125</td><td class=muted>0</td></tr>
+<tr><td class=s muted>total</td><td>56,937</td><td></td></tr></table>
+<table style="width:100%;margin-top:4px"><tr><th class=s>top syscall</th><th>cat</th><th>calls</th></tr>
+<tr><td class=s>sched_yield</td><td class=muted>yield</td><td>20,400</td></tr>
+<tr><td class=s>futex</td><td class=muted>sync</td><td>17,470</td></tr>
+<tr><td class=s>clock_nanosleep</td><td class=muted>time</td><td>12,255</td></tr>
+<tr><td class=s>newfstatat</td><td class=muted>file</td><td>1,689</td></tr>
+<tr><td class=s>fstat</td><td class=muted>file</td><td>770</td></tr>
+<tr><td class=s>read</td><td class=muted>file</td><td>696</td></tr>
+<tr><td class=s>lseek</td><td class=muted>file</td><td>632</td></tr>
+<tr><td class=s>mmap</td><td class=muted>mem</td><td>539</td></tr>
+</table></div>
+<div class=colbox><div><span class=pill style="background:#58a6ff">macOS</span> <span class=muted>kqueue</span></div>
+<table style="width:100%;margin-top:6px"><tr><th class=s>category</th><th>calls</th><th>%</th></tr>
+<tr><td class=s>poll/wait</td><td>1,077</td><td class=muted>1</td></tr>
+<tr><td class=s>sync</td><td>46,360</td><td class=muted>53</td></tr>
+<tr><td class=s>time</td><td>20,800</td><td class=muted>24</td></tr>
+<tr><td class=s>file</td><td>18,359</td><td class=muted>21</td></tr>
+<tr><td class=s>mem</td><td>760</td><td class=muted>1</td></tr>
+<tr><td class=s>proc/thr</td><td>15</td><td class=muted>0</td></tr>
+<tr><td class=s>signal</td><td>43</td><td class=muted>0</td></tr>
+<tr><td class=s>other</td><td>110</td><td class=muted>0</td></tr>
+<tr><td class=s muted>total</td><td>87,524</td><td></td></tr></table>
+<table style="width:100%;margin-top:4px"><tr><th class=s>top syscall</th><th>cat</th><th>calls</th></tr>
+<tr><td class=s>semwait_signal</td><td class=muted>sync</td><td>22,422</td></tr>
+<tr><td class=s>gettimeofday</td><td class=muted>time</td><td>20,800</td></tr>
+<tr><td class=s>psynch_cvwait</td><td class=muted>sync</td><td>20,773</td></tr>
+<tr><td class=s>write</td><td class=muted>file</td><td>12,617</td></tr>
+<tr><td class=s>read</td><td class=muted>file</td><td>2,504</td></tr>
+<tr><td class=s>psynch_cvsignal</td><td class=muted>sync</td><td>2,171</td></tr>
+<tr><td class=s>kevent</td><td class=muted>poll/wait</td><td>1,073</td></tr>
+<tr><td class=s>stat64</td><td class=muted>file</td><td>1,068</td></tr>
+</table></div>
+<div class=colbox><div><span class=pill style="background:#d29922">Windows</span> <span class=muted>iocp-afd</span></div>
+<table style="width:100%;margin-top:6px"><tr><th class=s>category</th><th>calls</th><th>%</th></tr>
+<tr><td class=s>poll/wait</td><td>1,982</td><td class=muted>4</td></tr>
+<tr><td class=s>net</td><td>369</td><td class=muted>1</td></tr>
+<tr><td class=s>sync</td><td>1,956</td><td class=muted>4</td></tr>
+<tr><td class=s>time</td><td>23,930</td><td class=muted>48</td></tr>
+<tr><td class=s>registry</td><td>4,328</td><td class=muted>9</td></tr>
+<tr><td class=s>file</td><td>8,141</td><td class=muted>16</td></tr>
+<tr><td class=s>mem</td><td>1,715</td><td class=muted>3</td></tr>
+<tr><td class=s>proc/thr</td><td>3,060</td><td class=muted>6</td></tr>
+<tr><td class=s>other</td><td>4,234</td><td class=muted>9</td></tr>
+<tr><td class=s muted>total</td><td>49,715</td><td></td></tr></table>
+<table style="width:100%;margin-top:4px"><tr><th class=s>top syscall</th><th>cat</th><th>calls</th></tr>
+<tr><td class=s>NtDelayExecution</td><td class=muted>time</td><td>23,860</td></tr>
+<tr><td class=s>NtClose</td><td class=muted>file</td><td>2,511</td></tr>
+<tr><td class=s>NtQueryKey</td><td class=muted>registry</td><td>2,116</td></tr>
+<tr><td class=s>NtQueryInformationFile</td><td class=muted>file</td><td>1,875</td></tr>
+<tr><td class=s>NtOpenKeyEx</td><td class=muted>registry</td><td>1,374</td></tr>
+<tr><td class=s>NtWaitForAlertByThreadId</td><td class=muted>sync</td><td>1,275</td></tr>
+<tr><td class=s>NtQueryInformationByName</td><td class=muted>other</td><td>1,176</td></tr>
+<tr><td class=s>NtQueryVolumeInformationFile</td><td class=muted>file</td><td>1,174</td></tr>
+</table></div>
+</div>
+<h2 id="p111_fork_while_scheduler_active">p111_fork_while_scheduler_active</h2>
+<div class=cols>
+<div class=colbox><div><span class=pill style="background:#3fb950">Linux</span> <span class=muted>epoll</span></div>
+<table style="width:100%;margin-top:6px"><tr><th class=s>category</th><th>calls</th><th>%</th></tr>
+<tr><td class=s>poll/wait</td><td>16,202</td><td class=muted>22</td></tr>
+<tr><td class=s>sync</td><td>3,059</td><td class=muted>4</td></tr>
+<tr><td class=s>yield</td><td>22,720</td><td class=muted>30</td></tr>
+<tr><td class=s>time</td><td>1,479</td><td class=muted>2</td></tr>
+<tr><td class=s>file</td><td>22,361</td><td class=muted>30</td></tr>
+<tr><td class=s>mem</td><td>791</td><td class=muted>1</td></tr>
+<tr><td class=s>proc/thr</td><td>156</td><td class=muted>0</td></tr>
+<tr><td class=s>signal</td><td>186</td><td class=muted>0</td></tr>
+<tr><td class=s>other</td><td>8,300</td><td class=muted>11</td></tr>
+<tr><td class=s muted>total</td><td>75,254</td><td></td></tr></table>
+<table style="width:100%;margin-top:4px"><tr><th class=s>top syscall</th><th>cat</th><th>calls</th></tr>
+<tr><td class=s>sched_yield</td><td class=muted>yield</td><td>22,720</td></tr>
+<tr><td class=s>close</td><td class=muted>file</td><td>16,422</td></tr>
+<tr><td class=s>epoll_ctl</td><td class=muted>poll/wait</td><td>7,950</td></tr>
+<tr><td class=s>epoll_create1</td><td class=muted>poll/wait</td><td>7,805</td></tr>
+<tr><td class=s>eventfd2</td><td class=muted>other</td><td>7,804</td></tr>
+<tr><td class=s>futex</td><td class=muted>sync</td><td>3,059</td></tr>
+<tr><td class=s>newfstatat</td><td class=muted>file</td><td>1,690</td></tr>
+<tr><td class=s>clock_nanosleep</td><td class=muted>time</td><td>1,479</td></tr>
+</table></div>
+<div class=colbox><div><span class=pill style="background:#58a6ff">macOS</span> <span class=muted>kqueue</span></div>
+<table style="width:100%;margin-top:6px"><tr><th class=s>category</th><th>calls</th><th>%</th></tr>
+<tr><td class=s>poll/wait</td><td>15,744</td><td class=muted>14</td></tr>
+<tr><td class=s>sync</td><td>3,894</td><td class=muted>3</td></tr>
+<tr><td class=s>time</td><td>2,508</td><td class=muted>2</td></tr>
+<tr><td class=s>file</td><td>90,628</td><td class=muted>79</td></tr>
+<tr><td class=s>mem</td><td>651</td><td class=muted>1</td></tr>
+<tr><td class=s>proc/thr</td><td>337</td><td class=muted>0</td></tr>
+<tr><td class=s>signal</td><td>43</td><td class=muted>0</td></tr>
+<tr><td class=s>other</td><td>714</td><td class=muted>1</td></tr>
+<tr><td class=s muted>total</td><td>114,519</td><td></td></tr></table>
+<table style="width:100%;margin-top:4px"><tr><th class=s>top syscall</th><th>cat</th><th>calls</th></tr>
+<tr><td class=s>sys_fcntl</td><td class=muted>file</td><td>54,786</td></tr>
+<tr><td class=s>sys_close</td><td class=muted>file</td><td>23,849</td></tr>
+<tr><td class=s>kevent</td><td class=muted>poll/wait</td><td>7,940</td></tr>
+<tr><td class=s>pipe</td><td class=muted>file</td><td>7,923</td></tr>
+<tr><td class=s>kqueue</td><td class=muted>poll/wait</td><td>7,804</td></tr>
+<tr><td class=s>psynch_cvwait</td><td class=muted>sync</td><td>2,737</td></tr>
+<tr><td class=s>gettimeofday</td><td class=muted>time</td><td>2,508</td></tr>
+<tr><td class=s>stat64</td><td class=muted>file</td><td>1,074</td></tr>
+</table></div>
+<div class=colbox><div><span class=pill style="background:#d29922">Windows</span> <span class=muted>iocp-afd</span></div>
+<table style="width:100%;margin-top:6px"><tr><th class=s>category</th><th>calls</th><th>%</th></tr>
+<tr><td class=s>poll/wait</td><td>431</td><td class=muted>1</td></tr>
+<tr><td class=s>net</td><td>21</td><td class=muted>0</td></tr>
+<tr><td class=s>sync</td><td>509</td><td class=muted>1</td></tr>
+<tr><td class=s>time</td><td>19,302</td><td class=muted>52</td></tr>
+<tr><td class=s>registry</td><td>3,666</td><td class=muted>10</td></tr>
+<tr><td class=s>file</td><td>5,563</td><td class=muted>15</td></tr>
+<tr><td class=s>mem</td><td>1,342</td><td class=muted>4</td></tr>
+<tr><td class=s>proc/thr</td><td>2,159</td><td class=muted>6</td></tr>
+<tr><td class=s>other</td><td>3,798</td><td class=muted>10</td></tr>
+<tr><td class=s muted>total</td><td>36,791</td><td></td></tr></table>
+<table style="width:100%;margin-top:4px"><tr><th class=s>top syscall</th><th>cat</th><th>calls</th></tr>
+<tr><td class=s>NtDelayExecution</td><td class=muted>time</td><td>19,244</td></tr>
+<tr><td class=s>NtQueryKey</td><td class=muted>registry</td><td>1,886</td></tr>
+<tr><td class=s>NtQueryInformationFile</td><td class=muted>file</td><td>1,881</td></tr>
+<tr><td class=s>NtQueryVolumeInformationFile</td><td class=muted>file</td><td>1,182</td></tr>
+<tr><td class=s>NtQueryInformationByName</td><td class=muted>other</td><td>1,178</td></tr>
+<tr><td class=s>NtOpenKeyEx</td><td class=muted>registry</td><td>1,163</td></tr>
+<tr><td class=s>NtQueryInformationToken</td><td class=muted>proc/thr</td><td>1,004</td></tr>
+<tr><td class=s>NtProtectVirtualMemory</td><td class=muted>mem</td><td>532</td></tr>
+</table></div>
+</div>
+<h2 id="p114_setitimer_storm">p114_setitimer_storm</h2>
+<div class=cols>
+<div class=colbox><div><span class=pill style="background:#3fb950">Linux</span> <span class=muted>epoll</span></div>
+<table style="width:100%;margin-top:6px"><tr><th class=s>category</th><th>calls</th><th>%</th></tr>
+<tr><td class=s>poll/wait</td><td>344</td><td class=muted>1</td></tr>
+<tr><td class=s>net</td><td>675</td><td class=muted>2</td></tr>
+<tr><td class=s>sync</td><td>3,195</td><td class=muted>10</td></tr>
+<tr><td class=s>yield</td><td>20,560</td><td class=muted>61</td></tr>
+<tr><td class=s>time</td><td>1,061</td><td class=muted>3</td></tr>
+<tr><td class=s>file</td><td>5,951</td><td class=muted>18</td></tr>
+<tr><td class=s>mem</td><td>1,040</td><td class=muted>3</td></tr>
+<tr><td class=s>proc/thr</td><td>29</td><td class=muted>0</td></tr>
+<tr><td class=s>signal</td><td>401</td><td class=muted>1</td></tr>
+<tr><td class=s>other</td><td>261</td><td class=muted>1</td></tr>
+<tr><td class=s muted>total</td><td>33,517</td><td></td></tr></table>
+<table style="width:100%;margin-top:4px"><tr><th class=s>top syscall</th><th>cat</th><th>calls</th></tr>
+<tr><td class=s>sched_yield</td><td class=muted>yield</td><td>20,560</td></tr>
+<tr><td class=s>futex</td><td class=muted>sync</td><td>3,195</td></tr>
+<tr><td class=s>newfstatat</td><td class=muted>file</td><td>1,689</td></tr>
+<tr><td class=s>clock_nanosleep</td><td class=muted>time</td><td>1,058</td></tr>
+<tr><td class=s>read</td><td class=muted>file</td><td>780</td></tr>
+<tr><td class=s>fstat</td><td class=muted>file</td><td>769</td></tr>
+<tr><td class=s>ioctl</td><td class=muted>file</td><td>641</td></tr>
+<tr><td class=s>lseek</td><td class=muted>file</td><td>632</td></tr>
+</table></div>
+<div class=colbox><div><span class=pill style="background:#58a6ff">macOS</span> <span class=muted>kqueue</span></div>
+<table style="width:100%;margin-top:6px"><tr><th class=s>category</th><th>calls</th><th>%</th></tr>
+<tr><td class=s>poll/wait</td><td>378</td><td class=muted>3</td></tr>
+<tr><td class=s>net</td><td>675</td><td class=muted>5</td></tr>
+<tr><td class=s>sync</td><td>3,618</td><td class=muted>27</td></tr>
+<tr><td class=s>time</td><td>2,847</td><td class=muted>21</td></tr>
+<tr><td class=s>file</td><td>4,816</td><td class=muted>36</td></tr>
+<tr><td class=s>mem</td><td>760</td><td class=muted>6</td></tr>
+<tr><td class=s>proc/thr</td><td>15</td><td class=muted>0</td></tr>
+<tr><td class=s>signal</td><td>186</td><td class=muted>1</td></tr>
+<tr><td class=s>other</td><td>112</td><td class=muted>1</td></tr>
+<tr><td class=s muted>total</td><td>13,407</td><td></td></tr></table>
+<table style="width:100%;margin-top:4px"><tr><th class=s>top syscall</th><th>cat</th><th>calls</th></tr>
+<tr><td class=s>gettimeofday</td><td class=muted>time</td><td>2,844</td></tr>
+<tr><td class=s>psynch_cvwait</td><td class=muted>sync</td><td>2,841</td></tr>
+<tr><td class=s>stat64</td><td class=muted>file</td><td>1,066</td></tr>
+<tr><td class=s>ioctl</td><td class=muted>file</td><td>863</td></tr>
+<tr><td class=s>semwait_signal</td><td class=muted>sync</td><td>743</td></tr>
+<tr><td class=s>read</td><td class=muted>file</td><td>609</td></tr>
+<tr><td class=s>mmap</td><td class=muted>mem</td><td>496</td></tr>
+<tr><td class=s>sys_close</td><td class=muted>file</td><td>416</td></tr>
+</table></div>
+<div class=colbox><div><span class=pill style="background:#d29922">Windows</span> <span class=muted>iocp-afd</span></div>
+<table style="width:100%;margin-top:6px"><tr><th class=s>category</th><th>calls</th><th>%</th></tr>
+<tr><td class=s>poll/wait</td><td>988</td><td class=muted>2</td></tr>
+<tr><td class=s>net</td><td>1,586</td><td class=muted>4</td></tr>
+<tr><td class=s>sync</td><td>1,058</td><td class=muted>3</td></tr>
+<tr><td class=s>time</td><td>18,841</td><td class=muted>45</td></tr>
+<tr><td class=s>registry</td><td>3,656</td><td class=muted>9</td></tr>
+<tr><td class=s>file</td><td>6,806</td><td class=muted>16</td></tr>
+<tr><td class=s>mem</td><td>2,329</td><td class=muted>6</td></tr>
+<tr><td class=s>proc/thr</td><td>2,872</td><td class=muted>7</td></tr>
+<tr><td class=s>other</td><td>4,024</td><td class=muted>10</td></tr>
+<tr><td class=s muted>total</td><td>42,160</td><td></td></tr></table>
+<table style="width:100%;margin-top:4px"><tr><th class=s>top syscall</th><th>cat</th><th>calls</th></tr>
+<tr><td class=s>NtDelayExecution</td><td class=muted>time</td><td>18,783</td></tr>
+<tr><td class=s>NtQueryInformationFile</td><td class=muted>file</td><td>1,879</td></tr>
+<tr><td class=s>NtQueryKey</td><td class=muted>registry</td><td>1,872</td></tr>
+<tr><td class=s>NtDeviceIoControlFile</td><td class=muted>net</td><td>1,565</td></tr>
+<tr><td class=s>NtQueryVolumeInformationFile</td><td class=muted>file</td><td>1,187</td></tr>
+<tr><td class=s>NtQueryInformationByName</td><td class=muted>other</td><td>1,176</td></tr>
+<tr><td class=s>NtOpenKeyEx</td><td class=muted>registry</td><td>1,150</td></tr>
+<tr><td class=s>NtQueryInformationToken</td><td class=muted>proc/thr</td><td>1,002</td></tr>
+</table></div>
+</div>
+<h2 id="p116_sigchld_storm">p116_sigchld_storm</h2>
+<div class=cols>
+<div class=colbox><div><span class=pill style="background:#3fb950">Linux</span> <span class=muted>epoll</span></div>
+<table style="width:100%;margin-top:6px"><tr><th class=s>category</th><th>calls</th><th>%</th></tr>
+<tr><td class=s>poll/wait</td><td>15,957</td><td class=muted>2</td></tr>
+<tr><td class=s>sync</td><td>607</td><td class=muted>0</td></tr>
+<tr><td class=s>yield</td><td>701,920</td><td class=muted>74</td></tr>
+<tr><td class=s>time</td><td>11,147</td><td class=muted>1</td></tr>
+<tr><td class=s>file</td><td>192,574</td><td class=muted>20</td></tr>
+<tr><td class=s>mem</td><td>9,934</td><td class=muted>1</td></tr>
+<tr><td class=s>proc/thr</td><td>1,179</td><td class=muted>0</td></tr>
+<tr><td class=s>signal</td><td>11,155</td><td class=muted>1</td></tr>
+<tr><td class=s>other</td><td>2,516</td><td class=muted>0</td></tr>
+<tr><td class=s muted>total</td><td>946,989</td><td></td></tr></table>
+<table style="width:100%;margin-top:4px"><tr><th class=s>top syscall</th><th>cat</th><th>calls</th></tr>
+<tr><td class=s>sched_yield</td><td class=muted>yield</td><td>701,920</td></tr>
+<tr><td class=s>newfstatat</td><td class=muted>file</td><td>60,272</td></tr>
+<tr><td class=s>fstat</td><td class=muted>file</td><td>28,298</td></tr>
+<tr><td class=s>read</td><td class=muted>file</td><td>23,494</td></tr>
+<tr><td class=s>lseek</td><td class=muted>file</td><td>22,536</td></tr>
+<tr><td class=s>openat</td><td class=muted>file</td><td>17,968</td></tr>
+<tr><td class=s>close</td><td class=muted>file</td><td>17,488</td></tr>
+<tr><td class=s>epoll_wait</td><td class=muted>poll/wait</td><td>15,793</td></tr>
+</table></div>
+<div class=colbox><div><span class=pill style="background:#58a6ff">macOS</span> <span class=muted>kqueue</span></div>
+<table style="width:100%;margin-top:6px"><tr><th class=s>category</th><th>calls</th><th>%</th></tr>
+<tr><td class=s>poll/wait</td><td>187</td><td class=muted>0</td></tr>
+<tr><td class=s>sync</td><td>12,068</td><td class=muted>12</td></tr>
+<tr><td class=s>time</td><td>9,137</td><td class=muted>9</td></tr>
+<tr><td class=s>file</td><td>65,040</td><td class=muted>63</td></tr>
+<tr><td class=s>mem</td><td>4,793</td><td class=muted>5</td></tr>
+<tr><td class=s>proc/thr</td><td>2,874</td><td class=muted>3</td></tr>
+<tr><td class=s>signal</td><td>2,811</td><td class=muted>3</td></tr>
+<tr><td class=s>other</td><td>6,424</td><td class=muted>6</td></tr>
+<tr><td class=s muted>total</td><td>103,334</td><td></td></tr></table>
+<table style="width:100%;margin-top:4px"><tr><th class=s>top syscall</th><th>cat</th><th>calls</th></tr>
+<tr><td class=s>stat64</td><td class=muted>file</td><td>17,496</td></tr>
+<tr><td class=s>psynch_cvwait</td><td class=muted>sync</td><td>9,157</td></tr>
+<tr><td class=s>gettimeofday</td><td class=muted>time</td><td>9,137</td></tr>
+<tr><td class=s>sys_close</td><td class=muted>file</td><td>7,239</td></tr>
+<tr><td class=s>ioctl</td><td class=muted>file</td><td>7,167</td></tr>
+<tr><td class=s>sys_fstat64</td><td class=muted>file</td><td>6,868</td></tr>
+<tr><td class=s>lseek</td><td class=muted>file</td><td>6,310</td></tr>
+<tr><td class=s>read</td><td class=muted>file</td><td>6,119</td></tr>
+</table></div>
+<div class=colbox><div><span class=pill style="background:#d29922">Windows</span> <span class=muted>iocp-afd</span></div>
+<table style="width:100%;margin-top:6px"><tr><th class=s>category</th><th>calls</th><th>%</th></tr>
+<tr><td class=s>poll/wait</td><td>4,540</td><td class=muted>1</td></tr>
+<tr><td class=s>net</td><td>2,977</td><td class=muted>1</td></tr>
+<tr><td class=s>sync</td><td>18,974</td><td class=muted>5</td></tr>
+<tr><td class=s>time</td><td>190,855</td><td class=muted>55</td></tr>
+<tr><td class=s>registry</td><td>8,320</td><td class=muted>2</td></tr>
+<tr><td class=s>file</td><td>64,070</td><td class=muted>18</td></tr>
+<tr><td class=s>mem</td><td>15,282</td><td class=muted>4</td></tr>
+<tr><td class=s>proc/thr</td><td>17,139</td><td class=muted>5</td></tr>
+<tr><td class=s>other</td><td>25,472</td><td class=muted>7</td></tr>
+<tr><td class=s muted>total</td><td>347,629</td><td></td></tr></table>
+<table style="width:100%;margin-top:4px"><tr><th class=s>top syscall</th><th>cat</th><th>calls</th></tr>
+<tr><td class=s>NtDelayExecution</td><td class=muted>time</td><td>190,317</td></tr>
+<tr><td class=s>NtQueryInformationFile</td><td class=muted>file</td><td>17,004</td></tr>
+<tr><td class=s>NtClose</td><td class=muted>file</td><td>14,253</td></tr>
+<tr><td class=s>NtWaitForSingleObject</td><td class=muted>sync</td><td>12,357</td></tr>
+<tr><td class=s>NtQueryInformationByName</td><td class=muted>other</td><td>12,165</td></tr>
+<tr><td class=s>NtQueryVolumeInformationFile</td><td class=muted>file</td><td>10,844</td></tr>
+<tr><td class=s>NtProtectVirtualMemory</td><td class=muted>mem</td><td>5,157</td></tr>
+<tr><td class=s>NtReleaseSemaphore</td><td class=muted>sync</td><td>4,999</td></tr>
+</table></div>
+</div>
+<p class=muted style="margin-top:30px">gen_syscall_backends_html.py &mdash; Linux 23p, macOS 23p, Windows 23p</p>
+</div>
