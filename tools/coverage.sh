@@ -33,6 +33,7 @@ if [ -z "${PYTHON:-}" ]; then
     done
 fi
 echo "[cov] python: $PYTHON"
+command -v gcov >/dev/null 2>&1 || { echo "[cov] gcov not found -- install gcc/gcov; cannot measure coverage"; exit 2; }
 
 RM="$(command -v safe-rm || echo rm)"
 OBJDIR="build/temp.coverage"

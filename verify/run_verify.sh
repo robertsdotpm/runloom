@@ -31,7 +31,7 @@ CBMC_DIR="$HERE/cbmc"
 WORK="$(mktemp -d /tmp/runloom_verify.XXXXXX)"
 QUIET=0; [ "${1:-}" = "-q" ] && QUIET=1
 
-pass=0; fail=0; FAILED=""
+pass=0; fail=0; skipped=0; FAILED=""
 green() { printf '\033[32m%s\033[0m' "$1"; }
 red()   { printf '\033[31m%s\033[0m' "$1"; }
 
@@ -200,6 +200,8 @@ eng_finish() {  # fold every launched engine's result in, in declaration order
             if echo "$out" | grep -q "passed, 0 failed"; then
                 n="$(echo "$out" | sed -n 's/.* \([0-9]*\) passed, 0 failed/\1/p' | tail -1)"
                 [ -n "$n" ] && pass=$((pass+n))
+            else
+                skipped=$((skipped+1))   # rc=0 but no pass-count -> engine skipped (tool absent)
             fi
         else
             fail=$((fail+1)); FAILED="$FAILED $label"
@@ -299,6 +301,7 @@ if have spin && have cc; then
     collect
 else
     echo "  (spin / cc not found -- skipping Spin models;  sudo apt-get install spin)"
+    skipped=$((skipped + 1))
 fi
 
 # ---- CBMC: real cldeque.c under concurrent pthreads -------------------
@@ -446,6 +449,7 @@ if have cbmc; then
     collect
 else
     echo "  (cbmc not found -- skipping;  sudo apt-get install cbmc)"
+    skipped=$((skipped + 1))
 fi
 
 # ---- external engines: drain the background runs (launched up top) + fold in
@@ -457,8 +461,19 @@ wait
 eng_finish
 
 echo "----------------------------------------------------------"
-echo "  $pass passed, $fail failed"
+echo "  $pass passed, $fail failed, $skipped skipped"
 [ -n "$FAILED" ] && echo "  failed:$FAILED"
+[ "$skipped" -gt 0 ] && echo "  ($skipped engine(s)/phase(s) skipped -- tool absent; see lines above)"
 [ "$QUIET" = 0 ] && echo "  logs under: $WORK"
 echo "=========================================================="
-[ "$fail" -eq 0 ]
+# NON-VACUOUS verdict: a real failure fails the phase, AND an all-skipped run
+# (no spin/cbmc/herd7/... installed -> nothing actually verified) must NOT
+# masquerade as a green.  Only a run with >=1 real PASS and 0 failures succeeds.
+if [ "$fail" -ne 0 ]; then
+    exit 1
+elif [ "$pass" -eq 0 ]; then
+    echo "  $(red "NO FORMAL CHECKS RAN") -- every engine was skipped (no verification tools found)."
+    echo "  install at least one:  sudo apt-get install cbmc spin   (herd7/genmc/tlc optional)"
+    exit 1
+fi
+exit 0

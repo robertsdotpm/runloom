@@ -38,14 +38,24 @@ awk 'BEGIN{d=0} /"a":"Release"/ && d==0 {d=1; next} {print}' "$TR" > "$TR_BUG"
 
 rc=0
 echo "-- TLC: real trace (expect CONFORMS) --"
-if "$PY" tools/mn_trace_conform.py "$TR"; then
+"$PY" tools/mn_trace_conform.py "$TR"; r=$?
+if [ "$r" -eq 2 ]; then
+    # rc=2 from the helper == java / verify/tla/tla2tools.jar unavailable.
+    # That is a missing tool, NOT a model violation -> SKIP, don't false-FAIL.
+    echo "   SKIP: TLC unavailable (java / verify/tla/tla2tools.jar missing; run verify/tla/run_tla.sh once)"
+    "$(command -v safe-rm || echo rm)" -f "$TR" "$TR_BUG"
+    exit 0
+elif [ "$r" -eq 0 ]; then
     echo "   OK: the real baton run conforms (at most one hub holds the baton)"
 else
     echo "   FAIL: a real controlled-scheduler run should conform"; rc=1
 fi
 echo "-- TLC: dropped-Release trace (expect NON-CONFORMING) --"
-if "$PY" tools/mn_trace_conform.py "$TR_BUG"; then
+"$PY" tools/mn_trace_conform.py "$TR_BUG"; r=$?
+if [ "$r" -eq 0 ]; then
     echo "   FAIL: a double-hold should NOT conform"; rc=1
+elif [ "$r" -eq 2 ]; then
+    echo "   SKIP: TLC unavailable for the negative control"
 else
     echo "   OK: the double-hold is rejected -- MutualExclusion enforced against the code"
 fi

@@ -33,14 +33,24 @@ RUNLOOM_GILSTATE_DELETE_ON_MAIN=1 RUNLOOM_GILSTATE_TRACE="$TR_BUG" \
 
 rc=0
 echo "-- TLC check: fixed-code trace (expect CONFORMS) --"
-if "$PY" tools/tla_trace_conform.py "$TR_OK"; then
+"$PY" tools/tla_trace_conform.py "$TR_OK"; r=$?
+if [ "$r" -eq 2 ]; then
+    # rc=2 from the helper == java / verify/tla/tla2tools.jar unavailable.
+    # That is a missing tool, NOT a model violation -> SKIP, don't false-FAIL.
+    echo "   SKIP: TLC unavailable (java / verify/tla/tla2tools.jar missing; run verify/tla/run_tla.sh once)"
+    "$(command -v safe-rm || echo rm)" -f "$TR_OK" "$TR_BUG"
+    exit 0
+elif [ "$r" -eq 0 ]; then
     echo "   OK: fixed-code run conforms to the model"
 else
     echo "   FAIL: fixed-code run should conform"; rc=1
 fi
 echo "-- TLC check: delete-on-main trace (expect NON-CONFORMING) --"
-if "$PY" tools/tla_trace_conform.py "$TR_BUG"; then
+"$PY" tools/tla_trace_conform.py "$TR_BUG"; r=$?
+if [ "$r" -eq 0 ]; then
     echo "   FAIL: the wrong-thread-delete run should NOT conform"; rc=1
+elif [ "$r" -eq 2 ]; then
+    echo "   SKIP: TLC unavailable for the negative control"
 else
     echo "   OK: the bug trace is flagged, same violation as RunloomGilstate_bug.cfg"
 fi

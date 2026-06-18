@@ -61,6 +61,10 @@ if [ -z "${PYTHON:-}" ]; then
         if command -v "$cand" >/dev/null 2>&1; then PYTHON="$cand"; break; fi
     done
 fi
+# One clear message rather than N opaque "command not found"s per phase.
+if [ -z "${PYTHON:-}" ]; then
+    echo "check_all: no python interpreter found -- set PYTHON=/path/to/python3 (want a free-threaded 3.13t)"; exit 2
+fi
 
 phases=("$@")
 [ ${#phases[@]} -eq 0 ] && phases=(tests mn replay lincheck dst ctest)

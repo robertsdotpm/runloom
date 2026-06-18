@@ -21,6 +21,7 @@ OBJDIR="build/temp.coverage"
 COVOUT="build/coverage"
 
 echo "[cov] python: $PYTHON"
+command -v gcov >/dev/null 2>&1 || { echo "[cov] gcov not found -- install gcc/gcov; cannot measure coverage"; exit 2; }
 $RM -rf "$OBJDIR" "$COVOUT" build/temp.* build/lib.* src/runloom_c*.so 2>/dev/null
 mkdir -p "$COVOUT"
 

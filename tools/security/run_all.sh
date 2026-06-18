@@ -11,9 +11,13 @@ PY="${PYTHON:-python3}"
 export PYTHON_GIL=0
 export PYTHONPATH=src
 H=tools/security/stack_scrub_helper
-cc -O0 -shared -fPIC -o "$H.so" "$H.c"
-
-echo "== S1 recycled-stack hygiene =="; "$PY" tools/security/test_stack_scrub.py
+echo "== S1 recycled-stack hygiene =="
+if command -v cc >/dev/null 2>&1; then
+    cc -O0 -shared -fPIC -o "$H.so" "$H.c"
+    "$PY" tools/security/test_stack_scrub.py
+else
+    echo "  SKIP: cc not found (cannot build stack_scrub_helper)"
+fi
 echo "== S2 signal storm ==";           "$PY" tools/security/test_signal_storm.py
 echo "== S3 cross-hub refcount race =="; "$PY" tools/security/test_refcount_race.py
 echo "== S4 valgrind memcheck =="
