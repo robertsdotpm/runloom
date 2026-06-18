@@ -2,7 +2,9 @@
 # check_all.sh -- run every layer of runloom's correctness stack.
 #
 # Layers, fastest first:
-#   static      gcc -fanalyzer + cppcheck on the C core           ~1-2 min
+#   static      security SAST on the C core (parallel across cores):     ~15s
+#               gates  = gcc -fanalyzer+taint, seclint (banned unbounded fns)
+#               advise = clang analyzer/ArrayBound, clang-tidy cert-*, cppcheck
 #   tests       Python test suite (pytest tests/)               ~seconds
 #   mn          M:N scheduler fuzzer (tools/mn_stress.py)        ~seconds-min
 #   replay      controlled-M:N deterministic replay probes       ~seconds-min
@@ -97,7 +99,7 @@ for ph in "${phases[@]}"; do
       "$PYTHON" tools/mn_controlled/repro_timer.py "${REPLAY_SEEDS:-8}" "${REPLAY_REPS:-6}" || rc=1
       ;;
     static)
-      hr "Static analysis (gcc -fanalyzer gate + cppcheck advisory)"
+      hr "Static + security analysis (gcc -fanalyzer+taint & seclint gates; clang/cert/cppcheck advisory)"
       PYTHON="$PYTHON" bash tools/static_analysis.sh || rc=1
       hr "Wake-protocol lint (every wake_state transition is NOTE-witnessed)"
       bash scripts/check_wake_protocol.sh || rc=1
