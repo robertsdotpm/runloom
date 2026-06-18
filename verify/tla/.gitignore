@@ -5,3 +5,5 @@ RunloomGilstateTrace.tla
 RunloomGilstateTrace.cfg
 RunloomMNControlTrace.tla
 RunloomMNControlTrace.cfg
+RunloomCPythonSTWTrace.tla
+RunloomCPythonSTWTrace.cfg

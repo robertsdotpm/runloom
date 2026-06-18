@@ -1,0 +1,119 @@
+--- a/Python/pystate.c.orig	2026-06-18 11:24:19.422681920 +1000
++++ b/Python/pystate.c	2026-06-18 11:45:12.605658112 +1000
+@@ -2081,6 +2081,9 @@
+     } while (!tstate_try_attach(tstate));
+ }
+ 
++/* runloom STW trace-conformance emit (defined below; env RUNLOOM_STW_TRACE). */
++static void runloom_stw_trace(const char *action, void *key);
++
+ void
+ _PyThreadState_Attach(PyThreadState *tstate)
+ {
+@@ -2122,6 +2125,7 @@
+ #endif
+         break;
+     }
++    runloom_stw_trace("Attach", tstate);   /* M1: detached -> attached */
+ 
+     // Resume previous critical section. This acquires the lock(s) from the
+     // top-most critical section.
+@@ -2148,6 +2152,11 @@
+ #endif
+     tstate_deactivate(tstate);
+     tstate_set_detached(tstate, detached_state);
++    /* M1: attached -> detached.  (The attached -> suspended case is emitted as
++     * SelfSuspend by _PyThreadState_Suspend; don't double-count it here.) */
++    if (detached_state == _Py_THREAD_DETACHED) {
++        runloom_stw_trace("Detach", tstate);
++    }
+     current_fast_clear(&_PyRuntime);
+     _PyEval_ReleaseLock(tstate->interp, tstate, 0);
+ }
+@@ -2158,6 +2167,38 @@
+     detach_thread(tstate, _Py_THREAD_DETACHED);
+ }
+ 
++/* ---- runloom STW trace-conformance instrumentation (env RUNLOOM_STW_TRACE) ----
++ * Emits the stop-the-world handshake transitions (machine M2) as one ndjson line
++ * each, keyed by the PyThreadState pointer, so tools/stw_trace_conform.py can
++ * replay the REAL CPython STW protocol through verify/tla/RunloomCPythonSTW.tla's
++ * OWN actions under TLC -- conforming runloom's interaction against the host's
++ * actual stop_the_world, not a transcription.  No-op (and near-zero) when the env
++ * is unset.  Self-contained: its own leaf mutex makes the lazy open + append safe
++ * regardless of which runtime lock is held at the call site, so the emits can sit
++ * exactly at the transition points.  This is the ONLY runloom edit to the CPython
++ * tree (snapshot kept at Python/pystate.c.runloom-orig). */
++static void
++runloom_stw_trace(const char *action, void *key)
++{
++    static PyMutex mtx;
++    static FILE *fp;
++    static int inited;
++    PyMutex_Lock(&mtx);
++    if (!inited) {
++        inited = 1;
++        const char *path = getenv("RUNLOOM_STW_TRACE");
++        if (path != NULL && path[0] != '\0') {
++            fp = fopen(path, "a");
++        }
++    }
++    if (fp != NULL) {
++        fprintf(fp, "{\"a\":\"%s\",\"t\":%llu}\n",
++                action, (unsigned long long)(uintptr_t)key);
++        fflush(fp);
++    }
++    PyMutex_Unlock(&mtx);
++}
++
+ void
+ _PyThreadState_Suspend(PyThreadState *tstate)
+ {
+@@ -2184,6 +2225,7 @@
+ 
+     // Switch to "suspended" state.
+     detach_thread(tstate, _Py_THREAD_SUSPENDED);
++    runloom_stw_trace("SelfSuspend", tstate);
+ 
+     // Decrease the count of remaining threads needing to park.
+     HEAD_LOCK(runtime);
+@@ -2239,6 +2281,7 @@
+             if (_Py_atomic_compare_exchange_int(&t->state,
+                                                 &state, _Py_THREAD_SUSPENDED)) {
+                 num_parked++;
++                runloom_stw_trace("GCPark", t);
+             }
+         }
+         else if (state == _Py_THREAD_ATTACHED && t != stw->requester) {
+@@ -2268,6 +2311,7 @@
+     stw->thread_countdown = 0;
+     stw->stop_event = (PyEvent){0};  // zero-initialize (unset)
+     stw->requester = _PyThreadState_GET();  // may be NULL
++    runloom_stw_trace("GCRequest", stw->requester);
+ 
+     PyInterpreterState *i;
+     PyThreadState *t;
+@@ -2281,6 +2325,7 @@
+     if (stw->thread_countdown == 0) {
+         HEAD_UNLOCK(runtime);
+         stw->world_stopped = 1;
++        runloom_stw_trace("GCStopComplete", stw->requester);
+         return;
+     }
+ 
+@@ -2303,6 +2348,7 @@
+         HEAD_LOCK(runtime);
+     }
+     stw->world_stopped = 1;
++    runloom_stw_trace("GCStopComplete", stw->requester);
+ }
+ 
+ static void
+@@ -2314,6 +2360,7 @@
+     HEAD_LOCK(runtime);
+     stw->requested = 0;
+     stw->world_stopped = 0;
++    runloom_stw_trace("GCStart", stw->requester);
+     // Switch threads back to the detached state.
+     PyInterpreterState *i;
+     PyThreadState *t;

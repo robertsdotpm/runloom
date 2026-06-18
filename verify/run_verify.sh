@@ -212,6 +212,7 @@ eng_bg litmus    litmus/run_litmus.sh
 eng_bg genmc     genmc/run_genmc.sh
 eng_bg dartagnan dartagnan/run_dartagnan.sh
 eng_bg tla       tla/run_tla.sh
+eng_bg traceconf tla/run_trace_conform.sh
 eng_bg alloy     alloy/run_alloy.sh
 eng_bg coq       coq/run_coq.sh
 eng_bg iris      iris/run_iris.sh
