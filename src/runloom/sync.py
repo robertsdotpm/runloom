@@ -334,6 +334,27 @@ def wake(g):
 # foreign-thread-wakeable Event must park on a netpoll fd instead -- that is why
 # monkey's CoEvent uses _Parker, not park().)
 # --------------------------------------------------------------------
+def _acquire(mu):
+    """Acquire a cooperative runloom_c.Mutex, foreign-OS-thread-safe.
+
+    A fiber parks via ``mu.lock()`` (cooperative, FIFO).  A FOREIGN OS thread (no
+    goroutine) MUST NOT call ``mu.lock()``: its contended path parks on a channel,
+    which raises "blocking channel ops require a runloom goroutine context" the
+    instant another holder has the guard (a load-only crash -- uncontended it took
+    the CAS fast path).  Per the Mutex's own contract (module_chan.c.inc
+    RunloomMutex: "foreign OS threads must use try_lock"), a foreign thread spins on
+    the non-blocking ``try_lock`` instead -- it never parks, so it is foreign-safe.
+    Per-fiber behaviour is unchanged; only foreign callers take the spin.  (The
+    WAKE side -- done()/set_result -- stays fiber-only via _resolve_from_fiber; this
+    is only for the read/wait side, which is allowed from anywhere.)
+    """
+    if runloom_c.current_g() is not None:
+        mu.lock()
+    else:
+        while not mu.try_lock():
+            _time.sleep(0.0002)
+
+
 class WaitGroup(object):
     """Go-style sync.WaitGroup: wait for a set of fibers to finish.
 
@@ -360,7 +381,7 @@ class WaitGroup(object):
             raise RuntimeError(
                 "WaitGroup.done() / add(negative) must be called from a "
                 "fiber, not a foreign OS thread")
-        self._mu.lock()
+        _acquire(self._mu)
         self._n += delta
         if self._n < 0:
             self._mu.unlock()
@@ -381,14 +402,14 @@ class WaitGroup(object):
         if g is None:
             # Foreign OS thread: no fiber to park, poll the counter.
             while True:
-                self._mu.lock()
+                _acquire(self._mu)
                 n = self._n
                 self._mu.unlock()
                 if n == 0:
                     return
                 _time.sleep(0.0005)
         while True:
-            self._mu.lock()
+            _acquire(self._mu)
             if self._n == 0:
                 self._mu.unlock()
                 return
@@ -418,7 +439,7 @@ class Future(object):
         self._mu = runloom_c.Mutex()
 
     def done(self):
-        self._mu.lock()
+        _acquire(self._mu)
         d = self._done
         self._mu.unlock()
         return d
@@ -434,7 +455,7 @@ class Future(object):
         if runloom_c.current_g() is None:
             raise RuntimeError(
                 "Future must be resolved from a fiber, not a foreign OS thread")
-        self._mu.lock()
+        _acquire(self._mu)
         if self._done:
             self._mu.unlock()
             raise RuntimeError("Future already resolved")
@@ -461,7 +482,7 @@ class Future(object):
         # authoritative, never a single park() return.
         g = runloom_c.current_g()
         deadline = None if timeout is None else _time.monotonic() + timeout
-        self._mu.lock()
+        _acquire(self._mu)
         if self._done:
             exc, res = self._exc, self._result
             self._mu.unlock()
@@ -472,7 +493,7 @@ class Future(object):
             # Foreign OS thread: poll until resolved (cannot park).
             self._mu.unlock()
             while True:
-                self._mu.lock()
+                _acquire(self._mu)
                 if self._done:
                     exc, res = self._exc, self._result
                     self._mu.unlock()
@@ -495,7 +516,7 @@ class Future(object):
             else:
                 remaining = deadline - _time.monotonic()
                 if remaining <= 0:
-                    self._mu.lock()
+                    _acquire(self._mu)
                     try:
                         self._waiters.remove(g)   # de-queue on timeout
                     except ValueError:
@@ -509,7 +530,7 @@ class Future(object):
                     self._mu.unlock()
                     raise TimeoutError("Future.result timed out")
                 runloom_c.park(timeout=remaining)
-            self._mu.lock()
+            _acquire(self._mu)
             if self._done:
                 exc, res = self._exc, self._result
                 self._mu.unlock()
@@ -610,7 +631,7 @@ class RWMutex(object):
     def rlock(self):
         _resolve_from_fiber("RWMutex.rlock()")
         g = runloom_c.current_g()
-        self._mu.lock()
+        _acquire(self._mu)
         if not self._writer and not self._wwait:    # writer-preference: a waiting
             self._readers += 1                       # writer blocks new readers
             self._mu.unlock()
@@ -621,7 +642,7 @@ class RWMutex(object):
         runloom_c.set_wait_reason(runloom_c.WR_LOCK)
         while True:
             runloom_c.park()
-            self._mu.lock()
+            _acquire(self._mu)
             granted = cell[1][0]
             self._mu.unlock()
             if granted:                              # _readers already bumped for us
@@ -629,7 +650,7 @@ class RWMutex(object):
 
     def runlock(self):
         _resolve_from_fiber("RWMutex.runlock()")
-        self._mu.lock()
+        _acquire(self._mu)
         if self._readers <= 0:
             self._mu.unlock()
             raise RuntimeError("RWMutex.runlock(): read lock not held")
@@ -646,7 +667,7 @@ class RWMutex(object):
     def lock(self):
         _resolve_from_fiber("RWMutex.lock()")
         g = runloom_c.current_g()
-        self._mu.lock()
+        _acquire(self._mu)
         if not self._writer and self._readers == 0:
             self._writer = True
             self._mu.unlock()
@@ -657,7 +678,7 @@ class RWMutex(object):
         runloom_c.set_wait_reason(runloom_c.WR_LOCK)
         while True:
             runloom_c.park()
-            self._mu.lock()
+            _acquire(self._mu)
             granted = cell[1][0]
             self._mu.unlock()
             if granted:                              # _writer already True for us
@@ -665,7 +686,7 @@ class RWMutex(object):
 
     def unlock(self):
         _resolve_from_fiber("RWMutex.unlock()")
-        self._mu.lock()
+        _acquire(self._mu)
         if not self._writer:
             self._mu.unlock()
             raise RuntimeError("RWMutex.unlock(): write lock not held")
@@ -728,7 +749,7 @@ class Semaphore(object):
         _resolve_from_fiber("Semaphore.acquire()")
         deadline = None if timeout is None else _time.monotonic() + timeout
         g = runloom_c.current_g()
-        self._mu.lock()
+        _acquire(self._mu)
         # Fast path: permits free AND nobody ahead (FIFO -- never jump the queue).
         if not self._waiters and self._held + n <= self._limit:
             self._held += n
@@ -744,7 +765,7 @@ class Semaphore(object):
             else:
                 remaining = deadline - _time.monotonic()
                 if remaining <= 0:
-                    self._mu.lock()
+                    _acquire(self._mu)
                     if w[2][0]:                      # granted at the last moment
                         self._mu.unlock()
                         return True
@@ -755,7 +776,7 @@ class Semaphore(object):
                     self._mu.unlock()
                     return False
                 runloom_c.park(timeout=remaining)
-            self._mu.lock()
+            _acquire(self._mu)
             granted = w[2][0]
             self._mu.unlock()
             if granted:
@@ -766,7 +787,7 @@ class Semaphore(object):
         if n < 0:
             raise ValueError("n must be >= 0")
         _resolve_from_fiber("Semaphore.try_acquire()")   # fiber-only contract
-        self._mu.lock()
+        _acquire(self._mu)
         if not self._waiters and self._held + n <= self._limit:
             self._held += n
             self._mu.unlock()
@@ -778,7 +799,7 @@ class Semaphore(object):
         if n < 0:
             raise ValueError("Semaphore.release(n): n must be >= 0")
         _resolve_from_fiber("Semaphore.release()")
-        self._mu.lock()
+        _acquire(self._mu)
         self._held -= n
         if self._held < 0:
             self._held = 0
@@ -826,14 +847,14 @@ class Once(object):
         self._mu = runloom_c.Mutex()
 
     def done(self):
-        self._mu.lock()
+        _acquire(self._mu)
         d = self._done
         self._mu.unlock()
         return d
 
     def do(self, fn):
         g = runloom_c.current_g()
-        self._mu.lock()
+        _acquire(self._mu)
         if self._done:
             self._mu.unlock()
             return
@@ -851,7 +872,7 @@ class Once(object):
             finally:
                 # Mark done + wake waiters even if fn raised (Go: a panic still
                 # completes the Once).  Snapshot+clear under the guard, wake AFTER.
-                self._mu.lock()
+                _acquire(self._mu)
                 self._done = True
                 self._running = False
                 waiters, self._waiters = self._waiters, []
@@ -864,7 +885,7 @@ class Once(object):
             self._mu.unlock()
             while True:
                 _time.sleep(0.0005)
-                self._mu.lock()
+                _acquire(self._mu)
                 d = self._done
                 self._mu.unlock()
                 if d:
@@ -873,7 +894,7 @@ class Once(object):
             self._waiters.append(g)
             self._mu.unlock()
             runloom_c.park()
-            self._mu.lock()
+            _acquire(self._mu)
             if self._done:
                 self._mu.unlock()
                 return
@@ -926,7 +947,7 @@ class Group(object):
 
     def do(self, key, fn):
         g = runloom_c.current_g()
-        self._mu.lock()
+        _acquire(self._mu)
         fut = self._calls.get(key)
         if fut is not None:
             # Waiter: share the in-flight result (Future.result blocks + re-raises).
@@ -945,13 +966,13 @@ class Group(object):
         except BaseException as e:   # noqa: BLE001  (shared to all waiters + re-raised)
             # Delete the entry BEFORE resolving, so a freshly-arriving do(key) after
             # this starts a NEW call instead of joining the finished one.
-            self._mu.lock()
+            _acquire(self._mu)
             if self._calls.get(key) is fut:
                 del self._calls[key]
             self._mu.unlock()
             fut.set_exception(e)
             raise
-        self._mu.lock()
+        _acquire(self._mu)
         if self._calls.get(key) is fut:
             del self._calls[key]
         self._mu.unlock()
@@ -960,7 +981,7 @@ class Group(object):
 
     def forget(self, key):
         """Drop any in-flight call for key, so the next do(key) starts fresh."""
-        self._mu.lock()
+        _acquire(self._mu)
         self._calls.pop(key, None)
         self._mu.unlock()
 
@@ -980,26 +1001,26 @@ class Watch(object):
         self._mu = runloom_c.Mutex()
 
     def get(self):
-        self._mu.lock()
+        _acquire(self._mu)
         v = self._value
         self._mu.unlock()
         return v
 
     def version(self):
-        self._mu.lock()
+        _acquire(self._mu)
         ver = self._version
         self._mu.unlock()
         return ver
 
     def get_versioned(self):
-        self._mu.lock()
+        _acquire(self._mu)
         r = (self._value, self._version)
         self._mu.unlock()
         return r
 
     def set(self, value):
         _resolve_from_fiber("Watch.set()")
-        self._mu.lock()
+        _acquire(self._mu)
         self._value = value
         self._version += 1                  # increment UNDER the guard (no lost wake)
         waiters, self._waiters = self._waiters, []
@@ -1028,7 +1049,7 @@ class Watch(object):
                 if deadline is not None and _time.monotonic() >= deadline:
                     return None
                 _time.sleep(0.0005)
-        self._mu.lock()
+        _acquire(self._mu)
         if self._version > seen_version:
             r = (self._value, self._version)
             self._mu.unlock()
@@ -1041,7 +1062,7 @@ class Watch(object):
             else:
                 remaining = deadline - _time.monotonic()
                 if remaining <= 0:
-                    self._mu.lock()
+                    _acquire(self._mu)
                     try:
                         self._waiters.remove(g)
                     except ValueError:
@@ -1053,7 +1074,7 @@ class Watch(object):
                     self._mu.unlock()
                     return None
                 runloom_c.park(timeout=remaining)
-            self._mu.lock()
+            _acquire(self._mu)
             if self._version > seen_version:
                 try:
                     self._waiters.remove(g)            # done -> de-queue ourselves
