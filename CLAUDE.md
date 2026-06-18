@@ -80,6 +80,28 @@
   each) and sum at the boundary. Cost decomposition vs Go:
   `tests_c/bench_throughput_py.py` + `bench/bench_throughput_go.go`.
 
+## Loopback firewall tax (use a netns for clean network benchmarks)
+- On this Docker host, **every loopback packet traverses the host nft ruleset**
+  (Docker's `filter`/`mangle`/`nat` base chains + conntrack).  Measured on p01
+  (TCP echo) under `perf`: `nft_do_chain` + conntrack/NAT is **~9% of total CPU**
+  and costs **~14% of throughput** -- a measurement artifact, NOT a runloom cost,
+  and absent on real-NIC paths.
+- **NOTRACK on `lo` does NOT fix it** (`iptables -t raw -A OUTPUT -o lo -j
+  NOTRACK`): it only skips *conntrack* (~1%); the dominant cost is *chain
+  traversal* (`nft_do_chain` runs the filter/mangle base chains regardless of
+  tracking).  Verified 9.4% -> 8.9% (noise).  Don't bother re-trying this.
+- **The fix is a fresh network namespace** -- its empty ruleset means the chains
+  never run (9.4% -> 0.2%, ~85k -> ~97k ops on p01).  Pass **`--netns`** to any
+  big_100 program: the harness re-execs via `unshare --net --map-root-user` (no
+  sudo).  Caveat: in that user-ns the harness's `sudo prlimit` is a no-op, so
+  RLIMIT_NOFILE stays at the inherited cap (4096) -- raise it in the launching
+  shell for >~2k-socket runs.
+- For PROFILING with kernel symbols, drive a root netns:
+  `sudo ip netns add ns; sudo ip netns exec ns bash -c 'ip link set lo up;
+  perf record -F 499 -g -- env PYTHON_GIL=0 PYTHONPATH=src python big_100/pNN.py
+  --hubs 8 --rounds 0 --duration 12'` with `kptr_restrict=0` +
+  `perf_event_paranoid=-1` so kernel syms resolve (restore both to 1 after).
+
 ## Concurrency tooling (tools/)
 - `run_sanitizers.sh` (deque ASan/TSan/UBSan), `run_sanitizers_ext.sh` (whole
   ext under TSan via preloaded libtsan + `setarch -R`), `lincheck/` (Porcupine

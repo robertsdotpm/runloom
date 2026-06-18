@@ -249,9 +249,29 @@ class Harness(object):
                         help="last server-IP offset into 127/8 (inclusive). "
                              "e.g. --ip-start-offset 0 --ip-end-offset 999 -> "
                              "1000 servers spreading the connect storm.")
+        ap.add_argument("--netns", action="store_true", default=False,
+                        help="re-exec the whole run inside a FRESH user+net "
+                             "namespace (no sudo) before mn_init.  Its empty nft "
+                             "ruleset means the host firewall/conntrack chains "
+                             "never run on loopback -- worth ~9%% kernel / ~14%% "
+                             "throughput on a Docker host (see CLAUDE.md "
+                             "'loopback firewall tax').  Use for clean network "
+                             "benchmarks / profiles.")
         if add_args is not None:
             add_args(ap)
         self.args = ap.parse_args()
+
+        # --netns: re-exec inside a fresh user+net namespace (no sudo) so the
+        # host's Docker nft/conntrack chains never touch loopback traffic.  A
+        # sentinel env guards against re-exec looping; bring lo up, then exec the
+        # identical argv.  (See CLAUDE.md "loopback firewall tax".)
+        if getattr(self.args, "netns", False) and \
+                os.environ.get("RUNLOOM_BENCH_IN_NETNS") != "1":
+            os.environ["RUNLOOM_BENCH_IN_NETNS"] = "1"
+            _inner = 'ip link set lo up 2>/dev/null; exec "$@"'
+            os.execvp("unshare",
+                      ["unshare", "--net", "--map-root-user", "--",
+                       "bash", "-c", _inner, "bash", sys.executable] + sys.argv)
 
         if self.args.hubs < 2:
             sys.stderr.write(
