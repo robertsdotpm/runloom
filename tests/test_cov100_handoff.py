@@ -56,6 +56,7 @@ See `unreachable` in the structured report for L40 / L153-154 / L214-220 /
 L230-234 (teardown-race + un-hooked OOM/resource-exhaustion guards).
 """
 import os
+import re
 import subprocess
 import sys
 
@@ -132,6 +133,40 @@ def _parse_handoff_ok(stdout):
     return None
 
 
+# The rescue ADOPT path is a real, reliable event, but its LATENCY is not bounded by
+# the blocker's sleep: the sysmon watchdog backs its scan off adaptively when idle
+# (Go-style, to save idle wakeups) and the standby rescue thread must then be
+# scheduled to adopt -- under CPU contention (the parallel suite) that chain can
+# occasionally exceed a single blocker's sleep window, so `during` comes back 0 and
+# the adopt never ran THIS attempt (measured: ~1/5 isolated, all-fire standalone).
+# These are rare-PATH probes: the property is "the adopt path executes", which a
+# retry proves directly (a genuine never-fires still fails every attempt) without
+# weakening any assertion.  So run the wedge workload until the rescue provably
+# fired, then assert on that run.
+def _run_rescue_until(sleep, predicate, env_extra=None, attempts=8, timeout=60):
+    script = _RESCUE_WORKLOAD.format(sleep=sleep)
+    env = dict(_HANDOFF_ENV, **(env_extra or {}))
+    p = None
+    for _ in range(attempts):
+        p = _run(script, env, timeout=timeout)
+        if predicate(p):
+            return p
+    return p
+
+
+def _rescued(p):
+    parsed = _parse_handoff_ok(p.stdout)
+    return p.returncode == 0 and parsed is not None and parsed[1] >= 1
+
+
+def _adopted_and_drained(p):
+    # the adopt line AND the deque-empty-while-wedged line, both gated debug traces.
+    if not _rescued(p) or "adopt hub 0 (own tstate)" not in p.stderr:
+        return False
+    m = re.search(r"hub 0 deque empty \(drained=(\d+)\)", p.stderr)
+    return m is not None and int(m.group(1)) >= 1
+
+
 # --------------------------------------------------------------------------
 # 1. The core adopt path: a rescue thread runs fresh fibers off a wedged hub.
 #    Drives L97-122 (per-fiber adopt/attach/resume/detach), L101+L105-106 (the
@@ -144,8 +179,7 @@ def _parse_handoff_ok(stdout):
 #    finished during that window was carried by the rescue's own PyThreadState.
 # --------------------------------------------------------------------------
 def test_rescue_runs_fresh_fibers_off_a_wedged_single_hub():
-    script = _RESCUE_WORKLOAD.format(sleep="1.0")
-    p = _run(script, _HANDOFF_ENV)
+    p = _run_rescue_until("1.5", _rescued)
     assert p.returncode == 0, (
         "wedged-hub workload did not exit cleanly (rc=%s)\nstdout=%s\nstderr=%s"
         % (p.returncode, p.stdout[-600:], p.stderr[-1500:]))
@@ -176,10 +210,10 @@ def test_rescue_runs_fresh_fibers_off_a_wedged_single_hub():
 #    appear on stderr -- the rescue both adopted and drained, not just spun.
 # --------------------------------------------------------------------------
 def test_rescue_debug_trace_shows_adopt_and_drain():
-    import re
-    script = _RESCUE_WORKLOAD.format(sleep="1.4")
-    env = dict(_HANDOFF_ENV, RUNLOOM_HANDOFF_DEBUG="1")
-    p = _run(script, env, timeout=60)
+    # a longer blocker so the rescue can fully drain the deque mid-wedge (the
+    # deque-empty trace below needs that), retried past adaptive-backoff latency.
+    p = _run_rescue_until("3.0", _adopted_and_drained,
+                          env_extra={"RUNLOOM_HANDOFF_DEBUG": "1"})
     assert p.returncode == 0, (
         "debug-traced wedge run crashed (rc=%s)\nstderr=%s" % (p.returncode, p.stderr[-1500:]))
     assert _parse_handoff_ok(p.stdout) is not None, "no HANDOFF_OK marker\nstderr=%s" % p.stderr[-800:]
@@ -209,8 +243,7 @@ def test_rescue_debug_trace_shows_adopt_and_drain():
 #    the join.
 # --------------------------------------------------------------------------
 def test_handoff_pool_spawned_and_used():
-    script = _RESCUE_WORKLOAD.format(sleep="0.8")
-    p = _run(script, _HANDOFF_ENV)
+    p = _run_rescue_until("1.2", _rescued)
     assert p.returncode == 0, (
         "handoff-enabled run did not tear down cleanly (rc=%s)\nstderr=%s"
         % (p.returncode, p.stderr[-1500:]))

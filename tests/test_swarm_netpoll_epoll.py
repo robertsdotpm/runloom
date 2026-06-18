@@ -843,25 +843,31 @@ def test_iouring_loop_mode_file_io_subprocess():
     # EPOLLEXCLUSIVE in the shared epoll (the documented hang hazard -- the loop
     # idle path must drain the global ring after loop_wait).  Bounded; assert it
     # completes, no hang.
+    # NB: ok is a per-goroutine bytearray, NOT a shared `ok[0] += 1` -- with the GIL
+    # off the read-modify-write of a shared counter from 12 M:N goroutines LOSES
+    # increments (a lost update under load made this assert LOOP_OK 11 != 12 even
+    # though every file round-trip succeeded).  One slot per goroutine, single
+    # writer each, summed at the end (the race-free counter rule, CLAUDE.md).
     script = r'''
 import sys, os, tempfile; sys.path.insert(0, "src")
 import runloom
 import runloom_c as rc
-ok = [0]
+N = 12
+ok = bytearray(N)
 def main():
-    for i in range(12):
+    for i in range(N):
         def one(i=i):
             fd, path = tempfile.mkstemp()
             try:
                 rc.file_write(fd, b"u" * 4096, 0)
                 buf = bytearray(4096)
                 if rc.file_read(fd, buf, 4096, 0) == 4096:
-                    ok[0] += 1
+                    ok[i] = 1
             finally:
                 os.close(fd); os.unlink(path)
         rc.mn_go(one)
 runloom.run(3, main)
-sys.stdout.write("LOOP_OK %d\n" % ok[0])
+sys.stdout.write("LOOP_OK %d\n" % sum(ok))
 '''
     p = _subproc(script, env_extra={"RUNLOOM_IOURING_LOOP": "1"}, timeout=40)
     _assert_no_signal_crash(p, "iouring loop")

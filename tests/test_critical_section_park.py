@@ -35,14 +35,17 @@ class CollidingKey:
 
 def test_park_in_dict_critical_section_no_deadlock():
     table = {CollidingKey(i): i for i in range(8)}
-    done = [0]
+    n_workers = 40
+    # race-free counter: with 4 hubs (GIL off) a shared `done[0] += 1` is a
+    # read-modify-write race that LOSES increments -> the exact-count assert below
+    # would spuriously fail (got 39 != 40).  One slot per worker, single writer each.
+    done = bytearray(n_workers)
 
     def worker(i):
         for _ in range(30):
             table.get(CollidingKey(i % 8))
-        done[0] += 1
+        done[i] = 1
 
-    n_workers = 40
     runloom_c.mn_init(4)
     try:
         for i in range(n_workers):
@@ -51,7 +54,7 @@ def test_park_in_dict_critical_section_no_deadlock():
     finally:
         runloom_c.mn_fini()
 
-    assert done[0] == n_workers, "expected all workers to finish, got %d" % done[0]
+    assert sum(done) == n_workers, "expected all workers to finish, got %d" % sum(done)
 
 
 if __name__ == "__main__":
