@@ -23,6 +23,7 @@ skip() { echo "== STW (M2) trace conformance =="; echo "  SKIP: $1"; exit 0; }
 
 command -v java >/dev/null 2>&1 || skip "java not found (TLC needs it)"
 [ -x "$PYD" ] || skip "no pydebug interp at $PYD (set RUNLOOM_PYDEBUG_PYTHON)"
+[ -f "$ROOT/verify/tla/tla2tools.jar" ] || skip "tla2tools.jar not present (the verify phase fetches it; or run verify/tla/run_tla.sh once)"
 
 TR="$(mktemp /tmp/stwconf.XXXX.ndjson)"
 WL='import gc, sys; sys.path.insert(0,"src")

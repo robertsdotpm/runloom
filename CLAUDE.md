@@ -7,7 +7,11 @@
   (especially macOS minutes), and we don't want it. This has been asked for
   repeatedly.
 - Our "CI" is **local**: `scripts/check_all.sh`. Phases: `tests mn lincheck dst
-  ctest sanitizers exttsan verify` (or name phases).
+  ctest sanitizers exttsan verify ftconform` (or name phases). `ftconform` conforms
+  the REAL CPython stop-the-world against the TLA+ model via the instrumented
+  `--with-pydebug` interp; it's in both the fast and extensive lanes but **skips
+  cleanly** where that oracle isn't set up, so it only runs on the dev box / CI
+  runner (~5s there).
 - **Run `scripts/check_all_fast.sh` before proposing a merge.** It is the routine
   pre-merge gate: the quick correctness phases + a *fast* formal lane (all Spin
   models + every cheap CBMC proof, parallelised) that **skips the 3 genuinely

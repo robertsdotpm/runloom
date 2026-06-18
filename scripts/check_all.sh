@@ -14,6 +14,9 @@
 #   sanitizers  C deque harness under ASan/TSan/UBSan            ~seconds-min
 #   exttsan     WHOLE ext under ThreadSanitizer (real runtime)  ~30s-min
 #   verify      formal proofs: Spin models + CBMC on real C      ~3-4 min
+#   ftconform   REAL CPython stop-the-world (M2) conformed to the TLA+ model under
+#               TLC, via the instrumented --with-pydebug interp (skips cleanly if
+#               that oracle isn't present); in `all`, not in fast    ~seconds
 #   bench       rigorous microbench sweep (informational)        ~1-3 min
 #   combo       pairwise config-matrix interaction sweep          ~1-2 min
 #
@@ -28,11 +31,15 @@
 #
 # Two convenience wrappers wrap the common tiers (see scripts/check_all_fast,
 # scripts/check_all_extensive):
-#   check_all_fast       = tests mn replay lincheck dst ctest verify-fast
+#   check_all_fast       = tests mn replay lincheck dst ctest verify-fast ftconform
 #                          (the routine PRE-MERGE gate -- full Spin + cheap CBMC,
 #                           skips the 3 slow proofs; ~minutes)
 #   check_all_extensive  = all  (every proof + sanitizers; run before a risky
 #                          merge / periodically; the verify phase is now parallel)
+# The ftconform phase is in BOTH lanes but SKIPS CLEANLY where the instrumented
+# --with-pydebug oracle isn't set up (so it only actually runs on the dev box /
+# the self-hosted CI runner); it adds ~a few seconds there.  It is ordered AFTER
+# verify(-fast) so the TLA+ jar that phase fetches is already present.
 #
 # The verify / verify-fast phases run their checks through a parallel worker pool
 # (VERIFY_JOBS, default nproc).  See verify/run_verify.sh.
@@ -69,7 +76,7 @@ fi
 phases=("$@")
 [ ${#phases[@]} -eq 0 ] && phases=(tests mn replay lincheck dst ctest)
 if [ "${phases[0]}" = all ]; then
-  phases=(tests mn replay lincheck dst ctest static sanitizers exttsan verify)
+  phases=(tests mn replay lincheck dst ctest static sanitizers exttsan verify ftconform)
 fi
 
 rc=0
@@ -137,6 +144,10 @@ for ph in "${phases[@]}"; do
       hr "Formal verification -- fast lane (all Spin + cheap CBMC; skips 3 slow proofs)"
       VERIFY_FAST=1 verify/run_verify.sh || rc=1
       ;;
+    ftconform)
+      hr "STW (M2) trace conformance -- real CPython stop-the-world vs the model"
+      tools/stw_conform_ci.sh || rc=1
+      ;;
     bench)
       hr "Rigorous microbench sweep (informational -- bootstrap CIs)"
       PYTHON="$PYTHON" bash tools/bench/bench.sh || rc=1
@@ -146,7 +157,7 @@ for ph in "${phases[@]}"; do
       PYTHON_GIL=0 "$PYTHON" tools/combinatorial/covering.py --iters "${COMBO_ITERS:-40}" || rc=1
       ;;
     *)
-      echo "unknown phase: $ph (want: tests mn replay lincheck dst ctest static sanitizers exttsan verify verify-fast bench combo all)"; rc=2 ;;
+      echo "unknown phase: $ph (want: tests mn replay lincheck dst ctest static sanitizers exttsan verify verify-fast ftconform bench combo all)"; rc=2 ;;
   esac
 done
 

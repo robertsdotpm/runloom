@@ -14,4 +14,4 @@
 #
 # Usage:  scripts/check_all_fast.sh
 # Env:    same as check_all.sh (PYTHON=..., VERIFY_JOBS=N, ...)
-exec "$(dirname "$0")/check_all.sh" tests mn replay lincheck dst ctest verify-fast
+exec "$(dirname "$0")/check_all.sh" tests mn replay lincheck dst ctest verify-fast ftconform

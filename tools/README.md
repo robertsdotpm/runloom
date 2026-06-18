@@ -56,7 +56,8 @@ map, and the few deepest-used ones are written up at the bottom.
 | tool | what | run |
 |------|------|-----|
 | [`lincheck/`](lincheck/) | channel histories checked LINEARIZABLE vs the FIFO spec (Porcupine) + a stateful Hypothesis model | see [`lincheck/README.md`](lincheck/README.md) |
-| [`stw_trace_conform.py`](stw_trace_conform.py) + [`stw_trace_conform_demo.sh`](stw_trace_conform_demo.sh) | conform the REAL CPython stop-the-world (M2) handshake against `verify/tla/RunloomCPythonSTW.tla` under TLC (needs the instrumented pydebug; run via [`run_pydebug.sh`](run_pydebug.sh)) | `tools/stw_trace_conform_demo.sh` |
+| [`stw_trace_conform.py`](stw_trace_conform.py) + [`stw_trace_conform_demo.sh`](stw_trace_conform_demo.sh) | conform the REAL CPython stop-the-world (M2) handshake against `verify/tla/RunloomCPythonSTW.tla` under TLC (needs the instrumented pydebug) | `tools/stw_trace_conform_demo.sh` |
+| [`stw_conform_ci.sh`](stw_conform_ci.sh) | the `ftconform` check_all phase: idempotently set up the pydebug oracle, then run the demo -- skip-clean where it isn't available | `scripts/check_all.sh ftconform` (in fast + extensive) |
 | [`tla_trace_conform.py`](tla_trace_conform.py) + [`trace_conform_demo.sh`](trace_conform_demo.sh) | conform the real gilstate-TSS lifecycle (M4) hub-tstate create/delete against `RunloomGilstate.tla` | `tools/trace_conform_demo.sh` (gated in `check_all` via `verify/tla/run_trace_conform.sh`) |
 | [`mn_trace_conform.py`](mn_trace_conform.py) + [`mn_trace_conform_demo.sh`](mn_trace_conform_demo.sh) | conform the real controlled-M:N baton events against `RunloomMNControl.tla` | `tools/mn_trace_conform_demo.sh` (also gated in `check_all`) |
 
