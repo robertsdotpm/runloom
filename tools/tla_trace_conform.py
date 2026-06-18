@@ -33,8 +33,17 @@ TLA = os.path.join(ROOT, "verify", "tla")
 JAR = os.path.join(TLA, "tla2tools.jar")
 
 
+RESCUE_BASE = 1000   # rescue tstates are traced in a disjoint id band (>= 1000)
+                     # so the model treats them as their own threads, not re-
+                     # created hubs -- mirror of RUNLOOM_GILSTATE_RESCUE_TRACE_ID
+                     # in src/runloom_c/mn_sched_handoff.c.inc.
+
+
 def hub_name(i):
-    return "h{}".format(i + 1)          # hub id 0 -> h1 (matches the .cfg's Hubs)
+    i = int(i)
+    if i >= RESCUE_BASE:
+        return "r{}".format(i - RESCUE_BASE + 1)   # rescue-thread tstate (own thread)
+    return "h{}".format(i + 1)                      # hub id 0 -> h1 (matches the .cfg's Hubs)
 
 
 def thread_name(d):

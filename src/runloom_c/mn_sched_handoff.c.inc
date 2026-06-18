@@ -133,6 +133,15 @@ static void runloom_handoff_rescue(runloom_hub_t *h, PyThreadState *rescue_ts)
 /* index counter: monotonic, rescue threads claim slots 0, 1, 2, ... */
 static volatile int runloom_rescue_thread_next = 0;
 
+/* gilstate trace conformance: a rescue tstate lives on its OWN rescue OS thread
+ * (distinct from any hub), but rescue-slot indices overlap hub ids 0,1,2,...
+ * Trace rescue tstates in a DISJOINT id band so RunloomGilstate.tla treats each
+ * as its own thread (its own Create + self-Delete), not a re-created hub.  Mirror
+ * this base in tools/tla_trace_conform.py (RESCUE_BASE).  (The trace is only
+ * emitted under RUNLOOM_GILSTATE_TRACE -- a debug/verification env var -- so the
+ * 1000 band never collides with a real hub count.) */
+#define RUNLOOM_GILSTATE_RESCUE_TRACE_ID(idx) (1000 + (idx))
+
 static RUNLOOM_THREAD_RET runloom_handoff_main(void *arg)
 {
     PyThreadState *rescue_ts;
@@ -165,6 +174,11 @@ static RUNLOOM_THREAD_RET runloom_handoff_main(void *arg)
         runloom_coro_thread_fini();
         RUNLOOM_THREAD_RETURN(NULL);
     }
+    /* trace conformance: this rescue tstate was just created on (and gilstate-
+     * bound to) THIS rescue thread -- emit its Create so the trace balances the
+     * later self-Delete.  Mirrors the hub Create at mn_sched_hub_main.c.inc:159. */
+    runloom_gilstate_trace("Create", RUNLOOM_GILSTATE_RESCUE_TRACE_ID(my_idx),
+                                     RUNLOOM_GILSTATE_RESCUE_TRACE_ID(my_idx));
     /* Publish tstate for stop_join to delete -- see runloom_rescue_tstates comment.
      * RELEASE: pairs with stop_join's post-join read (which gets a happens-before
      * via the pthread_join). */
@@ -205,7 +219,8 @@ static RUNLOOM_THREAD_RET runloom_handoff_main(void *arg)
      * delete.  NULL the published slot first so the delete_tstates sweep skips it. */
     runloom_coro_thread_fini();
     if (getenv("RUNLOOM_GILSTATE_DELETE_ON_MAIN") == NULL) {
-        runloom_gilstate_trace("Delete", my_idx, my_idx);   /* deleter = own thread (the fix) */
+        runloom_gilstate_trace("Delete", RUNLOOM_GILSTATE_RESCUE_TRACE_ID(my_idx),
+                                         RUNLOOM_GILSTATE_RESCUE_TRACE_ID(my_idx));   /* deleter = own thread (the fix) */
         __atomic_store_n((void **)&runloom_rescue_tstates[my_idx], (void *)NULL,
                          __ATOMIC_RELEASE);
         PyEval_RestoreThread(rescue_ts);   /* attach; waits out any pending STW */
@@ -330,7 +345,7 @@ static void runloom_handoff_delete_tstates(void)
                 /* Negative-control / straggler path only (see above): a
                  * cross-thread delete from MAIN.  Trace deleter=-1 (main) so the
                  * gilstate TLA trace check flags it, matching the hub control. */
-                runloom_gilstate_trace("Delete", k, -1);
+                runloom_gilstate_trace("Delete", RUNLOOM_GILSTATE_RESCUE_TRACE_ID(k), -1);
                 PyThreadState_Clear(rts);
                 PyThreadState_Delete(rts);
             }
