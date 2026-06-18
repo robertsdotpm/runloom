@@ -1090,11 +1090,31 @@ class TestDeadlockDiagnostics:
 
         def main():
             # park_self leaves fibers in PARKED_SAFE -> counted as deadlockable.
+            # A park_self fiber is wakeable ONLY via its OWN handle: sched_reset()
+            # and cancel_all_parked() are netpoll/fd-only and do NOT release a
+            # PARKED_SAFE parker.  The old cleanup (rc.sched_reset()) therefore
+            # never released these 4 -- they leaked past run() under load as
+            # live/deadlocked fibers and polluted a later idle test
+            # (test_idle_counts_are_zero then saw rc.fiber_count() != 0).  Capture
+            # each handle and wake them deterministically so they complete + reap.
+            handles = []
+            done = []
+
+            def parker():
+                handles.append(rc.current_g())
+                rc.park_self()                 # PARKED_SAFE until woken via handle
+                done.append(1)
+
             for _ in range(4):
-                runloom.go(lambda: rc.park_self())
-            runloom.sleep(0.02)
+                runloom.go(parker)
+            # Barrier: all 4 captured their handle AND committed to the park.
+            while len(handles) < 4 or rc.count_deadlocked() < 4:
+                runloom.sleep(0.002)
             cap["n"] = rc.count_deadlocked()
-            rc.sched_reset()   # release the parked fibers so run() can drain
+            for h in handles:
+                h.wake()                       # park_self returns -> fiber completes
+            while len(done) < 4:               # all 4 fully drained (reaped)
+                runloom.sleep(0.002)
 
         with hang_guard(20, "count_deadlocked"):
             runloom.run(1, main)
