@@ -169,6 +169,30 @@ Py_ssize_t runloom_sched_drain(runloom_sched_t *s)
                  * stays wall-clock (the open-system limit). */
                 if (runloom_sched_logical_enabled() && timeout_ns > 50000000LL)
                     timeout_ns = 50000000LL;
+                /* FOREIGN-THREAD WAKE BACKSTOP.  Blockpool workers / foreign
+                 * parkers (run_in_executor, etc.) wake us by poking the pump
+                 * eventfd (runloom_netpoll_wake_pump), but that poke RACES our
+                 * decision to block here.  Under load the poke can land in the
+                 * window after we last checked the wake_list and before we
+                 * enter epoll_wait, and is then lost -- leaving the sched asleep
+                 * in epoll_wait(timeout=-1) FOREVER while the worker has already
+                 * run the job and queued the woken g on the wake_list (gdb-
+                 * confirmed: bp_inflight=0, all workers idle on bp_cond, main
+                 * thread parked in epoll_wait(-1) on the default pool's epoll).
+                 * M:N hubs never hit this -- they busy-poll ~1 ms, so the bounded
+                 * pump timeout is their backstop (see runloom_netpoll_wake_pump's
+                 * own comment); the single-thread drain is the ONLY path that
+                 * blocks UNBOUNDED on a foreign poke.  Give it the same backstop:
+                 * cap the block so a lost poke self-heals on the next re-poll,
+                 * which re-drains the wake_list at the loop top.  The poke stays
+                 * the fast path (microseconds); this only bounds the rare
+                 * lost-poke tail.  Reproduced ~1% in the gate / reliably under
+                 * `-s` parallel load (tests/test_swarm_blockpool_diag_crash.py
+                 * TestBlockingResults). */
+                if ((runloom_blockpool_inflight() > 0 ||
+                     runloom_foreign_park_inflight() > 0) &&
+                    (timeout_ns < 0 || timeout_ns > 2000000LL))
+                    timeout_ns = 2000000LL;   /* 2 ms */
                 runloom_netpoll_pump(timeout_ns);
             } else if (timeout_ns > 0) {
                 if (runloom_sched_logical_enabled() &&
