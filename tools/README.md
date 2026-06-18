@@ -1,18 +1,96 @@
-# runloom concurrency tooling
+# runloom dev tooling
 
-Tools for exposing deadlocks, hangs, races, and crashes in the runloom
-runtime -- and the harnesses that drive them hard.
+Tools for exposing deadlocks, hangs, races, and crashes in the runloom runtime --
+and the harnesses that drive them hard. This file is the **complete index of every
+tool under `tools/`**. Most are wired into the CI lanes (`../scripts/check_all.sh`
+and its `_fast` / `_extensive` variants); the machine-checked proofs live in
+`../verify/`. Every tool's own file header explains it in full -- this index is the
+map, and the few deepest-used ones are written up at the bottom.
 
-| tool | purpose |
-|------|---------|
-| [`watchdog.py`](watchdog.py) | turn a silent hang into a full state dump (thread stacks + scheduler self-check + stats + lifecycle event ring) |
-| [`mn_stress.py`](mn_stress.py) | seeded randomized fuzzer for the M:N (multi-hub) scheduler: cross-hub channels + select under real parallelism, with conservation checks |
-| [`run_sanitizers.sh`](run_sanitizers.sh) | build + run the standalone C harnesses (test_cldeque) under ASan / TSan / UBSan |
-| [`run_sanitizers_ext.sh`](run_sanitizers_ext.sh) | build the **whole runloom_c ext** under TSan + run it under the free-threaded interpreter (mn_stress + lincheck + pytest subset) -- hunts races in the real scheduler/chan/select/netpoll, not just the deque |
-| [`build_tsan_cpython.sh`](build_tsan_cpython.sh) | recipe for a fully TSan-instrumented free-threaded CPython (gold standard; currently blocked on an upstream getpath quirk -- see header) |
+## Index
 
-See also `../verify/` (formal proofs), `lincheck/` (linearizability +
-stateful model), and `../tests_c/test_cldeque.c` (deque stress).
+### Hang / race / crash hunting
+| tool | what | run |
+|------|------|-----|
+| [`watchdog.py`](watchdog.py) | turn a silent hang into a full state dump (thread stacks + scheduler self-check + stats + lifecycle event ring) | `python tools/watchdog.py` / import in tests |
+| [`mn_stress.py`](mn_stress.py) | seeded fuzzer for the M:N scheduler: token-conservation over cross-hub channels + `select` under real parallelism | `python tools/mn_stress.py --iters 500 [--seed N]` |
+| [`hang_hunter/`](hang_hunter/) | autonomous stress+fuzz daemon for the M:N scheduler with auto-triage + dedup of hangs/crashes | see [`hang_hunter/README.md`](hang_hunter/README.md) |
+| [`lifefuzz/`](lifefuzz/) | generative, **replayable** life-cycle fuzzer: mass-produces diverse runloom programs under lifecycle oracles | see [`lifefuzz/README.md`](lifefuzz/README.md) |
+| [`monkey_offload_stress.py`](monkey_offload_stress.py) | stress the monkey-offload cross-thread wake path (worker threads `unpark`-ing goroutines) | `python tools/monkey_offload_stress.py [ngor] [ops] [nhubs]` |
+| [`wake_skew_test.sh`](wake_skew_test.sh) | wake-protocol **Layer 3**: run wake-sensitive tests under skew injection (`-DRUNLOOM_WAKE_SKEW`) to expose park/wake races | `tools/wake_skew_test.sh` |
+
+### Sanitizers & instrumented interpreters (dynamic analysis)
+| tool | what | run |
+|------|------|-----|
+| [`run_sanitizers.sh`](run_sanitizers.sh) | the standalone deque C harness (`test_cldeque`) under ASan / TSan / UBSan | `tools/run_sanitizers.sh [pushes thieves rounds]` |
+| [`run_sanitizers_ext.sh`](run_sanitizers_ext.sh) | the **whole `runloom_c` ext** under TSan (preloaded libtsan) on free-threaded CPython -- real scheduler/chan/select/netpoll | `tools/run_sanitizers_ext.sh [intensity]` |
+| [`run_pydebug.sh`](run_pydebug.sh) | runloom under a `--with-pydebug` CPython so the host's OWN internal asserts (tstate/STW/gilstate/mimalloc) are the oracle | `tools/run_pydebug.sh [iters]` -- see [`../docs/dev/cpython_boundary.md`](../docs/dev/cpython_boundary.md) |
+| [`run_msan.sh`](run_msan.sh) | `runloom_c` under MemorySanitizer vs an MSan-instrumented CPython -- uninitialised reads | `tools/run_msan.sh` -- see [`../docs/dev/msan.md`](../docs/dev/msan.md) |
+| [`build_msan_cpython.sh`](build_msan_cpython.sh) | build a free-threaded CPython under MSan (clang, `-fsanitize=memory`) -- prereq for `run_msan.sh` | `tools/build_msan_cpython.sh` |
+| [`build_tsan_cpython.sh`](build_tsan_cpython.sh) | build a fully TSan-instrumented CPython (gold standard -- interpreter + ext both instrumented) | `tools/build_tsan_cpython.sh` |
+| [`build_patched_rr.sh`](build_patched_rr.sh) | build + install `rr` with the vPMU min-period clamp so record/replay works on VMware vPMU | `tools/build_patched_rr.sh` -- see [`../docs/dev/rr_vpmu_status.md`](../docs/dev/rr_vpmu_status.md) |
+
+### Static analysis
+| tool | what | run |
+|------|------|-----|
+| [`static_analysis.sh`](static_analysis.sh) | seclint (banned funcs) + `gcc -fanalyzer` + clang analyzer + cppcheck | `tools/static_analysis.sh` |
+| [`racerd.sh`](racerd.sh) | compositional static race detection (Infer **RacerD**) + memory-safety (**Pulse**) | `tools/racerd.sh` |
+
+### Coverage
+| tool | what | run |
+|------|------|-----|
+| [`coverage.sh`](coverage.sh) | C line/branch coverage (gcov) over the whole corpus (pytest + mn_stress + deque stress) | `tools/coverage.sh [phases]` |
+| [`cov_measure.sh`](cov_measure.sh) | coverage via the **isolated** runner (`-j1`) -- avoids cross-file state leaks + the `.gcda` race | `tools/cov_measure.sh [args]` |
+| [`cov_subsystem.py`](cov_subsystem.py) | aggregate gcov for a subsystem split across `.c` + `.c.inc` fragments (honors LCOV markers) | `cov_subsystem.py <covdir>` |
+| [`cov_summary.py`](cov_summary.py) | per-file line coverage + heuristic uncovered-error-path report (ENOMEM/errno/`return -1`) | `cov_summary.py <covdir>` |
+| [`kqueue_cov.sh`](kqueue_cov.sh) · [`kqueue_cov_run.sh`](kqueue_cov_run.sh) · [`kqueue_cov_parse.py`](kqueue_cov_parse.py) | scoped **branch** coverage of the macOS kqueue netpoll backend (one module/process) | `tools/kqueue_cov.sh` -- see [`../docs/dev/KQUEUE_AUDIT_2026-06.md`](../docs/dev/KQUEUE_AUDIT_2026-06.md) |
+
+### Deterministic & controlled scheduling (a failure reduces to one seed)
+| tool | what | run |
+|------|------|-----|
+| [`dst/`](dst/) | Deterministic Simulation Testing on the single hub: real chan/select, seeded yield oracle (`UniformYield` / `PCTBounded`) | see [`dst/README.md`](dst/README.md) |
+| [`pct/`](pct/) | Probabilistic Concurrency Testing (single hub): random priorities + demotions, depth-bounded bug guarantee | see [`pct/README.md`](pct/README.md) |
+| [`mn_controlled/`](mn_controlled/) | the M:N analogue: baton-gated hub resumption (`RUNLOOM_MN_SEED`) for reproducible multi-hub races | see [`mn_controlled/README.md`](mn_controlled/README.md) |
+
+### Linearizability & model<->binary conformance
+| tool | what | run |
+|------|------|-----|
+| [`lincheck/`](lincheck/) | channel histories checked LINEARIZABLE vs the FIFO spec (Porcupine) + a stateful Hypothesis model | see [`lincheck/README.md`](lincheck/README.md) |
+| [`stw_trace_conform.py`](stw_trace_conform.py) + [`stw_trace_conform_demo.sh`](stw_trace_conform_demo.sh) | conform the REAL CPython stop-the-world (M2) handshake against `verify/tla/RunloomCPythonSTW.tla` under TLC (needs the instrumented pydebug; run via [`run_pydebug.sh`](run_pydebug.sh)) | `tools/stw_trace_conform_demo.sh` |
+| [`tla_trace_conform.py`](tla_trace_conform.py) + [`trace_conform_demo.sh`](trace_conform_demo.sh) | conform the real gilstate-TSS lifecycle (M4) hub-tstate create/delete against `RunloomGilstate.tla` | `tools/trace_conform_demo.sh` (gated in `check_all` via `verify/tla/run_trace_conform.sh`) |
+| [`mn_trace_conform.py`](mn_trace_conform.py) + [`mn_trace_conform_demo.sh`](mn_trace_conform_demo.sh) | conform the real controlled-M:N baton events against `RunloomMNControl.tla` | `tools/mn_trace_conform_demo.sh` (also gated in `check_all`) |
+
+### Fault injection & robustness
+| tool | what | run |
+|------|------|-----|
+| [`fault_sweep.py`](fault_sweep.py) | single-fault sweep: fail each Nth alloc/syscall in turn, classify OK / GRACEFUL / CRASH / HANG | `tools/fault_sweep.py [targets] [maxN]` |
+| [`faultinj/`](faultinj/) | the `LD_PRELOAD` fault shim + cleanup-path workload that `fault_sweep.py` drives | see [`faultinj/README.md`](faultinj/README.md) |
+| [`leak_check.py`](leak_check.py) | resource-balance harness: run a workload N times, assert live objects + open fds return to baseline | `python tools/leak_check.py` / import `check_leak()` |
+
+### Mutation, combinatorial, security
+| tool | what | run |
+|------|------|-----|
+| [`mutate/`](mutate/) | mutation testing: inject one compilable fault, rebuild, run a slice -- surviving mutants name untested lines | see [`mutate/README.md`](mutate/README.md) |
+| [`combinatorial/`](combinatorial/) | t-way covering-array config-matrix testing -- find interaction faults cheaply (pairwise/3-way) | see [`combinatorial/README.md`](combinatorial/README.md) |
+| [`security/`](security/) | the security verification suite (stack scrub, tainted-pointer bounds, frame overflow, C-API / TLS-bridge fuzzers, hardening lint) | see [`security/README.md`](security/README.md) |
+
+### Benchmarking & misc
+| tool | what | run |
+|------|------|-----|
+| [`bench/`](bench/) | rigorous microbench harness defending against autocorrelation + layout bias (Kalibera & Jones) -- driven by `../scripts/bench.sh` | see [`bench/README.md`](bench/README.md) |
+| [`heavy_frames/`](heavy_frames/) | the stdlib fat-frame profile + generator for `runloom_heavy_frames.h` (goroutine stack cold-start sizing) | see [`heavy_frames/README.md`](heavy_frames/README.md) |
+
+**Related, outside `tools/`:** `../scripts/check_all*.sh` (the CI lanes that drive
+most of the above), `../scripts/check_wake_protocol.sh` (wake-protocol Layer 2
+lint), `../verify/` (Spin / CBMC / GenMC / herd7 / TLA+ / Coq / Iris proofs, see
+[`../verify/README.md`](../verify/README.md)), and `../tests_c/test_cldeque.c`
+(deque stress). Several tools have a dedicated deep-dive doc under `../docs/dev/`
+(linked inline above).
+
+---
+
+The few deepest-used tools are written up in full below; everything else is
+self-documenting (open the file -- its header explains it and how to run it).
 
 ## watchdog.py -- hang / deadlock detector
 
