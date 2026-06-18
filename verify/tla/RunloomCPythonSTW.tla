@@ -39,6 +39,12 @@ EXTENDS Naturals, FiniteSets
 
 CONSTANTS Hubs,       \* set of hub OS-thread ids
           NoHub,      \* sentinel: no requester (model value)
+          External,   \* sentinel: an EXTERNAL requester not in Hubs -- a real STW
+                      \*   whose requester tstate is NULL (_PyThreadState_GET()==NULL,
+                      \*   e.g. a gc from a context with no current tstate).  It is
+                      \*   never tracked as a hub, so Others(External) = all Hubs (the
+                      \*   external STW must suspend every hub).  Unused by the
+                      \*   standalone Next (only the trace driver reaches it).
           Bypass,     \* TRUE -> enable the handoff re-attach bug (C3 violation)
           BuggyBlock, \* TRUE -> a hub may BLOCK while ATTACHED (a C4 violation): it
                       \*         never reaches a safe point, so stop-the-world can
@@ -60,7 +66,7 @@ vars == <<state, world, requester, stops, wedged>>
 TypeOK ==
     /\ state \in [Hubs -> {"attached","detached","suspended"}]
     /\ world \in {"running","stopping","stopped"}
-    /\ requester \in Hubs \cup {NoHub}
+    /\ requester \in Hubs \cup {NoHub, External}
     /\ stops \in 0..MaxStops
     /\ wedged \in [Hubs -> BOOLEAN]
 
@@ -97,6 +103,18 @@ GCRequest(r) ==
     /\ stops < MaxStops
     /\ world' = "stopping"
     /\ requester' = r
+    /\ UNCHANGED <<state, stops, wedged>>
+
+\* M2 with an EXTERNAL requester (a NULL-tstate STW; see CONSTANT External): no
+\* "attached" precondition (the external thread is not a tracked hub), and every
+\* hub is an "other" (Others(External) = Hubs) that must reach suspended before
+\* GCStopComplete.  Reached only by the trace driver; NOT part of the standalone
+\* Next, so the standalone model's reachable states are unchanged.
+GCRequestExt ==
+    /\ world = "running"
+    /\ stops < MaxStops
+    /\ world' = "stopping"
+    /\ requester' = External
     /\ UNCHANGED <<state, stops, wedged>>
 
 \* M2: park_detached_threads -- the requester CAS-flips a DETACHED other hub to
@@ -189,7 +207,8 @@ STWExclusive ==
 
 \* The requester is attached exactly while it holds the world stopped.
 RequesterAttached ==
-    (world = "stopped") => (requester \in Hubs /\ state[requester] = "attached")
+    (world = "stopped" /\ requester # External)
+        => (requester \in Hubs /\ state[requester] = "attached")
 
 \* LIVENESS (the STW-monopoly hang): every requested stop-the-world eventually
 \* completes.  Holds under BuggyBlock=FALSE (with LiveFairness); a hub that blocks

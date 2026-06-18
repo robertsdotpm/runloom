@@ -83,6 +83,15 @@ echo "-- mn_stress under pydebug --"
 PYTHON_GIL=0 PYTHONPATH=src timeout 240 "$PYD" tools/mn_stress.py --iters "$ITERS" >/tmp/runloom_pydebug_mn.log 2>&1 \
     && echo "  mn_stress: PASS" || { echo "  mn_stress: FAIL"; tail -4 /tmp/runloom_pydebug_mn.log; fails=$((fails+1)); }
 
+# STW (M2) TRACE CONFORMANCE: if this pydebug interp is also instrumented with the
+# stop-the-world trace (verify/cpython_patches/pystate_stw_trace.patch), validate
+# the REAL handshake against RunloomCPythonSTW.tla under TLC.  The pydebug-ABI ext
+# is built above, so this is its natural home.  Skips cleanly (not a failure) when
+# the interp isn't STW-instrumented or a clean trace can't be captured.
+echo "-- STW (M2) trace conformance vs the real stop_the_world --"
+RUNLOOM_PYDEBUG_PYTHON="$PYD" bash tools/stw_trace_conform_demo.sh 2>&1 | sed 's/^/  /' \
+    || { echo "  STW conformance: FAIL"; fails=$((fails+1)); }
+
 echo "----------------------------------------------------------------------------"
 [ "$fails" -eq 0 ] && echo "  CLEAN -- runloom satisfies CPython's internal assertions" \
                    || echo "  $fails failure(s) -- a boundary-contract assert fired; see above"

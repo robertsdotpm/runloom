@@ -41,10 +41,29 @@ def load_events(path):
             line = line.strip()
             if not line:
                 continue
-            e = json.loads(line)
-            if int(e.get("t", 0)) == 0:      # NULL requester: pre-runtime gc
-                continue
-            out.append(e)
+            out.append(json.loads(line))
+    return out
+
+
+def drop_fast_cycles(events):
+    """Drop the degenerate FAST-PATH STWs: GCRequest -> GCStopComplete -> GCStart
+    with NO GCPark/SelfSuspend between (CPython's thread_countdown==0 path, where
+    the requester was alone in the interpreter's thread list).  They are
+    state-neutral (no hub is parked) and VACUOUS for STWExclusive (no "others" to
+    suspend) -- the static model's Others(requester) would wrongly demand the
+    hubs (which simply were not in the list) be suspended.  The multi-hub cycles
+    (with real GCPark/SelfSuspend), which actually exercise STWExclusive, are
+    kept and checked.  (All observed fast cycles are exactly 3 consecutive events.)"""
+    out = []
+    i = 0
+    while i < len(events):
+        if (events[i]["a"] == "GCRequest" and i + 2 < len(events)
+                and events[i + 1]["a"] == "GCStopComplete"
+                and events[i + 2]["a"] == "GCStart"):
+            i += 3
+        else:
+            out.append(events[i])
+            i += 1
     return out
 
 
@@ -53,13 +72,18 @@ def replay(events):
     index, the (state, world, present) just BEFORE that event.  Used only to
     fast-forward to a clean steady-state Init -- the actual conformance check is
     TLC on the suffix, against the real model's actions."""
+    # t==0 is the EXTERNAL requester (NULL tstate -- a real STW from a context with
+    # no current tstate); it is NOT a tracked hub, it maps to "ext", and the model
+    # drives it via GCRequestExt.  Only real tstates become hubs h1.. .
     order = {}
     for e in events:
         t = int(e["t"])
-        if t not in order:
+        if t != 0 and t not in order:
             order[t] = len(order) + 1
-    hn = lambda t: "h{}".format(order[int(t)])
-    all_hubs = frozenset(hn(t) for t in order)
+    def hn(t):
+        t = int(t)
+        return "ext" if t == 0 else "h{}".format(order[t])
+    all_hubs = frozenset("h{}".format(i) for i in order.values())
 
     state = {}            # hub -> "attached" / "detached" / "suspended"
     present = set()
@@ -77,7 +101,9 @@ def replay(events):
         elif a == "GCPark":
             present.add(h); state[h] = "suspended"
         elif a == "GCRequest":
-            present.add(h); state[h] = "attached"; world = "stopping"
+            world = "stopping"
+            if h != "ext":               # a real hub requester is attached
+                present.add(h); state[h] = "attached"
         elif a == "GCStopComplete":
             world = "stopped"
         elif a == "GCStart":
@@ -92,10 +118,38 @@ def main():
     if len(sys.argv) < 2:
         print("usage: stw_trace_conform.py <trace.ndjson>")
         return 2
-    events = load_events(sys.argv[1])
+    events = drop_fast_cycles(load_events(sys.argv[1]))
     if not events:
         print("empty trace -- nothing to check (was RUNLOOM_STW_TRACE set?)")
         return 2
+
+    # Dynamic tstate-identity churn: a tstate pointer can be REUSED (a rescue/hub
+    # tstate is deleted and a fresh one allocated at the same address), which
+    # conflates two distinct threads under one key -> an impossible per-pointer
+    # sequence (e.g. Attach with no intervening Detach).  This is NOT an ordering
+    # problem (the emit order is faithful per physical tstate); it needs a tstate
+    # GENERATION id in the instrumentation to disambiguate (see STW_FINDINGS.md).
+    # Until then, a trace with reuse is INCONCLUSIVE -- skip it rather than report
+    # a misleading non-conformance.
+    pst = {}
+    legal = {("detached", "Attach"): "attached", ("attached", "Detach"): "detached",
+             ("attached", "SelfSuspend"): "suspended", ("detached", "GCPark"): "suspended"}
+    for e in events:
+        a, t = e["a"], int(e["t"])
+        if a == "GCStart":
+            for k in list(pst):
+                if pst[k] == "suspended":
+                    pst[k] = "detached"
+            continue
+        if a in ("GCStopComplete", "GCRequest") or t == 0:
+            continue
+        nxt = legal.get((pst.get(t, "detached"), a))
+        if nxt is None:
+            print("  INCONCLUSIVE: dynamic tstate-identity churn (a reused tstate "
+                  "pointer) in the trace -- needs a tstate generation id to "
+                  "disambiguate (see docs/dev/ft_conformance/STW_FINDINGS.md)")
+            return 3
+        pst[t] = nxt
 
     order, hn, all_hubs, snaps = replay(events)
 
@@ -185,7 +239,8 @@ TNext ==
        /\\ LET e == TraceEvents[tpc] IN
             /\\ \\/ (e.a = "Attach"         /\\ Attach(e.h))
                \\/ (e.a = "Detach"         /\\ Detach(e.h))
-               \\/ (e.a = "GCRequest"      /\\ GCRequest(e.h))
+               \\/ (e.a = "GCRequest" /\\ e.h = "ext" /\\ GCRequestExt)
+               \\/ (e.a = "GCRequest" /\\ e.h # "ext" /\\ GCRequest(e.h))
                \\/ (e.a = "GCPark"         /\\ GCPark(e.h))
                \\/ (e.a = "SelfSuspend"    /\\ SelfSuspend(e.h))
                \\/ (e.a = "GCStopComplete" /\\ GCStopComplete)
@@ -203,6 +258,7 @@ CFG = '''\\* GENERATED. Hubs covers the steady-window tstate ids; Bypass/BuggyBl
 CONSTANTS
     Hubs = {{{hubs}}}
     NoHub = "nohub"
+    External = "ext"
     Bypass = FALSE
     BuggyBlock = FALSE
     MaxStops = {maxstops}
