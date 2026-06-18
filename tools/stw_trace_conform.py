@@ -118,22 +118,32 @@ def main():
     if len(sys.argv) < 2:
         print("usage: stw_trace_conform.py <trace.ndjson>")
         return 2
-    events = drop_fast_cycles(load_events(sys.argv[1]))
+    raw = load_events(sys.argv[1])
+    # The emit (file) order is NOT a happens-before-consistent order across threads:
+    # a requester's GCPark(id) can be logged before id's own Detach whose published
+    # DETACHED the GCPark CAS read (the cross-thread M1 emit-lag).  Each event carries
+    # a seq-cst logical-clock stamp s (runloom_stw_tick, placed BEFORE a publishing
+    # store / AFTER a dependent read in pystate.c), so sorting by s reconstructs a
+    # linearization that respects every happens-before edge -- the sequential model
+    # can then replay it.  Events are keyed by the tstate's UNIQUE id (field t =
+    # tstate->id), so a REUSED PyThreadState pointer no longer conflates two threads.
+    # Together these close the two mechanisms STW_FINDINGS.md identified (emit-lag +
+    # pointer reuse), so a churny run now CONFORMS rather than being skipped.
+    raw.sort(key=lambda e: e.get("s", 0))
+    events = drop_fast_cycles(raw)
     if not events:
         print("empty trace -- nothing to check (was RUNLOOM_STW_TRACE set?)")
         return 2
 
-    # Dynamic tstate-identity churn: a tstate pointer can be REUSED (a rescue/hub
-    # tstate is deleted and a fresh one allocated at the same address), which
-    # conflates two distinct threads under one key -> an impossible per-pointer
-    # sequence (e.g. Attach with no intervening Detach).  This is NOT an ordering
-    # problem (the emit order is faithful per physical tstate); it needs a tstate
-    # GENERATION id in the instrumentation to disambiguate (see STW_FINDINGS.md).
-    # Until then, a trace with reuse is INCONCLUSIVE -- skip it rather than report
-    # a misleading non-conformance.
+    # Per-id sanity pre-check.  Now that events are id-keyed and seq-sorted, a churny
+    # run no longer produces impossible per-id sequences (reuse disambiguated by the
+    # id key, emit-lag by the seq sort).  A residual illegal transition would be a
+    # REAL finding, not "inconclusive"; surface it but let TLC give the precise
+    # verdict (it localizes which event the model couldn't take).
     pst = {}
     legal = {("detached", "Attach"): "attached", ("attached", "Detach"): "detached",
              ("attached", "SelfSuspend"): "suspended", ("detached", "GCPark"): "suspended"}
+    illegal = 0
     for e in events:
         a, t = e["a"], int(e["t"])
         if a == "GCStart":
@@ -145,40 +155,116 @@ def main():
             continue
         nxt = legal.get((pst.get(t, "detached"), a))
         if nxt is None:
-            print("  INCONCLUSIVE: dynamic tstate-identity churn (a reused tstate "
-                  "pointer) in the trace -- needs a tstate generation id to "
-                  "disambiguate (see docs/dev/ft_conformance/STW_FINDINGS.md)")
-            return 3
-        pst[t] = nxt
+            illegal += 1
+        else:
+            pst[t] = nxt
+    if illegal:
+        print("  note: {} residual illegal per-id transition(s) after id+seq "
+              "ordering -- TLC will localize".format(illegal))
 
     order, hn, all_hubs, snaps = replay(events)
 
-    # steady-state window: [first index where all hubs co-present + world running]
-    # .. [last GCStart] (exclude teardown detaches after the final cycle).
-    start = None
-    for i in range(len(events)):
-        st, wd, pr = snaps[i]
-        if pr == all_hubs and wd == "running":
-            start = i
-            break
+    # Per-id lifetime (first/last index in the sorted, de-fast event list).  Real
+    # runs CHURN: transient tstates -- runloom rescue tstates and short-lived native
+    # threads, whose addresses the allocator recycles (hence the UNIQUE id key) --
+    # enter and leave, so there is no instant when every distinct id is co-present.
+    # We therefore track PRESENCE explicitly: the window opens once the long-lived
+    # ("stable") hubs are all up, and the model is driven Create(h)/Destroy(h) as
+    # transients enter/leave, with STW completion and STWExclusive quantified over
+    # the PRESENT hubs only.  This all lives in the generated trace module; the base
+    # RunloomCPythonSTW model is untouched (its 4 gated checks are unaffected).
+    first = {}
+    last = {}
+    for i, e in enumerate(events):
+        h = hn(e["t"])
+        if h == "ext":
+            continue
+        first.setdefault(h, i)
+        last[h] = i
+
     gc_starts = [i for i, e in enumerate(events) if e["a"] == "GCStart"]
-    if start is None or not gc_starts or gc_starts[-1] < start:
-        print("  no steady multi-hub STW window (all hubs never co-present while "
-              "the world is running) -- nothing to conform")
+    if not gc_starts:
+        print("  no STW cycle in the trace -- nothing to conform")
         return 2
     end = gc_starts[-1]
-    window = events[start:end + 1]
-    hubs = sorted(all_hubs, key=lambda h: int(h[1:]))
-    init_st = snaps[start][0]
-    init_state = {h: init_st.get(h, "detached") for h in hubs}
-    nstops = sum(1 for e in window if e["a"] == "GCStart")
 
+    def present_at(i):
+        return frozenset(h for h in first if first[h] <= i <= last[h])
+
+    # "stable" hubs bound the window: a hub whose lifetime spans the last GCStart.
+    stable = frozenset(h for h in first if first[h] <= end <= last[h])
+    if not stable:
+        print("  no hub spans the steady window -- nothing to conform")
+        return 2
+    # window start: first world="running" index where every stable hub is present
+    # (past the spawn warm-up, where the main thread STWs alone).
+    start = None
+    for i in range(len(events)):
+        if snaps[i][1] == "running" and stable <= present_at(i):
+            start = i
+            break
+    if start is None or end < start:
+        print("  no steady multi-hub STW window -- nothing to conform")
+        return 2
+
+    # Augment the window with injected Create/Destroy so the model's `present` set
+    # tracks reality, walking a running per-hub model state (replay() semantics).
+    window_ids = sorted(
+        {hn(e["t"]) for e in events[start:end + 1] if hn(e["t"]) != "ext"},
+        key=lambda h: int(h[1:]))
+    init_st = snaps[start][0]
+    st = {h: init_st.get(h, "detached") for h in window_ids}
+    init_present = present_at(start) & frozenset(window_ids)
+    present = set(init_present)
+
+    def step_state(a, h):
+        if a == "Attach":
+            st[h] = "attached"
+        elif a == "Detach":
+            st[h] = "detached"
+        elif a in ("SelfSuspend", "GCPark"):
+            st[h] = "suspended"
+        elif a == "GCRequest" and h != "ext":
+            st[h] = "attached"
+        elif a == "GCStart":
+            for k in list(st):
+                if st[k] == "suspended":
+                    st[k] = "detached"
+
+    aug = []   # list of (action, hubname), with Create/Destroy injected
+    for i in range(start, end + 1):
+        e = events[i]
+        a = e["a"]
+        h = hn(e["t"])
+        if h != "ext" and h not in present:
+            aug.append(("Create", h))
+            present.add(h)
+            st[h] = "detached"
+        aug.append((a, h))
+        step_state(a, h)
+        # a transient whose LAST global event is here (and not the window end)
+        # departs: bring it to detached, then remove it from the thread list.
+        if h != "ext" and last.get(h, -1) == i and i < end and h in present:
+            if st[h] == "attached":
+                aug.append(("Detach", h))
+                st[h] = "detached"
+            if st[h] == "detached":
+                aug.append(("Destroy", h))
+                present.discard(h)
+            # if still "suspended" it is parked -- a later GCStart resumes it; leave.
+
+    nstops = sum(1 for a, _ in aug if a == "GCStart")
     seq = ",\n                  ".join(
-        '[a |-> "{}", h |-> "{}"]'.format(e["a"], hn(e["t"])) for e in window)
-    init_fcn = " @@ ".join('("{}" :> "{}")'.format(h, init_state[h]) for h in hubs)
+        '[a |-> "{}", h |-> "{}"]'.format(a, h) for a, h in aug)
+    init_fcn = " @@ ".join('("{}" :> "{}")'.format(h, init_st.get(h, "detached"))
+                           for h in window_ids)
+    init_present_set = "{{{}}}".format(", ".join(
+        '"{}"'.format(h) for h in sorted(init_present, key=lambda h: int(h[1:]))))
+    hubs = window_ids
 
     with open(os.path.join(TLA, "RunloomCPythonSTWTrace.tla"), "w") as f:
-        f.write(TEMPLATE.format(seq=seq, init_fcn=init_fcn))
+        f.write(TEMPLATE.format(seq=seq, init_fcn=init_fcn,
+                                init_present=init_present_set))
     with open(os.path.join(TLA, "RunloomCPythonSTWTrace.cfg"), "w") as f:
         f.write(CFG.format(hubs=", ".join('"{}"'.format(h) for h in hubs),
                            maxstops=max(1, nstops)))
@@ -192,8 +278,9 @@ def main():
          "-config", "RunloomCPythonSTWTrace.cfg", "RunloomCPythonSTWTrace.tla"],
         cwd=TLA, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     out = proc.stdout
-    print("  window: {} events ({} STW cycles), hubs: {}  [prefix {} fast-forwarded]"
-          .format(len(window), nstops, ", ".join(hubs), start))
+    print("  window: {} events ({} STW cycles), {} hubs ({} present at start, "
+          "transients Create/Destroy'd)  [prefix {} fast-forwarded]"
+          .format(len(aug), nstops, len(hubs), len(init_present), start))
     if "No error has been found" in out:
         print("  CONFORMS -- the real stop-the-world handshake is a legal "
               "RunloomCPythonSTW execution; STWExclusive holds at every stopped state")
@@ -217,15 +304,46 @@ def main():
 TEMPLATE = '''\\* GENERATED by tools/stw_trace_conform.py from a real RUNLOOM_STW_TRACE run.
 \\* Replays the recorded CPython stop-the-world (M1+M2) transitions through
 \\* RunloomCPythonSTW's OWN actions under TLC.  DO NOT EDIT (regenerated per run).
+\\*
+\\* PRESENCE: a real run churns -- transient tstates (rescue tstates, short-lived
+\\* native threads at recycled addresses) come and go, so not every id is co-present.
+\\* This module adds a `present` set (the live tstates) driven by Create/Destroy that
+\\* the tool injects from each id's first/last appearance, and quantifies STW
+\\* completion + STWExclusive over PRESENT hubs only.  The base RunloomCPythonSTW
+\\* model is untouched -- so its 4 gated checks (correct/bug/live/livebug) are
+\\* unaffected; only this generated driver knows about presence.
 -------------------------- MODULE RunloomCPythonSTWTrace --------------------------
 EXTENDS RunloomCPythonSTW, Sequences, Naturals, TLC
 
 TraceEvents == << {seq} >>
 
-VARIABLE tpc
+VARIABLE tpc, present
 
-\\* Init reconstructed from the steady-state window start (all hubs present, world
-\\* running): per-hub state from the prefix replay; no STW in flight.
+\\* A tstate enters the thread list (a fresh PyThreadState, detached) ...
+TCreate(h) ==
+    /\\ h \\notin present
+    /\\ present' = present \\cup {{h}}
+    /\\ state' = [state EXCEPT ![h] = "detached"]
+    /\\ UNCHANGED <<world, requester, stops, wedged>>
+
+\\* ... and leaves it (deleted while detached, never the requester, never mid-stop).
+TDestroy(h) ==
+    /\\ h \\in present
+    /\\ h # requester
+    /\\ state[h] = "detached"
+    /\\ present' = present \\ {{h}}
+    /\\ UNCHANGED <<state, world, requester, stops, wedged>>
+
+\\* stop_the_world completes once every PRESENT other hub is suspended (a not-present
+\\* tstate is not in the interpreter's thread list, so the requester never waits on it).
+TGCStopComplete ==
+    /\\ world = "stopping"
+    /\\ \\A h \\in (present \\ {{requester}}) : state[h] = "suspended"
+    /\\ world' = "stopped"
+    /\\ UNCHANGED <<state, requester, stops, wedged, present>>
+
+\\* Init reconstructed from the window start: per-hub state from the prefix replay;
+\\* `present` is exactly the tstates alive at the start; no STW in flight.
 TInit ==
     /\\ state = ({init_fcn})
     /\\ world = "running"
@@ -233,23 +351,36 @@ TInit ==
     /\\ stops = 0
     /\\ wedged = [h \\in Hubs |-> FALSE]
     /\\ tpc = 1
+    /\\ present = {init_present}
 
 TNext ==
     \\/ /\\ tpc <= Len(TraceEvents)
        /\\ LET e == TraceEvents[tpc] IN
-            /\\ \\/ (e.a = "Attach"         /\\ Attach(e.h))
-               \\/ (e.a = "Detach"         /\\ Detach(e.h))
-               \\/ (e.a = "GCRequest" /\\ e.h = "ext" /\\ GCRequestExt)
-               \\/ (e.a = "GCRequest" /\\ e.h # "ext" /\\ GCRequest(e.h))
-               \\/ (e.a = "GCPark"         /\\ GCPark(e.h))
-               \\/ (e.a = "SelfSuspend"    /\\ SelfSuspend(e.h))
-               \\/ (e.a = "GCStopComplete" /\\ GCStopComplete)
-               \\/ (e.a = "GCStart"        /\\ GCStart)
+            /\\ \\/ (e.a = "Attach"         /\\ Attach(e.h)        /\\ UNCHANGED present)
+               \\/ (e.a = "Detach" /\\ e.h # requester /\\ Detach(e.h) /\\ UNCHANGED present)
+               \\/ (e.a = "Detach" /\\ e.h = requester /\\ RequesterPause(e.h) /\\ UNCHANGED present)
+               \\/ (e.a = "GCRequest" /\\ e.h = "ext" /\\ GCRequestExt /\\ UNCHANGED present)
+               \\/ (e.a = "GCRequest" /\\ e.h # "ext" /\\ GCRequest(e.h) /\\ UNCHANGED present)
+               \\/ (e.a = "GCPark"         /\\ GCPark(e.h)       /\\ UNCHANGED present)
+               \\/ (e.a = "SelfSuspend"    /\\ SelfSuspend(e.h)  /\\ UNCHANGED present)
+               \\/ (e.a = "GCStopComplete" /\\ TGCStopComplete)
+               \\/ (e.a = "GCStart"        /\\ GCStart           /\\ UNCHANGED present)
+               \\/ (e.a = "Create"         /\\ TCreate(e.h))
+               \\/ (e.a = "Destroy"        /\\ TDestroy(e.h))
             /\\ tpc' = tpc + 1
     \\/ /\\ tpc > Len(TraceEvents)
-       /\\ UNCHANGED <<vars, tpc>>
+       /\\ UNCHANGED <<vars, tpc, present>>
 
-TSpec == TInit /\\ [][TNext]_<<vars, tpc>>
+\\* present-aware safety + typing (checked instead of the base model's, which
+\\* quantify over ALL Hubs and would wrongly demand a departed tstate be suspended).
+TPresentOK == present \\subseteq Hubs
+TSTWExclusive ==
+    (world = "stopped") => \\A h \\in (present \\ {{requester}}) : state[h] = "suspended"
+TRequesterAttached ==
+    (world = "stopped" /\\ requester # External)
+        => (requester \\in present /\\ state[requester] = "attached")
+
+TSpec == TInit /\\ [][TNext]_<<vars, tpc, present>>
 =============================================================================
 '''
 
@@ -264,8 +395,9 @@ CONSTANTS
     MaxStops = {maxstops}
 SPECIFICATION TSpec
 INVARIANT TypeOK
-INVARIANT STWExclusive
-INVARIANT RequesterAttached
+INVARIANT TPresentOK
+INVARIANT TSTWExclusive
+INVARIANT TRequesterAttached
 '''
 
 

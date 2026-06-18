@@ -80,7 +80,9 @@ Init ==
 \* M1: attach to run a goroutine.  tstate_try_attach is a CAS detached->attached.
 \* Impossible once the world is "stopped" (the requester holds the eval lock); the
 \* real race with a "stopping" requester is allowed -- it just defers the stop until
-\* this hub self-suspends again.  A hub never attaches while it is the requester.
+\* this hub self-suspends again.  A non-requester hub never attaches while another
+\* holds the stop; the one exception is the requester re-attaching after a
+\* RequesterPause (handled by this same action, since world = "stopping" there).
 Attach(h) ==
     /\ state[h] = "detached"
     /\ world # "stopped"
@@ -92,6 +94,24 @@ Attach(h) ==
 Detach(h) ==
     /\ state[h] = "attached"
     /\ h # requester
+    /\ state' = [state EXCEPT ![h] = "detached"]
+    /\ UNCHANGED <<world, requester, stops, wedged>>
+
+\* M1 (runloom cooperative-STW): the REQUESTER itself briefly DETACHES during the
+\* "stopping" phase.  runloom lets the stop-requesting hub detach and pump its
+\* scheduler so the OTHER hubs get CPU to reach their safe points (this is what
+\* averts the STW-monopoly stall, the known gc-churn deadlock); it then re-attaches
+\* (the ordinary Attach, enabled because world # "stopped") before the stop
+\* completes.  Observed directly in the real handshake (1/114 cycles in the churn
+\* capture).  SAFE: it is confined to "stopping" (NEVER "stopped"), and the requester
+\* re-attaches before GCStopComplete, so STWExclusive (only constrains "stopped") and
+\* RequesterAttached (requester attached once "stopped") both still hold.  Trace-only,
+\* like GCRequestExt: NOT part of the standalone Next, so the base model's reachable
+\* state space (and the 4 gated checks) are unchanged.
+RequesterPause(h) ==
+    /\ world = "stopping"
+    /\ h = requester
+    /\ state[h] = "attached"
     /\ state' = [state EXCEPT ![h] = "detached"]
     /\ UNCHANGED <<world, requester, stops, wedged>>
 

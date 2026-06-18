@@ -30,9 +30,10 @@ try:
     import runloom_c
 except Exception:
     sys.exit(7)                       # ext not built against this (pydebug) ABI
-done = runloom_c.Chan(32); stop=[False]
+NW=8; NC=2
+done = runloom_c.Chan(NW+NC); stop=[False]
 def worker():
-    for _ in range(6):
+    for _ in range(40):                   # long-lived: spans many STW cycles
         a={};b={};a["b"]=b;b["a"]=a;a["s"]=a; del a,b
         runloom_c.sched_yield_classic()
     done.send(1)
@@ -41,10 +42,12 @@ def collector():
         gc.collect(); runloom_c.sched_yield_classic()
     done.send(1)
 def stopper():
-    for _ in range(4): done.recv()
-    stop[0]=True; done.recv()
-runloom_c.mn_init(2); runloom_c.mn_go(collector)
-for _ in range(4): runloom_c.mn_go(worker)
+    for _ in range(NW): done.recv()
+    stop[0]=True
+    for _ in range(NC): done.recv()
+runloom_c.mn_init(3)
+for _ in range(NC): runloom_c.mn_go(collector)
+for _ in range(NW): runloom_c.mn_go(worker)
 runloom_c.mn_go(stopper); runloom_c.mn_run(); runloom_c.mn_fini()'
 
 echo "== STW (M2) trace conformance: RunloomCPythonSTW.tla vs the real handshake =="
@@ -60,29 +63,31 @@ rc=0
 echo "-- TLC: real trace (expect CONFORMS) --"
 out="$("$PY" tools/stw_trace_conform.py "$TR" 2>&1)"
 echo "$out" | sed 's/^/   /'
-if echo "$out" | grep -q INCONCLUSIVE; then
-    # the captured run happened to reuse a tstate pointer (run-dependent); the
-    # conformance is sound but this trace can't be checked -- skip, don't fail.
-    $RM -f "$TR"
-    skip "captured run had dynamic tstate-identity churn (a reused tstate pointer) -- a known scoped limitation; see STW_FINDINGS.md"
-fi
 if echo "$out" | grep -q CONFORMS; then
     echo "   OK: the real stop-the-world handshake conforms to RunloomCPythonSTW"
 else
     echo "   FAIL: a real run should conform"; rc=1
 fi
 
-echo "-- TLC: in-window GCPark dropped (expect NON-CONFORMING) --"
+echo "-- TLC: an in-window suspend dropped (expect NON-CONFORMING) --"
 BUG="$(mktemp /tmp/stwconf_bug.XXXX.ndjson)"
 "$PY" - "$TR" "$BUG" <<'PY'
 import sys, json
+from collections import Counter
 sys.path.insert(0, "tools"); import stw_trace_conform as S
-ev = S.drop_fast_cycles(S.load_events(sys.argv[1]))
-order, hn, all_hubs, snaps = S.replay(ev)
-start = next(i for i in range(len(ev)) if snaps[i][1]=="running" and snaps[i][2]==all_hubs)
-gcs = [i for i,e in enumerate(ev) if e["a"]=="GCStart"]; end = gcs[-1]
-# drop a GCPark/SelfSuspend inside the steady window -> a hub stays un-suspended
-victim = next(i for i in range(start, end+1) if ev[i]["a"] in ("GCPark","SelfSuspend"))
+raw = S.load_events(sys.argv[1]); raw.sort(key=lambda e: e.get("s", 0))
+ev = S.drop_fast_cycles(raw)
+# Drop a GCPark/SelfSuspend whose hub REAPPEARS later (so the tool can't infer it
+# departed and Destroy it -- it is provably still present at its stop).  That hub
+# then stays un-suspended at the stop, so the model cannot complete that
+# GCStopComplete -> non-conforming.  Proves the conform really enforces "every
+# present hub suspended before the world stops".
+lastidx = {}
+for i, e in enumerate(ev):
+    lastidx[e["t"]] = i
+susp = [i for i, e in enumerate(ev)
+        if e["a"] in ("GCPark", "SelfSuspend") and lastidx[e["t"]] > i]
+victim = susp[len(susp) // 2]
 with open(sys.argv[2], "w") as f:
     for k, e in enumerate(ev):
         if k != victim:

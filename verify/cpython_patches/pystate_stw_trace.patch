@@ -1,55 +1,98 @@
---- a/Python/pystate.c.orig	2026-06-18 11:24:19.422681920 +1000
-+++ b/Python/pystate.c	2026-06-18 11:45:12.605658112 +1000
-@@ -2081,6 +2081,9 @@
+--- a/Python/pystate.c
++++ b/Python/pystate.c
+@@ -2081,6 +2081,14 @@
      } while (!tstate_try_attach(tstate));
  }
  
-+/* runloom STW trace-conformance emit (defined below; env RUNLOOM_STW_TRACE). */
-+static void runloom_stw_trace(const char *action, void *key);
++/* runloom STW trace-conformance emit + SC logical clock (env RUNLOOM_STW_TRACE;
++ * defined after _PyThreadState_Detach).  tick() returns a seq-cst sequence number
++ * placed at the transition point so the conform tool can sort the cross-thread
++ * trace into a happens-before-consistent order (see STW_FINDINGS.md). */
++static unsigned long long runloom_stw_tick(void);
++static void runloom_stw_trace(const char *action, unsigned long long id,
++                              void *ptr, unsigned long long seq);
 +
  void
  _PyThreadState_Attach(PyThreadState *tstate)
  {
-@@ -2122,6 +2125,7 @@
+@@ -2122,6 +2130,9 @@
  #endif
          break;
      }
-+    runloom_stw_trace("Attach", tstate);   /* M1: detached -> attached */
++    /* M1: detached -> attached.  Dependent read (the tstate_try_attach CAS that
++     * observed it could attach); tick AFTER it. */
++    runloom_stw_trace("Attach", tstate->id, tstate, runloom_stw_tick());
  
      // Resume previous critical section. This acquires the lock(s) from the
      // top-most critical section.
-@@ -2148,6 +2152,11 @@
+@@ -2147,7 +2158,18 @@
+     _Py_qsbr_detach(((_PyThreadStateImpl *)tstate)->qsbr);
  #endif
      tstate_deactivate(tstate);
-     tstate_set_detached(tstate, detached_state);
-+    /* M1: attached -> detached.  (The attached -> suspended case is emitted as
-+     * SelfSuspend by _PyThreadState_Suspend; don't double-count it here.) */
++    /* M1: attached -> detached.  Publishing store (read by the requester's GCPark
++     * CAS); tick BEFORE it so this Detach orders before any GCPark that reads it.
++     * The attached -> suspended case is emitted as SelfSuspend by the caller
++     * (_PyThreadState_Suspend), which ticks before calling detach_thread. */
++    unsigned long long seqd = 0;
 +    if (detached_state == _Py_THREAD_DETACHED) {
-+        runloom_stw_trace("Detach", tstate);
++        seqd = runloom_stw_tick();
++    }
+     tstate_set_detached(tstate, detached_state);
++    if (detached_state == _Py_THREAD_DETACHED) {
++        runloom_stw_trace("Detach", tstate->id, tstate, seqd);
 +    }
      current_fast_clear(&_PyRuntime);
      _PyEval_ReleaseLock(tstate->interp, tstate, 0);
  }
-@@ -2158,6 +2167,38 @@
+@@ -2158,6 +2180,67 @@
      detach_thread(tstate, _Py_THREAD_DETACHED);
  }
  
 +/* ---- runloom STW trace-conformance instrumentation (env RUNLOOM_STW_TRACE) ----
-+ * Emits the stop-the-world handshake transitions (machine M2) as one ndjson line
-+ * each, keyed by the PyThreadState pointer, so tools/stw_trace_conform.py can
-+ * replay the REAL CPython STW protocol through verify/tla/RunloomCPythonSTW.tla's
-+ * OWN actions under TLC -- conforming runloom's interaction against the host's
-+ * actual stop_the_world, not a transcription.  No-op (and near-zero) when the env
-+ * is unset.  Self-contained: its own leaf mutex makes the lazy open + append safe
-+ * regardless of which runtime lock is held at the call site, so the emits can sit
-+ * exactly at the transition points.  This is the ONLY runloom edit to the CPython
-+ * tree (snapshot kept at Python/pystate.c.runloom-orig). */
++ * Emits the stop-the-world handshake (M1 attach/detach + M2 stop_the_world) as one
++ * ndjson line per transition so tools/stw_trace_conform.py can replay the REAL
++ * CPython STW protocol through verify/tla/RunloomCPythonSTW.tla's OWN actions under
++ * TLC.  Each line carries the tstate's UNIQUE id (tstate->id -- disambiguates a
++ * REUSED PyThreadState pointer) and a seq-cst logical-clock stamp s (runloom_stw_tick,
++ * placed before a publishing store / after a dependent read) so the conform tool can
++ * sort the per-thread emits into a happens-before-consistent total order -- the emit
++ * (file) order is NOT such an order across threads.  No-op (one predictable branch)
++ * when the env is unset.  Self-contained leaf mutex for the append; the clock is a
++ * separate global SC counter ticked AT the transition point, NOT under the emit mutex
++ * (that would merely reproduce the broken emit order).  Only runloom edit to the
++ * CPython tree (snapshot at Python/pystate.c.runloom-orig). */
++static int
++runloom_stw_enabled(void)
++{
++    static int e = -1;
++    if (e < 0) {
++        const char *p = getenv("RUNLOOM_STW_TRACE");
++        e = (p != NULL && p[0] != '\0') ? 1 : 0;
++    }
++    return e;
++}
++
++static unsigned long long runloom_stw_seq;
++
++static unsigned long long
++runloom_stw_tick(void)
++{
++    if (!runloom_stw_enabled()) {
++        return 0;
++    }
++    return _Py_atomic_add_uint64(&runloom_stw_seq, 1) + 1;
++}
++
 +static void
-+runloom_stw_trace(const char *action, void *key)
++runloom_stw_trace(const char *action, unsigned long long id,
++                  void *ptr, unsigned long long seq)
 +{
 +    static PyMutex mtx;
 +    static FILE *fp;
 +    static int inited;
++    if (!runloom_stw_enabled()) {
++        return;
++    }
 +    PyMutex_Lock(&mtx);
 +    if (!inited) {
 +        inited = 1;
@@ -59,8 +102,8 @@
 +        }
 +    }
 +    if (fp != NULL) {
-+        fprintf(fp, "{\"a\":\"%s\",\"t\":%llu}\n",
-+                action, (unsigned long long)(uintptr_t)key);
++        fprintf(fp, "{\"a\":\"%s\",\"t\":%llu,\"p\":%llu,\"s\":%llu}\n",
++                action, id, (unsigned long long)(uintptr_t)ptr, seq);
 +        fflush(fp);
 +    }
 +    PyMutex_Unlock(&mtx);
@@ -69,51 +112,87 @@
  void
  _PyThreadState_Suspend(PyThreadState *tstate)
  {
-@@ -2184,6 +2225,7 @@
+@@ -2183,7 +2266,13 @@
+     }
  
      // Switch to "suspended" state.
++    /* M1+M2: attached -> suspended at the eval-breaker safe point.  Dependent read
++     * (the stw != NULL check above observed the requester's GCRequest) AND a
++     * publishing store (read by the requester's GCStopComplete); tick AFTER the
++     * read and BEFORE the store. */
++    unsigned long long seqss = runloom_stw_tick();
      detach_thread(tstate, _Py_THREAD_SUSPENDED);
-+    runloom_stw_trace("SelfSuspend", tstate);
++    runloom_stw_trace("SelfSuspend", tstate->id, tstate, seqss);
  
      // Decrease the count of remaining threads needing to park.
      HEAD_LOCK(runtime);
-@@ -2239,6 +2281,7 @@
+@@ -2239,6 +2328,10 @@
              if (_Py_atomic_compare_exchange_int(&t->state,
                                                  &state, _Py_THREAD_SUSPENDED)) {
                  num_parked++;
-+                runloom_stw_trace("GCPark", t);
++                /* M2: park_detached_threads CAS detached -> suspended.  Dependent
++                 * read (the CAS observed t detached, published by t's Detach);
++                 * tick AFTER the CAS so this orders after that Detach. */
++                runloom_stw_trace("GCPark", t->id, t, runloom_stw_tick());
              }
          }
          else if (state == _Py_THREAD_ATTACHED && t != stw->requester) {
-@@ -2268,6 +2311,7 @@
+@@ -2264,10 +2357,17 @@
+     }
+ 
+     HEAD_LOCK(runtime);
++    /* M2: GCRequest.  Publishing store (stw->requested, observed under HEAD_LOCK by
++     * other hubs' _PyThreadState_Suspend); tick BEFORE it so GCRequest orders
++     * before any SelfSuspend it triggers. */
++    unsigned long long seqreq = runloom_stw_tick();
+     stw->requested = 1;
      stw->thread_countdown = 0;
      stw->stop_event = (PyEvent){0};  // zero-initialize (unset)
      stw->requester = _PyThreadState_GET();  // may be NULL
-+    runloom_stw_trace("GCRequest", stw->requester);
++    runloom_stw_trace("GCRequest",
++                      stw->requester ? stw->requester->id : 0,
++                      stw->requester, seqreq);
  
      PyInterpreterState *i;
      PyThreadState *t;
-@@ -2281,6 +2325,7 @@
+@@ -2280,7 +2380,12 @@
+ 
      if (stw->thread_countdown == 0) {
          HEAD_UNLOCK(runtime);
++        /* M2: GCStopComplete (fast path: requester alone in the thread list). */
++        unsigned long long seqfast = runloom_stw_tick();
          stw->world_stopped = 1;
-+        runloom_stw_trace("GCStopComplete", stw->requester);
++        runloom_stw_trace("GCStopComplete",
++                          stw->requester ? stw->requester->id : 0,
++                          stw->requester, seqfast);
          return;
      }
  
-@@ -2303,6 +2348,7 @@
+@@ -2302,7 +2407,13 @@
+ 
          HEAD_LOCK(runtime);
      }
++    /* M2: GCStopComplete.  Dependent read (the loop confirmed every other thread
++     * suspended); tick AFTER it, before publishing world_stopped. */
++    unsigned long long seqstop = runloom_stw_tick();
      stw->world_stopped = 1;
-+    runloom_stw_trace("GCStopComplete", stw->requester);
++    runloom_stw_trace("GCStopComplete",
++                      stw->requester ? stw->requester->id : 0,
++                      stw->requester, seqstop);
  }
  
  static void
-@@ -2314,6 +2360,7 @@
+@@ -2312,6 +2423,13 @@
+     assert(PyMutex_IsLocked(&stw->mutex));
+ 
      HEAD_LOCK(runtime);
++    /* M2: GCStart / start_the_world.  Publishing store (the per-thread suspended ->
++     * detached flips + unpark, observed by each resumed hub's Attach CAS); tick
++     * BEFORE them so GCStart orders before any Attach it enables. */
++    unsigned long long seqstart = runloom_stw_tick();
++    runloom_stw_trace("GCStart",
++                      stw->requester ? stw->requester->id : 0,
++                      stw->requester, seqstart);
      stw->requested = 0;
      stw->world_stopped = 0;
-+    runloom_stw_trace("GCStart", stw->requester);
      // Switch threads back to the detached state.
-     PyInterpreterState *i;
-     PyThreadState *t;
