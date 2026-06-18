@@ -1011,13 +1011,20 @@ class Watch(object):
         g = runloom_c.current_g()
         deadline = None if timeout is None else _time.monotonic() + timeout
         if g is None:
+            # FOREIGN OS thread (no goroutine): the cooperative Mutex.lock() parks on
+            # a channel when contended, which needs a goroutine -> it raises "channel
+            # recv would block, but no goroutine is running" the instant a set() holds
+            # the guard (a load-only crash; uncontended it took the CAS fast path).
+            # Poll with the NON-blocking try_lock instead -- it never parks, so it is
+            # foreign-safe; a lost try_lock just means "contended right now", re-poll.
+            # (CLAUDE.md: cooperative primitives must be foreign-OS-thread-safe.)
             while True:
-                self._mu.lock()
-                if self._version > seen_version:
-                    r = (self._value, self._version)
+                if self._mu.try_lock():
+                    if self._version > seen_version:
+                        r = (self._value, self._version)
+                        self._mu.unlock()
+                        return r
                     self._mu.unlock()
-                    return r
-                self._mu.unlock()
                 if deadline is not None and _time.monotonic() >= deadline:
                     return None
                 _time.sleep(0.0005)
