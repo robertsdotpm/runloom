@@ -7,8 +7,21 @@
   (especially macOS minutes), and we don't want it. This has been asked for
   repeatedly.
 - Our "CI" is **local**: `scripts/check_all.sh`. Phases: `tests mn lincheck dst
-  ctest sanitizers exttsan verify` (run `scripts/check_all.sh all` for
-  everything, or name phases). Run that before proposing a merge.
+  ctest sanitizers exttsan verify` (or name phases).
+- **Run `scripts/check_all_fast.sh` before proposing a merge.** It is the routine
+  pre-merge gate: the quick correctness phases + a *fast* formal lane (all Spin
+  models + every cheap CBMC proof, parallelised) that **skips the 3 genuinely
+  slow CBMC proofs** (the Chase-Lev concurrent deque ~148s, the INV_race
+  disjointness monitor ~5-10min, and the timer min-heap ~76s — measured, not
+  guessed). It keeps ~all formal coverage as a sub-minute smoke gate.
+- **Run `scripts/check_all_extensive.sh` (== `check_all.sh all`) before a risky
+  or large merge, or periodically.** It runs EVERYTHING incl. those 3 slow
+  proofs, all sanitizers, and the static analyzer. The `verify`/`verify-fast`
+  phases run their checks through a parallel worker pool (`VERIFY_JOBS`, default
+  nproc; `=1` for serial) — so the full suite is far faster than the old serial
+  run, but its floor is the single slowest proof (the disjoint monitor), which
+  no parallelism removes. The self-hosted CI runner (below) also exercises the
+  full matrix post-merge, so the slow proofs are not skipped in practice.
 - There is also a **local self-hosted CI runner** (a cron-driven shell script on
   the dev box, NOT GitHub Actions) that auto-builds+tests every new `origin/main`
   on a matrix: Linux 3.13t + Windows 3.12 + Windows 3.13t + **macOS arm64 3.13t**.

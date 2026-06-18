@@ -18,14 +18,27 @@
 # Usage:
 #   scripts/check_all.sh                 # tests + mn + lincheck + dst + ctest
 #   scripts/check_all.sh all             # everything incl. sanitizers + verify
-#   scripts/check_all.sh verify          # just the formal proofs
+#   scripts/check_all.sh verify          # just the formal proofs (parallel)
+#   scripts/check_all.sh verify-fast     # proofs minus the 3 slow CBMC monsters
 #   scripts/check_all.sh tests ctest     # pick phases
 #   scripts/check_all.sh bench           # perf only (NOT in `all` -- machine-dependent)
 #   scripts/check_all.sh combo           # config-matrix sweep (candidate for `all`)
 #
+# Two convenience wrappers wrap the common tiers (see scripts/check_all_fast,
+# scripts/check_all_extensive):
+#   check_all_fast       = tests mn replay lincheck dst ctest verify-fast
+#                          (the routine PRE-MERGE gate -- full Spin + cheap CBMC,
+#                           skips the 3 slow proofs; ~minutes)
+#   check_all_extensive  = all  (every proof + sanitizers; run before a risky
+#                          merge / periodically; the verify phase is now parallel)
+#
+# The verify / verify-fast phases run their checks through a parallel worker pool
+# (VERIFY_JOBS, default nproc).  See verify/run_verify.sh.
+#
 # Env:
 #   PYTHON=...   interpreter for the Python suite + fuzzer
 #                (default: a free-threaded 3.13t if found, else python3)
+#   VERIFY_JOBS=N  formal-verification worker pool size (default: nproc; 1=serial)
 set -u
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -111,8 +124,12 @@ for ph in "${phases[@]}"; do
       tools/run_sanitizers.sh || rc=1
       ;;
     verify)
-      hr "Formal verification (Spin + CBMC)"
+      hr "Formal verification (Spin + CBMC, parallel)"
       verify/run_verify.sh || rc=1
+      ;;
+    verify-fast)
+      hr "Formal verification -- fast lane (all Spin + cheap CBMC; skips 3 slow proofs)"
+      VERIFY_FAST=1 verify/run_verify.sh || rc=1
       ;;
     bench)
       hr "Rigorous microbench sweep (informational -- bootstrap CIs)"
@@ -123,7 +140,7 @@ for ph in "${phases[@]}"; do
       PYTHON_GIL=0 "$PYTHON" tools/combinatorial/covering.py --iters "${COMBO_ITERS:-40}" || rc=1
       ;;
     *)
-      echo "unknown phase: $ph (want: tests mn lincheck dst ctest static sanitizers exttsan verify bench combo all)"; rc=2 ;;
+      echo "unknown phase: $ph (want: tests mn replay lincheck dst ctest static sanitizers exttsan verify verify-fast bench combo all)"; rc=2 ;;
   esac
 done
 
