@@ -387,12 +387,15 @@ def test_park_safe_dekker_abort_under_foreign_wake_storm():
             rc.park(foreign_wakeable=True)
             n += 1
         res["n"] = n
+        # Stop + join the foreign wake-storm WHILE the runtime is still up (see
+        # the M:N sibling): a storm that outlives run() executes g.wake() into a
+        # torn-down runtime -> use-after-free / crash.
+        stop.set()
+        t.join(timeout=3)
 
     with hang_guard(90, "park_safe_dekker"):
         rc.go(parker)
         rc.run()
-    stop.set()
-    t.join(timeout=3)
     # Safety oracle: not one of 30k parks lost its wake (would hang) and none
     # double-freed / returned garbage (would crash).  Exact count == no lost
     # wake, no spurious extra return.
@@ -428,11 +431,21 @@ def test_park_generic_hub_dekker_under_foreign_wake_storm():
 
         rc.mn_go(parker)
         wg.wait()
+        # Stop the foreign wake-storm and JOIN it WHILE the runtime is still up.
+        # If the storm outlives runloom.run() (stop/join placed AFTER run
+        # returned), the foreign thread keeps executing g.wake() -- i.e. running
+        # Python -- while mn_fini tears the free-threaded runtime down and frees
+        # the g-slab; that corrupts the foreign thread's eval state and faults
+        # with a NULL vectorcall (the rare dekker SIGSEGV -- PID-attributed core:
+        # the crashing thread is _storm_until -> g.wake() with a garbage eval
+        # throwflag, all hubs already gone).  Bounding the storm to run()'s
+        # lifetime keeps the during-park abort-window coverage and removes the
+        # post-teardown use-after-free.
+        stop.set()
+        t.join(timeout=3)
 
     with hang_guard(120, "park_generic_hub_dekker"):
         runloom.run(3, main)
-    stop.set()
-    t.join(timeout=3)
     assert res.get("n") == PARKS
 
 
