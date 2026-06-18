@@ -44,8 +44,12 @@ static void runloom_fd_poolmask_init_once(void)
         }
         __atomic_store_n(&runloom_fd_poolmask_state, 2, __ATOMIC_RELEASE);
     } else {
+        /* The winner calloc's the mask in microseconds; brief spin until it
+         * publishes state==2.  Bare spin (no sched_yield) to match the
+         * lock_ensure_inited once-init convention and stay portable -- POSIX
+         * sched_yield does not link on Windows/MSVC. */
         while (__atomic_load_n(&runloom_fd_poolmask_state, __ATOMIC_ACQUIRE) != 2)
-            sched_yield();
+            ;
     }
 }
 

@@ -159,6 +159,15 @@
    static __forceinline unsigned char runloom_atomic_or_uc (volatile unsigned char *p, unsigned char v) { return (unsigned char)_InterlockedOr8 ((char volatile *)p, (char)v); }
    static __forceinline unsigned char runloom_atomic_and_uc(volatile unsigned char *p, unsigned char v) { return (unsigned char)_InterlockedAnd8((char volatile *)p, (char)v); }
 
+   /* ---- or_fetch / and_fetch on a 64-bit word.  Return the NEW value
+    *      (GCC __atomic_or_fetch / __atomic_and_fetch contract -- contrast
+    *      the fetch_or/fetch_and byte helpers above, which return the OLD).
+    *      _InterlockedOr64/_And64 return the PRIOR word, so recompute new =
+    *      old OP v.  Used by the per-fd parker-pool dispatch bitmask
+    *      (netpoll_parker_link: set/clear a pool's bit on an fd's mask). ---- */
+   static __forceinline unsigned long long runloom_atomic_or_fetch_ull (volatile unsigned long long *p, unsigned long long v) { return (unsigned long long)_InterlockedOr64 ((volatile __int64 *)p, (__int64)v) | v; }
+   static __forceinline unsigned long long runloom_atomic_and_fetch_ull(volatile unsigned long long *p, unsigned long long v) { return (unsigned long long)_InterlockedAnd64((volatile __int64 *)p, (__int64)v) & v; }
+
    /* ---- _Generic dispatch.  Match by pointer type to the typed
     *      helper.  Requires C11 _Generic (MSVC 19.20+). ---- */
 
@@ -188,6 +197,7 @@
            const unsigned long long *:          runloom_atomic_load_ull, \
            volatile unsigned long long *:       runloom_atomic_load_ull, \
            const volatile unsigned long long *: runloom_atomic_load_ull, \
+           unsigned long long **:      runloom_atomic_load_ptr,          \
            unsigned char **:           runloom_atomic_load_ptr,          \
            struct runloom_g **:           runloom_atomic_load_ptr,          \
            void **:                    runloom_atomic_load_ptr           \
@@ -218,6 +228,7 @@
            volatile unsigned char *: runloom_atomic_store_uc,            \
            unsigned long long *:           runloom_atomic_store_ull,     \
            volatile unsigned long long *:  runloom_atomic_store_ull,     \
+           unsigned long long **:    runloom_atomic_store_ptr,           \
            unsigned char **:         runloom_atomic_store_ptr,           \
            struct runloom_g **:         runloom_atomic_store_ptr,           \
            void **:                  runloom_atomic_store_ptr            \
@@ -312,6 +323,18 @@
        _Generic((p),                                                  \
            unsigned char *:          runloom_atomic_and_uc,              \
            volatile unsigned char *: runloom_atomic_and_uc               \
+       )((p), (v))
+
+#  define __atomic_or_fetch(p, v, ord)                                \
+       _Generic((p),                                                  \
+           unsigned long long *:          runloom_atomic_or_fetch_ull,  \
+           volatile unsigned long long *: runloom_atomic_or_fetch_ull   \
+       )((p), (v))
+
+#  define __atomic_and_fetch(p, v, ord)                               \
+       _Generic((p),                                                  \
+           unsigned long long *:          runloom_atomic_and_fetch_ull, \
+           volatile unsigned long long *: runloom_atomic_and_fetch_ull  \
        )((p), (v))
 
 #  define __atomic_thread_fence(ord)  MemoryBarrier()
