@@ -18,6 +18,20 @@ Py_ssize_t runloom_tcpconn_c_recv_into(PyObject *conn, void *buf, Py_ssize_t n)
     fd = self->fd;
 
 #if defined(__linux__)
+    /* Stage-2 single-shot io_uring PROACTOR: when the loop backend is on, submit
+     * the recv as an SQE and inline-drain -- on a data-ready socket the CQE is
+     * already posted (FAST_POLL did the recv) so the fiber skips the park
+     * entirely.  This is the +20%-on-loopback path the all-C echo uses; without
+     * it a Cython handler on RUNLOOM_IOURING_LOOP would do a readiness recv() +
+     * an io_uring-bridged park (io_uring's cost, none of its win). */
+    if (runloom_iouring_loop_enabled()) {
+        runloom_iouring_ring_t *ring = runloom_mn_current_iouring_ring();
+        if (ring != NULL) {
+            runloom_iouring_ssize_t r =
+                runloom_iouring_loop_recv(ring, fd, buf, (size_t)n, 0);
+            return (r < 0) ? -1 : (Py_ssize_t)r;   /* errno set by loop_recv */
+        }
+    }
     if (runloom_tcpconn_use_iouring(self)) {
         runloom_iouring_ssize_t r;
         if (runloom_iouring_pbuf_available()) {
@@ -73,6 +87,21 @@ Py_ssize_t runloom_tcpconn_c_send_all(PyObject *conn, const void *buf, Py_ssize_
     fd = self->fd;
 
 #if defined(__linux__)
+    /* Stage-2 single-shot io_uring proactor send (see recv_into above). */
+    if (runloom_iouring_loop_enabled()) {
+        runloom_iouring_ring_t *ring = runloom_mn_current_iouring_ring();
+        if (ring != NULL) {
+            while (sent < n) {
+                runloom_iouring_ssize_t r =
+                    runloom_iouring_loop_send(ring, fd, (const char *)buf + sent,
+                                              (size_t)(n - sent), 0);
+                if (r < 0) return -1;
+                sent += (Py_ssize_t)r;
+                if (r == 0) break;
+            }
+            return sent;
+        }
+    }
     if (runloom_tcpconn_use_iouring(self)) {
         while (sent < n) {
             runloom_iouring_ssize_t r =

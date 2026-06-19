@@ -1,0 +1,194 @@
+{
+  "meta": {
+    "cpu_count": 64,
+    "hubs": 44,
+    "go_server_cores": 44,
+    "client_cores": 16,
+    "client_cpus": "0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15",
+    "server_cpus": "16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59",
+    "payload_small_bytes": 1024,
+    "payload_large_bytes": 1572864,
+    "ramp_s": 2.0,
+    "measure_s": 5.0,
+    "reps": 3,
+    "conn_ladder": [
+      16,
+      32,
+      64,
+      128,
+      256,
+      512,
+      1024,
+      2048,
+      4096,
+      8192,
+      16384,
+      32768
+    ],
+    "sysctls": {
+      "net.ipv4.tcp_wmem": "4096 16384 2097152",
+      "net.ipv4.tcp_rmem": "4096 87380 2097152",
+      "net.core.somaxconn": "65535",
+      "net.ipv4.tcp_tw_reuse": "1"
+    },
+    "fd_limit": 8388608,
+    "ft_python": "/home/x/.pyenv/versions/3.13.13t/bin/python3",
+    "gil_python": "/home/x/.pyenv/versions/3.13.13/bin/python3"
+  },
+  "quick": false,
+  "metrics": {
+    "spawn": {
+      "runloom": {
+        "n": 1000000,
+        "seconds": 19.29938638000749,
+        "rate_per_s": 51815.11890118508,
+        "cores": 44
+      },
+      "go": {
+        "n": 1000000,
+        "seconds": 0.741572392,
+        "rate_per_s": 1348486.015374747,
+        "cores": 44
+      },
+      "asyncio": {
+        "n": 1000000,
+        "seconds": 14.762835976987844,
+        "rate_per_s": 67737.66243550966,
+        "cores": 1
+      },
+      "greenlet": {
+        "n": 1000000,
+        "seconds": 27.169454383983975,
+        "rate_per_s": 36806.039085918725,
+        "cores": 1
+      },
+      "uvloop": {
+        "n": 1000000,
+        "seconds": 13.489941981009906,
+        "rate_per_s": 74129.30325480438,
+        "cores": 1
+      }
+    },
+    "ctxswitch": {
+      "runloom": {
+        "switches": 3999424,
+        "seconds": 101.55289726000046,
+        "ns_per_switch": 25391.880745827515,
+        "cores": 44
+      },
+      "go": {
+        "switches": 3999424,
+        "seconds": 2.703949363,
+        "ns_per_switch": 676.0846969463603,
+        "cores": 44
+      },
+      "asyncio": {
+        "switches": 4000000,
+        "seconds": 8.94559335600934,
+        "ns_per_switch": 2236.398339002335,
+        "cores": 1
+      },
+      "greenlet": {
+        "switches": 4000000,
+        "seconds": 1.8585075160081033,
+        "ns_per_switch": 464.6268790020258,
+        "cores": 1
+      },
+      "uvloop": {
+        "switches": 4000000,
+        "seconds": 5.297810058997129,
+        "ns_per_switch": 1324.4525147492823,
+        "cores": 1
+      }
+    },
+    "rtt": {
+      "runloom": {
+        "ns_per_rtt": 87451.34261000202,
+        "n": 100000,
+        "payload": 64,
+        "cores": 1,
+        "runtime": "runloom",
+        "metric": "rtt"
+      },
+      "go": {
+        "metric": "rtt",
+        "n": 100000,
+        "ns_per_rtt": 92415.90759,
+        "payload": 64,
+        "runtime": "go"
+      },
+      "asyncio": {
+        "ns_per_rtt": 200370.67166995257,
+        "n": 100000,
+        "payload": 64,
+        "cores": 1,
+        "runtime": "asyncio",
+        "metric": "rtt"
+      },
+      "greenlet": {
+        "ns_per_rtt": 109327.72703003138,
+        "n": 100000,
+        "payload": 64,
+        "cores": 1,
+        "runtime": "greenlet",
+        "metric": "rtt"
+      },
+      "uvloop": {
+        "ns_per_rtt": 127657.12495005573,
+        "n": 100000,
+        "payload": 64,
+        "cores": 1,
+        "runtime": "uvloop",
+        "metric": "rtt"
+      }
+    },
+    "http": {
+      "runloom": {
+        "rps": 146242.26844323776,
+        "reqs": 731272,
+        "measure_s": 5.000414776004618,
+        "conns": 256,
+        "cores": 16,
+        "runtime": "runloom",
+        "metric": "http"
+      },
+      "go": {
+        "conns": 256,
+        "cores": 16,
+        "errors": 0,
+        "measure_s": 5.000019968,
+        "metric": "http",
+        "reqs": 637482,
+        "rps": 127495.89083241037,
+        "runtime": "go"
+      },
+      "asyncio": {
+        "rps": 11106.67202598496,
+        "reqs": 55821,
+        "measure_s": 5.025897934989189,
+        "conns": 256,
+        "cores": 1,
+        "runtime": "asyncio",
+        "metric": "http"
+      },
+      "greenlet": {
+        "rps": 15336.021386395832,
+        "reqs": 76916,
+        "measure_s": 5.015381634002551,
+        "conns": 256,
+        "cores": 1,
+        "runtime": "greenlet",
+        "metric": "http"
+      },
+      "uvloop": {
+        "rps": 37009.84804024422,
+        "reqs": 185309,
+        "measure_s": 5.007018666990916,
+        "conns": 256,
+        "cores": 1,
+        "runtime": "uvloop",
+        "metric": "http"
+      }
+    }
+  }
+}

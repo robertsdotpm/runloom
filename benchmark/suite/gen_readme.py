@@ -78,6 +78,12 @@ def main():
                      "(`client`-bound rows); the report gives a server-ceiling estimate "
                      "from server CPU utilisation.[^bench]")
             L.append("")
+            L.append("> **io_uring:** driven through the Stage-2 proactor (`loop_recv`), the "
+                     "io_uring loop backend is a major win &mdash; the Cython handler on io_uring "
+                     "reaches a **1.16M req/s server ceiling (+2.17× over epoll)**, the fastest "
+                     "runloom config measured. \"io_uring loses on loopback\" was an artifact of "
+                     "driving it through the readiness path; see the findings writeup.[^bench]")
+            L.append("")
 
     # --- memory 1M ---
     if mem:

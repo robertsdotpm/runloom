@@ -223,3 +223,45 @@ These refine the decisions above based on what the real runtime/box required:
     saturate the path -- and a deep ladder at 1.5 MB/conn would blow out memory.
     The Go loadgen establishes all connections in **parallel** (capped) so a
     high-connection rung does not serialise into a multi-second ramp.
+
+## io_uring & thread-state investigation (2026-06-19, full record in `../IOURING_TSTATE_FINDINGS.md`)
+
+14. **io_uring's loop backend WINS here — once driven through the Stage-2
+    proactor.** The first cut showed the io_uring tiers *losing* (runloom_cython
+    439k, server-bound) because the capi fell through to the *readiness* path
+    (`recv()` + `wait_fd_coop` + the epoll→ring bridge): io_uring's bookkeeping
+    with none of its win. The fix routes the capi through
+    `runloom_iouring_loop_recv/send` (the proactor) when `RUNLOOM_IOURING_LOOP`
+    is on. Result: runloom_cython 1 KiB went **439k → 639k (client-bound), server
+    ceiling 533k → 1.16M** = +40% peak / **+2.17× ceiling**, at ~half the server
+    CPU. So "io_uring loses on loopback" was an artifact of mis-driving it; the
+    corrected suite reports io_uring as a major win via the proactor.
+
+15. **The "+20% over epoll" reference reconciled.** Real but conditional: it's an
+    **8-byte ping-pong** on a **tstate-free `c_entry`** fiber, and its writeup
+    mis-attributed the mechanism (it credits an inline-drain skip-park in
+    `ring_do`; the all-C echo actually calls `loop_io`, which *always* parks —
+    the real win is **batching** one `submit_and_wait_timeout` across N parked
+    conns). Magnitude is setup-dependent: **+6%** ceiling for the 8-byte all-C
+    echo (epoll already near-optimal), **+117%** ceiling for the 1 KiB Cython
+    handler. Measured head-to-head in `suite/iouring_compare.py` (8B `handler=None`
+    + 1 KiB Cython, each epoll vs `RUNLOOM_IOURING_LOOP=1`).
+
+16. **The tstate "omit-if-absent" optimization (`g->c_entry`) and its cost.**
+    `runloom_g_entry` skips ALL Python-frame/tstate setup for a fiber spawned via
+    `runloom_mn_fiber_c` (a C function pointer) — the all-C echo's other speed
+    half. A Cython handler is a Python callable, so it gets a full Python fiber +
+    tstate and pays `tstate_save/restore` on every proactor park. Default tstate
+    mode is **per-hub snapshot** (no per-fiber `PyThreadState`); the per-g mode is
+    gated off (mimalloc-heap migration SEGV). Measured: a full per-g
+    `PyThreadState` is **~18 KB/fiber** (26.7 KB vs 8.8 KB snapshot vs 2.7 KB
+    go-goroutine). **Buildable next step**: a `cdef`/C-pointer handler path for
+    `serve()` (capsule → `mn_fiber_c` → `c_entry`) would give a *custom* handler
+    the tstate-free fast path — should top even the proactor Cython tier on CPU
+    and be lighter per fiber. Evidence backs it; not yet built.
+
+17. **Open anomaly (reproducible):** the Cython handler on *epoll* is server-bound
+    at 455k (533k ceiling) — *slower* than the Python handler on epoll (988k
+    ceiling), despite being zero-PyObject and zero-alloc. It **vanishes under the
+    io_uring proactor**, implicating the capi's epoll readiness path specifically.
+    Flagged for a focused `perf`/flamegraph pass; not yet explained.

@@ -164,9 +164,16 @@ def sec_perf(perf):
            ("req/s / core", True), ("Conns@peak", True), ("p99 &micro;s", True),
            ("Bottleneck", False), ("Server-ceiling est.", True)]
     reqps_tbl = table("t_reqps", hdr, rows,
-                      "Sorted by req/s per core (best first). Small 1 KiB payload &rarr; this "
-                      "measures scheduling + syscall overhead, not bandwidth. 'client' bottleneck "
-                      "means the 16-core loadgen saturated first &mdash; see the server-ceiling estimate.")
+                      "Sorted by req/s per core (the spec's scale-to-1-core normalisation). "
+                      "Small 1 KiB payload &rarr; measures scheduling + syscall overhead, not "
+                      "bandwidth. <b>Two stories, both true:</b> by <i>absolute</i> req/s (click "
+                      "'Peak req/s') the 44-hub M:N runtimes (runloom, go) win by ~10&times; &mdash; "
+                      "they use the whole machine; by <i>per-core</i> the single-threaded GIL event "
+                      "loops (uvloop, asyncio) win, because free-threading pays an atomic-refcount / "
+                      "cross-core tax per core that a single-threaded loop avoids. A 'client' "
+                      "bottleneck means the 16-core loadgen saturated first, so that row's per-core "
+                      "is an <i>under</i>-estimate &mdash; the server-ceiling column is the fairer "
+                      "per-core proxy there.")
     # bandwidth
     brows = []
     for name, s in servers.items():
@@ -288,6 +295,46 @@ def sec_speed(speed):
     return "\n".join(out)
 
 
+def sec_iouring(iou):
+    if not iou:
+        return ""
+    pairs = [("cecho_epoll", "cecho_iouring", "8-byte all-C echo (handler=None, tstate-free c_entry)"),
+             ("cython_epoll", "cython_iouring_proactor", "1 KiB Cython C handler")]
+    rows = []
+    for a, b, label in pairs:
+        ra, rb = iou.get(a, {}), iou.get(b, {})
+        pka, pkb = ra.get("peak", {}), rb.get("peak", {})
+        if "rps_median" not in pka or "rps_median" not in pkb:
+            continue
+        ea, eb = pka["rps_median"], pkb["rps_median"]
+        ca = ra.get("server_ceiling_est") or ea
+        cb = rb.get("server_ceiling_est") or eb
+        rows.append([
+            (esc(label), label),
+            (fmt(ea) + ' <span class="sub">(%s)</span>' % esc(ra.get("bottleneck_at_peak", "")), ea),
+            (fmt(eb) + ' <span class="sub">(%s)</span>' % esc(rb.get("bottleneck_at_peak", "")), eb),
+            (fmt(ca), ca), (fmt(cb), cb),
+            ('<b>%.2f&times;</b>' % (cb / ca) if ca else "&mdash;", cb / ca if ca else 0),
+        ])
+    if not rows:
+        return ""
+    hdr = [("Workload", False), ("epoll peak", True), ("io_uring peak", True),
+           ("epoll ceiling", True), ("io_uring ceiling", True), ("uring/epoll ceiling", True)]
+    return ('<h2 id="iouring">io_uring loop backend vs epoll</h2>'
+            '<p>Driven through the Stage-2 <b>proactor</b> (<code>loop_recv</code>), '
+            'io_uring is a major win for a real handler &mdash; <b>+2.17&times; server '
+            'ceiling at 1 KiB</b>, the fastest runloom config in the suite. The earlier '
+            '"io_uring loses on loopback" was an artifact of driving it through the '
+            'readiness path (recv + an epoll&rarr;ring bridge). Full reasoning, the '
+            '"+20%" reconciliation, and the thread-state cost analysis are in '
+            '<a href="IOURING_TSTATE_FINDINGS.md">IOURING_TSTATE_FINDINGS.md</a>.</p>'
+            + table("t_iou", hdr, rows,
+                    "Peaks are often client-bound (the 16-core loadgen), so the "
+                    "server-ceiling columns (peak / server-CPU-util) are the fairer "
+                    "comparison. At 8 bytes the gain is small because the all-C epoll path "
+                    "is already near-optimal; at 1 KiB the proactor cuts server CPU 85%&rarr;55%."))
+
+
 def sec_mem(mem):
     if not mem:
         return '<h2 id="mem">Memory</h2><p class="warn">no mem.json yet</p>'
@@ -315,7 +362,10 @@ def sec_mem(mem):
                     "+ its handler buffer (the py handler's 64 KiB bytearray dominates; the Cython "
                     "handler's stack buffer faults similarly, so its win is CPU, not idle RSS). "
                     "optimize(memory) does not shrink idle parked-fiber RSS &mdash; it tunes "
-                    "blockpool/prewarm. The scale column is the headline 1M-fiber resident set."))
+                    "blockpool/prewarm. The scale column is the headline 1M-fiber resident set. "
+                    "NB: the default tstate mode is per-hub snapshot (no per-fiber PyThreadState); "
+                    "the gated per-g mode adds a full PyThreadState = ~18 KB/fiber (~26.7 KB total, "
+                    "vs 8.8 KB snapshot) &mdash; see IOURING_TSTATE_FINDINGS.md."))
 
 
 def sec_code():
@@ -340,6 +390,8 @@ def sec_code():
         ("Harness &mdash; config / constraints", "suite/harness/config.py"),
         ("Harness &mdash; topology (veth/netns/pin/fd)", "suite/harness/topo.py"),
         ("Harness &mdash; measurement (ladder/CI/CPU)", "suite/harness/measure.py"),
+        ("io_uring vs epoll comparison program", "suite/iouring_compare.py"),
+        ("io_uring &amp; thread-state findings (full writeup)", "IOURING_TSTATE_FINDINGS.md"),
         ("Archived original prompt + scoping decisions", "prompt/original_spec.md"),
     ]
     for title, rel in files:
@@ -408,13 +460,15 @@ def main():
     perf = load("perf.json") or load("perf_quick.json")
     speed = load("speed.json") or load("speed_quick.json")
     mem = load("mem.json") or load("mem_quick.json")
+    iou = load("iouring_test.json")
     meta = (perf or speed or mem or {}).get("meta") or config.summary()
     quick = any(d and d.get("quick") for d in (perf, speed, mem))
 
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
     nav = ('<nav><b>Runloom benchmarks</b> '
            '<a href="#env">machine</a><a href="#constraints">constraints</a>'
-           '<a href="#perf">req/s</a><a href="#speed">speed</a><a href="#mem">memory</a>'
+           '<a href="#perf">req/s</a><a href="#iouring">io_uring</a>'
+           '<a href="#speed">speed</a><a href="#mem">memory</a>'
            '<a href="#code">code</a><a href="#profiles">profiles</a></nav>')
     parts = [
         '<!doctype html><html><head><meta charset="utf-8">',
@@ -427,6 +481,7 @@ def main():
         sec_header(envd),
         sec_constraints(meta),
         sec_perf(perf),
+        sec_iouring(iou),
         sec_speed(speed),
         sec_mem(mem),
         sec_profiles(),
