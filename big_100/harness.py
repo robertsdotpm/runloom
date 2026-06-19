@@ -764,17 +764,21 @@ class Harness(object):
             runloom.sleep(0.05)
 
     def _settle_stragglers(self, stall_s=3.0):
-        """Split the worker shortfall into SLOW vs LOST (scale-portable).
+        """Give post-deadline stragglers a bounded window to finish BEFORE run()
+        returns, so the SLOW/LOST split (computed in finish() from the FINAL exit
+        count) is measured against a fair drain.  Keeps draining while workers
+        keep RETURNING; stops once `exited` plateaus for stall_s with work still
+        outstanding (a genuine wedge is the watchdog's job, EXIT_HANG).  Runs
+        inside the root goroutine; runloom.sleep yields so the stragglers
+        actually get scheduled while we watch them.
 
-        After the normal drain + the netpoll force-cancel, keep draining as long
-        as workers keep RETURNING.  A worker that is merely behind (SLOW) will
-        still finish given the time; one that is parked-and-never-rewoken or has
-        vanished (LOST -- the lost-wakeup / lost-park class) will not, so once
-        `exited` plateaus for `stall_s` with work still outstanding, the
-        remainder is LOST.  Bounded by the same hard deadline the watchdog uses
-        so a genuine stall can't wedge teardown (the watchdog fires on it
-        separately).  Runs inside the root goroutine; the runloom.sleep yields so
-        the stragglers actually get scheduled while we watch them."""
+        NOTE: this loop does NOT decide lost-vs-slow.  An earlier version froze
+        that split here, at the mid-drain settle point -- but run() does not
+        return until mn_run has joined EVERY pending g, so a worker that is
+        merely slow keeps finishing during the join AFTER this snapshot.  Freezing
+        here mislabelled those slow finishers as LOST (e.g. 1M workers all exited
+        yet 'lost=394317').  The split is now taken in finish() from the final
+        count, where exited==expected for any clean return."""
         # Relative cap: only spent when workers are STILL outstanding (the loop
         # exits instantly once exited==expected), and kept short so a slow 1M
         # trickle can't drag teardown out -- a 3s progress plateau is decisive.
@@ -784,27 +788,12 @@ class Harness(object):
             prev = self.exited
             runloom.sleep(0.2)
             if self.exited > prev:
-                stalled = 0.0           # progress -> they're SLOW, keep waiting
+                stalled = 0.0           # still finishing -> keep waiting
             else:
                 stalled += 0.2
                 if stalled >= stall_s:
-                    break               # plateaued while incomplete -> LOST
+                    break               # plateaued; let mn_run's join finish them
         self.exited_settled = self.exited
-        # SLOW = finished, but only after the measured window closed.
-        self.slow_workers = max(0, self.exited_settled - self.exited_at_deadline)
-        # LOST = never returned even after progress stopped.  This is the real
-        # fault; corroborate with the runtime's own deadlockable-fiber count.
-        self.lost_workers = max(0, self.expected - self.exited_settled)
-        if self.lost_workers > 0:
-            try:
-                self.deadlocked_at_end = runloom_c.count_deadlocked()
-            except Exception:
-                self.deadlocked_at_end = -1
-            # Surface WHERE the lost workers are parked (lost-wakeup signature).
-            try:
-                runloom_c._dump_parkers()
-            except Exception:
-                pass
 
     def run(self, body, setup=None, post=None):
         """The single entry point a project calls.
@@ -920,6 +909,25 @@ class Harness(object):
             else:
                 self.exit_code = EXIT_OK
 
+        # LOST vs SLOW, from the FINAL exit count -- run() has fully drained by
+        # now (mn_run joins on EVERY pending g), so exited==expected for a clean
+        # return and lost==0.  SLOW = finished, but only after the measured
+        # window closed (benign at the 1M survival tier).  LOST = never returned
+        # at all -- only nonzero on spawn-accounting loss or an aborted run; a
+        # genuinely stranded worker hangs the run instead (watchdog EXIT_HANG),
+        # so it never reaches here.
+        self.slow_workers = max(0, self.exited - self.exited_at_deadline)
+        self.lost_workers = max(0, self.expected - self.exited)
+        if self.lost_workers > 0:
+            try:
+                self.deadlocked_at_end = runloom_c.count_deadlocked()
+            except Exception:
+                self.deadlocked_at_end = -1
+            try:
+                runloom_c._dump_parkers()   # WHERE the lost workers are parked
+            except Exception:
+                pass
+
         sys.stderr.write("\n")
         sys.stderr.write("==== {0} RESULTS ====\n".format(self.name))
         sys.stderr.write("  elapsed_s     : {0:.1f}\n".format(elapsed))
@@ -931,7 +939,7 @@ class Harness(object):
         sys.stderr.write("  completed_funcs: {0}\n".format(tasks))
         sys.stderr.write("  worker_exits  : {0}/{1}\n".format(
             self.exited, self.expected))
-        # LOST-vs-SLOW completeness split (scale-portable; see _settle_stragglers).
+        # LOST-vs-SLOW completeness split (computed in finish() from final counts).
         sys.stderr.write("  completed_in_window: {0}\n".format(
             self.exited_at_deadline))
         sys.stderr.write("  slow_finishers: {0}  (returned after the deadline; "
