@@ -352,6 +352,25 @@ class Harness(object):
         self.first_fail = None           # (msg) of the first invariant break
         self.errors = []                 # sample of (wid, repr) error strings
 
+        # LOST-vs-SLOW oracle (scale-portable completeness).  A worker that did
+        # not finish is one of two very different things:
+        #   SLOW  -- it kept making progress and just ran out of window
+        #            (benign at the 1M survival tier; expected to be 0 at the
+        #            design tier of tens-of-thousands).
+        #   LOST  -- progress STALLED with it still outstanding: parked and
+        #            never re-woken (a lost-wakeup, the lost-park class), or
+        #            otherwise vanished from the scheduler.  A real fault at ANY
+        #            scale.
+        # We capture `exited` at the deadline, after the normal drain, and after
+        # a progress-settle drain, then split the shortfall into slow vs lost.
+        self.exited_at_deadline = 0      # completed within the measured window
+        self.exited_after_drain = 0      # after mark_done() + bounded drain
+        self.exited_settled = 0          # after draining until progress stalled
+        self.parked_cancelled = 0        # netpoll parkers force-cancelled
+        self.slow_workers = 0            # finished late but DID finish (benign)
+        self.lost_workers = 0            # never finished after progress stalled
+        self.deadlocked_at_end = -1      # runtime count_deadlocked() if lost>0
+
         # Real OS lock for exited: at 100k goroutines all finishing simultaneously
         # a CoLock would serialize 100k cooperative handoffs (~1s each at scale),
         # making drain take minutes.  A real OS lock takes <1µs per acquire for
@@ -481,6 +500,24 @@ class Harness(object):
         if not cond:
             self.fail(msg)
         return cond
+
+    def require_no_lost(self, label="completeness"):
+        """Two-tier-aware completeness oracle -- call from post().
+
+        FAILS only if workers were LOST (parked-then-vanished / lost-wakeup), NOT
+        if they were merely SLOW (didn't finish the window -- benign at the 1M
+        survival tier).  At the design tier (tens-of-thousands) both are 0, so
+        this is the same as "all workers completed"; at 1M it stays meaningful
+        because it doesn't false-positive on workers the box simply couldn't
+        schedule to completion in time.  This is the fix for the old
+        all-N-did-an-op oracles that flagged scale as a bug.  Returns True iff no
+        worker was lost."""
+        if self.lost_workers > 0:
+            self.fail("{0}: {1}/{2} worker(s) LOST (parked-then-vanished after "
+                      "progress stalled); deadlockable_fibers={3}, slow={4}"
+                      .format(label, self.lost_workers, self.expected,
+                              self.deadlocked_at_end, self.slow_workers))
+        return self.lost_workers == 0
 
     def error(self, wid, exc):
         """Record an unexpected worker exception (counts as a failure)."""
@@ -726,6 +763,49 @@ class Harness(object):
         while self.exited < self.expected and REAL_MONO() < until:
             runloom.sleep(0.05)
 
+    def _settle_stragglers(self, stall_s=3.0):
+        """Split the worker shortfall into SLOW vs LOST (scale-portable).
+
+        After the normal drain + the netpoll force-cancel, keep draining as long
+        as workers keep RETURNING.  A worker that is merely behind (SLOW) will
+        still finish given the time; one that is parked-and-never-rewoken or has
+        vanished (LOST -- the lost-wakeup / lost-park class) will not, so once
+        `exited` plateaus for `stall_s` with work still outstanding, the
+        remainder is LOST.  Bounded by the same hard deadline the watchdog uses
+        so a genuine stall can't wedge teardown (the watchdog fires on it
+        separately).  Runs inside the root goroutine; the runloom.sleep yields so
+        the stragglers actually get scheduled while we watch them."""
+        # Relative cap: only spent when workers are STILL outstanding (the loop
+        # exits instantly once exited==expected), and kept short so a slow 1M
+        # trickle can't drag teardown out -- a 3s progress plateau is decisive.
+        hard = REAL_MONO() + min(self.drain_timeout, 15.0)
+        stalled = 0.0
+        while self.exited < self.expected and REAL_MONO() < hard:
+            prev = self.exited
+            runloom.sleep(0.2)
+            if self.exited > prev:
+                stalled = 0.0           # progress -> they're SLOW, keep waiting
+            else:
+                stalled += 0.2
+                if stalled >= stall_s:
+                    break               # plateaued while incomplete -> LOST
+        self.exited_settled = self.exited
+        # SLOW = finished, but only after the measured window closed.
+        self.slow_workers = max(0, self.exited_settled - self.exited_at_deadline)
+        # LOST = never returned even after progress stopped.  This is the real
+        # fault; corroborate with the runtime's own deadlockable-fiber count.
+        self.lost_workers = max(0, self.expected - self.exited_settled)
+        if self.lost_workers > 0:
+            try:
+                self.deadlocked_at_end = runloom_c.count_deadlocked()
+            except Exception:
+                self.deadlocked_at_end = -1
+            # Surface WHERE the lost workers are parked (lost-wakeup signature).
+            try:
+                runloom_c._dump_parkers()
+            except Exception:
+                pass
+
     def run(self, body, setup=None, post=None):
         """The single entry point a project calls.
 
@@ -771,9 +851,11 @@ class Harness(object):
                 self.exit_code = EXIT_ERROR
                 return  # let deadline/drain finish naturally
             self.wait_for_deadline()
+            self.exited_at_deadline = self.exited   # completed in the window
             self._profile_mark("deadline")     # drain begins (workers told to stop)
             self.mark_done()
             self.drain_workers()
+            self.exited_after_drain = self.exited
             # Teardown backstop (kqueue audit finding B3): after the normal drain
             # (workers told to stop + registered listeners closed), any fiber
             # still parked on an IDLE-but-OPEN socket -- e.g. a client mid-recv
@@ -786,12 +868,16 @@ class Harness(object):
             # run is over.  No-op (cancels 0) on a clean drain.
             try:
                 n = runloom_c.cancel_all_parked()
+                self.parked_cancelled = n
                 if n:
                     self.log("teardown: force-cancelled {0} stranded "
                              "parker(s)".format(n))
                     self.drain_workers(grace=10)
             except Exception:
                 pass
+            # LOST-vs-SLOW split: drain while progress continues; the remainder
+            # once it STALLS is lost, not merely behind.
+            self._settle_stragglers()
             self._profile_mark("drain_done")   # worker goroutines returned
 
         runloom.monkey.patch()
@@ -845,6 +931,21 @@ class Harness(object):
         sys.stderr.write("  completed_funcs: {0}\n".format(tasks))
         sys.stderr.write("  worker_exits  : {0}/{1}\n".format(
             self.exited, self.expected))
+        # LOST-vs-SLOW completeness split (scale-portable; see _settle_stragglers).
+        sys.stderr.write("  completed_in_window: {0}\n".format(
+            self.exited_at_deadline))
+        sys.stderr.write("  slow_finishers: {0}  (returned after the deadline; "
+                         "benign scale, NOT a fault)\n".format(self.slow_workers))
+        sys.stderr.write("  lost_workers  : {0}  (never returned after progress "
+                         "stalled -- LOST/lost-wakeup, a real fault)\n".format(
+                             self.lost_workers))
+        if self.parked_cancelled:
+            sys.stderr.write("  parked_cancelled: {0}  (netpoll parkers force-"
+                             "unblocked at teardown)\n".format(
+                                 self.parked_cancelled))
+        if self.lost_workers > 0:
+            sys.stderr.write("  deadlockable_fibers: {0}  (runtime count at "
+                             "settle)\n".format(self.deadlocked_at_end))
         sys.stderr.write("  failures      : {0}\n".format(self.failures))
         sys.stderr.write("  fd_base       : {0}\n".format(self.fd_base))
         sys.stderr.write("  fd_end        : {0}\n".format(self.fd_end))
