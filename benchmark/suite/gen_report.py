@@ -354,26 +354,37 @@ def sec_speed(speed):
                      "Higher is better. One spawner creates N tasks; drained to completion. "
                      "runloom &amp; greenlet carry real C stacks (heavyweight vs goroutines)."))
 
-    # ctxswitch
+    # ctxswitch -- the speed.json rows are PYTHON-fiber; add a runloom
+    # compiled-fiber-entry (c_entry capstone) row so the true scheduler yield is
+    # in the same table, and relabel the runloom row to say what it actually is.
+    cap = load("centry_capstone.json")
     rows = []
     for rt, d in (m.get("ctxswitch") or {}).items():
         if "ns_per_switch" not in d:
             continue
-        rows.append([(esc(rt), rt), (fmt(d.get("cores", 1)), d.get("cores", 1)),
+        label = "runloom (python fiber)" if rt == "runloom" else rt
+        rows.append([(esc(label), label), (fmt(d.get("cores", 1)), d.get("cores", 1)),
                      (fmt(d["ns_per_switch"]), d["ns_per_switch"])])
+    if cap and cap.get("c_entry_ns"):
+        ce44 = cap["c_entry_ns"][-1]      # 44-hub c_entry, same cores as the python row
+        h44 = cap["hubs"][-1]
+        rows.append([("runloom (compiled fiber entry)", "runloom (compiled fiber entry)"),
+                     (fmt(h44), h44),
+                     (fmt(ce44, 1) if ce44 < 10 else fmt(ce44), ce44)])
     rows.sort(key=lambda r: (r[2][1] or 1e18))
     out.append("<h3>Context switch (loaded-yield)</h3>")
     out.append(table("t_ctx", [("Runtime", False), ("Cores", True), ("ns / switch", True)], rows,
                      "Lower is better. G concurrent tasks each yield K times (run queues stay full "
-                     "&mdash; same-hub re-dispatch, not a 2-party ping-pong). <b>Caveat &mdash; runloom's "
-                     "row is the PYTHON-FIBER number, and at 44 hubs it is NOT the scheduler:</b> it is "
-                     "free-threaded CPython object-lock contention (a futex&rarr;cross-NUMA IPI storm; "
-                     "<code>perf</code>-confirmed, runloom's own yield is ~2% of the profile). The "
-                     "capstone just below strips the Python eval and shows runloom's <em>true</em> "
-                     "scheduler yield."))
+                     "&mdash; same-hub re-dispatch, not a 2-party ping-pong). Two runloom rows: "
+                     "<b>runloom (python fiber)</b> is a Python coroutine &mdash; at 44 hubs that number "
+                     "is NOT the scheduler, it is free-threaded CPython object-lock contention (a "
+                     "futex&rarr;cross-NUMA IPI storm; <code>perf</code>-confirmed, runloom's own yield "
+                     "is ~2% of the profile). <b>runloom (compiled fiber entry)</b> is the same yield on "
+                     "a tstate-free <code>c_entry</code> fiber (no Python eval) &mdash; the true "
+                     "scheduler cost, ~single-digit ns and flat to 44 hubs. The capstone just below "
+                     "shows the full hub-scaling proof."))
 
     # ---- c_entry capstone: the TRUE scheduler yield (no Python) ----
-    cap = load("centry_capstone.json")
     if cap and cap.get("hubs"):
         hubs = cap["hubs"]
         xl = [str(h) for h in hubs]
