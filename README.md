@@ -25,14 +25,15 @@ def main():
 runloom.run(8, main) # 8 hub threads -> real cores on 3.13t (GIL off)
 ```
 
-Already have `async def` code? Run it unchanged on runloom's scheduler with the
-`runloom.aio` bridge (`runloom.aio.run(main())` ≈ `asyncio.run`). See [docs/](https://github.com/robertsdotpm/runloom/tree/main/docs/).
+Already have `async def` code? Run it unchanged on runloom's **single-threaded**
+scheduler with the `runloom.aio` bridge (`runloom.aio.run(main())` ≈ `asyncio.run`).
+It's a way to port your async code with zero rewrites, not a path to multi-core
+performance. See [docs/](https://github.com/robertsdotpm/runloom/tree/main/docs/).
 
 **The trade-off:** the bridge isn't a guaranteed speed-up -- it has more
 per-task overhead than asyncio's own loop, so whether it comes out faster
-depends on how many `await`s each task does before finishing.[^bridge] Think of
-it as a way to run your existing async code on runloom's scheduler: point the
-extension at your code and measure.
+depends on how many `await`s each task does before finishing.[^bridge] For
+multi-core parallelism, use the sync API with `runloom.run(n>1, main)` instead.
 
 ---
 
@@ -228,17 +229,32 @@ Details: [docs/stack-sizing.md](https://github.com/robertsdotpm/runloom/blob/mai
 
 ## Ways to use it
 
-runloom is one scheduler with several front-ends -- pick whichever fits your code;
-they share the same goroutines and can be mixed.
+runloom offers multiple APIs, each with different performance characteristics:
 
-- **`runloom.sync`** -- Go-style straight-line code: `go(fn)`, `Chan`, `select`,
-  cooperative `sleep` and sockets. No `async`/`await`, no event-loop ceremony.
+**Sync API (M:N multi-core with `run(n, main)`)**
+
+- **`runloom.run(n, main_fn)`** -- the main entry point. Runs your code across
+  `n` hub threads: `run(1, main)` for single-threaded I/O, `run(8, main)` for
+  multi-core parallelism on 3.13t+GIL-off. This is the path that gets real
+  M:N performance and scales to multiple cores.
+- **`runloom.sync`** -- Go-style straight-line code API: `go(fn)`, `Chan`, 
+  `select`, cooperative `sleep` and sockets. No `async`/`await`. Call
+  `runloom.run(n, main)` to drive it on the M:N scheduler.
 - **Stdlib monkey-patch** -- `runloom.monkey.patch()` makes blocking stdlib
   cooperative across ~20 categories, so `requests`, `pymysql`, plain `urllib`
   and friends run unchanged.[^monkey]
-- **`runloom.aio`** -- run existing `async`/`await` code on the scheduler;
-  high-fidelity enough to run **aiohttp, uvicorn, starlette, hypercorn,
-  websockets and anyio** unchanged.[^aio]
+
+**Asyncio bridge (single-threaded with `runloom.aio.run(coro)`)**
+
+- **`runloom.aio`** -- run existing `async`/`await` code on a **single-threaded**
+  scheduler. `runloom.aio.run(main())` is the entry point (like `asyncio.run`).
+  High-fidelity enough to run **aiohttp, uvicorn, starlette, hypercorn,
+  websockets and anyio** unchanged.[^aio] Useful for porting async code as-is,
+  but does not use the M:N scheduler -- it's a single-threaded event loop
+  (equivalent to `run(1)` in the sync API).
+
+**Offload pattern**
+
 - **`runloom.blocking(fn, …)` / `runloom.monkey.offload(fn, …)`** -- offload a
   genuinely-blocking or CPU-bound call to a worker pool so it never wedges a hub
   (runs inline when not on a goroutine).

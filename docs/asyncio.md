@@ -6,6 +6,12 @@ fibers: every `asyncio.Task` becomes a runloom fiber driving the
 coroutine, and `await fut` parks the fiber on a per-task wake
 primitive.
 
+**Important:** `runloom.aio` runs on a **single-threaded scheduler** (one OS
+thread), like asyncio itself. It does NOT use the M:N scheduler for multi-core
+parallelism. Use it to port your existing async code with zero rewrites. If
+you need multi-core performance, use the sync API with `runloom.run(n>1, main)`
+instead.
+
 ## When to use this
 
 **Use `runloom.aio` when:**
