@@ -7,7 +7,7 @@
  *
  * Differences from the Python harness:
  *   - No CPython interpreter -- everything runs through the C-only
- *     runloom_mn_go_c spawn path added in this commit.  Python is only
+ *     runloom_mn_fiber_c spawn path added in this commit.  Python is only
  *     used to call Py_Initialize once at startup so PyMem_*, etc., are
  *     available (runloom_c internals still call into CPython for the
  *     slab allocator and a few other places even when no Python work
@@ -365,8 +365,8 @@ int main(int argc, char **argv)
 
     double t0 = now_seconds();
     for (int i = 0; i < N; i++) {
-        if (runloom_mn_go_c(client_g, NULL) < 0) {
-            fprintf(stderr, "mn_go_c failed at i=%d: %s\n",
+        if (runloom_mn_fiber_c(client_g, NULL) < 0) {
+            fprintf(stderr, "mn_fiber_c failed at i=%d: %s\n",
                     i, strerror(errno));
             return 2;
         }

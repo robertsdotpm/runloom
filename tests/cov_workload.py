@@ -70,7 +70,7 @@ def workload(producers=4, consumers=4, per=80):
         def w():
             rc.sched_yield()
             rc.tcp_send(b.fileno(), b"ping")        # cooperative
-        rc.mn_fiber(w)                                  # MUST be mn_go under M:N
+        rc.mn_fiber(w)                                  # MUST be mn_fiber under M:N
         buf = bytearray(4)
         rc.tcp_recv(a.fileno(), buf, 4)             # cooperative park
         rc.netpoll_unregister(a.fileno()); a.close()

@@ -7,7 +7,7 @@ workload — plus a supervisor that detects crashes/hangs, gathers cores and
 gdb backtraces, and restarts the stack automatically.
 
 Everything is written in the *blocking* style: no `async`/`await`, no event
-loop ceremony. Concurrency comes from `runloom_c.mn_go` + cooperative I/O
+loop ceremony. Concurrency comes from `runloom_c.mn_fiber` + cooperative I/O
 (`runloom_c.wait_fd`), channels (`runloom_c.Chan`), and a cooperative lock
 (`runloom.sync.Lock`).
 
@@ -15,7 +15,7 @@ loop ceremony. Concurrency comes from `runloom_c.mn_go` + cooperative I/O
 
 | file | what it is |
 | --- | --- |
-| [mnweb.py](mnweb.py) | the micro HTTP framework: routing, request parsing, a cooperative `CoSock` built on `wait_fd` (with read timeouts), keep-alive, and `dial`/`fetch` for outbound requests. Serves with `mn_init` → accept-loop goroutine → one `mn_go` handler per connection → `mn_run`. |
+| [mnweb.py](mnweb.py) | the micro HTTP framework: routing, request parsing, a cooperative `CoSock` built on `wait_fd` (with read timeouts), keep-alive, and `dial`/`fetch` for outbound requests. Serves with `mn_init` → accept-loop goroutine → one `mn_fiber` handler per connection → `mn_run`. |
 | [site.py](site.py) | the website: `/` (host IP + visitor count + uptime), `/ip`, `/count` (lock-guarded counter), `POST /visit`, `/health` (cheap, for the watchdog), `/slow` (timer path), `/stats` (scheduler + per-hub introspection). Every request is logged to a file **and** written to a local sqlite DB by a single dedicated writer goroutine (blocking writes, batched commits). Fetches `example.com` once at startup and **every 10 minutes**. Arms the crash + `kill -QUIT` goroutine-dump handlers and a `health.json` heartbeat. |
 | [burst_client.py](burst_client.py) | load client on the **same** M:N lib: every 60 s it fires 100 concurrent requests (one goroutine each), collects results over a channel, logs a latency/status summary, repeats forever. |
 | [supervisor.sh](supervisor.sh) | the watchdog (see below). |

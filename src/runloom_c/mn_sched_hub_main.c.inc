@@ -946,10 +946,10 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
                     runloom_netpoll_force_unlink_g_parker(g);
                     runloom_g_decref(g);                  /* scheduler ref */
                     if (from_runq) runloom_g_decref(g);   /* queue ref */
-                    /* pending_complete LAST: the final decref may run a go_n
+                    /* pending_complete LAST: the final decref may run a fiber_n
                      * batch teardown (arena cursor reset).  mn_run returns when
                      * global pending hits 0, so only mark complete AFTER teardown
-                     * -- else the next go_n's arena alloc races a not-yet-reset
+                     * -- else the next fiber_n's arena alloc races a not-yet-reset
                      * cursor and falls back to the slow per-g path. */
                     runloom_mn_pending_complete(h);
                 } else if (parked_offqueue) {
@@ -1165,7 +1165,7 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
                 runloom_g_decref(g);                  /* scheduler ref */
                 if (from_runq) runloom_g_decref(g);   /* queue ref */
                 /* pending_complete LAST -- see the sibling completion site:
-                 * the final decref may run a go_n batch teardown (arena reset),
+                 * the final decref may run a fiber_n batch teardown (arena reset),
                  * which must be visible before mn_run observes pending == 0. */
                 runloom_mn_pending_complete(h);
                 runloom_pystate_snap(&hub_snap);

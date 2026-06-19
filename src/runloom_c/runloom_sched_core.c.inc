@@ -275,7 +275,7 @@ runloom_g_t *runloom_sched_peek_current(void)
 /* RUNLOOM_GOROUTINE_PANIC: how an unhandled exception that escapes a goroutine
  * body is surfaced.  Without it the exception is captured into g->error but
  * never raised out of run()/mn_run(), never on G.result, and never printed -- a
- * silent failure (and most goroutines, every mn_go included, expose no handle
+ * silent failure (and most goroutines, every mn_fiber included, expose no handle
  * to inspect at all).  Modes:
  *   silent : the legacy behaviour -- capture into g->error, no report
  *   print  : (default) report via PyErr_WriteUnraisable -> sys.unraisablehook /
@@ -410,7 +410,7 @@ void runloom_g_entry(void *user)
 
     runloom_delay_inject(RUNLOOM_DLY_G_ENTRY);
     if (g->pass_index) {
-        /* go_n(indexed=True): call fn(index).  The index rode in c_arg as a raw
+        /* fiber_n(indexed=True): call fn(index).  The index rode in c_arg as a raw
          * integer; mint the PyLong here on the hub (parallel, overlapped).  Use
          * CallFunctionObjArgs for portability across Python versions. */
         PyObject *idx = PyLong_FromSsize_t((Py_ssize_t)(intptr_t)g->c_arg);
@@ -527,7 +527,7 @@ runloom_g_t *runloom_g_slab_alloc(void)
          *   part 2: clear the fields AFTER `state` up to the introspection
          *           block (arena/batch/pass_index).  These are NOT preserved
          *           on purpose and are NOT all reset at spawn -- pass_index is
-         *           set only on the indexed go_n path, so without this clear a
+         *           set only on the indexed fiber_n path, so without this clear a
          *           recycled g carries a stale pass_index and mis-calls
          *           fn(stale index) instead of fn() (a real wrong-result bug),
          *           and any FUTURE field added in this gap would leak the same
@@ -674,7 +674,7 @@ void runloom_g_decref(runloom_g_t *g)
              * runloom_coro_destroy (it would pool/free an arena coro) nor
              * runloom_g_slab_free (it would free an arena g) -- either corrupts
              * the heap.  Drop the Python refs (g_entry already Py_CLEAR'd
-             * callable; result/error are normally NULL for go_n workers), then
+             * callable; result/error are normally NULL for fiber_n workers), then
              * decrement the batch; the last finisher reclaims the whole batch.
              * Bulk gs are never admitted under the max-fibers limit, so
              * limit_counted is 0 -- nothing to release. */

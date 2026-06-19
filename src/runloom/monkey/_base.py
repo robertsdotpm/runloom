@@ -75,7 +75,7 @@ _raw_os_sendfile = getattr(os, "sendfile", None)
 
 # ---------- fiber-context detection ----------
 # runloom_c (C scheduler) does not expose a "current fiber"
-# accessor, so we wrap runloom_c.fiber / mn_go and bump a thread-local
+# accessor, so we wrap runloom_c.fiber / mn_fiber and bump a thread-local
 # counter for the duration of every user callable.  The Python
 # scheduler still uses runloom.current() (which works there).
 _g_state = _th.local()

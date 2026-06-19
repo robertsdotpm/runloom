@@ -159,7 +159,7 @@ def test_print_smoke():
 
 
 def test_records_under_mn_scheduler():
-    # The M:N spawn site (mn_go) is hooked independently of the single-sched one.
+    # The M:N spawn site (mn_fiber) is hooked independently of the single-sched one.
     runloom.inspect.enable_stack_advice(True)
     runloom_c.mn_init(2)
     try:

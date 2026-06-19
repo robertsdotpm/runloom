@@ -105,7 +105,7 @@ Crude but works.
 `preempt_init` configures preemption for the calling OS thread's
 scheduler.  Under the M:N hub model, each hub thread runs its own
 scheduler; preemption needs to be initialised on each.  The
-`mn_init`/`mn_go` path handles this automatically.
+`mn_init`/`mn_fiber` path handles this automatically.
 
 ## Stopping preemption
 

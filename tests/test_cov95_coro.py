@@ -21,7 +21,7 @@ Regions driven (uncovered coro.c line -> how):
             -> set it + churn >TLS_CAP fibers so a cache flush consults
             runloom_global_stack_cap() and resolves mode=static.
   L490,494-509,515-516  test stack ARENA carve / in-arena / acquire
-            -> RUNLOOM_STACK_ARENA=1: mn_go fibers carve their stacks as slices
+            -> RUNLOOM_STACK_ARENA=1: mn_fiber fibers carve their stacks as slices
             of the one big arena (lock-free bump) instead of mmap+depot.
   L608-618  ARENA stack release path -> the same fibers COMPLETE, so their
             arena slices are madvise'd + returned to the bump allocator;
@@ -84,7 +84,7 @@ PY = sys.executable
 
 # coro.c's POSIX stack pool / arena / madvise / grow all live behind
 # RUNLOOM_HAVE_FCONTEXT|UCONTEXT (the guard-page backends).  The Coro-driven
-# bits work without the GIL off, but the fiber_n/mn_go workloads need the M:N
+# bits work without the GIL off, but the fiber_n/mn_fiber workloads need the M:N
 # scheduler -> skip the whole file on a GIL build (matches the other cov suites).
 pytestmark = pytest.mark.skipif(not FT, reason="coro.c stack paths need the M:N / FT build")
 
@@ -120,7 +120,7 @@ def _assert_clean(p, marker):
 
 
 # A race-free fiber-churn body shared by several mode tests: each round spawns
-# PER mn_go fibers that each set their OWN bytearray slot (single writer ->
+# PER mn_fiber fibers that each set their OWN bytearray slot (single writer ->
 # no lost-increment race with the GIL off) and signal a WaitGroup; we assert
 # every fiber in every round ran.  ROUNDS forces stack release + reuse.
 _CHURN = r'''
@@ -164,7 +164,7 @@ def test_depot_cap_static_override():
 # L608-618 : ARENA stack release (madvise + return slot + cursor reset).
 # --------------------------------------------------------------------------
 def test_stack_arena_carve_and_release_churn():
-    """RUNLOOM_STACK_ARENA=1 makes every mn_go fiber carve its stack as a slice
+    """RUNLOOM_STACK_ARENA=1 makes every mn_fiber fiber carve its stack as a slice
     of ONE pre-mmap'd arena (runloom_stack_arena_carve, L494-500) via a lock-free
     bump (runloom_arena_alloc), instead of mmap + the depot.  On completion the
     slice is recognised by runloom_stack_in_arena (L504-509), madvise-reclaimed,

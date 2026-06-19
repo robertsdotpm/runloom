@@ -36,13 +36,13 @@ timing-dependent exploration for A/B):
    the `Barrier` constant in `verify/tla/RunloomMNControl.tla` (`DeterministicGrant`
    holds with it, fails without it).
 2. **Startup entry gate.** Hubs block at loop entry until `mn_run` arms the
-   controller — *after* all pre-run `mn_go` placement. Without it the main thread
+   controller — *after* all pre-run `mn_fiber` placement. Without it the main thread
    places the initial goroutines concurrently with already-spinning hubs, so a
    hub could check in idle before its share landed and the first census would be
    partial. Work created *later* (by a running segment) is published at that
    segment's release and picked up in the next round, so only startup needs the
    gate.
-3. **No work-stealing.** With deterministic `mn_go` placement
+3. **No work-stealing.** With deterministic `mn_fiber` placement
    (`spawn_counter % hub_count`) and hub-pinned wakes, disabling steal makes each
    hub's execution stream a fixed function of the schedule — closing the gap
    where an identical grant sequence still produced different goroutine orderings.
@@ -65,7 +65,7 @@ timing-dependent exploration for A/B):
    runs Python without yielding would hold the baton forever (the deadlock
    below) — but the sysmon fires it on a *wall-clock* threshold, the last
    nondeterministic input to the schedule (it broke the tie e.g. on which of two
-   back-to-back `mn_go`s a segment finishes before yielding). In barrier mode the
+   back-to-back `mn_fiber`s a segment finishes before yielding). In barrier mode the
    eval-frame wrapper ignores the wall-clock flag and instead yields the baton
    after a fixed COUNT of Python frame entries on the baton
    (`RUNLOOM_MN_PREEMPT_FRAMES`, default 4096) — a deterministic function of the
@@ -105,7 +105,7 @@ timing-dependent exploration for A/B):
 7. **Atomic deferred publish at release.** Levers 2 and 4 assume the model in
    their own words — *"work created later (by a running segment) is published at
    that segment's release"* — but the code used to publish **immediately**: a
-   cross-hub `mn_go` / channel-wake pushed onto the target's `sub_list` mid-segment
+   cross-hub `mn_fiber` / channel-wake pushed onto the target's `sub_list` mid-segment
    (`runloom_mn_hub_submit`). A target draining its `sub_list` at loop entry could
    then catch a **partial** snapshot of an in-flight segment's submits — e.g. a
    `boot` segment that spawns producers `[1025, 1028]` onto hub 0: if hub 0's drain

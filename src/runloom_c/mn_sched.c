@@ -153,7 +153,7 @@ typedef struct runloom_hub {
     volatile int stopping;
     volatile long pending;        /* gs ever-pushed minus gs-completed */
     /* MPSC submission list.  Chase-Lev's `push` is owner-only (single
-     * producer); when mn_go runs on a non-owner thread, pushing
+     * producer); when mn_fiber runs on a non-owner thread, pushing
      * directly to the deque races with the owner's pop and corrupts
      * the deque's `bottom` counter (a missed RMW), causing
      * non-deterministic segfaults under load.  Instead, producers
@@ -178,7 +178,7 @@ typedef struct runloom_hub {
     runloom_cond_t    idle_cond;
     volatile int      idle_waiting;
     /* Controlled-replay deferred publish (barrier mode only).  A cross-hub
-     * submit made DURING this hub's execution segment (mn_go / channel-wake from
+     * submit made DURING this hub's execution segment (mn_fiber / channel-wake from
      * a running fiber) is staged here per TARGET hub, then spliced onto the
      * target's sub_list ATOMICALLY at this segment's release -- so a target's
      * loop-top drain sees the COMPLETE set a segment sent it, never a partial

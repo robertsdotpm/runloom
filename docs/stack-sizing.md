@@ -71,7 +71,7 @@ margin) where grow-down would measure-and-shrink.
   runs nothing until it finishes, so the sampler can't amortise) and the memory
   win, which only pays off at scale, isn't on the table.
 - **Per `runloom.fiber()`-spawned function.** Goroutines spawned through the raw C
-  entry points (`runloom_c.mn_go`) use the plain default; the learning lives in
+  entry points (`runloom_c.mn_fiber`) use the plain default; the learning lives in
   the friendly `runloom.fiber()` wrapper. Arg-bearing `runloom.fiber(fn, x)` binds the
   size to `fn` (shared across all its arg variants), not the per-call wrapper.
 

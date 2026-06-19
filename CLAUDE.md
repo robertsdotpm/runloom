@@ -205,7 +205,7 @@
   default 512 KB, env `RUNLOOM_AIO_IO_STACK`) — the same reason task drivers use
   `_TASK_STACK`. The explicit pin matters because it holds 512 KB regardless of
   the scheduler default / calibration / the M:N grow-down (which can shrink an
-  unpinned goroutine toward 16 KB). Do NOT revert these to a bare `runloom_c.go`.
+  unpinned goroutine toward 16 KB). Do NOT revert these to a bare `runloom_c.fiber`.
   The 512 KB is virtual + pooled; only the asyncio bridge pins it. (NB: the
   scheduler's *unpinned* default is `RUNLOOM_DEFAULT_STACK_SIZE` = 512 KB on both
   the single-thread and M:N paths — `mn_sched_init_fini.c.inc` resolves to

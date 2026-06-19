@@ -1,6 +1,6 @@
 """1M-coroutine spawn + RUN to completion: correctness + where the moved cost lands.
 
-go_n(noop, N) then mn_run() (drains all N on the hubs).  mn_run returns the
+fiber_n(noop, N) then mn_run() (drains all N on the hubs).  mn_run returns the
 completed count -- assert == N proves the deferred-stack path actually runs.
 Compare RUNLOOM_GON_FRESH=0 (frames written at spawn) vs =1 (frames written
 lazily on the owning hub at first resume, in parallel across 8 hubs).

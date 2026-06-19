@@ -118,7 +118,7 @@ virtual + pooled, only the bridge pays it; `RUNLOOM_AIO_{IO,TASK}_STACK`. The pi
 matters because it holds the 512 KB *regardless of the scheduler default,
 calibration, or the M:N grow-down* (which can shrink an unpinned fiber toward
 16 KB) — an explicit `stack_size=` always wins. **Do not revert these to a bare
-`runloom_c.go`** — it's a documented invariant. (The code comments here say "the
+`runloom_c.fiber`** — it's a documented invariant. (The code comments here say "the
 default 32 KB g-stack"; that reflects the pre-512 KB default era — see spec 10 for
 the current numbers. The "(M:N paths keep 128 KB)" note in `CLAUDE.md` is likewise
 stale: M:N's unpinned default is the 512 KB calibrated `h->sched.stack_size`,

@@ -185,8 +185,8 @@ static void accept_g(void *arg)
              * runloom_netpoll_register into skipping epoll_ctl ADD. */
             runloom_netpoll_unregister(conn);
             long n = __atomic_add_fetch(&g_accepted, 1, __ATOMIC_RELAXED);
-            if (runloom_mn_go_c(echo_conn_g, (void *)(long)conn) < 0) {
-                fprintf(stderr, "accept_g: mn_go_c failed at accepted=%ld\n", n);
+            if (runloom_mn_fiber_c(echo_conn_g, (void *)(long)conn) < 0) {
+                fprintf(stderr, "accept_g: mn_fiber_c failed at accepted=%ld\n", n);
                 close(conn);
                 return;
             }
@@ -379,14 +379,14 @@ int main(int argc, char **argv)
     double t0 = now_seconds();
 
     /* Spawn the accept goroutine first so it's ready to take connects. */
-    if (runloom_mn_go_c(accept_g, NULL) < 0) {
+    if (runloom_mn_fiber_c(accept_g, NULL) < 0) {
         fprintf(stderr, "spawn accept_g failed\n");
         return 2;
     }
     /* Then spawn the N client goroutines. */
     for (int i = 0; i < N; i++) {
-        if (runloom_mn_go_c(client_g, NULL) < 0) {
-            fprintf(stderr, "mn_go_c client failed at i=%d: %s\n",
+        if (runloom_mn_fiber_c(client_g, NULL) < 0) {
+            fprintf(stderr, "mn_fiber_c client failed at i=%d: %s\n",
                     i, strerror(errno));
             return 2;
         }

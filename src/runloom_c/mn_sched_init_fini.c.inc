@@ -448,7 +448,7 @@ static int runloom_mn_fiber_core(PyObject *callable, runloom_c_entry_fn c_fn,
     n = __atomic_fetch_add(&runloom_mn_spawn_counter, 1, __ATOMIC_RELAXED);
     if (runloom_pair_affinity_mode()) {
         /* stride pairs together: prefer the explicit fiber index when present
-         * (go_n indexed / the bulk-path fallback), else the spawn counter. */
+         * (fiber_n indexed / the bulk-path fallback), else the spawn counter. */
         long key = (py_index >= 0) ? py_index : n;
         hub_idx = (int)((key >> 1) % runloom_hub_count);
     } else {
@@ -479,7 +479,7 @@ static int runloom_mn_fiber_core(PyObject *callable, runloom_c_entry_fn c_fn,
         g->callable = callable;
         /* Stack-advice: note the kind at spawn (0 unless profiling on). */
         g->advice_key = runloom_advice_note_spawn(callable);
-        if (py_index >= 0) {                 /* go_n(indexed=True): call fn(index) */
+        if (py_index >= 0) {                 /* fiber_n(indexed=True): call fn(index) */
             g->pass_index = 1;
             g->c_arg = (void *)(intptr_t)py_index;
         }
@@ -502,7 +502,7 @@ static int runloom_mn_fiber_core(PyObject *callable, runloom_c_entry_fn c_fn,
         if (stack_size > RUNLOOM_MAX_STACK_SIZE) stack_size = RUNLOOM_MAX_STACK_SIZE;
     }
     /* Stack size, in precedence order:
-     *  1. an explicit per-spawn override (mn_go(fn, stack_size) > 0) -- a caller
+     *  1. an explicit per-spawn override (mn_fiber(fn, stack_size) > 0) -- a caller
      *     that knows it runs a deep, NON-yielding C burst (cold stdlib import,
      *     readline/terminfo init, a doctest, OpenSSL) asks for a roomy stack up
      *     front; the resume-boundary copy-grow only rescues stacks that deepen
@@ -585,13 +585,13 @@ PyObject *runloom_mn_fiber(PyObject *callable, size_t stack_size)
 
 /* Bulk-spawn: create `n` fibers, ALL running the same Python `callable`,
  * by looping the spawn core in C.  This removes the n Python->C call dispatches
- * + per-call PyArg parsing that a Python `for i: mn_go(fn)` loop pays -- the
+ * + per-call PyArg parsing that a Python `for i: mn_fiber(fn)` loop pays -- the
  * fibers still run the Python callable (each gets its own g + tstate slot
  * and invokes `callable()` when scheduled).  Returns 0 on success, or -1 with a
  * Python error set if a spawn fails partway (the already-created fibers are
  * live and will run; the caller decides whether to treat a partial as fatal).
  * Must be called from inside the M:N runtime (root or a fiber). */
-/* Read RUNLOOM_GON_BULK once: 1 = go_n uses the bulk-arena fast path. */
+/* Read RUNLOOM_GON_BULK once: 1 = fiber_n uses the bulk-arena fast path. */
 static int runloom_fibern_bulk_enabled(void)
 {
     static int v = -1;
@@ -604,13 +604,13 @@ static int runloom_fibern_bulk_enabled(void)
     return cur;
 }
 
-/* ---- go_n bulk-arena batch lifecycle ----
- * One descriptor per go_n() call.  Owns the two contiguous arenas (g + coro)
+/* ---- fiber_n bulk-arena batch lifecycle ----
+ * One descriptor per fiber_n() call.  Owns the two contiguous arenas (g + coro)
  * and the reserved stack block; `live` starts at N and is decremented by each
  * fiber's final decref.  The decrement that reaches 0 is the last finisher,
  * which reclaims everything wholesale -- the safe answer to "you can't free a
  * slice of a calloc/mmap individually".  No per-slot freelist yet: a batch is
- * reclaimed all-or-nothing, which is exact for go_n's "spawn N, they all run"
+ * reclaimed all-or-nothing, which is exact for fiber_n's "spawn N, they all run"
  * shape; partial slot reuse is a later refinement. */
 struct runloom_fibern_batch {
     void  *garena;       /* calloc'd g-struct arena   (one free) */
@@ -645,7 +645,7 @@ void runloom_fibern_batch_finish_one(struct runloom_fibern_batch *b)
  * (the free path is not yet taught about arena memory), so this is only valid
  * for workloads whose fibers do NOT complete during the measured window
  * (e.g. long-parked workers) -- guarded by RUNLOOM_GON_BULK so the default
- * go_n (loop) stays the safe path. */
+ * fiber_n (loop) stays the safe path. */
 static int runloom_mn_fiber_n_bulk(PyObject *callable, long n, size_t stack_size,
                                 int indexed)
 {
@@ -706,7 +706,7 @@ static int runloom_mn_fiber_n_bulk(PyObject *callable, long n, size_t stack_size
         tmpl.state        = (unsigned char)RUNLOOM_GST_SUBMITTED;
         tmpl.arena        = (batch != NULL);      /* arena-owned: skip individual free */
         tmpl.batch        = batch;                /* final decref -> batch_finish_one */
-        tmpl.pass_index   = (unsigned char)(indexed != 0);  /* go_n(indexed=True): fn(i) */
+        tmpl.pass_index   = (unsigned char)(indexed != 0);  /* fiber_n(indexed=True): fn(i) */
         if (use_grunq) tmpl.wake_state = RUNLOOM_WS_RUNNING;
 
         if (!nofields) {
@@ -717,7 +717,7 @@ static int runloom_mn_fiber_n_bulk(PyObject *callable, long n, size_t stack_size
                 memcpy(g, &tmpl, gsz);            /* <-- template memcpy */
                 g->owner = &runloom_hubs[hub].sched;
                 g->id    = goid_base + (long long)i;
-                g->c_arg = (void *)(intptr_t)i;   /* go_n index (read iff pass_index) */
+                g->c_arg = (void *)(intptr_t)i;   /* fiber_n index (read iff pass_index) */
                 g->next  = NULL;
                 if (tails[hub] != NULL) tails[hub]->next = g; else heads[hub] = g;
                 tails[hub] = g;
@@ -856,7 +856,7 @@ static int runloom_mn_has_wakeable_work(void)
         /* Mid-resume: the hub is running a fiber right now. */
         if (__atomic_load_n(&h->resume_start_ns, __ATOMIC_RELAXED) != 0) return 1;
         /* Runnable work queued on this hub: ready ring / steal deque / the
-         * mn_go + wake_g submission list. */
+         * mn_fiber + wake_g submission list. */
         if (!runloom_sched_ready_empty(&h->sched))                  return 1;
         if (runloom_cldeque_size(&h->deque) != 0)                   return 1;
         /* Lock-free ACQUIRE read of the submission list head, paired with RELEASE
@@ -969,7 +969,7 @@ Py_ssize_t runloom_mn_run(void)
      * 64-bit POSIX).  Using plain long would truncate on Windows. */
     Py_ssize_t total_completed = 0;
     PyThreadState *saved;
-    /* Controlled-replay: all pre-run mn_go placement is done; release the hubs'
+    /* Controlled-replay: all pre-run mn_fiber placement is done; release the hubs'
      * startup gate so their first census is over the complete requester set. */
     runloom_mn_ctrl_arm();
     saved = PyEval_SaveThread();

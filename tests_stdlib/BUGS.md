@@ -43,7 +43,7 @@ single stack bug (BUG-001) got smeared into ~10 fake "distinct" clusters
 (`test_pulldom` etc. are **PASS at 8 MB** — the scary lines were verbose test
 *docstrings* + harmless `[RUNLOOM_SYSMON] … 0 stranded` noise). A full 689-module
 re-sweep at an 8 MB per-spawn stack (`sweep_mn.py --stack 8388608`, which uses
-`mn_go(stack_size)`) is the honest baseline:
+`mn_fiber(stack_size)`) is the honest baseline:
 
 | | 32 KB baseline | **8 MB re-sweep** |
 |---|---:|---:|
@@ -59,7 +59,7 @@ policy/design call (⏸ discuss), or is environment (▫ not a bug):
 
 | ⏸/▫ | cluster | modules | read |
 |---|---|---|---|
-| ⏸ | **BUG-001 — goroutine stack policy** | (290 modules) | THE one decision. Default M:N g-stack (32 KB) vs CPython's 8 MB C-stack assumption. Resolvable per-spawn (`mn_go(stack_size)` / aio `_IO_STACK`) with zero runtime change; the *default UX* (raise default? auto-warmup? clean RecursionError at the guard? tune grow-on-fault?) is the deferred call. |
+| ⏸ | **BUG-001 — goroutine stack policy** | (290 modules) | THE one decision. Default M:N g-stack (32 KB) vs CPython's 8 MB C-stack assumption. Resolvable per-spawn (`mn_fiber(stack_size)` / aio `_IO_STACK`) with zero runtime change; the *default UX* (raise default? auto-warmup? clean RecursionError at the guard? tune grow-on-fault?) is the deferred call. |
 | ⏸ | **signal / KeyboardInterrupt** (1 root cause) | `test_signal`, `test_unittest.test_break`, `test_generators`, `test_multiprocessing_fork`, `test_multiprocessing_forkserver` — all crash ending in `KeyboardInterrupt` | tests self-`SIGINT`; SIGINT→KeyboardInterrupt delivery through a **bare (unpatched) M:N goroutine**. Verify against the documented signal invariant; partly *expected* for self-interrupting tests. NOT five bugs. |
 | ▫ | **`test_threading` → SIGABRT** → **[BUG-003]** | `run_in_subinterp` | ROOT-CAUSED: `Py_EndInterpreter: not the last thread` — **sub-interpreters**, not a bug. Reclassified to unsupported-config; recommend a fail-loud guard. |
 | ✅ | **`test_weakref` → SIGSEGV** → **[BUG-002]** | `test_threaded_weak_key_dict_copy` | **FIXED (80b5956).** runloom **preemption** froze a goroutine mid `tp_dealloc` (weakref callback / finalizer, via the BRC cross-thread merge or trashcan) at a GC-safe point → a concurrent `gc.collect()` STW reclaim corrupted the half-destroyed objects (UAF). Fix: defer the preempt/liveness yield while `runloom_tstate_in_destruction(ts)`. Repro 85/85 clean, ext-TSan clean. |
@@ -104,10 +104,10 @@ same), and a lot of perfectly normal stdlib code recurses deeper than that in C.
 - **Minimal repro:**
   ```python
   import runloom_c as rc
-  rc.mn_init(1); rc.mn_go(lambda: __import__("test.test_argparse")); rc.mn_run(); rc.mn_fini()
+  rc.mn_init(1); rc.mn_fiber(lambda: __import__("test.test_argparse")); rc.mn_run(); rc.mn_fini()
   # -> Segmentation fault (exit 139)
   ```
-- **Confirmed it is the stack** (the `go()` 1:1 path accepts a stack arg; `mn_go`
+- **Confirmed it is the stack** (the `go()` 1:1 path accepts a stack arg; `mn_fiber`
   does not):
   ```
   go(import test.test_argparse)            # 128 KB default -> SIGSEGV

@@ -73,7 +73,7 @@ int main(void)
 
     t0 = now_ms();
     for (i = 0; i < NBLOCK; i++) {
-        if (runloom_mn_go_c(blocker_fn, (void *)(long)i) < 0) {
+        if (runloom_mn_fiber_c(blocker_fn, (void *)(long)i) < 0) {
             fprintf(stderr, "go blocker %d\n", i); return 2;
         }
     }

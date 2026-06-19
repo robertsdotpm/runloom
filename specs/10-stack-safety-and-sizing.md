@@ -98,14 +98,14 @@ the true values are in `runloom_sched_datastack.c.inc:521-525`):
 | `RUNLOOM_MAX_STACK_SIZE` (cap) | 8 MB | [datastack.inc:523](../src/runloom_c/runloom_sched_datastack.c.inc#L523) |
 | calibration target / safety | 1000 completions / ×4 | [datastack.inc:524-525](../src/runloom_c/runloom_sched_datastack.c.inc#L524) |
 | raw `runloom_c.Coro()` / `TCPConn` constructor default | 128 KB | [module_coro.inc:37](../src/runloom_c/module_coro.c.inc#L37), [module_tcp.inc:46](../src/runloom_c/module_tcp.c.inc#L46) |
-| `runloom_c.go` (stack_size=-1) / `mn_go` (stack_size=0) | resolve to the 512 KB scheduler default (via `advice_size_for`) | [module_go.inc:56](../src/runloom_c/module_go.c.inc#L56), [mn_sched_init_fini.inc:385](../src/runloom_c/mn_sched_init_fini.c.inc#L385) |
+| `runloom_c.fiber` (stack_size=-1) / `mn_fiber` (stack_size=0) | resolve to the 512 KB scheduler default (via `advice_size_for`) | [module_go.inc:56](../src/runloom_c/module_go.c.inc#L56), [mn_sched_init_fini.inc:385](../src/runloom_c/mn_sched_init_fini.c.inc#L385) |
 | aio task / io fiber (`_TASK_STACK`/`_IO_STACK`) | 512 KB | [aio/_base.py:56](../src/runloom/aio/_base.py#L56) |
 
-So the default a normal `go()`/`mn_go()` fiber gets is **512 KB** (or the
+So the default a normal `go()`/`mn_fiber()` fiber gets is **512 KB** (or the
 grow-down learned size under M:N), *not* 32 KB. The only real 32 KB in the system
 is the CPython module-hint buffer above.
 
-**Precedence (highest wins):** explicit `runloom.go(fn, stack_size=N)` > the opt-in
+**Precedence (highest wins):** explicit `runloom.fiber(fn, stack_size=N)` > the opt-in
 C auto-sizer (if you turned it on) > the default-on grow-down (M:N) > the
 process-wide calibrated default.
 

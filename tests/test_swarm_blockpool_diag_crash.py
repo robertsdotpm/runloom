@@ -1241,7 +1241,7 @@ class TestFaultInjectionResilience:
     def test_spawn_g_fault_once_clean_error(self):
         # RUNLOOM_FAULT_SPAWN_G=once:12 fails the FIRST g allocation with
         # ENOMEM(12).  Under runloom.run that first allocation IS the main fiber
-        # (mn_go(main_fn)), so it must surface a clean MemoryError -- NOT a crash
+        # (mn_fiber(main_fn)), so it must surface a clean MemoryError -- NOT a crash
         # -- and a SUBSEQUENT run() (fault already consumed) must succeed and
         # leave the runtime self-consistent.
         rc2, out = run_child("""

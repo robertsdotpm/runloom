@@ -73,7 +73,7 @@ DEQUE_CAP = 4096
 # L388 (trigger 1/3) -- deque-overflow fallback, exactly-once oracle.
 #
 # mn_init(1): the M:N hub loop runs with a SINGLE hub, so runloom_mn_fiber_core's
-# `hub_idx = counter % hub_count` is always 0 -- EVERY mn_go targets hub 0's
+# `hub_idx = counter % hub_count` is always 0 -- EVERY mn_fiber targets hub 0's
 # sub-list.  The driver g runs ON hub 0; while it spins the spawn loop the hub is
 # busy resuming the driver and CANNOT drain its own sub-list, so all N children
 # pile up FRESH (snap-invalid) in hub 0's sub_head.  Only when the driver finally

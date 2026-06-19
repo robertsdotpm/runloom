@@ -16,7 +16,7 @@
  * runloom_sched.h documents): EVERY byte in [0, offsetof(id)) is zeroed-or-
  * overwritten by the scrub -- no recycled g carries a stale value in the
  * pre-introspection region.  This already produced one real wrong-result bug
- * (a recycled g kept a stale `pass_index` from a prior go_n(indexed=True) and
+ * (a recycled g kept a stale `pass_index` from a prior fiber_n(indexed=True) and
  * mis-called fn(stale_index) instead of fn()).  The contract holds IFF part 2's
  * start (offsetof(arena)) is immediately after the state byte -- i.e. ANY field
  * inserted in the [state, arena) gap leaks: part 1 stops at `state`, part 2

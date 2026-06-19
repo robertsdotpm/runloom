@@ -99,8 +99,8 @@ class _LoopScheduleMixin(object):
                     self.call_exception_handler({"message": "call_soon callback", "exception": e})
         # asyncio's done-callbacks (gather, wait_for) generally don't
         # yield -- they just walk children + set the outer future.
-        # We use go_noyield to skip the per-g snap dance.  If a user
-        # ever passes a callback that DOES yield, go_noyield's
+        # We use fiber_noyield to skip the per-g snap dance.  If a user
+        # ever passes a callback that DOES yield, fiber_noyield's
         # behaviour is undefined; switch back to runloom_c.fiber.
         # Roomier stack: call_soon delivers protocol callbacks (data_received,
         # pipe_data_received, ...) that can run deep C-recursive code (crypto),

@@ -7,7 +7,7 @@ per core) with the GIL off (free-threaded 3.13t).
 
 The only runloom primitives used:
 
-    runloom_c.mn_init / mn_go / mn_run / mn_fini   -- the M:N scheduler
+    runloom_c.mn_init / mn_fiber / mn_run / mn_fini   -- the M:N scheduler
     runloom_c.wait_fd(fd, events, timeout_ms)      -- cooperative readiness
     runloom_c.Chan / select                        -- channels
     runloom.sync.Lock                              -- cooperative mutex

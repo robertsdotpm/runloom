@@ -13,7 +13,7 @@ FAIRNESS under the conditions that break a lock-free work-stealing scheduler:
     deliver every cross-hub wake (a single dropped wake = a hung fiber = a lost
     increment), checked by exact set-equality, not a coarse counter.
   * The sched_yield FAIRNESS BOUND: a g looping sched_yield on a hub whose local
-    queue is momentarily empty must STILL let a later mn_go'd sibling run -- the
+    queue is momentarily empty must STILL let a later mn_fiber'd sibling run -- the
     yield fastpath must not starve a newcomer (a real fairness bug class).
   * MODE INTERACTIONS: sysmon + handoff + preempt + barrier + sweep + world-yield
     all ON AT ONCE under a hostile contention+CPU+blocking workload (every
@@ -142,7 +142,7 @@ def test_mn_fiber_non_callable_raises_typeerror(bad):
 
 @mn
 def test_mn_fiber_negative_stack_size_still_runs_the_fiber():
-    # Empirically mn_go(fn, -1) is accepted (negative stack folds to the hub
+    # Empirically mn_fiber(fn, -1) is accepted (negative stack folds to the hub
     # default).  Assert it actually RUNS the fiber rather than silently dropping
     # it -- a dropped fiber would be a lost-work integrity bug.
     ran = bytearray(1)
@@ -150,7 +150,7 @@ def test_mn_fiber_negative_stack_size_still_runs_the_fiber():
     rc.mn_fiber(lambda: ran.__setitem__(0, 1), -1)
     n = rc.mn_run()
     rc.mn_fini()
-    assert ran[0] == 1, "mn_go with a negative stack_size dropped the fiber"
+    assert ran[0] == 1, "mn_fiber with a negative stack_size dropped the fiber"
     assert n >= 1
 
 
@@ -412,7 +412,7 @@ def test_cross_hub_lock_wake_integrity_no_lost_increment():
 @mn
 def test_sched_yield_fastpath_does_not_starve_later_sibling():
     # A g loops sched_yield with a momentarily-empty local queue on a SINGLE
-    # hub.  A LATER mn_go'd sibling must still get to run -- if the yield
+    # hub.  A LATER mn_fiber'd sibling must still get to run -- if the yield
     # fastpath re-ran the spinner forever without ever draining a newly-admitted
     # g, the latecomer would starve (the fairness bug; a hang here).  Empirically
     # the fastpath has a BOUND: with a LONG spin (>= ~20k yields) the bound trips
@@ -954,7 +954,7 @@ def test_cpu_parallelism_speedup_across_hubs():
                     x += i
                 wg.done()
             for _ in range(NJOBS):
-                runloom.fiber(job)   # dispatch: single-thread go for run(1), mn_go for run(N)
+                runloom.fiber(job)   # dispatch: single-thread go for run(1), mn_fiber for run(N)
             wg.wait()
         return main
 
@@ -975,7 +975,7 @@ def test_cpu_parallelism_speedup_across_hubs():
 
 
 # ==========================================================================
-# 14. FOREIGN-OS-THREAD: mn_go from a raw (non-hub, non-fiber) thread
+# 14. FOREIGN-OS-THREAD: mn_fiber from a raw (non-hub, non-fiber) thread
 # ==========================================================================
 @mn
 def test_mn_fiber_from_foreign_thread_is_rejected_not_crash():
@@ -1004,9 +1004,9 @@ rc.mn_fini()
 sys.stdout.write("FOREIGN_OK errs=%r ran=%d\n" % (errs, ran[0]))
 '''
     p = _run_script(script, timeout=30)
-    _assert_no_crash(p, "mn_go from foreign thread")
+    _assert_no_crash(p, "mn_fiber from foreign thread")
     assert "FOREIGN_OK" in p.stdout, (
-        "mn_go from a foreign OS thread hung or aborted:\n%s\n%s"
+        "mn_fiber from a foreign OS thread hung or aborted:\n%s\n%s"
         % (p.stdout, p.stderr[-1000:]))
 
 
@@ -1125,7 +1125,7 @@ def test_hub_states_consistent_while_gs_park_and_run():
 # ==========================================================================
 # Empirically (probed against the source): RUNLOOM_FAULT_SPAWN_G fires in
 # runloom_g_slab_alloc (the per-g struct alloc) on EVERY spawn path including
-# mn_go/fiber_n; SPAWN_STACK / SPAWN_TSTATE fire only in the SINGLE-THREAD
+# mn_fiber/fiber_n; SPAWN_STACK / SPAWN_TSTATE fire only in the SINGLE-THREAD
 # runloom_spawn_g body (runloom_mn_fiber_core builds its coro directly and never
 # reaches those sites).  So under M:N, SPAWN_G is the spawn fault that matters,
 # and the contract is: a mid-spawn alloc failure surfaces as a clean Python

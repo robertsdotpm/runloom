@@ -71,7 +71,7 @@ Representative mechanisms:
 ### 1. Goroutine-context detection (`_in_fiber`)
 
 `runloom_c` doesn't expose a "current fiber" accessor cheaply, so `monkey`
-wraps `runloom_c.go`/`mn_go` to bump a **thread-local counter** for the duration of
+wraps `runloom_c.fiber`/`mn_fiber` to bump a **thread-local counter** for the duration of
 each user callable; `_in_fiber()` is `count > 0` (plus the Python-scheduler's
 `runloom.current()`). Every cooperative patch branches on this: in a fiber →
 park cooperatively; outside one → fall back to real blocking. This is why the same
@@ -136,7 +136,7 @@ cooperative sockets removes the most common reason to need the offload pool.
 - **Patch early** — a library that does `from socket import socket` and caches the
   class at import time keeps the original if you patch after; patch-then-import.
 - **`threading.Thread` is NOT replaced** — turning it into a fiber would break
-  too many assumptions; use `runloom.go`.
+  too many assumptions; use `runloom.fiber`.
 - **Buffered file `.read()/.write()` can't be patched** — `io.FileIO`/`io.Buffered*`
   are immutable C types; use `os.read`/`os.write` on the raw fd, or `offload()`.
 - **`mp` *fork* start-method deadlocks** (inherits runloom's threads) — use

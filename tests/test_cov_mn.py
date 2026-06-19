@@ -90,7 +90,7 @@ def test_mn_varied_hub_counts(hubs):
             finally:
                 wg.done()
         for _ in range(N):
-            runloom.fiber(w)        # dispatches: single-thread go for run(1), mn_go for run(N>1)
+            runloom.fiber(w)        # dispatches: single-thread go for run(1), mn_fiber for run(N>1)
         wg.wait()
     with hang_guard(40, "mn hubs=%d" % hubs):
         runloom.run(hubs, main)

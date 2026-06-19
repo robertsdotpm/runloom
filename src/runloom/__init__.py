@@ -5,14 +5,14 @@ Everyday API -- `import runloom` is all you need:
     runloom.run(n, main_fn)       THE entry point. run main_fn with n hubs:
                                   n=1 single-thread, n>1 M:N parallel across n
                                   cores (needs 3.13t + GIL off; n>1 on a GIL
-                                  build raises).  Collapses mn_init/mn_go/
+                                  build raises).  Collapses mn_init/mn_fiber/
                                   mn_run/mn_fini.  main_fn optional -> drain only.
     runloom.sleep(seconds)        sleep without blocking the OS thread
     runloom.yield_now()           cooperative yield (give other fibers a turn)
     runloom.Chan(capacity=0)      Go-style channel
     runloom.select(cases, ...)    wait on multiple channel ops
     runloom.blocking(fn, ...)     offload a blocking/CPU call off the hub
-    runloom.mn_init/mn_go/mn_run/mn_fini   raw M:N scheduler (run() wraps these)
+    runloom.mn_init/mn_fiber/mn_run/mn_fini   raw M:N scheduler (run() wraps these)
     runloom.backend() / .netpoll_backend()
 
 Feature packages (import as needed, Go-style):
@@ -23,7 +23,7 @@ Feature packages (import as needed, Go-style):
     runloom.aio     -- run async/await code on the scheduler
 
 The raw C extension stays importable as `runloom_c` for advanced use
-(TCPConn, wait_fd, warmup, raw Coro/G handles, go_noyield, ...).
+(TCPConn, wait_fd, warmup, raw Coro/G handles, fiber_noyield, ...).
 """
 # Distribution version, read from the installed package metadata so that
 # pyproject.toml stays the single source of truth.

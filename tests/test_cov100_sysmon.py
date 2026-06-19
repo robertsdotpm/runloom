@@ -17,7 +17,7 @@ The uncovered lines in this fragment fall into three groups:
       The normal corpus never builds this exact state, so the function is dark.
 
       To drive it we run, in a clean subprocess with RUNLOOM_HANDOFF=1:
-        * many FRESH fibers queued via mn_go (they pile into the per-hub deques),
+        * many FRESH fibers queued via mn_fiber (they pile into the per-hub deques),
           in three flavors so the rescue's three post-resume branches all fire:
             flavor 0: run straight to completion
                       -> coro_done branch              (L377-L383)

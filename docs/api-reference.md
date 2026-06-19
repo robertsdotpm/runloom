@@ -6,7 +6,7 @@ your way around.
 
 ## `runloom_c` (C extension)
 
-The low-level scheduler API.  Most user code calls `runloom.go` and
+The low-level scheduler API.  Most user code calls `runloom.fiber` and
 `runloom.run`; everything else is for advanced use.
 
 ### Scheduler control
@@ -20,7 +20,7 @@ Spawn a fiber running `fn`.  Returns a [`G`](#g) handle.
 - `stack_size` -- optional per-call override (bytes).  Bypasses the
   scheduler's calibrated default.  See [stack sizing](stack-sizing.md).
 
-#### `go_noyield(fn) → G`
+#### `fiber_noyield(fn) → G`
 
 Like `go(fn)` but with a contract: `fn` promises not to yield, sleep,
 park, or do monkey-patched I/O.  The scheduler skips per-g datastack
@@ -155,7 +155,7 @@ True if the kernel supports io_uring (Linux 5.1+).
 See [Parallelism](parallelism.md).
 
 - `mn_init(n=0)` -- start `n` hub threads (defaults to `cpu_count`).
-- `mn_go(fn) → G` -- spawn on a round-robin hub.
+- `mn_fiber(fn) → G` -- spawn on a round-robin hub.
 - `mn_run() → int` -- wait for all hubs to drain.
 - `mn_fini()` -- tear down the pool.
 
@@ -341,7 +341,7 @@ runloom.run(n, main_fn=None)  # THE entry point. run main_fn with n hubs:
                           #   n=1 single-thread, n>1 M:N parallel across n
                           #   cores (needs 3.13t + GIL off; n>1 under the GIL
                           #   raises).  main_fn optional -> drain-only.
-                          #   Collapses mn_init/mn_go/mn_run/mn_fini.
+                          #   Collapses mn_init/mn_fiber/mn_run/mn_fini.
 runloom.current() → Goroutine
 runloom.backend() → str
 ```

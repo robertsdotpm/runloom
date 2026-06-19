@@ -6,7 +6,7 @@ from .locks import CoLock, CoRLock, _real_BoundedSemaphore, _real_Condition, _re
 
 def _spawn(fn):
     """Spawn a helper fiber (a wait-timeout waker) on whichever scheduler
-    is active: mn_go under M:N (mn_hub_count() > 0), else the single-thread
+    is active: mn_fiber under M:N (mn_hub_count() > 0), else the single-thread
     go.  A waker spawned via the single-thread fiber() never runs under mn_run,
     so the timeout would never fire -> a timed wait hangs until notified."""
     if runloom_c.mn_hub_count() > 0:

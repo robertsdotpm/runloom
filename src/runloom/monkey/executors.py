@@ -5,7 +5,7 @@ from . import osio  # _orig_os_read/_orig_os_write are rebound at patch-time -> 
 
 
 def _spawn(fn):
-    """Spawn the worker fiber on whichever scheduler is active: mn_go under
+    """Spawn the worker fiber on whichever scheduler is active: mn_fiber under
     M:N (mn_hub_count() > 0), else the single-thread go.  A task spawned via the
     single-thread fiber() never runs under mn_run, so future.result() would hang."""
     if runloom_c.mn_hub_count() > 0:

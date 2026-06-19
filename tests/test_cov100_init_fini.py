@@ -231,7 +231,7 @@ def test_mn_fiber_core_coro_alloc_failure_releases_admission():
     mn_fiber_core runs its cleanup (Py_DECREF callable, PyErr_NoMemory, release the
     admission slot, slab_free, errno=ENOMEM, return -1).  With set_max_fibers
     active the admission slot was COUNTED (limit_counted==1), so the cleanup MUST
-    decrement live_fibers back -- we assert that (L485-487) and that mn_go raised
+    decrement live_fibers back -- we assert that (L485-487) and that mn_fiber raised
     MemoryError (L483)."""
     body = """
         import resource

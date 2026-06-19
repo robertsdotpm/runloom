@@ -238,7 +238,7 @@ static RUNLOOM_TLS int    runloom_tls_stack_pool_n = 0;
 
 /* Shared global stack depot (magazine model).  The TLS pool above is a
  * lock-free per-thread cache for the common balanced case; but under an
- * acceptor->worker fan-out (one fiber mn_go's many handlers that complete
+ * acceptor->worker fan-out (one fiber mn_fiber's many handlers that complete
  * across all hubs) stacks drain out of the acceptor thread's cache and pile
  * into the worker threads' caches, which the acceptor can never reach -- so the
  * acceptor re-mmaps forever and the worker caches grow without bound.  When a

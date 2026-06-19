@@ -2,7 +2,7 @@
 
 With the GIL off, `run(n, main_fn)` spreads fibers across n hub threads —
 one per core — for genuine multi-core parallelism.  The whole
-mn_init / mn_go / mn_run / mn_fini envelope collapses into that single call;
+mn_init / mn_fiber / mn_run / mn_fini envelope collapses into that single call;
 inside it, `runloom.fiber()` lands each fiber on a hub automatically.  Here we
 fan out CPU-bound SHA-256 work (which releases the GIL while it hashes) and run
 it across every core, so the speedup over a single thread is near-linear.
@@ -39,7 +39,7 @@ def spawn_all():
 
 def time_run(n_hubs):
     start = time.perf_counter()
-    runloom.run(n_hubs, spawn_all)   # collapses mn_init/mn_go/mn_run/mn_fini
+    runloom.run(n_hubs, spawn_all)   # collapses mn_init/mn_fiber/mn_run/mn_fini
     return time.perf_counter() - start
 
 def main():

@@ -18,8 +18,8 @@ The adversarial mandate (CRASH / HANG / UAF / REORDER / WRONG-DATA / SLOW-RETURN
   * a deep C-recursion guard-page OVERFLOW on a single-thread fiber AND on an
     M:N hub -- run in a subprocess, assert the crash handler CLASSIFIES it as a
     clean guard-page trap, not silent corruption;
-  * pinned tiny / zero / negative / huge stack sizes through Coro, go, mn_go --
-    negative must RAISE (Coro) or be ignored (go/mn_go clamp), never crash;
+  * pinned tiny / zero / negative / huge stack sizes through Coro, go, mn_fiber --
+    negative must RAISE (Coro) or be ignored (go/mn_fiber clamp), never crash;
   * autosize learning across alternating deep/shallow workloads;
   * the cross-hub depot under burst prewarm + a concurrent spawn storm +
     prewarm_keep daemon start/stop churn;
@@ -276,7 +276,7 @@ def test_fiber_huge_stack_clamps_and_runs():
 
 @pytest.mark.skipif(not FT, reason="M:N needs GIL-disabled build")
 def test_mn_fiber_stack_arg_edges():
-    # mn_go honours stack_size>0 and ignores non-positive (uses default) -- all
+    # mn_fiber honours stack_size>0 and ignores non-positive (uses default) -- all
     # must run under mn_run() without crashing or hanging.  (The HUGE-size case
     # is split out below -- it does NOT clamp like the single-thread path: see
     # the xfail finding.)
@@ -288,13 +288,13 @@ def test_mn_fiber_stack_arg_edges():
         rc.mn_fiber(lambda: done.__setitem__(2, 1), 65536)      # tiny pinned
         for _ in range(20):
             rc.sched_yield()
-    with hang_guard(20, "mn_go stack edges"):
+    with hang_guard(20, "mn_fiber stack edges"):
         runloom.run(2, main)
-    assert sum(done) == 3, "only %d/3 mn_go stack-edge fibers ran" % sum(done)
+    assert sum(done) == 3, "only %d/3 mn_fiber stack-edge fibers ran" % sum(done)
 
 
 @pytest.mark.skipif(not FT, reason="M:N needs GIL-disabled build")
-# REGRESSION (was finding #15): mn_go(fn, huge) now clamps an explicit
+# REGRESSION (was finding #15): mn_fiber(fn, huge) now clamps an explicit
 # stack_size to [MIN, MAX] (8 MiB) in runloom_mn_fiber_core, exactly like the
 # single-thread fiber() path (runloom_sched_spawn_sized) -- so a wild size
 # clamps-and-runs instead of failing runloom_coro_new's mmap with MemoryError.
@@ -315,12 +315,12 @@ def test_mn_fiber_huge_stack_should_clamp_like_single_thread():
         for _ in range(20):
             rc.sched_yield()
     try:
-        with hang_guard(20, "mn_go huge clamp"):
+        with hang_guard(20, "mn_fiber huge clamp"):
             runloom.run(2, main)
     finally:
         sys.unraisablehook = old_hook
     # CORRECT behaviour (currently failing): the huge size is clamped and runs.
-    assert box.get("r") == 1, "mn_go(huge) did not clamp-and-run (raised instead)"
+    assert box.get("r") == 1, "mn_fiber(huge) did not clamp-and-run (raised instead)"
 
 
 # ==========================================================================

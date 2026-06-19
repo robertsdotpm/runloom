@@ -42,7 +42,7 @@ typedef struct runloom_pystate_snap runloom_pystate_snap_t;
 #define RUNLOOM_WS_SWEEPING       4
 #define RUNLOOM_WS_SWEEPING_WOKEN 5
 
-/* Per-fiber stack bounds for an EXPLICIT size override (go/mn_go(fn, n)): the
+/* Per-fiber stack bounds for an EXPLICIT size override (go/mn_fiber(fn, n)): the
  * caller's size wins over the autosizer but is still clamped to [MIN, MAX].  A
  * wild size would otherwise fail the mmap with MemoryError on the M:N spawn
  * path instead of clamping the way the single-thread path does.  Shared here so

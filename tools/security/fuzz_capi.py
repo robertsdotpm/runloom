@@ -76,7 +76,7 @@ HOSTILE = [
 SWEEP_NAMES = [
     "wait_fd", "cancel_wait_fd", "netpoll_unregister", "netpoll_release_if_idle",
     "set_max_goroutines", "get_max_goroutines", "goroutine_stack", "mn_hub_states",
-    "mn_init", "mn_go", "go", "go_noyield", "run_ready", "dump_goroutines",
+    "mn_init", "mn_fiber", "go", "fiber_noyield", "run_ready", "dump_goroutines",
     "goroutines", "live_goroutines", "goroutine_count", "cancel_all_parked",
     "netpoll_backend", "prewarm",
 ]

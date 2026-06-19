@@ -6,7 +6,7 @@ echo handlers, N clients, all on the M:N scheduler), but every goroutine
 runs a real Python `def` instead of a C function.  That matters for one
 reason: a goroutine only allocates a CPython `_PyStackChunk` (the 4 KB
 datastack chunk) once it executes Python *bytecode*.  The pure-C bench
-(runloom_mn_go_c) never does, so it allocates zero chunks and can't measure
+(runloom_mn_fiber_c) never does, so it allocates zero chunks and can't measure
 the datastack RSS that T2.3 targets.  This bench does, and -- because a
 handler parks inside wait_fd while a live Python frame sits on its chunk
 -- it models the N=1M steady state ("95% parked, each holding a chunk").
@@ -54,7 +54,7 @@ M = 5
 N = 1024
 listen_sock = None
 
-# Per-goroutine accounting.  mn_go is fire-and-forget (returns None), and
+# Per-goroutine accounting.  mn_fiber is fire-and-forget (returns None), and
 # a shared counter would race under 3.13t free-threading.  Instead each
 # client owns a distinct slot in a preallocated list and writes its slot
 # only -- distinct-index stores + Bool singletons need no lock.

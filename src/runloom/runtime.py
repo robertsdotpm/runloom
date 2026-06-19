@@ -251,12 +251,12 @@ def fiber(callable_, *args, **kwargs):
     Dispatches on the active scheduler so the same call works in both modes:
       - single-thread (run(1, ...)): spawns on this thread's scheduler and
         returns a Goroutine handle.
-      - M:N (run(n > 1, ...)): spawns onto a hub via mn_go.  M:N v1 is
+      - M:N (run(n > 1, ...)): spawns onto a hub via mn_fiber.  M:N v1 is
         run-to-completion with no join handle, so this returns None.
 
     The dispatch uses runloom_c.mn_hub_count() rather than a mode flag, so a
     fiber() called from anywhere -- inside a hub fiber or from the main
-    thread while hubs run -- routes correctly (mn_go round-robins a non-hub
+    thread while hubs run -- routes correctly (mn_fiber round-robins a non-hub
     caller).  Spawning via the plain scheduler inside a hub would skip the
     M:N pending-counter accounting that mn_run() joins on, so this dispatch
     is required for correctness, not just convenience.
@@ -374,7 +374,7 @@ def run(n, main_fn=None):
     execute Python in parallel, so shared state can race), opted into by typing
     the number -- never by accident or by which interpreter is free-threaded.
     main_fn, when given, is the root fiber and may fiber() more (those dispatch
-    to the hubs automatically).  Collapses the raw mn_init / mn_go / mn_run /
+    to the hubs automatically).  Collapses the raw mn_init / mn_fiber / mn_run /
     mn_fini envelope.  Returns the number of fibers completed.
     """
     if isinstance(n, bool) or not isinstance(n, int) or n < 1:

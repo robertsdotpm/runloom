@@ -81,7 +81,7 @@ def _run_single(fn, guard=10.0, label="single"):
 
 
 def _run_mn(main, n=2, guard=15.0, label="mn"):
-    """Drive main() under run(n) (M:N).  main MUST spawn children via mn_go /
+    """Drive main() under run(n) (M:N).  main MUST spawn children via mn_fiber /
     runloom.fiber, never rc.fiber."""
     with hang_guard(guard, label):
         runloom.run(n, main)
@@ -866,7 +866,7 @@ def test_grow_down_toggle_roundtrips():
 
 # ==========================================================================
 # M:N -- timers / contexts / runtime under run(n>=2) with slow-return guards.
-# The time/context _spawn() routes through mn_go when mn_hub_count()>0, so
+# The time/context _spawn() routes through mn_fiber when mn_hub_count()>0, so
 # these exercise the cross-hub timer-fiber path the single-thread tests can't.
 # ==========================================================================
 @pytest.mark.skipif(not needs_free_threading(),
@@ -934,7 +934,7 @@ def test_context_cascade_broadcast_under_mn():
             woke.append(i)
 
         for i in range(N):
-            runloom.fiber(lambda i=i: waiter(i))   # mn_go under M:N
+            runloom.fiber(lambda i=i: waiter(i))   # mn_fiber under M:N
         runloom.sleep(0.02)            # let all park
         root_cancel()                  # cancel the ROOT -> cascades to child
 
@@ -1589,7 +1589,7 @@ def test_concurrent_cancel_same_ctx_under_mn_no_crash():
             callers.append(1)
 
         for _ in range(32):
-            runloom.fiber(racer)            # mn_go: spread across hubs
+            runloom.fiber(racer)            # mn_fiber: spread across hubs
         runloom.sleep(0.05)
         box["err"] = ctx.err()
         box["closed"] = ctx.done.closed

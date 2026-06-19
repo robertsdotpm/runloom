@@ -44,7 +44,7 @@ struct runloom_iouring_ring *runloom_mn_current_iouring_ring(void)
 
 /* Push g onto a hub's submission list.  Called by netpoll pump to
  * route an I/O-woken g back to whichever hub it was running on.
- * (Also used internally by mn_go.)  Hub_main drains submissions every
+ * (Also used internally by mn_fiber.)  Hub_main drains submissions every
  * iteration and routes each entry to either the deque (if g is fresh)
  * or the local FIFO (if g has saved state -- the netpoll-wake case).
  *
@@ -343,11 +343,11 @@ int runloom_mn_yield_current(void)
                          && runloom_netpoll_parked_count() == 0
                          && runloom_blockpool_inflight() == 0, 1)) {
         /* The fast path deliberately does NOT look at h->sub_head -- work
-         * delivered by mn_go (main thread) or wake_g (another hub) lands there,
+         * delivered by mn_fiber (main thread) or wake_g (another hub) lands there,
          * and checking it lock-free on this hot path is fragile.  But that
          * means a g looping on sched_yield with momentarily-empty local queues
          * would spin forever and NEVER return to hub_main to drain sub_head, so
-         * a fiber later mn_go'd / woken onto this hub starves (the multi-hub
+         * a fiber later mn_fiber'd / woken onto this hub starves (the multi-hub
          * sched_yield-fairness bug).  Bound it: after RUNLOOM_YIELD_FASTPATH_BOUND
          * consecutive trivial fast-paths, fall through to a real yield so
          * hub_main drains sub_head (under sub_lock, as always) + re-polls. */

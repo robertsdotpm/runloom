@@ -14,7 +14,7 @@
  * Lifts the ~200 concurrent yielded fiber cliff.
  *
  * The Python side talks to us through a tiny Python type defined in
- * module.c (RunloomG).  The user-visible API is `runloom.go / yield_ /
+ * module.c (RunloomG).  The user-visible API is `runloom.fiber / yield_ /
  * sleep / run`.
  */
 

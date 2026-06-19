@@ -603,7 +603,7 @@ class Harness(object):
             return
         if self._use_gon and self.hubs < 8:
             sys.stderr.write(
-                "[{0}] go_n fast spawn DISABLED: needs hubs>=8, have {1}; "
+                "[{0}] fiber_n fast spawn DISABLED: needs hubs>=8, have {1}; "
                 "using per-g spawn\n".format(self.name, self.hubs))
             sys.stderr.flush()
 
@@ -730,7 +730,7 @@ class Harness(object):
         # Diagnostic (RUNLOOM_DUMP_STATES=path): write the goroutine state
         # histogram RIGHT NOW -- at the deadline, before we close anything --
         # so we can see WHERE goroutines are parked (connect / recv / sleep /
-        # accept).  Cheap structural dump, no Python.  CAVEAT: go_n bulk-arena
+        # accept).  Cheap structural dump, no Python.  CAVEAT: fiber_n bulk-arena
         # workers skip the introspection registry (the hot spawn path takes no
         # greg lock), so this shows only H.fiber()-spawned goroutines (servers,
         # handlers, accept loops) -- not the bulk client pool.

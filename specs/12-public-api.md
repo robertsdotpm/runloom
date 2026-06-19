@@ -18,7 +18,7 @@ Five functions carry almost all usage:
 - **`go(callable, *args, stack_size=0, **kwargs)`** — spawn a fiber. The
   dispatch is the interesting part: it reads `runloom_c.mn_hub_count()` (not a mode
   flag) so the *same* `go()` works from anywhere — inside a hub fiber or from
-  the main thread while hubs run. If hubs exist (`mn > 0`) it routes via `mn_go`
+  the main thread while hubs run. If hubs exist (`mn > 0`) it routes via `mn_fiber`
   (round-robins a non-hub caller) and returns `None` (M:N v1 is run-to-completion,
   no join handle); else it spawns on this thread's scheduler and returns a
   `Goroutine` handle. **Spawning via the plain scheduler inside a hub would skip
@@ -36,7 +36,7 @@ Five functions carry almost all usage:
   parallel, so shared state can race) — you opt in by typing the number, never by
   accident. `n=1` is single-thread (cooperative, GIL-OK); `n>1` is M:N and
   **raises on a GIL build** rather than silently running serial. It collapses the
-  raw `mn_init`/`mn_go`/`mn_run`/`mn_fini` envelope and `prewarm`s the stdlib
+  raw `mn_init`/`mn_fiber`/`mn_run`/`mn_fini` envelope and `prewarm`s the stdlib
   first.
 - **`sleep(seconds)`** — cooperative; falls back to `time.sleep` outside a
   fiber (so the same name works in either context).
@@ -87,7 +87,7 @@ wake and bails if a `Reset` superseded it (no way to cancel an in-flight
 `sched_sleep`, so you invalidate it instead). `try_send` on a buffer-1 channel
 naturally drops backlog if the consumer is slow (matches Go's Ticker).
 
-`_spawn` routes through `mn_go` when `mn_hub_count() > 0`, else `go` — so timers
+`_spawn` routes through `mn_fiber` when `mn_hub_count() > 0`, else `go` — so timers
 fire under the M:N scheduler too (a recurring pattern: anything that spawns a
 helper fiber must check the hub count, or it hangs under `mn_run`).
 
@@ -109,7 +109,7 @@ parent deadline). Error sentinels are plain strings (`"cancelled"` /
 be mixed in one process. The reason all three exist: they meet code where it is.
 New Go-style code wants `sync` (no coloring). Existing `async def` code wants `aio`
 (spec 13). Existing blocking code using `requests`/`pymysql` wants `monkey` (spec
-14). None of them is a different runtime — they all bottom out in `runloom_c.go` /
+14). None of them is a different runtime — they all bottom out in `runloom_c.fiber` /
 `runloom_c.run` and the C scheduler.
 
 ## Invariants

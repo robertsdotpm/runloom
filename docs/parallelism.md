@@ -33,7 +33,7 @@ import runloom
 runloom.mn_init(n=8)         # start 8 hub threads
                                 # n defaults to cpu_count() if omitted
 
-runloom.mn_go(fn)            # spawn a fiber on a round-robin hub
+runloom.mn_fiber(fn)            # spawn a fiber on a round-robin hub
                                 # returns a G handle
 
 runloom.mn_run()             # wait for everyone; returns total completed
@@ -60,7 +60,7 @@ def hash_loop():
 runloom.mn_init(n=8)
 t0 = time.time()
 for _ in range(N):
-    runloom.mn_go(hash_loop)
+    runloom.mn_fiber(hash_loop)
 runloom.mn_run()
 print("8 hubs:", time.time() - t0, "s")
 runloom.mn_fini()
@@ -87,7 +87,7 @@ Each hub thread:
 - Pushes new fibers locally; other hubs **steal** from the
   bottom when their own deque is empty.
 - Has a per-hub MPSC submission queue for external producers
-  (so `mn_go` from outside any hub doesn't race the deque owner).
+  (so `mn_fiber` from outside any hub doesn't race the deque owner).
 - Routes fibers back to the originating hub on yield/sleep/I/O
   wake -- this preserves locality (the fiber's per-thread cache
   warms one hub, not all of them).
@@ -95,7 +95,7 @@ Each hub thread:
 When a hub has no work and no other hub does either, the hub
 blocks on a condition variable.  Wakes happen when:
 
-- New `mn_go` lands work in the submission queue.
+- New `mn_fiber` lands work in the submission queue.
 - A wait_fd / sleep / channel op completes.
 - Another hub completes a steal that gives them headroom.
 
@@ -122,8 +122,8 @@ def consumer():
         total += v
     print("consumed:", total)
 
-runloom.mn_go(producer)
-runloom.mn_go(consumer)
+runloom.mn_fiber(producer)
+runloom.mn_fiber(consumer)
 runloom.mn_run()
 runloom.mn_fini()
 ```
@@ -157,9 +157,9 @@ def accept_loop():
     srv.listen(128)
     while True:
         conn, _ = srv.accept()
-        runloom.mn_go(lambda c=conn: handle(c))
+        runloom.mn_fiber(lambda c=conn: handle(c))
 
-runloom.mn_go(accept_loop)
+runloom.mn_fiber(accept_loop)
 runloom.mn_run()
 runloom.mn_fini()
 ```
@@ -169,7 +169,7 @@ by four different hub threads simultaneously (subject to scheduling).
 
 ## Performance characteristics
 
-- **Spawn**: `mn_go` is ~250 ns on 3.13t -- submission to the per-hub
+- **Spawn**: `mn_fiber` is ~250 ns on 3.13t -- submission to the per-hub
   MPSC queue + work-steal-eligible push.  Comparable to single-thread
   `go`.
 - **Yield**: per-hub yield is the same ~80 ns swap.  No cross-thread

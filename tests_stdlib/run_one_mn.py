@@ -11,7 +11,7 @@ the native suite, lifted to the vendored stdlib corpus.
 What "port to run in a goroutine with N:M on" means here:
   * we do NOT monkey-patch the stdlib (threading/asyncio/socket stay native);
   * we spin up ``hubs`` OS-thread hubs with mn_init(),
-  * load + run the module's unittest suite *inside* a goroutine via mn_go(),
+  * load + run the module's unittest suite *inside* a goroutine via mn_fiber(),
   * and let the M:N scheduler drive it to completion with mn_run().
 So the stackful-coroutine engine and the work-stealing M:N scheduler are
 exercised against real, diverse Python workloads -- the bug-hunting surface.
@@ -71,8 +71,8 @@ def main():
 
     # RUNLOOM_MN_STACK (bytes) overrides the default 128 KB goroutine stack.
     # RUNLOOM_RUN_MODE selects the scheduler:
-    #   "mn" (default) -> mn_init/mn_go/mn_run on `hubs` hubs (the real target);
-    #   "go"           -> the 1:1 scheduler go()/run(), which (unlike mn_go)
+    #   "mn" (default) -> mn_init/mn_fiber/mn_run on `hubs` hubs (the real target);
+    #   "go"           -> the 1:1 scheduler go()/run(), which (unlike mn_fiber)
     #                     accepts a stack_size, used as a STACK-ISOLATION control
     #                     to measure how many crashes are pure C-stack overflow.
     stack = int(os.environ.get("RUNLOOM_MN_STACK", "0"))

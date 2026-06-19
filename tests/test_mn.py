@@ -5,7 +5,7 @@ runloom's channels, select, sleep, and work-stealing all behave differently
 once fibers are spread across N OS-thread hubs on free-threaded
 CPython -- that is where cross-hub channel handoff, work-stealing, and
 the per-g wake machinery actually run in parallel.  None of the other
-test modules call mn_init/mn_go/mn_run, so this fills that gap.
+test modules call mn_init/mn_fiber/mn_run, so this fills that gap.
 
 Each test runs its workload in a FRESH SUBPROCESS, for two reasons:
   1. mn_init/mn_fini install process-global hub threads; a clean process

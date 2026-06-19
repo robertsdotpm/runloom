@@ -116,7 +116,7 @@ launch want_bug chunk_pool_alias_cbmc.c "-DBUG_NO_ROOT_SKIP" "install starts at 
 launch want_ok  fiber_admit_cbmc.c ""
 launch want_bug fiber_admit_cbmc.c "-DBUG_NO_BACKOUT"     "over-limit admit doesn't back out -> live_g leaks (cap ratchets down)"
 launch want_bug fiber_admit_cbmc.c "-DBUG_DOUBLE_RELEASE" "release ignores limit_counted -> an uncounted fiber underflows the slot"
-launch want_bug fiber_admit_cbmc.c "-DBUG_BULK_COUNTED"   "a bulk go_n fiber wrongly counted -> phantom release / underflow"
+launch want_bug fiber_admit_cbmc.c "-DBUG_BULK_COUNTED"   "a bulk fiber_n fiber wrongly counted -> phantom release / underflow"
 
 # channel PyObject ref conservation: a sent value takes one Py_INCREF and is
 # released exactly once -- recv-consume / close-drop (parked sender) / free-drain

@@ -20,7 +20,7 @@ def crawl(url):
 
 def main():
     for _ in range(64):
-        runloom.go(crawl, "http://example.com")
+        runloom.fiber(crawl, "http://example.com")
 
 runloom.run(8, main) # 8 hub threads -> real cores on 3.13t (GIL off)
 ```
@@ -397,7 +397,7 @@ Full guide in [docs/](https://github.com/robertsdotpm/runloom/tree/main/docs/) (
 
 [^memory]: A Python `socket` + `bytes` buffers + frame objects all carry
     PyObject headers and are simply fatter than Go structs and `[]byte`. Run the
-    *same* handler in C (`runloom_mn_go_c`, no Python frames) and you're at Go
+    *same* handler in C (`runloom_mn_fiber_c`, no Python frames) and you're at Go
     parity. At scale the kernel's own socket buffers (~8 KB+/socket) dominate in
     any runtime, so a million live connections is ~tens of GB everywhere -- and
     vs ~1 MB-stack OS threads (where a million is impossible), the goroutine

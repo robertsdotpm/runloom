@@ -184,7 +184,7 @@ def main():
     a.setblocking(False)
     hold = {}
     def reader():
-        # mn_go returns None, so the reader records its OWN g handle for the
+        # mn_fiber returns None, so the reader records its OWN g handle for the
         # canceller.  park on the fd via wait_fd (under the io_uring loop this
         # routes through the ring); cancel_wait_fd must wake it CANCELLED, not hang
         hold["g"] = rc.current_g()

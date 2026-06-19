@@ -2,7 +2,7 @@
 
 What of the Python standard library cooperates (parks the fiber) vs blocks
 an OS hub, under `runloom.monkey.patch()` + the M:N scheduler (`mn_init`/
-`mn_go`/`mn_run`, free-threaded 3.13t, GIL off).  Built by scanning CPython
+`mn_fiber`/`mn_run`, free-threaded 3.13t, GIL off).  Built by scanning CPython
 `Lib/` for the leaf blocking primitives and empirically probing each under a
 single-hub canary (a 5 ms ticker fiber: if the op parks the canary keeps
 ticking → COOP; if it blocks the hub the canary freezes → STALL).
@@ -103,7 +103,7 @@ Reproducer (now exits cleanly; SEGV'd before the fix):
 
 ```python
 import select, runloom, runloom_c
-runloom.monkey.patch(); GO = runloom_c.mn_go
+runloom.monkey.patch(); GO = runloom_c.mn_fiber
 def worker():
     select.select([], [], [], 0)       # cooperative epoll path; no 51 KB frame
 runloom.mn_init(2); GO(worker); runloom.mn_run(); runloom.mn_fini()

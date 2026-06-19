@@ -207,7 +207,7 @@ def _patched_runloom_c_mn_fiber(fn, stack_size=0, **kwargs):
 
 
 def _install_fiber_wrapper():
-    """Wrap runloom_c.fiber / mn_go so user callables run with the
+    """Wrap runloom_c.fiber / mn_fiber so user callables run with the
     fiber-context flag set.  Idempotent."""
     global _orig_runloom_c_fiber, _orig_runloom_c_mn_fiber
     if _orig_runloom_c_fiber is None:

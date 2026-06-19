@@ -611,7 +611,7 @@ double runloom_sched_timer_next_deadline(runloom_sched_t *s)
  * tail for huge fiber counts is the per-kind auto-sizer's job (opt-in
  * "grow down"; runloom.inspect.enable_stack_autosize), not calibration's.  A true
  * outlier deeper than 512 KB is a clean guard-page crash + a one-line pin
- * (runloom.go(fn, stack_size=...)), never corruption.
+ * (runloom.fiber(fn, stack_size=...)), never corruption.
  *
  * Reads/writes are plain (single-threaded scheduler in v0); when
  * Phase C arrives these will move under the scheduler lock. */

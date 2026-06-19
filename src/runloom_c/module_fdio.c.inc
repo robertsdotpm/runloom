@@ -233,7 +233,7 @@ static PyObject *m_file_write(PyObject *self, PyObject *args)
 
 /* ---- Fast-path: C scheduler ----
  *
- * runloom_c.go(fn)       -> RunloomG handle.  Schedules fn to run.
+ * runloom_c.fiber(fn)       -> RunloomG handle.  Schedules fn to run.
  * runloom_c.sched_yield() -> None.  Yields current g via the C scheduler.
  * runloom_c.sched_sleep(s) -> None.  Parks current g on the sleep heap.
  * runloom_c.run()        -> int.  Drives the scheduler until idle.

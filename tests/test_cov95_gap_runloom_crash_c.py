@@ -137,7 +137,7 @@ def test_arm_sigaltstack_failure_munmaps_and_returns():
 # L192-195: disarm body, driven DETERMINISTICALLY on a single hub thread.
 #
 # install first (so the hub thread arms), then mn_init(1) -> one OS hub thread
-# -> mn_go workers -> mn_run -> mn_fini joins+exits that single thread ->
+# -> mn_fiber workers -> mn_run -> mn_fini joins+exits that single thread ->
 # runloom_coro_thread_fini -> runloom_crash_thread_disarm: with exactly one arm
 # and one disarm there is no concurrent gcov-counter writer on L192-195.
 # --------------------------------------------------------------------------

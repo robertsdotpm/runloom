@@ -2,7 +2,7 @@
 hub's OS thread, so threading.get_native_id() inside it is ground truth for
 which hub actually ran it (captures any work-steal re-distribution too).
 
-Spawn 2*H*reps goroutines via go_n(indexed=True) -- the same indexed path
+Spawn 2*H*reps goroutines via fiber_n(indexed=True) -- the same indexed path
 run_pool uses under RUNLOOM_HARNESS_GON=1, where py_index == wid -- and check
 whether adjacent (2k, 2k+1) pairs land on the SAME hub thread.
 

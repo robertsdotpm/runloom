@@ -1,6 +1,6 @@
 """Repro: per-thread stack/coro pool imbalance leak (see LEAK_ANALYSIS.md).
 
-One acceptor goroutine mn_go's N short-lived workers per round; the workers run
+One acceptor goroutine mn_fiber's N short-lived workers per round; the workers run
 across all hubs and complete there, draining stacks out of the acceptor hub's
 pool into the worker hubs' pools.  The acceptor re-mmaps every round -> the
 process's mapping count climbs ~2 per worker (guard + stack VMA) and never

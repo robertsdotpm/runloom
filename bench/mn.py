@@ -52,7 +52,7 @@ def make_mn(hubs):
     ~12ms pool spin-up/teardown that would otherwise mask scaling at high
     hub counts.  mn_run is reusable after a single mn_init.
     """
-    mn_init, mn_go, mn_run, mn_fini = (
+    mn_init, mn_fiber, mn_run, mn_fini = (
         runloom_c.mn_init, runloom_c.mn_fiber, runloom_c.mn_run, runloom_c.mn_fini)
 
     def setup():
@@ -60,7 +60,7 @@ def make_mn(hubs):
 
     def once():
         for _ in range(N):
-            mn_go(lambda: work(ITER))
+            mn_fiber(lambda: work(ITER))
         mn_run()
 
     def teardown():

@@ -105,7 +105,7 @@ def _run_single(fn):
 
 
 def _run_mn(fn, n=4):
-    """Run fn() inside a hub fiber under run(n); fn's children must use mn_go."""
+    """Run fn() inside a hub fiber under run(n); fn's children must use mn_fiber."""
     box = {}
     def main():
         box["r"] = fn()

@@ -115,7 +115,7 @@ int runloom_advice_autosize_enabled(void)
 }
 
 /* Follow __wrapped__ to the REAL underlying callable so a fiber's kind (and
- * its prescan scan) is keyed on the user's function, not a wrapper.  runloom.go's
+ * its prescan scan) is keyed on the user's function, not a wrapper.  runloom.fiber's
  * arg-binding lambda sets __wrapped__ to the target, and functools.wraps sets it
  * on decorated functions -- both should attribute to the wrapped function, not
  * the wrapper's code location.  Returns a NEW reference (the input incref'd when

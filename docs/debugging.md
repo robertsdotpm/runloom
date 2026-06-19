@@ -282,7 +282,7 @@ import runloom
 gi.set_max_fibers(100_000)   # 0 = unlimited (default); env RUNLOOM_MAX_GOROUTINES
 ```
 
-Over the cap, `runloom.go` / the spawn raises `RuntimeError`, so the caller can
+Over the cap, `runloom.fiber` / the spawn raises `RuntimeError`, so the caller can
 apply backpressure — retry after a yield, shed the request, or block the
 producer:
 

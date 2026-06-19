@@ -71,7 +71,7 @@ typedef struct {
      * The wall-clock sysmon preempt trigger is the one remaining nondeterministic
      * input to the schedule: it fires a runaway fiber's yield at a *timing*-
      * decided frame boundary, which perturbs the grant order (observable e.g. as
-     * different mn_go spawn-counter interleavings).  In barrier mode we ignore it
+     * different mn_fiber spawn-counter interleavings).  In barrier mode we ignore it
      * and instead preempt after a fixed COUNT of Python frame entries on the
      * baton -- a deterministic function of the fiber's own execution.
      * Cooperative fibers park long before the count, so they never preempt
@@ -519,12 +519,12 @@ static int runloom_mn_ctrl_census_idle(runloom_hub_t *h)
 }
 
 /* Startup rendezvous.  Without it, the main thread places the initial
- * fibers (mn_go) CONCURRENTLY with hubs that are already spinning, so a hub
+ * fibers (mn_fiber) CONCURRENTLY with hubs that are already spinning, so a hub
  * can check in idle for round 1 before its share of the work lands -> the first
  * census completes over a partial requester set and the grant is timing-
  * dependent (the very nondeterminism the barrier exists to remove, but at
  * startup).  Fix: hubs block at loop entry until mn_run arms the controller,
- * which happens AFTER all pre-run mn_go calls return.  Every hub's first drain
+ * which happens AFTER all pre-run mn_fiber calls return.  Every hub's first drain
  * then sees the complete initial work set, so the first requester set -- and
  * thus the first seeded grant -- is a function of the program, not OS timing.
  * Work created later (by a running segment) is published at that segment's
@@ -557,7 +557,7 @@ static void runloom_mn_ctrl_wait_armed(void)
 }
 
 /* True in deterministic-replay mode (controlled + barrier): hub_main then skips
- * cross-hub work-stealing.  mn_go placement is deterministic (spawn_counter %
+ * cross-hub work-stealing.  mn_fiber placement is deterministic (spawn_counter %
  * hub_count) and wake-routing is hub-pinned, so with no steal each hub's
  * execution stream is a fixed function of the schedule -- closing one way an
  * identical grant sequence could still produce different fiber orderings
@@ -679,7 +679,7 @@ static RUNLOOM_TLS int runloom_tls_parked_offqueue = 0;
 /* Consecutive trivial sched_yield fast-paths on THIS hub thread since the last
  * real yield (see runloom_mn_yield_current).  Bounds the fast path so a g looping
  * on sched_yield can't spin forever without returning to hub_main to drain
- * h->sub_head (work mn_go'd / wake_g'd onto this hub after the loop started).
+ * h->sub_head (work mn_fiber'd / wake_g'd onto this hub after the loop started).
  * Per-thread; only the running g touches it; reset on every real yield. */
 static RUNLOOM_TLS int runloom_tls_fastpath_streak = 0;
 /* After this many consecutive trivial fast-paths, force one real yield so

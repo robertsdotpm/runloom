@@ -23,7 +23,7 @@ _dns_result_cache = {}    # (lowername, qtype) -> (addrs, expire_ts)
 
 
 def _spawn(fn):
-    """Spawn a resolver fiber on whichever scheduler is active: mn_go under
+    """Spawn a resolver fiber on whichever scheduler is active: mn_fiber under
     M:N (mn_hub_count() > 0), else the single-thread go.  A runner spawned via
     the single-thread fiber() never runs under mn_run, so the parker.park() in
     _resolve_dual would hang forever (the M:N getaddrinfo deadlock)."""

@@ -1,7 +1,7 @@
 /*
  * fiber_admit_cbmc.c -- CBMC conservation proof for runloom's max-fibers admission
  * gate (runloom_fiber_admit / runloom_fiber_release in runloom_introspect.c, driven
- * by the spawn exit paths in mn_sched_init_fini.c.inc runloom_mn_go_core).
+ * by the spawn exit paths in mn_sched_init_fini.c.inc runloom_mn_fiber_core).
  *
  * FAITHFUL SLICE.  admit() returns 0 (rejected, over the limit -- and BACKS OUT the
  * speculative increment), 1 (admitted, NO limit active -> not counted), or 2
@@ -29,7 +29,7 @@
  *   -DBUG_DOUBLE_RELEASE : the success path releases WITHOUT the limit_counted check
  *                          -> an uncounted (adm==1) fiber releases a slot it never
  *                          took -> live_g underflows.
- *   -DBUG_BULK_COUNTED   : a bulk go_n fiber (never admitted) is marked counted and
+ *   -DBUG_BULK_COUNTED   : a bulk fiber_n fiber (never admitted) is marked counted and
  *                          releases on completion -> a phantom release -> underflow.
  */
 
@@ -68,13 +68,13 @@ static int find_empty(void) {
     return -1;
 }
 
-/* Begin a spawn lifecycle (faithful to runloom_mn_go_core's pre-run exit paths). */
+/* Begin a spawn lifecycle (faithful to runloom_mn_fiber_core's pre-run exit paths). */
 static void start_fiber(void)
 {
     int i = find_empty();
     if (i < 0) return;
 
-    if (nondet_bool()) {                      /* a bulk go_n fiber: NEVER admitted */
+    if (nondet_bool()) {                      /* a bulk fiber_n fiber: NEVER admitted */
         slot[i] = 3;
         return;
     }
@@ -104,7 +104,7 @@ static void finish_slot(int i)
 #ifdef BUG_DOUBLE_RELEASE
         fiber_release();                       /* BUG: releases a slot it never took */
 #endif
-    } else if (slot[i] == 3) {                 /* bulk go_n */
+    } else if (slot[i] == 3) {                 /* bulk fiber_n */
 #ifdef BUG_BULK_COUNTED
         fiber_release();                       /* BUG: arena g wrongly counted */
 #endif

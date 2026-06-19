@@ -639,7 +639,7 @@ def test_sched_stop_leaves_parked_fiber_and_run_returns():
 
 
 # ==========================================================================
-# 8.  go_noyield: the FAST path, and the documented misuse (a yielding body).
+# 8.  fiber_noyield: the FAST path, and the documented misuse (a yielding body).
 #     "Undefined behavior" must at least not silently corrupt / crash here.
 # ==========================================================================
 def test_fiber_noyield_pure_compute_runs():
@@ -650,7 +650,7 @@ def test_fiber_noyield_pure_compute_runs():
 
 
 def test_fiber_noyield_with_yielding_body_does_not_crash_subprocess():
-    # The docstring says behaviour is UNDEFINED if a go_noyield body yields.
+    # The docstring says behaviour is UNDEFINED if a fiber_noyield body yields.
     # Contain it in a subprocess and require: no signal (no SIGSEGV/abort).  A
     # clean completion or a clean Python error are both acceptable; a crash is
     # the failure we are hunting.
@@ -668,7 +668,7 @@ sys.stdout.write("OK n=%d done=%d check=%d\n" % (n, len(done), rc._self_check(0)
 '''
     p = _subproc(script, env_extra={"RUNLOOM_GOROUTINE_PANIC": "silent"}, timeout=20)
     assert p.returncode is not None and p.returncode >= 0, (
-        "go_noyield yielding body crashed: rc=%r\n%s%s"
+        "fiber_noyield yielding body crashed: rc=%r\n%s%s"
         % (p.returncode, p.stdout, p.stderr))
 
 

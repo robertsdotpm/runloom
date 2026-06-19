@@ -12,7 +12,7 @@ the `rsync` under "Vendor the corpus" once before the first sweep.
 |------|------|
 | `test/` | local copy of CPython 3.13t `Lib/test` (the corpus). **Not committed** — gitignored, ~80 MB of verbatim upstream source; populate once with the `rsync` below. Shadows the installed `test` package when `tests_stdlib/` is first on `sys.path`. |
 | `c_stack_sizes.py` / `stdlib_c_stack_sizes.json` | catalogs each stdlib C function's `.eh_frame` prologue frame size — the fat single frames (e.g. `select_select_impl` ~49 KB) that can overflow a small goroutine stack. Regenerate with `python tests_stdlib/c_stack_sizes.py`. |
-| `run_one_mn.py` | child: runs ONE module's unittest suite inside a goroutine (`mn_init`/`mn_go`/`mn_run`), one per subprocess. |
+| `run_one_mn.py` | child: runs ONE module's unittest suite inside a goroutine (`mn_init`/`mn_fiber`/`mn_run`), one per subprocess. |
 | `sweep_mn.py` | driver: discovers all modules, runs each child with a timeout in a parallel pool, classifies PASS/FAIL/LOADERR/CRASH/HANG/ERROR, saves logs. |
 | `triage.py` | clusters `results/` into bug buckets and regenerates the auto-section of `BUGS.md`. |
 | `BUGS.md` | the running bug triage. |

@@ -115,9 +115,9 @@ int main(void)
     if (runloom_mn_init(NHUBS) < 0) { fprintf(stderr, "mn_init failed\n"); return 2; }
 
     /* staller first (so it claims an origin hub), then the workers. */
-    if (runloom_mn_go_c(staller_fn, NULL) < 0) { fprintf(stderr, "go staller\n"); return 2; }
+    if (runloom_mn_fiber_c(staller_fn, NULL) < 0) { fprintf(stderr, "go staller\n"); return 2; }
     for (i = 0; i < N_WORKERS; i++) {
-        if (runloom_mn_go_c(worker_fn, (void *)(long)i) < 0) {
+        if (runloom_mn_fiber_c(worker_fn, (void *)(long)i) < 0) {
             fprintf(stderr, "go worker %d\n", i); return 2;
         }
     }

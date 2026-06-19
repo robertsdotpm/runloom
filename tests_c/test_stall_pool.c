@@ -136,12 +136,12 @@ int main(void)
     /* stallers first (counters 0..S-1 round-robin onto distinct hubs), then
      * the workers. */
     for (i = 0; i < N_STALLERS; i++) {
-        if (runloom_mn_go_c(staller_fn, (void *)(long)i) < 0) {
+        if (runloom_mn_fiber_c(staller_fn, (void *)(long)i) < 0) {
             fprintf(stderr, "go staller %d\n", i); return 2;
         }
     }
     for (i = 0; i < N_WORKERS; i++) {
-        if (runloom_mn_go_c(worker_fn, (void *)(long)i) < 0) {
+        if (runloom_mn_fiber_c(worker_fn, (void *)(long)i) < 0) {
             fprintf(stderr, "go worker %d\n", i); return 2;
         }
     }

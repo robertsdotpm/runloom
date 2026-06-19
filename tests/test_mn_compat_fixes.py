@@ -1,7 +1,7 @@
 """M:N-scheduler correctness for the cooperative-compat fixes.
 
 Covers the API changes that made the monkey layer + feature modules work under
-the M:N scheduler (mn_init/mn_go/mn_run, free-threaded 3.13t, GIL off):
+the M:N scheduler (mn_init/mn_fiber/mn_run, free-threaded 3.13t, GIL off):
 
   * runloom_c.Mutex                 -- new C-level M:N-safe mutex
   * current_g() under M:N           -- returns the hub's running fiber

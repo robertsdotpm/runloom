@@ -26,7 +26,7 @@ between threads (which is unsafe — spec 01, 03).
   │ io_uring   │   │ io_uring   │   │ io_uring   │   ring; per-hub PyThreadState
   │ tstate     │   │ tstate     │   │ tstate     │
   └────────────┘   └────────────┘   └────────────┘
-         ▲ MPSC submission queue (sub_head) per hub: external mn_go / cross-hub wakes
+         ▲ MPSC submission queue (sub_head) per hub: external mn_fiber / cross-hub wakes
          ▼ ONE shared netpoll (epoll/kqueue/IOCP) created once; the pump runs on
            whichever hub is idle and routes each wake back to the parker's origin hub
 ```
@@ -40,7 +40,7 @@ between threads (which is unsafe — spec 01, 03).
 > per-hub poller. (`docs/parallelism.md` and an older mn_sched.c comment say "each
 > hub has its own netpoll" — that's the stale view; spec 06 states it correctly.)
 
-`runloom_mn_init(n)` starts n hub threads; `mn_go(fn)` spawns onto a hub;
+`runloom_mn_init(n)` starts n hub threads; `mn_fiber(fn)` spawns onto a hub;
 `mn_run()` waits for all queues to drain; `mn_fini()` tears down. `runloom.run(n,
 main)` wraps this whole envelope (spec 12).
 
@@ -50,7 +50,7 @@ Each hub thread, per iteration:
 
 1. **Create its `PyThreadState` on its own thread** (see "the tstate ownership
    rule" below).
-2. Drain its **MPSC submission queue** (external `mn_go`, cross-hub wakes) into
+2. Drain its **MPSC submission queue** (external `mn_fiber`, cross-hub wakes) into
    either the deque (fresh g) or the local FIFO (a woken/yielded g with a saved
    snap).
 3. Pop work, in priority order: **local FIFO** (yielded gs) → **own deque**
@@ -61,7 +61,7 @@ Each hub thread, per iteration:
    `coro_yield`), push it back to the local FIFO so it keeps progressing.
 
 This is the spec-02 drain, per hub, plus stealing. The idle policy: when all hubs
-report `pending == 0`, keep polling (more `mn_go` can arrive any time); stop on
+report `pending == 0`, keep polling (more `mn_fiber` can arrive any time); stop on
 `h->stopping`.
 
 ## Work-stealing deque (Chase-Lev) — `cldeque.c`
@@ -102,9 +102,9 @@ balance.** A g parked for I/O wakes on its origin hub even if another hub is idl
 In practice this evens out under steady load; the alternative (migrating live
 stacks) is not safely available.
 
-### `mn_go`'s round-robin and the submission queue
+### `mn_fiber`'s round-robin and the submission queue
 
-`mn_go` from inside a hub places on that hub; from outside any hub it round-robins.
+`mn_fiber` from inside a hub places on that hub; from outside any hub it round-robins.
 Either way it goes through the target hub's **MPSC submission queue** (`sub_head`
 under `sub_lock`), guarded by the `in_sub_queue` CAS flag so a g can't be
 submitted twice (a spurious double-wake becomes a no-op rather than a
