@@ -84,7 +84,7 @@ def setup(H):
             except OSError:
                 pass
 
-    servers = netutil.listen_all(H, lambda conn, addr: H.go(handler, conn))
+    servers = netutil.listen_all(H, lambda conn, addr: H.fiber(handler, conn))
     H.state = {"servers": servers, "cctx": cctx}
 
 

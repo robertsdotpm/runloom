@@ -98,8 +98,8 @@ def main():
                 x = (x + i * i) % 7
         finally:
             wg.done()
-    rc.mn_go(lambda: hog(1))
-    rc.mn_go(lambda: hog(2))
+    rc.mn_fiber(lambda: hog(1))
+    rc.mn_fiber(lambda: hog(2))
     wg.wait()
 runloom.run(2, main)
 rc.preempt_fini()
@@ -185,7 +185,7 @@ def test_timed_park_in_hub_times_out_via_timer_drain():
             finally:
                 wg.done()
 
-        rc.mn_go(f)
+        rc.mn_fiber(f)
         wg.wait()
 
     with hang_guard(40, "timed_park_hub"):
@@ -230,8 +230,8 @@ def test_timed_park_in_hub_woken_before_deadline_and_release_timers():
             rc.sched_sleep(0.02)          # let the parker commit its park
             hbox["g"].wake()
 
-        rc.mn_go(parker)
-        rc.mn_go(waker)
+        rc.mn_fiber(parker)
+        rc.mn_fiber(waker)
         wg.wait()
 
     with hang_guard(40, "timed_park_woken_release"):
@@ -283,7 +283,7 @@ def test_sched_sleep_real_in_hub():
             finally:
                 wg.done()
 
-        rc.mn_go(s)
+        rc.mn_fiber(s)
         wg.wait()
 
     with hang_guard(40, "sched_sleep_real_hub"):
@@ -333,7 +333,7 @@ def test_run_ready_in_hub_degrades_to_yield():
             finally:
                 wg.done()
 
-        rc.mn_go(f)
+        rc.mn_fiber(f)
         wg.wait()
 
     with hang_guard(40, "run_ready_hub"):
@@ -429,7 +429,7 @@ def test_park_generic_hub_dekker_under_foreign_wake_storm():
             finally:
                 wg.done()
 
-        rc.mn_go(parker)
+        rc.mn_fiber(parker)
         wg.wait()
         # Stop the foreign wake-storm and JOIN it WHILE the runtime is still up.
         # If the storm outlives runloom.run() (stop/join placed AFTER run
@@ -486,7 +486,7 @@ def _run_capture_hub_parker(hbox, done):
             hbox["g"] = rc.current_g()   # handle for THIS hub-parked g
             rc.park()                    # hub park_generic -> records park_hub
             done["ok"] = True
-        rc.mn_go(parker)
+        rc.mn_fiber(parker)
         for _ in range(2000):
             if hbox.get("g") is not None:
                 break
@@ -561,7 +561,7 @@ def test_stale_handle_wake_during_reinit_is_noop():
                     slots[i] = 1
                 finally:
                     wg.done()
-            rc.mn_go(w)
+            rc.mn_fiber(w)
         wg.wait()
         res["sum"] = sum(slots)
 
@@ -626,9 +626,9 @@ def test_exception_state_survives_park_in_hub():
 
         for i in range(N):
             if i % 2:
-                rc.mn_go(lambda i=i: with_exc(i))
+                rc.mn_fiber(lambda i=i: with_exc(i))
             else:
-                rc.mn_go(lambda i=i: without_exc(i))
+                rc.mn_fiber(lambda i=i: without_exc(i))
         wg.wait()
 
     with hang_guard(40, "exc_state_park"):
@@ -681,7 +681,7 @@ def main():
         finally:
             wg.done()
     for i in range(N):
-        rc.mn_go(lambda i=i: f(i))
+        rc.mn_fiber(lambda i=i: f(i))
     wg.wait()
 runloom.run(3, main)
 sys.stdout.write("IMMORTAL_OK %d\n" % sum(done))
@@ -724,7 +724,7 @@ def main():
         finally:
             wg.done()
     for i in range(N):
-        rc.mn_go(lambda i=i: f(i))
+        rc.mn_fiber(lambda i=i: f(i))
     wg.wait()
 runloom.run(3, main)
 sys.stdout.write("DBGEXC_OK %d\n" % sum(ok))
@@ -780,7 +780,7 @@ def test_g_entry_fiber_n_indexed_pass_index():
         rc.fiber_n(worker, N, 0, True)        # indexed bulk spawn
 
     with hang_guard(40, "go_n_indexed"):
-        rc.mn_init(4); rc.mn_go(main); rc.mn_run(); rc.mn_fini()
+        rc.mn_init(4); rc.mn_fiber(main); rc.mn_run(); rc.mn_fini()
     assert sum(seen) == N
 
 

@@ -7,7 +7,7 @@ a lost wake or a teardown deadlock shows up as a `hang_guard` _exit with a
 pinpointed traceback, not a silently-green run.
 
 Includes one xfail-documented FINDING: an unhandled exception inside a bare
-`runloom_c.go` fiber is silently swallowed -- not raised out of run(),
+`runloom_c.fiber` fiber is silently swallowed -- not raised out of run(),
 not retrievable via `G.result`, and not even written to stderr / the
 unraisable hook.  In a Go-parity runtime a fiber panic should at minimum
 be observable; today it vanishes.
@@ -57,7 +57,7 @@ def test_nested_spawn_from_inside_fiber():
 
 def test_fiber_noyield_runs_to_completion():
     out = []
-    rc.go_noyield(lambda: out.append("ran"))
+    rc.fiber_noyield(lambda: out.append("ran"))
     rc.run()
     assert out == ["ran"]
 
@@ -276,7 +276,7 @@ def test_mn_init_fini_cycles_no_hang():
             rc.mn_init(4)
             done = []
             for _ in range(20):
-                rc.mn_go(lambda: done.append(1))
+                rc.mn_fiber(lambda: done.append(1))
             rc.mn_run()
             rc.mn_fini()
             assert rc.mn_hub_count() == 0
@@ -296,7 +296,7 @@ def test_mn_spawn_storm_completion_count():
             finally:
                 wg.done()
         for _ in range(N):
-            rc.mn_go(w)
+            rc.mn_fiber(w)
         wg.wait()
     with hang_guard(60, "mn spawn storm"):
         runloom.run(4, main)
@@ -310,7 +310,7 @@ def test_mn_init_spawn_fini_without_run_drains():
         rc.mn_init(2)
         ran = []
         for _ in range(50):
-            rc.mn_go(lambda: ran.append(1))
+            rc.mn_fiber(lambda: ran.append(1))
         rc.mn_fini()
     assert rc.mn_hub_count() == 0
 
@@ -332,13 +332,13 @@ def test_cpu_bound_fiber_does_not_starve_sibling():
             progress.append(("needy",))
             rc.sched_sleep(0.01)
     def main():
-        rc.mn_go(cpu_hog)
-        rc.mn_go(needy)
+        rc.mn_fiber(cpu_hog)
+        rc.mn_fiber(needy)
     with hang_guard(45, "cpu starvation"):
         # 1 hub: the needy fiber shares the single hub with the hog, so it only
         # makes progress if the runtime preempts/yields the hog.
         rc.mn_init(1)
-        rc.mn_go(main)
+        rc.mn_fiber(main)
         rc.mn_run()
         rc.mn_fini()
     needy_runs = sum(1 for p in progress if p[0] == "needy")

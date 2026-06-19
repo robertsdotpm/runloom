@@ -101,7 +101,7 @@ def test_steal_success_path_drives_item_read_and_cas():
                 ran[i] = 1
                 rc.sched_yield()
             for i in range(N):
-                rc.mn_go(lambda i=i: worker(i))
+                rc.mn_fiber(lambda i=i: worker(i))
         # 8 hubs, N gs round-robin'd -> idle hubs steal from busy deques.
         runloom.run(8, main)
         lost = N - sum(ran)
@@ -181,7 +181,7 @@ def test_owner_pop_last_element_loses_to_thief():
                     rc.sched_yield()
                     ran[i] = 1
                 for i in range(N):
-                    rc.mn_go(lambda i=i: worker(i))
+                    rc.mn_fiber(lambda i=i: worker(i))
             runloom.run(8, main)
             assert sum(ran) == N, ("LOST", N - sum(ran))
             total_ran += sum(ran)
@@ -220,7 +220,7 @@ def test_work_stealing_soak_exact_once():
                 # steal-from-spread deque shapes occur.
                 rc.fiber_n(lambda: None, 1, 0)
                 for i in range(N):
-                    rc.mn_go(lambda i=i: worker(i))
+                    rc.mn_fiber(lambda i=i: worker(i))
             runloom.run(12, main)
             miss = N - sum(ran)
             assert miss == 0, ("ROUND", r, "LOST", miss)

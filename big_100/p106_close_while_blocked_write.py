@@ -76,7 +76,7 @@ def unit(H, wid, rng, closed, woken):
             pass
     ready = runloom.Chan(1)
     done = runloom.Chan(1)
-    H.go(writer, H, a, ready, done)
+    H.fiber(writer, H, a, ready, done)
     ready.recv()                             # writer filled the buffer; blocked
     runloom.sleep(0.002)
     closed[wid] += 1

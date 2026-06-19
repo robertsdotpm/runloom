@@ -32,15 +32,15 @@ def producer_consumer():
             total += v
         return total
 
-    runloom_c.go(prod)
-    runloom_c.go(cons)
+    runloom_c.fiber(prod)
+    runloom_c.fiber(cons)
     runloom_c.run()
 
 
 def mn_round():
     runloom_c.mn_init(2)
     for i in range(16):
-        runloom_c.mn_go(lambda n=i: n * 2)
+        runloom_c.mn_fiber(lambda n=i: n * 2)
     runloom_c.mn_run()
     runloom_c.mn_fini()
 
@@ -48,7 +48,7 @@ def mn_round():
 def timed_park():
     def g():
         runloom.sleep(0.001)
-    runloom.go(g)
+    runloom.fiber(g)
     runloom.run()
 
 

@@ -32,7 +32,7 @@ def worker(H, wid, rng, state):
     while H.running():
         host = rng.choice(NAMES)
         out = runloom.Chan(1)               # buffered: child can always deliver
-        H.go(do_lookup, host, out)
+        H.fiber(do_lookup, host, out)
         # Race the result against a tiny cancel window.
         ctx, cancel = cancelutil.WithTimeout(cancelutil.Background(),
                                              rng.uniform(0.0001, 0.005))

@@ -103,7 +103,7 @@ def test_patched_lock_mutual_exclusion_fibers_mn():
             finally:
                 wg.done()
         for _ in range(N):
-            rc.mn_go(w)
+            rc.mn_fiber(w)
         wg.wait()
     with hang_guard(40, "lock mutex M:N"):
         runloom.run(4, main)
@@ -156,7 +156,7 @@ def test_patched_lock_foreign_thread_plus_fibers():
             finally:
                 wg.done()
         for _ in range(GOR):
-            rc.mn_go(w)
+            rc.mn_fiber(w)
         wg.wait()
 
     with hang_guard(60, "lock foreign+fibers"):

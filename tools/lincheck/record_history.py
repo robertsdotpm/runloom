@@ -92,11 +92,11 @@ def record(out_path, nhubs, nprod, nper, cap, nselect=0):
 
     runloom_c.mn_init(nhubs)
     for p in range(nprod):
-        runloom_c.mn_go(lambda gid=p, base=p: producer(gid, base))
+        runloom_c.mn_fiber(lambda gid=p, base=p: producer(gid, base))
     for c in range(nconsumers):
         fn = select_consumer if c < nselect else consumer
-        runloom_c.mn_go(lambda gid=nprod + c, fn=fn: fn(gid))
-    runloom_c.mn_go(lambda gid=nprod + nconsumers: closer(gid))
+        runloom_c.mn_fiber(lambda gid=nprod + c, fn=fn: fn(gid))
+    runloom_c.mn_fiber(lambda gid=nprod + nconsumers: closer(gid))
     runloom_c.mn_run()
     runloom_c.mn_fini()
     assert runloom_c._self_check(0) == 0, "self_check failed after run"

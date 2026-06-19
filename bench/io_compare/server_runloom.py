@@ -99,7 +99,7 @@ def accept_loop():
             runloom_c.netpoll_unregister(conn.fileno())
         except (AttributeError, OSError):
             pass
-        runloom_c.mn_go(lambda c=conn: server_conn(c))
+        runloom_c.mn_fiber(lambda c=conn: server_conn(c))
 
 
 def main():
@@ -128,7 +128,7 @@ def main():
     if runloom_c.mn_init(H) < 0:
         sys.stderr.write("mn_init failed\n")
         return 2
-    runloom_c.mn_go(accept_loop)
+    runloom_c.mn_fiber(accept_loop)
     runloom_c.mn_run()
     return 0
 

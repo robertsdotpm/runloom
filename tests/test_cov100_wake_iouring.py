@@ -112,7 +112,7 @@ def test_mn_cancel_g_wakes_parked_fiber_cancelled():
         def parker():
             hold["g"] = rc.current_g()
             res["rv"] = rc.wait_fd(a.fileno(), READ, 20000)
-        rc.mn_go(parker)
+        rc.mn_fiber(parker)
         _wait_until_parked(1)                 # parker has COMMITTED its park
         res["woke"] = hold["g"].cancel_wait_fd()
         _wait_until(lambda: "rv" in res)      # woken g resumed + recorded
@@ -163,7 +163,7 @@ def test_mn_unpark_many_batch_wakes_all_and_reports_running_missed():
             handles[i] = rc.current_g()
             rvs[i] = rc.wait_fd(a.fileno(), READ, 20000)
         for i in range(N):
-            rc.mn_go(lambda i=i: waiter(i))
+            rc.mn_fiber(lambda i=i: waiter(i))
         _wait_until_parked(N)                  # all N COMMITTED to park
         me = rc.current_g()                    # running -> must be reported missed
         missed = rc.unpark_many(handles + [me])
@@ -202,7 +202,7 @@ def test_mn_cancel_fd_wakes_all_parkers_on_one_fd():
         def waiter(i):
             rvs[i] = rc.wait_fd(a.fileno(), READ, 20000)
         for i in range(N):
-            rc.mn_go(lambda i=i: waiter(i))
+            rc.mn_fiber(lambda i=i: waiter(i))
         _wait_until_parked(N)                  # all N parked on a.fileno()
         rc.netpoll_cancel_fd(a.fileno())       # one call wakes the whole bucket
         _wait_until(lambda: all(v is not None for v in rvs))
@@ -269,7 +269,7 @@ def test_iouring_ring_table_overflow_falls_back_gracefully():
             finally:
                 wg.done()
         for i in range(N):
-            rc.mn_go(lambda i=i: w(i))
+            rc.mn_fiber(lambda i=i: w(i))
         wg.wait()
         res["ok"] = sum(ok)
     with hang_guard(90, "iouring ring overflow"):
@@ -311,9 +311,9 @@ def test_mn_mixed_wakers_drain_cleanly_under_contention():
         def wC(i):
             handlesC.append(rc.current_g()); rvC[i] = rc.wait_fd(a3.fileno(), READ, 20000)
         for i in range(8):
-            rc.mn_go(lambda i=i: wA(i))
-            rc.mn_go(lambda i=i: wB(i))
-            rc.mn_go(lambda i=i: wC(i))
+            rc.mn_fiber(lambda i=i: wA(i))
+            rc.mn_fiber(lambda i=i: wB(i))
+            rc.mn_fiber(lambda i=i: wC(i))
         _wait_until_parked(24)                 # all 24 COMMITTED to park
         for h in list(handlesA):
             h.cancel_wait_fd()
@@ -358,7 +358,7 @@ def test_mn_many_parkers_one_fd_across_hubs_none_lost():
         def w(i):
             rvs[i] = rc.wait_fd(a.fileno(), READ, 20000)
         for i in range(N):
-            rc.mn_go(lambda i=i: w(i))
+            rc.mn_fiber(lambda i=i: w(i))
         res["all_parked"] = _wait_until_parked(N)        # the lost-park oracle
         res["parked_count"] = rc.stats().get("netpoll_parked", 0)
         rc.netpoll_cancel_fd(a.fileno())                 # wake the whole bucket

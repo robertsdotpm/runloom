@@ -66,7 +66,7 @@ def stack_hwm():
         # >=2 goroutines so yields actually swap (and paint) rather than
         # idle the run loop.
         for _ in range(8):
-            runloom_c.go(worker)
+            runloom_c.fiber(worker)
         runloom_c.run()
         hwm = runloom_c.stats()["stack_hwm"]
         points[depth] = hwm
@@ -104,7 +104,7 @@ def c_recursion(size):
             json.dumps(d)
             runloom_c.sched_yield()
         for _ in range(8):
-            runloom_c.go(worker)
+            runloom_c.fiber(worker)
         runloom_c.run()
         hwm = runloom_c.stats()["stack_hwm"]
         if base is None:
@@ -126,7 +126,7 @@ def rss_sweep():
         def noop():
             pass
         for _ in range(n):
-            runloom_c.go(noop)
+            runloom_c.fiber(noop)
         runloom_c.run()
         rss = rss_mb()
         print("  %8d  %10.1f  %14.2f" % (n, rss, (rss - base) * 1024.0 / n))

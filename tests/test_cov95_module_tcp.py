@@ -199,7 +199,7 @@ def test_select_case_parse_error_arms():
 # drainer frees buffer space. Drives the loop re-entry (L304), the syscall
 # (L318-319), and the wait_fd_coop park SUCCESS arm (L325 false branch).
 #
-# Runs in a subprocess on the SINGLE-THREAD scheduler (rc.go/rc.run): both
+# Runs in a subprocess on the SINGLE-THREAD scheduler (rc.fiber/rc.run): both
 # fibers share one socketpair and one netpoll, so the WRITE-readiness wake for
 # the parked send is delivered on the same OS thread that drained the peer --
 # deterministic, unlike spreading the two cooperating fibers across M:N hubs.

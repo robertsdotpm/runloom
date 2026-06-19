@@ -70,7 +70,7 @@ def bench_tcpconn(N, M):
         port_holder[0] = _bound_port(listener)
         for _ in range(N):
             c = listener.accept()
-            runloom_c.go(make_handler(c))
+            runloom_c.fiber(make_handler(c))
         listener.close()
 
     def make_client():
@@ -89,14 +89,14 @@ def bench_tcpconn(N, M):
         return client
 
     def driver():
-        runloom_c.go(server)
+        runloom_c.fiber(server)
         while port_holder[0] is None:
             runloom_c.sched_yield()
         t_start[0] = time.perf_counter()
         for _ in range(N):
-            runloom_c.go(make_client())
+            runloom_c.fiber(make_client())
 
-    runloom_c.go(driver)
+    runloom_c.fiber(driver)
     runloom_c.run()
     return t_end[0] - t_start[0]
 
@@ -129,7 +129,7 @@ def bench_monkey(N, M):
     def server():
         for _ in range(N):
             c, _ = srv.accept()
-            runloom_c.go(make_handler(c))
+            runloom_c.fiber(make_handler(c))
 
     def make_client():
         def client():
@@ -146,12 +146,12 @@ def bench_monkey(N, M):
         return client
 
     def driver():
-        runloom_c.go(server)
+        runloom_c.fiber(server)
         t_start[0] = time.perf_counter()
         for _ in range(N):
-            runloom_c.go(make_client())
+            runloom_c.fiber(make_client())
 
-    runloom_c.go(driver)
+    runloom_c.fiber(driver)
     runloom_c.run()
     srv.close()
     return t_end[0] - t_start[0]

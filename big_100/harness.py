@@ -286,9 +286,9 @@ class Harness(object):
         self.funcs = self.args.funcs
         self._max_funcs = None   # set by harness.main(max_funcs=) to cap H.funcs
 
-        # Fast bulk spawn via runloom_c.go_n(indexed=True): one C call builds the
+        # Fast bulk spawn via runloom_c.fiber_n(indexed=True): one C call builds the
         # whole worker pool (arena g/coro/stacks + deferred stack frames) instead
-        # of N Python-level runloom.go() calls.  Opt-in (RUNLOOM_HARNESS_GON=1)
+        # of N Python-level runloom.fiber() calls.  Opt-in (RUNLOOM_HARNESS_GON=1)
         # AND requires the bulk gates (RUNLOOM_GON_BULK=1, usually +GON_FRESH=1).
         # The deferred stack frames materialize on the hubs in parallel, so it
         # NEEDS hubs >= 8 -- with fewer, 1M goroutines funnel through too few
@@ -536,9 +536,9 @@ class Harness(object):
         sys.stderr.flush()
 
     # ---------------- spawning ----------------
-    def go(self, fn, *args, **kwargs):
+    def fiber(self, fn, *args, **kwargs):
         """Spawn a goroutine.  Must be called from inside the root (M:N)."""
-        return runloom.go(fn, *args, **kwargs)
+        return runloom.fiber(fn, *args, **kwargs)
 
     def register_close(self, obj):
         """Register a socket/file to be closed at shutdown so a parked
@@ -587,7 +587,7 @@ class Harness(object):
         actual = n if (max_concurrent is None or max_concurrent >= n) else max_concurrent
         self.expected += actual
 
-        # Fast path: build the whole pool with ONE runloom_c.go_n(indexed=True).
+        # Fast path: build the whole pool with ONE runloom_c.fiber_n(indexed=True).
         # Needs hubs >= 8 (deferred stack frames materialize across hubs in
         # parallel); below that, fall back to per-g spawn so we never run the
         # bulk path in a regime where it degrades.
@@ -599,7 +599,7 @@ class Harness(object):
                 rng = self.derive("pool", name, wid)
                 self._worker_wrap(worker_fn, wid, rng, captured)
 
-            runloom_c.go_n(spawn_one, actual, indexed=True)
+            runloom_c.fiber_n(spawn_one, actual, indexed=True)
             return
         if self._use_gon and self.hubs < 8:
             sys.stderr.write(
@@ -609,7 +609,7 @@ class Harness(object):
 
         for wid in range(actual):
             rng = self.derive("pool", worker_fn.__name__, wid)
-            self.go(self._worker_wrap, worker_fn, wid, rng, extra)
+            self.fiber(self._worker_wrap, worker_fn, wid, rng, extra)
 
     def _worker_wrap(self, fn, wid, rng, extra):
         try:
@@ -732,7 +732,7 @@ class Harness(object):
         # so we can see WHERE goroutines are parked (connect / recv / sleep /
         # accept).  Cheap structural dump, no Python.  CAVEAT: go_n bulk-arena
         # workers skip the introspection registry (the hot spawn path takes no
-        # greg lock), so this shows only H.go()-spawned goroutines (servers,
+        # greg lock), so this shows only H.fiber()-spawned goroutines (servers,
         # handlers, accept loops) -- not the bulk client pool.
         _ds = os.environ.get("RUNLOOM_DUMP_STATES")
         if _ds:
@@ -823,7 +823,7 @@ class Harness(object):
 
         def root():
             self.lock = runloom.sync.Lock()
-            self.go(self.progress_loop)
+            self.fiber(self.progress_loop)
             if setup is not None:
                 try:
                     setup(self)

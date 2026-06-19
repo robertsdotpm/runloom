@@ -58,7 +58,7 @@ static PyObject *m_serve_acceptor(PyObject *self, PyObject *args)
         part = PyObject_CallFunctionObjArgs(runloom_io_partial, handler, conn, NULL);
         Py_DECREF(conn);
         if (part == NULL) { PyErr_Clear(); continue; }
-        h = runloom_mn_go(part, RUNLOOM_SERVE_HANDLER_STACK);
+        h = runloom_mn_fiber(part, RUNLOOM_SERVE_HANDLER_STACK);
         Py_DECREF(part);
         if (h == NULL) PyErr_Clear();
         else Py_DECREF(h);
@@ -123,7 +123,7 @@ static int runloom_io_listener_port(PyObject *listener)
 
 /* ---- All-C echo path (handler=None): tstate-free C fibers ----
  * serve(..., handler=None) runs each connection entirely in C, spawned via
- * runloom_mn_go_c -- a C-entry fiber carries NO Python tstate and NO root
+ * runloom_mn_fiber_c -- a C-entry fiber carries NO Python tstate and NO root
  * frame, so the per-swap PyThreadState save/restore that a Python-callable
  * fiber pays on every park/wake is SKIPPED.  Pure C recv/send loop,
  * cooperative via runloom_netpoll_wait_fd (same pattern module_tcp / TCPConn
@@ -243,7 +243,7 @@ static void runloom_io_c_acceptor(void *arg)
             int on = 1;
             (void)setsockopt(cfd, IPPROTO_TCP, TCP_NODELAY, &on, sizeof(on));
         }
-        if (runloom_mn_go_c(runloom_io_c_echo, (void *)(intptr_t)cfd) < 0)
+        if (runloom_mn_fiber_c(runloom_io_c_echo, (void *)(intptr_t)cfd) < 0)
             close(cfd);
     }
 }
@@ -286,7 +286,7 @@ static PyObject *m_serve(PyObject *self, PyObject *args, PyObject *kw)
                         "serve(): handler must be callable, or None for the built-in all-C echo");
         return NULL;
     }
-    /* serve() hosts each accept loop on an M:N hub (runloom_mn_go / mn_go_c).
+    /* serve() hosts each accept loop on an M:N hub (runloom_mn_fiber / mn_go_c).
      * Single-thread mode -- runloom.run(1, ...) -- has no hubs (hub_count==0),
      * so the spawns fail with a cryptic "mn_init must be called first".  Fail
      * fast with an actionable message instead, before any listener is bound. */
@@ -326,9 +326,9 @@ static PyObject *m_serve(PyObject *self, PyObject *args, PyObject *kw)
             int lfd = runloom_io_listener_fd(ln);
             Py_DECREF(ln);
             if (lfd < 0) { Py_DECREF(listeners); return NULL; }
-            if (runloom_mn_go_c(runloom_io_c_acceptor, (void *)(intptr_t)lfd) < 0) {
+            if (runloom_mn_fiber_c(runloom_io_c_acceptor, (void *)(intptr_t)lfd) < 0) {
                 Py_DECREF(listeners);
-                PyErr_SetString(PyExc_RuntimeError, "serve(): mn_go_c failed");
+                PyErr_SetString(PyExc_RuntimeError, "serve(): mn_fiber_c failed");
                 return NULL;
             }
             continue;
@@ -340,7 +340,7 @@ static PyObject *m_serve(PyObject *self, PyObject *args, PyObject *kw)
                                             ln, handler, NULL);
         Py_DECREF(ln);
         if (part == NULL) { Py_DECREF(listeners); return NULL; }
-        h = runloom_mn_go(part, 0);
+        h = runloom_mn_fiber(part, 0);
         Py_DECREF(part);
         if (h == NULL) { Py_DECREF(listeners); return NULL; }
         Py_DECREF(h);

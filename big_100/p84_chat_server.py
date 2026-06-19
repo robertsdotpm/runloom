@@ -57,7 +57,7 @@ def setup(H):
                 finally:
                     writer_done.send(1)
 
-            H.go(writer)
+            H.fiber(writer)
             started = True
             while True:
                 if b"\n" not in buf:
@@ -99,8 +99,8 @@ def setup(H):
                 writer_done.recv()
             netutil.close_quiet(conn)
 
-    H.go(netutil.serve_forever, H, srv,
-         lambda conn, addr: H.go(serve, conn))
+    H.fiber(netutil.serve_forever, H, srv,
+         lambda conn, addr: H.fiber(serve, conn))
 
 
 def client(H, wid, rng, state):

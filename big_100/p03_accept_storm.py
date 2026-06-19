@@ -43,7 +43,7 @@ def setup(H):
 
     def on_conn(conn, addr):
         bump("accepted", 1)
-        H.go(handler, conn)
+        H.fiber(handler, conn)
 
     servers = netutil.listen_all(H, on_conn, backlog=8192)
     H.state = {"servers": servers}
@@ -87,7 +87,7 @@ def body(H):
         H.log("accepted={0} closed={1} max_live={2} diff={3}".format(
             acc, clo, H.counters["max_live"], acc - clo))
 
-    H.go(auditor)
+    H.fiber(auditor)
 
 
 if __name__ == "__main__":

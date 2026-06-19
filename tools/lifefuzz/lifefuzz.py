@@ -173,7 +173,7 @@ def run_program(spec, timeout=20.0):
     def spawn(fn, stack):
         # M:N and single-thread spawn, with an optional pinned stack size.
         # (stack_size must be omitted, not passed None, when unset.)
-        gofn = runloom_c.mn_go if mode == "mn" else runloom_c.go
+        gofn = runloom_c.mn_fiber if mode == "mn" else runloom_c.fiber
         if stack is None:
             return gofn(fn)
         try:

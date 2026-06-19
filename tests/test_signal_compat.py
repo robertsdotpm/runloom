@@ -11,7 +11,7 @@ tests).  The contract a cooperative version must keep:
   * a blocked wait yields the scheduler -- a sibling fiber keeps running;
   * pause() returns once a handled signal is caught.
 
-These run under the single-threaded scheduler (runloom_c.go/run on the main
+These run under the single-threaded scheduler (runloom_c.fiber/run on the main
 thread), which is where signal masks are stable and set_wakeup_fd is usable.
 """
 import os

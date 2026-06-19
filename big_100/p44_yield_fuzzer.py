@@ -60,7 +60,7 @@ def body(H):
                                total, TOTAL)):
                 return
 
-    H.go(auditor)
+    H.fiber(auditor)
 
 
 def post(H):

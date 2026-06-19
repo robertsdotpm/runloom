@@ -62,7 +62,7 @@ def accept_loop():
         except OSError: break
         try: runloom_c.netpoll_unregister(conn.fileno())
         except (AttributeError, OSError): pass
-        runloom_c.mn_go(lambda c=conn: server_conn(c))
+        runloom_c.mn_fiber(lambda c=conn: server_conn(c))
 
 
 def main():
@@ -77,7 +77,7 @@ def main():
     listen_sock.bind((host, port)); listen_sock.listen(65535); listen_sock.setblocking(False)
     print("honest-runloom listening on %s H=%d" % (listen_sock.getsockname(), H), flush=True)
     if runloom_c.mn_init(H) < 0: return 2
-    runloom_c.mn_go(accept_loop); runloom_c.mn_run(); return 0
+    runloom_c.mn_fiber(accept_loop); runloom_c.mn_run(); return 0
 
 
 if __name__ == "__main__":

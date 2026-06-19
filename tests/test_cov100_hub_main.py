@@ -109,12 +109,12 @@ def test_deque_overflow_fallback_no_drop():
         # No yield in this loop: every g stays FRESH (snap-invalid) and piles into
         # hub 0's sub-list, so the single drain that follows overflows the deque.
         for i in range(N):
-            rc.mn_go(lambda i=i: child(i))
+            rc.mn_fiber(lambda i=i: child(i))
         wg.wait()                 # park the driver -> hub_main drains all N now
 
     with hang_guard(90, "deque overflow fallback"):
         rc.mn_init(1)             # single hub -> all spawns target hub 0
-        rc.mn_go(main)
+        rc.mn_fiber(main)
         rc.mn_run()
         rc.mn_fini()
 
@@ -147,7 +147,7 @@ def test_deque_overflow_fallback_fiber_n_bulk():
 
     with hang_guard(90, "deque overflow via fiber_n"):
         rc.mn_init(1)
-        rc.mn_go(main)
+        rc.mn_fiber(main)
         rc.mn_run()
         rc.mn_fini()
 
@@ -191,15 +191,15 @@ def test_deque_overflow_fallback_channel_work():
             box["sum"] = s
             box["count"] = c
 
-        rc.mn_go(collector)       # one consumer drains all N
+        rc.mn_fiber(collector)       # one consumer drains all N
         # > 4096 fresh senders pile onto hub 0's sub-list, overflow the deque on
         # the drain, and run via the L388 fallback FIFO.
         for i in range(N):
-            rc.mn_go(lambda i=i: sender(i))
+            rc.mn_fiber(lambda i=i: sender(i))
 
     with hang_guard(120, "deque overflow channel work"):
         rc.mn_init(1)
-        rc.mn_go(main)
+        rc.mn_fiber(main)
         rc.mn_run()
         rc.mn_fini()
 
@@ -245,7 +245,7 @@ def main():
             ran[i] = 1
         wg.done()
     for i in range(N):
-        rc.mn_go(lambda i=i: w(i))
+        rc.mn_fiber(lambda i=i: w(i))
     wg.wait()
 
 # Multiple hubs so MORE THAN ONE hub thread exercises the L1256 exit branch; each
@@ -302,7 +302,7 @@ def main():
             ran[i] = 1
         wg.done()
     for i in range(N):
-        rc.mn_go(lambda i=i: w(i))
+        rc.mn_fiber(lambda i=i: w(i))
     wg.wait()
 runloom.run(3, main)
 assert sum(ran) == N, "lost %d/%d" % (N - sum(ran), N)

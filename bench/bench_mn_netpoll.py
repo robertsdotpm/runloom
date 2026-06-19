@@ -55,7 +55,7 @@ def server(listen_sock, ready_event, target):
             conn, _ = listen_sock.accept()
         except OSError:
             return
-        runloom_c.mn_go(lambda c=conn: handler(c))
+        runloom_c.mn_fiber(lambda c=conn: handler(c))
 
 
 def client(port):
@@ -86,13 +86,13 @@ def main():
     runloom_c.mn_init(N_HUBS)
 
     ready_event = threading.Event()
-    runloom_c.mn_go(lambda: server(listen_sock, ready_event, N_CLIENTS))
+    runloom_c.mn_fiber(lambda: server(listen_sock, ready_event, N_CLIENTS))
     while not ready_event.is_set():
         time.sleep(0.001)
 
     t0 = time.perf_counter()
     for _ in range(N_CLIENTS):
-        runloom_c.mn_go(lambda p=port: client(p))
+        runloom_c.mn_fiber(lambda p=port: client(p))
     runloom_c.mn_run()
     dt = time.perf_counter() - t0
 

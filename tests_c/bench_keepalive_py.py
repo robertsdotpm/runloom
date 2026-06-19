@@ -223,7 +223,7 @@ def accept_loop():
                 pass
             cidx = accepted
             accepted += 1
-            runloom_c.mn_go(lambda c=conn, i=cidx: server_conn(c, i))
+            runloom_c.mn_fiber(lambda c=conn, i=cidx: server_conn(c, i))
             if accepted >= N:
                 break
             try:
@@ -385,10 +385,10 @@ def main(argv):
     T0 = time.monotonic()
     MEASURE_START_T = T0 + RAMP_S + WARMUP_S
     MEASURE_END_T = MEASURE_START_T + MEASURE_S
-    runloom_c.mn_go(accept_loop)
-    runloom_c.mn_go(sampler)
+    runloom_c.mn_fiber(accept_loop)
+    runloom_c.mn_fiber(sampler)
     for i in range(N):
-        runloom_c.mn_go(lambda i=i: client(i))
+        runloom_c.mn_fiber(lambda i=i: client(i))
     runloom_c.mn_run()
 
     peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss

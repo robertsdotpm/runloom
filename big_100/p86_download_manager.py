@@ -66,7 +66,7 @@ def setup(H):
         finally:
             netutil.close_quiet(conn)
 
-    servers = netutil.listen_all(H, lambda conn, addr: H.go(handle, conn))
+    servers = netutil.listen_all(H, lambda conn, addr: H.fiber(handle, conn))
     H.state = {"servers": servers, "files": files}
 
 
@@ -109,7 +109,7 @@ def client(H, wid, rng, state):
         out = runloom.Chan(len(ranges))
         for ri, (s, e) in enumerate(ranges):
             host, port = netutil.pick_server(servers, rng)
-            H.go(fetch_range, H, host, port, idx, s, e, ri, out)
+            H.fiber(fetch_range, H, host, port, idx, s, e, ri, out)
         parts = [None] * len(ranges)
         ok = True
         for _ in range(len(ranges)):

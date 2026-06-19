@@ -222,8 +222,8 @@ static PyMethodDef module_methods[] = {
      "mn_fini(): tear down the hub pool."},
     {"mn_hub_count", m_mn_hub_count, METH_NOARGS,
      "mn_hub_count(): number of M:N hubs currently running (0 if mn_init "
-     "was never called or after mn_fini).  Lets the runloom.go() wrapper "
-     "dispatch to mn_go inside an M:N run."},
+     "was never called or after mn_fini).  Lets the runloom.fiber() wrapper "
+     "dispatch to mn_fiber inside an M:N run."},
     {"mn_hub_states", m_mn_hub_states, METH_NOARGS,
      "mn_hub_states() -> list[dict].  A snapshot of every M:N hub: id, state "
      "('detached'/'attached'/'suspended'), running_g (goid being resumed, or "

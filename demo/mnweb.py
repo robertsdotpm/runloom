@@ -2,7 +2,7 @@
 
 No async/await, no event loop ceremony, no monkey-patching.  You write
 straight-line blocking-looking handlers; every connection is a goroutine
-spawned with ``runloom_c.mn_go`` and scheduled across N hub threads (one
+spawned with ``runloom_c.mn_fiber`` and scheduled across N hub threads (one
 per core) with the GIL off (free-threaded 3.13t).
 
 The only runloom primitives used:
@@ -384,7 +384,7 @@ class App:
                 conn, addr = listener.accept()
             except OSError:
                 return
-            runloom_c.mn_go(lambda c=conn, a=addr: self.handle_connection(c, a))
+            runloom_c.mn_fiber(lambda c=conn, a=addr: self.handle_connection(c, a))
 
     def run(self, host, port, hubs=0, background_goroutines=()):
         """Start the M:N scheduler and serve forever.
@@ -403,7 +403,7 @@ class App:
             host, port, nhubs, runloom_c.backend(), runloom_c.netpoll_backend()), flush=True)
 
         for fn in background_goroutines:
-            runloom_c.mn_go(fn)
-        runloom_c.mn_go(lambda: self.accept_loop(listener))
+            runloom_c.mn_fiber(fn)
+        runloom_c.mn_fiber(lambda: self.accept_loop(listener))
         runloom_c.mn_run()
         runloom_c.mn_fini()

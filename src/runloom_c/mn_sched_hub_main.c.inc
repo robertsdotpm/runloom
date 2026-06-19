@@ -123,7 +123,7 @@ static void runloom_mn_world_yield_if_monopolizing(runloom_hub_t *h)
  *      local FIFO so it keeps making progress.
  *
  * Idle policy: when all hubs report pending=0 we still poll (the
- * caller may runloom_mn_go more work at any time).  Stop signal comes
+ * caller may runloom_mn_fiber more work at any time).  Stop signal comes
  * from runloom_mn_fini setting h->stopping. */
 static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
 {

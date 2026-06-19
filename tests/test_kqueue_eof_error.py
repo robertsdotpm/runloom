@@ -22,7 +22,7 @@ the error.
 
 These tests assert that BEHAVIOUR through real sockets (socketpair / loopback
 connect) + runloom_c.wait_fd -- never a backend internal -- and compare to a
-plain blocking socket where it clarifies intent.  Single-thread (runloom_c.go/
+plain blocking socket where it clarifies intent.  Single-thread (runloom_c.fiber/
 run) AND a couple under M:N (runloom.run(4, ...), per-hub kqueue delivers EOF).
 
 kqueue only; run from the repo root.

@@ -32,7 +32,7 @@ def setup(H):
             netutil.close_quiet(conn)
 
     servers = netutil.listen_all(
-        H, lambda conn, addr: H.go(handler, conn))
+        H, lambda conn, addr: H.fiber(handler, conn))
     H.state = {"servers": servers}
 
 

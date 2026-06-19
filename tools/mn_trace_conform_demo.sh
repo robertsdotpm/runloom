@@ -22,11 +22,11 @@ def recv():
     while True:
         v, ok = ch.recv()
         if not ok: break
-for _ in range(4): runloom_c.mn_go(recv)
+for _ in range(4): runloom_c.mn_fiber(recv)
 def prod():
     for v in range(8): ch.send(v)
     ch.close()
-runloom_c.mn_go(prod)
+runloom_c.mn_fiber(prod)
 runloom_c.mn_run(); runloom_c.mn_fini()'
 
 echo "== trace conformance: RunloomMNControl.tla vs the real controlled baton =="

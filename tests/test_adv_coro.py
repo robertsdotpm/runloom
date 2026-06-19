@@ -126,7 +126,7 @@ def test_introspection_during_mn_churn():
             finally:
                 wg.done()
         for _ in range(200):
-            rc.mn_go(worker)
+            rc.mn_fiber(worker)
         # hammer introspection while they churn
         for _ in range(50):
             try:

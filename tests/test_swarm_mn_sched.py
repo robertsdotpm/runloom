@@ -124,7 +124,7 @@ def test_mn_init_non_int_raises_typeerror():
 @mn
 def test_mn_fiber_without_init_raises_not_crash():
     with pytest.raises(RuntimeError):
-        rc.mn_go(lambda: None)
+        rc.mn_fiber(lambda: None)
     assert rc.mn_hub_count() == 0
 
 
@@ -134,7 +134,7 @@ def test_mn_fiber_non_callable_raises_typeerror(bad):
     rc.mn_init(2)
     try:
         with pytest.raises(TypeError):
-            rc.mn_go(bad)
+            rc.mn_fiber(bad)
     finally:
         rc.mn_run()
         rc.mn_fini()
@@ -147,7 +147,7 @@ def test_mn_fiber_negative_stack_size_still_runs_the_fiber():
     # it -- a dropped fiber would be a lost-work integrity bug.
     ran = bytearray(1)
     rc.mn_init(2)
-    rc.mn_go(lambda: ran.__setitem__(0, 1), -1)
+    rc.mn_fiber(lambda: ran.__setitem__(0, 1), -1)
     n = rc.mn_run()
     rc.mn_fini()
     assert ran[0] == 1, "mn_go with a negative stack_size dropped the fiber"
@@ -179,7 +179,7 @@ def test_double_mn_init_is_idempotent_keeps_first_hub_count():
 @mn
 def test_double_mn_fini_is_safe():
     rc.mn_init(2)
-    rc.mn_go(lambda: None)
+    rc.mn_fiber(lambda: None)
     rc.mn_run()
     rc.mn_fini()
     rc.mn_fini()  # second fini with no live pool must be a no-op, not a crash
@@ -266,11 +266,11 @@ def main():
         cwg.done()
 
     for _ in range(C):
-        rc.mn_go(consumer)
+        rc.mn_fiber(consumer)
     # Deliberate IMBALANCE: bulk-spawn all producers at once so one hub's deque
     # is loaded and the others must STEAL -- the Chase-Lev pop/steal CAS window.
     for pid in range(P):
-        rc.mn_go(lambda pid=pid: producer(pid))
+        rc.mn_fiber(lambda pid=pid: producer(pid))
 
     pwg.wait()
     ch.close()
@@ -341,12 +341,12 @@ def main():
                 seen[v] = 1
             wg.done()
 
-        rc.mn_go(receiver)
+        rc.mn_fiber(receiver)
         ch.send(i)                # wakes the parked receiver, possibly on a
                                   # different hub
 
     for i in range(N):
-        rc.mn_go(lambda i=i: pair(i))
+        rc.mn_fiber(lambda i=i: pair(i))
     wg.wait()
     missing = N - sum(seen)
     sys.stdout.write("WAKE_OK\n" if missing == 0 else "WAKE_LOST missing=%d\n" % missing)
@@ -388,7 +388,7 @@ def main():
             wg.done()
 
     for _ in range(G):
-        rc.mn_go(worker)
+        rc.mn_fiber(worker)
     wg.wait()
     sys.stdout.write("LOCK_OK\n" if box[0] == G * PER else
                      "LOCK_SHORT got=%d want=%d\n" % (box[0], G * PER))
@@ -432,13 +432,13 @@ def test_sched_yield_fastpath_does_not_starve_later_sibling():
         order.append("latecomer_ran")
 
     def main():
-        rc.mn_go(yielder)
+        rc.mn_fiber(yielder)
         rc.sched_sleep(0.005)     # let the yielder get into its spin
-        rc.mn_go(latecomer)       # admitted AFTER the spinner is looping
+        rc.mn_fiber(latecomer)       # admitted AFTER the spinner is looping
 
     with hang_guard(30, "yield fairness"):
         rc.mn_init(1)             # ONE hub: the latecomer shares it with spinner
-        rc.mn_go(main)
+        rc.mn_fiber(main)
         rc.mn_run()
         rc.mn_fini()
 
@@ -465,9 +465,9 @@ def test_many_yielders_still_complete_all_work():
         from runloom.sync import WaitGroup
         wg = WaitGroup(); wg.add(64)
         for _ in range(16):
-            rc.mn_go(spinner)
+            rc.mn_fiber(spinner)
         for i in range(64):
-            rc.mn_go(lambda i=i: (worker(i), wg.done()))
+            rc.mn_fiber(lambda i=i: (worker(i), wg.done()))
         wg.wait()
 
     with hang_guard(40, "many yielders"):
@@ -523,18 +523,18 @@ def main():
             wg.done()
 
     for _ in range(4):
-        rc.mn_go(consumer)
+        rc.mn_fiber(consumer)
     for _ in range(NW):
-        rc.mn_go(contender)
+        rc.mn_fiber(contender)
     for _ in range(8):
-        rc.mn_go(cpu)
+        rc.mn_fiber(cpu)
     # producers feed the consumers then close
     def feeder():
         for k in range(200):
             ch.send(k)
-    rc.mn_go(feeder)
+    rc.mn_fiber(feeder)
     for _ in range(4):
-        rc.mn_go(offloader)
+        rc.mn_fiber(offloader)
     wg_inner = WaitGroup()
     # drain contenders+cpu+offloaders+consumers
     wg.wait()
@@ -583,7 +583,7 @@ for cyc in range(60):
             x += i
         ran[0] += 1
     for _ in range(80):
-        rc.mn_go(w)
+        rc.mn_fiber(w)
     # NO mn_run: tear down immediately, racing fini against in-flight resumes
     rc.mn_fini()
     if rc.mn_hub_count() != 0:
@@ -619,7 +619,7 @@ def test_rapid_init_fini_cycling_in_process_no_hang():
             rc.mn_init(4)
             seen = bytearray(1)
             for _ in range(30):
-                rc.mn_go(lambda: seen.__setitem__(0, 1))
+                rc.mn_fiber(lambda: seen.__setitem__(0, 1))
             rc.mn_run()
             rc.mn_fini()
             assert rc.mn_hub_count() == 0
@@ -636,7 +636,7 @@ def test_fini_with_parked_channel_gs_does_not_hang():
             rc.mn_init(3)
             ch = rc.Chan(0)
             for _ in range(20):
-                rc.mn_go(lambda: ch.recv())   # parks forever
+                rc.mn_fiber(lambda: ch.recv())   # parks forever
             rc.sched_sleep(0.02) if False else None
             # give them a moment to park via a no-op run window is not possible
             # without blocking; fini must handle still-pending+parked gs.
@@ -654,7 +654,7 @@ def test_mn_deadlock_raises_under_mn_run():
     rc.set_deadlock_mode(2)
     try:
         rc.mn_init(3)
-        rc.mn_go(lambda: rc.Chan(0).recv())   # nobody sends -> M:N deadlock
+        rc.mn_fiber(lambda: rc.Chan(0).recv())   # nobody sends -> M:N deadlock
         with pytest.raises(RuntimeError):
             rc.mn_run()
     finally:
@@ -670,8 +670,8 @@ def test_mn_cyclic_deadlock_detected_not_hung():
     try:
         def main():
             chA = rc.Chan(0); chB = rc.Chan(0)
-            rc.mn_go(lambda: (chA.recv(), chB.send(1)))
-            rc.mn_go(lambda: (chB.recv(), chA.send(1)))
+            rc.mn_fiber(lambda: (chA.recv(), chB.send(1)))
+            rc.mn_fiber(lambda: (chB.recv(), chA.send(1)))
         with hang_guard(20, "mn cyclic deadlock"):
             with pytest.raises(RuntimeError):
                 runloom.run(2, main)
@@ -697,7 +697,7 @@ def test_mn_busy_workload_is_not_a_false_deadlock():
                 out[i] = s & 0xFF
                 wg.done()
             for i in range(96):
-                rc.mn_go(lambda i=i: w(i))
+                rc.mn_fiber(lambda i=i: w(i))
             wg.wait()
         with hang_guard(30, "mn busy no-false-fire"):
             runloom.run(4, main)   # must NOT raise
@@ -744,7 +744,7 @@ def main():
         finally:
             wg.done()
     for i in range(N):
-        rc.mn_go(lambda i=i: w(i))
+        rc.mn_fiber(lambda i=i: w(i))
     wg.wait()
     # outcome fingerprint: order-independent per-index work, plus the COUNT, so
     # a lost/dup g would change it.
@@ -802,7 +802,7 @@ def main():
         finally:
             wg.done()
     for i in range(NCLIENTS):
-        rc.mn_go(lambda i=i: client(i))
+        rc.mn_fiber(lambda i=i: client(i))
     wg.wait()
     for L in listeners:
         L.close()
@@ -857,7 +857,7 @@ def main():
     def w():
         rc.sched_yield(); wg.done()
     for _ in range(200):
-        rc.mn_go(w)
+        rc.mn_fiber(w)
     wg.wait()
 runloom.run(4, main)
 sys.stdout.write("MIGRATE_WARN_OK\n")
@@ -888,7 +888,7 @@ import sys; sys.path.insert(0, "src")
 import runloom, runloom_c as rc
 rc.install_crash_handler("backtrace")
 def main():
-    rc.mn_go(lambda: rc._crash_selftest_overflow(), 131072)   # small hub stack
+    rc.mn_fiber(lambda: rc._crash_selftest_overflow(), 131072)   # small hub stack
 runloom.run(2, main)
 sys.stdout.write("UNREACHABLE\n")
 '''
@@ -926,7 +926,7 @@ def test_parallel_blocking_offload_overlaps_not_serialized():
             finally:
                 wg.done()
         for _ in range(K):
-            rc.mn_go(off)
+            rc.mn_fiber(off)
         wg.wait()
 
     with hang_guard(30, "offload overlap"):
@@ -992,7 +992,7 @@ errs = []
 ran = [0]
 def from_thread():
     try:
-        rc.mn_go(lambda: ran.__setitem__(0, ran[0] + 1))
+        rc.mn_fiber(lambda: ran.__setitem__(0, ran[0] + 1))
     except BaseException as e:
         errs.append(type(e).__name__)
 t = threading.Thread(target=from_thread)
@@ -1022,7 +1022,7 @@ def test_raw_thread_observes_run_completes_in_process():
         from runloom.sync import WaitGroup
         wg = WaitGroup(); wg.add(500)
         for _ in range(500):
-            rc.mn_go(lambda: (rc.sched_yield(), wg.done()))
+            rc.mn_fiber(lambda: (rc.sched_yield(), wg.done()))
         wg.wait()
 
     observed = {"completed": False}
@@ -1060,7 +1060,7 @@ def test_fiber_n_bulk_indexed_every_index_runs_exactly_once():
 
     with hang_guard(40, "fiber_n indexed"):
         rc.mn_init(4)
-        rc.mn_go(main)
+        rc.mn_fiber(main)
         n = rc.mn_run()
         rc.mn_fini()
     assert sum(seen) == 512, "fiber_n indexed dropped %d fibers" % (512 - sum(seen))
@@ -1083,7 +1083,7 @@ def test_fiber_n_bulk_noindex_runs_n_fibers():
 
     with hang_guard(40, "fiber_n noindex"):
         rc.mn_init(4)
-        rc.mn_go(main)
+        rc.mn_fiber(main)
         n = rc.mn_run()
         rc.mn_fini()
     assert ran[0] == 300, "fiber_n non-indexed ran %d/300 fibers" % ran[0]
@@ -1099,7 +1099,7 @@ def test_hub_states_consistent_while_gs_park_and_run():
     def main():
         ch = rc.Chan(0)
         for _ in range(30):
-            rc.mn_go(lambda: ch.recv())   # park on the channel
+            rc.mn_fiber(lambda: ch.recv())   # park on the channel
         rc.sched_sleep(0.02)              # let them park
         states = rc.mn_hub_states()
         snap["count"] = rc.mn_hub_count()
@@ -1140,7 +1140,7 @@ failed = 0
 ok = 0
 for _ in range(80):
     try:
-        rc.mn_go(lambda: None)
+        rc.mn_fiber(lambda: None)
         ok += 1
     except (MemoryError, RuntimeError):
         failed += 1
@@ -1192,7 +1192,7 @@ err = None
 try:
     def main():
         rc.fiber_n(lambda: None, 200, 0, False)
-    rc.mn_go(main)
+    rc.mn_fiber(main)
     n = rc.mn_run()
 except (MemoryError, RuntimeError) as e:
     err = type(e).__name__
@@ -1234,7 +1234,7 @@ def test_max_fibers_caps_held_live_fibers_and_releases_under_mn():
         failed = 0
         for _ in range(60):
             try:
-                rc.mn_go(lambda: ch.recv())   # parks -> stays live
+                rc.mn_fiber(lambda: ch.recv())   # parks -> stays live
                 ok += 1
             except RuntimeError:
                 failed += 1
@@ -1247,7 +1247,7 @@ def test_max_fibers_caps_held_live_fibers_and_releases_under_mn():
         rc.set_max_fibers(CAP)
         with hang_guard(30, "max_fibers M:N gate"):
             rc.mn_init(4)
-            rc.mn_go(main)
+            rc.mn_fiber(main)
             rc.mn_run()
             rc.mn_fini()
     finally:
@@ -1280,7 +1280,7 @@ def test_max_fibers_slot_released_on_completion_no_ratchet():
                 for _ in range(CAP - 1):      # leave a slot for nothing; all admit
                     def w():
                         mu.lock(); ran[0] += 1; mu.unlock()
-                    rc.mn_go(w)
+                    rc.mn_fiber(w)
                 rc.mn_run()
                 rc.mn_fini()
                 assert ran[0] == CAP - 1, (
@@ -1305,7 +1305,7 @@ def test_fiber_n_zero_and_negative_is_noop_not_hang_or_crash():
 
     with hang_guard(20, "fiber_n zero/neg"):
         rc.mn_init(2)
-        rc.mn_go(main)
+        rc.mn_fiber(main)
         n = rc.mn_run()
         rc.mn_fini()
     completed["n"] = n
@@ -1396,9 +1396,9 @@ def main():
         cwg.done()
 
     for _ in range(C):
-        rc.mn_go(consumer)
+        rc.mn_fiber(consumer)
     for pid in range(P):
-        rc.mn_go(lambda pid=pid: producer(pid))
+        rc.mn_fiber(lambda pid=pid: producer(pid))
     pwg.wait()
     ch.close()
     cwg.wait()
@@ -1442,11 +1442,11 @@ def main():
             if ok and 0 <= val < N and idx == 1:
                 seen[val] = 1
             wg.done()
-        rc.mn_go(waiter)
+        rc.mn_fiber(waiter)
         b.send(i)                 # the idx==1 arm wins; wakes the select cross-hub
 
     for i in range(N):
-        rc.mn_go(lambda i=i: pair(i))
+        rc.mn_fiber(lambda i=i: pair(i))
     wg.wait()
     miss = N - sum(seen)
     sys.stdout.write("SELECT_OK\n" if miss == 0 else "SELECT_LOST miss=%d\n" % miss)
@@ -1505,12 +1505,12 @@ def main():
         flags[0] = 1; wg.done()
     def sibling():
         flags[1] = 1; wg.done()
-    rc.mn_go(hog)
+    rc.mn_fiber(hog)
     rc.sched_sleep(0.03)         # let the hog get into its non-yielding burst
-    rc.mn_go(sibling)            # can only run if the hog yields/is preempted
+    rc.mn_fiber(sibling)            # can only run if the hog yields/is preempted
     wg.wait()
 rc.mn_init(1)                   # ONE real hub: hog and sibling share it
-rc.mn_go(main)
+rc.mn_fiber(main)
 n = rc.mn_run()
 rc.mn_fini()
 sys.stdout.write("PREEMPT_HOG_OK flags=%r completed=%d hubs=%d\n"
@@ -1542,11 +1542,11 @@ def test_mn_run_then_spawn_again_then_run_again_same_pool():
 
     with hang_guard(20, "mn_run re-entrancy"):
         rc.mn_init(2)
-        rc.mn_go(lambda: w(0))
+        rc.mn_fiber(lambda: w(0))
         n1 = rc.mn_run()
         # pool is still alive: a second spawn + run must work, not hang/no-op.
-        rc.mn_go(lambda: w(1))
-        rc.mn_go(lambda: w(2))
+        rc.mn_fiber(lambda: w(1))
+        rc.mn_fiber(lambda: w(2))
         n2 = rc.mn_run()
         rc.mn_fini()
     assert box[0] == 1 and box[1] == 1 and box[2] == 1, (
@@ -1575,9 +1575,9 @@ def main():
     ch = rc.Chan(0)
     wg = WaitGroup(); wg.add(2 * N)
     for _ in range(N):
-        rc.mn_go(lambda: (ch.recv(), wg.done()))
+        rc.mn_fiber(lambda: (ch.recv(), wg.done()))
     for _ in range(N):
-        rc.mn_go(lambda: (ch.send(1), wg.done()))
+        rc.mn_fiber(lambda: (ch.send(1), wg.done()))
     wg.wait()
     sys.stdout.write("HALF_DEADLOCK_OK\n")
 
@@ -1611,7 +1611,7 @@ def main():
     def w():
         rc.sched_sleep(0.01); wg.done()
     for _ in range(40):
-        rc.mn_go(w)
+        rc.mn_fiber(w)
     wg.wait()
     sys.stdout.write("SLEEP_BUDGET_OK\n")
 runloom.run(4, main)
@@ -1719,8 +1719,8 @@ def test_hub_states_readable_while_hub_blocked_in_offload():
             snap["sc"] = rc._self_check(0)
             wg.done()
 
-        rc.mn_go(blocker)
-        rc.mn_go(observer)
+        rc.mn_fiber(blocker)
+        rc.mn_fiber(observer)
         wg.wait()
 
     with hang_guard(30, "hub states while blocked"):
@@ -1779,7 +1779,7 @@ for cyc in range(25):
     def blocker():
         rc.blocking(lambda: (time.sleep(0.01), 1)[1])
     for _ in range(20):
-        rc.mn_go(blocker)
+        rc.mn_fiber(blocker)
     # let SOME enter the offload, then fini with offloads in flight
     rc.mn_run()
     rc.mn_fini()

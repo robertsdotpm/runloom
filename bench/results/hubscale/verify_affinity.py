@@ -32,7 +32,7 @@ def w(i):
 
 
 def root():
-    runloom_c.go_n(w, N, indexed=True)
+    runloom_c.fiber_n(w, N, indexed=True)
 
 
 runloom.run(H, root)

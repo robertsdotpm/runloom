@@ -59,9 +59,9 @@ def stopper():
     stop[0]=True
     for _ in range(NCOLL): done.recv()
 runloom_c.mn_init(NHUB)
-for _ in range(NCOLL): runloom_c.mn_go(collector)
-for _ in range(NWORK): runloom_c.mn_go(worker)
-runloom_c.mn_go(stopper)
+for _ in range(NCOLL): runloom_c.mn_fiber(collector)
+for _ in range(NWORK): runloom_c.mn_fiber(worker)
+runloom_c.mn_fiber(stopper)
 runloom_c.mn_run(); runloom_c.mn_fini()
 assert runloom_c._self_check(0)==0, "self_check"
 print("PASS")

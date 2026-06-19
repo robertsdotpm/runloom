@@ -41,8 +41,8 @@ def run(quantum_us, label):
     if quantum_us > 0:
         runloom_c.preempt_init(quantum_us)
     try:
-        runloom_c.go(lambda: busy_loop(8_000_000, marker))
-        runloom_c.go(lambda: reader(marker, 10))
+        runloom_c.fiber(lambda: busy_loop(8_000_000, marker))
+        runloom_c.fiber(lambda: reader(marker, 10))
         runloom_c.run()
     finally:
         if quantum_us > 0:

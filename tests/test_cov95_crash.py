@@ -339,7 +339,7 @@ def make(i):
         done[i] = 1
     return w
 for i in range(N):
-    rc.mn_go(make(i))
+    rc.mn_fiber(make(i))
 rc.mn_run()
 # mn_fini joins+exits every hub thread -> runloom_coro_thread_fini ->
 # runloom_crash_thread_disarm BODY (armed, so it SS_DISABLEs + munmaps).

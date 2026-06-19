@@ -92,7 +92,7 @@ def body(H):
             H.sleep(1.0)
             gc.collect()
 
-    H.go(auditor)
+    H.fiber(auditor)
     H.run_pool(H.funcs, worker, H.state)
 
 

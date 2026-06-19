@@ -63,7 +63,7 @@ def accept_loop(srv):
             except OSError:
                 break
             track(conn)
-            runloom.go(echo_conn, conn)
+            runloom.fiber(echo_conn, conn)
     except OSError:
         pass
 
@@ -87,9 +87,9 @@ def main():
     srv.bind(("127.0.0.1", 0))
     srv.listen(128)
     addr = srv.getsockname()
-    runloom.go(accept_loop, srv)
+    runloom.fiber(accept_loop, srv)
     for _ in range(24):
-        runloom.go(client, addr)
+        runloom.fiber(client, addr)
     runloom.sleep(0.05)                  # let live traffic actually start
     sys.stdout.write("DONE-MARKER\n"); sys.stdout.flush()
     if MODE == "abrupt":

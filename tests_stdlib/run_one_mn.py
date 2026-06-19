@@ -80,16 +80,16 @@ def main():
 
     if mode == "go":
         if stack > 0:
-            rc.go(body, stack)
+            rc.fiber(body, stack)
         else:
-            rc.go(body)
+            rc.fiber(body)
         mn_rc = rc.run()
     else:
         rc.mn_init(hubs)
         if stack > 0:
-            rc.mn_go(body, stack)   # roomy stack for deep stdlib C bursts
+            rc.mn_fiber(body, stack)   # roomy stack for deep stdlib C bursts
         else:
-            rc.mn_go(body)          # hub default (128 KB) -- raw crash baseline
+            rc.mn_fiber(body)          # hub default (128 KB) -- raw crash baseline
         mn_rc = rc.mn_run()
         rc.mn_fini()
 

@@ -301,7 +301,7 @@ def _wake_storm(spawn, drive, n):
 def test_wake_storm_single_thread():
     N = 300
     with hang_guard(40, "wake storm single-thread"):
-        total = _wake_storm(rc.go, lambda m: (rc.fiber(m), rc.run()), N)
+        total = _wake_storm(rc.fiber, lambda m: (rc.fiber(m), rc.run()), N)
     assert total == N, "edge-drop: only %d/%d readers woke" % (total, N)
 
 
@@ -310,11 +310,11 @@ def test_wake_storm_across_mn_hubs():
     N = 400
     def drive(main):
         rc.mn_init(4)
-        rc.mn_go(main)
+        rc.mn_fiber(main)
         rc.mn_run()
         rc.mn_fini()
     with hang_guard(60, "wake storm M:N"):
-        total = _wake_storm(rc.mn_go, drive, N)
+        total = _wake_storm(rc.mn_fiber, drive, N)
     assert total == N, "edge-drop under M:N: only %d/%d readers woke" % (total, N)
 
 

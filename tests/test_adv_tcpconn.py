@@ -198,7 +198,7 @@ def test_tcpconn_echo_under_mn():
         def acceptor():
             for _ in range(N):
                 conn = lst.accept()
-                rc.mn_go(lambda conn=conn: (conn.send_all(b"x:" + conn.recv(64)), conn.close()))
+                rc.mn_fiber(lambda conn=conn: (conn.send_all(b"x:" + conn.recv(64)), conn.close()))
 
         def client(i):
             try:
@@ -211,9 +211,9 @@ def test_tcpconn_echo_under_mn():
             finally:
                 wg.done()
 
-        rc.mn_go(acceptor)
+        rc.mn_fiber(acceptor)
         for i in range(N):
-            rc.mn_go(lambda i=i: client(i))
+            rc.mn_fiber(lambda i=i: client(i))
         wg.wait()
         lst.close()
     with hang_guard(60, "tcpconn M:N"):

@@ -27,7 +27,7 @@ import runloom_c
 
 def go1(fn):
     """Run one short, non-blocking goroutine to completion."""
-    runloom_c.go(fn)
+    runloom_c.fiber(fn)
     runloom_c.run()
 
 

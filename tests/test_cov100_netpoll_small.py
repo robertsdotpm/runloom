@@ -133,7 +133,7 @@ def test_fault_inject_wellformed_spec_does_inject_contrast():
             os.close(r); os.close(w)
             sys.stdout.write("READ:%d:%s\n" % (n, bytes(buf[:n]).decode()))
             sys.stdout.write("FIRED:%d\n" % rc._fault_count("FD_READ"))
-        def driver(): rc.mn_go(main)
+        def driver(): rc.mn_fiber(main)
         runloom.run(2, driver)
     """, env_extra={"RUNLOOM_FAULT_FD_READ": "once:11"})
     assert p.returncode == 0, p.stderr[-1500:]
@@ -209,20 +209,20 @@ def test_reset_after_fork_memsets():
             def w():
                 rc.sched_yield()
                 rc.tcp_send(b.fileno(), tag)
-            rc.mn_go(w)
+            rc.mn_fiber(w)
             r = rc.wait_fd(a.fileno(), 1, 5000)   # real epoll park+wake: alloc by_fd + reg bitmap
             assert r == 1, (tag, r)
             buf = bytearray(1); rc.tcp_recv(a.fileno(), buf, 1)
             rc.netpoll_unregister(a.fileno()); a.close()
             rc.netpoll_unregister(b.fileno()); b.close()
 
-        def driver(): rc.mn_go(lambda: park_once(b"P"))
+        def driver(): rc.mn_fiber(lambda: park_once(b"P"))
         runloom.run(2, driver)            # parent: by_fd[] + registered_bm now non-NULL
 
         pid = os.fork()
         if pid == 0:
             try:
-                def cd(): rc.mn_go(lambda: park_once(b"C"))   # reset ran at fork; re-park
+                def cd(): rc.mn_fiber(lambda: park_once(b"C"))   # reset ran at fork; re-park
                 runloom.run(2, cd)
                 os._exit(0)
             except BaseException as e:
@@ -252,13 +252,13 @@ def test_pump_claim_via_epoll_data_event():
         def writer():
             rc.sched_yield(); rc.sched_yield()
             rc.tcp_send(b.fileno(), b"X")     # make 'a' readable -> epoll pump dispatch
-        rc.mn_go(writer)
+        rc.mn_fiber(writer)
         res["r"] = rc.wait_fd(a.fileno(), 1, 5000)   # park READ; pump_claim wakes it
         buf = bytearray(1); rc.tcp_recv(a.fileno(), buf, 1)
         res["data"] = bytes(buf)
         rc.netpoll_unregister(a.fileno()); a.close()
         rc.netpoll_unregister(b.fileno()); b.close()
-    def driver(): rc.mn_go(main)
+    def driver(): rc.mn_fiber(main)
     with hang_guard(30, "pump_claim epoll"):
         runloom.run(2, driver)
     assert res["r"] == 1, res          # READ readiness delivered by the pump claim
@@ -292,11 +292,11 @@ def test_pump_claim_on_peer_reset():
             cli.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER,
                            struct.pack("ii", 1, 0))
             cli.close()
-        rc.mn_go(resetter)
+        rc.mn_fiber(resetter)
         # park READ; the RST wakes us through the pump's error-fold -> pump_claim.
         res["r"] = rc.wait_fd(conn.fileno(), 1, 5000)
         rc.netpoll_unregister(conn.fileno()); conn.close(); srv.close()
-    def driver(): rc.mn_go(main)
+    def driver(): rc.mn_fiber(main)
     with hang_guard(30, "pump_claim RST"):
         runloom.run(2, driver)
     # A reset must wake the reader (READ bit set by the error fold), never hang.
@@ -320,7 +320,7 @@ def test_drain_expired_timeout_claim():
         res["r"] = rc.wait_fd(a.fileno(), 1, 40)   # 40ms; nobody writes -> drain_expired
         res["dt"] = time.monotonic() - t0
         rc.netpoll_unregister(a.fileno()); a.close(); b.close()
-    def driver(): rc.mn_go(main)
+    def driver(): rc.mn_fiber(main)
     with hang_guard(30, "drain_expired"):
         runloom.run(2, driver)
     assert res["r"] == 0, res                  # 0 == timeout (drain_expired set ready=0)
@@ -375,7 +375,7 @@ def test_pump_iouring_ring_eventfd_match():
                 finally:
                     wg.done()
             for cid in range(N):
-                rc.mn_go(lambda cid=cid: client(cid))
+                rc.mn_fiber(lambda cid=cid: client(cid))
             wg.wait()
             for L in listeners: L.close()
             assert sum(res.values()) == N, res
@@ -415,7 +415,7 @@ def test_parker_link_ghost_churn_beststeffort():
             def writer():
                 rc.sched_yield()
                 rc.tcp_send(b.fileno(), b"x")
-            rc.mn_go(writer)
+            rc.mn_fiber(writer)
             r = rc.wait_fd(a.fileno(), 1, 2000)
             assert r == 1, r
             buf = bytearray(1); rc.tcp_recv(a.fileno(), buf, 1)
@@ -423,7 +423,7 @@ def test_parker_link_ghost_churn_beststeffort():
         rc.netpoll_unregister(a.fileno()); a.close()
         rc.netpoll_unregister(b.fileno()); b.close()
         res["ok"] = 1
-    def driver(): rc.mn_go(main)
+    def driver(): rc.mn_fiber(main)
     with hang_guard(60, "parker ghost churn"):
         runloom.run(4, driver)
     assert res["ok"] == 1

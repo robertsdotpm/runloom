@@ -101,7 +101,7 @@ def body(H):
     H.state["counter"] = [0]
     H.state["drained"] = 0
 
-    H.go(queue_drainer, H)
+    H.fiber(queue_drainer, H)
     # Spawn the real OS threads (foreign to the scheduler).  start_new_thread is
     # the pre-patch _thread entry point, so these are genuine OS threads.
     for tid in range(NTHREADS):

@@ -42,7 +42,7 @@ def _spawn(fn):
     otherwise After/Tick/Timer/Ticker hang under mn_run because nothing drains
     the single-thread queue.  mn_hub_count() > 0 means mn_init() is in effect,
     so route through mn_go; else use the single-thread go.  Reading
-    runloom_c.go / mn_go at call time also picks up monkey's
+    runloom_c.fiber / mn_go at call time also picks up monkey's
     fiber-context wrapper when patch() is active."""
     if runloom_c.mn_hub_count() > 0:
         return runloom_c.mn_fiber(fn)

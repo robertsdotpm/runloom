@@ -73,7 +73,7 @@ def reader(H, wid, rng, state):
 
 
 def body(H):
-    H.go(writer, H)
+    H.fiber(writer, H)
     H.run_pool(H.funcs, reader, H.state)
 
 

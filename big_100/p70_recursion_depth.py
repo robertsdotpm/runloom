@@ -90,7 +90,7 @@ def body(H):
     def probe():
         done.append(measure_ceiling())
 
-    H.go(probe)
+    H.fiber(probe)
     while not done and H.running():
         H.sleep(0.01)
     if done:

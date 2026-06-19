@@ -564,7 +564,7 @@ def gather(*callables):
             wg.done()
 
     # Spawn on whichever scheduler is live: mn_go under M:N (run/mn_run), else
-    # the single-thread go.  A runner spawned via runloom_c.go never runs under
+    # the single-thread go.  A runner spawned via runloom_c.fiber never runs under
     # mn_run, so wg.wait() would hang -- same routing as monkey's _spawn helper.
     mn = runloom_c.mn_hub_count() > 0
     for i, fn in enumerate(callables):

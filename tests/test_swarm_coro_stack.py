@@ -283,9 +283,9 @@ def test_mn_fiber_stack_arg_edges():
     done = bytearray(3)
 
     def main():
-        rc.mn_go(lambda: done.__setitem__(0, 1), 0)
-        rc.mn_go(lambda: done.__setitem__(1, 1), -5)
-        rc.mn_go(lambda: done.__setitem__(2, 1), 65536)      # tiny pinned
+        rc.mn_fiber(lambda: done.__setitem__(0, 1), 0)
+        rc.mn_fiber(lambda: done.__setitem__(1, 1), -5)
+        rc.mn_fiber(lambda: done.__setitem__(2, 1), 65536)      # tiny pinned
         for _ in range(20):
             rc.sched_yield()
     with hang_guard(20, "mn_go stack edges"):
@@ -309,7 +309,7 @@ def test_mn_fiber_huge_stack_should_clamp_like_single_thread():
     def main():
         try:
             # mirror the single-thread go(fn, 1<<62) which clamps + runs
-            rc.mn_go(lambda: box.__setitem__("r", 1), 1 << 62)
+            rc.mn_fiber(lambda: box.__setitem__("r", 1), 1 << 62)
         except MemoryError:
             caught.append(MemoryError)
         for _ in range(20):
@@ -344,10 +344,10 @@ rc.install_crash_handler("backtrace")
 def f():
     rc._crash_selftest_overflow()
 def main():
-    rc.mn_go(lambda: f(), 65536)
+    rc.mn_fiber(lambda: f(), 65536)
     for _ in range(50):
         rc.sched_yield()
-rc.mn_init(2); rc.mn_go(main); rc.mn_run(); rc.mn_fini()
+rc.mn_init(2); rc.mn_fiber(main); rc.mn_run(); rc.mn_fini()
 print("UNREACHABLE")
 '''
 
@@ -685,7 +685,7 @@ def test_prewarm_keep_daemon_under_concurrent_mn_spawn_storm():
                 finally:
                     wg.done()
             for i in range(600):
-                rc.mn_go(lambda i=i: w(i))
+                rc.mn_fiber(lambda i=i: w(i))
             wg.wait()
         with hang_guard(45, "prewarm_keep + mn storm"):
             runloom.run(4, main)
@@ -845,7 +845,7 @@ def test_machinecode_runs_across_mn_fibers():
     def main():
         ch = rc.Chan()
         for n in range(N):
-            rc.mn_go(lambda n=n: worker(n, ch))
+            rc.mn_fiber(lambda n=n: worker(n, ch))
         got = {}
         for _ in range(N):
             (n, v), ok = ch.recv()
@@ -1202,7 +1202,7 @@ def test_machinecode_create_close_churn_across_mn_hubs():
     def main():
         wg = WaitGroup(); wg.add(N)
         for n in range(N):
-            rc.mn_go(lambda n=n: worker(n, wg))
+            rc.mn_fiber(lambda n=n: worker(n, wg))
         wg.wait()
     with hang_guard(30, "mn machinecode churn"):
         runloom.run(3, main)
@@ -1251,7 +1251,7 @@ def test_current_g_hwm_inside_mn_hub_fiber():
         def f():
             sum(bytes(8192))               # touch >1 page of C stack
             box["hwm"] = rc.current_g_hwm()
-        rc.mn_go(f, 262144)
+        rc.mn_fiber(f, 262144)
         for _ in range(40):
             rc.sched_yield()
     with hang_guard(20, "mn hwm"):
@@ -1276,7 +1276,7 @@ def test_stack_advice_records_and_resets_cleanly_under_mn():
             def w():
                 json.dumps({"a": [1, [2, [3, [4]]]]})
             for _ in range(60):
-                rc.mn_go(w)
+                rc.mn_fiber(w)
             for _ in range(40):
                 rc.sched_yield()
         with hang_guard(25, "advice under mn"):
@@ -1368,7 +1368,7 @@ def test_fiber_stack_on_live_mn_parked_fiber():
     def main():
         ch = rc.Chan(0)
         for _ in range(16):
-            rc.mn_go(lambda: ch.recv())
+            rc.mn_fiber(lambda: ch.recv())
         for _ in range(10):
             rc.sched_yield()
         fl = rc.fibers()

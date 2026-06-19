@@ -31,7 +31,7 @@ def spawn_tree(H, depth, done):
     counts completions so the root can verify the full count."""
     if depth > 0:
         for _ in range(BRANCH):
-            H.go(spawn_tree, H, depth - 1, done)
+            H.fiber(spawn_tree, H, depth - 1, done)
     done.send(1)
 
 
@@ -43,7 +43,7 @@ def worker(H, wid, rng, state):
     total = expected_nodes()
     while H.running():
         done = runloom.Chan(total)
-        H.go(spawn_tree, H, DEPTH, done)
+        H.fiber(spawn_tree, H, DEPTH, done)
         seen = 0
         while seen < total:
             done.recv()

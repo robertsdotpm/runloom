@@ -111,8 +111,8 @@ rc.mn_init(1)                       # single hub: no neighbour to steal the work
 # Workers first (queued), blocker LAST so the deque LIFO pop wedges the hub on it
 # while the workers are still in the deque for the rescue thread to steal.
 for i in range(NWORK):
-    rc.mn_go(lambda i=i: worker(i))
-rc.mn_go(blocker)
+    rc.mn_fiber(lambda i=i: worker(i))
+rc.mn_fiber(blocker)
 rc.mn_run()
 rc.mn_fini()
 sys.stdout.write("HANDOFF_OK %d %d\n" % (sum(rescued), res["during"]))
@@ -282,8 +282,8 @@ def cycle():
     def blocker(): time.sleep(0.25)
     rc.mn_init(1)
     for i in range(NWORK):
-        rc.mn_go(lambda i=i: worker(i))
-    rc.mn_go(blocker)
+        rc.mn_fiber(lambda i=i: worker(i))
+    rc.mn_fiber(blocker)
     rc.mn_run()
     rc.mn_fini()
     return sum(rescued)

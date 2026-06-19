@@ -30,9 +30,9 @@ def worker(wid, delay):
     got.append(wid)
 # 6 same-delay workers (pure scheduling order) + 3 staggered (distinct deadlines)
 for i in range(6):
-    runloom_c.mn_go(lambda i=i: worker(i, 0.002))
+    runloom_c.mn_fiber(lambda i=i: worker(i, 0.002))
 for j in range(3):
-    runloom_c.mn_go(lambda j=j: worker(100 + j, 0.001 * (j + 1)))
+    runloom_c.mn_fiber(lambda j=j: worker(100 + j, 0.001 * (j + 1)))
 runloom_c.mn_run(); runloom_c.mn_fini()
 # conservation: every worker recorded exactly once
 ok = sorted(got) == sorted([0,1,2,3,4,5,100,101,102])

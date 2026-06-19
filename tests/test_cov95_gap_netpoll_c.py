@@ -139,7 +139,7 @@ def test_cancel_all_parked_wakes_idle_fd_parker():
             # idle fd: nothing writes or closes it, so only the cancel wakes us.
             res["r"] = rc.wait_fd(a.fileno(), 1, 5000)
 
-        rc.mn_go(parker)
+        rc.mn_fiber(parker)
         # Wait until the parker is genuinely parked (cross-hub safe via a real
         # logical sleep rather than a same-hub sched_yield).
         t0 = time.monotonic()
@@ -157,7 +157,7 @@ def test_cancel_all_parked_wakes_idle_fd_parker():
         b.close()
 
     with hang_guard(30, "cancel_all_parked"):
-        runloom.run(2, lambda: rc.mn_go(main))
+        runloom.run(2, lambda: rc.mn_fiber(main))
 
     assert res.get("parked_before") == 1, res          # the parker really parked
     assert res.get("n") == 1, res                       # exactly one cancelled
@@ -216,7 +216,7 @@ def test_cancel_all_parked_empty_is_clean_noop():
         res["n1"] = rc.cancel_all_parked()
 
     with hang_guard(20, "cancel_all_parked noop"):
-        runloom.run(2, lambda: rc.mn_go(main))
+        runloom.run(2, lambda: rc.mn_fiber(main))
     assert res.get("n0") == 0, res
     assert res.get("n1") == 0, res
 
@@ -303,7 +303,7 @@ _MN_RING = r"""
             rc.sched_yield()
     def drv():
         for _ in range(6):
-            rc.mn_go(worker)
+            rc.mn_fiber(worker)
     runloom.run(2, drv)
     sys.stdout.write("MN_RING_OK\n")
 """
@@ -406,19 +406,19 @@ def test_reset_after_fork_memsets():
             def w():
                 rc.sched_yield()
                 rc.tcp_send(b.fileno(), tag)
-            rc.mn_go(w)
+            rc.mn_fiber(w)
             r = rc.wait_fd(a.fileno(), 1, 5000)   # epoll park+wake: alloc by_fd + reg bitmap
             assert r == 1, (tag, r)
             buf = bytearray(1); rc.tcp_recv(a.fileno(), buf, 1)
             rc.netpoll_unregister(a.fileno()); a.close()
             rc.netpoll_unregister(b.fileno()); b.close()
 
-        runloom.run(2, lambda: rc.mn_go(lambda: park_once(b"P")))  # parent: by_fd[]+bitmap now set
+        runloom.run(2, lambda: rc.mn_fiber(lambda: park_once(b"P")))  # parent: by_fd[]+bitmap now set
 
         pid = os.fork()
         if pid == 0:
             try:
-                runloom.run(2, lambda: rc.mn_go(lambda: park_once(b"C")))  # reset ran at fork
+                runloom.run(2, lambda: rc.mn_fiber(lambda: park_once(b"C")))  # reset ran at fork
                 gcov_dump()
                 os._exit(0)
             except BaseException as e:
@@ -499,13 +499,13 @@ def test_fd_cap_target_rlim_cur_fallback(tmp_path):
             a.setblocking(False); b.setblocking(False)
             def w():
                 rc.sched_yield(); rc.tcp_send(b.fileno(), b"x")
-            rc.mn_go(w)
+            rc.mn_fiber(w)
             r = rc.wait_fd(a.fileno(), 1, 5000)
             assert r == 1, r
             buf = bytearray(1); rc.tcp_recv(a.fileno(), buf, 1)
             rc.netpoll_unregister(a.fileno()); a.close()
             rc.netpoll_unregister(b.fileno()); b.close()
-        runloom.run(2, lambda: rc.mn_go(park_once))
+        runloom.run(2, lambda: rc.mn_fiber(park_once))
         sys.stdout.write("RLIM_OK\n")
     """, preload=str(so), timeout=45)
     assert p.returncode == 0, p.stderr[-1500:]

@@ -1,6 +1,6 @@
 """Pure 1M-coroutine STARTUP cost (no run).
 
-Times runloom_c.go_n(noop, N) with RUNLOOM_GON_NOSUBMIT=1: the bulk path builds
+Times runloom_c.fiber_n(noop, N) with RUNLOOM_GON_NOSUBMIT=1: the bulk path builds
 the g-arena + coro-arena (+ stacks) but never publishes to the hubs, so nothing
 runs.  This isolates creation cost.  Compare RUNLOOM_GON_FRESH=0 (eager
 asm_make_ctx -> 1M stack-top faults on this thread) vs =1 (deferred to first
@@ -32,7 +32,7 @@ def main():
     best = 1e9
     for r in range(REPS):
         t0 = time.monotonic()
-        runloom_c.go_n(noop, N)
+        runloom_c.fiber_n(noop, N)
         dt = time.monotonic() - t0
         best = min(best, dt)
         print("  rep {0}: {1:.3f}s  ({2:.0f}k spawn/s)".format(r, dt, N / dt / 1000))

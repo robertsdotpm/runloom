@@ -44,8 +44,8 @@ def proxy_conn(H, client_sock):
         backend.connect((host, int(port)))
         client_sock.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
         done = runloom.Chan(2)
-        H.go(tunnel_half, client_sock, backend, done)
-        H.go(tunnel_half, backend, client_sock, done)
+        H.fiber(tunnel_half, client_sock, backend, done)
+        H.fiber(tunnel_half, backend, client_sock, done)
         done.recv()
         done.recv()
     except OSError:
@@ -62,8 +62,8 @@ def setup(H):
     H.state = {"host": host, "proxy_port": pxy.getsockname()[1],
                "backend_port": backend_port}
 
-    H.go(netutil.serve_forever, H, pxy,
-         lambda conn, addr: H.go(proxy_conn, H, conn))
+    H.fiber(netutil.serve_forever, H, pxy,
+         lambda conn, addr: H.fiber(proxy_conn, H, conn))
 
 
 def client(H, wid, rng, state):

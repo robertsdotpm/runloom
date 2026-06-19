@@ -131,7 +131,7 @@ def body(H):
             H.sleep(1.0)
         H.log("fd_ceiling={0}".format(H.fd_ceiling))
 
-    H.go(auditor)
+    H.fiber(auditor)
 
 
 if __name__ == "__main__":

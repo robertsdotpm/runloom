@@ -53,7 +53,7 @@ def make_mn(hubs):
     hub counts.  mn_run is reusable after a single mn_init.
     """
     mn_init, mn_go, mn_run, mn_fini = (
-        runloom_c.mn_init, runloom_c.mn_go, runloom_c.mn_run, runloom_c.mn_fini)
+        runloom_c.mn_init, runloom_c.mn_fiber, runloom_c.mn_run, runloom_c.mn_fini)
 
     def setup():
         mn_init(hubs)

@@ -33,12 +33,12 @@ def setup(H):
     # Spread the IPv4 side across one listener per loopback IP so accepts don't
     # serialize under the connect storm; clients pick a v4 server per attempt.
     state["v4_servers"] = netutil.listen_all(
-        H, lambda conn, addr: H.go(echo_handle, conn))
+        H, lambda conn, addr: H.fiber(echo_handle, conn))
     try:
         srv6 = netutil.listen_tcp("::1", family=socket.AF_INET6)
         state["v6"] = srv6.getsockname()[:2]
-        H.go(netutil.serve_forever, H, srv6,
-             lambda conn, addr: H.go(echo_handle, conn))
+        H.fiber(netutil.serve_forever, H, srv6,
+             lambda conn, addr: H.fiber(echo_handle, conn))
     except OSError:
         state["v6"] = None      # no IPv6 loopback on this box -> v4 always wins
     H.state = state
@@ -68,8 +68,8 @@ def client(H, wid, rng, state):
         j4 = rng.random() * 0.01
         j6 = rng.random() * 0.01
         v4addr = netutil.pick_server(state["v4_servers"], rng)
-        H.go(connector, socket.AF_INET, v4addr, j4, result)
-        H.go(connector, socket.AF_INET6, state["v6"], j6, result)
+        H.fiber(connector, socket.AF_INET, v4addr, j4, result)
+        H.fiber(connector, socket.AF_INET6, state["v6"], j6, result)
 
         winner = None
         loser = None

@@ -161,7 +161,7 @@ def test_single_hub_disarm_runs_body_deterministically():
         "        done[i] = 1\n"
         "    return w\n"
         "for i in range(N):\n"
-        "    rc.mn_go(make(i))\n"
+        "    rc.mn_fiber(make(i))\n"
         "rc.mn_run()\n"
         # mn_fini exits the single hub thread -> runloom_coro_thread_fini ->
         # runloom_crash_thread_disarm BODY (armed, so SS_DISABLE + munmap).

@@ -134,7 +134,7 @@ def main():
         done[0] += 1
         return i
     for i in range(64):
-        rc.mn_go(lambda i=i: w(i))
+        rc.mn_fiber(lambda i=i: w(i))
     rc.sched_sleep(0.1)
 runloom.run(3, main)
 sys.stdout.write("DONE\n")
@@ -229,7 +229,7 @@ def main():
         finally:
             wg.done()
     for i in range(N):
-        rc.mn_go(lambda i=i: client(i))
+        rc.mn_fiber(lambda i=i: client(i))
     wg.wait()
     for ln in lst: ln.close()
 runloom.run(4, main)
@@ -282,7 +282,7 @@ def main():
         finally:
             wg.done()
     for i in range(N):
-        rc.mn_go(lambda i=i: client(i))
+        rc.mn_fiber(lambda i=i: client(i))
     wg.wait()
     for ln in lst: ln.close()
 runloom.run(4, main)
@@ -337,7 +337,7 @@ def main():
         finally:
             wg.done()
     for i in range(N):
-        rc.mn_go(lambda i=i: client(i))
+        rc.mn_fiber(lambda i=i: client(i))
     wg.wait()
     rc.sched_sleep(0.2)
     for ln in lst: ln.close()
@@ -390,7 +390,7 @@ def main():
         finally:
             wg.done()
     for i in range(N):
-        rc.mn_go(lambda i=i: client(i))
+        rc.mn_fiber(lambda i=i: client(i))
     wg.wait()
     rc.sched_sleep(0.2)
     for ln in lst: ln.close()

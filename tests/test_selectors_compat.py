@@ -9,7 +9,7 @@ return codes, the same KeyError / ValueError fault behaviour -- but a
 fiber blocked in select() now yields the OS thread to its siblings
 instead of freezing the scheduler.
 
-Run under the C scheduler (runloom_c.go / runloom_c.run), which is the path
+Run under the C scheduler (runloom_c.fiber / runloom_c.run), which is the path
 the monkey-patches target.
 """
 import errno

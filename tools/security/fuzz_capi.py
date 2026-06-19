@@ -33,7 +33,7 @@ import runloom_c  # noqa: E402
 def _reentrant_spawn():
     # a callback that re-enters the API from inside a goroutine
     try:
-        runloom_c.go(lambda: None)
+        runloom_c.fiber(lambda: None)
     except Exception:  # noqa: BLE001
         pass
 
@@ -128,13 +128,13 @@ def targeted(rng):
     for bad in (None, 5, "f", object(), _Boom()):
         _log("go", (bad,))
         try:
-            runloom_c.go(bad)
+            runloom_c.fiber(bad)
         except OK_EXC:
             pass
     _log("go+run", ("raiser/reentrant",))
     try:
-        runloom_c.go(_raiser)
-        runloom_c.go(_reentrant_spawn)
+        runloom_c.fiber(_raiser)
+        runloom_c.fiber(_reentrant_spawn)
         runloom_c.run()
     except OK_EXC:
         pass

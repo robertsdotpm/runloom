@@ -29,10 +29,10 @@ SENTINEL = 0xDEADBEEFCAFEF00D
 def leaked_points(scrub):
     runloom_c.set_stack_scrub(scrub)
     runloom_c.set_stack_size(128 * 1024)
-    runloom_c.go(lambda: lib.write_sentinel(SENTINEL))
+    runloom_c.fiber(lambda: lib.write_sentinel(SENTINEL))
     runloom_c.run()                                  # A done -> stack recycled
     r = {}
-    runloom_c.go(lambda: r.__setitem__("h", lib.read_recorded(SENTINEL)))
+    runloom_c.fiber(lambda: r.__setitem__("h", lib.read_recorded(SENTINEL)))
     runloom_c.run()                                  # B reuses the stack
     return r["h"]
 

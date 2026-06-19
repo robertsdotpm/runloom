@@ -117,7 +117,7 @@ def deadlock_mode():
 
 def set_max_fibers(n):
     """Cap the number of live fibers (0 = unlimited, the default).  Over
-    the cap, runloom.go / spawn raises RuntimeError -- an admission gate so an
+    the cap, runloom.fiber / spawn raises RuntimeError -- an admission gate so an
     unbounded spawn loop can't OOM the process.  The caller applies
     backpressure (retry / shed load) on the rejection.  Zero hot-path cost
     when unset; also via env RUNLOOM_MAX_GOROUTINES."""

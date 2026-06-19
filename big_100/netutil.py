@@ -149,7 +149,7 @@ def listen_all(H, on_conn, backlog=4096, family=socket.AF_INET):
         srv = listen_tcp(host=ip, backlog=backlog, family=family)
         H.register_close(srv)
         name = srv.getsockname()
-        H.go(serve_forever, H, srv, on_conn)
+        H.fiber(serve_forever, H, srv, on_conn)
         servers.append((name[0], name[1]))
     return servers
 
@@ -191,7 +191,7 @@ def start_echo_server(H, host=None):
             except OSError:
                 pass
 
-    H.go(serve_forever, H, srv, lambda conn, addr: H.go(handler, conn))
+    H.fiber(serve_forever, H, srv, lambda conn, addr: H.fiber(handler, conn))
     return port
 
 

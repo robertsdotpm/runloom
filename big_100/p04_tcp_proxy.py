@@ -45,8 +45,8 @@ def proxy_conn(H, client_sock, backend_addr):
         netutil.close_quiet(backend)
         return
     done = runloom.Chan(2)
-    H.go(pipe, client_sock, backend, done)
-    H.go(pipe, backend, client_sock, done)
+    H.fiber(pipe, client_sock, backend, done)
+    H.fiber(pipe, backend, client_sock, done)
     # Join both halves (each ends on a network FIN, never a forced close)
     # before tearing the fds down, so neither half is parked at close time.
     done.recv()
@@ -59,7 +59,7 @@ def setup(H):
     backend_port = netutil.start_echo_server(H)
     backend_addr = (netutil._DEFAULT_HOST, backend_port)
     servers = netutil.listen_all(
-        H, lambda conn, addr: H.go(proxy_conn, H, conn, backend_addr))
+        H, lambda conn, addr: H.fiber(proxy_conn, H, conn, backend_addr))
     H.state = {"servers": servers}
 
 

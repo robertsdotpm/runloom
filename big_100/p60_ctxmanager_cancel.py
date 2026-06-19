@@ -45,7 +45,7 @@ def worker(H, wid, rng, state):
     while H.running():
         ctx, cancel = cancelutil.WithCancel(cancelutil.Background())
         if rng.random() < 0.5:
-            H.go(cancelutil.delayed_cancel, cancel, rng.uniform(0.0, 0.008))
+            H.fiber(cancelutil.delayed_cancel, cancel, rng.uniform(0.0, 0.008))
         try:
             with Resource(state):
                 with state["lock"]:

@@ -65,7 +65,7 @@ def setup(H):
             netutil.close_quiet(conn)
 
     state["servers"] = netutil.listen_all(
-        H, lambda conn, addr: H.go(tcp_handle, conn))
+        H, lambda conn, addr: H.fiber(tcp_handle, conn))
 
     def udp_server():
         try:
@@ -80,7 +80,7 @@ def setup(H):
         finally:
             netutil.close_quiet(udp)
 
-    H.go(udp_server)
+    H.fiber(udp_server)
 
     def aggregator():
         while H.running():
@@ -93,7 +93,7 @@ def setup(H):
             except OSError:
                 pass
 
-    H.go(aggregator)
+    H.fiber(aggregator)
 
 
 def tcp_client(H, wid, rng, state):

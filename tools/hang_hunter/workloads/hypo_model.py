@@ -73,9 +73,9 @@ def run_program(p):
 
     runloom_c.mn_init(nhub)
     for s in specs:
-        runloom_c.mn_go(mk(s))
+        runloom_c.mn_fiber(mk(s))
     for _ in range(ncoll):
-        runloom_c.mn_go(collector)
+        runloom_c.mn_fiber(collector)
 
     def reaper():
         for _ in range(len(specs)):
@@ -84,7 +84,7 @@ def run_program(p):
         for _ in range(ncoll):
             done.recv()
 
-    runloom_c.mn_go(reaper)
+    runloom_c.mn_fiber(reaper)
     runloom_c.mn_run()
     runloom_c.mn_fini()
     assert runloom_c._self_check(0) == 0, "self_check failed for {0}".format(p)

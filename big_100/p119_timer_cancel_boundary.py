@@ -41,7 +41,7 @@ def worker(H, wid, rng, state):
         # worker already resolved on the timeout branch.
         ch = runloom.Chan(1)
         d = rng.uniform(0.0005, 0.004)
-        H.go(helper, ch, d)
+        H.fiber(helper, ch, d)
         # Timer fires at ~d with jitter so the two genuinely race.
         dprime = d + rng.uniform(-0.0015, 0.0015)
         if dprime < 0.0:

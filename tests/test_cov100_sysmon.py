@@ -136,21 +136,21 @@ def main():
     # Queue the fresh fibers FIRST so they pile into the per-hub deques, where the
     # rescue can steal them while the hubs are wedged.
     for i in range(NFRESH):
-        rc.mn_go(lambda i=i: fresh(i))
+        rc.mn_fiber(lambda i=i: fresh(i))
 
     # One long DETACHED blocker per hub: real builtin time.sleep -> the hub
     # tstate goes DETACHED for 0.5s -> a stable wedge the rescue pool adopts.
     def blocker():
         time.sleep(0.5)
     for _ in range(NHUBS):
-        rc.mn_go(blocker)
+        rc.mn_fiber(blocker)
 
     # Exactly one sender per flavor-2 receiver so every chan-parked fiber is
     # woken and completes; nobody is stranded and the channel is never closed
     # under a queued sender.
     nrecv = sum(1 for i in range(NFRESH) if i % 3 == 2)
     for _ in range(nrecv):
-        rc.mn_go(lambda: ch.send(1))
+        rc.mn_fiber(lambda: ch.send(1))
 
     wg.wait()                              # cooperative park until ALL fresh done
     R["ran"] = sum(ran)
@@ -198,12 +198,12 @@ def main():
         finally:
             wg.done()
     for i in range(NFRESH):
-        rc.mn_go(lambda i=i: fresh(i))
+        rc.mn_fiber(lambda i=i: fresh(i))
 
     def blocker():
         time.sleep(0.6)                     # DETACHED wedge per hub
     for _ in range(NHUBS):
-        rc.mn_go(blocker)
+        rc.mn_fiber(blocker)
 
     wg.wait()
     R["done"] = sum(done)
@@ -248,12 +248,12 @@ def main():
         finally:
             wg.done()
     for i in range(NFRESH):
-        rc.mn_go(lambda i=i: fresh(i))
+        rc.mn_fiber(lambda i=i: fresh(i))
 
     def blocker():
         time.sleep(0.3)
     for _ in range(NHUBS):
-        rc.mn_go(blocker)
+        rc.mn_fiber(blocker)
 
     wg.wait()
     R["done"] = sum(done)

@@ -110,7 +110,7 @@ def body(H):
             base_obj,
             H.state["obj_samples"][-1] if H.state["obj_samples"] else base_obj))
 
-    H.go(auditor)
+    H.fiber(auditor)
 
 
 def post(H):

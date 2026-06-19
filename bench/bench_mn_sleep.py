@@ -42,7 +42,7 @@ def main():
     t0 = time.perf_counter()
     for i in range(N):
         secs = BASE + STEP * i
-        runloom_c.mn_go(lambda secs=secs, i=i: sleeper(secs, i, results, lock))
+        runloom_c.mn_fiber(lambda secs=secs, i=i: sleeper(secs, i, results, lock))
     runloom_c.mn_run()
     runloom_c.mn_fini()
     wall = time.perf_counter() - t0

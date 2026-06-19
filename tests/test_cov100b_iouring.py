@@ -73,7 +73,7 @@ def main():
         finally:
             wg.done()
     for i in range(N):
-        rc.mn_go(lambda i=i: client(i))
+        rc.mn_fiber(lambda i=i: client(i))
     wg.wait()
     for ln in lst:
         ln.close()
@@ -116,7 +116,7 @@ def main():
         finally:
             wg.done()
     for i in range(N):
-        rc.mn_go(lambda i=i: client(i))
+        rc.mn_fiber(lambda i=i: client(i))
     wg.wait()
     for ln in lst: ln.close()
 runloom.run(4, main)
@@ -150,7 +150,7 @@ def one_round():
                 got[i] = c.recv(8); c.close()
             finally:
                 wg.done()
-        for i in range(8): rc.mn_go(lambda i=i: cl(i))
+        for i in range(8): rc.mn_fiber(lambda i=i: cl(i))
         wg.wait()
         for ln in lst: ln.close()
     runloom.run(4, main)         # each run() creates + tears down per-hub rings
@@ -189,7 +189,7 @@ def main():
         # routes through the ring); cancel_wait_fd must wake it CANCELLED, not hang
         hold["g"] = rc.current_g()
         res["rv"] = rc.wait_fd(a.fileno(), 1, -1)
-    rc.mn_go(reader)
+    rc.mn_fiber(reader)
     while "g" not in hold:
         rc.sched_yield()
     # hold["g"] is set BEFORE wait_fd commits the netpoll park, so we must not
@@ -246,7 +246,7 @@ def main():
         finally:
             os.close(fd); os.unlink(path)
     for i in range(24):
-        rc.mn_go(lambda i=i: one(i))
+        rc.mn_fiber(lambda i=i: one(i))
 runloom.run(4, main)
 sys.stdout.write("FILEIO_OK %d\n" % sum(ok))
 '''

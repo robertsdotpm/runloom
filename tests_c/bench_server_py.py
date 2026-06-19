@@ -194,7 +194,7 @@ def accept_loop():
             except (AttributeError, OSError):
                 pass
             accepted += 1
-            runloom_c.mn_go(lambda c=conn: echo_handler(c))
+            runloom_c.mn_fiber(lambda c=conn: echo_handler(c))
             if accepted >= N:
                 break
             since_yield += 1
@@ -313,11 +313,11 @@ def main(argv):
         return 2
 
     t0 = time.monotonic()
-    runloom_c.mn_go(accept_loop)
+    runloom_c.mn_fiber(accept_loop)
     if IDLE_S > 0.0:
-        runloom_c.mn_go(sampler)
+        runloom_c.mn_fiber(sampler)
     for i in range(N):
-        runloom_c.mn_go(lambda i=i: client(i))
+        runloom_c.mn_fiber(lambda i=i: client(i))
     completed = runloom_c.mn_run()
     dt = time.monotonic() - t0
 

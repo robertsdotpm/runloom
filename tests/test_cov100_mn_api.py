@@ -107,7 +107,7 @@ def main():
         res["replies"] = replies
         for L in listeners:
             L.close()
-    rc.mn_go(client)
+    rc.mn_fiber(client)
 runloom.run(4, main)
 ok = (len(res.get("replies", [])) == 12 and
       all(r == b"abcdefgh" for r in res["replies"]))
@@ -167,7 +167,7 @@ def main():
     def acceptor():
         try: acc["conn"] = lconn.accept()
         finally: wg_acc.done()
-    rc.mn_go(acceptor)
+    rc.mn_fiber(acceptor)
 
     client = rc.TCPConn.connect("127.0.0.1", port)
     wg_acc.wait()
@@ -185,7 +185,7 @@ def main():
             res["exc_type"] = type(e).__name__
         finally:
             wg.done()
-    rc.mn_go(reader)
+    rc.mn_fiber(reader)
 
     for _ in range(400):
         if "g" in holder: break
@@ -252,7 +252,7 @@ def main():
     def acceptor():
         try: acc["conn"] = lconn.accept()
         finally: wg_acc.done()
-    rc.mn_go(acceptor)
+    rc.mn_fiber(acceptor)
     client = rc.TCPConn.connect("127.0.0.1", port)
     wg_acc.wait()
     server_conn = acc["conn"]
@@ -265,7 +265,7 @@ def main():
             res["exc_errno"] = e.errno
         finally:
             wg.done()
-    rc.mn_go(reader)
+    rc.mn_fiber(reader)
     for _ in range(400):
         if "g" in holder: break
         runloom.sleep(0.003)

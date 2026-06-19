@@ -1,7 +1,7 @@
 """big_100 / 139 -- __del__ that touches the scheduler, incl. at shutdown.
 
 Objects whose __del__ tries to do SCHEDULER work -- spawn a goroutine
-(runloom.go), yield (runloom.yield_now), and/or set a runloom Event -- are
+(runloom.fiber), yield (runloom.yield_now), and/or set a runloom Event -- are
 churned through create/drop by thousands of goroutines, with periodic
 gc.collect() under load.  The finalizers fire from arbitrary points: a plain
 drop, a cyclic-GC sweep, the free-threaded biased-refcount cross-thread merge,
@@ -51,7 +51,7 @@ class Finalizes(object):
         kind = self.idx % 3
         try:
             if kind == 0:
-                runloom.go(noop)                 # spawn from a destructor
+                runloom.fiber(noop)                 # spawn from a destructor
                 with st["lock"]:
                     st["spawned"][0] += 1
             elif kind == 1:
@@ -114,7 +114,7 @@ def body(H):
             H.state["created"][0], H.state["finalized"][0],
             H.state["spawned"][0]))
 
-    H.go(gc_driver)
+    H.fiber(gc_driver)
     H.run_pool(H.funcs, worker, H.state)
 
 

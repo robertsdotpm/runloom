@@ -295,9 +295,9 @@ def test_mn_fan_in_fan_out_no_dup_no_loss():
                     break
                 collected[cid].append(v)
         for c in range(C):
-            rc.mn_go(lambda cid=c: consumer(cid))
+            rc.mn_fiber(lambda cid=c: consumer(cid))
         for p in range(P):
-            rc.mn_go(lambda pid=p: producer(pid))
+            rc.mn_fiber(lambda pid=p: producer(pid))
         wg.wait()
         ch.close()
 
@@ -338,9 +338,9 @@ def test_mn_select_across_channels_integrity():
                     finally:
                         sink_mu.unlock()
                     n += 1
-        rc.mn_go(consumer)
+        rc.mn_fiber(consumer)
         for i in range(K):
-            rc.mn_go(lambda i=i: producer(i))
+            rc.mn_fiber(lambda i=i: producer(i))
         wg.wait()
 
     with hang_guard(60, "mn select integrity"):

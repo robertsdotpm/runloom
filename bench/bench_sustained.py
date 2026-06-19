@@ -36,7 +36,7 @@ def bench(total, batch, mode):
     while spawned < total:
         n = min(batch, total - spawned)
         for _ in range(n):
-            runloom_c.go(w)
+            runloom_c.fiber(w)
         runloom_c.run()
         spawned += n
     return time.perf_counter() - t0

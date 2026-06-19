@@ -139,7 +139,7 @@ def body(H):
         state["stop"][0] = True
         H.log("thread_collects={0}".format(state["thread_collects"][0]))
 
-    H.go(gc_driver)
+    H.fiber(gc_driver)
     H.run_pool(H.funcs, worker, state)
 
 

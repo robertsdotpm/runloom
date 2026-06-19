@@ -128,7 +128,7 @@ def main(argv):
             except OSError:
                 break
             accepted[0] += 1
-            runloom.go(echo_handler, conn)
+            runloom.fiber(echo_handler, conn)
 
     def client(idx):
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -197,10 +197,10 @@ def main(argv):
 
     def root():
         for ls in listeners:
-            runloom.go(acceptor, ls)
+            runloom.fiber(acceptor, ls)
         for i in range(N):
-            runloom.go(client, i)
-        runloom.go(controller)
+            runloom.fiber(client, i)
+        runloom.fiber(controller)
         # Root waits until the controller stops the run.
         while not state["stop"]:
             runloom.sleep(0.05)

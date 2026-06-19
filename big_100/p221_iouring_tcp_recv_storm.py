@@ -232,7 +232,7 @@ def worker(H, wid, rng, state):
                 # request first, so the echo never comes and our recv parks on
                 # the ring -- then the sibling close must cancel it cleanly.
                 fired = [False]
-                H.go(closer_sibling, H, conn, fired)
+                H.fiber(closer_sibling, H, conn, fired)
                 try:
                     got = conn.recv(64)
                     # A clean orderly-shutdown (b'') from our own close is fine;

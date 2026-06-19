@@ -135,7 +135,7 @@ def setup(H):
     hold = []
     addr = (host, port)
     for _ in range(IDLE_POOL):
-        H.go(idle_holder, H, addr, hold)
+        H.fiber(idle_holder, H, addr, hold)
     H.state["idle_hold"] = hold
 
 

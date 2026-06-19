@@ -46,25 +46,25 @@ def producer(ch_idx, base):
 
 # initial consumers
 for cid in range(4):
-    runloom_c.mn_go(lambda cid=cid: consumer(cid))
+    runloom_c.mn_fiber(lambda cid=cid: consumer(cid))
 
 # a spawner goroutine that adds two more consumers mid-run
 def spawner():
-    runloom_c.mn_go(lambda: consumer(100))
-    runloom_c.mn_go(lambda: consumer(101))
-runloom_c.mn_go(spawner)
+    runloom_c.mn_fiber(lambda: consumer(100))
+    runloom_c.mn_fiber(lambda: consumer(101))
+runloom_c.mn_fiber(spawner)
 
 # producers: each channel gets two producers with distinct bases
 def boot():
     for ci in range(NCH):
-        runloom_c.mn_go(lambda ci=ci: producer(ci, ci * 2 + 1))
-        runloom_c.mn_go(lambda ci=ci: producer(ci, ci * 2 + 2))
+        runloom_c.mn_fiber(lambda ci=ci: producer(ci, ci * 2 + 1))
+        runloom_c.mn_fiber(lambda ci=ci: producer(ci, ci * 2 + 2))
     # join ALL producers (deterministic) before closing -- no send/close race
     for _ in range(NPROD):
         done.recv()
     for c in chans:
         c.close()
-runloom_c.mn_go(boot)
+runloom_c.mn_fiber(boot)
 
 runloom_c.mn_run(); runloom_c.mn_fini()
 

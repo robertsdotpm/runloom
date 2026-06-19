@@ -90,7 +90,7 @@ Backend layer:
     backends only expose submit(fn, args, kwargs).
 
 Limitations:
-    * Designed for the C scheduler (runloom_c.go / runloom_c.run).  The
+    * Designed for the C scheduler (runloom_c.fiber / runloom_c.run).  The
       pure-Python scheduler in runloom.runtime has no netpoll integration.
     * select.select with >1 fd, and select.poll(), are yield-backoff
       busy-polls (no backing fd to park on).  epoll/kqueue ARE event-driven
@@ -188,44 +188,44 @@ def __getattr__(name):
 # ============================================================
 # top-level patch() / unpatch()
 # ============================================================
-_orig_runloom_c_go = None
-_orig_runloom_c_mn_go = None
+_orig_runloom_c_fiber = None
+_orig_runloom_c_mn_fiber = None
 
 
-def _patched_runloom_c_go(fn, stack_size=0, **kwargs):
+def _patched_runloom_c_fiber(fn, stack_size=0, **kwargs):
     # runloom.runtime.fiber() calls runloom_c.fiber(target, stack_size) with the
     # stack size as a 2nd POSITIONAL arg, so this wrapper must accept and
     # forward it.  A bare (fn, **kwargs) signature raised TypeError and broke
     # every runloom.fiber() once monkey.patch() was applied (worst under M:N,
     # where runtime.go always passes the grow-down stack size).
-    return _orig_runloom_c_go(_wrap_fiber_callable(fn), stack_size, **kwargs)
+    return _orig_runloom_c_fiber(_wrap_fiber_callable(fn), stack_size, **kwargs)
 
 
-def _patched_runloom_c_mn_go(fn, stack_size=0, **kwargs):
-    return _orig_runloom_c_mn_go(_wrap_fiber_callable(fn), stack_size,
+def _patched_runloom_c_mn_fiber(fn, stack_size=0, **kwargs):
+    return _orig_runloom_c_mn_fiber(_wrap_fiber_callable(fn), stack_size,
                                  **kwargs)
 
 
 def _install_fiber_wrapper():
-    """Wrap runloom_c.go / mn_go so user callables run with the
+    """Wrap runloom_c.fiber / mn_go so user callables run with the
     fiber-context flag set.  Idempotent."""
-    global _orig_runloom_c_go, _orig_runloom_c_mn_go
-    if _orig_runloom_c_go is None:
-        _orig_runloom_c_go = runloom_c.go
-        runloom_c.go = _patched_runloom_c_go
-    if _orig_runloom_c_mn_go is None:
-        _orig_runloom_c_mn_go = runloom_c.mn_go
-        runloom_c.mn_go = _patched_runloom_c_mn_go
+    global _orig_runloom_c_fiber, _orig_runloom_c_mn_fiber
+    if _orig_runloom_c_fiber is None:
+        _orig_runloom_c_fiber = runloom_c.fiber
+        runloom_c.fiber = _patched_runloom_c_fiber
+    if _orig_runloom_c_mn_fiber is None:
+        _orig_runloom_c_mn_fiber = runloom_c.mn_fiber
+        runloom_c.mn_fiber = _patched_runloom_c_mn_fiber
 
 
 def _uninstall_fiber_wrapper():
-    global _orig_runloom_c_go, _orig_runloom_c_mn_go
-    if _orig_runloom_c_go is not None:
-        runloom_c.go = _orig_runloom_c_go
-        _orig_runloom_c_go = None
-    if _orig_runloom_c_mn_go is not None:
-        runloom_c.mn_go = _orig_runloom_c_mn_go
-        _orig_runloom_c_mn_go = None
+    global _orig_runloom_c_fiber, _orig_runloom_c_mn_fiber
+    if _orig_runloom_c_fiber is not None:
+        runloom_c.fiber = _orig_runloom_c_fiber
+        _orig_runloom_c_fiber = None
+    if _orig_runloom_c_mn_fiber is not None:
+        runloom_c.mn_fiber = _orig_runloom_c_mn_fiber
+        _orig_runloom_c_mn_fiber = None
 
 
 _DEFAULTS = ("socket", "time", "os", "select", "selectors", "stdio", "getpass",

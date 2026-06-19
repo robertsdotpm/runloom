@@ -302,7 +302,7 @@ def main():
         c = rc.TCPConn.connect("::1", port)
         c.send_all(b"v6"); result["reply"] = c.recv(64); c.close()
         for L in listeners: L.close()
-    rc.mn_go(client)
+    rc.mn_fiber(client)
 runloom.run(3, main)
 if isinstance(result.get("port"), int) and result["port"] > 0 and result.get("reply") == b"6:v6":
     print("IPV6_ROUNDTRIP_OK"); sys.exit(0)

@@ -34,7 +34,7 @@ def root():
         finally:
             try: c.close()
             except OSError: pass
-    for i in range(N): runloom.go(client, i)
+    for i in range(N): runloom.fiber(client, i)
     def controller():
         t0=REAL_MONO()
         while sum(conn_flags)<N:
@@ -47,6 +47,6 @@ def root():
             try: ln.close()
             except OSError: pass
         print("SERVE N=%d est=%d/%d %.1fK req/s"%(N,est,N,win[0]/w/1000.0))
-    runloom.go(controller)
+    runloom.fiber(controller)
     while not stop[0]: runloom.sleep(0.05)
 runloom.run(H, root)

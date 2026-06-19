@@ -21,7 +21,7 @@ TR_BUG="$(mktemp /tmp/gil_bug.XXXX.ndjson)"
 
 WL='import sys; sys.path.insert(0,"src"); import runloom_c
 runloom_c.mn_init(3)
-for _ in range(6): runloom_c.mn_go(lambda: None)
+for _ in range(6): runloom_c.mn_fiber(lambda: None)
 runloom_c.mn_run(); runloom_c.mn_fini()'
 
 echo "== trace conformance: RunloomGilstate.tla vs the real extension =="

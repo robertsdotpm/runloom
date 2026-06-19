@@ -84,7 +84,7 @@ def body(H):
         H.log("coop_ticks={0} heavy_ticks={1}".format(
             sum(H.state["coop_ticks"]), sum(H.state["heavy_ticks"])))
 
-    H.go(auditor)
+    H.fiber(auditor)
 
 
 def post(H):

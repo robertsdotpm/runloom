@@ -682,7 +682,7 @@ void runloom_g_decref(runloom_g_t *g)
             Py_XDECREF(g->result);
             Py_XDECREF(g->error);
             runloom_g_state_set(g, RUNLOOM_GST_FREED);
-            runloom_gon_batch_finish_one(g->batch);
+            runloom_fibern_batch_finish_one(g->batch);
             return;
         }
         if (g->coro != NULL) {

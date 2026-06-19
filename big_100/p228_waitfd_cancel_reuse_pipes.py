@@ -126,7 +126,7 @@ def worker(H, wid, rng):
         tag = (seq * 31 + wid) & 0xFF
         do_cancel = rng.random() < 0.5
         done = runloom.Chan(1)
-        H.go(parked_reader, rfd, "cancel" if do_cancel else "write",
+        H.fiber(parked_reader, rfd, "cancel" if do_cancel else "write",
              tag, done)
         H.sleep(0.002)                # let the sibling actually reach the park
 
@@ -202,7 +202,7 @@ def worker(H, wid, rng):
         os.set_blocking(r2, False)
         tag2 = (seq * 17 + wid + 3) & 0xFF
         done2 = runloom.Chan(1)
-        H.go(parked_reader, r2, "write", tag2, done2)
+        H.fiber(parked_reader, r2, "write", tag2, done2)
         H.sleep(0.002)
         try:
             os.write(w2, bytes((tag2,)))

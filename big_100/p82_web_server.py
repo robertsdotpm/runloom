@@ -69,8 +69,8 @@ def setup(H):
         finally:
             netutil.close_quiet(conn)
 
-    H.go(netutil.serve_forever, H, srv,
-         lambda conn, addr: H.go(handle, conn))
+    H.fiber(netutil.serve_forever, H, srv,
+         lambda conn, addr: H.fiber(handle, conn))
 
 
 def read_response(sock):

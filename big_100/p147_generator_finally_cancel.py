@@ -90,7 +90,7 @@ def body(H):
             H.sleep(0.03)
             gc.collect()
 
-    H.go(gc_driver)
+    H.fiber(gc_driver)
     H.run_pool(H.funcs, worker, H.state)
 
 

@@ -120,7 +120,7 @@ def body(H):
         H.log("finalized={0} thread_collects={1}".format(
             state["finalized"][0], state["thread_collects"][0]))
 
-    H.go(gc_driver)
+    H.fiber(gc_driver)
     H.run_pool(H.funcs, worker, state)
 
 

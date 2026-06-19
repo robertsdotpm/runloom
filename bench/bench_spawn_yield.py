@@ -19,7 +19,7 @@ def bench_runloom(n_coros, yields_per_coro):
 
     t0 = time.perf_counter()
     for _ in range(n_coros):
-        runloom.go(worker, yields_per_coro)
+        runloom.fiber(worker, yields_per_coro)
     spawn = time.perf_counter() - t0
 
     t0 = time.perf_counter()

@@ -37,7 +37,7 @@ def bench_runloom(n_hubs):
     runloom_c.mn_init(n_hubs)
     t0 = time.perf_counter()
     for _ in range(N):
-        runloom_c.mn_go(lambda: work(ITER))
+        runloom_c.mn_fiber(lambda: work(ITER))
     runloom_c.mn_run()
     t = time.perf_counter() - t0
     runloom_c.mn_fini()

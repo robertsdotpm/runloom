@@ -85,7 +85,7 @@ def body(H):
                            "auditor: total {0} != {1}".format(total, TOTAL)):
                 return
 
-    H.go(auditor)
+    H.fiber(auditor)
 
 
 def post(H):

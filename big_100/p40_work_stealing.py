@@ -26,8 +26,8 @@ def parallel_sum(H, lo, hi, result):
     # Uneven split (1/4 vs 3/4) to stress load balancing.
     mid = lo + max(1, n // 4)
     sub = runloom.Chan(2)
-    H.go(parallel_sum, H, lo, mid, sub)
-    H.go(parallel_sum, H, mid, hi, sub)
+    H.fiber(parallel_sum, H, lo, mid, sub)
+    H.fiber(parallel_sum, H, mid, hi, sub)
     total = 0
     for _ in range(2):
         total += sub.recv()[0]
@@ -57,7 +57,7 @@ def worker(H, wid, rng, state):
         expected = seq_sum(0, hi)
         if do_parallel:
             result = runloom.Chan(1)
-            H.go(parallel_sum, H, 0, hi, result)
+            H.fiber(parallel_sum, H, 0, hi, result)
             got = result.recv()[0]
         else:
             got = expected               # 1M-goroutine load, no sub-tree

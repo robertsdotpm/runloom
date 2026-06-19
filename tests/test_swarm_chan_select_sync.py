@@ -30,8 +30,8 @@ manufactures, per the adversarial mandate:
               double-close, double-unlock, unlock-not-held, double-resolve;
               fault injection (SPAWN_G / SPAWN_STACK) mid-workload.
 
-Drive: single-thread via runloom.run(1, ...) / rc.go+rc.run; M:N via
-runloom.run(N>=2, main) where children are spawned with rc.mn_go / runloom.go.
+Drive: single-thread via runloom.run(1, ...) / rc.fiber+rc.run; M:N via
+runloom.run(N>=2, main) where children are spawned with rc.mn_fiber / runloom.fiber.
 """
 import gc
 import os
@@ -1188,7 +1188,7 @@ def test_semaphore_bounds_concurrency_under_mn():
                 wg.done()
 
         for _ in range(N):
-            rc.mn_go(worker)
+            rc.mn_fiber(worker)
         wg.wait()
 
     with hang_guard(40, "sem bounds MN"):
@@ -1656,9 +1656,9 @@ def test_mn_buffered_fan_in_set_equality_no_dup_no_loss():
                 collected[cid].append(v)
 
         for c in range(C):
-            rc.mn_go(lambda cid=c: consumer(cid))
+            rc.mn_fiber(lambda cid=c: consumer(cid))
         for p in range(P):
-            rc.mn_go(lambda pid=p: producer(pid))
+            rc.mn_fiber(lambda pid=p: producer(pid))
         wg.wait()
         ch.close()
 
@@ -1715,9 +1715,9 @@ def test_mn_select_send_and_recv_mixed_no_loss():
                     sink_mu.unlock()
                     n += 1
 
-        rc.mn_go(consumer)
+        rc.mn_fiber(consumer)
         for i in range(K):
-            rc.mn_go(lambda i=i: producer(i))
+            rc.mn_fiber(lambda i=i: producer(i))
         wg.wait()
 
     with hang_guard(60, "mn select mixed"):
@@ -1749,7 +1749,7 @@ def test_mn_mutex_serializes_under_work_stealing():
                 wg.done()
 
         for _ in range(N):
-            rc.mn_go(worker)
+            rc.mn_fiber(worker)
         wg.wait()
 
     with hang_guard(60, "mn mutex exclusion"):
@@ -2608,9 +2608,9 @@ def test_mn_unbuffered_rendezvous_fan_in_out_set_equality():
                     break
                 collected[cid].append(v)
         for c in range(C):
-            rc.mn_go(lambda cid=c: consumer(cid))
+            rc.mn_fiber(lambda cid=c: consumer(cid))
         for p in range(P):
-            rc.mn_go(lambda pid=p: producer(pid))
+            rc.mn_fiber(lambda pid=p: producer(pid))
         wg.wait()
         ch.close()
 
@@ -2677,11 +2677,11 @@ def test_mn_select_competes_with_direct_recv_no_double_consume():
 
         # 2 select consumers across all channels + one direct consumer per channel
         for _ in range(2):
-            rc.mn_go(select_consumer)
+            rc.mn_fiber(select_consumer)
         for i in range(K):
-            rc.mn_go(lambda i=i: direct_consumer(i))
+            rc.mn_fiber(lambda i=i: direct_consumer(i))
         for i in range(K):
-            rc.mn_go(lambda i=i: producer(i))
+            rc.mn_fiber(lambda i=i: producer(i))
         wg.wait()
         # drain stragglers: keep consumers alive until sink full (they self-exit)
         while len(sink) < total:
@@ -2966,9 +2966,9 @@ def main():
                 v, ok = ch.recv()
                 if not ok: break
                 seen += 1
-        rc.mn_go(consumer)
+        rc.mn_fiber(consumer)
         for p in range(n):
-            rc.mn_go(lambda p=p: producer(p))
+            rc.mn_fiber(lambda p=p: producer(p))
         wg.wait()
         ch.close()
         out['r'] = 'ok'

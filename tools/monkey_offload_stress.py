@@ -50,12 +50,12 @@ def main():
     # single-thread cooperative model as the design target.  See FINDINGS.
     if nhubs <= 1:
         for i in range(ngor):
-            runloom_c.go(lambda i=i: worker(i, ops), stack_size=2 << 20)
+            runloom_c.fiber(lambda i=i: worker(i, ops), stack_size=2 << 20)
         runloom_c.run()
     else:
         runloom_c.mn_init(nhubs)
         for i in range(ngor):
-            runloom_c.mn_go(lambda i=i: worker(i, ops))
+            runloom_c.mn_fiber(lambda i=i: worker(i, ops))
         runloom_c.mn_run()
         runloom_c.mn_fini()
     assert runloom_c._self_check(0) == 0, "self_check failed after offload stress"

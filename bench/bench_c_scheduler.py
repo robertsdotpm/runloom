@@ -30,7 +30,7 @@ if {2!r} == 'cgo':
     import runloom_c
     def w():
         for _ in range(Y): runloom_c.sched_yield()
-    for _ in range(N): runloom_c.go(w)
+    for _ in range(N): runloom_c.fiber(w)
     t0 = time.perf_counter()
     runloom_c.run()
     t = time.perf_counter() - t0
@@ -38,7 +38,7 @@ elif {2!r} == 'runloom':
     import runloom
     def w(n):
         for _ in range(n): runloom.yield_()
-    for _ in range(N): runloom.go(w, Y)
+    for _ in range(N): runloom.fiber(w, Y)
     t0 = time.perf_counter()
     runloom.run()
     t = time.perf_counter() - t0

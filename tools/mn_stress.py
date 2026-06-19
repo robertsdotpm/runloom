@@ -128,12 +128,12 @@ def _one_experiment(rng, stable=False):
     # Spread consumers between the two styles (stable => range only).
     for cid in range(ncons):
         if stable or (cid % 2 == 0 and nchan > 0):
-            runloom_c.mn_go(consumer_range(cid))
+            runloom_c.mn_fiber(consumer_range(cid))
         else:
-            runloom_c.mn_go(consumer_select(cid))
+            runloom_c.mn_fiber(consumer_select(cid))
     for pid in range(nprod):
-        runloom_c.mn_go(producer(pid))
-    runloom_c.mn_go(closer)
+        runloom_c.mn_fiber(producer(pid))
+    runloom_c.mn_fiber(closer)
     runloom_c.mn_run()
 
     # Collect consumer reports (buffered; drained from the main thread).

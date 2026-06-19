@@ -58,7 +58,7 @@ def worker(H, wid, rng):
         b1.setblocking(True)
         ready = runloom.Chan(1)
         done = runloom.Chan(1)
-        H.go(parked_reader, a1, ready, done)
+        H.fiber(parked_reader, a1, ready, done)
         ready.recv()               # reader is about to recv
         H.sleep(0.003)             # let it actually reach the recv park
         netutil.close_quiet(a1)    # cross-goroutine close cancels the parked recv

@@ -52,7 +52,7 @@ def worker(i):
 
 
 def root():
-    runloom_c.go_n(worker, G, indexed=True)
+    runloom_c.fiber_n(worker, G, indexed=True)
 
 
 runloom.run(H, root)

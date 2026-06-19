@@ -42,7 +42,7 @@ def worker(H, wid, rng, state):
         exp_alpha = kinds.count(0)
         exp_beta = kinds.count(1)
         for i, k in enumerate(kinds):
-            H.go(child, i, k, out)
+            H.fiber(child, i, k, out)
         excs = []
         for _ in range(KIDS):
             tag, payload = out.recv()[0]

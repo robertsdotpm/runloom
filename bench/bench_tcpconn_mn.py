@@ -43,7 +43,7 @@ def run(H, N, M):
     def server():
         for _ in range(N):
             c = listener.accept()
-            runloom_c.mn_go(make_handler(c))
+            runloom_c.mn_fiber(make_handler(c))
         listener.close()
 
     def make_client():
@@ -57,10 +57,10 @@ def run(H, N, M):
         return client
 
     runloom_c.mn_init(H)
-    runloom_c.mn_go(server)
+    runloom_c.mn_fiber(server)
     t0 = time.perf_counter()
     for _ in range(N):
-        runloom_c.mn_go(make_client())
+        runloom_c.mn_fiber(make_client())
     runloom_c.mn_run()
     dt = time.perf_counter() - t0
     runloom_c.mn_fini()

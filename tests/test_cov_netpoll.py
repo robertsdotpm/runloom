@@ -251,9 +251,9 @@ def test_epoll_cross_hub_pump_wake():
                     break
                 mu.lock(); got[0] += 1; mu.unlock()
         for _ in range(4):
-            rc.mn_go(consumer)
+            rc.mn_fiber(consumer)
         for _ in range(N):
-            rc.mn_go(producer)
+            rc.mn_fiber(producer)
         wg.wait()
         ch.close()
     with hang_guard(40, "cross-hub pump wake"):

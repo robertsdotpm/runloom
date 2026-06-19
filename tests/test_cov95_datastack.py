@@ -99,7 +99,7 @@ def main():
         finally:
             wg.done()
     for i in range(NC):
-        rc.mn_go(lambda i=i: client(i))
+        rc.mn_fiber(lambda i=i: client(i))
 
     pp = []
     for j in range(NP):
@@ -120,7 +120,7 @@ def main():
         finally:
             wg2.done()
     for j in range(NP):
-        rc.mn_go(lambda j=j: pyreader(j))
+        rc.mn_fiber(lambda j=j: pyreader(j))
 
     rc.sched_sleep(0.5)              # let the dwell sweep fire on the parked fibers
     for a, b in pp:
@@ -187,7 +187,7 @@ def main():
         finally:
             wg.done()
     for j in range(NP):
-        rc.mn_go(lambda j=j: reader(j))
+        rc.mn_fiber(lambda j=j: reader(j))
     rc.sched_sleep(0.4)
     for a, b in pp:
         try: b.send(b"x")

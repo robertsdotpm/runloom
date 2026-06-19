@@ -1487,7 +1487,7 @@ class TestBlockingSpuriousWake:
     @mn_only
     def test_spurious_wake_under_mn_does_not_uaf(self):
         # Same, under M:N (the wake routes through runloom_mn_wake_g on the g's
-        # recorded hub).  runloom.go returns None under M:N, so each offloader
+        # recorded hub).  runloom.fiber returns None under M:N, so each offloader
         # PUBLISHES ITS OWN handle (rc.current_g()) BEFORE it parks in blocking;
         # a single waker fiber then hammers wake() on every published handle the
         # whole time the offloads are in flight -- so spurious wakes land on

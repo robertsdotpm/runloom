@@ -83,7 +83,7 @@ def _connected_pair():
             holder["sc"] = L.accept()
         finally:
             wg.done()
-    rc.mn_go(acc)
+    rc.mn_fiber(acc)
     c = rc.TCPConn.connect("127.0.0.1", port)
     wg.wait()
     return c, holder["sc"], L
@@ -540,7 +540,7 @@ def main():
         finally:
             wg.done()
     for i in range(N):
-        rc.mn_go(lambda i=i: client(i))
+        rc.mn_fiber(lambda i=i: client(i))
     wg.wait()
     # leave one conn with an OPEN multishot ms handle to be GC'd (dealloc ms-close):
     leak = rc.TCPConn.connect("127.0.0.1", port)
@@ -570,7 +570,7 @@ def main():
     def acc():
         try: holder["sc"] = L.accept()
         finally: wg.done()
-    rc.mn_go(acc)
+    rc.mn_fiber(acc)
     raw = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     raw.connect(("127.0.0.1", port))
     wg.wait()

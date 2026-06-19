@@ -158,7 +158,7 @@ def run_with_probe(H):
     if _OFFLOAD is None:
         H.log("SKIP: runloom_c.blocking unavailable; offload pool not built")
         return
-    H.go(probe_live_fibers, H)
+    H.fiber(probe_live_fibers, H)
     H.run_pool(H.funcs, worker, H.state)
 
 

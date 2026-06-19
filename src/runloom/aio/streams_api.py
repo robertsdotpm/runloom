@@ -106,7 +106,7 @@ class _Server(object):
         # Build the connection coroutine and drive it directly as a RunloomTask.
         # We're already inside a non-task fiber (the accept loop or a
         # per-conn TLS fiber); creating RunloomTask directly here -- the
-        # earlier "wrap in runloom_c.go then RunloomTask inside" added a second
+        # earlier "wrap in runloom_c.fiber then RunloomTask inside" added a second
         # fiber spawn for no real benefit.
         coro = self._cb(reader, writer)
         if asyncio.iscoroutine(coro):

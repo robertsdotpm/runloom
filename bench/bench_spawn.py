@@ -1,4 +1,4 @@
-"""Spawn cost: time runloom.go() in a tight loop, run all gs once.
+"""Spawn cost: time runloom.fiber() in a tight loop, run all gs once.
 
 Spawn touches:
   - PyMem_Calloc of runloom_g_t (small, fast)
@@ -24,7 +24,7 @@ def measure(n, repeats=5):
     for _ in range(repeats):
         t0 = time.perf_counter()
         for _ in range(n):
-            runloom_c.go(noop)
+            runloom_c.fiber(noop)
         runloom_c.run()
         dt = time.perf_counter() - t0
         if dt < best:

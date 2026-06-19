@@ -47,9 +47,9 @@ def stopper():
     stop[0]=True
     for _ in range(NC): done.recv()
 runloom_c.mn_init(3)
-for _ in range(NC): runloom_c.mn_go(collector)
-for _ in range(NW): runloom_c.mn_go(worker)
-runloom_c.mn_go(stopper); runloom_c.mn_run(); runloom_c.mn_fini()'
+for _ in range(NC): runloom_c.mn_fiber(collector)
+for _ in range(NW): runloom_c.mn_fiber(worker)
+runloom_c.mn_fiber(stopper); runloom_c.mn_run(); runloom_c.mn_fini()'
 
 echo "== STW (M2) trace conformance: RunloomCPythonSTW.tla vs the real handshake =="
 echo "-- capture the real stop_the_world trace (instrumented pydebug interp) --"

@@ -144,7 +144,7 @@ def test_getattr_resolves_section_internals_live():
 
 
 def test_fiber_wrapper_installed_marks_fiber_context():
-    # After patch(), runloom_c.go is wrapped so _in_fiber() is true inside.
+    # After patch(), runloom_c.fiber is wrapped so _in_fiber() is true inside.
     box = {}
     def main():
         box["in_fiber"] = monkey._in_fiber()
@@ -197,7 +197,7 @@ def test_lock_exact_count_foreign_plus_fibers_heavy():
             finally:
                 wg.done()
         for _ in range(GOR):
-            rc.mn_go(w)
+            rc.mn_fiber(w)
         wg.wait()
 
     with hang_guard(90, "lock exact-count foreign+fibers heavy"):
@@ -242,7 +242,7 @@ def test_rlock_exact_count_foreign_plus_fibers():
             finally:
                 wg.done()
         for _ in range(GOR):
-            rc.mn_go(w)
+            rc.mn_fiber(w)
         wg.wait()
 
     with hang_guard(70, "rlock foreign+fibers"):
@@ -284,7 +284,7 @@ def test_semaphore_exact_count_foreign_plus_fibers():
             finally:
                 wg.done()
         for _ in range(GOR):
-            rc.mn_go(w)
+            rc.mn_fiber(w)
         wg.wait()
 
     with hang_guard(70, "semaphore foreign+fibers"):
@@ -336,7 +336,7 @@ def test_foreign_thread_lock_no_scheduler_alloc_subprocess():
                 finally:
                     wg.done()
             for _ in range(8):
-                rc.mn_go(w)
+                rc.mn_fiber(w)
             wg.wait()
         runloom.run(4, main)
         dl = time.monotonic() + 20
@@ -440,7 +440,7 @@ def test_event_fanin_mixed_foreign_and_fiber_waiters():
                     wg.done()
             return waiter
         for i in range(NG):
-            rc.mn_go(make_waiter(i))
+            rc.mn_fiber(make_waiter(i))
         rc.sched_yield()
         rc.sched_yield()
         ev.set()                     # ONE set wakes fibers AND foreign
@@ -706,7 +706,7 @@ def test_simplequeue_foreign_producer_fiber_consumer():
                     got.append(q.get())
             finally:
                 wg.done()
-        rc.mn_go(consumer)
+        rc.mn_fiber(consumer)
         wg.wait()
     with hang_guard(40, "simplequeue foreign producer"):
         runloom.run(4, main)
@@ -754,7 +754,7 @@ def run_it(start_method):
             finally:
                 wg.done()
         p.start()
-        rc.mn_go(consumer)
+        rc.mn_fiber(consumer)
         wg.wait()
     runloom.run(4, main)
     p.join(timeout=15)
@@ -1393,7 +1393,7 @@ def test_monkey_lock_workload_under_env_gated_mode(env):
                 finally:
                     wg.done()
             for _ in range(N):
-                rc.mn_go(w)
+                rc.mn_fiber(w)
             wg.wait()
         runloom.run(4, main)
         assert counter[0] == N*ITERS, counter[0]
@@ -1426,7 +1426,7 @@ def test_unsafe_migration_flag_gated_off_warns_not_crash(flag):
                 finally:
                     wg.done()
             for _ in range(8):
-                rc.mn_go(w)
+                rc.mn_fiber(w)
             wg.wait()
         runloom.run(4, main)
         assert counter[0] == 8*300, counter[0]
@@ -1546,7 +1546,7 @@ def test_foreign_semaphore_no_scheduler_alloc_subprocess():
                 finally:
                     wg.done()
             for _ in range(8):
-                rc.mn_go(w)
+                rc.mn_fiber(w)
             wg.wait()
         runloom.run(4, main)
         dl = time.monotonic() + 20
@@ -1601,7 +1601,7 @@ def test_foreign_simplequeue_no_scheduler_alloc_subprocess():
                         got_gor.append(v)
                 finally:
                     wg.done()
-            rc.mn_go(consumer)
+            rc.mn_fiber(consumer)
             wg.wait()
         runloom.run(4, main)
         dl = time.monotonic() + 20
@@ -1647,7 +1647,7 @@ def test_foreign_rlock_reentrant_no_scheduler_alloc_subprocess():
                 finally:
                     wg.done()
             for _ in range(8):
-                rc.mn_go(w)
+                rc.mn_fiber(w)
             wg.wait()
         runloom.run(4, main)
         dl = time.monotonic() + 20
@@ -1744,7 +1744,7 @@ def test_os_write_foreign_thread_os_read_fiber_subprocess():
                         got.extend(d)
                 finally:
                     wg.done()
-            rc.mn_go(reader)
+            rc.mn_fiber(reader)
             wg.wait()
         runloom.run(4, main)
         dl = time.monotonic() + 15
@@ -2364,7 +2364,7 @@ def test_condition_notify_n_exactly_n_mixed_foreign_fiber():
                     wg.done()
             return g
         for j in range(NG):
-            rc.mn_go(make(NF + j))
+            rc.mn_fiber(make(NF + j))
         # wait until ALL NF+NG are parked
         dl = time.monotonic() + 8
         while parked[0] < NF + NG and time.monotonic() < dl:
@@ -2535,7 +2535,7 @@ def test_lock_timed_acquire_from_foreign_thread_bounded():
                     lk.release()
                 finally:
                     wg.done()
-            rc.mn_go(holder)
+            rc.mn_fiber(holder)
             # wait for the foreign thread to do its timed probe, then release
             dl = time.monotonic() + 5
             while not res.get('foreign_done') and time.monotonic() < dl:

@@ -1409,7 +1409,7 @@ try:
     aio.run(body())
 except BaseException as e:
     # A fault that fires on the entry-task spawn (e.g. SPAWN_G once:ENOMEM hits
-    # the very first runloom_c.go before body() runs) surfaces as a CLEAN Python
+    # the very first runloom_c.fiber before body() runs) surfaces as a CLEAN Python
     # exception out of aio.run -- acceptable per the mandate (no crash).
     if isinstance(e, (KeyboardInterrupt, SystemExit)):
         raise

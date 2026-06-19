@@ -56,7 +56,7 @@ def body(H):
         H.log("max_wakeup_latency={0:.3f}s late_wakeups={1}".format(
             max(H.state["maxlat"]), sum(H.state["late"])))
 
-    H.go(reporter)
+    H.fiber(reporter)
 
 
 if __name__ == "__main__":

@@ -71,9 +71,9 @@ def main():
         a.setblocking(True)
         b.setblocking(True)
         socks.append((a, b))
-        runloom.go(parked_recv, a)
+        runloom.fiber(parked_recv, a)
     for _ in range(40):
-        runloom.go(parked_sleep)
+        runloom.fiber(parked_sleep)
     runloom.sleep(0.05)           # let all 80 actually reach their park point
     sys.stdout.write("DONE-MARKER\n"); sys.stdout.flush()
     # Deterministic wind-down of the still-parked tasks, then RETURN.

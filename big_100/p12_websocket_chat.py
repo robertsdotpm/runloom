@@ -80,7 +80,7 @@ def setup(H):
                 finally:
                     writer_done.send(1)
 
-            H.go(writer)
+            H.fiber(writer)
             writer_started = True
             # Reader: parks on the client socket; the client's FIN (a network
             # event) wakes it, so we never need a cross-goroutine close here.
@@ -105,8 +105,8 @@ def setup(H):
                 writer_done.recv()
             netutil.close_quiet(sock)
 
-    H.go(netutil.serve_forever, H, srv,
-         lambda conn, addr: H.go(serve, conn))
+    H.fiber(netutil.serve_forever, H, srv,
+         lambda conn, addr: H.fiber(serve, conn))
 
 
 def client(H, wid, rng, state):

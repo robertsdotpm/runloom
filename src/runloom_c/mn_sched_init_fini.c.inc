@@ -192,7 +192,7 @@ int runloom_mn_init(int n_threads)
  * Each leaked g still holds: its Python callable ref, an fcontext
  * stack, and a slab entry.  runloom_g_decref unwinds all three when its
  * last reference drops.  The hub holds exactly one ref per g it
- * accepted (taken at spawn in runloom_mn_go_core, dropped at completion
+ * accepted (taken at spawn in runloom_mn_fiber_core, dropped at completion
  * in hub_main), so a single decref here mirrors the completion path. */
 static void runloom_mn_hub_drain_leftovers(runloom_hub_t *h)
 {
@@ -430,7 +430,7 @@ static int runloom_pair_affinity_mode(void)
  * Either callable (Python path) or c_fn+c_arg (C-only path) must be set,
  * not both.  Returns 0 on success, -1 on failure (errno set).  Python
  * error is also set on failure when callable != NULL. */
-static int runloom_mn_go_core(PyObject *callable, runloom_c_entry_fn c_fn,
+static int runloom_mn_fiber_core(PyObject *callable, runloom_c_entry_fn c_fn,
                            void *c_arg, size_t stack_size, long py_index)
 {
     long n;
@@ -569,15 +569,15 @@ static int runloom_mn_go_core(PyObject *callable, runloom_c_entry_fn c_fn,
     return 0;
 }
 
-int runloom_mn_go_c(runloom_c_entry_fn fn, void *arg)
+int runloom_mn_fiber_c(runloom_c_entry_fn fn, void *arg)
 {
     if (fn == NULL) { errno = EINVAL; return -1; }
-    return runloom_mn_go_core(NULL, fn, arg, 0, -1);
+    return runloom_mn_fiber_core(NULL, fn, arg, 0, -1);
 }
 
-PyObject *runloom_mn_go(PyObject *callable, size_t stack_size)
+PyObject *runloom_mn_fiber(PyObject *callable, size_t stack_size)
 {
-    if (runloom_mn_go_core(callable, NULL, NULL, stack_size, -1) < 0) {
+    if (runloom_mn_fiber_core(callable, NULL, NULL, stack_size, -1) < 0) {
         return NULL;
     }
     Py_RETURN_NONE;
@@ -592,7 +592,7 @@ PyObject *runloom_mn_go(PyObject *callable, size_t stack_size)
  * live and will run; the caller decides whether to treat a partial as fatal).
  * Must be called from inside the M:N runtime (root or a fiber). */
 /* Read RUNLOOM_GON_BULK once: 1 = go_n uses the bulk-arena fast path. */
-static int runloom_gon_bulk_enabled(void)
+static int runloom_fibern_bulk_enabled(void)
 {
     static int v = -1;
     int cur = __atomic_load_n(&v, __ATOMIC_RELAXED);
@@ -612,7 +612,7 @@ static int runloom_gon_bulk_enabled(void)
  * slice of a calloc/mmap individually".  No per-slot freelist yet: a batch is
  * reclaimed all-or-nothing, which is exact for go_n's "spawn N, they all run"
  * shape; partial slot reuse is a later refinement. */
-struct runloom_gon_batch {
+struct runloom_fibern_batch {
     void  *garena;       /* calloc'd g-struct arena   (one free) */
     void  *carena;       /* calloc'd coro-struct arena (one free) */
     size_t start_slot;   /* first stack-arena slot of this batch's block */
@@ -620,7 +620,7 @@ struct runloom_gon_batch {
     long   live;         /* fibers not yet finished; atomic */
 };
 
-void runloom_gon_batch_finish_one(struct runloom_gon_batch *b)
+void runloom_fibern_batch_finish_one(struct runloom_fibern_batch *b)
 {
     if (b == NULL) return;
     if (__atomic_sub_fetch(&b->live, 1, __ATOMIC_ACQ_REL) == 0) {
@@ -646,7 +646,7 @@ void runloom_gon_batch_finish_one(struct runloom_gon_batch *b)
  * for workloads whose fibers do NOT complete during the measured window
  * (e.g. long-parked workers) -- guarded by RUNLOOM_GON_BULK so the default
  * go_n (loop) stays the safe path. */
-static int runloom_mn_go_n_bulk(PyObject *callable, long n, size_t stack_size,
+static int runloom_mn_fiber_n_bulk(PyObject *callable, long n, size_t stack_size,
                                 int indexed)
 {
     int H = runloom_hub_count;
@@ -660,7 +660,7 @@ static int runloom_mn_go_n_bulk(PyObject *callable, long n, size_t stack_size,
     int hub;
     long i;
     long long goid_base;
-    struct runloom_gon_batch *batch = NULL;       /* arena lifecycle, real path only */
+    struct runloom_fibern_batch *batch = NULL;       /* arena lifecycle, real path only */
     size_t start_slot = 0;                         /* this batch's stack-arena block start */
 
     if (H > 64) return -1;                       /* fixed per-hub list cap */
@@ -690,7 +690,7 @@ static int runloom_mn_go_n_bulk(PyObject *callable, long n, size_t stack_size,
          * carry an arena-ownership marker + back-pointer.  Skipped for the
          * nofields/nosub benchmark gates (they never run, so never tear down). */
         if (!nofields && !nosub) {
-            batch = (struct runloom_gon_batch *)calloc(1, sizeof *batch);
+            batch = (struct runloom_fibern_batch *)calloc(1, sizeof *batch);
             if (batch == NULL) { free(garena); free(carena); PyErr_NoMemory(); return -1; }
         }
 
@@ -734,7 +734,7 @@ static int runloom_mn_go_n_bulk(PyObject *callable, long n, size_t stack_size,
                                    &start_slot) != 0) {
             free(garena); free(carena); free(batch);
             for (i = 0; i < n; i++)
-                if (runloom_mn_go_core(callable, NULL, NULL, stack_size,
+                if (runloom_mn_fiber_core(callable, NULL, NULL, stack_size,
                                        indexed ? i : -1) < 0) return -1;
             return 0;
         }
@@ -743,7 +743,7 @@ static int runloom_mn_go_n_bulk(PyObject *callable, long n, size_t stack_size,
     }
 
     /* Hand the arenas + reserved stack block to the batch; arm its live count.
-     * From here, each fiber's final decref calls runloom_gon_batch_finish_one,
+     * From here, each fiber's final decref calls runloom_fibern_batch_finish_one,
      * and the Nth reclaims all three allocations. */
     batch->garena     = garena;
     batch->carena     = carena;
@@ -800,7 +800,7 @@ static int runloom_mn_go_n_bulk(PyObject *callable, long n, size_t stack_size,
     return 0;
 }
 
-int runloom_mn_go_n(PyObject *callable, long n, size_t stack_size, int indexed)
+int runloom_mn_fiber_n(PyObject *callable, long n, size_t stack_size, int indexed)
 {
     long i;
     if (runloom_hubs == NULL) {
@@ -808,11 +808,11 @@ int runloom_mn_go_n(PyObject *callable, long n, size_t stack_size, int indexed)
                         "runloom_mn_init() must be called first");
         return -1;
     }
-    if (n > 0 && runloom_gon_bulk_enabled()) {
-        return runloom_mn_go_n_bulk(callable, n, stack_size, indexed);
+    if (n > 0 && runloom_fibern_bulk_enabled()) {
+        return runloom_mn_fiber_n_bulk(callable, n, stack_size, indexed);
     }
     for (i = 0; i < n; i++) {
-        if (runloom_mn_go_core(callable, NULL, NULL, stack_size,
+        if (runloom_mn_fiber_core(callable, NULL, NULL, stack_size,
                                indexed ? i : -1) < 0) {
             return -1;
         }

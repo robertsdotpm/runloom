@@ -57,7 +57,7 @@ def throughput(hubs, tasks, iters):
     runloom_c.mn_init(hubs)
     t0 = time.perf_counter()
     for _ in range(tasks):
-        runloom_c.mn_go(lambda: work(iters))
+        runloom_c.mn_fiber(lambda: work(iters))
     runloom_c.mn_run()
     dt = time.perf_counter() - t0
     runloom_c.mn_fini()

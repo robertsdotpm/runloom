@@ -58,7 +58,7 @@ def listener_reuse_unit(H, wid, rng):
     exited = [0] * n_waiters
     done = runloom.Chan(n_waiters)
     for i in range(n_waiters):
-        H.go(accept_one, H, doomed, i, exited, done)
+        H.fiber(accept_one, H, doomed, i, exited, done)
     # let the waiters reach the accept park
     runloom.yield_now()
     H.sleep(0.001)
@@ -89,7 +89,7 @@ def listener_reuse_unit(H, wid, rng):
         finally:
             netutil.close_quiet(conn)
 
-    H.go(fresh_acceptor)
+    H.fiber(fresh_acceptor)
     runloom.yield_now()
 
     # 4) connect to the fresh listener and round-trip a tagged frame.

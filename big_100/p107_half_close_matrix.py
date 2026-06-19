@@ -111,8 +111,8 @@ def worker(H, wid, rng, state):
         done = runloom.Chan(2)
         r1 = random.Random(rng.getrandbits(48))
         r2 = random.Random(rng.getrandbits(48))
-        H.go(run_side, H, cli, result, 0, r1, done)
-        H.go(run_side, H, srv, result, 1, r2, done)
+        H.fiber(run_side, H, cli, result, 0, r1, done)
+        H.fiber(run_side, H, srv, result, 1, r2, done)
         # block until BOTH sides finished their (bounded) transition sequence.
         done.recv()
         done.recv()

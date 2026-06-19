@@ -40,7 +40,7 @@ def body(H):
             min(c for c in H.ops[:H.funcs] if c > 0) if any(H.ops[:H.funcs])
             else 0, max(H.ops[:H.funcs])))
 
-    H.go(auditor)
+    H.fiber(auditor)
 
 
 if __name__ == "__main__":

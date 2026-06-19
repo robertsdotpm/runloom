@@ -103,7 +103,7 @@ def action_chan(H, wid, rng, state):
     read or write them -- the value we get back is provably our own."""
     ch_in, ch_out = runloom.Chan(1), runloom.Chan(1)
     val = struct.pack("<IQ", wid, rng.getrandbits(48))
-    H.go(echo_once, ch_in, ch_out, val)
+    H.fiber(echo_once, ch_in, ch_out, val)
     try:
         ch_in.send(val)
         got, ok = ch_out.recv()
@@ -167,7 +167,7 @@ def action_cancel(H, wid, rng, state):
         except Exception:
             pass
 
-    H.go(helper)
+    H.fiber(helper)
     timer = rtime.After(delay * rng.uniform(0.3, 2.0) + 0.0005)
     idx, payload = runloom.select([("recv", ch), ("recv", timer)])
     if idx == 0:

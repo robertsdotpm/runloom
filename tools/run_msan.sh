@@ -57,7 +57,7 @@ $SA env PYTHON_GIL=0 PYTHONPATH=src "$PY" -c \
    'import runloom_c
 for _ in range('"$ITERS"'):
     for _ in range(128):
-        runloom_c.go(lambda: None)
+        runloom_c.fiber(lambda: None)
     runloom_c.run()
 print("LIFECYCLE_DONE")' >>"$LOG" 2>&1
 # (2) mn_stress -- the M:N scheduler fuzzer (TLS-free): deque / pool / cross-hub

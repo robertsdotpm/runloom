@@ -192,8 +192,8 @@ def test_blocking_spurious_wake_does_not_uaf_mn_hub():
                 g.wake()
                 rc.sched_sleep(0.001)
 
-        rc.mn_go(worker)
-        rc.mn_go(waker)
+        rc.mn_fiber(worker)
+        rc.mn_fiber(waker)
         wg.wait()
 
     with hang_guard(90, "blocking_spurious_mn"):
@@ -226,7 +226,7 @@ def test_blocking_concurrent_offloads_overlap_on_one_hub():
                 wg.done()
 
         for i in range(N):
-            rc.mn_go(lambda i=i: w(i))
+            rc.mn_fiber(lambda i=i: w(i))
         wg.wait()
 
     with hang_guard(90, "blocking_overlap"):
@@ -263,7 +263,7 @@ def test_blocking_storm_reuses_pool_no_leak():
                 wg.done()
 
         for i in range(PER):
-            rc.mn_go(lambda i=i: w(i))
+            rc.mn_fiber(lambda i=i: w(i))
         wg.wait()
         total["n"] += sum(ok)
 
@@ -301,7 +301,7 @@ def main():
         finally:
             wg.done()
     for i in range(N):
-        rc.mn_go(lambda i=i: f(i))
+        rc.mn_fiber(lambda i=i: f(i))
     wg.wait()
 runloom.run(4, main)
 sys.stdout.write("GSTATE_OK %d\n" % sum(done))

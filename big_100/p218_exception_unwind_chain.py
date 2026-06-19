@@ -57,7 +57,7 @@ def chain_link(level, tag, req_ch, res_ch):
     # Spawn the child link + its channels, kick it, await its result.
     child_req = runloom.Chan(0)
     child_res = runloom.Chan(0)
-    runloom.go(chain_link, level + 1, tag, child_req, child_res)
+    runloom.fiber(chain_link, level + 1, tag, child_req, child_res)
     child_req.send(None)                    # kick the child
     result, ok = child_res.recv()           # recv() -> (value, ok)
     if not ok:
@@ -81,7 +81,7 @@ def worker(H, wid, rng, state):
         tag = wid * 1_000_003 + (relayed[wid] & 0xFFFF)
         top_req = runloom.Chan(0)
         top_res = runloom.Chan(0)
-        runloom.go(chain_link, 0, tag, top_req, top_res)
+        runloom.fiber(chain_link, 0, tag, top_req, top_res)
         top_req.send(None)                  # kick the top of the chain
         result, rok = top_res.recv()        # recv() -> (value, ok)
         if not rok:

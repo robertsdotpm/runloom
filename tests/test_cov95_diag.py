@@ -225,8 +225,8 @@ def w():
     rc.sched_yield()
 def mnmain():
     for _ in range(20):
-        rc.mn_go(w)
-rc.mn_init(3); rc.mn_go(mnmain); rc.mn_run(); rc.mn_fini()
+        rc.mn_fiber(w)
+rc.mn_init(3); rc.mn_fiber(mnmain); rc.mn_run(); rc.mn_fini()
 
 # Dump the whole ring to a temp file (NOT a pipe -- a >64KB dump deadlocks a pipe).
 fd, path = tempfile.mkstemp()
@@ -318,11 +318,11 @@ def w():
         rc.sched_yield()
 def main():
     for _ in range(80):
-        rc.mn_go(w)
+        rc.mn_fiber(w)
 
 t = threading.Thread(target=native_gc, daemon=True)
 t.start()
-rc.mn_init(4); rc.mn_go(main); rc.mn_run(); rc.mn_fini()
+rc.mn_init(4); rc.mn_fiber(main); rc.mn_run(); rc.mn_fini()
 stop[0] = True
 t.join(timeout=5)
 
@@ -409,9 +409,9 @@ def w():
     rc.sched_yield()
 def main():
     for _ in range(8):
-        rc.mn_go(w)
+        rc.mn_fiber(w)
 HUBS = 3
-rc.mn_init(HUBS); rc.mn_go(main); rc.mn_run(); rc.mn_fini()
+rc.mn_init(HUBS); rc.mn_fiber(main); rc.mn_run(); rc.mn_fini()
 
 lines = [l for l in open(path).read().splitlines() if l.strip()]
 assert lines, "RUNLOOM_GILSTATE_TRACE produced no events"
@@ -461,8 +461,8 @@ def w():
     rc.sched_yield()
 def main():
     for _ in range(16):
-        rc.mn_go(w)
-rc.mn_init(3); rc.mn_go(main); rc.mn_run(); rc.mn_fini()
+        rc.mn_fiber(w)
+rc.mn_init(3); rc.mn_fiber(main); rc.mn_run(); rc.mn_fini()
 
 lines = [l for l in open(path).read().splitlines() if l.strip()]
 assert lines, "RUNLOOM_MN_EVENTS produced no baton events"

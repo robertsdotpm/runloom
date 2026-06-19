@@ -51,7 +51,7 @@ def _round(nhubs, k):
             wg2.done()
 
         for _ in range(k):
-            go = runloom.go
+            go = runloom.fiber
             go(plain)                     # reuse the recycled slab gs
         wg2.wait()
 

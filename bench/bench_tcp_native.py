@@ -57,8 +57,8 @@ def bench(N=2000, mode="monkey"):
         result[0] = time.perf_counter() - t0[0]
         c.close()
 
-    runloom_c.go(server)
-    runloom_c.go(client)
+    runloom_c.fiber(server)
+    runloom_c.fiber(client)
     runloom_c.run()
     srv.close()
     return result[0]

@@ -34,7 +34,7 @@ def main():
 
         # heavy park/wake: 32 ping-pong pairs, each bouncing N times, plus
         # sleepers parking on the timer -- all while signals rain down.
-        # NB: runloom_c.go(fn, stack_size) does NOT forward args (the 2nd
+        # NB: runloom_c.fiber(fn, stack_size) does NOT forward args (the 2nd
         # positional is stack_size) -- capture everything via closures.
         def make_pinger(a, b):
             def pinger():
@@ -57,10 +57,10 @@ def main():
 
         for _ in range(32):
             a, b = runloom_c.Chan(), runloom_c.Chan()
-            runloom_c.go(make_pinger(a, b))
-            runloom_c.go(make_ponger(a, b))
+            runloom_c.fiber(make_pinger(a, b))
+            runloom_c.fiber(make_ponger(a, b))
         for _ in range(32):
-            runloom_c.go(sleeper)
+            runloom_c.fiber(sleeper)
         runloom_c.run()
     finally:
         signal.setitimer(signal.ITIMER_REAL, 0)

@@ -115,10 +115,10 @@ def main():
         finally:
             wg.done()
     for i in range(PAIRS):
-        rc.mn_go(lambda i=i: consumer(i))
+        rc.mn_fiber(lambda i=i: consumer(i))
     # senders on (potentially) other hubs wake the parked consumers
     for i in range(PAIRS):
-        rc.mn_go(lambda i=i: ch.send(i))
+        rc.mn_fiber(lambda i=i: ch.send(i))
     wg.wait()
 
     # --- cross-hub fd park/wake storm (netpoll wake path) ---
@@ -141,8 +141,8 @@ def main():
         def writer():
             rc.sched_yield()
             rc.tcp_send(b.fileno(), bytes([i & 0x7f]))
-        rc.mn_go(reader)
-        rc.mn_go(writer)
+        rc.mn_fiber(reader)
+        rc.mn_fiber(writer)
     for i in range(PAIRS):
         fd_pair(i)
     wg2.wait()

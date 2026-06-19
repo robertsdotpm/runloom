@@ -58,7 +58,7 @@ def body(H):
                                    g, max(grp) - min(grp))):
                     return
 
-    H.go(auditor)
+    H.fiber(auditor)
     # Abort the barriers at teardown so any member parked in wait() wakes via
     # BrokenBarrierError instead of hanging the drain.
 
@@ -71,7 +71,7 @@ def body(H):
             except Exception:
                 pass
 
-    H.go(breaker)
+    H.fiber(breaker)
 
 
 if __name__ == "__main__":

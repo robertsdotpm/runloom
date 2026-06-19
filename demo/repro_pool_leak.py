@@ -47,7 +47,7 @@ def acceptor():
             ch.send(1)
 
         for _ in range(WORKERS_PER_ROUND):
-            runloom_c.mn_go(w)
+            runloom_c.mn_fiber(w)
         for _ in range(WORKERS_PER_ROUND):
             done.recv()
         time.sleep(0.05)
@@ -57,7 +57,7 @@ def acceptor():
 def main():
     print("baseline maps={}".format(maps_count()), flush=True)
     runloom_c.mn_init(4)
-    runloom_c.mn_go(acceptor)
+    runloom_c.mn_fiber(acceptor)
     runloom_c.mn_run()
     runloom_c.mn_fini()
     print("final    maps={}  (climbing across rounds == the leak)".format(maps_count()), flush=True)

@@ -88,7 +88,7 @@ def body(H):
                 cond.notify_all()
             H.sleep(0.02)
 
-    H.go(stopper)
+    H.fiber(stopper)
 
 
 def post(H):

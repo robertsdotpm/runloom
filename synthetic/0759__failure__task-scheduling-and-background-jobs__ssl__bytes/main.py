@@ -9,7 +9,7 @@ Synthetic runloom toy program (auto-generated).
   scheduler : M:N via runloom.run(8, root), free-threaded 3.13t, GIL off
 
 Exercises runloom's main API -- the root goroutine spawns workers with
-runloom.go(...) onto 8 hub threads, using the monkey-patched cooperative
+runloom.fiber(...) onto 8 hub threads, using the monkey-patched cooperative
 ssl primitive to carry a bytes payload.  Prints PASS and exits 0 when
 healthy; FAIL / hang / crash signals a bug.
 """
@@ -95,7 +95,7 @@ def decode(buf):
 # ---- body ----
 def main():
     runloom.monkey.patch()
-    GO = runloom.go
+    GO = runloom.fiber
     payload = mk_payload()
     enc = encode(payload)
     assert decode(enc) == payload

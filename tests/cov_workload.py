@@ -70,7 +70,7 @@ def workload(producers=4, consumers=4, per=80):
         def w():
             rc.sched_yield()
             rc.tcp_send(b.fileno(), b"ping")        # cooperative
-        rc.mn_go(w)                                  # MUST be mn_go under M:N
+        rc.mn_fiber(w)                                  # MUST be mn_go under M:N
         buf = bytearray(4)
         rc.tcp_recv(a.fileno(), buf, 4)             # cooperative park
         rc.netpoll_unregister(a.fileno()); a.close()
@@ -84,15 +84,15 @@ def workload(producers=4, consumers=4, per=80):
 
     def main():
         for c in range(consumers):
-            rc.mn_go(consumer)
+            rc.mn_fiber(consumer)
         for p in range(producers):
-            rc.mn_go(lambda p=p: producer(p))
+            rc.mn_fiber(lambda p=p: producer(p))
         for _ in range(3):
-            rc.mn_go(cpu)
-            rc.mn_go(yielder)
-            rc.mn_go(offloader)
-            rc.mn_go(io_pair)
-            rc.mn_go(file_io)
+            rc.mn_fiber(cpu)
+            rc.mn_fiber(yielder)
+            rc.mn_fiber(offloader)
+            rc.mn_fiber(io_pair)
+            rc.mn_fiber(file_io)
         wg.wait()
         ch.close()
         # introspection while hubs are still alive

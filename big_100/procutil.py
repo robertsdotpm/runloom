@@ -144,7 +144,7 @@ def popen(*args, running=None, **kwargs):
             s = _spawn_sem  # read the canonical global at cancel time
             if s is not None:
                 s.cancel_all()
-        runloom.go(_cancel_watcher)
+        runloom.fiber(_cancel_watcher)
     if running is not None:
         # Infinite park — cancel_all() wakes us if running() goes False.
         if not sem.acquire():

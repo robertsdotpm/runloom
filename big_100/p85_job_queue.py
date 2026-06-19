@@ -70,8 +70,8 @@ def setup(H):
         finally:
             netutil.close_quiet(conn)
 
-    H.go(netutil.serve_forever, H, srv,
-         lambda conn, addr: H.go(handle, conn))
+    H.fiber(netutil.serve_forever, H, srv,
+         lambda conn, addr: H.fiber(handle, conn))
 
     def reaper():
         # Re-queue expired leases so a failed worker's job gets retried.
@@ -85,7 +85,7 @@ def setup(H):
                     state["ready"].append(j)
             H.sleep(0.1)
 
-    H.go(reaper)
+    H.fiber(reaper)
 
 
 def rpc(sock, line):

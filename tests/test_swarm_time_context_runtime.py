@@ -82,7 +82,7 @@ def _run_single(fn, guard=10.0, label="single"):
 
 def _run_mn(main, n=2, guard=15.0, label="mn"):
     """Drive main() under run(n) (M:N).  main MUST spawn children via mn_go /
-    runloom.go, never rc.go."""
+    runloom.fiber, never rc.fiber."""
     with hang_guard(guard, label):
         runloom.run(n, main)
 

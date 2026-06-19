@@ -12,7 +12,7 @@ Every generated program:
     category (naming + payload), carrying a payload in ONE format;
   * is "success" (drives the primitive to a correct result) or "failure"
     (drives it to a specific, reliable, offline error and asserts it);
-  * spawns workers with `runloom.go(...)` from the root goroutine and verifies
+  * spawns workers with `runloom.fiber(...)` from the root goroutine and verifies
     AFTER `run()` returns (goroutine exceptions are swallowed by the scheduler,
     so the main thread must do the asserting);
   * prints exactly "PASS" and exits 0 when runloom is healthy, else
@@ -180,7 +180,7 @@ def fmt_block(fmt, idx):
 # Primitive bodies.  Written with the raw mn_init / <spawns> / mn_run /
 # mn_fini envelope; to_run_envelope() rewrites that into the public
 # `runloom.run(NHUB, __root)` form before emission, and GO is rebound to
-# the public `runloom.go`.  Each body references module constants (THEME,
+# the public `runloom.fiber`.  Each body references module constants (THEME,
 # NW, NHUB, CERT, KEY, PY) and preamble helpers (finish, make_coordinator,
 # recvexact).
 # ----------------------------------------------------------------------
@@ -189,7 +189,7 @@ BODY = {}
 BODY[("sockets", "success")] = '''
 def main():
     runloom.monkey.patch()
-    GO = runloom_c.mn_go
+    GO = runloom_c.mn_fiber
     payload = mk_payload()
     enc = encode(payload)
     assert decode(enc) == payload
@@ -246,7 +246,7 @@ def main():
 BODY[("sockets", "failure")] = '''
 def main():
     runloom.monkey.patch()
-    GO = runloom_c.mn_go
+    GO = runloom_c.mn_fiber
     payload = mk_payload()
     enc = encode(payload)
     assert decode(enc) == payload
@@ -276,7 +276,7 @@ def main():
 BODY[("ssl", "success")] = '''
 def main():
     runloom.monkey.patch()
-    GO = runloom_c.mn_go
+    GO = runloom_c.mn_fiber
     payload = mk_payload()
     enc = encode(payload)
     assert decode(enc) == payload
@@ -351,7 +351,7 @@ def main():
 BODY[("ssl", "failure")] = '''
 def main():
     runloom.monkey.patch()
-    GO = runloom_c.mn_go
+    GO = runloom_c.mn_fiber
     payload = mk_payload()
     enc = encode(payload)
     assert decode(enc) == payload
@@ -403,7 +403,7 @@ def main():
 BODY[("disk_files", "success")] = '''
 def main():
     runloom.monkey.patch()
-    GO = runloom_c.mn_go
+    GO = runloom_c.mn_fiber
     payload = mk_payload()
     enc = encode(payload)
     assert decode(enc) == payload
@@ -437,7 +437,7 @@ def main():
 BODY[("disk_files", "failure")] = '''
 def main():
     runloom.monkey.patch()
-    GO = runloom_c.mn_go
+    GO = runloom_c.mn_fiber
     payload = mk_payload()
     enc = encode(payload)
     assert decode(enc) == payload
@@ -465,7 +465,7 @@ CHILD_ECHO = "import sys; sys.stdout.buffer.write(sys.stdin.buffer.read())"
 
 def main():
     runloom.monkey.patch()
-    GO = runloom_c.mn_go
+    GO = runloom_c.mn_fiber
     payload = mk_payload()
     enc = encode(payload)
     assert decode(enc) == payload
@@ -494,7 +494,7 @@ def main():
 BODY[("processes", "failure")] = '''
 def main():
     runloom.monkey.patch()
-    GO = runloom_c.mn_go
+    GO = runloom_c.mn_fiber
     payload = mk_payload()
     enc = encode(payload)
     assert decode(enc) == payload
@@ -518,7 +518,7 @@ def main():
 BODY[("threads", "success")] = '''
 def main():
     runloom.monkey.patch()
-    GO = runloom_c.mn_go
+    GO = runloom_c.mn_fiber
     payload = mk_payload()
     enc = encode(payload)
     assert decode(enc) == payload
@@ -556,7 +556,7 @@ def main():
 BODY[("threads", "failure")] = '''
 def main():
     runloom.monkey.patch()
-    GO = runloom_c.mn_go
+    GO = runloom_c.mn_fiber
     payload = mk_payload()
     enc = encode(payload)
     assert decode(enc) == payload
@@ -582,7 +582,7 @@ def mp_echo(in_q, out_q):
 
 def main():
     runloom.monkey.patch()
-    GO = runloom_c.mn_go
+    GO = runloom_c.mn_fiber
     payload = mk_payload()
     enc = encode(payload)
     assert decode(enc) == payload
@@ -616,7 +616,7 @@ def mp_fail(in_q):
 
 def main():
     runloom.monkey.patch()
-    GO = runloom_c.mn_go
+    GO = runloom_c.mn_fiber
     payload = mk_payload()
     enc = encode(payload)
     assert decode(enc) == payload
@@ -642,7 +642,7 @@ def main():
 BODY[("select_selectors", "success")] = '''
 def main():
     runloom.monkey.patch()
-    GO = runloom_c.mn_go
+    GO = runloom_c.mn_fiber
     payload = mk_payload()
     enc = encode(payload)
     assert decode(enc) == payload
@@ -693,7 +693,7 @@ def main():
 BODY[("select_selectors", "failure")] = '''
 def main():
     runloom.monkey.patch()
-    GO = runloom_c.mn_go
+    GO = runloom_c.mn_fiber
     payload = mk_payload()
     enc = encode(payload)
     assert decode(enc) == payload
@@ -720,7 +720,7 @@ def main():
 BODY[("queues", "success")] = '''
 def main():
     runloom.monkey.patch()
-    GO = runloom_c.mn_go
+    GO = runloom_c.mn_fiber
     payload = mk_payload()
     enc = encode(payload)
     assert decode(enc) == payload
@@ -753,7 +753,7 @@ def main():
 BODY[("queues", "failure_empty")] = '''
 def main():
     runloom.monkey.patch()
-    GO = runloom_c.mn_go
+    GO = runloom_c.mn_fiber
     payload = mk_payload()
     enc = encode(payload)
     assert decode(enc) == payload
@@ -776,7 +776,7 @@ def main():
 BODY[("queues", "failure_full")] = '''
 def main():
     runloom.monkey.patch()
-    GO = runloom_c.mn_go
+    GO = runloom_c.mn_fiber
     payload = mk_payload()
     enc = encode(payload)
     assert decode(enc) == payload
@@ -801,7 +801,7 @@ def main():
 BODY[("signals", "success")] = '''
 def main():
     runloom.monkey.patch()
-    GO = runloom_c.mn_go
+    GO = runloom_c.mn_fiber
     payload = mk_payload()
     enc = encode(payload)
     fmt_ok = decode(enc) == payload
@@ -835,7 +835,7 @@ def main():
 BODY[("signals", "failure")] = '''
 def main():
     runloom.monkey.patch()
-    GO = runloom_c.mn_go
+    GO = runloom_c.mn_fiber
     payload = mk_payload()
     enc = encode(payload)
     assert decode(enc) == payload
@@ -858,7 +858,7 @@ def main():
 BODY[("dns", "success")] = '''
 def main():
     runloom.monkey.patch()
-    GO = runloom_c.mn_go
+    GO = runloom_c.mn_fiber
     payload = mk_payload()
     enc = encode(payload)
     assert decode(enc) == payload
@@ -887,7 +887,7 @@ def main():
 BODY[("dns", "failure")] = '''
 def main():
     runloom.monkey.patch()
-    GO = runloom_c.mn_go
+    GO = runloom_c.mn_fiber
     payload = mk_payload()
     enc = encode(payload)
     assert decode(enc) == payload
@@ -922,9 +922,9 @@ def body_for(prim, tt, idx):
 def to_run_envelope(body):
     """Rewrite the raw  mn_init(NHUB) / <spawns> / mn_run() / mn_fini()
     envelope into the public  def __root(): <spawns>; runloom.run(NHUB, __root)
-    form, and rebind GO to the public runloom.go.  The spawns become the root
+    form, and rebind GO to the public runloom.fiber.  The spawns become the root
     goroutine; run() drives the M:N scheduler to completion."""
-    body = body.replace("    GO = runloom_c.mn_go", "    GO = runloom.go")
+    body = body.replace("    GO = runloom_c.mn_fiber", "    GO = runloom.fiber")
     lines = body.split("\n")
     out = []
     i, n = 0, len(lines)
@@ -960,7 +960,7 @@ Synthetic runloom toy program (auto-generated).
   scheduler : M:N via runloom.run(@@NHUB@@, root), free-threaded 3.13t, GIL off
 
 Exercises runloom's main API -- the root goroutine spawns workers with
-runloom.go(...) onto @@NHUB@@ hub threads, using the monkey-patched cooperative
+runloom.fiber(...) onto @@NHUB@@ hub threads, using the monkey-patched cooperative
 @@PRIM@@ primitive to carry a @@FMT@@ payload.  Prints PASS and exits 0 when
 healthy; FAIL / hang / crash signals a bug.
 """

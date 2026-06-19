@@ -60,10 +60,10 @@ def collector():
 runloom_c.mn_init(NHUB)
 for _ in range(PAIRS):
     prod, cons = mk(CAP)
-    runloom_c.mn_go(prod)
-    runloom_c.mn_go(cons)
+    runloom_c.mn_fiber(prod)
+    runloom_c.mn_fiber(cons)
 if GC:
-    runloom_c.mn_go(collector)
+    runloom_c.mn_fiber(collector)
 
 
 def reaper():
@@ -74,7 +74,7 @@ def reaper():
         done.recv()
 
 
-runloom_c.mn_go(reaper)
+runloom_c.mn_fiber(reaper)
 runloom_c.mn_run()
 runloom_c.mn_fini()
 assert runloom_c._self_check(0) == 0, "self_check failed"

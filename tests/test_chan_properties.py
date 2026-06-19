@@ -1,6 +1,6 @@
 """Property-based tests for channel + select semantics (single-thread sched).
 
-These run on the deterministic single-thread scheduler (runloom_c.go +
+These run on the deterministic single-thread scheduler (runloom_c.fiber +
 run), so Hypothesis can explore buffer sizes, value sequences, and
 producer/consumer fan-outs while we assert the algebraic invariants Go
 channels must satisfy:

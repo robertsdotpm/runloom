@@ -34,8 +34,8 @@ def setup(H):
     srv = netutil.listen_tcp(host=host)
     H.state = {"port": srv.getsockname()[1], "host": host}
 
-    H.go(netutil.serve_forever, H, srv,
-         lambda conn, addr: H.go(server_handler, conn))
+    H.fiber(netutil.serve_forever, H, srv,
+         lambda conn, addr: H.fiber(server_handler, conn))
 
 
 def well_behaved(H, sock, rng, wid):

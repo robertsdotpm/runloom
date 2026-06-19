@@ -1,6 +1,6 @@
 """runloom runtime: scheduler + fiber helpers.
 
-This module delegates to the C scheduler (runloom_c.go / .run / .sched_*)
+This module delegates to the C scheduler (runloom_c.fiber / .run / .sched_*)
 for all fiber state management.  An earlier version implemented the
 scheduler in Python on top of raw runloom_c.Coro -- that worked for one
 fiber at a time but tangled Python's tstate.cframe chain across
@@ -8,7 +8,7 @@ multiple concurrent fibers, crashing the process on Windows Fibers.
 The C scheduler does per-g tstate snapshots which is the only correct
 way to multiplex Python frames across stacks.
 
-The public API (runloom.go, .yield_now, .sleep, .run, .current) is preserved
+The public API (runloom.fiber, .yield_now, .sleep, .run, .current) is preserved
 so existing code keeps working.
 """
 import os
@@ -387,7 +387,7 @@ def run(n, main_fn=None):
     if n == 1:
         prewarm_stdlib()
         if main_fn is not None:
-            go(main_fn)
+            fiber(main_fn)
         return runloom_c.run()
     # An M:N run() cannot nest: re-entering mn_init() while a hub runtime is
     # already live deadlocks (the nested mn_init/mn_run never makes progress

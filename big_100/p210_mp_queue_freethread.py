@@ -100,9 +100,9 @@ def body(H):
             prod_done[0] += 1
 
     for pid in range(NPRODUCERS):
-        H.go(prod_wrap, pid)
+        H.fiber(prod_wrap, pid)
     for cid in range(NCONSUMERS):
-        H.go(consumer, H, cid, total, done_event)
+        H.fiber(consumer, H, cid, total, done_event)
 
     # Wait for all producers to finish, then send one sentinel per consumer so
     # they drain and exit cleanly (no goroutine left parked in q.get()).

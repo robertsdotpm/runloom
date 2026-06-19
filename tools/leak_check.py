@@ -36,7 +36,7 @@ def fd_count():
 
 def _drive(fn):
     box = []
-    runloom_c.go(lambda: box.append(fn()), stack_size=8 << 20)
+    runloom_c.fiber(lambda: box.append(fn()), stack_size=8 << 20)
     runloom_c.run()
     return box[0] if box else None
 

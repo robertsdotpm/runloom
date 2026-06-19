@@ -33,7 +33,7 @@ def worker(H, wid, rng, state):
     while H.running():
         ctx, cancel = cancelutil.WithCancel(cancelutil.Background())
         if rng.random() < 0.6:
-            H.go(cancelutil.delayed_cancel, cancel,
+            H.fiber(cancelutil.delayed_cancel, cancel,
                  rng.uniform(0.0, 0.01))
         counters = {"entered": [0], "finalized": [0]}
         try:

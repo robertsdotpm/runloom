@@ -1,6 +1,6 @@
 """Hello, fibers — spawn, yield, sleep.
 
-The "go fn(args)" of Python: runloom.go schedules a function to run
+The "go fn(args)" of Python: runloom.fiber schedules a function to run
 cooperatively and returns immediately, just like Go's `go`.  runloom.run
 drives the scheduler until every fiber has finished.
 

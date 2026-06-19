@@ -160,7 +160,7 @@ def test_fini_drains_sleep_heap_leftovers():
         def sleeper():
             rc.sched_sleep(1000.0)   # effectively forever -> stuck in sleep heap
         for _ in range(8):
-            rc.mn_go(sleeper)
+            rc.mn_fiber(sleeper)
         time.sleep(0.25)             # let the hubs consume + park them in sleep heap
         assert rc._self_check(0) == 0
         rc.mn_fini()                 # drains the sleep heap leftovers
@@ -188,7 +188,7 @@ def test_fini_drains_ready_ring_leftovers():
             while True:
                 rc.sched_yield()    # re-queues self onto the ready ring forever
         for _ in range(48):
-            rc.mn_go(spinner)
+            rc.mn_fiber(spinner)
         time.sleep(0.25)            # hubs pick them up and start cycling
         rc.mn_fini()               # stops hubs mid-cycle -> ready/deque drain
         assert rc._self_check(0) == 0, "self-check tripped after ready-ring drain"
@@ -211,11 +211,11 @@ def test_fini_deletes_hub_tstate_on_main():
     body = """
         ran = []
         def main():
-            rc.mn_go(lambda: ran.append(1))
-        rc.mn_init(3); rc.mn_go(main); rc.mn_run(); rc.mn_fini()
+            rc.mn_fiber(lambda: ran.append(1))
+        rc.mn_init(3); rc.mn_fiber(main); rc.mn_run(); rc.mn_fini()
         assert ran, "fiber did not run"
         # Reusable after the main-thread tstate delete path:
-        rc.mn_init(2); rc.mn_go(lambda: None); rc.mn_run(); rc.mn_fini()
+        rc.mn_init(2); rc.mn_fiber(lambda: None); rc.mn_run(); rc.mn_fini()
         print("DELETE_ON_MAIN_OK")
     """
     p = _run_worker(body, env_extra={"RUNLOOM_GILSTATE_DELETE_ON_MAIN": "1"})
@@ -249,7 +249,7 @@ def test_mn_fiber_core_coro_alloc_failure_releases_admission():
         resource.setrlimit(resource.RLIMIT_AS, (cap, hard))
         raised = False
         try:
-            rc.mn_go(lambda: None, 8 * 1024 * 1024)
+            rc.mn_fiber(lambda: None, 8 * 1024 * 1024)
             print("UNEXPECTED_SPAWN_OK")
         except MemoryError:
             raised = True
@@ -311,7 +311,7 @@ def test_fiber_n_bulk_arena_failure_falls_back_to_per_g_loop():
                 wg.done()
             rc.fiber_n(lambda i: w(i), N, 0, True)   # bulk -> arena fail -> per-g fallback
             wg.wait()
-        rc.mn_init(3); rc.mn_go(main); rc.mn_run(); rc.mn_fini()
+        rc.mn_init(3); rc.mn_fiber(main); rc.mn_run(); rc.mn_fini()
         assert sum(seen) == N, ("only %d/%d fibers ran via the fallback" % (sum(seen), N))
         print("GON_BULK_FALLBACK_OK")
     """
@@ -347,7 +347,7 @@ def test_fiber_n_bulk_wakes_idle_hubs():
             wg.wait()
             # The whole batch should drain quickly via the idle-cond signal.
             assert time.monotonic() - t0 < 5.0, "bulk batch was slow to wake"
-        rc.mn_init(4); rc.mn_go(main); rc.mn_run(); rc.mn_fini()
+        rc.mn_init(4); rc.mn_fiber(main); rc.mn_run(); rc.mn_fini()
         assert sum(seen) == N, ("only %d/%d bulk fibers ran" % (sum(seen), N))
         print("GON_BULK_IDLEWAKE_OK")
     """

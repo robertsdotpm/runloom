@@ -83,7 +83,7 @@ def body(H):
         H.log("created={0} finalized={1}".format(
             H.state["created"][0], H.state["finalized"][0]))
 
-    H.go(gc_driver)
+    H.fiber(gc_driver)
     H.run_pool(H.funcs, worker, H.state)
 
 

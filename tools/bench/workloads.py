@@ -36,7 +36,7 @@ def spawn(scale=100000):
 
     t0 = time.perf_counter()
     for _ in range(scale):
-        runloom_c.go(noop)
+        runloom_c.fiber(noop)
     runloom_c.run()
     return scale, time.perf_counter() - t0
 
@@ -60,8 +60,8 @@ def chan_pingpong(scale=200000):
             v, _ = a.recv()
             b.send(v)
 
-    runloom_c.go(pinger)
-    runloom_c.go(ponger)
+    runloom_c.fiber(pinger)
+    runloom_c.fiber(ponger)
     t0 = time.perf_counter()
     runloom_c.run()
     return scale, time.perf_counter() - t0
@@ -86,8 +86,8 @@ def chan_buffered(scale=500000, cap=64):
             if not ok:
                 break
 
-    runloom_c.go(producer)
-    runloom_c.go(consumer)
+    runloom_c.fiber(producer)
+    runloom_c.fiber(consumer)
     t0 = time.perf_counter()
     runloom_c.run()
     return scale, time.perf_counter() - t0
@@ -104,7 +104,7 @@ def yield_storm(gs=200, k=2000):
             runloom_c.yield_()
 
     for _ in range(gs):
-        runloom_c.go(spinner)
+        runloom_c.fiber(spinner)
     t0 = time.perf_counter()
     runloom_c.run()
     return gs * k, time.perf_counter() - t0

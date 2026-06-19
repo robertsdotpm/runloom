@@ -150,7 +150,7 @@ def body(H):
     slot = 0
     for lsock in listeners:
         for _ in range(ACCEPTORS_PER):
-            H.go(acceptor, H, lsock, slot, served)
+            H.fiber(acceptor, H, lsock, slot, served)
             slot += 1
     H.run_pool(H.funcs, client, H.state)
 

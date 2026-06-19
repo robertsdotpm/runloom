@@ -41,8 +41,8 @@ def proxy_conn(H, client_sock, backend_addr):
         netutil.close_quiet(backend)
         return
     done = runloom.Chan(2)
-    H.go(pipe, client_sock, backend, done)
-    H.go(pipe, backend, client_sock, done)
+    H.fiber(pipe, client_sock, backend, done)
+    H.fiber(pipe, backend, client_sock, done)
     done.recv()
     done.recv()
     netutil.close_quiet(client_sock)
@@ -54,7 +54,7 @@ def setup(H):
     backend_port = netutil.start_echo_server(H, host=backend_host)
     backend_addr = (backend_host, backend_port)
     servers = netutil.listen_all(
-        H, lambda conn, addr: H.go(proxy_conn, H, conn, backend_addr))
+        H, lambda conn, addr: H.fiber(proxy_conn, H, conn, backend_addr))
     H.state = {"servers": servers,
                "lat_sum": [0.0], "lat_max": [0.0], "lat_n": [0],
                "buckets": [0] * 1024}

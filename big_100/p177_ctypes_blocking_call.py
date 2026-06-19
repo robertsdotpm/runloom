@@ -102,7 +102,7 @@ def sampler(H):
 
 
 def body(H):
-    H.go(sampler, H)
+    H.fiber(sampler, H)
     H.run_pool(H.funcs, worker, H.state)
 
 

@@ -23,7 +23,7 @@ ONLY exercised when >512 coros are released on ONE pool.  Batch 1 spawned 200-30
 at a time, so the pool absorbed them all and none of these lines ran.
 
 Each worker therefore spawns N > 512 fibers and holds them ALL concurrently
-alive on a SINGLE M:1 pool (runloom.run(1, ...) -> rc.go, the cooperative
+alive on a SINGLE M:1 pool (runloom.run(1, ...) -> rc.fiber, the cooperative
 single-thread scheduler whose coro pool is one TLS pool) behind a release
 WaitGroup, so when they finish together the pool overflows by N-512 and that
 many real stack releases run.  M:1 (not M:N) is deliberate: it pins every

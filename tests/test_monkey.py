@@ -1,6 +1,6 @@
 """Tests for runloom.monkey -- cooperative patches across the stdlib.
 
-These tests exercise the C scheduler (runloom_c.go / runloom_c.run)
+These tests exercise the C scheduler (runloom_c.fiber / runloom_c.run)
 because that's the path the monkey-patches target.
 """
 import os

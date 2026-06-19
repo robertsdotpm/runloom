@@ -92,7 +92,7 @@ def main():
         finally:
             wg.done()
     for i in range(N):
-        rc.mn_go(lambda i=i: client(i))
+        rc.mn_fiber(lambda i=i: client(i))
     wg.wait()
     for ln in lst:
         ln.close()
@@ -208,7 +208,7 @@ def main():
         finally:
             wg.done()
     for i in range(N):
-        rc.mn_go(lambda i=i: client(i))
+        rc.mn_fiber(lambda i=i: client(i))
     wg.wait()
     for ln in lst: ln.close()
 runloom.run(2, main)
@@ -253,7 +253,7 @@ def main():
         finally:
             wg.done()
     for i in range(N):
-        rc.mn_go(lambda i=i: client(i))
+        rc.mn_fiber(lambda i=i: client(i))
     wg.wait()
     for ln in lst: ln.close()
 runloom.run(4, main)
@@ -312,7 +312,7 @@ def main():
         finally:
             wg.done()
     for i in range(N):
-        rc.mn_go(lambda i=i: client(i))
+        rc.mn_fiber(lambda i=i: client(i))
     wg.wait()
     rc.sched_sleep(0.2)                # let the cancel CQEs drain (free the op records)
     for ln in lst: ln.close()
@@ -355,7 +355,7 @@ def main():
         finally:
             wg.done()
     for i in range(N):
-        rc.mn_go(lambda i=i: client(i))
+        rc.mn_fiber(lambda i=i: client(i))
     wg.wait()
     for ln in lst: ln.close()
 runloom.run(4, main)

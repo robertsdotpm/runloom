@@ -49,7 +49,7 @@ def setup(H):
                 return
             runloom.sleep(0.0005)
 
-    H.go(monitor)
+    H.fiber(monitor)
 
 
 def worker(H, wid, rng, state):

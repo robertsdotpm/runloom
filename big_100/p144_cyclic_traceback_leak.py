@@ -159,7 +159,7 @@ def body(H):
         state["stop"][0] = True
 
     _real_thread.start_new_thread(auditor_thread, (H, state))
-    H.go(gc_driver)
+    H.fiber(gc_driver)
     H.run_pool(H.funcs, worker, state)
 
 

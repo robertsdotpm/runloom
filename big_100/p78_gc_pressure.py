@@ -62,7 +62,7 @@ def body(H):
             H.sleep(0.05)
         H.log("gc_collect_calls={0}".format(H.state["collections"][0]))
 
-    H.go(gc_driver)
+    H.fiber(gc_driver)
 
 
 if __name__ == "__main__":

@@ -50,7 +50,7 @@ def worker(H, wid, rng, state):
         wg = runloom.WaitGroup()
         wg.add(J)
         for i in range(J):
-            H.go(joiner, ready, cell, results, i, wg)
+            H.fiber(joiner, ready, cell, results, i, wg)
 
         # Compute and PUBLISH the outcome, then broadcast via close.
         r = rng.random()

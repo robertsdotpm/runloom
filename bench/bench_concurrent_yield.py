@@ -25,7 +25,7 @@ def make_worker(yields):
 def run_burst(n, yields):
     t0 = time.perf_counter()
     for _ in range(n):
-        runloom_c.go(make_worker(yields))
+        runloom_c.fiber(make_worker(yields))
     runloom_c.run()
     dt = time.perf_counter() - t0
     total_yields = n * yields

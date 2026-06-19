@@ -119,8 +119,8 @@ def worker(H, wid, rng, state):
             finally:
                 wg.done()
 
-        H.go(run_producer)
-        H.go(run_consumer)
+        H.fiber(run_producer)
+        H.fiber(run_consumer)
         wg.wait()
         produced[slot] += n
         H.op(wid, n)

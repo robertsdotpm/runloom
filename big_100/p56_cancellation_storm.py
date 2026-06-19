@@ -57,7 +57,7 @@ def worker(H, wid, rng, state):
     while H.running():
         ctx, cancel = cancelutil.WithCancel(cancelutil.Background())
         if rng.random() < 0.5:
-            H.go(cancelutil.delayed_cancel, cancel, rng.uniform(0.0, 0.01))
+            H.fiber(cancelutil.delayed_cancel, cancel, rng.uniform(0.0, 0.01))
         op = rng.choice(ops)
         try:
             if op is op_file:
@@ -91,7 +91,7 @@ def body(H):
             H.sleep(1.0)
         H.log("fd_ceiling={0}".format(H.fd_ceiling))
 
-    H.go(auditor)
+    H.fiber(auditor)
 
 
 if __name__ == "__main__":

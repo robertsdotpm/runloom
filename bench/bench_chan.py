@@ -26,8 +26,8 @@ def bench_unbuffered_ping_pong(N=200_000):
             v, _ = a.recv()
             b.send(v)
 
-    runloom_c.go(pinger)
-    runloom_c.go(ponger)
+    runloom_c.fiber(pinger)
+    runloom_c.fiber(ponger)
     t0 = time.perf_counter()
     runloom_c.run()
     dt = time.perf_counter() - t0
@@ -52,8 +52,8 @@ def bench_buffered(N=500_000, cap=64):
         for _ in range(N):
             ch.recv()
 
-    runloom_c.go(producer)
-    runloom_c.go(consumer)
+    runloom_c.fiber(producer)
+    runloom_c.fiber(consumer)
     t0 = time.perf_counter()
     runloom_c.run()
     dt = time.perf_counter() - t0

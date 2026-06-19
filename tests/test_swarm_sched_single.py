@@ -79,7 +79,7 @@ def test_fiber_rejects_non_callable():
     with pytest.raises(TypeError):
         rc.fiber(5)
     with pytest.raises(TypeError):
-        rc.go_noyield(object())
+        rc.fiber_noyield(object())
 
 
 def test_fiber_n_requires_mn_init_in_single_thread():
@@ -444,7 +444,7 @@ def test_admission_cap_noyield_path_also_counts_and_releases():
         n = 0
         for _ in range(5):
             try:
-                rc.go_noyield(lambda: None); n += 1
+                rc.fiber_noyield(lambda: None); n += 1
             except RuntimeError:
                 pass
         assert n == 2
@@ -644,7 +644,7 @@ def test_sched_stop_leaves_parked_fiber_and_run_returns():
 # ==========================================================================
 def test_fiber_noyield_pure_compute_runs():
     out = []
-    rc.go_noyield(lambda: out.append(sum(range(1000))))
+    rc.fiber_noyield(lambda: out.append(sum(range(1000))))
     rc.run()
     assert out == [sum(range(1000))]
 
@@ -662,7 +662,7 @@ def body():
     rc.sched_yield()          # promised not to; does
     rc.sched_sleep(0.001)     # and parks on the sleep heap
     done.append(1)
-rc.go_noyield(body)
+rc.fiber_noyield(body)
 n = rc.run()
 sys.stdout.write("OK n=%d done=%d check=%d\n" % (n, len(done), rc._self_check(0)))
 '''

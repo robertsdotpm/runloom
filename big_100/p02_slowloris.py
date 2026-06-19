@@ -52,7 +52,7 @@ def server_handler(conn):
 def setup(H):
     # One server per loopback IP so the connect storm spreads across many accept
     # loops (a single accept loop serializes and wedges under a large storm).
-    servers = netutil.listen_all(H, lambda conn, addr: H.go(server_handler, conn))
+    servers = netutil.listen_all(H, lambda conn, addr: H.fiber(server_handler, conn))
     H.state = {"servers": servers}
 
 

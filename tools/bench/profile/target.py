@@ -56,8 +56,8 @@ def ping_pong(n):
             v, _ = a.recv()
             b.send(v)
 
-    runloom_c.go(pinger)
-    runloom_c.go(ponger)
+    runloom_c.fiber(pinger)
+    runloom_c.fiber(ponger)
     runloom_c.run()
 
 

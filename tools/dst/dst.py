@@ -1,6 +1,6 @@
 """Deterministic Simulation Testing (DST) for runloom's channel / scheduler core.
 
-The single-thread cooperative scheduler (runloom_c.go + run) is deterministic:
+The single-thread cooperative scheduler (runloom_c.fiber + run) is deterministic:
 for a fixed set of goroutines making fixed yield decisions, the run-queue
 order is fixed, so the whole execution is reproducible.  This harness drives
 REAL runloom channels/select on that scheduler while a seeded decision oracle
@@ -128,8 +128,8 @@ def scenario_unbuffered_handoff(sim):
                 break
             received.append(v)
 
-    runloom_c.go(sender)
-    runloom_c.go(receiver)
+    runloom_c.fiber(sender)
+    runloom_c.fiber(receiver)
     runloom_c.run()
     sim.record(("recv_order", tuple(received)))
     # unbuffered single sender/receiver: strict FIFO handoff, nothing lost
@@ -166,10 +166,10 @@ def scenario_buffered_mpmc(sim):
             received.append(v)
 
     for p in range(nprod):
-        runloom_c.go(lambda p=p: producer(p))
-    runloom_c.go(closer)
+        runloom_c.fiber(lambda p=p: producer(p))
+    runloom_c.fiber(closer)
     for c in range(2):
-        runloom_c.go(lambda c=c: consumer(c))
+        runloom_c.fiber(lambda c=c: consumer(c))
     runloom_c.run()
     sim.record(("recv_set", tuple(sorted(received))))
     # conservation: every produced value received exactly once (any order)
@@ -213,9 +213,9 @@ def scenario_select_race(sim):
             else:
                 open_b = False
 
-    runloom_c.go(lambda: sender(a, 0))
-    runloom_c.go(lambda: sender(b, 1000))
-    runloom_c.go(selector)
+    runloom_c.fiber(lambda: sender(a, 0))
+    runloom_c.fiber(lambda: sender(b, 1000))
+    runloom_c.fiber(selector)
     runloom_c.run()
     sim.record(("select_set", tuple(sorted(got))))
     want = sorted([i for i in range(n)] + [1000 + i for i in range(n)])
@@ -254,9 +254,9 @@ def scenario_BUG_strict_order(sim):
                 break
             received.append(v)
 
-    runloom_c.go(prod)
-    runloom_c.go(lambda: cons(0))
-    runloom_c.go(lambda: cons(1))
+    runloom_c.fiber(prod)
+    runloom_c.fiber(lambda: cons(0))
+    runloom_c.fiber(lambda: cons(1))
     runloom_c.run()
     sim.record(("order", tuple(received)))
     assert received == list(range(n)), "non-FIFO arrival: {0}".format(received)

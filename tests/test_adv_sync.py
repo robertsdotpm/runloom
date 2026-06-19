@@ -229,7 +229,7 @@ def test_semaphore_bounds_concurrency_under_mn():
             finally:
                 wg.done()
         for _ in range(N):
-            rc.mn_go(worker)
+            rc.mn_fiber(worker)
         wg.wait()
     with hang_guard(60, "semaphore mn bound"):
         runloom.run(4, main)

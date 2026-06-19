@@ -71,7 +71,7 @@ def body(H):
         except Exception:
             pass
 
-    H.go(closer)
+    H.fiber(closer)
 
 
 def post(H):

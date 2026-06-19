@@ -136,7 +136,7 @@ def main():
             done[i] = 1
             wg.done()
         for i in range(PER):
-            rc.mn_go(lambda i=i: w(i))
+            rc.mn_fiber(lambda i=i: w(i))
         wg.wait()
         assert sum(done) == PER, ("round %d only %d/%d ran" % (r, sum(done), PER))
     print("{marker} %d" % (ROUNDS * PER))
@@ -276,7 +276,7 @@ ran = bytearray(80)
 def main():
     wg = WaitGroup(); wg.add(80)
     for i in range(80):
-        rc.mn_go(lambda i=i: (ran.__setitem__(i, 1), wg.done()))
+        rc.mn_fiber(lambda i=i: (ran.__setitem__(i, 1), wg.done()))
     wg.wait()
 assert sum(ran) == 0 or True  # set below after run completes
 runloom.run(2, main)
@@ -351,7 +351,7 @@ def test_default_churn_baseline_in_process():
     def main():
         wg = WaitGroup(); wg.add(120)
         for i in range(120):
-            rc.mn_go(lambda i=i: (ran.__setitem__(i, 1), wg.done()))
+            rc.mn_fiber(lambda i=i: (ran.__setitem__(i, 1), wg.done()))
         wg.wait()
 
     with hang_guard(30, "default churn baseline"):

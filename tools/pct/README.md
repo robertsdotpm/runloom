@@ -40,7 +40,7 @@ one goroutine per callback (`_go_io`, for the roomy stack protocol callbacks
 need), and task steps are scheduled the same way, so those callbacks ARE
 ready-ring goroutines. asyncio *guarantees* them call_soon-FIFO — permuting them
 is exploring an interleaving the contract FORBIDS (a false positive, not a bug).
-So the aio bridge marks every such goroutine `fifo` (`runloom_c.go(fn,
+So the aio bridge marks every such goroutine `fifo` (`runloom_c.fiber(fn,
 fifo=True)` → `g->pct_fifo`), and PCT keeps `fifo` goroutines in spawn order:
 only the OLDEST ready `fifo` g is a pick candidate, younger ones wait their
 turn. PCT may still freely interleave *raw* (un-marked) goroutines/channels —

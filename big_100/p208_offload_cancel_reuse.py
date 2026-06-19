@@ -72,7 +72,7 @@ def worker(H, wid, rng, state):
                                                          for _ in range(48))
         # cap-1 result channel; the child publishes there, we race a timer.
         ch = runloom.Chan(1)
-        H.go(offload_into, ch, payload)
+        H.fiber(offload_into, ch, payload)
 
         # Sometimes give the offload a tiny deadline so the timer frequently
         # wins (a cancel near completion); other times a generous one so it

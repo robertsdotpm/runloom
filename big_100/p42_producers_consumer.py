@@ -57,7 +57,7 @@ def consumer(H, state):
 
 
 def body(H):
-    H.go(consumer, H, H.state)
+    H.fiber(consumer, H, H.state)
     H.run_pool(H.funcs, producer, H.state)
 
 

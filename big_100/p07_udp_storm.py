@@ -43,7 +43,7 @@ def setup(H):
         finally:
             netutil.close_quiet(srv)
 
-    H.go(echo_server)
+    H.fiber(echo_server)
 
 
 def client(H, wid, rng, state):

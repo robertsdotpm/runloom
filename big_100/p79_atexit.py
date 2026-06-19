@@ -28,7 +28,7 @@ def w():
         runloom.sleep(0.001); n += 1
 def main():
     for _ in range(24):
-        runloom.go(w)
+        runloom.fiber(w)
     runloom.sleep(0.03)
     flag[0] = False                 # let the background goroutines wind down
 runloom.run(4, main)

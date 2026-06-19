@@ -59,7 +59,7 @@ def main():
     def child(): ran[0] += 1
     for _ in range(400):
         try:
-            rc.mn_go(child)
+            rc.mn_fiber(child)
         except BaseException:
             failed[0] += 1
 runloom.run(4, main)
@@ -103,7 +103,7 @@ for cycle in range(40):
     seen = [0]
     def w(): seen[0] += 1
     for _ in range(120):
-        rc.mn_go(w)
+        rc.mn_fiber(w)
     rc.mn_run()
     rc.mn_fini()
 sys.stdout.write("TEARDOWN_OK\n")
@@ -127,7 +127,7 @@ def main():
     def boom(): raise ValueError("storm")
     def ok(): pass
     for i in range(600):
-        rc.mn_go(boom if (i % 2) else ok)
+        rc.mn_fiber(boom if (i % 2) else ok)
 runloom.run(4, main)
 sys.stdout.write("EXC_OK\n")
 '''
@@ -153,7 +153,7 @@ def main():
     def child(): rc.sched_yield()
     for _ in range(800):
         try:
-            rc.mn_go(child); ok[0] += 1
+            rc.mn_fiber(child); ok[0] += 1
         except RuntimeError:
             err[0] += 1
 runloom.run(4, main)
@@ -187,8 +187,8 @@ def main():
         def receiver():
             try: ch.recv()
             finally: wg.done()
-        for _ in range(20): rc.mn_go(sender)
-        for _ in range(20): rc.mn_go(receiver)
+        for _ in range(20): rc.mn_fiber(sender)
+        for _ in range(20): rc.mn_fiber(receiver)
         rc.sched_sleep(0.001)
         ch.close()
         wg.wait()
@@ -212,7 +212,7 @@ import sys; sys.path.insert(0, "src")
 import runloom, runloom_c as rc
 rc.install_crash_handler("backtrace")
 def main():
-    rc.mn_go(lambda: rc._crash_selftest_overflow(), 131072)   # small hub stack
+    rc.mn_fiber(lambda: rc._crash_selftest_overflow(), 131072)   # small hub stack
 runloom.run(2, main)
 sys.stdout.write("UNREACHABLE\n")
 '''

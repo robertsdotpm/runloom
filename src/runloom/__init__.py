@@ -48,7 +48,7 @@ if _sys.getrecursionlimit() < 1_000_000:
     _sys.setrecursionlimit(1_000_000)
 
 from .runtime import (
-    go,
+    fiber,
     yield_now,
     yield_,        # deprecated alias for yield_now (keyword-dodge name)
     sleep,
@@ -75,7 +75,7 @@ select = _core.select
 # advanced use (custom spawn loops, benchmarks).  mn_hub_count() reports how
 # many hubs are live and is what the runloom.fiber() wrapper dispatches on.
 mn_init = _core.mn_init
-mn_go = _core.mn_go
+mn_fiber = _core.mn_fiber
 mn_run = _core.mn_run
 mn_fini = _core.mn_fini
 mn_hub_count = _core.mn_hub_count
@@ -91,7 +91,7 @@ wait_fd = _core.wait_fd                # park the current fiber on fd readiness
 WAIT_FD_CANCELLED = _core.WAIT_FD_CANCELLED
 tcp_recv = _core.tcp_recv
 tcp_send = _core.tcp_send
-go_noyield = _core.go_noyield          # faster spawn for run-to-completion work
+fiber_noyield = _core.fiber_noyield          # faster spawn for run-to-completion work
 warmup = _core.warmup                  # pre-allocate the per-thread stack pool
 prewarm = _core.prewarm                # opt-in: pre-fill the GLOBAL stack depot
                                        # (call it yourself; never on by default)
@@ -163,8 +163,8 @@ from . import aio      # noqa: E402,F401  – run async/await on the scheduler
 
 __all__ = [
     # scheduler
-    "go", "run", "sleep", "yield_now", "yield_", "blocking", "current",
-    "Goroutine", "go_noyield", "warmup", "prewarm", "prewarm_keep", "prewarm_stop",
+    "fiber", "run", "sleep", "yield_now", "yield_", "blocking", "current",
+    "Goroutine", "fiber_noyield", "warmup", "prewarm", "prewarm_keep", "prewarm_stop",
     "optimize",
     "thread_init", "thread_fini",
     "preempt_init", "preempt_fini",
@@ -173,7 +173,7 @@ __all__ = [
     # fan-in primitives
     "WaitGroup", "Future", "gather",
     # M:N (free-threaded 3.13t)
-    "mn_init", "mn_go", "mn_run", "mn_fini", "mn_hub_count", "mn_hub_states",
+    "mn_init", "mn_fiber", "mn_run", "mn_fini", "mn_hub_count", "mn_hub_states",
     "hubs",
     # low-level I/O primitives
     "TCPConn", "Coro", "G", "wait_fd", "WAIT_FD_CANCELLED",

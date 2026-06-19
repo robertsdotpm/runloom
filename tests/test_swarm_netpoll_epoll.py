@@ -344,7 +344,7 @@ def test_wake_storm_set_equality_single_thread():
     N = 350
     with hang_guard(40, "wake storm set-eq single"):
         expected, received, got = _wake_storm_payload(
-            rc.go, lambda m: (rc.fiber(m), rc.run()), N)
+            rc.fiber, lambda m: (rc.fiber(m), rc.run()), N)
     missing = expected - received
     assert not missing, "%d readers got wrong/dropped payload: missing %r" % (
         len(missing), list(missing)[:5])
@@ -359,11 +359,11 @@ def test_wake_storm_set_equality_across_mn_hubs():
 
     def drive(main):
         rc.mn_init(4)
-        rc.mn_go(main)
+        rc.mn_fiber(main)
         rc.mn_run()
         rc.mn_fini()
     with hang_guard(60, "wake storm set-eq M:N"):
-        expected, received, got = _wake_storm_payload(rc.mn_go, drive, N)
+        expected, received, got = _wake_storm_payload(rc.mn_fiber, drive, N)
     missing = expected - received
     assert not missing, "M:N edge-drop/cross-wire: missing %d payloads %r" % (
         len(missing), list(missing)[:5])
@@ -865,7 +865,7 @@ def main():
                     ok[i] = 1
             finally:
                 os.close(fd); os.unlink(path)
-        rc.mn_go(one)
+        rc.mn_fiber(one)
 runloom.run(3, main)
 sys.stdout.write("LOOP_OK %d\n" % sum(ok))
 '''
@@ -993,7 +993,7 @@ def test_tcpconn_many_concurrent_connections_mn():
             finally:
                 wg.done()
         for i in range(N):
-            rc.mn_go(lambda i=i: client(i))
+            rc.mn_fiber(lambda i=i: client(i))
         wg.wait()
         for ln in listeners:
             ln.close()
@@ -1039,7 +1039,7 @@ def main():
         finally:
             wg.done()
     for i in range(N):
-        rc.mn_go(lambda i=i: client(i))
+        rc.mn_fiber(lambda i=i: client(i))
     wg.wait()
     for ln in listeners:
         ln.close()
@@ -1138,7 +1138,7 @@ def test_serve_python_handler_echo_mn():
             finally:
                 for ln in listeners:
                     ln.close()
-        rc.mn_go(client)
+        rc.mn_fiber(client)
     with hang_guard(40, "serve python handler M:N"):
         runloom.run(3, main)
     assert box.get("reply") == b"echo:hello", "serve python handler echo: %r" % box.get("reply")
@@ -1353,9 +1353,9 @@ def main():
         for k in range(300000): x += k
         return x
     for i in range(40):
-        rc.mn_go(lambda i=i: reader(i))
+        rc.mn_fiber(lambda i=i: reader(i))
     for _ in range(4):
-        rc.mn_go(cpu)
+        rc.mn_fiber(cpu)
     rc.sched_yield()
     for i in range(40):
         pairs[i][1].send(b"!")

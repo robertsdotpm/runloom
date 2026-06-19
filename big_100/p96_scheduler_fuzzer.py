@@ -44,9 +44,9 @@ def worker(H, wid, rng, state):
         k = rng.randint(2, 8)
         done = runloom.Chan(k)
         for i in range(k):
-            H.go(child, H, ctx, done, H.derive("p96", wid, rng.getrandbits(32)))
+            H.fiber(child, H, ctx, done, H.derive("p96", wid, rng.getrandbits(32)))
         if rng.random() < 0.5:
-            H.go(cancelutil.delayed_cancel, cancel, rng.uniform(0.0, 0.006))
+            H.fiber(cancelutil.delayed_cancel, cancel, rng.uniform(0.0, 0.006))
         completed = cancelled = 0
         for _ in range(k):
             status = done.recv()[0]

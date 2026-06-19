@@ -123,7 +123,7 @@ def main():
     def acceptor():
         try: acc["sc"] = lconn.accept()
         finally: wga.done()
-    rc.mn_go(acceptor)
+    rc.mn_fiber(acceptor)
     client = rc.TCPConn.connect("127.0.0.1", port)
     wga.wait(); sc = acc["sc"]
 
@@ -140,7 +140,7 @@ def main():
             sc.close()                     # ms_close (armed cancel branch)
         finally:
             wg.done()
-    rc.mn_go(server)
+    rc.mn_fiber(server)
 
     client.send_all(payload)               # hub-ring iouring send -> ring_send
     got = bytearray()
@@ -195,7 +195,7 @@ def main():
     def acceptor():
         try: acc["sc"] = lconn.accept()
         finally: wga.done()
-    rc.mn_go(acceptor)
+    rc.mn_fiber(acceptor)
     client = rc.TCPConn.connect("127.0.0.1", port)
     wga.wait(); sc = acc["sc"]
 
@@ -212,7 +212,7 @@ def main():
             res["err"] = e.errno
         finally:
             wg.done()
-    rc.mn_go(reader)
+    rc.mn_fiber(reader)
     wg.wait()
     sc.close(); client.close(); lconn.close()
 runloom.run(2, main)
@@ -277,7 +277,7 @@ def main():
         finally:
             wg.done()
     for i in range(N):
-        rc.mn_go(lambda i=i: client(i))
+        rc.mn_fiber(lambda i=i: client(i))
     wg.wait()
     for L in listeners: L.close()
 runloom.run(4, main)
@@ -326,7 +326,7 @@ def main():
         except OSError as e:
             rd["errno"] = e.errno
         rd["done"] = True
-    rc.mn_go(reader)
+    rc.mn_fiber(reader)
     # Deterministic handshake (no sleep-as-sync): cancel_wait_fd() returns True
     # IFF the reader's io_uring op is published AND wait==PARKED -- i.e. the park
     # has committed (runloom_iouring_cancel_g returns 0 otherwise).  So retry it
@@ -468,7 +468,7 @@ def main():
     def acceptorA():
         try: accA["sc"] = lconn.accept()
         finally: wgaA.done()
-    rc.mn_go(acceptorA)
+    rc.mn_fiber(acceptorA)
     clientA = rc.TCPConn.connect("127.0.0.1", port)
     wgaA.wait(); scA = accA["sc"]
     wgA = WaitGroup(); wgA.add(1)
@@ -478,7 +478,7 @@ def main():
             scA.close()                # ms_close while ARMED -> cancel branch
         finally:
             wgA.done()
-    rc.mn_go(serverA)
+    rc.mn_fiber(serverA)
     clientA.send_all(b"ARMEDXX1")
     wgA.wait()
     clientA.close()
@@ -488,7 +488,7 @@ def main():
     def acceptorB():
         try: accB["sc"] = lconn.accept()
         finally: wgaB.done()
-    rc.mn_go(acceptorB)
+    rc.mn_fiber(acceptorB)
     clientB = rc.TCPConn.connect("127.0.0.1", port)
     wgaB.wait(); scB = accB["sc"]
     wgB = WaitGroup(); wgB.add(1)
@@ -499,7 +499,7 @@ def main():
             scB.close()                # ms_close, multishot ENDED -> immediate-free
         finally:
             wgB.done()
-    rc.mn_go(serverB)
+    rc.mn_fiber(serverB)
     clientB.send_all(b"EOFCLOSE")
     runloom.sleep(0.05)
     clientB.close()                    # peer EOF
@@ -562,7 +562,7 @@ def main():
     def acceptor():
         try: acc["sc"] = lconn.accept()
         finally: wga.done()
-    rc.mn_go(acceptor)
+    rc.mn_fiber(acceptor)
     client = rc.TCPConn.connect("127.0.0.1", port)
     wga.wait(); sc = acc["sc"]
 
@@ -575,7 +575,7 @@ def main():
             res["errno"] = e.errno
         finally:
             wg.done()
-    rc.mn_go(reader)
+    rc.mn_fiber(reader)
     # Deterministic handshake (no sleep-as-sync): cancel_wait_fd() returns True
     # IFF the reader's hub-ring op is published AND wait==PARKED -- i.e. the park
     # has committed (runloom_iouring_cancel_g returns 0 / routes nothing before

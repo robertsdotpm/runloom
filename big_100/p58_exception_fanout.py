@@ -49,7 +49,7 @@ def worker(H, wid, rng, state):
             r = random.Random(seed)
             if r.random() >= 0.5:
                 expected_err += 1
-            H.go(child, i, seed, out)
+            H.fiber(child, i, seed, out)
         errs = 0
         for _ in range(KIDS):
             tag, idx, payload = out.recv()[0]

@@ -2,7 +2,7 @@
 
 We don't use unittest here.  CPython tracks frame chain + recursion
 counters in thread-state; the legacy `runloom.runtime` Python scheduler
-only swaps recursion counters (the C scheduler in `runloom_c.go`
+only swaps recursion counters (the C scheduler in `runloom_c.fiber`
 does the full Phase B snap).  Multi-fiber tests therefore go
 through `runloom_c.*` directly so the production path is exercised.
 

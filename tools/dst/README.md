@@ -1,7 +1,7 @@
 # dst -- Deterministic Simulation Testing
 
 `dst.py` drives REAL runloom channels / `select` on the single-thread cooperative
-scheduler (`runloom_c.go` + `run`), which is deterministic: for a fixed set of
+scheduler (`runloom_c.fiber` + `run`), which is deterministic: for a fixed set of
 goroutines making fixed yield decisions the run-queue order is fixed, so the whole
 execution is reproducible. A **seeded decision oracle** chooses *where* each
 goroutine yields (`runloom_c.sched_yield`) -- a different seed explores a different

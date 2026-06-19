@@ -57,7 +57,7 @@ def body(H):
         H.log("io_ticks={0} hog_ticks={1}".format(
             sum(H.state["io_ticks"]), sum(H.state["hog_ticks"])))
 
-    H.go(auditor)
+    H.fiber(auditor)
 
 
 if __name__ == "__main__":

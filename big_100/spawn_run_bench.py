@@ -28,7 +28,7 @@ def main():
     print("N={0} bulk={1} fresh={2} hubs=8  (spawn + run to completion)".format(N, bulk, fresh))
 
     t0 = time.monotonic()
-    runloom_c.go_n(noop, N)
+    runloom_c.fiber_n(noop, N)
     t_spawn = time.monotonic() - t0
 
     t1 = time.monotonic()

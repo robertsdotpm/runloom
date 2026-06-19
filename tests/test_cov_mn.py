@@ -106,7 +106,7 @@ def test_mn_fiber_n_bulk_indexed():
     def main():
         rc.fiber_n(worker, 256, 0, True)    # indexed bulk spawn
     with hang_guard(40, "fiber_n bulk"):
-        rc.mn_init(4); rc.mn_go(main); rc.mn_run(); rc.mn_fini()
+        rc.mn_init(4); rc.mn_fiber(main); rc.mn_run(); rc.mn_fini()
     assert sum(seen) == 256
 
 
@@ -130,7 +130,7 @@ def test_mn_serve_echo():
             c.close()
             for L in listeners:
                 L.close()
-        rc.mn_go(client)
+        rc.mn_fiber(client)
     with hang_guard(30, "serve echo"):
         runloom.run(4, main)
     assert result.get("reply") == b"s:hi"
@@ -142,8 +142,8 @@ def test_mn_deadlock_raise():
     rc.set_deadlock_mode(2)               # raise
     try:
         def main():
-            rc.mn_go(lambda: rc.Chan(0).recv())   # nobody sends -> deadlock
-        rc.mn_init(2); rc.mn_go(main)
+            rc.mn_fiber(lambda: rc.Chan(0).recv())   # nobody sends -> deadlock
+        rc.mn_init(2); rc.mn_fiber(main)
         with pytest.raises(RuntimeError):
             rc.mn_run()
     finally:
@@ -159,7 +159,7 @@ def test_mn_hubinfo_and_diag_introspection():
     def main():
         ch = rc.Chan(0)
         for _ in range(20):
-            rc.mn_go(lambda: ch.recv())   # park on channel
+            rc.mn_fiber(lambda: ch.recv())   # park on channel
         rc.sched_sleep(0.01)              # let them park
         snap["hubs"] = rc.mn_hub_states()
         snap["hub_count"] = rc.mn_hub_count()

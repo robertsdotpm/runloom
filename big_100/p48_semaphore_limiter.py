@@ -23,7 +23,7 @@ def setup(H):
             runloom.sleep(0.05)
         s.cancel_all()
 
-    H.go(_cancel_watcher)
+    H.fiber(_cancel_watcher)
     H.state = {"sem": sem,
                "active": [0], "lock": threading.Lock(), "maxactive": [0]}
 

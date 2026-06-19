@@ -22,7 +22,7 @@ def measure(fn, n_coros, n_yields, repeats=5):
     best = float("inf")
     for _ in range(repeats):
         for _ in range(n_coros):
-            runloom_c.go(make_yielder(fn, n_yields))
+            runloom_c.fiber(make_yielder(fn, n_yields))
         t0 = time.perf_counter()
         runloom_c.run()
         dt = time.perf_counter() - t0

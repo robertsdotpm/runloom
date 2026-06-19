@@ -2,7 +2,7 @@
 
 Every CLIENT_INTERVAL seconds (default 60) it fires CLIENT_BURST (default
 100) concurrent HTTP requests at the server -- one goroutine per request,
-spawned with runloom_c.mn_go, all using the cooperative mnweb.fetch path.
+spawned with runloom_c.mn_fiber, all using the cooperative mnweb.fetch path.
 It collects every result over a channel, logs a latency/status summary,
 sleeps, and repeats forever.
 
@@ -71,7 +71,7 @@ def driver():
         results = runloom_c.Chan(BURST + 16)
         sent = time.perf_counter()
         for i in range(BURST):
-            runloom_c.mn_go(lambda i=i, r=results: one_request(i, r))
+            runloom_c.mn_fiber(lambda i=i, r=results: one_request(i, r))
         latencies, ok, fails, errors = [], 0, 0, []
         for _ in range(BURST):
             success, status, latency, err = results.recv()[0]
@@ -102,7 +102,7 @@ def main():
     os.makedirs(RUNDIR, exist_ok=True)
     arm_diagnostics()
     runloom_c.mn_init(HUBS)
-    runloom_c.mn_go(driver)
+    runloom_c.mn_fiber(driver)
     runloom_c.mn_run()
     runloom_c.mn_fini()
 

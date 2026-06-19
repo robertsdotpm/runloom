@@ -84,7 +84,7 @@ def body(H):
             sum(H.state["cancelled"]), sum(H.state["connected"]),
             H.fd_ceiling))
 
-    H.go(auditor)
+    H.fiber(auditor)
 
 
 if __name__ == "__main__":

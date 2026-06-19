@@ -128,8 +128,8 @@ def main():
         sys.stdout.write("HUBINFO_OK %d %s\n" % (got, "wedger" if any(
             "wedger" in n for n in names) else "none"))
         sys.stdout.flush()
-    rc.mn_go(wedger)
-    rc.mn_go(watcher)
+    rc.mn_fiber(wedger)
+    rc.mn_fiber(watcher)
 
 runloom.run(3, main)
 '''
@@ -440,7 +440,7 @@ def test_park_on_ready_sockets_across_hubs_post_register_recheck():
 
     def main():
         for i in range(NWORK):
-            rc.mn_go(lambda i=i: worker(i))
+            rc.mn_fiber(lambda i=i: worker(i))
         wg.wait()
 
     with hang_guard(30, "post-register recheck race"):

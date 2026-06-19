@@ -212,7 +212,7 @@ def acceptor(ln, handler):
             conn = ln.accept()
         except OSError:
             break
-        runloom.go(handler, conn, stop, stack_size=512 * 1024)
+        runloom.fiber(handler, conn, stop, stack_size=512 * 1024)
 
 
 def client(idx, port):
@@ -242,9 +242,9 @@ def client(idx, port):
 def root(handler):
     port, listeners = open_listeners("127.0.0.1", HUBS, min(N, 65535))
     for ln in listeners:
-        runloom.go(acceptor, ln, handler, stack_size=256 * 1024)
+        runloom.fiber(acceptor, ln, handler, stack_size=256 * 1024)
     for i in range(N):
-        runloom.go(client, i, port)
+        runloom.fiber(client, i, port)
 
     def controller():
         t0 = REAL_MONO()
@@ -268,7 +268,7 @@ def root(handler):
         print("RESULT mode=%-12s N=%-6d hubs=%d est=%d/%d  %.1fK req/s"
               % (mode, N, HUBS, est, N, win[0] / w / 1000.0))
 
-    runloom.go(controller)
+    runloom.fiber(controller)
     while not stop[0]:
         runloom.sleep(0.05)
 

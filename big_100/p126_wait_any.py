@@ -40,8 +40,8 @@ def worker(H, wid, rng, state):
         ch1 = runloom.Chan(1)
         d0 = rng.uniform(0.0005, 0.005)
         d1 = rng.uniform(0.0005, 0.005)
-        H.go(helper, ch0, d0, b"0")
-        H.go(helper, ch1, d1, b"1")
+        H.fiber(helper, ch0, d0, b"0")
+        H.fiber(helper, ch1, d1, b"1")
         to = rng.uniform(0.0005, 0.005)
         timer = rtime.After(to)
         idx, _payload = runloom.select(

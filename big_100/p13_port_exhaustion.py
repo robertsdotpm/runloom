@@ -66,7 +66,7 @@ def body(H):
             H.sleep(1.0)
         H.log("fd_ceiling={0} refused={1}".format(H.fd_ceiling, H.refused[0]))
 
-    H.go(fd_auditor)
+    H.fiber(fd_auditor)
 
 
 if __name__ == "__main__":

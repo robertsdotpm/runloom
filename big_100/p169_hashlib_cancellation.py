@@ -59,7 +59,7 @@ def worker(H, wid, rng, state):
             # fraction cancel essentially immediately (delay 0) so the very first
             # inter-chunk ctx.err() check catches it; the rest race the offload.
             delay = 0.0 if (rng.random() < 0.5) else rng.uniform(0.0001, 0.002)
-            runloom.go(cancelutil.delayed_cancel, cancel, delay)
+            runloom.fiber(cancelutil.delayed_cancel, cancel, delay)
 
         h = hashlib.sha256()
         aborted = False

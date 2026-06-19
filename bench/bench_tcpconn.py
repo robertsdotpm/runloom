@@ -50,7 +50,7 @@ def bench_monkey(N):
         t[0] = time.perf_counter() - t0
         c.close()
 
-    runloom_c.go(server); runloom_c.go(client); runloom_c.run()
+    runloom_c.fiber(server); runloom_c.fiber(client); runloom_c.run()
     srv.close()
     return t[0]
 
@@ -87,7 +87,7 @@ def bench_native_fns(N):
         t[0] = time.perf_counter() - t0
         c.close()
 
-    runloom_c.go(server); runloom_c.go(client); runloom_c.run()
+    runloom_c.fiber(server); runloom_c.fiber(client); runloom_c.run()
     srv.close()
     return t[0]
 
@@ -121,7 +121,7 @@ def bench_tcpconn(N):
         t[0] = time.perf_counter() - t0
         c.close()
 
-    runloom_c.go(server); runloom_c.go(client); runloom_c.run()
+    runloom_c.fiber(server); runloom_c.fiber(client); runloom_c.run()
     return t[0]
 
 

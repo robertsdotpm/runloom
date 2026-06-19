@@ -60,7 +60,7 @@ Building and running the campaign surfaced **10 real bugs/limitations** in the
 extension — see [FINDINGS.md](FINDINGS.md) for the full writeups with repros.
 Headlines:
 
-- **#1 (fixed):** `monkey.patch()` broke every `runloom.go()` (the wrapper
+- **#1 (fixed):** `monkey.patch()` broke every `runloom.fiber()` (the wrapper
   dropped the stack-size positional arg). Fixed in `src/runloom/monkey/`.
 - **#2:** the handoff rescue corrupts memory under high socket concurrency
   (SIGSEGV/SIGBUS). The harness disables it by default (`RUNLOOM_HANDOFF=0`);

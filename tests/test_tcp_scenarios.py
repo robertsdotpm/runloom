@@ -31,7 +31,7 @@ import runloom.sync as psync
 # Prewarm getaddrinfo's deep, non-yielding lazy import chain
 # (encodings.idna -> stringprep -> unicodedata) on the MAIN thread, with its
 # full C stack.  runloom.sync.run()/runloom.runtime.run() do this for you; these
-# tests drive the low-level runloom_c.go/run() path directly, which does not,
+# tests drive the low-level runloom_c.fiber/run() path directly, which does not,
 # so the first getaddrinfo inside a fiber would otherwise overflow the
 # (small) fiber stack and crash.  See runloom/sync.py prewarm comment.
 socket.getaddrinfo("127.0.0.1", 0, socket.AF_INET, socket.SOCK_STREAM)

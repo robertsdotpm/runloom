@@ -41,7 +41,7 @@ def run_case(hubs, n_gs, yields_per_g, label):
     lock = threading.Lock()
     t0 = time.perf_counter()
     for _ in range(n_gs):
-        runloom_c.mn_go(make_yielder(yields_per_g, counter, lock))
+        runloom_c.mn_fiber(make_yielder(yields_per_g, counter, lock))
     runloom_c.mn_run()
     runloom_c.mn_fini()
     dt = time.perf_counter() - t0

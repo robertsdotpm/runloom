@@ -51,7 +51,7 @@ def unit(H, wid, rng, woken_close, woken_timeout):
     b.setblocking(True)
     ready = runloom.Chan(1)
     done = runloom.Chan(1)
-    H.go(reader, H, a, ready, done)
+    H.fiber(reader, H, a, ready, done)
     ready.recv()                              # reader is about to park
     runloom.sleep(0.003)                      # let it actually reach the park
     try:

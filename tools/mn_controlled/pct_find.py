@@ -50,8 +50,8 @@ WORKLOAD = (
     "        runloom_c.sched_sleep(0)\n"
     "def B():\n"
     "    st['seen'] = st['x']\n"           # one read = one segment, PCT places it
-    "runloom_c.mn_go(A)\n"
-    "runloom_c.mn_go(B)\n"
+    "runloom_c.mn_fiber(A)\n"
+    "runloom_c.mn_fiber(B)\n"
     "runloom_c.mn_run(); runloom_c.mn_fini()\n"
     "print('BUG' if st['seen'] == TARGET else 'ok', st['seen'])\n"
 )

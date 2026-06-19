@@ -41,7 +41,7 @@ def main():
 
     runloom_c.mn_init(N_HUBS)
     for _ in range(N_GOROUTINES):
-        runloom_c.mn_go(worker)
+        runloom_c.mn_fiber(worker)
     runloom_c.mn_run()
     runloom_c.mn_fini()
 

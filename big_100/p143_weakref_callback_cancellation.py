@@ -102,14 +102,14 @@ def body(H):
             runloom.yield_now()
         H.log("event_wakes={0}".format(woken))
 
-    H.go(waiter)
+    H.fiber(waiter)
 
     def gc_driver():
         while H.running():
             H.sleep(0.05)
             gc.collect()
 
-    H.go(gc_driver)
+    H.fiber(gc_driver)
     H.run_pool(H.funcs, worker, state)
 
 

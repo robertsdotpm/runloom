@@ -71,7 +71,7 @@ def setup(H):
         finally:
             netutil.close_quiet(conn)
 
-    servers = netutil.listen_all(H, lambda conn, addr: H.go(handle, conn))
+    servers = netutil.listen_all(H, lambda conn, addr: H.fiber(handle, conn))
     H.state = {"servers": servers,
                "lock": threading.Lock(), "accepted": [0], "corrupt": [0]}
 

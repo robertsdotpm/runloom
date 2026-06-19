@@ -33,8 +33,8 @@ def setup(H):
     for ip in H.net_ips:
         srv = netutil.listen_tcp(host=ip)
         H.register_close(srv)
-        H.go(netutil.serve_forever, H, srv,
-             lambda conn, addr: H.go(echo_handler, H, conn))
+        H.fiber(netutil.serve_forever, H, srv,
+             lambda conn, addr: H.fiber(echo_handler, H, conn))
         servers.append((ip, srv.getsockname()[1]))
     H.state = {"servers": servers}
 

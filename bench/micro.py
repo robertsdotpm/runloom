@@ -23,7 +23,7 @@ from bench.harness import Suite
 
 def make_spawn(n):
     """Spawn n no-op goroutines, run to empty.  inner = n goroutines."""
-    go = runloom_c.go
+    go = runloom_c.fiber
     run = runloom_c.run
 
     def noop():
@@ -44,12 +44,12 @@ def make_yield(n_coros, m_yields):
     (few-long vs many-short) expose ready-queue vs per-goroutine cost.
 
     NB: m_yields is captured via the closure, NOT passed as a second
-    positional to go() -- `runloom_c.go(fn, stack_size=None)` reads its
+    positional to go() -- `runloom_c.fiber(fn, stack_size=None)` reads its
     second positional as the stack size, so `go(worker, m)` would set the
     stack to m bytes and call worker() with no args (silent TypeError,
     swallowed by the scheduler -> zero work measured).
     """
-    go = runloom_c.go
+    go = runloom_c.fiber
     run = runloom_c.run
     sched_yield = runloom_c.sched_yield
 
@@ -71,7 +71,7 @@ def make_pingpong(n):
     Each round-trip = a.send + a.recv + b.send + b.recv = 4 chan ops and
     2 cross-goroutine wakeups -- the unbuffered (always-park) hot path.
     """
-    go = runloom_c.go
+    go = runloom_c.fiber
     run = runloom_c.run
 
     def once():
@@ -101,7 +101,7 @@ def make_buffered(n, cap):
     With a cap-deep buffer most sends don't park, so this measures the
     buffered fast path rather than the wakeup machinery.
     """
-    go = runloom_c.go
+    go = runloom_c.fiber
     run = runloom_c.run
 
     def once():

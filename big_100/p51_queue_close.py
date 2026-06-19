@@ -50,9 +50,9 @@ def session(H, wid, rng, state):
         sent = [[0] for _ in range(PRODUCERS)]
         got = [[0] for _ in range(CONSUMERS)]
         for i in range(PRODUCERS):
-            H.go(producer, H, ch, sent[i], done)
+            H.fiber(producer, H, ch, sent[i], done)
         for i in range(CONSUMERS):
-            H.go(consumer, H, ch, got[i], done)
+            H.fiber(consumer, H, ch, got[i], done)
         # Let some traffic build up, then close mid-flight.
         runloom.sleep(rng.uniform(0.0005, 0.005))
         ch.close()

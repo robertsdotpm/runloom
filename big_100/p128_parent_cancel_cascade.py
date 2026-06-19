@@ -58,9 +58,9 @@ def branch(H, ctx, wg, exited_cell, exited_lock, rng, depth):
         for _ in range(nkids):
             wg.add(1)
             if depth > 1:
-                H.go(branch, H, ctx, wg, exited_cell, exited_lock, rng, depth - 1)
+                H.fiber(branch, H, ctx, wg, exited_cell, exited_lock, rng, depth - 1)
             else:
-                H.go(leaf, H, ctx, wg, exited_cell, exited_lock, rng)
+                H.fiber(leaf, H, ctx, wg, exited_cell, exited_lock, rng)
         # The internal node itself also blocks until cancelled.
         cancelutil.cancellable_sleep(ctx, 2.0)
     finally:
@@ -89,9 +89,9 @@ def worker(H, wid, rng, state):
             wg.add(1)
             n_spawned += 1
             if depth > 1:
-                H.go(branch, H, ctx, wg, exited_cell, exited_lock, rng, depth - 1)
+                H.fiber(branch, H, ctx, wg, exited_cell, exited_lock, rng, depth - 1)
             else:
-                H.go(leaf, H, ctx, wg, exited_cell, exited_lock, rng)
+                H.fiber(leaf, H, ctx, wg, exited_cell, exited_lock, rng)
 
         # Let the tree fully materialize (every descendant parks watching ctx)
         # before we cancel, so we exercise the cascade-to-parked path.

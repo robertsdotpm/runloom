@@ -273,8 +273,8 @@ def test_select_recv_parks_in_mn_hub_then_woken():
             finally:
                 wg.done()
 
-        rc.mn_go(chooser)
-        rc.mn_go(sender)
+        rc.mn_fiber(chooser)
+        rc.mn_fiber(sender)
         wg.wait()
 
     with hang_guard(30, "mn hub select park"):
@@ -324,9 +324,9 @@ def test_select_mn_recv_integrity_stress():
 
         NSEL = 8
         for _ in range(NSEL):
-            rc.mn_go(selector)
+            rc.mn_fiber(selector)
         for p in range(NPROD):
-            rc.mn_go(lambda p=p: producer(p))
+            rc.mn_fiber(lambda p=p: producer(p))
         wg.wait()                                 # everything produced
         for c in chans:                           # unpark leftover selectors
             try:
@@ -386,9 +386,9 @@ def test_select_mn_send_integrity_stress():
 
         NRECV = K * 4
         for rr in range(NRECV):
-            rc.mn_go(lambda rr=rr: receiver(rr))
+            rc.mn_fiber(lambda rr=rr: receiver(rr))
         for s in range(NSEL):
-            rc.mn_go(lambda s=s: selector(s))
+            rc.mn_fiber(lambda s=s: selector(s))
         wgS.wait()
 
     with hang_guard(90, "mn send-select integrity"):
@@ -425,10 +425,10 @@ def worker():
 
 def main():
     for _ in range(4):                  # round 1: establishes the sample
-        rc.mn_go(worker)
+        rc.mn_fiber(worker)
     rc.sched_sleep(0.3)
     for _ in range(4):                  # round 2: learned (samples > 0)
-        rc.mn_go(worker)
+        rc.mn_fiber(worker)
     rc.sched_sleep(0.3)
 
 runloom.run(2, main)
@@ -477,7 +477,7 @@ assert "Decimal" in crypto_like.__code__.co_names
 
 def main():
     for _ in range(6):
-        rc.mn_go(crypto_like)           # spawned DIRECTLY -> size_for sees it
+        rc.mn_fiber(crypto_like)           # spawned DIRECTLY -> size_for sees it
     rc.sched_sleep(0.3)
 
 runloom.run(2, main)
@@ -513,7 +513,7 @@ def fresh():                            # an UNSEEN kind -> starts at the env si
     return 1
 
 def main():
-    rc.mn_go(fresh)                     # first spawn: no sample -> autosize start
+    rc.mn_fiber(fresh)                     # first spawn: no sample -> autosize start
     rc.sched_sleep(0.2)
 
 runloom.run(2, main)
@@ -560,7 +560,7 @@ assert "Decimal" not in wrapper.__code__.co_names   # only the target has it
 
 def main():
     for _ in range(4):
-        rc.mn_go(wrapper)               # unwrap -> real_target's bytecode
+        rc.mn_fiber(wrapper)               # unwrap -> real_target's bytecode
     rc.sched_sleep(0.3)
 
 runloom.run(2, main)
@@ -602,7 +602,7 @@ assert not hasattr(c, "__code__")
 
 def main():
     for _ in range(3):
-        rc.mn_go(c)                      # name_of: code==NULL -> "module.<callable>"
+        rc.mn_fiber(c)                      # name_of: code==NULL -> "module.<callable>"
     rc.sched_sleep(0.2)
 
 runloom.run(2, main)
@@ -645,7 +645,7 @@ w = Weird()
 
 def main():
     for _ in range(3):
-        rc.mn_go(w)                      # cold_start: co_names not tuple -> generic
+        rc.mn_fiber(w)                      # cold_start: co_names not tuple -> generic
     rc.sched_sleep(0.2)
 
 runloom.run(2, main)
@@ -682,7 +682,7 @@ def w():
 
 def main():
     for _ in range(6):
-        rc.mn_go(w)
+        rc.mn_fiber(w)
     rc.sched_sleep(0.2)
 
 runloom.run(2, main)
@@ -719,7 +719,7 @@ def slow():
     return 1
 
 def main():
-    rc.mn_go(slow)                      # note_spawn inserts slow's key
+    rc.mn_fiber(slow)                      # note_spawn inserts slow's key
     rc.sched_sleep(0.05)
     rc.reset_stack_advice()             # clears the table -> slow's key gone
     rc.sched_sleep(0.4)                 # slow completes -> record_g -> find MISS
@@ -753,7 +753,7 @@ funcs = [ns["k%d" % i] for i in range(N)]
 
 def main():
     for f in funcs:
-        rc.mn_go(f)                     # each distinct qualname -> distinct kind
+        rc.mn_fiber(f)                     # each distinct qualname -> distinct kind
     rc.sched_sleep(0.6)
 
 runloom.run(2, main)
@@ -791,7 +791,7 @@ def w():
 
 def main():
     for _ in range(3):
-        rc.mn_go(w)
+        rc.mn_fiber(w)
     rc.sched_sleep(0.15)
 
 runloom.run(2, main)
