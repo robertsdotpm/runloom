@@ -15,3 +15,5 @@ build/
 **/build/
 __pycache__/
 *.pyc
+speed/centry_probe.c
+speed/centry_probe*.so
