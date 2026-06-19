@@ -8,6 +8,7 @@ backend syscall profiles (linux/mac/win).
 """
 import html
 import json
+import math
 import os
 import sys
 import datetime
@@ -42,6 +43,78 @@ def fmt(x, nd=0):
     return esc(x)
 
 
+def _axfmt(v):
+    if v >= 1e6:
+        return ("%gM" % (v / 1e6))
+    if v >= 1e3:
+        return ("%gk" % (v / 1e3))
+    return "%g" % v
+
+
+def svg_linechart(series, xlabels, xaxis="FNV passes (--work)", width=760, height=380):
+    """A log-y line chart (data spans orders of magnitude). x is categorical /
+    equally spaced (the --work values aren't linear). series: list of
+    (name, color, [y aligned to xlabels]); a None y is a gap. Pure inline SVG,
+    no JS/deps. Returns "" if there is nothing positive to plot."""
+    ml, mr, mt, mb = 66, 158, 22, 46
+    pw, ph = width - ml - mr, height - mt - mb
+    n = len(xlabels)
+    allv = [y for _, _, ys in series for y in ys if y and y > 0]
+    if not allv or n < 2:
+        return ""
+    ymin, ymax = min(allv), max(allv)
+    lo, hi = math.floor(math.log10(ymin)), math.ceil(math.log10(ymax))
+    if hi == lo:
+        hi += 1
+
+    def yp(v):
+        if not v or v <= 0:
+            return None
+        return mt + ph - (math.log10(v) - lo) / (hi - lo) * ph
+
+    def xp(i):
+        return ml + pw * i / (n - 1)
+
+    out = ['<svg viewBox="0 0 %d %d" class="chart" width="100%%" style="max-width:%dpx">'
+           % (width, height, width)]
+    # log-decade gridlines (1/2/5 within each decade), labelled
+    for d in range(lo, hi + 1):
+        for mant in (1, 2, 5):
+            v = mant * 10 ** d
+            if v < ymin * 0.92 or v > ymax * 1.08:
+                continue
+            y = yp(v)
+            out.append('<line x1="%d" y1="%.1f" x2="%d" y2="%.1f" class="grid"/>' % (ml, y, ml + pw, y))
+            out.append('<text x="%d" y="%.1f" class="ytick">%s</text>' % (ml - 7, y + 3, _axfmt(v)))
+    # x ticks + axis label
+    for i, xl in enumerate(xlabels):
+        out.append('<text x="%.1f" y="%d" class="xtick">%s</text>' % (xp(i), mt + ph + 16, esc(xl)))
+    out.append('<text x="%.1f" y="%d" class="axlbl">%s</text>' % (ml + pw / 2, height - 5, esc(xaxis)))
+    out.append('<text x="14" y="%.1f" class="axlbl" transform="rotate(-90 14 %.1f)">req/s (log)</text>'
+               % (mt + ph / 2, mt + ph / 2))
+    # series: polyline over non-null segments + dots + legend
+    for si, (name, color, ys) in enumerate(series):
+        path, pen = "", False
+        for i, v in enumerate(ys):
+            y = yp(v)
+            if y is None:
+                pen = False
+                continue
+            path += ("L" if pen else "M") + "%.1f %.1f " % (xp(i), y)
+            pen = True
+        out.append('<path d="%s" fill="none" stroke="%s" stroke-width="2.2"/>' % (path, color))
+        for i, v in enumerate(ys):
+            y = yp(v)
+            if y is not None:
+                out.append('<circle cx="%.1f" cy="%.1f" r="2.6" fill="%s"/>' % (xp(i), y, color))
+        ly = mt + 12 + si * 18
+        out.append('<line x1="%d" y1="%d" x2="%d" y2="%d" stroke="%s" stroke-width="2.2"/>'
+                   % (ml + pw + 14, ly, ml + pw + 32, ly, color))
+        out.append('<text x="%d" y="%d" class="leg">%s</text>' % (ml + pw + 36, ly + 4, esc(name)))
+    out.append('</svg>')
+    return "".join(out)
+
+
 # ---------------------------------------------------------------- table helper
 def table(tid, headers, rows, note="", mark_best=True):
     """headers: list of (label, numeric?bool). rows: list of list of (display,
@@ -50,8 +123,10 @@ def table(tid, headers, rows, note="", mark_best=True):
     visible at a glance; the tag rides the row if the reader re-sorts."""
     out = ['<table id="%s" class="sortable"><thead><tr>' % tid]
     for i, (lbl, num) in enumerate(headers):
+        # header labels are authored HTML (may contain &times; etc.); not esc'd
+        # -- same as the cells below, which are also raw authored HTML.
         out.append('<th onclick="sortT(\'%s\',%d,%s)">%s<span class="ar"></span></th>'
-                    % (tid, i, "true" if num else "false", esc(lbl)))
+                    % (tid, i, "true" if num else "false", lbl))
     out.append("</tr></thead><tbody>")
     for ri, r in enumerate(rows):
         best = mark_best and ri == 0
@@ -73,9 +148,12 @@ def code_block(title, path, lang=""):
     with open(path) as f:
         src = f.read()
     rel = os.path.relpath(path, BENCH)
+    # title is authored HTML (may contain intentional entities like &mdash;); do
+    # NOT esc it (that double-escapes -> "&mdash;" renders literally). rel/src ARE
+    # escaped (filename / source code -- untrusted-ish content).
     return ('<details class="code"><summary>%s <span class="path">%s</span></summary>'
             '<pre><code>%s</code></pre></details>'
-            % (esc(title), esc(rel), esc(src)))
+            % (title, esc(rel), esc(src)))
 
 
 # ---------------------------------------------------------------- sections
@@ -403,6 +481,12 @@ def sec_work(work):
            ("Cython handler req/s", True), ("Cython / Python", True),
            ("Python bottleneck", False)]
     pl = meta.get("payload", 1024)
+    # line chart: req/s vs --work, Python vs Cython (log-y -- spans 615k->1.7k)
+    xlabels = [("%d (echo)" % w) if w == 0 else str(w) for w in works]
+    ys = lambda h: [py.get(str(w), {}).get("peak", {}).get("rps_median") if h == "py"
+                    else cy.get(str(w), {}).get("peak", {}).get("rps_median") for w in works]
+    chart = svg_linechart([("Python handler", "var(--warn)", ys("py")),
+                           ("Cython handler", "var(--good)", ys("cy"))], xlabels)
     return ('<h2 id="work">Handler work curve &mdash; what compiling the handler buys</h2>'
             '<p>Every handler-side optimization <em>ties</em> on echo because a TCP echo '
             'does no CPU work in the handler (the cost is the kernel TCP path). This is the '
@@ -422,6 +506,7 @@ def sec_work(work):
             '<em>That</em> gap is what the whole Cython/cdef handler path was built to earn '
             'and echo structurally could not show.</p>'
             % (pl, max_speed)
+            + chart
             + table("t_work", hdr, rows, mark_best=False, note=
                     "Read the <b>Cython / Python ratio</b> column as the robust signal: it is "
                     "monotonic because the Python side collapses (server-bound from the first "
@@ -482,6 +567,17 @@ def sec_work_xrt(xrt):
     for w in works:
         hdr.append((("w=%d (echo)" % w) if w == 0 else ("w=%d" % w), True))
 
+    # per-core line chart: cool colours = compiled band, warm = interpreted band
+    palette = {"runloom_cython": "var(--good)", "go": "var(--acc)",
+               "runloom_py": "var(--warn)", "asyncio": "#ff9966",
+               "uvloop": "#ff6b9d", "gevent": "#e06c75"}
+    xlabels = [("%d (echo)" % w) if w == 0 else str(w) for w in works]
+    cseries = []
+    for name, info in rtinfo.items():
+        cseries.append((info.get("label", name), palette.get(name, "var(--fg)"),
+                        [percore(name, w) for w in works]))
+    chart = svg_linechart(cseries, xlabels)
+
     return ('<h2 id="workxrt">Cross-runtime work curve &mdash; per core, every runtime</h2>'
             '<p>The same <code>--work N</code> FNV-1a byte hash as above, now run in '
             '<b>every runtime\'s natural handler language</b> &mdash; interpreted Python '
@@ -489,8 +585,10 @@ def sec_work_xrt(xrt):
             'in the echo benchmark) and compiled/native (runloom-Cython on M:N, Go on '
             '<code>GOMAXPROCS</code>). Reported <b>per core</b> (peak rps &divide; the server\'s '
             'pinned cores) so it is an efficiency comparison, not a core-count one. Same '
-            'algorithm, same payload, nothing cherry-picked.</p>'
-            + table("t_workxrt", hdr, body, mark_best=False, note=
+            'algorithm, same payload, nothing cherry-picked. The chart is log-y: cool '
+            'lines are the compiled band, warm lines the interpreted band.</p>'
+            + chart
+            + table("t_workxrt", hdr, body, mark_best=True, note=
                     "Rows are sorted by per-core throughput at the heaviest work &mdash; that "
                     "<b>rightmost column is the one to read</b>, because it is the only point where "
                     "all six runtimes are genuinely server-bound (a true capacity comparison). "
@@ -615,13 +713,20 @@ th:first-child,td:first-child{text-align:left}
 thead th{background:#1d242e;cursor:pointer;user-select:none;position:relative;white-space:nowrap}
 thead th:hover{color:var(--acc)}.ar{font-size:10px;color:var(--mut);margin-left:4px}
 tbody tr:hover{background:#1d242e}.sub{color:var(--mut);font-size:11px}
-tr.best{background:#16301f}tr.best td{font-weight:600;color:#eafaf0}tr.best:hover{background:#1b3a26}
-.trophy{margin-right:6px;filter:saturate(1.3)}
+tr.best{background:#16301f;box-shadow:inset 3px 0 0 var(--good)}tr.best td{font-weight:700;color:#eafaf0}
+tr.best td:first-child{color:var(--good)}tr.best:hover{background:#1b3a26}
+.trophy{margin-right:6px;filter:saturate(1.4);font-size:15px}
 table.kv th{text-align:left;width:210px;color:var(--mut);font-weight:600;cursor:default}
 table.kv th:hover{color:var(--mut)}
 .note{color:var(--mut);font-size:12px;margin:4px 0 18px}
 .warn{color:var(--warn);font-size:13px}
 .kgood{color:var(--good);font-weight:600}.kwarn{color:var(--warn);font-weight:600}
+svg.chart{display:block;background:var(--panel);border:1px solid var(--line);border-radius:4px;margin:14px 0}
+.chart .grid{stroke:var(--line);stroke-width:1}
+.chart .ytick{fill:var(--mut);font-size:10px;text-anchor:end}
+.chart .xtick{fill:var(--mut);font-size:11px;text-anchor:middle}
+.chart .axlbl{fill:var(--mut);font-size:11px;text-anchor:middle}
+.chart .leg{fill:var(--fg);font-size:11px}
 details.code{margin:6px 0;background:var(--panel);border:1px solid var(--line);border-radius:4px}
 details.code summary{cursor:pointer;padding:8px 12px;font-weight:600;display:flex;justify-content:space-between;align-items:baseline;gap:16px}
 details.code summary::-webkit-details-marker{flex:0 0 auto}
