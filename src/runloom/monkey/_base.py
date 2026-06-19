@@ -488,33 +488,36 @@ class _ThreadPoolBackend(_BlockingBackend):
             except Exception:
                 size = 4
         self.size = max(1, size)
-        # Raw C SimpleQueue.  Why not a Lock/Condition + deque: a fiber that
-        # took a real threading.Lock here and was PREEMPTED while holding it
-        # would have every sibling on its hub block the hub OS-thread on
-        # Lock.acquire(), freezing the hub on a lock only that frozen hub can
-        # release -- under heavy offload every hub froze at once (big_100
-        # BUG #4).  A cooperative try+backoff acquire avoids the freeze but
-        # collapses throughput under contention.  SimpleQueue.put() is instead
-        # a single atomic C call: runloom only preempts at Python frame
-        # boundaries, so a fiber can NEVER be parked mid-put holding the
-        # queue's internal lock, and that lock is held only nanoseconds -- the
-        # hub is never frozen.  put() never blocks (unbounded); workers block
-        # in get() on a real OS thread, which is exactly the point of the pool.
-        self._q = _real_SimpleQueue_for_backend()
+        # SHARDED job queues -- ONE raw C SimpleQueue per worker, NOT one shared
+        # queue.  Raw C SimpleQueue (never monkey-patched): its put() is a single
+        # atomic C call, so a fiber can never be PREEMPTED mid-put holding the
+        # queue lock and freeze its hub (the old Lock/Condition+deque freeze,
+        # big_100 BUG #4); workers block in get() on a real OS thread.
+        #
+        # WHY SHARDED (the p23/p17 @1M wedge): under FREE-THREADED CPython a
+        # SimpleQueue's per-object `Py_BEGIN_CRITICAL_SECTION` PyMutex CONVOYS
+        # when many threads put/get the SAME object.  At ~1M concurrent offloads,
+        # 8 hubs (put) + N workers (get) all contend one mutex; the loser threads
+        # `_PyParkingLot_Park` on its futex -- and a PARKED HUB OS THREAD is OFF
+        # the scheduler, so it stops pumping netpoll, so FD-mode offload-
+        # completion self-pipe wakes are never delivered -> ~1M fibers strand ->
+        # total wedge (gdb: 18/19 threads in futex on the SimpleQueue mutex).
+        # One queue per worker spreads put/get across N distinct critical
+        # sections (each shard: 1 worker get + the hubs that hash to it), so no
+        # single mutex is contended by every thread and the convoy can't form.
+        self._qs = [_real_SimpleQueue_for_backend() for _ in range(self.size)]
         self._started = self.size
         # Start workers eagerly in __init__ -- we are not yet inside any
         # fiber (the backend is built on first offload, called from the
-        # scheduler root fiber), so there is no concurrent fiber
-        # racing on _started.  Eager start avoids the lazy-start race: if
-        # 8000 fibers all call submit() concurrently on the first touch,
-        # each would see _started < size and could spawn duplicate or zero
-        # workers depending on preemption timing.
-        for _ in range(self.size):
-            _thread.start_new_thread(self._worker_loop, ())
+        # scheduler root fiber), so there is no concurrent fiber racing on
+        # _started.  Each worker owns shard i.
+        for i in range(self.size):
+            _thread.start_new_thread(self._worker_loop, (i,))
 
-    def _worker_loop(self):
+    def _worker_loop(self, shard):
+        q = self._qs[shard]               # this worker's own shard queue
         while True:
-            item = self._q.get()           # real C blocking get on a real thread
+            item = q.get()                 # real C blocking get on a real thread
             if item is _BACKEND_SHUTDOWN:
                 return
             fn, args, kwargs, box, parker = item
@@ -549,7 +552,11 @@ class _ThreadPoolBackend(_BlockingBackend):
         # wakeup edge-insensitive: we only return once the worker actually
         # finished (any stale byte is then drained by release()).
         box = [None, None, False]
-        self._q.put((fn, args, kwargs, box, p))   # atomic C call; never freezes the hub
+        # Shard by OS-thread (hub) id -- stateless, so it adds no shared counter
+        # to convoy on.  Spreads puts across the per-worker queues so no single
+        # SimpleQueue critical section is hammered by every hub (see __init__).
+        self._qs[_thread.get_ident() % self.size].put(
+            (fn, args, kwargs, box, p))            # atomic C call; never freezes the hub
         try:
             while not box[2]:
                 p.park()
@@ -560,9 +567,9 @@ class _ThreadPoolBackend(_BlockingBackend):
         return box[0]
 
     def fini(self):
-        # One shutdown sentinel per started worker; each get()s it and exits.
-        for _ in range(self._started):
-            self._q.put(_BACKEND_SHUTDOWN)
+        # One shutdown sentinel per worker, on that worker's OWN shard queue.
+        for q in self._qs:
+            q.put(_BACKEND_SHUTDOWN)
 
 
 _backend = None
