@@ -34,6 +34,7 @@ def main():
     perf = load("perf.json")
     speed = load("speed.json")
     mem = load("mem.json")
+    work = load("work_curve.json")
     envd = load("env.json") or {}
     quick = any(d and d.get("quick") for d in (perf, speed, mem))
 
@@ -83,6 +84,50 @@ def main():
                      "reaches a **1.16M req/s server ceiling (+2.17× over epoll)**, the fastest "
                      "runloom config measured. \"io_uring loses on loopback\" was an artifact of "
                      "driving it through the readiness path; see the findings writeup.[^bench]")
+            L.append("")
+
+    # --- handler work curve ---
+    if work:
+        res = work.get("results", {})
+        wmeta = work.get("meta", {})
+        py, cy = res.get("py", {}), res.get("cython", {})
+        works = wmeta.get("works", [])
+        # a curated subset of work levels for the README (full curve in the report)
+        show = [w for w in works if w in (0, 1, 4, 16, 64)] or works
+        rows = []
+        for w in show:
+            ppy = py.get(str(w), {}).get("peak", {})
+            pcy = cy.get(str(w), {}).get("peak", {})
+            vpy, vcy = ppy.get("rps_median"), pcy.get("rps_median")
+            if vpy is None or vcy is None:
+                continue
+            rows.append((w, vpy, vcy, (vcy / vpy) if vpy else 0))
+        if rows:
+            pl = wmeta.get("payload", 1024)
+            mx = max(r[3] for r in rows)
+            L.append("### Handler work curve (what compiling the handler buys)")
+            L.append("")
+            L.append("Echo ties every handler optimisation because it does no CPU work in the "
+                     "handler. This is the one experiment that gives the handler something to do: "
+                     "**one server, one knob** (`--work N` = an FNV-1a byte hash over the %d B "
+                     "payload, repeated N times), **two builds of the identical algorithm** &mdash; "
+                     "interpreted Python vs Cython-compiled &mdash; on the same runtime and I/O "
+                     "path. `--work 0` **is** the echo (lowest point), so it consolidates the echo "
+                     "load and reproduces it as a cross-check.[^bench]" % pl)
+            L.append("")
+            L.append("| --work (FNV passes) | Python handler req/s | Cython handler req/s | Cython / Python |")
+            L.append("|--:|--:|--:|--:|")
+            for w, vpy, vcy, spd in rows:
+                tag = " (echo)" if w == 0 else ""
+                L.append("| %d%s | %s | %s | %.2f× |"
+                         % (w, tag, commafy(vpy), commafy(vcy), spd))
+            L.append("")
+            L.append("> As the knob grows the interpreted handler goes server-bound and collapses "
+                     "while the compiled handler holds (up to **%.1f×** here). The work is pure "
+                     "inline arithmetic, never offloaded to a worker thread, so per-core accounting "
+                     "stays valid. **Honest framing:** if the handler delegated to a C library "
+                     "(`hashlib`/`json`/`struct`) Python and Cython would converge &mdash; the gap "
+                     "is specific to *handler-level* Python work.[^bench]" % mx)
             L.append("")
 
     # --- memory 1M ---

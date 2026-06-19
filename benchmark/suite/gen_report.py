@@ -364,6 +364,82 @@ def sec_iouring(iou):
             + tstate_tbl)
 
 
+def sec_work(work):
+    """The handler work-curve: ONE server, ONE knob (--work N = FNV passes over
+    the payload), TWO builds of the identical algorithm (interpreted py_fnv vs
+    compiled work_cy.fnv_work). work=0 IS the echo, so it consolidates the echo
+    load as the leftmost point. The gap that opens as work grows is the thing
+    echo can never show -- a handler optimization needs handler CPU to pay."""
+    if not work:
+        return ""
+    res = work.get("results", {})
+    meta = work.get("meta", {})
+    py, cy = res.get("py", {}), res.get("cython", {})
+    works = meta.get("works", sorted({int(k) for k in py} | {int(k) for k in cy}))
+    rows = []
+    max_speed = 0.0
+    for w in works:
+        rpy, rcy = py.get(str(w), {}), cy.get(str(w), {})
+        ppy, pcy = rpy.get("peak", {}), rcy.get("peak", {})
+        vpy = ppy.get("rps_median")
+        vcy = pcy.get("rps_median")
+        if vpy is None or vcy is None:
+            continue
+        spd = (vcy / vpy) if vpy else 0.0
+        max_speed = max(max_speed, spd)
+        cpu_py = (ppy.get("server_cpu_util") or 0) * 100
+        cpu_cy = (pcy.get("server_cpu_util") or 0) * 100
+        wlabel = ("%d <span class=\"sub\">(echo)</span>" % w) if w == 0 else str(w)
+        rows.append([
+            (wlabel, w),
+            (fmt(vpy) + ' <span class="sub">%.0f%% CPU</span>' % cpu_py, vpy),
+            (fmt(vcy) + ' <span class="sub">%.0f%% CPU</span>' % cpu_cy, vcy),
+            ('<b>%.2f&times;</b>' % spd, spd),
+            (esc(rpy.get("bottleneck_at_peak", "")), rpy.get("bottleneck_at_peak", "")),
+        ])
+    if not rows:
+        return ""
+    hdr = [("FNV passes (--work)", True), ("Python handler req/s", True),
+           ("Cython handler req/s", True), ("Cython / Python", True),
+           ("Python bottleneck", False)]
+    pl = meta.get("payload", 1024)
+    return ('<h2 id="work">Handler work curve &mdash; what compiling the handler buys</h2>'
+            '<p>Every handler-side optimization <em>ties</em> on echo because a TCP echo '
+            'does no CPU work in the handler (the cost is the kernel TCP path). This is the '
+            'one experiment that gives the handler something to do: <b>one server</b> '
+            '(<code>srv_runloom_work.py</code>), <b>one knob</b> (<code>--work N</code> = an '
+            'FNV-1a byte hash over the %d&nbsp;B payload, repeated N times, folded into the '
+            'reply so it can\'t be elided), and <b>two builds of the identical algorithm</b>: '
+            'the interpreted <code>py_fnv()</code> vs the Cython-compiled '
+            '<code>work_cy.fnv_work()</code>. Same runtime, same I/O path &mdash; the '
+            '<em>only</em> variable is whether the handler\'s per-byte work is interpreted '
+            'or native.</p>'
+            '<p><b><code>--work&nbsp;0</code> is the echo</b> (the handler skips the work '
+            'call entirely), so it consolidates the echo load as the leftmost point and '
+            'should reproduce the echo numbers &mdash; a built-in cross-check. As the knob '
+            'grows the Python curve bends down (it goes server-bound) while the Cython curve '
+            'holds; the peak <code>Cython / Python</code> ratio here is <b>%.2f&times;</b>. '
+            '<em>That</em> gap is what the whole Cython/cdef handler path was built to earn '
+            'and echo structurally could not show.</p>'
+            % (pl, max_speed)
+            + table("t_work", hdr, rows, mark_best=False, note=
+                    "Read the <b>Cython / Python ratio</b> column as the robust signal: it is "
+                    "monotonic because the Python side collapses (server-bound from the first "
+                    "pass). The Cython handler's <em>absolute</em> numbers through ~work&nbsp;4 are "
+                    "the 16-core loadgen ceiling (bottleneck <code>client</code>/<code>neither</code>, "
+                    "the same wall echo hits), not the server &mdash; so the early Cython curve is "
+                    "flat at the client limit, with minor sub-saturation wobble, before it goes "
+                    "genuinely server-bound under heavy work. "
+                    "The work is PURE inline arithmetic (an FNV xor/mul loop) &mdash; nothing "
+                    "runloom routes to the blockpool, so it runs on the fiber's hub and the "
+                    "per-core CPU accounting stays valid. <b>Honest framing:</b> if the handler "
+                    "delegated this to a C-accelerated library (<code>hashlib</code>, "
+                    "<code>json</code>, <code>struct</code>), Python and Cython would converge "
+                    "&mdash; both just call the same native code, back to echo-equal. The gap "
+                    "only appears for <em>handler-level</em> Python work; that is the actual "
+                    "lesson. See WORK_CURVE_EXPERIMENT.md."))
+
+
 def sec_mem(mem):
     if not mem:
         return '<h2 id="mem">Memory</h2><p class="warn">no mem.json yet</p>'
@@ -404,6 +480,9 @@ def sec_code():
         ("Server tier 2 &mdash; runloom_c.serve (py handler)", "suite/servers/srv_runloom_c.py"),
         ("Server tiers 4/5 &mdash; runloom_c.serve + Cython handler", "suite/servers/srv_runloom_cython.py"),
         ("Cython zero-PyObject handler", "suite/servers/handler_cy.pyx"),
+        ("Work-curve server (--work N, work=0==echo)", "suite/servers/srv_runloom_work.py"),
+        ("Work-curve compiled FNV (pure inline arithmetic)", "suite/servers/work_cy.pyx"),
+        ("Work-curve sweep driver", "suite/work_sweep.py"),
         ("C-API exposed for the Cython handler", "../src/runloom_c/runloom_tcp_capi.c.inc"),
         ("Cython hot-loop disassembly (zero-PyObject proof)", "suite/servers/handler_cy_hotloop_disasm.txt"),
         ("asyncio / uvloop server", "suite/servers/srv_asyncio.py"),
@@ -493,6 +572,7 @@ def main():
     speed = load("speed.json") or load("speed_quick.json")
     mem = load("mem.json") or load("mem_quick.json")
     iou = load("iouring_test.json")
+    work = load("work_curve.json")
     meta = (perf or speed or mem or {}).get("meta") or config.summary()
     quick = any(d and d.get("quick") for d in (perf, speed, mem))
 
@@ -500,6 +580,7 @@ def main():
     nav = ('<nav><b>Runloom benchmarks</b> '
            '<a href="#env">machine</a><a href="#constraints">constraints</a>'
            '<a href="#perf">req/s</a><a href="#iouring">io_uring</a>'
+           '<a href="#work">work curve</a>'
            '<a href="#speed">speed</a><a href="#mem">memory</a>'
            '<a href="#code">code</a><a href="#profiles">profiles</a></nav>')
     parts = [
@@ -514,6 +595,7 @@ def main():
         sec_constraints(meta),
         sec_perf(perf),
         sec_iouring(iou),
+        sec_work(work),
         sec_speed(speed),
         sec_mem(mem),
         sec_profiles(),

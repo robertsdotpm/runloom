@@ -3,6 +3,10 @@ servers/*.so
 servers/handler_cy.c
 servers/handler_cy.html
 servers/handler_cy_hotloop_disasm.txt
+servers/handler_cdef.c
+servers/handler_cdef.html
+servers/work_cy.c
+servers/work_cy.html
 servers/srv_go
 clients/loadgen
 speed/speed_go

@@ -24,6 +24,20 @@ Requests/second, raw and normalised to a single core (multi-core servers divided
 
 > **io_uring:** driven through the Stage-2 proactor (`loop_recv`), the io_uring loop backend is a major win &mdash; the Cython handler on io_uring reaches a **1.16M req/s server ceiling (+2.17× over epoll)**, the fastest runloom config measured. "io_uring loses on loopback" was an artifact of driving it through the readiness path; see the findings writeup.[^bench]
 
+### Handler work curve (what compiling the handler buys)
+
+Echo ties every handler optimisation because it does no CPU work in the handler. This is the one experiment that gives the handler something to do: **one server, one knob** (`--work N` = an FNV-1a byte hash over the 1024 B payload, repeated N times), **two builds of the identical algorithm** &mdash; interpreted Python vs Cython-compiled &mdash; on the same runtime and I/O path. `--work 0` **is** the echo (lowest point), so it consolidates the echo load and reproduces it as a cross-check.[^bench]
+
+| --work (FNV passes) | Python handler req/s | Cython handler req/s | Cython / Python |
+|--:|--:|--:|--:|
+| 0 (echo) | 615,403 | 613,316 | 1.00× |
+| 1 | 82,137 | 584,879 | 7.12× |
+| 4 | 25,332 | 495,938 | 19.58× |
+| 16 | 6,931 | 478,025 | 68.97× |
+| 64 | 1,740 | 273,827 | 157.34× |
+
+> As the knob grows the interpreted handler goes server-bound and collapses while the compiled handler holds (up to **157.3×** here). The work is pure inline arithmetic, never offloaded to a worker thread, so per-core accounting stays valid. **Honest framing:** if the handler delegated to a C library (`hashlib`/`json`/`struct`) Python and Cython would converge &mdash; the gap is specific to *handler-level* Python work.[^bench]
+
 ### Memory per idle fiber
 
 Used resident memory (RSS, not virtual) for 1,000,000 live parked fibers/goroutines.[^bench]
