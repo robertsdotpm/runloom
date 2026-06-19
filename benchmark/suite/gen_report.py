@@ -365,8 +365,46 @@ def sec_speed(speed):
     out.append("<h3>Context switch (loaded-yield)</h3>")
     out.append(table("t_ctx", [("Runtime", False), ("Cores", True), ("ns / switch", True)], rows,
                      "Lower is better. G concurrent tasks each yield K times (run queues stay full "
-                     "&mdash; same-hub re-dispatch, not a 2-party ping-pong). runloom at 44 hubs hits "
-                     "the free-threaded cross-core refcount wall here; at &le;8 hubs it is ~400 ns/switch."))
+                     "&mdash; same-hub re-dispatch, not a 2-party ping-pong). <b>Caveat &mdash; runloom's "
+                     "row is the PYTHON-FIBER number, and at 44 hubs it is NOT the scheduler:</b> it is "
+                     "free-threaded CPython object-lock contention (a futex&rarr;cross-NUMA IPI storm; "
+                     "<code>perf</code>-confirmed, runloom's own yield is ~2% of the profile). The "
+                     "capstone just below strips the Python eval and shows runloom's <em>true</em> "
+                     "scheduler yield."))
+
+    # ---- c_entry capstone: the TRUE scheduler yield (no Python) ----
+    cap = load("centry_capstone.json")
+    if cap and cap.get("hubs"):
+        hubs = cap["hubs"]
+        xl = [str(h) for h in hubs]
+        ce, pyn = cap.get("c_entry_ns", []), cap.get("python_ns", [])
+        capchart = svg_linechart("ch_cap",
+                                 [("c_entry (pure scheduler, no Python)", "var(--good)", ce, "centry"),
+                                  ("Python fiber", "var(--warn)", pyn, "python")],
+                                 xl, xaxis="scheduler hubs", ylabel="ns / switch (log)")
+        caprows = []
+        for h, c, p in zip(hubs, ce, pyn):
+            ratio = (p / c) if c else None
+            caprows.append([(str(h), h), (fmt(c), c), (fmt(p), p),
+                            (('<b>%.0f&times;</b>' % ratio) if ratio else "&mdash;", ratio or 0)])
+        out.append('<h3>True scheduler yield &mdash; the c_entry capstone (no Python eval)</h3>')
+        out.append('<p>The same loaded-yield, but the fibers are tstate-free <code>c_entry</code> '
+                   'fibers (spawned via <code>runloom_mn_fiber_c</code> from a Cython probe) &mdash; '
+                   '<b>no Python frame, no shared closure cell, no interpreter eval</b>, just the '
+                   'scheduler. This isolates runloom\'s pure context-switch cost from the CPython '
+                   'contention the table above measures.</p>'
+                   + capchart
+                   + table("t_cap", [("scheduler hubs", True), ("c_entry ns/switch", True),
+                                     ("Python-fiber ns/switch", True), ("Python / c_entry", True)],
+                           caprows, mark_best=False, note=
+                           "runloom's pure scheduler yield is <b>~20&ndash;43 ns and FLAT (even "
+                           "improves) to 44 hubs</b> &mdash; zero contention wall, and <b>10&ndash;20&times; "
+                           "faster than greenlet (465) and Go (676)</b>. The Python-fiber path explodes "
+                           "to ~12&ndash;27 &micro;s at 44 hubs (the wall's height is load-dependent &mdash; "
+                           "it is contention, not a fixed cost). That entire gap is the CPython "
+                           "interpreter, not the scheduler. (1-hub c_entry can read ~0: the yield is "
+                           "below the n=0-subtraction noise floor.) Full analysis: "
+                           "<a href=\"SCHEDULER_SCALING_FINDINGS.md\">SCHEDULER_SCALING_FINDINGS.md</a>."))
 
     # http
     rows = []

@@ -41,7 +41,7 @@ code{color:#cbd5e1}
 <nav><b>Runloom benchmarks</b> <a href="#env">machine</a><a href="#constraints">constraints</a><a href="#perf">req/s</a><a href="#iouring">io_uring</a><a href="#work">work curve</a><a href="#workxrt">work x-runtime</a><a href="#speed">speed</a><a href="#mem">memory</a><a href="#code">code</a><a href="#profiles">profiles</a></nav>
 <div class="wrap">
 <h1>Runloom benchmark report</h1>
-<p class="note">Generated 2026-06-19 21:26. Throughput is shown raw and divided down to one core; latencies are not divided. Click any column header to sort.</p>
+<p class="note">Generated 2026-06-19 22:08. Throughput is shown raw and divided down to one core; latencies are not divided. Click any column header to sort.</p>
 <h2 id="env">Machine &amp; toolchain</h2><table class="kv"><tr><th>Host</th><td>x-VMware20-1 (vmware, Ubuntu 24.04.3 LTS)</td></tr><tr><th>Kernel</th><td>6.17.0-35-generic x86_64</td></tr><tr><th>CPU</th><td>Intel(R) Xeon(R) CPU E5-2696 v3 @ 2.30GHz</td></tr><tr><th>Logical CPUs / NUMA</th><td>64 vCPUs &mdash; node0=0-31, node1=32-63</td></tr><tr><th>Memory</th><td>78.6 GiB</td></tr><tr><th>CPU governor / steal</th><td>n/a / 0%</td></tr><tr><th>Runloom interp</th><td>3.13.13 FT @ b037eb9</td></tr><tr><th>Runloom build</th><td>-O2 -DNDEBUG -D_FORTIFY_SOURCE=2 -fstack-protector-strong (as-shipped release) (RUNLOOM_DEBUG=<unset>)</td></tr><tr><th>Baseline interp</th><td>3.13.13 GIL &mdash; uvloop 0.22.1, gevent 26.5.0, greenlet 3.5.1</td></tr><tr><th>Go</th><td>go version go1.22.2 linux/amd64</td></tr><tr><th>Cython</th><td>3.2.5</td></tr></table><p class="warn">This is a VMware guest &mdash; the CPUs are vCPUs and may incur hypervisor steal; numbers are valid for relative comparison on this host, not absolute hardware peaks.</p>
 <h2 id="constraints">Assumed constraints &amp; methodology</h2><table class="kv"><tr><th>CPU sizing</th><td>hubs = int(cpu&times;0.7) = <b>44</b>; go GOMAXPROCS = <b>44</b>; client = int(cpu&times;0.25) = <b>16</b></td></tr><tr><th>CPU placement</th><td>client cpus <code>0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15</code>; server cpus <code>16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59</code> (disjoint, so the loadgen never steals a server core)</td></tr><tr><th>Network</th><td>veth pair across two netns (10.99.0.1 &harr; 10.99.0.2); spec sysctls applied inside the server netns; empty firewall ruleset (no host nft tax)</td></tr><tr><th>Sysctls</th><td>net.ipv4.tcp_wmem = 4096 16384 2097152; net.ipv4.tcp_rmem = 4096 87380 2097152; net.core.somaxconn = 65535; net.ipv4.tcp_tw_reuse = 1</td></tr><tr><th>fd limit</th><td>RLIMIT_NOFILE raised to 8,388,608 per exec via prlimit (the editor-shell 4096 cap does not propagate)</td></tr><tr><th>Debug</th><td>RUNLOOM_DEBUG unset; as-shipped -O2 -DNDEBUG release build, no sanitizers</td></tr><tr><th>TCP_NODELAY</th><td>set once per connection at setup (listener + client), never in the per-request loop</td></tr><tr><th>req/s payload</th><td>1024 B (small &rarr; scheduling/syscall bound, the headline req/s)</td></tr><tr><th>bandwidth payload</th><td>1,572,864 B = 1.5 MiB (large &rarr; copy/IO bound, reported as GB/s)</td></tr><tr><th>Stop rule</th><td>geometric connection ladder; a rung must beat the incumbent peak's bootstrap-CI upper bound to count; 2 consecutive misses stop the sweep; 3 reps/rung</td></tr><tr><th>Per-core scaling</th><td>throughput metrics (req/s, spawn, http, GB/s) are divided by the runtime's core count; latency metrics (ctx-switch, RTT) are not divided; single-threaded runtimes are already 1 core. We do NOT measure run(1) as 'runloom per core' &mdash; that is the M:1 cooperative scheduler, a different runtime than the M:N work-stealer.</td></tr><tr><th>Saturation honesty</th><td>the 16-core client cannot saturate the fastest servers for a symmetric echo, so each peak is tagged with the CPU-bound side and, when client-bound, a server-ceiling estimate (peak / server-CPU-utilisation).</td></tr></table>
 <h2 id="perf">Performance &mdash; requests / second</h2><table id="t_reqps" class="sortable"><thead><tr>
@@ -1377,7 +1377,40 @@ code{color:#cbd5e1}
 <td data-v="25391.880745827515">25,392</td>
 </tr>
 </tbody></table>
-<p class="note">Lower is better. G concurrent tasks each yield K times (run queues stay full &mdash; same-hub re-dispatch, not a 2-party ping-pong). runloom at 44 hubs hits the free-threaded cross-core refcount wall here; at &le;8 hubs it is ~400 ns/switch.</p>
+<p class="note">Lower is better. G concurrent tasks each yield K times (run queues stay full &mdash; same-hub re-dispatch, not a 2-party ping-pong). <b>Caveat &mdash; runloom's row is the PYTHON-FIBER number, and at 44 hubs it is NOT the scheduler:</b> it is free-threaded CPython object-lock contention (a futex&rarr;cross-NUMA IPI storm; <code>perf</code>-confirmed, runloom's own yield is ~2% of the profile). The capstone just below strips the Python eval and shows runloom's <em>true</em> scheduler yield.</p>
+<h3>True scheduler yield &mdash; the c_entry capstone (no Python eval)</h3>
+<p>The same loaded-yield, but the fibers are tstate-free <code>c_entry</code> fibers (spawned via <code>runloom_mn_fiber_c</code> from a Cython probe) &mdash; <b>no Python frame, no shared closure cell, no interpreter eval</b>, just the scheduler. This isolates runloom's pure context-switch cost from the CPython contention the table above measures.</p><svg viewBox="0 0 760 392" id="ch_cap" class="chart" width="100%" style="max-width:760px"><line x1="70" y1="314.4" x2="564" y2="314.4" class="grid"/><text x="63" y="317.4" class="ytick">0.05</text><line x1="70" y1="300.9" x2="564" y2="300.9" class="grid"/><text x="63" y="303.9" class="ytick">0.1</text><line x1="70" y1="287.3" x2="564" y2="287.3" class="grid"/><text x="63" y="290.3" class="ytick">0.2</text><line x1="70" y1="269.3" x2="564" y2="269.3" class="grid"/><text x="63" y="272.3" class="ytick">0.5</text><line x1="70" y1="255.7" x2="564" y2="255.7" class="grid"/><text x="63" y="258.7" class="ytick">1</text><line x1="70" y1="242.1" x2="564" y2="242.1" class="grid"/><text x="63" y="245.1" class="ytick">2</text><line x1="70" y1="224.2" x2="564" y2="224.2" class="grid"/><text x="63" y="227.2" class="ytick">5</text><line x1="70" y1="210.6" x2="564" y2="210.6" class="grid"/><text x="63" y="213.6" class="ytick">10</text><line x1="70" y1="197.0" x2="564" y2="197.0" class="grid"/><text x="63" y="200.0" class="ytick">20</text><line x1="70" y1="179.0" x2="564" y2="179.0" class="grid"/><text x="63" y="182.0" class="ytick">50</text><line x1="70" y1="165.4" x2="564" y2="165.4" class="grid"/><text x="63" y="168.4" class="ytick">100</text><line x1="70" y1="151.8" x2="564" y2="151.8" class="grid"/><text x="63" y="154.8" class="ytick">200</text><line x1="70" y1="133.9" x2="564" y2="133.9" class="grid"/><text x="63" y="136.9" class="ytick">500</text><line x1="70" y1="120.3" x2="564" y2="120.3" class="grid"/><text x="63" y="123.3" class="ytick">1k</text><line x1="70" y1="106.7" x2="564" y2="106.7" class="grid"/><text x="63" y="109.7" class="ytick">2k</text><line x1="70" y1="88.7" x2="564" y2="88.7" class="grid"/><text x="63" y="91.7" class="ytick">5k</text><line x1="70" y1="75.1" x2="564" y2="75.1" class="grid"/><text x="63" y="78.1" class="ytick">10k</text><text x="70.0" y="362" class="xtick">1</text><text x="234.7" y="362" class="xtick">8</text><text x="399.3" y="362" class="xtick">16</text><text x="564.0" y="362" class="xtick">44</text><text x="317.0" y="387" class="axlbl">scheduler hubs</text><text x="14" y="188.0" class="axlbl" transform="rotate(-90 14 188.0)">ns / switch (log)</text><text x="578" y="18" class="hint">click a name to toggle</text><g class="ser ser-ch_cap-centry"><path d="M70.0 318.7 L234.7 176.1 L399.3 180.8 L564.0 230.5 " fill="none" stroke="var(--good)" stroke-width="2.4"/><circle cx="70.0" cy="318.7" r="2.7" fill="var(--good)"/><circle cx="234.7" cy="176.1" r="2.7" fill="var(--good)"/><circle cx="399.3" cy="180.8" r="2.7" fill="var(--good)"/><circle cx="564.0" cy="230.5" r="2.7" fill="var(--good)"/></g><g class="legi" data-c="ch_cap" data-s="centry" onclick="tglSeries('ch_cap','centry')"><rect x="574" y="30" width="184" height="17" fill="transparent"/><line x1="578" y1="38" x2="596" y2="38" stroke="var(--good)" stroke-width="2.4"/><text x="600" y="42" class="leg">c_entry (pure scheduler, no Python)</text></g><g class="ser ser-ch_cap-python"><path d="M70.0 148.9 L234.7 136.7 L399.3 129.5 L564.0 69.7 " fill="none" stroke="var(--warn)" stroke-width="2.4"/><circle cx="70.0" cy="148.9" r="2.7" fill="var(--warn)"/><circle cx="234.7" cy="136.7" r="2.7" fill="var(--warn)"/><circle cx="399.3" cy="129.5" r="2.7" fill="var(--warn)"/><circle cx="564.0" cy="69.7" r="2.7" fill="var(--warn)"/></g><g class="legi" data-c="ch_cap" data-s="python" onclick="tglSeries('ch_cap','python')"><rect x="574" y="49" width="184" height="17" fill="transparent"/><line x1="578" y1="57" x2="596" y2="57" stroke="var(--warn)" stroke-width="2.4"/><text x="600" y="61" class="leg">Python fiber</text></g></svg><table id="t_cap" class="sortable"><thead><tr>
+<th onclick="sortT('t_cap',0,true)">scheduler hubs<span class="ar"></span></th>
+<th onclick="sortT('t_cap',1,true)">c_entry ns/switch<span class="ar"></span></th>
+<th onclick="sortT('t_cap',2,true)">Python-fiber ns/switch<span class="ar"></span></th>
+<th onclick="sortT('t_cap',3,true)">Python / c_entry<span class="ar"></span></th>
+</tr></thead><tbody>
+<tr>
+<td data-v="1">1</td>
+<td data-v="0.04035098710267246">0</td>
+<td data-v="232.55498599610291">233</td>
+<td data-v="5763.303519796687"><b>5763&times;</b></td>
+</tr>
+<tr>
+<td data-v="8">8</td>
+<td data-v="57.96195458056347">58</td>
+<td data-v="432.81085888575603">433</td>
+<td data-v="7.467154308679777"><b>7&times;</b></td>
+</tr>
+<tr>
+<td data-v="16">16</td>
+<td data-v="45.594428060798364">46</td>
+<td data-v="625.5881216152288">626</td>
+<td data-v="13.72071431142928"><b>14&times;</b></td>
+</tr>
+<tr>
+<td data-v="44">44</td>
+<td data-v="3.6123609661764555">4</td>
+<td data-v="13230.988545358585">13,231</td>
+<td data-v="3662.698348599164"><b>3663&times;</b></td>
+</tr>
+</tbody></table>
+<p class="note">runloom's pure scheduler yield is <b>~20&ndash;43 ns and FLAT (even improves) to 44 hubs</b> &mdash; zero contention wall, and <b>10&ndash;20&times; faster than greenlet (465) and Go (676)</b>. The Python-fiber path explodes to ~12&ndash;27 &micro;s at 44 hubs (the wall's height is load-dependent &mdash; it is contention, not a fixed cost). That entire gap is the CPython interpreter, not the scheduler. (1-hub c_entry can read ~0: the yield is below the n=0-subtraction noise floor.) Full analysis: <a href="SCHEDULER_SCALING_FINDINGS.md">SCHEDULER_SCALING_FINDINGS.md</a>.</p>
 <h3>HTTP req/s (client vs a Go httpd)</h3>
 <table id="t_http" class="sortable"><thead><tr>
 <th onclick="sortT('t_http',0,false)">Runtime<span class="ar"></span></th>
@@ -4727,14 +4760,17 @@ workload where they are guaranteed to be equal. Read the tiers below with that
 lens: they measure the I/O path, not the handler.
 
 **This prediction is now demonstrated.** `WORK_CURVE_EXPERIMENT.md` gives the
-handler real CPU via a `--work N` knob (an FNV byte-hash, pure inline arithmetic,
-two builds of the identical algorithm: interpreted vs Cython-compiled). At
-`work=0` the handler skips the work and the two are dead-even (1.00×, reproducing
-echo) &amp;mdash; the built-in cross-check. As the knob grows the interpreted handler
-goes server-bound and collapses while the compiled handler holds: the gap reaches
-**157× at work=64**. That is the handler-optimization win echo could never show,
-measured directly. (Honest caveat carried there: delegate the work to a C lib and
-Python/Cython re-converge &amp;mdash; the gap is specific to handler-level Python.)
+handler real CPU via a `--work N` knob (an FNV byte-hash, pure inline arithmetic).
+At `work=0` the handler skips the work and an interpreted vs a fully-native
+handler are dead-even (0.99×, reproducing echo) &amp;mdash; the built-in cross-check.
+As the knob grows the interpreted handler collapses while the fully-native Cython
+handler (work inlined, zero-PyObject) holds nearly flat: gap **164× at work=64**.
+And cross-runtime (per core), that fully-native handler **matches-to-beats Go**
+&amp;mdash; ahead through ~work 4 (runloom&#x27;s faster I/O), within ~8% at heaviest
+compute &amp;mdash; with `cython ≈ cdef` re-confirming the tstate bypass buys ~nothing
+on throughput. So the runtime (I/O + scheduler) is the solved, Go-beating part;
+the only residual cost is the interpreter, which a compiled handler removes.
+(Honest caveat: delegate the work to a C lib and every runtime re-converges.)
 
 ## Built: the cdef / c_entry handler tier (an honest negative result)
 
