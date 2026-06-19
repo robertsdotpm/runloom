@@ -71,6 +71,7 @@ func ctxswitch(n, gomax int) {
 	switches := G * K
 	emit(map[string]any{"runtime": "go", "metric": "ctxswitch", "n": n,
 		"cores": gomax, "switches": switches, "fibers": G,
+		"seconds": dt.Seconds(),
 		"ns_per_switch": float64(dt.Nanoseconds()) / float64(switches)})
 }
 

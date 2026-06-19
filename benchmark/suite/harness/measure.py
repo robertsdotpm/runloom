@@ -102,10 +102,13 @@ class Server:
 # --------------------------------------------------------------------------
 # loadgen invocation
 # --------------------------------------------------------------------------
-def run_loadgen(loadgen_bin, addr, conns, payload, ramp, measure, gomax):
+def run_loadgen(loadgen_bin, addr, conns, payload, ramp, measure, gomax,
+                server_cpus=None):
     """Run the Go loadgen in the client netns, pinned to client cpus.  Returns
-    (result_dict, server_util, client_util)."""
+    (result_dict, server_util, client_util).  server_cpus is the server's ACTUAL
+    pinned core set (so a 1-core server's util isn't diluted across 44 cores)."""
     import topo
+    server_cpus = server_cpus if server_cpus is not None else config.SERVER_CPUS
     argv = [loadgen_bin, "-addr", addr, "-conns", str(conns),
             "-payload", str(payload), "-ramp", str(ramp),
             "-measure", str(measure), "-gomaxprocs", str(gomax)]
@@ -117,7 +120,7 @@ def run_loadgen(loadgen_bin, addr, conns, payload, ramp, measure, gomax):
                        timeout=ramp + measure + 45)
     dt = time.time() - t0
     s1 = _proc_stat()
-    srv_u = cpu_group_util(s0, s1, config.SERVER_CPUS)
+    srv_u = cpu_group_util(s0, s1, server_cpus)
     cli_u = cpu_group_util(s0, s1, config.CLIENT_CPUS)
     out = r.stdout.strip().splitlines()
     res = None
@@ -150,9 +153,10 @@ def bootstrap_ci(xs, iters=2000, q=0.95):
 
 
 def ladder(server_factory, loadgen_bin, addr, payload, ladder_conns,
-           reps, ramp, measure, gomax, patience):
+           reps, ramp, measure, gomax, patience, server_cpus=None):
     """Bring up ONE server, sweep the connection ladder, find peak rps with a
-    rigorous stop rule.  Returns the full curve + peak summary.
+    rigorous stop rule.  Returns the full curve + peak summary.  server_cpus is
+    the server's actual pinned core set for the server-bound check.
 
     server_factory() -> a started Server (already LISTENING).  We own stopping it.
     """
@@ -165,7 +169,7 @@ def ladder(server_factory, loadgen_bin, addr, payload, ladder_conns,
             reps_rps, reps_lat, srv_us, cli_us, errs = [], [], [], [], 0
             for _ in range(reps):
                 res, su, cu = run_loadgen(loadgen_bin, addr, conns, payload,
-                                          ramp, measure, gomax)
+                                          ramp, measure, gomax, server_cpus=server_cpus)
                 reps_rps.append(res["rps"])
                 reps_lat.append(res)
                 srv_us.append(su)

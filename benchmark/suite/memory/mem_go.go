@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"net"
 	"os"
 	"strconv"
 	"strings"
@@ -52,6 +53,7 @@ func main() {
 
 	done := make(chan struct{}) // never closed -> receivers block forever
 	var peers []*os.File
+	var conns []net.Conn
 	var mu sync.Mutex
 
 	for i := 0; i < *n; i++ {
@@ -60,16 +62,28 @@ func main() {
 			if err != nil {
 				continue
 			}
+			// Hand the read end to the runtime netpoller (net.Conn) instead of a
+			// blocking os.File.Read -- otherwise each blocked Read pins an OS
+			// thread and 10k+ of them hit Go's thread-exhaustion limit (and
+			// inflate RSS with thread stacks). This matches how a real Go server
+			// holds idle connections: epoll-managed, one goroutine, no thread.
+			syscall.SetNonblock(fds[0], true)
 			f := os.NewFile(uintptr(fds[0]), "a")
+			c, err := net.FileConn(f)
+			f.Close()
+			if err != nil {
+				syscall.Close(fds[1])
+				continue
+			}
 			peer := os.NewFile(uintptr(fds[1]), "b")
 			mu.Lock()
+			conns = append(conns, c)
 			peers = append(peers, peer)
 			mu.Unlock()
-			go func(f *os.File) {
+			go func(c net.Conn) {
 				buf := make([]byte, 1)
-				f.Read(buf) // blocks: peer never writes
-				_ = done
-			}(f)
+				c.Read(buf) // parks via the netpoller: peer never writes
+			}(c)
 		} else {
 			go func() { <-done }()
 		}
@@ -81,4 +95,5 @@ func main() {
 	b, _ := json.Marshal(out)
 	fmt.Println(string(b))
 	_ = peers
+	_ = conns
 }

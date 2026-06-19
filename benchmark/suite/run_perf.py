@@ -72,6 +72,9 @@ def build_specs():
         dict(name="runloom_c", label="Runloom C scaffold (py handler, C TCPConn)",
              interp="3.13t FT", cores=HUBS, cpus=many, gil_off=True, env={},
              make=rl("srv_runloom_c.py")),
+        dict(name="runloom_c_cython", label="Runloom C scaffold + Cython C handler (epoll)",
+             interp="3.13t FT", cores=HUBS, cpus=many, gil_off=True, env={},
+             make=rl("srv_runloom_cython.py", ("--optimize", "none"))),
         dict(name="runloom_iouring", label="Runloom io_uring loop (py handler)",
              interp="3.13t FT", cores=HUBS, cpus=many, gil_off=True,
              env={"RUNLOOM_IOURING_LOOP": "1"}, make=rl("srv_runloom_sync.py")),
@@ -145,10 +148,12 @@ def run(quick, only, which_metrics):
                 print("\n== %s / %s (payload=%dB, cores=%d) =="
                       % (spec["name"], metric, mc["payload"], spec["cores"]), flush=True)
                 try:
+                    srv_cpus = [int(c) for c in spec["cpus"].split(",")]
                     out = measure.ladder(
                         server_factory(spec, port, token), LOADGEN,
                         "%s:%d" % (config.SRV_IP, port), mc["payload"], lad,
-                        reps, ramp, measure_s, gomax, config.PLATEAU_PATIENCE)
+                        reps, ramp, measure_s, gomax, config.PLATEAU_PATIENCE,
+                        server_cpus=srv_cpus)
                     out["payload"] = mc["payload"]
                     results["servers"][spec["name"]]["metrics"][metric] = out
                     pk = out["peak"]
@@ -168,6 +173,19 @@ def run(quick, only, which_metrics):
 
     out_path = os.path.join(config.RESULTS_DIR,
                             "perf_quick.json" if quick else "perf.json")
+    # Merge into any existing results with the same quick flag, so a targeted
+    # `--only <name>` re-run ADDS that server to the matrix instead of clobbering
+    # the others (used to splice in extra configs without re-running everything).
+    if os.path.exists(out_path):
+        try:
+            with open(out_path) as f:
+                prev = json.load(f)
+            if bool(prev.get("quick")) == bool(quick):
+                merged = prev.get("servers", {})
+                merged.update(results["servers"])
+                results["servers"] = merged
+        except Exception:
+            pass
     with open(out_path, "w") as f:
         json.dump(results, f, indent=2)
     print("\nwrote", out_path, flush=True)

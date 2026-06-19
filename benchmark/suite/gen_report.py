@@ -191,9 +191,35 @@ def sec_perf(perf):
     bw_tbl = table("t_bw", bhdr, brows,
                    "1.5 MiB payload echoed (send + receive counted). Aggregate over the veth pair; "
                    "client-bound at the peak in most rows.")
-    return ('<h2 id="perf">Performance &mdash; requests / second</h2>%s'
+    # full connection-ladder curves (methodology: raise conns until req/s stops growing)
+    curves = ['<h3>Connection-ladder curves (req/s)</h3>'
+              '<p class="note">The stop rule walks connections up a geometric ladder until '
+              'req/s stops beating the peak\'s CI. Each server\'s full curve:</p>']
+    for name, s in servers.items():
+        mt = s.get("metrics", {}).get("reqps", {})
+        curve = mt.get("curve")
+        if not curve:
+            continue
+        crows = []
+        for rung in curve:
+            ci = rung.get("rps_ci", [None, None])
+            crows.append([
+                (fmt(rung.get("conns")), rung.get("conns")),
+                (fmt(rung.get("rps_median")), rung.get("rps_median")),
+                ("%s&ndash;%s" % (fmt(ci[0]), fmt(ci[1])), ci[0]),
+                (fmt((rung.get("server_cpu_util") or 0) * 100, 0) + "%", rung.get("server_cpu_util")),
+                (fmt((rung.get("client_cpu_util") or 0) * 100, 0) + "%", rung.get("client_cpu_util")),
+                (fmt(rung.get("p99_us")), rung.get("p99_us")),
+                (fmt(rung.get("errors")), rung.get("errors")),
+            ])
+        ch = [("Conns", True), ("req/s", True), ("95% CI", False), ("srv CPU", True),
+              ("cli CPU", True), ("p99 &micro;s", True), ("err", True)]
+        curves.append('<details class="code"><summary>%s &mdash; %d rungs (peak %s req/s)</summary>%s</details>'
+                      % (esc(name), len(curve), fmt(mt.get("peak", {}).get("rps_median")),
+                         table("c_%s" % name, ch, crows)))
+    return ('<h2 id="perf">Performance &mdash; requests / second</h2>%s%s'
             '<h3>Performance &mdash; bandwidth (1.5 MB streaming)</h3>%s'
-            % (reqps_tbl, bw_tbl))
+            % (reqps_tbl, "\n".join(curves), bw_tbl))
 
 
 def sec_speed(speed):
