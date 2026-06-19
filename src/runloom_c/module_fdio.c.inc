@@ -246,5 +246,10 @@ static PyObject *m_file_write(PyObject *self, PyObject *args)
 typedef struct {
     PyObject_HEAD
     runloom_g_t *g;
+    /* M:N session generation at handle creation (runloom_mn_generation_get()).
+     * RunloomG_wake compares it to the live generation: if the hub pool this g
+     * parked on has since been torn down, the recorded g->park_hub dangles into
+     * freed memory, so the hub-routed wake is skipped.  See module_g.c.inc. */
+    uint64_t born_gen;
 } RunloomG;
 

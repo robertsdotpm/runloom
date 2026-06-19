@@ -46,6 +46,7 @@
 
 #define PY_SSIZE_T_CLEAN
 #include <Python.h>
+#include <stdint.h>
 
 #include "runloom_sched.h"   /* for runloom_g_t forward */
 
@@ -77,6 +78,12 @@ void runloom_mn_fini(void);
  * this mn_hub_count()==0 and a fresh runloom_mn_init() works.  Single-thread
  * child only (called from the after-fork handler). */
 void runloom_mn_reset_after_fork(void);
+
+/* Current M:N session generation -- monotonically bumped on every hub-pool
+ * teardown (runloom_mn_fini / reset_after_fork).  A RunloomG handle stamps this
+ * at creation; RunloomG.wake compares to decide whether the g's park_hub still
+ * points at a live hub.  See runloom_mn_gen in mn_sched.c. */
+uint64_t runloom_mn_generation_get(void);
 
 /* Logical clock for the controlled-replay scheduler (RUNLOOM_MN_SEED + barrier).
  * Returns the deterministic logical time that sched_sleep deadlines and timer

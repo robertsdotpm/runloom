@@ -75,6 +75,23 @@ static PyObject *RunloomG_wake(RunloomG *self, PyObject *unused)
      * as a (benign) data race. */
     runloom_g_t *wg = __atomic_load_n(&self->g, __ATOMIC_ACQUIRE);
     if (wg != NULL) {
+        /* Reading wg/park_hub is always sound: the g STRUCT is retained for the
+         * process lifetime (runloom_g_slab_free + this handle's own incref), so
+         * it never goes back to the OS.  park_hub, though, is a HUB pointer into
+         * the runloom_hubs array, which mn_fini PyMem_Free's at teardown.  If
+         * this handle outlived its M:N run (a foreign thread still holding it and
+         * calling .wake() after run() returned -- the dekker UAF), park_hub now
+         * dangles.  Gate the hub-routed wake on the session generation: an M:N
+         * parker (park_hub != NULL) whose birth generation no longer matches the
+         * live one belongs to a destroyed pool, so the wake is a safe no-op, not
+         * a dereference of freed (or re-init-reused) hub memory.  Single-thread
+         * parkers (park_hub == NULL) are unaffected -- their sched persists and
+         * the generation, which only the M:N teardown bumps, is irrelevant to
+         * them. */
+        void *hub = (void *)__atomic_load_n(&wg->park_hub, __ATOMIC_ACQUIRE);
+        if (hub != NULL && self->born_gen != runloom_mn_generation_get()) {
+            Py_RETURN_NONE;
+        }
         /* ALWAYS go through wake_safe: it drives the parked_safe / wake_pending
          * Dekker (so a wake that races the park is never lost) and routes the
          * re-queue by g->park_hub -- runloom_mn_wake_g for an M:N hub parker,
@@ -84,8 +101,7 @@ static PyObject *RunloomG_wake(RunloomG *self, PyObject *unused)
          * run() epoll_wait(-1); harmless on the same-thread / hub path. */
         runloom_sched_wake_safe(wg);
         /* Per-hub kqueue: kick the pump of the hub this g parked on. */
-        runloom_netpoll_wake_pump((void *)__atomic_load_n(&wg->park_hub,
-                                                          __ATOMIC_ACQUIRE));
+        runloom_netpoll_wake_pump(hub);
     }
     Py_RETURN_NONE;
 }

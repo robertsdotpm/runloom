@@ -450,6 +450,130 @@ def test_park_generic_hub_dekker_under_foreign_wake_storm():
 
 
 # ==========================================================================
+# module_g.c.inc -- RunloomG.wake() must be a safe no-op after M:N teardown.
+#
+# The two dekker tests above AVOID the post-teardown UAF by bounding their
+# wake-storm to run()'s lifetime.  These two do the OPPOSITE on purpose: they
+# wake a handle that OUTLIVED its M:N run, after mn_fini bumped the session
+# generation and freed the runloom_hubs array that the g's park_hub points into.
+# The runtime guard (a per-session generation stamped on the handle at creation,
+# bumped at every mn_fini) turns that into a no-op instead of following a
+# dangling park_hub into freed hub memory.  This is the belt-and-suspenders the
+# dekker FINDING calls for (docs/dev/repro/DEKKER_SIGSEGV_FINDING.md).
+#
+# These are STAYS-SAFE nets, not deterministic crash-catchers: the guarded read
+# is undefined behaviour, but it does not reliably fault, because (a) PyMem
+# retains the freed arena mapping and (b) wake_safe short-circuits on a DONE g
+# (the normal post-run() state) before it would dereference the hub.  A poison-
+# the-freed-array control confirmed even the unguarded path does not segfault
+# here -- consistent with the FINDING, whose actual crash was Python-eval-state
+# corruption in the foreign thread, removed by bounding the storm (the landed
+# test fix).  The value of THIS guard is eliminating the UB read outright; these
+# tests assert the safe behaviour holds across teardown and re-init aliasing.
+# ==========================================================================
+def _wake_storm(h, stop):
+    """Hammer a handle's .wake() from a foreign OS thread until told to stop."""
+    while not stop.is_set():
+        h.wake()
+
+
+def _run_capture_hub_parker(hbox, done):
+    """Run a 3-hub M:N session whose parker parks on a hub (records park_hub),
+    capture its handle in hbox['g'], wake it so it completes, then return (which
+    runs mn_fini -> frees the hub array -> bumps the session generation)."""
+    def main():
+        def parker():
+            hbox["g"] = rc.current_g()   # handle for THIS hub-parked g
+            rc.park()                    # hub park_generic -> records park_hub
+            done["ok"] = True
+        rc.mn_go(parker)
+        for _ in range(2000):
+            if hbox.get("g") is not None:
+                break
+            runloom.sleep(0.0005)
+        # wake (in-session, normal path) until the parker completes
+        for _ in range(4000):
+            if done.get("ok"):
+                break
+            hbox["g"].wake()
+            runloom.sleep(0.0005)
+    with hang_guard(60, "wake_teardown_setup"):
+        runloom.run(3, main)
+
+
+@mn
+def test_wake_after_mn_teardown_is_noop():
+    ROUNDS = 30
+    handles = []                         # hold every handle alive across rounds
+    for _ in range(ROUNDS):
+        hbox, done = {}, {}
+        _run_capture_hub_parker(hbox, done)
+        h = hbox["g"]
+        handles.append(h)
+        assert bool(h.done)              # parker completed before teardown
+        # The runtime is now torn down; h.park_hub dangles into the freed hub
+        # array.  Wake it hard, from the main thread AND a foreign OS thread.
+        # Pre-guard this faulted; with the guard it is a no-op.
+        for _ in range(500):
+            h.wake()
+        stop = threading.Event()
+        t = threading.Thread(target=_wake_storm, args=(h, stop), daemon=True)
+        t.start()
+        time.sleep(0.02)
+        stop.set()
+        t.join(timeout=3)
+    # Every stale handle's wake was absorbed; the process survived all rounds.
+    assert len(handles) == ROUNDS
+    assert all(bool(h.done) for h in handles)
+
+
+@mn
+def test_stale_handle_wake_during_reinit_is_noop():
+    """The re-init aliasing case a bare `runloom_hubs != NULL` guard would MISS:
+    a stale handle from pool #1 is stormed throughout pool #2's life.  Its
+    park_hub dangles into pool #1's freed array; a NULL-check would see pool #2's
+    (non-NULL) array and deref the dangling hub, corrupting the LIVE pool.  The
+    generation stamp distinguishes them, so the wake is skipped and pool #2's
+    work completes intact."""
+    # Round 1: capture a hub-parked handle, complete it, tear pool #1 down.
+    hbox, done = {}, {}
+    _run_capture_hub_parker(hbox, done)
+    h1 = hbox["g"]
+    assert bool(h1.done)
+
+    # Round 2: a foreign thread storms the stale h1 throughout a FRESH session.
+    stop = threading.Event()
+    t = threading.Thread(target=_wake_storm, args=(h1, stop), daemon=True)
+    t.start()
+    res = {}
+
+    def main2():
+        from runloom.sync import WaitGroup
+        N = 300
+        slots = bytearray(N)             # one writer per slot: GIL-off-safe
+        wg = WaitGroup()
+        for i in range(N):
+            wg.add(1)
+
+            def w(i=i):
+                try:
+                    runloom.sleep(0.001)
+                    slots[i] = 1
+                finally:
+                    wg.done()
+            rc.mn_go(w)
+        wg.wait()
+        res["sum"] = sum(slots)
+
+    with hang_guard(60, "reinit_aliasing"):
+        runloom.run(3, main2)
+    stop.set()
+    t.join(timeout=3)
+    # If the stale wake had corrupted pool #2, this would crash / hang / mis-sum.
+    assert res.get("sum") == 300
+
+
+# ==========================================================================
 # runloom_sched_pystate.c.inc -- exception-in-flight snap/load.
 #
 # A fiber that PARKS (sched_sleep) while an exception is in flight (inside an

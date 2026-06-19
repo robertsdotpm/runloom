@@ -258,6 +258,27 @@ static runloom_hub_t *runloom_hubs = NULL;
 static int runloom_hub_count = 0;
 static volatile long runloom_mn_spawn_counter = 0;
 
+/* Monotonic M:N "session generation".  Bumped each time the hub pool is torn
+ * down (runloom_mn_fini) or abandoned in a forked child (reset_after_fork).  A
+ * RunloomG handle stamps the value live at its creation; RunloomG.wake compares
+ * it against the current value and, when they differ, SKIPS the hub-routed wake
+ * -- the g's park_hub points into the runloom_hubs array that fini PyMem_Free'd,
+ * so the wake would dereference freed (or re-init-reused) hub memory.  A bare
+ * "runloom_hubs != NULL" guard is insufficient: after fini->init the array is
+ * non-NULL again but an old handle's park_hub still dangles into the freed one;
+ * the generation distinguishes "this g's pool is alive" from "a new pool now
+ * lives where the old one's hubs were freed".  The g STRUCT itself stays
+ * readable forever (runloom_g_slab_free retention + the handle's own incref), so
+ * reading g->park_hub to make this decision is always sound; only following it
+ * into the hub is gated.  This is the runtime belt-and-suspenders behind the
+ * dekker test fix (docs/dev/repro/DEKKER_SIGSEGV_FINDING.md). */
+static uint64_t runloom_mn_gen = 0;
+
+uint64_t runloom_mn_generation_get(void)
+{
+    return __atomic_load_n(&runloom_mn_gen, __ATOMIC_ACQUIRE);
+}
+
 /* BUG #10 throughput: is the per-hub idle condvar wake enabled?  Default ON; set
  * RUNLOOM_HUB_IDLE_WAKE=0 to fall back to the plain idle nanosleep (A/B / escape
  * hatch).  An idle hub that owns parked gs waits on its per-hub condvar instead

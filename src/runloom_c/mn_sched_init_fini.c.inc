@@ -256,6 +256,16 @@ void runloom_mn_fini(void)
 {
     int i;
     if (runloom_hubs == NULL) return;
+    /* Bump the session generation FIRST (RELEASE), before any hub state is torn
+     * down, so the ENTIRE teardown window -- not just the post-free tail -- is
+     * covered: a RunloomG handle that outlives this run (a foreign thread still
+     * holding one and calling .wake()) sees the changed generation and treats
+     * its g's park_hub as a no-op, never dereferencing a hub that is mid-
+     * teardown or already freed.  All hubs' gs have completed by now (mn_run
+     * joins on the pending count), so there is no legitimate in-session wake to
+     * lose by gating early.  See runloom_mn_gen in mn_sched.c and the dekker
+     * finding (docs/dev/repro/DEKKER_SIGSEGV_FINDING.md). */
+    __atomic_add_fetch(&runloom_mn_gen, 1, __ATOMIC_RELEASE);
     /* Stop the watchdog before any hub teardown so its scan never touches
      * freed hub state, then stop the rescue thread (after the watchdog so no
      * fresh dispatch lands) so it can never hold a tstate about to be deleted.
@@ -363,6 +373,7 @@ void runloom_mn_fini(void)
     /* Sysmon is joined -> no more auto-cap ticks; forget the watermark so the next
      * session (or a sysmon-less context) falls back to the static default. */
     runloom_stack_autocap_reset();
+    /* (Session generation was bumped at the TOP of fini -- see the note there.) */
 }
 
 /* Reset the M:N scheduler in a forked CHILD.  After fork() only the
@@ -391,6 +402,10 @@ void runloom_mn_reset_after_fork(void)
     runloom_tls_current_g = NULL;
     runloom_coro_prewarm_reset_after_fork();   /* daemon thread didn't survive */
     runloom_stack_autocap_reset();             /* sysmon gone -> forget the watermark */
+    /* The inherited hub array is abandoned (leaked); bump the generation so a
+     * handle carried across the fork can't route a wake into it.  See the bump
+     * in runloom_mn_fini for the rationale. */
+    __atomic_add_fetch(&runloom_mn_gen, 1, __ATOMIC_RELEASE);
 }
 
 /* EXPERIMENT (docs/dev/HUB_SCALING.md, A1a): pair-affinity placement.  When
