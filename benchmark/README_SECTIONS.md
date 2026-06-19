@@ -38,6 +38,21 @@ Echo ties every handler optimisation because it does no CPU work in the handler.
 
 > As the knob grows the interpreted handler goes server-bound and collapses while the compiled handler holds (up to **157.3×** here). The work is pure inline arithmetic, never offloaded to a worker thread, so per-core accounting stays valid. **Honest framing:** if the handler delegated to a C library (`hashlib`/`json`/`struct`) Python and Cython would converge &mdash; the gap is specific to *handler-level* Python work.[^bench]
 
+### Real-work handler curve across runtimes (per core)
+
+The same `--work` FNV hash in every runtime's natural handler language, reported per core (peak req/s ÷ pinned cores). It shows the result is honest: under real CPU work the **handler language** sets the tier, not the runtime.[^bench]
+
+| Runtime | handler | cores | req/s per core @ echo | req/s per core @ work=64 |
+|---|:--|--:|--:|--:|
+| Go net (GOMAXPROCS=44) | compiled | 44 | 13,522 | 7,010 |
+| Runloom (M:N) — Cython handler | compiled | 44 | 13,971 | 5,951 |
+| Runloom (M:N) — Python handler | interpreted | 44 | 14,089 | 39 |
+| asyncio Protocol (1 core) | interpreted | 1 | 38,122 | 31 |
+| uvloop (1 core) | interpreted | 1 | 53,073 | 31 |
+| gevent StreamServer (1 core) | interpreted | 1 | 20,737 | 29 |
+
+> Two bands by handler language: compiled (runloom-Cython, Go) sit together per core under load, interpreted (runloom-py, asyncio, uvloop, gevent) sit together. At echo the single-core event loops lead per core (pure I/O pays no free-threading/M:N tax) — that inverts the instant the handler does work. runloom's edge: it reaches the compiled band while keeping M:N across all cores automatically; one asyncio process serialises the same work onto one core. Delegate to a C lib and all runtimes re-converge.[^bench]
+
 ### Memory per idle fiber
 
 Used resident memory (RSS, not virtual) for 1,000,000 live parked fibers/goroutines.[^bench]

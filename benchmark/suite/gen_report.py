@@ -440,6 +440,80 @@ def sec_work(work):
                     "lesson. See WORK_CURVE_EXPERIMENT.md."))
 
 
+def sec_work_xrt(xrt):
+    """Cross-runtime work curve, PER CORE: the same FNV --work knob in every
+    runtime's natural handler language. One row per runtime, sorted by per-core
+    throughput at the heaviest work so the two bands (compiled vs interpreted)
+    separate visually. The honest point: for CPU-bound handler work the dominant
+    variable is the handler LANGUAGE, not the runtime."""
+    if not xrt:
+        return ""
+    res = xrt.get("results", {})
+    meta = xrt.get("meta", {})
+    rtinfo = meta.get("runtimes", {})
+    works = meta.get("works", [])
+    if not works:
+        return ""
+    heaviest = str(works[-1])
+
+    def percore(name, w):
+        r = res.get(name, {}).get(str(w), {})
+        rps = r.get("peak", {}).get("rps_median")
+        c = rtinfo.get(name, {}).get("cores", 1) or 1
+        return (rps / c) if rps else None
+
+    rows = []
+    for name, info in rtinfo.items():
+        pc_heavy = percore(name, works[-1])
+        kind = info.get("kind", "")
+        cells = [
+            (esc(info.get("label", name)), info.get("label", name)),
+            ('<span class="%s">%s</span>' % ("kgood" if kind == "compiled" else "kwarn", esc(kind)), kind),
+            (str(info.get("cores", 1)), info.get("cores", 1)),
+        ]
+        for w in works:
+            pc = percore(name, w)
+            cells.append((fmt(pc) if pc is not None else "&mdash;", pc if pc is not None else -1))
+        rows.append((pc_heavy if pc_heavy is not None else -1, cells))
+    rows.sort(key=lambda t: -t[0])
+    body = [c for _, c in rows]
+
+    hdr = [("Runtime", False), ("handler", False), ("cores", True)]
+    for w in works:
+        hdr.append((("w=%d (echo)" % w) if w == 0 else ("w=%d" % w), True))
+
+    return ('<h2 id="workxrt">Cross-runtime work curve &mdash; per core, every runtime</h2>'
+            '<p>The same <code>--work N</code> FNV-1a byte hash as above, now run in '
+            '<b>every runtime\'s natural handler language</b> &mdash; interpreted Python '
+            '(runloom-py on M:N, plus asyncio / uvloop / gevent on one core each, exactly as '
+            'in the echo benchmark) and compiled/native (runloom-Cython on M:N, Go on '
+            '<code>GOMAXPROCS</code>). Reported <b>per core</b> (peak rps &divide; the server\'s '
+            'pinned cores) so it is an efficiency comparison, not a core-count one. Same '
+            'algorithm, same payload, nothing cherry-picked.</p>'
+            + table("t_workxrt", hdr, body, mark_best=False, note=
+                    "Rows are sorted by per-core throughput at the heaviest work &mdash; that "
+                    "<b>rightmost column is the one to read</b>, because it is the only point where "
+                    "all six runtimes are genuinely server-bound (a true capacity comparison). "
+                    "There, two bands emerge drawn by the <b>handler language, not the runtime</b>: "
+                    "compiled (runloom-Cython &asymp; Go, ~6&ndash;7k/core) far above interpreted "
+                    "(runloom-py &asymp; asyncio &asymp; uvloop &asymp; gevent, ~30&ndash;40/core) "
+                    "&mdash; a ~180&times; language gap, with the runtime barely mattering inside "
+                    "each band. <b>Read the lighter-work columns with care:</b> the compiled "
+                    "runtimes are so fast there that the 16-core loadgen cannot saturate them "
+                    "(bottleneck <code>client</code>), so their mid-curve per-core figures are the "
+                    "loadgen ceiling &divide; cores, not capacity &mdash; that is why the Cython row "
+                    "is non-monotonic, not noise. The interpreted runtimes are server-bound from "
+                    "<code>w=1</code>, so their figures are real capacity throughout. <b>The "
+                    "<code>w=0</code> (echo) inversion:</b> there the single-threaded event loops "
+                    "lead per core (uvloop highest) because pure I/O pays no free-threading/M:N tax "
+                    "&mdash; the known echo result, and it vanishes the instant the handler does "
+                    "work. Per-core also understates runloom's edge: it reaches the compiled band "
+                    "<em>while keeping M:N across all cores automatically</em> (aggregate "
+                    "44&times;), where one asyncio process serialises the same work onto one core. "
+                    "<b>Honest caveat:</b> delegate the work to a C library and every runtime "
+                    "re-converges &mdash; they would all call the same native code."))
+
+
 def sec_mem(mem):
     if not mem:
         return '<h2 id="mem">Memory</h2><p class="warn">no mem.json yet</p>'
@@ -482,7 +556,8 @@ def sec_code():
         ("Cython zero-PyObject handler", "suite/servers/handler_cy.pyx"),
         ("Work-curve server (--work N, work=0==echo)", "suite/servers/srv_runloom_work.py"),
         ("Work-curve compiled FNV (pure inline arithmetic)", "suite/servers/work_cy.pyx"),
-        ("Work-curve sweep driver", "suite/work_sweep.py"),
+        ("Work-curve sweep driver (runloom py vs cython)", "suite/work_sweep.py"),
+        ("Cross-runtime work sweep (all runtimes, per core)", "suite/work_xrt_sweep.py"),
         ("C-API exposed for the Cython handler", "../src/runloom_c/runloom_tcp_capi.c.inc"),
         ("Cython hot-loop disassembly (zero-PyObject proof)", "suite/servers/handler_cy_hotloop_disasm.txt"),
         ("asyncio / uvloop server", "suite/servers/srv_asyncio.py"),
@@ -546,6 +621,7 @@ table.kv th{text-align:left;width:210px;color:var(--mut);font-weight:600;cursor:
 table.kv th:hover{color:var(--mut)}
 .note{color:var(--mut);font-size:12px;margin:4px 0 18px}
 .warn{color:var(--warn);font-size:13px}
+.kgood{color:var(--good);font-weight:600}.kwarn{color:var(--warn);font-weight:600}
 details.code{margin:6px 0;background:var(--panel);border:1px solid var(--line);border-radius:4px}
 details.code summary{cursor:pointer;padding:8px 12px;font-weight:600;display:flex;justify-content:space-between;align-items:baseline;gap:16px}
 details.code summary::-webkit-details-marker{flex:0 0 auto}
@@ -573,6 +649,7 @@ def main():
     mem = load("mem.json") or load("mem_quick.json")
     iou = load("iouring_test.json")
     work = load("work_curve.json")
+    work_xrt = load("work_xrt.json")
     meta = (perf or speed or mem or {}).get("meta") or config.summary()
     quick = any(d and d.get("quick") for d in (perf, speed, mem))
 
@@ -580,7 +657,7 @@ def main():
     nav = ('<nav><b>Runloom benchmarks</b> '
            '<a href="#env">machine</a><a href="#constraints">constraints</a>'
            '<a href="#perf">req/s</a><a href="#iouring">io_uring</a>'
-           '<a href="#work">work curve</a>'
+           '<a href="#work">work curve</a><a href="#workxrt">work x-runtime</a>'
            '<a href="#speed">speed</a><a href="#mem">memory</a>'
            '<a href="#code">code</a><a href="#profiles">profiles</a></nav>')
     parts = [
@@ -596,6 +673,7 @@ def main():
         sec_perf(perf),
         sec_iouring(iou),
         sec_work(work),
+        sec_work_xrt(work_xrt),
         sec_speed(speed),
         sec_mem(mem),
         sec_profiles(),

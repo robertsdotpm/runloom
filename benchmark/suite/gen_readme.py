@@ -35,6 +35,7 @@ def main():
     speed = load("speed.json")
     mem = load("mem.json")
     work = load("work_curve.json")
+    work_xrt = load("work_xrt.json")
     envd = load("env.json") or {}
     quick = any(d and d.get("quick") for d in (perf, speed, mem))
 
@@ -129,6 +130,55 @@ def main():
                      "(`hashlib`/`json`/`struct`) Python and Cython would converge &mdash; the gap "
                      "is specific to *handler-level* Python work.[^bench]" % mx)
             L.append("")
+
+    # --- cross-runtime work curve (per core) ---
+    if work_xrt:
+        res = work_xrt.get("results", {})
+        wmeta = work_xrt.get("meta", {})
+        rtinfo = wmeta.get("runtimes", {})
+        works = wmeta.get("works", [])
+        if works and rtinfo:
+            w_echo, w_heavy = works[0], works[-1]
+
+            def percore(name, w):
+                r = res.get(name, {}).get(str(w), {})
+                rps = r.get("peak", {}).get("rps_median")
+                c = rtinfo.get(name, {}).get("cores", 1) or 1
+                return (rps / c) if rps else None
+
+            order = sorted(rtinfo, key=lambda n: -(percore(n, w_heavy) or -1))
+            rws = []
+            for n in order:
+                info = rtinfo[n]
+                pe, ph = percore(n, w_echo), percore(n, w_heavy)
+                if pe is None and ph is None:
+                    continue
+                rws.append((info.get("label", n), info.get("kind", ""), info.get("cores", 1), pe, ph))
+            if rws:
+                L.append("### Real-work handler curve across runtimes (per core)")
+                L.append("")
+                L.append("The same `--work` FNV hash in every runtime's natural handler language, "
+                         "reported per core (peak req/s ÷ pinned cores). It shows the result is "
+                         "honest: under real CPU work the **handler language** sets the tier, not "
+                         "the runtime.[^bench]")
+                L.append("")
+                L.append("| Runtime | handler | cores | req/s per core @ echo | req/s per core @ work=%d |"
+                         % w_heavy)
+                L.append("|---|:--|--:|--:|--:|")
+                for label, kind, cores, pe, ph in rws:
+                    L.append("| %s | %s | %d | %s | %s |"
+                             % (label, kind, cores, commafy(pe) if pe else "n/a",
+                                commafy(ph) if ph else "n/a"))
+                L.append("")
+                L.append("> Two bands by handler language: compiled (runloom-Cython, Go) sit "
+                         "together per core under load, interpreted (runloom-py, asyncio, uvloop, "
+                         "gevent) sit together. At echo the single-core event loops lead per core "
+                         "(pure I/O pays no free-threading/M:N tax) — that inverts the instant the "
+                         "handler does work. runloom's edge: it reaches the compiled band while "
+                         "keeping M:N across all cores automatically; one asyncio process serialises "
+                         "the same work onto one core. Delegate to a C lib and all runtimes "
+                         "re-converge.[^bench]")
+                L.append("")
 
     # --- memory 1M ---
     if mem:
