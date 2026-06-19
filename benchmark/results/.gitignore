@@ -1,3 +1,9 @@
 perf_quick.json
 *_quick.json
 *.log
+*.data
+sat_top_*.txt
+anomaly_srv_*.out
+anomaly_load_*.out
+anomaly_stat_*.txt
+anomaly_top_*.txt

@@ -278,11 +278,15 @@ These refine the decisions above based on what the real runtime/box required:
     ints, not a `PyThreadState`), so there's nothing to bypass. Use `handler_cy`
     (Cython `def`) on the proactor; the `cdef` path's value is per-fiber memory.
 
-19. **Anomaly #17 is REPRODUCIBLE, cause OPEN** (a premature "resolved" retracted).
-    Fresh back-to-back netns re-measure: py `runloom_c` 617,554 client-bound (63%
-    CPU); `runloom_c_cython` 423,458 **server-bound** (86% CPU) — ~2× the server
-    CPU per request, reproducibly, for a NO-WORK echo. My controlled-loopback A/B
-    (py≈cython≈488k) was FLAWED — loadgen-limited, never saturated either server,
-    `lo` ≠ `veth` — so "equal" and "buffer ruled out" are retracted. Since echo has
-    no handler compute, the 2× must be in the capi/Cython/`veth` plumbing. Next:
-    `perf` the netns servers AT SATURATION. Full record: `../IOURING_TSTATE_FINDINGS.md`.
+19. **Anomaly #17 RESOLVED: there is no anomaly.** Arc: looked ~2× (cython epoll
+    server-bound 425k vs py client-bound 620k) → called it an artifact → retracted
+    when a netns re-measure reproduced 425k → settled definitively by saturation +
+    objdump. At **2048 conns** (the load the ladder never reached): cython 604,946
+    ≈ py 598,527 — **equal**; the "425k server-bound" was the ladder's plateau label
+    misfiring at sub-saturation conn counts. Objdump: the cython capi `send_all` is
+    **115 insns, ZERO `Py_` calls** vs the py method's 134 insns + 10 `Py_` calls —
+    **no hidden Python object**, the Cython path is strictly leaner. Both hypotheses
+    (hidden PyObject; shared-object lock contention) ruled out. **Lesson banked:**
+    confirm a "server-bound" peak by saturating past the loadgen knee, don't trust
+    the ladder's bottleneck label. Full trace: `../IOURING_TSTATE_FINDINGS.md` +
+    `results/anomaly_notes.md`.
