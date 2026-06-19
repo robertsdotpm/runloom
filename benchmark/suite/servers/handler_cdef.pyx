@@ -36,6 +36,30 @@ cdef fd_recv_t _fd_recv = NULL
 cdef fd_send_t _fd_send_all = NULL
 cdef fd_close_t _fd_close = NULL
 
+# Work knob for the cross-runtime work curve: the SAME FNV-1a byte hash as
+# work_cy / py_fnv / goFnv, but here it runs INSIDE the tstate-free nogil cdef
+# handler -- so unlike srv_runloom_work.py's Python `def` handler (which wraps the
+# compiled work in interpreted recv_into/send_all/fold), the ENTIRE request path
+# is native C. This is the "fully-native runloom handler" line for the
+# Cython-vs-cdef-vs-Go comparison. _work is set once via set_work() before serve()
+# spawns any fiber, so the nogil read needs no lock. work=0 -> plain echo.
+cdef int _work = 0
+
+
+def set_work(int w):
+    global _work
+    _work = w
+
+
+cdef unsigned int _fnv(const unsigned char *buf, Py_ssize_t n, int passes) noexcept nogil:
+    cdef unsigned int h = 2166136261u   # FNV-1a offset basis
+    cdef Py_ssize_t i
+    cdef int p
+    for p in range(passes):
+        for i in range(n):
+            h = (h ^ buf[i]) * 16777619u   # FNV-1a prime, native wraparound
+    return h
+
 
 cdef int _load() except -1:
     global _fd_recv, _fd_send_all, _fd_close
@@ -54,15 +78,21 @@ _load()
 
 
 cdef void echo_handler(void *arg) noexcept nogil:
-    """serve() hands us the accepted fd (via intptr_t). Echo until EOF. No tstate,
-    no Python objects, no GIL -- the c_entry fast path."""
+    """serve() hands us the accepted fd (via intptr_t). recv -> (optional FNV
+    work) -> send, until EOF. No tstate, no Python objects, no GIL -- the c_entry
+    fast path. With _work>0 the ENTIRE request path is native C (the fully-native
+    runloom handler line vs Go); _work==0 is the plain echo."""
     cdef int fd = <int><intptr_t>arg
     cdef char buf[16384]
     cdef Py_ssize_t n
+    cdef unsigned int h
     while True:
         n = _fd_recv(fd, buf, 16384)
         if n <= 0:
             break
+        if _work > 0:
+            h = _fnv(<const unsigned char *>buf, n, _work)
+            buf[0] = <char>(<unsigned char>buf[0] ^ <unsigned char>(h & 0xffu))   # fold in -> no elision
         if _fd_send_all(fd, buf, n) < 0:
             break
     _fd_close(fd)

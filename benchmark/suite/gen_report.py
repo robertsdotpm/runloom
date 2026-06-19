@@ -10,6 +10,7 @@ import html
 import json
 import math
 import os
+import re
 import sys
 import datetime
 
@@ -51,49 +52,63 @@ def _axfmt(v):
     return "%g" % v
 
 
-def svg_linechart(series, xlabels, xaxis="FNV passes (--work)", width=760, height=380):
-    """A log-y line chart (data spans orders of magnitude). x is categorical /
-    equally spaced (the --work values aren't linear). series: list of
-    (name, color, [y aligned to xlabels]); a None y is a gap. Pure inline SVG,
-    no JS/deps. Returns "" if there is nothing positive to plot."""
-    ml, mr, mt, mb = 66, 158, 22, 46
+def _slug(s):
+    return re.sub(r"[^a-z0-9]+", "_", str(s).lower()).strip("_")
+
+
+def svg_linechart(cid, series, xlabels, xaxis="FNV passes (--work)", logy=True,
+                  ylabel=None, width=760, height=392):
+    """Interactive line chart. `cid` scopes its clickable legend. series: list of
+    (name, color, [y aligned to xlabels]) or (name, color, ys, slug); a None y is
+    a gap. Each series' path+dots are grouped under class `ser-<cid>-<slug>` and
+    the legend entry calls tglSeries(cid, slug) so a reader can click any line off
+    (e.g. isolate one runloom config vs Go). `logy=False` -> linear y (use when
+    the values share a magnitude and ratios must read true). Pure inline SVG."""
+    ml, mr, mt, mb = 70, 196, 30, 46
     pw, ph = width - ml - mr, height - mt - mb
     n = len(xlabels)
-    allv = [y for _, _, ys in series for y in ys if y and y > 0]
+    allv = [y for s in series for y in s[2] if y and y > 0]
     if not allv or n < 2:
         return ""
     ymin, ymax = min(allv), max(allv)
-    lo, hi = math.floor(math.log10(ymin)), math.ceil(math.log10(ymax))
-    if hi == lo:
-        hi += 1
+    if logy:
+        lo, hi = math.floor(math.log10(ymin)), math.ceil(math.log10(ymax))
+        if hi == lo:
+            hi += 1
 
-    def yp(v):
-        if not v or v <= 0:
-            return None
-        return mt + ph - (math.log10(v) - lo) / (hi - lo) * ph
+        def yp(v):
+            return None if (not v or v <= 0) else mt + ph - (math.log10(v) - lo) / (hi - lo) * ph
+        ticks = [m * 10 ** d for d in range(lo, hi + 1) for m in (1, 2, 5)
+                 if ymin * 0.92 <= m * 10 ** d <= ymax * 1.08]
+    else:
+        top = ymax * 1.06
+
+        def yp(v):
+            return None if v is None else mt + ph - (v / top) * ph
+        step = top / 5.0
+        ticks = [step * k for k in range(0, 6)]
 
     def xp(i):
         return ml + pw * i / (n - 1)
 
-    out = ['<svg viewBox="0 0 %d %d" class="chart" width="100%%" style="max-width:%dpx">'
-           % (width, height, width)]
-    # log-decade gridlines (1/2/5 within each decade), labelled
-    for d in range(lo, hi + 1):
-        for mant in (1, 2, 5):
-            v = mant * 10 ** d
-            if v < ymin * 0.92 or v > ymax * 1.08:
-                continue
-            y = yp(v)
-            out.append('<line x1="%d" y1="%.1f" x2="%d" y2="%.1f" class="grid"/>' % (ml, y, ml + pw, y))
-            out.append('<text x="%d" y="%.1f" class="ytick">%s</text>' % (ml - 7, y + 3, _axfmt(v)))
-    # x ticks + axis label
+    out = ['<svg viewBox="0 0 %d %d" id="%s" class="chart" width="100%%" style="max-width:%dpx">'
+           % (width, height, cid, width)]
+    for v in ticks:
+        y = yp(v)
+        if y is None:
+            continue
+        out.append('<line x1="%d" y1="%.1f" x2="%d" y2="%.1f" class="grid"/>' % (ml, y, ml + pw, y))
+        out.append('<text x="%d" y="%.1f" class="ytick">%s</text>' % (ml - 7, y + 3, _axfmt(v)))
     for i, xl in enumerate(xlabels):
         out.append('<text x="%.1f" y="%d" class="xtick">%s</text>' % (xp(i), mt + ph + 16, esc(xl)))
     out.append('<text x="%.1f" y="%d" class="axlbl">%s</text>' % (ml + pw / 2, height - 5, esc(xaxis)))
-    out.append('<text x="14" y="%.1f" class="axlbl" transform="rotate(-90 14 %.1f)">req/s (log)</text>'
-               % (mt + ph / 2, mt + ph / 2))
-    # series: polyline over non-null segments + dots + legend
-    for si, (name, color, ys) in enumerate(series):
+    out.append('<text x="14" y="%.1f" class="axlbl" transform="rotate(-90 14 %.1f)">%s</text>'
+               % (mt + ph / 2, mt + ph / 2, esc(ylabel or ("req/s (log)" if logy else "req/s per core"))))
+    out.append('<text x="%d" y="%d" class="hint">click a name to toggle</text>' % (ml + pw + 14, mt - 12))
+    for si, s in enumerate(series):
+        name, color, ys = s[0], s[1], s[2]
+        slug = s[3] if len(s) > 3 else _slug(name)
+        out.append('<g class="ser ser-%s-%s">' % (cid, slug))
         path, pen = "", False
         for i, v in enumerate(ys):
             y = yp(v)
@@ -102,15 +117,20 @@ def svg_linechart(series, xlabels, xaxis="FNV passes (--work)", width=760, heigh
                 continue
             path += ("L" if pen else "M") + "%.1f %.1f " % (xp(i), y)
             pen = True
-        out.append('<path d="%s" fill="none" stroke="%s" stroke-width="2.2"/>' % (path, color))
+        out.append('<path d="%s" fill="none" stroke="%s" stroke-width="2.4"/>' % (path, color))
         for i, v in enumerate(ys):
             y = yp(v)
             if y is not None:
-                out.append('<circle cx="%.1f" cy="%.1f" r="2.6" fill="%s"/>' % (xp(i), y, color))
-        ly = mt + 12 + si * 18
-        out.append('<line x1="%d" y1="%d" x2="%d" y2="%d" stroke="%s" stroke-width="2.2"/>'
-                   % (ml + pw + 14, ly, ml + pw + 32, ly, color))
-        out.append('<text x="%d" y="%d" class="leg">%s</text>' % (ml + pw + 36, ly + 4, esc(name)))
+                out.append('<circle cx="%.1f" cy="%.1f" r="2.7" fill="%s"/>' % (xp(i), y, color))
+        out.append('</g>')
+        ly = mt + 12 + si * 19
+        out.append('<g class="legi" data-c="%s" data-s="%s" onclick="tglSeries(\'%s\',\'%s\')">'
+                   % (cid, slug, cid, slug))
+        out.append('<rect x="%d" y="%d" width="184" height="17" fill="transparent"/>' % (ml + pw + 10, ly - 12))
+        out.append('<line x1="%d" y1="%d" x2="%d" y2="%d" stroke="%s" stroke-width="2.4"/>'
+                   % (ml + pw + 14, ly - 4, ml + pw + 32, ly - 4, color))
+        out.append('<text x="%d" y="%d" class="leg">%s</text>' % (ml + pw + 36, ly, esc(name)))
+        out.append('</g>')
     out.append('</svg>')
     return "".join(out)
 
@@ -444,10 +464,10 @@ def sec_iouring(iou):
 
 def sec_work(work):
     """The handler work-curve: ONE server, ONE knob (--work N = FNV passes over
-    the payload), TWO builds of the identical algorithm (interpreted py_fnv vs
-    compiled work_cy.fnv_work). work=0 IS the echo, so it consolidates the echo
-    load as the leftmost point. The gap that opens as work grows is the thing
-    echo can never show -- a handler optimization needs handler CPU to pay."""
+    the payload), same runtime, interpreted Python def vs the fully-native
+    zero-PyObject Cython handler (work inline). work=0 IS the echo, so it
+    consolidates the echo load as the leftmost point. The gap that opens as work
+    grows is the cost of leaving handler work in the interpreter."""
     if not work:
         return ""
     res = work.get("results", {})
@@ -485,26 +505,30 @@ def sec_work(work):
     xlabels = [("%d (echo)" % w) if w == 0 else str(w) for w in works]
     ys = lambda h: [py.get(str(w), {}).get("peak", {}).get("rps_median") if h == "py"
                     else cy.get(str(w), {}).get("peak", {}).get("rps_median") for w in works]
-    chart = svg_linechart([("Python handler", "var(--warn)", ys("py")),
-                           ("Cython handler", "var(--good)", ys("cy"))], xlabels)
-    return ('<h2 id="work">Handler work curve &mdash; what compiling the handler buys</h2>'
+    chart = svg_linechart("ch_work",
+                          [("Python handler (interpreted)", "var(--warn)", ys("py"), "py"),
+                           ("Cython handler (fully native)", "var(--good)", ys("cy"), "cython")],
+                          xlabels)
+    return ('<h2 id="work">Handler work curve &mdash; interpreted vs the optimized handler</h2>'
             '<p>Every handler-side optimization <em>ties</em> on echo because a TCP echo '
             'does no CPU work in the handler (the cost is the kernel TCP path). This is the '
             'one experiment that gives the handler something to do: <b>one server</b> '
             '(<code>srv_runloom_work.py</code>), <b>one knob</b> (<code>--work N</code> = an '
             'FNV-1a byte hash over the %d&nbsp;B payload, repeated N times, folded into the '
-            'reply so it can\'t be elided), and <b>two builds of the identical algorithm</b>: '
-            'the interpreted <code>py_fnv()</code> vs the Cython-compiled '
-            '<code>work_cy.fnv_work()</code>. Same runtime, same I/O path &mdash; the '
-            '<em>only</em> variable is whether the handler\'s per-byte work is interpreted '
-            'or native.</p>'
+            'reply so it can\'t be elided), the <b>same runtime</b>, two handler '
+            'implementations: an <b>interpreted Python <code>def</code></b> (recv_into / '
+            'py_fnv / fold / send_all all in the interpreter) vs the <b>fully-native, '
+            'zero-PyObject Cython handler</b> with the work inlined (capi recv, native FNV, '
+            'fold, capi send &mdash; no Python wrapper, no per-call boxing; '
+            '<code>disasm_check.sh</code> proves the loop is PyObject-free). The Cython line '
+            'is runloom\'s state of the art; the cross-runtime section shows it tracking Go.</p>'
             '<p><b><code>--work&nbsp;0</code> is the echo</b> (the handler skips the work '
-            'call entirely), so it consolidates the echo load as the leftmost point and '
-            'should reproduce the echo numbers &mdash; a built-in cross-check. As the knob '
-            'grows the Python curve bends down (it goes server-bound) while the Cython curve '
-            'holds; the peak <code>Cython / Python</code> ratio here is <b>%.2f&times;</b>. '
-            '<em>That</em> gap is what the whole Cython/cdef handler path was built to earn '
-            'and echo structurally could not show.</p>'
+            'entirely), so it consolidates the echo load as the leftmost point and reproduces '
+            'the echo number &mdash; a built-in cross-check. As the knob grows the interpreted '
+            'handler goes server-bound and collapses while the optimized Cython handler holds '
+            'nearly flat; the peak <code>Cython / Python</code> ratio here is <b>%.2f&times;</b> '
+            '&mdash; the cost of leaving handler-level work in the interpreter, and what a '
+            'properly-optimized handler reclaims.</p>'
             % (pl, max_speed)
             + chart
             + table("t_work", hdr, rows, mark_best=False, note=
@@ -568,48 +592,68 @@ def sec_work_xrt(xrt):
         hdr.append((("w=%d (echo)" % w) if w == 0 else ("w=%d" % w), True))
 
     # per-core line chart: cool colours = compiled band, warm = interpreted band
-    palette = {"runloom_cython": "var(--good)", "go": "var(--acc)",
+    palette = {"runloom_cdef": "#6cd9c0", "runloom_cython": "var(--good)", "go": "var(--acc)",
                "runloom_py": "var(--warn)", "asyncio": "#ff9966",
                "uvloop": "#ff6b9d", "gevent": "#e06c75"}
     xlabels = [("%d (echo)" % w) if w == 0 else str(w) for w in works]
     cseries = []
     for name, info in rtinfo.items():
         cseries.append((info.get("label", name), palette.get(name, "var(--fg)"),
-                        [percore(name, w) for w in works]))
-    chart = svg_linechart(cseries, xlabels)
+                        [percore(name, w) for w in works], name))
+    chart = svg_linechart("ch_xrt", cseries, xlabels)
+
+    # FOCUSED chart at the top: just the compiled band (runloom cython/cdef vs Go)
+    # on a LINEAR y-axis, where the ~2x Go-vs-runloom gap reads true (log-y hides
+    # it). Only render the compiled runtimes that are present.
+    comp_order = [n for n in ("go", "runloom_cdef", "runloom_cython")
+                  if n in rtinfo and any(percore(n, w) for w in works)]
+    focus = ""
+    if len(comp_order) >= 2:
+        fseries = [(rtinfo[n].get("label", n), palette.get(n, "var(--fg)"),
+                    [percore(n, w) for w in works], n) for n in comp_order]
+        focus = ('<h3>Compiled handlers vs Go (linear scale &mdash; the gap the log chart hides)</h3>'
+                 + svg_linechart("ch_comp", fseries, xlabels, logy=False,
+                                 ylabel="req/s per core (linear)"))
 
     return ('<h2 id="workxrt">Cross-runtime work curve &mdash; per core, every runtime</h2>'
-            '<p>The same <code>--work N</code> FNV-1a byte hash as above, now run in '
-            '<b>every runtime\'s natural handler language</b> &mdash; interpreted Python '
-            '(runloom-py on M:N, plus asyncio / uvloop / gevent on one core each, exactly as '
-            'in the echo benchmark) and compiled/native (runloom-Cython on M:N, Go on '
-            '<code>GOMAXPROCS</code>). Reported <b>per core</b> (peak rps &divide; the server\'s '
-            'pinned cores) so it is an efficiency comparison, not a core-count one. Same '
-            'algorithm, same payload, nothing cherry-picked. The chart is log-y: cool '
-            'lines are the compiled band, warm lines the interpreted band.</p>'
+            '<p>The same <code>--work N</code> FNV-1a byte hash, run in <b>each runtime\'s '
+            'natural handler language</b>, reported <b>per core</b> (peak rps &divide; pinned '
+            'cores) so it is an efficiency comparison, not a core-count one. Three runloom '
+            'handler tiers are shown: interpreted Python (<code>py</code>), the fully-native '
+            'zero-PyObject Cython handler (<code>cython</code>, work inline &mdash; the '
+            'state-of-the-art path), and the tstate-free <code>cdef</code> c_entry handler. '
+            'References: Go (<code>GOMAXPROCS</code>) and the single-core event loops '
+            '(asyncio / uvloop / gevent). <b>Click any name in a chart legend to toggle it</b> '
+            '(e.g. isolate one runloom line against Go).</p>'
+            '<p><b>The headline:</b> a fully-native runloom handler <b>matches&ndash;to&ndash;beats '
+            'Go across the whole curve</b> &mdash; runloom-cython and runloom-cdef are <em>ahead</em> '
+            'of Go through ~work&nbsp;4 (its faster I/O paying off) and within ~8% at the heaviest '
+            'compute, where Go\'s native codegen edges back. The earlier 2&times; gap was entirely '
+            'the interpreted Python <code>def</code> wrapper; inlining the work into the compiled '
+            'handler erases it. cython &asymp; cdef confirms the tstate bypass is worth ~nothing on '
+            'throughput. Meanwhile the interpreted handlers (runloom-py, asyncio, uvloop, gevent) '
+            'collapse ~100&ndash;200&times; below under real work &mdash; the handler <em>language</em> '
+            'is the only thing that ever separates the field.</p>'
+            + focus
             + chart
             + table("t_workxrt", hdr, body, mark_best=True, note=
-                    "Rows are sorted by per-core throughput at the heaviest work &mdash; that "
-                    "<b>rightmost column is the one to read</b>, because it is the only point where "
-                    "all six runtimes are genuinely server-bound (a true capacity comparison). "
-                    "There, two bands emerge drawn by the <b>handler language, not the runtime</b>: "
-                    "compiled (runloom-Cython &asymp; Go, ~6&ndash;7k/core) far above interpreted "
-                    "(runloom-py &asymp; asyncio &asymp; uvloop &asymp; gevent, ~30&ndash;40/core) "
-                    "&mdash; a ~180&times; language gap, with the runtime barely mattering inside "
-                    "each band. <b>Read the lighter-work columns with care:</b> the compiled "
-                    "runtimes are so fast there that the 16-core loadgen cannot saturate them "
-                    "(bottleneck <code>client</code>), so their mid-curve per-core figures are the "
-                    "loadgen ceiling &divide; cores, not capacity &mdash; that is why the Cython row "
-                    "is non-monotonic, not noise. The interpreted runtimes are server-bound from "
-                    "<code>w=1</code>, so their figures are real capacity throughout. <b>The "
-                    "<code>w=0</code> (echo) inversion:</b> there the single-threaded event loops "
-                    "lead per core (uvloop highest) because pure I/O pays no free-threading/M:N tax "
-                    "&mdash; the known echo result, and it vanishes the instant the handler does "
-                    "work. Per-core also understates runloom's edge: it reaches the compiled band "
-                    "<em>while keeping M:N across all cores automatically</em> (aggregate "
-                    "44&times;), where one asyncio process serialises the same work onto one core. "
-                    "<b>Honest caveat:</b> delegate the work to a C library and every runtime "
-                    "re-converges &mdash; they would all call the same native code."))
+                    "Rows sorted by per-core throughput at the heaviest work &mdash; the "
+                    "<b>rightmost column is the true capacity comparison</b> (the only point where all "
+                    "runtimes are genuinely server-bound). Two bands, drawn by the <b>handler "
+                    "language, not the runtime</b>: compiled (runloom-cdef &asymp; runloom-cython "
+                    "&asymp; Go, ~6.5&ndash;7k/core) ~180&times; above interpreted (~30&ndash;40/core); "
+                    "the runtime barely matters inside a band, and runloom-py is the <em>top</em> of "
+                    "the interpreted band (free-threaded M:N Python is not slower per core than a "
+                    "single-thread event loop, and runs on all 44 cores at once). <b>Lighter-work "
+                    "columns:</b> the compiled runtimes are so fast there that the 16-core loadgen "
+                    "can\'t saturate them (bottleneck <code>client</code>), so those per-core figures "
+                    "are the loadgen ceiling &divide; cores, not capacity &mdash; hence any "
+                    "non-monotonicity is the measurement, not the runtime. <b>The <code>w=0</code> "
+                    "(echo) inversion:</b> single-thread event loops lead per core (uvloop highest) "
+                    "because pure I/O pays no free-threading/M:N tax &mdash; and it vanishes the instant "
+                    "the handler does work. <b>Honest caveat:</b> delegate the work to a C library "
+                    "(<code>hashlib</code>/<code>json</code>) and every runtime re-converges &mdash; "
+                    "they would all call the same native code."))
 
 
 def sec_mem(mem):
@@ -651,10 +695,10 @@ def sec_code():
         ("Server tier 1 &mdash; runloom sync wrappers", "suite/servers/srv_runloom_sync.py"),
         ("Server tier 2 &mdash; runloom_c.serve (py handler)", "suite/servers/srv_runloom_c.py"),
         ("Server tiers 4/5 &mdash; runloom_c.serve + Cython handler", "suite/servers/srv_runloom_cython.py"),
-        ("Cython zero-PyObject handler", "suite/servers/handler_cy.pyx"),
-        ("Work-curve server (--work N, work=0==echo)", "suite/servers/srv_runloom_work.py"),
-        ("Work-curve compiled FNV (pure inline arithmetic)", "suite/servers/work_cy.pyx"),
-        ("Work-curve sweep driver (runloom py vs cython)", "suite/work_sweep.py"),
+        ("Cython zero-PyObject handler (echo + inline FNV work)", "suite/servers/handler_cy.pyx"),
+        ("Cython cdef c_entry handler (tstate-free, inline FNV work)", "suite/servers/handler_cdef.pyx"),
+        ("Work-curve server (--handler py/cython/cdef, --work N, work=0==echo)", "suite/servers/srv_runloom_work.py"),
+        ("Work-curve sweep driver (interpreted vs fully-native handler)", "suite/work_sweep.py"),
         ("Cross-runtime work sweep (all runtimes, per core)", "suite/work_xrt_sweep.py"),
         ("C-API exposed for the Cython handler", "../src/runloom_c/runloom_tcp_capi.c.inc"),
         ("Cython hot-loop disassembly (zero-PyObject proof)", "suite/servers/handler_cy_hotloop_disasm.txt"),
@@ -727,6 +771,10 @@ svg.chart{display:block;background:var(--panel);border:1px solid var(--line);bor
 .chart .xtick{fill:var(--mut);font-size:11px;text-anchor:middle}
 .chart .axlbl{fill:var(--mut);font-size:11px;text-anchor:middle}
 .chart .leg{fill:var(--fg);font-size:11px}
+.chart .hint{fill:var(--mut);font-size:10px;font-style:italic;text-anchor:start}
+.chart .legi{cursor:pointer}.chart .legi:hover .leg{fill:var(--acc)}
+.chart .legi.off .leg{fill:var(--mut);text-decoration:line-through;opacity:.6}
+.chart .ser.off{display:none}
 details.code{margin:6px 0;background:var(--panel);border:1px solid var(--line);border-radius:4px}
 details.code summary{cursor:pointer;padding:8px 12px;font-weight:600;display:flex;justify-content:space-between;align-items:baseline;gap:16px}
 details.code summary::-webkit-details-marker{flex:0 0 auto}
@@ -744,6 +792,11 @@ var yv=num?parseFloat(y.getAttribute('data-v')||y.textContent.replace(/[^0-9.\\-
 if(num){xv=isNaN(xv)?-Infinity:xv;yv=isNaN(yv)?-Infinity:yv;return (xv-yv)*dir;}
 return xv<yv?-dir:xv>yv?dir:0;});
 rows.forEach(function(r){tb.appendChild(r);});}
+function tglSeries(cid,slug){
+var grp=document.querySelector('.ser-'+cid+'-'+slug);if(!grp)return;
+grp.classList.toggle('off');var off=grp.classList.contains('off');
+var legs=document.querySelectorAll('.legi[data-c="'+cid+'"][data-s="'+slug+'"]');
+legs.forEach(function(e){if(off)e.classList.add('off');else e.classList.remove('off');});}
 """
 
 

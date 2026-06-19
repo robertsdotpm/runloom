@@ -30,13 +30,13 @@ Echo ties every handler optimisation because it does no CPU work in the handler.
 
 | --work (FNV passes) | Python handler req/s | Cython handler req/s | Cython / Python |
 |--:|--:|--:|--:|
-| 0 (echo) | 615,403 | 613,316 | 1.00× |
-| 1 | 82,137 | 584,879 | 7.12× |
-| 4 | 25,332 | 495,938 | 19.58× |
-| 16 | 6,931 | 478,025 | 68.97× |
-| 64 | 1,740 | 273,827 | 157.34× |
+| 0 (echo) | 615,882 | 609,964 | 0.99× |
+| 1 | 84,989 | 616,838 | 7.26× |
+| 4 | 24,788 | 625,008 | 25.21× |
+| 16 | 6,829 | 584,877 | 85.64× |
+| 64 | 1,750 | 287,390 | 164.18× |
 
-> As the knob grows the interpreted handler goes server-bound and collapses while the compiled handler holds (up to **157.3×** here). The work is pure inline arithmetic, never offloaded to a worker thread, so per-core accounting stays valid. **Honest framing:** if the handler delegated to a C library (`hashlib`/`json`/`struct`) Python and Cython would converge &mdash; the gap is specific to *handler-level* Python work.[^bench]
+> As the knob grows the interpreted handler goes server-bound and collapses while the compiled handler holds (up to **164.2×** here). The work is pure inline arithmetic, never offloaded to a worker thread, so per-core accounting stays valid. **Honest framing:** if the handler delegated to a C library (`hashlib`/`json`/`struct`) Python and Cython would converge &mdash; the gap is specific to *handler-level* Python work.[^bench]
 
 ### Real-work handler curve across runtimes (per core)
 
@@ -45,7 +45,8 @@ The same `--work` FNV hash in every runtime's natural handler language, reported
 | Runtime | handler | cores | req/s per core @ echo | req/s per core @ work=64 |
 |---|:--|--:|--:|--:|
 | Go net (GOMAXPROCS=44) | compiled | 44 | 13,522 | 7,010 |
-| Runloom (M:N) — Cython handler | compiled | 44 | 13,971 | 5,951 |
+| Runloom (M:N) — Cython handler (py def + compiled work) | compiled | 44 | 13,872 | 6,532 |
+| Runloom (M:N) — cdef c_entry (fully native) | compiled | 44 | 14,069 | 6,483 |
 | Runloom (M:N) — Python handler | interpreted | 44 | 14,089 | 39 |
 | asyncio Protocol (1 core) | interpreted | 1 | 38,122 | 31 |
 | uvloop (1 core) | interpreted | 1 | 53,073 | 31 |

@@ -45,15 +45,43 @@ _load_capi()
 # ~24x per message while the small-payload req/s test fits in one read.
 DEF CHUNK = 65536
 
+# Work knob for the work curve: the SAME FNV-1a byte hash, run INLINE in this
+# zero-PyObject Cython handler. So the FULL request path is native -- capi recv,
+# native FNV, fold, capi send -- no interpreted recv_into/send_all/fold wrapper
+# and no per-call boxing. This is the state-of-the-art optimized runloom handler
+# (the line that competes with Go), not a Python def calling a compiled function.
+# _work is set once via set_work() before serve() spawns any fiber. work=0 = echo.
+cdef int _work = 0
+
+
+def set_work(int w):
+    global _work
+    _work = w
+
+
+cdef unsigned int _fnv(const unsigned char *buf, Py_ssize_t n, int passes) noexcept nogil:
+    cdef unsigned int h = 2166136261u   # FNV-1a offset basis
+    cdef Py_ssize_t i
+    cdef int p
+    for p in range(passes):
+        for i in range(n):
+            h = (h ^ buf[i]) * 16777619u   # FNV-1a prime, native wraparound
+    return h
+
+
 def handler(conn):
-    """serve() hands us a runloom_c.TCPConn.  Echo until EOF, zero PyObjects
-    in the loop body."""
+    """serve() hands us a runloom_c.TCPConn.  recv -> (optional inline FNV) ->
+    send, until EOF. Zero PyObjects in the loop body either way."""
     cdef PyObject *c = <PyObject *>conn
     cdef char buf[CHUNK]
     cdef Py_ssize_t n
+    cdef unsigned int h
     while True:
         n = _capi.recv_into(c, buf, CHUNK)
         if n <= 0:
             break
+        if _work > 0:
+            h = _fnv(<const unsigned char *>buf, n, _work)
+            buf[0] = <char>(<unsigned char>buf[0] ^ <unsigned char>(h & 0xffu))   # fold -> no elision
         if _capi.send_all(c, buf, n) < 0:
             break

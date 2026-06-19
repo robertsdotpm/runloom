@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""The handler work-curve: what does compiling the handler's WORK buy?
+"""The handler work-curve: interpreted handler vs the fully-optimized one.
 
 ONE server (srv_runloom_work.py), ONE knob (--work N = FNV-1a passes over the
-payload), TWO builds of the identical algorithm: --handler py (interpreted
-py_fnv) vs --handler cython (compiled work_cy.fnv_work). Same runtime (runloom,
-same proactor/epoll I/O), same payload -- the ONLY variable is whether the
-handler's per-byte work is interpreted or native.
+payload), the same runtime: --handler py (an interpreted Python def doing
+recv_into/py_fnv/fold/send_all) vs --handler cython (the zero-PyObject Cython
+handler with the FNV INLINE -- native recv, FNV, fold, send, no Python wrapper).
+The cython line is runloom's state of the art (it tracks Go in work_xrt_sweep).
 
 `--work 0` IS the echo (the handler skips the work call), so the leftmost point
 of the curve consolidates the echo load and should reproduce the echo numbers

@@ -290,3 +290,76 @@ These refine the decisions above based on what the real runtime/box required:
     confirm a "server-bound" peak by saturating past the loadgen knee, don't trust
     the ladder's bottleneck label. Full trace: `../IOURING_TSTATE_FINDINGS.md` +
     `results/anomaly_notes.md`.
+
+## Work-curve, scaling, bench-consolidation & report refinements (2026-06-19, branch feat/cdef-handler)
+
+20. **The "work" experiment — handler CPU vs throughput (`../WORK_CURVE_EXPERIMENT.md`).**
+    Echo ties every handler optimization because it has no handler CPU. So: ONE
+    server (`servers/srv_runloom_work.py`), ONE knob (`--work N` = an FNV-1a byte
+    hash over the payload, repeated N times, folded into the reply so it can't be
+    elided), swept into a curve. The work is **pure inline arithmetic** — no
+    stdlib/`hashlib`/`json` and nothing runloom routes to the blockpool — so it
+    runs on the fiber's hub (a valid per-hub measurement); a thread-offloaded call
+    would wreck the per-core accounting. **`--work 0` IS the echo** (lowest point),
+    so the one program consolidates the echo load and reproduces it as a built-in
+    cross-check.
+
+21. **"cython" means the FASTEST fully-native handler, not a Python `def` wrapping
+    compiled work.** First cut made `--handler cython` an interpreted `def` calling
+    a compiled `work_cy.fnv_work` — which isolated "what does compiling the *work*
+    buy" but carried Python per-request overhead (recv_into/send_all/fold/call-box)
+    and so trailed Go ~2× at light work. Per the project owner, the cython line must
+    be the **state of the art**: the FNV is now **inline inside the zero-PyObject
+    Cython handler** (`handler_cy`, work knob via `set_work()`), and a third
+    `--handler cdef` runs it in the tstate-free `c_entry` handler (`handler_cdef`).
+    `disasm_check.sh` re-confirms the per-request loop stays PyObject-free.
+    **Result:** a fully-native runloom handler **matches-to-beats Go across the
+    curve** — runloom-cython/cdef are *ahead* of Go through ~work 4 (faster I/O) and
+    within ~8% at heaviest compute. The 2× gap was 100% the Python `def` wrapper.
+    `cython ≈ cdef` (re-confirms the tstate bypass is worth ~nothing on throughput).
+    The handler **language** is the only thing that ever separates the field;
+    interpreted Python (runloom-py/asyncio/uvloop/gevent) collapses ~100–200× under
+    work. Takeaway: runloom's runtime (I/O + scheduler) is the solved, Go-beating
+    part; the residual is interpreter cost, orthogonal to runloom (future work:
+    auto-compile handlers — seed in `bench/poc_compile_handler.py`).
+
+22. **Cross-runtime work curve, per core (`work_xrt_sweep.py` → `results/work_xrt.json`).**
+    The same `--work` FNV in every runtime's natural handler language, reported
+    per core, with `--only NAME,...` + merge-on-write so individual runtimes can be
+    re-measured without re-running the rest. Read the **heaviest-work column** for
+    the true capacity comparison (the only point all runtimes are server-bound):
+    two bands by language (compiled runloom-cdef ≈ runloom-cython ≈ Go ~6.5–7k/core;
+    interpreted ~30–40/core). Light-work columns are loadgen-bound for the compiled
+    runtimes (so non-monotonicity there is the measurement, not the runtime); at
+    `w=0` echo the single-thread event loops lead per core (no FT/M:N tax on pure
+    I/O), which inverts the instant the handler does work.
+
+23. **Scheduler micro-benchmark scaling — spawn/ctxswitch (`../SCHEDULER_SCALING_FINDINGS.md`).**
+    No timer-boundary artifact: `run_speed.py` already subtracts an **n=0 lifecycle
+    baseline** for both spawn and ctxswitch, so the published gaps vs Go are genuine.
+    Hub-scaling curve: runloom ctxswitch is **~350 ns/switch (beats greenlet 465 &
+    Go 676) and flat to ~16 hubs**, then a cliff (3,452 ns @32, 12,130 @44).
+    `perf` localised the wall: it is **free-threaded CPython `_PyCriticalSection`/
+    `_PyMutex` contention** (a futex → cross-NUMA IPI storm; 24% `native_write_msr`)
+    from 704 identical-worker fibers sharing interpreter state — **runloom's yield is
+    ~2% of the profile.** So the "25 µs" headline is a CPython object-lock artifact,
+    not runloom. spawn is a separate, milder story (genuinely ~16 µs/task heavy path,
+    mild anti-scaling) — own profile TODO.
+
+24. **`bench/` consolidation (commit bf896e7).** Audited before deleting: `bench/`
+    is the **live local perf gate** (`scripts/bench.sh` runs the `bench.micro`/
+    `bench.mn` package against committed `bench/results/` baselines) plus profiling
+    drivers (`bench/profile/`) referenced by `docs/dev/PERHUB_EPOLL.md` — NOT
+    superseded by `benchmark/`. Only the 20 `bench/bench_*.py` one-shots (which the
+    repo's own README flags as superseded, imported by nothing) + the generated
+    `.cyc_build/` cache were removed. A full move under `benchmark/` would break
+    `scripts/bench.sh` + the docs and is deliberately left for a reference-updating
+    pass.
+
+25. **Report (`report.html`) presentation.** Inline SVG line charts (no JS deps) for
+    the work + cross-runtime curves, log-y by default with a **focused linear
+    "compiled handlers vs Go" chart** where the log scale would hide the small
+    ratios; **clickable legends** (`tglSeries`) to toggle any series (isolate one
+    runloom config vs Go). Fixed HTML double-escaping (authored entities in
+    `code_block` titles / table headers were run through `esc()`), and emphasised
+    the winning row (trophy + accent border, marked on the capacity table).

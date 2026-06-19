@@ -1,22 +1,26 @@
-"""Work-curve server: ONE program that consolidates echo + the compute sweep.
+"""Work-curve server: ONE program, one knob (--work N = FNV-1a passes over the
+payload), three handler implementations spanning interpreted -> state-of-the-art:
 
-`--work 0` is the echo (the handler skips the work call -> identical recv->send,
-reproduces the echo numbers). `--work N>0` runs an FNV-1a byte hash over the
-payload N times before echoing -- the SAME algorithm whether `--handler py`
-(interpreted) or `--handler cython` (compiled work_cy.fnv_work). I/O is identical
-in both (TCPConn recv_into/send_all); the ONLY variable is whether the handler's
-work is interpreted or compiled. Swept across N, this is the curve that shows
-"what compiling the handler buys" -- the thing echo structurally cannot show.
+  --handler py      interpreted Python: a `def` doing conn.recv_into / py_fnv /
+                    fold / conn.send_all -- every step in the interpreter.
+  --handler cython  the FASTEST / properly-optimized path: the zero-PyObject
+                    Cython handler (handler_cy) with the FNV INLINE -- capi recv,
+                    native FNV, fold, capi send. No Python def wrapper, no
+                    per-call boxing; the whole request path is native. This is
+                    runloom's state of the art (the line that competes with Go).
+  --handler cdef    handler_cdef: the same native work but on the tstate-free
+                    c_entry path (no Python frame at all) -- the extreme.
 
-The work is PURE inline arithmetic (no stdlib, no I/O, no blockpool-offloaded
-call), so it runs on the fiber's hub, never a worker thread -- required for a
-valid per-hub measurement.
+--work 0 is a pure echo in every mode. The work is pure inline arithmetic (no
+stdlib, no blockpool offload), so it runs on the fiber's hub -- a valid per-hub
+measurement. The compiled handlers (cython/cdef) set their work knob via
+set_work() before serve() spawns any fiber.
 """
 import argparse
 import os
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # find work_cy*.so
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # find handler_cy/cdef *.so
 
 import runloom
 import runloom_c
@@ -27,7 +31,8 @@ FNV_PRIME = 16777619        # 0x01000193
 
 
 def py_fnv(buf, n, passes):
-    """Pure-Python FNV-1a -- the interpreted twin of work_cy.fnv_work."""
+    """Pure-Python FNV-1a -- the interpreted twin of the inline FNV in the
+    compiled handlers (handler_cy / handler_cdef)."""
     h = FNV_OFF
     for _ in range(passes):
         for i in range(n):
@@ -64,21 +69,27 @@ def main():
     ap.add_argument("--host", default="10.99.0.1")
     ap.add_argument("--port", type=int, default=9000)
     ap.add_argument("--hubs", type=int, default=int((os.cpu_count() or 1) * 0.7))
-    ap.add_argument("--handler", default="py", choices=["py", "cython"])
+    ap.add_argument("--handler", default="py", choices=["py", "cython", "cdef"])
     ap.add_argument("--work", type=int, default=0, help="FNV passes over the payload (0 = echo)")
     ap.add_argument("--token", default="")
     args = ap.parse_args()
 
+    # cython / cdef: the work runs INLINE inside the compiled, zero-PyObject
+    # handler -- the whole request path is native (the Go-comparable line). py:
+    # the interpreted Python def. Compiled handlers take the work via set_work().
     if args.handler == "cython":
-        import work_cy
-        work_fn = lambda buf, n, passes: work_cy.fnv_work(buf, n, passes)
+        import handler_cy            # zero-PyObject Cython def, work inline
+        handler_cy.set_work(args.work)
+        srv_handler = handler_cy.handler
+    elif args.handler == "cdef":
+        import handler_cdef          # tstate-free c_entry, work inline
+        handler_cdef.set_work(args.work)
+        srv_handler = handler_cdef.handler
     else:
-        work_fn = py_fnv
-
-    handle = make_handle(work_fn, args.work)
+        srv_handler = make_handle(py_fnv, args.work)   # interpreted baseline
 
     def root():
-        port, listeners = runloom_c.serve(args.host, args.port, handle,
+        port, listeners = runloom_c.serve(args.host, args.port, srv_handler,
                                           acceptors=args.hubs, backlog=4096)
         print("LISTENING %d" % port, flush=True)
         runloom.sleep(float("inf"))

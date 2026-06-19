@@ -74,7 +74,9 @@ def build_runtimes():
                 "-gomaxprocs", str(GO), "-work", str(w), "-token", token]
 
     return [
-        dict(name="runloom_cython", label="Runloom (M:N) — Cython handler",
+        dict(name="runloom_cdef", label="Runloom (M:N) — cdef c_entry (fully native)",
+             kind="compiled", cores=HUBS, cpus=MANY, gil_off=True, env={}, make=rl("cdef")),
+        dict(name="runloom_cython", label="Runloom (M:N) — Cython handler (py def + compiled work)",
              kind="compiled", cores=HUBS, cpus=MANY, gil_off=True, env={}, make=rl("cython")),
         dict(name="go", label="Go net (GOMAXPROCS=%d)" % GO,
              kind="compiled", cores=GO, cpus=MANY, gil_off=True, env={}, make=gomk),
@@ -119,8 +121,13 @@ def run_point(rt, w, port):
 
 
 def main():
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--only", default="", help="comma list of runtime names to (re)run; merges into work_xrt.json")
+    a = ap.parse_args()
+    only = set(filter(None, a.only.split(",")))
     topo.setup()
-    runtimes = build_runtimes()
+    runtimes = [rt for rt in build_runtimes() if not only or rt["name"] in only]
     results = {rt["name"]: {} for rt in runtimes}
     port = 9600
     try:
@@ -139,12 +146,19 @@ def main():
     finally:
         topo.teardown()
 
-    meta = {"payload": PAYLOAD, "works": WORKS, "ladder": LADDER, "reps": REPS,
-            "runtimes": {rt["name"]: {"cores": rt["cores"], "label": rt["label"],
-                                      "kind": rt["kind"]} for rt in runtimes}}
+    rt_meta = {rt["name"]: {"cores": rt["cores"], "label": rt["label"], "kind": rt["kind"]}
+               for rt in runtimes}
     out = os.path.join(config.RESULTS_DIR, "work_xrt.json")
+    # merge-on-write: if --only re-ran a subset, keep the other runtimes' data
+    merged_results, merged_rt = dict(results), dict(rt_meta)
+    if os.path.exists(out):
+        old = json.load(open(out))
+        old_res = dict(old.get("results", {})); old_res.update(results); merged_results = old_res
+        old_rt = dict(old.get("meta", {}).get("runtimes", {})); old_rt.update(rt_meta); merged_rt = old_rt
+    meta = {"payload": PAYLOAD, "works": WORKS, "ladder": LADDER, "reps": REPS,
+            "runtimes": merged_rt}
     with open(out, "w") as f:
-        json.dump({"meta": meta, "results": results}, f, indent=2)
+        json.dump({"meta": meta, "results": merged_results}, f, indent=2)
 
     print("\n=== cross-runtime work curve (PER-CORE rps, 1 KiB payload) ===")
     head = "  %-8s" % "work" + "".join("%16s" % rt["name"] for rt in runtimes)
