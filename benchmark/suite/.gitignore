@@ -5,6 +5,8 @@ servers/handler_cy.html
 servers/handler_cy_hotloop_disasm.txt
 servers/srv_go
 clients/loadgen
+speed/speed_go
+memory/mem_go
 build/
 **/build/
 __pycache__/
