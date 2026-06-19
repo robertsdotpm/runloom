@@ -81,12 +81,19 @@ def main():
     results = {}
     port = 9300
     try:
+        IOU = {"RUNLOOM_IOURING_LOOP": "1"}
         cases = [
+            # io_uring vs epoll (8-byte all-C echo + 1 KiB Cython handler)
             ("cecho_epoll", "srv_runloom_cecho.py", [], {}, 8),
-            ("cecho_iouring", "srv_runloom_cecho.py", [], {"RUNLOOM_IOURING_LOOP": "1"}, 8),
+            ("cecho_iouring", "srv_runloom_cecho.py", [], IOU, 8),
             ("cython_epoll", "srv_runloom_cython.py", ["--optimize", "none"], {}, 1024),
-            ("cython_iouring_proactor", "srv_runloom_cython.py", ["--optimize", "none"],
-             {"RUNLOOM_IOURING_LOOP": "1"}, 1024),
+            ("cython_iouring_proactor", "srv_runloom_cython.py", ["--optimize", "none"], IOU, 1024),
+            # tstate bypass: a Python-fiber Cython handler vs a tstate-free cdef
+            # c_entry handler, at 8 bytes (op-bound -- where per-park tstate cost
+            # should matter) and 1 KiB (I/O-bound -- where it should wash out).
+            ("cython_iouring_8b", "srv_runloom_cython.py", ["--optimize", "none"], IOU, 8),
+            ("cdef_iouring_8b", "srv_runloom_cdef.py", [], IOU, 8),
+            ("cdef_iouring_1k", "srv_runloom_cdef.py", [], IOU, 1024),
         ]
         for name, script, extra, env, payload in cases:
             port += 1

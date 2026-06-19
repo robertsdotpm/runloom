@@ -13,11 +13,12 @@ Requests/second, raw and normalised to a single core (multi-core servers divided
 | gevent StreamServer (GIL, 1 core) | 1 | 19,881 | 19,881 | server |
 | Runloom io_uring + Cython + optimize(throughput) | 44 | 642,200 | 14,595 | client |
 | Runloom io_uring + Cython C handler | 44 | 631,954 | 14,363 | client |
-| Runloom C scaffold (py handler, C TCPConn) | 44 | 624,287 | 14,188 | client |
+| Runloom io_uring + Cython cdef handler (tstate-free c_entry) | 44 | 627,051 | 14,251 | client |
+| Runloom C scaffold (py handler, C TCPConn) | 44 | 617,554 | 14,035 | client |
 | Go net (GOMAXPROCS=44) | 44 | 602,706 | 13,698 | client |
 | Runloom sync wrappers (epoll, py handler) | 44 | 593,730 | 13,494 | server |
 | Runloom io_uring loop (py handler) | 44 | 589,112 | 13,389 | server |
-| Runloom C scaffold + Cython C handler (epoll) | 44 | 431,638 | 9,810 | server |
+| Runloom C scaffold + Cython C handler (epoll) | 44 | 423,458 | 9,624 | server |
 
 > The 16-core Go loadgen saturates before the fastest servers (`client`-bound rows); the report gives a server-ceiling estimate from server CPU utilisation.[^bench]
 

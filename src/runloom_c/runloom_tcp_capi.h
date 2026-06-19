@@ -36,13 +36,32 @@
 Py_ssize_t runloom_tcpconn_c_recv_into(PyObject *conn, void *buf, Py_ssize_t n);
 Py_ssize_t runloom_tcpconn_c_send_all(PyObject *conn, const void *buf, Py_ssize_t n);
 
+/* Raw-fd, tstate-free cooperative I/O -- the all-C echo's fast path, reusable by
+ * a custom c_entry handler (e.g. a Cython cdef function).  No PyObject, no
+ * TCPConn, no tstate.  Uses the Stage-2 io_uring proactor (loop_recv/send) when
+ * the loop backend + a hub ring are active, else the readiness recv/send +
+ * wait_fd path.  recv: bytes read (0 = EOF), -1 on error.  send_all: n, or -1.
+ * close: clear the netpoll arm + close (avoids the fd-reuse deadlock). */
+Py_ssize_t runloom_tcp_c_fd_recv(int fd, void *buf, Py_ssize_t n);
+Py_ssize_t runloom_tcp_c_fd_send_all(int fd, const void *buf, Py_ssize_t n);
+void       runloom_tcp_c_fd_close(int fd);
+
 /* Function-pointer table exported as the PyCapsule runloom_c.__tcp_capi__,
  * for consumers that prefer not to rely on RTLD_GLOBAL symbol resolution. */
 typedef struct {
     Py_ssize_t (*recv_into)(PyObject *conn, void *buf, Py_ssize_t n);
     Py_ssize_t (*send_all)(PyObject *conn, const void *buf, Py_ssize_t n);
+    Py_ssize_t (*fd_recv)(int fd, void *buf, Py_ssize_t n);
+    Py_ssize_t (*fd_send_all)(int fd, const void *buf, Py_ssize_t n);
+    void       (*fd_close)(int fd);
 } RunloomTCPCAPI;
 
 #define RUNLOOM_TCP_CAPI_CAPSULE_NAME "runloom_c.__tcp_capi__"
+
+/* serve(handler=<PyCapsule of this name>) custom C handler: a capsule wrapping a
+ * void(*)(void *arg) (arg = the accepted connection fd, cast through intptr_t)
+ * makes serve() spawn the handler as a tstate-free c_entry fiber per connection
+ * (runloom_mn_fiber_c) -- the all-C echo's fast path with custom logic. */
+#define RUNLOOM_C_HANDLER_CAPSULE_NAME "runloom_c.c_handler"
 
 #endif /* RUNLOOM_TCP_CAPI_H */

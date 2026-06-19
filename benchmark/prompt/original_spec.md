@@ -265,3 +265,24 @@ These refine the decisions above based on what the real runtime/box required:
     ceiling), despite being zero-PyObject and zero-alloc. It **vanishes under the
     io_uring proactor**, implicating the capi's epoll readiness path specifically.
     Flagged for a focused `perf`/flamegraph pass; not yet explained.
+
+## Follow-up built + investigated (2026-06-19, branch feat/cdef-handler → main)
+
+18. **`cdef`/`c_entry` handler tier BUILT — honest negative on throughput.**
+    `serve()` now accepts a `runloom_c.c_handler` PyCapsule (a `cdef` C function)
+    and spawns it via `runloom_mn_fiber_c` → the tstate-free `g->c_entry` path
+    (raw-fd capi `fd_recv`/`fd_send_all`/`fd_close` + `module_io.c.inc` dispatch +
+    `handler_cdef.pyx` + tier `srv_runloom_cdef.py`). Measured: the tstate-bypass
+    buys ~nothing — `cdef` vs `cython` ceiling +0.25% at 8 B, +2.3% at 1 KiB (both
+    noise). The default per-hub **snapshot** tstate is already cheap (snaps a few
+    ints, not a `PyThreadState`), so there's nothing to bypass. Use `handler_cy`
+    (Cython `def`) on the proactor; the `cdef` path's value is per-fiber memory.
+
+19. **Anomaly #17 is REPRODUCIBLE, cause OPEN** (a premature "resolved" retracted).
+    Fresh back-to-back netns re-measure: py `runloom_c` 617,554 client-bound (63%
+    CPU); `runloom_c_cython` 423,458 **server-bound** (86% CPU) — ~2× the server
+    CPU per request, reproducibly, for a NO-WORK echo. My controlled-loopback A/B
+    (py≈cython≈488k) was FLAWED — loadgen-limited, never saturated either server,
+    `lo` ≠ `veth` — so "equal" and "buffer ruled out" are retracted. Since echo has
+    no handler compute, the 2× must be in the capi/Cython/`veth` plumbing. Next:
+    `perf` the netns servers AT SATURATION. Full record: `../IOURING_TSTATE_FINDINGS.md`.

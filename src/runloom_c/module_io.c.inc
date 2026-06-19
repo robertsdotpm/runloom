@@ -21,7 +21,10 @@
 #  include <errno.h>
 #  include <stdint.h>
 #  include <fcntl.h>      /* non-Linux accept(): O_NONBLOCK via fcntl */
+#  include <stdlib.h>     /* malloc/free for the custom-handler acceptor arg */
 #endif
+
+#include "runloom_tcp_capi.h"   /* RUNLOOM_C_HANDLER_CAPSULE_NAME + raw-fd capi */
 
 /* Lazily-resolved helpers (set on first serve()). */
 static PyObject *runloom_io_partial      = NULL;   /* functools.partial */
@@ -248,6 +251,47 @@ static void runloom_io_c_acceptor(void *arg)
     }
 }
 
+/* ---- Custom C handler path: serve(handler=<runloom_c.c_handler PyCapsule>) ----
+ * Identical accept loop to runloom_io_c_acceptor, but spawns a USER C function
+ * per connection instead of the built-in echo -- still a tstate-free c_entry
+ * fiber (runloom_mn_fiber_c), so a Cython cdef handler gets the all-C echo's fast
+ * path (no Python frame, no per-park tstate save/restore) with custom logic.
+ * arg = the malloc'd {listen fd, handler}, freed when the listener closes. */
+typedef struct {
+    int lfd;
+    void (*handler)(void *arg);   /* arg = accepted fd (via intptr_t) */
+} runloom_io_c_handler_arg_t;
+
+static void runloom_io_c_handler_acceptor(void *arg)
+{
+    runloom_io_c_handler_arg_t *a = (runloom_io_c_handler_arg_t *)arg;
+    int lfd = a->lfd;
+    void (*handler)(void *) = a->handler;
+    for (;;) {
+#if defined(__linux__)
+        int cfd = accept4(lfd, NULL, NULL, SOCK_NONBLOCK);
+#else
+        int cfd = accept(lfd, NULL, NULL);
+#endif
+        RUNLOOM_IO_NOTE(RUNLOOM_IO_ACCEPT,
+                        runloom_io_classify(RUNLOOM_IO_ACCEPT, (long long)cfd, errno));
+        if (cfd < 0) {
+            if (errno == EINTR || errno == ECONNABORTED) continue;
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                if (runloom_netpoll_wait_fd(lfd, RUNLOOM_NETPOLL_READ, -1LL) < 0) { free(a); return; }
+                continue;
+            }
+            free(a); return;                     /* listener closed / hard error */
+        }
+#if !defined(__linux__)
+        { int fl = fcntl(cfd, F_GETFL, 0); if (fl >= 0) (void)fcntl(cfd, F_SETFL, fl | O_NONBLOCK); }
+#endif
+        { int on = 1; (void)setsockopt(cfd, IPPROTO_TCP, TCP_NODELAY, &on, sizeof(on)); }
+        if (runloom_mn_fiber_c(handler, (void *)(intptr_t)cfd) < 0)
+            close(cfd);
+    }
+}
+
 /* Bound listen fd of a TCPConn listener via fileno(). */
 static int runloom_io_listener_fd(PyObject *listener)
 {
@@ -281,9 +325,14 @@ static PyObject *m_serve(PyObject *self, PyObject *args, PyObject *kw)
                                      &host, &port, &handler,
                                      &acceptors, &backlog))
         return NULL;
-    if (handler != Py_None && !PyCallable_Check(handler)) {
+    if (handler != Py_None && !PyCallable_Check(handler)
+#if !defined(RUNLOOM_OS_WINDOWS)
+        && !PyCapsule_IsValid(handler, RUNLOOM_C_HANDLER_CAPSULE_NAME)
+#endif
+        ) {
         PyErr_SetString(PyExc_TypeError,
-                        "serve(): handler must be callable, or None for the built-in all-C echo");
+                        "serve(): handler must be callable, None for the built-in all-C "
+                        "echo, or a runloom_c.c_handler PyCapsule (custom C handler)");
         return NULL;
     }
     /* serve() hosts each accept loop on an M:N hub (runloom_mn_fiber / mn_go_c).
@@ -319,6 +368,26 @@ static PyObject *m_serve(PyObject *self, PyObject *args, PyObject *kw)
             Py_DECREF(ln); Py_DECREF(listeners); return NULL;
         }
 #if !defined(RUNLOOM_OS_WINDOWS)
+        if (PyCapsule_IsValid(handler, RUNLOOM_C_HANDLER_CAPSULE_NAME)) {
+            /* Custom C handler: spawn the user's C function per connection as a
+             * tstate-free c_entry fiber (the all-C echo's fast path + custom
+             * logic).  The listener stays alive in `listeners`; drop the loop ref. */
+            void (*h)(void *) = (void (*)(void *))PyCapsule_GetPointer(
+                handler, RUNLOOM_C_HANDLER_CAPSULE_NAME);
+            int lfd = runloom_io_listener_fd(ln);
+            runloom_io_c_handler_arg_t *ha;
+            Py_DECREF(ln);
+            if (lfd < 0 || h == NULL) { Py_DECREF(listeners); return NULL; }
+            ha = (runloom_io_c_handler_arg_t *)malloc(sizeof(*ha));
+            if (ha == NULL) { Py_DECREF(listeners); return PyErr_NoMemory(); }
+            ha->lfd = lfd; ha->handler = h;
+            if (runloom_mn_fiber_c(runloom_io_c_handler_acceptor, ha) < 0) {
+                free(ha); Py_DECREF(listeners);
+                PyErr_SetString(PyExc_RuntimeError, "serve(): mn_fiber_c failed");
+                return NULL;
+            }
+            continue;
+        }
         if (handler == Py_None) {
             /* All-C path: tstate-free C accept loop (mn_go_c) on the raw listen
              * fd; it spawns a C echo fiber per connection.  The listener

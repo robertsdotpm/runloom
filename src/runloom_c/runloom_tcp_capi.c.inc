@@ -148,10 +148,124 @@ Py_ssize_t runloom_tcpconn_c_send_all(PyObject *conn, const void *buf, Py_ssize_
     return sent;
 }
 
+/* ============================================================================
+ * Raw-fd, tstate-free I/O for c_entry handlers (no PyObject, no TCPConn, no
+ * tstate).  Mirrors the all-C echo (module_io.c.inc runloom_io_c_echo): Stage-2
+ * io_uring proactor when the loop backend + a hub ring are live, else readiness
+ * recv/send + runloom_netpoll_wait_fd.  A Cython cdef handler cimports these (via
+ * the __tcp_capi__ capsule) and runs the request loop with zero Python state.
+ * ============================================================================ */
+Py_ssize_t runloom_tcp_c_fd_recv(int fd, void *buf, Py_ssize_t n)
+{
+    if (n <= 0) return 0;
+#if defined(__linux__)
+    if (runloom_iouring_loop_enabled()) {
+        runloom_iouring_ring_t *ring = runloom_mn_current_iouring_ring();
+        if (ring != NULL) {
+            runloom_iouring_ssize_t r =
+                runloom_iouring_loop_recv(ring, fd, buf, (size_t)n, 0);
+            return (r < 0) ? -1 : (Py_ssize_t)r;
+        }
+    }
+#endif
+    for (;;) {
+#if defined(RUNLOOM_OS_WINDOWS)
+        long long r = (long long)recv((SOCKET)fd, (char *)buf, (int)n, 0);
+#else
+        long long r = (long long)recv(fd, buf, (size_t)n, 0);
+#endif
+        RUNLOOM_IO_SWITCH(runloom_io_classify(RUNLOOM_IO_RECV, r, runloom_sock_errno())) {
+        case RUNLOOM_IO_READY:
+        case RUNLOOM_IO_EOF:
+            return (Py_ssize_t)r;
+        case RUNLOOM_IO_WOULDBLOCK_R:
+        case RUNLOOM_IO_INTR:
+            break;
+        case RUNLOOM_IO_ERROR:
+            return -1;
+        case RUNLOOM_IO_PROGRESS:
+        case RUNLOOM_IO_WOULDBLOCK_W:
+        case RUNLOOM_IO_RETRY:
+        case RUNLOOM_IO_EVENT_COUNT:
+            runloom_fsm_violation("runloom_tcp_capi.fd_recv",
+                                  RUNLOOM_IO_RECV, -1, __FILE__, __LINE__);
+        } RUNLOOM_IO_SWITCH_END
+        if (runloom_netpoll_wait_fd(fd, RUNLOOM_NETPOLL_READ, -1LL) < 0) {
+            if (!errno) errno = ECANCELED;
+            return -1;
+        }
+    }
+}
+
+Py_ssize_t runloom_tcp_c_fd_send_all(int fd, const void *buf, Py_ssize_t n)
+{
+    Py_ssize_t sent = 0;
+    if (n <= 0) return 0;
+#if defined(__linux__)
+    if (runloom_iouring_loop_enabled()) {
+        runloom_iouring_ring_t *ring = runloom_mn_current_iouring_ring();
+        if (ring != NULL) {
+            while (sent < n) {
+                runloom_iouring_ssize_t r = runloom_iouring_loop_send(
+                    ring, fd, (const char *)buf + sent, (size_t)(n - sent), 0);
+                if (r < 0) return -1;
+                sent += (Py_ssize_t)r;
+                if (r == 0) break;
+            }
+            return sent;
+        }
+    }
+#endif
+    while (sent < n) {
+#if defined(RUNLOOM_OS_WINDOWS)
+        long long r = (long long)send((SOCKET)fd, (const char *)buf + sent,
+                                      (int)(n - sent), 0);
+#else
+        long long r = (long long)send(fd, (const char *)buf + sent,
+                                      (size_t)(n - sent), 0);
+#endif
+        RUNLOOM_IO_SWITCH(runloom_io_classify(RUNLOOM_IO_SEND, r, runloom_sock_errno())) {
+        case RUNLOOM_IO_PROGRESS:
+            sent += (Py_ssize_t)r;
+            continue;
+        case RUNLOOM_IO_WOULDBLOCK_W:
+        case RUNLOOM_IO_INTR:
+            break;
+        case RUNLOOM_IO_ERROR:
+            return -1;
+        case RUNLOOM_IO_READY:
+        case RUNLOOM_IO_EOF:
+        case RUNLOOM_IO_WOULDBLOCK_R:
+        case RUNLOOM_IO_RETRY:
+        case RUNLOOM_IO_EVENT_COUNT:
+            runloom_fsm_violation("runloom_tcp_capi.fd_send_all",
+                                  RUNLOOM_IO_SEND, -1, __FILE__, __LINE__);
+        } RUNLOOM_IO_SWITCH_END
+        if (runloom_netpoll_wait_fd(fd, RUNLOOM_NETPOLL_WRITE, -1LL) < 0) {
+            if (!errno) errno = ECANCELED;
+            return -1;
+        }
+    }
+    return sent;
+}
+
+void runloom_tcp_c_fd_close(int fd)
+{
+    runloom_netpoll_release_if_idle(fd);
+#if defined(RUNLOOM_OS_WINDOWS)
+    closesocket((SOCKET)fd);
+#else
+    close(fd);
+#endif
+}
+
 /* The exported pointer table for the PyCapsule fallback. */
 static const RunloomTCPCAPI runloom_tcp_capi_table = {
     runloom_tcpconn_c_recv_into,
     runloom_tcpconn_c_send_all,
+    runloom_tcp_c_fd_recv,
+    runloom_tcp_c_fd_send_all,
+    runloom_tcp_c_fd_close,
 };
 
 /* Called once from module init (module_init.c.inc) to attach the capsule. */

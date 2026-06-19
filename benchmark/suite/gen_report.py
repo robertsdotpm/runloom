@@ -43,18 +43,23 @@ def fmt(x, nd=0):
 
 
 # ---------------------------------------------------------------- table helper
-def table(tid, headers, rows, note=""):
-    """headers: list of (label, numeric?bool). rows: list of list of (display, sortvalue)."""
+def table(tid, headers, rows, note="", mark_best=True):
+    """headers: list of (label, numeric?bool). rows: list of list of (display,
+    sortvalue), ALREADY sorted best-first. With mark_best, row 0 is tagged as the
+    winner (a trophy + a highlighted row) so the best config in each bench is
+    visible at a glance; the tag rides the row if the reader re-sorts."""
     out = ['<table id="%s" class="sortable"><thead><tr>' % tid]
     for i, (lbl, num) in enumerate(headers):
         out.append('<th onclick="sortT(\'%s\',%d,%s)">%s<span class="ar"></span></th>'
                     % (tid, i, "true" if num else "false", esc(lbl)))
     out.append("</tr></thead><tbody>")
-    for r in rows:
-        out.append("<tr>")
-        for disp, sortv in r:
+    for ri, r in enumerate(rows):
+        best = mark_best and ri == 0
+        out.append('<tr class="best">' if best else "<tr>")
+        for ci, (disp, sortv) in enumerate(r):
             sv = "" if sortv is None else ' data-v="%s"' % sortv
-            out.append("<td%s>%s</td>" % (sv, disp))
+            cell = ('<span class="trophy">&#127942;</span>' + disp) if (best and ci == 0) else disp
+            out.append("<td%s>%s</td>" % (sv, cell))
         out.append("</tr>")
     out.append("</tbody></table>")
     if note:
@@ -159,7 +164,7 @@ def sec_perf(perf):
             (esc(mt.get("bottleneck_at_peak", "")), mt.get("bottleneck_at_peak", "")),
             (fmt(ceil), ceil or 0),
         ])
-    rows.sort(key=lambda r: -(r[4][1] or 0))
+    rows.sort(key=lambda r: -(r[3][1] or 0))   # best = highest absolute req/s
     hdr = [("Server", False), ("Interp", False), ("Cores", True), ("Peak req/s", True),
            ("req/s / core", True), ("Conns@peak", True), ("p99 &micro;s", True),
            ("Bottleneck", False), ("Server-ceiling est.", True)]
@@ -223,7 +228,7 @@ def sec_perf(perf):
               ("cli CPU", True), ("p99 &micro;s", True), ("err", True)]
         curves.append('<details class="code"><summary>%s &mdash; %d rungs (peak %s req/s)</summary>%s</details>'
                       % (esc(name), len(curve), fmt(mt.get("peak", {}).get("rps_median")),
-                         table("c_%s" % name, ch, crows)))
+                         table("c_%s" % name, ch, crows, mark_best=False)))
     return ('<h2 id="perf">Performance &mdash; requests / second</h2>%s%s'
             '<h3>Performance &mdash; bandwidth (1.5 MB streaming)</h3>%s'
             % (reqps_tbl, "\n".join(curves), bw_tbl))
@@ -244,7 +249,7 @@ def sec_speed(speed):
         rows.append([(esc(rt), rt), (fmt(cores), cores), (fmt(d["rate_per_s"]), d["rate_per_s"]),
                      (fmt(d["seconds"] * 1e6 / d["n"], 2), d["seconds"] * 1e6 / d["n"]),
                      (fmt(d["rate_per_s"] / cores), d["rate_per_s"] / cores)])
-    rows.sort(key=lambda r: -(r[4][1] or 0))
+    rows.sort(key=lambda r: -(r[2][1] or 0))   # best = highest absolute spawn rate
     out.append("<h3>Spawn 1M fibers / goroutines / coroutines</h3>")
     out.append(table("t_spawn", [("Runtime", False), ("Cores", True), ("spawn/s", True),
                                  ("&micro;s/task", True), ("spawn/s / core", True)], rows,
@@ -273,7 +278,7 @@ def sec_speed(speed):
         cores = d.get("cores", 1)
         rows.append([(esc(rt), rt), (fmt(cores), cores), (fmt(d["rps"]), d["rps"]),
                      (fmt(d["rps"] / cores), d["rps"] / cores)])
-    rows.sort(key=lambda r: -(r[3][1] or 0))
+    rows.sort(key=lambda r: -(r[2][1] or 0))   # best = highest absolute req/s
     out.append("<h3>HTTP req/s (client vs a Go httpd)</h3>")
     out.append(table("t_http", [("Runtime", False), ("Cores", True), ("req/s", True),
                                 ("req/s / core", True)], rows,
@@ -320,6 +325,29 @@ def sec_iouring(iou):
         return ""
     hdr = [("Workload", False), ("epoll peak", True), ("io_uring peak", True),
            ("epoll ceiling", True), ("io_uring ceiling", True), ("uring/epoll ceiling", True)]
+    # tstate-bypass comparison: Python-fiber Cython def vs tstate-free cdef c_entry
+    trows = []
+    for cy, cd, label in [("cython_iouring_8b", "cdef_iouring_8b", "8-byte echo (op-bound)"),
+                          ("cython_iouring_proactor", "cdef_iouring_1k", "1 KiB echo (I/O-bound)")]:
+        rcy, rcd = iou.get(cy, {}), iou.get(cd, {})
+        ccy = rcy.get("server_ceiling_est") or rcy.get("peak", {}).get("rps_median")
+        ccd = rcd.get("server_ceiling_est") or rcd.get("peak", {}).get("rps_median")
+        if not ccy or not ccd:
+            continue
+        trows.append([(esc(label), label), (fmt(ccy), ccy), (fmt(ccd), ccd),
+                      ("%+.1f%%" % ((ccd / ccy - 1) * 100), ccd / ccy)])
+    tstate_tbl = ""
+    if trows:
+        tstate_tbl = ('<h3>Thread-state bypass: Cython <code>def</code> (tstate) vs '
+                      '<code>cdef</code> c_entry (tstate-free)</h3>'
+                      + table("t_tstate", [("Workload", False), ("Cython def ceiling", True),
+                              ("cdef c_entry ceiling", True), ("cdef vs def", True)], trows,
+                              mark_best=False, note=
+                              "Both on the io_uring proactor. The tstate-free cdef handler is within noise "
+                              "of the Python-fiber Cython handler at BOTH payloads &mdash; the default "
+                              "per-hub snapshot tstate is already cheap (a few ints, not a PyThreadState), "
+                              "so bypassing it buys ~nothing on throughput (the c_entry path's value is "
+                              "per-fiber memory). See IOURING_TSTATE_FINDINGS.md."))
     return ('<h2 id="iouring">io_uring loop backend vs epoll</h2>'
             '<p>Driven through the Stage-2 <b>proactor</b> (<code>loop_recv</code>), '
             'io_uring is a major win for a real handler &mdash; <b>+2.17&times; server '
@@ -328,11 +356,12 @@ def sec_iouring(iou):
             'readiness path (recv + an epoll&rarr;ring bridge). Full reasoning, the '
             '"+20%" reconciliation, and the thread-state cost analysis are in '
             '<a href="IOURING_TSTATE_FINDINGS.md">IOURING_TSTATE_FINDINGS.md</a>.</p>'
-            + table("t_iou", hdr, rows,
+            + table("t_iou", hdr, rows, mark_best=False, note=
                     "Peaks are often client-bound (the 16-core loadgen), so the "
                     "server-ceiling columns (peak / server-CPU-util) are the fairer "
                     "comparison. At 8 bytes the gain is small because the all-C epoll path "
-                    "is already near-optimal; at 1 KiB the proactor cuts server CPU 85%&rarr;55%."))
+                    "is already near-optimal; at 1 KiB the proactor cuts server CPU 85%&rarr;55%.")
+            + tstate_tbl)
 
 
 def sec_mem(mem):
@@ -432,13 +461,16 @@ th:first-child,td:first-child{text-align:left}
 thead th{background:#1d242e;cursor:pointer;user-select:none;position:relative;white-space:nowrap}
 thead th:hover{color:var(--acc)}.ar{font-size:10px;color:var(--mut);margin-left:4px}
 tbody tr:hover{background:#1d242e}.sub{color:var(--mut);font-size:11px}
+tr.best{background:#16301f}tr.best td{font-weight:600;color:#eafaf0}tr.best:hover{background:#1b3a26}
+.trophy{margin-right:6px;filter:saturate(1.3)}
 table.kv th{text-align:left;width:210px;color:var(--mut);font-weight:600;cursor:default}
 table.kv th:hover{color:var(--mut)}
 .note{color:var(--mut);font-size:12px;margin:4px 0 18px}
 .warn{color:var(--warn);font-size:13px}
 details.code{margin:6px 0;background:var(--panel);border:1px solid var(--line);border-radius:4px}
-details.code summary{cursor:pointer;padding:8px 12px;font-weight:600}
-details.code .path{color:var(--mut);font-weight:400;font-size:11px;margin-left:8px}
+details.code summary{cursor:pointer;padding:8px 12px;font-weight:600;display:flex;justify-content:space-between;align-items:baseline;gap:16px}
+details.code summary::-webkit-details-marker{flex:0 0 auto}
+details.code .path{color:var(--mut);font-weight:400;font-size:11px;white-space:nowrap;flex:0 0 auto}
 pre{margin:0;padding:12px;overflow:auto;max-height:520px;background:#0c1116;font:12px/1.45 ui-monospace,Menlo,monospace}
 code{color:#cbd5e1}
 """
