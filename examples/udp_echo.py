@@ -2,8 +2,8 @@
 
 runloom.sync gives you blocking-style sockets without monkey-patching the
 stdlib and without async/await: runloom.sync.udp_endpoint returns a
-cooperative Socket whose recvfrom/sendto/recv/send park the goroutine
-on netpoll.  Here a server and a client run as two goroutines in one
+cooperative Socket whose recvfrom/sendto/recv/send park the fiber
+on netpoll.  Here a server and a client run as two fibers in one
 process and exchange a few datagrams over loopback.
 
 Run:
@@ -14,7 +14,7 @@ import os
 
 import runloom
 
-# Free-threaded build: fan goroutines across all cores (M:N scheduler).
+# Free-threaded build: fan fibers across all cores (M:N scheduler).
 HUBS = os.cpu_count() or 4
 
 ROUNDS = 3
@@ -38,8 +38,8 @@ def client(ready):
 
 def main():
     ready = runloom.Chan(1)
-    runloom.go(server, ready)
-    runloom.go(client, ready)
+    runloom.fiber(server, ready)
+    runloom.fiber(client, ready)
 
 if __name__ == "__main__":
     runloom.run(HUBS, main)

@@ -1,7 +1,7 @@
 """Round-2 complementary coverage suite for src/runloom_c/coro.c.
 
 tests/test_cov95_coro.py (batch 1) already drives the env-gated MODES
-(arena carve, depot static-cap override, MADV mode resolve, go_n fresh
+(arena carve, depot static-cap override, MADV mode resolve, fiber_n fresh
 deferred, the invariant sanitizer, the prewarm thread-spawn-failure paths).
 This file is COMPLEMENTARY: it targets the lines batch 1's workloads do NOT
 reach because they UNDER-SPAWN.
@@ -158,7 +158,7 @@ def _wave():
         release.wait()               # HOLD the coro alive: all N live at once
         done.done()
     for i in range(N):
-        rc.go(lambda i=i: body(i))   # M:1 single-thread scheduler -> ONE coro pool
+        rc.fiber(lambda i=i: body(i))   # M:1 single-thread scheduler -> ONE coro pool
     up.wait()                        # every fiber has started + is parked
     release.done()                   # release them all -> N coros finish on ONE pool
     done.wait()
@@ -321,7 +321,7 @@ def test_default_mode_pool_overflow_baseline_in_process():
             done.done()
 
         for i in range(N):
-            rc.go(lambda i=i: body(i))
+            rc.fiber(lambda i=i: body(i))
         up.wait()
         release.done()
         done.wait()

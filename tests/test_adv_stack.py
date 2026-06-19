@@ -2,8 +2,8 @@
 and the MachineCode escape hatch.
 
 The 297-SIGSEGV stdlib corpus bug was a single class: a deep C-call burst
-overflowing a small goroutine stack.  Here we:
-  * drive a goroutine off the low end of a small C stack and assert the crash
+overflowing a small fiber stack.  Here we:
+  * drive a fiber off the low end of a small C stack and assert the crash
     handler turns the fault into a CLEAN, classified guard-page diagnostic
     (not silent corruption) -- run in a subprocess since it ends the process;
   * hammer the blocking-offload pool: a parked offload must keep the scheduler
@@ -30,7 +30,7 @@ def _run_single(fn):
     box = {}
     def main():
         box["r"] = fn()
-    rc.go(main)
+    rc.fiber(main)
     rc.run()
     return box.get("r")
 
@@ -52,7 +52,7 @@ import runloom_c as rc
 rc.install_crash_handler("backtrace")
 def f():
     rc._crash_selftest_overflow()      # deliberate C-stack overflow
-rc.go(f, 131072)                       # small 128 KiB stack
+rc.fiber(f, 131072)                       # small 128 KiB stack
 rc.run()
 print("UNREACHABLE")
 '''
@@ -81,7 +81,7 @@ def test_roomy_stack_survives_what_small_stack_cannot():
     def main():
         out["r"] = recurse(800)        # deep-ish Python recursion
     with hang_guard(15, "roomy stack recursion"):
-        rc.go(main, 4 << 20)           # 4 MiB
+        rc.fiber(main, 4 << 20)           # 4 MiB
         rc.run()
     assert out["r"] == 800
 
@@ -100,7 +100,7 @@ def test_stack_autosize_toggle_and_run():
         assert rc.stack_autosize_enabled() in (True, False)
         out = []
         for _ in range(50):
-            rc.go(lambda: out.append(1))
+            rc.fiber(lambda: out.append(1))
         with hang_guard(15, "autosize run"):
             rc.run()
         assert len(out) == 50
@@ -128,11 +128,11 @@ def test_blocking_offload_overlaps_with_scheduler():
             for i in range(5):
                 order.append(("burn", i))
                 rc.sched_yield()
-        rc.go(offloader)
-        rc.go(burner)
+        rc.fiber(offloader)
+        rc.fiber(burner)
     with hang_guard(20, "blocking overlap"):
         with assert_faster_than(0.5, "offload overlap"):
-            rc.go(main)
+            rc.fiber(main)
             rc.run()
     # the burner must have run WHILE the offload was sleeping
     burns_before_done = order.index(("offload-done", 99))
@@ -173,10 +173,10 @@ def test_many_concurrent_offloads_complete():
             finally:
                 wg.done()
         for i in range(N):
-            rc.go(lambda i=i: worker(i))
+            rc.fiber(lambda i=i: worker(i))
         wg.wait()
     with hang_guard(40, "many offloads"):
-        rc.go(main)
+        rc.fiber(main)
         rc.run()
     assert sum(results) == N, "only %d/%d offloads completed correctly" % (sum(results), N)
 

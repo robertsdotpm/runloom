@@ -33,7 +33,7 @@ def _drive(fn):
         except BaseException as e:  # noqa: BLE001
             box[1] = e
 
-    runloom_c.go(runner)
+    runloom_c.fiber(runner)
     runloom_c.run()
     if box[1] is not None:
         raise box[1]
@@ -48,7 +48,7 @@ def test_event_timeout_then_wake():
         dt = time.monotonic() - t0
         assert r is False and 0.12 < dt < 0.6, (r, dt)
         out = []
-        runloom.go(lambda: out.append(ev.wait(2.0)))
+        runloom.fiber(lambda: out.append(ev.wait(2.0)))
         runloom.sleep(0.03)
         ev.set()
         runloom.sleep(0.05)
@@ -70,7 +70,7 @@ def test_condition_timeout_then_wake():
         def w():
             with cond:
                 out.append(cond.wait(2.0))
-        runloom.go(w)
+        runloom.fiber(w)
         runloom.sleep(0.03)
         with cond:
             cond.notify()
@@ -88,7 +88,7 @@ def test_semaphore_timeout_then_wake():
         dt = time.monotonic() - t0
         assert r is False and 0.12 < dt < 0.6, (r, dt)
         out = []
-        runloom.go(lambda: out.append(sem.acquire(timeout=2.0)))
+        runloom.fiber(lambda: out.append(sem.acquire(timeout=2.0)))
         runloom.sleep(0.03)
         sem.release()
         runloom.sleep(0.05)
@@ -105,7 +105,7 @@ def test_timed_waits_spawn_no_waker_fibers():
         base = runloom_c.live_fibers()
         n = 200
         for _ in range(n):
-            runloom.go(lambda: ev.wait(5.0))
+            runloom.fiber(lambda: ev.wait(5.0))
         runloom.sleep(0.2)            # all parked on their timed wait
         peak = runloom_c.live_fibers()
         ev.set()

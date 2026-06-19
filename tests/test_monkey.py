@@ -29,7 +29,7 @@ def _drive(fn):
             box[0] = fn()
         except BaseException as e:
             box[1] = e
-    runloom_c.go(runner)
+    runloom_c.fiber(runner)
     runloom_c.run()
     if box[1] is not None:
         raise box[1]
@@ -66,8 +66,8 @@ class TestTimeSleep(unittest.TestCase):
             log.append((name, "start"))
             time.sleep(dur)            # patched -> runloom.sleep
             log.append((name, "end"))
-        runloom_c.go(lambda: sleeper("A", 0.05))
-        runloom_c.go(lambda: sleeper("B", 0.05))
+        runloom_c.fiber(lambda: sleeper("A", 0.05))
+        runloom_c.fiber(lambda: sleeper("B", 0.05))
         t0 = time.monotonic()
         runloom_c.run()
         elapsed = time.monotonic() - t0
@@ -87,9 +87,9 @@ class TestThreadingLock(unittest.TestCase):
                 log.append((name, "in"))
                 runloom.sleep(0.01)
                 log.append((name, "out"))
-        runloom_c.go(lambda: worker("A"))
-        runloom_c.go(lambda: worker("B"))
-        runloom_c.go(lambda: worker("C"))
+        runloom_c.fiber(lambda: worker("A"))
+        runloom_c.fiber(lambda: worker("B"))
+        runloom_c.fiber(lambda: worker("C"))
         runloom_c.run()
         # Within each pair (in, out) must be adjacent -- no interleaving.
         names = [n for n, _ in log]
@@ -112,9 +112,9 @@ class TestThreadingEvent(unittest.TestCase):
             runloom.sleep(0.02)
             log.append("set")
             ev.set()
-        runloom_c.go(waiter)
-        runloom_c.go(waiter)
-        runloom_c.go(setter)
+        runloom_c.fiber(waiter)
+        runloom_c.fiber(waiter)
+        runloom_c.fiber(setter)
         runloom_c.run()
         self.assertEqual(log.count("wait-start"), 2)
         self.assertEqual(log.count("wait-end"), 2)
@@ -133,8 +133,8 @@ class TestQueue(unittest.TestCase):
         def consumer():
             for _ in range(5):
                 consumed.append(q.get())
-        runloom_c.go(producer)
-        runloom_c.go(consumer)
+        runloom_c.fiber(producer)
+        runloom_c.fiber(consumer)
         runloom_c.run()
         self.assertEqual(consumed, [0, 1, 2, 3, 4])
 
@@ -154,8 +154,8 @@ class TestOsReadWrite(unittest.TestCase):
         def reader():
             got[0] = os.read(r, 1024)
             os.close(r)
-        runloom_c.go(reader)
-        runloom_c.go(writer)
+        runloom_c.fiber(reader)
+        runloom_c.fiber(writer)
         runloom_c.run()
         self.assertEqual(got[0], b"hello")
 
@@ -176,8 +176,8 @@ class TestSelect(unittest.TestCase):
             rr, _, _ = select.select([r], [], [], 1.0)
             ready_fd[0] = rr
             os.read(r, 1)
-        runloom_c.go(reader)
-        runloom_c.go(writer)
+        runloom_c.fiber(reader)
+        runloom_c.fiber(writer)
         runloom_c.run()
         os.close(r); os.close(w)
         self.assertEqual(ready_fd[0], [r])
@@ -189,7 +189,7 @@ class TestSelect(unittest.TestCase):
         result = [None]
         def waiter():
             result[0] = select.select([r], [], [], 0.05)
-        runloom_c.go(waiter)
+        runloom_c.fiber(waiter)
         t0 = time.monotonic()
         runloom_c.run()
         elapsed = time.monotonic() - t0
@@ -205,7 +205,7 @@ class TestDNS(unittest.TestCase):
         def looker():
             result[0] = socket.getaddrinfo("localhost", 80,
                                            type=socket.SOCK_STREAM)
-        runloom_c.go(looker)
+        runloom_c.fiber(looker)
         runloom_c.run()
         self.assertIsNotNone(result[0])
         self.assertTrue(len(result[0]) > 0)
@@ -220,7 +220,7 @@ class TestDNS(unittest.TestCase):
             result[0] = socket.getaddrinfo("8.8.8.8", 53,
                                            family=socket.AF_INET,
                                            type=socket.SOCK_DGRAM)
-        runloom_c.go(looker)
+        runloom_c.fiber(looker)
         runloom_c.run()
         self.assertEqual(result[0][0][4][0], "8.8.8.8")
 
@@ -239,8 +239,8 @@ class TestDNS(unittest.TestCase):
             except Exception:
                 pass
             times.append(time.monotonic() - t0)
-        runloom_c.go(lambda: looker("localhost"))
-        runloom_c.go(lambda: looker("localhost"))
+        runloom_c.fiber(lambda: looker("localhost"))
+        runloom_c.fiber(lambda: looker("localhost"))
         runloom_c.run()
         # Both should be sub-second (they hit /etc/hosts, no UDP).
         self.assertTrue(all(t < 0.5 for t in times), times)
@@ -258,7 +258,7 @@ class TestFile(unittest.TestCase):
             def reader():
                 with open(path, "r") as f:
                     got[0] = f.read()
-            runloom_c.go(reader)
+            runloom_c.fiber(reader)
             runloom_c.run()
             self.assertEqual(got[0], "hello runloom")
         finally:
@@ -279,8 +279,8 @@ class TestFile(unittest.TestCase):
                 with open(path, "rb") as f:
                     f.read()
                 log.append((name, "done"))
-            runloom_c.go(lambda: reader("A"))
-            runloom_c.go(lambda: reader("B"))
+            runloom_c.fiber(lambda: reader("A"))
+            runloom_c.fiber(lambda: reader("B"))
             runloom_c.run()
             starts = [e for e in log if e[1] == "start"]
             self.assertEqual(len(starts), 2)
@@ -301,7 +301,7 @@ class TestSyscalls(unittest.TestCase):
             def worker():
                 got[0] = sorted(os.listdir(tmpdir))
                 got[1] = os.stat(os.path.join(tmpdir, "a.txt")).st_size
-            runloom_c.go(worker)
+            runloom_c.fiber(worker)
             runloom_c.run()
             self.assertEqual(got[0], ["a.txt", "b.txt"])
             self.assertEqual(got[1], 5)
@@ -341,8 +341,8 @@ class TestSubprocessWait(unittest.TestCase):
             rc = spawn().wait()
             log.append((name, "done", rc))
         t0 = time.monotonic()
-        runloom_c.go(lambda: waiter("A"))
-        runloom_c.go(lambda: waiter("B"))
+        runloom_c.fiber(lambda: waiter("A"))
+        runloom_c.fiber(lambda: waiter("B"))
         runloom_c.run()
         elapsed = time.monotonic() - t0
 
@@ -392,11 +392,11 @@ class TestParkerSocketpair(unittest.TestCase):
                 def signaller():
                     sequence.append("signal")
                     p.unpark()
-                runloom_c.go(signaller)
+                runloom_c.fiber(signaller)
                 p.park()
                 sequence.append("woken")
                 p.release()
-            runloom_c.go(coordinator)
+            runloom_c.fiber(coordinator)
             runloom_c.run()
         finally:
             M._IS_WINDOWS = was_windows
@@ -425,8 +425,8 @@ class TestSocketStillWorks(unittest.TestCase):
             c.sendall(b"ping")
             result[0] = c.recv(1024)
             c.close()
-        runloom_c.go(server)
-        runloom_c.go(client)
+        runloom_c.fiber(server)
+        runloom_c.fiber(client)
         runloom_c.run()
         srv.close()
         self.assertEqual(result[0], b"ping")

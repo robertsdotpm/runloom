@@ -57,7 +57,7 @@ def _drive(fn):
         except BaseException as e:   # noqa: BLE001
             box[1] = e
 
-    runloom_c.go(runner)
+    runloom_c.fiber(runner)
     runloom_c.run()
     if box[1] is not None:
         raise box[1]
@@ -126,8 +126,8 @@ class TestConnectionInProcess(unittest.TestCase):
                     runloom.sleep(0.004)       # ~32 ms before the message lands
                 b.send(("payload", 99))
 
-            runloom_c.go(ticker)
-            runloom_c.go(sender)
+            runloom_c.fiber(ticker)
+            runloom_c.fiber(sender)
             got = a.recv()                  # blocks until the sender sends
             stop["v"] = True
             a.close(); b.close()
@@ -177,8 +177,8 @@ class TestConnectionInProcess(unittest.TestCase):
                 out.append(b.recv_bytes())
 
             out = []
-            runloom_c.go(ticker)
-            runloom_c.go(lambda: reader(out))
+            runloom_c.fiber(ticker)
+            runloom_c.fiber(lambda: reader(out))
             a.send_bytes(payload)
             # let the reader drain
             import time
@@ -229,9 +229,9 @@ class TestSyncPrimitives(unittest.TestCase):
                     ticks.append(1)
                     runloom.sleep(0.003)
 
-            runloom_c.go(holder)
-            runloom_c.go(waiter)
-            runloom_c.go(ticker)
+            runloom_c.fiber(holder)
+            runloom_c.fiber(waiter)
+            runloom_c.fiber(ticker)
             import time
             t0 = time.monotonic()
             while "B-lock" not in order and time.monotonic() - t0 < 5:

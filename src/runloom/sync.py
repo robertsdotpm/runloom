@@ -8,7 +8,7 @@ synchronous code without giving up the runloom scheduler.  Two styles:
     sock = runloom.sync.tcp_connect(...)
     sock.sendall(b'...')              # cooperative
     data = sock.recv(...)
-    runloom.sync.go(other_worker)        # other fibers run concurrently
+    runloom.sync.fiber(other_worker)        # other fibers run concurrently
     runloom.sync.stop()
 
   Style B: drive a "main" function as the entry point.
@@ -37,7 +37,7 @@ from runloom.runtime import prewarm_stdlib as _prewarm_stdlib
 # --------------------------------------------------------------------
 # Scheduler control
 # --------------------------------------------------------------------
-def go(callable_, *args, **kwargs):
+def fiber(callable_, *args, **kwargs):
     """Spawn a fiber.  Returns a G handle (has .done / .result /
     .wake / .stack).  Equivalent of asyncio.create_task minus the
     coroutine layer."""
@@ -52,7 +52,7 @@ def go(callable_, *args, **kwargs):
         target = lambda: callable_(*args, **kwargs)
     else:
         target = callable_
-    return runloom_c.go(target)
+    return runloom_c.fiber(target)
 
 
 def run(main_fn=None):
@@ -61,7 +61,7 @@ def run(main_fn=None):
     # import on the big stack before any fiber runs on a small one.
     _prewarm_stdlib()
     if main_fn is not None:
-        runloom_c.go(main_fn)
+        runloom_c.fiber(main_fn)
     return runloom_c.run()
 
 
@@ -299,7 +299,7 @@ park_self = runloom_c.park_self
 
 
 def wake(g):
-    """Wake a fiber handle returned by go()."""
+    """Wake a fiber handle returned by fiber()."""
     if g is not None:
         g.wake()
 
@@ -338,8 +338,8 @@ def _acquire(mu):
     """Acquire a cooperative runloom_c.Mutex, foreign-OS-thread-safe.
 
     A fiber parks via ``mu.lock()`` (cooperative, FIFO).  A FOREIGN OS thread (no
-    goroutine) MUST NOT call ``mu.lock()``: its contended path parks on a channel,
-    which raises "blocking channel ops require a runloom goroutine context" the
+    fiber) MUST NOT call ``mu.lock()``: its contended path parks on a channel,
+    which raises "blocking channel ops require a runloom fiber context" the
     instant another holder has the guard (a load-only crash -- uncontended it took
     the CAS fast path).  Per the Mutex's own contract (module_chan.c.inc
     RunloomMutex: "foreign OS threads must use try_lock"), a foreign thread spins on
@@ -570,9 +570,9 @@ def gather(*callables):
     for i, fn in enumerate(callables):
         target = (lambda i=i, fn=fn: _runner(i, fn))
         if mn:
-            runloom_c.mn_go(target)
+            runloom_c.mn_fiber(target)
         else:
-            runloom_c.go(target)
+            runloom_c.fiber(target)
     wg.wait()
     for e in errs:
         if e is not None:
@@ -1032,9 +1032,9 @@ class Watch(object):
         g = runloom_c.current_g()
         deadline = None if timeout is None else _time.monotonic() + timeout
         if g is None:
-            # FOREIGN OS thread (no goroutine): the cooperative Mutex.lock() parks on
-            # a channel when contended, which needs a goroutine -> it raises "channel
-            # recv would block, but no goroutine is running" the instant a set() holds
+            # FOREIGN OS thread (no fiber): the cooperative Mutex.lock() parks on
+            # a channel when contended, which needs a fiber -> it raises "channel
+            # recv would block, but no fiber is running" the instant a set() holds
             # the guard (a load-only crash; uncontended it took the CAS fast path).
             # Poll with the NON-blocking try_lock instead -- it never parks, so it is
             # foreign-safe; a lost try_lock just means "contended right now", re-poll.
@@ -1121,9 +1121,9 @@ class JoinSet(object):
                 self._wg.done()
 
         if runloom_c.mn_hub_count() > 0:
-            runloom_c.mn_go(runner)
+            runloom_c.mn_fiber(runner)
         else:
-            runloom_c.go(runner)
+            runloom_c.fiber(runner)
         return i
 
     def join_all(self):

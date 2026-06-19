@@ -84,7 +84,7 @@ def run(nhubs, n, rounds):
         return w
     runloom_c.mn_init(nhubs)
     for k in range(n):
-        runloom_c.mn_go(mk(k))
+        runloom_c.mn_fiber(mk(k))
     runloom_c.mn_run()
     fin = 0
     for _ in range(n):
@@ -129,14 +129,14 @@ def worker(k):
     return w
 runloom_c.mn_init(4)
 for _ in range(8):                 # spinners monopolize the hubs first
-    runloom_c.mn_go(spinner)
+    runloom_c.mn_fiber(spinner)
 for k in range(NWORK):             # then the workers they could starve
-    runloom_c.mn_go(worker(k))
+    runloom_c.mn_fiber(worker(k))
 def stopper():                     # workers done -> release the spinners
     for _ in range(NWORK):
         done.recv()
     stop[0] = True
-runloom_c.mn_go(stopper)
+runloom_c.mn_fiber(stopper)
 runloom_c.mn_run()
 runloom_c.mn_fini()
 assert stop[0]
@@ -173,7 +173,7 @@ def mk(k):
     return w
 runloom_c.mn_init(NHUBS)
 for k in range(N):
-    runloom_c.mn_go(mk(k))
+    runloom_c.mn_fiber(mk(k))
 runloom_c.mn_run()
 fin = 0
 for _ in range(N):
@@ -210,8 +210,8 @@ def run(nhubs):
     def setter():
         flag[0] = True
     runloom_c.mn_init(nhubs)
-    runloom_c.mn_go(waiter)
-    runloom_c.mn_go(setter)
+    runloom_c.mn_fiber(waiter)
+    runloom_c.mn_fiber(setter)
     runloom_c.mn_run()
     runloom_c.mn_fini()
     assert flag[0]

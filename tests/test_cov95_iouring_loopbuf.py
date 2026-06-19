@@ -118,7 +118,7 @@ def test_loop_single_shot_recv_ms_off():
 #    surfaces -ECONNRESET on the multishot recv.
 #
 #    HOW: clients are REAL OS threads (genuine sockets, never patched / never a
-#    goroutine) so they don't block a hub.  Each connects, reads the first echo
+#    fiber) so they don't block a hub.  Each connects, reads the first echo
 #    (the server-side multishot is now ARMED with F_MORE), blasts more bytes,
 #    then RSTs (SO_LINGER {1,0}).  The server's all-C echo loop reads the blast,
 #    its loop_send echo fails on the RST WHILE the multishot is still armed, and

@@ -64,8 +64,8 @@ def _wait_until_parked(n, timeout=6.0):
     netpoll park, then return True; return False on timeout.
 
     This replaces a fixed ``sched_sleep`` guess.  These tests spawn N waiter
-    goroutines that ``wait_fd``-park, then wake them and assert all N were
-    parked.  Under load a goroutine may not have been scheduled to reach its
+    fibers that ``wait_fd``-park, then wake them and assert all N were
+    parked.  Under load a fiber may not have been scheduled to reach its
     park yet when a fixed sleep elapses, and the runtime then CORRECTLY reports
     that not-yet-parked g as "missed" / leaves it un-stranded (the documented
     edge-before-park contract of unpark_many/cancel_fd) -- so the fixed-sleep

@@ -66,7 +66,7 @@ class _ProtocolServer(object):
         if self._serving or self._closed or self._sockets is None:
             return
         self._serving = True
-        self._accept_gs = [_go_io(lambda s=s: self._accept_loop(s))
+        self._accept_gs = [_fiber_io(lambda s=s: self._accept_loop(s))
                            for s in self._sockets]
 
     def _accept_loop(self, sock):
@@ -88,7 +88,7 @@ class _ProtocolServer(object):
             if self._ssl_context is not None:
                 # Finish the TLS handshake in its own fiber so a slow or
                 # stalled client never blocks accepting new connections.
-                _go_io(lambda c=conn: self._setup_tls_conn(c))
+                _fiber_io(lambda c=conn: self._setup_tls_conn(c))
             else:
                 protocol = self._factory()
                 self._conns.add(_StreamTransport(conn, protocol, loop=self._loop,

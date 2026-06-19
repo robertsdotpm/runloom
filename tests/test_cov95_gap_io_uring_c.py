@@ -409,7 +409,7 @@ def test_global_ms_on_cqe_closing_reclaim_with_inflight():
 # ===========================================================================
 # 9. LOOP-backend runloom_iouring_loop_ms_close() held-buffer reclaim.
 #
-# Real OS-thread peers (genuine sockets, never goroutines) each connect, read the
+# Real OS-thread peers (genuine sockets, never fibers) each connect, read the
 # first echo (server multishot now ARMED), then blast several small chunks fast
 # so the all-C echo's per-hub multishot QUEUES >1 buffer (q_count>0) faster than
 # the echo drains, then RST (SO_LINGER {1,0}).  When the server's loop_send echo

@@ -148,7 +148,7 @@ def _unpatch_heavy():
 # NOT covered: eval(str)/exec(str), which compile internally in C (not via
 # builtins.compile) and need the caller's namespace -- a fiber that evals/
 # execs deeply-nested untrusted source should use runloom.monkey.offload() (or a
-# roomier g-stack via runloom_c.go(fn, stack_size=...)).
+# roomier g-stack via runloom_c.fiber(fn, stack_size=...)).
 # ============================================================
 _orig_compile = None
 

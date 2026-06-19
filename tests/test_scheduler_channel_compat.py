@@ -30,7 +30,7 @@ def _drive(fn):
         except BaseException as e:   # noqa: BLE001
             box[1] = e
 
-    runloom_c.go(runner)
+    runloom_c.fiber(runner)
     runloom_c.run()
     if box[1] is not None:
         raise box[1]
@@ -70,7 +70,7 @@ class TestSchedulerFairness(unittest.TestCase):
                 done.append((idx, data))
 
             for i in range(N):
-                runloom_c.go(lambda i=i: worker(i))
+                runloom_c.fiber(lambda i=i: worker(i))
 
             # Let them all park, then feed every peer in a burst.
             def feeder():
@@ -78,7 +78,7 @@ class TestSchedulerFairness(unittest.TestCase):
                 for _a, b in pairs:
                     b.send(b"go")
 
-            runloom_c.go(feeder)
+            runloom_c.fiber(feeder)
 
             t0 = time.monotonic()
             while len(done) < N and time.monotonic() - t0 < 5:
@@ -107,7 +107,7 @@ class TestSchedulerFairness(unittest.TestCase):
                     time.sleep(DELAY)        # simulate work
                     a.send(b"pong")
 
-                runloom_c.go(responder)
+                runloom_c.fiber(responder)
                 b.send(b"ping")
                 r = b.recv(8)
                 results.append((idx, r))
@@ -115,7 +115,7 @@ class TestSchedulerFairness(unittest.TestCase):
 
             t0 = time.monotonic()
             for i in range(N):
-                runloom_c.go(lambda i=i: round_trip(i))
+                runloom_c.fiber(lambda i=i: round_trip(i))
             while len(results) < N and time.monotonic() - t0 < 5:
                 runloom.sleep(0.005)
             return len(results), time.monotonic() - t0
@@ -172,10 +172,10 @@ class TestChannelPipeline(unittest.TestCase):
                         break
                     collected.append(v)
 
-            runloom_c.go(producer)
-            runloom_c.go(stage1)
-            runloom_c.go(stage2)
-            runloom_c.go(collector)
+            runloom_c.fiber(producer)
+            runloom_c.fiber(stage1)
+            runloom_c.fiber(stage2)
+            runloom_c.fiber(collector)
 
             t0 = time.monotonic()
             while len(collected) < ITEMS and time.monotonic() - t0 < 5:
@@ -232,9 +232,9 @@ class TestChannelPipeline(unittest.TestCase):
                     got.append(v)
 
             for i in range(M):
-                runloom_c.go(lambda i=i: feeder(i))
-                runloom_c.go(lambda i=i: producer_wrap(i))
-            runloom_c.go(consumer)
+                runloom_c.fiber(lambda i=i: feeder(i))
+                runloom_c.fiber(lambda i=i: producer_wrap(i))
+            runloom_c.fiber(consumer)
 
             t0 = time.monotonic()
             while len(got) < total and time.monotonic() - t0 < 5:
@@ -265,14 +265,14 @@ class TestSelectWithIO(unittest.TestCase):
                 def kick():
                     time.sleep(delay)
                     b.send(b"x")
-                runloom_c.go(kick)
+                runloom_c.fiber(kick)
                 a.recv(4)
                 ch.send(tag)
                 a.close(); b.close()
 
             p0, p1 = _echo_pair(), _echo_pair()
-            runloom_c.go(lambda: io_feeder(ch0, p0, "zero", 0.04))
-            runloom_c.go(lambda: io_feeder(ch1, p1, "one", 0.02))
+            runloom_c.fiber(lambda: io_feeder(ch0, p0, "zero", 0.04))
+            runloom_c.fiber(lambda: io_feeder(ch1, p1, "one", 0.02))
 
             results = []
             for _ in range(2):
@@ -299,7 +299,7 @@ class TestConcurrentTimers(unittest.TestCase):
 
             t0 = time.monotonic()
             for i in range(N):
-                runloom_c.go(lambda i=i: napper(i))
+                runloom_c.fiber(lambda i=i: napper(i))
             while len(fired) < N and time.monotonic() - t0 < 5:
                 runloom.sleep(0.002)
             return len(fired), time.monotonic() - t0

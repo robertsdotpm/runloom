@@ -31,7 +31,7 @@ def _drive(*fibers):
         return runner
 
     for g in fibers:
-        runloom_c.go(wrap(g))
+        runloom_c.fiber(wrap(g))
     runloom_c.run()
     return box
 

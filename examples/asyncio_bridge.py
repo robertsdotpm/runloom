@@ -1,7 +1,7 @@
 """asyncio bridge — run existing async/await code on runloom's scheduler.
 
 Already have async def code?  runloom.aio.run(coro) is a drop-in for
-asyncio.run that drives each Task on a runloom goroutine.  Standard
+asyncio.run that drives each Task on a runloom fiber.  Standard
 asyncio building blocks — gather, sleep, wait_for, Queue, Lock — work
 unchanged; runloom just provides the event loop underneath.
 

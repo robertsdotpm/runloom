@@ -22,7 +22,7 @@ class DatagramTransport(object):
         except Exception as e:
             self._report(e, "connection_made")
         # Spawn the recv loop.
-        self._recv_g = _go_io(self._recv_loop)
+        self._recv_g = _fiber_io(self._recv_loop)
 
     def _recv_loop(self):
         sock = self._sock
@@ -75,11 +75,11 @@ class DatagramTransport(object):
             return
         self._closed = True
         self._stopping = True
-        # Wake the recv goroutine parked in _wait_fd so it observes _stopping and
+        # Wake the recv fiber parked in _wait_fd so it observes _stopping and
         # exits, instead of staying parked forever on the fd we're about to close
         # (epoll/kqueue auto-remove on close emit NO event) -- a deterministic
         # per-endpoint fiber + fd-registration leak.  Mirrors _Server.close() and
-        # the "Server close() must wake its accept-loop goroutines" invariant
+        # the "Server close() must wake its accept-loop fibers" invariant
         # (audit finding B4).
         g = self._recv_g
         self._recv_g = None

@@ -129,8 +129,8 @@ def hog(i):
     while time.monotonic() - t0 < 0.25:   # CPU-bound, no cooperative yield
         x = (x + i * i) % 7
     done.append(i)
-rc.go(lambda: hog(1))
-rc.go(lambda: hog(2))
+rc.fiber(lambda: hog(1))
+rc.fiber(lambda: hog(2))
 rc.run()
 rc.preempt_fini()
 sys.stdout.write("PREEMPT_ST_OK %d\n" % len(done))
@@ -256,7 +256,7 @@ def test_sched_sleep_real_single_thread():
         out.append(time.monotonic() - t0)
 
     with hang_guard(20, "sched_sleep_real"):
-        rc.go(s)
+        rc.fiber(s)
         rc.run()
     assert len(out) == 1
     # Real oracle: it actually slept ~30ms (a real wall-clock park, not a
@@ -309,8 +309,8 @@ def test_run_ready_quiescence_two_fibers_single_thread():
         out.append(i)
 
     with hang_guard(20, "run_ready_quiescence"):
-        rc.go(lambda: w(1))
-        rc.go(lambda: w(2))
+        rc.fiber(lambda: w(1))
+        rc.fiber(lambda: w(2))
         rc.run()
     assert sorted(out) == [1, 2]
 
@@ -394,7 +394,7 @@ def test_park_safe_dekker_abort_under_foreign_wake_storm():
         t.join(timeout=3)
 
     with hang_guard(90, "park_safe_dekker"):
-        rc.go(parker)
+        rc.fiber(parker)
         rc.run()
     # Safety oracle: not one of 30k parks lost its wake (would hang) and none
     # double-freed / returned garbage (would crash).  Exact count == no lost
@@ -652,7 +652,7 @@ def test_exception_state_survives_park_single_thread():
             seen["msg"] = exc.args[0] if exc is not None else None
 
     with hang_guard(20, "exc_state_park_st"):
-        rc.go(f)
+        rc.fiber(f)
         rc.run()
     assert seen.get("msg") == "st-in-flight"
 
@@ -745,7 +745,7 @@ def test_dbg_excstate_validator_passes_live_exceptions_subprocess():
 # refcount machine (runloom_g_try_incref / _decref) + runloom_cal_record (the
 # stack-calibration freeze).  A deep nested-spawn chain drives many fresh
 # free->runnable->running->done transitions (each a try_incref on spawn, a
-# decref at completion), and the indexed go_n path drives g_entry's
+# decref at completion), and the indexed fiber_n path drives g_entry's
 # pass_index branch (PyLong_FromSsize_t + CallFunctionObjArgs).
 # ==========================================================================
 def test_g_entry_and_refcount_machine_nested_spawn():
@@ -754,20 +754,20 @@ def test_g_entry_and_refcount_machine_nested_spawn():
     def chain(n):
         def step(i):
             if i:
-                rc.go(lambda: step(i - 1))
+                rc.fiber(lambda: step(i - 1))
             out.append(i)
         step(n)
 
     with hang_guard(30, "g_entry_nested"):
-        rc.go(lambda: chain(30))
+        rc.fiber(lambda: chain(30))
         rc.run()
     assert sorted(out) == list(range(31))
     assert rc._self_check(0) == 0
 
 
 @mn
-def test_g_entry_go_n_indexed_pass_index():
-    """go_n(indexed=True) drives runloom_g_entry's pass_index branch
+def test_g_entry_fiber_n_indexed_pass_index():
+    """fiber_n(indexed=True) drives runloom_g_entry's pass_index branch
     (L398-408: mint a PyLong from the raw index, CallFunctionObjArgs)."""
     N = 256
     seen = bytearray(N)
@@ -777,7 +777,7 @@ def test_g_entry_go_n_indexed_pass_index():
             seen[i] = 1
 
     def main():
-        rc.go_n(worker, N, 0, True)        # indexed bulk spawn
+        rc.fiber_n(worker, N, 0, True)        # indexed bulk spawn
 
     with hang_guard(40, "go_n_indexed"):
         rc.mn_init(4); rc.mn_go(main); rc.mn_run(); rc.mn_fini()
@@ -808,7 +808,7 @@ def loop():
     def run_one():
         start.wait()    # all threads cross the freeze threshold together
         for _ in range(PER):
-            rc.go(lambda: None)
+            rc.fiber(lambda: None)
         rc.run()
     run_one()
 ts = [threading.Thread(target=loop, daemon=True) for _ in range(THREADS)]

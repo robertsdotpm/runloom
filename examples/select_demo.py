@@ -14,15 +14,15 @@ import os
 
 import runloom
 
-# Free-threaded build: fan goroutines across all cores (M:N scheduler).
+# Free-threaded build: fan fibers across all cores (M:N scheduler).
 HUBS = os.cpu_count() or 4
 
 def main():
     a = runloom.Chan(1)
     b = runloom.Chan(1)
 
-    runloom.go(lambda: a.send("from a"))
-    runloom.go(lambda: b.send("from b"))
+    runloom.fiber(lambda: a.send("from a"))
+    runloom.fiber(lambda: b.send("from b"))
 
     # Receive from whichever is ready first; do it twice to drain both.
     for _ in range(2):
@@ -35,7 +35,7 @@ def main():
 
     # A send case: parks until a receiver shows up, then completes.
     sink = runloom.Chan()            # unbuffered
-    runloom.go(lambda: print("received:", sink.recv()[0]))
+    runloom.fiber(lambda: print("received:", sink.recv()[0]))
     idx, payload = runloom.select([("send", sink, "hello")])
     print("send case {0} completed (payload={1})".format(idx, payload))
 

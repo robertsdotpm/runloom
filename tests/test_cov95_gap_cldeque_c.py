@@ -119,7 +119,7 @@ def test_steal_success_path_drives_item_read_and_cas():
 # that keeps work concentrated, so several thieves load-acquire the same `t`,
 # one wins the CAS and the rest fail -> L100.
 #
-# go_n bulk-spawns all N gs by looping the spawn core in C -- they land on the
+# fiber_n bulk-spawns all N gs by looping the spawn core in C -- they land on the
 # running hub's deque in a tight burst, so the OTHER 11 hubs all wake idle at
 # once and thunder-herd the same bottom indices: the canonical CAS-loser drive.
 # Oracle is again exact-once: every g runs exactly once despite the lost races.
@@ -130,7 +130,7 @@ def test_steal_cas_loser_returns_null():
         import runloom, runloom_c as rc
         N = 8000
         ran = bytearray(N)          # ran[i] written ONLY by g i -> race-free
-        def worker(i):              # go_n(indexed=True) passes a distinct i
+        def worker(i):              # fiber_n(indexed=True) passes a distinct i
             x = 0
             for _ in range(20):
                 x += 1
@@ -138,7 +138,7 @@ def test_steal_cas_loser_returns_null():
         def main():
             # bulk burst: all N land on one hub's deque in a C loop, so the
             # other hubs wake simultaneously and race the same top -> losers.
-            rc.go_n(worker, N, 0, indexed=True)
+            rc.fiber_n(worker, N, 0, indexed=True)
         runloom.run(12, main)
         sys.stdout.write("LOSER_RAN:%d:LOST:%d\n" % (sum(ran), N - sum(ran)))
     """)
@@ -215,10 +215,10 @@ def test_work_stealing_soak_exact_once():
                         x += 1
                     rc.sched_yield()
                     ran[i] = 1
-                # mix bulk-burst (go_n -> one hot deque) with individual spawns
+                # mix bulk-burst (fiber_n -> one hot deque) with individual spawns
                 # (round-robin -> spread) so both steal-from-hot and
                 # steal-from-spread deque shapes occur.
-                rc.go_n(lambda: None, 1, 0)
+                rc.fiber_n(lambda: None, 1, 0)
                 for i in range(N):
                     rc.mn_go(lambda i=i: worker(i))
             runloom.run(12, main)

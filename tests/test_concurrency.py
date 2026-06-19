@@ -46,8 +46,8 @@ class TestParkWakeRace(unittest.TestCase):
             g_holder[0].wake()
             order.append("waked")
 
-        runloom_c.go(parker)
-        runloom_c.go(waker)
+        runloom_c.fiber(parker)
+        runloom_c.fiber(waker)
         runloom_c.run()
         # Both orderings ("waked" before "before-park" OR after) are
         # legal; what matters is "after-park" happens.
@@ -70,8 +70,8 @@ class TestParkWakeRace(unittest.TestCase):
             order.append("waking")
             g_holder[0].wake()
 
-        runloom_c.go(parker)
-        runloom_c.go(waker)
+        runloom_c.fiber(parker)
+        runloom_c.fiber(waker)
         runloom_c.run()
         self.assertEqual(order, ["before-park", "waking", "after-park"])
 
@@ -95,8 +95,8 @@ class TestParkWakeRace(unittest.TestCase):
             for _ in range(3):
                 g_holder[0].wake()
 
-        runloom_c.go(parker)
-        runloom_c.go(burst_waker)
+        runloom_c.fiber(parker)
+        runloom_c.fiber(burst_waker)
         runloom_c.run()
         self.assertEqual(events, ["p", "p", "p"])
 
@@ -183,8 +183,8 @@ class TestChannelOrdering(unittest.TestCase):
         def consumer():
             for v in ch:
                 out.append(v)
-        runloom_c.go(producer)
-        runloom_c.go(consumer)
+        runloom_c.fiber(producer)
+        runloom_c.fiber(consumer)
         runloom_c.run()
         self.assertEqual(out, list(range(50)))
 
@@ -200,8 +200,8 @@ class TestChannelOrdering(unittest.TestCase):
         def consumer():
             for v in ch:
                 out.append(v)
-        runloom_c.go(producer)
-        runloom_c.go(consumer)
+        runloom_c.fiber(producer)
+        runloom_c.fiber(consumer)
         runloom_c.run()
         self.assertEqual(out, list(range(20)))
 
@@ -215,7 +215,7 @@ class TestChannelOrdering(unittest.TestCase):
         def consumer():
             for v in ch:
                 out.append(v)
-        runloom_c.go(consumer)
+        runloom_c.fiber(consumer)
         runloom_c.run()
         self.assertEqual(out, ["first"])
 
@@ -230,7 +230,7 @@ class TestChannelOrdering(unittest.TestCase):
             recv_results.append(ch.recv())   # "a", True
             recv_results.append(ch.recv())   # "b", True
             recv_results.append(ch.recv())   # None, False
-        runloom_c.go(consumer)
+        runloom_c.fiber(consumer)
         runloom_c.run()
         self.assertEqual(recv_results,
                          [("a", True), ("b", True), (None, False)])
@@ -252,7 +252,7 @@ class TestSelect(unittest.TestCase):
                                   ("recv", ch_b)], default=True)
             # default-fired returns bare -1 (not a tuple)
             result[0] = r if isinstance(r, int) else r[0]
-        runloom_c.go(w)
+        runloom_c.fiber(w)
         runloom_c.run()
         self.assertEqual(result[0], -1)
 
@@ -266,7 +266,7 @@ class TestSelect(unittest.TestCase):
             idx, val = runloom_c.select([("recv", ch_a),
                                          ("recv", ch_b)])
             result[0] = (idx, val)
-        runloom_c.go(w)
+        runloom_c.fiber(w)
         runloom_c.run()
         self.assertEqual(result[0], (1, ("b-value", True)))
 
@@ -278,7 +278,7 @@ class TestSelect(unittest.TestCase):
             idx, _ = runloom_c.select([("send", ch, "x")])
             result[0] = idx
 
-        runloom_c.go(w)
+        runloom_c.fiber(w)
         runloom_c.run()
         self.assertEqual(result[0], 0)
 
@@ -295,8 +295,8 @@ class TestSelect(unittest.TestCase):
             runloom_c.sched_sleep(0.005)
             ch.send("late")
 
-        runloom_c.go(w)
-        runloom_c.go(feeder)
+        runloom_c.fiber(w)
+        runloom_c.fiber(feeder)
         runloom_c.run()
         self.assertEqual(out, [(0, ("late", True))])
 
@@ -386,7 +386,7 @@ class TestFastPath(unittest.TestCase):
         def w():
             for _ in range(5):
                 out.append(ch.recv())
-        runloom_c.go(w)
+        runloom_c.fiber(w)
         runloom_c.run()
         self.assertEqual(out, [(i, True) for i in range(5)])
 

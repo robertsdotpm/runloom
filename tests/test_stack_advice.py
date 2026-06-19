@@ -67,7 +67,7 @@ def _clean_advice():
 def _run(kinds, n, stack=524288):
     for _ in range(n):
         for fn in kinds:
-            runloom_c.go(fn, stack)
+            runloom_c.fiber(fn, stack)
     runloom_c.run()
 
 
@@ -164,7 +164,7 @@ def test_records_under_mn_scheduler():
     runloom_c.mn_init(2)
     try:
         for _ in range(20):
-            runloom_c.mn_go(c_heavy)
+            runloom_c.mn_fiber(c_heavy)
         runloom_c.mn_run()
     finally:
         runloom_c.mn_fini()

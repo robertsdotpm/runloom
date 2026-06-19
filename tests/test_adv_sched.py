@@ -2,14 +2,14 @@
 
 Targets the highest-bug-density area: spawn/admission, park/wake races, the
 M:N teardown path (the known-flaky `mn_fini` hang), deadlock detection, and
-goroutine exception handling.  Several of these are *negative-space* checks:
+fiber exception handling.  Several of these are *negative-space* checks:
 a lost wake or a teardown deadlock shows up as a `hang_guard` _exit with a
 pinpointed traceback, not a silently-green run.
 
 Includes one xfail-documented FINDING: an unhandled exception inside a bare
-`runloom_c.go` goroutine is silently swallowed -- not raised out of run(),
+`runloom_c.go` fiber is silently swallowed -- not raised out of run(),
 not retrievable via `G.result`, and not even written to stderr / the
-unraisable hook.  In a Go-parity runtime a goroutine panic should at minimum
+unraisable hook.  In a Go-parity runtime a fiber panic should at minimum
 be observable; today it vanishes.
 """
 import io
@@ -29,7 +29,7 @@ def _run_single(fn):
     box = {}
     def main():
         box["r"] = fn()
-    rc.go(main)
+    rc.fiber(main)
     rc.run()
     return box.get("r")
 
@@ -40,7 +40,7 @@ def _run_single(fn):
 def test_run_returns_completion_count():
     ran = []
     for _ in range(50):
-        rc.go(lambda: ran.append(1))
+        rc.fiber(lambda: ran.append(1))
     n = rc.run()
     assert n >= 50 and len(ran) == 50
 
@@ -49,13 +49,13 @@ def test_nested_spawn_from_inside_fiber():
     seen = []
     def parent():
         for i in range(10):
-            rc.go(lambda i=i: seen.append(i))
-    rc.go(parent)
+            rc.fiber(lambda i=i: seen.append(i))
+    rc.fiber(parent)
     rc.run()
     assert sorted(seen) == list(range(10))
 
 
-def test_go_noyield_runs_to_completion():
+def test_fiber_noyield_runs_to_completion():
     out = []
     rc.go_noyield(lambda: out.append("ran"))
     rc.run()
@@ -64,7 +64,7 @@ def test_go_noyield_runs_to_completion():
 
 def test_custom_stack_size_runs():
     out = []
-    rc.go(lambda: out.append("big"), 1 << 20)   # 1 MiB stack
+    rc.fiber(lambda: out.append("big"), 1 << 20)   # 1 MiB stack
     rc.run()
     assert out == ["big"]
 
@@ -85,11 +85,11 @@ def test_current_g_none_outside_fiber():
 
 
 # --------------------------------------------------------------------------
-# FINDING: unhandled goroutine exceptions vanish silently
+# FINDING: unhandled fiber exceptions vanish silently
 # --------------------------------------------------------------------------
-def test_goroutine_exception_is_reported_and_retrievable():
+def test_fiber_exception_is_reported_and_retrievable():
     # Regression for the swallowed-exception FINDING (now fixed): an unhandled
-    # goroutine exception is reported via sys.unraisablehook (default
+    # fiber exception is reported via sys.unraisablehook (default
     # RUNLOOM_GOROUTINE_PANIC=print) AND retrievable on G.exception.  run() still
     # does NOT raise it (report, not propagate) and G.result stays None.
     # NB: PyErr_WriteUnraisable calls sys.unraisablehook, so we capture there --
@@ -102,7 +102,7 @@ def test_goroutine_exception_is_reported_and_retrievable():
     prev_hook = sys.unraisablehook
     sys.unraisablehook = lambda u: recorded.append(u)
     try:
-        g = rc.go(boom)
+        g = rc.fiber(boom)
         n = rc.run()
     finally:
         sys.unraisablehook = prev_hook
@@ -112,7 +112,7 @@ def test_goroutine_exception_is_reported_and_retrievable():
     assert isinstance(g.exception, ValueError)     # now retrievable on the handle
     assert marker in str(g.exception)
     assert any(marker in str(getattr(u, "exc_value", "")) for u in recorded), \
-        "goroutine exception was not reported via the unraisable hook"
+        "fiber exception was not reported via the unraisable hook"
 
 
 _SILENT_SCRIPT = r'''
@@ -120,7 +120,7 @@ import sys, os; sys.path.insert(0, "src")
 import runloom_c as rc
 def boom():
     raise ValueError("SILENT_MARKER_X")
-g = rc.go(boom)
+g = rc.fiber(boom)
 r, w = os.pipe(); saved = os.dup(2); os.dup2(w, 2)
 rc.run()
 os.dup2(saved, 2); os.close(w)
@@ -130,7 +130,7 @@ sys.stdout.write("RETRIEVABLE\n" if isinstance(g.exception, ValueError) else "LO
 '''
 
 
-def test_goroutine_exception_silent_mode_opt_out():
+def test_fiber_exception_silent_mode_opt_out():
     # RUNLOOM_GOROUTINE_PANIC=silent restores no-report (still retrievable).
     # Subprocess: the mode is cached process-wide.
     import subprocess
@@ -156,11 +156,11 @@ def test_max_fibers_admission_gate_and_release():
         def boss():
             for _ in range(20):
                 try:
-                    rc.go(child)
+                    rc.fiber(child)
                     spawned.append(1)
                 except RuntimeError:
                     errors.append(1)
-        rc.go(boss)
+        rc.fiber(boss)
         rc.run()
         # boss itself counts against the cap, so at most 3 children admit at once;
         # over the cap raises, and admitted slots release as children finish.
@@ -172,7 +172,7 @@ def test_max_fibers_admission_gate_and_release():
     assert rc.get_max_fibers() == 0
     out = []
     for _ in range(100):
-        rc.go(lambda: out.append(1))
+        rc.fiber(lambda: out.append(1))
     rc.run()
     assert len(out) == 100
 
@@ -189,12 +189,12 @@ def test_wake_after_park_resumes():
         rc.park_self()             # parks until woken
         state["resumed"] = True
     def main():
-        rc.go(waiter)
+        rc.fiber(waiter)
         rc.sched_yield()           # waiter records handle + yields
         rc.sched_yield()           # waiter parks
         holder["g"].wake()
     with hang_guard(15, "wake after park"):
-        rc.go(main)
+        rc.fiber(main)
         rc.run()
     assert state.get("resumed") is True
 
@@ -211,11 +211,11 @@ def test_wake_before_park_is_not_lost():
         rc.park_self()             # must return immediately (wake already pending)
         state["resumed"] = True
     def main():
-        rc.go(waiter)
+        rc.fiber(waiter)
         rc.sched_yield()           # waiter sets handle, yields back (not yet parked)
         holder["g"].wake()         # wake BEFORE the park
     with hang_guard(15, "wake before park"):
-        rc.go(main)
+        rc.fiber(main)
         rc.run()
     assert state.get("resumed") is True, "wake-before-park was lost (hung waiter)"
 
@@ -238,7 +238,7 @@ def test_deadlock_mode_raise():
     try:
         def stuck():
             rc.Chan(0).recv()      # nobody will ever send
-        rc.go(stuck)
+        rc.fiber(stuck)
         with pytest.raises(RuntimeError):
             rc.run()
     finally:
@@ -252,7 +252,7 @@ def test_count_deadlocked_reports_parked():
     try:
         def stuck():
             rc.Chan(0).recv()
-        rc.go(stuck)
+        rc.fiber(stuck)
         rc.run()                   # returns with 1 fiber stranded
         assert rc.count_deadlocked() >= 1
     finally:

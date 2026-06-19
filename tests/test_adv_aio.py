@@ -5,8 +5,8 @@ dozen fragile invariants.  We target the observable ones:
 
   * connection_made-that-writes -- a server greeting written inside
     connection_made must reach the client (the _io_g seed-before-callback bug);
-  * server close() wakes its accept-loop goroutines -- repeated create/close
-    must not accumulate parked goroutines (the per-server leak);
+  * server close() wakes its accept-loop fibers -- repeated create/close
+    must not accumulate parked fibers (the per-server leak);
   * cancellation -- a task parked in sleep / I/O / executor must take a
     CancelledError, not hang;
   * SLOW RETURN -- wait_for must time out promptly and overlap, gather must run
@@ -60,9 +60,9 @@ def test_connection_made_write_reaches_client():
 
 
 # --------------------------------------------------------------------------
-# server close() wakes accept loops -- no parked-goroutine accumulation
+# server close() wakes accept loops -- no parked-fiber accumulation
 # --------------------------------------------------------------------------
-def test_server_close_does_not_leak_accept_goroutines():
+def test_server_close_does_not_leak_accept_fibers():
     async def cycle():
         loop = asyncio.get_event_loop()
         server = await loop.create_server(asyncio.Protocol, "127.0.0.1", 0)
@@ -76,7 +76,7 @@ def test_server_close_does_not_leak_accept_goroutines():
         for _ in range(10):
             one()
         after = _parked()
-    assert after <= base, "accept-loop goroutines leaked: parked %d -> %d" % (base, after)
+    assert after <= base, "accept-loop fibers leaked: parked %d -> %d" % (base, after)
 
 
 # --------------------------------------------------------------------------

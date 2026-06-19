@@ -1,8 +1,8 @@
-"""Concurrent prime sieve — a goroutine per prime.
+"""Concurrent prime sieve — a fiber per prime.
 
-Doug McIlroy's pipeline sieve, the example that sold Go's goroutines:
+Doug McIlroy's pipeline sieve, the example that sold Go's fibers:
 numbers flow down a chain of channels, and each prime spins up a new
-filter goroutine that drops its own multiples.  What survives to the
+filter fiber that drops its own multiples.  What survives to the
 end of the chain is prime.  It's gloriously wasteful and a perfect
 stress test of cheap spawning + channel hand-off.
 
@@ -14,7 +14,7 @@ import os
 
 import runloom
 
-# Free-threaded build: fan goroutines across all cores (M:N scheduler).
+# Free-threaded build: fan fibers across all cores (M:N scheduler).
 HUBS = os.cpu_count() or 4
 
 LIMIT = 60
@@ -32,7 +32,7 @@ def filter_multiples(prime, inp, out):
 
 def main():
     ch = runloom.Chan()
-    runloom.go(generate, ch)
+    runloom.fiber(generate, ch)
 
     primes = []
     while True:
@@ -41,7 +41,7 @@ def main():
             break
         primes.append(prime)
         nxt = runloom.Chan()
-        runloom.go(filter_multiples, prime, ch, nxt)
+        runloom.fiber(filter_multiples, prime, ch, nxt)
         ch = nxt                    # next round reads from the filtered stream
 
     print("primes up to {0}:".format(LIMIT))

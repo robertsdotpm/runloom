@@ -11,7 +11,7 @@ import runloom
 def hello():
     print("hello from a fiber!")
 
-runloom.go(hello)        # spawn -- doesn't run yet
+runloom.fiber(hello)        # spawn -- doesn't run yet
 runloom.run(1)            # drive the scheduler until everyone finishes
 ```
 
@@ -34,7 +34,7 @@ def worker(i):
     print("worker", i)
 
 for i in range(10):
-    runloom.go(lambda i=i: worker(i))   # bind i per-spawn
+    runloom.fiber(lambda i=i: worker(i))   # bind i per-spawn
 runloom.run(1)
 ```
 
@@ -67,7 +67,7 @@ def slow():
 
 # Spawn three sleeps concurrently; they all wake at ~the same time.
 for _ in range(3):
-    runloom.go(slow)
+    runloom.fiber(slow)
 runloom.run(1)
 ```
 
@@ -106,8 +106,8 @@ def consumer():
     for v in ch:                   # iterates until ch closes
         print("got", v)
 
-runloom.go(producer)
-runloom.go(consumer)
+runloom.fiber(producer)
+runloom.fiber(consumer)
 runloom.run(1)
 ```
 
@@ -152,9 +152,9 @@ def accept_loop():
     srv.listen(128)
     while True:
         conn, _ = srv.accept()
-        runloom.go(lambda c=conn: handle(c))
+        runloom.fiber(lambda c=conn: handle(c))
 
-runloom.go(accept_loop)
+runloom.fiber(accept_loop)
 runloom.run(1)
 ```
 

@@ -51,7 +51,7 @@ def _spawn_mn(fn, n, hubs=4, **go_kw):
     """Spawn fn n times under run(hubs); mn_run joins them all before returning."""
     def main():
         for _ in range(n):
-            runloom.go(fn, **go_kw)
+            runloom.fiber(fn, **go_kw)
     runloom.run(hubs, main)
 
 
@@ -86,7 +86,7 @@ def test_n1_does_not_learn():
     # single-thread run(1) keeps the fixed default -- no learning, no store
     def worker():
         json.dumps(NESTED)
-    runloom.run(1, lambda: [runloom.go(worker) for _ in range(40)])
+    runloom.run(1, lambda: [runloom.fiber(worker) for _ in range(40)])
     assert worker.__dict__.get(GROW_DOWN_KEY) is None
 
 
@@ -112,7 +112,7 @@ def test_defers_to_c_autosizer_when_enabled():
     def main():
         runloom.inspect.enable_stack_autosize(True)
         for _ in range(40):
-            runloom.go(worker)
+            runloom.fiber(worker)
     runloom.run(4, main)
     # the explicitly-enabled C autosizer wins; grow-down backs off entirely
     assert worker.__dict__.get(GROW_DOWN_KEY) is None
@@ -147,14 +147,14 @@ def test_non_introspectable_callable_is_safe():
 
 
 def test_arg_bearing_binds_to_real_function():
-    # runloom.go(fn, arg) wraps fn in an arg-binding lambda; the learned size must
+    # runloom.fiber(fn, arg) wraps fn in an arg-binding lambda; the learned size must
     # bind to fn (shared across all arg variants), not the per-call wrapper
     def worker(x):
         json.dumps(NESTED)
         return x
     def main():
         for i in range(80):
-            runloom.go(worker, i)
+            runloom.fiber(worker, i)
     runloom.run(4, main)
     store = worker.__dict__.get(GROW_DOWN_KEY)
     assert store is not None and store[0] >= 32 * 1024

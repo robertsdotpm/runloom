@@ -272,8 +272,8 @@ def main():
                     if d: conn.send_all(d)
                 finally:
                     conn.close()
-            rc.go(handle)
-    rc.go(acceptor)
+            rc.fiber(handle)
+    rc.fiber(acceptor)
     def client(i):
         try:
             c = rc.TCPConn.connect("127.0.0.1", port)
@@ -285,7 +285,7 @@ def main():
             if done[0] == N:
                 lst.close()
     for i in range(N):
-        rc.go(lambda i=i: client(i))
+        rc.fiber(lambda i=i: client(i))
 runloom.run(1, main)
 sys.stdout.write("SINGLE_OK %d\n" % sum(1 for i in range(N) if got[i] == struct.pack(">Q", i)))
 '''

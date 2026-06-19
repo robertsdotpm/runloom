@@ -72,9 +72,9 @@ def test_three_fibers_interleave():
                 log.append((name, i))
                 runloom_c.sched_yield()
         return w
-    runloom_c.go(make_worker("A", 3))
-    runloom_c.go(make_worker("B", 3))
-    runloom_c.go(make_worker("C", 3))
+    runloom_c.fiber(make_worker("A", 3))
+    runloom_c.fiber(make_worker("B", 3))
+    runloom_c.fiber(make_worker("C", 3))
     runloom_c.run()
     expected = [("A", 0), ("B", 0), ("C", 0),
                 ("A", 1), ("B", 1), ("C", 1),
@@ -93,8 +93,8 @@ def test_sleep_lets_others_run():
         for i in range(3):
             log.append(("b", i))
             runloom_c.sched_yield()
-    runloom_c.go(sleeper)
-    runloom_c.go(burner)
+    runloom_c.fiber(sleeper)
+    runloom_c.fiber(burner)
     t0 = time.monotonic()
     runloom_c.run()
     elapsed = time.monotonic() - t0

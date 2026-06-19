@@ -40,8 +40,8 @@ def consumer():
             return
         print("got", v)
 
-runloom.go(producer)
-runloom.go(consumer)
+runloom.fiber(producer)
+runloom.fiber(consumer)
 runloom.run(1)
 ```
 
@@ -101,8 +101,8 @@ def producer():
 def consumer():
     print("got:", ch.recv())  # blocks here until producer sends
 
-runloom.go(producer)
-runloom.go(consumer)
+runloom.fiber(producer)
+runloom.fiber(consumer)
 runloom.run(1)
 ```
 
@@ -146,8 +146,8 @@ def consumer():
     else:
         print("b got:", payload)
 
-runloom.go(producer)
-runloom.go(consumer)
+runloom.fiber(producer)
+runloom.fiber(consumer)
 runloom.run(1)
 ```
 

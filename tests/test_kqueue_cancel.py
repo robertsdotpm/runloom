@@ -88,7 +88,7 @@ def _drive(*fibers):
         return runner
 
     for g in fibers:
-        runloom_c.go(wrap(g))
+        runloom_c.fiber(wrap(g))
     runloom_c.run()
     if box:
         raise box[0]
@@ -317,8 +317,8 @@ def test_monkey_recv_cross_fiber_close_raises():
         a.close()                    # cross-fiber close -> cancel_fd + EBADF
 
     def main():
-        runloom.go(reader)
-        runloom.go(closer)
+        runloom.fiber(reader)
+        runloom.fiber(closer)
         runloom.sleep(0.2)
 
     try:
@@ -365,8 +365,8 @@ def test_monkey_recv_cancel_all_open_socket_raises_ecanceled():
         runloom_c.cancel_all_parked()
 
     def main():
-        runloom.go(reader)
-        runloom.go(canceller)
+        runloom.fiber(reader)
+        runloom.fiber(canceller)
         runloom.sleep(0.2)
 
     try:
@@ -471,7 +471,7 @@ def test_cancel_all_parked_mn(hubs, k):
 
     def main():
         for i, (a, _b) in enumerate(pairs):
-            runloom.go(make_parker(i, a))
+            runloom.fiber(make_parker(i, a))
         # Wait (cooperatively) until every fiber has parked, then cancel.  We
         # poll the global stat from inside the root fiber via short sleeps.
         deadline = time.monotonic() + 4.0
@@ -512,7 +512,7 @@ def test_cancel_fd_mn_wakes_all_on_one_fd(hubs):
 
     def main():
         for i in range(n_waiters):
-            runloom.go(make_parker(i))
+            runloom.fiber(make_parker(i))
         deadline = time.monotonic() + 4.0
         while (runloom_c.stats().get("netpoll_parked", 0) < n_waiters
                and time.monotonic() < deadline):
@@ -565,7 +565,7 @@ def test_tcpconn_recv_cancel_mn_raises_ecanceled(hubs):
 
     def main():
         for i in range(n):
-            runloom.go(make_reader(i))
+            runloom.fiber(make_reader(i))
         deadline = time.monotonic() + 4.0
         while (runloom_c.stats().get("netpoll_parked", 0) < n
                and time.monotonic() < deadline):

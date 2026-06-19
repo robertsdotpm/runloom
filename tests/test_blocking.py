@@ -35,7 +35,7 @@ class TestBlocking(unittest.TestCase):
         def w():
             out.append(runloom.blocking(add, 2, 3, c=10))
 
-        runloom_c.go(w)
+        runloom_c.fiber(w)
         runloom_c.run()
         self.assertEqual(out, [15])
 
@@ -53,7 +53,7 @@ class TestBlocking(unittest.TestCase):
             except ValueError as e:
                 seen.append(str(e))
 
-        runloom_c.go(w)
+        runloom_c.fiber(w)
         runloom_c.run()
         self.assertEqual(seen, ["kaboom"])
 
@@ -68,7 +68,7 @@ class TestBlocking(unittest.TestCase):
             done.append(i)
 
         for i in range(N):
-            runloom_c.go(lambda i=i: w(i))
+            runloom_c.fiber(lambda i=i: w(i))
         t0 = time.monotonic()
         runloom_c.run()
         wall = time.monotonic() - t0

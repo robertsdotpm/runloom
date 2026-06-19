@@ -50,7 +50,7 @@ def main():
         except BaseException as e:                              # noqa: BLE001
             result.append(("err", type(e).__name__))
 
-    runloom_c.go(parker)
+    runloom_c.fiber(parker)
     runloom_c.run()
     s.close()
 

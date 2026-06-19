@@ -395,7 +395,7 @@ def main():
     holder = {}
     def acceptor():
         holder["sc"] = lconn.accept()
-    rc.go(acceptor)
+    rc.fiber(acceptor)
     client = rc.TCPConn.connect("127.0.0.1", port)
     for _ in range(200000):
         if "sc" in holder: break
@@ -409,7 +409,7 @@ def main():
         d = sc.recv(64, MSG_PEEK)
         sc.send_all(d)                 # global-ring runloom_iouring_send
         done["d"] = d
-    rc.go(server)
+    rc.fiber(server)
     client.send_all(b"GLOBALRG")       # global-ring send
     res["reply"] = client.recv(64, MSG_PEEK)   # global-ring recv
     for _ in range(200000):
@@ -417,7 +417,7 @@ def main():
         rc.sched_yield()
     res["server_saw"] = done.get("d")
     client.close(); sc.close(); lconn.close()
-rc.go(main)
+rc.fiber(main)
 rc.run()
 ''' + _POST + r'''
 sys.stdout.write("GLOBAL_ECHO reply=%r server_saw=%r\n" %

@@ -87,10 +87,10 @@ half of the function-bound grow-down auto-sizer.
 #### `set_grow_down(enabled=True)` / `grow_down_enabled() → bool`
 
 (On `runloom`, not `runloom_c`.) Toggle the function-bound stack **grow-down**
-auto-sizer, which learns each `runloom.go()`-spawned function's real stack need
+auto-sizer, which learns each `runloom.fiber()`-spawned function's real stack need
 and reserves only that.  **On by default**, active under M:N (`run(n>1)`) only;
 single-thread `run(1)` keeps the fixed default.  Also disabled by
-`RUNLOOM_GROW_DOWN=0` in the environment.  A per-call `runloom.go(fn,
+`RUNLOOM_GROW_DOWN=0` in the environment.  A per-call `runloom.fiber(fn,
 stack_size=N)` pin always wins, and grow-down defers to the opt-in
 `enable_stack_autosize()` when that is explicitly enabled.  See
 [docs/stack-sizing.md](stack-sizing.md#automatic-grow-down-on-by-default-mn).
@@ -334,7 +334,7 @@ Top-level package.  Re-exports a Go-style API from `runloom.runtime`
 ```python
 import runloom
 
-runloom.go(fn)            # spawn (uses the C scheduler under the hood)
+runloom.fiber(fn)            # spawn (uses the C scheduler under the hood)
 runloom.yield_now()       # cooperative yield (give other fibers a turn)
 runloom.sleep(seconds)    # cooperative sleep
 runloom.run(n, main_fn=None)  # THE entry point. run main_fn with n hubs:
@@ -400,7 +400,7 @@ Classes:
 No-`async`/`await` facade.  See [Sync API](sync-api.md).
 
 ```python
-runloom.sync.go(fn, *args, **kwargs)        # spawn with args
+runloom.sync.fiber(fn, *args, **kwargs)        # spawn with args
 runloom.sync.run(main_fn=None)              # drive scheduler
 runloom.sync.sleep(seconds)
 runloom.sync.yield_now()

@@ -1,10 +1,10 @@
 """Concurrent port scanner — fan-out over the network.
 
-Spawns one goroutine per candidate port and connects to them all at
-once.  This is where goroutines shine over threads: a thousand
-in-flight connect()s cost ~thousands of cheap goroutines, not a
+Spawns one fiber per candidate port and connects to them all at
+once.  This is where fibers shine over threads: a thousand
+in-flight connect()s cost ~thousands of cheap fibers, not a
 thousand 8 MB OS threads.  Under runloom.monkey.patch() the ordinary
-blocking socket.connect parks the goroutine on netpoll instead of the
+blocking socket.connect parks the fiber on netpoll instead of the
 OS thread, so they really do overlap.
 
 To keep it self-contained it opens a few listeners first, then scans a
@@ -19,7 +19,7 @@ import os
 
 import runloom
 
-# Free-threaded build: fan goroutines across all cores (M:N scheduler).
+# Free-threaded build: fan fibers across all cores (M:N scheduler).
 HUBS = os.cpu_count() or 4
 
 runloom.monkey.patch()
@@ -52,7 +52,7 @@ def main():
 
     results = runloom.Chan(len(candidates))
     for port in candidates:
-        runloom.go(probe, host, port, results)
+        runloom.fiber(probe, host, port, results)
 
     found = []
     for _ in range(len(candidates)):

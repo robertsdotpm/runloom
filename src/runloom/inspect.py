@@ -191,7 +191,7 @@ def watch_leaks(min_age=60.0, interval=30.0, states=PARKED_STATES, on_leak=None)
             if hits:
                 cb(hits)
 
-    return _runloom.go(loop)
+    return _runloom.fiber(loop)
 
 
 def install_dump_signal(sig=None):
@@ -257,7 +257,7 @@ def enable_stack_advice(on=True):
     Purely ADVISORY: the runtime never changes or persists a stack size itself
     -- a remembered-small size is only a lower bound on what a future input
     might need, so you read the advice and apply it yourself via
-    ``runloom_c.go(fn, stack_size=...)``, with the guard page + crash reporter
+    ``runloom_c.fiber(fn, stack_size=...)``, with the guard page + crash reporter
     still backstopping every choice.  Off by default; enabling it keeps stack
     painting on (a small profiling cost) for the session."""
     _core.enable_stack_advice(bool(on))
@@ -285,7 +285,7 @@ def enable_stack_autosize(on=True, prescan=False):
 
     Enabling autosize implies `enable_stack_advice()` (so `stack_advice()` keeps
     reporting) and turns on park-time idle-page reclaim. An explicit
-    `runloom.go(fn, stack_size=...)` always overrides the auto-sizer. Off by
+    `runloom.fiber(fn, stack_size=...)` always overrides the auto-sizer. Off by
     default; also enable via `RUNLOOM_STACK_AUTOSIZE=1` (start size via
     `RUNLOOM_STACK_AUTOSIZE_START`, default 256 KiB). Best enabled before the
     runtime starts so kinds are sized from their first spawn.

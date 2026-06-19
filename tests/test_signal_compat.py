@@ -46,7 +46,7 @@ def _drive(fn):
         except BaseException as e:   # noqa: BLE001
             box[1] = e
 
-    runloom_c.go(runner)
+    runloom_c.fiber(runner)
     runloom_c.run()
     if box[1] is not None:
         raise box[1]
@@ -85,8 +85,8 @@ class TestSigwait(unittest.TestCase):
                         ticks.append(1)
                         runloom.sleep(0.002)
 
-                runloom_c.go(sender)
-                runloom_c.go(ticker)
+                runloom_c.fiber(sender)
+                runloom_c.fiber(ticker)
                 sig = signal.sigwait({SIG})
                 done["v"] = True
             finally:
@@ -116,7 +116,7 @@ class TestSigwait(unittest.TestCase):
                 def sender():
                     runloom.sleep(0.02)
                     os.kill(os.getpid(), SIG)
-                runloom_c.go(sender)
+                runloom_c.fiber(sender)
                 return signal.sigwait({SIG})
             finally:
                 _m.signals._orig_sigtimedwait = real
@@ -141,8 +141,8 @@ class TestSigwait(unittest.TestCase):
                         ticks.append(1)
                         runloom.sleep(0.002)
 
-                runloom_c.go(sender)
-                runloom_c.go(ticker)
+                runloom_c.fiber(sender)
+                runloom_c.fiber(ticker)
                 info = signal.sigwaitinfo({SIG})
                 done["v"] = True
             finally:
@@ -165,7 +165,7 @@ class TestSigtimedwait(unittest.TestCase):
                     runloom.sleep(0.02)
                     os.kill(os.getpid(), SIG)
 
-                runloom_c.go(sender)
+                runloom_c.fiber(sender)
                 info = signal.sigtimedwait({SIG}, 5.0)
             finally:
                 signal.pthread_sigmask(signal.SIG_UNBLOCK, {SIG})
@@ -183,7 +183,7 @@ class TestSigtimedwait(unittest.TestCase):
                         ticks.append(1)
                         runloom.sleep(0.003)
 
-                runloom_c.go(ticker)
+                runloom_c.fiber(ticker)
                 info = signal.sigtimedwait({SIG}, 0.08)   # nothing pending
                 done["v"] = True
             finally:
@@ -233,8 +233,8 @@ class TestPause(unittest.TestCase):
                     runloom.sleep(0.03)
                     os.kill(os.getpid(), SIG)
 
-                runloom_c.go(ticker)
-                runloom_c.go(sender)
+                runloom_c.fiber(ticker)
+                runloom_c.fiber(sender)
                 signal.pause()           # parks on the wakeup-fd pipe
                 done["v"] = True
                 return len(ticks)

@@ -1,8 +1,8 @@
-"""Context — cancellation that fans out to every goroutine.
+"""Context — cancellation that fans out to every fiber.
 
 runloom.context mirrors Go's context.Context.  WithCancel returns a
 context plus a cancel() function; calling cancel() closes ctx.done,
-which wakes *every* goroutine select-ing on it at once (a closed
+which wakes *every* fiber select-ing on it at once (a closed
 channel never blocks a receive).  WithTimeout / WithDeadline cancel
 automatically, and cancellation is transitive to child contexts.
 
@@ -14,7 +14,7 @@ import os
 
 import runloom
 
-# Free-threaded build: fan goroutines across all cores (M:N scheduler).
+# Free-threaded build: fan fibers across all cores (M:N scheduler).
 HUBS = os.cpu_count() or 4
 
 def worker(ctx, work, wid):
@@ -33,7 +33,7 @@ def main():
     work = runloom.Chan()               # unbuffered
 
     for wid in range(2):
-        runloom.go(worker, ctx, work, wid)
+        runloom.fiber(worker, ctx, work, wid)
 
     for job in range(4):
         work.send(job)                    # rendezvous with a free worker

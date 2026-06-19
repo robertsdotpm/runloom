@@ -67,7 +67,7 @@ class TestRandomYield(_Seeded):
         for _ in range(20):
             counter[0] = 0
             for _ in range(N):
-                runloom_c.go(lambda r=random.Random(self.rng.random()): w(r))
+                runloom_c.fiber(lambda r=random.Random(self.rng.random()): w(r))
             runloom_c.run()
             # With random yields between read and write, we DO lose
             # updates -- that's the design (cooperative != locked).
@@ -115,10 +115,10 @@ class TestChannelChaos(_Seeded):
                     recv_count[0] += 1
 
             for pid in range(N_PRODS):
-                runloom_c.go(lambda pid=pid: producer(pid))
+                runloom_c.fiber(lambda pid=pid: producer(pid))
             for _ in range(N_CONS):
-                runloom_c.go(consumer)
-            runloom_c.go(closer)
+                runloom_c.fiber(consumer)
+            runloom_c.fiber(closer)
             runloom_c.run()
 
             self.assertEqual(
@@ -152,9 +152,9 @@ class TestChannelChaos(_Seeded):
                 runloom_c.sched_sleep(self.rng.uniform(0.0001, 0.005))
                 ch.close()
 
-            runloom_c.go(sender)
-            runloom_c.go(receiver)
-            runloom_c.go(closer)
+            runloom_c.fiber(sender)
+            runloom_c.fiber(receiver)
+            runloom_c.fiber(closer)
             runloom_c.run()
 
             # After close, sender raised (sent < 100) OR sent all 100.

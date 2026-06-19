@@ -30,8 +30,8 @@ class TestWithCancel(unittest.TestCase):
             runloom_c.sched_sleep(0.01)
             cancel()
 
-        runloom_c.go(waiter)
-        runloom_c.go(canceller)
+        runloom_c.fiber(waiter)
+        runloom_c.fiber(canceller)
         runloom_c.run()
 
         self.assertEqual(len(got), 1)
@@ -51,8 +51,8 @@ class TestWithCancel(unittest.TestCase):
             runloom_c.sched_sleep(0.01)
             p_cancel()
 
-        runloom_c.go(child_waiter)
-        runloom_c.go(cancel_parent)
+        runloom_c.fiber(child_waiter)
+        runloom_c.fiber(cancel_parent)
         runloom_c.run()
 
         self.assertEqual(got, [ctxmod.CANCELED])
@@ -73,7 +73,7 @@ class TestWithTimeout(unittest.TestCase):
             runloom_c.select([("recv", ctx.done)])
             outcome.append(ctx.err())
 
-        runloom_c.go(waiter)
+        runloom_c.fiber(waiter)
         runloom_c.run()
 
         self.assertEqual(outcome, [ctxmod.DEADLINE_EXCEEDED])
@@ -88,7 +88,7 @@ class TestWithTimeout(unittest.TestCase):
             outcome.append(ctx.err())
 
         def early_cancel():
-            # No sleep: cancel() must fire as soon as this goroutine is
+            # No sleep: cancel() must fire as soon as this fiber is
             # scheduled.  The original 0.01s sleep raced the 1.0s deadline
             # waker -- under CPU starvation a >1.0s scheduling delay let the
             # timeout fire first (DEADLINE_EXCEEDED), inverting the assertion.
@@ -97,8 +97,8 @@ class TestWithTimeout(unittest.TestCase):
             # it immediately removes the load-dependence by construction.
             cancel()
 
-        runloom_c.go(waiter)
-        runloom_c.go(early_cancel)
+        runloom_c.fiber(waiter)
+        runloom_c.fiber(early_cancel)
         runloom_c.run()
 
         self.assertEqual(outcome, [ctxmod.CANCELED])
@@ -115,7 +115,7 @@ class TestWithTimeout(unittest.TestCase):
             runloom_c.select([("recv", child.done)])
             outcome.append((child.err(), _time.monotonic() - t0))
 
-        runloom_c.go(waiter)
+        runloom_c.fiber(waiter)
         runloom_c.run()
 
         err, elapsed = outcome[0]

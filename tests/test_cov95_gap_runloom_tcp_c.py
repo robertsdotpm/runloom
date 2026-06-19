@@ -101,7 +101,7 @@ def main():
         c.send_all(b"ping")       # auto-mode resolve_mode runs here too
         res[0] = c.recv(64)
         c.close()
-    rc.go(server); rc.go(client); rc.run()
+    rc.fiber(server); rc.fiber(client); rc.run()
 import socket
 def _port(lst):
     s = socket.socket(fileno=socket.dup(lst.fileno()))
@@ -159,7 +159,7 @@ def main():
         # auto + live_count(>=1) >= threshold(1) + iouring_available -> choice=1.
         res[0] = c.send(b"ping")    # io_uring SEND, small, bounded
         c.close()
-    rc.go(server); rc.go(client); rc.run()
+    rc.fiber(server); rc.fiber(client); rc.run()
 main()
 sys.stdout.write("AUTO_IOURING_SEND %r\n" % (res[0],))
 '''
@@ -211,7 +211,7 @@ def main():
         n = c.recv_into(buf, 8, socket.MSG_PEEK)   # flags!=0 -> single-shot RECV
         res["peek"] = (n, bytes(buf[:n]) if n > 0 else b"")
         c.close()
-    rc.go(server); rc.go(client); rc.run()
+    rc.fiber(server); rc.fiber(client); rc.run()
 main()
 sys.stdout.write("PEEK %r\n" % (res.get("peek"),))
 '''
@@ -233,9 +233,9 @@ def test_recv_into_msg_peek_singleshot_fallback():
 
 # ===========================================================================
 # 4. send EAGAIN backpressure: epoll-path send loop back-edge (L30) + the
-#    EAGAIN park (L46) and its success-resume (L46-47).  A goroutine fills
+#    EAGAIN park (L46) and its success-resume (L46-47).  A fiber fills
 #    SO_SNDBUF on a conn whose peer never reads -> send() EAGAINs -> park on
-#    EPOLLOUT (L46) -> a second goroutine drains the peer -> the park resumes ->
+#    EPOLLOUT (L46) -> a second fiber drains the peer -> the park resumes ->
 #    loop back to L30 -> send completes -> break.  DEFAULT (epoll) backend so no
 #    io_uring at all.
 # ===========================================================================
@@ -244,7 +244,7 @@ def test_send_eagain_park_then_resume_epoll():
     # EAGAIN parks on EPOLLOUT: send_all sends what fits, EAGAINs, parks (L46),
     # the server drains (frees buffer space), the park resumes and the loop
     # re-enters at the back-edge (L30) until the whole payload is sent.  Two
-    # goroutines only (server reads, client sends) -- no busy-yield goroutine
+    # fibers only (server reads, client sends) -- no busy-yield fiber
     # that would starve netpoll.  DEFAULT (epoll) backend; no io_uring.
     PAYLOAD = 4 * 1024 * 1024
     res = {}
@@ -275,8 +275,8 @@ def test_send_eagain_park_then_resume_epoll():
         c.close()
 
     with hang_guard(25, "send EAGAIN park/resume"):
-        rc.go(server)
-        rc.go(sender)
+        rc.fiber(server)
+        rc.fiber(sender)
         rc.run()
     assert res.get("sent") == PAYLOAD, res
     assert res.get("recv") == PAYLOAD, res
@@ -332,8 +332,8 @@ def test_send_hard_error_surfaces_oserror_epoll():
         lst.close()
 
     with hang_guard(20, "send hard error"):
-        rc.go(server)
-        rc.go(sender)
+        rc.fiber(server)
+        rc.fiber(sender)
         rc.run()
     # EPIPE (32) or ECONNRESET (104): a non-transient send error surfaced as a
     # clean OSError (L41-43), never a crash or a hang.
@@ -352,8 +352,8 @@ def errno_ECONNRESET():
 
 # ===========================================================================
 # 6. send EAGAIN park + cancel -> wait_fd<0 error return (conn_send.c.inc L50).
-#    A goroutine fills SO_SNDBUF and parks on EPOLLOUT inside send_all (L46);
-#    a second goroutine then cancel_wait_fd()s it, so netpoll_wait_fd_coop
+#    A fiber fills SO_SNDBUF and parks on EPOLLOUT inside send_all (L46);
+#    a second fiber then cancel_wait_fd()s it, so netpoll_wait_fd_coop
 #    returns <0 -> L47 PyBuffer_Release + L50 returns (clean OSError, no
 #    Python-level pending exc -> SetFromErrno).  Epoll path, bounded.
 # ===========================================================================
@@ -403,9 +403,9 @@ def test_send_park_then_cancel_returns_error_epoll():
         lst.close()
 
     with hang_guard(20, "send park+cancel"):
-        hold["g"] = rc.go(sender)
-        rc.go(server)
-        rc.go(canceller)
+        hold["g"] = rc.fiber(sender)
+        rc.fiber(server)
+        rc.fiber(canceller)
         rc.run()
     # The parked send was cancelled: wait_fd returned <0 -> L50 error return.
     # The cancel succeeded and the send did NOT silently complete.
@@ -446,8 +446,8 @@ def test_send_all_on_closed_conn_raises():
         lst.close()
 
     with hang_guard(15, "send_all closed guard"):
-        rc.go(server)
-        rc.go(client)
+        rc.fiber(server)
+        rc.fiber(client)
         rc.run()
     assert res.get("raised") is True, res
     assert "closed" in res.get("msg", ""), res
@@ -481,7 +481,7 @@ def main():
             conn.close()
         except OSError as e:
             box["errno"] = e.errno
-    rc.go(server); rc.run()
+    rc.fiber(server); rc.run()
     raw.close(); lst.close()
 main()
 if "errno" in box:

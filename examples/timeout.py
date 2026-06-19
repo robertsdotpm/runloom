@@ -13,7 +13,7 @@ import os
 
 import runloom
 
-# Free-threaded build: fan goroutines across all cores (M:N scheduler).
+# Free-threaded build: fan fibers across all cores (M:N scheduler).
 HUBS = os.cpu_count() or 4
 
 def slow_op(out, delay):
@@ -22,7 +22,7 @@ def slow_op(out, delay):
 
 def with_timeout(delay, limit):
     result = runloom.Chan(1)
-    runloom.go(slow_op, result, delay)
+    runloom.fiber(slow_op, result, delay)
     idx, payload = runloom.select([
         ("recv", result),                 # case 0: the work finished
         ("recv", runloom.time.After(limit)), # case 1: the deadline fired

@@ -33,7 +33,7 @@ CHILD_TIMEOUT = float(os.environ.get("RUNLOOM_FORK_TIMEOUT", "15"))
 def _coop(workload):
     """Run workload() inside a fiber, return its result."""
     box = []
-    runloom_c.go(lambda: box.append(workload()), stack_size=8 << 20)
+    runloom_c.fiber(lambda: box.append(workload()), stack_size=8 << 20)
     runloom_c.run()
     return box[0] if box else None
 

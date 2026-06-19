@@ -103,7 +103,7 @@ def _cross_hub_waves(hubs, n, waves):
 
     def main():
         for i in range(n):
-            runloom.go(waiter, i)
+            runloom.fiber(waiter, i)
         # let every waiter link + commit its park across the hubs
         runloom.sleep(0.2)
         per = max(1, n // waves)
@@ -166,11 +166,11 @@ def _same_hub(hubs, n, busy):
 
     def main():
         for _ in range(busy):
-            runloom.go(spinner)
+            runloom.fiber(spinner)
         for i in range(n):
             a, b = _pair()
             socks.append((a, b))
-            runloom.go(waiter, i, a, b)
+            runloom.fiber(waiter, i, a, b)
         runloom.sleep(0.5)
         main.total = sum(woke)
 
@@ -217,7 +217,7 @@ def _many_via_kqueue(hubs, n):
 
     def main():
         for i in range(n):
-            runloom.go(waiter, i)
+            runloom.fiber(waiter, i)
         runloom.sleep(0.3)       # all parked across hubs
         for i in range(n):       # one burst: a big ready set into the kqueues
             pairs[i][1].send(b"z")
@@ -240,7 +240,7 @@ def test_many_waiters_via_kqueue_event(n):
 
 
 # --------------------------------------------------------------------------- #
-# 4a. FOREIGN-THREAD CLOSE: a real (non-goroutine, non-hub) threading.Thread
+# 4a. FOREIGN-THREAD CLOSE: a real (non-fiber, non-hub) threading.Thread
 #     closes the PEER of a socketpair while a fiber is parked READ on its end.
 #     Closing the peer half-closes the parked fd -> kqueue reports EV_EOF on the
 #     READ filter; the pump folds EOF into BOTH directions
@@ -266,7 +266,7 @@ def test_foreign_thread_peer_close_wakes_parked(hubs):
 
     def main():
         for i in range(n):
-            runloom.go(waiter, i)
+            runloom.fiber(waiter, i)
         runloom.sleep(0.25)      # all parked across the hubs
 
         def closer():
@@ -317,7 +317,7 @@ def test_foreign_thread_cancel_wait_fd(hubs):
 
     def main():
         for i in range(n):
-            runloom.go(waiter, i)
+            runloom.fiber(waiter, i)
         runloom.sleep(0.3)       # all parked; handles recorded
 
         def canceller():
@@ -367,7 +367,7 @@ def test_cross_hub_g_wake_breaks_parking_hub(hubs):
 
     def main():
         for i in range(n):
-            runloom.go(waiter, i)
+            runloom.fiber(waiter, i)
         runloom.sleep(0.3)
         for h in handles:        # root hub wakes each parked fiber cross-hub
             if h is not None:
@@ -414,7 +414,7 @@ def test_cancel_all_parked_drains_every_hub(hubs):
 
     def main():
         for i in range(n):
-            runloom.go(waiter, i)
+            runloom.fiber(waiter, i)
         runloom.sleep(0.3)       # all parked, blocking-forever, across hubs
         box["ret"] = runloom_c.cancel_all_parked()
         runloom.sleep(0.4)

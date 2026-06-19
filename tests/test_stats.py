@@ -26,8 +26,8 @@ class TestStats(unittest.TestCase):
 
     def test_completed_increments(self):
         before = runloom_c.stats()["completed"]
-        runloom_c.go(lambda: None)
-        runloom_c.go(lambda: None)
+        runloom_c.fiber(lambda: None)
+        runloom_c.fiber(lambda: None)
         runloom_c.run()
         after = runloom_c.stats()["completed"]
         self.assertGreaterEqual(after - before, 2)

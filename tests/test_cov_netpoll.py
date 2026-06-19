@@ -51,7 +51,7 @@ def test_epoll_hup_wakes_reader():
     r, w = os.pipe()
     hold["r"], hold["w"] = r, w
     with hang_guard(15, "epoll hup"):
-        rc.go(reader); rc.go(closer); rc.run()
+        rc.fiber(reader); rc.fiber(closer); rc.run()
     _drop(r)
     assert res.get("rv", 0) & READ, "HUP did not wake the reader (rv=%r)" % res.get("rv")
 
@@ -69,7 +69,7 @@ def test_epoll_err_wakes_on_socket_reset():
     a, b = socket.socketpair()
     hold["a"], hold["b"] = a, b
     with hang_guard(15, "epoll err"):
-        rc.go(reader); rc.go(resetter); rc.run()
+        rc.fiber(reader); rc.fiber(resetter); rc.run()
     _drop(a.fileno())
     assert res.get("rv", 0) != 0, "RST/ERR did not wake the reader"
 
@@ -90,7 +90,7 @@ def test_epoll_mod_widen_second_direction():
     a, b = socket.socketpair()
     hold["fd"], hold["b"] = a.fileno(), b
     with hang_guard(15, "epoll mod widen"):
-        rc.go(write_waiter); rc.go(read_waiter); rc.go(sender); rc.run()
+        rc.fiber(write_waiter); rc.fiber(read_waiter); rc.fiber(sender); rc.run()
     _drop(a.fileno()); b.close()
     assert res.get("w") is True and res.get("r") is True
 
@@ -108,9 +108,9 @@ def test_epoll_many_timed_parks_expire():
             fired[i] = 1
     def main():
         for i in range(N):
-            rc.go(lambda i=i: waiter(i))
+            rc.fiber(lambda i=i: waiter(i))
     with hang_guard(20, "epoll deadline heap"):
-        rc.go(main); rc.run()
+        rc.fiber(main); rc.run()
     for r, w in pipes:
         _drop(r); os.close(w)
     assert sum(fired) == N, "%d/%d timed parks expired" % (sum(fired), N)
@@ -130,12 +130,12 @@ def test_epoll_release_if_idle_and_cancel():
         r2, w2 = os.pipe()
         def parker():
             res["rv"] = rc.wait_fd(r2, READ, -1)
-        g = rc.go(parker)
+        g = rc.fiber(parker)
         rc.sched_yield(); rc.sched_yield()
         res["cancel"] = g.cancel_wait_fd()
         _drop(r2); os.close(w2)
     with hang_guard(15, "epoll release/cancel"):
-        rc.go(f); rc.run()
+        rc.fiber(f); rc.run()
     assert res.get("cancel") is True
     assert res.get("rv") == rc.WAIT_FD_CANCELLED
 
@@ -150,12 +150,12 @@ def test_epoll_many_distinct_fds_grow_by_fd_array():
             woke[i] = 1
     def main():
         for i in range(N):
-            rc.go(lambda i=i: reader(i))
+            rc.fiber(lambda i=i: reader(i))
         rc.sched_yield()
         for i in range(N):
             pairs[i][1].send(b"!")
     with hang_guard(40, "epoll many fds"):
-        rc.go(main); rc.run()
+        rc.fiber(main); rc.run()
     for rd, wr in pairs:
         _drop(rd.fileno()); wr.close()
     assert sum(woke) == N
@@ -178,9 +178,9 @@ def test_epoll_iouring_file_io_drains_eventfd():
                 if rc.file_read(fd, buf, 4096, 0) == 4096:
                     ok[i] = 1
                 os.close(fd); os.unlink(path)
-            rc.go(one)
+            rc.fiber(one)
     with hang_guard(30, "iouring eventfd"):
-        rc.go(main); rc.run()
+        rc.fiber(main); rc.run()
     assert sum(ok) == 16
 
 
@@ -192,7 +192,7 @@ def test_epoll_diag_dump_while_parked():
     def f():
         socks = [socket.socketpair() for _ in range(10)]
         for a, b in socks:
-            rc.go(lambda a=a: rc.wait_fd(a.fileno(), READ, -1))
+            rc.fiber(lambda a=a: rc.wait_fd(a.fileno(), READ, -1))
         rc.sched_yield()
         snap["parked"] = rc.stats().get("netpoll_parked_self", 0)
         rc.dump_fibers(_DEVNULL)
@@ -205,7 +205,7 @@ def test_epoll_diag_dump_while_parked():
         for a, b in socks:
             _drop(a.fileno()); b.close()
     with hang_guard(20, "epoll diag dump"):
-        rc.go(f); rc.run()
+        rc.fiber(f); rc.run()
     assert snap.get("parked", 0) >= 10
     assert snap.get("self_check") == 0
 
@@ -215,7 +215,7 @@ def test_epoll_netpoll_maxfd_env_subprocess():
     script = (
         "import sys,os; sys.path.insert(0,'src');"
         "import runloom_c as rc;"
-        "rc.go(lambda: rc.stats());"
+        "rc.fiber(lambda: rc.stats());"
         "rc.run();"
         "rc.dump_fibers(os.open(os.devnull,os.O_WRONLY));"
         "rc._dump_parkers();"

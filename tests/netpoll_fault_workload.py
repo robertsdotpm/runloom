@@ -57,7 +57,7 @@ def mode_happy():
         except OSError as e:
             err.append(e.errno)
 
-    runloom_c.go(waiter)
+    runloom_c.fiber(waiter)
     runloom_c.run()
     t.join(5)
     r.close(); w.close()
@@ -79,7 +79,7 @@ def mode_timeout():
     def waiter():
         got.append(runloom_c.wait_fd(r.fileno(), READ, TIMEOUT_MS))
 
-    runloom_c.go(waiter)
+    runloom_c.fiber(waiter)
     runloom_c.run()
     r.close(); w.close()
     # Either a clean timeout (0) or a raised OSError handled by the caller is

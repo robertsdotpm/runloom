@@ -39,12 +39,12 @@ def worker(i):
 
 def main():
     for i in range(5):
-        ps.go(worker, i)         # args + kwargs supported
+        ps.fiber(worker, i)         # args + kwargs supported
 
 ps.run(main)
 ```
 
-`ps.go(fn, *args, **kwargs)` is like `threading.Thread(target=...).start()`
+`ps.fiber(fn, *args, **kwargs)` is like `threading.Thread(target=...).start()`
 except the "thread" is a fiber -- cheap to create, cooperatively
 scheduled.
 
@@ -75,8 +75,8 @@ def consumer(ch):
 
 def main():
     ch = ps.Chan(5)
-    ps.go(producer, ch)
-    ps.go(consumer, ch)
+    ps.fiber(producer, ch)
+    ps.fiber(consumer, ch)
 
 ps.run(main)
 ```
@@ -103,8 +103,8 @@ def main():
         result = fut.result(timeout=1.0)  # blocks until result arrives or timeout
         print("got:", result)
     
-    runloom.go(sender)
-    runloom.go(receiver)
+    runloom.fiber(sender)
+    runloom.fiber(receiver)
 
 runloom.run(main)
 ```
@@ -155,8 +155,8 @@ def main():
     f1 = runloom.sync.Future()
     f2 = runloom.sync.Future()
     
-    runloom.go(lambda: f1.set_result(10))
-    runloom.go(lambda: f2.set_result(20))
+    runloom.fiber(lambda: f1.set_result(10))
+    runloom.fiber(lambda: f2.set_result(20))
     
     results = runloom.sync.gather(f1, f2)
     print(results)  # [10, 20]
@@ -180,7 +180,7 @@ def main():
     
     for i in range(5):
         wg.add(1)
-        runloom.go(lambda i=i: (worker(i), wg.done()))
+        runloom.fiber(lambda i=i: (worker(i), wg.done()))
     
     wg.wait()  # blocks until all Done() calls
     print("all done")
@@ -212,8 +212,8 @@ def main():
             runloom.sleep(0.01)
     
     for i in range(3):
-        runloom.go(reader, i)
-        runloom.go(writer, i)
+        runloom.fiber(reader, i)
+        runloom.fiber(writer, i)
     
     runloom.sleep(0.2)
 
@@ -241,7 +241,7 @@ def main():
             sem.release()
     
     for i in range(6):
-        runloom.go(worker, i)
+        runloom.fiber(worker, i)
     
     runloom.sleep(0.4)
 
@@ -282,7 +282,7 @@ def main():
         print("using initialized state")
     
     for i in range(5):
-        runloom.go(worker)
+        runloom.fiber(worker)
     
     runloom.sleep(0.2)
     print("init was called", init_called[0], "times")  # 1
@@ -330,7 +330,7 @@ def main():
     
     # All 5 calls with the same key share one execution
     for i in range(5):
-        runloom.go(caller, "x")
+        runloom.fiber(caller, "x")
     
     runloom.sleep(0.2)
     print("expensive was called", call_count[0], "times")  # 1
@@ -361,11 +361,11 @@ def main():
             value = watch.wait_changed(timeout=1.0)  # blocks until value changes
             print(name, "got", value)
     
-    runloom.go(setter, 0)
-    runloom.go(setter, 1)
-    runloom.go(setter, 2)
+    runloom.fiber(setter, 0)
+    runloom.fiber(setter, 1)
+    runloom.fiber(setter, 2)
     for name in ["w1", "w2"]:
-        runloom.go(waiter, name)
+        runloom.fiber(waiter, name)
     
     runloom.sleep(0.2)
 
@@ -405,7 +405,7 @@ def main():
     listener = ps.tcp_listen("127.0.0.1", 9000)
     while True:
         conn, _ = listener.accept()
-        ps.go(handle, conn)
+        ps.fiber(handle, conn)
 
 ps.run(main)
 ```
@@ -455,7 +455,7 @@ def waiter():
     print("woken")
 
 def main():
-    ps.go(waiter)
+    ps.fiber(waiter)
     # Later, from another fiber: ps.wake(g)  -- or g.wake()
 ```
 
@@ -507,7 +507,7 @@ def main():
     targets = ["example.com", "example.org", "example.net"]
     ch = ps.Chan(len(targets))
     for h in targets:
-        ps.go(fetch_one, h, 80, ch)
+        ps.fiber(fetch_one, h, 80, ch)
     for _ in targets:
         host, result = ch.recv()[0]
         print(host, "->", result)

@@ -64,7 +64,7 @@ void      runloom_critsec_restore(void *tstate, uintptr_t saved);
 
 /* EXPERIMENT (docs/dev/HUB_SCALING.md, A1b): make `op` immortal so its refcount
  * is frozen and never touched again.  Cross-hub incref/decref on a shared,
- * long-lived instance (the harness/channel objects every goroutine calls into)
+ * long-lived instance (the harness/channel objects every fiber calls into)
  * then become no-ops instead of _Py_TryIncRefShared / _Py_DecRefShared atomics
  * -- the dominant cross-hub cost the hub-scaling audit measured.  ONLY safe for
  * objects that live for the whole run (immortal objects are never freed).

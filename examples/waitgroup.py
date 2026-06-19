@@ -1,7 +1,7 @@
-"""WaitGroup — wait for a batch of goroutines to finish.
+"""WaitGroup — wait for a batch of fibers to finish.
 
 Go's sync.WaitGroup in ~10 lines on top of a channel: add(n) records
-how many goroutines you launched, each calls done() when it finishes,
+how many fibers you launched, each calls done() when it finishes,
 and wait() blocks until that many have reported in.  A buffered channel
 is all the bookkeeping you need.
 
@@ -13,7 +13,7 @@ import os
 
 import runloom
 
-# Free-threaded build: fan goroutines across all cores (M:N scheduler).
+# Free-threaded build: fan fibers across all cores (M:N scheduler).
 HUBS = os.cpu_count() or 4
 
 class WaitGroup(object):
@@ -45,7 +45,7 @@ def main():
     num_tasks = 5
     wg.add(num_tasks)
     for tid in range(num_tasks):
-        runloom.go(task, wg, tid)
+        runloom.fiber(task, wg, tid)
     wg.wait()
     print("all {0} tasks done".format(num_tasks))
 

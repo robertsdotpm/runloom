@@ -27,7 +27,7 @@ def _run_single(fn):
     box = {}
     def main():
         box["r"] = fn()
-    rc.go(main)
+    rc.fiber(main)
     rc.run()
     return box.get("r")
 
@@ -85,10 +85,10 @@ def test_many_concurrent_file_ops():
             finally:
                 wg.done()
         for i in range(N):
-            rc.go(lambda i=i: worker(i))
+            rc.fiber(lambda i=i: worker(i))
         wg.wait()
     with hang_guard(40, "concurrent file ops"):
-        rc.go(main); rc.run()
+        rc.fiber(main); rc.run()
     assert sum(results) == N, "%d/%d concurrent file ops correct" % (sum(results), N)
 
 
@@ -112,10 +112,10 @@ def test_fd_read_write_nonblocking_pipe_cooperative():
             buf = bytearray(5)
             n = rc.fd_read(r, buf, 5)
             out["data"] = bytes(buf[:n])
-        rc.go(reader)
-        rc.go(writer)
+        rc.fiber(reader)
+        rc.fiber(writer)
     with hang_guard(15, "fd nonblocking pipe"):
-        rc.go(main); rc.run()
+        rc.fiber(main); rc.run()
     r, w = hold["fds"]
     rc.netpoll_unregister(r); os.close(r)
     rc.netpoll_unregister(w); os.close(w)
@@ -138,14 +138,14 @@ def test_fd_read_on_blocking_fd_cooperates():
             for _ in range(5):
                 rc.sched_yield()               # only runs if fd_read PARKED
             os.write(w, b"X")
-        rc.go(sib)
+        rc.fiber(sib)
         def reader():
             buf = bytearray(1)
             out["n"] = rc.fd_read(r, buf, 1)   # must park cooperatively, not wedge
             out["buf"] = bytes(buf)
-        rc.go(reader)
+        rc.fiber(reader)
     with hang_guard(10, "fd_read blocking fd"):
-        rc.go(main); rc.run()
+        rc.fiber(main); rc.run()
     r, w = hold["fds"]
     rc.netpoll_unregister(r); os.close(r); os.close(w)
     assert out.get("buf") == b"X", "fd_read wedged or lost data on a blocking fd"

@@ -7,25 +7,25 @@ deeper into the failure modes a lock-free M:N scheduler + non-blocking I/O
 break under:
 
   * CRASH         -- a foreign-thread caller must never park a nonexistent
-                     goroutine nor lazily allocate scheduler state (the
+                     fiber nor lazily allocate scheduler state (the
                      documented SIGSEGV class).  Crash-prone scenarios run in a
                      SUBPROCESS so a SIGSEGV is contained + observed.
   * HANG/lost-wake -- every fan-in/cross-thread wake is wrapped in hang_guard
                      and/or driven with finite timeouts so a lost wake is a
                      bounded failure, never an infinite hang.
-  * WRONG DATA    -- a lock-guarded counter hammered by goroutines AND a real
+  * WRONG DATA    -- a lock-guarded counter hammered by fibers AND a real
                      OS thread must be EXACT with the GIL off; a Queue/Event/
                      Condition must deliver every item / wake every waiter.
   * REORDER       -- FIFO Queue ordering, notify(n) waking exactly n, a timed-
                      out Condition waiter not stealing a later notify().
-  * SLOW RETURN   -- a foreign+goroutine contended primitive that DOES complete
+  * SLOW RETURN   -- a foreign+fiber contended primitive that DOES complete
                      but serialized (assert_faster_than) is still a bug.
   * UNVALIDATED INPUT -- patch() unknown category, BoundedSemaphore over-release,
                      CoSemaphore negative value, DNS bogus name / family mismatch.
 
 THE HEADLINE is FOREIGN-OS-THREAD SAFETY (CLAUDE.md "Cooperative primitives must
 be FOREIGN-OS-THREAD-safe"): for each patched primitive, drive it from a genuine
-foreign OS thread (raw_thread / _thread.start_new_thread) WHILE goroutines also
+foreign OS thread (raw_thread / _thread.start_new_thread) WHILE fibers also
 use it under runloom.run(N), asserting no crash and correct behaviour.
 """
 import os
@@ -100,7 +100,7 @@ def _run_single(fn):
     box = {}
     def main():
         box["r"] = fn()
-    rc.go(main); rc.run()
+    rc.fiber(main); rc.run()
     return box.get("r")
 
 
@@ -143,13 +143,13 @@ def test_getattr_resolves_section_internals_live():
         monkey.this_name_does_not_exist_anywhere
 
 
-def test_go_wrapper_installed_marks_fiber_context():
+def test_fiber_wrapper_installed_marks_fiber_context():
     # After patch(), runloom_c.go is wrapped so _in_fiber() is true inside.
     box = {}
     def main():
         box["in_fiber"] = monkey._in_fiber()
         box["off_fiber_seen_from_here"] = True
-    rc.go(main); rc.run()
+    rc.fiber(main); rc.run()
     assert box["in_fiber"] is True
     # Outside any fiber, _in_fiber() is false.
     assert monkey._in_fiber() is False
@@ -164,11 +164,11 @@ def test_queue_uses_cooperative_condition_after_patch():
 
 
 # ==========================================================================
-# 2. HEADLINE: a patched Lock hammered by MANY goroutines AND a foreign OS
+# 2. HEADLINE: a patched Lock hammered by MANY fibers AND a foreign OS
 #    thread, EXACT guarded counter (lost mutex / lost cross-thread wake / crash)
 # ==========================================================================
 @mn_only
-def test_lock_exact_count_foreign_plus_goroutines_heavy():
+def test_lock_exact_count_foreign_plus_fibers_heavy():
     lk = threading.Lock()
     counter = [0]
     GOR, GOR_ITERS = 32, 300
@@ -200,7 +200,7 @@ def test_lock_exact_count_foreign_plus_goroutines_heavy():
             rc.mn_go(w)
         wg.wait()
 
-    with hang_guard(90, "lock exact-count foreign+goroutines heavy"):
+    with hang_guard(90, "lock exact-count foreign+fibers heavy"):
         runloom.run(4, main)
         deadline = time.monotonic() + 40
         while foreign_done[0] < FOREIGN_THREADS and time.monotonic() < deadline:
@@ -214,7 +214,7 @@ def test_lock_exact_count_foreign_plus_goroutines_heavy():
 
 
 @mn_only
-def test_rlock_exact_count_foreign_plus_goroutines():
+def test_rlock_exact_count_foreign_plus_fibers():
     # RLock reentrancy + ownership identity differs between a fiber
     # (runloom.current()) and a foreign thread (get_ident); both must serialize.
     rl = threading.RLock()
@@ -245,7 +245,7 @@ def test_rlock_exact_count_foreign_plus_goroutines():
             rc.mn_go(w)
         wg.wait()
 
-    with hang_guard(70, "rlock foreign+goroutines"):
+    with hang_guard(70, "rlock foreign+fibers"):
         runloom.run(4, main)
         deadline = time.monotonic() + 30
         while not fdone[0] and time.monotonic() < deadline:
@@ -258,8 +258,8 @@ def test_rlock_exact_count_foreign_plus_goroutines():
 
 
 @mn_only
-def test_semaphore_exact_count_foreign_plus_goroutines():
-    # A Semaphore(1) is a mutex; foreign + goroutine contenders must serialize.
+def test_semaphore_exact_count_foreign_plus_fibers():
+    # A Semaphore(1) is a mutex; foreign + fiber contenders must serialize.
     sem = threading.Semaphore(1)
     counter = [0]
     GOR, GOR_ITERS = 20, 200
@@ -287,7 +287,7 @@ def test_semaphore_exact_count_foreign_plus_goroutines():
             rc.mn_go(w)
         wg.wait()
 
-    with hang_guard(70, "semaphore foreign+goroutines"):
+    with hang_guard(70, "semaphore foreign+fibers"):
         runloom.run(4, main)
         deadline = time.monotonic() + 30
         while not fdone[0] and time.monotonic() < deadline:
@@ -301,7 +301,7 @@ def test_semaphore_exact_count_foreign_plus_goroutines():
 
 # ==========================================================================
 # 3. The SIGSEGV class: a foreign thread taking a patched primitive must NOT
-#    lazily allocate scheduler state nor park a nonexistent goroutine.  Run
+#    lazily allocate scheduler state nor park a nonexistent fiber.  Run
 #    crash-prone foreign+M:N combos in a subprocess so a SIGSEGV is contained.
 # ==========================================================================
 def test_foreign_thread_lock_no_scheduler_alloc_subprocess():
@@ -324,7 +324,7 @@ def test_foreign_thread_lock_no_scheduler_alloc_subprocess():
         for _ in range(6):
             _thread.start_new_thread(foreign, ())
 
-        # Now also run goroutines concurrently under M:N on the SAME lock.
+        # Now also run fibers concurrently under M:N on the SAME lock.
         from runloom.sync import WaitGroup
         def main():
             wg = WaitGroup(); wg.add(8)
@@ -349,9 +349,9 @@ def test_foreign_thread_lock_no_scheduler_alloc_subprocess():
     assert "OK" in out, out
 
 
-def test_foreign_condition_woken_by_goroutine_notify_subprocess():
+def test_foreign_condition_woken_by_fiber_notify_subprocess():
     # A foreign thread waiting on a patched Condition must make progress via
-    # real OS blocking and be woken by a goroutine's cross-thread notify_all.
+    # real OS blocking and be woken by a fiber's cross-thread notify_all.
     rc_, out = run_child("""
         import threading, time, _thread
         import runloom, runloom_c as rc
@@ -384,7 +384,7 @@ def test_foreign_condition_woken_by_goroutine_notify_subprocess():
 # ==========================================================================
 # 4. Event / Condition fan-in correctness (wake ALL / exactly-n / no steal)
 # ==========================================================================
-def test_event_wakes_all_goroutine_waiters_single_thread():
+def test_event_wakes_all_fiber_waiters_single_thread():
     ev = threading.Event()
     woke = []
     N = 64
@@ -393,16 +393,16 @@ def test_event_wakes_all_goroutine_waiters_single_thread():
         woke.append(1)
     def main():
         for _ in range(N):
-            rc.go(waiter)
+            rc.fiber(waiter)
         rc.sched_yield()
         ev.set()
     with hang_guard(20, "event fan-in 64"):
-        rc.go(main); rc.run()
+        rc.fiber(main); rc.run()
     assert len(woke) == N
 
 
 @mn_only
-def test_event_fanin_mixed_foreign_and_goroutine_waiters():
+def test_event_fanin_mixed_foreign_and_fiber_waiters():
     ev = threading.Event()
     foreign_woke = [0]
     NG = 32
@@ -423,10 +423,10 @@ def test_event_fanin_mixed_foreign_and_goroutine_waiters():
     while foreign_started[0] < NF and time.monotonic() < dl:
         time.sleep(0.005)
 
-    # Per-goroutine slot (single writer each) summed at the boundary -- a shared
-    # counter += 1 from many goroutines LOSES increments with the GIL off (the
+    # Per-fiber slot (single writer each) summed at the boundary -- a shared
+    # counter += 1 from many fibers LOSES increments with the GIL off (the
     # documented race-free-counter rule), which is a test artefact, not a wake
-    # bug.  We only want to prove every goroutine waiter was woken exactly once.
+    # bug.  We only want to prove every fiber waiter was woken exactly once.
     woke_slots = bytearray(NG)
 
     def main():
@@ -443,7 +443,7 @@ def test_event_fanin_mixed_foreign_and_goroutine_waiters():
             rc.mn_go(make_waiter(i))
         rc.sched_yield()
         rc.sched_yield()
-        ev.set()                     # ONE set wakes goroutines AND foreign
+        ev.set()                     # ONE set wakes fibers AND foreign
         wg.wait()
 
     with hang_guard(40, "event fan-in mixed"):
@@ -452,7 +452,7 @@ def test_event_fanin_mixed_foreign_and_goroutine_waiters():
         while foreign_woke[0] < NF and time.monotonic() < dl:
             time.sleep(0.005)
     gor_woke_total = sum(woke_slots)
-    assert gor_woke_total == NG, "goroutine waiters: %d != %d (a lost wake)" % (
+    assert gor_woke_total == NG, "fiber waiters: %d != %d (a lost wake)" % (
         gor_woke_total, NG)
     assert foreign_woke[0] == NF, "foreign waiters: %d != %d" % (foreign_woke[0], NF)
 
@@ -464,7 +464,7 @@ def test_event_timed_wait_returns_false_on_timeout_not_slow():
         with assert_faster_than(2.0, "event timed wait"):
             out["r"] = ev.wait(timeout=0.2)   # never set -> times out
     with hang_guard(10, "event timed wait timeout"):
-        rc.go(main); rc.run()
+        rc.fiber(main); rc.run()
     assert out["r"] is False
 
 
@@ -482,7 +482,7 @@ def test_condition_notify_n_wakes_exactly_n():
         return waiter
     def main():
         for i in range(N):
-            rc.go(make_waiter(i))
+            rc.fiber(make_waiter(i))
         # let all N park
         while parked[0] < N:
             rc.sched_yield()
@@ -494,7 +494,7 @@ def test_condition_notify_n_wakes_exactly_n():
         with cv:
             cv.notify_all()
     with hang_guard(20, "condition notify(n)"):
-        rc.go(main); rc.run()
+        rc.fiber(main); rc.run()
     assert len(woke) == N
     assert sorted(woke[:5]) == list(range(5)), "notify is not FIFO: %r" % woke[:5]
 
@@ -513,17 +513,17 @@ def test_condition_timed_out_waiter_does_not_steal_later_notify():
             r = cv.wait(timeout=5.0)
             order.append(("live", r))
     def main():
-        rc.go(timed_waiter)
+        rc.fiber(timed_waiter)
         rc.sched_yield()
         # let the timed waiter actually time out
         runloom.sleep(0.25)
-        rc.go(live_waiter)
+        rc.fiber(live_waiter)
         rc.sched_yield()
         runloom.sleep(0.05)
         with cv:
             cv.notify()     # must wake the LIVE waiter, not the dead one
     with hang_guard(20, "condition no-steal"):
-        rc.go(main); rc.run()
+        rc.fiber(main); rc.run()
     # the live waiter must have been woken by notify (r True), not timed out
     live = [r for tag, r in order if tag == "live"]
     assert live == [True], (
@@ -570,10 +570,10 @@ def test_semaphore_limits_concurrency_exactly():
             finally:
                 wg.done()
         for _ in range(N):
-            rc.go(w)
+            rc.fiber(w)
         wg.wait()
     with hang_guard(30, "semaphore concurrency cap"):
-        rc.go(main); rc.run()
+        rc.fiber(main); rc.run()
     assert peak[0] <= 3, "semaphore let %d run at once (cap 3)" % peak[0]
 
 
@@ -584,7 +584,7 @@ def test_semaphore_timed_acquire_bounded_not_slow():
         with assert_faster_than(1.0, "sem timed acquire"):
             out["r"] = sem.acquire(timeout=0.2)
     with hang_guard(10, "sem timed acquire"):
-        rc.go(main); rc.run()
+        rc.fiber(main); rc.run()
     assert out["r"] is False
 
 
@@ -598,19 +598,19 @@ def test_semaphore_cancel_all_unblocks_waiters_without_permit():
         results.append(sem.acquire())   # blocking, no timeout
     def main():
         for _ in range(N):
-            rc.go(waiter)
+            rc.fiber(waiter)
         while parked[0] < N:
             rc.sched_yield()
         runloom.sleep(0.02)
         sem.cancel_all()                # wake all WITHOUT a permit -> all False
     with hang_guard(20, "semaphore cancel_all"):
-        rc.go(main); rc.run()
+        rc.fiber(main); rc.run()
     assert results == [False] * N, "cancel_all did not unblock all waiters: %r" % results
 
 
 # ==========================================================================
 # 6. Queue / SimpleQueue: ordering, timeouts, no lost wakeup under fan-in,
-#    foreign + goroutine producer/consumer.
+#    foreign + fiber producer/consumer.
 # ==========================================================================
 def test_simplequeue_fifo_and_get_nowait_empty():
     q = queue.SimpleQueue()
@@ -623,7 +623,7 @@ def test_simplequeue_fifo_and_get_nowait_empty():
             out["empty"] = False
         except queue.Empty:
             out["empty"] = True
-    rc.go(main); rc.run()
+    rc.fiber(main); rc.run()
     assert out["a"] == [1, 2, 3]
     assert out["empty"] is True
 
@@ -639,7 +639,7 @@ def test_simplequeue_timed_get_times_out_bounded():
             except queue.Empty:
                 out["raised"] = True
     with hang_guard(10, "simplequeue timed get"):
-        rc.go(main); rc.run()
+        rc.fiber(main); rc.run()
     assert out["raised"] is True
 
 
@@ -669,22 +669,22 @@ def test_queue_many_producers_consumers_no_lost_item():
             finally:
                 wg.done()
         for _ in range(NP):
-            rc.go(p)
+            rc.fiber(p)
         for _ in range(NC):
-            rc.go(consumer)
+            rc.fiber(consumer)
         # one driver waits for producers then poisons each consumer
         def driver():
             wg.wait()
             for _ in range(NC):
                 q.put(SENTINEL)
-        rc.go(driver)
+        rc.fiber(driver)
     with hang_guard(30, "queue many prod/cons"):
-        rc.go(main); rc.run()
+        rc.fiber(main); rc.run()
     assert len(got) == produced, "lost items: %d != %d" % (len(got), produced)
 
 
 @mn_only
-def test_simplequeue_foreign_producer_goroutine_consumer():
+def test_simplequeue_foreign_producer_fiber_consumer():
     q = queue.SimpleQueue()
     N = 300
     got = []
@@ -694,7 +694,7 @@ def test_simplequeue_foreign_producer_goroutine_consumer():
         for i in range(N):
             q.put(i)
             if i % 64 == 0:
-                time.sleep(0)   # let the goroutine drain
+                time.sleep(0)   # let the fiber drain
         fdone[0] = True
     _real_thread_mod.start_new_thread(foreign_producer, ())
 
@@ -885,7 +885,7 @@ def test_rlock_at_fork_reinit_resets_owner():
         rl._at_fork_reinit()
         out["owned"] = rl._is_owned()
         out["count"] = rl._recursion_count()
-    rc.go(main); rc.run()
+    rc.fiber(main); rc.run()
     assert out["owned"] is False
     assert out["count"] == 0
 
@@ -981,7 +981,7 @@ def test_subprocess_wait_cooperative_returns_code():
         p = subprocess.Popen([sys.executable, "-c", "import sys; sys.exit(7)"])
         out["rc"] = p.wait()
     with hang_guard(30, "subprocess wait"):
-        rc.go(main); rc.run()
+        rc.fiber(main); rc.run()
     assert out["rc"] == 7
 
 
@@ -995,10 +995,10 @@ def test_subprocess_wait_yields_to_sibling():
             for _ in range(50):
                 out["sib"] += 1
                 runloom.sleep(0.005)
-        rc.go(sibling)
+        rc.fiber(sibling)
         out["rc"] = p.wait()
     with hang_guard(30, "subprocess wait yields"):
-        rc.go(main); rc.run()
+        rc.fiber(main); rc.run()
     assert out["rc"] == 0
     assert out["sib"] >= 30, "sibling starved while a fiber waited on a child: %d" % out["sib"]
 
@@ -1017,7 +1017,7 @@ def test_subprocess_wait_timeout_then_kill():
         p.kill()
         out["final_rc"] = p.wait()
     with hang_guard(40, "subprocess wait timeout+kill"):
-        rc.go(main); rc.run()
+        rc.fiber(main); rc.run()
     assert out["timed_out"] is True
     assert out["final_rc"] != 0   # killed by signal -> negative on POSIX
 
@@ -1035,14 +1035,14 @@ def test_selectors_default_selector_read_ready():
         def writer():
             runloom.sleep(0.05)
             b.send(b"ping")
-        rc.go(writer)
+        rc.fiber(writer)
         events = sel.select(timeout=5.0)
         out["ready"] = bool(events)
         out["data"] = a.recv(8) if events else b""
         sel.close()
         a.close(); b.close()
     with hang_guard(20, "selectors read-ready"):
-        rc.go(main); rc.run()
+        rc.fiber(main); rc.run()
     assert out["ready"] is True
     assert out["data"] == b"ping"
 
@@ -1058,7 +1058,7 @@ def test_selectors_select_timeout_empty_bounded():
             out["events"] = sel.select(timeout=0.3)   # nothing written
         sel.close(); a.close(); b.close()
     with hang_guard(10, "selectors timeout empty"):
-        rc.go(main); rc.run()
+        rc.fiber(main); rc.run()
     assert out["events"] == []
 
 
@@ -1071,7 +1071,7 @@ def test_select_select_empty_lists_with_timeout_is_a_sleep():
             out["elapsed"] = time.monotonic() - t0
             out["r"] = r
     with hang_guard(10, "select empty sleep"):
-        rc.go(main); rc.run()
+        rc.fiber(main); rc.run()
     assert out["r"] == ([], [], [])
     assert out["elapsed"] >= 0.15, "select(timeout) returned too early: %.3f" % out["elapsed"]
 
@@ -1086,13 +1086,13 @@ def test_select_two_fds_read_ready_cooperative():
         def writer():
             runloom.sleep(0.05)
             d.send(b"x")
-        rc.go(writer)
+        rc.fiber(writer)
         r, w, x = _select_mod.select([a, c], [], [], 5.0)
         out["ready"] = c in r
         for s in (a, b, c, d):
             s.close()
     with hang_guard(20, "select two fds"):
-        rc.go(main); rc.run()
+        rc.fiber(main); rc.run()
     assert out["ready"] is True
 
 
@@ -1189,8 +1189,8 @@ def main():
         try: cs.unwrap()
         except Exception: pass
         sp_b.close()
-    rc.go(server); rc.go(client)
-rc.go(main); rc.run()
+    rc.fiber(server); rc.fiber(client)
+rc.fiber(main); rc.run()
 os.unlink(certfile); os.unlink(keyfile)
 assert out.get("reply") == b"S:hello", out
 print("OK", out["reply"])
@@ -1254,9 +1254,9 @@ def _socket_echo_once():
                 result["client_err"] = e
             finally:
                 srv.close()
-        rc.go(server)
-        rc.go(client)
-    rc.go(main); rc.run()
+        rc.fiber(server)
+        rc.fiber(client)
+    rc.fiber(main); rc.run()
     return result
 
 
@@ -1319,13 +1319,13 @@ def test_fault_injection_mid_monkey_workload_no_crash(site, spec):
                             errs.append(("cli", e))
                         finally:
                             srv.close()
-                    rc.go(server); rc.go(client)
+                    rc.fiber(server); rc.fiber(client)
                 except OSError as e:
                     errs.append(("echo", e))
             def main():
-                rc.go(consumer); rc.go(producer); rc.go(echo)
+                rc.fiber(consumer); rc.fiber(producer); rc.fiber(echo)
             try:
-                rc.go(main); rc.run()
+                rc.fiber(main); rc.run()
             except Exception as e:
                 errs.append(("run", e))
             return errs
@@ -1353,7 +1353,7 @@ def test_fault_injection_always_backs_off_bounded():
             except OSError as e:
                 print("ERR", e.errno)
             os.close(r); os.close(w)
-        rc.go(main); rc.run()
+        rc.fiber(main); rc.run()
         print("DONE")
     """, extra_env={"RUNLOOM_FAULT_FD_READ": "always:%d" % errno.EIO},
        timeout=30)
@@ -1453,10 +1453,10 @@ def test_heavy_hash_offload_yields_to_sibling():
             for _ in range(40):
                 out["sib"] += 1
                 runloom.sleep(0.002)
-        rc.go(sibling)
+        rc.fiber(sibling)
         out["digest"] = hashlib.sha256(big).hexdigest()
     with hang_guard(20, "heavy hash offload"):
-        rc.go(main); rc.run()
+        rc.fiber(main); rc.run()
     assert out["digest"] == expected, "offloaded hash differs from stock"
     assert out["sib"] >= 20, "sibling starved during a heavy offload: %d" % out["sib"]
 
@@ -1470,7 +1470,7 @@ def test_compile_in_fiber_offloads_and_returns_code_object():
         exec(code, ns)
         out["a"] = ns["a"]
     with hang_guard(20, "compile in fiber"):
-        rc.go(main); rc.run()
+        rc.fiber(main); rc.run()
     assert out["a"] == sum(range(50))
 
 
@@ -1498,7 +1498,7 @@ def test_compile_in_fiber_offloads_and_returns_code_object():
 #     (only forward getaddrinfo/gethostbyname covered).
 #   - unpatch() round-trip + selective unpatch.
 #   - Condition wait_for predicate + a notify(n) wake-exactly-n ACROSS the
-#     foreign/goroutine boundary (the first pass's notify(n) was single-thread).
+#     foreign/fiber boundary (the first pass's notify(n) was single-thread).
 #   - resource-exhaustion-scale Event fan-in (thousands of in-memory waiters)
 #     with SET-EQUALITY integrity (not a count), to flush a lost wake at scale.
 #   - BoundedSemaphore over-release WITH live waiters (the
@@ -1513,7 +1513,7 @@ import collections as _collections
 # --------------------------------------------------------------------------
 # A1. SIGSEGV-class: EVERY patched primitive a foreign thread can reach, taken
 #     from MANY foreign threads BEFORE any scheduler exists, concurrent with
-#     M:N goroutines on the SAME object.  The first pass only did this for Lock
+#     M:N fibers on the SAME object.  The first pass only did this for Lock
 #     + Condition; Semaphore / SimpleQueue / RLock are the untested crash
 #     surface (each has its own foreign-thread fallback branch).  Subprocess-
 #     contained so a SIGSEGV is a negative returncode, not a suite kill.
@@ -1562,8 +1562,8 @@ def test_foreign_semaphore_no_scheduler_alloc_subprocess():
 
 def test_foreign_simplequeue_no_scheduler_alloc_subprocess():
     # A foreign thread putting AND a foreign thread getting a CoSimpleQueue with
-    # no scheduler, concurrent with a goroutine consumer.  put/get must fall
-    # back to real OS blocking, never park a nonexistent goroutine.
+    # no scheduler, concurrent with a fiber consumer.  put/get must fall
+    # back to real OS blocking, never park a nonexistent fiber.
     rc_, out = run_child("""
         import queue, time, _thread
         import runloom, runloom_c as rc
@@ -1577,7 +1577,7 @@ def test_foreign_simplequeue_no_scheduler_alloc_subprocess():
             for i in range(N):
                 q.put(i)
             for _ in range(2):
-                q.put(None)     # sentinels: 1 foreign consumer + 1 goroutine
+                q.put(None)     # sentinels: 1 foreign consumer + 1 fiber
             fdone[0] = 1
         # foreign consumer drains until a None
         def fconsumer():
@@ -1618,7 +1618,7 @@ def test_foreign_simplequeue_no_scheduler_alloc_subprocess():
 
 def test_foreign_rlock_reentrant_no_scheduler_alloc_subprocess():
     # RLock identity uses get_ident() on a foreign thread; reentrant acquire on
-    # the same thread must be granted, and must serialize vs M:N goroutines.
+    # the same thread must be granted, and must serialize vs M:N fibers.
     rc_, out = run_child("""
         import threading, time, _thread
         import runloom, runloom_c as rc
@@ -1662,7 +1662,7 @@ def test_foreign_rlock_reentrant_no_scheduler_alloc_subprocess():
 
 
 # --------------------------------------------------------------------------
-# A2. os.read / os.write cooperative across goroutines on a pipe: data
+# A2. os.read / os.write cooperative across fibers on a pipe: data
 #     integrity (every byte, in order) + cooperative overlap (the reader parks
 #     on wait_fd while the writer makes progress).  Never tested directly.
 # --------------------------------------------------------------------------
@@ -1682,7 +1682,7 @@ def test_os_read_write_pipe_cooperative_integrity_and_overlap():
             os.write(w, b"\xff")    # terminator distinct sentinel via length
             rc.netpoll_unregister(w)
             os.close(w)
-        rc.go(writer)
+        rc.fiber(writer)
         buf = bytearray()
         # read exactly CHUNKS+1 bytes back, parking between each
         while len(buf) < CHUNKS + 1:
@@ -1698,16 +1698,16 @@ def test_os_read_write_pipe_cooperative_integrity_and_overlap():
         rc.netpoll_unregister(r)
         os.close(r)
     with hang_guard(20, "os.read/write pipe cooperative"):
-        rc.go(main); rc.run()
+        rc.fiber(main); rc.run()
     expected = bytes([i % 256 for i in range(50)]) + b"\xff"
     assert out["data"] == expected, "lost/reordered pipe bytes: %r" % out["data"][:20]
     assert out["writer_progress"] == 50
 
 
 @mn_only
-def test_os_write_foreign_thread_os_read_goroutine_subprocess():
+def test_os_write_foreign_thread_os_read_fiber_subprocess():
     # os.write from a FOREIGN thread (no fiber -> passthrough _orig_os_write on
-    # a nonblocking fd), os.read from a goroutine (cooperative wait_fd).  The
+    # a nonblocking fd), os.read from a fiber (cooperative wait_fd).  The
     # foreign side must not crash and every byte must arrive in order.
     rc_, out = run_child("""
         import os, time, _thread
@@ -1755,7 +1755,7 @@ def test_os_write_foreign_thread_os_read_goroutine_subprocess():
         assert bytes(got) == bytes([i % 256 for i in range(N)]), len(got)
         print("OK", len(got))
     """, timeout=60)
-    assert_no_signal_death(rc_, out, "os-write-foreign-read-goroutine")
+    assert_no_signal_death(rc_, out, "os-write-foreign-read-fiber")
     assert "OK" in out, out
 
 
@@ -1800,10 +1800,10 @@ def test_fcntl_flock_cooperative_mutual_exclusion():
             finally:
                 wg.done()
         for _ in range(N):
-            rc.go(worker)
+            rc.fiber(worker)
         wg.wait()
     with hang_guard(40, "fcntl flock mutual exclusion"):
-        rc.go(main); rc.run()
+        rc.fiber(main); rc.run()
     try:
         os.unlink(path)
     except OSError:
@@ -1838,8 +1838,8 @@ def test_fcntl_flock_yields_to_sibling_while_contended():
             for _ in range(40):
                 out["sib"] += 1
                 runloom.sleep(0.003)
-        rc.go(waiter)
-        rc.go(sibling)
+        rc.fiber(waiter)
+        rc.fiber(sibling)
         # hold the lock a while so the waiter must park and the sibling must run
         runloom.sleep(0.2)
         fcntl.flock(fd1, fcntl.LOCK_UN)
@@ -1851,7 +1851,7 @@ def test_fcntl_flock_yields_to_sibling_while_contended():
             runloom.sleep(0.005)
         out["waiter_got"] = waiter_got[0]
     with hang_guard(30, "fcntl flock yields"):
-        rc.go(main); rc.run()
+        rc.fiber(main); rc.run()
     try:
         os.unlink(path)
     except OSError:
@@ -1861,7 +1861,7 @@ def test_fcntl_flock_yields_to_sibling_while_contended():
 
 
 # --------------------------------------------------------------------------
-# A4. UDP datagram recvfrom/sendto cooperative across goroutines (subsystem-
+# A4. UDP datagram recvfrom/sendto cooperative across fibers (subsystem-
 #     focus item, ZERO coverage).  A receiver parks on wait_fd; a sender on a
 #     sibling fiber delivers; data + peer address must be correct.
 # --------------------------------------------------------------------------
@@ -1879,14 +1879,14 @@ def test_udp_recvfrom_sendto_cooperative():
             cli.sendto(b"datagram-payload", ("127.0.0.1", port))
             rc.netpoll_unregister(cli.fileno())
             cli.close()
-        rc.go(sender)
+        rc.fiber(sender)
         data, addr = srv.recvfrom(64)       # parks cooperatively on wait_fd
         out["data"] = data
         out["from_loopback"] = addr[0] == "127.0.0.1"
         rc.netpoll_unregister(srv.fileno())
         srv.close()
     with hang_guard(20, "udp recvfrom/sendto"):
-        rc.go(main); rc.run()
+        rc.fiber(main); rc.run()
     assert out["data"] == b"datagram-payload", out
     assert out["from_loopback"] is True
 
@@ -1918,7 +1918,7 @@ def main():
     except (socket.timeout, OSError):
         out["r"] = "timeout"
     rc.netpoll_unregister(srv.fileno()); srv.close()
-rc.go(main); rc.run()
+rc.fiber(main); rc.run()
 print("RESULT", out)
 '''
 
@@ -1980,7 +1980,7 @@ def test_sendmsg_recvmsg_scm_rights_fd_passing():
             runloom.sleep(0.03)
             fds = array.array("i", [pr])
             a.sendmsg([b"M"], [(socket.SOL_SOCKET, socket.SCM_RIGHTS, fds)])
-        rc.go(sender)
+        rc.fiber(sender)
         fds_buf = array.array("i", [0])
         msg, anc, flags, addr = b.recvmsg(64, socket.CMSG_LEN(fds_buf.itemsize))
         out["msg"] = msg
@@ -1998,7 +1998,7 @@ def test_sendmsg_recvmsg_scm_rights_fd_passing():
             rc.netpoll_unregister(s.fileno())
             s.close()
     with hang_guard(20, "sendmsg/recvmsg scm_rights"):
-        rc.go(main); rc.run()
+        rc.fiber(main); rc.run()
     assert out["msg"] == b"M", out
     assert out["passed_data"] == b"through-the-pipe", out
 
@@ -2020,7 +2020,7 @@ def test_select_poll_object_read_ready_cooperative():
         def writer():
             runloom.sleep(0.05)
             b.send(b"poke")
-        rc.go(writer)
+        rc.fiber(writer)
         events = po.poll(5000)             # ms; cooperative busy-poll
         out["ready"] = bool(events)
         out["data"] = a.recv(8) if events else b""
@@ -2029,7 +2029,7 @@ def test_select_poll_object_read_ready_cooperative():
         rc.netpoll_unregister(b.fileno())
         a.close(); b.close()
     with hang_guard(20, "select.poll object read-ready"):
-        rc.go(main); rc.run()
+        rc.fiber(main); rc.run()
     assert out["ready"] is True
     assert out["data"] == b"poke"
 
@@ -2050,7 +2050,7 @@ def test_select_poll_object_timeout_bounded():
         rc.netpoll_unregister(b.fileno())
         a.close(); b.close()
     with hang_guard(10, "select.poll timeout"):
-        rc.go(main); rc.run()
+        rc.fiber(main); rc.run()
     assert out["events"] == []
 
 
@@ -2072,11 +2072,11 @@ def test_signal_sigtimedwait_bounded_timeout():
             for _ in range(20):
                 out["sib"] += 1
                 runloom.sleep(0.005)
-        rc.go(sibling)
+        rc.fiber(sibling)
         with assert_faster_than(1.5, "sigtimedwait timeout"):
             out["r"] = _signal.sigtimedwait({_signal.SIGUSR1}, 0.25)
     with hang_guard(10, "sigtimedwait timeout"):
-        rc.go(main); rc.run()
+        rc.fiber(main); rc.run()
     # restore mask on the main thread
     try:
         _signal.pthread_sigmask(_signal.SIG_UNBLOCK, {_signal.SIGUSR1})
@@ -2098,7 +2098,7 @@ def test_signal_sigtimedwait_reaps_pending_signal():
         info = _signal.sigtimedwait({_signal.SIGUSR1}, 1.0)
         out["signo"] = None if info is None else info.si_signo
     with hang_guard(10, "sigtimedwait reap"):
-        rc.go(main); rc.run()
+        rc.fiber(main); rc.run()
     try:
         _signal.pthread_sigmask(_signal.SIG_UNBLOCK, {_signal.SIGUSR1})
     except Exception:
@@ -2125,10 +2125,10 @@ def test_time_sleep_cooperative_overlap_not_serialized():
         # all N sleeps must overlap: wall time ~S, not N*S
         with assert_faster_than(N * S * 0.5, "time.sleep overlap"):
             for _ in range(N):
-                rc.go(w)
+                rc.fiber(w)
             wg.wait()
     with hang_guard(15, "time.sleep overlap"):
-        rc.go(main); rc.run()
+        rc.fiber(main); rc.run()
     assert out["done"] == N
 
 
@@ -2145,7 +2145,7 @@ def test_futures_threadpool_submit_and_result_in_fiber():
             futs = [ex.submit(lambda i=i: i * i) for i in range(16)]
             out["results"] = [f.result() for f in futs]
     with hang_guard(20, "futures submit/result"):
-        rc.go(main); rc.run()
+        rc.fiber(main); rc.run()
     assert out["results"] == [i * i for i in range(16)], out
 
 
@@ -2160,7 +2160,7 @@ def test_futures_threadpool_map_preserves_order():
                 return i + 100
             out["mapped"] = list(ex.map(work, range(12)))
     with hang_guard(20, "futures map order"):
-        rc.go(main); rc.run()
+        rc.fiber(main); rc.run()
     assert out["mapped"] == [i + 100 for i in range(12)], out
 
 
@@ -2180,7 +2180,7 @@ def test_futures_threadpool_max_workers_caps_concurrency():
             futs = [ex.submit(work, i) for i in range(20)]
             out["sum"] = sum(f.result() for f in futs)
     with hang_guard(20, "futures max_workers cap"):
-        rc.go(main); rc.run()
+        rc.fiber(main); rc.run()
     assert out["sum"] == 20
     assert peak[0] <= 2, "ThreadPoolExecutor(max_workers=2) ran %d at once" % peak[0]
 
@@ -2197,7 +2197,7 @@ def test_futures_threadpool_propagates_exception():
             except ZeroDivisionError:
                 out["raised"] = True
     with hang_guard(20, "futures exception"):
-        rc.go(main); rc.run()
+        rc.fiber(main); rc.run()
     assert out["raised"] is True
 
 
@@ -2226,11 +2226,11 @@ def test_getnameinfo_yields_to_sibling():
             for _ in range(30):
                 out["sib"] += 1
                 runloom.sleep(0.002)
-        rc.go(sibling)
+        rc.fiber(sibling)
         out["res"] = socket.getnameinfo(("127.0.0.1", 22),
                                         socket.NI_NUMERICHOST | socket.NI_NUMERICSERV)
     with hang_guard(15, "getnameinfo yields"):
-        rc.go(main); rc.run()
+        rc.fiber(main); rc.run()
     assert out["res"][0] == "127.0.0.1"
     assert out["sib"] >= 10, "getnameinfo offload starved a sibling: %d" % out["sib"]
 
@@ -2294,7 +2294,7 @@ def test_unpatch_unknown_category_raises_after_repatch():
 
 # --------------------------------------------------------------------------
 # A12. Condition.wait_for predicate + a notify(n) that wakes EXACTLY n across
-#      the foreign/goroutine boundary.  The first pass's notify(n) was single-
+#      the foreign/fiber boundary.  The first pass's notify(n) was single-
 #      thread only; a cross-thread notify(n) is the harder REORDER/lost-wake.
 # --------------------------------------------------------------------------
 def test_condition_wait_for_predicate_satisfied_by_notify():
@@ -2305,14 +2305,14 @@ def test_condition_wait_for_predicate_satisfied_by_notify():
         def waiter():
             with cv:
                 out["r"] = cv.wait_for(lambda: state["ready"], timeout=5.0)
-        rc.go(waiter)
+        rc.fiber(waiter)
         rc.sched_yield()
         runloom.sleep(0.05)
         with cv:
             state["ready"] = True
             cv.notify_all()
     with hang_guard(20, "condition wait_for"):
-        rc.go(main); rc.run()
+        rc.fiber(main); rc.run()
     assert out["r"] is True
 
 
@@ -2324,13 +2324,13 @@ def test_condition_wait_for_predicate_times_out_bounded():
             with assert_faster_than(1.5, "wait_for timeout"):
                 out["r"] = cv.wait_for(lambda: False, timeout=0.3)
     with hang_guard(10, "condition wait_for timeout"):
-        rc.go(main); rc.run()
+        rc.fiber(main); rc.run()
     assert out["r"] is False
 
 
 @mn_only
-def test_condition_notify_n_exactly_n_mixed_foreign_goroutine():
-    # NF foreign threads + NG goroutines all park on one Condition; a single
+def test_condition_notify_n_exactly_n_mixed_foreign_fiber():
+    # NF foreign threads + NG fibers all park on one Condition; a single
     # notify(K) must wake EXACTLY K of them (REORDER / over-wake hunt).  We
     # cannot tell which K wake, so we assert the TOTAL woken == K after one
     # notify(K), then notify_all the rest so nothing hangs.
@@ -2376,7 +2376,7 @@ def test_condition_notify_n_exactly_n_mixed_foreign_goroutine():
         # let exactly-K propagate
         runloom.sleep(0.3)
         woken_after_k = sum(woke)
-        # now release the rest so foreign threads + remaining goroutines finish
+        # now release the rest so foreign threads + remaining fibers finish
         with cv:
             cv.notify_all()
         wg.wait()
@@ -2414,14 +2414,14 @@ def test_event_fanin_scale_set_equality_single_thread():
                     wg.done()
             return w
         for i in range(N):
-            rc.go(make(i))
+            rc.fiber(make(i))
         # let them all park
         for _ in range(5):
             rc.sched_yield()
         ev.set()                      # ONE set wakes all N
         wg.wait()
     with hang_guard(60, "event fan-in scale 3000"):
-        rc.go(main); rc.run()
+        rc.fiber(main); rc.run()
     missing = [i for i in range(N) if not woke[i]]
     assert not missing, "lost wake for %d/%d waiters (e.g. %r)" % (
         len(missing), N, missing[:10])
@@ -2449,7 +2449,7 @@ def test_bounded_semaphore_over_release_counts_pending_waiter():
             parked[0] = True
             bs.acquire()                   # parks: no permit yet
             gave_back[0] = True            # got a permit eventually
-        rc.go(waiter)
+        rc.fiber(waiter)
         while not parked[0]:
             rc.sched_yield()
         runloom.sleep(0.02)
@@ -2467,7 +2467,7 @@ def test_bounded_semaphore_over_release_counts_pending_waiter():
             out["raised"] = True
         out["gave_back"] = gave_back[0]
     with hang_guard(20, "bounded semaphore over-release with waiter"):
-        rc.go(main); rc.run()
+        rc.fiber(main); rc.run()
     assert out["gave_back"] is True, "waiter never got its handed-off permit"
     assert out["raised"] is True, "over-release past the bound did not raise"
 
@@ -2489,7 +2489,7 @@ def test_open_pollable_pipe_fd_buffered_read_is_cooperative():
                 out["sib"] += 1
             os.write(w, b"buffered-payload")
             os.close(w)
-        rc.go(feeder)
+        rc.fiber(feeder)
         # this read must PARK cooperatively (the feeder sibling must advance)
         data = f.read(64)
         out["data"] = data
@@ -2500,7 +2500,7 @@ def test_open_pollable_pipe_fd_buffered_read_is_cooperative():
             pass
         f.close()
     with hang_guard(20, "open pollable pipe buffered read"):
-        rc.go(main); rc.run()
+        rc.fiber(main); rc.run()
     assert out["data"] == b"buffered-payload", out
     assert out["sib_at_read"] >= 3, (
         "buffered .read() on a pipe did NOT yield -- it wedged the hub "
@@ -2520,7 +2520,7 @@ def test_lock_timed_acquire_from_foreign_thread_bounded():
         from runloom.sync import WaitGroup
         lk = threading.Lock()
         res = {}
-        # A goroutine grabs the lock and holds it a while; a foreign thread then
+        # A fiber grabs the lock and holds it a while; a foreign thread then
         # does a TIMED acquire that must return False at its deadline (the
         # foreign spin branch), bounded.
         held = [False]; release_it = [False]
@@ -2578,12 +2578,12 @@ def test_heavy_zlib_offload_roundtrip_and_yields():
             for _ in range(30):
                 out["sib"] += 1
                 runloom.sleep(0.002)
-        rc.go(sibling)
+        rc.fiber(sibling)
         comp = zlib.compress(big)
         out["comp_ok"] = (comp == expected)
         out["roundtrip"] = (zlib.decompress(comp) == big)
     with hang_guard(20, "heavy zlib offload"):
-        rc.go(main); rc.run()
+        rc.fiber(main); rc.run()
     assert out["comp_ok"] is True, "offloaded zlib.compress differs from stock"
     assert out["roundtrip"] is True
     assert out["sib"] >= 15, "zlib offload starved a sibling: %d" % out["sib"]
@@ -2607,10 +2607,10 @@ def test_offload_runs_blocking_call_and_yields():
             for _ in range(30):
                 out["sib"] += 1
                 runloom.sleep(0.003)
-        rc.go(sibling)
+        rc.fiber(sibling)
         out["r"] = monkey.offload(blocking_work)
     with hang_guard(20, "offload yields"):
-        rc.go(main); rc.run()
+        rc.fiber(main); rc.run()
     assert out["r"] == 4242
     assert out["sib"] >= 15, "offload starved a sibling: %d" % out["sib"]
 
@@ -2626,7 +2626,7 @@ def test_offload_propagates_exception():
         except KeyError as e:
             out["raised"] = e.args[0]
     with hang_guard(20, "offload exception"):
-        rc.go(main); rc.run()
+        rc.fiber(main); rc.run()
     assert out["raised"] == "offloaded-boom", out
 
 
@@ -2646,7 +2646,7 @@ def test_event_clear_then_wait_reblocks():
         with assert_faster_than(1.5, "cleared event re-blocks"):
             out["r"] = ev.wait(timeout=0.3)
     with hang_guard(10, "event clear then wait"):
-        rc.go(main); rc.run()
+        rc.fiber(main); rc.run()
     assert out["r"] is False, "cleared Event.wait returned early (stale flag)"
 
 
@@ -2668,18 +2668,18 @@ def test_event_set_during_wait_window_no_lost_wake():
                     wg.done()
             return w
         for i in range(N):
-            rc.go(make(i))
+            rc.fiber(make(i))
             if i == N // 2:
                 ev.set()              # set BEFORE the second half even spawns
         wg.wait()
     with hang_guard(30, "event set during wait window"):
-        rc.go(main); rc.run()
+        rc.fiber(main); rc.run()
     missing = [i for i in range(N) if not woke[i]]
     assert not missing, "lost wake in the set-during-spawn window: %r" % missing[:10]
 
 
 # --------------------------------------------------------------------------
-# A20. Queue.join()/task_done balance + a foreign producer with a goroutine
+# A20. Queue.join()/task_done balance + a foreign producer with a fiber
 #      consumer using set-equality integrity (the first pass's foreign-producer
 #      test used sorted() == range, which we keep, but here we also stress
 #      task_done/join, a separate Condition-based wait the first pass skipped).
@@ -2701,14 +2701,14 @@ def test_queue_join_task_done_balance():
                 consumed[i] = 1
                 q.task_done()
         for _ in range(6):
-            rc.go(consumer)
+            rc.fiber(consumer)
         def joiner():
             q.join()                  # blocks until every task_done balances
             out["joined"] = True
             out["all_consumed"] = (sum(consumed) == N)
-        rc.go(joiner)
+        rc.fiber(joiner)
     with hang_guard(30, "queue join/task_done"):
-        rc.go(main); rc.run()
+        rc.fiber(main); rc.run()
     assert out.get("joined") is True, "queue.join() never returned (lost task_done wake)"
     assert out.get("all_consumed") is True, "queue dropped items vs task_done count"
 

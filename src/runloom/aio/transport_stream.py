@@ -126,7 +126,7 @@ class _StreamTransport(_StreamIOMixin, asyncio.Transport):
             except Exception as e:
                 self._report(e, "connection_made")
         if self._io_g is None:
-            self._io_g = _go_io(self._io_loop)
+            self._io_g = _fiber_io(self._io_loop)
 
 
     def close(self, exc=None):

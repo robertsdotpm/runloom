@@ -71,7 +71,7 @@ def _run_single(fn):
             box["r"] = fn()
         except BaseException as e:  # noqa: BLE001 -- re-raised on the main thread
             box["e"] = e
-    rc.go(main)
+    rc.fiber(main)
     rc.run()
     if "e" in box:
         raise box["e"]
@@ -219,16 +219,16 @@ def test_close_wakes_all_parked_receivers_at_scale():
             got.append((v, ok))
 
         for _ in range(N):
-            rc.go(receiver)
+            rc.fiber(receiver)
 
         def closer():
             for _ in range(N):
                 rc.sched_yield()     # let every receiver park first
             ch.close()
-        rc.go(closer)
+        rc.fiber(closer)
 
     with hang_guard(30, "close wakes %d receivers" % N):
-        rc.go(main)
+        rc.fiber(main)
         rc.run()
     assert len(got) == N, "lost wake: only %d/%d receivers woke" % (len(got), N)
     assert all(r == (None, False) for r in got)
@@ -249,16 +249,16 @@ def test_close_makes_all_parked_senders_raise_at_scale():
                 results.append(("closed", i))
 
         for i in range(N):
-            rc.go(lambda i=i: sender(i))
+            rc.fiber(lambda i=i: sender(i))
 
         def closer():
             for _ in range(N):
                 rc.sched_yield()
             ch.close()
-        rc.go(closer)
+        rc.fiber(closer)
 
     with hang_guard(30, "close raises %d senders" % N):
-        rc.go(main)
+        rc.fiber(main)
         rc.run()
     assert len(results) == N, "lost wake: only %d/%d senders woke" % (len(results), N)
     assert all(tag == "closed" for tag, _ in results), \
@@ -290,19 +290,19 @@ def test_close_wakes_mixed_senders_and_receivers_no_lost_wake():
             recv_out.append(ok)
 
         for i in range(NS):
-            rc.go(lambda i=i: sender(i))
+            rc.fiber(lambda i=i: sender(i))
         for _ in range(NR):
-            rc.go(receiver)
+            rc.fiber(receiver)
 
         def closer():
             for _ in range(NS + NR + 10):
                 rc.sched_yield()
             ch.close()
             rch.close()
-        rc.go(closer)
+        rc.fiber(closer)
 
     with hang_guard(30, "mixed close wake"):
-        rc.go(main)
+        rc.fiber(main)
         rc.run()
     assert len(sender_out) == NS and all(x == "closed" for x in sender_out)
     assert len(recv_out) == NR and all(ok is False for ok in recv_out)
@@ -331,12 +331,12 @@ def test_unbuffered_rendezvous_blocks_until_paired():
             v, ok = ch.recv()
             order.append(("got", v))
 
-        rc.go(sender)
-        rc.go(receiver)
+        rc.fiber(sender)
+        rc.fiber(receiver)
 
     with assert_faster_than(10, "unbuffered rendezvous"):
         with hang_guard(20, "rendezvous"):
-            rc.go(main)
+            rc.fiber(main)
             rc.run()
     assert order.index("send_start") < order.index("recv")
     assert order.index("send_done") > order.index("recv")  # send waited for recv
@@ -377,11 +377,11 @@ def test_full_buffer_send_parks_then_recv_frees_slot_and_wakes_sender():
                 rc.sched_yield()  # let sender park
             out.append(ch.recv())  # pops A, frees slot -> wakes sender
             out.append(ch.recv())  # pops B
-        rc.go(sender)
-        rc.go(reader)
+        rc.fiber(sender)
+        rc.fiber(reader)
 
     with hang_guard(20, "full-buffer sender wake"):
-        rc.go(main)
+        rc.fiber(main)
         rc.run()
     assert ("A", True) in out and ("B", True) in out
     assert "B-sent" in out
@@ -455,11 +455,11 @@ def test_select_send_case_to_waiting_receiver_fires():
                 rc.sched_yield()        # let receiver park
             idx, res = rc.select([("send", ch, "payload")])
             out.append(("sent", idx, res))
-        rc.go(receiver)
-        rc.go(chooser)
+        rc.fiber(receiver)
+        rc.fiber(chooser)
 
     with hang_guard(20, "select send to waiting receiver"):
-        rc.go(main)
+        rc.fiber(main)
         rc.run()
     assert ("recv", "payload", True) in out
     assert ("sent", 0, None) in out
@@ -532,12 +532,12 @@ def test_select_blocks_then_wakes_no_busy_spin_fast():
                 order.append(("work", i))
                 rc.sched_yield()
             c.send("done")          # wakes case index 2
-        rc.go(chooser)
-        rc.go(producer)
+        rc.fiber(chooser)
+        rc.fiber(producer)
 
     with assert_faster_than(10, "select wake"):
         with hang_guard(20, "select block-then-wake"):
-            rc.go(main)
+            rc.fiber(main)
             rc.run()
     assert ("chose", 2, "done") in order
     assert order.index(("work", 0)) < order.index(("chose", 2, "done"))
@@ -605,8 +605,8 @@ def test_select_non_firing_send_value_is_released():
                 ("send", full_b, box_z),
             ])
             out["idx"] = idx
-        rc.go(recvr)
-        rc.go(chooser)
+        rc.fiber(recvr)
+        rc.fiber(chooser)
         return out
 
     out = _run_single(f)
@@ -652,12 +652,12 @@ def test_unconsumed_unbuffered_send_value_not_leaked_when_chan_dropped():
                 ch.send(o)       # never received -> parks; run() abandons it
             except BaseException:
                 pass
-        rc.go(sender)
+        rc.fiber(sender)
         # no receiver: run() returns once nothing else runnable (chan park does
         # not keep run() alive -- documented FINDING in chan_waiters.c.inc)
 
     with hang_guard(15, "orphan send"):
-        rc.go(main)
+        rc.fiber(main)
         rc.run()
     gc.collect(); gc.collect()
     # The sender fiber is abandoned mid-park; its frame (holding the ref) is not
@@ -739,11 +739,11 @@ def test_mutex_mutual_exclusion_serializes_critical_section():
                 rc.sched_yield()           # widen the race window
                 box["n"] = cur + 1
                 m.unlock()
-        rc.go(worker)
-        rc.go(worker)
+        rc.fiber(worker)
+        rc.fiber(worker)
 
     with hang_guard(30, "mutex mutual exclusion"):
-        rc.go(main)
+        rc.fiber(main)
         rc.run()
     assert box["n"] == 2 * ITERS, "mutex did not serialize: lost increments"
 
@@ -803,11 +803,11 @@ def test_waitgroup_multi_waiter_all_woken():
             wg.done(); wg.done(); wg.done()
 
         for i in range(4):                  # 4 waiters on one wg
-            rc.go(lambda i=i: waiter(i))
-        rc.go(worker)
+            rc.fiber(lambda i=i: waiter(i))
+        rc.fiber(worker)
 
     with hang_guard(20, "waitgroup multi-waiter"):
-        rc.go(main)
+        rc.fiber(main)
         rc.run()
     assert sorted(woke) == [0, 1, 2, 3], "not all waiters woken: %r" % woke
 
@@ -825,18 +825,18 @@ def test_waitgroup_reuse_after_drain():
             def w():
                 wg.wait()
                 seq.append(tag)
-            rc.go(w)
+            rc.fiber(w)
 
             def f():
                 for _ in range(3):
                     rc.sched_yield()
                 wg.done(); wg.done()
-            rc.go(f)
+            rc.fiber(f)
         cycle("A")
 
     # run two full cycles to prove reuse
     with hang_guard(20, "waitgroup reuse"):
-        rc.go(main)
+        rc.fiber(main)
         rc.run()
 
         def main2():
@@ -845,12 +845,12 @@ def test_waitgroup_reuse_after_drain():
 
             def w():
                 wg.wait(); seq.append("B")
-            rc.go(w)
+            rc.fiber(w)
 
             def f():
                 rc.sched_yield(); wg.done()
-            rc.go(f)
-        rc.go(main2)
+            rc.fiber(f)
+        rc.fiber(main2)
         rc.run()
     assert "A" in seq and "B" in seq
 
@@ -934,16 +934,16 @@ def test_future_exception_propagates_to_every_waiter():
                 seen.append(("err", i, str(e)))
 
         for i in range(5):
-            rc.go(lambda i=i: waiter(i))
+            rc.fiber(lambda i=i: waiter(i))
 
         def resolver():
             for _ in range(8):
                 rc.sched_yield()
             fut.set_exception(ValueError("boom"))
-        rc.go(resolver)
+        rc.fiber(resolver)
 
     with hang_guard(20, "future exc broadcast"):
-        rc.go(main)
+        rc.fiber(main)
         rc.run()
     assert len(seen) == 5
     assert all(tag == "err" and msg == "boom" for tag, _, msg in seen)
@@ -1000,7 +1000,7 @@ def main():
     for _ in range(3):
         rc.sched_yield()
     fut.set_result(99)
-rc.go(main); rc.run()
+rc.fiber(main); rc.run()
 t.join(5)
 assert out.get('v') == 99, out
 print('FUT_FOREIGN_WAIT_OK')
@@ -1127,20 +1127,20 @@ def test_semaphore_weighted_fifo_no_starvation():
             order.append(("small", i))
             s.release(1)
 
-        rc.go(big)                        # queued first
+        rc.fiber(big)                        # queued first
         for _ in range(3):
             rc.sched_yield()
         for i in range(3):                # queued behind big
-            rc.go(lambda i=i: small(i))
+            rc.fiber(lambda i=i: small(i))
 
         def releaser():
             for _ in range(6):
                 rc.sched_yield()
             s.release(4)                  # frees all; FIFO -> big first
-        rc.go(releaser)
+        rc.fiber(releaser)
 
     with hang_guard(30, "sem weighted FIFO"):
-        rc.go(main)
+        rc.fiber(main)
         rc.run()
     assert "big" in order
     # big was queued first; FIFO means it is granted before the small waiters
@@ -1239,11 +1239,11 @@ def test_rwmutex_concurrent_readers_allowed():
                 wg.done()
 
         for _ in range(5):
-            rc.go(reader)
+            rc.fiber(reader)
         wg.wait()
 
     with hang_guard(20, "rwmutex readers"):
-        rc.go(main)
+        rc.fiber(main)
         rc.run()
     assert peak["max"] >= 2, "readers did not run concurrently: max=%d" % peak["max"]
 
@@ -1280,12 +1280,12 @@ def test_rwmutex_writer_is_exclusive_and_preferred():
             finally:
                 wg.done()
 
-        rc.go(writer)
-        rc.go(reader)
+        rc.fiber(writer)
+        rc.fiber(reader)
         wg.wait()
 
     with hang_guard(20, "rwmutex writer exclusive"):
-        rc.go(main)
+        rc.fiber(main)
         rc.run()
     # No reader may sit between W_in and W_out.
     w_in, w_out = events.index("W_in"), events.index("W_out")
@@ -1322,11 +1322,11 @@ def test_once_runs_exactly_once_under_concurrency():
                 wg.done()
 
         for _ in range(6):
-            rc.go(caller)
+            rc.fiber(caller)
         wg.wait()
 
     with hang_guard(20, "once exactly-once"):
-        rc.go(main)
+        rc.fiber(main)
         rc.run()
     assert sum(runs) == 1, "Once ran %d times" % sum(runs)
     assert all(seen), "all callers must observe done()==True after do()"
@@ -1357,16 +1357,16 @@ def test_once_first_caller_sees_exception_later_do_not():
                 wg.done()
 
         # spawn the executor first, give it a head start to BE the executor
-        rc.go(lambda: caller(0))
+        rc.fiber(lambda: caller(0))
         for _ in range(3):
             rc.sched_yield()
         for i in range(1, 4):
-            rc.go(lambda i=i: caller(i))
+            rc.fiber(lambda i=i: caller(i))
         wg.wait()
         outcomes.append(("nran", sum(ran)))
 
     with hang_guard(20, "once panic-safety"):
-        rc.go(main)
+        rc.fiber(main)
         rc.run()
     nran = dict(o for o in outcomes if o[0] == "nran")["nran"] if False else None
     raised = [o for o in outcomes if o[0] == "raised"]
@@ -1445,11 +1445,11 @@ def test_singleflight_dedups_concurrent_calls_by_key():
                 wg.done()
 
         for _ in range(5):
-            rc.go(caller)
+            rc.fiber(caller)
         wg.wait()
 
     with hang_guard(20, "singleflight dedup"):
-        rc.go(main)
+        rc.fiber(main)
         rc.run()
     assert sum(calls) == 1, "fn ran %d times; singleflight must dedup" % sum(calls)
     assert all(v == "VALUE" for v, _ in results)
@@ -1481,11 +1481,11 @@ def test_singleflight_shares_exception():
                 wg.done()
 
         for _ in range(4):
-            rc.go(caller)
+            rc.fiber(caller)
         wg.wait()
 
     with hang_guard(20, "singleflight exc"):
-        rc.go(main)
+        rc.fiber(main)
         rc.run()
     assert all(o[0] == "err" and o[1] == "shared-fail" for o in outs), outs
 
@@ -1527,17 +1527,17 @@ def test_watch_version_broadcast_wakes_all_observers():
                 wg.done()
 
         for i in range(5):
-            rc.go(lambda i=i: observer(i))
+            rc.fiber(lambda i=i: observer(i))
 
         def setter():
             for _ in range(8):
                 rc.sched_yield()
             w.set("changed")
-        rc.go(setter)
+        rc.fiber(setter)
         wg.wait()
 
     with hang_guard(20, "watch broadcast"):
-        rc.go(main)
+        rc.fiber(main)
         rc.run()
     assert len(seen) == 5, "not all observers woke: %r" % seen
     assert all(val == "changed" and ver == 1 for _, val, ver in seen)
@@ -1763,13 +1763,13 @@ def test_mn_mutex_serializes_under_work_stealing():
 #               never a crash, when a spawn fails mid-workload.
 # ==========================================================================
 def test_spawn_g_fault_injection_is_clean_error_not_crash():
-    # RUNLOOM_FAULT_SPAWN_G="once:12" -> the next go() fails with ENOMEM-style
+    # RUNLOOM_FAULT_SPAWN_G="once:12" -> the next fiber() fails with ENOMEM-style
     # error. gather()/JoinSet spawn fibers; the failure must be a Python
     # exception, not a SIGSEGV. Contained in a subprocess.
     script = r"""
 import os, sys
 import runloom_c as rc
-# RUNLOOM_FAULT_SPAWN_G="once:12" makes the NEXT go()/mn_go() fail with a clean
+# RUNLOOM_FAULT_SPAWN_G="once:12" makes the NEXT fiber()/mn_fiber() fail with a clean
 # MemoryError-class error. Whether it lands on the driver spawn or a workload
 # spawn, the contract is the same: a clean Python exception, NO signal/crash.
 crashed = {}
@@ -1781,7 +1781,7 @@ def main():
     except BaseException as e:
         crashed['r'] = type(e).__name__
 try:
-    rc.go(main)
+    rc.fiber(main)
     rc.run()
 except BaseException as e:
     crashed['top'] = type(e).__name__
@@ -1817,7 +1817,7 @@ def main():
     except BaseException as e:
         out['r'] = type(e).__name__
 try:
-    rc.go(main)
+    rc.fiber(main)
     rc.run()
 except BaseException as e:
     out['top'] = type(e).__name__
@@ -1858,11 +1858,11 @@ def test_many_selects_evict_tombstones_no_leak():
                 for _ in range(2):
                     rc.sched_yield()
                 target.send(i)
-        rc.go(chooser)
-        rc.go(feeder)
+        rc.fiber(chooser)
+        rc.fiber(feeder)
 
     with hang_guard(40, "select tombstone eviction"):
-        rc.go(main)
+        rc.fiber(main)
         rc.run()
     assert len(rounds) == 40
     # every value 0..39 was delivered exactly once (no drop/dup across evictions)
@@ -2008,12 +2008,12 @@ def test_select_send_case_parks_then_woken_by_arriving_receiver():
             for _ in range(4):
                 rc.sched_yield()    # ensure chooser parked as a sender first
             out["got"] = ch.recv()
-        rc.go(chooser)
-        rc.go(receiver)
+        rc.fiber(chooser)
+        rc.fiber(receiver)
 
     with assert_faster_than(10, "select send park"):
         with hang_guard(20, "select send park wake"):
-            rc.go(main)
+            rc.fiber(main)
             rc.run()
     assert out.get("sent") == (0, None), out
     assert out.get("got") == ("payload", True), out
@@ -2038,11 +2038,11 @@ def test_select_send_parked_then_woken_raises_on_close():
             for _ in range(5):
                 rc.sched_yield()
             ch.close()
-        rc.go(chooser)
-        rc.go(closer)
+        rc.fiber(chooser)
+        rc.fiber(closer)
 
     with hang_guard(20, "select send close"):
-        rc.go(main)
+        rc.fiber(main)
         rc.run()
     assert out.get("r") == "closed", out
 
@@ -2153,17 +2153,17 @@ def test_semaphore_single_release_wakes_multiple_small_waiters():
             finally:
                 wg.done()
         for i in range(4):
-            rc.go(lambda i=i: small(i))
+            rc.fiber(lambda i=i: small(i))
 
         def releaser():
             for _ in range(4):
                 rc.sched_yield()
             s.release(4)                        # frees all 4 at once
-        rc.go(releaser)
+        rc.fiber(releaser)
         wg.wait()
 
     with hang_guard(30, "sem multi-grant"):
-        rc.go(main)
+        rc.fiber(main)
         rc.run()
     assert sorted(order) == [0, 1, 2, 3], "not all small waiters granted: %r" % order
 
@@ -2189,7 +2189,7 @@ def main():
     for _ in range(6):
         rc.sched_yield()
     wg.done()                 # fiber drains the wg
-rc.go(main); rc.run()
+rc.fiber(main); rc.run()
 t.join(5)
 assert out.get('ok') is True, out
 print('WG_FOREIGN_WAIT_OK')
@@ -2215,7 +2215,7 @@ def main():
     for _ in range(6):
         rc.sched_yield()
     w.set("changed")
-rc.go(main); rc.run()
+rc.fiber(main); rc.run()
 t.join(5)
 assert out.get('r') == ("changed", 1), out
 print('WATCH_FOREIGN_WAIT_OK')
@@ -2254,7 +2254,7 @@ def foreign_waiter():
     once.do(lambda: ran.append('FOREIGN_RAN'))   # must be a no-op WAIT
     out['foreign'] = 'returned'
 threading.Thread(target=foreign_waiter).start()
-rc.go(fiber_exec); rc.run()
+rc.fiber(fiber_exec); rc.run()
 time.sleep(0.3)                      # let the foreign poll observe _done
 assert sum(1 for x in ran if x == 1) == 1, ran
 assert 'FOREIGN_RAN' not in ran, ('foreign became executor', ran)
@@ -2306,13 +2306,13 @@ def test_rwmutex_writer_release_wakes_all_queued_readers_at_once():
                 rw.runlock()
             finally:
                 wg.done()
-        rc.go(writer)
+        rc.fiber(writer)
         for i in range(3):
-            rc.go(lambda i=i: reader(i))
+            rc.fiber(lambda i=i: reader(i))
         wg.wait()
 
     with hang_guard(30, "rwmutex broadcast to readers"):
-        rc.go(main)
+        rc.fiber(main)
         rc.run()
     # all readers were handed the lock together after the writer released
     assert peak["max"] == 3, "writer did not release to ALL readers: %r" % events
@@ -2341,11 +2341,11 @@ def test_rwmutex_rlocked_context_manager():
             finally:
                 wg.done()
         for _ in range(3):
-            rc.go(reader)
+            rc.fiber(reader)
         wg.wait()
 
     with hang_guard(20, "rwmutex rlocked ctx"):
-        rc.go(main)
+        rc.fiber(main)
         rc.run()
     assert peak["max"] >= 2, "rlocked() ctx serialized readers: %r" % peak
 
@@ -2402,12 +2402,12 @@ def test_singleflight_forget_while_inflight_starts_fresh_call():
                 owners.append(("c2",) + g.do("k", fresh))
             finally:
                 wg.done()
-        rc.go(c1)
-        rc.go(c2)
+        rc.fiber(c1)
+        rc.fiber(c2)
         wg.wait()
 
     with hang_guard(20, "singleflight forget in-flight"):
-        rc.go(main)
+        rc.fiber(main)
         rc.run()
     # forget made c2 start a NEW call: both fns ran, both are owners (shared=False)
     assert sorted(calls) == ["A", "B"], calls
@@ -2453,7 +2453,7 @@ def foreign_joiner():
     key_ready.wait(3)                # wait until the fiber owns the key
     out['joiner'] = g.do("k", lambda: "SHOULD_NOT_RUN")   # joins, shares result
 threading.Thread(target=foreign_joiner).start()
-rc.go(fiber_owner); rc.run()
+rc.fiber(fiber_owner); rc.run()
 time.sleep(0.3)                      # let the foreign join's poll observe _done
 assert out.get('owner') == ("SHARED", False), out
 assert out.get('joiner') == ("SHARED", True), out
@@ -2502,11 +2502,11 @@ def test_watch_coalesces_multiple_sets_to_latest_for_parked_observer():
             for _ in range(3):
                 rc.sched_yield()            # let observer park
             w.set("v1"); w.set("v2"); w.set("v3")
-        rc.go(observer)
-        rc.go(setter)
+        rc.fiber(observer)
+        rc.fiber(setter)
 
     with hang_guard(20, "watch coalesce"):
-        rc.go(main)
+        rc.fiber(main)
         rc.run()
     assert seen == [("v3", 3)], "observer did not see the coalesced latest: %r" % seen
 
@@ -2536,7 +2536,7 @@ def test_mutex_parked_lockers_handed_off_fifo():
                 wg.done()
         # spawn 0,1,2 in order; each parks behind the held mutex in FIFO order
         for i in range(3):
-            rc.go(lambda i=i: locker(i))
+            rc.fiber(lambda i=i: locker(i))
             for _ in range(2):
                 rc.sched_yield()            # ensure i parks before i+1 spawns
 
@@ -2544,11 +2544,11 @@ def test_mutex_parked_lockers_handed_off_fifo():
             for _ in range(2):
                 rc.sched_yield()
             m.unlock()                      # release -> first parked locker wins
-        rc.go(releaser)
+        rc.fiber(releaser)
         wg.wait()
 
     with hang_guard(30, "mutex FIFO handoff"):
-        rc.go(main)
+        rc.fiber(main)
         rc.run()
     assert order == [0, 1, 2], "mutex did not hand off FIFO: %r" % order
 
@@ -2777,14 +2777,14 @@ def test_waitgroup_reused_three_cycles_no_residue():
                 for _ in range(3):
                     rc.sched_yield()
                 wg.done(); wg.done()
-            rc.go(waiter)
-            rc.go(worker)
+            rc.fiber(waiter)
+            rc.fiber(worker)
             # let this cycle fully drain before starting the next
             for _ in range(8):
                 rc.sched_yield()
 
     with hang_guard(30, "wg three cycles"):
-        rc.go(main)
+        rc.fiber(main)
         rc.run()
     assert sorted(seq) == [0, 1, 2], "reuse leaked a cycle: %r" % seq
 
@@ -2844,15 +2844,15 @@ def test_once_executor_fn_yields_while_waiters_queue_then_all_wake():
             finally:
                 wg.done()
         # executor first, then 5 more queue behind it
-        rc.go(lambda: caller(0))
+        rc.fiber(lambda: caller(0))
         for _ in range(2):
             rc.sched_yield()
         for i in range(1, 6):
-            rc.go(lambda i=i: caller(i))
+            rc.fiber(lambda i=i: caller(i))
         wg.wait()
 
     with hang_guard(30, "once executor yields"):
-        rc.go(main)
+        rc.fiber(main)
         rc.run()
     assert sum(ran) == 1, "Once ran %d times" % sum(ran)
     assert sorted(woke) == [0, 1, 2, 3, 4, 5], "not all waiters woke: %r" % woke
@@ -2893,13 +2893,13 @@ def test_many_concurrent_selects_deep_eviction_no_leak():
                     i += 1
                 else:
                     rc.sched_yield()
-        rc.go(feeder)
+        rc.fiber(feeder)
         for cid in range(NSEL):
-            rc.go(lambda cid=cid: chooser(cid))
+            rc.fiber(lambda cid=cid: chooser(cid))
         wg.wait()
 
     with hang_guard(60, "many selects deep eviction"):
-        rc.go(main)
+        rc.fiber(main)
         rc.run()
     # NSEL*ROUNDS values were delivered, each exactly once (no drop/dup across
     # the tombstone evictions of the losing channels).
@@ -2927,11 +2927,11 @@ def test_chan_iterator_partial_then_close_midstream():
         def consumer():
             for v in ch:                    # iterates until closed+empty
                 out.append(v)
-        rc.go(producer)
-        rc.go(consumer)
+        rc.fiber(producer)
+        rc.fiber(consumer)
 
     with hang_guard(20, "chan iterator midstream close"):
-        rc.go(main)
+        rc.fiber(main)
         rc.run()
     assert out == [0, 1, 2, 3], "iterator lost/duped buffered values: %r" % out
 
@@ -2951,7 +2951,7 @@ def main():
     ch = rc.Chan(8)
     wg = WaitGroup()
     try:
-        # spawning under the fault may raise on some go(); catch + record
+        # spawning under the fault may raise on some fiber(); catch + record
         n = 6
         wg.add(n)
         def producer(pid):
@@ -3003,7 +3003,7 @@ def main():
     except BaseException as e:
         out['r'] = type(e).__name__
 try:
-    rc.go(main); rc.run()
+    rc.fiber(main); rc.run()
 except BaseException as e:
     out['top'] = type(e).__name__
 print('RESULT', out)
@@ -3067,8 +3067,8 @@ def test_select_recv_delivered_value_refcount_conserved():
             box = _Box("delivered")
             refs.append(weakref.ref(box))
             ch.send(box)
-        rc.go(chooser)
-        rc.go(sender)
+        rc.fiber(chooser)
+        rc.fiber(sender)
         return out
 
     out = _run_single(main)

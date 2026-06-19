@@ -56,7 +56,7 @@ def _run_single(fn):
     box = {}
     def main():
         box["r"] = fn()
-    rc.go(main)
+    rc.fiber(main)
     rc.run()
     return box.get("r")
 
@@ -90,7 +90,7 @@ def test_wait_fd_readable_and_writable():
             def writer():
                 rc.sched_yield(); rc.sched_yield()
                 b.send(b"x")
-            rc.go(writer)
+            rc.fiber(writer)
             assert rc.wait_fd(a.fileno(), READ, 2000) & READ
             assert a.recv(1) == b"x"
             return "ok"
@@ -128,7 +128,7 @@ def test_netpoll_cancel_fd_wakes_with_sentinel():
             def canceller():
                 rc.sched_yield(); rc.sched_yield()
                 rc.netpoll_cancel_fd(r)
-            rc.go(canceller)
+            rc.fiber(canceller)
             return rc.wait_fd(r, READ, -1)
         finally:
             _drop(r); _drop(w)
@@ -144,11 +144,11 @@ def test_g_cancel_wait_fd_wakes_target():
         hold["fds"] = (r, w)
         res["rv"] = rc.wait_fd(r, READ, -1)
     def main():
-        g = rc.go(waiter)
+        g = rc.fiber(waiter)
         rc.sched_yield(); rc.sched_yield()
         res["cancel_ret"] = g.cancel_wait_fd()
     with hang_guard(15, "G.cancel_wait_fd"):
-        rc.go(main)
+        rc.fiber(main)
         rc.run()
     r, w = hold["fds"]; _drop(r); _drop(w)
     assert res["cancel_ret"] is True
@@ -171,7 +171,7 @@ def test_fd_reuse_after_unregister_is_clean():
             def writer():
                 rc.sched_yield(); rc.sched_yield()
                 os.write(w2, b"y")
-            rc.go(writer)
+            rc.fiber(writer)
             t0 = time.monotonic()
             rv = rc.wait_fd(r2, READ, 3000)
             return rv, time.monotonic() - t0
@@ -199,7 +199,7 @@ def test_release_if_idle_enables_clean_reuse():
             def writer():
                 rc.sched_yield(); rc.sched_yield()
                 os.write(w2, b"y")
-            rc.go(writer)
+            rc.fiber(writer)
             return rc.wait_fd(r2, READ, 3000)
         finally:
             _drop(r2); _drop(w2)
@@ -232,7 +232,7 @@ def test_fd_reuse_without_unregister_should_still_wake():
             def writer():
                 rc.sched_yield(); rc.sched_yield()
                 os.write(w2, b"y")
-            rc.go(writer)
+            rc.fiber(writer)
             t0 = time.monotonic()
             rv = rc.wait_fd(r2, READ, 1200)
             return rv, time.monotonic() - t0
@@ -263,11 +263,11 @@ def test_never_ready_park_does_not_block_siblings():
             progress.append(("burn", i))
             rc.sched_yield()
     def main():
-        rc.go(parker)
-        rc.go(burner)
+        rc.fiber(parker)
+        rc.fiber(burner)
     with hang_guard(15, "slow-return overlap"):
         with assert_faster_than(1.5, "park+burn overlap"):
-            rc.go(main)
+            rc.fiber(main)
             rc.run()
     burns = sum(1 for p in progress if isinstance(p, tuple))
     assert burns == 50, "burner starved by the parked fiber (%d/50)" % burns
@@ -301,7 +301,7 @@ def _wake_storm(spawn, drive, n):
 def test_wake_storm_single_thread():
     N = 300
     with hang_guard(40, "wake storm single-thread"):
-        total = _wake_storm(rc.go, lambda m: (rc.go(m), rc.run()), N)
+        total = _wake_storm(rc.go, lambda m: (rc.fiber(m), rc.run()), N)
     assert total == N, "edge-drop: only %d/%d readers woke" % (total, N)
 
 
@@ -337,11 +337,11 @@ def test_two_waiters_same_fd_distinct_directions():
         def sender():
             rc.sched_yield(); rc.sched_yield()
             b.send(b"z")         # makes READ ready
-        rc.go(write_waiter)
-        rc.go(read_waiter)
-        rc.go(sender)
+        rc.fiber(write_waiter)
+        rc.fiber(read_waiter)
+        rc.fiber(sender)
     with hang_guard(20, "same fd distinct directions"):
-        rc.go(setup)
+        rc.fiber(setup)
         rc.run()
     a, b = holder["socks"]
     _drop_sock(a); _drop_sock(b)
@@ -364,7 +364,7 @@ def main():
     a, b = socket.socketpair(); fd = a.fileno()
     def s1():
         rc.sched_yield(); rc.sched_yield(); b.send(b"X")
-    rc.go(s1); a.recv(1)                       # arm fd
+    rc.fiber(s1); a.recv(1)                       # arm fd
     b.close(); del a; gc.collect()            # GC-close WITHOUT unregister -> stale arm
     c, d = socket.socketpair()
     if c.fileno() != fd:
@@ -377,8 +377,8 @@ def main():
     def late():
         for _ in range(6): rc.sched_yield()
         d.send(b"Y"); rc.netpoll_unregister(d.fileno()); d.close()
-    rc.go(reader); rc.go(late)
-rc.go(main); rc.run()
+    rc.fiber(reader); rc.fiber(late)
+rc.fiber(main); rc.run()
 sys.stdout.write("SKIP\n" if out.get("skip") else ("HEALED\n" if out.get("rv") else "HUNG\n"))
 '''
 

@@ -48,7 +48,7 @@ def test_rwmutex_mutual_exclusion():
             wg.done()
 
         for _ in range(n):
-            runloom.go(writer)
+            runloom.fiber(writer)
         wg.wait()
         return ctr["n"]
     assert _drive(body) == 8 * 300
@@ -93,9 +93,9 @@ def test_rwmutex_readers_concurrent_writer_exclusive():
 
         wg.add(12)
         for _ in range(10):
-            runloom.go(reader)
+            runloom.fiber(reader)
         for _ in range(2):
-            runloom.go(writer)
+            runloom.fiber(writer)
         wg.wait()
         return state
     s = _drive(body)
@@ -139,7 +139,7 @@ def test_semaphore_weighted_limits_concurrency():
             wg.done()
 
         for _ in range(20):
-            runloom.go(worker)
+            runloom.fiber(worker)
         wg.wait()
         return state["max"]
     assert _drive(body) == 3            # never more than 3 in the section
@@ -166,7 +166,7 @@ def test_semaphore_weighted_n_and_fifo_no_starvation():
             sem.release(1)
             wg.done()
 
-        runloom.go(big)
+        runloom.fiber(big)
         # Deterministic handshake: spin until big has actually APPENDED itself to
         # the FIFO waiter queue before spawning the small stream.  A sleep here is
         # load-dependent -- if big hasn't run sem.acquire(10) yet when the smalls
@@ -177,7 +177,7 @@ def test_semaphore_weighted_n_and_fifo_no_starvation():
         while len(sem._waiters) < 1 and _spin < 200000:
             runloom_c.sched_yield(); _spin += 1
         for i in range(5):
-            runloom.go(small, i)
+            runloom.fiber(small, i)
         # And wait until all 6 (big + 5 small) have queued before releasing, so the
         # release grants strictly in FIFO order from a fully-populated queue.
         _spin = 0
@@ -236,7 +236,7 @@ def test_once_runs_exactly_once_concurrent():
             wg.done()
 
         for _ in range(30):
-            runloom.go(caller)
+            runloom.fiber(caller)
         wg.wait()
         return runs["n"]
     assert _drive(body) == 1
@@ -262,7 +262,7 @@ def test_once_executor_sees_exception_others_dont():
             caller(i)
             wg.done()
         for i in range(10):
-            runloom.go(run, i)
+            runloom.fiber(run, i)
             runloom.sleep(0.002)
         wg.wait()
         return sum(saw)
@@ -318,7 +318,7 @@ def test_singleflight_dedupes_and_shares():
             wg.done()
 
         for _ in range(20):
-            runloom.go(caller)
+            runloom.fiber(caller)
         wg.wait()
         return calls["n"], set(results), sum(shared_flags)
     n, vals, n_shared = _drive(body)
@@ -346,7 +346,7 @@ def test_singleflight_exception_shared():
             wg.done()
 
         for i in range(8):
-            runloom.go(caller, i)
+            runloom.fiber(caller, i)
         wg.wait()
         return sum(caught)
     assert _drive(body) == 8               # the exception reached every caller
@@ -384,7 +384,7 @@ def test_watch_broadcast_and_version():
             wg.done()
 
         for _ in range(5):
-            runloom.go(observer)
+            runloom.fiber(observer)
         runloom.sleep(0.03)                # all 5 parked on wait_changed
         w.set(99)
         wg.wait()

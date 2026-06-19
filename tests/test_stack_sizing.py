@@ -1,6 +1,6 @@
 """Tests for the per-fiber stack sizing machinery:
 
-  * runloom_c.go(fn, stack_size=N): per-call override
+  * runloom_c.fiber(fn, stack_size=N): per-call override
   * runloom_c.set_stack_size(N) / get_stack_size(): program-wide default
   * Auto-calibration over the first RUNLOOM_CAL_TARGET completions
   * stats() exposes stack_hwm, stack_completed, stack_calibrated
@@ -70,7 +70,7 @@ class TestStackSizeOverride(unittest.TestCase):
         ran = [False]
         def w():
             ran[0] = True
-        runloom_c.go(w, stack_size=64 * 1024)
+        runloom_c.fiber(w, stack_size=64 * 1024)
         runloom_c.run()
         self.assertTrue(ran[0])
 
@@ -78,7 +78,7 @@ class TestStackSizeOverride(unittest.TestCase):
         original = runloom_c.get_stack_size()
         def w():
             pass
-        runloom_c.go(w, stack_size=128 * 1024)
+        runloom_c.fiber(w, stack_size=128 * 1024)
         runloom_c.run()
         self.assertEqual(runloom_c.get_stack_size(), original)
 
@@ -90,7 +90,7 @@ class TestStackSizeOverride(unittest.TestCase):
             # Some C-stack-heavy work: small local allocation
             data = list(range(100))
             out.append(sum(data))
-        runloom_c.go(w, stack_size=2 * 1024 * 1024)
+        runloom_c.fiber(w, stack_size=2 * 1024 * 1024)
         runloom_c.run()
         self.assertEqual(out, [sum(range(100))])
 
@@ -117,7 +117,7 @@ class TestCalibrationStats(unittest.TestCase):
             def w():
                 pass
             for _ in range(10):
-                runloom_c.go(w)
+                runloom_c.fiber(w)
             runloom_c.run()
             after = runloom_c.stats()
             if before["stack_painting"]:
@@ -141,7 +141,7 @@ class TestSpawnWithSize(unittest.TestCase):
         def w():
             out.append(1)
         for _ in range(N):
-            runloom_c.go(w, stack_size=32 * 1024)
+            runloom_c.fiber(w, stack_size=32 * 1024)
         runloom_c.run()
         self.assertEqual(len(out), N)
 
@@ -155,9 +155,9 @@ class TestSpawnWithSize(unittest.TestCase):
         def large():
             out.append("l")
         for _ in range(20):
-            runloom_c.go(small,  stack_size=16 * 1024)
-            runloom_c.go(medium, stack_size=64 * 1024)
-            runloom_c.go(large,  stack_size=256 * 1024)
+            runloom_c.fiber(small,  stack_size=16 * 1024)
+            runloom_c.fiber(medium, stack_size=64 * 1024)
+            runloom_c.fiber(large,  stack_size=256 * 1024)
         runloom_c.run()
         self.assertEqual(out.count("s"), 20)
         self.assertEqual(out.count("m"), 20)

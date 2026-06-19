@@ -57,7 +57,7 @@ def _drive(fn):
         except BaseException as e:   # noqa: BLE001
             box[1] = e
 
-    runloom_c.go(runner)
+    runloom_c.fiber(runner)
     runloom_c.run()
     if box[1] is not None:
         raise box[1]
@@ -77,7 +77,7 @@ def _ticker(ticks, stop):
         while not stop["v"]:
             ticks.append(1)
             runloom.sleep(0.003)
-    runloom_c.go(t)
+    runloom_c.fiber(t)
 
 
 class TestInstalled(unittest.TestCase):

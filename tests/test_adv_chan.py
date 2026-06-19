@@ -32,7 +32,7 @@ def _run_single(fn):
     box = {}
     def main():
         box["r"] = fn()
-    rc.go(main)
+    rc.fiber(main)
     rc.run()
     return box.get("r")
 
@@ -88,11 +88,11 @@ def test_close_wakes_every_parked_receiver():
     def main():
         ch = rc.Chan(0)
         for _ in range(N):
-            rc.go(lambda: results.append(ch.recv()))
+            rc.fiber(lambda: results.append(ch.recv()))
         rc.sched_yield()      # let receivers park
         ch.close()
     with hang_guard(20, "close wakes receivers"):
-        rc.go(main)
+        rc.fiber(main)
         rc.run()
     assert len(results) == N
     assert all(r == (None, False) for r in results)
@@ -113,11 +113,11 @@ def test_close_makes_parked_senders_raise():
             except ValueError:
                 outcomes.append(("closed", i))
         for i in range(N):
-            rc.go(lambda i=i: sender(i))
+            rc.fiber(lambda i=i: sender(i))
         rc.sched_yield()
         ch.close()
     with hang_guard(20, "close wakes senders"):
-        rc.go(main)
+        rc.fiber(main)
         rc.run()
     assert len(outcomes) == N
     assert all(o[0] == "closed" for o in outcomes), outcomes
@@ -196,10 +196,10 @@ def test_select_blocks_until_one_case_ready_no_busy_spin():
                 order.append(("burn", i))
                 rc.sched_yield()
             b.send("hello")          # rendezvous onto case 1
-        rc.go(chooser)
-        rc.go(burner)
+        rc.fiber(chooser)
+        rc.fiber(burner)
     with hang_guard(20, "select blocks then wakes"):
-        rc.go(main)
+        rc.fiber(main)
         rc.run()
     assert ("chose", 1, "hello") in order
     # the burner got to run while the chooser was parked (cooperative overlap)

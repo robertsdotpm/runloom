@@ -77,7 +77,7 @@ print("stack default:", runloom.get_stack_size(), "bytes")
 
 def hello():
     print("hello from a fiber!")
-runloom.go(hello)
+runloom.fiber(hello)
 runloom.run(1)
 ```
 

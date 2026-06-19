@@ -94,7 +94,7 @@ class TestTaskGC(unittest.TestCase):
                 return 7
 
             box["w"] = weakref.ref(body)
-            runloom_c.go(body)
+            runloom_c.fiber(body)
             runloom_c.run()
             del body
 

@@ -27,7 +27,7 @@ def _run_single(fn):
     box = {}
     def main():
         box["r"] = fn()
-    rc.go(main)
+    rc.fiber(main)
     rc.run()
     return box.get("r")
 
@@ -57,7 +57,7 @@ def test_waitgroup_basic_and_reuse():
         for cycle in range(2):                 # reusable once back at zero
             wg.add(3)
             for i in range(3):
-                rc.go(lambda i=i: (seen.append(i), wg.done()))
+                rc.fiber(lambda i=i: (seen.append(i), wg.done()))
             wg.wait()
         return sorted(seen)
     with hang_guard(15, "waitgroup reuse"):
@@ -76,7 +76,7 @@ def test_waitgroup_negative_counter_raises():
 
 
 def test_waitgroup_done_from_foreign_thread_rejected_cleanly():
-    # The wake side from a non-goroutine must raise, NOT crash.
+    # The wake side from a non-fiber must raise, NOT crash.
     wg = WaitGroup()
     wg.add(1)
     assert _foreign_call(lambda: wg.done()) == "RuntimeError"
@@ -110,7 +110,7 @@ def test_future_set_exception_propagates_to_all_waiters():
             except KeyError:
                 outcomes.append("keyerror")
         for _ in range(5):
-            rc.go(waiter)
+            rc.fiber(waiter)
         rc.sched_yield()                        # all 5 park on the future
         fut.set_exception(KeyError("boom"))     # type form -> instantiated
         return outcomes
@@ -266,8 +266,8 @@ def test_rwmutex_writer_is_exclusive():
             log.append(("w", active[0]))       # must see 0 readers active
             rw.unlock()
         for i in range(4):
-            rc.go(lambda i=i: reader(i))
-        rc.go(writer)
+            rc.fiber(lambda i=i: reader(i))
+        rc.fiber(writer)
         return log
     with hang_guard(15, "rwmutex exclusivity"):
         log = _run_single(f)
@@ -288,7 +288,7 @@ def test_once_runs_exactly_once_under_concurrency():
         def caller():
             once.do(fn)
         for _ in range(10):
-            rc.go(caller)
+            rc.fiber(caller)
         return runs
     with hang_guard(15, "once concurrency"):
         runs = _run_single(f)
@@ -308,7 +308,7 @@ def test_once_first_caller_sees_exception_later_callers_do_not():
             except ValueError:
                 outcomes.append("raised")
         for _ in range(5):
-            rc.go(caller)
+            rc.fiber(caller)
         return outcomes
     with hang_guard(15, "once exception"):
         outcomes = _run_single(f)

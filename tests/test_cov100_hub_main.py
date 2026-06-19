@@ -72,7 +72,7 @@ DEQUE_CAP = 4096
 # --------------------------------------------------------------------------
 # L388 (trigger 1/3) -- deque-overflow fallback, exactly-once oracle.
 #
-# mn_init(1): the M:N hub loop runs with a SINGLE hub, so runloom_mn_go_core's
+# mn_init(1): the M:N hub loop runs with a SINGLE hub, so runloom_mn_fiber_core's
 # `hub_idx = counter % hub_count` is always 0 -- EVERY mn_go targets hub 0's
 # sub-list.  The driver g runs ON hub 0; while it spins the spawn loop the hub is
 # busy resuming the driver and CANNOT drain its own sub-list, so all N children
@@ -125,16 +125,16 @@ def test_deque_overflow_fallback_no_drop():
 
 
 # --------------------------------------------------------------------------
-# L388 (trigger 2/3) -- go_n bulk-spawn route.
+# L388 (trigger 2/3) -- fiber_n bulk-spawn route.
 #
-# go_n is the arena/bulk spawn path; at hub_count==1 its `hub = i % H` is also
+# fiber_n is the arena/bulk spawn path; at hub_count==1 its `hub = i % H` is also
 # always 0, so its N fresh gs all land on hub 0 and overflow the deque on the
 # single drain.  A DISTINCT code path into the SAME fragment line: a regression
-# that only breaks one spawn route still shows here.  Indexed go_n(fn,N,0,True)
+# that only breaks one spawn route still shows here.  Indexed fiber_n(fn,N,0,True)
 # calls fn(index), giving a per-g exactly-once slot for the same no-drop oracle.
 # --------------------------------------------------------------------------
 @pytest.mark.skipif(not FT, reason="M:N hub_main only runs with the GIL disabled")
-def test_deque_overflow_fallback_go_n_bulk():
+def test_deque_overflow_fallback_fiber_n_bulk():
     N = DEQUE_CAP + 800           # 4896 fresh gs via the bulk path
     ran = bytearray(N)
 
@@ -143,9 +143,9 @@ def test_deque_overflow_fallback_go_n_bulk():
             ran[i] = 1
 
     def main():
-        rc.go_n(worker, N, 0, True)   # bulk-spawn N indexed fresh gs onto hub 0
+        rc.fiber_n(worker, N, 0, True)   # bulk-spawn N indexed fresh gs onto hub 0
 
-    with hang_guard(90, "deque overflow via go_n"):
+    with hang_guard(90, "deque overflow via fiber_n"):
         rc.mn_init(1)
         rc.mn_go(main)
         rc.mn_run()

@@ -45,8 +45,8 @@ and each names the exact source lines it drives + the gate it makes true.
     to a firing spec from INSIDE the run -- after the earlier, must-succeed
     spawns -- so exactly the targeted later spawn fails.  Run in a SUBPROCESS
     that exits cleanly so gcov flushes:
-      io L324-326 (all-C serve: acceptor mn_go_c fails -> RuntimeError)
-      io L241     (all-C acceptor: per-conn echo mn_go_c fails -> close(cfd))
+      io L324-326 (all-C serve: acceptor mn_fiber_c fails -> RuntimeError)
+      io L241     (all-C acceptor: per-conn echo mn_fiber_c fails -> close(cfd))
 
  5. all-C echo send HARD error (io L205): a peer RST (SO_LINGER 0 close) arriving
     while the echo is mid-send makes send() return EPIPE/ECONNRESET (not
@@ -100,7 +100,7 @@ def _run_single(fn, label, secs=15):
     def main():
         box["r"] = fn()
     with hang_guard(secs, label):
-        rc.go(main)
+        rc.fiber(main)
         rc.run()
     return box.get("r")
 
@@ -461,7 +461,7 @@ import runloom_c as rc, runloom
 res = {}
 def main():
     # main spawned with always:0 (never fires). Arm a one-shot ENOMEM so the
-    # NEXT g spawn -- serve()'s all-C acceptor mn_go_c -- fails (io L324-326).
+    # NEXT g spawn -- serve()'s all-C acceptor mn_fiber_c -- fails (io L324-326).
     os.environ["RUNLOOM_FAULT_SPAWN_G"] = "once:12"
     try:
         rc.serve("127.0.0.1", 0, None, 1, 64)     # handler=None -> all-C path
@@ -473,7 +473,7 @@ def main():
     finally:
         os.environ["RUNLOOM_FAULT_SPAWN_G"] = "always:0"
 runloom.run(2, main)
-if res.get("r") and res["r"][0] == "RuntimeError" and "mn_go_c failed" in res["r"][1]:
+if res.get("r") and res["r"][0] == "RuntimeError" and "mn_fiber_c failed" in res["r"][1]:
     print("ACCEPTOR_SPAWNFAIL_OK"); sys.exit(0)
 print("UNEXPECTED %r" % (res.get("r"),)); sys.exit(3)
 '''
@@ -486,7 +486,7 @@ RealThread = threading.Thread
 res = {}
 def main():
     # acceptor spawns fine (always:0). After serve() returns it is running; now
-    # make EVERY subsequent g spawn fail so the acceptor's per-conn echo mn_go_c
+    # make EVERY subsequent g spawn fail so the acceptor's per-conn echo mn_fiber_c
     # fails -> close(cfd) (io L241). The acceptor keeps accepting+failing safely.
     port, listeners = rc.serve("127.0.0.1", 0, None, 1, 64)
     res["port"] = port
@@ -522,8 +522,8 @@ print("UNEXPECTED %r" % (res,)); sys.exit(3)
 
 @pytest.mark.skipif(not FT, reason="serve()/M:N needs the GIL-off build")
 def test_all_c_serve_acceptor_spawn_fail():
-    """io L324-326: when the all-C acceptor's mn_go_c fails, serve() drops the
-    listener list and raises RuntimeError('serve(): mn_go_c failed')."""
+    """io L324-326: when the all-C acceptor's mn_fiber_c fails, serve() drops the
+    listener list and raises RuntimeError('serve(): mn_fiber_c failed')."""
     p = _run_subproc(_SERVE_ACCEPTOR_SPAWNFAIL)
     assert p.returncode == 0, (
         "rc=%d\nstdout=%s\nstderr=%s" % (p.returncode, p.stdout[-400:], p.stderr[-800:]))
@@ -533,7 +533,7 @@ def test_all_c_serve_acceptor_spawn_fail():
 @pytest.mark.skipif(not FT, reason="serve()/M:N needs the GIL-off build")
 def test_all_c_acceptor_echo_spawn_fail():
     """io L241: when the all-C acceptor cannot spawn a per-connection echo fiber
-    (mn_go_c < 0), it close()s the accepted fd and keeps looping; the server
+    (mn_fiber_c < 0), it close()s the accepted fd and keeps looping; the server
     stays up and the connecting clients all see a dropped connection."""
     p = _run_subproc(_SERVE_ECHO_SPAWNFAIL)
     assert p.returncode == 0, (

@@ -34,7 +34,7 @@ class TestCountAndRegistry(unittest.TestCase):
 
         def main():
             for _ in range(5):
-                runloom.go(sleeper)
+                runloom.fiber(sleeper)
             runloom.sleep(0.005)            # let them park
             seen["count"] = runloom_c.fiber_count()
             seen["states"] = [g["state"] for g in runloom_c.fibers()]
@@ -52,7 +52,7 @@ class TestCountAndRegistry(unittest.TestCase):
 
         def main():
             for _ in range(2000):
-                runloom.go(noop)
+                runloom.fiber(noop)
                 runloom.yield_()
 
         runloom.run(1, main)
@@ -66,7 +66,7 @@ class TestCountAndRegistry(unittest.TestCase):
 
         def main():
             for _ in range(8):
-                runloom.go(sleeper)
+                runloom.fiber(sleeper)
             runloom.sleep(0.005)
             ids["set"] = [g["id"] for g in runloom_c.fibers()]
 
@@ -84,7 +84,7 @@ class TestStates(unittest.TestCase):
             runloom.sleep(0.05)
 
         def main():
-            runloom.go(sleeper)
+            runloom.fiber(sleeper)
             runloom.sleep(0.005)
             g = [x for x in runloom_c.fibers() if x["state"] == "sleep"][0]
             cap["wake_in"] = g["wake_in"]
@@ -107,7 +107,7 @@ class TestStates(unittest.TestCase):
                 os.read(r, 1)
 
             def main():
-                runloom.go(waiter)
+                runloom.fiber(waiter)
                 runloom.sleep(0.01)
                 iow = [g for g in runloom_c.fibers()
                        if g["state"] == "io-wait"]
@@ -142,7 +142,7 @@ class TestStackReconstruction(unittest.TestCase):
             middle()
 
         def main():
-            runloom.go(top)
+            runloom.fiber(top)
             runloom.sleep(0.01)
             gid = [g for g in runloom_c.fibers()
                    if g["state"] == "sleep"][0]["id"]
@@ -170,7 +170,7 @@ class TestAge(unittest.TestCase):
                 runloom.sleep(0.05)
 
             def main():
-                runloom.go(sleeper)
+                runloom.fiber(sleeper)
                 runloom.sleep(0.02)
                 g = [x for x in runloom_c.fibers()
                      if x["state"] == "sleep"][0]
@@ -192,7 +192,7 @@ class TestDump(unittest.TestCase):
             runloom.sleep(0.03)
 
         def main():
-            runloom.go(sleeper)
+            runloom.fiber(sleeper)
             runloom.sleep(0.005)
             fd, path = tempfile.mkstemp()
             out["path"] = path
@@ -213,7 +213,7 @@ class TestDump(unittest.TestCase):
             runloom.sleep(0.03)
 
         def main():
-            runloom.go(sleeper)
+            runloom.fiber(sleeper)
             runloom.sleep(0.005)
             cap["text"] = gi.format(stacks=True)
 
@@ -228,7 +228,7 @@ class TestDump(unittest.TestCase):
             runloom.sleep(0.03)
 
         def main():
-            runloom.go(sleeper)
+            runloom.fiber(sleeper)
             runloom.sleep(0.005)
             buf = io.StringIO()
             gi.dump(file=buf, stacks=True)
@@ -291,7 +291,7 @@ class TestDeadlockDetection(unittest.TestCase):
             "gi.set_deadlock_mode('warn')\n"
             "def waiter(): runloom_c.Chan(0).recv()\n"
             "def main():\n"
-            "    runloom.go(waiter)\n"
+            "    runloom.fiber(waiter)\n"
             "    runloom_c.Chan(0).recv()\n"
             "runloom.run(1, main)\n"            # warn -> prints, no raise
             "print('SURVIVED')\n")
@@ -317,7 +317,7 @@ class TestDeadlockDetection(unittest.TestCase):
             "def worker():\n"
             "    [runloom.yield_() for _ in range(3)]\n"
             "def main():\n"
-            "    [runloom.go(worker) for _ in range(5)]\n"
+            "    [runloom.fiber(worker) for _ in range(5)]\n"
             "    runloom.sleep(0.005)\n"
             "runloom.run(1, main)\n"            # completes -> no deadlock
             "print('CLEAN_OK')\n")
@@ -336,7 +336,7 @@ class TestLeakWatchdog(unittest.TestCase):
         def main():
             gi.enable_timestamps(True)
             for _ in range(3):
-                runloom.go(sleeper)
+                runloom.fiber(sleeper)
             runloom.sleep(0.03)            # let them age
             cap["hits"] = gi.leaked(min_age=0.01, states=("sleep",))
             cap["none"] = gi.leaked(min_age=10.0, states=("sleep",))
@@ -367,7 +367,7 @@ class TestMaxGoroutines(unittest.TestCase):
                 runloom_c.park_self()       # occupies a slot
             for _ in range(20):
                 try:
-                    runloom.go(parker)
+                    runloom.fiber(parker)
                     spawned += 1
                 except RuntimeError:
                     rejected += 1
@@ -392,7 +392,7 @@ class TestMaxGoroutines(unittest.TestCase):
             def quick():
                 ran["n"] += 1
             for _ in range(500):
-                runloom.go(quick)
+                runloom.fiber(quick)
                 runloom.yield_()               # let some finish, freeing slots
 
         runloom.run(1, main)

@@ -260,11 +260,11 @@ def main():
     # interleave the spawns so multiple FIFO gs sit ready together (forces the
     # argmax seen_fifo `continue` skip) and raw gs mix in for the change point.
     for i in range(NF):
-        rc.go(lambda i=i: fifo_worker(i), fifo=True)
+        rc.fiber(lambda i=i: fifo_worker(i), fifo=True)
     for i in range(NR):
-        rc.go(lambda i=i: raw_worker(i))
+        rc.fiber(lambda i=i: raw_worker(i))
 
-rc.go(main)
+rc.fiber(main)
 rc.run()
 
 # FIFO contract: across the whole schedule the FIFO ids appear in
@@ -325,8 +325,8 @@ def main():
             runs[i] += 1
             rc.sched_yield()
     for i in range(6):
-        rc.go(lambda i=i: w(i))
-rc.go(main)
+        rc.fiber(lambda i=i: w(i))
+rc.fiber(main)
 rc.run()
 sys.stdout.write("PCT1 total=%d allthree=%s\n"
                  % (sum(runs), all(r == 3 for r in runs)))
@@ -411,18 +411,18 @@ def main():
     def short_parker(t, name):
         order.append((name, rc.park(timeout=t)))        # must sift up above root
         wg.done()
-    rc.go(long_parker)
+    rc.fiber(long_parker)
     rc.sched_yield()                  # ensure the 5s timer is in the heap first
     # several shorter deadlines, each pushed AFTER the 5s root -> each sifts up
-    rc.go(lambda: short_parker(0.04, "s1"))
-    rc.go(lambda: short_parker(0.05, "s2"))
-    rc.go(lambda: short_parker(0.06, "s3"))
-    rc.go(lambda: short_parker(0.07, "s4"))
+    rc.fiber(lambda: short_parker(0.04, "s1"))
+    rc.fiber(lambda: short_parker(0.05, "s2"))
+    rc.fiber(lambda: short_parker(0.06, "s3"))
+    rc.fiber(lambda: short_parker(0.07, "s4"))
     rc.sched_sleep(0.25)              # let all the short timers fire (timed out)
     long_h["g"].wake()               # wake the long parker early (False)
     wg.wait()
     res["order"] = order
-rc.go(main)
+rc.fiber(main)
 rc.run()
 o = res["order"]
 shorts = [v for (n, v) in o if n.startswith("s")]

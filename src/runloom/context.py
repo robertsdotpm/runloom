@@ -39,7 +39,7 @@ _READ = 1   # runloom_c.wait_fd READ direction
 # A permanent, never-readable, never-closed pipe used purely as a parking
 # target for deadline-waker fibers.  A waker parks in wait_fd(<read end>, READ,
 # remaining_ms): the park is deadline-BOUNDED (the ms timeout) yet WAKEABLE --
-# cancel() calls the waker goroutine's cancel_wait_fd(), so a cancelled
+# cancel() calls the waker fiber's cancel_wait_fd(), so a cancelled
 # context's run() returns at once instead of lingering to the original
 # deadline (Go stops its timer on cancel; we wake the equivalent fiber).  The
 # fd number never changes and is never closed, so it cannot poison the netpoll
@@ -64,8 +64,8 @@ def _spawn(fn):
     single-thread one -- otherwise the deadline silently never fires under
     mn_run.  mn_hub_count() > 0 means mn_init() is in effect."""
     if runloom_c.mn_hub_count() > 0:
-        return runloom_c.mn_go(fn)
-    return runloom_c.go(fn)
+        return runloom_c.mn_fiber(fn)
+    return runloom_c.fiber(fn)
 
 
 # Error sentinels (strings -- runloom deliberately avoids custom exception
@@ -118,7 +118,7 @@ class _CancelCtx(object):
         self._err        = None
         self._children   = []
         self._deadline   = deadline
-        self._deadline_g = None   # the deadline-waker goroutine, if armed
+        self._deadline_g = None   # the deadline-waker fiber, if armed
 
         # Wire ourselves into the parent's cancel fanout.  Background is
         # the only "uncancellable" parent; everyone else exposes

@@ -72,8 +72,8 @@ static PyMethodDef module_methods[] = {
     {"iouring_available", m_iouring_available, METH_NOARGS,
      "True if the io_uring kernel interface is usable (Linux 5.1+)."},
     /* C-scheduler fast path. */
-    {"go",          (PyCFunction)m_go, METH_VARARGS | METH_KEYWORDS,
-     "go(fn, stack_size=None): spawn a fiber via the C scheduler.\n"
+    {"fiber",          (PyCFunction)m_fiber, METH_VARARGS | METH_KEYWORDS,
+     "fiber(fn, stack_size=None): spawn a fiber via the C scheduler.\n"
      "Returns a G handle.  stack_size overrides the scheduler default\n"
      "(post-calibration) for this one fiber -- use when the entry\n"
      "function is known to recurse deeply or call into a C extension\n"
@@ -85,10 +85,10 @@ static PyMethodDef module_methods[] = {
      "sockets/files, GIL-releasing C extensions) that would otherwise wedge\n"
      "the fiber's hub and strand everything queued behind it.  fn runs\n"
      "off any fiber and must not call runloom scheduler ops."},
-    {"go_noyield",  m_go_noyield,  METH_O,
+    {"fiber_noyield",  m_fiber_noyield,  METH_O,
      "Spawn a fiber that the caller promises will run to "
      "completion without yielding.  Skips the per-g datastack/snap/"
-     "load-sched dance -- ~150-400 ns/g faster than go() for pure-"
+     "load-sched dance -- ~150-400 ns/g faster than fiber() for pure-"
      "compute callables.  If the callable does yield (sched_yield, "
      "sched_sleep, wait_fd, monkey-patched I/O), behaviour is "
      "undefined.  Use only when you know the work is CPU-bound."},
@@ -203,13 +203,13 @@ static PyMethodDef module_methods[] = {
      "Return whether recycled-stack scrubbing is enabled."},
     {"mn_init",     m_mn_init,     METH_VARARGS,
      "mn_init(n=cpus): start N hub threads.  Returns count."},
-    {"mn_go",       (PyCFunction)m_mn_go, METH_VARARGS | METH_KEYWORDS,
-     "mn_go(callable, stack_size=0): spawn a fiber on a round-robin hub.  "
+    {"mn_fiber",       (PyCFunction)m_mn_fiber, METH_VARARGS | METH_KEYWORDS,
+     "mn_fiber(callable, stack_size=0): spawn a fiber on a round-robin hub.  "
      "stack_size>0 overrides the hub's small default C-stack (bytes) for a g "
      "that runs a deep non-yielding C burst.  "
      "v1 only supports run-to-completion gs (no yield)."},
-    {"go_n",        (PyCFunction)m_go_n, METH_VARARGS | METH_KEYWORDS,
-     "go_n(fn, n, stack_size=0): bulk-spawn n fibers all running fn(), "
+    {"fiber_n",        (PyCFunction)m_fiber_n, METH_VARARGS | METH_KEYWORDS,
+     "fiber_n(fn, n, stack_size=0): bulk-spawn n fibers all running fn(), "
      "looping the spawn core in C (skips n Python->C dispatches).  fn still "
      "runs as Python in each fiber."},
     {"immortalize", m_immortalize, METH_O,

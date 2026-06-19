@@ -250,8 +250,8 @@ def test_sched_reset_drains_same_thread_wait_fd_parker():
         res["reset"] = rc.sched_reset()
 
     with hang_guard(15, "sched_reset drain"):
-        rc.go(waiter)
-        rc.go(driver)
+        rc.fiber(waiter)
+        rc.fiber(driver)
         rc.run()
 
     r, w = res["fds"]
@@ -293,8 +293,8 @@ def test_sched_reset_drains_many_same_thread_parkers():
 
     with hang_guard(20, "sched_reset drain many"):
         for _ in range(N):
-            rc.go(waiter)
-        rc.go(driver)
+            rc.fiber(waiter)
+        rc.fiber(driver)
         rc.run()
 
     for r, w in res["fds"]:
@@ -343,7 +343,7 @@ def body():
         box["caught"] = True
 
 try:
-    rc.go(body)
+    rc.fiber(body)
     rc.run()
 except BaseException as e:
     box["escaped"] = repr(e)

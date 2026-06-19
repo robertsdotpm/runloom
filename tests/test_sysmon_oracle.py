@@ -44,7 +44,7 @@ _HASH_WORKLOAD = textwrap.dedent("""
             hashlib.sha256(BUF).digest()
     runloom_c.mn_init(4)
     for _ in range(4):
-        runloom_c.mn_go(g)
+        runloom_c.mn_fiber(g)
     runloom_c.mn_run()
 """)
 
@@ -73,7 +73,7 @@ class TestSysmonOracle(unittest.TestCase):
                     i += 1
             runloom_c.mn_init(4)
             for _ in range(4):
-                runloom_c.mn_go(hog)
+                runloom_c.mn_fiber(hog)
             runloom_c.mn_run()
         """)
         out = _run(snippet)
@@ -97,7 +97,7 @@ class TestSysmonOracle(unittest.TestCase):
                     runloom.sleep(0.005)
             runloom_c.mn_init(4)
             for _ in range(8):
-                runloom_c.mn_go(g)
+                runloom_c.mn_fiber(g)
             runloom_c.mn_run()
         """)
         out = _run(snippet)

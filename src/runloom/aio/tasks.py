@@ -87,8 +87,8 @@ class RunloomTask(_RunloomFutureMixin, asyncio.Task):
         # PCT controlled scheduler must keep this driver in order with the loop's
         # other call_soon fibers (else a sleep(0) resume can race ahead of a
         # call_soon callback -- a false positive, not a bug).  See pct_fifo.
-        self._g = runloom_c.go(_body, stack_size=_TASK_STACK, fifo=True) \
-            if _TASK_STACK else runloom_c.go(_body, fifo=True)
+        self._g = runloom_c.fiber(_body, stack_size=_TASK_STACK, fifo=True) \
+            if _TASK_STACK else runloom_c.fiber(_body, fifo=True)
 
     def _pg_settle_c(self):
         # Settle the underlying C Future to FINISHED so asyncio.Task.__del__

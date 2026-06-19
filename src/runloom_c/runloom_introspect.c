@@ -56,14 +56,14 @@ long long runloom_introspect_monotonic_ns(void)
  * no unsigned-long-long slot at all.  Ids are always positive, so signed is
  * fine. */
 #define RUNLOOM_GOID_BLOCK 1024
-static long long runloom_goid_global = 1;   /* next id to hand out (1-based) */
+static long long runloom_fiberid_global = 1;   /* next id to hand out (1-based) */
 static RUNLOOM_TLS long long runloom_tls_goid_next = 0;
 static RUNLOOM_TLS long long runloom_tls_goid_end  = 0;
 
 long long runloom_next_goid(void)
 {
     if (runloom_tls_goid_next >= runloom_tls_goid_end) {
-        long long base = __atomic_fetch_add(&runloom_goid_global,
+        long long base = __atomic_fetch_add(&runloom_fiberid_global,
                                             RUNLOOM_GOID_BLOCK, __ATOMIC_RELAXED);
         runloom_tls_goid_next = base;
         runloom_tls_goid_end  = base + RUNLOOM_GOID_BLOCK;
@@ -75,7 +75,7 @@ long long runloom_next_goid(void)
  * The bulk-spawn loop then assigns base+0..base+n-1 inline (no per-g call). */
 long long runloom_next_goid_block(long n)
 {
-    long long base = __atomic_fetch_add(&runloom_goid_global,
+    long long base = __atomic_fetch_add(&runloom_fiberid_global,
                                         (long long)n, __ATOMIC_RELAXED);
     return base;
 }

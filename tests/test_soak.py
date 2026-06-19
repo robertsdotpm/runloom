@@ -45,14 +45,14 @@ class TestSpawnSoak(unittest.TestCase):
 
         # Warmup batch: stack pool, g slab, parker pool all populate.
         for _ in range(per):
-            runloom_c.go(lambda: None)
+            runloom_c.fiber(lambda: None)
         runloom_c.run()
         gc.collect()
         rss_baseline = _rss_mb()
 
         for i in range(1, batches):
             for _ in range(per):
-                runloom_c.go(lambda: None)
+                runloom_c.fiber(lambda: None)
             runloom_c.run()
             if i % 10 == 0:
                 gc.collect()
@@ -89,8 +89,8 @@ class TestChannelSoak(unittest.TestCase):
                 ch_b.send(1)
 
         t0 = time.monotonic()
-        runloom_c.go(pinger)
-        runloom_c.go(ponger)
+        runloom_c.fiber(pinger)
+        runloom_c.fiber(ponger)
         runloom_c.run()
         dt = time.monotonic() - t0
         print("[soak] 100k ping-pong in %.2fs (%.1f ns/round)"

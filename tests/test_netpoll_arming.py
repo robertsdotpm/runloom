@@ -131,7 +131,7 @@ def _run_rearm(n_edges, timeout_ms=TIMEOUT_MS):
                 _drain(data_r)
             ack_w.send(b"a")                  # release the feeder for edge N+1
 
-    runloom_c.go(waiter)
+    runloom_c.fiber(waiter)
     runloom_c.run()
     t.join(timeout=10)
     try:
@@ -166,7 +166,7 @@ def test_ready_before_park_returns_immediately():
     def waiter():
         got.append(runloom_c.wait_fd(data_r.fileno(), READ, TIMEOUT_MS))
 
-    runloom_c.go(waiter)
+    runloom_c.fiber(waiter)
     runloom_c.run()
     data_r.close(); data_w.close()
     assert got == [READ], "ready-at-arm not reported on %s: %r" % (BACKEND, got)
@@ -180,7 +180,7 @@ def test_write_side_is_ready_immediately():
     def waiter():
         got.append(runloom_c.wait_fd(a.fileno(), WRITE, TIMEOUT_MS))
 
-    runloom_c.go(waiter)
+    runloom_c.fiber(waiter)
     runloom_c.run()
     a.close(); b.close()
     assert got and (got[0] & WRITE), "writable arm not reported: %r" % got
@@ -196,7 +196,7 @@ def test_combined_read_write_returns_write_subset():
     def waiter():
         got.append(runloom_c.wait_fd(a.fileno(), READ | WRITE, TIMEOUT_MS))
 
-    runloom_c.go(waiter)
+    runloom_c.fiber(waiter)
     runloom_c.run()
     a.close(); b.close()
     assert got, "no return"
@@ -217,7 +217,7 @@ def test_never_ready_times_out():
     def waiter():
         got.append(runloom_c.wait_fd(data_r.fileno(), READ, 200))
 
-    runloom_c.go(waiter)
+    runloom_c.fiber(waiter)
     runloom_c.run()
     data_r.close(); data_w.close()
     assert got == [0], "expected timeout (0), got %r on %s" % (got, BACKEND)
@@ -246,7 +246,7 @@ def test_peer_close_wakes_reader():
         m = runloom_c.wait_fd(data_r.fileno(), READ, TIMEOUT_MS)
         woke.append(m)
 
-    runloom_c.go(waiter)
+    runloom_c.fiber(waiter)
     runloom_c.run()
     t.join(5)
     data_r.close()
@@ -284,8 +284,8 @@ def test_close_armed_fd_degrades_to_timeout():
         runloom_c.sched_yield()               # let the waiter register its fd + park
         data_r.close()                        # close the fd we're parked on
 
-    runloom_c.go(waiter)
-    runloom_c.go(closer)
+    runloom_c.fiber(waiter)
+    runloom_c.fiber(closer)
     runloom_c.run()
     data_w.close()
     assert got == [0], "closing the armed fd should time out cleanly: %r" % got
@@ -324,7 +324,7 @@ def test_concurrent_distinct_fds_thundering():
         return waiter
 
     for i in range(N):
-        runloom_c.go(make_waiter(i))
+        runloom_c.fiber(make_waiter(i))
     runloom_c.run()
     t.join(5)
     for r, w in pairs:
@@ -365,7 +365,7 @@ def test_concurrent_distinct_fds_staggered():
         return waiter
 
     for i in range(N):
-        runloom_c.go(make_waiter(i))
+        runloom_c.fiber(make_waiter(i))
     runloom_c.run()
     t.join(10)
     for r, w in pairs:

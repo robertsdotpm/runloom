@@ -39,7 +39,7 @@ def _drive(fn):
         except BaseException as e:   # noqa: BLE001
             box[1] = e
 
-    runloom_c.go(runner)
+    runloom_c.fiber(runner)
     runloom_c.run()
     if box[1] is not None:
         raise box[1]
@@ -218,7 +218,7 @@ class TestSendfileFaults(unittest.TestCase):
                     got["buf"] += chunk
                 conn.close()
 
-            runloom_c.go(server)
+            runloom_c.fiber(server)
             cli = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             cli.connect(addr)
             with inject(runloom.monkey.sockets, "_raw_os_sendfile",

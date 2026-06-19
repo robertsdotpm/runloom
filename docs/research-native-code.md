@@ -80,10 +80,10 @@ def worker(n, ch):
 def main():
     ch = runloom_c.Chan()
     for n in range(8):
-        runloom_c.mn_go(lambda n=n: worker(n, ch))
+        runloom_c.mn_fiber(lambda n=n: worker(n, ch))
     return dict(ch.recv()[0] for _ in range(8))   # {n: n*n}
 
-runloom_c.mn_init(2); runloom_c.mn_go(main); runloom_c.mn_run(); runloom_c.mn_fini()
+runloom_c.mn_init(2); runloom_c.mn_fiber(main); runloom_c.mn_run(); runloom_c.mn_fini()
 ```
 
 ## How it works
@@ -116,7 +116,7 @@ inherits the fiber model's hard edges:
   PROT_NONE guard page). The same fat-frame rule as the rest of runloom applies:
   a blob that pushes a large frame or recurses deeply overflows into the guard
   page → a clean SIGSEGV. For a big compute kernel, give that fiber a roomy
-  stack: `runloom_c.go(fn, stack_size=...)`.
+  stack: `runloom_c.fiber(fn, stack_size=...)`.
 - **No cooperation.** Raw machine code knows nothing about the scheduler — it
   can't park, yield, or do I/O cooperatively, and the sysmon preemptor (which
   acts at Python bytecode boundaries) can't interrupt it mid-blob. A long blob

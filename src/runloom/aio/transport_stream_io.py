@@ -293,7 +293,7 @@ class _StreamIOMixin(object):
             except Exception:
                 pass
         else:
-            self._io_g = _go_io(self._io_loop)
+            self._io_g = _fiber_io(self._io_loop)
 
     def _maybe_pause_writing(self):
         if not self._protocol_paused and len(self._write_buf) > self._high_water:

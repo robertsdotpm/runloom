@@ -45,7 +45,7 @@ def _drive(fn):
         except BaseException as e:   # noqa: BLE001
             box[1] = e
 
-    runloom_c.go(runner)
+    runloom_c.fiber(runner)
     runloom_c.run()
     if box[1] is not None:
         raise box[1]
@@ -116,9 +116,9 @@ class TestFlock(unittest.TestCase):
                     ticks.append(1)
                     runloom.sleep(0.003)
 
-            runloom_c.go(holder)
-            runloom_c.go(waiter)
-            runloom_c.go(ticker)
+            runloom_c.fiber(holder)
+            runloom_c.fiber(waiter)
+            runloom_c.fiber(ticker)
             t0 = time.monotonic()
             while "b-locked" not in order and time.monotonic() - t0 < 5:
                 runloom.sleep(0.005)
@@ -199,7 +199,7 @@ class TestLockf(unittest.TestCase):
                     ticks.append(1)
                     runloom.sleep(0.004)
 
-            runloom_c.go(ticker)
+            runloom_c.fiber(ticker)
             fcntl.lockf(fd, fcntl.LOCK_EX)  # blocks until the child releases
             acquired = True
             fcntl.lockf(fd, fcntl.LOCK_UN)

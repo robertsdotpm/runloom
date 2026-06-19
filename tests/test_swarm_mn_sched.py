@@ -122,7 +122,7 @@ def test_mn_init_non_int_raises_typeerror():
 
 
 @mn
-def test_mn_go_without_init_raises_not_crash():
+def test_mn_fiber_without_init_raises_not_crash():
     with pytest.raises(RuntimeError):
         rc.mn_go(lambda: None)
     assert rc.mn_hub_count() == 0
@@ -130,7 +130,7 @@ def test_mn_go_without_init_raises_not_crash():
 
 @mn
 @pytest.mark.parametrize("bad", [None, 42, "x", object()])
-def test_mn_go_non_callable_raises_typeerror(bad):
+def test_mn_fiber_non_callable_raises_typeerror(bad):
     rc.mn_init(2)
     try:
         with pytest.raises(TypeError):
@@ -141,7 +141,7 @@ def test_mn_go_non_callable_raises_typeerror(bad):
 
 
 @mn
-def test_mn_go_negative_stack_size_still_runs_the_fiber():
+def test_mn_fiber_negative_stack_size_still_runs_the_fiber():
     # Empirically mn_go(fn, -1) is accepted (negative stack folds to the hub
     # default).  Assert it actually RUNS the fiber rather than silently dropping
     # it -- a dropped fiber would be a lost-work integrity bug.
@@ -210,7 +210,7 @@ def test_run_rejects_non_callable_main():
 @mn
 def test_run_finalizes_hubs_even_when_main_raises():
     # The root main_fn under run(N>1) is just the root GOROUTINE: an exception it
-    # raises is a goroutine panic -- REPORTED via sys.unraisablehook, NOT
+    # raises is a fiber panic -- REPORTED via sys.unraisablehook, NOT
     # propagated out of run() (run() returns normally).  The critical contract is
     # that run()'s try/finally still tears the hub pool down (mn_fini) so a
     # raising main does NOT leak a pool that would wedge the next test.
@@ -221,13 +221,13 @@ def test_run_finalizes_hubs_even_when_main_raises():
     try:
         def main():
             raise ValueError(marker)
-        # run() returns normally; it does not re-raise the goroutine panic.
+        # run() returns normally; it does not re-raise the fiber panic.
         runloom.run(2, main)
     finally:
         sys.unraisablehook = prev_hook
     assert rc.mn_hub_count() == 0, "run() leaked hubs after main raised"
     assert any(marker in r for r in recorded), (
-        "a panic in the root main goroutine was not reported via unraisablehook")
+        "a panic in the root main fiber was not reported via unraisablehook")
 
 
 # ==========================================================================
@@ -954,7 +954,7 @@ def test_cpu_parallelism_speedup_across_hubs():
                     x += i
                 wg.done()
             for _ in range(NJOBS):
-                runloom.go(job)   # dispatch: single-thread go for run(1), mn_go for run(N)
+                runloom.fiber(job)   # dispatch: single-thread go for run(1), mn_go for run(N)
             wg.wait()
         return main
 
@@ -975,11 +975,11 @@ def test_cpu_parallelism_speedup_across_hubs():
 
 
 # ==========================================================================
-# 14. FOREIGN-OS-THREAD: mn_go from a raw (non-hub, non-goroutine) thread
+# 14. FOREIGN-OS-THREAD: mn_go from a raw (non-hub, non-fiber) thread
 # ==========================================================================
 @mn
-def test_mn_go_from_foreign_thread_is_rejected_not_crash():
-    # A genuine OS thread is not a hub and not a goroutine; spawning onto the
+def test_mn_fiber_from_foreign_thread_is_rejected_not_crash():
+    # A genuine OS thread is not a hub and not a fiber; spawning onto the
     # M:N pool from it must be rejected cleanly (or routed), never SIGSEGV.
     # We drive this in a subprocess so any crash is contained.
     script = r'''
@@ -1040,10 +1040,10 @@ def test_raw_thread_observes_run_completes_in_process():
 
 
 # ==========================================================================
-# 15. go_n BULK SPAWN INTEGRITY (indexed + non-indexed) under M:N
+# 15. fiber_n BULK SPAWN INTEGRITY (indexed + non-indexed) under M:N
 # ==========================================================================
 @mn
-def test_go_n_bulk_indexed_every_index_runs_exactly_once():
+def test_fiber_n_bulk_indexed_every_index_runs_exactly_once():
     seen = bytearray(512)
     counts = bytearray(512)  # detect a double-run (would exceed 1)
 
@@ -1056,21 +1056,21 @@ def test_go_n_bulk_indexed_every_index_runs_exactly_once():
             counts[i] = (counts[i] + 1) & 0xFF
 
     def main():
-        rc.go_n(worker, 512, 0, True)   # indexed bulk spawn
+        rc.fiber_n(worker, 512, 0, True)   # indexed bulk spawn
 
-    with hang_guard(40, "go_n indexed"):
+    with hang_guard(40, "fiber_n indexed"):
         rc.mn_init(4)
         rc.mn_go(main)
         n = rc.mn_run()
         rc.mn_fini()
-    assert sum(seen) == 512, "go_n indexed dropped %d fibers" % (512 - sum(seen))
+    assert sum(seen) == 512, "fiber_n indexed dropped %d fibers" % (512 - sum(seen))
     # main + 512 workers completed
     assert n >= 512
 
 
 @mn
-def test_go_n_bulk_noindex_runs_n_fibers():
-    # go_n non-indexed: n copies of fn() all run; count completions.
+def test_fiber_n_bulk_noindex_runs_n_fibers():
+    # fiber_n non-indexed: n copies of fn() all run; count completions.
     box = bytearray(1)
     ran = [0]
     mu = rc.Mutex()
@@ -1079,14 +1079,14 @@ def test_go_n_bulk_noindex_runs_n_fibers():
         mu.lock(); ran[0] += 1; mu.unlock()
 
     def main():
-        rc.go_n(worker, 300, 0, False)
+        rc.fiber_n(worker, 300, 0, False)
 
-    with hang_guard(40, "go_n noindex"):
+    with hang_guard(40, "fiber_n noindex"):
         rc.mn_init(4)
         rc.mn_go(main)
         n = rc.mn_run()
         rc.mn_fini()
-    assert ran[0] == 300, "go_n non-indexed ran %d/300 fibers" % ran[0]
+    assert ran[0] == 300, "fiber_n non-indexed ran %d/300 fibers" % ran[0]
 
 
 # ==========================================================================
@@ -1125,8 +1125,8 @@ def test_hub_states_consistent_while_gs_park_and_run():
 # ==========================================================================
 # Empirically (probed against the source): RUNLOOM_FAULT_SPAWN_G fires in
 # runloom_g_slab_alloc (the per-g struct alloc) on EVERY spawn path including
-# mn_go/go_n; SPAWN_STACK / SPAWN_TSTATE fire only in the SINGLE-THREAD
-# runloom_spawn_g body (runloom_mn_go_core builds its coro directly and never
+# mn_go/fiber_n; SPAWN_STACK / SPAWN_TSTATE fire only in the SINGLE-THREAD
+# runloom_spawn_g body (runloom_mn_fiber_core builds its coro directly and never
 # reaches those sites).  So under M:N, SPAWN_G is the spawn fault that matters,
 # and the contract is: a mid-spawn alloc failure surfaces as a clean Python
 # error (MemoryError / RuntimeError), never a crash, hang, or leaked admission
@@ -1180,8 +1180,8 @@ def test_mn_spawn_g_fault_is_clean_error_not_crash(spec):
 
 
 @mn
-def test_mn_spawn_g_fault_under_go_n_bulk_no_crash():
-    # go_n's BULK arena path (RUNLOOM_GON_BULK=1) is a DISTINCT spawn path; an
+def test_mn_spawn_g_fault_under_fiber_n_bulk_no_crash():
+    # fiber_n's BULK arena path (RUNLOOM_GON_BULK=1) is a DISTINCT spawn path; an
     # alloc fault during a bulk spawn must fall back / error cleanly, never
     # corrupt the shared arena (which would crash other hubs).
     script = r'''
@@ -1191,7 +1191,7 @@ rc.mn_init(4)
 err = None
 try:
     def main():
-        rc.go_n(lambda: None, 200, 0, False)
+        rc.fiber_n(lambda: None, 200, 0, False)
     rc.mn_go(main)
     n = rc.mn_run()
 except (MemoryError, RuntimeError) as e:
@@ -1203,18 +1203,18 @@ sys.stdout.write("GON_BULK_FAULT_OK err=%r completed=%d hubs=%d\n"
 '''
     p = _run_script(script, {"RUNLOOM_GON_BULK": "1",
                              "RUNLOOM_FAULT_SPAWN_G": "always:12"}, timeout=40)
-    _assert_no_crash(p, "SPAWN_G under go_n bulk")
+    _assert_no_crash(p, "SPAWN_G under fiber_n bulk")
     assert "GON_BULK_FAULT_OK" in p.stdout, (
-        "SPAWN_G fault under go_n bulk crashed/hung:\n%s\n%s"
+        "SPAWN_G fault under fiber_n bulk crashed/hung:\n%s\n%s"
         % (p.stdout, p.stderr[-1200:]))
-    assert "hubs=0" in p.stdout, "go_n-bulk fault leaked a hub:\n%s" % p.stdout
+    assert "hubs=0" in p.stdout, "fiber_n-bulk fault leaked a hub:\n%s" % p.stdout
 
 
 # ==========================================================================
 # 18. max_fibers ADMISSION GATE under M:N (held-live fibers trip the cap;
 #     completion RELEASES the slot -- the conservation ledger the FV models)
 #     -- the existing file tests max_fibers nowhere; cov tests cover only the
-#     single-thread go() gate.  Under M:N a spawn that returns immediately
+#     single-thread fiber() gate.  Under M:N a spawn that returns immediately
 #     while hubs drain fibers rarely reaches the cap, so the gate only bites
 #     when fibers are HELD live; this is the test that proves the M:N cap.
 # ==========================================================================
@@ -1291,43 +1291,43 @@ def test_max_fibers_slot_released_on_completion_no_ratchet():
 
 
 # ==========================================================================
-# 19. go_n EDGE VALUES + bulk-path integrity (n=0/negative no-op; bulk indexed)
+# 19. fiber_n EDGE VALUES + bulk-path integrity (n=0/negative no-op; bulk indexed)
 # ==========================================================================
 @mn
-def test_go_n_zero_and_negative_is_noop_not_hang_or_crash():
-    # go_n(fn, 0) and go_n(fn, -5) spawn nothing; mn_run must still terminate
+def test_fiber_n_zero_and_negative_is_noop_not_hang_or_crash():
+    # fiber_n(fn, 0) and fiber_n(fn, -5) spawn nothing; mn_run must still terminate
     # (only the main fiber completes), not hang on a phantom pending count.
     completed = {}
 
     def main():
-        rc.go_n(lambda: None, 0)        # n=0
-        rc.go_n(lambda: None, -5)       # negative -> clamped to 0 in C
+        rc.fiber_n(lambda: None, 0)        # n=0
+        rc.fiber_n(lambda: None, -5)       # negative -> clamped to 0 in C
 
-    with hang_guard(20, "go_n zero/neg"):
+    with hang_guard(20, "fiber_n zero/neg"):
         rc.mn_init(2)
         rc.mn_go(main)
         n = rc.mn_run()
         rc.mn_fini()
     completed["n"] = n
     # only main ran; a phantom pending from a mis-clamped negative n would hang
-    assert n == 1, "go_n(0)/go_n(-5) spawned phantom work (completed=%d != 1)" % n
+    assert n == 1, "fiber_n(0)/fiber_n(-5) spawned phantom work (completed=%d != 1)" % n
 
 
 @mn
-def test_go_n_non_int_n_raises_typeerror():
+def test_fiber_n_non_int_n_raises_typeerror():
     rc.mn_init(2)
     try:
         with pytest.raises(TypeError):
-            rc.go_n(lambda: None, "not-an-int")
+            rc.fiber_n(lambda: None, "not-an-int")
     finally:
         rc.mn_run()
         rc.mn_fini()
 
 
 @mn
-def test_go_n_bulk_path_indexed_integrity():
+def test_fiber_n_bulk_path_indexed_integrity():
     # RUNLOOM_GON_BULK=1 is the arena fast-path -- a different spawn path than
-    # the default per-g go_n.  Every index must run exactly once (set-equality
+    # the default per-g fiber_n.  Every index must run exactly once (set-equality
     # over the index, not a count), proving the bulk arena assigns each slot a
     # unique, correct index across hubs.
     script = r'''
@@ -1342,7 +1342,7 @@ def main():
         if 0 <= i < N:
             seen[i] = 1
         wg.done()
-    rc.go_n(w, N, 0, True)        # indexed bulk spawn
+    rc.fiber_n(w, N, 0, True)        # indexed bulk spawn
     wg.wait()
     miss = N - sum(seen)
     sys.stdout.write("GON_BULK_IDX_OK\n" if miss == 0 else
@@ -1350,9 +1350,9 @@ def main():
 runloom.run(6, main)
 '''
     p = _run_script(script, {"RUNLOOM_GON_BULK": "1"}, timeout=40)
-    _assert_no_crash(p, "go_n bulk indexed integrity")
+    _assert_no_crash(p, "fiber_n bulk indexed integrity")
     assert "GON_BULK_IDX_OK" in p.stdout, (
-        "go_n bulk path lost/duplicated an index:\n%s\n%s"
+        "fiber_n bulk path lost/duplicated an index:\n%s\n%s"
         % (p.stdout, p.stderr[-800:]))
 
 
@@ -1652,9 +1652,9 @@ def test_mn_init_huge_int_raises_overflow_not_crash():
 
 
 # ==========================================================================
-# 25. SPAWN STORM RESOURCE LIMIT: a very large single go_n + a deep many-fiber
+# 25. SPAWN STORM RESOURCE LIMIT: a very large single fiber_n + a deep many-fiber
 #     burst must complete with EXACT set-equality (no slab/arena corruption at
-#     scale) -- the existing file's go_n tests stop at 512.
+#     scale) -- the existing file's fiber_n tests stop at 512.
 # ==========================================================================
 _BIG_GON = r'''
 import sys; sys.path.insert(0, "src")
@@ -1669,7 +1669,7 @@ def main():
         if 0 <= i < N:
             seen[i] = 1
         wg.done()
-    rc.go_n(w, N, 0, True)
+    rc.fiber_n(w, N, 0, True)
     wg.wait()
     miss = N - sum(seen)
     sys.stdout.write("BIG_GON_OK\n" if miss == 0 else "BIG_GON_LOST miss=%d\n" % miss)
@@ -1680,13 +1680,13 @@ runloom.run(8, main)
 
 @mn
 @pytest.mark.parametrize("bulk", ["0", "1"])
-def test_large_go_n_set_equality_at_scale(bulk):
-    # Run the 20k-index go_n on BOTH the per-g path (GON_BULK=0) and the bulk
+def test_large_fiber_n_set_equality_at_scale(bulk):
+    # Run the 20k-index fiber_n on BOTH the per-g path (GON_BULK=0) and the bulk
     # arena path (GON_BULK=1); every index must run exactly once on both.
     p = _run_script(_BIG_GON, {"RUNLOOM_GON_BULK": bulk}, timeout=90)
-    _assert_no_crash(p, "big go_n (bulk=%s)" % bulk)
+    _assert_no_crash(p, "big fiber_n (bulk=%s)" % bulk)
     assert "BIG_GON_OK" in p.stdout, (
-        "go_n at scale (bulk=%s) lost/dup'd an index:\n%s\n%s"
+        "fiber_n at scale (bulk=%s) lost/dup'd an index:\n%s\n%s"
         % (bulk, p.stdout, p.stderr[-1000:]))
 
 

@@ -57,7 +57,7 @@ def _run_single(fn):
     box = {}
     def main():
         box["r"] = fn()
-    rc.go(main)
+    rc.fiber(main)
     rc.run()
     return box.get("r")
 
@@ -75,18 +75,18 @@ def _subproc(script, env_extra=None, timeout=40):
 # 1.  Argument validation / edge values on every public entry point.
 #     A bad arg must raise a clean Python error, never crash the interpreter.
 # ==========================================================================
-def test_go_rejects_non_callable():
+def test_fiber_rejects_non_callable():
     with pytest.raises(TypeError):
-        rc.go(5)
+        rc.fiber(5)
     with pytest.raises(TypeError):
         rc.go_noyield(object())
 
 
-def test_go_n_requires_mn_init_in_single_thread():
-    # go_n is the M:N bulk-spawn path; under the single-thread scheduler (no
+def test_fiber_n_requires_mn_init_in_single_thread():
+    # fiber_n is the M:N bulk-spawn path; under the single-thread scheduler (no
     # hubs) it must raise a clean RuntimeError, not spawn-into-nothing / crash.
     with pytest.raises(RuntimeError):
-        rc.go_n(lambda: None, 5)
+        rc.fiber_n(lambda: None, 5)
     assert rc._self_check(0) == 0
 
 
@@ -169,7 +169,7 @@ def test_current_g_stable_across_yield_and_park():
 
 
 def test_current_g_none_again_after_run_completes():
-    rc.go(lambda: None)
+    rc.fiber(lambda: None)
     rc.run()
     assert rc.current_g() is None   # the run drained; no current fiber survives
 
@@ -193,7 +193,7 @@ def test_many_waiters_each_woken_exactly_once_no_lost_wake():
 
     def main():
         for i in range(N):
-            rc.go(lambda i=i: waiter(i))
+            rc.fiber(lambda i=i: waiter(i))
         # let every waiter record its handle + reach park
         for _ in range(3):
             rc.sched_yield()
@@ -201,7 +201,7 @@ def test_many_waiters_each_woken_exactly_once_no_lost_wake():
             handles[i].wake()
 
     with hang_guard(20, "many waiters"):
-        rc.go(main)
+        rc.fiber(main)
         rc.run()
     assert sum(resumed) == N, "lost wake(s): only %d/%d resumed" % (sum(resumed), N)
 
@@ -225,7 +225,7 @@ def test_double_wake_before_park_consumes_one_and_blocks_again():
         state["second"] = True
 
     def main():
-        rc.go(waiter)
+        rc.fiber(waiter)
         rc.sched_yield()
         holder["g"].wake()
         holder["g"].wake()          # double wake-before-(first)-park
@@ -234,7 +234,7 @@ def test_double_wake_before_park_consumes_one_and_blocks_again():
         holder["g"].wake()          # explicit wake to release the second park
 
     with hang_guard(15, "double wake before park"):
-        rc.go(main)
+        rc.fiber(main)
         rc.run()
     assert state.get("first") is True
     assert state.get("second") is True, "second park was not honoured (over-counted wake)"
@@ -258,16 +258,16 @@ def test_wake_in_nested_spawn_cascade_is_not_lost():
         if n == 0:
             holder["g"].wake()
             return
-        rc.go(lambda: level(n - 1))
+        rc.fiber(lambda: level(n - 1))
 
     def main():
-        rc.go(waiter)
+        rc.fiber(waiter)
         for _ in range(2):
             rc.sched_yield()        # waiter parks
-        rc.go(lambda: level(12))    # 12-deep spawn cascade ends in the wake
+        rc.fiber(lambda: level(12))    # 12-deep spawn cascade ends in the wake
 
     with hang_guard(15, "nested-spawn wake cascade"):
-        rc.go(main)
+        rc.fiber(main)
         rc.run()
     assert state.get("resumed") is True, "wake from a deep spawn cascade was lost"
 
@@ -285,17 +285,17 @@ def test_park_timeout_true_when_unwoken_false_when_woken():
         rc.sched_yield()
         state["r"] = rc.park(timeout=5.0)     # main wakes well before 5s -> False
     def main():
-        rc.go(waiter)
+        rc.fiber(waiter)
         rc.sched_yield()
         holder["g"].wake()
     with hang_guard(15, "timed park woken"):
-        rc.go(main)
+        rc.fiber(main)
         rc.run()
     assert state.get("r") is False, "timed park reported timeout despite a real wake"
 
 
 def test_wake_on_completed_g_is_safe_noop():
-    g = rc.go(lambda: None)
+    g = rc.fiber(lambda: None)
     rc.run()
     assert g.done is True
     g.wake(); g.wake()                         # wake a finished g -> no crash
@@ -335,7 +335,7 @@ def test_unpark_many_wakes_wait_fd_parkers_and_reports_running_missed():
 
         me = rc.current_g()                    # RUNNING main fiber: not wait_fd-parked
         for _ in range(30):
-            rc.go(mk())
+            rc.fiber(mk())
         # Deterministic: wait until all 30 waiters have COMMITTED their wait_fd
         # park before unparking.  A fixed sleep lets a loaded scheduler leave
         # some still RUNNING, which unpark_many then mis-reports as `missed`.
@@ -381,14 +381,14 @@ def main():
             rc.wait_fd(r, 1, 2000)
         return waiter
     for _ in range(4):
-        rc.go(mk())
+        rc.fiber(mk())
     rc.sched_sleep(0.1)
     def foreign():
         rc.unpark_many(list(handles))
         done["foreign_returned"] = True
     t = RealThread(target=foreign); t.start(); t.join()
     os.close(r); os.close(w)
-rc.go(main); rc.run()
+rc.fiber(main); rc.run()
 sys.stdout.write("FOREIGN_RETURNED\n" if done.get("foreign_returned") else "NEVER\n")
 '''
     # 4s is far longer than the ~0.1s the parkers take to commit; a healthy
@@ -413,7 +413,7 @@ sys.stdout.write("FOREIGN_RETURNED\n" if done.get("foreign_returned") else "NEVE
 # 5.  Admission gate (set_max_fibers): exhaustion raises + slot release.
 # ==========================================================================
 def test_admission_cap_from_main_thread_exact_release():
-    # Spawning from the main thread (not inside a fiber): each pending go()
+    # Spawning from the main thread (not inside a fiber): each pending fiber()
     # counts against the cap until run() completes it.  Over the cap raises;
     # after the run every slot releases back to 0.
     rc.set_max_fibers(3)
@@ -421,7 +421,7 @@ def test_admission_cap_from_main_thread_exact_release():
         ok = errs = 0
         for _ in range(10):
             try:
-                rc.go(lambda: None); ok += 1
+                rc.fiber(lambda: None); ok += 1
             except RuntimeError:
                 errs += 1
         assert ok == 3 and errs == 7, (ok, errs)
@@ -433,7 +433,7 @@ def test_admission_cap_from_main_thread_exact_release():
     # cap lifted -> unbounded spawns admit again
     out = []
     for _ in range(50):
-        rc.go(lambda: out.append(1))
+        rc.fiber(lambda: out.append(1))
     rc.run()
     assert len(out) == 50
 
@@ -456,7 +456,7 @@ def test_admission_cap_noyield_path_also_counts_and_releases():
 
 
 def test_admission_slot_released_even_when_fiber_raises():
-    # A goroutine that raises still counts as completed -> its admission slot
+    # A fiber that raises still counts as completed -> its admission slot
     # must release, or a cap would leak slots and wedge after a few failures.
     import sys as _sys
     prev = _sys.unraisablehook
@@ -466,12 +466,12 @@ def test_admission_slot_released_even_when_fiber_raises():
         def boom():
             raise ValueError("x")
         for _ in range(2):
-            rc.go(boom)
+            rc.fiber(boom)
         assert rc.live_fibers() == 2
         rc.run()
         assert rc.live_fibers() == 0, "admission slot leaked on a raising fiber"
         # cap still usable after the failures
-        rc.go(boom); rc.go(boom)
+        rc.fiber(boom); rc.fiber(boom)
         rc.run()
         assert rc.live_fibers() == 0
     finally:
@@ -487,13 +487,13 @@ def test_deadlock_raise_then_reset_then_reuse():
     prev = rc.get_deadlock_mode()
     rc.set_deadlock_mode(2)
     try:
-        rc.go(lambda: rc.Chan(0).recv())       # nobody ever sends
+        rc.fiber(lambda: rc.Chan(0).recv())       # nobody ever sends
         with pytest.raises(RuntimeError):
             rc.run()
         rc.sched_reset()
         rc.set_deadlock_mode(0)
         out = []
-        rc.go(lambda: out.append(1))
+        rc.fiber(lambda: out.append(1))
         rc.run()                               # scheduler reusable after the raise
         assert out == [1]
         assert rc._self_check(0) == 0
@@ -506,7 +506,7 @@ def test_deadlock_warn_mode_does_not_raise():
     prev = rc.get_deadlock_mode()
     rc.set_deadlock_mode(1)                     # warn: dump to stderr, no raise
     try:
-        rc.go(lambda: rc.Chan(0).recv())
+        rc.fiber(lambda: rc.Chan(0).recv())
         rc.run()                               # must return (no exception)
         assert rc.count_deadlocked() >= 1
     finally:
@@ -518,7 +518,7 @@ def test_deadlock_off_mode_silent_return():
     prev = rc.get_deadlock_mode()
     rc.set_deadlock_mode(0)
     try:
-        rc.go(lambda: rc.Chan(0).recv())
+        rc.fiber(lambda: rc.Chan(0).recv())
         rc.run()
         assert rc.count_deadlocked() >= 1      # stranded fiber visible to census
     finally:
@@ -537,9 +537,9 @@ def test_park_self_stranded_fiber_counts_as_deadlocked():
             holder["g"] = rc.current_g()
             rc.park_self()                     # never woken
         def main():
-            rc.go(parker)
+            rc.fiber(parker)
             rc.sched_yield(); rc.sched_yield()
-        rc.go(main)
+        rc.fiber(main)
         rc.run()
         assert rc.count_deadlocked() >= 1
         # And it can STILL be woken after run() returned: wake + drain it cleanly.
@@ -562,13 +562,13 @@ def test_sched_reset_drains_ready_and_sleep_heap():
         rc.sched_sleep(1000.0)
     def main():
         for _ in range(5):
-            rc.go(sleeper)
+            rc.fiber(sleeper)
         rc.sched_yield()                       # let them reach the sleep heap
         # don't wait for them
-    rc.go(main)
+    rc.fiber(main)
     # run() would block on the 1000s sleeps; instead drive one quiescence then reset.
     # Use a stop to break out, then reset the heap.
-    rc.go(lambda: rc.sched_stop())
+    rc.fiber(lambda: rc.sched_stop())
     rc.run()
     n_ready, n_sleep, n_parked = rc.sched_reset()
     assert n_sleep >= 0 and n_ready >= 0       # structural: no crash, valid tuple
@@ -596,9 +596,9 @@ def test_sched_reset_cannot_reclaim_in_memory_park_self_parker():
             rc.park_self()
             holder["resumed"] = True
         def main():
-            rc.go(parker)
+            rc.fiber(parker)
             rc.sched_yield(); rc.sched_yield()
-        rc.go(main)
+        rc.fiber(main)
         rc.run()
         before = rc.count_deadlocked()
         # reset does NOT reclaim the in-memory parker:
@@ -628,10 +628,10 @@ def test_sched_stop_leaves_parked_fiber_and_run_returns():
         rc.sched_yield()
         rc.sched_stop()
     def main():
-        rc.go(bg)
-        rc.go(stopper)
+        rc.fiber(bg)
+        rc.fiber(stopper)
     with assert_faster_than(5.0, "sched_stop mid-run"):
-        rc.go(main)
+        rc.fiber(main)
         rc.run()
     assert ran == []                           # the 1000s sleeper never fired
     rc.sched_reset()
@@ -642,14 +642,14 @@ def test_sched_stop_leaves_parked_fiber_and_run_returns():
 # 8.  go_noyield: the FAST path, and the documented misuse (a yielding body).
 #     "Undefined behavior" must at least not silently corrupt / crash here.
 # ==========================================================================
-def test_go_noyield_pure_compute_runs():
+def test_fiber_noyield_pure_compute_runs():
     out = []
     rc.go_noyield(lambda: out.append(sum(range(1000))))
     rc.run()
     assert out == [sum(range(1000))]
 
 
-def test_go_noyield_with_yielding_body_does_not_crash_subprocess():
+def test_fiber_noyield_with_yielding_body_does_not_crash_subprocess():
     # The docstring says behaviour is UNDEFINED if a go_noyield body yields.
     # Contain it in a subprocess and require: no signal (no SIGSEGV/abort).  A
     # clean completion or a clean Python error are both acceptable; a crash is
@@ -687,7 +687,7 @@ def test_spawn_to_completion_storm_no_uaf():
             def f():
                 pass
             for _ in range(400):
-                rc.go(f)
+                rc.fiber(f)
             completed += rc.run()
     assert completed == 150 * 400
     assert rc._self_check(0) == 0
@@ -706,7 +706,7 @@ for _ in range(80):
         x = [0] * 8     # tiny per-fiber datastack churn
         return x
     for _ in range(500):
-        rc.go(f)
+        rc.fiber(f)
     total += rc.run()
 assert rc._self_check(0) == 0
 sys.stdout.write("STORM_OK %d\n" % total)
@@ -731,9 +731,9 @@ def test_datastack_chunk_reuse_across_many_short_fibers():
             b = sum(range(i % 7))
             results.append((i, a, b))
         for i in range(500):
-            rc.go(lambda i=i: worker(i))
+            rc.fiber(lambda i=i: worker(i))
     with hang_guard(30, "datastack reuse"):
-        rc.go(main)
+        rc.fiber(main)
         rc.run()
     assert len(results) == 500
     for i, a, b in results:
@@ -754,9 +754,9 @@ def test_sleeping_fibers_overlap_not_serialize():
             rc.sched_sleep(0.05)
             done[i] = 1
         for i in range(N):
-            rc.go(lambda i=i: s(i))
+            rc.fiber(lambda i=i: s(i))
     with assert_faster_than(1.0, "%d overlapping sleeps" % N):
-        rc.go(main)
+        rc.fiber(main)
         rc.run()
     assert sum(done) == N
 
@@ -768,7 +768,7 @@ def test_yield_storm_returns_promptly():
         for _ in range(100_000):
             rc.sched_yield()
     with assert_faster_than(5.0, "100k yields"):
-        rc.go(main)
+        rc.fiber(main)
         rc.run()
 
 
@@ -801,7 +801,7 @@ def body():
         rd.close(); wr.close()
 escaped = None
 try:
-    rc.go(body); rc.run()
+    rc.fiber(body); rc.run()
 except Boom:
     escaped = "Boom"
 sys.stdout.write("result=%s escaped=%s check=%d\n" % (box.get("r"), escaped, rc._self_check(0)))
@@ -835,7 +835,7 @@ def body():
         box["r"] = "caught"
 escaped = None
 try:
-    rc.go(body); rc.run()
+    rc.fiber(body); rc.run()
 except Boom:
     escaped = "Boom"
 # "not lost" == either caught in-fiber OR carried out of run()
@@ -860,7 +860,7 @@ import runloom, runloom_c
 runloom.inspect.install_crash_handler("on")
 def body():
     runloom_c._crash_selftest_overflow()   # unbounded real-C recursion
-runloom_c.go(body, 64 * 1024)              # pin a small 64 KiB stack
+runloom_c.fiber(body, 64 * 1024)              # pin a small 64 KiB stack
 runloom_c.run()
 '''
     p = _subproc(script, timeout=30)
@@ -885,7 +885,7 @@ import runloom_c as rc
 ok = err = 0
 for _ in range(20):
     try:
-        rc.go(lambda: None); ok += 1
+        rc.fiber(lambda: None); ok += 1
     except MemoryError:
         err += 1
 n = rc.run()
@@ -908,7 +908,7 @@ rc.set_max_fibers(8)
 ok = err = 0
 for _ in range(20):
     try:
-        rc.go(lambda: None); ok += 1
+        rc.fiber(lambda: None); ok += 1
     except MemoryError:
         err += 1
 live_before_run = rc.live_fibers()
@@ -944,7 +944,7 @@ def test_run_returns_completion_count_and_stats_track():
     base = rc.stats()["completed"]
     ran = []
     for _ in range(40):
-        rc.go(lambda: ran.append(1))
+        rc.fiber(lambda: ran.append(1))
     n = rc.run()
     assert n == 40 and len(ran) == 40
     assert rc.stats()["completed"] == base + 40
@@ -969,9 +969,9 @@ def plain():
     holders["p"] = rc.current_g()
     rc.park()                     # park:sync (no tag set)
 def main():
-    rc.go(tagged); rc.go(plain)
+    rc.fiber(tagged); rc.fiber(plain)
     rc.sched_yield(); rc.sched_yield(); rc.sched_yield()
-rc.go(main); rc.run()
+rc.fiber(main); rc.run()
 '''
     p = _subproc(script, env_extra={"RUNLOOM_DEADLOCK": "warn",
                                     "PYTHONUNBUFFERED": "1"}, timeout=20)
@@ -1000,7 +1000,7 @@ rc.go(main); rc.run()
 
 # --- 15a.  G handle accessor contract ------------------------------------
 def test_g_result_and_done_on_value_returning_fiber():
-    g = rc.go(lambda: 42)
+    g = rc.fiber(lambda: 42)
     assert g.done is False                     # not run yet
     rc.run()
     assert g.done is True
@@ -1017,7 +1017,7 @@ def test_g_result_is_none_and_exception_none_mid_run():
         holder["g"] = rc.current_g()
         rc.park_self()
     def main():
-        rc.go(parker)
+        rc.fiber(parker)
         rc.sched_yield(); rc.sched_yield()
         g = holder["g"]
         seen["done"] = g.done
@@ -1025,7 +1025,7 @@ def test_g_result_is_none_and_exception_none_mid_run():
         seen["exc"] = g.exception
         g.wake()                               # release so the run drains
     with hang_guard(15, "g accessors mid-run"):
-        rc.go(main); rc.run()
+        rc.fiber(main); rc.run()
     assert seen == {"done": False, "result": None, "exc": None}
     assert rc._self_check(0) == 0
 
@@ -1037,7 +1037,7 @@ def test_g_exception_captured_not_escaped_for_plain_exception():
     try:
         def boom():
             raise ValueError("boom")
-        g = rc.go(boom)
+        g = rc.fiber(boom)
         n = rc.run()                           # must NOT raise out of run()
         assert n == 1
         assert g.done is True
@@ -1051,7 +1051,7 @@ def test_g_exception_captured_not_escaped_for_plain_exception():
 def test_g_baseexception_captured_not_escaped_out_of_run():
     # SystemExit / KeyboardInterrupt raised inside a fiber must be CAPTURED on
     # the G like any other exception, NOT propagated out of run() (which would
-    # tear down an embedding application on a single misbehaving goroutine).
+    # tear down an embedding application on a single misbehaving fiber).
     import sys as _sys
     prev = _sys.unraisablehook
     _sys.unraisablehook = lambda u: None
@@ -1059,7 +1059,7 @@ def test_g_baseexception_captured_not_escaped_out_of_run():
         for exc_t, arg in ((SystemExit, 3), (KeyboardInterrupt, None)):
             def boom(exc_t=exc_t, arg=arg):
                 raise exc_t(arg) if arg is not None else exc_t()
-            g = rc.go(boom)
+            g = rc.fiber(boom)
             escaped = None
             try:
                 n = rc.run()
@@ -1086,11 +1086,11 @@ def test_reentrant_run_from_inside_fiber_runs_inner_and_outer_counts():
     def child():
         order.append("child")
     def body():
-        rc.go(child)
+        rc.fiber(child)
         inner_n["n"] = rc.run()                # nested run drains the child
         order.append("body-after-nested")
     with hang_guard(15, "reentrant run"):
-        rc.go(body)
+        rc.fiber(body)
         outer = rc.run()
     assert order == ["child", "body-after-nested"]
     assert inner_n["n"] == 1                    # nested run drove exactly the child
@@ -1105,10 +1105,10 @@ def test_deeply_nested_run_no_uaf():
     def lvl(n):
         depth["max"] = max(depth["max"], n)
         if n < 4:
-            rc.go(lambda: lvl(n + 1))
+            rc.fiber(lambda: lvl(n + 1))
             rc.run()                           # nested
     with hang_guard(20, "deep nested run"):
-        rc.go(lambda: lvl(0))
+        rc.fiber(lambda: lvl(0))
         rc.run()
     assert depth["max"] == 4
     assert rc._self_check(0) == 0
@@ -1140,13 +1140,13 @@ def test_run_ready_waits_for_transitive_wake_chain():
         log.append("w1-resumed")
         holder["w2"].wake()                    # transitive wake on resume
     def driver():
-        rc.go(w1); rc.go(w2)
+        rc.fiber(w1); rc.fiber(w2)
         rc.sched_yield(); rc.sched_yield()      # both reach park
         holder["w1"].wake()
         rc.run_ready()                          # must settle w1 AND w2
         log.append("after-run_ready")
     with hang_guard(15, "run_ready transitive"):
-        rc.go(driver)
+        rc.fiber(driver)
         rc.run()
     assert log == ["w1-resumed", "w2-resumed", "after-run_ready"], (
         "run_ready returned before the transitive wake settled: %r" % (log,))
@@ -1175,7 +1175,7 @@ def test_sched_reset_reclaims_netpoll_parker_and_arm_not_poisoned():
         os.set_blocking(r, False); os.set_blocking(w, False)
         def waiter():
             rc.wait_fd(r, READ, 5000)
-        rc.go(waiter)
+        rc.fiber(waiter)
         rc.sched_sleep(0.1)                     # commit the parker
         # confirm it is actually netpoll-parked before we reset
         box["parked"] = rc.stats().get("netpoll_parked_self",
@@ -1186,7 +1186,7 @@ def test_sched_reset_reclaims_netpoll_parker_and_arm_not_poisoned():
     def outer():
         box["fds"] = cycle()
     with hang_guard(20, "reset reclaim netpoll parker"):
-        rc.go(outer); rc.run()
+        rc.fiber(outer); rc.run()
     assert box["parked"] >= 1
     n_ready, n_sleep, n_parked = rc.sched_reset()
     assert n_parked >= 1, ("sched_reset did NOT reclaim the netpoll parker: "
@@ -1199,7 +1199,7 @@ def test_sched_reset_reclaims_netpoll_parker_and_arm_not_poisoned():
         os.write(w, b"x")
         def waiter2():
             got["rv"] = rc.wait_fd(r, READ, 2000)
-        rc.go(waiter2); rc.run()
+        rc.fiber(waiter2); rc.run()
     with hang_guard(15, "reused-fd wait_fd"):
         reuse()
     assert got.get("rv") == READ, (
@@ -1229,7 +1229,7 @@ def test_unpark_many_same_g_twice_in_batch_claims_once():
         def waiter():
             h.append(rc.current_g())
             woke.append(rc.wait_fd(r, READ, 4000))
-        rc.go(waiter)
+        rc.fiber(waiter)
         rc.sched_sleep(0.1)                     # the single parker commits
         g = h[0]
         missed = rc.unpark_many([g, g])         # SAME g twice
@@ -1259,13 +1259,13 @@ def test_admission_cap_counts_running_fiber_itself():
             ok = err = 0
             for _ in range(10):
                 try:
-                    rc.go(child); ok += 1
+                    rc.fiber(child); ok += 1
                 except RuntimeError:
                     err += 1
             res["ok"] = ok; res["err"] = err
             res["live"] = rc.live_fibers()
         with hang_guard(15, "in-fiber admission"):
-            rc.go(main); rc.run()
+            rc.fiber(main); rc.run()
         assert res["ok"] == 2, res          # body + 2 children == cap of 3
         assert res["err"] == 8, res
         assert res["live"] == 3, res        # at peak: main + 2 children
@@ -1285,7 +1285,7 @@ def test_sched_reset_from_inside_running_fiber_is_noop_no_uaf():
         out["reset"] = rc.sched_reset()
         out["after"] = "alive"                 # proves the g survived the reset
         return "done"
-    g = rc.go(body)
+    g = rc.fiber(body)
     with hang_guard(15, "reset from inside"):
         rc.run()
     assert out.get("reset") == (0, 0, 0), out
@@ -1314,9 +1314,9 @@ def main():
             out["n"] = n
         except OSError as e:
             out["err"] = e.errno
-    rc.go(reader); rc.run()
+    rc.fiber(reader); rc.run()
     rc.netpoll_unregister(r); os.close(r); os.close(w)
-rc.go(main); rc.run()
+rc.fiber(main); rc.run()
 sys.stdout.write("err=%r check=%d\n" % (out.get("err"), rc._self_check(0)))
 '''
     p = _subproc(script, env_extra={"RUNLOOM_FAULT_FD_READ": "once:5",
@@ -1341,9 +1341,9 @@ def main():
             out["ok"] = True
         except OSError as e:
             out["err"] = e.errno
-    rc.go(writer); rc.run()
+    rc.fiber(writer); rc.run()
     rc.netpoll_unregister(w); os.close(r); os.close(w)
-rc.go(main); rc.run()
+rc.fiber(main); rc.run()
 sys.stdout.write("err=%r ok=%r check=%d\n"
                  % (out.get("err"), out.get("ok"), rc._self_check(0)))
 '''
@@ -1371,7 +1371,7 @@ def test_sched_yield_classic_matches_vectorcall_yield_interleave():
         for i in range(4):
             seq.append(("b", i)); rc.sched_yield()
     with hang_guard(15, "classic vs vectorcall yield"):
-        rc.go(a); rc.go(b); rc.run()
+        rc.fiber(a); rc.fiber(b); rc.run()
     # strict round-robin interleave; set-equality on the full payload (not counts)
     assert seq == [("a", 0), ("b", 0), ("a", 1), ("b", 1),
                    ("a", 2), ("b", 2), ("a", 3), ("b", 3)], seq
@@ -1393,7 +1393,7 @@ def test_fibers_and_stats_snapshot_integrity_while_parked():
             rc.wait_fd(r, READ, 4000)
         def sleeper():
             rc.sched_sleep(3.0)
-        rc.go(waiter); rc.go(sleeper)
+        rc.fiber(waiter); rc.fiber(sleeper)
         rc.sched_sleep(0.1)                     # both committed
         snap = rc.fibers()
         st = rc.stats()
@@ -1415,7 +1415,7 @@ def test_fibers_and_stats_snapshot_integrity_while_parked():
         rc.netpoll_unregister(r); os.close(r); os.close(w)
         rc.sched_reset()                        # drop the long sleeper + drained waiter
     with hang_guard(15, "fibers snapshot"):
-        rc.go(main); rc.run()
+        rc.fiber(main); rc.run()
     rc.sched_reset()
     # our three states are all present in the live snapshot (others may exist)
     assert {"io-wait", "running", "sleep"} <= box["states"], box["states"]

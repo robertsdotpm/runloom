@@ -39,7 +39,7 @@ def _drive(fn):
         except BaseException as e:  # noqa: BLE001
             box[1] = e
 
-    runloom_c.go(runner)
+    runloom_c.fiber(runner)
     runloom_c.run()
     if box[1] is not None:
         raise box[1]
@@ -64,7 +64,7 @@ def test_unpark_many_wakes_all_parked():
 
         n = 300
         for i in range(n):
-            runloom.go(waiter, i)
+            runloom.fiber(waiter, i)
         # Deterministic: wait until ALL n waiters have COMMITTED their wait_fd
         # park (netpoll_parked == n) before unparking.  A fixed sleep lets a
         # loaded scheduler leave some still RUNNING, which unpark_many then
@@ -122,7 +122,7 @@ def test_event_set_fiber_setter_wakes_all():
             out[i] = 1 if ev.wait(5.0) else 0
 
         for i in range(250):
-            runloom.go(waiter, i)
+            runloom.fiber(waiter, i)
         runloom.sleep(0.15)
         ev.set()
         runloom.sleep(0.2)
@@ -142,7 +142,7 @@ def test_event_set_foreign_thread_setter_wakes_all():
             out[i] = 1 if ev.wait(5.0) else 0
 
         for i in range(50):
-            runloom.go(waiter, i)
+            runloom.fiber(waiter, i)
         runloom.sleep(0.15)
         # set() from a real OS thread (foreign): must still wake every waiter.
         t = _real_threading_preimport.Thread(target=ev.set)
@@ -166,7 +166,7 @@ def test_event_mixed_fiber_and_foreign_waiters():
             gout[i] = 1 if ev.wait(5.0) else 0
 
         for i in range(40):
-            runloom.go(gwaiter, i)
+            runloom.fiber(gwaiter, i)
 
         fresult = []
         # A real OS thread also waits on the same Event (foreign waiter ->
@@ -199,7 +199,7 @@ def test_condition_notify_all_batched():
             out[i] = 1 if got else 0
 
         for i in range(120):
-            runloom.go(w, i)
+            runloom.fiber(w, i)
         runloom.sleep(0.2)
         with cond:
             cond.notify_all()
@@ -218,7 +218,7 @@ def test_semaphore_release_n_batched():
             got[i] = 1 if sem.acquire(timeout=5.0) else 0
 
         for i in range(60):
-            runloom.go(acq, i)
+            runloom.fiber(acq, i)
         runloom.sleep(0.2)
         sem.release(60)                         # one batched wake of all 60
         runloom.sleep(0.2)
@@ -240,7 +240,7 @@ def test_repeated_fanin_no_lost_or_double_wake():
                 out[i] = 1 if ev.wait(5.0) else 0
 
             for i in range(200):
-                runloom.go(waiter, i)
+                runloom.fiber(waiter, i)
             runloom.sleep(0.1)
             ev.set()
             runloom.sleep(0.12)

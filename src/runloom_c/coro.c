@@ -39,7 +39,7 @@
 #  define RUNLOOM_UNPOISON(p, n) ((void)0)
 #endif
 
-/* valgrind: register goroutine stacks so memcheck treats the paint + HWM scan
+/* valgrind: register fiber stacks so memcheck treats the paint + HWM scan
  * (direct accesses from hub code, far from the hub's own SP) as valid stack
  * accesses instead of "Invalid read/write" -- removes the S4 suppression need.
  * Client requests are ~free outside valgrind.  We register on map but do NOT
@@ -113,7 +113,7 @@ struct runloom_coro {
     void *stack;
     size_t stack_size;
     int grown;             /* 1 if copy-grow enlarged this stack */
-    /* Bulk fresh-flag (go_n): 1 if the initial fcontext frame has NOT yet been
+    /* Bulk fresh-flag (fiber_n): 1 if the initial fcontext frame has NOT yet been
      * written to the stack top.  bulk_init can defer that write (the per-g page
      * fault) off the single spawner thread; runloom_coro_resume materializes it
      * lazily on the OWNING hub at first resume, then clears the flag.  Moves the
@@ -481,7 +481,7 @@ static int runloom_arena_ensure_locked(size_t slot)
 }
 
 /* Reserve n contiguous slots; 0 + *start on success, -1 on exhaustion/mismatch.
- * LOCKED, but called once per go_n / per single carve -- NEVER per fiber --
+ * LOCKED, but called once per fiber_n / per single carve -- NEVER per fiber --
  * so it's off the hot path.  The bump cursor is rewound on free (and fully
  * reset when the arena drains to empty), so repeated spawn->drain->spawn cycles
  * reuse the same address space instead of marching the cursor to the cap. */
@@ -1257,7 +1257,7 @@ runloom_coro_t *runloom_coro_new(size_t stack_size,
     return c;
 }
 
-/* ---- bulk/arena fast path (go_n) ---------------------------------------- *
+/* ---- bulk/arena fast path (fiber_n) ---------------------------------------- *
  * Placement coro: initialise a coroutine in CALLER-PROVIDED memory `mem`
  * (>= runloom_coro_struct_size() bytes) on a CALLER-PROVIDED `stack` (lowest
  * usable byte, `stack_size` usable bytes).  No malloc, no stack-acquire, no
@@ -1357,7 +1357,7 @@ int runloom_coro_bulk_init(void *coro_arena, size_t coro_stride,
 
 /* Release a bulk stack block (n slots from start_slot): drop its physical pages
  * back to the OS (MADV_DONTNEED -- the virtual reservation stays) AND return the
- * slots to the allocator for reuse.  Called by the go_n batch teardown when the
+ * slots to the allocator for reuse.  Called by the fiber_n batch teardown when the
  * last fiber in a batch finishes.  The block stays PROT_READ|WRITE; the next
  * fault into it gets a fresh zero page -- exactly what the fresh-flag path wants
  * (a zero stack reads back as a not-yet-materialised frame). */
@@ -1531,7 +1531,7 @@ void runloom_coro_resume(runloom_coro_t *c)
 {
     runloom_coro_t *prev = runloom_tls_current;
     if (c->fresh) {
-        /* Deferred bulk init (go_n fresh-flag): bulk_init skipped the initial
+        /* Deferred bulk init (fiber_n fresh-flag): bulk_init skipped the initial
          * fcontext frame write at spawn to keep the 1M scattered stack-top page
          * faults OFF the single spawner thread.  Materialize it now, on the
          * OWNING hub, just before the first swap -- so those faults land on the
@@ -1571,8 +1571,8 @@ int runloom_coro_done(const runloom_coro_t *c)
 /* Bulk coro arena (placement-init N coro structs in one allocation, carve every
  * stack from one mmap'd block) is an fcontext-backend optimization.  On the
  * Windows Fibers and the generic ucontext backends it is unavailable, so report
- * "arena off" (-1): runloom_mn_go_n_bulk then falls back to the per-g spawn path.
- * The bulk path is opt-in via RUNLOOM_GON_BULK; the default go_n loop never calls
+ * "arena off" (-1): runloom_mn_fiber_n_bulk then falls back to the per-g spawn path.
+ * The bulk path is opt-in via RUNLOOM_GON_BULK; the default fiber_n loop never calls
  * these.  Stubs keep the symbols that mn_sched references regardless of backend. */
 size_t runloom_coro_struct_size(void) { return sizeof(runloom_coro_t); }
 

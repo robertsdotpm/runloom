@@ -141,15 +141,15 @@ class TestWorkerPool(unittest.TestCase):
             jobs.close()
 
         for _ in range(N_WORKERS):
-            runloom_c.go(worker)
-        runloom_c.go(feeder)
+            runloom_c.fiber(worker)
+        runloom_c.fiber(feeder)
 
         out = []
         def collector():
             for _ in range(N_JOBS):
                 v, _ = results.recv()
                 out.append(v)
-        runloom_c.go(collector)
+        runloom_c.fiber(collector)
         runloom_c.run()
         self.assertEqual(sorted(out), [i * 2 for i in range(N_JOBS)])
 
@@ -175,9 +175,9 @@ class TestWorkerPool(unittest.TestCase):
                 total += v
             out_ch.send(total)
 
-        runloom_c.go(stage1)
-        runloom_c.go(stage2)
-        runloom_c.go(stage3)
+        runloom_c.fiber(stage1)
+        runloom_c.fiber(stage2)
+        runloom_c.fiber(stage3)
         runloom_c.run()
         v, _ = out_ch.recv()
         self.assertEqual(v, sum(i * 2 for i in range(100)))
@@ -286,7 +286,7 @@ class TestMixedExecution(unittest.TestCase):
                 count += 1
 
         async def main():
-            runloom_c.go(producer)
+            runloom_c.fiber(producer)
             await consumer()
 
         paio.run(main())

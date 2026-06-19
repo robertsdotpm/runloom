@@ -111,7 +111,7 @@ def test_dump_labels_every_dark_wait_reason():
         r, w = os.pipe()
         try:
             for _name, code in _DARK_REASONS:
-                rc.go(make_parker(code))
+                rc.fiber(make_parker(code))
 
             def dumper():
                 # Let all eight commit to PARKED_SAFE before we walk them.
@@ -120,14 +120,14 @@ def test_dump_labels_every_dark_wait_reason():
                 captured["parked"] = rc.count_deadlocked()
                 rc.dump_fibers(w)        # writes the structural dump to the pipe
                 os.close(w)
-            rc.go(dumper)
+            rc.fiber(dumper)
             rc.run()
             captured["dump"] = os.read(r, 1 << 16).decode("utf-8", "replace")
         finally:
             os.close(r)
 
     with hang_guard(30, "dump dark wait reasons"):
-        rc.go(main)
+        rc.fiber(main)
         rc.run()
 
     # All eight parked-safe fibers were live when we walked the registry...
@@ -162,7 +162,7 @@ seen = {}
 def main():
     def parker():
         rc.park(timeout=2.0)           # PARKED_SAFE; stamped because tracking is ON
-    rc.go(parker)
+    rc.fiber(parker)
     def probe():
         for _ in range(6):
             rc.sched_yield()
@@ -170,7 +170,7 @@ def main():
         # that stamping is on (state_since_ns was set at the park).
         rows = [f for f in rc.fibers() if f["state"] == "park"]
         seen["rows"] = rows
-    rc.go(probe)
+    rc.fiber(probe)
     rc.run()
 
 main()
@@ -225,13 +225,13 @@ def main():
     # then one extra that should be refused.
     for _ in range(CAP + 4):
         try:
-            rc.go(p)
+            rc.fiber(p)
         except RuntimeError:
             rejected["hit"] = True
             break
     # Let everything drain.
     rc.park(timeout=3.0)
-rc.go(main)
+rc.fiber(main)
 rc.run()
 assert rejected["hit"], "over-cap spawn was NOT rejected (cap=%d not enforced)" % CAP
 # And after the drain the gate is back to zero admitted.
@@ -240,7 +240,7 @@ sys.stdout.write("MAX_GOROUTINES_OK\n")
 """
 
 
-def test_max_goroutines_env_installs_admission_gate():
+def test_max_fibers_env_installs_admission_gate():
     cap = 6
     env = dict(os.environ, RUNLOOM_MAX_GOROUTINES=str(cap),
                PYTHON_GIL="0", PYTHONPATH="src")
@@ -274,19 +274,19 @@ def main():
     def w():
         ran["n"] += 1            # single-thread sched: no race on this counter
     for _ in range(50):
-        rc.go(w)                 # would raise if a (bogus) cap were active
+        rc.fiber(w)                 # would raise if a (bogus) cap were active
     def d():
         for _ in range(4):
             rc.sched_yield()
-    rc.go(d)
-rc.go(main)
+    rc.fiber(d)
+rc.fiber(main)
 rc.run()
 assert ran["n"] == 50, "spawn storm under no-cap dropped some: %d" % ran["n"]
 sys.stdout.write("MAX_GOROUTINES_BAD_OK\n")
 """
 
 
-def test_max_goroutines_env_invalid_is_unlimited():
+def test_max_fibers_env_invalid_is_unlimited():
     env = dict(os.environ, RUNLOOM_MAX_GOROUTINES="notanumber",
                PYTHON_GIL="0", PYTHONPATH="src")
     env.pop("RUNLOOM_INTROSPECT_TIME", None)

@@ -314,7 +314,7 @@ static void crash_handler(int sig, siginfo_t *si, void *uctx)
             crash_emit(
                 "[runloom]     -- the fault hit the guard page just below it: a CLEAN trap,\n"
                 "[runloom]     not memory corruption.\n"
-                "[runloom]     Fix: pin a bigger stack with runloom.go(fn, stack_size=N)\n"
+                "[runloom]     Fix: pin a bigger stack with runloom.fiber(fn, stack_size=N)\n"
                 "[runloom]     (an explicit size ALWAYS wins over the auto-sizer), or flatten\n"
                 "[runloom]     the deep native recursion to a heap stack / offload it.  If this\n"
                 "[runloom]     fiber's depth varies with INPUT, pin it -- the auto-sizer\n"

@@ -32,7 +32,7 @@ runloom_coro_t *runloom_coro_new(size_t stack_size,
 
 void runloom_coro_destroy(runloom_coro_t *c);
 
-/* ---- bulk/arena fast path (go_n) ----
+/* ---- bulk/arena fast path (fiber_n) ----
  * Placement coro init in caller-provided memory (>= runloom_coro_struct_size())
  * on a caller-provided stack: no malloc, no stack-acquire, no lock.  Do NOT
  * runloom_coro_destroy a placement coro -- the arena is reclaimed wholesale. */
@@ -43,7 +43,7 @@ size_t runloom_coro_struct_size(void);
 void *runloom_coro_arena_stack(size_t stack_size);
 /* Release a bulk stack block (n slots from start_slot): MADV_DONTNEED the pages
  * (keeps the virtual reservation) AND return the slots to the allocator for
- * reuse.  Called by the go_n batch teardown.  No-op off-POSIX (slots still
+ * reuse.  Called by the fiber_n batch teardown.  No-op off-POSIX (slots still
  * returned). */
 void runloom_coro_arena_release(size_t start_slot, long n);
 /* Fill an entire coro arena (n structs) inline, one stack each from one reserved

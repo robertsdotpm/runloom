@@ -41,7 +41,7 @@ def test_waitgroup_waits_for_all():
         done = bytearray(100)
         wg.add(100)
         for i in range(100):
-            runloom.go(lambda i=i: (done.__setitem__(i, 1), wg.done()))
+            runloom.fiber(lambda i=i: (done.__setitem__(i, 1), wg.done()))
         wg.wait()
         return sum(done)
     assert _drive(body) == 100
@@ -53,7 +53,7 @@ def test_waitgroup_multiple_waiters():
         wg.add(3)
         woke = bytearray(10)
         for w in range(10):
-            runloom.go(lambda w=w: (wg.wait(), woke.__setitem__(w, 1)))
+            runloom.fiber(lambda w=w: (wg.wait(), woke.__setitem__(w, 1)))
         runloom.sleep(0.02)
         for _ in range(3):
             wg.done()
@@ -70,7 +70,7 @@ def test_waitgroup_reusable():
             wg.add(5)
             c = bytearray(5)
             for i in range(5):
-                runloom.go(lambda i=i: (c.__setitem__(i, 1), wg.done()))
+                runloom.fiber(lambda i=i: (c.__setitem__(i, 1), wg.done()))
             wg.wait()
             total += sum(c)
         return total
@@ -105,7 +105,7 @@ def test_future_result_and_many_awaiters():
         fut = sync.Future()
         got = bytearray(40)
         for i in range(40):
-            runloom.go(lambda i=i: got.__setitem__(i, 1 if fut.result() == 7 else 0))
+            runloom.fiber(lambda i=i: got.__setitem__(i, 1 if fut.result() == 7 else 0))
         runloom.sleep(0.02)
         fut.set_result(7)
         runloom.sleep(0.05)
@@ -130,7 +130,7 @@ def test_future_exception():
                 fut.result()
             except ValueError as e:
                 seen.append(str(e))
-        runloom.go(aw)
+        runloom.fiber(aw)
         runloom.sleep(0.02)
         return seen
     assert _drive(body) == ["boom"]
@@ -203,7 +203,7 @@ def test_repeated_fanin_no_lost_wakeup():
             slots = bytearray(n)
             wg.add(n)
             for i in range(n):
-                runloom.go(lambda i=i: (slots.__setitem__(i, 1), wg.done()))
+                runloom.fiber(lambda i=i: (slots.__setitem__(i, 1), wg.done()))
             wg.wait()
             total += sum(slots)
             # interleave a gather round too
@@ -282,7 +282,7 @@ def test_future_await_does_not_peg_a_hub():
 
     def runner():
         fut = sync.Future()
-        runloom.go(lambda: fut.result())         # awaiter parks for the window
+        runloom.fiber(lambda: fut.result())         # awaiter parks for the window
         runloom.sleep(0.3)
         fut.set_result(1)
         runloom.sleep(0.02)

@@ -48,7 +48,7 @@ def _run_fiber(body):
             box["result"] = "ESCAPED_GOROUTINE"
             raise
     try:
-        runloom_c.go(wrapper)
+        runloom_c.fiber(wrapper)
         runloom_c.run()
     except BaseException as e:       # noqa: BLE001
         box["escaped"] = e

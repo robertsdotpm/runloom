@@ -1,7 +1,7 @@
 # runloom examples
 
 Small, self-contained programs — each one demonstrates a single aspect of
-runloom. They run goroutines across all your cores via the M:N scheduler
+runloom. They run fibers across all your cores via the M:N scheduler
 (`run(HUBS, ...)`), so they need **free-threaded CPython 3.13t with the GIL
 off** — runloom is a free-threaded runtime, and `run(n>1)` deliberately raises
 on a GIL build rather than pretend.
@@ -10,7 +10,7 @@ Install runloom first — `pip install runloom`, or `pip install -e .` from a
 clone — then run any example with the GIL off:
 
 ```bash
-PYTHON_GIL=0 ~/.pyenv/versions/3.13.13t/bin/python3 examples/hello_goroutines.py
+PYTHON_GIL=0 ~/.pyenv/versions/3.13.13t/bin/python3 examples/hello_fibers.py
 ```
 
 (On a stock GIL build the M:N examples raise a clear error telling you to use
@@ -22,10 +22,10 @@ For raw performance numbers and the measurement harness, see [`../bench/`](../be
 
 | Example | Shows |
 | --- | --- |
-| [hello_goroutines.py](hello_goroutines.py) | `go` / `run` / `yield_now` / `sleep` — the basics |
+| [hello_fibers.py](hello_fibers.py) | `go` / `run` / `yield_now` / `sleep` — the basics |
 | [channels.py](channels.py) | buffered vs unbuffered channels, `close`, `for v in ch` |
 | [select_demo.py](select_demo.py) | `select` over recv/send cases, plus non-blocking `default` |
-| [ping_pong.py](ping_pong.py) | two goroutines synchronised purely by channels |
+| [ping_pong.py](ping_pong.py) | two fibers synchronised purely by channels |
 
 ## Concurrency patterns
 
@@ -45,7 +45,7 @@ For raw performance numbers and the measurement harness, see [`../bench/`](../be
 | --- | --- |
 | [timeout.py](timeout.py) | race work against `runloom.time.After` with `select` |
 | [ticker.py](ticker.py) | periodic ticks with `runloom.time.NewTicker` |
-| [context_cancel.py](context_cancel.py) | `runloom.context` cancellation fanned out to many goroutines |
+| [context_cancel.py](context_cancel.py) | `runloom.context` cancellation fanned out to many fibers |
 
 ## Networking (blocking-style sockets)
 
@@ -53,7 +53,7 @@ For raw performance numbers and the measurement harness, see [`../bench/`](../be
 | --- | --- |
 | [echo_server.py](echo_server.py) / [echo_client.py](echo_client.py) | a TCP echo server + load-generating client |
 | [http_server.py](http_server.py) | hand-rolled HTTP server + `urllib.urlopen` clients, all cooperative |
-| [tcp_proxy.py](tcp_proxy.py) | a port forwarder with two pump goroutines per connection |
+| [tcp_proxy.py](tcp_proxy.py) | a port forwarder with two pump fibers per connection |
 | [port_scanner.py](port_scanner.py) | thousands of concurrent `connect()`s via fan-out |
 | [udp_echo.py](udp_echo.py) | cooperative UDP datagrams with the `runloom.sync` front-end |
 
@@ -63,7 +63,7 @@ For raw performance numbers and the measurement harness, see [`../bench/`](../be
 | --- | --- |
 | [offload_blocking.py](offload_blocking.py) | `runloom.blocking` keeps a hub alive across a non-cooperative call |
 | [mn_parallel.py](mn_parallel.py) | the M:N scheduler scaling across cores (free-threaded 3.13t) |
-| [segfault_dump.py](segfault_dump.py) | `install_crash_handler()` turns a goroutine stack overflow into a classified dump |
+| [segfault_dump.py](segfault_dump.py) | `install_crash_handler()` turns a fiber stack overflow into a classified dump |
 | [asyncio_bridge.py](asyncio_bridge.py) | run existing `async`/`await` code on runloom via `runloom.aio.run` |
 
 ### Free-threaded run (for `mn_parallel.py`)

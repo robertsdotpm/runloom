@@ -33,7 +33,7 @@ def _filework():
 
 def test_concurrent_offload_single_thread():
     for _ in range(16):
-        runloom_c.go(_filework, stack_size=2 << 20)
+        runloom_c.fiber(_filework, stack_size=2 << 20)
     runloom_c.run()
     assert runloom_c._self_check(0) == 0
 
@@ -41,7 +41,7 @@ def test_concurrent_offload_single_thread():
 def test_concurrent_offload_mn():
     runloom_c.mn_init(4)
     for _ in range(16):
-        runloom_c.mn_go(_filework)
+        runloom_c.mn_fiber(_filework)
     runloom_c.mn_run()
     runloom_c.mn_fini()
     assert runloom_c._self_check(0) == 0

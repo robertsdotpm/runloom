@@ -33,7 +33,7 @@ def worker():
     s.close()
     return data
 
-runloom.go(worker)
+runloom.fiber(worker)
 runloom.run(1)
 ```
 
@@ -92,11 +92,11 @@ def main():
     ]
     results = runloom.Chan(len(urls))
     for u in urls:
-        runloom.go(lambda url=u: results.send((url, len(fetch(url)))))
+        runloom.fiber(lambda url=u: results.send((url, len(fetch(url)))))
     for _ in urls:
         print(results.recv()[0])
 
-runloom.go(main)
+runloom.fiber(main)
 runloom.run(1)
 ```
 
@@ -126,7 +126,7 @@ def worker(i):
     print("bucket", i, "->", len(rows), "rows")
 
 for i in range(32):
-    runloom.go(lambda i=i: worker(i))
+    runloom.fiber(lambda i=i: worker(i))
 runloom.run(1)
 ```
 
@@ -162,8 +162,8 @@ Patching doesn't turn `threading.Thread` into a fiber -- it would
 break too many assumptions.  If you spawn an OS thread, it runs
 independently of the runloom scheduler.
 
-For "I want runloom, not threads," use `runloom.go(fn)` or
-`runloom.sync.go(fn)`.
+For "I want runloom, not threads," use `runloom.fiber(fn)` or
+`runloom.sync.fiber(fn)`.
 
 ### `os.read` on a regular file dispatches to a thread
 

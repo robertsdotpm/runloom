@@ -38,7 +38,7 @@ def _drive(fn):
         except BaseException as e:   # noqa: BLE001 - propagate to the test
             box[1] = e
 
-    runloom_c.go(runner)
+    runloom_c.fiber(runner)
     runloom_c.run()
     if box[1] is not None:
         raise box[1]
@@ -146,7 +146,7 @@ class TestSelectorsReadiness(unittest.TestCase):
                 order.append("write")
                 b.send(b"payload")
 
-            runloom_c.go(writer)
+            runloom_c.fiber(writer)
             t0 = time.monotonic()
             ready = sel.select(timeout=2.0)
             dt = time.monotonic() - t0
@@ -248,7 +248,7 @@ class TestSelectorsConcurrency(unittest.TestCase):
                     time.sleep(0.05)
                     b.send(b"go")
 
-                runloom_c.go(w)
+                runloom_c.fiber(w)
                 sel.select(timeout=2.0)
                 a.recv(4)
                 sel.close(); a.close(); b.close()
@@ -257,7 +257,7 @@ class TestSelectorsConcurrency(unittest.TestCase):
             t0 = time.monotonic()
             g_done = []
             for i in range(2):
-                runloom_c.go(lambda i=i: (one(i), g_done.append(1)))
+                runloom_c.fiber(lambda i=i: (one(i), g_done.append(1)))
             # Spin the driving fiber until both children finish.
             while len(g_done) < 2:
                 runloom.sleep(0.005)
@@ -283,7 +283,7 @@ class TestSelectPollDirect(unittest.TestCase):
                 time.sleep(0.02)
                 b.send(b"data")
 
-            runloom_c.go(w)
+            runloom_c.fiber(w)
             evts = p.poll(2000)         # milliseconds
             d = a.recv(8)
             a.close(); b.close()
@@ -350,7 +350,7 @@ class TestSelectEpollDirect(unittest.TestCase):
                 time.sleep(0.02)
                 b.send(b"epoll")
 
-            runloom_c.go(w)
+            runloom_c.fiber(w)
             evts = ep.poll(timeout=2.0)   # seconds
             d = a.recv(8)
             ep.close(); a.close(); b.close()

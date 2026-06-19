@@ -7,9 +7,9 @@ from .handles import _PG_ALL_TASKS, _PG_OPEN_LOOPS  # noqa: F401
 class _LoopRunMixin(object):
     def _can_spawn_here(self):
         """True iff runloom_c.go is safe on the CALLING thread for THIS loop:
-        we are the thread running the loop (go() lands on our own sched) or the
+        we are the thread running the loop (fiber() lands on our own sched) or the
         loop isn't running yet (the calling thread will drive it).  A FOREIGN
-        thread must marshal spawns via call_soon_threadsafe -- its go() would
+        thread must marshal spawns via call_soon_threadsafe -- its fiber() would
         land on ITS thread's sched, which this loop never drains."""
         tid = self._thread_id
         return tid is None or tid == _threading.get_ident()

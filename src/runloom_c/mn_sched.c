@@ -1,7 +1,7 @@
 /* mn_sched.c -- M:N scheduler.
  *
  * N OS threads, each one a "hub" with its own runloom_sched_t and a
- * Chase-Lev work-stealing deque.  Goroutines spawned by runloom_mn_go
+ * Chase-Lev work-stealing deque.  Goroutines spawned by runloom_mn_fiber
  * are round-robined onto hubs at spawn time; once running, a g is
  * pinned to its hub (its C stack is absolute address).
  *
@@ -312,7 +312,7 @@ static int runloom_hub_tstate_lock_inited = 0;
 
 /* Global pending-g counter, replacing the per-hub `pending` field
  * for purposes of "is there any work left in the M:N scheduler".
- * Incremented in runloom_mn_go (spawn), decremented in hub_main when a
+ * Incremented in runloom_mn_fiber (spawn), decremented in hub_main when a
  * g completes.  Steals do NOT touch this counter (the per-hub field
  * is still updated for diagnostics / future scheduler heuristics,
  * but the steal-time inc-then-dec across hubs created a

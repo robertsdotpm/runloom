@@ -91,9 +91,9 @@ def run_cap(cap, nprod, ncons, per):
             c += 1; t += v
         res.send((c, t))
     runloom_c.mn_init(4)
-    for _ in range(ncons): runloom_c.mn_go(cons)
-    for p in range(nprod): runloom_c.mn_go(prod(p))
-    runloom_c.mn_go(closer)
+    for _ in range(ncons): runloom_c.mn_fiber(cons)
+    for p in range(nprod): runloom_c.mn_fiber(prod(p))
+    runloom_c.mn_fiber(closer)
     runloom_c.mn_run()
     tc = tt = 0
     for _ in range(ncons):
@@ -140,9 +140,9 @@ def once(nprod, ncons, per):
             c += 1; t += v
         res.send((c, t))
     runloom_c.mn_init(4)
-    for _ in range(ncons): runloom_c.mn_go(cons)
-    for p in range(nprod): runloom_c.mn_go(prod(p))
-    runloom_c.mn_go(closer)
+    for _ in range(ncons): runloom_c.mn_fiber(cons)
+    for p in range(nprod): runloom_c.mn_fiber(prod(p))
+    runloom_c.mn_fiber(closer)
     runloom_c.mn_run()
     tc = tt = 0
     for _ in range(ncons):
@@ -188,7 +188,7 @@ def run_cap(cap, n):
             done.send(1)
         return run
     runloom_c.mn_init(4)
-    runloom_c.mn_go(mk(0)); runloom_c.mn_go(mk(1))
+    runloom_c.mn_fiber(mk(0)); runloom_c.mn_fiber(mk(1))
     runloom_c.mn_run()
     a = done.try_recv(); b = done.try_recv()
     runloom_c.mn_fini()
@@ -253,9 +253,9 @@ def once(it):
         res.send((c, t))
 
     runloom_c.mn_init(4)
-    for _ in range(ncons): runloom_c.mn_go(cons)
-    for p in range(nprod): runloom_c.mn_go(prod(p))
-    runloom_c.mn_go(closer)
+    for _ in range(ncons): runloom_c.mn_fiber(cons)
+    for p in range(nprod): runloom_c.mn_fiber(prod(p))
+    runloom_c.mn_fiber(closer)
     runloom_c.mn_run()
     tc = tt = 0
     for _ in range(ncons):
@@ -300,8 +300,8 @@ def feeder():
     for i in range(N):
         (a if (i & 1) == 0 else b).send(i)
 runloom_c.mn_init(2)
-runloom_c.mn_go(selector)
-runloom_c.mn_go(feeder)
+runloom_c.mn_fiber(selector)
+runloom_c.mn_fiber(feeder)
 runloom_c.mn_run()
 g = hits.try_recv()
 runloom_c.mn_fini()
@@ -345,8 +345,8 @@ def receiver():
         n += 1
     res.send((n, bad))
 runloom_c.mn_init(4)
-runloom_c.mn_go(receiver)
-runloom_c.mn_go(sender)
+runloom_c.mn_fiber(receiver)
+runloom_c.mn_fiber(sender)
 runloom_c.mn_run()
 g = res.try_recv()
 runloom_c.mn_fini()
@@ -380,8 +380,8 @@ def once(nrecv):
             runloom_c.sched_yield_classic()
         ch.close()
     runloom_c.mn_init(4)
-    for _ in range(nrecv): runloom_c.mn_go(recv)
-    runloom_c.mn_go(closer)
+    for _ in range(nrecv): runloom_c.mn_fiber(recv)
+    runloom_c.mn_fiber(closer)
     runloom_c.mn_run()
     got = []
     for _ in range(nrecv):
@@ -453,9 +453,9 @@ def experiment(it):
             runloom_c.sched_yield_classic()
         res.send((got, violations))
     runloom_c.mn_init(3)
-    for _ in range(ncons): runloom_c.mn_go(cons)
-    for p in range(3): runloom_c.mn_go(prod(p))
-    runloom_c.mn_go(closer)
+    for _ in range(ncons): runloom_c.mn_fiber(cons)
+    for p in range(3): runloom_c.mn_fiber(prod(p))
+    runloom_c.mn_fiber(closer)
     runloom_c.mn_run()
     tv = 0
     for _ in range(ncons):

@@ -58,7 +58,7 @@ class TestGCWithParkedGoroutines(unittest.TestCase):
         def main():
             done = runloom_c.Chan(N)
             for i in range(N):
-                runloom.go(worker, i, done)
+                runloom.fiber(worker, i, done)
             runloom.sleep(0.01)              # let them all park holding cycles
             for _ in range(30):           # hammer the cyclic GC
                 gc.collect()
@@ -102,7 +102,7 @@ class TestGCWithParkedGoroutines(unittest.TestCase):
         def main():
             done = runloom_c.Chan(N)
             for i in range(N):
-                runloom.go(worker, i, done)
+                runloom.fiber(worker, i, done)
             runloom.sleep(0.02)              # let them park on their chans
             for _ in range(30):
                 gc.collect()
@@ -130,7 +130,7 @@ class TestGCWithParkedGoroutines(unittest.TestCase):
             N = 150
             done = runloom_c.Chan(N)
             for i in range(N):
-                runloom.go(worker, i, done)
+                runloom.fiber(worker, i, done)
             runloom.sleep(0.02)
             for _ in range(30):
                 gc.collect()

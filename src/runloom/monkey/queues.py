@@ -17,11 +17,11 @@ _real_SimpleQueue = _queue_mod.SimpleQueue
 def _spawn(fn):
     """Spawn a helper fiber on whichever scheduler is active: mn_go under
     M:N (mn_hub_count() > 0), else the single-thread go.  A waker spawned via
-    the single-thread go() never runs under mn_run, so a timed get() would hang
+    the single-thread fiber() never runs under mn_run, so a timed get() would hang
     until something is put."""
     if runloom_c.mn_hub_count() > 0:
-        return runloom_c.mn_go(fn)
-    return runloom_c.go(fn)
+        return runloom_c.mn_fiber(fn)
+    return runloom_c.fiber(fn)
 
 
 class CoSimpleQueue(object):

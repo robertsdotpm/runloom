@@ -53,7 +53,7 @@ def test_fd_reuse_no_spurious_wait_fd_return():
                 cycle(do_write)
                 done[0] = True
 
-            runloom.go(run)
+            runloom.fiber(run)
             runloom.sleep(0.05)
             if do_write:
                 os.write(w, b"\x01")
@@ -87,7 +87,7 @@ def test_high_fanin_event_no_spurious_false():
                 outs.append(ev.wait(0.5))
 
             for _ in range(500):
-                runloom.go(waiter)
+                runloom.fiber(waiter)
             runloom.sleep(0.1)
             ev.set()
             runloom.sleep(0.4)

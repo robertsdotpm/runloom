@@ -6,7 +6,7 @@ receiver parks in conn.recv() partway through a 4 MiB send and is never woken
 again, so the single-thread scheduler's run() never returns.
 
   * DEFAULT epoll backend (RUNLOOM_TCPCONN_IOURING unset): transfers fine.
-  * io_uring recv forced on: server goroutine wedges in recv() (observed at
+  * io_uring recv forced on: server fiber wedges in recv() (observed at
     tests/test_tcp_scenarios.py:96, test_writealot_backpressure) -> hang.
 
 This is the libuv `test-tcp-writealot` pattern (sender parks on write-readiness
@@ -88,8 +88,8 @@ def main():
     # non-zero rather than hang forever.
     faulthandler.dump_traceback_later(WATCHDOG_S, exit=True)
     print("[repro] backend = {0}; transferring {1} bytes ...".format(mode, SIZE))
-    runloom_c.go(server)
-    runloom_c.go(client)
+    runloom_c.fiber(server)
+    runloom_c.fiber(client)
     runloom_c.run()
     faulthandler.cancel_dump_traceback_later()
 

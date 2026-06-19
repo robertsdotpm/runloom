@@ -30,12 +30,12 @@ class TestRunReady(unittest.TestCase):
                 order.append("B")
                 state["removed"] = True
             def A():
-                runloom_c.go(B)            # "close frame woke run_asgi"
+                runloom_c.fiber(B)            # "close frame woke run_asgi"
                 if use_run_ready:
                     runloom_c.run_ready()
                 order.append("A")
                 state["seen"] = state["removed"]   # what shutdown() observes
-            runloom_c.go(A)
+            runloom_c.fiber(A)
             runloom_c.run()
             return order, state["seen"]
 
@@ -52,13 +52,13 @@ class TestRunReady(unittest.TestCase):
         entire wake cascade (A->B->C->D), not a single round-robin pass."""
         order = []
         def D(): order.append("D")
-        def C(): order.append("C"); runloom_c.go(D)
-        def B(): order.append("B"); runloom_c.go(C)
+        def C(): order.append("C"); runloom_c.fiber(D)
+        def B(): order.append("B"); runloom_c.fiber(C)
         def A():
-            runloom_c.go(B)
+            runloom_c.fiber(B)
             runloom_c.run_ready()
             order.append("A")
-        runloom_c.go(A)
+        runloom_c.fiber(A)
         runloom_c.run()
         self.assertEqual(order, ["B", "C", "D", "A"])
         self.assertEqual(runloom_c._self_check(0), 0)
@@ -67,12 +67,12 @@ class TestRunReady(unittest.TestCase):
         """Contrast: a single classic yield resumes A after just one level."""
         order = []
         def C(): order.append("C")
-        def B(): order.append("B"); runloom_c.go(C)
+        def B(): order.append("B"); runloom_c.fiber(C)
         def A():
-            runloom_c.go(B)
+            runloom_c.fiber(B)
             runloom_c.sched_yield_classic()
             order.append("A")
-        runloom_c.go(A)
+        runloom_c.fiber(A)
         runloom_c.run()
         self.assertEqual(order, ["B", "A", "C"])
 
@@ -82,11 +82,11 @@ class TestRunReady(unittest.TestCase):
         order = []
         def W(): order.append("W")
         def A():
-            runloom_c.go(W); runloom_c.run_ready(); order.append("A")
+            runloom_c.fiber(W); runloom_c.run_ready(); order.append("A")
         def B():
             runloom_c.run_ready(); order.append("B")
-        runloom_c.go(A)
-        runloom_c.go(B)
+        runloom_c.fiber(A)
+        runloom_c.fiber(B)
         runloom_c.run()
         self.assertEqual(order, ["W", "A", "B"])
         self.assertEqual(runloom_c._self_check(0), 0)
@@ -97,7 +97,7 @@ class TestRunReady(unittest.TestCase):
         def A():
             runloom_c.run_ready()
             order.append("A")
-        runloom_c.go(A)
+        runloom_c.fiber(A)
         runloom_c.run()
         self.assertEqual(order, ["A"])
 
@@ -116,8 +116,8 @@ class TestRunReady(unittest.TestCase):
         def A():
             runloom_c.run_ready()
             order.append("A")
-        runloom_c.go(sleeper)
-        runloom_c.go(A)
+        runloom_c.fiber(sleeper)
+        runloom_c.fiber(A)
         runloom_c.run()
         # A resumes at the quiescence point (before the timer); both complete.
         self.assertIn("A", order)

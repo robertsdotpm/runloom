@@ -13,7 +13,7 @@ import os
 
 import runloom
 
-# Free-threaded build: fan goroutines across all cores (M:N scheduler).
+# Free-threaded build: fan fibers across all cores (M:N scheduler).
 HUBS = os.cpu_count() or 4
 
 def main():
@@ -23,7 +23,7 @@ def main():
             ticker.c.recv()               # blocks ~50 ms between ticks
             print("tick", n)
     finally:
-        ticker.Stop()                     # halt the backing goroutine
+        ticker.Stop()                     # halt the backing fiber
     print("stopped after 5 ticks")
 
 if __name__ == "__main__":

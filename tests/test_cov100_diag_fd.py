@@ -94,9 +94,9 @@ def test_dump_classifies_write_rdwr_and_other_parkers():
         def other_waiter():
             rvs["other"] = rc.wait_fd(e.fileno(), 0, 600)
 
-        rc.go(w_waiter)
-        rc.go(rw_waiter)
-        rc.go(other_waiter)
+        rc.fiber(w_waiter)
+        rc.fiber(rw_waiter)
+        rc.fiber(other_waiter)
         # Let all three link + commit to PARKED before we walk them.
         rc.sched_yield()
         rc.sched_yield()
@@ -118,7 +118,7 @@ def test_dump_classifies_write_rdwr_and_other_parkers():
             peer.close()
 
     with hang_guard(20, "dump classify write/rdwr/other"):
-        rc.go(main)
+        rc.fiber(main)
         rc.run()
 
     # All three distinct-mask parkers were live at dump time...
@@ -169,8 +169,8 @@ def test_dump_ready_but_parked_probe_counts_readable_fd():
         # prober returns here; run() then pumps and wakes the still-linked reader.
 
     with hang_guard(20, "dump ready-but-parked"):
-        rc.go(reader)
-        rc.go(prober)
+        rc.fiber(reader)
+        rc.fiber(prober)
         rc.run()
 
     rc.netpoll_unregister(a.fileno())
@@ -218,7 +218,7 @@ def _run_maxfd_subprocess(value):
         "        got[0] = rc.wait_fd(a.fileno(), 1, 2000)\n"
         "    def sender():\n"
         "        rc.sched_yield(); rc.sched_yield(); b.send(b'hi')\n"
-        "    rc.go(reader); rc.go(sender); rc.run()\n"
+        "    rc.fiber(reader); rc.fiber(sender); rc.run()\n"
         "    rc.netpoll_unregister(a.fileno()); a.close(); b.close()\n"
         "    assert got[0] & 1, 'reader did not wake on READ (got %r)' % got[0]\n"
         "main()\n"

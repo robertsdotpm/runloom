@@ -1,6 +1,6 @@
 """Adversarial coverage suite for src/runloom_c/mn_sched_init_fini.c.inc.
 
-This fragment is the M:N scheduler's init / fini / spawn-core / go_n-bulk /
+This fragment is the M:N scheduler's init / fini / spawn-core / fiber_n-bulk /
 deadlock-census code.  Most of its UNCOVERED lines live behind error-cleanup,
 teardown-drain, and bulk-arena-fallback branches the normal corpus never trips.
 Each test below drives ONE such dark region with a real adverse condition and
@@ -26,16 +26,16 @@ Regions driven (uncovered line -> how):
             WITHOUT mn_run (gs sitting in the sleep heap when the hub stops).
   L333-335  hub-tstate delete on the MAIN thread (negative control) ->
             RUNLOOM_GILSTATE_DELETE_ON_MAIN leaves h->tstate live for fini.
-  L480-491  runloom_mn_go_core coro==NULL cleanup -> RLIMIT_AS capped just above
+  L480-491  runloom_mn_fiber_core coro==NULL cleanup -> RLIMIT_AS capped just above
             VmSize + an 8 MiB explicit stack so coro_new's mmap fails; asserts
             the admission slot was RELEASED (set_max_fibers -> limit_counted).
-  L694-698  go_n bulk-arena coro_init FAILURE fallback -> RUNLOOM_GON_BULK=1 +
+  L694-698  fiber_n bulk-arena coro_init FAILURE fallback -> RUNLOOM_GON_BULK=1 +
             RUNLOOM_STACK_ARENA_N=1 (1-slot arena) so the bulk path falls back
-            to the per-g mn_go_core loop; asserts all (indexed) fibers still ran.
-  L742-744  go_n bulk splice signalling an IDLE hub's cond -> GON_BULK + let the
-            hubs idle, then a bulk go_n.
-  L764      go_n non-bulk loop spawn-failure return -1 -> RUNLOOM_FAULT_SPAWN_G
-            forces the first slab alloc to fail; go_n raises.
+            to the per-g mn_fiber_core loop; asserts all (indexed) fibers still ran.
+  L742-744  fiber_n bulk splice signalling an IDLE hub's cond -> GON_BULK + let the
+            hubs idle, then a bulk fiber_n.
+  L764      fiber_n non-bulk loop spawn-failure return -1 -> RUNLOOM_FAULT_SPAWN_G
+            forces the first slab alloc to fail; fiber_n raises.
 
 See the module docstring's `unreachable` notes in the structured report for the
 per-g-tstate / OOM-only / lost-wakeup lines that have no SAFE trigger.
@@ -223,12 +223,12 @@ def test_fini_deletes_hub_tstate_on_main():
 
 
 # --------------------------------------------------------------------------
-# L480-491 : runloom_mn_go_core coro==NULL cleanup (stack mmap fails)
+# L480-491 : runloom_mn_fiber_core coro==NULL cleanup (stack mmap fails)
 # --------------------------------------------------------------------------
-def test_mn_go_core_coro_alloc_failure_releases_admission():
-    """Cap RLIMIT_AS just above the current VmSize, then mn_go() an 8 MiB stack:
+def test_mn_fiber_core_coro_alloc_failure_releases_admission():
+    """Cap RLIMIT_AS just above the current VmSize, then mn_fiber() an 8 MiB stack:
     the fresh-size stack mmap inside runloom_coro_new fails -> coro == NULL ->
-    mn_go_core runs its cleanup (Py_DECREF callable, PyErr_NoMemory, release the
+    mn_fiber_core runs its cleanup (Py_DECREF callable, PyErr_NoMemory, release the
     admission slot, slab_free, errno=ENOMEM, return -1).  With set_max_fibers
     active the admission slot was COUNTED (limit_counted==1), so the cleanup MUST
     decrement live_fibers back -- we assert that (L485-487) and that mn_go raised
@@ -266,23 +266,23 @@ def test_mn_go_core_coro_alloc_failure_releases_admission():
 
 
 # --------------------------------------------------------------------------
-# L764 : runloom_mn_go_n non-bulk loop -- a mid-loop spawn failure returns -1
+# L764 : runloom_mn_fiber_n non-bulk loop -- a mid-loop spawn failure returns -1
 # --------------------------------------------------------------------------
-def test_go_n_loop_spawn_failure_returns_error():
+def test_fiber_n_loop_spawn_failure_returns_error():
     """RUNLOOM_FAULT_SPAWN_G=always:12 forces every g slab alloc to fail.  In the
-    non-bulk go_n loop (GON_BULK unset), the first mn_go_core fails -> go_n
+    non-bulk fiber_n loop (GON_BULK unset), the first mn_fiber_core fails -> fiber_n
     returns -1 with a Python error set (L761-765, the L764 return).  Asserts
-    go_n raised."""
+    fiber_n raised."""
     body = """
         rc.mn_init(2)
         raised = False
         try:
-            rc.go_n(lambda: None, 4, 0, False)
+            rc.fiber_n(lambda: None, 4, 0, False)
             print("UNEXPECTED_GON_OK")
         except (MemoryError, RuntimeError):
             raised = True
         rc.mn_run(); rc.mn_fini()
-        assert raised, "go_n did not raise on a spawn failure"
+        assert raised, "fiber_n did not raise on a spawn failure"
         print("GON_LOOP_FAIL_OK")
     """
     p = _run_worker(body, env_extra={"RUNLOOM_FAULT_SPAWN_G": "always:12"})
@@ -290,13 +290,13 @@ def test_go_n_loop_spawn_failure_returns_error():
 
 
 # --------------------------------------------------------------------------
-# L694-698 : go_n bulk-arena path falls back to the per-g loop on arena failure
+# L694-698 : fiber_n bulk-arena path falls back to the per-g loop on arena failure
 # --------------------------------------------------------------------------
-def test_go_n_bulk_arena_failure_falls_back_to_per_g_loop():
+def test_fiber_n_bulk_arena_failure_falls_back_to_per_g_loop():
     """RUNLOOM_GON_BULK=1 takes the bulk-arena spawn path; RUNLOOM_STACK_ARENA_N=1
     makes the stack arena hold a single slot, so runloom_arena_alloc(n>1) fails
     and runloom_coro_bulk_init returns -1.  go_n_bulk then frees its arenas and
-    FALLS BACK to the per-g mn_go_core loop (L694-698), re-spawning each fiber
+    FALLS BACK to the per-g mn_fiber_core loop (L694-698), re-spawning each fiber
     with its index.  We assert every indexed fiber still ran with the CORRECT
     index (the fallback passes `indexed ? i : -1`)."""
     body = """
@@ -309,7 +309,7 @@ def test_go_n_bulk_arena_failure_falls_back_to_per_g_loop():
                 if 0 <= i < N:
                     seen[i] = 1
                 wg.done()
-            rc.go_n(lambda i: w(i), N, 0, True)   # bulk -> arena fail -> per-g fallback
+            rc.fiber_n(lambda i: w(i), N, 0, True)   # bulk -> arena fail -> per-g fallback
             wg.wait()
         rc.mn_init(3); rc.mn_go(main); rc.mn_run(); rc.mn_fini()
         assert sum(seen) == N, ("only %d/%d fibers ran via the fallback" % (sum(seen), N))
@@ -321,12 +321,12 @@ def test_go_n_bulk_arena_failure_falls_back_to_per_g_loop():
 
 
 # --------------------------------------------------------------------------
-# L742-744 : go_n bulk splice signals an IDLE hub's condvar
+# L742-744 : fiber_n bulk splice signals an IDLE hub's condvar
 # --------------------------------------------------------------------------
-def test_go_n_bulk_wakes_idle_hubs():
+def test_fiber_n_bulk_wakes_idle_hubs():
     """RUNLOOM_GON_BULK=1 with a real (large) arena -> the bulk path SUCCEEDS and
     splices each hub's whole batch under one lock.  We first let the hubs settle
-    into their idle condvar wait, then issue the bulk go_n; the per-hub splice
+    into their idle condvar wait, then issue the bulk fiber_n; the per-hub splice
     finds idle_waiting set and signals idle_cond (L741-744) to drain the batch
     promptly.  Asserts every fiber ran within a generous bound (a missed wake
     would strand the batch until idle_ns expiry / hang)."""
@@ -343,7 +343,7 @@ def test_go_n_bulk_wakes_idle_hubs():
                     seen[i] = 1
                 wg.done()
             t0 = time.monotonic()
-            rc.go_n(lambda i: w(i), N, 0, True)   # bulk splice across now-idle hubs
+            rc.fiber_n(lambda i: w(i), N, 0, True)   # bulk splice across now-idle hubs
             wg.wait()
             # The whole batch should drain quickly via the idle-cond signal.
             assert time.monotonic() - t0 < 5.0, "bulk batch was slow to wake"

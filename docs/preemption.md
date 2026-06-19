@@ -35,8 +35,8 @@ def chatty():
         print("chatty tick", i)
         runloom.sched_sleep(0.01)
 
-runloom.go(hog)
-runloom.go(chatty)
+runloom.fiber(hog)
+runloom.fiber(chatty)
 runloom.run(1)
 ```
 

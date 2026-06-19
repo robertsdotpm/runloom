@@ -1,4 +1,4 @@
-"""TCP echo client — sends N parallel goroutines, each doing M round-trips."""
+"""TCP echo client — sends N parallel fibers, each doing M round-trips."""
 import socket
 import sys
 import time
@@ -7,7 +7,7 @@ import os
 
 import runloom
 
-# Free-threaded build: fan goroutines across all cores (M:N scheduler).
+# Free-threaded build: fan fibers across all cores (M:N scheduler).
 HUBS = os.cpu_count() or 4
 
 HOST = "127.0.0.1"
@@ -39,7 +39,7 @@ def main():
 
     def spawn():
         for i in range(n_clients):
-            runloom.go(lambda i=i: client(i, n_msgs, payload))
+            runloom.fiber(lambda i=i: client(i, n_msgs, payload))
     t0 = time.perf_counter()
     runloom.run(HUBS, spawn)
     t = time.perf_counter() - t0

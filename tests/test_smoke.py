@@ -1,4 +1,4 @@
-"""Smoke tests: Coro primitive + go()/run() scheduler."""
+"""Smoke tests: Coro primitive + fiber()/run() scheduler."""
 import sys
 import time
 import unittest
@@ -65,9 +65,9 @@ class TestScheduler(unittest.TestCase):
             for i in range(n):
                 log.append((name, i))
                 runloom.yield_()
-        runloom.go(worker, "A", 3)
-        runloom.go(worker, "B", 3)
-        runloom.go(worker, "C", 3)
+        runloom.fiber(worker, "A", 3)
+        runloom.fiber(worker, "B", 3)
+        runloom.fiber(worker, "C", 3)
         runloom.run(1)
         # Should round-robin A0 B0 C0 A1 B1 C1 ...
         self.assertEqual(log, [
@@ -86,8 +86,8 @@ class TestScheduler(unittest.TestCase):
             for i in range(3):
                 log.append(("b", i))
                 runloom.yield_()
-        runloom.go(sleeper)
-        runloom.go(burner)
+        runloom.fiber(sleeper)
+        runloom.fiber(burner)
         t0 = time.monotonic()
         runloom.run(1)
         elapsed = time.monotonic() - t0

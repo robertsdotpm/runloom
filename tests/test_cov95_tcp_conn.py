@@ -310,7 +310,7 @@ def client():
     c.close()
 
 import faulthandler; faulthandler.dump_traceback_later(40, exit=True)
-rc.go(server); rc.go(client); rc.run()
+rc.fiber(server); rc.fiber(client); rc.run()
 faulthandler.cancel_dump_traceback_later()
 sys.stdout.write("SIG OP=%s interrupt=%r rv=%r\n" % (OP, box.get("interrupt"), box.get("rv")))
 '''
@@ -337,7 +337,7 @@ def client():
     except OSError as e:
         box["oserror"] = e.errno
 import faulthandler; faulthandler.dump_traceback_later(40, exit=True)
-rc.go(client); rc.run()
+rc.fiber(client); rc.run()
 faulthandler.cancel_dump_traceback_later()
 sys.stdout.write("CONNECT_SIG interrupt=%r oserror=%r rv=%r\n" %
                  (box.get("interrupt"), box.get("oserror"), box.get("rv")))
@@ -420,7 +420,7 @@ def client():
     except OSError as e:
         box["errno"] = e.errno
     lsock.close()
-rc.go(client); rc.run()
+rc.fiber(client); rc.run()
 if "errno" in box:
     print("OSERROR errno=%s" % box["errno"]); sys.exit(42)
 print("OK"); sys.exit(0)
@@ -444,7 +444,7 @@ def client():
     except OSError as e:
         box["errno"] = e.errno
     lsock.close()
-rc.go(client); rc.run()
+rc.fiber(client); rc.run()
 if "errno" in box:
     print("OSERROR errno=%s" % box["errno"]); sys.exit(42)
 print("N=%s" % box.get("n")); sys.exit(0)

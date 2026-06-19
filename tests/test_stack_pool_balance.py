@@ -43,14 +43,14 @@ def test_stack_pool_plateaus_under_fanout():
         for r in range(ROUNDS):
             ch = runloom_c.Chan(WORKERS)
             for _ in range(WORKERS):
-                runloom_c.mn_go(lambda c=ch: worker(c))
+                runloom_c.mn_fiber(lambda c=ch: worker(c))
             for _ in range(WORKERS):
                 ch.recv()
             samples.append(maps_count())
 
     runloom_c.mn_init(4)
     try:
-        runloom_c.mn_go(acceptor)
+        runloom_c.mn_fiber(acceptor)
         runloom_c.mn_run()
     finally:
         runloom_c.mn_fini()

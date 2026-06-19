@@ -1,6 +1,6 @@
 /* runloom_sched.h -- C-level cooperative scheduler.
  *
- * The Python-side `runloom.go(fn)` ultimately creates a fiber here.
+ * The Python-side `runloom.fiber(fn)` ultimately creates a fiber here.
  * yield, sleep, run -- all do their bookkeeping in C, calling into
  * Python only to invoke the user's entry function.
  *
@@ -146,7 +146,7 @@ struct runloom_pystate_snap {
  *   - the RunloomG Python wrapper, while the user holds it
  * Both decrement on release; the g is freed when both are gone.
  */
-/* C-only entry point.  Set on a g spawned via runloom_mn_go_c (no Python
+/* C-only entry point.  Set on a g spawned via runloom_mn_fiber_c (no Python
  * callable).  When set, runloom_g_entry calls c_entry(c_arg) instead of
  * PyObject_CallNoArgs(callable).  Used by the C test harness in
  * tests_c/ to exercise the M:N + netpoll core without the Python
@@ -187,7 +187,7 @@ struct runloom_g {
     int done;
     int refcount;
     /* Caller-asserted "this fiber will never yield".  Spawned via
-     * runloom_sched_spawn_noyield (Python: runloom_c.go_noyield(fn)).
+     * runloom_sched_spawn_noyield (Python: runloom_c.fiber_noyield(fn)).
      * When set, drain skips the per-g datastack install + drain +
      * sched_snap load/resnap dance, because g runs to completion
      * within one resume + uses the scheduler's existing Python state
@@ -205,7 +205,7 @@ struct runloom_g {
     int pct_prio;
     /* PCT FIFO marker: when set, PCT must NOT reorder this g relative to other
      * FIFO-marked gs -- it preserves their spawn (ready-ring) order.  The aio
-     * bridge marks every _go_io fiber (call_soon callbacks, task steps,
+     * bridge marks every _fiber_io fiber (call_soon callbacks, task steps,
      * io/timer drivers) so PCT respects asyncio's call_soon-FIFO contract
      * instead of permuting it (which was a false positive, not a bug -- asyncio
      * scheduling has no legal reordering freedom).  PCT still freely interleaves
@@ -328,7 +328,7 @@ struct runloom_g {
      * per transition. */
     unsigned char state;
 
-    /* ---- bulk-arena ownership (go_n) ----
+    /* ---- bulk-arena ownership (fiber_n) ----
      * When `arena` is set, this g, its coro, and its stack are SLICES of a bulk
      * arena (one calloc / one mmap for the whole batch), NOT individually
      * malloc'd.  Its final decref must therefore NOT runloom_coro_destroy the coro
@@ -338,9 +338,9 @@ struct runloom_g {
      * arenas, MADV_DONTNEED the stack block).  0 for every normal fiber.
      * Both live BEFORE the id introspection block so slab reuse clears them. */
     unsigned char arena;
-    struct runloom_gon_batch *batch;
+    struct runloom_fibern_batch *batch;
 
-    /* go_n(indexed=True): call the entry as fn(index) rather than fn().  The
+    /* fiber_n(indexed=True): call the entry as fn(index) rather than fn().  The
      * index is stashed in c_arg (a void*, unused on the Python-callable path
      * since c_entry is NULL there); g_entry builds the PyLong lazily on the hub.
      * 0 = fn() (slab-cleared default). */
@@ -447,12 +447,12 @@ void runloom_sched_wake_safe(runloom_g_t *g);
 void runloom_g_incref(runloom_g_t *g);
 void runloom_g_decref(runloom_g_t *g);
 
-/* go_n bulk-arena batch teardown: called by an arena g's final decref instead
+/* fiber_n bulk-arena batch teardown: called by an arena g's final decref instead
  * of free()ing the g/coro/stack slices individually.  Decrements the batch's
  * live count; the LAST fiber to finish frees the g + coro arenas and
  * MADV_DONTNEEDs the stack block.  Defined in mn_sched_init_fini.c.inc. */
-struct runloom_gon_batch;
-void runloom_gon_batch_finish_one(struct runloom_gon_batch *b);
+struct runloom_fibern_batch;
+void runloom_fibern_batch_finish_one(struct runloom_fibern_batch *b);
 
 /* Acquire a reference ONLY if the g is still live (refcount > 0).  Returns
  * 1 on success (caller now owns a ref, must decref), 0 if the g is already

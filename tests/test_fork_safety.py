@@ -54,21 +54,21 @@ def run_child(child_fn, timeout=8.0):
 
 
 def spawn_mn_and_await_started(n, cap=5.0):
-    """Spawn `n` M:N goroutines that mark themselves started then sleep, and
+    """Spawn `n` M:N fibers that mark themselves started then sleep, and
     return only once all `n` have ACTUALLY begun running on the hubs.
 
-    The point of the goroutines is to have the M:N runtime genuinely ACTIVE
+    The point of the fibers is to have the M:N runtime genuinely ACTIVE
     (hubs dispatching/holding locks) when the caller forks -- that is the
     fork-while-hub-busy hazard reset_after_fork exists to clear.  A blind
     time.sleep() to "let them run" is load-dependent: under CPU load the hub
     threads may not be scheduled in the window, so the fork would capture a
     quiescent, un-dispatched runtime and the test would pass WITHOUT exercising
-    the hazard.  This handshake is deterministic instead: each goroutine writes
+    the hazard.  This handshake is deterministic instead: each fiber writes
     its own slot (single writer per index -> race-free with the GIL off) and we
     block until every slot is set.  The cap only bounds a hang; the happy path
     returns in ~1 ms.
     """
-    started = bytearray(n)            # one slot per goroutine, single writer each
+    started = bytearray(n)            # one slot per fiber, single writer each
 
     def make(i):
         def g():
@@ -77,14 +77,14 @@ def spawn_mn_and_await_started(n, cap=5.0):
         return g
 
     for i in range(n):
-        runloom_c.mn_go(make(i))
+        runloom_c.mn_fiber(make(i))
 
     deadline = time.monotonic() + cap
     while sum(started) < n and time.monotonic() < deadline:
         time.sleep(0.0005)
     if sum(started) < n:
         raise AssertionError(
-            "only %d/%d M:N goroutines started within %.1fs" % (sum(started), n, cap))
+            "only %d/%d M:N fibers started within %.1fs" % (sum(started), n, cap))
 
 
 class TestSingleThreadChild(unittest.TestCase):
@@ -100,7 +100,7 @@ class TestSingleThreadChild(unittest.TestCase):
             def w():
                 out.append(1)
             for _ in range(4):
-                runloom.go(w)
+                runloom.fiber(w)
             runloom.run(1)
             return 0 if len(out) == 4 else 3
 
@@ -115,7 +115,7 @@ class TestAioChildAfterMNParent(unittest.TestCase):
 
         runloom_c.mn_init(4)
         try:
-            # Deterministic: fork only once the 8 goroutines are actually
+            # Deterministic: fork only once the 8 fibers are actually
             # running on the hubs (not a load-dependent time.sleep guess).
             spawn_mn_and_await_started(8)
 
@@ -137,7 +137,7 @@ class TestAioChildAfterMNParent(unittest.TestCase):
         # mn_run returns immediately instead of waiting on hubs that don't exist.
         runloom_c.mn_init(4)
         try:
-            # Deterministic: fork only once the 8 goroutines are actually
+            # Deterministic: fork only once the 8 fibers are actually
             # running on the hubs (not a load-dependent time.sleep guess).
             spawn_mn_and_await_started(8)
 
@@ -188,7 +188,7 @@ class TestForkUnderLoad(unittest.TestCase):
         def churn():
             while not stop[0]:
                 for _ in range(40):
-                    runloom_c.mn_go(lambda: None)
+                    runloom_c.mn_fiber(lambda: None)
                 time.sleep(0.001)
 
         t = threading.Thread(target=churn, daemon=True)
@@ -219,7 +219,7 @@ class TestIntrospectionInChild(unittest.TestCase):
                 runloom.sleep(0.02)
             def main():
                 for _ in range(3):
-                    runloom.go(w)
+                    runloom.fiber(w)
                 runloom.sleep(0.005)
                 out.append(runloom_c.fiber_count())
             runloom.run(1, main)

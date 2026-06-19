@@ -50,7 +50,7 @@ def mode_fileread():
         finally:
             os.close(fd)
 
-    runloom_c.go(worker)
+    runloom_c.fiber(worker)
     runloom_c.run()
     os.unlink(path)
     if "errno" in out:
@@ -76,7 +76,7 @@ def mode_badfd():
         except OSError as e:
             out["errno"] = e.errno
 
-    runloom_c.go(worker)
+    runloom_c.fiber(worker)
     runloom_c.run()
     if out.get("unexpected"):
         print("FAIL read on closed fd did not error")

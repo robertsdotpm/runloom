@@ -98,7 +98,7 @@ class TestMachineCodeExec(unittest.TestCase):
             box.append(fn(12))
             fn.close()
 
-        runloom_c.go(g)
+        runloom_c.fiber(g)
         runloom_c.run()
         self.assertEqual(box, [144])
 
@@ -115,7 +115,7 @@ class TestMachineCodeExec(unittest.TestCase):
 
         def main():
             for n in range(N):
-                runloom_c.mn_go(lambda n=n: worker(n))
+                runloom_c.mn_fiber(lambda n=n: worker(n))
             got = {}
             for _ in range(N):
                 (n, sq), ok = ch.recv()    # Chan.recv() -> (value, ok)
@@ -123,7 +123,7 @@ class TestMachineCodeExec(unittest.TestCase):
             box["r"] = got
 
         runloom_c.mn_init(2)
-        runloom_c.mn_go(main)
+        runloom_c.mn_fiber(main)
         runloom_c.mn_run()
         runloom_c.mn_fini()
         self.assertEqual(box["r"], {n: n * n for n in range(N)})

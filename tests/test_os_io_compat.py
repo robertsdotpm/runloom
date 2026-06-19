@@ -28,7 +28,7 @@ def _drive(fn):
         except BaseException as e:   # noqa: BLE001
             box[1] = e
 
-    runloom_c.go(runner)
+    runloom_c.fiber(runner)
     runloom_c.run()
     if box[1] is not None:
         raise box[1]
@@ -77,8 +77,8 @@ class TestVectoredIO(unittest.TestCase):
                     runloom.sleep(0.004)        # ~24 ms before data lands
                 os.writev(w, [b"AB", b"CD"])
 
-            runloom_c.go(ticker)
-            runloom_c.go(sender)
+            runloom_c.fiber(ticker)
+            runloom_c.fiber(sender)
             bufs = [bytearray(2), bytearray(2)]
             n = os.readv(r, bufs)            # blocks until the sender writes
             stop["v"] = True
@@ -127,7 +127,7 @@ class TestOffload(unittest.TestCase):
                     ticks.append(1)
                     runloom.sleep(0.003)
 
-            runloom_c.go(ticker)
+            runloom_c.fiber(ticker)
             val = runloom.monkey.offload(slow_double, 21)
             stop["v"] = True
             return val, len(ticks)

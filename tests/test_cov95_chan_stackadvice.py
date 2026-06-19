@@ -95,11 +95,11 @@ def test_select_recv_parks_then_woken_by_send():
                 rc.sched_yield()
             ch.send("payload")
 
-        rc.go(chooser)
-        rc.go(sender)
+        rc.fiber(chooser)
+        rc.fiber(sender)
 
     with hang_guard(20, "recv parks then woken"):
-        rc.go(main)
+        rc.fiber(main)
         rc.run()
 
     assert res["r"] == (0, "payload", True), res
@@ -125,11 +125,11 @@ def test_select_send_parks_then_taken_by_recv():
                 rc.sched_yield()
             res["recv"] = ch.recv()
 
-        rc.go(chooser)
-        rc.go(receiver)
+        rc.fiber(chooser)
+        rc.fiber(receiver)
 
     with hang_guard(20, "send parks then taken"):
-        rc.go(main)
+        rc.fiber(main)
         rc.run()
 
     # SEND case fired (index 0), payload is None (Go: send case yields no value)
@@ -158,11 +158,11 @@ def test_select_recv_parks_then_channel_closed_returns_ok_false():
                 rc.sched_yield()
             ch.close()
 
-        rc.go(chooser)
-        rc.go(closer)
+        rc.fiber(chooser)
+        rc.fiber(closer)
 
     with hang_guard(20, "recv parks then closed"):
-        rc.go(main)
+        rc.fiber(main)
         rc.run()
 
     # closed + empty -> the Go `v, ok := <-ch` close idiom: (None, False)
@@ -191,11 +191,11 @@ def test_select_send_parks_then_channel_closed_raises():
                 rc.sched_yield()
             ch.close()
 
-        rc.go(chooser)
-        rc.go(closer)
+        rc.fiber(chooser)
+        rc.fiber(closer)
 
     with hang_guard(20, "send parks then closed"):
-        rc.go(main)
+        rc.fiber(main)
         rc.run()
 
     assert res["r"] == "select send on closed channel", res
@@ -230,11 +230,11 @@ def test_select_multicase_nonfiring_send_value_dropped():
                 rc.sched_yield()
             b.send("delivered")   # makes case 1 (RECV) fire
 
-        rc.go(chooser)
-        rc.go(feeder)
+        rc.fiber(chooser)
+        rc.fiber(feeder)
 
     with hang_guard(20, "multicase nonfiring send"):
-        rc.go(main)
+        rc.fiber(main)
         rc.run()
 
     # the RECV case (index 1) won, with its delivered value

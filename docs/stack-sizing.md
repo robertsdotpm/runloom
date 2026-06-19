@@ -29,7 +29,7 @@ Under M:N scheduling (`run(n)` with `n > 1`) runloom **learns each function's
 real stack need and reserves only that** -- automatically, no setup. This is the
 function-bound *grow-down*, and it is **on by default**.
 
-The first time you `runloom.go(fn)` a function, its fiber starts at the safe
+The first time you `runloom.fiber(fn)` a function, its fiber starts at the safe
 default stack (a "cold start" -- a size the function is known to complete on),
 measures its real C-stack high-water mark on return, and writes a derived size
 back onto the function itself (`fn.__dict__["runloom_stack"]` -- the function
@@ -57,7 +57,7 @@ runloom.grow_down_enabled()      # -> current state
 ```
 
 or set `RUNLOOM_GROW_DOWN=0` in the environment before `import runloom`. A
-per-call `runloom.go(fn, stack_size=N)` pin always wins regardless -- use it to
+per-call `runloom.fiber(fn, stack_size=N)` pin always wins regardless -- use it to
 opt a single function out and choose its exact size. The grow-down also steps
 aside automatically when you explicitly enable the opt-in C auto-sizer
 ([below](#letting-runloom-size-them-for-you)) -- the sizer you turned on by hand
@@ -70,9 +70,9 @@ margin) where grow-down would measure-and-shrink.
   default -- there the per-spawn learning is pure overhead (a tight spawn loop
   runs nothing until it finishes, so the sampler can't amortise) and the memory
   win, which only pays off at scale, isn't on the table.
-- **Per `runloom.go()`-spawned function.** Goroutines spawned through the raw C
+- **Per `runloom.fiber()`-spawned function.** Goroutines spawned through the raw C
   entry points (`runloom_c.mn_go`) use the plain default; the learning lives in
-  the friendly `runloom.go()` wrapper. Arg-bearing `runloom.go(fn, x)` binds the
+  the friendly `runloom.fiber()` wrapper. Arg-bearing `runloom.fiber(fn, x)` binds the
   size to `fn` (shared across all its arg variants), not the per-call wrapper.
 
 ## Why fibers have stacks at all
@@ -225,10 +225,10 @@ child starts with none).
 import runloom
 
 # Goroutine known to recurse deeply or call into a heavy C extension:
-runloom.go(deep_handler, stack_size=512 * 1024)
+runloom.fiber(deep_handler, stack_size=512 * 1024)
 
 # Pure-compute callable that you've confirmed fits in 8 KB:
-runloom.go(tight_loop,  stack_size=8 * 1024)
+runloom.fiber(tight_loop,  stack_size=8 * 1024)
 ```
 
 The `stack_size=N` kwarg overrides the calibrated default for that
@@ -246,11 +246,11 @@ overrides the default and its floor, down to the 16 KB hard minimum):
 ```python
 import runloom
 
-# Before any runloom.go() call:
+# Before any runloom.fiber() call:
 runloom.set_stack_size(32 * 1024)
 
 # Subsequent fibers use exactly 32 KB:
-runloom.go(worker)
+runloom.fiber(worker)
 ```
 
 `set_stack_size` also **freezes** calibration (no further auto-tuning)
@@ -354,7 +354,7 @@ give it a bigger stack up front:
 ```python
 runloom.set_stack_size(128 * 1024)        # process-wide default floor
 # or just the suspicious fiber:
-runloom.go(work, stack_size=512 * 1024)
+runloom.fiber(work, stack_size=512 * 1024)
 ```
 
 So the 16 KB minimum is a *floor for the calibrator*, not a blanket "safe for
@@ -399,7 +399,7 @@ crash reporter stay the safety net. You read the advice and apply it yourself,
 e.g. give the `tight` kind a roomier stack:
 
 ```python
-runloom.go(handle_request, stack_size=128 * 1024)
+runloom.fiber(handle_request, stack_size=128 * 1024)
 ```
 
 Enabling the profiler keeps stack painting on (a small per-spawn cost) for the
@@ -429,7 +429,7 @@ is only a lower bound on what a *future* input might need (recursion depth is
 data-dependent), so writing it out would be a foot-gun across restarts and
 deploys -- the run that finally gets the deep input would load a too-small size.
 The guard page, on-demand growth, and the crash reporter remain the safety net
-for any underestimate. An explicit `runloom.go(fn, stack_size=...)` always wins
+for any underestimate. An explicit `runloom.fiber(fn, stack_size=...)` always wins
 over the auto-sizer. Off by default (it changes per-kind stack sizes); enable it
 before the runtime starts so kinds are sized from their first spawn.
 
@@ -479,9 +479,9 @@ protects the deep path it didn't happen to exercise this time (a small RSA sign
 now, a 4096-bit one later). Learn-down still right-sizes everything else; the
 floor only pins the classes whose depth is most likely to surprise you. To
 reclaim that memory anyway, pin the kind explicitly with
-`runloom.go(fn, stack_size=...)` -- an explicit size always wins, floor and all.
+`runloom.fiber(fn, stack_size=...)` -- an explicit size always wins, floor and all.
 
-> Arg-bearing spawns are keyed correctly too: `runloom.go(fn, x)` wraps `fn` in
+> Arg-bearing spawns are keyed correctly too: `runloom.fiber(fn, x)` wraps `fn` in
 > a binding lambda, but the auto-sizer follows `__wrapped__` to `fn`, so the
 > per-kind size and the prescan scan apply to *your* function, not the wrapper.
 > (Decorated functions with `functools.wraps` get the same treatment.)
@@ -531,7 +531,7 @@ runloom.set_stack_size(32 * 1024)        # whatever your dry-run found
 
 # Spawn workers
 for i in range(10000):
-    runloom.go(worker)
+    runloom.fiber(worker)
 
 runloom.run(1)
 

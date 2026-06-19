@@ -40,7 +40,7 @@ def test_fibers_run_after_prewarm():
         def w(i):
             done[i] = 1
         for i in range(400):
-            runloom.go(w, i)
+            runloom.fiber(w, i)
 
     runloom.run(8, main)
     assert sum(done) == 400

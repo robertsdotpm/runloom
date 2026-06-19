@@ -6,7 +6,7 @@
  * NOT change any stack size itself: the runtime never auto-redefines or
  * persists sizes (a remembered-small size is only ever a lower bound on what a
  * future input needs -- see docs).  You read the advice and apply it yourself
- * via runloom_c.go(fn, stack_size=...), with the guard page + crash reporter
+ * via runloom_c.fiber(fn, stack_size=...), with the guard page + crash reporter
  * still backstopping every guess.
  *
  * Off by default (zero cost).  Enabling it turns stack painting back on so the

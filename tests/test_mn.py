@@ -82,7 +82,7 @@ def mk(k):
     return w
 runloom_c.mn_init(4)
 for k in range(N):
-    runloom_c.mn_go(mk(k))
+    runloom_c.mn_fiber(mk(k))
 runloom_c.mn_run()
 runloom_c.mn_fini()
 assert len(results) == N, len(results)
@@ -110,8 +110,8 @@ def setter():
     flag[0] = True
 runloom_c.mn_init(4)
 for _ in range(8):          # 8 spinners monopolizing the hubs first ...
-    runloom_c.mn_go(waiter)
-runloom_c.mn_go(setter)     # ... then the never-run fiber they wait on
+    runloom_c.mn_fiber(waiter)
+runloom_c.mn_fiber(setter)     # ... then the never-run fiber they wait on
 runloom_c.mn_run()
 runloom_c.mn_fini()
 assert flag[0]
@@ -133,8 +133,8 @@ def waiter():
 def setter():
     flag[0] = True
 runloom_c.mn_init(1)
-runloom_c.mn_go(setter)     # fresh -> goes to the deque
-runloom_c.mn_go(waiter)     # popped first (deque LIFO); must yield to setter
+runloom_c.mn_fiber(setter)     # fresh -> goes to the deque
+runloom_c.mn_fiber(waiter)     # popped first (deque LIFO); must yield to setter
 runloom_c.mn_run()
 runloom_c.mn_fini()
 assert flag[0]
@@ -167,9 +167,9 @@ def fanin(nprod, ncons, per):
             c += 1; t += v
         res.send((c, t))
     runloom_c.mn_init(4)
-    for _ in range(ncons): runloom_c.mn_go(cons)
-    for p in range(nprod): runloom_c.mn_go(prod(p))
-    runloom_c.mn_go(closer)
+    for _ in range(ncons): runloom_c.mn_fiber(cons)
+    for p in range(nprod): runloom_c.mn_fiber(prod(p))
+    runloom_c.mn_fiber(closer)
     runloom_c.mn_run()
     tc = tt = 0
     for _ in range(ncons):
@@ -212,7 +212,7 @@ def pair(pid):
 runloom_c.mn_init(4)
 for pid in range(NPAIRS):
     pi, po = pair(pid)
-    runloom_c.mn_go(pi); runloom_c.mn_go(po)
+    runloom_c.mn_fiber(pi); runloom_c.mn_fiber(po)
 runloom_c.mn_run()
 got = 0
 for _ in range(NPAIRS):
@@ -235,7 +235,7 @@ def w():
     ch = runloom_c.Chan(1)
     ch.send(1); ch.recv()
 runloom_c.mn_init(3)
-for _ in range(500): runloom_c.mn_go(w)
+for _ in range(500): runloom_c.mn_fiber(w)
 runloom_c.mn_run()
 runloom_c.mn_fini()
 v = runloom_c._self_check(1)
@@ -305,9 +305,9 @@ def experiment(nhubs, nprod, ncons, nchan, per):
                 closed[live[idx]] = True
         res.send((got, total))
     runloom_c.mn_init(nhubs)
-    for _ in range(ncons): runloom_c.mn_go(consumer)
-    for p in range(nprod):  runloom_c.mn_go(producer(p))
-    runloom_c.mn_go(closer)
+    for _ in range(ncons): runloom_c.mn_fiber(consumer)
+    for p in range(nprod):  runloom_c.mn_fiber(producer(p))
+    runloom_c.mn_fiber(closer)
     runloom_c.mn_run()
     rc = rt = 0
     for _ in range(ncons):
@@ -371,9 +371,9 @@ def run_once(nrelay, n):
             c += 1; t += v
         res.send((c, t))
     runloom_c.mn_init(3)
-    runloom_c.mn_go(consumer)
-    runloom_c.mn_go(relay(src, dst))
-    runloom_c.mn_go(producer)
+    runloom_c.mn_fiber(consumer)
+    runloom_c.mn_fiber(relay(src, dst))
+    runloom_c.mn_fiber(producer)
     runloom_c.mn_run()
     g = res.try_recv()
     runloom_c.mn_fini()
@@ -428,9 +428,9 @@ def experiment(it):
                 closed[live[idx]] = True
         res.send(c)
     runloom_c.mn_init(3)
-    for _ in range(ncons): runloom_c.mn_go(cons)
-    for p in range(3): runloom_c.mn_go(prod(p))
-    runloom_c.mn_go(closer)
+    for _ in range(ncons): runloom_c.mn_fiber(cons)
+    for p in range(3): runloom_c.mn_fiber(prod(p))
+    runloom_c.mn_fiber(closer)
     runloom_c.mn_run()
     runloom_c.mn_fini()
     assert runloom_c._self_check(0) == 0

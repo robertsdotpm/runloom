@@ -40,7 +40,7 @@ def test_untimed_event_waiters_are_fd_free():
             woke[i] = 1
 
         for i in range(300):
-            runloom.go(waiter, i)
+            runloom.fiber(waiter, i)
         runloom.sleep(0.15)              # all 300 parked in memory
         parked = _count_fds()
         ev.set()
@@ -68,7 +68,7 @@ def test_event_foreign_thread_setter_wakes_inmem_waiter():
                 ev.wait()
                 done[0] = 1
 
-            runloom.go(waiter)
+            runloom.fiber(waiter)
             # Event is sticky: a set() that beats the park is NOT lost (the
             # wake_pending handshake, proven by test_event_wake_before_park),
             # so no pre-set sleep is needed to "park first".
@@ -101,7 +101,7 @@ def test_event_wake_before_park():
                 ev.wait()
                 done[0] = 1
 
-            runloom.go(waiter)
+            runloom.fiber(waiter)
             ev.set()                                # races the park commit
             for _ in range(200):
                 if done[0]:
@@ -124,7 +124,7 @@ def test_timed_and_condition_and_semaphore_still_work():
         got = []
         # Sticky Event: set() before the timed park is not lost.  Set, then poll
         # for the result instead of a fixed sleep a loaded scheduler can outrun.
-        runloom.go(lambda: got.append(ev.wait(2.0)))
+        runloom.fiber(lambda: got.append(ev.wait(2.0)))
         ev.set()
         i = 0
         while not got and i < 1000000:
@@ -142,7 +142,7 @@ def test_timed_and_condition_and_semaphore_still_work():
                 cond.wait()            # atomically releases cond as it parks
             cwoke[0] = 1
 
-        runloom.go(cw)
+        runloom.fiber(cw)
         # Condition has NO sticky pending state (unlike Event/Semaphore): a
         # notify that beats the park is LOST and the waiter hangs forever.
         # Deterministic park-before-notify handshake: wait for the waiter to be
@@ -164,7 +164,7 @@ def test_timed_and_condition_and_semaphore_still_work():
         swoke = bytearray(1)
         # Sticky counter: release() before acquire() parks is not lost (the
         # token is banked).  Release, then poll for the result.
-        runloom.go(lambda: (sem.acquire(), swoke.__setitem__(0, 1)))
+        runloom.fiber(lambda: (sem.acquire(), swoke.__setitem__(0, 1)))
         sem.release()
         i = 0
         while not swoke[0] and i < 1000000:
@@ -191,7 +191,7 @@ def test_timed_event_waiters_are_fd_free():
             done[i] = 1 if evs[i].wait(0.12) else 0   # 0 == timed out (expected)
 
         for i in range(150):
-            runloom.go(waiter, i)
+            runloom.fiber(waiter, i)
         runloom.sleep(0.05)
         out["delta"] = _count_fds() - before          # while all parked, timed
         runloom.sleep(0.15)                            # let them time out
@@ -210,7 +210,7 @@ def test_timed_wait_woken_before_deadline():
         got = []
         # Sticky Event + a 5s deadline: set() always wins the wake (never lost,
         # never a timeout), even if it beats the park.  Poll for the result.
-        runloom.go(lambda: got.append(ev.wait(5.0)))
+        runloom.fiber(lambda: got.append(ev.wait(5.0)))
         ev.set()
         i = 0
         while not got and i < 1000000:
@@ -243,7 +243,7 @@ def test_timed_wake_vs_timeout_exactly_once():
                 box["rd"] = (r, time.monotonic() - t0)   # single atomic write (no
                 resumes[i] += 1                          # torn read of r vs dt)
 
-            runloom.go(waiter)
+            runloom.fiber(waiter)
             runloom.sleep(dl * (0.5 + (i % 7) / 7.0))
             ev.set()
             # Wait for the waiter to actually resume before classifying.  A woken
@@ -294,7 +294,7 @@ def test_condition_timeout_does_not_steal_a_later_notify():
                 waiting[0] = 1                 # inside the cond block, holds it
                 woke.append(cond.wait(2.0))    # releases cond as it parks
 
-        runloom.go(w)
+        runloom.fiber(w)
         # Condition notify has no sticky pending state: a notify that beats the
         # park is LOST.  Deterministic park-before-notify handshake -- wait for
         # the waiter to enter the cond block, then take the cond lock, which it

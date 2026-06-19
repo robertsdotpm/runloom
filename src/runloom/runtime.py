@@ -29,9 +29,9 @@ _prewarmed = False
 # function IS the database row".
 #
 # Active under M:N (run(n>1)) only; single-thread run(1) keeps the fixed default
-# (see the dispatch in go() for why).
+# (see the dispatch in fiber() for why).
 #
-# On the first runloom.go(fn, ...) spawn we let the C side use the default
+# On the first runloom.fiber(fn, ...) spawn we let the C side use the default
 # stack (a "cold start" we know is safe -- the function completes on it).  The
 # fiber measures its real C-stack high-water-mark on return (page-granular,
 # paint-free via mincore) and writes a derived, smaller size back onto fn's
@@ -53,7 +53,7 @@ _prewarmed = False
 # The one residual risk -- an input deeper than every sampled run, hitting the
 # now-smaller stack -- lands on the PROT_NONE guard page as a clean crash (a
 # classified overflow, never silent corruption), and re-learns next process.
-# Pin an exact size with runloom.go(fn, stack_size=N) to opt a function out
+# Pin an exact size with runloom.fiber(fn, stack_size=N) to opt a function out
 # entirely; disable globally with RUNLOOM_GROW_DOWN=0 or set_grow_down(False).
 #
 # Free-threaded note: the learned size lives in a 2-element list on fn.__dict__,
@@ -76,7 +76,7 @@ def set_grow_down(enabled=True):
     """Enable/disable the function-bound stack grow-down auto-sizer.
 
     On by default, and active under M:N scheduling (run(n>1)) only -- single-
-    thread run(1) always uses the fixed default stack.  When off, runloom.go()
+    thread run(1) always uses the fixed default stack.  When off, runloom.fiber()
     reserves the fixed default stack for every fiber (no per-function
     learning).  Also settable at import via the RUNLOOM_GROW_DOWN=0 environment
     variable.  Per-call ``stack_size=`` pins always win regardless of this
@@ -224,7 +224,7 @@ class Goroutine(object):
 
     @property
     def exception(self):
-        # Unhandled exception that escaped the goroutine body, or None.  Also
+        # Unhandled exception that escaped the fiber body, or None.  Also
         # reported via the unraisable hook at completion unless
         # RUNLOOM_GOROUTINE_PANIC=silent.
         return self._g.exception
@@ -240,7 +240,7 @@ class Goroutine(object):
         return "<Goroutine {0} done={1}>".format(self.name, self.done)
 
 
-def go(callable_, *args, **kwargs):
+def fiber(callable_, *args, **kwargs):
     """Spawn a fiber.  Mirrors Go's `go fn(a, b)`: schedules
     fn(*args, **kwargs) to run cooperatively and returns immediately.
 
@@ -255,7 +255,7 @@ def go(callable_, *args, **kwargs):
         run-to-completion with no join handle, so this returns None.
 
     The dispatch uses runloom_c.mn_hub_count() rather than a mode flag, so a
-    go() called from anywhere -- inside a hub fiber or from the main
+    fiber() called from anywhere -- inside a hub fiber or from the main
     thread while hubs run -- routes correctly (mn_go round-robins a non-hub
     caller).  Spawning via the plain scheduler inside a hub would skip the
     M:N pending-counter accounting that mn_run() joins on, so this dispatch
@@ -272,7 +272,7 @@ def go(callable_, *args, **kwargs):
         target.__name__ = name
         # The C auto-sizer keys a fiber's "kind" (and its crypto/fat-frame
         # prescan) on the callable's code identity.  Without this, every
-        # arg-bearing go() would look like the SAME kind -- this wrapper lambda
+        # arg-bearing fiber() would look like the SAME kind -- this wrapper lambda
         # -- so they'd share one stack size and the prescan would scan the
         # wrapper, not the target.  __wrapped__ points the auto-sizer at the
         # real function (runloom_advice_unwrap follows it).
@@ -302,9 +302,9 @@ def go(callable_, *args, **kwargs):
             and not runloom_c.stack_autosize_enabled()):
         stack_size, target = grow_down_prepare(callable_, target)
     if mn > 0:
-        runloom_c.mn_go(target, stack_size)
+        runloom_c.mn_fiber(target, stack_size)
         return None
-    g = runloom_c.go(target, stack_size)
+    g = runloom_c.fiber(target, stack_size)
     return Goroutine(g, name=name)
 
 
@@ -368,12 +368,12 @@ def run(n, main_fn=None):
                        build (CPython 3.13t, PYTHON_GIL=0); n > 1 with the GIL on
                        raises rather than silently running serial.
         run(n)         main_fn omitted -> just drain fibers you've already
-                       go()'d (n == 1 is the common drain-only case).
+                       fiber()'d (n == 1 is the common drain-only case).
 
     n is required and explicit: M:N is a different correctness model (fibers
     execute Python in parallel, so shared state can race), opted into by typing
     the number -- never by accident or by which interpreter is free-threaded.
-    main_fn, when given, is the root fiber and may go() more (those dispatch
+    main_fn, when given, is the root fiber and may fiber() more (those dispatch
     to the hubs automatically).  Collapses the raw mn_init / mn_go / mn_run /
     mn_fini envelope.  Returns the number of fibers completed.
     """
@@ -398,7 +398,7 @@ def run(n, main_fn=None):
         raise RuntimeError(
             "run(n={0}) called while an M:N runtime is already active -- "
             "run(n>1) cannot be nested inside a running hub.  Spawn more work "
-            "with go()/mn_go() instead of starting a second M:N world.".format(n))
+            "with fiber()/mn_fiber() instead of starting a second M:N world.".format(n))
     if gil_enabled():
         raise RuntimeError(
             "run(n={0}) needs free-threaded CPython with the GIL off "
@@ -412,7 +412,7 @@ def run(n, main_fn=None):
     runloom_c.mn_init(n)
     try:
         if main_fn is not None:
-            runloom_c.mn_go(main_fn)
+            runloom_c.mn_fiber(main_fn)
         return runloom_c.mn_run()
     finally:
         runloom_c.mn_fini()

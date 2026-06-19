@@ -1,6 +1,6 @@
 """Fan-in — many producers, one consumer, one channel.
 
-Several producer goroutines write into the same channel; a single
+Several producer fibers write into the same channel; a single
 consumer multiplexes their output.  The channel does the merging for
 you — no locks, no shared list.
 
@@ -12,7 +12,7 @@ import os
 
 import runloom
 
-# Free-threaded build: fan goroutines across all cores (M:N scheduler).
+# Free-threaded build: fan fibers across all cores (M:N scheduler).
 HUBS = os.cpu_count() or 4
 
 NUM_PRODUCERS = 4
@@ -25,7 +25,7 @@ def producer(pid, out):
 def main():
     merged = runloom.Chan(16)
     for pid in range(NUM_PRODUCERS):
-        runloom.go(producer, pid, merged)
+        runloom.fiber(producer, pid, merged)
 
     for _ in range(NUM_PRODUCERS * ITEMS_EACH):
         pid, item = merged.recv()[0]

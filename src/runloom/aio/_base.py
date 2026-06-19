@@ -1,5 +1,5 @@
 """Shared foundation for the runloom asyncio bridge: stdlib re-exports,
-_go_io (roomy-stack fiber spawn), module-root capture, blocking
+_fiber_io (roomy-stack fiber spawn), module-root capture, blocking
 helpers, cooperative _wait_fd, the lazy CoLock, and the current-task
 registry.  Every submodule does `from ._base import *`."""
 
@@ -72,7 +72,7 @@ except ValueError:
     _IO_STACK = _TASK_STACK or 512 * 1024
 
 
-def _go_io(fn):
+def _fiber_io(fn):
     """Spawn a fiber that synchronously runs user protocol callbacks,
     on the roomier _IO_STACK (falls back to the scheduler default if disabled).
 
@@ -82,8 +82,8 @@ def _go_io(fn):
     guarantees them call_soon-FIFO, so permuting them is a false positive, not a
     bug.  No effect when PCT is off; PCT still freely interleaves raw fibers."""
     if _IO_STACK:
-        return runloom_c.go(fn, stack_size=_IO_STACK, fifo=True)
-    return runloom_c.go(fn, fifo=True)
+        return runloom_c.fiber(fn, stack_size=_IO_STACK, fifo=True)
+    return runloom_c.fiber(fn, fifo=True)
 
 
 # ------------------------------------------------------------------
@@ -107,7 +107,7 @@ def _go_io(fn):
 # f_back link to the spawner (that would dangle the moment the spawner's
 # stack is swapped away or returns, and would be a lie -- the spawner is
 # concurrent, not on the fiber's call stack).  Only task-driver
-# fibers are wrapped; raw runloom_c.go() fibers (netpoll pump,
+# fibers are wrapped; raw runloom_c.fiber() fibers (netpoll pump,
 # keepalive, timers) are untouched, so the per-fiber cost stays off the
 # scale-out path.  Disable with RUNLOOM_AIO_MODULE_ROOT=0.
 _PG_MODULE_ROOT_ON = _os.environ.get("RUNLOOM_AIO_MODULE_ROOT", "1") != "0"
@@ -149,8 +149,8 @@ def _pg_run_with_module_root(body, module_name):
 # only its own sched, never the others'.  No single-driver election, no global
 # bootstrap queue: each loop just drives itself.
 #
-# The only cross-thread rule: runloom_c.go() (create_task/call_soon/call_later/
-# keepalive) must run on the LOOP'S thread -- a foreign thread's go() would land
+# The only cross-thread rule: runloom_c.fiber() (create_task/call_soon/call_later/
+# keepalive) must run on the LOOP'S thread -- a foreign thread's fiber() would land
 # on ITS thread's sched, which this loop never drains.  So a foreign-thread
 # spawn is marshalled onto the loop's thread via call_soon_threadsafe (the
 # loop's lock-guarded ts queue, drained by its keepalive on its own thread).

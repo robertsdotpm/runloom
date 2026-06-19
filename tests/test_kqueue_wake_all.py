@@ -95,7 +95,7 @@ def _drive(*fibers):
         return runner
 
     for g in fibers:
-        runloom_c.go(wrap(g))
+        runloom_c.fiber(wrap(g))
     runloom_c.run()
     if box:
         raise box[0]
@@ -266,7 +266,7 @@ def test_wake_all_same_fd_mn(hubs, n):
                 woke[i] = 1
 
         for i in range(n):
-            runloom.go(reader, i)
+            runloom.fiber(reader, i)
         runloom.sleep(0.2)              # let all N park (spread across hubs)
         b.send(b"x")                    # ONE write -> all N must wake
         runloom.sleep(0.4)             # give every hub time to drain + resume
@@ -301,7 +301,7 @@ def test_wake_all_pipe_readers_mn(hubs):
                 woke[i] = 1
 
         for i in range(n):
-            runloom.go(reader, i)
+            runloom.fiber(reader, i)
         runloom.sleep(0.2)
         os.write(wfd, b"\x01")
         runloom.sleep(0.4)
@@ -337,7 +337,7 @@ def test_wake_all_mixed_directions_mn(hubs):
 
         for i in range(n):
             ev = WRITE if (i % 2 == 0) else READ
-            runloom.go(waiter, i, ev)
+            runloom.fiber(waiter, i, ev)
         runloom.sleep(0.2)
         b.send(b"hello")               # make a readable too
         runloom.sleep(0.5)
@@ -450,9 +450,9 @@ def test_wake_all_rearm_storm_mn(hubs):
             if r == READ:
                 sib_wakes[i] = 1
 
-        runloom.go(looper)
+        runloom.fiber(looper)
         for i in range(sibling_n):
-            runloom.go(sibling, i)
+            runloom.fiber(sibling, i)
         runloom.sleep(0.2)             # everyone parked across hubs
         for _ in range(rounds):
             b.send(b"x")

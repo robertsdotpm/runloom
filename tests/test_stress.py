@@ -43,7 +43,7 @@ class TestSchedulerStress(unittest.TestCase):
         fiber slab / stack pool leaks."""
         for batch in range(10):
             for _ in range(10_000):
-                runloom_c.go(lambda: None)
+                runloom_c.fiber(lambda: None)
             runloom_c.run()
         gc.collect()
         stats = runloom_c.stats()
@@ -66,7 +66,7 @@ class TestSchedulerStress(unittest.TestCase):
             for _ in range(100_000):
                 counter[0] += 1
                 runloom_c.sched_yield_classic()
-        runloom_c.go(w)
+        runloom_c.fiber(w)
         runloom_c.run()
         self.assertEqual(counter[0], 100_000)
 
@@ -80,7 +80,7 @@ class TestSchedulerStress(unittest.TestCase):
                 counters[i] += 1
                 runloom_c.sched_yield_classic()
         for i in range(N):
-            runloom_c.go(lambda i=i: w(i))
+            runloom_c.fiber(lambda i=i: w(i))
         runloom_c.run()
         self.assertEqual(sum(counters), N * K)
         self.assertTrue(all(c == K for c in counters))
@@ -95,7 +95,7 @@ class TestSchedulerStress(unittest.TestCase):
             runloom_c.sched_sleep(0.001 + i * 0.00001)
             wakes[i] = time.monotonic() - t0
         for i in range(N):
-            runloom_c.go(lambda i=i: w(i))
+            runloom_c.fiber(lambda i=i: w(i))
         runloom_c.run()
         # Every sleep completed.
         self.assertTrue(all(w is not None for w in wakes))
@@ -124,8 +124,8 @@ class TestChannelStress(unittest.TestCase):
             for _ in range(N):
                 ch_a.recv()
                 ch_b.send(1)
-        runloom_c.go(pinger)
-        runloom_c.go(ponger)
+        runloom_c.fiber(pinger)
+        runloom_c.fiber(ponger)
         t0 = time.monotonic()
         runloom_c.run()
         elapsed = time.monotonic() - t0
@@ -149,8 +149,8 @@ class TestChannelStress(unittest.TestCase):
                 results.append(ch.recv())
 
         for p in range(N):
-            runloom_c.go(lambda p=p: producer(p))
-        runloom_c.go(consumer)
+            runloom_c.fiber(lambda p=p: producer(p))
+        runloom_c.fiber(consumer)
         runloom_c.run()
 
         self.assertEqual(len(results), N * K)
@@ -177,9 +177,9 @@ class TestChannelStress(unittest.TestCase):
             for _v in ch:
                 per_consumer[idx] += 1
 
-        runloom_c.go(producer)
+        runloom_c.fiber(producer)
         for i in range(N):
-            runloom_c.go(lambda i=i: consumer(i))
+            runloom_c.fiber(lambda i=i: consumer(i))
         runloom_c.run()
 
         self.assertEqual(sum(per_consumer), N * K)
@@ -208,10 +208,10 @@ class TestChannelStress(unittest.TestCase):
             for i in range(K):
                 ch.send((key, i))
 
-        runloom_c.go(selector)
-        runloom_c.go(lambda: feeder(ch_a, "a"))
-        runloom_c.go(lambda: feeder(ch_b, "b"))
-        runloom_c.go(lambda: ch_done.recv())
+        runloom_c.fiber(selector)
+        runloom_c.fiber(lambda: feeder(ch_a, "a"))
+        runloom_c.fiber(lambda: feeder(ch_b, "b"))
+        runloom_c.fiber(lambda: ch_done.recv())
         runloom_c.run()
 
         self.assertEqual(counts["a"], K)
@@ -226,14 +226,14 @@ class TestMemorySoak(unittest.TestCase):
     def test_no_leak_spawn_drain(self):
         """1M spawn/drain cycles, measure RSS growth post-warmup."""
         for _ in range(10_000):
-            runloom_c.go(lambda: None)
+            runloom_c.fiber(lambda: None)
         runloom_c.run()
         gc.collect()
         baseline = _rss_mb()
 
         for _ in range(99):
             for _ in range(10_000):
-                runloom_c.go(lambda: None)
+                runloom_c.fiber(lambda: None)
             runloom_c.run()
 
         gc.collect()
@@ -267,8 +267,8 @@ class TestMemorySoak(unittest.TestCase):
             for _ in range(N): ch_a.send(1); ch_b.recv()
         def ponger(N):
             for _ in range(N): ch_a.recv(); ch_b.send(1)
-        runloom_c.go(lambda: pinger(10_000))
-        runloom_c.go(lambda: ponger(10_000))
+        runloom_c.fiber(lambda: pinger(10_000))
+        runloom_c.fiber(lambda: ponger(10_000))
         runloom_c.run()
         gc.collect()
         baseline = _rss_mb()
@@ -276,8 +276,8 @@ class TestMemorySoak(unittest.TestCase):
         for _ in range(50):
             ch_a = runloom_c.Chan(0)
             ch_b = runloom_c.Chan(0)
-            runloom_c.go(lambda: pinger(10_000))
-            runloom_c.go(lambda: ponger(10_000))
+            runloom_c.fiber(lambda: pinger(10_000))
+            runloom_c.fiber(lambda: ponger(10_000))
             runloom_c.run()
         gc.collect()
         growth = _rss_mb() - baseline

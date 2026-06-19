@@ -35,7 +35,7 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 def _run(*fibers):
     for g in fibers:
-        runloom_c.go(g)
+        runloom_c.fiber(g)
     runloom_c.run()
 
 
@@ -259,9 +259,9 @@ def once(it):
             last[pid] = s; c += 1
         res.send((c, bad))
     runloom_c.mn_init(4)
-    for _ in range(ncons): runloom_c.mn_go(cons)
-    for p in range(nprod): runloom_c.mn_go(prod(p))
-    runloom_c.mn_go(closer)
+    for _ in range(ncons): runloom_c.mn_fiber(cons)
+    for p in range(nprod): runloom_c.mn_fiber(prod(p))
+    runloom_c.mn_fiber(closer)
     runloom_c.mn_run()
     tot_c = tot_bad = 0
     for _ in range(ncons):

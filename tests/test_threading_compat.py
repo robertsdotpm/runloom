@@ -31,7 +31,7 @@ def _drive(fn):
         except BaseException as e:   # noqa: BLE001
             box[1] = e
 
-    runloom_c.go(runner)
+    runloom_c.fiber(runner)
     runloom_c.run()
     if box[1] is not None:
         raise box[1]
@@ -88,7 +88,7 @@ class TestLock(unittest.TestCase):
                     log.append((name, "out"))
 
             for n in "ABCD":
-                runloom_c.go(lambda n=n: worker(n))
+                runloom_c.fiber(lambda n=n: worker(n))
             t0 = time.monotonic()
             while len(log) < 8 and time.monotonic() - t0 < 5:
                 runloom.sleep(0.005)
@@ -117,7 +117,7 @@ class TestLock(unittest.TestCase):
                         state["n"] = v + 1
 
             for _ in range(N):
-                runloom_c.go(bump)
+                runloom_c.fiber(bump)
             t0 = time.monotonic()
             while state["n"] < N * M and time.monotonic() - t0 < 10:
                 runloom.sleep(0.005)
@@ -157,8 +157,8 @@ class TestRLock(unittest.TestCase):
                 with rl:                          # now block until A frees
                     log.append("B-in")
 
-            runloom_c.go(a)
-            runloom_c.go(b)
+            runloom_c.fiber(a)
+            runloom_c.fiber(b)
             t0 = time.monotonic()
             while "B-in" not in log and time.monotonic() - t0 < 5:
                 runloom.sleep(0.005)
@@ -210,13 +210,13 @@ class TestEvent(unittest.TestCase):
                 woke.append(i)
 
             for i in range(3):
-                runloom_c.go(lambda i=i: waiter(i))
+                runloom_c.fiber(lambda i=i: waiter(i))
 
             def setter():
                 runloom.sleep(0.02)
                 ev.set()
 
-            runloom_c.go(setter)
+            runloom_c.fiber(setter)
             t0 = time.monotonic()
             while len(woke) < 3 and time.monotonic() - t0 < 5:
                 runloom.sleep(0.005)
@@ -256,7 +256,7 @@ class TestCondition(unittest.TestCase):
                     woke.append(i)
 
             for i in range(2):
-                runloom_c.go(lambda i=i: waiter(i))
+                runloom_c.fiber(lambda i=i: waiter(i))
 
             def notifier():
                 runloom.sleep(0.02)
@@ -266,7 +266,7 @@ class TestCondition(unittest.TestCase):
                 with cv:
                     cv.notify(1)            # then the other
 
-            runloom_c.go(notifier)
+            runloom_c.fiber(notifier)
             t0 = time.monotonic()
             while len(woke) < 2 and time.monotonic() - t0 < 5:
                 runloom.sleep(0.005)
@@ -291,8 +291,8 @@ class TestCondition(unittest.TestCase):
                     state["ready"] = True
                     cv.notify_all()
 
-            runloom_c.go(waiter)
-            runloom_c.go(setter)
+            runloom_c.fiber(waiter)
+            runloom_c.fiber(setter)
             t0 = time.monotonic()
             while not got and time.monotonic() - t0 < 5:
                 runloom.sleep(0.005)
@@ -330,8 +330,8 @@ class TestCondition(unittest.TestCase):
                         consumed.append(buf.pop(0))
                         cv.notify()
 
-            runloom_c.go(producer)
-            runloom_c.go(consumer)
+            runloom_c.fiber(producer)
+            runloom_c.fiber(consumer)
             t0 = time.monotonic()
             while len(consumed) < TOTAL and time.monotonic() - t0 < 10:
                 runloom.sleep(0.005)
@@ -378,7 +378,7 @@ class TestSemaphore(unittest.TestCase):
                     inside["now"] -= 1
 
             for _ in range(12):
-                runloom_c.go(worker)
+                runloom_c.fiber(worker)
             t0 = time.monotonic()
             while inside["now"] != 0 or time.monotonic() - t0 < 0.2:
                 if time.monotonic() - t0 > 5:
@@ -407,7 +407,7 @@ class TestThreadJoin(unittest.TestCase):
                     time.sleep(0.005)
                     log.append("sib")
 
-            runloom_c.go(sib)
+            runloom_c.fiber(sib)
             th.join()
             log.append("joined")
             return log
@@ -469,7 +469,7 @@ class TestBarrier(unittest.TestCase):
                 done["v"] += 1
 
             for i in range(parties):
-                runloom_c.go(lambda i=i: worker(i))
+                runloom_c.fiber(lambda i=i: worker(i))
 
             t0 = time.monotonic()
             while done["v"] < parties and time.monotonic() - t0 < 5:
@@ -497,7 +497,7 @@ class TestBarrier(unittest.TestCase):
                 counts.append(1)
 
             for _ in range(3):
-                runloom_c.go(worker)
+                runloom_c.fiber(worker)
             t0 = time.monotonic()
             while len(counts) < 3 and time.monotonic() - t0 < 5:
                 runloom.sleep(0.005)
@@ -518,14 +518,14 @@ class TestBarrier(unittest.TestCase):
                     broken["n"] += 1
 
             # only two of three parties ever arrive; a third fiber aborts
-            runloom_c.go(worker)
-            runloom_c.go(worker)
+            runloom_c.fiber(worker)
+            runloom_c.fiber(worker)
 
             def breaker():
                 runloom.sleep(0.02)
                 b.abort()
 
-            runloom_c.go(breaker)
+            runloom_c.fiber(breaker)
             t0 = time.monotonic()
             while broken["n"] < 2 and time.monotonic() - t0 < 5:
                 runloom.sleep(0.005)

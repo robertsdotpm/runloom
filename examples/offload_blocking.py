@@ -1,14 +1,14 @@
 """Offload — keep a hub alive across a non-cooperative call.
 
-A goroutine that enters a long pure-C / pure-compute call has no yield
+A fiber that enters a long pure-C / pure-compute call has no yield
 point, so on its own it would monopolise its hub until it returns.
 runloom.blocking(fn, ...) hands such a call to a worker pool and parks the
-goroutine until it's done, so the other goroutines on that hub keep
+fiber until it's done, so the other fibers on that hub keep
 running.  (runloom.monkey.offload is the same thing under the monkey API,
 and the monkey `heavy` category does this automatically for big
 hashlib/zlib/... calls.)
 
-The heartbeat goroutine keeps ticking while the heavy compute runs —
+The heartbeat fiber keeps ticking while the heavy compute runs —
 that's the proof the scheduler wasn't wedged.
 
 Run:
@@ -19,7 +19,7 @@ import os
 
 import runloom
 
-# Free-threaded build: fan goroutines across all cores (M:N scheduler).
+# Free-threaded build: fan fibers across all cores (M:N scheduler).
 HUBS = os.cpu_count() or 4
 
 def crunch(rounds):
@@ -30,7 +30,7 @@ def crunch(rounds):
     return total
 
 def heavy_worker(results):
-    # Without runloom.blocking this loop would block every other goroutine
+    # Without runloom.blocking this loop would block every other fiber
     # sharing this hub for its whole duration.
     result = runloom.blocking(crunch, 8_000_000)
     results.send(result)
@@ -46,8 +46,8 @@ def main():
     results = runloom.Chan(1)
     stop = [False]
 
-    runloom.go(heartbeat, stop)
-    runloom.go(heavy_worker, results)
+    runloom.fiber(heartbeat, stop)
+    runloom.fiber(heavy_worker, results)
 
     result = results.recv()[0]
     stop[0] = True

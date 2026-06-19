@@ -3,7 +3,7 @@
   * src/runloom_c/module_init.c.inc -- the module method table, PyInit, the
     fiber-safe module getattro slot, and the two env-gated PyInit branches
     (RUNLOOM_STACK_SCRUB, RUNLOOM_TRACEBACK).
-  * src/runloom_c/module_g.c.inc    -- the RunloomG (goroutine handle) type:
+  * src/runloom_c/module_g.c.inc    -- the RunloomG (fiber handle) type:
     RunloomG_stack() (the watchdog state probe) and RunloomG_richcompare's
     NOT-IMPLEMENTED / RETURN_FALSE arms.
 
@@ -114,7 +114,7 @@ def test_g_stack_reports_fresh_parked_done():
         # is not the current fiber -> "parked", has_snap True.
         def parker():
             rc.park(timeout=2.0)
-        ch = rc.go(parker)
+        ch = rc.fiber(parker)
         for _ in range(6):
             rc.sched_yield()        # let it commit to PARKED
         seen["parked"] = ch.stack()
@@ -123,7 +123,7 @@ def test_g_stack_reports_fresh_parked_done():
         # (c) a finished child: g->done set -> "done", has_snap False.
         def finisher():
             return 123
-        cd = rc.go(finisher)
+        cd = rc.fiber(finisher)
         while not cd.done:
             rc.sched_yield()
         seen["done"] = cd.stack()
@@ -132,13 +132,13 @@ def test_g_stack_reports_fresh_parked_done():
         # its snap is not valid and it isn't done -> "fresh".
         def never():
             return None
-        cf = rc.go(never)
+        cf = rc.fiber(never)
         seen["fresh_child"] = cf.stack()
         while not cf.done:           # then let it finish so nothing leaks
             rc.sched_yield()
 
     with hang_guard(30, "g.stack states"):
-        rc.go(main)
+        rc.fiber(main)
         rc.run()
 
     # Every probe returned a well-formed dict with exactly the two documented
@@ -154,7 +154,7 @@ def test_g_stack_reports_fresh_parked_done():
     assert seen["self_running"]["state"] == "fresh", seen["self_running"]
     assert seen["self_running"]["has_snap"] is False
 
-    # A child fresh off go() but not yet resumed: also "fresh".
+    # A child fresh off fiber() but not yet resumed: also "fresh".
     assert seen["fresh_child"]["state"] == "fresh", seen["fresh_child"]
     assert seen["fresh_child"]["has_snap"] is False
 
@@ -193,7 +193,7 @@ def test_g_richcompare_notimplemented_and_false_arms():
         def child():
             box["h"] = rc.current_g()
             rc.park(timeout=2.0)
-        ch = rc.go(child)
+        ch = rc.fiber(child)
         for _ in range(6):
             rc.sched_yield()
         other = box["h"]
@@ -219,7 +219,7 @@ def test_g_richcompare_notimplemented_and_false_arms():
         ch.wake()                    # drain the parked child
 
     with hang_guard(30, "g.richcompare arms"):
-        rc.go(main)
+        rc.fiber(main)
         rc.run()
 
     # Same underlying g compares equal (by wrapped pointer, not object identity).
@@ -305,14 +305,14 @@ alive = {"after_quit": False}
 def main():
     def parker():
         rc.park(timeout=2.0)
-    pk = rc.go(parker)
+    pk = rc.fiber(parker)
     def trigger():
         for _ in range(4):
             rc.sched_yield()
         os.kill(os.getpid(), signal.SIGQUIT)   # handler runs the dump + returns
         alive["after_quit"] = True             # reached ONLY if we did not die
         pk.wake()
-    rc.go(trigger)
+    rc.fiber(trigger)
     rc.run()
 main()
 assert alive["after_quit"], "process did not survive SIGQUIT (handler not installed)"

@@ -54,7 +54,7 @@ class TestIouring(unittest.TestCase):
         with open(path, "wb") as f:
             f.write(b"hello world")
 
-        runloom_c.go(lambda: worker(path))
+        runloom_c.fiber(lambda: worker(path))
         runloom_c.run()
         os.unlink(path)
 
@@ -84,12 +84,12 @@ class TestIouring(unittest.TestCase):
                 events.append("tick-" + str(i))
                 runloom_c.sched_yield()
 
-        runloom_c.go(reader)
-        runloom_c.go(runner)
+        runloom_c.fiber(reader)
+        runloom_c.fiber(runner)
         runloom_c.run()
         os.unlink(path)
 
-        # Reader starts before runner's first tick (both go() calls happen
+        # Reader starts before runner's first tick (both fiber() calls happen
         # before run()).  The point is that the runner's ticks land
         # *between* read-start and read-done -- without cooperative parking
         # the reader would block the thread and runner couldn't tick at

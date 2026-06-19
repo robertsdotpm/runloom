@@ -203,7 +203,7 @@ def parker():
         second.append(("oserror", e.errno))
     t.join(5)
 
-runloom_c.go(parker)
+runloom_c.fiber(parker)
 runloom_c.run()
 a.close(); b.close()
 print("BACKEND=%s" % runloom_c.netpoll_backend())
@@ -262,7 +262,7 @@ def main():
             result.append(("oserror", e.errno))
         except BaseException as e:
             result.append(("err", type(e).__name__))
-    runloom.go(parker)
+    runloom.fiber(parker)
     runloom.sleep(float(TO) / 1000.0 + 0.3)
     s.close()
 
@@ -332,7 +332,7 @@ for i in range(N):
     socks.append(s)
     results.append(None)
 for i, s in enumerate(socks):
-    runloom_c.go(make_parker(i, s.fileno()))
+    runloom_c.fiber(make_parker(i, s.fileno()))
 runloom_c.run()
 for s in socks:
     s.close()
@@ -430,7 +430,7 @@ def worker(i):
         outcomes.append(("err", type(e).__name__))
 def main():
     for i in range(64):
-        runloom.go(worker, i)
+        runloom.fiber(worker, i)
     runloom.sleep(0.6)
 runloom.run(8, main)
 print("BACKEND=%s" % runloom_c.netpoll_backend())

@@ -107,7 +107,7 @@ async def _close_settle(server):
     no-op sleep(0); a single turn can race the shutdown-readiness delivery under
     load, orphaning the accept fiber's netpoll parker (caught by conftest's
     per-test parked-leak invariant).  This is test hygiene, NOT a bridge bug --
-    the dedicated test_start_server_close_no_accept_goroutine_leak proves the
+    the dedicated test_start_server_close_no_accept_fiber_leak proves the
     wake itself works across cycles."""
     server.close()
     try:
@@ -341,9 +341,9 @@ def test_add_done_callback_to_already_done_future_is_deferred():
 
 
 # ==========================================================================
-# 4. Server close() wakes accept loops -- no parked-goroutine leak, MANY cycles.
+# 4. Server close() wakes accept loops -- no parked-fiber leak, MANY cycles.
 # ==========================================================================
-def test_start_server_close_no_accept_goroutine_leak():
+def test_start_server_close_no_accept_fiber_leak():
     """start_server's _Server._accept_loop parks in _wait_fd(listen_fd, READ);
     close() must shutdown()+close the fd so the accept fiber wakes, sees _closed
     and exits.  Repeated create/close must not accumulate parked fibers."""
@@ -1433,12 +1433,12 @@ except BaseException as e:
 # 17. Guard-page overflow inside a data_received callback is CLASSIFIED.
 # ==========================================================================
 def test_deep_recursion_in_data_received_is_classified_not_silent():
-    """A protocol callback that recurses past the goroutine stack guard page
+    """A protocol callback that recurses past the fiber stack guard page
     must NOT silently corrupt: the runtime should either classify the overflow
     ('GOROUTINE STACK OVERFLOW' + 'guard page') or unwind cleanly -- never a bare
     unclassified SIGSEGV.  We raise the Python recursion limit (so RecursionError
     doesn't preempt the C-stack overflow) and force a small IO stack so the C
-    recursion runs into the goroutine guard page.  The child must TERMINATE
+    recursion runs into the fiber guard page.  The child must TERMINATE
     (no hang) and must not die on an unclassified signal."""
     script = r"""
 import asyncio, sys

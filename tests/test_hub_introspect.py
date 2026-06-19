@@ -67,7 +67,7 @@ class HubIntrospectTest(unittest.TestCase):
         out = {}
 
         def main():
-            runloom.go(blocking_sleep_worker)
+            runloom.fiber(blocking_sleep_worker)
             runloom.sleep(0.10)          # let the wedge pass the budget
             out["hubs"] = gi.hubs()
 
@@ -99,7 +99,7 @@ class HubIntrospectTest(unittest.TestCase):
         out = {}
 
         def main():
-            runloom.go(blocking_sleep_worker)   # blocks 300ms -> a DETACHED wedge
+            runloom.fiber(blocking_sleep_worker)   # blocks 300ms -> a DETACHED wedge
             # The py-spy hint fires when a hub's DISPLAYED dwell >= WEDGE_MS (50ms).
             # A single 100ms snapshot can race a dwell-counter reset (sysmon
             # resume/handoff bookkeeping momentarily shows the wedged hub at dwell
@@ -131,7 +131,7 @@ class HubIntrospectTest(unittest.TestCase):
 
             def main():
                 for _ in range(6):
-                    runloom.go(blocking_sleep_worker)
+                    runloom.fiber(blocking_sleep_worker)
                 runloom.sleep(0.10)
                 out["hubs"] = gi.hubs()
 

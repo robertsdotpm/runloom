@@ -190,8 +190,8 @@ def test_cancel_all_parked_single_thread_sched_wake():
         res["parked"] = rc.stats()["netpoll_parked"]
         res["n"] = rc.cancel_all_parked()        # single-thread -> L284 sched_wake
 
-    rc.go(parker)
-    rc.go(canceller)
+    rc.fiber(parker)
+    rc.fiber(canceller)
     with hang_guard(20, "cancel_all_parked single-thread"):
         rc.run()                                  # single-thread scheduler
     rc.netpoll_unregister(a.fileno())
@@ -248,7 +248,7 @@ _IOURING_FILEREAD = r"""
                 out["errno"] = e.errno
         finally:
             os.close(fd)
-    rc.go(worker); rc.run()
+    rc.fiber(worker); rc.run()
     os.unlink(path)
     # io_uring must have disabled itself after the injected ADD failure.
     sys.stdout.write("AVAIL=%d OK=%r ERRNO=%r\n" % (
@@ -358,7 +358,7 @@ _BLOCKING_ARM = r"""
     def main():
         r = runloom.blocking(slow)        # arms the pump-wake eventfd
         assert r == 42, r
-    rc.go(main); rc.run()
+    rc.fiber(main); rc.run()
     sys.stdout.write("BLOCK_OK\n")
 """
 

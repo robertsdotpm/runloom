@@ -35,7 +35,7 @@ def _trivial_cycle(nhubs):
         box[0] = 1
 
     runloom_c.mn_init(nhubs)
-    runloom_c.mn_go(runner)
+    runloom_c.mn_fiber(runner)
     runloom_c.mn_run()
     runloom_c.mn_fini()
     return box[0]
@@ -80,7 +80,7 @@ for i in range(24):
     if nhubs == 3:
         nhubs = 8
     runloom_c.mn_init(nhubs)
-    runloom_c.mn_go(lambda: None)
+    runloom_c.mn_fiber(lambda: None)
     runloom_c.mn_run()
     runloom_c.mn_fini()
 print("OK")

@@ -71,7 +71,7 @@ def test_blocking_result_and_kwargs_single_thread():
         out.append(runloom.blocking(add, 5, 7, c=100))
 
     with hang_guard(30, "blocking_result_single"):
-        rc.go(w)
+        rc.fiber(w)
         rc.run()
     assert out == [112]
 
@@ -94,7 +94,7 @@ def test_blocking_exception_propagates():
             seen.append(str(e))
 
     with hang_guard(30, "blocking_exc"):
-        rc.go(w)
+        rc.fiber(w)
         rc.run()
     assert seen == ["offloaded-kaboom"]
 
@@ -109,7 +109,7 @@ def test_blocking_inline_outside_fiber():
         marker.append(("thread", id(marker)))
         return x * 3
 
-    # No run()/go() -- we are a plain OS thread, not a fiber.
+    # No run()/fiber() -- we are a plain OS thread, not a fiber.
     assert rc.blocking(fn, 14) == 42
     assert marker == [("thread", id(marker))]
 
@@ -150,8 +150,8 @@ def test_blocking_spurious_wake_does_not_uaf_single_thread():
             rc.sched_sleep(0.001)
 
     with hang_guard(60, "blocking_spurious_single"):
-        rc.go(worker)
-        rc.go(waker)
+        rc.fiber(worker)
+        rc.fiber(waker)
         rc.run()
     # The result survived the spurious-wake storm: re-park loop held.
     assert result.get("v") == 4242
@@ -339,13 +339,13 @@ def test_gstate_set_in_get_exercised_by_normal_workload():
         def step(i):
             if i:
                 # nested spawn: many fresh->runnable->running->done transitions
-                rc.go(lambda: step(i - 1))
+                rc.fiber(lambda: step(i - 1))
             out.append(i)
 
         step(n)
 
     with hang_guard(30, "gstate_workload"):
-        rc.go(lambda: chain(20))
+        rc.fiber(lambda: chain(20))
         rc.run()
     assert sorted(out) == list(range(21))
     # Structural invariant (conftest also asserts this post-test): every g

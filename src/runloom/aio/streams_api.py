@@ -70,7 +70,7 @@ class _Server(object):
         self._ssl_context = ssl_context
         self._ssl_handshake_timeout = ssl_handshake_timeout
         self._closed = False
-        self._accept_g = _go_io(self._accept_loop)
+        self._accept_g = _fiber_io(self._accept_loop)
 
     def _accept_loop(self):
         while not self._closed:
@@ -96,7 +96,7 @@ class _Server(object):
             conn.setblocking(False)
             if self._ssl_context is not None:
                 # Handshake off the accept loop so a slow client can't stall it.
-                _go_io(lambda c=conn: self._setup_conn_tls(c))
+                _fiber_io(lambda c=conn: self._setup_conn_tls(c))
             else:
                 self._spawn_conn(conn)
 

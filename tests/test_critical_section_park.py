@@ -49,7 +49,7 @@ def test_park_in_dict_critical_section_no_deadlock():
     runloom_c.mn_init(4)
     try:
         for i in range(n_workers):
-            runloom_c.mn_go(lambda i=i: worker(i))
+            runloom_c.mn_fiber(lambda i=i: worker(i))
         runloom_c.mn_run()        # would hang here pre-fix (or the process segfaults)
     finally:
         runloom_c.mn_fini()

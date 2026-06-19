@@ -3,7 +3,7 @@
 OWNS: runloom.time (After/Tick/Timer/Ticker/NewTimer/NewTicker/Sleep -- Stop/
 Reset + the generation counter that defeats stale fires), runloom.context
 (Background/WithCancel/WithTimeout/WithDeadline + CANCELED/DEADLINE_EXCEEDED),
-and runloom.runtime/__init__ (run(n,main), go() single-vs-M:N dispatch, sleep,
+and runloom.runtime/__init__ (run(n,main), fiber() single-vs-M:N dispatch, sleep,
 yield_now, blocking, current, the Goroutine handle, set_grow_down/
 grow_down_enabled).
 
@@ -22,7 +22,7 @@ DEEPER and hunts NEW conditions:
     WithTimeout deadline-auto-fire vs manual-cancel-before-deadline error code,
     N-waiter broadcast on cancel, far-future deadline + immediate cancel, past
     deadline synchronous fire (no fiber), child of an already-cancelled parent.
-  * Runtime: go() returns a Goroutine under run(1) and None under run(N);
+  * Runtime: fiber() returns a Goroutine under run(1) and None under run(N);
     current() identity + None outside a fiber; blocking() under M:N; Goroutine
     .done/.result/.exception surfacing of a raised error; run(n) argument
     validation; nested go; sleep() outside a fiber.
@@ -75,7 +75,7 @@ def _run_single(fn, guard=10.0, label="single"):
         box["r"] = fn()
 
     with hang_guard(guard, label):
-        rc.go(main)
+        rc.fiber(main)
         rc.run()
     return box.get("r")
 
@@ -406,7 +406,7 @@ def main():
     print("TICKS", n)
     sys.stdout.flush()
     import os; os._exit(0)
-rc.go(main); rc.run()
+rc.fiber(main); rc.run()
 """
     proc = _subproc(script, timeout=20)
     out = proc.stdout.decode().strip()
@@ -496,7 +496,7 @@ def main():
     print("RECV_EL %.6f ERR %s" % (el, ctx.err()))
     sys.stdout.flush()
     os._exit(0)
-rc.go(main); rc.run()
+rc.fiber(main); rc.run()
 """
     proc = _subproc(script, timeout=15)
     _assert_no_signal(proc, "manual-before-deadline")
@@ -524,7 +524,7 @@ def main():
     print("RECV_EL %.6f ERR %s" % (el, ctx.err()))
     sys.stdout.flush()
     os._exit(0)
-rc.go(main); rc.run()
+rc.fiber(main); rc.run()
 """
     proc = _subproc(script, timeout=15)
     _assert_no_signal(proc, "far-future-cancel")
@@ -609,13 +609,13 @@ def test_context_multi_waiter_broadcast_all_wake():
             woke.append(i)
 
         for i in range(N):
-            rc.go(lambda i=i: waiter(i))
+            rc.fiber(lambda i=i: waiter(i))
         rc.sched_yield()               # everyone parks on ctx.done
         cancel()
 
     with hang_guard(15, "broadcast"):
         with assert_faster_than(3.0, "%d-waiter broadcast wake" % N):
-            rc.go(main)
+            rc.fiber(main)
             rc.run()
     assert len(woke) == N, \
         "cancel woke only %d/%d done-waiters" % (len(woke), N)
@@ -638,13 +638,13 @@ def test_context_deadline_accessor_reports_value():
 
 
 # ==========================================================================
-# Runtime -- go() dispatch, current(), blocking(), Goroutine handle.
+# Runtime -- fiber() dispatch, current(), blocking(), Goroutine handle.
 # ==========================================================================
-def test_run1_go_returns_goroutine_handle_with_result():
+def test_run1_fiber_returns_fiber_handle_with_result():
     box = {}
 
     def main():
-        g = runloom.go(lambda: 6 * 7)
+        g = runloom.fiber(lambda: 6 * 7)
         assert isinstance(g, runloom.Goroutine)
         # drain so the child completes
         for _ in range(4):
@@ -660,8 +660,8 @@ def test_run1_go_returns_goroutine_handle_with_result():
     assert box["exc"] is None
 
 
-def test_run1_goroutine_exception_surfaces_on_handle():
-    # A raised error inside a goroutine must surface on .exception (and be
+def test_run1_fiber_exception_surfaces_on_handle():
+    # A raised error inside a fiber must surface on .exception (and be
     # silenced from the unraisable hook via RUNLOOM_GOROUTINE_PANIC=silent).
     script = r"""
 import sys, os; sys.path.insert(0, "src")
@@ -671,7 +671,7 @@ out = {}
 def boom():
     raise ValueError("intentional")
 def main():
-    g = runloom.go(boom)
+    g = runloom.fiber(boom)
     for _ in range(8):
         rc.sched_yield()
     out["done"] = g.done
@@ -709,8 +709,8 @@ def test_current_identity_inside_and_none_outside():
         def child(i):
             handles.append(runloom.current())
 
-        runloom.go(lambda: child(0))
-        runloom.go(lambda: child(1))
+        runloom.fiber(lambda: child(0))
+        runloom.fiber(lambda: child(1))
         for _ in range(4):
             rc.sched_yield()
         seen["handles"] = handles
@@ -747,8 +747,8 @@ def test_sleep_inside_fiber_yields_to_siblings():
         def s(tag, d):
             runloom.sleep(d)
             order.append(tag)
-        runloom.go(lambda: s("a", 0.05))
-        runloom.go(lambda: s("b", 0.05))
+        runloom.fiber(lambda: s("a", 0.05))
+        runloom.fiber(lambda: s("b", 0.05))
 
     with hang_guard(10, "sleep-overlap"):
         with assert_faster_than(0.5, "two overlapping 50ms sleeps"):
@@ -770,8 +770,8 @@ def test_yield_now_is_a_scheduling_point():
             seq.append("b1")
             runloom.yield_now()
             seq.append("b2")
-        runloom.go(a)
-        runloom.go(b)
+        runloom.fiber(a)
+        runloom.fiber(b)
 
     with hang_guard(10, "yield"):
         runloom.run(1, main)
@@ -780,7 +780,7 @@ def test_yield_now_is_a_scheduling_point():
         "yield_now did not yield to the sibling: %r" % seq
 
 
-def test_nested_go_under_run1():
+def test_nested_fiber_under_run1():
     # A fiber that spawns a fiber that spawns a fiber -- all must run.
     hits = []
 
@@ -789,15 +789,15 @@ def test_nested_go_under_run1():
             hits.append(3)
         def lvl2():
             hits.append(2)
-            runloom.go(lvl3)
+            runloom.fiber(lvl3)
         def lvl1():
             hits.append(1)
-            runloom.go(lvl2)
-        runloom.go(lvl1)
+            runloom.fiber(lvl2)
+        runloom.fiber(lvl1)
 
     with hang_guard(10, "nested-go"):
         runloom.run(1, main)
-    assert sorted(hits) == [1, 2, 3], "nested go() did not run all levels: %r" % hits
+    assert sorted(hits) == [1, 2, 3], "nested fiber() did not run all levels: %r" % hits
 
 
 # ==========================================================================
@@ -819,9 +819,9 @@ def test_run_rejects_noncallable_main():
 
 
 def test_run_main_none_is_drain_only():
-    # run(1) with no main_fn drains whatever you've already go()'d.
+    # run(1) with no main_fn drains whatever you've already fiber()'d.
     hits = []
-    rc.go(lambda: hits.append("drained"))
+    rc.fiber(lambda: hits.append("drained"))
     with hang_guard(10, "drain-only"):
         runloom.run(1)
     assert hits == ["drained"]
@@ -934,7 +934,7 @@ def test_context_cascade_broadcast_under_mn():
             woke.append(i)
 
         for i in range(N):
-            runloom.go(lambda i=i: waiter(i))   # mn_go under M:N
+            runloom.fiber(lambda i=i: waiter(i))   # mn_go under M:N
         runloom.sleep(0.02)            # let all park
         root_cancel()                  # cancel the ROOT -> cascades to child
 
@@ -955,8 +955,8 @@ def test_blocking_under_mn_overlaps():
         def worker(tag):
             r = runloom.blocking(lambda: (time.sleep(0.05), tag)[1])
             results.append(r)
-        runloom.go(lambda: worker("x"))
-        runloom.go(lambda: worker("y"))
+        runloom.fiber(lambda: worker("x"))
+        runloom.fiber(lambda: worker("y"))
 
     with hang_guard(15, "mn-blocking"):
         with assert_faster_than(2.0, "two overlapping blocking() offloads"):
@@ -966,15 +966,15 @@ def test_blocking_under_mn_overlaps():
 
 @pytest.mark.skipif(not needs_free_threading(),
                     reason="M:N needs GIL-disabled build")
-def test_go_returns_none_under_mn():
+def test_fiber_returns_none_under_mn():
     box = {}
 
     def main():
-        box["ret"] = runloom.go(lambda: None)
+        box["ret"] = runloom.fiber(lambda: None)
         box["cur"] = runloom.current() is not None
 
     _run_mn(main, n=2, label="mn-go-none")
-    assert box.get("ret") is None, "go() under M:N must return None"
+    assert box.get("ret") is None, "fiber() under M:N must return None"
     assert box.get("cur") is True, "current() must be non-None inside an M:N fiber"
 
 
@@ -1006,7 +1006,7 @@ def test_ticker_drop_under_mn():
 # is not.  Run in subprocesses so a SIGSEGV is contained.
 # ==========================================================================
 def test_spawn_g_fault_during_timer_does_not_crash():
-    # RUNLOOM_FAULT_SPAWN_G once: fail the next goroutine spawn.  After/Timer/
+    # RUNLOOM_FAULT_SPAWN_G once: fail the next fiber spawn.  After/Timer/
     # context all spawn a backing fiber; the failure must surface as a clean
     # Python error, never a segfault.
     script = r"""
@@ -1027,7 +1027,7 @@ def main():
         print("CLEAN_ERR", type(e).__name__)
         return
     print("NO_FAULT_OR_SURVIVED")
-rc.go(main)
+rc.fiber(main)
 try:
     rc.run()
 except Exception as e:
@@ -1059,7 +1059,7 @@ def main():
         print("CLEAN_ERR", type(e).__name__)
         return
     print("SURVIVED")
-rc.go(main)
+rc.fiber(main)
 try:
     rc.run()
 except Exception as e:
@@ -1087,7 +1087,7 @@ def main():
     except Exception as e:
         print("CLEAN_ERR", type(e).__name__); return
     print("SURVIVED")
-rc.go(main)
+rc.fiber(main)
 try:
     rc.run()
 except Exception as e:
@@ -1114,7 +1114,7 @@ def test_many_timers_all_fire_no_lost_wake():
             fired.append(ok)
 
     with hang_guard(20, "many-timers"):
-        rc.go(main)
+        rc.fiber(main)
         rc.run()
     assert len(fired) == N and all(fired), \
         "only %d/%d timers fired (lost wake at scale)" % (sum(fired), N)
@@ -1135,14 +1135,14 @@ def test_many_contexts_cancel_all_wake_no_leak():
             woke.append(i)
 
         for i, (ctx, _c) in enumerate(ctxs):
-            rc.go(lambda ctx=ctx, i=i: waiter(ctx, i))
+            rc.fiber(lambda ctx=ctx, i=i: waiter(ctx, i))
         rc.sched_yield()
         for _ctx, cancel in ctxs:
             cancel()
 
     with hang_guard(20, "many-contexts"):
         with assert_faster_than(5.0, "%d context cancels" % N):
-            rc.go(main)
+            rc.fiber(main)
             rc.run()
     assert len(woke) == N, \
         "only %d/%d context waiters woke" % (len(woke), N)
@@ -1279,7 +1279,7 @@ def test_nested_run1_inside_fiber_drives_correctly():
         order.append("outer-end")
 
     with hang_guard(10, "nested-run1"):
-        rc.go(main)
+        rc.fiber(main)
         rc.run()
     assert order[0] == "outer-start"
     assert "inner" in order
@@ -1348,7 +1348,7 @@ def test_many_timers_fire_with_correct_distinct_values_integrity():
             recv_vals.append(v)
 
     with hang_guard(20, "timer-value-integrity"):
-        rc.go(main)
+        rc.fiber(main)
         rc.run()
     assert len(recv_vals) == N, "lost a timer wake (%d/%d)" % (len(recv_vals), N)
     # Each timer delivered ITS OWN configured duration -- positional integrity.
@@ -1425,11 +1425,11 @@ def test_context_child_shorter_deadline_keeps_own_parent_untightened():
 
 
 # ----- Goroutine handle read PRE-completion (no crash / sane defaults) -------
-def test_goroutine_handle_pre_completion_is_safe():
+def test_fiber_handle_pre_completion_is_safe():
     box = {}
 
     def main():
-        g = runloom.go(lambda: 99)
+        g = runloom.fiber(lambda: 99)
         # Read the handle BEFORE the child has had a chance to run.
         box["pre_done"] = g.done
         box["pre_result"] = g.result
@@ -1453,7 +1453,7 @@ def test_goroutine_handle_pre_completion_is_safe():
 
 
 # ----- current() returns the bare C-G, not the Python Goroutine wrapper ------
-def test_current_returns_bare_c_g_not_goroutine_wrapper():
+def test_current_returns_bare_c_g_not_fiber_wrapper():
     # runtime.current() is documented to return the bare runloom_c.G, NOT the
     # Python Goroutine wrapper -- callers compare identity / None-ness.  Pin that
     # contract so a future change that wraps it doesn't silently break callers.
@@ -1462,13 +1462,13 @@ def test_current_returns_bare_c_g_not_goroutine_wrapper():
     def main():
         cur = runloom.current()
         box["type_is_G"] = isinstance(cur, rc.G)
-        box["is_goroutine_wrapper"] = isinstance(cur, runloom.Goroutine)
+        box["is_fiber_wrapper"] = isinstance(cur, runloom.Goroutine)
 
     with hang_guard(10, "current-type"):
         runloom.run(1, main)
     assert box["type_is_G"] is True, \
         "current() inside a fiber should be a bare runloom_c.G"
-    assert box["is_goroutine_wrapper"] is False, \
+    assert box["is_fiber_wrapper"] is False, \
         "current() must NOT return the Python Goroutine wrapper (contract)"
 
 
@@ -1589,7 +1589,7 @@ def test_concurrent_cancel_same_ctx_under_mn_no_crash():
             callers.append(1)
 
         for _ in range(32):
-            runloom.go(racer)            # mn_go: spread across hubs
+            runloom.fiber(racer)            # mn_go: spread across hubs
         runloom.sleep(0.05)
         box["err"] = ctx.err()
         box["closed"] = ctx.done.closed
@@ -1625,7 +1625,7 @@ def main():
     except BaseException as e:
         print("CLEAN_EXC", type(e).__name__)
 try:
-    rc.go(main); rc.run()
+    rc.fiber(main); rc.run()
 except KeyboardInterrupt:
     print("KI_OUT_OF_RUN")     # the idle/sleep-only delivery path is also fine
 print("DONE")
@@ -1668,7 +1668,7 @@ def main():
     def cancelled():
         ctx, cancel = rctx.WithTimeout(rctx.Background(), 0.03)
         ctx.done.recv(); box["c"] = ctx.err(); cancel()
-    runloom.go(hot); runloom.go(timed); runloom.go(cancelled)
+    runloom.fiber(hot); runloom.fiber(timed); runloom.fiber(cancelled)
     runloom.sleep(0.25)
 runloom.run(3, main)
 ok = box.get("hot") and box.get("t") is True and box.get("c") == "deadline_exceeded"
@@ -1742,7 +1742,7 @@ def main():
     except Exception as e:
         print("CLEAN_ERR", type(e).__name__); return
     print("SURVIVED")
-rc.go(main)
+rc.fiber(main)
 try:
     rc.run()
 except Exception as e:
@@ -1777,7 +1777,7 @@ def main():
     except Exception as e:
         print("CLEAN_ERR", type(e).__name__); return
     print("SURVIVED")
-rc.go(main)
+rc.fiber(main)
 try:
     rc.run()
 except Exception as e:

@@ -45,7 +45,7 @@ def _read_via_fiber(fd, n, offset=0):
         except OSError as e:
             out["errno"] = e.errno
 
-    runloom_c.go(worker)
+    runloom_c.fiber(worker)
     runloom_c.run()
     return out
 
@@ -72,7 +72,7 @@ def test_roundtrip_write_then_read():
         def w():
             out["written"] = runloom_c.file_write(fd, data, 0)
 
-        runloom_c.go(w)
+        runloom_c.fiber(w)
         runloom_c.run()
         assert out["written"] == len(data)
 
@@ -162,7 +162,7 @@ def test_concurrent_distinct_files_single_thread():
             return worker
 
         for i in range(N):
-            runloom_c.go(make_worker(i))
+            runloom_c.fiber(make_worker(i))
         runloom_c.run()
 
         for i in range(N):
@@ -208,7 +208,7 @@ def mk(i):
 
 runloom_c.mn_init(H)
 for i in range(N):
-    runloom_c.mn_go(mk(i))
+    runloom_c.mn_fiber(mk(i))
 runloom_c.mn_run()
 runloom_c.mn_fini()
 
@@ -282,7 +282,7 @@ def mk(i):
 
 runloom_c.mn_init(H)
 for i in range(N):
-    runloom_c.mn_go(mk(i))
+    runloom_c.mn_fiber(mk(i))
 runloom_c.mn_run()
 runloom_c.mn_fini()
 for fd in fds: os.close(fd)
@@ -336,7 +336,7 @@ def gcer():
 gt = threading.Thread(target=gcer, daemon=True); gt.start()
 t = threading.Thread(target=feeder); t.start()
 runloom_c.mn_init(H)
-for i in range(N): runloom_c.mn_go(mk(i))
+for i in range(N): runloom_c.mn_fiber(mk(i))
 runloom_c.mn_run()
 runloom_c.mn_fini()
 stop[0] = True; t.join()
@@ -428,7 +428,7 @@ threading.Thread(target=gcer, daemon=True).start()
 t = threading.Thread(target=feeder); t.start()
 runloom_c.mn_init(H)
 for i in range(N):
-    runloom_c.mn_go(mk_server(i))
+    runloom_c.mn_fiber(mk_server(i))
 runloom_c.mn_run()
 runloom_c.mn_fini()
 stop[0] = True; t.join()

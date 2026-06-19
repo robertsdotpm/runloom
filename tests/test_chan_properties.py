@@ -46,7 +46,7 @@ def test_buffered_fifo(cap, values):
             out.append(v)
 
     for g in (producer, consumer):
-        runloom_c.go(g)
+        runloom_c.fiber(g)
     runloom_c.run()
     assert out == values
 
@@ -82,10 +82,10 @@ def test_fanin_conservation(nprod, ncons, per, cap):
             got.append(v)
 
     for c in range(ncons):
-        runloom_c.go(consumer)
+        runloom_c.fiber(consumer)
     for p in range(nprod):
-        runloom_c.go(producer(p))
-    runloom_c.go(closer)
+        runloom_c.fiber(producer(p))
+    runloom_c.fiber(closer)
     runloom_c.run()
 
     expected = sorted((p, s) for p in range(nprod) for s in range(per))
@@ -118,7 +118,7 @@ def test_close_drains_then_stops(cap, buffered, extra_recv):
         for _ in range(extra_recv):
             out.append(ch.recv())
 
-    runloom_c.go(runner)
+    runloom_c.fiber(runner)
     runloom_c.run()
 
     expect = [(v, True) for v in buffered] + [(None, False)] * extra_recv
@@ -147,7 +147,7 @@ def test_select_default_picks_ready(vals):
         result["r"] = r
         result["ready"] = ready
 
-    runloom_c.go(runner)
+    runloom_c.fiber(runner)
     runloom_c.run()
 
     r = result["r"]

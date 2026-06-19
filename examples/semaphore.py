@@ -1,7 +1,7 @@
 """Semaphore — bound concurrency with a buffered channel.
 
 A buffered channel of N tokens is a counting semaphore: receive a token
-to acquire, send it back to release.  At most N goroutines hold a token
+to acquire, send it back to release.  At most N fibers hold a token
 at once, so this caps how many run the protected section simultaneously
 even though 10 are spawned.
 
@@ -9,7 +9,7 @@ The channel needs no lock.  The active/peak *counter* below does, though:
 with the GIL off, tasks holding tokens run on different hubs in parallel,
 so `active[0] += 1` is a real read-modify-write race -- a runloom.sync.Lock
 makes it correct.  (Go's lesson: share memory by communicating; when you
-do share raw state across goroutines, guard it.)
+do share raw state across fibers, guard it.)
 
 Run:
     python3 examples/semaphore.py
@@ -20,7 +20,7 @@ import os
 import runloom
 from runloom.sync import Lock
 
-# Free-threaded build: fan goroutines across all cores (M:N scheduler).
+# Free-threaded build: fan fibers across all cores (M:N scheduler).
 HUBS = os.cpu_count() or 4
 
 MAX_CONCURRENT = 3
@@ -52,7 +52,7 @@ def main():
             done.send(tid)
 
     for tid in range(NUM_TASKS):
-        runloom.go(task, tid)
+        runloom.fiber(task, tid)
     for _ in range(NUM_TASKS):
         done.recv()
 

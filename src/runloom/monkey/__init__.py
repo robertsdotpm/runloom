@@ -193,10 +193,10 @@ _orig_runloom_c_mn_go = None
 
 
 def _patched_runloom_c_go(fn, stack_size=0, **kwargs):
-    # runloom.runtime.go() calls runloom_c.go(target, stack_size) with the
+    # runloom.runtime.fiber() calls runloom_c.fiber(target, stack_size) with the
     # stack size as a 2nd POSITIONAL arg, so this wrapper must accept and
     # forward it.  A bare (fn, **kwargs) signature raised TypeError and broke
-    # every runloom.go() once monkey.patch() was applied (worst under M:N,
+    # every runloom.fiber() once monkey.patch() was applied (worst under M:N,
     # where runtime.go always passes the grow-down stack size).
     return _orig_runloom_c_go(_wrap_fiber_callable(fn), stack_size, **kwargs)
 
@@ -206,7 +206,7 @@ def _patched_runloom_c_mn_go(fn, stack_size=0, **kwargs):
                                  **kwargs)
 
 
-def _install_go_wrapper():
+def _install_fiber_wrapper():
     """Wrap runloom_c.go / mn_go so user callables run with the
     fiber-context flag set.  Idempotent."""
     global _orig_runloom_c_go, _orig_runloom_c_mn_go
@@ -218,7 +218,7 @@ def _install_go_wrapper():
         runloom_c.mn_go = _patched_runloom_c_mn_go
 
 
-def _uninstall_go_wrapper():
+def _uninstall_fiber_wrapper():
     global _orig_runloom_c_go, _orig_runloom_c_mn_go
     if _orig_runloom_c_go is not None:
         runloom_c.go = _orig_runloom_c_go
@@ -274,7 +274,7 @@ def patch(**flags):
     if unknown:
         raise TypeError("patch() got unknown category: " +
                         ", ".join(sorted(unknown)))
-    _install_go_wrapper()
+    _install_fiber_wrapper()
     # Threading must come before queue (queue is a no-op but kept for
     # symmetry); socket has to come before dns (dns wraps socket fns).
     order = list(_DEFAULTS)
@@ -301,4 +301,4 @@ def unpatch(**flags):
         _PATCHERS[name][1]()
         _applied.discard(name)
     if not _applied:
-        _uninstall_go_wrapper()
+        _uninstall_fiber_wrapper()

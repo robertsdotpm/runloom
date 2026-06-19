@@ -94,7 +94,7 @@ def _run_single(fn):
 
     def main():
         box["r"] = fn()
-    rc.go(main)
+    rc.fiber(main)
     rc.run()
     return box.get("r")
 
@@ -140,7 +140,7 @@ def main():
             pass
         except Exception as e:
             bad.append(("wrong-exc", fd, type(e).__name__))
-rc.go(main); rc.run()
+rc.fiber(main); rc.run()
 sys.stdout.write("BAD=%r\n" % bad if bad else "ALL_RAISED\n")
 '''
 
@@ -209,7 +209,7 @@ def test_epoll_hup_wakes_a_write_waiter():
     a.setblocking(False)
     hold["a"], hold["b"] = a, b
     with hang_guard(20, "hup wakes write waiter"):
-        rc.go(write_waiter); rc.go(closer); rc.run()
+        rc.fiber(write_waiter); rc.fiber(closer); rc.run()
     _drop_sock(a)
     assert res.get("rv", 0) != 0, "peer HUP/RST did not wake the WRITE waiter"
 
@@ -246,7 +246,7 @@ def test_epoll_half_close_read_then_drain():
     a.setblocking(False); b.setblocking(False)
     hold["a"], hold["b"] = a, b
     with hang_guard(20, "half-close read"):
-        rc.go(reader); rc.go(peer); rc.run()
+        rc.fiber(reader); rc.fiber(peer); rc.run()
     _drop_sock(a); _drop_sock(b)
     assert res.get("rv", 0) & READ, "RDHUP did not wake the reader"
     assert res.get("got") == b"tail-bytes", "wrong data after half-close: %r" % res.get("got")
@@ -282,16 +282,16 @@ def test_mod_widen_preserves_both_arms(first):
         # the second yields then widens it to IN|OUT via EPOLL_CTL_MOD.  Neither
         # direction's arm may be clobbered by the other's register/completion.
         if first == "read_first":
-            rc.go(read_waiter)
+            rc.fiber(read_waiter)
             rc.sched_yield()
-            rc.go(write_waiter)
+            rc.fiber(write_waiter)
         else:
-            rc.go(write_waiter)
+            rc.fiber(write_waiter)
             rc.sched_yield()
-            rc.go(read_waiter)
-        rc.go(sender)
+            rc.fiber(read_waiter)
+        rc.fiber(sender)
     with hang_guard(20, "mod widen " + first):
-        rc.go(main); rc.run()
+        rc.fiber(main); rc.run()
     _drop_sock(a); _drop_sock(b)
     assert res.get("w", 0) & WRITE, "WRITE arm lost under MOD-widen (%s)" % first
     assert res.get("r", 0) & READ, "READ arm clobbered by MOD-widen (%s)" % first
@@ -344,7 +344,7 @@ def test_wake_storm_set_equality_single_thread():
     N = 350
     with hang_guard(40, "wake storm set-eq single"):
         expected, received, got = _wake_storm_payload(
-            rc.go, lambda m: (rc.go(m), rc.run()), N)
+            rc.go, lambda m: (rc.fiber(m), rc.run()), N)
     missing = expected - received
     assert not missing, "%d readers got wrong/dropped payload: missing %r" % (
         len(missing), list(missing)[:5])
@@ -407,11 +407,11 @@ def test_deadline_heap_fires_in_order():
         # deadlines from 20ms..(20+N*6)ms, spawned in REVERSE so spawn order
         # != deadline order (the heap, not insertion order, must dominate).
         for i in reversed(range(N)):
-            rc.go(lambda i=i: waiter(i, 20 + i * 6))
-        rc.go(ready_waiter)
-        rc.go(feeder)
+            rc.fiber(lambda i=i: waiter(i, 20 + i * 6))
+        rc.fiber(ready_waiter)
+        rc.fiber(feeder)
     with hang_guard(20, "deadline order"):
-        rc.go(main); rc.run()
+        rc.fiber(main); rc.run()
     a, b = ready["socks"]; _drop_sock(a); _drop_sock(b)
     for r, w in pipes:
         _drop(r); os.close(w)
@@ -445,10 +445,10 @@ def main():
         rc.netpoll_unregister(r2); os.close(r2); os.close(w2); return
     def writer():
         rc.sched_yield(); rc.sched_yield(); os.write(w2, b"y")
-    rc.go(writer)
+    rc.fiber(writer)
     out["rv"] = rc.wait_fd(r2, READ, 1200)   # bounded so a stale arm = timeout 0
     rc.netpoll_unregister(r2); os.close(r2); os.close(w2)
-rc.go(main); rc.run()
+rc.fiber(main); rc.run()
 if out.get("skip"): sys.stdout.write("SKIP\n")
 elif out.get("rv"): sys.stdout.write("WOKE\n")
 else: sys.stdout.write("HUNG\n")
@@ -495,7 +495,7 @@ def main():
     a, b = socket.socketpair(); fd = a.fileno()
     def s1():
         rc.sched_yield(); rc.sched_yield(); b.send(b"X")
-    rc.go(s1); a.recv(1)
+    rc.fiber(s1); a.recv(1)
     b.close(); del a; gc.collect()        # GC-close WITHOUT unregister
     c, d = socket.socketpair()
     if c.fileno() != fd:
@@ -508,8 +508,8 @@ def main():
     def late():
         for _ in range(6): rc.sched_yield()
         d.send(b"Y"); rc.netpoll_unregister(d.fileno()); d.close()
-    rc.go(reader); rc.go(late)
-rc.go(main); rc.run()
+    rc.fiber(reader); rc.fiber(late)
+rc.fiber(main); rc.run()
 sys.stdout.write("SKIP\n" if out.get("skip") else ("HEALED\n" if out.get("rv") else "HUNG\n"))
 '''
     for _ in range(6):
@@ -545,12 +545,12 @@ def main():
         # would starve the pump; that is by design, see netpoll_poll docs).
         rc.sched_yield()
         os.write(w, b"abc")
-    rc.go(writer)
+    rc.fiber(writer)
     buf = bytearray(3)
     n = rc.fd_read(r, buf, 3)       # injected EAGAIN -> park -> wake -> read
     out["n"] = n; out["buf"] = bytes(buf)
     rc.netpoll_unregister(r); os.close(r); os.close(w)
-rc.go(main); rc.run()
+rc.fiber(main); rc.run()
 sys.stdout.write("OK %d %r\n" % (out.get("n", -1), out.get("buf")))
 '''
     p = _subproc(script, env_extra={"RUNLOOM_FAULT_FD_READ": "once:11"}, timeout=20)
@@ -580,7 +580,7 @@ def main():
         pass
     rc.netpoll_unregister(r); os.close(r)
     rc.netpoll_unregister(w); os.close(w)
-rc.go(main); rc.run()
+rc.fiber(main); rc.run()
 sys.stdout.write("OK %d\n" % out.get("n", -1))
 '''
     p = _subproc(script, env_extra={"RUNLOOM_FAULT_FD_WRITE": "once:11"}, timeout=20)
@@ -602,7 +602,7 @@ def main():
     except OSError as e:
         out["res"] = ("OSError", e.errno)
     rc.netpoll_unregister(r); os.close(r); os.close(w)
-rc.go(main); rc.run()
+rc.fiber(main); rc.run()
 sys.stdout.write("RES=%r\n" % (out.get("res"),))
 '''
     p = _subproc(script, env_extra={"RUNLOOM_FAULT_FD_READ": "always:5"}, timeout=20)
@@ -649,8 +649,8 @@ def main():
             c.close()
         except OSError as e:
             out["err"] = ("client", e.errno)
-    rc.go(server); rc.go(client)
-rc.go(main); rc.run()
+    rc.fiber(server); rc.fiber(client)
+rc.fiber(main); rc.run()
 sys.stdout.write("DONE err=%r echo=%r\n" % (out["err"], out["echo"]))
 '''
     p = _subproc(script, env_extra={site: "once:%d" % errno_code}, timeout=25)
@@ -666,7 +666,7 @@ sys.stdout.write("DONE err=%r echo=%r\n" % (out["err"], out["echo"]))
 def test_signal_interrupts_parked_wait_fd():
     # An alarm handler that raises must propagate out of the cooperative wait_fd
     # through the parked fiber's own stack (CLAUDE.md "signals deliver INTO the
-    # parked goroutine").  Subprocess: setitimer is process-global.
+    # parked fiber").  Subprocess: setitimer is process-global.
     script = r'''
 import sys, os, signal; sys.path.insert(0, "src")
 import runloom_c as rc
@@ -685,7 +685,7 @@ def main():
     except BaseException as e:
         out["res"] = ("other", type(e).__name__)
     rc.netpoll_unregister(r); os.close(r); os.close(w)
-rc.go(main); rc.run()
+rc.fiber(main); rc.run()
 sys.stdout.write("RES=%s\n" % (out.get("res"),))
 '''
     p = _subproc(script, timeout=20)
@@ -718,7 +718,7 @@ def main():
         out["res"] = ("other", type(e).__name__)
     rc.netpoll_unregister(a.fileno()); a.close()
     rc.netpoll_unregister(b.fileno()); b.close()
-rc.go(main); rc.run()
+rc.fiber(main); rc.run()
 sys.stdout.write("RES=%s\n" % (out.get("res"),))
 '''
     p = _subproc(script, timeout=20)
@@ -750,11 +750,11 @@ def test_many_never_ready_parks_dont_starve_burner():
 
     def main():
         for i in range(60):
-            rc.go(lambda i=i: parker(i))
-        rc.go(burner)
+            rc.fiber(lambda i=i: parker(i))
+        rc.fiber(burner)
     with hang_guard(15, "no-starve overlap"):
         with assert_faster_than(2.0, "60 parks + 200 burns overlap"):
-            rc.go(main); rc.run()
+            rc.fiber(main); rc.run()
     for r, w in holders:
         _drop(r); os.close(w)
     assert progress["burns"] == 200, "burner starved (%d/200)" % progress["burns"]
@@ -781,7 +781,7 @@ def test_ready_fd_returns_fast_amid_idle_parkers():
         def feeder():
             rc.sched_yield(); rc.sched_yield()
             b.send(b"!")
-        rc.go(feeder)
+        rc.fiber(feeder)
         # let the idle fibers park first so their deadlines are live in the heap
         for _ in range(6):
             rc.sched_yield()
@@ -795,11 +795,11 @@ def test_ready_fd_returns_fast_amid_idle_parkers():
 
     def main():
         for i in range(40):
-            rc.go(lambda i=i: idle(i))
-        rc.go(quick)
+            rc.fiber(lambda i=i: idle(i))
+        rc.fiber(quick)
     with hang_guard(15, "quick amid idle"):
         with assert_faster_than(3.0, "ready fd return amid idle parkers"):
-            rc.go(main); rc.run()
+            rc.fiber(main); rc.run()
     a, b = res["socks"]; _drop_sock(a); _drop_sock(b)
     for r, w in holders:
         _drop(r); os.close(w)
@@ -830,9 +830,9 @@ def test_iouring_concurrent_file_io_drains_eventfd():
 
     def main():
         for i in range(N):
-            rc.go(lambda i=i: one(i))
+            rc.fiber(lambda i=i: one(i))
     with hang_guard(40, "iouring concurrent file io"):
-        rc.go(main); rc.run()
+        rc.fiber(main); rc.run()
     assert sum(ok) == N, "%d/%d file round-trips ok (eventfd drain lost a CQE?)" % (sum(ok), N)
 
 
@@ -843,10 +843,10 @@ def test_iouring_loop_mode_file_io_subprocess():
     # EPOLLEXCLUSIVE in the shared epoll (the documented hang hazard -- the loop
     # idle path must drain the global ring after loop_wait).  Bounded; assert it
     # completes, no hang.
-    # NB: ok is a per-goroutine bytearray, NOT a shared `ok[0] += 1` -- with the GIL
-    # off the read-modify-write of a shared counter from 12 M:N goroutines LOSES
+    # NB: ok is a per-fiber bytearray, NOT a shared `ok[0] += 1` -- with the GIL
+    # off the read-modify-write of a shared counter from 12 M:N fibers LOSES
     # increments (a lost update under load made this assert LOOP_OK 11 != 12 even
-    # though every file round-trip succeeded).  One slot per goroutine, single
+    # though every file round-trip succeeded).  One slot per fiber, single
     # writer each, summed at the end (the race-free counter rule, CLAUDE.md).
     script = r'''
 import sys, os, tempfile; sys.path.insert(0, "src")
@@ -913,7 +913,7 @@ def test_tcpconn_eof_returns_empty():
     a, b = socket.socketpair(); a.setblocking(False); b.setblocking(False)
     hold["a"], hold["b"] = a, b
     with hang_guard(15, "tcpconn eof"):
-        rc.go(conn_side); rc.go(peer); rc.run()
+        rc.fiber(conn_side); rc.fiber(peer); rc.run()
     rc.netpoll_unregister(a.fileno())   # a.fileno() owned by the TCPConn (now GC'd)
     assert res.get("eof") == b"", "EOF did not return empty bytes: %r" % res.get("eof")
 
@@ -956,7 +956,7 @@ def test_tcpconn_large_framed_transfer():
     hold["port"] = raw.getsockname()[1]; raw.detach()
     hold["lstn"] = lstn
     with hang_guard(40, "tcpconn large transfer"):
-        rc.go(server); rc.go(client); rc.run()
+        rc.fiber(server); rc.fiber(client); rc.run()
     assert res.get("recv_len") == SIZE, "short transfer: %r/%d" % (res.get("recv_len"), SIZE)
     assert res.get("recv_ok") is True, "4MB transfer corrupted"
 
@@ -1008,7 +1008,7 @@ def test_tcpconn_many_concurrent_connections_mn():
         assert g == struct.pack(">Q", i), "client %d got wrong echo %r" % (i, g)
 
 
-# FINDING: serve(handler=None) -- the tstate-free all-C echo path (mn_go_c C
+# FINDING: serve(handler=None) -- the tstate-free all-C echo path (mn_fiber_c C
 # accept loop + per-conn runloom_io_c_echo fibers, with the io_uring multishot
 # recv) -- DEADLOCKS/lost-wakes intermittently under concurrent M:N connections,
 # while the Python-handler serve path with the IDENTICAL client load never does.
@@ -1090,7 +1090,7 @@ def test_serve_requires_mn_single_thread_refuses():
         except RuntimeError as e:
             res["res"] = ("RuntimeError", str(e))
     with hang_guard(10, "serve single-thread refuse"):
-        rc.go(main); rc.run()
+        rc.fiber(main); rc.run()
     assert isinstance(res.get("res"), tuple), "serve() did not refuse single-thread: %r" % res.get("res")
     assert "M:N" in res["res"][1] or "hub" in res["res"][1]
 
@@ -1109,7 +1109,7 @@ def test_serve_rejects_non_callable_handler():
             # either way a non-callable must not silently serve.
             res["res"] = "RuntimeError"
     with hang_guard(10, "serve non-callable"):
-        rc.go(main); rc.run()
+        rc.fiber(main); rc.run()
     assert res.get("res") in ("TypeError", "RuntimeError"), (
         "non-callable handler not rejected: %r" % res.get("res"))
 
@@ -1169,7 +1169,7 @@ def test_close_socket_while_parked_wakes_recv():
     c = rc.TCPConn(a.fileno())
     hold["c"], hold["b"] = c, b
     with hang_guard(15, "close while parked"):
-        rc.go(reader); rc.go(closer); rc.run()
+        rc.fiber(reader); rc.fiber(closer); rc.run()
     _drop_sock(b)
     # recv returns b"" (cancel_fd-woken recv re-reads -> EOF/empty) or raises
     # OSError; either is acceptable, the point is it did NOT hang.
@@ -1196,9 +1196,9 @@ def test_cancel_fd_wakes_all_waiters_on_one_fd():
     with hang_guard(15, "cancel_fd all waiters"):
         def main():
             for i in range(K):
-                rc.go(lambda i=i: waiter(i))
-            rc.go(canceller)
-        rc.go(main); rc.run()
+                rc.fiber(lambda i=i: waiter(i))
+            rc.fiber(canceller)
+        rc.fiber(main); rc.run()
     _drop(r); os.close(w)
     woken = sum(1 for v in res if v == CANCELLED)
     assert woken == K, "cancel_fd woke only %d/%d waiters on the shared fd" % (woken, K)
@@ -1224,7 +1224,7 @@ def test_drain_parked_cancels_leftover_loops():
         rc.netpoll_cancel_fd(hold["fds"][0])
 
     with hang_guard(15, "drain leftover"):
-        rc.go(parker); rc.go(waker); rc.run()
+        rc.fiber(parker); rc.fiber(waker); rc.run()
     r, w = hold["fds"]; _drop(r); os.close(w)
     assert res.get("rv") == CANCELLED
     # a fresh run() afterward must work (no inherited wedge)
@@ -1268,7 +1268,7 @@ def test_many_distinct_fds_mixed_ready_and_timeout():
 
     def main():
         for i in range(N):
-            rc.go(lambda i=i: reader(i))
+            rc.fiber(lambda i=i: reader(i))
         # Yield enough times that every reader has parked before we send, so the
         # test measures level-ready delivery, not a park-after-send race.
         for _ in range(8):
@@ -1276,7 +1276,7 @@ def test_many_distinct_fds_mixed_ready_and_timeout():
         for i in range(0, N, 2):     # make every even fd ready
             pairs[i][1].send(b"!")
     with hang_guard(40, "many fds mixed"):
-        rc.go(main); rc.run()
+        rc.fiber(main); rc.run()
     for a, b in pairs:
         _drop_sock(a); _drop_sock(b)
     # The lost-wake property: EVERY even (data-bearing) reader must have woken
@@ -1295,7 +1295,7 @@ def test_many_distinct_fds_mixed_ready_and_timeout():
 
 # ==========================================================================
 # 15. foreign OS thread: netpoll_unregister / release_if_idle must be safe to
-#     call from a non-goroutine thread (the GC / close-hook can run anywhere).
+#     call from a non-fiber thread (the GC / close-hook can run anywhere).
 # ==========================================================================
 def test_netpoll_unregister_from_foreign_thread_safe():
     # netpoll_unregister / release_if_idle are pure cache/epoll_ctl ops with no
@@ -1423,7 +1423,7 @@ def test_netpoll_poll_delivers_readiness_on_sleep0():
     a, b = socket.socketpair(); a.setblocking(False); b.setblocking(False)
     hold["a"], hold["b"] = a, b
     with hang_guard(15, "netpoll_poll sleep0"):
-        rc.go(reader); rc.go(driver); rc.run()
+        rc.fiber(reader); rc.fiber(driver); rc.run()
     _drop_sock(a); _drop_sock(b)
     assert res.get("rv", 0) & READ, "netpoll_poll did not deliver readiness"
     assert res.get("data") == b"P"
@@ -1534,13 +1534,13 @@ def test_cancel_fd_noop_on_idle_and_bad_fd():
         def feeder():
             rc.sched_yield(); rc.sched_yield()
             b.send(b"k")
-        rc.go(parker); rc.go(feeder)
+        rc.fiber(parker); rc.fiber(feeder)
         return res, a, b
     with hang_guard(10, "cancel_fd no-op"):
         box = {}
         def main():
             box["v"] = f()
-        rc.go(main); rc.run()
+        rc.fiber(main); rc.run()
     res, a, b = box["v"]
     _drop_sock(a); _drop_sock(b)
     assert res.get("rv", 0) & READ, "cancel_fd no-ops corrupted the fd table (later wait lost)"
@@ -1569,7 +1569,7 @@ def test_release_if_idle_is_noop_while_parked():
     a, b = socket.socketpair(); a.setblocking(False); b.setblocking(False)
     hold["a"], hold["b"] = a, b
     with hang_guard(15, "release_if_idle while parked"):
-        rc.go(parker); rc.go(feeder); rc.run()
+        rc.fiber(parker); rc.fiber(feeder); rc.run()
     _drop_sock(a); _drop_sock(b)
     assert box.get("rv", 0) & READ, (
         "release_if_idle DEL'd a LIVE arm -> the parked reader lost its wake")
@@ -1599,7 +1599,7 @@ def test_epoll_err_wakes_a_read_only_waiter():
     a.setblocking(False)
     hold["a"], hold["b"] = a, b
     with hang_guard(20, "err wakes read-only waiter"):
-        rc.go(reader); rc.go(resetter); rc.run()
+        rc.fiber(reader); rc.fiber(resetter); rc.run()
     _drop_sock(a)
     assert res.get("rv", 0) & READ, "RST/ERR did not wake the READ-only waiter (rv=%r)" % res.get("rv")
 
@@ -1634,11 +1634,11 @@ def test_cancel_fd_wakes_both_directions_on_one_fd():
     hold["a"], hold["b"] = a, b
     with hang_guard(15, "cancel both directions"):
         def main():
-            rc.go(read_waiter)
+            rc.fiber(read_waiter)
             rc.sched_yield()
-            rc.go(write_waiter)
-            rc.go(canceller)
-        rc.go(main); rc.run()
+            rc.fiber(write_waiter)
+            rc.fiber(canceller)
+        rc.fiber(main); rc.run()
     _drop_sock(a); _drop_sock(b)
     assert res.get("r") == CANCELLED, "READ waiter not cancelled: %r" % res.get("r")
     assert res.get("w") == CANCELLED, "WRITE waiter not cancelled: %r" % res.get("w")
@@ -1673,7 +1673,7 @@ def test_raw_tcp_send_recv_large_real_eagain_byte_exact():
     a, b = socket.socketpair(); a.setblocking(False); b.setblocking(False)
     hold["a"], hold["b"] = a, b
     with hang_guard(30, "raw tcp_send/recv 2MB"):
-        rc.go(sender); rc.go(receiver); rc.run()
+        rc.fiber(sender); rc.fiber(receiver); rc.run()
     _drop_sock(a); _drop_sock(b)
     assert res.get("sent") == SIZE, "tcp_send short: %r/%d" % (res.get("sent"), SIZE)
     assert res.get("recv_len") == SIZE, "tcp_recv short: %r/%d" % (res.get("recv_len"), SIZE)
@@ -1788,10 +1788,10 @@ def test_netpoll_poll_drains_many_parked_set_equality():
 
     def main():
         for i in range(N):
-            rc.go(lambda i=i: reader(i))
-        rc.go(driver)
+            rc.fiber(lambda i=i: reader(i))
+        rc.fiber(driver)
     with hang_guard(30, "netpoll_poll fan-out"):
-        rc.go(main); rc.run()
+        rc.fiber(main); rc.run()
     expected = {struct.pack(">I", i) for i in range(N)}
     received = {g for g in got if g is not None}
     for a, b in pairs:
@@ -1849,9 +1849,9 @@ def test_deadline_park_survives_a_netpoll_poll_drain():
             rc.sched_yield()
 
     def main():
-        rc.go(timed); rc.go(ready); rc.go(driver)
+        rc.fiber(timed); rc.fiber(ready); rc.fiber(driver)
     with hang_guard(15, "deadline survives poll"):
-        rc.go(main); rc.run()
+        rc.fiber(main); rc.run()
     r, w = hold["timed"]; _drop(r); os.close(w)
     a, b = hold["ready"]; _drop_sock(a); _drop_sock(b)
     assert res.get("timed_rv") == 0, "timed park did not expire to 0 across a poll: %r" % res.get("timed_rv")
@@ -1898,12 +1898,12 @@ def test_fd_read_partial_and_large_fd_write_real_park():
             sub["read_ok"] = (bytes(got) == payload)
             sub["read_len"] = len(got)
 
-        rc.go(writer); rc.go(reader)
+        rc.fiber(writer); rc.fiber(reader)
         res["sub"] = sub
         res["_fds"] = (r2, w2)
 
     with hang_guard(20, "fd_read/write real park"):
-        rc.go(main); rc.run()
+        rc.fiber(main); rc.run()
     r2, w2 = res["_fds"]
     rc.netpoll_unregister(r2); os.close(r2)
     rc.netpoll_unregister(w2); os.close(w2)
@@ -1954,7 +1954,7 @@ def main():
         out["res"] = ("OSError", e.errno)
     except Exception as e:
         out["res"] = ("wrong", type(e).__name__)
-rc.go(main); rc.run()
+rc.fiber(main); rc.run()
 sys.stdout.write("SKIP\n" if out.get("skip") else "RES=%r\n" % (out.get("res"),))
 '''
     p = _subproc(script, timeout=25)
@@ -1997,7 +1997,7 @@ def test_tcpconn_accept_loop_recv_send_roundtrip_single_thread():
     hold["port"] = raw.getsockname()[1]; raw.detach()
     hold["lstn"] = lstn
     with hang_guard(20, "tcpconn single-thread roundtrip"):
-        rc.go(server); rc.go(client); rc.run()
+        rc.fiber(server); rc.fiber(client); rc.run()
     assert res.get("server_got") == b"hello-rt", "server recv wrong: %r" % res.get("server_got")
     assert res.get("client_got") == b"reply:hello-rt", "client recv wrong: %r" % res.get("client_got")
 

@@ -42,7 +42,7 @@ def _drive(fn):
         except BaseException as e:   # noqa: BLE001
             box[1] = e
 
-    runloom_c.go(runner)
+    runloom_c.fiber(runner)
     runloom_c.run()
     if box[1] is not None:
         raise box[1]
@@ -81,7 +81,7 @@ class TestTCPEcho(unittest.TestCase):
                 conn.sendall(data[::-1])
                 conn.close()
 
-            runloom_c.go(server)
+            runloom_c.fiber(server)
             cli = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             cli.connect(addr)
             n = cli.send(b"hello-world")
@@ -142,7 +142,7 @@ class TestTCPEcho(unittest.TestCase):
                     received["n"] += len(chunk)
                 conn.close()
 
-            runloom_c.go(server)
+            runloom_c.fiber(server)
             cli = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             cli.connect(addr)
             cli.sendall(payload)
@@ -175,8 +175,8 @@ class TestTCPEcho(unittest.TestCase):
                 c.connect(addr)
                 c.close()
 
-            runloom_c.go(acceptor)
-            runloom_c.go(connector)
+            runloom_c.fiber(acceptor)
+            runloom_c.fiber(connector)
             t0 = time.monotonic()
             while "accepted" not in order and time.monotonic() - t0 < 5:
                 runloom.sleep(0.005)
@@ -206,7 +206,7 @@ class TestUDP(unittest.TestCase):
                 got["data"] = data
                 got["peer_ok"] = peer[0] == "127.0.0.1"
 
-            runloom_c.go(receiver)
+            runloom_c.fiber(receiver)
             time.sleep(0.01)
             s2.sendto(b"datagram", addr1)
             t0 = time.monotonic()
@@ -233,7 +233,7 @@ class TestSendmsgRecvmsg(unittest.TestCase):
                 got["data"] = data
                 got["anc"] = ancdata
 
-            runloom_c.go(receiver)
+            runloom_c.fiber(receiver)
             time.sleep(0.01)
             n = b.sendmsg([b"hello", b"-msg"])
             t0 = time.monotonic()
@@ -274,7 +274,7 @@ class TestSendmsgRecvmsg(unittest.TestCase):
                 got["msg"] = msg
                 got["fds"] = list(fds)
 
-            runloom_c.go(receiver)
+            runloom_c.fiber(receiver)
             time.sleep(0.01)
             b.sendmsg([b"fd!"],
                       [(socket.SOL_SOCKET, socket.SCM_RIGHTS,
@@ -324,7 +324,7 @@ class TestFaultInjection(unittest.TestCase):
                                 _linger_struct())
                 conn.close()
 
-            runloom_c.go(server)
+            runloom_c.fiber(server)
             c = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             # The RST can race any step: connect (handshake then abort),
             # send (write to a reset peer) or recv (notice the RST).  Catch
@@ -418,7 +418,7 @@ class TestSendfile(unittest.TestCase):
                     received["buf"] += chunk
                 conn.close()
 
-            runloom_c.go(server)
+            runloom_c.fiber(server)
             cli = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             cli.connect(addr)
             f = make_file()
@@ -512,8 +512,8 @@ class TestSendfile(unittest.TestCase):
                     ticks["n"] += 1
                     runloom.sleep(0.002)
 
-            runloom_c.go(server)
-            runloom_c.go(ticker)
+            runloom_c.fiber(server)
+            runloom_c.fiber(ticker)
             cli = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             cli.connect(addr)
             with open(path, "rb") as f:
@@ -551,7 +551,7 @@ class TestRecvfromInto(unittest.TestCase):
                 tx.sendto(b"datagram-payload", addr)
                 tx.close()
 
-            runloom_c.go(sender)
+            runloom_c.fiber(sender)
             buf = bytearray(64)
             n, peer = rx.recvfrom_into(buf)
             rx.close()
@@ -573,7 +573,7 @@ class TestRecvfromInto(unittest.TestCase):
                 tx.sendto(b"0123456789", addr)
                 tx.close()
 
-            runloom_c.go(sender)
+            runloom_c.fiber(sender)
             buf = bytearray(64)
             n, _ = rx.recvfrom_into(buf, 4)
             rx.close()
@@ -603,8 +603,8 @@ class TestRecvfromInto(unittest.TestCase):
                 tx.sendto(b"ping", addr)
                 tx.close()
 
-            runloom_c.go(receiver)
-            runloom_c.go(sender)
+            runloom_c.fiber(receiver)
+            runloom_c.fiber(sender)
             t0 = time.monotonic()
             while "got" not in order and time.monotonic() - t0 < 5:
                 runloom.sleep(0.005)

@@ -2,7 +2,7 @@
 
 coro.c is the portable stackful-coroutine backend (fcontext on x86_64 here):
 the guarded-stack map/unmap, the per-thread + global stack depot, the test
-stack ARENA, the madvise RSS-reclaim policy, the bulk/go_n placement-init +
+stack ARENA, the madvise RSS-reclaim policy, the bulk/fiber_n placement-init +
 fresh-flag deferred-materialize fast path, the prewarm one-shot + daemon, the
 copy-on-grow path, and the invariant sanitizer.
 
@@ -30,7 +30,7 @@ Regions driven (uncovered coro.c line -> how):
             madvise) and is cached.
   L575,594  RUNLOOM_STACK_MADV=dontneed -> flag resolves to MADV_DONTNEED and
             every pooled-stack release madvise's the body.
-  L1500-1502 go_n fresh-flag DEFERRED materialize -> RUNLOOM_GON_BULK=1 +
+  L1500-1502 fiber_n fresh-flag DEFERRED materialize -> RUNLOOM_GON_BULK=1 +
             RUNLOOM_GON_FRESH=1 + RUNLOOM_STACK_ARENA=1: bulk_init skips the
             per-g asm_make_ctx and marks each coro `fresh`; the first
             runloom_coro_resume on the owning hub materializes the frame.
@@ -84,7 +84,7 @@ PY = sys.executable
 
 # coro.c's POSIX stack pool / arena / madvise / grow all live behind
 # RUNLOOM_HAVE_FCONTEXT|UCONTEXT (the guard-page backends).  The Coro-driven
-# bits work without the GIL off, but the go_n/mn_go workloads need the M:N
+# bits work without the GIL off, but the fiber_n/mn_go workloads need the M:N
 # scheduler -> skip the whole file on a GIL build (matches the other cov suites).
 pytestmark = pytest.mark.skipif(not FT, reason="coro.c stack paths need the M:N / FT build")
 
@@ -208,10 +208,10 @@ def test_stack_madv_dontneed_eager_reclaim():
 
 
 # --------------------------------------------------------------------------
-# L1500-1502 : go_n fresh-flag DEFERRED materialize at first resume.
+# L1500-1502 : fiber_n fresh-flag DEFERRED materialize at first resume.
 # --------------------------------------------------------------------------
-def test_go_n_fresh_flag_deferred_materialize():
-    """RUNLOOM_GON_BULK=1 takes go_n's bulk-arena fast path; RUNLOOM_GON_FRESH=1
+def test_fiber_n_fresh_flag_deferred_materialize():
+    """RUNLOOM_GON_BULK=1 takes fiber_n's bulk-arena fast path; RUNLOOM_GON_FRESH=1
     makes runloom_coro_bulk_init SKIP the per-g asm_make_ctx (the scattered
     stack-top page fault) and mark each coro `fresh`, leaving self.sp/caller.sp
     zero.  The first runloom_coro_resume on the OWNING hub then materializes the
@@ -224,8 +224,8 @@ import runloom
 N = 600
 ran = bytearray(N)            # one writer per slot -> race-free under M:N
 def main():
-    # go_n(fn, n, stack_size, indexed=True) -> fn(i) per fiber
-    rc.go_n(lambda i: ran.__setitem__(i, 1), N, 0, True)
+    # fiber_n(fn, n, stack_size, indexed=True) -> fn(i) per fiber
+    rc.fiber_n(lambda i: ran.__setitem__(i, 1), N, 0, True)
     for _ in range(150):
         rc.sched_yield()      # let every hub resume its bulk fibers
 runloom.run(2, main)

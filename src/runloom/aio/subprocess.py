@@ -126,7 +126,7 @@ class _SubprocessTransport(asyncio.SubprocessTransport):
                     rc = -1
             self._process_exited(rc)
 
-        runloom_c.go(reaper)
+        runloom_c.fiber(reaper)
 
     async def _connect_pipes(self):
         # Mirror asyncio.base_subprocess._connect_pipes: await the loop's pipe

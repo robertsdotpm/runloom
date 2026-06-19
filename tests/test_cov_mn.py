@@ -2,14 +2,14 @@
 and its mn_sched_*.c.inc fragments).
 
 Half the M:N scheduler's lines live behind env-gated modes the normal corpus
-never enables: the controlled-replay / PCT barrier, go_n bulk spawn, the sysmon
+never enables: the controlled-replay / PCT barrier, fiber_n bulk spawn, the sysmon
 stalled-hub detector, the DETACHED-tstate handoff rescue, ATTACHED preemption,
 the idle-condvar-vs-nanosleep wake, the stack-park idle sweep, world-yield,
 hub-affinity, the io_uring-as-loop backend, and the gated-off migratable-mode
 warn path.  Each `test_mn_mode_*` runs the shared diverse workload
 (tests/cov_workload.py) in a subprocess with that mode's env set, driving its C
 paths; the in-process tests cover the default-scheduler surfaces (varied hub
-counts, go_n bulk, serve(), deadlock-raise, and the hubinfo/diag introspection).
+counts, fiber_n bulk, serve(), deadlock-raise, and the hubinfo/diag introspection).
 
 The subprocess assertion is "the mode ran the workload to completion (exit 0,
 WORKLOAD_OK) without crashing or hanging" -- the coverage benefit is the C lines
@@ -90,22 +90,22 @@ def test_mn_varied_hub_counts(hubs):
             finally:
                 wg.done()
         for _ in range(N):
-            runloom.go(w)        # dispatches: single-thread go for run(1), mn_go for run(N>1)
+            runloom.fiber(w)        # dispatches: single-thread go for run(1), mn_go for run(N>1)
         wg.wait()
     with hang_guard(40, "mn hubs=%d" % hubs):
         runloom.run(hubs, main)
 
 
 @pytest.mark.skipif(not FT, reason="M:N needs GIL-disabled build")
-def test_mn_go_n_bulk_indexed():
-    # go_n is the bulk/arena spawn path (mn_sched_init_fini.c.inc).
+def test_mn_fiber_n_bulk_indexed():
+    # fiber_n is the bulk/arena spawn path (mn_sched_init_fini.c.inc).
     seen = bytearray(256)
     def worker(i):
         if 0 <= i < 256:
             seen[i] = 1
     def main():
-        rc.go_n(worker, 256, 0, True)    # indexed bulk spawn
-    with hang_guard(40, "go_n bulk"):
+        rc.fiber_n(worker, 256, 0, True)    # indexed bulk spawn
+    with hang_guard(40, "fiber_n bulk"):
         rc.mn_init(4); rc.mn_go(main); rc.mn_run(); rc.mn_fini()
     assert sum(seen) == 256
 

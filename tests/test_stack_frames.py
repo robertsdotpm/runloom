@@ -84,7 +84,7 @@ import select
 def w():
     for _ in range(50):
         select.select([], [], [], 0)
-runloom_c.go(w); runloom_c.run()
+runloom_c.fiber(w); runloom_c.run()
 print("PASS")
 """)
 
@@ -98,7 +98,7 @@ def w():
         runloom.sleep(0.0001)
 runloom.mn_init(2)
 for _ in range(6):
-    runloom_c.mn_go(w)
+    runloom_c.mn_fiber(w)
 runloom.mn_run(); runloom.mn_fini()
 print("PASS")
 """)
@@ -113,7 +113,7 @@ def w():
     assert r == [a], (r, wl, x)
     assert a.recv(1) == b"x"
 print("READY")  # marker before
-runloom_c.go(w); runloom_c.run()
+runloom_c.fiber(w); runloom_c.run()
 print("PASS")
 """)
 
@@ -124,7 +124,7 @@ a, b = socket.socketpair()
 def w():
     r, wl, x = select.select([], [a], [], 1.0)
     assert wl == [a], (r, wl, x)
-runloom_c.go(w); runloom_c.run()
+runloom_c.fiber(w); runloom_c.run()
 print("PASS")
 """)
 
@@ -139,7 +139,7 @@ def w():
     dt = time.monotonic() - t0
     assert (r, wl, x) == ([], [], []), (r, wl, x)
     assert dt >= 0.15, dt
-runloom_c.go(w); runloom_c.run()
+runloom_c.fiber(w); runloom_c.run()
 print("PASS")
 """)
 
@@ -159,8 +159,8 @@ def canary():
 def waiter():
     r, wl, x = select.select([a], [], [], 0.3)   # never readable -> parks 0.3s
     assert (r, wl, x) == ([], [], []), (r, wl, x)
-runloom_c.go(canary)
-runloom_c.go(waiter)
+runloom_c.fiber(canary)
+runloom_c.fiber(waiter)
 runloom_c.run()
 assert ticks[0] >= 10, ticks[0]   # cooperative: canary ran while waiter parked
 print("PASS ticks=%d" % ticks[0])
@@ -198,7 +198,7 @@ class TestStdlibFrameFootprint(unittest.TestCase):
             "import runloom_c\n"
             "def worker():\n"
             "    %s\n"
-            "runloom_c.go(worker, stack_size=2*1024*1024)\n"
+            "runloom_c.fiber(worker, stack_size=2*1024*1024)\n"
             "runloom_c.run()\n"
             "print('HWM', runloom_c.stats().get('stack_hwm', 0))\n"
             % (os.path.join(REPO, "src"), op_src)
@@ -263,7 +263,7 @@ class TestStdlibFrameFootprint(unittest.TestCase):
 import ssl
 def w():
     ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)   # first context, on a fiber
-runloom_c.go(w); runloom_c.run()
+runloom_c.fiber(w); runloom_c.run()
 print("PASS")
 """)
 
@@ -292,7 +292,7 @@ def w():
     except RecursionError:
         ok = "clean"
     assert ok == "clean", ok
-runloom_c.go(w); runloom_c.run()
+runloom_c.fiber(w); runloom_c.run()
 print("PASS")
 """)
 
@@ -311,7 +311,7 @@ def w():
     except RecursionError:
         ok = "clean"
     assert ok == "clean", ok
-runloom_c.go(w); runloom_c.run()
+runloom_c.fiber(w); runloom_c.run()
 print("PASS")
 """)
 
@@ -323,7 +323,7 @@ SRC = "(" * 100 + "1" + ")" * 100
 def w():
     code = compile(SRC, "<s>", "eval")   # auto-offloaded inside a fiber
     assert eval(code) == 1
-runloom_c.go(w); runloom_c.run()
+runloom_c.fiber(w); runloom_c.run()
 print("PASS")
 """)
 
@@ -335,7 +335,7 @@ SRC = "(" * 100 + "1" + ")" * 100
 def w():
     tree = ast.parse(SRC)
     assert type(tree).__name__ == "Module"
-runloom_c.go(w); runloom_c.run()
+runloom_c.fiber(w); runloom_c.run()
 print("PASS")
 """)
 

@@ -11,7 +11,7 @@ import runloom_c
 def _run_in_sched(*fibers):
     """Spawn each callable, run scheduler to completion."""
     for g in fibers:
-        runloom_c.go(g)
+        runloom_c.fiber(g)
     runloom_c.run()
 
 
@@ -410,22 +410,22 @@ if __name__ == "__main__":
 
 
 class TestNoGoroutineGuard(unittest.TestCase):
-    """A blocking channel op with NO goroutine context (top-level call or a
+    """A blocking channel op with NO fiber context (top-level call or a
     foreign OS thread) must raise RuntimeError, NOT busy-spin forever.  Audit
     hang: park_waiter with current_g==NULL spun (its coro_yield is a no-op and
     wake_waiter can't wake a NULL g).  Matches runloom.sync's
-    current_g()-is-None guard.  Non-blocking ops + ops inside a goroutine are
+    current_g()-is-None guard.  Non-blocking ops + ops inside a fiber are
     unaffected (covered by the other tests in this module)."""
 
     def test_toplevel_blocking_recv_raises(self):
         ch = runloom_c.Chan()
         with self.assertRaises(RuntimeError):
-            ch.recv()                      # empty + no goroutine -> would block
+            ch.recv()                      # empty + no fiber -> would block
 
     def test_toplevel_blocking_send_raises(self):
         ch = runloom_c.Chan()              # unbuffered, no receiver
         with self.assertRaises(RuntimeError):
-            ch.send(1)                     # would block, no goroutine
+            ch.send(1)                     # would block, no fiber
 
     def test_foreign_thread_blocking_recv_raises(self):
         import threading

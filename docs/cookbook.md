@@ -24,7 +24,7 @@ def main():
     results = runloom.Chan(N_JOBS)
 
     for _ in range(N_WORKERS):
-        runloom.go(lambda: worker(jobs, results))
+        runloom.fiber(lambda: worker(jobs, results))
 
     # Feed jobs
     for i in range(N_JOBS):
@@ -38,7 +38,7 @@ def main():
         total += v
     print("sum:", total)
 
-runloom.go(main)
+runloom.fiber(main)
 runloom.run(1)
 ```
 
@@ -70,13 +70,13 @@ def main():
     a, b = runloom.Chan(10), runloom.Chan(10)
     result = runloom.Chan(1)
 
-    runloom.go(lambda: stage1(a))
-    runloom.go(lambda: stage2(a, b))
-    runloom.go(lambda: stage3(b, result))
+    runloom.fiber(lambda: stage1(a))
+    runloom.fiber(lambda: stage2(a, b))
+    runloom.fiber(lambda: stage3(b, result))
 
     print(result.recv()[0])
 
-runloom.go(main)
+runloom.fiber(main)
 runloom.run(1)
 ```
 
@@ -93,14 +93,14 @@ def main():
     ch = runloom.Chan(100)
     PRODUCERS = 5
     for p in range(PRODUCERS):
-        runloom.go(lambda p=p: producer(p, ch))
+        runloom.fiber(lambda p=p: producer(p, ch))
 
     # Drain everything (sender count × items per sender)
     for _ in range(PRODUCERS * 10):
         prod_id, value = ch.recv()[0]
         print(prod_id, value)
 
-runloom.go(main)
+runloom.fiber(main)
 runloom.run(1)
 ```
 
@@ -126,11 +126,11 @@ def consumer(id, in_):
 
 def main():
     ch = runloom.Chan(10)
-    runloom.go(lambda: producer(ch))
+    runloom.fiber(lambda: producer(ch))
     for c in range(4):
-        runloom.go(lambda c=c: consumer(c, ch))
+        runloom.fiber(lambda c=c: consumer(c, ch))
 
-runloom.go(main)
+runloom.fiber(main)
 runloom.run(1)
 ```
 
@@ -155,13 +155,13 @@ def worker(done):
 def main():
     done = runloom.Chan(0)        # unbuffered; close to broadcast
     out = runloom.Chan(10)
-    runloom.go(lambda: worker(done))
+    runloom.fiber(lambda: worker(done))
 
     # ... do stuff with out ...
     runloom.sched_sleep(0.05)
     done.close()                    # wakes every recv on done
 
-runloom.go(main)
+runloom.fiber(main)
 runloom.run(1)
 ```
 
@@ -179,7 +179,7 @@ def with_timeout(ch, seconds):
     def fire():
         runloom.sched_sleep(seconds)
         timer.send(None)
-    runloom.go(fire)
+    runloom.fiber(fire)
 
     idx, payload = runloom.select([
         ("recv", ch),
@@ -194,7 +194,7 @@ def main():
     # Don't send anything to data; the timeout will fire
     print(with_timeout(data, 0.1))  # None
 
-runloom.go(main)
+runloom.fiber(main)
 runloom.run(1)
 ```
 
@@ -222,7 +222,7 @@ def main():
     finished = runloom.Chan(4)        # one slot per worker
 
     for _ in range(4):
-        runloom.go(lambda: worker(jobs, finished))
+        runloom.fiber(lambda: worker(jobs, finished))
 
     shutdown = threading.Event()
     signal.signal(signal.SIGINT, lambda *_: shutdown.set())
@@ -238,7 +238,7 @@ def main():
             finished.recv()
         print("clean shutdown")
 
-runloom.go(main)
+runloom.fiber(main)
 runloom.run(1)
 ```
 
@@ -254,7 +254,7 @@ def worker_thread():
         # ... cooperative work ...
         pass
     for _ in range(100):
-        runloom.go(task)
+        runloom.fiber(task)
     runloom.run(1)
 
 threads = [threading.Thread(target=worker_thread) for _ in range(4)]
@@ -287,7 +287,7 @@ def slow_op():
         sem.send(None)              # release
 
 for _ in range(20):
-    runloom.go(slow_op)
+    runloom.fiber(slow_op)
 runloom.run(1)
 ```
 
@@ -317,10 +317,10 @@ def producer(work):
 
 def main():
     work = runloom.Chan(1)
-    runloom.go(lambda: producer(work))
-    runloom.go(lambda: consumer(work))
+    runloom.fiber(lambda: producer(work))
+    runloom.fiber(lambda: consumer(work))
 
-runloom.go(main)
+runloom.fiber(main)
 runloom.run(1)
 ```
 
@@ -355,13 +355,13 @@ def serve(addr):
     try:
         while not done.is_set():
             conn, _ = srv.accept()
-            runloom.go(lambda c=conn: handle(c, done))
+            runloom.fiber(lambda c=conn: handle(c, done))
     except KeyboardInterrupt:
         done.set()
         srv.close()
 
 import threading
-runloom.go(lambda: serve(("127.0.0.1", 9000)))
+runloom.fiber(lambda: serve(("127.0.0.1", 9000)))
 runloom.run(1)
 ```
 
@@ -378,7 +378,7 @@ t.start()
 
 # After
 import runloom
-g = runloom.go(worker)             # plus runloom.run(1) at top level
+g = runloom.fiber(worker)             # plus runloom.run(1) at top level
 ```
 
 You go from 8 MB per thread (Linux default) to ~16 KB per fiber.
@@ -386,7 +386,7 @@ Spawn rate goes from ~10k/sec to ~1.7M/sec.
 
 ## Bridging runloom with `asyncio` libraries
 
-You can call `runloom.go(fn)` from inside an async coroutine -- the
+You can call `runloom.fiber(fn)` from inside an async coroutine -- the
 fiber runs concurrently with the awaiting code:
 
 ```python
@@ -398,7 +398,7 @@ def background_worker():
         runloom.sched_sleep(1.0)
 
 async def main():
-    runloom.go(background_worker)
+    runloom.fiber(background_worker)
     # ... your async code runs in parallel with the background fiber ...
     await asyncio.sleep(5)
 

@@ -43,7 +43,7 @@ def _drive(fn):
         except BaseException as e:   # noqa: BLE001
             box[1] = e
 
-    runloom_c.go(runner)
+    runloom_c.fiber(runner)
     runloom_c.run()
     if box[1] is not None:
         raise box[1]
@@ -65,7 +65,7 @@ def _sibling_counter(store, n=4, step=0.005):
         for _ in range(n):
             time.sleep(step)
             store.append(1)
-    runloom_c.go(sib)
+    runloom_c.fiber(sib)
 
 
 class TestSubprocessRun(unittest.TestCase):

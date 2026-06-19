@@ -61,8 +61,8 @@ def test_cyclic_two_fiber_deadlock_is_detected():
                 chB.recv()
                 chA.send(1)
 
-            runloom.go(fiber_a)
-            runloom.go(fiber_b)
+            runloom.fiber(fiber_a)
+            runloom.fiber(fiber_b)
         with pytest.raises(RuntimeError):
             runloom.run(2, main)
     _with_mode(2, body)
@@ -102,8 +102,8 @@ def test_channel_handoff_is_not_a_false_deadlock():
                 val = ch.recv()               # Go-style (value, ok) tuple
                 got.append(val[0] if isinstance(val, tuple) else val)
 
-            runloom.go(producer)
-            runloom.go(consumer)
+            runloom.fiber(producer)
+            runloom.fiber(consumer)
         runloom.run(2, main)                  # must NOT raise
         assert got == [42]
     _with_mode(2, body)
@@ -128,7 +128,7 @@ def test_busy_workload_no_false_fire():
                 wg.done()
 
             for i in range(64):
-                runloom.go(work, i)
+                runloom.fiber(work, i)
             wg.wait()
 
         runloom.run(4, main)                  # must NOT raise
@@ -160,8 +160,8 @@ def test_ping_pong_churn_no_false_fire():
                     up.recv()
                     down.send(1)
 
-            runloom.go(pinger)
-            runloom.go(ponger)
+            runloom.fiber(pinger)
+            runloom.fiber(ponger)
 
         runloom.run(2, main)                  # must NOT raise across the churn
         assert result == ["ping-done"]

@@ -74,7 +74,7 @@ def test_runs_after_optimize():
         def w(i):
             done[i] = 1
         for i in range(200):
-            runloom.go(w, i)
+            runloom.fiber(w, i)
 
     runloom.run(4, main)
     assert sum(done) == 200

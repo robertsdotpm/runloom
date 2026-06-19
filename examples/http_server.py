@@ -16,7 +16,7 @@ import os
 
 import runloom
 
-# Free-threaded build: fan goroutines across all cores (M:N scheduler).
+# Free-threaded build: fan fibers across all cores (M:N scheduler).
 HUBS = os.cpu_count() or 4
 
 runloom.monkey.patch()
@@ -40,7 +40,7 @@ def http_server(ready, n_requests):
     ready.send(s.getsockname()[1])        # tell main which port we got
     for _ in range(n_requests):
         conn, _ = s.accept()
-        runloom.go(serve_one, conn)          # one goroutine per connection
+        runloom.fiber(serve_one, conn)          # one fiber per connection
     s.close()
 
 def fetcher(fid, port, results):
@@ -49,12 +49,12 @@ def fetcher(fid, port, results):
 
 def main():
     ready = runloom.Chan(1)
-    runloom.go(http_server, ready, NUM_CLIENTS)
+    runloom.fiber(http_server, ready, NUM_CLIENTS)
     port = ready.recv()[0]
 
     results = runloom.Chan(NUM_CLIENTS)
     for fid in range(NUM_CLIENTS):
-        runloom.go(fetcher, fid, port, results)
+        runloom.fiber(fetcher, fid, port, results)
 
     for _ in range(NUM_CLIENTS):
         fid, body = results.recv()[0]

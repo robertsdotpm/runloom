@@ -77,7 +77,7 @@ class _LoopScheduleMixin(object):
     # ---- callback scheduling ----
     def call_soon(self, callback, *args, context=None):
         self._check_closed()
-        # Off the driver thread, go() would race the ready ring; route through
+        # Off the driver thread, fiber() would race the ready ring; route through
         # the thread-safe queue (the driver's keepalive runs it).
         if not self._can_spawn_here():
             return self.call_soon_threadsafe(callback, *args, context=context)
@@ -105,7 +105,7 @@ class _LoopScheduleMixin(object):
         # Roomier stack: call_soon delivers protocol callbacks (data_received,
         # pipe_data_received, ...) that can run deep C-recursive code (crypto),
         # which overflows the default 32 KB g-stack and SEGVs -- see _IO_STACK.
-        _go_io(runner)
+        _fiber_io(runner)
         return handle
 
     def call_soon_threadsafe(self, callback, *args, context=None):
@@ -117,7 +117,7 @@ class _LoopScheduleMixin(object):
         self._check_closed()
         # Thread-safe: may be called from ANY OS thread.  Enqueue under the
         # lock; the keepalive fiber on the loop thread drains and runs it.
-        # We do NOT runloom_c.go() here -- from a foreign thread that would
+        # We do NOT runloom_c.fiber() here -- from a foreign thread that would
         # spawn onto that thread's own (never-drained) scheduler.
         # _Handle captures copy_context() HERE on the calling thread (or honours
         # context=), so a contextvar set by the caller propagates to the drained
@@ -204,7 +204,7 @@ class _LoopScheduleMixin(object):
                     pass
         # Roomier stack: the keepalive runs call_soon_threadsafe callbacks
         # (_drain_ts_queue), which may be deep protocol/crypto callbacks.
-        _go_io(_keepalive)
+        _fiber_io(_keepalive)
 
     def call_later(self, delay, callback, *args, context=None):
         # Mirror asyncio: call_later is call_at(self.time() + delay, ...).
@@ -243,10 +243,10 @@ class _LoopScheduleMixin(object):
                     # can itself recurse if we're near the c_recursion limit.
                     sys.stderr.write("[runloom.aio] timer cb: %r\n" % (e,))
         if self._can_spawn_here():
-            _go_io(runner)
+            _fiber_io(runner)
         else:
             # Foreign thread: spawn the timer fiber on the loop's own thread.
-            self.call_soon_threadsafe(lambda: _go_io(runner))
+            self.call_soon_threadsafe(lambda: _fiber_io(runner))
         return handle
 
     # ---- I/O readers / writers (level-triggered, matches selector loops) ----

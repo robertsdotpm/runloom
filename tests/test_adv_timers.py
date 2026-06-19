@@ -22,7 +22,7 @@ def _run_single(fn):
     box = {}
     def main():
         box["r"] = fn()
-    rc.go(main)
+    rc.fiber(main)
     rc.run()
     return box.get("r")
 
@@ -207,11 +207,11 @@ def test_context_multiple_waiters_all_woken():
             ctx.done.recv()
             woke.append(i)
         for i in range(16):
-            rc.go(lambda i=i: waiter(i))
+            rc.fiber(lambda i=i: waiter(i))
         rc.sched_yield()                   # all park on ctx.done
         cancel()
     with hang_guard(15, "context broadcast"):
-        rc.go(f); rc.run()
+        rc.fiber(f); rc.run()
     assert len(woke) == 16, "cancel did not wake all %d done-waiters (got %d)" % (16, len(woke))
 
 

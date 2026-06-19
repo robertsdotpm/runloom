@@ -68,7 +68,7 @@ def test_backend_is_windows_pump():
 
 
 def test_pump_lockorder_soak():
-    """SESSIONS x {run(HUBS): WORKERS goroutines, each parking ITERS times in
+    """SESSIONS x {run(HUBS): WORKERS fibers, each parking ITERS times in
     wait_fd(READ, deadline) on its own fixed fd + allocation churn}.  Parked fds
     keep the pump polling (pool.lock held across the GIL re-attach); the re-parks
     contend pool.lock; the churn drives stop-the-world.  Healthy: each session
@@ -102,7 +102,7 @@ def test_pump_lockorder_soak():
             def main(done=done):
                 backend[0] = runloom_c.netpoll_backend()
                 for i in range(WORKERS):
-                    runloom.go(worker, done, fds[i], i)
+                    runloom.fiber(worker, done, fds[i], i)
 
             runloom.run(HUBS, main)
             completed = sum(done)

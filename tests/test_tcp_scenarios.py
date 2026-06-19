@@ -60,7 +60,7 @@ def _drive(*fibers):
         return runner
 
     for g in fibers:
-        runloom_c.go(wrap(g))
+        runloom_c.fiber(wrap(g))
     runloom_c.run()
     if box:
         raise box[0]
@@ -270,7 +270,7 @@ class TestManyConcurrentConnections(unittest.TestCase):
             port_holder[0] = _bound_port(listener)
             for _ in range(N):
                 conn = listener.accept()
-                runloom_c.go(handler(conn))   # one fiber per connection
+                runloom_c.fiber(handler(conn))   # one fiber per connection
             listener.close()
 
         def make_client(i):

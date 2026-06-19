@@ -60,9 +60,9 @@ def test_tcpconn_echo_roundtrip():
             out["reply"] = c.recv(64)
             c.close()
             lst.close()
-        rc.go(server); rc.go(client)
+        rc.fiber(server); rc.fiber(client)
     with hang_guard(15, "tcpconn echo"):
-        rc.go(main); rc.run()
+        rc.fiber(main); rc.run()
     assert out.get("reply") == b"echo:hi"
 
 
@@ -77,7 +77,7 @@ def test_tcpconn_connect_refused_raises():
         except OSError as e:
             out["r"] = type(e).__name__
     with hang_guard(15, "tcpconn refused"):
-        rc.go(f); rc.run()
+        rc.fiber(f); rc.run()
     assert out.get("r") in ("ConnectionRefusedError", "OSError"), out
 
 
@@ -93,9 +93,9 @@ def test_tcpconn_recv_after_peer_close_is_eof():
             c = rc.TCPConn.connect("127.0.0.1", port)
             out["recv"] = c.recv(64)                # peer closed -> b""
             c.close(); lst.close()
-        rc.go(server); rc.go(client)
+        rc.fiber(server); rc.fiber(client)
     with hang_guard(15, "tcpconn eof"):
-        rc.go(main); rc.run()
+        rc.fiber(main); rc.run()
     assert out.get("recv") == b""
 
 
@@ -116,9 +116,9 @@ def test_tcpconn_large_framed_transfer():
             c.send_all(payload)
             out["echo"] = _recv_exactly(c, SIZE)
             c.close(); lst.close()
-        rc.go(server); rc.go(client)
+        rc.fiber(server); rc.fiber(client)
     with hang_guard(30, "tcpconn large"):
-        rc.go(main); rc.run()
+        rc.fiber(main); rc.run()
     assert out.get("echo") == payload, "large transfer corrupted/truncated"
 
 
@@ -137,9 +137,9 @@ def test_tcpconn_recv_into_buffer():
             n = c.recv_into(buf, 5)
             out["n"] = n; out["buf"] = bytes(buf[:n])
             c.close(); lst.close()
-        rc.go(server); rc.go(client)
+        rc.fiber(server); rc.fiber(client)
     with hang_guard(15, "tcpconn recv_into"):
-        rc.go(main); rc.run()
+        rc.fiber(main); rc.run()
     assert out.get("buf") == b"ABCDE"
 
 
@@ -162,7 +162,7 @@ def test_tcpconn_many_concurrent_connections():
                     data = conn.recv(64)
                     conn.send_all(b"r:" + data)
                     conn.close()
-                rc.go(handle)
+                rc.fiber(handle)
 
         def client(i):
             try:
@@ -175,13 +175,13 @@ def test_tcpconn_many_concurrent_connections():
             finally:
                 wg.done()
 
-        rc.go(acceptor)
+        rc.fiber(acceptor)
         for i in range(N):
-            rc.go(lambda i=i: client(i))
+            rc.fiber(lambda i=i: client(i))
         wg.wait()
         lst.close()
     with hang_guard(40, "tcpconn concurrent"):
-        rc.go(main); rc.run()
+        rc.fiber(main); rc.run()
     assert sum(ok) == N, "%d/%d concurrent TCPConn echoes ok" % (sum(ok), N)
 
 

@@ -14,7 +14,7 @@ tests/test_tcp_faultinject.py reaches the TCPConn ones: strace -e inject= forces
 the very first recvfrom/sendto to return ECONNRESET/EPIPE (Linux only). The
 signal-interrupted-park arms are reached with a real raised SIGALRM handler
 landing on the parked fiber (CLAUDE.md: "signals deliver INTO the parked
-goroutine"); those run in a subprocess because setitimer is process-global.
+fiber"); those run in a subprocess because setitimer is process-global.
 
 The uncovered (#####) lines split into these reachability classes; each test
 names the source lines it makes live and the gate it satisfies.
@@ -239,7 +239,7 @@ def main():
             except BlockingIOError:
                 rc.sched_sleep(0.01)
         drained["done"] = True
-    rc.go(drainer)
+    rc.fiber(drainer)
     # First send() EAGAINs (buffer full) -> park WRITE (L325) -> drainer frees
     # space -> loop re-enters (L304) -> send succeeds -> break.
     res["sent"] = rc.tcp_send_once(a.fileno(), b"Z" * 4096)
@@ -249,7 +249,7 @@ def main():
     rc.netpoll_unregister(a.fileno()); a.close()
     rc.netpoll_unregister(b.fileno()); b.close()
 import faulthandler; faulthandler.dump_traceback_later(40, exit=True)
-rc.go(main); rc.run()
+rc.fiber(main); rc.run()
 faulthandler.cancel_dump_traceback_later()
 sys.stdout.write("SENDONCE prefill=%r sent=%r drained=%r\n" %
                  (res.get("prefill"), res.get("sent"), res.get("drained")))
@@ -328,7 +328,7 @@ def main():
     rc.netpoll_unregister(b.fileno()); b.close()
 
 import faulthandler; faulthandler.dump_traceback_later(40, exit=True)
-rc.go(main); rc.run()
+rc.fiber(main); rc.run()
 faulthandler.cancel_dump_traceback_later()
 sys.stdout.write("SIG MODE=%s res=%r\n" % (MODE, out.get("res")))
 '''
@@ -399,7 +399,7 @@ def main():
         out["errno"] = e.errno
     rc.netpoll_unregister(a.fileno()); a.close()
     rc.netpoll_unregister(b.fileno()); b.close()
-rc.go(main); rc.run()
+rc.fiber(main); rc.run()
 if "errno" in out:
     sys.stdout.write("ERRNO=%d\n" % out["errno"]); sys.exit(42)
 sys.stdout.write("RES=%r\n" % out.get("res")); sys.exit(0)

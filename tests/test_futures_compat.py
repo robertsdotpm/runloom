@@ -32,7 +32,7 @@ def _drive(fn):
         except BaseException as e:   # noqa: BLE001
             box[1] = e
 
-    runloom_c.go(runner)
+    runloom_c.fiber(runner)
     runloom_c.run()
     if box[1] is not None:
         raise box[1]
@@ -123,7 +123,7 @@ class TestThreadPoolExecutor(unittest.TestCase):
                     ticks.append(1)
                     runloom.sleep(0.002)
 
-            runloom_c.go(ticker)
+            runloom_c.fiber(ticker)
             with cf.ThreadPoolExecutor() as ex:
                 fut = ex.submit(lambda: (
                     [runloom.sleep(0.005) for _ in range(6)], 99)[1])

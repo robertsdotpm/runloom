@@ -33,7 +33,7 @@ def _park_returns(hubs):
             returns[0] += 1
 
     def main():
-        runloom.go(waiter)
+        runloom.fiber(waiter)
         t0 = time.monotonic()
         while time.monotonic() - t0 < 0.13:
             runloom.sleep(0.01)
@@ -65,7 +65,7 @@ def _wake_case(hubs, foreign, fw):
         box.append("woke")
 
     def main():
-        runloom.go(waiter)
+        runloom.fiber(waiter)
         # Deterministic: wait until the waiter has RECORDED its handle, not a
         # fixed nap.  A bare nap is a load-dependent bet that the waiter ran
         # within 80ms; if it has not recorded hb["g"] when we wake, we either
@@ -134,9 +134,9 @@ def test_wake_before_park_race_stress():
                 runloom_c.park()
                 done[0] = True
 
-            runloom.go(waiter)
+            runloom.fiber(waiter)
             # Wait until the waiter has recorded its handle.  The waiter may be
-            # round-robined onto THIS goroutine's OWN hub, in which case it
+            # round-robined onto THIS fiber's OWN hub, in which case it
             # cannot start until we yield -- a bare non-yielding spin then races
             # async preemption, and on a fast core (arm64) the spin can give up
             # before the waiter ever runs, KeyError on hb["g"], and strand a
@@ -176,7 +176,7 @@ def test_many_parkers_all_woken():
             woke[i] = 1
 
         for i in range(n):
-            runloom.go(waiter, i)
+            runloom.fiber(waiter, i)
         # Deterministic: wait until every waiter has RECORDED its handle, not a
         # fixed nap.  A 0.15s bet that all 200 fibers ran is load-dependent --
         # under load some handles[i] are still None, so h.wake() hits None

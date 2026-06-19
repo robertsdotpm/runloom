@@ -105,7 +105,7 @@ class _LoopIOMixin(object):
             except Exception:        # the runner catches it and re-evaluates.
                 pass
         if g is None and (st["r"] is not None or st["w"] is not None):
-            st["g"] = _go_io(lambda: self._pg_io_runner(fd, st))
+            st["g"] = _fiber_io(lambda: self._pg_io_runner(fd, st))
 
     def _pg_io_runner(self, fd, st):
         while True:

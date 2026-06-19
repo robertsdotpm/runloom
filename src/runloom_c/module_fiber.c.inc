@@ -46,7 +46,7 @@ static PyObject *m_blocking(PyObject *self, PyObject *args, PyObject *kw)
     return job.result;
 }
 
-static PyObject *m_go(PyObject *self, PyObject *args, PyObject *kw)
+static PyObject *m_fiber(PyObject *self, PyObject *args, PyObject *kw)
 {
     static char *kwlist[] = {"fn", "stack_size", "fifo", NULL};
     runloom_sched_t *s;
@@ -61,7 +61,7 @@ static PyObject *m_go(PyObject *self, PyObject *args, PyObject *kw)
         return NULL;
     }
     if (!PyCallable_Check(callable)) {
-        PyErr_SetString(PyExc_TypeError, "go(): callable required");
+        PyErr_SetString(PyExc_TypeError, "fiber(): callable required");
         return NULL;
     }
     s = runloom_sched_get();
@@ -91,7 +91,7 @@ static PyObject *m_go(PyObject *self, PyObject *args, PyObject *kw)
     return (PyObject *)handle;
 }
 
-static PyObject *m_go_noyield(PyObject *self, PyObject *callable)
+static PyObject *m_fiber_noyield(PyObject *self, PyObject *callable)
 {
     runloom_sched_t *s;
     RunloomG *handle;
@@ -99,7 +99,7 @@ static PyObject *m_go_noyield(PyObject *self, PyObject *callable)
     PyObject *cap;
     (void)self;
     if (!PyCallable_Check(callable)) {
-        PyErr_SetString(PyExc_TypeError, "go_noyield(): callable required");
+        PyErr_SetString(PyExc_TypeError, "fiber_noyield(): callable required");
         return NULL;
     }
     s = runloom_sched_get();

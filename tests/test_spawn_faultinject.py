@@ -36,11 +36,11 @@ _RECOVER = """
 import runloom, runloom_c as c
 ran = []
 try:
-    c.go(lambda: ran.append('x'))
+    c.fiber(lambda: ran.append('x'))
     print('NO_ERROR')
 except MemoryError:
     print('OOM_RAISED')
-c.go(lambda: ran.append('y'))   # fault was once -> succeeds
+c.fiber(lambda: ran.append('y'))   # fault was once -> succeeds
 runloom.run(1)
 print('RECOVERED' if ran == ['y'] and c.fiber_count() == 0 else 'BAD')
 """
@@ -50,7 +50,7 @@ _NOLEAK = """
 import runloom_c as c
 fails = 0
 for _ in range(3000):
-    try: c.go(lambda: None)
+    try: c.fiber(lambda: None)
     except MemoryError: fails += 1
 print('NOLEAK' if fails == 3000 and c.fiber_count() == 0 else 'BAD:%d:%d' % (fails, c.fiber_count()))
 """

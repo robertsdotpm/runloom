@@ -99,7 +99,7 @@ def run_child(body, extra_env=None, timeout=60, panic_silent=True):
     env.pop("RUNLOOM_CRASH", None)
     env.pop("RUNLOOM_CRASH_FILE", None)
     if panic_silent:
-        # Keep goroutine-panic noise off stderr unless a test wants it.
+        # Keep fiber-panic noise off stderr unless a test wants it.
         env.setdefault("RUNLOOM_GOROUTINE_PANIC", "silent")
     if extra_env:
         env.update(extra_env)
@@ -122,7 +122,7 @@ def _drive_single(fn, hang_s=20):
             box[1] = e
 
     with hang_guard(hang_s, "drive_single"):
-        rc.go(runner)
+        rc.fiber(runner)
         rc.run()
     if box[1] is not None:
         raise box[1]
@@ -238,10 +238,10 @@ class TestBlockingOverlap:
 
         def main():
             for i in range(N):
-                rc.go(lambda i=i: w(i))
+                rc.fiber(lambda i=i: w(i))
         with hang_guard(30, "single-thread overlap"):
             with assert_faster_than(N * NAP * 0.6, "concurrent offload (single)"):
-                rc.go(main)
+                rc.fiber(main)
                 rc.run()
         assert sorted(done) == list(range(N))
 
@@ -259,7 +259,7 @@ class TestBlockingOverlap:
 
         def main():
             for i in range(N):
-                runloom.go(lambda i=i: w(i))
+                runloom.fiber(lambda i=i: w(i))
             while len(done) < N:
                 runloom.sleep(0.005)
         with hang_guard(30, "mn overlap"):
@@ -284,8 +284,8 @@ class TestBlockingOverlap:
                 runloom.sleep(0.005)
 
         def main():
-            runloom.go(offloader)
-            runloom.go(burner)
+            runloom.fiber(offloader)
+            runloom.fiber(burner)
             while "off-done" not in progress:
                 runloom.sleep(0.005)
         with hang_guard(30, "sibling-runs"):
@@ -315,7 +315,7 @@ class TestBlockingPoolStress:
 
         def main():
             for i in range(N):
-                runloom.go(lambda i=i: w(i))
+                runloom.fiber(lambda i=i: w(i))
             while any(r is None for r in results):
                 runloom.sleep(0.002)
         with hang_guard(60, "pool stress 200"):
@@ -339,7 +339,7 @@ class TestBlockingPoolStress:
 
         def main():
             for i in range(N):
-                runloom.go(lambda i=i: w(i))
+                runloom.fiber(lambda i=i: w(i))
             while any(g is None for g in got):
                 runloom.sleep(0.002)
         with hang_guard(60, "storm crosstalk"):
@@ -358,7 +358,7 @@ class TestBlockingPoolStress:
                 out.append(rc.blocking(lambda k=k: k * 3))
 
         def main():
-            runloom.go(w)
+            runloom.fiber(w)
             while len(out) < 50:
                 runloom.sleep(0.002)
         with hang_guard(40, "repeated offload"):
@@ -383,7 +383,7 @@ class TestBlockingTeardownRace:
                 done.append(i)
             def main():
                 for i in range(40):
-                    runloom.go(lambda i=i: w(i))
+                    runloom.fiber(lambda i=i: w(i))
                 # Wait for MOST but not necessarily all -- main may return with
                 # a few still in flight; the runtime must still drain cleanly.
                 t0 = time.monotonic()
@@ -410,7 +410,7 @@ class TestBlockingTeardownRace:
                     results.append(runloom_c.blocking(lambda i=i: i + cyc))
                 def main():
                     for i in range(20):
-                        runloom.go(lambda i=i: w(i))
+                        runloom.fiber(lambda i=i: w(i))
                     while len(results) < 20:
                         runloom.sleep(0.002)
                 runloom.run(4, main)
@@ -436,7 +436,7 @@ class TestBlockingEnvModes:
                 done.append(i)
             def main():
                 for i in range(12):
-                    runloom.go(lambda i=i: w(i))
+                    runloom.fiber(lambda i=i: w(i))
                 while len(done) < 12:
                     runloom.sleep(0.005)
             runloom.run(4, main)
@@ -456,7 +456,7 @@ class TestBlockingEnvModes:
                 done.append(i)
             def main():
                 for i in range(8):
-                    runloom.go(lambda i=i: w(i))
+                    runloom.fiber(lambda i=i: w(i))
                 while len(done) < 8:
                     runloom.sleep(0.005)
             runloom.run(4, main)
@@ -476,7 +476,7 @@ class TestBlockingEnvModes:
                 done.append(i)
             def main():
                 for i in range(8):
-                    runloom.go(lambda i=i: w(i))
+                    runloom.fiber(lambda i=i: w(i))
                 while len(done) < 8:
                     runloom.sleep(0.005)
             runloom.run(4, main)
@@ -575,12 +575,12 @@ class TestCrashInstallState:
 # ===========================================================================
 @requires_guard
 class TestCrashClassification:
-    def test_goroutine_overflow_classified_single_thread(self):
+    def test_fiber_overflow_classified_single_thread(self):
         rc2, out = run_child("""
             runloom.inspect.install_crash_handler("on")
             def boom():
                 runloom_c._crash_selftest_overflow()   # unbounded real-C recursion
-            runloom_c.go(boom, 16384)                  # small 16 KiB stack
+            runloom_c.fiber(boom, 16384)                  # small 16 KiB stack
             runloom_c.run()
         """, timeout=40)
         assert rc2 in FAULT_RCS, (rc2, out)            # chained out -> cored
@@ -590,7 +590,7 @@ class TestCrashClassification:
         assert "=== runloom fiber dump" in out, out
 
     @mn_only
-    def test_goroutine_overflow_classified_under_mn(self):
+    def test_fiber_overflow_classified_under_mn(self):
         # The fault fires on a HUB thread -> proves the per-thread sigaltstack was
         # armed at hub start (runloom_coro_thread_init), so the handler can run.
         rc2, out = run_child("""
@@ -598,7 +598,7 @@ class TestCrashClassification:
             runloom_c.mn_init(2)
             def boom():
                 runloom_c._crash_selftest_overflow()
-            runloom_c.mn_go(boom)
+            runloom_c.mn_fiber(boom)
             runloom_c.mn_run()
         """, timeout=40)
         assert rc2 in FAULT_RCS, (rc2, out)
@@ -610,7 +610,7 @@ class TestCrashClassification:
             runloom.inspect.install_crash_handler("on")
             def boom():
                 ctypes.string_at(0)        # NULL deref -- not a guard page
-            runloom_c.go(boom)
+            runloom_c.fiber(boom)
             runloom_c.run()
         """, timeout=40)
         assert rc2 in FAULT_RCS, (rc2, out)
@@ -629,7 +629,7 @@ class TestCrashClassification:
             def main():
                 def w():
                     runloom_c.blocking(runloom_c._crash_selftest_overflow)
-                runloom.go(w)
+                runloom.fiber(w)
                 runloom.sleep(2.0)
             runloom.run(4, main)
         """, timeout=40)
@@ -637,7 +637,7 @@ class TestCrashClassification:
         # into the thread's guard page: a fatal fault, contained + observed.
         assert rc2 in FAULT_RCS or rc2 == 0, (rc2, out)
         # If it faulted, the handler must have run (banner present) and NOT
-        # mislabel a non-fiber-stack worker overflow as a goroutine overflow.
+        # mislabel a non-fiber-stack worker overflow as a fiber overflow.
         if rc2 in FAULT_RCS:
             assert "runloom crash" in out, out
 
@@ -647,7 +647,7 @@ class TestCrashClassification:
             results = []
             def work():
                 results.append(42)
-            runloom_c.go(work)
+            runloom_c.fiber(work)
             runloom_c.run()
             print("CLEAN-EXIT", results)
         """, timeout=30)
@@ -662,7 +662,7 @@ class TestCrashClassification:
                 runloom.inspect.install_crash_handler("on", %r)
                 def boom():
                     runloom_c._crash_selftest_overflow()
-                runloom_c.go(boom, 16384)
+                runloom_c.fiber(boom, 16384)
                 runloom_c.run()
             """ % report, timeout=40)
             assert rc2 in FAULT_RCS, (rc2, out)
@@ -709,7 +709,7 @@ class TestTracebackSignal:
                 def sleeper():
                     runloom.sleep(0.5)
                 for _ in range(3):
-                    runloom.go(sleeper)
+                    runloom.fiber(sleeper)
                 runloom.sleep(0.05)
                 os.kill(os.getpid(), signal.SIGQUIT)   # -> raw dump to fd 2
                 runloom.sleep(0.05)
@@ -828,7 +828,7 @@ class TestFiberStackStates:
             leaf()
 
         def main():
-            runloom.go(middle)
+            runloom.fiber(middle)
             runloom.sleep(0.01)
             sleepers = [g for g in rc.fibers() if g["state"] == "sleep"]
             assert sleepers, [g["state"] for g in rc.fibers()]
@@ -865,7 +865,7 @@ class TestFiberStackStates:
             return 1
 
         def main():
-            g = runloom.go(quick)
+            g = runloom.fiber(quick)
             # capture an id from the registry before it drains
             ids = [x["id"] for x in rc.fibers()]
             runloom.sleep(0.02)   # let quick() finish + free
@@ -880,7 +880,7 @@ class TestFiberStackStates:
         cap = {}
 
         def main():
-            runloom.go(lambda: runloom.sleep(0.05))
+            runloom.fiber(lambda: runloom.sleep(0.05))
             runloom.sleep(0.005)
             cap["neg"] = rc.fiber_stack(-7)
             cap["huge"] = rc.fiber_stack(2 ** 60)
@@ -899,7 +899,7 @@ class TestAgeTracking:
 
         def main():
             rc.set_introspect_timestamps(True)
-            runloom.go(lambda: runloom.sleep(0.06))
+            runloom.fiber(lambda: runloom.sleep(0.06))
             runloom.sleep(0.025)
             g = [x for x in rc.fibers() if x["state"] == "sleep"][0]
             cap["age"] = g["age"]
@@ -920,7 +920,7 @@ class TestAgeTracking:
             runloom_c.set_introspect_timestamps(False)
             cap = {}
             def main():
-                runloom.go(lambda: runloom.sleep(0.05))
+                runloom.fiber(lambda: runloom.sleep(0.05))
                 runloom.sleep(0.02)
                 g = [x for x in runloom_c.fibers() if x["state"] == "sleep"][0]
                 cap["age"] = g["age"]
@@ -942,14 +942,14 @@ class TestAgeTracking:
         rc2, out = run_child("""
             def main1():
                 runloom_c.set_introspect_timestamps(True)
-                runloom.go(lambda: runloom.sleep(0.05))
+                runloom.fiber(lambda: runloom.sleep(0.05))
                 runloom.sleep(0.02)
                 [x for x in runloom_c.fibers() if x["state"] == "sleep"][0]
             runloom.run(1, main1)
             runloom_c.set_introspect_timestamps(False)
             cap = {}
             def main2():
-                runloom.go(lambda: runloom.sleep(0.05))
+                runloom.fiber(lambda: runloom.sleep(0.05))
                 runloom.sleep(0.02)
                 sl = [x for x in runloom_c.fibers() if x["state"] == "sleep"]
                 cap["ages"] = [g["age"] for g in sl]
@@ -978,7 +978,7 @@ class TestIntrospectRaceSafety:
 
         def churn():
             for _ in range(150):
-                runloom.go(lambda: runloom.yield_())
+                runloom.fiber(lambda: runloom.yield_())
                 runloom.yield_()
 
         def hammer():
@@ -997,9 +997,9 @@ class TestIntrospectRaceSafety:
 
         def main():
             for _ in range(6):
-                runloom.go(churn)
+                runloom.fiber(churn)
             for _ in range(3):
-                runloom.go(hammer)
+                runloom.fiber(hammer)
             runloom.sleep(0.6)
 
         try:
@@ -1025,7 +1025,7 @@ class TestIntrospectRaceSafety:
 
         def churn():
             for _ in range(100):
-                runloom.go(lambda: runloom.yield_())
+                runloom.fiber(lambda: runloom.yield_())
                 runloom.yield_()
 
         def hammer():
@@ -1037,11 +1037,11 @@ class TestIntrospectRaceSafety:
 
         def main():
             for _ in range(30):
-                runloom.go(sleeper)
+                runloom.fiber(sleeper)
             for _ in range(4):
-                runloom.go(churn)
+                runloom.fiber(churn)
             for _ in range(2):
-                runloom.go(hammer)
+                runloom.fiber(hammer)
             runloom.sleep(0.5)
 
         with hang_guard(60, "hammer diverse states"):
@@ -1069,9 +1069,9 @@ class TestIntrospectRaceSafety:
 
         def main():
             for i in range(60):
-                runloom.go(lambda i=i: offloader(i))
+                runloom.fiber(lambda i=i: offloader(i))
             for _ in range(3):
-                runloom.go(hammer)
+                runloom.fiber(hammer)
             while len(done) < 60:
                 runloom.sleep(0.005)
 
@@ -1106,7 +1106,7 @@ class TestDeadlockDiagnostics:
                 done.append(1)
 
             for _ in range(4):
-                runloom.go(parker)
+                runloom.fiber(parker)
             # Barrier: all 4 captured their handle AND committed to the park.
             while len(handles) < 4 or rc.count_deadlocked() < 4:
                 runloom.sleep(0.002)
@@ -1168,11 +1168,11 @@ class TestForkReset:
 
                 def main():
                     for _ in range(20):
-                        runloom.go(w)
+                        runloom.fiber(w)
                     runloom.sleep(0.005)
                 runloom.run(1, main)
                 # Run a second cycle to be sure the reset left a usable runtime.
-                runloom.run(1, lambda: [runloom.go(w) for _ in range(5)])
+                runloom.run(1, lambda: [runloom.fiber(w) for _ in range(5)])
                 if len(out) == 25 and rc._self_check(0) == 0:
                     code = 0
             except BaseException:  # noqa: BLE001
@@ -1198,7 +1198,7 @@ class TestForkReset:
 
                 def main():
                     for i in range(6):
-                        runloom.go(lambda i=i: w(i))
+                        runloom.fiber(lambda i=i: w(i))
                     t0 = time.monotonic()
                     while len(done) < 6 and time.monotonic() - t0 < 5:
                         runloom.sleep(0.005)
@@ -1254,7 +1254,7 @@ class TestFaultInjectionResilience:
             done = []
             def main():
                 for _ in range(20):
-                    runloom.go(lambda: done.append(1))
+                    runloom.fiber(lambda: done.append(1))
                 runloom.sleep(0.02)
             runloom.run(4, main)
             print("RESULT", raised, len(done) == 20, runloom_c._self_check(0) == 0)
@@ -1276,7 +1276,7 @@ class TestFaultInjectionResilience:
             done = []
             def main():
                 for _ in range(20):
-                    runloom.go(lambda: done.append(1))
+                    runloom.fiber(lambda: done.append(1))
                 runloom.sleep(0.02)
             runloom.run(1, main)
             print("RESULT", raised, len(done) == 20, runloom_c._self_check(0) == 0)
@@ -1314,7 +1314,7 @@ class TestEnvGatedModes:
                     runloom_c.blocking(time.sleep, 0.03)
                     done.append(i)
                 for i in range(10):
-                    runloom.go(lambda i=i: w(i))
+                    runloom.fiber(lambda i=i: w(i))
                 while len(done) < 10:
                     runloom_c.fibers(); runloom_c._self_check(0)
                     runloom.sleep(0.005)
@@ -1336,7 +1336,7 @@ class TestEnvGatedModes:
                     runloom_c.blocking(time.sleep, 0.05)
                     done.append(i)
                 for i in range(12):
-                    runloom.go(lambda i=i: w(i))
+                    runloom.fiber(lambda i=i: w(i))
                 while len(done) < 12:
                     runloom.sleep(0.005)
             runloom.run(4, main)
@@ -1358,7 +1358,7 @@ class TestEnvGatedModes:
                 def w():
                     done.append(1)
                 for _ in range(20):
-                    runloom.go(w)
+                    runloom.fiber(w)
                 runloom.sleep(0.02)
             runloom.run(4, main)
             print("DONE", len(done))
@@ -1395,12 +1395,12 @@ class TestForeignThreadIntrospection:
 
         def churn():
             for _ in range(150):
-                runloom.go(lambda: runloom.yield_())
+                runloom.fiber(lambda: runloom.yield_())
                 runloom.yield_()
 
         def main():
             for _ in range(6):
-                runloom.go(churn)
+                runloom.fiber(churn)
             runloom.sleep(0.4)
 
         try:
@@ -1475,11 +1475,11 @@ class TestBlockingSpuriousWake:
                 rc.sched_yield()
 
         def main():
-            h = rc.go(offloader)
-            rc.go(lambda: waker(h))
+            h = rc.fiber(offloader)
+            rc.fiber(lambda: waker(h))
 
         with hang_guard(30, "spurious wake single"):
-            rc.go(main)
+            rc.fiber(main)
             rc.run()
         assert cap.get("res") == 7
         assert rc._self_check(0) == 0
@@ -1511,8 +1511,8 @@ class TestBlockingSpuriousWake:
 
         def main():
             for i in range(N):
-                runloom.go(lambda i=i: offloader(i))
-            runloom.go(waker)
+                runloom.fiber(lambda i=i: offloader(i))
+            runloom.fiber(waker)
             while any(r is None for r in results):
                 runloom.sleep(0.003)
 
@@ -1572,7 +1572,7 @@ class TestBlockingResultEdges:
             got["r"] = rc.blocking(f, 1, 2, c=3)
 
         def main():
-            runloom.go(w)
+            runloom.fiber(w)
             while "r" not in got:
                 runloom.sleep(0.003)
         with hang_guard(20, "mn kwargs"):
@@ -1598,7 +1598,7 @@ class TestBlockingResultEdges:
             cap["r"] = rc.blocking(outer)
 
         def main():
-            runloom.go(w)
+            runloom.fiber(w)
             while "r" not in cap:
                 runloom.sleep(0.003)
         with hang_guard(20, "nested blocking"):
@@ -1628,7 +1628,7 @@ class TestBlockingObjectStress:
 
         def main():
             for i in range(N):
-                runloom.go(lambda i=i: w(i))
+                runloom.fiber(lambda i=i: w(i))
             while any(o is None for o in out):
                 runloom.sleep(0.002)
 
@@ -1656,7 +1656,7 @@ class TestBlockingObjectStress:
 
         def main():
             for i in range(20):
-                runloom.go(lambda i=i: w(i))
+                runloom.fiber(lambda i=i: w(i))
             while any(o is None for o in out):
                 runloom.sleep(0.003)
         with hang_guard(30, "identity stress"):
@@ -1767,7 +1767,7 @@ class TestFiberStackBlockpool:
             rc.blocking(time.sleep, 0.25)
 
         def main():
-            rc.go(deep_offload)
+            rc.fiber(deep_offload)
             rc.sched_sleep(0.05)
             parked = [g for g in rc.fibers() if g["state"] == "park"]
             cap["parked_states"] = [g["state"] for g in rc.fibers()]
@@ -1777,7 +1777,7 @@ class TestFiberStackBlockpool:
                 cap["funcs"] = [name for (_f, _l, name) in frames]
 
         with hang_guard(30, "fiber_stack blockpool"):
-            rc.go(main)
+            rc.fiber(main)
             rc.run()
         # there WAS a park-state fiber while the offload was in flight
         assert "park" in cap.get("parked_states", []), cap.get("parked_states")
@@ -1823,7 +1823,7 @@ class TestSpawnTstateFault:
             done = []
             def main():
                 for _ in range(15):
-                    runloom.go(lambda: done.append(1))
+                    runloom.fiber(lambda: done.append(1))
                 runloom.sleep(0.02)
             runloom.run(1, main)
             print("RESULT", raised, len(done) == 15, runloom_c._self_check(0) == 0)
@@ -1847,7 +1847,7 @@ class TestSpawnTstateFault:
             done = []
             def main():
                 for _ in range(20):
-                    runloom.go(lambda: done.append(1))
+                    runloom.fiber(lambda: done.append(1))
                 runloom.sleep(0.02)
             runloom.run(4, main)
             print("RESULT", len(done) == 20, runloom_c._self_check(0) == 0)
@@ -1873,7 +1873,7 @@ class TestResetAfterForkIdempotent:
             assert runloom_c.fiber_count() == 0
             assert runloom_c.fibers() == []
             done = []
-            runloom.run(1, lambda: [runloom.go(lambda: done.append(1)) for _ in range(10)])
+            runloom.run(1, lambda: [runloom.fiber(lambda: done.append(1)) for _ in range(10)])
             print("RESULT", len(done) == 10, runloom_c._self_check(0) == 0,
                   runloom_c.fiber_count() == 0)
         """, timeout=30)
@@ -1899,8 +1899,8 @@ class TestConcurrentCrash:
             runloom_c.mn_init(2)
             def boom():
                 runloom_c._crash_selftest_overflow()
-            runloom_c.mn_go(boom, 16384)
-            runloom_c.mn_go(boom, 16384)
+            runloom_c.mn_fiber(boom, 16384)
+            runloom_c.mn_fiber(boom, 16384)
             runloom_c.mn_run()
             print("UNREACHABLE")
         """, timeout=40)
@@ -1936,12 +1936,12 @@ class TestStatsDuringOffload:
 
         def main():
             for _ in range(6):
-                rc.go(offloader)
-            rc.go(sampler)
+                rc.fiber(offloader)
+            rc.fiber(sampler)
             rc.sched_sleep(0.3)
 
         with hang_guard(30, "stats during offload"):
-            rc.go(main)
+            rc.fiber(main)
             rc.run()
         assert all(v == 0 for v in cap["viol"]), set(cap["viol"])
         for s in cap["snaps"]:
@@ -1969,7 +1969,7 @@ class TestBlockingTeardownHarder:
                 done.append(i)
             def main():
                 for i in range(30):
-                    runloom.go(lambda i=i: w(i))
+                    runloom.fiber(lambda i=i: w(i))
                 runloom.sleep(0.005)   # return almost immediately; all still pending
             runloom.run(4, main)
             print("DONE", len(done))
@@ -1991,7 +1991,7 @@ class TestBlockingTeardownHarder:
                 done.append(i)
             def main():
                 for i in range(20):
-                    runloom.go(lambda i=i: w(i))
+                    runloom.fiber(lambda i=i: w(i))
                 runloom.sleep(0.005)
             runloom.run(4, main)
             print("DONE", sorted(done) == list(range(20)))

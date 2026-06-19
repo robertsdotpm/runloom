@@ -8,7 +8,7 @@
  * GIL is gone in free-threaded builds.
  *
  *   runloom_mn_init(n_threads)      start N OS threads, each with a hub
- *   runloom_mn_go(callable)         spawn on the calling thread's hub
+ *   runloom_mn_fiber(callable)         spawn on the calling thread's hub
  *                                (or, if not in a hub, round-robin)
  *   runloom_mn_run()                join all hubs after their queues drain
  *   runloom_mn_fini()               teardown
@@ -20,7 +20,7 @@
  *   stealing primitive; ~150 LoC of careful atomics in C.
  *
  *   Global fiber pool: thread-safe stack of fresh G structs so
- *   runloom_mn_go from outside any hub can place a g without contending.
+ *   runloom_mn_fiber from outside any hub can place a g without contending.
  *
  *   Sleep heap: still per-hub.  Sleep duration includes a check for
  *   cross-hub wakeups (no -- gs cannot migrate; sleep is hub-local).
@@ -58,17 +58,17 @@ int runloom_mn_init(int n_threads);
 /* stack_size: per-fiber C-stack override in bytes; 0 = the hub default.
  * Use a larger value for a g that runs a deep, non-yielding C burst (cold
  * imports, terminfo/OpenSSL init) that the copy-grow can't rescue mid-burst. */
-PyObject *runloom_mn_go(PyObject *callable, size_t stack_size);
+PyObject *runloom_mn_fiber(PyObject *callable, size_t stack_size);
 /* Bulk-spawn n fibers all running `callable`, looping the spawn core in C
  * (skips n Python->C dispatches + per-call arg parsing).  indexed != 0 calls
  * each as callable(i) for i in 0..n-1 (per-fiber arg); 0 calls callable().
  * Returns 0, or -1 with a Python error set on partial failure (already-created
  * fibers still run). */
-int runloom_mn_go_n(PyObject *callable, long n, size_t stack_size, int indexed);
+int runloom_mn_fiber_n(PyObject *callable, long n, size_t stack_size, int indexed);
 /* C-only spawn: no Python callable, just a function + arg.  Distributes
- * fibers across hubs round-robin (same as runloom_mn_go).  Returns 0 on
+ * fibers across hubs round-robin (same as runloom_mn_fiber).  Returns 0 on
  * success, -1 with errno on failure (ENOMEM, EINVAL). */
-int runloom_mn_go_c(runloom_c_entry_fn fn, void *arg);
+int runloom_mn_fiber_c(runloom_c_entry_fn fn, void *arg);
 Py_ssize_t runloom_mn_run(void);
 void runloom_mn_fini(void);
 

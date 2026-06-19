@@ -1,7 +1,7 @@
 """runloom -- Go-style coroutines in Python.
 
 Everyday API -- `import runloom` is all you need:
-    runloom.go(fn, *args, **kw)   spawn a fiber
+    runloom.fiber(fn, *args, **kw)   spawn a fiber
     runloom.run(n, main_fn)       THE entry point. run main_fn with n hubs:
                                   n=1 single-thread, n>1 M:N parallel across n
                                   cores (needs 3.13t + GIL off; n>1 on a GIL
@@ -73,7 +73,7 @@ select = _core.select
 # M:N scheduler -- real multi-core parallelism on free-threaded 3.13t.
 # Everyday code uses run(n, main_fn); these raw entry points stay exposed for
 # advanced use (custom spawn loops, benchmarks).  mn_hub_count() reports how
-# many hubs are live and is what the runloom.go() wrapper dispatches on.
+# many hubs are live and is what the runloom.fiber() wrapper dispatches on.
 mn_init = _core.mn_init
 mn_go = _core.mn_go
 mn_run = _core.mn_run

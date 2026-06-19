@@ -12,7 +12,7 @@ import os
 
 import runloom
 
-# Free-threaded build: fan goroutines across all cores (M:N scheduler).
+# Free-threaded build: fan fibers across all cores (M:N scheduler).
 HUBS = os.cpu_count() or 4
 
 NUM_CONSUMERS = 4
@@ -33,9 +33,9 @@ def main():
     jobs = runloom.Chan(8)
     done = runloom.Chan(NUM_CONSUMERS)
 
-    runloom.go(producer, jobs)
+    runloom.fiber(producer, jobs)
     for cid in range(NUM_CONSUMERS):
-        runloom.go(consumer, cid, jobs, done)
+        runloom.fiber(consumer, cid, jobs, done)
 
     total = 0
     for _ in range(NUM_CONSUMERS):

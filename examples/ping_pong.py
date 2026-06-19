@@ -1,6 +1,6 @@
-"""Ping-pong — two goroutines bouncing a message over two channels.
+"""Ping-pong — two fibers bouncing a message over two channels.
 
-The classic concurrency hello-world: two goroutines take turns, each
+The classic concurrency hello-world: two fibers take turns, each
 blocked on the other, synchronised purely by unbuffered channels (no
 locks).  This is the cooperative hand-off the scheduler is built for —
 each rendezvous is a ~few-hundred-nanosecond stack swap.
@@ -13,7 +13,7 @@ import os
 
 import runloom
 
-# Free-threaded build: fan goroutines across all cores (M:N scheduler).
+# Free-threaded build: fan fibers across all cores (M:N scheduler).
 HUBS = os.cpu_count() or 4
 
 ROUNDS = 5
@@ -36,8 +36,8 @@ def pong(from_ping, to_ping):
 def main():
     a = runloom.Chan()       # ping -> pong  (unbuffered rendezvous)
     b = runloom.Chan()       # pong -> ping
-    runloom.go(ping, a, b)
-    runloom.go(pong, a, b)
+    runloom.fiber(ping, a, b)
+    runloom.fiber(pong, a, b)
 
 if __name__ == "__main__":
     runloom.run(HUBS, main)

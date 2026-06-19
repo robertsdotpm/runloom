@@ -41,7 +41,7 @@ def test_offloaded_in_fiber():
         def work():
             out["v"] = _getpass_mod.getpass("Pwd: ")
 
-        runloom_c.go(work)
+        runloom_c.fiber(work)
         runloom_c.run()
         assert out["v"] == "s3cret"          # return value passes through
         assert seen["prompt"] == "Pwd: "     # prompt passes through

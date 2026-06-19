@@ -65,9 +65,9 @@ def _batch(fns, n, stack=None):
     for _ in range(n):
         for fn in fns:
             if stack is None:
-                runloom_c.go(fn)
+                runloom_c.fiber(fn)
             else:
-                runloom_c.go(fn, stack)
+                runloom_c.fiber(fn, stack)
     runloom_c.run()
 
 
@@ -141,8 +141,8 @@ def pinned_worker():
     return 1
 
 
-def test_friendly_go_honors_stack_size():
-    # runloom.go(fn, stack_size=N) must PIN the fiber stack, not forward
+def test_friendly_fiber_honors_stack_size():
+    # runloom.fiber(fn, stack_size=N) must PIN the fiber stack, not forward
     # stack_size into fn (regression: the friendly wrapper used to swallow it
     # into **kwargs and pass it to the target, leaving the fiber on the
     # default stack).  Covers both the single-thread and M:N spawn paths.
@@ -150,7 +150,7 @@ def test_friendly_go_honors_stack_size():
 
     def main():
         runloom.inspect.enable_stack_advice(True)
-        runloom.go(pinned_worker, stack_size=128 * 1024)
+        runloom.fiber(pinned_worker, stack_size=128 * 1024)
         runloom.sleep(0.02)
         out["reserved"] = _row(pinned_worker)["reserved"]
 
@@ -167,15 +167,15 @@ def plain_with_arg(x):
     return x
 
 
-def test_friendly_go_with_args_preserves_kind_and_prescan():
-    # runloom.go(fn, arg) wraps fn in an arg-binding lambda; __wrapped__ must
+def test_friendly_fiber_with_args_preserves_kind_and_prescan():
+    # runloom.fiber(fn, arg) wraps fn in an arg-binding lambda; __wrapped__ must
     # make the auto-sizer key on fn (not the shared wrapper), so distinct targets
     # are distinct kinds AND the crypto prescan reaches them through the wrapper.
     def main():
         runloom.inspect.enable_stack_autosize(True, prescan=True)
         for i in range(10):
-            runloom.go(crypto_with_arg, i)
-            runloom.go(plain_with_arg, i)
+            runloom.fiber(crypto_with_arg, i)
+            runloom.fiber(plain_with_arg, i)
         runloom.sleep(0.05)
 
     runloom.run(2, main)
@@ -311,10 +311,10 @@ def test_autosize_under_mn():
     runloom_c.mn_init(2)
     try:
         for _ in range(20):
-            runloom_c.mn_go(heavy)        # batch 1: learn
+            runloom_c.mn_fiber(heavy)        # batch 1: learn
         runloom_c.mn_run()
         for _ in range(20):
-            runloom_c.mn_go(heavy)        # batch 2: all start at the learned size
+            runloom_c.mn_fiber(heavy)        # batch 2: all start at the learned size
         runloom_c.mn_run()
     finally:
         runloom_c.mn_fini()

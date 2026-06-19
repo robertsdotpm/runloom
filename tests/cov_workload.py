@@ -3,7 +3,7 @@
 Exercises, under runloom.run(N): cross-hub channels (wake_g / hub_submit),
 sleeps (timer/sleep heap), CPU spins (preempt/sysmon), blocking offload
 (blockpool), socket + file I/O (netpoll + io_uring), sched_yield (fastpath),
-go_n bulk spawn, and introspection.  Importing as a module gives `workload()`;
+fiber_n bulk spawn, and introspection.  Importing as a module gives `workload()`;
 running as a script runs it under run(args.hubs) and exits 0 on success.
 
 It is deliberately SHORT and self-terminating so it can run as a subprocess

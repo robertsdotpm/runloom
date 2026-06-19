@@ -134,7 +134,7 @@ def test_many_waiters_one_fd_closed(hubs, nwaiters):
                 done[i] = 1
 
             for i in range(nwaiters):
-                runloom.go(waiter, i)
+                runloom.fiber(waiter, i)
             # let every waiter park on the one fd
             runloom.sleep(0.02)
             runloom_c.netpoll_cancel_fd(fd)    # the close-hook waker
@@ -184,7 +184,7 @@ def test_fd_number_reuse_churn(hubs):
                     flags[c] = 1               # deadline is acceptable, not a hang
                 done[0] = True
 
-            runloom.go(reader)
+            runloom.fiber(reader)
             runloom.sleep(0.003)               # let the reader park first
             b.send(b"go")
             spins = 0
@@ -229,7 +229,7 @@ def test_eof_storm_all_readers_unwind(hubs, nconns):
                 flags[i] = 1                   # deadline (no hang) acceptable
 
         for i in range(nconns):
-            runloom.go(reader, i)
+            runloom.fiber(reader, i)
         runloom.sleep(0.05)                    # let every reader park
         for a, b in pairs:                     # bulk close -> EOF storm
             b.close()
@@ -282,7 +282,7 @@ def test_rst_storm_via_linger(hubs):
                 flags[i] = 1
 
         for i in range(NCONNS):
-            runloom.go(reader, i)
+            runloom.fiber(reader, i)
         runloom.sleep(0.05)
         # Abortive close: SO_LINGER {1,0} sends RST instead of FIN.
         linger = struct.pack("ii", 1, 0)
@@ -331,7 +331,7 @@ def test_cancel_all_parked_from_root(hubs):
                 done[i] = 1
 
             for i in range(NPARK):
-                runloom.go(waiter, i)
+                runloom.fiber(waiter, i)
             runloom.sleep(0.02)
             n = runloom_c.cancel_all_parked()
             assert n >= 0                      # returns a count, never crashes
@@ -383,7 +383,7 @@ def test_cancel_all_parked_from_os_thread(hubs):
                     done[i] = 1
 
                 for i in range(NPARK):
-                    runloom.go(waiter, i)
+                    runloom.fiber(waiter, i)
                 spins = 0
                 while sum(done) < NPARK and spins < 3000:
                     runloom.sleep(0.001)
@@ -427,7 +427,7 @@ def test_cancel_fd_races_peer_write(hubs):
                         pass
                 done[0] = True
 
-            runloom.go(waiter)
+            runloom.fiber(waiter)
             runloom.sleep(0.005)
             # race: write AND cancel near-simultaneously
             b.send(b"x")
@@ -464,7 +464,7 @@ def test_g_cancel_wait_fd_self_targeted(hubs):
                 flags[r] = 1 if rv in (CANCELLED, 0, READ) else 0
                 done[0] = True
 
-            runloom.go(waiter)
+            runloom.fiber(waiter)
             # wait until the waiter has published its handle AND likely parked
             spins = 0
             while not handle_box and spins < 1000:
@@ -524,7 +524,7 @@ def test_park_wake_soak(hubs):
             flags[i] = 1 if ok == ITERS else (1 if ok >= 0 else 0)
 
         for i in range(NFIBERS):
-            runloom.go(worker, i)
+            runloom.fiber(worker, i)
 
     runloom.run(hubs, main)
     _assert_all(flags, NFIBERS, "park-wake-soak hubs=%d" % hubs)
@@ -563,8 +563,8 @@ def test_dup_fd_both_directions_peer_close(hubs):
                 flags[base + 1] = 1 if rv in (WRITE, CANCELLED, 0) else 0
                 done[1] = 1
 
-            runloom.go(rd)
-            runloom.go(wr)
+            runloom.fiber(rd)
+            runloom.fiber(wr)
             runloom.sleep(0.02)
             b.close()                          # EOF on the shared description
             runloom.sleep(0.3)

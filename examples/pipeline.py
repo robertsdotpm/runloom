@@ -1,6 +1,6 @@
 """Pipeline — stages connected by channels.
 
-Each stage is a goroutine that reads from an input channel, does one
+Each stage is a fiber that reads from an input channel, does one
 job, and writes to an output channel; closing an output propagates the
 "done" signal downstream.  Here: generate 1..N -> square -> sum.
 
@@ -12,7 +12,7 @@ import os
 
 import runloom
 
-# Free-threaded build: fan goroutines across all cores (M:N scheduler).
+# Free-threaded build: fan fibers across all cores (M:N scheduler).
 HUBS = os.cpu_count() or 4
 
 def generate(out, n):
@@ -36,9 +36,9 @@ def main():
     squares = runloom.Chan(10)
     result = runloom.Chan(1)
 
-    runloom.go(generate, nums, 10)
-    runloom.go(square, nums, squares)
-    runloom.go(sum_all, squares, result)
+    runloom.fiber(generate, nums, 10)
+    runloom.fiber(square, nums, squares)
+    runloom.fiber(sum_all, squares, result)
 
     print("sum of squares 1..10 =", result.recv()[0])   # 385
 

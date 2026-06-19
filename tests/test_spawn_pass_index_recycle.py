@@ -7,7 +7,7 @@ and `pass_index` live AFTER `state` and BEFORE the introspection block, so they
 were NOT cleared by that single memset (the header documented them as cleared;
 the code did not -- a doc/code contradiction).
 
-`go_n(fn, n, indexed=True)` sets `pass_index = 1` on each (slab-allocated, on the
+`fiber_n(fn, n, indexed=True)` sets `pass_index = 1` on each (slab-allocated, on the
 default non-bulk path) g so `g_entry` calls `fn(i)`.  When such a g completes and
 is recycled for a plain `go(fn2)` (which goes through the `py_index < 0` branch
 and never touches `pass_index`), the stale `pass_index = 1` made `g_entry` call
@@ -24,8 +24,8 @@ import runloom_c
 
 
 def _round(nhubs, k):
-    """Phase 1: k indexed go_n fibers (pass_index=1 on slab gs).  Drain them so
-    they return to the slab freelist.  Phase 2: k plain go() fibers that MUST be
+    """Phase 1: k indexed fiber_n fibers (pass_index=1 on slab gs).  Drain them so
+    they return to the slab freelist.  Phase 2: k plain fiber() fibers that MUST be
     called with no positional arg -- any arg means pass_index leaked.  Returns
     the list of leaked arg-tuples (empty == clean)."""
     from runloom.sync import WaitGroup
@@ -39,7 +39,7 @@ def _round(nhubs, k):
         def idx(i):
             wg1.done()
 
-        runloom_c.go_n(idx, k, 0, True)   # (fn, n, stack_size, indexed=True)
+        runloom_c.fiber_n(idx, k, 0, True)   # (fn, n, stack_size, indexed=True)
         wg1.wait()                        # phase 1 fully drains -> gs recycled
 
         wg2 = WaitGroup()
@@ -66,6 +66,6 @@ def test_pass_index_not_leaked_across_recycle():
     for i in range(4):
         nhubs = (i % 3) + 1
         if nhubs == 1:
-            nhubs = 2                     # go_n needs the M:N runtime (n > 1)
+            nhubs = 2                     # fiber_n needs the M:N runtime (n > 1)
         leaked = _round(nhubs, 256)
         assert leaked == [], (i, nhubs, leaked[:8])

@@ -11,11 +11,11 @@ import runloom.sync as ps
 
 
 class TestBasics(unittest.TestCase):
-    def test_go_run(self):
+    def test_fiber_run(self):
         out = []
         def w():
             out.append("ran")
-        ps.go(w)
+        ps.fiber(w)
         ps.run()
         self.assertEqual(out, ["ran"])
 
@@ -29,7 +29,7 @@ class TestBasics(unittest.TestCase):
             order.append("b-1")
             ps.yield_now()
             order.append("b-2")
-        ps.go(a); ps.go(b); ps.run()
+        ps.fiber(a); ps.fiber(b); ps.run()
         # a starts, parks on sleep, b runs (a-1, b-1, b-2), then a-2.
         self.assertIn("a-2", order)
         self.assertIn("b-2", order)
@@ -58,8 +58,8 @@ class TestTCP(unittest.TestCase):
             listen = ps.tcp_listen("127.0.0.1", 0)
             listen_holder.append(listen)
             host, port = listen.getsockname()[:2]
-            ps.go(server, listen)
-            ps.go(client, host, port)
+            ps.fiber(server, listen)
+            ps.fiber(client, host, port)
 
         ps.run(main)
         self.assertEqual(result_holder, [b"hello-sync"])
@@ -71,7 +71,7 @@ class TestTCP(unittest.TestCase):
             try:
                 for _ in range(expected):
                     conn, _ = listen_sock.accept()
-                    ps.go(handle_one, conn)
+                    ps.fiber(handle_one, conn)
             finally:
                 listen_sock.close()
 
@@ -91,9 +91,9 @@ class TestTCP(unittest.TestCase):
             listen = ps.tcp_listen("127.0.0.1", 0)
             host, port = listen.getsockname()[:2]
             N = 50
-            ps.go(server, listen, N)
+            ps.fiber(server, listen, N)
             for i in range(N):
-                ps.go(client, host, port, ("msg-%d" % i).encode())
+                ps.fiber(client, host, port, ("msg-%d" % i).encode())
 
         ps.run(main)
         self.assertEqual(sorted(results),
@@ -120,8 +120,8 @@ class TestUDP(unittest.TestCase):
         def main():
             recv = ps.udp_endpoint(local_addr=("127.0.0.1", 0))
             host, port = recv.getsockname()[:2]
-            ps.go(receiver, recv)
-            ps.go(sender, host, port)
+            ps.fiber(receiver, recv)
+            ps.fiber(sender, host, port)
 
         ps.run(main)
         self.assertEqual(result_holder, [b"ping"])
@@ -141,7 +141,7 @@ class TestPrimitives(unittest.TestCase):
         def main():
             lk = ps.Lock()
             for _ in range(4):
-                ps.go(worker, lk)
+                ps.fiber(worker, lk)
 
         ps.run(main)
         self.assertEqual(counter[0], 200)
@@ -159,8 +159,8 @@ class TestPrimitives(unittest.TestCase):
 
         def main():
             ev = ps.Event()
-            ps.go(waiter, ev)
-            ps.go(setter, ev)
+            ps.fiber(waiter, ev)
+            ps.fiber(setter, ev)
 
         ps.run(main)
         self.assertEqual(out, ["woken"])

@@ -69,7 +69,7 @@ _DEVNULL = os.open(os.devnull, os.O_WRONLY)
 # ==========================================================================
 def _subproc(script, env_extra=None, timeout=40):
     env = dict(os.environ, PYTHON_GIL="0", PYTHONPATH="src")
-    # keep deliberate goroutine panics from spamming the captured stderr
+    # keep deliberate fiber panics from spamming the captured stderr
     env.setdefault("RUNLOOM_GOROUTINE_PANIC", "silent")
     if env_extra:
         env.update(env_extra)
@@ -83,7 +83,7 @@ def _run_single(fn):
 
     def main():
         box["r"] = fn()
-    rc.go(main)
+    rc.fiber(main)
     rc.run()
     return box.get("r")
 
@@ -222,7 +222,7 @@ def test_coro_tiny_positive_stack_runs():
 
 def test_coro_huge_stack_raises_memoryerror_not_crash():
     # Coro is the LOW-LEVEL primitive: it does NOT clamp to MAX_STACK_SIZE (only
-    # the scheduler's go()/mn_go() path does).  An un-mmap-able size must surface
+    # the scheduler's fiber()/mn_fiber() path does).  An un-mmap-able size must surface
     # as a clean MemoryError at construction, never a wild mapping / crash.
     for sz in (1 << 46, 1 << 55, 1 << 62):
         with pytest.raises(MemoryError):
@@ -243,39 +243,39 @@ def test_coro_leaked_unfinished_is_collected_cleanly():
 
 
 # ==========================================================================
-# 2. go() / mn_go() stack-size argument probing
+# 2. fiber() / mn_fiber() stack-size argument probing
 # ==========================================================================
-def test_go_negative_and_zero_stack_treated_as_default():
-    # go() only honours stack_size>0 (else uses the scheduler default); a
+def test_fiber_negative_and_zero_stack_treated_as_default():
+    # fiber() only honours stack_size>0 (else uses the scheduler default); a
     # non-positive value must be silently treated as default, never crash.
     for bad in (-1, 0, -(1 << 40)):
         box = {}
-        rc.go(lambda: box.__setitem__("r", 1), bad)
+        rc.fiber(lambda: box.__setitem__("r", 1), bad)
         rc.run()
         assert box.get("r") == 1
 
 
-def test_go_noninteger_stack_rejected():
+def test_fiber_noninteger_stack_rejected():
     with pytest.raises(TypeError):
-        rc.go(lambda: 1, "big")
+        rc.fiber(lambda: 1, "big")
     with pytest.raises(TypeError):
-        rc.go(lambda: 1, 1.5)
+        rc.fiber(lambda: 1, 1.5)
     # drain any spawned-then-nothing scheduler state
     rc.run()
 
 
-def test_go_huge_stack_clamps_and_runs():
+def test_fiber_huge_stack_clamps_and_runs():
     # The scheduler path CLAMPS to RUNLOOM_MAX_STACK_SIZE (8 MiB); an absurd size
     # must not fail the spawn -- it runs on the clamped stack.
     box = {}
-    rc.go(lambda: box.__setitem__("r", 2), 1 << 62)
+    rc.fiber(lambda: box.__setitem__("r", 2), 1 << 62)
     with hang_guard(15, "go huge clamp"):
         rc.run()
     assert box.get("r") == 2
 
 
 @pytest.mark.skipif(not FT, reason="M:N needs GIL-disabled build")
-def test_mn_go_stack_arg_edges():
+def test_mn_fiber_stack_arg_edges():
     # mn_go honours stack_size>0 and ignores non-positive (uses default) -- all
     # must run under mn_run() without crashing or hanging.  (The HUGE-size case
     # is split out below -- it does NOT clamp like the single-thread path: see
@@ -295,12 +295,12 @@ def test_mn_go_stack_arg_edges():
 
 @pytest.mark.skipif(not FT, reason="M:N needs GIL-disabled build")
 # REGRESSION (was finding #15): mn_go(fn, huge) now clamps an explicit
-# stack_size to [MIN, MAX] (8 MiB) in runloom_mn_go_core, exactly like the
-# single-thread go() path (runloom_sched_spawn_sized) -- so a wild size
+# stack_size to [MIN, MAX] (8 MiB) in runloom_mn_fiber_core, exactly like the
+# single-thread fiber() path (runloom_sched_spawn_sized) -- so a wild size
 # clamps-and-runs instead of failing runloom_coro_new's mmap with MemoryError.
-def test_mn_go_huge_stack_should_clamp_like_single_thread():
+def test_mn_fiber_huge_stack_should_clamp_like_single_thread():
     box = {}
-    # Capture the goroutine's unraisable MemoryError so it doesn't leak into the
+    # Capture the fiber's unraisable MemoryError so it doesn't leak into the
     # test's warning surface; the xfail observes that the fiber never ran.
     caught = []
     old_hook = sys.unraisablehook
@@ -332,7 +332,7 @@ import runloom_c as rc
 rc.install_crash_handler("backtrace")
 def f():
     rc._crash_selftest_overflow()
-rc.go(f, 65536)                      # small 64 KiB stack
+rc.fiber(f, 65536)                      # small 64 KiB stack
 rc.run()
 print("UNREACHABLE")
 '''
@@ -389,7 +389,7 @@ def test_roomy_pinned_stack_survives_what_tiny_cannot():
     def main():
         out["r"] = recurse(900)
     with hang_guard(15, "roomy stack recursion"):
-        rc.go(main, 4 << 20)
+        rc.fiber(main, 4 << 20)
         rc.run()
     assert out["r"] == 900
 
@@ -427,7 +427,7 @@ def test_set_stack_size_roundtrips_and_drives_default():
         assert rc.get_stack_size() == 256 * 1024
         # a default-stack fiber must run fine at the new default
         box = {}
-        rc.go(lambda: box.__setitem__("r", 1))
+        rc.fiber(lambda: box.__setitem__("r", 1))
         rc.run()
         assert box.get("r") == 1
     finally:
@@ -470,9 +470,9 @@ def test_fibers_run_correctly_with_scrub_on_then_off():
                     buf = [i] * 256
                     acc[i] = 1 if sum(buf) == i * 256 else 0
                 for i in range(60):
-                    rc.go(lambda i=i: w(i))
+                    rc.fiber(lambda i=i: w(i))
             with hang_guard(20, "scrub=%s churn" % scrub):
-                rc.go(main)
+                rc.fiber(main)
                 rc.run()
             assert sum(acc) == 60, "scrub=%s: %d/60" % (scrub, sum(acc))
             assert rc._self_check(0) == 0
@@ -495,7 +495,7 @@ def test_stack_advice_report_shape_and_reset():
             # real C-stack depth (json C encoder), not pure-Python recursion
             json.dumps({"a": [1, 2, {"b": [3, 4, {"c": 5}]}]})
         for _ in range(40):
-            rc.go(w)
+            rc.fiber(w)
         with hang_guard(20, "advice churn"):
             rc.run()
         rep = rc.stack_advice()
@@ -534,7 +534,7 @@ def test_autosize_toggle_and_run():
         assert rc.stack_autosize_enabled() is True
         out = bytearray(60)
         for i in range(60):
-            rc.go(lambda i=i: out.__setitem__(i, 1))
+            rc.fiber(lambda i=i: out.__setitem__(i, 1))
         with hang_guard(20, "autosize run"):
             rc.run()
         assert sum(out) == 60
@@ -552,7 +552,7 @@ def test_autosize_prescan_arg_runs():
         rc.enable_stack_autosize(True, True)
         assert rc.stack_autosize_enabled() is True
         box = {}
-        rc.go(lambda: box.__setitem__("r", 1))
+        rc.fiber(lambda: box.__setitem__("r", 1))
         with hang_guard(15, "autosize prescan"):
             rc.run()
         assert box.get("r") == 1
@@ -581,8 +581,8 @@ def test_autosize_learns_down_across_alternating_workloads():
             json.dumps([{"x": [1, 2, [3, [4, [5, [6]]]]]}] * 8)   # C recursion
 
         for _ in range(80):
-            rc.go(shallow)
-            rc.go(deep)
+            rc.fiber(shallow)
+            rc.fiber(deep)
         with hang_guard(30, "autosize learn-down"):
             rc.run()
         rep = {d["kind"]: d for d in rc.stack_advice()}
@@ -616,7 +616,7 @@ def test_current_g_hwm_positive_inside_fiber():
         # do a little C work so the HWM is at least one page
         sum(bytes(4096))
         box["hwm"] = rc.current_g_hwm()
-    rc.go(f, 262144)
+    rc.fiber(f, 262144)
     rc.run()
     assert box.get("hwm", 0) >= _PAGE
     # never report more than the stack it ran on
@@ -657,9 +657,9 @@ def test_prewarm_then_spawn_storm_correct():
         def w(i):
             done[i] = 1
         for i in range(400):
-            rc.go(lambda i=i: w(i))
+            rc.fiber(lambda i=i: w(i))
     with hang_guard(30, "prewarm + spawn storm"):
-        rc.go(main)
+        rc.fiber(main)
         rc.run()
     assert sum(done) == 400
     assert rc._self_check(0) == 0
@@ -713,7 +713,7 @@ def test_prewarm_keep_rapid_start_stop_churn():
 
 
 def test_prewarm_from_foreign_thread_is_safe():
-    # prewarm() is a depot pre-fill with no goroutine/hub context; calling it
+    # prewarm() is a depot pre-fill with no fiber/hub context; calling it
     # from a genuine foreign OS thread (not a fiber, not a hub) must be safe and
     # not lazily allocate scheduler state on that thread.
     res = {}
@@ -825,7 +825,7 @@ def test_machinecode_runs_inside_single_fiber():
     def g():
         with rc.MachineCode(sq) as fn:
             box["r"] = fn(11)
-    rc.go(g)
+    rc.fiber(g)
     rc.run()
     assert box.get("r") == 121
 
@@ -903,7 +903,7 @@ def test_fiber_stack_on_live_parked_fiber():
     def main():
         ch = rc.Chan(0)
         for _ in range(20):
-            rc.go(lambda: ch.recv())
+            rc.fiber(lambda: ch.recv())
         rc.sched_yield()                  # let them park
         fl = rc.fibers()
         if fl:
@@ -911,7 +911,7 @@ def test_fiber_stack_on_live_parked_fiber():
             snap["ok"] = isinstance(frames, list)
         ch.close()
     with hang_guard(20, "fiber_stack live"):
-        rc.go(main)
+        rc.fiber(main)
         rc.run()
     assert snap.get("ok") is True
 
@@ -942,11 +942,11 @@ def test_cooperative_overlap_survives_stack_machinery_churn():
                 for i in range(5):
                     order.append(("burn", i))
                     rc.sched_yield()
-            rc.go(offloader)
-            rc.go(burner)
+            rc.fiber(offloader)
+            rc.fiber(burner)
         with hang_guard(20, "overlap under churn"):
             with assert_faster_than(0.6, "offload overlap under stack churn"):
-                rc.go(main)
+                rc.fiber(main)
                 rc.run()
         idx = order.index(("off-done", 7))
         burns_before = sum(1 for o in order[:idx]
@@ -1074,7 +1074,7 @@ def test_coro_exception_object_is_the_one_raised_then_consumed():
 ])
 def test_prewarm_family_negative_stack_size_crashes(label, call):
     # REGRESSION (was finding #17, a SIGSEGV): warmup(n, -1) / prewarm(n, -1) /
-    # prewarm_keep(n, -1) used to SEGV.  Coro(), set_stack_size() and go() all
+    # prewarm_keep(n, -1) used to SEGV.  Coro(), set_stack_size() and fiber() all
     # validate a non-positive stack_size, but the prewarm/warmup family parsed
     # stack_size as a Py_ssize_t and cast straight to (size_t) with NO check --
     # -1 became SIZE_MAX, overflowing the guard-page mmap+memset arithmetic in
@@ -1106,10 +1106,10 @@ import runloom_c as rc
 done = bytearray(40)
 def main():
     for i in range(40):
-        rc.go(lambda i=i: done.__setitem__(i, 1))
+        rc.fiber(lambda i=i: done.__setitem__(i, 1))
 err = None
 try:
-    rc.go(main)
+    rc.fiber(main)
     rc.run()
 except MemoryError as e:
     err = "MemoryError"
@@ -1211,10 +1211,10 @@ def test_machinecode_create_close_churn_across_mn_hubs():
 
 
 # --- 12e. set_stack_size huge -> silent clamp to MAX (not crash) ----------
-def test_set_stack_size_huge_clamps_to_max_and_default_go_runs():
+def test_set_stack_size_huge_clamps_to_max_and_default_fiber_runs():
     # set_stack_size accepts an absurd value but clamps the EFFECTIVE default to
     # RUNLOOM_MAX_STACK_SIZE (8 MiB) -- get_stack_size reflects the clamp -- so a
-    # default-stack go() must still map + run (NOT fail the mmap of 2^62 the way
+    # default-stack fiber() must still map + run (NOT fail the mmap of 2^62 the way
     # the low-level Coro primitive does).  This is the scheduler-path clamp
     # contract the file probed for go(fn, huge) but never for the DEFAULT path.
     old = rc.get_stack_size()
@@ -1224,7 +1224,7 @@ def test_set_stack_size_huge_clamps_to_max_and_default_go_runs():
         assert clamped <= 8 * 1024 * 1024, "default not clamped: %d" % clamped
         box = {}
         with hang_guard(15, "huge-default go"):
-            rc.go(lambda: box.__setitem__("r", 1))
+            rc.fiber(lambda: box.__setitem__("r", 1))
             rc.run()
         assert box.get("r") == 1
     finally:
@@ -1304,13 +1304,13 @@ def test_reset_stack_advice_mid_lived_report_is_safe():
         def w():
             json.dumps([1, [2, [3]]])
         for _ in range(20):
-            rc.go(w)
+            rc.fiber(w)
         rc.run()
         n1 = len(rc.stack_advice())
         rc.reset_stack_advice()
         assert rc.stack_advice() == []
         for _ in range(20):
-            rc.go(w)
+            rc.fiber(w)
         rc.run()
         n2 = len(rc.stack_advice())
         assert n2 >= 1 and n2 <= n1 + 2   # fresh count, not n1+ accumulation
@@ -1350,9 +1350,9 @@ def test_prewarm_background_then_immediate_stop_no_hang():
 
     def main():
         for i in range(50):
-            rc.go(lambda i=i: done.__setitem__(i, 1))
+            rc.fiber(lambda i=i: done.__setitem__(i, 1))
     with hang_guard(20, "post-bg-prewarm storm"):
-        rc.go(main)
+        rc.fiber(main)
         rc.run()
     assert sum(done) == 50
     assert rc._self_check(0) == 0
@@ -1404,9 +1404,9 @@ def test_scrub_recycle_does_not_corrupt_neighbour_results():
                     scratch[k] = (i + k) & 0xFF
                 out[i] = (i, sum(scratch) & 0xFFFF)
             for i in range(N):
-                rc.go(lambda i=i: w(i))
+                rc.fiber(lambda i=i: w(i))
         with hang_guard(25, "scrub integrity"):
-            rc.go(main)
+            rc.fiber(main)
             rc.run()
         # every slot filled, every index present exactly once, value matches
         assert all(out[i] is not None for i in range(N))

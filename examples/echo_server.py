@@ -1,7 +1,7 @@
 """TCP echo server — the Go-feel proof.
 
 Reads exactly like blocking code.  No async, no await.  Each client gets
-its own goroutine; the goroutines park transparently on socket I/O via
+its own fiber; the fibers park transparently on socket I/O via
 the monkey-patch + netpoll.
 
 Usage:
@@ -18,7 +18,7 @@ import os
 
 import runloom
 
-# Free-threaded build: fan goroutines across all cores (M:N scheduler).
+# Free-threaded build: fan fibers across all cores (M:N scheduler).
 HUBS = os.cpu_count() or 4
 
 HOST = "127.0.0.1"
@@ -50,7 +50,7 @@ def main():
     def accept_loop():
         while True:
             conn, addr = listener.accept()
-            runloom.go(lambda c=conn, a=addr: handle(c, a))
+            runloom.fiber(lambda c=conn, a=addr: handle(c, a))
 
     runloom.run(HUBS, accept_loop)
 

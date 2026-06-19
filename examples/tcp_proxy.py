@@ -1,12 +1,12 @@
-"""TCP proxy — pump bytes both ways with two goroutines per connection.
+"""TCP proxy — pump bytes both ways with two fibers per connection.
 
-A port forwarder is the textbook two-goroutines-per-connection job: one
-goroutine copies client->upstream, another copies upstream->client, and
+A port forwarder is the textbook two-fibers-per-connection job: one
+fiber copies client->upstream, another copies upstream->client, and
 each blocks on recv without holding up the other.  Under
 runloom.monkey.patch() these are plain blocking sockets.
 
 Self-contained: it stands up an echo upstream, the proxy, and a client
-as three goroutines and runs the traffic through end to end.
+as three fibers and runs the traffic through end to end.
 
 Run:
     python3 examples/tcp_proxy.py
@@ -17,7 +17,7 @@ import os
 
 import runloom
 
-# Free-threaded build: fan goroutines across all cores (M:N scheduler).
+# Free-threaded build: fan fibers across all cores (M:N scheduler).
 HUBS = os.cpu_count() or 4
 
 runloom.monkey.patch()
@@ -41,8 +41,8 @@ def pump(src, dst):
 def handle(client, upstream_addr):
     upstream = socket.socket()
     upstream.connect(upstream_addr)
-    # One goroutine each way; this goroutine handles the return path.
-    runloom.go(pump, client, upstream)
+    # One fiber each way; this fiber handles the return path.
+    runloom.fiber(pump, client, upstream)
     pump(upstream, client)
     client.close()
     upstream.close()
@@ -85,13 +85,13 @@ def main():
     up_ready = runloom.Chan(1)
     proxy_ready = runloom.Chan(1)
 
-    runloom.go(echo_upstream, up_ready)
+    runloom.fiber(echo_upstream, up_ready)
     upstream_addr = up_ready.recv()[0]
 
-    runloom.go(proxy, proxy_ready, upstream_addr)
+    runloom.fiber(proxy, proxy_ready, upstream_addr)
     proxy_addr = proxy_ready.recv()[0]
 
-    runloom.go(client, proxy_addr)
+    runloom.fiber(client, proxy_addr)
 
 if __name__ == "__main__":
     runloom.run(HUBS, main)

@@ -202,7 +202,7 @@ On a fault it maps the faulting address onto the guard pages and prints, e.g.:
 [runloom] >>> GOROUTINE STACK OVERFLOW <<<
 [runloom]     fiber g1 ran off the low end of its 128 KiB C stack
 [runloom]     (the fault hit the guard page just below it).
-[runloom]     Fix: give it a bigger stack -- runloom_c.go(fn, stack_size=N), ...
+[runloom]     Fix: give it a bigger stack -- runloom_c.fiber(fn, stack_size=N), ...
 [runloom] this thread was executing fiber g1.
 === runloom fiber dump: 1 live (default stack 128 KiB) ===
   ...
@@ -272,7 +272,7 @@ with pending background tasks never trips the detector — only a genuine
 
 ## Bounding fibers (backpressure)
 
-Goroutines are cheap, but `go()` is unbounded — a runaway spawn loop (a
+Goroutines are cheap, but `fiber()` is unbounded — a runaway spawn loop (a
 fan-out with no limit, an accept loop that spawns per connection under a
 flood) can still exhaust memory.  An optional admission gate caps the number
 of live fibers:
@@ -289,7 +289,7 @@ producer:
 ```python
 while True:
     try:
-        runloom.go(handle, conn)
+        runloom.fiber(handle, conn)
         break
     except RuntimeError:
         runloom.yield_now()         # let some finish, then retry

@@ -60,7 +60,7 @@ def _drive(*fibers):
         return runner
 
     for g in fibers:
-        runloom_c.go(wrap(g))
+        runloom_c.fiber(wrap(g))
     runloom_c.run()
     if box:
         raise box[0]
@@ -370,7 +370,7 @@ def test_unregister_then_fd_reuse_rearms(attempt):
             def feed():
                 runloom_c.sched_yield()
                 b.send(b"x")
-            runloom_c.go(feed)
+            runloom_c.fiber(feed)
             out1.append(runloom_c.wait_fd(a.fileno(), READ, 2000))
 
         _drive(reader1)
@@ -390,7 +390,7 @@ def test_unregister_then_fd_reuse_rearms(attempt):
             def feed():
                 runloom_c.sched_yield()
                 d.send(b"y")
-            runloom_c.go(feed)
+            runloom_c.fiber(feed)
             out2.append(runloom_c.wait_fd(c.fileno(), READ, 2000))
 
         _drive(reader2)

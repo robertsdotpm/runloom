@@ -75,8 +75,8 @@ assert got[0] == (SIZE, want), ("incomplete/corrupt transfer", got[0], (SIZE, wa
 print("TRANSFER_OK")
 """
 
-_DRIVE_ST = "runloom_c.go(server); runloom_c.go(client); runloom_c.run()"
-_DRIVE_MN = ("runloom_c.mn_init(2); runloom_c.mn_go(server); runloom_c.mn_go(client); "
+_DRIVE_ST = "runloom_c.fiber(server); runloom_c.fiber(client); runloom_c.run()"
+_DRIVE_MN = ("runloom_c.mn_init(2); runloom_c.mn_fiber(server); runloom_c.mn_fiber(client); "
              "runloom_c.mn_run(); runloom_c.mn_fini()")
 
 
@@ -133,8 +133,8 @@ def drain(i):
 def client(i):
     c = runloom_c.TCPConn.connect("127.0.0.1", PORT); c.send_all(pl[i]); c.close()
 runloom_c.mn_init(4)
-for i in range(NCONN): runloom_c.mn_go(lambda i=i: drain(i))
-for i in range(NCONN): runloom_c.mn_go(lambda i=i: client(i))
+for i in range(NCONN): runloom_c.mn_fiber(lambda i=i: drain(i))
+for i in range(NCONN): runloom_c.mn_fiber(lambda i=i: client(i))
 runloom_c.mn_run(); runloom_c.mn_fini(); L.close()
 # every received stream must equal exactly one distinct payload, all distinct
 used = set()

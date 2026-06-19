@@ -19,7 +19,7 @@ this module solves both:
      first-class check, not a flaky afterthought.
 
 `raw_thread()` spawns a **real** OS thread captured from the unpatched
-`threading` module, so foreign-OS-thread tests keep a genuine non-goroutine
+`threading` module, so foreign-OS-thread tests keep a genuine non-fiber
 thread even after `runloom.monkey.patch()` has replaced `threading`.
 """
 import faulthandler

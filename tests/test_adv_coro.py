@@ -64,7 +64,7 @@ def test_coro_tiny_positive_stack_runs():
 def test_coro_negative_stack_raises_not_segfaults():
     # Regression: Coro(fn, -1) cast the negative size to ~SIZE_MAX, overflowed
     # the guard-page arithmetic to an undersized mapping, and SIGSEGV'd.  It now
-    # validates the argument like go() / set_stack_size().
+    # validates the argument like fiber() / set_stack_size().
     with pytest.raises(ValueError):
         rc.Coro(lambda: 1, -1)
     with pytest.raises(ValueError):
@@ -94,7 +94,7 @@ def test_introspection_during_single_thread_churn():
         ch = rc.Chan(0)
         # spawn workers that PARK on a channel (live + parked state)
         for _ in range(40):
-            rc.go(lambda: ch.recv())
+            rc.fiber(lambda: ch.recv())
         rc.sched_yield()              # let them park
         snap["count"] = rc.fiber_count()
         snap["fibers_len"] = len(rc.fibers())
@@ -106,7 +106,7 @@ def test_introspection_during_single_thread_churn():
         rc.dump_fibers(_DEVNULL)
         ch.close()                    # release the parked workers (clean teardown)
     with hang_guard(20, "introspect churn"):
-        rc.go(main); rc.run()
+        rc.fiber(main); rc.run()
     assert snap.get("count", 0) >= 40
     assert snap.get("fibers_len", 0) >= 40
     assert snap.get("self_check") == 0

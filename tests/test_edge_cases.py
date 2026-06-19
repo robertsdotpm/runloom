@@ -117,7 +117,7 @@ class TestChannelEdges(unittest.TestCase):
                 out.append("no-raise")
             except ValueError:
                 out.append("closed")
-        runloom_c.go(w)
+        runloom_c.fiber(w)
         runloom_c.run()
         self.assertEqual(out, ["closed"])
 
@@ -133,7 +133,7 @@ class TestChannelEdges(unittest.TestCase):
         out = []
         def w():
             out.append(ch.recv())
-        runloom_c.go(w)
+        runloom_c.fiber(w)
         runloom_c.run()
         self.assertEqual(out, [(None, False)])
 
@@ -143,7 +143,7 @@ class TestChannelEdges(unittest.TestCase):
         out = []
         def w():
             out.append(ch.try_recv())
-        runloom_c.go(w)
+        runloom_c.fiber(w)
         runloom_c.run()
         self.assertEqual(out, [None])
 
@@ -153,7 +153,7 @@ class TestChannelEdges(unittest.TestCase):
         out = []
         def w():
             out.append(ch.try_recv())
-        runloom_c.go(w)
+        runloom_c.fiber(w)
         runloom_c.run()
         self.assertEqual(out, [("v", True)])
 
@@ -163,7 +163,7 @@ class TestChannelEdges(unittest.TestCase):
         def w():
             out.append(ch.try_send("a"))
             out.append(ch.try_send("b"))   # full
-        runloom_c.go(w)
+        runloom_c.fiber(w)
         runloom_c.run()
         self.assertEqual(out, [True, False])
 
@@ -177,8 +177,8 @@ class TestChannelEdges(unittest.TestCase):
         def consumer():
             v, _ = ch.recv()
             out.append(("got", v))
-        runloom_c.go(producer)
-        runloom_c.go(consumer)
+        runloom_c.fiber(producer)
+        runloom_c.fiber(consumer)
         runloom_c.run()
         self.assertIn(("got", "hi"), out)
         self.assertIn("sent", out)
@@ -192,8 +192,8 @@ class TestChannelEdges(unittest.TestCase):
         def closer():
             runloom_c.sched_sleep(0.005)
             ch.close()
-        runloom_c.go(waiter)
-        runloom_c.go(closer)
+        runloom_c.fiber(waiter)
+        runloom_c.fiber(closer)
         runloom_c.run()
         self.assertEqual(out, [(None, False)])
 

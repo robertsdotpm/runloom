@@ -97,7 +97,7 @@ leaf must fit the default stack, so a *new* fat frame is caught), and the
 ssl-warmed-so-fiber-is-safe check.  A fiber that calls into arbitrary
 third-party C with a single >32 KB frame remains the one residual: it fails as
 a clean guard-page crash and is fixed by sizing that fiber
-(`runloom_c.go(fn, stack_size=…)`) or offloading it.
+(`runloom_c.fiber(fn, stack_size=…)`) or offloading it.
 
 Reproducer (now exits cleanly; SEGV'd before the fix):
 
@@ -145,7 +145,7 @@ fiber's `c_stack_*` bounds and drop the offload.
 `builtins.compile`) and need the caller's namespace, so they are not offloaded.
 A fiber that `eval`/`exec`s deeply-nested untrusted source should use
 `runloom.monkey.offload()` / `runloom_c.blocking()` for the compile, or a
-roomier g-stack (`runloom_c.go(fn, stack_size=…)`).
+roomier g-stack (`runloom_c.fiber(fn, stack_size=…)`).
 
 ### Re-scan summary (stdlib C-frame sweep)
 

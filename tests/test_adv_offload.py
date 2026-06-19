@@ -33,7 +33,7 @@ def test_hashlib_large_offload_correct():
     def main():
         out["h"] = hashlib.sha256(data).hexdigest()
     with hang_guard(20, "hashlib offload"):
-        rc.go(main); rc.run()
+        rc.fiber(main); rc.run()
     # ground-truth via a fresh hasher fed in small chunks (stays inline)
     h = hashlib.sha256()
     for i in range(0, len(data), 4096):
@@ -49,7 +49,7 @@ def test_zlib_roundtrip_large():
         out["ok"] = zlib.decompress(comp) == data
         out["shrank"] = len(comp) < len(data)
     with hang_guard(20, "zlib roundtrip"):
-        rc.go(main); rc.run()
+        rc.fiber(main); rc.run()
     assert out.get("ok") is True
     assert out.get("shrank") is True
 
@@ -68,10 +68,10 @@ def test_heavy_offload_overlaps_scheduler():
             progress.append(("burn", i))
             rc.sched_yield()
     def main():
-        rc.go(hasher)
-        rc.go(burner)
+        rc.fiber(hasher)
+        rc.fiber(burner)
     with hang_guard(20, "heavy overlap"):
-        rc.go(main); rc.run()
+        rc.fiber(main); rc.run()
     done_idx = progress.index("hash-done")
     burns_before = sum(1 for p in progress[:done_idx]
                        if isinstance(p, tuple) and p[0] == "burn")
@@ -93,10 +93,10 @@ def test_subprocess_wait_is_cooperative():
             progress.append(("burn", i))
             time.sleep(0.01)                # cooperative (patched)
     def main():
-        rc.go(waiter)
-        rc.go(burner)
+        rc.fiber(waiter)
+        rc.fiber(burner)
     with hang_guard(20, "subprocess wait"):
-        rc.go(main); rc.run()
+        rc.fiber(main); rc.run()
     assert ("exit", 0) in progress
     exit_idx = progress.index(("exit", 0))
     burns_before = sum(1 for p in progress[:exit_idx]
@@ -116,7 +116,7 @@ def test_subprocess_wait_timeout_then_kill():
             p.kill()
             p.wait()
     with hang_guard(20, "subprocess timeout"):
-        rc.go(main); rc.run()
+        rc.fiber(main); rc.run()
     assert out.get("r") == "timeout"
 
 
@@ -132,13 +132,13 @@ def test_selectors_default_selector_cooperative():
         def writer():
             rc.sched_yield(); rc.sched_yield()
             b.send(b"go")
-        rc.go(writer)
+        rc.fiber(writer)
         events = sel.select(timeout=3)
         out["n"] = len(events)
         out["data"] = a.recv(2)
         sel.close(); a.close(); b.close()
     with hang_guard(20, "selectors"):
-        rc.go(main); rc.run()
+        rc.fiber(main); rc.run()
     assert out.get("n", 0) >= 1
     assert out.get("data") == b"go"
 

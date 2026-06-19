@@ -22,9 +22,9 @@ def accept_loop():
     s = socket.socket(); s.bind(("127.0.0.1", 9000)); s.listen(128)
     while True:
         conn, _ = s.accept()
-        runloom.go(lambda c=conn: handle(c))
+        runloom.fiber(lambda c=conn: handle(c))
 
-runloom.go(accept_loop)
+runloom.fiber(accept_loop)
 runloom.run(1)
 ```
 
@@ -37,7 +37,7 @@ fibers.
 - **Cheap fibers.**  A fiber is ~16 KB of C stack + ~150 B
   metadata after [calibration](stack-sizing.md).  50 000 idle
   fibers on one OS thread is normal; 200 000 has been tested.
-- **Two programming styles.**  Use `runloom.go(fn)` for plain
+- **Two programming styles.**  Use `runloom.fiber(fn)` for plain
   Go-style code, or `runloom.aio.run(coro)` to drive existing `async def`
   code on the same scheduler.  See the [asyncio bridge](asyncio.md).
 - **Channels.**  `runloom.Chan(capacity)` with send/recv/close, plus
@@ -76,7 +76,7 @@ fibers.
 
 ## How it works in 60 seconds
 
-When you call `runloom.go(fn)`, the scheduler allocates a new
+When you call `runloom.fiber(fn)`, the scheduler allocates a new
 fiber (a C struct + a private C stack) and puts it on the ready
 queue.  `runloom.run(1)` starts the scheduler loop.  Each iteration:
 

@@ -1,9 +1,9 @@
 """M:N scheduler — runloom's headline trick: use ALL your cores.
 
-With the GIL off, `run(n, main_fn)` spreads goroutines across n hub threads —
+With the GIL off, `run(n, main_fn)` spreads fibers across n hub threads —
 one per core — for genuine multi-core parallelism.  The whole
 mn_init / mn_go / mn_run / mn_fini envelope collapses into that single call;
-inside it, `runloom.go()` lands each goroutine on a hub automatically.  Here we
+inside it, `runloom.fiber()` lands each fiber on a hub automatically.  Here we
 fan out CPU-bound SHA-256 work (which releases the GIL while it hashes) and run
 it across every core, so the speedup over a single thread is near-linear.
 
@@ -32,10 +32,10 @@ def work():
     return data
 
 def spawn_all():
-    # Root goroutine: fan out the CPU-bound workers.  Inside an M:N run,
-    # runloom.go() lands each one on a hub (round-robin) for us.
+    # Root fiber: fan out the CPU-bound workers.  Inside an M:N run,
+    # runloom.fiber() lands each one on a hub (round-robin) for us.
     for _ in range(NUM_TASKS):
-        runloom.go(work)
+        runloom.fiber(work)
 
 def time_run(n_hubs):
     start = time.perf_counter()
@@ -43,7 +43,7 @@ def time_run(n_hubs):
     return time.perf_counter() - start
 
 def main():
-    print("workload: {0} goroutines x {1} SHA-256 rounds; cores available: {2}\n"
+    print("workload: {0} fibers x {1} SHA-256 rounds; cores available: {2}\n"
           .format(NUM_TASKS, ROUNDS, NCPU))
 
     gil_on = getattr(sys, "_is_gil_enabled", lambda: True)()

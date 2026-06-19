@@ -45,8 +45,8 @@ def _spawn(fn):
     runloom_c.go / mn_go at call time also picks up monkey's
     fiber-context wrapper when patch() is active."""
     if runloom_c.mn_hub_count() > 0:
-        return runloom_c.mn_go(fn)
-    return runloom_c.go(fn)
+        return runloom_c.mn_fiber(fn)
+    return runloom_c.fiber(fn)
 
 
 def Sleep(seconds):

@@ -33,7 +33,7 @@ def _drive(fn):
         except BaseException as e:   # noqa: BLE001
             box[1] = e
 
-    runloom_c.go(runner)
+    runloom_c.fiber(runner)
     runloom_c.run()
     if box[1] is not None:
         raise box[1]
@@ -95,7 +95,7 @@ class TestSimpleQueueContract(unittest.TestCase):
                 order.append("put")
                 q.put("item")
 
-            runloom_c.go(producer)
+            runloom_c.fiber(producer)
             val = q.get()              # parks until producer runs
             order.append("got")
             self.assertEqual(val, "item")
@@ -131,9 +131,9 @@ class TestSimpleQueueConservation(unittest.TestCase):
                             return
 
             for p in range(N_PROD):
-                runloom_c.go(lambda base=p * 1000: producer(base))
+                runloom_c.fiber(lambda base=p * 1000: producer(base))
             for _ in range(N_CONS):
-                runloom_c.go(consumer)
+                runloom_c.fiber(consumer)
 
             # Wait for all items, cooperatively.
             t0 = time.monotonic()
@@ -200,7 +200,7 @@ class TestQueueBlockingHandoff(unittest.TestCase):
                 time.sleep(0.02)
                 order.append("get:" + q.get())
 
-            runloom_c.go(consumer)
+            runloom_c.fiber(consumer)
             order.append("put-start")
             q.put("second")            # blocks until consumer takes "first"
             order.append("put-done")
@@ -224,7 +224,7 @@ class TestQueueBlockingHandoff(unittest.TestCase):
                     drained.append(item)
                     q.task_done()
 
-            runloom_c.go(worker)
+            runloom_c.fiber(worker)
             q.join()                   # parks until task_done called 5x
             return sorted(drained)
         self.assertEqual(_drive(body), [0, 1, 2, 3, 4])

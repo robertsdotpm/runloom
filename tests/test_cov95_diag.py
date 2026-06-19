@@ -146,8 +146,8 @@ def w():
     rc.sched_yield()
 def main():
     for _ in range(10):
-        rc.go(w)
-rc.go(main); rc.run()
+        rc.fiber(w)
+rc.fiber(main); rc.run()
 
 fd, path = tempfile.mkstemp()
 rc._diag_dump(fd); os.close(fd)
@@ -174,7 +174,7 @@ def test_debug_diag_ring_flag_and_unknown_token():
 #                                   -> PARK_LINK / PARK_UNLINK / PARK_TIMEOUT
 #   - runs an M:N hub               -> G_SUBMIT / G_POP
 #   - exercises the coro pool       -> CORO_ACQUIRE / CORO_RELEASE
-#   - completes goroutines          -> G_TRANSITION / G_DECREF / G_COMPLETE
+#   - completes fibers          -> G_TRANSITION / G_DECREF / G_COMPLETE
 # emits twelve distinct op codes.  We dump (to a temp file) and assert each
 # op_name label appears -- proof the matching op_name switch arm executed AND
 # the runloom_diag_dump per-thread event loop (L235-252) walked them.
@@ -193,7 +193,7 @@ def st_phase():
     def producer():
         rc.sched_yield(); rc.sched_yield()
         ch.send(1)
-    rc.go(consumer); rc.go(producer)
+    rc.fiber(consumer); rc.fiber(producer)
 
     # netpoll fd: a reader parks, a peer's send wakes it (LINK + UNLINK)
     a, b = socket.socketpair()
@@ -202,13 +202,13 @@ def st_phase():
     def waker():
         rc.sched_yield(); rc.sched_yield()
         b.send(b"x")
-    rc.go(reader); rc.go(waker)
+    rc.fiber(reader); rc.fiber(waker)
 
     # a pure-timeout park (PARK_TIMEOUT)
     rp, wp = os.pipe()
     def tmo():
         rc.wait_fd(rp, READ, 25)
-    rc.go(tmo)
+    rc.fiber(tmo)
 
     for _ in range(40):
         rc.sched_yield()
@@ -218,7 +218,7 @@ def st_phase():
     rc.netpoll_unregister(rp)
     a.close(); b.close(); os.close(rp); os.close(wp)
 
-rc.go(st_phase); rc.run()
+rc.fiber(st_phase); rc.run()
 
 # M:N hub -> G_SUBMIT / G_POP
 def w():
@@ -258,7 +258,7 @@ def test_ring_dump_covers_every_reachable_op_name_arm():
 # L194 (op_name CAL_FREEZE) + the CAL_FREEZE emit path it labels.
 #
 # The auto-calibration window freezes once exactly after RUNLOOM_CAL_TARGET
-# (1000) goroutines complete with stack-paint on (the default).  That single
+# (1000) fibers complete with stack-paint on (the default).  That single
 # RUNLOOM_EVT_CAL_FREEZE is then in the ring; we run 1010 completions and assert
 # the dump carries the CAL_FREEZE label -- which only the op_name CAL_FREEZE arm
 # can emit.
@@ -274,9 +274,9 @@ def main():
     # low concurrency so the freeze event (around completion #1000) survives
     # the 1024-entry ring until the post-run dump.
     for _ in range(1010):
-        rc.go(w)
+        rc.fiber(w)
         rc.sched_yield()
-rc.go(main); rc.run()
+rc.fiber(main); rc.run()
 
 fd, path = tempfile.mkstemp()
 rc._diag_dump(fd); os.close(fd)
@@ -362,7 +362,7 @@ def main():
         except Exception:
             pass
         rc.netpoll_unregister(a.fileno())
-    rc.go(reader)
+    rc.fiber(reader)
     for _ in range(3):
         rc.sched_yield()
     rc.netpoll_cancel_fd(a.fileno())   # force-unlink the parked fiber
@@ -370,7 +370,7 @@ def main():
         rc.sched_yield()
     rc.netpoll_unregister(b.fileno())
     a.close(); b.close()
-rc.go(main); rc.run()
+rc.fiber(main); rc.run()
 
 fd, path = tempfile.mkstemp()
 rc._diag_dump(fd); os.close(fd)
@@ -502,7 +502,7 @@ def test_mn_events_trace_env_emits_baton_protocol():
 # runs runloom_delay_init_once (reads the seed + RUNLOOM_DELAY_MAX_NS, L516-524),
 # and every instrumented scheduler transition then mixes (seed, site, count)
 # through runloom_splitmix64 (L501-506) into a bounded sleep (L535-541).  A
-# normal goroutine workload hits many of those sites, so the child just runs to
+# normal fiber workload hits many of those sites, so the child just runs to
 # completion under the env -- the coverage is the injector body itself.
 # --------------------------------------------------------------------------
 _DELAY_CHILD = r"""
@@ -514,9 +514,9 @@ def w():
     rc.sched_yield()
 def main():
     for _ in range(40):
-        rc.go(w)
+        rc.fiber(w)
 t0 = time.monotonic()
-rc.go(main); rc.run()
+rc.fiber(main); rc.run()
 # The injector ran (the sites fired); the work still completed.
 assert time.monotonic() - t0 < 60.0
 sys.stdout.write("DELAY_OK\n")
@@ -550,8 +550,8 @@ def w():
     rc.sched_yield()
 def main():
     for _ in range(20):
-        rc.go(w)
-rc.go(main); rc.run()
+        rc.fiber(w)
+rc.fiber(main); rc.run()
 sys.stdout.write("DELAY_ZERO_OK\n")
 """
 

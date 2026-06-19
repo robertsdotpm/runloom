@@ -67,7 +67,7 @@ def _drive(*fibers):
         return runner
 
     for g in fibers:
-        runloom_c.go(wrap(g))
+        runloom_c.fiber(wrap(g))
     runloom_c.run()
     if box:
         raise box[0]
@@ -393,14 +393,14 @@ def _run_mn_eof_read(hubs):
     def reader(slot):
         a, b = socket.socketpair()
         a.setblocking(False); b.setblocking(False)
-        runloom.go(_peer_closer, b)         # spawn the closer fiber
+        runloom.fiber(_peer_closer, b)         # spawn the closer fiber
         r = runloom_c.wait_fd(a.fileno(), READ, 4000)
         box[slot] = (r, a.recv(16))
         a.close()
 
     def main():
-        runloom.go(reader, "r")
-        # No sleep: runloom.run() waits for ALL goroutines, so the reader's
+        runloom.fiber(reader, "r")
+        # No sleep: runloom.run() waits for ALL fibers, so the reader's
         # full round-trip (park -> EOF fold -> recv) completes before run()
         # returns -- deterministic regardless of load.
     runloom.run(hubs, main)
@@ -438,14 +438,14 @@ def _run_mn_write_fold(hubs):
 
     def writer(slot):
         a, b, _ = _make_write_blocked_pair()
-        runloom.go(_peer_closer, b)
+        runloom.fiber(_peer_closer, b)
         r = runloom_c.wait_fd(a.fileno(), WRITE, 4000)
         box[slot] = r
         a.close()
 
     def main():
-        runloom.go(writer, "w")
-        # No sleep: run() waits for the writer goroutine's full round-trip.
+        runloom.fiber(writer, "w")
+        # No sleep: run() waits for the writer fiber's full round-trip.
     runloom.run(hubs, main)
     return box
 

@@ -294,7 +294,7 @@ static PyObject *m_mn_init(PyObject *self, PyObject *args)
     }
 }
 
-static PyObject *m_mn_go(PyObject *self, PyObject *args, PyObject *kw)
+static PyObject *m_mn_fiber(PyObject *self, PyObject *args, PyObject *kw)
 {
     static char *kwlist[] = {"fn", "stack_size", NULL};
     PyObject *callable;
@@ -305,18 +305,18 @@ static PyObject *m_mn_go(PyObject *self, PyObject *args, PyObject *kw)
         return NULL;
     }
     if (!PyCallable_Check(callable)) {
-        PyErr_SetString(PyExc_TypeError, "mn_go(): callable required");
+        PyErr_SetString(PyExc_TypeError, "mn_fiber(): callable required");
         return NULL;
     }
-    return runloom_mn_go(callable, stack_size > 0 ? (size_t)stack_size : 0);
+    return runloom_mn_fiber(callable, stack_size > 0 ? (size_t)stack_size : 0);
 }
 
-/* go_n(fn, n, stack_size=0, indexed=False): bulk-spawn n fibers all running
+/* fiber_n(fn, n, stack_size=0, indexed=False): bulk-spawn n fibers all running
  * fn(), looping the spawn core in C to skip n Python->C dispatches.  fn still
  * runs as Python in each fiber.  indexed=True calls fn(i) for i in 0..n-1
  * (the fiber's index) instead of fn() -- the per-fiber arg that lets a
  * shared worker distinguish itself (wid). */
-static PyObject *m_go_n(PyObject *self, PyObject *args, PyObject *kw)
+static PyObject *m_fiber_n(PyObject *self, PyObject *args, PyObject *kw)
 {
     static char *kwlist[] = {"fn", "n", "stack_size", "indexed", NULL};
     PyObject *callable;
@@ -329,11 +329,11 @@ static PyObject *m_go_n(PyObject *self, PyObject *args, PyObject *kw)
         return NULL;
     }
     if (!PyCallable_Check(callable)) {
-        PyErr_SetString(PyExc_TypeError, "go_n(): fn must be callable");
+        PyErr_SetString(PyExc_TypeError, "fiber_n(): fn must be callable");
         return NULL;
     }
     if (n < 0) n = 0;
-    if (runloom_mn_go_n(callable, n,
+    if (runloom_mn_fiber_n(callable, n,
                         stack_size > 0 ? (size_t)stack_size : 0, indexed) < 0) {
         return NULL;
     }

@@ -72,7 +72,7 @@ def mk(g):
     return w
 runloom_c.mn_init(NHUB)
 for g in range(NG):
-    runloom_c.mn_go(mk(g))
+    runloom_c.mn_fiber(mk(g))
 runloom_c.mn_run()
 fin = 0
 for _ in range(NG):
@@ -108,7 +108,7 @@ def mk(g):
     return w
 runloom_c.mn_init(NHUB)
 for g in range(NG):
-    runloom_c.mn_go(mk(g))
+    runloom_c.mn_fiber(mk(g))
 runloom_c.mn_run()
 fin = 0
 for _ in range(NG):
@@ -148,7 +148,7 @@ def worker():
     done.send(1)
 runloom_c.mn_init(NHUB)
 for _ in range(NG):
-    runloom_c.mn_go(worker)
+    runloom_c.mn_fiber(worker)
 runloom_c.mn_run()
 fin = 0
 for _ in range(NG):
@@ -195,15 +195,15 @@ def collector():
         runloom_c.sched_yield_classic()
     done.send(('gc', n))
 runloom_c.mn_init(NHUB)
-runloom_c.mn_go(collector)
+runloom_c.mn_fiber(collector)
 for _ in range(NWORK):
-    runloom_c.mn_go(worker)
+    runloom_c.mn_fiber(worker)
 def stopper():
     for _ in range(NWORK):
         done.recv()            # all workers finished
     stop[0] = True
     done.recv()                # collector's final tally
-runloom_c.mn_go(stopper)
+runloom_c.mn_fiber(stopper)
 runloom_c.mn_run()
 runloom_c.mn_fini()
 assert runloom_c._self_check(0) == 0
@@ -265,7 +265,7 @@ def body():
                 pass
         t.join()
 runloom_c.mn_init(NHUB)
-runloom_c.mn_go(body, 8 << 20)            # roomy stack: dodge the cold-import overflow
+runloom_c.mn_fiber(body, 8 << 20)            # roomy stack: dodge the cold-import overflow
 runloom_c.mn_run()
 runloom_c.mn_fini()
 assert runloom_c._self_check(0) == 0

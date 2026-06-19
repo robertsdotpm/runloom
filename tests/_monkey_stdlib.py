@@ -78,7 +78,7 @@ class MonkeyHosted(object):
         def body():
             holder["r"] = super(MonkeyHosted, self).run(result)
 
-        runloom_c.go(body, stack_size=STACK)
+        runloom_c.fiber(body, stack_size=STACK)
         runloom_c.run()
         return holder.get("r", result)
 

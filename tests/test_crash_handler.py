@@ -108,7 +108,7 @@ def test_no_interference_on_clean_run():
         results = []
         def work():
             results.append(42)
-        runloom_c.go(work)
+        runloom_c.fiber(work)
         runloom_c.run()
         print("CLEAN-EXIT", results)
     """)
@@ -126,7 +126,7 @@ def test_overflow_classified_single_thread():
         runloom.inspect.install_crash_handler("on")
         def boom():
             runloom_c._crash_selftest_overflow()   # unbounded real-C recursion
-        runloom_c.go(boom, 16384)                  # small 16 KiB stack
+        runloom_c.fiber(boom, 16384)                  # small 16 KiB stack
         runloom_c.run()
     """)
     assert rc in FAULT_RCS, (rc, out)          # chained to default -> cored
@@ -145,7 +145,7 @@ def test_overflow_classified_under_mn_scheduler():
         runloom_c.mn_init(2)
         def boom():
             runloom_c._crash_selftest_overflow()
-        runloom_c.mn_go(boom)
+        runloom_c.mn_fiber(boom)
         runloom_c.mn_run()
     """)
     assert rc in FAULT_RCS, (rc, out)
@@ -162,7 +162,7 @@ def test_wild_pointer_not_classified_as_overflow():
         runloom.inspect.install_crash_handler("on")
         def boom():
             ctypes.string_at(0)        # read address 0 -- not a guard page
-        runloom_c.go(boom)
+        runloom_c.fiber(boom)
         runloom_c.run()
     """)
     assert rc in FAULT_RCS, (rc, out)
@@ -180,7 +180,7 @@ def test_pystack_chains_python_traceback():
         runloom.inspect.install_crash_handler("all")   # all => +pystack
         def boom():
             ctypes.string_at(0)
-        runloom_c.go(boom)
+        runloom_c.fiber(boom)
         runloom_c.run()
     """)
     assert rc in FAULT_RCS, (rc, out)
@@ -200,7 +200,7 @@ def test_report_written_to_file(tmp_path):
         runloom.inspect.install_crash_handler("on", %r)
         def boom():
             runloom_c._crash_selftest_overflow()
-        runloom_c.go(boom, 16384)
+        runloom_c.fiber(boom, 16384)
         runloom_c.run()
     """ % str(report))
     assert rc in FAULT_RCS, (rc, out)
@@ -235,7 +235,7 @@ def test_env_autoinstall_actually_catches_crash():
     rc, out = run_child("""
         def boom():
             runloom_c._crash_selftest_overflow()
-        runloom_c.go(boom, 16384)
+        runloom_c.fiber(boom, 16384)
         runloom_c.run()
     """, extra_env={"RUNLOOM_CRASH": "on"})
     assert rc in FAULT_RCS, (rc, out)
