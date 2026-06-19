@@ -170,4 +170,5 @@ static PyTypeObject RunloomTCPConnType;
 #include "runloom_tcp_conn_io.c.inc"
 #include "runloom_tcp_conn_send.c.inc"
 #include "runloom_tcp_conn_net.c.inc"
+#include "runloom_tcp_capi.c.inc"      /* zero-PyObject C entry points for Cython handlers */
 #include "runloom_tcp_type_init.c.inc"

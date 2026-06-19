@@ -570,6 +570,11 @@ PyMODINIT_FUNC PyInit_runloom_c(void)
         Py_DECREF(m);
         return NULL;
     }
+    /* Zero-PyObject C recv/send capsule for Cython handlers (benchmark tier). */
+    if (runloom_tcpconn_capi_register(m) < 0) {
+        Py_DECREF(m);
+        return NULL;
+    }
     /* Sentinel that wait_fd returns when cancelled via G.cancel_wait_fd();
      * runloom.aio turns it into CancelledError. */
     if (PyModule_AddIntConstant(m, "WAIT_FD_CANCELLED",

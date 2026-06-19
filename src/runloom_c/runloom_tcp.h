@@ -32,4 +32,8 @@
  * Adds TCPConn as an attribute of the module. */
 int runloom_tcpconn_register(PyObject *module);
 
+/* Attach the runloom_c.__tcp_capi__ PyCapsule (zero-PyObject recv/send pointer
+ * table for Cython/C handlers).  Defined in runloom_tcp_capi.c.inc. */
+int runloom_tcpconn_capi_register(PyObject *module);
+
 #endif
