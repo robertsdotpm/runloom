@@ -1,3 +1,13 @@
+# benchmark/
+
+- **Throughput / speed / memory suite** → [`suite/`](suite/README.md); consolidated
+  results in [`report.html`](report.html). Compares runloom vs Go/asyncio/uvloop/
+  gevent/greenlet (req/s, bandwidth, spawn, context-switch, RTT, memory).
+- **Backend syscall profiles** (this file, below) — per-OS syscall traces the
+  report links to.
+
+---
+
 # big_100 syscall profiles, by netpoll backend
 
 Per-syscall profiles of the `big_100` stress programs on the latest `origin/main`,
