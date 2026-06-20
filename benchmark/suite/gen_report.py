@@ -678,7 +678,7 @@ def sec_work_xrt(xrt):
         hdr.append((("w=%d (echo)" % w) if w == 0 else ("w=%d" % w), True))
 
     # per-core line chart: cool colours = compiled band, warm = interpreted band
-    palette = {"runloom_cdef": "#6cd9c0", "runloom_cython": "var(--good)", "go": "var(--acc)",
+    palette = {"runloom_cython": "var(--good)", "go": "var(--acc)",
                "runloom_py": "var(--warn)", "asyncio": "#ff9966",
                "uvloop": "#ff6b9d", "gevent": "#e06c75"}
     xlabels = [("%d (echo)" % w) if w == 0 else str(w) for w in works]
@@ -688,10 +688,10 @@ def sec_work_xrt(xrt):
                         [percore(name, w) for w in works], name))
     chart = svg_linechart("ch_xrt", cseries, xlabels)
 
-    # FOCUSED chart at the top: just the compiled band (runloom cython/cdef vs Go)
-    # on a LINEAR y-axis, where the ~2x Go-vs-runloom gap reads true (log-y hides
+    # FOCUSED chart at the top: just the compiled band (runloom Cython vs Go) on
+    # a LINEAR y-axis, where the ~2x Go-vs-runloom gap reads true (log-y hides
     # it). Only render the compiled runtimes that are present.
-    comp_order = [n for n in ("go", "runloom_cdef", "runloom_cython")
+    comp_order = [n for n in ("go", "runloom_cython")
                   if n in rtinfo and any(percore(n, w) for w in works)]
     focus = ""
     if len(comp_order) >= 2:

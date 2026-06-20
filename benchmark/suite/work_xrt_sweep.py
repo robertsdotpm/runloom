@@ -74,9 +74,12 @@ def build_runtimes():
                 "-gomaxprocs", str(GO), "-work", str(w), "-token", token]
 
     return [
-        dict(name="runloom_cdef", label="Runloom (M:N) — cdef c_entry (fully native)",
-             kind="compiled", cores=HUBS, cpus=MANY, gil_off=True, env={}, make=rl("cdef")),
-        dict(name="runloom_cython", label="Runloom (M:N) — Cython handler (py def + compiled work)",
+        # The cdef c_entry (tstate-free) handler matched this Cython handler to
+        # within noise, so the cross-runtime comparison shows just ONE compiled
+        # runloom line -- the relatable "compile your hot handler in Cython" path.
+        # (The cdef-vs-cython tstate-bypass detail lives in its own report
+        # section, suite/servers/handler_cdef.pyx, not here.)
+        dict(name="runloom_cython", label="Runloom (M:N) — Cython handler (compiled)",
              kind="compiled", cores=HUBS, cpus=MANY, gil_off=True, env={}, make=rl("cython")),
         dict(name="go", label="Go net (GOMAXPROCS=%d)" % GO,
              kind="compiled", cores=GO, cpus=MANY, gil_off=True, env={}, make=gomk),
