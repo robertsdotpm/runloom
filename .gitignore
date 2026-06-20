@@ -23,3 +23,5 @@ hang_hunter_reports/
 
 # overnight flake-hunt loop output (transient, local)
 overnight_suite_results.log
+experiments_build.log
+experiments/spawn_perf/baseline_run.log

@@ -1,2 +1,4 @@
 results/
 *.so
+*.log
+baseline_run.log
