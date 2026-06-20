@@ -1,0 +1,19 @@
+#!/bin/sh
+# runloom-keep-resident -- run a command with the keep-resident madvise shim
+# preloaded (see keep_resident.c).  Builds the shim on first use.
+#
+# Stops CPython's free-threaded mimalloc QSBR purge from madvise-ing freed heap
+# segments back to the OS -- the ~1-per-fiber-completion TLB-shootdown that caps
+# spawn-heavy throughput.  Measured ~2x at 8 issuers.  Trades RSS; see
+# keep_resident.c and docs/dev/spawn_cost.md.
+#
+# Usage:
+#   tools/keep_resident/runloom-keep-resident python3 your_app.py
+#   tools/keep_resident/runloom-keep-resident env PYTHON_GIL=0 PYTHONPATH=src python3 app.py
+set -e
+here=$(cd "$(dirname "$0")" && pwd)
+so="$here/keep_resident.so"
+if [ ! -f "$so" ] || [ "$here/keep_resident.c" -nt "$so" ]; then
+    cc -O2 -shared -fPIC -o "$so" "$here/keep_resident.c" -ldl
+fi
+exec env LD_PRELOAD="${LD_PRELOAD:+$LD_PRELOAD:}$so" "$@"
