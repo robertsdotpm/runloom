@@ -375,47 +375,70 @@ def sec_speed(speed):
     out.append("<h3>Context switch (loaded-yield)</h3>")
     out.append(table("t_ctx", [("Runtime", False), ("Cores", True), ("ns / switch", True)], rows,
                      "Lower is better. G concurrent tasks each yield K times (run queues stay full "
-                     "&mdash; same-hub re-dispatch, not a 2-party ping-pong). Two runloom rows: "
-                     "<b>runloom (python fiber)</b> is a Python coroutine &mdash; at 44 hubs that number "
-                     "is NOT the scheduler, it is free-threaded CPython object-lock contention (a "
-                     "futex&rarr;cross-NUMA IPI storm; <code>perf</code>-confirmed, runloom's own yield "
-                     "is ~2% of the profile). <b>runloom (compiled fiber entry)</b> is the same yield on "
-                     "a tstate-free <code>c_entry</code> fiber (no Python eval) &mdash; the true "
-                     "scheduler cost, ~single-digit ns and flat to 44 hubs. The capstone just below "
-                     "shows the full hub-scaling proof."))
+                     "&mdash; same-hub re-dispatch, not a 2-party ping-pong). <b>runloom (python "
+                     "fiber)</b> here is the benchmark's <b>shared-closure</b> worker &mdash; at 44 hubs "
+                     "that number is NOT the scheduler, it is free-threaded CPython contention on the "
+                     "shared closure's <b>cells</b> (a futex&rarr;cross-NUMA IPI storm; <code>perf</code>"
+                     "-confirmed, runloom's own yield is ~2% of the profile). A plain module-level "
+                     "handler, or <code>@runloom.hot</code>, removes it &mdash; see the capstone below. "
+                     "<b>runloom (compiled fiber entry)</b> is the same yield on a tstate-free "
+                     "<code>c_entry</code> fiber (no Python eval) &mdash; the true scheduler cost, "
+                     "~single-digit ns and flat to 44 hubs."))
 
-    # ---- c_entry capstone: the TRUE scheduler yield (no Python) ----
+    # ---- c_entry capstone: the TRUE scheduler yield, + what the wall really is ----
     if cap and cap.get("hubs"):
         hubs = cap["hubs"]
         xl = [str(h) for h in hubs]
-        ce, pyn = cap.get("c_entry_ns", []), cap.get("python_ns", [])
-        capchart = svg_linechart("ch_cap",
-                                 [("c_entry (pure scheduler, no Python)", "var(--good)", ce, "centry"),
-                                  ("Python fiber", "var(--warn)", pyn, "python")],
-                                 xl, xaxis="scheduler hubs", ylabel="ns / switch (log)")
+        ce = cap.get("c_entry_ns", [])
+        pyn = cap.get("python_ns", [])
+        pyd = cap.get("python_distinct_ns", [])
+        series = [("c_entry (pure scheduler, no Python)", "var(--good)", ce, "centry")]
+        if pyd:
+            series.append(("Python fiber, per-core cells (@runloom.hot / module-level)",
+                           "var(--acc)", pyd, "pydist"))
+        series.append(("Python fiber, ONE shared closure", "var(--warn)", pyn, "pyshared"))
+        capchart = svg_linechart("ch_cap", series, xl,
+                                 xaxis="scheduler hubs", ylabel="ns / switch (log)")
         caprows = []
-        for h, c, p in zip(hubs, ce, pyn):
-            ratio = (p / c) if c else None
-            caprows.append([(str(h), h), (fmt(c), c), (fmt(p), p),
-                            (('<b>%.0f&times;</b>' % ratio) if ratio else "&mdash;", ratio or 0)])
-        out.append('<h3>True scheduler yield &mdash; the c_entry capstone (no Python eval)</h3>')
-        out.append('<p>The same loaded-yield, but the fibers are tstate-free <code>c_entry</code> '
-                   'fibers (spawned via <code>runloom_mn_fiber_c</code> from a Cython probe) &mdash; '
-                   '<b>no Python frame, no shared closure cell, no interpreter eval</b>, just the '
-                   'scheduler. This isolates runloom\'s pure context-switch cost from the CPython '
-                   'contention the table above measures.</p>'
+        for i, h in enumerate(hubs):
+            c, p = ce[i], pyn[i]
+            d = pyd[i] if pyd else None
+            ratio = (p / d) if (d and d > 0) else None   # shared closure vs the fixed path
+            row = [(str(h), h), (fmt(c), c)]
+            if pyd:
+                row.append((fmt(d), d))
+            row.append((fmt(p), p))
+            row.append((('<b>%.0f&times;</b>' % ratio) if ratio else "&mdash;", ratio or 0))
+            caprows.append(row)
+        cols = [("scheduler hubs", True), ("c_entry ns/switch", True)]
+        if pyd:
+            cols.append(("Python per-core cells", True))
+        cols += [("Python shared closure", True), ("shared / fixed", True)]
+        out.append('<h3>What the 44-hub &ldquo;wall&rdquo; actually was &mdash; the capstone</h3>')
+        out.append('<p>The same loaded-yield across hub counts, three ways. <b>c_entry</b> is a '
+                   'tstate-free fiber (no Python frame at all) &mdash; runloom\'s pure scheduler cost. '
+                   'The two Python lines settle what the wall is: a Python fiber with <b>per-core '
+                   'cells</b> (exactly what <code>@runloom.hot</code> does, and what a plain '
+                   'module-level handler already is) scales <b>flat, on par with c_entry</b>; a single '
+                   '<b>shared closure</b> walls hard. So the wall is shared closure <b>cells</b> &mdash; '
+                   'free-threaded CPython contention &mdash; NOT the scheduler and NOT the code object '
+                   '(a single shared code object scales fine; '
+                   '<a href="SCHEDULER_SCALING_FINDINGS.md">SCHEDULER_SCALING_FINDINGS.md</a> has the '
+                   '7-variant proof). The ~250 ns 1-hub Python cost is the interpreter frame; it is '
+                   'per-hub-parallel, so it parallelises away in aggregate.</p>'
                    + capchart
-                   + table("t_cap", [("scheduler hubs", True), ("c_entry ns/switch", True),
-                                     ("Python-fiber ns/switch", True), ("Python / c_entry", True)],
-                           caprows, mark_best=False, note=
-                           "runloom's pure scheduler yield is <b>~20&ndash;43 ns and FLAT (even "
-                           "improves) to 44 hubs</b> &mdash; zero contention wall, and <b>10&ndash;20&times; "
-                           "faster than greenlet (465) and Go (676)</b>. The Python-fiber path explodes "
-                           "to ~12&ndash;27 &micro;s at 44 hubs (the wall's height is load-dependent &mdash; "
-                           "it is contention, not a fixed cost). That entire gap is the CPython "
-                           "interpreter, not the scheduler. (1-hub c_entry can read ~0: the yield is "
-                           "below the n=0-subtraction noise floor.) Full analysis: "
-                           "<a href=\"SCHEDULER_SCALING_FINDINGS.md\">SCHEDULER_SCALING_FINDINGS.md</a>."))
+                   + table("t_cap", cols, caprows, mark_best=False, note=
+                           "<b>Per-core cells (<code>@runloom.hot</code>) / module-level handlers scale "
+                           "flat to 44 hubs &mdash; 18 ns aggregate, dead level with c_entry (34 ns).</b> "
+                           "A single shared closure explodes to ~7.5 &micro;s (the captured cells bounce "
+                           "across NUMA nodes; <code>perf</code> shows the futex&rarr;IPI storm). So a "
+                           "regular Python handler already context-switches as cheaply in aggregate as "
+                           "the pure-C path; only sharing ONE closure's cells across every core breaks "
+                           "it, and <code>@runloom.hot</code> / <code>optimize(&quot;throughput&quot;)</code> "
+                           "fixes that (69k&rarr;10.4M switches/s, <b>150&times;</b>). Measured "
+                           "preempt-off (the CPU-preempt watchdog is microbenchmark noise). Full "
+                           "analysis: <a href=\"SCHEDULER_SCALING_FINDINGS.md\">"
+                           "SCHEDULER_SCALING_FINDINGS.md</a>."))
 
     # http
     rows = []

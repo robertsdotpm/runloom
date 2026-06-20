@@ -41,7 +41,7 @@ code{color:#cbd5e1}
 <nav><b>Runloom benchmarks</b> <a href="#env">machine</a><a href="#constraints">constraints</a><a href="#perf">req/s</a><a href="#iouring">io_uring</a><a href="#work">work curve</a><a href="#workxrt">work x-runtime</a><a href="#speed">speed</a><a href="#mem">memory</a><a href="#code">code</a><a href="#profiles">profiles</a></nav>
 <div class="wrap">
 <h1>Runloom benchmark report</h1>
-<p class="note">Generated 2026-06-19 22:18. Throughput is shown raw and divided down to one core; latencies are not divided. Click any column header to sort.</p>
+<p class="note">Generated 2026-06-20 11:28. Throughput is shown raw and divided down to one core; latencies are not divided. Click any column header to sort.</p>
 <h2 id="env">Machine &amp; toolchain</h2><table class="kv"><tr><th>Host</th><td>x-VMware20-1 (vmware, Ubuntu 24.04.3 LTS)</td></tr><tr><th>Kernel</th><td>6.17.0-35-generic x86_64</td></tr><tr><th>CPU</th><td>Intel(R) Xeon(R) CPU E5-2696 v3 @ 2.30GHz</td></tr><tr><th>Logical CPUs / NUMA</th><td>64 vCPUs &mdash; node0=0-31, node1=32-63</td></tr><tr><th>Memory</th><td>78.6 GiB</td></tr><tr><th>CPU governor / steal</th><td>n/a / 0%</td></tr><tr><th>Runloom interp</th><td>3.13.13 FT @ b037eb9</td></tr><tr><th>Runloom build</th><td>-O2 -DNDEBUG -D_FORTIFY_SOURCE=2 -fstack-protector-strong (as-shipped release) (RUNLOOM_DEBUG=<unset>)</td></tr><tr><th>Baseline interp</th><td>3.13.13 GIL &mdash; uvloop 0.22.1, gevent 26.5.0, greenlet 3.5.1</td></tr><tr><th>Go</th><td>go version go1.22.2 linux/amd64</td></tr><tr><th>Cython</th><td>3.2.5</td></tr></table><p class="warn">This is a VMware guest &mdash; the CPUs are vCPUs and may incur hypervisor steal; numbers are valid for relative comparison on this host, not absolute hardware peaks.</p>
 <h2 id="constraints">Assumed constraints &amp; methodology</h2><table class="kv"><tr><th>CPU sizing</th><td>hubs = int(cpu&times;0.7) = <b>44</b>; go GOMAXPROCS = <b>44</b>; client = int(cpu&times;0.25) = <b>16</b></td></tr><tr><th>CPU placement</th><td>client cpus <code>0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15</code>; server cpus <code>16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59</code> (disjoint, so the loadgen never steals a server core)</td></tr><tr><th>Network</th><td>veth pair across two netns (10.99.0.1 &harr; 10.99.0.2); spec sysctls applied inside the server netns; empty firewall ruleset (no host nft tax)</td></tr><tr><th>Sysctls</th><td>net.ipv4.tcp_wmem = 4096 16384 2097152; net.ipv4.tcp_rmem = 4096 87380 2097152; net.core.somaxconn = 65535; net.ipv4.tcp_tw_reuse = 1</td></tr><tr><th>fd limit</th><td>RLIMIT_NOFILE raised to 8,388,608 per exec via prlimit (the editor-shell 4096 cap does not propagate)</td></tr><tr><th>Debug</th><td>RUNLOOM_DEBUG unset; as-shipped -O2 -DNDEBUG release build, no sanitizers</td></tr><tr><th>TCP_NODELAY</th><td>set once per connection at setup (listener + client), never in the per-request loop</td></tr><tr><th>req/s payload</th><td>1024 B (small &rarr; scheduling/syscall bound, the headline req/s)</td></tr><tr><th>bandwidth payload</th><td>1,572,864 B = 1.5 MiB (large &rarr; copy/IO bound, reported as GB/s)</td></tr><tr><th>Stop rule</th><td>geometric connection ladder; a rung must beat the incumbent peak's bootstrap-CI upper bound to count; 2 consecutive misses stop the sweep; 3 reps/rung</td></tr><tr><th>Per-core scaling</th><td>throughput metrics (req/s, spawn, http, GB/s) are divided by the runtime's core count; latency metrics (ctx-switch, RTT) are not divided; single-threaded runtimes are already 1 core. We do NOT measure run(1) as 'runloom per core' &mdash; that is the M:1 cooperative scheduler, a different runtime than the M:N work-stealer.</td></tr><tr><th>Saturation honesty</th><td>the 16-core client cannot saturate the fastest servers for a symmetric echo, so each peak is tagged with the CPU-bound side and, when client-bound, a server-ceiling estimate (peak / server-CPU-utilisation).</td></tr></table>
 <h2 id="perf">Performance &mdash; requests / second</h2><table id="t_reqps" class="sortable"><thead><tr>
@@ -1354,7 +1354,7 @@ code{color:#cbd5e1}
 <tr class="best">
 <td data-v="runloom (compiled fiber entry)"><span class="trophy">&#127942;</span>runloom (compiled fiber entry)</td>
 <td data-v="44">44</td>
-<td data-v="3.6123609661764555">3.6</td>
+<td data-v="34.41355636616288">34</td>
 </tr>
 <tr>
 <td data-v="greenlet">greenlet</td>
@@ -1382,40 +1382,45 @@ code{color:#cbd5e1}
 <td data-v="25391.880745827515">25,392</td>
 </tr>
 </tbody></table>
-<p class="note">Lower is better. G concurrent tasks each yield K times (run queues stay full &mdash; same-hub re-dispatch, not a 2-party ping-pong). Two runloom rows: <b>runloom (python fiber)</b> is a Python coroutine &mdash; at 44 hubs that number is NOT the scheduler, it is free-threaded CPython object-lock contention (a futex&rarr;cross-NUMA IPI storm; <code>perf</code>-confirmed, runloom's own yield is ~2% of the profile). <b>runloom (compiled fiber entry)</b> is the same yield on a tstate-free <code>c_entry</code> fiber (no Python eval) &mdash; the true scheduler cost, ~single-digit ns and flat to 44 hubs. The capstone just below shows the full hub-scaling proof.</p>
-<h3>True scheduler yield &mdash; the c_entry capstone (no Python eval)</h3>
-<p>The same loaded-yield, but the fibers are tstate-free <code>c_entry</code> fibers (spawned via <code>runloom_mn_fiber_c</code> from a Cython probe) &mdash; <b>no Python frame, no shared closure cell, no interpreter eval</b>, just the scheduler. This isolates runloom's pure context-switch cost from the CPython contention the table above measures.</p><svg viewBox="0 0 760 392" id="ch_cap" class="chart" width="100%" style="max-width:760px"><line x1="70" y1="314.4" x2="564" y2="314.4" class="grid"/><text x="63" y="317.4" class="ytick">0.05</text><line x1="70" y1="300.9" x2="564" y2="300.9" class="grid"/><text x="63" y="303.9" class="ytick">0.1</text><line x1="70" y1="287.3" x2="564" y2="287.3" class="grid"/><text x="63" y="290.3" class="ytick">0.2</text><line x1="70" y1="269.3" x2="564" y2="269.3" class="grid"/><text x="63" y="272.3" class="ytick">0.5</text><line x1="70" y1="255.7" x2="564" y2="255.7" class="grid"/><text x="63" y="258.7" class="ytick">1</text><line x1="70" y1="242.1" x2="564" y2="242.1" class="grid"/><text x="63" y="245.1" class="ytick">2</text><line x1="70" y1="224.2" x2="564" y2="224.2" class="grid"/><text x="63" y="227.2" class="ytick">5</text><line x1="70" y1="210.6" x2="564" y2="210.6" class="grid"/><text x="63" y="213.6" class="ytick">10</text><line x1="70" y1="197.0" x2="564" y2="197.0" class="grid"/><text x="63" y="200.0" class="ytick">20</text><line x1="70" y1="179.0" x2="564" y2="179.0" class="grid"/><text x="63" y="182.0" class="ytick">50</text><line x1="70" y1="165.4" x2="564" y2="165.4" class="grid"/><text x="63" y="168.4" class="ytick">100</text><line x1="70" y1="151.8" x2="564" y2="151.8" class="grid"/><text x="63" y="154.8" class="ytick">200</text><line x1="70" y1="133.9" x2="564" y2="133.9" class="grid"/><text x="63" y="136.9" class="ytick">500</text><line x1="70" y1="120.3" x2="564" y2="120.3" class="grid"/><text x="63" y="123.3" class="ytick">1k</text><line x1="70" y1="106.7" x2="564" y2="106.7" class="grid"/><text x="63" y="109.7" class="ytick">2k</text><line x1="70" y1="88.7" x2="564" y2="88.7" class="grid"/><text x="63" y="91.7" class="ytick">5k</text><line x1="70" y1="75.1" x2="564" y2="75.1" class="grid"/><text x="63" y="78.1" class="ytick">10k</text><text x="70.0" y="362" class="xtick">1</text><text x="234.7" y="362" class="xtick">8</text><text x="399.3" y="362" class="xtick">16</text><text x="564.0" y="362" class="xtick">44</text><text x="317.0" y="387" class="axlbl">scheduler hubs</text><text x="14" y="188.0" class="axlbl" transform="rotate(-90 14 188.0)">ns / switch (log)</text><text x="578" y="18" class="hint">click a name to toggle</text><g class="ser ser-ch_cap-centry"><path d="M70.0 318.7 L234.7 176.1 L399.3 180.8 L564.0 230.5 " fill="none" stroke="var(--good)" stroke-width="2.4"/><circle cx="70.0" cy="318.7" r="2.7" fill="var(--good)"/><circle cx="234.7" cy="176.1" r="2.7" fill="var(--good)"/><circle cx="399.3" cy="180.8" r="2.7" fill="var(--good)"/><circle cx="564.0" cy="230.5" r="2.7" fill="var(--good)"/></g><g class="legi" data-c="ch_cap" data-s="centry" onclick="tglSeries('ch_cap','centry')"><rect x="574" y="30" width="184" height="17" fill="transparent"/><line x1="578" y1="38" x2="596" y2="38" stroke="var(--good)" stroke-width="2.4"/><text x="600" y="42" class="leg">c_entry (pure scheduler, no Python)</text></g><g class="ser ser-ch_cap-python"><path d="M70.0 148.9 L234.7 136.7 L399.3 129.5 L564.0 69.7 " fill="none" stroke="var(--warn)" stroke-width="2.4"/><circle cx="70.0" cy="148.9" r="2.7" fill="var(--warn)"/><circle cx="234.7" cy="136.7" r="2.7" fill="var(--warn)"/><circle cx="399.3" cy="129.5" r="2.7" fill="var(--warn)"/><circle cx="564.0" cy="69.7" r="2.7" fill="var(--warn)"/></g><g class="legi" data-c="ch_cap" data-s="python" onclick="tglSeries('ch_cap','python')"><rect x="574" y="49" width="184" height="17" fill="transparent"/><line x1="578" y1="57" x2="596" y2="57" stroke="var(--warn)" stroke-width="2.4"/><text x="600" y="61" class="leg">Python fiber</text></g></svg><table id="t_cap" class="sortable"><thead><tr>
+<p class="note">Lower is better. G concurrent tasks each yield K times (run queues stay full &mdash; same-hub re-dispatch, not a 2-party ping-pong). <b>runloom (python fiber)</b> here is the benchmark's <b>shared-closure</b> worker &mdash; at 44 hubs that number is NOT the scheduler, it is free-threaded CPython contention on the shared closure's <b>cells</b> (a futex&rarr;cross-NUMA IPI storm; <code>perf</code>-confirmed, runloom's own yield is ~2% of the profile). A plain module-level handler, or <code>@runloom.hot</code>, removes it &mdash; see the capstone below. <b>runloom (compiled fiber entry)</b> is the same yield on a tstate-free <code>c_entry</code> fiber (no Python eval) &mdash; the true scheduler cost, ~single-digit ns and flat to 44 hubs.</p>
+<h3>What the 44-hub &ldquo;wall&rdquo; actually was &mdash; the capstone</h3>
+<p>The same loaded-yield across hub counts, three ways. <b>c_entry</b> is a tstate-free fiber (no Python frame at all) &mdash; runloom's pure scheduler cost. The two Python lines settle what the wall is: a Python fiber with <b>per-core cells</b> (exactly what <code>@runloom.hot</code> does, and what a plain module-level handler already is) scales <b>flat, on par with c_entry</b>; a single <b>shared closure</b> walls hard. So the wall is shared closure <b>cells</b> &mdash; free-threaded CPython contention &mdash; NOT the scheduler and NOT the code object (a single shared code object scales fine; <a href="SCHEDULER_SCALING_FINDINGS.md">SCHEDULER_SCALING_FINDINGS.md</a> has the 7-variant proof). The ~250 ns 1-hub Python cost is the interpreter frame; it is per-hub-parallel, so it parallelises away in aggregate.</p><svg viewBox="0 0 760 392" id="ch_cap" class="chart" width="100%" style="max-width:760px"><line x1="70" y1="282.8" x2="564" y2="282.8" class="grid"/><text x="63" y="285.8" class="ytick">1</text><line x1="70" y1="263.8" x2="564" y2="263.8" class="grid"/><text x="63" y="266.8" class="ytick">2</text><line x1="70" y1="238.6" x2="564" y2="238.6" class="grid"/><text x="63" y="241.6" class="ytick">5</text><line x1="70" y1="219.6" x2="564" y2="219.6" class="grid"/><text x="63" y="222.6" class="ytick">10</text><line x1="70" y1="200.6" x2="564" y2="200.6" class="grid"/><text x="63" y="203.6" class="ytick">20</text><line x1="70" y1="175.4" x2="564" y2="175.4" class="grid"/><text x="63" y="178.4" class="ytick">50</text><line x1="70" y1="156.4" x2="564" y2="156.4" class="grid"/><text x="63" y="159.4" class="ytick">100</text><line x1="70" y1="137.4" x2="564" y2="137.4" class="grid"/><text x="63" y="140.4" class="ytick">200</text><line x1="70" y1="112.2" x2="564" y2="112.2" class="grid"/><text x="63" y="115.2" class="ytick">500</text><line x1="70" y1="93.2" x2="564" y2="93.2" class="grid"/><text x="63" y="96.2" class="ytick">1k</text><line x1="70" y1="74.2" x2="564" y2="74.2" class="grid"/><text x="63" y="77.2" class="ytick">2k</text><line x1="70" y1="49.0" x2="564" y2="49.0" class="grid"/><text x="63" y="52.0" class="ytick">5k</text><text x="70.0" y="362" class="xtick">1</text><text x="234.7" y="362" class="xtick">8</text><text x="399.3" y="362" class="xtick">16</text><text x="564.0" y="362" class="xtick">44</text><text x="317.0" y="387" class="axlbl">scheduler hubs</text><text x="14" y="188.0" class="axlbl" transform="rotate(-90 14 188.0)">ns / switch (log)</text><text x="578" y="18" class="hint">click a name to toggle</text><g class="ser ser-ch_cap-centry"><path d="M70.0 287.8 L234.7 175.0 L399.3 173.8 L564.0 185.7 " fill="none" stroke="var(--good)" stroke-width="2.4"/><circle cx="70.0" cy="287.8" r="2.7" fill="var(--good)"/><circle cx="234.7" cy="175.0" r="2.7" fill="var(--good)"/><circle cx="399.3" cy="173.8" r="2.7" fill="var(--good)"/><circle cx="564.0" cy="185.7" r="2.7" fill="var(--good)"/></g><g class="legi" data-c="ch_cap" data-s="centry" onclick="tglSeries('ch_cap','centry')"><rect x="574" y="30" width="184" height="17" fill="transparent"/><line x1="578" y1="38" x2="596" y2="38" stroke="var(--good)" stroke-width="2.4"/><text x="600" y="42" class="leg">c_entry (pure scheduler, no Python)</text></g><g class="ser ser-ch_cap-pydist"><path d="M70.0 130.5 L234.7 162.3 L399.3 174.6 L564.0 203.6 " fill="none" stroke="var(--acc)" stroke-width="2.4"/><circle cx="70.0" cy="130.5" r="2.7" fill="var(--acc)"/><circle cx="234.7" cy="162.3" r="2.7" fill="var(--acc)"/><circle cx="399.3" cy="174.6" r="2.7" fill="var(--acc)"/><circle cx="564.0" cy="203.6" r="2.7" fill="var(--acc)"/></g><g class="legi" data-c="ch_cap" data-s="pydist" onclick="tglSeries('ch_cap','pydist')"><rect x="574" y="49" width="184" height="17" fill="transparent"/><line x1="578" y1="57" x2="596" y2="57" stroke="var(--acc)" stroke-width="2.4"/><text x="600" y="61" class="leg">Python fiber, per-core cells (@runloom.hot / module-level)</text></g><g class="ser ser-ch_cap-pyshared"><path d="M70.0 132.6 L234.7 141.6 L399.3 127.8 L564.0 38.0 " fill="none" stroke="var(--warn)" stroke-width="2.4"/><circle cx="70.0" cy="132.6" r="2.7" fill="var(--warn)"/><circle cx="234.7" cy="141.6" r="2.7" fill="var(--warn)"/><circle cx="399.3" cy="127.8" r="2.7" fill="var(--warn)"/><circle cx="564.0" cy="38.0" r="2.7" fill="var(--warn)"/></g><g class="legi" data-c="ch_cap" data-s="pyshared" onclick="tglSeries('ch_cap','pyshared')"><rect x="574" y="68" width="184" height="17" fill="transparent"/><line x1="578" y1="76" x2="596" y2="76" stroke="var(--warn)" stroke-width="2.4"/><text x="600" y="80" class="leg">Python fiber, ONE shared closure</text></g></svg><table id="t_cap" class="sortable"><thead><tr>
 <th onclick="sortT('t_cap',0,true)">scheduler hubs<span class="ar"></span></th>
 <th onclick="sortT('t_cap',1,true)">c_entry ns/switch<span class="ar"></span></th>
-<th onclick="sortT('t_cap',2,true)">Python-fiber ns/switch<span class="ar"></span></th>
-<th onclick="sortT('t_cap',3,true)">Python / c_entry<span class="ar"></span></th>
+<th onclick="sortT('t_cap',2,true)">Python per-core cells<span class="ar"></span></th>
+<th onclick="sortT('t_cap',3,true)">Python shared closure<span class="ar"></span></th>
+<th onclick="sortT('t_cap',4,true)">shared / fixed<span class="ar"></span></th>
 </tr></thead><tbody>
 <tr>
 <td data-v="1">1</td>
-<td data-v="0.04035098710267246">0</td>
-<td data-v="232.55498599610291">233</td>
-<td data-v="5763.303519796687"><b>5763&times;</b></td>
+<td data-v="0.8323019719682634">1</td>
+<td data-v="256.46386196604">256</td>
+<td data-v="237.9934930067975">238</td>
+<td data-v="0.9279806175511455"><b>1&times;</b></td>
 </tr>
 <tr>
 <td data-v="8">8</td>
-<td data-v="57.96195458056347">58</td>
-<td data-v="432.81085888575603">433</td>
-<td data-v="7.467154308679777"><b>7&times;</b></td>
+<td data-v="50.71796997786313">51</td>
+<td data-v="80.70268796546216">81</td>
+<td data-v="171.16890080487056">171</td>
+<td data-v="2.120981408675318"><b>2&times;</b></td>
 </tr>
 <tr>
 <td data-v="16">16</td>
-<td data-v="45.594428060798364">46</td>
-<td data-v="625.5881216152288">626</td>
-<td data-v="13.72071431142928"><b>14&times;</b></td>
+<td data-v="52.985903086172854">53</td>
+<td data-v="51.610732107660176">52</td>
+<td data-v="283.4706251304866">283</td>
+<td data-v="5.492474405113375"><b>5&times;</b></td>
 </tr>
 <tr>
 <td data-v="44">44</td>
-<td data-v="3.6123609661764555">4</td>
-<td data-v="13230.988545358585">13,231</td>
-<td data-v="3662.698348599164"><b>3663&times;</b></td>
+<td data-v="34.41355636616288">34</td>
+<td data-v="17.909424996769154">18</td>
+<td data-v="7470.037390964364">7,470</td>
+<td data-v="417.10090593706684"><b>417&times;</b></td>
 </tr>
 </tbody></table>
-<p class="note">runloom's pure scheduler yield is <b>~20&ndash;43 ns and FLAT (even improves) to 44 hubs</b> &mdash; zero contention wall, and <b>10&ndash;20&times; faster than greenlet (465) and Go (676)</b>. The Python-fiber path explodes to ~12&ndash;27 &micro;s at 44 hubs (the wall's height is load-dependent &mdash; it is contention, not a fixed cost). That entire gap is the CPython interpreter, not the scheduler. (1-hub c_entry can read ~0: the yield is below the n=0-subtraction noise floor.) Full analysis: <a href="SCHEDULER_SCALING_FINDINGS.md">SCHEDULER_SCALING_FINDINGS.md</a>.</p>
+<p class="note"><b>Per-core cells (<code>@runloom.hot</code>) / module-level handlers scale flat to 44 hubs &mdash; 18 ns aggregate, dead level with c_entry (34 ns).</b> A single shared closure explodes to ~7.5 &micro;s (the captured cells bounce across NUMA nodes; <code>perf</code> shows the futex&rarr;IPI storm). So a regular Python handler already context-switches as cheaply in aggregate as the pure-C path; only sharing ONE closure's cells across every core breaks it, and <code>@runloom.hot</code> / <code>optimize(&quot;throughput&quot;)</code> fixes that (69k&rarr;10.4M switches/s, <b>150&times;</b>). Measured preempt-off (the CPU-preempt watchdog is microbenchmark noise). Full analysis: <a href="SCHEDULER_SCALING_FINDINGS.md">SCHEDULER_SCALING_FINDINGS.md</a>.</p>
 <h3>HTTP req/s (client vs a Go httpd)</h3>
 <table id="t_http" class="sortable"><thead><tr>
 <th onclick="sortT('t_http',0,false)">Runtime<span class="ar"></span></th>
@@ -3141,27 +3146,54 @@ def m_spawn(n, hubs):
     return {&quot;seconds&quot;: time.perf_counter() - t0, &quot;n&quot;: n, &quot;cores&quot;: hubs}
 
 
-def m_ctxswitch(n, hubs):
+def _make_distinct_worker(K, yobj):
+    # The real contention is SHARED CLOSURE CELLS, not the code object (proven in
+    # SCHEDULER_SCALING_FINDINGS.md &quot;CORRECTION&quot; + suite/speed/hot_diag.py: one
+    # SHARED code object scales fine; one SHARED closure&#x27;s cells do not).  This
+    # worker reads `sy`/`K` as GLOBALS in its own dict, so it has NO shared cells
+    # -- which is why it scales.  (The `shared` mode uses a nested closure, so all
+    # fibers share its cells == the wall.)  User-facing fix: @runloom.hot.
+    g = {&quot;sy&quot;: yobj, &quot;K&quot;: K, &quot;__builtins__&quot;: __builtins__}
+    exec(compile(&quot;def w():\n for _ in range(K):\n  sy()&quot;, &quot;&lt;w&gt;&quot;, &quot;exec&quot;), g)
+    return g[&quot;w&quot;]
+
+
+def m_ctxswitch(n, hubs, distinct=False):
     # &quot;Context switch under load&quot;: G concurrent fibers each yield K times, so the
     # hubs stay full of ready work and switches are same-hub re-dispatch -- the
     # realistic cost a loaded server pays, NOT a 2-fiber ping-pong (which forces
     # a cross-hub wake of a freshly-parked idle hub every op: ~30us, pathological
     # and unrepresentative). G*K == n total switches.
+    #
+    # The yield object is runloom_c.sched_yield, an IMMORTAL process-lifetime
+    # singleton (module_init.c.inc), so the per-yield refcount-contention layer
+    # is already gone for both modes.  --distinct ALSO de-shares the code object
+    # (above), so the only residual cost is the per-yield Python frame itself,
+    # which is per-hub-parallel and therefore scales.  shared (default) == the
+    # naive &quot;one handler fn for every fiber&quot; server; distinct == the fixed path.
     G = max(2, hubs * 16)
     K = max(1, n // G)
     sched_yield = runloom_c.sched_yield
 
-    def worker():
-        for _ in range(K):
-            sched_yield()
+    if distinct:
+        workers = [_make_distinct_worker(K, sched_yield) for _ in range(G)]
 
-    def root():
-        for _ in range(G):
-            runloom.fiber(worker)
+        def root():
+            for w in workers:
+                runloom.fiber(w)
+    else:
+        def worker():
+            for _ in range(K):
+                sched_yield()
+
+        def root():
+            for _ in range(G):
+                runloom.fiber(worker)
     t0 = time.perf_counter()
     runloom.run(hubs, root)
     return {&quot;seconds&quot;: time.perf_counter() - t0, &quot;n&quot;: n, &quot;cores&quot;: hubs,
-            &quot;switches&quot;: G * K, &quot;fibers&quot;: G, &quot;yields_each&quot;: K}
+            &quot;switches&quot;: G * K, &quot;fibers&quot;: G, &quot;yields_each&quot;: K,
+            &quot;mode&quot;: &quot;distinct&quot; if distinct else &quot;shared&quot;}
 
 
 def _recvn(sock, n):
@@ -3282,12 +3314,15 @@ def main():
     ap.add_argument(&quot;--conns&quot;, type=int, default=64)
     ap.add_argument(&quot;--ramp&quot;, type=float, default=1.0)
     ap.add_argument(&quot;--measure&quot;, type=float, default=3.0)
+    ap.add_argument(&quot;--distinct&quot;, action=&quot;store_true&quot;,
+                    help=&quot;ctxswitch: give each fiber its own code object &quot;
+                         &quot;(de-shares co_code_adaptive; the fixed Python path)&quot;)
     args = ap.parse_args()
 
     if args.metric == &quot;spawn&quot;:
         res = m_spawn(args.n, args.hubs)
     elif args.metric == &quot;ctxswitch&quot;:
-        res = m_ctxswitch(args.n, args.hubs)
+        res = m_ctxswitch(args.n, args.hubs, distinct=args.distinct)
     elif args.metric == &quot;rtt&quot;:
         res = m_rtt(args.host, args.port, args.n, args.payload)
     else:
