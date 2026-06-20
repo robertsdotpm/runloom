@@ -77,10 +77,21 @@ static PyObject *RunloomTCPConn_listen_cls(PyTypeObject *cls, PyObject *args, Py
     return (PyObject *)result;
 }
 
+#if defined(__linux__) && defined(SOCK_NONBLOCK)
+static int runloom_tcp_accept4_on(void)
+{
+    static int v = -1;
+    if (v < 0) { const char *e = getenv("RUNLOOM_TCP_ACCEPT4");
+                 v = (e && e[0] == '0') ? 0 : 1; }   /* default ON */
+    return v;
+}
+#endif
+
 static PyObject *RunloomTCPConn_accept(RunloomTCPConn *self, PyObject *unused)
 {
     RunloomTCPConn *result;
     int new_fd;
+    int nb_set = 0;
     (void)unused;
 
     if (self->closed || self->fd < 0) {
@@ -108,7 +119,18 @@ static PyObject *RunloomTCPConn_accept(RunloomTCPConn *self, PyObject *unused)
         ev = runloom_io_classify(RUNLOOM_IO_ACCEPT, -1, runloom_sock_errno());
 #else
         int injerr = RUNLOOM_TCP_FINJ(RUNLOOM_FAULT_TCP_ACCEPT);
-        new_fd = injerr ? (errno = injerr, -1) : accept(self->fd, NULL, NULL);
+        if (injerr) { new_fd = (errno = injerr, -1); }
+#if defined(__linux__) && defined(SOCK_NONBLOCK)
+        /* accept4 bakes O_NONBLOCK + CLOEXEC into the accepted fd in ONE syscall,
+         * removing the 2 fcntls runloom_set_nonblock did per connection (the conn/s
+         * accept-path micro-win, docs/dev/conn_cpu.md).  RUNLOOM_TCP_ACCEPT4=0 reverts
+         * to accept()+fcntl for an ancient kernel that lacks accept4. */
+        else if (runloom_tcp_accept4_on()) {
+            new_fd = accept4(self->fd, NULL, NULL, SOCK_NONBLOCK | SOCK_CLOEXEC);
+            if (new_fd >= 0) nb_set = 1;        /* nonblock already set -> skip the fcntls */
+        }
+#endif
+        else { new_fd = accept(self->fd, NULL, NULL); }
         if (new_fd >= 0) break;
         ev = runloom_io_classify(RUNLOOM_IO_ACCEPT, -1, errno);
 #endif
@@ -134,7 +156,7 @@ static PyObject *RunloomTCPConn_accept(RunloomTCPConn *self, PyObject *unused)
         }
     }
 
-    runloom_set_nonblock(new_fd);
+    if (!nb_set) runloom_set_nonblock(new_fd);   /* accept4 already did it on Linux */
     runloom_set_nodelay(new_fd, self->family);
 
     result = RunloomTCPConn_alloc(Py_TYPE(self));
