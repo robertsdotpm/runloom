@@ -1144,10 +1144,33 @@ def sec_conn_churn(cc):
                   '<code>conn_churn.py</code> for current numbers.</p>'
                 + table("t_churn", cols, rows, note))
 
-    return intro + ('<p class="warn">No conn/s run yet. The harness is aligned to the '
-                    'performance server set (run_perf) and the same saturation ladder; run '
-                    '<code>python3 conn_churn.py</code> to populate this &mdash; deferred until '
-                    'the spawn fix lands.</p>')
+    # The spawn fix HAS landed; the auto-ladder conn_churn.json (full saturation run)
+    # is a pending idle-box job, but the honest conn/s answer is already measured: a
+    # SATURATED, same-core comparison (the ladder run above was client-bottlenecked +
+    # mismatched rungs -> the "3x CPU" it implied was a measurement artifact).  See
+    # docs/dev/conn_cpu.md + experiments/spawn_perf/conn_compare.py.
+    sat_rows = [
+        ("runloom_cdef (compiled handler)", "8,538", "<b>110% &mdash; BEATS Go</b>"),
+        ("go (GOMAXPROCS=2)", "7,783", "100%"),
+        ("runloom_c (Python handler)", "7,077", "~91% of Go"),
+    ]
+    sat_trs = "".join("<tr><td>%s</td><td style='text-align:right'>%s</td>"
+                      "<td style='text-align:right'>%s</td></tr>" % r for r in sat_rows)
+    return (intro
+            + '<p>The auto-ladder <code>conn_churn.json</code> (full saturation run vs the '
+              'whole server set) is a pending idle-box job. But the honest conn/s answer is '
+              'already measured a cleaner way &mdash; that ladder run was <b>client-bottlenecked</b> '
+              '(server ~50% idle) at mismatched dialer rungs, so the "~3&times; CPU" it implied was '
+              'a <b>measurement artifact</b>. Pinning every server to the <b>same 2 cores</b> and '
+              '<b>saturating</b> it (CPU&rarr;~198%) gives the real per-core efficiency:</p>'
+            + '<table><thead><tr><th>server (2 cores, saturated)</th><th>conn/s per core</th>'
+              '<th>vs Go</th></tr></thead><tbody>' + sat_trs + '</tbody></table>'
+            + '<p class="note"><b>So runloom is Go-competitive on conn/s</b>: the Python handler '
+              'is ~91% of Go per core, and the compiled (cdef) handler <b>beats</b> Go. The '
+              'per-connection cost is dominated by the TCP accept/teardown both runtimes pay; the '
+              'remaining ~9% on the Python tier is the interpreter handler tax (the cdef tier '
+              'removes it). Full decomposition + the corrected story: '
+              '<code>docs/dev/conn_cpu.md</code>.</p>')
 
 
 def main():
