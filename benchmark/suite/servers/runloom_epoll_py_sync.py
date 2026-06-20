@@ -1,5 +1,8 @@
-"""Server tier 1 (and tier 3 with RUNLOOM_IOURING_LOOP=1): runloom default
-backend, ZERO optimized -- the naive, object-heavy path.
+"""Std name: runloom_epoll_py_sync  (this file ALSO backs runloom_iouring_py_sync,
+launched byte-for-byte with env RUNLOOM_IOURING_LOOP=1).
+
+Server tier 1 (epoll) / tier 3 (io_uring): runloom default backend, ZERO
+optimized -- the naive, object-heavy path.
 
 Spec: wrapped python calls, no direct C calls, python objects.
     listener = runloom.sync.tcp_listen(...)

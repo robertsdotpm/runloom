@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Validate that @runloom.hot recovers per-core ctxswitch scaling vs a plain
-shared handler -- the user-facing API delivering the speed_runloom.py --distinct
+shared handler -- the user-facing API delivering the runloom_epoll_py_fiber.py --distinct
 result with no manual code-object juggling.  One mode per process, pinned,
 preempt off (the CPU-preempt watchdog is microbenchmark noise; see
 SCHEDULER_SCALING_FINDINGS.md):

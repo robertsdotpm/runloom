@@ -3,7 +3,7 @@ and report USED memory (RSS / PSS -- NOT virtual size).
 
 Configs (via flags):
   --handler py            fiber parked in a python handler holding a 64 KiB
-                          bytearray (matches srv_runloom_c) -> heap-faulted
+                          bytearray (matches runloom_epoll_py_tcpcon) -> heap-faulted
   --handler c             fiber parked in the Cython handler (stack buffer,
                           un-faulted until first recv) -> the cheap path
   --optimize memory       call runloom.optimize("memory") first

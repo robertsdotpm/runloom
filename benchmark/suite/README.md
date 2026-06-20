@@ -30,7 +30,7 @@ The original spec and every scoping decision are archived verbatim in
 
       python servers/build_cy.py build_ext --inplace      # Cython handler (+ disasm_check.sh proves zero-PyObject)
       (cd clients && go build -o loadgen loadgen.go)
-      (cd servers && go build -o srv_go srv_go.go)
+      (cd servers && go build -o go_netpoll_native_net go_netpoll_native_net.go)
       (cd speed   && go build -o speed_go speed_go.go)
       (cd memory  && go build -o mem_go mem_go.go)
 

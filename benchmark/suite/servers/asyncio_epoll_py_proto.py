@@ -1,4 +1,7 @@
-"""Baseline server: canonical asyncio Protocol echo (and uvloop via --loop).
+"""Std name: asyncio_epoll_py_proto  (this file ALSO backs uvloop_libuv_py_proto,
+launched with --loop uvloop).
+
+Baseline server: canonical asyncio Protocol echo (and uvloop via --loop).
 
 Single-threaded (decision #4: run on the GIL build, its best case). uvloop uses
 the identical protocol, only the event-loop policy changes.

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Driver for the c_entry scheduler capstone. Mirrors speed_runloom.py's
+"""Driver for the c_entry scheduler capstone. Mirrors runloom_epoll_py_fiber.py's
 ctxswitch/spawn but spawns tstate-free c_entry fibers (no Python eval, no shared
 closure cells) via centry_probe. Resolves runloom_c's exported scheduler symbols
 by promoting runloom_c.so to RTLD_GLOBAL before importing the probe.

@@ -53,7 +53,7 @@ def spec(rt, n):
     if rt == "go":
         return [GO, "-metric", "spawn", "-n", str(n), "-gomaxprocs", str(HUBS)], MANY, True
     if rt == "runloom_py":
-        return [FT, os.path.join(HERE, "speed_runloom.py"), "--metric", "spawn",
+        return [FT, os.path.join(HERE, "runloom_epoll_py_fiber.py"), "--metric", "spawn",
                 "--n", str(n), "--hubs", str(HUBS)], MANY, True
     if rt == "runloom_c":
         return [FT, os.path.join(HERE, "run_centry.py"), "--metric", "spawn",
@@ -62,7 +62,7 @@ def spec(rt, n):
         return [GIL, os.path.join(HERE, "speed_asyncio.py"), "--metric", "spawn",
                 "--loop", rt, "--n", str(n)], ONE, False
     if rt == "greenlet":
-        return [GIL, os.path.join(HERE, "speed_greenlet.py"), "--metric", "spawn",
+        return [GIL, os.path.join(HERE, "greenlet_native_py_coro.py"), "--metric", "spawn",
                 "--n", str(n)], ONE, False
     raise ValueError(rt)
 

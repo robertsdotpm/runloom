@@ -25,7 +25,7 @@ SD = config.SERVERS_DIR
 P = config.FT_PYTHON
 G = config.GIL_PYTHON
 SPEED_GO = os.path.join(SP, "speed_go")
-SRV_GO = os.path.join(SD, "srv_go")           # echo target for rtt
+SRV_GO = os.path.join(SD, "go_netpoll_native_net")           # echo target for rtt
 MANY = config.SERVER_CPU_SPEC
 ONE_S = str(config.SERVER_CPUS[0])
 ONE_C = str(config.CLIENT_CPUS[0])
@@ -69,7 +69,7 @@ def argv_for(rt, metric, n, host=None, port=None, conns=64, ramp=1.0, measure_s=
                 "-conns", str(conns), "-gomaxprocs", str(gomax or config.CLIENT_CORES),
                 "-ramp", str(ramp), "-measure", str(measure_s)]
     if rt == "runloom":
-        base = [P, os.path.join(SP, "speed_runloom.py"), "--metric", metric]
+        base = [P, os.path.join(SP, "runloom_epoll_py_fiber.py"), "--metric", metric]
         if metric in ("spawn", "ctxswitch"):
             return base + ["--n", str(n), "--hubs", str(gomax or HUBS)]
         if metric == "rtt":
@@ -86,7 +86,7 @@ def argv_for(rt, metric, n, host=None, port=None, conns=64, ramp=1.0, measure_s=
         return base + ["--host", host, "--port", str(port), "--conns", str(conns),
                        "--ramp", str(ramp), "--measure", str(measure_s)]
     if rt == "greenlet":
-        base = [G, os.path.join(SP, "speed_greenlet.py"), "--metric", metric]
+        base = [G, os.path.join(SP, "greenlet_native_py_coro.py"), "--metric", metric]
         if metric in ("spawn", "ctxswitch"):
             return base + ["--n", str(n)]
         if metric == "rtt":

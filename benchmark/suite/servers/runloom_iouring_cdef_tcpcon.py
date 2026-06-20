@@ -1,7 +1,7 @@
 """Server tier: runloom_c.serve + a tstate-free Cython CDEF handler (the c_entry
 fast path), on the io_uring proactor (orchestrator sets RUNLOOM_IOURING_LOOP=1).
 
-The difference from srv_runloom_cython.py: handler_cdef.handler is a
+The difference from runloom_iouring_cython_tcpcon.py: handler_cdef.handler is a
 runloom_c.c_handler PyCapsule (a cdef C function), so serve() spawns it via
 runloom_mn_fiber_c -> the g->c_entry path -> NO Python frame, NO per-park tstate
 save/restore. Zero PyObjects in the hot loop AND zero tstate juggle per round

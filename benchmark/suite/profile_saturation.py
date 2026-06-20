@@ -42,8 +42,8 @@ def main():
     notes = open(os.path.join(RES, "anomaly_notes.md"), "a")
     notes.write("\n## Saturation profile (netns, 2048 conns, server cores %s)\n\n" % SRVCPU)
     try:
-        for tier, script, extra in [("cython", "srv_runloom_cython.py", ["--optimize", "none"]),
-                                    ("py", "srv_runloom_c.py", [])]:
+        for tier, script, extra in [("cython", "runloom_iouring_cython_tcpcon.py", ["--optimize", "none"]),
+                                    ("py", "runloom_epoll_py_tcpcon.py", [])]:
             port = config.BASE_PORT + 700 + (0 if tier == "cython" else 1)
             token = "SAT_%s_%d" % (tier, port)
             argv = [PY, os.path.join(SD, script), "--host", config.SRV_IP,

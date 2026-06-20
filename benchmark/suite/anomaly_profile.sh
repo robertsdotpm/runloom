@@ -57,8 +57,8 @@ run_one() {
   echo "  $(grep rps "$RES/anomaly_load_$tier.out" 2>/dev/null | tail -1 | head -c 120)"
 }
 
-run_one py     19111 "$HERE/servers/srv_runloom_c.py"
-run_one cython 19112 "$HERE/servers/srv_runloom_cython.py" "--optimize" "none"
+run_one py     19111 "$HERE/servers/runloom_epoll_py_tcpcon.py"
+run_one cython 19112 "$HERE/servers/runloom_iouring_cython_tcpcon.py" "--optimize" "none"
 
 echo; echo "===== perf stat diff (py vs cython, server cores, ${WINDOW}s) ====="
 paste <(grep -E "instructions|cache-misses|cache-references|branch-misses|context-switches|insn per" "$RES/anomaly_stat_py.txt") \

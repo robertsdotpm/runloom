@@ -186,19 +186,19 @@ STD_NAME = {
 }
 # standard-name -> source file (relative to BENCH) for the click-to-code overlay
 STD_SRC = {
-    "runloom_epoll_py_sync":             "suite/servers/srv_runloom_sync.py",
-    "runloom_epoll_py_tcpcon":           "suite/servers/srv_runloom_c.py",
-    "runloom_epoll_cython_tcpcon":       "suite/servers/srv_runloom_cython.py",
-    "runloom_iouring_py_sync":           "suite/servers/srv_runloom_sync.py",
-    "runloom_iouring_cython_tcpcon":     "suite/servers/srv_runloom_cython.py",
-    "runloom_iouring_cython_tcpcon_opt": "suite/servers/srv_runloom_cython.py",
-    "runloom_iouring_cdef_tcpcon":       "suite/servers/srv_runloom_cdef.py",
-    "asyncio_epoll_py_proto":            "suite/servers/srv_asyncio.py",
-    "uvloop_libuv_py_proto":             "suite/servers/srv_asyncio.py",
-    "gevent_libev_py_stream":            "suite/servers/srv_gevent.py",
-    "go_netpoll_native_net":             "suite/servers/srv_go.go",
-    "runloom_epoll_py_fiber":            "suite/speed/speed_runloom.py",
-    "greenlet_native_py_coro":           "suite/speed/speed_greenlet.py",
+    "runloom_epoll_py_sync":             "suite/servers/runloom_epoll_py_sync.py",
+    "runloom_epoll_py_tcpcon":           "suite/servers/runloom_epoll_py_tcpcon.py",
+    "runloom_epoll_cython_tcpcon":       "suite/servers/runloom_iouring_cython_tcpcon.py",
+    "runloom_iouring_py_sync":           "suite/servers/runloom_epoll_py_sync.py",
+    "runloom_iouring_cython_tcpcon":     "suite/servers/runloom_iouring_cython_tcpcon.py",
+    "runloom_iouring_cython_tcpcon_opt": "suite/servers/runloom_iouring_cython_tcpcon.py",
+    "runloom_iouring_cdef_tcpcon":       "suite/servers/runloom_iouring_cdef_tcpcon.py",
+    "asyncio_epoll_py_proto":            "suite/servers/asyncio_epoll_py_proto.py",
+    "uvloop_libuv_py_proto":             "suite/servers/asyncio_epoll_py_proto.py",
+    "gevent_libev_py_stream":            "suite/servers/gevent_libev_py_stream.py",
+    "go_netpoll_native_net":             "suite/servers/go_netpoll_native_net.go",
+    "runloom_epoll_py_fiber":            "suite/speed/runloom_epoll_py_fiber.py",
+    "greenlet_native_py_coro":           "suite/speed/greenlet_native_py_coro.py",
 }
 
 
@@ -888,15 +888,15 @@ def sec_code():
     blocks = []
     files = [
         # --- servers (these are the program names you click in the tables above) ---
-        ("runloom_epoll_py_sync &mdash; sync wrappers (epoll, py handler)", "suite/servers/srv_runloom_sync.py"),
-        ("runloom_epoll_py_tcpcon &mdash; runloom_c.serve (py handler, C TCPConn)", "suite/servers/srv_runloom_c.py"),
-        ("runloom_*_cython_tcpcon &mdash; runloom_c.serve + Cython handler", "suite/servers/srv_runloom_cython.py"),
-        ("runloom_iouring_cdef_tcpcon &mdash; cdef c_entry handler server", "suite/servers/srv_runloom_cdef.py"),
+        ("runloom_epoll_py_sync &mdash; sync wrappers (epoll, py handler)", "suite/servers/runloom_epoll_py_sync.py"),
+        ("runloom_epoll_py_tcpcon &mdash; runloom_c.serve (py handler, C TCPConn)", "suite/servers/runloom_epoll_py_tcpcon.py"),
+        ("runloom_*_cython_tcpcon &mdash; runloom_c.serve + Cython handler", "suite/servers/runloom_iouring_cython_tcpcon.py"),
+        ("runloom_iouring_cdef_tcpcon &mdash; cdef c_entry handler server", "suite/servers/runloom_iouring_cdef_tcpcon.py"),
         ("Cython zero-PyObject handler (echo + inline FNV work)", "suite/servers/handler_cy.pyx"),
         ("Cython cdef c_entry handler (tstate-free, inline FNV work)", "suite/servers/handler_cdef.pyx"),
-        ("asyncio_epoll_py_proto / uvloop_libuv_py_proto server", "suite/servers/srv_asyncio.py"),
-        ("gevent_libev_py_stream server", "suite/servers/srv_gevent.py"),
-        ("go_netpoll_native_net server", "suite/servers/srv_go.go"),
+        ("asyncio_epoll_py_proto / uvloop_libuv_py_proto server", "suite/servers/asyncio_epoll_py_proto.py"),
+        ("gevent_libev_py_stream server", "suite/servers/gevent_libev_py_stream.py"),
+        ("go_netpoll_native_net server", "suite/servers/go_netpoll_native_net.go"),
         ("Work-curve server (--handler py/cython/cdef, --work N)", "suite/servers/srv_runloom_work.py"),
         # --- clients / loadgens ---
         ("Go closed-loop loadgen (persistent req/s)", "suite/clients/loadgen.go"),
@@ -917,9 +917,9 @@ def sec_code():
         ("Steady-state churn harness", "../experiments/spawn_perf/churn.py"),
         ("Saturated conn/s comparison (go vs runloom_c vs cdef)", "../experiments/spawn_perf/conn_compare.py"),
         # --- speed / memory probes ---
-        ("Speed &mdash; runloom", "suite/speed/speed_runloom.py"),
+        ("Speed &mdash; runloom", "suite/speed/runloom_epoll_py_fiber.py"),
         ("Speed &mdash; asyncio/uvloop", "suite/speed/speed_asyncio.py"),
-        ("Speed &mdash; greenlet/gevent", "suite/speed/speed_greenlet.py"),
+        ("Speed &mdash; greenlet/gevent", "suite/speed/greenlet_native_py_coro.py"),
         ("Speed &mdash; go", "suite/speed/speed_go.go"),
         ("Memory &mdash; runloom probe", "suite/memory/mem_runloom.py"),
         ("Memory &mdash; go probe", "suite/memory/mem_go.go"),

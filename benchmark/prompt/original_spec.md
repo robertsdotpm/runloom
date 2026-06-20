@@ -272,7 +272,7 @@ These refine the decisions above based on what the real runtime/box required:
     `serve()` now accepts a `runloom_c.c_handler` PyCapsule (a `cdef` C function)
     and spawns it via `runloom_mn_fiber_c` → the tstate-free `g->c_entry` path
     (raw-fd capi `fd_recv`/`fd_send_all`/`fd_close` + `module_io.c.inc` dispatch +
-    `handler_cdef.pyx` + tier `srv_runloom_cdef.py`). Measured: the tstate-bypass
+    `handler_cdef.pyx` + tier `runloom_iouring_cdef_tcpcon.py`). Measured: the tstate-bypass
     buys ~nothing — `cdef` vs `cython` ceiling +0.25% at 8 B, +2.3% at 1 KiB (both
     noise). The default per-hub **snapshot** tstate is already cheap (snaps a few
     ints, not a `PyThreadState`), so there's nothing to bypass. Use `handler_cy`

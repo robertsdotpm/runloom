@@ -1,5 +1,9 @@
-"""Server tiers 4 & 5: runloom_c.serve + the zero-PyObject CYTHON handler, on the
-io_uring loop backend (orchestrator sets RUNLOOM_IOURING_LOOP=1).
+"""Std name: runloom_iouring_cython_tcpcon  (this file ALSO backs the epoll tier
+runloom_epoll_cython_tcpcon and the ..._opt tier; the orchestrator selects the
+backend + optimize per spec).
+
+Server tiers 4 & 5: runloom_c.serve + the zero-PyObject CYTHON handler. Backend
+is io_uring when the orchestrator sets RUNLOOM_IOURING_LOOP=1, else epoll.
 
   tier 4: no optimize()
   tier 5: runloom.optimize("throughput") first  (--optimize throughput)

@@ -2,7 +2,7 @@
 """Capstone sweep -> results/centry_capstone.json.
 
 ctxswitch ns/switch vs hub count for the tstate-free c_entry fiber (pure
-scheduler, no Python eval; run_centry.py) vs the Python fiber (speed_runloom.py),
+scheduler, no Python eval; run_centry.py) vs the Python fiber (runloom_epoll_py_fiber.py),
 each pinned to `hubs` cores, n=0-subtracted, median of REPS. Proves runloom's
 scheduler yield is ~20 ns and flat while the Python-fiber path explodes -> the
 ctxswitch wall is CPython, not runloom. Rendered in report.html's speed section.
@@ -20,7 +20,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = config.REPO
 PY = config.FT_PYTHON
 RC = os.path.join(HERE, "run_centry.py")
-SR = os.path.join(HERE, "speed_runloom.py")
+SR = os.path.join(HERE, "runloom_epoll_py_fiber.py")
 HUBS = [1, 8, 16, 44]
 N = 500_000
 REPS = 2

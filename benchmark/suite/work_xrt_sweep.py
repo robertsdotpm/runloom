@@ -60,17 +60,17 @@ def build_runtimes():
 
     def aio(loop):
         def mk(port, token, w):
-            return [GIL, s("srv_asyncio.py"), "--host", config.SRV_IP,
+            return [GIL, s("asyncio_epoll_py_proto.py"), "--host", config.SRV_IP,
                     "--port", str(port), "--loop", loop, "--work", str(w),
                     "--token", token]
         return mk
 
     def gev(port, token, w):
-        return [GIL, s("srv_gevent.py"), "--host", config.SRV_IP,
+        return [GIL, s("gevent_libev_py_stream.py"), "--host", config.SRV_IP,
                 "--port", str(port), "--work", str(w), "--token", token]
 
     def gomk(port, token, w):
-        return [s("srv_go"), "-host", config.SRV_IP, "-port", str(port),
+        return [s("go_netpoll_native_net"), "-host", config.SRV_IP, "-port", str(port),
                 "-gomaxprocs", str(GO), "-work", str(w), "-token", token]
 
     return [
