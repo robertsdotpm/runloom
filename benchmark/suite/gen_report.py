@@ -936,35 +936,73 @@ def sec_spawn_curve(sc):
 
 def sec_metrics_legend():
     """Self-documenting verdict panel: what each metric measures, whether it
-    exercises spawn, where runloom stands, and the target.  Static (no data) so it
-    is always present -- the anti-repeat artifact for 'which number means what'."""
+    exercises spawn, where runloom stands.  Static (no data) so it is always
+    present -- the anti-repeat artifact for 'which number means what', and the
+    antidote to the two confusions every reader hits: conn/s-vs-req/s, and
+    reading a number without checking what got dropped."""
     rows = [
-        ["req/s (persistent echo)", "steady-state throughput on live keepalive connections",
-         "No &mdash; 1 handler/conn at setup, then loops; spawn ~0% of the timed window",
-         "competitive (both M:N, all cores)", "hold parity &mdash; the common-case server"],
-        ["conn/s (conn-churn)", "fresh handler spawned + destroyed per request",
-         "Yes &mdash; 1 spawn+teardown / request",
-         "matches conn/s, at ~4&times; the CPU", "close the CPU gap (spawn shows as CPU here)"],
-        ["spawn/s (naked)", "fiber create+run+destroy, no I/O, nothing to amortize",
-         "Yes, and nothing else", "~48&times; behind (~46k vs ~2.2M)",
-         "productionize the arena (the real target)"],
+        ["<b>active</b> spawn &mdash; fleet launch (<code>fiber_n</code>)",
+         "create+run+destroy N fibers at once, no I/O",
+         "Yes &mdash; it IS the whole workload",
+         "~1.5M/s vs Go ~1.8M (~0.85&times;) on this box",
+         "the spawn-fast-path lever (parallel bulk-create) got it here; near parity"],
+        ["naked spawn &mdash; 1 issuer (microbench)",
+         "the same, but one fiber at a time, nothing batched",
+         "Yes, and nothing else",
+         "~65k/s &mdash; the famous '~48&times; behind' number",
+         "<b>pathological</b>: no real workload spawns naked one-at-a-time; ignore it"],
+        ["<b>passive</b> spawn &mdash; conn/s (conn-churn)",
+         "fresh handler spawned + torn down per request (new connection each time)",
+         "Yes &mdash; 1 spawn+teardown / request, but in the hot loop",
+         "~31k/s &asymp; Go, at ~3&times; the server CPU",
+         "TCP accept/handshake/teardown DOMINATES &mdash; spawn is only a slice"],
+        ["req/s &mdash; persistent / keep-alive",
+         "steady-state requests on live connections (the browser case)",
+         "No &mdash; 1 handler/conn at setup, then loops; spawn ~0% of the window",
+         "competitive (syscall + netpoll bound, same as Go)",
+         "where real servers + browsers live; the spawn cost is amortized to ~0"],
         ["ctxswitch", "yield/resume cost under load", "n/a",
-         "competitive (after closure-cell / @runloom.hot / immortalize)", "hold"],
+         "competitive (after closure-cell / @runloom.hot / immortalize)", "the FT refcount lever (1.65&times;)"],
     ]
-    head = ["Metric", "Measures", "Spawn in hot loop?", "runloom vs Go", "Target"]
+    head = ["Metric", "Measures", "Spawn in hot loop?", "runloom vs Go (this box)", "Reality"]
     trs = "".join("<tr>" + "".join("<td>%s</td>" % c for c in r) + "</tr>" for r in rows)
     return ('<h2 id="metrics">How to read these metrics &mdash; and where runloom stands</h2>'
             '<p>There is no single "runloom vs Go" number: each benchmark measures a different '
-            'axis, and <b>spawn is only exercised by some of them</b>. This table is the verdict, '
-            'so the workload behind each number is never ambiguous.</p>'
+            'axis, and <b>spawn is only exercised by some of them</b>. Two framings make the table '
+            'below unambiguous:</p>'
+            '<p><b>Active vs passive spawn.</b> <i>Active</i> spawn is an explicit "launch a fleet" '
+            '(<code>fiber_n</code> / the spawn benchmark) &mdash; you create N at once, so the create '
+            'loop can be parallelized (that is the 804k&rarr;1.5M win). <i>Passive</i> spawn is a '
+            'server creating one handler per connection inside its accept loop &mdash; a <i>single</i> '
+            'spawn per event, so the active fleet-launch lever does <b>not</b> apply to it; passive '
+            'spawn shows up in conn/s.</p>'
+            '<p><b>conn/s vs req/s &mdash; the distinction everyone trips on.</b> '
+            '<i>req/s</i> (keep-alive) opens connections ONCE and loops requests on them &mdash; this '
+            'is the <b>100k&ndash;1M+/s</b> number people quote, and spawn is ~0% of it. '
+            '<i>conn/s</i> (churn) opens a NEW connection per request and closes it, so every unit '
+            'pays the full TCP lifecycle (SYN handshake + socket alloc + spawn + FIN teardown + '
+            'TIME_WAIT). That is <b>~10&ndash;30k/s for everyone, Go included</b> &mdash; the kernel '
+            'TCP stack dominates, not the application. They are different benchmarks; quoting the '
+            'wrong one is the most common benchmark deception.</p>'
+            '<p><b>Where a browser lands:</b> browsers are aggressively keep-alive (HTTP/1.1 reuses '
+            '~6 connections per origin; HTTP/2 multiplexes everything over <i>one</i>), so they hit '
+            'the <b>req/s</b> path, not conn/s churn. The per-connection spawn (and TLS handshake) is '
+            'paid once at connect and amortized over the whole session &mdash; so for browser-shaped '
+            'load runloom is &asymp; Go, and the conn/s worst case describes <i>non</i>-keep-alive '
+            'clients (proxies without upstream pooling, connection-per-call RPC, reconnect storms).</p>'
             '<table><thead><tr>' + "".join("<th>%s</th>" % h for h in head) +
             '</tr></thead><tbody>' + trs + '</tbody></table>'
-            '<p class="note"><b>Gotchas (documented so they are not re-derived):</b> '
-            'req/s does NOT test spawn (it spawns once per connection at setup, then loops); '
-            'teardown cost (runloom_coro_destroy) only fires on completion (absent in req/s); '
-            '<code>RUNLOOM_STACK_ARENA</code> currently holds ONE stack-size class and falls '
-            'back to per-stack mmap on mixed sizes. Full diagnosis + targets: '
-            '<code>docs/dev/spawn_cost.md</code>.</p>')
+            '<p class="note"><b>Reading any of these honestly (so the chart does not fool you):</b> '
+            '(1) <b>check which side saturated</b> &mdash; a number where the load-generator CPU is '
+            'pinned and the server is idle measures the <i>client</i>, not the server (it understates '
+            'the runtime). (2) <b>report throughput per core</b> &mdash; matching Go\'s throughput at '
+            '3&times; the cores is not parity; the per-core column is the honest one. (3) <b>warm vs '
+            'cold</b> &mdash; a min-of-reps number is the warm, fault-free rep and hides cold-start '
+            'cost. (4) <b>name the metric precisely</b> (active/passive, conn/req, naked/amortized) '
+            '&mdash; a number with no workload attached is a claim with the asterisk removed. Full '
+            'spawn diagnosis + the corrected story (the per-fiber madvise is the security stack-scrub, '
+            'NOT a CPython purge): <code>docs/dev/spawn_experiments.md</code>; the &gt;1M plan: '
+            '<code>docs/dev/spawn_above_1m.md</code>.</p>')
 
 
 def sec_conn_churn(cc):
