@@ -48,6 +48,7 @@ _GOAL_ENV = {
         "RUNLOOM_STACK_ARENA":               "1",       # per-size warm-stack arena
         "RUNLOOM_GON_BULK":                  "1",       # bulk-arena spawn for big fiber_n
         "RUNLOOM_GON_FRESH":                 "1",        # defer frame-fault to first resume (parallel)
+        "RUNLOOM_GON_PCREATE":               "auto",    # parallel bulk-create (1 builder/hub) -> 1.4M+ spawn/s, TSan-clean
         "RUNLOOM_PREWARM_KEEP":              "1",       # continuous depot top-up daemon
         "RUNLOOM_HOT_HANDLERS":              "1",       # @runloom.hot active (per-core handler copies)
         "RUNLOOM_HOT_AUTO":                  "1",       # auto-promote the busiest handlers, no decorator

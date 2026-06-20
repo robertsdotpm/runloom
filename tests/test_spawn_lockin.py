@@ -30,6 +30,7 @@ def test_optimize_throughput_wires_spawn_fastpath():
     eff = runloom.optimize("throughput")
     for k in ("RUNLOOM_STACK_ARENA", "RUNLOOM_GON_BULK", "RUNLOOM_GON_FRESH"):
         assert eff.get(k) == "1", (k, eff.get(k))
+    assert eff.get("RUNLOOM_GON_PCREATE") == "auto", eff.get("RUNLOOM_GON_PCREATE")
 
 
 def test_optimize_memory_overrides_throughput():

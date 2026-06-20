@@ -671,11 +671,23 @@ static int runloom_create_timing_on(void)
  * builder pool is the productionization. */
 static int runloom_pcreate_threads(void)
 {
-    static int v = -1;
-    if (v < 0) { const char *e = getenv("RUNLOOM_GON_PCREATE");
-                 v = (e && *e) ? atoi(e) : 0;
-                 if (v < 0) v = 0; if (v > 64) v = 64; }
-    return v;
+    /* mode: -2 unread; -1 = "auto" (resolve to hub_count, capped); >=0 = fixed P. */
+    static int mode = -2;
+    int m = __atomic_load_n(&mode, __ATOMIC_RELAXED);
+    if (m == -2) {
+        const char *e = getenv("RUNLOOM_GON_PCREATE");
+        if (e == NULL || !*e || e[0] == '0') m = 0;
+        else if (strcmp(e, "auto") == 0)     m = -1;
+        else { m = atoi(e); if (m < 0) m = 0; if (m > 64) m = 64; }
+        __atomic_store_n(&mode, m, __ATOMIC_RELAXED);
+    }
+    if (m == -1) {                            /* auto: one builder per hub, capped */
+        int p = runloom_hub_count;            /* memory-bandwidth bound past ~16 */
+        if (p > 16) p = 16;
+        if (p < 1)  p = 1;
+        return p;
+    }
+    return m;
 }
 typedef struct {
     char *garena; size_t gsz; const runloom_g_t *tmpl;
