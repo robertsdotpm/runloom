@@ -475,6 +475,69 @@ static int runloom_stack_arena_on(void)
     return cur;
 }
 
+/* EXPERIMENT (docs/dev/spawn_experiments.md, Exp A): back the stack arena with
+ * 2MB huge pages.  A 4KB-page arena faults in ~128 pages per 512KB stack and
+ * burns a TLB entry per 4KB; at the spawn burst those minor faults + the TLB
+ * footprint serialize on the shared mm.  2MB pages cut both ~512x.
+ *   RUNLOOM_STACK_ARENA_HUGE = 0/unset : off (plain 4KB arena)
+ *                              1 | thp  : THP -- mmap 2MB-aligned + MADV_HUGEPAGE
+ *                              2 | hugetlb : explicit MAP_HUGETLB (needs a reserved
+ *                                        pool; falls back to THP if the pool is empty) */
+#ifndef MADV_HUGEPAGE
+#define MADV_HUGEPAGE 14
+#endif
+#ifndef MAP_HUGETLB
+#define MAP_HUGETLB 0x40000
+#endif
+#define RUNLOOM_HP_2MB ((size_t)(2UL * 1024 * 1024))
+
+static int runloom_arena_huge_mode(void)
+{
+    static int v = -1;
+    int cur = __atomic_load_n(&v, __ATOMIC_RELAXED);
+    if (cur < 0) {
+        const char *e = getenv("RUNLOOM_STACK_ARENA_HUGE");
+        if (e == NULL || *e == '\0' || *e == '0') cur = 0;
+        else if (strcmp(e, "hugetlb") == 0 || *e == '2') cur = 2;
+        else cur = 1;                       /* "1" / "thp" / anything else -> THP */
+        __atomic_store_n(&v, cur, __ATOMIC_RELAXED);
+    }
+    return cur;
+}
+
+/* Map one arena class of `bytes`.  *base_out is the carve base (2MB-aligned in THP
+ * mode so the very first 2MB chunk is already eligible).  Returns 0 / -1. */
+static int runloom_arena_map(size_t bytes, char **base_out)
+{
+    int mode = runloom_arena_huge_mode();
+    if (mode == 2) {
+        size_t hb = (bytes + RUNLOOM_HP_2MB - 1) & ~(RUNLOOM_HP_2MB - 1);
+        void *b = mmap(NULL, hb, PROT_READ | PROT_WRITE,
+                       MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_HUGETLB, -1, 0);
+        if (b != MAP_FAILED) { *base_out = (char *)b; return 0; }
+        mode = 1;                           /* empty hugetlb pool -> THP */
+    }
+    if (mode == 1) {
+        size_t padded = bytes + RUNLOOM_HP_2MB;
+        void *raw = mmap(NULL, padded, PROT_READ | PROT_WRITE,
+                         MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+        if (raw == MAP_FAILED) return -1;
+        size_t off = (RUNLOOM_HP_2MB - ((uintptr_t)raw & (RUNLOOM_HP_2MB - 1)))
+                     & (RUNLOOM_HP_2MB - 1);
+        char *base = (char *)raw + off;
+        (void)madvise(base, bytes, MADV_HUGEPAGE);
+        *base_out = base;
+        return 0;
+    }
+    {
+        void *b = mmap(NULL, bytes, PROT_READ | PROT_WRITE,
+                       MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+        if (b == MAP_FAILED) return -1;
+        *base_out = (char *)b;
+        return 0;
+    }
+}
+
 /* Find the class for `slot`, lazily mmap'ing a new one if needed.  Caller holds
  * runloom_arena_init_lock.  Returns the class index, or -1 if every class is
  * taken by other sizes / mmap failed (caller then falls back to map_guarded). */
@@ -492,9 +555,8 @@ static int runloom_arena_class_for_locked(size_t slot)
     {
         const char *n = getenv("RUNLOOM_STACK_ARENA_N");
         size_t cap = (n != NULL && *n) ? (size_t)strtoull(n, NULL, 0) : 1200000;
-        void *base = mmap(NULL, cap * slot, PROT_READ | PROT_WRITE,
-                          MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
-        if (base == MAP_FAILED) return -1;
+        char *base = NULL;
+        if (runloom_arena_map(cap * slot, &base) != 0) return -1;
         runloom_arena_cls[freecls].slot = slot;
         runloom_arena_cls[freecls].cap  = cap;
         runloom_arena_cls[freecls].next = 0;
