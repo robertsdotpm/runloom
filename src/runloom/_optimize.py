@@ -39,6 +39,8 @@ _GOAL_ENV = {
         "RUNLOOM_BLOCKPOOL_WORKERS":         "16",      # more blocking-offload workers
         "RUNLOOM_GON_BULK":                  "1",       # bulk-arena spawn for big fiber_n
         "RUNLOOM_PREWARM_KEEP":              "1",       # continuous depot top-up daemon
+        "RUNLOOM_HOT_HANDLERS":              "1",       # @runloom.hot active (per-core handler copies)
+        "RUNLOOM_HOT_AUTO":                  "1",       # auto-promote the busiest handlers, no decorator
         # depot pool size is now AUTO -- it sizes itself to the live-fiber
         # high-water (vm.max_map_count- and RAM-clamped), so no static cap here.
     },
@@ -52,6 +54,8 @@ _GOAL_ENV = {
         "RUNLOOM_STACK_MADV":                "dontneed",  # eager reclaim, tightest RSS
         "RUNLOOM_STACK_PARK_DONTNEED":       "1",          # return idle parked-fiber pages now
         "RUNLOOM_GROW_DOWN":                 "1",          # per-function stack learning (M:N)
+        "RUNLOOM_HOT_HANDLERS":              "0",          # no per-core handler copies (spend the RAM back)
+        "RUNLOOM_HOT_AUTO":                  "0",          # and don't auto-promote either
     },
     "secure": {
         "RUNLOOM_STACK_SCRUB":               "1",       # wipe recycled stacks (TLS keys/bodies)

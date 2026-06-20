@@ -16,6 +16,8 @@ import sys
 import time
 import runloom_c
 
+from . import _hot  # @runloom.hot + auto per-core scaling (stdlib-only, no cycle)
+
 
 _prewarmed = False
 
@@ -261,6 +263,13 @@ def fiber(callable_, *args, **kwargs):
     M:N pending-counter accounting that mn_run() joins on, so this dispatch
     is required for correctness, not just convenience.
     """
+    # Auto per-core scaling (optimize("throughput")): if this handler has been
+    # spawned enough to be worth it, swap in its per-core copy.  No-op (one
+    # `is None` check) unless auto mode is on.  Done on the bare callable, before
+    # the arg-binding wrapper below, so it keys on YOUR function's code.
+    if _hot._AUTO is not None:
+        callable_ = _hot._AUTO.resolve(callable_)
+
     # stack_size= is OUR keyword (the per-fiber C stack), not an argument
     # for the target -- pop it before binding args so it pins the fiber's
     # stack instead of being forwarded into the call.  0 = use the default /
@@ -377,6 +386,7 @@ def run(n, main_fn=None):
     to the hubs automatically).  Collapses the raw mn_init / mn_fiber / mn_run /
     mn_fini envelope.  Returns the number of fibers completed.
     """
+    _hot._install_auto()  # one-time: turn on auto per-core scaling iff its env is set
     if isinstance(n, bool) or not isinstance(n, int) or n < 1:
         raise ValueError(
             "run(n, main_fn): n must be an int >= 1 (got {0!r})".format(n))

@@ -35,12 +35,12 @@ def m_spawn(n, hubs):
 
 
 def _make_distinct_worker(K, yobj):
-    # A fresh code object per fiber: each gets its OWN co_code_adaptive inline-
-    # cache array, so N hubs running the SAME logic don't concurrently memcpy
-    # the SAME shared cache (the 46x shared-code-object contention layer, see
-    # SCHEDULER_SCALING_FINDINGS.md -- the unsynchronized specializer writes that
-    # bounce a cache line across hubs; real servers running ONE shared handler
-    # hit it, distinct handlers / per-hub code copies don't).
+    # The real contention is SHARED CLOSURE CELLS, not the code object (proven in
+    # SCHEDULER_SCALING_FINDINGS.md "CORRECTION" + suite/speed/hot_diag.py: one
+    # SHARED code object scales fine; one SHARED closure's cells do not).  This
+    # worker reads `sy`/`K` as GLOBALS in its own dict, so it has NO shared cells
+    # -- which is why it scales.  (The `shared` mode uses a nested closure, so all
+    # fibers share its cells == the wall.)  User-facing fix: @runloom.hot.
     g = {"sy": yobj, "K": K, "__builtins__": __builtins__}
     exec(compile("def w():\n for _ in range(K):\n  sy()", "<w>", "exec"), g)
     return g["w"]

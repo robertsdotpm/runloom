@@ -149,6 +149,7 @@ dump = inspect.dump
 hubs = inspect.hubs
 
 from ._optimize import optimize  # noqa: E402,F401  – one call, named trade-offs
+from ._hot import hot  # noqa: E402,F401  – mark a hot handler for per-core scaling
 
 # Feature packages, imported eagerly so that `import runloom` is the ONLY
 # import statement you ever need.  Importing them has no side effects -- in
@@ -165,7 +166,7 @@ __all__ = [
     # scheduler
     "fiber", "run", "sleep", "yield_now", "yield_", "blocking", "current",
     "Goroutine", "fiber_noyield", "warmup", "prewarm", "prewarm_keep", "prewarm_stop",
-    "optimize",
+    "optimize", "hot",
     "thread_init", "thread_fini",
     "preempt_init", "preempt_fini",
     # channels

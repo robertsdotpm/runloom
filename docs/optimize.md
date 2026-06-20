@@ -84,3 +84,52 @@ runloom.optimize("throughput", "latency", "secure")
 # Hard fan-out ceiling on a shared box.
 runloom.optimize(max_fibers=200_000)
 ```
+
+## Hot handlers: scaling a shared handler across cores
+
+A plain module-level handler already scales across every core — there's nothing
+shared for the cores to fight over:
+
+```python
+def handle(conn):          # scales flat to as many cores as you have
+    ...
+```
+
+The one shape that *doesn't* scale on its own is a **shared closure** — a single
+handler that *captures* something and is reused for every connection:
+
+```python
+config = load_config()
+
+def handle(conn):
+    serve(conn, config)    # captures `config`
+server.serve(handle)       # the SAME closure runs on every core
+```
+
+When many cores run that one closure flat out, they all hammer the same captured
+slots and start colliding, so adding cores stops helping. Mark it `@runloom.hot`
+and each core gets its own private copy of the captured slots (pointing at the
+same values), so they stop colliding:
+
+```python
+@runloom.hot
+def handle(conn):
+    serve(conn, config)
+```
+
+- It's a **no-op** on a handler that captures nothing (already scales) — safe to
+  leave on.
+- It costs one copy of the captured slots **per core**, not per fiber (a million
+  fibers over one handler still cost one copy per core).
+- It stays correct: it only kicks in when the handler *reads* its captures. If it
+  *rebinds* one (`nonlocal x; x = ...`), runloom leaves it shared.
+- Stacking decorators? Put `@runloom.hot` closest to your `def`.
+
+`optimize("throughput")` turns this on automatically for the busiest closures (no
+decorator, under a memory budget — it tells you if the budget is hit);
+`optimize("memory")` turns it all off to reclaim the RAM.
+
+**Fastest path first:** if a handler is hot enough to want this, *compiling* it
+(a Cython `cdef` handler) beats it outright — that removes the interpreter cost
+entirely, not just the cross-core contention. `@runloom.hot` is the zero-rewrite
+option for when you won't compile.
