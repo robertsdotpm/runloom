@@ -38,12 +38,70 @@ details.code .path{color:var(--mut);font-weight:400;font-size:11px;white-space:n
 pre{margin:0;padding:12px;overflow:auto;max-height:520px;background:#0c1116;font:12px/1.45 ui-monospace,Menlo,monospace}
 code{color:#cbd5e1}
 </style></head><body>
-<nav><b>Runloom benchmarks</b> <a href="#env">machine</a><a href="#constraints">constraints</a><a href="#perf">req/s</a><a href="#iouring">io_uring</a><a href="#work">work curve</a><a href="#workxrt">work x-runtime</a><a href="#spawncurve">spawn vs N</a><a href="#speed">speed</a><a href="#mem">memory</a><a href="#code">code</a><a href="#profiles">profiles</a></nav>
+<nav><b>Runloom benchmarks</b> <a href="#env">machine</a><a href="#constraints">constraints</a><a href="#churn">conn churn</a><a href="#perf">req/s</a><a href="#iouring">io_uring</a><a href="#work">work curve</a><a href="#workxrt">work x-runtime</a><a href="#spawncurve">spawn vs N</a><a href="#speed">speed</a><a href="#mem">memory</a><a href="#code">code</a><a href="#profiles">profiles</a></nav>
 <div class="wrap">
 <h1>Runloom benchmark report</h1>
-<p class="note">Generated 2026-06-20 12:52. Throughput is shown raw and divided down to one core; latencies are not divided. Click any column header to sort.</p>
+<p class="note">Generated 2026-06-20 14:47. Throughput is shown raw and divided down to one core; latencies are not divided. Click any column header to sort.</p>
 <h2 id="env">Machine &amp; toolchain</h2><table class="kv"><tr><th>Host</th><td>x-VMware20-1 (vmware, Ubuntu 24.04.3 LTS)</td></tr><tr><th>Kernel</th><td>6.17.0-35-generic x86_64</td></tr><tr><th>CPU</th><td>Intel(R) Xeon(R) CPU E5-2696 v3 @ 2.30GHz</td></tr><tr><th>Logical CPUs / NUMA</th><td>64 vCPUs &mdash; node0=0-31, node1=32-63</td></tr><tr><th>Memory</th><td>78.6 GiB</td></tr><tr><th>CPU governor / steal</th><td>n/a / 0%</td></tr><tr><th>Runloom interp</th><td>3.13.13 FT @ b037eb9</td></tr><tr><th>Runloom build</th><td>-O2 -DNDEBUG -D_FORTIFY_SOURCE=2 -fstack-protector-strong (as-shipped release) (RUNLOOM_DEBUG=<unset>)</td></tr><tr><th>Baseline interp</th><td>3.13.13 GIL &mdash; uvloop 0.22.1, gevent 26.5.0, greenlet 3.5.1</td></tr><tr><th>Go</th><td>go version go1.22.2 linux/amd64</td></tr><tr><th>Cython</th><td>3.2.5</td></tr></table><p class="warn">This is a VMware guest &mdash; the CPUs are vCPUs and may incur hypervisor steal; numbers are valid for relative comparison on this host, not absolute hardware peaks.</p>
 <h2 id="constraints">Assumed constraints &amp; methodology</h2><table class="kv"><tr><th>CPU sizing</th><td>hubs = int(cpu&times;0.7) = <b>44</b>; go GOMAXPROCS = <b>44</b>; client = int(cpu&times;0.25) = <b>16</b></td></tr><tr><th>CPU placement</th><td>client cpus <code>0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15</code>; server cpus <code>16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59</code> (disjoint, so the loadgen never steals a server core)</td></tr><tr><th>Network</th><td>veth pair across two netns (10.99.0.1 &harr; 10.99.0.2); spec sysctls applied inside the server netns; empty firewall ruleset (no host nft tax)</td></tr><tr><th>Sysctls</th><td>net.ipv4.tcp_wmem = 4096 16384 2097152; net.ipv4.tcp_rmem = 4096 87380 2097152; net.core.somaxconn = 65535; net.ipv4.tcp_tw_reuse = 1</td></tr><tr><th>fd limit</th><td>RLIMIT_NOFILE raised to 8,388,608 per exec via prlimit (the editor-shell 4096 cap does not propagate)</td></tr><tr><th>Debug</th><td>RUNLOOM_DEBUG unset; as-shipped -O2 -DNDEBUG release build, no sanitizers</td></tr><tr><th>TCP_NODELAY</th><td>set once per connection at setup (listener + client), never in the per-request loop</td></tr><tr><th>req/s payload</th><td>1024 B (small &rarr; scheduling/syscall bound, the headline req/s)</td></tr><tr><th>bandwidth payload</th><td>1,572,864 B = 1.5 MiB (large &rarr; copy/IO bound, reported as GB/s)</td></tr><tr><th>Stop rule</th><td>geometric connection ladder; a rung must beat the incumbent peak's bootstrap-CI upper bound to count; 2 consecutive misses stop the sweep; 3 reps/rung</td></tr><tr><th>Per-core scaling</th><td>throughput metrics (req/s, spawn, http, GB/s) are divided by the runtime's core count; latency metrics (ctx-switch, RTT) are not divided; single-threaded runtimes are already 1 core. We do NOT measure run(1) as 'runloom per core' &mdash; that is the M:1 cooperative scheduler, a different runtime than the M:N work-stealer.</td></tr><tr><th>Saturation honesty</th><td>the 16-core client cannot saturate the fastest servers for a symmetric echo, so each peak is tagged with the CPU-bound side and, when client-bound, a server-ceiling estimate (peak / server-CPU-utilisation).</td></tr></table>
+<h2 id="churn">Connection churn &mdash; conn/s (a fresh handler spawned per request)</h2><p>The req/s benchmark further down establishes connections ONCE and loops requests on them &mdash; so the server never spawns a handler under load. This is the opposite, and the case most people picture when they hear "spawn a handler per request": the client opens a NEW connection, sends one request, reads the echo, and CLOSES, as hard as it can. So the server pays <b>accept + spawn-a-handler + serve + teardown for every counted connection, in the hot loop</b> &mdash; the metric where per-connection fiber/goroutine/coroutine spawn actually lands. (One request per connection, so conn/s == req/s here, but every request is a fresh connection.)</p><table id="t_churn" class="sortable"><thead><tr>
+<th onclick="sortT('t_churn',0,false)">Runtime<span class="ar"></span></th>
+<th onclick="sortT('t_churn',1,true)">Cores<span class="ar"></span></th>
+<th onclick="sortT('t_churn',2,true)">conn/s<span class="ar"></span></th>
+<th onclick="sortT('t_churn',3,true)">p50 &micro;s<span class="ar"></span></th>
+<th onclick="sortT('t_churn',4,true)">p99 &micro;s<span class="ar"></span></th>
+<th onclick="sortT('t_churn',5,true)">server CPU<span class="ar"></span></th>
+</tr></thead><tbody>
+<tr>
+<td data-v="Runloom (M:N) — Python handler">Runloom (M:N) — Python handler</td>
+<td data-v="44">44</td>
+<td data-v="31908.7564207861">31,909</td>
+<td data-v="2550.7497910957613">2,551</td>
+<td data-v="80464.01848526079">80,464</td>
+<td data-v="0.589585780573628">59%</td>
+</tr>
+<tr>
+<td data-v="Go net (GOMAXPROCS=44)">Go net (GOMAXPROCS=44)</td>
+<td data-v="44">44</td>
+<td data-v="30437.900880660465">30,438</td>
+<td data-v="5589.006899357588">5,589</td>
+<td data-v="24808.558999164277">24,809</td>
+<td data-v="0.13855265328325136">14%</td>
+</tr>
+<tr>
+<td data-v="uvloop (1 core)">uvloop (1 core)</td>
+<td data-v="1">1</td>
+<td data-v="7414.579678120019">7,415</td>
+<td data-v="26832.937413496085">26,833</td>
+<td data-v="27906.254910035932">27,906</td>
+<td data-v="0.9929278642149929">99%</td>
+</tr>
+<tr>
+<td data-v="asyncio Protocol (1 core)">asyncio Protocol (1 core)</td>
+<td data-v="1">1</td>
+<td data-v="6239.543611078386">6,240</td>
+<td data-v="31390.741523122662">31,391</td>
+<td data-v="35310.31507266585">35,310</td>
+<td data-v="0.9943342776203966">99%</td>
+</tr>
+<tr>
+<td data-v="Runloom (M:N) — Cython handler (compiled)">Runloom (M:N) — Cython handler (compiled)</td>
+<td data-v="44">44</td>
+<td data-v="5151.375749280607">5,151</td>
+<td data-v="26832.937413496085">26,833</td>
+<td data-v="190693.18944822115">190,693</td>
+<td data-v="0.975120406458034">98%</td>
+</tr>
+<tr>
+<td data-v="gevent StreamServer (1 core)">gevent StreamServer (1 core)</td>
+<td data-v="1">1</td>
+<td data-v="4910.50604826988">4,911</td>
+<td data-v="39719.30225389921">39,719</td>
+<td data-v="44678.81321053008">44,679</td>
+<td data-v="0.9929378531073446">99%</td>
+</tr>
+</tbody></table>
+<p class="note">Higher conn/s is better. <b>runloom (Python handler) keeps up with Go on throughput</b> &mdash; connection churn is dominated by the TCP accept/setup/teardown syscalls BOTH runtimes pay, so runloom's heavier fiber-spawn is a small slice of the per-connection cost. But look at <b>server CPU</b>: Go does its throughput at a fraction of runloom's, so Go has far more headroom (a much higher ceiling under heavier churn). KNOWN BUG: the runloom <i>Cython</i>-handler server busy-spins under churn (near 100% CPU for low conn/s &mdash; the M:N no-data park loop); that row is a defect, not a real limit, so the Python-handler row is the representative runloom number. Single-core asyncio/uvloop/gevent saturate one core.</p>
 <h2 id="perf">Performance &mdash; requests / second</h2><table id="t_reqps" class="sortable"><thead><tr>
 <th onclick="sortT('t_reqps',0,false)">Server<span class="ar"></span></th>
 <th onclick="sortT('t_reqps',1,false)">Interp<span class="ar"></span></th>

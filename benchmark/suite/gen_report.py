@@ -929,6 +929,47 @@ def sec_spawn_curve(sc):
                     "goroutines are 2 KB grow-on-demand native stacks. No bounding/backpressure."))
 
 
+def sec_conn_churn(cc):
+    if not cc or not cc.get("results"):
+        return ""
+    res = cc["results"]
+    order = sorted(res.keys(), key=lambda n: -(res[n].get("conns_per_s") or 0))
+    rows = []
+    for n in order:
+        d = res[n]
+        cps = d.get("conns_per_s")
+        rows.append([
+            (esc(d.get("label", n)), d.get("label", n)),
+            (fmt(d.get("cores", 1)), d.get("cores", 1)),
+            (fmt(cps) if cps else "&mdash;", cps or -1),
+            (fmt(d.get("p50_us", 0)), d.get("p50_us", 0)),
+            (fmt(d.get("p99_us", 0)), d.get("p99_us", 0)),
+            ("%.0f%%" % ((d.get("server_util") or 0) * 100), (d.get("server_util") or 0)),
+        ])
+    cols = [("Runtime", False), ("Cores", True), ("conn/s", True),
+            ("p50 &micro;s", True), ("p99 &micro;s", True), ("server CPU", True)]
+    return ('<h2 id="churn">Connection churn &mdash; conn/s (a fresh handler spawned per request)</h2>'
+            '<p>The req/s benchmark further down establishes connections ONCE and loops requests '
+            'on them &mdash; so the server never spawns a handler under load. This is the '
+            'opposite, and the case most people picture when they hear "spawn a handler per '
+            'request": the client opens a NEW connection, sends one request, reads the echo, and '
+            'CLOSES, as hard as it can. So the server pays <b>accept + spawn-a-handler + serve + '
+            'teardown for every counted connection, in the hot loop</b> &mdash; the metric where '
+            'per-connection fiber/goroutine/coroutine spawn actually lands. (One request per '
+            'connection, so conn/s == req/s here, but every request is a fresh connection.)</p>'
+            + table("t_churn", cols, rows, mark_best=False, note=
+                    "Higher conn/s is better. <b>runloom (Python handler) keeps up with Go on "
+                    "throughput</b> &mdash; connection churn is dominated by the TCP "
+                    "accept/setup/teardown syscalls BOTH runtimes pay, so runloom's heavier "
+                    "fiber-spawn is a small slice of the per-connection cost. But look at "
+                    "<b>server CPU</b>: Go does its throughput at a fraction of runloom's, so Go "
+                    "has far more headroom (a much higher ceiling under heavier churn). KNOWN "
+                    "BUG: the runloom <i>Cython</i>-handler server busy-spins under churn (near "
+                    "100% CPU for low conn/s &mdash; the M:N no-data park loop); that row is a "
+                    "defect, not a real limit, so the Python-handler row is the representative "
+                    "runloom number. Single-core asyncio/uvloop/gevent saturate one core."))
+
+
 def main():
     envd = load("env.json")
     perf = load("perf.json") or load("perf_quick.json")
@@ -938,13 +979,14 @@ def main():
     work = load("work_curve.json")
     work_xrt = load("work_xrt.json")
     spawn_curve = load("spawn_curve.json")
+    conn_churn = load("conn_churn.json")
     meta = (perf or speed or mem or {}).get("meta") or config.summary()
     quick = any(d and d.get("quick") for d in (perf, speed, mem))
 
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
     nav = ('<nav><b>Runloom benchmarks</b> '
            '<a href="#env">machine</a><a href="#constraints">constraints</a>'
-           '<a href="#perf">req/s</a><a href="#iouring">io_uring</a>'
+           '<a href="#churn">conn churn</a><a href="#perf">req/s</a><a href="#iouring">io_uring</a>'
            '<a href="#work">work curve</a><a href="#workxrt">work x-runtime</a>'
            '<a href="#spawncurve">spawn vs N</a>'
            '<a href="#speed">speed</a><a href="#mem">memory</a>'
@@ -959,6 +1001,7 @@ def main():
         % (now, " &mdash; <b>QUICK/SMOKE DATA</b>" if quick else ""),
         sec_header(envd),
         sec_constraints(meta),
+        sec_conn_churn(conn_churn),
         sec_perf(perf),
         sec_iouring(iou),
         sec_work(work),

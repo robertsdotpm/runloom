@@ -9,6 +9,7 @@ servers/work_cy.c
 servers/work_cy.html
 servers/srv_go
 clients/loadgen
+clients/churn_loadgen
 speed/speed_go
 memory/mem_go
 build/
