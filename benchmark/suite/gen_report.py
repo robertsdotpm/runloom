@@ -162,6 +162,110 @@ def table(tid, headers, rows, note="", mark_best=True):
     return "\n".join(out)
 
 
+# ---- standard program names: runtime_backend_handler_server[_extra] ----
+# Maps the raw data-JSON keys (and a few authored labels) to a single standard
+# scheme so every table reads consistently, e.g. runloom_epoll_py_tcpcon.
+STD_NAME = {
+    "runloom_sync":       "runloom_epoll_py_sync",
+    "runloom_c":          "runloom_epoll_py_tcpcon",
+    "runloom_c_cython":   "runloom_epoll_cython_tcpcon",
+    "runloom_iouring":    "runloom_iouring_py_sync",
+    "runloom_cython":     "runloom_iouring_cython_tcpcon",
+    "runloom_cython_opt": "runloom_iouring_cython_tcpcon_opt",
+    "runloom_cdef":       "runloom_iouring_cdef_tcpcon",
+    "asyncio":            "asyncio_epoll_py_proto",
+    "uvloop":             "uvloop_libuv_py_proto",
+    "gevent":             "gevent_libev_py_stream",
+    "go":                 "go_netpoll_native_net",
+    "runloom_py":         "runloom_epoll_py_fiber",
+    "greenlet":           "greenlet_native_py_coro",
+    # authored labels in the saturated conn/s table
+    "runloom_cdef (compiled handler)": "runloom_iouring_cdef_tcpcon",
+    "runloom_c (Python handler)":      "runloom_epoll_py_tcpcon",
+    "go (GOMAXPROCS=2)":               "go_netpoll_native_net",
+}
+# standard-name -> source file (relative to BENCH) for the click-to-code overlay
+STD_SRC = {
+    "runloom_epoll_py_sync":             "suite/servers/srv_runloom_sync.py",
+    "runloom_epoll_py_tcpcon":           "suite/servers/srv_runloom_c.py",
+    "runloom_epoll_cython_tcpcon":       "suite/servers/srv_runloom_cython.py",
+    "runloom_iouring_py_sync":           "suite/servers/srv_runloom_sync.py",
+    "runloom_iouring_cython_tcpcon":     "suite/servers/srv_runloom_cython.py",
+    "runloom_iouring_cython_tcpcon_opt": "suite/servers/srv_runloom_cython.py",
+    "runloom_iouring_cdef_tcpcon":       "suite/servers/srv_runloom_cdef.py",
+    "asyncio_epoll_py_proto":            "suite/servers/srv_asyncio.py",
+    "uvloop_libuv_py_proto":             "suite/servers/srv_asyncio.py",
+    "gevent_libev_py_stream":            "suite/servers/srv_gevent.py",
+    "go_netpoll_native_net":             "suite/servers/srv_go.go",
+    "runloom_epoll_py_fiber":            "suite/speed/speed_runloom.py",
+    "greenlet_native_py_coro":           "suite/speed/speed_greenlet.py",
+}
+
+
+def std(key):
+    return STD_NAME.get(key, key)
+
+
+def prog_html(key):
+    """A program-name cell: the standard name, clickable to overlay its source."""
+    name = std(key)
+    if name in STD_SRC:
+        return '<span class="prog" data-prog="%s">%s</span>' % (esc(name), esc(name))
+    return '<span class="prog nosrc">%s</span>' % esc(name)
+
+
+def prog_cell(key):
+    """(display, sortvalue) tuple for a first table cell."""
+    return (prog_html(key), std(key))
+
+
+_PYKW = set("def class return import from as if elif else for while in is not and or "
+            "pass break continue try except finally with yield lambda None True False global "
+            "nonlocal raise assert del async await".split())
+_GOKW = set("func package import return if else for range var const type struct interface go "
+            "defer chan select map nil true false switch case break continue default".split())
+
+
+def hl_code(src, fname):
+    """Server-side syntax highlight -> escaped HTML with <span class=hl-*> tokens.
+    One left-to-right regex (comment|string|number|word) so tokens never overlap."""
+    import re
+    kw = _GOKW if fname.endswith(".go") else _PYKW
+    com = re.escape("//" if fname.endswith(".go") else "#")
+    esc_src = esc(src)                       # & < > " ' -> entities
+    token = re.compile(
+        r"(" + com + r"[^\n]*)"                                  # comment
+        r"|(&quot;.*?&quot;|&#x27;.*?&#x27;|&#39;.*?&#39;)"      # string (escaped quotes)
+        r"|(\b\d[\d_.]*\b)"                                      # number
+        r"|(\b[A-Za-z_]\w*\b)")                                  # word
+
+    def repl(m):
+        c, s, n, w = m.group(1), m.group(2), m.group(3), m.group(4)
+        if c:
+            return '<span class="hl-com">%s</span>' % c
+        if s:
+            return '<span class="hl-str">%s</span>' % s
+        if n:
+            return '<span class="hl-num">%s</span>' % n
+        if w in kw:
+            return '<span class="hl-kw">%s</span>' % w
+        return w
+
+    return token.sub(repl, esc_src)
+
+
+def prog_sources_script():
+    """Embed every program's pre-highlighted source as window.PROG_SRC (self-contained)."""
+    import json as _json
+    out = {}
+    for name, rel in STD_SRC.items():
+        p = os.path.join(BENCH, rel)
+        if name not in out and os.path.exists(p):
+            with open(p) as f:
+                out[name] = {"file": rel, "html": hl_code(f.read(), rel)}
+    return "<script>window.PROG_SRC=%s;</script>" % _json.dumps(out)
+
+
 def code_block(title, path, lang=""):
     if not os.path.exists(path):
         return ""
@@ -206,30 +310,24 @@ def sec_header(envd):
 def sec_constraints(meta):
     m = meta or {}
     items = [
-        ("CPU sizing", "hubs = int(cpu&times;0.7) = <b>%s</b>; go GOMAXPROCS = <b>%s</b>; "
-         "client = int(cpu&times;0.25) = <b>%s</b>" % (m.get("hubs"), m.get("go_server_cores"), m.get("client_cores"))),
-        ("CPU placement", "client cpus <code>%s</code>; server cpus <code>%s</code> "
-         "(disjoint, so the loadgen never steals a server core)" % (m.get("client_cpus"), m.get("server_cpus"))),
-        ("Network", "veth pair across two netns (10.99.0.1 &harr; 10.99.0.2); spec sysctls "
-         "applied inside the server netns; empty firewall ruleset (no host nft tax)"),
-        ("Sysctls", "; ".join("%s = %s" % (k, v) for k, v in (m.get("sysctls") or {}).items())),
-        ("fd limit", "RLIMIT_NOFILE raised to %s per exec via prlimit (the editor-shell 4096 cap "
-         "does not propagate)" % "{:,}".format(m.get("fd_limit", 0))),
-        ("Debug", "RUNLOOM_DEBUG unset; as-shipped -O2 -DNDEBUG release build, no sanitizers"),
-        ("TCP_NODELAY", "set once per connection at setup (listener + client), never in the "
-         "per-request loop"),
-        ("req/s payload", "%s B (small &rarr; scheduling/syscall bound, the headline req/s)" % m.get("payload_small_bytes")),
-        ("bandwidth payload", "%s B = 1.5 MiB (large &rarr; copy/IO bound, reported as GB/s)" % "{:,}".format(m.get("payload_large_bytes", 0))),
-        ("Stop rule", "geometric connection ladder; a rung must beat the incumbent peak's "
-         "bootstrap-CI upper bound to count; %s consecutive misses stop the sweep; "
-         "%s reps/rung" % (config.PLATEAU_PATIENCE, m.get("reps"))),
-        ("Per-core scaling", "throughput metrics (req/s, spawn, http, GB/s) are divided by the "
-         "runtime's core count; latency metrics (ctx-switch, RTT) are not divided; single-"
-         "threaded runtimes are already 1 core. We do NOT measure run(1) as 'runloom per core' "
-         "&mdash; that is the M:1 cooperative scheduler, a different runtime than the M:N work-stealer."),
-        ("Saturation honesty", "the 16-core client cannot saturate the fastest servers for a "
-         "symmetric echo, so each peak is tagged with the CPU-bound side and, when client-bound, "
-         "a server-ceiling estimate (peak / server-CPU-utilisation)."),
+        ("CPU", "hubs = int(cpu&times;0.7) = <b>%s</b>, go GOMAXPROCS = <b>%s</b>, client = <b>%s</b>; "
+         "server cpus <code>%s</code> &harr; client <code>%s</code> (disjoint, loadgen never steals a core)"
+         % (m.get("hubs"), m.get("go_server_cores"), m.get("client_cores"),
+            m.get("server_cpus"), m.get("client_cpus"))),
+        ("Network", "veth pair across two netns (10.99.0.1 &harr; .2), <b>empty firewall ruleset</b> "
+         "(no host nft tax); spec sysctls applied in the server netns"),
+        ("Build / fd", "as-shipped <b>-O2 -DNDEBUG</b> release, no sanitizers, RUNLOOM_DEBUG unset; "
+         "RLIMIT_NOFILE raised to %s per exec via prlimit" % "{:,}".format(m.get("fd_limit", 0))),
+        ("Payloads", "req/s = <b>%s B</b> (small &rarr; syscall/scheduling bound); bandwidth = 1.5 MiB "
+         "(large &rarr; copy bound, GB/s); TCP_NODELAY set once at setup, never per request"
+         % m.get("payload_small_bytes")),
+        ("Saturation", "geometric dialer ladder; a rung must beat the peak's bootstrap-CI to count; "
+         "%s misses stop it, %s reps/rung. The 16-core client can&rsquo;t saturate the fastest "
+         "servers, so each peak is tagged client- vs server-bound (+ a server-ceiling estimate when "
+         "client-bound)." % (config.PLATEAU_PATIENCE, m.get("reps"))),
+        ("Per-core", "throughput (req/s, spawn, GB/s) &divide; core count; latencies (ctxswitch, RTT) "
+         "are not. <code>run(1)</code> is NOT used as &lsquo;runloom per core&rsquo; &mdash; that is the "
+         "M:1 cooperative scheduler, a different runtime than the M:N work-stealer."),
     ]
     body = "".join("<tr><th>%s</th><td>%s</td></tr>" % (k, v) for k, v in items)
     return ('<h2 id="constraints">Assumed constraints &amp; methodology</h2>'
@@ -252,7 +350,7 @@ def sec_perf(perf):
         per = rps / cores
         ceil = mt.get("server_ceiling_est")
         rows.append([
-            ('<b>%s</b><br><span class="sub">%s</span>' % (esc(name), esc(s.get("label", ""))), name),
+            ('<b>%s</b><br><span class="sub">%s</span>' % (prog_html(name), esc(s.get("label", ""))), std(name)),
             (esc(s.get("interp", "")), s.get("interp", "")),
             (fmt(cores), cores),
             (fmt(rps), rps),
@@ -288,7 +386,7 @@ def sec_perf(perf):
         payload = mt.get("payload", config.PAYLOAD_LARGE)
         gbps = pk.get("rps_median", 0) * payload * 2 / 1e9
         brows.append([
-            ('<b>%s</b>' % esc(name), name),
+            ('<b>%s</b>' % prog_html(name), std(name)),
             (fmt(cores), cores),
             (fmt(gbps, 2), gbps),
             (fmt(gbps / cores, 3), gbps / cores),
@@ -344,7 +442,7 @@ def sec_speed(speed):
         if "rate_per_s" not in d:
             continue
         cores = d.get("cores", 1)
-        rows.append([(esc(rt), rt), (fmt(cores), cores), (fmt(d["rate_per_s"]), d["rate_per_s"]),
+        rows.append([prog_cell(rt), (fmt(cores), cores), (fmt(d["rate_per_s"]), d["rate_per_s"]),
                      (fmt(d["seconds"] * 1e6 / d["n"], 2), d["seconds"] * 1e6 / d["n"]),
                      (fmt(d["rate_per_s"] / cores), d["rate_per_s"] / cores)])
     rows.sort(key=lambda r: -(r[2][1] or 0))   # best = highest absolute spawn rate
@@ -471,7 +569,7 @@ def sec_speed(speed):
         if "rps" not in d:
             continue
         cores = d.get("cores", 1)
-        rows.append([(esc(rt), rt), (fmt(cores), cores), (fmt(d["rps"]), d["rps"]),
+        rows.append([prog_cell(rt), (fmt(cores), cores), (fmt(d["rps"]), d["rps"]),
                      (fmt(d["rps"] / cores), d["rps"] / cores)])
     rows.sort(key=lambda r: -(r[2][1] or 0))   # best = highest absolute req/s
     out.append("<h3>HTTP req/s (client vs a Go httpd)</h3>")
@@ -485,7 +583,7 @@ def sec_speed(speed):
     for rt, d in (m.get("rtt") or {}).items():
         if "ns_per_rtt" not in d:
             continue
-        rows.append([(esc(rt), rt), (fmt(d["ns_per_rtt"]), d["ns_per_rtt"]),
+        rows.append([prog_cell(rt), (fmt(d["ns_per_rtt"]), d["ns_per_rtt"]),
                      (fmt(d["ns_per_rtt"] / 1000, 2), d["ns_per_rtt"] / 1000)])
     rows.sort(key=lambda r: (r[1][1] or 1e18))
     out.append("<h3>TCP round-trip latency (to a Go echo server)</h3>")
@@ -789,37 +887,59 @@ def sec_mem(mem):
 def sec_code():
     blocks = []
     files = [
-        ("Server tier 1 &mdash; runloom sync wrappers", "suite/servers/srv_runloom_sync.py"),
-        ("Server tier 2 &mdash; runloom_c.serve (py handler)", "suite/servers/srv_runloom_c.py"),
-        ("Server tiers 4/5 &mdash; runloom_c.serve + Cython handler", "suite/servers/srv_runloom_cython.py"),
+        # --- servers (these are the program names you click in the tables above) ---
+        ("runloom_epoll_py_sync &mdash; sync wrappers (epoll, py handler)", "suite/servers/srv_runloom_sync.py"),
+        ("runloom_epoll_py_tcpcon &mdash; runloom_c.serve (py handler, C TCPConn)", "suite/servers/srv_runloom_c.py"),
+        ("runloom_*_cython_tcpcon &mdash; runloom_c.serve + Cython handler", "suite/servers/srv_runloom_cython.py"),
+        ("runloom_iouring_cdef_tcpcon &mdash; cdef c_entry handler server", "suite/servers/srv_runloom_cdef.py"),
         ("Cython zero-PyObject handler (echo + inline FNV work)", "suite/servers/handler_cy.pyx"),
         ("Cython cdef c_entry handler (tstate-free, inline FNV work)", "suite/servers/handler_cdef.pyx"),
-        ("Work-curve server (--handler py/cython/cdef, --work N, work=0==echo)", "suite/servers/srv_runloom_work.py"),
-        ("Work-curve sweep driver (interpreted vs fully-native handler)", "suite/work_sweep.py"),
+        ("asyncio_epoll_py_proto / uvloop_libuv_py_proto server", "suite/servers/srv_asyncio.py"),
+        ("gevent_libev_py_stream server", "suite/servers/srv_gevent.py"),
+        ("go_netpoll_native_net server", "suite/servers/srv_go.go"),
+        ("Work-curve server (--handler py/cython/cdef, --work N)", "suite/servers/srv_runloom_work.py"),
+        # --- clients / loadgens ---
+        ("Go closed-loop loadgen (persistent req/s)", "suite/clients/loadgen.go"),
+        ("Go connection-churn loadgen (conn/s)", "suite/clients/churn_loadgen.go"),
+        # --- benchmark orchestrators ---
+        ("Orchestrator &mdash; all (perf+speed+mem)", "suite/run_all.py"),
+        ("Orchestrator &mdash; req/s + bandwidth (server set + ladder)", "suite/run_perf.py"),
+        ("Orchestrator &mdash; speed (spawn/ctxswitch/rtt/http)", "suite/run_speed.py"),
+        ("Orchestrator &mdash; memory (RSS/fiber + 1M)", "suite/run_mem.py"),
+        ("Connection-churn (conn/s, same server set + ladder)", "suite/conn_churn.py"),
+        ("Spawn-rate-vs-N (the naked single-spawn curve)", "suite/speed/spawn_curve.py"),
+        ("Work-curve sweep driver", "suite/work_sweep.py"),
         ("Cross-runtime work sweep (all runtimes, per core)", "suite/work_xrt_sweep.py"),
-        ("C-API exposed for the Cython handler", "../src/runloom_c/runloom_tcp_capi.c.inc"),
-        ("Cython hot-loop disassembly (zero-PyObject proof)", "suite/servers/handler_cy_hotloop_disasm.txt"),
-        ("asyncio / uvloop server", "suite/servers/srv_asyncio.py"),
-        ("gevent server", "suite/servers/srv_gevent.py"),
-        ("Go server", "suite/servers/srv_go.go"),
-        ("Go closed-loop loadgen", "suite/clients/loadgen.go"),
+        ("io_uring vs epoll comparison program", "suite/iouring_compare.py"),
+        # --- spawn-campaign harnesses (the >1M + conn-CPU work) ---
+        ("Active-spawn scaling harness (M issuers)", "../experiments/spawn_perf/scaling.py"),
+        ("Bulk fleet-launch harness (fiber_n, the 2.0M path)", "../experiments/spawn_perf/bulk.py"),
+        ("Steady-state churn harness", "../experiments/spawn_perf/churn.py"),
+        ("Saturated conn/s comparison (go vs runloom_c vs cdef)", "../experiments/spawn_perf/conn_compare.py"),
+        # --- speed / memory probes ---
         ("Speed &mdash; runloom", "suite/speed/speed_runloom.py"),
         ("Speed &mdash; asyncio/uvloop", "suite/speed/speed_asyncio.py"),
         ("Speed &mdash; greenlet/gevent", "suite/speed/speed_greenlet.py"),
         ("Speed &mdash; go", "suite/speed/speed_go.go"),
         ("Memory &mdash; runloom probe", "suite/memory/mem_runloom.py"),
         ("Memory &mdash; go probe", "suite/memory/mem_go.go"),
+        # --- harness + C-API + docs ---
+        ("C-API exposed for the Cython handler", "../src/runloom_c/runloom_tcp_capi.c.inc"),
+        ("Cython hot-loop disassembly (zero-PyObject proof)", "suite/servers/handler_cy_hotloop_disasm.txt"),
         ("Harness &mdash; config / constraints", "suite/harness/config.py"),
         ("Harness &mdash; topology (veth/netns/pin/fd)", "suite/harness/topo.py"),
         ("Harness &mdash; measurement (ladder/CI/CPU)", "suite/harness/measure.py"),
-        ("io_uring vs epoll comparison program", "suite/iouring_compare.py"),
+        ("Spawn-tuning consolidated summary", "../docs/dev/PERF_SUMMARY.md"),
+        ("Spawn >1M plan + results", "../docs/dev/spawn_above_1m.md"),
+        ("conn/s CPU decomposition + saturated comparison", "../docs/dev/conn_cpu.md"),
         ("io_uring &amp; thread-state findings (full writeup)", "IOURING_TSTATE_FINDINGS.md"),
         ("Archived original prompt + scoping decisions", "prompt/original_spec.md"),
     ]
     for title, rel in files:
         blocks.append(code_block(title, os.path.join(BENCH, rel)))
     return ('<h2 id="code">Benchmark source &amp; constraints</h2>'
-            '<p>Every program and the assumed constraints, embedded for reproducibility.</p>'
+            '<p>Every program embedded for reproducibility &mdash; or just <b>click any program '
+            'name in a table above</b> to pop its source up, syntax-highlighted.</p>'
             + "\n".join(b for b in blocks if b))
 
 
@@ -879,6 +999,18 @@ details.code summary::-webkit-details-marker{flex:0 0 auto}
 details.code .path{color:var(--mut);font-weight:400;font-size:11px;white-space:nowrap;flex:0 0 auto}
 pre{margin:0;padding:12px;overflow:auto;max-height:520px;background:#0c1116;font:12px/1.45 ui-monospace,Menlo,monospace}
 code{color:#cbd5e1}
+.prog{cursor:pointer;color:var(--acc);border-bottom:1px dotted rgba(108,182,255,.5)}
+.prog:hover{color:#fff}
+.prog.nosrc{cursor:default;color:inherit;border-bottom:none}
+tr.best td:first-child .prog{color:var(--good)}
+#codeoverlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.66);z-index:99;padding:4vh 4vw}
+#codeoverlay.show{display:block}
+#codebox{background:var(--panel);border:1px solid var(--line);border-radius:6px;max-width:1000px;max-height:92vh;margin:0 auto;display:flex;flex-direction:column;box-shadow:0 10px 50px rgba(0,0,0,.6)}
+#codehead{display:flex;justify-content:space-between;align-items:center;gap:16px;padding:10px 16px;border-bottom:1px solid var(--line)}
+#codetitle{font-weight:700;color:var(--acc)}#codefn{color:var(--mut);font:11px ui-monospace,monospace}
+#codeclose{cursor:pointer;color:var(--mut);font-size:22px;line-height:1;border:none;background:none}#codeclose:hover{color:#fff}
+#codebody{overflow:auto}#codebody pre{max-height:none;background:#0c1116}
+.hl-kw{color:#c792ea}.hl-str{color:#c3e88d}.hl-com{color:#5f6e82;font-style:italic}.hl-num{color:#f78c6c}
 """
 
 JS = """
@@ -895,6 +1027,17 @@ var grp=document.querySelector('.ser-'+cid+'-'+slug);if(!grp)return;
 grp.classList.toggle('off');var off=grp.classList.contains('off');
 var legs=document.querySelectorAll('.legi[data-c="'+cid+'"][data-s="'+slug+'"]');
 legs.forEach(function(e){if(off)e.classList.add('off');else e.classList.remove('off');});}
+function showCode(name){var d=window.PROG_SRC&&window.PROG_SRC[name];if(!d)return;
+document.getElementById('codetitle').textContent=name;
+document.getElementById('codefn').textContent=d.file;
+document.getElementById('codepre').innerHTML=d.html;
+document.getElementById('codeoverlay').classList.add('show');}
+function closeCode(){document.getElementById('codeoverlay').classList.remove('show');}
+document.addEventListener('click',function(e){
+if(e.target&&e.target.id==='codeoverlay'){closeCode();return;}
+var p=e.target.closest?e.target.closest('.prog'):null;
+if(p&&!p.classList.contains('nosrc')&&p.getAttribute('data-prog'))showCode(p.getAttribute('data-prog'));});
+document.addEventListener('keydown',function(e){if(e.key==='Escape')closeCode();});
 """
 
 
@@ -936,12 +1079,19 @@ def sec_active_spawn():
     ]
     trs = "".join("<tr><td>%s</td><td style='text-align:right'>%s</td><td>%s</td></tr>"
                   % (a, b, c) for a, b, c in rows)
-    return ('<h2 id="activespawn">Active spawn &mdash; the real number (804k &rarr; 2.0M/s, past Go)</h2>'
-            '<p>The spawn-vs-N curve below is <b>naked</b> spawn (create one fiber at a time, '
-            'no batching, no I/O) &mdash; the worst case, and the source of the "~48&times; behind '
-            'Go" line. <b>No real workload does that.</b> The achievable spawn throughput is the '
-            '<i>active</i> "launch a fleet" path (<code>fiber_n</code>), which this campaign took '
-            'from 804k to <b>~2.0M/s &mdash; past Go\'s 1.8M</b> (this box, FT&nbsp;3.13t):</p>'
+    return ('<h2 id="activespawn">Active spawn &mdash; single vs batch (804k &rarr; 2.0M/s, past Go)</h2>'
+            '<p>There are <b>two</b> ways to spawn, and they have very different ceilings:</p>'
+            '<ul><li><b>Single spawn</b> &mdash; <code>runloom.fiber(fn)</code> one at a time (the '
+            'per-event / per-connection pattern, and what the curve + table below measure). '
+            '<b>Go wins this</b>: a goroutine is a cheap 2&nbsp;KB stack, a runloom fiber is a real '
+            'C stack + a CPython frame, so created one-at-a-time it is heavier (~65k naked, ~360k '
+            'with the warm arena).</li>'
+            '<li><b>Batch spawn</b> &mdash; <code>fiber_n(fn, N)</code> launches N <i>at once</i> '
+            '(the "launch a fleet" pattern). One call builds the whole batch in parallel across '
+            'builder threads, so <b>runloom wins</b>: <b>~2.0M/s, past Go\'s 1.8M</b>. Go does not '
+            'need a batch API because its per-goroutine cost is already tiny.</li></ul>'
+            '<p>So "is runloom\'s spawn fast?" depends entirely on which you mean. The ladder from '
+            'single &rarr; batch on this box (FT&nbsp;3.13t):</p>'
             '<table><thead><tr><th>spawn mode</th><th>spawn/s</th><th>note</th></tr></thead>'
             '<tbody>' + trs + '</tbody></table>'
             '<p class="note"><b>How:</b> <code>total = (create&times;run)/(create+run)</code> &mdash; '
@@ -974,8 +1124,8 @@ def sec_spawn_curve(sc):
         if rt not in rates:
             continue
         ys = [getr(rt, n) for n in NS]
-        series.append((labels.get(rt, rt), palette.get(rt, "var(--fg)"), ys, rt))
-        cells = [(labels.get(rt, rt), labels.get(rt, rt))]
+        series.append((std(rt), palette.get(rt, "var(--fg)"), ys, rt))
+        cells = [prog_cell(rt)]
         for v in ys:
             cells.append((fmt(v) if v else "&mdash;", v if v else -1))
         rows.append(cells)
@@ -1166,7 +1316,8 @@ def sec_conn_churn(cc):
         ("runloom_c (Python handler)", "7,077", "~91% of Go"),
     ]
     sat_trs = "".join("<tr><td>%s</td><td style='text-align:right'>%s</td>"
-                      "<td style='text-align:right'>%s</td></tr>" % r for r in sat_rows)
+                      "<td style='text-align:right'>%s</td></tr>"
+                      % (prog_html(r[0]), r[1], r[2]) for r in sat_rows)
     return (intro
             + '<p>The auto-ladder <code>conn_churn.json</code> (full saturation run vs the '
               'whole server set) is a pending idle-box job. But the honest conn/s answer is '
@@ -1230,7 +1381,14 @@ def main():
         sec_mem(mem),
         sec_profiles(),
         sec_code(),
-        '</div><script>%s</script></body></html>' % JS,
+        '</div>',
+        # click-to-code overlay (a program name in any table opens it, highlighted)
+        '<div id="codeoverlay"><div id="codebox">'
+        '<div id="codehead"><span id="codetitle"></span><span id="codefn"></span>'
+        '<button id="codeclose" onclick="closeCode()" title="close (Esc)">&times;</button></div>'
+        '<div id="codebody"><pre><code id="codepre"></code></pre></div></div></div>',
+        prog_sources_script(),
+        '<script>%s</script></body></html>' % JS,
     ]
     out = os.path.join(BENCH, "report.html")
     with open(out, "w") as f:
