@@ -1482,6 +1482,28 @@ int runloom_coro_bulk_init(void *coro_arena, size_t coro_stride,
         /* deferred: leave self.sp/caller.sp zero (calloc); resume materializes */
         *(void **)(g + g_coro_off) = c;             /* g->coro = c */
     }
+    /* EXPERIMENT (Exp B): RUNLOOM_GON_POPULATE=1 pre-faults the TOP page of every
+     * slot here on the spawner, in one contiguous pass, instead of letting each
+     * hub fault it at first resume.  The whole batch is one contiguous block, so
+     * this is the closest analogue to MAP_POPULATE over exactly the used pages.
+     * (Full-slot pre-fault is pathological -- n*512KB of untouched stack -- so we
+     * touch only the page resume will land on.) */
+    {
+        static int populate = -1;
+        if (__atomic_load_n(&populate, __ATOMIC_RELAXED) < 0) {
+            const char *e = getenv("RUNLOOM_GON_POPULATE");
+            __atomic_store_n(&populate, (e && *e == '1') ? 1 : 0, __ATOMIC_RELAXED);
+        }
+        if (__atomic_load_n(&populate, __ATOMIC_RELAXED) == 1) {
+            long ps = sysconf(_SC_PAGESIZE);
+            size_t page = (ps > 0) ? (size_t)ps : 4096;
+            for (i = 0; i < n; i++) {
+                volatile char *top = (volatile char *)(sbase + (size_t)i * slot + rounded - 1);
+                *top = 0;                            /* fault in the resume page */
+                (void)page;
+            }
+        }
+    }
     return 0;
 }
 
