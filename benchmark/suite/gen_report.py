@@ -348,11 +348,22 @@ def sec_speed(speed):
                      (fmt(d["seconds"] * 1e6 / d["n"], 2), d["seconds"] * 1e6 / d["n"]),
                      (fmt(d["rate_per_s"] / cores), d["rate_per_s"] / cores)])
     rows.sort(key=lambda r: -(r[2][1] or 0))   # best = highest absolute spawn rate
-    out.append("<h3>Spawn 1M fibers / goroutines / coroutines</h3>")
+    out.append("<h3>Spawn 1M fibers / goroutines / coroutines (NAKED, worst case)</h3>")
+    out.append('<p class="warn">This is <b>naked single-spawn</b> &mdash; ONE spawner creating '
+               'tasks <b>one at a time</b>, default config (no arena), no I/O. <b>Go wins this by '
+               '~30&times;</b> and that is honest: a goroutine is a cheap 2&nbsp;KB stack, a runloom '
+               'fiber is a real C stack + a CPython frame, so one-at-a-time it is heavier. <b>But no '
+               'real workload spawns this way.</b> The achievable spawn throughput is the <b>batch '
+               '"launch a fleet"</b> path (<a href="#activespawn">Active spawn</a>): bulk '
+               '<code>fiber_n</code> + the warm-stack arena + parallel builder threads &mdash; '
+               '<b>~2.0M/s, past Go</b>. Same as the curve below: read both as the worst case, not '
+               'the headline.</p>')
     out.append(table("t_spawn", [("Runtime", False), ("Cores", True), ("spawn/s", True),
                                  ("&micro;s/task", True), ("spawn/s / core", True)], rows,
-                     "Higher is better. One spawner creates N tasks; drained to completion. "
-                     "runloom &amp; greenlet carry real C stacks (heavyweight vs goroutines)."))
+                     "Higher is better &mdash; but this is the WORST case (one-at-a-time, no arena). "
+                     "runloom matches/beats Go only by batching (<code>fiber_n</code> + arena + "
+                     "parallel create); see the Active spawn panel. runloom &amp; greenlet carry "
+                     "real C stacks (heavyweight per-spawn vs goroutines)."))
 
     # ctxswitch -- the speed.json rows are PYTHON-fiber; add a runloom
     # compiled-fiber-entry (c_entry capstone) row so the true scheduler yield is
