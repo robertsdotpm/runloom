@@ -25,13 +25,21 @@ def noop():
     pass
 
 
-def m_spawn(n, hubs):
-    def root():
-        for _ in range(n):
-            runloom.fiber(noop)
+def m_spawn(n, hubs, stack_size=0):
+    # stack_size>0 pins each fiber's C stack (e.g. the smallest-stack variant in
+    # the spawn-cost decomposition); 0 = the default/auto-sized stack.
+    if stack_size > 0:
+        def root():
+            for _ in range(n):
+                runloom.fiber(noop, stack_size=stack_size)
+    else:
+        def root():
+            for _ in range(n):
+                runloom.fiber(noop)
     t0 = time.perf_counter()
     runloom.run(hubs, root)
-    return {"seconds": time.perf_counter() - t0, "n": n, "cores": hubs}
+    return {"seconds": time.perf_counter() - t0, "n": n, "cores": hubs,
+            "stack_size": stack_size}
 
 
 def _make_distinct_worker(K, yobj):
@@ -205,10 +213,12 @@ def main():
     ap.add_argument("--distinct", action="store_true",
                     help="ctxswitch: give each fiber its own code object "
                          "(de-shares co_code_adaptive; the fixed Python path)")
+    ap.add_argument("--stack-size", type=int, default=0,
+                    help="spawn: pin each fiber's C stack size in bytes (0 = default)")
     args = ap.parse_args()
 
     if args.metric == "spawn":
-        res = m_spawn(args.n, args.hubs)
+        res = m_spawn(args.n, args.hubs, stack_size=args.stack_size)
     elif args.metric == "ctxswitch":
         res = m_ctxswitch(args.n, args.hubs, distinct=args.distinct)
     elif args.metric == "rtt":

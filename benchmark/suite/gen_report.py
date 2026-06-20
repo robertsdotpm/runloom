@@ -886,6 +886,49 @@ legs.forEach(function(e){if(off)e.classList.add('off');else e.classList.remove('
 """
 
 
+def sec_spawn_curve(sc):
+    if not sc or not sc.get("rates"):
+        return ""
+    NS = sc["NS"]
+    labels = sc.get("labels", {})
+    rates = sc["rates"]
+
+    def fmtN(n):
+        return ("%dk" % (n // 1000)) if n < 1_000_000 else ("%dM" % (n // 1_000_000))
+
+    def getr(rt, n):
+        d = rates.get(rt, {})
+        return d.get(str(n), d.get(n))
+
+    xlabels = [fmtN(n) for n in NS]
+    palette = {"go": "var(--acc)", "runloom_c": "var(--good)", "runloom_py": "var(--warn)",
+               "uvloop": "#ff6b9d", "asyncio": "#ff9966", "greenlet": "#e06c75"}
+    order = ["go", "uvloop", "asyncio", "greenlet", "runloom_c", "runloom_py"]
+    series, rows = [], []
+    for rt in order:
+        if rt not in rates:
+            continue
+        ys = [getr(rt, n) for n in NS]
+        series.append((labels.get(rt, rt), palette.get(rt, "var(--fg)"), ys, rt))
+        cells = [(labels.get(rt, rt), labels.get(rt, rt))]
+        for v in ys:
+            cells.append((fmt(v) if v else "&mdash;", v if v else -1))
+        rows.append(cells)
+    chart = svg_linechart("ch_spawn", series, xlabels,
+                          xaxis="tasks spawned, front-loaded (N)", ylabel="spawn / s (log)")
+    cols = [("Runtime", False)] + [(fmtN(n), True) for n in NS]
+    return ('<h3 id="spawncurve">Spawn rate vs N (1k &rarr; 1M)</h3>'
+            '<p>Raw spawn/s (= N / whole-run seconds) as N front-loaded tasks climb 1k&rarr;1M, '
+            'each runtime drained to completion (Go\'s own bench front-loads identically). '
+            'runloom &amp; Go on %d cores; asyncio/uvloop/greenlet single-core. Click a legend '
+            'entry to isolate a line.</p>' % sc.get("hubs", 8)
+            + chart
+            + table("t_spawncurve", cols, rows, mark_best=False, note=
+                    "Higher is better. Stackful runtimes (runloom, greenlet) carry a real C stack "
+                    "per task; asyncio/uvloop coroutines are stackless Python objects; Go "
+                    "goroutines are 2 KB grow-on-demand native stacks. No bounding/backpressure."))
+
+
 def main():
     envd = load("env.json")
     perf = load("perf.json") or load("perf_quick.json")
@@ -894,6 +937,7 @@ def main():
     iou = load("iouring_test.json")
     work = load("work_curve.json")
     work_xrt = load("work_xrt.json")
+    spawn_curve = load("spawn_curve.json")
     meta = (perf or speed or mem or {}).get("meta") or config.summary()
     quick = any(d and d.get("quick") for d in (perf, speed, mem))
 
@@ -902,6 +946,7 @@ def main():
            '<a href="#env">machine</a><a href="#constraints">constraints</a>'
            '<a href="#perf">req/s</a><a href="#iouring">io_uring</a>'
            '<a href="#work">work curve</a><a href="#workxrt">work x-runtime</a>'
+           '<a href="#spawncurve">spawn vs N</a>'
            '<a href="#speed">speed</a><a href="#mem">memory</a>'
            '<a href="#code">code</a><a href="#profiles">profiles</a></nav>')
     parts = [
@@ -918,6 +963,7 @@ def main():
         sec_iouring(iou),
         sec_work(work),
         sec_work_xrt(work_xrt),
+        sec_spawn_curve(spawn_curve),
         sec_speed(speed),
         sec_mem(mem),
         sec_profiles(),
