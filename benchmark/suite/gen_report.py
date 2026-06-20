@@ -930,44 +930,92 @@ def sec_spawn_curve(sc):
 
 
 def sec_conn_churn(cc):
-    if not cc or not cc.get("results"):
-        return ""
-    res = cc["results"]
-    order = sorted(res.keys(), key=lambda n: -(res[n].get("conns_per_s") or 0))
-    rows = []
-    for n in order:
-        d = res[n]
-        cps = d.get("conns_per_s")
-        rows.append([
-            (esc(d.get("label", n)), d.get("label", n)),
-            (fmt(d.get("cores", 1)), d.get("cores", 1)),
-            (fmt(cps) if cps else "&mdash;", cps or -1),
-            (fmt(d.get("p50_us", 0)), d.get("p50_us", 0)),
-            (fmt(d.get("p99_us", 0)), d.get("p99_us", 0)),
-            ("%.0f%%" % ((d.get("server_util") or 0) * 100), (d.get("server_util") or 0)),
-        ])
-    cols = [("Runtime", False), ("Cores", True), ("conn/s", True),
-            ("p50 &micro;s", True), ("p99 &micro;s", True), ("server CPU", True)]
-    return ('<h2 id="churn">Connection churn &mdash; conn/s (a fresh handler spawned per request)</h2>'
-            '<p>The req/s benchmark further down establishes connections ONCE and loops requests '
-            'on them &mdash; so the server never spawns a handler under load. This is the '
-            'opposite, and the case most people picture when they hear "spawn a handler per '
-            'request": the client opens a NEW connection, sends one request, reads the echo, and '
-            'CLOSES, as hard as it can. So the server pays <b>accept + spawn-a-handler + serve + '
-            'teardown for every counted connection, in the hot loop</b> &mdash; the metric where '
-            'per-connection fiber/goroutine/coroutine spawn actually lands. (One request per '
-            'connection, so conn/s == req/s here, but every request is a fresh connection.)</p>'
-            + table("t_churn", cols, rows, mark_best=False, note=
-                    "Higher conn/s is better. <b>runloom (Python handler) keeps up with Go on "
-                    "throughput</b> &mdash; connection churn is dominated by the TCP "
-                    "accept/setup/teardown syscalls BOTH runtimes pay, so runloom's heavier "
-                    "fiber-spawn is a small slice of the per-connection cost. But look at "
-                    "<b>server CPU</b>: Go does its throughput at a fraction of runloom's, so Go "
-                    "has far more headroom (a much higher ceiling under heavier churn). KNOWN "
-                    "BUG: the runloom <i>Cython</i>-handler server busy-spins under churn (near "
-                    "100% CPU for low conn/s &mdash; the M:N no-data park loop); that row is a "
-                    "defect, not a real limit, so the Python-handler row is the representative "
-                    "runloom number. Single-core asyncio/uvloop/gevent saturate one core."))
+    # New shape mirrors perf.json -- {servers:{name:{label,interp,cores,peak,...}}}
+    # from measure.ladder() against run_perf's server set.  The old preliminary
+    # shape was {results:{name:{conns_per_s,...}}} (a fixed-load snapshot); both
+    # are tolerated, and an empty/absent payload renders a "pending run" panel.
+    cc = cc or {}
+    servers = cc.get("servers")
+    legacy = cc.get("results") if not servers else None
+
+    intro = (
+        '<h2 id="churn">Connection churn &mdash; conn/s (a fresh handler spawned per request)</h2>'
+        '<p>The req/s benchmark further down establishes connections ONCE and loops requests '
+        'on them &mdash; so the server never spawns a handler under load. This is the '
+        'opposite, and the case most people picture when they hear "spawn a handler per '
+        'request": the client opens a NEW connection, sends one request, reads the echo, and '
+        'CLOSES, as hard as it can. So the server pays <b>accept + spawn-a-handler + serve + '
+        'teardown for every counted connection, in the hot loop</b> &mdash; the metric where '
+        'per-connection fiber/goroutine/coroutine spawn actually lands. It runs against the '
+        '<b>same servers</b> as the req/s benchmark and is driven to the <b>same saturation</b>: '
+        'a ladder of concurrent dialers climbed until conn/s plateaus, with the per-core '
+        'server- vs client-bound CPU check. (One request per connection, so conn/s == req/s '
+        'here, but every request is a fresh connection.)</p>')
+
+    note = ("Higher conn/s is better; the ladder climbs concurrent dialers until conn/s plateaus, "
+            "so <b>Bottleneck</b> says whether the <i>server</i> was the limit at peak (a real "
+            "ceiling) or the 16-core <i>client</i> saturated first (then Server-ceiling est. = "
+            "peak / server-CPU is the fairer per-core proxy). Connection churn is dominated by "
+            "the TCP accept/setup/teardown syscalls EVERY runtime pays, so a heavier fiber-spawn "
+            "is only a slice of the per-connection cost &mdash; but lower server CPU at the same "
+            "conn/s means more headroom under heavier churn. KNOWN BUG: the runloom "
+            "<i>Cython</i>-handler server busy-spins under churn (the M:N no-data park loop), so "
+            "its row is a defect, not a real limit; the Python-handler row is the representative "
+            "runloom number. Single-core asyncio/uvloop/gevent saturate one core.")
+
+    if servers:
+        rows = []
+        for name, s in servers.items():
+            pk = s.get("peak") or {}
+            if "rps_median" not in pk:
+                continue
+            cores = s.get("cores", 1) or 1
+            cps = pk.get("rps_median", 0)
+            ceil = s.get("server_ceiling_est")
+            rows.append([
+                ('<b>%s</b><br><span class="sub">%s</span>' % (esc(name), esc(s.get("label", ""))), name),
+                (esc(s.get("interp", "")), s.get("interp", "")),
+                (fmt(cores), cores),
+                (fmt(cps), cps),
+                (fmt(cps / cores), cps / cores),
+                (fmt(pk.get("conns")), pk.get("conns")),
+                (fmt(pk.get("p99_us")), pk.get("p99_us")),
+                (esc(s.get("bottleneck_at_peak", "")), s.get("bottleneck_at_peak", "")),
+                (fmt(ceil), ceil or 0),
+            ])
+        if rows:
+            rows.sort(key=lambda r: -(r[3][1] or 0))
+            cols = [("Runtime", False), ("Interp", False), ("Cores", True),
+                    ("Peak conn/s", True), ("conn/s / core", True), ("Dialers@peak", True),
+                    ("p99 &micro;s", True), ("Bottleneck", False), ("Server-ceiling est.", True)]
+            return intro + table("t_churn", cols, rows, note)
+
+    if legacy:
+        order = sorted(legacy.keys(), key=lambda n: -(legacy[n].get("conns_per_s") or 0))
+        rows = []
+        for n in order:
+            d = legacy[n]
+            cps = d.get("conns_per_s")
+            rows.append([
+                (esc(d.get("label", n)), d.get("label", n)),
+                (fmt(d.get("cores", 1)), d.get("cores", 1)),
+                (fmt(cps) if cps else "&mdash;", cps or -1),
+                (fmt(d.get("p50_us", 0)), d.get("p50_us", 0)),
+                (fmt(d.get("p99_us", 0)), d.get("p99_us", 0)),
+                ("%.0f%%" % ((d.get("server_util") or 0) * 100), (d.get("server_util") or 0)),
+            ])
+        cols = [("Runtime", False), ("Cores", True), ("conn/s", True),
+                ("p50 &micro;s", True), ("p99 &micro;s", True), ("server CPU", True)]
+        return (intro
+                + '<p class="warn">Preliminary fixed-load snapshot &mdash; superseded by the '
+                  'saturation-ladder harness against the performance server set; re-run '
+                  '<code>conn_churn.py</code> for current numbers.</p>'
+                + table("t_churn", cols, rows, note))
+
+    return intro + ('<p class="warn">No conn/s run yet. The harness is aligned to the '
+                    'performance server set (run_perf) and the same saturation ladder; run '
+                    '<code>python3 conn_churn.py</code> to populate this &mdash; deferred until '
+                    'the spawn fix lands.</p>')
 
 
 def main():

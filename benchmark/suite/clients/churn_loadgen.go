@@ -169,17 +169,26 @@ func main() {
 	conns := totalConns.Load()
 	cps := float64(conns) / elapsed
 	out := map[string]any{
-		"workers":      *workers,
-		"payload":      *payload,
-		"gomaxprocs":   *gomax,
-		"measure_s":    elapsed,
-		"conns":        conns,
-		"conns_per_s":  cps,
-		"p50_us":       agg.pct(0.50),
-		"p99_us":       agg.pct(0.99),
-		"p999_us":      agg.pct(0.999),
-		"dial_errors":  dialErrs.Load(),
-		"io_errors":    ioErrs.Load(),
+		"workers":     *workers,
+		"payload":     *payload,
+		"gomaxprocs":  *gomax,
+		"measure_s":   elapsed,
+		"conns":       conns,
+		"conns_per_s": cps,
+		"p50_us":      agg.pct(0.50),
+		"p99_us":      agg.pct(0.99),
+		"p999_us":     agg.pct(0.999),
+		"dial_errors": dialErrs.Load(),
+		"io_errors":   ioErrs.Load(),
+		// Aliases so this is a drop-in for measure.ladder (same saturation
+		// machinery as the req/s benchmark). One request per fresh connection,
+		// so conn/s IS the req/s for this workload; live_conns is the count of
+		// concurrently in-flight dialers (the driven concurrency level); the
+		// error fields map churn's dial/io failures onto the ladder's tally.
+		"rps":              cps,
+		"live_conns":       int64(*workers),
+		"establish_errors": dialErrs.Load(),
+		"conn_errors":      ioErrs.Load(),
 	}
 	b, _ := json.Marshal(out)
 	fmt.Println(string(b))
