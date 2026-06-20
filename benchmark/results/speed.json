@@ -40,70 +40,70 @@
     "spawn": {
       "runloom": {
         "n": 1000000,
-        "seconds": 19.29938638000749,
-        "rate_per_s": 51815.11890118508,
+        "seconds": 14.033577303984202,
+        "rate_per_s": 71257.66854300899,
         "cores": 44
       },
       "go": {
         "n": 1000000,
-        "seconds": 0.741572392,
-        "rate_per_s": 1348486.015374747,
+        "seconds": 0.669469125,
+        "rate_per_s": 1493720.8642743607,
         "cores": 44
       },
       "asyncio": {
         "n": 1000000,
-        "seconds": 14.762835976987844,
-        "rate_per_s": 67737.66243550966,
+        "seconds": 13.943350991990883,
+        "rate_per_s": 71718.77123185122,
         "cores": 1
       },
       "greenlet": {
         "n": 1000000,
-        "seconds": 27.169454383983975,
-        "rate_per_s": 36806.039085918725,
+        "seconds": 23.392664215993136,
+        "rate_per_s": 42748.44416038419,
         "cores": 1
       },
       "uvloop": {
         "n": 1000000,
-        "seconds": 13.489941981009906,
-        "rate_per_s": 74129.30325480438,
+        "seconds": 12.229306032997556,
+        "rate_per_s": 81770.78873500784,
         "cores": 1
       }
     },
     "ctxswitch": {
       "runloom": {
         "switches": 3999424,
-        "seconds": 38.94011477997992,
-        "ns_per_switch": 9736.430741021686,
+        "seconds": 89.93553081102436,
+        "ns_per_switch": 22487.120848158225,
         "cores": 44
       },
       "go": {
         "switches": 3999424,
-        "seconds": 2.997020206,
-        "ns_per_switch": 749.3629597662064,
+        "seconds": 2.7542572720000003,
+        "ns_per_switch": 688.6634855419181,
         "cores": 44
       },
       "asyncio": {
         "switches": 4000000,
-        "seconds": 10.847829115984496,
-        "ns_per_switch": 2711.957278996124,
+        "seconds": 8.603586484998232,
+        "ns_per_switch": 2150.896621249558,
         "cores": 1
       },
       "greenlet": {
         "switches": 4000000,
-        "seconds": 1.9458267579611856,
-        "ns_per_switch": 486.4566894902964,
+        "seconds": 1.8521502439980395,
+        "ns_per_switch": 463.0375609995099,
         "cores": 1
       },
       "uvloop": {
         "switches": 4000000,
-        "seconds": 4.652331966004567,
-        "ns_per_switch": 1163.0829915011418,
+        "seconds": 4.2305633679789025,
+        "ns_per_switch": 1057.6408419947256,
         "cores": 1
       }
     },
     "rtt": {
       "runloom": {
-        "ns_per_rtt": 87451.34261000202,
+        "ns_per_rtt": 73252.77885975083,
         "n": 100000,
         "payload": 64,
         "cores": 1,
@@ -113,12 +113,12 @@
       "go": {
         "metric": "rtt",
         "n": 100000,
-        "ns_per_rtt": 92415.90759,
+        "ns_per_rtt": 89765.53723,
         "payload": 64,
         "runtime": "go"
       },
       "asyncio": {
-        "ns_per_rtt": 200370.67166995257,
+        "ns_per_rtt": 168696.4148498373,
         "n": 100000,
         "payload": 64,
         "cores": 1,
@@ -126,7 +126,7 @@
         "metric": "rtt"
       },
       "greenlet": {
-        "ns_per_rtt": 109327.72703003138,
+        "ns_per_rtt": 91813.34751017856,
         "n": 100000,
         "payload": 64,
         "cores": 1,
@@ -134,7 +134,7 @@
         "metric": "rtt"
       },
       "uvloop": {
-        "ns_per_rtt": 127657.12495005573,
+        "ns_per_rtt": 109249.11632988369,
         "n": 100000,
         "payload": 64,
         "cores": 1,
@@ -144,9 +144,9 @@
     },
     "http": {
       "runloom": {
-        "rps": 146242.26844323776,
-        "reqs": 731272,
-        "measure_s": 5.000414776004618,
+        "rps": 148030.13250023825,
+        "reqs": 740159,
+        "measure_s": 5.000056322984165,
         "conns": 256,
         "cores": 16,
         "runtime": "runloom",
@@ -156,34 +156,34 @@
         "conns": 256,
         "cores": 16,
         "errors": 0,
-        "measure_s": 5.000019968,
+        "measure_s": 5.000006712,
         "metric": "http",
-        "reqs": 637482,
-        "rps": 127495.89083241037,
+        "reqs": 627852,
+        "rps": 125570.23143452131,
         "runtime": "go"
       },
       "asyncio": {
-        "rps": 11106.67202598496,
-        "reqs": 55821,
-        "measure_s": 5.025897934989189,
+        "rps": 10572.420904085924,
+        "reqs": 53210,
+        "measure_s": 5.032905942993239,
         "conns": 256,
         "cores": 1,
         "runtime": "asyncio",
         "metric": "http"
       },
       "greenlet": {
-        "rps": 15336.021386395832,
-        "reqs": 76916,
-        "measure_s": 5.015381634002551,
+        "rps": 16788.94129401688,
+        "reqs": 84088,
+        "measure_s": 5.008534994994989,
         "conns": 256,
         "cores": 1,
         "runtime": "greenlet",
         "metric": "http"
       },
       "uvloop": {
-        "rps": 37009.84804024422,
-        "reqs": 185309,
-        "measure_s": 5.007018666990916,
+        "rps": 36715.35740435771,
+        "reqs": 183792,
+        "measure_s": 5.005861660989467,
         "conns": 256,
         "cores": 1,
         "runtime": "uvloop",

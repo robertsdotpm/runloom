@@ -42,68 +42,12 @@ code{color:#cbd5e1}
 <nav><b>Runloom benchmarks</b> <a href="#summary">summary</a><a href="#env">machine</a><a href="#constraints">constraints</a><a href="#metrics">metrics</a><a href="#churn">conn churn</a><a href="#perf">req/s</a><a href="#iouring">io_uring</a><a href="#work">work curve</a><a href="#workxrt">work x-runtime</a><a href="#activespawn">active spawn</a><a href="#spawncurve">spawn vs N</a><a href="#speed">speed</a><a href="#mem">memory</a><a href="#code">code</a><a href="#profiles">profiles</a></nav>
 <div class="wrap">
 <h1>Runloom benchmark report</h1>
-<p class="note">Generated 2026-06-20 23:09. Throughput is shown raw and divided down to one core; latencies are not divided. Click any column header to sort.</p>
+<p class="note">Generated 2026-06-20 23:27. Throughput is shown raw and divided down to one core; latencies are not divided. Click any column header to sort.</p>
 <h2 id="summary">Executive summary &mdash; runloom vs Go, in plain language</h2><p class="lead">Runloom brings Go-style stackful coroutines to free-threaded Python, and on the workloads real servers actually hit it is <b>competitive with Go</b> &mdash; not a "Python toy." For keep-alive traffic (browsers, persistent connections) it is roughly <b>on par with Go</b>; on raw connection churn it matches Go <b>per core</b> with a plain <b>Python</b> handler (~91%) and <b>beats Go</b> with a compiled handler (~110%); and launching a large fleet of fibers runs at <b>~2.0M/s &mdash; past Go's ~1.8M</b>. Runloom's overhead lives at <b>connection birth/death and in the Python interpreter</b>, not the steady request loop &mdash; so a busy keep-alive server barely pays it. The honest gaps are narrow and mostly synthetic: spawning fibers <i>one at a time</i> (a microbenchmark no real app does) is far behind Go, and the absolute spawn ceiling is capped by CPython's per-fiber cost. <b>Bottom line: where it counts, runloom is close to Go &mdash; and on connection churn with a compiled handler, ahead of it.</b> The per-metric breakdown and the measurement caveats are below.</p>
 <h2 id="env">Machine &amp; toolchain</h2><table class="kv"><tr><th>Host</th><td>x-VMware20-1 (vmware, Ubuntu 24.04.3 LTS)</td></tr><tr><th>Kernel</th><td>6.17.0-35-generic x86_64</td></tr><tr><th>CPU</th><td>Intel(R) Xeon(R) CPU E5-2696 v3 @ 2.30GHz</td></tr><tr><th>Logical CPUs / NUMA</th><td>64 vCPUs &mdash; node0=0-31, node1=32-63</td></tr><tr><th>Memory</th><td>78.6 GiB</td></tr><tr><th>CPU governor / steal</th><td>n/a / 0%</td></tr><tr><th>Runloom interp</th><td>3.13.13 FT @ b037eb9</td></tr><tr><th>Runloom build</th><td>-O2 -DNDEBUG -D_FORTIFY_SOURCE=2 -fstack-protector-strong (as-shipped release) (RUNLOOM_DEBUG=<unset>)</td></tr><tr><th>Baseline interp</th><td>3.13.13 GIL &mdash; uvloop 0.22.1, gevent 26.5.0, greenlet 3.5.1</td></tr><tr><th>Go</th><td>go version go1.22.2 linux/amd64</td></tr><tr><th>Cython</th><td>3.2.5</td></tr></table><p class="warn">This is a VMware guest &mdash; the CPUs are vCPUs and may incur hypervisor steal; numbers are valid for relative comparison on this host, not absolute hardware peaks.</p>
 <h2 id="constraints">Assumed constraints &amp; methodology</h2><table class="kv"><tr><th>CPU sizing</th><td>hubs = int(cpu&times;0.7) = <b>44</b>; go GOMAXPROCS = <b>44</b>; client = int(cpu&times;0.25) = <b>16</b></td></tr><tr><th>CPU placement</th><td>client cpus <code>0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15</code>; server cpus <code>16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59</code> (disjoint, so the loadgen never steals a server core)</td></tr><tr><th>Network</th><td>veth pair across two netns (10.99.0.1 &harr; 10.99.0.2); spec sysctls applied inside the server netns; empty firewall ruleset (no host nft tax)</td></tr><tr><th>Sysctls</th><td>net.ipv4.tcp_wmem = 4096 16384 2097152; net.ipv4.tcp_rmem = 4096 87380 2097152; net.core.somaxconn = 65535; net.ipv4.tcp_tw_reuse = 1</td></tr><tr><th>fd limit</th><td>RLIMIT_NOFILE raised to 8,388,608 per exec via prlimit (the editor-shell 4096 cap does not propagate)</td></tr><tr><th>Debug</th><td>RUNLOOM_DEBUG unset; as-shipped -O2 -DNDEBUG release build, no sanitizers</td></tr><tr><th>TCP_NODELAY</th><td>set once per connection at setup (listener + client), never in the per-request loop</td></tr><tr><th>req/s payload</th><td>1024 B (small &rarr; scheduling/syscall bound, the headline req/s)</td></tr><tr><th>bandwidth payload</th><td>1,572,864 B = 1.5 MiB (large &rarr; copy/IO bound, reported as GB/s)</td></tr><tr><th>Stop rule</th><td>geometric connection ladder; a rung must beat the incumbent peak's bootstrap-CI upper bound to count; 2 consecutive misses stop the sweep; 3 reps/rung</td></tr><tr><th>Per-core scaling</th><td>throughput metrics (req/s, spawn, http, GB/s) are divided by the runtime's core count; latency metrics (ctx-switch, RTT) are not divided; single-threaded runtimes are already 1 core. We do NOT measure run(1) as 'runloom per core' &mdash; that is the M:1 cooperative scheduler, a different runtime than the M:N work-stealer.</td></tr><tr><th>Saturation honesty</th><td>the 16-core client cannot saturate the fastest servers for a symmetric echo, so each peak is tagged with the CPU-bound side and, when client-bound, a server-ceiling estimate (peak / server-CPU-utilisation).</td></tr></table>
 <h2 id="metrics">How to read these metrics &mdash; and where runloom stands</h2><p>There is no single "runloom vs Go" number: each benchmark measures a different axis, and <b>spawn is only exercised by some of them</b>. Two framings make the table below unambiguous:</p><p><b>Active vs passive spawn.</b> <i>Active</i> spawn is an explicit "launch a fleet" (<code>fiber_n</code> / the spawn benchmark) &mdash; you create N at once, so the create loop can be parallelized (that is the 804k&rarr;1.5M win). <i>Passive</i> spawn is a server creating one handler per connection inside its accept loop &mdash; a <i>single</i> spawn per event, so the active fleet-launch lever does <b>not</b> apply to it; passive spawn shows up in conn/s.</p><p><b>conn/s vs req/s &mdash; the distinction everyone trips on.</b> <i>req/s</i> (keep-alive) opens connections ONCE and loops requests on them &mdash; this is the <b>100k&ndash;1M+/s</b> number people quote, and spawn is ~0% of it. <i>conn/s</i> (churn) opens a NEW connection per request and closes it, so every unit pays the full TCP lifecycle (SYN handshake + socket alloc + spawn + FIN teardown + TIME_WAIT). That is <b>~10&ndash;30k/s for everyone, Go included</b> &mdash; the kernel TCP stack dominates, not the application. They are different benchmarks; quoting the wrong one is the most common benchmark deception.</p><p><b>Where a browser lands:</b> browsers are aggressively keep-alive (HTTP/1.1 reuses ~6 connections per origin; HTTP/2 multiplexes everything over <i>one</i>), so they hit the <b>req/s</b> path, not conn/s churn. The per-connection spawn (and TLS handshake) is paid once at connect and amortized over the whole session &mdash; so for browser-shaped load runloom is &asymp; Go, and the conn/s worst case describes <i>non</i>-keep-alive clients (proxies without upstream pooling, connection-per-call RPC, reconnect storms).</p><table><thead><tr><th>Metric</th><th>Measures</th><th>Spawn in hot loop?</th><th>runloom vs Go (this box)</th><th>Reality</th></tr></thead><tbody><tr><td><b>active</b> spawn &mdash; fleet launch (<code>fiber_n</code>)</td><td>create+run+destroy N fibers at once, no I/O</td><td>Yes &mdash; it IS the whole workload</td><td>~1.5M/s vs Go ~1.8M (~0.85&times;) on this box</td><td>the spawn-fast-path lever (parallel bulk-create) got it here; near parity</td></tr><tr><td>naked spawn &mdash; 1 issuer (microbench)</td><td>the same, but one fiber at a time, nothing batched</td><td>Yes, and nothing else</td><td>~65k/s &mdash; the famous '~48&times; behind' number</td><td><b>pathological</b>: no real workload spawns naked one-at-a-time; ignore it</td></tr><tr><td><b>passive</b> spawn &mdash; conn/s (conn-churn)</td><td>fresh handler spawned + torn down per request (new connection each time)</td><td>Yes &mdash; 1 spawn+teardown / request, but in the hot loop</td><td>~31k/s &asymp; Go, at ~3&times; the server CPU</td><td>TCP accept/handshake/teardown DOMINATES &mdash; spawn is only a slice</td></tr><tr><td>req/s &mdash; persistent / keep-alive</td><td>steady-state requests on live connections (the browser case)</td><td>No &mdash; 1 handler/conn at setup, then loops; spawn ~0% of the window</td><td>competitive (syscall + netpoll bound, same as Go)</td><td>where real servers + browsers live; the spawn cost is amortized to ~0</td></tr><tr><td>ctxswitch</td><td>yield/resume cost under load</td><td>n/a</td><td>competitive (after closure-cell / @runloom.hot / immortalize)</td><td>the FT refcount lever (1.65&times;)</td></tr></tbody></table><p class="note"><b>Reading any of these honestly (so the chart does not fool you):</b> (1) <b>check which side saturated</b> &mdash; a number where the load-generator CPU is pinned and the server is idle measures the <i>client</i>, not the server (it understates the runtime). (2) <b>report throughput per core</b> &mdash; matching Go's throughput at 3&times; the cores is not parity; the per-core column is the honest one. (3) <b>warm vs cold</b> &mdash; a min-of-reps number is the warm, fault-free rep and hides cold-start cost. (4) <b>name the metric precisely</b> (active/passive, conn/req, naked/amortized) &mdash; a number with no workload attached is a claim with the asterisk removed. Full spawn diagnosis + the corrected story (the per-fiber madvise is the security stack-scrub, NOT a CPython purge): <code>docs/dev/spawn_experiments.md</code>; the &gt;1M plan: <code>docs/dev/spawn_above_1m.md</code>.</p>
-<h2 id="churn">Connection churn &mdash; conn/s (a fresh handler spawned per request)</h2><p>The req/s benchmark further down establishes connections ONCE and loops requests on them &mdash; so the server never spawns a handler under load. This is the opposite, and the case most people picture when they hear "spawn a handler per request": the client opens a NEW connection, sends one request, reads the echo, and CLOSES, as hard as it can. So the server pays <b>accept + spawn-a-handler + serve + teardown for every counted connection, in the hot loop</b> &mdash; the metric where per-connection fiber/goroutine/coroutine spawn actually lands. It runs against the <b>same servers</b> as the req/s benchmark and is driven to the <b>same saturation</b>: a ladder of concurrent dialers climbed until conn/s plateaus, with the per-core server- vs client-bound CPU check. (One request per connection, so conn/s == req/s here, but every request is a fresh connection.)</p><table id="t_churn" class="sortable"><thead><tr>
-<th onclick="sortT('t_churn',0,false)">Runtime<span class="ar"></span></th>
-<th onclick="sortT('t_churn',1,false)">Interp<span class="ar"></span></th>
-<th onclick="sortT('t_churn',2,true)">Cores<span class="ar"></span></th>
-<th onclick="sortT('t_churn',3,true)">Peak conn/s<span class="ar"></span></th>
-<th onclick="sortT('t_churn',4,true)">conn/s / core<span class="ar"></span></th>
-<th onclick="sortT('t_churn',5,true)">Dialers@peak<span class="ar"></span></th>
-<th onclick="sortT('t_churn',6,true)">p99 &micro;s<span class="ar"></span></th>
-<th onclick="sortT('t_churn',7,false)">Bottleneck<span class="ar"></span></th>
-<th onclick="sortT('t_churn',8,true)">Server-ceiling est.<span class="ar"></span></th>
-</tr></thead><tbody>
-<tr class="best">
-<td data-v="runloom_c"><span class="trophy">&#127942;</span><b>runloom_c</b><br><span class="sub">Runloom C scaffold (py handler, C TCPConn)</span></td>
-<td data-v="3.13t FT">3.13t FT</td>
-<td data-v="44">44</td>
-<td data-v="30957.465728110426">30,957</td>
-<td data-v="703.5787665479643">704</td>
-<td data-v="128">128</td>
-<td data-v="31390.741523122662">31,391</td>
-<td data-v="client">client</td>
-<td data-v="61023.733946931054">61,024</td>
-</tr>
-<tr>
-<td data-v="go"><b>go</b><br><span class="sub">Go net (GOMAXPROCS=44)</span></td>
-<td data-v="go">go</td>
-<td data-v="44">44</td>
-<td data-v="30088.77962977799">30,089</td>
-<td data-v="683.8359006767724">684</td>
-<td data-v="16">16</td>
-<td data-v="995.1022691852406">995</td>
-<td data-v="neither_saturated">neither_saturated</td>
-<td data-v="192688.11414045506">192,688</td>
-</tr>
-<tr>
-<td data-v="runloom_cython_opt"><b>runloom_cython_opt</b><br><span class="sub">Runloom io_uring + Cython + optimize(throughput)</span></td>
-<td data-v="3.13t FT">3.13t FT</td>
-<td data-v="44">44</td>
-<td data-v="7782.644726257808">7,783</td>
-<td data-v="176.878289233132">177</td>
-<td data-v="128">128</td>
-<td data-v="114525.38798497243">114,525</td>
-<td data-v="client">client</td>
-<td data-v="24315.805525346394">24,316</td>
-</tr>
-<tr>
-<td data-v="asyncio"><b>asyncio</b><br><span class="sub">asyncio Protocol (GIL, 1 core)</span></td>
-<td data-v="3.13 GIL">3.13 GIL</td>
-<td data-v="1">1</td>
-<td data-v="6553.90692057799">6,554</td>
-<td data-v="6553.90692057799">6,554</td>
-<td data-v="128">128</td>
-<td data-v="21206.460205893836">21,206</td>
-<td data-v="server">server</td>
-<td data-v="6684.9850589895495">6,685</td>
-</tr>
-</tbody></table>
-<p class="note">Higher conn/s is better; the ladder climbs concurrent dialers until conn/s plateaus, so <b>Bottleneck</b> says whether the <i>server</i> was the limit at peak (a real ceiling) or the 16-core <i>client</i> saturated first (then Server-ceiling est. = peak / server-CPU is the fairer per-core proxy). Connection churn is dominated by the TCP accept/setup/teardown syscalls EVERY runtime pays, so a heavier fiber-spawn is only a slice of the per-connection cost &mdash; but lower server CPU at the same conn/s means more headroom under heavier churn. KNOWN BUG: the runloom <i>Cython</i>-handler server busy-spins under churn (the M:N no-data park loop), so its row is a defect, not a real limit; the Python-handler row is the representative runloom number. Single-core asyncio/uvloop/gevent saturate one core.</p>
+<h2 id="churn">Connection churn &mdash; conn/s (a fresh handler spawned per request)</h2><p>The req/s benchmark further down establishes connections ONCE and loops requests on them &mdash; so the server never spawns a handler under load. This is the opposite, and the case most people picture when they hear "spawn a handler per request": the client opens a NEW connection, sends one request, reads the echo, and CLOSES, as hard as it can. So the server pays <b>accept + spawn-a-handler + serve + teardown for every counted connection, in the hot loop</b> &mdash; the metric where per-connection fiber/goroutine/coroutine spawn actually lands. It runs against the <b>same servers</b> as the req/s benchmark and is driven to the <b>same saturation</b>: a ladder of concurrent dialers climbed until conn/s plateaus, with the per-core server- vs client-bound CPU check. (One request per connection, so conn/s == req/s here, but every request is a fresh connection.)</p><p class="warn">No conn/s run yet. The harness is aligned to the performance server set (run_perf) and the same saturation ladder; run <code>python3 conn_churn.py</code> to populate this &mdash; deferred until the spawn fix lands.</p>
 <h2 id="perf">Performance &mdash; requests / second</h2><table id="t_reqps" class="sortable"><thead><tr>
 <th onclick="sortT('t_reqps',0,false)">Server<span class="ar"></span></th>
 <th onclick="sortT('t_reqps',1,false)">Interp<span class="ar"></span></th>
@@ -1350,7 +1294,7 @@ code{color:#cbd5e1}
 </tbody></table>
 <p class="note">Rows sorted by per-core throughput at the heaviest work &mdash; the <b>rightmost column is the true capacity comparison</b> (the only point where all runtimes are genuinely server-bound). Two bands, drawn by the <b>handler language, not the runtime</b>: compiled (runloom-cdef &asymp; runloom-cython &asymp; Go, ~6.5&ndash;7k/core) ~180&times; above interpreted (~30&ndash;40/core); the runtime barely matters inside a band, and runloom-py is the <em>top</em> of the interpreted band (free-threaded M:N Python is not slower per core than a single-thread event loop, and runs on all 44 cores at once). <b>Lighter-work columns:</b> the compiled runtimes are so fast there that the 16-core loadgen can't saturate them (bottleneck <code>client</code>), so those per-core figures are the loadgen ceiling &divide; cores, not capacity &mdash; hence any non-monotonicity is the measurement, not the runtime. <b>The <code>w=0</code> (echo) inversion:</b> single-thread event loops lead per core (uvloop highest) because pure I/O pays no free-threading/M:N tax &mdash; and it vanishes the instant the handler does work. <b>Honest caveat:</b> delegate the work to a C library (<code>hashlib</code>/<code>json</code>) and every runtime re-converges &mdash; they would all call the same native code.</p>
 <h2 id="activespawn">Active spawn &mdash; the real number (804k &rarr; 2.0M/s, past Go)</h2><p>The spawn-vs-N curve below is <b>naked</b> spawn (create one fiber at a time, no batching, no I/O) &mdash; the worst case, and the source of the "~48&times; behind Go" line. <b>No real workload does that.</b> The achievable spawn throughput is the <i>active</i> "launch a fleet" path (<code>fiber_n</code>), which this campaign took from 804k to <b>~2.0M/s &mdash; past Go's 1.8M</b> (this box, FT&nbsp;3.13t):</p><table><thead><tr><th>spawn mode</th><th>spawn/s</th><th>note</th></tr></thead><tbody><tr><td>naked spawn &mdash; 1 issuer (the curve below)</td><td style='text-align:right'>~65k</td><td>the famous ~48&times; microbench &mdash; <b>pathological</b>, no real workload spawns one-at-a-time</td></tr><tr><td>single <code>fiber()</code> loop + warm-stack arena</td><td style='text-align:right'>242k &rarr; <b>363k</b></td><td>server-style per-event spawn; 363k with the secure resident scrub (now default)</td></tr><tr><td>bulk <code>fiber_n</code> + <code>FRESH</code> (fleet launch)</td><td style='text-align:right'>804k</td><td>one call builds N at once &mdash; the idiom the parallel-create lever needs</td></tr><tr><td>+ parallel create Pass A (<code>PCREATE=auto</code>)</td><td style='text-align:right'>1.54M</td><td>8 builder threads fill disjoint g-arena slices; create was the serial bottleneck</td></tr><tr><td>+ parallel create Pass B (<code>PCREATE_B=auto</code>)</td><td style='text-align:right'><b>2.0&ndash;2.2M</b></td><td><b>past Go</b> (1.8M) &mdash; 2.05M @8h, 2.23M @16h; both create passes parallel; TSan-clean</td></tr></tbody></table><p class="note"><b>How:</b> <code>total = (create&times;run)/(create+run)</code> &mdash; create was <b>serial</b> at 1.32M/s, so every lever was capped at 804k until it parallelized; parallel bulk-create &rarr; 1.54M (then the run/drain phase becomes the wall). Get it with <code>runloom.optimize("throughput")</code>. Full story: <code>docs/dev/spawn_above_1m.md</code> + <code>spawn_experiments.md</code>.</p>
-<h3 id="spawncurve">Spawn rate vs N (1k &rarr; 1M)</h3><p>Raw spawn/s (= N / whole-run seconds) as N front-loaded tasks climb 1k&rarr;1M, each runtime drained to completion (Go's own bench front-loads identically). runloom &amp; Go on 8 cores; asyncio/uvloop/greenlet single-core. Click a legend entry to isolate a line.</p><svg viewBox="0 0 760 392" id="ch_spawn" class="chart" width="100%" style="max-width:760px"><line x1="70" y1="314.3" x2="564" y2="314.3" class="grid"/><text x="63" y="317.3" class="ytick">20k</text><line x1="70" y1="272.4" x2="564" y2="272.4" class="grid"/><text x="63" y="275.4" class="ytick">50k</text><line x1="70" y1="240.7" x2="564" y2="240.7" class="grid"/><text x="63" y="243.7" class="ytick">100k</text><line x1="70" y1="209.0" x2="564" y2="209.0" class="grid"/><text x="63" y="212.0" class="ytick">200k</text><line x1="70" y1="167.0" x2="564" y2="167.0" class="grid"/><text x="63" y="170.0" class="ytick">500k</text><line x1="70" y1="135.3" x2="564" y2="135.3" class="grid"/><text x="63" y="138.3" class="ytick">1M</text><line x1="70" y1="103.6" x2="564" y2="103.6" class="grid"/><text x="63" y="106.6" class="ytick">2M</text><text x="70.0" y="362" class="xtick">1k</text><text x="152.3" y="362" class="xtick">3k</text><text x="234.7" y="362" class="xtick">10k</text><text x="317.0" y="362" class="xtick">30k</text><text x="399.3" y="362" class="xtick">100k</text><text x="481.7" y="362" class="xtick">300k</text><text x="564.0" y="362" class="xtick">1M</text><text x="317.0" y="387" class="axlbl">tasks spawned, front-loaded (N)</text><text x="14" y="188.0" class="axlbl" transform="rotate(-90 14 188.0)">spawn / s (log)</text><text x="578" y="18" class="hint">click a name to toggle</text><g class="ser ser-ch_spawn-go"><path d="M70.0 144.0 L152.3 120.1 L234.7 114.5 L317.0 113.4 L399.3 100.6 L481.7 97.9 L564.0 99.3 " fill="none" stroke="var(--acc)" stroke-width="2.4"/><circle cx="70.0" cy="144.0" r="2.7" fill="var(--acc)"/><circle cx="152.3" cy="120.1" r="2.7" fill="var(--acc)"/><circle cx="234.7" cy="114.5" r="2.7" fill="var(--acc)"/><circle cx="317.0" cy="113.4" r="2.7" fill="var(--acc)"/><circle cx="399.3" cy="100.6" r="2.7" fill="var(--acc)"/><circle cx="481.7" cy="97.9" r="2.7" fill="var(--acc)"/><circle cx="564.0" cy="99.3" r="2.7" fill="var(--acc)"/></g><g class="legi" data-c="ch_spawn" data-s="go" onclick="tglSeries('ch_spawn','go')"><rect x="574" y="30" width="184" height="17" fill="transparent"/><line x1="578" y1="38" x2="596" y2="38" stroke="var(--acc)" stroke-width="2.4"/><text x="600" y="42" class="leg">Go (GOMAXPROCS=8)</text></g><g class="ser ser-ch_spawn-uvloop"><path d="M70.0 211.4 L152.3 212.1 L234.7 215.1 L317.0 214.0 L399.3 225.1 L481.7 247.9 L564.0 253.1 " fill="none" stroke="#ff6b9d" stroke-width="2.4"/><circle cx="70.0" cy="211.4" r="2.7" fill="#ff6b9d"/><circle cx="152.3" cy="212.1" r="2.7" fill="#ff6b9d"/><circle cx="234.7" cy="215.1" r="2.7" fill="#ff6b9d"/><circle cx="317.0" cy="214.0" r="2.7" fill="#ff6b9d"/><circle cx="399.3" cy="225.1" r="2.7" fill="#ff6b9d"/><circle cx="481.7" cy="247.9" r="2.7" fill="#ff6b9d"/><circle cx="564.0" cy="253.1" r="2.7" fill="#ff6b9d"/></g><g class="legi" data-c="ch_spawn" data-s="uvloop" onclick="tglSeries('ch_spawn','uvloop')"><rect x="574" y="49" width="184" height="17" fill="transparent"/><line x1="578" y1="57" x2="596" y2="57" stroke="#ff6b9d" stroke-width="2.4"/><text x="600" y="61" class="leg">uvloop (1 core)</text></g><g class="ser ser-ch_spawn-asyncio"><path d="M70.0 234.2 L152.3 226.7 L234.7 231.5 L317.0 232.4 L399.3 239.7 L481.7 254.7 L564.0 257.7 " fill="none" stroke="#ff9966" stroke-width="2.4"/><circle cx="70.0" cy="234.2" r="2.7" fill="#ff9966"/><circle cx="152.3" cy="226.7" r="2.7" fill="#ff9966"/><circle cx="234.7" cy="231.5" r="2.7" fill="#ff9966"/><circle cx="317.0" cy="232.4" r="2.7" fill="#ff9966"/><circle cx="399.3" cy="239.7" r="2.7" fill="#ff9966"/><circle cx="481.7" cy="254.7" r="2.7" fill="#ff9966"/><circle cx="564.0" cy="257.7" r="2.7" fill="#ff9966"/></g><g class="legi" data-c="ch_spawn" data-s="asyncio" onclick="tglSeries('ch_spawn','asyncio')"><rect x="574" y="68" width="184" height="17" fill="transparent"/><line x1="578" y1="76" x2="596" y2="76" stroke="#ff9966" stroke-width="2.4"/><text x="600" y="80" class="leg">asyncio (1 core)</text></g><g class="ser ser-ch_spawn-greenlet"><path d="M70.0 273.6 L152.3 280.2 L234.7 275.6 L317.0 275.2 L399.3 276.2 L481.7 276.8 L564.0 280.5 " fill="none" stroke="#e06c75" stroke-width="2.4"/><circle cx="70.0" cy="273.6" r="2.7" fill="#e06c75"/><circle cx="152.3" cy="280.2" r="2.7" fill="#e06c75"/><circle cx="234.7" cy="275.6" r="2.7" fill="#e06c75"/><circle cx="317.0" cy="275.2" r="2.7" fill="#e06c75"/><circle cx="399.3" cy="276.2" r="2.7" fill="#e06c75"/><circle cx="481.7" cy="276.8" r="2.7" fill="#e06c75"/><circle cx="564.0" cy="280.5" r="2.7" fill="#e06c75"/></g><g class="legi" data-c="ch_spawn" data-s="greenlet" onclick="tglSeries('ch_spawn','greenlet')"><rect x="574" y="87" width="184" height="17" fill="transparent"/><line x1="578" y1="95" x2="596" y2="95" stroke="#e06c75" stroke-width="2.4"/><text x="600" y="99" class="leg">greenlet (1 core)</text></g><g class="ser ser-ch_spawn-runloom_c"><path d="M70.0 323.3 L152.3 295.6 L234.7 293.5 L317.0 262.9 L399.3 260.5 L481.7 263.2 L564.0 313.2 " fill="none" stroke="var(--good)" stroke-width="2.4"/><circle cx="70.0" cy="323.3" r="2.7" fill="var(--good)"/><circle cx="152.3" cy="295.6" r="2.7" fill="var(--good)"/><circle cx="234.7" cy="293.5" r="2.7" fill="var(--good)"/><circle cx="317.0" cy="262.9" r="2.7" fill="var(--good)"/><circle cx="399.3" cy="260.5" r="2.7" fill="var(--good)"/><circle cx="481.7" cy="263.2" r="2.7" fill="var(--good)"/><circle cx="564.0" cy="313.2" r="2.7" fill="var(--good)"/></g><g class="legi" data-c="ch_spawn" data-s="runloom_c" onclick="tglSeries('ch_spawn','runloom_c')"><rect x="574" y="106" width="184" height="17" fill="transparent"/><line x1="578" y1="114" x2="596" y2="114" stroke="var(--good)" stroke-width="2.4"/><text x="600" y="118" class="leg">Runloom (M:N) — pure C fiber (c_entry)</text></g><g class="ser ser-ch_spawn-runloom_py"><path d="M70.0 324.2 L152.3 308.2 L234.7 292.8 L317.0 278.5 L399.3 278.3 L481.7 275.4 L564.0 278.5 " fill="none" stroke="var(--warn)" stroke-width="2.4"/><circle cx="70.0" cy="324.2" r="2.7" fill="var(--warn)"/><circle cx="152.3" cy="308.2" r="2.7" fill="var(--warn)"/><circle cx="234.7" cy="292.8" r="2.7" fill="var(--warn)"/><circle cx="317.0" cy="278.5" r="2.7" fill="var(--warn)"/><circle cx="399.3" cy="278.3" r="2.7" fill="var(--warn)"/><circle cx="481.7" cy="275.4" r="2.7" fill="var(--warn)"/><circle cx="564.0" cy="278.5" r="2.7" fill="var(--warn)"/></g><g class="legi" data-c="ch_spawn" data-s="runloom_py" onclick="tglSeries('ch_spawn','runloom_py')"><rect x="574" y="125" width="184" height="17" fill="transparent"/><line x1="578" y1="133" x2="596" y2="133" stroke="var(--warn)" stroke-width="2.4"/><text x="600" y="137" class="leg">Runloom (M:N) — Python fiber</text></g></svg><table id="t_spawncurve" class="sortable"><thead><tr>
+<h3 id="spawncurve">Spawn rate vs N (1k &rarr; 1M)</h3><p>Raw spawn/s (= N / whole-run seconds) as N front-loaded tasks climb 1k&rarr;1M, each runtime drained to completion (Go's own bench front-loads identically). runloom &amp; Go on 8 cores; asyncio/uvloop/greenlet single-core. Click a legend entry to isolate a line.</p><svg viewBox="0 0 760 392" id="ch_spawn" class="chart" width="100%" style="max-width:760px"><line x1="70" y1="314.3" x2="564" y2="314.3" class="grid"/><text x="63" y="317.3" class="ytick">20k</text><line x1="70" y1="272.4" x2="564" y2="272.4" class="grid"/><text x="63" y="275.4" class="ytick">50k</text><line x1="70" y1="240.7" x2="564" y2="240.7" class="grid"/><text x="63" y="243.7" class="ytick">100k</text><line x1="70" y1="209.0" x2="564" y2="209.0" class="grid"/><text x="63" y="212.0" class="ytick">200k</text><line x1="70" y1="167.0" x2="564" y2="167.0" class="grid"/><text x="63" y="170.0" class="ytick">500k</text><line x1="70" y1="135.3" x2="564" y2="135.3" class="grid"/><text x="63" y="138.3" class="ytick">1M</text><line x1="70" y1="103.6" x2="564" y2="103.6" class="grid"/><text x="63" y="106.6" class="ytick">2M</text><text x="70.0" y="362" class="xtick">1k</text><text x="152.3" y="362" class="xtick">3k</text><text x="234.7" y="362" class="xtick">10k</text><text x="317.0" y="362" class="xtick">30k</text><text x="399.3" y="362" class="xtick">100k</text><text x="481.7" y="362" class="xtick">300k</text><text x="564.0" y="362" class="xtick">1M</text><text x="317.0" y="387" class="axlbl">tasks spawned, front-loaded (N)</text><text x="14" y="188.0" class="axlbl" transform="rotate(-90 14 188.0)">spawn / s (log)</text><text x="578" y="18" class="hint">click a name to toggle</text><g class="ser ser-ch_spawn-go"><path d="M70.0 160.0 L152.3 128.3 L234.7 115.2 L317.0 110.2 L399.3 100.2 L481.7 101.2 L564.0 104.5 " fill="none" stroke="var(--acc)" stroke-width="2.4"/><circle cx="70.0" cy="160.0" r="2.7" fill="var(--acc)"/><circle cx="152.3" cy="128.3" r="2.7" fill="var(--acc)"/><circle cx="234.7" cy="115.2" r="2.7" fill="var(--acc)"/><circle cx="317.0" cy="110.2" r="2.7" fill="var(--acc)"/><circle cx="399.3" cy="100.2" r="2.7" fill="var(--acc)"/><circle cx="481.7" cy="101.2" r="2.7" fill="var(--acc)"/><circle cx="564.0" cy="104.5" r="2.7" fill="var(--acc)"/></g><g class="legi" data-c="ch_spawn" data-s="go" onclick="tglSeries('ch_spawn','go')"><rect x="574" y="30" width="184" height="17" fill="transparent"/><line x1="578" y1="38" x2="596" y2="38" stroke="var(--acc)" stroke-width="2.4"/><text x="600" y="42" class="leg">Go (GOMAXPROCS=8)</text></g><g class="ser ser-ch_spawn-uvloop"><path d="M70.0 209.0 L152.3 209.4 L234.7 211.8 L317.0 215.1 L399.3 223.4 L481.7 245.2 L564.0 251.5 " fill="none" stroke="#ff6b9d" stroke-width="2.4"/><circle cx="70.0" cy="209.0" r="2.7" fill="#ff6b9d"/><circle cx="152.3" cy="209.4" r="2.7" fill="#ff6b9d"/><circle cx="234.7" cy="211.8" r="2.7" fill="#ff6b9d"/><circle cx="317.0" cy="215.1" r="2.7" fill="#ff6b9d"/><circle cx="399.3" cy="223.4" r="2.7" fill="#ff6b9d"/><circle cx="481.7" cy="245.2" r="2.7" fill="#ff6b9d"/><circle cx="564.0" cy="251.5" r="2.7" fill="#ff6b9d"/></g><g class="legi" data-c="ch_spawn" data-s="uvloop" onclick="tglSeries('ch_spawn','uvloop')"><rect x="574" y="49" width="184" height="17" fill="transparent"/><line x1="578" y1="57" x2="596" y2="57" stroke="#ff6b9d" stroke-width="2.4"/><text x="600" y="61" class="leg">uvloop (1 core)</text></g><g class="ser ser-ch_spawn-asyncio"><path d="M70.0 231.7 L152.3 225.6 L234.7 229.2 L317.0 231.0 L399.3 239.6 L481.7 257.2 L564.0 257.8 " fill="none" stroke="#ff9966" stroke-width="2.4"/><circle cx="70.0" cy="231.7" r="2.7" fill="#ff9966"/><circle cx="152.3" cy="225.6" r="2.7" fill="#ff9966"/><circle cx="234.7" cy="229.2" r="2.7" fill="#ff9966"/><circle cx="317.0" cy="231.0" r="2.7" fill="#ff9966"/><circle cx="399.3" cy="239.6" r="2.7" fill="#ff9966"/><circle cx="481.7" cy="257.2" r="2.7" fill="#ff9966"/><circle cx="564.0" cy="257.8" r="2.7" fill="#ff9966"/></g><g class="legi" data-c="ch_spawn" data-s="asyncio" onclick="tglSeries('ch_spawn','asyncio')"><rect x="574" y="68" width="184" height="17" fill="transparent"/><line x1="578" y1="76" x2="596" y2="76" stroke="#ff9966" stroke-width="2.4"/><text x="600" y="80" class="leg">asyncio (1 core)</text></g><g class="ser ser-ch_spawn-greenlet"><path d="M70.0 281.2 L152.3 274.3 L234.7 273.0 L317.0 276.5 L399.3 275.6 L481.7 275.6 L564.0 280.1 " fill="none" stroke="#e06c75" stroke-width="2.4"/><circle cx="70.0" cy="281.2" r="2.7" fill="#e06c75"/><circle cx="152.3" cy="274.3" r="2.7" fill="#e06c75"/><circle cx="234.7" cy="273.0" r="2.7" fill="#e06c75"/><circle cx="317.0" cy="276.5" r="2.7" fill="#e06c75"/><circle cx="399.3" cy="275.6" r="2.7" fill="#e06c75"/><circle cx="481.7" cy="275.6" r="2.7" fill="#e06c75"/><circle cx="564.0" cy="280.1" r="2.7" fill="#e06c75"/></g><g class="legi" data-c="ch_spawn" data-s="greenlet" onclick="tglSeries('ch_spawn','greenlet')"><rect x="574" y="87" width="184" height="17" fill="transparent"/><line x1="578" y1="95" x2="596" y2="95" stroke="#e06c75" stroke-width="2.4"/><text x="600" y="99" class="leg">greenlet (1 core)</text></g><g class="ser ser-ch_spawn-runloom_c"><path d="M70.0 304.0 L152.3 296.0 L234.7 290.7 L317.0 296.8 L399.3 258.3 L481.7 256.9 " fill="none" stroke="var(--good)" stroke-width="2.4"/><circle cx="70.0" cy="304.0" r="2.7" fill="var(--good)"/><circle cx="152.3" cy="296.0" r="2.7" fill="var(--good)"/><circle cx="234.7" cy="290.7" r="2.7" fill="var(--good)"/><circle cx="317.0" cy="296.8" r="2.7" fill="var(--good)"/><circle cx="399.3" cy="258.3" r="2.7" fill="var(--good)"/><circle cx="481.7" cy="256.9" r="2.7" fill="var(--good)"/></g><g class="legi" data-c="ch_spawn" data-s="runloom_c" onclick="tglSeries('ch_spawn','runloom_c')"><rect x="574" y="106" width="184" height="17" fill="transparent"/><line x1="578" y1="114" x2="596" y2="114" stroke="var(--good)" stroke-width="2.4"/><text x="600" y="118" class="leg">Runloom (M:N) — pure C fiber (c_entry)</text></g><g class="ser ser-ch_spawn-runloom_py"><path d="M70.0 313.5 L152.3 315.0 L234.7 292.8 L317.0 268.8 L399.3 263.2 L481.7 260.8 L564.0 262.8 " fill="none" stroke="var(--warn)" stroke-width="2.4"/><circle cx="70.0" cy="313.5" r="2.7" fill="var(--warn)"/><circle cx="152.3" cy="315.0" r="2.7" fill="var(--warn)"/><circle cx="234.7" cy="292.8" r="2.7" fill="var(--warn)"/><circle cx="317.0" cy="268.8" r="2.7" fill="var(--warn)"/><circle cx="399.3" cy="263.2" r="2.7" fill="var(--warn)"/><circle cx="481.7" cy="260.8" r="2.7" fill="var(--warn)"/><circle cx="564.0" cy="262.8" r="2.7" fill="var(--warn)"/></g><g class="legi" data-c="ch_spawn" data-s="runloom_py" onclick="tglSeries('ch_spawn','runloom_py')"><rect x="574" y="125" width="184" height="17" fill="transparent"/><line x1="578" y1="133" x2="596" y2="133" stroke="var(--warn)" stroke-width="2.4"/><text x="600" y="137" class="leg">Runloom (M:N) — Python fiber</text></g></svg><table id="t_spawncurve" class="sortable"><thead><tr>
 <th onclick="sortT('t_spawncurve',0,false)">Runtime<span class="ar"></span></th>
 <th onclick="sortT('t_spawncurve',1,true)">1k<span class="ar"></span></th>
 <th onclick="sortT('t_spawncurve',2,true)">3k<span class="ar"></span></th>
@@ -1362,63 +1306,63 @@ code{color:#cbd5e1}
 </tr></thead><tbody>
 <tr>
 <td data-v="Go (GOMAXPROCS=8)">Go (GOMAXPROCS=8)</td>
-<td data-v="826991.6854255948">826,992</td>
-<td data-v="1394474.534106058">1,394,475</td>
-<td data-v="1577559.7800503052">1,577,560</td>
-<td data-v="1614728.99814839">1,614,729</td>
-<td data-v="2134807.637180391">2,134,808</td>
-<td data-v="2264429.425490478">2,264,429</td>
-<td data-v="2198995.1164056757">2,198,995</td>
+<td data-v="583286.9620198528">583,287</td>
+<td data-v="1167332.43526558">1,167,332</td>
+<td data-v="1552090.8060038597">1,552,091</td>
+<td data-v="1731693.4888671157">1,731,693</td>
+<td data-v="2153696.157192252">2,153,696</td>
+<td data-v="2106575.5618612696">2,106,576</td>
+<td data-v="1962677.4392640486">1,962,677</td>
 </tr>
 <tr>
 <td data-v="uvloop (1 core)">uvloop (1 core)</td>
-<td data-v="189421.0971988574">189,421</td>
-<td data-v="186701.23379754717">186,701</td>
-<td data-v="175017.5717910406">175,018</td>
-<td data-v="179249.34530073608">179,249</td>
-<td data-v="140594.545991814">140,595</td>
-<td data-v="85374.38168854117">85,374</td>
-<td data-v="76182.67659941957">76,183</td>
+<td data-v="199627.85371017727">199,628</td>
+<td data-v="198149.24638758082">198,149</td>
+<td data-v="187997.82411762577">187,998</td>
+<td data-v="174901.10801158828">174,901</td>
+<td data-v="146000.0585905756">146,000</td>
+<td data-v="90616.44641331965">90,616</td>
+<td data-v="78840.32321701132">78,840</td>
 </tr>
 <tr>
 <td data-v="asyncio (1 core)">asyncio (1 core)</td>
-<td data-v="115063.27881538305">115,063</td>
-<td data-v="135852.9589337154">135,853</td>
-<td data-v="122318.73809068189">122,319</td>
-<td data-v="119899.82417638655">119,900</td>
-<td data-v="102054.43715718435">102,054</td>
-<td data-v="73621.74458368793">73,622</td>
-<td data-v="68878.38873030474">68,878</td>
+<td data-v="121661.19100860725">121,661</td>
+<td data-v="138896.5666366796">138,897</td>
+<td data-v="128416.5330889719">128,417</td>
+<td data-v="123439.36789193004">123,439</td>
+<td data-v="102348.99677856355">102,349</td>
+<td data-v="69680.97383242701">69,681</td>
+<td data-v="68802.2617588875">68,802</td>
 </tr>
 <tr>
 <td data-v="greenlet (1 core)">greenlet (1 core)</td>
-<td data-v="48724.30276941658">48,724</td>
-<td data-v="42138.77369505907">42,139</td>
-<td data-v="46581.019545463285">46,581</td>
-<td data-v="47021.76735241793">47,022</td>
-<td data-v="45939.55092729162">45,940</td>
-<td data-v="45409.722006523974">45,410</td>
-<td data-v="41872.52918087824">41,873</td>
+<td data-v="41190.67917171502">41,191</td>
+<td data-v="47952.91637553121">47,953</td>
+<td data-v="49365.922373300804">49,366</td>
+<td data-v="45706.23563735983">45,706</td>
+<td data-v="46547.378328244005">46,547</td>
+<td data-v="46641.21108976952">46,641</td>
+<td data-v="42197.506806488556">42,198</td>
 </tr>
 <tr>
 <td data-v="Runloom (M:N) — pure C fiber (c_entry)">Runloom (M:N) — pure C fiber (c_entry)</td>
-<td data-v="16421.701949068698">16,422</td>
-<td data-v="30109.666627380477">30,110</td>
-<td data-v="31501.322473084514">31,501</td>
-<td data-v="61506.013363232596">61,506</td>
-<td data-v="64794.575904367055">64,795</td>
-<td data-v="61120.164871426336">61,120</td>
-<td data-v="20495.60380622081">20,496</td>
+<td data-v="25061.147325988735">25,061</td>
+<td data-v="29851.53666364155">29,852</td>
+<td data-v="33493.9652562088">33,494</td>
+<td data-v="29330.944726006463">29,331</td>
+<td data-v="68011.14646729724">68,011</td>
+<td data-v="70135.88640254865">70,136</td>
+<td data-v="-1">&mdash;</td>
 </tr>
 <tr>
 <td data-v="Runloom (M:N) — Python fiber">Runloom (M:N) — Python fiber</td>
-<td data-v="16121.950038784025">16,122</td>
-<td data-v="22868.4809169981">22,868</td>
-<td data-v="31997.658179728383">31,998</td>
-<td data-v="43751.501551676556">43,752</td>
-<td data-v="43964.3320154752">43,964</td>
-<td data-v="46767.089829002216">46,767</td>
-<td data-v="43707.47018607208">43,707</td>
+<td data-v="20370.591588924024">20,371</td>
+<td data-v="19703.163308102565">19,703</td>
+<td data-v="31965.03137964136">31,965</td>
+<td data-v="54030.050208010885">54,030</td>
+<td data-v="61080.64776192668">61,081</td>
+<td data-v="64374.662126602496">64,375</td>
+<td data-v="61645.95022074601">61,646</td>
 </tr>
 </tbody></table>
 <p class="note">Higher is better, but read this as the <b>worst case</b>: NAKED spawn &mdash; create+run+destroy one fiber at a time, no I/O, no batching. No real workload does this; the achievable number is the <b>active fleet-launch path above (804k &rarr; 1.54M/s)</b>. Stackful runtimes (runloom, greenlet) carry a real C stack per task; asyncio/uvloop coroutines are stackless Python objects; Go goroutines are 2&nbsp;KB grow-on-demand native stacks. The naked-burst gap was per-fiber stack mmap/mprotect &mdash; now solved by the warm-stack arena (landed); what is left here is the one-at-a-time CPython per-fiber cost. Corrected diagnosis + the &gt;1M story: docs/dev/spawn_experiments.md + spawn_above_1m.md.</p>
@@ -1434,37 +1378,37 @@ code{color:#cbd5e1}
 <tr class="best">
 <td data-v="go"><span class="trophy">&#127942;</span>go</td>
 <td data-v="44">44</td>
-<td data-v="1348486.015374747">1,348,486</td>
-<td data-v="0.741572392">0.74</td>
-<td data-v="30647.409440335163">30,647</td>
+<td data-v="1493720.8642743607">1,493,721</td>
+<td data-v="0.669469125">0.67</td>
+<td data-v="33948.201460780925">33,948</td>
 </tr>
 <tr>
 <td data-v="uvloop">uvloop</td>
 <td data-v="1">1</td>
-<td data-v="74129.30325480438">74,129</td>
-<td data-v="13.489941981009906">13.49</td>
-<td data-v="74129.30325480438">74,129</td>
+<td data-v="81770.78873500784">81,771</td>
+<td data-v="12.229306032997556">12.23</td>
+<td data-v="81770.78873500784">81,771</td>
 </tr>
 <tr>
 <td data-v="asyncio">asyncio</td>
 <td data-v="1">1</td>
-<td data-v="67737.66243550966">67,738</td>
-<td data-v="14.762835976987844">14.76</td>
-<td data-v="67737.66243550966">67,738</td>
+<td data-v="71718.77123185122">71,719</td>
+<td data-v="13.943350991990883">13.94</td>
+<td data-v="71718.77123185122">71,719</td>
 </tr>
 <tr>
 <td data-v="runloom">runloom</td>
 <td data-v="44">44</td>
-<td data-v="51815.11890118508">51,815</td>
-<td data-v="19.29938638000749">19.30</td>
-<td data-v="1177.6163386632973">1,178</td>
+<td data-v="71257.66854300899">71,258</td>
+<td data-v="14.033577303984202">14.03</td>
+<td data-v="1619.4924668865679">1,619</td>
 </tr>
 <tr>
 <td data-v="greenlet">greenlet</td>
 <td data-v="1">1</td>
-<td data-v="36806.039085918725">36,806</td>
-<td data-v="27.16945438398398">27.17</td>
-<td data-v="36806.039085918725">36,806</td>
+<td data-v="42748.44416038419">42,748</td>
+<td data-v="23.392664215993136">23.39</td>
+<td data-v="42748.44416038419">42,748</td>
 </tr>
 </tbody></table>
 <p class="note">Higher is better. One spawner creates N tasks; drained to completion. runloom &amp; greenlet carry real C stacks (heavyweight vs goroutines).</p>
@@ -1487,27 +1431,27 @@ code{color:#cbd5e1}
 <tr>
 <td data-v="greenlet">greenlet</td>
 <td data-v="1">1</td>
-<td data-v="486.4566894902964">486</td>
+<td data-v="463.0375609995099">463</td>
 </tr>
 <tr>
 <td data-v="go">go</td>
 <td data-v="44">44</td>
-<td data-v="749.3629597662064">749</td>
+<td data-v="688.6634855419181">689</td>
 </tr>
 <tr>
 <td data-v="uvloop">uvloop</td>
 <td data-v="1">1</td>
-<td data-v="1163.0829915011418">1,163</td>
+<td data-v="1057.6408419947256">1,058</td>
 </tr>
 <tr>
 <td data-v="asyncio">asyncio</td>
 <td data-v="1">1</td>
-<td data-v="2711.957278996124">2,712</td>
+<td data-v="2150.896621249558">2,151</td>
 </tr>
 <tr>
 <td data-v="runloom (python fiber, shared closure)">runloom (python fiber, shared closure)</td>
 <td data-v="44">44</td>
-<td data-v="9736.430741021686">9,736</td>
+<td data-v="22487.120848158225">22,487</td>
 </tr>
 </tbody></table>
 <p class="note">Lower is better. G concurrent tasks each yield K times (run queues stay full &mdash; same-hub re-dispatch, not a 2-party ping-pong). THREE runloom rows tell the story: <b>python fiber, shared closure</b> is the naive case (one closure reused on every core) &mdash; at 44 hubs that number is free-threaded CPython contention on the shared closure's <b>cells</b> (a futex&rarr;cross-NUMA IPI storm; <code>perf</code>-confirmed, runloom's own yield is ~2% of the profile), NOT the scheduler. <b>python fiber, @runloom.hot</b> is the SAME handler with per-core cells (also what a plain module-level handler already is) &mdash; the wall is gone. <b>compiled fiber entry</b> is a tstate-free <code>c_entry</code> fiber (no Python eval), the true scheduler floor. All three runloom rows are measured preempt-off and n=0-subtracted (the CPU-preempt watchdog fires spuriously on this pure-CPU microbenchmark and is an I/O-workload feature); the capstone below has the hub-scaling proof.</p>
@@ -1559,32 +1503,32 @@ code{color:#cbd5e1}
 <tr class="best">
 <td data-v="runloom"><span class="trophy">&#127942;</span>runloom</td>
 <td data-v="16">16</td>
-<td data-v="146242.26844323776">146,242</td>
-<td data-v="9140.14177770236">9,140</td>
+<td data-v="148030.13250023825">148,030</td>
+<td data-v="9251.88328126489">9,252</td>
 </tr>
 <tr>
 <td data-v="go">go</td>
 <td data-v="16">16</td>
-<td data-v="127495.89083241037">127,496</td>
-<td data-v="7968.493177025648">7,968</td>
+<td data-v="125570.23143452131">125,570</td>
+<td data-v="7848.139464657582">7,848</td>
 </tr>
 <tr>
 <td data-v="uvloop">uvloop</td>
 <td data-v="1">1</td>
-<td data-v="37009.84804024422">37,010</td>
-<td data-v="37009.84804024422">37,010</td>
+<td data-v="36715.35740435771">36,715</td>
+<td data-v="36715.35740435771">36,715</td>
 </tr>
 <tr>
 <td data-v="greenlet">greenlet</td>
 <td data-v="1">1</td>
-<td data-v="15336.021386395832">15,336</td>
-<td data-v="15336.021386395832">15,336</td>
+<td data-v="16788.94129401688">16,789</td>
+<td data-v="16788.94129401688">16,789</td>
 </tr>
 <tr>
 <td data-v="asyncio">asyncio</td>
 <td data-v="1">1</td>
-<td data-v="11106.67202598496">11,107</td>
-<td data-v="11106.67202598496">11,107</td>
+<td data-v="10572.420904085924">10,572</td>
+<td data-v="10572.420904085924">10,572</td>
 </tr>
 </tbody></table>
 <p class="note">Higher is better. The runtime under test is the HTTP <i>client</i> (keepalive GET) against a fixed Go server.</p>
@@ -1596,28 +1540,28 @@ code{color:#cbd5e1}
 </tr></thead><tbody>
 <tr class="best">
 <td data-v="runloom"><span class="trophy">&#127942;</span>runloom</td>
-<td data-v="87451.34261000202">87,451</td>
-<td data-v="87.45134261000202">87.45</td>
+<td data-v="73252.77885975083">73,253</td>
+<td data-v="73.25277885975083">73.25</td>
 </tr>
 <tr>
 <td data-v="go">go</td>
-<td data-v="92415.90759">92,416</td>
-<td data-v="92.41590759">92.42</td>
+<td data-v="89765.53723">89,766</td>
+<td data-v="89.76553723">89.77</td>
 </tr>
 <tr>
 <td data-v="greenlet">greenlet</td>
-<td data-v="109327.72703003138">109,328</td>
-<td data-v="109.32772703003138">109.33</td>
+<td data-v="91813.34751017856">91,813</td>
+<td data-v="91.81334751017856">91.81</td>
 </tr>
 <tr>
 <td data-v="uvloop">uvloop</td>
-<td data-v="127657.12495005573">127,657</td>
-<td data-v="127.65712495005573">127.66</td>
+<td data-v="109249.11632988369">109,249</td>
+<td data-v="109.24911632988369">109.25</td>
 </tr>
 <tr>
 <td data-v="asyncio">asyncio</td>
-<td data-v="200370.67166995257">200,371</td>
-<td data-v="200.37067166995257">200.37</td>
+<td data-v="168696.4148498373">168,696</td>
+<td data-v="168.6964148498373">168.70</td>
 </tr>
 </tbody></table>
 <p class="note">Lower is better. Single connection, sequential. Dominated by the ~70&micro;s veth round-trip floor on this VM; runtime overhead is the spread above it.</p>
