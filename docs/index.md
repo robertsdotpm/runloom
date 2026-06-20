@@ -105,5 +105,7 @@ switches.
 - Working on a server?  See the [Cookbook](cookbook.md) for worker
   pools, pipelines, and graceful shutdown.
 - Memory matters?  See [Stack sizing](stack-sizing.md).
+- One handler shared across every core?  See [Hot handlers](hot-handlers.md)
+  (`@runloom.hot`) so it scales instead of contending.
 - Curious how deep "real native stacks" goes?  [Research: executing native
   machine code from a fiber](research-native-code.md) (experimental).

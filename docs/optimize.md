@@ -87,6 +87,9 @@ runloom.optimize(max_fibers=200_000)
 
 ## Hot handlers: scaling a shared handler across cores
 
+> Full reference: **[Hot handlers](hot-handlers.md)** (`@runloom.hot`, auto mode,
+> the rules, and why it works). Short version below.
+
 A plain module-level handler already scales across every core — there's nothing
 shared for the cores to fight over:
 
