@@ -645,6 +645,64 @@ void runloom_fibern_batch_finish_one(struct runloom_fibern_batch *b)
  * for workloads whose fibers do NOT complete during the measured window
  * (e.g. long-parked workers) -- guarded by RUNLOOM_GON_BULK so the default
  * fiber_n (loop) stays the safe path. */
+/* Create-pass timing (RUNLOOM_GON_TIMING=1): isolate which of the 3 serial create
+ * passes dominates the ~1.32M/s create wall -- see docs/dev/spawn_above_1m.md. */
+static long long runloom_create_now_ns(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (long long)ts.tv_sec * 1000000000LL + (long long)ts.tv_nsec;
+}
+static int runloom_create_timing_on(void)
+{
+    static int v = -1;
+    if (v < 0) { const char *e = getenv("RUNLOOM_GON_TIMING");
+                 v = (e && *e && *e != '0') ? 1 : 0; }
+    return v;
+}
+
+/* EXPERIMENT (docs/dev/spawn_above_1m.md, lever #1): parallelize the dominant create
+ * pass.  The g-template loop (pass A, ~70% of create) is cold-write/cache-latency
+ * bound writing the fresh g-arena -- embarrassingly parallel across disjoint slices.
+ * RUNLOOM_GON_PCREATE=P spawns P builder threads, each filling a contiguous slice
+ * [b*n/P,(b+1)*n/P) into its OWN per-hub partial lists; the issuer merges the lists
+ * (concatenation) after join.  P>1 only for n above a threshold (thread-spawn cost).
+ * Prototype: fresh pthreads per call (overhead negligible at large N); a persistent
+ * builder pool is the productionization. */
+static int runloom_pcreate_threads(void)
+{
+    static int v = -1;
+    if (v < 0) { const char *e = getenv("RUNLOOM_GON_PCREATE");
+                 v = (e && *e) ? atoi(e) : 0;
+                 if (v < 0) v = 0; if (v > 64) v = 64; }
+    return v;
+}
+typedef struct {
+    char *garena; size_t gsz; const runloom_g_t *tmpl;
+    long long goid_base; int H; int pair_aff; long lo, hi;
+    runloom_g_t *heads[64], *tails[64];
+    long counts[64];
+} runloom_pcreate_arg_t;
+static void *runloom_pcreate_worker(void *p)
+{
+    runloom_pcreate_arg_t *a = (runloom_pcreate_arg_t *)p;
+    long i; int h;
+    for (h = 0; h < a->H; h++) { a->heads[h] = a->tails[h] = NULL; a->counts[h] = 0; }
+    for (i = a->lo; i < a->hi; i++) {
+        runloom_g_t *g = (runloom_g_t *)(a->garena + (size_t)i * a->gsz);
+        int hub = a->pair_aff ? (int)((i >> 1) % a->H) : (int)(i % a->H);
+        memcpy(g, a->tmpl, a->gsz);
+        g->owner = &runloom_hubs[hub].sched;
+        g->id    = a->goid_base + (long long)i;
+        g->c_arg = (void *)(intptr_t)i;
+        g->next  = NULL;
+        if (a->tails[hub] != NULL) a->tails[hub]->next = g; else a->heads[hub] = g;
+        a->tails[hub] = g;
+        a->counts[hub]++;
+    }
+    return NULL;
+}
+
 static int runloom_mn_fiber_n_bulk(PyObject *callable, long n, size_t stack_size,
                                 int indexed)
 {
@@ -659,6 +717,8 @@ static int runloom_mn_fiber_n_bulk(PyObject *callable, long n, size_t stack_size
     int hub;
     long i;
     long long goid_base;
+    int tmg = runloom_create_timing_on();
+    long long t0 = 0, t1 = 0, t2 = 0, t3 = 0;
     struct runloom_fibern_batch *batch = NULL;       /* arena lifecycle, real path only */
     size_t start_slot = 0;                         /* this batch's stack-arena block start */
     int    batch_node = 0;                         /* NUMA node the block was carved on */
@@ -709,21 +769,63 @@ static int runloom_mn_fiber_n_bulk(PyObject *callable, long n, size_t stack_size
         tmpl.pass_index   = (unsigned char)(indexed != 0);  /* fiber_n(indexed=True): fn(i) */
         if (use_grunq) tmpl.wake_state = RUNLOOM_WS_RUNNING;
 
+        if (tmg) t0 = runloom_create_now_ns();
         if (!nofields) {
             int pair_aff = runloom_pair_affinity_mode();
-            for (i = 0; i < n; i++) {
-                runloom_g_t *g = (runloom_g_t *)(garena + (size_t)i * gsz);
-                hub = pair_aff ? (int)((i >> 1) % H) : (int)(i % H);
-                memcpy(g, &tmpl, gsz);            /* <-- template memcpy */
-                g->owner = &runloom_hubs[hub].sched;
-                g->id    = goid_base + (long long)i;
-                g->c_arg = (void *)(intptr_t)i;   /* fiber_n index (read iff pass_index) */
-                g->next  = NULL;
-                if (tails[hub] != NULL) tails[hub]->next = g; else heads[hub] = g;
-                tails[hub] = g;
-                counts[hub]++;
+            int P = runloom_pcreate_threads();
+            int did_parallel = 0;
+            if (P > 1 && n >= 4096) {            /* lever #1: parallel builders */
+                runloom_pcreate_arg_t *args =
+                    (runloom_pcreate_arg_t *)malloc((size_t)P * sizeof *args);
+                pthread_t th[64];
+                int b, started = 0;
+                if (args != NULL) {
+                    for (b = 0; b < P; b++) {
+                        args[b].garena = garena; args[b].gsz = gsz; args[b].tmpl = &tmpl;
+                        args[b].goid_base = goid_base; args[b].H = H; args[b].pair_aff = pair_aff;
+                        args[b].lo = (long)((long long)b * n / P);
+                        args[b].hi = (long)((long long)(b + 1) * n / P);
+                        if (pthread_create(&th[b], NULL, runloom_pcreate_worker, &args[b]) != 0)
+                            break;
+                        started++;
+                    }
+                    for (b = 0; b < started; b++) pthread_join(th[b], NULL);
+                    if (started == P) {          /* merge per-hub partial lists in slice order */
+                        int hh;
+                        for (hub = 0; hub < H; hub++) { heads[hub] = tails[hub] = NULL; counts[hub] = 0; }
+                        for (b = 0; b < P; b++) {
+                            for (hh = 0; hh < H; hh++) {
+                                if (args[b].heads[hh] == NULL) continue;
+                                if (tails[hh] != NULL) tails[hh]->next = args[b].heads[hh];
+                                else heads[hh] = args[b].heads[hh];
+                                tails[hh] = args[b].tails[hh];
+                                counts[hh] += args[b].counts[hh];
+                            }
+                        }
+                        did_parallel = 1;
+                    }
+                    free(args);
+                }
+                /* started<P (pthread_create failed): the joined slices wrote their gs,
+                 * but heads/tails are still NULL (builders use local lists) -> the serial
+                 * pass below re-writes every g + rebuilds the lists, which is correct. */
+            }
+            if (!did_parallel) {
+                for (i = 0; i < n; i++) {
+                    runloom_g_t *g = (runloom_g_t *)(garena + (size_t)i * gsz);
+                    hub = pair_aff ? (int)((i >> 1) % H) : (int)(i % H);
+                    memcpy(g, &tmpl, gsz);        /* <-- template memcpy */
+                    g->owner = &runloom_hubs[hub].sched;
+                    g->id    = goid_base + (long long)i;
+                    g->c_arg = (void *)(intptr_t)i; /* fiber_n index (read iff pass_index) */
+                    g->next  = NULL;
+                    if (tails[hub] != NULL) tails[hub]->next = g; else heads[hub] = g;
+                    tails[hub] = g;
+                    counts[hub]++;
+                }
             }
         }
+        if (tmg) t1 = runloom_create_now_ns();   /* pass A (g template loop) done */
 
         /* Fill the coro arena + set each g->coro.  MUST run after the memcpy
          * (which would otherwise clobber g->coro).  On arena failure, fall back
@@ -738,6 +840,7 @@ static int runloom_mn_fiber_n_bulk(PyObject *callable, long n, size_t stack_size
                                        indexed ? i : -1) < 0) return -1;
             return 0;
         }
+        if (tmg) t2 = runloom_create_now_ns();   /* pass B (coro_bulk_init) done */
 
         if (nofields || nosub) { free(garena); free(carena); free(batch); return 0; }
     }
@@ -760,6 +863,13 @@ static int runloom_mn_fiber_n_bulk(PyObject *callable, long n, size_t stack_size
         if (norefcnt < 0) { const char *e = getenv("RUNLOOM_GON_NOREFCNT");
                             norefcnt = (e && *e != '0' && *e) ? 1 : 0; }
         if (!norefcnt) for (i = 0; i < n; i++) Py_INCREF(callable);
+    }
+    if (tmg) {
+        t3 = runloom_create_now_ns();            /* pass C (Py_INCREF loop) done */
+        fprintf(stderr, "[GON_TIMING] n=%ld  A(g-template)=%.3fms  B(coro_bulk)=%.3fms  "
+                "C(incref)=%.3fms  create=%.3fms (%.0f/s)\n", n,
+                (t1 - t0) / 1e6, (t2 - t1) / 1e6, (t3 - t2) / 1e6,
+                (t3 - t0) / 1e6, n / ((t3 - t0) / 1e9));
     }
 
     /* Splice each hub's whole batch onto its sub-list under ONE lock. */
