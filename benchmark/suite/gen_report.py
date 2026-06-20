@@ -897,7 +897,7 @@ def sec_exec_summary():
             'connections) it is roughly <b>on par with Go</b>; on raw connection churn it matches '
             'Go <b>per core</b> with a plain <b>Python</b> handler (~91%) and <b>beats Go</b> with '
             'a compiled handler (~110%); and launching a large fleet of fibers runs at '
-            '<b>~1.5M/s</b> vs Go\'s ~1.8M. Runloom\'s overhead lives at <b>connection '
+            '<b>~2.0M/s &mdash; past Go\'s ~1.8M</b>. Runloom\'s overhead lives at <b>connection '
             'birth/death and in the Python interpreter</b>, not the steady request loop &mdash; so '
             'a busy keep-alive server barely pays it. The honest gaps are narrow and mostly '
             'synthetic: spawning fibers <i>one at a time</i> (a microbenchmark no real app does) is '
@@ -918,17 +918,19 @@ def sec_active_spawn():
          "server-style per-event spawn; 363k with the secure resident scrub (now default)"],
         ["bulk <code>fiber_n</code> + <code>FRESH</code> (fleet launch)", "804k",
          "one call builds N at once &mdash; the idiom the parallel-create lever needs"],
-        ["+ parallel bulk-create (<code>PCREATE=auto</code>)", "<b>1.54M</b>",
-         "<b>~0.85&times; Go</b> &mdash; 8 builder threads fill disjoint arena slices; TSan-clean"],
+        ["+ parallel create Pass A (<code>PCREATE=auto</code>)", "1.54M",
+         "8 builder threads fill disjoint g-arena slices; create was the serial bottleneck"],
+        ["+ parallel create Pass B (<code>PCREATE_B=auto</code>)", "<b>2.0&ndash;2.2M</b>",
+         "<b>past Go</b> (1.8M) &mdash; 2.05M @8h, 2.23M @16h; both create passes parallel; TSan-clean"],
     ]
     trs = "".join("<tr><td>%s</td><td style='text-align:right'>%s</td><td>%s</td></tr>"
                   % (a, b, c) for a, b, c in rows)
-    return ('<h2 id="activespawn">Active spawn &mdash; the real number (804k &rarr; 1.54M/s)</h2>'
+    return ('<h2 id="activespawn">Active spawn &mdash; the real number (804k &rarr; 2.0M/s, past Go)</h2>'
             '<p>The spawn-vs-N curve below is <b>naked</b> spawn (create one fiber at a time, '
             'no batching, no I/O) &mdash; the worst case, and the source of the "~48&times; behind '
             'Go" line. <b>No real workload does that.</b> The achievable spawn throughput is the '
             '<i>active</i> "launch a fleet" path (<code>fiber_n</code>), which this campaign took '
-            'from 804k to <b>1.54M/s</b> (this box, FT&nbsp;3.13t, 8 hubs):</p>'
+            'from 804k to <b>~2.0M/s &mdash; past Go\'s 1.8M</b> (this box, FT&nbsp;3.13t):</p>'
             '<table><thead><tr><th>spawn mode</th><th>spawn/s</th><th>note</th></tr></thead>'
             '<tbody>' + trs + '</tbody></table>'
             '<p class="note"><b>How:</b> <code>total = (create&times;run)/(create+run)</code> &mdash; '
