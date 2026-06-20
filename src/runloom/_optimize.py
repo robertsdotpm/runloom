@@ -22,10 +22,13 @@ starts, and the first call wins for any given knob.  An explicit shell env var
 (e.g. you exported RUNLOOM_STACK_MADV) still wins over optimize(), so power users
 keep full control; the returned dict reflects the EFFECTIVE values after that.
 
-These trades are deliberately SAFE: none of them flips an experimental lever or a
-setting that can OOM-kill a RAM-tight host. The sharpest expert tricks (e.g.
-RUNLOOM_STACK_MADV=off for zero-syscall-but-no-pressure-reclaim) stay raw env
-vars with their own warnings -- a friendly name should never hide a footgun.
+These trades are deliberately SAFE: each is validated (the spawn fast-path in
+"throughput" -- warm-stack arena + bulk/FRESH -- is measured and gate-checked in
+docs/dev/spawn_experiments.md) and none can OOM-kill a RAM-tight host on its own.
+"throughput" does spend RAM (it holds freed stacks warm); compose it with "memory"
+(higher precedence) to claw that back on a tight host.  The sharpest raw expert
+tricks (e.g. RUNLOOM_STACK_MADV=off) stay raw env vars with their own warnings --
+a friendly name should never hide a footgun.
 """
 import os
 
@@ -37,7 +40,14 @@ _GOAL_ENV = {
         "RUNLOOM_TCPCONN_IOURING":           "auto",   # flip epoll->io_uring as conns climb
         "RUNLOOM_TCPCONN_IOURING_THRESHOLD": "512",
         "RUNLOOM_BLOCKPOOL_WORKERS":         "16",      # more blocking-offload workers
+        # Spawn fast-path (validated in docs/dev/spawn_experiments.md): the per-size
+        # stack arena keeps freed stacks warm (no per-spawn mmap/mprotect -> 8x on
+        # naked spawn), and bulk+FRESH builds a big fiber_n batch in one locked op
+        # and faults the frames across the hubs in parallel (~3.3x: 804k/s @8 here).
+        # Costs RAM (warm stacks held resident) -- the "memory" trade turns it back off.
+        "RUNLOOM_STACK_ARENA":               "1",       # per-size warm-stack arena
         "RUNLOOM_GON_BULK":                  "1",       # bulk-arena spawn for big fiber_n
+        "RUNLOOM_GON_FRESH":                 "1",        # defer frame-fault to first resume (parallel)
         "RUNLOOM_PREWARM_KEEP":              "1",       # continuous depot top-up daemon
         "RUNLOOM_HOT_HANDLERS":              "1",       # @runloom.hot active (per-core handler copies)
         "RUNLOOM_HOT_AUTO":                  "1",       # auto-promote the busiest handlers, no decorator
@@ -54,6 +64,8 @@ _GOAL_ENV = {
         "RUNLOOM_STACK_MADV":                "dontneed",  # eager reclaim, tightest RSS
         "RUNLOOM_STACK_PARK_DONTNEED":       "1",          # return idle parked-fiber pages now
         "RUNLOOM_GROW_DOWN":                 "1",          # per-function stack learning (M:N)
+        "RUNLOOM_STACK_ARENA":               "0",          # no warm-stack arena (don't hold RSS); precedence > throughput
+        "RUNLOOM_STACK_SCRUB_RESIDENT":      "0",          # DONTNEED scrub reclaims pages (resident-memset holds them)
         "RUNLOOM_HOT_HANDLERS":              "0",          # no per-core handler copies (spend the RAM back)
         "RUNLOOM_HOT_AUTO":                  "0",          # and don't auto-promote either
     },

@@ -930,8 +930,13 @@ static int runloom_scrub_resident_mode(void)
     static int v = -1;
     int cur = __atomic_load_n(&v, __ATOMIC_RELAXED);
     if (cur < 0) {
+        /* DEFAULT ON (Exp D): the resident memset wipe is secure AND ~1.5x faster
+         * than the madvise(DONTNEED) wipe (no cross-hub TLB-shootdown IPI, no
+         * page-drop/re-fault).  Opt out with RUNLOOM_STACK_SCRUB_RESIDENT=0 to get
+         * the old DONTNEED wipe -- which ALSO reclaims RSS, so the "memory" trade
+         * (optimize("memory")) sets =0 for tight-RSS hosts. */
         const char *e = getenv("RUNLOOM_STACK_SCRUB_RESIDENT");
-        cur = (e != NULL && *e == '1') ? 1 : 0;
+        cur = (e != NULL && e[0] == '0') ? 0 : 1;
         __atomic_store_n(&v, cur, __ATOMIC_RELAXED);
     }
     return cur;
