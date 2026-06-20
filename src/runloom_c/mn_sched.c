@@ -310,26 +310,19 @@ static int runloom_hub_idle_wake_enabled(void)
 static runloom_mutex_t runloom_hub_tstate_lock;
 static int runloom_hub_tstate_lock_inited = 0;
 
-/* Global pending-g counter, replacing the per-hub `pending` field
- * for purposes of "is there any work left in the M:N scheduler".
- * Incremented in runloom_mn_fiber (spawn), decremented in hub_main when a
- * g completes.  Steals do NOT touch this counter (the per-hub field
- * is still updated for diagnostics / future scheduler heuristics,
- * but the steal-time inc-then-dec across hubs created a
- * sum-observed-as-N-1 window where runloom_mn_run could see total=0
- * and exit while a stolen g was still running on the destination
- * hub).  ACQ_REL on both inc and dec; ACQUIRE on the mn_run read
- * pairs with the completion release. */
-static volatile long runloom_mn_pending_global = 0;
-
-/* ---- co-located pending counters ----
+/* (Removed: the global pending-g counter.  runloom_mn_run now sums the per-hub
+ * `pending` fields directly.  The single global was one contended cache line
+ * that every spawn + completion on every core had to atomically RMW, which
+ * serialized -- even NEGATIVELY scaled -- parallel spawn (46k/s at 1 core down
+ * to 25k/s at 8).  The steal race that originally motivated the global (a
+ * stolen g momentarily summed as N-1 across hubs, so runloom_mn_run could see 0
+ * and exit while a stolen g was still running) is now handled in
+ * runloom_mn_pending_steal by bumping the THIEF before dropping the VICTIM: the
+ * transient is an OVER-count, never an under-count, so the per-hub sum is safe.)
  *
- * Every change to a hub's pending count either changes the global
- * counter too (spawn, complete) or rebalances between two hubs (steal).
- * Forwarding through these helpers ensures the per-hub and global
- * counters always move atomically together and a future caller cannot
- * accidentally update one without the other.  See the broader
- * counter-co-location sweep in the diag/gstate session for context. */
+ * The pending count is forwarded through the runloom_mn_pending_{inc,complete,
+ * steal} helpers so the per-hub updates stay consistent and a future caller
+ * can't accidentally update the field by hand. */
 
 /* ---------------------------------------------------------------------------
  * mn_sched.c is split across the mn_sched_*.c.inc fragments below for readability.

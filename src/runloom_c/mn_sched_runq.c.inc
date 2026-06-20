@@ -4,33 +4,41 @@
 
 RUNLOOM_INLINE void runloom_mn_pending_inc(runloom_hub_t *h)
 {
-    /* spawn: per-hub up, global up.  RELAXED on the per-hub side is
-     * fine (only the owning hub reads it for scheduling decisions);
-     * ACQ_REL on the global so the mn_run reader sees the spawn
-     * before any subsequent completion's release. */
-    __atomic_add_fetch(&h->pending, 1, __ATOMIC_RELAXED);
-    __atomic_add_fetch(&runloom_mn_pending_global, 1, __ATOMIC_ACQ_REL);
+    /* spawn: bump THIS hub's pending only -- sharded, no global counter.
+     * runloom_mn_run sums the per-hub fields.  A single global counter here was a
+     * contended cache line that serialized parallel spawn (every spawn on every
+     * core hit one line -> negative scaling).  RELEASE so the mn_run reader's
+     * ACQUIRE sum observes the spawn before the g can run/complete.  No false 0
+     * during a concurrent spawn: the SPAWNER is itself a live counted g (its
+     * hub's pending >= 1), so the sum can't reach 0 while a spawn is in flight.
+     * The work-stealing race is handled in runloom_mn_pending_steal. */
+    __atomic_add_fetch(&h->pending, 1, __ATOMIC_RELEASE);
 }
 
 RUNLOOM_INLINE void runloom_mn_pending_complete(runloom_hub_t *h)
 {
-    /* complete: per-hub completed up, per-hub pending down, global down.
-     * Order matters: bump completed BEFORE decrementing pending so a
-     * mn_run reader that observes pending == 0 (via acquire) is also
-     * guaranteed to see the matching completed++ already published. */
+    /* complete: bump completed, drop THIS hub's pending.  No global counter --
+     * runloom_mn_run sums the per-hub pending fields.  RELEASE on the dec so the
+     * reader's ACQUIRE sum observes the completion (ordered after completed++). */
     __atomic_add_fetch(&h->sched.completed, 1, __ATOMIC_RELEASE);
     __atomic_sub_fetch(&h->pending, 1, __ATOMIC_RELEASE);
-    __atomic_sub_fetch(&runloom_mn_pending_global, 1, __ATOMIC_ACQ_REL);
 }
 
 RUNLOOM_INLINE void runloom_mn_pending_steal(runloom_hub_t *victim,
                                               runloom_hub_t *thief)
 {
-    /* steal: work moves between hubs, total work unchanged.  ACQ_REL
-     * on both so the stolen-g's data writes are visible to the
-     * destination hub before its later resume. */
-    __atomic_sub_fetch(&victim->pending, 1, __ATOMIC_ACQ_REL);
+    /* steal: work moves victim -> thief, total unchanged.  Bump the THIEF
+     * BEFORE dropping the VICTIM so a concurrent runloom_mn_run sum sees the
+     * stolen g transiently OVER-counted (on both hubs), NEVER under-counted (on
+     * neither).  An over-count is harmless -- mn_run just polls again -- but a
+     * transient sum of 0 would let run() exit while a stolen g is still live.
+     * This reorder is what makes the sharded per-hub pending sum safe: the old
+     * single global counter existed ONLY to dodge this steal race (see the note
+     * at the steal call site in hub_main), and the reorder removes the need for
+     * it.  ACQ_REL so the stolen g's writes are visible to the destination hub
+     * before its later resume. */
     __atomic_add_fetch(&thief->pending,  1, __ATOMIC_ACQ_REL);
+    __atomic_sub_fetch(&victim->pending, 1, __ATOMIC_ACQ_REL);
 }
 
 /* ---- Global stealable run-queue (RUNLOOM_PER_G_TSTATE only) ----

@@ -363,10 +363,8 @@ void runloom_mn_fini(void)
     PyMem_Free(runloom_hubs);
     runloom_hubs = NULL;
     runloom_hub_count = 0;
-    /* Reset the global pending counter so the next mn_init starts at
-     * 0.  Any leaked g (incomplete at fini) leaves a non-zero residue
-     * otherwise. */
-    __atomic_store_n(&runloom_mn_pending_global, 0, __ATOMIC_RELEASE);
+    /* (No global pending counter to reset -- runloom_mn_run sums the per-hub
+     * fields, which are freed along with the hub array just above.) */
     /* Stand the snap back up for any later single-thread scheduler use. */
     runloom_set_per_g_tstate_mode(0);
     runloom_mn_interp = NULL;
@@ -392,7 +390,6 @@ void runloom_mn_reset_after_fork(void)
     runloom_hubs = NULL;            /* abandon (leak) the inherited hub array */
     runloom_hub_count = 0;
     runloom_mn_spawn_counter = 0;
-    __atomic_store_n(&runloom_mn_pending_global, 0, __ATOMIC_RELAXED);
     runloom_mn_interp = NULL;
     runloom_set_per_g_tstate_mode(0);
     runloom_mutex_init(&runloom_global_runq_lock);   /* may be inherited held */
@@ -771,13 +768,10 @@ static int runloom_mn_fiber_n_bulk(PyObject *callable, long n, size_t stack_size
             __atomic_store_n(&h->sub_head, heads[hub], __ATOMIC_RELEASE);
         h->sub_tail = tails[hub];
         RUNLOOM_RUNLOCK(&h->sub_lock, RUNLOOM_RANK_HUB_SUB);
+        /* Bulk spawn: add the whole batch to THIS hub's pending (runloom_mn_run
+         * sums the per-hub fields).  Runs at setup before the hubs are released,
+         * so it is single-threaded -- no contention concern here. */
         __atomic_add_fetch(&h->pending, counts[hub], __ATOMIC_ACQ_REL);
-        /* GLOBAL pending too: mn_run polls runloom_mn_pending_global, not the
-         * per-hub fields.  The per-g spawn path does this via runloom_mn_pending_inc;
-         * the bulk path must add its whole batch here or mn_run sees 0 and exits
-         * before the fibers run.  Each g's completion (runloom_mn_pending_complete)
-         * decrements it, so the count balances. */
-        __atomic_add_fetch(&runloom_mn_pending_global, counts[hub], __ATOMIC_ACQ_REL);
         __atomic_add_fetch(&h->sub_gen, 1, __ATOMIC_RELEASE);
         /* Wake the target hub in WHATEVER wait mode it is in -- this MUST mirror
          * runloom_mn_hub_submit's full routing, not just the idle_cond signal.  A
@@ -822,7 +816,7 @@ int runloom_mn_fiber_n(PyObject *callable, long n, size_t stack_size, int indexe
 
 /* ---- M:N deadlock census (Go's checkdead analogue) -------------------------
  *
- * runloom_mn_run() polls runloom_mn_pending_global and returns when it reaches
+ * runloom_mn_run() polls the per-hub pending sum and returns when it reaches
  * 0 (every fiber finished).  If the count instead stays > 0 while the WHOLE
  * system is quiescent -- every hub idle, no runnable / stealable work anywhere,
  * no sleeper or timer due, and nothing in flight on netpoll / blockpool /
@@ -985,13 +979,27 @@ Py_ssize_t runloom_mn_run(void)
         long stall       = 0;                       /* consecutive no-progress polls */
         long stall_kick  = runloom_mn_stall_kick_polls();  /* flat polls before kick; 0=off */
         for (;;) {
-            /* Read the GLOBAL pending counter, not the per-hub fields.
-             * The per-hub fields race during work-stealing (source dec
-             * before dest inc); the global counter is only touched on
-             * spawn + completion, so it's monotonic across the lifecycle
-             * of each g and reliably reaches 0 iff all gs are done. */
-            long total = __atomic_load_n(&runloom_mn_pending_global,
-                                         __ATOMIC_ACQUIRE);
+            /* Sum the per-hub pending fields (no global counter -- that was one
+             * contended cache line that serialized parallel spawn).  This is
+             * race-free for the termination test because (1) the steal helper now
+             * bumps the thief BEFORE dropping the victim, so a stolen g is
+             * transiently OVER-counted, never under-counted -> the sum never
+             * momentarily reads 0 with a stolen g in flight; (2) any spawner is
+             * itself a live counted g, so a concurrent spawn can't drive the sum
+             * to 0.  ACQUIRE loads pair with the RELEASE spawn/complete writes.
+             * Read only at the ~1ms poll cadence, so the O(hubs) sum is off the
+             * hot path. */
+            long total = 0;
+            {
+                int hi;
+                for (hi = 0; hi < runloom_hub_count; hi++)
+                    total += __atomic_load_n(&runloom_hubs[hi].pending,
+                                             __ATOMIC_ACQUIRE);
+            }
+            /* == 0, not <= 0: the sum equals spawns-minus-completes and is never
+             * truly negative, but if read-skew ever produced a transient
+             * negative, polling again is the safe response -- a missed-exit
+             * (brief extra poll) beats a false exit (use-after-free). */
             if (total == 0) break;
 
             /* Progress-stall liveness backstop.  If pending has not moved for
