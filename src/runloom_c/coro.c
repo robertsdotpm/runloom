@@ -65,6 +65,9 @@
 #  include "fcontext.h"
 #  include <sys/mman.h>
 #  include <unistd.h>
+#  if defined(__linux__)
+#    include <sys/syscall.h>          /* SYS_getcpu for the NUMA-aware arena (Exp C) */
+#  endif
 #  ifndef MAP_ANONYMOUS
 #    ifdef MAP_ANON
 #      define MAP_ANONYMOUS MAP_ANON
@@ -453,15 +456,50 @@ static void runloom_stack_flush_to_global(void)
  * handful of sizes a workload uses; past the cap, carve falls back to
  * map_guarded (rare). */
 #define RUNLOOM_ARENA_CLASSES 8
+#define RUNLOOM_ARENA_NODES   8            /* max NUMA nodes we shard arenas across */
+/* With NUMA sharding (Exp C) the class key is (slot, node): each node gets its own
+ * set of size-class mappings, so a hub carves stacks from its LOCAL node's arena
+ * and Linux's first-touch policy places the pages on that node.  Without sharding
+ * everything keys to node 0 (the prior single-set behaviour). */
+#define RUNLOOM_ARENA_TABLE   (RUNLOOM_ARENA_CLASSES * RUNLOOM_ARENA_NODES)
 typedef struct {
     char  *base;   /* mmap base; NULL = unused class slot */
     size_t slot;   /* guard + rounded stack size (the class key) */
     size_t cap;    /* slots reserved */
     size_t next;   /* bump cursor (slots); guarded by runloom_arena_init_lock */
     size_t live;   /* live slots; guarded */
+    int    node;   /* NUMA node this class is bound to (0 when sharding off) */
 } runloom_arena_class_t;
-static runloom_arena_class_t runloom_arena_cls[RUNLOOM_ARENA_CLASSES];
+static runloom_arena_class_t runloom_arena_cls[RUNLOOM_ARENA_TABLE];
 static runloom_mutex_t runloom_arena_init_lock = RUNLOOM_MUTEX_STATIC_INIT;
+
+static int runloom_arena_numa_on(void)
+{
+    static int v = -1;
+    int cur = __atomic_load_n(&v, __ATOMIC_RELAXED);
+    if (cur < 0) {
+        const char *e = getenv("RUNLOOM_STACK_ARENA_NUMA");
+        cur = (e != NULL && *e != '0' && *e != '\0') ? 1 : 0;
+        __atomic_store_n(&v, cur, __ATOMIC_RELAXED);
+    }
+    return cur;
+}
+
+/* The NUMA node of the calling thread (the carving hub), or 0 if sharding is off /
+ * getcpu is unavailable.  getcpu() is a vDSO call (no real syscall cost). */
+static int runloom_current_node(void)
+{
+    if (!runloom_arena_numa_on()) return 0;
+#ifdef SYS_getcpu
+    {
+        unsigned cpu = 0, node = 0;
+        if (syscall(SYS_getcpu, &cpu, &node, (void *)0) == 0 &&
+            node < RUNLOOM_ARENA_NODES)
+            return (int)node;
+    }
+#endif
+    return 0;
+}
 
 static int runloom_stack_arena_on(void)
 {
@@ -541,17 +579,18 @@ static int runloom_arena_map(size_t bytes, char **base_out)
 /* Find the class for `slot`, lazily mmap'ing a new one if needed.  Caller holds
  * runloom_arena_init_lock.  Returns the class index, or -1 if every class is
  * taken by other sizes / mmap failed (caller then falls back to map_guarded). */
-static int runloom_arena_class_for_locked(size_t slot)
+static int runloom_arena_class_for_locked(size_t slot, int node)
 {
     int i, freecls = -1;
-    for (i = 0; i < RUNLOOM_ARENA_CLASSES; i++) {
+    for (i = 0; i < RUNLOOM_ARENA_TABLE; i++) {
         if (runloom_arena_cls[i].base != NULL) {
-            if (runloom_arena_cls[i].slot == slot) return i;
+            if (runloom_arena_cls[i].slot == slot && runloom_arena_cls[i].node == node)
+                return i;
         } else if (freecls < 0) {
             freecls = i;
         }
     }
-    if (freecls < 0) return -1;                 /* no free class for a new size */
+    if (freecls < 0) return -1;                 /* no free class for a new (size,node) */
     {
         const char *n = getenv("RUNLOOM_STACK_ARENA_N");
         size_t cap = (n != NULL && *n) ? (size_t)strtoull(n, NULL, 0) : 1200000;
@@ -561,8 +600,9 @@ static int runloom_arena_class_for_locked(size_t slot)
         runloom_arena_cls[freecls].cap  = cap;
         runloom_arena_cls[freecls].next = 0;
         runloom_arena_cls[freecls].live = 0;
+        runloom_arena_cls[freecls].node = node;
         /* base written LAST with release: a non-NULL base (read acquire) implies
-         * slot/cap/next/live are already published. */
+         * slot/cap/next/live/node are already published. */
         __atomic_store_n(&runloom_arena_cls[freecls].base, (char *)base, __ATOMIC_RELEASE);
     }
     return freecls;
@@ -573,12 +613,15 @@ static int runloom_arena_class_for_locked(size_t slot)
  * called once per fiber_n / per single carve -- NEVER per fiber -- so off the hot
  * path.  Each class's bump cursor rewinds on free (full reset when it drains to
  * empty), so spawn->drain->spawn cycles reuse the same address space. */
-static int runloom_arena_alloc(long n, size_t slot, size_t *start_out, char **base_out)
+static int runloom_arena_alloc(long n, size_t slot, size_t *start_out, char **base_out,
+                               int *node_out)
 {
     int rc = -1;
+    int node = runloom_current_node();          /* the carving hub's NUMA node */
+    if (node_out) *node_out = node;             /* report it so free() targets the right class */
     RUNLOOM_RLOCK(&runloom_arena_init_lock, RUNLOOM_RANK_ARENA_INIT);
     {
-        int cls = runloom_arena_class_for_locked(slot);
+        int cls = runloom_arena_class_for_locked(slot, node);
         if (cls >= 0 &&
             runloom_arena_cls[cls].next + (size_t)n <= runloom_arena_cls[cls].cap) {
             *start_out = runloom_arena_cls[cls].next;
@@ -596,12 +639,13 @@ static int runloom_arena_alloc(long n, size_t slot, size_t *start_out, char **ba
  * cursor when it drains to empty (the batch-spawn/drain/respawn pattern -> total
  * reuse), else rewind if the range sits at the very top (LIFO).  An out-of-order
  * partial range is reclaimed at the next full drain (no free-list yet). */
-static void runloom_arena_free(size_t start, long n, size_t slot)
+static void runloom_arena_free(size_t start, long n, size_t slot, int node)
 {
     int i;
     RUNLOOM_RLOCK(&runloom_arena_init_lock, RUNLOOM_RANK_ARENA_INIT);
-    for (i = 0; i < RUNLOOM_ARENA_CLASSES; i++) {
-        if (runloom_arena_cls[i].base != NULL && runloom_arena_cls[i].slot == slot) {
+    for (i = 0; i < RUNLOOM_ARENA_TABLE; i++) {
+        if (runloom_arena_cls[i].base != NULL && runloom_arena_cls[i].slot == slot &&
+            runloom_arena_cls[i].node == node) {
             if (runloom_arena_cls[i].live >= (size_t)n)
                 runloom_arena_cls[i].live -= (size_t)n;
             if (runloom_arena_cls[i].live == 0)
@@ -620,23 +664,25 @@ static void *runloom_stack_arena_carve(size_t size)
     size_t slot  = guard + size;
     size_t start;
     char  *base;
-    if (runloom_arena_alloc(1, slot, &start, &base) != 0) return NULL;
+    if (runloom_arena_alloc(1, slot, &start, &base, NULL) != 0) return NULL;
     return base + start * slot + guard;
 }
 
-/* If `usable` is a slice of some arena class, return 1 and the (base, slot) of
- * that class -- lets release locate the class for a stack pointer.  Reads each
- * class's base with acquire; non-NULL implies cap/slot are published. */
-static int runloom_arena_class_of_ptr(void *usable, char **base_out, size_t *slot_out)
+/* If `usable` is a slice of some arena class, return 1 and the (base, slot, node)
+ * of that class -- lets release locate the class for a stack pointer.  Reads each
+ * class's base with acquire; non-NULL implies cap/slot/node are published. */
+static int runloom_arena_class_of_ptr(void *usable, char **base_out, size_t *slot_out,
+                                      int *node_out)
 {
     char *p = (char *)usable;
     int i;
-    for (i = 0; i < RUNLOOM_ARENA_CLASSES; i++) {
+    for (i = 0; i < RUNLOOM_ARENA_TABLE; i++) {
         char *base = __atomic_load_n(&runloom_arena_cls[i].base, __ATOMIC_ACQUIRE);
         if (base != NULL && p >= base &&
             p < base + runloom_arena_cls[i].cap * runloom_arena_cls[i].slot) {
             *base_out = base;
             *slot_out = runloom_arena_cls[i].slot;
+            *node_out = runloom_arena_cls[i].node;
             return 1;
         }
     }
@@ -739,9 +785,9 @@ static void runloom_stack_release(void *stack, size_t size)
     /* TEST arena slices are never reclaimed/pooled (they belong to the one big
      * arena mapping); just drop them.  No-op when the arena is off. */
     {
-        char *abase; size_t aslot;
+        char *abase; size_t aslot; int anode = 0;
         if (runloom_stack_arena_on() &&
-            runloom_arena_class_of_ptr(stack, &abase, &aslot)) {
+            runloom_arena_class_of_ptr(stack, &abase, &aslot, &anode)) {
             size_t guard = runloom_stack_guard();
             size_t start = ((size_t)((char *)stack - guard - abase)) / aslot;
             /* Arena stacks are a RESIDENT pool: the freed slot is reused by the
@@ -763,7 +809,7 @@ static void runloom_stack_release(void *stack, size_t size)
                 if (size > page)
                     runloom_stack_madv_reclaim((char *)stack + page, size - page);
             }
-            runloom_arena_free(start, 1, aslot);   /* return the slot for reuse */
+            runloom_arena_free(start, 1, aslot, anode); /* return the slot for reuse */
             return;                                /* arena: not in runloom_stack_live */
         }
     }
@@ -1431,7 +1477,7 @@ size_t runloom_coro_struct_size(void) { return sizeof(runloom_coro_t); }
 int runloom_coro_bulk_init(void *coro_arena, size_t coro_stride,
                            void *g_arena, size_t g_stride, size_t g_coro_off,
                            size_t stack_size, long n, runloom_entry_fn entry,
-                           size_t *start_slot_out)
+                           size_t *start_slot_out, int *node_out)
 {
     size_t guard, rounded, slot, start;
     char *sbase;
@@ -1456,9 +1502,11 @@ int runloom_coro_bulk_init(void *coro_arena, size_t coro_stride,
      * batch teardown can MADV + return the whole block when the last g finishes. */
     {
         char *abase;
-        if (runloom_arena_alloc(n, slot, &start, &abase) != 0)
+        int anode = 0;
+        if (runloom_arena_alloc(n, slot, &start, &abase, &anode) != 0)
             return -1;                              /* off/exhausted -> fallback */
         sbase = abase + start * slot + guard;       /* usable base of slot 0 */
+        if (node_out) *node_out = anode;            /* batch teardown frees on this node */
     }
     if (start_slot_out) *start_slot_out = start;
     for (i = 0; i < n; i++) {
@@ -1513,10 +1561,10 @@ int runloom_coro_bulk_init(void *coro_arena, size_t coro_stride,
  * last fiber in a batch finishes.  The block stays PROT_READ|WRITE; the next
  * fault into it gets a fresh zero page -- exactly what the fresh-flag path wants
  * (a zero stack reads back as a not-yet-materialised frame). */
-void runloom_coro_arena_release(size_t start_slot, long n, size_t stack_size)
+void runloom_coro_arena_release(size_t start_slot, long n, size_t stack_size, int node)
 {
-    /* stack_size identifies the size CLASS this batch was carved from (per-size
-     * arenas).  slot = guard + rounded, matching coro_bulk_init's carve. */
+    /* (stack_size, node) identify the CLASS this batch was carved from (per-size,
+     * per-NUMA-node arenas).  slot = guard + rounded, matching coro_bulk_init's carve. */
     size_t guard = runloom_stack_guard();
     size_t slot;
     if (n <= 0) return;
@@ -1537,16 +1585,17 @@ void runloom_coro_arena_release(size_t start_slot, long n, size_t stack_size)
     }
     if (trim) {
         int i;
-        for (i = 0; i < RUNLOOM_ARENA_CLASSES; i++) {
+        for (i = 0; i < RUNLOOM_ARENA_TABLE; i++) {
             char *base = __atomic_load_n(&runloom_arena_cls[i].base, __ATOMIC_ACQUIRE);
-            if (base != NULL && runloom_arena_cls[i].slot == slot) {
+            if (base != NULL && runloom_arena_cls[i].slot == slot &&
+                runloom_arena_cls[i].node == node) {
                 madvise(base + start_slot * slot, (size_t)n * slot, MADV_DONTNEED);
                 break;
             }
         }
     }
 #endif
-    runloom_arena_free(start_slot, n, slot);
+    runloom_arena_free(start_slot, n, slot, node);
 }
 
 /* Carve one stack (lowest usable byte) from the bulk arena, NULL if the arena
@@ -1744,17 +1793,18 @@ size_t runloom_coro_struct_size(void) { return sizeof(runloom_coro_t); }
 int runloom_coro_bulk_init(void *coro_arena, size_t coro_stride,
                            void *g_arena, size_t g_stride, size_t g_coro_off,
                            size_t stack_size, long n, runloom_entry_fn entry,
-                           size_t *start_slot_out)
+                           size_t *start_slot_out, int *node_out)
 {
     (void)coro_arena; (void)coro_stride; (void)g_arena; (void)g_stride;
     (void)g_coro_off; (void)stack_size; (void)n; (void)entry;
     if (start_slot_out != NULL) *start_slot_out = 0;
+    if (node_out != NULL) *node_out = 0;
     return -1;   /* arena unavailable -> caller uses the per-g path */
 }
 
-void runloom_coro_arena_release(size_t start_slot, long n, size_t stack_size)
+void runloom_coro_arena_release(size_t start_slot, long n, size_t stack_size, int node)
 {
-    (void)start_slot; (void)n; (void)stack_size;
+    (void)start_slot; (void)n; (void)stack_size; (void)node;
 }
 #endif  /* !RUNLOOM_HAVE_FCONTEXT */
 

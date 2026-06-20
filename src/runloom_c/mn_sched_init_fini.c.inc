@@ -615,6 +615,7 @@ struct runloom_fibern_batch {
     size_t start_slot;   /* first stack-arena slot of this batch's block */
     long   nslots;       /* slots in the block (== N) -- for MADV + slot return */
     size_t stack_size;   /* the batch's carve size -> identifies its arena class */
+    int    node;         /* NUMA node the block was carved on (per-node arena free) */
     long   live;         /* fibers not yet finished; atomic */
 };
 
@@ -627,7 +628,7 @@ void runloom_fibern_batch_finish_one(struct runloom_fibern_batch *b)
          * stack block is MADV'd back AND its slots returned for reuse. */
         free(b->garena);
         free(b->carena);
-        runloom_coro_arena_release(b->start_slot, b->nslots, b->stack_size);
+        runloom_coro_arena_release(b->start_slot, b->nslots, b->stack_size, b->node);
         free(b);
     }
 }
@@ -660,6 +661,7 @@ static int runloom_mn_fiber_n_bulk(PyObject *callable, long n, size_t stack_size
     long long goid_base;
     struct runloom_fibern_batch *batch = NULL;       /* arena lifecycle, real path only */
     size_t start_slot = 0;                         /* this batch's stack-arena block start */
+    int    batch_node = 0;                         /* NUMA node the block was carved on */
 
     if (H > 64) return -1;                       /* fixed per-hub list cap */
     garena = (char *)calloc((size_t)n, gsz);
@@ -729,7 +731,7 @@ static int runloom_mn_fiber_n_bulk(PyObject *callable, long n, size_t stack_size
         if (runloom_coro_bulk_init(carena, csz, garena, gsz,
                                    offsetof(runloom_g_t, coro),
                                    hub_stack, n, runloom_g_entry,
-                                   &start_slot) != 0) {
+                                   &start_slot, &batch_node) != 0) {
             free(garena); free(carena); free(batch);
             for (i = 0; i < n; i++)
                 if (runloom_mn_fiber_core(callable, NULL, NULL, stack_size,
@@ -748,6 +750,7 @@ static int runloom_mn_fiber_n_bulk(PyObject *callable, long n, size_t stack_size
     batch->start_slot = start_slot;
     batch->nslots     = n;
     batch->stack_size = hub_stack;
+    batch->node       = batch_node;
     __atomic_store_n(&batch->live, n, __ATOMIC_RELEASE);
 
     /* ===== bookkeeping, LAST ===== */
