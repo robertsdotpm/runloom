@@ -65,6 +65,7 @@
 #  include "fcontext.h"
 #  include <sys/mman.h>
 #  include <unistd.h>
+#  include <pthread.h>                /* Pass-B parallel builders (spawn_above_1m) */
 #  if defined(__linux__)
 #    include <sys/syscall.h>          /* SYS_getcpu for the NUMA-aware arena (Exp C) */
 #  endif
@@ -1506,6 +1507,68 @@ runloom_coro_t *runloom_coro_init_at(void *mem, size_t stack_size, void *stack,
 /* Bytes a placement coro needs. */
 size_t runloom_coro_struct_size(void) { return sizeof(runloom_coro_t); }
 
+/* EXPERIMENT (docs/dev/spawn_above_1m.md, lever parallelize_passB): the coro-fill
+ * loop (Pass B of bulk create) is cold-write bound like Pass A and is serial; split
+ * it across builder threads over disjoint [lo,hi) slices to lift create further (run
+ * then stays the binding constraint).  RUNLOOM_GON_PCREATE_B=P; off by default. */
+typedef struct {
+    char *coro_arena; size_t coro_stride;
+    char *g_arena; size_t g_stride, g_coro_off;
+    char *sbase; size_t slot, rounded;
+    runloom_entry_fn entry; int defer;
+    long lo, hi;
+} runloom_bulkfill_arg_t;
+
+static void runloom_bulkfill_range(const runloom_bulkfill_arg_t *a)
+{
+    long i;
+    for (i = a->lo; i < a->hi; i++) {
+        runloom_coro_t *c = (runloom_coro_t *)(a->coro_arena + (size_t)i * a->coro_stride);
+        char *g = a->g_arena + (size_t)i * a->g_stride;
+        char *stk = a->sbase + (size_t)i * a->slot;
+        c->entry = a->entry;
+        c->user = g;
+        c->done = 0;
+        c->dbg_running = 0;
+        c->pool_next = NULL;
+        c->stack = stk;
+        c->stack_size = a->rounded;
+        c->grown = 0;
+        c->asm_coro.entry = runloom_fcontext_entry;
+        c->asm_coro.user = c;
+        c->asm_coro.done = 0;
+        c->fresh = a->defer;
+        if (!a->defer)
+            runloom_asm_make_ctx(&c->asm_coro, (void *)((uintptr_t)stk + a->rounded));
+        *(void **)(g + a->g_coro_off) = c;          /* g->coro = c (disjoint slice) */
+    }
+}
+static void *runloom_bulkfill_worker(void *p)
+{
+    runloom_bulkfill_range((const runloom_bulkfill_arg_t *)p);
+    return NULL;
+}
+extern int runloom_mn_hub_count(void); /* mn_sched.c accessor; for PCREATE_B="auto" */
+static int runloom_pcreate_b_threads(void)
+{
+    static int mode = -2;              /* -2 unread; -1 auto; >=0 fixed */
+    int m = __atomic_load_n(&mode, __ATOMIC_RELAXED);
+    if (m == -2) {
+        const char *e = getenv("RUNLOOM_GON_PCREATE_B");
+        if (e == NULL || !*e || e[0] == '0') m = 0;
+        else if (strcmp(e, "auto") == 0)     m = -1;
+        else { m = atoi(e); if (m < 0) m = 0; if (m > 64) m = 64; }
+        __atomic_store_n(&mode, m, __ATOMIC_RELAXED);
+    }
+    if (m == -1) {                     /* auto: one builder per hub, bandwidth-capped */
+        int p = runloom_mn_hub_count();
+        if (p > 16) p = 16;
+        if (p < 1)  p = 1;
+        return p;
+    }
+    return m;
+}
+
 /* Bulk coro init: fill an ENTIRE coro arena (n structs) inline, each on its own
  * stack carved from one reserved arena block, and write each g's coro pointer.
  * ONE call for all N -- the per-coro work (field stores + asm_make_ctx) is
@@ -1550,26 +1613,37 @@ int runloom_coro_bulk_init(void *coro_arena, size_t coro_stride,
         if (node_out) *node_out = anode;            /* batch teardown frees on this node */
     }
     if (start_slot_out) *start_slot_out = start;
-    for (i = 0; i < n; i++) {
-        runloom_coro_t *c = (runloom_coro_t *)((char *)coro_arena + (size_t)i * coro_stride);
-        char *g = (char *)g_arena + (size_t)i * g_stride;
-        char *stk = sbase + (size_t)i * slot;
-        c->entry = entry;
-        c->user = g;
-        c->done = 0;
-        c->dbg_running = 0;
-        c->pool_next = NULL;
-        c->stack = stk;
-        c->stack_size = rounded;
-        c->grown = 0;
-        c->asm_coro.entry = runloom_fcontext_entry;
-        c->asm_coro.user = c;
-        c->asm_coro.done = 0;
-        c->fresh = defer;
-        if (!defer)                                 /* eager: write frame now */
-            runloom_asm_make_ctx(&c->asm_coro, (void *)((uintptr_t)stk + rounded));
-        /* deferred: leave self.sp/caller.sp zero (calloc); resume materializes */
-        *(void **)(g + g_coro_off) = c;             /* g->coro = c */
+    {
+        runloom_bulkfill_arg_t base;
+        int P = runloom_pcreate_b_threads();
+        int did_parallel = 0;
+        base.coro_arena = (char *)coro_arena; base.coro_stride = coro_stride;
+        base.g_arena = (char *)g_arena; base.g_stride = g_stride; base.g_coro_off = g_coro_off;
+        base.sbase = sbase; base.slot = slot; base.rounded = rounded;
+        base.entry = entry; base.defer = defer;
+        if (P > 1 && n >= 4096) {               /* parallel Pass B over disjoint slices */
+            runloom_bulkfill_arg_t *args =
+                (runloom_bulkfill_arg_t *)malloc((size_t)P * sizeof *args);
+            pthread_t th[64];
+            int b, started = 0;
+            if (args != NULL) {
+                for (b = 0; b < P; b++) {
+                    args[b] = base;
+                    args[b].lo = (long)((long long)b * n / P);
+                    args[b].hi = (long)((long long)(b + 1) * n / P);
+                    if (pthread_create(&th[b], NULL, runloom_bulkfill_worker, &args[b]) != 0)
+                        break;
+                    started++;
+                }
+                for (b = 0; b < started; b++) pthread_join(th[b], NULL);
+                if (started == P) did_parallel = 1;
+                free(args);
+            }
+        }
+        if (!did_parallel) {                    /* serial (default / fallback) */
+            base.lo = 0; base.hi = n;
+            runloom_bulkfill_range(&base);
+        }
     }
     /* EXPERIMENT (Exp B): RUNLOOM_GON_POPULATE=1 pre-faults the TOP page of every
      * slot here on the spawner, in one contiguous pass, instead of letting each
