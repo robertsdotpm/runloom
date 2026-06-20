@@ -34,27 +34,54 @@ def m_spawn(n, hubs):
     return {"seconds": time.perf_counter() - t0, "n": n, "cores": hubs}
 
 
-def m_ctxswitch(n, hubs):
+def _make_distinct_worker(K, yobj):
+    # A fresh code object per fiber: each gets its OWN co_code_adaptive inline-
+    # cache array, so N hubs running the SAME logic don't concurrently memcpy
+    # the SAME shared cache (the 46x shared-code-object contention layer, see
+    # SCHEDULER_SCALING_FINDINGS.md -- the unsynchronized specializer writes that
+    # bounce a cache line across hubs; real servers running ONE shared handler
+    # hit it, distinct handlers / per-hub code copies don't).
+    g = {"sy": yobj, "K": K, "__builtins__": __builtins__}
+    exec(compile("def w():\n for _ in range(K):\n  sy()", "<w>", "exec"), g)
+    return g["w"]
+
+
+def m_ctxswitch(n, hubs, distinct=False):
     # "Context switch under load": G concurrent fibers each yield K times, so the
     # hubs stay full of ready work and switches are same-hub re-dispatch -- the
     # realistic cost a loaded server pays, NOT a 2-fiber ping-pong (which forces
     # a cross-hub wake of a freshly-parked idle hub every op: ~30us, pathological
     # and unrepresentative). G*K == n total switches.
+    #
+    # The yield object is runloom_c.sched_yield, an IMMORTAL process-lifetime
+    # singleton (module_init.c.inc), so the per-yield refcount-contention layer
+    # is already gone for both modes.  --distinct ALSO de-shares the code object
+    # (above), so the only residual cost is the per-yield Python frame itself,
+    # which is per-hub-parallel and therefore scales.  shared (default) == the
+    # naive "one handler fn for every fiber" server; distinct == the fixed path.
     G = max(2, hubs * 16)
     K = max(1, n // G)
     sched_yield = runloom_c.sched_yield
 
-    def worker():
-        for _ in range(K):
-            sched_yield()
+    if distinct:
+        workers = [_make_distinct_worker(K, sched_yield) for _ in range(G)]
 
-    def root():
-        for _ in range(G):
-            runloom.fiber(worker)
+        def root():
+            for w in workers:
+                runloom.fiber(w)
+    else:
+        def worker():
+            for _ in range(K):
+                sched_yield()
+
+        def root():
+            for _ in range(G):
+                runloom.fiber(worker)
     t0 = time.perf_counter()
     runloom.run(hubs, root)
     return {"seconds": time.perf_counter() - t0, "n": n, "cores": hubs,
-            "switches": G * K, "fibers": G, "yields_each": K}
+            "switches": G * K, "fibers": G, "yields_each": K,
+            "mode": "distinct" if distinct else "shared"}
 
 
 def _recvn(sock, n):
@@ -175,12 +202,15 @@ def main():
     ap.add_argument("--conns", type=int, default=64)
     ap.add_argument("--ramp", type=float, default=1.0)
     ap.add_argument("--measure", type=float, default=3.0)
+    ap.add_argument("--distinct", action="store_true",
+                    help="ctxswitch: give each fiber its own code object "
+                         "(de-shares co_code_adaptive; the fixed Python path)")
     args = ap.parse_args()
 
     if args.metric == "spawn":
         res = m_spawn(args.n, args.hubs)
     elif args.metric == "ctxswitch":
-        res = m_ctxswitch(args.n, args.hubs)
+        res = m_ctxswitch(args.n, args.hubs, distinct=args.distinct)
     elif args.metric == "rtt":
         res = m_rtt(args.host, args.port, args.n, args.payload)
     else:

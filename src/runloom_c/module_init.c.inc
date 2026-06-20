@@ -612,6 +612,16 @@ PyMODINIT_FUNC PyInit_runloom_c(void)
             return NULL;
         }
         y->vectorcall = yielder_vectorcall;
+        /* Immortalize the singleton.  It lives for the whole process and EVERY
+         * fiber on EVERY hub calls it, so the interpreter's per-yield
+         * LOAD_GLOBAL/CALL incref+decref on this one shared object bounces its
+         * refcount cache line across NUMA nodes -- the 3.3x ctxswitch
+         * contention layer measured in SCHEDULER_SCALING_FINDINGS.md.  Freezing
+         * the refcount makes those touches no-ops (free-threaded build skips
+         * refcounting immortal objects).  Safe: immortal == never freed, and
+         * this object is process-lifetime by construction.  runloom_immortalize
+         * is declared extern in module_run.c.inc, included earlier in this TU. */
+        runloom_immortalize((PyObject *)y);
         if (PyModule_AddObject(m, "sched_yield", (PyObject *)y) < 0) {
             Py_DECREF(y);
             Py_DECREF(m);
