@@ -614,6 +614,7 @@ struct runloom_fibern_batch {
     void  *carena;       /* calloc'd coro-struct arena (one free) */
     size_t start_slot;   /* first stack-arena slot of this batch's block */
     long   nslots;       /* slots in the block (== N) -- for MADV + slot return */
+    size_t stack_size;   /* the batch's carve size -> identifies its arena class */
     long   live;         /* fibers not yet finished; atomic */
 };
 
@@ -626,7 +627,7 @@ void runloom_fibern_batch_finish_one(struct runloom_fibern_batch *b)
          * stack block is MADV'd back AND its slots returned for reuse. */
         free(b->garena);
         free(b->carena);
-        runloom_coro_arena_release(b->start_slot, b->nslots);
+        runloom_coro_arena_release(b->start_slot, b->nslots, b->stack_size);
         free(b);
     }
 }
@@ -746,6 +747,7 @@ static int runloom_mn_fiber_n_bulk(PyObject *callable, long n, size_t stack_size
     batch->carena     = carena;
     batch->start_slot = start_slot;
     batch->nslots     = n;
+    batch->stack_size = hub_stack;
     __atomic_store_n(&batch->live, n, __ATOMIC_RELEASE);
 
     /* ===== bookkeeping, LAST ===== */

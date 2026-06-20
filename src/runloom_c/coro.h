@@ -41,11 +41,11 @@ runloom_coro_t *runloom_coro_init_at(void *mem, size_t stack_size, void *stack,
 size_t runloom_coro_struct_size(void);
 /* Carve one stack from the bulk arena (NULL if off/exhausted/size-mismatch). */
 void *runloom_coro_arena_stack(size_t stack_size);
-/* Release a bulk stack block (n slots from start_slot): MADV_DONTNEED the pages
- * (keeps the virtual reservation) AND return the slots to the allocator for
- * reuse.  Called by the fiber_n batch teardown.  No-op off-POSIX (slots still
- * returned). */
-void runloom_coro_arena_release(size_t start_slot, long n);
+/* Release a bulk stack block (n slots from start_slot, carved at `stack_size`):
+ * MADV_DONTNEED the pages (keeps the virtual reservation) AND return the slots to
+ * the allocator for reuse.  stack_size identifies the per-size arena class the
+ * block came from.  Called by the fiber_n batch teardown.  No-op off-POSIX. */
+void runloom_coro_arena_release(size_t start_slot, long n, size_t stack_size);
 /* Fill an entire coro arena (n structs) inline, one stack each from one reserved
  * arena block, and set each g's coro pointer (g_arena[i] + g_coro_off).  One
  * call for all N: zero per-g calls into the coro layer.  0 ok, -1 on arena
