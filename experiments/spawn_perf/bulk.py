@@ -30,7 +30,12 @@ def main():
     ap.add_argument("--stack-size", type=int, default=0)
     ap.add_argument("--reps", type=int, default=3)
     ap.add_argument("--label", default="bulk")
+    ap.add_argument("--immortalize", action="store_true",
+                    help="freeze the callable's refcount (test the per-fiber decref bounce)")
     args = ap.parse_args()
+
+    if args.immortalize:
+        runloom_c.immortalize(noop)
 
     runloom_c.mn_init(args.hubs)
     b_spawn = b_run = b_total = 1e18
