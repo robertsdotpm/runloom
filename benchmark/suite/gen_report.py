@@ -362,28 +362,41 @@ def sec_speed(speed):
     for rt, d in (m.get("ctxswitch") or {}).items():
         if "ns_per_switch" not in d:
             continue
-        label = "runloom (python fiber)" if rt == "runloom" else rt
+        # the runloom speed.json row is the NAIVE shared-closure worker -- label it
+        # so the contrast with the @hot / compiled rows below is unmistakable.
+        label = "runloom (python fiber, shared closure)" if rt == "runloom" else rt
         rows.append([(esc(label), label), (fmt(d.get("cores", 1)), d.get("cores", 1)),
                      (fmt(d["ns_per_switch"]), d["ns_per_switch"])])
-    if cap and cap.get("c_entry_ns"):
-        ce44 = cap["c_entry_ns"][-1]      # 44-hub c_entry, same cores as the python row
+    if cap and cap.get("hubs"):
         h44 = cap["hubs"][-1]
-        rows.append([("runloom (compiled fiber entry)", "runloom (compiled fiber entry)"),
-                     (fmt(h44), h44),
-                     (fmt(ce44, 1) if ce44 < 10 else fmt(ce44), ce44)])
+        # the SAME Python fiber, but with per-core cells (@runloom.hot, or just a
+        # module-level handler) -- the fix.  From the capstone (preempt-off,
+        # n=0-subtracted), so the python fiber actually MOVES in this table.
+        if cap.get("python_distinct_ns"):
+            pd44 = cap["python_distinct_ns"][-1]
+            rows.append([("runloom (python fiber, @runloom.hot)", "runloom (python fiber, @runloom.hot)"),
+                         (fmt(h44), h44),
+                         (fmt(pd44, 1) if pd44 < 10 else fmt(pd44), pd44)])
+        if cap.get("c_entry_ns"):
+            ce44 = cap["c_entry_ns"][-1]      # 44-hub c_entry, same cores
+            rows.append([("runloom (compiled fiber entry)", "runloom (compiled fiber entry)"),
+                         (fmt(h44), h44),
+                         (fmt(ce44, 1) if ce44 < 10 else fmt(ce44), ce44)])
     rows.sort(key=lambda r: (r[2][1] or 1e18))
     out.append("<h3>Context switch (loaded-yield)</h3>")
     out.append(table("t_ctx", [("Runtime", False), ("Cores", True), ("ns / switch", True)], rows,
                      "Lower is better. G concurrent tasks each yield K times (run queues stay full "
-                     "&mdash; same-hub re-dispatch, not a 2-party ping-pong). <b>runloom (python "
-                     "fiber)</b> here is the benchmark's <b>shared-closure</b> worker &mdash; at 44 hubs "
-                     "that number is NOT the scheduler, it is free-threaded CPython contention on the "
-                     "shared closure's <b>cells</b> (a futex&rarr;cross-NUMA IPI storm; <code>perf</code>"
-                     "-confirmed, runloom's own yield is ~2% of the profile). A plain module-level "
-                     "handler, or <code>@runloom.hot</code>, removes it &mdash; see the capstone below. "
-                     "<b>runloom (compiled fiber entry)</b> is the same yield on a tstate-free "
-                     "<code>c_entry</code> fiber (no Python eval) &mdash; the true scheduler cost, "
-                     "~single-digit ns and flat to 44 hubs."))
+                     "&mdash; same-hub re-dispatch, not a 2-party ping-pong). THREE runloom rows tell "
+                     "the story: <b>python fiber, shared closure</b> is the naive case (one closure "
+                     "reused on every core) &mdash; at 44 hubs that number is free-threaded CPython "
+                     "contention on the shared closure's <b>cells</b> (a futex&rarr;cross-NUMA IPI storm; "
+                     "<code>perf</code>-confirmed, runloom's own yield is ~2% of the profile), NOT the "
+                     "scheduler. <b>python fiber, @runloom.hot</b> is the SAME handler with per-core "
+                     "cells (also what a plain module-level handler already is) &mdash; the wall is "
+                     "gone. <b>compiled fiber entry</b> is a tstate-free <code>c_entry</code> fiber (no "
+                     "Python eval), the true scheduler floor. The @hot and compiled rows are the "
+                     "preempt-off capstone (n=0-subtracted); the capstone below has the hub-scaling "
+                     "proof."))
 
     # ---- c_entry capstone: the TRUE scheduler yield, + what the wall really is ----
     if cap and cap.get("hubs"):
