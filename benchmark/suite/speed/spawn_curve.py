@@ -6,6 +6,18 @@ runtimes front-load the same way (Go's bench does too).  Each runtime runs at it
 native config: runloom + go on HUBS cores (GIL off), asyncio/uvloop/greenlet on 1
 core (GIL on) -- same as the cross-runtime report.  Writes results/spawn_curve.json
 for the report curve.  RUNLOOM_SYSMON/PREEMPT off (microbenchmark watchdog noise).
+
+TRADE-OFF / TARGET (full diagnosis: docs/dev/spawn_cost.md).  This is NAKED spawn
+-- the WORST case: create+run+destroy with no I/O to amortize over.  runloom is
+~48x behind Go HERE and only here; req/s does NOT have this gap (it spawns one
+handler per *connection* at setup, then loops -- spawn is ~0% of the timed
+window), and conn/s matches Go's conn/s (at ~4x CPU; TCP syscalls dominate).  The
+gap is per-fiber stack mmap+mprotect during the spawn burst (runloom_coro_new ->
+runloom_stack_map_guarded), because RUNLOOM_STACK_ARENA holds ONE stack-size class
+and falls back to per-stack mmap on any other size.  TARGET: productionize the
+arena -- per-size-class arenas + unguarded pure-Python slots + a bounded resident
+pool (no per-completion madvise).  Do NOT read this number as "runloom is 48x
+slower"; read the metrics legend at the top of the report.
 """
 import json
 import os

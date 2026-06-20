@@ -924,9 +924,47 @@ def sec_spawn_curve(sc):
             'entry to isolate a line.</p>' % sc.get("hubs", 8)
             + chart
             + table("t_spawncurve", cols, rows, mark_best=False, note=
-                    "Higher is better. Stackful runtimes (runloom, greenlet) carry a real C stack "
-                    "per task; asyncio/uvloop coroutines are stackless Python objects; Go "
-                    "goroutines are 2 KB grow-on-demand native stacks. No bounding/backpressure."))
+                    "Higher is better. This is NAKED spawn &mdash; create+run+destroy with no I/O "
+                    "to amortize it over, the worst case for runloom and the headline ~48&times; "
+                    "gap to Go. Stackful runtimes (runloom, greenlet) carry a real C stack per "
+                    "task; asyncio/uvloop coroutines are stackless Python objects; Go goroutines "
+                    "are 2 KB grow-on-demand native stacks. The gap is per-fiber stack "
+                    "mmap+mprotect during the burst (runloom_coro_new &rarr; stack_map_guarded); "
+                    "target = productionize the arena. Full diagnosis + targets: "
+                    "docs/dev/spawn_cost.md."))
+
+
+def sec_metrics_legend():
+    """Self-documenting verdict panel: what each metric measures, whether it
+    exercises spawn, where runloom stands, and the target.  Static (no data) so it
+    is always present -- the anti-repeat artifact for 'which number means what'."""
+    rows = [
+        ["req/s (persistent echo)", "steady-state throughput on live keepalive connections",
+         "No &mdash; 1 handler/conn at setup, then loops; spawn ~0% of the timed window",
+         "competitive (both M:N, all cores)", "hold parity &mdash; the common-case server"],
+        ["conn/s (conn-churn)", "fresh handler spawned + destroyed per request",
+         "Yes &mdash; 1 spawn+teardown / request",
+         "matches conn/s, at ~4&times; the CPU", "close the CPU gap (spawn shows as CPU here)"],
+        ["spawn/s (naked)", "fiber create+run+destroy, no I/O, nothing to amortize",
+         "Yes, and nothing else", "~48&times; behind (~46k vs ~2.2M)",
+         "productionize the arena (the real target)"],
+        ["ctxswitch", "yield/resume cost under load", "n/a",
+         "competitive (after closure-cell / @runloom.hot / immortalize)", "hold"],
+    ]
+    head = ["Metric", "Measures", "Spawn in hot loop?", "runloom vs Go", "Target"]
+    trs = "".join("<tr>" + "".join("<td>%s</td>" % c for c in r) + "</tr>" for r in rows)
+    return ('<h2 id="metrics">How to read these metrics &mdash; and where runloom stands</h2>'
+            '<p>There is no single "runloom vs Go" number: each benchmark measures a different '
+            'axis, and <b>spawn is only exercised by some of them</b>. This table is the verdict, '
+            'so the workload behind each number is never ambiguous.</p>'
+            '<table><thead><tr>' + "".join("<th>%s</th>" % h for h in head) +
+            '</tr></thead><tbody>' + trs + '</tbody></table>'
+            '<p class="note"><b>Gotchas (documented so they are not re-derived):</b> '
+            'req/s does NOT test spawn (it spawns once per connection at setup, then loops); '
+            'teardown cost (runloom_coro_destroy) only fires on completion (absent in req/s); '
+            '<code>RUNLOOM_STACK_ARENA</code> currently holds ONE stack-size class and falls '
+            'back to per-stack mmap on mixed sizes. Full diagnosis + targets: '
+            '<code>docs/dev/spawn_cost.md</code>.</p>')
 
 
 def sec_conn_churn(cc):
@@ -1034,6 +1072,7 @@ def main():
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
     nav = ('<nav><b>Runloom benchmarks</b> '
            '<a href="#env">machine</a><a href="#constraints">constraints</a>'
+           '<a href="#metrics">metrics</a>'
            '<a href="#churn">conn churn</a><a href="#perf">req/s</a><a href="#iouring">io_uring</a>'
            '<a href="#work">work curve</a><a href="#workxrt">work x-runtime</a>'
            '<a href="#spawncurve">spawn vs N</a>'
@@ -1049,6 +1088,7 @@ def main():
         % (now, " &mdash; <b>QUICK/SMOKE DATA</b>" if quick else ""),
         sec_header(envd),
         sec_constraints(meta),
+        sec_metrics_legend(),
         sec_conn_churn(conn_churn),
         sec_perf(perf),
         sec_iouring(iou),
