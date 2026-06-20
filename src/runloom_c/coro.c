@@ -914,10 +914,46 @@ int  runloom_coro_scrub_enabled(void)    { return runloom_stack_scrub_on; }
  * costs an O(1) syscall instead of a stack-sized memset (a 512 KB memset
  * was ~60x the spawn cost in measurement; this is ~flat).  Elsewhere
  * MADV_DONTNEED is only advisory (may not zero), so fall back to memset for
- * a guaranteed wipe.  stack is page-aligned and size page-rounded. */
+ * a guaranteed wipe.  stack is page-aligned and size page-rounded.
+ *
+ * EXPERIMENT (Exp D, docs/dev/spawn_experiments.md): the default MADV_DONTNEED
+ * scrub is the per-fiber-completion cost the keep_resident shim was suppressing
+ * (NOT a CPython purge) -- it fires a cross-hub TLB-shootdown IPI per fiber AND
+ * drops the arena slot's pages, forcing a re-fault on reuse (defeats keep-warm).
+ * RUNLOOM_STACK_SCRUB_RESIDENT=1 keeps the SAME security guarantee (every byte the
+ * fiber wrote is zeroed) but does it in userspace: mincore() finds the resident
+ * (touched) pages -- only a handful for a shallow fiber -- and memset()s just those.
+ * No IPI, no page drop, no re-fault.  Wipes a touched-then-swapped page only if it
+ * is still resident (same swap caveat the DONTNEED path silently has). */
+static int runloom_scrub_resident_mode(void)
+{
+    static int v = -1;
+    int cur = __atomic_load_n(&v, __ATOMIC_RELAXED);
+    if (cur < 0) {
+        const char *e = getenv("RUNLOOM_STACK_SCRUB_RESIDENT");
+        cur = (e != NULL && *e == '1') ? 1 : 0;
+        __atomic_store_n(&v, cur, __ATOMIC_RELAXED);
+    }
+    return cur;
+}
+
 static void runloom_stack_scrub(void *stack, size_t size)
 {
 #if defined(__linux__) && defined(MADV_DONTNEED)
+    if (runloom_scrub_resident_mode()) {
+        long ps = sysconf(_SC_PAGESIZE);
+        size_t page = (ps > 0) ? (size_t)ps : 4096;
+        size_t npages = (size + page - 1) / page;
+        unsigned char vec[8192];          /* covers up to 8192*page (>=32MB) stacks */
+        if (npages <= sizeof vec && mincore(stack, size, vec) == 0) {
+            size_t i;
+            for (i = 0; i < npages; i++)
+                if (vec[i] & 1)            /* resident -> the fiber touched it; wipe it */
+                    memset((char *)stack + i * page, 0, page);
+            return;
+        }
+        /* npages too big / mincore failed -> fall through to the madvise wipe */
+    }
     (void)madvise(stack, size, MADV_DONTNEED);
 #else
     memset(stack, 0, size);

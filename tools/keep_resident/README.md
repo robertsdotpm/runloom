@@ -1,7 +1,20 @@
-# keep_resident — the +2× spawn shim (keep mimalloc memory resident)
+# keep_resident — the +2× spawn shim (keep memory resident)
+
+> **CORRECTION (2026-06-20, docs/dev/spawn_experiments.md, Exp D):** the "+2×" this
+> shim delivers is **NOT** killing a CPython mimalloc QSBR purge, as the rest of this
+> README and `spawn_cost.md` originally claimed. A patched CPython (mimalloc
+> `purge_delay=-1`, and even a no-op'd `unix_madvise`) did **not** reproduce it, and an
+> `strace -k` backtrace showed the per-fiber madvise is
+> **`runloom_coro_destroy → runloom_stack_scrub → madvise(MADV_DONTNEED)`** — runloom's
+> own **security stack-scrub** (full-512KB wipe of each recycled stack). This shim was
+> silently **disabling that security feature**. The native equivalent is
+> **`RUNLOOM_STACK_SCRUB=0`** (same speedup, no LD_PRELOAD); the *secure* fix that keeps
+> the wipe AND most of the speedup is **`RUNLOOM_STACK_SCRUB_RESIDENT=1`** (mincore +
+> userspace memset of only the touched pages). Prefer those. This shim is kept only as
+> the blunt-instrument record of the investigation.
 
 A tiny `LD_PRELOAD` shim that no-ops `madvise(MADV_DONTNEED/MADV_FREE)`, so
-freed heap pages stay **resident** instead of being returned to the OS — Go's
+freed pages stay **resident** instead of being returned to the OS — Go's
 keep-resident strategy.
 
 ## Why
