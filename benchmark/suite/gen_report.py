@@ -394,9 +394,10 @@ def sec_speed(speed):
                      "scheduler. <b>python fiber, @runloom.hot</b> is the SAME handler with per-core "
                      "cells (also what a plain module-level handler already is) &mdash; the wall is "
                      "gone. <b>compiled fiber entry</b> is a tstate-free <code>c_entry</code> fiber (no "
-                     "Python eval), the true scheduler floor. The @hot and compiled rows are the "
-                     "preempt-off capstone (n=0-subtracted); the capstone below has the hub-scaling "
-                     "proof."))
+                     "Python eval), the true scheduler floor. All three runloom rows are measured "
+                     "preempt-off and n=0-subtracted (the CPU-preempt watchdog fires spuriously on this "
+                     "pure-CPU microbenchmark and is an I/O-workload feature); the capstone below has "
+                     "the hub-scaling proof."))
 
     # ---- c_entry capstone: the TRUE scheduler yield, + what the wall really is ----
     if cap and cap.get("hubs"):

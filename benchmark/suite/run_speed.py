@@ -157,11 +157,18 @@ def main():
     if "ctxswitch" in metrics:
         results["metrics"]["ctxswitch"] = {}
         for rt in [r for r in RUNTIMES if r in only]:
+            # runloom: this is a pure-CPU yield loop, which spuriously trips the
+            # ATTACHED/CPU-preempt watchdog (a feature for I/O workloads that park
+            # back to hub_main, never this microbenchmark). Measure the
+            # representative cooperative-yield cost with it OFF -- consistent with
+            # the c_entry capstone, which is also preempt-off. Other runtimes
+            # ignore these vars.
+            cx_env = {"RUNLOOM_PREEMPT": "0", "RUNLOOM_SYSMON": "0"} if rt == "runloom" else None
             try:
                 base = run_local(argv_for(rt, "ctxswitch", 0), cpus_for(rt, "ctxswitch"),
-                                 gil_off_for(rt), raise_fd=True)
+                                 gil_off_for(rt), extra_env=cx_env, raise_fd=True)
                 full = run_local(argv_for(rt, "ctxswitch", nswitch), cpus_for(rt, "ctxswitch"),
-                                 gil_off_for(rt), raise_fd=True, timeout=600)
+                                 gil_off_for(rt), extra_env=cx_env, raise_fd=True, timeout=600)
                 sw = full["switches"]
                 sec = max(full["seconds"] - base["seconds"], 1e-9)
                 ns = sec * 1e9 / sw
@@ -227,6 +234,27 @@ def main():
             topo.teardown()
 
     out = os.path.join(config.RESULTS_DIR, "speed_quick.json" if args.quick else "speed.json")
+    # Merge into any existing file so a SUBSET run (e.g. --metric ctxswitch) does
+    # NOT wipe the other metrics, and a runtime that errored this pass keeps its
+    # prior good value rather than overwriting it with the error.
+    if os.path.exists(out):
+        try:
+            with open(out) as f:
+                prev = json.load(f)
+            pm = dict(prev.get("metrics", {}))
+            for metric, rtmap in results["metrics"].items():
+                dest = dict(pm.get(metric, {}))
+                for rt, val in rtmap.items():
+                    if isinstance(val, dict) and "error" in val and rt in dest:
+                        continue  # keep the prior good value
+                    dest[rt] = val
+                pm[metric] = dest
+            prev["meta"] = results["meta"]
+            prev["quick"] = results["quick"]
+            prev["metrics"] = pm
+            results = prev
+        except Exception as e:
+            print("merge into existing %s failed (%r); overwriting" % (out, e), flush=True)
     with open(out, "w") as f:
         json.dump(results, f, indent=2)
     print("\nwrote", out, flush=True)

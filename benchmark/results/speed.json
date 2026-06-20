@@ -72,32 +72,32 @@
     "ctxswitch": {
       "runloom": {
         "switches": 3999424,
-        "seconds": 101.55289726000046,
-        "ns_per_switch": 25391.880745827515,
+        "seconds": 38.94011477997992,
+        "ns_per_switch": 9736.430741021686,
         "cores": 44
       },
       "go": {
         "switches": 3999424,
-        "seconds": 2.703949363,
-        "ns_per_switch": 676.0846969463603,
+        "seconds": 2.997020206,
+        "ns_per_switch": 749.3629597662064,
         "cores": 44
       },
       "asyncio": {
         "switches": 4000000,
-        "seconds": 8.94559335600934,
-        "ns_per_switch": 2236.398339002335,
+        "seconds": 10.847829115984496,
+        "ns_per_switch": 2711.957278996124,
         "cores": 1
       },
       "greenlet": {
         "switches": 4000000,
-        "seconds": 1.8585075160081033,
-        "ns_per_switch": 464.6268790020258,
+        "seconds": 1.9458267579611856,
+        "ns_per_switch": 486.4566894902964,
         "cores": 1
       },
       "uvloop": {
         "switches": 4000000,
-        "seconds": 5.297810058997129,
-        "ns_per_switch": 1324.4525147492823,
+        "seconds": 4.652331966004567,
+        "ns_per_switch": 1163.0829915011418,
         "cores": 1
       }
     },
