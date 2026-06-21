@@ -80,6 +80,14 @@ void runloom_immortalize(PyObject *op);
  * no-op against stock CPython, so the call site is unconditional. */
 void runloom_iframe_borrow_alloc_home(PyThreadState *exec, PyThreadState *home);
 
+/* True iff this build can SAFELY migrate fibers across hubs: compiled against the
+ * alloc-home CPython patch (Py_TSTATE_ALLOC_HOME) and not disabled at runtime
+ * (RUNLOOM_NO_ALLOC_HOME).  The scheduler's migratable-mode interlock uses this as
+ * the production gate -- when true, RUNLOOM_MIGRATION enables without the unsafe
+ * override; against stock CPython it returns 0 and migration stays dev-gated.
+ * Exposed to Python as runloom_c.alloc_home_available. */
+int runloom_alloc_home_active(void);
+
 #ifdef __cplusplus
 }
 #endif

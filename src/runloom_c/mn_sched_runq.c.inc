@@ -230,24 +230,60 @@ static int runloom_unsafe_migration_acked(void)
     return cur;
 }
 
+/* RUNLOOM_MIGRATION (default OFF): the PRODUCTION-facing master flag for cross-hub
+ * fiber migration.  A stable, user-friendly alias of RUNLOOM_PER_G_TSTATE -- code
+ * opts in with this name (or via runloom.enable_migration()) without needing to
+ * know the internal per-g-tstate machinery.  Read once. */
+static int runloom_migration_flag(void)
+{
+    static int v = -1;
+    int cur = __atomic_load_n(&v, __ATOMIC_RELAXED);
+    if (cur < 0) {
+        const char *e = getenv("RUNLOOM_MIGRATION");
+        cur = (e != NULL && e[0] != '0' && e[0] != '\0') ? 1 : 0;
+        __atomic_store_n(&v, cur, __ATOMIC_RELAXED);
+    }
+    return cur;
+}
+
 /* Resolve the migratable-mode request through the interlock.  Returns 1 (enable
- * per-g-tstate) only if a migratable flag is set AND the unsafe ack is present;
- * otherwise 0.  Warns once when a flag was requested but the ack is missing, so a
- * silent fallback to the default scheduler is visible.  Called once from mn_init;
- * its result feeds runloom_set_per_g_tstate_mode, so a gated-off request leaves
- * per_g_tstate_mode == 0 and runloom_use_global_runq() false -> default scheduler
- * (and, crucially, NOT the unsound snap-migration branch). */
+ * per-g-tstate cross-hub migration) when a migratable flag is set AND the mode is
+ * safe to run; otherwise 0.  Called once from mn_init; its result feeds
+ * runloom_set_per_g_tstate_mode, so a gated-off request leaves per_g_tstate_mode
+ * == 0 and runloom_use_global_runq() false -> default scheduler (and, crucially,
+ * NOT the unsound snap-migration branch).
+ *
+ * SAFETY GATE (two-tier):
+ *  - PRODUCTION: built against the alloc-home CPython patch (Py_TSTATE_ALLOC_HOME,
+ *    runloom_alloc_home_active()).  Each per-g tstate borrows the running hub's
+ *    heap, so no heap migrates OS threads -- the crash that gated this mode is
+ *    gone (validated: experiments/resume_rebuild/mpmc_pergt_repro.py 24/24 + a
+ *    direct migration proof 50/60 cross-hub, zero crash).  Enable WITHOUT any
+ *    unsafe override.  This is the supported way to ship migration.
+ *  - STOCK CPython (no patch): per-g migration still corrupts (the per-g tstate's
+ *    mimalloc heap migrates across hub threads -> SEGV under churn at H>=2; see
+ *    docs/dev/STEAL_WOKEN_CLEANUP.md).  Keep the DEV/FUZZ gate: activate only with
+ *    RUNLOOM_ALLOW_UNSAFE_MIGRATION=1.  Otherwise warn + run the default
+ *    scheduler, so a production user who flips the flag on an unpatched
+ *    interpreter gets a clean fallback, never a segfault. */
 static int runloom_resolve_migratable_mode(void)
 {
-    int want = runloom_per_g_tstate_flag() || runloom_steal_woken_flag();
+    int want = runloom_per_g_tstate_flag() || runloom_steal_woken_flag()
+               || runloom_migration_flag();
     if (!want) return 0;
+    /* Production: the patch makes it heap-safe -> enable, no override needed. */
+    if (runloom_alloc_home_active()) return 1;
+    /* Stock CPython: still unsound -> require the explicit dev escape hatch. */
     if (runloom_unsafe_migration_acked()) return 1;
     fprintf(stderr,
-        "[runloom] RUNLOOM_PER_G_TSTATE / RUNLOOM_STEAL_WOKEN are GATED OFF: the "
-        "migratable mode has a known crash (a per-g PyThreadState's mimalloc heap "
-        "migrates across hub threads -> SEGV under churn at H>=2; see docs/dev/"
-        "STEAL_WOKEN_CLEANUP.md). Running the default (per-hub-tstate) scheduler "
-        "instead. Set RUNLOOM_ALLOW_UNSAFE_MIGRATION=1 to enable anyway.\n");
+        "[runloom] cross-hub migration (RUNLOOM_MIGRATION / RUNLOOM_PER_G_TSTATE / "
+        "RUNLOOM_STEAL_WOKEN) is OFF: this CPython lacks the alloc-home patch, so a "
+        "per-g PyThreadState's mimalloc heap would migrate across hub threads -> "
+        "SEGV under churn at H>=2 (see docs/dev/STEAL_WOKEN_CLEANUP.md). For "
+        "PRODUCTION, build against patches/cpython313t-tstate-alloc-home.patch "
+        "(makes it heap-safe). For dev/fuzzing on stock CPython, set "
+        "RUNLOOM_ALLOW_UNSAFE_MIGRATION=1 to enable anyway. Running the default "
+        "(per-hub-tstate) scheduler instead.\n");
     return 0;
 }
 

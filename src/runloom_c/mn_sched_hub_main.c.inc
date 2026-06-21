@@ -881,13 +881,18 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
                     continue;
                 }
                 hub_ts = PyEval_SaveThread();        /* detach hub tstate */
-                PyEval_RestoreThread(g->tstate);      /* attach g's own tstate */
-                /* Borrow the running hub's allocator: the per-g tstate allocates
-                 * on whichever hub runs it, so its OWN heap stays empty and never
-                 * migrates OS threads -- removing the _mi_page_retire teardown
-                 * corruption.  No-op without the Py_TSTATE_ALLOC_HOME CPython
-                 * patch (patches/cpython313t-tstate-alloc-home.patch). */
+                /* Borrow the running hub's allocator BEFORE attaching g's tstate.
+                 * The per-g tstate then allocates on whichever hub runs it, so its
+                 * OWN heap stays empty and never migrates OS threads (removing the
+                 * _mi_page_retire teardown corruption).  Setting it BEFORE
+                 * RestoreThread is load-bearing on a CROSS-HUB resume: g->tstate's
+                 * _alloc_home still points at its PREVIOUS hub here, so any
+                 * allocation during/after attach would otherwise hit the prior
+                 * hub's heap on this hub's thread (mimalloc heap->thread_id != tid
+                 * abort).  No-op without the Py_TSTATE_ALLOC_HOME CPython patch
+                 * (patches/cpython313t-tstate-alloc-home.patch). */
                 runloom_iframe_borrow_alloc_home(g->tstate, hub_ts);
+                PyEval_RestoreThread(g->tstate);      /* attach g's own tstate */
                 /* Deep-surface migration oracle (RUNLOOM_DBG_MIGRATE; zero-cost
                  * otherwise).  The per-g tstate's mimalloc heap / brc / QSBR are
                  * bound to the OS thread that first used them; running it on a

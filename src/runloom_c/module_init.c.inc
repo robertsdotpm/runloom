@@ -597,6 +597,22 @@ PyMODINIT_FUNC PyInit_runloom_c(void)
         Py_DECREF(m);
         return NULL;
     }
+    /* Capability probe for cross-hub fiber migration: 1 iff this build was
+     * compiled against the alloc-home CPython patch (Py_TSTATE_ALLOC_HOME) and
+     * the borrow isn't disabled (RUNLOOM_NO_ALLOC_HOME).  When 1, RUNLOOM_MIGRATION
+     * is safe to enable for production; when 0 (stock CPython) migration is only
+     * reachable via the RUNLOOM_ALLOW_UNSAFE_MIGRATION dev override.  The Python
+     * layer reads this in runloom.migration_available()/enable_migration().
+     * runloom_alloc_home_active is defined in runloom_iframe.c (extern, same
+     * pattern as runloom_immortalize in module_run.c.inc). */
+    {
+        extern int runloom_alloc_home_active(void);
+        if (PyModule_AddIntConstant(m, "alloc_home_available",
+                                    runloom_alloc_home_active()) < 0) {
+            Py_DECREF(m);
+            return NULL;
+        }
+    }
     /* Set up the vectorcall singleton and expose it as `sched_yield`.
      * The interpreter's CALL bytecode will specialize this to the
      * vectorcall fast path, shaving Python-call-dispatch overhead off

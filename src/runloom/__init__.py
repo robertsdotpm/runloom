@@ -140,6 +140,54 @@ if _autosize_env in ("1", "on", "true", "prescan"):
     except Exception:
         pass
 
+# ---- Cross-hub fiber migration (opt-in, behind flags) -----------------------
+# A parked fiber normally resumes on the SAME hub it parked on.  With migration
+# enabled, a woken fiber is routed to a global run-queue and resumed on ANY idle
+# hub -- so work stranded behind a wedged hub gets rescued and load spreads to
+# free cores.  This needs each fiber to own a migratable PyThreadState (per-g
+# tstate), which is only HEAP-SAFE when CPython is built with the optional
+# alloc-home patch (patches/cpython313t-tstate-alloc-home.patch): the per-g
+# tstate then borrows the running hub's allocator, so no per-fiber heap migrates
+# OS threads.  Off by default; turn on with RUNLOOM_MIGRATION=1 in the
+# environment, or runloom.enable_migration(), BEFORE the runtime starts (the
+# flag is read once at mn_init).
+def migration_available():
+    """True iff this build can SAFELY migrate fibers across hubs -- i.e. it was
+    compiled against the alloc-home CPython patch (see patches/).  On stock
+    CPython this is False and migration is only reachable via the
+    RUNLOOM_ALLOW_UNSAFE_MIGRATION dev override (which can crash under churn)."""
+    return bool(getattr(_core, "alloc_home_available", 0))
+
+def migration_enabled():
+    """True iff cross-hub migration is REQUESTED for the next runtime start
+    (RUNLOOM_MIGRATION / RUNLOOM_PER_G_TSTATE / RUNLOOM_STEAL_WOKEN set in the
+    environment).  Whether it actually activates also depends on
+    migration_available(); on stock CPython without the unsafe override the
+    scheduler warns and falls back to the default (non-migrating) mode."""
+    return any(
+        _os.environ.get(v, "").strip() not in ("", "0")
+        for v in ("RUNLOOM_MIGRATION", "RUNLOOM_PER_G_TSTATE", "RUNLOOM_STEAL_WOKEN")
+    )
+
+def enable_migration(allow_unsafe=False):
+    """Opt into cross-hub fiber migration.  Must be called BEFORE the M:N runtime
+    starts (run() / mn_init); the flag is read once at init.  On a build WITHOUT
+    the alloc-home patch this raises RuntimeError unless allow_unsafe=True, which
+    also sets the RUNLOOM_ALLOW_UNSAFE_MIGRATION dev escape hatch (per-g tstate
+    migration can then crash under churn at >1 hub -- dev/fuzzing only).
+    Idempotent."""
+    if not migration_available() and not allow_unsafe:
+        raise RuntimeError(
+            "runloom: cross-hub migration needs CPython built with the alloc-home "
+            "patch (patches/cpython313t-tstate-alloc-home.patch); without it a "
+            "per-g PyThreadState's heap migrates across hub threads and crashes "
+            "under churn. Rebuild against the patch, or pass allow_unsafe=True "
+            "for dev/fuzzing on stock CPython."
+        )
+    _os.environ["RUNLOOM_MIGRATION"] = "1"
+    if allow_unsafe and not migration_available():
+        _os.environ["RUNLOOM_ALLOW_UNSAFE_MIGRATION"] = "1"
+
 # Runtime introspection -- `runloom.inspect.dump()`, fibers(), stack(), etc.
 # See runloom/inspect.py.  Exposed as a submodule plus a couple of top-level
 # conveniences (the common "what are all my fibers doing" calls).
@@ -176,6 +224,8 @@ __all__ = [
     # M:N (free-threaded 3.13t)
     "mn_init", "mn_fiber", "mn_run", "mn_fini", "mn_hub_count", "mn_hub_states",
     "hubs",
+    # cross-hub migration (opt-in, needs the alloc-home CPython patch)
+    "migration_available", "migration_enabled", "enable_migration",
     # low-level I/O primitives
     "TCPConn", "Coro", "G", "wait_fd", "WAIT_FD_CANCELLED",
     "tcp_recv", "tcp_send", "iouring_available",
