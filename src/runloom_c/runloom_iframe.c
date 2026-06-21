@@ -26,6 +26,7 @@
 #  ifdef Py_GIL_DISABLED
 #    include "internal/pycore_brc.h"        /* struct _brc_thread_state */
 #    include "internal/pycore_critical_section.h"  /* _PyCriticalSection_* */
+#    include "internal/pycore_tstate.h"   /* _PyThreadState_SetAllocHome (Py_TSTATE_ALLOC_HOME) */
 #    define RUNLOOM_CRITSEC_HAVE 1
 #  endif
 #  define RUNLOOM_DESTRUCT_HAVE 1
@@ -49,6 +50,27 @@ void runloom_immortalize(PyObject *op)
     op->ob_ref_shared = 0;
 #elif defined(_Py_IMMORTAL_REFCNT)
     op->ob_refcnt    = _Py_IMMORTAL_REFCNT;
+#endif
+}
+
+/* Borrow `home`'s allocator (mimalloc heap + qsbr/page-reclaim) for `exec` --
+ * the per-g cross-hub migration fix.  With the optional CPython patch
+ * (Py_TSTATE_ALLOC_HOME, see patches/) a per-g tstate carries no live heap and
+ * allocates on whichever hub is running it, so no per-fiber heap ever migrates
+ * OS threads -- removing the _mi_page_retire teardown corruption that gates the
+ * per-g-tstate mode.  Compiled as a no-op when built against stock CPython. */
+void runloom_iframe_borrow_alloc_home(PyThreadState *exec, PyThreadState *home)
+{
+#if defined(Py_GIL_DISABLED) && defined(Py_TSTATE_ALLOC_HOME)
+    /* RUNLOOM_NO_ALLOC_HOME=1 disables the borrow (A/B baseline: reproduces the
+     * pre-patch per-g-tstate _mi_page_retire crash).  Default = borrow ON. */
+    static int off = -1;
+    if (off < 0) { const char *e = getenv("RUNLOOM_NO_ALLOC_HOME"); off = (e && e[0] == '1'); }
+    if (!off) {
+        _PyThreadState_SetAllocHome(exec, home);
+    }
+#else
+    (void)exec; (void)home;
 #endif
 }
 

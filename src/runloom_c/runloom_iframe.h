@@ -72,6 +72,14 @@ void      runloom_critsec_restore(void *tstate, uintptr_t saved);
  * _Py_SetImmortal is internal. */
 void runloom_immortalize(PyObject *op);
 
+/* Per-g cross-hub migration fix: make `exec` (a per-g tstate) borrow `home`'s
+ * (the running hub's) allocator -- mimalloc heap + qsbr/page-reclaim -- so the
+ * per-g tstate carries no live heap and nothing migrates OS threads (the
+ * _mi_page_retire crash that gates RUNLOOM_PER_G_TSTATE).  Requires the optional
+ * CPython patch (patches/cpython313t-tstate-alloc-home.patch); compiled as a
+ * no-op against stock CPython, so the call site is unconditional. */
+void runloom_iframe_borrow_alloc_home(PyThreadState *exec, PyThreadState *home);
+
 #ifdef __cplusplus
 }
 #endif

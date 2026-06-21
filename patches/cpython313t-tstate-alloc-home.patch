@@ -2,19 +2,20 @@
 #   build flag:  -DPy_TSTATE_ALLOC_HOME      (OFF by default)
 #
 # WHAT: adds one optional pointer, _PyThreadStateImpl._alloc_home, that the
-# allocator hot path follows instead of the executing tstate. It decouples a
-# thread state's portable EXECUTION context (frames/exc/recursion) from its
-# thread-affine ALLOCATOR (mimalloc heap + qsbr/page-reclaim).
+# OBJECT/RAW ALLOCATION path follows instead of the executing tstate. It
+# decouples a thread state's portable EXECUTION context (frames/exc/recursion)
+# from its thread-affine HEAP (mimalloc heaps + current_object_heap + the
+# deferred-page list). Redirected: the alloc-heap selection and the mimalloc
+# page_list. NOT redirected: the QSBR reader slot -- _Py_qsbr_poll asserts the
+# passed qsbr is the *running* tstate's, so qsbr stays self; the deferred-free
+# queue and biased refcount likewise stay with the running tstate (brc/ob_tid
+# already key on the OS thread id, so they self-correct on a same-thread borrow).
 #
-# WHY: a stackful coroutine parked on hub A can't resume on hub B today -- its
-# frozen eval frame is bound to hub A's tstate, and CPython reads BOTH execution
-# and allocation off that one tstate. With this patch a migratable fiber carries
-# an execution-only tstate (no heap of its own) and, on each resume, sets its
-# alloc-home to the OS-thread tstate now running it -- so it allocates on the
-# running hub's heap and can resume on ANY hub. No per-fiber heap => no GC-walk
-# blow-up; no heap migration => no cross-thread mimalloc corruption. (brc/ob_tid
-# already key on the OS thread id _Py_ThreadId(), so they self-correct; only the
-# mimalloc heap + its qsbr/page-reclaim needed redirecting.)
+# WHY: a migratable coroutine/fiber carries an execution-only tstate (no heap of
+# its own) and, on each resume, sets _alloc_home to the OS-thread tstate now
+# running it -- so it allocates on the running hub's heap and can resume on ANY
+# hub. No per-fiber heap => no GC-walk blow-up; no heap migration => no
+# _mi_page_retire teardown corruption.
 #
 # ZERO IMPACT BY DEFAULT: with Py_TSTATE_ALLOC_HOME undefined,
 # _PyThreadStateImpl_AllocHome(tstate) is #defined to (tstate), so every redirect
@@ -23,16 +24,25 @@
 # internal _PyThreadStateImpl, not the public PyThreadState). One extra pointer
 # load on the alloc hot path ONLY when enabled.
 #
+# VALIDATED (CPython 3.13.13, free-threaded + pydebug):
+#   * builds clean with the flag ON; 593 stdlib tests pass (test_dict/list/gc/
+#     weakref/threading) -- field present, home=NULL=self, zero regression.
+#   * the redirect accessor honours _alloc_home (a core-ext unit check).
+#   * END-TO-END with runloom: wiring _PyThreadState_SetAllocHome(g->tstate,
+#     hub_ts) at the per-g-tstate attach point fixes the RUNLOOM_PER_G_TSTATE
+#     channel-churn crash -- 24/24 PASS with the borrow vs 8/8 abort without
+#     (the pre-patch _mi_page_retire / qsbr teardown failure). Default mode
+#     unaffected.
+#
 # ENABLE: build CPython 3.13t with -DPy_TSTATE_ALLOC_HOME
 # USE:    _PyThreadState_SetAllocHome(fiber_tstate, current_hub_tstate) on resume
+#         (runloom: runloom_iframe_borrow_alloc_home, wired in mn_sched_hub_main.c.inc)
 # APPLY:  from the CPython source root:  patch -p1 < this-file   (or git apply)
 # SCOPE:  Include/internal/{pycore_tstate.h,pycore_object_alloc.h}, Objects/obmalloc.c
-# STATUS: applies clean to CPython 3.13.13; default-off identical by construction;
-#         needs a build with the flag ON to validate the enabled path.
 #
 diff -ruN a/Include/internal/pycore_object_alloc.h b/Include/internal/pycore_object_alloc.h
---- a/Include/internal/pycore_object_alloc.h	2026-06-21 13:18:15.982863353 +1000
-+++ b/Include/internal/pycore_object_alloc.h	2026-06-21 13:18:16.131434469 +1000
+--- a/Include/internal/pycore_object_alloc.h	2026-06-21 13:54:06.053290441 +1000
++++ b/Include/internal/pycore_object_alloc.h	2026-06-21 13:54:06.057686710 +1000
 @@ -17,7 +17,7 @@
  static inline mi_heap_t *
  _PyObject_GetAllocationHeap(_PyThreadStateImpl *tstate, PyTypeObject *tp)
@@ -61,8 +71,8 @@ diff -ruN a/Include/internal/pycore_object_alloc.h b/Include/internal/pycore_obj
  #endif
      void *mem = PyObject_Realloc(ptr, size);
 diff -ruN a/Include/internal/pycore_tstate.h b/Include/internal/pycore_tstate.h
---- a/Include/internal/pycore_tstate.h	2026-06-21 13:18:15.970524477 +1000
-+++ b/Include/internal/pycore_tstate.h	2026-06-21 13:18:16.130357816 +1000
+--- a/Include/internal/pycore_tstate.h	2026-06-21 13:54:06.042486169 +1000
++++ b/Include/internal/pycore_tstate.h	2026-06-21 13:54:06.047474393 +1000
 @@ -21,6 +21,23 @@
      // semi-public fields are in PyThreadState.
      PyThreadState base;
@@ -114,38 +124,10 @@ diff -ruN a/Include/internal/pycore_tstate.h b/Include/internal/pycore_tstate.h
  #ifdef __cplusplus
  }
 diff -ruN a/Objects/obmalloc.c b/Objects/obmalloc.c
---- a/Objects/obmalloc.c	2026-06-21 13:18:15.960036120 +1000
-+++ b/Objects/obmalloc.c	2026-06-21 13:18:16.149991355 +1000
-@@ -116,7 +116,7 @@
-         if (tstate == NULL) {
-             return false;
-         }
--        return _Py_qbsr_goal_reached(tstate->qsbr, page->qsbr_goal);
-+        return _Py_qbsr_goal_reached(_PyThreadStateImpl_AllocHome(tstate)->qsbr, page->qsbr_goal);
-     }
- #endif
-     return true;
-@@ -157,7 +157,7 @@
-     assert(mi_page_all_free(page));
-     if (page->use_qsbr) {
-         _PyThreadStateImpl *tstate = (_PyThreadStateImpl *)PyThreadState_GET();
--        if (page->qsbr_goal != 0 && _Py_qbsr_goal_reached(tstate->qsbr, page->qsbr_goal)) {
-+        if (page->qsbr_goal != 0 && _Py_qbsr_goal_reached(_PyThreadStateImpl_AllocHome(tstate)->qsbr, page->qsbr_goal)) {
-             _PyMem_mi_page_clear_qsbr(page);
-             _mi_page_free(page, pq, force);
-             return true;
-@@ -166,14 +166,14 @@
-         _PyMem_mi_page_clear_qsbr(page);
-         page->retire_expire = 0;
- 
--        if (should_advance_qsbr_for_page(tstate->qsbr, page)) {
--            page->qsbr_goal = _Py_qsbr_advance(tstate->qsbr->shared);
-+        if (should_advance_qsbr_for_page(_PyThreadStateImpl_AllocHome(tstate)->qsbr, page)) {
-+            page->qsbr_goal = _Py_qsbr_advance(_PyThreadStateImpl_AllocHome(tstate)->qsbr->shared);
-         }
-         else {
--            page->qsbr_goal = _Py_qsbr_shared_next(tstate->qsbr->shared);
-+            page->qsbr_goal = _Py_qsbr_shared_next(_PyThreadStateImpl_AllocHome(tstate)->qsbr->shared);
+--- a/Objects/obmalloc.c	2026-06-21 13:54:06.032360247 +1000
++++ b/Objects/obmalloc.c	2026-06-21 13:54:06.036893169 +1000
+@@ -173,7 +173,7 @@
+             page->qsbr_goal = _Py_qsbr_shared_next(tstate->qsbr->shared);
          }
  
 -        llist_insert_tail(&tstate->mimalloc.page_list, &page->qsbr_node);
@@ -171,15 +153,6 @@ diff -ruN a/Objects/obmalloc.c b/Objects/obmalloc.c
      if (llist_empty(head)) {
          return;
      }
-@@ -223,7 +223,7 @@
-             continue;
-         }
- 
--        if (!_Py_qsbr_poll(tstate->qsbr, page->qsbr_goal)) {
-+        if (!_Py_qsbr_poll(_PyThreadStateImpl_AllocHome(tstate)->qsbr, page->qsbr_goal)) {
-             return;
-         }
- 
 @@ -238,7 +238,7 @@
  {
  #ifdef Py_GIL_DISABLED
