@@ -303,7 +303,7 @@ def test_ring_dump_covers_cal_freeze_arm():
 # the WORLD_YIELD label.
 # --------------------------------------------------------------------------
 _WORLD_YIELD_CHILD = r"""
-import os, sys, gc, threading, tempfile
+import os, sys, gc, threading, tempfile, time
 sys.path.insert(0, 'src')
 import runloom_c as rc
 
@@ -316,21 +316,40 @@ def native_gc():
 def w():
     for _ in range(20):
         rc.sched_yield()
-def main():
-    for _ in range(80):
-        rc.mn_fiber(w)
+
+def attempt():
+    # One short M:N run under the native STW churn, then dump + check the ring.
+    # A WORLD_YIELD only lands if a hub world-yields to a foreign STW DURING this
+    # window, so it is probabilistic per run -- especially on a loaded box -- and
+    # the diag ring is fixed-size, so a single long run would scroll the event
+    # off.  We therefore retry short runs until the event is captured (below).
+    def main():
+        for _ in range(80):
+            rc.mn_fiber(w)
+    rc.mn_init(4); rc.mn_fiber(main); rc.mn_run(); rc.mn_fini()
+    fd, path = tempfile.mkstemp()
+    rc._diag_dump(fd); os.close(fd)
+    data = open(path).read(); os.unlink(path)
+    return "WORLD_YIELD" in data
 
 t = threading.Thread(target=native_gc, daemon=True)
 t.start()
-rc.mn_init(4); rc.mn_fiber(main); rc.mn_run(); rc.mn_fini()
+# Bounded retry: a world-yield reliably fires within a few short runs; cap at
+# ~20s so a genuine "world-yield never arms" regression still fails (with a
+# count) rather than hanging, and a loaded box no longer false-fails.
+ok = False
+tries = 0
+deadline = time.time() + 20.0
+while time.time() < deadline:
+    tries += 1
+    if attempt():
+        ok = True
+        break
 stop[0] = True
 t.join(timeout=5)
-
-fd, path = tempfile.mkstemp()
-rc._diag_dump(fd); os.close(fd)
-data = open(path).read(); os.unlink(path)
-assert "WORLD_YIELD" in data, "WORLD_YIELD label absent under monopoly STW"
-sys.stdout.write("WORLD_YIELD_OK\n")
+assert ok, ("WORLD_YIELD label absent under monopoly STW after %d run(s) in ~20s "
+            "(world-yield never armed -- a real regression, not a load flake)" % tries)
+sys.stdout.write("WORLD_YIELD_OK tries=%d\n" % tries)
 """
 
 
