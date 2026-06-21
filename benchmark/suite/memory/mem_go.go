@@ -81,7 +81,10 @@ func main() {
 			peers = append(peers, peer)
 			mu.Unlock()
 			go func(c net.Conn) {
-				buf := make([]byte, 1)
+				// match the runloom handler buffer (mem_runloom.py bytearray(65536))
+				// and the perf-path Go server (srv_go.go make([]byte,65536)) so the
+				// w/socket comparison holds an equal-size handler buffer per task.
+				buf := make([]byte, 65536)
 				c.Read(buf) // parks via the netpoller: peer never writes
 			}(c)
 		} else {

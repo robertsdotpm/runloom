@@ -2,7 +2,9 @@
 
 - **Throughput / speed / memory suite** → [`suite/`](suite/README.md); consolidated
   results in [`report.html`](report.html). Compares runloom vs Go/asyncio/uvloop/
-  gevent/greenlet (req/s, bandwidth, spawn, context-switch, RTT, memory).
+  gevent/greenlet on req/s, bandwidth, spawn, context-switch and RTT. **Memory
+  (RSS/fiber, 1M fibers) covers only the two stackful runtimes, runloom and Go** —
+  stackless asyncio/uvloop/greenlet are not in the memory matrix.
 - **Backend syscall profiles** (this file, below) — per-OS syscall traces the
   report links to.
 

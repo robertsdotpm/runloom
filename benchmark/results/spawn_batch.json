@@ -1,0 +1,109 @@
+{
+ "meta": {
+  "hubs": 8,
+  "reps": 3,
+  "cpu_affinity": [
+   0,
+   1,
+   2,
+   3,
+   4,
+   5,
+   6,
+   7
+  ],
+  "ncores_pinned": 8,
+  "note": "naked vs batch (fiber_n) spawn, this box, single NUMA node; rate=N/(wall-baseline), median of reps. NO Go batch-spawn equivalent exists (Go has no bulk-spawn API) -- runloom capability, not a Go comparison. Like-for-like vs Go is naked single-spawn (spawn_curve.json), which Go wins.",
+  "optimize_throughput_eff": {
+   "RUNLOOM_TCPCONN_IOURING": "auto",
+   "RUNLOOM_TCPCONN_IOURING_THRESHOLD": "512",
+   "RUNLOOM_BLOCKPOOL_WORKERS": "16",
+   "RUNLOOM_STACK_ARENA": "1",
+   "RUNLOOM_GON_BULK": "1",
+   "RUNLOOM_GON_FRESH": "1",
+   "RUNLOOM_GON_PCREATE": "auto",
+   "RUNLOOM_GON_PCREATE_B": "auto",
+   "RUNLOOM_PREWARM_KEEP": "1",
+   "RUNLOOM_HOT_HANDLERS": "1",
+   "RUNLOOM_HOT_AUTO": "1"
+  }
+ },
+ "modes": {
+  "default": {
+   "100000": {
+    "naked": {
+     "rate_per_s": 95439.0325814773,
+     "wall_median_s": 1.0717716769431718,
+     "reps": 3
+    },
+    "batch": {
+     "rate_per_s": 96360.79077049269,
+     "wall_median_s": 1.0617488410207443,
+     "reps": 3
+    }
+   },
+   "300000": {
+    "naked": {
+     "rate_per_s": 106184.57010392233,
+     "wall_median_s": 2.849251590028871,
+     "reps": 3
+    },
+    "batch": {
+     "rate_per_s": 103191.18594670619,
+     "wall_median_s": 2.9312073899782263,
+     "reps": 3
+    }
+   },
+   "1000000": {
+    "naked": {
+     "rate_per_s": 110528.24083785164,
+     "wall_median_s": 9.071443814027589,
+     "reps": 3
+    },
+    "batch": {
+     "rate_per_s": 96937.85243607612,
+     "wall_median_s": 10.339870051015168,
+     "reps": 3
+    }
+   }
+  },
+  "throughput": {
+   "100000": {
+    "naked": {
+     "rate_per_s": 90934.53513913021,
+     "wall_median_s": 1.1224560330156237,
+     "reps": 3
+    },
+    "batch": {
+     "rate_per_s": 1635194.0340631653,
+     "wall_median_s": 0.08391864399891347,
+     "reps": 3
+    }
+   },
+   "300000": {
+    "naked": {
+     "rate_per_s": 82173.86086532041,
+     "wall_median_s": 3.6735597910010256,
+     "reps": 3
+    },
+    "batch": {
+     "rate_per_s": 1586039.4023039779,
+     "wall_median_s": 0.2119142300216481,
+     "reps": 3
+    }
+   },
+   "1000000": {
+    "naked": {
+     "rate_per_s": 104503.2958845499,
+     "wall_median_s": 9.591840007982682,
+     "reps": 3
+    },
+    "batch": {
+     "rate_per_s": 1600329.7245358708,
+     "wall_median_s": 0.6476350499433465,
+     "reps": 3
+    }
+   }
+  }
+ }
+}

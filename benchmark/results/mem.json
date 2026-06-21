@@ -40,84 +40,84 @@
     "go": {
       "empty": {
         "n": 200000,
-        "rss_total": 535588864,
-        "rss_baseline": 4542464,
-        "bytes_per_fiber_rss": 2655.232
+        "rss_total": 543023104,
+        "rss_baseline": 4554752,
+        "bytes_per_fiber_rss": 2692.34176
       },
       "socket": {
         "n": 20000,
-        "rss_total": 74604544,
-        "rss_baseline": 4632576,
-        "bytes_per_fiber_rss": 3498.5984
+        "rss_total": 129499136,
+        "rss_baseline": 4542464,
+        "bytes_per_fiber_rss": 6247.8336
       },
       "million": {
         "n": 1000000,
-        "rss_total": 2685255680,
+        "rss_total": 2655899648,
         "pss_total": null,
-        "rss_per_fiber": 2685.25568
+        "rss_per_fiber": 2655.899648
       }
     },
     "runloom_py": {
       "empty": {
         "n": 200000,
-        "rss_total": 1807409152,
-        "rss_baseline": 46661632,
-        "bytes_per_fiber_rss": 8803.7376,
-        "bytes_per_fiber_pss": 8804.3776
+        "rss_total": 1807564800,
+        "rss_baseline": 46743552,
+        "bytes_per_fiber_rss": 8804.10624,
+        "bytes_per_fiber_pss": 8804.11648
       },
       "socket": {
         "n": 20000,
-        "rss_total": 1658109952,
-        "rss_baseline": 46723072,
-        "bytes_per_fiber_rss": 80569.344,
-        "bytes_per_fiber_pss": 80566.9888
+        "rss_total": 1657913344,
+        "rss_baseline": 46690304,
+        "bytes_per_fiber_rss": 80561.152,
+        "bytes_per_fiber_pss": 80558.4896
       },
       "million": {
         "n": 1000000,
-        "rss_total": 8847720448,
-        "pss_total": 8837512192,
-        "rss_per_fiber": 8847.720448
+        "rss_total": 8847843328,
+        "pss_total": 8839304192,
+        "rss_per_fiber": 8847.843328
       }
     },
     "runloom_py_optmem": {
       "empty": {
         "n": 200000,
-        "rss_total": 1807433728,
-        "rss_baseline": 46718976,
-        "bytes_per_fiber_rss": 8803.57376,
-        "bytes_per_fiber_pss": 8804.23936
+        "rss_total": 1807486976,
+        "rss_baseline": 46686208,
+        "bytes_per_fiber_rss": 8804.00384,
+        "bytes_per_fiber_pss": 8804.01408
       },
       "socket": {
         "n": 20000,
-        "rss_total": 1658077184,
-        "rss_baseline": 46489600,
-        "bytes_per_fiber_rss": 80579.3792,
-        "bytes_per_fiber_pss": 80571.2896
+        "rss_total": 1658195968,
+        "rss_baseline": 46624768,
+        "bytes_per_fiber_rss": 80578.56,
+        "bytes_per_fiber_pss": 80592.0768
       },
       "million": {
-        "error": "TimeoutExpired(['sudo', '-n', 'prlimit', '--nofile=8388608:8388608', 'taskset', '-c', '16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59', 'env', 'PYTHONPATH=/home/x/projects/pygo-bench/src', 'PYTHON_GIL=0', 'PATH=/home/x/projects/runloom_venv/bin:/usr/share/safe-rm/bin:/usr/share/safe-rm/bin:/home/x/.cargo/bin:/usr/share/safe-rm/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin:/snap/bin', 'HOME=/home/x', '/home/x/.pyenv/versions/3.13.13t/bin/python3', '/home/x/projects/pygo-bench/benchmark/suite/memory/mem_runloom.py', '--state', 'empty', '--n', '1000000', '--handler', 'py', '--hubs', '44', '--optimize', 'memory'], 900)"
+        "n": 1000000,
+        "rss_total": 8847720448,
+        "pss_total": 8839457792,
+        "rss_per_fiber": 8847.720448
       }
     },
     "runloom_c": {
       "empty": {
         "n": 200000,
-        "rss_total": 1807486976,
-        "rss_baseline": 46690304,
-        "bytes_per_fiber_rss": 8803.98336,
-        "bytes_per_fiber_pss": 8803.30752
+        "rss_total": 1807577088,
+        "rss_baseline": 46739456,
+        "bytes_per_fiber_rss": 8804.18816,
+        "bytes_per_fiber_pss": 8804.1984
       },
       "socket": {
         "n": 20000,
-        "rss_total": 1572601856,
-        "rss_baseline": 46862336,
-        "bytes_per_fiber_rss": 76286.976,
-        "bytes_per_fiber_pss": 76284.7232
+        "rss_total": 1572913152,
+        "rss_baseline": 46895104,
+        "bytes_per_fiber_rss": 76300.9024,
+        "bytes_per_fiber_pss": 76296.2432
       },
       "million": {
-        "n": 1000000,
-        "rss_total": 8847798272,
-        "pss_total": 8836997120,
-        "rss_per_fiber": 8847.798272
+        "error": "TimeoutExpired(['sudo', '-n', 'prlimit', '--nofile=8388608:8388608', 'taskset', '-c', '16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59', 'env', 'PYTHONPATH=/home/x/projects/pygo-bench/src', 'PYTHON_GIL=0', 'PATH=/home/x/projects/runloom_venv/bin:/usr/share/safe-rm/bin:/usr/share/safe-rm/bin:/home/x/.cargo/bin:/usr/share/safe-rm/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin:/snap/bin', 'HOME=/home/x', '/home/x/.pyenv/versions/3.13.13t/bin/python3', '/home/x/projects/pygo-bench/benchmark/suite/memory/mem_runloom.py', '--state', 'empty', '--n', '1000000', '--handler', 'c', '--hubs', '44'], 900)"
       }
     }
   }
