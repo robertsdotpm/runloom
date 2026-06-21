@@ -1,5 +1,10 @@
-"""Server tier: runloom_c.serve + a tstate-free Cython CDEF handler (the c_entry
-fast path), on the io_uring proactor (orchestrator sets RUNLOOM_IOURING_LOOP=1).
+"""Std name: runloom_iouring_cdef_tcpcon  (this file ALSO backs
+runloom_epoll_cdef_tcpcon -- same handler, no io_uring env, so it runs on the
+epoll readiness backend; the orchestrator selects the backend per spec).
+
+Server tier: runloom_c.serve + a tstate-free Cython CDEF handler (the c_entry
+fast path); io_uring proactor when the orchestrator sets RUNLOOM_IOURING_LOOP=1,
+else the epoll readiness backend.
 
 The difference from runloom_iouring_cython_tcpcon.py: handler_cdef.handler is a
 runloom_c.c_handler PyCapsule (a cdef C function), so serve() spawns it via

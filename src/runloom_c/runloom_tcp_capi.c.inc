@@ -190,7 +190,11 @@ Py_ssize_t runloom_tcp_c_fd_recv(int fd, void *buf, Py_ssize_t n)
             runloom_fsm_violation("runloom_tcp_capi.fd_recv",
                                   RUNLOOM_IO_RECV, -1, __FILE__, __LINE__);
         } RUNLOOM_IO_SWITCH_END
-        if (runloom_netpoll_wait_fd(fd, RUNLOOM_NETPOLL_READ, -1LL) < 0) {
+        /* _coop maps the POSITIVE RUNLOOM_NETPOLL_CANCELLED sentinel to -1 so a
+         * cancelled park UNWINDS instead of slipping the "< 0" test and busy-
+         * spinning on a cancelled-but-open fd under connection churn (matches the
+         * TCPConn methods + the cooperative socket fast paths; audit finding B3). */
+        if (runloom_netpoll_wait_fd_coop(fd, RUNLOOM_NETPOLL_READ, -1LL) < 0) {
             if (!errno) errno = ECANCELED;
             return -1;
         }
@@ -241,7 +245,8 @@ Py_ssize_t runloom_tcp_c_fd_send_all(int fd, const void *buf, Py_ssize_t n)
             runloom_fsm_violation("runloom_tcp_capi.fd_send_all",
                                   RUNLOOM_IO_SEND, -1, __FILE__, __LINE__);
         } RUNLOOM_IO_SWITCH_END
-        if (runloom_netpoll_wait_fd(fd, RUNLOOM_NETPOLL_WRITE, -1LL) < 0) {
+        /* _coop: unwind a cancelled park instead of busy-spinning (see fd_recv). */
+        if (runloom_netpoll_wait_fd_coop(fd, RUNLOOM_NETPOLL_WRITE, -1LL) < 0) {
             if (!errno) errno = ECANCELED;
             return -1;
         }

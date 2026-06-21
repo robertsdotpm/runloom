@@ -182,7 +182,7 @@ static void runloom_io_c_echo(void *arg)
                 if (n >= 0) break;
                 if (errno == EINTR) continue;
                 if (errno != EAGAIN && errno != EWOULDBLOCK) { runloom_io_c_close(fd); return; }
-                if (runloom_netpoll_wait_fd(fd, RUNLOOM_NETPOLL_READ, -1LL) < 0) { runloom_io_c_close(fd); return; }
+                if (runloom_netpoll_wait_fd_coop(fd, RUNLOOM_NETPOLL_READ, -1LL) < 0) { runloom_io_c_close(fd); return; }
             }
         }
         if (n == 0) {                           /* peer closed */
@@ -206,7 +206,7 @@ static void runloom_io_c_echo(void *arg)
                 if (s > 0) { sent += s; continue; }
                 if (s < 0 && errno == EINTR) continue;
                 if (s < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-                    if (runloom_netpoll_wait_fd(fd, RUNLOOM_NETPOLL_WRITE, -1LL) < 0) { runloom_io_c_close(fd); return; }
+                    if (runloom_netpoll_wait_fd_coop(fd, RUNLOOM_NETPOLL_WRITE, -1LL) < 0) { runloom_io_c_close(fd); return; }
                     continue;
                 }
                 runloom_io_c_close(fd); return;  /* hard error */
@@ -231,7 +231,7 @@ static void runloom_io_c_acceptor(void *arg)
         if (cfd < 0) {
             if (errno == EINTR || errno == ECONNABORTED) continue;
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                if (runloom_netpoll_wait_fd(lfd, RUNLOOM_NETPOLL_READ, -1LL) < 0) return;
+                if (runloom_netpoll_wait_fd_coop(lfd, RUNLOOM_NETPOLL_READ, -1LL) < 0) return;
                 continue;
             }
             return;                              /* listener closed / hard error */
@@ -278,7 +278,7 @@ static void runloom_io_c_handler_acceptor(void *arg)
         if (cfd < 0) {
             if (errno == EINTR || errno == ECONNABORTED) continue;
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                if (runloom_netpoll_wait_fd(lfd, RUNLOOM_NETPOLL_READ, -1LL) < 0) { free(a); return; }
+                if (runloom_netpoll_wait_fd_coop(lfd, RUNLOOM_NETPOLL_READ, -1LL) < 0) { free(a); return; }
                 continue;
             }
             free(a); return;                     /* listener closed / hard error */
