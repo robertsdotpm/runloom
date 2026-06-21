@@ -55,4 +55,12 @@ void runloom_blockpool_reset_after_fork(void);
  * fiber has no netpoll/iouring footprint of its own). */
 long runloom_blockpool_inflight(void);
 
+/* Optional per-worker-thread teardown hook, installed by the Python layer
+ * (module_chan.c.inc) so a worker can release the persistent PyThreadState it
+ * lazily created for Python offloads -- on the SAME thread, where its
+ * gilstate-TSS is bound.  Called once by each worker just before it exits.
+ * NULL (the default) means no Python offloads ran / nothing to clean up, so the
+ * generic blockpool stays free of any Python dependency. */
+extern void (*runloom_blockpool_worker_thread_fini)(void);
+
 #endif /* RUNLOOM_BLOCKPOOL_H */

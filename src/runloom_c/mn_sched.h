@@ -134,6 +134,18 @@ runloom_hub_info_t *runloom_mn_hub_snapshot(long *count_out);
  * to route a parked g when it becomes ready. */
 void *runloom_mn_current_hub_opaque(void);
 
+/* Persistent PyThreadState for a runloom-owned worker OS thread (e.g. a
+ * blockpool offload worker).  Created serialized against the hub-startup
+ * immortalize race and bound to the M:N interpreter, returned DETACHED.  The
+ * worker attaches it (PyEval_RestoreThread) ONLY around the Python call it runs,
+ * so it pays no per-job tstate create/destroy -- the runtime HEAD_LOCK churn
+ * that otherwise serializes all offload workers and caps offload throughput.
+ * Returns NULL when the M:N runtime isn't up (caller falls back to a per-call
+ * PyGILState_Ensure).  MUST be released on the SAME thread that created it, via
+ * runloom_mn_worker_tstate_delete (gilstate-TSS is thread-bound). */
+PyThreadState *runloom_mn_worker_tstate_new(void);
+void runloom_mn_worker_tstate_delete(PyThreadState *ts);
+
 /* Deposit an io_uring single-op cancel request (the target op, a void* across
  * the TU boundary) into the owning hub's mailbox + wake it, so the hub -- the
  * SINGLE_ISSUER of its ring -- submits the ASYNC_CANCEL at its loop top.

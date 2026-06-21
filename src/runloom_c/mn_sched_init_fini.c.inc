@@ -3,6 +3,35 @@
  * these definitions depend on. */
 
 
+/* Persistent worker-thread PyThreadState (see mn_sched.h).  Created on the
+ * worker's OWN thread so biased-refcount + mimalloc bind to it, serialized
+ * against the new_threadstate() immortalize race via runloom_hub_tstate_lock --
+ * exactly like the hubs and the handoff rescue thread.  NULL when the M:N
+ * interpreter isn't up. */
+PyThreadState *runloom_mn_worker_tstate_new(void)
+{
+    PyThreadState *ts;
+    if (runloom_mn_interp == NULL) return NULL;
+    RUNLOOM_RLOCK(&runloom_hub_tstate_lock, RUNLOOM_RANK_HUB_TSTATE);
+    ts = PyThreadState_New(runloom_mn_interp);
+    RUNLOOM_RUNLOCK(&runloom_hub_tstate_lock, RUNLOOM_RANK_HUB_TSTATE);
+    return ts;
+}
+
+void runloom_mn_worker_tstate_delete(PyThreadState *ts)
+{
+    if (ts == NULL) return;
+    /* Delete on THIS (owning) thread: PyThreadState_New gilstate-bound ts to this
+     * thread's gilstate-TSS slot, so it must be cleared/deleted here (mirrors the
+     * handoff rescue self-delete, mn_sched_handoff.c.inc).  RestoreThread first
+     * waits out any pending stop-the-world, then attaches so DeleteCurrent clears
+     * the right gilstate slot.  ts is DETACHED on entry (the worker SaveThread's
+     * after every job). */
+    PyEval_RestoreThread(ts);
+    PyThreadState_Clear(ts);
+    PyThreadState_DeleteCurrent();
+}
+
 int runloom_mn_init(int n_threads)
 {
     int i;

@@ -613,6 +613,11 @@ PyMODINIT_FUNC PyInit_runloom_c(void)
             return NULL;
         }
     }
+    /* Install the blockpool worker-thread teardown hook so each offload worker
+     * releases the persistent Python tstate it lazily created (see
+     * py_blocking_worker) on its own thread at exit -- before any worker starts
+     * (workers spawn lazily on the first offload, well after PyInit). */
+    runloom_blockpool_worker_thread_fini = py_blocking_worker_thread_fini;
     /* Set up the vectorcall singleton and expose it as `sched_yield`.
      * The interpreter's CALL bytecode will specialize this to the
      * vectorcall fast path, shaving Python-call-dispatch overhead off

@@ -336,10 +336,41 @@ typedef struct {
     PyObject *exc_tb;
 } py_blocking_job_t;
 
+/* Each blockpool worker thread caches ONE PyThreadState here (lazily, on its
+ * first Python offload) and reuses it via cheap attach/detach per job, instead
+ * of PyGILState_Ensure/Release creating + destroying a tstate every call.  The
+ * per-job create/destroy each took the runtime's global HEAD_LOCK, which
+ * serialized all workers and capped offload throughput at ~one round-trip at a
+ * time (measured: flat ~20k offloads/s regardless of workers/hubs/shards).  With
+ * a persistent tstate the per-job cost is just PyEval_RestoreThread/SaveThread
+ * (lock-free attach/detach), so offload scales.  `tried` records that creation
+ * was attempted (NULL result => M:N not up => fall back to PyGILState). */
+static RUNLOOM_TLS PyThreadState *bp_worker_pyts = NULL;
+static RUNLOOM_TLS int            bp_worker_pyts_tried = 0;
+
+/* Worker-exit hook (installed on runloom_blockpool_worker_thread_fini): release
+ * this thread's cached tstate on this thread, where its gilstate-TSS is bound. */
+static void py_blocking_worker_thread_fini(void)
+{
+    if (bp_worker_pyts != NULL) {
+        runloom_mn_worker_tstate_delete(bp_worker_pyts);
+        bp_worker_pyts = NULL;
+    }
+    bp_worker_pyts_tried = 0;
+}
+
+static void py_blocking_worker_call(py_blocking_job_t *j)
+{
+    j->result = PyObject_Call(j->fn, j->args, j->kwargs);
+    if (j->result == NULL) {
+        PyErr_Fetch(&j->exc_type, &j->exc_value, &j->exc_tb);
+        PyErr_NormalizeException(&j->exc_type, &j->exc_value, &j->exc_tb);
+    }
+}
+
 static void *py_blocking_worker(void *p)
 {
     py_blocking_job_t *j = (py_blocking_job_t *)p;
-    PyGILState_STATE st;
     /* If this thread already has an attached tstate, the call is running INLINE
      * (the off-fiber fallback in runloom_blocking_call, e.g. a top-level
      * blocking()).  Call directly: the tstate is held, so PyObject_Call is
@@ -347,22 +378,33 @@ static void *py_blocking_worker(void *p)
      * down on this thread, the gilstate TSS is desynced from the live tstate,
      * so Ensure() tries to attach a fresh tstate over the still-current one and
      * aborts ("_PyThreadState_Attach: non-NULL old thread state").  Only a bare
-     * pool thread (no tstate) needs to Ensure one. */
+     * pool thread (no tstate) needs one. */
     if (PyThreadState_GetUnchecked() != NULL) {
-        j->result = PyObject_Call(j->fn, j->args, j->kwargs);
-        if (j->result == NULL) {
-            PyErr_Fetch(&j->exc_type, &j->exc_value, &j->exc_tb);
-            PyErr_NormalizeException(&j->exc_type, &j->exc_value, &j->exc_tb);
-        }
+        py_blocking_worker_call(j);
         return NULL;
     }
-    st = PyGILState_Ensure();
-    j->result = PyObject_Call(j->fn, j->args, j->kwargs);
-    if (j->result == NULL) {
-        PyErr_Fetch(&j->exc_type, &j->exc_value, &j->exc_tb);
-        PyErr_NormalizeException(&j->exc_type, &j->exc_value, &j->exc_tb);
+
+    /* Bare pool worker.  Use a PERSISTENT per-thread tstate, created once and
+     * attached ONLY around the Python call (so a pure-C offload on this same
+     * worker, or the idle wait between jobs, never holds an attached tstate that
+     * would stall a stop-the-world GC). */
+    if (!bp_worker_pyts_tried) {
+        bp_worker_pyts_tried = 1;
+        bp_worker_pyts = runloom_mn_worker_tstate_new();   /* NULL if M:N not up */
     }
-    PyGILState_Release(st);
+    if (bp_worker_pyts != NULL) {
+        PyEval_RestoreThread(bp_worker_pyts);              /* cheap attach */
+        py_blocking_worker_call(j);
+        PyEval_SaveThread();                               /* cheap detach */
+        return NULL;
+    }
+
+    /* Fallback (single-thread sched / M:N not running): per-call gilstate. */
+    {
+        PyGILState_STATE st = PyGILState_Ensure();
+        py_blocking_worker_call(j);
+        PyGILState_Release(st);
+    }
     return NULL;
 }
 
