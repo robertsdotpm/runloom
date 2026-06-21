@@ -277,7 +277,7 @@ static int runloom_resolve_migratable_mode(void)
     if (runloom_unsafe_migration_acked()) return 1;
     fprintf(stderr,
         "[runloom] cross-hub migration (RUNLOOM_MIGRATION / RUNLOOM_PER_G_TSTATE / "
-        "RUNLOOM_STEAL_WOKEN) is OFF: this CPython lacks the alloc-home patch, so a "
+        "RUNLOOM_STEAL_WOKEN) is GATED OFF: this CPython lacks the alloc-home patch, so a "
         "per-g PyThreadState's mimalloc heap would migrate across hub threads -> "
         "SEGV under churn at H>=2 (see docs/dev/STEAL_WOKEN_CLEANUP.md). For "
         "PRODUCTION, build against patches/cpython313t-tstate-alloc-home.patch "
