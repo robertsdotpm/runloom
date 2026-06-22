@@ -369,6 +369,8 @@ def sec_perf(perf):
         cores = s.get("cores", 1)
         rps = pk.get("rps_median", 0)
         ceil = mt.get("server_ceiling_est")
+        su = pk.get("server_cpu_util") or 0
+        cu = pk.get("client_cpu_util") or 0
         rows.append([
             ('<b>%s</b><br><span class="sub">%s</span>' % (prog_html(name), esc(s.get("label", ""))), std(name)),
             (esc(s.get("interp", "")), s.get("interp", "")),
@@ -376,12 +378,15 @@ def sec_perf(perf):
             (fmt(rps), rps),
             (fmt(pk.get("conns")), pk.get("conns")),
             (fmt(pk.get("p99_us")), pk.get("p99_us")),
+            ("%.0f%%" % (su * 100), su),
+            ("%.0f%%" % (cu * 100), cu),
             (esc(mt.get("bottleneck_at_peak", "")), mt.get("bottleneck_at_peak", "")),
             (fmt(ceil), ceil or 0),
         ])
     rows.sort(key=lambda r: -(r[3][1] or 0))   # sort by raw peak req/s, as measured
     hdr = [("Server", False), ("Interp", False), ("Cores", True), ("Peak req/s", True),
            ("Conns@peak", True), ("p99 &micro;s", True),
+           ("Srv CPU%", True), ("Cli CPU%", True),
            ("Bottleneck", False), ("Server-ceiling est. (extrap.)", True)]
     reqps_tbl = table("t_reqps", hdr, rows,
                       "Sorted by <b>raw peak req/s</b>, as measured &mdash; the Cores column shows how "
@@ -407,16 +412,20 @@ def sec_perf(perf):
         cores = s.get("cores", 1)
         payload = mt.get("payload", config.PAYLOAD_LARGE)
         gbps = pk.get("rps_median", 0) * payload * 2 / 1e9
+        su = pk.get("server_cpu_util") or 0
+        cu = pk.get("client_cpu_util") or 0
         brows.append([
             ('<b>%s</b>' % prog_html(name), std(name)),
             (fmt(cores), cores),
             (fmt(gbps, 2), gbps),
             (fmt(pk.get("conns")), pk.get("conns")),
+            ("%.0f%%" % (su * 100), su),
+            ("%.0f%%" % (cu * 100), cu),
             (esc(mt.get("bottleneck_at_peak", "")), mt.get("bottleneck_at_peak", "")),
         ])
     brows.sort(key=lambda r: -(r[2][1] or 0))   # sort by raw peak GB/s, as measured
     bhdr = [("Server", False), ("Cores", True), ("Peak GB/s", True),
-            ("Conns@peak", True), ("Bottleneck", False)]
+            ("Conns@peak", True), ("Srv CPU%", True), ("Cli CPU%", True), ("Bottleneck", False)]
     bw_tbl = table("t_bw", bhdr, brows,
                    "1.5 MiB payload echoed (send + receive counted), sorted by <b>raw peak GB/s</b>, "
                    "as measured (Cores column shown, not divided out). Aggregate over the veth pair; "
@@ -1343,10 +1352,20 @@ def sec_conn_churn(cc):
             "Cores column is alongside (not divided out). Connection churn is dominated by the TCP "
             "accept/setup/teardown syscalls EVERY runtime pays, so a heavier fiber-spawn is only a "
             "slice of the per-connection cost &mdash; but lower server CPU at the same conn/s means "
-            "more headroom under heavier churn. The churn client fans its connects across many "
-            "source IPs (<code>conn_churn.py</code>) so TIME_WAIT / ephemeral-port exhaustion does "
-            "not cap the measured conn/s &mdash; every rung here ran with zero dial errors. "
-            "Single-core asyncio/uvloop/gevent saturate one core.")
+            "more headroom under heavier churn. <b>Read the Srv/Cli CPU% columns &mdash; they say who "
+            "the wall is</b>: the fast runloom tiers run the server at ~55&ndash;70% with the 16-core "
+            "client pinned at ~96% (client-bound &mdash; the loadgen is the limit, the server still "
+            "has headroom), whereas <b>Go sits at ~17% server CPU and is flat at ~33k from the very "
+            "first rung (16 dialers)</b> &mdash; it is <b>not</b> CPU-bound, it is serialized on its "
+            "single <code>Accept()</code> loop, so more dialers don't help and it peaks at a far lower "
+            "dialer count. The runloom servers use <b>N SO_REUSEPORT acceptors</b> (one accept queue "
+            "per hub), so accept parallelizes and conn/s climbs with dialers. <b>That acceptor "
+            "asymmetry (N vs 1), not the runtime, is most of the runloom conn/s lead</b> &mdash; in "
+            "the persistent req/s benchmark (accept once, then loop) Go is &asymp; runloom. A "
+            "like-for-like churn comparison needs the Go baseline on N reuseport acceptors too. "
+            "The churn client fans its connects across many source IPs (<code>conn_churn.py</code>) so "
+            "TIME_WAIT / ephemeral-port exhaustion does not cap the measured conn/s &mdash; every rung "
+            "here ran with zero dial errors. Single-core asyncio/uvloop/gevent saturate one core.")
 
     if servers:
         rows = []
@@ -1357,6 +1376,8 @@ def sec_conn_churn(cc):
             cores = s.get("cores", 1) or 1
             cps = pk.get("rps_median", 0)
             ceil = s.get("server_ceiling_est")
+            su = pk.get("server_cpu_util") or 0
+            cu = pk.get("client_cpu_util") or 0
             rows.append([
                 ('<b>%s</b><br><span class="sub">%s</span>' % (esc(name), esc(s.get("label", ""))), name),
                 (esc(s.get("interp", "")), s.get("interp", "")),
@@ -1364,6 +1385,8 @@ def sec_conn_churn(cc):
                 (fmt(cps), cps),
                 (fmt(pk.get("conns")), pk.get("conns")),
                 (fmt(pk.get("p99_us")), pk.get("p99_us")),
+                ("%.0f%%" % (su * 100), su),
+                ("%.0f%%" % (cu * 100), cu),
                 (esc(s.get("bottleneck_at_peak", "")), s.get("bottleneck_at_peak", "")),
                 (fmt(ceil), ceil or 0),
             ])
@@ -1371,7 +1394,8 @@ def sec_conn_churn(cc):
             rows.sort(key=lambda r: -(r[3][1] or 0))
             cols = [("Runtime", False), ("Interp", False), ("Cores", True),
                     ("Peak conn/s", True), ("Dialers@peak", True),
-                    ("p99 &micro;s", True), ("Bottleneck", False), ("Server-ceiling est.", True)]
+                    ("p99 &micro;s", True), ("Srv CPU%", True), ("Cli CPU%", True),
+                    ("Bottleneck", False), ("Server-ceiling est.", True)]
             return intro + table("t_churn", cols, rows, note)
 
     if legacy:
