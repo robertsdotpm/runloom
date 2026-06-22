@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Cross-runtime handler work curve: the same FNV --work knob across EVERY
-runtime, reported PER CORE so the comparison is honest (not "runloom magic").
+runtime, reported as RAW peak throughput (the core count each ran on is recorded
+alongside, not divided out).
 
 The runloom-only curve (work_sweep.py -> work_curve.json) isolates "what does
 compiling the handler buy" within one runtime. This puts that in context: the
@@ -10,12 +11,13 @@ identical FNV-1a byte hash runs in each runtime's natural handler language --
                        for the event loops, like the echo benchmark)
   compiled / native  : runloom_cython (M:N), go (GOMAXPROCS)
 
-Read PER CORE, the prediction is two bands: the interpreted runtimes cluster
-together and the compiled ones cluster together -- i.e. for CPU-bound handler
-work the dominant variable is the handler LANGUAGE, not the runtime. runloom's
-own advantage is that it gets the compiled band (Cython) while keeping M:N
-parallelism across all cores; a single asyncio process serialises the same work
-onto one core. Nothing cherry-picked: same algorithm, every runtime, per core.
+The prediction is two bands: the interpreted runtimes cluster together and the
+compiled ones cluster together -- i.e. for CPU-bound handler work the dominant
+variable is the handler LANGUAGE, not the runtime. runloom's own advantage is
+that it gets the compiled band (Cython) while keeping M:N parallelism across all
+cores; a single asyncio process serialises the same work onto one core. Compare
+within a matched core count (runloom-cython vs Go run on the same cores). Nothing
+cherry-picked: same algorithm, every runtime, raw throughput with cores shown.
 
 Separate artifact (results/work_xrt.json) so the committed 8-point isolation
 curve is untouched. Short ladder; work>0 is CPU-bound and saturates at low conns.
@@ -116,8 +118,8 @@ def run_point(rt, w, port):
         config.CLIENT_CORES, len(LADDER), server_cpus=srv_cpus)
     pk = out["peak"]
     rps = pk["rps_median"]
-    print("  -> %-16s peak=%.0f rps  per-core=%.0f  cpu=%.0f%%  bottleneck=%s"
-          % (rt["name"], rps, rps / rt["cores"], (pk.get("server_cpu_util") or 0) * 100,
+    print("  -> %-16s peak=%.0f rps  cores=%d  cpu=%.0f%%  bottleneck=%s"
+          % (rt["name"], rps, rt["cores"], (pk.get("server_cpu_util") or 0) * 100,
              out["bottleneck_at_peak"]), flush=True)
     out["_cores"] = rt["cores"]
     return out

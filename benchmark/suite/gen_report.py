@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Generate the single consolidated benchmark report: benchmark/report.html.
 
-Consumes results/{env,perf,speed,mem}.json, renders sortable tables (per-core
-normalised + raw), the assumed constraints/methodology, an embedded code viewer
+Consumes results/{env,perf,speed,mem}.json, renders sortable tables (raw
+throughput, with each runtime's core count shown but not divided out), the
+assumed constraints/methodology, an embedded code viewer
 for every benchmark program, and links to the pre-existing cross-platform
 backend syscall profiles (linux/mac/win).
 """
@@ -103,7 +104,7 @@ def svg_linechart(cid, series, xlabels, xaxis="FNV passes (--work)", logy=True,
         out.append('<text x="%.1f" y="%d" class="xtick">%s</text>' % (xp(i), mt + ph + 16, esc(xl)))
     out.append('<text x="%.1f" y="%d" class="axlbl">%s</text>' % (ml + pw / 2, height - 5, esc(xaxis)))
     out.append('<text x="14" y="%.1f" class="axlbl" transform="rotate(-90 14 %.1f)">%s</text>'
-               % (mt + ph / 2, mt + ph / 2, esc(ylabel or ("req/s (log)" if logy else "req/s per core"))))
+               % (mt + ph / 2, mt + ph / 2, esc(ylabel or ("req/s (log)" if logy else "req/s"))))
     out.append('<text x="%d" y="%d" class="hint">click a name to toggle</text>' % (ml + pw + 14, mt - 12))
     for si, s in enumerate(series):
         name, color, ys = s[0], s[1], s[2]
@@ -316,7 +317,7 @@ def sec_constraints(meta):
          "server cpus <code>%s</code> &harr; client <code>%s</code> (disjoint, loadgen never steals a core). "
          "<b>NB:</b> the server cpu set straddles BOTH NUMA nodes while the 1-core asyncio/uvloop/gevent "
          "runs stay NUMA-local, so the M:N servers pay some cross-node memory traffic the single-core runs "
-         "don&rsquo;t &mdash; a pinning artifact that <i>depresses</i> the runloom/Go per-core figures, not a "
+         "don&rsquo;t &mdash; a pinning artifact that <i>depresses</i> the runloom/Go throughput, not a "
          "runtime cost"
          % (m.get("hubs"), m.get("go_server_cores"), m.get("client_cores"),
             m.get("server_cpus"), m.get("client_cpus"))),
@@ -332,14 +333,17 @@ def sec_constraints(meta):
          "servers, so each peak is tagged client- vs server-bound (+ a server-ceiling estimate when "
          "client-bound). The stop-rule can occasionally tag a sub-saturation peak as server-bound (a "
          "known detection artifact) and truncate a ladder early, which can mis-rank close rows &mdash; "
-         "read the per-core + bottleneck columns together, not the rank alone." % (config.PLATEAU_PATIENCE, m.get("reps"))),
-        ("Per-core", "throughput (req/s, spawn, GB/s) &divide; core count; latencies (ctxswitch, RTT) "
-         "are not. <code>run(1)</code> is NOT used as &lsquo;runloom per core&rsquo; &mdash; that is the "
-         "M:1 cooperative scheduler, a different runtime than the M:N work-stealer."),
+         "read the bottleneck column alongside the rank, not the rank alone." % (config.PLATEAU_PATIENCE, m.get("reps"))),
+        ("Throughput", "shown <b>raw, as measured</b> (req/s, spawn/s, GB/s, conn/s) &mdash; NOT "
+         "divided by core count; each runtime&rsquo;s core count is in its own column, so a number is "
+         "always paired with the hardware that produced it. Latencies (ctxswitch, RTT) are absolute. "
+         "Compare within a matched core count (e.g. runloom vs Go, both on the full set)."),
         ("Acceptors", "runloom servers run <b>N SO_REUSEPORT acceptors</b> (one kernel accept queue per "
          "hub); the Go baseline uses a <b>single <code>Accept()</code> loop</b>. Irrelevant to keep-alive "
-         "req/s (connections are accepted once, then loop on) but it would favour runloom on connection "
-         "<i>churn</i> &mdash; which is why no conn/s comparison is claimed here."),
+         "req/s (connections are accepted once, then loop on) but it favours runloom on connection "
+         "<i>churn</i> &mdash; so the conn/s comparison <b>is</b> shown (see the churn section), with "
+         "that acceptor asymmetry called out as a caveat: part of the runloom conn/s lead is acceptor "
+         "count, not runtime."),
         ("Provenance", "Result JSONs span several days and runloom builds: the <b>active-spawn</b> "
          "numbers were measured with the current build (the one exposing <code>fiber_n</code>), the rest "
          "with the build present when each JSON was written. governor = n/a (cpufreq sysfs absent on this "
@@ -364,39 +368,35 @@ def sec_perf(perf):
             continue
         cores = s.get("cores", 1)
         rps = pk.get("rps_median", 0)
-        per = rps / cores
         ceil = mt.get("server_ceiling_est")
         rows.append([
             ('<b>%s</b><br><span class="sub">%s</span>' % (prog_html(name), esc(s.get("label", ""))), std(name)),
             (esc(s.get("interp", "")), s.get("interp", "")),
             (fmt(cores), cores),
             (fmt(rps), rps),
-            (fmt(per), per),
             (fmt(pk.get("conns")), pk.get("conns")),
             (fmt(pk.get("p99_us")), pk.get("p99_us")),
             (esc(mt.get("bottleneck_at_peak", "")), mt.get("bottleneck_at_peak", "")),
             (fmt(ceil), ceil or 0),
         ])
-    rows.sort(key=lambda r: -(r[4][1] or 0))   # best = highest req/s PER CORE (spec's scale-to-1-core; the only cross-model-fair axis)
+    rows.sort(key=lambda r: -(r[3][1] or 0))   # sort by raw peak req/s, as measured
     hdr = [("Server", False), ("Interp", False), ("Cores", True), ("Peak req/s", True),
-           ("req/s / core", True), ("Conns@peak", True), ("p99 &micro;s", True),
+           ("Conns@peak", True), ("p99 &micro;s", True),
            ("Bottleneck", False), ("Server-ceiling est. (extrap.)", True)]
     reqps_tbl = table("t_reqps", hdr, rows,
-                      "Sorted by req/s <b>per core</b> &mdash; the spec's scale-to-1-core "
-                      "normalisation, the only apples-to-apples axis across these concurrency "
-                      "models. Small 1 KiB payload &rarr; measures scheduling + syscall overhead, "
-                      "not bandwidth. <b>Read the bottleneck column.</b> The 44-hub M:N runtimes "
-                      "(runloom, go) post the biggest <i>absolute</i> req/s (click 'Peak req/s') "
-                      "because they use the whole machine &mdash; but at peak they are "
+                      "Sorted by <b>raw peak req/s</b>, as measured &mdash; the Cores column shows how "
+                      "many cores produced each number (it is not divided out). Small 1 KiB payload "
+                      "&rarr; measures scheduling + syscall overhead, not bandwidth. <b>Read the "
+                      "bottleneck column.</b> The 44-hub M:N runtimes (runloom, go) post the biggest "
+                      "req/s because they use the whole machine &mdash; but at peak they are "
                       "<b>client-bound</b>: the 16-core loadgen saturates before the server does, so "
-                      "those absolute numbers measure the loadgen ceiling, not the server, and the "
-                      "~6&times; spread among the fast runtimes sits inside the loadgen's noise. "
-                      "<b>Per core, the single-threaded GIL loops (uvloop, asyncio) genuinely "
-                      "win</b> &mdash; a real server-bound measurement for them, while free-threading "
-                      "pays an atomic-refcount / cross-core tax. The server-ceiling column is a rough "
-                      "<i>extrapolation</i> (peak &divide; CPU-util; it only lifts client-bound rows) "
-                      "&mdash; an upper bound, not a measurement. For a <b>server-bound</b> throughput "
-                      "comparison (the meaningful one), see the handler work-curve below.")
+                      "those numbers measure the loadgen ceiling, not the server, and the spread among "
+                      "the fast runtimes sits inside the loadgen's noise. The single-core GIL loops "
+                      "(uvloop, asyncio) are server-bound here, so their numbers are a real ceiling for "
+                      "one core. The server-ceiling column is a rough <i>extrapolation</i> (peak "
+                      "&divide; CPU-util; it only lifts client-bound rows) &mdash; an upper bound, not "
+                      "a measurement. For a <b>server-bound</b> throughput comparison (the meaningful "
+                      "one), see the handler work-curve below.")
     # bandwidth
     brows = []
     for name, s in servers.items():
@@ -411,18 +411,17 @@ def sec_perf(perf):
             ('<b>%s</b>' % prog_html(name), std(name)),
             (fmt(cores), cores),
             (fmt(gbps, 2), gbps),
-            (fmt(gbps / cores, 3), gbps / cores),
             (fmt(pk.get("conns")), pk.get("conns")),
             (esc(mt.get("bottleneck_at_peak", "")), mt.get("bottleneck_at_peak", "")),
         ])
-    brows.sort(key=lambda r: -(r[3][1] or 0))   # per-core (GB/s/core), consistent with the req/s table
-    bhdr = [("Server", False), ("Cores", True), ("Peak GB/s", True), ("GB/s / core", True),
+    brows.sort(key=lambda r: -(r[2][1] or 0))   # sort by raw peak GB/s, as measured
+    bhdr = [("Server", False), ("Cores", True), ("Peak GB/s", True),
             ("Conns@peak", True), ("Bottleneck", False)]
     bw_tbl = table("t_bw", bhdr, brows,
-                   "1.5 MiB payload echoed (send + receive counted), sorted by GB/s <b>per core</b> "
-                   "to match the req/s table. Aggregate over the veth pair; <b>client-bound at the "
-                   "peak in most rows</b> (Bottleneck = client), so absolute GB/s reflects the "
-                   "loadgen ceiling, not the server &mdash; per-core is the fairer cross-model axis.")
+                   "1.5 MiB payload echoed (send + receive counted), sorted by <b>raw peak GB/s</b>, "
+                   "as measured (Cores column shown, not divided out). Aggregate over the veth pair; "
+                   "<b>client-bound at the peak in most rows</b> (Bottleneck = client), so the GB/s "
+                   "reflects the loadgen ceiling, not the server.")
     # full connection-ladder curves (methodology: raise conns until req/s stops growing)
     curves = ['<h3>Connection-ladder curves (req/s)</h3>'
               '<p class="note">The stop rule walks connections up a geometric ladder until '
@@ -467,8 +466,7 @@ def sec_speed(speed):
             continue
         cores = d.get("cores", 1)
         rows.append([prog_cell(rt), (fmt(cores), cores), (fmt(d["rate_per_s"]), d["rate_per_s"]),
-                     (fmt(d["seconds"] * 1e6 / d["n"], 2), d["seconds"] * 1e6 / d["n"]),
-                     (fmt(d["rate_per_s"] / cores), d["rate_per_s"] / cores)])
+                     (fmt(d["seconds"] * 1e6 / d["n"], 2), d["seconds"] * 1e6 / d["n"])])
     rows.sort(key=lambda r: -(r[2][1] or 0))   # best = highest absolute spawn rate
     out.append("<h3>Spawn 1M fibers / goroutines / coroutines (NAKED, worst case)</h3>")
     out.append('<p class="warn">This is <b>naked single-spawn</b> &mdash; ONE spawner creating '
@@ -481,7 +479,7 @@ def sec_speed(speed):
                'measured here</b> &mdash; a runloom capability (Go has no batch API), though still '
                'below Go\'s naked ~2.15M. Read this curve as the worst case, not the headline.</p>')
     out.append(table("t_spawn", [("Runtime", False), ("Cores", True), ("spawn/s", True),
-                                 ("&micro;s/task", True), ("spawn/s / core", True)], rows,
+                                 ("&micro;s/task", True)], rows,
                      "Higher is better &mdash; but this is the WORST case (one-at-a-time, no arena). "
                      "runloom&rsquo;s batch <code>fiber_n</code> path (see the <a href=\"#activespawn\">"
                      "Active spawn</a> panel) is ~16&times; faster than naked but still <i>below</i> "
@@ -605,18 +603,15 @@ def sec_speed(speed):
         if "rps" not in d:
             continue
         cores = d.get("cores", 1)
-        rows.append([prog_cell(rt), (fmt(cores), cores), (fmt(d["rps"]), d["rps"]),
-                     (fmt(d["rps"] / cores), d["rps"] / cores)])
-    rows.sort(key=lambda r: -(r[3][1] or 0))   # best = highest req/s PER CORE (consistent with the req/s table)
+        rows.append([prog_cell(rt), (fmt(cores), cores), (fmt(d["rps"]), d["rps"])])
+    rows.sort(key=lambda r: -(r[2][1] or 0))   # sort by raw req/s, as measured
     out.append("<h3>HTTP req/s (client vs a Go httpd)</h3>")
-    out.append(table("t_http", [("Runtime", False), ("Cores", True), ("req/s", True),
-                                ("req/s / core", True)], rows,
-                     "Sorted by req/s <b>per core</b>, like the main req/s table. The runtime under "
-                     "test is the HTTP <i>client</i> (keepalive GET) against a fixed Go server. "
-                     "<b>Core counts differ:</b> runloom and go drive the client on 16 cores, "
-                     "asyncio/uvloop/greenlet on 1 &mdash; so by <i>absolute</i> req/s (click 'req/s') "
-                     "the 16-core clients lead, but <b>per core the single-threaded loops (uvloop, "
-                     "greenlet, asyncio) win</b>, the same story as the server req/s table."))
+    out.append(table("t_http", [("Runtime", False), ("Cores", True), ("req/s", True)], rows,
+                     "Sorted by <b>raw req/s</b>, as measured (Cores column shown, not divided out). "
+                     "The runtime under test is the HTTP <i>client</i> (keepalive GET) against a fixed "
+                     "Go server. <b>Core counts differ:</b> runloom and go drive the client on 16 "
+                     "cores, asyncio/uvloop/greenlet on 1 &mdash; so the 16-core clients lead on raw "
+                     "req/s while the single-core loops are held to one core."))
 
     # rtt
     rows = []
@@ -785,7 +780,7 @@ def sec_work(work):
                     "genuinely server-bound under heavy work. "
                     "The work is PURE inline arithmetic (an FNV xor/mul loop) &mdash; nothing "
                     "runloom routes to the blockpool, so it runs on the fiber's hub and the "
-                    "per-core CPU accounting stays valid. <b>Honest framing:</b> if the handler "
+                    "server-CPU measurement attributes the work correctly. <b>Honest framing:</b> if the handler "
                     "delegated this to a C-accelerated library (<code>hashlib</code>, "
                     "<code>json</code>, <code>struct</code>), Python and Cython would converge "
                     "&mdash; both just call the same native code, back to echo-equal. The gap "
@@ -794,9 +789,10 @@ def sec_work(work):
 
 
 def sec_work_xrt(xrt):
-    """Cross-runtime work curve, PER CORE: the same FNV --work knob in every
-    runtime's natural handler language. One row per runtime, sorted by per-core
-    throughput at the heaviest work so the two bands (compiled vs interpreted)
+    """Cross-runtime work curve: the same FNV --work knob in every runtime's
+    natural handler language, reported as RAW peak throughput (not divided by
+    cores -- the cores column is shown alongside). One row per runtime, sorted by
+    raw throughput at the heaviest work so the two bands (compiled vs interpreted)
     separate visually. The honest point: for CPU-bound handler work the dominant
     variable is the handler LANGUAGE, not the runtime."""
     if not xrt:
@@ -809,15 +805,14 @@ def sec_work_xrt(xrt):
         return ""
     heaviest = str(works[-1])
 
-    def percore(name, w):
+    def rawrps(name, w):
         r = res.get(name, {}).get(str(w), {})
         rps = r.get("peak", {}).get("rps_median")
-        c = rtinfo.get(name, {}).get("cores", 1) or 1
-        return (rps / c) if rps else None
+        return rps if rps else None
 
     rows = []
     for name, info in rtinfo.items():
-        pc_heavy = percore(name, works[-1])
+        heavy = rawrps(name, works[-1])
         kind = info.get("kind", "")
         cells = [
             (esc(info.get("label", name)), info.get("label", name)),
@@ -825,9 +820,9 @@ def sec_work_xrt(xrt):
             (str(info.get("cores", 1)), info.get("cores", 1)),
         ]
         for w in works:
-            pc = percore(name, w)
-            cells.append((fmt(pc) if pc is not None else "&mdash;", pc if pc is not None else -1))
-        rows.append((pc_heavy if pc_heavy is not None else -1, cells))
+            v = rawrps(name, w)
+            cells.append((fmt(v) if v is not None else "&mdash;", v if v is not None else -1))
+        rows.append((heavy if heavy is not None else -1, cells))
     rows.sort(key=lambda t: -t[0])
     body = [c for _, c in rows]
 
@@ -835,7 +830,7 @@ def sec_work_xrt(xrt):
     for w in works:
         hdr.append((("w=%d (echo)" % w) if w == 0 else ("w=%d" % w), True))
 
-    # per-core line chart: cool colours = compiled band, warm = interpreted band
+    # raw-throughput line chart: cool colours = compiled band, warm = interpreted
     palette = {"runloom_cython": "var(--good)", "go": "var(--acc)",
                "runloom_py": "var(--warn)", "asyncio": "#ff9966",
                "uvloop": "#ff6b9d", "gevent": "#e06c75"}
@@ -843,60 +838,58 @@ def sec_work_xrt(xrt):
     cseries = []
     for name, info in rtinfo.items():
         cseries.append((info.get("label", name), palette.get(name, "var(--fg)"),
-                        [percore(name, w) for w in works], name))
+                        [rawrps(name, w) for w in works], name))
     chart = svg_linechart("ch_xrt", cseries, xlabels)
 
-    # FOCUSED chart at the top: just the compiled band (runloom Cython vs Go) on
-    # a LINEAR y-axis, where the ~2x Go-vs-runloom gap reads true (log-y hides
-    # it). Only render the compiled runtimes that are present.
+    # FOCUSED chart at the top: just the compiled band (runloom Cython vs Go,
+    # same core count) on a LINEAR y-axis, where the ~2x Go-vs-runloom gap reads
+    # true (log-y hides it). Only render the compiled runtimes that are present.
     comp_order = [n for n in ("go", "runloom_cython")
-                  if n in rtinfo and any(percore(n, w) for w in works)]
+                  if n in rtinfo and any(rawrps(n, w) for w in works)]
     focus = ""
     if len(comp_order) >= 2:
         fseries = [(rtinfo[n].get("label", n), palette.get(n, "var(--fg)"),
-                    [percore(n, w) for w in works], n) for n in comp_order]
+                    [rawrps(n, w) for w in works], n) for n in comp_order]
         focus = ('<h3>Compiled handlers vs Go (linear scale &mdash; the gap the log chart hides)</h3>'
                  + svg_linechart("ch_comp", fseries, xlabels, logy=False,
-                                 ylabel="req/s per core (linear)"))
+                                 ylabel="req/s (linear)"))
 
-    return ('<h2 id="workxrt">Cross-runtime work curve &mdash; per core, every runtime</h2>'
+    return ('<h2 id="workxrt">Cross-runtime work curve &mdash; every runtime</h2>'
             '<p>The same <code>--work N</code> FNV-1a byte hash, run in <b>each runtime\'s '
-            'natural handler language</b>, reported <b>per core</b> (peak rps &divide; pinned '
-            'cores) so it is an efficiency comparison, not a core-count one. <b>Two</b> runloom '
+            'natural handler language</b>, reported as <b>raw peak req/s</b> &mdash; the cores column '
+            'shows how many cores produced each number (it is not divided out). <b>Two</b> runloom '
             'handler tiers are measured in this curve: interpreted Python (<code>py</code>) and the '
             'fully-native zero-PyObject Cython handler (<code>cython</code>, work inline &mdash; the '
             'state-of-the-art path). (The tstate-free <code>cdef</code> handler is an echo handler '
             'with no <code>--work</code> knob, so it is not on this curve &mdash; its result lives in '
             'the io_uring section.) '
-            'References: Go (<code>GOMAXPROCS</code>) and the single-core event loops '
-            '(asyncio / uvloop / gevent). <b>Click any name in a chart legend to toggle it</b> '
-            '(e.g. isolate one runloom line against Go).</p>'
-            '<p><b>The headline:</b> a fully-native runloom Cython handler <b>matches&ndash;to&ndash;beats '
+            'References: Go (<code>GOMAXPROCS</code>) on the same core count, and the single-core '
+            'event loops (asyncio / uvloop / gevent). <b>Click any name in a chart legend to toggle '
+            'it</b> (e.g. isolate one runloom line against Go).</p>'
+            '<p><b>The headline</b> (runloom-cython and Go run on the same core count, so that pair is '
+            'like-for-like): a fully-native runloom Cython handler <b>matches&ndash;to&ndash;beats '
             'Go across the whole curve</b> &mdash; runloom-cython is <em>ahead</em> '
             'of Go through ~work&nbsp;4 (its faster I/O paying off) and within ~8% at the heaviest '
             'compute, where Go\'s native codegen edges back. The earlier 2&times; gap was entirely '
             'the interpreted Python <code>def</code> wrapper; inlining the work into the compiled '
             'handler erases it. Meanwhile the interpreted handlers (runloom-py, asyncio, uvloop, gevent) '
-            'collapse ~100&ndash;200&times; below under real work &mdash; the handler <em>language</em> '
+            'collapse far below under real work &mdash; the handler <em>language</em> '
             'is the only thing that ever separates the field.</p>'
             + focus
             + chart
             + table("t_workxrt", hdr, body, mark_best=True, note=
-                    "Rows sorted by per-core throughput at the heaviest work &mdash; the "
+                    "Rows sorted by <b>raw peak req/s</b> at the heaviest work &mdash; the "
                     "<b>rightmost column is the true capacity comparison</b> (the only point where all "
                     "runtimes are genuinely server-bound). Two bands, drawn by the <b>handler "
-                    "language, not the runtime</b>: compiled (runloom-cython &asymp; Go, "
-                    "~6.5&ndash;7k/core) ~180&times; above interpreted (~30&ndash;40/core); "
-                    "the runtime barely matters inside a band, and runloom-py is the <em>top</em> of "
-                    "the interpreted band (free-threaded M:N Python is not slower per core than a "
-                    "single-thread event loop, and runs on all 44 cores at once). <b>Lighter-work "
-                    "columns:</b> the compiled runtimes are so fast there that the 16-core loadgen "
-                    "can\'t saturate them (bottleneck <code>client</code>), so those per-core figures "
-                    "are the loadgen ceiling &divide; cores, not capacity &mdash; hence any "
-                    "non-monotonicity is the measurement, not the runtime. <b>The <code>w=0</code> "
-                    "(echo) inversion:</b> single-thread event loops lead per core (uvloop highest) "
-                    "because pure I/O pays no free-threading/M:N tax &mdash; and it vanishes the instant "
-                    "the handler does work. <b>Honest caveat:</b> delegate the work to a C library "
+                    "language, not the runtime</b>: the compiled handlers (runloom-cython &asymp; Go, "
+                    "both on the full core set) sit ~180&times; above the interpreted ones; the runtime "
+                    "barely matters inside a band. <b>Cores differ</b> &mdash; runloom and Go use the "
+                    "whole machine, the event loops one core; the cores column makes that explicit, so "
+                    "compare within a matched core count. <b>Lighter-work columns:</b> the compiled "
+                    "runtimes are so fast there that the 16-core loadgen can\'t saturate them "
+                    "(bottleneck <code>client</code>), so those figures are the loadgen ceiling, not "
+                    "capacity &mdash; hence any non-monotonicity is the measurement, not the runtime. "
+                    "<b>Honest caveat:</b> delegate the work to a C library "
                     "(<code>hashlib</code>/<code>json</code>) and every runtime re-converges &mdash; "
                     "they would all call the same native code."))
 
@@ -979,7 +972,7 @@ def sec_code():
         ("Connection-churn (conn/s, same server set + ladder)", "suite/conn_churn.py"),
         ("Spawn-rate-vs-N (the naked single-spawn curve)", "suite/speed/spawn_curve.py"),
         ("Work-curve sweep driver", "suite/work_sweep.py"),
-        ("Cross-runtime work sweep (all runtimes, per core)", "suite/work_xrt_sweep.py"),
+        ("Cross-runtime work sweep (all runtimes, raw throughput)", "suite/work_xrt_sweep.py"),
         ("io_uring vs epoll comparison program", "suite/iouring_compare.py"),
         # --- active/batch spawn bench (committed, in-suite) ---
         ("Active/batch spawn bench (naked vs fiber_n, default vs optimize)", "suite/speed/spawn_batch.py"),
@@ -1119,18 +1112,19 @@ def sec_exec_summary():
             '(a real handler doing CPU work &mdash; the comparison whose numbers are <i>not</i> '
             'loadgen-limited) a fully-native runloom Cython handler <b>matches-to-beats Go across the '
             'curve</b>, and the <a href="#iouring">io_uring</a> backend is the fastest config here; '
-            'free-threaded M:N Python is not slower per core than a single-thread event loop and uses '
-            'every core. '
+            'free-threaded M:N Python runs that handler across every core and matches Go on the same '
+            'core count. '
             '<b>The honest caveats:</b> the small-payload echo <a href="#perf">req/s</a> headline is '
             '<b>client-bound</b> on this single box (the 16-core loadgen saturates before the fast '
             'servers), so runloom and Go cluster within the loadgen\'s noise &mdash; read it as '
-            '"scheduling/spawn isn\'t the bottleneck," not as a ranking; <b>per core, single-threaded '
-            'uvloop/asyncio win echo req/s.</b> Spawning fibers <i>one at a time</i> is ~20&times; '
+            '"scheduling/spawn isn\'t the bottleneck," not as a ranking (the single-core uvloop/asyncio '
+            'loops are server-bound on their one core there). Spawning fibers <i>one at a time</i> is ~20&times; '
             'behind Go (a stackful fiber + CPython frame vs a 2&nbsp;KB goroutine); batch '
             '<code>fiber_n</code> launches a fleet at <b>~1.6M/s</b> here, but Go has no batch API to '
             'compare against and that figure still trails Go\'s naked 2.15M. Stackful fibers also cost '
-            'more <a href="#mem">RSS</a> than stackless asyncio tasks, and connection churn is <b>not '
-            'yet measured</b> in this suite\'s pipeline. <b>Bottom line: for a busy server running a '
+            'more <a href="#mem">RSS</a> than stackless asyncio tasks. (Connection <a href="#churn">churn</a> '
+            'now reaches ~77k conn/s on the fast tiers, client-bound, after the source-IP fan-out.) '
+            '<b>Bottom line: for a busy server running a '
             'real (CPU-doing) handler, runloom is close to Go and well ahead of interpreted Python; '
             'the gaps are the spawn microbench and per-fiber memory.</b> Per-metric breakdown + '
             'caveats below.</p>')
@@ -1259,12 +1253,12 @@ def sec_metrics_legend():
         ["<b>passive</b> spawn &mdash; conn/s (conn-churn)",
          "fresh handler spawned + torn down per request (new connection each time)",
          "Yes &mdash; 1 spawn+teardown / request, but in the hot loop",
-         "<b>not measured in this suite</b> (conn_churn.json empty)",
-         "TCP accept/handshake/teardown DOMINATES; runloom uses N reuseport acceptors vs Go's single accept &mdash; not yet a like-for-like run"],
+         "<b>~77k/s</b> fast runloom tiers (16-core client-bound) vs Go ~33k on this box",
+         "TCP accept/handshake/teardown is a large share; runloom uses N reuseport acceptors vs Go's single accept, so some of the runloom lead is acceptor count, not runtime"],
         ["req/s &mdash; persistent / keep-alive",
          "steady-state requests on live connections (the browser case)",
          "No &mdash; 1 handler/conn at setup, then loops; spawn ~0% of the window",
-         "client-bound here &mdash; &asymp; Go within loadgen noise; per-core uvloop/asyncio win",
+         "client-bound here &mdash; &asymp; Go within loadgen noise (raw req/s; single-core uvloop/asyncio are server-bound on their one core)",
          "where real servers + browsers live; the spawn cost is amortized to ~0"],
         ["ctxswitch", "yield/resume cost under load", "n/a",
          "competitive (after closure-cell / @runloom.hot / immortalize)", "the FT refcount lever (1.65&times;)"],
@@ -1286,8 +1280,9 @@ def sec_metrics_legend():
             'is the <b>100k&ndash;1M+/s</b> number people quote, and spawn is ~0% of it. '
             '<i>conn/s</i> (churn) opens a NEW connection per request and closes it, so every unit '
             'pays the full TCP lifecycle (SYN handshake + socket alloc + spawn + FIN teardown + '
-            'TIME_WAIT). That is <b>~10&ndash;30k/s for everyone, Go included</b> &mdash; the kernel '
-            'TCP stack dominates, not the application. They are different benchmarks; quoting the '
+            'TIME_WAIT). On this box the fast runloom tiers reach <b>~77k/s</b> (16-core client-bound, '
+            'so the server ceiling is higher) and Go ~33k; the per-connection TCP accept/teardown '
+            'syscalls are a large share of every unit. They are different benchmarks; quoting the '
             'wrong one is the most common benchmark deception.</p>'
             '<p><b>Where a browser lands:</b> browsers are aggressively keep-alive (HTTP/1.1 reuses '
             '~6 connections per origin; HTTP/2 multiplexes everything over <i>one</i>), so they hit '
@@ -1300,8 +1295,9 @@ def sec_metrics_legend():
             '<p class="note"><b>Reading any of these honestly (so the chart does not fool you):</b> '
             '(1) <b>check which side saturated</b> &mdash; a number where the load-generator CPU is '
             'pinned and the server is idle measures the <i>client</i>, not the server (it understates '
-            'the runtime). (2) <b>report throughput per core</b> &mdash; matching Go\'s throughput at '
-            '3&times; the cores is not parity; the per-core column is the honest one. (3) <b>warm vs '
+            'the runtime). (2) <b>note the core count</b> &mdash; we list cores next to every number '
+            '(shown raw, not divided) so a runtime that needs more cores for equal throughput stays '
+            'visible; compare within a matched core count. (3) <b>warm vs '
             'cold</b> &mdash; a min-of-reps number is the warm, fault-free rep and hides cold-start '
             'cost. (4) <b>name the metric precisely</b> (active/passive, conn/req, naked/amortized) '
             '&mdash; a number with no workload attached is a claim with the asterisk removed. Full '
@@ -1329,20 +1325,21 @@ def sec_conn_churn(cc):
         'teardown for every counted connection, in the hot loop</b> &mdash; the metric where '
         'per-connection fiber/goroutine/coroutine spawn actually lands. It runs against the '
         '<b>same servers</b> as the req/s benchmark and is driven to the <b>same saturation</b>: '
-        'a ladder of concurrent dialers climbed until conn/s plateaus, with the per-core '
+        'a ladder of concurrent dialers climbed until conn/s plateaus, with the '
         'server- vs client-bound CPU check. (One request per connection, so conn/s == req/s '
         'here, but every request is a fresh connection.)</p>')
 
     note = ("Higher conn/s is better; the ladder climbs concurrent dialers until conn/s plateaus, "
             "so <b>Bottleneck</b> says whether the <i>server</i> was the limit at peak (a real "
             "ceiling) or the 16-core <i>client</i> saturated first (then Server-ceiling est. = "
-            "peak / server-CPU is the fairer per-core proxy). Connection churn is dominated by "
-            "the TCP accept/setup/teardown syscalls EVERY runtime pays, so a heavier fiber-spawn "
-            "is only a slice of the per-connection cost &mdash; but lower server CPU at the same "
-            "conn/s means more headroom under heavier churn. KNOWN BUG: the runloom "
-            "<i>Cython</i>-handler server busy-spins under churn (the M:N no-data park loop), so "
-            "its row is a defect, not a real limit; the Python-handler row is the representative "
-            "runloom number. Single-core asyncio/uvloop/gevent saturate one core.")
+            "peak / server-CPU is a rough headroom proxy). conn/s is shown raw, as measured; the "
+            "Cores column is alongside (not divided out). Connection churn is dominated by the TCP "
+            "accept/setup/teardown syscalls EVERY runtime pays, so a heavier fiber-spawn is only a "
+            "slice of the per-connection cost &mdash; but lower server CPU at the same conn/s means "
+            "more headroom under heavier churn. The churn client fans its connects across many "
+            "source IPs (<code>conn_churn.py</code>) so TIME_WAIT / ephemeral-port exhaustion does "
+            "not cap the measured conn/s &mdash; every rung here ran with zero dial errors. "
+            "Single-core asyncio/uvloop/gevent saturate one core.")
 
     if servers:
         rows = []
@@ -1358,7 +1355,6 @@ def sec_conn_churn(cc):
                 (esc(s.get("interp", "")), s.get("interp", "")),
                 (fmt(cores), cores),
                 (fmt(cps), cps),
-                (fmt(cps / cores), cps / cores),
                 (fmt(pk.get("conns")), pk.get("conns")),
                 (fmt(pk.get("p99_us")), pk.get("p99_us")),
                 (esc(s.get("bottleneck_at_peak", "")), s.get("bottleneck_at_peak", "")),
@@ -1367,7 +1363,7 @@ def sec_conn_churn(cc):
         if rows:
             rows.sort(key=lambda r: -(r[3][1] or 0))
             cols = [("Runtime", False), ("Interp", False), ("Cores", True),
-                    ("Peak conn/s", True), ("conn/s / core", True), ("Dialers@peak", True),
+                    ("Peak conn/s", True), ("Dialers@peak", True),
                     ("p99 &micro;s", True), ("Bottleneck", False), ("Server-ceiling est.", True)]
             return intro + table("t_churn", cols, rows, note)
 
@@ -1416,11 +1412,11 @@ def sec_conn_churn(cc):
               'bug), so its conn/s would be a defect, not a real ceiling.</p>'
             + '<p>For reference only, a <b>preliminary</b> 2-core saturated side-experiment '
               '(<code>docs/dev/conn_cpu.md</code> &mdash; <b>not</b> from this suite, and subject to '
-              'the caveats above) measured conn/s per core:</p>'
+              'the caveats above) measured conn/s on 2 saturated cores:</p>'
             + '<table><thead><tr><th>server (2 cores, saturated) &mdash; preliminary</th>'
-              '<th>conn/s / core</th><th>caveat</th></tr></thead><tbody>' + ptrs + '</tbody></table>'
+              '<th>conn/s (2-core)</th><th>caveat</th></tr></thead><tbody>' + ptrs + '</tbody></table>'
             + '<p class="note"><b>What is and isn&rsquo;t claimed:</b> the figures above are close '
-              'across runtimes (~7&ndash;8.5k/core), consistent with conn/s being dominated by the TCP '
+              'across runtimes (~7&ndash;8.5k on 2 cores), consistent with conn/s being dominated by the TCP '
               'accept/teardown syscalls every runtime pays. But with the acceptor asymmetry and the '
               'cdef busy-spin bug unresolved, and no committed saturation run, <b>this report makes no '
               'conn/s win or parity claim.</b> A like-for-like run (matched acceptors + a rebuilt '
@@ -1456,9 +1452,12 @@ def main():
         '<title>Runloom benchmark report</title><style>%s</style></head><body>' % CSS,
         nav, '<div class="wrap">',
         '<h1>Runloom benchmark report</h1>',
-        '<p class="note">Generated %s%s. Throughput is shown raw and divided down to one '
-        'core; latencies are not divided. Click any column header to sort.</p>'
-        % (now, " &mdash; <b>QUICK/SMOKE DATA</b>" if quick else ""),
+        '<p class="note">Generated %s%s, built against runloom <code>%s</code>. '
+        'Throughput is shown <b>raw, as measured</b> (not divided by core count); each '
+        'runtime\'s core count is listed in its own column so the hardware behind each '
+        'number stays visible. Latencies are not divided. Click any column header to sort.</p>'
+        % (now, " &mdash; <b>QUICK/SMOKE DATA</b>" if quick else "",
+           (envd or {}).get("runloom_git_sha", "?")),
         sec_exec_summary(),
         sec_header(envd),
         sec_constraints(meta),

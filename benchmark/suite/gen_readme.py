@@ -51,7 +51,7 @@ def main():
              "report.[^bench]" % (hw, " **(smoke data &mdash; rerun for real numbers.)**" if quick else ""))
     L.append("")
 
-    # --- req/s per core ---
+    # --- req/s (raw) ---
     if perf:
         servers = perf.get("servers", {})
         rows = []
@@ -61,20 +61,19 @@ def main():
             if not pk or "rps_median" not in pk:
                 continue
             cores = s.get("cores", 1)
-            rows.append((s.get("label", name), cores, pk["rps_median"],
-                         pk["rps_median"] / cores, bt))
-        rows.sort(key=lambda r: -r[3])
+            rows.append((s.get("label", name), cores, pk["rps_median"], bt))
+        rows.sort(key=lambda r: -r[2])
         if rows:
             L.append("### Echo throughput (1 KiB requests)")
             L.append("")
-            L.append("Requests/second, raw and normalised to a single core "
-                     "(multi-core servers divided by their core count).[^bench]")
+            L.append("Requests/second, shown raw (as measured); the cores column is the core "
+                     "count behind each number, not divided out.[^bench]")
             L.append("")
-            L.append("| Server | Cores | req/s | req/s per core | CPU-bound side |")
-            L.append("|---|--:|--:|--:|---|")
-            for label, cores, rps, per, bt in rows:
-                L.append("| %s | %d | %s | %s | %s |"
-                         % (label, cores, commafy(rps), commafy(per), bt))
+            L.append("| Server | Cores | req/s | CPU-bound side |")
+            L.append("|---|--:|--:|---|")
+            for label, cores, rps, bt in rows:
+                L.append("| %s | %d | %s | %s |"
+                         % (label, cores, commafy(rps), bt))
             L.append("")
             L.append("> The 16-core Go loadgen saturates before the fastest servers "
                      "(`client`-bound rows); the report gives a server-ceiling estimate "
@@ -125,13 +124,13 @@ def main():
             L.append("")
             L.append("> As the knob grows the interpreted handler goes server-bound and collapses "
                      "while the compiled handler holds (up to **%.1f×** here). The work is pure "
-                     "inline arithmetic, never offloaded to a worker thread, so per-core accounting "
-                     "stays valid. **Honest framing:** if the handler delegated to a C library "
+                     "inline arithmetic, never offloaded to a worker thread. **Honest framing:** if "
+                     "the handler delegated to a C library "
                      "(`hashlib`/`json`/`struct`) Python and Cython would converge &mdash; the gap "
                      "is specific to *handler-level* Python work.[^bench]" % mx)
             L.append("")
 
-    # --- cross-runtime work curve (per core) ---
+    # --- cross-runtime work curve (raw) ---
     if work_xrt:
         res = work_xrt.get("results", {})
         wmeta = work_xrt.get("meta", {})
@@ -140,29 +139,28 @@ def main():
         if works and rtinfo:
             w_echo, w_heavy = works[0], works[-1]
 
-            def percore(name, w):
+            def rawrps(name, w):
                 r = res.get(name, {}).get(str(w), {})
                 rps = r.get("peak", {}).get("rps_median")
-                c = rtinfo.get(name, {}).get("cores", 1) or 1
-                return (rps / c) if rps else None
+                return rps if rps else None
 
-            order = sorted(rtinfo, key=lambda n: -(percore(n, w_heavy) or -1))
+            order = sorted(rtinfo, key=lambda n: -(rawrps(n, w_heavy) or -1))
             rws = []
             for n in order:
                 info = rtinfo[n]
-                pe, ph = percore(n, w_echo), percore(n, w_heavy)
+                pe, ph = rawrps(n, w_echo), rawrps(n, w_heavy)
                 if pe is None and ph is None:
                     continue
                 rws.append((info.get("label", n), info.get("kind", ""), info.get("cores", 1), pe, ph))
             if rws:
-                L.append("### Real-work handler curve across runtimes (per core)")
+                L.append("### Real-work handler curve across runtimes (raw throughput)")
                 L.append("")
                 L.append("The same `--work` FNV hash in every runtime's natural handler language, "
-                         "reported per core (peak req/s ÷ pinned cores). It shows the result is "
-                         "honest: under real CPU work the **handler language** sets the tier, not "
-                         "the runtime.[^bench]")
+                         "reported as raw peak req/s (the cores column shows the core count behind "
+                         "each number, not divided out). It shows the result is honest: under real "
+                         "CPU work the **handler language** sets the tier, not the runtime.[^bench]")
                 L.append("")
-                L.append("| Runtime | handler | cores | req/s per core @ echo | req/s per core @ work=%d |"
+                L.append("| Runtime | handler | cores | req/s @ echo | req/s @ work=%d |"
                          % w_heavy)
                 L.append("|---|:--|--:|--:|--:|")
                 for label, kind, cores, pe, ph in rws:
@@ -170,14 +168,14 @@ def main():
                              % (label, kind, cores, commafy(pe) if pe else "n/a",
                                 commafy(ph) if ph else "n/a"))
                 L.append("")
-                L.append("> Two bands by handler language: compiled (runloom-Cython, Go) sit "
-                         "together per core under load, interpreted (runloom-py, asyncio, uvloop, "
-                         "gevent) sit together. At echo the single-core event loops lead per core "
-                         "(pure I/O pays no free-threading/M:N tax) — that inverts the instant the "
-                         "handler does work. runloom's edge: it reaches the compiled band while "
-                         "keeping M:N across all cores automatically; one asyncio process serialises "
-                         "the same work onto one core. Delegate to a C lib and all runtimes "
-                         "re-converge.[^bench]")
+                L.append("> Two bands by handler language: the compiled handlers (runloom-Cython, Go, "
+                         "both on the full core set) sit together under load, the interpreted ones "
+                         "(runloom-py, asyncio, uvloop, gevent) sit together below. Cores differ — "
+                         "runloom and Go use the whole machine, the event loops one core (the cores "
+                         "column makes that explicit, so compare within a matched core count). "
+                         "runloom's edge: it reaches the compiled band while keeping M:N across all "
+                         "cores automatically; one asyncio process serialises the same work onto one "
+                         "core. Delegate to a C lib and all runtimes re-converge.[^bench]")
                 L.append("")
 
     # --- memory 1M ---

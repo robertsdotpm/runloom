@@ -39,7 +39,7 @@ def py(*rest):
     return [P, *rest]
 
 
-# Each spec: name, label, interpreter tag, server "cores" (for per-core scaling),
+# Each spec: name, label, interpreter tag, server "cores" (shown raw alongside throughput),
 # cpu pin spec, gil flag, env, and make_argv(port, token).
 def build_specs():
     many = config.SERVER_CPU_SPEC

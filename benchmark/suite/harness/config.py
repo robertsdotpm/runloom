@@ -110,6 +110,17 @@ SERVERS_DIR = os.path.join(SUITE_DIR, "servers")
 CLIENTS_DIR = os.path.join(SUITE_DIR, "clients")
 
 
+def git_commit():
+    """Short HEAD sha of the repo the suite is running from (provenance: which
+    commit produced these numbers).  '?' if git is unavailable."""
+    import subprocess
+    try:
+        return subprocess.run(["git", "-C", REPO, "rev-parse", "--short", "HEAD"],
+                              capture_output=True, text=True, timeout=10).stdout.strip() or "?"
+    except Exception:
+        return "?"
+
+
 def base_env(gil_off=True):
     """A clean child env: PYTHONPATH=src, GIL toggled, RUNLOOM_DEBUG cleared
     (decision #7: as-shipped release, debug OFF)."""
@@ -122,6 +133,7 @@ def base_env(gil_off=True):
 
 def summary():
     return {
+        "git_commit": git_commit(),
         "cpu_count": CPU_COUNT,
         "hubs": HUBS,
         "go_server_cores": GO_SERVER_CORES,
