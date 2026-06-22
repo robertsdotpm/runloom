@@ -125,6 +125,144 @@ static void runloom_mn_world_yield_if_monopolizing(runloom_hub_t *h)
  * Idle policy: when all hubs report pending=0 we still poll (the
  * caller may runloom_mn_fiber more work at any time).  Stop signal comes
  * from runloom_mn_fini setting h->stopping. */
+
+/* Adaptive idle-pump backoff cap (ms).  An idle hub re-pumps every 1ms, which
+ * costs ~8%/core (epoll) to ~30%/core (io_uring loop) PER HUB even at zero load
+ * -- an over-provisioned server idles hot, proportional to hub count.  When a
+ * hub keeps finding no work, widen its pump 1ms->2->4->...->cap so it sleeps
+ * deep; the wake eventfd (armed before every pump) still breaks the wait
+ * immediately on real work, so this only lengthens the *backstop* interval, and
+ * the streak resets to 1ms on the next resume.  Default cap = the base 1ms (OFF,
+ * unchanged behavior); RUNLOOM_IDLE_BACKOFF_MS=N (N>1) enables backoff to N ms. */
+static int runloom_idle_backoff_cap_ms(void)
+{
+    static int v = -1;
+    int cur = __atomic_load_n(&v, __ATOMIC_RELAXED);
+    if (cur < 0) {
+        /* DEFAULT ON at 32ms: the validated full idle-CPU win (io_uring idle
+         * 30%/core -> ~3%/core, ~11x) with no measured throughput/latency
+         * regression and no cooperative-wake regression, and hang-proof at ANY
+         * value via the wakep + the 500us uninterruptible-wait cap.  Set
+         * RUNLOOM_IDLE_BACKOFF_MS=1 to disable (the wakep then goes fully dormant),
+         * or higher for a deeper idle sleep at the cost of cooperative-wake tail. */
+        const char *e = getenv("RUNLOOM_IDLE_BACKOFF_MS");
+        cur = (e != NULL && e[0]) ? atoi(e) : 32;
+        if (cur < 1) cur = 1;
+        __atomic_store_n(&v, cur, __ATOMIC_RELAXED);
+    }
+    return cur;
+}
+
+/* Idle-backoff ceiling (ns): how deep an idle hub may back off.  Just the
+ * configured cap; 0 when disabled (cap<=1ms).  Hang-safety at ANY cap does NOT
+ * come from clamping the cap -- it comes from making every wake that can target
+ * a sleeping hub SIGNAL it: foreign/cooperative wakes via hub_submit's Dekker
+ * eventfd kick, and stealable-surplus via the WAKEP registry below.  So the cap
+ * is a pure backstop the timer-clamps still bound; no value of it can hang. */
+static long long runloom_idle_backoff_ceiling_ns(void)
+{
+    int cap_ms = runloom_idle_backoff_cap_ms();
+    if (cap_ms <= 1) return 0;                       /* disabled */
+    return (long long)cap_ms * 1000000LL;
+}
+
+/* ---- WAKEP: the push half of work-stealing (Go's wakep) -------------------
+ * The pull half (findrunnable's victim scan) only works while an idle hub is
+ * actively re-polling.  Once a hub idles DEEP (backoff past ~2ms) it can no
+ * longer notice stealable surplus a busy hub holds on its OWN deque -- local
+ * work emits no cross-hub wake -- so an arbitrarily deep idle backoff would
+ * stall an imbalanced workload (the hang every adversarial design-review found).
+ *
+ * WAKEP closes it with the SAME Dekker handshake as hub_submit's
+ * ring_waiting<->sub_head (GenMC-proven, verify/genmc/sched_parkwake.c):
+ *   park side  : set idle_parked=1 ; SEQ_CST fence ; re-scan for stealable work
+ *   producer   : publish work to its deque ; SEQ_CST fence ; read nidle/parked
+ * Either the parking hub sees the surplus on its re-scan (and does NOT park) or
+ * the producer sees idle_parked=1 (and kicks it).  The kick targets a counted
+ * eventfd / the idle condvar, so a kick delivered BEFORE the hub blocks is
+ * remembered and makes its next wait return at once.  Hence the cap can be any
+ * value -- it is a pure backstop, never load-bearing for liveness. */
+static volatile int runloom_mn_nidle = 0;   /* # hubs with idle_parked=1 (hint) */
+
+/* True iff some hub holds stealable surplus a steal would find RIGHT NOW: the
+ * global runq is non-empty, or some deque has >1 g (one for its owner to run, at
+ * least one to steal).  Cheap, lock-free; scanned only at park-decision time. */
+static int runloom_mn_any_stealable_work(void)
+{
+    int i;
+    if (__atomic_load_n(&runloom_global_runq_len, __ATOMIC_ACQUIRE) > 0) return 1;
+    for (i = 0; i < runloom_hub_count; i++)
+        if (runloom_cldeque_size(&runloom_hubs[i].deque) > 1) return 1;
+    return 0;
+}
+
+/* Producer side: wake ONE parked hub so it re-scans + steals.  Gated on the
+ * nidle hint so the common (nothing parked) case is a single relaxed load. */
+static void runloom_mn_wakep_one(void)
+{
+    int i;
+    /* No deep idle sleeps when the backoff is off (the default) -> no hub ever
+     * registers, so this is dead weight; bail on a single cached read BEFORE the
+     * fence so the shipped default carries zero wakep cost. */
+    if (runloom_idle_backoff_cap_ms() <= 1) return;
+    /* Dekker: the SEQ_CST fence MUST precede the nidle/idle_parked reads so the
+     * caller's work-publish (deque push / global-runq push) is globally ordered
+     * before them.  Putting the nidle fast-path check BEFORE the fence would let
+     * a producer that reads nidle==0 skip the fence entirely -- and then on weak
+     * memory (arm64) a hub parking concurrently could miss the just-published
+     * work in its own re-scan AND not be kicked here -> a lost wakep.  The fence
+     * is only paid on a surplus tick, never in the busy steady state. */
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    if (__atomic_load_n(&runloom_mn_nidle, __ATOMIC_RELAXED) <= 0) return;
+    for (i = 0; i < runloom_hub_count; i++) {
+        runloom_hub_t *h = &runloom_hubs[i];
+        int expect = 1;
+        if (__atomic_load_n(&h->idle_parked, __ATOMIC_RELAXED) != 1) continue;
+        if (__atomic_compare_exchange_n(&h->idle_parked, &expect, 0, 0,
+                                        __ATOMIC_ACQ_REL, __ATOMIC_RELAXED)) {
+            __atomic_sub_fetch(&runloom_mn_nidle, 1, __ATOMIC_ACQ_REL);
+            /* Kick every wait mode (one hub; mirrors runloom_mn_kick_all_hubs). */
+            if (h->loop_wake_fd >= 0)
+                runloom_iouring_loop_wake(h->loop_wake_fd);
+            RUNLOOM_RLOCK(&h->idle_lock, RUNLOOM_RANK_HUB_IDLE);
+            runloom_cond_signal(&h->idle_cond);
+            RUNLOOM_RUNLOCK(&h->idle_lock, RUNLOOM_RANK_HUB_IDLE);
+            runloom_netpoll_wake_pump((void *)h);
+            return;                              /* one wakep per surplus, like Go */
+        }
+    }
+}
+
+/* Park side: register this hub as wakep-able, then re-scan (the double-check).
+ * Returns 1 if stealable work raced in (caller must NOT block -- re-loop and run
+ * it), else 0 (the hub may block; it stays registered until its next loop top). */
+static int runloom_mn_park_enter(runloom_hub_t *h)
+{
+    int expect;
+    if (__atomic_load_n(&h->idle_parked, __ATOMIC_RELAXED) == 1) return 0;
+    __atomic_store_n(&h->idle_parked, 1, __ATOMIC_RELEASE);
+    __atomic_add_fetch(&runloom_mn_nidle, 1, __ATOMIC_ACQ_REL);
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);   /* set-flag BEFORE re-scan */
+    if (runloom_mn_any_stealable_work()) {
+        expect = 1;
+        if (__atomic_compare_exchange_n(&h->idle_parked, &expect, 0, 0,
+                                        __ATOMIC_ACQ_REL, __ATOMIC_RELAXED))
+            __atomic_sub_fetch(&runloom_mn_nidle, 1, __ATOMIC_ACQ_REL);
+        return 1;
+    }
+    return 0;
+}
+
+/* Unpark (the hub's next loop top, unless a producer already claimed it).  The
+ * CAS makes it idempotent + makes the winner the sole nidle decrementer. */
+static void runloom_mn_park_exit(runloom_hub_t *h)
+{
+    int expect = 1;
+    if (__atomic_compare_exchange_n(&h->idle_parked, &expect, 0, 0,
+                                    __ATOMIC_ACQ_REL, __ATOMIC_RELAXED))
+        __atomic_sub_fetch(&runloom_mn_nidle, 1, __ATOMIC_ACQ_REL);
+}
+
 static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
 {
     runloom_hub_t *h = (runloom_hub_t *)arg;
@@ -289,8 +427,18 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
      * non-blocking self-pump below (see the loop top). */
     unsigned int self_pump_ctr = 0;
     (void)self_pump_ctr;
+    /* Consecutive idle-pump iterations with no resumed g; drives the adaptive
+     * idle-pump backoff (reset to 0 at the resume site below).  Thread-local to
+     * this hub -- never shared, so a plain int is fine. */
+    unsigned int idle_streak = 0;
     while (!__atomic_load_n(&h->stopping, __ATOMIC_ACQUIRE)) {
         runloom_g_t *g;
+        /* WAKEP: a fresh loop turn -- if we registered as a deep idle sleeper last
+         * turn, unregister now (whether we woke on a kick, a real event, or the
+         * cap).  A producer that already claimed us (CAS'd the flag to 0) makes
+         * this a no-op. */
+        if (__atomic_load_n(&h->idle_parked, __ATOMIC_RELAXED))
+            runloom_mn_park_exit(h);
         /* Drain the io_uring single-op cancel mailbox: a foreign task.cancel
          * deposited an op targeting THIS hub's SINGLE_ISSUER ring; submit the
          * ASYNC_CANCEL here, where we are the ring's sole issuer. */
@@ -411,6 +559,18 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
                 sub = next;
             }
         }
+
+        /* WAKEP (producer): we just drained fresh gs onto our deque.  If we now
+         * hold stealable surplus (>1: one for us, >=1 to steal), wake ONE parked
+         * hub so it re-scans + steals -- the push half of work-stealing that makes
+         * a deep idle backoff hang-proof.  The sub_head drain above (under
+         * sub_lock, a release) publishes the gs; wakep_one's SEQ_CST fence orders
+         * that before the idle_parked read, completing the Dekker handshake with
+         * runloom_mn_park_enter.  Gated on the nidle hint -> ~free when nothing
+         * parked (the busy steady state). */
+        if (runloom_idle_backoff_cap_ms() > 1 &&
+            runloom_cldeque_size(&h->deque) > 1)
+            runloom_mn_wakep_one();
 
         /* Wake any sleepers whose timers have expired and move them
          * onto the local FIFO so the pop below picks them up.  In controlled-
@@ -558,6 +718,26 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
                 /* Default idle wait (no work anywhere -> longer; some
                  * work elsewhere -> shorter so we re-poll for steal). */
                 idle_ns = (total == 0) ? 500000LL : 100000LL;
+                /* One idle iteration: drive the adaptive idle-pump backoff
+                 * (reset to 0 at the resume site).  Common to ALL idle branches
+                 * below (io_uring loop_wait, the epoll pump, the condvar, the
+                 * bare sleep) so the whole idle path backs off together. */
+                idle_streak++;
+                /* Grow the base idle wait as this hub keeps idling so an idle
+                 * server doesn't burn ~8%/core (epoll) to ~30%/core (io_uring)
+                 * PER HUB re-polling every 100-500us at zero load.  The wake
+                 * eventfd / ring wake still breaks the wait at once on real work;
+                 * the timer/sleeper clamps below still cap it so we never
+                 * oversleep a deadline.  Default cap = 1ms base (OFF). */
+                {
+                    long long cap_ns = runloom_idle_backoff_ceiling_ns();
+                    if (cap_ns > 0 && idle_streak > 1) {
+                        unsigned sh = idle_streak < 20u ? idle_streak : 20u;
+                        long long grown = idle_ns << sh;
+                        if (grown > cap_ns) grown = cap_ns;
+                        if (grown > idle_ns) idle_ns = grown;
+                    }
+                }
                 /* Cap by the next-due sleeper on THIS hub so we don't
                  * oversleep past a local timer.  (Other hubs' timers
                  * are handled by those hubs.)  Skipped in controlled-replay
@@ -582,6 +762,15 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
                     if (gap_ns < idle_ns) idle_ns = gap_ns;
                 }
                 parked = runloom_netpoll_parked_count();
+                /* WAKEP (park double-check): idle_ns is now final.  Only a DEEP
+                 * wait (past ~2ms, where re-poll is too slow to catch surplus on
+                 * its own) needs the registry; a short poll re-scans soon enough.
+                 * Register, then re-scan: if stealable work raced in between our
+                 * failed steal above and the flag-set, do a non-blocking pass
+                 * (idle_ns=0) and re-loop to run it.  Pairs with a producer's
+                 * deque-publish via the SEQ_CST fences in park_enter/wakep_one. */
+                if (idle_ns > 2000000LL && runloom_mn_park_enter(h))
+                    idle_ns = 0;
                 /* Hub-idle dwell-based stack reclaim (opt-in,
                  * RUNLOOM_STACK_PARK_SWEEP=1; threshold ms via
                  * RUNLOOM_STACK_PARK_SWEEP_MS, default 5).  This hub is idle
@@ -725,7 +914,21 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
                      * release the GIL around THAT alone. */
                     int iouring_total = runloom_iouring_inflight();
                     if (parked > 0 || iouring_total > 0) {
-                        long long pump_ns = 1000000LL;
+                        long long pump_ns = 1000000LL;     /* 1ms base */
+                        /* Adaptive backoff (path-aware ceiling, blockpool-gated --
+                         * see runloom_idle_backoff_ceiling_ns): a hub that keeps
+                         * idling widens its pump so it doesn't burn a core per hub
+                         * at zero load.  The wake eventfd (armed below) breaks the
+                         * wait at once on real work, so this only stretches the
+                         * backstop; the streak resets to 0 on the next resume. */
+                        {
+                            long long cap_ns = runloom_idle_backoff_ceiling_ns();
+                            if (cap_ns > 0 && idle_streak > 1) {
+                                unsigned sh = idle_streak < 16u ? idle_streak : 16u;
+                                long long ns = 1000000LL << sh;
+                                pump_ns = (ns < cap_ns) ? ns : cap_ns;
+                            }
+                        }
                         if ((h->sched.sleep_size > 0 || h->sched.timer_size > 0) &&
                             idle_ns < pump_ns) {
                             pump_ns = idle_ns;      /* idle_ns already timer-bounded */
@@ -814,8 +1017,20 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
                              * ~2/3 with the re-attach inside the lock). */
                             if (waited) PyEval_RestoreThread(saved);
                         } else {
+                            /* Bare nanosleep: the idle condvar is disabled
+                             * (RUNLOOM_HUB_IDLE_WAKE=0), so NOTHING -- not a
+                             * cross-hub submit, not the wakep, not a foreign wake
+                             * -- can interrupt this sleep.  It must therefore
+                             * NEVER carry the idle backoff: cap it at the short
+                             * base so the hub re-polls within ~one base tick and a
+                             * submit/steal is seen promptly, never after the full
+                             * (uninterruptible) cap.  This is the ONE wait that the
+                             * wakep/eventfd signalling cannot make hang-safe, so it
+                             * stays tight regardless of the cap. */
+                            long long nap_ns = (idle_ns > 500000LL)
+                                               ? 500000LL : idle_ns;
                             saved = PyEval_SaveThread();
-                            runloom_sleep_ns(idle_ns);
+                            runloom_sleep_ns(nap_ns);
                             PyEval_RestoreThread(saved);
                         }
                     }
@@ -824,6 +1039,12 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
                 continue;
             }
         }
+
+        /* Reached the resume site => this hub has a runnable g, i.e. it did
+         * real work this turn.  Reset the idle-pump backoff so a busy hub keeps
+         * its sharp 1ms cadence; only a hub that idles for consecutive turns
+         * backs off. */
+        idle_streak = 0;
 
         /* Phase B snap dance: load g's tstate slice; resume; if g
          * completed, restore hub's tstate before any Python that

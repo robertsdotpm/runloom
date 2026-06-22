@@ -1,0 +1,31 @@
+C wakep_no_fence
+(*
+ * NECESSITY (the teeth) for wakep_sc_fence.litmus.  The SAME wakep SB/Dekker but
+ * with release/acquire ONLY -- no seq_cst StoreLoad fence between each thread's
+ * store and load.  Without the fence the store buffers let BOTH threads read the
+ * other's pre-store value: the park side reads stealable_work==0 (parks) AND the
+ * producer reads idle_parked==0 (does not kick) -> a LOST WAKEP: a hub sleeps the
+ * full backoff cap with stealable surplus pending and nobody to wake it.  That is
+ * exactly the hang an arbitrarily deep cap would expose if wakep_one / park_enter
+ * dropped their fences.
+ *
+ * herd7 reports the `exists` IS reachable (Observation Sometimes) -- proving the
+ * seq_cst fence in wakep_sc_fence.litmus is load-bearing, not decorative.
+ *)
+
+{
+  stealable_work = 0;
+  idle_parked = 0;
+}
+
+P0 (atomic_int *idle_parked, atomic_int *stealable_work) {
+  atomic_store_explicit(idle_parked, 1, memory_order_release);
+  int sw = atomic_load_explicit(stealable_work, memory_order_acquire);
+}
+
+P1 (atomic_int *idle_parked, atomic_int *stealable_work) {
+  atomic_store_explicit(stealable_work, 1, memory_order_release);
+  int ip = atomic_load_explicit(idle_parked, memory_order_acquire);
+}
+
+exists (0:sw=0 /\ 1:ip=0)

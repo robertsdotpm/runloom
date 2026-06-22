@@ -57,6 +57,16 @@ check parkwake_no_fence Sometimes \
 check parkwake_sc_fence Never \
       "seq_cst StoreLoad fences forbid the park/wake lost wakeup (fence suffices)"
 
+# WAKEP (work-stealing push half) SB/Dekker -- the idle_parked<->stealable_work
+# handshake (runloom_mn_park_enter / runloom_mn_wakep_one) that makes an
+# arbitrarily deep idle backoff hang-proof.  Same shape + same fence requirement
+# as parkwake above; the teeth show a dropped fence loses the wakep -> a sleeper
+# never woken to steal -> the hang a large cap would expose.
+check wakep_no_fence Sometimes \
+      "release/acquire ALONE allows the wakep SB lost wakeup (a deep sleeper is never kicked to steal)"
+check wakep_sc_fence Never \
+      "seq_cst StoreLoad fences forbid the wakep lost wakeup -> the backoff cap is a pure backstop"
+
 # Chase-Lev pop-vs-steal SB/Dekker: the owner's StoreLoad fence (supplied by the
 # SEQ_CST store of bottom, cldeque.c:52) is load-bearing.  Models the MSVC bug7
 # where plat_atomic.h downgraded that store to a plain MOV and the fix that

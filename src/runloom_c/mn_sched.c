@@ -246,6 +246,17 @@ typedef struct runloom_hub {
      * cancel for the same hub is dropped (best-effort -- that fiber still
      * unblocks when its op completes).  See runloom_iouring_cancel_g. */
     void                *iouring_cancel_op;
+    /* WAKEP (work-stealing wake registry).  1 while THIS hub is registered as a
+     * DEEP idle sleeper that a producer may kick to come steal.  Set in
+     * runloom_mn_park_enter just before a deep idle wait; cleared (CAS 1->0) by
+     * whichever of {the hub at its next loop top, a producer in
+     * runloom_mn_wakep_one} wins -- the CAS winner is the sole decrementer of
+     * runloom_mn_nidle, so the parked count stays exact.  This is the push half
+     * of work-stealing: local deque surplus emits no cross-hub wake, so without
+     * it an arbitrarily deep idle backoff would stall an imbalanced workload (the
+     * hang every adversarial design-review found).  Foreign/cooperative wakes
+     * already break the wait via hub_submit's Dekker eventfd kick. */
+    volatile int         idle_parked;
 } runloom_hub_t;
 
 /* B4/R6: enforce that every hub array element starts on its own cache line, so
@@ -330,6 +341,12 @@ static int runloom_hub_tstate_lock_inited = 0;
  * file's includes, typedefs and file-scope statics and are NOT compiled
  * standalone.  setup.py compiles only mn_sched.c.
  * --------------------------------------------------------------------------- */
+
+/* WAKEP forward decl: runloom_mn_global_runq_push (mn_sched_runq.c.inc) kicks a
+ * parked hub when it publishes a migratable woken g; the definition lives in
+ * mn_sched_hub_main.c.inc (it needs the hub array + per-hub kick helpers). */
+static void runloom_mn_wakep_one(void);
+
 #include "mn_sched_runq.c.inc"
 #include "mn_sched_hub_resume_preempt.c.inc"
 #include "mn_sched_hub_main.c.inc"

@@ -127,6 +127,11 @@ static void runloom_mn_global_runq_push(runloom_g_t *g)
     RUNLOOM_RUNLOCK(&runloom_global_runq_lock, RUNLOOM_RANK_GLOBAL_RUNQ);
     RUNLOOM_EVT(RUNLOOM_EVT_G_SUBMIT, g, NULL, 0);
     runloom_g_state_set(g, RUNLOOM_GST_SUBMITTED);
+    /* WAKEP: a migratable woken g any idle hub may run -- kick a deep-parked hub
+     * to re-scan + pull it (the global-runq counterpart of deque-surplus wakep).
+     * The unlock above is the release publish; wakep_one's SEQ_CST fence orders
+     * it before the idle_parked read, so no parked hub misses this push. */
+    runloom_mn_wakep_one();
 }
 
 /* Pop one g from the global run-queue head (NULL if empty).  No per-hub

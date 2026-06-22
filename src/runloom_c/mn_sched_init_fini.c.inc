@@ -306,10 +306,17 @@ void runloom_mn_fini(void)
         __atomic_store_n(&runloom_hubs[i].stopping, 1, __ATOMIC_RELEASE);
         /* BUG #10 idle wake: a hub parked in its idle condvar must observe the
          * stop promptly instead of waiting out idle_ns.  Signal under the lock
-         * so it can't slip between the hub's stopping re-check and its wait. */
+         * so it can't slip between the hub's stopping re-check and its wait.
+         * With the idle backoff the wait can be a deep one in ANY mode, so kick
+         * every mode (mirrors runloom_mn_kick_all_hubs) -- else a hub deep in its
+         * io_uring loop_wait / epoll pump would stall the join below up to the
+         * full cap (seconds at a large RUNLOOM_IDLE_BACKOFF_MS). */
+        if (runloom_hubs[i].loop_wake_fd >= 0)
+            runloom_iouring_loop_wake(runloom_hubs[i].loop_wake_fd);
         runloom_mutex_lock(&runloom_hubs[i].idle_lock);
         runloom_cond_signal(&runloom_hubs[i].idle_cond);
         runloom_mutex_unlock(&runloom_hubs[i].idle_lock);
+        runloom_netpoll_wake_pump((void *)&runloom_hubs[i]);
     }
     {
         PyThreadState *saved = PyEval_SaveThread();
@@ -419,6 +426,7 @@ void runloom_mn_reset_after_fork(void)
     runloom_hubs = NULL;            /* abandon (leak) the inherited hub array */
     runloom_hub_count = 0;
     runloom_mn_spawn_counter = 0;
+    runloom_mn_nidle = 0;           /* WAKEP parked-hub count: no hubs in the child */
     runloom_mn_interp = NULL;
     runloom_set_per_g_tstate_mode(0);
     runloom_mutex_init(&runloom_global_runq_lock);   /* may be inherited held */

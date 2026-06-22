@@ -1,0 +1,49 @@
+C wakep_sc_fence
+(*
+ * THE WAKEP HANDSHAKE -- the push half of work-stealing (Go's wakep), added so a
+ * deep idle backoff cannot hang.  A hub about to sleep DEEP registers itself
+ * (idle_parked=1) and re-scans for stealable work; a hub that publishes stealable
+ * surplus to its deque kicks one registered hub.  Without a wake the only hang
+ * vector of an arbitrarily deep idle backoff is local deque surplus a sleeper
+ * never learns to steal (local work emits no cross-hub wake).
+ *
+ *   park side (runloom_mn_park_enter, mn_sched_hub_main.c.inc):
+ *       store idle_parked = 1  (release)
+ *       atomic_thread_fence(seq_cst)
+ *       load  stealable_work    (acquire)   -- if work, DON'T park (re-loop)
+ *   producer side (runloom_mn_wakep_one, after a deque/global-runq push):
+ *       store stealable_work = 1 (release)  -- the cldeque_push / runq push
+ *       atomic_thread_fence(seq_cst)
+ *       load  idle_parked        (acquire)  -- if parked, KICK it
+ *
+ * Identical SB/Dekker shape to parkwake_sc_fence.litmus.  The two seq_cst fences
+ * impose a global order on the four accesses such that the two "both read stale
+ * 0" reads cannot coexist: if the park side reads stealable_work==0 then its
+ * idle_parked=1 store is globally before the producer's load, so the producer
+ * MUST read idle_parked==1 and kick.  Symmetrically if the producer reads
+ * idle_parked==0 the parker sees the surplus and does not park.  At least one of
+ * {parker does not park, producer kicks} always holds -> no lost wakep -> the
+ * idle backoff cap is a pure backstop and no value of it can hang.
+ *
+ * herd7 reports the `exists` is NOT reachable (Observation Never): the fence is
+ * sufficient.  Pair with wakep_no_fence.litmus (Sometimes) for necessity.
+ *)
+
+{
+  stealable_work = 0;
+  idle_parked = 0;
+}
+
+P0 (atomic_int *idle_parked, atomic_int *stealable_work) {
+  atomic_store_explicit(idle_parked, 1, memory_order_release);
+  atomic_thread_fence(memory_order_seq_cst);
+  int sw = atomic_load_explicit(stealable_work, memory_order_acquire);
+}
+
+P1 (atomic_int *idle_parked, atomic_int *stealable_work) {
+  atomic_store_explicit(stealable_work, 1, memory_order_release);
+  atomic_thread_fence(memory_order_seq_cst);
+  int ip = atomic_load_explicit(idle_parked, memory_order_acquire);
+}
+
+exists (0:sw=0 /\ 1:ip=0)
