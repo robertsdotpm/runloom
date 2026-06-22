@@ -18,6 +18,7 @@ import (
 	"math"
 	"net"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -86,8 +87,42 @@ func main() {
 	ramp := flag.Float64("ramp", 2.0, "ramp/warmup seconds (not counted)")
 	measure := flag.Float64("measure", 5.0, "measurement window seconds")
 	gomax := flag.Int("gomaxprocs", runtime.NumCPU()/4, "GOMAXPROCS (client cores)")
+	// Source-IP fan-out (the netns analog of big_100's 127/8 fragment trick): the
+	// churn client ACTIVELY closes every connection, so it accumulates TIME_WAIT
+	// and burns ephemeral ports on its own 4-tuples.  A single source IP has only
+	// ~64k ephemeral ports, and at a high conn/s rate the TIME_WAIT backlog
+	// (rate x fin_timeout) blows past that and dials start failing -- which caps
+	// the measured conn/s, not the server.  Binding each connect to a rotating
+	// source IP from a block on the client veth gives each IP its own independent
+	// ephemeral/TIME_WAIT pool, multiplying capacity by the number of IPs.  Empty
+	// -> the old single unbound dialer (so the persistent loadgen is unchanged).
+	srcips := flag.String("srcips", "", "comma-separated client source IPs to "+
+		"rotate connects across (TIME_WAIT/ephemeral fan-out); empty = unbound")
 	flag.Parse()
 	runtime.GOMAXPROCS(*gomax)
+
+	// One dialer per source IP (LocalAddr port 0 -> kernel picks an ephemeral
+	// port on that IP).  Built once, shared read-only across workers.
+	var dialers []*net.Dialer
+	for _, s := range strings.Split(*srcips, ",") {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			continue
+		}
+		ip := net.ParseIP(s)
+		if ip == nil {
+			fmt.Printf("{\"error\":\"bad -srcips entry %q\"}\n", s)
+			return
+		}
+		dialers = append(dialers, &net.Dialer{
+			Timeout:   5 * time.Second,
+			LocalAddr: &net.TCPAddr{IP: ip},
+		})
+	}
+	if len(dialers) == 0 {
+		dialers = []*net.Dialer{{Timeout: 5 * time.Second}}
+	}
+	nDialers := len(dialers)
 
 	var measuring atomic.Bool
 	var totalConns atomic.Int64
@@ -100,7 +135,6 @@ func main() {
 	}
 	perHist := make([]hist, *workers)
 	var wg sync.WaitGroup
-	d := net.Dialer{Timeout: 5 * time.Second}
 
 	worker := func(idx int) {
 		defer wg.Done()
@@ -108,7 +142,13 @@ func main() {
 		mine := make([]byte, *payload)
 		copy(mine, send)
 		h := &perHist[idx]
+		di := idx % nDialers // offset per worker, then rotate per connection
 		for !stop.Load() {
+			d := dialers[di]
+			di++
+			if di >= nDialers {
+				di = 0
+			}
 			t0 := time.Now()
 			c, err := d.Dial("tcp", *addr)        // a NEW connection -> server spawns a handler
 			if err != nil {

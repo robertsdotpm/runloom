@@ -28,8 +28,10 @@ The original spec and every scoping decision are archived verbatim in
 - `go`, passwordless `sudo` (for `ip netns` + `prlimit`), `taskset`, `liburing`.
 - Build the native pieces once:
 
-      python servers/build_cy.py build_ext --inplace      # Cython handler (+ disasm_check.sh proves zero-PyObject)
+      python servers/build_cy.py   build_ext --inplace    # Cython handler (+ disasm_check.sh proves zero-PyObject)
+      python servers/build_cdef.py build_ext --inplace    # Cython cdef c_entry handler (tstate-free)
       (cd clients && go build -o loadgen loadgen.go)
+      (cd clients && go build -o churn_loadgen churn_loadgen.go)   # conn-churn (conn/s) loadgen
       (cd servers && go build -o go_netpoll_native_net go_netpoll_native_net.go)
       (cd speed   && go build -o speed_go speed_go.go)
       (cd memory  && go build -o mem_go mem_go.go)

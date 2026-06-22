@@ -89,7 +89,7 @@ def run(quick, only):
                     run_perf.server_factory(spec, port, token), CHURN,
                     "%s:%d" % (config.SRV_IP, port), PAYLOAD, lad,
                     reps, ramp, measure_s, gomax, config.PLATEAU_PATIENCE,
-                    server_cpus=srv_cpus)
+                    server_cpus=srv_cpus, src_ips=config.CLI_SRC_IPS)
                 out["payload"] = PAYLOAD
                 entry.update(out)
                 pk = out["peak"]

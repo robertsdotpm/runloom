@@ -19,7 +19,7 @@ import subprocess
 import sys
 
 from config import (SRV_NS, CLI_NS, VETH_SRV, VETH_CLI, SRV_IP, CLI_IP, PREFIX,
-                    NS_SYSCTLS, FD_LIMIT, SRC, FT_PYTHON)
+                    NS_SYSCTLS, FD_LIMIT, SRC, FT_PYTHON, CLI_SRC_IPS)
 
 
 def _sudo(*argv, check=True, quiet=False):
@@ -66,6 +66,17 @@ def setup():
           "%s/%d" % (SRV_IP, PREFIX), "dev", VETH_SRV)
     _sudo("ip", "netns", "exec", CLI_NS, "ip", "addr", "add",
           "%s/%d" % (CLI_IP, PREFIX), "dev", VETH_CLI)
+    # Client source-IP fan-out block (the netns analog of big_100's 127/8 trick):
+    # extra addresses on the client veth so the churn loadgen can spread its
+    # connects across many source IPs and avoid TIME_WAIT/ephemeral exhaustion.
+    # All are in the client /24 (CLI_IP's subnet), so they need no extra route;
+    # CLI_IP itself is already added above.  Idempotent ("add" of an existing
+    # addr just warns, which _sudo swallows under quiet).
+    for ip in CLI_SRC_IPS:
+        if ip == CLI_IP:
+            continue
+        _sudo("ip", "netns", "exec", CLI_NS, "ip", "addr", "add",
+              "%s/%d" % (ip, PREFIX), "dev", VETH_CLI, check=False, quiet=True)
     for ns, dev in ((SRV_NS, VETH_SRV), (CLI_NS, VETH_CLI)):
         _sudo("ip", "netns", "exec", ns, "ip", "link", "set", dev, "up")
         _sudo("ip", "netns", "exec", ns, "ip", "link", "set", "lo", "up")
