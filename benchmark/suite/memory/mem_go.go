@@ -85,6 +85,16 @@ func main() {
 				// and the perf-path Go server (srv_go.go make([]byte,65536)) so the
 				// w/socket comparison holds an equal-size handler buffer per task.
 				buf := make([]byte, 65536)
+				// Fault the buffer in (make its pages resident) -- the ACTUAL
+				// under-load situation: a live connection's Read FILLS this buffer,
+				// and CPython's bytearray(65536) is eagerly resident on allocation.
+				// Without this touch Go's make([]byte) stays lazily unfaulted while
+				// the probe parks on Read, which UNDERSTATES Go's real
+				// per-active-connection RSS and makes the w/socket column
+				// apples-to-oranges vs CPython.  One write per 4 KiB page = resident.
+				for i := 0; i < len(buf); i += 4096 {
+					buf[i] = 1
+				}
 				c.Read(buf) // parks via the netpoller: peer never writes
 			}(c)
 		} else {

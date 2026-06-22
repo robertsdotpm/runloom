@@ -46,9 +46,10 @@
       },
       "socket": {
         "n": 20000,
-        "rss_total": 129499136,
-        "rss_baseline": 4542464,
-        "bytes_per_fiber_rss": 6247.8336
+        "rss_total": 1392062464,
+        "rss_baseline": 4771840,
+        "bytes_per_fiber_rss": 69364.5312,
+        "buffer_faulted": true
       },
       "million": {
         "n": 1000000,
