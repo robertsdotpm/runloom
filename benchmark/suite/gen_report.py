@@ -1139,7 +1139,8 @@ def sec_exec_summary():
             '<code>fiber_n</code> launches a fleet at <b>~1.6M/s</b> here, but Go has no batch API to '
             'compare against and that figure still trails Go\'s naked 2.15M. Stackful fibers also cost '
             'more <a href="#mem">RSS</a> than stackless asyncio tasks. (Connection <a href="#churn">churn</a> '
-            'now reaches ~77k conn/s on the fast tiers, client-bound, after the source-IP fan-out.) '
+            'is ~75&ndash;78k conn/s &mdash; at <b>parity with Go</b> once the Go baseline runs matched '
+            'reuseport acceptors; both client-bound.) '
             '<b>Bottom line: for a busy server running a '
             'real (CPU-doing) handler, runloom is close to Go and well ahead of interpreted Python; '
             'the gaps are the spawn microbench and per-fiber memory.</b> Per-metric breakdown + '
@@ -1269,8 +1270,8 @@ def sec_metrics_legend():
         ["<b>passive</b> spawn &mdash; conn/s (conn-churn)",
          "fresh handler spawned + torn down per request (new connection each time)",
          "Yes &mdash; 1 spawn+teardown / request, but in the hot loop",
-         "<b>~77k/s</b> fast runloom tiers (16-core client-bound) vs Go ~33k on this box",
-         "TCP accept/handshake/teardown is a large share; runloom uses N reuseport acceptors vs Go's single accept, so some of the runloom lead is acceptor count, not runtime"],
+         "<b>~75&ndash;78k/s</b> &mdash; runloom and Go at <b>parity</b> (matched N reuseport acceptors, both client-bound)",
+         "TCP accept/handshake/teardown dominates; with matched acceptors Go &asymp; runloom. A single-Accept Go caps at ~33k (acceptor artifact, not runtime)"],
         ["req/s &mdash; persistent / keep-alive",
          "steady-state requests on live connections (the browser case)",
          "No &mdash; 1 handler/conn at setup, then loops; spawn ~0% of the window",
@@ -1296,9 +1297,9 @@ def sec_metrics_legend():
             'is the <b>100k&ndash;1M+/s</b> number people quote, and spawn is ~0% of it. '
             '<i>conn/s</i> (churn) opens a NEW connection per request and closes it, so every unit '
             'pays the full TCP lifecycle (SYN handshake + socket alloc + spawn + FIN teardown + '
-            'TIME_WAIT). On this box the fast runloom tiers reach <b>~77k/s</b> (16-core client-bound, '
-            'so the server ceiling is higher) and Go ~33k; the per-connection TCP accept/teardown '
-            'syscalls are a large share of every unit. They are different benchmarks; quoting the '
+            'TIME_WAIT). On this box, with matched N reuseport acceptors, runloom and Go are at '
+            '<b>parity ~75&ndash;78k/s</b> (both 16-core-client-bound); the per-connection TCP '
+            'accept/teardown syscalls are a large share of every unit. They are different benchmarks; quoting the '
             'wrong one is the most common benchmark deception.</p>'
             '<p><b>Where a browser lands:</b> browsers are aggressively keep-alive (HTTP/1.1 reuses '
             '~6 connections per origin; HTTP/2 multiplexes everything over <i>one</i>), so they hit '
@@ -1353,16 +1354,22 @@ def sec_conn_churn(cc):
             "accept/setup/teardown syscalls EVERY runtime pays, so a heavier fiber-spawn is only a "
             "slice of the per-connection cost &mdash; but lower server CPU at the same conn/s means "
             "more headroom under heavier churn. <b>Read the Srv/Cli CPU% columns &mdash; they say who "
-            "the wall is</b>: the fast runloom tiers run the server at ~55&ndash;70% with the 16-core "
-            "client pinned at ~96% (client-bound &mdash; the loadgen is the limit, the server still "
-            "has headroom), whereas <b>Go sits at ~17% server CPU and is flat at ~33k from the very "
-            "first rung (16 dialers)</b> &mdash; it is <b>not</b> CPU-bound, it is serialized on its "
-            "single <code>Accept()</code> loop, so more dialers don't help and it peaks at a far lower "
-            "dialer count. The runloom servers use <b>N SO_REUSEPORT acceptors</b> (one accept queue "
-            "per hub), so accept parallelizes and conn/s climbs with dialers. <b>That acceptor "
-            "asymmetry (N vs 1), not the runtime, is most of the runloom conn/s lead</b> &mdash; in "
-            "the persistent req/s benchmark (accept once, then loop) Go is &asymp; runloom. A "
-            "like-for-like churn comparison needs the Go baseline on N reuseport acceptors too. "
+            "the wall is.</b> <b>Like-for-like acceptors:</b> the Go baseline runs the SAME accept "
+            "architecture as runloom &mdash; <b>N <code>SO_REUSEPORT</code> acceptors</b> (one accept "
+            "queue per core/hub) &mdash; so accept parallelizes on both sides. The result is "
+            "<b>parity</b>: the fast runloom tiers and Go all land at <b>~75&ndash;78k conn/s, all "
+            "client-bound</b> (server ~55&ndash;71%, the 16-core loadgen pinned at ~96% &mdash; the "
+            "loadgen is the wall, not either server). <b>Under that shared wall the tstate-free "
+            "<code>cdef</code> tiers run the server <i>lighter</i> than Go</b> &mdash; ~55&ndash;59% CPU "
+            "vs Go's ~78% at the same ~77k (no per-connection Python / PyThreadState on the lean "
+            "C-handler path) &mdash; i.e. more server headroom per connection (see the Srv CPU% "
+            "column); both are client-capped here, so that is headroom, not a higher ceiling. "
+            "<b>(A SINGLE <code>Accept()</code> loop instead "
+            "caps Go at ~33k / ~17% server CPU &mdash; flat from the first rung, accept-serialized, "
+            "not CPU-bound; reproduce with <code>-acceptors 1</code>. Racing runloom's N acceptors "
+            "against that single-accept Go shows a ~2.3&times; gap that is pure acceptor asymmetry, "
+            "not runtime &mdash; so the baseline is matched here.)</b> In the persistent req/s "
+            "benchmark (accept once, then loop) Go is likewise &asymp; runloom. "
             "The churn client fans its connects across many source IPs (<code>conn_churn.py</code>) so "
             "TIME_WAIT / ephemeral-port exhaustion does not cap the measured conn/s &mdash; every rung "
             "here ran with zero dial errors. Single-core asyncio/uvloop/gevent saturate one core.")
@@ -1379,7 +1386,7 @@ def sec_conn_churn(cc):
             su = pk.get("server_cpu_util") or 0
             cu = pk.get("client_cpu_util") or 0
             rows.append([
-                ('<b>%s</b><br><span class="sub">%s</span>' % (esc(name), esc(s.get("label", ""))), name),
+                ('<b>%s</b><br><span class="sub">%s</span>' % (prog_html(name), esc(s.get("label", ""))), std(name)),
                 (esc(s.get("interp", "")), s.get("interp", "")),
                 (fmt(cores), cores),
                 (fmt(cps), cps),
@@ -1396,7 +1403,36 @@ def sec_conn_churn(cc):
                     ("Peak conn/s", True), ("Dialers@peak", True),
                     ("p99 &micro;s", True), ("Srv CPU%", True), ("Cli CPU%", True),
                     ("Bottleneck", False), ("Server-ceiling est.", True)]
-            return intro + table("t_churn", cols, rows, note)
+            # per-rung connection-ladder curves: the dialer-by-dialer detail incl.
+            # server/client CPU per rung -- where the "flat at low CPU across rungs =
+            # accept/serialization-bound" story is visible (not just in the JSON).
+            curves = ['<h3>Connection-ladder curves (conn/s)</h3>'
+                      '<p class="note">The ladder climbs concurrent dialers until conn/s stops '
+                      'beating the peak\'s CI. Each server\'s full curve &mdash; watch the Srv CPU% '
+                      'column: a server flat at low CPU across rungs is accept/serialization-bound, '
+                      'not compute-bound. Click a runtime in the table above to open its source.</p>']
+            for name, s in servers.items():
+                curve = s.get("curve")
+                if not curve:
+                    continue
+                crows = []
+                for rung in curve:
+                    ci = rung.get("rps_ci", [None, None])
+                    crows.append([
+                        (fmt(rung.get("conns")), rung.get("conns")),
+                        (fmt(rung.get("rps_median")), rung.get("rps_median")),
+                        ("%s&ndash;%s" % (fmt(ci[0]), fmt(ci[1])), ci[0]),
+                        (fmt((rung.get("server_cpu_util") or 0) * 100, 0) + "%", rung.get("server_cpu_util")),
+                        (fmt((rung.get("client_cpu_util") or 0) * 100, 0) + "%", rung.get("client_cpu_util")),
+                        (fmt(rung.get("p99_us")), rung.get("p99_us")),
+                        (fmt(rung.get("errors")), rung.get("errors")),
+                    ])
+                ch = [("Dialers", True), ("conn/s", True), ("95% CI", False), ("Srv CPU%", True),
+                      ("Cli CPU%", True), ("p99 &micro;s", True), ("err", True)]
+                curves.append('<details class="code"><summary>%s &mdash; %d rungs (peak %s conn/s)</summary>%s</details>'
+                              % (esc(name), len(curve), fmt((s.get("peak") or {}).get("rps_median")),
+                                 table("cc_%s" % name, ch, crows, mark_best=False)))
+            return intro + table("t_churn", cols, rows, note) + "".join(curves)
 
     if legacy:
         order = sorted(legacy.keys(), key=lambda n: -(legacy[n].get("conns_per_s") or 0))
