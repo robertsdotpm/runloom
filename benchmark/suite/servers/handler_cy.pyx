@@ -85,3 +85,10 @@ def handler(conn):
             buf[0] = <char>(<unsigned char>buf[0] ^ <unsigned char>(h & 0xffu))   # fold -> no elision
         if _capi.send_all(c, buf, n) < 0:
             break
+    # Close explicitly so the fd's netpoll registration is released NOW, not at
+    # TCPConn dealloc.  Under connection churn that dealloc lags, leaving the
+    # closed peer's fd in epoll, level-triggered-readable (EPOLLIN/RDHUP) with no
+    # parker -> it re-fires every epoll_wait forever (the pump dispatch misses,
+    # restashes, re-fires), pinning every hub in a futex storm so no fiber can
+    # resume = a congestion-collapse livelock.  conn_churn investigation.
+    conn.close()
