@@ -35,7 +35,14 @@ def ensure_kernel_ceilings():
     These persist until reboot; safe to re-apply."""
     for key, val in {
         "fs.nr_open": str(FD_LIMIT),
-        "vm.max_map_count": "2000000",      # ~2 VMAs per goroutine stack
+        # ~2 VMAs per fiber stack (the stack mapping + its guard-page mprotect).
+        # 1M plain fibers need ~2M VMAs, so the old 2,000,000 ceiling sat right at
+        # the wall: mmap/mprotect starts failing at the limit and the spawn path
+        # degrades into a syscall-retry storm -> the 1M-fiber RSS bench timed out
+        # at 900s. 4M gives headroom (with it raised, the same run completes in
+        # ~86s). optimize("memory")'s warm-stack arena uses far fewer VMAs and was
+        # never affected.
+        "vm.max_map_count": "4000000",
         "net.core.somaxconn": "65535",
     }.items():
         _sudo("sysctl", "-w", "%s=%s" % (key, val), quiet=True)
