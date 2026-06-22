@@ -22,19 +22,21 @@ import runloom_c
 from .. import runtime as _runtime
 
 
-# Security: the bridge runs user protocol callbacks -- including TLS handshakes
-# and OpenSSL key material -- on fiber stacks that are pooled and reused.
-# By default those stacks are not scrubbed on recycle, so a later connection's
-# fiber could read the previous one's leftovers off a shared stack (see
-# tools/security/FINDINGS.md, S1). Enable scrubbing by default for the bridge:
-# its fibers are long-lived (per connection / per task), so the per-recycle
-# cost (MADV_DONTNEED, ~8 us) is negligible. Opt out with RUNLOOM_STACK_SCRUB=0.
-# No-op on a runloom_c too old to expose the API.
-if _os.environ.get("RUNLOOM_STACK_SCRUB") != "0":
-    try:
-        runloom_c.set_stack_scrub(True)
-    except AttributeError:
-        pass
+# Recycled fiber stacks are NOT scrubbed by default -- matching Go and asyncio
+# (neither wipes a coroutine/goroutine stack on recycle), and because the wipe is
+# NOT free under connection churn: it is a mincore + memset of the touched stack
+# on EVERY fiber completion, which measured ~4% CPU on the python-handler echo
+# tier and ~10% on the cython tier of the conn-churn benchmark.  The leftover is
+# only reachable by a C extension reading uninitialised stack (Python objects
+# live on the heap, not the fiber C stack), so the safe default is off.
+#
+# This bridge DOES run TLS handshakes / OpenSSL key material on these stacks, so
+# a deployment that handles secrets should opt in -- one call, before run():
+#     runloom.optimize("secure")          # or export RUNLOOM_STACK_SCRUB=1
+# optimize("secure") applies it live (see runloom/_optimize.py); the env var is
+# read by the C runtime at import (module_init.c.inc).  No-op on a runloom_c too
+# old to expose the API.  See tools/security/FINDINGS.md S1 + coro.c
+# runloom_stack_scrub.
 
 
 def _signal_wakeup_noop(signum, frame):

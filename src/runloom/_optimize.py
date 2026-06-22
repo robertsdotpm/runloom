@@ -113,5 +113,17 @@ def optimize(*goals, max_fibers=None):
     for k, v in merged.items():
         os.environ.setdefault(k, v)
 
+    # RUNLOOM_STACK_SCRUB is read by the C runtime AT IMPORT (module_init), which
+    # is before this post-import optimize() call -- so setting the env var alone
+    # would not take effect.  Apply it LIVE through the API: this is what makes
+    # optimize("secure") actually scrub recycled stacks (default is off; see
+    # runloom/aio/_base.py).  Mirror an explicit "=0" too (turn scrubbing back off).
+    if "RUNLOOM_STACK_SCRUB" in merged:
+        try:
+            import runloom_c
+            runloom_c.set_stack_scrub(os.environ.get("RUNLOOM_STACK_SCRUB") == "1")
+        except (ImportError, AttributeError):
+            pass
+
     # Report what is ACTUALLY in effect for those keys (shell overrides show here).
     return {k: os.environ.get(k) for k in merged}
