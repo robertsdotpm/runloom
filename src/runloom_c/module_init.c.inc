@@ -78,7 +78,7 @@ static PyMethodDef module_methods[] = {
      "(post-calibration) for this one fiber -- use when the entry\n"
      "function is known to recurse deeply or call into a C extension\n"
      "that consumes large amounts of C stack."},
-    {"fiber_fast",     (PyCFunction)m_fiber_fast, METH_FASTCALL,
+    {"fiber_fast",     (PyCFunction)m_fiber_fast, METH_FASTCALL | METH_KEYWORDS,
      "fiber_fast(callable): C fast entry that runloom.fiber binds to.  A bare\n"
      "Go-style fiber(callable) under M:N spawns straight through the C core (no\n"
      "Python wrapper frame); rich calls (extra args, stack_size=, single-thread,\n"
