@@ -1423,6 +1423,85 @@ static void runloom_fcontext_entry(void *user)
 static RUNLOOM_TLS runloom_coro_t *runloom_coro_pool = NULL;
 static RUNLOOM_TLS int runloom_coro_pool_size = 0;
 
+/* ---- cross-hub coro-pool balancing (same shape as the g-slab) -------------
+ * runloom_coro_pool is per-thread (RUNLOOM_TLS); under single-producer/
+ * many-consumer spawn the producer hub's pool drains and callocs a coro struct
+ * per spawn while consumer pools fill and free over-cap structs.  A global
+ * balance pool fixes it: a thread spills a batch once its pool passes the cap
+ * and refills a batch when its pool is empty.  Coros on the global are idle
+ * (coro_destroy asserts idle) and keep their attached stack, so refill hands a
+ * producer a ready coro+stack instead of a calloc.
+ *
+ * The global holds exactly ONE stack-size class (the first size to overflow a
+ * pool, in practice the M:N default).  Coros of any other size never enter the
+ * global -- they take the old release+free over-cap path.  Without this a
+ * mixed-size spawn could fill the global with coros that never match a refill
+ * request, so they never recycle and (with stacks resident under madv=off) grow
+ * without bound -> OOM.  One class keeps the global homogeneous: every refilled
+ * coro matches the requesting size, so it always recycles and the occupancy is
+ * bounded by live fibers of that size.  Lock amortized (once per batch). */
+#define RUNLOOM_CORO_GLOBAL_BATCH 128
+static runloom_coro_t  *runloom_coro_global_pool = NULL;
+static int              runloom_coro_global_size = 0;
+static size_t           runloom_coro_global_class = 0;  /* the ONE stack size balanced (0 = unclaimed) */
+static pthread_mutex_t  runloom_coro_global_lock = PTHREAD_MUTEX_INITIALIZER;
+
+/* Refill a batch from the global into this thread's (empty) pool. */
+static void runloom_coro_global_refill(void)
+{
+    runloom_coro_t *head, *tail;
+    int n;
+    pthread_mutex_lock(&runloom_coro_global_lock);
+    head = runloom_coro_global_pool;
+    if (head == NULL) { pthread_mutex_unlock(&runloom_coro_global_lock); return; }
+    tail = head; n = 1;
+    while (n < RUNLOOM_CORO_GLOBAL_BATCH && tail->pool_next != NULL) { tail = tail->pool_next; n++; }
+    runloom_coro_global_pool = tail->pool_next;
+    runloom_coro_global_size -= n;
+    pthread_mutex_unlock(&runloom_coro_global_lock);
+    tail->pool_next = runloom_coro_pool;   /* NULL: refill is called only when empty */
+    runloom_coro_pool = head;
+    runloom_coro_pool_size += n;
+}
+
+/* Spill a batch from this thread's (over-cap) pool into the global.  Only the
+ * single balanced size class crosses hubs; coros of any other size take the old
+ * over-cap path (release the stack to the depot, free the struct) so the global
+ * stays size-homogeneous and a mixed-size flood can't grow it without bound. */
+static void runloom_coro_global_flush(void)
+{
+    runloom_coro_t *to_global = NULL, *to_global_tail = NULL;
+    int moved = 0, scanned = 0;
+    size_t klass;
+
+    if (runloom_coro_global_class == 0 && runloom_coro_pool != NULL)
+        runloom_coro_global_class = runloom_coro_pool->stack_size;  /* claim once */
+    klass = runloom_coro_global_class;
+
+    while (runloom_coro_pool != NULL && scanned < RUNLOOM_CORO_GLOBAL_BATCH) {
+        runloom_coro_t *c = runloom_coro_pool;
+        runloom_coro_pool = c->pool_next;
+        runloom_coro_pool_size--;
+        scanned++;
+        if (c->stack_size == klass) {
+            c->pool_next = to_global;
+            if (to_global_tail == NULL) to_global_tail = c;   /* first appended = list tail */
+            to_global = c;
+            moved++;
+        } else {
+            if (c->stack != NULL) runloom_stack_release(c->stack, c->stack_size);
+            free(c);
+        }
+    }
+    if (to_global != NULL) {
+        pthread_mutex_lock(&runloom_coro_global_lock);
+        to_global_tail->pool_next = runloom_coro_global_pool;
+        runloom_coro_global_pool = to_global;
+        runloom_coro_global_size += moved;
+        pthread_mutex_unlock(&runloom_coro_global_lock);
+    }
+}
+
 runloom_coro_t *runloom_coro_new(size_t stack_size,
                            runloom_entry_fn entry,
                            void *user)
@@ -1439,6 +1518,8 @@ runloom_coro_t *runloom_coro_new(size_t stack_size,
      * peek at the head and fall through to allocation if it
      * mismatches.  In practice every spawn uses the default
      * stack_size, so the head is virtually always a match. */
+    if (runloom_coro_pool == NULL && rounded == runloom_coro_global_class)
+        runloom_coro_global_refill();   /* cross-hub refill (balanced class only) before a cold calloc */
     if (runloom_coro_pool != NULL && runloom_coro_pool->stack_size == rounded) {
         c = runloom_coro_pool;
         runloom_coro_pool = c->pool_next;
@@ -1748,8 +1829,12 @@ void runloom_coro_destroy(runloom_coro_t *c)
      * default-size reuse check, so pooling it would just park a big
      * stack at the head and defeat the pool for every later default
      * spawn.  Release it instead so its pages go back promptly. */
-    if (!c->grown && runloom_coro_pool_size < RUNLOOM_CORO_POOL_CAP
-        && c->stack != NULL) {
+    if (!c->grown && c->stack != NULL) {
+        /* Local pool at cap -> spill a batch to the cross-hub global pool so a
+         * producer hub on another thread refills from it instead of callocing a
+         * coro struct (the producer-drains fix; same shape as the g-slab). */
+        if (runloom_coro_pool_size >= RUNLOOM_CORO_POOL_CAP)
+            runloom_coro_global_flush();
         c->pool_next = runloom_coro_pool;
         runloom_coro_pool = c;
         runloom_coro_pool_size++;
