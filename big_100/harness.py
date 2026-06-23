@@ -75,6 +75,7 @@ EXIT_OK = 0
 EXIT_INVARIANT = 1
 EXIT_ERROR = 2
 EXIT_HANG = 3
+EXIT_BOXLIMIT = 4   # memory guard tripped: the BOX can't sustain this N (not a bug)
 
 # Hot-counter sharding.  Power of two so we can mask.  64k slots covers the
 # common "tens of thousands of workers, one shard each" case exactly (one
@@ -123,17 +124,132 @@ def rss_mb():
 
 
 def phys_mem_gib():
-    """Total installed physical memory in GiB (best-effort; 8.0 fallback)."""
+    """Total installed physical memory in GiB (best-effort; 8.0 fallback).
+
+    Subprocess-FREE: the memory guard calls this from the watchdog's foreign OS
+    thread, where a monkey-patched subprocess can't run (it would hang/die and
+    silently disable the guard).  macOS uses ctypes sysctlbyname (see below)."""
     try:
         if sys.platform == "darwin" or "bsd" in sys.platform:
-            import subprocess
-            return int(subprocess.check_output(
-                ["sysctl", "-n", "hw.memsize"])) / (1024.0 ** 3)
+            total = _mac_sysctl_u("hw.memsize", 8)
+            return (total / (1024.0 ** 3)) if total else 8.0
         # Linux / POSIX with sysconf
         return (os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
                 / (1024.0 ** 3))
     except Exception:
         return 8.0
+
+
+# Memory introspection MUST be subprocess-free: the memory guard reads it from
+# the watchdog's REAL OS thread, and under monkey.patch() a patched subprocess
+# from a non-goroutine thread can't run.  Linux uses /proc (plain file reads);
+# macOS/*BSD use ctypes sysctlbyname (a direct syscall, thread-safe).
+_MAC = (sys.platform == "darwin" or "bsd" in sys.platform)
+_libc = None
+if _MAC:
+    try:
+        import ctypes as _ct
+        _libc = _ct.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True)
+    except Exception:
+        _libc = None
+
+
+def _mac_sysctl_u(name, width):
+    if _libc is None:
+        return None
+    try:
+        import ctypes as _ct
+        v = (_ct.c_uint64 if width == 8 else _ct.c_uint32)(0)
+        sz = _ct.c_size_t(width)
+        if _libc.sysctlbyname(name.encode(), _ct.byref(v), _ct.byref(sz),
+                              None, 0) != 0:
+            return None
+        return v.value
+    except Exception:
+        return None
+
+
+def _mac_swap_used_total():
+    """(used_bytes, total_bytes) from vm.swapusage via ctypes; (0, 0) on failure."""
+    if _libc is None:
+        return (0, 0)
+    try:
+        import ctypes as _ct
+
+        class _XSW(_ct.Structure):
+            _fields_ = [("total", _ct.c_uint64), ("avail", _ct.c_uint64),
+                        ("used", _ct.c_uint64), ("pagesize", _ct.c_int32),
+                        ("encrypted", _ct.c_int32)]
+        v = _XSW()
+        sz = _ct.c_size_t(_ct.sizeof(_XSW))
+        if _libc.sysctlbyname(b"vm.swapusage", _ct.byref(v), _ct.byref(sz),
+                              None, 0) != 0:
+            return (0, 0)
+        return (v.used, v.total)
+    except Exception:
+        return (0, 0)
+
+
+def available_mem_frac():
+    """Fraction (0..1) of physical RAM currently AVAILABLE (reclaimable without
+    swapping).  1.0 if unknown -- callers must treat unknown as 'fine', never
+    abort on a read failure."""
+    try:
+        if sys.platform.startswith("linux"):
+            total = avail = None
+            with open("/proc/meminfo") as f:
+                for line in f:
+                    if line.startswith("MemTotal:"):
+                        total = int(line.split()[1])
+                    elif line.startswith("MemAvailable:"):
+                        avail = int(line.split()[1])
+                    if total and avail is not None:
+                        break
+            if total and avail is not None:
+                return avail / float(total)
+            return 1.0
+        if _MAC:
+            total = _mac_sysctl_u("hw.memsize", 8)
+            page = _mac_sysctl_u("hw.pagesize", 8) or 16384
+            # free + speculative + purgeable are reclaimable without swapping.
+            # (Conservative -- omits the inactive list, so it can only read LOW,
+            # which errs toward protecting the box.)
+            pages = 0
+            for nm in ("vm.page_free_count", "vm.page_speculative_count",
+                       "vm.page_purgeable_count"):
+                pages += (_mac_sysctl_u(nm, 4) or 0)
+            if total:
+                return (pages * page) / float(total)
+        return 1.0
+    except Exception:
+        return 1.0
+
+
+def swap_used_total_bytes():
+    """(used_bytes, total_bytes) of SWAP.  (0, 0) if unknown / no swap."""
+    try:
+        if sys.platform.startswith("linux"):
+            total = free = None
+            with open("/proc/meminfo") as f:
+                for line in f:
+                    if line.startswith("SwapTotal:"):
+                        total = int(line.split()[1]) * 1024
+                    elif line.startswith("SwapFree:"):
+                        free = int(line.split()[1]) * 1024
+            if total and free is not None:
+                return (total - free, total)
+            return (0, 0)
+        if _MAC:
+            return _mac_swap_used_total()
+        return (0, 0)
+    except Exception:
+        return (0, 0)
+
+
+def swap_used_frac():
+    """Fraction (0..1) of SWAP currently in use.  0.0 if unknown / no swap."""
+    used, total = swap_used_total_bytes()
+    return (used / float(total)) if total else 0.0
 
 
 def mem_safe_fd_cap():
@@ -716,11 +832,64 @@ class Harness(object):
         last = self.progress_signal()
         last_change = REAL_MONO()
         hard_deadline = self.deadline + max(self.drain_timeout, 0.15 * self.duration)
+        # Memory guard: a runtime backstop so NO program (whatever its N) can drive
+        # this box into the OS OOM-killer / swap-death and destabilize it.  The
+        # watchdog is a real OS thread, so it still samples even when the scheduler
+        # is swamped (and it reads memory subprocess-free, so monkey.patch() can't
+        # break it).  Tunable / disable-able via env.
+        mem_guard = os.environ.get("RUNLOOM_MEM_GUARD", "1") not in ("0", "no", "off")
+        try:
+            mem_floor = float(os.environ.get("RUNLOOM_MEM_FLOOR", "0.06"))
+        except ValueError:
+            mem_floor = 0.06
+        try:                  # NEW swap this run may push before it's "thrashing"
+            growth_frac = float(os.environ.get("RUNLOOM_SWAP_GROWTH", "0.40"))
+        except ValueError:
+            growth_frac = 0.40
+        growth_limit = int(growth_frac * phys_mem_gib() * (1024 ** 3))   # bytes
+        swap_base = swap_used_total_bytes()[0]   # baseline: pre-existing cold swap
+        mem_bad = 0       # consecutive danger samples (2 = confirm, avoid blips)
+        interval = 1.0    # normal cadence; tightens to 0.5s near danger so a fast
+                          # spawn can't OOM the box between samples.  (Targets
+                          # GRADUAL swap-death, the real box-destabilizer; a sub-1s
+                          # allocation-failure crash is a PROCESS crash, not a box
+                          # hazard -- it dies fast and frees its memory.)
+        _dbg = os.environ.get("RUNLOOM_MEM_DEBUG")
         while not self.finished:
-            REAL_SLEEP(2.0)
+            REAL_SLEEP(interval)
             if self.finished:
                 return
             now = REAL_MONO()
+            if mem_guard:
+                avail = available_mem_frac()
+                swap_used = swap_used_total_bytes()[0]
+                grew = swap_used - swap_base
+                # Danger = RAM critically low (the primary OOM signal), OR THIS run
+                # has pushed a large amount of NEW data into swap (actively
+                # thrashing the box).  Swap GROWTH, not absolute swap, is the
+                # portable signal: a healthy box can sit at high absolute swap with
+                # cold pages (tripping on that is a false positive), but growth
+                # during the run is pressure we are causing.
+                if _dbg:
+                    sys.stderr.write("[memguard] avail={0:.3f} floor={1:.3f} "
+                                     "swap_grew={2}B limit={3}B\n".format(
+                                         avail, mem_floor, grew, growth_limit))
+                    sys.stderr.flush()
+                danger = (avail < mem_floor) or (grew > growth_limit)
+                if danger:
+                    mem_bad += 1
+                    interval = 0.5   # sample fast to confirm + react before OOM
+                    # Trip immediately when CRITICALLY low / thrashing hard (no time
+                    # to wait out a 2nd sample -- a burst could OOM in <2s);
+                    # otherwise require a 2nd danger sample to rule out a blip.
+                    if (avail < mem_floor * 0.5 or grew > growth_limit * 2
+                            or mem_bad >= 2):
+                        self._mem_abort(avail, swap_used_frac(), grew,
+                                        growth_limit, mem_floor)
+                        return
+                else:
+                    mem_bad = 0
+                    interval = 2.0
             sig = self.progress_signal()
             if sig != last:
                 last = sig
@@ -736,6 +905,25 @@ class Harness(object):
             if now > hard_deadline:
                 self._hang("hard deadline exceeded (drain/teardown wedged)")
                 return
+
+    def _mem_abort(self, avail, swap_frac, grew_bytes, growth_limit, floor):
+        """The box is running critically low on memory -- abort the run CLEANLY,
+        before the OS OOM-killer or swap-thrash can take the system down.  This is
+        a BOX LIMIT (this machine can't sustain this N), NOT a runtime bug, so it
+        exits EXIT_BOXLIMIT with an actionable message rather than crashing."""
+        sys.stderr.write(
+            "\n[{0}] MEMORY GUARD: available RAM {1:.1f}% (floor {2:.0f}%), "
+            "swap +{3:.1f} GiB this run (limit {4:.1f}), now {5:.0f}% used, at "
+            "~{6} workers spawned.\n"
+            "[{0}] This BOX ({7:.0f} GiB) cannot sustain --funcs {8} -- aborting "
+            "cleanly before the OS OOM-killer/swap-thrash destabilizes it.  Reduce "
+            "--funcs, or set RUNLOOM_MEM_GUARD=0 to override.\n".format(
+                self.name, avail * 100.0, floor * 100.0,
+                grew_bytes / float(1024 ** 3), growth_limit / float(1024 ** 3),
+                swap_frac * 100.0, self.total_tasks(), phys_mem_gib(),
+                self.funcs))
+        sys.stderr.flush()
+        os._exit(EXIT_BOXLIMIT)
 
     def _hang(self, why):
         sys.stderr.write(

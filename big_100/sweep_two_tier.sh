@@ -71,6 +71,7 @@ classify() {
     1)   echo "INVARIANT_FAIL" ;;
     2)   echo "SETUP_ERROR" ;;
     3)   echo "WATCHDOG_HANG" ;;
+    4)   echo "BOXLIMIT" ;;          # memory guard tripped: BOX can't sustain N (benign)
     124|137|143) echo "TIMEOUT" ;;
     *)
       if [ "$rc" -ge 128 ] 2>/dev/null; then echo "CRASH(sig$((rc-128)))"
@@ -79,7 +80,9 @@ classify() {
 }
 
 # is a class a HARD fault (crash/hang/timeout/lost/setup)?  INVARIANT_FAIL is
-# context-dependent (real at design, scale at survival) so it is NOT here.
+# context-dependent (real at design, scale at survival) so it is NOT here.  BOXLIMIT
+# is NEVER a fault -- it means the memory guard cleanly stopped a run this box's RAM
+# can't sustain (a box property, not a program/runtime bug).
 is_hard_fault() {
   case "$1" in
     CRASH*|WATCHDOG_HANG|TIMEOUT|LOST*|SETUP_ERROR) return 0 ;;
@@ -105,12 +108,17 @@ run_one() {  # prog scale tmo -> prints "class|secs|lost|slow|exits"
 }
 
 # Reconcile the two tiers into one verdict.
-reconcile() {  # design_class survival_class -> OK|REAL_FAULT|SCALE_ONLY|...
+reconcile() {  # design_class survival_class -> OK|REAL_FAULT|SCALE_ONLY|BOXLIMIT|...
   local d="$1" s="$2"
+  # BOXLIMIT at either tier = the memory guard cleanly stopped a run this box's
+  # RAM can't sustain.  Benign (a box property, not a program/runtime bug), never
+  # a fault -- reported as its own class so it's distinguishable from OK/SCALE.
+  if [ "$d" = "BOXLIMIT" ]; then echo "BOXLIMIT(design)"; return; fi
   if is_hard_fault "$d"; then echo "REAL_FAULT(design:$d)"; return; fi
   if [ "$d" = "INVARIANT_FAIL" ] || [ "$d" = "VFAIL" ]; then
     echo "REAL_FAULT(design_oracle:$d)"; return; fi
   # design is clean (PASS).  Now judge survival.
+  if [ "$s" = "BOXLIMIT" ]; then echo "BOXLIMIT(survival)"; return; fi
   if is_hard_fault "$s"; then echo "REAL_FAULT(survival:$s)"; return; fi
   case "$s" in
     PASS)            echo "OK" ;;
@@ -157,5 +165,6 @@ echo | tee -a "$RES"
 echo "==== SUMMARY ====" | tee -a "$RES"
 grep -cE "REAL_FAULT"  "$RES" | xargs printf "  REAL_FAULT : %s\n" | tee -a "$RES"
 grep -cE "SCALE_ONLY"  "$RES" | xargs printf "  SCALE_ONLY : %s\n" | tee -a "$RES"
+grep -cE "BOXLIMIT"    "$RES" | xargs printf "  BOXLIMIT   : %s  (box RAM too small for N -- benign)\n" | tee -a "$RES"
 grep -cwE "OK|OK\(design-only\)" "$RES" | xargs printf "  OK         : %s\n" | tee -a "$RES"
 echo "  (full table: $RES)" | tee -a "$RES"
