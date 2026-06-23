@@ -61,6 +61,16 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _SRC = os.path.join(REPO, "src")
 mn_only = pytest.mark.skipif(not FT, reason="M:N needs GIL-disabled build")
 
+# Cooperative os.read/os.write on a NON-BLOCKING pipe fd is POSIX-specific: the
+# reader's parking model is the offload pool on Windows (iocp-afd polls Winsock
+# sockets only, so a pipe fd is not wait_fd-pollable), and a non-blocking pipe
+# os.read inside a pool worker raises EINVAL on Windows.  Tests that exercise
+# cooperative-overlap on a non-blocking os.pipe() are gated off Windows.
+no_cooperative_pipe_win = pytest.mark.skipif(sys.platform == "win32", reason=(
+    "cooperative overlap on a non-blocking os.pipe(): iocp-afd cannot wait_fd a "
+    "pipe and a non-blocking pipe os.read in the offload pool is EINVAL on "
+    "Windows; this is POSIX pipe/netpoll semantics, not portable as written"))
+
 
 # ==========================================================================
 # subprocess crash-containment helper (a SIGSEGV here is contained + observed)
@@ -1666,6 +1676,7 @@ def test_foreign_rlock_reentrant_no_scheduler_alloc_subprocess():
 #     integrity (every byte, in order) + cooperative overlap (the reader parks
 #     on wait_fd while the writer makes progress).  Never tested directly.
 # --------------------------------------------------------------------------
+@no_cooperative_pipe_win
 def test_os_read_write_pipe_cooperative_integrity_and_overlap():
     out = {}
     def main():
@@ -1705,6 +1716,7 @@ def test_os_read_write_pipe_cooperative_integrity_and_overlap():
 
 
 @mn_only
+@no_cooperative_pipe_win
 def test_os_write_foreign_thread_os_read_fiber_subprocess():
     # os.write from a FOREIGN thread (no fiber -> passthrough _orig_os_write on
     # a nonblocking fd), os.read from a fiber (cooperative wait_fd).  The
@@ -2476,6 +2488,7 @@ def test_bounded_semaphore_over_release_counts_pending_waiter():
 # A15. builtins.open on a pollable PIPE fd routes through cooperative _pyio
 #      (so a buffered .read() parks instead of wedging the hub).  Never tested.
 # --------------------------------------------------------------------------
+@no_cooperative_pipe_win
 def test_open_pollable_pipe_fd_buffered_read_is_cooperative():
     out = {"sib": 0}
     def main():

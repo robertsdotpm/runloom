@@ -103,3 +103,30 @@ def free_tcp_port_pair():
 def needs_free_threading():
     """True iff this interpreter has the GIL disabled (real M:N parallelism)."""
     return hasattr(sys, "_is_gil_enabled") and not sys._is_gil_enabled()
+
+
+def pollable_pipe():
+    """Return (rfd, wfd, keepalive) -- a pair of fds usable as a wait_fd target.
+
+    On POSIX the netpoll backend (epoll/kqueue/select) can poll a pipe, so this
+    is just os.pipe() and `keepalive` is None.
+
+    On Windows the readiness backend is iocp-afd, which can ONLY poll Winsock
+    sockets -- a wait_fd on an os.pipe() read end fails (AFD has no IRP path for
+    a non-socket HANDLE).  A loopback socket.socketpair() IS pollable by AFD and
+    is the same substitute monkey/_base.py + runloom.aio already use, so return
+    its fds there.  The socket objects MUST stay referenced or Python closes the
+    fds out from under the parked fiber, so the caller keeps `keepalive` alive.
+
+    Use this only for tests that PARK on the fd (timeout / cancel / never-ready /
+    park-forever) -- they never os.read()/os.write() the fds, which would not
+    work on a Windows SOCKET handle.  Tests that drive readiness by writing a
+    byte, or that probe pipe-/epoll-specific semantics, are gated off Windows
+    instead.
+    """
+    if sys.platform == "win32":
+        import socket
+        s1, s2 = socket.socketpair()
+        return s1.fileno(), s2.fileno(), (s1, s2)
+    r, w = os.pipe()
+    return r, w, None

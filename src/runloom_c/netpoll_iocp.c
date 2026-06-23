@@ -428,8 +428,22 @@ int runloom_iocp_submit(int fd, int events, long long timeout_ns)
         return 0;
     }
     /* Hard error.  Drop the ctx -- caller's wait_fd will see no
-     * completion and fall back to whatever its error path is. */
+     * completion and fall back to whatever its error path is.  Classify the
+     * failure so module_run.c's PyErr_SetFromErrno surfaces a meaningful
+     * OSError instead of OSError(0): AFD_POLL only works on Winsock sockets,
+     * so the overwhelmingly common cause is a non-socket fd (e.g. an
+     * os.pipe() read end) -- detect that via SO_TYPE and report ENOTSOCK. */
     free(ctx);
+    {
+        int so_type; int so_len = (int)sizeof(so_type);
+        if (getsockopt((SOCKET)(uintptr_t)fd, SOL_SOCKET, SO_TYPE,
+                       (char *)&so_type, &so_len) == SOCKET_ERROR
+            && WSAGetLastError() == WSAENOTSOCK) {
+            errno = ENOTSOCK;   /* non-socket fd: AFD poll is sockets-only */
+        } else {
+            errno = EIO;
+        }
+    }
     return -1;
 }
 

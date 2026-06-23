@@ -30,8 +30,12 @@ descendants are cancelled too.  This is the main reason for the
 explicit tree, vs. just passing a channel around.
 """
 import os
+import socket as _socket
+import sys as _sys
 import time as _time
 import runloom_c
+
+_IS_WINDOWS = _sys.platform == "win32"
 
 _READ = 1   # runloom_c.wait_fd READ direction
 
@@ -45,14 +49,26 @@ _READ = 1   # runloom_c.wait_fd READ direction
 # fd number never changes and is never closed, so it cannot poison the netpoll
 # arm cache (the fd-reuse hazard), and many wakers can park on it at once (each
 # wakes/cancels independently).
+# On Windows the readiness backend (iocp-afd) can ONLY poll Winsock sockets, not
+# pipe fds, so wait_fd on an os.pipe() read end fails (OSError) -- use a socketpair
+# there instead (an AF_INET loopback pair, which AFD can poll), the same thing
+# monkey/_base.py + runloom.aio already do.  Nothing is ever written to either end,
+# so READ never becomes ready: a waker only ever times out or is cancelled.
 _wake_rfd = None
 _wake_wfd = None
+_wake_socks = None   # keep the Windows socketpair objects alive (so the fds stay valid)
 
 
 def _wake_fd():
-    global _wake_rfd, _wake_wfd
+    global _wake_rfd, _wake_wfd, _wake_socks
     if _wake_rfd is None:
-        _wake_rfd, _wake_wfd = os.pipe()
+        if _IS_WINDOWS:
+            _s1, _s2 = _socket.socketpair()
+            _wake_socks = (_s1, _s2)   # never closed -- a permanent parking target
+            _wake_rfd = _s1.fileno()
+            _wake_wfd = _s2.fileno()
+        else:
+            _wake_rfd, _wake_wfd = os.pipe()
     return _wake_rfd
 
 

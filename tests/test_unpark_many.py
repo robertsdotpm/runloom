@@ -14,8 +14,12 @@ safety fallbacks that these tests pin down:
     falls back to os.write for every waiter.
 """
 import os
+import socket as _socket
+import sys as _sys
 import threading as _real_threading_preimport
 import time  # noqa: F401
+
+_IS_WINDOWS = _sys.platform == "win32"
 
 import pytest
 
@@ -52,8 +56,19 @@ def test_unpark_many_wakes_all_parked():
     """N fibers parked in wait_fd are all woken by one unpark_many, each
     returning the UNPARKED sentinel, with nothing reported missed."""
     def main():
-        r, w = os.pipe()
-        os.set_blocking(r, False)
+        # The fibers PARK on `r` (never written) and are woken by unpark_many,
+        # not by fd readiness -- so any pollable fd works.  On Windows the
+        # iocp-afd backend can only poll Winsock sockets, so use a socketpair
+        # read end there (a pipe fd is not AFD-pollable); on POSIX an os.pipe()
+        # is fine.  Keep the socket objects alive while they are parked on.
+        _keep = None
+        if _IS_WINDOWS:
+            _s1, _s2 = _socket.socketpair()
+            _keep = (_s1, _s2)
+            r, w = _s1.fileno(), _s2.fileno()
+        else:
+            r, w = os.pipe()
+            os.set_blocking(r, False)
         handles = []
         woke = []
 
@@ -78,7 +93,10 @@ def test_unpark_many_wakes_all_parked():
         _spin = 0
         while len(woke) < n and _spin < 2000000:
             runloom.sleep(0); _spin += 1
-        os.close(r); os.close(w)
+        if _keep is not None:
+            _keep[0].close(); _keep[1].close()   # closes the socket fds
+        else:
+            os.close(r); os.close(w)
         return n, len(woke), missed, sorted(set(rv for _, rv in woke))
 
     n, woke, missed, rvs = _drive(main)

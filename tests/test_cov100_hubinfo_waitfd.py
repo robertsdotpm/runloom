@@ -54,7 +54,9 @@ import sys
 import pytest
 
 import runloom_c as rc
-from adv_util import hang_guard, needs_free_threading
+from adv_util import hang_guard, needs_free_threading, pollable_pipe
+
+_IS_WINDOWS = sys.platform == "win32"
 
 READ, WRITE = 1, 2
 FT = needs_free_threading()
@@ -185,9 +187,11 @@ def test_sched_reset_drains_same_thread_wait_fd_parker():
     res = {}
 
     def waiter():
-        r, w = os.pipe()
+        # park forever on a never-ready fd; only the drain frees it.  On Windows
+        # iocp-afd cannot poll a pipe, so use a socketpair read end there.
+        r, w, keep = pollable_pipe()
         res["fds"] = (r, w)
-        # park forever; only the drain frees it.
+        res["keep"] = keep
         res["rv"] = rc.wait_fd(r, READ, -1)
 
     def driver():
@@ -202,6 +206,8 @@ def test_sched_reset_drains_same_thread_wait_fd_parker():
 
     r, w = res["fds"]
     _drop(r); _drop(w)
+    if res.get("keep") is not None:
+        res["keep"][0].close(); res["keep"][1].close()
     assert res.get("reset") is not None, "sched_reset never ran"
     n_ready, n_sleep, n_parked = res["reset"]
     assert n_parked == 1, (
@@ -225,11 +231,15 @@ def test_sched_reset_drains_many_same_thread_parkers():
     Adversarial property: every one of N same-thread parkers is drained
     (n_parked==N) and the structures are clean afterward."""
     N = 16
-    res = {"fds": []}
+    res = {"fds": [], "keep": []}
 
     def waiter():
-        r, w = os.pipe()
+        # never-ready park-forever fd; socketpair on Windows (iocp-afd can't
+        # poll a pipe), os.pipe on POSIX.
+        r, w, keep = pollable_pipe()
         res["fds"].append((r, w))
+        if keep is not None:
+            res["keep"].append(keep)
         rc.wait_fd(r, READ, -1)
 
     def driver():
@@ -245,6 +255,8 @@ def test_sched_reset_drains_many_same_thread_parkers():
 
     for r, w in res["fds"]:
         _drop(r); _drop(w)
+    for s1, s2 in res["keep"]:
+        s1.close(); s2.close()
     assert res.get("reset") is not None
     assert res["reset"][2] == N, (
         "drained %d/%d parkers -- the claim loop did not process every linked "
@@ -308,6 +320,9 @@ sys.stdout.write("SIGWAKE caught=%r rv=%r escaped=%r\n" % (
 
 
 @pytest.mark.skipif(not FT, reason="signal-into-wait_fd needs the runtime")
+@pytest.mark.skipif(_IS_WINDOWS, reason=(
+    "uses signal.SIGALRM + signal.setitimer(ITIMER_REAL), which do not exist on "
+    "Windows; the signal-wake-into-wait_fd path is POSIX-signal specific"))
 def test_signal_handler_raises_into_wait_fd_parker():
     """Drives netpoll_wait_fd.c.inc L101 (the signal_wake claim-loop load) and
     the wait_fd signal-restore tail (L401-411).
