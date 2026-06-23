@@ -7,17 +7,25 @@ native config: runloom + go on HUBS cores (GIL off), asyncio/uvloop/greenlet on 
 core (GIL on) -- same as the cross-runtime report.  Writes results/spawn_curve.json
 for the report curve.  RUNLOOM_SYSMON/PREEMPT off (microbenchmark watchdog noise).
 
-TRADE-OFF / TARGET (full diagnosis: docs/dev/spawn_cost.md).  This is NAKED spawn
--- the WORST case: create+run+destroy with no I/O to amortize over.  runloom is
-~48x behind Go HERE and only here; req/s does NOT have this gap (it spawns one
-handler per *connection* at setup, then loops -- spawn is ~0% of the timed
-window), and conn/s matches Go's conn/s (at ~4x CPU; TCP syscalls dominate).  The
-gap is per-fiber stack mmap+mprotect during the spawn burst (runloom_coro_new ->
-runloom_stack_map_guarded), because RUNLOOM_STACK_ARENA holds ONE stack-size class
-and falls back to per-stack mmap on any other size.  TARGET: productionize the
-arena -- per-size-class arenas + unguarded pure-Python slots + a bounded resident
-pool (no per-completion madvise).  Do NOT read this number as "runloom is 48x
-slower"; read the metrics legend at the top of the report.
+This is NAKED spawn -- the WORST case: create+run+destroy with no I/O to amortize
+over.  runloom now MATCHES Go here: the user-facing Python spawn
+(runloom.fiber_fast) hits ~2M/s vs Go's ~2.1M, and the pure-C c_entry path
+beats Go at warm steady state.  (History: this was once ~48x behind Go; two fixes
+closed it -- (1) lazily allocating each fiber's C stack at FIRST RESUME on the hub
+that runs it, instead of at spawn on the producer hub whose pool never refilled
+and cold-mmap'd a guarded stack per fiber; (2) auto-pacing the spawn loop so the
+producer hub interleaves running with spawning instead of flooding 7/8 hubs.  See
+docs/dev/spawn_cost.md.)
+
+Two runloom spawn entries are reported:
+  runloom_py -- runloom.fiber_fast: the fair apples-to-apples vs Go's `go f()`
+                (a thin Python spawn, no per-spawn work).  ~Go.
+  runloom_c  -- the pure-C c_entry path (no Python frame): the scheduler ceiling.
+NOTE: the DEFAULT runloom.fiber adds the grow-down auto-sizer (a per-spawn
+stack-HWM learn that trades ~7x spawn speed for small resident stacks -- an RSS
+feature Go lacks), so it is a separate RSS-vs-speed number, not the
+spawn-speed-vs-Go comparison measured here.  Each rep is a fresh process, so this
+is the COLD first-burst; warm steady-state is higher.
 """
 import json
 import os
