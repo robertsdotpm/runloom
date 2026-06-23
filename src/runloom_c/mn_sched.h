@@ -79,6 +79,12 @@ int runloom_mn_init(int n_threads);
  * Use a larger value for a g that runs a deep, non-yielding C burst (cold
  * imports, terminfo/OpenSSL init) that the copy-grow can't rescue mid-burst. */
 PyObject *runloom_mn_fiber(PyObject *callable, size_t stack_size);
+/* Like runloom_mn_fiber but `size` is a grow-down LEARNED size: spawn it down the
+ * deferred (lazy) stack-alloc path so a tight front-load loop doesn't cold-mmap a
+ * guarded stack per spawn -- the alloc lands on the consumer hub where the pool
+ * recycles -- while still installing exactly `size`.  For internal right-sizing
+ * only (the C-side frozen grow-down), never a user pin. */
+PyObject *runloom_mn_fiber_grown(PyObject *callable, size_t size);
 /* Bulk-spawn n fibers all running `callable`, looping the spawn core in C
  * (skips n Python->C dispatches + per-call arg parsing).  indexed != 0 calls
  * each as callable(i) for i in 0..n-1 (per-fiber arg); 0 calls callable().

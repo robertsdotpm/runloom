@@ -14,6 +14,14 @@ you are spending and buying:
     runloom.optimize("throughput", "latency")   # compose -- pass the trades you want
     runloom.optimize("memory", max_fibers=200_000)
 
+Natural synonyms work too -- ``optimize("speed")`` == ``optimize("throughput")``,
+``optimize("rss")`` == ``optimize("memory")`` (case-insensitive).
+
+The throughput/memory trades ALSO pick which spawn path ``runloom.fiber`` uses:
+``throughput`` points it at ``fiber_fast`` (max naked-spawn rate, fixed default
+stack), ``memory`` at the grow-down auto-sizer (small right-sized stacks).  The
+default (no call) is grow-down.
+
 Conflicts resolve by precedence ``secure > memory > latency > throughput`` (so
 ``optimize("throughput", "memory")`` keeps RSS lean where they disagree).
 
@@ -79,6 +87,22 @@ _GOAL_ENV = {
 # Apply order = ascending precedence; the later one wins on a conflicting key.
 _PRECEDENCE = ("throughput", "latency", "memory", "secure")
 
+# Friendly synonyms -> canonical goal.  Case-insensitive; lets the natural words
+# ("speed", "rss") map onto the trade names without a second vocabulary.
+_ALIASES = {
+    "speed": "throughput", "cpu": "throughput", "fast": "throughput",
+    "time": "throughput",
+    "rss": "memory", "ram": "memory", "small": "memory", "space": "memory",
+    "mem": "memory",
+    "tail": "latency",
+    "security": "secure", "hardened": "secure", "harden": "secure",
+}
+
+
+def _normalize(g):
+    s = str(g).strip().lower()
+    return _ALIASES.get(s, s)
+
 #: the valid trade names, in precedence order.
 GOALS = tuple(_PRECEDENCE)
 
@@ -96,6 +120,7 @@ def optimize(*goals, max_fibers=None):
     Returns the dict of EFFECTIVE settings for the knobs it touched (an explicit
     shell env var shows through here, since it wins).
     """
+    goals = tuple(_normalize(g) for g in goals)
     for g in goals:
         if g not in _GOAL_ENV:
             raise ValueError(
@@ -122,6 +147,20 @@ def optimize(*goals, max_fibers=None):
         try:
             import runloom_c
             runloom_c.set_stack_scrub(os.environ.get("RUNLOOM_STACK_SCRUB") == "1")
+        except (ImportError, AttributeError):
+            pass
+
+    # Spawn-path trade, applied LIVE (it picks which C entry runloom.fiber uses):
+    #   throughput -> fiber_fast: max naked-spawn rate, fixed default stack.
+    #   memory     -> grow-down : small right-sized resident stacks.
+    # Same precedence as the env knobs (memory > throughput), so on a conflict the
+    # leaner choice wins.  Untouched unless one of the two is requested, so
+    # optimize("latency")/optimize() leave runloom.fiber at its grow-down default.
+    if "throughput" in goals or "memory" in goals:
+        want_speed = ("throughput" in goals) and ("memory" not in goals)
+        try:
+            import runloom_c
+            runloom_c._fiber_set_speed(1 if want_speed else 0)
         except (ImportError, AttributeError):
             pass
 

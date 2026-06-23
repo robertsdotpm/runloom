@@ -101,6 +101,9 @@ static PyMethodDef module_methods[] = {
      "a callable's learned stack size from its __dict__ in C."},
     {"_fiber_set_grow_down", m_fiber_set_grow_down, METH_O,
      "internal: mirror runtime.grow_down_active into fiber_grow's C fast path."},
+    {"_fiber_set_speed", m_fiber_set_speed, METH_O,
+     "internal: optimize('throughput') -> runloom.fiber spawns like fiber_fast;\n"
+     "optimize('memory')/default -> the grow-down auto-sizer."},
     {"blocking",    (PyCFunction)m_blocking, METH_VARARGS | METH_KEYWORDS,
      "blocking(fn, *args, **kwargs): run fn(*args, **kwargs) on the\n"
      "blocking-offload thread pool, parking the calling fiber until it\n"

@@ -476,7 +476,8 @@ static long runloom_spawn_pace(void)
 }
 
 static int runloom_mn_fiber_core(PyObject *callable, runloom_c_entry_fn c_fn,
-                           void *c_arg, size_t stack_size, long py_index)
+                           void *c_arg, size_t stack_size, long py_index,
+                           int defer_sized)
 {
     long n;
     int hub_idx;
@@ -578,12 +579,15 @@ static int runloom_mn_fiber_core(PyObject *callable, runloom_c_entry_fn c_fn,
                           ? stack_size
                           : runloom_advice_size_for(g->advice_key, callable,
                                                     (size_t)h->sched.stack_size);
-    if (runloom_use_global_runq() || stack_size > 0) {
+    if (runloom_use_global_runq() || (stack_size > 0 && !defer_sized)) {
         /* Eager when: a global-runq mode (its resume path assumes coro set), OR
          * the caller PINNED an explicit stack_size -- an explicit oversize ask
          * should fail at spawn (MemoryError) where the caller can handle it, not
          * silently later at resume.  The default/auto-sized common path (the
-         * spawn-freely front-load) is the one that defers. */
+         * spawn-freely front-load) is the one that defers.  defer_sized carries a
+         * specific size (the grow-down learned size) down the DEFERRED path: it is
+         * an internal right-sizing, not a user pin, so it defers like the default
+         * (no front-load mmap storm) yet installs at req_stack_size, not advice. */
         g->coro = runloom_coro_new(g->req_stack_size, runloom_g_entry, g);
         if (g->coro == NULL) {
             if (callable != NULL) {
@@ -644,12 +648,26 @@ static int runloom_mn_fiber_core(PyObject *callable, runloom_c_entry_fn c_fn,
 int runloom_mn_fiber_c(runloom_c_entry_fn fn, void *arg)
 {
     if (fn == NULL) { errno = EINVAL; return -1; }
-    return runloom_mn_fiber_core(NULL, fn, arg, 0, -1);
+    return runloom_mn_fiber_core(NULL, fn, arg, 0, -1, 0);
 }
 
 PyObject *runloom_mn_fiber(PyObject *callable, size_t stack_size)
 {
-    if (runloom_mn_fiber_core(callable, NULL, NULL, stack_size, -1) < 0) {
+    if (runloom_mn_fiber_core(callable, NULL, NULL, stack_size, -1, 0) < 0) {
+        return NULL;
+    }
+    Py_RETURN_NONE;
+}
+
+/* Like runloom_mn_fiber, but `size` is the grow-down LEARNED size: spawn it down
+ * the DEFERRED stack-alloc path (coro+stack installed at first resume on the
+ * consumer hub) instead of eager at spawn.  An explicit user pin stays eager so
+ * an oversize ask fails at spawn; a learned size is an internal right-sizing, so
+ * it defers like the auto-sized default -- no cold-mmap front-load storm -- while
+ * still installing exactly `size`, not the advice size. */
+PyObject *runloom_mn_fiber_grown(PyObject *callable, size_t size)
+{
+    if (runloom_mn_fiber_core(callable, NULL, NULL, size, -1, 1) < 0) {
         return NULL;
     }
     Py_RETURN_NONE;
@@ -925,7 +943,7 @@ static int runloom_mn_fiber_n_bulk(PyObject *callable, long n, size_t stack_size
             free(garena); free(carena); free(batch);
             for (i = 0; i < n; i++)
                 if (runloom_mn_fiber_core(callable, NULL, NULL, stack_size,
-                                       indexed ? i : -1) < 0) return -1;
+                                       indexed ? i : -1, 0) < 0) return -1;
             return 0;
         }
         if (tmg) t2 = runloom_create_now_ns();   /* pass B (coro_bulk_init) done */
@@ -1010,7 +1028,7 @@ int runloom_mn_fiber_n(PyObject *callable, long n, size_t stack_size, int indexe
     }
     for (i = 0; i < n; i++) {
         if (runloom_mn_fiber_core(callable, NULL, NULL, stack_size,
-                               indexed ? i : -1) < 0) {
+                               indexed ? i : -1, 0) < 0) {
             return -1;
         }
     }

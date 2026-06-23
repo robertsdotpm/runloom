@@ -389,6 +389,9 @@ static PyObject *m_mn_hub_count(PyObject *self, PyObject *unused)
  * ONE public entry that is fast AND M:N-correct. */
 static PyObject *runloom_py_fiber_full = NULL;   /* the Python full-feature wrapper */
 static int       runloom_fiber_force_full = 0;   /* 1 = always delegate (auto mode) */
+static int       runloom_fiber_speed = 0;        /* 1 = runloom.fiber == fiber_fast
+                                                  * (optimize("throughput")); 0 = the
+                                                  * grow-down default (optimize("memory")) */
 
 static PyObject *m_fiber_fast(PyObject *self, PyObject *const *args,
                               Py_ssize_t nargs, PyObject *kwnames)
@@ -459,10 +462,35 @@ static PyObject *m_fiber_set_grow_down(PyObject *self, PyObject *arg)
     Py_RETURN_NONE;
 }
 
+/* optimize("throughput") -> 1: runloom.fiber spawns like fiber_fast (max naked-
+ * spawn rate, fixed default stack).  optimize("memory") / default -> 0: the
+ * grow-down auto-sizer (small right-sized stacks).  Keeps runloom.fiber a STABLE
+ * object (no rebinding) so `from runloom import fiber` honors the choice too. */
+static PyObject *m_fiber_set_speed(PyObject *self, PyObject *arg)
+{
+    int v = PyObject_IsTrue(arg);
+    (void)self;
+    if (v < 0) return NULL;
+    runloom_fiber_speed = v;
+    Py_RETURN_NONE;
+}
+
 static PyObject *m_fiber_grow(PyObject *self, PyObject *const *args,
                               Py_ssize_t nargs, PyObject *kwnames)
 {
     (void)self;
+    if (runloom_fiber_speed) {
+        /* optimize("throughput"): raw fiber_fast spawn.  Wins over force_full
+         * (the _AUTO hot latch) and grow-down -- the user explicitly chose max
+         * spawn rate, which is incompatible with routing every spawn through the
+         * Python _fiber_full frame that auto-hot promotion / grow-down need. */
+        if (nargs == 1 && kwnames == NULL && runloom_mn_hub_count() > 0
+                && PyCallable_Check(args[0]))
+            return runloom_mn_fiber(args[0], 0);
+        if (runloom_py_fiber_full != NULL)   /* rich/single-thread: delegate */
+            return PyObject_Vectorcall(runloom_py_fiber_full, args,
+                                       (size_t)nargs, kwnames);
+    }
     if (!runloom_fiber_force_full && runloom_grow_down_active && nargs == 1
             && kwnames == NULL && runloom_mn_hub_count() > 0
             && runloom_grow_down_key != NULL && PyFunction_Check(args[0])) {
@@ -489,7 +517,9 @@ static PyObject *m_fiber_grow(PyObject *self, PyObject *const *args,
                 Py_XDECREF(cnt_o);
                 Py_XDECREF(sz_o);
                 if (frozen)
-                    return runloom_mn_fiber(fn, size);   /* learned size, no Python frame */
+                    /* learned size, no Python frame, DEFERRED stack alloc (lazy
+                     * path) so a tight front-load loop doesn't cold-mmap per spawn */
+                    return runloom_mn_fiber_grown(fn, size);
             } else if (store == NULL && PyErr_Occurred()) {
                 PyErr_Clear();
             }
