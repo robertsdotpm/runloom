@@ -183,4 +183,8 @@ int  runloom_coro_scrub_enabled(void);
  * (no introspectable stack). */
 size_t runloom_coro_scan_hwm(runloom_coro_t *c);
 
+/* After fork(): re-init the FCONTEXT coro cross-hub balance lock in the child
+ * (no-op on non-FCONTEXT backends).  Wired into runloom_after_fork_child. */
+void runloom_coro_reset_after_fork(void);
+
 #endif /* RUNLOOM_CORO_H */

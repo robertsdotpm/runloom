@@ -290,6 +290,29 @@ static PyObject *m_reset_after_fork(PyObject *self, PyObject *unused)
     Py_RETURN_NONE;
 }
 
+/* Test-only: hold / acquire the g-slab balance lock for the fork-deadlock
+ * regression test (tests/test_fork_balance_lock.py).  Not for production use. */
+static PyObject *m_test_g_balance_hold_ns(PyObject *self, PyObject *arg)
+{
+    long long ns;
+    (void)self;
+    ns = PyLong_AsLongLong(arg);
+    if (ns == -1 && PyErr_Occurred()) return NULL;
+    Py_BEGIN_ALLOW_THREADS
+    runloom_g_global_test_hold_ns(ns);
+    Py_END_ALLOW_THREADS
+    Py_RETURN_NONE;
+}
+
+static PyObject *m_test_g_balance_acquire(PyObject *self, PyObject *unused)
+{
+    (void)self; (void)unused;
+    Py_BEGIN_ALLOW_THREADS
+    runloom_g_global_test_acquire();
+    Py_END_ALLOW_THREADS
+    Py_RETURN_NONE;
+}
+
 static PyObject *m_install_traceback_signal(PyObject *self, PyObject *args)
 {
     int signum = -1;

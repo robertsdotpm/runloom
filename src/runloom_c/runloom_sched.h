@@ -623,6 +623,19 @@ void runloom_sched_stack_stats(runloom_stack_stats_t *out);
  * after-fork-in-child handler. */
 void runloom_cal_reset_after_fork(void);
 
+/* After fork(): re-init the cross-hub g-slab balance lock in the child (it may
+ * be inherited held by a dead hub mid-splice) and abandon the bounded inherited
+ * batch.  Wired into runloom_after_fork_child.  Non-hot-path. */
+void runloom_g_global_reset_after_fork(void);
+
+/* After fork(): re-init the FCONTEXT coro cross-hub balance lock in the child
+ * (no-op on non-FCONTEXT backends).  Wired into runloom_after_fork_child. */
+void runloom_coro_reset_after_fork(void);
+
+/* Test-only hooks (runloom_c._test_*) for the fork-deadlock regression test. */
+void runloom_g_global_test_hold_ns(long long ns);
+void runloom_g_global_test_acquire(void);
+
 /* Yield the current g.  Re-queues on the ready FIFO, swaps back to
  * the scheduler stack.  Must be called from inside a g. */
 void runloom_sched_yield(runloom_sched_t *s);

@@ -592,6 +592,42 @@ static void runloom_g_global_flush(void)
     runloom_mutex_unlock(&runloom_g_global_lock);
 }
 
+/* ---- test-only hooks for the fork-deadlock regression test ----------------
+ * Not used in production; exposed only as runloom_c._test_* for the regression
+ * test that proves the after-fork balance-lock reset.  Kept here so they share
+ * the (file-static) lock + ensure shim. */
+void runloom_g_global_test_hold_ns(long long ns)
+{
+    runloom_g_global_ensure_lock();
+    runloom_mutex_lock(&runloom_g_global_lock);
+    if (ns > 0) runloom_sleep_ns(ns);
+    runloom_mutex_unlock(&runloom_g_global_lock);
+}
+
+void runloom_g_global_test_acquire(void)
+{
+    /* Blocks forever if the lock was inherited HELD by a dead owner across
+     * fork() -- exactly the deadlock the after-fork reset prevents. */
+    runloom_g_global_ensure_lock();
+    runloom_mutex_lock(&runloom_g_global_lock);
+    runloom_mutex_unlock(&runloom_g_global_lock);
+}
+
+/* After fork(): a hub may have died mid-splice holding runloom_g_global_lock,
+ * leaving it locked with the global freelist possibly inconsistent.  Re-init the
+ * lock and abandon the bounded inherited batch.  The structs are leaked, never
+ * freed to the OS, so the "freed g never returns to the OS" UAF invariant still
+ * holds; the child has abandoned all hubs/fibers (runloom_mn_reset_after_fork) so
+ * no stale wake can reference them.  Non-hot-path: runs once, child-side only.
+ * Mirrors runloom_cal_reset_after_fork. */
+void runloom_g_global_reset_after_fork(void)
+{
+    runloom_mutex_init(&runloom_g_global_lock);
+    __atomic_store_n(&runloom_g_global_lock_inited, 2, __ATOMIC_RELAXED);
+    runloom_g_global_slab = NULL;
+    runloom_g_global_size = 0;
+}
+
 runloom_g_t *runloom_g_slab_alloc(void)
 {
     runloom_g_t *g = runloom_g_slab;

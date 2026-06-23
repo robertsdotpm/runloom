@@ -2271,3 +2271,17 @@ size_t runloom_coro_scan_hwm(runloom_coro_t *c)
     return 0;
 #endif
 }
+
+/* After fork(): re-init the FCONTEXT coro cross-hub balance lock (a hub may have
+ * died mid-splice holding it) and abandon the bounded inherited batch.  A no-op
+ * stub on the FIBERS/UCONTEXT backends, which have no cross-hub coro balance
+ * pool.  Non-hot-path; mirrors runloom_g_global_reset_after_fork. */
+void runloom_coro_reset_after_fork(void)
+{
+#if defined(RUNLOOM_HAVE_FCONTEXT)
+    pthread_mutex_init(&runloom_coro_global_lock, NULL);
+    runloom_coro_global_pool = NULL;
+    runloom_coro_global_size = 0;
+    runloom_coro_global_class = 0;
+#endif
+}

@@ -295,6 +295,12 @@ static PyMethodDef module_methods[] = {
      "its own netpoll fd.  Registered automatically as an "
      "os.register_at_fork(after_in_child=...) handler; call directly only if "
      "you fork without importing the runloom package.  CHILD process only."},
+    {"_test_g_balance_hold_ns", m_test_g_balance_hold_ns, METH_O,
+     "test-only: hold the g-slab balance lock for N ns (run in a helper thread "
+     "to simulate a hub holding it across fork).  Regression test only."},
+    {"_test_g_balance_acquire", m_test_g_balance_acquire, METH_NOARGS,
+     "test-only: acquire+release the g-slab balance lock; blocks forever if it "
+     "was inherited held across fork.  Regression test only."},
     {"get_introspect_timestamps", m_get_introspect_timestamps, METH_NOARGS,
      "get_introspect_timestamps() -> bool.  Whether park-age tracking is on."},
     {"set_deadlock_mode", m_set_deadlock_mode, METH_O,

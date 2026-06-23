@@ -617,6 +617,8 @@ void runloom_after_fork_child(void)
     runloom_crash_reset_after_fork();        /* clear crash latch (keep altstack) */
     runloom_advice_reset_after_fork();       /* stack-advice table lock */
     runloom_cal_reset_after_fork();          /* default-stack calibration lock */
+    runloom_g_global_reset_after_fork();     /* cross-hub g-slab balance lock + pool */
+    runloom_coro_reset_after_fork();         /* cross-hub coro balance lock + pool */
 }
 
 /* ---------------------------------------------------------------- *
