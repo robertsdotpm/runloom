@@ -686,9 +686,10 @@ void runloom_fibern_batch_finish_one(struct runloom_fibern_batch *b)
  * passes dominates the ~1.32M/s create wall -- see docs/dev/spawn_above_1m.md. */
 static long long runloom_create_now_ns(void)
 {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (long long)ts.tv_sec * 1000000000LL + (long long)ts.tv_nsec;
+    /* Portable monotonic clock (QueryPerformanceCounter on Windows,
+     * clock_gettime(CLOCK_MONOTONIC) on POSIX) -- raw clock_gettime does not
+     * compile under MSVC. */
+    return runloom_monotonic_ns();
 }
 static int runloom_create_timing_on(void)
 {
@@ -732,7 +733,7 @@ typedef struct {
     runloom_g_t *heads[64], *tails[64];
     long counts[64];
 } runloom_pcreate_arg_t;
-static void *runloom_pcreate_worker(void *p)
+static RUNLOOM_THREAD_RET runloom_pcreate_worker(void *p)
 {
     runloom_pcreate_arg_t *a = (runloom_pcreate_arg_t *)p;
     long i; int h;
@@ -749,7 +750,7 @@ static void *runloom_pcreate_worker(void *p)
         a->tails[hub] = g;
         a->counts[hub]++;
     }
-    return NULL;
+    RUNLOOM_THREAD_RETURN(NULL);
 }
 
 static int runloom_mn_fiber_n_bulk(PyObject *callable, long n, size_t stack_size,
@@ -826,7 +827,7 @@ static int runloom_mn_fiber_n_bulk(PyObject *callable, long n, size_t stack_size
             if (P > 1 && n >= 4096) {            /* lever #1: parallel builders */
                 runloom_pcreate_arg_t *args =
                     (runloom_pcreate_arg_t *)malloc((size_t)P * sizeof *args);
-                pthread_t th[64];
+                runloom_thread_t th[64];
                 int b, started = 0;
                 if (args != NULL) {
                     for (b = 0; b < P; b++) {
@@ -834,11 +835,11 @@ static int runloom_mn_fiber_n_bulk(PyObject *callable, long n, size_t stack_size
                         args[b].goid_base = goid_base; args[b].H = H; args[b].pair_aff = pair_aff;
                         args[b].lo = (long)((long long)b * n / P);
                         args[b].hi = (long)((long long)(b + 1) * n / P);
-                        if (pthread_create(&th[b], NULL, runloom_pcreate_worker, &args[b]) != 0)
+                        if (runloom_thread_create(&th[b], runloom_pcreate_worker, &args[b]) != 0)
                             break;
                         started++;
                     }
-                    for (b = 0; b < started; b++) pthread_join(th[b], NULL);
+                    for (b = 0; b < started; b++) runloom_thread_join(th[b]);
                     if (started == P) {          /* merge per-hub partial lists in slice order */
                         int hh;
                         for (hub = 0; hub < H; hub++) { heads[hub] = tails[hub] = NULL; counts[hub] = 0; }

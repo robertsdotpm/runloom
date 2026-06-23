@@ -55,6 +55,17 @@ PY = sys.executable
 
 pytestmark = pytest.mark.skipif(not FT, reason="M:N scheduler needs GIL-disabled build")
 
+# The thread-spawn-failure and coro-alloc-failure coverage drivers below inject
+# their adverse condition via Linux-only mechanisms: RLIMIT_NPROC (which caps
+# THREADS per-uid on Linux but only fork()'d PROCESSES on Darwin/BSD, so
+# pthread_create never EAGAINs there -> mn_init succeeds), and /proc/self/status
+# (absent on macOS). There is no in-process knob to trip the mn_init
+# thread_create cleanup branch on macOS, so these are Linux-specific gcov drivers.
+_LINUX_ONLY = pytest.mark.skipif(
+    not sys.platform.startswith("linux"),
+    reason="RLIMIT_NPROC thread cap + /proc/self/status are Linux-specific "
+           "(Darwin RLIMIT_NPROC limits fork() not threads; no /proc)")
+
 
 def _run_worker(body, env_extra=None, timeout=60):
     """Run a worker snippet in a fresh subprocess; return CompletedProcess.
@@ -82,6 +93,7 @@ def _assert_clean(p, marker):
 # --------------------------------------------------------------------------
 # L146-172 : runloom_thread_create failure -> mn_init partial-cleanup + OSError
 # --------------------------------------------------------------------------
+@_LINUX_ONLY
 def test_mn_init_thread_spawn_failure_first_hub():
     """All hub pthread_creates fail (RLIMIT_NPROC=1) -> mn_init marks every hub
     stopping, restores the saved tstate, frees runloom_hubs, sets OSError, and
@@ -114,6 +126,7 @@ def test_mn_init_thread_spawn_failure_first_hub():
     assert "UNEXPECTED_OK" not in p.stdout
 
 
+@_LINUX_ONLY
 def test_mn_init_thread_spawn_failure_partial():
     """A FEW hub threads spawn, then EAGAIN -> mn_init also runs the j<i join
     loop (L149-152) over the already-spawned hubs before unwinding.  We grant
@@ -225,6 +238,7 @@ def test_fini_deletes_hub_tstate_on_main():
 # --------------------------------------------------------------------------
 # L480-491 : runloom_mn_fiber_core coro==NULL cleanup (stack mmap fails)
 # --------------------------------------------------------------------------
+@_LINUX_ONLY
 def test_mn_fiber_core_coro_alloc_failure_releases_admission():
     """Cap RLIMIT_AS just above the current VmSize, then mn_fiber() an 8 MiB stack:
     the fresh-size stack mmap inside runloom_coro_new fails -> coro == NULL ->

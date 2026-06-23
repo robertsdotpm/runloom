@@ -291,6 +291,10 @@ print("INVAR_OK")
 # L905-906 : prewarm(background=True) thread-create failure -> free arg, return -1.
 # L979-980 : prewarm_keep daemon thread-create failure -> clear flag, return -1.
 # --------------------------------------------------------------------------
+@pytest.mark.skipif(
+    not sys.platform.startswith("linux"),
+    reason="forces thread-create failure via RLIMIT_NPROC + reads /proc/self/status; "
+           "both Linux-specific (Darwin RLIMIT_NPROC caps fork() not threads; no /proc)")
 def test_prewarm_background_and_daemon_thread_spawn_failure():
     """Pin RLIMIT_NPROC at the current thread count so no new OS thread can be
     created.  Then:

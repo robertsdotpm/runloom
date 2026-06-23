@@ -146,8 +146,9 @@ def test_iouring_loop_cecho_drives_current_ring_accessor():
 #     (False would mean netpoll handled it / no op / already-pending; True can
 #      ONLY come from the iouring cancel here, since netpoll_cancel_g found no
 #      parker for a fiber parked on a bare ring op).
-#   * the recv raised OSError with errno == ECANCELED (125) -> the hub drained
-#     the mailbox and the kernel cancelled the op (end-to-end proof).
+#   * the recv raised OSError with errno == ECANCELED (125 on Linux, 89 on
+#     macOS) -> the hub drained the mailbox and the op was cancelled (end-to-end
+#     proof).  Asserted symbolically (is_canceled), never against the literal.
 _CANCEL_HUBRING = r'''
 import sys, os, socket, errno
 sys.path.insert(0, "src")
@@ -201,8 +202,9 @@ def main():
 import faulthandler; faulthandler.dump_traceback_later(40, exit=True)
 runloom.run(2, main)
 faulthandler.cancel_dump_traceback_later()
-sys.stdout.write("CANCEL_OK cancel_ret=%r exc_type=%r exc_errno=%r got_data=%r\n" %
-                 (res["cancel_ret"], res["exc_type"], res["exc_errno"], res["got_data"]))
+sys.stdout.write("CANCEL_OK cancel_ret=%r exc_type=%r exc_errno=%r is_canceled=%r got_data=%r\n" %
+                 (res["cancel_ret"], res["exc_type"], res["exc_errno"],
+                  res["exc_errno"] == errno.ECANCELED, res["got_data"]))
 '''
 
 
@@ -217,7 +219,9 @@ def test_iouring_hubring_recv_cancel_routes_through_mailbox():
         "G.cancel_wait_fd() did not report a hub-ring iouring cancel (True): the "
         "request was not routed through runloom_mn_hub_request_iouring_cancel\n"
         "stdout=%s\nstderr=%s" % (p.stdout, p.stderr[-1200:]))
-    assert "exc_type='OSError'" in p.stdout and "exc_errno=125" in p.stdout, (
+    # ECANCELED is errno 125 on Linux but 89 on macOS, so compare against the
+    # platform's symbolic value (the subprocess emits is_canceled), not a literal.
+    assert "exc_type='OSError'" in p.stdout and "is_canceled=True" in p.stdout, (
         "the parked recv did not unblock with ECANCELED after the mailbox cancel "
         "(the hub never drained the cancel mailbox)\nstdout=%s\nstderr=%s"
         % (p.stdout, p.stderr[-1200:]))
@@ -235,7 +239,7 @@ def test_iouring_hubring_recv_cancel_routes_through_mailbox():
 # False, so we assert the SECOND is False and the runtime stays correct: the
 # recv still unblocks with ECANCELED and no fiber is left stranded.)
 _CANCEL_DOUBLE = r'''
-import sys, os, socket
+import sys, os, socket, errno
 sys.path.insert(0, "src")
 import runloom
 import runloom_c as rc
@@ -279,8 +283,9 @@ def main():
 import faulthandler; faulthandler.dump_traceback_later(40, exit=True)
 runloom.run(2, main)
 faulthandler.cancel_dump_traceback_later()
-sys.stdout.write("DOUBLE_OK c1=%r c2=%r exc_errno=%r\n" %
-                 (res["c1"], res["c2"], res["exc_errno"]))
+sys.stdout.write("DOUBLE_OK c1=%r c2=%r exc_errno=%r is_canceled=%r\n" %
+                 (res["c1"], res["c2"], res["exc_errno"],
+                  res["exc_errno"] == errno.ECANCELED))
 '''
 
 
@@ -296,7 +301,8 @@ def test_iouring_hubring_double_cancel_is_idempotent():
         "stdout=%s\nstderr=%s" % (p.stdout, p.stderr[-1200:]))
     # End-to-end: the recv still unblocked with ECANCELED -- the fiber is not
     # stranded by the redundant second cancel.
-    assert "exc_errno=125" in p.stdout, (
+    # ECANCELED is errno 125 on Linux, 89 on macOS; match the symbolic value.
+    assert "is_canceled=True" in p.stdout, (
         "after a double cancel the recv did not unblock with ECANCELED\n"
         "stdout=%s\nstderr=%s" % (p.stdout, p.stderr[-1200:]))
 

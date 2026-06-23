@@ -118,10 +118,12 @@ def test_fault_inject_malformed_spec_is_noop():
 def test_fault_inject_wellformed_spec_does_inject_contrast():
     # Contrast probe: a WELL-FORMED once:<errno> spec DOES inject at the same
     # FD_READ site (taking the once-CAS branch, not L184) -- proving the malformed
-    # test above isolates L184 specifically and not a dead site.  EAGAIN(11) is
+    # test above isolates L184 specifically and not a dead site.  EAGAIN is
     # injected once: fd_read treats it as "park", and with data already present
     # the post-park read still returns the bytes, so the call still succeeds but
-    # the fault counter increments.
+    # the fault counter increments.  errno.EAGAIN is platform-specific (11 on
+    # Linux, 35 on macOS where 11 == EDEADLK) -- inject the SYMBOLIC value so the
+    # netpoll FSM classifies it as WOULDBLOCK/park on every platform.
     p = _run_py(r"""
         import os, sys
         import runloom, runloom_c as rc
@@ -129,13 +131,13 @@ def test_fault_inject_wellformed_spec_does_inject_contrast():
             r, w = os.pipe()
             os.write(w, b"abcd")
             buf = bytearray(4)
-            n = rc.fd_read(r, buf, 4)     # once:11 -> EAGAIN -> park -> wake -> read
+            n = rc.fd_read(r, buf, 4)     # once:EAGAIN -> park -> wake -> read
             os.close(r); os.close(w)
             sys.stdout.write("READ:%d:%s\n" % (n, bytes(buf[:n]).decode()))
             sys.stdout.write("FIRED:%d\n" % rc._fault_count("FD_READ"))
         def driver(): rc.mn_fiber(main)
         runloom.run(2, driver)
-    """, env_extra={"RUNLOOM_FAULT_FD_READ": "once:11"})
+    """, env_extra={"RUNLOOM_FAULT_FD_READ": "once:%d" % errno.EAGAIN})
     assert p.returncode == 0, p.stderr[-1500:]
     assert "READ:4:abcd" in p.stdout, (p.stdout, p.stderr[-800:])
     assert "FIRED:1" in p.stdout, p.stdout   # the well-formed once: path DID fire
