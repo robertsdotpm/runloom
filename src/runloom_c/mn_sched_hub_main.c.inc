@@ -443,10 +443,18 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
          * deposited an op targeting THIS hub's SINGLE_ISSUER ring; submit the
          * ASYNC_CANCEL here, where we are the ring's sole issuer. */
         {
-            /* MSVC atomics don't support void ** in _Generic; cast to intptr_t. */
-            intptr_t cop = __atomic_exchange_n((intptr_t *)&h->iouring_cancel_op, 0,
-                                              __ATOMIC_ACQ_REL);
-            if (cop != 0) runloom_iouring_submit_cancel_for_op((void *)cop);
+            /* MSVC atomics don't support void ** in _Generic; cast to intptr_t.
+             * Cheap relaxed PEEK first: the mailbox is empty almost every turn
+             * (and ALWAYS when io_uring is off, the default), so skip the per-turn
+             * locked xchg and only claim with the ACQ_REL exchange when a foreign
+             * task.cancel actually deposited an op.  A deposit racing the peek is
+             * caught next turn (<=1-turn cancel latency, fine for a cancel). */
+            if (__atomic_load_n((intptr_t *)&h->iouring_cancel_op,
+                                __ATOMIC_RELAXED) != 0) {
+                intptr_t cop = __atomic_exchange_n((intptr_t *)&h->iouring_cancel_op, 0,
+                                                  __ATOMIC_ACQ_REL);
+                if (cop != 0) runloom_iouring_submit_cancel_for_op((void *)cop);
+            }
         }
         /* Set when g came from the global run-queue: it then carries a queue
          * ref this iteration must release, and its resume must claim it with the
