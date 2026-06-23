@@ -509,6 +509,63 @@ static RUNLOOM_TLS int runloom_g_slab_size = 0;
 unsigned long long runloom_next_wseq_ctr = 0;   /* source-hunt: ->next write seq */
 #endif
 
+/* ---- cross-hub g-slab balancing -------------------------------------------
+ * The slab above is per-thread (RUNLOOM_TLS).  Under a single-producer /
+ * many-consumer spawn pattern (one root fiber spawns, N hubs run) the producer
+ * hub allocs every g while they free into the CONSUMER hubs' slabs -- so the
+ * producer's slab drains and callocs every spawn (-> glibc grow_heap/mprotect;
+ * MEASURED ~30% of spawn time at 8 hubs, and it VANISHES at 1 hub).  A global
+ * balance pool fixes it, mirroring the stack depot: a thread flushes a batch
+ * once its slab passes the cap, and refills a batch when its slab is empty.
+ * The structs stay VALID DEAD g's (FREED state, still greg-linked, NEVER freed
+ * to the OS), so the try_incref UAF invariant is fully preserved -- they just
+ * sit on the global freelist between uses.  The lock is amortized (once per
+ * RUNLOOM_G_GLOBAL_BATCH ops), so the hot alloc/free stay lock-free. */
+#define RUNLOOM_G_GLOBAL_BATCH 256
+static runloom_g_t   *runloom_g_global_slab = NULL;
+static int            runloom_g_global_size = 0;
+static pthread_mutex_t runloom_g_global_lock = PTHREAD_MUTEX_INITIALIZER;
+
+/* Move up to BATCH structs from the global pool into this thread's empty slab.
+ * Returns the new slab head (== runloom_g_slab), or NULL if the global is dry. */
+static runloom_g_t *runloom_g_global_refill(void)
+{
+    runloom_g_t *head, *tail;
+    int n;
+    pthread_mutex_lock(&runloom_g_global_lock);
+    head = runloom_g_global_slab;
+    if (head == NULL) { pthread_mutex_unlock(&runloom_g_global_lock); return NULL; }
+    tail = head; n = 1;
+    while (n < RUNLOOM_G_GLOBAL_BATCH && tail->next != NULL) { tail = tail->next; n++; }
+    runloom_g_global_slab = tail->next;
+    runloom_g_global_size -= n;
+    pthread_mutex_unlock(&runloom_g_global_lock);
+    /* caller guarantees the TLS slab is empty -> detach the batch tail and
+     * make the batch the new TLS slab. */
+    RUNLOOM_NEXT_SET(tail, runloom_g_slab, 3);   /* runloom_g_slab == NULL here */
+    runloom_g_slab = head;
+    runloom_g_slab_size += n;
+    return head;
+}
+
+/* Move a batch from this thread's slab into the global pool (over-cap spill). */
+static void runloom_g_global_flush(void)
+{
+    runloom_g_t *head, *tail;
+    int n;
+    head = runloom_g_slab;
+    if (head == NULL) return;
+    tail = head; n = 1;
+    while (n < RUNLOOM_G_GLOBAL_BATCH && tail->next != NULL) { tail = tail->next; n++; }
+    runloom_g_slab = tail->next;
+    runloom_g_slab_size -= n;
+    pthread_mutex_lock(&runloom_g_global_lock);
+    RUNLOOM_NEXT_SET(tail, runloom_g_global_slab, 3);
+    runloom_g_global_slab = head;
+    runloom_g_global_size += n;
+    pthread_mutex_unlock(&runloom_g_global_lock);
+}
+
 runloom_g_t *runloom_g_slab_alloc(void)
 {
     runloom_g_t *g = runloom_g_slab;
@@ -516,6 +573,9 @@ runloom_g_t *runloom_g_slab_alloc(void)
      * simulate "can't allocate a fiber struct" regardless of the slab
      * cache, so the spawn error paths get exercised. */
     if (RUNLOOM_SPAWN_FINJ(RUNLOOM_FAULT_SPAWN_G)) return NULL;
+    /* TLS slab empty -> pull a batch from the cross-hub global pool before
+     * falling to a cold calloc (the producer-hub-drains fix). */
+    if (g == NULL) g = runloom_g_global_refill();
     if (g != NULL) {
         runloom_g_slab = g->next;
         runloom_g_slab_size--;
@@ -593,6 +653,9 @@ void runloom_g_slab_free(runloom_g_t *g)
     RUNLOOM_NEXT_SET(g, runloom_g_slab, 3);   /* slab freelist link */
     runloom_g_slab = g;
     runloom_g_slab_size++;
+    /* over-cap -> spill a batch to the cross-hub global pool so a producer hub
+     * on another thread can refill from it instead of callocing. */
+    if (runloom_g_slab_size > RUNLOOM_G_SLAB_CAP) runloom_g_global_flush();
 }
 
 /* ---- Refcount ---- */
