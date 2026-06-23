@@ -257,7 +257,7 @@ runloom_tcp_type_init.c.inc      68-69     OOM        PyModule_AddObject("TCPCon
 # instrumented build), but the -O0 --coverage per-line counters are NON-ATOMIC
 # and race to ##### under concurrent steal/pop -- a gcov counter artifact, not
 # non-execution.  The lock-free deque is also model/sanitizer-checked by the
-# dedicated C harness tests_c/test_cldeque.c (ASan/TSan/UBSan).
+# dedicated C harness tests/tests_c/test_cldeque.c (ASan/TSan/UBSan).
 cldeque.c                        77-78     RACE       runloom_cldeque_pop last-element lost-race tail; executes (pop 146611x, blocks 100%), free-threaded non-atomic gcov line-counter race to #####.
 cldeque.c                        90-90     RACE       runloom_cldeque_steal item read; executes (steal 891830x, blocks 100%), free-threaded gcov-counter-race artifact.
 cldeque.c                        92-93     RACE       runloom_cldeque_steal expected=t + top-CAS; executes, free-threaded gcov-counter-race artifact.

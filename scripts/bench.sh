@@ -16,7 +16,7 @@ set -eu
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO"
 PY="${PYTHON:-python3}"
-RESULTS="bench/results"
+RESULTS="benchmark/bench/results"
 REPORT_DIR="$RESULTS/reports"
 mkdir -p "$REPORT_DIR"
 STAMP="$(date -u +%Y%m%d-%H%M%S)"
@@ -26,7 +26,7 @@ REPORT="$REPORT_DIR/bench-$STAMP.md"
 # (like the F6a TLS A/B) for smaller, real deltas.
 TOL="${RUNLOOM_BENCH_TOL:-0.15}"
 
-RUN="env PYTHONPATH=src PYTHON_GIL=0"
+RUN="env PYTHONPATH=src:benchmark PYTHON_GIL=0"   # benchmark/ on path so `-m bench.X` resolves benchmark/bench
 SETARCH=""
 command -v setarch >/dev/null 2>&1 && SETARCH="setarch -R"
 

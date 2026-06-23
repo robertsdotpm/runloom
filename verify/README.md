@@ -14,7 +14,7 @@ They are complementary: Spin proves the algorithm has no bad interleaving
 but abstracts the C and assumes sequential consistency; CBMC and GenMC run
 on real code with real `acquire`/`release`/`seq_cst`; herd7 and GenMC drop
 the SC assumption and verify the fences against the weak (RC11) model.
-Together with the runtime sanitizer stress in `tests_c/test_cldeque.c`
+Together with the runtime sanitizer stress in `tests/tests_c/test_cldeque.c`
 (real threads, millions of ops) that's several independent angles on the
 same code.
 

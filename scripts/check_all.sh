@@ -10,7 +10,7 @@
 #   replay      controlled-M:N deterministic replay probes       ~seconds-min
 #   lincheck    linearizability (Porcupine + stateful select)   ~seconds
 #   dst         deterministic simulation seed sweep             ~seconds
-#   ctest       C deque concurrency stress (tests_c/test_cldeque) ~seconds
+#   ctest       C deque concurrency stress (tests/tests_c/test_cldeque) ~seconds
 #   sanitizers  C deque harness under ASan/TSan/UBSan            ~seconds-min
 #   exttsan     WHOLE ext under ThreadSanitizer (real runtime)  ~30s-min
 #   verify      formal proofs: Spin models + CBMC on real C      ~3-4 min
@@ -129,8 +129,8 @@ for ph in "${phases[@]}"; do
       ;;
     ctest)
       hr "C deque concurrency stress"
-      make -C tests_c test_cldeque >/dev/null && \
-        tests_c/test_cldeque "${CLDEQUE_PUSHES:-100000}" 4 4 || rc=1
+      make -C tests/tests_c test_cldeque >/dev/null && \
+        tests/tests_c/test_cldeque "${CLDEQUE_PUSHES:-100000}" 4 4 || rc=1
       ;;
     sanitizers)
       hr "C sanitizer harnesses (ASan/TSan/UBSan)"

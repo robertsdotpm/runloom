@@ -78,13 +78,13 @@ map, and the few deepest-used ones are written up at the bottom.
 ### Benchmarking & misc
 | tool | what | run |
 |------|------|-----|
-| [`bench/`](bench/) | rigorous microbench harness defending against autocorrelation + layout bias (Kalibera & Jones) -- driven by `../scripts/bench.sh` | see [`bench/README.md`](bench/README.md) |
+| [`benchmark/bench/`](benchmark/bench/) | rigorous microbench harness defending against autocorrelation + layout bias (Kalibera & Jones) -- driven by `../scripts/bench.sh` | see [`benchmark/bench/README.md`](benchmark/bench/README.md) |
 | [`heavy_frames/`](heavy_frames/) | the stdlib fat-frame profile + generator for `runloom_heavy_frames.h` (goroutine stack cold-start sizing) | see [`heavy_frames/README.md`](heavy_frames/README.md) |
 
 **Related, outside `tools/`:** `../scripts/check_all*.sh` (the CI lanes that drive
 most of the above), `../scripts/check_wake_protocol.sh` (wake-protocol Layer 2
 lint), `../verify/` (Spin / CBMC / GenMC / herd7 / TLA+ / Coq / Iris proofs, see
-[`../verify/README.md`](../verify/README.md)), and `../tests_c/test_cldeque.c`
+[`../verify/README.md`](../verify/README.md)), and `../tests/tests_c/test_cldeque.c`
 (deque stress). Several tools have a dedicated deep-dive doc under `../docs/dev/`
 (linked inline above).
 
@@ -152,7 +152,7 @@ tools/run_sanitizers.sh                 # quick (seconds)
 tools/run_sanitizers.sh 500000 8 10     # soak
 ```
 
-Builds and runs `tests_c/test_cldeque` under ASan/TSan/UBSan. TSan runs
+Builds and runs `tests/tests_c/test_cldeque` under ASan/TSan/UBSan. TSan runs
 are auto-wrapped in `setarch -R` (high-entropy ASLR on 6.x kernels makes
 TSan abort otherwise).
 

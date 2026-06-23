@@ -316,7 +316,7 @@ cbmc_cldeque() {
     # Verify the real cldeque.c at a small capacity (-DRUNLOOM_CLDEQUE_CAP=4):
     # the algorithm is identical, but a 4-slot buffer keeps the SAT
     # encoding tractable.  Production default stays 4096; the stress test
-    # in tests_c/test_cldeque.c exercises the full-size deque.
+    # in tests/tests_c/test_cldeque.c exercises the full-size deque.
     if cbmc "$CBMC_DIR/cldeque_cbmc.c" "$ROOT/src/runloom_c/cldeque.c" \
             -I "$CBMC_DIR/stubs" -I "$ROOT/src/runloom_c" \
             -DRUNLOOM_CLDEQUE_CAP=4 \
