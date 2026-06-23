@@ -110,6 +110,10 @@ def post(H):
 
 
 if __name__ == "__main__":
+    # Each worker batch owns several fds incl. socketpairs; on mbuf-limited kernels
+    # (macOS/*BSD) a high worker count exhausts the RAM-sized socket-buffer pool
+    # well before RAM does (socketpair() -> ENOMEM).  Cap workers to a memory-safe
+    # ceiling for this box (loose/no-op on Linux here).  See harness.mem_safe_fd_cap.
     harness.main("p98_resource_lifetime", body, setup=setup, post=post,
-                 default_funcs=2000,
+                 default_funcs=2000, max_funcs=harness.mem_safe_fd_cap(),
                  describe="objects own fds; close/drop/GC each release exactly once")

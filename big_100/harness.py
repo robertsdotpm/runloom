@@ -122,6 +122,55 @@ def rss_mb():
         return -1
 
 
+def phys_mem_gib():
+    """Total installed physical memory in GiB (best-effort; 8.0 fallback)."""
+    try:
+        if sys.platform == "darwin" or "bsd" in sys.platform:
+            import subprocess
+            return int(subprocess.check_output(
+                ["sysctl", "-n", "hw.memsize"])) / (1024.0 ** 3)
+        # Linux / POSIX with sysconf
+        return (os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+                / (1024.0 ** 3))
+    except Exception:
+        return 8.0
+
+
+def mem_safe_fd_cap():
+    """A safe ceiling on concurrent fd/socket-CHURNING workers, derived from the
+    INSTALLED PHYSICAL MEMORY of the box.
+
+    Programs that hold a pipe + socketpair per worker (p25 fd-leak, p98
+    resource-lifetime, ...) are bounded NOT by RAM but by the kernel SOCKET-BUFFER
+    pool.  On macOS/*BSD that pool -- kern.ipc.nmbclusters, which the kernel sizes
+    from physical RAM at boot -- is FAR tighter than Linux's dynamic per-socket
+    buffers, so a high worker count exhausts it (socketpair() -> ENOMEM, or an
+    OSError-retry spin that wedges the run) LONG before RAM runs out.  Measured: a
+    16 GiB macOS box (nmbclusters=131072) is clean to ~10k such workers and
+    collapses by ~20k; Linux/epoll handles the same churn fine.
+
+    So cap concurrent workers to what the installed memory can back: on
+    mbuf-limited kernels ~512/GiB (16 GiB -> ~8k, a safe margin under the ~10k
+    knee), additionally clamped by the real nmbclusters pool when readable; Linux
+    scales its socket buffers dynamically and only needs a loose RAM backstop
+    (~64k/GiB, so a 16 GiB box still reaches the 1M survival tier while a tiny box
+    is protected).  Returns an ABSOLUTE worker ceiling -- harness.main() applies
+    min(--funcs, cap) and logs when it bites."""
+    gib = phys_mem_gib()
+    if sys.platform == "darwin" or "bsd" in sys.platform:
+        cap = int(gib * 512)
+        try:
+            import subprocess
+            nmb = int(subprocess.check_output(
+                ["sysctl", "-n", "kern.ipc.nmbclusters"]))
+            cap = min(cap, nmb // 16)   # ~16 clusters/worker under churn + headroom
+        except Exception:
+            pass
+    else:
+        cap = int(gib * 65536)          # Linux et al.: dynamic buffers, loose backstop
+    return max(1000, cap)
+
+
 def raise_fd_limit(target):
     """Best-effort raise of RLIMIT_NOFILE so tens of thousands of sockets fit.
 
@@ -990,6 +1039,10 @@ def main(name, body, setup=None, post=None, default_funcs=10000, describe="",
     H = Harness(name, default_funcs=default_funcs, describe=describe,
                 add_args=add_args)
     if max_funcs is not None and H.funcs > max_funcs:
+        print("[{0}] funcs capped {1} -> {2} (memory-safe ceiling for this box: "
+              "{3:.0f} GiB installed)".format(
+                  name, H.funcs, max_funcs, phys_mem_gib()))
+        sys.stdout.flush()
         H.funcs = max_funcs
     code = H.run(body, setup=setup, post=post)
     sys.exit(code)

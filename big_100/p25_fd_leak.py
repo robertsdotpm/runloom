@@ -92,5 +92,10 @@ def body(H):
 
 
 if __name__ == "__main__":
+    # Each worker holds a pipe + a socketpair; on mbuf-limited kernels (macOS/*BSD)
+    # a high worker count exhausts the RAM-sized socket-buffer pool well before RAM
+    # does.  Cap workers to a memory-safe ceiling for this box (loose/no-op on
+    # Linux at these scales).  See harness.mem_safe_fd_cap.
     harness.main("p25_fd_leak", body, setup=setup, default_funcs=4000,
+                 max_funcs=harness.mem_safe_fd_cap(),
                  describe="open files/pipes/sockets/subprocs; verify no fd leak")
