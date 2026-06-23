@@ -91,6 +91,16 @@ static PyMethodDef module_methods[] = {
     {"_fiber_force_full", m_fiber_force_full, METH_O,
      "internal: force fiber_fast to always delegate to the Python wrapper (set\n"
      "when auto per-core mode is on, so the per-core resolve is not skipped)."},
+    {"fiber_grow",     (PyCFunction)m_fiber_grow, METH_FASTCALL | METH_KEYWORDS,
+     "fiber_grow(callable): the default runloom.fiber entry.  Does the grow-down\n"
+     "auto-sizer, but handles the FROZEN case (learned size) in C with no Python\n"
+     "frame; sampling / rich / single-thread calls delegate to _fiber_register's\n"
+     "wrapper."},
+    {"_fiber_register_growdown", m_fiber_register_growdown, METH_VARARGS,
+     "internal: register (GROW_DOWN_KEY, GROW_DOWN_SAMPLES) so fiber_grow can read\n"
+     "a callable's learned stack size from its __dict__ in C."},
+    {"_fiber_set_grow_down", m_fiber_set_grow_down, METH_O,
+     "internal: mirror runtime.grow_down_active into fiber_grow's C fast path."},
     {"blocking",    (PyCFunction)m_blocking, METH_VARARGS | METH_KEYWORDS,
      "blocking(fn, *args, **kwargs): run fn(*args, **kwargs) on the\n"
      "blocking-offload thread pool, parking the calling fiber until it\n"

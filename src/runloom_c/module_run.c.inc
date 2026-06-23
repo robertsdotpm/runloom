@@ -423,6 +423,87 @@ static PyObject *m_fiber_force_full(PyObject *self, PyObject *arg)
     Py_RETURN_NONE;
 }
 
+/* ---- default runloom.fiber: C-side frozen grow-down -----------------------
+ * runloom.fiber binds to fiber_grow.  It IS the grow-down auto-sizer, but the
+ * FROZEN case -- a callable measured >= GROW_DOWN_SAMPLES times, i.e. the steady
+ * state -- is handled here in C: the learned size lives in
+ * fn.__dict__[GROW_DOWN_KEY] = [size, count]; read it and spawn at it with no
+ * Python frame.  The sampling phase (first GROW_DOWN_SAMPLES spawns of each
+ * callable -- which must wrap + measure the C-stack HWM), grow-down disabled,
+ * single-thread, rich (args/kwargs), and non-plain-function callables all
+ * delegate to the registered Python _fiber_full wrapper.  The constants + the
+ * on/off flag are pushed from runtime.py so Python stays the source of truth. */
+static PyObject *runloom_grow_down_key = NULL;       /* interned GROW_DOWN_KEY */
+static long      runloom_grow_down_samples = (1L << 30); /* never frozen until registered */
+static int       runloom_grow_down_active = 1;       /* mirrors runtime.grow_down_active */
+
+static PyObject *m_fiber_register_growdown(PyObject *self, PyObject *args)
+{
+    PyObject *key;
+    long samples;
+    (void)self;
+    if (!PyArg_ParseTuple(args, "Ul", &key, &samples)) return NULL;
+    Py_INCREF(key);
+    PyUnicode_InternInPlace(&key);                    /* ptr-compare dict lookups */
+    Py_XSETREF(runloom_grow_down_key, key);
+    runloom_grow_down_samples = samples;
+    Py_RETURN_NONE;
+}
+
+static PyObject *m_fiber_set_grow_down(PyObject *self, PyObject *arg)
+{
+    int v = PyObject_IsTrue(arg);
+    (void)self;
+    if (v < 0) return NULL;
+    runloom_grow_down_active = v;
+    Py_RETURN_NONE;
+}
+
+static PyObject *m_fiber_grow(PyObject *self, PyObject *const *args,
+                              Py_ssize_t nargs, PyObject *kwnames)
+{
+    (void)self;
+    if (!runloom_fiber_force_full && runloom_grow_down_active && nargs == 1
+            && kwnames == NULL && runloom_mn_hub_count() > 0
+            && runloom_grow_down_key != NULL && PyFunction_Check(args[0])) {
+        PyObject *fn = args[0];
+        PyObject *d = ((PyFunctionObject *)fn)->func_dict;   /* borrowed, may be NULL */
+        if (d != NULL && PyDict_CheckExact(d)) {
+            PyObject *store = PyDict_GetItemWithError(d, runloom_grow_down_key); /* borrowed */
+            if (store != NULL && PyList_CheckExact(store) && PyList_GET_SIZE(store) == 2) {
+                /* FT-safe: a late sampling completion may still be writing store[0];
+                 * take strong refs under the list lock rather than borrow + race. */
+                PyObject *cnt_o = PyList_GetItemRef(store, 1);
+                PyObject *sz_o  = PyList_GetItemRef(store, 0);
+                int frozen = 0;
+                size_t size = 0;
+                if (cnt_o != NULL && sz_o != NULL
+                        && PyLong_CheckExact(cnt_o) && PyLong_CheckExact(sz_o)) {
+                    long count = PyLong_AsLong(cnt_o);
+                    long sz    = PyLong_AsLong(sz_o);
+                    if (count >= runloom_grow_down_samples && sz > 0) {
+                        frozen = 1;
+                        size = (size_t)sz;
+                    }
+                }
+                Py_XDECREF(cnt_o);
+                Py_XDECREF(sz_o);
+                if (frozen)
+                    return runloom_mn_fiber(fn, size);   /* learned size, no Python frame */
+            } else if (store == NULL && PyErr_Occurred()) {
+                PyErr_Clear();
+            }
+        }
+        /* no store / not frozen / size 0 -> Python sampling path below */
+    }
+    if (runloom_py_fiber_full == NULL) {
+        PyErr_SetString(PyExc_RuntimeError,
+                        "runloom: fiber fallback not registered");
+        return NULL;
+    }
+    return PyObject_Vectorcall(runloom_py_fiber_full, args, (size_t)nargs, kwnames);
+}
+
 /* Preemption: 3.13t only.  Refuse on other versions with a clear error
  * rather than silently failing -- the timer + Py_AddPendingCall path
  * has only been validated on free-threaded 3.13, and the M:N hub model

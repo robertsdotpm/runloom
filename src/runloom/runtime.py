@@ -85,6 +85,7 @@ def set_grow_down(enabled=True):
     setting."""
     global grow_down_active
     grow_down_active = bool(enabled)
+    runloom_c._fiber_set_grow_down(grow_down_active)   # mirror into fiber_grow's C fast path
 
 
 def grow_down_enabled():
@@ -242,7 +243,7 @@ class Goroutine(object):
         return "<Goroutine {0} done={1}>".format(self.name, self.done)
 
 
-def fiber(callable_, *args, **kwargs):
+def _fiber_full(callable_, *args, **kwargs):
     """Spawn a fiber.  Mirrors Go's `go fn(a, b)`: schedules
     fn(*args, **kwargs) to run cooperatively and returns immediately.
 
@@ -263,15 +264,14 @@ def fiber(callable_, *args, **kwargs):
     M:N pending-counter accounting that mn_run() joins on, so this dispatch
     is required for correctness, not just convenience.
 
-    NOTE: this IS the public ``runloom.fiber`` -- the full-featured default
-    (grow-down auto-sizer, args/kwargs, single-thread + M:N dispatch).
-    ``runloom.fiber_fast`` is a SEPARATE, experimental C entry (METH_FASTCALL,
-    no Python frame) under active optimization: it fast-paths a bare
-    ``fiber_fast(callable)`` M:N spawn straight to the C core and delegates rich
-    calls (args / stack_size= / single-thread / auto-mode) back HERE.  Because
-    fiber_fast bypasses the grow-down auto-sizer it spawns at the fixed default
-    stack (higher RSS at scale); use plain ``fiber`` (this) when grow-down
-    matters, fiber_fast when raw spawn throughput does.
+    NOTE: this is the full-feature DELEGATE, not the public entry.
+    ``runloom.fiber`` is bound to the C ``fiber_grow``, which handles the FROZEN
+    grow-down case (a callable's learned stack size, the steady state) in C with
+    no Python frame and delegates back HERE only for the sampling phase (first
+    GROW_DOWN_SAMPLES spawns of a callable, which must wrap + measure), rich calls
+    (args / stack_size= / single-thread / auto-mode), and non-plain-function
+    callables.  ``runloom.fiber_fast`` is the separate raw-throughput entry that
+    bypasses grow-down entirely (fixed default stack).
     """
     # Auto per-core scaling (optimize("throughput")): if this handler has been
     # spawned enough to be worth it, swap in its per-core copy.  No-op (one
@@ -327,12 +327,16 @@ def fiber(callable_, *args, **kwargs):
     return Goroutine(g, name=name)
 
 
-# runloom.fiber (above) is the full-featured DEFAULT: grow-down auto-sizer,
-# args/kwargs, single-thread + M:N dispatch.  runloom.fiber_fast is the
-# experimental C fast-spawn entry (METH_FASTCALL, no Python frame) kept separate
-# while we optimize it -- it delegates anything it can't fast-path (kwargs,
-# stack_size=, single-thread, auto-mode) back to `fiber` via this registration.
-runloom_c._fiber_register(fiber)
+# runloom.fiber is bound to the C `fiber_grow`: the grow-down auto-sizer with its
+# FROZEN case (a callable's learned stack size, the steady state) handled in C
+# with no Python frame.  fiber_grow delegates the sampling phase + rich/single-
+# thread/auto calls back to `_fiber_full` (the full-feature wrapper above), and
+# reads the learned size from fn.__dict__ using the (key, samples) registered
+# here.  runloom.fiber_fast is the raw-throughput entry that skips grow-down.
+runloom_c._fiber_register(_fiber_full)
+runloom_c._fiber_register_growdown(GROW_DOWN_KEY, GROW_DOWN_SAMPLES)
+runloom_c._fiber_set_grow_down(grow_down_active)
+fiber = runloom_c.fiber_grow
 fiber_fast = runloom_c.fiber_fast
 
 
