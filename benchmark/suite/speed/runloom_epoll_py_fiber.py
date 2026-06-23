@@ -27,12 +27,13 @@ def noop():
 
 def m_spawn(n, hubs, stack_size=0):
     # Naked single-spawn rate.  Default (stack_size=0) uses runloom.fiber_fast --
-    # the apples-to-apples vs Go's `go f()`: a thin Python spawn with no per-spawn
-    # work, like Go (which does no per-spawn stack-HWM measurement).  The DEFAULT
-    # runloom.fiber adds the grow-down auto-sizer (a per-spawn HWM learn that
-    # trades ~7x spawn speed for small resident stacks -- an RSS feature Go lacks);
-    # that is its own RSS-vs-speed number, not the spawn-speed-vs-Go comparison.
-    # stack_size>0 pins each fiber's C stack (the spawn-cost decomposition variant).
+    # a thin Python spawn with no per-spawn work, the apples-to-apples vs Go's
+    # `go f()`.  The DEFAULT runloom.fiber adds the grow-down auto-sizer (small
+    # right-sized stacks, an RSS feature Go lacks); its learned size now spawns
+    # down the DEFERRED stack-alloc path, so the default is ~1.7M/s warm
+    # (small-stacks AND fast) -- not the old ~7x-slower eager-alloc number.
+    # optimize("throughput")/("memory") swaps runloom.fiber between fiber_fast and
+    # grow-down.  stack_size>0 pins each fiber's C stack (decomposition variant).
     if stack_size > 0:
         def root():
             for _ in range(n):

@@ -16,11 +16,12 @@ Two runloom spawn entries are reported:
   runloom_py -- runloom.fiber_fast: the fair apples-to-apples vs Go's `go f()`
                 (a thin Python spawn, no per-spawn work).  ~Go.
   runloom_c  -- the pure-C c_entry path (no Python frame): the scheduler ceiling.
-NOTE: the DEFAULT runloom.fiber adds the grow-down auto-sizer (a per-spawn
-stack-HWM learn that trades ~7x spawn speed for small resident stacks -- an RSS
-feature Go lacks), so it is a separate RSS-vs-speed number, not the
-spawn-speed-vs-Go comparison measured here.  Each rep is a fresh process, so this
-is the COLD first-burst; warm steady-state is higher.
+NOTE: the DEFAULT runloom.fiber adds the grow-down auto-sizer (small right-sized
+stacks, an RSS feature Go lacks).  Its learned size now spawns down the DEFERRED
+stack-alloc path, so the default is ~1.7M/s warm (small-stacks AND fast), not the
+old ~7x-slower eager-alloc number; optimize("throughput")/("memory") swaps
+runloom.fiber between fiber_fast and grow-down.  Each rep is a fresh process, so
+this is the COLD first-burst; warm steady-state is higher.
 """
 import json
 import os
