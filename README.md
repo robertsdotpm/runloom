@@ -109,9 +109,9 @@ zero-rewrite port path, not a multi-core speedup (use the sync API with
 | --- | --- | --- | --- |
 | Linux x86_64 | fcontext-asm | epoll | **yes — hw, 3.11 / 3.12 / 3.13t (primary)** |
 | Linux aarch64 | fcontext-asm | epoll | qemu |
-| macOS x86_64 / arm64 | fcontext-asm | kqueue | hw / review |
+| macOS x86_64 / arm64 | fcontext-asm | kqueue | hw, 3.13t |
 | FreeBSD / GhostBSD | fcontext-asm | kqueue | hw, 3.12 |
-| Windows 10/11 / Server 2022 | Fibers | IOCP→WSAPoll→select | hw, 3.12 |
+| Windows 10/11 / Server 2022 | Fibers | IOCP→WSAPoll→select | hw, 3.13t |
 | Solaris / Android / other BSD | ucontext / asm | select / epoll / kqueue | review |
 
 ## Docs & layout
