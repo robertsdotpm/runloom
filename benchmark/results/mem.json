@@ -105,10 +105,10 @@
     "runloom_c": {
       "empty": {
         "n": 200000,
-        "rss_total": 1807351808,
-        "rss_baseline": 46583808,
-        "bytes_per_fiber_rss": 8803.84,
-        "bytes_per_fiber_pss": 8804.61312
+        "rss_total": 1005305856,
+        "rss_baseline": 47546368,
+        "bytes_per_fiber_rss": 4788.79744,
+        "bytes_per_fiber_pss": 4791.28064
       },
       "socket": {
         "n": 20000,
@@ -119,9 +119,9 @@
       },
       "million": {
         "n": 1000000,
-        "rss_total": 8847745024,
-        "pss_total": 8839952384,
-        "rss_per_fiber": 8847.745024
+        "rss_total": 4832948224,
+        "pss_total": 4821946368,
+        "rss_per_fiber": 4832.948224
       }
     }
   }

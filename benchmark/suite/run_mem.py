@@ -95,6 +95,17 @@ def main():
 
     for name, builder, gil_off in CONFIGS:
         results["configs"][name] = {}
+        # Warm any first-touch lazy init BEFORE the differential runs, so it is
+        # charged to NEITHER the n=0 baseline NOR the n=K full.  The --handler c
+        # column compiles its parker on the fly (Cython); a cold-cache compile
+        # would inflate only the first of the two processes per_unit spawns and
+        # bias bytes/fiber.  This throwaway n=0 run populates the on-disk compile
+        # cache so the baseline and full processes both just import it.  Cheap
+        # no-op for the go / py columns.
+        try:
+            run(builder("empty", 0), gil_off, timeout=300)
+        except Exception:
+            pass
         # empty bytes/fiber
         try:
             e = per_unit(builder, gil_off, "empty", n_empty)
