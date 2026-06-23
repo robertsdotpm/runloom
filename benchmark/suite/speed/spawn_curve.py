@@ -8,14 +8,9 @@ core (GIL on) -- same as the cross-runtime report.  Writes results/spawn_curve.j
 for the report curve.  RUNLOOM_SYSMON/PREEMPT off (microbenchmark watchdog noise).
 
 This is NAKED spawn -- the WORST case: create+run+destroy with no I/O to amortize
-over.  runloom now MATCHES Go here: the user-facing Python spawn
-(runloom.fiber_fast) hits ~2M/s vs Go's ~2.1M, and the pure-C c_entry path
-beats Go at warm steady state.  (History: this was once ~48x behind Go; two fixes
-closed it -- (1) lazily allocating each fiber's C stack at FIRST RESUME on the hub
-that runs it, instead of at spawn on the producer hub whose pool never refilled
-and cold-mmap'd a guarded stack per fiber; (2) auto-pacing the spawn loop so the
-producer hub interleaves running with spawning instead of flooding 7/8 hubs.  See
-docs/dev/spawn_cost.md.)
+over.  runloom MATCHES Go here: the user-facing Python spawn (runloom.fiber_fast)
+hits ~2.0M/s vs Go's ~2.1M, and the pure-C c_entry path beats Go warm
+(~2.2-2.46M).
 
 Two runloom spawn entries are reported:
   runloom_py -- runloom.fiber_fast: the fair apples-to-apples vs Go's `go f()`

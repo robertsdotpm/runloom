@@ -479,12 +479,11 @@ def sec_speed(speed):
     rows.sort(key=lambda r: -(r[2][1] or 0))   # best = highest absolute spawn rate
     out.append("<h3>Spawn 1M fibers / goroutines / coroutines (NAKED single-spawn)</h3>")
     out.append('<p class="warn">This is <b>naked single-spawn</b> &mdash; ONE spawner creating '
-               'tasks <b>one at a time</b>, no I/O &mdash; historically runloom&rsquo;s worst case. '
-               'After two fixes (lazy stack alloc + auto-pace), runloom&rsquo;s FAST spawn '
-               '(<code>runloom.fiber_fast</code>) now reaches <b>~2.0M/s &mdash; matching Go</b>&rsquo;s '
+               'tasks <b>one at a time</b>, no I/O. runloom&rsquo;s FAST spawn '
+               '(<code>runloom.fiber_fast</code>) reaches <b>~2.0M/s &mdash; matching Go</b>&rsquo;s '
                '~2.1M/s <code>go&nbsp;f()</code> on this box, the fair apples-to-apples; the pure-C '
                '<code>c_entry</code> scheduler path runs <b>~2.2&ndash;2.46M/s warm (beats Go)</b>. '
-               '<b>Caveat:</b> the <b>default</b> <code>runloom.fiber</code> stays at ~0.29M/s (~7&times; '
+               '<b>Caveat:</b> the <b>default</b> <code>runloom.fiber</code> sits at ~0.29M/s (~7&times; '
                'slower) because it runs a grow-down stack auto-sizer that trades spawn speed for small '
                'resident stacks &mdash; an RSS feature Go lacks, a separate axis, not the spawn-vs-Go '
                'number. Batch fleet-launch (<a href="#activespawn">Active spawn</a>: bulk '
@@ -492,9 +491,9 @@ def sec_speed(speed):
                'capability (~1.6M/s here; Go has no batch API).</p>')
     out.append(table("t_spawn", [("Runtime", False), ("Cores", True), ("spawn/s", True),
                                  ("&micro;s/task", True)], rows,
-                     "Higher is better. Naked single-spawn: <code>runloom.fiber_fast</code> now "
+                     "Higher is better. Naked single-spawn: <code>runloom.fiber_fast</code> "
                      "<b>matches Go</b> (~2.0M vs ~2.1M/s) and pure-C <code>c_entry</code> beats Go warm "
-                     "(~2.2&ndash;2.46M), after the lazy-stack-alloc + auto-pace fixes. The <b>default</b> "
+                     "(~2.2&ndash;2.46M). The <b>default</b> "
                      "<code>runloom.fiber</code> trails at ~0.29M/s (~7&times;) only because of its "
                      "grow-down RSS auto-sizer &mdash; a speed-vs-RSS tradeoff, not a spawn deficit. "
                      "runloom &amp; greenlet carry real C stacks (heavier per-spawn than 2&nbsp;KB "
@@ -1139,10 +1138,10 @@ def sec_exec_summary():
             '<b>client-bound</b> on this single box (the 16-core loadgen saturates before the fast '
             'servers), so runloom and Go cluster within the loadgen\'s noise &mdash; read it as '
             '"scheduling/spawn isn\'t the bottleneck," not as a ranking (the single-core uvloop/asyncio '
-            'loops are server-bound on their one core there). Spawning fibers <i>one at a time</i> now '
+            'loops are server-bound on their one core there). Spawning fibers <i>one at a time</i> '
             '<b>matches Go</b>: <code>runloom.fiber_fast</code> does ~2.0M/s vs Go\'s ~2.1M/s (the pure-C '
-            '<code>c_entry</code> path beats Go warm at ~2.2&ndash;2.46M), after the lazy-stack-alloc + '
-            'auto-pace fixes &mdash; the <b>default</b> <code>runloom.fiber</code> is slower '
+            '<code>c_entry</code> path beats Go warm at ~2.2&ndash;2.46M) &mdash; '
+            'the <b>default</b> <code>runloom.fiber</code> is slower '
             '(~0.29M/s, ~7&times;) only because of its grow-down RSS auto-sizer, a speed-vs-RSS tradeoff '
             'Go lacks. Batch <code>fiber_n</code> launches a fleet at <b>~1.6M/s</b> here (a separate '
             'runloom capability; Go has no batch API). Stackful fibers also cost '
@@ -1151,7 +1150,7 @@ def sec_exec_summary():
             'reuseport acceptors; both client-bound.) '
             '<b>Bottom line: for a busy server running a '
             'real (CPU-doing) handler, runloom is close to Go and well ahead of interpreted Python; '
-            'naked spawn now matches Go via <code>fiber_fast</code>, and the remaining gaps are '
+            'naked spawn matches Go via <code>fiber_fast</code>, and the remaining gaps are '
             'per-fiber memory and the default fiber&rsquo;s grow-down RSS auto-sizer (a speed-vs-RSS '
             'tradeoff).</b> Per-metric breakdown + '
             'caveats below.</p>')
@@ -1168,9 +1167,9 @@ def sec_active_spawn(sb):
     framing = (
         '<p>There are <b>two</b> ways to spawn, with very different ceilings:</p>'
         '<ul><li><b>Single spawn</b> &mdash; one fiber at a time (the per-event / per-connection '
-        'pattern). The FAST path <code>runloom.fiber_fast(fn)</code> now reaches <b>~2.0M/s &mdash; '
+        'pattern). The FAST path <code>runloom.fiber_fast(fn)</code> reaches <b>~2.0M/s &mdash; '
         'matching Go</b>&rsquo;s ~2.1M/s <code>go&nbsp;f()</code> (and the pure-C <code>c_entry</code> '
-        'path beats Go warm at ~2.2&ndash;2.46M), after the lazy-stack-alloc + auto-pace fixes &mdash; '
+        'path beats Go warm at ~2.2&ndash;2.46M) &mdash; '
         'see the <a href="#spawncurve">spawn-vs-N</a> curve. <b>Caveat:</b> the <code>naked</code> column '
         'in the table just below is the <b>default</b> <code>runloom.fiber(fn)</code>, which runs a '
         'grow-down stack auto-sizer; it stays at ~0.1&ndash;0.29M/s &mdash; a deliberate speed-vs-RSS '
@@ -1206,7 +1205,7 @@ def sec_active_spawn(sb):
         "Measured on this box: %d hubs pinned to a single NUMA node (%d cores), median of %d reps, "
         "rate = N / (wall &minus; empty-run baseline). The <b>naked</b> column is the <b>default</b> "
         "<code>runloom.fiber</code> (the grow-down RSS auto-sizer), NOT the FAST "
-        "<code>runloom.fiber_fast</code> path &mdash; <code>fiber_fast</code> naked single-spawn now "
+        "<code>runloom.fiber_fast</code> path &mdash; <code>fiber_fast</code> naked single-spawn "
         "<b>matches Go</b> (~2.0M/s), shown in the <a href=\"#spawncurve\">spawn-vs-N</a> curve, not here. "
         "<b>fiber_n alone (default) is ~no faster than the default naked path</b> &mdash; the batch "
         "speedup needs <code>optimize(\"throughput\")</code> (warm-stack arena + parallel bulk-create), "
@@ -1249,11 +1248,10 @@ def sec_spawn_curve(sc):
     chart = svg_linechart("ch_spawn", series, xlabels,
                           xaxis="tasks spawned, front-loaded (N)", ylabel="spawn / s (log)")
     cols = [("Runtime", False)] + [(fmtN(n), True) for n in NS]
-    return ('<h3 id="spawncurve">Spawn rate vs N (1k &rarr; 1M) &mdash; naked single-spawn, now matches Go</h3>'
+    return ('<h3 id="spawncurve">Spawn rate vs N (1k &rarr; 1M) &mdash; naked single-spawn, matches Go</h3>'
             '<p>Raw spawn/s (= N / whole-run seconds) as N front-loaded tasks climb 1k&rarr;1M, '
             'each runtime drained to completion (Go\'s own bench front-loads identically). This is '
-            'NAKED single-spawn, runloom\'s historical worst case &mdash; and after the lazy-stack-alloc '
-            '+ auto-pace fixes it now <b>matches Go</b>: <code>runloom_py</code> here is '
+            'NAKED single-spawn, and runloom <b>matches Go</b>: <code>runloom_py</code> here is '
             '<code>runloom.fiber_fast</code> (~2.0M/s vs Go\'s ~2.1M), and <code>runloom_c</code> is the '
             'pure-C <code>c_entry</code> scheduler ceiling (~2.2&ndash;2.46M/s warm, beats Go). '
             'runloom &amp; Go on %d cores; asyncio/uvloop/greenlet single-core. Each rep is a fresh '
@@ -1262,21 +1260,16 @@ def sec_spawn_curve(sc):
             + chart
             + table("t_spawncurve", cols, rows, mark_best=False, note=
                     "Higher is better. This is NAKED single-spawn &mdash; "
-                    "create+run+destroy one fiber at a time, no I/O, no batching. <b>runloom now "
+                    "create+run+destroy one fiber at a time, no I/O, no batching. <b>runloom "
                     "matches Go here</b>: <code>runloom_py</code> = <code>runloom.fiber_fast</code> "
                     "(~2.0M/s vs Go ~2.1M), <code>runloom_c</code> = pure-C <code>c_entry</code> "
                     "(~2.2&ndash;2.46M warm, beats Go). Stackful runtimes (runloom, greenlet) carry a "
                     "real C stack per task; asyncio/uvloop coroutines are stackless Python objects; Go "
-                    "goroutines are 2&nbsp;KB grow-on-demand native stacks. The naked-burst gap was "
-                    "per-fiber stack mmap/mprotect on the producer hub &mdash; closed by <b>lazy stack "
-                    "alloc</b> (allocate each fiber's stack at first resume on the hub that runs it, "
-                    "commit <code>aef0c94</code>) + <b>auto-pace</b> (yield every 512 spawns so the "
-                    "producer interleaves, commit <code>167e574</code>). NB: the <b>default</b> "
+                    "goroutines are 2&nbsp;KB grow-on-demand native stacks. NB: the <b>default</b> "
                     "<code>runloom.fiber</code> (not <code>fiber_fast</code>) trades ~7&times; spawn "
                     "speed (~0.29M/s) for small resident stacks via its grow-down auto-sizer &mdash; a "
                     "separate RSS-vs-speed axis. Batch fleet-launch (<code>fiber_n</code> + optimize, "
-                    "~1.6M/s) is a further runloom capability. Diagnosis + the &gt;1M story: "
-                    "docs/dev/spawn_cost.md + spawn_experiments.md + spawn_above_1m.md."))
+                    "~1.6M/s) is a further runloom capability."))
 
 
 def sec_metrics_legend():
@@ -1295,7 +1288,7 @@ def sec_metrics_legend():
          "the same, but one fiber at a time, nothing batched",
          "Yes, and nothing else",
          "<code>fiber_fast</code> <b>~2.0M/s &mdash; matches Go</b> (~2.1M); <code>c_entry</code> ~2.2&ndash;2.46M warm beats Go. (Default <code>fiber</code> ~0.29M/s, ~7&times; &mdash; grow-down RSS tradeoff)",
-         "the like-for-like spawn comparison vs Go &mdash; closed by lazy-stack-alloc + auto-pace; the remaining ~7&times; is the default fiber&rsquo;s RSS-vs-speed auto-sizer, not a spawn deficit"],
+         "the like-for-like spawn comparison vs Go; the ~7&times; on the default fiber is its RSS-vs-speed auto-sizer, not a spawn deficit"],
         ["<b>passive</b> spawn &mdash; conn/s (conn-churn)",
          "fresh handler spawned + torn down per request (new connection each time)",
          "Yes &mdash; 1 spawn+teardown / request, but in the hot loop",
