@@ -524,7 +524,31 @@ unsigned long long runloom_next_wseq_ctr = 0;   /* source-hunt: ->next write seq
 #define RUNLOOM_G_GLOBAL_BATCH 256
 static runloom_g_t   *runloom_g_global_slab = NULL;
 static int            runloom_g_global_size = 0;
-static pthread_mutex_t runloom_g_global_lock = PTHREAD_MUTEX_INITIALIZER;
+static runloom_mutex_t runloom_g_global_lock = RUNLOOM_MUTEX_STATIC_INIT;
+static int             runloom_g_global_lock_inited = 0;
+
+/* This g-slab balance lock lives in a TU compiled on EVERY platform (unlike the
+ * coro balance lock, which is FCONTEXT/POSIX-only and can rely on a real static
+ * init).  On Windows RUNLOOM_MUTEX_STATIC_INIT is {0} -- a CRITICAL_SECTION
+ * cannot be statically initialised -- so lazily init on first use, exactly like
+ * runloom_cal_lock above.  POSIX gets a real static init and this is a no-op. */
+static void runloom_g_global_ensure_lock(void)
+{
+#if defined(RUNLOOM_OS_WINDOWS)
+    int st = __atomic_load_n(&runloom_g_global_lock_inited, __ATOMIC_ACQUIRE);
+    if (st == 2) return;
+    if (st == 0 &&
+        __atomic_compare_exchange_n(&runloom_g_global_lock_inited, &st, 1, 0,
+                                    __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+        runloom_mutex_init(&runloom_g_global_lock);
+        __atomic_store_n(&runloom_g_global_lock_inited, 2, __ATOMIC_RELEASE);
+        return;
+    }
+    while (__atomic_load_n(&runloom_g_global_lock_inited, __ATOMIC_ACQUIRE) != 2) { }
+#else
+    (void)runloom_g_global_lock_inited;   /* POSIX: static init suffices */
+#endif
+}
 
 /* Move up to BATCH structs from the global pool into this thread's empty slab.
  * Returns the new slab head (== runloom_g_slab), or NULL if the global is dry. */
@@ -532,14 +556,15 @@ static runloom_g_t *runloom_g_global_refill(void)
 {
     runloom_g_t *head, *tail;
     int n;
-    pthread_mutex_lock(&runloom_g_global_lock);
+    runloom_g_global_ensure_lock();
+    runloom_mutex_lock(&runloom_g_global_lock);
     head = runloom_g_global_slab;
-    if (head == NULL) { pthread_mutex_unlock(&runloom_g_global_lock); return NULL; }
+    if (head == NULL) { runloom_mutex_unlock(&runloom_g_global_lock); return NULL; }
     tail = head; n = 1;
     while (n < RUNLOOM_G_GLOBAL_BATCH && tail->next != NULL) { tail = tail->next; n++; }
     runloom_g_global_slab = tail->next;
     runloom_g_global_size -= n;
-    pthread_mutex_unlock(&runloom_g_global_lock);
+    runloom_mutex_unlock(&runloom_g_global_lock);
     /* caller guarantees the TLS slab is empty -> detach the batch tail and
      * make the batch the new TLS slab. */
     RUNLOOM_NEXT_SET(tail, runloom_g_slab, 3);   /* runloom_g_slab == NULL here */
@@ -559,11 +584,12 @@ static void runloom_g_global_flush(void)
     while (n < RUNLOOM_G_GLOBAL_BATCH && tail->next != NULL) { tail = tail->next; n++; }
     runloom_g_slab = tail->next;
     runloom_g_slab_size -= n;
-    pthread_mutex_lock(&runloom_g_global_lock);
+    runloom_g_global_ensure_lock();
+    runloom_mutex_lock(&runloom_g_global_lock);
     RUNLOOM_NEXT_SET(tail, runloom_g_global_slab, 3);
     runloom_g_global_slab = head;
     runloom_g_global_size += n;
-    pthread_mutex_unlock(&runloom_g_global_lock);
+    runloom_mutex_unlock(&runloom_g_global_lock);
 }
 
 runloom_g_t *runloom_g_slab_alloc(void)
