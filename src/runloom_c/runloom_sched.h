@@ -167,6 +167,11 @@ struct runloom_g {
      * completion to fold this g's C-stack HWM into its kind.  See
      * runloom_stackadvice.c. */
     size_t advice_key;
+    /* Resolved C-stack size requested at spawn, in bytes.  In the default
+     * scheduler the coro + guarded stack are NOT created at spawn but lazily at
+     * first resume (on the hub that runs the fiber), so this carries the size
+     * across.  Set at spawn; read once by the first-run install in hub_main. */
+    size_t req_stack_size;
     PyObject *callable;     /* Python callable (NULL if c_entry set) */
     runloom_c_entry_fn c_entry;
     void *c_arg;

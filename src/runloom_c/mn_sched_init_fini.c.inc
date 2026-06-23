@@ -532,25 +532,41 @@ static int runloom_mn_fiber_core(PyObject *callable, runloom_c_entry_fn c_fn,
      *  2. otherwise the adaptive autosizer -- this fiber-kind's learned
      *     size (start-large default for an unseen kind), which itself falls
      *     back to the hub default when autosize is off. */
-    g->coro = runloom_coro_new(
-                stack_size > 0
-                    ? stack_size
-                    : runloom_advice_size_for(g->advice_key, callable,
-                                              (size_t)h->sched.stack_size),
-                runloom_g_entry, g);
-    if (g->coro == NULL) {
-        if (callable != NULL) {
-            Py_DECREF(callable);
-            g->callable = NULL;             /* don't leave a dangling ref on the slab */
-            PyErr_NoMemory();
+    /* Resolve the stack size now (cheap, no alloc).  In the DEFAULT scheduler we
+     * DEFER the coro + guarded-stack creation to first resume on the hub that
+     * RUNS the fiber: a tight spawn loop monopolizes the producer hub, whose
+     * per-thread stack pool never refills (it allocs, never completes), so eager
+     * alloc cold-mmaps a guarded stack PER spawn -- the front-load mmap storm
+     * that wedges hubs.  Deferring puts the alloc on the consumer hub, where the
+     * pool recycles.  The global-runq resume paths (per-g-tstate / steal-woken)
+     * assume g->coro is set at claim time, so those modes stay eager. */
+    g->req_stack_size = (stack_size > 0)
+                          ? stack_size
+                          : runloom_advice_size_for(g->advice_key, callable,
+                                                    (size_t)h->sched.stack_size);
+    if (runloom_use_global_runq() || stack_size > 0) {
+        /* Eager when: a global-runq mode (its resume path assumes coro set), OR
+         * the caller PINNED an explicit stack_size -- an explicit oversize ask
+         * should fail at spawn (MemoryError) where the caller can handle it, not
+         * silently later at resume.  The default/auto-sized common path (the
+         * spawn-freely front-load) is the one that defers. */
+        g->coro = runloom_coro_new(g->req_stack_size, runloom_g_entry, g);
+        if (g->coro == NULL) {
+            if (callable != NULL) {
+                Py_DECREF(callable);
+                g->callable = NULL;         /* don't leave a dangling ref on the slab */
+                PyErr_NoMemory();
+            }
+            if (g->limit_counted) {         /* release the admission slot we took */
+                runloom_fiber_release();
+                g->limit_counted = 0;
+            }
+            runloom_g_slab_free(g);         /* return to slab (handles greg + free) */
+            errno = ENOMEM;
+            return -1;
         }
-        if (g->limit_counted) {             /* release the admission slot we took */
-            runloom_fiber_release();
-            g->limit_counted = 0;
-        }
-        runloom_g_slab_free(g);             /* return to slab (handles greg + free) */
-        errno = ENOMEM;
-        return -1;
+    } else {
+        g->coro = NULL;                     /* deferred: installed at first resume */
     }
     /* Wake-state machine init.  Any global-runq mode (per-g-tstate OR
      * steal-woken) reads wake_state: a fresh g has never parked, so it is

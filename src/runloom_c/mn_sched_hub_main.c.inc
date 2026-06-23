@@ -1304,6 +1304,34 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
              * processing path owns the decrement. */
             RUNLOOM_G_ASSERT_NOT(g, RUNLOOM_GST_BIT(RUNLOOM_GST_FREED));
             RUNLOOM_EVT(RUNLOOM_EVT_G_POP, g, h, 0);
+            /* Deferred first-run install (default scheduler): the coro + guarded
+             * stack are created HERE, on the hub that RUNS the fiber, not at spawn
+             * on the (monopolized) producer hub -- so a tight spawn loop doesn't
+             * cold-mmap a stack per spawn (the front-load wedge).  Gated on a fresh
+             * VALID g (coro deferred, not done, owner + entry set) so a dead/stale
+             * entry still falls through to the skip below.  OOM here: complete the
+             * fiber (it never ran -> no datastack/parker/HWM to drain) so mn_run's
+             * pending count still reaches 0 instead of hanging. */
+            if (g->coro == NULL && g->owner != NULL
+                && (g->callable != NULL || g->c_entry != NULL)
+                && !__atomic_load_n(&g->done, __ATOMIC_ACQUIRE)) {
+                g->coro = runloom_coro_new(g->req_stack_size, runloom_g_entry, g);
+                if (g->coro == NULL) {
+                    if (g->callable != NULL) {     /* surface OOM to a Python fiber */
+                        Py_INCREF(PyExc_MemoryError);
+                        g->error = PyExc_MemoryError;
+                    }
+                    runloom_g_state_set(g, RUNLOOM_GST_DONE);
+                    __atomic_store_n(&g->done, 1, __ATOMIC_RELEASE);
+                    h->sched.current = NULL;
+                    runloom_tls_current_g = NULL;
+                    runloom_g_decref(g);                  /* scheduler ref */
+                    if (from_runq) runloom_g_decref(g);   /* queue ref */
+                    if (had_qref) runloom_g_decref(g);    /* queue ref */
+                    runloom_mn_pending_complete(h);
+                    continue;
+                }
+            }
             if (g->coro == NULL ||
                 __atomic_load_n(&g->done, __ATOMIC_ACQUIRE)) {
                 h->sched.current = NULL;
