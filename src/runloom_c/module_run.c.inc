@@ -378,6 +378,51 @@ static PyObject *m_mn_hub_count(PyObject *self, PyObject *unused)
     return PyLong_FromLong(runloom_mn_hub_count());
 }
 
+/* ---- fiber() fast entry --------------------------------------------------
+ * runloom.fiber is bound to this C function (METH_FASTCALL) instead of the
+ * Python wrapper.  The common Go-style spawn -- fiber(callable), no extra args,
+ * no stack_size=, hubs running -- goes straight to the M:N spawn core with NO
+ * Python wrapper frame and NO args-tuple build (~330k->440k/s naked).  Every
+ * richer call (extra args, stack_size=, single-thread, auto per-core mode) is
+ * delegated to the Python wrapper registered via _fiber_register, which owns
+ * those features.  This collapses runloom.fiber / mn_fiber / fiber_noyield into
+ * ONE public entry that is fast AND M:N-correct. */
+static PyObject *runloom_py_fiber_full = NULL;   /* the Python full-feature wrapper */
+static int       runloom_fiber_force_full = 0;   /* 1 = always delegate (auto mode) */
+
+static PyObject *m_fiber_fast(PyObject *self, PyObject *const *args,
+                              Py_ssize_t nargs, PyObject *kwnames)
+{
+    (void)self;
+    if (!runloom_fiber_force_full && nargs == 1 && kwnames == NULL
+            && runloom_mn_hub_count() > 0 && PyCallable_Check(args[0])) {
+        return runloom_mn_fiber(args[0], 0);   /* fire-and-forget M:N spawn */
+    }
+    if (runloom_py_fiber_full == NULL) {
+        PyErr_SetString(PyExc_RuntimeError,
+                        "runloom: fiber fallback not registered");
+        return NULL;
+    }
+    return PyObject_Vectorcall(runloom_py_fiber_full, args, (size_t)nargs, kwnames);
+}
+
+static PyObject *m_fiber_register(PyObject *self, PyObject *fn)
+{
+    (void)self;
+    Py_INCREF(fn);
+    Py_XSETREF(runloom_py_fiber_full, fn);
+    Py_RETURN_NONE;
+}
+
+static PyObject *m_fiber_force_full(PyObject *self, PyObject *arg)
+{
+    int v = PyObject_IsTrue(arg);
+    (void)self;
+    if (v < 0) return NULL;
+    runloom_fiber_force_full = v;
+    Py_RETURN_NONE;
+}
+
 /* Preemption: 3.13t only.  Refuse on other versions with a clear error
  * rather than silently failing -- the timer + Py_AddPendingCall path
  * has only been validated on free-threaded 3.13, and the M:N hub model

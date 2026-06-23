@@ -242,7 +242,7 @@ class Goroutine(object):
         return "<Goroutine {0} done={1}>".format(self.name, self.done)
 
 
-def fiber(callable_, *args, **kwargs):
+def _fiber_full(callable_, *args, **kwargs):
     """Spawn a fiber.  Mirrors Go's `go fn(a, b)`: schedules
     fn(*args, **kwargs) to run cooperatively and returns immediately.
 
@@ -262,17 +262,13 @@ def fiber(callable_, *args, **kwargs):
     caller).  Spawning via the plain scheduler inside a hub would skip the
     M:N pending-counter accounting that mn_run() joins on, so this dispatch
     is required for correctness, not just convenience.
+
+    NOTE: the public ``runloom.fiber`` is bound to the C ``fiber_fast`` entry
+    (METH_FASTCALL), which fast-paths the bare ``fiber(callable)`` M:N spawn
+    straight to the C core -- no Python frame -- and delegates rich calls HERE.
+    So this wrapper only runs for args / stack_size= / single-thread / auto-mode
+    spawns; the common Go-style spawn never enters this frame.
     """
-    # FAST PATH: bare Go-style fiber(fn) fire-and-forget under M:N -- no bound
-    # args, no stack_size kwarg, no auto-handler swap.  Skip the wrapper's
-    # per-spawn work (getattr __name__, arg-binding, grow-down sampling) and hit
-    # the C M:N spawn directly: ~2x the wrapped path, verified to join (mn_fiber
-    # does the pending-counter accounting, 200k/200k).  The grow-down auto-sizer
-    # (a memory optimization) is deliberately skipped here -- speed-by-default for
-    # the spawn-freely idiom; opt into the sizer with stack_size= / a memory mode.
-    if not args and not kwargs and _hot._AUTO is None and runloom_c.mn_hub_count() > 0:
-        runloom_c.mn_fiber(callable_, 0)
-        return None
     # Auto per-core scaling (optimize("throughput")): if this handler has been
     # spawned enough to be worth it, swap in its per-core copy.  No-op (one
     # `is None` check) unless auto mode is on.  Done on the bare callable, before
@@ -325,6 +321,13 @@ def fiber(callable_, *args, **kwargs):
         return None
     g = runloom_c.fiber(target, stack_size)
     return Goroutine(g, name=name)
+
+
+# Bind the public spawn to the C fast entry: a bare fiber(callable) under M:N
+# spawns with NO Python frame; _fiber_full is the delegate the C entry falls
+# back to for args / stack_size= / single-thread / auto-mode calls.
+runloom_c._fiber_register(_fiber_full)
+fiber = runloom_c.fiber_fast
 
 
 def yield_now():
@@ -397,6 +400,10 @@ def run(n, main_fn=None):
     mn_fini envelope.  Returns the number of fibers completed.
     """
     _hot._install_auto()  # one-time: turn on auto per-core scaling iff its env is set
+    if _hot._AUTO is not None:
+        # auto mode resolves a per-core handler copy per spawn -- the C fast entry
+        # must delegate to _fiber_full so that resolve is not skipped.
+        runloom_c._fiber_force_full(True)
     if isinstance(n, bool) or not isinstance(n, int) or n < 1:
         raise ValueError(
             "run(n, main_fn): n must be an int >= 1 (got {0!r})".format(n))

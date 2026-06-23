@@ -78,6 +78,17 @@ static PyMethodDef module_methods[] = {
      "(post-calibration) for this one fiber -- use when the entry\n"
      "function is known to recurse deeply or call into a C extension\n"
      "that consumes large amounts of C stack."},
+    {"fiber_fast",     (PyCFunction)m_fiber_fast, METH_FASTCALL,
+     "fiber_fast(callable): C fast entry that runloom.fiber binds to.  A bare\n"
+     "Go-style fiber(callable) under M:N spawns straight through the C core (no\n"
+     "Python wrapper frame); rich calls (extra args, stack_size=, single-thread,\n"
+     "auto mode) delegate to the Python wrapper registered via _fiber_register."},
+    {"_fiber_register", m_fiber_register, METH_O,
+     "internal: register the Python full-feature fiber wrapper that fiber_fast\n"
+     "delegates rich calls to."},
+    {"_fiber_force_full", m_fiber_force_full, METH_O,
+     "internal: force fiber_fast to always delegate to the Python wrapper (set\n"
+     "when auto per-core mode is on, so the per-core resolve is not skipped)."},
     {"blocking",    (PyCFunction)m_blocking, METH_VARARGS | METH_KEYWORDS,
      "blocking(fn, *args, **kwargs): run fn(*args, **kwargs) on the\n"
      "blocking-offload thread pool, parking the calling fiber until it\n"
