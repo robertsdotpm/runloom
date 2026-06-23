@@ -14,7 +14,7 @@
 #   ./dist        the source distribution (.tar.gz) -- platform-independent
 #   ./wheelhouse  the prebuilt wheels (.whl) for this platform
 #
-# Then publish everything at once (see RELEASING.md):
+# Then publish everything at once (see docs/dev/RELEASING.md):
 #   twine upload dist/*.tar.gz wheelhouse/*.whl
 #
 # Requires the dev tools:  pip install "runloom[dev]"   (build + cibuildwheel)
