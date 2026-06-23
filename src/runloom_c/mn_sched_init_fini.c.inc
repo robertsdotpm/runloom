@@ -452,6 +452,29 @@ static int runloom_pair_affinity_mode(void)
  * Either callable (Python path) or c_fn+c_arg (C-only path) must be set,
  * not both.  Returns 0 on success, -1 on failure (errno set).  Python
  * error is also set on failure when callable != NULL. */
+/* Auto-pace: a tight in-fiber spawn loop pins its producer hub (a compiled
+ * `for: fiber(fn)` loop has no yield points), so without this only 7/8 hubs run
+ * fibers and the loser hub floods its run queue + cold stack pool.  Yielding
+ * every PACE spawns lets the producer's hub interleave running with spawning --
+ * the runtime self-pacing a busy spawner, exactly like Go preempting a goroutine
+ * that spawns in a loop.  Default 512 (measured sweet spot: ~2.2M/s naked
+ * single-spawn vs ~0.9M unpaced; light spawners never reach PACE so they pay
+ * nothing).  A periodic cooperative yield, NOT a cap on in-flight fibers, so
+ * high-concurrency PARKED workloads never starve.  Tune/disable via
+ * RUNLOOM_SPAWN_PACE (0 = off). */
+static long runloom_spawn_pace(void)
+{
+    static long v = -1;
+    long cur = __atomic_load_n(&v, __ATOMIC_RELAXED);
+    if (cur < 0) {
+        const char *e = getenv("RUNLOOM_SPAWN_PACE");
+        cur = (e != NULL) ? atol(e) : 512;
+        if (cur < 0) cur = 0;
+        __atomic_store_n(&v, cur, __ATOMIC_RELAXED);
+    }
+    return cur;
+}
+
 static int runloom_mn_fiber_core(PyObject *callable, runloom_c_entry_fn c_fn,
                            void *c_arg, size_t stack_size, long py_index)
 {
@@ -466,6 +489,17 @@ static int runloom_mn_fiber_core(PyObject *callable, runloom_c_entry_fn c_fn,
         }
         errno = EINVAL;
         return -1;
+    }
+    {   /* auto-pace (experiment): yield every PACE spawns so the producer hub
+         * interleaves running with spawning.  Only an in-fiber spawner can yield. */
+        long pace = runloom_spawn_pace();
+        if (pace > 0 && runloom_mn_tls_current_g() != NULL) {
+            static RUNLOOM_TLS long runloom_pace_ctr = 0;
+            if (++runloom_pace_ctr >= pace) {
+                runloom_pace_ctr = 0;
+                runloom_mn_yield_current();
+            }
+        }
     }
     n = __atomic_fetch_add(&runloom_mn_spawn_counter, 1, __ATOMIC_RELAXED);
     if (runloom_pair_affinity_mode()) {
