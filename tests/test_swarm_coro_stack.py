@@ -224,9 +224,23 @@ def test_coro_huge_stack_raises_memoryerror_not_crash():
     # Coro is the LOW-LEVEL primitive: it does NOT clamp to MAX_STACK_SIZE (only
     # the scheduler's fiber()/mn_fiber() path does).  An un-mmap-able size must surface
     # as a clean MemoryError at construction, never a wild mapping / crash.
+    #
+    # PORTABILITY: the real invariant is "no wild mapping / crash", NOT "MemoryError
+    # specifically".  Linux refuses an over-large mmap up front -> MemoryError.  macOS
+    # OVERCOMMITS a mapping that still fits the user address space lazily (1<<46 = 64 TB
+    # maps without backing until a page is faulted), so construction can instead SUCCEED
+    # there -- which is still safe as long as the never-resumed coro is dropped cleanly
+    # (munmap of an untouched mapping).  Sizes past the address space (1<<55, 1<<62)
+    # still fail on both.
     for sz in (1 << 46, 1 << 55, 1 << 62):
-        with pytest.raises(MemoryError):
-            rc.Coro(lambda: 1, sz)
+        try:
+            c = rc.Coro(lambda: 1, sz)
+        except MemoryError:
+            continue                       # un-mmap-able outcome (Linux; macOS past AS)
+        # Overcommitted (macOS, size that fits the address space): the mapping must be
+        # inert -- never resume it; just ensure dropping it doesn't crash.
+        assert not c.done
+        del c
 
 
 def test_coro_leaked_unfinished_is_collected_cleanly():

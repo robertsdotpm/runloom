@@ -359,6 +359,13 @@ def test_unpark_many_wakes_wait_fd_parkers_and_reports_running_missed():
 
 
 # FINDING ------------------------------------------------------------------
+@pytest.mark.skipif(
+    sys.platform == "darwin",
+    reason="the foreign-thread unpark_many WEDGE is a Linux-observed finding "
+           "(cross-thread direct-wake racing an epoll-parked g); on macOS the "
+           "kqueue wake path lets the foreign unpark_many return cleanly, so the "
+           "finding does not reproduce here -- gating keeps the doc-test honest "
+           "rather than asserting a hang that platform doesn't exhibit")
 def test_finding_foreign_thread_unpark_many_hangs():
     # FINDING: unpark_many() called DIRECTLY from a foreign OS thread on fibers
     # parked in a single-thread run()'s wait_fd WEDGES the process.  The runtime's

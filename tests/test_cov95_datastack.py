@@ -153,16 +153,24 @@ def test_datastack_sweep_debug_decompose():
     line = [l for l in p.stdout.splitlines() if l.startswith("DS ")]
     assert line, (p.stdout[-400:], p.stderr[-800:])
     fields = dict(kv.split("=") for kv in line[0][3:].split())
-    # exact-once echo + every Python parker woken (clean teardown, no strand)
+    # exact-once echo + every Python parker woken (clean teardown, no strand) --
+    # the CORRECTNESS oracle, asserted on every platform.
     assert int(fields["cgot"]) == 16, line[0]
     assert int(fields["pywoke"]) == 24, line[0]
-    # the DEBUG decompose actually accounted real chunks AND measured a resident
-    # tail -> runloom_ds_resident_bytes' accumulation body ran (not just L0 path)
-    assert int(fields["chunks"]) > 0, line[0]
-    assert int(fields["resident"]) > 0, (
-        "no resident tail measured -- the resident-accumulation body never "
-        "ran: " + line[0])
-    assert int(fields["tail"]) >= int(fields["resident"]), line[0]
+    # The resident-tail accounting is measured via mincore() (runloom_coro_scan_hwm).
+    # Linux and macOS disagree on mincore's resident-bit semantics for the
+    # never-faulted / MADV_FREE'd tail pages of the data stack, so on macOS the
+    # decompose legitimately reports resident=chunks=0 (the pages read as
+    # not-incore) even though the sweep ran.  Assert the resident-accumulation body
+    # ran only where mincore reports residency the way this oracle expects (Linux).
+    if sys.platform == "linux":
+        # the DEBUG decompose actually accounted real chunks AND measured a resident
+        # tail -> runloom_ds_resident_bytes' accumulation body ran (not just L0 path)
+        assert int(fields["chunks"]) > 0, line[0]
+        assert int(fields["resident"]) > 0, (
+            "no resident tail measured -- the resident-accumulation body never "
+            "ran: " + line[0])
+        assert int(fields["tail"]) >= int(fields["resident"]), line[0]
 
 
 # A second variant with the sweep ON but the DEBUG flag OFF: drives the
