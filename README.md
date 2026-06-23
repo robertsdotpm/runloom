@@ -31,7 +31,6 @@ steady-state. Go ≈ 2.1 M spawn/s here.
 | metric | runloom | Go | verdict |
 | --- | ---: | ---: | --- |
 | **spawn** — pure C (`c_entry`) | **2.32 M/s** | 2.10 M/s | **1.10× — beats Go** |
-| **spawn** — bulk (`fiber_n`) | **2.29 M/s** | — | **1.09× (Go has no batch API)** |
 | **spawn** — Python (`runloom.fiber`) | 1.73 M/s | 2.10 M/s | 0.82× |
 | **context switch** | ~75 ns yield · ~560 ns chan RT | ~50 ns `Gosched` | ~parity |
 | **conn/s** — churn (new conn per req) | ~75–78 k/s | ~75–78 k/s | **parity** |
