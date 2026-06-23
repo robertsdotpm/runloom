@@ -79,10 +79,12 @@ static PyMethodDef module_methods[] = {
      "function is known to recurse deeply or call into a C extension\n"
      "that consumes large amounts of C stack."},
     {"fiber_fast",     (PyCFunction)m_fiber_fast, METH_FASTCALL | METH_KEYWORDS,
-     "fiber_fast(callable): C fast entry that runloom.fiber binds to.  A bare\n"
-     "Go-style fiber(callable) under M:N spawns straight through the C core (no\n"
-     "Python wrapper frame); rich calls (extra args, stack_size=, single-thread,\n"
-     "auto mode) delegate to the Python wrapper registered via _fiber_register."},
+     "fiber_fast(callable): experimental C fast-spawn entry, exposed as\n"
+     "runloom.fiber_fast (runloom.fiber is the full Python default).  A bare\n"
+     "Go-style fiber_fast(callable) under M:N spawns straight through the C core\n"
+     "(no Python wrapper frame, and NO grow-down auto-sizer -- fixed default\n"
+     "stack); rich calls (extra args, stack_size=, single-thread, auto mode)\n"
+     "delegate to the Python wrapper registered via _fiber_register."},
     {"_fiber_register", m_fiber_register, METH_O,
      "internal: register the Python full-feature fiber wrapper that fiber_fast\n"
      "delegates rich calls to."},

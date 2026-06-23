@@ -242,7 +242,7 @@ class Goroutine(object):
         return "<Goroutine {0} done={1}>".format(self.name, self.done)
 
 
-def _fiber_full(callable_, *args, **kwargs):
+def fiber(callable_, *args, **kwargs):
     """Spawn a fiber.  Mirrors Go's `go fn(a, b)`: schedules
     fn(*args, **kwargs) to run cooperatively and returns immediately.
 
@@ -263,11 +263,15 @@ def _fiber_full(callable_, *args, **kwargs):
     M:N pending-counter accounting that mn_run() joins on, so this dispatch
     is required for correctness, not just convenience.
 
-    NOTE: the public ``runloom.fiber`` is bound to the C ``fiber_fast`` entry
-    (METH_FASTCALL), which fast-paths the bare ``fiber(callable)`` M:N spawn
-    straight to the C core -- no Python frame -- and delegates rich calls HERE.
-    So this wrapper only runs for args / stack_size= / single-thread / auto-mode
-    spawns; the common Go-style spawn never enters this frame.
+    NOTE: this IS the public ``runloom.fiber`` -- the full-featured default
+    (grow-down auto-sizer, args/kwargs, single-thread + M:N dispatch).
+    ``runloom.fiber_fast`` is a SEPARATE, experimental C entry (METH_FASTCALL,
+    no Python frame) under active optimization: it fast-paths a bare
+    ``fiber_fast(callable)`` M:N spawn straight to the C core and delegates rich
+    calls (args / stack_size= / single-thread / auto-mode) back HERE.  Because
+    fiber_fast bypasses the grow-down auto-sizer it spawns at the fixed default
+    stack (higher RSS at scale); use plain ``fiber`` (this) when grow-down
+    matters, fiber_fast when raw spawn throughput does.
     """
     # Auto per-core scaling (optimize("throughput")): if this handler has been
     # spawned enough to be worth it, swap in its per-core copy.  No-op (one
@@ -323,11 +327,13 @@ def _fiber_full(callable_, *args, **kwargs):
     return Goroutine(g, name=name)
 
 
-# Bind the public spawn to the C fast entry: a bare fiber(callable) under M:N
-# spawns with NO Python frame; _fiber_full is the delegate the C entry falls
-# back to for args / stack_size= / single-thread / auto-mode calls.
-runloom_c._fiber_register(_fiber_full)
-fiber = runloom_c.fiber_fast
+# runloom.fiber (above) is the full-featured DEFAULT: grow-down auto-sizer,
+# args/kwargs, single-thread + M:N dispatch.  runloom.fiber_fast is the
+# experimental C fast-spawn entry (METH_FASTCALL, no Python frame) kept separate
+# while we optimize it -- it delegates anything it can't fast-path (kwargs,
+# stack_size=, single-thread, auto-mode) back to `fiber` via this registration.
+runloom_c._fiber_register(fiber)
+fiber_fast = runloom_c.fiber_fast
 
 
 def yield_now():
@@ -401,8 +407,9 @@ def run(n, main_fn=None):
     """
     _hot._install_auto()  # one-time: turn on auto per-core scaling iff its env is set
     if _hot._AUTO is not None:
-        # auto mode resolves a per-core handler copy per spawn -- the C fast entry
-        # must delegate to _fiber_full so that resolve is not skipped.
+        # auto mode resolves a per-core handler copy per spawn -- a direct
+        # fiber_fast caller must delegate to `fiber` so that resolve is not
+        # skipped (runloom.fiber already routes here; this covers fiber_fast).
         runloom_c._fiber_force_full(True)
     if isinstance(n, bool) or not isinstance(n, int) or n < 1:
         raise ValueError(

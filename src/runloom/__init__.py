@@ -49,6 +49,7 @@ if _sys.getrecursionlimit() < 1_000_000:
 
 from .runtime import (
     fiber,
+    fiber_fast,    # experimental C fast-spawn entry (bypasses grow-down; under optimization)
     yield_now,
     yield_,        # deprecated alias for yield_now (keyword-dodge name)
     sleep,
@@ -212,7 +213,7 @@ from . import aio      # noqa: E402,F401  – run async/await on the scheduler
 
 __all__ = [
     # scheduler
-    "fiber", "run", "sleep", "yield_now", "yield_", "blocking", "current",
+    "fiber", "fiber_fast", "run", "sleep", "yield_now", "yield_", "blocking", "current",
     "Goroutine", "fiber_noyield", "warmup", "prewarm", "prewarm_keep", "prewarm_stop",
     "optimize", "hot",
     "thread_init", "thread_fini",
