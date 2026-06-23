@@ -6,8 +6,7 @@
 /* Persistent worker-thread PyThreadState (see mn_sched.h).  Created on the
  * worker's OWN thread so biased-refcount + mimalloc bind to it, serialized
  * against the new_threadstate() immortalize race via runloom_hub_tstate_lock --
- * exactly like the hubs and the handoff rescue thread.  NULL when the M:N
- * interpreter isn't up. */
+ * exactly like the hub threads.  NULL when the M:N interpreter isn't up. */
 PyThreadState *runloom_mn_worker_tstate_new(void)
 {
     PyThreadState *ts;
@@ -23,7 +22,7 @@ void runloom_mn_worker_tstate_delete(PyThreadState *ts)
     if (ts == NULL) return;
     /* Delete on THIS (owning) thread: PyThreadState_New gilstate-bound ts to this
      * thread's gilstate-TSS slot, so it must be cleared/deleted here (mirrors the
-     * handoff rescue self-delete, mn_sched_handoff.c.inc).  RestoreThread first
+     * hub thread self-delete in mn_sched_hub_main.c.inc).  RestoreThread first
      * waits out any pending stop-the-world, then attaches so DeleteCurrent clears
      * the right gilstate slot.  ts is DETACHED on entry (the worker SaveThread's
      * after every job). */
@@ -100,7 +99,7 @@ int runloom_mn_init(int n_threads)
      * we still hold the main tstate and before any hub runs Python. */
     runloom_preempt_install(interp);
     /* controlled M:N (RUNLOOM_MN_SEED): set up the execution baton before any hub
-     * runs; forces handoff off, keeps preempt on (see runloom_mn_ctrl_init).
+     * runs; keeps preempt on (see runloom_mn_ctrl_init).
      * No-op when RUNLOOM_MN_SEED is unset. */
     runloom_mn_ctrl_init(n_threads);
 
@@ -161,8 +160,8 @@ int runloom_mn_init(int n_threads)
          * gc-churn SIGSEGV the hang-hunter found).  Creating the tstate on the
          * hub's own thread makes brc->tid == ob_tid for every object the hub
          * owns, so the owner is always found.  PyMem_Calloc already zeroed
-         * h->tstate; sysmon / handoff / world-yield read it with an acquire load
-         * and treat NULL as attach-state -1 (fail closed) during the brief
+         * h->tstate; sysmon / hub-snapshot / world-yield read it with an acquire
+         * load and treat NULL as attach-state -1 (fail closed) during the brief
          * window before the hub publishes it. */
     }
     saved = PyEval_SaveThread();
@@ -205,10 +204,9 @@ int runloom_mn_init(int n_threads)
     /* Resolve the depot auto-cap's SAFE_MAX (reads /proc once) before the watchdog,
      * whose tick will recompute the cap from the live-stack watermark. */
     runloom_stack_autocap_init();
-    /* Hubs are up; start the watchdog (no-op unless RUNLOOM_SYSMON / RUNLOOM_HANDOFF
-     * is set) and the rescue thread (no-op unless RUNLOOM_HANDOFF is set). */
+    /* Hubs are up; start the watchdog (no-op unless RUNLOOM_SYSMON / RUNLOOM_PREEMPT
+     * is set). */
     runloom_sysmon_spawn();
-    runloom_handoff_spawn();
     return n_threads;
 }
 
@@ -296,12 +294,8 @@ void runloom_mn_fini(void)
      * finding (docs/dev/repro/DEKKER_SIGSEGV_FINDING.md). */
     __atomic_add_fetch(&runloom_mn_gen, 1, __ATOMIC_RELEASE);
     /* Stop the watchdog before any hub teardown so its scan never touches
-     * freed hub state, then stop the rescue thread (after the watchdog so no
-     * fresh dispatch lands) so it can never hold a tstate about to be deleted.
-     * At fini all gs have completed -> no wedge -> the rescue is idle, but the
-     * stop flag also unwinds an in-progress rescue (load base + detach). */
+     * freed hub state. */
     runloom_sysmon_stop_join();
-    runloom_handoff_stop_join();
     for (i = 0; i < runloom_hub_count; i++) {
         __atomic_store_n(&runloom_hubs[i].stopping, 1, __ATOMIC_RELEASE);
         /* BUG #10 idle wake: a hub parked in its idle condvar must observe the
@@ -325,12 +319,6 @@ void runloom_mn_fini(void)
         }
         PyEval_RestoreThread(saved);
     }
-    /* Now both the rescue threads (joined at runloom_handoff_stop_join above) AND
-     * the hubs are joined, so no thread can hold runloom_hub_tstate_lock across a
-     * startup stop-the-world: safe to delete the rescue tstates here, attached.
-     * (Deferred from runloom_handoff_stop_join to dodge the STW deadlock -- see
-     * the note there.) */
-    runloom_handoff_delete_tstates();
     /* controlled-mode baton: all hubs joined, nobody can acquire/release now */
     runloom_mn_ctrl_fini();
     /* Uninstall the preempt wrapper now that every hub thread is joined (no one

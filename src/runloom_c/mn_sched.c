@@ -231,7 +231,7 @@ typedef struct runloom_hub {
     volatile long        resume_seq;
     runloom_g_t            *resume_g;
     /* RUNLOOM_PREEMPT: set by the sysmon watchdog when this hub is ATTACHED-wedged
-     * (a CPU-bound / non-yielding fiber the DETACHED handoff can't take).
+     * (a CPU-bound / non-yielding fiber, which work-stealing can't drain).
      * runloom's installed eval-frame wrapper reads it at the next Python frame
      * boundary on THIS hub's owner thread and yields the running g back to the
      * scheduler -- Go pre-1.14 cooperative preemption.  Written rarely (only
@@ -352,6 +352,5 @@ static void runloom_mn_wakep_one(void);
 #include "mn_sched_hub_main.c.inc"
 #include "mn_sched_mn_api.c.inc"
 #include "mn_sched_sysmon.c.inc"
-#include "mn_sched_handoff.c.inc"
 #include "mn_sched_hubinfo.c.inc"
 #include "mn_sched_init_fini.c.inc"

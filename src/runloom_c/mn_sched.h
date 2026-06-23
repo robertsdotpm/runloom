@@ -31,11 +31,31 @@
  *
  *   Goroutine pinning: a g is created on a hub and runs ONLY on that
  *   hub.  Greenlets / our coros have absolute stack pointers that
- *   tie them to a single OS thread.  Migration would need to suspend,
- *   re-create on the target thread, restore -- doable but adds
- *   overhead Go doesn't pay.  Work-stealing here actually steals
- *   READY fibers (which haven't run yet, so no stack to migrate)
- *   rather than active ones.
+ *   tie them to a single OS thread.  Work-stealing here steals only
+ *   READY ("fresh", snap.valid==0) fibers -- they have NEVER run, so
+ *   there is no stack/tstate to migrate: the stealer runs them clean
+ *   from the start on its OWN tstate, and if such a fiber later parks
+ *   it parks AND resumes on that same hub.  No migration.
+ *
+ *   *** DO NOT add cross-OS-thread migration of a SUSPENDED fiber. ***
+ *   It is UNSOUND in stock free-threaded CPython.  Once a fiber has run
+ *   and parked (snap.valid==1) the eval loop's PyThreadState pointer is
+ *   baked into the frozen coro stack (spilled to eval-frame slots, not a
+ *   single rewritable register), and one _PyThreadState_GET() serves BOTH
+ *   the allocator AND execution (PyErr/recursion/GC).  Resuming that frozen
+ *   frame on a different hub drives the wrong tstate's datastack/heap ->
+ *   corruption: an arm64 SIGSEGV that is benign-looking on x86-TSO, so it
+ *   passes local x86 review and code reasoning and only dies on weak memory.
+ *   This is why the old "handoff-rescue" pool (run a wedged hub's fibers on
+ *   a standby thread) was REMOVED (2026-06): it migrated suspended fibers,
+ *   and was redundant with work-stealing anyway (idle hubs already drain a
+ *   wedged hub's FRESH fibers safely).  Full analysis + the only sound path
+ *   (the opt-in CPython execution/alloc-home hook + per-g-tstate, gated
+ *   behind RUNLOOM_ALLOW_UNSAFE_MIGRATION until the patch lands):
+ *   docs/dev/HUB_MIGRATION_VERDICT.md and docs/dev/STEAL_WOKEN_CLEANUP.md.
+ *   Regression guard: the RUNLOOM_DIAG_MIGRATE detector in
+ *   runloom_sched_pystate.c.inc fires if any snap carrying a live Python
+ *   frame is loaded under a tstate other than the one it was saved on.
  *
  *   Wake interrupts: when a hub steals work, it needs to inform other
  *   hubs that may be sleeping in epoll_wait.  Use eventfd / pipe
@@ -109,8 +129,8 @@ int runloom_mn_hub_count(void);
  * Every field is a lock-free read of a per-hub atomic; for a hub that is
  * DETACHED-wedged (a fiber inside a non-cooperative blocking call) it
  * ALSO best-effort fills `blocked_at` with the running fiber's top
- * Python frame -- the blocking call site -- read under a handoff-rescue
- * lockout (see mn_sched_hubinfo.c.inc for the safety argument). */
+ * Python frame -- the blocking call site (see mn_sched_hubinfo.c.inc
+ * for the safety argument). */
 typedef struct runloom_hub_info {
     int       id;                 /* dense hub index 0..count-1 */
     long long running_g;          /* goid of the g currently being resumed */
@@ -203,13 +223,12 @@ void runloom_mn_sweep_claim_release(runloom_g_t *g);
  * global ring's mutex-protected submit + legacy spin-drain. */
 struct runloom_iouring_ring *runloom_mn_current_iouring_ring(void);
 
-/* Halt the M:N watchdog threads (sysmon preemption + handoff rescue) from
- * inside the fatal-signal crash handler.  Async-signal-safe: only atomic/plain
- * stores to the loop-stop flags.  A hub thread that has faulted and is driving
- * the crash dump must NOT be treated as a recoverable wedge -- otherwise the
- * handoff rescue adopts its fibers and steals the faulting g away before
- * the handler's chain-out re-faults and cores, leaving the process limping
- * (service dead, no core).  See runloom_crash.c / crash_handler. */
+/* Halt the M:N sysmon watchdog + disable preemption from inside the
+ * fatal-signal crash handler.  Async-signal-safe: only atomic/plain stores to
+ * the loop-stop flag + the preempt-enable flag.  A hub thread that has faulted
+ * and is driving the crash dump must NOT have its faulting g preempted away
+ * before the handler's chain-out re-faults and cores, leaving the process
+ * limping (service dead, no core).  See runloom_crash.c / crash_handler. */
 void runloom_sched_freeze_for_crash(void);
 
 #endif /* RUNLOOM_MN_SCHED_H */

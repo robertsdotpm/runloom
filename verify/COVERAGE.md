@@ -42,7 +42,7 @@ Driver: `verify/run_verify.sh` (Spin + CBMC + GenMC + herd7 + Coq + Iris + Alloy
 | Blocking-offload pool | `runloom_blockpool.c` | `blockpool.pml`, `blockpool_job.c`(GenMC), `Blockpool.v`(Coq ∞) | **deep** |
 | io_uring single-op + multishot | `io_uring.c`, `io_uring_l_msclose.c.inc` | `iouring_waitcommit.c`(GenMC), `iouring_msclose.pml`(Spin) | good |
 | Preemption defer-in-destruction | `mn_sched_hub_resume_preempt.c.inc` | `preempt_defer_cbmc.c`(CBMC) | good |
-| Teardown / mn_fini | `mn_sched_init_fini.c.inc` | `RunloomMnFini.tla`, `RunloomHandoff.tla`(TLA) | good |
+| Teardown / mn_fini | `mn_sched_init_fini.c.inc` | `RunloomMnFini.tla`(TLA) | good |
 | **mn_run deadlock-census + stall-kick** | `mn_sched_init_fini.c.inc` | **`RunloomMnRun.tla`(TLA) — NEW 2026-06-17**; census-idle wake-guard also in `RunloomComposite.tla` | good (NEW) |
 | Whole-scheduler composition | `mn_sched*.c.inc` | `RunloomSched.tla`, `RunloomComposite.tla`(TLA) | good |
 | tstate lifecycle / STW / migration | `mn_sched_hub_main.c.inc` | `tstate_attach_detach.pml`, `RunloomCPythonSTW`,`RunloomGilstate`,`RunloomTstateMigration.tla`, `sched_pystate_cbmc.c` | **deep** |
@@ -258,7 +258,6 @@ TLA+ `RunloomMnRun`.
 | `RunloomComposite.tla` | composed scheduler hang-freedom (wake/park + dispatch + routing) |
 | `RunloomMnRun.tla` | **NEW** mn_run deadlock-census + stall-kick liveness backstop |
 | `RunloomMnFini.tla` | teardown stop-signal handshake under `idle_lock` |
-| `RunloomHandoff.tla` | wedged-hub rescue/handoff stall recovery |
 | `RunloomMNControl.tla` | controlled-replay baton (acquire/release/timed) |
 | `RunloomCPythonSTW.tla` | CPython free-threaded attach/detach + stop-the-world |
 | `RunloomGilstate.tla` | hub-tstate gilstate create/delete on the owning thread |

@@ -41,7 +41,7 @@ static runloom_iouring_ssize_t runloom_iouring_do(struct io_uring_sqe sqe)
          * per-g-tstate attach protocol) whose completion depends on a thread
          * frozen at the STW barrier -- and it monopolizes the hub so its
          * other fibers can't run.  Yield instead: the hub returns to its
-         * (STW-safe, handoff-compatible) main loop, and when idle pumps the
+         * (STW-safe) main loop, and when idle pumps the
          * shared ring's eventfd; a drainer wakes us via the wait handshake.
          * The inline drain above already completed us inline in the common
          * data-ready case (wait == DONE) -- skip the park then. */

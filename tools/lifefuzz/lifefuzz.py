@@ -409,7 +409,6 @@ def run_aio_program(spec, timeout=20.0):
 # replayable because the choice is a pure function of the seed.
 KNOB_FACTORS = (
     ("RUNLOOM_NETPOLL", ["epoll", "select", "io_uring"]),
-    ("RUNLOOM_HANDOFF", ["0", "1"]),
     ("RUNLOOM_PREEMPT", ["0", "1"]),
     ("RUNLOOM_SYSMON",  ["0", "1"]),
 )

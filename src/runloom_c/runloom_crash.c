@@ -283,11 +283,11 @@ static void crash_handler(int sig, siginfo_t *si, void *uctx)
         for (;;) pause();
     }
 
-    /* We are the crash owner.  Freeze the M:N watchdogs FIRST -- before the
+    /* We are the crash owner.  Freeze the M:N watchdog FIRST -- before the
      * (potentially slow) dump dwells long enough for sysmon to flag this hub
-     * wedged and the handoff pool to adopt + steal the faulting fiber,
-     * which would stop the chain-out from re-faulting and coring (the process
-     * would limp on with a stranded hub instead of dying cleanly). */
+     * wedged and preempt the faulting fiber, which would stop the chain-out
+     * from re-faulting and coring (the process would limp on with a stranded
+     * hub instead of dying cleanly). */
     runloom_sched_freeze_for_crash();
 
     crash_emit("\n======================== runloom crash ========================\n");

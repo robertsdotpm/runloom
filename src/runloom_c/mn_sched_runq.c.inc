@@ -303,7 +303,7 @@ static int runloom_use_global_runq(void)
     return runloom_get_per_g_tstate_mode();
 }
 
-/* ---- sysmon watchdog (Group B: stalled-hub detection) ----
+/* ---- sysmon watchdog (stalled-hub detection) ----
  *
  * RUNLOOM_SYSMON (default OFF): spawn one extra OS thread that periodically
  * scans every hub's resume_start_ns and logs a hub stuck inside a single
@@ -311,18 +311,19 @@ static int runloom_use_global_runq(void)
  * signature -- a fiber occupying its hub's OS thread with a
  * non-yielding blocking C call that Group A's offload never wrapped).
  *
- * This first cut is DETECT-ONLY (log the wedge + how many gs it strands);
- * the tstate-handoff recovery builds on top once the detector is measured.
- * Gated so the per-resume instrumentation (two stores + a clock read) is a
- * predicted-not-taken branch -- zero cost when the watchdog is off. */
+ * DETECT + PREEMPT: log the wedge (and how many gs it strands), and for an
+ * ATTACHED (CPU-bound) wedge arm preemption so the hub time-slices.  A DETACHED
+ * (blocking-IO) wedge needs no recovery here -- work-stealing already drains its
+ * fresh fibers to idle hubs.  Gated so the per-resume instrumentation (two
+ * stores + a clock read) is a predicted-not-taken branch -- zero cost when the
+ * watchdog is off. */
 /* PyThreadState->state values (cpython/pystate.h documents the field;
  * the numeric values live in the internal pycore_pystate.h).  Mirrored here
  * so the watchdog can classify a wedge WITHOUT the Python C-API: it reads
- * h->tstate->state to tell a handoff-RECOVERABLE stall (the running g
- * released the tstate via Py_BEGIN_ALLOW_THREADS -> DETACHED, a well-behaved
- * blocking-IO call a standby thread can take over) from an un-recoverable one
- * (ATTACHED = CPU-bound bytecode or a raw tstate-holding syscall; SUSPENDED =
- * a stop-the-world is in progress -- never adopt). */
+ * h->tstate->state to tell a DETACHED stall (the running g released the tstate
+ * via Py_BEGIN_ALLOW_THREADS -> a well-behaved blocking-IO call) from an
+ * ATTACHED one (CPU-bound bytecode or a raw tstate-holding syscall -> arm
+ * preemption) and from a SUSPENDED one (a stop-the-world is in progress). */
 #define RUNLOOM_TS_DETACHED  0
 #define RUNLOOM_TS_ATTACHED  1
 #define RUNLOOM_TS_SUSPENDED 2
@@ -331,23 +332,22 @@ static int runloom_use_global_runq(void)
  * The `state` field + this tri-state attach protocol are free-threading
  * infrastructure that only exists from 3.13 (3.12 has `_status` and no
  * attach/detach/stop-the-world concept).  Pre-3.13 returns -1 ("unknown"),
- * which makes the sysmon classifier print "?" and the handoff adopt/dispatch
- * gates (== / != RUNLOOM_TS_DETACHED) all fail closed -- the rescue never fires,
- * matching runloom_handoff_enabled being forced off there. */
+ * which makes the sysmon classifier print "?" and the preempt dispatch gate
+ * (== RUNLOOM_TS_ATTACHED) fail closed -- preemption never fires there. */
 #if PY_VERSION_HEX >= 0x030D0000
 RUNLOOM_INLINE int runloom_tstate_attach_state(PyThreadState *ts)
 {
     if (ts == NULL) return -1;
 #if defined(RUNLOOM_OS_WINDOWS)
-    /* This read is DELIBERATELY racy: the sysmon / handoff / hub-snapshot
-     * threads read h->tstate->state without owning the tstate (see callers).
+    /* This read is DELIBERATELY racy: the sysmon / hub-snapshot threads read
+     * h->tstate->state without owning the tstate (see callers).
      * On POSIX a tstate freed under us leaves its page mapped, so the stale
      * read returns garbage harmlessly.  On Windows the allocator (mimalloc)
      * UNMAPS freed pages, so the same race faults with an access violation
      * (reproduced by big_100 under M:N free-threading).  Wrap the read in SEH:
      * a faulting read means the tstate was freed concurrently -> report -1
      * ("unknown"), identical to the NULL case, so every attach-state gate
-     * fails closed and no rescue/adopt fires on a dead hub. */
+     * fails closed on a dead hub. */
     __try {
         return __atomic_load_n(&ts->state, __ATOMIC_ACQUIRE);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
@@ -369,11 +369,11 @@ static int       runloom_sysmon_enabled = 0;
 static int       runloom_sysmon_quiet = 0;   /* RUNLOOM_SYSMON_QUIET: suppress
                                               * the per-wedge WEDGED/RECOVERED
                                               * diagnostic spam (detector +
-                                              * handoff/preempt stay fully on) */
+                                              * preempt stay fully on) */
 static long long runloom_sysmon_wedge_ns = 50LL * 1000000LL;   /* 50 ms default */
-/* ATTACHED-preempt threshold, split from the DETACHED-handoff/wedge threshold
+/* ATTACHED-preempt threshold, split from the DETACHED/wedge detection threshold
  * above so a CPU-bound time-slice (fairness) tunes independently of the
- * blocking-call rescue latency.  Defaults to wedge_ns (backward compatible);
+ * blocking-call detection latency.  Defaults to wedge_ns (backward compatible);
  * RUNLOOM_PREEMPT_MS overrides.  (Go uses forcePreemptNS=10 ms for the CPU
  * time-slice, much larger than its ~20 us syscall retake.) */
 static long long runloom_sysmon_preempt_ns = 50LL * 1000000LL;
@@ -383,76 +383,13 @@ static runloom_thread_t runloom_sysmon_thread;
 static int       runloom_sysmon_running = 0;   /* 1 once the thread is spawned */
 static volatile int runloom_sysmon_stop = 0;
 
-/* ---- Group B: stalled-hub tstate handoff (RUNLOOM_HANDOFF, default OFF) ----
+/* ---- ATTACHED/CPU preemption (RUNLOOM_PREEMPT, default OFF) ----
  *
- * One standby "rescue" OS thread adopts a hub's DETACHED bound tstate -- a
- * fiber inside a Py_BEGIN_ALLOW_THREADS blocking call left it free -- and
- * drains THAT hub's stranded runnable gs, handing the tstate back when the
- * block ends.  This is the DETACHED-class wedge the sysmon detector classifies
- * as handoff-recoverable (a well-behaved blocking-IO call), the asyncio-killer
- * scenario: one blocking task no longer stalls a whole hub's fan-out.
- *
- * DEFAULT mode only (no per-g-tstate).  The adopted tstate is the hub's single
- * bound tstate, so a stranded g resumes on the SAME tstate it parked under --
- * the invariant the H>=2 cross-hub snap migration violated (a stackful coro's
- * suspended eval-loop C frame caches its origin tstate; only resuming on that
- * exact tstate is correct).  The rescue moves the *tstate* (to its own OS
- * thread) rather than the fiber, so the cached pointer stays valid.
- *
- * Single-runner safety = the tstate attach state itself.  PyEval_RestoreThread
- * CASes the bound tstate DETACHED->ATTACHED; at most one thread holds it
- * ATTACHED, and ONLY the ATTACHED holder mutates hub state.  The rescue adopts
- * only while state==DETACHED (the owner provably parked in its block, not in
- * the hub loop); attaching excludes the owner's END_ALLOW_THREADS re-attach
- * until the rescue detaches.  A stop-the-world that beats the rescue to the
- * tstate (DETACHED->SUSPENDED) makes the adopt attach block until
- * start_the_world -- STW-safe for free (the per-g bug was thousands of
- * EPHEMERAL tstates churning across STW; these H bound tstates do not).
- *
- * Dispatch: a pool of standby rescue threads + a per-hub claim slot
- * (runloom_handoff_claim[hub], FREE/PENDING/OWNED).  The sysmon watchdog, on a
- * DETACHED wedge, CASes the hub's slot FREE->PENDING; an idle rescue thread
- * CASes PENDING->OWNED to take it (so at most one thread ever rescues a given
- * hub -- the single-attach invariant holds), rescues it, then stores OWNED->FREE
- * at its final release.  K simultaneous DETACHED wedges recover on K threads in
- * parallel (each owns a distinct hub).  A persistently-wedged hub is re-flagged
- * FREE->PENDING on the next sysmon scan after a premature release (e.g. a STW
- * window left the hub wedged), since sysmon only ever CASes from FREE. */
-#define RUNLOOM_HANDOFF_FREE    0   /* not wedged / not in rescue */
-#define RUNLOOM_HANDOFF_PENDING 1   /* sysmon flagged a DETACHED wedge, awaiting pickup */
-#define RUNLOOM_HANDOFF_OWNED   2   /* a rescue thread holds this hub */
-/* The sysmon must observe a hub continuously DETACHED-while-wedged for this many
- * consecutive ticks before dispatching a handoff.  A genuine blocking call
- * (Py_BEGIN_ALLOW_THREADS: owner parked in a syscall, not touching the tstate)
- * stays DETACHED across ticks and is safe to adopt; a transient detach (idle /
- * world-yield blip, or the instant before a stop-the-world flips the state to
- * SUSPENDED) does not, and adopting it races the owner re-attaching/suspending
- * on the same tstate's non-atomic _status -> use-after-free.  2 ticks
- * (>= one full tick of continuous DETACH) excludes the transients while adding
- * at most ~one tick of rescue latency to a real blocking wedge. */
-#define RUNLOOM_HANDOFF_DETACH_TICKS 2
-static int          runloom_handoff_enabled = 0;
-static int          runloom_handoff_pool    = 0;    /* number of rescue threads */
-static int         *runloom_handoff_claim   = NULL; /* per-hub FREE/PENDING/OWNED */
-static runloom_thread_t *runloom_handoff_threads = NULL;
-static int          runloom_handoff_running = 0;     /* count of spawned rescue threads */
-static int          runloom_handoff_debug   = 0;     /* RUNLOOM_HANDOFF_DEBUG: trace adopts/drains */
-/* BUG #2 fix: each rescue thread's own PyThreadState.  Created by the rescue
- * thread on its own OS thread (so biased-refcount ob_tid binds to that TID).
- * Stored here (indexed [0..running-1]) so stop_join can delete them from the
- * MAIN thread after joining -- same pattern as hub tstates in mn_sched_init_fini.
- * A rescue thread must NEVER call PyThreadState_Delete itself: doing so while a
- * GC stop-the-world is in progress (the gcer fires during mn_fini) deadlocks
- * because Delete interacts with STW bookkeeping, and the main thread (the only
- * one that safely drives that interaction) is blocked in thread_join. */
-static PyThreadState **runloom_rescue_tstates = NULL;
-
-/* ---- Group B step (a): ATTACHED/CPU preemption (RUNLOOM_PREEMPT, default OFF) ----
- *
- * The DETACHED handoff above can't recover an ATTACHED wedge (a CPU-bound or
- * raw-tstate-holding fiber -- it never releases its hub's tstate).  The
- * answer is preemption: make the offending g yield so the hub round-robins its
- * other gs, exactly as Go time-slices a long-running fiber.
+ * An ATTACHED wedge is a CPU-bound or raw-tstate-holding fiber -- it never
+ * releases its hub's tstate, so a sibling g on that hub starves.  The answer is
+ * preemption: make the offending g yield so the hub round-robins its other gs,
+ * exactly as Go time-slices a long-running fiber.  (A DETACHED wedge needs no
+ * such recovery -- work-stealing already drains its fresh fibers to idle hubs.)
  *
  * Mechanism = a chained eval-frame function (the only exported, build-stable
  * hook; `_PyEval_AddPendingCall` can't target a specific thread, and runloom
@@ -462,7 +399,7 @@ static PyThreadState **runloom_rescue_tstates = NULL;
  * entering the frame -- a clean safe point identical to a recv-park.  This is
  * Go pre-1.14 cooperative preemption: prompt for call-bearing CPU code; a tight
  * single-frame / C-extension loop makes no Python calls and so is NOT preempted
- * (the same class the sysmon already flags as out-of-handoff-scope).
+ * (the single-frame liveness backstop's eval-breaker pending call covers it).
  *
  * Cost: installing a custom eval-frame func disables CPython's
  * `eval_frame == _PyEval_EvalFrameDefault` fast path, so EVERY frame goes
@@ -470,4 +407,3 @@ static PyThreadState **runloom_rescue_tstates = NULL;
  * mode keeps the fast path and never reads `preempt_requested`.  The wrapper
  * itself is defined below runloom_tls_hub/runloom_tls_current_g (it reads them). */
 static int          runloom_preempt_enabled = 0;
-static volatile int runloom_handoff_stop = 0;

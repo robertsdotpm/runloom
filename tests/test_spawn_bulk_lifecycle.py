@@ -18,7 +18,6 @@ os.environ.setdefault("PYTHON_GIL", "0")
 # Deterministic (the batch lifecycle is scheduler-independent for this count check).
 os.environ.setdefault("RUNLOOM_PREEMPT", "0")
 os.environ.setdefault("RUNLOOM_SYSMON", "0")
-os.environ.setdefault("RUNLOOM_HANDOFF", "0")
 
 import runloom_c  # noqa: E402
 

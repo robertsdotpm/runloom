@@ -54,17 +54,17 @@ class TestSysmonOracle(unittest.TestCase):
     def test_unwrapped_heavy_wedges(self):
         """Negative control: inline CPU-heavy hashing pins hubs -> WEDGED.
         Proves the detector fires (so the positive test's silence is real).
-        (hashlib/zlib release the GIL, so these classify DETACHED and handoff
-        can even rescue the hub's siblings -- but the wedge is still logged.)"""
+        (hashlib/zlib release the GIL, so these classify DETACHED -- but the
+        wedge is still logged.)"""
         out = _run(_HASH_WORKLOAD.format(heavy="False"))
         self.assertIn("WEDGED", out,
                       "expected the sysmon detector to flag the inline stall")
 
     def test_attached_cpu_loop_classified(self):
         """A frameless pure-Python loop is the true ATTACHED class -- it holds
-        the tstate (no GIL release) so neither handoff nor preempt can rescue
-        it.  The detector must flag it AND classify it ATTACHED; this is the
-        case offload() exists for."""
+        the tstate (no GIL release) and makes no Python calls, so preemption's
+        eval-frame hook can't break it.  The detector must flag it AND classify
+        it ATTACHED; this is the case offload() exists for."""
         snippet = textwrap.dedent("""
             import runloom_c
             def hog():

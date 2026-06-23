@@ -6,22 +6,15 @@ Covers the reliable contract:
     py-spy stack_cmd carrying THIS process's PID;
   * a hub genuinely stuck in a single blocking C call is reported as
     `detached` with a growing dwell, and `blocked_at` names the call site;
-  * a quiescent / cooperative run reports no `blocked_at` (no false wedges);
-  * the default config (handoff rescue ON) takes the snapshot's frame-read
-    lockout path without crashing.
+  * a quiescent / cooperative run reports no `blocked_at` (no false wedges).
 
-`blocked_at` is read from another hub's tstate, so the deterministic cases run
-with the handoff rescue OFF (no thread can be mutating that tstate's frames);
-the last test flips it back on to exercise the CAS-lockout path.
+`blocked_at` is read from another hub's tstate; this is safe because the wedged
+hub's owner is the only thread that can mutate that tstate's frames (work-stealing
+only touches the deque).
 """
 import os
 import sys
 import unittest
-
-# Deterministic blocked_at: no rescue thread adopting the wedged hub's tstate.
-# Read at mn_init, so set before the first runloom.run().  The handoff-on test
-# re-enables it explicitly.
-os.environ["RUNLOOM_HANDOFF"] = "0"
 
 sys.path.insert(0, "src")
 
@@ -102,7 +95,7 @@ class HubIntrospectTest(unittest.TestCase):
             runloom.fiber(blocking_sleep_worker)   # blocks 300ms -> a DETACHED wedge
             # The py-spy hint fires when a hub's DISPLAYED dwell >= WEDGE_MS (50ms).
             # A single 100ms snapshot can race a dwell-counter reset (sysmon
-            # resume/handoff bookkeeping momentarily shows the wedged hub at dwell
+            # resume bookkeeping momentarily shows the wedged hub at dwell
             # 0 -> no hint; the overnight flake), so sample across the blocking
             # window and accept the hint in ANY snapshot.
             texts = []
@@ -121,31 +114,6 @@ class HubIntrospectTest(unittest.TestCase):
             any("py-spy dump --pid" in t for t in texts),
             "no py-spy hint in any of {0} snapshots; last:\n{1}".format(
                 len(texts), texts[-1] if texts else "<none>"))
-
-    def test_handoff_on_lockout_path(self):
-        # Re-enable the rescue: the snapshot must take its CAS-lockout path
-        # (and skip blocked_at when it loses the race) without crashing.
-        os.environ["RUNLOOM_HANDOFF"] = "1"
-        try:
-            out = {}
-
-            def main():
-                for _ in range(6):
-                    runloom.fiber(blocking_sleep_worker)
-                runloom.sleep(0.10)
-                out["hubs"] = gi.hubs()
-
-            runloom.run(4, main)
-            hubs = out["hubs"]
-            self.assertEqual(len(hubs), 4)
-            for h in hubs:
-                self.assertTrue(HUB_KEYS <= set(h), h)
-                # blocked_at is best-effort here (may be None under the rescue);
-                # whatever it is, it's None or a string naming a frame.
-                self.assertTrue(h["blocked_at"] is None
-                                or isinstance(h["blocked_at"], str))
-        finally:
-            os.environ["RUNLOOM_HANDOFF"] = "0"
 
 
 if __name__ == "__main__":

@@ -2,22 +2,19 @@
 
   * src/runloom_c/mn_sched_hubinfo.c.inc   -- the per-hub diagnostic snapshot
     (runloom.inspect.hubs() / rc.mn_hub_states()), in particular the `blocked_at`
-    capture of a DETACHED-wedged hub's top Python frame and the handoff-claim
-    CAS that locks the rescue out for the duration of that frame walk.
+    capture of a DETACHED-wedged hub's top Python frame.
   * src/runloom_c/netpoll_wait_fd.c.inc    -- the drain/signal-wake CAS-retry
     loops and the wait_fd park/abort/resume cleanup paths.
 
 WHY THE NORMAL CORPUS MISSES THESE
 ----------------------------------
-hubinfo's `blocked_at` block (L111-140) runs ONLY when a hub has been
-DETACHED (its running fiber did Py_BEGIN_ALLOW_THREADS and is parked in a real
-blocking syscall) for longer than the sysmon wedge budget -- and the
-`resume_start_ns` clock that the dwell test reads is stamped ONLY when
-RUNLOOM_SYSMON is on (runloom_hub_resume_begin).  The handoff-claim CAS inside it
-(L115-117 lock, L134-136 unlock) additionally needs RUNLOOM_HANDOFF on.  None of
-that is in the default scheduler mode, so every line gated on it is dark unless a
-test deliberately manufactures a DETACHED wedge under those env modes AND samples
-mn_hub_states() during the wedge window.
+hubinfo's `blocked_at` block runs ONLY when a hub has been DETACHED (its running
+fiber did Py_BEGIN_ALLOW_THREADS and is parked in a real blocking syscall) for
+longer than the sysmon wedge budget -- and the `resume_start_ns` clock that the
+dwell test reads is stamped ONLY when RUNLOOM_SYSMON is on
+(runloom_hub_resume_begin).  None of that is in the default scheduler mode, so
+every line gated on it is dark unless a test deliberately manufactures a DETACHED
+wedge under those env modes AND samples mn_hub_states() during the wedge window.
 
 The wait_fd drain-loop CAS load (L37) only runs when sched_reset() finds a
 parker OWNED BY THE CALLING THREAD's single-thread scheduler; the corpus calls
@@ -27,23 +24,13 @@ handed to a fiber parked in wait_fd on the idle single-thread scheduler.
 
 TECHNIQUES
 ----------
-Env-gated modes (sysmon/handoff) are read once at import/first-run, so every
+Env-gated modes (sysmon) are read once at import/first-run, so every
 mode-dependent scenario runs in its OWN SUBPROCESS with the env set and asserts
 on a stdout marker + a clean (rc 0) exit -- gcov only counts a clean exit.  The
 two single-thread-scheduler paths (drain, signal-wake) need no env mode and run
 in-process / in a hygienic subprocess.
 
 Uncovered lines driven (line numbers in each .inc):
-
-  mn_sched_hubinfo.c.inc
-    * L115-117  handoff-claim CAS FREE->OWNED (lock the rescue out before the
-                frame walk).  Reached: RUNLOOM_HANDOFF on + a DETACHED-wedged
-                hub sampled by mn_hub_states() mid-wedge.  A captured non-None
-                `blocked_at` under handoff PROVES the CAS won (locked==1), since
-                blocked_at is gated on `!handoff_on || locked`.
-    * L134-136  the matching CAS OWNED->FREE the instant the walk is done.  Same
-                trigger: a captured blocked_at under handoff implies locked==1,
-                so both the lock and the unlock executed.
 
   netpoll_wait_fd.c.inc
     * L37       drain_parked CAS-retry load: `cur = load(&p->commit)` inside the
@@ -94,16 +81,15 @@ def _run_subprocess(script, env_extra, timeout=40):
 
 
 # ==========================================================================
-# mn_sched_hubinfo.c.inc -- the DETACHED-wedge blocked_at capture + handoff CAS
+# mn_sched_hubinfo.c.inc -- the DETACHED-wedge blocked_at capture
 # ==========================================================================
 
 # A fiber does a REAL time.sleep (Py_BEGIN_ALLOW_THREADS -> the hub's bound
 # tstate goes DETACHED) and holds the hub's resume clock for the whole sleep --
 # a textbook DETACHED wedge.  A SECOND fiber, on a DIFFERENT hub, samples
 # mn_hub_states() tightly during the wedge.  Each sample that returns a non-None
-# `blocked_at` for a 'detached' hub ran the L111-140 block: it CAS-locked the
-# handoff claim (L115-117), re-confirmed DETACHED, walked the top frame
-# (L123-131), and CAS-unlocked (L134-136).
+# `blocked_at` for a 'detached' hub ran the blocked_at block: it re-confirmed
+# DETACHED and walked the wedged hub's top Python frame.
 _HUBINFO_WEDGE = r'''
 import sys, time
 sys.path.insert(0, "src")
@@ -144,75 +130,35 @@ def _parse_hubinfo_ok(stdout):
 
 
 @pytest.mark.skipif(not FT, reason="DETACHED-wedge snapshot needs the M:N runtime")
-def test_hubinfo_blocked_at_under_handoff_drives_claim_cas():
-    """Drives mn_sched_hubinfo.c.inc L111-140 INCLUDING the handoff-claim CAS
-    lock (L115-117) and unlock (L134-136).
+def test_hubinfo_blocked_at_for_detached_wedge():
+    """Drives mn_sched_hubinfo.c.inc's `blocked_at` capture: a DETACHED wedge
+    yields the wedged hub's top Python frame.
 
-    With RUNLOOM_HANDOFF on, `blocked_at` is written only inside the
-    `if (!handoff_on || locked)` guard -- and handoff_on is true -- so any
-    captured blocked_at proves the FREE->OWNED CAS *won* (locked==1).  That in
-    turn means both the locking CAS (L115-117) and the unlocking CAS (L134-136)
-    executed, and the frame walk ran between them.  The decisive assertion is
-    that the captured frame is the WEDGER's own call site, i.e. we read the top
-    frame of the genuinely-DETACHED hub, not a spurious one."""
-    env = {
-        "RUNLOOM_HANDOFF": "1",
-        "RUNLOOM_HANDOFF_POOL": "2",
-        "RUNLOOM_SYSMON": "1",
-        "RUNLOOM_SYSMON_QUIET": "1",
-        # 50ms wedge budget: wide enough that the snapshot's CAS reliably wins
-        # the claim before the rescue adopts and clears the resume clock.
-        "RUNLOOM_SYSMON_MS": "50",
-        # keep ATTACHED-preempt out of the picture -- we want a pure DETACHED wedge.
-        "RUNLOOM_PREEMPT": "0",
-    }
-    script = _HUBINFO_WEDGE.format(sleep="0.6", watch="0.55")
-    p = _run_subprocess(script, env, timeout=40)
-    assert p.returncode == 0, (
-        "handoff-wedge hubinfo run did not exit cleanly (rc=%s)\nstderr=%s"
-        % (p.returncode, p.stderr[-1500:]))
-    parsed = _parse_hubinfo_ok(p.stdout)
-    assert parsed is not None, (
-        "no HUBINFO_OK marker -- the workload hung/crashed\nstdout=%s\nstderr=%s"
-        % (p.stdout[-500:], p.stderr[-1200:]))
-    got, who = parsed
-    assert got >= 1, (
-        "mn_hub_states() never captured a blocked_at for a DETACHED hub under "
-        "handoff -- the handoff-claim CAS path (L115-117 / L134-136) and the "
-        "frame walk never ran (got=%d)" % got)
-    assert who == "wedger", (
-        "captured a blocked_at, but not the wedger's frame (who=%r) -- the walk "
-        "did not read the wedged hub's top frame" % who)
+    The wedger holds its hub's bound tstate DETACHED (a real time.sleep) past the
+    sysmon wedge budget; the snapshot re-confirms DETACHED and walks the top
+    frame.  The owner is the only thread that can mutate that frame chain
+    (work-stealing only touches the deque), so no cross-thread coordination is
+    needed -- the capture is plain.
 
-
-@pytest.mark.skipif(not FT, reason="DETACHED-wedge snapshot needs the M:N runtime")
-def test_hubinfo_blocked_at_without_handoff_takes_no_cas_branch():
-    """Complementary path: with RUNLOOM_HANDOFF off, the same DETACHED wedge
-    still yields a `blocked_at` (the `!handoff_on` branch of L120), but WITHOUT
-    touching the handoff-claim CAS.  This pins the behavioural contract that the
-    blocked_at capture is independent of the rescue subsystem, and exercises the
-    frame walk (L123-131) on the no-handoff side so the two branches are
-    distinguished rather than conflated.
-
-    Adversarial property: the wedger's frame is captured even though no rescue
-    pool exists to lock out -- and the run still tears down cleanly."""
+    Adversarial property: the wedger's own frame is captured (not a spurious
+    one), and the run still tears down cleanly."""
     env = {
         "RUNLOOM_SYSMON": "1",
         "RUNLOOM_SYSMON_QUIET": "1",
         "RUNLOOM_SYSMON_MS": "30",
-        "RUNLOOM_HANDOFF": "0",
+        # keep ATTACHED-preempt out of the picture -- we want a pure DETACHED wedge.
         "RUNLOOM_PREEMPT": "0",
     }
     script = _HUBINFO_WEDGE.format(sleep="0.5", watch="0.45")
     p = _run_subprocess(script, env, timeout=40)
     assert p.returncode == 0, (
-        "no-handoff wedge run crashed (rc=%s)\nstderr=%s"
+        "DETACHED-wedge hubinfo run crashed (rc=%s)\nstderr=%s"
         % (p.returncode, p.stderr[-1500:]))
     parsed = _parse_hubinfo_ok(p.stdout)
     assert parsed is not None, "no HUBINFO_OK marker\nstderr=%s" % p.stderr[-1000:]
     got, who = parsed
     assert got >= 1 and who == "wedger", (
-        "no-handoff DETACHED wedge did not surface the wedger's frame "
+        "DETACHED wedge did not surface the wedger's frame "
         "(got=%d who=%r)" % (got, who))
 
 

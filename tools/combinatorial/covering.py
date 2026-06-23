@@ -45,7 +45,6 @@ ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
 # among features that are meant to work, so it stays a clean regression gate.
 FACTORS = [
     ("RUNLOOM_NETPOLL", ["epoll", "select", "io_uring"]),
-    ("RUNLOOM_HANDOFF", ["0", "1"]),
     ("RUNLOOM_PREEMPT", ["0", "1"]),
     ("RUNLOOM_SYSMON",  ["0", "1"]),
 ]

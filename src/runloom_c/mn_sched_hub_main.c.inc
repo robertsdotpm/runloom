@@ -275,7 +275,7 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
      * makes brc->tid == the ob_tid every object this hub creates carries.  That
      * is required for cross-thread DECREF to find the live owner instead of
      * merging its refcount as "exited" (the gc-churn use-after-free).  Publish
-     * with release; sysmon / handoff / world-yield read it with acquire and
+     * with release; sysmon / hub-snapshot / world-yield read it with acquire and
      * tolerate the brief NULL window before this store. */
     /* Serialize across hubs: CPython's new_threadstate() races on the
      * gc.immortalize check-then-act outside its HEAD_LOCK when several threads

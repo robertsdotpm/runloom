@@ -53,7 +53,7 @@ def _knobs(rng):
     # crash handler so any crash carries its recent per-thread timeline.
     env = {"PYTHON_GIL": "0", "RUNLOOM_GIL": "0",
            "RUNLOOM_DEBUG": "ring", "RUNLOOM_CRASH": "on"}
-    for k in ("RUNLOOM_SYSMON", "RUNLOOM_PREEMPT", "RUNLOOM_HANDOFF"):
+    for k in ("RUNLOOM_SYSMON", "RUNLOOM_PREEMPT"):
         if rng.random() < 0.3:
             env[k] = "0"
     if rng.random() < 0.3:

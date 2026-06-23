@@ -367,9 +367,6 @@ static void runloom_mn_ctrl_init(int n)
         runloom_mn_ctrl.tracepath[sizeof(runloom_mn_ctrl.tracepath) - 1] = '\0';
     }
     runloom_mn_ctrl.enabled = 1;
-    /* Handoff MUST stay off: its rescue thread resumes a fiber OFF the
-     * baton (bypasses resume_begin/end), which would break serialization. */
-    runloom_handoff_enabled = 0;
     /* Preemption stays ON (liveness backstop, proven necessary by
      * verify/tla/RunloomMNControl.tla's Preempt=FALSE control): a fiber that
      * runs Python without yielding would otherwise hold the baton forever and

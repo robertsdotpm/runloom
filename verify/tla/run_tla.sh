@@ -46,20 +46,6 @@ else
     echo "FAIL -- the injected lost-wake bug should violate AllComplete"; fail=$((fail+1))
 fi
 
-printf '  [tlc] %-28s ' "RunloomHandoff (rescue)"
-if run_tlc hook -config RunloomHandoff.cfg RunloomHandoff.tla | grep -q "No error has been found"; then
-    echo "PASS -- TypeOK/NoConcurrentDrain + AllDrained (stall-recovery liveness)"; pass=$((pass+1))
-else
-    echo "FAIL -- correct handoff spec should hold"; fail=$((fail+1))
-fi
-
-printf '  [tlc] %-28s ' "RunloomHandoff (no rescue)"
-if run_tlc hobug -deadlock -config RunloomHandoff_bug.cfg RunloomHandoff.tla | grep -q "Temporal properties were violated"; then
-    echo "PASS -- correctly DETECTS stranded work without the rescue M -> AllDrained violated"; pass=$((pass+1))
-else
-    echo "FAIL -- removing the rescue should strand a wedged hub's work"; fail=$((fail+1))
-fi
-
 # ---- Controlled M:N scheduler (RUNLOOM_MN_SEED experiment): the baton +
 # rendezvous protocol.  Correct = mutual-exclusion + deadlock-free +
 # deterministic grant.  Two negative controls model the two real obstacles:

@@ -14,17 +14,10 @@
  *   - the hub's bound tstate must be DETACHED and the resume must have overrun
  *     the wedge budget: a fiber that did Py_BEGIN_ALLOW_THREADS and is now
  *     parked in a blocking syscall.  The owner thread will NOT touch
- *     current_frame until END_ALLOW_THREADS re-attaches (the very property that
- *     lets the handoff rescue adopt the tstate), so the frame chain is pinned
- *     for the duration of a genuine wedge.
- *   - the handoff rescue is the OTHER thread that could mutate this tstate's
- *     frames (it resumes stranded gs on it).  We lock it out by CASing the
- *     hub's claim slot FREE->OWNED -- mimicking a rescue holding the hub:
- *     sysmon's FREE->PENDING dispatch and a rescue's PENDING->OWNED pickup both
- *     fail against OWNED, so neither runs while we hold it; we store OWNED->FREE
- *     the instant we are done (a few microseconds).  This reuses the existing
- *     claim values, so the FV-verified handoff protocol is untouched.  If the
- *     CAS loses (a rescue is already pending/active), we skip blocked_at.
+ *     current_frame until END_ALLOW_THREADS re-attaches, so the frame chain is
+ *     pinned for the duration of a genuine wedge, and the OWNER is the only
+ *     thread that can mutate it (work-stealing only touches the deque, never the
+ *     hub's bound tstate / its frame chain).
  *
  * Residual: the owner thread returning from its syscall mid-read re-attaches and
  * could overwrite the frame.  We re-confirm DETACHED immediately before the walk
@@ -72,7 +65,7 @@ static int hubinfo_frame_cb(PyCodeObject *code, int line, void *cv)
 runloom_hub_info_t *runloom_mn_hub_snapshot(long *count_out)
 {
     runloom_hub_info_t *arr;
-    int n, i, per_g, handoff_on;
+    int n, i, per_g;
     long long now;
 
     if (count_out != NULL) *count_out = 0;
@@ -84,7 +77,6 @@ runloom_hub_info_t *runloom_mn_hub_snapshot(long *count_out)
 
     now        = runloom_monotonic_ns();
     per_g      = runloom_get_per_g_tstate_mode();
-    handoff_on = (runloom_handoff_enabled && runloom_handoff_claim != NULL);
 
     for (i = 0; i < n; i++) {
         runloom_hub_t *h = &runloom_hubs[i];
@@ -110,32 +102,19 @@ runloom_hub_info_t *runloom_mn_hub_snapshot(long *count_out)
          * skipped unless a hub has actually overrun the wedge budget. */
         if (!per_g && start != 0 && (now - start) > runloom_sysmon_wedge_ns &&
             tss == RUNLOOM_TS_DETACHED && hts != NULL) {
-            int locked = 0;
-            if (handoff_on) {
-                int free_st = RUNLOOM_HANDOFF_FREE;
-                locked = __atomic_compare_exchange_n(
-                    &runloom_handoff_claim[i], &free_st, RUNLOOM_HANDOFF_OWNED,
-                    0, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED);
-            }
-            if (!handoff_on || locked) {
-                /* Re-confirm the owner is still parked in its block before
-                 * chasing its frame pointer. */
-                if (runloom_tstate_attach_state(hts) == RUNLOOM_TS_DETACHED) {
-                    struct hubinfo_frame_ctx ctx;
-                    ctx.buf = o->blocked_at;
-                    ctx.cap = sizeof o->blocked_at;
-                    ctx.got = 0;
+            /* Re-confirm the owner is still parked in its block before
+             * chasing its frame pointer.  The owner is the only thread that can
+             * mutate this tstate's frames -- work-stealing only touches the
+             * deque -- so no cross-thread coordination is needed here. */
+            if (runloom_tstate_attach_state(hts) == RUNLOOM_TS_DETACHED) {
+                struct hubinfo_frame_ctx ctx;
+                ctx.buf = o->blocked_at;
+                ctx.cap = sizeof o->blocked_at;
+                ctx.got = 0;
 #if PY_VERSION_HEX >= 0x030D0000
-                    runloom_iframe_walk((void *)hts->current_frame, 1,
-                                        hubinfo_frame_cb, &ctx);
+                runloom_iframe_walk((void *)hts->current_frame, 1,
+                                    hubinfo_frame_cb, &ctx);
 #endif
-                }
-                if (locked) {
-                    int owned = RUNLOOM_HANDOFF_OWNED;
-                    __atomic_compare_exchange_n(
-                        &runloom_handoff_claim[i], &owned, RUNLOOM_HANDOFF_FREE,
-                        0, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED);
-                }
             }
         }
     }
