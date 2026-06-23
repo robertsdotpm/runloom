@@ -96,9 +96,17 @@ def body(H):
         woken = 0
         while H.running():
             ev = state["ev"]
-            ev.wait()
-            woken += 1
-            ev.clear()
+            # TIMED wait so the waiter rechecks H.running() and EXITS at teardown.
+            # A no-timeout ev.wait() strands this goroutine once the workers are
+            # done and no setter remains: the harness teardown force-cancels
+            # netpoll parkers but NOT a cooperative Event waiter (an in-memory
+            # runloom_c.park), so the stranded waiter wedges mn_run's join.  macOS
+            # exposes this 100% (the wait->clear->wait re-park lands stuck); Linux
+            # only happened to fire a last set() from post()'s gc.collect().  The
+            # timed poll still exercises the set-from-dealloc -> wake path.
+            if ev.wait(timeout=0.05):
+                woken += 1
+                ev.clear()
             runloom.yield_now()
         H.log("event_wakes={0}".format(woken))
 

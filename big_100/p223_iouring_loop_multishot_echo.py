@@ -87,13 +87,11 @@ def tag_stream(seed, n):
 
 
 def setup(H):
-    # Availability guard: io_uring must be usable (probes liburing + a kernel
-    # >= 5.1 with the needed ops; non-Linux returns 0).  If not, SKIP clean.
-    if not runloom_c.iouring_available():
-        print("SKIP: io_uring not available "
-              "(non-Linux, kernel < 5.1, or liburing not built) -- "
-              "loop/multishot backend cannot be exercised")
-        sys.exit(0)
+    # (The io_uring availability guard runs in __main__ BEFORE harness.main / the
+    # scheduler.  A sys.exit() from INSIDE setup() is caught by the harness root
+    # fiber's BaseException handler and mis-reported as a SETUP_ERROR rather than
+    # a clean exit-0 skip -- the macOS false-fault this layout fixes.  p222 does
+    # the same guard-before-harness.main.)
 
     # Re-assert the env toggles from the parsed args.  These were already
     # defaulted at module import (before runloom_c loaded), but --ms / --ms-bufs
@@ -192,6 +190,15 @@ def body(H):
 
 
 if __name__ == "__main__":
+    # Availability guard BEFORE the scheduler starts (probes liburing + a kernel
+    # >= 5.1 with the needed ops; non-Linux returns 0).  Skipping HERE is a clean
+    # exit 0; the same sys.exit() inside setup() is swallowed by the harness root
+    # fiber and mis-reported as SETUP_ERROR (the macOS false REAL_FAULT this fixes).
+    if not runloom_c.iouring_available():
+        print("SKIP: io_uring not available "
+              "(non-Linux, kernel < 5.1, or liburing not built) -- "
+              "loop/multishot backend cannot be exercised")
+        sys.exit(0)
     harness.main(
         "p223_iouring_loop_multishot_echo", body, setup=setup,
         default_funcs=2000, add_args=add_args,
