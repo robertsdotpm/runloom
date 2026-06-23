@@ -5,7 +5,7 @@
 # Hunts use-after-free, out-of-bounds, data races, and UB in the
 # lock-free core (currently the Chase-Lev deque stress, test_cldeque).
 # This is the "real hardware, real threads, high volume" complement to
-# the exhaustive-but-bounded checks in verify/ (CBMC + Spin).
+# the exhaustive-but-bounded checks in tools/verify/ (CBMC + Spin).
 #
 # TSan vs ASLR: on Linux 6.x with high-entropy ASLR, TSan aborts at
 # startup with "unexpected memory mapping".  We auto-wrap TSan runs in

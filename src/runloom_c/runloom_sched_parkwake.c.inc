@@ -4,7 +4,7 @@
 
 /* ---- Layer-3 wake-skew injection (test-only; compile-gated) ----------------
  * The park/wake Dekker handshake (parked_safe / wake_pending + dual SEQ_CST
- * StoreLoad fences) is correct (GenMC-proven in verify/genmc/sched_parkwake.c),
+ * StoreLoad fences) is correct (GenMC-proven in tools/verify/genmc/sched_parkwake.c),
  * but a LOGICAL race -- the parker's recheck and the waker's CAS-load racing past
  * each other -- only manifests when the two threads interleave inside the tiny
  * store..fence..load window.  In production that window is nanoseconds, so a
@@ -421,7 +421,7 @@ void runloom_sched_wake_safe(runloom_g_t *g)
      * recheck reads a stale wake_pending==0, and BOTH miss each other: the g
      * parks but is never enqueued (lost wakeup -> permanent hang).  This is the
      * Dekker/StoreLoad pattern; the matching fence is in park_safe.  Verified
-     * necessary + sufficient by verify/genmc/sched_parkwake.c under RC11
+     * necessary + sufficient by tools/verify/genmc/sched_parkwake.c under RC11
      * (x86-TSO is also vulnerable via the store buffer). */
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
     runloom_wake_skew();   /* test-only: widen the CAS-load window (no-op in release) */
@@ -531,7 +531,7 @@ void runloom_sched_park_safe(void)
      * fence the recheck could read a stale wake_pending==0 while wake_safe's
      * CAS reads a stale parked_safe==0, and the wake is lost (g parks, never
      * enqueued).  Pairs with the fence in wake_safe; see that comment and
-     * verify/genmc/sched_parkwake.c (the -DBUG_NO_SC_FENCE control reproduces
+     * tools/verify/genmc/sched_parkwake.c (the -DBUG_NO_SC_FENCE control reproduces
      * the lost wake; the SC fence makes GenMC clean under RC11). */
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
 

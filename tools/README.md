@@ -4,7 +4,7 @@ Tools for exposing deadlocks, hangs, races, and crashes in the runloom runtime -
 and the harnesses that drive them hard. This file is the **complete index of every
 tool under `tools/`**. Most are wired into the CI lanes (`../scripts/check_all.sh`
 and its `_fast` / `_extensive` variants); the machine-checked proofs live in
-`../verify/`. Every tool's own file header explains it in full -- this index is the
+`verify/`. Every tool's own file header explains it in full -- this index is the
 map, and the few deepest-used ones are written up at the bottom.
 
 ## Index
@@ -56,9 +56,9 @@ map, and the few deepest-used ones are written up at the bottom.
 | tool | what | run |
 |------|------|-----|
 | [`lincheck/`](lincheck/) | channel histories checked LINEARIZABLE vs the FIFO spec (Porcupine) + a stateful Hypothesis model | see [`lincheck/README.md`](lincheck/README.md) |
-| [`stw_trace_conform.py`](stw_trace_conform.py) + [`stw_trace_conform_demo.sh`](stw_trace_conform_demo.sh) | conform the REAL CPython stop-the-world (M2) handshake against `verify/tla/RunloomCPythonSTW.tla` under TLC (needs the instrumented pydebug) | `tools/stw_trace_conform_demo.sh` |
+| [`stw_trace_conform.py`](stw_trace_conform.py) + [`stw_trace_conform_demo.sh`](stw_trace_conform_demo.sh) | conform the REAL CPython stop-the-world (M2) handshake against `tools/verify/tla/RunloomCPythonSTW.tla` under TLC (needs the instrumented pydebug) | `tools/stw_trace_conform_demo.sh` |
 | [`stw_conform_ci.sh`](stw_conform_ci.sh) | the `ftconform` check_all phase: idempotently set up the pydebug oracle, then run the demo -- skip-clean where it isn't available | `scripts/check_all.sh ftconform` (in fast + extensive) |
-| [`tla_trace_conform.py`](tla_trace_conform.py) + [`trace_conform_demo.sh`](trace_conform_demo.sh) | conform the real gilstate-TSS lifecycle (M4) hub-tstate create/delete against `RunloomGilstate.tla` | `tools/trace_conform_demo.sh` (gated in `check_all` via `verify/tla/run_trace_conform.sh`) |
+| [`tla_trace_conform.py`](tla_trace_conform.py) + [`trace_conform_demo.sh`](trace_conform_demo.sh) | conform the real gilstate-TSS lifecycle (M4) hub-tstate create/delete against `RunloomGilstate.tla` | `tools/trace_conform_demo.sh` (gated in `check_all` via `tools/verify/tla/run_trace_conform.sh`) |
 | [`mn_trace_conform.py`](mn_trace_conform.py) + [`mn_trace_conform_demo.sh`](mn_trace_conform_demo.sh) | conform the real controlled-M:N baton events against `RunloomMNControl.tla` | `tools/mn_trace_conform_demo.sh` (also gated in `check_all`) |
 
 ### Fault injection & robustness
@@ -83,8 +83,8 @@ map, and the few deepest-used ones are written up at the bottom.
 
 **Related, outside `tools/`:** `../scripts/check_all*.sh` (the CI lanes that drive
 most of the above), `../scripts/check_wake_protocol.sh` (wake-protocol Layer 2
-lint), `../verify/` (Spin / CBMC / GenMC / herd7 / TLA+ / Coq / Iris proofs, see
-[`../verify/README.md`](../verify/README.md)), and `../tests/tests_c/test_cldeque.c`
+lint), `verify/` (Spin / CBMC / GenMC / herd7 / TLA+ / Coq / Iris proofs, see
+[`verify/README.md`](verify/README.md)), and `../tests/tests_c/test_cldeque.c`
 (deque stress). Several tools have a dedicated deep-dive doc under `../docs/dev/`
 (linked inline above).
 
@@ -221,7 +221,7 @@ was a mis-minimisation: that repro also had a *usage* bug (unpacking
 select's `-1` default-sentinel as a tuple).  The real defects are the four
 above and are independent of `default=`.  The deque, `wake_state`,
 `park_safe`, and `select`-claim *algorithms* remain machine-proven in
-`verify/`; these were integration bugs in the select → park/wake path,
+`tools/verify/`; these were integration bugs in the select → park/wake path,
 surfaced by the fuzzer + watchdog under M:N.
 
 Verified: `mn_stress` full (select consumers) CLEAN over 3000 iterations
@@ -269,7 +269,7 @@ each is now fixed to match:
    plain (also double-created on concurrent first-arm).  Double-checked locking
    under `runloom_pool.lock` + release-store; readers acquire-load.
 
-The select/deque/park-wake *algorithms* remain machine-proven in `verify/`;
+The select/deque/park-wake *algorithms* remain machine-proven in `tools/verify/`;
 these were missing-atomic-qualifier bugs in the shipped C that only a sanitizer
 on the real binary (not a model of an extracted fragment) can see.
 

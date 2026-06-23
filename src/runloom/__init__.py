@@ -147,14 +147,14 @@ if _autosize_env in ("1", "on", "true", "prescan"):
 # hub -- so work stranded behind a wedged hub gets rescued and load spreads to
 # free cores.  This needs each fiber to own a migratable PyThreadState (per-g
 # tstate), which is only HEAP-SAFE when CPython is built with the optional
-# alloc-home patch (patches/cpython313t-tstate-alloc-home.patch): the per-g
+# alloc-home patch (src/patches/cpython313t-tstate-alloc-home.patch): the per-g
 # tstate then borrows the running hub's allocator, so no per-fiber heap migrates
 # OS threads.  Off by default; turn on with RUNLOOM_MIGRATION=1 in the
 # environment, or runloom.enable_migration(), BEFORE the runtime starts (the
 # flag is read once at mn_init).
 def migration_available():
     """True iff this build can SAFELY migrate fibers across hubs -- i.e. it was
-    compiled against the alloc-home CPython patch (see patches/).  On stock
+    compiled against the alloc-home CPython patch (see src/patches/).  On stock
     CPython this is False and migration is only reachable via the
     RUNLOOM_ALLOW_UNSAFE_MIGRATION dev override (which can crash under churn)."""
     return bool(getattr(_core, "alloc_home_available", 0))
@@ -180,7 +180,7 @@ def enable_migration(allow_unsafe=False):
     if not migration_available() and not allow_unsafe:
         raise RuntimeError(
             "runloom: cross-hub migration needs CPython built with the alloc-home "
-            "patch (patches/cpython313t-tstate-alloc-home.patch); without it a "
+            "patch (src/patches/cpython313t-tstate-alloc-home.patch); without it a "
             "per-g PyThreadState's heap migrates across hub threads and crashes "
             "under churn. Rebuild against the patch, or pass allow_unsafe=True "
             "for dev/fuzzing on stock CPython."

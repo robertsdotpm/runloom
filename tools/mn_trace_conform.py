@@ -118,7 +118,7 @@ def main():
                            maxruns=maxruns))
 
     if not os.path.exists(JAR):
-        print("tla2tools.jar missing; run verify/tla/run_tla.sh once")
+        print("tla2tools.jar missing; run tools/verify/tla/run_tla.sh once")
         return 2
     meta = "/tmp/runloom_mntrace_{}".format(os.getpid())
     proc = subprocess.run(

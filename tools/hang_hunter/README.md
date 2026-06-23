@@ -7,7 +7,7 @@ that **auto-triages and deduplicates** any hang or crash it finds.
 
 Our targeted tools each check a specific slice:
 
-- `verify/` — formal models (Spin / CBMC / GenMC / herd7) of small concurrency
+- `tools/verify/` — formal models (Spin / CBMC / GenMC / herd7) of small concurrency
   primitives (park/wake, ready-ring, the chan/select state machine);
 - `tools/lincheck/` — linearizability of the channel/select operations;
 - `tools/dst/` — deterministic simulation;

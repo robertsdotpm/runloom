@@ -11,7 +11,7 @@ d-1 demotions are exactly the d-1 ordering inversions a depth-d bug needs, so an
 such bug is hit with probability >= 1/(n * k^(d-1)) PER SEED -- a guaranteed lower
 bound the uniform draw has no analogue of. (See the runtime hook + the TLA
 safety argument in src/runloom_c/mn_sched_hub_resume_preempt.c.inc and
-verify/tla/PygoMNControl.tla.)
+tools/verify/tla/PygoMNControl.tla.)
 
 This script demonstrates the three properties that matter on a deliberately
 NARROW order-dependent bug -- goroutine B must observe a shared counter at a LATE

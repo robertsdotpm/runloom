@@ -2,7 +2,7 @@
 """tla_trace_conform.py -- TRACE CONFORMANCE: run a TLA+ model against the ACTUAL
 extension.
 
-A formal model (verify/tla/RunloomGilstate.tla) is only as trustworthy as its
+A formal model (tools/verify/tla/RunloomGilstate.tla) is only as trustworthy as its
 correspondence to the C code -- TLC checks the model, not the binary.  This
 closes that gap for the gilstate-TSS lifecycle (M4 / contract C6): the real
 extension emits a trace of its hub-tstate create/delete events
@@ -126,7 +126,7 @@ def main():
         f.write(CFG.format(hubs=", ".join('"{}"'.format(h) for h in hubs)))
 
     if not os.path.exists(JAR):
-        print("tla2tools.jar missing at {}; run verify/tla/run_tla.sh once".format(JAR))
+        print("tla2tools.jar missing at {}; run tools/verify/tla/run_tla.sh once".format(JAR))
         return 2
     meta = "/tmp/runloom_traceconf_{}".format(os.getpid())
     proc = subprocess.run(

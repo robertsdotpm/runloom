@@ -33,7 +33,7 @@ timing-dependent exploration for A/B):
    wanter (in `acquire`) or as idle (in `hub_main`'s no-work branch). The single
    seeded RNG draw per grant is then over the full set, so the handoff sequence
    is a function of the schedule, not of who happened to register first. This is
-   the `Barrier` constant in `verify/tla/RunloomMNControl.tla` (`DeterministicGrant`
+   the `Barrier` constant in `tools/verify/tla/RunloomMNControl.tla` (`DeterministicGrant`
    holds with it, fails without it).
 2. **Startup entry gate.** Hubs block at loop entry until `mn_run` arms the
    controller — *after* all pre-run `mn_fiber` placement. Without it the main thread
@@ -47,7 +47,7 @@ timing-dependent exploration for A/B):
    hub's execution stream a fixed function of the schedule — closing the gap
    where an identical grant sequence still produced different goroutine orderings.
    Steal is a lock-free, sub-segment CAS race; it is covered by the memory-model
-   tools (`verify/` GenMC / herd7, `tools/lincheck`), not by segment-granularity
+   tools (`tools/verify/` GenMC / herd7, `tools/lincheck`), not by segment-granularity
    replay, so dropping it here loses no coverage that lives at this level.
 4. **Census-idle wake-guard.** `census_idle` must not declare a hub idle on a
    drain that *predates* a wake: hub Y drains its sub_list (empty) → hub X's
@@ -175,7 +175,7 @@ stable with PCT on as well as off).
 
 *Why it's safe.* PCT only changes **which** waiting hub the (already TLA-verified)
 grant protocol hands the baton to — and the TLA `Grant(h)` action
-(`verify/tla/PygoMNControl.tla`) already leaves that a **free nondeterministic
+(`tools/verify/tla/PygoMNControl.tla`) already leaves that a **free nondeterministic
 choice**. `MutualExclusion`, `DeterministicGrant`, `AllRun` and `DeterministicTick`
 constrain *when* a grant fires (barrier / quiescence) and that exactly one hub
 runs — never *which* one — so replacing the selection function refines a choice

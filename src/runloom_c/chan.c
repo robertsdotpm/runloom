@@ -138,7 +138,7 @@ RUNLOOM_FSM_ASSERT_TABLE(runloom_wq_table, RUNLOOM_WQ_STATE_COUNT,
 /* ---- select `fired_case` claim FSM (OBSERVATIONAL) --------------------------
  * A select's multi-party claim race (the firing channel's waiter_claim vs the
  * select's own install-time readiness CAS vs other channels), Spin-verified in
- * verify/spin/select_claim.pml.  fired_case is -1 (UNCLAIMED) until the FIRST CAS
+ * tools/verify/spin/select_claim.pml.  fired_case is -1 (UNCLAIMED) until the FIRST CAS
  * wins, then frozen at the winner's case_index (CLAIMED); a second claimer's CAS
  * fails and skips the tombstone -- exactly-once.  Two logical states: the field's
  * raw value is -1 or a case_index>=0, mapped to UNCLAIMED/CLAIMED for the

@@ -89,7 +89,7 @@
 /* ---- per-g wake_state FSM transition table (OBSERVATIONAL) -------------------
  * The provably-total transition relation for the RUNLOOM_PER_G_TSTATE global-runq
  * per-g wake_state (runloom_sched.h:236-285), identical to the CBMC-proven table
- * in verify/cbmc/wake_state_fsm_cbmc.c.  Six states x five events.  Cells with no
+ * in tools/verify/cbmc/wake_state_fsm_cbmc.c.  Six states x five events.  Cells with no
  * legal transition are RUNLOOM_FSM_INVALID (-1).  This table never DRIVES the
  * state (the proven atomic CASes still do); it is only consulted by
  * RUNLOOM_WS_NOTE() to abort loudly under -DRUNLOOM_FSM_VALIDATE if a live CAS/

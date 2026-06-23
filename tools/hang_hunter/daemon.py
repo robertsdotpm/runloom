@@ -9,7 +9,7 @@ each hub's queue snapshot; when a job CRASHES it captures the core's backtrace.
 Each finding is keyed by a backtrace signature so thousands of repeats of one bug
 collapse to a single report-with-count, and distinct bugs stand out.
 
-Why this exists: our targeted tools (verify/ formal models, lincheck, dst, the
+Why this exists: our targeted tools (tools/verify/ formal models, lincheck, dst, the
 sanitizers) check specific primitives; they did not -- and structurally could not
 -- catch the stop-the-world MONOPOLY deadlock, which only appears as an emergent
 scheduling-fairness failure under realistic churn.  This daemon hunts exactly that

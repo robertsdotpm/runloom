@@ -8,8 +8,8 @@
 #include "plat_compat.h"
 #include "cldeque.h"
 
-/* Ghost instrumentation for the verification monitor (verify/cbmc,
- * verify/genmc).  ZERO cost in production: without RUNLOOM_CLDEQUE_VERIFY the
+/* Ghost instrumentation for the verification monitor (tools/verify/cbmc,
+ * tools/verify/genmc).  ZERO cost in production: without RUNLOOM_CLDEQUE_VERIFY the
  * hooks expand to nothing and the emitted code is byte-identical.  Under
  * RUNLOOM_CLDEQUE_VERIFY the harness supplies runloom_cl_* to check INV_race:
  * segment-disjointness at pop's fenced top-read + TAKEN-once per index. */

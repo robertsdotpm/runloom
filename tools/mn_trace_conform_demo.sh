@@ -40,9 +40,9 @@ rc=0
 echo "-- TLC: real trace (expect CONFORMS) --"
 "$PY" tools/mn_trace_conform.py "$TR"; r=$?
 if [ "$r" -eq 2 ]; then
-    # rc=2 from the helper == java / verify/tla/tla2tools.jar unavailable.
+    # rc=2 from the helper == java / tools/verify/tla/tla2tools.jar unavailable.
     # That is a missing tool, NOT a model violation -> SKIP, don't false-FAIL.
-    echo "   SKIP: TLC unavailable (java / verify/tla/tla2tools.jar missing; run verify/tla/run_tla.sh once)"
+    echo "   SKIP: TLC unavailable (java / tools/verify/tla/tla2tools.jar missing; run tools/verify/tla/run_tla.sh once)"
     "$(command -v safe-rm || echo rm)" -f "$TR" "$TR_BUG"
     exit 0
 elif [ "$r" -eq 0 ]; then

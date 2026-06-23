@@ -69,7 +69,7 @@
 /* The job-completion handshake is a ONE-WAY 2-state FSM on `done`: a job is
  * PENDING until the single worker that owns it publishes DONE (release-store)
  * exactly once; the parked fiber then resumes via the GenMC-proven
- * park_generic/wake_safe Dekker (verify/genmc/sched_parkwake.c).  Single writer +
+ * park_generic/wake_safe Dekker (tools/verify/genmc/sched_parkwake.c).  Single writer +
  * one-way + the atomic-is-the-proof => harden-in-place: explicit states + a
  * single-completion witness under -DRUNLOOM_FSM_VALIDATE, no runtime table. */
 enum {

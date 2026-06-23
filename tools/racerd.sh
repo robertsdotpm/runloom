@@ -2,7 +2,7 @@
 # racerd.sh -- compositional STATIC race + memory-safety analysis with Infer.
 #
 # runloom already hunts races dynamically (ThreadSanitizer on the whole ext, real
-# threads) and proves the lock-free algorithms in verify/.  Infer adds a third
+# threads) and proves the lock-free algorithms in tools/verify/.  Infer adds a third
 # angle that needs neither a running binary nor the racy interleaving to occur:
 #
 #   RacerD -- compositional static race detection.  Reasons per-procedure about

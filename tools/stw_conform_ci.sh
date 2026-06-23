@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # stw_conform_ci.sh -- the check_all_extensive entry point for the STW (M2) trace
 # conformance: conform the REAL CPython stop-the-world handshake against
-# verify/tla/RunloomCPythonSTW.tla under TLC (see tools/stw_trace_conform_demo.sh,
+# tools/verify/tla/RunloomCPythonSTW.tla under TLC (see tools/stw_trace_conform_demo.sh,
 # docs/dev/ft_conformance/STW_FINDINGS.md).
 #
 # The demo needs an INSTRUMENTED --with-pydebug interpreter + a runloom_c built
@@ -23,7 +23,7 @@
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"; cd "$ROOT"
 PYD="${RUNLOOM_PYDEBUG_PYTHON:-/home/x/projects/cpython-pydebug/python}"
-PATCH="$ROOT/verify/cpython_patches/pystate_stw_trace.patch"
+PATCH="$ROOT/tools/verify/cpython_patches/pystate_stw_trace.patch"
 
 skip() { echo "== STW (M2) trace conformance =="; echo "  SKIP: $1"; exit 0; }
 

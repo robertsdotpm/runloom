@@ -25,7 +25,7 @@
 set -u
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
-ROOT="$(cd "$HERE/.." && pwd)"
+ROOT="$(cd "$HERE/../.." && pwd)"   # verify lives under tools/, so repo root is two up
 SPIN_DIR="$HERE/spin"
 CBMC_DIR="$HERE/cbmc"
 WORK="$(mktemp -d /tmp/runloom_verify.XXXXXX)"

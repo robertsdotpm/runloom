@@ -42,7 +42,7 @@
 # verify(-fast) so the TLA+ jar that phase fetches is already present.
 #
 # The verify / verify-fast phases run their checks through a parallel worker pool
-# (VERIFY_JOBS, default nproc).  See verify/run_verify.sh.
+# (VERIFY_JOBS, default nproc).  See tools/verify/run_verify.sh.
 #
 # Env:
 #   PYTHON=...   interpreter for the Python suite + fuzzer
@@ -138,11 +138,11 @@ for ph in "${phases[@]}"; do
       ;;
     verify)
       hr "Formal verification (Spin + CBMC, parallel)"
-      verify/run_verify.sh || rc=1
+      tools/verify/run_verify.sh || rc=1
       ;;
     verify-fast)
       hr "Formal verification -- fast lane (all Spin + cheap CBMC; skips 3 slow proofs)"
-      VERIFY_FAST=1 verify/run_verify.sh || rc=1
+      VERIFY_FAST=1 tools/verify/run_verify.sh || rc=1
       ;;
     ftconform)
       hr "STW (M2) trace conformance -- real CPython stop-the-world vs the model"

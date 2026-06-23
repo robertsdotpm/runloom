@@ -16,7 +16,7 @@
  *   (2) RUNLOOM_FSM_STEP() looks the next state up in the table and, on an
  *       INVALID cell, calls runloom_fsm_violation() -- a loud, immediate abort.
  *       An undefined pathway is a diagnosed crash, never silent state drift.
- *   (3) The tiny FSM is then model-checked in verify/ (CBMC/GenMC) for the
+ *   (3) The tiny FSM is then model-checked in tools/verify/ (CBMC/GenMC) for the
  *       protocol properties (no lost event, progress); that gates check_all.
  *
  * Two adoption modes (FSM_ADOPTION.md tier 1 vs the hot-path sites):

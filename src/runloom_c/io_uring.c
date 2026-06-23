@@ -142,7 +142,7 @@ struct runloom_iouring_buf_reg {
 
 /* ---- io_uring SINGLE-op park/wake FSM (OBSERVATIONAL) -----------------------
  * The op->wait commit handshake (INFLIGHT/PARKED/DONE), GenMC-proven in
- * verify/genmc/iouring_waitcommit.c.  A submitter that won't block the OS thread
+ * tools/verify/genmc/iouring_waitcommit.c.  A submitter that won't block the OS thread
  * CASes INFLIGHT->PARKED and coro_yields; a concurrent drainer exchanges
  * *->DONE and, iff it observed PARKED, wakes the parker.  Three states:
  *   INFLIGHT -> PARKED : submitter commits to park (CAS).

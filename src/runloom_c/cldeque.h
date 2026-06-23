@@ -18,7 +18,7 @@
 #include "compat.h"
 
 /* Capacity is overridable at compile time (must stay a power of two) so
- * a bounded model checker (verify/cbmc) can verify a small instance of
+ * a bounded model checker (tools/verify/cbmc) can verify a small instance of
  * the algorithm quickly.  The production default is 4096. */
 #ifndef RUNLOOM_CLDEQUE_CAP
 #define RUNLOOM_CLDEQUE_CAP 4096

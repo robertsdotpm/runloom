@@ -70,7 +70,7 @@ static void runloom_mn_hub_submit(runloom_hub_t *h, runloom_g_t *g)
      * hub's sub_head and resumed).
      *
      * The ref MUST be a refcount>0-gated try_incref taken up front, not a plain
-     * incref after the CAS: CBMC (verify/cbmc/sched_qref_cbmc.c) shows the latter
+     * incref after the CAS: CBMC (tools/verify/cbmc/sched_qref_cbmc.c) shows the latter
      * still has a window where completion frees the g between the CAS and the
      * incref (it resurrects a freed g).  try_incref FAILS if the g is already
      * freeing (refcount 0), so a stale wake on a completed g bails here, and on

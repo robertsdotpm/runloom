@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """stw_trace_conform.py -- TRACE CONFORMANCE for the CPython stop-the-world model.
 
-verify/tla/RunloomCPythonSTW.tla composes M1 (per-tstate attach/detach) and M2
+tools/verify/tla/RunloomCPythonSTW.tla composes M1 (per-tstate attach/detach) and M2
 (the real stop_the_world handshake) and proves STWExclusive -- while the world is
 stopped, every non-requester hub is suspended.  TLC checks the model against
 itself; this checks it against the BINARY: an instrumented --with-pydebug CPython
-(verify/cpython_patches/pystate_stw_trace.patch) emits every M1+M2 transition of a
+(tools/verify/cpython_patches/pystate_stw_trace.patch) emits every M1+M2 transition of a
 REAL runloom run (RUNLOOM_STW_TRACE=<path>, one ndjson line each, keyed by the
 PyThreadState pointer), and this tool replays that trace through the model's OWN
 actions under TLC.  So TLC checks the ACTUAL CPython stop-the-world handshake of a
@@ -270,7 +270,7 @@ def main():
                            maxstops=max(1, nstops)))
 
     if not os.path.exists(JAR):
-        print("tla2tools.jar missing at {}; run verify/tla/run_tla.sh once".format(JAR))
+        print("tla2tools.jar missing at {}; run tools/verify/tla/run_tla.sh once".format(JAR))
         return 2
     meta = "/tmp/runloom_stwconf_{}".format(os.getpid())
     proc = subprocess.run(

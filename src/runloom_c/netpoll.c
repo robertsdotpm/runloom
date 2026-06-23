@@ -138,7 +138,7 @@ typedef struct runloom_parked {
 
 /* ---- parker-commit FSM transition table (OBSERVATIONAL) ---------------------
  * The Go-netpollblockcommit claim protocol (GenMC-proven in
- * verify/genmc/netpoll_claim.c).  Three states (ARMED/PARKED/WOKEN), two events:
+ * tools/verify/genmc/netpoll_claim.c).  Three states (ARMED/PARKED/WOKEN), two events:
  *   COMMIT -- the parking g commits to parking (the sole ARMED->PARKED writer).
  *   CLAIM  -- a waker (pump fd-ready / timeout sweep / cancel / unpark) claims
  *             the parker, CASing it to WOKEN; legal from ARMED (g not yet parked

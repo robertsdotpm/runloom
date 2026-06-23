@@ -295,7 +295,7 @@ static int runloom_perhub_epoll(void)
  * pool->wake_pending; the pump clears it when it drains the eventfd -- so a
  * burst of cross-hub wakes to one hub collapses to a single write.  Measured a
  * clean win on the saturated echo bench (+~3-5% rps, lower p50/p99) with ~99.98%
- * fewer wake writes; proven no-lost-kick by verify/spin/netpoll_pump_kick.pml
+ * fewer wake writes; proven no-lost-kick by tools/verify/spin/netpoll_pump_kick.pml
  * (Dekker clear-then-recheck), with the bounded pump timeout (idle_ns) as a
  * further backstop.  Read once. */
 static int runloom_wake_dedup_enabled(void)

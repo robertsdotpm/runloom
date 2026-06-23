@@ -84,7 +84,7 @@ PYTHON_GIL=0 PYTHONPATH=src timeout 240 "$PYD" tools/mn_stress.py --iters "$ITER
     && echo "  mn_stress: PASS" || { echo "  mn_stress: FAIL"; tail -4 /tmp/runloom_pydebug_mn.log; fails=$((fails+1)); }
 
 # STW (M2) TRACE CONFORMANCE: if this pydebug interp is also instrumented with the
-# stop-the-world trace (verify/cpython_patches/pystate_stw_trace.patch), validate
+# stop-the-world trace (tools/verify/cpython_patches/pystate_stw_trace.patch), validate
 # the REAL handshake against RunloomCPythonSTW.tla under TLC.  The pydebug-ABI ext
 # is built above, so this is its natural home.  Skips cleanly (not a failure) when
 # the interp isn't STW-instrumented or a clean trace can't be captured.

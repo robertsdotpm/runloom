@@ -2,7 +2,7 @@
 
 `lifefuzz` mass-produces structurally-diverse runloom programs that exercise the
 **object life-cycle** operations and runs each under the **life-cycle oracles** —
-the dynamic counterpart to the `verify/` life-cycle models. Where those models
+the dynamic counterpart to the `tools/verify/` life-cycle models. Where those models
 *prove* "every object is allocated, owned by the right thread, and freed exactly
 once," this *tries to violate it at scale* on the real extension.
 
@@ -32,7 +32,7 @@ them — each run is a point in *workload × schedule (`RUNLOOM_MN_SEED`) × con
 
 ## What each knob targets (the model-map)
 
-Every generator knob is aimed at a `verify/` life-cycle model, so a finding maps
+Every generator knob is aimed at a `tools/verify/` life-cycle model, so a finding maps
 back to a proven (or gated) invariant:
 
 | generator knob | exercises | model |
@@ -113,7 +113,7 @@ tools/lifefuzz/lifefuzz.py sweep 120 --unsafe-migrate --mn-seed 5000
 ```
 
 If this stops producing findings, the oracle-capture pipeline has regressed —
-treat it as a tooling failure, exactly like a `verify/` negative control that
+treat it as a tooling failure, exactly like a `tools/verify/` negative control that
 stops failing.
 
 ## Composing with the rest of the suite

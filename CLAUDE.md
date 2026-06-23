@@ -36,7 +36,7 @@ Full derivations for the invariants below: [docs/dev/RUNTIME_GOTCHAS.md](docs/de
 - **A freed `runloom_g` struct never returns to the OS.** `slab_free` retains it
   (refcount 0, magic DEAD); a stale dup-wake reaches `hub_submit`, which reads
   `g->refcount` via `try_incref` — only sound while the struct is a valid g.
-  Freeing → garbage refcount → SIGSEGV (arm64). Guard: `verify/cbmc/sched_qref_cbmc.c`.
+  Freeing → garbage refcount → SIGSEGV (arm64). Guard: `tools/verify/cbmc/sched_qref_cbmc.c`.
 - **Signals deliver INTO the parked goroutine, not via the scheduler.** A handler
   raising during a cooperative wait propagates out of *that call*; the idle
   scheduler carries one out of `run()` only when nothing is parked. Path:

@@ -44,7 +44,7 @@
  * 10/10).  Open scope: real-I/O arrival timing (the open-system limit) and the
  * runloom.aio call_at timer path (not yet on the logical clock).  Formal model +
  * properties (the no-preempt deadlock and the barrier's DeterministicGrant):
- * verify/tla/RunloomMNControl.tla.  Mechanism + scope: tools/mn_controlled/README.md.
+ * tools/verify/tla/RunloomMNControl.tla.  Mechanism + scope: tools/mn_controlled/README.md.
  * Zero cost when RUNLOOM_MN_SEED is unset.
  * ==================================================================== */
 typedef struct {
@@ -64,7 +64,7 @@ typedef struct {
      * COMPLETE -- every hub has "checked in" for the round, either as a wanter
      * (in acquire) or as idle (in hub_main's no-work branch).  The pick is then
      * a function of the schedule alone.  Formal counterpart: the Barrier
-     * constant in verify/tla/RunloomMNControl.tla (DeterministicGrant). */
+     * constant in tools/verify/tla/RunloomMNControl.tla (DeterministicGrant). */
     int          barrier;     /* census gate on */
     int          armed;       /* mn_run reached: hubs may begin + grants may fire */
     /* Deterministic preemption (RUNLOOM_MN_PREEMPT_FRAMES, >0 under the barrier).
@@ -368,7 +368,7 @@ static void runloom_mn_ctrl_init(int n)
     }
     runloom_mn_ctrl.enabled = 1;
     /* Preemption stays ON (liveness backstop, proven necessary by
-     * verify/tla/RunloomMNControl.tla's Preempt=FALSE control): a fiber that
+     * tools/verify/tla/RunloomMNControl.tla's Preempt=FALSE control): a fiber that
      * runs Python without yielding would otherwise hold the baton forever and
      * wedge every other hub.  Under the barrier the trigger is the DETERMINISTIC
      * frame counter above (not the wall-clock watchdog), so a runaway fiber
@@ -749,7 +749,7 @@ static PyObject *runloom_preempt_eval_frame(PyThreadState *ts,
          * drains the sub_list and the g (now at the FIFO back) round-robins. */
 #if defined(RUNLOOM_FSM_VALIDATE)
         /* Runtime witness of the p69b invariant proven in
-         * verify/cbmc/preempt_defer_cbmc.c: the gate above cleared do_preempt iff
+         * tools/verify/cbmc/preempt_defer_cbmc.c: the gate above cleared do_preempt iff
          * mid-destruction, so this yield is UNREACHABLE while in_destruction.
          * Abort loudly if that ever fails to hold. */
         if (runloom_tstate_in_destruction(ts))
@@ -824,7 +824,7 @@ static int runloom_mn_liveness_pending_cb(void *arg)
 #if defined(RUNLOOM_FSM_VALIDATE)
         /* Same p69b witness as the eval-frame wrapper: the guard at the top of
          * this callback returned already if in_destruction, so this is unreachable
-         * mid-destruction (verify/cbmc/preempt_defer_cbmc.c). */
+         * mid-destruction (tools/verify/cbmc/preempt_defer_cbmc.c). */
         if (runloom_tstate_in_destruction(PyThreadState_GET()))
             runloom_fsm_violation("preempt_gate", 1 /*about-to-yield*/, 0,
                                   __FILE__, __LINE__);

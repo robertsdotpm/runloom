@@ -30,7 +30,7 @@ ready-pop order *is* the whole schedule. It deliberately does **not**:
 
 - **reach the M:N hubs** — those are real parallel OS threads; PCT can't
   serialize them, and that's where runloom's hardest concurrency bugs live. (For
-  the M:N path: `tools/mn_stress.py`, `exttsan`, `verify/`, and the controlled
+  the M:N path: `tools/mn_stress.py`, `exttsan`, `tools/verify/`, and the controlled
   M:N scheduler `RUNLOOM_MN_SEED` / `tools/mn_controlled/`.)
 - **permute pure-compute `yield_`** — single-hub `yield_` has a
   run-to-completion fast path when nothing else is parked.

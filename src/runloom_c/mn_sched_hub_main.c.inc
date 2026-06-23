@@ -174,7 +174,7 @@ static long long runloom_idle_backoff_ceiling_ns(void)
  * stall an imbalanced workload (the hang every adversarial design-review found).
  *
  * WAKEP closes it with the SAME Dekker handshake as hub_submit's
- * ring_waiting<->sub_head (GenMC-proven, verify/genmc/sched_parkwake.c):
+ * ring_waiting<->sub_head (GenMC-proven, tools/verify/genmc/sched_parkwake.c):
  *   park side  : set idle_parked=1 ; SEQ_CST fence ; re-scan for stealable work
  *   producer   : publish work to its deque ; SEQ_CST fence ; read nidle/parked
  * Either the parking hub sees the surplus on its re-scan (and does NOT park) or
@@ -1356,7 +1356,7 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
              * live/dead runloom canaries).  Two fixes close it: (1) hub_submit takes
              * the queue ref via runloom_g_try_incref BEFORE touching the g, so a
              * stale wake on a still-VALID freed g (refcount 0) bails [CBMC:
-             * verify/cbmc/sched_qref_cbmc.c]; (2) runloom_g_slab_free no longer
+             * tools/verify/cbmc/sched_qref_cbmc.c]; (2) runloom_g_slab_free no longer
              * frees g STRUCTS to the OS, so try_incref always reads a real
              * refcount instead of garbage on reused memory.  Validated: 0/16
              * connect-storm crashes on arm64 with this block compiled OUT, BADG

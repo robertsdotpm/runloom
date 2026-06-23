@@ -6,7 +6,7 @@ goroutines spread across N OS-thread hubs on free-threaded CPython,
 exchanging values through channels and select() while the work-stealing
 deque migrates ready goroutines between hubs.  That is exactly where
 lost-wakes, double-resumes, and cross-hub channel-handoff races would
-live -- the bugs the formal models in verify/ rule out in the abstract,
+live -- the bugs the formal models in tools/verify/ rule out in the abstract,
 checked here against the real extension under real parallelism.
 
 Every run is a seeded, reproducible "token conservation" experiment:

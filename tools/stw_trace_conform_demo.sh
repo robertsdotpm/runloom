@@ -9,7 +9,7 @@
 #   an in-window GCPark/Self  -> NON-CONFORMING (a hub left un-suspended while the
 #     Suspend dropped             world is stopped -- the gc-churn UAF class)
 #
-# Requires the instrumented pydebug interp (apply verify/cpython_patches/
+# Requires the instrumented pydebug interp (apply tools/verify/cpython_patches/
 # pystate_stw_trace.patch + rebuild) AND a runloom_c built against its ABI.  SKIPS
 # CLEANLY (exit 0) when that is not set up -- e.g. a normal stock-ABI build -- so
 # it is safe to call from the gate; it only runs where the pydebug oracle lives.
@@ -23,7 +23,7 @@ skip() { echo "== STW (M2) trace conformance =="; echo "  SKIP: $1"; exit 0; }
 
 command -v java >/dev/null 2>&1 || skip "java not found (TLC needs it)"
 [ -x "$PYD" ] || skip "no pydebug interp at $PYD (set RUNLOOM_PYDEBUG_PYTHON)"
-[ -f "$ROOT/verify/tla/tla2tools.jar" ] || skip "tla2tools.jar not present (the verify phase fetches it; or run verify/tla/run_tla.sh once)"
+[ -f "$ROOT/tools/verify/tla/tla2tools.jar" ] || skip "tla2tools.jar not present (the verify phase fetches it; or run tools/verify/tla/run_tla.sh once)"
 
 TR="$(mktemp /tmp/stwconf.XXXX.ndjson)"
 WL='import gc, sys; sys.path.insert(0,"src")

@@ -22,5 +22,5 @@ tools/lincheck/check_lin.sh
 ```
 
 Part of `scripts/check_all.sh` (the `lincheck` phase). The deque/select/park-wake
-*algorithms* are additionally machine-proven in `../../verify/`; lincheck checks
+*algorithms* are additionally machine-proven in `../../tools/verify/`; lincheck checks
 the assembled channel as a black box on the real binary.

@@ -17,7 +17,7 @@
  *     without updating the mask is catchable, and RUNLOOM_IO_NOTE() asserts
  *     (under -DRUNLOOM_FSM_VALIDATE) that a site only acts on events the call can
  *     actually emit -- the consumer-side "you didn't handle a real pathway" net.
- *   - verify/cbmc/io_classify_cbmc.c proves TOTALITY (always an in-range event)
+ *   - tools/verify/cbmc/io_classify_cbmc.c proves TOTALITY (always an in-range event)
  *     and MASK-SOUNDNESS (the event is always one the call kind may emit) over
  *     all (call, rc, errno); a -DBUG_* teeth config must fail.
  *

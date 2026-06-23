@@ -4,7 +4,7 @@ Where the existing fuzzers vary the SCHEDULE (tools/dst, tools/pct,
 tools/mn_controlled) or the CONFIG (tools/combinatorial) over a mostly-fixed
 workload, or hunt HANGS (tools/hang_hunter), this one mass-produces
 structurally-DIVERSE programs that exercise the OBJECT-LIFE-CYCLE operations the
-verify/ models specify -- channel ref churn, varied-stack goroutines, nested
+tools/verify/ models specify -- channel ref churn, varied-stack goroutines, nested
 spawn (snap/migration), timed parks, select+close races, undrained buffered
 channels -- and runs each under the LIFE-CYCLE ORACLES those models point at:
 
@@ -22,7 +22,7 @@ with the existing replay levers rather than duplicating them: each program is
 single (seed, env) one-liner that replays the exact execution.  Always-
 terminating by construction, so a hang is a real bug.
 
-The design rationale + a map of which knob targets which verify/ model lives in
+The design rationale + a map of which knob targets which tools/verify/ model lives in
 tools/lifefuzz/README.md.
 
 CLI (house style: .format(), no f-strings):
