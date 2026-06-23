@@ -749,18 +749,17 @@ static void runloom_stack_madv_reclaim(void *addr, size_t len)
     int flag = __atomic_load_n(&runloom_stack_madv_flag, __ATOMIC_RELAXED);
     if (flag == -1) {
         const char *e = getenv("RUNLOOM_STACK_MADV");
-        if (e != NULL && strcmp(e, "off") == 0) {
-            flag = 0;
-        } else if (e != NULL && strcmp(e, "dontneed") == 0) {
+        if (e != NULL && strcmp(e, "dontneed") == 0) {
 #if defined(MADV_DONTNEED)
             flag = MADV_DONTNEED;
 #else
             flag = 0;
 #endif
-        } else {
+        } else if (e != NULL && strcmp(e, "free") == 0) {
 #if defined(MADV_FREE)
-            /* Default: probe MADV_FREE on this first call (EINVAL => kernel too
-             * old).  On success the region is already reclaimed -> remember + return. */
+            /* Explicit opt-in to lazy reclaim: probe MADV_FREE on this first call
+             * (EINVAL => kernel too old).  On success the region is already
+             * reclaimed -> remember + return. */
             if (madvise(addr, len, MADV_FREE) == 0) {
                 __atomic_store_n(&runloom_stack_madv_flag, MADV_FREE, __ATOMIC_RELAXED);
                 return;
@@ -771,6 +770,15 @@ static void runloom_stack_madv_reclaim(void *addr, size_t len)
 #else
             flag = 0;
 #endif
+        } else {
+            /* DEFAULT (and explicit "off"): keep pooled stacks RESIDENT -- no
+             * madvise, so no per-release TLB-shootdown IPI.  MEASURED ~17% of
+             * naked-spawn self-time at 8 hubs, and it SCALES WITH HUB COUNT (each
+             * stack release IPIs every hub thread sharing the mm to flush TLBs).
+             * Trades pool RSS (bounded by the depot cap x stack_size) for spawn
+             * throughput -- the spawn-freely default.  RUNLOOM_STACK_MADV=free
+             * (lazy, reclaim-under-pressure) or =dontneed (eager) re-enables it. */
+            flag = 0;
         }
         __atomic_store_n(&runloom_stack_madv_flag, flag, __ATOMIC_RELAXED);
     }
