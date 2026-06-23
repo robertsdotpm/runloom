@@ -37,14 +37,14 @@ steady-state. Go ≈ 2.1 M spawn/s here.
 | **spawn** — Python (`runloom.fiber`) | 1.73 M/s | 2.10 M/s | 0.82× |
 | **context switch** | ~75 ns yield · ~560 ns chan RT | ~50 ns `Gosched` | ~parity |
 | **conn/s** — churn (new conn per req) | ~75–78 k/s | ~75–78 k/s | **parity** |
-| **req/s** — keep-alive, Python handler | ~half Go | — | 0.5× (CPython `recv`/`send` tax) |
+| **req/s** — keep-alive echo, Python handler | 596 k/s | 603 k/s | **0.99× — parity** (C handler beats Go) |
 | **memory** — empty parked fiber | 8.8 KB | 2.7 KB | 3.3× (the one real gap) |
 
-The short story: on **spawn and scheduling, runloom trades blows with Go and
-beats it on raw spawn** — a stackful coroutine runtime on CPython matching a
-compiled language. The two honest gaps are both the interpreter, not the
-scheduler: a **Python** handler runs `recv`/`send` as bytecode (~½ Go's req/s),
-and a suspended fiber carries one CPython eval frame (~3.3× Go's per-fiber RSS).
+The short story: on **spawn, scheduling, and throughput, runloom trades blows
+with Go and beats it on raw spawn** — a stackful coroutine runtime on CPython
+matching a compiled language even with a Python handler (596 k vs 603 k req/s at
+saturation; a C handler beats Go). The one honest gap left is **memory**: a
+suspended fiber carries a CPython eval frame, ~3.3× Go's per-fiber RSS.
 Full cross-runtime numbers + cold spawn-vs-N curves: **[benchmark report](https://github.com/robertsdotpm/runloom/blob/main/benchmark/report.html)**
 · [perf summary](https://github.com/robertsdotpm/runloom/blob/main/docs/dev/PERF_SUMMARY.md).
 
