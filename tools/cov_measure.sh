@@ -59,7 +59,7 @@ echo "[cov]   mn_stress rc=$?"
 # recv DEADLOCKS a backpressured loopback transfer (see
 # tests/regressions/iouring_recv_backpressure_deadlock.py) -- so those lines
 # cannot be driven by a clean-exit test today. They are handled as BLOCKED
-# exclusions in the manifest instead (see COVERAGE.md).
+# exclusions in the manifest instead (see tests/COVERAGE.md).
 
 echo "[cov] collecting gcov (from repo root so .c.inc fragment paths resolve) ..."
 ( cd "$ROOT"
