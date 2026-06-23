@@ -1,4 +1,4 @@
-# runloom
+# Runloom
 
 Go-style stackful coroutines for Python. Write **blocking** code — `fiber(fn)`,
 plain `recv`/`send`, no `async`/`await` — and run a million of them across every
@@ -23,7 +23,7 @@ def main():
 runloom.run(8, main)   # 8 hub threads -> real cores on 3.13t (GIL off)
 ```
 
-## runloom vs Go
+## Runloom vs Go
 
 Same box (64c, free-threaded CPython 3.13t), 8 hubs / `GOMAXPROCS=8`, warm
 steady-state. Go ≈ 2.1 M spawn/s here.
