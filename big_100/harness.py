@@ -130,6 +130,9 @@ def phys_mem_gib():
     thread, where a monkey-patched subprocess can't run (it would hang/die and
     silently disable the guard).  macOS uses ctypes sysctlbyname (see below)."""
     try:
+        if _WIN:
+            ms = _win_memstatus()
+            return (ms[1] / (1024.0 ** 3)) if ms else 8.0
         if sys.platform == "darwin" or "bsd" in sys.platform:
             total = _mac_sysctl_u("hw.memsize", 8)
             return (total / (1024.0 ** 3)) if total else 8.0
@@ -145,6 +148,7 @@ def phys_mem_gib():
 # from a non-goroutine thread can't run.  Linux uses /proc (plain file reads);
 # macOS/*BSD use ctypes sysctlbyname (a direct syscall, thread-safe).
 _MAC = (sys.platform == "darwin" or "bsd" in sys.platform)
+_WIN = (sys.platform == "win32")
 _libc = None
 if _MAC:
     try:
@@ -152,6 +156,33 @@ if _MAC:
         _libc = _ct.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True)
     except Exception:
         _libc = None
+
+
+def _win_memstatus():
+    """(avail_phys, total_phys, avail_pagefile, total_pagefile) bytes via
+    GlobalMemoryStatusEx; None on failure.  Subprocess-free (the guard reads this
+    from the watchdog's foreign OS thread)."""
+    if not _WIN:
+        return None
+    try:
+        import ctypes as _ct
+
+        class _MSEX(_ct.Structure):
+            _fields_ = [("dwLength", _ct.c_uint32), ("dwMemoryLoad", _ct.c_uint32),
+                        ("ullTotalPhys", _ct.c_uint64), ("ullAvailPhys", _ct.c_uint64),
+                        ("ullTotalPageFile", _ct.c_uint64),
+                        ("ullAvailPageFile", _ct.c_uint64),
+                        ("ullTotalVirtual", _ct.c_uint64),
+                        ("ullAvailVirtual", _ct.c_uint64),
+                        ("ullAvailExtendedVirtual", _ct.c_uint64)]
+        m = _MSEX()
+        m.dwLength = _ct.sizeof(_MSEX)
+        if _ct.windll.kernel32.GlobalMemoryStatusEx(_ct.byref(m)) == 0:
+            return None
+        return (m.ullAvailPhys, m.ullTotalPhys,
+                m.ullAvailPageFile, m.ullTotalPageFile)
+    except Exception:
+        return None
 
 
 def _mac_sysctl_u(name, width):
@@ -195,6 +226,9 @@ def available_mem_frac():
     swapping).  1.0 if unknown -- callers must treat unknown as 'fine', never
     abort on a read failure."""
     try:
+        if _WIN:
+            ms = _win_memstatus()
+            return (ms[0] / float(ms[1])) if (ms and ms[1]) else 1.0
         if sys.platform.startswith("linux"):
             total = avail = None
             with open("/proc/meminfo") as f:
@@ -228,6 +262,13 @@ def available_mem_frac():
 def swap_used_total_bytes():
     """(used_bytes, total_bytes) of SWAP.  (0, 0) if unknown / no swap."""
     try:
+        if _WIN:
+            # Windows' pagefile "commit charge" counts RESERVED-but-not-resident
+            # virtual memory (the per-fiber stacks reserve a lot), so its growth is
+            # NOT a thrashing signal -- it would false-trip a healthy high-N run.
+            # The real Windows pressure signal is available PHYSICAL RAM
+            # (available_mem_frac via ullAvailPhys); report no swap here.
+            return (0, 0)
         if sys.platform.startswith("linux"):
             total = free = None
             with open("/proc/meminfo") as f:
