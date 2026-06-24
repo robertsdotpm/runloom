@@ -512,9 +512,11 @@ def sec_speed(speed):
                'auto-sizer, small right-sized stacks &mdash; an RSS feature Go lacks) is <b>~1.4M/s '
                '(~0.6&times; Go)</b>, 1.5&times; behind <code>c_entry</code> &mdash; not the old ~7&times;: '
                'its learned size spawns down the DEFERRED stack-alloc path, so it is small-stacked AND '
-               'fast. <code>optimize("throughput")</code> points <code>fiber</code> at '
-               '<code>fiber_fast</code> (lifting it to <b>~1.7M/s</b>), <code>optimize("memory")</code> at '
-               'grow-down. Batch fleet-launch '
+               'fast. <code>optimize("throughput")</code> switches <code>runloom.fiber</code> to the '
+               'fixed-stack fast-spawn path (like <code>fiber_fast</code>, trading the small grow-down '
+               'stacks for speed), lifting it to <b>~1.57M/s</b> &mdash; though not all the way to bare '
+               '<code>fiber_fast</code>\'s ~1.97M (the <code>fiber()</code> wrapper keeps some overhead); '
+               '<code>optimize("memory")</code> keeps the grow-down auto-sizer. Batch fleet-launch '
                '(<a href="#activespawn">Active spawn</a>: bulk <code>fiber_n</code>) hits <b>~2.41M/s</b> '
                '&mdash; runloom&rsquo;s spawn ceiling (Go has no batch API to compare).</p>')
     out.append(table("t_spawn", [("Runtime", False), ("Cores", True), ("spawn/s", True),
