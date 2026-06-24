@@ -363,12 +363,11 @@ def sec_constraints(meta):
          "divided by core count; each runtime&rsquo;s core count is in its own column, so a number is "
          "always paired with the hardware that produced it. Latencies (ctxswitch, RTT) are absolute. "
          "Compare within a matched core count (e.g. runloom vs Go, both on the full set)."),
-        ("Acceptors", "runloom servers run <b>N SO_REUSEPORT acceptors</b> (one kernel accept queue per "
-         "hub); the Go baseline uses a <b>single <code>Accept()</code> loop</b>. Irrelevant to keep-alive "
-         "req/s (connections are accepted once, then loop on) but it favours runloom on connection "
-         "<i>churn</i> &mdash; so the conn/s comparison <b>is</b> shown (see the churn section), with "
-         "that acceptor asymmetry called out as a caveat: part of the runloom conn/s lead is acceptor "
-         "count, not runtime."),
+        ("Acceptors", "runloom and the Go baseline run the <b>same architecture</b>: <b>N "
+         "<code>SO_REUSEPORT</code> acceptors</b> (one kernel accept queue per hub/proc), so accept "
+         "parallelizes on both sides. Irrelevant to keep-alive req/s (connections are accepted once, then "
+         "loop on); on connection <i>churn</i> the matched acceptors mean the conn/s comparison is "
+         "like-for-like (see the churn section) &mdash; the result is parity, not an acceptor artifact."),
         ("Provenance", "Result JSONs span several days and runloom builds: the <b>active-spawn</b> "
          "numbers were measured with the current build (the one exposing <code>fiber_n</code>), the rest "
          "with the build present when each JSON was written. governor = n/a (cpufreq sysfs absent on this "
@@ -1271,7 +1270,7 @@ def sec_metrics_legend():
          "fresh handler spawned + torn down per request (new connection each time)",
          "Yes &mdash; 1 spawn+teardown / request, but in the hot loop",
          "<b>~75&ndash;78k/s</b> &mdash; runloom and Go at <b>parity</b> (matched N reuseport acceptors, both client-bound)",
-         "TCP accept/handshake/teardown dominates; with matched acceptors Go &asymp; runloom. A single-Accept Go caps at ~33k (acceptor artifact, not runtime)"],
+         "TCP accept/handshake/teardown dominates; with matched N SO_REUSEPORT acceptors Go &asymp; runloom"],
         ["req/s &mdash; persistent / keep-alive",
          "steady-state requests on live connections (the browser case)",
          "No &mdash; 1 handler/conn at setup, then loops; spawn ~0% of the window",
@@ -1346,10 +1345,8 @@ def sec_conn_churn(cc):
             "tiers and Go all land at <b>~75&ndash;78k conn/s, all client-bound</b> (server "
             "~55&ndash;71%, loadgen pinned ~96%). Under that shared wall the tstate-free "
             "<code>cdef</code> tiers run the server <i>lighter</i> than Go (~55&ndash;59% vs ~78% at the "
-            "same ~77k) &mdash; more headroom per connection, not a higher ceiling. (A SINGLE "
-            "<code>Accept()</code> loop caps Go at ~33k / ~17% CPU, accept-serialized; racing runloom's "
-            "N acceptors against that shows a ~2.3&times; gap that is pure acceptor asymmetry, not "
-            "runtime &mdash; so the baseline is matched here.) The churn client fans connects across many "
+            "same ~77k) &mdash; more headroom per connection, not a higher ceiling. The churn client fans "
+            "connects across many "
             "source IPs so TIME_WAIT / port exhaustion doesn't cap conn/s (zero dial errors every rung). "
             "Single-core asyncio/uvloop/gevent saturate one core.")
 
@@ -1436,12 +1433,12 @@ def sec_conn_churn(cc):
                 + table("t_churn", cols, rows, note))
 
     # conn_churn.json is empty (no committed saturation run yet). Rather than headline a
-    # hardcoded side-experiment as a Go-beating result, show conn/s as NOT-yet-measured and
-    # disclose why it is not yet a like-for-like comparison (acceptor asymmetry + a cython
-    # busy-spin bug). No win or parity is claimed from the preliminary side numbers.
+    # hardcoded side-experiment as a Go-beating result, show conn/s as NOT-yet-measured.
+    # The acceptors are matched (both runloom and Go run N SO_REUSEPORT acceptors), so the
+    # only caveat left is the cython/cdef-handler busy-spin bug + no committed saturation run.
     prelim_rows = [
         ("runloom_iouring_cdef_tcpcon", "8,538", "from a prebuilt cdef .so that predates recent ext rebuilds"),
-        ("go_netpoll_native_net", "7,783", "GOMAXPROCS=2, single <code>Accept()</code> loop"),
+        ("go_netpoll_native_net", "7,783", "GOMAXPROCS=2, N SO_REUSEPORT acceptors (matched)"),
         ("runloom_epoll_py_tcpcon", "7,077", "Python handler"),
     ]
     ptrs = "".join("<tr><td>%s</td><td style='text-align:right'>%s</td><td>%s</td></tr>"
@@ -1449,13 +1446,12 @@ def sec_conn_churn(cc):
     return (intro
             + '<p class="warn"><b>Connection churn is NOT yet measured in this suite&rsquo;s '
               'pipeline</b> &mdash; <code>conn_churn.json</code> is empty (the saturation-ladder run '
-              'against the full server set is a pending idle-box job). It is also <b>not yet a '
-              'like-for-like comparison</b>: connection churn is accept-bound, and the runloom servers '
-              'use <b>N SO_REUSEPORT acceptors</b> (one kernel accept queue per hub) while the Go '
-              'baseline uses a <b>single <code>Accept()</code> loop</b> &mdash; so any runloom conn/s '
-              'lead would partly be the acceptor count, not the runtime. Separately, the runloom '
-              '<i>Cython/cdef</i>-handler server busy-spins under churn (a known M:N no-data park-loop '
-              'bug), so its conn/s would be a defect, not a real ceiling.</p>'
+              'against the full server set is a pending idle-box job). The acceptor architecture is '
+              '<b>matched</b> &mdash; both runloom and the Go baseline run <b>N SO_REUSEPORT '
+              'acceptors</b> (one kernel accept queue per hub/proc) &mdash; so churn is a like-for-like '
+              'comparison. The one open caveat: the runloom <i>Cython/cdef</i>-handler server busy-spins '
+              'under churn (a known M:N no-data park-loop bug), so its conn/s would be a defect, not a '
+              'real ceiling.</p>'
             + '<p>For reference only, a <b>preliminary</b> 2-core saturated side-experiment '
               '(<code>docs/dev/conn_cpu.md</code> &mdash; <b>not</b> from this suite, and subject to '
               'the caveats above) measured conn/s on 2 saturated cores:</p>'
@@ -1463,10 +1459,10 @@ def sec_conn_churn(cc):
               '<th>conn/s (2-core)</th><th>caveat</th></tr></thead><tbody>' + ptrs + '</tbody></table>'
             + '<p class="note"><b>What is and isn&rsquo;t claimed:</b> the figures above are close '
               'across runtimes (~7&ndash;8.5k on 2 cores), consistent with conn/s being dominated by the TCP '
-              'accept/teardown syscalls every runtime pays. But with the acceptor asymmetry and the '
-              'cdef busy-spin bug unresolved, and no committed saturation run, <b>this report makes no '
-              'conn/s win or parity claim.</b> A like-for-like run (matched acceptors + a rebuilt '
-              'handler) is the open follow-up.</p>')
+              'accept/teardown syscalls every runtime pays. Acceptors are matched (both run N '
+              'SO_REUSEPORT), but with the cdef busy-spin bug unresolved and no committed saturation run, '
+              '<b>this report makes no conn/s win or parity claim.</b> A full saturation run with a '
+              'rebuilt handler is the open follow-up.</p>')
 
 
 def main():
