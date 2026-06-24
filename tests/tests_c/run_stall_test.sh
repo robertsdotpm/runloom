@@ -19,26 +19,17 @@ cc -g -O2 -Wall -Wextra -Wno-unused-parameter \
 echo "build rc=$?"
 ls -la test_stall_steal 2>&1 || { echo "BUILD FAILED"; exit 1; }
 
-# NB: RUNLOOM_HANDOFF + RUNLOOM_PREEMPT now default ON (free-threaded 3.13+), so the
-# RED baseline sets them =0 explicitly to show the un-recovered problem.
-echo "--- RUN default mode, recovery OFF (RUNLOOM_HANDOFF=0 RUNLOOM_PREEMPT=0) -- expect RED ---"
-RUNLOOM_PER_G_TSTATE=0 RUNLOOM_HANDOFF=0 RUNLOOM_PREEMPT=0 timeout 30 ./test_stall_steal; echo "exit rc=$?"
-
-echo "--- RUN per-g-tstate ON (RUNLOOM_PER_G_TSTATE=1) -- recovers via global runq ---"
-RUNLOOM_PER_G_TSTATE=1 timeout 30 ./test_stall_steal; echo "exit rc=$?"
-
-# Group B: stalled-hub tstate handoff.  The DETACHED staller (a well-behaved
-# Py_BEGIN_ALLOW_THREADS blocking call) is the handoff-recoverable class; the
-# rescue M adopts the hub's freed tstate and drains its stranded gs.
-echo "--- RUN DETACHED staller + RUNLOOM_HANDOFF=1, default mode -- expect GREEN 64/64 ---"
-STALL_ALLOW_THREADS=1 RUNLOOM_HANDOFF=1 timeout 30 ./test_stall_steal; echo "exit rc=$?"
-
-# Control: the raw-usleep staller keeps its tstate ATTACHED (CPU/raw-syscall
-# class), which a tstate handoff CANNOT recover -- must stay RED even with the
-# handoff on (the rescue correctly refuses to adopt a non-DETACHED wedge).
-# (RUNLOOM_PREEMPT=0 here: this staller is a raw-usleep *C* goroutine with no
-# Python frames, so preemption can't touch it anyway -- isolate the handoff.)
-echo "--- RUN ATTACHED staller + RUNLOOM_HANDOFF=1 RUNLOOM_PREEMPT=0 -- expect RED (not handoff-recoverable) ---"
-RUNLOOM_HANDOFF=1 RUNLOOM_PREEMPT=0 timeout 30 ./test_stall_steal; echo "exit rc=$?  (RED is correct here)"
-
-echo "=== stall test end $(date -Is) ==="
+# The handoff-rescue / per-g-tstate recovery these modes exercised was removed
+# (2026-06; work-stealing steals only FRESH fibers, so a stalled hub no longer
+# drains mid-stall).  The surviving invariant is no-lost-wake: every woken worker
+# eventually runs even behind a stalled hub.  Run a few times; any non-PASS is a
+# regression.
+echo "--- RUN no-lost-wake check (DETACHED staller, RUNLOOM_HANDOFF=1) -- expect PASS 64/64 ---"
+rc=0
+for r in 1 2 3 4 5; do
+    PYTHON_GIL=0 STALL_ALLOW_THREADS=1 RUNLOOM_HANDOFF=1 RUNLOOM_PREEMPT=1 RUNLOOM_SYSMON_MS=20 \
+        timeout 30 ./test_stall_steal || rc=1
+    echo "  run $r exit rc=$?"
+done
+echo "=== stall test end $(date -Is) rc=$rc ==="
+exit $rc

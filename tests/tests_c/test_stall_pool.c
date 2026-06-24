@@ -185,19 +185,27 @@ int main(void)
      * unless a rescue thread drains that hub. */
     double t0 = now_ms();
     for (i = 0; i < N_WORKERS; i++) (void)write(w_efd[i], &one, sizeof one);
-    while (now_ms() - t0 < WINDOW_MS) usleep(1000);
 
+    /* Poll until every woken worker has run.  Stalled hubs no longer drain
+     * mid-stall (the handoff-rescue pool was removed; work-stealing steals only
+     * FRESH fibers, so co-located woken workers run when their staller finishes,
+     * not during it) -- so the surviving invariant is no-lost-wake: nothing is
+     * permanently stranded.  Wait past the stall, then assert all ran. */
     long responded = 0;
-    for (i = 0; i < N_WORKERS; i++)
-        if (__atomic_load_n(&w_responded[i], __ATOMIC_ACQUIRE)) responded++;
+    while (now_ms() - t0 < STALL_MS + 3000) {
+        responded = 0;
+        for (i = 0; i < N_WORKERS; i++)
+            if (__atomic_load_n(&w_responded[i], __ATOMIC_ACQUIRE)) responded++;
+        if (responded == N_WORKERS) break;
+        usleep(2000);
+    }
 
-    printf("per_g_tstate=%d N=%d hubs=%d wedged_hubs=%d stall=%dms window=%dms "
-           "responded=%ld/%d\n",
+    printf("per_g_tstate=%d N=%d hubs=%d wedged_hubs=%d stall=%dms responded=%ld/%d\n",
            runloom_get_per_g_tstate_mode(), N_WORKERS, NHUBS, nwedged,
-           STALL_MS, WINDOW_MS, responded, N_WORKERS);
+           STALL_MS, responded, N_WORKERS);
     int pass = (responded == N_WORKERS);
-    printf("%s\n", pass ? "PASS: all workers recovered across multiple wedged hubs"
-                        : "FAIL: workers stranded behind un-rescued wedged hubs");
+    printf("%s\n", pass ? "PASS: every worker ran -- no lost wake behind the wedged hubs"
+                        : "FAIL: worker(s) permanently stranded -- lost wake");
     fflush(stdout);
     _exit(pass ? 0 : 1);
 }

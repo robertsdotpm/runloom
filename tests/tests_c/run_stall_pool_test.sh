@@ -20,23 +20,14 @@ cc -g -O2 -Wall -Wextra -Wno-unused-parameter \
 echo "build rc=$?"
 ls -la test_stall_pool 2>&1 || { echo "BUILD FAILED"; exit 1; }
 
-# The pool must recover EVERY wedged hub.  Run a few times each (timing varies).
-echo "--- RUN POOL=1 (old single-thread behaviour) -- expect RED (FAIL) ---"
+# The rescue-thread pool this exercised was removed (2026-06).  The surviving
+# invariant is no-lost-wake: every worker eventually runs even with multiple
+# wedged hubs.  Run a few times; any non-PASS is a regression.
+echo "--- RUN no-lost-wake check (multi-wedge, RUNLOOM_HANDOFF=1) -- expect PASS 64/64 ---"
+rc=0
 for r in 1 2 3 4 5; do
-    RUNLOOM_HANDOFF=1 RUNLOOM_HANDOFF_POOL=1 RUNLOOM_SYSMON_MS=20 timeout 30 ./test_stall_pool
+    PYTHON_GIL=0 RUNLOOM_HANDOFF=1 RUNLOOM_SYSMON_MS=20 timeout 30 ./test_stall_pool || rc=1
     echo "  run $r exit rc=$?"
 done
-
-echo "--- RUN POOL=4 (rescue pool) -- expect GREEN 64/64 (PASS) ---"
-for r in 1 2 3 4 5 6 7 8 9 10; do
-    RUNLOOM_HANDOFF=1 RUNLOOM_HANDOFF_POOL=4 RUNLOOM_SYSMON_MS=20 timeout 30 ./test_stall_pool
-    echo "  run $r exit rc=$?"
-done
-
-echo "--- RUN default pool (RUNLOOM_HANDOFF=1, pool=min(hubs,4)=4) -- expect GREEN ---"
-for r in 1 2 3; do
-    RUNLOOM_HANDOFF=1 RUNLOOM_SYSMON_MS=20 timeout 30 ./test_stall_pool
-    echo "  run $r exit rc=$?"
-done
-
-echo "=== stall pool test end $(date -Is) ==="
+echo "=== stall pool test end $(date -Is) rc=$rc ==="
+exit $rc

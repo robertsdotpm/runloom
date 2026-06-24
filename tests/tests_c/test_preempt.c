@@ -160,18 +160,27 @@ int main(void)
 
     double t0 = now_ms();
     for (i = 0; i < N_WORKERS; i++) (void)write(w_efd[i], &one, sizeof one);
-    while (now_ms() - t0 < WINDOW_MS) usleep(1000);
 
+    /* Poll until every woken worker has run.  A CPU-stalled hub no longer
+     * drains mid-stall (the handoff-rescue pool was removed; work-stealing
+     * steals only FRESH fibers, so co-located woken workers run when the staller
+     * finishes, not during it) -- so the surviving invariant is no-lost-wake:
+     * nothing is permanently stranded.  Wait past the stall, then assert all ran. */
     long responded = 0;
-    for (i = 0; i < N_WORKERS; i++)
-        if (__atomic_load_n(&w_responded[i], __ATOMIC_ACQUIRE)) responded++;
+    while (now_ms() - t0 < STALL_MS + 3000) {
+        responded = 0;
+        for (i = 0; i < N_WORKERS; i++)
+            if (__atomic_load_n(&w_responded[i], __ATOMIC_ACQUIRE)) responded++;
+        if (responded == N_WORKERS) break;
+        usleep(2000);
+    }
 
-    printf("preempt=%s N=%d hubs=%d stall=%dms window=%dms responded=%ld/%d\n",
+    printf("preempt=%s N=%d hubs=%d stall=%dms responded=%ld/%d\n",
            getenv("RUNLOOM_PREEMPT") ? getenv("RUNLOOM_PREEMPT") : "(off)",
-           N_WORKERS, NHUBS, STALL_MS, WINDOW_MS, responded, N_WORKERS);
+           N_WORKERS, NHUBS, STALL_MS, responded, N_WORKERS);
     int pass = (responded == N_WORKERS);
-    printf("%s\n", pass ? "PASS: CPU-bound Python g preempted; hub workers ran"
-                        : "FAIL: workers starved behind the CPU-bound Python g");
+    printf("%s\n", pass ? "PASS: every worker ran -- no lost wake behind the CPU staller"
+                        : "FAIL: worker(s) permanently stranded -- lost wake");
     fflush(stdout);
     _exit(pass ? 0 : 1);
 }
