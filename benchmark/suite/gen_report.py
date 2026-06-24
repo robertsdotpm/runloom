@@ -202,25 +202,49 @@ STD_SRC = {
     "gevent_libev_py_stream":            "suite/servers/gevent_libev_py_stream.py",
     "go_netpoll_native_net":             "suite/servers/go_netpoll_native_net.go",
     "runloom_epoll_py_fiber":            "suite/speed/runloom_epoll_py_fiber.py",
+    "runloom_centry_fiber":              "suite/speed/run_centry.py",
     "greenlet_native_py_coro":           "suite/speed/greenlet_native_py_coro.py",
 }
 
+# The SPAWN sections (speed micro-spawn + spawn-vs-N) measure *spawn paths*, not
+# servers, so a couple of keys mean something different there than in the server
+# tables.  Most notably `runloom_c`: in a server table it is the C-TCPConn cython
+# server (runloom_epoll_cython_tcpcon); in the spawn benchmarks it is the pure-C
+# c_entry spawn path (suite/speed/run_centry.py + centry_probe.pyx) -- NO TCP
+# connection, NO cython request handler.  The flat STD_NAME can't tell the two
+# apart, so the spawn sections resolve names through SPAWN_NAME first.
+SPAWN_NAME = {
+    "runloom_c":  "runloom_centry_fiber",   # pure-C c_entry path, not a server
+    "runloom":    "runloom_epoll_py_fiber",
+    "runloom_py": "runloom_epoll_py_fiber",
+}
 
-def std(key):
-    return STD_NAME.get(key, key)
+
+def std(key, names=STD_NAME):
+    return names.get(key, key)
 
 
-def prog_html(key):
+def prog_html(key, names=STD_NAME):
     """A program-name cell: the standard name, clickable to overlay its source."""
-    name = std(key)
+    name = std(key, names)
     if name in STD_SRC:
         return '<span class="prog" data-prog="%s">%s</span>' % (esc(name), esc(name))
     return '<span class="prog nosrc">%s</span>' % esc(name)
 
 
-def prog_cell(key):
+def prog_cell(key, names=STD_NAME):
     """(display, sortvalue) tuple for a first table cell."""
-    return (prog_html(key), std(key))
+    return (prog_html(key, names), std(key, names))
+
+
+def std_spawn(key):
+    """Resolve a name in a SPAWN section (runloom_c -> c_entry, not a server)."""
+    return SPAWN_NAME.get(key) or std(key)
+
+
+def prog_cell_spawn(key):
+    """Like prog_cell, but for the spawn sections (SPAWN_NAME override first)."""
+    return prog_cell(std_spawn(key))
 
 
 _PYKW = set("def class return import from as if elif else for while in is not and or "
@@ -473,7 +497,7 @@ def sec_speed(speed):
             continue
         cores = d.get("cores", 1)
         per_core = d["rate_per_s"] / cores if cores else d["rate_per_s"]
-        rows.append([prog_cell(rt), (fmt(cores), cores), (fmt(d["rate_per_s"]), d["rate_per_s"]),
+        rows.append([prog_cell_spawn(rt), (fmt(cores), cores), (fmt(d["rate_per_s"]), d["rate_per_s"]),
                      (fmt(d["seconds"] * 1e6 / d["n"], 2), d["seconds"] * 1e6 / d["n"]),
                      (fmt(per_core), per_core)])
     rows.sort(key=lambda r: -(r[4][1] or 0))   # best = highest spawn/s per core
@@ -1175,8 +1199,8 @@ def sec_spawn_curve(sc):
         if rt not in rates:
             continue
         ys = [getr(rt, n) for n in NS]
-        series.append((std(rt), palette.get(rt, "var(--fg)"), ys, rt))
-        cells = [prog_cell(rt)]
+        series.append((std_spawn(rt), palette.get(rt, "var(--fg)"), ys, rt))
+        cells = [prog_cell_spawn(rt)]
         for v in ys:
             cells.append((fmt(v) if v else "&mdash;", v if v else -1))
         # Store with 1M value (last column) for sorting
