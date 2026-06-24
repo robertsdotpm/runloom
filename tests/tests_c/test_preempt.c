@@ -134,6 +134,14 @@ int main(void)
         }
     }
 
+    /* Release the GIL while the hubs run.  The hub threads attach their own
+     * PyThreadStates and the staller runs a Python loop on its hub; a main
+     * thread that holds the GIL through the orchestration below starves them,
+     * so no fiber ever dispatches ("setup timeout: parked=0 staller=0").  The
+     * orchestration here is pure atomics + eventfd syscalls (no main-thread
+     * Python), and we _exit() at the end, so we never need to re-acquire. */
+    PyEval_SaveThread();
+
     double t = now_ms();
     while (__atomic_load_n(&parked_count, __ATOMIC_RELAXED) < N_WORKERS ||
            !__atomic_load_n(&staller_parked, __ATOMIC_ACQUIRE)) {
