@@ -23,7 +23,7 @@ DUR = float(sys.argv[3]) if len(sys.argv) > 3 else 10.0
 TMO = float(sys.argv[4]) if len(sys.argv) > 4 else 120.0
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.dirname(HERE)
+ROOT = os.path.dirname(os.path.dirname(HERE))
 LOGD = os.path.join(HERE, "win_logs")
 os.makedirs(LOGD, exist_ok=True)
 

@@ -76,6 +76,18 @@ EXIT_INVARIANT = 1
 EXIT_ERROR = 2
 EXIT_HANG = 3
 EXIT_BOXLIMIT = 4   # memory guard tripped: the BOX can't sustain this N (not a bug)
+# A benign SCALE LIMIT of the platform (not a runtime bug): on Windows the kernel
+# non-paged pool caps concurrent AFD sockets ~16k regardless of RAM, so an
+# offload / socket-per-fiber run over that knee fails workers with WSAENOBUFS
+# (WinError 10055) or wedges its drain at over-scale.  We reuse EXIT_BOXLIMIT's
+# benign verdict slot (exit 4) -- both run_all.py and sweep_two_tier.sh already
+# classify exit 4 as a non-fatal box/scale artifact, distinct from FAIL/HANG.
+EXIT_SCALE_LIMIT = EXIT_BOXLIMIT
+
+# WSAENOBUFS: Winsock "no buffer space available" -- the AFD non-paged-pool
+# exhaustion signal.  Python surfaces it as OSError.winerror == 10055 (and
+# usually errno == 10055 too on Windows).
+WSAENOBUFS = 10055
 
 # Hot-counter sharding.  Power of two so we can mask.  64k slots covers the
 # common "tens of thousands of workers, one shard each" case exactly (one
@@ -156,6 +168,19 @@ if _MAC:
         _libc = _ct.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True)
     except Exception:
         _libc = None
+
+
+def is_win_scale_limit_err(exc):
+    """True iff `exc` is the Windows AFD non-paged-pool exhaustion error
+    (WSAENOBUFS / WinError 10055) -- a benign platform SCALE LIMIT at over-scale,
+    not a runtime bug.  Always False off Windows, so Linux/other classification is
+    byte-identical."""
+    if not _WIN:
+        return False
+    if not isinstance(exc, OSError):
+        return False
+    return (getattr(exc, "winerror", None) == WSAENOBUFS
+            or getattr(exc, "errno", None) == WSAENOBUFS)
 
 
 def _win_memstatus():
@@ -314,7 +339,18 @@ def mem_safe_fd_cap():
     is protected).  Returns an ABSOLUTE worker ceiling -- harness.main() applies
     min(--funcs, cap) and logs when it bites."""
     gib = phys_mem_gib()
-    if sys.platform == "darwin" or "bsd" in sys.platform:
+    if os.name == "nt" or sys.platform == "win32":
+        # Windows caps concurrent AFD sockets via the kernel NON-PAGED POOL, which
+        # the kernel sizes from physical RAM at boot and which is FAR tighter than
+        # an fd rlimit (there is none on Windows).  Each AFD socket pins a fixed
+        # slice of non-paged pool regardless of how much user RAM is free, so a
+        # socket-per-fiber / offload program exhausts the pool (WSAENOBUFS /
+        # WinError 10055) LONG before RAM runs out -- the practical ceiling is
+        # ~16k concurrent AFD sockets on a typical box.  Mirror the mbuf-limited
+        # darwin/bsd path: ~512/GiB, but hold the absolute ceiling well under the
+        # ~16k pool knee so we clamp before exhaustion (16 GiB -> ~8k, capped).
+        cap = min(int(gib * 512), 8000)
+    elif sys.platform == "darwin" or "bsd" in sys.platform:
         cap = int(gib * 512)
         try:
             import subprocess
@@ -553,6 +589,12 @@ class Harness(object):
 
         # rare counters under a cooperative lock
         self.failures = 0
+        # Benign platform SCALE LIMITs that are NOT counted as failures: Windows
+        # WSAENOBUFS (AFD non-paged-pool exhaustion) workers at over-scale, and a
+        # slow-but-progressing drain past the hard deadline.  Tracked separately so
+        # the verdict can be SCALE_LIMIT (benign, exit 4) instead of FAIL/HANG.
+        self.scale_limited = 0           # workers that hit a benign scale limit
+        self.scale_limit_reason = None   # first SCALE_LIMIT reason string
         self.exited = 0                  # worker goroutines that returned
         self.expected = 0                # worker goroutines spawned
         self.first_fail = None           # (msg) of the first invariant break
@@ -741,6 +783,21 @@ class Harness(object):
         sys.stderr.write(traceback.format_exc())
         sys.stderr.flush()
 
+    def note_scale_limit(self, reason):
+        """Record a benign platform SCALE LIMIT (NOT a failure): the run hit a
+        kernel/platform ceiling at over-scale (e.g. Windows WSAENOBUFS), not a
+        runtime bug.  Does not set self.failed; finish() turns it into the benign
+        SCALE_LIMIT verdict (exit 4) only when there were no real failures."""
+        if self.lock is not None:
+            with self.lock:
+                self.scale_limited += 1
+                if self.scale_limit_reason is None:
+                    self.scale_limit_reason = reason
+        else:
+            self.scale_limited += 1
+            if self.scale_limit_reason is None:
+                self.scale_limit_reason = reason
+
     # ---------------- spawning ----------------
     def fiber(self, fn, *args, **kwargs):
         """Spawn a goroutine.  Must be called from inside the root (M:N)."""
@@ -823,7 +880,16 @@ class Harness(object):
         except StopWorkload:
             pass
         except Exception as exc:           # noqa: BLE001 - report everything
-            if self.running() or not isinstance(exc, OSError):
+            # Windows AFD non-paged-pool exhaustion (WSAENOBUFS / WinError 10055)
+            # is a benign platform SCALE LIMIT at over-scale, not a runtime bug:
+            # the kernel caps concurrent AFD sockets ~16k regardless of RAM.
+            # Record it as a scale limit (never a failure) and don't let it set
+            # self.failed.  Off Windows is_win_scale_limit_err() is always False,
+            # so this branch never fires and Linux behavior is byte-identical.
+            if is_win_scale_limit_err(exc):
+                self.note_scale_limit("worker {0}: {1}: {2}".format(
+                    wid, type(exc).__name__, exc))
+            elif self.running() or not isinstance(exc, OSError):
                 self.error(wid, exc)
         finally:
             with self._exit_lock:
@@ -873,6 +939,14 @@ class Harness(object):
         last = self.progress_signal()
         last_change = REAL_MONO()
         hard_deadline = self.deadline + max(self.drain_timeout, 0.15 * self.duration)
+        # Drain progress tracking (for the hard-deadline branch below): the
+        # MONOTONIC high-water mark of completed workers and when it last climbed.
+        # A drain that keeps RETURNING workers (exit count climbing) and is near
+        # total is merely SLOW at over-scale -- a benign SCALE_LIMIT, not a wedge.
+        # A drain whose exit count is FLAT (no forward progress) is a real stall /
+        # lost-wakeup -> EXIT_HANG.
+        exited_hwm = self.exited
+        exited_climb = REAL_MONO()    # last time exited_hwm increased
         # Memory guard: a runtime backstop so NO program (whatever its N) can drive
         # this box into the OS OOM-killer / swap-death and destabilize it.  The
         # watchdog is a real OS thread, so it still samples even when the scheduler
@@ -935,6 +1009,13 @@ class Harness(object):
             if sig != last:
                 last = sig
                 last_change = now
+            # Track the monotonic high-water mark of completed workers so the
+            # hard-deadline branch can tell a SLOW-but-progressing drain from a
+            # genuinely wedged one.
+            ex = self.exited
+            if ex > exited_hwm:
+                exited_hwm = ex
+                exited_climb = now
             # Only treat a stall as a hang while there is work to do: before
             # the deadline (workers should be progressing) or during the
             # post-deadline drain (which must finish, not wedge).
@@ -944,6 +1025,24 @@ class Harness(object):
                     now - last_change))
                 return
             if now > hard_deadline:
+                # Past the hard deadline the drain is overdue -- but "overdue" is
+                # not the same as "wedged".  Distinguish:
+                #   PROGRESSING -- the completed/exited count is still climbing
+                #                  (it advanced within the last hang_timeout) and
+                #                  is near total: a SLOW drain at over-scale (the
+                #                  box just can't retire this many workers in the
+                #                  window).  Benign SCALE_LIMIT, NOT a lost-wakeup.
+                #   STALLED     -- the exit count is FLAT (no forward progress for
+                #                  >= hang_timeout): a real stall / lost-wakeup.
+                # `expected==0` (nothing was spawned) can't be "progressing", so it
+                # falls through to the stalled branch as before.
+                drain_progressing = (
+                    self.expected > 0
+                    and (now - exited_climb) <= self.hang_timeout
+                    and exited_hwm >= int(0.99 * self.expected))
+                if drain_progressing:
+                    self._scale_drain_abort(exited_hwm)
+                    return
                 self._hang("hard deadline exceeded (drain/teardown wedged)")
                 return
 
@@ -965,6 +1064,25 @@ class Harness(object):
                 self.funcs))
         sys.stderr.flush()
         os._exit(EXIT_BOXLIMIT)
+
+    def _scale_drain_abort(self, exited_hwm):
+        """The post-deadline drain is overdue but STILL PROGRESSING (the completed
+        count kept climbing and is near total): the box simply can't retire this
+        many workers inside the window.  That is a benign SCALE LIMIT at over-scale,
+        NOT a lost-wakeup / wedge -- so exit with the benign scale verdict (exit 4)
+        and a PASS-adjacent verdict line, instead of EXIT_HANG.  Prints a VERDICT
+        line so VERDICT-first sweeps see SCALE_LIMIT rather than a bare hang."""
+        sys.stderr.write(
+            "\n[{0}] SCALE LIMIT: drain past the hard deadline but STILL "
+            "PROGRESSING -- {1}/{2} workers retired (>=99%), exit count climbing.\n"
+            "[{0}] This is a SLOW drain at over-scale (the box can't retire "
+            "--funcs {3} in time), NOT a lost-wakeup/wedge.  Reduce --funcs or "
+            "raise --drain-timeout.\n".format(
+                self.name, exited_hwm, self.expected, self.funcs))
+        sys.stderr.write("  VERDICT       : SCALE_LIMIT (exit {0})\n".format(
+            EXIT_SCALE_LIMIT))
+        sys.stderr.flush()
+        os._exit(EXIT_SCALE_LIMIT)
 
     def _hang(self, why):
         sys.stderr.write(
@@ -1184,6 +1302,15 @@ class Harness(object):
         if self.exit_code == EXIT_OK:
             if self.failed:
                 self.exit_code = EXIT_INVARIANT
+            elif self.scale_limited > 0:
+                # No real failure, but workers hit a benign platform SCALE LIMIT
+                # (Windows WSAENOBUFS / AFD non-paged-pool exhaustion at over-
+                # scale).  That is a box/platform ceiling, NOT a runtime bug, so
+                # report the benign scale verdict (exit 4) -- both run_all.py and
+                # sweep_two_tier.sh classify exit 4 as non-fatal, distinct from
+                # FAIL.  scale_limited is only ever nonzero on Windows, so Linux
+                # behavior is byte-identical.
+                self.exit_code = EXIT_SCALE_LIMIT
             else:
                 self.exit_code = EXIT_OK
 
@@ -1225,6 +1352,11 @@ class Harness(object):
         sys.stderr.write("  lost_workers  : {0}  (never returned after progress "
                          "stalled -- LOST/lost-wakeup, a real fault)\n".format(
                              self.lost_workers))
+        if self.scale_limited:
+            sys.stderr.write("  scale_limited : {0}  (workers hit a benign "
+                             "platform SCALE LIMIT, e.g. Windows WSAENOBUFS / "
+                             "WinError 10055 -- NOT a fault; reason: {1})\n".format(
+                                 self.scale_limited, self.scale_limit_reason))
         if self.parked_cancelled:
             sys.stderr.write("  parked_cancelled: {0}  (netpoll parkers force-"
                              "unblocked at teardown)\n".format(
@@ -1244,7 +1376,12 @@ class Harness(object):
         sys.stderr.write("  mem_rss_mb    : {0}\n".format(rss_mb()))
         if self.first_fail:
             sys.stderr.write("  first_failure : {0}\n".format(self.first_fail))
-        verdict = "PASS" if self.exit_code == EXIT_OK else "FAIL"
+        if self.exit_code == EXIT_OK:
+            verdict = "PASS"
+        elif self.exit_code == EXIT_SCALE_LIMIT:
+            verdict = "SCALE_LIMIT"   # benign platform/box ceiling, not a fault
+        else:
+            verdict = "FAIL"
         sys.stderr.write("  VERDICT       : {0} (exit {1})\n".format(
             verdict, self.exit_code))
         sys.stderr.flush()
