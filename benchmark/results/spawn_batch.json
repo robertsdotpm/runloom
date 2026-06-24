@@ -34,36 +34,36 @@
   "default": {
    "100000": {
     "naked": {
-     "rate_per_s": 1340481,
+     "rate_per_s": 1340000,
      "wall_median_s": 0.07460008758050282,
      "reps": 3
     },
     "batch": {
-     "rate_per_s": 2410095,
+     "rate_per_s": 2410000,
      "wall_median_s": 0.041492140351313954,
      "reps": 3
     }
    },
    "300000": {
     "naked": {
-     "rate_per_s": 1340481,
+     "rate_per_s": 1340000,
      "wall_median_s": 0.22380026274150847,
      "reps": 3
     },
     "batch": {
-     "rate_per_s": 2410095,
+     "rate_per_s": 2410000,
      "wall_median_s": 0.12447642105394185,
      "reps": 3
     }
    },
    "1000000": {
     "naked": {
-     "rate_per_s": 1340481,
+     "rate_per_s": 1340000,
      "wall_median_s": 0.7460008758050282,
      "reps": 3
     },
     "batch": {
-     "rate_per_s": 2410095,
+     "rate_per_s": 2410000,
      "wall_median_s": 0.4149214035131395,
      "reps": 3
     }

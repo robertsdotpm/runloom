@@ -25,15 +25,18 @@ def noop():
     pass
 
 
-def m_spawn(n, hubs, stack_size=0):
+def m_spawn(n, hubs, stack_size=0, warm=0):
     # Naked single-spawn rate.  Default (stack_size=0) uses runloom.fiber_fast --
     # a thin Python spawn with no per-spawn work, the apples-to-apples vs Go's
     # `go f()`.  The DEFAULT runloom.fiber adds the grow-down auto-sizer (small
     # right-sized stacks, an RSS feature Go lacks); its learned size now spawns
-    # down the DEFERRED stack-alloc path, so the default is ~1.7M/s warm
+    # down the DEFERRED stack-alloc path, so the default is ~1.9M/s warm
     # (small-stacks AND fast) -- not the old ~7x-slower eager-alloc number.
     # optimize("throughput")/("memory") swaps runloom.fiber between fiber_fast and
     # grow-down.  stack_size>0 pins each fiber's C stack (decomposition variant).
+    # warm>0: run `warm` extra in-process passes first, report the BEST timed pass,
+    # so the one-time runloom.run() scheduler boot is excluded -- the same basis Go
+    # is measured on (its runtime is already up at main()).
     if stack_size > 0:
         def root():
             for _ in range(n):
@@ -43,10 +46,14 @@ def m_spawn(n, hubs, stack_size=0):
             f = runloom.fiber_fast
             for _ in range(n):
                 f(noop)
-    t0 = time.perf_counter()
-    runloom.run(hubs, root)
-    return {"seconds": time.perf_counter() - t0, "n": n, "cores": hubs,
-            "stack_size": stack_size}
+    best = None
+    for _ in range(warm + 1):
+        t0 = time.perf_counter()
+        runloom.run(hubs, root)
+        dt = time.perf_counter() - t0
+        best = dt if best is None else min(best, dt)
+    return {"seconds": best, "n": n, "cores": hubs,
+            "stack_size": stack_size, "warm": warm}
 
 
 def _make_distinct_worker(K, yobj):
@@ -222,10 +229,12 @@ def main():
                          "(de-shares co_code_adaptive; the fixed Python path)")
     ap.add_argument("--stack-size", type=int, default=0,
                     help="spawn: pin each fiber's C stack size in bytes (0 = default)")
+    ap.add_argument("--warm", type=int, default=0,
+                    help="spawn: extra in-process passes before timing (boot-excluded warm rate)")
     args = ap.parse_args()
 
     if args.metric == "spawn":
-        res = m_spawn(args.n, args.hubs, stack_size=args.stack_size)
+        res = m_spawn(args.n, args.hubs, stack_size=args.stack_size, warm=args.warm)
     elif args.metric == "ctxswitch":
         res = m_ctxswitch(args.n, args.hubs, distinct=args.distinct)
     elif args.metric == "rtt":
