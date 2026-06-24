@@ -847,6 +847,12 @@ class Once(object):
         self._mu = runloom_c.Mutex()
 
     def done(self):
+        if runloom_c.current_g() is None:
+            # Foreign OS thread: read the published flag directly.  It must NOT
+            # take the cooperative mutex -- holding `_mu` can strand a fiber that
+            # parks in `mu.lock()` (see the note in do()).  `_done` is monotonic
+            # (False -> True, set once under the guard by the executor).
+            return self._done
         _acquire(self._mu)
         d = self._done
         self._mu.unlock()
@@ -854,17 +860,52 @@ class Once(object):
 
     def do(self, fn):
         g = runloom_c.current_g()
+        if g is None:
+            # Foreign OS thread.  It may WAIT for an in-flight executor or be a
+            # no-op once complete, but it is NEVER the first executor (that would
+            # wake parked fibers).  CRITICAL: it must not touch the cooperative
+            # mutex at all.  Holding `_mu` -- even the brief `try_lock` inside
+            # `_acquire` -- lets the executor fiber's `finally` mu.lock() park on
+            # the mutex wait-channel; a foreign-thread `mu.unlock()` then hands the
+            # lock to that parked fiber but does NOT schedule it in the
+            # single-thread runtime, stranding the executor (it never sets
+            # `_done`).  The scheduler then deadlocks ("ran out of work with 1
+            # fiber blocked") and this thread spins on `try_lock` forever.
+            # `_done`/`_running` are monotonic flags the executor publishes; an
+            # unlocked read is safe here -- the foreign waiter reads nothing but
+            # `_done`, so cache coherence alone makes completion visible (the same
+            # atomic-load shape as Go's sync.Once foreign path).
+            misses = 0
+            while not self._done:
+                if self._running:
+                    misses = 0          # an executor is in flight -> wait it out
+                elif misses >= 2000:
+                    # ~1s of polling with no executor electing: a foreign thread
+                    # genuinely WAS the first caller (it cannot be the executor --
+                    # that would have to wake parked fibers).  A single
+                    # (_done, _running) sample cannot tell "no executor" apart
+                    # from "an executor fiber mid-election (committed but has not
+                    # published _running yet)" or "mid-finish (arm64 may observe
+                    # the _running=False store before the _done=True store -- two
+                    # un-fenced relaxed slot stores, no synchronizes-with edge on
+                    # this lock-free read)".  Both of those resolve within
+                    # microseconds, so we retry far past any election/propagation
+                    # window before concluding first-caller and raising.  An
+                    # immediate raise here mis-fires on a legitimate concurrent
+                    # waiter (~39% in a start-window race).
+                    raise RuntimeError(
+                        "Once.do() first call must be from a fiber, not a "
+                        "foreign OS thread")
+                else:
+                    misses += 1
+                _time.sleep(0.0005)
+            return
         _acquire(self._mu)
         if self._done:
             self._mu.unlock()
             return
         if not self._running:
             # We are the executor.
-            if g is None:
-                self._mu.unlock()
-                raise RuntimeError(
-                    "Once.do() first call must be from a fiber, not a foreign "
-                    "OS thread")
             self._running = True
             self._mu.unlock()
             try:
@@ -880,16 +921,7 @@ class Once(object):
                 for w in waiters:
                     w.wake()
             return
-        # A waiter: block until the executor finishes.  Guard is held here.
-        if g is None:
-            self._mu.unlock()
-            while True:
-                _time.sleep(0.0005)
-                _acquire(self._mu)
-                d = self._done
-                self._mu.unlock()
-                if d:
-                    return
+        # A fiber waiter: block until the executor finishes.  Guard is held here.
         while True:
             self._waiters.append(g)
             self._mu.unlock()
