@@ -239,6 +239,31 @@ static int runloom_parker_unlink(runloom_parker_pool_t *pool, runloom_parked_t *
         }
         RUNLOOM_EVT(RUNLOOM_EVT_PARKER_UNLINK, p, p->g, (long long)p->fd);
     }
+#if defined(RUNLOOM_OS_WINDOWS)
+    /* Windows IOCP-AFD ONLY: this is the SINGLE parker-unlink choke point, so
+     * cancelling the parker's in-flight AFD_POLL IRP here covers EVERY release
+     * path (deadline-heap timeout, fd-ready dispatch, cancel_all teardown,
+     * force-unlink-on-g-completion, drain_parked) with one site.  The IRP was
+     * submitted with an INFINITE AFD Timeout (the deadline heap is the sole
+     * timeout owner), so without this it would linger until the socket actually
+     * closes -- and if the fd were reused meanwhile, its stale completion would
+     * dispatch against a DIFFERENT fiber's parker (the UAF / access-violation
+     * this fix closes).  runloom_iocp_cancel marks the ctx orphaned (so the
+     * wait-drain drops the stale completion) and forces it to complete now, then
+     * drops the parker party's refcount ref.
+     *
+     * Extract park->iocp_ctx exactly once, UNDER pool->lock: every unlink runs
+     * holding this lock and wait_fd stored the ctx under it too, so the field is
+     * lock-consistent and the clear-after-read makes a second (defensive/idempotent)
+     * unlink a no-op cancel.  Guarded on runloom_win_use_iocp so the WSAPoll /
+     * select Windows backends (which never submit an IRP, so iocp_ctx stays NULL)
+     * pay only a branch.  POSIX never compiles this; iocp_ctx is always NULL there. */
+    if (runloom_win_use_iocp && p->iocp_ctx != NULL) {
+        void *ctx = p->iocp_ctx;
+        p->iocp_ctx = NULL;
+        runloom_iocp_cancel(ctx);
+    }
+#endif
     return touched;
 }
 

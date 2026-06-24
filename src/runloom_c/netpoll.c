@@ -59,6 +59,18 @@
    /* winsock2.h, ws2tcpip.h and windows.h are already pulled in via
     * plat_compat.h.  WSAPoll + WSAPOLLFD live in winsock2.h, FD_SET /
     * FD_ISSET likewise -- no extra header needed here. */
+   /* IOCP-AFD backend prototypes (runloom_iocp_cancel/submit/wait/...).  Pulled
+    * in HERE -- before the .c.inc fragments below -- because the single
+    * parker-unlink choke point in netpoll_parker_link.c.inc (the FIRST fragment
+    * after the parker pool) calls runloom_iocp_cancel to tear down a released
+    * parker's in-flight AFD IRP.  netpoll_diag_fd.c.inc re-includes this header
+    * (idempotent via its guard) for the backend-selection statics.  */
+#  include "netpoll_iocp.h"
+   /* Runtime backend-selection flag; the definition (a file-scope static) lives
+    * in netpoll_diag_fd.c.inc, included further down.  Forward-declared here so
+    * the earlier parker-link fragment can gate its IOCP cancel on it.  A static
+    * forward decl + later static definition is one internal-linkage object. */
+static int runloom_win_use_iocp;
 #else
 #  include <sys/select.h>
 #  include <unistd.h>
@@ -130,6 +142,18 @@ typedef struct runloom_parked {
      * (pool acquire zeroes both). */
     long long park_ts;
     int reclaimed;
+    /* Windows IOCP-AFD backend ONLY.  WEAK reference to the per-park
+     * runloom_poll_ctx_t whose AFD_POLL IRP this parker submitted
+     * (netpoll_wait_fd's IOCP branch).  The ctx is owned and freed
+     * EXCLUSIVELY by runloom_iocp_wait when its completion drains -- the
+     * parker never frees it; it only needs the pointer to runloom_iocp_cancel
+     * the still-in-flight IRP when the parker is released early (deadline
+     * heap timeout, fd-ready dispatch on a sibling completion, cross-fiber
+     * close, cancel_all).  Stored under pool->lock at submit, cancelled +
+     * cleared at the single unlink choke point (runloom_parker_unlink).
+     * Typed void* to keep runloom_poll_ctx_t private to netpoll_iocp.c (no
+     * header cycle).  NULL on every non-Windows / non-IOCP park. */
+    void *iocp_ctx;
 } runloom_parked_t;
 
 #define RUNLOOM_PARK_ARMED  0

@@ -45,9 +45,22 @@ void runloom_iocp_fini(void);
 /* Submit a poll request for `fd` (a SOCKET, cast to int per runloom's
  * fd convention).  `events` is the same RUNLOOM_NETPOLL_READ/WRITE
  * bitmask the rest of runloom uses.  `timeout_ns` is when to give up
- * (-1 = forever).  Returns 0 on success; the caller waits via
- * runloom_iocp_pump.  -1 on error. */
-int runloom_iocp_submit(int fd, int events, long long timeout_ns);
+ * (-1 = forever; the caller passes -1 so the deadline heap is the sole
+ * timeout owner and the IRP is never left in flight on a self-timeout).
+ * `gen` is the submitting parker's acquire generation (diagnostic only).
+ * On success returns 0 AND sets *out_ctx to the WEAK per-poll context
+ * pointer -- still owned/freed by runloom_iocp_wait, but the parker tracks
+ * it so it can runloom_iocp_cancel this exact IRP if released early.  On
+ * any error returns -1 and sets *out_ctx = NULL.  out_ctx may be NULL. */
+int runloom_iocp_submit(int fd, int events, long long timeout_ns,
+                        unsigned int gen, void **out_ctx);
+
+/* Cancel the in-flight AFD_POLL IRP that `ctxp` (a value previously
+ * returned via runloom_iocp_submit's out_ctx) represents: mark its ctx
+ * orphaned so runloom_iocp_wait drops the stale completion, and force the
+ * IRP to complete now via NtCancelIoFileEx.  Does NOT free the ctx (the
+ * wait drain owns the free).  No-op on a NULL ctxp. */
+void runloom_iocp_cancel(void *ctxp);
 
 /* Wait for at most timeout_ns for the next completion (-1 = forever).
  * Writes the completed fd into *out_fd and the readiness mask into

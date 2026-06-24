@@ -179,7 +179,49 @@ typedef struct runloom_poll_ctx {
     AFD_POLL_INFO   poll_info;
     int             fd;             /* the socket */
     int             requested;      /* RUNLOOM_NETPOLL_* mask */
+    /* Snapshot of the submitting parker's acquire generation
+     * (runloom_parked_t.gen), carried purely for diagnostics: a stale
+     * completion's gen no longer matching the live parker on by_fd[fd]
+     * is the signature of the released-then-reused-fd race this fix
+     * closes.  Not consulted by the dispatch fast path (orphaned/Status
+     * gate that). */
+    unsigned int    gen;
+    /* Set to 1 by runloom_iocp_cancel when the owning parker is released
+     * early (deadline-heap timeout / fd-ready dispatch on a sibling /
+     * cancel_all teardown), BEFORE NtCancelIoFileEx forces this IRP to
+     * complete STATUS_CANCELLED.  runloom_iocp_wait reads it on every
+     * completion: an orphaned completion is dropped (not dispatched), so
+     * a stale IRP whose fd was reused by another fiber can never wake /
+     * UAF the new owner's parker.  Distinct from the refs free-arbiter
+     * below -- orphaned is the *dispatch* gate, refs is the *lifetime*
+     * gate. */
+    volatile LONG   orphaned;
+    /* Two-party free arbiter (the UAF fix).  A ctx is referenced by
+     * exactly TWO parties: (A) the in-flight AFD IRP, released when its
+     * completion is drained by runloom_iocp_wait; and (B) the submitting
+     * parker, released when runloom_parker_unlink runs (which may also
+     * runloom_iocp_cancel, dereferencing the ctx).  Each party drops its
+     * ref exactly once via runloom_iocp_ctx_unref; the party that drops
+     * the LAST ref (refs 1->0) frees.  This decouples WHO frees from WHO
+     * holds the pointer, so a concurrent wait-drain (party A) and
+     * unlink-cancel (party B) on the SAME ctx can never free-under-
+     * dereference: the cancel-deref happens while B still holds its ref
+     * (refs >= 1), so A's drain cannot have freed it.  Initialised to 2
+     * at submit.  volatile LONG for InterlockedDecrement. */
+    volatile LONG   refs;
 } runloom_poll_ctx_t;
+
+/* Drop one reference to ctx; free on the 1->0 transition.  Both the
+ * wait-drain (IRP party) and the unlink/cancel (parker party) call this
+ * exactly once, so whichever runs LAST frees -- no double free, no
+ * free-under-dereference.  Internal to this file. */
+static void runloom_iocp_ctx_unref(runloom_poll_ctx_t *ctx)
+{
+    if (ctx == NULL) return;
+    if (InterlockedDecrement(&ctx->refs) == 0) {
+        free(ctx);
+    }
+}
 
 /* Translate RUNLOOM_NETPOLL_READ/WRITE to AFD event mask. */
 static ULONG runloom_to_afd_events(int events)
@@ -324,13 +366,59 @@ fail:
 
 void runloom_iocp_fini(void)
 {
-    if (runloom_iocp_handle != NULL) {
-        CloseHandle(runloom_iocp_handle);
-        runloom_iocp_handle = NULL;
-    }
+    /* Teardown ordering matters -- it must reclaim EVERY still-in-flight AFD
+     * IRP's ctx before the IOCP is destroyed, else those calloc'd ctxs leak and
+     * (worse) a late completion could post to a freed IOCP.
+     *
+     * Concurrency assumption: mn_fini quiesces every hub (no pump thread is
+     * running) and runloom_netpoll_cancel_all_parked has run before
+     * runloom_netpoll_fini -> runloom_iocp_fini, so nothing else touches the
+     * IOCP / AFD handles or these ctxs while we drain.  This single thread is the
+     * sole owner here, so the bounded drain below is race-free.
+     *
+     * This is the TERMINAL reclaim: it raw-frees each completion's ctx,
+     * deliberately BYPASSING the two-party refcount (runloom_iocp_ctx_unref).
+     * Post-quiescence the only conceivable remaining holder of a parker-party
+     * ref is a parker on a fiber that will never run again (its hub is stopped),
+     * so that ref would never be dropped -- a refcount-unref here would LEAK such
+     * a ctx.  Raw-free is correct because no live thread can still dereference
+     * these ctxs after the AFD handle is closed and the hubs are stopped.
+     *
+     *   1. CloseHandle(AFD) FIRST: closing the \Device\Afd handle forces all of
+     *      its outstanding poll IRPs to complete STATUS_CANCELLED INTO the IOCP
+     *      (any parker that somehow skipped its runloom_iocp_cancel is covered).
+     *   2. Drain the IOCP with a bounded non-blocking loop, freeing every ctx
+     *      surfaced (the OVERLAPPED is the first field, so CONTAINING_RECORD
+     *      recovers the ctx).  Stop on the first empty poll with a NULL overlapped
+     *      (no more queued completions and none pending).
+     *   3. CloseHandle(IOCP) LAST, now that no ctx and no completion remains. */
     if (runloom_afd_handle != INVALID_HANDLE_VALUE) {
         CloseHandle(runloom_afd_handle);
         runloom_afd_handle = INVALID_HANDLE_VALUE;
+    }
+    if (runloom_iocp_handle != NULL) {
+        DWORD bytes;
+        ULONG_PTR key;
+        LPOVERLAPPED ov;
+        /* Bounded: GetQueuedCompletionStatus with 0 ms returns FALSE+ov==NULL
+         * once the queue is empty.  `ok || ov` reaches a completion whether the
+         * IRP succeeded or completed with a failure status (FALSE + non-NULL ov
+         * == a failed/cancelled completion, which we still must free). */
+        for (;;) {
+            BOOL ok = GetQueuedCompletionStatus(runloom_iocp_handle,
+                                                &bytes, &key, &ov, 0);
+            if (ov != NULL) {
+                /* A pump-wake (NULL-overlapped post) cannot occur here -- hubs
+                 * are quiesced -- so any non-NULL ov is a poll-ctx completion. */
+                free(CONTAINING_RECORD(ov, runloom_poll_ctx_t, overlapped));
+                continue;
+            }
+            if (!ok) break;   /* empty queue: FALSE + NULL overlapped */
+            /* ok && ov==NULL would be a stray NULL-overlapped post; ignore. */
+            break;
+        }
+        CloseHandle(runloom_iocp_handle);
+        runloom_iocp_handle = NULL;
     }
     runloom_iocp_inited = 0;
 }
@@ -378,11 +466,16 @@ static SOCKET runloom_iocp_base_socket(SOCKET s)
     return s;
 }
 
-int runloom_iocp_submit(int fd, int events, long long timeout_ns)
+int runloom_iocp_submit(int fd, int events, long long timeout_ns,
+                        unsigned int gen, void **out_ctx)
 {
     runloom_poll_ctx_t *ctx;
     NTSTATUS st;
     SOCKET base;
+
+    /* Always define the out param on EVERY path so the caller can store it
+     * unconditionally; NULL means "no ctx to track / cancel". */
+    if (out_ctx != NULL) *out_ctx = NULL;
 
     if (runloom_iocp_inited != 2 || runloom_afd_handle == INVALID_HANDLE_VALUE) {
         return -1;
@@ -395,6 +488,13 @@ int runloom_iocp_submit(int fd, int events, long long timeout_ns)
     if (ctx == NULL) return -1;
     ctx->fd = fd;
     ctx->requested = events;
+    ctx->gen = gen;
+    /* orphaned starts 0 from calloc.  Two references: the in-flight IRP and the
+     * submitting parker (see runloom_iocp_ctx_unref).  Set BEFORE the IOCTL so a
+     * completion drained on another thread the instant the IRP is queued already
+     * sees refs==2.  On the error path below (IRP never queued) we free directly
+     * -- no completion will arrive and the parker never receives the ctx. */
+    ctx->refs = 2;
 
     /* AFD timeout is a relative time in 100-ns ticks (negative).
      * INT64_MAX = "wait forever". */
@@ -424,7 +524,11 @@ int runloom_iocp_submit(int fd, int events, long long timeout_ns)
     if (st == STATUS_SUCCESS || st == STATUS_PENDING) {
         /* Either case, the IOCP will deliver one completion -- the
          * kernel auto-posts sync completions because we didn't pass
-         * FILE_SKIP_COMPLETION_PORT_ON_SUCCESS at init time. */
+         * FILE_SKIP_COMPLETION_PORT_ON_SUCCESS at init time.  Hand the
+         * caller the ctx (a WEAK ref: still owned/freed by runloom_iocp_wait
+         * when the completion drains) so the parker can runloom_iocp_cancel
+         * this exact IRP if it is released before that completion arrives. */
+        if (out_ctx != NULL) *out_ctx = ctx;
         return 0;
     }
     /* Hard error.  Drop the ctx -- caller's wait_fd will see no
@@ -445,6 +549,52 @@ int runloom_iocp_submit(int fd, int events, long long timeout_ns)
         }
     }
     return -1;
+}
+
+/* Cancel the in-flight AFD_POLL IRP a released parker submitted (ctxp is the
+ * runloom_poll_ctx_t* the parker tracked via runloom_iocp_submit's out_ctx).
+ *
+ * Called from the single parker-unlink choke point (runloom_parker_unlink) on
+ * EVERY early-release path -- deadline-heap timeout, fd-ready dispatch on a
+ * sibling completion, cancel_all teardown -- so a parker never leaves its IRP
+ * in flight after its stack-allocated record is recycled.  This is the parker
+ * party's single ref-drop (the unlink choke point extracts park->iocp_ctx
+ * exactly once, so this runs at most once per ctx).
+ *
+ * ORDER MATTERS:
+ *   1. InterlockedExchange(&ctx->orphaned, 1) FIRST so the pump thread that
+ *      later drains this completion in runloom_iocp_wait observes orphaned!=0
+ *      and DROPS it (no dispatch) -- a stale IRP whose fd was reused can never
+ *      wake the new owner.
+ *   2. NtCancelIoFileEx on the SHARED runloom_afd_handle, keyed by &ctx->iosb
+ *      (the UserIosb the IRP was issued with), to FORCE that specific IRP to
+ *      complete now as STATUS_CANCELLED instead of lingering until the socket
+ *      actually closes.  The forced completion still posts to the IOCP, where
+ *      runloom_iocp_wait drops the IRP party's ref.
+ *   3. runloom_iocp_ctx_unref drops THIS (the parker) party's ref.
+ *
+ * Lifetime safety: steps 1-2 dereference ctx while the parker party STILL holds
+ * its ref (we drop it only in step 3), so a concurrent wait-drain (the IRP
+ * party) that frees on its decrement cannot have taken refs to 0 underneath us
+ * -- the deref is free-safe.  The LAST party to unref frees; no double free. */
+void runloom_iocp_cancel(void *ctxp)
+{
+    runloom_poll_ctx_t *ctx = (runloom_poll_ctx_t *)ctxp;
+    if (ctx == NULL) return;
+    /* Publish orphaned before the cancel so the drain side's load cannot miss
+     * it (InterlockedExchange is a full barrier). */
+    InterlockedExchange(&ctx->orphaned, 1);
+    if (pf_NtCancelIoFileEx != NULL &&
+        runloom_afd_handle != INVALID_HANDLE_VALUE) {
+        IO_STATUS_BLOCK local_iosb;
+        memset(&local_iosb, 0, sizeof(local_iosb));
+        /* IoRequestToCancel == the IRP's UserIosb (&ctx->iosb).  Best-effort:
+         * STATUS_NOT_FOUND (already completed) is fine -- the queued completion
+         * carries the orphaned flag and the drain drops the IRP ref. */
+        (void)pf_NtCancelIoFileEx(runloom_afd_handle, &ctx->iosb, &local_iosb);
+    }
+    /* Drop the parker party's ref last (frees iff the IRP party already drained). */
+    runloom_iocp_ctx_unref(ctx);
 }
 
 int runloom_iocp_wait(long long timeout_ns,
@@ -470,50 +620,76 @@ int runloom_iocp_wait(long long timeout_ns,
         ms = (DWORD)ms_ll;
     }
 
-    ok = GetQueuedCompletionStatus(runloom_iocp_handle, &bytes, &key, &ov, ms);
-    if (!ok && ov == NULL) {
-        /* timeout */
-        return 0;
+    /* Drain loop.  A single GetQueuedCompletionStatus can return a completion
+     * that belongs to a RELEASED parker -- one whose AFD IRP we cancelled (see
+     * runloom_iocp_cancel): it completes STATUS_CANCELLED and/or carries the
+     * orphaned flag, and its fd may already have been closed and REUSED by a
+     * different fiber.  Dispatching it (return 1) would wake / UAF the new owner;
+     * returning 0 would make the pump's drain loop BREAK, stranding real
+     * readiness completions still queued behind it.  So we free the orphaned ctx
+     * and RE-POLL with a 0 ms timeout to keep draining, looping until we hit a
+     * genuine readiness completion (return 1) or the queue is empty (return 0).
+     * The first iteration honours the caller's timeout; every retry uses 0 ms so
+     * we never block past a real readiness while skipping orphans. */
+    for (;;) {
+        ok = GetQueuedCompletionStatus(runloom_iocp_handle, &bytes, &key, &ov, ms);
+        ms = 0;   /* subsequent skips re-poll non-blocking */
+        if (!ok && ov == NULL) {
+            /* timeout (or the queue drained to empty across skips) -- nothing
+             * (more) ready.  Matches the original 0-return timeout contract. */
+            return 0;
+        }
+        /* The completion routes via the OVERLAPPED pointer.  For
+         * STATUS_PENDING -> async completion the kernel delivers our
+         * ApcContext (== ctx, since OVERLAPPED is the first field of
+         * runloom_poll_ctx_t).  Reading `key` would only work for the
+         * PostQueuedCompletionStatus path we use on STATUS_SUCCESS;
+         * the async kernel-driven path has key == 0 (our AFD
+         * association key). */
+        if (ov == NULL) {
+            /* A completion with a NULL OVERLAPPED is a pump-wake posted by
+             * runloom_iocp_wake() (PostQueuedCompletionStatus, NULL overlapped) --
+             * the Windows analogue of the epoll backend's eventfd write.  No
+             * fd to dispatch; report "woke, nothing ready" so the pump loop
+             * returns and the scheduler drains its wake_list.  Preserved
+             * verbatim: a pump-wake must surface as a 0-return, not be skipped. */
+            return 0;
+        }
+        ctx = CONTAINING_RECORD(ov, runloom_poll_ctx_t, overlapped);
+        (void)key;
+        (void)bytes;
+
+        /* ORPHANED / CANCELLED gate (checked BEFORE touching *out_fd):
+         * this completion belongs to a parker that was released early -- its
+         * IRP was cancelled (runloom_iocp_cancel set orphaned + forced
+         * STATUS_CANCELLED) -- so the fd may now be owned by a different fiber.
+         * Drop the IRP party's ref and re-poll for the next queued completion
+         * WITHOUT dispatching: skipping it here is what stops the
+         * stale-completion -> reused-fd use-after-free.  NumberOfHandles==0 is
+         * folded in: with the deadline heap as the sole timeout (AFD Timeout is
+         * INFINITE; see netpoll_wait_fd.c.inc), a 0-handle completion is a
+         * cancelled/stale IRP, not a per-op timeout -- skip it the same way.
+         * The unref frees iff the parker party already dropped its ref. */
+        if (InterlockedCompareExchange(&ctx->orphaned, 0, 0) != 0 ||
+            ctx->iosb.Status == STATUS_CANCELLED ||
+            ctx->poll_info.NumberOfHandles == 0) {
+            runloom_iocp_ctx_unref(ctx);
+            continue;
+        }
+
+        /* Real readiness.  Snapshot fd+events out of the ctx, THEN drop the IRP
+         * party's ref.  The parker party's ref keeps the parker's
+         * runloom_iocp_cancel(park->iocp_ctx) at the unlink choke point free-safe:
+         * if it has not yet unlinked, its ref is still live (this unref leaves
+         * refs>=1); if it already unlinked+unref'd, this unref frees.  Either way
+         * the subsequent runloom_pump_dispatch_event finds the parker by fd and
+         * its unlink-cancel never touches freed memory (the refcount, not the
+         * pointer, arbitrates the free). */
+        *out_fd = ctx->fd;
+        *out_events = runloom_from_afd_events(ctx->poll_info.Handles[0].Events);
+        runloom_iocp_ctx_unref(ctx);
+        return 1;
     }
-    /* The completion routes via the OVERLAPPED pointer.  For
-     * STATUS_PENDING -> async completion the kernel delivers our
-     * ApcContext (== ctx, since OVERLAPPED is the first field of
-     * runloom_poll_ctx_t).  Reading `key` would only work for the
-     * PostQueuedCompletionStatus path we use on STATUS_SUCCESS;
-     * the async kernel-driven path has key == 0 (our AFD
-     * association key). */
-    if (ov == NULL) {
-        /* A completion with a NULL OVERLAPPED is a pump-wake posted by
-         * runloom_iocp_wake() (PostQueuedCompletionStatus, NULL overlapped) --
-         * the Windows analogue of the epoll backend's eventfd write.  No
-         * fd to dispatch; report "woke, nothing ready" so the pump loop
-         * returns and the scheduler drains its wake_list. */
-        return 0;
-    }
-    ctx = CONTAINING_RECORD(ov, runloom_poll_ctx_t, overlapped);
-    (void)key;
-    (void)bytes;
-
-    *out_fd = ctx->fd;
-
-    /* AFD poll timeout: the driver writes NumberOfHandles = (# handles that
-     * signaled) on completion -- 0 means the per-op Timeout elapsed with
-     * nothing ready.  The Handles[0].Events field still holds the INPUT mask we
-     * submitted (the buffer is shared in/out), so reading it would report a
-     * phantom readiness (e.g. a wait_fd(READ, timeout) returning READ instead of
-     * 0 on its deadline -- caught by test_netpoll_conformance on iocp-afd).
-     * Report "nothing ready" (return 0) and let the parker wake via its deadline
-     * heap entry, matching the wsapoll/select and epoll/kqueue backends. */
-    if (ctx->poll_info.NumberOfHandles == 0) {
-        *out_events = 0;
-        free(ctx);
-        return 0;
-    }
-
-    *out_events = runloom_from_afd_events(ctx->poll_info.Handles[0].Events);
-
-    free(ctx);
-    return 1;
 }
 
 /* ============================================================ */

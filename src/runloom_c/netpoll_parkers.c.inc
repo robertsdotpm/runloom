@@ -72,6 +72,12 @@ static runloom_parked_t *runloom_parker_pool_acquire(void)
     p->heap_index = -1;
     p->park_ts = 0;
     p->reclaimed = 0;
+    /* Windows IOCP-AFD weak ctx ref: NULL until this park's runloom_iocp_submit
+     * stores it (under pool->lock).  Reset on every acquire so a freelist-reused
+     * parker never inherits a stale ctx pointer from a prior lifetime -- the unlink
+     * choke point would otherwise cancel an unrelated, already-freed IRP.  NULL on
+     * non-Windows / non-IOCP parks. */
+    p->iocp_ctx = NULL;
     /* Fresh park: not yet committed, not yet woken.  Plain store is
      * safe -- the parker is not linked, so no pump can see it. */
     p->commit = RUNLOOM_PARK_ARMED;
@@ -97,6 +103,10 @@ static void runloom_parker_pool_release(runloom_parked_t *p)
     p->g           = NULL;
     p->hub         = NULL;
     p->heap_index  = -1;
+    /* Weak IOCP ctx ref already cancelled+cleared at the unlink choke point
+     * (runloom_parker_unlink) before any release reaches here; scrub anyway as
+     * defence-in-depth so a freelist entry never carries a dangling ctx pointer. */
+    p->iocp_ctx    = NULL;
     if (runloom_parker_pool_size >= RUNLOOM_PARKER_POOL_CAP) {
         free(p);
         return;

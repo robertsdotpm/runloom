@@ -206,8 +206,29 @@ void runloom_netpoll_cancel_fd(int fd)
      * stack-allocated parker) -> use-after-free / access violation under M:N
      * free-threading (crashed every big_100 socket program at scale; POSIX has
      * no such auto-wake on close so cancel_fd is the sole, race-free waker
-     * there).  Skip it on IOCP; LOCAL_CLOSE is the race-free close-waker. */
-    if (runloom_win_use_iocp) return;
+     * there).  So we still do NOT walk by_fd to wake here -- LOCAL_CLOSE is the
+     * race-free close-waker for any fiber ALREADY parked.
+     *
+     * But there is a residual lost-wake the LOCAL_CLOSE completion alone cannot
+     * cover: a fiber that has NOT yet submitted its AFD_POLL when the close
+     * fires (the edge-before-park window -- e.g. it appended to a wait list,
+     * unlinked on a prior wake, or is between this close and its next wait_fd).
+     * No in-flight IRP exists for it, so the LOCAL_CLOSE edge is delivered to
+     * nobody and that fiber would park forever on the now-dead fd (the
+     * p12/p84 teardown-drain hang).  Record the close as a pending-wake for
+     * READ|WRITE so the NEXT wait_fd on this fd consumes the missed edge and
+     * returns immediately instead of parking (the same backstop the epoll/kqueue
+     * pumps use when an event arrives with no parker linked).  This is a plain
+     * lock-free bit set on the never-realloc'd per-fd array -- no parker is
+     * touched, so it cannot double-wake / UAF the LOCAL_CLOSE path.  The bit is
+     * idempotent and self-clearing: consumed by the next wait_fd, or harmlessly
+     * stale until the fd is reused (a reused fd's first wait_fd consumes+clears
+     * it, and on a freshly-opened socket a spurious immediate return just forces
+     * one re-check of a ready/dead fd -- never a dropped real edge). */
+    if (runloom_win_use_iocp) {
+        runloom_fd_pending_wake_set(fd, RUNLOOM_NETPOLL_READ | RUNLOOM_NETPOLL_WRITE);
+        return;
+    }
 #endif
     for (i = 0; i < RUNLOOM_PARKER_POOL_MAX; i++) {
         runloom_parker_pool_t *pool = &runloom_pools[i];
