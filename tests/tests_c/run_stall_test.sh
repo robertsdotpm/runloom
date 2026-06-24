@@ -2,19 +2,20 @@
 # Build + run the stalled-hub repro both ways. Logs to stall_test.log so
 # results survive the laggy interactive channel.
 set -u
-cd /home/x/projects/runloom/tests_c
+cd "$(dirname "$0")"                       # tests/tests_c (was a hardcoded dead clone path)
+SRC="$(cd ../../src && pwd)"               # repo src/ (post-reorg: tests/tests_c -> ../../src)
 LOG=stall_test.log
 exec > "$LOG" 2>&1
 echo "=== stall test $(date -Is) ==="
 PY=/home/x/.pyenv/versions/3.13.13t
-SO=/home/x/projects/runloom/src/runloom_c.cpython-313t-x86_64-linux-gnu.so
+SO="$SRC/runloom_c.cpython-313t-x86_64-linux-gnu.so"
 
 echo "--- build ---"
 cc -g -O2 -Wall -Wextra -Wno-unused-parameter \
-   -I"$PY/include/python3.13t" -I../src/runloom_c \
+   -I"$PY/include/python3.13t" -I"$SRC/runloom_c" \
    test_stall_steal.c -o test_stall_steal \
    -L"$PY/lib" -Wl,-rpath,"$PY/lib" -lpython3.13t -pthread \
-   -Wl,-rpath,/home/x/projects/runloom/src -Wl,--no-as-needed "$SO"
+   -Wl,-rpath,"$SRC" -Wl,--no-as-needed "$SO"
 echo "build rc=$?"
 ls -la test_stall_steal 2>&1 || { echo "BUILD FAILED"; exit 1; }
 

@@ -27,9 +27,9 @@
 #include <unistd.h>
 #include <time.h>
 
-#include "../src/runloom_c/runloom_sched.h"
-#include "../src/runloom_c/mn_sched.h"
-#include "../src/runloom_c/runloom_blockpool.h"
+#include "../../src/runloom_c/runloom_sched.h"
+#include "../../src/runloom_c/mn_sched.h"
+#include "../../src/runloom_c/runloom_blockpool.h"
 
 #define NHUBS     1
 #define NBLOCK    6

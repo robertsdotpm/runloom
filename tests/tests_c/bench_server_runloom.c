@@ -33,10 +33,10 @@
 #include <sys/resource.h>
 #include <arpa/inet.h>
 
-#include "../src/runloom_c/runloom_sched.h"
-#include "../src/runloom_c/mn_sched.h"
-#include "../src/runloom_c/netpoll.h"
-#include "../src/runloom_c/runloom_diag.h"
+#include "../../src/runloom_c/runloom_sched.h"
+#include "../../src/runloom_c/mn_sched.h"
+#include "../../src/runloom_c/netpoll.h"
+#include "../../src/runloom_c/runloom_diag.h"
 
 #define PAYLOAD     "hellopyg"
 #define PAYLOAD_LEN 8

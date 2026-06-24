@@ -36,9 +36,9 @@
 #include <time.h>
 #include <sys/eventfd.h>
 
-#include "../src/runloom_c/runloom_sched.h"
-#include "../src/runloom_c/mn_sched.h"
-#include "../src/runloom_c/netpoll.h"
+#include "../../src/runloom_c/runloom_sched.h"
+#include "../../src/runloom_c/mn_sched.h"
+#include "../../src/runloom_c/netpoll.h"
 
 #define N_WORKERS 64
 #define NHUBS      2
