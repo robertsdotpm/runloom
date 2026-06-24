@@ -168,7 +168,7 @@ def table(tid, headers, rows, note="", mark_best=True):
 # scheme so every table reads consistently, e.g. runloom_epoll_py_tcpcon.
 STD_NAME = {
     "runloom_sync":       "runloom_epoll_py_sync",
-    "runloom_c":          "runloom_epoll_py_tcpcon",
+    "runloom_c":          "runloom_epoll_cython_tcpcon",
     "runloom_c_cython":   "runloom_epoll_cython_tcpcon",
     "runloom_iouring":    "runloom_iouring_py_sync",
     "runloom_cython":     "runloom_iouring_cython_tcpcon",
@@ -179,6 +179,7 @@ STD_NAME = {
     "uvloop":             "uvloop_libuv_py_proto",
     "gevent":             "gevent_libev_py_stream",
     "go":                 "go_netpoll_native_net",
+    "runloom":            "runloom_epoll_py_fiber",
     "runloom_py":         "runloom_epoll_py_fiber",
     "greenlet":           "greenlet_native_py_coro",
     # authored labels in the saturated conn/s table
