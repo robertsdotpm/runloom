@@ -691,6 +691,9 @@ static RUNLOOM_TLS int runloom_tls_fastpath_streak = 0;
  * it composes with any other installed wrapper; _PyInterpreterFrame is opaque
  * (passed straight through). */
 static _PyFrameEvalFunction runloom_preempt_prev_eval = NULL;
+/* Process-lifetime guard: the preempt eval-frame hook is installed EXACTLY ONCE
+ * (first mn_init) and never swapped back -- see runloom_preempt_install. */
+static int runloom_preempt_installed = 0;
 
 static PyObject *runloom_preempt_eval_frame(PyThreadState *ts,
                                          struct _PyInterpreterFrame *frame,
@@ -838,40 +841,63 @@ static int runloom_mn_liveness_pending_cb(void *arg)
 }
 #endif
 
-/* Install/uninstall the preemption eval-frame wrapper on `interp`.  Install
- * runs in mn_init after runloom_sysmon_config (so runloom_preempt_enabled is set) and
- * BEFORE any fiber runs Python; uninstall runs in mn_fini.  No-ops unless
+/* Install the preemption eval-frame wrapper on `interp` ONCE for the process
+ * lifetime.  Install runs in mn_init after runloom_sysmon_config (so
+ * runloom_preempt_enabled is set) and BEFORE any fiber runs Python.  No-op unless
  * RUNLOOM_PREEMPT (and 3.13+).  Capturing the previous func means we chain rather
- * than clobber a wrapper someone else installed. */
+ * than clobber a wrapper someone else installed.
+ *
+ * INSTALL-ONCE, NEVER-UNINSTALL.  Toggling interp->eval_frame on every
+ * mn_init/mn_fini cycle is a data race against EVERY other Python thread: a
+ * foreign/user thread not managed by runloom loads-and-indirect-calls
+ * interp->eval_frame in _PyEval_EvalFrame on every frame, and CPython's setter
+ * is a plain non-atomic store that also represents "the default" as a NULL.
+ * _PyEval_EvalFrame double-loads the field (once for the NULL-check, once for
+ * the call), so an mn_fini uninstall storing NULL between those two loads makes
+ * the foreign thread call through NULL -> SIGSEGV at 0x0 (TSan-confirmed: the
+ * racing object is interp->eval_frame; write=this install/the old uninstall,
+ * read=_PyEval_EvalFrame on a foreign thread; see docs/dev + the gold-TSan
+ * finding).  Installing exactly once leaves the only store as NULL->hook (which
+ * cannot create the NULL-at-call window) and a STABLE pointer thereafter, so
+ * concurrent readers can never hit NULL -> the SEGV is gone.
+ *
+ * RESIDUAL (benign, suppressed): CPython's setter is a plain store and the
+ * reader (_PyEval_EvalFrame) a plain load, so the lone NULL->hook publish is,
+ * formally, still a data race vs a foreign thread already dispatching frames --
+ * TSan flags it, though it cannot crash (the store is monotonic to a non-NULL
+ * aligned pointer; a reader observes either the old default or the new hook,
+ * both valid).  An extension cannot synchronize it: _PyEval_StopTheWorld is not
+ * exported to extensions, and an atomic store on our side does not help (the
+ * reader's load stays non-atomic).  The unsynchronized access lives in CPython's
+ * own non-atomic eval-frame setter, so it is annotated benign on the CPython
+ * frame in tools/tsan_suppressions.txt (race:_PyInterpreterState_SetEvalFrameFunc
+ * -- an upstream FT gap, not a runloom-fixable frame).  The hook
+ * self-gates (runloom_tls_hub == NULL -> straight pass-through to the chained
+ * prev), so leaving it installed between sessions is correct and cheap. */
 static void runloom_preempt_install(PyInterpreterState *interp)
 {
 #if PY_VERSION_HEX >= 0x030D0000
     if (!runloom_preempt_enabled) return;
+    if (runloom_preempt_installed) return;   /* install once; never re-swap */
     /* Release-store so the eval hook's acquire-load sees a fully-published
      * prev pointer; pairs with the load in runloom_preempt_eval_frame. */
     __atomic_store_n((void **)&runloom_preempt_prev_eval,
                      (void *)_PyInterpreterState_GetEvalFrameFunc(interp),
                      __ATOMIC_RELEASE);
     _PyInterpreterState_SetEvalFrameFunc(interp, runloom_preempt_eval_frame);
+    runloom_preempt_installed = 1;
 #else
     (void)interp;
 #endif
 }
 
+/* Intentionally a NO-OP.  The preempt eval-frame hook is installed once for the
+ * process lifetime (see runloom_preempt_install) and is NEVER swapped back: the
+ * per-session restore was the write half of the interp->eval_frame data race
+ * (mn_fini storing the default -- i.e. NULL -- while a foreign thread dispatched
+ * a frame).  Because the hook passes straight through when no hub is active
+ * (runloom_tls_hub == NULL), there is nothing to restore between sessions. */
 static void runloom_preempt_uninstall(PyInterpreterState *interp)
 {
-#if PY_VERSION_HEX >= 0x030D0000
-    {
-        /* Cast through void** for the MSVC atomic shim's _Generic (it can't
-         * name _PyFrameEvalFunction in the shared macro -- some TUs lack the
-         * Python headers); a no-op on GCC's type-generic builtin. */
-        _PyFrameEvalFunction prev = (_PyFrameEvalFunction)
-            __atomic_load_n((void **)&runloom_preempt_prev_eval, __ATOMIC_ACQUIRE);
-        if (!runloom_preempt_enabled || prev == NULL) return;
-        _PyInterpreterState_SetEvalFrameFunc(interp, prev);
-        __atomic_store_n((void **)&runloom_preempt_prev_eval, (void *)NULL, __ATOMIC_RELEASE);
-    }
-#else
     (void)interp;
-#endif
 }

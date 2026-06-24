@@ -22,3 +22,18 @@ race:_PyObjectStackChunk_New
 #  prefer the narrowest function name over a whole-file match.  Do NOT use a
 #  blanket called_from_lib:libpython... rule -- every runloom race is "called
 #  from" libpython via cfunction_call, so that would hide real bugs.)
+
+# --- CPython non-atomic eval-frame hook setter (Python/pystate.c) ---
+# _PyInterpreterState_SetEvalFrameFunc stores interp->eval_frame with a plain
+# (non-atomic) write, and _PyEval_EvalFrame reads it with a plain load + indirect
+# call.  runloom installs its RUNLOOM_PREEMPT eval-frame wrapper EXACTLY ONCE for
+# the process lifetime (runloom_preempt_install; it used to toggle per
+# mn_init/mn_fini, which raced a foreign thread's frame dispatch into a NULL
+# call -> SIGSEGV; that toggle is gone).  The lone remaining NULL->hook publish
+# still trips TSan against a foreign thread already dispatching frames, but it
+# cannot crash (monotonic store to a non-NULL aligned pointer; the reader sees
+# the old default or the new hook, both valid).  This is an upstream FT gap (the
+# setter/reader would need to be atomic); an extension cannot close it
+# (_PyEval_StopTheWorld is not exported, and an atomic store on our side does not
+# make CPython's load atomic).  Suppressed on the CPython frame, not runloom's.
+race:_PyInterpreterState_SetEvalFrameFunc
