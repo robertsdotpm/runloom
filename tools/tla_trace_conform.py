@@ -29,7 +29,7 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
-TLA = os.path.join(ROOT, "verify", "tla")
+TLA = os.path.join(HERE, "verify", "tla")
 JAR = os.path.join(TLA, "tla2tools.jar")
 
 

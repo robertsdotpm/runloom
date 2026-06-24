@@ -26,11 +26,11 @@ PY_LIBNAME  := python$(PY_VERSION)$(PY_ABIFLAGS)
 
 # runloom_c .so suffix matches the Python build.
 RUNLOOM_SO_NAME := runloom_c.cpython-$(subst .,,$(PY_VERSION))$(PY_ABIFLAGS)-x86_64-linux-gnu.so
-RUNLOOM_SO      := $(abspath ../src/$(RUNLOOM_SO_NAME))
-RUNLOOM_SO_DIR  := $(abspath ../src)
+RUNLOOM_SO      := $(abspath ../../src/$(RUNLOOM_SO_NAME))
+RUNLOOM_SO_DIR  := $(abspath ../../src)
 
 CFLAGS_BASE := -g -O2 -Wall -Wextra -Wno-unused-parameter \
-               -I$(PY_INC) -I../src/runloom_c
+               -I$(PY_INC) -I../../src/runloom_c
 # Link against the absolute path of the .so (so DT_NEEDED records the
 # absolute path; otherwise the loader looks for the relative path
 # verbatim from the program's CWD).  Plus an explicit RPATH for ldd.
@@ -84,8 +84,8 @@ bench_server_runloom-ubsan: bench_server_runloom.c $(RUNLOOM_SO)
 # "unexpected memory mapping").  NOTE: cldeque.c's standalone SEQ_CST
 # fence in steal() is not modelled by TSan (it warns); that ordering is
 # covered exhaustively by verify/cbmc + verify/spin instead.
-CLDEQUE_SRC  := test_cldeque.c ../src/runloom_c/cldeque.c
-CLDEQUE_CF   := -g -Wall -Wextra -Wno-unused-parameter -I../src/runloom_c -pthread
+CLDEQUE_SRC  := test_cldeque.c ../../src/runloom_c/cldeque.c
+CLDEQUE_CF   := -g -Wall -Wextra -Wno-unused-parameter -I../../src/runloom_c -pthread
 
 test_cldeque: $(CLDEQUE_SRC)
 	$(CC) -O2 $(CLDEQUE_CF) $(CLDEQUE_SRC) -o test_cldeque

@@ -18,7 +18,7 @@ set -u
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
-TC="$ROOT/tests_c"
+TC="$ROOT/tests/tests_c"
 
 PUSHES=${1:-20000}
 THIEVES=${2:-4}

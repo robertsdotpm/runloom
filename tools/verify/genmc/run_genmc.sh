@@ -114,7 +114,7 @@ fi
 # The C-layout refactor split runloom_sched.c into runloom_sched_*.c.inc
 # modules (the park/wake fences now live in runloom_sched_parkwake.c.inc), so
 # count across the whole module set rather than one filename.
-SRCDIR="$HERE/../../src/runloom_c"
+SRCDIR="$HERE/../../../src/runloom_c"
 printf '  [genmc] %-30s ' "park/wake SC-fence drift-guard"
 nfence=$(grep -h '__atomic_thread_fence(__ATOMIC_SEQ_CST)' \
             "$SRCDIR"/runloom_sched.c "$SRCDIR"/runloom_sched_*.c.inc 2>/dev/null | wc -l)
@@ -205,7 +205,7 @@ fi
 # The refactor split io_uring.c into io_uring*.c.inc modules (the op->wait
 # markers + exchanges now live in io_uring_l_{ring,buf,...}.c.inc), so check
 # the whole io_uring module set rather than one filename.
-IOU_SRCS=( "$HERE"/../../src/runloom_c/io_uring.c "$HERE"/../../src/runloom_c/io_uring*.c.inc )
+IOU_SRCS=( "$HERE"/../../../src/runloom_c/io_uring.c "$HERE"/../../../src/runloom_c/io_uring*.c.inc )
 printf '  [genmc] %-30s ' "iouring wait-commit drift-guard"
 if grep -qh "RUNLOOM_IOURING_WAIT_PARKED" "${IOU_SRCS[@]}" 2>/dev/null \
    && grep -qh "RUNLOOM_IOURING_WAIT_DONE" "${IOU_SRCS[@]}" 2>/dev/null \
