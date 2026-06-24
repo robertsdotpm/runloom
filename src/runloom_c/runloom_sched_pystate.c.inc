@@ -159,20 +159,49 @@ void runloom_pystate_snap(runloom_pystate_snap_t *snap)
                          ts->exc_state.exc_value == NULL, 1)) {
         snap->exc_info = NULL;
         snap->exc_chain_bottom = NULL;
+        snap->exc_owner_count = 0;
     } else {
         snap->exc_info = ts->exc_info;
         snap->exc_state = ts->exc_state;
         Py_XINCREF(snap->exc_state.exc_value);
-        /* Record the bottom per-g exc item -- the one whose previous_item roots
-         * at THIS tstate's &exc_state -- so a cross-hub load (steal-woken) can
-         * re-root it onto the target hub's tstate.  Bounded walk (chain depth =
-         * coroutine nesting).  NULL if the chain doesn't root here (defensive;
-         * then load skips the re-root). */
+        /* Walk the exc_info chain ONCE, from the head (ts->exc_info) down to the
+         * tstate-embedded &exc_state, doing two things:
+         *   (1) record exc_chain_bottom -- the item whose previous_item roots at
+         *       THIS tstate's &exc_state -- so a cross-hub load (steal-woken) can
+         *       re-root it onto the target hub's tstate; and
+         *   (2) PIN the owner of every NON-base item with a strong ref (p69
+         *       residual UAF).  An item that is not &ts->exc_state is embedded in
+         *       a generator/coroutine/async-gen object's *_exc_state field, all at
+         *       the SAME byte offset (shared _PyGenObject_HEAD layout), so the
+         *       owning object is item - offsetof(PyGenObject, gi_exc_state).  We
+         *       type-check that recovered pointer before trusting the offset, then
+         *       INCREF it so a transient gen (e.g. extract_tb's internal
+         *       _extract_from_extended_frame_gen) cannot be freed while this fiber
+         *       is parked mid-iteration -- which would otherwise leave snap->exc_info
+         *       and the previous_item links dangling, and load would re-install a
+         *       wild ts->exc_info (the p69/p69b AV under preemption).
+         * Bounded walk (chain depth = coroutine nesting).  exc_chain_bottom stays
+         * NULL if the chain doesn't root here (defensive; load then skips re-root). */
         {
             _PyErr_StackItem *it = ts->exc_info;
             int guard = 0;
             snap->exc_chain_bottom = NULL;
+            snap->exc_owner_count = 0;
             while (it != NULL && it != &ts->exc_state && guard++ < 256) {
+                if (snap->exc_owner_count <
+                        (int)(sizeof(snap->exc_owners) / sizeof(snap->exc_owners[0]))) {
+                    PyObject *owner = (PyObject *)((char *)it -
+                                                  offsetof(PyGenObject, gi_exc_state));
+                    /* Only pin if the recovered pointer really is a gen/coro/
+                     * async-gen object; the *_exc_state fields share one offset.
+                     * A non-matching item (shouldn't occur for a per-g chain) is
+                     * left borrowed rather than risking a bogus INCREF. */
+                    if (PyGen_CheckExact(owner) || PyCoro_CheckExact(owner) ||
+                        PyAsyncGen_CheckExact(owner)) {
+                        Py_INCREF(owner);
+                        snap->exc_owners[snap->exc_owner_count++] = owner;
+                    }
+                }
                 if (it->previous_item == &ts->exc_state) {
                     snap->exc_chain_bottom = it;
                     break;
@@ -380,6 +409,7 @@ void runloom_pystate_load(runloom_pystate_snap_t *snap)
             ts->exc_state.previous_item = NULL;
             ts->exc_info = &ts->exc_state;
         }
+        snap->exc_owner_count = 0;   /* none pinned on this path */
     } else {
         /* Drop ts's old exc_value before overwriting it with snap's
          * (which we own a strong ref to from the matching snap call). */
@@ -398,6 +428,13 @@ void runloom_pystate_load(runloom_pystate_snap_t *snap)
         snap->exc_info = NULL;
         snap->exc_state.exc_value = NULL;       /* ownership transferred */
         snap->exc_state.previous_item = NULL;
+        /* Release the gen/coro owners pinned across the suspension (p69 residual
+         * UAF).  Safe to drop now: the chain is re-installed into THIS tstate and
+         * the fiber's resumed frames hold their own refs to these generators
+         * again, so dropping our extra ref cannot free a still-referenced item. */
+        while (snap->exc_owner_count > 0) {
+            Py_DECREF(snap->exc_owners[--snap->exc_owner_count]);
+        }
     }
     /* Restore current_exception: drop whatever the previous g left
      * and install ours.  snap's ref transfers to ts. */
@@ -448,6 +485,11 @@ void runloom_pystate_snap_clear(runloom_pystate_snap_t *snap)
     Py_CLEAR(snap->context);
     Py_CLEAR(snap->exc_state.exc_value);
     snap->exc_info = NULL;
+    snap->exc_chain_bottom = NULL;
+    /* Drop the gen/coro owners pinned across the suspension (p69 residual UAF). */
+    while (snap->exc_owner_count > 0) {
+        Py_DECREF(snap->exc_owners[--snap->exc_owner_count]);
+    }
     Py_CLEAR(snap->current_exception);
     Py_CLEAR(snap->c_profileobj);            /* BUG #11: drop held hook refs */
     Py_CLEAR(snap->c_traceobj);

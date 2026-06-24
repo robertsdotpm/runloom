@@ -97,6 +97,22 @@ struct runloom_pystate_snap {
      * Borrowed (the item lives in a per-g gen/coro object kept alive by the g's
      * frames); no ref held. */
     _PyErr_StackItem *exc_chain_bottom;
+    /* p69 residual UAF: each _PyErr_StackItem in the saved exc_info chain that is
+     * NOT the tstate-embedded &exc_state is embedded inside a generator/coroutine
+     * object's gi_exc_state.  The mac fix borrowed those items, ASSUMING the g's
+     * frames keep the owning gen alive across the suspension -- but the internal
+     * traceback.extract_tb generator (_extract_from_extended_frame_gen) is
+     * TRANSIENT: it can be exhausted and FREED while the fiber is parked
+     * mid-extract_tb (only under preemption), after which snap->exc_info (its
+     * gi_exc_state) and the previous_item links into it DANGLE -> the borrowed
+     * pointer load re-installs into ts->exc_info is wild -> AV on the next raise.
+     * Fix: own a STRONG ref to every gen/coro that owns a chain item across the
+     * suspension, so none can be freed.  count==0 in the common case (no in-flight
+     * exception, or the only item is &exc_state).  Capacity bounds coroutine
+     * nesting depth captured; deeper chains fall back to leaving the head item's
+     * owner unpinned only past the cap (vanishingly rare, see snap). */
+    PyObject *exc_owners[8];
+    int exc_owner_count;
 #endif
 #if PY_VERSION_HEX >= 0x030B0000 && PY_VERSION_HEX < 0x030C0000
     /* 3.11: single recursion counter, named recursion_remaining. */
