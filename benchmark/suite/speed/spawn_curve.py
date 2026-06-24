@@ -31,8 +31,9 @@ Two runloom spawn entries are reported:
   runloom_c  -- the pure-C c_entry path (no Python frame): the scheduler ceiling.
 NOTE: the DEFAULT runloom.fiber adds the grow-down auto-sizer (small right-sized
 stacks, an RSS feature Go lacks).  Its learned size spawns down the DEFERRED
-stack-alloc path, so the default is ~1.34M/s warm (small-stacks AND fast), not the
-old ~7x-slower eager-alloc number; optimize("throughput")/("memory") swaps
+stack-alloc path, so the default is ~1.4M/s warm (small-stacks AND fast, ~1.7M
+under optimize("throughput")), not the old ~7x-slower eager-alloc number; the
+optimize("throughput")/("memory") swap
 runloom.fiber between fiber_fast and grow-down.
 """
 import json
