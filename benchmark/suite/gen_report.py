@@ -1169,7 +1169,7 @@ def sec_spawn_curve(sc):
     palette = {"go": "var(--acc)", "runloom_c": "var(--good)", "runloom_py": "var(--warn)",
                "uvloop": "#ff6b9d", "asyncio": "#ff9966", "greenlet": "#e06c75"}
     order = ["go", "uvloop", "asyncio", "greenlet", "runloom_c", "runloom_py"]
-    series, rows = [], []
+    series, rows_dict = [], {}
     for rt in order:
         if rt not in rates:
             continue
@@ -1178,7 +1178,11 @@ def sec_spawn_curve(sc):
         cells = [prog_cell(rt)]
         for v in ys:
             cells.append((fmt(v) if v else "&mdash;", v if v else -1))
-        rows.append(cells)
+        # Store with 1M value (last column) for sorting
+        last_val = getr(rt, NS[-1]) if NS else -1
+        rows_dict[last_val] = cells
+    # Sort rows by 1M spawn rate (highest first)
+    rows = [rows_dict[k] for k in sorted(rows_dict.keys(), reverse=True)]
     chart = svg_linechart("ch_spawn", series, xlabels,
                           xaxis="tasks spawned, front-loaded (N)", ylabel="spawn / s (log)")
     cols = [("Runtime", False)] + [(fmtN(n), True) for n in NS]
@@ -1191,8 +1195,8 @@ def sec_spawn_curve(sc):
             'is a fresh process (COLD first-burst; warm is a touch higher). Click a legend entry to '
             'isolate a line.</p>' % sc.get("hubs", 8)
             + chart
-            + table("t_spawncurve", cols, rows, mark_best=False, note=
-                    "Higher is better; NAKED single-spawn (create+run+destroy one fiber, no I/O, no "
+            + table("t_spawncurve", cols, rows, mark_best=True, note=
+                    "Higher is better. Sorted by 1M spawn rate (rightmost column). NAKED single-spawn (create+run+destroy one fiber, no I/O, no "
                     "batching). Stackful runtimes (runloom, greenlet) carry a real C stack per task; "
                     "asyncio/uvloop coroutines are stackless Python objects; Go goroutines are 2&nbsp;KB "
                     "grow-on-demand stacks. NB: the <b>default</b> <code>runloom.fiber</code> does "
