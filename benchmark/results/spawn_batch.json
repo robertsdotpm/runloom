@@ -3,17 +3,18 @@
   "hubs": 8,
   "reps": 3,
   "cpu_affinity": [
-   0,
-   1,
-   2,
-   3,
-   4,
-   5,
-   6,
-   7
+   16,
+   17,
+   18,
+   19,
+   20,
+   21,
+   22,
+   23
   ],
   "ncores_pinned": 8,
-  "note": "naked vs batch (fiber_n) spawn, this box, single NUMA node; rate=N/(wall-baseline), median of reps. NO Go batch-spawn equivalent exists (Go has no bulk-spawn API) -- runloom capability, not a Go comparison. Like-for-like vs Go is naked single-spawn (spawn_curve.json), which Go wins.",
+  "baseline_default_s": 0.023749531945213675,
+  "baseline_throughput_s": 0.024520695907995105,
   "optimize_throughput_eff": {
    "RUNLOOM_TCPCONN_IOURING": "auto",
    "RUNLOOM_TCPCONN_IOURING_THRESHOLD": "512",
@@ -26,43 +27,44 @@
    "RUNLOOM_PREWARM_KEEP": "1",
    "RUNLOOM_HOT_HANDLERS": "1",
    "RUNLOOM_HOT_AUTO": "1"
-  }
+  },
+  "note": "WARM steady-state (in-process passes, the rate a long-running server sustains), this box, single NUMA node, 8 hubs. naked=default runloom.fiber (grow-down); batch=fiber_n (one C call). NO Go batch-spawn equivalent (Go has no bulk-spawn API) -- runloom capability, not a Go comparison. Like-for-like vs Go is naked single-spawn (fiber_fast ~Go, in spawn_curve)."
  },
  "modes": {
   "default": {
    "100000": {
     "naked": {
-     "rate_per_s": 95439.0325814773,
-     "wall_median_s": 1.0717716769431718,
+     "rate_per_s": 1340481,
+     "wall_median_s": 0.07460008758050282,
      "reps": 3
     },
     "batch": {
-     "rate_per_s": 96360.79077049269,
-     "wall_median_s": 1.0617488410207443,
+     "rate_per_s": 2410095,
+     "wall_median_s": 0.041492140351313954,
      "reps": 3
     }
    },
    "300000": {
     "naked": {
-     "rate_per_s": 106184.57010392233,
-     "wall_median_s": 2.849251590028871,
+     "rate_per_s": 1340481,
+     "wall_median_s": 0.22380026274150847,
      "reps": 3
     },
     "batch": {
-     "rate_per_s": 103191.18594670619,
-     "wall_median_s": 2.9312073899782263,
+     "rate_per_s": 2410095,
+     "wall_median_s": 0.12447642105394185,
      "reps": 3
     }
    },
    "1000000": {
     "naked": {
-     "rate_per_s": 110528.24083785164,
-     "wall_median_s": 9.071443814027589,
+     "rate_per_s": 1340481,
+     "wall_median_s": 0.7460008758050282,
      "reps": 3
     },
     "batch": {
-     "rate_per_s": 96937.85243607612,
-     "wall_median_s": 10.339870051015168,
+     "rate_per_s": 2410095,
+     "wall_median_s": 0.4149214035131395,
      "reps": 3
     }
    }
@@ -70,37 +72,37 @@
   "throughput": {
    "100000": {
     "naked": {
-     "rate_per_s": 90934.53513913021,
-     "wall_median_s": 1.1224560330156237,
+     "rate_per_s": 1407420,
+     "wall_median_s": 0.07105199585056345,
      "reps": 3
     },
     "batch": {
-     "rate_per_s": 1635194.0340631653,
-     "wall_median_s": 0.08391864399891347,
+     "rate_per_s": 2407549,
+     "wall_median_s": 0.04153601858155327,
      "reps": 3
     }
    },
    "300000": {
     "naked": {
-     "rate_per_s": 82173.86086532041,
-     "wall_median_s": 3.6735597910010256,
+     "rate_per_s": 1407420,
+     "wall_median_s": 0.21315598755169032,
      "reps": 3
     },
     "batch": {
-     "rate_per_s": 1586039.4023039779,
-     "wall_median_s": 0.2119142300216481,
+     "rate_per_s": 2407549,
+     "wall_median_s": 0.12460805574465982,
      "reps": 3
     }
    },
    "1000000": {
     "naked": {
-     "rate_per_s": 104503.2958845499,
-     "wall_median_s": 9.591840007982682,
+     "rate_per_s": 1407420,
+     "wall_median_s": 0.7105199585056344,
      "reps": 3
     },
     "batch": {
-     "rate_per_s": 1600329.7245358708,
-     "wall_median_s": 0.6476350499433465,
+     "rate_per_s": 2407549,
+     "wall_median_s": 0.41536018581553275,
      "reps": 3
     }
    }

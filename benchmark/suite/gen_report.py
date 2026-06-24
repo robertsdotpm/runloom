@@ -503,25 +503,29 @@ def sec_speed(speed):
     rows.sort(key=lambda r: -(r[4][1] or 0))   # best = highest spawn/s per core
     out.append("<h3>Spawn 1M fibers / goroutines / coroutines (NAKED single-spawn)</h3>")
     out.append('<p class="warn">This is <b>naked single-spawn</b> &mdash; ONE spawner creating '
-               'tasks <b>one at a time</b>, no I/O. runloom&rsquo;s FAST spawn '
-               '(<code>runloom.fiber_fast</code>) reaches <b>~2.0M/s &mdash; matching Go</b>&rsquo;s '
-               '~2.1M/s <code>go&nbsp;f()</code> on this box, the fair apples-to-apples; the pure-C '
-               '<code>c_entry</code> scheduler path runs <b>~2.32M/s warm (beats Go, ~1.1&times;)</b>. '
-               'The <b>default</b> <code>runloom.fiber</code> (grow-down auto-sizer, small right-sized '
-               'stacks &mdash; an RSS feature Go lacks) is now <b>~1.73M/s warm</b> &mdash; 1.34&times; '
-               'behind <code>c_entry</code>, not the old ~7&times;: its learned size now spawns down the '
-               'DEFERRED stack-alloc path, so it is small-stacked AND fast. '
-               '<code>optimize("throughput")</code> points <code>fiber</code> at <code>fiber_fast</code>, '
-               '<code>optimize("memory")</code> at grow-down. Batch fleet-launch '
-               '(<a href="#activespawn">Active spawn</a>: bulk <code>fiber_n</code>) hits ~2.29M/s '
-               '(1.09&times; Go) &mdash; a further runloom capability (Go has no batch API).</p>')
+               'tasks <b>one at a time</b>, no I/O. <b>Warm steady-state on this box (the rate a '
+               'long-running server sustains)</b>: Go&rsquo;s <code>go&nbsp;f()</code> is the fastest at '
+               '<b>~2.36M/s</b>. runloom&rsquo;s fast spawn <code>runloom.fiber_fast</code> does '
+               '<b>~1.92M/s (0.81&times; Go)</b>, the pure-C <code>c_entry</code> scheduler path '
+               '<b>~2.07M/s (0.88&times; Go)</b> &mdash; so on naked single-spawn <b>Go is ahead</b>; '
+               'runloom closes the gap to parity only with batch. The <b>default</b> '
+               '<code>runloom.fiber</code> (grow-down auto-sizer, small right-sized stacks &mdash; an RSS '
+               'feature Go lacks) is <b>~1.34M/s (0.57&times; Go)</b>, 1.5&times; behind <code>c_entry</code> '
+               '&mdash; not the old ~7&times;: its learned size spawns down the DEFERRED stack-alloc path, '
+               'so it is small-stacked AND fast. <code>optimize("throughput")</code> points '
+               '<code>fiber</code> at <code>fiber_fast</code>, <code>optimize("memory")</code> at '
+               'grow-down. Batch fleet-launch (<a href="#activespawn">Active spawn</a>: bulk '
+               '<code>fiber_n</code>) hits <b>~2.41M/s (1.02&times; Go)</b> &mdash; the one spawn path that '
+               'reaches Go parity, a runloom capability (Go has no batch API).</p>')
     out.append(table("t_spawn", [("Runtime", False), ("Cores", True), ("spawn/s", True),
                                  ("&micro;s/task", True), ("spawn/s / core", True)], rows,
                      mark_best=True,
                      note="Higher is better. Sorted by <b>spawn/s per core</b> (rightmost column). "
-                     "Naked single-spawn (warm): default <code>runloom.fiber</code> "
-                     "<b>~1.73M/s</b>, pure-C <code>c_entry</code> <b>~2.32M (~1.1&times; Go)</b>, "
-                     "<code>fiber_fast</code> ~Go. The default sits 1.34&times; behind c_entry (not the "
+                     "Warm steady-state, naked single-spawn: <b>Go ~2.36M leads</b>; "
+                     "<code>fiber_fast</code> <b>~1.92M (0.81&times; Go)</b>, pure-C <code>c_entry</code> "
+                     "<b>~2.07M (0.88&times; Go)</b>, default <code>runloom.fiber</code> <b>~1.34M "
+                     "(0.57&times;)</b>. Only batch <code>fiber_n</code> (~2.41M, see Active spawn) reaches "
+                     "Go parity. The default sits 1.5&times; behind c_entry (not the "
                      "old ~7&times;) &mdash; small-stacked yet fast via the deferred-alloc grow-down path "
                      "(<code>optimize(\"throughput\"/\"memory\")</code> swaps it). runloom &amp; greenlet "
                      "carry real C stacks (heavier than 2&nbsp;KB goroutines); batch <code>fiber_n</code> "
@@ -1113,35 +1117,40 @@ def sec_exec_summary():
             'spreads it over every core. The small-payload echo <a href="#perf">req/s</a> headline is '
             '<b>client-bound</b> here (the 16-core loadgen saturates first), so the fast servers cluster '
             'within noise &mdash; read it as "scheduling isn\'t the bottleneck," not a ranking. Warm '
-            'one-at-a-time spawn: default <code>runloom.fiber</code> <b>~1.73M/s</b> (small-stacked yet '
-            'fast, 1.34&times; behind c_entry, not the old ~7&times;), pure-C <code>c_entry</code> '
-            '<b>~2.32M (1.1&times; Go)</b>, batch <code>fiber_n</code> ~2.29M (1.09&times; Go). '
+            'one-at-a-time spawn (steady-state, the rate a server sustains): <b>Go leads at ~2.36M/s</b>; '
+            'runloom <code>fiber_fast</code> <b>~1.92M (0.81&times; Go)</b>, pure-C <code>c_entry</code> '
+            '<b>~2.07M (0.88&times;)</b>, default <code>runloom.fiber</code> <b>~1.34M (0.57&times;)</b>; '
+            'only batch <code>fiber_n</code> <b>~2.41M</b> reaches Go parity (1.02&times;). '
             'Connection <a href="#churn">churn</a> ~75&ndash;78k conn/s, at <b>parity with Go</b>. The '
             'one real cost: stackful fibers use more <a href="#mem">RSS</a> than stackless asyncio tasks. '
             '<b>Bottom line: for a busy server with a real handler, runloom is close to Go and well ahead '
-            'of interpreted Python; naked spawn beats Go via <code>c_entry</code>; the remaining gap is '
-            'per-fiber memory.</b></p>')
+            'of interpreted Python; on naked single-spawn Go is ahead and runloom reaches parity only via '
+            'batch <code>fiber_n</code>; the remaining gaps are single-spawn throughput and per-fiber '
+            'memory.</b></p>')
 
 
 def sec_active_spawn(sb):
     """The spawn story, MEASURED in-suite (spawn_batch.json) rather than asserted:
     naked single-spawn (here = the DEFAULT runloom.fiber, the grow-down path) vs
-    batch fiber_n, under default config and optimize("throughput"). NOTE: the FAST
-    single-spawn path runloom.fiber_fast (which matches Go, ~2.0M/s) is measured in
-    the spawn microbench / spawn-vs-N curve, NOT this table's 'naked' column. Go has
-    NO batch-spawn API, so batch is a runloom capability, not a Go-beating number."""
+    batch fiber_n, warm steady-state. NOTE: the FAST single-spawn path
+    runloom.fiber_fast (~1.92M warm, 0.81x Go) is measured in the spawn microbench /
+    spawn-vs-N curve, NOT this table's 'naked' column. Go has NO batch-spawn API, so
+    batch is a runloom capability, not a Go-beating number -- but it is the one spawn
+    path that reaches Go parity (~2.41M, 1.02x)."""
     head = '<h2 id="activespawn">Active spawn &mdash; single vs batch (measured on this box)</h2>'
     framing = (
-        '<p>There are <b>two</b> ways to spawn, with different ceilings:</p>'
-        '<ul><li><b>Single spawn</b> &mdash; one fiber at a time (the per-event pattern). Warm: default '
-        '<code>runloom.fiber</code> <b>~1.73M/s</b>, pure-C <code>c_entry</code> <b>~2.32M (~1.1&times; '
-        'Go)</b>, <code>fiber_fast</code> ~Go. The default is small-stacked (an RSS feature Go lacks) yet '
-        'fast (1.34&times; behind c_entry, not the old ~7&times;); '
+        '<p>There are <b>two</b> ways to spawn, with different ceilings (warm steady-state):</p>'
+        '<ul><li><b>Single spawn</b> &mdash; one fiber at a time (the per-event pattern). Default '
+        '<code>runloom.fiber</code> <b>~1.34M/s (0.57&times; Go)</b>, pure-C <code>c_entry</code> '
+        '<b>~2.07M (0.88&times;)</b>, <code>fiber_fast</code> <b>~1.92M (0.81&times;)</b> &mdash; '
+        '<b>Go (~2.36M) is ahead</b> of every single-spawn path here. The default is small-stacked (an RSS '
+        'feature Go lacks) yet fast (1.5&times; behind c_entry, not the old ~7&times;); '
         '<code>optimize("throughput"/"memory")</code> swaps the path. See the '
         '<a href="#spawncurve">spawn-vs-N</a> curve.</li>'
         '<li><b>Batch spawn</b> &mdash; <code>fiber_n(fn, N)</code> launches N <i>at once</i> in one bulk '
-        'C call, <b>~2.29M/s</b> warm (1.09&times; Go). <b>Go has no batch API</b>, so there\'s no '
-        'like-for-like number to beat &mdash; a runloom <i>capability</i>, not a Go comparison.'
+        'C call, <b>~2.41M/s</b> &mdash; <b>1.02&times; Go</b>, the one spawn path that reaches Go parity. '
+        '<b>Go has no batch API</b>, so there\'s no like-for-like number to beat &mdash; a runloom '
+        '<i>capability</i>, not a Go comparison.'
         '</li></ul>')
     if not sb or not sb.get("modes"):
         return head + framing + '<p class="warn">spawn_batch.json not present &mdash; run speed/spawn_batch.py.</p>'
@@ -1163,15 +1172,16 @@ def sec_active_spawn(sb):
     cols = [("tasks N", True), ("naked spawn/s (default fiber)", True), ("fiber_n /s (default)", True),
             ("fiber_n /s + optimize", True), ("batch / naked", True)]
     tbl = table("t_actspawn", cols, rows, mark_best=False, note=(
-        "Measured on this box: %d hubs on one NUMA node (%d cores), median of %d reps, rate = N / (wall "
-        "&minus; empty-run baseline). The <b>naked</b> column is the <b>default</b> "
-        "<code>runloom.fiber</code> (grow-down auto-sizer), NOT <code>fiber_fast</code> (whose naked "
-        "spawn matches Go ~2.0M, in the <a href=\"#spawncurve\">spawn-vs-N</a> curve). <b>fiber_n alone "
-        "(default) is ~no faster than naked</b> &mdash; the batch speedup needs "
-        "<code>optimize(\"throughput\")</code> (warm-stack arena + parallel bulk-create), reaching "
-        "<b>~1.6M/s here</b>; that doesn't pass Go&rsquo;s naked spawn (~2.15M), and no Go batch number "
-        "exists to compare (see <code>docs/dev/spawn_above_1m.md</code>)."
-        % (meta.get("hubs"), meta.get("ncores_pinned"), meta.get("reps"))))
+        "Measured on this box: %d hubs on one NUMA node (%d cores), warm steady-state (in-process passes, "
+        "the rate a long-running server sustains). The <b>naked</b> column is the <b>default</b> "
+        "<code>runloom.fiber</code> (grow-down auto-sizer), NOT <code>fiber_fast</code> (~1.92M warm, "
+        "0.81&times; Go, in the <a href=\"#spawncurve\">spawn-vs-N</a> curve). <b>Bulk "
+        "<code>fiber_n</code> reaches ~2.41M/s</b> (1.02&times; Go&rsquo;s ~2.36M naked spawn) &mdash; "
+        "the batch path (one C call, no per-spawn Python frame) is the runloom spawn ceiling and the one "
+        "spawn path that reaches Go parity; <code>optimize(\"throughput\")</code> (warm-stack arena + "
+        "parallel bulk-create) trades for RSS. <b>Go has no batch API</b>, so there is no like-for-like Go "
+        "number to beat &mdash; a runloom <i>capability</i> (see <code>docs/dev/spawn_above_1m.md</code>)."
+        % (meta.get("hubs"), meta.get("ncores_pinned"))))
     return head + framing + ('<p>The single&rarr;batch ladder, measured on this box (FT&nbsp;3.13t):</p>'
                              + tbl)
 
@@ -1211,23 +1221,27 @@ def sec_spawn_curve(sc):
     chart = svg_linechart("ch_spawn", series, xlabels,
                           xaxis="tasks spawned, front-loaded (N)", ylabel="spawn / s (log)")
     cols = [("Runtime", False)] + [(fmtN(n), True) for n in NS]
-    return ('<h3 id="spawncurve">Spawn rate vs N (1k &rarr; 1M) &mdash; naked single-spawn, matches Go</h3>'
+    return ('<h3 id="spawncurve">Spawn rate vs N (1k &rarr; 1M) &mdash; naked single-spawn (cold curve)</h3>'
             '<p>Raw spawn/s (= N / whole-run seconds) as N front-loaded tasks climb 1k&rarr;1M, each '
-            'runtime drained to completion (Go front-loads identically). This is NAKED single-spawn, and '
-            'runloom <b>matches Go</b>: <code>runloom_py</code> is <code>fiber_fast</code> (~2.0M/s vs Go '
-            '~2.1M), <code>runloom_c</code> the pure-C <code>c_entry</code> ceiling (~2.2&ndash;2.46M '
-            'warm, beats Go). runloom &amp; Go on %d cores; asyncio/uvloop/greenlet single-core. Each rep '
-            'is a fresh process (COLD first-burst; warm is a touch higher). Click a legend entry to '
-            'isolate a line.</p>' % sc.get("hubs", 8)
+            'runtime drained to completion (Go front-loads identically). This is NAKED single-spawn. '
+            '<b>Each rep is a fresh process, so this is the COLD first-burst</b> &mdash; cold, runloom&rsquo;s '
+            '<code>runloom_c</code> (<code>c_entry</code>) and Go land close at 1M (~2.2M vs ~2.06M). The '
+            'honest <b>warm steady-state</b> &mdash; the rate a long-running server actually sustains, in the '
+            '<a href="#speed">speed table</a> above &mdash; has <b>Go ahead</b> of every runloom '
+            'single-spawn path (<code>fiber_fast</code> 0.81&times;, <code>c_entry</code> 0.88&times; Go); '
+            'only batch <code>fiber_n</code> reaches parity. runloom &amp; Go on %d cores; '
+            'asyncio/uvloop/greenlet single-core. Click a legend entry to isolate a line.</p>'
+            % sc.get("hubs", 8)
             + chart
             + table("t_spawncurve", cols, rows, mark_best=True, note=
                     "Higher is better. Sorted by 1M spawn rate (rightmost column). NAKED single-spawn (create+run+destroy one fiber, no I/O, no "
                     "batching). Stackful runtimes (runloom, greenlet) carry a real C stack per task; "
                     "asyncio/uvloop coroutines are stackless Python objects; Go goroutines are 2&nbsp;KB "
-                    "grow-on-demand stacks. NB: the <b>default</b> <code>runloom.fiber</code> does "
-                    "<b>~1.73M/s</b> warm (small right-sized stacks), 1.34&times; behind pure-C "
-                    "<code>c_entry</code> &mdash; not the old ~7&times;. Batch <code>fiber_n</code> "
-                    "(~2.29M/s) is a further capability."))
+                    "grow-on-demand stacks. This table is the <b>cold</b> first-burst (fresh process per "
+                    "rep). <b>Warm</b> steady-state (the speed table above): default "
+                    "<code>runloom.fiber</code> ~1.34M (0.57&times; Go), <code>fiber_fast</code> ~1.92M "
+                    "(0.81&times;), <code>c_entry</code> ~2.07M (0.88&times;) &mdash; Go (~2.36M) leads "
+                    "single-spawn; only batch <code>fiber_n</code> (~2.41M) reaches parity."))
 
 
 def sec_metrics_legend():
@@ -1240,13 +1254,13 @@ def sec_metrics_legend():
         ["<b>active</b> spawn &mdash; fleet launch (<code>fiber_n</code>)",
          "create+run+destroy N fibers at once, no I/O",
          "Yes &mdash; it IS the whole workload",
-         "~1.6M/s batch (measured); Go has no batch API to compare",
-         "needs <code>optimize(\"throughput\")</code>; a runloom capability, not a Go-beating number"],
+         "~2.41M/s batch (warm, 1.02&times; Go); Go has no batch API to compare",
+         "bulk one-C-call launch; the one spawn path that reaches Go parity, a runloom capability"],
         ["naked spawn &mdash; 1 issuer (microbench)",
          "the same, but one fiber at a time, nothing batched",
          "Yes, and nothing else",
-         "warm: default <code>fiber</code> <b>~1.73M/s</b>; <code>c_entry</code> <b>~2.32M (beats Go ~1.1&times;)</b>; <code>fiber_fast</code> ~Go (~2.1M). Bulk <code>fiber_n</code> ~2.29M (1.09&times; Go)",
-         "default fiber is 1.34&times; behind c_entry (not the old ~7&times;) &mdash; grow-down learned size now spawns down the deferred alloc path, small-stacked AND fast; optimize(\"throughput\"/\"memory\") swaps it"],
+         "warm: <code>fiber_fast</code> <b>~1.92M (0.81&times; Go)</b>; <code>c_entry</code> <b>~2.07M (0.88&times;)</b>; default <code>fiber</code> <b>~1.34M (0.57&times;)</b>. <b>Go (~2.36M) leads</b>; only batch <code>fiber_n</code> (~2.41M) reaches parity",
+         "default fiber is 1.5&times; behind c_entry (not the old ~7&times;) &mdash; grow-down learned size now spawns down the deferred alloc path, small-stacked AND fast; optimize(\"throughput\"/\"memory\") swaps it"],
         ["<b>passive</b> spawn &mdash; conn/s (conn-churn)",
          "fresh handler spawned + torn down per request (new connection each time)",
          "Yes &mdash; 1 spawn+teardown / request, but in the hot loop",

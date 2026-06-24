@@ -41,38 +41,38 @@
     "spawn": {
       "runloom": {
         "n": 1000000,
-        "seconds": 0.504606,
-        "rate_per_s": 1982647.4335563534,
+        "seconds": 0.5221501306941777,
+        "rate_per_s": 1915158,
         "cores": 8
       },
       "runloom_c": {
         "n": 1000000,
-        "seconds": 1.0128,
-        "rate_per_s": 987269.4379958744,
+        "seconds": 0.48312586298357274,
+        "rate_per_s": 2069854,
         "cores": 8
       },
       "go": {
         "n": 1000000,
-        "seconds": 0.471694,
-        "rate_per_s": 2120198.011228823,
+        "seconds": 0.42437742770412235,
+        "rate_per_s": 2356393,
         "cores": 8
       },
       "asyncio": {
         "n": 1000000,
-        "seconds": 12.52663,
-        "rate_per_s": 79829.46,
-        "cores": 1
-      },
-      "greenlet": {
-        "n": 1000000,
-        "seconds": 20.234,
-        "rate_per_s": 49422.31,
+        "seconds": 12.845475037000142,
+        "rate_per_s": 77848.42499943344,
         "cores": 1
       },
       "uvloop": {
         "n": 1000000,
-        "seconds": 11.586,
-        "rate_per_s": 86309.92,
+        "seconds": 10.58863219700288,
+        "rate_per_s": 94440.9043014121,
+        "cores": 1
+      },
+      "greenlet": {
+        "n": 1000000,
+        "seconds": 18.6785997049883,
+        "rate_per_s": 53537.20384793836,
         "cores": 1
       }
     },
