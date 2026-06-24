@@ -1,6 +1,6 @@
 {
   "meta": {
-    "git_commit": "52ae9d6",
+    "git_commit": "530b873",
     "cpu_count": 64,
     "hubs": 44,
     "go_server_cores": 44,
