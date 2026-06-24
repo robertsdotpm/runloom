@@ -1,0 +1,31 @@
+== topology setup ==
+
+== churn runloom_c (payload=1024B, cores=44) ==
+  conns=16     rps=28901        ci=[28901,28901] srvCPU=61% cliCPU=63% p99=3103us err=0 
+  conns=128    rps=30957        ci=[30957,30957] srvCPU=51% cliCPU=85% p99=31391us err=0 
+  conns=1024   rps=30539        ci=[30539,30539] srvCPU=45% cliCPU=84% p99=156736us err=0 (miss 1)
+  conns=8192   rps=16632        ci=[16632,16632] srvCPU=35% cliCPU=74% p99=1071031us err=0 (miss 2)
+  -> PEAK 30957 conn/s @ dialers=128  bottleneck=client
+
+== churn runloom_cython_opt (payload=1024B, cores=44) ==
+  conns=16     rps=3527         ci=[3527,3527] srvCPU=38% cliCPU=78% p99=16760us err=0 
+  conns=128    rps=7783         ci=[7783,7783] srvCPU=32% cliCPU=95% p99=114525us err=0 
+  conns=1024   rps=1838         ci=[1838,1838] srvCPU=32% cliCPU=95% p99=952143us err=0 (miss 1)
+  conns=8192   rps=1336         ci=[1336,1336] srvCPU=34% cliCPU=96% p99=2346761us err=0 (miss 2)
+  -> PEAK 7783 conn/s @ dialers=128  bottleneck=client
+
+== churn asyncio (payload=1024B, cores=1) ==
+  conns=16     rps=6256         ci=[6256,6256] srvCPU=98% cliCPU=13% p99=2869us err=0 
+  conns=128    rps=6554         ci=[6554,6554] srvCPU=98% cliCPU=14% p99=21206us err=0 
+  conns=1024   rps=6142         ci=[6142,6142] srvCPU=97% cliCPU=11% p99=176307us err=0 (miss 1)
+  conns=8192   rps=5099         ci=[5099,5099] srvCPU=98% cliCPU=9% p99=1928867us err=0 (miss 2)
+  -> PEAK 6554 conn/s @ dialers=128  bottleneck=server
+
+== churn go (payload=1024B, cores=44) ==
+  conns=16     rps=30089        ci=[30089,30089] srvCPU=16% cliCPU=45% p99=995us err=0 
+  conns=128    rps=29892        ci=[29892,29892] srvCPU=16% cliCPU=49% p99=10887us err=0 (miss 1)
+  conns=1024   rps=29121        ci=[29121,29121] srvCPU=17% cliCPU=49% p99=66136us err=0 (miss 2)
+  -> PEAK 30089 conn/s @ dialers=16  bottleneck=neither_saturated
+
+wrote /home/x/projects/pygo-bench/benchmark/results/conn_churn.json
+CONN_CHURN_EXIT=0

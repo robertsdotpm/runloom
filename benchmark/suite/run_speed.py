@@ -77,6 +77,12 @@ def argv_for(rt, metric, n, host=None, port=None, conns=64, ramp=1.0, measure_s=
         return base + ["--host", host, "--port", str(port), "--conns", str(conns),
                        "--hubs", str(gomax or config.CLIENT_CORES),
                        "--ramp", str(ramp), "--measure", str(measure_s)]
+    if rt == "runloom_c":
+        base = [P, os.path.join(SP, "run_centry.py"), "--metric", metric]
+        if metric in ("spawn", "ctxswitch"):
+            return base + ["--n", str(n), "--hubs", str(gomax or HUBS)]
+        # centry doesn't support network metrics yet
+        raise ValueError("runloom_c only supports spawn/ctxswitch metrics")
     if rt in ("asyncio", "uvloop"):
         base = [G, os.path.join(SP, "speed_asyncio.py"), "--metric", metric, "--loop", rt]
         if metric in ("spawn", "ctxswitch"):
@@ -96,7 +102,7 @@ def argv_for(rt, metric, n, host=None, port=None, conns=64, ramp=1.0, measure_s=
     raise ValueError(rt)
 
 
-RUNTIMES = ["runloom", "go", "asyncio", "greenlet", "uvloop"]
+RUNTIMES = ["runloom", "runloom_c", "go", "asyncio", "greenlet", "uvloop"]
 
 
 def cpus_for(rt, metric):
@@ -108,7 +114,7 @@ def cpus_for(rt, metric):
 
 
 def gil_off_for(rt):
-    return rt in ("runloom", "go")  # go ignores it; GIL runtimes need GIL on
+    return rt in ("runloom", "runloom_c", "go")  # go ignores it; GIL runtimes need GIL on
 
 
 def cores_of(res, rt, metric):

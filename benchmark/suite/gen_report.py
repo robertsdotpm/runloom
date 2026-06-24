@@ -471,9 +471,11 @@ def sec_speed(speed):
         if "rate_per_s" not in d:
             continue
         cores = d.get("cores", 1)
+        per_core = d["rate_per_s"] / cores if cores else d["rate_per_s"]
         rows.append([prog_cell(rt), (fmt(cores), cores), (fmt(d["rate_per_s"]), d["rate_per_s"]),
-                     (fmt(d["seconds"] * 1e6 / d["n"], 2), d["seconds"] * 1e6 / d["n"])])
-    rows.sort(key=lambda r: -(r[2][1] or 0))   # best = highest absolute spawn rate
+                     (fmt(d["seconds"] * 1e6 / d["n"], 2), d["seconds"] * 1e6 / d["n"]),
+                     (fmt(per_core), per_core)])
+    rows.sort(key=lambda r: -(r[4][1] or 0))   # best = highest spawn/s per core
     out.append("<h3>Spawn 1M fibers / goroutines / coroutines (NAKED single-spawn)</h3>")
     out.append('<p class="warn">This is <b>naked single-spawn</b> &mdash; ONE spawner creating '
                'tasks <b>one at a time</b>, no I/O. runloom&rsquo;s FAST spawn '
@@ -489,8 +491,10 @@ def sec_speed(speed):
                '(<a href="#activespawn">Active spawn</a>: bulk <code>fiber_n</code>) hits ~2.29M/s '
                '(1.09&times; Go) &mdash; a further runloom capability (Go has no batch API).</p>')
     out.append(table("t_spawn", [("Runtime", False), ("Cores", True), ("spawn/s", True),
-                                 ("&micro;s/task", True)], rows,
-                     "Higher is better. Naked single-spawn (warm): default <code>runloom.fiber</code> "
+                                 ("&micro;s/task", True), ("spawn/s / core", True)], rows,
+                     mark_best=True,
+                     note="Higher is better. Sorted by <b>spawn/s per core</b> (rightmost column). "
+                     "Naked single-spawn (warm): default <code>runloom.fiber</code> "
                      "<b>~1.73M/s</b>, pure-C <code>c_entry</code> <b>~2.32M (~1.1&times; Go)</b>, "
                      "<code>fiber_fast</code> ~Go. The default sits 1.34&times; behind c_entry (not the "
                      "old ~7&times;) &mdash; small-stacked yet fast via the deferred-alloc grow-down path "

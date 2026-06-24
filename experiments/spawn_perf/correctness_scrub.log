@@ -1,0 +1,8 @@
+== runloom isolated suite: 4 file(s), j=4 parallel + 0 serial, /home/x/.pyenv/versions/3.13.13t/bin/python3 ==
+  test_adv_coro.py             PASS            1.0s  10 passed in 0.39s
+  test_adv_stack.py            PASS            1.3s  11 passed in 0.71s
+  test_swarm_coro_stack.py     PASS            2.7s  80 passed in 2.25s
+  test_cov95_coro.py           PASS            3.8s  8 passed in 3.33s
+------------------------------------------------------------
+
+== 4 passed, 0 skipped, 0 not-passed (all green) ==

@@ -1,0 +1,3 @@
+{"label": "arena", "hubs": 8, "issuers": 1, "n": 300000, "stack_size": 0, "reps": 3, "seconds": 4.100811167998472, "spawn_per_s": 73156.25804502095, "arena": "1", "arena_huge": "", "populate": "", "ld_preload": ""}
+{"label": "arena", "hubs": 8, "issuers": 4, "n": 300000, "stack_size": 0, "reps": 3, "seconds": 1.8906481090234593, "spawn_per_s": 158675.7464639749, "arena": "1", "arena_huge": "", "populate": "", "ld_preload": ""}
+{"label": "arena", "hubs": 8, "issuers": 8, "n": 300000, "stack_size": 0, "reps": 3, "seconds": 1.2413081849808805, "spawn_per_s": 241680.5138561306, "arena": "1", "arena_huge": "", "populate": "", "ld_preload": ""}

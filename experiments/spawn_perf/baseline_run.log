@@ -1,0 +1,13 @@
+baseline_noarena       issuers=1     43890 spawn/s  (6.835s / 300000)
+baseline_noarena       issuers=4     31375 spawn/s  (9.562s / 300000)
+baseline_noarena       issuers=8     28952 spawn/s  (10.362s / 300000)
+wrote /home/x/projects/pygo-bench/experiments/spawn_perf/results/baseline_noarena.jsonl
+arena                  issuers=1     73156 spawn/s  (4.101s / 300000)
+arena                  issuers=4    158676 spawn/s  (1.891s / 300000)
+arena                  issuers=8    241681 spawn/s  (1.241s / 300000)
+wrote /home/x/projects/pygo-bench/experiments/spawn_perf/results/arena.jsonl
+arena_keepres          issuers=1     96101 spawn/s  (3.122s / 300000)
+arena_keepres          issuers=4    269726 spawn/s  (1.112s / 300000)
+arena_keepres          issuers=8    477017 spawn/s  (0.629s / 300000)
+wrote /home/x/projects/pygo-bench/experiments/spawn_perf/results/arena_keepres.jsonl
+ALL BASELINES DONE

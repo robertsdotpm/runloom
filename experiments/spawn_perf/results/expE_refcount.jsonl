@@ -1,0 +1,6 @@
+{"label": "imm_off", "hubs": 8, "issuers": 1, "n": 300000, "reps": 3, "immortalize": false, "seconds": 4.601496944989776, "spawn_per_s": 65196.17498098036}
+{"label": "imm_on", "hubs": 8, "issuers": 1, "n": 300000, "reps": 3, "immortalize": true, "seconds": 4.610053612996126, "spawn_per_s": 65075.16510312916}
+{"label": "imm_off", "hubs": 8, "issuers": 4, "n": 300000, "reps": 3, "immortalize": false, "seconds": 1.9650906099996064, "spawn_per_s": 152664.71605605}
+{"label": "imm_on", "hubs": 8, "issuers": 4, "n": 300000, "reps": 3, "immortalize": true, "seconds": 1.9936729999899399, "spawn_per_s": 150476.03092458684}
+{"label": "imm_off", "hubs": 8, "issuers": 8, "n": 300000, "reps": 3, "immortalize": false, "seconds": 1.2742282309918664, "spawn_per_s": 235436.62956398187}
+{"label": "imm_on", "hubs": 8, "issuers": 8, "n": 300000, "reps": 3, "immortalize": true, "seconds": 1.3061729639885016, "spawn_per_s": 229678.61705231326}
