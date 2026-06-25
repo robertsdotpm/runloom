@@ -108,6 +108,106 @@ _spawn_sem = None
 _cancel_started = [False]
 
 
+# ---- Windows: kill spawned children when THIS process dies -----------------
+# On Unix an orphaned child is reparented to init, but the big_100 subprocess
+# programs spawn short-lived children that self-exit and the loop driver kills
+# whole process groups, so Unix needs no in-process reaper here (and procutil
+# keeps Unix behaviour byte-for-byte, per the module note above).
+#
+# On Windows there is no process-group kill: if the test process is terminated
+# by the loop driver's watchdog while children are mid-flight (e.g. p135 at
+# over-scale), every child is orphaned and keeps running, leaking processes +
+# sockets + handles that snowball across loop iterations and degrade the box.
+# Fix: put every spawned child in a Job Object created with
+# JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE.  The job handle is held ONLY by this
+# process, so when it dies for ANY reason (clean exit, TerminateProcess, crash)
+# the kernel closes the handle and tears down the whole job -> all children die.
+_job_handle = None          # None=unset, False=create failed, else HANDLE int
+_job_lock = threading.Lock()
+
+if _WIN:
+    import ctypes
+    from ctypes import wintypes
+
+    _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
+    _JobObjectExtendedLimitInformation = 9
+
+    class _JOBOBJECT_BASIC_LIMIT_INFORMATION(ctypes.Structure):
+        _fields_ = [("PerProcessUserTimeLimit", ctypes.c_int64),
+                    ("PerJobUserTimeLimit", ctypes.c_int64),
+                    ("LimitFlags", wintypes.DWORD),
+                    ("MinimumWorkingSetSize", ctypes.c_size_t),
+                    ("MaximumWorkingSetSize", ctypes.c_size_t),
+                    ("ActiveProcessLimit", wintypes.DWORD),
+                    ("Affinity", ctypes.c_size_t),
+                    ("PriorityClass", wintypes.DWORD),
+                    ("SchedulingClass", wintypes.DWORD)]
+
+    class _IO_COUNTERS(ctypes.Structure):
+        _fields_ = [("ReadOperationCount", ctypes.c_uint64),
+                    ("WriteOperationCount", ctypes.c_uint64),
+                    ("OtherOperationCount", ctypes.c_uint64),
+                    ("ReadTransferCount", ctypes.c_uint64),
+                    ("WriteTransferCount", ctypes.c_uint64),
+                    ("OtherTransferCount", ctypes.c_uint64)]
+
+    class _JOBOBJECT_EXTENDED_LIMIT_INFORMATION(ctypes.Structure):
+        _fields_ = [("BasicLimitInformation",
+                     _JOBOBJECT_BASIC_LIMIT_INFORMATION),
+                    ("IoInfo", _IO_COUNTERS),
+                    ("ProcessMemoryLimit", ctypes.c_size_t),
+                    ("JobMemoryLimit", ctypes.c_size_t),
+                    ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                    ("PeakJobMemoryUsed", ctypes.c_size_t)]
+
+    _k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    _k32.CreateJobObjectW.restype = wintypes.HANDLE
+    _k32.CreateJobObjectW.argtypes = [wintypes.LPVOID, wintypes.LPCWSTR]
+    _k32.SetInformationJobObject.restype = wintypes.BOOL
+    _k32.SetInformationJobObject.argtypes = [wintypes.HANDLE, ctypes.c_int,
+                                             ctypes.c_void_p, wintypes.DWORD]
+    _k32.AssignProcessToJobObject.restype = wintypes.BOOL
+    _k32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+
+    def _ensure_job():
+        global _job_handle
+        if _job_handle is not None:
+            return _job_handle
+        with _job_lock:
+            if _job_handle is not None:
+                return _job_handle
+            h = _k32.CreateJobObjectW(None, None)
+            if not h:
+                _job_handle = False
+                return False
+            info = _JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
+            info.BasicLimitInformation.LimitFlags = \
+                _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+            if not _k32.SetInformationJobObject(
+                    h, _JobObjectExtendedLimitInformation,
+                    ctypes.byref(info), ctypes.sizeof(info)):
+                _k32.CloseHandle(h)
+                _job_handle = False
+                return False
+            _job_handle = h
+            return h
+
+    def _assign_to_job(proc):
+        # Best-effort: a failed assignment must never break the spawn itself.
+        try:
+            h = _ensure_job()
+            if not h:
+                return
+            ph = int(getattr(proc, "_handle", 0) or 0)
+            if ph:
+                _k32.AssignProcessToJobObject(h, wintypes.HANDLE(ph))
+        except Exception:
+            pass
+else:
+    def _assign_to_job(proc):
+        return
+
+
 def popen(*args, running=None, **kwargs):
     """Construct a Popen off-goroutine (via runloom.blocking) to avoid nested
     offload deadlocks.  Pass running=H.running for fast shutdown: a single
@@ -152,6 +252,8 @@ def popen(*args, running=None, **kwargs):
     else:
         sem.acquire()
     try:
-        return runloom.blocking(subprocess.Popen, *args, **kwargs)
+        proc = runloom.blocking(subprocess.Popen, *args, **kwargs)
+        _assign_to_job(proc)   # Windows: child dies with us; no-op on Unix
+        return proc
     finally:
         sem.release()
