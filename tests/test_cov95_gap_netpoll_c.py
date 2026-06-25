@@ -224,10 +224,14 @@ def test_cancel_all_parked_empty_is_clean_noop():
 # ---------------------------------------------------------------------------
 # A global io_uring file_read is the simplest way to drive the GLOBAL ring's
 # add_iouring_eventfd (it registers the ring CQE eventfd into the epoll pump).
-# When io_uring is the first epoll user, the epoll_ctl ADD of that eventfd is
-# epoll_ctl call #1, so faultinj can target it precisely.  On failure io_uring
-# disables itself and file_read falls back to pread -- the SAME data, no crash,
-# no recv-backpressure deadlock.
+# The io_uring eventfd ADD is NOT epoll_ctl call #1 -- under per-hub epoll each
+# parker pool first registers its own wake eventfd and nests the shared epoll
+# (so the io_uring eventfd ADD lands several calls in), so NTH-counting can't
+# target it portably.  Fail EVERY epoll_ctl instead (FAULTINJ_ALL): the wake-pump
+# arm + pool-nest degrade cleanly and the io_uring eventfd ADD takes its failure
+# branch regardless of ordering.  On failure io_uring disables itself and
+# file_read falls back to pread -- the SAME data, no crash, no recv-backpressure
+# deadlock.
 # ---------------------------------------------------------------------------
 _IOURING_FILEREAD = r"""
     import os, sys, tempfile
@@ -263,9 +267,11 @@ def test_add_iouring_eventfd_outer_add_nonexist_returns_minus1():
     # io_uring eventfd fails with a NON-EINVAL, NON-EEXIST errno (EPERM=1):
     # errno!=EINVAL skips the fallback, L315 errno!=EEXIST is true -> L316
     # return -1.  io_uring init aborts, file_read falls back to pread.
+    # FAULTINJ_ALL=1 fails the io_uring eventfd ADD whatever epoll_ctl call # it
+    # is (per-hub pools register their own epolls first; see the note above).
     p = _run_py(_IOURING_FILEREAD, preload=FAULTINJ_SO,
-                env_extra={"FAULTINJ_TARGET": "epoll_ctl",
-                           "FAULTINJ_NTH": "1", "FAULTINJ_ERRNO": "1"})
+                env_extra={"FAULTINJ_TARGET": "epoll_ctl", "FAULTINJ_NTH": "1",
+                           "FAULTINJ_ALL": "1", "FAULTINJ_ERRNO": "1"})
     assert p.returncode == 0, p.stderr[-1500:]
     assert "AVAIL=0" in p.stdout, (p.stdout, p.stderr[-800:])   # io_uring disabled
     assert "OK=True" in p.stdout, (p.stdout, p.stderr[-800:])   # pread fallback data

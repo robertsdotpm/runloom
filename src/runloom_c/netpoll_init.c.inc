@@ -346,7 +346,14 @@ int runloom_netpoll_init(void)
         size_t pi;
         for (pi = 0; pi < (size_t)RUNLOOM_PARKER_POOL_MAX; pi++) {
             runloom_parker_pool_t *p = &runloom_pools[pi];
-            if (p->epoll_fd >= 0) {
+            /* > 0, not >= 0: a never-created pool slot is BSS-zero, so its
+             * epoll_fd is 0 -- which is fd 0 (stdin), NOT a real epoll.  The
+             * >= 0 test matched it and spewed epoll_ctl(0, ADD, ...) -> EINVAL
+             * once per uninited slot (POOL_MAX-1 wasted failing syscalls every
+             * netpoll_init).  A real per-hub epoll is always > 2; an inited-but-
+             * unused pool is -1 (backend_create).  Single-pool reads elsewhere
+             * keep >= 0 -- only these all-slots loops can see the BSS-zero slot. */
+            if (p->epoll_fd > 0) {
                 struct epoll_event nev;
                 nev.events  = EPOLLIN;
                 nev.data.fd = runloom_epoll_fd;
@@ -446,8 +453,14 @@ void runloom_netpoll_fini(void)
         size_t i;
         for (i = 0; i < (size_t)RUNLOOM_PARKER_POOL_MAX; i++) {
             runloom_parker_pool_t *p = &runloom_pools[i];
-            if (p->wake_efd >= 0) { close(p->wake_efd); p->wake_efd = -1; }
-            if (p->epoll_fd >= 0) { close(p->epoll_fd); p->epoll_fd = -1; }
+            /* > 0, not >= 0: a never-created slot is BSS-zero, so these fields
+             * are 0 -- closing them would close fd 0 (stdin).  fini() runs in the
+             * forked child (reset_after_fork), so the >= 0 test silently closed
+             * the child's stdin for every uninited pool.  Real fds are > 2; -1 is
+             * not-created.  (backend_create normalizes BSS-zero slots to -1 right
+             * after, line ~510, so a skipped slot is harmless.) */
+            if (p->wake_efd > 0) { close(p->wake_efd); p->wake_efd = -1; }
+            if (p->epoll_fd > 0) { close(p->epoll_fd); p->epoll_fd = -1; }
         }
     }
 #elif defined(RUNLOOM_HAVE_KQUEUE)
@@ -456,9 +469,12 @@ void runloom_netpoll_fini(void)
         size_t i;
         for (i = 0; i < (size_t)RUNLOOM_PARKER_POOL_MAX; i++) {
             runloom_parker_pool_t *p = &runloom_pools[i];
-            if (p->kqueue_fd  >= 0) { close(p->kqueue_fd);  p->kqueue_fd  = -1; }
-            if (p->selfpipe_r >= 0) { close(p->selfpipe_r); p->selfpipe_r = -1; }
-            if (p->selfpipe_w >= 0) { close(p->selfpipe_w); p->selfpipe_w = -1; }
+            /* > 0, not >= 0: BSS-zero (never-created) slots have these at 0 --
+             * close(0) would close the forked child's stdin.  See the epoll fini
+             * loop above for the full rationale. */
+            if (p->kqueue_fd  > 0) { close(p->kqueue_fd);  p->kqueue_fd  = -1; }
+            if (p->selfpipe_r > 0) { close(p->selfpipe_r); p->selfpipe_r = -1; }
+            if (p->selfpipe_w > 0) { close(p->selfpipe_w); p->selfpipe_w = -1; }
         }
     }
 #elif defined(RUNLOOM_OS_WINDOWS)
