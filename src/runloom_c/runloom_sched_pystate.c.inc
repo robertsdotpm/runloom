@@ -244,6 +244,21 @@ void runloom_pystate_snap(runloom_pystate_snap_t *snap)
      * fiber, and the next loader still drops ts->exc_state.exc_value as before). */
     ts->exc_info = &ts->exc_state;
     ts->exc_state.previous_item = NULL;
+    /* p218 fix: the p69 neutralize above resets the exc_info HEAD POINTER, but a
+     * fiber that snapped mid-except also leaves its in-flight exception OBJECTS
+     * in the shared tstate -- ts->exc_state.exc_value (the active handler's
+     * exception) and ts->current_exception (a raised-but-uncaught one).  The
+     * NEXT fiber resumed on this hub via the FIRST-RUN path does NO pystate_load,
+     * so it inherits those stale objects; its next `raise` makes _PyErr_SetObject
+     * chain onto / walk the stale exception's __context__ cycle -> Py_DECREF of a
+     * dangling/NULL link -> SIGSEGV (the p218_exception_unwind_chain crash, same
+     * _PyErr_SetObject family as p69).  Clear them too so a first-run inheritor
+     * sees a clean "no exception in flight" state.  Refcount-neutral: snap already
+     * took its OWN ref to both (Py_XINCREF above); load Py_XDECREFs ts's value
+     * (now NULL = no-op) before installing snap's -- the net ref dance is
+     * unchanged, the DECREF of ts's ref just moves from load-time to here. */
+    Py_CLEAR(ts->exc_state.exc_value);
+    Py_CLEAR(ts->current_exception);
 #endif
 
 #if PY_VERSION_HEX >= 0x030B0000 && PY_VERSION_HEX < 0x030D0000
