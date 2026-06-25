@@ -42,31 +42,18 @@ class CoLock(object):
     __slots__ = ("_mu", "__weakref__")
 
     def __init__(self):
-        self._mu = runloom_c.Mutex()
+        self._mu = CoFMutex()
 
     def acquire(self, blocking=True, timeout=-1):
+        # _mu is a CoFMutex (foreign-safe): acquire() handles the fiber-vs-foreign
+        # and timed/untimed dispatch internally -- a fiber parks 0-fd
+        # (foreign_wakeable, keeps run() alive); a FOREIGN OS thread parks on an
+        # fd _Parker (real select, woken by os.write) rather than busy-spinning;
+        # and a foreign holder no longer strands a parked fiber.
         if not blocking:
             return self._mu.try_lock()
-        if _in_fiber():
-            if timeout is None or timeout < 0:
-                self._mu.lock()             # parks on contention (cooperative)
-                return True
-            # Timed acquire inside a fiber: cooperative try + sleep so we
-            # never park past the deadline.
-            deadline = time.monotonic() + timeout
-            while not self._mu.try_lock():
-                if time.monotonic() >= deadline:
-                    return False
-                runloom.sleep(0.0005)
-            return True
-        # Foreign / non-fiber thread: cannot park; spin on try_lock.
-        t0 = time.monotonic()
-        while not self._mu.try_lock():
-            if timeout is not None and timeout >= 0:
-                if time.monotonic() - t0 >= timeout:
-                    return False
-            _raw_time_sleep(0.0001)
-        return True
+        to = None if (timeout is None or timeout < 0) else timeout
+        return self._mu.acquire(blocking=True, timeout=to)
 
     def release(self):
         try:
@@ -87,7 +74,7 @@ class CoLock(object):
         # parent's fibers, so reset to a fresh unlocked mutex.  Called via
         # os.register_at_fork by stdlib modules (concurrent.futures.thread,
         # logging, ...) that build a module-global Lock at import time.
-        self._mu = runloom_c.Mutex()
+        self._mu = CoFMutex()
 
     def __enter__(self):
         self.acquire(); return self

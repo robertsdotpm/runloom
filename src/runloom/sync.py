@@ -283,6 +283,7 @@ from runloom.monkey import CoLock as Lock
 from runloom.monkey import CoEvent as Event
 from runloom.monkey import CoSemaphore as Semaphore
 from runloom.monkey import CoCondition as Condition
+from runloom.monkey._base import CoFMutex   # foreign-safe cooperative mutex (guard for the primitives below)
 
 
 # --------------------------------------------------------------------
@@ -335,24 +336,19 @@ def wake(g):
 # monkey's CoEvent uses _Parker, not park().)
 # --------------------------------------------------------------------
 def _acquire(mu):
-    """Acquire a cooperative runloom_c.Mutex, foreign-OS-thread-safe.
+    """Acquire a CoFMutex guard, foreign-OS-thread-safe.
 
-    A fiber parks via ``mu.lock()`` (cooperative, FIFO).  A FOREIGN OS thread (no
-    fiber) MUST NOT call ``mu.lock()``: its contended path parks on a channel,
-    which raises "blocking channel ops require a runloom fiber context" the
-    instant another holder has the guard (a load-only crash -- uncontended it took
-    the CAS fast path).  Per the Mutex's own contract (module_chan.c.inc
-    RunloomMutex: "foreign OS threads must use try_lock"), a foreign thread spins on
-    the non-blocking ``try_lock`` instead -- it never parks, so it is foreign-safe.
-    Per-fiber behaviour is unchanged; only foreign callers take the spin.  (The
-    WAKE side -- done()/set_result -- stays fiber-only via _resolve_from_fiber; this
-    is only for the read/wait side, which is allowed from anywhere.)
+    ``mu`` is a runloom.monkey._base.CoFMutex.  acquire() handles the
+    fiber-vs-foreign dispatch internally: a fiber waiter parks 0-fd
+    (``runloom_c.park(foreign_wakeable=True)``, which the single-thread drain
+    loop counts -> run() stays alive); a FOREIGN OS thread parks on an fd-backed
+    _Parker (real ``select``, woken by ``os.write``).  So a foreign holder no
+    longer strands a fiber that parks on the same guard -- the deadlock CLASS
+    this closes.  (Formerly ``mu`` was a channel-backed runloom_c.Mutex; a foreign
+    caller spun ``try_lock`` and, while holding it, a fiber's ``mu.lock()``
+    chan-parked and was abandoned by run() -> stranded.)
     """
-    if runloom_c.current_g() is not None:
-        mu.lock()
-    else:
-        while not mu.try_lock():
-            _time.sleep(0.0002)
+    mu.acquire()
 
 
 class WaitGroup(object):
@@ -366,7 +362,7 @@ class WaitGroup(object):
     def __init__(self):
         self._n = 0
         self._waiters = []          # current_g() handles parked in wait()
-        self._mu = runloom_c.Mutex()
+        self._mu = CoFMutex()
 
     def add(self, delta=1):
         # done()/add(negative) is the WAKE side; it must come from a fiber.
@@ -436,7 +432,7 @@ class Future(object):
         self._result = None
         self._exc = None
         self._waiters = []
-        self._mu = runloom_c.Mutex()
+        self._mu = CoFMutex()
 
     def done(self):
         _acquire(self._mu)
@@ -626,7 +622,7 @@ class RWMutex(object):
         self._writer  = False    # a write lock is held
         self._rwait   = []       # parked reader cells [g, [granted]]
         self._wwait   = []       # parked writer cells [g, [granted]] (FIFO)
-        self._mu = runloom_c.Mutex()
+        self._mu = CoFMutex()
 
     def rlock(self):
         _resolve_from_fiber("RWMutex.rlock()")
@@ -739,7 +735,7 @@ class Semaphore(object):
         self._limit   = value
         self._held    = 0        # permits currently held
         self._waiters = []       # FIFO: each [g, n, [granted_bool]]
-        self._mu = runloom_c.Mutex()
+        self._mu = CoFMutex()
 
     def acquire(self, n=1, timeout=None):
         if n < 0:
@@ -844,7 +840,7 @@ class Once(object):
         self._done    = False
         self._running = False
         self._waiters = []
-        self._mu = runloom_c.Mutex()
+        self._mu = CoFMutex()
 
     def done(self):
         if runloom_c.current_g() is None:
@@ -975,7 +971,7 @@ class Group(object):
 
     def __init__(self):
         self._calls = {}        # key -> Future (in-flight)
-        self._mu = runloom_c.Mutex()
+        self._mu = CoFMutex()
 
     def do(self, key, fn):
         g = runloom_c.current_g()
@@ -1030,7 +1026,7 @@ class Watch(object):
         self._value   = value
         self._version = 0
         self._waiters = []
-        self._mu = runloom_c.Mutex()
+        self._mu = CoFMutex()
 
     def get(self):
         _acquire(self._mu)

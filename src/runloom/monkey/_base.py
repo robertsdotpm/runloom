@@ -373,6 +373,175 @@ class _Parker(object):
                 except OSError: pass
 
 
+class CoFMutex(object):
+    """Foreign-OS-thread-safe cooperative mutex (drop-in for runloom_c.Mutex).
+
+    Closes the deadlock CLASS where a foreign OS thread holds the channel-backed
+    runloom_c.Mutex while a fiber locks the SAME mutex: the fiber parks as a
+    channel receiver, single-thread run() does NOT count a chan-park as live work
+    so it ABANDONS the fiber, and the foreign unlock's cross-thread wake lands on
+    a dead loop -> stranded fiber, foreign thread spins try_lock forever
+    (SIGUSR1-confirmed for Once ~1/240, WaitGroup 58/600, CoLock 31/400).
+
+    The fix reuses the already-GenMC/Spin-verified _Parker substrate that
+    CoEvent/CoSemaphore use:
+      * a WAITING fiber parks on a 0-fd `runloom_c.park(foreign_wakeable=True)`
+        -- this increments foreign_park_inflight, which the single-thread drain
+        loop COUNTS, so run() stays alive while a fiber waits (the chan-park that
+        run() abandons is never used here);
+      * a WAITING foreign OS thread parks on an fd-backed _Parker (real select),
+        woken race-free by os.write;
+      * release() hands the lock to the FIFO-head waiter directly (no unlocked
+        window, no barging -- cap-1-channel hand-off semantics) and wakes it via
+        the kind-correct foreign-safe route: g.wake() for a fiber, os.write for a
+        foreign thread.
+
+    The internal bookkeeping guard is a SPIN-ONLY channel mutex (try_lock +
+    sched_yield for fibers / tiny real-sleep for foreign), held only for O(1)
+    state mutation: because nobody ever calls its blocking lock(), it never
+    chan-parks (so it cannot itself strand) and never blocks the OS thread (so it
+    cannot freeze a hub or self-deadlock single-thread run()).  This also breaks
+    the CoLock -> CoFMutex -> guard recursion cleanly (the guard is a raw
+    runloom_c.Mutex, never a CoFMutex).
+    """
+
+    __slots__ = ("_locked", "_waiters", "_guard_mu", "__weakref__")
+
+    def __init__(self):
+        self._locked = False
+        self._waiters = collections.deque()   # FIFO of [parker, active, granted]
+        self._guard_mu = runloom_c.Mutex()    # used SPIN-ONLY (try_lock), never lock()
+
+    # --- spin-only guard: never parks (foreign-safe), never blocks the thread ---
+    def _glock(self):
+        if self._guard_mu.try_lock():
+            return
+        if runloom_c.current_g() is not None:
+            while not self._guard_mu.try_lock():
+                runloom_c.sched_yield()        # fiber: yield so the O(1) holder runs
+        else:
+            while not self._guard_mu.try_lock():
+                _raw_time_sleep(0.0001)         # foreign: brief real sleep
+
+    def _gunlock(self):
+        self._guard_mu.unlock()
+
+    def _granted(self, rec):
+        # Read the hand-off flag UNDER the guard (release() publishes it under the
+        # guard), so the access is race-free.  A wake that beats the next park is
+        # absorbed by the park itself (Dekker for the in-memory parker, the latched
+        # pipe byte for the fd parker), so a spurious park return just re-reads here
+        # and re-parks -- the flag, not the park return, is authoritative.
+        self._glock()
+        g = rec[2]
+        self._gunlock()
+        return g
+
+    def acquire(self, blocking=True, timeout=None):
+        self._glock()
+        if not self._locked:
+            self._locked = True               # UNCONTENDED FAST PATH
+            self._gunlock()
+            return True
+        if not blocking:
+            self._gunlock()
+            return False
+        # Contended.  Build the parker with the guard RELEASED first -- an fd
+        # _Parker() can yield during Windows socketpair setup, so it must not run
+        # under the guard (same ordering CoSemaphore.acquire documents).
+        self._gunlock()
+        p = _Parker(inmem=_in_fiber())
+        self._glock()
+        if not self._locked:                  # TOCTOU: freed while we built the parker
+            self._locked = True
+            self._gunlock()
+            p.release()
+            return True
+        rec = [p, True, False]                # [parker, active, granted]
+        self._waiters.append(rec)
+        self._gunlock()
+        # Park loop -- authoritative on the granted flag (read under the guard via
+        # _granted), NEVER on a single park return: a spurious/early park return
+        # re-reads and re-parks rather than falsely acquiring, and a wake that
+        # beats the park commit is absorbed by the park (granted was published
+        # under the guard before the wake).
+        if timeout is None:
+            while not self._granted(rec):
+                p.park(None)
+            p.release()
+            return True
+        deadline = time.monotonic() + timeout
+        while not self._granted(rec):
+            rem = deadline - time.monotonic()
+            if rem <= 0:
+                self._glock()
+                if rec[2]:                    # granted at the last moment -> we own it
+                    self._gunlock()
+                    p.release()
+                    return True
+                rec[1] = False                # deactivate: a racing release() skips us
+                self._gunlock()
+                p.release()
+                return False
+            p.park(rem)
+        p.release()
+        return True
+
+    def release(self):
+        self._glock()
+        if not self._locked:
+            self._gunlock()
+            if _is_forked_child():
+                return                         # benign post-fork teardown noise
+            raise RuntimeError("release unlocked lock")
+        woke = None
+        while self._waiters:
+            rec = self._waiters.popleft()
+            if rec[1]:                        # active
+                rec[2] = True                 # grant UNDER the guard, BEFORE the wake
+                woke = rec[0]                 # _locked STAYS True -> direct hand-off
+                break
+            # else inactive (timed-out) -> lazily discard
+        if woke is None:
+            self._locked = False
+        self._gunlock()
+        if woke is not None:
+            # Wake OUTSIDE the guard, via the kind-correct foreign-safe route only.
+            # (Never the batched unpark_many -- per _unpark_all's foreign-thread
+            # note, the single-waiter direct route is the foreign-safe one.)
+            h = woke._g_handle
+            if h is not None:
+                h.wake()                       # fiber inmem parker: wake_safe + pump kick
+            else:
+                woke.unpark()                  # foreign fd parker: os.write
+
+    # --- drop-in shims for runloom_c.Mutex / CoLock call sites ---
+    def unlock(self):
+        self.release()
+
+    def try_lock(self):
+        return self.acquire(blocking=False)
+
+    def locked(self):
+        self._glock()
+        v = self._locked
+        self._gunlock()
+        return v
+
+    def _at_fork_reinit(self):
+        # The child inherits none of the parent's fibers/waiters.
+        self._locked = False
+        self._waiters = collections.deque()
+        self._guard_mu = runloom_c.Mutex()
+
+    def __enter__(self):
+        self.acquire()
+        return self
+
+    def __exit__(self, *a):
+        self.release()
+
+
 def _unpark_all(parkers):
     """Wake a batch of waiters (the fan-in wake side of Event/Condition/
     Semaphore).  GOROUTINE waiters are woken by ONE batched runloom_c.unpark_many
