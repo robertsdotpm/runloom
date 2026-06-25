@@ -48,8 +48,12 @@ def mn_round():
 def timed_park():
     def g():
         runloom.sleep(0.001)
-    runloom.fiber(g)
-    runloom.run()
+    # runloom.run is the high-level entry: run(n, main_fn) on n hubs; the sleep
+    # parks on the deadline heap (epoll_wait timeout) and is woken on expiry.
+    # Was `runloom.fiber(g); runloom.run()`, but run() requires the hub-count n,
+    # so it raised TypeError and aborted the workload before this timed-park stage
+    # (and the self_check below) ran at all under injection.
+    runloom.run(1, g)
 
 
 def main():
