@@ -36,6 +36,42 @@ def _pidfd_open(pid):
 # subprocess
 # ============================================================
 _orig_popen_wait = None
+_orig_popen_init = None
+
+
+def _patched_popen_init(self, *args, **kwargs):
+    """Construct a Popen off-fiber when called from inside a fiber.
+
+    Building a Popen with pipes from a fiber makes Popen.__init__ wrap each
+    parent pipe end with io.open(fd) -> _patched_open -> _fd_pollable(fd) ->
+    os.fstat(fd), which the monkey layer OFFLOADS to the pool -- one offload per
+    pipe, so typically two parks for a stdout+stderr Popen.  os.fstat on an open
+    fd is a sub-microsecond metadata read, so each offload is pure round-trip
+    overhead: park the fiber, hand to a worker, wake it back.  At high spawn
+    rates that churn dominates the cost of spawning from a fiber -- measured
+    ~2x here (a 4000-fiber x 15-round spawn storm drops from ~28s to ~12s).
+
+    Running the WHOLE constructor on a pool thread (where _in_fiber() is False,
+    so every internal os.fstat runs INLINE) removes those per-pipe offloads
+    entirely: the fiber parks once on the single construction offload instead of
+    once per pipe, and the (potentially blocking) fork/exec runs off the hub.
+    This is exactly the hand-rolled dodge in tests/big_100/procutil.py, promoted
+    into the monkey layer so any fiber that spawns a subprocess is fast by
+    default with no per-caller workaround.  The fiber is parked (not running)
+    for the duration, so mutating `self` on the worker is race-free, and an
+    __init__ that raises propagates the exception back to the fiber.
+
+    This is a throughput (and bounded-latency) fix, not a deadlock fix: the
+    default FD-mode offload parker is a level-triggered self-pipe and is
+    wake-safe, so the fstat offloads never lost a wakeup in the default config.
+    Only the opt-in inmem parker (RUNLOOM_BLOCKPOOL_INMEM=1) routes the wake
+    through the foreign-worker pump-poke whose lost poke is bounded to <=2ms by
+    the drain backstop (runloom_sched_drain.c.inc, commit f214341); collapsing
+    the offloads removes that residual latency exposure too.
+    """
+    if _in_fiber():
+        return _blocking_call(_orig_popen_init, self, *args, **kwargs)
+    return _orig_popen_init(self, *args, **kwargs)
 
 
 def _patched_popen_wait(self, timeout=None):
@@ -85,13 +121,17 @@ def _patched_popen_wait(self, timeout=None):
 
 
 def _patch_subprocess():
-    global _orig_popen_wait
+    global _orig_popen_wait, _orig_popen_init
     _orig_popen_wait = subprocess.Popen.wait
     subprocess.Popen.wait = _patched_popen_wait
+    _orig_popen_init = subprocess.Popen.__init__
+    subprocess.Popen.__init__ = _patched_popen_init
 
 
 def _unpatch_subprocess():
     subprocess.Popen.wait = _orig_popen_wait
+    if _orig_popen_init is not None:
+        subprocess.Popen.__init__ = _orig_popen_init
 
 
 # ============================================================
