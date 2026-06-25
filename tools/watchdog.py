@@ -191,7 +191,7 @@ if __name__ == "__main__":
         def spinner():
             while True:
                 pc.sched_yield_classic()   # always runnable -> run() never drains
-        pc.go(spinner)
+        pc.fiber(spinner)
         pc.run()
 
     print("running a non-terminating scheduler under a 2s guard...")

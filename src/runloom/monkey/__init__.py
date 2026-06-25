@@ -260,6 +260,49 @@ _PATCHERS = {
 _applied = set()
 
 
+_saved_tempfile_once_lock = None
+
+
+def _fixup_preimported_stdlib_locks():
+    """Make stdlib lock singletons captured BEFORE patch() cooperative.
+
+    A stdlib module imported before patch() may capture ``_thread.allocate_lock``
+    DIRECTLY (tempfile: ``from _thread import allocate_lock``), so its
+    module-level lock is a REAL (non-cooperative) lock even after the threading
+    patch -- and a real lock held by one fiber across a yielding/offloaded call
+    while another fiber blocks on it FREEZES the single scheduler thread
+    (deadlock; see the locks.py header).  ``tempfile._once_lock`` (the one-time
+    ``gettempdir()`` probe guard) is hit by every fiber doing ``mkstemp`` /
+    ``NamedTemporaryFile`` / etc. -- runloom imports tempfile before patch(), so
+    this deadlocked deterministically (tools/monkey_offload_stress.py, lifefuzz
+    seed=2).  Re-create it cooperative; save the original so unpatch() restores
+    it."""
+    global _saved_tempfile_once_lock
+    import sys
+    tf = sys.modules.get("tempfile")
+    if tf is None or _saved_tempfile_once_lock is not None:
+        return
+    try:
+        _saved_tempfile_once_lock = tf._once_lock
+        tf._once_lock = CoLock()
+    except Exception:
+        _saved_tempfile_once_lock = None
+
+
+def _restore_preimported_stdlib_locks():
+    global _saved_tempfile_once_lock
+    if _saved_tempfile_once_lock is None:
+        return
+    import sys
+    tf = sys.modules.get("tempfile")
+    if tf is not None:
+        try:
+            tf._once_lock = _saved_tempfile_once_lock
+        except Exception:
+            pass
+    _saved_tempfile_once_lock = None
+
+
 def patch(**flags):
     """Apply runloom monkey-patches.  Idempotent.
 
@@ -285,6 +328,9 @@ def patch(**flags):
             continue
         _PATCHERS[name][0]()
         _applied.add(name)
+    # stdlib locks captured pre-patch (tempfile._once_lock) are real and freeze
+    # a hub when a fiber blocks on them across an offloaded call -- cooperative-ize.
+    _fixup_preimported_stdlib_locks()
 
 
 def unpatch(**flags):
@@ -302,3 +348,4 @@ def unpatch(**flags):
         _applied.discard(name)
     if not _applied:
         _uninstall_fiber_wrapper()
+        _restore_preimported_stdlib_locks()
