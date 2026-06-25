@@ -259,11 +259,14 @@ def test_mn_fiber_core_coro_alloc_failure_releases_admission():
         rc.mn_init(2)
         live0 = rc.live_fibers()
         soft, hard = resource.getrlimit(resource.RLIMIT_AS)
-        cap = vmsize() + 8 * 1024 * 1024 # ~8 MiB headroom: a fresh 8 MiB stack won't fit
+        cap = vmsize() + 8 * 1024 * 1024 # ~8 MiB headroom for a 32 MiB stack reservation
         resource.setrlimit(resource.RLIMIT_AS, (cap, hard))
         raised = False
         try:
-            rc.mn_fiber(lambda: None, 8 * 1024 * 1024)
+            # 32 MiB >> the 8 MiB headroom -> the stack reservation reliably OOMs.
+            # (Was 8 MiB: an 8-into-8 razor margin that Python's own VmSize drift
+            # flipped under memory pressure -> "UNEXPECTED_SPAWN_OK" flake.)
+            rc.mn_fiber(lambda: None, 32 * 1024 * 1024)
             print("UNEXPECTED_SPAWN_OK")
         except MemoryError:
             raised = True

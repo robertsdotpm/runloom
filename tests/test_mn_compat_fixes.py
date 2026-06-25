@@ -34,6 +34,8 @@ import runloom
 import runloom.monkey
 import runloom_c
 
+from adv_util import wedge_capture
+
 NHUBS = 4
 
 
@@ -57,7 +59,13 @@ def _drive_mn(main_fn, nhubs=NHUBS):
 
     runloom_c.mn_init(nhubs)
     runloom_c.mn_fiber(runner)
-    runloom_c.mn_run()
+    # A wedge here (e.g. test_subprocess_stdout_read_parks: a parked pipe read
+    # whose netpoll wake is lost) is otherwise an opaque hang until run_isolated's
+    # 300s kill.  Capture the cooperative state -- which fiber parked on which fd,
+    # and the netpoll parker's readyParked (data-ready-but-not-woken == lost wake)
+    # -- if mn_run hasn't returned in 30s (these tests normally finish in <1s).
+    with wedge_capture(30, "_drive_mn/" + getattr(main_fn, "__name__", "?")):
+        runloom_c.mn_run()
     runloom_c.mn_fini()
     if box[1] is not None:
         raise box[1]

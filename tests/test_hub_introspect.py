@@ -29,7 +29,7 @@ HUB_KEYS = {"id", "state", "running_g", "dwell_ms", "pending",
 # wedge budget while a sampler fiber inspects the hubs.
 def blocking_sleep_worker():
     import time
-    time.sleep(0.30)            # raw time.sleep -> DETACHED hub wedge
+    time.sleep(0.60)            # raw time.sleep -> DETACHED hub wedge
 
 
 class HubIntrospectTest(unittest.TestCase):
@@ -92,15 +92,17 @@ class HubIntrospectTest(unittest.TestCase):
         out = {}
 
         def main():
-            runloom.fiber(blocking_sleep_worker)   # blocks 300ms -> a DETACHED wedge
+            runloom.fiber(blocking_sleep_worker)   # blocks 600ms -> a DETACHED wedge
             # The py-spy hint fires when a hub's DISPLAYED dwell >= WEDGE_MS (50ms).
-            # A single 100ms snapshot can race a dwell-counter reset (sysmon
-            # resume bookkeeping momentarily shows the wedged hub at dwell
-            # 0 -> no hint; the overnight flake), so sample across the blocking
-            # window and accept the hint in ANY snapshot.
+            # A single snapshot can race a dwell-counter reset (sysmon resume
+            # bookkeeping momentarily shows the wedged hub at dwell 0 -> no hint;
+            # the overnight flake), so sample MANY snapshots across a wedge long
+            # enough that most land in the >=50ms hint window, and accept the hint
+            # in ANY snapshot.  (Was 20 over 240ms of a 300ms wedge -- too few in
+            # the hint window when a reset clustered with the samples.)
             texts = []
-            for _ in range(20):
-                runloom.sleep(0.012)            # 20 * 12ms = 240ms < the 300ms wedge
+            for _ in range(40):
+                runloom.sleep(0.012)            # 40 * 12ms = 480ms < the 600ms wedge
                 buf = io.StringIO()
                 gi.print_hubs(file=buf)
                 texts.append(buf.getvalue())

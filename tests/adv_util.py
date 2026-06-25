@@ -36,24 +36,90 @@ sys.path.insert(0, os.path.join(
 # thread class + primitives a "foreign thread" test needs to stay foreign.
 _RealThread = threading.Thread
 _real_sleep = time.sleep
+# The wedge-capture watchdog reuses _RealThread (above) -- it MUST run on a real
+# OS thread, since a cooperative thread can't run while the scheduler is wedged,
+# which is exactly when we need the dump.  Event is captured pre-patch too.
+_real_event = threading.Event
+
+
+def dump_cooperative_state(label=""):
+    """Dump the runloom COOPERATIVE state for a wedge / lost-wake post-mortem.
+
+    faulthandler shows only the OS-thread (hub) stacks; it cannot show the
+    PARKED FIBERS -- which is exactly what a lost-wake wedge looks like.  This
+    dumps:
+      * dump_fibers   -- every live fiber + its state + the fd it waits on
+                         (e.g. ``g1025 io-wait fd=5 ev=R``);
+      * _dump_parkers -- the netpoll parkers.  A nonzero ``readyParked`` means an
+                         fd was READY but its parker was NOT woken == a LOST WAKE
+                         (the smoking gun: data present, fiber still parked);
+      * print_hubs    -- per-hub running_g / dwell / pending.
+    Safe to call from a foreign OS thread while the scheduler is wedged.
+    """
+    import runloom_c as _rc
+    tag = " (" + label + ")" if label else ""
+    sys.stderr.write("\n[wedge-capture] cooperative-state dump{0}:\n".format(tag))
+    sys.stderr.flush()
+    for fn in ("dump_fibers", "_dump_parkers"):
+        try:
+            getattr(_rc, fn)()
+        except Exception as e:               # noqa: BLE001
+            sys.stderr.write("[wedge-capture] {0} failed: {1!r}\n".format(fn, e))
+    try:
+        from runloom import inspect as _gi
+        _gi.print_hubs(file=sys.stderr)
+    except Exception as e:                    # noqa: BLE001
+        sys.stderr.write("[wedge-capture] print_hubs failed: {0!r}\n".format(e))
+    sys.stderr.flush()
 
 
 @contextlib.contextmanager
-def hang_guard(seconds, label=""):
+def wedge_capture(seconds, label=""):
+    """Real-OS-thread watchdog: if the body does not finish within `seconds`,
+    dump_cooperative_state(label).  Unlike hang_guard it does NOT abort -- the
+    body keeps running (the outer test/run_isolated timeout is the backstop), so
+    a recoverable slow path is merely annotated, while a true wedge is captured
+    with WHICH fiber parked on WHICH fd instead of an opaque timeout.
+    """
+    _done = _real_event()
+
+    def _watch():
+        if not _done.wait(seconds):
+            dump_cooperative_state(label)
+
+    _RealThread(target=_watch, name="wedge_capture", daemon=True).start()
+    try:
+        yield
+    finally:
+        _done.set()
+
+
+@contextlib.contextmanager
+def hang_guard(seconds, label="", capture=True):
     """Dump all stacks and _exit if the body does not finish in `seconds`.
 
     The only reliable watchdog for a hang that lives inside the C scheduler
     with the GIL off: faulthandler runs its timer on a dedicated thread that
-    does not need the interpreter to be responsive.
+    does not need the interpreter to be responsive.  With ``capture`` (default
+    on), also dump the runloom COOPERATIVE state (dump_cooperative_state) just
+    before the faulthandler exit, so a lost-wake wedge shows which fiber parked
+    on which fd -- not just the opaque OS-thread dump.
     """
     if label:
         sys.stderr.write("[hang_guard] arming {0}s for {1}\n".format(seconds, label))
         sys.stderr.flush()
+    _done = _real_event()
+    if capture:
+        def _cap():
+            if not _done.wait(max(2.0, seconds * 0.8)):
+                dump_cooperative_state(label)
+        _RealThread(target=_cap, name="hang_guard_capture", daemon=True).start()
     faulthandler.dump_traceback_later(seconds, exit=True)
     try:
         yield
     finally:
         faulthandler.cancel_dump_traceback_later()
+        _done.set()
 
 
 class Stopwatch(object):

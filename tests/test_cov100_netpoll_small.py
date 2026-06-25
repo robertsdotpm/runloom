@@ -418,7 +418,12 @@ def test_parker_link_ghost_churn_beststeffort():
                 rc.sched_yield()
                 rc.tcp_send(b.fileno(), b"x")
             rc.mn_fiber(writer)
-            r = rc.wait_fd(a.fileno(), 1, 2000)
+            # 10s budget (was 2s): under extreme oversubscription (the writer
+            # fiber starved for a hub slot across many concurrent test procs) a
+            # round can exceed 2s even though the normal round is ~3ms -- that is
+            # load, not a lost wake.  A genuine wedge is still caught (and now
+            # dumped with the cooperative state) by the hang_guard below.
+            r = rc.wait_fd(a.fileno(), 1, 10000)
             assert r == 1, r
             buf = bytearray(1); rc.tcp_recv(a.fileno(), buf, 1)
             done[0] = 1
