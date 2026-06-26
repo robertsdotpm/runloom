@@ -67,6 +67,46 @@ else
     echo "FAIL -- no backstop should violate AllWoken (liveness)"; fail=$((fail+1))
 fi
 
+# ---- M:N hub-submit wake (route A, default mode): the SIBLING of RunloomWake for
+# an M:N hub.  A foreign waker appends g to the OWNER hub's per-hub sub_head and
+# fires TWO free-delivery kicks (idle_cond + wake-pump eventfd); an idle M:N hub
+# never blocks unbounded -- it polls ~1ms and re-drains sub_head -- so even with
+# BOTH kicks lost the appended fiber self-heals.  Negative control: BoundedPoll=
+# FALSE (the unbounded-block regression) strands it -> the M:N lost-wakeup lasso.
+printf '  [tlc] %-28s ' "RunloomMNWake (correct)"
+if run_tlc mnwkok -config RunloomMNWake.cfg RunloomMNWake.tla | grep -q "No error has been found"; then
+    echo "PASS -- TypeOK/ResumeIsTerminal + AllWoken (~1ms bounded poll closes the lost-kick window)"; pass=$((pass+1))
+else
+    echo "FAIL -- the bounded-poll M:N wake protocol should hold"; fail=$((fail+1))
+fi
+
+printf '  [tlc] %-28s ' "RunloomMNWake (Bounded=FALSE)"
+if run_tlc mnwkbug -deadlock -config RunloomMNWake_bug.cfg RunloomMNWake.tla | grep -q "Temporal properties were violated"; then
+    echo "PASS -- correctly DETECTS the M:N lost-wakeup lasso (unbounded hub block + both kicks lost)"; pass=$((pass+1))
+else
+    echo "FAIL -- no bounded poll should violate AllWoken (liveness)"; fail=$((fail+1))
+fi
+
+# ---- io_uring CQE wake: a fiber submits an SQE and parks; the kernel posts a CQE
+# and signals the registered eventfd -- EXCEPT for a completion forced into the CQ
+# overflow backlog, which the kernel does NOT re-signal (the lost-wakeup).  Correct
+# = while inflight>0 the drain runs the GETEVENTS overflow flush FIRST (drain-first,
+# drain.c:155-158) so the backlogged completion becomes visible and is consumed.
+# Negative control: Heal=FALSE drops the flush -> a stranded completion is lost.
+printf '  [tlc] %-28s ' "RunloomIouringWake (correct)"
+if run_tlc iouwkok -config RunloomIouringWake.cfg RunloomIouringWake.tla | grep -q "No error has been found"; then
+    echo "PASS -- TypeOK/ResumeIsTerminal/NoStrandedCompletion + AllWoken (drain-first flush closes the overflow window)"; pass=$((pass+1))
+else
+    echo "FAIL -- the drain-first-flush iouring wake protocol should hold"; fail=$((fail+1))
+fi
+
+printf '  [tlc] %-28s ' "RunloomIouringWake (Heal=FALSE)"
+if run_tlc iouwkbug -deadlock -config RunloomIouringWake_bug.cfg RunloomIouringWake.tla | grep -q "Temporal properties were violated"; then
+    echo "PASS -- correctly DETECTS the CQ-overflow lost-wakeup lasso (no flush strands a backlogged completion)"; pass=$((pass+1))
+else
+    echo "FAIL -- no overflow flush should violate AllWoken (liveness)"; fail=$((fail+1))
+fi
+
 # ---- Controlled M:N scheduler (RUNLOOM_MN_SEED experiment): the baton +
 # rendezvous protocol.  Correct = mutual-exclusion + deadlock-free +
 # deterministic grant.  Two negative controls model the two real obstacles:
