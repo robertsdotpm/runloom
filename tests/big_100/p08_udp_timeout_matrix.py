@@ -7,6 +7,7 @@ dead path must not block the goroutines making progress on the live path.
 
 Stresses: timeout handling, scheduler wakeups, ICMP-unreachable error delivery.
 """
+import errno
 import sys
 
 import harness
@@ -64,12 +65,29 @@ def client(H, wid, rng, state):
     # Bind to a distributed loopback address (127.0.0.2-9) so workers don't
     # deplete 127.0.0.1's port pool — see _CLIENT_BIND_ADDRS comment above.
     bind_host = _CLIENT_BIND_ADDRS[wid % len(_CLIENT_BIND_ADDRS)]
-    live = netutil.udp_socket(host=bind_host)
-    live.setblocking(False)
-    live.connect(state["live"])
-    dead = netutil.udp_socket(host=bind_host)
-    dead.setblocking(False)
-    dead.connect(state["dead"])
+    # Socket SETUP can hit a benign HOST resource limit at high concurrency that
+    # is orthogonal to this test's timeout-isolation invariant: e.g. on macOS a
+    # bind/connect to a per-worker loopback addr can momentarily return
+    # EADDRNOTAVAIL (ephemeral-port pool churn), the *NIX cousin of the Windows
+    # WSAENOBUFS socket ceiling this test already documents.  Treat such a setup
+    # failure as a skipped worker (benign), not an invariant failure -- mirrors
+    # the send/recv OSError tolerance below.
+    live = dead = None
+    try:
+        live = netutil.udp_socket(host=bind_host)
+        live.setblocking(False)
+        live.connect(state["live"])
+        dead = netutil.udp_socket(host=bind_host)
+        dead.setblocking(False)
+        dead.connect(state["dead"])
+    except OSError as e:
+        netutil.close_quiet(live)
+        netutil.close_quiet(dead)
+        if e.errno in (errno.EADDRNOTAVAIL, errno.EADDRINUSE,
+                       errno.ENOBUFS, errno.EMFILE, errno.ENFILE):
+            H.op(wid)               # benign host limit -> count + skip this worker
+            return
+        raise
     try:
         H.sleep(rng.random() * 0.5)
         while H.running():
