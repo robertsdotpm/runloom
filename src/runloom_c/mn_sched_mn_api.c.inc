@@ -141,6 +141,15 @@ static void runloom_mn_hub_submit(runloom_hub_t *h, runloom_g_t *g)
     RUNLOOM_RUNLOCK(&h->sub_lock, RUNLOOM_RANK_HUB_SUB);
     RUNLOOM_EVT(RUNLOOM_EVT_G_SUBMIT, g, h, 0);
     runloom_g_state_set(g, RUNLOOM_GST_SUBMITTED);
+    /* MNWAKE-TRACE: the DURABLE append to the owner hub's sub_head (model
+     * WakerAppend) -- opens a model episode for g.  Gated on g->snap.valid so only
+     * a WOKEN g (snapped its state at park) emits, not a FRESH spawn (snap-invalid,
+     * routed to the deque not the ready FIFO -> no HUB_DRAIN, not a wake episode);
+     * this matches the HUB_DRAIN emit (also snap.valid only).  snap.valid is set at
+     * park on the owner thread before this foreign waker's parked_safe CAS, so the
+     * read is race-free.  Immediate-push path only (the staged path returns above). */
+    if (g->snap.valid)
+        runloom_mnwake_trace_event("FOREIGN_WAKE", (unsigned long)(uintptr_t)g, 0);
     /* BUG #10 throughput: bump the submit generation, then signal the target hub
      * if it is parked in its idle condvar (it owns parked gs and nothing else to
      * run), so the woken g is drained in ~us instead of stranded for idle_ns
@@ -182,6 +191,11 @@ static void runloom_mn_hub_submit(runloom_hub_t *h, runloom_g_t *g)
      * not a broadcast -- this is the hot cross-hub handoff path.  Shared-handle
      * backends (epoll/IOCP/select) ignore the arg. */
     runloom_netpoll_wake_pump((void *)h);
+    /* MNWAKE-TRACE: both kicks fired (model WakerSignal -- idle_cond + wake-pump
+     * eventfd, each FREE delivery).  One event per WOKEN-g submit (snap.valid, as
+     * for FOREIGN_WAKE); delivery left free. */
+    if (g->snap.valid)
+        runloom_mnwake_trace_event("SIGNAL", (unsigned long)(uintptr_t)g, 0);
 }
 
 void runloom_mn_wake_g(void *hub_opaque, runloom_g_t *g)

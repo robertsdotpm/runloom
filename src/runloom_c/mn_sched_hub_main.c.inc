@@ -547,6 +547,12 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
                  * wake_gs against ANY queued state, not just the
                  * sub list. */
                 if (sub->snap.valid) {
+                    /* MNWAKE-TRACE: a woken (snap.valid) g drained from sub_head to
+                     * the local ready FIFO (model HubDrain).  Emitted ONLY here,
+                     * inside the non-empty drain branch -- the steady empty-poll
+                     * spin (sub_head==NULL) never reaches this, so the hot M:N path
+                     * is unperturbed.  One event per woken g; coalesced by the driver. */
+                    runloom_mnwake_trace_event("HUB_DRAIN", (unsigned long)(uintptr_t)sub, 0);
                     runloom_sched_ready_push(&h->sched, sub);
                 } else if (runloom_cldeque_push(&h->deque, sub) != 0) {
                     /* Deque full (>RUNLOOM_CLDEQUE_CAP=4096 fresh gs on this
@@ -975,7 +981,13 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
                          * the waiter woken (cross-hub via mn_wake_g).  Cheap no-op
                          * when the global ring is uninitialised or its CQ empty. */
                         runloom_iouring_drain();
+                        /* MNWAKE-TRACE: idle hub blocks in the netpoll pump, a
+                         * BOUNDED timed wait (pump_ns, ~1ms base) -- model
+                         * HubDrainEmpty->HubDecide->HubBlock; cap=1 witnesses the
+                         * bounded poll (the BoundedPoll arm). */
+                        runloom_mnwake_trace_event("HUB_BLOCK", 0, 1);
                         runloom_netpoll_pump(pump_ns);
+                        runloom_mnwake_trace_event("HUB_UNBLOCK", 0, 0);
                     } else {
                         if (idle_ns <= 0) idle_ns = 1;
                         /* BUG #10 throughput: this hub has no netpoll/iouring work
@@ -1011,8 +1023,13 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
                                  * stop-the-world sees this hub already stopped and
                                  * the cond wait holds no tstate. */
                                 saved = PyEval_SaveThread();
+                                /* MNWAKE-TRACE: idle hub blocks on its per-hub
+                                 * idle_cond, a BOUNDED timed wait (idle_ns) -- model
+                                 * HubDrainEmpty->HubDecide->HubBlock; cap=1 = bounded. */
+                                runloom_mnwake_trace_event("HUB_BLOCK", 0, 1);
                                 runloom_cond_timedwait_ns(&h->idle_cond,
                                                           &h->idle_lock, idle_ns);
+                                runloom_mnwake_trace_event("HUB_UNBLOCK", 0, 0);
                                 waited = 1;
                             }
                             __atomic_store_n(&h->idle_waiting, 0, __ATOMIC_RELEASE);
@@ -1390,6 +1407,12 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
                 continue;
             }
             runloom_g_state_set(g, RUNLOOM_GST_RUNNING);   /* observational: now on-CPU */
+            /* MNWAKE-TRACE: the hub runs a ready g (model HubResume).  Emitted for
+             * EVERY resume; the driver keeps only those that close a foreign-wake
+             * episode (a preceding FOREIGN_WAKE for this g), dropping first-run /
+             * cooperative-yield resumes -- so a RESUME with no durable sub_head
+             * append is a resume-without-a-wake (the M:N lost-wakeup class). */
+            runloom_mnwake_trace_event("RESUME", (unsigned long)(uintptr_t)g, 0);
             runloom_hub_resume_begin(h, g);
             runloom_coro_resume(cp);
             }

@@ -454,6 +454,29 @@ void runloom_wake_trace_event(const char *action, unsigned long g, int cap)
     RUNLOOM_RUNLOCK(&runloom_wake_trace_lock, RUNLOOM_RANK_TRACE);
 }
 
+/* ---- M:N HUB-SUBMIT wake protocol trace (TLA+ trace conformance, RUNLOOM_MNWAKE_TRACE) ----
+ * Sibling of runloom_wake_trace_event for the M:N hub-submit route (route A):
+ * FOREIGN_WAKE (sub_head durable append) / SIGNAL (the idle_cond + wake-pump
+ * kicks) on the foreign waker; HUB_DRAIN / HUB_BLOCK / HUB_UNBLOCK / RESUME on the
+ * owner hub -- replayed against RunloomMNWake.tla by tools/mnwake_trace_conform.py.
+ * `cap` is meaningful only on HUB_BLOCK (1 == the hub's idle wait is the bounded
+ * ~1ms timed poll, the model's BoundedPoll arm).  All emit sites are at wake /
+ * drain-with-work / idle-block / resume frequency -- NEVER the steady empty-poll
+ * spin (HUB_DRAIN is emitted inside the non-empty drain branch only), so a NULL
+ * fp is one predictable-not-taken load and production is unperturbed. */
+static FILE           *runloom_mnwake_trace_fp = NULL;
+static runloom_mutex_t runloom_mnwake_trace_lock;
+
+void runloom_mnwake_trace_event(const char *action, unsigned long g, int cap)
+{
+    if (runloom_mnwake_trace_fp == NULL) return;
+    RUNLOOM_RLOCK(&runloom_mnwake_trace_lock, RUNLOOM_RANK_TRACE);
+    fprintf(runloom_mnwake_trace_fp,
+            "{\"a\":\"%s\",\"g\":%lu,\"cap\":%d}\n", action, g, cap);
+    fflush(runloom_mnwake_trace_fp);
+    RUNLOOM_RUNLOCK(&runloom_mnwake_trace_lock, RUNLOOM_RANK_TRACE);
+}
+
 void runloom_diag_init(void)
 {
     if (runloom_diag_inited) return;
@@ -478,6 +501,13 @@ void runloom_diag_init(void)
             if (wt != NULL && wt[0] != '\0') {
                 runloom_mutex_init(&runloom_wake_trace_lock);
                 runloom_wake_trace_fp = fopen(wt, "w");
+            }
+        }
+        {
+            const char *mw = getenv("RUNLOOM_MNWAKE_TRACE");
+            if (mw != NULL && mw[0] != '\0') {
+                runloom_mutex_init(&runloom_mnwake_trace_lock);
+                runloom_mnwake_trace_fp = fopen(mw, "w");
             }
         }
     }

@@ -201,6 +201,14 @@ void runloom_mn_trace_event(const char *action, int hub);
  * one predictable-NULL load) unless the env var is set. */
 void runloom_wake_trace_event(const char *action, unsigned long g, int cap);
 
+
+/* ---- M:N hub-submit wake trace (TLA+ trace conformance, RUNLOOM_MNWAKE_TRACE) ----
+ * One ndjson line per M:N wake transition ({"a":<FOREIGN_WAKE|SIGNAL|HUB_DRAIN|
+ * HUB_BLOCK|HUB_UNBLOCK|RESUME>,"g":<fiber-ptr token>,"cap":<0|1 bounded-poll,
+ * HUB_BLOCK only>}); tools/mnwake_trace_conform.py replays it through
+ * RunloomMNWake.tla.  Off (zero-cost -- one predictable-NULL load) unless set. */
+void runloom_mnwake_trace_event(const char *action, unsigned long g, int cap);
+
 #ifdef __cplusplus
 }
 #endif

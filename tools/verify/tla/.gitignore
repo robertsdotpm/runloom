@@ -9,3 +9,5 @@ RunloomCPythonSTWTrace.tla
 RunloomCPythonSTWTrace.cfg
 RunloomWakeTrace.tla
 RunloomWakeTrace.cfg
+RunloomMNWakeTrace.tla
+RunloomMNWakeTrace.cfg

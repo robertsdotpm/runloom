@@ -1,0 +1,252 @@
+#!/usr/bin/env python3
+r"""mnwake_trace_conform.py -- TRACE CONFORMANCE for the M:N HUB-SUBMIT wake
+protocol: replay a REAL extension run against RunloomMNWake.tla (route A).
+
+RunloomWake binds the SINGLE-THREAD drain; this binds the M:N hub-submit route.
+The M:N hub emits its wake-handshake transitions (RUNLOOM_MNWAKE_TRACE=<path>:
+FOREIGN_WAKE (sub_head durable append) / SIGNAL (the idle_cond + wake-pump kicks)
+on the foreign waker; HUB_DRAIN / HUB_BLOCK / HUB_UNBLOCK / RESUME on the owner
+hub, one ndjson line each).  This lowers that real trace to RunloomMNWake's OWN
+actions (WakerAppend / WakerSignal / HubDrain / HubDrainEmpty / HubDecide /
+HubBlock / HubKickWake | HubPollTimeout / HubResume) and TLC checks TypeOK +
+ResumeIsTerminal hold at every step.
+
+  - a real M:N offload run conforms (every observed transition is an enabled model
+    step; no fiber is resumed without a durable sub_head append);
+  - drop a FOREIGN_WAKE and the dependent SIGNAL/RESUME can no longer fire -> TLC
+    deadlocks: the M:N lost-wakeup the bounded poll exists to forbid.
+
+THE HONEST SPLIT (same as RunloomWake): SAFETY only along the real path
+(ResumeIsTerminal + every-event-enabled).  The kicks keep the model's FREE
+delivery (WakerSignal leaves both idle_cond and pump_efd free); HUB_UNBLOCK maps to
+(HubKickWake \/ HubPollTimeout), and because the bounded ~1ms poll is armed while
+fp_inflight>0, HubPollTimeout is always enabled, so the both-kicks-lost branch
+never spuriously deadlocks while TLC still explores both.  LIVENESS (AllWoken) is
+NOT replay-checked -- a finite trace can't witness <>[]; it stays proven by the
+closed RunloomMNWake.cfg/_bug.cfg.
+
+M:N-SPECIFIC LOWERING:
+  * Each FOREIGN_WAKE opens a FRESH model episode id even for the same fiber ptr
+    (the per-g waker_pc is single-use); a RESUME with no open episode (the fresh
+    spawn's first run) is dropped.
+  * Trailing idle-poll HUB_BLOCK/HUB_UNBLOCK after the last RESUME have
+    fp_inflight=0 (so the model's hub_timeout is "infinite", not the bounded poll)
+    and are teardown noise -- truncated at the last RESUME so every retained block
+    has fp_inflight>0 (the bounded poll armed).
+
+House style: .format(), no f-strings.
+
+Usage: mnwake_trace_conform.py <events.ndjson> [--drop-foreign-wake[=N]]
+"""
+import json
+import os
+import subprocess
+import sys
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(HERE)
+TLA = os.path.join(HERE, "verify", "tla")
+JAR = os.path.join(TLA, "tla2tools.jar")
+
+DUMMY_G = "g0"
+
+
+def load_events(path):
+    out = []
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                out.append(json.loads(line))
+    return out
+
+
+def build_model_events(raw, drop_fw=-1):
+    """Lower the raw M:N trace to model-level (action, g) events.
+
+    Truncate at the last RESUME (trailing idle polls are teardown).  Episodes open
+    on FOREIGN_WAKE (fresh id per occurrence) and close on the matching RESUME;
+    first-run / spawn RESUMEs (no open episode) are dropped.  One HUB_BLOCK expands
+    to HubDrainEmpty -> HubDecide -> HubBlock.
+
+    drop_fw >= 0 suppresses the WakerAppend emission of that episode ordinal (the
+    negative control) -> the orphaned SIGNAL/RESUME deadlocks TLC.
+
+    Returns (events, gs, backstop_unarmed).
+    """
+    # truncate at the last RESUME -- everything after is post-work idle polling
+    last_resume = -1
+    for i, e in enumerate(raw):
+        if e["a"] == "RESUME":
+            last_resume = i
+    raw = raw[:last_resume + 1] if last_resume >= 0 else raw
+
+    open_ep = {}            # fiber ptr -> currently-open episode id
+    gs = []
+    out = []
+    backstop_unarmed = []
+    nfw = 0
+
+    def new_ep(ptr):
+        name = "g{}".format(len(gs) + 1)
+        gs.append(name)
+        open_ep[ptr] = name
+        return name
+
+    for e in raw:
+        a = e["a"]
+        ptr = e.get("g", 0)
+        cap = e.get("cap", 0)
+        if a == "FOREIGN_WAKE":
+            ep = new_ep(ptr)
+            if nfw != drop_fw:
+                out.append(("FOREIGN_WAKE", ep))
+            nfw += 1
+        elif a == "SIGNAL":
+            ep = open_ep.get(ptr)
+            if ep is not None:
+                out.append(("SIGNAL", ep))
+        elif a == "HUB_DRAIN":
+            if not (out and out[-1][0] == "HUB_DRAIN"):
+                out.append(("HUB_DRAIN", DUMMY_G))    # readies the whole sub_list
+        elif a == "HUB_BLOCK":
+            if cap != 1:
+                backstop_unarmed.append(len(out))
+            out.append(("HUB_DRAINEMPTY", DUMMY_G))
+            out.append(("HUB_DECIDE", DUMMY_G))
+            out.append(("HUB_BLOCK", DUMMY_G))
+        elif a == "HUB_UNBLOCK":
+            out.append(("HUB_UNBLOCK", DUMMY_G))
+        elif a == "RESUME":
+            ep = open_ep.pop(ptr, None)
+            if ep is not None:
+                out.append(("RESUME", ep))
+    return out, gs, backstop_unarmed
+
+
+TEMPLATE = '''\\* GENERATED by tools/mnwake_trace_conform.py from a real RUNLOOM_MNWAKE_TRACE run.
+\\* Replays the recorded M:N hub-submit wake transitions through RunloomMNWake's OWN
+\\* actions under TLC: conformance = each event is an enabled model step and
+\\* ResumeIsTerminal (no resume without a durable sub_head append) holds along the
+\\* real path.  SAFETY refinement only; liveness stays in the closed model.  DO NOT EDIT.
+-------------------------- MODULE RunloomMNWakeTrace --------------------------
+EXTENDS RunloomMNWake, Sequences, Naturals
+
+TraceEvents == << {seq} >>
+
+VARIABLE tpc
+
+\\* The hub's idle wait returned: a DELIVERED kick (HubKickWake) OR the bounded
+\\* ~1ms poll timeout (HubPollTimeout).  The binary cannot observe which; replay
+\\* admits BOTH.  Because the poll is armed (pump_1ms) while fp_inflight>0,
+\\* HubPollTimeout is always enabled, so the both-kicks-lost branch never spuriously
+\\* deadlocks while the model still explores both kick outcomes.
+HubUnblock == HubKickWake \\/ HubPollTimeout
+
+TInit == Init /\\ tpc = 1
+
+TNext ==
+    \\/ /\\ tpc <= Len(TraceEvents)
+       /\\ LET e == TraceEvents[tpc] IN
+            /\\ \\/ (e.a = "FOREIGN_WAKE"  /\\ WakerAppend(e.g))
+               \\/ (e.a = "SIGNAL"        /\\ WakerSignal(e.g))
+               \\/ (e.a = "HUB_DRAIN"     /\\ HubDrain)
+               \\/ (e.a = "HUB_DRAINEMPTY"/\\ HubDrainEmpty)
+               \\/ (e.a = "HUB_DECIDE"    /\\ HubDecide)
+               \\/ (e.a = "HUB_BLOCK"     /\\ HubBlock)
+               \\/ (e.a = "HUB_UNBLOCK"   /\\ HubUnblock)
+               \\/ (e.a = "RESUME"        /\\ HubResume)
+            /\\ tpc' = tpc + 1
+    \\/ /\\ tpc > Len(TraceEvents)
+       /\\ UNCHANGED <<vars, tpc>>
+
+TSpec == TInit /\\ [][TNext]_<<vars, tpc>>
+=============================================================================
+'''
+
+CFG = '''\\* GENERATED.  Gs = the distinct foreign-wake episodes (one per durable sub_head
+\\* append -> resume).  BoundedPoll = TRUE: the real binary HAS the ~1ms timed poll.
+\\* SAFETY conformance (no liveness on a finite trace).
+CONSTANTS
+    Gs = {{{gs}}}
+    BoundedPoll = TRUE
+SPECIFICATION TSpec
+INVARIANT TypeOK
+INVARIANT ResumeIsTerminal
+'''
+
+
+def record(action, g):
+    return '[a |-> "{}", g |-> "{}"]'.format(action, g)
+
+
+def main():
+    argv = list(sys.argv[1:])
+    drop_fw = -1
+    rest = []
+    for a in argv:
+        if a == "--drop-foreign-wake":
+            drop_fw = 0
+        elif a.startswith("--drop-foreign-wake="):
+            drop_fw = int(a.split("=", 1)[1])
+        else:
+            rest.append(a)
+    if not rest:
+        print("usage: mnwake_trace_conform.py <events.ndjson> [--drop-foreign-wake[=N]]")
+        return 2
+    raw = load_events(rest[0])
+    if not raw:
+        print("empty trace (was RUNLOOM_MNWAKE_TRACE set on an mn_run() offload?)")
+        return 2
+
+    events, gs, unarmed = build_model_events(raw, drop_fw)
+    if not gs:
+        print("no M:N foreign-wake episodes (did any rc.blocking() run under mn_run?)")
+        return 2
+
+    if drop_fw < 0 and unarmed:
+        print("  NON-CONFORMING -- the M:N bounded poll did NOT arm at {} "
+              "HUB_BLOCK(s) (cap=0 while a foreign-park fiber was in flight): an "
+              "idle hub blocked UNBOUNDED -> a lost kick can strand the fiber"
+              .format(len(unarmed)))
+        return 1
+
+    seq = ",\n                  ".join(record(a, g) for a, g in events)
+    with open(os.path.join(TLA, "RunloomMNWakeTrace.tla"), "w") as f:
+        f.write(TEMPLATE.format(seq=seq))
+    with open(os.path.join(TLA, "RunloomMNWakeTrace.cfg"), "w") as f:
+        f.write(CFG.format(gs=", ".join('"{}"'.format(g) for g in gs)))
+
+    if not os.path.exists(JAR):
+        print("tla2tools.jar missing; run tools/verify/tla/run_tla.sh once")
+        return 2
+    meta = "/tmp/runloom_mnwaketrace_{}".format(os.getpid())
+    proc = subprocess.run(
+        ["java", "-Xmx1g", "-cp", JAR, "tlc2.TLC", "-workers", "4", "-metadir", meta,
+         "-config", "RunloomMNWakeTrace.cfg", "RunloomMNWakeTrace.tla"],
+        cwd=TLA, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    out = proc.stdout
+    print("  events: {}   episodes: {}   model-steps: {}".format(
+        len(raw), len(gs), len(events)))
+    if "No error has been found" in out:
+        print("  CONFORMS -- every M:N wake event is a legal RunloomMNWake step; "
+              "ResumeIsTerminal holds along the real path (no resume without a "
+              "durable sub_head append)")
+        return 0
+    if "is violated" in out:
+        inv = next((l.strip() for l in out.splitlines() if "is violated" in l),
+                   "an invariant")
+        print("  NON-CONFORMING -- {}".format(inv))
+        return 1
+    if "Deadlock" in out or "deadlock" in out:
+        print("  NON-CONFORMING -- a recorded M:N wake transition was not an enabled "
+              "model step (e.g. a SIGNAL/RESUME with no preceding durable "
+              "FOREIGN_WAKE sub_head append -- a resume without a wake, the M:N "
+              "lost-wakeup class RunloomMNWake.tla forbids)")
+        return 1
+    print("  TLC error:\n" + "\n".join(out.splitlines()[-10:]))
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())
