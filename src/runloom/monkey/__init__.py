@@ -318,6 +318,11 @@ def patch(**flags):
         raise TypeError("patch() got unknown category: " +
                         ", ".join(sorted(unknown)))
     _install_fiber_wrapper()
+    # Safe sys._current_frames: hand callers self-contained frame snapshots so a
+    # cross-thread / descheduled reader never use-after-frees a recycled datastack
+    # chunk (layer C of the p200 frame-UAF fix; see monkey/frames.py).
+    from . import frames as _frames
+    _frames.install()
     # Threading must come before queue (queue is a no-op but kept for
     # symmetry); socket has to come before dns (dns wraps socket fns).
     order = list(_DEFAULTS)
@@ -348,4 +353,6 @@ def unpatch(**flags):
         _applied.discard(name)
     if not _applied:
         _uninstall_fiber_wrapper()
+        from . import frames as _frames
+        _frames.uninstall()
         _restore_preimported_stdlib_locks()
