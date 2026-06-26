@@ -46,6 +46,27 @@ else
     echo "FAIL -- the injected lost-wake bug should violate AllComplete"; fail=$((fail+1))
 fi
 
+# ---- Netpoll-drain wake protocol: the layer RunloomSched does NOT cover -- the
+# single-thread drain's decide-to-block window vs a foreign thread's append+poke,
+# and the f214341 2ms FOREIGN-THREAD WAKE BACKSTOP.  Correct = a possibly-lost
+# poke self-heals via the bounded re-poll while EITHER backstop term is armed
+# (bp_inflight>0 OR foreign_park_inflight>0 -- both load-bearing; TLC found the
+# lasso when only the first armed it).  Negative control: Backstop=FALSE leaves
+# the block unbounded, so a poke lost after a peek-empty strands the fiber.
+printf '  [tlc] %-28s ' "RunloomWake (correct)"
+if run_tlc wkok -config RunloomWake.cfg RunloomWake.tla | grep -q "No error has been found"; then
+    echo "PASS -- TypeOK/ResumeIsTerminal + AllWoken (2ms backstop closes the lost-poke window)"; pass=$((pass+1))
+else
+    echo "FAIL -- the backstopped wake protocol should hold"; fail=$((fail+1))
+fi
+
+printf '  [tlc] %-28s ' "RunloomWake (Backstop=FALSE)"
+if run_tlc wkbug -deadlock -config RunloomWake_bug.cfg RunloomWake.tla | grep -q "Temporal properties were violated"; then
+    echo "PASS -- correctly DETECTS the lost-wakeup lasso (unbounded block strands a poked-but-lost fiber)"; pass=$((pass+1))
+else
+    echo "FAIL -- no backstop should violate AllWoken (liveness)"; fail=$((fail+1))
+fi
+
 # ---- Controlled M:N scheduler (RUNLOOM_MN_SEED experiment): the baton +
 # rendezvous protocol.  Correct = mutual-exclusion + deadlock-free +
 # deterministic grant.  Two negative controls model the two real obstacles:
