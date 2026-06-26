@@ -33,6 +33,63 @@ def _pidfd_open(pid):
 
 
 # ============================================================
+# EVFILT_PROC -- event-driven child reaping on mac/BSD (which have no pidfd)
+#
+# Without this the wait family below falls back to a per-fiber WNOHANG
+# cooperative-poll loop; at tens of thousands of concurrent child waits those
+# poll loops congest the cooperative timer and reaping stalls (a no-forward-
+# progress watchdog HANG -- big_100 p27/p31/p94 on mac).  kqueue
+# EVFILT_PROC|NOTE_EXIT is the native pidfd equivalent: register the pid on a
+# dedicated kqueue whose OWN fd then becomes readable -- level-triggered --
+# exactly when the child exits.  os.dup()'ing that kqueue fd out hands the caller
+# a plain, os.close()-able fd that parks through the SAME netpoll wait_fd path as
+# a pidfd: one fd per wait, event-driven, scales to any N.  (No EV_ONESHOT: the
+# readable state must PERSIST so a reused exit fd keeps reporting "exited" across
+# the caller's poll loop, exactly like a pidfd.)
+# ============================================================
+# RUNLOOM_PROC_KQUEUE=0 forces the legacy WNOHANG poll-loop fallback (escape
+# hatch + A/B baseline for the event-driven path).
+_HAVE_KQ_PROC = (not _HAVE_PIDFD and hasattr(_select_mod, "kqueue") and
+                 hasattr(_select_mod, "KQ_FILTER_PROC") and
+                 hasattr(_select_mod, "KQ_NOTE_EXIT") and
+                 os.environ.get("RUNLOOM_PROC_KQUEUE", "1") != "0")
+
+
+def _proc_exit_fd(pid):
+    """Return an fd that becomes readable when child `pid` terminates -- Linux: a
+    pidfd; mac/BSD: a dup'd kqueue registered for EVFILT_PROC|NOTE_EXIT -- or None
+    if event-driven waiting is unavailable, `pid` is not one specific positive
+    pid, or it raced a reap.  The fd behaves like a pidfd (unreadable while the
+    child runs, level-readable once it exits), so every caller below treats both
+    backends uniformly.  Caller owns the fd and must close it with os.close()."""
+    if pid is None or pid <= 0:
+        return None
+    if _HAVE_PIDFD:
+        return _pidfd_open(pid)
+    if _HAVE_KQ_PROC:
+        try:
+            kq = _select_mod.kqueue()
+        except OSError:
+            return None
+        try:
+            kq.control([_select_mod.kevent(
+                pid, filter=_select_mod.KQ_FILTER_PROC,
+                flags=_select_mod.KQ_EV_ADD, fflags=_select_mod.KQ_NOTE_EXIT)],
+                0, 0)
+            # dup detaches the fd from the select.kqueue wrapper: kq.close() drops
+            # the wrapper's fd while the dup keeps the kqueue (and its knote) alive
+            # until the caller os.close()s it.
+            return os.dup(kq.fileno())
+        except (ProcessLookupError, OSError):
+            # ESRCH: already exited+reaped.  Other OSError (fd exhaustion, ...):
+            # caller falls back to the WNOHANG poll loop.
+            return None
+        finally:
+            kq.close()
+    return None
+
+
+# ============================================================
 # subprocess
 # ============================================================
 _orig_popen_wait = None
@@ -78,10 +135,12 @@ def _patched_popen_wait(self, timeout=None):
     if not _in_fiber() or self.returncode is not None:
         return _orig_popen_wait(self, timeout)
     deadline = None if timeout is None else time.monotonic() + timeout
-    # Fast path (POSIX, Linux 5.3+): park on a pidfd until the child exits,
-    # then poll() reaps it -- no busy-poll tick.  poll() is what records the
-    # returncode (Windows: WaitForSingleObject 0ms; POSIX: waitpid(WNOHANG)).
-    pfd = _pidfd_open(getattr(self, "pid", None))
+    # Fast path: park on an exit fd until the child exits, then poll() reaps it
+    # -- no busy-poll tick.  The exit fd is a pidfd (Linux 5.3+) or a dup'd
+    # EVFILT_PROC kqueue (mac/BSD); both go readable on termination.  poll() is
+    # what records the returncode (Windows: WaitForSingleObject 0ms; POSIX:
+    # waitpid(WNOHANG)).
+    pfd = _proc_exit_fd(getattr(self, "pid", None))
     if pfd is not None:
         try:
             while True:
@@ -140,9 +199,10 @@ def _unpatch_subprocess():
 # subprocess.Popen.wait is handled above, but bare os.wait* calls (used by
 # code that forks directly, by os.popen, by some test harnesses) and
 # os.system still block the OS thread.  On POSIX we make the wait family
-# cooperative with a WNOHANG poll loop; os.system has no non-blocking form,
-# so it is offloaded to the backend pool.  On Windows WNOHANG does not
-# exist, so os.waitpid is offloaded too.
+# cooperative: park on a single-child exit fd (pidfd / EVFILT_PROC kqueue) when
+# possible, else a WNOHANG poll loop.  os.system has no non-blocking form, so it
+# is offloaded to the backend pool.  On Windows WNOHANG does not exist, so
+# os.waitpid is offloaded too.
 # ============================================================
 _orig_os_waitpid = None
 _orig_os_wait    = None
@@ -162,11 +222,12 @@ def _patched_os_waitpid(pid, options):
         return _blocking_call(_orig_os_waitpid, pid, options)
     if options & os.WNOHANG:
         return _orig_os_waitpid(pid, options)
-    # Event-driven fast path: park on a pidfd that signals the child's exit,
-    # then reap WNOHANG.  Only for a single child waited for termination.
+    # Event-driven fast path: park on an exit fd (pidfd / EVFILT_PROC kqueue)
+    # that signals the child's exit, then reap WNOHANG.  Only for a single child
+    # waited for termination.
     pfd = None
     if not (options & _PIDFD_INCOMPATIBLE):
-        pfd = _pidfd_open(pid)
+        pfd = _proc_exit_fd(pid)
     step = 0.0005
     try:
         while True:
@@ -204,7 +265,7 @@ def _patched_os_waitid(idtype, id, options):
     pfd = None
     if idtype == getattr(os, "P_PID", object()) and \
             not (options & _PIDFD_INCOMPATIBLE):
-        pfd = _pidfd_open(id)
+        pfd = _proc_exit_fd(id)
     step = 0.0005
     try:
         while True:
@@ -233,7 +294,7 @@ def _patched_os_wait4(pid, options):
         return _orig_os_wait4(pid, options)
     pfd = None
     if not (options & _PIDFD_INCOMPATIBLE):
-        pfd = _pidfd_open(pid)
+        pfd = _proc_exit_fd(pid)
     step = 0.0005
     try:
         while True:
