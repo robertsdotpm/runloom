@@ -106,10 +106,11 @@ def first_choice(trace, depth):
     return None
 
 
-def explore(workload, c, timeout, extra_env, results, runs):
+def explore(workload, c, timeout, extra_env, results, runs, cov):
     """Exhaustively enumerate every schedule reachable with <= c preemptions.
-    Mutates `results` (hubseq -> (outcome, exemplar_line, prefix)) and `runs`
-    (a counter dict).  Returns (pruned_by_bound, max_depth, max_fanout)."""
+    Mutates `results` (hubseq -> (outcome, exemplar_line, prefix)), `runs`
+    (counter), and `cov` (schedule-coverage: which choice-point BRANCHES were
+    actually exercised).  Returns (pruned_by_bound, max_depth, max_fanout)."""
     pruned = 0
     max_depth = 0
     max_fanout = 0
@@ -124,6 +125,11 @@ def explore(workload, c, timeout, extra_env, results, runs):
         max_depth = max(max_depth, len(trace))
         if trace:
             max_fanout = max(max_fanout, max(r["cnt"] for r in trace))
+        # ---- schedule coverage: record each choice point's fan-out + every
+        # (grant, chosen-index) branch this realized schedule actually took.
+        for r in trace:
+            cov["points"][r["g"]] = max(cov["points"].get(r["g"], 0), r["cnt"])
+            cov["covered"].add((r["g"], r["k"]))
         if hubseq not in results:
             results[hubseq] = (outcome, last, list(prefix))
         ch = first_choice(trace, len(prefix))
@@ -163,6 +169,45 @@ def replay_check(workload, prefix, timeout, extra_env, reps):
     return (len(sigs) == 1 and len(outs) == 1), outs, len(sigs)
 
 
+def run_pct_tail(workload, depth, k, reps, timeout, extra_env, cmax, pruned):
+    """Quantify the >cmax-preemption TAIL that exhaustive enumeration did not
+    reach.  PCT (Burckhardt et al., ASPLOS 2010): a depth-d schedule bug among a
+    run's grants over n hubs is hit with probability p >= 1/(n*k^(d-1)) per seed,
+    so R seeds give 1-(1-p)^R confidence of catching ANY depth-<=d bug.  This
+    turns the unexhausted tail from "we hope the fuzzer covered it" into a stated
+    miss-probability: exhaustive up to c=cmax, PCT-quantified beyond."""
+    n = 2                                   # controlled-baton workloads here: 2 hubs
+    p = 1.0 / (n * (k ** (depth - 1)))
+    conf = 1.0 - (1.0 - p) ** reps
+    hits = 0
+    for seed in range(1, reps + 1):
+        e = dict(os.environ)
+        e.update(PYTHON_GIL="0", PYTHONPATH=os.path.join(ROOT, "src"),
+                 RUNLOOM_MN_SEED=str(seed), RUNLOOM_MN_PCT=str(depth),
+                 RUNLOOM_MN_PCT_STEPS=str(k))
+        e.update(extra_env)
+        e.pop("RUNLOOM_MN_SCHEDULE", None)   # PCT path, not the schedule drive
+        e.pop("RUNLOOM_MN_FANOUT", None)
+        try:
+            r = subprocess.run([PY, workload], env=e, cwd=ROOT, timeout=timeout,
+                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            lines = r.stdout.decode("utf-8", "replace").strip().splitlines()
+            if lines and lines[-1].startswith("BUG"):
+                hits += 1
+        except subprocess.TimeoutExpired:
+            pass
+    tail = ("the <=%d-preemption space was EXHAUSTED, so this PCT pass quantifies "
+            "only DEEPER (>%d-preemption) bugs" % (cmax, cmax)) if pruned == 0 else \
+           ("%d schedules were pruned by the c<=%d bound; PCT quantifies that "
+            "unexhausted remainder" % (pruned, cmax))
+    print("PCT-confidence tail ({}):".format(tail))
+    print("  PCT depth-{} bound: p >= 1/(n*k^(d-1)) = 1/(2*{}^{}) = {:.4g} per run"
+          .format(depth, k, depth - 1, p))
+    print("  {} runs -> {:.3f}% confidence of catching any depth-<={} schedule bug "
+          "(miss-probability {:.3g})".format(reps, 100.0 * conf, depth, 1.0 - conf))
+    print("  observed: {}/{} PCT runs hit the bug".format(hits, reps))
+
+
 def main(argv=None):
     p = argparse.ArgumentParser()
     p.add_argument("--workload", default=DEFAULT_WORKLOAD)
@@ -170,6 +215,10 @@ def main(argv=None):
     p.add_argument("--timeout", type=float, default=30.0)
     p.add_argument("--replay", type=int, default=12,
                    help="reps to confirm a found-bug schedule is deterministic")
+    p.add_argument("--pct", default=None, metavar="D:K:R",
+                   help="after enumeration, quantify the >c-preemption TAIL: run R "
+                        "PCT(depth=D, steps=K) samples and report the 1-(1-p)^R "
+                        "confidence of catching any depth-<=D schedule bug (e.g. 2:14:200)")
     p.add_argument("env", nargs="*", help="extra ENV=VALUE for the workload")
     a = p.parse_args(argv)
     extra_env = {}
@@ -188,12 +237,15 @@ def main(argv=None):
         "c", "schedules", "exhausted", "max_depth", "max_fan", "new outcomes"))
 
     results = {}
+    cov = {"points": {}, "covered": set()}
     seen_outcomes = set()
     first_bug = None
+    final_pruned = 0
     for c in range(0, a.cmax + 1):
         runs = {"n": 0}
         pruned, max_depth, max_fanout = explore(
-            a.workload, c, a.timeout, extra_env, results, runs)
+            a.workload, c, a.timeout, extra_env, results, runs, cov)
+        final_pruned = pruned
         # outcomes so far
         classes = {}
         for hubseq, (outcome, last, prefix) in results.items():
@@ -206,6 +258,25 @@ def main(argv=None):
             max_depth, max_fanout, ",".join(new) if new else "-"))
         if first_bug is None and "BUG" in classes:
             first_bug = (c, classes["BUG"])
+
+    # ---- schedule-coverage metric: of the choice-point branches encountered,
+    # what fraction the enumeration actually exercised (100% at full exhaustion). ----
+    total_branches = sum(cov["points"].values())
+    covered = len(cov["covered"])
+    print("-" * 72)
+    print("schedule coverage: {}/{} choice-point branches exercised ({:.0f}%) over "
+          "{} choice points (max fan-out {}), {} distinct schedules".format(
+              covered, total_branches,
+              100.0 * covered / total_branches if total_branches else 100.0,
+              len(cov["points"]), max(cov["points"].values()) if cov["points"] else 0,
+              len(results)))
+    if a.pct:
+        try:
+            d, k, reps = (int(x) for x in a.pct.split(":"))
+            run_pct_tail(a.workload, d, k, reps, a.timeout, extra_env, a.cmax,
+                         final_pruned)
+        except ValueError:
+            print("  (--pct expects D:K:R, e.g. 2:14:200)")
 
     print("-" * 72)
     if first_bug is None:
