@@ -156,8 +156,9 @@ static runloom_mn_ctrl_t runloom_mn_ctrl;
 int runloom_mn_seg_track = 0;
 void runloom_mn_seg_touch(const void *obj) { runloom_mn_ctrl.seg_obj = obj; }
 
-/* LDFI fault injection (declared in mn_sched.h). drop=-1 in production. */
-int runloom_ldfi_drop = -1;
+/* LDFI fault injection (declared in mn_sched.h). dropn=0 in production. */
+int runloom_ldfi_drop_set[RUNLOOM_LDFI_MAX_DROPS];
+int runloom_ldfi_dropn = 0;
 int runloom_ldfi_count = 0;
 
 /* Per-hub-thread flag: the segment that is about to yield parked on a FOREIGN
@@ -493,9 +494,18 @@ static void runloom_mn_ctrl_init(int n)
     runloom_mn_ctrl.seg_obj = NULL;
     runloom_mn_seg_track = (runloom_mn_ctrl.ext_sched != NULL);  /* DPOR tracking on iff driving */
     {
-        const char *ld = getenv("RUNLOOM_LDFI_DROP");      /* LDFI: drop the k-th wake */
-        runloom_ldfi_drop = (ld != NULL && ld[0] != '\0') ? atoi(ld) : -1;
+        const char *ld = getenv("RUNLOOM_LDFI_DROP");  /* LDFI: comma-set of wakes to drop */
+        runloom_ldfi_dropn = 0;
         runloom_ldfi_count = 0;
+        if (ld != NULL && ld[0] != '\0') {
+            char *s = (char *)ld, *e;
+            while (runloom_ldfi_dropn < RUNLOOM_LDFI_MAX_DROPS) {
+                long v = strtol(s, &e, 10);
+                if (e == s) break;
+                runloom_ldfi_drop_set[runloom_ldfi_dropn++] = (int)v;
+                if (*e == ',') s = e + 1; else break;
+            }
+        }
     }
     /* PCT priority schedule (RUNLOOM_MN_PCT=<depth>): refines choose() from the
      * uniform draw above to a bug-depth-guaranteed order.  Needs the barrier
@@ -549,7 +559,7 @@ static void runloom_mn_ctrl_fini(void)
             if (f != NULL) { fprintf(f, "%d\n", runloom_ldfi_count); fclose(f); }
         }
     }
-    runloom_ldfi_drop = -1;
+    runloom_ldfi_dropn = 0;
     if (runloom_mn_ctrl.fanout_fp != NULL) {
         fclose(runloom_mn_ctrl.fanout_fp);
         runloom_mn_ctrl.fanout_fp = NULL;

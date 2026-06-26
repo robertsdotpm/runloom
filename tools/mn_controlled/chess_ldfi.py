@@ -53,9 +53,14 @@ def run(workload, drop, timeout, env, count_file=None):
 
 
 def main(argv=None):
+    import itertools
     p = argparse.ArgumentParser()
     p.add_argument("--workload", default=DEFAULT_WORKLOAD)
     p.add_argument("--timeout", type=float, default=15.0)
+    p.add_argument("--maxdepth", type=int, default=1,
+                   help="search for minimal CUT SETS up to this size (1 = single-fault; "
+                        ">1 enumerates wake combinations to find the smallest set whose "
+                        "simultaneous drop hangs the program)")
     p.add_argument("env", nargs="*", help="extra ENV=VALUE for the workload")
     a = p.parse_args(argv)
     env = {}
@@ -90,29 +95,59 @@ def main(argv=None):
         return 1
     print("-" * 64)
 
-    critical, redundant = [], []
-    for k in range(n_wakes):
-        out, last = run(a.workload, k, a.timeout, env)
-        if out == "HANG":
-            tag = "LOAD-BEARING  (drop -> hang: no backup path)"
-            critical.append(k)
-        elif out == "OK":
-            tag = "redundant     (drop tolerated)"
-            redundant.append(k)
-        else:
-            tag = out
-        print("  drop wake #{:<3} -> {:<10} {}".format(k, out, tag))
+    def drop_hangs(combo):
+        out, _last = run(a.workload, ",".join(str(x) for x in combo), a.timeout, env)
+        return out == "HANG"
+
+    # Minimal cut-set search by increasing size: a set S is a MINIMAL cut iff
+    # dropping S hangs and no proper subset of S does (so we skip any combo that
+    # is a superset of an already-found cut).
+    minimal = []          # list of frozensets, each a minimal cut set
+    for size in range(1, a.maxdepth + 1):
+        found_this_size = []
+        for combo in itertools.combinations(range(n_wakes), size):
+            cs = frozenset(combo)
+            if any(m <= cs for m in minimal):
+                continue                       # superset of a smaller cut -> non-minimal
+            if drop_hangs(combo):
+                found_this_size.append(cs)
+                tag = ("LOAD-BEARING" if size == 1 else
+                       "depth-{} cut".format(size))
+                print("  drop {{{}}} -> HANG   {} (no surviving path)".format(
+                    ",".join("#%d" % x for x in combo), tag))
+            elif size == 1:
+                print("  drop {{#{}}} -> OK     redundant (a backup path completes it)"
+                      .format(combo[0]))
+        minimal.extend(found_this_size)
 
     print("-" * 64)
-    print("{}/{} wakes are LOAD-BEARING (dropping any one strands a fiber); "
-          "{} redundant.".format(len(critical), n_wakes, len(redundant)))
-    if not redundant:
-        print("Fault-tolerance: NONE -- every wake is load-bearing (each delivery is "
-              "the sole path; a single dropped wake hangs the program).")
+    if not minimal:
+        print("NO cut set <= size {} found: the program TOLERATES every combination of "
+              "up to {} dropped wakes (fault-tolerant at this depth).".format(
+                  a.maxdepth, a.maxdepth))
     else:
-        print("Fault-tolerance: {} wake(s) have a backup path and are tolerated; the "
-              "load-bearing set {} is the minimal single-fault cut.".format(
-                  len(redundant), critical))
+        by_size = {}
+        for m in minimal:
+            by_size.setdefault(len(m), []).append(sorted(m))
+        sizes = sorted(by_size)
+        print("minimal cut sets found (smallest fault that hangs the program):")
+        for s in sizes:
+            print("  size {}: {}".format(
+                s, ", ".join("{" + ",".join("#%d" % x for x in c) + "}"
+                             for c in by_size[s])))
+        if sizes[0] == 1:
+            print("Fault-tolerance: NONE at depth 1 -- {} single wake(s) are each a "
+                  "sole path.".format(len(by_size[1])))
+        else:
+            print("Fault-tolerance: tolerates any single dropped wake; smallest hang "
+                  "needs {} simultaneous drops.".format(sizes[0]))
+    if a.maxdepth > 1:
+        print("NOTE: this index-based cut-set search is sound for FIXED-lineage "
+              "workloads (the set of wakes that occur does not change under injection). "
+              "Truly redundant wakes shift the lineage (a dropped wake makes a "
+              "different wake occur) -- and select() commits its case before the wake, "
+              "so it is not redundant either; depth>1 there needs backward-provenance "
+              "LDFI (the deeper follow-on).")
     return 0
 
 

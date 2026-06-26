@@ -262,7 +262,9 @@ void runloom_mn_seg_touch(const void *obj);
  * production).  runloom_ldfi_count counts wakes so the driver can enumerate them;
  * written to RUNLOOM_LDFI_COUNT at fini.  Use under the seeded baton so the wake
  * order is serialized + reproducible. */
-extern int runloom_ldfi_drop;
-extern int runloom_ldfi_count;
+#define RUNLOOM_LDFI_MAX_DROPS 64
+extern int runloom_ldfi_drop_set[RUNLOOM_LDFI_MAX_DROPS]; /* wake indices to drop (a CUT SET) */
+extern int runloom_ldfi_dropn;     /* size of the cut set; 0 = off (depth>1 = |set|>1) */
+extern int runloom_ldfi_count;     /* wakes seen so far (for the driver to enumerate) */
 
 #endif /* RUNLOOM_MN_SCHED_H */
