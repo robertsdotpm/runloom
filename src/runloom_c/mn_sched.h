@@ -253,7 +253,7 @@ void runloom_sched_freeze_for_crash(void);
  * schedule drive armed it.  Cross-TU: the chan ops (chan.c) record into the
  * baton controller (mn_sched.c). */
 extern int runloom_mn_seg_track;
-void runloom_mn_seg_touch(const void *obj);
+void runloom_mn_seg_touch(unsigned long long obj_id);
 
 /* LDFI -- lineage-driven fault injection (tools/mn_controlled/chess_ldfi.py): DROP
  * the runloom_ldfi_drop-th chan wake (RUNLOOM_LDFI_DROP) to test whether that wake

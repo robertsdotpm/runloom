@@ -146,7 +146,7 @@ typedef struct {
     size_t       ext_sched_idx;   /* next draw position */
     int          last_granted;    /* hub granted last (-1 start): the continue-default */
     FILE        *fanout_fp;       /* RUNLOOM_MN_FANOUT line-trace; NULL = off */
-    const void  *seg_obj;         /* DPOR: object (a Chan*) the running segment touched */
+    unsigned long long seg_obj;   /* DPOR: creation-order id of the chan the segment touched */
 } runloom_mn_ctrl_t;
 static runloom_mn_ctrl_t runloom_mn_ctrl;
 
@@ -154,7 +154,7 @@ static runloom_mn_ctrl_t runloom_mn_ctrl;
  * -- the chan ops record the touched object only while a schedule drive armed it
  * (set in ctrl_init, cleared in ctrl_fini). */
 int runloom_mn_seg_track = 0;
-void runloom_mn_seg_touch(const void *obj) { runloom_mn_ctrl.seg_obj = obj; }
+void runloom_mn_seg_touch(unsigned long long obj_id) { runloom_mn_ctrl.seg_obj = obj_id; }
 
 /* LDFI fault injection (declared in mn_sched.h). dropn=0 in production. */
 int runloom_ldfi_drop_set[RUNLOOM_LDFI_MAX_DROPS];
@@ -308,10 +308,10 @@ static int runloom_mn_ctrl_choose(void)
             fprintf(runloom_mn_ctrl.fanout_fp,
                     "{\"g\":%zu,\"cnt\":%d,\"def\":%d,\"k\":%d,\"hub\":%d,\"obj\":%llu}\n",
                     gi, cnt, defidx, kk, hub,
-                    (unsigned long long)(uintptr_t)runloom_mn_ctrl.seg_obj);
+                    runloom_mn_ctrl.seg_obj);
             fflush(runloom_mn_ctrl.fanout_fp);
         }
-        runloom_mn_ctrl.seg_obj = NULL;            /* consumed; next segment sets it */
+        runloom_mn_ctrl.seg_obj = 0;            /* consumed; next segment sets it */
         runloom_mn_ctrl.last_granted = hub;
         return hub;
     }
@@ -491,7 +491,7 @@ static void runloom_mn_ctrl_init(int n)
         if (fop != NULL && fop[0] != '\0')
             runloom_mn_ctrl.fanout_fp = fopen(fop, "w");
     }
-    runloom_mn_ctrl.seg_obj = NULL;
+    runloom_mn_ctrl.seg_obj = 0;
     runloom_mn_seg_track = (runloom_mn_ctrl.ext_sched != NULL);  /* DPOR tracking on iff driving */
     {
         const char *ld = getenv("RUNLOOM_LDFI_DROP");  /* LDFI: comma-set of wakes to drop */
@@ -551,7 +551,7 @@ static void runloom_mn_ctrl_fini(void)
     PyMem_Free(runloom_mn_ctrl.ext_sched);
     runloom_mn_ctrl.ext_sched = NULL;
     runloom_mn_seg_track = 0;
-    runloom_mn_ctrl.seg_obj = NULL;
+    runloom_mn_ctrl.seg_obj = 0;
     {
         const char *lc = getenv("RUNLOOM_LDFI_COUNT");     /* publish the wake count */
         if (lc != NULL && lc[0] != '\0') {

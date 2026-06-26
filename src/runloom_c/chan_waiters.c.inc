@@ -98,6 +98,12 @@ static runloom_chan_waiter_t *waiter_pop_claimable(runloom_chan_waiter_t **head,
 }
 
 /* ---- lifecycle --------------------------------------------------- */
+/* CHESS --dpor: a process-local creation-order counter gives each Chan a STABLE
+ * id (1,2,3,...) for the conflict relation -- unlike the heap pointer, which
+ * mimalloc varies across runs even under setarch -R.  Deterministic when chans
+ * are created in program order (the closed-world workload class). */
+static uint64_t runloom_chan_dpor_counter = 0;
+
 runloom_chan_t *runloom_chan_new(Py_ssize_t cap)
 {
     runloom_chan_t *ch;
@@ -120,6 +126,7 @@ runloom_chan_t *runloom_chan_new(Py_ssize_t cap)
     }
     ch->cap = cap;
     ch->refcount = 1;
+    ch->dpor_id = __atomic_add_fetch(&runloom_chan_dpor_counter, 1, __ATOMIC_RELAXED);
     runloom_mutex_init(&ch->lock);
     return ch;
 }

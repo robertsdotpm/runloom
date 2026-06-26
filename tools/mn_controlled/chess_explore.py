@@ -24,8 +24,11 @@ sched_sleep (the repro_probe/select/timer/pct_find class).  Workloads that OFFLO
 / do real I/O / use aio call_at are OUT: the barrier does not order foreign-wake
 arrival, so a prefix is not a pure function of the schedule there -- the
 NON_REPLAYABLE guard catches and flags such workloads rather than silently
-mis-covering.  No partial-order reduction yet (exact-duplicate dedup only), so it
-is exponential in c and fan-out -- rely on small c (1-3) and tiny programs.
+mis-covering.  --dpor adds sound Mazurkiewicz-equivalence partial-order reduction
+(collapses schedules differing only by independent reorderings into classes, via a
+stable creation-order chan id); in-search backtrack-set pruning (optimal-DPOR) is
+a follow-on, so EXPLORATION is still exponential in c and fan-out -- rely on small
+c (1-3) and tiny programs.
 
 House style: .format(), no f-strings.
 Usage:
@@ -43,10 +46,6 @@ ROOT = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)),
 PY = sys.executable
 DEFAULT_WORKLOAD = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 "chess_target.py")
-# Prepended to each run under --dpor: ASLR off so the chan POINTERS used as the
-# conflict object id are stable across subprocess runs (allocation order is
-# deterministic under the seeded baton).
-_SETARCH = []
 
 
 def run_prefix(workload, prefix, timeout, extra_env):
@@ -69,7 +68,7 @@ def run_prefix(workload, prefix, timeout, extra_env):
     rc = None
     last = ""
     try:
-        r = subprocess.run(_SETARCH + [PY, workload], env=env, cwd=ROOT,
+        r = subprocess.run([PY, workload], env=env, cwd=ROOT,
                            timeout=timeout,
                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         rc = r.returncode
@@ -111,19 +110,15 @@ def mazurkiewicz_key(trace):
     order, so interleavings differing only by reordering independent segments
     collapse to one class.  Key = per-object ordered tuple of toucher hubs.
     (trace[i].obj is the object the segment BEFORE grant i ran, by hub[i-1].)"""
-    # The C emits the raw chan POINTER, which is not stable across subprocess runs
-    # (mimalloc heap base varies even under setarch -R). Normalize to sorted-address
-    # RANK within the run: sequential Chan allocations are monotonic, so rank ~=
-    # creation order, a stable cross-run object identity. (A fully-robust id would
-    # be a creation-order counter in C -- a follow-on.)
-    objs = sorted({r.get("obj", 0) for r in trace if r.get("obj", 0)})
-    rank = {o: i for i, o in enumerate(objs)}
+    # The C emits a stable CREATION-ORDER id per chan (1,2,3,... -- a Chan field
+    # set at runloom_chan_new), so equal ids across runs are the same channel with
+    # no normalization and no ASLR dependence.
     per_obj = {}
     for i in range(1, len(trace)):
         o = trace[i].get("obj", 0)
         if o:
-            per_obj.setdefault(rank[o], []).append(trace[i - 1]["hub"])
-    return tuple(sorted((rid, tuple(seq)) for rid, seq in per_obj.items()))
+            per_obj.setdefault(o, []).append(trace[i - 1]["hub"])
+    return tuple(sorted((o, tuple(seq)) for o, seq in per_obj.items()))
 
 
 def first_choice(trace, depth):
@@ -274,8 +269,6 @@ def main(argv=None):
     print("  {:>2}  {:>10}  {:>9}  {:>9}  {:>9}  {}".format(
         "c", "schedules", "exhausted", "max_depth", "max_fan", "new outcomes"))
 
-    if a.dpor:
-        _SETARCH[:] = ["setarch", "-R"]   # stable chan pointers across runs
     results = {}
     cov = {"points": {}, "covered": set(), "mkeys": set(), "any_obj": False}
     seen_outcomes = set()

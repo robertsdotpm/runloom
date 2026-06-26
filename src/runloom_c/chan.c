@@ -95,6 +95,7 @@ struct runloom_chan {
     runloom_chan_waiter_t *receivers_tail;
     int closed;
     int refcount;
+    uint64_t dpor_id;                /* CHESS --dpor: stable creation-order conflict id */
 };
 
 
