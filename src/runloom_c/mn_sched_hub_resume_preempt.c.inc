@@ -136,6 +136,16 @@ typedef struct {
     int          pct_ncp;         /* number of change points (= d-1) */
     uint64_t    *pct_change_at;   /* sorted step indices that trigger a demotion */
     int         *pct_change_prio; /* demotion target priority for each (d-1..1) */
+    /* ---- CHESS systematic explorer (RUNLOOM_MN_SCHEDULE / RUNLOOM_MN_FANOUT) ----
+     * Drive choose() from an external sequence of chosen-INDICES (0-based into
+     * the ordered wanter list, one per grant) instead of the RNG, and log each
+     * draw's fan-out so a Python driver can enumerate the schedule tree.  All
+     * off unless RUNLOOM_MN_SCHEDULE is set -> one NULL test of added cost. */
+    int         *ext_sched;       /* parsed prefix; NULL = off (PCT/RNG as before) */
+    size_t       ext_sched_len;
+    size_t       ext_sched_idx;   /* next draw position */
+    int          last_granted;    /* hub granted last (-1 start): the continue-default */
+    FILE        *fanout_fp;       /* RUNLOOM_MN_FANOUT line-trace; NULL = off */
 } runloom_mn_ctrl_t;
 static runloom_mn_ctrl_t runloom_mn_ctrl;
 
@@ -261,6 +271,34 @@ static void runloom_mn_pct_init(uint64_t seed, int n)
 static int runloom_mn_ctrl_choose(void)
 {
     int cnt = 0, i, k;
+    /* CHESS explorer: drive the choice from an external schedule of chosen-
+     * indices into the ordered wanter list, logging each draw's fan-out so a
+     * driver can enumerate the schedule tree.  Precedence over PCT/RNG. */
+    if (runloom_mn_ctrl.ext_sched != NULL) {
+        int defidx = -1, kk, hub = -1, t;
+        size_t gi = runloom_mn_ctrl.ext_sched_idx;
+        for (i = 0; i < runloom_mn_ctrl.n; i++) {   /* fan-out + default index */
+            if (!runloom_mn_ctrl.want[i]) continue;
+            if (i == runloom_mn_ctrl.last_granted) defidx = cnt;
+            cnt++;
+        }
+        if (cnt == 0) return -1;
+        if (defidx < 0) defidx = 0;                 /* last hub not wanting -> idx 0 */
+        if (gi < runloom_mn_ctrl.ext_sched_len) kk = runloom_mn_ctrl.ext_sched[gi];
+        else kk = defidx;                           /* past prefix -> continue-default */
+        if (kk < 0 || kk >= cnt) kk = defidx;       /* clamp out-of-range */
+        runloom_mn_ctrl.ext_sched_idx++;
+        for (t = kk, i = 0; i < runloom_mn_ctrl.n; i++)  /* find the kk-th wanter */
+            if (runloom_mn_ctrl.want[i] && t-- == 0) { hub = i; break; }
+        if (runloom_mn_ctrl.fanout_fp != NULL) {
+            fprintf(runloom_mn_ctrl.fanout_fp,
+                    "{\"g\":%zu,\"cnt\":%d,\"def\":%d,\"k\":%d,\"hub\":%d}\n",
+                    gi, cnt, defidx, kk, hub);
+            fflush(runloom_mn_ctrl.fanout_fp);
+        }
+        runloom_mn_ctrl.last_granted = hub;
+        return hub;
+    }
     if (runloom_mn_ctrl.pct_enabled) {
         int best = -1, bestp = 0;
         for (i = 0; i < runloom_mn_ctrl.n; i++) {
@@ -270,13 +308,17 @@ static int runloom_mn_ctrl_choose(void)
                 best = i;
             }
         }
+        runloom_mn_ctrl.last_granted = best;
         return best;                /* -1 if none wanting; priorities are distinct */
     }
     for (i = 0; i < runloom_mn_ctrl.n; i++) cnt += runloom_mn_ctrl.want[i];
     if (cnt == 0) return -1;
     k = (int)(runloom_mn_ctrl_rand() % (uint64_t)cnt);
     for (i = 0; i < runloom_mn_ctrl.n; i++)
-        if (runloom_mn_ctrl.want[i] && k-- == 0) return i;
+        if (runloom_mn_ctrl.want[i] && k-- == 0) {
+            runloom_mn_ctrl.last_granted = i;
+            return i;
+        }
     return -1;
 }
 
@@ -403,6 +445,36 @@ static void runloom_mn_ctrl_init(int n)
     }
     runloom_mn_ctrl.rng = strtoull(seed, NULL, 10);
     if (runloom_mn_ctrl.rng == 0) runloom_mn_ctrl.rng = 0x9E3779B97F4A7C15ULL;
+    /* CHESS explorer drive: RUNLOOM_MN_SCHEDULE = comma-separated chosen-indices
+     * (""=engage with a 0-length prefix -> pure default policy), RUNLOOM_MN_FANOUT
+     * = path to log each grant's fan-out.  Both inert unless set. */
+    runloom_mn_ctrl.ext_sched = NULL;
+    runloom_mn_ctrl.ext_sched_len = 0;
+    runloom_mn_ctrl.ext_sched_idx = 0;
+    runloom_mn_ctrl.last_granted = -1;
+    runloom_mn_ctrl.fanout_fp = NULL;
+    {
+        const char *sch = getenv("RUNLOOM_MN_SCHEDULE");
+        const char *fop = getenv("RUNLOOM_MN_FANOUT");
+        if (sch != NULL) {                       /* sch=="" still engages (0-length) */
+            size_t cap = 1, m = 0; const char *p; int *a;
+            for (p = sch; *p; p++) if (*p == ',') cap++;
+            a = (int *)PyMem_Calloc(cap, sizeof(int));
+            if (a != NULL) {
+                char *s = (char *)sch, *e;
+                for (;;) {
+                    long v = strtol(s, &e, 10);
+                    if (e == s) break;
+                    a[m++] = (int)v;
+                    if (*e == ',') s = e + 1; else break;
+                }
+                runloom_mn_ctrl.ext_sched = a;
+                runloom_mn_ctrl.ext_sched_len = m;
+            }
+        }
+        if (fop != NULL && fop[0] != '\0')
+            runloom_mn_ctrl.fanout_fp = fopen(fop, "w");
+    }
     /* PCT priority schedule (RUNLOOM_MN_PCT=<depth>): refines choose() from the
      * uniform draw above to a bug-depth-guaranteed order.  Needs the barrier
      * (decided just above), so init it here. */
@@ -444,6 +516,12 @@ static void runloom_mn_ctrl_fini(void)
     PyMem_Free(runloom_mn_ctrl.pct_change_prio);
     runloom_mn_ctrl.pct_change_prio = NULL;
     runloom_mn_ctrl.pct_enabled = 0;
+    PyMem_Free(runloom_mn_ctrl.ext_sched);
+    runloom_mn_ctrl.ext_sched = NULL;
+    if (runloom_mn_ctrl.fanout_fp != NULL) {
+        fclose(runloom_mn_ctrl.fanout_fp);
+        runloom_mn_ctrl.fanout_fp = NULL;
+    }
     if (runloom_mn_ctrl.tracebuf != NULL) {
         if (runloom_mn_ctrl.tracepath[0] != '\0') {
             FILE *f = fopen(runloom_mn_ctrl.tracepath, "w");
