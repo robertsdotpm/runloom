@@ -208,6 +208,7 @@ class _Parker(object):
     # still races lock-free via try/except IndexError.
     _pool = []
     _pool_lock = _thread.allocate_lock()   # captured pre-patch → real OS mutex
+    _POOL_CAP = 64                          # max pooled (r, w, _sockets) tuples
 
     def __init__(self, inmem=False):
         # The handle of the fiber parked here.  In FD mode it is read by
@@ -356,7 +357,7 @@ class _Parker(object):
         pooled = False
         if _Parker._pool_lock.acquire(False):
             try:
-                if len(_Parker._pool) < 64:
+                if len(_Parker._pool) < _Parker._POOL_CAP:
                     _Parker._pool.append((self.r, self.w, self._sockets))
                     pooled = True
             finally:
@@ -623,6 +624,22 @@ import _queue as _real_queue_mod              # noqa: E402
 _real_SimpleQueue_for_backend = _real_queue_mod.SimpleQueue
 _BACKEND_SHUTDOWN = object()
 
+# Offload parker mode (p92).  "1" = always inmem (0-fd g.wake), "0" = always
+# FD-mode (per-task pipe + netpoll), unset = ADAPTIVE (FD while the pipe pool has
+# a spare, inmem once it drains).  Read once -- an env, fixed for the process.
+_BLOCKPOOL_INMEM_ENV = os.environ.get("RUNLOOM_BLOCKPOOL_INMEM")
+# Adaptive threshold: when the target worker shard already has more than this many
+# jobs QUEUED (offload backlog -- the workers can't keep up == high concurrency,
+# the regime that walls FD-mode), the next offload uses the 0-fd inmem parker
+# instead of churning a pipe.  ~8/shard caps the FD-mode (pipe-churning) offloads
+# near the pool size (8 * typical hub count) so the churn never forms, while a
+# cold-start / low-concurrency offload (empty backlog) keeps FD-mode + its
+# signal-interrupt fidelity.  Overridable via RUNLOOM_BLOCKPOOL_QDEPTH.
+try:
+    _BLOCKPOOL_INMEM_QDEPTH = max(1, int(os.environ.get("RUNLOOM_BLOCKPOOL_QDEPTH", "8")))
+except ValueError:
+    _BLOCKPOOL_INMEM_QDEPTH = 8
+
 
 class _BlockingBackend(object):
     name = "abstract"
@@ -703,16 +720,36 @@ class _ThreadPoolBackend(_BlockingBackend):
     def submit(self, fn, args, kwargs):
         if kwargs is None:
             kwargs = {}
-        # Parker mode.  DEFAULT = FD-mode (pipe + netpoll): correct but each
-        # offload churns ~10 syscalls, so throughput caps near ~52K/s under high
-        # concurrency.  RUNLOOM_BLOCKPOOL_INMEM=1 opts into an inmem parker (0 fds,
-        # woken by g.wake()) -> ~169K/s (3.2x), BUT an inmem park is NOT on the
-        # netpoll, so it loses the wait_fd signal-interrupt delivery: a signal
-        # handler that RAISES while parked on an offloaded blocking call no longer
-        # propagates out of the call (breaks EINTR-during-offload semantics, e.g.
-        # test_select_interrupt_exc).  So inmem stays opt-in for offload-heavy
-        # workloads that don't rely on signal-interrupting a blocking offload.
-        p = _Parker(inmem=(os.environ.get("RUNLOOM_BLOCKPOOL_INMEM") == "1"))
+        # Parker mode -- ADAPTIVE by default (p92).  FD-mode (per-task pipe +
+        # netpoll) is correct -- it carries a wait_fd signal-interrupt into an
+        # offloaded blocking call -- but each offload that can't reuse a pooled
+        # pipe churns ~10 syscalls, and at high concurrency the pipe pool (cap 64)
+        # is drained so EVERY offload creates+destroys a pipe AND contends the
+        # shared pool list -> throughput collapses (~52K/s; the p92 51k-concurrent
+        # fsync HANG: hub threads stuck in _Parker._pool.pop()).  The inmem parker
+        # (0 fds, woken by g.wake()) has none of that churn (~169K/s, 3.2x) but is
+        # not on the netpoll, so it can't deliver a signal-interrupt INTO the
+        # offloaded call -- a corner the netpoll signal tests never hit (they
+        # interrupt select/recv/accept, which don't offload).
+        #
+        # So: FD-mode while the offload BACKLOG is light (low/moderate concurrency
+        # -- the common case, full signal-interrupt fidelity, the <=64 pooled pipes
+        # cycle with zero creation), and the 0-fd inmem parker once this worker
+        # shard's queue is backed up past _BLOCKPOOL_INMEM_QDEPTH (the high-
+        # concurrency burst that walls FD-mode -- p92).  BACKLOG (qsize), not
+        # pool-emptiness, is the signal: a cold-start BURST drains the pool too
+        # (every offload arrives before any completes), so only true concurrency
+        # tells it apart from a single startup offload.  The threshold caps FD-mode
+        # pipes near the pool size so the churn can't form.  RUNLOOM_BLOCKPOOL_INMEM
+        # =1/0 force a mode (escape hatch + the swarm env-gated-mode tests).
+        shard = _thread.get_ident() % self.size
+        if _BLOCKPOOL_INMEM_ENV == "1":
+            use_inmem = True
+        elif _BLOCKPOOL_INMEM_ENV == "0":
+            use_inmem = False
+        else:
+            use_inmem = (self._qs[shard].qsize() > _BLOCKPOOL_INMEM_QDEPTH)
+        p = _Parker(inmem=use_inmem)
         # box = [result, exception, done].  The done flag is essential:
         # a pooled _Parker can carry a stale wake byte and runloom_c.wait_fd
         # can wake spuriously, so a single park() may return BEFORE the
@@ -721,10 +758,10 @@ class _ThreadPoolBackend(_BlockingBackend):
         # wakeup edge-insensitive: we only return once the worker actually
         # finished (any stale byte is then drained by release()).
         box = [None, None, False]
-        # Shard by OS-thread (hub) id -- stateless, so it adds no shared counter
-        # to convoy on.  Spreads puts across the per-worker queues so no single
-        # SimpleQueue critical section is hammered by every hub (see __init__).
-        self._qs[_thread.get_ident() % self.size].put(
+        # Spreads puts across the per-worker queues so no single SimpleQueue
+        # critical section is hammered by every hub (see __init__).  `shard` was
+        # computed above (OS-thread/hub id; also drove the adaptive backlog check).
+        self._qs[shard].put(
             (fn, args, kwargs, box, p))            # atomic C call; never freezes the hub
         try:
             while not box[2]:
