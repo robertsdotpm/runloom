@@ -95,6 +95,7 @@ static int chan_send_locked(runloom_chan_t *ch, PyObject *value, int blocking)
 
 int runloom_chan_send(runloom_chan_t *ch, PyObject *value)
 {
+    if (runloom_mn_seg_track) runloom_mn_seg_touch(ch);   /* DPOR conflict object */
     RUNLOOM_RLOCK(&ch->lock, RUNLOOM_RANK_CHAN);
     return chan_send_locked(ch, value, 1);
 }
@@ -196,6 +197,7 @@ static PyObject *chan_recv_locked(runloom_chan_t *ch, int *ok, int blocking)
 
 PyObject *runloom_chan_recv(runloom_chan_t *ch, int *ok)
 {
+    if (runloom_mn_seg_track) runloom_mn_seg_touch(ch);   /* DPOR conflict object */
     RUNLOOM_RLOCK(&ch->lock, RUNLOOM_RANK_CHAN);
     return chan_recv_locked(ch, ok, 1);
 }

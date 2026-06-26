@@ -244,4 +244,15 @@ struct runloom_iouring_ring *runloom_mn_current_iouring_ring(void);
  * limping (service dead, no core).  See runloom_crash.c / crash_handler. */
 void runloom_sched_freeze_for_crash(void);
 
+/* CHESS schedule-explorer conflict tracking (tools/mn_controlled/chess_explore.py
+ * --dpor partial-order reduction): when a schedule is being DRIVEN, record the
+ * shared object (a Chan) each baton segment touches, so the driver can compute
+ * the independence relation (disjoint-object segments commute -> reorderings are
+ * equivalent -> pruned).  runloom_mn_seg_track is 0 in production -- one
+ * predicted-not-taken branch per chan op -- and seg_touch is a no-op unless a
+ * schedule drive armed it.  Cross-TU: the chan ops (chan.c) record into the
+ * baton controller (mn_sched.c). */
+extern int runloom_mn_seg_track;
+void runloom_mn_seg_touch(const void *obj);
+
 #endif /* RUNLOOM_MN_SCHED_H */

@@ -43,6 +43,10 @@ ROOT = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)),
 PY = sys.executable
 DEFAULT_WORKLOAD = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 "chess_target.py")
+# Prepended to each run under --dpor: ASLR off so the chan POINTERS used as the
+# conflict object id are stable across subprocess runs (allocation order is
+# deterministic under the seeded baton).
+_SETARCH = []
 
 
 def run_prefix(workload, prefix, timeout, extra_env):
@@ -65,7 +69,8 @@ def run_prefix(workload, prefix, timeout, extra_env):
     rc = None
     last = ""
     try:
-        r = subprocess.run([PY, workload], env=env, cwd=ROOT, timeout=timeout,
+        r = subprocess.run(_SETARCH + [PY, workload], env=env, cwd=ROOT,
+                           timeout=timeout,
                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         rc = r.returncode
         lines = r.stdout.decode("utf-8", "replace").strip().splitlines()
@@ -96,6 +101,29 @@ def run_prefix(workload, prefix, timeout, extra_env):
         outcome = "OK"
     hubseq = tuple(r["hub"] for r in trace)
     return trace, outcome, last, hubseq
+
+
+def mazurkiewicz_key(trace):
+    """DPOR partial-order reduction (sound for runtime-visible conflicts): two
+    schedules are EQUIVALENT iff every pair of segments that conflict (touch the
+    SAME shared object) is in the same relative order.  Segments touching no
+    object (obj==0: CPU / sched_sleep) are independent of everything and impose no
+    order, so interleavings differing only by reordering independent segments
+    collapse to one class.  Key = per-object ordered tuple of toucher hubs.
+    (trace[i].obj is the object the segment BEFORE grant i ran, by hub[i-1].)"""
+    # The C emits the raw chan POINTER, which is not stable across subprocess runs
+    # (mimalloc heap base varies even under setarch -R). Normalize to sorted-address
+    # RANK within the run: sequential Chan allocations are monotonic, so rank ~=
+    # creation order, a stable cross-run object identity. (A fully-robust id would
+    # be a creation-order counter in C -- a follow-on.)
+    objs = sorted({r.get("obj", 0) for r in trace if r.get("obj", 0)})
+    rank = {o: i for i, o in enumerate(objs)}
+    per_obj = {}
+    for i in range(1, len(trace)):
+        o = trace[i].get("obj", 0)
+        if o:
+            per_obj.setdefault(rank[o], []).append(trace[i - 1]["hub"])
+    return tuple(sorted((rid, tuple(seq)) for rid, seq in per_obj.items()))
 
 
 def first_choice(trace, depth):
@@ -130,8 +158,13 @@ def explore(workload, c, timeout, extra_env, results, runs, cov):
         for r in trace:
             cov["points"][r["g"]] = max(cov["points"].get(r["g"], 0), r["cnt"])
             cov["covered"].add((r["g"], r["k"]))
+            if r.get("obj", 0):
+                cov["any_obj"] = True
         if hubseq not in results:
             results[hubseq] = (outcome, last, list(prefix))
+            # one Mazurkiewicz key per DISTINCT complete schedule (the trace here
+            # is a full run -- prefix + default tail), so classes <= schedules.
+            cov["mkeys"].add(mazurkiewicz_key(trace))
         ch = first_choice(trace, len(prefix))
         if ch is None:
             continue                     # leaf: schedule fully determined
@@ -219,6 +252,11 @@ def main(argv=None):
                    help="after enumeration, quantify the >c-preemption TAIL: run R "
                         "PCT(depth=D, steps=K) samples and report the 1-(1-p)^R "
                         "confidence of catching any depth-<=D schedule bug (e.g. 2:14:200)")
+    p.add_argument("--dpor", action="store_true",
+                   help="report DPOR partial-order reduction: collapse schedules "
+                        "differing only by reordering INDEPENDENT (disjoint-object) "
+                        "segments into Mazurkiewicz classes (sound only when conflicts "
+                        "are via runtime-visible objects -- channels; runs under setarch -R)")
     p.add_argument("env", nargs="*", help="extra ENV=VALUE for the workload")
     a = p.parse_args(argv)
     extra_env = {}
@@ -236,8 +274,10 @@ def main(argv=None):
     print("  {:>2}  {:>10}  {:>9}  {:>9}  {:>9}  {}".format(
         "c", "schedules", "exhausted", "max_depth", "max_fan", "new outcomes"))
 
+    if a.dpor:
+        _SETARCH[:] = ["setarch", "-R"]   # stable chan pointers across runs
     results = {}
-    cov = {"points": {}, "covered": set()}
+    cov = {"points": {}, "covered": set(), "mkeys": set(), "any_obj": False}
     seen_outcomes = set()
     first_bug = None
     final_pruned = 0
@@ -270,6 +310,17 @@ def main(argv=None):
               100.0 * covered / total_branches if total_branches else 100.0,
               len(cov["points"]), max(cov["points"].values()) if cov["points"] else 0,
               len(results)))
+    if a.dpor:
+        if not cov["any_obj"]:
+            print("DPOR: UNSOUND for this workload -- no runtime-visible conflict "
+                  "objects (it conflicts through plain Python state the runtime can't "
+                  "see). Use full enumeration; the class count is meaningless here.")
+        else:
+            red = 100.0 * (1.0 - len(cov["mkeys"]) / float(len(results))) if results else 0.0
+            print("DPOR partial-order reduction: {} raw schedules -> {} Mazurkiewicz "
+                  "equivalence classes ({:.0f}% reduction). Interleavings differing only "
+                  "by reordering INDEPENDENT (disjoint-object) segments are equivalent."
+                  .format(len(results), len(cov["mkeys"]), red))
     if a.pct:
         try:
             d, k, reps = (int(x) for x in a.pct.split(":"))

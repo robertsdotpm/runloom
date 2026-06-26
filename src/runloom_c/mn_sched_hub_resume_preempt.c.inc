@@ -146,8 +146,15 @@ typedef struct {
     size_t       ext_sched_idx;   /* next draw position */
     int          last_granted;    /* hub granted last (-1 start): the continue-default */
     FILE        *fanout_fp;       /* RUNLOOM_MN_FANOUT line-trace; NULL = off */
+    const void  *seg_obj;         /* DPOR: object (a Chan*) the running segment touched */
 } runloom_mn_ctrl_t;
 static runloom_mn_ctrl_t runloom_mn_ctrl;
+
+/* DPOR conflict tracking (declared in mn_sched.h).  seg_track is 0 in production
+ * -- the chan ops record the touched object only while a schedule drive armed it
+ * (set in ctrl_init, cleared in ctrl_fini). */
+int runloom_mn_seg_track = 0;
+void runloom_mn_seg_touch(const void *obj) { runloom_mn_ctrl.seg_obj = obj; }
 
 /* Per-hub-thread flag: the segment that is about to yield parked on a FOREIGN
  * completion (blocking-IO / offload via runloom_park_generic(foreign_wakeable=1)).
@@ -291,11 +298,15 @@ static int runloom_mn_ctrl_choose(void)
         for (t = kk, i = 0; i < runloom_mn_ctrl.n; i++)  /* find the kk-th wanter */
             if (runloom_mn_ctrl.want[i] && t-- == 0) { hub = i; break; }
         if (runloom_mn_ctrl.fanout_fp != NULL) {
+            /* "obj" = the object the segment that just released the baton touched
+             * (a Chan*, or 0 for a CPU/sched_sleep segment) -- the DPOR conflict key. */
             fprintf(runloom_mn_ctrl.fanout_fp,
-                    "{\"g\":%zu,\"cnt\":%d,\"def\":%d,\"k\":%d,\"hub\":%d}\n",
-                    gi, cnt, defidx, kk, hub);
+                    "{\"g\":%zu,\"cnt\":%d,\"def\":%d,\"k\":%d,\"hub\":%d,\"obj\":%llu}\n",
+                    gi, cnt, defidx, kk, hub,
+                    (unsigned long long)(uintptr_t)runloom_mn_ctrl.seg_obj);
             fflush(runloom_mn_ctrl.fanout_fp);
         }
+        runloom_mn_ctrl.seg_obj = NULL;            /* consumed; next segment sets it */
         runloom_mn_ctrl.last_granted = hub;
         return hub;
     }
@@ -475,6 +486,8 @@ static void runloom_mn_ctrl_init(int n)
         if (fop != NULL && fop[0] != '\0')
             runloom_mn_ctrl.fanout_fp = fopen(fop, "w");
     }
+    runloom_mn_ctrl.seg_obj = NULL;
+    runloom_mn_seg_track = (runloom_mn_ctrl.ext_sched != NULL);  /* DPOR tracking on iff driving */
     /* PCT priority schedule (RUNLOOM_MN_PCT=<depth>): refines choose() from the
      * uniform draw above to a bug-depth-guaranteed order.  Needs the barrier
      * (decided just above), so init it here. */
@@ -518,6 +531,8 @@ static void runloom_mn_ctrl_fini(void)
     runloom_mn_ctrl.pct_enabled = 0;
     PyMem_Free(runloom_mn_ctrl.ext_sched);
     runloom_mn_ctrl.ext_sched = NULL;
+    runloom_mn_seg_track = 0;
+    runloom_mn_ctrl.seg_obj = NULL;
     if (runloom_mn_ctrl.fanout_fp != NULL) {
         fclose(runloom_mn_ctrl.fanout_fp);
         runloom_mn_ctrl.fanout_fp = NULL;
