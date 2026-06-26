@@ -277,6 +277,10 @@ static void park_waiter(runloom_chan_t *ch,
  * has its own internal locking under M:N). */
 static void wake_waiter(runloom_chan_waiter_t *w)
 {
+    if (runloom_ldfi_drop >= 0) {                 /* LDFI: id each wake; drop the target */
+        if (runloom_ldfi_count++ == runloom_ldfi_drop)
+            return;                               /* dropped -> this waiter never wakes */
+    }
     if (w->hub != NULL) {
         runloom_mn_wake_g(w->hub, w->g);
     } else {

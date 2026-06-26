@@ -156,6 +156,10 @@ static runloom_mn_ctrl_t runloom_mn_ctrl;
 int runloom_mn_seg_track = 0;
 void runloom_mn_seg_touch(const void *obj) { runloom_mn_ctrl.seg_obj = obj; }
 
+/* LDFI fault injection (declared in mn_sched.h). drop=-1 in production. */
+int runloom_ldfi_drop = -1;
+int runloom_ldfi_count = 0;
+
 /* Per-hub-thread flag: the segment that is about to yield parked on a FOREIGN
  * completion (blocking-IO / offload via runloom_park_generic(foreign_wakeable=1)).
  * Set by runloom_mn_tls_mark_parked_foreign (called from park_generic's hub
@@ -488,6 +492,11 @@ static void runloom_mn_ctrl_init(int n)
     }
     runloom_mn_ctrl.seg_obj = NULL;
     runloom_mn_seg_track = (runloom_mn_ctrl.ext_sched != NULL);  /* DPOR tracking on iff driving */
+    {
+        const char *ld = getenv("RUNLOOM_LDFI_DROP");      /* LDFI: drop the k-th wake */
+        runloom_ldfi_drop = (ld != NULL && ld[0] != '\0') ? atoi(ld) : -1;
+        runloom_ldfi_count = 0;
+    }
     /* PCT priority schedule (RUNLOOM_MN_PCT=<depth>): refines choose() from the
      * uniform draw above to a bug-depth-guaranteed order.  Needs the barrier
      * (decided just above), so init it here. */
@@ -533,6 +542,14 @@ static void runloom_mn_ctrl_fini(void)
     runloom_mn_ctrl.ext_sched = NULL;
     runloom_mn_seg_track = 0;
     runloom_mn_ctrl.seg_obj = NULL;
+    {
+        const char *lc = getenv("RUNLOOM_LDFI_COUNT");     /* publish the wake count */
+        if (lc != NULL && lc[0] != '\0') {
+            FILE *f = fopen(lc, "w");
+            if (f != NULL) { fprintf(f, "%d\n", runloom_ldfi_count); fclose(f); }
+        }
+    }
+    runloom_ldfi_drop = -1;
     if (runloom_mn_ctrl.fanout_fp != NULL) {
         fclose(runloom_mn_ctrl.fanout_fp);
         runloom_mn_ctrl.fanout_fp = NULL;

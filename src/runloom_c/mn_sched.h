@@ -255,4 +255,14 @@ void runloom_sched_freeze_for_crash(void);
 extern int runloom_mn_seg_track;
 void runloom_mn_seg_touch(const void *obj);
 
+/* LDFI -- lineage-driven fault injection (tools/mn_controlled/chess_ldfi.py): DROP
+ * the runloom_ldfi_drop-th chan wake (RUNLOOM_LDFI_DROP) to test whether that wake
+ * is load-bearing (dropping it strands a fiber -> hang) or redundant (a backup
+ * path still completes the run).  -1 = off (one predicted branch per wake in
+ * production).  runloom_ldfi_count counts wakes so the driver can enumerate them;
+ * written to RUNLOOM_LDFI_COUNT at fini.  Use under the seeded baton so the wake
+ * order is serialized + reproducible. */
+extern int runloom_ldfi_drop;
+extern int runloom_ldfi_count;
+
 #endif /* RUNLOOM_MN_SCHED_H */
