@@ -209,6 +209,19 @@ void runloom_wake_trace_event(const char *action, unsigned long g, int cap);
  * RunloomMNWake.tla.  Off (zero-cost -- one predictable-NULL load) unless set. */
 void runloom_mnwake_trace_event(const char *action, unsigned long g, int cap);
 
+
+/* ---- io_uring CQE wake trace (TLA+ trace conformance, RUNLOOM_IOUWAKE_TRACE) ----
+ * Sibling of the wake/mnwake emitters for the io_uring CQE drain route: one
+ * ndjson line per transition ({"a":<SUBMIT|DRAIN_FLUSH|DRAIN_CONSUME|RESUME|
+ * DRAIN_BLOCK|DRAIN_UNBLOCK>,"g":<op-pointer token>,"cap":<0|1, DRAIN_BLOCK
+ * only>}); tools/iouwake_trace_conform.py lowers it to RunloomIouringWake.tla's
+ * OWN actions and TLC checks the binary is a SAFETY refinement (ResumeIsTerminal
+ * + NoStrandedCompletion).  DRAIN_FLUSH is emitted ONLY on the GETEVENTS branch
+ * of runloom_iouring_flush_cq_overflow (the CQ-overflow heal actually fired), so
+ * its presence is the witness that overflow was induced.  Off (zero-cost -- one
+ * predictable-NULL load) unless RUNLOOM_IOUWAKE_TRACE is set. */
+void runloom_iouwake_trace_event(const char *action, unsigned long g, int cap);
+
 #ifdef __cplusplus
 }
 #endif

@@ -477,6 +477,31 @@ void runloom_mnwake_trace_event(const char *action, unsigned long g, int cap)
     RUNLOOM_RUNLOCK(&runloom_mnwake_trace_lock, RUNLOOM_RANK_TRACE);
 }
 
+/* ---- io_uring CQE wake protocol trace (TLA+ trace conformance, RUNLOOM_IOUWAKE_TRACE) ----
+ * Sibling of runloom_wake_trace_event for the io_uring CQE drain route: SUBMIT (an
+ * SQE submitted + the fiber about to park) on the submitter; DRAIN_FLUSH (the
+ * GETEVENTS overflow flush -- the CQ-overflow heal fired), DRAIN_CONSUME (a CQE
+ * walked + its fiber readied), DRAIN_BLOCK / DRAIN_UNBLOCK (the pump block while an
+ * iouring op is inflight) and RESUME (the woken submitter returns from park) on the
+ * drainer/owner -- replayed against RunloomIouringWake.tla by
+ * tools/iouwake_trace_conform.py.  `cap` is meaningful only on DRAIN_BLOCK (1 == the
+ * drain-first overflow flush is armed while inflight>0, the model's Heal arm).  All
+ * emit sites are cold (submit / overflow-flush / CQE-consume / pump-block / resume),
+ * never a same-thread fast path; a NULL fp is one predictable-not-taken load so
+ * production is unperturbed. */
+static FILE           *runloom_iouwake_trace_fp = NULL;
+static runloom_mutex_t runloom_iouwake_trace_lock;
+
+void runloom_iouwake_trace_event(const char *action, unsigned long g, int cap)
+{
+    if (runloom_iouwake_trace_fp == NULL) return;
+    RUNLOOM_RLOCK(&runloom_iouwake_trace_lock, RUNLOOM_RANK_TRACE);
+    fprintf(runloom_iouwake_trace_fp,
+            "{\"a\":\"%s\",\"g\":%lu,\"cap\":%d}\n", action, g, cap);
+    fflush(runloom_iouwake_trace_fp);
+    RUNLOOM_RUNLOCK(&runloom_iouwake_trace_lock, RUNLOOM_RANK_TRACE);
+}
+
 void runloom_diag_init(void)
 {
     if (runloom_diag_inited) return;
@@ -508,6 +533,13 @@ void runloom_diag_init(void)
             if (mw != NULL && mw[0] != '\0') {
                 runloom_mutex_init(&runloom_mnwake_trace_lock);
                 runloom_mnwake_trace_fp = fopen(mw, "w");
+            }
+        }
+        {
+            const char *iw = getenv("RUNLOOM_IOUWAKE_TRACE");
+            if (iw != NULL && iw[0] != '\0') {
+                runloom_mutex_init(&runloom_iouwake_trace_lock);
+                runloom_iouwake_trace_fp = fopen(iw, "w");
             }
         }
     }

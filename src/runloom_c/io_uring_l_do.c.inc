@@ -339,6 +339,12 @@ static void runloom_iouring_ms_on_cqe(runloom_iouring_ms_t *h,
     RUNLOOM_RUNLOCK(&h->lock, RUNLOOM_RANK_HUB);
 
     if (wake_g != NULL) {
+        /* IOUWAKE-TRACE: a multishot CQE was walked -- its buffer is appended to
+         * the ready queue and the parked recv fiber is readied -- the model's
+         * DrainConsume(g).  Emitted just before the wake, keyed by the woken g so
+         * the driver pairs it with that fiber's SUBMIT/RESUME episode. */
+        runloom_iouwake_trace_event("DRAIN_CONSUME",
+                                    (unsigned long)(uintptr_t)wake_g, 0);
         if (wake_hub) runloom_mn_wake_g(wake_hub, wake_g);
         else          runloom_sched_wake_safe(wake_g);
     }
@@ -439,9 +445,17 @@ runloom_iouring_ssize_t runloom_iouring_ms_recv(runloom_iouring_ms_t *h,
         /* 6. Park.  Capture our g under the lock, release, then yield. */
         {
             void *hub = runloom_mn_current_hub_opaque();
+            runloom_g_t *park_g;
             h->waiter_hub = hub;
             h->waiter_g   = (hub != NULL) ? runloom_mn_tls_current_g()
                                           : runloom_sched_get()->current;
+            park_g = h->waiter_g;
+            /* IOUWAKE-TRACE: an op (the armed multishot recv) is submitted and
+             * this fiber is about to park on its CQE -- the model's Submit(g).
+             * Keyed by the waiter g pointer so the driver pairs it with the
+             * matching DRAIN_CONSUME (ms_on_cqe) + RESUME below. */
+            runloom_iouwake_trace_event("SUBMIT",
+                                        (unsigned long)(uintptr_t)park_g, 0);
             RUNLOOM_RUNLOCK(&h->lock, RUNLOOM_RANK_HUB);
             if (hub != NULL) {
                 /* PARK -- do NOT spin-drain.  A blocking io_uring_enter here
@@ -464,6 +478,11 @@ runloom_iouring_ssize_t runloom_iouring_ms_recv(runloom_iouring_ms_t *h,
             } else {
                 runloom_sched_park_safe();
             }
+            /* IOUWAKE-TRACE: the woken submitter has returned from its park and
+             * re-reads the handle -- the model's RESUME(g) (iouring-specific
+             * resume point, l_do post-yield).  Pairs with the SUBMIT above. */
+            runloom_iouwake_trace_event("RESUME",
+                                        (unsigned long)(uintptr_t)park_g, 0);
             RUNLOOM_RLOCK(&h->lock, RUNLOOM_RANK_HUB);
             /* Loop back to top to consume whatever drain delivered. */
         }

@@ -204,11 +204,22 @@ Py_ssize_t runloom_sched_drain(runloom_sched_t *s)
                  * emit cap=0 here while inflight>0 and the driver flags it. */
                 runloom_wake_trace_event("DRAIN_BLOCK", 0,
                                          timeout_ns == 2000000LL ? 1 : 0);
+                /* IOUWAKE-TRACE: the same pump block, but for the io_uring CQE
+                 * model (DrainPeekEmpty -> DrainDecide -> DrainBlock).  cap=1 iff
+                 * an iouring op is inflight -- the witness that the drain-first
+                 * overflow flush (runloom_iouring_drain at the loop top above,
+                 * gated on the same inflight>0) was armed BEFORE this block, the
+                 * model's Heal/\IouringInflight -> flush_first decision.  A
+                 * regression that dropped the loop-top flush would leave inflight>0
+                 * but skip the flush, which the driver's two-tier mapping catches. */
+                runloom_iouwake_trace_event("DRAIN_BLOCK", 0,
+                                            runloom_iouring_inflight() > 0 ? 1 : 0);
                 runloom_netpoll_pump(timeout_ns);
                 /* WAKE-TRACE: the pump returned -- a delivered poke (model
                  * DrainPumpWake) or the backstop timeout (DrainBackstopTimeout);
                  * either re-loops to the top to re-drain wake_list. */
                 runloom_wake_trace_event("DRAIN_UNBLOCK", 0, 0);
+                runloom_iouwake_trace_event("DRAIN_UNBLOCK", 0, 0);
             } else if (timeout_ns > 0) {
                 if (runloom_sched_logical_enabled() &&
                     !runloom_sleep_peek(s)->sleep_real) {

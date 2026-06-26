@@ -67,6 +67,13 @@ static void runloom_iouring_flush_cq_overflow(unsigned *sq_flags, int ring_fd)
 {
     if (sq_flags == NULL || ring_fd < 0) return;
     if (__atomic_load_n(sq_flags, __ATOMIC_ACQUIRE) & IORING_SQ_CQ_OVERFLOW) {
+        /* IOUWAKE-TRACE: the kernel set IORING_SQ_CQ_OVERFLOW, so this GETEVENTS
+         * is the model's DrainFlushFirst -- the structural heal flushing the
+         * overflow backlog back into the VISIBLE ring.  Emitted ONLY on this
+         * branch (flag actually set): its presence is the witness that CQ
+         * overflow was genuinely induced; if it never appears, the trace covers
+         * only the visible-ring path, not the overflow heal. */
+        runloom_iouwake_trace_event("DRAIN_FLUSH", 0, 0);
         /* Best-effort: a re-issued GETEVENTS just re-flushes if it raced. */
         (void)sys_io_uring_enter(ring_fd, 0, 0, IORING_ENTER_GETEVENTS, NULL, 0);
     }
@@ -199,6 +206,25 @@ static void runloom_iouring_lock_ensure_inited(void)
     }
 }
 
+/* CQ/SQ ring depth.  Default 64.  RUNLOOM_IOURING_ENTRIES overrides it so the
+ * CQ-overflow trace-conformance harness can make the ring TINY (4..8) and force
+ * IORING_SQ_CQ_OVERFLOW with a multishot recv burst -- the only way to drive the
+ * DrainFlushFirst overflow heal RunloomIouringWake.tla models.  Read once per
+ * setup; clamped to a sane pow2-friendly band and only honoured when set, so
+ * production (env unset) is byte-for-byte unchanged.  The kernel rounds the SQ up
+ * to a power of two and sizes the CQ at >= 2x, so a request of 4 yields the
+ * smallest ring the kernel allows -- ideal for forcing overflow. */
+static unsigned runloom_iouring_setup_entries(void)
+{
+    const char *e = getenv("RUNLOOM_IOURING_ENTRIES");
+    long v;
+    if (e == NULL || e[0] == '\0') return 64;
+    v = strtol(e, NULL, 10);
+    if (v < 1)    v = 1;
+    if (v > 4096) v = 4096;
+    return (unsigned)v;
+}
+
 /* Initialise the ring.  Lazy: only runs the first time
  * runloom_iouring_available() is called and only succeeds once.
  * Returns 0 on success, -1 on init failure / no kernel support. */
@@ -235,7 +261,7 @@ static int runloom_iouring_lazy_init(void)
      *    Dedicates a kernel thread to SQ polling.  Lower latency at
      *    the cost of a busy CPU.  Future opt-in.
      */
-    fd = sys_io_uring_setup(64, &p);
+    fd = sys_io_uring_setup(runloom_iouring_setup_entries(), &p);
     if (fd < 0) {
         __atomic_store_n(&runloom_iouring_state.initialised, -1, __ATOMIC_RELEASE);
         return -1;

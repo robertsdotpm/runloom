@@ -75,20 +75,22 @@ runloom_iouring_ring_t *runloom_iouring_ring_create(int defer_taskrun)
     if (defer_taskrun) flags |= IORING_SETUP_DEFER_TASKRUN;
     memset(&p, 0, sizeof(p));
     p.flags = flags;
-    fd = sys_io_uring_setup(64, &p);
+    /* RUNLOOM_IOURING_ENTRIES (default 64) -- same tiny-ring override as the
+     * global ring, so a hub-ring workload can also force CQ overflow. */
+    fd = sys_io_uring_setup(runloom_iouring_setup_entries(), &p);
     if (fd < 0 && errno == EINVAL && defer_taskrun) {
         /* DEFER_TASKRUN unsupported.  Retry without it; SINGLE_ISSUER
          * came in 5.18 so it's the more likely survivor. */
         memset(&p, 0, sizeof(p));
         p.flags = IORING_SETUP_SINGLE_ISSUER;
-        fd = sys_io_uring_setup(64, &p);
+        fd = sys_io_uring_setup(runloom_iouring_setup_entries(), &p);
         defer_taskrun = 0;
     }
     if (fd < 0 && errno == EINVAL) {
         /* SINGLE_ISSUER unsupported too (5.1-5.17 kernels).  Plain
          * setup -- still correct, just multi-issuer-tolerant. */
         memset(&p, 0, sizeof(p));
-        fd = sys_io_uring_setup(64, &p);
+        fd = sys_io_uring_setup(runloom_iouring_setup_entries(), &p);
     }
     if (fd < 0) {
         free(r);

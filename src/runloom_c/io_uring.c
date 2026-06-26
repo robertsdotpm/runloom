@@ -63,6 +63,7 @@
 #include "runloom_sched.h"
 #include "runloom_fsm.h"
 #include "runloom_io_fsm.h"   /* the total (rc,errno)->event I/O classifier */
+#include "runloom_diag.h"     /* runloom_iouwake_trace_event (RUNLOOM_IOUWAKE_TRACE) */
 
 /* IORING_REGISTER_EVENTFD opcode for io_uring_register.  Value is a
  * stable kernel ABI but some older Linux headers don't expose the
