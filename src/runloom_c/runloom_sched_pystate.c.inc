@@ -576,16 +576,32 @@ static RUNLOOM_TLS int runloom_chunk_pool_size = 0;
  * array (a 256-pointer __thread array overflows a dlopen'd .so's static TLS
  * block).  A parked chunk is off tstate's datastack chain, so reusing `previous`
  * as the FIFO link is safe (exactly as the LIFO pool reuses it). */
-/* GRACE in completions, not time: it must exceed the per-OS-thread completions
- * that elapse while a stale cross-thread reader is mid-read (incl. OS-descheduled)
- * under saturation.  At ~1M g/s over 8 hubs (~125k/s/hub) GRACE=256 (~2ms) is too
- * short -- a descheduled sampler outlives it and the chunk is reused (p200 still
- * SIGSEGV'd at funcs=1M); 4096 (~33ms/hub) covers it with ~64 MB/thread of parked
- * chunks (still pooled, no arena round-trip -> spawn/s unchanged).  Overridable via
- * RUNLOOM_CHUNK_GRACE for tuning. */
-#ifndef RUNLOOM_CHUNK_GRACE
-#define RUNLOOM_CHUNK_GRACE 512
-#endif
+/* GRACE depth, in completions -- RUNTIME-TUNABLE via RUNLOOM_CHUNK_GRACE (default
+ * 128).  CACHE, not just count, sets the default: the per-thread parked-chunk set
+ * is GRACE*~16 KB resident, and once it overflows the per-core L2 the reused chunk
+ * is cache-COLD (a new g writes its frame into a cold chunk -> misses).  Bench
+ * (spawn+run-to-completion, 500k g): GRACE 64/128 == baseline spawn/s, 256/512 cost
+ * ~4% (4-8 MB blows past L2).  So 128 (~2 MB, L2-resident) is the free default.
+ * With the sys._current_frames snapshot wrap (monkey/frames.py) the ring only has
+ * to cover the WRAPPER's immediate read (microseconds), not a held-across-loop
+ * window, so a small default suffices for the cooperative/wrapped surface; the mac
+ * p200 1M soak (un-wrapped foreign-C-thread residual) can raise it,
+ * RUNLOOM_CHUNK_GRACE=4096.  0 disables the ring (immediate reuse). */
+static int runloom_chunk_grace_cap = -1;   /* <0 = read env on first use */
+
+static int runloom_chunk_grace_depth(void)
+{
+    int c = runloom_chunk_grace_cap;
+    if (__builtin_expect(c < 0, 0)) {
+        const char *e = getenv("RUNLOOM_CHUNK_GRACE");
+        c = (e != NULL && e[0] != '\0') ? atoi(e) : 128;
+        if (c < 0) c = 0;
+        if (c > (1 << 20)) c = 1 << 20;
+        runloom_chunk_grace_cap = c;       /* idempotent; benign first-init race */
+    }
+    return c;
+}
+
 static RUNLOOM_TLS _PyStackChunk *runloom_chunk_grace_head = NULL;  /* oldest */
 static RUNLOOM_TLS _PyStackChunk *runloom_chunk_grace_tail = NULL;  /* newest */
 static RUNLOOM_TLS int runloom_chunk_grace_count = 0;
@@ -644,7 +660,7 @@ static void runloom_chunk_pool_put(_PyStackChunk *c, PyObjectArenaAllocator *all
     runloom_chunk_grace_tail = c;
     runloom_chunk_grace_count++;
     /* Once GRACE chunks are parked, release the oldest (head) to the reuse pool. */
-    if (runloom_chunk_grace_count > RUNLOOM_CHUNK_GRACE) {
+    if (runloom_chunk_grace_count > runloom_chunk_grace_depth()) {
         _PyStackChunk *old = runloom_chunk_grace_head;
         runloom_chunk_grace_head = old->previous;
         if (runloom_chunk_grace_head == NULL)
