@@ -27,7 +27,7 @@ into the per-g-tstate attach (`mn_sched_hub_main.c.inc`). The previously-crashin
 **8/8 abort** without it (`RUNLOOM_NO_ALLOC_HOME=1`); default mode unaffected.
 Refined scope: only the alloc-heap + mimalloc page_list redirect to home; the QSBR
 reader stays the running tstate's (`_Py_qsbr_poll` asserts that). A direct migration
-proof (`experiments/resume_rebuild/migration_crosshub_proof.py`) shows **50/60 fibers
+proof (`tests/experiments/resume_rebuild/migration_crosshub_proof.py`) shows **50/60 fibers
 wake on a different hub than they parked on, zero crash** — real cross-hub migration
 of transparent stackful fibers.
 

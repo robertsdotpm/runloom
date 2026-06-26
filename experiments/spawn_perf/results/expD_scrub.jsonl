@@ -1,6 +1,0 @@
-{"label": "scrub_on", "hubs": 8, "issuers": 1, "n": 300000, "stack_size": 0, "reps": 3, "seconds": 4.365484650013968, "spawn_per_s": 68720.8921921281, "arena": "1", "arena_huge": "", "populate": "", "ld_preload": ""}
-{"label": "scrub_off", "hubs": 8, "issuers": 1, "n": 300000, "stack_size": 0, "reps": 3, "seconds": 3.325957974011544, "spawn_per_s": 90199.57628573413, "arena": "1", "arena_huge": "", "populate": "", "ld_preload": ""}
-{"label": "scrub_on", "hubs": 8, "issuers": 4, "n": 300000, "stack_size": 0, "reps": 3, "seconds": 1.9536473600019235, "spawn_per_s": 153558.93092175276, "arena": "1", "arena_huge": "", "populate": "", "ld_preload": ""}
-{"label": "scrub_off", "hubs": 8, "issuers": 4, "n": 300000, "stack_size": 0, "reps": 3, "seconds": 1.0370104260218795, "spawn_per_s": 289293.137727499, "arena": "1", "arena_huge": "", "populate": "", "ld_preload": ""}
-{"label": "scrub_on", "hubs": 8, "issuers": 8, "n": 300000, "stack_size": 0, "reps": 3, "seconds": 1.3539371469814796, "spawn_per_s": 221576.01678100918, "arena": "1", "arena_huge": "", "populate": "", "ld_preload": ""}
-{"label": "scrub_off", "hubs": 8, "issuers": 8, "n": 300000, "stack_size": 0, "reps": 3, "seconds": 0.7154795090027619, "spawn_per_s": 419299.2199289413, "arena": "1", "arena_huge": "", "populate": "", "ld_preload": ""}

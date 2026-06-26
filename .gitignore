@@ -25,3 +25,10 @@ hang_hunter_reports/
 overnight_suite_results.log
 experiments_build.log
 tests/experiments/spawn_perf/baseline_run.log
+
+# stray top-level scratch dirs -- canonical homes are tools/verify/,
+# tests/experiments/ and tests/tests_c/ (these got committed once because the
+# top level had no ignore rule; keep build/run output out of the repo root)
+/verify/
+/experiments/
+/tests_c/
