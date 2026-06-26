@@ -12,6 +12,7 @@
 # control that MUST be flagged NON-CONFORMING -- so a passing demo proves teeth):
 #   - RunloomGilstate (M4 / contract C6)   via RUNLOOM_GILSTATE_TRACE
 #   - RunloomMNControl (controlled baton)  via RUNLOOM_MN_EVENTS
+#   - RunloomWake (foreign-wake backstop)  via RUNLOOM_WAKE_TRACE
 #
 # SKIPS CLEANLY (prints a skip line, "0 passed, 0 failed", exits 0 -> contributes
 # nothing) when a prerequisite is absent: java, the TLA jar, a free-threaded
@@ -19,8 +20,8 @@
 # skip an absent tool.  Prints "N passed, M failed" for run_verify.sh's
 # eng_finish() to fold into the suite tally.
 set -u
-HERE="$(cd "$(dirname "$0")" && pwd)"        # verify/tla
-ROOT="$(cd "$HERE/../.." && pwd)"
+HERE="$(cd "$(dirname "$0")" && pwd)"        # tools/verify/tla
+ROOT="$(cd "$HERE/../../.." && pwd)"         # tools/verify/tla -> repo root is THREE up
 JAR="${TLA_JAR:-$HERE/tla2tools.jar}"
 URL="https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar"
 PY="${RUNLOOM_PYTHON:-$HOME/.pyenv/versions/3.13.13t/bin/python3}"
@@ -62,6 +63,7 @@ run_demo() {  # human-label  demo-script-relpath
 
 run_demo "gilstate (M4/C6)"  tools/trace_conform_demo.sh
 run_demo "MNControl baton"   tools/mn_trace_conform_demo.sh
+run_demo "Wake backstop"     tools/wake_trace_conform_demo.sh
 
 echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

@@ -192,6 +192,15 @@ void runloom_gilstate_trace(const char *action, int hub, int deleter);
  * directly from it under TLC.  Off (zero-cost) unless the env var is set. */
 void runloom_mn_trace_event(const char *action, int hub);
 
+
+/* ---- netpoll-drain WAKE protocol trace (TLA+ trace conformance, RUNLOOM_WAKE_TRACE) ----
+ * Emits one ndjson line per wake-handshake transition ({"a":<FOREIGN_WAKE|POKE|
+ * DRAIN_DEC|DRAIN_CONSUME|DRAIN_BLOCK|DRAIN_UNBLOCK|RESUME>,"g":<fiber-ptr token>,
+ * "cap":<0|1, backstop-armed, DRAIN_BLOCK only>}); tools/wake_trace_conform.py
+ * replays it through RunloomWake.tla's OWN actions under TLC.  Off (zero-cost --
+ * one predictable-NULL load) unless the env var is set. */
+void runloom_wake_trace_event(const char *action, unsigned long g, int cap);
+
 #ifdef __cplusplus
 }
 #endif

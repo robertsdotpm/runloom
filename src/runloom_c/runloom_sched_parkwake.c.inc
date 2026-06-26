@@ -506,6 +506,11 @@ void runloom_sched_wake_safe(runloom_g_t *g)
                 }
                 s->wake_list_tail = g;
                 RUNLOOM_RUNLOCK(&s->wake_list_lock, RUNLOOM_RANK_WAKE_LIST);
+                /* WAKE-TRACE: the DURABLE append to the owner's wake_list (model
+                 * WakerAppend) -- this is the cross-thread foreign-waker path the
+                 * single-thread drain self-heals; opens a model episode for g. */
+                runloom_wake_trace_event("FOREIGN_WAKE",
+                                         (unsigned long)(uintptr_t)g, 0);
             }
         }
         /* CAS failed: g was either running (parked_safe==0 already)

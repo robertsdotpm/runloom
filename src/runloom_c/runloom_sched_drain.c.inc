@@ -79,6 +79,10 @@ Py_ssize_t runloom_sched_drain(runloom_sched_t *s)
          * lock-free per-g pushes to ready. */
         if (__atomic_load_n(&s->wake_list_head, __ATOMIC_ACQUIRE) != NULL) {
             runloom_sched_drain_wake_list(s);
+            /* WAKE-TRACE: loop-top drained the durable wake_list to ready (model
+             * DrainConsume) -- the unconditional re-peek that makes a lost poke
+             * self-healing.  Whole-list at once, so one event per loop-top drain. */
+            runloom_wake_trace_event("DRAIN_CONSUME", 0, 0);
         }
         /* Wake up any sleepers whose time has come.  A LOGICAL sleeper is due
          * when the logical clock (`now`) reaches it; a REAL one (keepalive) when
@@ -193,7 +197,18 @@ Py_ssize_t runloom_sched_drain(runloom_sched_t *s)
                      runloom_foreign_park_inflight() > 0) &&
                     (timeout_ns < 0 || timeout_ns > 2000000LL))
                     timeout_ns = 2000000LL;   /* 2 ms */
+                /* WAKE-TRACE: about to block in the pump (model DrainPeekEmpty ->
+                 * DrainDecide -> DrainBlock).  cap=1 iff the 2 ms foreign-wake
+                 * backstop is armed (timeout capped) -- the observable witness that
+                 * the f214341 cap is live; a regression that fails to arm it would
+                 * emit cap=0 here while inflight>0 and the driver flags it. */
+                runloom_wake_trace_event("DRAIN_BLOCK", 0,
+                                         timeout_ns == 2000000LL ? 1 : 0);
                 runloom_netpoll_pump(timeout_ns);
+                /* WAKE-TRACE: the pump returned -- a delivered poke (model
+                 * DrainPumpWake) or the backstop timeout (DrainBackstopTimeout);
+                 * either re-loops to the top to re-drain wake_list. */
+                runloom_wake_trace_event("DRAIN_UNBLOCK", 0, 0);
             } else if (timeout_ns > 0) {
                 if (runloom_sched_logical_enabled() &&
                     !runloom_sleep_peek(s)->sleep_real) {
@@ -403,6 +418,12 @@ Py_ssize_t runloom_sched_drain(runloom_sched_t *s)
 #endif
             }
 
+            /* WAKE-TRACE: running a ready fiber (model DrainResume).  Emitted for
+             * EVERY resume; the driver keeps only those that close a foreign-wake
+             * episode (a preceding FOREIGN_WAKE for this g), dropping first-run /
+             * cooperative-yield resumes -- so a RESUME with no durable append is a
+             * resume-without-wake and deadlocks the replay (the lost-wakeup class). */
+            runloom_wake_trace_event("RESUME", (unsigned long)(uintptr_t)g, 0);
             runloom_coro_resume(g->coro);
 
             s->current = prev;

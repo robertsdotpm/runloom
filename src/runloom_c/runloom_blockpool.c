@@ -50,6 +50,7 @@
 #include "coro.h"
 #include "runloom_crash.h"
 #include "runloom_fsm.h"   /* RUNLOOM_FSM_VALIDATE single-completion witness */
+#include "runloom_diag.h"  /* runloom_wake_trace_event (RUNLOOM_WAKE_TRACE) */
 
 #include <stdlib.h>
 #include <string.h>
@@ -229,9 +230,18 @@ static RUNLOOM_THREAD_RET runloom_blockpool_worker(void *arg)
              * Re-queue BEFORE decrementing inflight so the drain loop, which
              * stays alive while inflight>0, sees the fiber the moment it hits 0. */
             runloom_sched_wake_safe(g);
-            if (hub == NULL)
+            if (hub == NULL) {
                 runloom_netpoll_wake_pump(NULL);   /* single-thread owner -> default pool */
+                /* WAKE-TRACE: the poke ATTEMPT (model WakerPoke -- delivery left
+                 * free).  Single-thread path only; the model is the single drain. */
+                runloom_wake_trace_event("POKE", (unsigned long)(uintptr_t)g, 0);
+            }
             __atomic_sub_fetch(&bp_inflight, 1, __ATOMIC_ACQ_REL);
+            /* WAKE-TRACE: bp_inflight decremented LAST (model WakerDec) -- the
+             * trace ordering POKE-before-DRAIN_DEC witnesses the "decrement last"
+             * invariant the backstop's liveness depends on. */
+            if (hub == NULL)
+                runloom_wake_trace_event("DRAIN_DEC", (unsigned long)(uintptr_t)g, 0);
         }
     }
     RUNLOOM_THREAD_RETURN((void *)0);

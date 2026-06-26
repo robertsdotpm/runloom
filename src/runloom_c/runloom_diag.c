@@ -428,6 +428,32 @@ void runloom_mn_trace_event(const char *action, int hub)
     RUNLOOM_RUNLOCK(&runloom_mn_trace_lock, RUNLOOM_RANK_TRACE);
 }
 
+/* ---- netpoll-drain WAKE protocol trace (TLA+ trace conformance, RUNLOOM_WAKE_TRACE) ----
+ * Emits the wake-handshake transitions of the SINGLE-THREAD drain vs a foreign
+ * waker (blockpool worker) -- FOREIGN_WAKE (durable wake_list append) / POKE /
+ * DRAIN_DEC on the worker, DRAIN_CONSUME / DRAIN_BLOCK / DRAIN_UNBLOCK / RESUME on
+ * the owner -- so tools/wake_trace_conform.py can replay them through
+ * RunloomWake.tla's OWN actions under TLC and check the binary's wake behaviour is
+ * a SAFETY refinement of the proven model (ResumeIsTerminal + every observed
+ * transition enabled; a resume/consume with no durable append deadlocks TLC).  The
+ * `g` field is the raw fiber-pointer token (opaque; only matched for episode
+ * identity by the driver), `cap` is meaningful only on DRAIN_BLOCK (1 == the 2 ms
+ * foreign-wake backstop was armed).  Opened once in runloom_diag_init; a NULL fp
+ * is a single predictable-not-taken load => inert/zero-cost in production.  All
+ * emit sites are cold (park/wake/drain-block), never the same-thread fast path. */
+static FILE           *runloom_wake_trace_fp = NULL;
+static runloom_mutex_t runloom_wake_trace_lock;
+
+void runloom_wake_trace_event(const char *action, unsigned long g, int cap)
+{
+    if (runloom_wake_trace_fp == NULL) return;
+    RUNLOOM_RLOCK(&runloom_wake_trace_lock, RUNLOOM_RANK_TRACE);
+    fprintf(runloom_wake_trace_fp,
+            "{\"a\":\"%s\",\"g\":%lu,\"cap\":%d}\n", action, g, cap);
+    fflush(runloom_wake_trace_fp);
+    RUNLOOM_RUNLOCK(&runloom_wake_trace_lock, RUNLOOM_RANK_TRACE);
+}
+
 void runloom_diag_init(void)
 {
     if (runloom_diag_inited) return;
@@ -445,6 +471,13 @@ void runloom_diag_init(void)
             if (mt != NULL && mt[0] != '\0') {
                 runloom_mutex_init(&runloom_mn_trace_lock);
                 runloom_mn_trace_fp = fopen(mt, "w");
+            }
+        }
+        {
+            const char *wt = getenv("RUNLOOM_WAKE_TRACE");
+            if (wt != NULL && wt[0] != '\0') {
+                runloom_mutex_init(&runloom_wake_trace_lock);
+                runloom_wake_trace_fp = fopen(wt, "w");
             }
         }
     }
