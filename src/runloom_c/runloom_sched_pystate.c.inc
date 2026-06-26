@@ -551,6 +551,45 @@ void runloom_pystate_snap_clear(runloom_pystate_snap_t *snap)
 static RUNLOOM_TLS _PyStackChunk *runloom_chunk_pool = NULL;
 static RUNLOOM_TLS int runloom_chunk_pool_size = 0;
 
+/* GRACE delay-ring in FRONT of the reuse pool -- the targeted fix for the
+ * cross-thread frame UAF (mac/arm64 big_100 p200).  sys._current_frames() (and
+ * faulthandler / traceback) hand a foreign thread a reference to a goroutine's
+ * LIVE _PyInterpreterFrame; the goroutine pops it + this chunk is recycled, so a
+ * racing reader of frame.f_lineno/f_code follows a stale f_frame into a chunk the
+ * NEXT goroutine has already overwritten -> garbage code pointer -> SIGSEGV
+ * (TSan-confirmed: Python/frame.c take_ownership vs frame_getlineno; a benign
+ * stale read on x86-TSO, a hard UAF on arm64).  The data race is inherent to
+ * free-threaded CPython; only the CRASH is ours to prevent.
+ *
+ * A completing chunk is parked in this per-thread FIFO ring and only released to
+ * the LIFO reuse pool after RUNLOOM_CHUNK_GRACE FURTHER completions -- long after
+ * any in-flight stale reader has finished -- so its frame bytes stay intact
+ * (valid-but-stale) across the read window instead of being overwritten.  NOT a
+ * quarantine-to-arena: the chunk still POOLS (no arena round-trip), so spawn/s --
+ * the first-order metric -- is unchanged; the only cost is GRACE resident
+ * chunks/thread (~16 KB each).  No behavioural change when no frame introspection
+ * happens (the common case): just a fixed GRACE-completion lag before reuse.
+ *
+ * The ring is a singly-linked FIFO threaded through the chunk's own `previous`
+ * field (head=oldest, each `previous` points toward the newer/tail end, tail->
+ * previous=NULL) -- so it costs only two TLS pointers + a count, NOT a static-TLS
+ * array (a 256-pointer __thread array overflows a dlopen'd .so's static TLS
+ * block).  A parked chunk is off tstate's datastack chain, so reusing `previous`
+ * as the FIFO link is safe (exactly as the LIFO pool reuses it). */
+/* GRACE in completions, not time: it must exceed the per-OS-thread completions
+ * that elapse while a stale cross-thread reader is mid-read (incl. OS-descheduled)
+ * under saturation.  At ~1M g/s over 8 hubs (~125k/s/hub) GRACE=256 (~2ms) is too
+ * short -- a descheduled sampler outlives it and the chunk is reused (p200 still
+ * SIGSEGV'd at funcs=1M); 4096 (~33ms/hub) covers it with ~64 MB/thread of parked
+ * chunks (still pooled, no arena round-trip -> spawn/s unchanged).  Overridable via
+ * RUNLOOM_CHUNK_GRACE for tuning. */
+#ifndef RUNLOOM_CHUNK_GRACE
+#define RUNLOOM_CHUNK_GRACE 512
+#endif
+static RUNLOOM_TLS _PyStackChunk *runloom_chunk_grace_head = NULL;  /* oldest */
+static RUNLOOM_TLS _PyStackChunk *runloom_chunk_grace_tail = NULL;  /* newest */
+static RUNLOOM_TLS int runloom_chunk_grace_count = 0;
+
 /* Pop one chunk off the pool.  Returns NULL when empty; caller falls
  * back to letting PyEval arena-allocate. */
 static _PyStackChunk *runloom_chunk_pool_get(void)
@@ -572,8 +611,8 @@ static _PyStackChunk *runloom_chunk_pool_get(void)
     return c;
 }
 
-/* Push one chunk onto the pool.  At cap, arena-free instead. */
-static void runloom_chunk_pool_put(_PyStackChunk *c, PyObjectArenaAllocator *alloc)
+/* Push one chunk onto the LIFO reuse pool now.  At cap, arena-free instead. */
+static void runloom_chunk_pool_put_now(_PyStackChunk *c, PyObjectArenaAllocator *alloc)
 {
     if (runloom_chunk_pool_size >= RUNLOOM_CHUNK_POOL_CAP) {
         if (alloc->free != NULL) {
@@ -585,6 +624,34 @@ static void runloom_chunk_pool_put(_PyStackChunk *c, PyObjectArenaAllocator *all
     c->top = 0;
     runloom_chunk_pool = c;
     runloom_chunk_pool_size++;
+}
+
+/* Recycle a completed g's chunk through the GRACE delay-ring: park `c` and, once
+ * the ring is full, release the chunk that completed GRACE completions ago to the
+ * reuse pool.  Until released a chunk's bytes are never touched, so a stale
+ * cross-thread frame reader (sys._current_frames race) sees valid-but-stale memory
+ * rather than a reused/overwritten chunk (the mac/arm64 p200 UAF).  The chunk's
+ * `previous` link is untouched while parked (the ring uses its own array), so a
+ * still-resident parked chunk never re-enters CPython's datastack chain. */
+static void runloom_chunk_pool_put(_PyStackChunk *c, PyObjectArenaAllocator *alloc)
+{
+    /* Enqueue c at the tail (newest). */
+    c->previous = NULL;
+    if (runloom_chunk_grace_tail != NULL)
+        runloom_chunk_grace_tail->previous = c;
+    else
+        runloom_chunk_grace_head = c;
+    runloom_chunk_grace_tail = c;
+    runloom_chunk_grace_count++;
+    /* Once GRACE chunks are parked, release the oldest (head) to the reuse pool. */
+    if (runloom_chunk_grace_count > RUNLOOM_CHUNK_GRACE) {
+        _PyStackChunk *old = runloom_chunk_grace_head;
+        runloom_chunk_grace_head = old->previous;
+        if (runloom_chunk_grace_head == NULL)
+            runloom_chunk_grace_tail = NULL;
+        runloom_chunk_grace_count--;
+        runloom_chunk_pool_put_now(old, alloc);
+    }
 }
 
 /* Install a pooled chunk on tstate for a fresh g.  Returns 1 if the
