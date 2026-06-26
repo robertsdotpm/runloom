@@ -4,11 +4,21 @@
  * same virtual addresses and counts how many still hold the sentinel -- a leak.
  * Built -O0 so nothing is optimised away. */
 #include <stdint.h>
+
+/* POSIX .so exports every non-static symbol; a Windows .dll exports nothing
+ * unless told to, so ctypes.CDLL would not find these.  EXPORT is empty on
+ * POSIX (identical .so) and __declspec(dllexport) on Windows. */
+#ifdef _WIN32
+#define EXPORT __declspec(dllexport)
+#else
+#define EXPORT
+#endif
+
 volatile uint64_t g_sink;
 enum { NWORDS = 4096, NREC = 16 };          /* 32 KB buffer, 16 probe points */
 static volatile uint64_t * volatile g_addrs[NREC];
 
-void write_sentinel(uint64_t val) {
+EXPORT void write_sentinel(uint64_t val) {
     volatile uint64_t buf[NWORDS];
     int i;
     for (i = 0; i < NWORDS; i++) buf[i] = val;
@@ -17,7 +27,7 @@ void write_sentinel(uint64_t val) {
 }
 
 /* Count recorded addresses (now in the reused stack) that still == val. */
-int read_recorded(uint64_t val) {
+EXPORT int read_recorded(uint64_t val) {
     int i, hits = 0;
     for (i = 0; i < NREC; i++)
         if (g_addrs[i] && *g_addrs[i] == val) hits++;
@@ -25,4 +35,4 @@ int read_recorded(uint64_t val) {
 }
 
 /* Diagnostic: return the raw 8 bytes now at a mid-buffer recorded address. */
-uint64_t read_raw(void) { return g_addrs[8] ? *g_addrs[8] : 0; }
+EXPORT uint64_t read_raw(void) { return g_addrs[8] ? *g_addrs[8] : 0; }
