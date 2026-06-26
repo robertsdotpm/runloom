@@ -92,6 +92,18 @@ typedef struct {
     int          have_deadline;   /* any hub reported a pending timer this round */
     uint64_t     round;       /* current census round; bumped at each release */
     uint64_t    *seen;        /* per-hub: last round this hub checked in */
+    /* Per-hub "this hub's last segment parked on a FOREIGN-thread completion"
+     * (blocking-IO / offload: runloom_blocking_call -> runloom_park_generic(1)).
+     * Such a hub is NOT participating in the census this round: its fiber will be
+     * re-queued by a foreign wake whose wall-clock arrival the barrier cannot
+     * (and must not pretend to) order, so requiring its check-in would stall the
+     * complete-set forever, and letting the census go "quiescent" while it is
+     * pending would advance the logical clock at a timing-decided instant.
+     * Set/cleared ONLY on the hub's own thread at the resume boundary (release
+     * sets it when the just-ended segment parked foreign-wakeable; acquire /
+     * census_idle clear it when the hub re-enters the census).  Identically 0
+     * for any program without blocking-IO, so it changes no seeded replay. */
+    int         *offload;     /* per-hub: in a foreign-park this round (non-participating) */
     /* Grant trace (RUNLOOM_MN_TRACE=<path>).  Recorded into an in-memory byte ring
      * (one hub-id digit per grant) and dumped to the file at fini -- NOT
      * fprintf'd per grant, whose syscall/flush perturbs the very timing we are
@@ -126,6 +138,15 @@ typedef struct {
     int         *pct_change_prio; /* demotion target priority for each (d-1..1) */
 } runloom_mn_ctrl_t;
 static runloom_mn_ctrl_t runloom_mn_ctrl;
+
+/* Per-hub-thread flag: the segment that is about to yield parked on a FOREIGN
+ * completion (blocking-IO / offload via runloom_park_generic(foreign_wakeable=1)).
+ * Set by runloom_mn_tls_mark_parked_foreign (called from park_generic's hub
+ * path), consumed at the resume boundary in runloom_mn_ctrl_release to mark this
+ * hub non-participating in the census this round.  Declared here (before
+ * ctrl_release) so the release reader sees it.  Always 0 for a program that
+ * never offloads -> the census behaves exactly as before (determinism). */
+static RUNLOOM_TLS int runloom_tls_parked_foreign = 0;
 
 static uint64_t runloom_mn_ctrl_rand(void)      /* xorshift64 */
 {
@@ -259,12 +280,21 @@ static int runloom_mn_ctrl_choose(void)
     return -1;
 }
 
-/* lock held: have all hubs checked in for the current round? */
+/* lock held: have all PARTICIPATING hubs checked in for the current round?
+ * A hub whose last segment parked on a foreign-thread completion (offload[i],
+ * set by ctrl_release) is NOT participating this round -- exactly like a hub
+ * that has not yet entered the scheduler -- so it is excluded from the
+ * completeness requirement.  Its seen[] stays stale until its foreign wake
+ * re-queues the g and the hub re-enters via acquire (which clears offload[i]),
+ * at which point it rejoins the census normally.  offload[] is identically 0
+ * for any program without blocking-IO, so this loop is bit-identical there. */
 static int runloom_mn_ctrl_census_complete(void)
 {
     int i;
-    for (i = 0; i < runloom_mn_ctrl.n; i++)
+    for (i = 0; i < runloom_mn_ctrl.n; i++) {
+        if (runloom_mn_ctrl.offload[i]) continue;       /* non-participating */
         if (runloom_mn_ctrl.seen[i] != runloom_mn_ctrl.round) return 0;
+    }
     return 1;
 }
 
@@ -289,7 +319,22 @@ static void runloom_mn_ctrl_try_grant(void)
          * set and the minimum are functions of the schedule, not wall time.
          * Without a pending timer there is simply no runnable work (run is
          * draining to completion) -- do nothing. */
-        if (runloom_mn_ctrl.barrier && runloom_mn_ctrl.have_deadline) {
+        /* ...UNLESS a foreign offload is still in flight.  census_complete()
+         * already excluded the offloaded hub(s), so the census can read
+         * "complete + nobody wanting" while a worker thread is about to wake an
+         * offloaded fiber.  Advancing the logical clock then would fire a timer
+         * at an instant decided by whether that foreign wake has landed yet --
+         * the very real-I/O-arrival nondeterminism the barrier cannot order.
+         * Hold the clock until the foreign wake returns its fiber (which re-opens
+         * the census as a wanter): timer-vs-foreign-wake ordering is then the
+         * fiber's, not the OS scheduler's.  runloom_foreign_park_inflight() is a
+         * process-wide atomic, identically 0 without blocking-IO, so this guard
+         * is a dead (false) branch for repro_probe/select/timer -- the clock
+         * advances exactly as before.  A racy read only ever DEFERS an advance
+         * (re-loop on the next census); a real foreign wake makes a hub a wanter,
+         * which leaves this c<0 quiescent branch entirely. */
+        if (runloom_mn_ctrl.barrier && runloom_mn_ctrl.have_deadline &&
+            runloom_foreign_park_inflight() == 0) {
             runloom_mn_ctrl.logical_now = runloom_mn_ctrl.next_deadline;
             runloom_mn_ctrl.have_deadline = 0;
             runloom_mn_ctrl.round++;                    /* re-open: re-report + fire */
@@ -325,9 +370,12 @@ static void runloom_mn_ctrl_init(int n)
     if (seed == NULL || seed[0] == '\0' || n <= 0) return;
     runloom_mn_ctrl.want = (int *)PyMem_Calloc((size_t)n, sizeof(int));
     runloom_mn_ctrl.seen = (uint64_t *)PyMem_Calloc((size_t)n, sizeof(uint64_t));
-    if (runloom_mn_ctrl.want == NULL || runloom_mn_ctrl.seen == NULL) {
-        PyMem_Free(runloom_mn_ctrl.want);  runloom_mn_ctrl.want = NULL;
-        PyMem_Free(runloom_mn_ctrl.seen);  runloom_mn_ctrl.seen = NULL;
+    runloom_mn_ctrl.offload = (int *)PyMem_Calloc((size_t)n, sizeof(int));
+    if (runloom_mn_ctrl.want == NULL || runloom_mn_ctrl.seen == NULL ||
+        runloom_mn_ctrl.offload == NULL) {
+        PyMem_Free(runloom_mn_ctrl.want);    runloom_mn_ctrl.want = NULL;
+        PyMem_Free(runloom_mn_ctrl.seen);    runloom_mn_ctrl.seen = NULL;
+        PyMem_Free(runloom_mn_ctrl.offload); runloom_mn_ctrl.offload = NULL;
         return;                                 /* OOM -> stay disabled */
     }
     runloom_mutex_init(&runloom_mn_ctrl.lock);
@@ -387,6 +435,8 @@ static void runloom_mn_ctrl_fini(void)
     runloom_mn_ctrl.want = NULL;
     PyMem_Free(runloom_mn_ctrl.seen);
     runloom_mn_ctrl.seen = NULL;
+    PyMem_Free(runloom_mn_ctrl.offload);
+    runloom_mn_ctrl.offload = NULL;
     PyMem_Free(runloom_mn_ctrl.pct_prio);
     runloom_mn_ctrl.pct_prio = NULL;
     PyMem_Free(runloom_mn_ctrl.pct_change_at);
@@ -415,6 +465,11 @@ static void runloom_mn_ctrl_acquire(int hub)
 {
     if (!runloom_mn_ctrl.enabled || hub < 0 || hub >= runloom_mn_ctrl.n) return;
     RUNLOOM_RLOCK(&runloom_mn_ctrl.lock, RUNLOOM_RANK_MN_CTRL);
+    /* Re-entering the census: the hub is about to run a g, so it is no longer in
+     * a foreign offload (its prior offloaded fiber's wake is what brought it
+     * here, or it has fresh work).  Rejoin as a full participant.  No-op (already
+     * 0) for any hub that never offloaded -> no replay change. */
+    runloom_mn_ctrl.offload[hub] = 0;
     runloom_mn_ctrl.want[hub] = 1;
     runloom_mn_ctrl.seen[hub] = runloom_mn_ctrl.round;     /* checked in (wanting) */
     /* trace conformance: idle -> arriving -> waiting (acquire is atomic here, so
@@ -454,6 +509,18 @@ static void runloom_mn_ctrl_release(int hub)
         for (j = 0; j < runloom_mn_ctrl.pct_ncp; j++)
             if (runloom_mn_ctrl.pct_change_at[j] == runloom_mn_ctrl.pct_step)
                 runloom_mn_ctrl.pct_prio[hub] = runloom_mn_ctrl.pct_change_prio[j];
+    }
+    /* If the segment that just ended parked on a FOREIGN-thread completion
+     * (blocking-IO / offload), this hub is non-participating until its foreign
+     * wake re-queues the fiber (acquire clears offload[hub] then).  Consume the
+     * per-hub-thread marker set in runloom_park_generic.  A foreign-parked hub is
+     * NOT a wanter (its fiber is off-queue) and must NOT be required to check in,
+     * so it is excluded from census_complete() and never carried forward below.
+     * runloom_tls_parked_foreign is 0 for any non-offloading segment, so this is
+     * a no-op there -- the census proceeds exactly as before. */
+    if (runloom_tls_parked_foreign) {
+        runloom_mn_ctrl.offload[hub] = 1;
+        runloom_tls_parked_foreign = 0;
     }
     /* Open the next census round.  Hubs still blocked in acquire (want[]) are
      * carried forward as already-checked-in; the hub that just ran, and any

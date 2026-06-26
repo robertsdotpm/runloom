@@ -197,6 +197,13 @@ runloom_g_t *runloom_mn_tls_current_g(void);
  * the local FIFO and the next iteration re-runs it -> busy loop. */
 void runloom_mn_tls_mark_parked(void);
 
+/* Signal hub_main / the barrier census "the segment about to yield parked on a
+ * FOREIGN-thread completion" (blocking-IO / offload).  Set by runloom_park_generic
+ * on the hub path when foreign_wakeable!=0; read at the resume boundary
+ * (ctrl_release) so the census marks this hub non-participating for the round.
+ * No-op outside the controlled+barrier seeded scheduler. */
+void runloom_mn_tls_mark_parked_foreign(void);
+
 /* Return the runloom_sched_t owned by the hub running on this thread, or
  * NULL if not in a hub.  Used by hub-aware sched primitives (e.g.,
  * sleep_until) so they push to the hub's per-thread sleep heap rather

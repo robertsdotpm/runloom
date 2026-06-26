@@ -208,6 +208,15 @@ int runloom_park_generic(int foreign_wakeable)
              * hub resumes us from the re-queue. */
         }
         runloom_sched_park_current();   /* mark off-queue + snap */
+        /* This hub's segment is committing to a FOREIGN-thread-wake park (its g
+         * is re-queued only by a wake_safe from a worker / external thread).
+         * Tell the barrier census (read at the upcoming resume_end -> ctrl_release)
+         * to treat this hub as non-participating for the round: its foreign wake's
+         * wall-clock arrival is outside the deterministic schedule, so it must
+         * neither hold the complete-set hostage nor let the census go quiescent.
+         * Only on the genuine-park path (past every Dekker early-out, which return
+         * without yielding), and only when foreign_wakeable. */
+        if (foreign_wakeable) runloom_mn_tls_mark_parked_foreign();
         /* Consume the wait-reason hint (set by the higher-level primitive);
          * default SYNC.  Cleared so it can't leak to a later park. */
         g->wait_reason = (g->wait_reason_hint != (unsigned char)RUNLOOM_WR_NONE)

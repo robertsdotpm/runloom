@@ -30,6 +30,15 @@ void runloom_mn_tls_mark_parked(void)
     runloom_tls_parked_offqueue = 1;
 }
 
+void runloom_mn_tls_mark_parked_foreign(void)
+{
+    /* The segment about to yield is parking on a foreign-thread completion
+     * (blocking-IO / offload).  Recorded per hub-thread; consumed at the resume
+     * boundary by runloom_mn_ctrl_release.  No effect unless the controlled
+     * barrier census is active. */
+    runloom_tls_parked_foreign = 1;
+}
+
 runloom_sched_t *runloom_mn_current_sched(void)
 {
     runloom_hub_t *h = runloom_tls_hub;
