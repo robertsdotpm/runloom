@@ -4,7 +4,15 @@
 
 `sys._current_frames()` returns `PyFrameObject`s whose `f_frame` points at **another running thread's live `_PyInterpreterFrame`**. Reading any attribute (`f_lineno`, `f_lasti`, `f_globals`, …) dereferences that frame with **no synchronization** while the owning thread concurrently materializes/pops it (`take_ownership`, `Python/frame.c`). So **pure-Python code can segfault the interpreter** (use-after-free).
 
-This is documented as unsafe in the free-threading HOWTO, but it is a *memory-safety crash reachable from pure Python*, and a follow-up to gh-117300 / PR #117301 — that change stop-the-world's only the dict snapshot, not the subsequent attribute reads. ThreadSanitizer on a free-threaded build flags the race in `frame_getlineno` ↔ `take_ownership` / `_PyFrame_GetCode`.
+This is documented as unsafe in the free-threading HOWTO, but it is a *memory-safety crash reachable from pure Python*. It is the gap left by **gh-117300** (PR #117301, closed): that change stop-the-world's only the *dict snapshot*, not the subsequent frame-attribute reads — which is why the HOWTO's "may crash" warning *post-dates* the fix. ThreadSanitizer on a free-threaded build flags the race in `frame_getlineno` ↔ `take_ownership` / `_PyFrame_GetCode`.
+
+## Related
+
+- **gh-117300** / PR #117301 (closed, @colesbury) — the parent: STW'd the snapshot only; this is the remaining read-path race.
+- **DataDog dd-trace-py #13567** — the same UAF in the wild: a production profiler takes a fatal SIGSEGV dereferencing a stale frame from `sys._current_frames()` / `_PyThread_CurrentFrames`.
+- **gh-106883** — a related (different) hazard: deadlock when using `sys._current_frames` under threads.
+
+cc @colesbury (free-threaded frames / gh-117300).
 
 ## Repro (segfaults within seconds on a free-threaded build)
 
