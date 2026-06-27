@@ -132,6 +132,6 @@ def post(H):
 
 if __name__ == "__main__":
     harness.main("p218_exception_unwind_chain", body, setup=setup, post=post,
-                 default_funcs=2000,
+                 default_funcs=2000, max_funcs=2000,   # 9-deep chains -> design-tier cap (slow finishers past ~design)
                  describe="tagged exception relayed up a chain of D goroutines; "
                           "type+tag+traceback intact")

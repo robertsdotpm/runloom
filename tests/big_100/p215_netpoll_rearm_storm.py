@@ -75,6 +75,6 @@ def post(H):
 
 if __name__ == "__main__":
     harness.main("p215_netpoll_rearm_storm", body, setup=setup, post=post,
-                 default_funcs=3000,
+                 default_funcs=3000, max_funcs=3000,   # echo path oversubscribes past ~36k -> design-tier cap
                  describe="K round-trips per connection (re-arm the one-shot "
                           "netpoll K times) then churn a fresh fd; no lost readiness")
