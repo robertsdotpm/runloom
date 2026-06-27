@@ -1,3 +1,4 @@
+/* SOURCE-ANCHOR: runloom_dh_sift_up runloom_dh_sift_down runloom_dh_insert runloom_dh_remove runloom_dh_peek_deadline runloom_dh_swap  (guards this hand-model vs src drift; tools/verify/model_source_drift.py) */
 /*
  * timer_heap_cbmc.c -- CBMC bounded proof of the netpoll per-pool DEADLINE
  * MIN-HEAP (the sleep/timer heap), the data structure that orders parked

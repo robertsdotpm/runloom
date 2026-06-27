@@ -1,3 +1,4 @@
+/* SOURCE-ANCHOR: runloom_mn_hub_submit runloom_g_try_incref  (guards this hand-model vs src drift; tools/verify/model_source_drift.py) */
 /*
  * sched_qref_cbmc.c -- CBMC model of the default-path goroutine queue-membership
  * + refcount protocol the per-hub-kqueue crash centred on, and of the CORRECT

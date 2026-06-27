@@ -1,3 +1,4 @@
+/* SOURCE-ANCHOR: runloom_fiber_admit runloom_fiber_release  (guards this hand-model vs src drift; tools/verify/model_source_drift.py) */
 /*
  * fiber_admit_cbmc.c -- CBMC conservation proof for runloom's max-fibers admission
  * gate (runloom_fiber_admit / runloom_fiber_release in runloom_introspect.c, driven

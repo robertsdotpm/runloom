@@ -39,6 +39,24 @@ note() { [ "$QUIET" = 0 ] && echo "    $*"; }
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
+# ---------------- model<->source drift lints (cheap, no engine) ---------
+# Guard against the two drift classes the audit found: stale doc->source
+# citations (cite_drift) and hand-transcribed models drifting from the source
+# they mirror (model_source_drift, the model-logic analogue).  Both run in <1s,
+# need no build, and fail the verify gate on drift so a transcription can't
+# silently diverge from src/runloom_c.  (See docs/dev/frontier/MODEL_SOURCE_AUDIT.md.)
+if have python3; then
+    for lint in cite_drift model_source_drift; do
+        [ -f "$HERE/$lint.py" ] || continue
+        printf '  [lint] %-28s ' "$lint"
+        if python3 "$HERE/$lint.py" >"/tmp/runloom_$lint.log" 2>&1; then
+            echo "OK"; pass=$((pass + 1))
+        else
+            echo "DRIFT (see /tmp/runloom_$lint.log)"; fail=$((fail + 1)); FAILED="$FAILED $lint"
+        fi
+    done
+fi
+
 # ---------------- parallel job engine ----------------------------------
 # Each check runs as a pooled background job that prints its own one-line
 # result and RETURNS 0 (pass) / non-0 (fail).  collect() folds those verdicts

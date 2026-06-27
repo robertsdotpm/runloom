@@ -1,0 +1,53 @@
+{
+ "tools/verify/cbmc/chan_refflow_cbmc.c": {
+  "runloom_chan_recv": "9aca2f30fcffc641",
+  "runloom_chan_send": "3cf083624870b4c6"
+ },
+ "tools/verify/cbmc/chunk_pool_alias_cbmc.c": {
+  "runloom_chunk_pool_get": "d8aeb6ba4a09f3bb"
+ },
+ "tools/verify/cbmc/fiber_admit_cbmc.c": {
+  "runloom_fiber_admit": "97f2aa90a88b7f6c",
+  "runloom_fiber_release": "027d72c0f10990fc"
+ },
+ "tools/verify/cbmc/g_slab_recycle_cbmc.c": {
+  "runloom_g_slab_alloc": "879b60e592846016",
+  "runloom_g_slab_free": "795efc6fa02527b1"
+ },
+ "tools/verify/cbmc/preempt_defer_cbmc.c": {
+  "runloom_hub_resume_begin": "cdb57c23c3c63b06",
+  "runloom_hub_resume_end": "24d122499852c8a0",
+  "runloom_preempt_eval_frame": "7db2c5a36cade726"
+ },
+ "tools/verify/cbmc/sched_pystate_cbmc.c": {
+  "runloom_pystate_load": "5ddcd54fa9ea7e4b",
+  "runloom_pystate_snap": "bac514824eb40fd1"
+ },
+ "tools/verify/cbmc/sched_qref_cbmc.c": {
+  "runloom_g_try_incref": "98e9b193d7b659be",
+  "runloom_mn_hub_submit": "d906aed66bfd240a"
+ },
+ "tools/verify/cbmc/sched_readyring_cbmc.c": {
+  "runloom_ready_grow": "f2e0e608608f6fc4",
+  "runloom_sched_ready_pop": "f0b422e415a09480",
+  "runloom_sched_ready_push": "e1e637e0fd88c7b3"
+ },
+ "tools/verify/cbmc/snap_refown_cbmc.c": {
+  "runloom_pystate_load": "5ddcd54fa9ea7e4b",
+  "runloom_pystate_snap": "bac514824eb40fd1",
+  "runloom_pystate_snap_clear": "05bf48354022a420"
+ },
+ "tools/verify/cbmc/timer_heap_cbmc.c": {
+  "runloom_dh_insert": "ebdbf58964e74e4a",
+  "runloom_dh_peek_deadline": "16c354eea75e6df9",
+  "runloom_dh_remove": "55af6ff28f8a3091",
+  "runloom_dh_sift_down": "339db93a02eecf35",
+  "runloom_dh_sift_up": "5da87eb71e7fcee5",
+  "runloom_dh_swap": "464b5fcf643f5c40"
+ },
+ "tools/verify/cbmc/wake_state_fsm_cbmc.c": {
+  "runloom_sched_park_safe": "870c8fe47f1257b3",
+  "runloom_sched_wake": "f9987f61b5a5ee51",
+  "runloom_sched_wake_safe": "5f86dbd284501167"
+ }
+}

@@ -1,3 +1,4 @@
+/* SOURCE-ANCHOR: runloom_chan_send runloom_chan_recv  (guards this hand-model vs src drift; tools/verify/model_source_drift.py) */
 /*
  * chan_refflow_cbmc.c -- CBMC proof that a PyObject sent through a runloom channel
  * has its reference count CONSERVED across every send/recv/close/free path

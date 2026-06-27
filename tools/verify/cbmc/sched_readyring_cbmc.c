@@ -1,3 +1,4 @@
+/* SOURCE-ANCHOR: runloom_sched_ready_push runloom_sched_ready_pop runloom_ready_grow  (guards this hand-model vs src drift; tools/verify/model_source_drift.py) */
 /*
  * sched_readyring_cbmc.c -- CBMC harness for runloom's per-sched ready FIFO ring
  * (runloom_sched.c: runloom_sched_ready_push / runloom_sched_ready_pop / runloom_ready_grow).

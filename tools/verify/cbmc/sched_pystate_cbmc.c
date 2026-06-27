@@ -1,3 +1,4 @@
+/* SOURCE-ANCHOR: runloom_pystate_snap runloom_pystate_load  (guards this hand-model vs src drift; tools/verify/model_source_drift.py) */
 /*
  * sched_pystate_cbmc.c -- CBMC harness for runloom's per-goroutine tstate
  * save/restore (runloom_sched.c: runloom_pystate_snap / runloom_pystate_load), which

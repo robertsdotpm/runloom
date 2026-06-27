@@ -1,3 +1,4 @@
+/* SOURCE-ANCHOR: runloom_pystate_snap runloom_pystate_load runloom_pystate_snap_clear  (guards this hand-model vs src drift; tools/verify/model_source_drift.py) */
 /*
  * snap_refown_cbmc.c -- CBMC proof of the REFERENCE-OWNERSHIP discipline of
  * runloom's per-g tstate snapshot (runloom_pystate_snap / _load / _snap_clear in

@@ -1,3 +1,4 @@
+/* SOURCE-ANCHOR: runloom_sched_wake runloom_sched_wake_safe runloom_sched_park_safe  (guards this hand-model vs src drift; tools/verify/model_source_drift.py) */
 /*
  * wake_state_fsm_cbmc.c -- CBMC model of the per-g `wake_state` finite state
  * machine (RUNLOOM_PER_G_TSTATE global run-queue), the single atomic that makes

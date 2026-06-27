@@ -1,3 +1,4 @@
+/* SOURCE-ANCHOR: runloom_chunk_pool_get  (guards this hand-model vs src drift; tools/verify/model_source_drift.py) */
 /*
  * chunk_pool_alias_cbmc.c -- CBMC proof that runloom's datastack-chunk pool never
  * aliases the live CPython data-stack chain (runloom_chunk_pool_get / _install in

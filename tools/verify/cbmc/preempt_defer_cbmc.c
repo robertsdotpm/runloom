@@ -1,3 +1,4 @@
+/* SOURCE-ANCHOR: runloom_hub_resume_begin runloom_hub_resume_end runloom_preempt_eval_frame  (guards this hand-model vs src drift; tools/verify/model_source_drift.py) */
 /*
  * preempt_defer_cbmc.c -- CBMC proof of the preemption defer-during-destruction
  * gate (src/runloom_c/mn_sched_hub_resume_preempt.c.inc), the guard that prevents

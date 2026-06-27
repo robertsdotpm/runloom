@@ -1,3 +1,4 @@
+/* SOURCE-ANCHOR: runloom_g_slab_alloc runloom_g_slab_free  (guards this hand-model vs src drift; tools/verify/model_source_drift.py) */
 /*
  * g_slab_recycle_cbmc.c -- CBMC layout proof for the runloom_g_t slab-recycle
  * field scrub (runloom_g_slab_alloc reuse path, runloom_sched_core.c.inc ~449-484).
