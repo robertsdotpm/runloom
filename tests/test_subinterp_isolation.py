@@ -1,37 +1,34 @@
 """Sub-interpreter (PEP 684) isolation contract for runloom_c.
 
-DECISION (characterized 2026-06-27 on free-threaded 3.13t):
-runloom_c is a SINGLE-PHASE C extension with PROCESS-GLOBAL state -- the M:N
-scheduler, the shared netpoll, hub OS threads, and several init-once globals
-(mn_sched.c). It therefore does NOT support per-interpreter isolation: running
-the runtime from more than one interpreter would share/corrupt that global C
-state.
+CONTRACT (verified 2026-06-27 on free-threaded 3.13t):
+runloom_c is a SINGLE-PHASE C extension with PROCESS-GLOBAL state (the M:N
+scheduler, the shared netpoll, hub OS threads, init-once globals in mn_sched.c).
+It must NOT be loaded into more than one interpreter -- two interpreters driving
+the same global hub state would corrupt it (the one-owner-per-process assumption
+the scheduler rests on).
 
-CPython's usual safety net -- refusing a single-phase module in an isolated
-sub-interpreter -- is GIL-gated, so on a FREE-THREADED build (no GIL) it does
-NOT fire: `import runloom_c` succeeds in both "legacy" (shared-GIL) and
-"isolated" sub-interpreters here. That is a LATENT footgun, not a crash.
+CPython enforces exactly this for single-phase modules: importing one into a
+sub-interpreter raises `ImportError: module <name> does not support loading in
+subinterpreters`.  This test pins that the protection HOLDS -- in BOTH the
+`isolated` (own-state) and `legacy` (shared) sub-interpreter configs, on the
+free-threaded build.  It is a REGRESSION GUARD: if runloom is ever converted to
+multi-phase init (PEP 489) without declaring
+`Py_mod_multiple_interpreters = Py_MOD_MULTIPLE_INTERPRETERS_NOT_SUPPORTED`, the
+import would start *succeeding* and this test would fail, flagging that the
+process-global state is now reachable from a second interpreter.
 
-These tests pin the contract:
-  1. importing runloom_c in a sub-interpreter is MEMORY-SAFE (must not crash /
-     corrupt) -- a real regression sentinel;
-  2. the isolation status is RECORDED -- if a future change makes the import
-     start being refused (the recommended hardening below), test 2 is the
-     tripwire that flags the behavior change so this doc + the decision get
-     updated.
-
-RECOMMENDED HARDENING (follow-up, intentionally NOT done here -- invasive):
-convert module init to multi-phase (PyModuleDef_Slot[]) and declare
-`Py_mod_multiple_interpreters = Py_MOD_MULTIPLE_INTERPRETERS_NOT_SUPPORTED`
-next to the existing `Py_MOD_GIL_NOT_USED` declaration, so a second interpreter
-is cleanly refused at import. Tracked in docs/dev/frontier/TRACKING.md (A-A4).
+HISTORY: an earlier characterization claimed "import LOADS in an isolated
+sub-interpreter on FT (latent footgun)". That was a FALSE POSITIVE from an
+unreliable test harness (`_interpreters.run_string` returning without raising was
+misread as the sub-interpreter code succeeding; nested shell quoting also mangled
+the probe). A file-based driver shows the import is in fact cleanly REFUSED, so
+no guard code is needed -- CPython already protects us. This test uses the
+reliable file channel.
 """
 import os
-import sys
+import tempfile
 import unittest
 
-# Drive sub-interpreters via the low-level API present on 3.13 (the PEP 734
-# stdlib `interpreters` is not in 3.13t; `_interpreters` is).
 try:
     import _interpreters
     _HAVE = True
@@ -41,62 +38,63 @@ except ImportError:
 SRC = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src")
 
 
-def _run_in_subinterp(config, code):
-    """Create a sub-interpreter (config: 'isolated'|'legacy'), run `code`, destroy.
-    Returns None on success or the exception repr the sub-interpreter raised."""
+def _import_runloom_in_subinterp(config):
+    """Create a sub-interpreter of `config`, attempt `import runloom_c`, and
+    return the outcome string the sub-interpreter wrote to a temp file.
+    (A file is the reliable cross-interpreter channel: run_string swallows
+    SystemExit and redirects std streams.)"""
+    fd, res = tempfile.mkstemp(prefix="subinterp_", suffix=".txt")
+    os.close(fd)
+    code = (
+        "import sys\n"
+        "sys.path.insert(0, %r)\n" % SRC +
+        "r = open(%r, 'w')\n" % res +
+        "try:\n"
+        "    import runloom_c\n"
+        "    r.write('IMPORT_OK')\n"
+        "except ImportError as e:\n"
+        "    r.write('IMPORT_REFUSED:' + str(e)[:120])\n"
+        "except BaseException as e:\n"
+        "    r.write('IMPORT_ERR:' + type(e).__name__ + ':' + str(e)[:120])\n"
+        "finally:\n"
+        "    r.flush(); r.close()\n"
+    )
     iid = _interpreters.create(config)
     try:
-        try:
-            _interpreters.run_string(iid, code)
-            return None
-        except Exception as e:           # noqa: BLE001 - we report whatever it raised
-            return "{0}: {1}".format(type(e).__name__, str(e)[:200])
+        _interpreters.run_string(iid, code)
     finally:
         _interpreters.destroy(iid)
+    try:
+        with open(res) as f:
+            return f.read()
+    finally:
+        os.unlink(res)
 
 
 @unittest.skipUnless(_HAVE, "_interpreters not available")
 class SubinterpIsolation(unittest.TestCase):
 
-    def _import_code(self):
-        # make src importable inside the sub-interpreter, then import + a trivial
-        # read-only call; do NOT start the scheduler (that is the unsafe op).
-        return (
-            "import sys; sys.path.insert(0, {src!r})\n"
-            "import runloom_c\n"
-            "assert isinstance(runloom_c.backend(), str)\n"
-        ).format(src=SRC)
+    def test_import_refused_in_subinterpreters(self):
+        """runloom_c (single-phase, process-global) MUST be refused in any
+        sub-interpreter -- this is the protection against cross-interpreter
+        corruption of the global M:N scheduler."""
+        for config in ("isolated", "legacy"):
+            outcome = _import_runloom_in_subinterp(config)
+            self.assertTrue(
+                outcome.startswith("IMPORT_REFUSED"),
+                "{0} sub-interpreter: expected runloom_c import to be REFUSED "
+                "(single-phase protection), got {1!r}. If runloom was made "
+                "multi-phase, declare Py_mod_multiple_interpreters=NOT_SUPPORTED."
+                .format(config, outcome))
+            self.assertIn("subinterpreters", outcome,
+                          "{0}: refused, but not for the expected reason: {1!r}"
+                          .format(config, outcome))
 
-    def test_subinterp_import_is_memory_safe(self):
-        """Importing runloom_c in a sub-interpreter must not crash/corrupt the
-        process. (If runloom is ever hardened to REFUSE the import, this still
-        passes -- a clean ImportError is caught and reported, not a crash.)"""
-        for config in ("legacy", "isolated"):
-            err = _run_in_subinterp(config, self._import_code())
-            # Either a clean import (None) or a clean Python exception is fine;
-            # the failure mode we guard against is a process crash, which would
-            # take the whole test runner down rather than reach this assert.
-            if err is not None:
-                self.assertIn("Error", err,
-                              "{0} subinterp: unexpected non-exception result {1!r}"
-                              .format(config, err))
-
-    def test_isolation_status_is_recorded(self):
-        """Tripwire: document the CURRENT status so a behavior change is noticed.
-        On free-threaded 3.13t the import currently SUCCEEDS (the latent footgun).
-        If this starts being refused, update the module docstring + TRACKING A-A4."""
-        err = _run_in_subinterp("isolated", self._import_code())
-        currently_loads = err is None
-        # We assert only that the outcome is one of the two KNOWN-SAFE shapes
-        # (loads, or refused with an ImportError) -- never a crash or a weird
-        # non-import error. The boolean is logged for the maintainer.
-        sys.stderr.write(
-            "[subinterp] isolated import currently {0} (footgun: runloom "
-            "has process-global M:N state; see module docstring)\n".format(
-                "LOADS -- UNSUPPORTED but not refused" if currently_loads
-                else "is REFUSED: " + str(err)))
-        self.assertTrue(currently_loads or "ImportError" in (err or ""),
-                        "unexpected sub-interp outcome: {0!r}".format(err))
+    def test_main_interpreter_unaffected(self):
+        """Sanity: runloom_c imports + initializes fine in the main interpreter."""
+        import runloom_c
+        runloom_c.mn_init(2)
+        runloom_c.mn_fini()
 
 
 if __name__ == "__main__":
