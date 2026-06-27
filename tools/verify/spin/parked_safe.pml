@@ -46,7 +46,7 @@ active proctype parker()
 
     /* step 1: wake already arrived? eat one count, skip the park. */
     if
-    :: (wake_pending > 0) -> wake_pending--; goto pdone;
+    :: (wake_pending > 0) -> wake_pending--; assert(wake_pending >= 0); goto pdone;
     :: else -> skip;
     fi;
 
@@ -63,7 +63,7 @@ active proctype parker()
             fi;
         }
         if
-        :: (cas == 1) -> wake_pending--; goto pdone;
+        :: (cas == 1) -> wake_pending--; assert(wake_pending >= 0); goto pdone;
         :: else -> skip;               /* lost CAS: waker owns us, fall to yield */
         fi;
     :: else -> skip;
@@ -75,6 +75,8 @@ active proctype parker()
     (enqueued > 0);
     parked = 0;
     wake_pending--;                    /* eat the delivering wake */
+    assert(wake_pending >= 0);         /* never consume a wake that wasn't delivered
+                                        * (pins the >0 guards; a flipped guard -> -1) */
 
 pdone:
     atomic {
