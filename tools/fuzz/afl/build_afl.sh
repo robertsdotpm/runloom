@@ -34,12 +34,15 @@ case "${1:-}" in
     --teeth) mode="teeth";;
 esac
 
-build() {  # $1=src-deque $2=out [extra-env-for-cmplog]
-    AFL_USE_ASAN=1 ${3:-} afl-clang-fast $CFLAGS "$HARNESS" "$1" "$DRIVER" -o "$2" 2>/dev/null
+build() {  # $1=src-deque $2=out [extra-env e.g. AFL_LLVM_CMPLOG=1]
+    # No ASan here: it conflicts with CmpLog and needs `-m none` (else AFL throws
+    # FALSE crashes on the ASan virtual-memory map). The assert() oracle in the
+    # harness gives teeth on its own; the libFuzzer harness covers the ASan angle.
+    env ${3:-} afl-clang-fast $CFLAGS "$HARNESS" "$1" "$DRIVER" -o "$2" 2>/dev/null
 }
 
 # AFL env to run headless in a container/VM (no TUI, skip governor/core_pattern checks)
-export AFL_NO_UI=1 AFL_SKIP_CPUFREQ=1 AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1 AFL_USE_ASAN=1
+export AFL_NO_UI=1 AFL_SKIP_CPUFREQ=1 AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1
 
 seed() { mkdir -p "$1"; printf '\x00\x01\x02\x03' > "$1/a"; printf '\x02\x02\x03\x00\x01' > "$1/b"; }
 
