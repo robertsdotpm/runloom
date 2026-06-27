@@ -55,10 +55,24 @@ REAL_PERF = time.perf_counter
 import _thread as _real_thread
 
 # ---- make `runloom` importable from the repo checkout ---------------------
+# Walk up from here to the repo root (the dir whose src/ holds the runloom
+# package) instead of hardcoding a fixed number of levels: the repo reorg moved
+# big_100 -> tests/big_100, which made the old one-level-up path point at a
+# nonexistent tests/src.  That stayed invisible wherever runloom is editable-
+# installed or PYTHONPATH=src is set (Linux/CI), but breaks a bare run on a box
+# without either (e.g. a fresh mac soak loop).
 _HERE = os.path.dirname(os.path.abspath(__file__))
-_SRC = os.path.join(os.path.dirname(_HERE), "src")
-if _SRC not in sys.path:
-    sys.path.insert(0, _SRC)
+_d = _HERE
+for _ in range(6):
+    _cand = os.path.join(_d, "src")
+    if os.path.isdir(os.path.join(_cand, "runloom")):
+        if _cand not in sys.path:
+            sys.path.insert(0, _cand)
+        break
+    _parent = os.path.dirname(_d)
+    if _parent == _d:
+        break
+    _d = _parent
 
 # Quiet the per-wedge SYSMON diagnostic spam by default (the detector +
 # handoff + preemption stay fully ON -- this only suppresses the WEDGED/
