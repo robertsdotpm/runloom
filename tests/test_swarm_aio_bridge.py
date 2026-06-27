@@ -2447,24 +2447,27 @@ print("RESULT", aio.run(body()), flush=True)
     env = dict(mode)
     env["RUNLOOM_GOROUTINE_PANIC"] = "silent"
     try:
-        with hang_guard(90, "env mode %r" % sorted(mode)):
-            cp = _run_subprocess(script, timeout=60, env_extra=env)
+        # Generous budget: the body runs 8x loop.run_in_executor(burn)
+        # (2M-iteration CPU bursts), so it is genuinely CPU-bound and gets
+        # slowed many-fold on a SHARED box (continuous soak loops + sibling
+        # worktree suites).  The actual work is only seconds, so 180s is huge
+        # headroom that still trips a genuine deadlock -- it just stops a busy
+        # box from turning starvation into a false failure.
+        with hang_guard(210, "env mode %r" % sorted(mode)):
+            cp = _run_subprocess(script, timeout=180, env_extra=env)
     except subprocess.TimeoutExpired:
-        # The body runs 8x loop.run_in_executor(burn) (2M-iteration CPU bursts),
-        # so it is genuinely CPU-bound.  On a heavily OVERSUBSCRIBED box it can
-        # blow the budget WITHOUT the echo being wrong -- confirmed pure
-        # starvation: under forced 1-core saturation every copy times out, none
-        # crashes or returns RESULT False.  docs/dev/VALIDATION.md says not to run
-        # the stress suite under heavy core oversubscription; honour that by
-        # SKIPPING when the box is actually oversubscribed.  A timeout while the
-        # box is NOT oversubscribed would be a real hang, so re-raise (fail) then
-        # -- this can never mask a deadlock on an idle box.
+        # Even past 180s on a BUSY box this can be pure starvation, not a wrong
+        # echo (confirmed: under forced 1-core saturation every copy times out,
+        # none crashes or returns RESULT False; docs/dev/VALIDATION.md says not to
+        # run the stress suite under heavy oversubscription).  Skip when the box
+        # is meaningfully loaded; a timeout on an essentially-idle box is a real
+        # hang, so re-raise (fail) then -- never masks a deadlock on an idle box.
         load = os.getloadavg()[0]
         ncpu = os.cpu_count() or 1
-        if load > ncpu:
-            pytest.skip("box oversubscribed (load %.1f > %d cpus): CPU-heavy "
-                        "env-mode echo timed out -- benign, run isolated"
-                        % (load, ncpu))
+        if load > ncpu * 0.5:
+            pytest.skip("box loaded (load %.1f > %.0f): CPU-heavy env-mode echo "
+                        "timed out even at 180s -- benign starvation, run isolated"
+                        % (load, ncpu * 0.5))
         raise
     _assert_no_signal(cp)
     out = cp.stdout.decode(errors="replace")

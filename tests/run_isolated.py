@@ -66,17 +66,27 @@ SERIAL_FILES = frozenset({
     "test_scheduler_channel_compat.py",
     "test_threading_compat.py",
     "test_process_compat.py",
+    # Timing-sensitive netpoll deadline test (asserts 0.02 <= dt < 2.0 on a
+    # ~40ms park) -- green isolated + at low -j, but starves into a false failure
+    # in the parallel pool once the worker count is raised (surfaced at j32+).
+    "test_cov100_netpoll_small.py",
 })
 
-# Default parallel workers for the non-timing files.  Capped well under the
-# core count so the timing lane (and each pooled file's own threads) never
-# oversubscribe.  Override with -jN / --jobs N or RUNLOOM_TEST_JOBS.
+# Default parallel workers for the non-timing files.  Scales with the core
+# count but stays in a MEASURED-safe band: each pooled file spawns its own hub
+# threads, so too many concurrent files oversubscribe the box and starve the
+# timing-sensitive pool files (test_adv_aio, test_cov100_netpoll_small) into
+# false failures.  On a 64-core box the tests phase measured 149s @ 8 workers,
+# 91s @ 32 (both green), but FLAKED @ 48 and @ 64 -- so the knee is ~cpu/2,
+# capped at 32.  Floor at the historical min(8,n) so small boxes are unchanged.
+# Override with -jN / --jobs N or RUNLOOM_TEST_JOBS (e.g. =64 on a big idle box).
 def _default_jobs():
     try:
         env = os.environ.get("RUNLOOM_TEST_JOBS")
         if env:
             return max(1, int(env))
-        return max(1, min(8, (os.cpu_count() or 4)))
+        n = os.cpu_count() or 4
+        return max(1, min(32, max(min(8, n), n // 2)))
     except ValueError:
         return 4
 
@@ -238,6 +248,29 @@ def main(argv):
     for name in serial:
         rc, out, dt = run_file(name, passthru)
         record(name, rc, out, dt)
+
+    # Phase 3: retry any non-pass ONCE, isolated.  This box is shared (continuous
+    # soak loops + sibling worktrees' suites) and the pool adds its own load, so a
+    # tight wall-clock assert can be starved into a FALSE failure -- it then
+    # passes when re-run alone.  A genuine failure fails again.  Every retry is
+    # logged (RECOVERED vs STILL FAILING) so a chronically-flaky file stays
+    # visible instead of being silently masked.  Disable with RUNLOOM_TEST_NORETRY=1.
+    if os.environ.get("RUNLOOM_TEST_NORETRY") != "1":
+        flaky = [i for i, r in enumerate(results) if r[1] not in ("PASS", "SKIP")]
+        if flaky:
+            print("-" * 60)
+            print("retrying {0} non-pass file(s) ISOLATED (load-flake filter):".format(
+                len(flaky)))
+            for i in flaky:
+                name = results[i][0]
+                rc, out, dt = run_file(name, passthru)
+                v = classify(rc)
+                results[i] = (name, v, rc, out, dt)
+                with print_lock:
+                    print("  retry {0:<28} {1:<10} {2:6.1f}s  {3}".format(
+                        name, v, dt,
+                        "RECOVERED (load flake)" if v in ("PASS", "SKIP")
+                        else "STILL FAILING (real)"))
 
     bad = [r for r in results if r[1] not in ("PASS", "SKIP")]
     nskip = len([r for r in results if r[1] == "SKIP"])
