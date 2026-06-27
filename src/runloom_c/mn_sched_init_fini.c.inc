@@ -279,6 +279,8 @@ static void runloom_mn_hub_drain_leftovers(runloom_hub_t *h)
 #undef RUNLOOM_DROP_QREF
 }
 
+void runloom_garena_quar_drain(void);   /* defined with the bulk-arena path below */
+
 void runloom_mn_fini(void)
 {
     int i;
@@ -321,6 +323,12 @@ void runloom_mn_fini(void)
     }
     /* controlled-mode baton: all hubs joined, nobody can acquire/release now */
     runloom_mn_ctrl_fini();
+    /* Free the retired bulk-arena g-struct arenas.  Every hub thread is joined,
+     * so no wake_g can be in flight and no try_incref can read a garena g -- the
+     * grace period that makes returning these structs to the OS sound.  The
+     * helper is defined with the bulk-arena path below (after the batch struct).
+     * See runloom_garena_quar / runloom_fibern_batch_finish_one. */
+    runloom_garena_quar_drain();
     /* Uninstall the preempt wrapper now that every hub thread is joined (no one
      * can call it) and the main tstate is held -- restores the original
      * eval-frame func so a later mn_init re-captures it cleanly. */
@@ -720,19 +728,63 @@ struct runloom_fibern_batch {
     size_t stack_size;   /* the batch's carve size -> identifies its arena class */
     int    node;         /* NUMA node the block was carved on (per-node arena free) */
     long   live;         /* fibers not yet finished; atomic */
+    struct runloom_fibern_batch *quar_next;  /* garena-quarantine link (mn_fini) */
 };
+
+/* Garena quarantine -- a lock-free Treiber stack of completed batches whose
+ * g-struct arena must NOT be freed at completion.
+ *
+ * A stale/dup wake_g (a netpoll dup-wake, a chan/iouring waiter, a cancel/drain
+ * path) can still be mid-flight to runloom_mn_hub_submit -> runloom_g_try_incref,
+ * which reads g->refcount to decide whether to re-queue.  That read is only sound
+ * while g is a VALID g struct (refcount 0 -> try_incref bails).  The per-thread
+ * g-slab upholds exactly this by NEVER returning a g struct to the OS
+ * (runloom_sched_core.c.inc:700).  The bulk-arena path used to free(b->garena) at
+ * the last finish, returning every g struct in the batch to the OS -- inverting
+ * that contract: a freed, malloc-reused g yields a garbage refcount>0, so
+ * try_incref spuriously resurrects a non-g, re-submits it, and resumes a
+ * destroyed coro (the arm64 reused-g SIGSEGV the slab retention prevents).
+ *
+ * Fix: at the last finish, release the coro arena + stack slots (no wake reads
+ * those -- try_incref bails before any coro_resume), but RETAIN the g-struct
+ * arena by pushing the whole batch here, and free the lot at mn_fini, when every
+ * hub thread is joined and no wake_g can be in flight.  garena stays valid
+ * (refcount 0) the entire time, so a stale try_incref always bails -- the slab's
+ * contract, applied to the arena.  (A bounded per-quiescence reclaim is a future
+ * memory refinement, mirroring the slab's own QSBR TODO.) */
+static struct runloom_fibern_batch *runloom_garena_quar = NULL;  /* Treiber head */
+
+/* Free every retired garena.  Called from mn_fini with all hub threads joined,
+ * so no wake_g is in flight and no try_incref can read a garena g; single-
+ * threaded there, so the exchange + walk needs no lock. */
+void runloom_garena_quar_drain(void)
+{
+    struct runloom_fibern_batch *q =
+        __atomic_exchange_n(&runloom_garena_quar, NULL, __ATOMIC_ACQ_REL);
+    while (q != NULL) {
+        struct runloom_fibern_batch *next = q->quar_next;
+        free(q->garena);
+        free(q);
+        q = next;
+    }
+}
 
 void runloom_fibern_batch_finish_one(struct runloom_fibern_batch *b)
 {
     if (b == NULL) return;
     if (__atomic_sub_fetch(&b->live, 1, __ATOMIC_ACQ_REL) == 0) {
-        /* Last finisher: tear the whole batch down.  No other thread can touch
-         * these arenas now -- every g that lived in them has completed.  The
-         * stack block is MADV'd back AND its slots returned for reuse. */
-        free(b->garena);
+        /* Last finisher: every g that lived in this batch has completed.  The
+         * coro arena + stack slots are reclaimed now (no wake touches them); the
+         * g-struct arena (garena) is RETAINED -- a stale wake_g may still read a
+         * garena g's refcount.  Quarantine the batch (it carries garena) and free
+         * it at mn_fini.  See runloom_garena_quar. */
         free(b->carena);
         runloom_coro_arena_release(b->start_slot, b->nslots, b->stack_size, b->node);
-        free(b);
+        b->quar_next = __atomic_load_n(&runloom_garena_quar, __ATOMIC_RELAXED);
+        while (!__atomic_compare_exchange_n(
+                   &runloom_garena_quar, &b->quar_next, b,
+                   0, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED))
+            ; /* CAS reloaded b->quar_next with the current head; retry */
     }
 }
 
