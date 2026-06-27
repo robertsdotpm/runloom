@@ -1,0 +1,45 @@
+--- a/Objects/frameobject.c	2026-06-27 10:21:08.596126985 +1000
++++ b/Objects/frameobject.c	2026-06-27 10:21:08.715480903 +1000
+@@ -3,6 +3,7 @@
+ #include "Python.h"
+ #include "pycore_ceval.h"         // _PyEval_BuiltinsFromGlobals()
+ #include "pycore_code.h"          // CO_FAST_LOCAL, etc.
++#include "pycore_critical_section.h" // Py_BEGIN_CRITICAL_SECTION()
+ #include "pycore_function.h"      // _PyFunction_FromConstructor()
+ #include "pycore_moduleobject.h"  // _PyModule_GetDict()
+ #include "pycore_modsupport.h"    // _PyArg_CheckPositional()
+@@ -911,7 +912,10 @@
+ static PyObject *
+ frame_getlineno(PyFrameObject *f, void *closure)
+ {
+-    int lineno = PyFrame_GetLineNumber(f);
++    int lineno;
++    Py_BEGIN_CRITICAL_SECTION(f);
++    lineno = PyFrame_GetLineNumber(f);
++    Py_END_CRITICAL_SECTION();
+     if (lineno < 0) {
+         Py_RETURN_NONE;
+     }
+--- a/Python/frame.c	2026-06-27 10:21:08.599704184 +1000
++++ b/Python/frame.c	2026-06-27 10:21:08.716474828 +1000
+@@ -4,6 +4,7 @@
+ #include "Python.h"
+ #include "frameobject.h"
+ #include "pycore_code.h"          // stats
++#include "pycore_critical_section.h" // Py_BEGIN_CRITICAL_SECTION()
+ #include "pycore_frame.h"
+ #include "pycore_object.h"        // _PyObject_GC_UNTRACK()
+ #include "opcode.h"
+@@ -61,10 +62,12 @@
+     assert(frame->owner != FRAME_CLEARED);
+     Py_ssize_t size = ((char*)&frame->localsplus[frame->stacktop]) - (char *)frame;
+     Py_INCREF(_PyFrame_GetCode(frame));
++    Py_BEGIN_CRITICAL_SECTION(f);
+     memcpy((_PyInterpreterFrame *)f->_f_frame_data, frame, size);
+     frame = (_PyInterpreterFrame *)f->_f_frame_data;
+     f->f_frame = frame;
+     frame->owner = FRAME_OWNED_BY_FRAME_OBJECT;
++    Py_END_CRITICAL_SECTION();
+     if (_PyFrame_IsIncomplete(frame)) {
+         // This may be a newly-created generator or coroutine frame. Since it's
+         // dead anyways, just pretend that the first RESUME ran:
