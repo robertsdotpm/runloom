@@ -535,6 +535,18 @@ void runloom_netpoll_reset_after_fork(void)
         unsigned char *pw = __atomic_load_n(&runloom_fd_pending_wake, __ATOMIC_RELAXED);
         size_t cap = __atomic_load_n(&runloom_fd_pending_wake_cap, __ATOMIC_RELAXED);
         if (pw != NULL) memset(pw, 0, cap);
+        /* CRITICAL: registered_bm is NOT actually what gates the zero-syscall
+         * register skip -- runloom_fd_armed is (netpoll_register.c.inc:118,166).
+         * Against the child's brand-new epoll, a stale armed byte makes wait_fd
+         * take the "already armed -> 0 syscalls" skip, so an inherited fd is
+         * NEVER EPOLL_CTL_ADD'd into the child's poller and a cooperative recv on
+         * it parks forever (silent hang in the pre-fork-server / multiprocessing
+         * pattern).  The non-fork close paths (unregister:300, release_if_idle:361)
+         * clear fd_armed + fd_epoll_pool together; the fork path must too.  Both
+         * are cap_fds-sized (same cap as pending_wake) and same-TU statics.
+         * epoll_pool resets to 0xFF ("no owner"), matching arrays_init. */
+        if (runloom_fd_armed != NULL) memset(runloom_fd_armed, 0, cap);
+        if (runloom_fd_epoll_pool != NULL) memset(runloom_fd_epoll_pool, 0xFF, cap);
     }
 #if defined(RUNLOOM_HAVE_EPOLL)
     /* The per-hub io_uring ring registry names the PARENT hubs' rings (dead in

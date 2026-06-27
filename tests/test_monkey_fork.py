@@ -135,3 +135,78 @@ def test_parent_survives_forks():
     for _ in range(4):
         _run_child_workload_under_fork(_socketpair_roundtrip)
     assert _coop(_socketpair_roundtrip) is True
+
+
+def _arm_fd_in_parent():
+    """Leave a socketpair's read end ARMED + OPEN in the parent: a cooperative
+    recv that finds no data arms the fd in epoll + parks, a sibling fiber then
+    sends so it completes -- and per the register-once ET scheme IN stays armed
+    afterward (recv-after-recv = 0 syscalls).  This is the state the
+    close-before-fork tests above never reach, where the fork stale-arm bug
+    lived.  Returns (a, b); caller must NOT close them before forking."""
+    a, b = socket.socketpair()
+    st = {}
+
+    def receiver():
+        st["got"] = a.recv(8)          # no data yet -> ARMS fd a, parks
+
+    def sender():
+        runloom.sleep(0.05)
+        b.send(b"arm")                 # wakes receiver -> recv completes
+
+    runloom_c.fiber(receiver)
+    runloom_c.fiber(sender)
+    runloom_c.run()
+    assert st.get("got") == b"arm"
+    return a, b
+
+
+def test_fork_child_recv_on_armed_inherited_fd():
+    """Regression: an fd left ARMED in the parent must not poison the child.
+
+    reset_after_fork has to clear runloom_fd_armed + runloom_fd_epoll_pool, not
+    just registered_bm -- fd_armed is what actually gates the zero-syscall
+    register skip (netpoll_register.c.inc:166).  Without the clear, the child's
+    cooperative recv on the inherited armed fd takes the "already armed" skip,
+    the fd never enters the child's brand-new epoll, and the recv hangs forever.
+    Linux/epoll-specific (kqueue re-arms every park + uses registered_bm, which
+    the fork path already cleared); on kqueue this is simply a clean roundtrip."""
+    a, b = _arm_fd_in_parent()         # parent: fd a armed for READ, still open
+    try:
+        pid = os.fork()
+        if pid == 0:                   # ---- child ----
+            rc = 99
+            try:
+                box = []
+                runloom_c.fiber(lambda: box.append(a.recv(8)), stack_size=8 << 20)
+                runloom_c.run()
+                rc = 0 if box and box[0] == b"hello" else 3
+            except BaseException:      # noqa: BLE001
+                rc = 1
+            os._exit(rc)
+        # ---- parent: let the child park, THEN make the inherited fd readable
+        # (sending before it parks would let a non-blocking recv succeed and mask
+        # the bug). ----
+        time.sleep(0.3)
+        try:
+            b.send(b"hello")
+        except OSError:
+            pass
+        deadline = time.monotonic() + CHILD_TIMEOUT
+        while True:
+            done, status = os.waitpid(pid, os.WNOHANG)
+            if done == pid:
+                assert os.waitstatus_to_exitcode(status) == 0, \
+                    "child recv on armed inherited fd did not return 'hello'"
+                return
+            if time.monotonic() > deadline:
+                os.kill(pid, 9)
+                os.waitpid(pid, 0)
+                raise AssertionError(
+                    "child hung recv-ing on an armed inherited fd -- "
+                    "reset_after_fork left fd_armed stale (register skip never "
+                    "re-ADDs the fd to the child's epoll)")
+            time.sleep(0.01)
+    finally:
+        a.close()
+        b.close()
