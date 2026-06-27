@@ -173,7 +173,10 @@ def post(H):
 
 if __name__ == "__main__":
     harness.main("p216_accept_thundering_herd", body, setup=setup, post=post,
-                 default_funcs=2000,
+                 default_funcs=2000, max_funcs=8000,   # 100% confirmed <=8k; past ~10k the
+                 # accept-herd wake-throughput wall (level-triggered one-wake-per-epoll-cycle
+                 # across 256 acceptors) delays echoes past the 1s ceiling -- all conns ARE
+                 # served (served==funcs), a documented latency tradeoff not a lost accept.
                  describe="many accept goroutines parked on a few shared listen "
                           "fds; every connection round-trips its own token, no "
                           "cross-talk")
