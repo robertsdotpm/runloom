@@ -1,0 +1,5 @@
+in/
+out/
+cldeque_afl
+cldeque_afl_cmplog
+*.o
