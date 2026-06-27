@@ -752,15 +752,22 @@ struct runloom_fibern_batch {
  * (refcount 0) the entire time, so a stale try_incref always bails -- the slab's
  * contract, applied to the arena.  (A bounded per-quiescence reclaim is a future
  * memory refinement, mirroring the slab's own QSBR TODO.) */
-static struct runloom_fibern_batch *runloom_garena_quar = NULL;  /* Treiber head */
+static struct runloom_fibern_batch *runloom_garena_quar = NULL;  /* quarantine head */
+/* A tiny int spinlock guards the head push.  Pointer CAS/exchange is NOT
+ * portable: the cross-platform atomic shim (plat_atomic.h) only provides
+ * compare_exchange_n / exchange_n for integer types, not exotic pointer types,
+ * so a lock-free pointer Treiber stack fails to compile under MSVC.  Integer
+ * exchange/store ARE in the shim, so a test-and-set int lock is portable and the
+ * push under it is a plain two-pointer splice. */
+static int runloom_garena_quar_lock = 0;
 
 /* Free every retired garena.  Called from mn_fini with all hub threads joined,
  * so no wake_g is in flight and no try_incref can read a garena g; single-
- * threaded there, so the exchange + walk needs no lock. */
+ * threaded there (no concurrent push), so the read + walk needs no lock. */
 void runloom_garena_quar_drain(void)
 {
-    struct runloom_fibern_batch *q =
-        __atomic_exchange_n(&runloom_garena_quar, NULL, __ATOMIC_ACQ_REL);
+    struct runloom_fibern_batch *q = runloom_garena_quar;
+    runloom_garena_quar = NULL;
     while (q != NULL) {
         struct runloom_fibern_batch *next = q->quar_next;
         free(q->garena);
@@ -780,11 +787,13 @@ void runloom_fibern_batch_finish_one(struct runloom_fibern_batch *b)
          * it at mn_fini.  See runloom_garena_quar. */
         free(b->carena);
         runloom_coro_arena_release(b->start_slot, b->nslots, b->stack_size, b->node);
-        b->quar_next = __atomic_load_n(&runloom_garena_quar, __ATOMIC_RELAXED);
-        while (!__atomic_compare_exchange_n(
-                   &runloom_garena_quar, &b->quar_next, b,
-                   0, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED))
-            ; /* CAS reloaded b->quar_next with the current head; retry */
+        /* Push under the int spinlock (see runloom_garena_quar_lock): a plain
+         * pointer splice -- no exotic-pointer atomics, so it compiles on MSVC. */
+        while (__atomic_exchange_n(&runloom_garena_quar_lock, 1, __ATOMIC_ACQUIRE))
+            ; /* spin until we own the lock */
+        b->quar_next = runloom_garena_quar;
+        runloom_garena_quar = b;
+        (void)__atomic_exchange_n(&runloom_garena_quar_lock, 0, __ATOMIC_RELEASE);
     }
 }
 
