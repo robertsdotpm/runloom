@@ -84,8 +84,12 @@ build = "cp311-* cp312-* cp313-* cp313t-* cp314-* cp314t-*"
 # Skip 32-bit and musl for now; the asm fcontext path needs musl-specific
 # testing that's not in CI yet.  Linux x86_64 + aarch64, glibc only.
 skip = ["*-win32", "*-manylinux_i686", "*-musllinux_*", "pp*"]
-# Sanity-check imports after the wheel is built.
-test-command = "python -c \"import runloom; print('OK', runloom.backend(), runloom.netpoll_backend())\""
+# Sanity-check imports after the wheel is built.  On a free-threaded
+# (Py_GIL_DISABLED) wheel, importing runloom MUST keep the GIL OFF -- a
+# regression that drops Py_MOD_GIL_NOT_USED would silently re-enable it at import
+# and the rest of the matrix would still "pass".  Assert it, scoped to FT builds
+# so the regular cp31X wheel is unaffected.
+test-command = "python -c \"import sys, sysconfig, runloom; ft = bool(sysconfig.get_config_var('Py_GIL_DISABLED')); assert (not sys._is_gil_enabled()) if ft else True, 'runloom import RE-ENABLED the GIL on a free-threaded build'; print('OK', 'ft' if ft else 'gil', runloom.backend(), runloom.netpoll_backend())\""
 build-verbosity = 1
 
 [tool.cibuildwheel.linux]
