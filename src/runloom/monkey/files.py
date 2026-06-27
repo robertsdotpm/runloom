@@ -126,16 +126,27 @@ def _patched_open(file, *args, **kwargs):
     # parks the fiber rather than wedging the hub.  Regular files keep the
     # fast C path (their buffered reads don't block on local disk; the open
     # syscall itself is offloaded when called from a fiber).
-    if not _in_fiber():
-        # Off a fiber there is no scheduler to park on, so the cooperative _pyio
-        # path provides ZERO benefit (its os.read/os.write already fall back to
-        # the real blocking syscalls) -- and it is actively harmful: a forked
-        # process with no runloom runtime (a multiprocessing forkserver / its
-        # children) reading its pickled process spec via os.fdopen(pipe_fd,'rb')
-        # wedges in the _pyio buffered reader.  Use the robust C io.open.
-        return _orig_open(file, *args, **kwargs)
-    if isinstance(file, int) and _fd_pollable(file):
+    #
+    # Gate the pipe routing on _runtime_live() (a hub is alive on this process),
+    # NOT the instantaneous _in_fiber(): subprocess.Popen builds proc.stdout via
+    # io.open during the post-fork_exec window where the calling fiber is
+    # transiently DETACHED from its hub, so _in_fiber() reads False there even
+    # though we ARE on a live hub thread.  Gating on _in_fiber() handed those
+    # streams the C BufferedReader and the later proc.stdout.read() wedged the
+    # hub.  The _pyio reader re-checks _in_fiber() at READ time -- re-attached by
+    # then, so it parks.  A forkserver child (no live runtime) reads
+    # _runtime_live()==False and still gets the robust C path below.
+    if isinstance(file, int) and _fd_pollable(file) and _runtime_live():
         return _pyio.open(file, *args, **kwargs)
+    if not _in_fiber():
+        # Off a fiber / no live runtime there is no scheduler to park on, so the
+        # cooperative _pyio path provides ZERO benefit (its os.read/os.write
+        # already fall back to the real blocking syscalls) -- and it is actively
+        # harmful: a forked process with no runloom runtime (a multiprocessing
+        # forkserver / its children) reading its pickled process spec via
+        # os.fdopen(pipe_fd,'rb') wedges in the _pyio buffered reader.  Use the
+        # robust C io.open.
+        return _orig_open(file, *args, **kwargs)
     return _get_backend().submit(_orig_open, (file,) + args, kwargs)
 
 

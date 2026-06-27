@@ -109,6 +109,30 @@ def _in_fiber():
         return False
 
 
+def _runtime_live():
+    """True when a runloom scheduler is alive on this PROCESS -- and, crucially,
+    robust across the transient fiber-DETACH window, unlike the instantaneous
+    _in_fiber().
+
+    subprocess.Popen builds proc.stdout/stderr via io.open during the
+    post-fork_exec blocking-IO state, where the calling fiber is detached from
+    its hub, so current_g() (hence _in_fiber()) reads False even though we are
+    on a live hub thread.  mn_hub_count() stays > 0 throughout -- it tracks the
+    runtime, not the current fiber.  A forked child with no runtime (a
+    multiprocessing forkserver / its children) reads mn_hub_count()==0
+    (reset_after_fork zeroes it), so it still takes the robust C path.
+
+    Used to decide whether a pollable stream's buffered read has a hub to park
+    on; the per-syscall park decision still uses _in_fiber() (correct at read
+    time, by when the fiber has re-attached)."""
+    if _in_fiber():
+        return True
+    try:
+        return runloom_c.mn_hub_count() > 0
+    except Exception:
+        return False
+
+
 def _make_nonblocking(sock):
     """Set the underlying fd to non-blocking, idempotent.
 
