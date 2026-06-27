@@ -242,11 +242,11 @@ precisely *why* register-once must be LEVEL, not edge.
 
 Per-hub parker pools: a g parked on hub H links into `pool[H]`. One epoll
 delivery is processed by one pump (`EPOLLONESHOT`) that doesn't know the owning
-hub, so `runloom_pump_dispatch_event` (netpoll.c:1977-2023) **walks every pool**,
+hub, so `runloom_pump_dispatch_event` (`netpoll_pump_helpers.c.inc`) **walks every pool**,
 dropping each pool lock before the next, and on a match claims + unlinks +
 `wake_g(parker->hub)` -- and `wake_g` takes the *home hub's* `sub_lock`
-(`runloom_mn_hub_submit`, mn_sched.c:1273) **while still holding the pool lock**.
-That is a two-level hierarchy with a documented order (netpoll.c:1972-1976):
+(`runloom_mn_hub_submit`, `mn_sched_mn_api.c.inc`) **while still holding the pool lock**.
+That is a two-level hierarchy with a documented order (in `runloom_pump_dispatch_event`, `netpoll_pump_helpers.c.inc`):
 
 ```
 pool->lock  <  hub->sub_lock        (always; never reversed)
@@ -255,7 +255,7 @@ at most ONE pool lock held at a time (dropped before walking the next pool)
 
 Confirmed against the source: the only takers of *both* locks are
 `dispatch_event` and `runloom_pump_drain_expired`, both `pool→sub`; every
-`sub_lock` region (`hub_submit`, the hub-drain at mn_sched.c:651) takes the sub
+`sub_lock` region (`hub_submit`, the hub-drain in `mn_sched_hub_main.c.inc`) takes the sub
 lock alone. Proven over **two pumps racing one delivery** whose parker lives in
 pool 1, plus a `sub_lock` contender (a hub draining its submission list):
 
@@ -276,9 +276,9 @@ sub 1 while the contender holds sub 1 waiting for pool 1.
 
 The one genuinely io_uring-specific lifetime question (an audit finding, not a
 guessed property): `runloom_iouring_ms_recv` parks with the handle's `waiter_g`
-set and, on wake, **re-locks the handle** (io_uring.c:999); `on_cqe` on the
+set and, on wake, **re-locks the handle** (`runloom_iouring_ms_recv`); `on_cqe` on the
 closing CQE wakes that waiter and then frees the handle *outside* `h->lock`
-(io_uring.c:878-891), and `ms_close`'s `!armed` branch frees immediately
+(`runloom_loop_ms_on_cqe`), and `ms_close`'s `!armed` branch frees immediately
 (:1018-1032). `RunloomTCPConn` holds no lock around `self->ms`/`self->closed`
 (runloom_tcp.c), so `recv` and `close` are unsynchronised.
 
@@ -369,12 +369,12 @@ twice -- both caught by Spin.
 The **exactly-once `pool_release`** question. A parker `p` lives on the parking
 g's coroutine stack and is tracked by `g->netpoll_parker` (the *token*).
 `runloom_parker_unlink` clears that token under `pool->lock` whenever it removes p
-(netpoll.c:605-606). Three sites touch p: the **pump** unlinks it (clearing the
+(`runloom_parker_unlink`, `netpoll_parker_link.c.inc`). Three sites touch p: the **pump** unlinks it (clearing the
 token) and re-queues the g, but **never releases** -- the woken g resumes in
 `wait_fd` and releases p itself; **`wait_fd`** releases p on every exit *after*
 clearing the token; and **`runloom_netpoll_force_unlink_g_parker`** (the
 g-completion safety net) takes `pool->lock`, **re-reads the token under the
-lock** (netpoll.c:1421-1424: *"in case `g->netpoll_parker` was cleared by a
+lock** (`runloom_netpoll_force_unlink_g_parker`, `netpoll_wake_iouring.c.inc`: *"in case `g->netpoll_parker` was cleared by a
 concurrent unlink between the check above and the lock acquire"*), and
 unlinks + releases **only if it still saw the token set**.
 
@@ -549,7 +549,7 @@ Two negative controls, each producing an assertion violation:
   (`runloom_iouring_submit` / `runloom_iouring_drain`) is verified *by composition* --
   the goroutine parks via `runloom_sched_park_safe` (covered by `parked_safe.pml`)
   and the drain **wakes the goroutine before decrementing `inflight_count`**
-  (io_uring.c:620-625 wake, :640 decrement), the exact ordering `blockpool.pml`
+  (the io_uring drain wakes the g BEFORE the `runloom_iouring_inflight_count` decrement), the exact ordering `blockpool.pml`
   proves keeps the single-thread drain from exiting early. The one genuinely
   io_uring-specific surface is **multishot** (`runloom_iouring_ms_*`): its handle
   lifetime (the `on_cqe`/`ms_close` free vs a parked `ms_recv`) is now modelled

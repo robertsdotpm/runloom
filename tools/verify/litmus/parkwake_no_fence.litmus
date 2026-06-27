@@ -2,7 +2,7 @@ C parkwake_no_fence
 (*
  * THE BUG CASE -- the park_safe/wake_safe lost wakeup WITHOUT the StoreLoad
  * fence (the bug GenMC found; see verify/genmc/sched_parkwake.c and
- * src/runloom_c/runloom_sched.c:1363).  This is the LKMM/herd7 second oracle: a
+ * src/runloom_c/runloom_sched_parkwake.c.inc, runloom_sched_wake_safe).  This is the LKMM/herd7 second oracle: a
  * classic store-buffering (SB / Dekker) shape, proven reachable here under the
  * C11/RC11 model with release/acquire ALONE.
  *

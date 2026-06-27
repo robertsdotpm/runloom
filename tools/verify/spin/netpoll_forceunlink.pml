@@ -7,7 +7,7 @@
  * THE SETUP.  A parker `p` lives on the parking g's coroutine stack and is
  * tracked by g->netpoll_parker (the "token").  runloom_parker_unlink (under
  * pool->lock) clears that token whenever it actually removes p from the pool
- * (netpoll.c:605-606).  Three sites touch p:
+ * (netpoll_parker_link.c.inc, runloom_parker_unlink).  Three sites touch p:
  *
  *   - pump (runloom_pump_dispatch_event / drain_expired): under pool->lock,
  *     unlinks p (clearing the token) and -- if it claimed a PARKED g --
@@ -16,7 +16,7 @@
  *   - wait_fd: on every exit path releases p, AFTER clearing the token.
  *   - force_unlink (g completion, hub_main): the safety net for a parker still
  *     tracked when the g is torn down without wait_fd cleaning up.  It takes
- *     pool->lock, RE-READS the token under the lock (netpoll.c:1421-1424 --
+ *     pool->lock, RE-READS the token under the lock (netpoll_wake_iouring.c.inc, runloom_netpoll_force_unlink_g_parker --
  *     "in case g->netpoll_parker was cleared by a concurrent unlink between the
  *     check above and the lock acquire"), unlinks + clears + releases ONLY if it
  *     still saw the token set.
@@ -102,7 +102,7 @@ proctype force_unlink()
 
     LOCK;
 #ifndef BUG_NO_RECHECK
-    recheck = token;               /* RE-READ under the lock (netpoll.c:1424) */
+    recheck = token;               /* RE-READ under the lock (runloom_netpoll_force_unlink_g_parker) */
 #else
     recheck = 1;                   /* BUG: trust the stale cheap-path sample */
 #endif

@@ -28,7 +28,7 @@ Validated result (herd7 / RC11):
   with relaxed store/load (release/acquire and release fences do not).
 ```
 
-So the `seq_cst` fence on `runloom_sched.c:1363` carries *all* the ordering: the
+So the `seq_cst` fence in `runloom_sched_parkwake.c.inc` (`runloom_sched_wake_safe`) carries *all* the ordering: the
 lost wakeup is forbidden across the whole lattice iff that fence is present.
 This generalizes the two endpoints into a necessity+sufficiency proof.
 

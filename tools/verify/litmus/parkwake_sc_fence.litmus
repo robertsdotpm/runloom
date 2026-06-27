@@ -1,7 +1,7 @@
 C parkwake_sc_fence
 (*
  * THE FIX -- park_safe/wake_safe with the seq_cst StoreLoad fence on BOTH
- * sides (src/runloom_c/runloom_sched.c:1372 in wake_safe, :1433 in park_safe;
+ * sides (src/runloom_c/runloom_sched_parkwake.c.inc, in runloom_sched_wake_safe and runloom_sched_park_safe;
  * merged as 1052aba).  Identical SB/Dekker shape to parkwake_no_fence.litmus,
  * but each thread places an atomic_thread_fence(seq_cst) BETWEEN its store and
  * its load.

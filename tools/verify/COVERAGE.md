@@ -134,10 +134,12 @@ These do **not** invalidate any proof — they mis-*describe* what is verified:
    LEVEL scheme (no `EPOLLONESHOT`-per-park `MOD`); README §9 rewritten to match.
    `BUG_EDGE_TRIGGERED` retained as the negative control (old EPOLLET, no
    re-report). See "New this session → second batch".
-2. **Stale source line citations** across model headers + README (MED). The
-   code-layout refactor split the monoliths into `*.c.inc`; headers still cite
-   `netpoll.c:1158-2195`, `mn_sched.c:1273`, `io_uring.c:999`, etc. Fix: cite
-   function names (split-proof) or re-point to the `.c.inc` files.
+2. **~~Stale source line citations~~ — RESOLVED 2026-06-27.** The code-layout
+   refactor split the monoliths into `*.c.inc`, so line-number citations rotted.
+   They are now FUNCTION-NAME (split-proof) form across the README, model headers,
+   and litmus tests, and `tools/verify/cite_drift.py` guards against regressions
+   (it fails on any `file.c` line citation whose line is out of range or whose
+   file has vanished). Wire it into `check_all`.
 3. **README understates the parker link/unlink surgery** as "lock-protected
    straight-line code" despite the documented residual race (MED) — see the gap
    table above.
