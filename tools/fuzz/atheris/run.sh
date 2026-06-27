@@ -15,7 +15,7 @@ fi
 echo "atheris fuzz: ${SECS}s (scheduler-free API surface; a crash = a finding)"
 # -rss_limit_mb guards against a runaway alloc (the harness bounds sizes, but be safe).
 PYTHON_GIL=0 PYTHONPATH="$ROOT/src" "$PY" "$HERE/fuzz_api.py" \
-    -max_total_time="$SECS" -rss_limit_mb=3072 -close_fd_mask=3 "$CORPUS"
+    -max_total_time="$SECS" -rss_limit_mb=3072 -close_fd_mask=3 -artifact_prefix="$HERE/" "$CORPUS"
 rc=$?
 if [ $rc -eq 0 ]; then
     echo "atheris: clean (no crash) -- API validation held over the run"

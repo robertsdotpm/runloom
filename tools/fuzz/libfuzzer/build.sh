@@ -50,7 +50,7 @@ if [ "$mode" = "teeth" ]; then
     fi
     build "$tmp/cldeque_bug.c" "$tmp/cldeque_fuzz_bug" || { echo "teeth build failed"; exit 2; }
     echo "teeth: fuzzing a DELIBERATELY broken deque (full-check off-by-one); expect a crash..."
-    if "$tmp/cldeque_fuzz_bug" -max_total_time=30 -close_fd_mask=3 "$CORPUS" >/dev/null 2>&1; then
+    if "$tmp/cldeque_fuzz_bug" -max_total_time=30 -close_fd_mask=3 -artifact_prefix="$HERE/" "$CORPUS" >/dev/null 2>&1; then
         echo "teeth: FAIL -- fuzzer did NOT find the injected bug in 30s (harness is toothless)"
         exit 1
     fi
@@ -64,7 +64,7 @@ echo "built: $BIN"
 [ "$mode" = "build" ] && exit 0
 
 echo "run: $secs s (bounded; in-process; ASan+UBSan)"
-"$BIN" -max_total_time="$secs" -close_fd_mask=3 "$CORPUS"
+"$BIN" -max_total_time="$secs" -close_fd_mask=3 -artifact_prefix="$HERE/" "$CORPUS"
 rc=$?
 if [ $rc -eq 0 ]; then
     echo "fuzz: clean (no crash) over the run; corpus in $CORPUS"
