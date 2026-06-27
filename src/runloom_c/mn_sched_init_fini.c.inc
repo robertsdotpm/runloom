@@ -379,6 +379,16 @@ void runloom_mn_fini(void)
         PyMem_Free(runloom_hubs[i].sched.timer_heap);
         runloom_hubs[i].sched.timer_heap = NULL;
         runloom_hubs[i].sched.timer_cap = 0;
+        /* Free the per-hub ready-ring buffer that runloom_sched_init allocated
+         * (PyMem_Calloc(64) = 512 B/hub).  It was otherwise leaked every
+         * mn_init/mn_fini cycle -- the ONLY PyMem_Free(ready_ring) was the
+         * old-ring free inside runloom_ready_grow, never a teardown.  The ring
+         * holds raw slab-owned g pointers (no held refs, unlike timer_heap), so
+         * freeing the buffer at quiescent teardown releases nothing else. */
+        PyMem_Free(runloom_hubs[i].sched.ready_ring);
+        runloom_hubs[i].sched.ready_ring = NULL;
+        runloom_hubs[i].sched.ready_cap = 0;
+        runloom_hubs[i].sched.ready_mask = 0;
         PyMem_Free(runloom_hubs[i].stage_head);
         runloom_hubs[i].stage_head = NULL;
         PyMem_Free(runloom_hubs[i].stage_tail);
