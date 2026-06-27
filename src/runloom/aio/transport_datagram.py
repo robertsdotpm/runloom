@@ -31,15 +31,22 @@ class DatagramTransport(object):
                 data, addr = sock.recvfrom(65536)
             except (BlockingIOError, InterruptedError):
                 if self._stopping: return
+                # _wait_fd raises asyncio.CancelledError at shutdown -- a
+                # BaseException, NOT Exception -- so catch BaseException to stop
+                # this background recv fiber cleanly instead of letting it escape
+                # as an "exception ignored in _recv_loop" unraisable warning.
                 try:
                     _wait_fd(sock.fileno(), 1)
-                except Exception:
+                except BaseException:
                     return
                 continue
             except OSError as e:
                 if self._stopping: return
                 if e.errno in (_errno.EAGAIN, _errno.EWOULDBLOCK):
-                    _wait_fd(sock.fileno(), 1)
+                    try:
+                        _wait_fd(sock.fileno(), 1)   # same shutdown-cancel guard
+                    except BaseException:
+                        return
                     continue
                 # Error -- notify protocol and stop.
                 try:
