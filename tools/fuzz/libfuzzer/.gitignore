@@ -1,0 +1,8 @@
+# generated fuzzer artifacts
+corpus/
+cldeque_fuzz
+crash-*
+leak-*
+timeout-*
+oom-*
+*.o
