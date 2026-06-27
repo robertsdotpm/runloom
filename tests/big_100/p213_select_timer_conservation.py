@@ -92,7 +92,7 @@ def consumer(ch, counts, slot, to_seed):
 
 def worker(H, wid, rng, state):
     produced = state["produced"]
-    slot = wid & 1023
+    slot = wid                       # unique per worker -> race-free counter slot
     rno = 0
     for _ in H.round_range():
         if not H.running():
@@ -128,8 +128,13 @@ def worker(H, wid, rng, state):
 
 
 def setup(H):
-    H.state = {"produced": [0] * 1024, "consumed": [0] * 1024,
-               "timed_out": [0] * 1024}
+    # ONE counter slot per worker (indexed by wid), not `wid & 1023`.  At high
+    # funcs many workers collided on a slot, and `lst[slot] += n` is a non-atomic
+    # read-modify-write under free threading -> lost counter updates -> a FALSE
+    # "conservation broken" (the chan-select delivery is correct; the test's
+    # bookkeeping was racy).  A per-worker slot makes every increment unraced.
+    n = H.funcs
+    H.state = {"produced": [0] * n, "consumed": [0] * n, "timed_out": [0] * n}
 
 
 def body(H):
