@@ -255,8 +255,7 @@ class RunloomTask(_RunloomFutureMixin, asyncio.Task):
             # the send/throw.  asyncio.timeouts / current_task() rely on
             # this; without it stdlib helpers think we're not inside a
             # task and raise.
-            prev_current = _CURRENT_TASKS.get(loop)
-            _CURRENT_TASKS[loop] = self
+            prev_current = _pg_set_current_task(loop, self)
             try:
                 try:
                     if self._pgmustcancel and throw_exc is None:
@@ -302,10 +301,9 @@ class RunloomTask(_RunloomFutureMixin, asyncio.Task):
                     self._pg_settle_c()
                     return
             finally:
-                if prev_current is None:
-                    _CURRENT_TASKS.pop(loop, None)
-                else:
-                    _CURRENT_TASKS[loop] = prev_current
+                # Restore whatever was current before this step (None clears
+                # the slot) -- _pg_set_current_task handles None as a clear.
+                _pg_set_current_task(loop, prev_current)
 
             send_value = None
 

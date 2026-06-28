@@ -273,12 +273,12 @@ def _wait_fd(fd, events, timeout_ms=-1):
     (Future-based awaits don't need this: they park BETWEEN sends, after the
     driver's finally has already run.)"""
     loop = _PG_GET_RUNNING_LOOP()
-    saved = _CURRENT_TASKS.get(loop) if loop is not None else None
+    saved = _pg_get_current_task(loop) if loop is not None else None
     try:
         r = runloom_c.wait_fd(fd, events, timeout_ms)
     finally:
-        if saved is not None and _CURRENT_TASKS.get(loop) is not saved:
-            _CURRENT_TASKS[loop] = saved
+        if saved is not None and _pg_get_current_task(loop) is not saved:
+            _pg_set_current_task(loop, saved)
     if r == _WAIT_FD_CANCELLED:
         raise asyncio.CancelledError()
     return r
@@ -296,6 +296,50 @@ except AttributeError:
     # Very old Python -- fall back to a no-op dict; current_task() will
     # return None and asyncio.timeouts won't work, but the rest does.
     _CURRENT_TASKS = {}
+
+
+# In CPython 3.14 the C `_asyncio` accelerator stopped backing the
+# current-task registry with the module-level Python dict
+# asyncio.tasks._current_tasks: current_task() now reads a separate
+# C-internal per-loop store, so writing _CURRENT_TASKS[loop] = task is
+# INVISIBLE to current_task() (it returns None inside every fiber-driven
+# task -> asyncio.timeout()/wait_for()/TaskGroup raise "must be used inside
+# a task").  The supported primitive is the C helper
+# asyncio.tasks._swap_current_task(loop, task) -- it sets the current task,
+# returns the previous one, accepts None to clear, and (unlike _enter_task)
+# has NO "already entered" guard, so it is a clean drop-in for the bridge's
+# existing get/[]=/pop save-restore pattern.  It exists on BOTH 3.13 and
+# 3.14, behaves identically, drives current_task() on both, and on 3.13 ALSO
+# keeps the dict consistent -- and it is loop-keyed (visible cross OS thread
+# for the same loop), so it is safe for runloom resuming a fiber on a
+# different hub thread.  Probe for it once; fall back to the raw dict only on
+# a very old Python that lacks it (where current_task() reads the dict).
+_SWAP_CURRENT_TASK = getattr(asyncio.tasks, "_swap_current_task", None)
+
+
+def _pg_set_current_task(loop, task):
+    """Make `task` the loop's current task; return the previously-current one
+    (to restore later).  task=None clears the slot."""
+    if _SWAP_CURRENT_TASK is not None:
+        return _SWAP_CURRENT_TASK(loop, task)
+    prev = _CURRENT_TASKS.get(loop)
+    if task is None:
+        _CURRENT_TASKS.pop(loop, None)
+    else:
+        _CURRENT_TASKS[loop] = task
+    return prev
+
+
+def _pg_get_current_task(loop):
+    """Read the loop's current task without disturbing it.  On the swap-API
+    path there is no public per-loop getter (current_task() only reads the
+    RUNNING loop), so swap None in to read the previous value and swap it
+    straight back -- correct, and only used on the syscall-bound I/O park."""
+    if _SWAP_CURRENT_TASK is not None:
+        prev = _SWAP_CURRENT_TASK(loop, None)
+        _SWAP_CURRENT_TASK(loop, prev)
+        return prev
+    return _CURRENT_TASKS.get(loop)
 
 
 # Re-export every name defined above so a section module gets the

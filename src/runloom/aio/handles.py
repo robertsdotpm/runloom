@@ -61,12 +61,15 @@ def _run_stock_task_cb(loop, cb, fut):
     # slot for the duration of the (synchronous) stock-Task step is safe; we
     # restore it afterward so the RunloomTask's own _driver finally still sees the
     # value it expects.  Single-thread sched per loop => no races on the swap.
-    prev = _CURRENT_TASKS.pop(loop, None)
+    # Clear the slot for the (synchronous) stock-Task step; on 3.14 this
+    # actually clears the C-internal current-task store the stock Task's
+    # enter_task checks (a dict-pop was a silent no-op there).
+    prev = _pg_set_current_task(loop, None)
     try:
         cb(fut)
     finally:
         if prev is not None:
-            _CURRENT_TASKS[loop] = prev
+            _pg_set_current_task(loop, prev)
 
 
 # Make our tasks visible to asyncio.all_tasks() (and debug tooling, anyio's

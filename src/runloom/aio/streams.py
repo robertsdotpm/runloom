@@ -273,3 +273,64 @@ class StreamWriter(object):
         # asyncio code commonly does writer.transport.get_extra_info(...);
         # forward to ourselves for compat.
         return self
+
+
+# ====================================================================
+# 3.14 free-threaded fix for the STDLIB asyncio.streams.StreamReader.read
+#
+# create_subprocess_exec() builds the stdlib StreamReader (via
+# SubprocessStreamProtocol), not the bridge reader above, and its
+# Process.communicate() does `await gather(_read_stream(1), _read_stream(2))`.
+# The stdlib read() (byte-identical across 3.13 and 3.14) does:
+#     data = bytes(memoryview(self._buffer)[:n])
+#     del self._buffer[:n]
+# Under 3.14 free-threading the temporary `memoryview(self._buffer)[:n]` slice's
+# deallocation is DEFERRED (deferred refcounting / delayed free), so its buffer
+# EXPORT over the bytearray is still live when the very next statement resizes
+# it -> "BufferError: Existing exports of data: object cannot be re-sized" at
+# streams.py:734.  3.13t (immediate reclaim) is unaffected.  The minimal,
+# lowest-risk fix is to drop the lingering memoryview temporary: a plain
+# bytearray slice (`self._buffer[:n]`) yields a fresh bytes object and holds no
+# export over the buffer.  Same return semantics (at most n bytes,
+# _maybe_resume_transport()).  Installed only on >=3.14, so 3.13t is untouched.
+def _pg_install_stdlib_streamreader_read_314():
+    if sys.version_info < (3, 14):
+        return
+    import asyncio.streams as _streams
+
+    _Reader = _streams.StreamReader
+    if getattr(_Reader.read, "__runloom_ft314__", False):
+        return      # already installed
+
+    async def read(self, n=-1):
+        if self._exception is not None:
+            raise self._exception
+
+        if n == 0:
+            return b''
+
+        if n < 0:
+            blocks = []
+            while True:
+                block = await self.read(self._limit)
+                if not block:
+                    break
+                blocks.append(block)
+            return b''.join(blocks)
+
+        if not self._buffer and not self._eof:
+            await self._wait_for_data('read')
+
+        # bytes(self._buffer[:n]) -- no lingering memoryview export (see above).
+        data = bytes(self._buffer[:n])
+        del self._buffer[:n]
+
+        self._maybe_resume_transport()
+        return data
+
+    read.__doc__ = _Reader.read.__doc__
+    read.__runloom_ft314__ = True
+    _Reader.read = read
+
+
+_pg_install_stdlib_streamreader_read_314()

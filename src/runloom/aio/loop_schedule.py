@@ -65,14 +65,12 @@ class _LoopScheduleMixin(object):
         # the woken task hangs forever (aiohttp's connector _wait_for_close: the
         # ClientSession/AppRunner teardown deadlocks).  Clear the slot for the
         # callback and restore it after (symmetry with the driver's finally).
-        prev = _CURRENT_TASKS.get(self)
-        if prev is not None:
-            _CURRENT_TASKS.pop(self, None)
+        prev = _pg_set_current_task(self, None)
         try:
             ctx.run(callback, *args)
         finally:
             if prev is not None:
-                _CURRENT_TASKS[self] = prev
+                _pg_set_current_task(self, prev)
 
     # ---- callback scheduling ----
     def call_soon(self, callback, *args, context=None):
