@@ -135,13 +135,27 @@ def do_explicit_cancel(H, rng, counts, slot):
 
 def worker(H, wid, rng, state):
     slot = wid & 1023
+    i = 0
     for _ in H.round_range():
         if not H.running():
             break
-        r = rng.random()
-        if r < 0.34:
+        # These ops are timeout-bound: the outer-first/explicit cases wait out
+        # ~2-4s deadlines, so only a handful complete per run and pure random
+        # selection reliably misses a case -- post() requires each of the three
+        # cases >= 1, which then flakes under load (and the timeouts themselves
+        # are correct; the assertions never fire).  Seed each worker's first 3
+        # ops to round-robin the cases keyed off its id, so coverage holds
+        # whether one worker manages 3 ops or many workers manage 1 each.  Random
+        # after that, preserving the concurrent mix.
+        if i < 3:
+            sel = (wid + i) % 3
+        else:
+            r = rng.random()
+            sel = 0 if r < 0.34 else (1 if r < 0.67 else 2)
+        i += 1
+        if sel == 0:
             ok = do_inner_first(H, rng, state, slot)
-        elif r < 0.67:
+        elif sel == 1:
             ok = do_outer_first(H, rng, state, slot)
         else:
             ok = do_explicit_cancel(H, rng, state, slot)
