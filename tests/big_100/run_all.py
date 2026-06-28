@@ -122,8 +122,8 @@ def main():
     sys.stderr.flush()
 
     pending = list(projects)
-    running = {}        # popen -> (num, path, logf, t0, ip_slot)
-    results = {}        # num -> (verdict, exit_code, seconds)
+    running = {}        # popen -> (num, name, path, logf, t0, ip_slot)
+    results = {}        # name -> (verdict, exit_code, seconds, num)
     t_start = time.monotonic()
 
     def launch(num, path):
@@ -133,13 +133,17 @@ def main():
         slot_ip = "127.{0}.0.1".format(ip_slot + 1)
         job_env = dict(env)
         job_env["SOAK_HOST_IP"] = slot_ip
-        logpath = os.path.join(LOGDIR, "p{0:02d}.log".format(num))
+        # Key logs + results by the UNIQUE program name (not num): some numbers
+        # are shared by sibling files (p46_immortal vs p46_mutex_torture;
+        # p207_fast/immortal/park_wake_pingpong), and a num key silently
+        # overwrote their logs and verdicts -- 200 ran but only 197 reported.
+        name = os.path.basename(path)[:-3]
+        logpath = os.path.join(LOGDIR, name + ".log")
         logf = open(logpath, "wb")
         proc = subprocess.Popen(build_cmd(path, ip_slot), stdout=logf,
                                 stderr=logf, env=job_env, cwd=HERE)
-        running[proc] = (num, path, logf, time.monotonic(), ip_slot)
-        sys.stderr.write("  launch p{0:02d} {1}\n".format(
-            num, os.path.basename(path)))
+        running[proc] = (num, name, path, logf, time.monotonic(), ip_slot)
+        sys.stderr.write("  launch {0}\n".format(name))
         sys.stderr.flush()
 
     while pending or running:
@@ -151,16 +155,14 @@ def main():
             rc = proc.poll()
             if rc is None:
                 continue
-            num, path, logf, t0, ip_slot = running.pop(proc)
+            num, name, path, logf, t0, ip_slot = running.pop(proc)
             free_slots.append(ip_slot)
             logf.close()
             secs = time.monotonic() - t0
-            verdict = classify(os.path.join(LOGDIR, "p{0:02d}.log".format(num)),
-                               rc)
-            results[num] = (verdict, rc, secs)
-            sys.stderr.write("  done   p{0:02d} {1:<28} {2:>5} exit={3} {4:.0f}s\n"
-                             .format(num, os.path.basename(path), verdict, rc,
-                                     secs))
+            verdict = classify(os.path.join(LOGDIR, name + ".log"), rc)
+            results[name] = (verdict, rc, secs, num)
+            sys.stderr.write("  done   {0:<32} {1:>5} exit={2} {3:.0f}s\n"
+                             .format(name, verdict, rc, secs))
             sys.stderr.flush()
 
     return summarize(results, time.monotonic() - t_start)
@@ -189,20 +191,19 @@ def summarize(results, total_secs):
     sys.stderr.write("\n==== big_100 SUMMARY ====\n")
     npass = 0
     bad = []
-    for num in sorted(results):
-        verdict, rc, secs = results[num]
-        sys.stderr.write("  p{0:02d}  {1:<6} exit={2:<4} {3:6.0f}s\n".format(
-            num, verdict, rc, secs))
+    for name in sorted(results, key=lambda k: (results[k][3], k)):
+        verdict, rc, secs, num = results[name]
+        sys.stderr.write("  {0:<32} {1:<6} exit={2:<4} {3:6.0f}s\n".format(
+            name, verdict, rc, secs))
         if verdict in ("PASS", "SCALE"):
             npass += 1
         else:
-            bad.append(num)
+            bad.append(name)
     sys.stderr.write("  ----\n")
     sys.stderr.write("  {0}/{1} PASS in {2:.0f}s wall\n".format(
         npass, len(results), total_secs))
     if bad:
-        sys.stderr.write("  FAILED: {0}\n".format(
-            ", ".join("p{0:02d}".format(n) for n in bad)))
+        sys.stderr.write("  FAILED: {0}\n".format(", ".join(bad)))
     sys.stderr.flush()
     return 0 if not bad else 1
 
