@@ -96,8 +96,14 @@ def main():
                "--seed", str(args.seed),
                "--hubs", str(args.hubs),
                "--hang-timeout", str(args.hang_timeout),
-               "--drain-timeout", str(args.drain_timeout),
-               "--ip-slot", str(ip_slot)]
+               "--drain-timeout", str(args.drain_timeout)]
+        # Give each parallel job a DISTINCT linear slice of 127/8 so concurrent
+        # programs never collide on loopback IPs/ports.  The harness takes
+        # --ip-start-offset/--ip-end-offset (the old single --ip-slot arg was
+        # dropped); map slot N -> [N*W, N*W + W-1].
+        slot_w = 1000
+        cmd += ["--ip-start-offset", str(ip_slot * slot_w),
+                "--ip-end-offset",   str(ip_slot * slot_w + slot_w - 1)]
         if args.funcs is not None:
             cmd += ["--funcs", str(args.funcs)]
         if args.handoff:
