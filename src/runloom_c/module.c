@@ -70,7 +70,9 @@ static inline int PyDict_GetItemRef(PyObject *d, PyObject *key, PyObject **resul
  * Other fields like the topmost frame chain are still UB territory and
  * are why we don't run unittest harness frames over yields. */
 typedef struct {
-#if PY_VERSION_HEX >= 0x030C0000
+#if PY_VERSION_HEX >= 0x030E0000
+    int py_recursion_remaining;
+#elif PY_VERSION_HEX >= 0x030C0000
     int py_recursion_remaining;
     int c_recursion_remaining;
 #elif PY_VERSION_HEX >= 0x030B0000
@@ -95,7 +97,9 @@ typedef struct {
 RUNLOOM_INLINE void runloom_tstate_save(RunloomTstateSnapshot *s)
 {
     PyThreadState *ts = PyThreadState_GET();
-#if PY_VERSION_HEX >= 0x030C0000
+#if PY_VERSION_HEX >= 0x030E0000
+    s->py_recursion_remaining = ts->py_recursion_remaining;
+#elif PY_VERSION_HEX >= 0x030C0000
     s->py_recursion_remaining = ts->py_recursion_remaining;
     s->c_recursion_remaining = ts->c_recursion_remaining;
 #elif PY_VERSION_HEX >= 0x030B0000
@@ -113,7 +117,9 @@ RUNLOOM_INLINE void runloom_tstate_restore(const RunloomTstateSnapshot *s)
         return;
     }
     ts = PyThreadState_GET();
-#if PY_VERSION_HEX >= 0x030C0000
+#if PY_VERSION_HEX >= 0x030E0000
+    ts->py_recursion_remaining = s->py_recursion_remaining;
+#elif PY_VERSION_HEX >= 0x030C0000
     ts->py_recursion_remaining = s->py_recursion_remaining;
     ts->c_recursion_remaining = s->c_recursion_remaining;
 #elif PY_VERSION_HEX >= 0x030B0000

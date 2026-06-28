@@ -118,8 +118,12 @@ struct runloom_pystate_snap {
     /* 3.11: single recursion counter, named recursion_remaining. */
     int recursion_remaining;
 #endif
-#if PY_VERSION_HEX >= 0x030C0000
-    /* 3.12+: split into Python-level and C-level counters. */
+#if PY_VERSION_HEX >= 0x030E0000
+    /* 3.14: unified counter (c_recursion_remaining removed; C-stack overflow is
+     * an SP-based check, set per-fiber in runloom_coro_resume). */
+    int py_recursion_remaining;
+#elif PY_VERSION_HEX >= 0x030C0000
+    /* 3.12-3.13: split into Python-level and C-level counters. */
     int py_recursion_remaining;
     int c_recursion_remaining;
 #endif

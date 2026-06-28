@@ -122,7 +122,9 @@ void runloom_pystate_snap(runloom_pystate_snap_t *snap)
     snap->context = ts->context;
 #  endif
 
-#  if PY_VERSION_HEX >= 0x030C0000
+#  if PY_VERSION_HEX >= 0x030E0000
+    snap->py_recursion_remaining = ts->py_recursion_remaining;
+#  elif PY_VERSION_HEX >= 0x030C0000
     snap->py_recursion_remaining = ts->py_recursion_remaining;
     snap->c_recursion_remaining = ts->c_recursion_remaining;
 #  else
@@ -375,7 +377,9 @@ void runloom_pystate_load(runloom_pystate_snap_t *snap)
         ts->context_ver++;
     }
 
-#  if PY_VERSION_HEX >= 0x030C0000
+#  if PY_VERSION_HEX >= 0x030E0000
+    ts->py_recursion_remaining = snap->py_recursion_remaining;
+#  elif PY_VERSION_HEX >= 0x030C0000
     ts->py_recursion_remaining = snap->py_recursion_remaining;
     ts->c_recursion_remaining = snap->c_recursion_remaining;
 #  else

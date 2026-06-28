@@ -328,7 +328,11 @@ void runloom_g_entry(void *user)
     {
         PyThreadState *ts = PyThreadState_GET();
         int py_limit = Py_GetRecursionLimit();
-#if PY_VERSION_HEX >= 0x030C0000
+#if PY_VERSION_HEX >= 0x030E0000
+        /* 3.14: unified recursion counter; the per-fiber C-stack bounds are set
+         * in runloom_coro_resume (SP-based check), so nothing to scale here. */
+        ts->py_recursion_remaining = py_limit;
+#elif PY_VERSION_HEX >= 0x030C0000
         ts->py_recursion_remaining = py_limit;
         /* Scale the C-recursion budget to THIS fiber's actual C stack so a
          * big-stack fiber can recurse as deep as it has room for (nested
