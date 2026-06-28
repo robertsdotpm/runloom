@@ -18,6 +18,11 @@
 
 #if PY_VERSION_HEX >= 0x030D0000 && !defined(RUNLOOM_NO_IFRAME)
 #  include "internal/pycore_frame.h"
+#  if PY_VERSION_HEX >= 0x030E0000
+/* 3.14 moved the complete _PyInterpreterFrame struct + FRAME_OWNED_BY_CSTACK out
+ * of pycore_frame.h (now only a forward declaration) into pycore_interpframe.h. */
+#    include "internal/pycore_interpframe.h"
+#  endif
 #  define RUNLOOM_IFRAME_HAVE 1
 #endif
 
@@ -131,7 +136,12 @@ int runloom_iframe_walk(void *top, int max, runloom_iframe_cb cb, void *ctx)
         /* Skip the C-stack trampoline shim frames that bracket a real
          * call; they carry no user code. */
         if (f->owner != FRAME_OWNED_BY_CSTACK) {
+#if PY_VERSION_HEX >= 0x030E0000
+            /* 3.14: f_executable is a tagged _PyStackRef, not a PyObject*. */
+            PyObject *exec = PyStackRef_AsPyObjectBorrow(f->f_executable);
+#else
             PyObject *exec = f->f_executable;
+#endif
             if (exec != NULL && PyCode_Check(exec)) {
                 int line = PyUnstable_InterpreterFrame_GetLine(f);
                 if (cb((PyCodeObject *)exec, line, ctx) != 0)
