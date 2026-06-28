@@ -193,7 +193,7 @@ void runloom_pystate_snap(runloom_pystate_snap_t *snap)
                 if (snap->exc_owner_count <
                         (int)(sizeof(snap->exc_owners) / sizeof(snap->exc_owners[0]))) {
                     PyObject *owner = (PyObject *)((char *)it -
-                                                  offsetof(PyGenObject, gi_exc_state));
+                                                  runloom_gen_exc_state_offset());
                     /* Only pin if the recovered pointer really is a gen/coro/
                      * async-gen object; the *_exc_state fields share one offset.
                      * A non-matching item (shouldn't occur for a per-g chain) is

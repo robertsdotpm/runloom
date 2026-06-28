@@ -33,6 +33,9 @@ typedef int (*runloom_iframe_cb)(PyCodeObject *code, int line, void *ctx);
  * top is NULL or the platform has no internal frame layout. */
 int runloom_iframe_walk(void *top, int max, runloom_iframe_cb cb, void *ctx);
 
+/* offsetof(PyGenObject, gi_exc_state); see runloom_iframe.c. */
+size_t runloom_gen_exc_state_offset(void);
+
 /* True when `ts` is currently executing CPython object-destruction machinery
  * that must not be interrupted by a fiber switch -- a tp_dealloc and its
  * weakref callbacks / finalizers, driven by either the trashcan unwind
