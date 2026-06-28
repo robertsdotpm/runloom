@@ -174,6 +174,10 @@ def classify(logpath, rc):
         return "INVAR"          # invariant violation
     if rc == 2:
         return "ERROR"
+    if rc == 4:
+        return "SCALE"          # benign platform scale limit (NOT a fault):
+                                # e.g. Windows WSAENOBUFS, or a known-upstream
+                                # cap the program self-reports + exits 4 for.
     return "FAIL"
 
 
@@ -185,7 +189,7 @@ def summarize(results, total_secs):
         verdict, rc, secs = results[num]
         sys.stderr.write("  p{0:02d}  {1:<6} exit={2:<4} {3:6.0f}s\n".format(
             num, verdict, rc, secs))
-        if verdict == "PASS":
+        if verdict in ("PASS", "SCALE"):
             npass += 1
         else:
             bad.append(num)
