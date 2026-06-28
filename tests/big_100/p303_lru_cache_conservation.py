@@ -1,5 +1,15 @@
 """big_100 / 303 -- functools.lru_cache C list+dict under cross-hub eviction churn.
 
+SKIPPED FOR NOW -- the currsize<=maxsize bound this program asserts is violated by a
+KNOWN UPSTREAM CPython free-threading bug, NOT a runloom defect:
+    https://github.com/python/cpython/issues/148180
+    "functools.lru_cache critical section locks self but _LockHeld dict APIs assert
+     self->cache is locked"  (open, type-crash, topic-free-threading)
+Reproduced with PLAIN threading.Thread (no runloom) on arm64 3.13t: the cache dict
+exceeds maxsize (currsize=129 for maxsize=128); GIL-on and x86-64 stay clean, so it
+is an arm64 weak-memory window on the wrapper's wrong-object critical section.  The
+program skips via setup()'s note_scale_limit until CPython fixes it; re-enable then.
+
 No existing program touches functools at all -- and `functools.lru_cache`'s
 internals are exactly the kind of MUTATING shared C container that the M:N model
 stresses in a new way.  The C `_lru_cache_wrapper` keeps three coupled pieces of
@@ -145,21 +155,34 @@ def worker(H, wid, rng, state):
         H.task_done(wid)
 
 
+SKIP_REASON = (
+    "lru_cache maxsize over-grow is UPSTREAM CPython gh-148180 "
+    "(https://github.com/python/cpython/issues/148180 -- functools.lru_cache "
+    "critical section locks self, not self->cache); reproduced with PLAIN threads "
+    "on arm64 3.13t (currsize=129 > maxsize=128; GIL-on + x86 clean) -- NOT a "
+    "runloom bug. Skipped for now; re-enable when CPython fixes it.")
+
+
 def setup(H):
-    f_bounded, f_unbounded = make_caches()
-    # A handful of clearers: enough to race clear-vs-lookup hard, but a small
-    # minority so the steady-state is eviction churn, not a perpetually empty
-    # cache.  >= 2 even for tiny --funcs smoke runs.
-    nclear = min(8, max(2, H.funcs // 200))
-    H.state = {"f_bounded": f_bounded, "f_unbounded": f_unbounded,
-               "nclear": nclear}
+    # KNOWN UPSTREAM CPython bug -- skip for now (see module docstring + gh-148180).
+    H.note_scale_limit(SKIP_REASON)
+    H.state = None
+    # When gh-148180 is fixed, delete the two lines above and restore:
+    #   f_bounded, f_unbounded = make_caches()
+    #   H.state = {"f_bounded": f_bounded, "f_unbounded": f_unbounded,
+    #              "nclear": min(8, max(2, H.funcs // 200))}
 
 
 def body(H):
+    if H.state is None:
+        return                          # skipped in setup (upstream CPython gh-148180)
     H.run_pool(H.funcs, worker, H.state)
 
 
 def post(H):
+    if H.state is None:
+        H.log("SKIPPED: " + (H.scale_limit_reason or "upstream CPython gh-148180"))
+        return
     f_bounded = H.state["f_bounded"]
     f_unbounded = H.state["f_unbounded"]
     bi = f_bounded.cache_info()
