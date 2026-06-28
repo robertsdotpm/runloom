@@ -1967,30 +1967,11 @@ void runloom_coro_resume(runloom_coro_t *c)
     }
     runloom_coro_maybe_grow(c);     /* Path-A copy-grow at the resume boundary */
     runloom_tls_current = c;
-#if PY_VERSION_HEX >= 0x030E0000
-    /* 3.14 checks C-stack overflow by comparing the live machine SP against
-     * c_stack_soft_limit (_Py_MakeRecCheck).  This fiber runs on its OWN mmap'd
-     * C stack, so point the bounds at it before swapping in; restore the hub
-     * thread's own bounds after swapping back (else the hub would run Python
-     * against a foreign stack's limits and spuriously RecursionError). */
-    {
-        PyThreadState *_rl_ts = PyThreadState_GetUnchecked();
-        if (_rl_ts != NULL && c->stack != NULL)
-            PyUnstable_ThreadState_SetStackProtection(_rl_ts, c->stack, c->stack_size);
-    }
-#endif
     if (RUNLOOM_DBG_ON(RUNLOOM_DBG_INVARIANTS))
         __atomic_store_n(&c->dbg_running, 1, __ATOMIC_RELEASE);
     runloom_asm_swap(&c->asm_coro.caller, &c->asm_coro.self);
     if (RUNLOOM_DBG_ON(RUNLOOM_DBG_INVARIANTS))
         __atomic_store_n(&c->dbg_running, 0, __ATOMIC_RELEASE);
-#if PY_VERSION_HEX >= 0x030E0000
-    {
-        PyThreadState *_rl_ts = PyThreadState_GetUnchecked();
-        if (_rl_ts != NULL)
-            PyUnstable_ThreadState_ResetStackProtection(_rl_ts);
-    }
-#endif
     runloom_tls_current = prev;
 }
 

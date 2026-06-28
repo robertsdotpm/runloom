@@ -329,9 +329,15 @@ void runloom_g_entry(void *user)
         PyThreadState *ts = PyThreadState_GET();
         int py_limit = Py_GetRecursionLimit();
 #if PY_VERSION_HEX >= 0x030E0000
-        /* 3.14: unified recursion counter; the per-fiber C-stack bounds are set
-         * in runloom_coro_resume (SP-based check), so nothing to scale here. */
+        /* 3.14: unified recursion counter + SP-based C-stack overflow check.  ts is
+         * g->tstate here (current), so tell CPython this g runs on its OWN mmap'd C
+         * stack -- _Py_MakeRecCheck then bounds against the fiber stack, not the hub
+         * thread's (which lazy _Py_InitializeRecursionLimits would wrongly pick up). */
         ts->py_recursion_remaining = py_limit;
+        if (g->coro != NULL) {
+            PyUnstable_ThreadState_SetStackProtection(ts,
+                runloom_coro_stack_base(g->coro), runloom_coro_stack_size(g->coro));
+        }
 #elif PY_VERSION_HEX >= 0x030C0000
         ts->py_recursion_remaining = py_limit;
         /* Scale the C-recursion budget to THIS fiber's actual C stack so a
