@@ -97,13 +97,17 @@ def main():
                "--hubs", str(args.hubs),
                "--hang-timeout", str(args.hang_timeout),
                "--drain-timeout", str(args.drain_timeout)]
-        # Give each parallel job a DISTINCT linear slice of 127/8 so concurrent
-        # programs never collide on loopback IPs/ports.  The harness takes
-        # --ip-start-offset/--ip-end-offset (the old single --ip-slot arg was
-        # dropped); map slot N -> [N*W, N*W + W-1].
-        slot_w = 1000
-        cmd += ["--ip-start-offset", str(ip_slot * slot_w),
-                "--ip-end-offset",   str(ip_slot * slot_w + slot_w - 1)]
+        # Give each parallel job a DISTINCT, non-overlapping range of 127.X.0.1
+        # loopback IPs (harness mode (a), --ip-start/--ip-end).  This is the
+        # CROSS-PLATFORM scheme: mac and windows bind exactly 127.1.0.1 ..
+        # 127.8.0.1, whereas the linear --ip-start-offset (127.0.x.y) only
+        # resolves on linux (which routes ALL of 127/8 to loopback).  W
+        # second-octets per job; --jobs must be <= the bound-address count (8).
+        bound = 8
+        slot_w = max(1, bound // max(1, args.jobs))
+        ip_start = ip_slot * slot_w + 1
+        ip_end = ip_start + slot_w - 1
+        cmd += ["--ip-start", str(ip_start), "--ip-end", str(ip_end)]
         if args.funcs is not None:
             cmd += ["--funcs", str(args.funcs)]
         if args.handoff:
