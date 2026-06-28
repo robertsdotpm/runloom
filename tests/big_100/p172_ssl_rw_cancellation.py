@@ -82,10 +82,23 @@ def client(H, wid, rng, state):
     completed = H.completed
     cancelled = H.cancelled
     H.sleep(rng.random() * 0.5)
+    i = 0
     for _ in H.round_range():
         # ~30% of connections are cancelled mid-flight via a tight fd-readiness
-        # budget; the rest run to completion and must echo correctly.
-        cancel = (rng.random() < 0.30)
+        # budget; the rest run to completion and must echo correctly.  These ops
+        # are TLS-bound (full handshakes are heavy), so only a handful complete
+        # per run and pure random selection reliably misses the cancel branch --
+        # post() requires both cancelled>=1 and completed>=1, which then flakes
+        # under load (the cancellation/echo paths themselves are correct; the
+        # per-case assertions never fire).  Seed each worker's first 2 ops to
+        # round-robin the two branches keyed off its id, so coverage holds
+        # whether one worker manages 2 ops or many workers manage 1 each.  Random
+        # after that, preserving the concurrent mix.
+        if i < 2:
+            cancel = ((wid + i) % 2 == 1)
+        else:
+            cancel = (rng.random() < 0.30)
+        i += 1
         host, port = netutil.pick_server(state["servers"], rng)
         raw = None
         tls = None

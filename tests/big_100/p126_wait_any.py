@@ -33,16 +33,34 @@ def worker(H, wid, rng, state):
     w1 = state["data1_wins"]
     wt = state["timeout_wins"]
     slot = wid & 1023
+    i = 0
     for _ in H.round_range():
         if not H.running():
             break
         ch0 = runloom.Chan(1)
         ch1 = runloom.Chan(1)
-        d0 = rng.uniform(0.0005, 0.005)
-        d1 = rng.uniform(0.0005, 0.005)
+        # The winning branch is decided by WHICH source fires first, with all
+        # three delays drawn from the same small window -- so under load only a
+        # handful of rounds complete and the random timing reliably leaves one
+        # branch (data0/data1/timeout) unexercised, flaking post()'s "each branch
+        # won at least once" check (the exactly-once resolution itself is always
+        # correct).  Seed each worker's first 3 rounds to round-robin which
+        # branch wins, keyed off its id: skew the delays so the chosen source
+        # fires well ahead of the others.  Coverage then holds whether one worker
+        # runs 3 rounds or many workers run 1 each; random timing after that
+        # preserves the concurrent race mix.
+        if i < 3:
+            want = (wid + i) % 3
+            d0 = 0.0005 if want == 0 else 0.05
+            d1 = 0.0005 if want == 1 else 0.05
+            to = 0.0005 if want == 2 else 0.05
+        else:
+            d0 = rng.uniform(0.0005, 0.005)
+            d1 = rng.uniform(0.0005, 0.005)
+            to = rng.uniform(0.0005, 0.005)
+        i += 1
         H.fiber(helper, ch0, d0, b"0")
         H.fiber(helper, ch1, d1, b"1")
-        to = rng.uniform(0.0005, 0.005)
         timer = rtime.After(to)
         idx, _payload = runloom.select(
             [("recv", ch0), ("recv", ch1), ("recv", timer)])

@@ -34,18 +34,40 @@ def worker(H, wid, rng, state):
     data_wins = state["data_wins"]
     timeout_wins = state["timeout_wins"]
     slot = wid & 1023
+    i = 0
     for _ in H.round_range():
         if not H.running():
             break
         # A 1-buffered data channel so the helper never blocks even if the
         # worker already resolved on the timeout branch.
         ch = runloom.Chan(1)
-        d = rng.uniform(0.0005, 0.004)
+        # The post-check requires BOTH branches to win at least once, but at
+        # small op counts the near-tie race occasionally hands every round to
+        # the same side (data_wins=ops, timeout_wins=0 or vice-versa) and the
+        # coverage check flakes -- the select itself is correct (conservation
+        # always holds; no double-resume).  Seed each worker's first two ops to
+        # round-robin which side WINS, keyed off its id, by skewing the two
+        # delays far apart so the chosen branch deterministically wins.  This
+        # guarantees coverage whether one worker manages two ops or many workers
+        # manage one each.  After that, fall back to the original near-tie race
+        # so the genuine boundary mix is preserved.
+        if i < 2:
+            if (wid + i) & 1 == 0:
+                # Force a data win: token arrives well before the timer fires.
+                d = rng.uniform(0.0005, 0.004)
+                dprime = d + rng.uniform(0.01, 0.02)
+            else:
+                # Force a timeout win: timer fires well before the token arrives.
+                d = rng.uniform(0.01, 0.02)
+                dprime = 0.0
+        else:
+            d = rng.uniform(0.0005, 0.004)
+            # Timer fires at ~d with jitter so the two genuinely race.
+            dprime = d + rng.uniform(-0.0015, 0.0015)
+            if dprime < 0.0:
+                dprime = 0.0
+        i += 1
         H.fiber(helper, ch, d)
-        # Timer fires at ~d with jitter so the two genuinely race.
-        dprime = d + rng.uniform(-0.0015, 0.0015)
-        if dprime < 0.0:
-            dprime = 0.0
         timer = rtime.After(dprime)
         idx, _payload = runloom.select([("recv", ch), ("recv", timer)])
         if idx == 0:
