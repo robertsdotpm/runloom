@@ -91,6 +91,16 @@ void runloom_iframe_borrow_alloc_home(PyThreadState *exec, PyThreadState *home);
  * Exposed to Python as runloom_c.alloc_home_available. */
 int runloom_alloc_home_active(void);
 
+#if PY_VERSION_HEX >= 0x030E0000
+/* 3.14: arm the SP-based C-stack overflow check at fiber c's private stack, with
+ * extra reserved headroom above the guard so a deep-recursion RecursionError
+ * fires before CPython's datastack-chunk-alloc burst can dip into the guard page.
+ * See runloom_iframe.c for the full rationale (the p212 SIGSEGV fix).  Forward-
+ * declares runloom_coro so callers need not include coro.h. */
+struct runloom_coro;
+void runloom_arm_fiber_stackprot(PyThreadState *ts, struct runloom_coro *c);
+#endif
+
 #ifdef __cplusplus
 }
 #endif

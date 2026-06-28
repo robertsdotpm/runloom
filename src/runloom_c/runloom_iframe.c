@@ -15,6 +15,7 @@
 #include <Python.h>
 
 #include "runloom_iframe.h"
+#include "coro.h"    /* runloom_coro_stack_base/size (fiber C-stack geometry) */
 
 #if PY_VERSION_HEX >= 0x030D0000 && !defined(RUNLOOM_NO_IFRAME)
 #  include "internal/pycore_frame.h"
@@ -157,6 +158,59 @@ int runloom_iframe_walk(void *top, int max, runloom_iframe_cb cb, void *ctx)
     return 0;
 #endif
 }
+
+#if PY_VERSION_HEX >= 0x030E0000
+/* Arm the live tstate's SP-based C-stack overflow check (3.14) at THIS fiber's
+ * private mmap stack, with EXTRA reserved headroom above the hardware guard.
+ *
+ * 3.14 replaced the integer C-recursion counter with an SP check:
+ * PyUnstable_ThreadState_SetStackProtection(ts, base, size) sets
+ *   soft_limit = base + 2*MARGIN,  hard_limit = base + MARGIN
+ * (stack grows down; _Py_MakeRecCheck raises RecursionError once SP descends
+ * below soft_limit).  MARGIN is _PyOS_STACK_MARGIN_BYTES = 16 KB, so the default
+ * arm leaves only 32 KB between the RecursionError trip point and the PROT_NONE
+ * guard page.  On free-threaded 3.14 that 32 KB is NOT enough: once SP is just
+ * below soft_limit a single deeper Python call runs CPython's datastack-chunk
+ * path (_PyThreadState_PushFrame -> push_chunk -> allocate_chunk -> mmap, all on
+ * the C stack) which itself consumes several KB and then writes into the new
+ * chunk -- and that burst dips through the remaining margin into the guard page,
+ * SIGSEGV (caught on p212: a fault in allocate_chunk on descent and a munmap on a
+ * migrated unwind, both with SP within ~25-55 frames of soft_limit).  A bigger
+ * fiber stack makes it WORSE (recursion runs deeper before the trip, more chunk
+ * churn) -- proving the failure is the too-thin margin, not stack size.
+ *
+ * Fix: arm the check against a stack window that is RESERVE bytes SHORTER at the
+ * low end -- pass base' = base + RESERVE so soft_limit = base + RESERVE + 2*MARGIN.
+ * RecursionError then fires RESERVE earlier, leaving a comfortable cushion for the
+ * chunk-alloc / frame-setup burst to complete above the guard.  RESERVE is a
+ * fraction of the stack (so small fibers stay usable) with a floor sized to hold
+ * the deepest single non-yielding CPython call burst, clamped so the window never
+ * inverts on a tiny stack.  Inert on <3.14 (different recursion model). */
+#define RUNLOOM_STACKPROT_RESERVE_MIN ((size_t)96 * 1024)   /* >= one chunk-alloc burst */
+void runloom_arm_fiber_stackprot(PyThreadState *ts, runloom_coro_t *c)
+{
+    void  *base;
+    size_t size, reserve, eff;
+    if (ts == NULL || c == NULL) return;
+    base = runloom_coro_stack_base(c);
+    size = runloom_coro_stack_size(c);
+    if (base == NULL || size == 0) return;
+    /* Reserve max(min, size/8), but never more than half the stack so the usable
+     * window can't collapse on a small fiber. */
+    reserve = size / 8;
+    if (reserve < RUNLOOM_STACKPROT_RESERVE_MIN) reserve = RUNLOOM_STACKPROT_RESERVE_MIN;
+    if (reserve > size / 2) reserve = size / 2;
+    eff = size - reserve;
+    if (eff < RUNLOOM_STACKPROT_RESERVE_MIN) {
+        /* Stack too small to reserve usefully: raw arm against the real geometry
+         * (still bounds the check -- better than leaving it stale). */
+        PyUnstable_ThreadState_SetStackProtection(ts, base, size);
+        return;
+    }
+    PyUnstable_ThreadState_SetStackProtection(ts,
+        (void *)((char *)base + reserve), eff);
+}
+#endif
 
 /* offsetof(PyGenObject, gi_exc_state) -- computed in THIS Py_BUILD_CORE-isolated TU,
  * the only one that sees the complete _PyGenObject (on 3.14 the struct moved into

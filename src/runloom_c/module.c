@@ -44,6 +44,7 @@ static inline int PyDict_GetItemRef(PyObject *d, PyObject *key, PyObject **resul
 #include "plat.h"
 #include "plat_compat.h"
 #include "coro.h"
+#include "runloom_iframe.h"   /* runloom_arm_fiber_stackprot (3.14 SP-check arm) */
 #include "runloom_sched.h"
 #include "netpoll.h"
 #include "io_uring.h"   /* runloom_iouring_cancel_g for the cancel path */
@@ -129,6 +130,28 @@ RUNLOOM_INLINE void runloom_tstate_restore(const RunloomTstateSnapshot *s)
 #endif
 }
 
+
+#if PY_VERSION_HEX >= 0x030E0000
+/* runloom_coro_pre_swap hook (registered in PyInit on free-threaded 3.14+):
+ * re-arm the live thread state's SP-based C-stack overflow check at THIS fiber's
+ * stack on every resume.  3.14 replaced the integer recursion counter with an
+ * SP-vs-soft_limit check; because the default mode shares one tstate across all
+ * fibers on a hub, the limit set at a fiber's entry is overwritten by the next
+ * fiber to enter -- so a parked-then-resumed deep recurser would run off its own
+ * stack into the guard page (SIGSEGV).  Re-reading base+size each resume also
+ * tracks runloom_coro_maybe_grow's copy-grow.  (3.13 needs nothing: its
+ * c_recursion_remaining is restored from the per-g snapshot.)
+ *
+ * Delegates to runloom_arm_fiber_stackprot (runloom_iframe.c), which reserves
+ * extra headroom above the guard so the RecursionError trips before CPython's
+ * datastack-chunk-alloc burst can dip into the guard page (the p212 fix). */
+static void runloom_coro_rearm_stackprot(runloom_coro_t *c)
+{
+    PyThreadState *ts = PyThreadState_GetUnchecked();
+    if (ts != NULL && c != NULL)
+        runloom_arm_fiber_stackprot(ts, c);
+}
+#endif
 
 /* ---------------------------------------------------------------------------
  * module.c is split across the module_*.c.inc fragments below for readability.

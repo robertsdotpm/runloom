@@ -61,6 +61,16 @@ int runloom_coro_bulk_init(void *coro_arena, size_t coro_stride,
  * returns.  Calling resume on a done coroutine is undefined. */
 void runloom_coro_resume(runloom_coro_t *c);
 
+/* Optional pre-swap hook: invoked (when non-NULL) by every runloom_coro_resume
+ * backend right before switching into the fiber, AFTER any resume-boundary stack
+ * grow.  The Python layer registers this on free-threaded 3.14+ to re-arm the
+ * live thread state's C-stack soft/hard limit at THIS fiber's stack -- 3.14's
+ * overflow check is SP-vs-soft_limit, and the default shared-hub tstate's limit
+ * is otherwise left pointing at whichever fiber entered last.  NULL = no-op
+ * (3.13 and earlier need nothing: their integer recursion counter is restored
+ * from the per-g snapshot). */
+extern void (*runloom_coro_pre_swap)(runloom_coro_t *c);
+
 /* Yield from inside a coroutine.  Returns control to whatever called
  * runloom_coro_resume on us; on next resume, execution continues just
  * past the runloom_coro_yield call.  Calling yield from outside any

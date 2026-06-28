@@ -335,8 +335,7 @@ void runloom_g_entry(void *user)
          * thread's (which lazy _Py_InitializeRecursionLimits would wrongly pick up). */
         ts->py_recursion_remaining = py_limit;
         if (g->coro != NULL) {
-            PyUnstable_ThreadState_SetStackProtection(ts,
-                runloom_coro_stack_base(g->coro), runloom_coro_stack_size(g->coro));
+            runloom_arm_fiber_stackprot(ts, g->coro);
         }
 #elif PY_VERSION_HEX >= 0x030C0000
         ts->py_recursion_remaining = py_limit;

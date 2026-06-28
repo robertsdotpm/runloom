@@ -178,6 +178,11 @@ size_t runloom_coro_guard_size(void)
  * to find the caller context.  Thread-local. */
 static RUNLOOM_TLS runloom_coro_t *runloom_tls_current = NULL;
 
+/* Pre-swap hook -- see coro.h.  NULL unless the Python layer registers a re-arm
+ * (free-threaded 3.14+).  Defined unconditionally, outside the backend #if
+ * guards, so every runloom_coro_resume variant can invoke it. */
+void (*runloom_coro_pre_swap)(runloom_coro_t *c) = NULL;
+
 #if defined(RUNLOOM_HAVE_FIBERS)
 static RUNLOOM_TLS void *runloom_tls_caller_fiber = NULL;
 static RUNLOOM_TLS int runloom_tls_thread_was_fiber = 0;
@@ -1966,6 +1971,7 @@ void runloom_coro_resume(runloom_coro_t *c)
         c->fresh = 0;
     }
     runloom_coro_maybe_grow(c);     /* Path-A copy-grow at the resume boundary */
+    if (runloom_coro_pre_swap != NULL) runloom_coro_pre_swap(c);  /* re-arm C-stack limit (3.14) */
     runloom_tls_current = c;
     if (RUNLOOM_DBG_ON(RUNLOOM_DBG_INVARIANTS))
         __atomic_store_n(&c->dbg_running, 1, __ATOMIC_RELEASE);
@@ -2072,6 +2078,7 @@ void runloom_coro_resume(runloom_coro_t *c)
     void *prev_caller = runloom_tls_caller_fiber;
     runloom_tls_current = c;
     runloom_tls_caller_fiber = GetCurrentFiber();
+    if (runloom_coro_pre_swap != NULL) runloom_coro_pre_swap(c);  /* re-arm C-stack limit (3.14) */
     SwitchToFiber(c->fiber);
     runloom_tls_current = prev;
     runloom_tls_caller_fiber = prev_caller;
@@ -2172,6 +2179,7 @@ void runloom_coro_resume(runloom_coro_t *c)
 {
     runloom_coro_t *prev = runloom_tls_current;
     runloom_tls_current = c;
+    if (runloom_coro_pre_swap != NULL) runloom_coro_pre_swap(c);  /* re-arm C-stack limit (3.14) */
     swapcontext(&c->caller_ctx, &c->ctx);
     runloom_tls_current = prev;
 }

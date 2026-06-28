@@ -522,6 +522,9 @@ PyMODINIT_FUNC PyInit_runloom_c(void)
     runloom_diag_init();          /* parses RUNLOOM_DEBUG once; cheap; idempotent */
     runloom_introspect_init();    /* fiber registry lock; reads RUNLOOM_INTROSPECT_TIME */
     runloom_timer_res_init();     /* Windows: 1ms timer resolution (no-op POSIX) */
+#if PY_VERSION_HEX >= 0x030E0000
+    runloom_coro_pre_swap = runloom_coro_rearm_stackprot;  /* 3.14: re-arm fiber C-stack limit on every resume */
+#endif
     scrub_env = getenv("RUNLOOM_STACK_SCRUB");   /* opt-in recycled-stack wipe */
     if (scrub_env && scrub_env[0] && scrub_env[0] != '0') {
         runloom_coro_scrub_set(1);
