@@ -150,6 +150,20 @@ struct runloom_pystate_snap {
     struct _PyInterpreterFrame *current_frame;
     PyObject *delete_later;                  /* owned ref */
 #endif
+#if PY_VERSION_HEX >= 0x030E0000
+    /* 3.14 free-threaded: head of this fiber's _PyThreadStateImpl.c_stack_refs
+     * list (the per-thread-state chain of _PyCStackRef nodes the FT GC walks in
+     * gc_visit_thread_stacks).  Those nodes live on the fiber's OWN C stack, so
+     * they MUST be privatised across a swap -- left linked into the shared hub
+     * tstate, a sibling fiber's stack reuse corrupts the list and the GC SIGSEGVs
+     * (the p77_weakref_storm crash).  Taken (and the shared tstate cleared) at
+     * snap, restored at load.  Borrowed: the nodes belong to the parked fiber's
+     * preserved stack; no refcounting (the _PyStackRef inside each node is the
+     * eval loop's borrowed temporary, not an owned ref this snap manages).
+     * void* because runloom_sched.c is non-core (the type is internal-only;
+     * runloom_iframe.c does the typed access). */
+    void *c_stack_refs;
+#endif
     /* DIAG (RUNLOOM_DIAG_MIGRATE): the PyThreadState bound when this snap was
      * saved -- i.e. the tstate pointer baked into the g's suspended CPython
      * eval-loop C frame.  A cross-hub resume loads the snap onto a DIFFERENT

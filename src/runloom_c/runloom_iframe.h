@@ -65,6 +65,20 @@ int runloom_tstate_in_destruction(PyThreadState *ts);
 uintptr_t runloom_critsec_suspend(void *tstate);
 void      runloom_critsec_restore(void *tstate, uintptr_t saved);
 
+/* Per-fiber privatisation of _PyThreadStateImpl.c_stack_refs (free-threaded
+ * 3.14+).  The shared per-hub tstate's c_stack_refs list head points at
+ * _PyCStackRef nodes living on the RUNNING fiber's C stack; a fiber must not
+ * leave its nodes linked into the shared tstate when it parks, or a sibling
+ * fiber's stack reuse corrupts the list and the free-threaded GC SIGSEGVs while
+ * walking it (gc_visit_thread_stacks; the p77_weakref_storm crash).
+ *   take(): return the current head and clear it (hand the next fiber a clean,
+ *           empty list).  set(): restore this fiber's saved head on resume.
+ * void* head keeps the core/non-core ABI boundary clean.  No-op (returns
+ * NULL / ignores) on non-FT or < 3.14, where the field does not exist.
+ * See runloom_iframe.c and runloom_sched_pystate.c.inc (snap/load). */
+void *runloom_tstate_take_cstack_refs(void *tstate);
+void  runloom_tstate_set_cstack_refs(void *tstate, void *head);
+
 /* EXPERIMENT (docs/dev/HUB_SCALING.md, A1b): make `op` immortal so its refcount
  * is frozen and never touched again.  Cross-hub incref/decref on a shared,
  * long-lived instance (the harness/channel objects every fiber calls into)

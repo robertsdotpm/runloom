@@ -298,6 +298,16 @@ void runloom_pystate_snap(runloom_pystate_snap_t *snap)
     ts->delete_later = NULL;
 #endif
 
+#if PY_VERSION_HEX >= 0x030E0000
+    /* 3.14 free-threaded: privatise this fiber's c_stack_refs list (the
+     * _PyCStackRef chain the FT GC walks).  Its nodes live on THIS fiber's C
+     * stack; take the head into the snap and hand the next fiber a clean empty
+     * list, so a sibling's stack reuse can't corrupt our nodes and the GC can't
+     * follow a dangling next on collect (the p77_weakref_storm SIGSEGV in
+     * gc_visit_thread_stacks).  No-op (returns NULL) on non-FT builds. */
+    snap->c_stack_refs = runloom_tstate_take_cstack_refs(ts);
+#endif
+
     snap->valid = 1;
 }
 
@@ -485,6 +495,15 @@ void runloom_pystate_load(runloom_pystate_snap_t *snap)
     snap->delete_later = NULL;
 #endif
 
+#if PY_VERSION_HEX >= 0x030E0000
+    /* Restore this fiber's own c_stack_refs head (see snap).  ts->c_stack_refs is
+     * empty here: the fiber that ran before us took its own list out on its snap,
+     * and hub_main runs no Python between swaps, so nothing was pushed onto the
+     * shared tstate in the interim. */
+    runloom_tstate_set_cstack_refs(ts, snap->c_stack_refs);
+    snap->c_stack_refs = NULL;
+#endif
+
     snap->valid = 0;
 }
 
@@ -520,6 +539,12 @@ void runloom_pystate_snap_clear(runloom_pystate_snap_t *snap)
      * dying objects with a DECREF, just drop the reference -- a small bounded
      * leak of a few already-dead objects beats a use-after-free. */
     snap->delete_later = NULL;
+#endif
+#if PY_VERSION_HEX >= 0x030E0000
+    /* c_stack_refs nodes live on the dying g's own coro stack (freed with it) and
+     * hold only borrowed eval-loop temporaries -- nothing to drop, just forget
+     * the head.  The shared tstate already had its list cleared at snap time. */
+    snap->c_stack_refs = NULL;
 #endif
     snap->valid = 0;
 }

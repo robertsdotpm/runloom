@@ -262,3 +262,51 @@ void runloom_critsec_restore(void *tstate_v, uintptr_t saved)
     (void)tstate_v; (void)saved;
 #endif
 }
+
+/* ---- c_stack_refs take/set across a fiber swap (free-threaded 3.14+) ----
+ *
+ * 3.14 free-threaded builds added _PyThreadStateImpl.c_stack_refs: the head of a
+ * singly-linked list of _PyCStackRef nodes, each living on the C STACK of the
+ * function that pushed it (eval loop / C-API steal paths hold a temporary
+ * borrowed reference there).  The free-threaded GC walks this list per thread
+ * state in gc_visit_thread_stacks() to count deferred references.
+ *
+ * In runloom's default mode many fibers share ONE per-hub PyThreadState but each
+ * fiber has its OWN mmap'd C stack.  A fiber can park (cooperatively yield)
+ * while a _PyCStackRef node it pushed is still live on its stack and linked into
+ * the shared tstate's c_stack_refs.  The next fiber resumed on that same hub
+ * then pushes/pops its own nodes (on ITS stack) onto the SAME list head, and its
+ * stack activity overwrites the parked fiber's node bytes -- so the list's `next`
+ * pointers come to thread across two unrelated C stacks, some since reused.  When
+ * the GC (gc.collect()) later walks c_stack_refs it follows a `next` into stale
+ * memory -> SIGSEGV (the p77_weakref_storm crash: gc_visit_thread_stacks faulting
+ * with a node whose next pointed into the code segment).
+ *
+ * Fix (mirrors current_frame / datastack_chunk privatisation): take() saves the
+ * head and clears it so a sibling fiber starts with an empty, private list; set()
+ * restores this fiber's own head on resume.  Each fiber's c_stack_refs list then
+ * lives entirely on its own preserved stack, exactly like its frame chain.
+ * Returned/passed as void* to keep the core/non-core ABI boundary clean.  No-op
+ * on non-FT / pre-3.14 (the field does not exist there). */
+void *runloom_tstate_take_cstack_refs(void *tstate_v)
+{
+#if defined(Py_GIL_DISABLED) && PY_VERSION_HEX >= 0x030E0000
+    _PyThreadStateImpl *ts = (_PyThreadStateImpl *)tstate_v;
+    void *head = (void *)ts->c_stack_refs;
+    ts->c_stack_refs = NULL;          /* hand the next fiber a clean list */
+    return head;
+#else
+    (void)tstate_v;
+    return NULL;
+#endif
+}
+
+void runloom_tstate_set_cstack_refs(void *tstate_v, void *head)
+{
+#if defined(Py_GIL_DISABLED) && PY_VERSION_HEX >= 0x030E0000
+    _PyThreadStateImpl *ts = (_PyThreadStateImpl *)tstate_v;
+    ts->c_stack_refs = (_PyCStackRef *)head;
+#else
+    (void)tstate_v; (void)head;
+#endif
+}
