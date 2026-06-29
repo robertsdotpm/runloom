@@ -108,15 +108,28 @@ TSan report on mmap_object->exports localizes the torn count before the stamp
 assert or the BufferError gate even fires.
 """
 import os
+import sys
 import tempfile
+import mmap
+
+# mmap.resize() is backed by mremap(MREMAP_MAYMOVE), which CPython only compiles in
+# under HAVE_MREMAP (Linux).  On macOS / BSD every mm.resize() raises
+# SystemError "mmap: resizing not available--no mremap()", so refuse_live /
+# resize_ok / control_ok all stay 0 and post() reports a FALSE invariant violation
+# for a platform that simply lacks the operation.  Skip cleanly off-Linux; this
+# guard is INERT on linux (the program imports + runs exactly as before).
+if sys.platform != "linux":
+    print("SKIP: mmap.resize() needs mremap(MREMAP_MAYMOVE) -- Linux-only")
+    sys.exit(0)
 
 import harness
 import runloom
 
-# Page size on this box.  Every resize is page-multiple so mremap operates on whole
-# pages (the kernel may relocate the whole range).  4096 on the test boxes; read it
-# rather than hardcode.
-PAGE = 4096
+# Page / allocation granularity on this box.  Every resize is granularity-multiple so
+# mremap operates on whole pages (the kernel may relocate the whole range).  4096 on
+# x86 Linux, 16384 on arm64 -- read it rather than hardcode (mmap.ALLOCATIONGRANULARITY
+# is the platform page granularity).
+PAGE = mmap.ALLOCATIONGRANULARITY
 
 # Initial mapped length in BYTES (one page).  The view covers the whole map; the
 # holder stamps every byte and reads every byte back across the park, so a relocate
@@ -156,7 +169,6 @@ def fresh_map(d, rnd):
     FILE_BYTES, mapping the first INIT_BYTES.  Returns (mm, fd, path).  The caller
     closes mm / fd and unlinks path.  File-backed so mmap.resize() exercises the
     real mremap(MREMAP_MAYMOVE) base-pointer rewrite (see the module note)."""
-    import mmap
     path = os.path.join(d, "m{0}_{1}".format(os.getpid(), rnd))
     fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_TRUNC, 0o600)
     os.ftruncate(fd, FILE_BYTES)

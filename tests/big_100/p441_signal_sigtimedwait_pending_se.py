@@ -94,9 +94,22 @@ missing/duplicate tag under replay, localizes the fault before the conservation
 sum even closes.  RNG is per-worker (rng) for replay.
 """
 import ctypes
+import ctypes.util
 import errno
 import os
 import signal
+import sys
+
+# --- MAC / non-Linux PORTABILITY guard --------------------------------------
+# This program exercises POSIX real-time signals (signal.SIGRTMIN, sigqueue(2),
+# SI_QUEUE, the per-process RT-signal pending FIFO).  RT signals and the
+# signal.SIGRTMIN/SIGRTMAX names are a Linux-only feature; on macOS (and other
+# platforms lacking them) `signal` has no SIGRTMIN attribute and importing it
+# below would AttributeError at module load.  Skip cleanly there instead of
+# crashing.  On Linux this guard is INERT (SIGRTMIN exists -> falls through).
+if not hasattr(signal, "SIGRTMIN"):
+    print("SKIP: POSIX RT signals (SIGRTMIN/sigqueue) are Linux-only")
+    sys.exit(0)
 
 import harness
 import runloom
@@ -138,7 +151,9 @@ BLOCK_ALL = set(BAND) | {CTRL_SIG}
 signal.pthread_sigmask(signal.SIG_BLOCK, BLOCK_ALL)
 
 # ---- libc sigqueue(2): queue an RT signal carrying a distinct sival_int tag ----
-libc = ctypes.CDLL("libc.so.6", use_errno=True)
+# Resolve libc by name rather than hard-coding "libc.so.6" (Linux-glibc-only);
+# ctypes.util.find_library("c") returns the platform's correct soname.
+libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
 
 
 class Sigval(ctypes.Union):

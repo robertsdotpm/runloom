@@ -96,9 +96,13 @@ import threading
 import harness
 import runloom
 
-# Slots for race-free per-worker tallies (single writer per slot, summed in
-# post()).  Power of two so we can mask wid into a slot.
-SLOTS = 1024
+# Per-worker tallies are sized [0]*H.funcs and indexed by wid DIRECTLY (one
+# writer per slot, summed in post()).  run_pool(H.funcs, ...) spawns wids
+# 0..H.funcs-1, so slot=wid gives every worker its own private slot -- the
+# known-good idiom from p41/p47.  A fixed mask (SLOTS=1024) ALIASES ~20 workers
+# per slot at funcs=20000, and free-threaded list[i] += x is not atomic under
+# GIL=0, so aliased += updates are silently LOST and conservation (fired +
+# cancel_won == armed) falsely breaks.  slot=wid eliminates the sharing.
 
 # The cancel-vs-fire CASES.  post() asserts each was exercised, so the worker
 # round-robins them by id in its FIRST ops (NOT random -- pure random selection
@@ -116,24 +120,21 @@ NCASES = 3
 # genuinely race.
 FIRE_INTERVAL = 0.004
 
-# CANCEL-BEFORE-FIRE uses a DELIBERATELY LONG interval so the cancel CAUSALLY
-# precedes the deadline regardless of M:N scheduling latency.  This case asserts
-# an EXACT outcome (fired==0 required), so it must NOT depend on a wall-clock
-# race: under load a canceller fiber's cooperative wakeup is delayed (measured:
-# a sleep(0.0005) wakes in a median ~1.4ms and up to ~15ms when 2000 fibers
-# share 8 hubs -- the same cooperative-sleep latency p119/p125 document), which
-# would push a tight margin PAST a 4ms deadline and the timer would (correctly)
-# fire before cancel() ran -- a TIMING ARTIFACT, not a torn Event flag.  A
-# multi-second interval leaves a margin orders of magnitude larger than any
-# scheduling delay, so cancel() always wins causally and fired==0 is a true test
-# of the Event gate (an over-fire HERE is a genuine missed flag).  Mirrors p125's
-# 2-4s parent timeout that makes the inner deadline fire clearly first.
+# CANCEL-BEFORE-FIRE uses a DELIBERATELY LONG interval AND cancels SYNCHRONOUSLY
+# right after start() (see run_one_timer), so the cancel CAUSALLY precedes the
+# deadline by construction -- no wall-clock margin to lose.  This case asserts an
+# EXACT outcome (fired==0 required), so it must NOT depend on a timing race: a
+# separate canceller fiber's cooperative wakeup is delayed under load (a measured
+# sleep(0.0005) woke after ~3000ms when 20000 fibers share 8 hubs -- the same
+# cooperative-sleep latency p119/p125 document), which would push the cancel PAST
+# even a multi-second deadline and the timer would (correctly) fire before
+# cancel() ran -- a TIMING ARTIFACT, not a torn Event flag.  Calling cancel() on
+# THIS fiber, sequenced immediately after start(), removes that confound: (A) the
+# Event._flag set happens-before the timer fiber can leave wait(), so an over-fire
+# HERE is a genuine missed flag.  The long interval still means that, absent the
+# cancel, the timer would not have fired yet, so a fired==1 is unambiguously the
+# gate failing to observe cancel()'s set.
 CANCEL_BEFORE_INTERVAL = 3.0
-
-# CANCEL-BEFORE-FIRE cancels this long after start -- a tiny delay so the cancel
-# fiber runs on another hub, but ASTRONOMICALLY inside CANCEL_BEFORE_INTERVAL, so
-# the cancel deterministically precedes the (multi-second) deadline.
-CANCEL_MARGIN = 0.0005
 
 # RACE: the canceller sleeps ~the (short) FIRE_INTERVAL before cancel()ing, so
 # (A) the flag write and (C) the timer fiber's is_set() read genuinely race
@@ -194,29 +195,67 @@ def run_one_timer(H, wid, rng, state, slot, case):
         fired_tally[slot] += 1
         return True
 
-    # CANCEL-BEFORE-FIRE and RACE both arm a timer AND a sibling canceller on
-    # another hub.  The canceller is a separate fiber so cancel()'s Event.set (A)
-    # runs on a DIFFERENT hub from the timer fiber's wait/is_set (B/C) -- that is
-    # the cross-hub flag race we attack.  CANCEL-BEFORE uses a LONG interval (the
-    # cancel must causally precede the deadline; an exact fired==0 must not hinge
-    # on a wall-clock race that scheduling latency can lose); RACE uses the short
-    # interval so the cancel and the deadline genuinely collide.
-    race = (case == CASE_RACE)
-    interval = FIRE_INTERVAL if race else CANCEL_BEFORE_INTERVAL
+    if case == CASE_CANCEL_BEFORE:
+        # CANCEL-BEFORE-FIRE: deterministic suppression must be CAUSAL by
+        # construction, NOT a wall-clock race.  start() then cancel()
+        # SYNCHRONOUSLY on this same fiber -- cancel()'s Event._flag set (A)
+        # happens-before the timer fiber's wait() can return, because (A) is
+        # sequenced before this fiber yields/joins, so run()'s is_set() check (C)
+        # MUST observe it.  This needs no cross-hub timing margin, so it is immune
+        # to M:N scheduler latency: under load a separate canceller fiber's
+        # cooperative wakeup is delayed (a sleep(0.0005) was measured waking after
+        # ~3000ms when 20000 fibers share 8 hubs), which would let the real 3.0s
+        # deadline fire BEFORE the delayed cancel() ran -- a TIMING ARTIFACT, not
+        # a torn Event flag.  The synchronous cancel removes that confound: an
+        # over-fire HERE is a genuine missed flag.  The long interval still means
+        # that, absent the cancel, the timer would NOT have fired yet -- so a
+        # fired==1 is unambiguously the gate failing to observe cancel()'s set.
+        timer = threading.Timer(CANCEL_BEFORE_INTERVAL, fire_fn)
+        timer.start()
+        timer.cancel()                   # (A) Event._flag set, synchronous & causal
+        timer.join()                     # run() fully returned; cell quiescent
+
+        armed[slot] += 1
+        case_tally[case][slot] += 1
+        n = cell[0]
+
+        if n >= 2:
+            H.fail("CANCEL-BEFORE timer DOUBLE-FIRED (cell={0}>=2) -- torn re-arm "
+                   "/ duplicated run() ran the function more than once".format(n))
+            return False
+        if n == 1:
+            # OVER-FIRE: cancel() (A) set the flag BEFORE the timer fiber could
+            # leave wait(), yet the timer fired -- is_set() (C) did not observe
+            # the set, the Event gate let a cancelled timer run.
+            H.fail("OVER-FIRE: CANCEL-BEFORE-FIRE timer (cancel() issued "
+                   "synchronously right after start, deep inside a {0}s interval) "
+                   "STILL FIRED (cell=1) -- the threading.Event gate did not "
+                   "suppress a cancelled timer: cancel()'s flag set was not "
+                   "observed by run()'s is_set() check".format(
+                       CANCEL_BEFORE_INTERVAL))
+            return False
+        # n == 0: cancel correctly won.
+        cancel_won_tally[slot] += 1
+        return True
+
+    # CASE_RACE: arm a timer AND a sibling canceller on ANOTHER hub.  The
+    # canceller is a separate fiber so cancel()'s Event.set (A) runs on a
+    # DIFFERENT hub from the timer fiber's wait/is_set (B/C) -- that is the
+    # cross-hub flag race we attack.  RACE uses the short interval and cancels at
+    # ~the interval boundary so the cancel and the deadline genuinely collide.
+    # Unlike CANCEL-BEFORE this case asserts NO exact outcome (fired XOR
+    # cancel_won, either legal), so it is IMMUNE to scheduling latency: a late
+    # cancel just means the timer-won branch.
+    interval = FIRE_INTERVAL
     timer = threading.Timer(interval, fire_fn)
     cwg = runloom.WaitGroup()
     cwg.add(1)
 
-    def canceller(timer=timer, race=race):
+    def canceller(timer=timer):
         try:
-            if race:
-                # Cancel at ~the interval boundary so (A) the _flag write races
-                # (C) the timer fiber's is_set() read.
-                runloom.sleep(RACE_DELAY)
-            else:
-                # CANCEL-BEFORE-FIRE: cancel WELL inside the interval so the gate
-                # must deterministically suppress.
-                runloom.sleep(CANCEL_MARGIN)
+            # Cancel at ~the interval boundary so (A) the _flag write races (C)
+            # the timer fiber's is_set() read.
+            runloom.sleep(RACE_DELAY)
             timer.cancel()               # (A) Event._flag set + _unpark_all
         finally:
             cwg.done()
@@ -231,25 +270,9 @@ def run_one_timer(H, wid, rng, state, slot, case):
     n = cell[0]
 
     if n >= 2:
-        H.fail("{0} timer DOUBLE-FIRED (cell={1}>=2) -- torn re-arm / duplicated "
-               "run() ran the function more than once".format(
-                   "RACE" if race else "CANCEL-BEFORE", n))
+        H.fail("RACE timer DOUBLE-FIRED (cell={0}>=2) -- torn re-arm / duplicated "
+               "run() ran the function more than once".format(n))
         return False
-
-    if case == CASE_CANCEL_BEFORE:
-        if n == 1:
-            # OVER-FIRE: cancel() (A) set the flag a wide margin before the
-            # deadline, yet the timer fired -- is_set() (C) did not observe the
-            # set, the Event gate let a cancelled timer run.
-            H.fail("OVER-FIRE: CANCEL-BEFORE-FIRE timer (cancel() issued {0}s into "
-                   "a {1}s interval) STILL FIRED (cell=1) -- the threading.Event "
-                   "gate did not suppress a cancelled timer: cancel()'s flag set "
-                   "was not observed by run()'s is_set() check".format(
-                       CANCEL_MARGIN, CANCEL_BEFORE_INTERVAL))
-            return False
-        # n == 0: cancel correctly won.
-        cancel_won_tally[slot] += 1
-        return True
 
     # CASE_RACE: exactly one outcome is legal -- fired XOR cancel_won.  n is 0
     # (cancel won the boundary race) or 1 (timer won).  Either is fine; both
@@ -295,7 +318,7 @@ def run_control(H, slot, state):
 
 
 def worker(H, wid, rng, state):
-    slot = wid & (SLOTS - 1)
+    slot = wid                           # private per-worker slot (one writer)
     i = 0
     for _ in H.round_range():
         if not H.running():
@@ -324,12 +347,12 @@ def setup(H):
     # Event is the cooperative CoEvent and each Timer runs as an M:N fiber.  The
     # per-slot tally lists are single-writer-per-slot, summed in post().
     H.state = {
-        "armed": [0] * SLOTS,            # timers armed on the contended path
-        "fired": [0] * SLOTS,            # contended timers whose function fired
-        "cancel_won": [0] * SLOTS,       # contended timers the cancel suppressed
-        "control_ok": [0] * SLOTS,       # control timers that fired exactly once
+        "armed": [0] * H.funcs,          # timers armed on the contended path
+        "fired": [0] * H.funcs,          # contended timers whose function fired
+        "cancel_won": [0] * H.funcs,     # contended timers the cancel suppressed
+        "control_ok": [0] * H.funcs,     # control timers that fired exactly once
         # Per-case tally so post() can assert each case was actually exercised.
-        "case_hits": [[0] * SLOTS for _ in range(NCASES)],
+        "case_hits": [[0] * H.funcs for _ in range(NCASES)],
     }
 
 

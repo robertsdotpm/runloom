@@ -197,9 +197,16 @@ def run_consumer(H, shared, mode, seen, guard, slot, dup_box):
     out-of-universe value is a torn deque slot -> hot fail-fast.  We keep NO
     per-fiber received tally (sibling consumers share a worker slot; the per-round
     `seen` bitmap IS the authoritative delivery count, reconciled after join)."""
+    # NB: NO `if not H.running(): return` deadline-bail here.  Producers never
+    # check H.running() (they always put their full multiset), and the main fiber
+    # always puts the CONSUMERS poison Nones after prod_wg.wait(), so every
+    # consumer is guaranteed to receive its own None and exit cleanly -- bailing
+    # mid-round on a duration deadline would abandon the shared queue with items
+    # still in _items (and this consumer's None unconsumed), tripping the
+    # empty-at-quiesce check with a FALSE "stranded payload".  The round drains to
+    # completion regardless of the wall-clock deadline; H.running() gates whole
+    # rounds in worker(), not the drain of an in-flight round.
     while True:
-        if not H.running():
-            return
         try:
             if mode == MODE_BLOCK:
                 item = shared.get(block=True, timeout=10.0)

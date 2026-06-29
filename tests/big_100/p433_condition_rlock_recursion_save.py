@@ -148,6 +148,7 @@ def shared_round(H, wid, rng, slot, state):
     acq_levels = state["acq_levels"]     # per-slot tally of acquire levels
     rel_levels = state["rel_levels"]     # per-slot tally of release levels
     ok_depth = state["ok_depth"]         # per-slot count of correct wake depths
+    tally_lock = state["tally_lock"]     # guards the WAITERS siblings' shared-slot +=
 
     # Own this cond for the round so a sibling round on the SAME cond can't reset
     # `ready` underneath our waiters.  guard is a plain CoLock, distinct from the
@@ -218,8 +219,11 @@ def shared_round(H, wid, rng, slot, state):
                                "park and the restore did not re-establish "
                                "ownership".format(idx, d))
                         return
-                    ok_depth[slot] += 1
-                    acq_levels[slot] += d      # entered d levels (conservation)
+                    # The 4 sibling waiters in this round share one parent slot;
+                    # serialize the RMW so the conservation tally can't tear.
+                    with tally_lock:
+                        ok_depth[slot] += 1
+                        acq_levels[slot] += d  # entered d levels (conservation)
                 finally:
                     # Release the d-1 extra levels we took (mirror of the loop
                     # above); the `with` releases the last level.  If the restore
@@ -229,7 +233,8 @@ def shared_round(H, wid, rng, slot, state):
                 # leaving the `with`: the final release.  After it the lock MUST be
                 # fully free for the next acquirer.
                 cond.release()
-                rel_levels[slot] += d          # released d levels (conservation)
+                with tally_lock:
+                    rel_levels[slot] += d      # released d levels (conservation)
             except RuntimeError as exc:
                 # "cannot release un-acquired lock" is the SYMPTOM of an
                 # under-restore under-flow -- the depth came back too small, so a
@@ -286,6 +291,7 @@ def control_round(H, wid, rng, slot, state):
     ctrl_ok = state["ctrl_ok"]
     ctrl_acq = state["ctrl_acq"]
     ctrl_rel = state["ctrl_rel"]
+    tally_lock = state["tally_lock"]     # guards slot-aliased += across workers
 
     wg = runloom.WaitGroup()
     wg.add(2)
@@ -311,12 +317,14 @@ def control_round(H, wid, rng, slot, state):
                     return
                 result["depth"] = cond._lock._recursion_count()
                 result["owned"] = cond._lock._is_owned()
-                ctrl_acq[slot] += d
+                with tally_lock:
+                    ctrl_acq[slot] += d
             finally:
                 for _ in range(extra):
                     cond.release()
             cond.release()
-            ctrl_rel[slot] += d
+            with tally_lock:
+                ctrl_rel[slot] += d
         except RuntimeError as exc:
             result["underflow"] = True
             H.fail("CONTROL waiter (depth {0}) raised on release: {1} -- the "
@@ -359,7 +367,8 @@ def control_round(H, wid, rng, slot, state):
         H.fail("CONTROL woke NOT owning its PRIVATE lock (entered depth {0}) -- "
                "the restore did not re-establish _owner".format(d))
         return
-    ctrl_ok[slot] += 1
+    with tally_lock:
+        ctrl_ok[slot] += 1
 
 
 def worker(H, wid, rng, state):
@@ -401,6 +410,15 @@ def setup(H):
         "conds": conds,
         "boxes": boxes,
         "guards": guards,
+        # A SINGLE cooperative lock guarding every tally += below.  The shared
+        # arm spawns WAITERS=4 sibling waiter fibers PER round all sharing ONE
+        # parent worker's slot (slot=wid is per-WORKER, but the 4 siblings within
+        # a round share that one slot), so acq_levels[slot]+=d / rel_levels[slot]
+        # += d / ok_depth[slot]+=1 are concurrent non-atomic list-cell RMWs that
+        # TEAR across hubs under GIL-off.  Serializing the write makes the
+        # conservation oracle exact; it does NOT touch the CoRLock _count field
+        # under test (that race is entirely within wait()'s save/restore).
+        "tally_lock": runloom.sync.Lock(),
         "acq_levels": [0] * SLOTS,   # shared-arm recursion levels acquired
         "rel_levels": [0] * SLOTS,   # shared-arm recursion levels released
         "ok_depth": [0] * SLOTS,     # shared-arm waiters that woke at the right depth

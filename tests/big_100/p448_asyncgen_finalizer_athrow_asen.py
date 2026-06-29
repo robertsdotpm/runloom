@@ -105,8 +105,8 @@ UNIVERSE_SIZE = 96
 UNIVERSE = tuple(0x44800000 + i for i in range(UNIVERSE_SIZE))
 UNIVERSE_SET = frozenset(UNIVERSE)
 
-# Slots for race-free per-worker tallies (single writer per slot, summed in post).
-SLOTS = 1024
+# Per-worker tallies use slot == wid (sized [0]*H.funcs in setup), so each cell
+# has a single writer and the global sums are race-free (summed in post).
 
 # How many values the owner asend-drives before the round ends (and then closes).
 # Fewer than UNIVERSE_SIZE so aclose() always lands on a still-OPEN gen (the
@@ -477,7 +477,15 @@ def case_control(H, wid, rng, state, slot):
 
 
 def worker(H, wid, rng, state):
-    slot = wid & (SLOTS - 1)
+    # Each worker owns a UNIQUE slot == its wid (run_pool spawns wids
+    # 0..H.funcs-1), so every per-slot tally cell has a single writer.  The old
+    # slot = wid & 1023 aliased ~20 workers onto each of 1024 slots at the
+    # 20k design tier, so created[slot]+=1 / finalized[slot]+=1 (and the rest)
+    # tore by +/-1 -> sum(created) != sum(finalized).  The async-gen machinery
+    # is correct; only the test's bookkeeping was racy.  (Sub-fibers in the
+    # contended cases run the gen body on the OWNER's slot, so there is no
+    # sub-fiber sharing of a cell here -- the worker is the sole writer.)
+    slot = wid
     i = 0
     for _ in H.round_range():
         if not H.running():
@@ -508,20 +516,26 @@ def setup(H):
     # Built INSIDE the root (monkey.patch() already ran), so runloom.Chan /
     # WaitGroup / yield_now are the cooperative M:N primitives.  All tallies are
     # per-slot single-writer lists summed in post() -- no shared += under GIL-off.
+    # One cell PER WORKER (slot == wid), not 1024 cells aliased across
+    # workers: at funcs=20000 the old [0]*1024 sizing made ~20 workers share
+    # each slot and tore the single-writer tallies.  Size every per-slot array as
+    # [0]*H.funcs so each worker is the sole writer of its cell (H.funcs is the
+    # capped worker count by the time setup() runs).
+    n = H.funcs
     H.state = {
         # global create/finalize conservation across ALL gens (every case)
-        "created": [0] * SLOTS,
-        "finalized": [0] * SLOTS,
+        "created": [0] * n,
+        "finalized": [0] * n,
         # control-arm-only create/finalize (single-owner -> must be exact)
-        "ctrl_created": [0] * SLOTS,
-        "ctrl_finalized": [0] * SLOTS,
+        "ctrl_created": [0] * n,
+        "ctrl_finalized": [0] * n,
         # per-case exercise counters (coverage)
-        "case": [[0] * SLOTS for _ in range(NCASES)],
+        "case": [[0] * n for _ in range(NCASES)],
         # diagnostic tallies
         "tally": {
-            "yielded": [0] * SLOTS,        # universe values asend-yielded
-            "busy": [0] * SLOTS,           # owner-side legal "already running"
-            "sib_busy": [0] * SLOTS,       # sibling-side legal "already running"
+            "yielded": [0] * n,            # universe values asend-yielded
+            "busy": [0] * n,               # owner-side legal "already running"
+            "sib_busy": [0] * n,           # sibling-side legal "already running"
         },
     }
 

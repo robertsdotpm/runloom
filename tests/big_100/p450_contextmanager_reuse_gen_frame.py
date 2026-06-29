@@ -148,10 +148,14 @@ UNIVERSE_SIZE = 256
 UNIVERSE = tuple(0x45000000 + i for i in range(UNIVERSE_SIZE))
 UNIVERSE_SET = frozenset(UNIVERSE)
 
-# Per-slot tally tables (single-writer-per-slot, summed in post).  Power-of-two
-# so we mask the worker id.
-SLOTS = 1024
-SLOT_MASK = SLOTS - 1
+# Per-slot tally tables are sized [0]*H.funcs in setup() and indexed by the raw
+# worker id (slot == wid), so EACH worker owns a PRIVATE slot -- single-writer-
+# per-slot with no aliasing at any --funcs.  This is what makes the control arm's
+# "this fiber owns slot serially / delta MUST be exact" premise TRUE: with
+# slot==wid one and only one worker ever touches a given slot, so the serial
+# delta check holds.  (The earlier SLOTS=1024, slot=wid&SLOT_MASK aliased ~20
+# workers onto each slot at funcs=20000, which falsified that premise -- the bug
+# was the test's bookkeeping, not the contextmanager machinery.)
 
 # Cases, round-robined by worker id in the first ops so coverage holds whether
 # one worker does K ops or K workers do 1 op each (the p125/p126/p172
@@ -448,7 +452,10 @@ def run_control(H, wid, rng, state, slot):
 
 
 def worker(H, wid, rng, state):
-    slot = wid & SLOT_MASK
+    # slot == wid: each worker owns a PRIVATE slot (tally tables are sized
+    # [0]*H.funcs).  No aliasing at any --funcs, so the control arm's single-owner
+    # serial-delta premise holds.
+    slot = wid
     i = 0
     for _ in H.round_range():
         if not H.running():
@@ -480,14 +487,18 @@ def setup(H):
     # the correct-usage / control arms is FRESH and private; the shared-cm arm's
     # one _GeneratorContextManager is deliberately raced WITHOUT a lock so the
     # gi_frame_state guard is the thing on trial.
+    # Tally tables sized to the (capped) worker count so slot==wid gives each
+    # worker a PRIVATE slot (the p41/p47 [0]*H.funcs idiom) -- no aliasing at any
+    # --funcs, so the control arm's single-owner serial-delta check is exact.
+    n = H.funcs
     H.state = {
-        "acquired": [0] * SLOTS,        # correct-usage pre-yield acquires
-        "released": [0] * SLOTS,        # correct-usage post-yield releases
-        "control_acq": [0] * SLOTS,     # control-arm acquires
-        "control_rel": [0] * SLOTS,     # control-arm releases
-        "control_iters": [0] * SLOTS,   # control-arm iterations actually run
-        "shared_runs": [0] * SLOTS,     # shared-cm probe rounds completed
-        "shared_rejected": [0] * SLOTS, # shared-cm reuses that were rejected
+        "acquired": [0] * n,            # correct-usage pre-yield acquires
+        "released": [0] * n,            # correct-usage post-yield releases
+        "control_acq": [0] * n,         # control-arm acquires
+        "control_rel": [0] * n,         # control-arm releases
+        "control_iters": [0] * n,       # control-arm iterations actually run
+        "shared_runs": [0] * n,         # shared-cm probe rounds completed
+        "shared_rejected": [0] * n,     # shared-cm reuses that were rejected
     }
 
 
