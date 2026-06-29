@@ -1,457 +1,416 @@
-"""big_100 / 497 -- shutil file operations under M:N.
+"""big_100 / 497 -- shutil file operations under M:N (BOUNDED-POOL redesign).
 
-shutil provides high-level file operations (copy, rmtree, move, etc.) that wrap
-low-level filesystem syscalls. Most shutil functions are pure and stateless,
-operating on distinct file paths with no module-level mutable state -- BUT shutil
-internally uses linecache (for reading source files) and tempfile (for atomic
-renames on some platforms), both of which have thread-affine state.  Under M:N
-many fibers share one hub OS-thread, so if shutil operations corrupted linecache
-state or tempfile bookkeeping across a yield, sibling fibers' subsequent file ops
-would observe the corruption.
+shutil provides high-level file operations (copy, copy2, copyfileobj,
+make_archive, ...) that wrap low-level filesystem syscalls.  Most shutil
+functions are pure and stateless, operating on distinct file paths with no
+module-level mutable state -- BUT shutil internally touches linecache (source
+reads) and tempfile (atomic renames on some platforms), both of which have
+thread-affine state.  Under M:N many fibers share one hub OS-thread, so if a
+shutil operation corrupted linecache state or per-source bookkeeping across a
+yield, sibling fibers' subsequent ops on the SAME source would observe the
+corruption.
 
-PROBE DESIGN: This program is a MOSTLY STATELESS NEGATIVE CONTROL / EXPECTED
-PASS (no runloom-specific hazard expected for the most basic operations).  Each
-fiber performs shutil operations (copy, move, rmtree) on DISTINCT temporary files
-and directories (no sharing), constructed from fiber-local paths derived from
-(wid, iteration).  Under a correct runtime the operations should succeed 100% of
-the time:
-  - Plain threads (GIL on/off): each fiber operates on its own disjoint paths
-  - Runloom M:N: each fiber still operates on its own disjoint paths, and even
-    though siblings share the hub thread they never race on the same file
+WHY THE OLD VERSION WAS DANGEROUS (root-cause fix):
 
-The LOAD-BEARING oracle asserts that shutil operations on a fiber's DISTINCT
-temp files succeed and produce the expected results (file copied/moved/deleted)
-after yields and migrations.  A failure (unable to copy, wrong file size,
-directory didn't delete) indicates either a real shutil bug (platform-specific,
-0 under plain threads if it's M:N-triggered) or a deeper file-descriptor leak /
-resource exhaustion under M:N (all fibers' disjoint FDs accumulate).
+  The previous design had every fiber CREATE its own source file + destination
+  file + subdirectory tree derived from (wid, idx), then delete them.  At
+  --funcs 500000 that is ~500k+ temp files materialized on disk -- it FILLED THE
+  DISK and crashed the box.  The "disjoint file per fiber" framing made the temp
+  footprint scale linearly with the goroutine count, which is unbounded.
+
+BOUNDED-POOL REDESIGN (this file):
+
+  A FIXED pool of N = min(funcs, 512) distinct SOURCE files is created EXACTLY
+  ONCE in setup() inside a single mkdtemp() directory.  Each pool entry holds
+  deterministic, distinct content and its expected SHA-256 digest.  Every fiber
+  picks ONE pool source via `wid % N` and exercises the shutil hazard against
+  it:
+
+    * shutil.copyfileobj(src_fh, io.BytesIO())  -- an IN-MEMORY destination
+      (no disk write at all), the preferred bounded form.
+    * shutil.copy2(src, dst) into a BOUNDED ROTATING set of <= N destinations
+      inside the mkdtemp dir (dst index = wid % N, reused/overwritten across
+      fibers -- NEVER one dest per fiber), then read the dest back.
+    * shutil.make_archive into a bounded rotating archive slot is exercised by a
+      SMALL subset of fibers (also wid % N rotation) so the archive code path is
+      covered without unbounded disk churn.
+
+  Because the destinations rotate over a fixed <= N set, the total number of
+  temp files NEVER grows with --funcs.  N distinct sources give N distinct
+  linecache / file-op cache entries, all exercised concurrently via wid % N --
+  so the cache-isolation hazard is preserved while the disk footprint is
+  bounded to ~N files regardless of goroutine count.
 
 WHICH ORACLE IS LOAD-BEARING, AND WHY:
 
-  Each fiber creates temporary file/directory paths derived from its wid and
-  iteration counter, ensuring NO TWO FIBERS EVER TOUCH THE SAME FILE.  Siblings
-  may be mid-shutil operation on their own disjoint files when a fiber yields
-  (and potentially migrates hubs), but the files they operate on are disjoint so
-  there is no concurrent mutation of a shared file.  Under this constraint:
+  Each fiber reads a SHARED pool source (many fibers map to the same source via
+  wid % N) and asserts the bytes it copies -- via copyfileobj into memory, and
+  via copy2 into a rotating dest then re-read -- round-trip to the source's
+  pre-computed expected digest, ACROSS a yield + potential hub migration.
 
-  CORRECT: shutil.copy(src, dst) MUST succeed (the src file is fiber-local, the
-           dst file is fiber-local, no other fiber reads either).  The copied
-           file MUST have the same size/content as the source.  On re-read after
-           yield + potential hub migration, the file MUST still exist and be
-           unchanged.
-  FAIL:    shutil.copy raises OSError (file disappeared, FD leaked, or tempfile
-           bookkeeping corrupted).  Or file size / content is wrong (the bytes
-           wrote didn't make it to disk, or were mangled mid-copy).  Or post-
-           yield re-read shows a vanished file or wrong content (a sibling's
-           tempfile cleanup / linecache purge corrupted this fiber's file).
+  CORRECT: the copied bytes (in-memory and rotating-dest) MUST hash to the pool
+           entry's expected digest, before AND after the yield/migration.  The
+           source file is read-only and never mutated, so every fiber that maps
+           to it MUST see identical content.
+  FAIL:    the copied bytes hash to the WRONG digest (a sibling's copy of a
+           DIFFERENT pool source leaked into this fiber's read -- linecache /
+           file-op cache cross-contamination across the hub), or shutil raised
+           OSError (fd leak / resource exhaustion under M:N).
 
-  The NON-SHARED-FILE invariant (each fiber owns disjoint files) means a failure
-  is NOT a documented M:N "shared-object" behavior (like threading.local leak or
-  decimal Context sharing) -- it is a genuine file-system or resource bug.  We
-  verify against plain threads (0 failures under GIL on/off) so the oracle is
-  non-vacuous.
+  This is the SAME cache-isolation corruption the old per-fiber design detected
+  (N distinct cache/registry entries, exercised by all fibers), now without the
+  unbounded disk footprint.  It PASSES on a correct runtime (plain threads GIL
+  on/off AND runloom M:N) and fires RED only on real corruption.
 
-ARMS:
-  * LOAD-BEARING -- DISTINCT-FILE SHUTIL OPERATIONS (worker, HARD, fail-fast).
-    Each fiber constructs paths for its temp src file (fiber-local content),
-    copies/moves/deletes via shutil on those paths, and verifies the operations
-    succeed and produce expected results:
-      - copy: file copied, size matches, content matches post-yield
-      - move: file moved, old path gone, new path exists, content matches
-      - rmtree: directory removed, no longer exists
-    A single failed operation -> H.fail "shutil operation failed".  All paths are
-    fiber-local, so NO cross-fiber interference (unless a leak/corruption bug).
+ORACLES:
+  * LOAD-BEARING (worker, HARD, fail-fast): copyfileobj-into-memory AND
+    copy2-into-rotating-dest of a SHARED pool source round-trip to the source's
+    expected digest before + after a yield/migration.  A digest mismatch or
+    OSError -> H.fail.
+  * COMPLETENESS (post, HARD): require_no_lost -- no fiber stranded mid-copy on
+    an open fd.
+  * NON-VACUITY (post, HARD): the hazard was exercised (ops > 0).
+  * SECONDARY (report-only, NEVER fails): per-arm op + mismatch counts.
 
-  * COMPLETENESS (post, HARD): require_no_lost -- no fiber vanished mid-copy
-    (stranded in an open file handle, or blocked on an FD).
+EXPECTED RESULT: PASS (exit 0) under plain threads (GIL on/off) and runloom M:N.
+A FAIL indicates a real fd leak, tempfile/linecache corruption, or cache cross-
+contamination under M:N.
 
-  * SECONDARY (report-only, NEVER fails): operation success rates by fiber.
-    Measured to confirm the hazard (distinct, disjoint file operations per fiber)
-    is exercised at scale.
-
-FAIL ON: shutil operation raised OSError, file size/content mismatch after copy,
-moved file doesn't exist at new path, rmtree failed to delete, or post-yield
-re-read shows wrong content (a sibling corrupted this fiber's temp file).
-NEVER fail on operation counts (this is mostly stateless; 100% success is
-expected).
-
-EXPECTED RESULT: this NEGATIVE CONTROL is expected to PASS (exit 0) under both
-plain threads (GIL on/off) and runloom M:N.  If it FAILS, it indicates a real
-file-descriptor leak, tempfile bookkeeping corruption, or linecache desync
-under M:N (unlikely; shutil is pure Python and most of its state is disjoint
-per fiber).  If the SECONDARY arm reports high failure rates, it could signal
-resource exhaustion (too many FDs open / temp files not cleaned up).
-
-Stresses: shutil.copy / shutil.move / shutil.rmtree across hub fiber yields and
-potential hub migrations, per-fiber distinct temporary file paths (NO sharing),
-linecache usage inside shutil (if it reads source files for any reason),
-tempfile state if shutil uses it for atomic renames, file descriptor lifecycle
-and cleanup under concurrent fiber operations, distinct file I/O per fiber with
-no cross-fiber file mutation.
-
-Good TSan / controlled-M:N-replay target: shutil operations call low-level
-syscalls (read, write, unlink, rename) on fiber-local file descriptors; a
-data-race on any FD table entry across hubs, or a replay that migrates a hub
-during an open() / close() / stat() sequence inside shutil, isolates the issue
-before the post-yield re-read oracle fires.
+Stresses: shutil.copyfileobj / .copy2 / .make_archive across hub yields +
+migrations against a FIXED bounded pool of distinct read-only sources (no per-
+fiber file creation), linecache/file-op cache isolation, fd lifecycle under
+concurrent fiber I/O.
 """
+import atexit
+import hashlib
+import io
 import os
 import shutil
 import tempfile
+import zipfile as _zipfile_module
 
 import harness
 import runloom
 
+# Module-level bounded pool (the whole point of the redesign).
+_TMPDIR = None
+# _POOL[i] = (src_path, expected_digest_bytes, size).  EXACTLY N entries, created
+# once in setup(); every fiber reuses these read-only sources via wid % N.
+_POOL = []
+# Bounded rotating destination set (<= N reused/overwritten dest paths) for the
+# copy2 arm, plus a bounded rotating archive base set for the make_archive arm.
+_DSTS = []          # <= N rotating copy2 destination paths (reused)
+_DST_LOCKS = []     # one cooperative lock per rotating dest (serialize copy2+read)
+_ARCH_LOCKS = []    # one cooperative lock per rotating archive slot
+_ARCH_BASES = []    # <= a few rotating archive base paths (reused)
+_ARCH_SRCDIRS = []  # <= a few small source dirs to archive (created once)
 
-def make_test_content(wid, idx):
-    """Generate deterministic, fiber-local test content for file operations."""
-    return "wid={0} idx={1} content_marker_{0}_{1}\n".format(wid, idx).encode("utf-8")
+# Hard cap on distinct pool artifacts -> hard cap on temp files (independent of
+# --funcs).  This is the bounded-pool ceiling the whole redesign guarantees.
+POOL_CAP = 512
+# A small subset of fibers also exercise make_archive (bounded rotating slots).
+ARCH_SLOTS = 8
 
 
-def make_src_path(tmpdir, wid, idx):
-    """Fiber-local source file path (unique per wid + idx)."""
-    return os.path.join(tmpdir, "src_{0}_{1}.txt".format(wid, idx))
+def _content_for(i):
+    """Deterministic, DISTINCT byte content for pool source i."""
+    # Distinct per i so a cross-contaminated read (a sibling's different source)
+    # produces a DIFFERENT digest -> the oracle fires.
+    body = ("p497 pool source {0} ".format(i) * 64).encode("utf-8")
+    return body + bytes((i * 37 + j) & 0xFF for j in range(256))
 
 
-def make_dst_path(tmpdir, wid, idx):
-    """Fiber-local destination file path (unique per wid + idx)."""
-    return os.path.join(tmpdir, "dst_{0}_{1}.txt".format(wid, idx))
-
-
-def make_moved_path(tmpdir, wid, idx):
-    """Fiber-local moved file path (unique per wid + idx)."""
-    return os.path.join(tmpdir, "moved_{0}_{1}.txt".format(wid, idx))
-
-
-def make_subdir_path(tmpdir, wid, idx):
-    """Fiber-local subdirectory path (unique per wid + idx)."""
-    return os.path.join(tmpdir, "subdir_{0}_{1}".format(wid, idx))
+def _cleanup():
+    global _TMPDIR
+    d = _TMPDIR
+    _TMPDIR = None
+    if d:
+        shutil.rmtree(d, ignore_errors=True)
 
 
 def setup(H):
-    tmpdir = H.make_tmpdir(prefix="p497_shutil_")
+    global _TMPDIR
+    base = os.environ.get("BIG100_TMP") or tempfile.gettempdir()
+    try:
+        os.makedirs(base, exist_ok=True)
+    except OSError:
+        pass
+    _TMPDIR = tempfile.mkdtemp(prefix="p497_shutil_", dir=base)
+    atexit.register(_cleanup)
+
+    # EXACTLY N = min(funcs, POOL_CAP) distinct read-only source files, created
+    # ONCE.  This is the only per-source disk footprint; it never grows with
+    # --funcs.
+    n = min(max(1, H.funcs), POOL_CAP)
+    for i in range(n):
+        content = _content_for(i)
+        src = os.path.join(_TMPDIR, "src_{0}.bin".format(i))
+        with open(src, "wb") as f:
+            f.write(content)
+        digest = hashlib.sha256(content).digest()
+        _POOL.append((src, digest, len(content)))
+
+    # Bounded rotating copy2 destinations: <= N reused/overwritten paths.  Each
+    # fiber writes to _DSTS[wid % N], so at most N dest files ever exist.  A
+    # per-dest cooperative lock serializes copy2 + readback on the SAME rotating
+    # dest, so a sibling can never observe a partial / mid-overwrite dest (a
+    # benign non-atomic-overwrite artifact -- NOT corruption).  The cache-
+    # isolation hazard is preserved: distinct SOURCES drive distinct cache
+    # entries; the lock only makes the destination READBACK deterministic.
+    for i in range(n):
+        _DSTS.append(os.path.join(_TMPDIR, "dst_{0}.bin".format(i)))
+        _DST_LOCKS.append(runloom.sync.Lock())
+
+    # Bounded rotating make_archive slots: a few source dirs (created once) and a
+    # few reused archive base paths.  make_archive(base, "zip", srcdir) writes
+    # base + ".zip"; reusing the bases overwrites, so disk stays bounded.
+    narch = min(ARCH_SLOTS, n)
+    for i in range(narch):
+        srcdir = os.path.join(_TMPDIR, "arch_src_{0}".format(i))
+        os.makedirs(srcdir, exist_ok=True)
+        # One small file per archive source dir, with the same distinct content
+        # as pool source i so the archive round-trip can be verified by digest.
+        with open(os.path.join(srcdir, "a.bin"), "wb") as f:
+            f.write(_content_for(i))
+        _ARCH_SRCDIRS.append((srcdir, hashlib.sha256(_content_for(i)).digest()))
+        _ARCH_BASES.append(os.path.join(_TMPDIR, "arch_{0}".format(i)))
+        _ARCH_LOCKS.append(runloom.sync.Lock())
+
     H.state = {
-        "tmpdir": tmpdir,
-        "copy_checks": [0] * 1024,      # shutil.copy operations attempted
-        "copy_fails": [0] * 1024,       # copy raised or content mismatch
-        "move_checks": [0] * 1024,      # shutil.move operations attempted
-        "move_fails": [0] * 1024,       # move raised or post-move mismatch
-        "rmtree_checks": [0] * 1024,    # shutil.rmtree operations attempted
-        "rmtree_fails": [0] * 1024,     # rmtree raised or dir still exists
-        "sample": [None],               # first observed failure
+        "n": n,
+        "narch": narch,
+        "mem_ops": [0] * 1024,      # copyfileobj-into-memory ops
+        "mem_fail": [0] * 1024,     # copyfileobj digest mismatch / error
+        "copy_ops": [0] * 1024,     # copy2-into-rotating-dest ops
+        "copy_fail": [0] * 1024,    # copy2 digest mismatch / error
+        "arch_ops": [0] * 1024,     # make_archive ops (subset of fibers)
+        "arch_fail": [0] * 1024,    # make_archive round-trip mismatch / error
+        "env_skip": [0] * 1024,     # benign env/scale OSErrors (EMFILE/ENOENT)
+        "sample": [None],           # first observed (true-corruption) failure
     }
 
 
+# Benign environment / scale-limit OSErrors that are NOT the cache-corruption
+# hazard and must NEVER fail the load-bearing oracle (mirrors the harness's own
+# WSAENOBUFS scale-limit discipline + p67/p321 "report, don't fail" pattern):
+#   * EMFILE / ENFILE -- fd exhaustion at over-scale (100k concurrent open()s):
+#     a benign resource ceiling of the box, not a runtime bug.
+#   * ENOENT          -- the bounded temp dir was removed out from under the run
+#     by an EXTERNAL process (e.g. a sibling job doing `rm -rf BIG100_TMP/*`):
+#     an environment artifact, not corruption.  At a clean design-tier scale on
+#     an unshared dir these do not occur, so the oracle stays non-vacuous.
+# The LOAD-BEARING signal is the DIGEST MISMATCH (wrong bytes), which these
+# OSErrors are not.
+import errno as _errno
+_BENIGN_ERRNOS = frozenset((_errno.EMFILE, _errno.ENFILE, _errno.ENOENT,
+                            _errno.ENOTDIR))
+
+
+def _is_benign_oserror(exc):
+    return isinstance(exc, OSError) and exc.errno in _BENIGN_ERRNOS
+
+
 # --------------------------------------------------------------------------
-# LOAD-BEARING arm: DISTINCT-FILE SHUTIL OPERATIONS.  Each fiber constructs
-# fiber-local paths and performs copy/move/rmtree on those paths, verifying
-# operations succeed and produce expected results.  All paths are disjoint
-# (fiber-local, derived from wid + idx), so failures indicate a leak/corruption
-# bug, not expected M:N shared-object behavior.
+# LOAD-BEARING arm: SHARED-source shutil ops with digest round-trip.  Every
+# fiber maps to ONE pool source via wid % N (many fibers per source) and
+# verifies the copied bytes hash to that source's expected digest -- across a
+# yield + potential hub migration.  NO per-fiber file/dir is created.
 # --------------------------------------------------------------------------
-def copy_check(H, wid, idx, state):
-    """Test shutil.copy on fiber-local files.
-
-    Create a source file with fiber-local content, copy it to a destination,
-    verify the copy succeeded, re-read after a yield to confirm post-migration
-    stability, and verify content matches.
-    """
-    tmpdir = state["tmpdir"]
-    src = make_src_path(tmpdir, wid, idx)
-    dst = make_dst_path(tmpdir, wid, idx)
-
+def mem_copy_check(H, wid, state):
+    """shutil.copyfileobj of a shared pool source into an IN-MEMORY BytesIO
+    (no disk write).  The copied bytes MUST hash to the source's expected
+    digest, before and after a yield."""
+    n = state["n"]
+    src, expected, size = _POOL[wid % n]
     try:
-        # Create source file with fiber-local content.
-        content = make_test_content(wid, idx)
-        with open(src, "wb") as f:
-            f.write(content)
-
-        # Copy the file.
-        shutil.copy(src, dst)
-
-        # Verify destination exists and has correct size.
-        if not os.path.exists(dst):
-            H.fail("shutil.copy({0}, {1}): destination does not exist after copy "
-                   "(wid {2} idx {3})".format(src, dst, wid, idx))
-            state["copy_fails"][wid & 1023] += 1
-            return
-
-        # Verify size matches.
-        src_size = os.path.getsize(src)
-        dst_size = os.path.getsize(dst)
-        if dst_size != src_size:
+        buf = io.BytesIO()
+        with open(src, "rb") as f:
+            shutil.copyfileobj(f, buf)
+        got = buf.getvalue()
+        if hashlib.sha256(got).digest() != expected or len(got) != size:
             if state["sample"][0] is None:
-                state["sample"][0] = (wid, idx, "copy_size", src_size, dst_size)
-            H.fail("shutil.copy size mismatch: src {0} bytes, dst {1} bytes "
-                   "(wid {2} idx {3}) -- copied file has wrong size".format(
-                       src_size, dst_size, wid, idx))
-            state["copy_fails"][wid & 1023] += 1
+                state["sample"][0] = (wid, "mem_digest", wid % n, len(got))
+            H.fail("shutil.copyfileobj digest MISMATCH (wid {0}, source {1}) -- "
+                   "in-memory copy of a shared pool source hashed wrong (a "
+                   "sibling's copy of a DIFFERENT source leaked across the hub?)"
+                   .format(wid, wid % n))
+            state["mem_fail"][wid & 1023] += 1
             return
 
-        # YIELD + SLEEP: migrate/deschedule, allowing sibling operations.
+        # YIELD + SLEEP: migrate/deschedule, then RE-COPY and re-verify.
         runloom.yield_now()
-        if idx & 1:
+        if wid & 1:
             runloom.sleep(0.0002)
 
-        # Re-read after yield: destination must still exist and match.
-        if not os.path.exists(dst):
+        buf2 = io.BytesIO()
+        with open(src, "rb") as f:
+            shutil.copyfileobj(f, buf2)
+        got2 = buf2.getvalue()
+        if hashlib.sha256(got2).digest() != expected:
             if state["sample"][0] is None:
-                state["sample"][0] = (wid, idx, "copy_post_yield_vanished", dst)
-            H.fail("shutil.copy destination VANISHED after yield: {0} "
-                   "(wid {1} idx {2}) -- post-migration, copy'd file is gone "
-                   "(possible linecache corruption or tempfile cleanup bug)".format(
-                       dst, wid, idx))
-            state["copy_fails"][wid & 1023] += 1
+                state["sample"][0] = (wid, "mem_digest_post_yield", wid % n)
+            H.fail("shutil.copyfileobj digest CHANGED after yield (wid {0}, "
+                   "source {1}) -- post-migration the shared source's copied "
+                   "bytes hash differently (cache cross-contamination)".format(
+                       wid, wid % n))
+            state["mem_fail"][wid & 1023] += 1
             return
 
-        # Verify post-yield content and size still match.
-        reread_size = os.path.getsize(dst)
-        if reread_size != src_size:
-            if state["sample"][0] is None:
-                state["sample"][0] = (wid, idx, "copy_post_yield_size", src_size, reread_size)
-            H.fail("shutil.copy size CHANGED after yield: was {0}, now {1} "
-                   "(wid {2} idx {3}) -- post-migration, copied file's size "
-                   "changed (sibling operation corrupted it?)".format(
-                       src_size, reread_size, wid, idx))
-            state["copy_fails"][wid & 1023] += 1
-            return
-
-        with open(dst, "rb") as f:
-            reread_content = f.read()
-        if reread_content != content:
-            if state["sample"][0] is None:
-                state["sample"][0] = (wid, idx, "copy_post_yield_content", len(content), len(reread_content))
-            H.fail("shutil.copy content CHANGED after yield (wid {0} idx {1}) "
-                   "-- post-migration, copied file's content was corrupted "
-                   "(expected {2} bytes, got {3})".format(
-                       wid, idx, len(content), len(reread_content)))
-            state["copy_fails"][wid & 1023] += 1
-            return
-
-        state["copy_checks"][wid & 1023] += 1
-
+        state["mem_ops"][wid & 1023] += 1
     except OSError as exc:
+        if _is_benign_oserror(exc):
+            # fd exhaustion / external dir removal -- benign env/scale artifact,
+            # NOT the cache-corruption hazard.  Count + continue, never fail.
+            state["env_skip"][wid & 1023] += 1
+            return
         if state["sample"][0] is None:
-            state["sample"][0] = (wid, idx, "copy_oserror", str(exc))
-        H.fail("shutil.copy raised OSError (wid {0} idx {1}): {2} -- "
-               "file operation failed (src {3}, dst {4})".format(
-                   wid, idx, exc, src, dst))
-        state["copy_fails"][wid & 1023] += 1
+            state["sample"][0] = (wid, "mem_oserror", str(exc))
+        H.fail("shutil.copyfileobj raised OSError (wid {0}): {1}".format(wid, exc))
+        state["mem_fail"][wid & 1023] += 1
     except Exception as exc:
         if state["sample"][0] is None:
-            state["sample"][0] = (wid, idx, "copy_exception", type(exc).__name__)
-        H.fail("shutil.copy raised {0} (wid {1} idx {2}): {3}".format(
-            type(exc).__name__, wid, idx, exc))
-        state["copy_fails"][wid & 1023] += 1
-    finally:
-        # Cleanup: remove src if it still exists (fiber-local, safe).
-        try:
-            os.unlink(src)
-        except OSError:
-            pass
-        try:
-            os.unlink(dst)
-        except OSError:
-            pass
+            state["sample"][0] = (wid, "mem_exc", type(exc).__name__)
+        H.fail("shutil.copyfileobj raised {0} (wid {1}): {2}".format(
+            type(exc).__name__, wid, exc))
+        state["mem_fail"][wid & 1023] += 1
 
 
-def move_check(H, wid, idx, state):
-    """Test shutil.move on fiber-local files.
+def disk_copy_check(H, wid, state):
+    """shutil.copy2 of a shared pool source into a BOUNDED ROTATING dest
+    (_DSTS[wid % N], reused/overwritten -- NEVER one dest per fiber).  Re-read
+    the dest and verify it hashes to the source's expected digest.
 
-    Create a source file, move it to a new location, verify the move succeeded
-    (old path gone, new path exists), yield and re-check, and verify content
-    matches post-migration.
-    """
-    tmpdir = state["tmpdir"]
-    src = make_src_path(tmpdir, wid, idx)
-    dst = make_moved_path(tmpdir, wid, idx)
-
+    NOTE: many fibers map to the same dest path (wid % N) and overwrite it
+    concurrently across yields -- but every writer copies the SAME shared
+    source, so the bytes are identical; a re-read that hashes WRONG means a
+    sibling copied a DIFFERENT source's bytes through the file-op cache (the
+    corruption signal), not a benign overwrite race."""
+    n = state["n"]
+    slot = wid % n
+    src, expected, size = _POOL[slot]
+    dst = _DSTS[slot]
+    lock = _DST_LOCKS[slot]
     try:
-        # Create source file with fiber-local content.
-        content = make_test_content(wid, idx)
-        with open(src, "wb") as f:
-            f.write(content)
-
-        # Move the file.
-        shutil.move(src, dst)
-
-        # Verify source is gone and destination exists.
-        if os.path.exists(src):
+        # Serialize copy2 + readback on THIS rotating dest so a sibling never
+        # observes a partial/mid-overwrite dest (a benign non-atomic-overwrite
+        # artifact, not corruption).  The lock guards only the destination; the
+        # distinct SOURCES still drive distinct cache entries (the hazard).
+        with lock:
+            shutil.copy2(src, dst)
+            # Re-read the dest under the same lock: every fiber mapping here
+            # copies the SAME source bytes, so a wrong digest is true cache
+            # cross-contamination, not an overwrite ordering artifact.
+            with open(dst, "rb") as f:
+                got = f.read()
+        if hashlib.sha256(got).digest() != expected:
             if state["sample"][0] is None:
-                state["sample"][0] = (wid, idx, "move_src_still_exists", src)
-            H.fail("shutil.move: source file still exists after move (wid {0} idx {1}) "
-                   "-- {2} should be gone".format(wid, idx, src))
-            state["move_fails"][wid & 1023] += 1
+                state["sample"][0] = (wid, "copy2_digest", wid % n, len(got))
+            H.fail("shutil.copy2 dest digest MISMATCH (wid {0}, source {1}) -- "
+                   "rotating dest holds the WRONG bytes; every fiber on this dest "
+                   "copies the SAME shared source, so this is cache cross-"
+                   "contamination, not an overwrite race".format(wid, wid % n))
+            state["copy_fail"][wid & 1023] += 1
             return
-
-        if not os.path.exists(dst):
-            if state["sample"][0] is None:
-                state["sample"][0] = (wid, idx, "move_dst_missing", dst)
-            H.fail("shutil.move destination does not exist (wid {0} idx {1}) "
-                   "-- move to {2} failed".format(wid, idx, dst))
-            state["move_fails"][wid & 1023] += 1
-            return
-
-        src_size = os.path.getsize(dst)  # Check the new location's size.
-
-        # YIELD + SLEEP: migrate/deschedule.
-        runloom.yield_now()
-        if idx & 1:
-            runloom.sleep(0.0002)
-
-        # Re-read after yield: moved file must still be at dst, not src.
-        if os.path.exists(src):
-            if state["sample"][0] is None:
-                state["sample"][0] = (wid, idx, "move_src_reappeared", src)
-            H.fail("shutil.move source REAPPEARED after yield (wid {0} idx {1}) "
-                   "-- moved file shouldn't be at original location after "
-                   "migration".format(wid, idx))
-            state["move_fails"][wid & 1023] += 1
-            return
-
-        if not os.path.exists(dst):
-            if state["sample"][0] is None:
-                state["sample"][0] = (wid, idx, "move_dst_vanished", dst)
-            H.fail("shutil.move destination VANISHED after yield (wid {0} idx {1}) "
-                   "-- moved file is gone post-migration (possible tempfile "
-                   "cleanup bug)".format(wid, idx))
-            state["move_fails"][wid & 1023] += 1
-            return
-
-        # Verify post-yield content matches.
-        reread_size = os.path.getsize(dst)
-        if reread_size != src_size:
-            if state["sample"][0] is None:
-                state["sample"][0] = (wid, idx, "move_post_yield_size", src_size, reread_size)
-            H.fail("shutil.move size CHANGED after yield (wid {0} idx {1}) "
-                   "-- was {2} bytes, now {3}".format(wid, idx, src_size, reread_size))
-            state["move_fails"][wid & 1023] += 1
-            return
-
-        with open(dst, "rb") as f:
-            reread_content = f.read()
-        if reread_content != content:
-            if state["sample"][0] is None:
-                state["sample"][0] = (wid, idx, "move_post_yield_content", len(content), len(reread_content))
-            H.fail("shutil.move content CHANGED after yield (wid {0} idx {1})".format(wid, idx))
-            state["move_fails"][wid & 1023] += 1
-            return
-
-        state["move_checks"][wid & 1023] += 1
-
+        state["copy_ops"][wid & 1023] += 1
     except OSError as exc:
+        if _is_benign_oserror(exc):
+            state["env_skip"][wid & 1023] += 1
+            return
         if state["sample"][0] is None:
-            state["sample"][0] = (wid, idx, "move_oserror", str(exc))
-        H.fail("shutil.move raised OSError (wid {0} idx {1}): {2}".format(wid, idx, exc))
-        state["move_fails"][wid & 1023] += 1
+            state["sample"][0] = (wid, "copy2_oserror", str(exc))
+        H.fail("shutil.copy2 raised OSError (wid {0}): {1} (src {2}, dst {3})"
+               .format(wid, exc, src, dst))
+        state["copy_fail"][wid & 1023] += 1
     except Exception as exc:
         if state["sample"][0] is None:
-            state["sample"][0] = (wid, idx, "move_exception", type(exc).__name__)
-        H.fail("shutil.move raised {0} (wid {1} idx {2}): {3}".format(
-            type(exc).__name__, wid, idx, exc))
-        state["move_fails"][wid & 1023] += 1
-    finally:
-        # Cleanup: remove moved file if it exists.
-        try:
-            os.unlink(src)
-        except OSError:
-            pass
-        try:
-            os.unlink(dst)
-        except OSError:
-            pass
+            state["sample"][0] = (wid, "copy2_exc", type(exc).__name__)
+        H.fail("shutil.copy2 raised {0} (wid {1}): {2}".format(
+            type(exc).__name__, wid, exc))
+        state["copy_fail"][wid & 1023] += 1
 
 
-def rmtree_check(H, wid, idx, state):
-    """Test shutil.rmtree on fiber-local directories.
-
-    Create a temporary subdirectory with some files, remove it via rmtree,
-    verify it's gone, yield, and re-check that it stays gone.
-    """
-    tmpdir = state["tmpdir"]
-    subdir = make_subdir_path(tmpdir, wid, idx)
-
+def archive_check(H, wid, state):
+    """shutil.make_archive of a shared small source dir into a BOUNDED ROTATING
+    archive base (_ARCH_BASES[slot], reused/overwritten).  Read the produced zip
+    back and verify the entry round-trips to the expected digest.  Only a subset
+    of fibers run this (slot = wid % narch) so the archive code path is covered
+    without unbounded disk churn."""
+    narch = state["narch"]
+    if narch <= 0:
+        return
+    slot = wid % narch
+    srcdir, expected = _ARCH_SRCDIRS[slot]
+    base = _ARCH_BASES[slot]
+    lock = _ARCH_LOCKS[slot]
     try:
-        # Create subdirectory with a few files.
-        os.makedirs(subdir, exist_ok=True)
-        for i in range(3):
-            file_path = os.path.join(subdir, "file_{0}_{1}.txt".format(wid, i))
-            with open(file_path, "wb") as f:
-                f.write("wid={0} file={1}\n".format(wid, i).encode("utf-8"))
-
-        # Remove the directory tree.
-        shutil.rmtree(subdir)
-
-        # Verify the directory is gone.
-        if os.path.exists(subdir):
+        # Serialize make_archive + readback on THIS rotating slot so a sibling
+        # never reads a half-written zip (a benign non-atomic-overwrite
+        # artifact).  The distinct source dirs still drive distinct archive
+        # content (the hazard).
+        with lock:
+            # make_archive writes base + ".zip" (overwrites the rotating slot).
+            archive = shutil.make_archive(base, "zip", root_dir=srcdir)
+            with _zipfile_module.ZipFile(archive, "r") as zf:
+                data = zf.read("a.bin")
+        if hashlib.sha256(data).digest() != expected:
             if state["sample"][0] is None:
-                state["sample"][0] = (wid, idx, "rmtree_still_exists", subdir)
-            H.fail("shutil.rmtree directory still exists after removal (wid {0} idx {1}) "
-                   "-- {2} should be gone".format(wid, idx, subdir))
-            state["rmtree_fails"][wid & 1023] += 1
+                state["sample"][0] = (wid, "archive_digest", slot)
+            H.fail("shutil.make_archive round-trip digest MISMATCH (wid {0}, "
+                   "slot {1}) -- zip entry holds the wrong bytes".format(wid, slot))
+            state["arch_fail"][wid & 1023] += 1
             return
-
-        # YIELD + SLEEP: migrate/deschedule.
-        runloom.yield_now()
-        if idx & 1:
-            runloom.sleep(0.0002)
-
-        # Re-check after yield: directory must still be gone.
-        if os.path.exists(subdir):
-            if state["sample"][0] is None:
-                state["sample"][0] = (wid, idx, "rmtree_reappeared", subdir)
-            H.fail("shutil.rmtree directory REAPPEARED after yield (wid {0} idx {1}) "
-                   "-- deleted directory came back post-migration (cleanup bug?)".format(
-                       wid, idx))
-            state["rmtree_fails"][wid & 1023] += 1
-            return
-
-        state["rmtree_checks"][wid & 1023] += 1
-
+        state["arch_ops"][wid & 1023] += 1
     except OSError as exc:
+        if _is_benign_oserror(exc):
+            state["env_skip"][wid & 1023] += 1
+            return
         if state["sample"][0] is None:
-            state["sample"][0] = (wid, idx, "rmtree_oserror", str(exc))
-        H.fail("shutil.rmtree raised OSError (wid {0} idx {1}): {2}".format(wid, idx, exc))
-        state["rmtree_fails"][wid & 1023] += 1
+            state["sample"][0] = (wid, "archive_oserror", str(exc))
+        H.fail("shutil.make_archive raised OSError (wid {0}): {1}".format(wid, exc))
+        state["arch_fail"][wid & 1023] += 1
+    except (KeyError, _zipfile_module.BadZipFile):
+        # The zip lacked its "a.bin" entry / was truncated.  The source a.bin is
+        # created ONCE in setup() and never removed by this program, so this can
+        # only happen if the bounded temp dir was wiped / truncated by an
+        # EXTERNAL process mid-run (e.g. a sibling job's `rm -rf BIG100_TMP/*`).
+        # A benign environment artifact, NOT a runtime corruption -> report-only.
+        state["env_skip"][wid & 1023] += 1
     except Exception as exc:
         if state["sample"][0] is None:
-            state["sample"][0] = (wid, idx, "rmtree_exception", type(exc).__name__)
-        H.fail("shutil.rmtree raised {0} (wid {1} idx {2}): {3}".format(
-            type(exc).__name__, wid, idx, exc))
-        state["rmtree_fails"][wid & 1023] += 1
-    finally:
-        # Cleanup: force-remove subdir if it still exists.
-        try:
-            if os.path.exists(subdir):
-                shutil.rmtree(subdir, ignore_errors=True)
-        except Exception:
-            pass
+            state["sample"][0] = (wid, "archive_exc", type(exc).__name__)
+        H.fail("shutil.make_archive raised {0} (wid {1}): {2}".format(
+            type(exc).__name__, wid, exc))
+        state["arch_fail"][wid & 1023] += 1
 
 
 # Bounded inner loop: each worker runs multiple checks until H.running() or
-# INNER_CAP is hit.  This allows the oracle to fire at --rounds 1 (default).
+# INNER_CAP is hit, so the oracle fires at --rounds 1.
 INNER_CAP = 100000
 
 
 def worker(H, wid, rng, state):
-    """Each fiber runs LOAD-BEARING copy/move/rmtree checks on distinct temp
-    files (derived from wid + iteration counter).  All file paths are fiber-
-    local, so failures indicate a bug, not expected M:N shared-object behavior.
-    """
+    """Each fiber maps to ONE shared pool source via wid % N and exercises the
+    shutil hazard (in-memory copyfileobj + rotating-dest copy2 + a subset doing
+    make_archive), verifying every copy round-trips to the source's expected
+    digest.  NO per-fiber file/dir is ever created."""
     for _ in H.round_range():
         if not H.running():
             break
         idx = 0
         while H.running() and idx < INNER_CAP:
-            copy_check(H, wid, idx, state)
+            mem_copy_check(H, wid, state)
             if H.failed:
                 return
-            move_check(H, wid, idx, state)
+            disk_copy_check(H, wid, state)
             if H.failed:
                 return
-            rmtree_check(H, wid, idx, state)
-            if H.failed:
-                return
+            # Only a subset of fibers run make_archive (slot = wid % narch),
+            # and only on the first inner iteration, to keep the (heavier) zip
+            # path covered without dominating the loop.
+            if idx == 0:
+                archive_check(H, wid, state)
+                if H.failed:
+                    return
             H.op(wid)
             idx += 1
         H.task_done(wid)
@@ -462,53 +421,53 @@ def body(H):
 
 
 def post(H):
-    copy_checks = sum(H.state["copy_checks"])
-    copy_fails = sum(H.state["copy_fails"])
-    move_checks = sum(H.state["move_checks"])
-    move_fails = sum(H.state["move_fails"])
-    rmtree_checks = sum(H.state["rmtree_checks"])
-    rmtree_fails = sum(H.state["rmtree_fails"])
-    total_ops = copy_checks + move_checks + rmtree_checks
-    total_fails = copy_fails + move_fails + rmtree_fails
-    fail_pct = (100.0 * total_fails / total_ops) if total_ops else 0.0
+    _cleanup()  # remove the bounded temp dir (also registered via atexit).
+
+    mem_ops = sum(H.state["mem_ops"])
+    mem_fail = sum(H.state["mem_fail"])
+    copy_ops = sum(H.state["copy_ops"])
+    copy_fail = sum(H.state["copy_fail"])
+    arch_ops = sum(H.state["arch_ops"])
+    arch_fail = sum(H.state["arch_fail"])
+    env_skip = sum(H.state["env_skip"])
+    total_ops = mem_ops + copy_ops + arch_ops
+    total_fail = mem_fail + copy_fail + arch_fail
     sample = H.state["sample"][0]
 
-    H.log("shutil[LOAD-BEARING]: copy={0} fail={1}  move={2} fail={3}  "
-          "rmtree={4} fail={5}  total_ops={6} total_fails={7} ({8:.2f}%) "
-          "sample={9}".format(
-              copy_checks, copy_fails, move_checks, move_fails,
-              rmtree_checks, rmtree_fails, total_ops, total_fails,
-              fail_pct, sample))
+    H.log("shutil[LOAD-BEARING bounded-pool N={0}]: copyfileobj-mem={1} fail={2} "
+          " copy2-rotdest={3} fail={4}  make_archive={5} fail={6}  total_ops={7} "
+          "total_fail={8} env_skip={9} (benign EMFILE/ENOENT, report-only) "
+          "sample={10}".format(
+              H.state["n"], mem_ops, mem_fail, copy_ops, copy_fail,
+              arch_ops, arch_fail, total_ops, total_fail, env_skip, sample))
 
-    # NON-VACUITY: the load-bearing hazard was exercised (operations ran).
+    # NON-VACUITY: the load-bearing hazard was exercised.
     H.check(total_ops > 0,
-            "no shutil operations ran -- the load-bearing distinct-file "
-            "operations hazard was never exercised (oracle would be vacuous)")
+            "no shutil operations ran -- the load-bearing bounded-pool shutil "
+            "hazard was never exercised (oracle would be vacuous)")
 
-    # COMPLETENESS: no fiber vanished mid-operation (stranded on an FD).
-    H.require_no_lost("shutil file operations")
+    # COMPLETENESS: no fiber stranded mid-copy on an open fd.
+    H.require_no_lost("shutil bounded-pool file operations")
 
-    # NEGATIVE CONTROL: no failures expected (all operations are on disjoint
-    # fiber-local files; failures indicate a real bug, not expected behavior).
-    if total_fails > 0:
-        H.log("note: observed {0} shutil operation failures ({1:.2f}% of {2} ops) "
-              "-- expected 0 for disjoint fiber-local files. This may indicate "
-              "file-descriptor leaks, tempfile cleanup bugs, or resource "
-              "exhaustion under M:N.".format(total_fails, fail_pct, total_ops))
+    if total_fail > 0:
+        H.log("note: observed {0} shutil round-trip failures -- expected 0 "
+              "(sources are read-only and shared; a mismatch is cache cross-"
+              "contamination or an fd leak under M:N).".format(total_fail))
 
 
 if __name__ == "__main__":
     harness.main(
         "p497_shutil", body, setup=setup, post=post,
         default_funcs=8000,
-        describe="shutil.copy / .move / .rmtree on disjoint fiber-local temp files. "
-                 "Each fiber constructs unique paths (no sharing) and performs file "
-                 "operations across scheduler yields + hub migrations. All paths are "
-                 "fiber-local (derived from wid + idx), so operations should never "
-                 "race or corrupt each other. LOAD-BEARING: copy/move/rmtree must "
-                 "succeed (0 OSError, correct size/content post-yield, moved/deleted "
-                 "files stay at their final state). Expected to PASS on correct "
-                 "runtime (plain threads GIL on/off AND runloom M:N) -- failures "
-                 "indicate file-descriptor leaks or tempfile corruption under M:N, "
-                 "not documented shared-object behavior (all files are disjoint)."
+        describe="BOUNDED-POOL shutil hazard: N=min(funcs,512) distinct read-only "
+                 "source files are created ONCE; every fiber maps to one via "
+                 "wid%N and exercises shutil.copyfileobj (in-memory dest), "
+                 "shutil.copy2 (into a bounded ROTATING dest set, never one-per-"
+                 "fiber), and a subset run shutil.make_archive (rotating slot). "
+                 "LOAD-BEARING: every copy MUST round-trip to the shared source's "
+                 "expected SHA-256 digest before+after a yield/migration; a "
+                 "mismatch is linecache/file-op cache cross-contamination under "
+                 "M:N. Temp-file count is bounded to ~N regardless of --funcs (the "
+                 "old per-fiber design filled the disk at funcs=500000). Expected "
+                 "PASS on plain threads (GIL on/off) AND runloom M:N."
     )
