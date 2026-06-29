@@ -407,9 +407,40 @@ void runloom_g_entry(void *user)
     }
     if (cc && !runloom_get_per_g_tstate_mode()) {
         PyThreadState *cts = PyThreadState_GET();
+        /* Give this fiber a PRIVATE, EMPTY context as its baseline (p460).
+         *
+         * The old code did PyContext_CopyCurrent(), which copies WHATEVER
+         * ts->context is when the fiber first runs -- i.e. the LEFTOVER context
+         * of the previously-run sibling on this hub.  If that sibling was inside
+         * a decimal localcontext() (or anything that forked ts->context via
+         * ContextVar.set/setcontext and then parked mid-block), the copy carries
+         * the sibling's `decimal_context_var -> <sibling's private Context obj>`
+         * binding.  Because decimal's getcontext() returns the binding's VALUE
+         * (a live, mutable Context object) and lazily REUSES an existing binding
+         * rather than forking a private one, this new fiber's getcontext() then
+         * returns -- and mutates -- the sibling's private localcontext object,
+         * breaking localcontext()'s documented privacy (the p460 leak: genuine,
+         * hard-ref-confirmed sharing of one live Context object across fibers).
+         *
+         * Clearing ts->context to NULL first makes PyContext_CopyCurrent() copy
+         * the EMPTY default context (context_get() lazily materialises an empty
+         * one), so every fiber starts from a clean, binding-free context -- which
+         * is exactly what a fresh OS thread gets in stock CPython (each thread
+         * owns its own empty context; that is why the plain-threads control is
+         * green).  Per-contextvar isolation (BUG#7) is preserved: each fiber
+         * still gets its OWN PyContext, so a ContextVar.set() inside the fiber
+         * stays fiber-local.  Cross-fiber INHERITANCE of a parent's pre-spawn
+         * contextvars is NOT provided here by design -- the asyncio Task layer
+         * captures+runs its own copy_context() in Python (aio/tasks.py), so task
+         * semantics are unaffected; only the raw fiber() baseline changes (from
+         * "inherit the hub's leftover context" to "fresh empty context"). */
+        PyObject *old = cts->context;
+        cts->context = NULL;
+        cts->context_ver++;
+        Py_XDECREF(old);
         PyObject *ctx = PyContext_CopyCurrent();
         if (ctx != NULL) {
-            PyObject *old = cts->context;
+            old = cts->context;
             cts->context = ctx;          /* steals the new ref from CopyCurrent */
             cts->context_ver++;
             Py_XDECREF(old);
