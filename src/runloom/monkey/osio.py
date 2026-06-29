@@ -1,6 +1,6 @@
 """Cooperative os.read/os.write/readv/writev and stdio (input, sys.stdin)."""
 from ._base import *  # noqa: F401,F403  (shared foundation)
-from .sockets import _netpoll_unregister  # noqa: F401
+from .sockets import _netpoll_unregister, _wait_fd_coop  # noqa: F401
 
 # ============================================================
 # os.read / os.write
@@ -21,7 +21,7 @@ def _patched_os_read(fd, n):
             try:
                 return _orig_os_read(fd, n)
             except (BlockingIOError, InterruptedError):
-                runloom_c.wait_fd(fd, READ)
+                _wait_fd_coop(fd, READ)
     # Regular file / non-pollable -- offload to backend pool.
     return _blocking_call(_orig_os_read, fd, n)
 
@@ -38,7 +38,7 @@ def _patched_os_write(fd, data):
             try:
                 return _orig_os_write(fd, data)
             except (BlockingIOError, InterruptedError):
-                runloom_c.wait_fd(fd, WRITE)
+                _wait_fd_coop(fd, WRITE)
     return _blocking_call(_orig_os_write, fd, data)
 
 
@@ -60,7 +60,7 @@ def _patched_os_readv(fd, buffers):
             try:
                 return _orig_os_readv(fd, buffers)
             except (BlockingIOError, InterruptedError):
-                runloom_c.wait_fd(fd, READ)
+                _wait_fd_coop(fd, READ)
     return _blocking_call(_orig_os_readv, fd, buffers)
 
 
@@ -76,7 +76,7 @@ def _patched_os_writev(fd, buffers):
             try:
                 return _orig_os_writev(fd, buffers)
             except (BlockingIOError, InterruptedError):
-                runloom_c.wait_fd(fd, WRITE)
+                _wait_fd_coop(fd, WRITE)
     return _blocking_call(_orig_os_writev, fd, buffers)
 
 

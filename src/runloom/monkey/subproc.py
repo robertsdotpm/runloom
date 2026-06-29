@@ -1,5 +1,10 @@
 """pidfd, subprocess.Popen.wait, os.waitpid/wait/waitid/system."""
 from ._base import *  # noqa: F401,F403  (shared foundation)
+# The child-exit waits below park UNTIMED on the pidfd; route them through
+# _wait_fd_coop (not a bare runloom_c.wait_fd) so a teardown cancel_all_parked()
+# raises OSError(ECANCELED) and the wait unwinds instead of re-parking on the
+# still-open pidfd forever (the os.read/write file-fd analogue of audit B3).
+from .sockets import _wait_fd_coop  # noqa: F401
 
 # ============================================================
 # pidfd -- event-driven child-process reaping (Linux 5.3+)
@@ -148,7 +153,7 @@ def _patched_popen_wait(self, timeout=None):
                 if rc is not None:
                     return rc
                 if deadline is None:
-                    runloom_c.wait_fd(pfd, READ)
+                    _wait_fd_coop(pfd, READ)
                 else:
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
@@ -237,7 +242,7 @@ def _patched_os_waitpid(pid, options):
             if r[0] != 0:
                 return r
             if pfd is not None:
-                runloom_c.wait_fd(pfd, READ)   # park until the child exits
+                _wait_fd_coop(pfd, READ)   # park until the child exits
                 os.close(pfd)
                 pfd = None                     # reap next iter; poll if raced
                 continue
@@ -274,7 +279,7 @@ def _patched_os_waitid(idtype, id, options):
             if r is not None:
                 return r
             if pfd is not None:
-                runloom_c.wait_fd(pfd, READ)
+                _wait_fd_coop(pfd, READ)
                 os.close(pfd)
                 pfd = None
                 continue
@@ -302,7 +307,7 @@ def _patched_os_wait4(pid, options):
             if r[0] != 0:
                 return r
             if pfd is not None:
-                runloom_c.wait_fd(pfd, READ)
+                _wait_fd_coop(pfd, READ)
                 os.close(pfd)
                 pfd = None
                 continue
