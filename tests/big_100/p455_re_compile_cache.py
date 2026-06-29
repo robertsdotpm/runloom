@@ -262,7 +262,7 @@ def cache_sampler(H, state):
 
 
 def body(H):
-    n = min(MAX_WORKERS, max(2, H.funcs))
+    n = max(2, H.funcs)   # uncapped: respect --funcs (harness max_funcs is the mem backstop)
     npurge = max(1, int(n * PURGER_FRACTION))
     nident = max(1, n - npurge)
 

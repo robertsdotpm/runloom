@@ -238,7 +238,7 @@ def worker(H, wid, rng, state):
 
 
 def setup(H):
-    nworkers = min(MAX_WORKERS, max(2, H.funcs))
+    nworkers = max(2, H.funcs)   # uncapped: respect --funcs (harness max_funcs is the mem backstop)
     H.state = {
         "nworkers": nworkers,
         "repro_ok": [0] * 1024,            # private re-seed reproductions verified
