@@ -50,6 +50,38 @@ typedef struct runloom_pystate_snap runloom_pystate_snap_t;
 #define RUNLOOM_MIN_STACK_SIZE       (16  * 1024)         /* 3.13t hard floor */
 #define RUNLOOM_MAX_STACK_SIZE       (8   * 1024 * 1024)  /* 8 MiB ceiling */
 
+/* Free-threaded 3.14+ minimum PHYSICAL fiber C-stack.
+ *
+ * 3.14 replaced the integer c_recursion_remaining counter with an SP-vs-soft_limit
+ * guard (see runloom_arm_fiber_stackprot in runloom_iframe.c).  runloom arms it
+ * RESERVE bytes earlier than the raw geometry so the datastack-chunk-alloc burst
+ * can't punch the guard page -- but RESERVE is clamped to size/2 so a tiny fiber
+ * doesn't invert the window, which on a <=128KB fiber collapses the usable window
+ * to size - 2*MARGIN (MARGIN = _PyOS_STACK_MARGIN_BYTES = 16KB).  A 64KB fiber then
+ * has only 32KB usable -- too small for a legit shallow recursion plus the harness
+ * base frames -> a FALSE RecursionError (p226).  grow-on-demand can't rescue it: it
+ * grows at headroom < size/4 (16KB on a 64KB fiber) but the guard trips at 32KB, so
+ * the guard always wins first.
+ *
+ * Fix at fiber CREATION (a fresh empty stack -- NOT a live mid-recursion copy-grow,
+ * which is the p212 SEGV hazard): floor the requested size at 256KB, where both the
+ * chunk-alloc RESERVE (RUNLOOM_STACKPROT_RESERVE_MIN = 96KB) and a usable recursion
+ * window fit (eff = 256 - 96 = 160KB usable).  Inert on 3.13 / non-free-threaded
+ * (those keep the integer counter and the 16KB floor). */
+#if defined(Py_GIL_DISABLED) && PY_VERSION_HEX >= 0x030E0000
+#  define RUNLOOM_FT314_MIN_STACK_SIZE  ((size_t)256 * 1024)
+#endif
+
+/* Clamp a requested per-fiber C-stack size up to the free-threaded-3.14 floor.
+ * A no-op (returns the size unchanged) on every other build. */
+static inline size_t runloom_fiber_stack_floor(size_t bytes)
+{
+#if defined(RUNLOOM_FT314_MIN_STACK_SIZE)
+    if (bytes < RUNLOOM_FT314_MIN_STACK_SIZE) bytes = RUNLOOM_FT314_MIN_STACK_SIZE;
+#endif
+    return bytes;
+}
+
 /* Per-fiber CPython thread state snapshot.
  *
  * Fields here are everything the interpreter keeps on PyThreadState that

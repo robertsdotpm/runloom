@@ -953,14 +953,17 @@ class Harness(object):
         last = self.progress_signal()
         last_change = REAL_MONO()
         hard_deadline = self.deadline + max(self.drain_timeout, 0.15 * self.duration)
-        # Drain progress tracking (for the hard-deadline branch below): the
-        # MONOTONIC high-water mark of completed workers and when it last climbed.
-        # A drain that keeps RETURNING workers (exit count climbing) and is near
-        # total is merely SLOW at over-scale -- a benign SCALE_LIMIT, not a wedge.
-        # A drain whose exit count is FLAT (no forward progress) is a real stall /
-        # lost-wakeup -> EXIT_HANG.
-        exited_hwm = self.exited
-        exited_climb = REAL_MONO()    # last time exited_hwm increased
+        # Drain progress tracking (for the hard-deadline branch below).  A drain
+        # that keeps RETURNING workers (exit count CLIMBING since the drain began)
+        # is merely SLOW at over-scale -- a benign SCALE_LIMIT, not a wedge,
+        # REGARDLESS of the percentage retired so far.  A drain whose exit count is
+        # FLAT for the whole drain (no forward progress, e.g. the p77 flat-ops
+        # lost-wakeup signature) is a real stall -> EXIT_HANG.  Climbing-vs-flat is
+        # the discriminator, NOT a percentage threshold.
+        exited_hwm = self.exited      # monotonic high-water mark, for the message
+        drain_base = None             # exit count when the drain began (done_flag);
+                                      # None until then.  Drain "made progress" iff
+                                      # self.exited later climbed above drain_base.
         # Memory guard: a runtime backstop so NO program (whatever its N) can drive
         # this box into the OS OOM-killer / swap-death and destabilize it.  The
         # watchdog is a real OS thread, so it still samples even when the scheduler
@@ -1023,13 +1026,19 @@ class Harness(object):
             if sig != last:
                 last = sig
                 last_change = now
-            # Track the monotonic high-water mark of completed workers so the
-            # hard-deadline branch can tell a SLOW-but-progressing drain from a
-            # genuinely wedged one.
+            # Track the monotonic high-water mark of completed workers (for the
+            # SCALE_LIMIT message) and snapshot the exit count at the instant the
+            # drain BEGINS (done_flag first goes True).  The post-deadline
+            # classifier compares against drain_base to ask "did the drain retire
+            # ANY workers?" -- a drain that climbed since it began is PROGRESSING
+            # (benign SCALE_LIMIT, however slow / however far from 100%), while one
+            # that retired nothing since it began is the genuine p77 flat-ops
+            # lost-wakeup signature (workers parked early, never returned).
             ex = self.exited
             if ex > exited_hwm:
                 exited_hwm = ex
-                exited_climb = now
+            if self.done_flag and drain_base is None:
+                drain_base = ex
             # Only treat a stall as a hang while there is work to do: before
             # the deadline (workers should be progressing) or during the
             # post-deadline drain (which must finish, not wedge).
@@ -1040,24 +1049,34 @@ class Harness(object):
                 return
             if now > hard_deadline:
                 # Past the hard deadline the drain is overdue -- but "overdue" is
-                # not the same as "wedged".  Distinguish:
-                #   PROGRESSING -- the completed/exited count is still climbing
-                #                  (it advanced within the last hang_timeout) and
-                #                  is near total: a SLOW drain at over-scale (the
-                #                  box just can't retire this many workers in the
-                #                  window).  Benign SCALE_LIMIT, NOT a lost-wakeup.
-                #   STALLED     -- the exit count is FLAT (no forward progress for
-                #                  >= hang_timeout): a real stall / lost-wakeup.
-                # `expected==0` (nothing was spawned) can't be "progressing", so it
-                # falls through to the stalled branch as before.
-                drain_progressing = (
-                    self.expected > 0
-                    and (now - exited_climb) <= self.hang_timeout
-                    and exited_hwm >= int(0.99 * self.expected))
-                if drain_progressing:
-                    self._scale_drain_abort(exited_hwm)
-                    return
-                self._hang("hard deadline exceeded (drain/teardown wedged)")
+                # not the same as "wedged".  The discriminator is CLIMBING-vs-FLAT
+                # exit count, NOT the percentage retired.  EXIT_HANG is RESERVED for
+                # a GENUINE stall; a drain that retired workers is a benign
+                # SCALE_LIMIT regardless of whether it reached 66% or 99%:
+                #   PROGRESSED -- the exit count CLIMBED since the drain began
+                #                 (self.exited > drain_base): the box IS retiring
+                #                 workers, just not all of them inside the window.
+                #                 A slow / incomplete drain at over-scale -- benign
+                #                 SCALE_LIMIT.  (This is the p28/p305/p306/p308
+                #                 subprocess-heavy case that plateaus at the tail
+                #                 with netpoll-parked pipes still draining: it spent
+                #                 the whole drain CLIMBING, so it is not a wedge.)
+                #   FLAT       -- the exit count never moved since the drain began
+                #                 (the p77 flat-ops lost-wakeup signature: workers
+                #                 parked early and never returned).  A real stall.
+                #                 Corroborated by _fibers_stranded(): if instead the
+                #                 runtime is fully drained (no parked/runnable fiber)
+                #                 the flat tail is a spawn-accounting gap, also
+                #                 benign.  Only FLAT *and* stranded is EXIT_HANG.
+                # `expected==0` (nothing spawned) and a not-yet-started drain
+                # (drain_base is None) can never be "progressing".
+                verdict = self._drain_overdue_verdict(drain_base)
+                if verdict == "progressed":
+                    self._scale_drain_abort(exited_hwm, True)
+                elif verdict == "quiescent":
+                    self._scale_drain_abort(exited_hwm, False)
+                else:  # "stalled"
+                    self._hang("hard deadline exceeded (drain/teardown wedged)")
                 return
 
     def _mem_abort(self, avail, swap_frac, grew_bytes, growth_limit, floor):
@@ -1079,20 +1098,86 @@ class Harness(object):
         sys.stderr.flush()
         os._exit(EXIT_BOXLIMIT)
 
-    def _scale_drain_abort(self, exited_hwm):
-        """The post-deadline drain is overdue but STILL PROGRESSING (the completed
-        count kept climbing and is near total): the box simply can't retire this
-        many workers inside the window.  That is a benign SCALE LIMIT at over-scale,
+    def _drain_overdue_verdict(self, drain_base):
+        """Classify a drain that has run past the hard deadline.  Returns one of:
+          "progressed" -- the exit count CLIMBED since the drain began
+                          (self.exited > drain_base): a slow / incomplete drain at
+                          over-scale (benign SCALE_LIMIT, regardless of percentage).
+          "quiescent"  -- the drain retired nothing AND the runtime is fully
+                          drained (nothing parked/runnable): the residual
+                          expected-exited gap is spawn-accounting (benign).
+          "stalled"    -- the drain retired nothing AND fibers are still stranded
+                          (parked with no waker -- the p77 flat-ops lost-wakeup
+                          signature): a real stall -> EXIT_HANG.
+        The discriminator is CLIMBING-vs-FLAT exit count, NOT a percentage."""
+        progressed = (
+            self.expected > 0
+            and drain_base is not None
+            and self.exited > drain_base)
+        if progressed:
+            return "progressed"
+        return "stalled" if self._fibers_stranded() else "quiescent"
+
+    def _fibers_stranded(self):
+        """True when fibers are STILL PRESENT in the runtime, parked on an
+        external wake that is never coming, while nothing runnable remains to
+        deliver one -- the genuine lost-wakeup shape the watchdog exists to catch.
+        False when the runtime is EMPTY (every fiber has left the scheduler, so a
+        flat exit count is a spawn-accounting gap, not a wedge) or still has
+        runnable work in flight (a slow drain, not a stall).
+
+        The decision discriminates two flat-exit-count cases the hard-deadline
+        branch must NOT conflate:
+          * benign  -- p306-style: the runtime is fully drained (no fiber parked,
+            sleeping, ready, or running) yet `exited < expected` by an accounting
+            margin.  Nothing is wedged; nothing left to wake.  NOT stranded.
+          * stalled -- a real lost-wakeup: a parked set (netpoll / channel-park /
+            deadlock-prone wait) lingers with NO ready/running fiber to wake it.
+            (A genuine all-hubs-idle channel deadlock is caught by the runtime's
+            own deadlock detector before this; this guards the lost-wakeup that
+            the detector treats as nominally wakeable -- netpoll/foreign-park.)
+
+        Best-effort: any introspection error -> NOT stranded, so the watchdog can
+        never manufacture a HANG from a missing counter (it defers to the climbing
+        signal / benign verdict instead)."""
+        try:
+            st = runloom_c.stats()
+            deadlockable = runloom_c.count_deadlocked()
+        except Exception:
+            return False
+        # Runnable work present -> still draining, not stranded.
+        if st.get("ready", 0) > 0 or st.get("running", 0) > 0:
+            return False
+        # No runnable work: stranded iff a parked set that needs an EXTERNAL wake
+        # still lingers (netpoll arms, foreign-wakeable / channel parks).  Pure
+        # `sleeping` is excluded -- a timer fires itself and would not survive the
+        # whole hang window flat.  If every such counter is zero the runtime is
+        # empty -> benign accounting gap, not a wedge.
+        parked = (st.get("netpoll_parked", 0)
+                  + st.get("netpoll_parked_self", 0)
+                  + deadlockable)
+        return parked > 0
+
+    def _scale_drain_abort(self, exited_hwm, climbing):
+        """The post-deadline drain is overdue but NOT wedged -- either still
+        CLIMBING (the box can't retire this many workers in the window) or
+        QUIESCENT (every fiber has left the scheduler; the residual exit gap is
+        spawn-accounting).  Either way it is a benign SCALE LIMIT at over-scale,
         NOT a lost-wakeup / wedge -- so exit with the benign scale verdict (exit 4)
-        and a PASS-adjacent verdict line, instead of EXIT_HANG.  Prints a VERDICT
-        line so VERDICT-first sweeps see SCALE_LIMIT rather than a bare hang."""
+        and a PASS-adjacent verdict line, instead of EXIT_HANG.  Classified by
+        climbing-vs-flat exit count + a stranded-fiber check, NOT a percentage, so
+        a clearly-progressing drain that has only reached e.g. 66% is SCALE_LIMIT,
+        not HANG.  Prints a VERDICT line so VERDICT-first sweeps see SCALE_LIMIT."""
+        pct = (100.0 * exited_hwm / self.expected) if self.expected else 0.0
+        shape = ("STILL PROGRESSING (exit count climbing"
+                 if climbing else "fully drained (runtime quiescent")
         sys.stderr.write(
-            "\n[{0}] SCALE LIMIT: drain past the hard deadline but STILL "
-            "PROGRESSING -- {1}/{2} workers retired (>=99%), exit count climbing.\n"
+            "\n[{0}] SCALE LIMIT: drain past the hard deadline but {4}, no fibers "
+            "stranded) -- {1}/{2} workers retired ({5:.0f}%).\n"
             "[{0}] This is a SLOW drain at over-scale (the box can't retire "
             "--funcs {3} in time), NOT a lost-wakeup/wedge.  Reduce --funcs or "
             "raise --drain-timeout.\n".format(
-                self.name, exited_hwm, self.expected, self.funcs))
+                self.name, exited_hwm, self.expected, self.funcs, shape, pct))
         sys.stderr.write("  VERDICT       : SCALE_LIMIT (exit {0})\n".format(
             EXIT_SCALE_LIMIT))
         sys.stderr.flush()

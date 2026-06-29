@@ -106,6 +106,9 @@ static void runloom_cal_record(runloom_g_t *g)
 void runloom_sched_set_default_stack_size(size_t bytes)
 {
     if (bytes < RUNLOOM_MIN_STACK_SIZE) bytes = RUNLOOM_MIN_STACK_SIZE;
+    /* On free-threaded 3.14 the SP-vs-soft_limit guard needs a roomier physical
+     * stack than the 16KB 3.13 floor (else a false RecursionError -- p226). */
+    bytes = runloom_fiber_stack_floor(bytes);
     if (bytes > RUNLOOM_MAX_STACK_SIZE) bytes = RUNLOOM_MAX_STACK_SIZE;
     runloom_cal_ensure_lock();
     RUNLOOM_RLOCK(&runloom_cal_lock, RUNLOOM_RANK_CAL);
@@ -895,13 +898,15 @@ PyObject *runloom_sched_spawn(runloom_sched_t *s, PyObject *callable)
     /* Default-size path: profile the kind, and (autosize) start it at the
      * kind's learned size instead of the global default. */
     size_t key = runloom_advice_note_spawn(callable);
-    size_t sz  = runloom_advice_size_for(key, callable, (size_t)s->stack_size);
+    size_t sz  = runloom_fiber_stack_floor(
+                     runloom_advice_size_for(key, callable, (size_t)s->stack_size));
     return spawn_common(s, callable, /*noyield*/0, sz, key);
 }
 
 PyObject *runloom_sched_spawn_noyield(runloom_sched_t *s, PyObject *callable)
 {
     size_t key = runloom_advice_note_spawn(callable);
-    size_t sz  = runloom_advice_size_for(key, callable, (size_t)s->stack_size);
+    size_t sz  = runloom_fiber_stack_floor(
+                     runloom_advice_size_for(key, callable, (size_t)s->stack_size));
     return spawn_common(s, callable, /*noyield*/1, sz, key);
 }

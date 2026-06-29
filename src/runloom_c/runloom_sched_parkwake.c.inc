@@ -44,6 +44,7 @@ PyObject *runloom_sched_spawn_sized(runloom_sched_t *s, PyObject *callable,
      * Still record the kind so stack_advice() can report on it. */
     size_t key = runloom_advice_note_spawn(callable);
     if (stack_size < RUNLOOM_MIN_STACK_SIZE) stack_size = RUNLOOM_MIN_STACK_SIZE;
+    stack_size = runloom_fiber_stack_floor(stack_size);   /* FT-3.14 guard headroom */
     if (stack_size > RUNLOOM_MAX_STACK_SIZE) stack_size = RUNLOOM_MAX_STACK_SIZE;
     return spawn_common(s, callable, /*noyield*/0, stack_size, key);
 }

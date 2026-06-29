@@ -597,6 +597,9 @@ static int runloom_mn_fiber_core(PyObject *callable, runloom_c_entry_fn c_fn,
                           ? stack_size
                           : runloom_advice_size_for(g->advice_key, callable,
                                                     (size_t)h->sched.stack_size);
+    /* Floor the resolved size for the FT-3.14 SP-guard headroom (p226).  Covers
+     * both an explicit pin and an advice-learned auto size; no-op elsewhere. */
+    g->req_stack_size = runloom_fiber_stack_floor(g->req_stack_size);
     if (runloom_use_global_runq() || (stack_size > 0 && !defer_sized)) {
         /* Eager when: a global-runq mode (its resume path assumes coro set), OR
          * the caller PINNED an explicit stack_size -- an explicit oversize ask
@@ -907,6 +910,9 @@ static int runloom_mn_fiber_n_bulk(PyObject *callable, long n, size_t stack_size
                                             PyErr_NoMemory(); return -1; }
     hub_stack = (stack_size > 0) ? stack_size
                                  : (size_t)runloom_hubs[0].sched.stack_size;
+    /* FT-3.14 SP-guard headroom (p226): floor the whole batch's carve class so the
+     * arena slot size, the live coro and the teardown release class all agree. */
+    hub_stack = runloom_fiber_stack_floor(hub_stack);
 
     goid_base = runloom_next_goid_block(n);       /* reserve N ids in one atomic */
     for (hub = 0; hub < H; hub++) { heads[hub] = tails[hub] = NULL; counts[hub] = 0; }

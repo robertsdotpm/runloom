@@ -57,7 +57,8 @@ static int RunloomCoro_init(RunloomCoro *self, PyObject *args, PyObject *kw)
     self->error = NULL;
     self->has_run = 0;
     self->executing = 0;
-    self->coro = runloom_coro_new((size_t)stack_size,
+    self->coro = runloom_coro_new(
+                               runloom_fiber_stack_floor((size_t)stack_size),
                                runloom_coro_python_entry,
                                self);
     if (self->coro == NULL) {
