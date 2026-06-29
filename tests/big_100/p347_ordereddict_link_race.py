@@ -1,18 +1,24 @@
 """big_100 / 347 -- collections.OrderedDict C doubly-linked list under M:N splice churn.
 
-SKIPPED FOR NOW -- the SIGSEGV this program catches (concurrent setitem/move_to_end/
-popitem corrupting the C order list) is a KNOWN UPSTREAM CPython free-threading bug,
-already FIXED in 3.14, NOT a runloom defect:
+SKIPPED ON ALL FREE-THREADED Python -- the SIGSEGV this program catches (concurrent
+OrderedDict iteration vs popitem/__delitem__) is a STILL-LIVE UPSTREAM CPython
+free-threading bug, NOT a runloom defect:
     https://github.com/python/cpython/issues/125996
-    "nogil segmentation fault on ordered dict operations"  (closed; fixed by
-    GH-133734 "fix thread safety of ordered dict", in 3.14)
-Reproduced with PLAIN threading.Thread (no runloom): 3.13.13t crashes ~25/27
-(cross-arch x86 + arm64 -- a use-after-free), while a from-source 3.14.6t build
-(which has the fix) is 0/55 clean.  So it crashes on 3.13t only because the fix was
-NOT backported to 3.13's experimental free-threading.  setup() therefore AUTO-SKIPS
-only on free-threaded Python < 3.14 (where the fix is absent) and runs the full
-stress on 3.14+ -- so the test stays live where it should pass, and a crash on 3.14+
-would be a genuine NEW regression worth catching.
+    "nogil segmentation fault on ordered dict operations"
+gh-125996 was closed as fixed by GH-133734 ("fix thread safety of ordered dict"),
+but that fix is INCOMPLETE.  It wrapped the iterator ADVANCE path (odictiter_nextkey
+/ _odict_find_node) in Py_BEGIN_CRITICAL_SECTION but left the iterator CONSTRUCTOR
+odictiter_new UNLOCKED: it reads _odict_FIRST/_LAST(od) and node->key with no dict
+lock, racing _odict_remove_node + _odictnode_DEALLOC in a concurrent popitem/
+__delitem__, capturing a dangling node key into di_current that the first __next__
+then hashes -> SIGSEGV in PyObject_Hash (di_current->ob_type == NULL).  The iterator
+"mutated during iteration" / "changed size" guards both pass, so they do not protect
+against it.  Still present on CPython main as of 2026-06.
+Verified with PLAIN threading.Thread (NO runloom) on this box: 3.14.6t crashes 12/12
+GIL-off, 0/12 GIL-on, and gc-disabled still crashes -- an FT-specific use-after-free.
+(The earlier "3.14.6t is 0/55 clean" claim was a FALSE NEGATIVE -- it didn't push
+hard/long enough.)  setup() AUTO-SKIPS on ALL free-threaded builds until the upstream
+fix lands; remove the gate once odictiter_new takes the dict critical section.
 
 No existing program stresses `collections.OrderedDict`, and its C internals are a
 prime MUTATING shared container for the free-threaded M:N model.  The C
@@ -167,11 +173,12 @@ def worker(H, wid, rng, state):
 
 
 SKIP_REASON = (
-    "OrderedDict concurrent-splice SIGSEGV is UPSTREAM CPython gh-125996 "
-    "(https://github.com/python/cpython/issues/125996 -- 'nogil segmentation fault "
-    "on ordered dict operations'), FIXED in 3.14 via GH-133734; reproduced with "
-    "PLAIN threads (no runloom) -- 3.13.13t crashes ~25/27, 3.14.6t is 0/55 clean. "
-    "NOT a runloom bug; auto-skipped on free-threaded Python < 3.14 to avoid the crash.")
+    "OrderedDict concurrent iteration-vs-popitem SIGSEGV is UPSTREAM CPython gh-125996 "
+    "(https://github.com/python/cpython/issues/125996 -- 'nogil segmentation fault on "
+    "ordered dict operations'); GH-133734 fix is INCOMPLETE (odictiter_new constructor "
+    "still unlocked), so it is STILL LIVE on 3.14t and CPython main.  Reproduced with "
+    "PLAIN threads (no runloom): 3.14.6t crashes 12/12 GIL-off, 0/12 GIL-on. NOT a "
+    "runloom bug; auto-skipped on ALL free-threaded builds until the upstream fix lands.")
 
 
 def bug_unfixed():
@@ -180,7 +187,11 @@ def bug_unfixed():
     Python < 3.14 (the GH-133734 fix landed in 3.14).  On 3.14+ we RUN the stress --
     a crash there would be a genuine new regression worth catching, not a known bug."""
     gil_off = hasattr(sys, "_is_gil_enabled") and not sys._is_gil_enabled()
-    return gil_off and sys.version_info < (3, 14)
+    # The GH-133734 fix is INCOMPLETE (odictiter_new is still unlocked), so the
+    # crash is live on EVERY free-threaded build today (3.13t and 3.14t both crash;
+    # present on CPython main).  Skip on all FT until the upstream fix lands -- then
+    # drop this gate so the test goes live and catches any regression.
+    return gil_off
 
 
 def setup(H):
