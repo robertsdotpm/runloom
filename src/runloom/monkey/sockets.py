@@ -322,7 +322,6 @@ def _patched_recvfrom_into(self, buffer, nbytes=0, flags=0):
 
 def _co_sendfile_use_sendfile(self, file, offset, count):
     self._check_sendfile_params(file, offset, count)
-    sockno = self.fileno()
     try:
         fileno = file.fileno()
     except (AttributeError, io.UnsupportedOperation) as err:
@@ -342,9 +341,25 @@ def _co_sendfile_use_sendfile(self, file, offset, count):
                 blocksize = min(count - total_sent, blocksize)
                 if blocksize <= 0:
                     break
+            # Re-read the OUT socket fd EVERY iteration -- NEVER a value cached
+            # before the wait_fd(WRITE) park below.  A sibling on another hub can
+            # close THIS socket while we are parked on its WRITE arm; _patched_close
+            # wakes the park (netpoll_cancel_fd), but if we then drove os.sendfile /
+            # re-parked on a fd NUMBER captured before the park, a fresh socketpair
+            # that recycled that number would receive our file bytes / our wake --
+            # foreign-byte crossover onto a live unrelated socket (the same fd-reuse
+            # window _patched_close closes for accept/recv/connect, which all re-read
+            # self.fileno() per retry).  A closed socket reports fileno() == -1, so
+            # os.sendfile(-1, ...) raises EBADF and the loop unwinds cleanly below --
+            # exactly the recv/connect close behaviour -- never touching a reused fd.
+            sockno = self.fileno()
             try:
                 sent = _raw_os_sendfile(sockno, fileno, offset, blocksize)
             except (BlockingIOError, InterruptedError):
+                # Park on the SAME freshly-read fd we issued the op on -- a close
+                # between the read and here makes wait_fd(-1) return immediately
+                # (EBADF, not the CANCELLED sentinel) and the next iteration's
+                # os.sendfile(-1, ...) unwinds, so we never park on a recycled fd.
                 _wait_fd_coop(sockno, WRITE)
                 continue
             except OSError as err:

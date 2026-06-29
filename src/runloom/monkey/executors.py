@@ -158,6 +158,24 @@ _orig_mp_send_defaults  = None
 _orig_mp_close_defaults = None
 _orig_semlock_make_methods = None
 
+# multiprocessing.synchronize.RECURSIVE_MUTEX -- the SemLock.kind of an RLock
+# (Value/Array.get_lock()); SEMAPHORE (1) is Lock/Semaphore/Event/Condition.
+_SEMLOCK_RECURSIVE = 0
+
+# Raw OS-thread id, for tracking recursion ownership on a non-fiber (real OS
+# thread) caller -- captured pre-patch, same as locks.CoRLock uses.
+_raw_get_ident = _thread.get_ident
+
+
+def _co_recursion_owner():
+    """Identity that OWNS a recursive cooperative SemLock: the current fiber
+    when one is running, else the OS-thread id.  A G handle (fiber) and an int
+    (thread) never compare equal, so the two domains can't be confused -- the
+    same scheme locks.CoRLock uses.  This replaces the C SemLock's OS-thread
+    `_is_mine()` ownership, which is WRONG under M:N: many fibers share one hub
+    OS thread, so the C check would treat fiber B's re-entry as fiber A's."""
+    return runloom.current() if _in_fiber() else _raw_get_ident()
+
 
 def _co_semlock_acquire(semlock):
     """Cooperative SemLock.acquire.  A blocking acquire from a fiber does a
@@ -186,9 +204,95 @@ def _co_semlock_acquire(semlock):
     return acquire
 
 
+def _co_recursive_semlock_methods(semlock):
+    """Cooperative acquire/release for a RECURSIVE_MUTEX SemLock (an RLock, e.g.
+    Value/Array.get_lock()).  The C semlock_acquire tracks re-entrancy by OS
+    thread id (`_is_mine()`); under M:N that is broken, because many fibers
+    share ONE hub OS thread, so the C code would let fiber B re-enter a critical
+    section fiber A still holds (a double-entered lock -> a torn RMW / lost
+    increment).  We instead track recursion ownership + count by the CURRENT
+    FIBER and only touch the C semlock on the OUTERMOST acquire/release, so the
+    kernel sem is the cross-process gate and Python is the per-fiber re-entrancy.
+    A fiber that does NOT already own it never calls the C acquire while another
+    fiber holds it, so the C `_is_mine()` shortcut is unreachable across fibers.
+
+    `state` = [owner, count]; mutated only by the owning fiber (set under the
+    held lock, cleared on the final release), so a non-owner only ever READS
+    owner to compare against itself -- a benign stale read at worst costs one
+    extra backoff spin.  Real-thread / non-blocking callers fall through to the
+    raw C path unchanged (a real thread's OS id never collides with a fiber G)."""
+    state = [None, 0]                           # [owner identity, recursion count]
+
+    def acquire(block=True, timeout=None):
+        if not _in_fiber():
+            return semlock.acquire(block, timeout)
+        cur = _co_recursion_owner()
+        if state[0] is not None and state[0] == cur:
+            # Already held by THIS fiber -> pure re-entrant bump, no C call (the
+            # kernel sem stays at "1 holder", recursion lives only in Python).
+            if not block:
+                return True
+            state[1] += 1
+            return True
+        if not block:
+            # A non-blocking acquire by a fiber that is not the owner: only the
+            # C trywait can win it, and only when no fiber owns it (else the C
+            # `_is_mine()` shortcut on a sibling's hub thread would falsely pass).
+            if state[0] is not None:
+                return False
+            if semlock.acquire(False):          # sem_trywait
+                state[0] = cur
+                state[1] = 1
+                return True
+            return False
+        deadline = None if timeout is None else time.monotonic() + timeout
+        step = 0.0005
+        while True:
+            # Only attempt the C acquire when NO fiber currently owns it; this is
+            # what prevents the cross-fiber `_is_mine()` double-enter -- a sibling
+            # on the same hub thread never reaches the C call while we hold it.
+            if state[0] is None and semlock.acquire(False):   # sem_trywait
+                state[0] = cur
+                state[1] = 1
+                return True
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                _co_sleep(min(step, remaining))
+            else:
+                _co_sleep(step)
+            if step < 0.02:
+                step *= 2
+
+    def release():
+        cur = _co_recursion_owner()
+        if state[0] is None or state[0] != cur:
+            # Not held by us at the Python layer -- either a real-thread holder
+            # (whose recursion lives in C, never in `state`) or a forked child
+            # whose fiber identity changed; defer to the C release, which raises
+            # the same AssertionError the stock SemLock would on a bad release.
+            semlock.release()
+            return
+        state[1] -= 1
+        if state[1] == 0:
+            state[0] = None
+            semlock.release()                   # final release -> sem_post
+
+    return acquire, release
+
+
 def _patched_semlock_make_methods(self):
     _orig_semlock_make_methods(self)            # binds the C acquire/release
-    self.acquire = _co_semlock_acquire(self._semlock)
+    if getattr(self._semlock, "kind", None) == _SEMLOCK_RECURSIVE:
+        # RLock (Value/Array.get_lock()): re-entrancy must be per-FIBER, so own
+        # both ends -- the recursion count lives in Python, not the C semlock.
+        self.acquire, self.release = _co_recursive_semlock_methods(self._semlock)
+    else:
+        # Non-recursive (Lock/Semaphore/Event/Condition): every acquire goes to
+        # the real sem, no `_is_mine()` shortcut exists, so only acquire needs
+        # the cooperative backoff; release stays the C sem_post.
+        self.acquire = _co_semlock_acquire(self._semlock)
 
 
 def _patch_mp_connection():

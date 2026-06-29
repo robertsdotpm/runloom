@@ -145,39 +145,49 @@ class CoCondition(object):
     def wait(self, timeout=None):
         # Goroutine waits (timed or untimed) park in memory (0 fds); only a wait
         # from a FOREIGN thread keeps the fd-backed park.  notify wakes both.
-        p = _Parker(inmem=_in_fiber())
-        self._waiters.append(p)
-        # Release inner lock while parked.
+        # Save/restore CoRLock recursion across the unlocked window (once).
         owned_recursion = None
         if isinstance(self._lock, CoRLock):
             owned_recursion = self._lock._count
-            self._lock._count = 1   # release() pops once; ok
-        self._lock.release()
-        if timeout is None:
-            p.park()
-            timed_out = False
-        else:
-            deadline = time.monotonic() + timeout
-            # notify()/notify_all() unparks us, OR the deadline fires inside the
-            # park (wait_fd for a fiber, select for a foreign thread) -- no
-            # per-wait waker fiber + heap timer (see _Parker.park).
-            p.park(timeout)
-            timed_out = time.monotonic() >= deadline
-        p.release()
-        self._lock.acquire()
-        # Remove our parker if it is STILL queued -- i.e. we resumed by TIMEOUT (or
-        # a spurious wake), not by a notify that popped us.  A lingering timed-out
-        # parker would otherwise steal a later notify() (notify pops the leftmost
-        # waiter), leaving the real waiter unwoken.  Serialized with notify's
-        # popleft / notify_all's swap by the lock we just re-acquired; a no-op
-        # (ValueError) if a notify already claimed us.  (The fd path accidentally
-        # masked this: the timed-out parker's POOLED fd was reused by the next
-        # waiter, so waking the stale parker woke the live one through the shared
-        # fd.  In-memory parkers don't share -- so the removal is load-bearing.)
-        try:
-            self._waiters.remove(p)
-        except ValueError:
-            pass
+        deadline = None if timeout is None else time.monotonic() + timeout
+        notified = False
+        timed_out = False
+        # RE-PARK on a SPURIOUS wake: a pooled _Parker can carry a stale wake byte
+        # (a foreign set()/release() os.write that raced the prior owner's fd
+        # drain), so a single bare park could return BEFORE notify() fires.  An
+        # untimed wait must return ONLY on a real notify -- otherwise stock
+        # concurrent.futures Future.result(None), which correctly assumes an
+        # untimed Condition.wait returns only on notify, re-checks _state and
+        # raises a spurious TimeoutError.  Mirrors CoSemaphore.acquire's loop.
+        while True:
+            p = _Parker(inmem=_in_fiber())
+            self._waiters.append(p)
+            if owned_recursion is not None:
+                self._lock._count = 1   # release() pops once; ok
+            self._lock.release()
+            if deadline is None:
+                p.park()
+            else:
+                remaining = deadline - time.monotonic()
+                if remaining > 0:
+                    p.park(remaining)
+            p.release()
+            self._lock.acquire()
+            # If our parker is STILL queued we were NOT woken by a notify (a
+            # spurious wake or a timeout); remove it so it can't steal a later
+            # notify (notify pops the leftmost waiter).  If it is gone, a notify
+            # popped + woke us.  Serialized with notify's popleft / notify_all's
+            # swap by the lock we just re-acquired.
+            try:
+                self._waiters.remove(p)
+            except ValueError:
+                notified = True
+            if notified:
+                break
+            if deadline is not None and time.monotonic() >= deadline:
+                timed_out = True
+                break
+            # spurious wake before notify/deadline -> re-park.
         if owned_recursion is not None:
             self._lock._count = owned_recursion
         return not timed_out
