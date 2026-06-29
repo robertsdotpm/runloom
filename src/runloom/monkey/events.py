@@ -394,7 +394,15 @@ class CoBoundedSemaphore(CoSemaphore):
         self._initial = value
 
     def release(self, n=1):
-        if self._value + len(self._waiters) + n > self._initial:
+        # Match threading.BoundedSemaphore: the bound is on the live PERMIT count
+        # (self._value), NOT including queued waiters -- a blocked acquirer holds
+        # no permit (self._value stays 0 while it waits), and a release that hands
+        # its permit straight to a waiter never lifts the permit count above the
+        # bound.  Counting len(self._waiters) here made every legitimate release
+        # spuriously raise ValueError whenever fibers were queued (the common case
+        # at M:N scale -- thousands contending for K permits), losing the permit
+        # and parking the owed waiters forever.
+        if self._value + n > self._initial:
             raise ValueError("Semaphore released too many times")
         CoSemaphore.release(self, n)
 
