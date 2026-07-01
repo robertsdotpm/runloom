@@ -15,7 +15,8 @@ requires-python = ">=3.11"
 license = {text = "MIT"}
 authors = [
     {name = "Matthew Roberts", email = "matthew@roberts.pm"},
-    {name = "Claude"},
+    {name = "Claude Opus 4.8"},
+    {name = "Claude Fable 5"},
 ]
 readme = "README.md"
 keywords = ["coroutine", "goroutine", "scheduler", "io", "asyncio", "networking", "monkey-patch"]
