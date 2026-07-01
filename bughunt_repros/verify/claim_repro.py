@@ -1,7 +1,15 @@
-import asyncio
-import runloom.aio as aio
-loop=aio.RunloomEventLoop(); asyncio.set_event_loop(loop)
-ran=[]
-loop.call_soon(ran.append, 1)
-fut=loop.create_future(); fut.set_result(7)
-print('result:', loop.run_until_complete(fut), 'callbacks ran:', ran)
+import threading, faulthandler
+import runloom
+faulthandler.dump_traceback_later(20, exit=True)
+barrier = threading.Barrier(2)
+def t(i):
+    def work():
+        for _ in range(50): runloom.yield_now()
+    barrier.wait()
+    try:
+        runloom.run(2, work)
+    except Exception as e:
+        print('thread', i, 'raised', type(e).__name__)
+ths = [threading.Thread(target=t, args=(i,)) for i in range(2)]
+[x.start() for x in ths]; [x.join() for x in ths]
+print('done')
