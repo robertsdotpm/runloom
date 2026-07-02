@@ -57,8 +57,8 @@ void runloom_asm_make_ctx(runloom_asm_coro_t *coro, void *stack_top)
 
 #elif defined(RUNLOOM_ARCH_AARCH64)
 
-/* aarch64 AAPCS64: swap saves 12 GPRs (x19..x30) + 8 FPs (d8..d15)
- *   = 160 bytes.  Layout, low to high:
+/* aarch64 AAPCS64: swap saves 12 GPRs (x19..x30) + 8 FPs (d8..d15) + FPCR
+ *   = 160 + 16 = 176 bytes.  Layout, low to high:
  *     [sp, #0..15]    x19, x20      <- x19 = coro pointer
  *     [sp, #16..31]   x21, x22
  *     [sp, #32..47]   x23, x24
@@ -66,16 +66,20 @@ void runloom_asm_make_ctx(runloom_asm_coro_t *coro, void *stack_top)
  *     [sp, #64..79]   x27, x28
  *     [sp, #80..95]   x29, x30      <- x30 = lr = trampoline
  *     [sp, #96..159]  d8..d15
- * Trampoline reads x19; ret to x30. */
+ *     [sp, #160..175] FPCR (16-byte slot; FPCR at +160, +168 padding)
+ * Trampoline reads x19; ret to x30.  The FPCR slot must mirror runloom_asm_swap
+ * (16 bytes so the frame stays 16-aligned); zeroing it seeds FPCR = 0, the
+ * AArch64 default (round-to-nearest even, no FP traps, FZ off) for a fresh
+ * fiber -- matching how swap saves/restores it. */
 void runloom_asm_make_ctx(runloom_asm_coro_t *coro, void *stack_top)
 {
     uintptr_t sp = (uintptr_t)stack_top;
     uintptr_t *frame;
     sp &= ~(uintptr_t)15;       /* 16-align */
-    sp -= 160;
+    sp -= 176;
     frame = (uintptr_t *)sp;
-    /* zero everything first */
-    for (size_t i = 0; i < 20; i++) frame[i] = 0;
+    /* zero everything first (frame[20] = FPCR slot -> 0 = AArch64 default) */
+    for (size_t i = 0; i < 22; i++) frame[i] = 0;
     frame[0] = (uintptr_t)coro;                  /* x19 */
     frame[11] = (uintptr_t)&runloom_asm_trampoline; /* x30 (offset 88) */
 

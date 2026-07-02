@@ -37,9 +37,15 @@
     .type  RUNLOOM_SYM(runloom_asm_swap), %function
 #endif
 RUNLOOM_SYM(runloom_asm_swap):
-    /* Make room for 12 GPRs + 8 FPs = 20 * 8 = 160 bytes.
-     * Stack stays 16-aligned (160 = 10 * 16). */
-    sub     sp, sp, #160
+    /* Make room for 12 GPRs + 8 FPs + FPCR = 160 + 16 = 176 bytes (a 16-byte
+     * slot for FPCR keeps the frame 16-aligned: 176 = 11 * 16).  FPCR holds the
+     * callee-preserved FP control state (rounding mode, exception-trap enables,
+     * FZ/AH); without saving/restoring it a fiber's fesetround / feenableexcept
+     * leaks into whatever fiber or scheduler runs next on this hub -- silent
+     * float corruption or a process-killing FP trap.  (FPSR is caller-saved
+     * status, not preserved.)  runloom_asm_make_ctx seeds the FPCR slot to 0 =
+     * the AArch64 default (round-to-nearest even, no traps, FZ off). */
+    sub     sp, sp, #176
 
     stp     x19, x20, [sp, #0]
     stp     x21, x22, [sp, #16]
@@ -51,6 +57,8 @@ RUNLOOM_SYM(runloom_asm_swap):
     stp     d10, d11, [sp, #112]
     stp     d12, d13, [sp, #128]
     stp     d14, d15, [sp, #144]
+    mrs     x9,  fpcr
+    str     x9,  [sp, #160]            /* save FPCR (16-byte slot at +160) */
 
     /* from->sp = sp */
     mov     x9, sp
@@ -70,8 +78,10 @@ RUNLOOM_SYM(runloom_asm_swap):
     ldp     d10, d11, [sp, #112]
     ldp     d12, d13, [sp, #128]
     ldp     d14, d15, [sp, #144]
+    ldr     x9,  [sp, #160]            /* restore FPCR                  */
+    msr     fpcr, x9
 
-    add     sp, sp, #160
+    add     sp, sp, #176
     ret                              /* jump to saved lr (x30)        */
 #if !defined(__APPLE__)
     .size   RUNLOOM_SYM(runloom_asm_swap), .-RUNLOOM_SYM(runloom_asm_swap)
