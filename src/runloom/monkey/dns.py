@@ -368,6 +368,18 @@ def _patched_getaddrinfo(host, port=0, family=0, type=0, proto=0, flags=0):
         # None leaks into the returned sockaddr and connect() raises TypeError.
         port = 0
 
+    # Stock getaddrinfo accepts a bytes/bytearray hostname (treated as already
+    # ASCII-encoded).  Normalise to str once here so the /etc/hosts lookup (str
+    # keys) and the resolver path handle it uniformly instead of silently missing
+    # the hosts entry / mangling the name.  A non-ASCII bytes host can't be a DNS
+    # name; hand it to libc, which raises the same error stock would.
+    if isinstance(host, (bytes, bytearray)):
+        try:
+            host = bytes(host).decode("ascii")
+        except UnicodeDecodeError:
+            return _blocking_call(_orig_getaddrinfo,
+                                  host, port, family, type, proto, flags)
+
     if host is None or host == "":
         host = "::" if family == socket.AF_INET6 else "0.0.0.0"
 
