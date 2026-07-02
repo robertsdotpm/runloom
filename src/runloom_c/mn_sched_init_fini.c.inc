@@ -410,6 +410,11 @@ void runloom_mn_fini(void)
      * pool to the OS -- closing the per-fiber RSS leak across mn_init/mn_fini
      * cycles.  Must run before the fiber registry / interp teardown that follows. */
     runloom_g_slab_reclaim();
+    /* Free the datastack-chunk graveyard the hubs spliced their TLS chunk caches
+     * into at exit.  Every hub is joined, so no foreign sys._current_frames reader
+     * can still be inside a chunk's grace window -- returning them to the OS is
+     * sound.  Closes the dominant M:N per-fiber datastack-chunk RSS leak. */
+    runloom_chunk_pool_reclaim();
     PyMem_Free(runloom_hubs);
     runloom_hubs = NULL;
     runloom_hub_count = 0;

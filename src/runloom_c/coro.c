@@ -408,19 +408,28 @@ static void runloom_stack_refill_from_global(size_t size)
     RUNLOOM_RUNLOCK(&runloom_global_stack_lock, RUNLOOM_RANK_GLOBAL_STACK);
 }
 
-/* Move all-but-KEEP entries from the TLS cache down to the shared depot.
- * Past the depot cap, munmap (the bound that makes total mappings finite). */
-static void runloom_stack_flush_to_global(void)
+/* Move all-but-`keep` entries from the TLS cache down to the shared depot.
+ * Past the depot cap, munmap (the bound that makes total mappings finite).
+ * keep == 0 drains the WHOLE cache -- used at hub-thread exit so the pool
+ * doesn't die with the thread (the M:N per-run stack leak). */
+static void runloom_stack_flush_to_global(int keep)
 {
     void **keep_tail, **move_head;
     int i;
-    if (runloom_tls_stack_pool_n <= RUNLOOM_STACK_TLS_KEEP) return;
-    keep_tail = runloom_tls_stack_pool;
-    for (i = 1; i < RUNLOOM_STACK_TLS_KEEP; i++)
-        keep_tail = (void **)keep_tail[RUNLOOM_STACK_HDR_NEXT];
-    move_head = (void **)keep_tail[RUNLOOM_STACK_HDR_NEXT];
-    keep_tail[RUNLOOM_STACK_HDR_NEXT] = NULL;            /* cut local list at KEEP */
-    runloom_tls_stack_pool_n = RUNLOOM_STACK_TLS_KEEP;
+    if (keep < 0) keep = 0;
+    if (runloom_tls_stack_pool_n <= keep) return;
+    if (keep == 0) {
+        move_head = runloom_tls_stack_pool;
+        runloom_tls_stack_pool = NULL;
+        runloom_tls_stack_pool_n = 0;
+    } else {
+        keep_tail = runloom_tls_stack_pool;
+        for (i = 1; i < keep; i++)
+            keep_tail = (void **)keep_tail[RUNLOOM_STACK_HDR_NEXT];
+        move_head = (void **)keep_tail[RUNLOOM_STACK_HDR_NEXT];
+        keep_tail[RUNLOOM_STACK_HDR_NEXT] = NULL;        /* cut local list at keep */
+        runloom_tls_stack_pool_n = keep;
+    }
 
     {
     int cap = runloom_global_stack_cap();
@@ -869,7 +878,7 @@ static void runloom_stack_release(void *stack, size_t size)
      * thread can't hoard stacks unboundedly).  Keeps RUNLOOM_STACK_TLS_KEEP for
      * this thread's own fast path. */
     if (runloom_tls_stack_pool_n > RUNLOOM_STACK_TLS_CAP) {
-        runloom_stack_flush_to_global();
+        runloom_stack_flush_to_global(RUNLOOM_STACK_TLS_KEEP);
     }
 }
 
@@ -1051,8 +1060,15 @@ int runloom_coro_thread_init(void)
     return 0;
 }
 
+/* Flush this (exiting) hub thread's per-thread coro + stack recycle pools into
+ * the shared global pools, so the next run(n>1)'s hubs reuse them instead of the
+ * pools dying with the thread (the M:N per-fiber RSS leak across mn_init/mn_fini
+ * cycles).  Defined below, next to the coro pool machinery it drains. */
+static void runloom_coro_thread_flush(void);
+
 void runloom_coro_thread_fini(void)
 {
+    runloom_coro_thread_flush();
     runloom_crash_thread_disarm();
 #if defined(RUNLOOM_HAVE_FIBERS)
     if (runloom_tls_thread_was_fiber) {
@@ -1446,6 +1462,14 @@ static RUNLOOM_TLS int runloom_coro_pool_size = 0;
  * coro matches the requesting size, so it always recycles and the occupancy is
  * bounded by live fibers of that size.  Lock amortized (once per batch). */
 #define RUNLOOM_CORO_GLOBAL_BATCH 128
+/* Hard cap on IDLE coros retained in the global pool.  Each holds a resident-VA
+ * (512 KB default) stack mapping, so an uncapped pool -- fed by the hub-exit
+ * thread-flush every run(n>1) cycle -- retains a 512 KB stack VMA per idle coro
+ * without bound (VA/VMA growth across repeated runs, even with pages DONTNEED'd).
+ * Past the cap the excess coros' stacks return to the depot (which munmaps past
+ * ITS own cap) and the structs are freed.  Steady-state occupancy is live fibers,
+ * well under this bound, so the reuse fast path is unaffected. */
+#define RUNLOOM_CORO_GLOBAL_CAP 1024
 static runloom_coro_t  *runloom_coro_global_pool = NULL;
 static int              runloom_coro_global_size = 0;
 static size_t           runloom_coro_global_class = 0;  /* the ONE stack size balanced (0 = unclaimed) */
@@ -1498,13 +1522,50 @@ static void runloom_coro_global_flush(void)
             free(c);
         }
     }
+    (void)moved; (void)to_global_tail;
     if (to_global != NULL) {
+        runloom_coro_t *overflow;
         pthread_mutex_lock(&runloom_coro_global_lock);
-        to_global_tail->pool_next = runloom_coro_global_pool;
-        runloom_coro_global_pool = to_global;
-        runloom_coro_global_size += moved;
+        /* Accept into the global pool only up to the cap (see RUNLOOM_CORO_GLOBAL_CAP):
+         * an unbounded pool retains a 512 KB stack VMA per idle coro across runs. */
+        while (to_global != NULL &&
+               runloom_coro_global_size < RUNLOOM_CORO_GLOBAL_CAP) {
+            runloom_coro_t *c = to_global;
+            to_global = c->pool_next;
+            c->pool_next = runloom_coro_global_pool;
+            runloom_coro_global_pool = c;
+            runloom_coro_global_size++;
+        }
         pthread_mutex_unlock(&runloom_coro_global_lock);
+        /* Over-cap remainder: release each stack to the depot (-> munmap past the
+         * depot cap) and free the struct, OUTSIDE the global lock -- stack_release
+         * takes the depot lock, so don't nest the two. */
+        overflow = to_global;
+        while (overflow != NULL) {
+            runloom_coro_t *c = overflow;
+            overflow = c->pool_next;
+            if (c->stack != NULL) runloom_stack_release(c->stack, c->stack_size);
+            free(c);
+        }
     }
+}
+
+/* Hub-thread-exit flush (forward-declared above thread_fini).  Fully drains this
+ * thread's coro pool + stack cache into the shared global pools so the next
+ * run(n>1) reuses them, instead of the pools leaking with the dying thread --
+ * the M:N per-fiber RSS growth across repeated run() cycles (~5 kB/fiber; the
+ * fiber-stack analogue of the g-slab reclaim in runloom_sched_core.c.inc).  The
+ * global pools are bounded (depot cap -> munmap), so RSS plateaus at the
+ * high-water mark instead of growing every cycle. */
+static void runloom_coro_thread_flush(void)
+{
+    /* global_flush moves a BATCH per call (balanced class -> global for reuse;
+     * off-class -> stack released + struct freed), popping from the TLS pool each
+     * call, so looping to empty terminates. */
+    while (runloom_coro_pool != NULL)
+        runloom_coro_global_flush();
+    /* Drain the WHOLE TLS stack cache to the depot (past the depot cap -> munmap). */
+    runloom_stack_flush_to_global(0);
 }
 
 runloom_coro_t *runloom_coro_new(size_t stack_size,

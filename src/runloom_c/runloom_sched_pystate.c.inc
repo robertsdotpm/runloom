@@ -635,6 +635,66 @@ static RUNLOOM_TLS _PyStackChunk *runloom_chunk_grace_head = NULL;  /* oldest */
 static RUNLOOM_TLS _PyStackChunk *runloom_chunk_grace_tail = NULL;  /* newest */
 static RUNLOOM_TLS int runloom_chunk_grace_count = 0;
 
+/* Global chunk graveyard.  The reuse pool + grace ring above are per-thread
+ * (RUNLOOM_TLS): every completed fiber parks its 16 KB datastack chunk there, so
+ * a hub OS thread that exits at mn_fini takes its whole cache with it -- the
+ * dominant M:N per-fiber RSS leak across repeated run(n>1) cycles (run(1), which
+ * spawns no hub threads, doesn't leak).  A hub can't safely free the chunks at
+ * its own exit: a foreign sys._current_frames reader may still be inside the
+ * grace window (the arm64 p200 UAF the ring guards).  So at hub exit each thread
+ * splices its TLS lists into this graveyard, and the MAIN thread frees the whole
+ * thing at mn_fini AFTER every hub has joined -- the grace period that proves no
+ * such reader remains.  Mirrors the runloom_g_slab reclaim in runloom_sched_core. */
+static _PyStackChunk *runloom_chunk_graveyard = NULL;
+static pthread_mutex_t runloom_chunk_graveyard_lock = PTHREAD_MUTEX_INITIALIZER;
+
+/* Called by an EXITING hub thread (runloom_coro_thread_fini path): splice this
+ * thread's reuse pool + grace ring into the shared graveyard.  Chained through
+ * `previous` (both TLS lists already use it as their link); a parked chunk is off
+ * tstate's datastack chain, so this never touches a live frame. */
+void runloom_chunk_pool_thread_flush(void)
+{
+#if PY_VERSION_HEX >= 0x030B0000
+    _PyStackChunk *head = NULL, *tail = NULL, *c, *p;
+    for (c = runloom_chunk_pool; c != NULL; c = p) {   /* reuse pool (LIFO) */
+        p = c->previous; c->previous = head; head = c; if (tail == NULL) tail = c;
+    }
+    for (c = runloom_chunk_grace_head; c != NULL; c = p) {  /* grace ring (FIFO) */
+        p = c->previous; c->previous = head; head = c; if (tail == NULL) tail = c;
+    }
+    runloom_chunk_pool = NULL;        runloom_chunk_pool_size = 0;
+    runloom_chunk_grace_head = NULL;  runloom_chunk_grace_tail = NULL;
+    runloom_chunk_grace_count = 0;
+    if (head == NULL) return;
+    pthread_mutex_lock(&runloom_chunk_graveyard_lock);
+    tail->previous = runloom_chunk_graveyard;
+    runloom_chunk_graveyard = head;
+    pthread_mutex_unlock(&runloom_chunk_graveyard_lock);
+#endif
+}
+
+/* Called by the MAIN thread at mn_fini AFTER every hub has joined: free the
+ * whole graveyard back to CPython's arena allocator.  All hubs are gone (no
+ * grace-window reader can remain), so returning the chunks to the OS is sound. */
+void runloom_chunk_pool_reclaim(void)
+{
+#if PY_VERSION_HEX >= 0x030B0000
+    _PyStackChunk *c, *p;
+    PyObjectArenaAllocator alloc;
+    pthread_mutex_lock(&runloom_chunk_graveyard_lock);
+    c = runloom_chunk_graveyard;
+    runloom_chunk_graveyard = NULL;
+    pthread_mutex_unlock(&runloom_chunk_graveyard_lock);
+    if (c == NULL) return;
+    PyObject_GetArenaAllocator(&alloc);
+    while (c != NULL) {
+        p = c->previous;
+        if (alloc.free != NULL) alloc.free(alloc.ctx, c, c->size);
+        c = p;
+    }
+#endif
+}
+
 /* Pop one chunk off the pool.  Returns NULL when empty; caller falls
  * back to letting PyEval arena-allocate. */
 static _PyStackChunk *runloom_chunk_pool_get(void)

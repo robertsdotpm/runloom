@@ -1611,5 +1611,9 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
      * mutex); no tstate needed, so it is safe after the delete above.  A hub that
      * never ran fibers has an empty slab and this is a no-op. */
     runloom_g_slab_thread_flush();
+    /* Likewise splice this hub's TLS datastack-chunk cache (reuse pool + grace
+     * ring) into the shared graveyard, freed by runloom_chunk_pool_reclaim in
+     * mn_fini.  These pooled 16 KB chunks are the dominant M:N per-fiber leak. */
+    runloom_chunk_pool_thread_flush();
     RUNLOOM_THREAD_RETURN(NULL);
 }

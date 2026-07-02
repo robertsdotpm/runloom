@@ -821,6 +821,14 @@ void runloom_g_entry(void *user);
  * paying for an arena alloc. */
 void runloom_drain_g_datastack(void);
 
+/* Datastack-chunk graveyard reclamation (defined in runloom_sched_pystate.c.inc).
+ * thread_flush: an exiting hub splices its TLS chunk reuse-pool + grace-ring into
+ * a shared graveyard; reclaim: the main thread frees the graveyard at mn_fini
+ * after all hubs join.  Without these, each hub's pooled 16 KB datastack chunks
+ * leak with the thread -- the dominant M:N per-fiber RSS growth across run cycles. */
+void runloom_chunk_pool_thread_flush(void);
+void runloom_chunk_pool_reclaim(void);
+
 /* Set up tstate->datastack_{chunk,top,limit} for a first-run g.  Pulls
  * a chunk off the per-thread pool if available; otherwise leaves the
  * fields NULL so PyEval will arena-allocate.  Either is correct. */
