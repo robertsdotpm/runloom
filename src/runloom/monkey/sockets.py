@@ -33,6 +33,19 @@ _tcp_send_all   = getattr(runloom_c, "tcp_send", None)
 _raw_wait_fd = runloom_c.wait_fd
 _WAIT_FD_CANCELLED = getattr(runloom_c, "WAIT_FD_CANCELLED", 0x40000000)
 
+# MSG_WAITALL / MSG_PEEK are absent on some platforms (e.g. Windows recv has no
+# MSG_WAITALL).  Fall back to 0 so `flags & _MSG_WAITALL` is always False there.
+_MSG_WAITALL = getattr(socket, "MSG_WAITALL", 0)
+_MSG_PEEK    = getattr(socket, "MSG_PEEK", 0)
+
+# _coop_timeout sentinels.  _NONBLOCK marks a socket the USER made non-blocking
+# (setblocking(False) / settimeout(0) before any cooperative I/O): the I/O paths
+# must raise BlockingIOError on EAGAIN rather than park cooperatively.  _MISSING
+# is the "no side-table entry" probe -- a single atomic dict lookup, race-free
+# against a concurrent close() that pops the entry.
+_MISSING  = object()
+_NONBLOCK = object()
+
 
 def _wait_fd_coop(fd, ev, timeout_ms=-1):
     """wait_fd for the cooperative socket loops below, honouring cancellation.
@@ -65,21 +78,37 @@ def _coop_timeout(sock):
     every recv/send/connect, so any round trip slower than 1 ms (i.e. anything
     under real concurrency) died with socket.timeout, shredding connections.
 
-    So: a falsy timeout (None or 0.0) means "no deadline, block cooperatively";
-    only a POSITIVE timeout imposes a real cooperative deadline.  This matches
-    gevent/eventlet, where blocking sockets are the norm and the cooperative
-    layer supplies the blocking.  (A caller wanting genuinely-non-blocking,
-    raise-immediately semantics is not distinguishable here because the flag is
-    always forced on; that was already true before this change.)
+    So: a recorded falsy timeout (None) means "no deadline, block cooperatively";
+    only a POSITIVE recorded timeout imposes a real cooperative deadline.  This
+    matches gevent/eventlet, where blocking sockets are the norm and the
+    cooperative layer supplies the blocking.  A caller wanting genuinely-non-
+    blocking, raise-immediately semantics IS distinguished -- see the _NONBLOCK
+    note below (it hinges on there being no side-table entry, since a socket the
+    user forced non-blocking never records one).
 
     Reads the per-fd side table (populated by _make_nonblocking before
     setblocking(False) zeroed the live gettimeout()), NOT gettimeout() directly
     -- which always reads back 0.0 once the socket is forced non-blocking, so
-    the caller's settimeout() would otherwise be invisible here."""
+    the caller's settimeout() would otherwise be invisible here.
+
+    Returns the _NONBLOCK sentinel when the fd has NO side-table entry.
+    _make_nonblocking only records an entry when it first sees the socket with a
+    non-zero gettimeout() (a blocking or timed socket); a socket the user made
+    non-blocking (setblocking(False) / settimeout(0)) BEFORE any cooperative I/O
+    reads gettimeout()==0.0 on that first sighting, so nothing is recorded.  That
+    absence is the one reliable signal of explicit raise-immediately intent, so
+    the I/O paths let the BlockingIOError propagate instead of parking forever
+    (a hand-rolled non-blocking / drain-until-EWOULDBLOCK loop must not deadlock
+    under monkey.patch())."""
     try:
-        t = _SOCK_TIMEOUTS.get(sock.fileno())
+        fd = sock.fileno()
     except OSError:
         return None
+    # Single atomic get -- a concurrent close() may pop the entry between a
+    # membership test and a lookup, so probe with a sentinel default instead.
+    t = _SOCK_TIMEOUTS.get(fd, _MISSING)
+    if t is _MISSING:
+        return _NONBLOCK
     return t if t else None
 
 
@@ -97,10 +126,54 @@ def _wait_io(sock, fd, direction):
     otherwise a cancelled datagram/msg waiter on a still-open socket re-parks
     forever."""
     t = _coop_timeout(sock)
+    if t is _NONBLOCK:
+        # User made this socket non-blocking: don't park -- surface the
+        # BlockingIOError the caller just caught (stock non-blocking semantics).
+        raise BlockingIOError(errno.EWOULDBLOCK,
+                              os.strerror(errno.EWOULDBLOCK))
     if t is None:
         _wait_fd_coop(fd, direction)
     elif _wait_fd_coop(fd, direction, max(1, int(t * 1000))) == 0:
         raise socket.timeout("timed out")
+
+
+def _recv_waitall(sock, buffer, nbytes, flags, t):
+    """Fill buffer[:nbytes] completely (MSG_WAITALL semantics), returning the
+    number of bytes read; stops short only on EOF (peer closed), exactly like a
+    blocking recv(..., MSG_WAITALL).
+
+    _make_nonblocking forces every socket to O_NONBLOCK, and the kernel IGNORES
+    MSG_WAITALL on a non-blocking socket -- it returns whatever bytes are already
+    available.  So neither the C fast path nor a single _orig_recv accumulates to
+    n bytes; framed protocols that read fixed-length headers/payloads with
+    MSG_WAITALL silently short-read.  Re-implement the wait-for-all loop here,
+    parking on readiness between partial reads and honoring the socket's
+    cooperative timeout (raise socket.timeout if it elapses before n bytes).
+
+    `flags` arrives with MSG_WAITALL already stripped -- it is a no-op on a
+    non-blocking fd and only muddies intent.  `t` is the resolved cooperative
+    timeout (None == block, or a positive deadline); never _NONBLOCK here."""
+    fd = sock.fileno()
+    view = memoryview(buffer)
+    if nbytes > len(view):
+        nbytes = len(view)
+    got = 0
+    deadline = (time.monotonic() + t) if t is not None else None
+    while got < nbytes:
+        try:
+            n = _orig_recv_into(sock, view[got:nbytes], 0, flags)
+        except (BlockingIOError, InterruptedError):
+            if deadline is None:
+                _wait_fd_coop(fd, READ)
+            else:
+                rem = deadline - time.monotonic()
+                if rem <= 0 or _wait_fd_coop(fd, READ, max(1, int(rem * 1000))) == 0:
+                    raise socket.timeout("timed out")
+            continue
+        if n == 0:
+            break                     # EOF before n bytes -- short, like blocking recv
+        got += n
+    return got
 
 
 def _patched_recv(self, bufsize, flags=0):
@@ -114,6 +187,15 @@ def _patched_recv(self, bufsize, flags=0):
         return _orig_recv(self, bufsize, flags)
     _make_nonblocking(self)
     t = _coop_timeout(self)
+    if t is _NONBLOCK:
+        # User made this socket non-blocking: one attempt, let BlockingIOError
+        # propagate (and MSG_WAITALL is a kernel no-op here, as it is for stock
+        # non-blocking recv).
+        return _orig_recv(self, bufsize, flags)
+    if _MSG_WAITALL and (flags & _MSG_WAITALL) and not (flags & _MSG_PEEK) and bufsize > 0:
+        buf = bytearray(bufsize)
+        got = _recv_waitall(self, buf, bufsize, flags & ~_MSG_WAITALL, t)
+        return bytes(buf[:got])
     if _tcp_recv_alloc is not None and t is None:
         return _tcp_recv_alloc(self.fileno(), bufsize, flags)
     if t is not None:
@@ -141,6 +223,13 @@ def _patched_recv_into(self, buffer, nbytes=0, flags=0):
         return _orig_recv_into(self, buffer, nbytes, flags)
     _make_nonblocking(self)
     t = _coop_timeout(self)
+    if t is _NONBLOCK:
+        # User non-blocking socket: one attempt, let BlockingIOError propagate.
+        return _orig_recv_into(self, buffer, nbytes, flags)
+    if _MSG_WAITALL and (flags & _MSG_WAITALL) and not (flags & _MSG_PEEK):
+        n = nbytes if nbytes else len(buffer)
+        if n > 0:
+            return _recv_waitall(self, buffer, n, flags & ~_MSG_WAITALL, t)
     if _tcp_recv is not None and t is None:
         n = nbytes if nbytes else len(buffer)
         return _tcp_recv(self.fileno(), buffer, n, flags)
@@ -164,8 +253,26 @@ def _patched_send(self, data, flags=0):
     if not _in_fiber():
         return _orig_send(self, data, flags)
     _make_nonblocking(self)
-    if _tcp_send_once is not None:
+    t = _coop_timeout(self)
+    if t is _NONBLOCK:
+        # User non-blocking socket: one attempt, let BlockingIOError propagate.
+        return _orig_send(self, data, flags)
+    # The C fast path parks with an infinite deadline, so it can only be used
+    # when there is no timeout; a timed socket must honor settimeout() (like
+    # recv/connect) and raise socket.timeout instead of hanging on a stalled
+    # peer.
+    if _tcp_send_once is not None and t is None:
         return _tcp_send_once(self.fileno(), data, flags)
+    if t is not None:
+        deadline = time.monotonic() + t
+        while True:
+            try:
+                return _orig_send(self, data, flags)
+            except (BlockingIOError, InterruptedError):
+                rem = deadline - time.monotonic()
+                if rem <= 0 or _wait_fd_coop(self.fileno(), WRITE,
+                                             max(1, int(rem * 1000))) == 0:
+                    raise socket.timeout("timed out")
     while True:
         try:
             return _orig_send(self, data, flags)
@@ -177,18 +284,33 @@ def _patched_sendall(self, data, flags=0):
     if not _in_fiber():
         return _orig_sendall(self, data, flags)
     _make_nonblocking(self)
-    if _tcp_send_all is not None:
+    t = _coop_timeout(self)
+    if t is _NONBLOCK:
+        # User non-blocking socket: let stock non-blocking sendall raise
+        # BlockingIOError when it can't drain the buffer immediately.
+        return _orig_sendall(self, data, flags)
+    # C fast path parks with an infinite deadline -- only usable with no timeout;
+    # a timed socket must raise socket.timeout rather than hang forever.
+    if _tcp_send_all is not None and t is None:
         _tcp_send_all(self.fileno(), data, flags)
         return None
     view = data if isinstance(data, memoryview) else memoryview(data)
     sent = 0
+    deadline = (time.monotonic() + t) if t is not None else None
     while sent < len(view):
         try:
             n = _orig_send(self, view[sent:], flags)
             if n:
                 sent += n
         except (BlockingIOError, InterruptedError):
-            _wait_fd_coop(self.fileno(), WRITE)
+            if deadline is None:
+                _wait_fd_coop(self.fileno(), WRITE)
+            else:
+                rem = deadline - time.monotonic()
+                if rem <= 0 or _wait_fd_coop(self.fileno(), WRITE,
+                                             max(1, int(rem * 1000))) == 0:
+                    raise socket.timeout("timed out")
+    return None
 
 
 def _patched_accept(self):
@@ -202,40 +324,131 @@ def _patched_accept(self):
             _wait_io(self, self.fileno(), READ)
 
 
+def _connect_needs_resolve(host):
+    """True when `host` is a name that must be resolved before connect().
+
+    IP literals -- including zone'd IPv6 like 'fe80::1%eth0' -- return False so
+    connect_ex handles them verbatim (preserving exact sockaddr/scope semantics);
+    only names return True and get routed through the cooperative resolver."""
+    if not isinstance(host, str) or not host:
+        return False
+    probe = host.split("%", 1)[0]           # strip an IPv6 zone id for the check
+    for af in (socket.AF_INET6, socket.AF_INET):
+        try:
+            socket.inet_pton(af, probe)
+            return False                    # parses as a literal -> no DNS
+        except (OSError, ValueError):
+            continue
+    return True
+
+
+def _connect_resolve(sock, address):
+    """Resolve a (host, port[, ...]) connect target through the cooperatively
+    patched socket.getaddrinfo when `host` is a name.
+
+    connect_ex on a raw (hostname, port) tuple resolves the name INLINE via
+    libc getaddrinfo on the hub's OS thread, freezing every fiber on that hub
+    for the full (possibly multi-second) resolution -- the exact stall the
+    monkey layer exists to prevent.  Resolve here instead so DNS parks on the
+    cooperative resolver.  AF_UNIX paths / already-numeric addresses pass
+    through unchanged."""
+    if not isinstance(address, tuple) or len(address) < 2:
+        return address                      # AF_UNIX path or non-(host,port) form
+    if not _connect_needs_resolve(address[0]):
+        return address
+    infos = socket.getaddrinfo(address[0], address[1],
+                               sock.family, sock.type, sock.proto)
+    if not infos:
+        return address
+    return infos[0][4]                      # sockaddr of the first result (as connect does)
+
+
+def _connect_wait_result(sock, timeout_ms):
+    """In-flight connect: wait for writability, then read the outcome via
+    SO_ERROR.  The POSIX idiom of re-calling connect() to learn the result does
+    NOT work on Windows -- a refused connect re-reports WSAEALREADY/
+    WSAEWOULDBLOCK forever instead of the actual error, so the old loop hung
+    there.  SO_ERROR is the portable way both stacks agree on (it is exactly
+    what asyncio's selector loop uses), and OSError(err, ...) maps to the
+    right subclass -- ConnectionRefusedError etc. -- on Linux AND Windows
+    (where errno.ECONNREFUSED is the WSA code)."""
+    while True:
+        if timeout_ms is not None:
+            if _wait_fd_coop(sock.fileno(), WRITE, timeout_ms) == 0:
+                raise socket.timeout("connect timed out")
+        else:
+            _wait_fd_coop(sock.fileno(), WRITE)
+        err = sock.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
+        if err == 0:
+            return
+        if err not in (errno.EINPROGRESS, errno.EALREADY):
+            raise OSError(err, os.strerror(err))
+
+
+def _connect_retry_backlog(sock, address):
+    """POSIX AF_UNIX connect() returned EAGAIN: the listener's backlog is full
+    and NO connection was started (unlike a TCP EINPROGRESS -- the unconnected
+    socket would poll writable with SO_ERROR==0, so the SO_ERROR path would
+    falsely report success).  A stock BLOCKING connect waits in the kernel for
+    backlog space; emulate that cooperatively with a capped backoff until the
+    connect completes or fails for real.  Only reached for a cooperative-
+    blocking socket (timed / user-non-blocking sockets raise before we get
+    here, matching stock, which never waits on EAGAIN)."""
+    backoff = 0.0005
+    while True:
+        _co_sleep(backoff)
+        if backoff < 0.05:
+            backoff *= 2
+        err = sock.connect_ex(address)
+        if err == 0 or err == errno.EISCONN:
+            return
+        if err in (errno.EWOULDBLOCK, errno.EAGAIN):
+            continue
+        if err in (errno.EINPROGRESS, errno.EALREADY):
+            _connect_wait_result(sock, None)   # backlog opened; now in flight
+            return
+        raise OSError(err, os.strerror(err))
+
+
 def _patched_connect(self, address):
     if not _in_fiber():
         return _orig_connect(self, address)
     _make_nonblocking(self)
+    # Resolve a hostname target via the cooperative resolver BEFORE connect_ex,
+    # which would otherwise do a blocking inline libc getaddrinfo on the hub.
+    address = _connect_resolve(self, address)
     # connect_ex returns the errno instead of raising, so a synchronous
     # completion (loopback frequently connects at once) and the in-flight
     # case share one path.
     err = self.connect_ex(address)
     if err == 0 or err == errno.EISCONN:
         return
-    if err not in (errno.EINPROGRESS, errno.EWOULDBLOCK, errno.EALREADY):
+    in_progress = (errno.EINPROGRESS, errno.EALREADY)
+    if _IS_WINDOWS:
+        # A non-blocking TCP connect on Windows reports WSAEWOULDBLOCK (not
+        # EINPROGRESS) while the handshake is in flight -- treat it as such.
+        in_progress = in_progress + (errno.EWOULDBLOCK,)
+    if err not in in_progress:
+        if err in (errno.EWOULDBLOCK, errno.EAGAIN):
+            # POSIX only reaches here (Windows EWOULDBLOCK handled above): an
+            # AF_UNIX connect with a full listen backlog.  NO connection was
+            # started -- do NOT treat it as connect-in-progress (that reads
+            # SO_ERROR==0 on an unconnected socket and reports FALSE SUCCESS).
+            t = _coop_timeout(self)
+            if t is None:
+                return _connect_retry_backlog(self, address)
+            # Timed or user-non-blocking socket: stock never waits on EAGAIN
+            # from connect(), so surface it immediately like stock does.
+            raise BlockingIOError(err, os.strerror(err))
         raise OSError(err, os.strerror(err))
     # In flight: wait for writability, then read the outcome via SO_ERROR.
-    # The POSIX idiom of re-calling connect() to learn the result does NOT
-    # work on Windows -- a refused connect re-reports WSAEALREADY/
-    # WSAEWOULDBLOCK forever instead of the actual error, so the old loop hung
-    # there.  SO_ERROR is the portable way both stacks agree on (it is exactly
-    # what asyncio's selector loop uses), and OSError(err, ...) maps to the
-    # right subclass -- ConnectionRefusedError etc. -- on Linux AND Windows
-    # (where errno.ECONNREFUSED is the WSA code).
     t = _coop_timeout(self)
+    if t is _NONBLOCK:
+        # User non-blocking connect: surface the in-progress state (BlockingIOError
+        # EINPROGRESS) rather than parking, exactly like a stock non-blocking connect.
+        raise BlockingIOError(err, os.strerror(err))
     timeout_ms = max(1, int(t * 1000)) if t is not None else None
-    while True:
-        if timeout_ms is not None:
-            r = _wait_fd_coop(self.fileno(), WRITE, timeout_ms)
-            if r == 0:
-                raise socket.timeout("connect timed out")
-        else:
-            _wait_fd_coop(self.fileno(), WRITE)
-        err = self.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
-        if err == 0:
-            return
-        if err not in (errno.EINPROGRESS, errno.EALREADY):
-            raise OSError(err, os.strerror(err))
+    _connect_wait_result(self, timeout_ms)
 
 
 def _patched_recvfrom(self, bufsize, flags=0):
@@ -510,6 +723,15 @@ def _patch_socket():
     s.sendfile  = _patched_sendfile
     s.close     = _patched_close
     s.detach    = _patched_detach
+    # Cooperative settimeout/setblocking (defined in _base) keep the
+    # _SOCK_TIMEOUTS side table honest across a user's LATER change to
+    # non-blocking/timed: without them a settimeout(0)/setblocking(False) AFTER
+    # prior I/O leaves the stale recorded timeout authoritative, so _coop_timeout
+    # returns that deadline (or block-forever) instead of _NONBLOCK and the op the
+    # user made non-blocking parks/hangs instead of raising BlockingIOError.  The
+    # raw methods are captured in _base before this runs.
+    s.settimeout  = _patched_settimeout
+    s.setblocking = _patched_setblocking
     if _HAVE_RECVMSG:
         _orig_recvmsg      = s.recvmsg
         _orig_recvmsg_into = s.recvmsg_into
@@ -534,6 +756,8 @@ def _unpatch_socket():
     s.sendfile  = _orig_sendfile
     s.close     = _orig_close
     s.detach    = _orig_detach
+    s.settimeout  = _raw_sock_settimeout
+    s.setblocking = _raw_sock_setblocking
     if _HAVE_RECVMSG:
         s.recvmsg      = _orig_recvmsg
         s.recvmsg_into = _orig_recvmsg_into

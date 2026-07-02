@@ -62,6 +62,13 @@ _raw_time_sleep = time.sleep
 # forever on a non-blocking recv that returns BlockingIOError).
 _raw_sock_recv = socket.socket.recv
 _raw_sock_send = socket.socket.send
+# Captured before _patch_socket installs the cooperative settimeout/setblocking
+# wrappers.  _make_nonblocking forces the fd non-blocking with the RAW setblocking
+# (never the patched one, which would pop the entry it just recorded), and the
+# patched wrappers (_patched_settimeout / _patched_setblocking) call these to keep
+# the _SOCK_TIMEOUTS side table honest across a user's later timeout changes.
+_raw_sock_settimeout  = socket.socket.settimeout
+_raw_sock_setblocking = socket.socket.setblocking
 # Raw select (before polling.py installs the cooperative select).  A _Parker on
 # a FOREIGN OS thread (not a fiber) blocks the thread on its wake fd with
 # this -- the patched select would re-enter the cooperative path on a thread
@@ -156,15 +163,21 @@ def _make_nonblocking(sock):
         # cooperative I/O layer would otherwise lose the user's settimeout() and
         # park with no deadline (a timed socket that never receives hangs the
         # fiber).  socket.socket has no __dict__, so we keep this in a side
-        # table keyed by fd (see _coop_timeout).  The guard re-fires whenever
-        # the user changes the timeout (gettimeout != 0.0 again), so this tracks
-        # later settimeout() calls AND self-heals a reused fd (a fresh socket's
-        # first sighting overwrites any stale entry).
+        # table keyed by fd (see _coop_timeout).  The guard re-fires whenever the
+        # user RAISES the timeout to a non-zero value (gettimeout != 0.0 again),
+        # tracking later settimeout(t>0)/setblocking(True) calls.  A change TO
+        # zero (settimeout(0)/setblocking(False)) reads back 0.0 -- here it is
+        # indistinguishable from the non-blocking flag we force just below -- so
+        # it CANNOT be observed at this choke point; the patched settimeout/
+        # setblocking wrappers pop the now-stale entry instead (see
+        # _patched_settimeout / _patched_setblocking).
         try:
             _SOCK_TIMEOUTS[sock.fileno()] = sock.gettimeout()
         except OSError:
             pass
-        sock.setblocking(False)
+        # RAW setblocking: the patched setblocking would pop the entry we just
+        # recorded (its "user made this non-blocking" branch), losing the timeout.
+        _raw_sock_setblocking(sock, False)
         # First sighting of this socket -> flip TCP_NODELAY once.  Cheap (sets
         # a flag), safe (request-response apps benefit unconditionally), and
         # matches Go / asyncio's default for low-latency TCP.
@@ -174,6 +187,46 @@ def _make_nonblocking(sock):
                 sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         except (OSError, AttributeError):
             pass
+
+
+def _patched_settimeout(self, value):
+    """Cooperative settimeout that keeps the _SOCK_TIMEOUTS side table honest.
+
+    _make_nonblocking forces every socket to gettimeout()==0.0, so it can NEVER
+    observe a later user settimeout(0)/setblocking(False): both read back 0.0,
+    indistinguishable from the non-blocking flag it forced, so the previously
+    recorded timeout (e.g. 5.0) would stay authoritative and a supposedly
+    non-blocking op would inherit that stale deadline (block + socket.timeout
+    where stock raises BlockingIOError instantly).  Intercepting settimeout is
+    the only reliable signal of a change TO zero.  Installed by
+    sockets._patch_socket (restored by _unpatch_socket)."""
+    _raw_sock_settimeout(self, value)
+    try:
+        fd = self.fileno()
+    except OSError:
+        return
+    if value is None:
+        _SOCK_TIMEOUTS[fd] = None          # blocking -> cooperative block-forever
+    elif value == 0:
+        _SOCK_TIMEOUTS.pop(fd, None)       # non-blocking -> _NONBLOCK (raise EAGAIN)
+    else:
+        _SOCK_TIMEOUTS[fd] = value         # timed -> cooperative deadline
+
+
+def _patched_setblocking(self, flag):
+    """setblocking(flag) is settimeout(None) (flag=True) / settimeout(0)
+    (flag=False); keep the side table in step for the same reason as
+    _patched_settimeout (a user setblocking(False) after timed I/O must clear the
+    stale recorded timeout, else the op the user made non-blocking hangs)."""
+    _raw_sock_setblocking(self, flag)
+    try:
+        fd = self.fileno()
+    except OSError:
+        return
+    if flag:
+        _SOCK_TIMEOUTS[fd] = None          # blocking -> cooperative block-forever
+    else:
+        _SOCK_TIMEOUTS.pop(fd, None)       # non-blocking -> _NONBLOCK (raise EAGAIN)
 
 
 def _fd_pollable(fd):
@@ -646,7 +699,16 @@ _real_Condition_for_backend = _th.Condition
 # a single non-blocking atomic C call and get() blocks in C.
 import _queue as _real_queue_mod              # noqa: E402
 _real_SimpleQueue_for_backend = _real_queue_mod.SimpleQueue
+# The Empty raised by a non-blocking / timed SimpleQueue.get -- from the raw C
+# module (never monkey-patched), used by the work-stealing worker loop below.
+_real_queue_Empty = _real_queue_mod.Empty
 _BACKEND_SHUTDOWN = object()
+
+# Idle workers poll their OWN shard queue on this cadence so they can STEAL work
+# that piled up on another shard (see _ThreadPoolBackend._worker_loop): small
+# enough that a head-of-line-blocked offload is rescued promptly, large enough
+# that a fully idle pool costs only ~size/interval trivial wakeups per second.
+_WORKER_STEAL_POLL = 0.02
 
 # Offload parker mode (p92).  "1" = always inmem (0-fd g.wake), "0" = always
 # FD-mode (per-task pipe + netpoll), unset = ADAPTIVE (FD while the pipe pool has
@@ -716,6 +778,10 @@ class _ThreadPoolBackend(_BlockingBackend):
         # sections (each shard: 1 worker get + the hubs that hash to it), so no
         # single mutex is contended by every thread and the convoy can't form.
         self._qs = [_real_SimpleQueue_for_backend() for _ in range(self.size)]
+        # Round-robin cursor for submit() shard selection (see submit()).  Only
+        # mutated in submit(): serialized under single-thread run(), benign-racy
+        # under M:N (a lost increment merely reuses/skips a shard).
+        self._rr = 0
         self._started = self.size
         # Start workers eagerly in __init__ -- we are not yet inside any
         # fiber (the backend is built on first offload, called from the
@@ -725,9 +791,34 @@ class _ThreadPoolBackend(_BlockingBackend):
             _thread.start_new_thread(self._worker_loop, (i,))
 
     def _worker_loop(self, shard):
-        q = self._qs[shard]               # this worker's own shard queue
+        qs = self._qs
+        n = self.size
+        my_q = qs[shard]                  # this worker's own shard queue
         while True:
-            item = q.get()                 # real C blocking get on a real thread
+            # Block on our OWN shard, but wake periodically to STEAL work queued
+            # on a backed-up sibling.  Without stealing, one long/blocking offload
+            # head-of-line blocks every job behind it on its shard while sibling
+            # workers sit idle -- and under the single-thread scheduler (all
+            # fibers share one OS-thread id) offloads used to funnel onto a SINGLE
+            # shard, degrading the whole pool to one effective worker.  Stealing
+            # turns the N per-worker queues back into an N-wide pool with no
+            # single head-of-line-blocking worker.
+            try:
+                item = my_q.get(timeout=_WORKER_STEAL_POLL)
+            except _real_queue_Empty:
+                # Own shard idle: try to steal ONE job from a sibling.  get_nowait
+                # is FIFO, so a shard's real jobs always come out before that
+                # shard's shutdown sentinel -- no job is skipped at teardown, and
+                # every sentinel stays reachable so every worker still exits.
+                item = None
+                for k in range(1, n):
+                    try:
+                        item = qs[(shard + k) % n].get_nowait()
+                        break
+                    except _real_queue_Empty:
+                        continue
+                if item is None:
+                    continue
             if item is _BACKEND_SHUTDOWN:
                 return
             fn, args, kwargs, box, parker = item
@@ -766,7 +857,18 @@ class _ThreadPoolBackend(_BlockingBackend):
         # tells it apart from a single startup offload.  The threshold caps FD-mode
         # pipes near the pool size so the churn can't form.  RUNLOOM_BLOCKPOOL_INMEM
         # =1/0 force a mode (escape hatch + the swarm env-gated-mode tests).
-        shard = _thread.get_ident() % self.size
+        # ROUND-ROBIN across shards -- NOT `_thread.get_ident() % size`.  Under
+        # the single-thread scheduler every fiber shares one OS-thread id, so an
+        # ident-keyed shard funneled ALL offloads onto ONE worker: the pool
+        # degraded to 1 effective worker and a single long/blocking offloaded call
+        # head-of-line blocked every other one.  Round-robin spreads submits
+        # across every worker (and evens out the ident%size collisions that left
+        # workers idle under M:N); _worker_loop's stealing rebalances any residual
+        # pile-up.  The cursor is mutated only here: submit() is serialized under
+        # single-thread run() (perfect round-robin), and a benign race under M:N
+        # at worst reuses/skips a shard -- always a valid in-range index.
+        shard = self._rr
+        self._rr = (shard + 1) % self.size
         if _BLOCKPOOL_INMEM_ENV == "1":
             use_inmem = True
         elif _BLOCKPOOL_INMEM_ENV == "0":
@@ -784,7 +886,7 @@ class _ThreadPoolBackend(_BlockingBackend):
         box = [None, None, False]
         # Spreads puts across the per-worker queues so no single SimpleQueue
         # critical section is hammered by every hub (see __init__).  `shard` was
-        # computed above (OS-thread/hub id; also drove the adaptive backlog check).
+        # computed above (round-robin; also drove the adaptive backlog check).
         self._qs[shard].put(
             (fn, args, kwargs, box, p))            # atomic C call; never freezes the hub
         try:

@@ -37,9 +37,19 @@ def _spawn(fn):
 _orig_ThreadPoolExecutor = None
 _co_tpe_cls = None
 
+# Real (never-patched) lock for the executor's O(1) bookkeeping; captured at
+# import time -- before patch() rebinds _thread.allocate_lock to the cooperative
+# CoLock -- so it stays a real OS mutex (same idiom as _raw_get_ident below).
+# Held only for set/flag updates, never across a park.
+_raw_allocate_lock = _thread.allocate_lock
+
 
 def _build_co_tpe():
     import concurrent.futures as cf
+    try:
+        from concurrent.futures.thread import BrokenThreadPool as _BrokenThreadPool
+    except Exception:                       # pragma: no cover - ancient Python
+        _BrokenThreadPool = RuntimeError
 
     class CoThreadPoolExecutor(cf.Executor):
         """ThreadPoolExecutor that runs submitted callables as fibers."""
@@ -55,17 +65,90 @@ def _build_co_tpe():
             self._initializer = initializer
             self._initargs = initargs
             self._shutdown = False
-            self._pending = []          # CoEvent per in-flight task
+            self._broken = None             # BrokenThreadPool once init fails
+            self._guard = _raw_allocate_lock()   # real lock, O(1) bookkeeping
+            # Only the IN-FLIGHT futures (submitted but not finished): each task
+            # discards its own future on completion, so the set stays
+            # O(in-flight) -- never O(total submits) -- and shutdown() has the
+            # not-yet-started futures to cancel.
+            self._pending = set()
+            # Set whenever _pending is empty; shutdown(wait=True) parks on it
+            # until every task fiber has run its finally (i.e. after set_result
+            # and its inline done-callbacks), matching stdlib join semantics.
+            self._idle = CoEvent()
+            self._idle.set()
+            # The initializer runs once per POOL (a fiber-backed pool has no
+            # persistent worker threads), not once per task.
+            self._init_started = False
+            self._init_done = CoEvent()
+
+        def _run_initializer(self):
+            """Run the pool initializer exactly once for this executor, before
+            the first task's callable runs.  stdlib runs it once per worker
+            THREAD; the fiber-backed pool has no persistent workers, so
+            once-per-pool is the faithful, bounded analogue -- unlike the old
+            once-per-TASK, which re-ran per-worker setup (DB connect, license
+            slot, thread-local cache) for every submit.  A task that arrives
+            while another fiber is initializing waits on _init_done; if the
+            initializer raised, the pool is broken and every task/submit
+            surfaces BrokenThreadPool, as stdlib does."""
+            if self._initializer is None:
+                return
+            if self._init_done.is_set():    # fast path once settled
+                if self._broken is not None:
+                    raise self._broken
+                return
+            do_init = False
+            with self._guard:
+                if self._broken is not None:
+                    raise self._broken
+                if self._init_done.is_set():
+                    return
+                if not self._init_started:
+                    self._init_started = True
+                    do_init = True
+            if not do_init:
+                # Another fiber owns the one-shot init; wait for it to finish.
+                self._init_done.wait()
+                if self._broken is not None:
+                    raise self._broken
+                return
+            try:
+                self._initializer(*self._initargs)
+            except BaseException as exc:
+                broken = _BrokenThreadPool(
+                    "A worker initializer raised in CoThreadPoolExecutor")
+                broken.__cause__ = exc
+                with self._guard:
+                    self._broken = broken
+                self._init_done.set()       # wake waiters -> they see _broken
+                raise broken
+            self._init_done.set()
+
+        def _task_done(self, fut):
+            with self._guard:
+                self._pending.discard(fut)
+                if not self._pending:
+                    self._idle.set()
 
         def submit(self, fn, /, *args, **kwargs):
             if self._shutdown:
                 raise RuntimeError(
                     "cannot schedule new futures after shutdown")
+            if self._broken is not None:
+                raise self._broken
             fut = cf.Future()
-            done = CoEvent()
-            self._pending.append(done)
-            sem, initializer, initargs = self._sem, self._initializer, \
-                self._initargs
+            with self._guard:
+                # Re-check under the guard so a concurrent shutdown() cannot race
+                # a fresh future into _pending after it has snapshotted the set.
+                if self._shutdown:
+                    raise RuntimeError(
+                        "cannot schedule new futures after shutdown")
+                if self._broken is not None:
+                    raise self._broken
+                self._pending.add(fut)
+                self._idle.clear()
+            sem = self._sem
 
             def task():
                 sem.acquire()           # honour max_workers
@@ -73,8 +156,7 @@ def _build_co_tpe():
                     if not fut.set_running_or_notify_cancel():
                         return          # future was cancelled before start
                     try:
-                        if initializer is not None:
-                            initializer(*initargs)
+                        self._run_initializer()   # once per pool
                         result = fn(*args, **kwargs)
                     except BaseException as exc:
                         fut.set_exception(exc)
@@ -82,17 +164,30 @@ def _build_co_tpe():
                         fut.set_result(result)
                 finally:
                     sem.release()
-                    done.set()
+                    self._task_done(fut)
 
-            _spawn(task)
+            # A fiber-spawned task only runs while a scheduler is driving it.
+            # With no runtime live (a plain main thread before/after run(), a
+            # background OS thread with no hub), run it inline so the future
+            # still resolves -- stock ThreadPoolExecutor works in any context.
+            if _runtime_live():
+                _spawn(task)
+            else:
+                task()
             return fut
 
         def shutdown(self, wait=True, *, cancel_futures=False):
-            self._shutdown = True
-            pending, self._pending = self._pending, []
+            with self._guard:
+                self._shutdown = True
+                pending = list(self._pending) if cancel_futures else ()
+            if cancel_futures:
+                # Cancel every not-yet-started future.  A running future refuses
+                # the cancel (Future.cancel() -> False) and finishes normally; a
+                # cancelled one is skipped by set_running_or_notify_cancel().
+                for fut in pending:
+                    fut.cancel()
             if wait:
-                for done in pending:
-                    done.wait()
+                self._idle.wait()
 
     return CoThreadPoolExecutor
 
@@ -230,8 +325,12 @@ def _co_recursive_semlock_methods(semlock):
         if state[0] is not None and state[0] == cur:
             # Already held by THIS fiber -> pure re-entrant bump, no C call (the
             # kernel sem stays at "1 holder", recursion lives only in Python).
-            if not block:
-                return True
+            # A re-entrant acquire ALWAYS deepens the recursion, blocking or not
+            # -- stdlib RLock bumps the count on a non-blocking re-entrant
+            # acquire too.  Returning True without the bump would drop the count
+            # by one level, so the matching release() would sem_post the kernel
+            # semaphore while we logically still hold an outer level, releasing
+            # the cross-process lock out from under the caller.
             state[1] += 1
             return True
         if not block:

@@ -164,6 +164,17 @@ class StreamReader(object):
                 self._buf.clear()
             raise ValueError(e.args[0])
 
+    def __aiter__(self):
+        # Match stock asyncio.StreamReader: `async for line in reader:` reads
+        # lines via readline() and stops at EOF (readline returns b"").
+        return self
+
+    async def __anext__(self):
+        val = await self.readline()
+        if val == b"":
+            raise StopAsyncIteration
+        return val
+
 
 class StreamWriter(object):
     """asyncio.StreamWriter-compatible writer backed by cooperative
@@ -210,7 +221,7 @@ class StreamWriter(object):
                 return
             del self._buf[:n]
 
-    async def drain(self):
+    def _flush_blocking(self):
         """Block (cooperatively) until all buffered data is on the wire."""
         while self._buf:
             try:
@@ -225,15 +236,29 @@ class StreamWriter(object):
                     raise
             _wait_fd(self._sock.fileno(), 2)
 
+    async def drain(self):
+        """Block (cooperatively) until all buffered data is on the wire."""
+        self._flush_blocking()
+
     def close(self):
         if self._closed:
             return
         self._closed = True
+        # asyncio's transport.close() flushes any buffered write data before
+        # sending FIN; mirror that so a write() whose data didn't fit the kernel
+        # send buffer (residue left in _buf by _try_flush) isn't silently
+        # truncated by close().  We run in a fiber, so _flush_blocking parks
+        # cooperatively just like drain().
         try:
-            self._sock.shutdown(_socket.SHUT_RDWR)
+            self._flush_blocking()
         except OSError:
             pass
-        _close_sock(self._sock)
+        finally:
+            try:
+                self._sock.shutdown(_socket.SHUT_RDWR)
+            except OSError:
+                pass
+            _close_sock(self._sock)
 
     def is_closing(self):
         return self._closed

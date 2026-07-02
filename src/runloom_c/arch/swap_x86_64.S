@@ -4,7 +4,9 @@
  * twice per swap (~300 ns each = ~600 ns of syscall traffic) just to
  * save and restore the signal mask.  We don't care about the signal
  * mask -- application-level coroutines should not be touching it -- so
- * we save only what the SystemV ABI requires: rbx, rbp, r12-r15.
+ * we save only what the SystemV ABI requires: rbx, rbp, r12-r15, plus
+ * the callee-saved FP environment (the MXCSR control/status word and the
+ * x87 control word).
  *
  *   void runloom_asm_swap(runloom_asm_ctx_t *from, runloom_asm_ctx_t *to);
  *   void runloom_asm_trampoline(void);   <- jumped to on first swap-in
@@ -19,8 +21,11 @@
  * SystemV calling convention:
  *   first arg  -> %rdi
  *   second arg -> %rsi
- *   callee-saved: rbx, rbp, r12, r13, r14, r15  (we also save xmm none -
- *   they are caller-saved on SysV).
+ *   callee-saved: rbx, rbp, r12, r13, r14, r15.  The xmm register
+ *   *contents* are caller-saved on SysV, so we skip them -- but the
+ *   MXCSR *control bits* (rounding mode, exception masks, FTZ/DAZ) and
+ *   the x87 control word ARE callee-saved and must be preserved across
+ *   the swap, so we save/restore them explicitly below.
  *
  * macOS prepends '_' to C symbol names; Linux/BSD do not.
  */
@@ -40,8 +45,9 @@
 
 /* -------------------------------------------------------------------- *
  *  runloom_asm_swap(from, to)                                             *
- *  Save callee-saved regs on the current stack, store SP into *from,   *
- *  load SP from *to, restore regs, RET into the new context's IP.      *
+ *  Save callee-saved regs + FP env on the current stack, store SP into *
+ *  *from, load SP from *to, restore regs + FP env, RET into the new    *
+ *  context's IP.                                                       *
  * -------------------------------------------------------------------- */
     .globl RUNLOOM_SYM(runloom_asm_swap)
 #if defined(__linux__)
@@ -54,8 +60,26 @@ RUNLOOM_SYM(runloom_asm_swap):
     pushq   %r13
     pushq   %r14
     pushq   %r15
+    /* Preserve the callee-saved FP environment.  MXCSR (rounding mode,
+     * exception masks, FTZ/DAZ) and the x87 control word are a single
+     * per-OS-thread register pair; without saving/restoring them here a
+     * fiber's fesetround/feenableexcept would leak into whatever fiber
+     * or scheduler runs next on this hub -- silently corrupting float
+     * results or turning a later normal op into a process-killing SIGFPE.
+     * Reserve a 16-byte slot at the bottom of the frame (16, not 8, so the
+     * saved frame stays a multiple of 16 and the post-ret stack pointer is
+     * identical to the no-FP-env layout -- the trampoline's alignment math
+     * depends on that): MXCSR at +0 (4 bytes), x87 control word at +8
+     * (2 bytes).  runloom_asm_make_ctx reserves and initialises this same
+     * slot for freshly-made contexts (default MXCSR 0x1F80, x87 CW 0x037F). */
+    subq    $16, %rsp
+    stmxcsr (%rsp)                /* save MXCSR control/status word    */
+    fnstcw  8(%rsp)              /* save x87 control word             */
     movq    %rsp, (%rdi)          /* from->sp = rsp                    */
     movq    (%rsi), %rsp          /* rsp      = to->sp                 */
+    ldmxcsr (%rsp)                /* restore MXCSR control/status word */
+    fldcw   8(%rsp)              /* restore x87 control word          */
+    addq    $16, %rsp
     popq    %r15
     popq    %r14
     popq    %r13

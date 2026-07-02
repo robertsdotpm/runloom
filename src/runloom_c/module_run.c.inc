@@ -497,8 +497,15 @@ static PyObject *m_fiber_grow(PyObject *self, PyObject *const *args,
         PyObject *fn = args[0];
         PyObject *d = ((PyFunctionObject *)fn)->func_dict;   /* borrowed, may be NULL */
         if (d != NULL && PyDict_CheckExact(d)) {
-            PyObject *store = PyDict_GetItemWithError(d, runloom_grow_down_key); /* borrowed */
-            if (store != NULL && PyList_CheckExact(store) && PyList_GET_SIZE(store) == 2) {
+            /* FT-safe: take a STRONG ref to the store list itself, not a borrow.
+             * A concurrent replacement of fn.__dict__[GROW_DOWN_KEY] (e.g. the
+             * grow_down_prepare first-write race, or user code) can drop the old
+             * list's last reference mid-use; a borrowed pointer would then be a
+             * freed object. */
+            PyObject *store = NULL;   /* strong ref (or NULL) */
+            if (PyDict_GetItemRef(d, runloom_grow_down_key, &store) < 0) {
+                PyErr_Clear();
+            } else if (store != NULL && PyList_CheckExact(store) && PyList_GET_SIZE(store) == 2) {
                 /* FT-safe: a late sampling completion may still be writing store[0];
                  * take strong refs under the list lock rather than borrow + race. */
                 PyObject *cnt_o = PyList_GetItemRef(store, 1);
@@ -516,13 +523,14 @@ static PyObject *m_fiber_grow(PyObject *self, PyObject *const *args,
                 }
                 Py_XDECREF(cnt_o);
                 Py_XDECREF(sz_o);
-                if (frozen)
+                if (frozen) {
                     /* learned size, no Python frame, DEFERRED stack alloc (lazy
                      * path) so a tight front-load loop doesn't cold-mmap per spawn */
+                    Py_DECREF(store);
                     return runloom_mn_fiber_grown(fn, size);
-            } else if (store == NULL && PyErr_Occurred()) {
-                PyErr_Clear();
+                }
             }
+            Py_XDECREF(store);
         }
         /* no store / not frozen / size 0 -> Python sampling path below */
     }

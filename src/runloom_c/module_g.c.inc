@@ -142,6 +142,7 @@ static PyObject *RunloomG_cancel_wait_fd(RunloomG *self, PyObject *unused)
 static PyObject *RunloomG_stack(RunloomG *self, PyObject *unused)
 {
     PyObject *d;
+    PyObject *v;
     const char *state;
     int has_snap;
     (void)unused;
@@ -162,11 +163,23 @@ static PyObject *RunloomG_stack(RunloomG *self, PyObject *unused)
 
     d = PyDict_New();
     if (d == NULL) return NULL;
-    if (PyDict_SetItemString(d, "state", PyUnicode_FromString(state)) < 0 ||
-        PyDict_SetItemString(d, "has_snap", PyBool_FromLong(has_snap)) < 0) {
+    /* PyDict_SetItemString does NOT steal the value ref, so DECREF each
+     * freshly-created value after insertion.  Also guard against a NULL
+     * value (OOM) rather than passing it to PyDict_SetItemString. */
+    v = PyUnicode_FromString(state);
+    if (v == NULL || PyDict_SetItemString(d, "state", v) < 0) {
+        Py_XDECREF(v);
         Py_DECREF(d);
         return NULL;
     }
+    Py_DECREF(v);
+    v = PyBool_FromLong(has_snap);
+    if (v == NULL || PyDict_SetItemString(d, "has_snap", v) < 0) {
+        Py_XDECREF(v);
+        Py_DECREF(d);
+        return NULL;
+    }
+    Py_DECREF(v);
     return d;
 }
 

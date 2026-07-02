@@ -165,9 +165,12 @@ static PyObject *m_file_read(PyObject *self, PyObject *args)
         return NULL;
     }
 #if defined(__linux__)
-    if (runloom_iouring_available()) {
-        off_t off = (offset < 0) ? 0 : (off_t)offset;
-        r = runloom_iouring_pread(fd, buf.buf, (size_t)n_bytes, off);
+    /* io_uring pread is strictly positional and never advances the fd offset, so
+     * it can only serve an explicit (offset >= 0) request.  A default offset
+     * (offset < 0) means "use + advance the current fd position" -- fall through
+     * to read(), matching the non-io_uring fallback semantics exactly. */
+    if (offset >= 0 && runloom_iouring_available()) {
+        r = runloom_iouring_pread(fd, buf.buf, (size_t)n_bytes, (off_t)offset);
         if (r < 0) {
             PyBuffer_Release(&buf);
             return PyErr_SetFromErrno(PyExc_OSError);
@@ -204,9 +207,12 @@ static PyObject *m_file_write(PyObject *self, PyObject *args)
 
     if (!PyArg_ParseTuple(args, "iy*|L", &fd, &buf, &offset)) return NULL;
 #if defined(__linux__)
-    if (runloom_iouring_available()) {
-        off_t off = (offset < 0) ? 0 : (off_t)offset;
-        r = runloom_iouring_pwrite(fd, buf.buf, (size_t)buf.len, off);
+    /* io_uring pwrite is strictly positional and never advances the fd offset, so
+     * it can only serve an explicit (offset >= 0) request.  A default offset
+     * (offset < 0) means "use + advance the current fd position" -- fall through
+     * to write(), matching the non-io_uring fallback semantics exactly. */
+    if (offset >= 0 && runloom_iouring_available()) {
+        r = runloom_iouring_pwrite(fd, buf.buf, (size_t)buf.len, (off_t)offset);
         if (r < 0) {
             PyBuffer_Release(&buf);
             return PyErr_SetFromErrno(PyExc_OSError);

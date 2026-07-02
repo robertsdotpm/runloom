@@ -262,8 +262,21 @@ static int runloom_ready_grow(runloom_sched_t *s)
 void runloom_sched_ready_push(runloom_sched_t *s, runloom_g_t *g)
 {
     if (__builtin_expect(s->ready_tail - s->ready_head >= s->ready_cap, 0)) {
-        if (runloom_ready_grow(s) < 0) return;     /* OOM: drop g on the floor;
-                                                 * caller checks PyErr */
+        if (runloom_ready_grow(s) < 0) {
+            /* The ready ring is a critical per-thread scheduler structure and
+             * this g's pending-count was already charged to its hub, so dropping
+             * it here would orphan the fiber: h->pending never decrements, so
+             * runloom_mn_run's pending-sum exit condition is never met and run()
+             * hangs forever.  The old "OOM: drop g; caller checks PyErr" contract
+             * never actually held -- NO caller of ready_push (not even the
+             * single-thread spawn path, which returns the capsule unconditionally)
+             * inspects PyErr or recovers, and several M:N hub_main callers run
+             * with the GIL released and cannot.  Growth only fails on genuine
+             * memory exhaustion, so fail loudly and immediately -- matching
+             * runloom_sched_get's Py_FatalError on a failed sched allocation --
+             * rather than degrading into a silent, undiagnosable permanent hang. */
+            Py_FatalError("runloom: out of memory growing the ready ring");
+        }
     }
     s->ready_ring[s->ready_tail & s->ready_mask] = g;
     /* relaxed-atomic store: races the cross-thread deadlock census's read of

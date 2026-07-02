@@ -32,10 +32,20 @@ explicit tree, vs. just passing a channel around.
 import os
 import socket as _socket
 import sys as _sys
+import threading as _threading
 import time as _time
 import runloom_c
 
 _IS_WINDOWS = _sys.platform == "win32"
+
+# Capture the REAL, un-cooperative lock ONCE at import -- single-threaded, before
+# monkey.patch() (same rationale as the wake fd below).  Each _CancelCtx guards
+# its tiny cancel-fanout critical sections (register a child / set _err + snapshot
+# children / detach a child) with one of these so a concurrent cancel on another
+# free-threaded M:N hub cannot race a child registration and drop it on the floor.
+# Held only across a handful of in-memory ops -- never across a park -- so a plain
+# OS lock is correct here (Go serializes the same window under the parent mutex).
+_Lock = _threading.Lock
 
 _READ = 1   # runloom_c.wait_fd READ direction
 
@@ -133,7 +143,7 @@ class _CancelCtx(object):
     so consumers can treat any context uniformly."""
 
     __slots__ = ("done", "_parent", "_err", "_children", "_deadline",
-                 "_deadline_g")
+                 "_deadline_g", "_lock")
 
     def __init__(self, parent, deadline=None):
         self.done        = runloom_c.Chan(1)
@@ -142,16 +152,30 @@ class _CancelCtx(object):
         self._children   = []
         self._deadline   = deadline
         self._deadline_g = None   # the deadline-waker fiber, if armed
+        self._lock       = _Lock()
 
         # Wire ourselves into the parent's cancel fanout.  Background is
         # the only "uncancellable" parent; everyone else exposes
         # _children for that purpose.
+        #
+        # Register UNDER THE PARENT'S LOCK: the same lock guards the parent's
+        # own _cancel() (set _err + snapshot + clear _children).  Without it, a
+        # free-threaded M:N race -- our _err check passing on one hub while the
+        # parent is cancelled to completion on another -- could land our append
+        # after the parent's fanout snapshot, so we would miss BOTH the
+        # immediate-propagation branch and the fanout and NEVER be cancelled.
+        # Serializing here means we either observe _err (and cancel ourselves)
+        # or land in the list the canceller snapshots.  (Go's propagateCancel
+        # registers under the parent mutex for exactly this reason.)
         if isinstance(parent, _CancelCtx):
-            if parent._err is not None:
-                # Parent already cancelled; propagate immediately.
-                self._cancel(parent._err)
-            else:
-                parent._children.append(self)
+            with parent._lock:
+                already = parent._err
+                if already is None:
+                    parent._children.append(self)
+            if already is not None:
+                # Parent already cancelled; propagate immediately.  We were
+                # never appended, so there is nothing to detach from it.
+                self._cancel(already, remove_from_parent=False)
 
     def err(self):
         return self._err
@@ -167,35 +191,65 @@ class _CancelCtx(object):
             return self._parent.value(key)
         return None
 
-    def _cancel(self, reason):
-        if self._err is not None:
-            return       # already cancelled, idempotent
-        self._err = reason
-        try:
-            self.done.close()
-        except Exception:
-            # close() on an already-closed channel raises; we treat the
-            # window between "cancel called twice concurrently" as benign.
-            pass
+    def _cancel(self, reason, remove_from_parent=True):
+        # Set _err + snapshot/clear _children UNDER THE LOCK so a child
+        # registering concurrently (see __init__) is either captured in the
+        # snapshot or observes _err and cancels itself -- never lost.  Grab the
+        # waker handle and drop the children list here too; the slow parts
+        # (waking the waker, fanning out, detaching from the parent) run AFTER
+        # the lock is released so we never hold it across those calls.
+        with self._lock:
+            if self._err is not None:
+                return       # already cancelled, idempotent
+            self._err = reason
+            try:
+                self.done.close()
+            except Exception:
+                # close() on an already-closed channel raises; we treat the
+                # window between "cancel called twice concurrently" as benign.
+                pass
+            g = self._deadline_g
+            self._deadline_g = None
+            children = self._children
+            self._children = []
         # Wake the deadline-waker fiber (if armed) so it exits immediately
         # instead of sleeping to the original deadline -- otherwise a cancelled
         # WithTimeout/WithDeadline keeps a fiber alive (and run() blocked) for
         # the full timeout.  Covers both direct cancel() and a transitive
-        # cancel from this ctx's parent (this runs in both).
-        g = self._deadline_g
+        # cancel from this ctx's parent (this runs in both).  Done outside the
+        # lock: cancel_wait_fd only touches the netpoll parker.
         if g is not None:
-            self._deadline_g = None
             try:
                 g.cancel_wait_fd()
             except Exception:
                 pass
-        # Fan cancellation out to all children.  Iterate a snapshot in
-        # case a child registers more during their own cancel callbacks
-        # (defensive -- our model says children can't add grandchildren
-        # post-cancel, but cheap to be safe).
-        for child in tuple(self._children):
-            child._cancel(reason)
-        self._children = []
+        # Fan cancellation out to all children (transitive cancel).  They do
+        # NOT detach themselves from us -- we already cleared the list -- so
+        # pass remove_from_parent=False (which also avoids re-locking us).
+        for child in children:
+            child._cancel(reason, remove_from_parent=False)
+        # Detach ourselves from our parent so a long-lived parent context does
+        # not accumulate finished/cancelled children forever (each pins a Chan
+        # + any deadline state).  This is Go's removeChild(parent, c) on cancel;
+        # without it the idiomatic "app-level ctx + per-request WithTimeout child
+        # cancelled in a finally" pattern leaks a context per request.  Skipped
+        # on a transitive parent cancel, where the parent has already cleared
+        # its child list (and re-locking it would be pointless).
+        if remove_from_parent:
+            parent = self._parent
+            if isinstance(parent, _CancelCtx):
+                parent._remove_child(self)
+
+    def _remove_child(self, child):
+        """Detach `child` from our cancel-fanout list (Go's removeChild).
+
+        A no-op if we have already been cancelled (the list was cleared under
+        the lock, so remove() raises ValueError, which we swallow)."""
+        with self._lock:
+            try:
+                self._children.remove(child)
+            except ValueError:
+                pass
 
 
 def WithCancel(parent):
@@ -231,19 +285,29 @@ def WithDeadline(parent, deadline_monotonic):
         return ctx, cancel
 
     def deadline_waker():
-        # Park bounded by the deadline, but cancellable: if cancel() (or a
-        # transitive parent cancel) fires first it wakes us via cancel_wait_fd
-        # so run() doesn't linger.  The pre-park _err check handles the common
-        # "cancel before this fiber is first scheduled" case with no park at
-        # all.
-        if ctx._err is None:
+        # Publish OUR OWN fiber handle so cancel() (or a transitive parent
+        # cancel) can wake us early via cancel_wait_fd.  runloom_c.current_g()
+        # works under BOTH schedulers, whereas _spawn()'s return value is None
+        # under the primary M:N mode (mn_fiber returns None) -- so grabbing the
+        # handle from inside the fiber is the only way cancel() gets something
+        # to wake there.  Publish it BEFORE the pre-park _err re-check: a cancel
+        # that lands after we start still finds a handle to wake, and one that
+        # already fired is caught by the re-check (we then never park).
+        ctx._deadline_g = runloom_c.current_g()
+        # Park bounded by the deadline, but cancellable: cancel_wait_fd() wakes
+        # us so run() doesn't linger to the original deadline.  Loop so a
+        # spurious/early wake that is neither the deadline nor a cancel just
+        # re-arms for the time remaining -- and so we never fire
+        # DEADLINE_EXCEEDED before the deadline has actually passed.
+        while ctx._err is None:
             remaining = deadline_monotonic - _time.monotonic()
-            if remaining > 0:
-                runloom_c.wait_fd(_wake_fd(), _READ, int(remaining * 1000) + 1)
+            if remaining <= 0:
+                break
+            runloom_c.wait_fd(_wake_fd(), _READ, int(remaining * 1000) + 1)
         if ctx._err is None:
             ctx._cancel(DEADLINE_EXCEEDED)
 
-    ctx._deadline_g = _spawn(deadline_waker)
+    _spawn(deadline_waker)
     return ctx, cancel
 
 

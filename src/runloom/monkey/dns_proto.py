@@ -11,6 +11,13 @@ _QTYPE_AAAA    = 28
 
 def _is_ip_literal(host):
     """Return AF if host is a numeric address, else None."""
+    if isinstance(host, (bytes, bytearray)):
+        # Stock getaddrinfo accepts bytes hosts; decode for the str-only
+        # inet_pton / split below.  Non-ASCII bytes can't be an IP literal.
+        try:
+            host = host.decode("ascii")
+        except UnicodeDecodeError:
+            return None
     h = host.split("%", 1)[0]    # strip v6 zone-id
     try:
         socket.inet_pton(socket.AF_INET, h)
@@ -25,12 +32,27 @@ def _is_ip_literal(host):
     return None
 
 
+def _encode_query_name(name):
+    """Encode a DNS query name to its ASCII wire form.
+
+    Mirrors stock getaddrinfo: bytes hosts are used verbatim, and non-ASCII
+    str hostnames are IDNA (punycode) encoded rather than raising an encode
+    error.  (The ``idna`` codec is pre-warmed in runtime._prewarm.)"""
+    if isinstance(name, (bytes, bytearray)):
+        return bytes(name)
+    try:
+        return name.encode("ascii")
+    except UnicodeEncodeError:
+        return name.encode("idna")
+
+
 def _build_query(name, qtype):
     txn = _rand.randint(0, 0xFFFF)
     flags = 0x0100   # standard query + recursion desired
-    hdr = _struct.pack("!HHHHHH", txn, flags, 1, 0, 0, 0)
+    # ARCOUNT=1 for the EDNS0 OPT pseudo-RR appended below.
+    hdr = _struct.pack("!HHHHHH", txn, flags, 1, 0, 0, 1)
     qname = b""
-    for lbl in name.encode("ascii").split(b"."):
+    for lbl in _encode_query_name(name).split(b"."):
         if not lbl:
             continue
         if len(lbl) > 63:
@@ -38,7 +60,11 @@ def _build_query(name, qtype):
         qname += bytes([len(lbl)]) + lbl
     qname += b"\x00"
     qpart = qname + _struct.pack("!HH", qtype, 1)   # IN class
-    return txn, hdr + qpart
+    # EDNS0 OPT record (RFC 6891): root name, TYPE=41, CLASS=UDP payload
+    # size (advertise 4096 so servers send larger answers instead of
+    # setting TC), TTL=0 (ext-rcode/version/flags), RDLEN=0.
+    opt = b"\x00" + _struct.pack("!HHIH", 41, 4096, 0, 0)
+    return txn, hdr + qpart + opt
 
 
 def _skip_dns_name(data, off):
@@ -59,6 +85,12 @@ def _parse_dns_answer(data, expected_txn):
     txn, flags, qd, an, _ns, _ar = _struct.unpack("!HHHHHH", data[:12])
     if txn != expected_txn:
         raise OSError("DNS txn mismatch")
+    if flags & 0x0200:   # TC (truncation) bit -- the answer set is incomplete
+        # We speak UDP only; parsing what fit would silently drop records (and
+        # cache the partial/empty set).  Raise so _resolve_qtype falls through
+        # to the platform resolver, which retries over TCP and returns the
+        # full answer.
+        raise OSError("DNS response truncated (TC set)")
     rcode = flags & 0xF
     if rcode == 3:       # NXDOMAIN
         return []

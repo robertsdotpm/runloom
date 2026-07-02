@@ -18,6 +18,7 @@ _DNS_TIMEOUT_S = 2.0
 _DNS_CACHE_TTL = 60.0
 
 _resolvers_cache = None
+_search_conf_cache = None  # (search_list, ndots)
 _hosts_cache     = None
 _dns_result_cache = {}    # (lowername, qtype) -> (addrs, expire_ts)
 
@@ -127,6 +128,71 @@ def _get_hosts():
     return _hosts_cache
 
 
+def _load_search_conf():
+    """Parse the 'search'/'domain' list and 'options ndots:N' from resolv.conf.
+
+    Mirrors libc: 'search' and 'domain' are mutually exclusive and the last
+    occurrence wins; ndots defaults to 1 and is clamped to [0, 15].  Absent a
+    search list the resolver queries names verbatim (the historical behaviour)."""
+    search = []
+    ndots = 1
+    for path in _resolv_conf_paths():
+        text = _read_small_file(path)
+        if not text:
+            continue
+        for line in text.splitlines():
+            line = line.split("#", 1)[0].split(";", 1)[0].strip()
+            if not line:
+                continue
+            parts = line.split()
+            kw = parts[0]
+            if kw == "search" and len(parts) >= 2:
+                search = parts[1:]
+            elif kw == "domain" and len(parts) >= 2:
+                search = [parts[1]]
+            elif kw == "options":
+                for opt in parts[1:]:
+                    if opt.startswith("ndots:"):
+                        try:
+                            ndots = int(opt.split(":", 1)[1])
+                        except ValueError:
+                            pass
+        break
+    if ndots < 0:
+        ndots = 0
+    elif ndots > 15:
+        ndots = 15
+    return (search, ndots)
+
+
+def _get_search_conf():
+    global _search_conf_cache
+    if _search_conf_cache is None:
+        _search_conf_cache = _load_search_conf()
+    return _search_conf_cache
+
+
+def _candidate_names(name):
+    """Ordered list of names to actually query, applying the resolv.conf search
+    list / ndots exactly like libc and Go's netgo resolver.
+
+    Used only on the native-nameserver path -- the libc fallback performs its
+    own search-list expansion, so callers pass the bare name there."""
+    search, ndots = _get_search_conf()
+    # A rooted name (trailing dot) or a config with no search list is queried
+    # verbatim -- no suffixing.
+    if not search or name.endswith("."):
+        return [name]
+    has_ndots = name.count(".") >= ndots
+    names = []
+    if has_ndots:
+        names.append(name)
+    for suffix in search:
+        names.append(name + "." + suffix.rstrip("."))
+    if not has_ndots:
+        names.append(name)
+    return names
+
 
 def _query_nameserver(packet, txn, ns, timeout):
     """Single UDP round trip.  Uses cooperatively patched socket."""
@@ -177,18 +243,35 @@ def _resolve_qtype(name, qtype):
         addrs = _resolve_via_libc(name, qtype)
         _dns_result_cache[key] = (addrs, now + _DNS_CACHE_TTL)
         return addrs
-    txn, packet = _build_query(name, qtype)
     last_err = None
-    for ns in resolvers:
-        try:
-            addrs = _query_nameserver(packet, txn, ns, _DNS_TIMEOUT_S)
-            _dns_result_cache[key] = (addrs, now + _DNS_CACHE_TTL)
-            return addrs
-        except (OSError, socket.timeout) as e:
-            last_err = e
-            continue
-    # All configured nameservers failed -- try libc as a last resort
-    # rather than surfacing the per-server error, which is usually
+    saw_nxdomain = False
+    # Try each search-list candidate in turn (short names in Kubernetes /
+    # corp environments only resolve once the search domain is appended).
+    for cand in _candidate_names(name):
+        txn, packet = _build_query(cand, qtype)
+        answered = False
+        cand_addrs = None
+        for ns in resolvers:
+            try:
+                cand_addrs = _query_nameserver(packet, txn, ns, _DNS_TIMEOUT_S)
+                answered = True
+                break
+            except (OSError, socket.timeout) as e:
+                last_err = e
+                continue
+        if not answered:
+            continue          # every nameserver errored for this candidate
+        if cand_addrs:
+            _dns_result_cache[key] = (cand_addrs, now + _DNS_CACHE_TTL)
+            return cand_addrs
+        saw_nxdomain = True   # NXDOMAIN/empty -- fall through to next suffix
+    if saw_nxdomain:
+        # A definitive negative answer across the whole search list.  Cache it
+        # like stock (an empty result surfaces as EAI_NONAME in getaddrinfo).
+        _dns_result_cache[key] = ([], now + _DNS_CACHE_TTL)
+        return []
+    # Every configured nameserver failed for every candidate -- try libc as a
+    # last resort rather than surfacing the per-server error, which is usually
     # more confusing than just answering through the OS.
     addrs = _resolve_via_libc(name, qtype)
     if addrs:
@@ -240,6 +323,37 @@ def _af_wanted(family, candidate):
     return family == 0 or family == candidate or family == socket.AF_UNSPEC
 
 
+def _socktype_proto_rows(socktype, proto):
+    """Return the [(socktype, protocol), ...] rows stock getaddrinfo emits.
+
+    An explicit socktype yields a single row with the default protocol filled
+    in (SOCK_STREAM->TCP, SOCK_DGRAM->UDP).  socktype 0 expands to the standard
+    TCP/UDP/RAW set; an explicit protocol filters that set, with SOCK_RAW acting
+    as the protocol wildcard, matching libc."""
+    def _default_proto(st, pr):
+        if pr:
+            return pr
+        if st == socket.SOCK_STREAM:
+            return socket.IPPROTO_TCP
+        if st == socket.SOCK_DGRAM:
+            return socket.IPPROTO_UDP
+        return 0
+    if socktype:
+        return [(socktype, _default_proto(socktype, proto))]
+    table = ((socket.SOCK_STREAM, socket.IPPROTO_TCP),
+             (socket.SOCK_DGRAM,  socket.IPPROTO_UDP),
+             (socket.SOCK_RAW,    0))
+    if proto:
+        # Explicit protocol with socktype 0: stock/libc selects the *first*
+        # matching socktype and emits a single row (SOCK_RAW's zero protocol
+        # matches any protocol).  It does not additionally emit a RAW row.
+        for st, dp in table:
+            if dp == 0 or dp == proto:
+                return [(st, proto)]
+        return [(socket.SOCK_RAW, proto)]
+    return [(st, dp) for st, dp in table]
+
+
 def _patched_getaddrinfo(host, port=0, family=0, type=0, proto=0, flags=0):
     # Numeric-port-only path: hand "service name" lookups to libc by
     # offloading the full call (rare in normal apps).
@@ -249,6 +363,10 @@ def _patched_getaddrinfo(host, port=0, family=0, type=0, proto=0, flags=0):
         except ValueError:
             return _blocking_call(_orig_getaddrinfo,
                                   host, port, family, type, proto, flags)
+    elif port is None:
+        # Stock getaddrinfo maps a None service to port 0; without this the
+        # None leaks into the returned sockaddr and connect() raises TypeError.
+        port = 0
 
     if host is None or host == "":
         host = "::" if family == socket.AF_INET6 else "0.0.0.0"
@@ -287,28 +405,39 @@ def _patched_getaddrinfo(host, port=0, family=0, type=0, proto=0, flags=0):
                 pairs = _resolve_dual(host, want_v4, want_v6)
             except OSError as e:
                 raise socket.gaierror(socket.EAI_NONAME, str(e))
-            if not pairs:
-                raise socket.gaierror(socket.EAI_NONAME,
-                                      "Name or service not known")
 
-    st = type if type else socket.SOCK_STREAM
+    # Stock getaddrinfo never returns an empty list -- it raises.  This also
+    # covers the /etc/hosts branch, where family filtering can drop every
+    # address (e.g. an IPv6-only name queried with AF_INET).
+    if not pairs:
+        raise socket.gaierror(socket.EAI_NONAME,
+                              "Name or service not known")
+
+    # Expand (type, proto) the way stock getaddrinfo does: an explicit socktype
+    # yields one row with its default protocol filled in; type=0 expands to the
+    # standard TCP/UDP/RAW set (optionally filtered by an explicit protocol).
+    # Address is the outer loop and socktype the inner, matching stock order.
+    rows = _socktype_proto_rows(type, proto)
     result = []
     for aaf, a in pairs:
         if aaf == socket.AF_INET6:
             sa = (a, port, 0, 0)
         else:
             sa = (a, port)
-        result.append((aaf, st, proto, "", sa))
+        for st, pr in rows:
+            result.append((aaf, st, pr, "", sa))
     return result
 
 
 def _patched_gethostbyname(name):
-    infos = _patched_getaddrinfo(name, 0, socket.AF_INET)
+    # Pin the socktype so getaddrinfo's type=0 expansion doesn't return one
+    # row per socktype (which would duplicate every address below).
+    infos = _patched_getaddrinfo(name, 0, socket.AF_INET, socket.SOCK_STREAM)
     return infos[0][4][0]
 
 
 def _patched_gethostbyname_ex(name):
-    infos = _patched_getaddrinfo(name, 0, socket.AF_INET)
+    infos = _patched_getaddrinfo(name, 0, socket.AF_INET, socket.SOCK_STREAM)
     addrs = [info[4][0] for info in infos]
     return (name, [], addrs)
 

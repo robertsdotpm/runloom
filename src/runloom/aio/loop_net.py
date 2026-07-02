@@ -32,6 +32,12 @@ class _LoopNetMixin(object):
                              _socket.SOCK_STREAM, proto, flags)
             last_err = None
             for fam, typ, prt, _canon, sa in infos:
+                # Init before the try so socket() failing on this entry (e.g.
+                # EAFNOSUPPORT for an AAAA record on an IPv6-disabled host)
+                # doesn't leave `s` unbound -- the except's s.close() would then
+                # raise UnboundLocalError and abort the whole connect, skipping
+                # the IPv4 fallback.  asyncio's _connect_sock guards this too.
+                s = None
                 try:
                     s = _socket.socket(fam, typ, prt)
                     s.setblocking(False)
@@ -48,8 +54,9 @@ class _LoopNetMixin(object):
                     break
                 except OSError as e:
                     last_err = e
-                    try: s.close()
-                    except OSError: pass
+                    if s is not None:
+                        try: s.close()
+                        except OSError: pass
             if sock is None:
                 # Clear last_err as we raise so the propagating exception's
                 # traceback frame doesn't keep referencing it (exc -> tb ->
@@ -354,6 +361,11 @@ class _LoopNetMixin(object):
         return _resolve(host, port, family, type, proto, flags)
 
     async def getnameinfo(self, sockaddr, flags=0):
-        return _socket.getnameinfo(sockaddr, flags)
+        # Offloaded to the blocking pool so reverse-DNS doesn't wedge the hub
+        # (like getaddrinfo above); a direct _socket.getnameinfo() is a
+        # non-preemptible blocking C call that would freeze every task/timer on
+        # the loop for the full resolver timeout.  Stock asyncio runs this in the
+        # executor.  monkey.py may still patch this to a cooperative resolver.
+        return _blocking(_socket.getnameinfo, sockaddr, flags)
 
     # ---- low-level socket ops (loop.sock_*) ----

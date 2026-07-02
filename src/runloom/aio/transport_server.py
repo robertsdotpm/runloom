@@ -90,9 +90,24 @@ class _ProtocolServer(object):
                 # stalled client never blocks accepting new connections.
                 _fiber_io(lambda c=conn: self._setup_tls_conn(c))
             else:
-                protocol = self._factory()
-                self._conns.add(_StreamTransport(conn, protocol, loop=self._loop,
-                                                 context=self._context, server=self))
+                try:
+                    protocol = self._factory()
+                    self._conns.add(_StreamTransport(conn, protocol, loop=self._loop,
+                                                     context=self._context, server=self))
+                except Exception as exc:
+                    # A raising protocol factory (or transport construction) must
+                    # NOT kill the accept loop -- otherwise one transient error
+                    # turns into a permanent denial of service for this listener.
+                    # Route it to the loop exception handler and drop just this
+                    # connection, then keep accepting, like asyncio's
+                    # selector_events._accept_connection2.
+                    loop = (self._loop if self._loop is not None
+                            else asyncio.get_event_loop())
+                    loop.call_exception_handler({
+                        "message": "Error on accepting connection from a client",
+                        "exception": exc,
+                    })
+                    _close_sock(conn)
 
     def _setup_tls_conn(self, conn):
         try:
@@ -132,8 +147,19 @@ class _ProtocolServer(object):
         if self._closed:
             raise RuntimeError("server {0!r} is closed".format(self))
         self._start_accepting()
-        while not self._closed:
-            await asyncio.sleep(0.05)
+        try:
+            while not self._closed:
+                await asyncio.sleep(0.05)
+        except asyncio.CancelledError:
+            # asyncio.Server.serve_forever() closes the server when its task is
+            # cancelled (graceful-shutdown / TaskGroup teardown) -- tear down the
+            # listeners and wait for connections to drain before re-raising, so
+            # the port stops accepting instead of staying bound with no server.
+            try:
+                self.close()
+                await self.wait_closed()
+            finally:
+                raise
 
     def close(self):
         if self._closed: return
