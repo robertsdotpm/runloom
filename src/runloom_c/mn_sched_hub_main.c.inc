@@ -1605,5 +1605,11 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
          * Delete with deleter=main that the TLA trace check flags. */
         PyEval_SaveThread();
     }
+    /* Splice this hub's TLS g-slab into the shared global pool before the thread
+     * dies, so its cached g-structs survive to be freed by runloom_g_slab_reclaim
+     * in mn_fini (otherwise they leak with the thread).  Pure C (TLS list + a
+     * mutex); no tstate needed, so it is safe after the delete above.  A hub that
+     * never ran fibers has an empty slab and this is a no-op. */
+    runloom_g_slab_thread_flush();
     RUNLOOM_THREAD_RETURN(NULL);
 }

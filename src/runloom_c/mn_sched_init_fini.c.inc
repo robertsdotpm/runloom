@@ -402,6 +402,14 @@ void runloom_mn_fini(void)
         PyMem_Free(runloom_hubs[i].stage_tail);
         runloom_hubs[i].stage_tail = NULL;
     }
+    /* Reclaim the g-struct slab pool.  Every hub thread is joined (its TLS slab
+     * already spliced into the global pool at hub_main exit) and all leftover gs
+     * have been drained above into THIS thread's slab (runloom_g_decref /
+     * release_timers free into the per-thread slab), so this is the last point
+     * any g is freed.  reclaim() folds in the main slab and returns the whole
+     * pool to the OS -- closing the per-fiber RSS leak across mn_init/mn_fini
+     * cycles.  Must run before the fiber registry / interp teardown that follows. */
+    runloom_g_slab_reclaim();
     PyMem_Free(runloom_hubs);
     runloom_hubs = NULL;
     runloom_hub_count = 0;

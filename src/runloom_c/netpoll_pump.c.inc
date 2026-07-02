@@ -55,6 +55,17 @@ static void runloom_epoll_handle_event(int fd, unsigned int events, int *woke)
         /* No parker linked yet (or already woken once): stash the mask so the
          * next wait_fd consumes it instead of parking forever. */
         runloom_fd_pending_wake_set(fd, mask);
+        /* Level-triggered EPOLLOUT with no writer parked would otherwise re-fire
+         * on every pump iteration and busy-spin the idle hub at 100% CPU -- a
+         * bare cooperative connect() or a short write leaves the socket writable
+         * indefinitely.  A genuinely-waiting writer is always served above
+         * (dispatch wakes it and returns >0, leaving OUT armed so the level pump
+         * re-reports it for any remaining writers); reaching here means nobody
+         * wants OUT right now, so drop the arm.  The pending-WRITE bit stashed
+         * just above is still honoured: the next wait_fd(WRITE) re-arms OUT and
+         * consumes the pending wake at its post-register re-check. */
+        if (mask & RUNLOOM_NETPOLL_WRITE)
+            runloom_netpoll_disarm_out(fd);
     }
 }
 #endif

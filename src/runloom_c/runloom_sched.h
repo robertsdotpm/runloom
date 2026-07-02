@@ -539,6 +539,15 @@ int runloom_g_try_incref(runloom_g_t *g);
 runloom_g_t *runloom_g_slab_alloc(void);
 void runloom_g_slab_free(runloom_g_t *g);
 
+/* M:N g-slab reclamation (defined in runloom_sched_core.c.inc; called from
+ * mn_sched.c).  An exiting hub thread splices its OWN TLS slab into the shared
+ * global pool via thread_flush() before it dies; the main thread, after joining
+ * every hub, calls reclaim() to fold in its own slab and free the entire global
+ * pool back to the OS.  Without these the per-fiber g-structs cached in each
+ * hub's TLS slab leak across every mn_init/mn_fini cycle. */
+void runloom_g_slab_thread_flush(void);
+void runloom_g_slab_reclaim(void);
+
 /* Per-OS-thread scheduler. */
 /* One entry in a sched's TIMER heap: an in-memory timed park (runloom_c.park
  * with a timeout) that must be woken at `deadline` (monotonic seconds) if a real
