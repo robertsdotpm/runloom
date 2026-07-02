@@ -81,6 +81,11 @@ class _LoopCoreMixin(object):
         # asyncSetUp -> test -> asyncTearDown on one loop).  Stop the
         # keepalive and tear down outstanding tasks + parked fibers
         # (accept/recv loops, call_later runners) so they don't leak.
+        # asyncio's BaseEventLoop.close() refuses to close a running loop
+        # (e.g. close() called from inside a coroutine/callback) -- surface
+        # the same diagnostic instead of bulldozing the live scheduler.
+        if self.is_running():
+            raise RuntimeError("Cannot close a running event loop")
         if self._closed:
             return
         if self._ka_stop_box is not None:

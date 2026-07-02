@@ -1,5 +1,8 @@
 """Cooperative ssl.SSLSocket I/O patches."""
 from ._base import *  # noqa: F401,F403  (shared foundation)
+# The timeout- and WAIT_FD_CANCELLED-aware park used by the plain-socket loops.
+# .sockets is imported before .tls in the package __init__, so this is safe.
+from .sockets import _wait_io  # noqa: F401
 
 # ============================================================
 # ssl
@@ -12,22 +15,15 @@ _orig_ssl_do_handshake = None
 _orig_ssl_unwrap = None
 
 
-def _ssl_wait(self, want):
-    if want is _ssl_mod.SSLWantReadError:
-        runloom_c.wait_fd(self.fileno(), READ)
-    else:
-        runloom_c.wait_fd(self.fileno(), WRITE)
-
-
 def _patched_ssl_recv(self, buflen=1024, flags=0):
     _make_nonblocking(self)
     while True:
         try:
             return _orig_ssl_recv(self, buflen, flags)
         except _ssl_mod.SSLWantReadError:
-            runloom_c.wait_fd(self.fileno(), READ)
+            _wait_io(self, self.fileno(), READ)
         except _ssl_mod.SSLWantWriteError:
-            runloom_c.wait_fd(self.fileno(), WRITE)
+            _wait_io(self, self.fileno(), WRITE)
 
 
 def _patched_ssl_recv_into(self, buffer, nbytes=None, flags=0):
@@ -38,9 +34,9 @@ def _patched_ssl_recv_into(self, buffer, nbytes=None, flags=0):
                 return _orig_ssl_recv_into(self, buffer, flags=flags)
             return _orig_ssl_recv_into(self, buffer, nbytes, flags)
         except _ssl_mod.SSLWantReadError:
-            runloom_c.wait_fd(self.fileno(), READ)
+            _wait_io(self, self.fileno(), READ)
         except _ssl_mod.SSLWantWriteError:
-            runloom_c.wait_fd(self.fileno(), WRITE)
+            _wait_io(self, self.fileno(), WRITE)
 
 
 def _patched_ssl_send(self, data, flags=0):
@@ -49,9 +45,9 @@ def _patched_ssl_send(self, data, flags=0):
         try:
             return _orig_ssl_send(self, data, flags)
         except _ssl_mod.SSLWantReadError:
-            runloom_c.wait_fd(self.fileno(), READ)
+            _wait_io(self, self.fileno(), READ)
         except _ssl_mod.SSLWantWriteError:
-            runloom_c.wait_fd(self.fileno(), WRITE)
+            _wait_io(self, self.fileno(), WRITE)
 
 
 def _patched_ssl_sendall(self, data, flags=0):
@@ -64,9 +60,9 @@ def _patched_ssl_sendall(self, data, flags=0):
             if n:
                 sent += n
         except _ssl_mod.SSLWantReadError:
-            runloom_c.wait_fd(self.fileno(), READ)
+            _wait_io(self, self.fileno(), READ)
         except _ssl_mod.SSLWantWriteError:
-            runloom_c.wait_fd(self.fileno(), WRITE)
+            _wait_io(self, self.fileno(), WRITE)
 
 
 def _patched_ssl_do_handshake(self, *a, **kw):
@@ -75,9 +71,9 @@ def _patched_ssl_do_handshake(self, *a, **kw):
         try:
             return _orig_ssl_do_handshake(self, *a, **kw)
         except _ssl_mod.SSLWantReadError:
-            runloom_c.wait_fd(self.fileno(), READ)
+            _wait_io(self, self.fileno(), READ)
         except _ssl_mod.SSLWantWriteError:
-            runloom_c.wait_fd(self.fileno(), WRITE)
+            _wait_io(self, self.fileno(), WRITE)
 
 
 def _patched_ssl_unwrap(self):
@@ -85,9 +81,9 @@ def _patched_ssl_unwrap(self):
         try:
             return _orig_ssl_unwrap(self)
         except _ssl_mod.SSLWantReadError:
-            runloom_c.wait_fd(self.fileno(), READ)
+            _wait_io(self, self.fileno(), READ)
         except _ssl_mod.SSLWantWriteError:
-            runloom_c.wait_fd(self.fileno(), WRITE)
+            _wait_io(self, self.fileno(), WRITE)
 
 
 _orig_wrap_socket = None

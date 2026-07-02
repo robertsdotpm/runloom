@@ -661,8 +661,19 @@ static int runloom_mn_fiber_core(PyObject *callable, runloom_c_entry_fn c_fn,
             return -1;
         }
     }
-    runloom_mn_hub_submit(h, g);
+    /* Count this spawn on the target hub's pending BEFORE publishing the g to
+     * that hub.  runloom_mn_hub_submit kicks the hub (locked sub-list push +
+     * sub_gen bump + idle_cond signal + netpoll/ring wake), so once submitted a
+     * DIFFERENT hub (round-robin routing) can drain, run, and complete the g --
+     * decrementing its pending via runloom_mn_pending_complete -- before the
+     * matching increment lands.  Published-first, the g's net contribution would
+     * transiently read -1 and cancel the spawner's own +1, letting
+     * runloom_mn_run see a false sum of 0 while this spawner is still live.
+     * Incrementing first keeps the sum over-counted, never under-counted --
+     * the same rule runloom_mn_pending_steal uses.  No failure path lies between
+     * the two calls, so no rollback is needed. */
     runloom_mn_pending_inc(h);
+    runloom_mn_hub_submit(h, g);
     return 0;
 }
 
@@ -1060,16 +1071,21 @@ static int runloom_mn_fiber_n_bulk(PyObject *callable, long n, size_t stack_size
         runloom_hub_t *h;
         if (heads[hub] == NULL) continue;
         h = &runloom_hubs[hub];
+        /* Count this whole batch on THIS hub's pending BEFORE publishing the gs
+         * to its sub-list (runloom_mn_run sums the per-hub fields).  fiber_n may
+         * be called from inside a live fiber, so the consumer hubs run
+         * concurrently: were the batch spliced first, a consumer could drain,
+         * run, and complete a g -- decrementing pending -- before the matching
+         * increment landed, so its net contribution would transiently read -1
+         * and runloom_mn_run could observe a false sum of 0 while the spawner is
+         * still live.  Over-count-never-under-count, like runloom_mn_pending_steal. */
+        __atomic_add_fetch(&h->pending, counts[hub], __ATOMIC_ACQ_REL);
         RUNLOOM_RLOCK(&h->sub_lock, RUNLOOM_RANK_HUB_SUB);
         if (h->sub_tail != NULL) h->sub_tail->next = heads[hub];
         else /* RELEASE: publishes to the census ACQUIRE read (Finding D #4) */
             __atomic_store_n(&h->sub_head, heads[hub], __ATOMIC_RELEASE);
         h->sub_tail = tails[hub];
         RUNLOOM_RUNLOCK(&h->sub_lock, RUNLOOM_RANK_HUB_SUB);
-        /* Bulk spawn: add the whole batch to THIS hub's pending (runloom_mn_run
-         * sums the per-hub fields).  Runs at setup before the hubs are released,
-         * so it is single-threaded -- no contention concern here. */
-        __atomic_add_fetch(&h->pending, counts[hub], __ATOMIC_ACQ_REL);
         __atomic_add_fetch(&h->sub_gen, 1, __ATOMIC_RELEASE);
         /* Wake the target hub in WHATEVER wait mode it is in -- this MUST mirror
          * runloom_mn_hub_submit's full routing, not just the idle_cond signal.  A
@@ -1132,6 +1148,21 @@ int runloom_mn_fiber_n(PyObject *callable, long n, size_t stack_size, int indexe
 static int runloom_mn_has_wakeable_work(void)
 {
     int i;
+    /* The "a hub is running a fiber right now" signal below (h->resume_start_ns)
+     * is written ONLY by runloom_hub_resume_begin when runloom_sysmon_enabled.
+     * With the instrumentation off (RUNLOOM_PREEMPT=0 and no RUNLOOM_SYSMON, and
+     * default-off on GIL / pre-3.13 builds) resume_start_ns is never set, so a
+     * CPU-bound fiber that is ACTIVELY EXECUTING -- in no queue, with all queues
+     * empty -- looks identical to a genuinely deadlocked one.  Without a
+     * trustworthy running-fiber signal the census cannot distinguish a healthy
+     * long-running fiber from a real deadlock, and would spuriously declare one
+     * (a scary DEADLOCK/STALL dump, or under RUNLOOM_DEADLOCK=raise a
+     * RuntimeError that returns from mn_run mid-execution and tears the hubs
+     * down under live work).  So gate the whole census on the instrumentation
+     * being live: report wakeable work when it is off, so mn_run keeps polling.
+     * A genuine deadlock in this opt-out config then hangs (the pre-census
+     * behavior) rather than mis-firing on a healthy run. */
+    if (!runloom_sysmon_enabled) return 1;
     /* Cross-thread / external wake sources: an fd that may become readable, an
      * executor or io_uring completion, or a foreign (non-fiber) thread parked
      * on a runloom primitive that another thread will release.  Any of these

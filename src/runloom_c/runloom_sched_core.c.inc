@@ -763,6 +763,73 @@ void runloom_g_slab_free(runloom_g_t *g)
     if (runloom_g_slab_size > RUNLOOM_G_SLAB_CAP) runloom_g_global_flush();
 }
 
+/* ---- teardown reclaim (mn_fini) -------------------------------------------
+ * runloom_g_slab_free never returns a g STRUCT to the OS *while a runtime is
+ * live* (a stale netpoll dup-wake can still try_incref it -- see the invariant
+ * in runloom_g_slab_free).  That retention is meant to be BOUNDED by peak
+ * concurrency and REUSED, but a per-thread slab dies WITH its owning hub thread
+ * at mn_fini: the hub's TLS cache of completed-fiber structs is stranded (no
+ * portable pre-C11 TLS destructor to hand them back), so across repeated
+ * mn_init/mn_fini cycles every fiber ever completed leaks its struct forever --
+ * repeated runloom.run(n>1) grows RSS without bound.
+ *
+ * The reclaim below is sound for the SAME reason mn_fini already frees the
+ * bulk-arena g structs (runloom_garena_quar_drain) to the OS at teardown: by the
+ * time it runs every hub thread is joined and no wake_g can be in flight, so no
+ * try_incref can reach these structs -- the grace period that makes returning
+ * them to the OS safe.  Two halves:
+ *   runloom_g_slab_thread_flush() -- an EXITING hub thread splices its OWN TLS
+ *       slab into the shared global pool BEFORE it dies (call it from hub_main),
+ *       so its cached structs survive the thread and become reachable from the
+ *       main thread.  Also folds in the mn_fini thread's own slab (reclaim below).
+ *   runloom_g_slab_reclaim() -- the main thread, after joining every hub, folds
+ *       in its own slab then frees the ENTIRE global pool back to the OS,
+ *       unlinking each struct from the fiber registry (call it from mn_fini).
+ * Only the global pool is freed -- never a still-live thread's TLS slab -- so no
+ * other running thread (e.g. a concurrent aio loop) can be left with a dangling
+ * cache entry. */
+void runloom_g_slab_thread_flush(void)
+{
+    runloom_g_t *head = runloom_g_slab;
+    runloom_g_t *tail;
+    int n;
+    if (head == NULL) return;
+    tail = head; n = 1;
+    while (tail->next != NULL) { tail = tail->next; n++; }
+    runloom_g_slab = NULL;
+    runloom_g_slab_size = 0;
+    runloom_g_global_ensure_lock();
+    runloom_mutex_lock(&runloom_g_global_lock);
+    RUNLOOM_NEXT_SET(tail, runloom_g_global_slab, 3);
+    runloom_g_global_slab = head;
+    runloom_g_global_size += n;
+    runloom_mutex_unlock(&runloom_g_global_lock);
+}
+
+void runloom_g_slab_reclaim(void)
+{
+    runloom_g_t *head;
+    /* Fold the calling (main) thread's own TLS slab into the global pool first:
+     * mn_fini's leftover-drain (runloom_g_decref) freed those structs into THIS
+     * thread's slab. */
+    runloom_g_slab_thread_flush();
+    /* Detach the whole global pool under the lock, then free each struct to the
+     * OS OUTSIDE the lock -- runloom_greg_unlink takes the registry lock, so
+     * don't nest the two. */
+    runloom_g_global_ensure_lock();
+    runloom_mutex_lock(&runloom_g_global_lock);
+    head = runloom_g_global_slab;
+    runloom_g_global_slab = NULL;
+    runloom_g_global_size = 0;
+    runloom_mutex_unlock(&runloom_g_global_lock);
+    while (head != NULL) {
+        runloom_g_t *next = head->next;
+        runloom_greg_unlink(head);   /* drop from the global fiber registry */
+        free(head);                  /* mirror the cold-path libc calloc() */
+        head = next;
+    }
+}
+
 /* ---- Refcount ---- */
 void runloom_g_incref(runloom_g_t *g)
 {

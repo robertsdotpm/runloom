@@ -337,6 +337,18 @@ class RunloomTask(_RunloomFutureMixin, asyncio.Task):
                     "yielded a non-asyncio object from await: %r" % (yielded,))
                 continue
 
+            if yielded is self:
+                # A task awaiting itself.  Stock asyncio.Task.__step raises this
+                # immediately; without the check the driver would register
+                # _wake_unpark on itself, set _pgfutwaiter = self and park
+                # forever (silent deadlock), and a later cancel() would recurse
+                # unboundedly through self._pgfutwaiter.cancel() -> cancel() ...
+                # until RecursionError.  Throw the same RuntimeError INTO the
+                # coro so the task settles with an immediate diagnostic instead.
+                throw_exc = RuntimeError(
+                    "Task cannot await on itself: %r" % (self,))
+                continue
+
             # Mark we've registered our interest (mirrors Task.__step).
             yielded._asyncio_future_blocking = False
 

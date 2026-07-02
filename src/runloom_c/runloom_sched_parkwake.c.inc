@@ -85,13 +85,26 @@ void runloom_sched_yield(runloom_sched_t *s)
         runloom_sched_drain_wake_list(s);
     }
     /* Fast path (Go's runtime.Gosched shortcut): if there's nobody
-     * else to run -- no other ready gs, no sleepers due, no parked
+     * else to run -- no other ready gs, no sleepers due, no timed
+     * parks armed, no quiescence (run_ready) waiters, no parked
      * I/O -- yielding is just expensive bookkeeping that hands
      * control right back to us.  Skip the whole snap + asm-yield +
      * resume cycle and return.  This cuts the single-coro tight-yield
-     * baseline from ~230 ns to <10 ns. */
+     * baseline from ~230 ns to <10 ns.
+     *
+     * The timer heap (s->timer_size, runloom_park_generic_timed) and the
+     * quiescence list (s->quiescence_head, run_ready) MUST be in this
+     * predicate: a timed-parked / quiescence-parked fiber is off the ready
+     * ring, so ready_empty is true while it waits.  Omitting them let a
+     * yielding poll-loop fiber take the fast path on every yield, so control
+     * never returned to runloom_sched_drain (the only place
+     * runloom_sched_drain_timers fires deadlines and the quiescence list is
+     * resumed) -- the timed park's deadline never fired and the runtime hung
+     * indefinitely (single-thread sched has no fast-path streak bound). */
     if (__builtin_expect(runloom_sched_ready_empty(s)
                          && s->sleep_size == 0
+                         && s->timer_size == 0
+                         && s->quiescence_head == NULL
                          && runloom_netpoll_parked_count() == 0
                          && runloom_blockpool_inflight() == 0, 1)) {
         return;

@@ -51,10 +51,31 @@ static int RunloomCoro_init(RunloomCoro *self, PyObject *args, PyObject *kw)
         PyErr_SetString(PyExc_ValueError, "stack_size must be non-negative");
         return -1;
     }
+    /* tp_init is re-invocable from Python (c.__init__(g)).  Refuse to do it
+     * while the fiber is live -- freeing its stack out from under a running
+     * swapcontext (another thread, or a re-entrant call from the coro body)
+     * would crash. */
+    if (__atomic_load_n(&self->executing, __ATOMIC_ACQUIRE) != 0) {
+        PyErr_SetString(PyExc_RuntimeError,
+                        "cannot re-initialise a Coro while it is executing");
+        return -1;
+    }
+    /* Release whatever a previous init left on this instance before we
+     * overwrite the fields, or we leak the old callable/result/error refs
+     * and -- the costly part -- the previous coro's guard-paged stack mmap.
+     * On a fresh instance every field is NULL/zero (tp_alloc), so these are
+     * no-ops the first time through. */
+    if (self->coro != NULL) {
+        runloom_coro_destroy(self->coro);
+        self->coro = NULL;
+    }
+    Py_CLEAR(self->callable);
+    Py_CLEAR(self->result);
+    Py_CLEAR(self->error);
+    self->tstate_snap.initialised = 0;
+
     Py_INCREF(callable);
     self->callable = callable;
-    self->result = NULL;
-    self->error = NULL;
     self->has_run = 0;
     self->executing = 0;
     self->coro = runloom_coro_new(
@@ -84,16 +105,22 @@ static PyObject *RunloomCoro_resume(RunloomCoro *self, PyObject *unused)
 {
     RunloomTstateSnapshot caller_snap;
     (void)unused;
-    if (self->executing) {
-        /* Re-entrant resume: the coro's own body called self.resume() while
-         * still running on the swapped C stack.  Resuming it again would
-         * swapcontext into a context already live on this stack -> a wild
-         * jump / guard-page SIGSEGV.  Reject it cleanly. */
+    /* Atomically claim the "executing" flag before touching the fiber.  A
+     * plain check-then-set races on free-threaded 3.13t: two threads could
+     * both observe executing==0 and both swapcontext into the same live C
+     * stack -> corruption / guard-page SIGSEGV.  __atomic_exchange_n lets
+     * exactly one caller win; every other -- including a re-entrant resume
+     * from the coro's own body, which would swapcontext into a context
+     * already live on this stack -- sees the prior 1 and is rejected
+     * cleanly.  The claim is held across the swap and the tstate_snap
+     * save/restore below, and released once we are safely back. */
+    if (__atomic_exchange_n(&self->executing, 1, __ATOMIC_ACQ_REL) != 0) {
         PyErr_SetString(PyExc_RuntimeError,
                         "Coro is already executing (re-entrant resume)");
         return NULL;
     }
     if (self->coro == NULL || runloom_coro_done(self->coro)) {
+        __atomic_store_n(&self->executing, 0, __ATOMIC_RELEASE);
         if (self->error != NULL) {
             PyObject *err = self->error;
             self->error = NULL;
@@ -118,14 +145,16 @@ static PyObject *RunloomCoro_resume(RunloomCoro *self, PyObject *unused)
         runloom_tstate_restore(&self->tstate_snap);
     }
 
-    self->executing = 1;
+    /* executing was claimed atomically above; hold it across the swap and
+     * the tstate save/restore so a racing thread can neither re-enter the
+     * fiber nor observe a half-written tstate_snap. */
     runloom_coro_resume(self->coro);
-    self->executing = 0;
 
     /* Snapshot the coro's tstate at the yield/return point, then
      * restore the caller's counters. */
     runloom_tstate_save(&self->tstate_snap);
     runloom_tstate_restore(&caller_snap);
+    __atomic_store_n(&self->executing, 0, __ATOMIC_RELEASE);
 
     if (runloom_coro_done(self->coro) && self->error != NULL) {
         PyObject *err = self->error;

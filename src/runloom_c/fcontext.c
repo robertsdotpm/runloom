@@ -20,10 +20,14 @@ void runloom_asm_entry(runloom_asm_coro_t *c)
 
 #if defined(RUNLOOM_ARCH_X86_64)
 
-/* x86_64 SysV: swap pops 6 regs (r15 r14 r13 r12 rbx rbp) then ret.
+/* x86_64 SysV: swap saves a 16-byte FP-env slot, then pops 6 regs
+ * (r15 r14 r13 r12 rbx rbp) then ret.
  * Frame layout, low to high:
- *   sp ->  r15  r14  r13  r12=coro  rbx  rbp  return_addr=trampoline
- * Stack must be 16-aligned at trampoline's call instruction. */
+ *   sp ->  [MXCSR@+0, x87CW@+8]  r15  r14  r13  r12=coro  rbx  rbp  ret=trampoline
+ * The FP-env slot must mirror runloom_asm_swap (16 bytes so the frame stays a
+ * multiple of 16 and the post-ret sp matches the no-FP layout).  It is seeded
+ * with the SysV defaults so a fresh fiber starts with round-to-nearest and all
+ * FP exceptions masked.  Stack must be 16-aligned at trampoline's call. */
 void runloom_asm_make_ctx(runloom_asm_coro_t *coro, void *stack_top)
 {
     uintptr_t sp = (uintptr_t)stack_top;
@@ -31,15 +35,20 @@ void runloom_asm_make_ctx(runloom_asm_coro_t *coro, void *stack_top)
     sp &= ~(uintptr_t)15;
     sp -= 8;                /* deliberate misalign: after callq pushes 8,
                                we're 16-aligned at runloom_asm_entry entry. */
-    sp -= 7 * 8;
+    sp -= 7 * 8;            /* r15 r14 r13 r12 rbx rbp ret                 */
+    sp -= 16;               /* FP-env slot (matches swap's subq $16)       */
     frame = (uintptr_t *)sp;
-    frame[0] = 0;                              /* r15 */
-    frame[1] = 0;                              /* r14 */
-    frame[2] = 0;                              /* r13 */
-    frame[3] = (uintptr_t)coro;                /* r12 = coro_ptr */
-    frame[4] = 0;                              /* rbx */
-    frame[5] = 0;                              /* rbp */
-    frame[6] = (uintptr_t)&runloom_asm_trampoline;
+    /* FP env: MXCSR (32-bit) at +0, x87 control word (16-bit) at +8. */
+    ((uint32_t *)frame)[0] = 0x1F80u;          /* MXCSR: all exceptions masked */
+    frame[1] = 0;                              /* zero the x87 slot first  */
+    ((uint16_t *)&frame[1])[0] = 0x037Fu;      /* x87 CW: default, PC=64b   */
+    frame[2] = 0;                              /* r15 */
+    frame[3] = 0;                              /* r14 */
+    frame[4] = 0;                              /* r13 */
+    frame[5] = (uintptr_t)coro;                /* r12 = coro_ptr */
+    frame[6] = 0;                              /* rbx */
+    frame[7] = 0;                              /* rbp */
+    frame[8] = (uintptr_t)&runloom_asm_trampoline;
 
     coro->self.sp = (void *)sp;
     coro->caller.sp = NULL;

@@ -202,6 +202,28 @@ class CoSimpleQueue(object):
                     raise _queue_mod.Empty
             else:
                 remaining = None
+            # RE-REGISTER before parking.  put()'s wake_one() POPS our record out
+            # of _waiters when it wakes us (so the next put wakes a *different*
+            # getter); if the item it published was then stolen on the fast path,
+            # the pop above found _items empty and we must be back in _waiters --
+            # otherwise every later put() sees ``if self._waiters:`` false (line
+            # 110), writes no wake, and we park forever while items sit durably in
+            # the queue (lost wakeup).  We only re-append when absent (a spurious
+            # wake left us still registered), so no duplicate record can linger.
+            if rec not in self._waiters:
+                self._waiters.append(rec)        # publish registration FIRST...
+                try:
+                    item = self._items.popleft()  # ...then re-check: an item that
+                except IndexError:                # arrived between the pop above
+                    item = _EMPTY                 # and this re-append is taken here,
+                if item is not _EMPTY:            # closing the gap lock-free.
+                    rec[1] = False
+                    try:
+                        self._waiters.remove(rec)
+                    except ValueError:
+                        pass                     # already popped by a put() wake_one()
+                    p.release()
+                    return item
             p.park(remaining)
 
     def get_nowait(self):

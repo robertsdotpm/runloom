@@ -2,6 +2,110 @@
  * standalone.  See io_uring.c for the includes/typedefs/file-scope state
  * these definitions depend on. */
 
+/* ============================================================
+ * In-fiber delivery of signal-handler exceptions to fibers parked on an
+ * io_uring op (single-thread scheduler path).
+ *
+ * The scheduler hands a raised signal-handler exception (Ctrl-C / alarm) to a
+ * blocked fiber IN-FIBER -- so the fiber's own try/except/finally runs -- by
+ * waking a parked fiber with the exception stashed on its scheduler
+ * (runloom_sched_drain -> runloom_netpoll_signal_wake, for NETPOLL parkers).  A
+ * fiber blocked on an io_uring CQE is NOT a netpoll parker, so without a matching
+ * hook the exception bypasses the fiber and is carried out of run(), skipping its
+ * except/finally (backend-dependent control flow, audited bug).
+ *
+ * Single-thread io_uring parkers register a stack-allocated node in a
+ * THREAD-LOCAL list: park and resume run on the scheduler's own OS thread,
+ * cooperatively (never concurrently), and runloom_iouring_signal_wake() is called
+ * from that same thread's drain, so the list needs no lock.  signal_wake marks
+ * one parker SIGNALED and wakes it; on resume the parker restores the stashed
+ * exception into its own tstate and returns -1, mirroring runloom_netpoll_wait_fd.
+ * (M:N hub parkers are not registered here; hub signal delivery is separate.) */
+typedef struct runloom_iou_sigwaiter {
+    runloom_g_t                    *g;
+    int                             signaled;
+    struct runloom_iou_sigwaiter   *next;
+    struct runloom_iou_sigwaiter  **pprev;   /* &(the pointer that points at us) */
+} runloom_iou_sigwaiter_t;
+
+static RUNLOOM_TLS runloom_iou_sigwaiter_t *runloom_iou_sigwaiters;
+
+static void runloom_iou_sigwaiter_link(runloom_iou_sigwaiter_t *w, runloom_g_t *g)
+{
+    w->g        = g;
+    w->signaled = 0;
+    w->next     = runloom_iou_sigwaiters;
+    w->pprev    = &runloom_iou_sigwaiters;
+    if (w->next != NULL) w->next->pprev = &w->next;
+    runloom_iou_sigwaiters = w;
+}
+
+static void runloom_iou_sigwaiter_unlink(runloom_iou_sigwaiter_t *w)
+{
+    if (w->pprev == NULL) return;          /* not linked */
+    *w->pprev = w->next;
+    if (w->next != NULL) w->next->pprev = w->pprev;
+    w->pprev = NULL;
+    w->next  = NULL;
+}
+
+/* Restore the scheduler's stashed signal-handler exception into the CURRENT
+ * (this fiber's) tstate, so it propagates out of the parked op through the
+ * fiber's own stack.  Returns 1 if an exception was restored.  Mirrors the
+ * RUNLOOM_NETPOLL_SIGNALED handling in runloom_netpoll_wait_fd. */
+static int runloom_iou_deliver_signal(runloom_g_t *g)
+{
+    runloom_sched_t *owner = (g != NULL && g->owner != NULL)
+                             ? g->owner : runloom_sched_get();
+    PyObject *exc = (owner != NULL) ? owner->signal_exc : NULL;
+    if (owner != NULL) owner->signal_exc = NULL;
+    if (exc != NULL) {
+        PyObject *tb = PyException_GetTraceback(exc);   /* new ref or NULL */
+        /* PyErr_Restore steals all three refs. */
+        PyErr_Restore((PyObject *)Py_NewRef(Py_TYPE(exc)), exc, tb);
+        return 1;
+    }
+    return 0;
+}
+
+/* Submit a global-ring ASYNC_CANCEL matching `target` by user_data so the kernel
+ * completes `target` with -ECANCELED (best-effort; mirrors the global-ring branch
+ * of runloom_iouring_cancel_g).  Used to unblock a parked single-shot op WITHOUT
+ * returning while its SQE is still in flight -- which would leave the kernel
+ * writing through the returned frame's op record (a stack use-after-free). */
+static void runloom_iou_submit_cancel_global(runloom_iouring_op_t *target)
+{
+    runloom_iouring_op_t *cancel_op;
+    struct io_uring_sqe sqe;
+    cancel_op = (runloom_iouring_op_t *)calloc(1, sizeof(*cancel_op));
+    if (cancel_op == NULL) return;
+    cancel_op->type = RUNLOOM_IOURING_OP_CANCEL;
+    memset(&sqe, 0, sizeof(sqe));
+    sqe.opcode = IORING_OP_ASYNC_CANCEL;
+    sqe.addr   = (uint64_t)(uintptr_t)target;   /* match original SQE by user_data */
+    sqe.fd     = -1;
+    if (runloom_iouring_submit_sqe(sqe, cancel_op) != 0) free(cancel_op);
+}
+
+/* Hand the calling thread's stashed signal-handler exception to ONE io_uring
+ * parker owned by that scheduler: mark it SIGNALED and wake it, so it restores
+ * the exception in-fiber on resume.  Returns 1 if a parker took it, 0 if none are
+ * registered (the scheduler then carries the exception out of run(), as before).
+ * The io_uring analogue of runloom_netpoll_signal_wake; the single-thread drain
+ * calls it after netpoll_signal_wake finds no parker. */
+int runloom_iouring_signal_wake(void)
+{
+    runloom_iou_sigwaiter_t *w;
+    for (w = runloom_iou_sigwaiters; w != NULL; w = w->next) {
+        if (w->g != NULL && !w->signaled) {
+            w->signaled = 1;
+            runloom_sched_wake_safe(w->g);
+            return 1;
+        }
+    }
+    return 0;
+}
+
 static runloom_iouring_ssize_t runloom_iouring_do(struct io_uring_sqe sqe)
 {
     runloom_iouring_op_t op;
@@ -88,9 +192,36 @@ static runloom_iouring_ssize_t runloom_iouring_do(struct io_uring_sqe sqe)
          * -- the same "park until the condition holds" discipline as the chan /
          * netpoll / multishot park loops.  park_safe's wake_pending Dekker makes
          * the recheck-then-re-park race-free.  (audit round-3 single-op lost wake.) */
-        do {
-            runloom_sched_park_safe();
-        } while (__atomic_load_n(&op.result, __ATOMIC_ACQUIRE) == INT32_MIN);
+        {
+            runloom_iou_sigwaiter_t sw;
+            int cancelled = 0;
+            /* Register for in-fiber signal delivery (see runloom_iou_sigwaiter_*):
+             * a Ctrl-C/alarm handler that raises while we're parked should
+             * propagate through THIS fiber, not out of run(). */
+            runloom_iou_sigwaiter_link(&sw, op.g);
+            do {
+                runloom_sched_park_safe();
+                if (sw.signaled && !cancelled) {
+                    /* Signal raised for this fiber.  We must NOT return while the
+                     * single-shot SQE is still in flight -- its CQE would later
+                     * write through this frame's `op` (a stack use-after-free) --
+                     * so cancel the op and keep parking until its terminal
+                     * (-ECANCELED) CQE lands; surface the signal afterwards. */
+                    cancelled = 1;
+                    runloom_iou_submit_cancel_global(&op);
+                }
+            } while (__atomic_load_n(&op.result, __ATOMIC_ACQUIRE) == INT32_MIN);
+            runloom_iou_sigwaiter_unlink(&sw);
+            if (sw.signaled &&
+                __atomic_load_n(&op.result, __ATOMIC_ACQUIRE) < 0) {
+                /* Op ended cancelled/errored: deliver the signal in-fiber.  (If it
+                 * raced to success we fall through and return the data; the
+                 * scheduler drops the undelivered exception at drain exit.) */
+                (void)runloom_iou_deliver_signal(op.g);
+                errno = EINTR;
+                return -1;
+            }
+        }
     } else {
         /* Not inside a fiber (plain thread / main thread calling
          * file_read directly).  Block, but RELEASE the tstate around the
@@ -175,6 +306,16 @@ typedef struct ms_entry {
     struct ms_entry *next;
 } ms_entry_t;
 
+/* A parked consumer fiber.  A conn may have several (concurrent recv() on one
+ * socket is legal); each node lives on its parked fiber's stack and is linked
+ * into h->waiters under h->lock. */
+typedef struct ms_waiter {
+    runloom_g_t       *g;
+    void              *hub;
+    int                on_list;   /* linked in h->waiters (guards double-link) */
+    struct ms_waiter  *next;
+} ms_waiter_t;
+
 struct runloom_iouring_ms {
     runloom_iouring_op_t op;        /* must be first; SQE user_data */
     int               fd;
@@ -192,9 +333,11 @@ struct runloom_iouring_ms {
     uint32_t          inflight_off;
     uint32_t          inflight_len;
 
-    /* Single waiter (most TCPConns have one consumer fiber). */
-    runloom_g_t         *waiter_g;
-    void             *waiter_hub;
+    /* Parked consumers.  Usually one, but concurrent recv() on a single conn
+     * from multiple fibers is legal (stdlib blocking-socket semantics), so a
+     * LIST is kept: a single slot silently dropped all but the last parker,
+     * leaving earlier readers parked forever (lost wakeup / starvation). */
+    ms_waiter_t      *waiters;
 
     /* Lifetime refcount, guarded by `lock`.  Refs: (1) the "live" ref taken at
      * ms_open and dropped by the terminal closing CQE in ms_on_cqe (or by
@@ -284,8 +427,7 @@ static void runloom_iouring_ms_on_cqe(runloom_iouring_ms_t *h,
 {
     int has_buffer = (flags & IORING_CQE_F_BUFFER) != 0;
     int more       = (flags & IORING_CQE_F_MORE) != 0;
-    runloom_g_t *wake_g  = NULL;
-    void     *wake_hub = NULL;
+    ms_waiter_t *woken;
     int       was_closing;
     int       ms_from;
 
@@ -329,24 +471,38 @@ static void runloom_iouring_ms_on_cqe(runloom_iouring_ms_t *h,
     (void)ms_from;
     RUNLOOM_MS_NOTE(ms_from, runloom_ms_state(h->armed, h->eof, h->err));
 
-    /* Capture the waiter under the lock so we don't double-wake.
-     * Actual wake call goes outside the lock for latency. */
-    wake_g   = h->waiter_g;
-    wake_hub = h->waiter_hub;
-    h->waiter_g = NULL;
+    /* Detach ALL parked consumers under the lock and wake each below (outside the
+     * lock, for latency).  Waking every waiter -- not just one -- is required for
+     * correctness: a single CQE can carry enough data for several readers, and
+     * this mirrors level-triggered epoll, which re-delivers to every parker.  Each
+     * woken fiber re-checks the queue and re-parks if it finds nothing.  The old
+     * single waiter slot silently dropped all but the last parker (lost wakeup). */
+    woken = h->waiters;
+    h->waiters = NULL;
+    {
+        ms_waiter_t *w = woken;
+        while (w != NULL) { w->on_list = 0; w = w->next; }
+    }
 
     was_closing = h->closing;
     RUNLOOM_RUNLOCK(&h->lock, RUNLOOM_RANK_HUB);
 
-    if (wake_g != NULL) {
+    while (woken != NULL) {
+        /* Read the fields AND the successor link BEFORE waking: a woken fiber can
+         * resume (on another thread) and return from ms_recv -- freeing this
+         * stack-allocated node -- the instant we wake it. */
+        ms_waiter_t *wnext = woken->next;
+        runloom_g_t *wake_g   = woken->g;
+        void        *wake_hub = woken->hub;
         /* IOUWAKE-TRACE: a multishot CQE was walked -- its buffer is appended to
-         * the ready queue and the parked recv fiber is readied -- the model's
+         * the ready queue and this parked recv fiber is readied -- the model's
          * DrainConsume(g).  Emitted just before the wake, keyed by the woken g so
          * the driver pairs it with that fiber's SUBMIT/RESUME episode. */
         runloom_iouwake_trace_event("DRAIN_CONSUME",
                                     (unsigned long)(uintptr_t)wake_g, 0);
         if (wake_hub) runloom_mn_wake_g(wake_hub, wake_g);
         else          runloom_sched_wake_safe(wake_g);
+        woken = wnext;
     }
 
     /* If the handle is closing AND the multishot has ended, this was the last CQE
@@ -377,6 +533,14 @@ runloom_iouring_ssize_t runloom_iouring_ms_recv(runloom_iouring_ms_t *h,
     {
     runloom_iouring_ssize_t ret;
     int saved_errno = 0;
+    ms_waiter_t self_w;                 /* our node in h->waiters (multi-reader fix) */
+    runloom_iou_sigwaiter_t sw;         /* our node in the signal-delivery list */
+    int deliver_signal = 0;
+    runloom_g_t *sig_g = NULL;
+    self_w.on_list = 0;
+    self_w.next    = NULL;
+    sw.signaled    = 0;
+    sw.g           = NULL;
     for (;;) {
         /* 1. Drain any partially-consumed in-flight buffer first. */
         if (h->inflight_bid >= 0) {
@@ -445,11 +609,18 @@ runloom_iouring_ssize_t runloom_iouring_ms_recv(runloom_iouring_ms_t *h,
         /* 6. Park.  Capture our g under the lock, release, then yield. */
         {
             void *hub = runloom_mn_current_hub_opaque();
-            runloom_g_t *park_g;
-            h->waiter_hub = hub;
-            h->waiter_g   = (hub != NULL) ? runloom_mn_tls_current_g()
-                                          : runloom_sched_get()->current;
-            park_g = h->waiter_g;
+            runloom_g_t *park_g = (hub != NULL) ? runloom_mn_tls_current_g()
+                                                : runloom_sched_get()->current;
+            self_w.g   = park_g;
+            self_w.hub = hub;
+            /* Link our waiter node ONCE.  A spurious wake can resume us with the
+             * node still linked (ms_on_cqe detaches + clears on_list only on a real
+             * CQE wake); don't double-link then. */
+            if (!self_w.on_list) {
+                self_w.next    = h->waiters;
+                h->waiters     = &self_w;
+                self_w.on_list = 1;
+            }
             /* IOUWAKE-TRACE: an op (the armed multishot recv) is submitted and
              * this fiber is about to park on its CQE -- the model's Submit(g).
              * Keyed by the waiter g pointer so the driver pairs it with the
@@ -465,18 +636,23 @@ runloom_iouring_ssize_t runloom_iouring_ms_recv(runloom_iouring_ms_t *h,
                  * (e.g. the socket peer) -- this is the DEFAULT TCP recv path,
                  * so it's a live hang.  Yield instead: ms_on_cqe (run by the
                  * idle-hub pump draining the global ring) appends the buffer
-                 * and wakes us via mn_wake_g.  No lost wakeup: waiter_g was
-                 * published above under h->lock, and ms_on_cqe captures+NULLs
-                 * it under the same lock -- and ms_recv holds h->lock
-                 * continuously from the ready-queue check through publishing
-                 * waiter_g, so a buffer either lands before our check (we
-                 * consume it, never parking) or after we publish (ms_on_cqe
+                 * and wakes us via mn_wake_g.  No lost wakeup: our waiter node
+                 * was linked into h->waiters above under h->lock, and ms_on_cqe
+                 * detaches the whole list under the same lock -- and ms_recv
+                 * holds h->lock continuously from the ready-queue check through
+                 * linking the waiter, so a buffer either lands before our check
+                 * (we consume it, never parking) or after we link (ms_on_cqe
                  * wakes us).  The in_sub_queue CAS dedups a wake that races
                  * our coro_yield. */
                 runloom_sched_park_current();
                 runloom_coro_yield();
             } else {
+                /* Single-thread: also register for in-fiber signal delivery so a
+                 * Ctrl-C/alarm handler that raises while we're parked propagates
+                 * through THIS fiber (its except/finally), not out of run(). */
+                runloom_iou_sigwaiter_link(&sw, park_g);
                 runloom_sched_park_safe();
+                runloom_iou_sigwaiter_unlink(&sw);
             }
             /* IOUWAKE-TRACE: the woken submitter has returned from its park and
              * re-reads the handle -- the model's RESUME(g) (iouring-specific
@@ -484,10 +660,30 @@ runloom_iouring_ssize_t runloom_iouring_ms_recv(runloom_iouring_ms_t *h,
             runloom_iouwake_trace_event("RESUME",
                                         (unsigned long)(uintptr_t)park_g, 0);
             RUNLOOM_RLOCK(&h->lock, RUNLOOM_RANK_HUB);
+            /* Woken to deliver a signal-handler exception?  Surface it out of
+             * recv().  Any buffers already queued on the handle stay in the ready
+             * queue (not consumed here), so no data is lost. */
+            if (sw.signaled) {
+                deliver_signal = 1;
+                sig_g          = park_g;
+                ret            = -1;
+                goto done;
+            }
             /* Loop back to top to consume whatever drain delivered. */
         }
     }
 done:
+    /* Unlink our waiter node if it's still linked (returning after a spurious
+     * wake that left it linked, or via a signal): it lives on THIS frame's stack,
+     * so it must not remain in h->waiters after we return.  Under the held lock. */
+    if (self_w.on_list) {
+        ms_waiter_t **pp = &h->waiters;
+        while (*pp != NULL) {
+            if (*pp == &self_w) { *pp = self_w.next; break; }
+            pp = &(*pp)->next;
+        }
+        self_w.on_list = 0;
+    }
     /* Drop our recv-ref under the held lock.  If we are the last referencer (the
      * conn was closed + the terminal CQE dropped the live ref while we ran), free
      * the handle here; otherwise the owner / a concurrent ms_close still holds a
@@ -496,6 +692,14 @@ done:
         int last = (--h->refcount == 0);
         RUNLOOM_RUNLOCK(&h->lock, RUNLOOM_RANK_HUB);
         if (last) runloom_iouring_ms_free(h);
+        if (deliver_signal) {
+            /* Restore the signal-handler exception into this fiber's tstate and
+             * return -1; the recv caller must propagate a set Python error rather
+             * than raise OSError (see runloom_netpoll_wait_fd's SIGNALED path). */
+            (void)runloom_iou_deliver_signal(sig_g);
+            errno = EINTR;
+            return -1;
+        }
         if (saved_errno) errno = saved_errno;
         return ret;
     }

@@ -219,7 +219,22 @@ class _LoopScheduleMixin(object):
         # self.time())) both drifted the value and forced it to float.
         handle = _TimerHandle(callback, args, self, when, context)
         def runner():
-            runloom_c.sched_sleep(max(0.0, when - self.time()))
+            # Consult _cancelled BEFORE parking, not only after the sleep.
+            # call_at commonly schedules a long timeout that is cancelled in the
+            # SAME turn -- aiohttp's per-request TimeoutHandle, asyncio.wait_for/
+            # timeout, DB-pool idle timers -- i.e. handle.cancel() runs before the
+            # scheduler ever gets to run this freshly-spawned fiber.  The old code
+            # slept the full delay unconditionally and only checked _cancelled on
+            # wake, so each such cancelled timer kept its fiber + stack snapshot +
+            # sleep-heap entry live (~9.4 KiB RSS apiece) until the ORIGINAL
+            # deadline.  Skipping the sched_sleep when already cancelled lets the
+            # fiber return immediately and its stack recycle at once.  (A timer
+            # cancelled WHILE this fiber is already parked cannot be reclaimed
+            # early from here: sched_sleep exposes no wake/remove primitive, so
+            # its heap entry only clears when the deadline arrives -- that residual
+            # would need a C-side early-removal hook, out of scope for this file.)
+            if not handle._cancelled:
+                runloom_c.sched_sleep(max(0.0, when - self.time()))
             if not handle._cancelled:
                 try:
                     # Read the callback/args THROUGH the handle, never via closure

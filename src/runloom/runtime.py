@@ -13,6 +13,7 @@ so existing code keeps working.
 """
 import os
 import sys
+import threading
 import time
 import runloom_c
 
@@ -388,6 +389,16 @@ def current():
     return runloom_c.current_g()
 
 
+# Serializes the "claim the single M:N world" check-and-set below.  The bare
+# runloom_c.mn_hub_count() > 0 test is a check-then-act: two OS threads both
+# calling run(n>1) can each read hub_count == 0 before either has called
+# mn_init(), then both proceed and one wedges forever in mn_fini().  This lock
+# (plus the _mn_active flag it guards) makes the claim atomic, so exactly one
+# thread enters the M:N world and every other caller raises cleanly.
+_mn_lock = threading.Lock()
+_mn_active = False
+
+
 def run(n, main_fn=None):
     """Run the scheduler on n OS-thread hubs until every fiber finishes.
 
@@ -425,32 +436,54 @@ def run(n, main_fn=None):
     if n == 1:
         prewarm_stdlib()
         if main_fn is not None:
-            fiber(main_fn)
+            # Spawn onto THIS thread's single-thread scheduler explicitly, not
+            # via the M:N-aware public fiber() dispatcher.  fiber() routes on
+            # mn_hub_count(): called from inside a live M:N runtime (run(1, fn)
+            # nested under run(n>1)) it would send main_fn to the hubs, leaving
+            # the runloom_c.run() below draining an empty local scheduler and
+            # returning 0 before main_fn ever ran.  runloom_c.fiber and
+            # runloom_c.run share the same thread-local scheduler, so main_fn is
+            # guaranteed to run to completion before run(1) returns.
+            runloom_c.fiber(main_fn)
         return runloom_c.run()
     # An M:N run() cannot nest: re-entering mn_init() while a hub runtime is
     # already live deadlocks (the nested mn_init/mn_run never makes progress
     # because the outer hub thread is blocked in run()).  Detect the active
     # runtime and raise instead of hanging.  (run(1) re-entrancy IS supported --
     # it re-drives the same single-thread scheduler -- so only n > 1 is guarded.)
-    if runloom_c.mn_hub_count() > 0:
-        raise RuntimeError(
-            "run(n={0}) called while an M:N runtime is already active -- "
-            "run(n>1) cannot be nested inside a running hub.  Spawn more work "
-            "with fiber()/mn_fiber() instead of starting a second M:N world.".format(n))
-    if gil_enabled():
-        raise RuntimeError(
-            "run(n={0}) needs free-threaded CPython with the GIL off "
-            "(3.13t + PYTHON_GIL=0) for M:N parallelism, but the GIL is "
-            "enabled here.\n"
-            "  -> Use run(1, ...) to run single-threaded under the GIL.\n"
-            "  -> Or run on CPython 3.13t with PYTHON_GIL=0 for real "
-            "multi-core parallelism with n>1."
-            .format(n))
-    prewarm_stdlib()
-    runloom_c.mn_init(n)
+    #
+    # The check-and-claim must be atomic: a bare `if mn_hub_count() > 0: raise`
+    # is a check-then-act, so two OS threads calling run(n>1) at once both read
+    # hub_count == 0 (before either has run mn_init) and both proceed, wedging
+    # one forever in mn_fini().  _mn_lock serializes the claim -- exactly one
+    # thread sets _mn_active and starts the world; every other caller (this
+    # thread or another) sees the claim and raises the documented RuntimeError.
+    global _mn_active
+    with _mn_lock:
+        if _mn_active or runloom_c.mn_hub_count() > 0:
+            raise RuntimeError(
+                "run(n={0}) called while an M:N runtime is already active -- "
+                "run(n>1) cannot be nested inside a running hub.  Spawn more work "
+                "with fiber()/mn_fiber() instead of starting a second M:N world.".format(n))
+        _mn_active = True
     try:
-        if main_fn is not None:
-            runloom_c.mn_fiber(main_fn)
-        return runloom_c.mn_run()
+        if gil_enabled():
+            raise RuntimeError(
+                "run(n={0}) needs free-threaded CPython with the GIL off "
+                "(3.13t + PYTHON_GIL=0) for M:N parallelism, but the GIL is "
+                "enabled here.\n"
+                "  -> Use run(1, ...) to run single-threaded under the GIL.\n"
+                "  -> Or run on CPython 3.13t with PYTHON_GIL=0 for real "
+                "multi-core parallelism with n>1."
+                .format(n))
+        prewarm_stdlib()
+        runloom_c.mn_init(n)
+        try:
+            if main_fn is not None:
+                runloom_c.mn_fiber(main_fn)
+            return runloom_c.mn_run()
+        finally:
+            runloom_c.mn_fini()
     finally:
-        runloom_c.mn_fini()
+        with _mn_lock:
+            _mn_active = False

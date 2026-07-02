@@ -23,6 +23,19 @@ select_retry:
 
     if (default_ready) return -1;     /* Go's default: branch */
 
+    /* Would block (nothing ready, no default), but there is no goroutine on
+     * this thread to park on -- reject cleanly instead of busy-spinning the
+     * install->evict->free->retry loop forever (its coro_yield is a no-op and
+     * nothing can wake a NULL g).  Mirrors the chan_no_goroutine() guard that
+     * blocking send/recv already have (chan_ops.c.inc).  Placed AFTER phase-1
+     * so a ready case is still served on a foreign / top-level thread. */
+    if (chan_no_goroutine()) {
+        PyErr_SetString(PyExc_RuntimeError,
+                        "channel select would block, but no goroutine is running "
+                        "(blocking channel ops require a runloom goroutine context)");
+        return -2;
+    }
+
     /* Phase 2: park on every channel.  Waiter records are heap-
      * allocated; their lifetime is bounded by this function call.
      * We could stack-allocate with a cap fallback, but most selects
@@ -195,13 +208,24 @@ select_retry:
             RUNLOOM_RUNLOCK(&ch->lock, RUNLOOM_RANK_CHAN);
         }
 
-        /* All installed.  Park self (snap tstate) and yield. */
-        if (runloom_mn_current_hub_opaque() != NULL) {
-            runloom_sched_park_current();
-        } else if (runloom_sched_get()->current != NULL) {
-            runloom_sched_park_current();
+        /* All installed.  Park self (snap tstate) and yield.  Set
+         * PARKED_CHAN across the yield -- exactly as park_waiter does for a
+         * plain send/recv (chan_waiters.c.inc) -- so a select-blocked fiber
+         * introspects as "chan-wait" (not "running") and the deadlock census
+         * counts it (runloom_count_deadlockable_fibers).  All waiters share
+         * our g (waiters[0].g); the chan_no_goroutine() guard above
+         * guarantees it is non-NULL here. */
+        {
+            runloom_g_t *cur_g = waiters[0].g;
+            if (cur_g != NULL) {
+                runloom_sched_park_current();
+                runloom_g_state_set(cur_g, RUNLOOM_GST_PARKED_CHAN);
+            }
+            runloom_coro_yield();
+            if (cur_g != NULL) {
+                runloom_g_state_set(cur_g, RUNLOOM_GST_RUNNING);
+            }
         }
-        runloom_coro_yield();
 
         /* Woken.  park.fired_case is the winning index, OR still -1 on a
          * spurious wake: the scheduler resumed us without any channel

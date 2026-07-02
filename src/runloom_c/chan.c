@@ -178,3 +178,37 @@ RUNLOOM_FSM_ASSERT_TABLE(runloom_sel_table, RUNLOOM_SEL_STATE_COUNT,
 #include "chan_ops.c.inc"
 #include "chan_select_helpers.c.inc"
 #include "chan_select_main.c.inc"
+
+
+/* ---- cyclic-GC hooks (declared in module_chan.c.inc) -----------------------
+ * The RunloomChan wrapper is GC-tracked so a reference cycle passing through a
+ * buffered value (e.g. a request carrying its own reply channel) is collectable.
+ * The buffered value refs are the channel's own strong references (INCREF'd on
+ * send into the ring); a parked sender's pending value belongs to that sender's
+ * suspended C stack, not to the channel, so it is neither visited nor cleared.
+ * The cyclic collector stops the world before calling these, so the ring is
+ * walked WITHOUT taking ch->lock (a paused thread may be holding it). */
+int runloom_chan_gc_traverse(runloom_chan_t *ch, visitproc visit, void *arg)
+{
+    if (ch == NULL || ch->buf == NULL || ch->cap <= 0)
+        return 0;
+    for (Py_ssize_t i = 0; i < ch->len; i++) {
+        PyObject *v = ch->buf[(ch->head + i) % ch->cap];
+        Py_VISIT(v);
+    }
+    return 0;
+}
+
+void runloom_chan_gc_clear(runloom_chan_t *ch)
+{
+    if (ch == NULL || ch->buf == NULL || ch->cap <= 0)
+        return;
+    while (ch->len > 0) {
+        PyObject *v = ch->buf[ch->head];
+        ch->buf[ch->head] = NULL;
+        ch->head = (ch->head + 1) % ch->cap;
+        ch->len--;
+        Py_XDECREF(v);
+    }
+    ch->tail = ch->head;
+}

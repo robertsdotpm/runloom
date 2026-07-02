@@ -10,20 +10,54 @@ typedef struct {
     runloom_chan_t *ch;
 } RunloomChan;
 
+/* GC hooks for the channel's ring buffer.  The buffer holds strong references
+ * to arbitrary Python objects (Py_INCREF on send), so a reference cycle passing
+ * through a buffered value -- e.g. a request that carries its own reply channel
+ * -- must be visible to the cyclic collector or it leaks forever.  struct
+ * runloom_chan is opaque in this translation unit, so the actual walk/drop over
+ * the buffer live next to it in chan.c (chan_ops.c.inc) and are called from
+ * here.  gc_traverse tolerates a partially-initialised (ch == NULL) instance. */
+int  runloom_chan_gc_traverse(runloom_chan_t *ch, visitproc visit, void *arg);
+void runloom_chan_gc_clear(runloom_chan_t *ch);
+
+/* Reject a method call on an object built via Chan.__new__ / Mutex.__new__ (or
+ * whose __init__ never ran): self->ch is still NULL, and handing it to a channel
+ * op would dereference a NULL runloom_chan_t and hard-crash the interpreter.
+ * The sibling Coro/G types NULL-check their handle the same way. */
+static int chan_require(runloom_chan_t *ch)
+{
+    if (ch == NULL) {
+        PyErr_SetString(PyExc_ValueError,
+                        "channel is not initialised "
+                        "(object created without calling __init__)");
+        return -1;
+    }
+    return 0;
+}
+
 static int RunloomChan_init(RunloomChan *self, PyObject *args, PyObject *kw)
 {
     static char *kwlist[] = {"capacity", NULL};
     Py_ssize_t cap = 0;
+    runloom_chan_t *ch;
     if (!PyArg_ParseTupleAndKeywords(args, kw, "|n", kwlist, &cap)) {
         return -1;
     }
-    self->ch = runloom_chan_new(cap);
-    if (self->ch == NULL) return -1;
+    ch = runloom_chan_new(cap);
+    if (ch == NULL) return -1;
+    /* Support re-invocation of __init__ on a live object: drop the previous
+     * channel (and everything buffered in it) before installing the new one,
+     * or the old runloom_chan_t leaks.  The instance is already GC-tracked
+     * (PyType_GenericAlloc tracks HAVE_GC objects at allocation), so no
+     * PyObject_GC_Track here -- and RunloomChan_traverse tolerates ch == NULL. */
+    if (self->ch != NULL) runloom_chan_decref(self->ch);
+    self->ch = ch;
     return 0;
 }
 
 static void RunloomChan_dealloc(RunloomChan *self)
 {
+    PyObject_GC_UnTrack(self);
     if (self->ch != NULL) {
         runloom_chan_decref(self->ch);
         self->ch = NULL;
@@ -33,13 +67,16 @@ static void RunloomChan_dealloc(RunloomChan *self)
 
 static PyObject *RunloomChan_send(RunloomChan *self, PyObject *value)
 {
+    if (chan_require(self->ch) < 0) return NULL;
     if (runloom_chan_send(self->ch, value) < 0) return NULL;
     Py_RETURN_NONE;
 }
 
 static PyObject *RunloomChan_try_send(RunloomChan *self, PyObject *value)
 {
-    int r = runloom_chan_try_send(self->ch, value);
+    int r;
+    if (chan_require(self->ch) < 0) return NULL;
+    r = runloom_chan_try_send(self->ch, value);
     if (r < 0) return NULL;
     if (r == 0) Py_RETURN_TRUE;
     Py_RETURN_FALSE;
@@ -50,6 +87,7 @@ static PyObject *RunloomChan_recv(RunloomChan *self, PyObject *unused)
     int ok;
     PyObject *v;
     (void)unused;
+    if (chan_require(self->ch) < 0) return NULL;
     v = runloom_chan_recv(self->ch, &ok);
     if (v == NULL) return NULL;
     /* Return (value, ok) matching Go's `v, ok := <-ch` idiom. */
@@ -69,6 +107,7 @@ static PyObject *RunloomChan_try_recv(RunloomChan *self, PyObject *unused)
     int ok;
     PyObject *v;
     (void)unused;
+    if (chan_require(self->ch) < 0) return NULL;
     if (runloom_chan_try_recv(self->ch, &v, &ok) < 0) return NULL;
     if (v == NULL) {
         /* Would-block. */
@@ -86,6 +125,7 @@ static PyObject *RunloomChan_try_recv(RunloomChan *self, PyObject *unused)
 static PyObject *RunloomChan_close(RunloomChan *self, PyObject *unused)
 {
     (void)unused;
+    if (chan_require(self->ch) < 0) return NULL;
     if (runloom_chan_close(self->ch) < 0) return NULL;
     Py_RETURN_NONE;
 }
@@ -101,7 +141,9 @@ static PyObject *RunloomChan_iter(RunloomChan *self)
 static PyObject *RunloomChan_iternext(RunloomChan *self)
 {
     int ok;
-    PyObject *v = runloom_chan_recv(self->ch, &ok);
+    PyObject *v;
+    if (chan_require(self->ch) < 0) return NULL;
+    v = runloom_chan_recv(self->ch, &ok);
     if (v == NULL) return NULL;            /* error */
     if (!ok) {
         /* Channel closed and empty -> end iteration. */
@@ -115,6 +157,7 @@ static PyObject *RunloomChan_iternext(RunloomChan *self)
 static PyObject *RunloomChan_closed_get(RunloomChan *self, void *closure)
 {
     (void)closure;
+    if (chan_require(self->ch) < 0) return NULL;
     if (runloom_chan_is_closed(self->ch)) Py_RETURN_TRUE;
     Py_RETURN_FALSE;
 }
@@ -122,12 +165,35 @@ static PyObject *RunloomChan_closed_get(RunloomChan *self, void *closure)
 static PyObject *RunloomChan_cap_get(RunloomChan *self, void *closure)
 {
     (void)closure;
+    if (chan_require(self->ch) < 0) return NULL;
     return PyLong_FromSsize_t(runloom_chan_cap(self->ch));
 }
 
 static Py_ssize_t RunloomChan_len(RunloomChan *self)
 {
+    if (chan_require(self->ch) < 0) return -1;
     return runloom_chan_len(self->ch);
+}
+
+/* ---- GC protocol ---- */
+static int RunloomChan_traverse(RunloomChan *self, visitproc visit, void *arg)
+{
+    /* Expose the strong refs the C ring buffer holds so the cyclic collector
+     * can see cycles that reach back through a buffered value.  self->ch may be
+     * NULL on a partially-initialised instance (PyType_GenericAlloc tracks
+     * HAVE_GC objects before __init__ runs). */
+    if (self->ch != NULL)
+        return runloom_chan_gc_traverse(self->ch, visit, arg);
+    return 0;
+}
+
+static int RunloomChan_clear(RunloomChan *self)
+{
+    /* Break cycles by dropping every buffered value's ref.  The channel object
+     * survives (now empty), matching how the collector clears any container. */
+    if (self->ch != NULL)
+        runloom_chan_gc_clear(self->ch);
+    return 0;
 }
 
 static PyMethodDef RunloomChan_methods[] = {
@@ -163,8 +229,10 @@ static PyTypeObject RunloomChanType = {
     .tp_basicsize = sizeof(RunloomChan),
     .tp_dealloc = (destructor)RunloomChan_dealloc,
     .tp_as_sequence = &RunloomChan_seq,
-    .tp_flags = Py_TPFLAGS_DEFAULT,
+    .tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC,
     .tp_doc = "Go-style channel.  Chan(capacity=0).",
+    .tp_traverse = (traverseproc)RunloomChan_traverse,
+    .tp_clear = (inquiry)RunloomChan_clear,
     .tp_iter = (getiterfunc)RunloomChan_iter,
     .tp_iternext = (iternextfunc)RunloomChan_iternext,
     .tp_methods = RunloomChan_methods,
@@ -199,18 +267,22 @@ typedef struct {
 static int RunloomMutex_init(RunloomMutex *self, PyObject *args, PyObject *kw)
 {
     static char *kwlist[] = {NULL};
+    runloom_chan_t *ch;
     if (!PyArg_ParseTupleAndKeywords(args, kw, "", kwlist)) return -1;
-    self->ch = runloom_chan_new(1);
-    if (self->ch == NULL) return -1;
+    ch = runloom_chan_new(1);
+    if (ch == NULL) return -1;
     /* Seed the token: the mutex starts unlocked.  try_send returns 0 on
      * success (room in the empty cap-1 buffer). */
-    if (runloom_chan_try_send(self->ch, Py_None) != 0) {
-        runloom_chan_decref(self->ch);
-        self->ch = NULL;
+    if (runloom_chan_try_send(ch, Py_None) != 0) {
+        runloom_chan_decref(ch);
         if (!PyErr_Occurred())
             PyErr_SetString(PyExc_RuntimeError, "mutex init failed");
         return -1;
     }
+    /* Re-invocation of __init__ replaces the channel; drop the old one so it
+     * (and its buffered token) doesn't leak. */
+    if (self->ch != NULL) runloom_chan_decref(self->ch);
+    self->ch = ch;
     return 0;
 }
 
@@ -231,6 +303,7 @@ static PyObject *RunloomMutex_lock(RunloomMutex *self, PyObject *unused)
     int ok;
     PyObject *v;
     (void)unused;
+    if (chan_require(self->ch) < 0) return NULL;
     v = runloom_chan_recv(self->ch, &ok);   /* blocks while held elsewhere */
     if (v == NULL) return NULL;
     Py_DECREF(v);                            /* the token (None); discard */
@@ -243,6 +316,7 @@ static PyObject *RunloomMutex_try_lock(RunloomMutex *self, PyObject *unused)
     int ok;
     PyObject *v;
     (void)unused;
+    if (chan_require(self->ch) < 0) return NULL;
     if (runloom_chan_try_recv(self->ch, &v, &ok) < 0) return NULL;
     if (v == NULL) Py_RETURN_FALSE;          /* would-block: held elsewhere */
     Py_DECREF(v);
@@ -255,6 +329,7 @@ static PyObject *RunloomMutex_unlock(RunloomMutex *self, PyObject *unused)
 {
     int r;
     (void)unused;
+    if (chan_require(self->ch) < 0) return NULL;
     r = runloom_chan_try_send(self->ch, Py_None);
     if (r < 0) return NULL;
     if (r == 1) {
@@ -267,6 +342,7 @@ static PyObject *RunloomMutex_unlock(RunloomMutex *self, PyObject *unused)
 static PyObject *RunloomMutex_locked(RunloomMutex *self, PyObject *unused)
 {
     (void)unused;
+    if (chan_require(self->ch) < 0) return NULL;
     /* token taken (buffer empty) => held */
     if (runloom_chan_len(self->ch) == 0) Py_RETURN_TRUE;
     Py_RETURN_FALSE;

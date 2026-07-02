@@ -101,6 +101,20 @@ class CoEvent(object):
         if timeout is None:
             while not self._flag:
                 p.park(None)
+                # A set();clear() PULSE snapshots-and-removes our parker (set())
+                # and then resets _flag (clear()).  We wake, observe _flag False,
+                # and must RE-PARK -- but our parker is no longer queued, so a
+                # later set() (which only wakes QUEUED parkers) can never reach us
+                # again: the waiter is stranded forever.  Re-register before
+                # re-parking, mirroring CoCondition.wait's per-iteration append.
+                # Only on the re-park path, so the common single-park stays O(1);
+                # the `p not in` guard avoids a duplicate when the wake was merely
+                # spurious (parker still queued).  Under the guard + _flag re-check
+                # so a set() racing here is not missed.
+                if not self._flag:
+                    with self._guard:
+                        if not self._flag and p not in self._waiters:
+                            self._waiters.append(p)
         else:
             deadline = time.monotonic() + timeout
             while not self._flag:
@@ -108,6 +122,14 @@ class CoEvent(object):
                 if remaining <= 0:
                     break
                 p.park(remaining)
+                # Same set();clear() pulse hazard as the untimed branch: our
+                # snapshot-consumed parker must be re-registered before re-parking
+                # or a later set() cannot wake us (the timed wait would then return
+                # a spurious False at the deadline).
+                if not self._flag:
+                    with self._guard:
+                        if not self._flag and p not in self._waiters:
+                            self._waiters.append(p)
         # Remove our parker so a later set() never unparks this (now pooled/reused)
         # parker -> spurious wake.  Under the guard so it is serialized with set()'s
         # snapshot; a no-op (ValueError) if set() already claimed us.
@@ -412,9 +434,38 @@ class CoBoundedSemaphore(CoSemaphore):
         # spuriously raise ValueError whenever fibers were queued (the common case
         # at M:N scale -- thousands contending for K permits), losing the permit
         # and parking the owed waiters forever.
+        #
+        # The bound check AND the release must run under one continuous hold of
+        # the guard (as stdlib does under self._cond).  Checking self._value
+        # OUTSIDE the guard and then calling CoSemaphore.release (which re-takes
+        # the guard to increment) is a TOCTOU: two hubs releasing concurrently at
+        # self._value == self._initial - 1 both read the stale value, both pass
+        # the check, and both increment -> permit count over the bound with no
+        # ValueError.  So we inline the base loop here rather than delegate, to
+        # keep check + increment atomic.  The guard is held only for the O(1)
+        # bookkeeping (no park inside); _unpark_all runs after it is released.
+        woke = None
+        self._guard.acquire()
         if self._value + n > self._initial:
+            self._guard.release()
             raise ValueError("Semaphore released too many times")
-        CoSemaphore.release(self, n)
+        for _ in range(n):
+            found = False
+            while self._waiters:
+                w = self._waiters.popleft()
+                if w[1]:    # active (not timed out)?
+                    w[2] = True   # got_permit (set under guard, before unpark)
+                    if woke is None:
+                        woke = []
+                    woke.append(w[0])   # batch the wake, hand-off stays per-permit
+                    found = True
+                    break
+                # Stale timed-out waiter: discard (fiber drains its own parker)
+            if not found:
+                self._value += 1
+        self._guard.release()
+        if woke:
+            _unpark_all(woke)   # one batched wake for all handed permits
 
 
 _orig_thread_join = None

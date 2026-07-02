@@ -52,6 +52,13 @@ def fiber(callable_, *args, **kwargs):
         target = lambda: callable_(*args, **kwargs)
     else:
         target = callable_
+    # Route by the live scheduler, like runtime._fiber_full / gather /
+    # JoinSet.spawn: under M:N (run(n>1)/mn_run) spawn onto a hub via mn_fiber,
+    # else the single-thread scheduler.  runloom_c.fiber() lands on the calling
+    # thread's single-thread ring, which the M:N drain loop never services -- the
+    # fiber would silently never run and run() would return as if it were done.
+    if runloom_c.mn_hub_count() > 0:
+        return runloom_c.mn_fiber(target)
     return runloom_c.fiber(target)
 
 
@@ -275,13 +282,15 @@ def udp_endpoint(local_addr=None, remote_addr=None, *, family=_socket.AF_INET,
 
 
 # --------------------------------------------------------------------
-# Lock / Event / Semaphore -- cooperative versions of threading
-# primitives.  Same as monkey.py's CoLock / CoEvent / CoSemaphore,
-# re-exported here so callers don't need to monkey-patch.
+# Lock / Event / Condition -- cooperative versions of threading
+# primitives.  Same as monkey.py's CoLock / CoEvent / CoCondition,
+# re-exported here so callers don't need to monkey-patch.  NOTE: the
+# Semaphore defined below is the Go-style *weighted* semaphore (see its
+# class docstring), NOT threading.Semaphore -- so it is NOT re-exported
+# here; use monkey.CoSemaphore for the threading one-permit-per-waiter API.
 # --------------------------------------------------------------------
 from runloom.monkey import CoLock as Lock
 from runloom.monkey import CoEvent as Event
-from runloom.monkey import CoSemaphore as Semaphore
 from runloom.monkey import CoCondition as Condition
 from runloom.monkey._base import CoFMutex   # foreign-safe cooperative mutex (guard for the primitives below)
 
@@ -563,6 +572,17 @@ def gather(*callables):
     # the single-thread go.  A runner spawned via runloom_c.fiber never runs under
     # mn_run, so wg.wait() would hang -- same routing as monkey's _spawn helper.
     mn = runloom_c.mn_hub_count() > 0
+    # Fail loud instead of hanging: with no hub (not mn) AND not inside a fiber
+    # (a single-thread run() would give current_g()), the runloom_c.fiber()
+    # spawns below queue on THIS thread's single-thread ring, which nothing
+    # drains while we block in wg.wait() -> a silent forever-hang.  Diagnose it
+    # the way Chan.recv() does when it would block outside a running scheduler.
+    if not mn and runloom_c.current_g() is None:
+        raise RuntimeError(
+            "gather() requires a running scheduler: call it from inside a fiber "
+            "(runloom.run()/mn_run()), or while an M:N run loop is active on "
+            "another thread -- a foreign-thread gather() with no scheduler "
+            "running would hang forever")
     for i, fn in enumerate(callables):
         target = (lambda i=i, fn=fn: _runner(i, fn))
         if mn:
@@ -737,7 +757,34 @@ class Semaphore(object):
         self._waiters = []       # FIFO: each [g, n, [granted_bool]]
         self._mu = CoFMutex()
 
+    def _grant_locked(self):
+        """Grant permits to fitting FRONT waiters in FIFO order.  The caller
+        holds self._mu; returns the list of G handles to wake AFTER releasing the
+        guard (the Mutex wake path must not run under the held lock).  A too-big
+        front waiter blocks the rest -> no starvation."""
+        woke = []
+        while self._waiters:
+            w = self._waiters[0]
+            if self._held + w[1] <= self._limit:
+                self._held += w[1]
+                w[2][0] = True
+                self._waiters.pop(0)
+                woke.append(w[0])
+            else:
+                break
+        return woke
+
     def acquire(self, n=1, timeout=None):
+        if isinstance(n, bool):
+            # A bool is almost certainly threading.Semaphore.acquire(blocking=...)
+            # misuse: this is the Go-style WEIGHTED semaphore whose first arg is a
+            # permit COUNT.  acquire(False) would coerce to n=0 and return True
+            # WITHOUT taking a permit (silently losing mutual exclusion), so reject
+            # it -- use monkey.CoSemaphore for the threading blocking/timeout API.
+            raise TypeError(
+                "Semaphore.acquire(n): n is a permit count, not a bool; this is "
+                "the weighted semaphore -- use monkey.CoSemaphore for the "
+                "threading.Semaphore(blocking=...) API")
         if n < 0:
             raise ValueError("Semaphore.acquire(n): n must be >= 0")
         if n > self._limit:
@@ -769,7 +816,14 @@ class Semaphore(object):
                         self._waiters.remove(w)
                     except ValueError:
                         pass
+                    # We may have been the too-big FRONT waiter blocking the FIFO;
+                    # now that we're gone, waiters behind us may fit the free
+                    # permits.  Grants happen only here and in release(), so
+                    # re-scan now -- else those waiters would park forever.
+                    woke = self._grant_locked()
                     self._mu.unlock()
+                    for g2 in woke:
+                        g2.wake()
                     return False
                 runloom_c.park(timeout=remaining)
             _acquire(self._mu)
@@ -796,29 +850,20 @@ class Semaphore(object):
             raise ValueError("Semaphore.release(n): n must be >= 0")
         _resolve_from_fiber("Semaphore.release()")
         _acquire(self._mu)
-        self._held -= n
-        if self._held < 0:
-            self._held = 0
+        # Validate BEFORE mutating: on over-release leave _held intact and raise,
+        # so a caught ValueError doesn't corrupt the count.  (Clamping to 0 here
+        # would silently free permits other fibers still legitimately hold ->
+        # oversubscription.)
+        if n > self._held:
             self._mu.unlock()
             raise ValueError("Semaphore.release: released more than held")
+        self._held -= n
         # Grant FIFO while the FRONT waiter fits (a too-big front waiter blocks the
         # rest -> no starvation; granted+held set under the guard BEFORE the wake).
-        woke = None
-        while self._waiters:
-            w = self._waiters[0]
-            if self._held + w[1] <= self._limit:
-                self._held += w[1]
-                w[2][0] = True
-                self._waiters.pop(0)
-                if woke is None:
-                    woke = []
-                woke.append(w[0])
-            else:
-                break
+        woke = self._grant_locked()
         self._mu.unlock()
-        if woke:
-            for g in woke:
-                g.wake()
+        for g in woke:
+            g.wake()
 
     def __enter__(self):
         self.acquire(); return self

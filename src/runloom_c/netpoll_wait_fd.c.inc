@@ -403,7 +403,18 @@ int runloom_netpoll_wait_fd(int fd, int events, long long timeout_ns)
     runloom_coro_yield();
     /* On wake: pump SHOULD have set ready_mask and removed us from the
      * parked lists.  Defensive unlink covers the case where pump
-     * routed the wake via a path that bypassed runloom_parker_unlink. */
+     * routed the wake via a path that bypassed runloom_parker_unlink.
+     *
+     * Hold pool->lock across the ENTIRE check, not just the unlink: the
+     * by_fd probe reads pool->by_fd / pool->by_fd_cap, which the pool's
+     * owning hub grows via realloc (freeing the old base) under this lock
+     * in runloom_parker_fd_index_ensure.  In migratable mode
+     * (RUNLOOM_MIGRATION / PER_G_TSTATE / STEAL_WOKEN) a woken g may resume
+     * on a DIFFERENT hub than `pool`'s owner, so an unlocked read here could
+     * race that realloc -- loading the freed old base paired with the new
+     * cap (an OOB / use-after-free read).  Taking the lock first makes the
+     * base+cap pair consistent. */
+    RUNLOOM_RLOCK(&pool->lock, RUNLOOM_RANK_PARKER_POOL);
     if (park->slot != NULL || park->prev_by_fd != NULL ||
         park->next_by_fd != NULL ||
         (park->fd >= 0 && (size_t)park->fd < pool->by_fd_cap &&
@@ -419,10 +430,9 @@ int runloom_netpoll_wait_fd(int fd, int events, long long timeout_ns)
                 (park->fd >= 0 && (size_t)park->fd < pool->by_fd_cap)
                     ? (void *)pool->by_fd[park->fd] : NULL);
 #endif
-        RUNLOOM_RLOCK(&pool->lock, RUNLOOM_RANK_PARKER_POOL);
         runloom_parker_unlink(pool, park);
-        RUNLOOM_RUNLOCK(&pool->lock, RUNLOOM_RANK_PARKER_POOL);
     }
+    RUNLOOM_RUNLOCK(&pool->lock, RUNLOOM_RANK_PARKER_POOL);
     /* Clear g->netpoll_parker before release so completion's force-
      * unlink cannot dereference a freelist entry. */
     if (current_g != NULL && current_g->netpoll_parker == park) {

@@ -3,6 +3,98 @@
  * these definitions depend on. */
 
 
+/* Find g's LIVE wait_fd parker and lock the pool that owns it, defending
+ * against USE-AFTER-FREE.  We must NOT dereference the lock-free
+ * g->netpoll_parker pointer to choose the pool lock: a concurrent wake+resume
+ * on another hub can have already unlinked the parker (clearing
+ * g->netpoll_parker under its pool lock) AND released it -- and
+ * runloom_parker_pool_release free()s it outright once the releasing thread's
+ * 64-entry TLS freelist is full (e.g. right after a fan-in wake of >64
+ * waiters).  Reading p->hub off that stale pointer to pick the pool then
+ * dereferences freed (and possibly reallocated) memory; the old under-lock
+ * re-read could not un-happen that deref.
+ *
+ * Instead we REACH the parker only through the pools' own per-fd buckets and
+ * global lists -- both mutated exclusively under pool->lock -- and match it by
+ * p->g == g.  Every parker on those live chains is still linked, hence not yet
+ * released, so dereferencing it is safe.  This is the same "walk the live
+ * chain under the lock; never deref the saved pointer" discipline the idle
+ * sweep cursor uses (runloom_netpoll_sweep_idle) and the pump's fd dispatch.
+ * A g has at most one linked parker (it parks sequentially), so p->g == g
+ * uniquely identifies it, and finding it in whatever pool it currently lives
+ * in handles RE-PARK MIGRATION by construction -- no lock-free re-validation.
+ *
+ * g->park_fd (plain data on the g, published just after the park links) drives
+ * the O(1) fast path: the fd's dispatch poolmask names the owning hub pool and
+ * its by_fd bucket holds the parker (usually alone -- each waiter parks on its
+ * own self-pipe / socket fd).  `deep` adds a global-list fallback that also
+ * catches the brief window after link() but before park_fd is stored; the
+ * cancel / force-unlink paths pass deep=1 (they have no pipe-write backstop),
+ * while unpark_many passes deep=0 and lets its backstop cover that window.
+ *
+ * On success returns 1 holding *pool_out->lock with *p_out the found (live,
+ * pinned) parker living in *pool_out, so the caller has exclusive UNLINK
+ * rights on it.  Returns 0 with NO lock held if g has no linked parker (not
+ * parked, already woken+unlinked, or still in the pre-link setup window). */
+static int runloom_netpoll_lock_g_pool(runloom_g_t *g,
+                                       runloom_parked_t **p_out,
+                                       runloom_parker_pool_t **pool_out,
+                                       int deep)
+{
+    int fd = __atomic_load_n(&g->park_fd, __ATOMIC_RELAXED);
+    unsigned long long fm = ~0ULL;
+    int pi;
+    /* Only the hub pools whose dispatch-mask bit is set for fd can hold a
+     * parker on it; the DEFAULT pool (index 64) is never masked and is always
+     * visited.  Mirrors runloom_pump_dispatch_event's gating; fm == ~0 falls
+     * back to every pool (fd beyond the mask, or mask not yet allocated). */
+    {
+        unsigned long long *m = __atomic_load_n(&runloom_fd_poolmask,
+                                                __ATOMIC_ACQUIRE);
+        if (m != NULL && fd >= 0 && (size_t)fd < runloom_fd_poolmask_cap)
+            fm = __atomic_load_n(&m[fd], __ATOMIC_ACQUIRE);
+    }
+    for (pi = 0; pi < RUNLOOM_PARKER_POOL_MAX; pi++) {
+        runloom_parker_pool_t *pool = &runloom_pools[pi];
+        runloom_parked_t *p;
+        if (pi < 64 && fm != ~0ULL && !(fm & (1ULL << pi))) continue;
+        if (__atomic_load_n(&pool->lock_inited, __ATOMIC_ACQUIRE) != 2) continue;
+        RUNLOOM_RLOCK(&pool->lock, RUNLOOM_RANK_PARKER_POOL);
+        if (fd >= 0 && (size_t)fd < pool->by_fd_cap) {
+            for (p = pool->by_fd[fd]; p != NULL; p = p->next_by_fd) {
+                if (p->g == g) {
+                    *p_out = p;
+                    *pool_out = pool;
+                    return 1;   /* holding pool->lock; p is linked here (alive) */
+                }
+            }
+        }
+        RUNLOOM_RUNLOCK(&pool->lock, RUNLOOM_RANK_PARKER_POOL);
+    }
+    if (!deep) return 0;
+    /* Fallback: a parker that has linked but whose g->park_fd is not published
+     * yet won't be in by_fd[park_fd].  It IS on its pool's global list, so scan
+     * that.  Skipped entirely when g advertises no parker (the pointer VALUE is
+     * read, never dereferenced), so the common "already gone" case stays cheap
+     * and the O(N) walk fires only in the rare link->park_fd-store window. */
+    if (g->netpoll_parker == NULL) return 0;
+    for (pi = 0; pi < RUNLOOM_PARKER_POOL_MAX; pi++) {
+        runloom_parker_pool_t *pool = &runloom_pools[pi];
+        runloom_parked_t *p;
+        if (__atomic_load_n(&pool->lock_inited, __ATOMIC_ACQUIRE) != 2) continue;
+        RUNLOOM_RLOCK(&pool->lock, RUNLOOM_RANK_PARKER_POOL);
+        for (p = pool->head; p != NULL; p = p->next) {
+            if (p->g == g) {
+                *p_out = p;
+                *pool_out = pool;
+                return 1;   /* holding pool->lock; p is linked here (alive) */
+            }
+        }
+        RUNLOOM_RUNLOCK(&pool->lock, RUNLOOM_RANK_PARKER_POOL);
+    }
+    return 0;
+}
+
 void runloom_netpoll_force_unlink_g_parker(runloom_g_t *g)
 {
     runloom_parked_t *p;
@@ -10,75 +102,25 @@ void runloom_netpoll_force_unlink_g_parker(runloom_g_t *g)
     if (g == NULL) return;
     /* Cheap path: no parker tracked, nothing to do. */
     if (g->netpoll_parker == NULL) return;
-    p = (runloom_parked_t *)g->netpoll_parker;
-    /* Route via the parker's recorded hub -- pool ownership is set
-     * once at link time (wait_fd's runloom_parker_pool_for_hub) and the
-     * parker stays in that pool for its whole lifetime, so reading
-     * p->hub is sufficient to find the right lock here even though
-     * we're not in the parker's owning hub. */
-    pool = runloom_parker_pool_for_hub(p->hub);
-    RUNLOOM_RLOCK(&pool->lock, RUNLOOM_RANK_PARKER_POOL);
-    /* Re-read p inside the lock in case g->netpoll_parker was
-     * cleared by a concurrent unlink between the check above and
-     * the lock acquire. */
-    p = (runloom_parked_t *)g->netpoll_parker;
-    if (p != NULL) {
-        /* runloom_parker_unlink is no-op if p is already clean (e.g.,
-         * pump unlinked it between the cheap-path check and the lock
-         * acquire) -- safe to call unconditionally. */
-        (void)runloom_parker_unlink(pool, p);
+    /* Find the parker via the pools' LIVE chains -- never by dereferencing the
+     * possibly-freed g->netpoll_parker.  deep=1 so a parker linked before its
+     * park_fd was published is still found on the global list. */
+    if (!runloom_netpoll_lock_g_pool(g, &p, &pool, 1)) {
+        /* No linked parker: it was already unlinked+released on its own resume
+         * (the normal case), leaving only a stale back-pointer.  Clear it so no
+         * later path chases freed memory; the g is completing, so no concurrent
+         * wait_fd is (re)publishing it. */
         g->netpoll_parker = NULL;
-        RUNLOOM_EVT(RUNLOOM_EVT_PARKER_FORCE, p, g, (long long)p->gen);
+        return;
     }
+    /* holds pool->lock; p is linked in pool (hence alive), p->g == g */
+    (void)runloom_parker_unlink(pool, p);   /* clears g->netpoll_parker */
+    RUNLOOM_EVT(RUNLOOM_EVT_PARKER_FORCE, p, g, (long long)p->gen);
     RUNLOOM_RUNLOCK(&pool->lock, RUNLOOM_RANK_PARKER_POOL);
     /* The g is completing and its wait_fd will never resume to call
      * pool_release, so we release here.  Safe: parker is unlinked
      * above so no other thread holds a reference. */
-    if (p != NULL) runloom_parker_pool_release(p);
-}
-
-/* Lock the parker pool that currently owns g's wait_fd parker, defending against
- * RE-PARK MIGRATION.  g->netpoll_parker can change to a parker on a DIFFERENT hub
- * (hence a different pool) between the lock-free hub read and the lock acquire --
- * if the g is woken by another claimer and re-parks elsewhere in that window.
- * cancel_g and unpark_many both wake a g that WILL resume and may re-park, so
- * they must re-validate the pool under the lock; the pump/deadline sweep reach a
- * parker by walking the pool's OWN structures (so they always hold the right
- * lock), and force_unlink acts on a COMPLETING g (which never re-parks) -- only
- * these two need this guard.
- *
- * On success returns 1 holding *pool_out->lock with *p_out == g->netpoll_parker
- * living in *pool_out, so the caller has exclusive UNLINK rights on it (a
- * concurrent pump/timeout claimer can still CAS its commit lock-free, which the
- * caller's own claim CAS then loses cleanly -> exactly-once preserved).  Returns
- * 0 with NO lock held if g is not parked (parker NULL: not yet committed the
- * park, or already woken+unlinked). */
-static int runloom_netpoll_lock_g_pool(runloom_g_t *g,
-                                       runloom_parked_t **p_out,
-                                       runloom_parker_pool_t **pool_out)
-{
-    for (;;) {
-        runloom_parked_t *p = (runloom_parked_t *)g->netpoll_parker;
-        runloom_parker_pool_t *pool;
-        if (p == NULL) return 0;
-        pool = runloom_parker_pool_for_hub(p->hub);
-        RUNLOOM_RLOCK(&pool->lock, RUNLOOM_RANK_PARKER_POOL);
-        /* Re-read under the lock: a pump/timeout/force-unlink may have cleared
-         * it, OR the g may have re-parked on a different pool. */
-        p = (runloom_parked_t *)g->netpoll_parker;
-        if (p == NULL) { RUNLOOM_RUNLOCK(&pool->lock, RUNLOOM_RANK_PARKER_POOL); return 0; }
-        if (runloom_parker_pool_for_hub(p->hub) != pool) {
-            /* g re-parked on a different pool in the lock-acquire window; the
-             * lock we hold is the WRONG one -- drop it and retry with the fresh
-             * pool.  Bounded: a re-park needs a prior wake, and once our claim
-             * below wins, no further re-wake/re-park can occur. */
-            RUNLOOM_RUNLOCK(&pool->lock, RUNLOOM_RANK_PARKER_POOL);
-            continue;
-        }
-        *p_out = p;
-        *pool_out = pool;
-        return 1;
-    }
+    runloom_parker_pool_release(p);
 }
 
 /* Cancel a fiber parked in runloom_netpoll_wait_fd.  Unlike force_unlink
@@ -94,7 +136,9 @@ int runloom_netpoll_cancel_g(runloom_g_t *g)
     int cur, woke = 0;
     if (g == NULL) return 0;
     if (g->netpoll_parker == NULL) return 0;   /* cheap path: not parked */
-    if (!runloom_netpoll_lock_g_pool(g, &p, &pool)) return 0;
+    /* deep=1: no pipe-write backstop here, so also catch a parker linked before
+     * its park_fd was published (via the lock_g_pool global-list fallback). */
+    if (!runloom_netpoll_lock_g_pool(g, &p, &pool, 1)) return 0;
     /* holds pool->lock; p == g->netpoll_parker, living in pool */
     for (;;) {
         cur = __atomic_load_n(&p->commit, __ATOMIC_ACQUIRE);
@@ -127,7 +171,8 @@ int runloom_netpoll_cancel_g(runloom_g_t *g)
  * fan-in primitive (Event.set / Condition.notify_all / Semaphore.release).  Each
  * g is claimed + ready_out=UNPARKED + unlinked + re-queued, identical to cancel_g
  * (UNPARKED instead of CANCELLED), one g at a time under the right pool lock via
- * the re-validating lock helper.  A g whose parker is NULL -- it appended itself
+ * the live-chain lock helper (which reaches the parker through the pool's own
+ * structures, never a stale g->netpoll_parker deref).  A g whose parker is NULL -- it appended itself
  * to the primitive's wait list but has not yet committed the wait_fd park (the
  * edge-before-park window), or it was already woken+unlinked -- cannot be
  * direct-woken; its index goes into missed_out so the caller falls back to the
@@ -148,7 +193,10 @@ int runloom_netpoll_unpark_many(runloom_g_t **gs, int n, int *missed_out)
             missed_out[missed++] = i;
             continue;
         }
-        if (!runloom_netpoll_lock_g_pool(g, &p, &pool)) {
+        /* deep=0: any miss (parker not linked yet, or park_fd not published) is
+         * covered by the caller's pipe-write backstop below, so skip the O(N)
+         * global-list fallback and keep this fan-in wake O(1) per waiter. */
+        if (!runloom_netpoll_lock_g_pool(g, &p, &pool, 0)) {
             /* parker raced to NULL -> edge-before-park backstop via pipe-write. */
             missed_out[missed++] = i;
             continue;

@@ -1910,10 +1910,28 @@ static int runloom_coro_grow(runloom_coro_t *c, size_t new_usable)
     {
         void *old_stack = c->stack;
         size_t old_sz   = c->stack_size;
+        char  *abase; size_t aslot; int anode = 0;
         c->stack      = new_stack;
         c->stack_size = new_usable;
         c->grown      = 1;
-        runloom_stack_unmap_guarded(old_stack, old_sz);
+        /* Drop the old stack.  When it is a slice of the shared arena mapping
+         * (RUNLOOM_STACK_ARENA / RUNLOOM_GON_BULK) it MUST be returned to its
+         * class via arena_free: munmapping it (as we used to, unconditionally)
+         * punches an unmapped hole out of the middle of the one big
+         * MAP_NORESERVE arena and leaks the slot -- its class `live` count
+         * never drains to 0, the bump cursor `next` never resets, and the VA
+         * is lost.  runloom_stack_release does the right thing per case: for an
+         * arena slice it arena_free's the slot and returns WITHOUT touching
+         * runloom_stack_live; a standalone (depot/map_guarded) stack is
+         * unmapped below instead -- it was never counted on this path and the
+         * grown replacement is released on destroy, so the depot live counter
+         * stays balanced. */
+        if (runloom_stack_arena_on() &&
+            runloom_arena_class_of_ptr(old_stack, &abase, &aslot, &anode)) {
+            runloom_stack_release(old_stack, old_sz);
+        } else {
+            runloom_stack_unmap_guarded(old_stack, old_sz);
+        }
     }
     return 0;
 }

@@ -82,36 +82,49 @@ class _LoopRunMixin(object):
         _runtime.prewarm_stdlib()
         # Clear any stale stop request from a prior run on this loop.
         self._stopping = False
-        if not future.done():
-            # When the user-visible future completes, break our drain (matches
-            # asyncio.run -- don't block on background accept/ticker fibers
-            # the user didn't join).
-            def _stop_on_done(_fut):
-                box = self._ka_stop_box
-                if box is not None:
-                    box[0] = True
-                runloom_c.sched_stop()
-            # Fire synchronously the instant the main future completes (do NOT
-            # defer through call_soon like a library done-callback): this is the
-            # run loop's own control hook -- it must stop the drive in the same
-            # turn, not a tick later. See _fire_callbacks (_runloom_fire_sync).
-            _stop_on_done._runloom_fire_sync = True
-            future.add_done_callback(_stop_on_done)
-            self._spawn_keepalive()
-            # Remove the stop callback when the drive returns, no matter HOW it
-            # returns (future done, KeyboardInterrupt out of a callback, or the
-            # scheduler emptying) -- exactly as stock asyncio's
-            # run_until_complete does in its finally.  Otherwise a future that
-            # this run abandoned (e.g. a task left parked when a Ctrl-C aborted
-            # the run) keeps the stale callback, and when a LATER run completes
-            # that task its _stop_on_done fires and sched_stop()s the wrong
-            # drive -- breaking it before its own future is done -> a spurious
-            # "event loop stopped before Future completed" that masks the
-            # original KeyboardInterrupt (asyncio.Runner cleanup hits this).
-            try:
-                self._drive()
-            finally:
-                future.remove_done_callback(_stop_on_done)
+        # Always drive the loop for at least one iteration, EVEN when `future`
+        # is already done.  Stock BaseEventLoop.run_until_complete always calls
+        # run_forever(), so callbacks previously scheduled with call_soon run
+        # before it returns (asyncio defers the done future's stop through
+        # call_soon, so the loop processes its ready queue for one iteration and
+        # then stops).  Gating the entire drive on `if not future.done()`
+        # skipped that iteration for an already-completed future, stranding the
+        # fibers those earlier call_soon() calls spawned onto this thread's
+        # ready ring -- they sat unexecuted until some unrelated later run
+        # happened to drive this thread's scheduler (firing spuriously then).
+        #
+        # When the user-visible future completes, break our drain (matches
+        # asyncio.run -- don't block on background accept/ticker fibers
+        # the user didn't join).
+        def _stop_on_done(_fut):
+            box = self._ka_stop_box
+            if box is not None:
+                box[0] = True
+            runloom_c.sched_stop()
+        # Fire synchronously the instant the main future completes (do NOT
+        # defer through call_soon like a library done-callback): this is the
+        # run loop's own control hook -- it must stop the drive in the same
+        # turn, not a tick later. See _fire_callbacks (_runloom_fire_sync).
+        # (For an ALREADY-done future add_done_callback defers this through
+        # call_soon anyway, so the single drive iteration still runs the
+        # pending ready work first, then _stop_on_done stops the drive.)
+        _stop_on_done._runloom_fire_sync = True
+        future.add_done_callback(_stop_on_done)
+        self._spawn_keepalive()
+        # Remove the stop callback when the drive returns, no matter HOW it
+        # returns (future done, KeyboardInterrupt out of a callback, or the
+        # scheduler emptying) -- exactly as stock asyncio's
+        # run_until_complete does in its finally.  Otherwise a future that
+        # this run abandoned (e.g. a task left parked when a Ctrl-C aborted
+        # the run) keeps the stale callback, and when a LATER run completes
+        # that task its _stop_on_done fires and sched_stop()s the wrong
+        # drive -- breaking it before its own future is done -> a spurious
+        # "event loop stopped before Future completed" that masks the
+        # original KeyboardInterrupt (asyncio.Runner cleanup hits this).
+        try:
+            self._drive()
+        finally:
+            future.remove_done_callback(_stop_on_done)
         # IMPORTANT: do NOT cancel outstanding tasks / sched_reset here.
         # run_until_complete must leave other tasks + parked fibers ALIVE
         # (IsolatedAsyncioTestCase / asyncio.Runner reuse one loop across
@@ -140,6 +153,29 @@ class _LoopRunMixin(object):
                 t.cancel()
             except Exception:
                 pass
+        # Drive the loop so the cancellations actually PROPAGATE.  t.cancel()
+        # only requests a cancel (waking the task's parked fiber); the woken
+        # fiber must then run so its CancelledError unwinds try/finally and
+        # async-with __aexit__ cleanup and the task settles.  asyncio.run's
+        # Runner does exactly this -- it run_until_complete(gather(...))s the
+        # cancelled tasks AFTER cancelling them.  Without a drive here the woken
+        # fibers never run and cleanup is silently skipped (locks stay held,
+        # files/sockets/connections leak, aclose() bodies are dropped).
+        # close() has already flipped _closed=True (asyncio, by contrast,
+        # cancels BEFORE close()), so briefly re-open the loop for this cleanup
+        # drive: call_soon and gather's own done-callback bookkeeping raise on a
+        # closed loop, which would strand the cleanup.  Restore _closed after.
+        pending = [t for t in tasks if not t.done()]
+        if pending:
+            was_closed = self._closed
+            self._closed = False
+            try:
+                self.run_until_complete(
+                    asyncio.gather(*pending, return_exceptions=True))
+            except Exception:
+                pass
+            finally:
+                self._closed = was_closed
         # Forcibly drop anything still scheduled.  Goroutines parked on
         # netpoll/wake/chan that aren't interrupted by cancel get
         # abandoned; the underlying coro and snap are freed when the

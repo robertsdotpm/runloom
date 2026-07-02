@@ -290,10 +290,37 @@ class _StreamTransport(_StreamIOMixin, asyncio.Transport):
 
     # ---- abort / half-close ----
     def abort(self):
-        # Immediate teardown: discard any queued output so close() tears down
-        # now instead of draining (asyncio's abort() drops the write buffer).
+        # Immediate teardown: discard any queued output so the transport tears
+        # down NOW instead of draining (asyncio's abort() drops the write
+        # buffer).
         self._write_buf = bytearray()
-        self.close()
+        if not self._closed:
+            # Not closing yet: close() with an empty buffer tears down inline.
+            self.close()
+            return
+        # Already closing.  A graceful close() that still had queued output set
+        # _close_when_drained and deferred teardown to the io fiber's
+        # _drain_step.  We just emptied the buffer, so the io fiber's mask loses
+        # WRITE (and READ was already masked off by _closed): it exits with mask
+        # 0 and _drain_step -- the ONLY path that fires the deferred teardown --
+        # never runs, so _close_when_drained would stay True forever and
+        # connection_lost would never be delivered (permanent hang, fd leak).
+        # Force the teardown here; asyncio's abort() always forces
+        # _call_connection_lost.  If teardown is already in flight (_stopping),
+        # there is nothing left to do.
+        if self._stopping:
+            return
+        self._close_when_drained = False
+        self._stopping = True
+        # Wake the io fiber if parked (on the now-stale WRITE arm) so it sees
+        # _stopping and exits now.
+        g = self._io_g
+        if g is not None:
+            try:
+                g.cancel_wait_fd()
+            except Exception:
+                pass
+        self._deliver_connection_lost(self._close_exc, self._close_deliver_cl)
 
     def can_write_eof(self):
         return True

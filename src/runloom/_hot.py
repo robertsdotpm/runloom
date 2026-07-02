@@ -55,8 +55,24 @@ def _rebinds_capture(code):
     free = frozenset(code.co_freevars)
     if not free:
         return False
-    return any(ins.opname in ("STORE_DEREF", "DELETE_DEREF") and ins.argval in free
-               for ins in dis.get_instructions(code))
+    # The rebind can also live in a NESTED function that shares the cell via
+    # ``nonlocal`` -- its STORE_DEREF sits in a nested code object hanging off
+    # co_consts, which dis.get_instructions() does not descend into.  Scan those
+    # too, recursively, matching on the captured NAME (name-matching may
+    # over-report a same-named cell from a deeper scope, but that only keeps a
+    # cell shared -- the safe side of the "leave it shared rather than be subtly
+    # wrong" contract).
+    return _rebinds_names(code, free)
+
+
+def _rebinds_names(code, free):
+    for ins in dis.get_instructions(code):
+        if ins.opname in ("STORE_DEREF", "DELETE_DEREF") and ins.argval in free:
+            return True
+    for const in code.co_consts:
+        if isinstance(const, types.CodeType) and _rebinds_names(const, free):
+            return True
+    return False
 
 
 def hot(fn):
@@ -139,7 +155,7 @@ class _AutoHot:
         self.after = _intenv("RUNLOOM_HOT_AUTO_AFTER", 64)
         self.budget = _intenv("RUNLOOM_HOT_AUTO_BUDGET", 32)
         self._counts = {}     # code -> spawns seen so far (pre-promotion)
-        self._runners = {}    # code -> promoted per-core runner (the hot path)
+        self._runners = {}    # id(closure) -> promoted per-core runner (hot path)
         self._shared = set()  # code we'd promote but the budget was full
         self._warned = False
         self._lock = threading.Lock()
@@ -150,11 +166,18 @@ class _AutoHot:
         if type(fn) is not types.FunctionType or not fn.__closure__:
             return fn
         code = fn.__code__
-        runner = self._runners.get(code)
+        # Count by CODE (bounded: one counter per handler body), but cache the
+        # promoted runner by the CLOSURE INSTANCE.  Sibling closures from one
+        # factory share this code object yet carry their OWN captured cells, so a
+        # per-code runner would run every sibling with a single instance's data.
+        # hot(fn) closes over fn, so a cached runner keeps its fn alive and its
+        # id() stays unique+stable for exactly as long as it is cached.
+        key = id(fn)
+        runner = self._runners.get(key)
         if runner is not None:
             return runner
         with self._lock:
-            runner = self._runners.get(code)
+            runner = self._runners.get(key)
             if runner is not None:
                 return runner
             if code in self._shared:
@@ -169,7 +192,7 @@ class _AutoHot:
                 self._warn_budget()
                 return fn
             runner = hot(fn)                  # reuse the per-core cell-split path
-            self._runners[code] = runner
+            self._runners[key] = runner
             self._counts.pop(code, None)
             return runner
 

@@ -196,7 +196,17 @@ static int runloom_iouring_ring_submit_sqe(runloom_iouring_ring_t *r,
     r->sq_array[idx] = idx;
     __atomic_store_n(r->sq_tail, tail + 1, __ATOMIC_RELEASE);
     n = sys_io_uring_submit_eintr(r->ring_fd, 1);   /* retry on EINTR */
-    if (n < 0) return -1;
+    if (n < 0) {
+        /* Non-EINTR io_uring_enter failure (e.g. EAGAIN/EBUSY under resource
+         * pressure): the kernel never consumed the SQE, so roll sq_tail back
+         * to un-queue it.  Otherwise this stale SQE (dead op record, old
+         * fd/buf) lingers between sq_head and sq_tail and the NEXT submit
+         * makes the kernel execute it -- permanently shifting every later
+         * completion by one op.  Safe as the SINGLE issuer: no one else
+         * advances sq_tail and the kernel only ever advances sq_head. */
+        __atomic_store_n(r->sq_tail, tail, __ATOMIC_RELEASE);
+        return -1;
+    }
     __atomic_add_fetch(&r->inflight, 1, __ATOMIC_ACQ_REL);
     /* Also bump the process-wide counter so hub_main's idle decision
      * can do a single atomic load instead of walking the registered-

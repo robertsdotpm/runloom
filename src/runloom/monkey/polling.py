@@ -24,6 +24,14 @@ _KQ_EV_ADD = getattr(_select_mod, "KQ_EV_ADD", 1)
 _KQ_EV_ERROR = getattr(_select_mod, "KQ_EV_ERROR", 0x4000)
 _CO_KQUEUE_OK = _real_select_kqueue is not None
 
+# Positive sentinel returned by runloom_c.wait_fd when the park was cancelled
+# (cross-fiber close via runloom_netpoll_cancel_fd, or the cancel_all_parked
+# teardown backstop).  The cooperative wait loops below MUST honour it -- a
+# waiter that treats it as a spurious wake re-probes, finds nothing, and
+# re-parks forever, stranding the fiber and leaking its transient poll fd.
+# Mirrors monkey/sockets.py's _wait_fd_coop.
+_WAIT_FD_CANCELLED = getattr(runloom_c, "WAIT_FD_CANCELLED", 0x40000000)
+
 # ============================================================
 # select.select -- cooperative, on netpoll
 #
@@ -114,9 +122,14 @@ def _co_select_via_epoll(rlist, wlist, xlist, timeout):
                     return [], [], []
                 wait_ms = max(1, int(rem * 1000))
             try:
-                runloom_c.wait_fd(ep.fileno(), READ, wait_ms)  # park on epoll fd
+                rc = runloom_c.wait_fd(ep.fileno(), READ, wait_ms)  # park on epoll fd
             except OSError:
                 raise _SelectFallback()
+            if rc == _WAIT_FD_CANCELLED:
+                # Cancellation (cross-fiber close / cancel_all_parked teardown):
+                # unwind instead of re-parking forever; the finally below drops
+                # the transient epoll fd's netpoll registration and closes it.
+                raise OSError(errno.ECANCELED, "wait_fd cancelled")
     finally:
         # Drop the transient epoll fd's netpoll registration before closing it,
         # so a later fd reuse re-registers cleanly.
@@ -188,9 +201,13 @@ def _co_select_via_kqueue(rlist, wlist, xlist, timeout):
                     return [], [], []
                 wait_ms = max(1, int(min(0.05, rem) * 1000))
             try:
-                runloom_c.wait_fd(kq.fileno(), READ, wait_ms)  # park on kqueue fd
+                rc = runloom_c.wait_fd(kq.fileno(), READ, wait_ms)  # park on kqueue fd
             except OSError:
                 raise _SelectFallback()
+            if rc == _WAIT_FD_CANCELLED:
+                # Cancellation: unwind instead of re-parking forever; the finally
+                # below drops the transient kqueue fd and closes it.
+                raise OSError(errno.ECANCELED, "wait_fd cancelled")
     finally:
         try:
             if _netpoll_unregister is not None:
@@ -205,6 +222,13 @@ def _co_select_via_kqueue(rlist, wlist, xlist, timeout):
 def _patched_select(rlist, wlist, xlist, timeout=None):
     if not _in_fiber():
         return _orig_select_select(rlist, wlist, xlist, timeout)
+
+    # Stock select.select rejects a negative timeout; the cooperative paths
+    # below fold `timeout <= 0` into the non-blocking probe, so validate up
+    # front to keep behaviour identical (the non-fiber branch above already
+    # raises via _orig_select_select).
+    if timeout is not None and timeout < 0:
+        raise ValueError("timeout must be non-negative")
 
     # select.select() accepts ANY iterable of fds, and selectors.SelectSelector
     # passes SETS (self._readers / self._writers).  Normalise to lists; real
@@ -307,11 +331,17 @@ def _backing_fd_wait(real_obj, deadline):
     else:
         timeout_ms = int(_SELECTOR_REPROBE_S * 1000)
     try:
-        runloom_c.wait_fd(real_obj.fileno(), READ, timeout_ms)
+        rc = runloom_c.wait_fd(real_obj.fileno(), READ, timeout_ms)
     except OSError:
         # fileno() gone (closed under us) or netpoll refused it -- let the
         # caller re-probe with poll(0), which will surface the real error.
-        pass
+        return True
+    if rc == _WAIT_FD_CANCELLED:
+        # Cancellation (cross-fiber close / cancel_all_parked teardown): unwind
+        # the parked poll()/control() loop rather than re-probe and re-park
+        # forever.  The caller (CoEpoll/CoKqueue) does not catch OSError, so the
+        # fiber unwinds -- matching the cooperative socket loops.
+        raise OSError(errno.ECANCELED, "wait_fd cancelled")
     return True
 
 
@@ -334,12 +364,28 @@ class CoPoll(object):
         # A poll object has no kernel fd of its own to park on, so (unlike
         # epoll/kqueue, which park on their backing fd, and select.select,
         # which parks on a transient epoll fd) there's no clean netpoll target.
-        # The old form busy-polled poll(0) + _co_sleep on the hub; instead we
-        # offload the blocking poll to a pool thread and PARK on the offload --
-        # the fiber yields, other fibers run, no hub spin.  (poll's C
-        # frame is heap-backed, so this is about cooperation, not the
-        # select_select_impl stack-frame issue.)  Backs selectors.PollSelector.
-        return _get_backend().submit(self._r.poll, (timeout,), {})
+        # Drain with a non-blocking poll(0) and yield cooperatively between
+        # probes -- the same shape as the multi-fd select.select() path.
+        # We must NOT offload a blocking poll to the pool: the blocking-call
+        # backend is thread-ident sharded (one worker per hub OS thread), so an
+        # unbounded poll(None) would occupy that worker forever and deadlock
+        # every other offload from the same hub -- including the very work that
+        # would make the poll ready.  Backs selectors.PollSelector.
+        if timeout is None or timeout < 0:
+            deadline = None
+        else:
+            deadline = time.monotonic() + timeout / 1000.0
+        while True:
+            ev = self._r.poll(0)               # non-blocking drain
+            if ev:
+                return ev
+            if deadline is None:
+                _co_sleep(_SELECTOR_REPROBE_S)
+            else:
+                rem = deadline - time.monotonic()
+                if rem <= 0:
+                    return []
+                _co_sleep(min(_SELECTOR_REPROBE_S, rem))
 
     def __getattr__(self, name):
         return getattr(self._r, name)

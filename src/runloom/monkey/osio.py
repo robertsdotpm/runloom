@@ -134,44 +134,43 @@ def _patched_input(prompt=""):
     if prompt:
         sys.stdout.write(prompt)
         sys.stdout.flush()
-    try:
-        fd = sys.stdin.fileno()
-    except (OSError, ValueError):
-        return _orig_input("")
-    if _fd_pollable(fd):
-        runloom_c.wait_fd(fd, READ)
-    return _orig_input("")
+    # Offload the blocking read to a pool worker rather than gating on
+    # wait_fd.  sys.stdin is a TextIOWrapper over a BufferedReader: an
+    # earlier read slurps everything the kernel pipe has to offer into the
+    # user-space decode/byte buffers, and wait_fd -- which only sees
+    # kernel-level readiness -- is blind to that buffered data.  Parking on
+    # wait_fd for a kernel-empty fd would hang while the next line already
+    # sits in the io buffer.  The worker's real read returns any buffered
+    # line immediately and only truly blocks when the stream is empty,
+    # parking just this fiber.
+    return offload(_orig_input, "")
 
 
 def _patched_stdin_read(*args):
-    if _in_fiber():
-        try:
-            fd = sys.stdin.fileno()
-            if _fd_pollable(fd):
-                runloom_c.wait_fd(fd, READ)
-        except (OSError, ValueError):
-            pass
-    return _orig_stdin_read(*args)
+    if not _in_fiber():
+        return _orig_stdin_read(*args)
+    # See _patched_input: wait_fd is blind to data already buffered in the
+    # TextIOWrapper, so offload the blocking read instead of parking on it.
+    return offload(_orig_stdin_read, *args)
 
 
 def _patched_stdin_readline(*args):
-    if _in_fiber():
-        try:
-            fd = sys.stdin.fileno()
-            if _fd_pollable(fd):
-                runloom_c.wait_fd(fd, READ)
-        except (OSError, ValueError):
-            pass
-    return _orig_stdin_readline(*args)
+    if not _in_fiber():
+        return _orig_stdin_readline(*args)
+    # See _patched_input: wait_fd is blind to data already buffered in the
+    # TextIOWrapper, so offload the blocking read instead of parking on it.
+    return offload(_orig_stdin_readline, *args)
 
 
 def _patch_stdio():
     global _orig_input, _orig_stdin_read, _orig_stdin_readline
     _orig_input = builtins.input
     builtins.input = _patched_input
-    # sys.stdin is a TextIOWrapper -- wrapping its methods works because
-    # the underlying buffered/raw reads still drain the kernel buffer
-    # after wait_fd; wait_fd just keeps us off the OS-blocking syscall.
+    # sys.stdin is a TextIOWrapper over a BufferedReader: the underlying
+    # buffered read may already hold the next line(s) drained from the
+    # kernel pipe, so the patched methods offload the blocking read to a
+    # pool worker (which honours that buffering) instead of parking on
+    # wait_fd, whose kernel-level readiness check is blind to buffered data.
     try:
         _orig_stdin_read     = sys.stdin.read
         _orig_stdin_readline = sys.stdin.readline

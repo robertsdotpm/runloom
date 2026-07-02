@@ -157,8 +157,17 @@ static int runloom_netpoll_register(int fd, int events)
              * fixes the original stale-arm hang (test_monkey_offload): the fd
              * lands in the shared epoll, which IS pumped, never a dead pool. */
             (void)epoll_ctl(ep, EPOLL_CTL_DEL, fd, NULL);
+            /* PRESERVE every already-armed direction.  The fresh ADD into the
+             * shared epoll must re-arm the FULL mask (cur | need), not just this
+             * caller's `need`: narrowing to `need` dropped the direction(s) a
+             * currently-parked waiter (in `cur`) needs -- the fd landed in the
+             * shared epoll for ONE direction only, the arm cache recorded that
+             * narrowed mask (so no later register re-armed the lost one, the
+             * widen path computing target==cur and skipping), and the dropped
+             * direction's waiter never received its event (a deterministic lost
+             * wakeup / hang).  Compute the full mask BEFORE zeroing cur. */
+            target = cur | need;
             cur = 0;                 /* fresh ADD into the shared epoll */
-            target = need;
             ep = runloom_epoll_fd;
             my_pool_idx = -1;        /* record as shared -> no future migration */
         }
@@ -197,24 +206,47 @@ static int runloom_netpoll_register(int fd, int events)
     /* Fresh ADD: record which hub's epoll now owns this fd (read by a later widen
      * and by release_if_idle's DEL).  my_pool_idx is -1 on the shared fallback. */
     if (perhub && cur == 0) runloom_fd_epoll_pool_set(fd, my_pool_idx);
-    RUNLOOM_RUNLOCK(&runloom_pool.lock, RUNLOOM_RANK_PARKER_POOL);
 
     ev.events = 0;
     if (target & RUNLOOM_NETPOLL_READ)  ev.events |= EPOLLIN | EPOLLRDHUP;
     if (target & RUNLOOM_NETPOLL_WRITE) ev.events |= EPOLLOUT;
     ev.data.fd = fd;
 
+    /* Issue the epoll_ctl STILL HOLDING runloom_pool.lock -- the SAME critical
+     * section that read `cur` and published the arm cache above.  Dropping the
+     * lock before this syscall let two threads registering the SAME fd
+     * concurrently (READ on one hub, WRITE on another, fd not yet armed)
+     * interleave their ADD/MOD out of order with respect to their cache updates:
+     * the later MOD could hit ENOENT before the sibling's ADD landed and then
+     * EEXIST with both fallbacks exhausted -> a spurious FileExistsError raised
+     * out of a healthy wait_fd, or the kernel event set was silently narrowed to
+     * a single direction while the arm cache claimed both -> the other
+     * direction's waiter never woke.  epoll_ctl is a brief non-blocking syscall
+     * that does NOT release the GIL, so holding the lock across it adds no
+     * blocking path and no lock-order inversion. */
     if (cur == 0) {
-        if (epoll_ctl(ep, EPOLL_CTL_ADD, fd, &ev) == 0) return 0;
+        if (epoll_ctl(ep, EPOLL_CTL_ADD, fd, &ev) == 0) {
+            RUNLOOM_RUNLOCK(&runloom_pool.lock, RUNLOOM_RANK_PARKER_POOL);
+            return 0;
+        }
         if (errno == EEXIST &&
-            epoll_ctl(ep, EPOLL_CTL_MOD, fd, &ev) == 0) return 0;
+            epoll_ctl(ep, EPOLL_CTL_MOD, fd, &ev) == 0) {
+            RUNLOOM_RUNLOCK(&runloom_pool.lock, RUNLOOM_RANK_PARKER_POOL);
+            return 0;
+        }
     } else {
-        if (epoll_ctl(ep, EPOLL_CTL_MOD, fd, &ev) == 0) return 0;
+        if (epoll_ctl(ep, EPOLL_CTL_MOD, fd, &ev) == 0) {
+            RUNLOOM_RUNLOCK(&runloom_pool.lock, RUNLOOM_RANK_PARKER_POOL);
+            return 0;
+        }
         if (errno == ENOENT &&
-            epoll_ctl(ep, EPOLL_CTL_ADD, fd, &ev) == 0) return 0;
+            epoll_ctl(ep, EPOLL_CTL_ADD, fd, &ev) == 0) {
+            RUNLOOM_RUNLOCK(&runloom_pool.lock, RUNLOOM_RANK_PARKER_POOL);
+            return 0;
+        }
     }
-    /* Failed: roll the arm mask back so a future caller can retry. */
-    RUNLOOM_RLOCK(&runloom_pool.lock, RUNLOOM_RANK_PARKER_POOL);
+    /* Failed: roll the arm mask back so a future caller can retry.  Still under
+     * the lock taken at the top of the function. */
     runloom_fd_armed_set(fd, cur);
     if (perhub && cur == 0) runloom_fd_epoll_pool_set(fd, -1);
     RUNLOOM_RUNLOCK(&runloom_pool.lock, RUNLOOM_RANK_PARKER_POOL);
@@ -289,6 +321,67 @@ static int runloom_netpoll_register(int fd, int events)
 #endif
 }
 
+#if defined(RUNLOOM_HAVE_EPOLL)
+/* Lazy OUT-disarm -- the follow-up runloom_netpoll_register's body comment defers.
+ * OUT is armed LEVEL-triggered (no EPOLLET / EPOLLONESHOT) and a connected socket
+ * is almost always writable, so once a fd's single WRITE waiter has been served
+ * the kernel re-reports EPOLLOUT on EVERY epoll_wait; the pump finds no WRITE
+ * parker, stashes a pending-wake bit and returns, and the scheduler's idle loop
+ * re-pumps instantly -> a 100% CPU busy-spin for as long as the fd stays open with
+ * any fiber netpoll-parked.  This is not niche: the cooperative connect() path
+ * (EINPROGRESS -> wait_fd(fd, WRITE)) arms OUT on every outbound connection, so a
+ * plain connect-then-recv client pegs a core while merely waiting for a reply.
+ *
+ * The pump calls this from runloom_epoll_handle_event when an EPOLLOUT-bearing
+ * event for `fd` was NOT consumed by any parker (dispatch returned 0): drop OUT
+ * from the arm cache and the kernel event set (DEL if nothing is left armed, else
+ * MOD down to IN-only).  A later WRITE waiter re-arms OUT through
+ * runloom_netpoll_register's normal fresh-ADD / widen path.
+ *
+ * Race-safe against a WRITE waiter that re-registers concurrently: a waiter links
+ * its parker (runloom_parker_link) BEFORE it arms (runloom_netpoll_register), the
+ * arm runs under runloom_pool.lock, and the pump sets the fd's pending-wake bit on
+ * this same no-parker path -- so a writer that raced in either re-arms OUT after
+ * we drop it (its register sees `cur` without WRITE and re-ADDs the direction) or
+ * consumes the pending bit at its post-register re-check instead of parking. */
+static void runloom_netpoll_disarm_out(int fd)
+{
+    int cur, new_mask, ep;
+    struct epoll_event ev;
+    if (fd < 0) return;
+    RUNLOOM_RLOCK(&runloom_pool.lock, RUNLOOM_RANK_PARKER_POOL);
+    cur = runloom_fd_armed_get(fd);
+    if (!(cur & RUNLOOM_NETPOLL_WRITE)) {          /* OUT already disarmed */
+        RUNLOOM_RUNLOCK(&runloom_pool.lock, RUNLOOM_RANK_PARKER_POOL);
+        return;
+    }
+    new_mask = cur & ~RUNLOOM_NETPOLL_WRITE;       /* keep IN if a READ waiter armed it */
+    /* DEL/MOD against the epoll the fd actually lives in: its owning hub's under
+     * RUNLOOM_PERHUB_EPOLL, the shared runloom_epoll_fd otherwise (owner < 0). */
+    ep = runloom_epoll_fd;
+    if (runloom_perhub_epoll()) {
+        int owner = runloom_fd_epoll_pool_get(fd);
+        if (owner >= 0) ep = runloom_pools[owner].epoll_fd;
+    }
+    if (new_mask == 0) {
+        /* No direction left armed -> drop the whole registration (the fd is still
+         * OPEN, so the kernel will not auto-remove it; mirrors release_if_idle). */
+        runloom_fd_armed_set(fd, 0);
+        runloom_fd_bit_clear(fd);
+        if (runloom_perhub_epoll()) runloom_fd_epoll_pool_set(fd, -1);
+        epoll_ctl(ep, EPOLL_CTL_DEL, fd, NULL);
+    } else {
+        /* READ stays armed -> narrow the kernel event set to IN only. */
+        ev.events = EPOLLIN | EPOLLRDHUP;
+        ev.data.fd = fd;
+        runloom_fd_armed_set(fd, new_mask);
+        if (epoll_ctl(ep, EPOLL_CTL_MOD, fd, &ev) != 0 && errno == ENOENT)
+            (void)epoll_ctl(ep, EPOLL_CTL_ADD, fd, &ev);
+    }
+    RUNLOOM_RUNLOCK(&runloom_pool.lock, RUNLOOM_RANK_PARKER_POOL);
+}
+#endif  /* RUNLOOM_HAVE_EPOLL */
+
 void runloom_netpoll_unregister(int fd)
 {
 #if defined(RUNLOOM_HAVE_EPOLL) || defined(RUNLOOM_HAVE_KQUEUE)
@@ -335,32 +428,47 @@ void runloom_netpoll_release_if_idle(int fd)
 {
 #if defined(RUNLOOM_HAVE_EPOLL)
     if (fd < 0) return;
-    /* Scoped to runloom_pool, the single-thread / DEFAULT parker pool the aio
-     * bridge runs on (run_until_complete drives a single-thread scheduler, whose
-     * wait_fd links into runloom_pool via runloom_parker_pool_for_hub(NULL)).  The
-     * "no parker on fd" check, the arm-cache clear, AND the EPOLL_CTL_DEL all run
-     * under runloom_pool.lock -- the SAME lock wait_fd takes to link a parker and
-     * register() takes to set the arm.  So a wait_fd that links+arms cannot slip
-     * between the idle check and the DEL (which would DEL an fd it just armed -> a
-     * lost wake): either it links first (we see the parker, no-op) or we DEL first
-     * (an idle fd with no waiter) and its later register() re-ADDs fresh
-     * (armed==0).  (M:N hub pools are not in play -- only the bridge calls this,
-     * and it never shares an fd with a concurrently-running hub.) */
+    /* "No parker on this fd in ANY pool" -- the documented contract.  The arm-
+     * cache clear and the EPOLL_CTL_DEL run under runloom_pool.lock (the SAME lock
+     * register() takes to set the arm), and we check BOTH the DEFAULT pool's
+     * bucket (read directly under that lock) AND the 64 per-hub M:N pools (via the
+     * fd's dispatch poolmask -- the per-fd atomic bitmask, bit i set while hub
+     * pool i holds a parker for fd, set at parker_link BEFORE the arm and cleared
+     * when the bucket empties; the same bitmap runloom_pump_dispatch_event trusts).
+     * Checking only the DEFAULT pool (the old guard) could EPOLL_CTL_DEL an fd a
+     * live hub fiber was parked on -- runloom_c.netpoll_release_if_idle is exported
+     * to Python with no bridge-only restriction, and the aio bridge can run
+     * concurrently with M:N hubs -- stranding that fiber's readiness forever.
+     * Ordering: a hub waiter links (poolmask set, RELEASE) BEFORE it arms, and the
+     * arm is set under this lock, so any hub waiter whose registration we could
+     * tear down is guaranteed visible in the poolmask once we hold the lock; a
+     * waiter still mid-flight (linked, not yet armed) re-ADDs fresh in its own
+     * register() after our DEL clears the arm cache (armed==0). */
     RUNLOOM_RLOCK(&runloom_pool.lock, RUNLOOM_RANK_PARKER_POOL);
-    if (((size_t)fd >= runloom_pool.by_fd_cap || runloom_pool.by_fd[fd] == NULL)
-        && runloom_fd_armed_get(fd) != 0) {
-        /* DEL from the epoll the fd actually lives in.  Under RUNLOOM_PERHUB_EPOLL
-         * that is its owning hub's epoll (bridge fds are the DEFAULT pool's); the
-         * shared runloom_epoll_fd otherwise.  owner<0 -> shared fallback. */
-        int del_ep = runloom_epoll_fd;
-        if (runloom_perhub_epoll()) {
-            int owner = runloom_fd_epoll_pool_get(fd);
-            if (owner >= 0) del_ep = runloom_pools[owner].epoll_fd;
-            runloom_fd_epoll_pool_set(fd, -1);
+    {
+        int default_empty = ((size_t)fd >= runloom_pool.by_fd_cap ||
+                             runloom_pool.by_fd[fd] == NULL);
+        int hub_empty = 1;
+        unsigned long long *pm =
+            __atomic_load_n(&runloom_fd_poolmask, __ATOMIC_ACQUIRE);
+        if (pm != NULL && (size_t)fd < runloom_fd_poolmask_cap &&
+            __atomic_load_n(&pm[fd], __ATOMIC_ACQUIRE) != 0)
+            hub_empty = 0;
+        if (default_empty && hub_empty && runloom_fd_armed_get(fd) != 0) {
+            /* DEL from the epoll the fd actually lives in.  Under
+             * RUNLOOM_PERHUB_EPOLL that is its owning hub's epoll (bridge fds are
+             * the DEFAULT pool's); the shared runloom_epoll_fd otherwise.
+             * owner<0 -> shared fallback. */
+            int del_ep = runloom_epoll_fd;
+            if (runloom_perhub_epoll()) {
+                int owner = runloom_fd_epoll_pool_get(fd);
+                if (owner >= 0) del_ep = runloom_pools[owner].epoll_fd;
+                runloom_fd_epoll_pool_set(fd, -1);
+            }
+            runloom_fd_armed_set(fd, 0);
+            runloom_fd_bit_clear(fd);
+            epoll_ctl(del_ep, EPOLL_CTL_DEL, fd, NULL);
         }
-        runloom_fd_armed_set(fd, 0);
-        runloom_fd_bit_clear(fd);
-        epoll_ctl(del_ep, EPOLL_CTL_DEL, fd, NULL);
     }
     RUNLOOM_RUNLOCK(&runloom_pool.lock, RUNLOOM_RANK_PARKER_POOL);
 #else
@@ -467,16 +575,29 @@ int runloom_netpoll_sweep_idle(void *hub_opaque, long long threshold_ns)
         }
     }
     {
-        /* Resume from the saved cursor; reset to head if it was unlinked
-         * and its slot reused (gen changed) or we ran off the end last
-         * time.  The whole walk runs under the lock, so the list is
-         * stable here; only between sweeps can the cursor go stale, which
-         * the gen check catches.  Walking off the live chain into pooled-
-         * but-unlinked parkers is memory-safe (parkers are pool-recycled,
-         * never freed) and action-safe (the commit==PARKED + dwell gate
-         * skips woken/young ones); MAX_VISIT bounds it either way. */
+        /* Resume from the saved cursor -- but VALIDATE it WITHOUT dereferencing
+         * it.  A parker unlinked between sweeps can be free()d
+         * (runloom_parker_pool_release frees once the releasing thread's TLS
+         * freelist is full -- a fan-in wake of >64 waiters overflows it), so the
+         * old "parkers are pool-recycled, never freed" assumption was wrong and
+         * reading p->gen off the saved pointer to validate it was a use-after-free
+         * (and a coincidental gen match then walked p->next garbage).
+         *
+         * Safe test with no deref: the saved cursor was LINKED when we stored it,
+         * and a linked parker can only be freed AFTER being unlinked.  link/unlink
+         * both run under this pool lock, and the cumulative unlink count
+         * (link_count - total) is monotonic, so an UNCHANGED count since we saved
+         * the cursor proves it was never unlinked -- hence never freed -- and is
+         * still linked, so resuming from it is safe.  Any unlink since (count
+         * changed) means the cursor MIGHT be freed, so restart from head (the
+         * documented fallback).  Plain LINKS (head-inserts) don't disturb the
+         * cursor's linkage, so they don't force a restart.  The whole walk runs
+         * under the lock, so the live chain is stable here; MAX_VISIT bounds it
+         * either way. */
+        unsigned int unlinks_now = (unsigned int)(pool->link_count -
+            (unsigned long long)__atomic_load_n(&pool->total, __ATOMIC_RELAXED));
         runloom_parked_t *p = pool->sweep_cursor;
-        if (p == NULL || p->gen != pool->sweep_cursor_gen) {
+        if (p == NULL || unlinks_now != pool->sweep_cursor_gen) {
             p = pool->head;
         }
         while (p != NULL && n < RUNLOOM_SWEEP_BATCH &&
@@ -500,7 +621,11 @@ int runloom_netpoll_sweep_idle(void *hub_opaque, long long threshold_ns)
             visited++;
         }
         pool->sweep_cursor = p;                 /* NULL at end -> next resets to head */
-        pool->sweep_cursor_gen = (p != NULL) ? p->gen : 0;
+        /* Snapshot the cumulative-unlink count (NOT p->gen): the next sweep uses
+         * it to prove -- without dereferencing p -- that the cursor was not
+         * unlinked/freed in between.  The lock is held continuously across the
+         * walk, so no link/unlink ran since unlinks_now was read above; reuse it. */
+        pool->sweep_cursor_gen = unlinks_now;
     }
     RUNLOOM_RUNLOCK(&pool->lock, RUNLOOM_RANK_PARKER_POOL);
     for (i = 0; i < n; i++) {
