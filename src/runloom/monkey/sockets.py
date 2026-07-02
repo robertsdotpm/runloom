@@ -38,13 +38,14 @@ _WAIT_FD_CANCELLED = getattr(runloom_c, "WAIT_FD_CANCELLED", 0x40000000)
 _MSG_WAITALL = getattr(socket, "MSG_WAITALL", 0)
 _MSG_PEEK    = getattr(socket, "MSG_PEEK", 0)
 
-# _coop_timeout sentinels.  _NONBLOCK marks a socket the USER made non-blocking
-# (setblocking(False) / settimeout(0) before any cooperative I/O): the I/O paths
-# must raise BlockingIOError on EAGAIN rather than park cooperatively.  _MISSING
-# is the "no side-table entry" probe -- a single atomic dict lookup, race-free
-# against a concurrent close() that pops the entry.
+# _coop_timeout sentinel.  _MISSING is the "no side-table entry" probe -- a single
+# atomic dict lookup, race-free against a concurrent close() that pops the entry.
+# A monkey-patched socket ALWAYS parks cooperatively (the eventlet/gevent-hub
+# contract: the hub owns the real O_NONBLOCK fd and presents blocking semantics),
+# so a missing/None entry means "block cooperatively"; only a positive recorded
+# timeout imposes a deadline.  (A user's setblocking(False) does NOT raise EAGAIN
+# -- that attempt broke the suite's cooperative round-trips; see git history.)
 _MISSING  = object()
-_NONBLOCK = object()
 
 
 def _wait_fd_coop(fd, ev, timeout_ms=-1):
@@ -81,25 +82,19 @@ def _coop_timeout(sock):
     So: a recorded falsy timeout (None) means "no deadline, block cooperatively";
     only a POSITIVE recorded timeout imposes a real cooperative deadline.  This
     matches gevent/eventlet, where blocking sockets are the norm and the
-    cooperative layer supplies the blocking.  A caller wanting genuinely-non-
-    blocking, raise-immediately semantics IS distinguished -- see the _NONBLOCK
-    note below (it hinges on there being no side-table entry, since a socket the
-    user forced non-blocking never records one).
+    cooperative layer supplies the blocking.  A user's setblocking(False) does
+    NOT switch to raise-immediately semantics: under monkey.patch() the hub owns
+    the real O_NONBLOCK fd and presents blocking semantics to user code, so a
+    non-blocking socket still parks cooperatively (an earlier attempt to raise
+    BlockingIOError here broke the suite's cooperative round-trips).
 
     Reads the per-fd side table (populated by _make_nonblocking before
     setblocking(False) zeroed the live gettimeout()), NOT gettimeout() directly
     -- which always reads back 0.0 once the socket is forced non-blocking, so
-    the caller's settimeout() would otherwise be invisible here.
-
-    Returns the _NONBLOCK sentinel when the fd has NO side-table entry.
-    _make_nonblocking only records an entry when it first sees the socket with a
-    non-zero gettimeout() (a blocking or timed socket); a socket the user made
-    non-blocking (setblocking(False) / settimeout(0)) BEFORE any cooperative I/O
-    reads gettimeout()==0.0 on that first sighting, so nothing is recorded.  That
-    absence is the one reliable signal of explicit raise-immediately intent, so
-    the I/O paths let the BlockingIOError propagate instead of parking forever
-    (a hand-rolled non-blocking / drain-until-EWOULDBLOCK loop must not deadlock
-    under monkey.patch())."""
+    the caller's settimeout() would otherwise be invisible here.  A MISSING entry
+    (a socket already non-blocking on its first sighting -- accept4/dup/reused fd
+    -- records nothing) means "block cooperatively", exactly like a recorded
+    None."""
     try:
         fd = sock.fileno()
     except OSError:
@@ -108,7 +103,7 @@ def _coop_timeout(sock):
     # membership test and a lookup, so probe with a sentinel default instead.
     t = _SOCK_TIMEOUTS.get(fd, _MISSING)
     if t is _MISSING:
-        return _NONBLOCK
+        return None                  # never registered / already-nonblocking -> cooperative PARK
     return t if t else None
 
 
@@ -126,11 +121,6 @@ def _wait_io(sock, fd, direction):
     otherwise a cancelled datagram/msg waiter on a still-open socket re-parks
     forever."""
     t = _coop_timeout(sock)
-    if t is _NONBLOCK:
-        # User made this socket non-blocking: don't park -- surface the
-        # BlockingIOError the caller just caught (stock non-blocking semantics).
-        raise BlockingIOError(errno.EWOULDBLOCK,
-                              os.strerror(errno.EWOULDBLOCK))
     if t is None:
         _wait_fd_coop(fd, direction)
     elif _wait_fd_coop(fd, direction, max(1, int(t * 1000))) == 0:
@@ -187,11 +177,6 @@ def _patched_recv(self, bufsize, flags=0):
         return _orig_recv(self, bufsize, flags)
     _make_nonblocking(self)
     t = _coop_timeout(self)
-    if t is _NONBLOCK:
-        # User made this socket non-blocking: one attempt, let BlockingIOError
-        # propagate (and MSG_WAITALL is a kernel no-op here, as it is for stock
-        # non-blocking recv).
-        return _orig_recv(self, bufsize, flags)
     if _MSG_WAITALL and (flags & _MSG_WAITALL) and not (flags & _MSG_PEEK) and bufsize > 0:
         buf = bytearray(bufsize)
         got = _recv_waitall(self, buf, bufsize, flags & ~_MSG_WAITALL, t)
@@ -223,9 +208,6 @@ def _patched_recv_into(self, buffer, nbytes=0, flags=0):
         return _orig_recv_into(self, buffer, nbytes, flags)
     _make_nonblocking(self)
     t = _coop_timeout(self)
-    if t is _NONBLOCK:
-        # User non-blocking socket: one attempt, let BlockingIOError propagate.
-        return _orig_recv_into(self, buffer, nbytes, flags)
     if _MSG_WAITALL and (flags & _MSG_WAITALL) and not (flags & _MSG_PEEK):
         n = nbytes if nbytes else len(buffer)
         if n > 0:
@@ -254,9 +236,6 @@ def _patched_send(self, data, flags=0):
         return _orig_send(self, data, flags)
     _make_nonblocking(self)
     t = _coop_timeout(self)
-    if t is _NONBLOCK:
-        # User non-blocking socket: one attempt, let BlockingIOError propagate.
-        return _orig_send(self, data, flags)
     # The C fast path parks with an infinite deadline, so it can only be used
     # when there is no timeout; a timed socket must honor settimeout() (like
     # recv/connect) and raise socket.timeout instead of hanging on a stalled
@@ -285,10 +264,6 @@ def _patched_sendall(self, data, flags=0):
         return _orig_sendall(self, data, flags)
     _make_nonblocking(self)
     t = _coop_timeout(self)
-    if t is _NONBLOCK:
-        # User non-blocking socket: let stock non-blocking sendall raise
-        # BlockingIOError when it can't drain the buffer immediately.
-        return _orig_sendall(self, data, flags)
     # C fast path parks with an infinite deadline -- only usable with no timeout;
     # a timed socket must raise socket.timeout rather than hang forever.
     if _tcp_send_all is not None and t is None:
@@ -443,10 +418,6 @@ def _patched_connect(self, address):
         raise OSError(err, os.strerror(err))
     # In flight: wait for writability, then read the outcome via SO_ERROR.
     t = _coop_timeout(self)
-    if t is _NONBLOCK:
-        # User non-blocking connect: surface the in-progress state (BlockingIOError
-        # EINPROGRESS) rather than parking, exactly like a stock non-blocking connect.
-        raise BlockingIOError(err, os.strerror(err))
     timeout_ms = max(1, int(t * 1000)) if t is not None else None
     _connect_wait_result(self, timeout_ms)
 

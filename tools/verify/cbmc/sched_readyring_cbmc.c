@@ -66,7 +66,11 @@ static void ready_push(g_t *g)
 {
 #ifndef BUG_NO_CAPCHECK
     if (ready_tail - ready_head >= ready_cap) {
-        if (ready_grow() < 0) return;           /* OOM/bound: drop (as in src) */
+        /* src now Py_FatalError()s on grow-fail (never silently drops the g,
+         * which would orphan its pending-count -> permanent run() hang); CBMC
+         * can't model abort(), so `return` stands in -- the FIFO no-loss/no-dup
+         * proof below is about the NON-OOM paths and is unchanged either way. */
+        if (ready_grow() < 0) return;           /* OOM/bound: src Py_FatalError */
     }
 #endif
     ring[ready_tail & ready_mask] = g;

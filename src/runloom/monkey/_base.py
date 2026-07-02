@@ -208,7 +208,12 @@ def _patched_settimeout(self, value):
     if value is None:
         _SOCK_TIMEOUTS[fd] = None          # blocking -> cooperative block-forever
     elif value == 0:
-        _SOCK_TIMEOUTS.pop(fd, None)       # non-blocking -> _NONBLOCK (raise EAGAIN)
+        # non-blocking: monkey-patched sockets still park cooperatively (the
+        # eventlet/gevent-hub contract the suite enforces -- setblocking(False)
+        # presents blocking semantics, the hub owns the real O_NONBLOCK fd).  Drop
+        # any stale recorded deadline so the op blocks-forever rather than timing
+        # out on the old value; absence == cooperative block (_coop_timeout).
+        _SOCK_TIMEOUTS.pop(fd, None)
     else:
         _SOCK_TIMEOUTS[fd] = value         # timed -> cooperative deadline
 
@@ -226,7 +231,7 @@ def _patched_setblocking(self, flag):
     if flag:
         _SOCK_TIMEOUTS[fd] = None          # blocking -> cooperative block-forever
     else:
-        _SOCK_TIMEOUTS.pop(fd, None)       # non-blocking -> _NONBLOCK (raise EAGAIN)
+        _SOCK_TIMEOUTS.pop(fd, None)       # non-blocking -> cooperative block (absence, see settimeout)
 
 
 def _fd_pollable(fd):

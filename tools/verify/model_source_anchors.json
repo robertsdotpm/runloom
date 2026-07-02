@@ -20,8 +20,8 @@
   "runloom_preempt_eval_frame": "7db2c5a36cade726"
  },
  "tools/verify/cbmc/sched_pystate_cbmc.c": {
-  "runloom_pystate_load": "5ddcd54fa9ea7e4b",
-  "runloom_pystate_snap": "bac514824eb40fd1"
+  "runloom_pystate_load": "b02d39844ff4e5b2",
+  "runloom_pystate_snap": "a807bd2ee1d02a3f"
  },
  "tools/verify/cbmc/sched_qref_cbmc.c": {
   "runloom_g_try_incref": "98e9b193d7b659be",
@@ -30,12 +30,12 @@
  "tools/verify/cbmc/sched_readyring_cbmc.c": {
   "runloom_ready_grow": "f2e0e608608f6fc4",
   "runloom_sched_ready_pop": "f0b422e415a09480",
-  "runloom_sched_ready_push": "e1e637e0fd88c7b3"
+  "runloom_sched_ready_push": "cd2685fb5f4efcf6"
  },
  "tools/verify/cbmc/snap_refown_cbmc.c": {
-  "runloom_pystate_load": "5ddcd54fa9ea7e4b",
-  "runloom_pystate_snap": "bac514824eb40fd1",
-  "runloom_pystate_snap_clear": "05bf48354022a420"
+  "runloom_pystate_load": "b02d39844ff4e5b2",
+  "runloom_pystate_snap": "a807bd2ee1d02a3f",
+  "runloom_pystate_snap_clear": "aa975c1d46df5b3e"
  },
  "tools/verify/cbmc/timer_heap_cbmc.c": {
   "runloom_dh_insert": "ebdbf58964e74e4a",
