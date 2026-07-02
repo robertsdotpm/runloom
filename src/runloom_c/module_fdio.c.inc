@@ -165,11 +165,14 @@ static PyObject *m_file_read(PyObject *self, PyObject *args)
         return NULL;
     }
 #if defined(__linux__)
-    /* io_uring pread is strictly positional and never advances the fd offset, so
-     * it can only serve an explicit (offset >= 0) request.  A default offset
-     * (offset < 0) means "use + advance the current fd position" -- fall through
-     * to read(), matching the non-io_uring fallback semantics exactly. */
-    if (offset >= 0 && runloom_iouring_available()) {
+    /* io_uring READ treats off == (__u64)-1 as "use + advance the current fd
+     * position" (kernel 5.17+), exactly like read(): correct for a seekable file
+     * (advances the position -- so default-offset reads don't all restart at 0)
+     * AND for a stream (pipe/socket, offset ignored), where it ALSO parks
+     * cooperatively -- which the raw read() fallback below does NOT (it returns
+     * EAGAIN on a non-blocking fd instead of waiting).  An explicit offset >= 0
+     * is positional.  Passing our -1 sentinel through as (uint64_t)-1 does both. */
+    if (runloom_iouring_available()) {
         r = runloom_iouring_pread(fd, buf.buf, (size_t)n_bytes, (off_t)offset);
         if (r < 0) {
             PyBuffer_Release(&buf);
@@ -207,11 +210,12 @@ static PyObject *m_file_write(PyObject *self, PyObject *args)
 
     if (!PyArg_ParseTuple(args, "iy*|L", &fd, &buf, &offset)) return NULL;
 #if defined(__linux__)
-    /* io_uring pwrite is strictly positional and never advances the fd offset, so
-     * it can only serve an explicit (offset >= 0) request.  A default offset
-     * (offset < 0) means "use + advance the current fd position" -- fall through
-     * to write(), matching the non-io_uring fallback semantics exactly. */
-    if (offset >= 0 && runloom_iouring_available()) {
+    /* io_uring WRITE treats off == (__u64)-1 as "use + advance the current fd
+     * position" (kernel 5.17+), exactly like write(): correct for a seekable file
+     * AND for a stream (pipe/socket), where it also parks cooperatively rather
+     * than returning EAGAIN like the raw write() fallback.  Explicit offset >= 0
+     * is positional.  Passing our -1 sentinel through as (uint64_t)-1 does both. */
+    if (runloom_iouring_available()) {
         r = runloom_iouring_pwrite(fd, buf.buf, (size_t)buf.len, (off_t)offset);
         if (r < 0) {
             PyBuffer_Release(&buf);
