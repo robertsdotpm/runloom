@@ -255,6 +255,16 @@ void runloom_sched_freeze_for_crash(void);
 extern int runloom_mn_seg_track;
 void runloom_mn_seg_touch(unsigned long long obj_id);
 
+/* Controlled-mode stream for select's uniform-pseudo-random case order.
+ * Returns the next draw from a stream seeded off RUNLOOM_MN_SEED, or 0 when
+ * the controlled scheduler is off (the caller then uses its own per-thread
+ * ASLR-seeded stream -- fine in production, nondeterministic by construction
+ * under a replay seed).  Cross-TU: consumed by chan_select_helpers.c.inc
+ * (chan.c), lives with the baton controller (mn_sched.c).  Only ever drawn
+ * inside baton-held segments, so the stream needs no locking and its draw
+ * order is the deterministic segment order. */
+uint64_t runloom_mn_ctrl_select_rand(void);
+
 /* LDFI -- lineage-driven fault injection (tools/mn_controlled/chess_ldfi.py): DROP
  * the runloom_ldfi_drop-th chan wake (RUNLOOM_LDFI_DROP) to test whether that wake
  * is load-bearing (dropping it strands a fiber -> hang) or redundant (a backup

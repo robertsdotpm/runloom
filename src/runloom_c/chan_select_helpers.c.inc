@@ -13,7 +13,18 @@ static RUNLOOM_TLS uint64_t runloom_select_rng = 0;
 
 static uint64_t runloom_select_rand(void)
 {
-    uint64_t x = runloom_select_rng;
+    uint64_t x;
+    /* Controlled replay (RUNLOOM_MN_SEED): draw from the baton controller's
+     * seeded select stream instead (runloom_mn_ctrl_select_rand, mn_sched.h).
+     * The per-thread lazy seed below is an ASLR-dependent TLS ADDRESS --
+     * different every run BY CONSTRUCTION -- which made select case order
+     * the one un-seeded decision left under the controlled scheduler and
+     * broke the repro_select replay gate the day the Go-spec random order
+     * landed (f800cf1a: 8/8 -> 1/8 seeds stable).  0 means "controlled mode
+     * off" (a live seeded stream never yields 0). */
+    x = runloom_mn_ctrl_select_rand();
+    if (x != 0) return x;
+    x = runloom_select_rng;
     if (x == 0) {                        /* lazy per-thread seed */
         /* &runloom_select_rng is a per-thread address (distinct TLS blocks),
          * so distinct threads diverge; a splitmix64 finalizer diffuses the

@@ -131,6 +131,8 @@ typedef struct {
     int          pct_depth;       /* d */
     uint64_t     pct_k;           /* step bound change points are drawn from */
     uint64_t     pct_rng;         /* distinct stream: priorities + change points */
+    uint64_t     select_rng;      /* distinct stream: select case-order draws
+                                   * (runloom_mn_ctrl_select_rand) */
     uint64_t     pct_step;        /* completed segments (= PCT steps) so far */
     int         *pct_prio;        /* per-hub current priority (higher = first) */
     int          pct_ncp;         /* number of change points (= d-1) */
@@ -175,6 +177,28 @@ static uint64_t runloom_mn_ctrl_rand(void)      /* xorshift64 */
     uint64_t x = runloom_mn_ctrl.rng;
     x ^= x << 13; x ^= x >> 7; x ^= x << 17;
     runloom_mn_ctrl.rng = x;
+    return x;
+}
+
+/* Seeded, serialized stream for select's uniform-pseudo-random case order
+ * (declared in mn_sched.h; consumed by chan_select_helpers.c.inc).  Returns 0
+ * when the controlled scheduler is off -- the caller then uses its own
+ * per-thread ASLR-seeded stream (the production path).  Under RUNLOOM_MN_SEED
+ * the address-based per-thread seed is nondeterministic BY CONSTRUCTION
+ * (distinct TLS block addresses every run), which broke the repro_select
+ * replay gate the day the Go-spec random select order landed (f800cf1a:
+ * 8/8 -> 1/8 seeds stable).  This stream is drawn only from inside baton-held
+ * execution segments (all chan/select ops run there under ctrl mode), so the
+ * unsynchronized read-modify-write is serialized by the baton itself, and the
+ * draw ORDER is exactly the (deterministic) segment order.  xorshift64 on a
+ * nonzero seed never yields 0, so 0 is unambiguous as the "off" sentinel. */
+uint64_t runloom_mn_ctrl_select_rand(void)
+{
+    uint64_t x;
+    if (!runloom_mn_ctrl.enabled) return 0;
+    x = runloom_mn_ctrl.select_rng;
+    x ^= x << 13; x ^= x >> 7; x ^= x << 17;
+    runloom_mn_ctrl.select_rng = x;
     return x;
 }
 
@@ -461,6 +485,19 @@ static void runloom_mn_ctrl_init(int n)
     }
     runloom_mn_ctrl.rng = strtoull(seed, NULL, 10);
     if (runloom_mn_ctrl.rng == 0) runloom_mn_ctrl.rng = 0x9E3779B97F4A7C15ULL;
+    /* Dedicated stream for select's random case order
+     * (runloom_mn_ctrl_select_rand above) -- a SEPARATE stream, like pct_rng,
+     * so seeding it perturbs no existing draw sequence and every
+     * pre-existing seed stays bit-identical.  splitmix64-finalized so nearby
+     * integer seeds diverge; never 0 (xorshift fixpoint / the "off" sentinel). */
+    {
+        uint64_t s = runloom_mn_ctrl.rng ^ 0xD1B54A32D192ED03ULL;
+        s = (s ^ (s >> 30)) * 0xBF58476D1CE4E5B9ULL;
+        s = (s ^ (s >> 27)) * 0x94D049BB133111EBULL;
+        s ^= s >> 31;
+        if (s == 0) s = 0x9E3779B97F4A7C15ULL;
+        runloom_mn_ctrl.select_rng = s;
+    }
     /* CHESS explorer drive: RUNLOOM_MN_SCHEDULE = comma-separated chosen-indices
      * (""=engage with a 0-length prefix -> pure default policy), RUNLOOM_MN_FANOUT
      * = path to log each grant's fan-out.  Both inert unless set. */
