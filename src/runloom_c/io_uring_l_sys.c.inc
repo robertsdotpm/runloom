@@ -119,6 +119,12 @@ typedef struct runloom_iouring_op {
                               * submitted to, or NULL for the global ring; lets
                               * runloom_iouring_cancel_g submit the ASYNC_CANCEL
                               * to the SAME ring the op lives in. */
+    int       cancel_dup_fd; /* CANCEL only: an fd this cancel-by-fd op OWNS (a
+                              * dup made by TCPConn.close for the per-hub cancel
+                              * broadcast), close()d when the cancel's CQE drains;
+                              * -1 when the cancel carries no fd.  MUST be set at
+                              * EVERY OP_CANCEL alloc site (calloc's 0 is a live
+                              * fd -- stdin). */
 } runloom_iouring_op_t;
 
 /* Forward-declare for the drain handler. */

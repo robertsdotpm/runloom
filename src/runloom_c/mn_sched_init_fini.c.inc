@@ -124,6 +124,9 @@ int runloom_mn_init(int n_threads)
         runloom_mutex_init(&h->idle_lock);
         runloom_cond_init(&h->idle_cond);
         h->idle_waiting = 0;
+        /* Cancel-by-fd mailbox (R7 item 1). */
+        runloom_mutex_init(&h->cancel_fd_lock);
+        h->cancel_fd_head = NULL;
         /* io_uring-as-loop: the wake eventfd is created by the hub thread in
          * runloom_hub_main only when the loop backend is on; -1 = absent. */
         h->loop_wake_fd = -1;
@@ -192,6 +195,22 @@ int runloom_mn_init(int n_threads)
                 runloom_mutex_destroy(&runloom_hubs[j].sub_lock);
                 runloom_mutex_destroy(&runloom_hubs[j].idle_lock);
                 runloom_cond_destroy(&runloom_hubs[j].idle_cond);
+                /* Drain any cancel-by-fd nodes a concurrent foreign close()
+                 * deposited on this spawned hub before destroying its lock --
+                 * mirror mn_fini's per-hub cleanup so this failure path upholds
+                 * the same "every mailbox node is drained + its dup closed"
+                 * invariant (the hub joined above, so no concurrent depositor). */
+                {
+                    runloom_cancel_fd_node_t *cn = runloom_hubs[j].cancel_fd_head;
+                    runloom_hubs[j].cancel_fd_head = NULL;
+                    while (cn != NULL) {
+                        runloom_cancel_fd_node_t *nx = cn->next;
+                        if (cn->dup_fd >= 0) close(cn->dup_fd);
+                        free(cn);
+                        cn = nx;
+                    }
+                }
+                runloom_mutex_destroy(&runloom_hubs[j].cancel_fd_lock);
             }
             PyMem_Free(runloom_hubs);
             runloom_hubs = NULL;
@@ -376,9 +395,26 @@ void runloom_mn_fini(void)
             PyThreadState_Clear(hts);
             PyThreadState_Delete(hts);
         }
+        /* Drain any cancel-by-fd nodes never claimed by the (now stopped) hub;
+         * close their dup'd fds so they don't leak.  Runs after the hub joined,
+         * so no concurrent depositor -- but hold the lock for TSan cleanliness. */
+        {
+            runloom_cancel_fd_node_t *cn;
+            runloom_mutex_lock(&runloom_hubs[i].cancel_fd_lock);
+            cn = runloom_hubs[i].cancel_fd_head;
+            runloom_hubs[i].cancel_fd_head = NULL;
+            runloom_mutex_unlock(&runloom_hubs[i].cancel_fd_lock);
+            while (cn != NULL) {
+                runloom_cancel_fd_node_t *nx = cn->next;
+                if (cn->dup_fd >= 0) close(cn->dup_fd);
+                free(cn);
+                cn = nx;
+            }
+        }
         runloom_mutex_destroy(&runloom_hubs[i].sub_lock);
         runloom_mutex_destroy(&runloom_hubs[i].idle_lock);
         runloom_cond_destroy(&runloom_hubs[i].idle_cond);
+        runloom_mutex_destroy(&runloom_hubs[i].cancel_fd_lock);
         /* Release the g-refs held by this hub's still-pending timer entries
          * (future-deadline timed parks that never fired) so they don't leak,
          * then free the timer-heap buffer (otherwise leaked -- it was never

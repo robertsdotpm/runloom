@@ -39,6 +39,7 @@ void runloom_iouring_ms_close(runloom_iouring_ms_t *h)
         return;
     }
     cancel_op->type = RUNLOOM_IOURING_OP_CANCEL;
+    cancel_op->cancel_dup_fd = -1;      /* carries no fd (calloc's 0 = stdin) */
     memset(&sqe, 0, sizeof(sqe));
     sqe.opcode = IORING_OP_ASYNC_CANCEL;
     sqe.addr   = (uintptr_t)&h->op;     /* match SQE by its user_data */

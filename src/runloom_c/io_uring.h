@@ -66,6 +66,15 @@ int runloom_iouring_cancel_g(struct runloom_g *g);
  * where io_uring is unavailable or IORING_ASYNC_CANCEL_FD is unsupported. */
 void runloom_iouring_cancel_fd(int fd);
 
+/* M:N counterpart of runloom_iouring_cancel_fd: cancel in-flight ops on `fd`
+ * across EVERY per-hub SINGLE_ISSUER ring.  A single-shot recv routed to a hub
+ * ring can only be cancelled by that ring's owning thread, so this dup()s `fd`
+ * (keeping the struct file alive past close) and deposits the dup on each hub's
+ * cancel-by-fd mailbox for the hub to submit.  Defined in the mn TU.  TCPConn.
+ * close() calls this after runloom_iouring_cancel_fd.  No-op where io_uring or
+ * IORING_ASYNC_CANCEL_FD is unavailable. */
+void runloom_iouring_cancel_fd_all_hubs(int fd);
+
 /* Submit an ASYNC_CANCEL for a hub-ring op (a runloom_iouring_op_t*, void* here)
  * on ITS ring.  Called by the op's OWNING hub -- the ring's single issuer --
  * after it drains its cancel mailbox (runloom_mn_hub_request_iouring_cancel). */
@@ -210,6 +219,12 @@ runloom_iouring_ssize_t runloom_iouring_ring_recv(runloom_iouring_ring_t *r,
 runloom_iouring_ssize_t runloom_iouring_ring_send(runloom_iouring_ring_t *r,
                                             int fd, const void *buf,
                                             size_t n, int flags);
+
+/* Submit an ASYNC_CANCEL_FD|ALL for `dup_fd` on hub ring `r`.  Called by r's
+ * owning hub (single issuer) draining its cancel-by-fd mailbox.  On success the
+ * returned op OWNS dup_fd (the ring drain closes it when the cancel CQE lands);
+ * returns 0.  On failure returns -1 and the caller still owns (must close) it. */
+int runloom_iouring_ring_submit_cancel_fd(runloom_iouring_ring_t *r, int dup_fd);
 
 /* ============================================================
  * io_uring-as-loop backend (RUNLOOM_IOURING_LOOP=1, default off).

@@ -173,19 +173,20 @@ static PyObject *RunloomTCPConn_close(RunloomTCPConn *self, PyObject *unused)
      * closesock so the cancel matches the still-open fd.  netpoll_cancel_fd below
      * only reaches netpoll parkers, not io_uring ones.
      *
-     * SCOPE (2026-07-05, verified): this cancels ops on the GLOBAL ring -- the
-     * single-thread-scheduler path (runloom_iouring_recv routes to the global
-     * ring when NOT inside an M:N hub).  A recv parked on a per-hub ring
-     * (M:N + RUNLOOM_TCPCONN_IOURING, where runloom_iouring_recv routes to
-     * runloom_mn_current_iouring_ring()) is NOT reached: the hub ring is
-     * single-issuer, so cancelling it needs a cancel-by-fd deposited in the
-     * owning hub's cancel mailbox -- and that mailbox is today a single-slot
-     * best-effort by-OP slot, so a reliable cancel-by-fd broadcast is a
-     * follow-up (see docs/dev/RELIABILITY_PROGRAM.md R7 item 1).  The global
-     * cancel is a harmless no-op when the op is on a hub ring, so this is safe
-     * in both modes -- it just does not yet unblock the M:N hub-ring case. */
+     * TWO reaches (R7 item 1, 2026-07-05):
+     *   - GLOBAL ring (single-thread scheduler path): runloom_iouring_cancel_fd
+     *     submits the cancel synchronously on the global ring here.
+     *   - PER-HUB rings (M:N + RUNLOOM_TCPCONN_IOURING): each hub ring is single-
+     *     issuer, so ITS owner must submit the cancel.  cancel_fd_all_hubs dup()s
+     *     fd (keeping the struct file alive past the close() below) and deposits
+     *     the dup on every hub's cancel-by-fd mailbox; each hub submits an
+     *     ASYNC_CANCEL_FD on its dup at loop top, matching the recv by file
+     *     identity even after the original fd closes.  MUST run before closesock
+     *     so the dup captures a still-open fd.  Both are harmless no-ops when the
+     *     op is elsewhere, so running both in either mode is safe. */
     if (use_iou) {
         runloom_iouring_cancel_fd(fd);
+        runloom_iouring_cancel_fd_all_hubs(fd);
     }
 #endif
     /* Wake any fiber parked in accept()/recv()/send() on this fd so it sees the
@@ -308,10 +309,18 @@ static PyObject *RunloomTCPConn_recv(RunloomTCPConn *self, PyObject *args)
             }
             return result;
         }
-        RUNLOOM_TCPCONN_UNLOCK();
         /* Single-shot IORING_OP_RECV fallback (non-zero flags, or the provided-
-         * buffer ring / ms_open is unavailable). */
+         * buffer ring / ms_open is unavailable).  Hold the conn critical section
+         * ACROSS the submit+park -- exactly like the multishot ms_recv path above
+         * -- so a concurrent close() on another hub cannot deposit its cancel-by-
+         * fd AND have the owning hub drain+submit it BEFORE this recv's SQE is in
+         * flight (which would strand this fiber on a dead fd forever).  close()
+         * can't flip closed/fd until it acquires this section, and the scheduler
+         * suspends the section only once the op has parked (SQE already
+         * submitted), so the cancel necessarily lands on an in-flight op.  A
+         * cancel maps the op to -ECANCELED, surfaced by the r < 0 branch below. */
         r = runloom_iouring_recv(fd, out, (size_t)n_bytes, flags);
+        RUNLOOM_TCPCONN_UNLOCK();
         if (r < 0) {
             Py_DECREF(result);
             return PyErr_SetFromErrno(PyExc_OSError);
@@ -471,10 +480,14 @@ static PyObject *RunloomTCPConn_recv_into(RunloomTCPConn *self, PyObject *args)
             PyBuffer_Release(&buf);
             return PyLong_FromSsize_t((Py_ssize_t)r);
         }
-        RUNLOOM_TCPCONN_UNLOCK();
-        /* Single-shot IORING_OP_RECV fallback (kernel < 5.19, or
-         * non-zero flags). */
+        /* Single-shot IORING_OP_RECV fallback (kernel < 5.19, or non-zero flags).
+         * Hold the conn critical section ACROSS submit+park -- same rationale as
+         * RunloomTCPConn_recv's single-shot path -- so a concurrent close() on
+         * another hub cannot deposit+drain a cancel-by-fd (or closesock + reuse
+         * the fd number) BEFORE this recv's SQE is in flight, which would strand
+         * this fiber on a dead/reused fd instead of it being cancelled. */
         r = runloom_iouring_recv(fd, buf.buf, (size_t)n_bytes, flags);
+        RUNLOOM_TCPCONN_UNLOCK();
         PyBuffer_Release(&buf);
         if (r < 0) return PyErr_SetFromErrno(PyExc_OSError);
         return PyLong_FromSsize_t((Py_ssize_t)r);

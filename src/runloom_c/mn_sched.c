@@ -55,6 +55,14 @@
 #include "runloom_sched.h"
 #include "netpoll.h"
 #include "io_uring.h"
+#if defined(__linux__)
+/* UAPI header for IORING_ASYNC_CANCEL_FD/ALL: the cancel-by-fd broadcast
+ * (runloom_iouring_cancel_fd_all_hubs, mn_sched_mn_api.c.inc) gates on that
+ * macro, and the project io_uring.h does NOT pull it in -- without this the
+ * broadcast silently compiles to its no-op #else stub and a hub-ring single-
+ * shot recv can never be cancelled by close(). */
+#  include <linux/io_uring.h>
+#endif
 #include "coro.h"
 #include "cldeque.h"
 #include "runloom_diag.h"
@@ -138,6 +146,16 @@ RUNLOOM_FSM_ASSERT_TABLE(runloom_ws_table, RUNLOOM_WS_STATE_COUNT,
  * within each hub -- the cross-hub submission mailbox (producers write it on
  * every cross-hub submit) and the sysmon/cancel signals -- off the
  * owner-private deque/sched line. */
+/* Per-hub cancel-by-fd mailbox node (R7 item 1 / DESIGN_mn_iouring_cancel_fd.md).
+ * TCPConn.close() deposits a dup'd fd here for each live hub; the owning hub
+ * (the ring's single issuer) drains it at its loop top and submits an
+ * ASYNC_CANCEL_FD on its own ring.  dup_fd is closed after the cancel CQE drains
+ * (carried on the cancel op's cancel_dup_fd). */
+typedef struct runloom_cancel_fd_node {
+    int dup_fd;
+    struct runloom_cancel_fd_node *next;
+} runloom_cancel_fd_node_t;
+
 typedef struct runloom_hub {
     alignas(RUNLOOM_CACHELINE) int id;
     runloom_thread_t thread;
@@ -246,6 +264,14 @@ typedef struct runloom_hub {
      * cancel for the same hub is dropped (best-effort -- that fiber still
      * unblocks when its op completes).  See runloom_iouring_cancel_g. */
     void                *iouring_cancel_op;
+    /* Cross-thread cancel-by-fd mailbox (R7 item 1).  A foreign TCPConn.close()
+     * pushes dup'd fds here (one per live hub) under cancel_fd_lock; THIS hub
+     * drains them at its loop top and submits an ASYNC_CANCEL_FD on its own ring
+     * (SINGLE_ISSUER).  A proper MPSC list (not a single slot like
+     * iouring_cancel_op) so concurrent closes never drop a cancel.  See
+     * runloom_iouring_cancel_fd_all_hubs / DESIGN_mn_iouring_cancel_fd.md. */
+    runloom_mutex_t           cancel_fd_lock;
+    runloom_cancel_fd_node_t *cancel_fd_head;
     /* WAKEP (work-stealing wake registry).  1 while THIS hub is registered as a
      * DEEP idle sleeper that a producer may kick to come steal.  Set in
      * runloom_mn_park_enter just before a deep idle wait; cleared (CAS 1->0) by

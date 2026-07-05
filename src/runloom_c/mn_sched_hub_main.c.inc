@@ -456,6 +456,30 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
                 if (cop != 0) runloom_iouring_submit_cancel_for_op((void *)cop);
             }
         }
+        /* Drain the cancel-by-fd mailbox (R7 item 1): TCPConn.close() deposited
+         * dup'd fds targeting THIS hub's ring; submit an ASYNC_CANCEL_FD for each
+         * here, where we are the ring's SINGLE issuer.  Cheap relaxed peek first
+         * (empty almost every turn); the dup's ownership passes to the cancel op
+         * (closed when its CQE drains) on successful submit, else closed here. */
+        if (__atomic_load_n((intptr_t *)&h->cancel_fd_head, __ATOMIC_RELAXED) != 0
+                && h->iouring_ring != NULL) {
+            runloom_cancel_fd_node_t *cn;
+            runloom_mutex_lock(&h->cancel_fd_lock);
+            cn = h->cancel_fd_head;
+            /* RELAXED-atomic clear: pairs with the lock-free peek above (and the
+             * cross-thread deposit's atomic store), same as sub_head's clear. */
+            __atomic_store_n(&h->cancel_fd_head, (runloom_cancel_fd_node_t *)NULL,
+                             __ATOMIC_RELAXED);
+            runloom_mutex_unlock(&h->cancel_fd_lock);
+            while (cn != NULL) {
+                runloom_cancel_fd_node_t *nx = cn->next;
+                if (runloom_iouring_ring_submit_cancel_fd(h->iouring_ring,
+                                                          cn->dup_fd) != 0)
+                    close(cn->dup_fd);   /* submit failed -> we still own the dup */
+                free(cn);
+                cn = nx;
+            }
+        }
         /* Set when g came from the global run-queue: it then carries a queue
          * ref this iteration must release, and its resume must claim it with the
          * QUEUED->RUNNING CAS.  Gs from the local FIFO / own deque / a neighbour
@@ -1564,6 +1588,24 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
      * still had inflight ops we'd leak the underlying CQEs (kernel
      * frees them on close). */
     if (h->iouring_ring != NULL) {
+        /* Final reap before teardown: a fire-and-forget cancel-by-fd op (R7 item
+         * 1) OWNS a dup'd fd (cancel_dup_fd) that is closed only when its CQE is
+         * reaped in ring_drain's OP_CANCEL branch.  A non-owning hub's cancel
+         * completes -ENOENT and, if this hub exits its loop (stopping set) before
+         * next idling, that CQE can still be pending -> the dup (a live process
+         * fd) and the op record would leak on ring_destroy, accruing across
+         * mn_init/mn_fini cycles toward EMFILE.  We are the ring's sole issuer +
+         * drainer and all hubs are stopping, so drain to quiescence here:
+         * GETEVENTS (flush DEFER_TASKRUN task work) then drain, bounded so a
+         * (never-observed) stuck completion can't spin us forever. */
+        {
+            int reap;
+            for (reap = 0; reap < 64 &&
+                           runloom_iouring_ring_inflight(h->iouring_ring) > 0; reap++) {
+                runloom_iouring_ring_get_events(h->iouring_ring);
+                runloom_iouring_ring_drain(h->iouring_ring);
+            }
+        }
         if (h->loop_wake_fd >= 0) {
             /* Loop backend: no eventfd was registered in the epoll pump; just
              * close the wake eventfd (the multishot polls die with the ring). */

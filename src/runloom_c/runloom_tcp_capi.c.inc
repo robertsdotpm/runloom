@@ -41,6 +41,13 @@ Py_ssize_t runloom_tcpconn_c_recv_into(PyObject *conn, void *buf, Py_ssize_t n)
                 return (r < 0) ? -1 : (Py_ssize_t)r;
             }
         }
+        /* NOTE (R7 item 1): unlike RunloomTCPConn_recv/_recv_into, this allocation-
+         * free C-API path deliberately takes NO conn critical section, so it does
+         * not hold one across this submit -- a concurrent close() can therefore
+         * race this single-shot recv (fd-reuse / cancel-misses-the-in-flight-SQE),
+         * the pre-existing gap the section-across-submit fix closes only for the
+         * PyObject-level recv paths.  Retrofitting locking here would regress the
+         * lock-free hot loop this entry point exists for; left as a separate item. */
         r = runloom_iouring_recv(fd, buf, (size_t)n, 0);
         return (r < 0) ? -1 : (Py_ssize_t)r;
     }

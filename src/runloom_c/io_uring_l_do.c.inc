@@ -80,6 +80,7 @@ static void runloom_iou_submit_cancel_global(runloom_iouring_op_t *target)
     cancel_op = (runloom_iouring_op_t *)calloc(1, sizeof(*cancel_op));
     if (cancel_op == NULL) return;
     cancel_op->type = RUNLOOM_IOURING_OP_CANCEL;
+    cancel_op->cancel_dup_fd = -1;   /* carries no fd (calloc's 0 = stdin) */
     memset(&sqe, 0, sizeof(sqe));
     sqe.opcode = IORING_OP_ASYNC_CANCEL;
     sqe.addr   = (uint64_t)(uintptr_t)target;   /* match original SQE by user_data */
@@ -103,6 +104,7 @@ void runloom_iouring_cancel_fd(int fd)
     cancel_op = (runloom_iouring_op_t *)calloc(1, sizeof(*cancel_op));
     if (cancel_op == NULL) return;
     cancel_op->type = RUNLOOM_IOURING_OP_CANCEL;
+    cancel_op->cancel_dup_fd = -1;   /* carries no fd (calloc's 0 = stdin) */
     memset(&sqe, 0, sizeof(sqe));
     sqe.opcode = IORING_OP_ASYNC_CANCEL;
     sqe.fd     = fd;

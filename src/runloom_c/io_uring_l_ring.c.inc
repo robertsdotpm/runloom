@@ -254,10 +254,14 @@ void runloom_iouring_ring_drain(runloom_iouring_ring_t *r)
             continue;
         }
         if (op != NULL && op->type == RUNLOOM_IOURING_OP_CANCEL) {
-            /* ASYNC_CANCEL completion from runloom_iouring_cancel_g (a hub-ring
-             * op was cancelled).  Fire-and-forget: reclaim the record; the
-             * cancelled SINGLE op gets its own -ECANCELED CQE which wakes the
-             * fiber via the branch below. */
+            /* ASYNC_CANCEL completion (from runloom_iouring_cancel_g OR the
+             * per-hub cancel-by-fd broadcast, runloom_tcpconn close).  Fire-and-
+             * forget: reclaim the record; the cancelled SINGLE op gets its own
+             * -ECANCELED CQE which wakes the fiber via the branch below.  If this
+             * cancel OWNS a dup'd fd (the cancel-by-fd broadcast), close it now:
+             * the cancel already matched at issue time, so the file identity is
+             * no longer needed.  cancel_dup_fd is -1 for the by-user_data cancels. */
+            if (op->cancel_dup_fd >= 0) close(op->cancel_dup_fd);
             free(op);
         } else if (op != NULL) {
             /* Hub rings only carry SINGLE ops -- multishot stays on the
@@ -390,6 +394,38 @@ runloom_iouring_ssize_t runloom_iouring_ring_send(runloom_iouring_ring_t *r,
     return runloom_iouring_ring_do(r, sqe);
 }
 
+/* Submit an ASYNC_CANCEL_FD|ALL on hub ring `r` for `dup_fd`, cancelling every
+ * in-flight op whose struct file == dup_fd's (kernel matches by req->file, so a
+ * dup of the original recv fd hits that recv even after the original is closed).
+ * Runs ON r's owning hub -- the single issuer -- from its cancel-by-fd drain.
+ * The cancel op OWNS dup_fd via cancel_dup_fd; the ring drain's OP_CANCEL branch
+ * closes it when the cancel CQE lands.  Returns 0 if submitted (ownership passed
+ * to the op), -1 on OOM/submit failure (the caller still owns dup_fd). */
+int runloom_iouring_ring_submit_cancel_fd(runloom_iouring_ring_t *r, int dup_fd)
+{
+#if defined(IORING_ASYNC_CANCEL_FD)
+    runloom_iouring_op_t *cancel_op;
+    struct io_uring_sqe sqe;
+    if (r == NULL || dup_fd < 0) return -1;
+    cancel_op = (runloom_iouring_op_t *)calloc(1, sizeof(*cancel_op));
+    if (cancel_op == NULL) return -1;
+    cancel_op->type = RUNLOOM_IOURING_OP_CANCEL;
+    cancel_op->cancel_dup_fd = dup_fd;   /* ring drain closes it on the cancel CQE */
+    memset(&sqe, 0, sizeof(sqe));
+    sqe.opcode = IORING_OP_ASYNC_CANCEL;
+    sqe.fd     = dup_fd;
+    sqe.cancel_flags = IORING_ASYNC_CANCEL_FD | IORING_ASYNC_CANCEL_ALL;
+    if (runloom_iouring_ring_submit_sqe(r, sqe, cancel_op) != 0) {
+        free(cancel_op);
+        return -1;
+    }
+    return 0;
+#else
+    (void)r; (void)dup_fd;
+    return -1;
+#endif
+}
+
 
 /* Cancel a fiber parked on a single io_uring op (M:N hub path): submit an
  * IORING_OP_ASYNC_CANCEL to the op's OWN ring (global or per-hub) targeting its
@@ -423,6 +459,7 @@ int runloom_iouring_cancel_g(runloom_g_t *g)
     cancel_op = (runloom_iouring_op_t *)calloc(1, sizeof(*cancel_op));
     if (cancel_op == NULL) return 0;
     cancel_op->type = RUNLOOM_IOURING_OP_CANCEL;
+    cancel_op->cancel_dup_fd = -1;   /* carries no fd (calloc's 0 = stdin) */
     memset(&sqe, 0, sizeof(sqe));
     sqe.opcode = IORING_OP_ASYNC_CANCEL;
     sqe.addr   = (uint64_t)(uintptr_t)op;   /* match the original SQE by user_data */
@@ -448,6 +485,7 @@ void runloom_iouring_submit_cancel_for_op(void *opv)
     cancel_op = (runloom_iouring_op_t *)calloc(1, sizeof(*cancel_op));
     if (cancel_op == NULL) return;
     cancel_op->type = RUNLOOM_IOURING_OP_CANCEL;
+    cancel_op->cancel_dup_fd = -1;   /* carries no fd (calloc's 0 = stdin) */
     memset(&sqe, 0, sizeof(sqe));
     sqe.opcode = IORING_OP_ASYNC_CANCEL;
     sqe.addr   = (uint64_t)(uintptr_t)op;   /* match the original SQE by user_data */
