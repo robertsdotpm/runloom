@@ -45,3 +45,7 @@ docs/dev/soak/inbox_artifacts/
 docs/dev/soak/canary_*/canary.csv
 docs/dev/soak/canary_*/*.log
 docs/dev/soak/canary_*/*crash*.txt
+# nightly coverage artifacts: heat-map HTML + raw logs are per-night bulk;
+# the ledger + dated run.log summaries are the committed record
+docs/dev/soak/coverage/*/html/
+docs/dev/soak/coverage/*/workloads.log

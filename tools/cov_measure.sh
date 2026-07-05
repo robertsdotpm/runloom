@@ -41,6 +41,11 @@ echo "[cov] gcno/gcda dir: $GCNODIR"
 # a quiet corpus misses.
 HEAVY='test_soak.py'
 mapfile -t FILES < <(ls tests/test_*.py | sed 's#tests/##' | grep -vE "^($HEAVY)\$")
+# RUNLOOM_COV_SMOKE=1: plumbing check (coverage_night.sh --smoke) -- a few fast
+# files + tiny fuzz/sweep slices; the same pipeline end to end in ~a minute.
+if [ "${RUNLOOM_COV_SMOKE:-0}" = "1" ]; then
+    FILES=(test_chan.py test_time.py test_tcpconn.py)
+fi
 echo "[cov] driving ${#FILES[@]} test files via run_isolated -j1 (serial) ..."
 PYTHON_GIL=0 PYTHONPATH=src RUNLOOM_TEST_TIMEOUT="${RUNLOOM_TEST_TIMEOUT:-600}" \
     "$PYTHON" tests/run_isolated.py -j1 "${FILES[@]}" "$@" \
@@ -49,10 +54,34 @@ echo "[cov]   run_isolated rc=$? (full log: $COVOUT/workloads.log)"
 
 # The M:N fuzzer drives contended scheduler/netpoll paths the deterministic
 # tests under-count (idle-hub wakeup, wake-CAS retry, handoff adopt).
-echo "[cov] driving mn_stress fuzzer (--iters 200 --stable) ..."
-PYTHON_GIL=0 PYTHONPATH=src "$PYTHON" tools/mn_stress.py --iters 200 --stable \
+MN_ITERS=200; LF_SEEDS=25
+[ "${RUNLOOM_COV_SMOKE:-0}" = "1" ] && { MN_ITERS=20; LF_SEEDS=3; }
+echo "[cov] driving mn_stress fuzzer (--iters $MN_ITERS --stable) ..."
+PYTHON_GIL=0 PYTHONPATH=src "$PYTHON" tools/mn_stress.py --iters "$MN_ITERS" --stable \
     >> "$COVOUT/workloads.log" 2>&1
 echo "[cov]   mn_stress rc=$?"
+
+# lifefuzz slice: generative lifecycle programs reach chan/select/timer/nested-
+# spawn combinations the fixed suite doesn't enumerate.
+echo "[cov] driving lifefuzz ($LF_SEEDS seeds) ..."
+lf_fail=0
+for i in $(seq 1 "$LF_SEEDS"); do
+    seed=$(( (i * 2654435761) % 2000000000 ))
+    PYTHON_GIL=0 PYTHONPATH=src "$PYTHON" tools/lifefuzz/lifefuzz.py run "$seed" \
+        --timeout 20 >> "$COVOUT/workloads.log" 2>&1 || lf_fail=$((lf_fail+1))
+done
+echo "[cov]   lifefuzz: $LF_SEEDS seeds, $lf_fail failures"
+
+# Counted-exhaustive fault sweep: executes the ERROR/cleanup paths -- exactly
+# the "dark corners" this report exists to expose -- so they count as covered
+# only when genuinely driven.
+SWEEP_SITES=""
+[ "${RUNLOOM_COV_SMOKE:-0}" = "1" ] && SWEEP_SITES="FD_READ FD_WRITE"
+echo "[cov] driving counted fault sweep ${SWEEP_SITES:-(all Linux sites)} ..."
+# shellcheck disable=SC2086
+PYTHON_GIL=0 "$PYTHON" tools/fault_sweep_counted.py $SWEEP_SITES \
+    >> "$COVOUT/workloads.log" 2>&1
+echo "[cov]   fault sweep rc=$?"
 
 # NB: a global RUNLOOM_TCPCONN_IOURING=1 / RUNLOOM_IOURING_LOOP=1 re-drive was
 # tried to light up the io_uring eventfd/ring/pump lines, but forcing io_uring
@@ -68,6 +97,28 @@ echo "[cov] collecting gcov (from repo root so .c.inc fragment paths resolve) ..
   done
   mv -f ./*.gcov "$COVOUT/" 2>/dev/null )
 echo "[cov]   $(ls "$COVOUT"/*.gcov 2>/dev/null | wc -l) .gcov fragments emitted"
+
+# lcov HTML heat map (line-by-line red/green over the C source).  Optional:
+# skipped quietly when lcov/genhtml are absent; the gcov text + subsystem
+# summary below remain the canonical numbers either way.
+if command -v lcov >/dev/null 2>&1 && command -v genhtml >/dev/null 2>&1; then
+    echo "[cov] rendering lcov HTML heat map ..."
+    lcov --quiet --capture --directory "$GCNODIR" --base-directory "$ROOT" \
+         --output-file "$COVOUT/cov.info" \
+         --rc branch_coverage=1 --ignore-errors mismatch,negative,unused,empty,source \
+         > "$COVOUT/lcov.log" 2>&1 \
+      && lcov --quiet --extract "$COVOUT/cov.info" "*/src/runloom_c/*" \
+              --output-file "$COVOUT/cov.info" \
+              --rc branch_coverage=1 --ignore-errors unused,empty \
+              >> "$COVOUT/lcov.log" 2>&1 \
+      && genhtml --quiet --branch-coverage --output-directory "$COVOUT/html" \
+                 --title "runloom_c coverage" "$COVOUT/cov.info" \
+                 >> "$COVOUT/lcov.log" 2>&1 \
+      && echo "[cov]   heat map: $COVOUT/html/index.html" \
+      || echo "[cov]   WARN: lcov/genhtml failed (see $COVOUT/lcov.log) -- text report still valid"
+else
+    echo "[cov] lcov/genhtml not installed -- skipping HTML heat map"
+fi
 
 echo "[cov] ===== subsystem (manifest-aware coverable) ====="
 "$PYTHON" tools/cov_subsystem.py "$COVOUT"

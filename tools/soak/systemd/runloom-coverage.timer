@@ -1,0 +1,13 @@
+# Fires the nightly coverage recompute (runloom-coverage.service) at 01:00 --
+# an hour BEFORE the duty rotation (02:00+spread); the coverage run works in
+# its own worktree so the two never contend for the live tree's .so anyway.
+# NOT installed by the repo -- see README.md in this directory.
+[Unit]
+Description=Nightly runloom coverage recompute
+
+[Timer]
+OnCalendar=*-*-* 01:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

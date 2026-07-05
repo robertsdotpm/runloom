@@ -1,0 +1,16 @@
+# runloom nightly coverage recompute (tools/soak/coverage_night.sh).
+# Rebuilds the extension instrumented in an isolated worktree, drives the full
+# corpus, renders the lcov heat map, appends the COVERAGE_LEDGER.md trend line.
+# Driven by runloom-coverage.timer (01:00).  NOT installed by the repo -- see
+# README.md in this directory.
+[Unit]
+Description=runloom nightly C-coverage recompute (heat map + ledger)
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/projects/pygo
+ExecStart=/usr/bin/env bash tools/soak/coverage_night.sh
+Nice=10
+IOSchedulingClass=idle
+CPUSchedulingPolicy=idle
+TimeoutStartSec=infinity
