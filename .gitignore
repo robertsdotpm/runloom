@@ -49,3 +49,5 @@ docs/dev/soak/canary_*/*crash*.txt
 # the ledger + dated run.log summaries are the committed record
 docs/dev/soak/coverage/*/html/
 docs/dev/soak/coverage/*/workloads.log
+# dredd schemata mutation binary (~100MB LLVM release, fetched by setup_dredd.sh)
+tools/mutate/schemata/dredd/
