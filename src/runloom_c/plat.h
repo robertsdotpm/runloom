@@ -151,7 +151,16 @@
 #  define RUNLOOM_TLS __declspec(thread)
 #elif defined(RUNLOOM_CC_GCC) || defined(RUNLOOM_CC_CLANG) || defined(RUNLOOM_CC_ICC)
 #  if defined(RUNLOOM_TLS_GLOBAL_DYNAMIC)
-#    define RUNLOOM_TLS __thread
+/* Sanitizer build: force global-dynamic EXPLICITLY, not just as the default
+ * model.  A bare `__thread` on a STATIC (module-local) TLS var lets the
+ * compiler downgrade it to the local-dynamic model, whose DTPOFF32 offset is
+ * relative to the module's TLS block -- and ASan/TSan bloat .text past the
+ * ±2 GB that a 32-bit offset can reach, so the link fails with "relocation
+ * truncated to fit: R_X86_64_DTPOFF32" (e.g. runloom_select_rng in
+ * chan_select_helpers).  The explicit attribute pins global-dynamic (a
+ * GOT-indirect __tls_get_addr access, no 32-bit offset), so the sanitizer ext
+ * links.  Perf is irrelevant on a sanitizer build. */
+#    define RUNLOOM_TLS __thread __attribute__((tls_model("global-dynamic")))
 #  else
 /* initial-exec drops the __tls_get_addr() function call the default
  * global-dynamic model emits on every thread-local access (it was ~7% of
