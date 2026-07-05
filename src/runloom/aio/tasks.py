@@ -1,7 +1,8 @@
 """RunloomTask: the asyncio.Task <-> fiber bridge (heart of the bridge)."""
 from ._base import *  # noqa: F401,F403  (shared foundation)
 from .futures import _RunloomFutureMixin, _fut_cancelled_error  # noqa: F401
-from .handles import _PG_ALL_TASKS, _REGISTER_TASK, _TASK_NAME_COUNTER  # noqa: F401
+from .handles import (_PG_ALL_TASKS, _REGISTER_TASK, _UNREGISTER_TASK,  # noqa: F401
+                      _TASK_NAME_COUNTER)
 
 class RunloomTask(_RunloomFutureMixin, asyncio.Task):
     """A real asyncio.Task subclass (isinstance(x, asyncio.Task) holds) driven
@@ -87,8 +88,37 @@ class RunloomTask(_RunloomFutureMixin, asyncio.Task):
         # PCT controlled scheduler must keep this driver in order with the loop's
         # other call_soon fibers (else a sleep(0) resume can race ahead of a
         # call_soon callback -- a false positive, not a bug).  See pct_fifo.
-        self._g = runloom_c.fiber(_body, stack_size=_TASK_STACK, fifo=True) \
-            if _TASK_STACK else runloom_c.fiber(_body, fifo=True)
+        try:
+            self._g = runloom_c.fiber(_body, stack_size=_TASK_STACK, fifo=True) \
+                if _TASK_STACK else runloom_c.fiber(_body, fifo=True)
+        except BaseException:
+            # Driver spawn failed (genuine ENOMEM, or the RUNLOOM_FAULT_SPAWN_*
+            # injection).  We are already registered in asyncio.all_tasks()
+            # and _PG_ALL_TASKS (above) but have NO fiber, so nothing can ever
+            # run or settle this task: leaving it registered wedges
+            # loop.close() -- _cancel_outstanding_tasks cancel()s it (a no-op
+            # with no fiber to wake), then drives
+            # run_until_complete(gather(pending)) which waits FOREVER on a
+            # future nothing will settle, hanging the process on the teardown
+            # path while the real spawn error sits in aio.run's finally
+            # (gate fault-injection SPAWN_G/SPAWN_STACK hang).  Unwind both
+            # registrations and settle the future as CANCELLED (it never
+            # started), then let the spawn error propagate to the caller.
+            _PG_ALL_TASKS.discard(self)
+            if _UNREGISTER_TASK is not None:
+                try:
+                    _UNREGISTER_TASK(self)
+                except Exception:
+                    pass
+            try:
+                asyncio.Future.cancel(self)
+            except BaseException:
+                pass
+            try:
+                coro.close()        # never started: silence "never awaited"
+            except BaseException:
+                pass
+            raise
 
     def _pg_settle_c(self):
         # Settle the underlying C Future to FINISHED so asyncio.Task.__del__
