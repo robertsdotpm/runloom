@@ -730,15 +730,37 @@ def test_prewarm_from_foreign_thread_is_safe():
     # prewarm() is a depot pre-fill with no fiber/hub context; calling it
     # from a genuine foreign OS thread (not a fiber, not a hub) must be safe and
     # not lazily allocate scheduler state on that thread.
-    res = {}
-
-    def worker():
-        res["r"] = rc.prewarm(200, 512 * 1024, False)
-    t = raw_thread(worker)
-    t.join(timeout=15)
-    assert not t.is_alive(), "foreign-thread prewarm hung"
-    assert res.get("r") == 200
-    assert rc._self_check(0) == 0
+    #
+    # SUBPROCESS: prewarm's return is "count ADDED, bounded by the depot cap"
+    # -- and since the M:N RSS-leak fix (a933d5f0) hub TLS stack pools DRAIN
+    # INTO the global depot at fini instead of being abandoned, the depot in
+    # THIS long-lived process legitimately accumulates hundreds of stacks
+    # from the earlier swarm tests.  prewarm(200) then tops out at
+    # cap - already_pooled (< 200) and the strong ==200 assertion is only
+    # deterministic against a FRESH depot.  A fresh interpreter preserves the
+    # full contract instead of weakening the assertion in-process.
+    script = r'''
+import sys
+sys.path.insert(0, "src")
+import runloom_c as rc
+import _thread, time
+res = {}
+def worker():
+    res["r"] = rc.prewarm(200, 512 * 1024, False)
+    res["done"] = True
+_thread.start_new_thread(worker, ())
+deadline = time.time() + 15
+while "done" not in res and time.time() < deadline:
+    time.sleep(0.01)
+assert res.get("done"), "foreign-thread prewarm hung"
+assert res.get("r") == 200, "prewarm added %r of 200 into a FRESH depot" % (res.get("r"),)
+assert rc._self_check(0) == 0
+print("PREWARM-OK")
+'''
+    p = _subproc(script, timeout=30)
+    assert p.returncode == 0 and "PREWARM-OK" in p.stdout, (
+        "foreign-thread prewarm subprocess failed:\nstdout=%r\nstderr=%r"
+        % (p.stdout, p.stderr[-1500:]))
 
 
 # ==========================================================================

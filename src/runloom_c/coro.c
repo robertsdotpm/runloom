@@ -761,6 +761,29 @@ static void runloom_stack_madv_reclaim(void *addr, size_t len)
 {
 #if defined(__linux__)
     int flag = __atomic_load_n(&runloom_stack_madv_flag, __ATOMIC_RELAXED);
+    /* MEASUREMENT OVERRIDE.  While any HWM consumer is live -- the startup
+     * calibration window, stack-advice profiling, autosize (all gate on
+     * paint_on; runloom_coro_paint_enabled) -- the resident-page scan
+     * (mincore, runloom_stack_hwm_scan) IS the measurement, so a pooled
+     * stack's pages must ACTUALLY drop at release.  Under the flag=0
+     * spawn-throughput default (and under MADV_FREE, whose pages stay
+     * mincore-resident until memory pressure), a recycled stack keeps the
+     * PREVIOUS occupant's residency, which the next occupant's scan then
+     * reports as its own HWM: a shallow fiber on a previously-deep stack
+     * over-reports, autosize can never learn DOWN past the pool's high
+     * water, and the per-kind ordering assertions flip when one kind draws
+     * a deeper-residency stack than the other sampled
+     * (test_autosize_learns_down flake).  This also restores autosize's
+     * park-time reclaim promise ("large starts stay RSS-free"), which the
+     * flag=0 default had silently gutted.  DONTNEED only while measuring;
+     * steady state (calibration frozen, autosize off) keeps the configured
+     * fast path untouched. */
+#if defined(MADV_DONTNEED)
+    if (runloom_coro_paint_enabled()) {
+        (void)madvise(addr, len, MADV_DONTNEED);
+        return;
+    }
+#endif
     if (flag == -1) {
         const char *e = getenv("RUNLOOM_STACK_MADV");
         if (e != NULL && strcmp(e, "dontneed") == 0) {
@@ -845,9 +868,11 @@ static void runloom_stack_release(void *stack, size_t size)
      * lives in the first 16 bytes of the stack.
      *
      * Net effect with MADV_DONTNEED: pool entries hold 4 KB resident each
-     * instead of the full stack_size.  With the default MADV_FREE the reclaim is
-     * LAZY (pages stay counted until pressure, then drop) -- we trade a little
-     * apparent RSS for killing the per-release synchronous TLB shootdown, exactly
+     * instead of the full stack_size.  With RUNLOOM_STACK_MADV=free the reclaim
+     * is LAZY (pages stay counted until pressure, then drop); the DEFAULT is no
+     * madvise at all (keep pooled stacks warm -- see runloom_stack_madv_reclaim,
+     * which also documents the measurement-mode DONTNEED override) -- we trade
+     * pool RSS for killing the per-release synchronous TLB shootdown, exactly
      * like Go.  Either way the deepest-used pages re-fault/re-validate on reuse,
      * so steady-state RSS still tracks active gs, not capacity.
      *
