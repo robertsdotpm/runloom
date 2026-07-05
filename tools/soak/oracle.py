@@ -64,6 +64,17 @@ ABSOLUTE_FLOOR = {
 }
 _DEFAULT_ABS_FLOOR = 6.0   # a handful of objects of jitter on a count gauge
 
+# Pool-ratchet gauges: populations that are RETAINED by design (freed g structs
+# / coro stacks cached in per-thread slabs) and fill in a DECELERATING staircase
+# whose tail can outlast any reasonable warmup -- the first 6h cserve_echo
+# iteration measured per-hour g_struct deltas of 7017/2489/814/323/0/0 (a hard
+# plateau at 10.7K after ~4h; fds + fibers flat throughout).  For these gauges
+# a whole-window slope failure is forgiven ONLY when the FINAL QUARTER of the
+# window is flat (max-min <= the gauge's absolute floor): a converging ratchet
+# ends flat; a real leak stays linear to the end and still FAILs.
+RATCHETS = {"g_structs_total", "coro_stack_live", "coro_depot_pooled",
+            "py_parker_free", "vmas"}
+
 # Cumulative counters that only ever rise by design -- excluded from the slope
 # test (a soak WANTS these climbing; they confirm work is happening).
 ODOMETERS = {
@@ -157,6 +168,12 @@ def analyze(csv_path, warmup_seconds):
         below_eps = abs(slope_h) <= eps
         below_floor = pred_change <= abs_floor
         ok = ci_includes_zero or below_eps or below_floor
+        ratchet_converged = False
+        if not ok and metric in RATCHETS and len(ys) >= 16:
+            tail = ys[-max(8, len(ys) // 4):]      # final quarter of the window
+            if (max(tail) - min(tail)) <= abs_floor:
+                ok = True
+                ratchet_converged = True
         if not ok:
             overall_ok = False
         rows.append({
@@ -166,7 +183,8 @@ def analyze(csv_path, warmup_seconds):
             "ok": ok,
             "reason": ("ci~0" if ci_includes_zero else
                        ("<eps" if below_eps else
-                        ("<floor" if below_floor else "SLOPE"))),
+                        ("<floor" if below_floor else
+                         ("ratchet-converged" if ratchet_converged else "SLOPE")))),
         })
     verdict = "PASS" if overall_ok else "FAIL"
     if short:
