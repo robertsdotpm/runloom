@@ -1,0 +1,13 @@
+# Fires the nightly reliability duty-cycle (runloom-duty.service).
+# NOT installed by the repo -- see README.md in this directory.
+[Unit]
+Description=Nightly runloom reliability duty-cycle
+
+[Timer]
+# 02:00 local, with a spread so several boxes don't start in lockstep.
+OnCalendar=*-*-* 02:00:00
+RandomizedDelaySec=1800
+Persistent=true
+
+[Install]
+WantedBy=timers.target

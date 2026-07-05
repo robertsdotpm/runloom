@@ -1,0 +1,21 @@
+# runloom nightly reliability duty-cycle (docs/dev/RELIABILITY_PROGRAM.md R4).
+# A systemd --user service that runs ONE rotation (hang_hunter -> lifefuzz ->
+# weekly matrix slot) and exits.  Driven by runloom-duty.timer.  NOT installed
+# by the repo -- see tools/soak/systemd/README.md and get the box owner's OK
+# first (it consumes real CPU for hours; it is load-gated to back off under
+# foreground work).
+[Unit]
+Description=runloom nightly reliability duty-cycle (soak/fuzz rotation)
+
+[Service]
+Type=oneshot
+# %h = the user's home; adjust WorkingDirectory if the repo lives elsewhere.
+WorkingDirectory=%h/projects/pygo
+ExecStart=/usr/bin/env bash tools/soak/duty_cycle.sh
+# be a good citizen: lowest CPU + IO priority, and let the script's own
+# load-gate skip stages when the box is busy.
+Nice=15
+IOSchedulingClass=idle
+CPUSchedulingPolicy=idle
+# a rotation can legitimately run many hours; don't let systemd kill it.
+TimeoutStartSec=infinity

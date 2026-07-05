@@ -39,3 +39,4 @@ tests/experiments/spawn_perf/baseline_run.log
 docs/dev/soak/**/worker*.csv
 docs/dev/soak/**/*.hb
 docs/dev/soak/**/hang_*.txt
+docs/dev/soak/inbox_artifacts/
