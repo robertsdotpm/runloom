@@ -836,6 +836,15 @@ class _ThreadPoolBackend(_BlockingBackend):
             # result/exception too.
             box[2] = True
             parker.unpark()
+            # Drop this job's references BEFORE blocking for the next one.
+            # These locals otherwise pin the finished job's whole graph for
+            # as long as this worker sits idle -- with `args` holding the
+            # OFFLOADED CALL'S ARGUMENTS, e.g. the Popen `self` of a
+            # _patched_popen_init, so N idle workers retained the last N
+            # Popens (+ their lock/parker graphs) indefinitely
+            # (test_monkey_leak::test_no_leak_subprocess).  Same hygiene as
+            # concurrent.futures' `del work_item`.
+            item = fn = args = kwargs = box = parker = None
 
     def submit(self, fn, args, kwargs):
         if kwargs is None:
