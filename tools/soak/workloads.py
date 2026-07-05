@@ -221,6 +221,80 @@ def _wl_mixed(ctx):
     _spin(ctx, unit, concurrency=3)
 
 
+def _wl_cserve_echo(ctx):
+    # The production server shape, verbatim from the benchmark suite's fastest
+    # regular-fiber tier (benchmark/suite/servers/runloom_epoll_py_tcpcon.py,
+    # "runloom_c": 624K rps peak, above Go): runloom_c.serve's C scaffold
+    # (SO_REUSEPORT listeners + C accept loops) spawning a plain-Python handler
+    # fiber per connection that echoes via the C-level TCPConn recv_into/
+    # send_all -- on the DEFAULT epoll backend (no io_uring env), under
+    # runloom.run(hubs) M:N.  In-process client fibers provide the load:
+    # connect, a burst of echo round-trips, close, reconnect -- so both the
+    # steady path (recv/send parkers) and the lifecycle path (accept/spawn/
+    # close) accrue cycles.  Everything is joined: clients via a Chan, handler
+    # fibers end when their conn closes, acceptors end when the listeners are
+    # closed -- run() then drains (no stranded fiber, per the module contract).
+    hubs = int(os.environ.get("RUNLOOM_SOAK_HUBS", "4"))
+    conc = int(os.environ.get("RUNLOOM_SOAK_CONC", "8"))
+    RTRIPS = 64          # echo round-trips per connection before reconnecting
+    CHUNK = 65536
+
+    def handle(conn):
+        # the benchmark tier's handler, verbatim
+        buf = bytearray(CHUNK)
+        mv = memoryview(buf)
+        try:
+            while True:
+                n = conn.recv_into(buf)
+                if not n:
+                    break
+                conn.send_all(mv[:n])
+        except OSError:
+            pass
+
+    def client(port, done):
+        buf = bytearray(64)
+        try:
+            while not ctx.expired():
+                try:
+                    c = runloom_c.TCPConn.connect("127.0.0.1", port)
+                except OSError:
+                    continue
+                try:
+                    for _ in range(RTRIPS):
+                        c.send_all(b"ping-payload-64b" * 4)
+                        got = 0
+                        while got < 64:
+                            n = c.recv_into(buf)
+                            if not n:
+                                raise OSError("early EOF")
+                            got += n
+                        ctx.bump()
+                        if ctx.expired():
+                            break
+                except OSError:
+                    pass
+                finally:
+                    c.close()
+                if not ctx.compress:
+                    runloom_c.sched_yield()
+        finally:
+            done.send(1)
+
+    def root():
+        port, listeners = runloom_c.serve(
+            "127.0.0.1", 0, handle, acceptors=hubs, backlog=1024)
+        done = runloom_c.Chan(conc)
+        for _ in range(conc):
+            runloom.fiber(lambda: client(port, done))
+        for _ in range(conc):
+            done.recv()                  # join every client
+        for l in listeners:
+            l.close()                    # stops the C accept loops (serve doc)
+
+    runloom.run(hubs, main_fn=root)
+
+
 def _wl_iouring_churn(ctx):
     # R7 item 1 aging: connect / echo / close churn on runloom_c.TCPConn under
     # M:N with the io_uring backend, so the soak ages the per-hub cancel-by-fd /
@@ -366,6 +440,7 @@ WORKLOADS = {
     "tcp_churn": _wl_tcp_churn,
     "keepalive": _wl_keepalive,
     "offload": _wl_offload,
+    "cserve_echo": _wl_cserve_echo,
     "iouring_churn": _wl_iouring_churn,
     "mixed": _wl_mixed,
     "leak_control": _wl_leak_control,
