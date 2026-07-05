@@ -81,6 +81,10 @@ long long runloom_next_goid_block(long n);
 /* Number of live (non-FREED) fibers.  Takes runloom_greg_lock. */
 long runloom_fiber_count(void);
 
+/* R0 gauge: live + retained runloom_g structs (OS-taken, not yet freed).
+ * Lock-free relaxed load -- safe to call from m_stats while pumps run. */
+long runloom_greg_total_count(void);
+
 /* Count fibers owned by `owner` (a runloom_sched_t*; NULL = any) parked on a
  * channel or via park_safe -- the deadlockable set.  Used by the drain's
  * deadlock detector. */

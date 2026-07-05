@@ -101,6 +101,11 @@ void runloom_coro_park_reclaim_set(int on);
 /* Backend identifier ("fibers", "ucontext"); useful for tests. */
 const char *runloom_coro_backend(void);
 
+/* R0 gauges (lock-free): live depot-backed C-stacks IN USE, and freed stacks
+ * retained in the shared cross-hub depot.  0 on backends without a depot. */
+long runloom_coro_stack_live(void);
+long runloom_coro_depot_pooled(void);
+
 /* Per-thread setup / teardown.  Must be called once per OS thread
  * before any coro on that thread.  Idempotent. */
 int runloom_coro_thread_init(void);

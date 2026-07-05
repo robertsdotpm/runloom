@@ -8,6 +8,52 @@ int runloom_mn_hub_count(void)
     return runloom_hub_count;
 }
 
+/* R0 gauges: per-hub census over runloom_hubs[].  Lock-free, following the
+ * sysmon walk pattern (mn_sched_sysmon.c.inc): the array is PyMem_Calloc'd
+ * once at mn_init and never realloc'd within a run, so snapshotting
+ * runloom_hub_count and reading each hub's atomic field is race-free.  Safe
+ * from m_stats -- takes no lock any pump/hub holds.
+ *
+ * mn_pending_total: submitted-minus-completed gs across all hub run queues
+ * (the true live in-scheduler g population; work-stealing moves `pending`
+ * between hubs but the SUM is conserved).  Falls to ~0 at quiescence; a
+ * climbing floor across soak iterations = fibers stuck in hub queues.
+ * mn_completed_total: cumulative retired gs across hubs -- an odometer
+ * (never falls), a liveness signal to confirm the soak is retiring work.
+ * mn_deque_depth_total: fresh (stealable) gs across all hub deques. */
+long runloom_mn_pending_total(void)
+{
+    long total = 0;
+    int i, n = runloom_hub_count;
+    if (runloom_hubs == NULL) return 0;
+    for (i = 0; i < n; i++)
+        total += __atomic_load_n(&runloom_hubs[i].pending, __ATOMIC_ACQUIRE);
+    return total;
+}
+
+long long runloom_mn_completed_total(void)
+{
+    long long total = 0;
+    int i, n = runloom_hub_count;
+    if (runloom_hubs == NULL) return 0;
+    for (i = 0; i < n; i++)
+        total += (long long)__atomic_load_n(&runloom_hubs[i].sched.completed,
+                                            __ATOMIC_ACQUIRE);
+    return total;
+}
+
+long runloom_mn_deque_depth_total(void)
+{
+    long total = 0;
+    int i, n = runloom_hub_count;
+    if (runloom_hubs == NULL) return 0;
+    for (i = 0; i < n; i++) {
+        long d = runloom_cldeque_size(&runloom_hubs[i].deque);
+        if (d > 0) total += d;
+    }
+    return total;
+}
+
 void *runloom_mn_current_hub_opaque(void)
 {
     return (void *)runloom_tls_hub;

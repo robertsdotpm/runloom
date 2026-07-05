@@ -205,7 +205,7 @@ void runloom_introspect_fini(void)
     if (!runloom_greg_inited) return;
     RUNLOOM_RLOCK(&runloom_greg_lock, RUNLOOM_RANK_GREG);
     runloom_greg_head = NULL;
-    runloom_greg_total = 0;
+    __atomic_store_n(&runloom_greg_total, 0L, __ATOMIC_RELAXED);
     RUNLOOM_RUNLOCK(&runloom_greg_lock, RUNLOOM_RANK_GREG);
 }
 
@@ -232,7 +232,10 @@ void runloom_greg_link(runloom_g_t *g)
     g->reg_next = runloom_greg_head;
     if (runloom_greg_head != NULL) runloom_greg_head->reg_prev = g;
     runloom_greg_head = g;
-    runloom_greg_total++;
+    /* Atomic add (still under the lock -- zero cost on this cold slab-alloc
+     * path) so runloom_greg_total_count() can read it LOCK-FREE from m_stats,
+     * which must never take runloom_greg_lock (the spawn path holds it). */
+    __atomic_add_fetch(&runloom_greg_total, 1L, __ATOMIC_RELAXED);
     RUNLOOM_RUNLOCK(&runloom_greg_lock, RUNLOOM_RANK_GREG);
 }
 
@@ -250,7 +253,7 @@ void runloom_greg_unlink(runloom_g_t *g)
         if (g->reg_next != NULL) g->reg_next->reg_prev = g->reg_prev;
         g->reg_prev = NULL;
         g->reg_next = NULL;
-        runloom_greg_total--;
+        __atomic_sub_fetch(&runloom_greg_total, 1L, __ATOMIC_RELAXED);
     }
     RUNLOOM_RUNLOCK(&runloom_greg_lock, RUNLOOM_RANK_GREG);
 }
@@ -262,8 +265,20 @@ void runloom_introspect_reset_after_fork(void)
 {
     runloom_mutex_init(&runloom_greg_lock);
     runloom_greg_head = NULL;
-    runloom_greg_total = 0;
+    __atomic_store_n(&runloom_greg_total, 0L, __ATOMIC_RELAXED);
     runloom_greg_inited = 1;
+}
+
+/* Lock-free gauge (R0): live + retained runloom_g structs the process has
+ * taken from the OS and not yet freed.  Per the "a freed g never returns to
+ * the OS" invariant this only falls at mn_fini reclaim, so within a run it is
+ * a high-water of peak concurrency; a value that CLIMBS across soak iterations
+ * is leaked g structs.  Reads 0 when the registry is disabled
+ * (RUNLOOM_GREG_OFF).  Safe from m_stats: a bare relaxed atomic load, no
+ * runloom_greg_lock (which the spawn cold-path holds). */
+long runloom_greg_total_count(void)
+{
+    return __atomic_load_n(&runloom_greg_total, __ATOMIC_RELAXED);
 }
 
 long runloom_fiber_count(void)

@@ -944,6 +944,31 @@ static int runloom_stack_paint_on = 1;
 void runloom_coro_paint_set(int enabled) { runloom_stack_paint_on = enabled ? 1 : 0; }
 int  runloom_coro_paint_enabled(void)    { return runloom_stack_paint_on; }
 
+/* R0 gauges: coro C-stack populations, both lock-free relaxed reads (safe from
+ * m_stats while hubs run).  stack_live = depot-backed stacks currently IN USE
+ * (a per-acquire/release atomic; self-correcting, so a rising floor across
+ * soak iterations = leaked live stacks -- the dominant RSS signal).
+ * depot_pooled = freed stacks retained in the shared cross-hub depot (a plain
+ * int written under runloom_global_stack_lock; the relaxed read is a benign
+ * gauge approximation -- a torn/stale value only mis-reports by a little). */
+long runloom_coro_stack_live(void)
+{
+#if defined(RUNLOOM_HAVE_FCONTEXT) || defined(RUNLOOM_HAVE_UCONTEXT)
+    return (long)__atomic_load_n(&runloom_stack_live, __ATOMIC_RELAXED);
+#else
+    return 0;
+#endif
+}
+
+long runloom_coro_depot_pooled(void)
+{
+#if defined(RUNLOOM_HAVE_FCONTEXT) || defined(RUNLOOM_HAVE_UCONTEXT)
+    return (long)__atomic_load_n(&runloom_global_stack_n, __ATOMIC_RELAXED);
+#else
+    return 0;
+#endif
+}
+
 /* Security: wipe a fiber's stack when it is recycled, so the next
  * fiber to reuse that stack can't read this one's leftovers (TLS keys,
  * request bodies -- the aio bridge runs OpenSSL on these stacks). OFF by

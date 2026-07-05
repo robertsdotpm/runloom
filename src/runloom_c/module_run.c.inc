@@ -228,6 +228,28 @@ static PyObject *m_stats(PyObject *self, PyObject *unused)
         RUNLOOM_STATS_SET("stack_painting",       st.painting);
     }
 
+    /* R0 gauge surface (docs/dev/RELIABILITY_PROGRAM.md): process-wide LIVE
+     * populations, so a soak test sees a leak as a rising counter.  EVERY read
+     * here is lock-free (a relaxed/acquire atomic load or an O(cap) census of a
+     * never-realloc'd array) -- m_stats can run while pumps/hubs are live on
+     * other threads, so it must take NO lock a pump/hub path also takes.  See
+     * each accessor's header comment for the leak-signal semantics. */
+    RUNLOOM_STATS_SET("g_structs_total",   runloom_greg_total_count());
+    RUNLOOM_STATS_SET("live_fibers",       runloom_live_fibers());
+    RUNLOOM_STATS_SET("hubs_live",         runloom_mn_hub_count());
+    RUNLOOM_STATS_SET("mn_pending_total",  runloom_mn_pending_total());
+    RUNLOOM_STATS_SET("mn_completed_total",runloom_mn_completed_total());
+    RUNLOOM_STATS_SET("mn_deque_depth",    runloom_mn_deque_depth_total());
+    RUNLOOM_STATS_SET("coro_stack_live",   runloom_coro_stack_live());
+    RUNLOOM_STATS_SET("coro_depot_pooled", runloom_coro_depot_pooled());
+    RUNLOOM_STATS_SET("blockpool_inflight",runloom_blockpool_inflight());
+    RUNLOOM_STATS_SET("iouring_inflight",  runloom_iouring_inflight());
+    RUNLOOM_STATS_SET("foreign_park_inflight", runloom_foreign_park_inflight());
+    RUNLOOM_STATS_SET("netpoll_deadline_heap", runloom_netpoll_deadline_heap_total());
+    RUNLOOM_STATS_SET("netpoll_fd_armed",  runloom_netpoll_fd_armed_count());
+    RUNLOOM_STATS_SET("stale_arm_heals",
+                      (Py_ssize_t)runloom_netpoll_stale_arm_heals());
+
 #undef RUNLOOM_STATS_SET
     /* Strings: backends are useful in the same payload. */
     {

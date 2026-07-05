@@ -660,6 +660,56 @@ int runloom_netpoll_parked_count(void)
     return total;
 }
 
+/* R0 gauge: total timed parkers across all pools' deadline heaps.  Lock-free
+ * relaxed sum -- dh_size is written under each pool's lock but a stale/torn
+ * read only mis-reports a gauge by a little.  Should track netpoll_parked's
+ * timed subset; an unbounded climb = leaked timed parkers. */
+int runloom_netpoll_deadline_heap_total(void)
+{
+    int total = 0;
+    int i;
+    for (i = 0; i < RUNLOOM_PARKER_POOL_MAX; i++) {
+        total += __atomic_load_n(&runloom_pools[i].dh_size, __ATOMIC_RELAXED);
+    }
+    return total;
+}
+
+/* R0 gauge: stale-arm heals since process start (2026-07-05 fd-reuse-poison
+ * fix).  Every heal means the app leaked a socket to the GC without
+ * unregister; a climbing value is an app-level fd-hygiene leak the runtime is
+ * absorbing.  Lock-free relaxed load. */
+unsigned long long runloom_netpoll_stale_arm_heals(void)
+{
+#if defined(RUNLOOM_HAVE_EPOLL)
+    return __atomic_load_n(&runloom_stale_arm_heals, __ATOMIC_RELAXED);
+#else
+    return 0;
+#endif
+}
+
+/* R0 gauge: count of fds with a nonzero LEVEL arm mask (epoll registrations
+ * runloom currently holds).  An O(cap) census of the preallocated,
+ * never-realloc'd runloom_fd_armed array -- the base pointer is stable, so no
+ * lock is needed; a byte racing 0<->nonzero only shifts the gauge by one.
+ * A climb that outpaces live sockets = leaked registrations (the stale-arm
+ * class).  Returns 0 on non-epoll backends (no persistent arm cache). */
+int runloom_netpoll_fd_armed_count(void)
+{
+#if defined(RUNLOOM_HAVE_EPOLL)
+    int total = 0;
+    size_t cap = __atomic_load_n(&runloom_fd_pending_wake_cap, __ATOMIC_ACQUIRE);
+    unsigned char *base = runloom_fd_armed;
+    size_t i;
+    if (base == NULL) return 0;
+    for (i = 0; i < cap; i++) {
+        if (__atomic_load_n(&base[i], __ATOMIC_RELAXED) != 0) total++;
+    }
+    return total;
+#else
+    return 0;
+#endif
+}
+
 /* Hub-idle dwell-based stack reclaim (RUNLOOM_STACK_PARK_SWEEP).  Walk the
  * CALLING hub's parker pool and madvise the below-SP idle stack pages of
  * fibers whose current park has already exceeded threshold_ns.

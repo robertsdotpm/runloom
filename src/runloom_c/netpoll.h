@@ -90,6 +90,12 @@ int runloom_netpoll_pump(long long timeout_ns);
  * to decide whether to call pump or exit. */
 int runloom_netpoll_parked_count(void);
 
+/* R0 gauges (lock-free): timed parkers across all deadline heaps; stale-arm
+ * heals since start; count of fds holding a nonzero epoll LEVEL arm mask. */
+int runloom_netpoll_deadline_heap_total(void);
+unsigned long long runloom_netpoll_stale_arm_heals(void);
+int runloom_netpoll_fd_armed_count(void);
+
 /* DIAG: dump every parked parker (fd/g/hub/commit) to stderr. */
 void runloom_netpoll_dump_parkers(void);
 

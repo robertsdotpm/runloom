@@ -129,6 +129,13 @@ int runloom_mn_yield_current(void);
  * never called or after mn_fini). */
 int runloom_mn_hub_count(void);
 
+/* R0 gauges (lock-free per-hub census): live in-scheduler gs (submitted minus
+ * completed, sum conserved under work-stealing); cumulative retired gs
+ * (odometer); fresh stealable gs across all hub deques. */
+long      runloom_mn_pending_total(void);
+long long runloom_mn_completed_total(void);
+long      runloom_mn_deque_depth_total(void);
+
 /* ---- per-hub diagnostic snapshot (runloom.inspect.hubs()) ----
  * A point-in-time view of every hub's scheduler state, for answering
  * "what is each hub doing / is any hub wedged, on what, for how long".

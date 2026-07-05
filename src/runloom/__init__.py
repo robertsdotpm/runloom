@@ -210,6 +210,7 @@ from . import context  # noqa: E402,F401  – Background / WithCancel / WithTime
 from . import sync     # noqa: E402,F401  – blocking-style sockets + sync prims
 from .sync import WaitGroup, Future, gather  # noqa: E402,F401  – fan-in primitives
 from . import aio      # noqa: E402,F401  – run async/await on the scheduler
+from .stats import stats  # noqa: E402,F401  – R0 process-wide gauge surface
 
 __all__ = [
     # scheduler
@@ -231,7 +232,7 @@ __all__ = [
     "TCPConn", "Coro", "G", "wait_fd", "WAIT_FD_CANCELLED",
     "tcp_recv", "tcp_send", "iouring_available",
     # introspection
-    "backend", "netpoll_backend", "fibers", "dump", "inspect",
+    "backend", "netpoll_backend", "fibers", "dump", "inspect", "stats",
     # feature packages
     "monkey", "time", "context", "sync", "aio",
     "__version__",
