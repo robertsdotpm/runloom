@@ -7,7 +7,7 @@ scheduler (never drained by the loop) and was silently lost.  The fix
 (_pg_driver_tid), route foreign pre-run work into the loop's _ts_queue, and give
 RunloomTask a deferred-spawn mode so pre-run create_task is non-blocking.
 
-These are the gated promotion of bughunt_repros/r01 + the cases the adversarial
+These are the gated promotion of tests/bughunt_repros/r01 + the cases the adversarial
 review of the design flagged: both callback orderings, the schedule-then-start-
 driver pattern (no deadlock), the driver's own pre-run create_task, a custom
 task_factory, cancel-before-spawn, and the refcycle break.
