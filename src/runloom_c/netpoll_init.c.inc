@@ -187,9 +187,11 @@ int runloom_netpoll_hub_epoll_fd(void)
  * Where strace's `-e inject=` drives the Linux epoll campaign, the platforms
  * WITHOUT a syscall-injecting tracer (Windows; FreeBSD/macOS kqueue) gate IN
  * PROCESS on env vars.  RUNLOOM_FAULT_<SITE> = "<mode>:<code>", mode in
- * {once, always}, forces the named pump syscall to report a failure:
+ * {once, always, nth}, forces the named pump syscall to report a failure:
  *   once:CODE   -- inject CODE exactly the first time the site is reached
  *   always:CODE -- inject CODE every time (persistent error)
+ *   nth:N:CODE  -- inject CODE exactly the Nth (1-based) time the site is
+ *                  reached -- the counted-exhaustive sweep's primitive
  * code is a WSA error (Windows) or an errno (kqueue).  Each site counts how
  * many times it fired (read via runloom_c._fault_count) so a test can prove a
  * PERSISTENT error BACKS OFF (bounded count) instead of busy-spinning.  Inert
@@ -205,6 +207,10 @@ static const char *const runloom_fault_names[RUNLOOM_FAULT_NSITES] = {
     "SPAWN_G", "SPAWN_STACK", "SPAWN_TSTATE" };
 static volatile long runloom_fault_fired[RUNLOOM_FAULT_NSITES];
 static volatile long runloom_fault_once_done[RUNLOOM_FAULT_NSITES];
+/* nth-mode per-site HIT counter (every armed reach, fired or not).  Separate
+ * from fired so the counted-exhaustive sweep can detect "site reached fewer
+ * than N times this run" as fired==0 -- its termination fixpoint. */
+static volatile long runloom_fault_seen[RUNLOOM_FAULT_NSITES];
 
 long runloom_fault_count(const char *name)
 {
@@ -221,6 +227,7 @@ void runloom_fault_reset(void)
     for (i = 0; i < RUNLOOM_FAULT_NSITES; i++) {
         runloom_fault_fired[i] = 0;
         runloom_fault_once_done[i] = 0;
+        runloom_fault_seen[i] = 0;
     }
 }
 
@@ -257,6 +264,28 @@ int runloom_fault_inject(int site)
     if (spec == NULL || *spec == '\0') return 0;
     if (strncmp(spec, "once:", 5) == 0)        { once = 1; code = atoi(spec + 5); }
     else if (strncmp(spec, "always:", 7) == 0) { once = 0; code = atoi(spec + 7); }
+    else if (strncmp(spec, "nth:", 4) == 0) {
+        /* nth:N:CODE -- fail EXACTLY the Nth reach of this site (1-based), then
+         * never again this process.  Powers the counted-exhaustive anomaly sweep
+         * (tools/fault_sweep_counted.py, SQLite-style): iterate N=1,2,3,... and
+         * stop when a clean run ends with _fault_count(site)==0 -- the site was
+         * reached fewer than N times, so every reachable failure point has been
+         * exercised.  Counting is scoped to runloom's OWN sites (unlike an
+         * Nth-libc-malloc shim, which counts CPython's churn too). */
+        char *end = NULL;
+        long n = strtol(spec + 4, &end, 10);
+        long hit;
+        if (n <= 0 || end == NULL || *end != ':') return 0;
+        code = atoi(end + 1);
+        if (code == 0) return 0;
+#if defined(RUNLOOM_OS_WINDOWS)
+        hit = InterlockedIncrement(&runloom_fault_seen[site]);
+#else
+        hit = __atomic_add_fetch(&runloom_fault_seen[site], 1, __ATOMIC_ACQ_REL);
+#endif
+        if (hit != n) return 0;
+        goto fire;
+    }
     else return 0;
     if (code == 0) return 0;
     if (once) {
@@ -270,6 +299,7 @@ int runloom_fault_inject(int site)
             return 0;
 #endif
     }
+fire:
 #if defined(RUNLOOM_OS_WINDOWS)
     InterlockedIncrement(&runloom_fault_fired[site]);
 #else

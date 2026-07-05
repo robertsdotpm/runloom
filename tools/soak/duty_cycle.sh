@@ -46,9 +46,11 @@ while [ $# -gt 0 ]; do
 done
 
 if [ "$SMOKE" = "1" ]; then
-  HH_DUR=20; LF_DUR=15; DO_MATRIX_SMOKE=1
+  HH_DUR=20; LF_DUR=15; RR_DUR=20; DO_MATRIX_SMOKE=1
 else
-  HH_DUR=14400; LF_DUR=7200; DO_MATRIX_SMOKE=0   # 4h hang_hunter, 2h lifefuzz
+  # 4h hang_hunter, 2h lifefuzz, 2h rr-chaos (rr-chaos SKIPs in seconds while
+  # the host vPMU can't record -- see tools/soak/rr_chaos.sh)
+  HH_DUR=14400; LF_DUR=7200; RR_DUR=7200; DO_MATRIX_SMOKE=0
 fi
 
 load_ok() {
@@ -108,7 +110,41 @@ else
   echo "-- lifefuzz SKIPPED --"
 fi
 
-# --- stage 3 (weekly / smoke): one soak-matrix preset ---
+# --- stage 3: rr-chaos lost-wake hunt (self-gating: SKIPs while the host vPMU
+# can't record; auto-activates the day `rr record /bin/true` works) ---
+if load_ok; then
+  echo "-- rr-chaos ${RR_DUR}s --"
+  RR_OUT="$INBOX_ARTIFACTS/rr_chaos"; mkdir -p "$RR_OUT"
+  nice -n 10 bash tools/soak/rr_chaos.sh "$RR_DUR" "$RR_OUT" \
+      > "$RR_OUT/run.log" 2>&1
+  grep -E "^rr-chaos" "$RR_OUT/run.log" | sed 's/^/   /'
+  # every FINDING line carries a replayable trace -> inbox it
+  grep -E "^FINDING " "$RR_OUT/run.log" | while read -r _ kind rest; do
+    inbox "$kind" "rr-chaos $rest" "$RR_OUT/run.log"
+  done
+else
+  echo "-- rr-chaos SKIPPED (load too high) --"
+fi
+
+# --- stage 4: counted-exhaustive fault sweep (SQLite-style anomaly testing:
+# fail the Nth reach of every runloom fault site until exhausted; fast --
+# minutes -- so it runs nightly, not weekly) ---
+if load_ok; then
+  echo "-- counted fault sweep --"
+  FS_OUT="$INBOX_ARTIFACTS/fault_sweep_counted.log"
+  FS_SITES=""
+  [ "$SMOKE" = "1" ] && FS_SITES="FD_READ FD_WRITE"   # plumbing check: 2 fast sites
+  # shellcheck disable=SC2086
+  if ! nice -n 10 env PYTHON_GIL=0 "$PY" tools/fault_sweep_counted.py $FS_SITES \
+       > "$FS_OUT" 2>&1; then
+    inbox "fault-sweep" "counted-exhaustive sweep found CRASH/HANG" "$FS_OUT"
+  fi
+  grep -E "^== done" "$FS_OUT" | sed 's/^/   /'
+else
+  echo "-- counted fault sweep SKIPPED (load too high) --"
+fi
+
+# --- stage 5 (weekly / smoke): one soak-matrix preset ---
 MATRIX_PRESET=""
 if [ -n "$FORCE_MATRIX" ]; then
   MATRIX_PRESET="$FORCE_MATRIX"
