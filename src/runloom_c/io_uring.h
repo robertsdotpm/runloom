@@ -58,6 +58,14 @@ int runloom_iouring_inflight(void);
 struct runloom_g;
 int runloom_iouring_cancel_g(struct runloom_g *g);
 
+/* Cancel EVERY in-flight global-ring op on `fd` (keyed by fd, not user_data):
+ * submit an ASYNC_CANCEL so the kernel completes them -ECANCELED and the drain
+ * wakes any parked fiber.  io_uring holds a reference to the underlying file, so
+ * a plain close(fd) does NOT cancel a parked single-shot recv/send on the fd --
+ * TCPConn.close() calls this before closesock to unblock such a parker.  No-op
+ * where io_uring is unavailable or IORING_ASYNC_CANCEL_FD is unsupported. */
+void runloom_iouring_cancel_fd(int fd);
+
 /* Submit an ASYNC_CANCEL for a hub-ring op (a runloom_iouring_op_t*, void* here)
  * on ITS ring.  Called by the op's OWNING hub -- the ring's single issuer --
  * after it drains its cancel mailbox (runloom_mn_hub_request_iouring_cancel). */

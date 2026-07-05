@@ -126,6 +126,11 @@ static PyObject *RunloomTCPConn_close(RunloomTCPConn *self, PyObject *unused)
     int fd = -1;
 #if defined(__linux__)
     runloom_iouring_ms_t *ms = NULL;
+    /* Resolve the io_uring decision while `self` is still valid (the lock below
+     * invalidates fd/closed).  A single-shot io_uring recv/send parks on a CQE,
+     * not netpoll, so netpoll_cancel_fd below won't wake it -- we cancel it by fd
+     * after invalidation. */
+    int use_iou = runloom_tcpconn_use_iouring(self);
 #endif
     RUNLOOM_TCPCONN_LOCK_DECL;
     (void)unused;
@@ -161,6 +166,26 @@ static PyObject *RunloomTCPConn_close(RunloomTCPConn *self, PyObject *unused)
 #if defined(__linux__)
     if (ms != NULL) {
         runloom_iouring_ms_close(ms);
+    }
+    /* Cancel any in-flight SINGLE-SHOT io_uring recv/send parked on this fd.
+     * io_uring pinned the file, so closesock() below would NOT complete the op;
+     * the parked fiber would hang until unrelated peer activity.  Submit before
+     * closesock so the cancel matches the still-open fd.  netpoll_cancel_fd below
+     * only reaches netpoll parkers, not io_uring ones.
+     *
+     * SCOPE (2026-07-05, verified): this cancels ops on the GLOBAL ring -- the
+     * single-thread-scheduler path (runloom_iouring_recv routes to the global
+     * ring when NOT inside an M:N hub).  A recv parked on a per-hub ring
+     * (M:N + RUNLOOM_TCPCONN_IOURING, where runloom_iouring_recv routes to
+     * runloom_mn_current_iouring_ring()) is NOT reached: the hub ring is
+     * single-issuer, so cancelling it needs a cancel-by-fd deposited in the
+     * owning hub's cancel mailbox -- and that mailbox is today a single-slot
+     * best-effort by-OP slot, so a reliable cancel-by-fd broadcast is a
+     * follow-up (see docs/dev/RELIABILITY_PROGRAM.md R7 item 1).  The global
+     * cancel is a harmless no-op when the op is on a hub ring, so this is safe
+     * in both modes -- it just does not yet unblock the M:N hub-ring case. */
+    if (use_iou) {
+        runloom_iouring_cancel_fd(fd);
     }
 #endif
     /* Wake any fiber parked in accept()/recv()/send() on this fd so it sees the

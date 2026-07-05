@@ -87,6 +87,32 @@ static void runloom_iou_submit_cancel_global(runloom_iouring_op_t *target)
     if (runloom_iouring_submit_sqe(sqe, cancel_op) != 0) free(cancel_op);
 }
 
+/* Cancel EVERY in-flight global-ring op on `fd` (by fd, not user_data).  A parked
+ * single-shot recv/send does NOT return on close(fd) because io_uring pins the
+ * file until the op finishes; this submits an ASYNC_CANCEL keyed off the fd so
+ * the kernel completes each such op -ECANCELED, and the drain wakes the parked
+ * fiber.  The single-shot analogue of ms_close's user_data cancel.  Best-effort:
+ * IORING_ASYNC_CANCEL_FD is kernel 5.19+; where the headers predate it this is a
+ * no-op and close() keeps its prior behaviour (the parker waits for peer activity). */
+void runloom_iouring_cancel_fd(int fd)
+{
+#if defined(IORING_ASYNC_CANCEL_FD)
+    runloom_iouring_op_t *cancel_op;
+    struct io_uring_sqe sqe;
+    if (!runloom_iouring_available() || fd < 0) return;
+    cancel_op = (runloom_iouring_op_t *)calloc(1, sizeof(*cancel_op));
+    if (cancel_op == NULL) return;
+    cancel_op->type = RUNLOOM_IOURING_OP_CANCEL;
+    memset(&sqe, 0, sizeof(sqe));
+    sqe.opcode = IORING_OP_ASYNC_CANCEL;
+    sqe.fd     = fd;
+    sqe.cancel_flags = IORING_ASYNC_CANCEL_FD | IORING_ASYNC_CANCEL_ALL;
+    if (runloom_iouring_submit_sqe(sqe, cancel_op) != 0) free(cancel_op);
+#else
+    (void)fd;
+#endif
+}
+
 /* Hand the calling thread's stashed signal-handler exception to ONE io_uring
  * parker owned by that scheduler: mark it SIGNALED and wake it, so it restores
  * the exception in-fiber on resume.  Returns 1 if a parker took it, 0 if none are

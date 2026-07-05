@@ -221,5 +221,65 @@ def test_tcpconn_echo_under_mn():
     assert sum(ok) == N, "%d/%d M:N TCPConn echoes ok" % (sum(ok), N)
 
 
+# --------------------------------------------------------------------------
+# io_uring single-shot close-cancel (R7 item 1): closing a TCPConn while a
+# SINGLE-SHOT io_uring recv is parked on it must WAKE the recv, not hang.
+# io_uring pins the file, so a plain close does not complete the parked op --
+# RunloomTCPConn_close submits an ASYNC_CANCEL_FD (runloom_iouring_cancel_fd).
+#
+# SUBPROCESS + os._exit-on-wake: the failure mode is an io_uring D-state wedge
+# (an unkillable process whose ring teardown waits on the stuck op), so we run
+# it isolated with a hard timeout and hard-exit the instant the recv wakes,
+# before any teardown path.  Single-thread scheduler on purpose: that routes
+# the single-shot recv to the GLOBAL ring, which the cancel covers (the M:N
+# per-hub-ring case is a documented follow-up, RELIABILITY_PROGRAM.md R7).
+# --------------------------------------------------------------------------
+_IOU_CLOSE_CANCEL = r'''
+import sys, os, socket
+sys.path.insert(0, "src")
+import runloom_c as rc
+FLAGS = socket.MSG_WAITALL          # non-zero flags -> single-shot IORING_OP_RECV
+out = {}
+def main():
+    lst = rc.TCPConn.listen("127.0.0.1", 0)
+    s = socket.socket(fileno=os.dup(lst.fileno())); port = s.getsockname()[1]; s.detach()
+    box = {}
+    rc.fiber(lambda: box.__setitem__("conn", lst.accept()))
+    c = rc.TCPConn.connect("127.0.0.1", port)
+    for _ in range(5): rc.sched_yield()
+    def parker():
+        try:
+            r = c.recv(64, FLAGS)       # parks: peer never sends
+            out["r"] = ("ret", r)
+        except OSError as e:
+            out["r"] = ("err", e.errno)
+        sys.stdout.write("WOKE\n"); sys.stdout.flush()
+        os._exit(0)                     # hard-exit before any teardown can wedge
+    rc.fiber(parker)
+    def closer():
+        for _ in range(6): rc.sched_yield()
+        c.close()                       # -> runloom_iouring_cancel_fd(fd)
+    rc.fiber(closer)
+rc.fiber(main); rc.run()
+sys.stdout.write("HUNG\n"); sys.stdout.flush(); os._exit(2)
+'''
+
+
+@pytest.mark.skipif(not rc.iouring_available(), reason="io_uring unavailable")
+def test_tcpconn_iouring_close_cancels_parked_single_shot_recv():
+    import subprocess
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    env = dict(os.environ, RUNLOOM_TCPCONN_IOURING="1",
+               PYTHON_GIL="0", PYTHONPATH="src")
+    # -s KILL bounds a regression (a stuck op) so the suite never hangs; on a
+    # working build the child exits in well under a second.
+    p = subprocess.run(["timeout", "-s", "KILL", "15", sys.executable,
+                        "-c", _IOU_CLOSE_CANCEL],
+                       cwd=repo, env=env, capture_output=True, text=True)
+    assert "WOKE" in p.stdout, (
+        "parked io_uring single-shot recv did not wake on close (got %r / rc=%d)"
+        % (p.stdout, p.returncode))
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
