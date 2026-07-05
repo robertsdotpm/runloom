@@ -27,7 +27,15 @@ EPSILON_PER_HOUR = {
     "vsz_kb": 8192.0,     # address space is even noisier (mmap arenas)
     "vmas": 8.0,          # a few VMAs of pool growth
     "coro_depot_pooled": 8.0,
-    "g_structs_total": 4.0,
+    # g structs: freed structs are RETAINED by design (never returned to the OS)
+    # in per-thread slabs (RUNLOOM_G_SLAB_CAP each) + a global pool.  Under M:N
+    # the gauge ratchets up to ~slab-cap during warmup and then REBALANCES in
+    # small cross-hub batches at equilibrium (measured: plateau at ~4.6K, then
+    # occasional +-50 steps -- soak_cserve_echo plateau run, 2026-07-05).  A real
+    # per-connection leak accrues THOUSANDS per hour (the cserve smoke's genuine
+    # pre-plateau signal was +327K/h), so 64/h keeps >3 orders of magnitude of
+    # teeth while not flagging slab-batch noise.
+    "g_structs_total": 64.0,
     "stack_hwm": 1e18,    # a high-water max, not a population -- never a leak
     # cumulative odometers: excluded entirely (see ODOMETERS)
 }
@@ -42,9 +50,17 @@ EPSILON_PER_HOUR = {
 ABSOLUTE_FLOOR = {
     "rss_kb": 8192.0,     # < 8 MB total movement over the window = settling
     "vsz_kb": 16384.0,
-    "vmas": 24.0,
+    # vmas / coro_stack_live: coro stacks are RETAINED in per-thread pools
+    # (RUNLOOM_CORO_POOL_CAP=512 each) and each stack is 2 VMAs (map + guard).
+    # Under M:N the pools fill in a decelerating staircase (measured steps up to
+    # ~65 early, ~10-40 at equilibrium -- soak_cserve_echo plateau run,
+    # 2026-07-05); VM-only cost, RSS stays flat (lazy paging + madvise).  A real
+    # per-connection stack leak accrues thousands per hour, so these floors keep
+    # orders of magnitude of teeth while absorbing pool-fill steps.
+    "vmas": 224.0,
+    "coro_stack_live": 96.0,
     "coro_depot_pooled": 16.0,
-    "g_structs_total": 8.0,
+    "g_structs_total": 320.0,   # > the observed +-50 cross-hub slab-batch steps
 }
 _DEFAULT_ABS_FLOOR = 6.0   # a handful of objects of jitter on a count gauge
 
