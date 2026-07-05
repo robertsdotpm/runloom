@@ -59,6 +59,12 @@ void runloom_crash_uninstall(void);
 /* 1 once installed, else 0. */
 int  runloom_crash_installed(void);
 
+/* R5 self-hang watchdog: start a detached thread that emits a hang artifact
+ * (build+stats snapshot + fiber dump + flight recorder, no abort) if no fiber
+ * completes for `secs` while work is outstanding.  secs<=0 disables.
+ * Idempotent.  Auto-started from RUNLOOM_WATCHDOG=<secs> at crash install. */
+void runloom_watchdog_start(int secs);
+
 /* Per-thread sigaltstack arm / disarm.  Idempotent; both no-op unless the
  * handler is installed.  Wired into runloom_coro_thread_init / _fini and the
  * blockpool worker loop so every runloom OS thread is covered. */

@@ -11,6 +11,9 @@
 #include "runloom_introspect.h"
 #include "mn_sched.h"
 #include "coro.h"
+#include "netpoll.h"           /* R5 stats snapshot: parked / fd-armed / heals */
+#include "runloom_blockpool.h" /* R5 stats snapshot: blockpool inflight */
+#include "io_uring.h"          /* R5 stats snapshot: iouring inflight */
 #include "plat.h"
 #include "plat_compat.h"
 
@@ -44,6 +47,27 @@
 #    include <sys/wait.h>
 #  endif
 #endif
+
+/* R5 crash-telemetry build identity.  RUNLOOM_CRASH_VERSION can be overridden
+ * by setup.py (-DRUNLOOM_CRASH_VERSION=\"x.y.z\"); defaults to "dev".  The
+ * build-flags string records the toolchain conditions that most change runtime
+ * behaviour (sanitizers, NDEBUG) so a field report is unambiguous. */
+#ifndef RUNLOOM_CRASH_VERSION
+#  define RUNLOOM_CRASH_VERSION "dev"
+#endif
+#if defined(__SANITIZE_ADDRESS__)
+#  define RUNLOOM_CRASH_BF_SAN "  [ASan]"
+#elif defined(__SANITIZE_THREAD__)
+#  define RUNLOOM_CRASH_BF_SAN "  [TSan]"
+#else
+#  define RUNLOOM_CRASH_BF_SAN ""
+#endif
+#if defined(NDEBUG)
+#  define RUNLOOM_CRASH_BF_NDEBUG ""
+#else
+#  define RUNLOOM_CRASH_BF_NDEBUG "  [assert]"
+#endif
+#define RUNLOOM_CRASH_BUILDFLAGS RUNLOOM_CRASH_BF_SAN RUNLOOM_CRASH_BF_NDEBUG
 
 /* ---------------------------------------------------------------- *
  *  Shared state                                                    *
@@ -269,6 +293,145 @@ static void crash_spawn_gdb(void)
 /* ---------------------------------------------------------------- *
  *  The handler                                                     *
  * ---------------------------------------------------------------- */
+/* R5 build + runtime snapshot (docs/dev/RELIABILITY_PROGRAM.md).  Emit the
+ * build identity + backends + the R0 gauge snapshot.  Every value is an
+ * async-signal-safe read: a compile-time string, a backend id string, or a
+ * lock-free atomic-load gauge accessor (the SAME R0 accessors stats() uses) --
+ * NO Python, NO malloc, NO lock a pump holds.  This is what makes a pasted
+ * crash/hang artifact diagnosable without a reproduction.  Shared by the crash
+ * handler and the self-hang watchdog. */
+static void crash_emit_snapshot(void)
+{
+    crash_emit("[runloom] --- build + runtime snapshot ---\n");
+    crash_emitf("[runloom]   version %s  built %s %s\n",
+                RUNLOOM_CRASH_VERSION, __DATE__, __TIME__);
+    crash_emitf("[runloom]   backends: coro=%s netpoll=%s%s\n",
+                runloom_coro_backend(), runloom_netpoll_backend(),
+                RUNLOOM_CRASH_BUILDFLAGS);
+    crash_emitf("[runloom]   gs: total=%ld pending=%ld completed=%lld hubs=%d\n",
+                runloom_greg_total_count(), runloom_mn_pending_total(),
+                runloom_mn_completed_total(), runloom_mn_hub_count());
+    crash_emitf("[runloom]   stacks: live=%ld depot=%ld\n",
+                runloom_coro_stack_live(), runloom_coro_depot_pooled());
+    crash_emitf("[runloom]   netpoll: parked=%d heap=%d fd_armed=%d heals=%llu\n",
+                runloom_netpoll_parked_count(),
+                runloom_netpoll_deadline_heap_total(),
+                runloom_netpoll_fd_armed_count(),
+                runloom_netpoll_stale_arm_heals());
+    crash_emitf("[runloom]   inflight: blockpool=%ld iouring=%d\n",
+                runloom_blockpool_inflight(), runloom_iouring_inflight());
+}
+
+/* ---------------------------------------------------------------- *
+ *  R5 self-hang watchdog (RUNLOOM_WATCHDOG=secs)                    *
+ * ---------------------------------------------------------------- *
+ * A detached native thread that snapshots the SAME artifact -- WITHOUT aborting
+ * -- when the runtime stops making progress for N seconds while work is still
+ * outstanding.  The field equivalent of hang_hunter's gdb capture: a wedge that
+ * used to be a silent "the server just stopped responding" becomes a
+ * pinpointed, pasteable hang report.
+ *
+ * Progress signal: runloom_mn_completed_total() -- fibers RETIRING (R0, already
+ * maintained; zero new hot-path cost).  Guarded by "work outstanding" (pending
+ * or parked > 0) so a legitimately IDLE process (nothing to do) never trips it.
+ * So it fires exactly on: work is outstanding, yet none has retired for N
+ * seconds -> a wedge (deadlock / lost wake / a hub frozen off the scheduler).
+ *
+ * SCOPE: tuned for continuously-active workloads (the soak/canary that R5-R6
+ * run).  A workload whose fibers are long-lived by design (a pure keepalive
+ * server that rarely completes a fiber) can look stalled while healthy -- set
+ * RUNLOOM_WATCHDOG high, or leave it off, for such a service.  One snapshot per
+ * hang episode (re-arms only after progress resumes), so a persistent wedge
+ * does not spam. */
+static volatile int  runloom_watchdog_secs = 0;
+static volatile int  runloom_watchdog_on   = 0;
+
+static int runloom_watchdog_work_outstanding(void)
+{
+    return runloom_mn_pending_total() > 0 ||
+           runloom_netpoll_parked_count() > 0;
+}
+
+static void *runloom_watchdog_main(void *arg)
+{
+    int secs = runloom_watchdog_secs;
+    long long last_completed = -1;
+    double stalled_since = 0.0;      /* monotonic seconds; 0 = not stalling */
+    int reported = 0;
+    (void)arg;
+    for (;;) {
+        struct timespec nap = { 1, 0 };   /* poll cadence: 1 s */
+        nanosleep(&nap, NULL);
+        if (!runloom_watchdog_on) return NULL;
+        {
+            long long now_completed = runloom_mn_completed_total();
+            double now = (double)runloom_monotonic_ns() / 1e9;
+            if (now_completed != last_completed) {
+                /* progress happened -> reset the stall clock + re-arm. */
+                last_completed = now_completed;
+                stalled_since = 0.0;
+                reported = 0;
+                continue;
+            }
+            if (!runloom_watchdog_work_outstanding()) {
+                /* no progress but also no outstanding work -> genuinely idle. */
+                stalled_since = 0.0;
+                continue;
+            }
+            if (stalled_since == 0.0) {
+                stalled_since = now;
+                continue;
+            }
+            if (!reported && (now - stalled_since) >= (double)secs) {
+                /* WEDGE: outstanding work, no completion for `secs`.  Emit the
+                 * hang artifact -- snapshot + fiber dump + flight recorder --
+                 * WITHOUT aborting (the process may still recover; we only
+                 * observe).  Serialise against the crash handler so a real
+                 * crash mid-report does not interleave. */
+                if (__atomic_exchange_n(&runloom_crash_in_progress, 1,
+                                        __ATOMIC_ACQ_REL) == 0) {
+                    crash_emit("\n===================== runloom HANG (watchdog) "
+                               "=====================\n");
+                    crash_emitf("[runloom] no fiber has completed in %ds while "
+                                "work is outstanding (pid %ld) -- likely a "
+                                "deadlock / lost wake / frozen hub.\n",
+                                secs, (long)getpid());
+                    crash_emit_snapshot();
+                    if (runloom_crash_flags_v & RUNLOOM_CRASH_GOROUTINES) {
+                        runloom_dump_fibers_fd(2);
+                        if (runloom_crash_report_fd >= 0)
+                            runloom_dump_fibers_fd(runloom_crash_report_fd);
+                    }
+                    runloom_evt_crash_dump(2, 24);
+                    if (runloom_crash_report_fd >= 0)
+                        runloom_evt_crash_dump(runloom_crash_report_fd, 24);
+                    crash_emit("[runloom] (watchdog observed only; not aborting) "
+                               "==================\n");
+                    __atomic_store_n(&runloom_crash_in_progress, 0,
+                                     __ATOMIC_RELEASE);
+                }
+                reported = 1;   /* one report per episode */
+            }
+        }
+    }
+}
+
+/* Start the watchdog (idempotent).  secs<=0 disables.  Called from
+ * install_crash_handler when RUNLOOM_WATCHDOG is set, or explicitly. */
+void runloom_watchdog_start(int secs)
+{
+    pthread_t th;
+    if (secs <= 0) { runloom_watchdog_on = 0; return; }
+    if (__atomic_exchange_n(&runloom_watchdog_on, 1, __ATOMIC_ACQ_REL) != 0)
+        return;   /* already running */
+    runloom_watchdog_secs = secs;
+    if (pthread_create(&th, NULL, runloom_watchdog_main, NULL) != 0) {
+        runloom_watchdog_on = 0;
+        return;
+    }
+    pthread_detach(th);
+}
+
 static void crash_handler(int sig, siginfo_t *si, void *uctx)
 {
     int   idx  = crash_sig_index(sig);
@@ -297,6 +460,11 @@ static void crash_handler(int sig, siginfo_t *si, void *uctx)
         crash_emitf("[runloom] fatal %s", crash_sig_name(sig));
     crash_emitf("  (pid %ld, thread 0x%lx)\n",
                 (long)getpid(), (unsigned long)pthread_self());
+
+    /* R5 field telemetry: build identity + backends + the R0 gauge snapshot,
+     * emitted RIGHT AFTER the header (so it lands even if a later step hangs).
+     * Shared with the self-hang watchdog. */
+    crash_emit_snapshot();
 
     /* Classify the fault against the per-fiber guard pages. */
     {
@@ -484,6 +652,15 @@ int runloom_crash_install(int flags, const char *report_path)
 
     __atomic_store_n(&runloom_crash_on, 1, __ATOMIC_RELEASE);
     runloom_crash_thread_arm();   /* arm the installing (main) thread now */
+    /* R5: auto-start the self-hang watchdog if RUNLOOM_WATCHDOG=<secs> is set.
+     * It reuses the crash report fd + goroutine-dump flag installed here. */
+    {
+        const char *wd = getenv("RUNLOOM_WATCHDOG");
+        if (wd != NULL && wd[0] != '\0') {
+            int secs = atoi(wd);
+            if (secs > 0) runloom_watchdog_start(secs);
+        }
+    }
     return 0;
 }
 
