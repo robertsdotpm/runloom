@@ -228,17 +228,19 @@ def test_release_if_idle_enables_clean_reuse():
     assert out & READ
 
 
-@pytest.mark.xfail(strict=False, reason=(
-    "SHARP EDGE: the per-fd netpoll arm cache is PROCESS-GLOBAL and is not "
-    "cleared when an fd is closed -- only netpoll_unregister clears it. Closing "
-    "an armed fd at the raw wait_fd level WITHOUT unregister leaves the arm "
-    "stale; the next time that fd NUMBER is reused and parked on, the "
-    "register-once skip suppresses the EPOLL_CTL_ADD and wait_fd parks until its "
-    "ceiling even though data is ready. The aio sock_* / monkey close hooks "
-    "paper over this; a raw wait_fd user who forgets to unregister gets a silent "
-    "hang, and a process that leaks the arm makes UNRELATED later fds on the "
-    "same number hang. Encoded as the ideal so the hazard stays visible."))
 def test_fd_reuse_without_unregister_should_still_wake():
+    """Formerly an xfail SHARP EDGE, now a hard regression guard.
+
+    The per-fd netpoll arm cache is PROCESS-GLOBAL and only
+    netpoll_unregister clears it, so an fd closed WITHOUT unregister (a
+    GC'd socket, a raw wait_fd user) used to poison its fd NUMBER: the next
+    park on a reused number took register's zero-syscall skip with no
+    kernel registration behind it and slept to its ceiling with data ready.
+    The stale-arm probe (RUNLOOM_STALE_ARM_PROBE_MS, netpoll.c parker-struct
+    comment) now validates a predicted-skip park's arm from the deadline
+    heap and re-ADDs a stale one, so the reused fd wakes in ~probe-interval
+    (well under the 1.0s asserted here) instead of parking out the 1200ms
+    ceiling."""
     def f():
         r, w = os.pipe()
         rc.wait_fd(r, READ, 5)           # arm
@@ -262,6 +264,71 @@ def test_fd_reuse_without_unregister_should_still_wake():
         pytest.skip("fd number was not reused")
     rv, el = out
     assert rv & READ and el < 1.0, "stale arm: reused fd parked %.3fs (data ready)" % el
+
+
+def test_fd_reuse_without_unregister_untimed_park_heals():
+    """The FOREVER variant of the poison: an UNTIMED park on a poisoned fd
+    number used to hang the fiber for the life of the process (no deadline,
+    no kernel registration, no event ever).  The stale-arm probe gives the
+    predicted-skip park an internal deadline-heap tick, so the heal happens
+    even with timeout=-1 -- the scariest long-uptime failure mode of the
+    old cache (fd numbers recycle constantly in a real server)."""
+    def f():
+        r, w = os.pipe()
+        rc.wait_fd(r, READ, 5)           # arm
+        os.close(r); os.close(w)         # NO unregister -> poisons fd number r
+        r2, w2 = os.pipe()
+        try:
+            if r2 != r:
+                return "skip"
+            def writer():
+                rc.sched_yield(); rc.sched_yield()
+                os.write(w2, b"y")
+            rc.fiber(writer)
+            t0 = time.monotonic()
+            rv = rc.wait_fd(r2, READ, -1)          # UNTIMED
+            return rv, time.monotonic() - t0
+        finally:
+            _drop(r2); _drop(w2)
+    with hang_guard(15, "fd reuse untimed park"):
+        out = _run_single(f)
+    if out == "skip":
+        pytest.skip("fd number was not reused")
+    rv, el = out
+    assert rv & READ and el < 1.0, (
+        "untimed park on poisoned fd not healed: parked %.3fs (data ready)" % el)
+
+
+def test_untimed_park_on_fd_closed_after_skip_gets_error_woken():
+    """DEAD-arm branch of the probe: a predicted-skip park whose fd is then
+    closed (raw os.close, no unregister) can never receive a kernel event
+    -- the kernel auto-removed the registration at close.  The probe finds
+    the fd dead (EBADF), clears the stale cache, and error-wakes the parker
+    with the direction mask so its caller retries the op and surfaces a
+    loud OSError instead of parking forever."""
+    def f():
+        r, w = os.pipe()
+        rc.wait_fd(r, READ, 5)           # arm
+        os.close(r); os.close(w)         # poison fd number r
+        r2, w2 = os.pipe()
+        if r2 != r:
+            _drop(r2); _drop(w2)
+            return "skip"
+        def closer():
+            for _ in range(4):
+                rc.sched_yield()
+            os.close(r2); os.close(w2)   # close WHILE parked, no unregister
+        rc.fiber(closer)
+        t0 = time.monotonic()
+        rv = rc.wait_fd(r2, READ, -1)              # UNTIMED, predicted-skip
+        return rv, time.monotonic() - t0
+    with hang_guard(15, "park then close, no unregister"):
+        out = _run_single(f)
+    if out == "skip":
+        pytest.skip("fd number was not reused")
+    rv, el = out
+    assert rv & READ and el < 1.0, (
+        "parker on a dead fd not error-woken: rv=%r after %.3fs" % (rv, el))
 
 
 # --------------------------------------------------------------------------
@@ -411,7 +478,7 @@ def test_dbg_netpoll_tripwire_detects_and_heals_stale_arm():
                            cwd=repo, env=env, capture_output=True, text=True, timeout=30)
         if "SKIP" in p.stdout:
             continue
-        assert "STALE ARM on fd" in p.stderr, (
+        assert "STALE ARM healed on fd" in p.stderr, (
             "tripwire did not fire on a GC-poisoned fd\nstderr=%r" % p.stderr)
         assert "HEALED" in p.stdout, (
             "tripwire fired but did not self-heal the wait\nout=%r err=%r"

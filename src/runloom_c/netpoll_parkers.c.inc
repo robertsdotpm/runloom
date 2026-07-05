@@ -72,6 +72,11 @@ static runloom_parked_t *runloom_parker_pool_acquire(void)
     p->heap_index = -1;
     p->park_ts = 0;
     p->reclaimed = 0;
+    /* Stale-arm probe state: a freelist-reused parker must not inherit a
+     * prior lifetime's probe tick (deadline_ns/user_deadline_ns are set
+     * fresh by every wait_fd; the flag must start clear regardless). */
+    p->user_deadline_ns = -1;
+    p->probe_pending = 0;
     /* Windows IOCP-AFD weak ctx ref: NULL until this park's runloom_iocp_submit
      * stores it (under pool->lock).  Reset on every acquire so a freelist-reused
      * parker never inherits a stale ctx pointer from a prior lifetime -- the unlink

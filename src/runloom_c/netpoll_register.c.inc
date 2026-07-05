@@ -38,16 +38,18 @@
  * registration; the most common way to hit this is NOT a raw wait_fd user but
  * a socket DROPPED TO THE GC -- CPython's socket C-dealloc closes the raw fd
  * directly, bypassing the monkey-patched close() that calls unregister.  The
- * next wait_fd on that fd NUMBER then takes register's already-armed skip,
- * never re-ADDs, and parks until its timeout (forever on an untimed wait) even
- * though data is ready.
+ * next wait_fd on that fd NUMBER then takes register's already-armed skip and
+ * never re-ADDs.
  *
- * When this flag is set, the skip path VALIDATES itself with a single
- * EPOLL_CTL_MOD: ENOENT proves the arm is stale (fd not in the epoll set), so
- * we warn -- naming the fd -- and self-heal by re-ADDing, turning a silent
- * hang into a loud, pinpointed diagnostic.  OFF by default, so the
- * recv-after-recv hot path keeps its zero-syscall skip and this never runs in
- * production. */
+ * PRODUCTION correctness is carried by the stale-arm PROBE (default on,
+ * RUNLOOM_STALE_ARM_PROBE_MS): a predicted-skip park carries an internal
+ * deadline tick; the expiry sweep validates + heals the arm within ~one probe
+ * interval with zero hot-path syscalls (see the parker-struct comment in
+ * netpoll.c and runloom_netpoll_validate_arm below).  This flag additionally
+ * validates the skip path INLINE -- one EPOLL_CTL_MOD per skip -- so a stale
+ * arm is diagnosed loudly at the exact offending park instead of ~250 ms
+ * later.  OFF by default so the recv-after-recv hot path keeps its
+ * zero-syscall skip. */
 static int runloom_netpoll_dbg_stale_check(void)
 {
     static int v = -1;
@@ -58,6 +60,139 @@ static int runloom_netpoll_dbg_stale_check(void)
         __atomic_store_n(&v, cur, __ATOMIC_RELAXED);
     }
     return cur;
+}
+
+/* Stale-arm probe interval (see the parker-struct comment in netpoll.c for
+ * the full mechanism).  RUNLOOM_STALE_ARM_PROBE_MS: default 250 ms; 0
+ * disables probing (restores the pre-probe behaviour where a poisoned fd
+ * number parks to its ceiling).  Read once, cached. */
+static long long runloom_netpoll_stale_probe_ns(void)
+{
+    static long long v = -1;
+    long long cur = __atomic_load_n(&v, __ATOMIC_RELAXED);
+    if (cur < 0) {
+        const char *e = getenv("RUNLOOM_STALE_ARM_PROBE_MS");
+        cur = (e != NULL) ? atoll(e) * 1000000LL : 250000000LL;
+        if (cur < 0) cur = 0;
+        __atomic_store_n(&v, cur, __ATOMIC_RELAXED);
+    }
+    return cur;
+}
+
+/* Count of stale arms healed / cleared by runloom_netpoll_validate_arm.
+ * Every heal means some fd was closed WITHOUT netpoll_unregister (commonly
+ * a socket leaked to the GC) -- an app-level hygiene bug this runtime
+ * absorbs.  Relaxed: a diagnostic tally, not a synchronisation point. */
+static unsigned long long runloom_stale_arm_heals;
+
+/* ADVISORY, LOCK-FREE: will runloom_netpoll_register(fd, events) take the
+ * zero-syscall already-armed skip?  wait_fd calls this BEFORE linking, so a
+ * predicted-skip park can carry the stale-arm probe deadline from the start
+ * (the heap insert at link + the new-earliest poller-break then just work).
+ * Race analysis -- the cache can change between this read and register's
+ * locked read; every outcome is benign:
+ *   - predict skip, register fresh-ADDs (a concurrent unregister raced us):
+ *     the arm is kernel-confirmed but the probe stays scheduled -> one spare
+ *     validate MOD if the park dwells past the probe tick.  Harmless.
+ *   - predict fresh, register skips (a concurrent register raced us): the
+ *     sibling's ADD just kernel-confirmed the arm microseconds ago, so the
+ *     skip is trustworthy; the probe is simply not scheduled this episode.
+ *     A POISONED arm can never appear this way: poison requires a close,
+ *     and closing an fd another fiber is concurrently waiting on is an
+ *     app-level use-after-close outside this defence's scope.
+ * The poisoned case itself always predicts skip (the stale mask is exactly
+ * what the cache still holds), so the probe is always scheduled for it. */
+static int runloom_netpoll_arm_predict_skip(int fd, int events)
+{
+    int need = events & (RUNLOOM_NETPOLL_READ | RUNLOOM_NETPOLL_WRITE);
+    unsigned char *base;
+    size_t cap = __atomic_load_n(&runloom_fd_pending_wake_cap, __ATOMIC_ACQUIRE);
+    if (need == 0 || fd < 0 || (size_t)fd >= cap) return 0;
+    base = __atomic_load_n(&runloom_fd_armed, __ATOMIC_ACQUIRE);
+    if (base == NULL) return 0;
+    {
+        int cur = __atomic_load_n(&base[fd], __ATOMIC_RELAXED);
+        return (cur & need) == need;
+    }
+}
+
+/* Validate one fd's LEVEL arm against the kernel and self-heal a stale one.
+ * Called WITHOUT any RUNLOOM_RANK_PARKER_POOL lock held (takes
+ * runloom_pool.lock itself): from the expiry sweep's post-lock probe batch,
+ * and from the RUNLOOM_DBG_NETPOLL skip-path tripwire.
+ *
+ * Outcomes:
+ *   0  arm is genuine (MOD succeeded), or was already unregistered, or a
+ *      stale arm was HEALED by re-ADD -- the LEVEL epoll re-reports any
+ *      present readiness, which flows to the parker through the normal
+ *      pump dispatch/claim path (the commit protocol is never touched here).
+ *  -1  the fd itself is DEAD or not pollable (EBADF: closed without
+ *      unregister and not yet reused; EPERM: the number was reused by a
+ *      non-pollable file).  The cache is cleared exactly like unregister so
+ *      the next park on a reused number re-arms fresh; the caller should
+ *      error-wake any parkers still waiting on this fd (they can never be
+ *      woken by the kernel again). */
+static int runloom_netpoll_validate_arm(int fd)
+{
+    int cur, ep, err;
+    struct epoll_event chk;
+    if (fd < 0) return 0;
+    RUNLOOM_RLOCK(&runloom_pool.lock, RUNLOOM_RANK_PARKER_POOL);
+    cur = runloom_fd_armed_get(fd);
+    if (cur == 0) {   /* unregistered since the probe was scheduled */
+        RUNLOOM_RUNLOCK(&runloom_pool.lock, RUNLOOM_RANK_PARKER_POOL);
+        return 0;
+    }
+    ep = runloom_epoll_fd;
+    if (runloom_perhub_epoll()) {
+        int owner = runloom_fd_epoll_pool_get(fd);
+        if (owner >= 0) ep = runloom_pools[owner].epoll_fd;
+    }
+    chk.events = 0;
+    if (cur & RUNLOOM_NETPOLL_READ)  chk.events |= EPOLLIN | EPOLLRDHUP;
+    if (cur & RUNLOOM_NETPOLL_WRITE) chk.events |= EPOLLOUT;
+    chk.data.fd = fd;
+    if (epoll_ctl(ep, EPOLL_CTL_MOD, fd, &chk) == 0) {
+        RUNLOOM_RUNLOCK(&runloom_pool.lock, RUNLOOM_RANK_PARKER_POOL);
+        return 0;                                  /* arm is genuine */
+    }
+    err = errno;
+    if (err == ENOENT) {
+        /* Stale arm: the fd is open and pollable but NOT in the epoll set --
+         * it was closed without unregister and the number has been reused.
+         * Re-ADD to heal; LEVEL delivers any already-present readiness. */
+        if (epoll_ctl(ep, EPOLL_CTL_ADD, fd, &chk) == 0) {
+            __atomic_add_fetch(&runloom_stale_arm_heals, 1, __ATOMIC_RELAXED);
+            RUNLOOM_RUNLOCK(&runloom_pool.lock, RUNLOOM_RANK_PARKER_POOL);
+            if (runloom_netpoll_dbg_stale_check()) {
+                fprintf(stderr,
+                    "[runloom-netpoll] STALE ARM healed on fd %d (armed mask "
+                    "0x%x): the fd number was closed WITHOUT netpoll_unregister "
+                    "(a socket dropped to the GC bypasses the monkey close "
+                    "hook) and has been reused.  Re-ADDed; the wait_fd would "
+                    "otherwise have parked to its ceiling.\n",
+                    fd, (unsigned)cur);
+            }
+            return 0;
+        }
+        err = errno;
+    }
+    /* EBADF / EPERM / anything else: the cached arm cannot correspond to a
+     * pollable open fd -- clear it exactly like unregister. */
+    runloom_fd_armed_set(fd, 0);
+    runloom_fd_bit_clear(fd);
+    if (runloom_perhub_epoll()) runloom_fd_epoll_pool_set(fd, -1);
+    __atomic_add_fetch(&runloom_stale_arm_heals, 1, __ATOMIC_RELAXED);
+    RUNLOOM_RUNLOCK(&runloom_pool.lock, RUNLOOM_RANK_PARKER_POOL);
+    if (runloom_netpoll_dbg_stale_check()) {
+        fprintf(stderr,
+            "[runloom-netpoll] DEAD ARM cleared on fd %d (armed mask 0x%x, "
+            "errno=%d): the fd was closed WITHOUT netpoll_unregister and is "
+            "gone (or its number reused by a non-pollable file).  Parkers "
+            "still waiting on it are error-woken.\n",
+            fd, (unsigned)cur, err);
+    }
+    return -1;
 }
 #endif
 
@@ -174,28 +309,15 @@ static int runloom_netpoll_register(int fd, int events)
     }
     if (cur != 0 && target == cur) {
         RUNLOOM_RUNLOCK(&runloom_pool.lock, RUNLOOM_RANK_PARKER_POOL);
-        if (runloom_netpoll_dbg_stale_check()) {
-            /* Validate the zero-syscall skip: MOD the already-armed direction
-             * set; ENOENT means the fd is NOT actually in the epoll set -- a
-             * stale arm from an fd closed without unregister (commonly a GC'd
-             * socket).  Warn + self-heal so the wait does not silently hang. */
-            struct epoll_event chk;
-            chk.events = 0;
-            if (cur & RUNLOOM_NETPOLL_READ)  chk.events |= EPOLLIN | EPOLLRDHUP;
-            if (cur & RUNLOOM_NETPOLL_WRITE) chk.events |= EPOLLOUT;
-            chk.data.fd = fd;
-            if (epoll_ctl(ep, EPOLL_CTL_MOD, fd, &chk) != 0 &&
-                errno == ENOENT) {
-                fprintf(stderr,
-                    "[runloom-netpoll] STALE ARM on fd %d (armed mask 0x%x) -- "
-                    "fd is not in the epoll set: it was closed WITHOUT "
-                    "netpoll_unregister (a socket dropped to the GC bypasses "
-                    "the monkey close hook). Re-ADDing to self-heal; the "
-                    "wait_fd would otherwise park until timeout.\n",
-                    fd, (unsigned)cur);
-                (void)epoll_ctl(ep, EPOLL_CTL_ADD, fd, &chk);
-            }
-        }
+        /* RUNLOOM_DBG_NETPOLL tripwire: validate the zero-syscall skip
+         * IMMEDIATELY (one EPOLL_CTL_MOD per skip) instead of waiting for the
+         * production stale-arm probe tick -- turns a stale arm into a loud,
+         * pinpointed diagnostic at the exact park that would have hung.
+         * OFF by default so the recv-after-recv hot path keeps its
+         * zero-syscall skip; production correctness is carried by the
+         * probe_pending deadline the predicting wait_fd scheduled. */
+        if (runloom_netpoll_dbg_stale_check())
+            (void)runloom_netpoll_validate_arm(fd);
         return 0;                               /* already armed -> 0 syscalls */
     }
     if (runloom_fd_armed_set(fd, target) != 0) {

@@ -427,20 +427,30 @@ static void runloom_fd_bit_clear(int fd)
     runloom_fd_registered_bm[byte] &= (unsigned char)~(1u << (fd & 7));
 }
 
-/* Per-fd epoll LEVEL arm mask accessors.  Caller MUST hold runloom_pool.lock. */
+/* Per-fd epoll LEVEL arm mask accessors.  MUTATION (set) and any read that
+ * feeds a register/unregister decision MUST hold runloom_pool.lock -- that
+ * lock is what makes the read-modify-write cycles in register/unregister
+ * atomic.  The per-byte accesses themselves are relaxed atomics so that
+ * runloom_netpoll_arm_predict_skip's advisory LOCK-FREE read (wait_fd hot
+ * path, before link) is race-clean; a stale predict value only ever costs
+ * one spare probe epoll_ctl or defers the probe to the next park episode
+ * (analyzed at the predict helper).  The arrays are preallocated once and
+ * never realloc'd (runloom_fd_arrays_init), so the base pointer is stable. */
 static int runloom_fd_armed_get(int fd)
 {
     if (fd < 0 || runloom_fd_armed == NULL) return 0;
     if ((size_t)fd >= runloom_fd_pending_wake_cap) return 0;
-    return runloom_fd_armed[fd];
+    return __atomic_load_n(&runloom_fd_armed[fd], __ATOMIC_RELAXED);
 }
 
 static int runloom_fd_armed_set(int fd, int mask)
 {
     if (fd < 0 || runloom_fd_armed == NULL) return -1;
     if ((size_t)fd >= runloom_fd_pending_wake_cap) return -1;
-    runloom_fd_armed[fd] = (unsigned char)(mask & (RUNLOOM_NETPOLL_READ |
-                                                   RUNLOOM_NETPOLL_WRITE));
+    __atomic_store_n(&runloom_fd_armed[fd],
+                     (unsigned char)(mask & (RUNLOOM_NETPOLL_READ |
+                                             RUNLOOM_NETPOLL_WRITE)),
+                     __ATOMIC_RELAXED);
     return 0;
 }
 

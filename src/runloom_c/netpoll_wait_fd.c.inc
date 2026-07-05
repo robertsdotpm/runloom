@@ -198,6 +198,36 @@ int runloom_netpoll_wait_fd(int fd, int events, long long timeout_ns)
     park->fd = fd;
     park->events = events;
     park->deadline_ns = timeout_ns < 0 ? -1 : monotonic_ns() + timeout_ns;
+    park->user_deadline_ns = park->deadline_ns;
+    /* probe_pending is 0 from pool acquire.  Stale-arm probe: if this park
+     * will (predictably) take register's zero-syscall already-armed skip --
+     * the ONLY park a poisoned fd number can hang (see the parker-struct
+     * comment in netpoll.c) -- park on a short internal probe deadline
+     * instead of the caller's.  Setting it HERE, before the link, means the
+     * heap insert and the new-earliest poller-break below carry the probe
+     * tick with zero extra machinery; the expiry sweep re-keys us back to
+     * user_deadline_ns after validating the arm, without waking this fiber.
+     * The hot recv-after-recv park also predicts skip but is woken by its
+     * event long before the probe tick, so its entry simply leaves the heap
+     * at unlink -- no probe ever fires for it.  For a short timed wait the
+     * probe fires at timeout/2 so a poisoned fd still heals inside app-level
+     * retry loops instead of timing out forever. */
+#if defined(RUNLOOM_HAVE_EPOLL)
+    {
+        long long probe_ns = runloom_netpoll_stale_probe_ns();
+        if (probe_ns > 0 && runloom_netpoll_arm_predict_skip(fd, events)) {
+            if (timeout_ns >= 0 && timeout_ns / 2 < probe_ns)
+                probe_ns = timeout_ns / 2;
+            if (probe_ns > 0) {
+                long long probe_at = monotonic_ns() + probe_ns;
+                if (park->deadline_ns < 0 || probe_at < park->deadline_ns) {
+                    park->probe_pending = 1;
+                    park->deadline_ns = probe_at;
+                }
+            }
+        }
+    }
+#endif
     park->ready_out = &ready_mask;
     park->g = current_g;
     park->hub = hub_opaque;

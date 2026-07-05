@@ -142,6 +142,27 @@ typedef struct runloom_parked {
      * (pool acquire zeroes both). */
     long long park_ts;
     int reclaimed;
+    /* Stale-arm probe (epoll LEVEL register-once backend only).  The per-fd
+     * arm cache (runloom_fd_armed) is process-global and survives an fd
+     * closed WITHOUT netpoll_unregister (commonly a socket dropped to the GC:
+     * CPython's C-dealloc closes the raw fd, bypassing the monkey close
+     * hook).  A park on a reused fd NUMBER then takes register's zero-syscall
+     * already-armed skip while the kernel has no registration -- and would
+     * sleep to its ceiling (forever when untimed) with data ready.  When
+     * wait_fd PREDICTS it will take that skip (the only poisonable park), it
+     * parks with deadline_ns set to a short internal PROBE tick instead of
+     * the caller's deadline, which moves to user_deadline_ns.  The expiry
+     * sweep (runloom_pump_drain_expired) treats a probe_pending expiry as
+     * maintenance, NOT a timeout: it re-keys the parker back to
+     * user_deadline_ns (or out of the heap for an untimed wait), then
+     * validates the fd's kernel arm and self-heals a stale one
+     * (runloom_netpoll_validate_arm) -- the LEVEL re-ADD re-delivers any
+     * present readiness through the normal pump/claim path.  The fiber
+     * sleeps through a clean probe; the commit protocol is never touched.
+     * At most one probe per park episode (probe_pending clears at re-key).
+     * Interval: RUNLOOM_STALE_ARM_PROBE_MS (default 250; 0 disables). */
+    long long user_deadline_ns;
+    int probe_pending;
     /* Windows IOCP-AFD backend ONLY.  WEAK reference to the per-park
      * runloom_poll_ctx_t whose AFD_POLL IRP this parker submitted
      * (netpoll_wait_fd's IOCP branch).  The ctx is owned and freed

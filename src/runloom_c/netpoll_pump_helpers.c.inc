@@ -118,17 +118,52 @@ static int runloom_pump_dispatch_event(int fd, int mask, int wake_all)
  * its g is routed back via runloom_mn_wake_g / runloom_sched_wake.
  * Wakes happen inside the pool lock; lock ordering matches
  * runloom_pump_dispatch_event so the two are deadlock-free. */
+/* Max stale-arm probes serviced per pool per sweep pass.  Bounds the work
+ * done between the pool-lock release and the epoll_ctl probes; a burst of
+ * simultaneous probe ticks beyond the cap simply waits for the next pump
+ * pass (ms away -- the re-keyed survivors still sit at the heap front). */
+#define RUNLOOM_STALE_PROBE_BATCH 64
+
 static int runloom_pump_drain_expired(long long now)
 {
     int woke = 0;
     int pi;
     for (pi = 0; pi < RUNLOOM_PARKER_POOL_MAX; pi++) {
         runloom_parker_pool_t *pool = &runloom_pools[pi];
+#if defined(RUNLOOM_HAVE_EPOLL)
+        int probe_fds[RUNLOOM_STALE_PROBE_BATCH];
+        int nprobe = 0;
+#endif
         if (__atomic_load_n(&pool->lock_inited, __ATOMIC_ACQUIRE) != 2) continue;
         RUNLOOM_RLOCK(&pool->lock, RUNLOOM_RANK_PARKER_POOL);
         while (pool->dh_size > 0 && pool->dh_arr[0]->deadline_ns <= now) {
             runloom_parked_t *p = pool->dh_arr[0];
             int cur;
+#if defined(RUNLOOM_HAVE_EPOLL)
+            if (p->probe_pending) {
+                /* Stale-arm probe tick, NOT a timeout (see the parker-struct
+                 * comment in netpoll.c).  Re-key the parker back to its real
+                 * deadline -- out of the heap entirely for an untimed wait --
+                 * WITHOUT claiming, unlinking, or waking it (the commit
+                 * protocol is untouched; heap membership under this lock is
+                 * only ever ARMED/PARKED, and neither state reads deadline
+                 * fields concurrently).  The fd is validated after this
+                 * pool's lock drops: runloom_netpoll_validate_arm takes
+                 * runloom_pool.lock, same rank as pool->lock, so the two may
+                 * never nest.  probe_pending clears here, so each park
+                 * episode probes at most once and this loop always makes
+                 * forward progress (a re-keyed short wait whose REAL deadline
+                 * already passed comes back to the front with the flag clear
+                 * and is drained as a genuine timeout in this same pass). */
+                if (nprobe >= RUNLOOM_STALE_PROBE_BATCH) break;
+                p->probe_pending = 0;
+                runloom_dh_remove(pool, p);
+                p->deadline_ns = p->user_deadline_ns;
+                runloom_dh_insert(pool, p);      /* no-op when untimed (-1) */
+                probe_fds[nprobe++] = p->fd;
+                continue;
+            }
+#endif
             /* Claim like the pump so a g mid-commit doesn't both park and
              * get timeout-woken. */
             for (;;) {
@@ -153,6 +188,29 @@ static int runloom_pump_drain_expired(long long now)
             }
         }
         RUNLOOM_RUNLOCK(&pool->lock, RUNLOOM_RANK_PARKER_POOL);
+#if defined(RUNLOOM_HAVE_EPOLL)
+        /* Service the collected probes with NO pool lock held (validate_arm
+         * takes runloom_pool.lock -- same rank).  A HEALED arm (stale cache,
+         * fd re-ADDed) needs nothing more: the LEVEL epoll re-reports any
+         * present readiness and the normal pump dispatch wakes the parker.
+         * A DEAD fd (-1: EBADF/EPERM -- closed without unregister, no
+         * pollable reuse) can never produce a kernel event again, so error-
+         * wake every parker still on it: dispatch with the full direction
+         * mask and wake_all=1 (the parker's op retries, hits EBADF, and the
+         * app sees a loud OSError instead of a park to the ceiling --
+         * forever, when untimed).  The parker may already be gone (claimed
+         * between the re-key and here); dispatch on an empty bucket is a
+         * no-op and the probe was still useful (cache hygiene). */
+        {
+            int i;
+            for (i = 0; i < nprobe; i++) {
+                if (runloom_netpoll_validate_arm(probe_fds[i]) < 0) {
+                    (void)runloom_pump_dispatch_event(probe_fds[i],
+                            RUNLOOM_NETPOLL_READ | RUNLOOM_NETPOLL_WRITE, 1);
+                }
+            }
+        }
+#endif
     }
     return woke;
 }

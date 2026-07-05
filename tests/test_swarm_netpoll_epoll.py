@@ -456,23 +456,24 @@ else: sys.stdout.write("HUNG\n")
 
 
 def test_raw_close_without_unregister_poisons_fd_subprocess():
-    # FINDING (known SHARP EDGE, mirrors test_adv's xfail): a raw wait_fd user
-    # who closes WITHOUT unregister leaves the global arm cache stale, so the
-    # next fiber handed that fd NUMBER skips EPOLL_CTL_ADD and parks until its
-    # ceiling even though data is ready.  We assert the CURRENT (buggy) behavior:
-    # the reused fd times out to 0 ("HUNG") rather than waking.  Contained in a
-    # subprocess (the poison must not leak into the rest of the suite); bounded
-    # timeout so it never actually hangs.  No crash/abort either way.
+    # Formerly asserted the SHARP-EDGE (buggy) behavior: a raw wait_fd user who
+    # closed WITHOUT unregister left the global arm cache stale, so the next
+    # fiber handed that fd NUMBER skipped EPOLL_CTL_ADD and parked to its
+    # ceiling ("HUNG") with data ready.  The stale-arm probe (2026-07-05,
+    # RUNLOOM_STALE_ARM_PROBE_MS; parker-struct comment in netpoll.c) now
+    # validates a predicted-skip park from the deadline heap and re-ADDs the
+    # stale arm, so the reused fd WAKES within ~one probe interval -- well
+    # inside the script's 1200 ms ceiling.  Assert the FIXED behavior.  Still a
+    # subprocess (the poison scenario is process-global; keep it isolated).
     for _ in range(8):
         p = _subproc(_RAW_POISON_SCRIPT, timeout=20)
         _assert_no_signal_crash(p, "raw-poison")
         if "SKIP" in p.stdout:
             continue
-        # The hazard reproduces deterministically on the first reuse: the reused
-        # fd does NOT wake (the stale arm suppressed the re-ADD).
-        assert "HUNG" in p.stdout, (
-            "stale-arm poison did NOT reproduce (got %r); if the runtime now "
-            "self-heals this raw path that is a *fix*, update this assertion"
+        assert "WOKE" in p.stdout, (
+            "stale-arm probe did not heal the poisoned fd (got %r): the reused "
+            "number's park should be probed and re-ADDed within "
+            "RUNLOOM_STALE_ARM_PROBE_MS, long before the 1200 ms ceiling"
             % p.stdout)
         return
     pytest.skip("fd number never reused across 8 attempts")
@@ -517,7 +518,7 @@ sys.stdout.write("SKIP\n" if out.get("skip") else ("HEALED\n" if out.get("rv") e
         _assert_no_signal_crash(p, "dbg-tripwire")
         if "SKIP" in p.stdout:
             continue
-        assert "STALE ARM on fd" in p.stderr, (
+        assert "STALE ARM healed on fd" in p.stderr, (
             "tripwire did not fire on a GC-poisoned fd\nstderr=%r" % p.stderr[-1500:])
         assert "HEALED" in p.stdout, (
             "tripwire fired but did not self-heal\nout=%r err=%r"
