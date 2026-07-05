@@ -40,6 +40,7 @@ class Ctx(object):
         self.deadline = deadline
         self.compress = compress
         self.progress = 0
+        self.chaos_events = 0
         self.done = False
 
     def expired(self):
@@ -50,6 +51,50 @@ class Ctx(object):
         # thread scheduler; under M:N the sampler only reads it (a lost
         # increment merely under-reports progress, never a false wedge).
         self.progress += 1
+
+
+def _chaos_thread(ctx, seed):
+    """R3 in-process chaos (docs/dev/RELIABILITY_PROGRAM.md R3): error paths age
+    too.  A daemon thread that periodically inflicts a random disruption so the
+    runtime's cleanup / degraded paths get the same cycle counts the happy path
+    gets.  Runs on a foreign OS thread (not a fiber) so it disrupts the
+    scheduler from outside, like a real signal / GC pause / fd-pressure event.
+
+    Events (all self-inflicted, no root needed): GC storms (stop-the-world
+    bursts under churn), fd pressure (open many pipes toward EMFILE then release
+    -- exercises the ENOMEM/EMFILE degraded paths), and a brief allocator
+    thrash.  External chaos (SIGSTOP/SIGCONT a worker, tc netem loss) is driven
+    by the orchestrator / netns wrapper, not here.
+    """
+    import gc
+    import random
+    rng = random.Random(seed)
+    while not ctx.done and not ctx.expired():
+        _raw_sleep(rng.uniform(3.0, 12.0))
+        ctx.chaos_events += 1
+        pick = rng.random()
+        if pick < 0.4:
+            # GC storm: a burst of stop-the-world collections under live churn.
+            for _ in range(rng.randint(10, 40)):
+                gc.collect()
+        elif pick < 0.75:
+            # fd pressure: open pipes toward the soft limit, hold briefly, close.
+            pipes = []
+            try:
+                for _ in range(rng.randint(64, 512)):
+                    pipes.append(os.pipe())
+            except OSError:
+                pass  # EMFILE reached -> that IS the degraded path we want aged
+            finally:
+                for r, w in pipes:
+                    try:
+                        os.close(r); os.close(w)
+                    except OSError:
+                        pass
+        else:
+            # allocator thrash: churn large transient buffers.
+            junk = [bytearray(rng.randint(4096, 65536)) for _ in range(200)]
+            del junk
 
 
 def _proc_metrics():
@@ -128,6 +173,10 @@ def main(argv):
     ap.add_argument("--heartbeat", required=True)
     ap.add_argument("--compress", action="store_true",
                     help="churn-compress: drop inter-unit yields for max turnover")
+    ap.add_argument("--chaos", action="store_true",
+                    help="R3: run the in-process chaos thread (GC storms, fd "
+                         "pressure, allocator thrash) to age error/degraded paths")
+    ap.add_argument("--chaos-seed", type=int, default=1234)
     args = ap.parse_args(argv)
 
     t0 = _time.monotonic()
@@ -137,6 +186,9 @@ def main(argv):
         args=(ctx, args.csv, args.heartbeat, args.interval, t0),
         daemon=True)
     sampler.start()
+    if args.chaos:
+        threading.Thread(target=_chaos_thread, args=(ctx, args.chaos_seed),
+                         daemon=True).start()
     try:
         WORKLOADS[args.workload](ctx)
     finally:

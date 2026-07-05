@@ -24,6 +24,8 @@ worker that exits non-zero is a CRASH.  Either fails the run.
 """
 import argparse
 import os
+import random
+import signal
 import subprocess
 import sys
 import time
@@ -96,18 +98,45 @@ def run_soak(args):
                 "--csv", csv, "--heartbeat", hb]
         if args.compress:
             argv.append("--compress")
+        if args.chaos:
+            argv += ["--chaos", "--chaos-seed", str(1000 + i)]
         p = subprocess.Popen(argv, cwd=ROOT, env=env)
         procs.append({"i": i, "p": p, "csv": csv, "hb": hb,
-                      "last_prog": -1, "stall": 0, "verdict": None})
+                      "last_prog": -1, "stall": 0, "verdict": None,
+                      "frozen_until": 0.0})
 
     print("[soak] %s: %d workers, %.0fs, out=%s"
           % (args.workload, args.workers, seconds, out_dir))
     t0 = time.monotonic()
     check_every = min(args.interval, 10.0)
     deadline = t0 + seconds + args.interval + 15.0  # grace for final flush
+    rng = random.Random(20260705)   # fixed: reproducible chaos schedule
+    next_freeze = t0 + rng.uniform(20.0, 60.0) if args.chaos else float("inf")
 
     while time.monotonic() < deadline:
         time.sleep(check_every)
+        now = time.monotonic()
+        # --- external chaos: SIGSTOP a random running worker briefly, SIGCONT ---
+        # (docs/dev/RELIABILITY_PROGRAM.md R3: a process frozen mid-flight must
+        # resume cleanly, not wedge -- the field equivalent of the OS descheduling
+        # a hub thread under load.)  We record frozen_until so hang detection
+        # does NOT count the deliberate freeze (+ a recovery grace) as a wedge.
+        if args.chaos and now >= next_freeze:
+            live = [w for w in procs if w["verdict"] is None
+                    and w["p"].poll() is None]
+            if live:
+                victim = rng.choice(live)
+                dur = rng.uniform(1.0, 4.0)
+                try:
+                    victim["p"].send_signal(signal.SIGSTOP)
+                    print("[soak] chaos: froze worker%d for %.1fs" % (victim["i"], dur))
+                    time.sleep(dur)
+                    victim["p"].send_signal(signal.SIGCONT)
+                    # suppress hang detection until it has had time to recover
+                    victim["frozen_until"] = time.monotonic() + args.interval * 2
+                except (OSError, ProcessLookupError):
+                    pass
+            next_freeze = time.monotonic() + rng.uniform(20.0, 60.0)
         all_done = True
         for w in procs:
             if w["verdict"] is not None:
@@ -122,6 +151,9 @@ def run_soak(args):
                     w["verdict"] = "done"
                 continue
             all_done = False
+            # A deliberately-frozen worker (external chaos) is not a hang.
+            if time.monotonic() < w["frozen_until"]:
+                continue
             # liveness: heartbeat mtime + progress advancement
             hb = _read_heartbeat(w["hb"])
             try:
@@ -234,6 +266,10 @@ def main(argv):
                          "10min/duration, capped [0.1, 0.5])")
     ap.add_argument("--compress", action="store_true",
                     help="churn-compress: max lifecycle turnover (a day ~ months)")
+    ap.add_argument("--chaos", action="store_true",
+                    help="R3: age error/degraded paths -- in-worker GC storms + "
+                         "fd pressure + allocator thrash, plus orchestrator "
+                         "SIGSTOP/SIGCONT freeze chaos (recovery must be clean)")
     ap.add_argument("--env", action="append",
                     help="KEY=VAL passed to workers (RUNLOOM_PERHUB_EPOLL, "
                          "RUNLOOM_IOURING_LOOP, RUNLOOM_STACK_PARK_SWEEP, ...)")

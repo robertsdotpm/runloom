@@ -236,6 +236,31 @@ def _wl_leak_control(ctx):
     _spin(ctx, unit, concurrency=2)
 
 
+_ERR_LEAK_SINK = []
+
+
+def _wl_leak_on_error(ctx):
+    # R3 NEGATIVE CONTROL: the happy path fully drains, but the ERROR path
+    # leaks -- exactly the bug class chaos exists to age.  A fraction of units
+    # hit a simulated error and, on that branch, "forget" to close a socketpair
+    # (append one end to a module global forever).  The fd count + RSS +
+    # py_sock_timeouts climb, so the slope oracle MUST fail this under chaos.
+    # If it passes, error-path aging is not catching leaks.
+    n = [0]
+    def unit():
+        n[0] += 1
+        a, b = socket.socketpair()
+        if n[0] % 4 == 0:
+            # ERROR branch: leak `a` (never closed), close only b.  This is the
+            # "cleanup dropped a resource on the failure path" shape.
+            _ERR_LEAK_SINK.append(a)
+            b.close()
+        else:
+            a.close()
+            b.close()
+    _spin(ctx, unit, concurrency=2)
+
+
 WORKLOADS = {
     "spawn_churn": _wl_spawn_churn,
     "chan_select": _wl_chan_select,
@@ -245,4 +270,5 @@ WORKLOADS = {
     "offload": _wl_offload,
     "mixed": _wl_mixed,
     "leak_control": _wl_leak_control,
+    "leak_on_error": _wl_leak_on_error,
 }
