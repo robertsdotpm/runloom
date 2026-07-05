@@ -527,6 +527,53 @@ sys.stdout.write("SKIP\n" if out.get("skip") else ("HEALED\n" if out.get("rv") e
     pytest.skip("fd number never reused across 6 attempts")
 
 
+@pytest.mark.skipif(rc.netpoll_backend() != "epoll", reason="tripwire is epoll-only")
+def test_dbg_tripwire_dead_fd_at_register_raises_not_hangs_subprocess():
+    # Review finding (2026-07-05): the DBG tripwire's inline validate_arm used
+    # to CLEAR a dead arm's cache and have its -1 verdict discarded -- register
+    # returned 0, the fiber parked untimed, and the later probe tick read
+    # cur==0 ("unregistered meanwhile") and skipped the error-wake: enabling
+    # the diagnostic flag reintroduced the forever-hang production heals.  Now
+    # a dead verdict FAILS the register (errno = the epoll_ctl verdict), so
+    # wait_fd raises OSError promptly.  Drive it: poison a pipe fd number,
+    # reuse it with a REGULAR FILE (validate: MOD->ENOENT, heal-ADD->EPERM ->
+    # dead), park untimed under RUNLOOM_DBG_NETPOLL=1.
+    script = r'''
+import sys, os; sys.path.insert(0, "src")
+import runloom_c as rc
+READ = 1
+out = {}
+def main():
+    r, w = os.pipe()
+    rc.wait_fd(r, READ, 5)            # arm fd number `r`
+    os.close(r); os.close(w)          # NO unregister -> poison
+    f = os.open("/etc/hostname", os.O_RDONLY)   # regular file reuses the number
+    if f != r:
+        out["skip"] = True
+        os.close(f); return
+    try:
+        rc.wait_fd(f, READ, -1)       # UNTIMED park on a dead-armed number
+        out["res"] = "RETURNED"
+    except OSError as e:
+        out["res"] = "OSERROR:%d" % e.errno
+    finally:
+        os.close(f)
+rc.fiber(main); rc.run()
+sys.stdout.write("SKIP\n" if out.get("skip") else out.get("res", "NORESULT") + "\n")
+'''
+    for _ in range(6):
+        p = _subproc(script, env_extra={"RUNLOOM_DBG_NETPOLL": "1"}, timeout=15)
+        _assert_no_signal_crash(p, "dbg-dead-at-register")
+        if "SKIP" in p.stdout:
+            continue
+        assert "OSERROR" in p.stdout, (
+            "untimed park on a dead-armed fd under RUNLOOM_DBG_NETPOLL=1 did "
+            "not raise (got %r): the tripwire's dead verdict must fail the "
+            "register, not park forever" % p.stdout)
+        return
+    pytest.skip("fd number never reused across 6 attempts")
+
+
 # ==========================================================================
 # 7. fault injection mid-workload -- clean error or recovery, never a crash.
 # ==========================================================================

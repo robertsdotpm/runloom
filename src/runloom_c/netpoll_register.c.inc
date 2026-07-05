@@ -160,7 +160,46 @@ static int runloom_netpoll_validate_arm(int fd)
     if (err == ENOENT) {
         /* Stale arm: the fd is open and pollable but NOT in the epoll set --
          * it was closed without unregister and the number has been reused.
-         * Re-ADD to heal; LEVEL delivers any already-present readiness. */
+         *
+         * Heal ONLY if some parker still waits on this fd.  With no waiter
+         * (claimed between the probe re-key and this call, or the DBG path
+         * validating a skip whose parker aborted), a re-ADD would leave a
+         * LEVEL-armed fd with no consumer: if the reused number is
+         * persistently readable (an eventfd, a primed pipe owned by non-
+         * netpoll code), IN re-reports on every epoll_wait with no IN-disarm
+         * path and the pump busy-spins (review finding, 2026-07-05).  Clear
+         * the cache instead -- exactly what unregister would have done; the
+         * next real park re-ADDs fresh.  Waiter check: the per-fd hub-pool
+         * dispatch mask (lock-free atomic, set at parker_link BEFORE the
+         * arm) plus the DEFAULT pool's bucket, readable here because we HOLD
+         * runloom_pool.lock. */
+        int has_waiter = 0;
+        {
+            unsigned long long *pm =
+                __atomic_load_n(&runloom_fd_poolmask, __ATOMIC_ACQUIRE);
+            if (pm != NULL && (size_t)fd < runloom_fd_poolmask_cap &&
+                __atomic_load_n(&pm[fd], __ATOMIC_ACQUIRE) != 0)
+                has_waiter = 1;
+            if (!has_waiter && (size_t)fd < runloom_pool.by_fd_cap &&
+                runloom_pool.by_fd[fd] != NULL)
+                has_waiter = 1;
+        }
+        if (!has_waiter) {
+            runloom_fd_armed_set(fd, 0);
+            runloom_fd_bit_clear(fd);
+            if (runloom_perhub_epoll()) runloom_fd_epoll_pool_set(fd, -1);
+            __atomic_add_fetch(&runloom_stale_arm_heals, 1, __ATOMIC_RELAXED);
+            RUNLOOM_RUNLOCK(&runloom_pool.lock, RUNLOOM_RANK_PARKER_POOL);
+            if (runloom_netpoll_dbg_stale_check()) {
+                fprintf(stderr,
+                    "[runloom-netpoll] STALE ARM cleared on fd %d (armed mask "
+                    "0x%x, no waiter): closed WITHOUT netpoll_unregister; no "
+                    "parker remains, so the arm cache is reset instead of "
+                    "re-ADDed.\n", fd, (unsigned)cur);
+            }
+            return 0;
+        }
+        /* Re-ADD to heal; LEVEL delivers any already-present readiness. */
         if (epoll_ctl(ep, EPOLL_CTL_ADD, fd, &chk) == 0) {
             __atomic_add_fetch(&runloom_stale_arm_heals, 1, __ATOMIC_RELAXED);
             RUNLOOM_RUNLOCK(&runloom_pool.lock, RUNLOOM_RANK_PARKER_POOL);
@@ -192,6 +231,7 @@ static int runloom_netpoll_validate_arm(int fd)
             "still waiting on it are error-woken.\n",
             fd, (unsigned)cur, err);
     }
+    errno = err;   /* the epoll_ctl verdict, not fprintf/unlock noise */
     return -1;
 }
 #endif
@@ -315,9 +355,19 @@ static int runloom_netpoll_register(int fd, int events)
          * pinpointed diagnostic at the exact park that would have hung.
          * OFF by default so the recv-after-recv hot path keeps its
          * zero-syscall skip; production correctness is carried by the
-         * probe_pending deadline the predicting wait_fd scheduled. */
-        if (runloom_netpoll_dbg_stale_check())
-            (void)runloom_netpoll_validate_arm(fd);
+         * probe_pending deadline the predicting wait_fd scheduled.
+         *
+         * A -1 verdict (fd dead / not pollable) must FAIL this register:
+         * validate_arm just CLEARED the arm cache, so this caller's probe
+         * tick -- scheduled off the pre-clear predict -- would read cur==0,
+         * conclude "unregistered meanwhile, nothing to validate", and skip
+         * the error-wake; an untimed park would then sleep forever (review
+         * finding, 2026-07-05).  Returning -1 (errno = the epoll_ctl
+         * verdict: EBADF/EPERM) makes wait_fd unlink and raise instead --
+         * strictly better than parking on an fd the kernel cannot report. */
+        if (runloom_netpoll_dbg_stale_check() &&
+            runloom_netpoll_validate_arm(fd) < 0)
+            return -1;
         return 0;                               /* already armed -> 0 syscalls */
     }
     if (runloom_fd_armed_set(fd, target) != 0) {

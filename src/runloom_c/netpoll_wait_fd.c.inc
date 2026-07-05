@@ -277,8 +277,24 @@ int runloom_netpoll_wait_fd(int fd, int events, long long timeout_ns)
     RUNLOOM_RUNLOCK(&pool->lock, RUNLOOM_RANK_PARKER_POOL);
     /* Per-hub kqueue: the parker + its deadline live in `pool`, owned by
      * hub_opaque, so break THAT pump (NULL on the single-thread sched -> default
-     * pool, matching the old single-pump behaviour). */
-    if (new_earliest_deadline) runloom_netpoll_wake_pump(hub_opaque);
+     * pool, matching the old single-pump behaviour).
+     *
+     * EXCEPT for a stale-arm PROBE tick (probe_pending): do NOT break the
+     * poller for it.  At low pool occupancy a predicted-skip park's probe is
+     * the new minimum on almost EVERY park, and the break charged the hot
+     * path one eventfd write + one spurious pump wake + one eventfd read per
+     * park episode (review finding, 2026-07-05).  Skipping is sound because
+     * probe servicing never depends on a SIBLING pump's stale clamp: this
+     * fiber parks ON its own hub (or the single-thread sched), whose very
+     * next runloom_netpoll_pump call re-clamps to the fresh global heap
+     * minimum (runloom_dh_peek_deadline_global) -- and a foreign-thread park
+     * into the DEFAULT pool while the single-thread drain is already blocked
+     * is bounded by the 2 ms foreign-wake backstop it arms.  Worst case the
+     * probe is serviced late by a busy hub's pump gap -- maintenance whose
+     * latency tolerance IS the probe interval; user deadlines (probe_pending
+     * unset, or user < probe so no probe was scheduled) keep the break. */
+    if (new_earliest_deadline && !park->probe_pending)
+        runloom_netpoll_wake_pump(hub_opaque);
     if (current_g != NULL) {
         /* Record what we're blocked on as plain data ON the g, so the
          * fiber dump can report "fd=N R/W" without ever dereferencing

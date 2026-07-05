@@ -155,12 +155,17 @@ static int runloom_pump_drain_expired(long long now)
                  * forward progress (a re-keyed short wait whose REAL deadline
                  * already passed comes back to the front with the flag clear
                  * and is drained as a genuine timeout in this same pass). */
-                if (nprobe >= RUNLOOM_STALE_PROBE_BATCH) break;
+                int dup = 0, pj;
+                for (pj = 0; pj < nprobe; pj++) {   /* per-fd dedupe: N same-fd
+                     * probes (N sleepers on one shared fd) need ONE epoll_ctl */
+                    if (probe_fds[pj] == p->fd) { dup = 1; break; }
+                }
+                if (!dup && nprobe >= RUNLOOM_STALE_PROBE_BATCH) break;
                 p->probe_pending = 0;
                 runloom_dh_remove(pool, p);
                 p->deadline_ns = p->user_deadline_ns;
                 runloom_dh_insert(pool, p);      /* no-op when untimed (-1) */
-                probe_fds[nprobe++] = p->fd;
+                if (!dup) probe_fds[nprobe++] = p->fd;
                 continue;
             }
 #endif
