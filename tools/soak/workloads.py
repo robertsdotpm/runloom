@@ -221,6 +221,104 @@ def _wl_mixed(ctx):
     _spin(ctx, unit, concurrency=3)
 
 
+def _wl_iouring_churn(ctx):
+    # R7 item 1 aging: connect / echo / close churn on runloom_c.TCPConn under
+    # M:N with the io_uring backend, so the soak ages the per-hub cancel-by-fd /
+    # dup-fd close path just landed (docs/dev/DESIGN_mn_iouring_cancel_fd.md).
+    # Every 3rd unit closes a connection WHILE a recv is parked on the hub ring
+    # -- the exact cancel-by-fd path -- so the dup-fd lifecycle is exercised, not
+    # only happy-path echo.  Watches fds / iouring_inflight / netpoll_fd_armed for
+    # a leak over hours.  REQUIRES --env RUNLOOM_TCPCONN_IOURING=1 to hit the
+    # io_uring path (else it ages the epoll TCPConn path, still useful).  Each
+    # worker owns ONE listener reused across units (no ephemeral-port churn) and
+    # every unit fully joins its server+client fibers via a Chan (race-free under
+    # M:N) -- no stranded fiber, per the module contract.
+    hubs = int(os.environ.get("RUNLOOM_SOAK_HUBS", "2"))
+    conc = int(os.environ.get("RUNLOOM_SOAK_CONC", "4"))
+
+    def bound_port(l):
+        fd = l.fileno(); sk = socket.socket(fileno=socket.dup(fd))
+        p = sk.getsockname()[1]; sk.close(); return p
+
+    def unit(L, port, cancel_variant):
+        join = runloom_c.Chan(2)   # server + client each send one token on exit
+        def server():
+            try:
+                conn = L.accept()
+                try:
+                    d = conn.recv(64)        # EOF (b'') when the client closes
+                    if d:
+                        conn.send(d)
+                finally:
+                    conn.close()
+            except OSError:
+                pass
+            finally:
+                join.send(1)
+        def client():
+            try:
+                c = runloom_c.TCPConn.connect("127.0.0.1", port)
+                if cancel_variant:
+                    # Park a recv on the hub ring, then close it -> the cancel-by-
+                    # fd broadcast wakes it -ECANCELED (server sees EOF + closes).
+                    # Join rd via a Chan (a cooperative PARK); never a sched_yield
+                    # spin -- a busy-spin waiting on a sibling fiber starves the hub
+                    # it runs on under M:N, a livelock (not a leak) that wedges the
+                    # soak.  A short bounded yield first lets rd actually park on the
+                    # recv, so close() exercises the cancel-a-parked-recv path.
+                    rddone = runloom_c.Chan(1)
+                    def rd(cc=c, ch=rddone):
+                        try:
+                            cc.recv(64, socket.MSG_WAITALL)
+                        except OSError:
+                            pass
+                        finally:
+                            ch.send(1)
+                    runloom_c.mn_fiber(rd)
+                    for _ in range(10):
+                        runloom_c.sched_yield()
+                    c.close()                # cancels the parked recv
+                    rddone.recv()            # cooperative join -- no spin/starve
+                else:
+                    c.send(b"ping")
+                    c.recv(64)
+                    c.close()
+            except OSError:
+                pass
+            finally:
+                join.send(1)
+        runloom_c.mn_fiber(server)
+        runloom_c.mn_fiber(client)
+        join.recv(); join.recv()             # join BOTH -- no abandoned fiber
+
+    def worker(w, wdone):
+        L = runloom_c.TCPConn.listen("127.0.0.1", 0)
+        port = bound_port(L)
+        i = 0
+        try:
+            while not ctx.expired():
+                unit(L, port, (i + w) % 3 == 0)
+                i += 1
+                ctx.bump()
+                if not ctx.compress:
+                    runloom_c.sched_yield()
+        finally:
+            L.close()
+            wdone.send(1)
+
+    def body():
+        wdone = runloom_c.Chan(conc)
+        for w in range(conc):
+            runloom_c.mn_fiber(lambda w=w: worker(w, wdone))
+        for _ in range(conc):
+            wdone.recv()                     # join every worker before teardown
+
+    runloom_c.mn_init(hubs)
+    runloom_c.mn_fiber(body)
+    runloom_c.mn_run()
+    runloom_c.mn_fini()
+
+
 # ---------------------------------------------------------------------------
 # NEGATIVE CONTROL -- proves the slope oracle has teeth
 # ---------------------------------------------------------------------------
@@ -268,6 +366,7 @@ WORKLOADS = {
     "tcp_churn": _wl_tcp_churn,
     "keepalive": _wl_keepalive,
     "offload": _wl_offload,
+    "iouring_churn": _wl_iouring_churn,
     "mixed": _wl_mixed,
     "leak_control": _wl_leak_control,
     "leak_on_error": _wl_leak_on_error,
