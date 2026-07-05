@@ -5,15 +5,51 @@ from .futures import RunloomFuture  # noqa: F401
 from .handles import _Handle, _TimerHandle  # noqa: F401
 from .tasks import RunloomTask  # noqa: F401
 
+
+class _DeferredSpawn(object):
+    """A foreign thread's PRE-RUN call_soon/create_task, deferred into
+    _ts_queue.  Its `_spawn` thunk, called at drain time ON THE LOOP THREAD,
+    spawns a fifo=True fiber -- so a pre-run call_soon and a pre-run create_task
+    interleave in enqueue order (matching stock asyncio's ready-queue FIFO),
+    instead of one running INLINE in the drain while the other is a fiber whose
+    first step runs a turn later.  See DESIGN_loop_run_prerun_scheduling.md
+    (must-fix #1)."""
+    __slots__ = ("_spawn",)
+
+    def __init__(self, spawn):
+        self._spawn = spawn
+
+
 class _LoopScheduleMixin(object):
     def create_task(self, coro, *, name=None, context=None, **kwargs):
         self._check_closed()
         if self._can_spawn_here():
             return self._pg_make_task(coro, name, context, kwargs)
-        # Foreign thread: RunloomTask.__init__ spawns a fiber, which would land
-        # on the CALLING thread's sched (never drained by this loop).  Marshal
-        # the creation onto the loop's own thread via its thread-safe queue and
-        # block for the task (mirrors asyncio.run_coroutine_threadsafe).
+        if self._thread_id is None:
+            # PRE-RUN foreign thread: build the task NOW (registrations +
+            # module-root capture must run on the creator's stack) but DEFER the
+            # driver-fiber spawn into _ts_queue so the keepalive spawns it on the
+            # DRIVER thread's sched.  NON-BLOCKING -- so the classic "schedule
+            # initial work, THEN start the driver thread" pattern doesn't
+            # deadlock (the blocking marshal below would block before the driver
+            # ever starts -> the keepalive that drains the queue never spawns).
+            task = self._pg_make_task(coro, name, context, kwargs,
+                                      defer_spawn=True)
+            # ONLY a deferrable RunloomTask has _pg_spawn_driver.  A custom
+            # task_factory returns a stock asyncio.Task, which self-scheduled its
+            # first step via loop.call_soon(self.__step) (routed to _ts_queue by
+            # our call_soon below) -- appending a _DeferredSpawn for it would
+            # AttributeError at drain and is redundant.
+            if isinstance(task, RunloomTask):
+                with self._ts_lock:
+                    self._ts_queue.append(_DeferredSpawn(task._pg_spawn_driver))
+            return task
+        # Foreign thread, loop ALREADY RUNNING: RunloomTask.__init__ spawns a
+        # fiber, which would land on the CALLING thread's sched (never drained by
+        # this loop).  Marshal the creation onto the loop's own thread via its
+        # thread-safe queue and block for the task (mirrors
+        # asyncio.run_coroutine_threadsafe) -- safe here because a running loop
+        # HAS a keepalive draining, so ev.wait() below is guaranteed to progress.
         box = {}
         ev = _threading.Event()
         def _mk():
@@ -29,13 +65,15 @@ class _LoopScheduleMixin(object):
             raise box["e"]
         return box["t"]
 
-    def _pg_make_task(self, coro, name, context, kwargs):
+    def _pg_make_task(self, coro, name, context, kwargs, defer_spawn=False):
         # Build the task for create_task, honouring a custom task factory
         # (loop.set_task_factory).  Mirrors BaseEventLoop.create_task: the
         # factory is called WITHOUT name (context only when non-None), then
         # task.set_name(name) applies the name -- so a factory installing a
         # plain asyncio.Task / Task subclass works exactly as on stock.  No
         # factory => our own RunloomTask (the default, fiber-driven path).
+        # defer_spawn applies ONLY to the default RunloomTask; a factory task is
+        # stock asyncio and self-schedules via call_soon (nothing to defer).
         factory = self._task_factory
         if factory is not None:
             if context is not None:
@@ -46,7 +84,8 @@ class _LoopScheduleMixin(object):
             return task
         # Default path: RunloomTask ignores any stray kwargs (eager_start etc. --
         # the eager-task factory installs its own factory above).
-        return RunloomTask(coro, loop=self, name=name, context=context)
+        return RunloomTask(coro, loop=self, name=name, context=context,
+                           defer_spawn=defer_spawn)
 
     def create_future(self):
         return RunloomFuture(loop=self)
@@ -78,6 +117,28 @@ class _LoopScheduleMixin(object):
         # Off the driver thread, fiber() would race the ready ring; route through
         # the thread-safe queue (the driver's keepalive runs it).
         if not self._can_spawn_here():
+            if self._thread_id is None:
+                # PRE-RUN foreign: DEFER a fifo fiber (not the inline
+                # call_soon_threadsafe path) so this callback interleaves in
+                # enqueue order with a pre-run create_task -- both become fifo
+                # fibers at drain, preserving call_soon-FIFO.  Running inline
+                # while the task's first step is a fiber would invert their order
+                # (DESIGN_loop_run_prerun_scheduling.md must-fix #1).
+                handle = _Handle(callback, args, self, context)
+                def _runner(handle=handle, callback=callback, args=args):
+                    if handle._cancelled:
+                        return
+                    try:
+                        self._pg_run_loop_cb(handle._context, callback, args)
+                    except (KeyboardInterrupt, SystemExit) as e:
+                        self._pg_signal_fatal(e)
+                    except BaseException as e:
+                        self.call_exception_handler(
+                            {"message": "call_soon callback", "exception": e})
+                with self._ts_lock:
+                    self._ts_queue.append(_DeferredSpawn(lambda: _fiber_io(_runner)))
+                return handle
+            # Running loop, foreign thread: inline via the thread-safe queue.
             return self.call_soon_threadsafe(callback, *args, context=context)
         handle = _Handle(callback, args, self, context)
         def runner():
@@ -134,6 +195,18 @@ class _LoopScheduleMixin(object):
                 return
             pending, self._ts_queue = self._ts_queue, []
         for handle in pending:
+            if isinstance(handle, _DeferredSpawn):
+                # Pre-run call_soon/create_task: spawn its fifo fiber on the loop
+                # thread (its first step then runs in enqueue order with the
+                # others -- see _DeferredSpawn).
+                try:
+                    handle._spawn()
+                except (KeyboardInterrupt, SystemExit) as e:
+                    self._pg_signal_fatal(e)
+                except BaseException as e:
+                    self.call_exception_handler(
+                        {"message": "pre-run deferred spawn", "exception": e})
+                continue
             if handle._cancelled:
                 continue
             try:

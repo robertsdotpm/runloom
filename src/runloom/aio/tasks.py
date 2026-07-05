@@ -16,7 +16,8 @@ class RunloomTask(_RunloomFutureMixin, asyncio.Task):
     C Future state so asyncio.Task.__del__ doesn't warn "destroyed but pending".
     """
 
-    def __init__(self, coro, *, loop=None, name=None, context=None):
+    def __init__(self, coro, *, loop=None, name=None, context=None,
+                 defer_spawn=False):
         # Match asyncio.Task.__init__: reject a non-coroutine SYNCHRONOUSLY.
         # loop.create_task(123) / create_task(some_plain_fn) must raise TypeError
         # right here -- not accept the bad arg and later blow up in the driver
@@ -75,35 +76,73 @@ class RunloomTask(_RunloomFutureMixin, asyncio.Task):
         # _pg_run_with_module_root.  Clearing g->callable at completion still
         # breaks the task<->g cycle: the closure's only strong ref to self is
         # the bound self._driver it carries, dropped when the closure is.
+        # Build the driver body NOW (module-root capture walks the CREATOR's
+        # live frames, so it must run here even for a deferred spawn).  The body
+        # is a bound-method closure whose __self__ is this task, so retaining it
+        # forms a task->_body->self cycle that survives refcounting -- it is
+        # cleared the instant the fiber is spawned (see _pg_spawn_driver /
+        # _pg_settle_c), the same refcycle break _g/_self_g get.
+        self._g = None
         if _PG_MODULE_ROOT_ON:
             _modname = _pg_capture_module_name()
             _driver = self._driver
-            _body = lambda: _pg_run_with_module_root(_driver, _modname)
+            self._body = lambda: _pg_run_with_module_root(_driver, _modname)
         else:
-            _body = self._driver
-        # Driver fibers run arbitrary user async code (deep C-recursive
-        # first-time imports overflow the default 32 KB g-stack and SEGV), so
-        # give them a roomier stack.  Override with RUNLOOM_AIO_TASK_STACK.
+            self._body = self._driver
+        # defer_spawn (DESIGN_loop_run_prerun_scheduling.md R7 item 2): a foreign
+        # thread's PRE-RUN create_task builds the task here (registrations +
+        # module-root capture on the creator's stack) but defers the fiber spawn
+        # into the loop's _ts_queue, so it lands on the DRIVER thread's sched
+        # (not the creator's, which the loop never drains).  The keepalive calls
+        # _pg_spawn_driver() at drain.  In-run / on-the-driver-thread create_task
+        # spawns immediately (defer_spawn=False), which re-raises a spawn failure
+        # to the caller; the deferred path can't re-raise (drainer context) so it
+        # unwinds + logs internally.
+        if not defer_spawn:
+            self._pg_spawn_driver(reraise=True)
+
+    def _pg_spawn_driver(self, reraise=False):
+        """Spawn the driver fiber.  Called immediately from __init__ (direct
+        path, reraise=True) or from the keepalive drain on the loop thread
+        (deferred path, reraise=False).  Idempotent; settles a cancel that
+        arrived before the spawn; unwinds a failed spawn internally (the drainer
+        swallows exceptions, so nothing else would perform the unwind)."""
+        if self._g is not None:
+            return                              # already spawned (idempotent)
+        # cancel() before the deferred spawn is a safe no-op that only set the
+        # flags (no fiber to wake); settle CANCELLED here and never run a fiber,
+        # else a registered _g=None task wedges _cancel_outstanding_tasks' gather.
+        if self._cancel_requested:
+            try:
+                self._pg_future_cancel(self._pgcancelmsg)
+            except BaseException:
+                pass
+            try:
+                self._pgcoro.close()
+            except BaseException:
+                pass
+            self._pg_settle_c()                 # fires done-callbacks; clears refs
+            self._body = None
+            return
+        body = self._body
         # fifo=True: task STEPS are scheduled call_soon-FIFO in asyncio, so the
         # PCT controlled scheduler must keep this driver in order with the loop's
-        # other call_soon fibers (else a sleep(0) resume can race ahead of a
-        # call_soon callback -- a false positive, not a bug).  See pct_fifo.
+        # other call_soon fibers.  Roomier stack: driver fibers run arbitrary
+        # user async code (deep C-recursive first-time imports overflow the
+        # default 32 KB g-stack and SEGV).
         try:
-            self._g = runloom_c.fiber(_body, stack_size=_TASK_STACK, fifo=True) \
-                if _TASK_STACK else runloom_c.fiber(_body, fifo=True)
-        except BaseException:
-            # Driver spawn failed (genuine ENOMEM, or the RUNLOOM_FAULT_SPAWN_*
-            # injection).  We are already registered in asyncio.all_tasks()
-            # and _PG_ALL_TASKS (above) but have NO fiber, so nothing can ever
-            # run or settle this task: leaving it registered wedges
-            # loop.close() -- _cancel_outstanding_tasks cancel()s it (a no-op
-            # with no fiber to wake), then drives
-            # run_until_complete(gather(pending)) which waits FOREVER on a
-            # future nothing will settle, hanging the process on the teardown
-            # path while the real spawn error sits in aio.run's finally
-            # (gate fault-injection SPAWN_G/SPAWN_STACK hang).  Unwind both
-            # registrations and settle the future as CANCELLED (it never
-            # started), then let the spawn error propagate to the caller.
+            self._g = runloom_c.fiber(body, stack_size=_TASK_STACK, fifo=True) \
+                if _TASK_STACK else runloom_c.fiber(body, fifo=True)
+            self._body = None                   # break the task->_body->self cycle
+        except BaseException as e:
+            # Driver spawn failed (genuine ENOMEM, or RUNLOOM_FAULT_SPAWN_*).  We
+            # are registered in asyncio.all_tasks() + _PG_ALL_TASKS but have NO
+            # fiber, so nothing can run or settle this task -- a registered
+            # _g=None task wedges loop.close()'s _cancel_outstanding_tasks gather
+            # (waits forever on a future nothing settles).  Unwind both
+            # registrations + settle CANCELLED, then re-raise (direct path) or
+            # log (deferred path -- the drainer swallows, so we must unwind here).
+            self._body = None
             _PG_ALL_TASKS.discard(self)
             if _UNREGISTER_TASK is not None:
                 try:
@@ -115,10 +154,13 @@ class RunloomTask(_RunloomFutureMixin, asyncio.Task):
             except BaseException:
                 pass
             try:
-                coro.close()        # never started: silence "never awaited"
+                self._pgcoro.close()            # never started: silence "never awaited"
             except BaseException:
                 pass
-            raise
+            if reraise:
+                raise
+            self._loop.call_exception_handler({
+                "message": "deferred task driver spawn failed", "exception": e})
 
     def _pg_settle_c(self):
         # Settle the underlying C Future to FINISHED so asyncio.Task.__del__
@@ -147,6 +189,10 @@ class RunloomTask(_RunloomFutureMixin, asyncio.Task):
         # task is terminal) is safe.
         self._g = None
         self._self_g = None
+        # Also drop the deferred-spawn body if it was never consumed (a task
+        # cancelled/settled before its deferred spawn) -- same task->_body->self
+        # refcycle break as _g/_self_g.
+        self._body = None
 
     def _pg_strip_driver_tb(self, exc):
         """Drop this driver's own frame(s) from the head of exc's traceback.

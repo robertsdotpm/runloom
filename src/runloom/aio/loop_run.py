@@ -7,12 +7,19 @@ from .handles import _PG_ALL_TASKS, _PG_OPEN_LOOPS  # noqa: F401
 class _LoopRunMixin(object):
     def _can_spawn_here(self):
         """True iff runloom_c.fiber is safe on the CALLING thread for THIS loop:
-        we are the thread running the loop (fiber() lands on our own sched) or the
-        loop isn't running yet (the calling thread will drive it).  A FOREIGN
-        thread must marshal spawns via call_soon_threadsafe -- its fiber() would
-        land on ITS thread's sched, which this loop never drains."""
+        its fiber() lands on a scheduler this loop will drain.  A FOREIGN thread
+        must marshal via call_soon_threadsafe / defer into _ts_queue -- its
+        fiber() would land on ITS own sched, which this loop never drains.
+
+        RUNNING (_thread_id set): only the loop thread.  PRE-RUN (_thread_id
+        None): only the thread that entered run() and is about to drive (claimed
+        as _pg_driver_tid) -- NOT any thread, which the old `tid is None`
+        shortcut wrongly allowed, stranding a foreign thread's pre-run
+        call_soon/create_task on its own sched (R7 item 2)."""
         tid = self._thread_id
-        return tid is None or tid == _threading.get_ident()
+        if tid is not None:
+            return tid == _threading.get_ident()
+        return self._pg_driver_tid == _threading.get_ident()
 
     def _drive(self):
         """Drain THIS thread's scheduler until the run's stop fires.  Each loop
@@ -31,6 +38,10 @@ class _LoopRunMixin(object):
         finally:
             self._running = False
             self._thread_id = None
+            # The run is over; drop the pre-run driver claim so a later
+            # create_task on this thread (loop not running) is treated as
+            # foreign and deferred, not direct-spawned onto an undrained sched.
+            self._pg_driver_tid = None
             asyncio._set_running_loop(None)
             # Retire the keepalive so it can't linger parked in the sleep queue
             # into the next run on this loop.
@@ -60,26 +71,37 @@ class _LoopRunMixin(object):
 
     def run_until_complete(self, future):
         self._check_running()
-        if asyncio.iscoroutine(future):
-            future = self.create_task(future)
-        elif not (isinstance(future, asyncio.Future)
-                  or isinstance(future, RunloomFuture)
-                  or asyncio.isfuture(future)):
-            if hasattr(future, "__await__"):
-                # asyncio's run_until_complete accepts ANY awaitable -- its
-                # ensure_future wraps a bare __await__ object in a coroutine.
-                # aiohttp's Connector.close()/ClientSession.close() return such
-                # deprecation-wrapper awaitables, so run_until_complete(
-                # conn.close()) must accept them instead of rejecting anything
-                # that isn't already a coroutine/Future.  Reuse asyncio's own
-                # wrapper (it calls our create_task under the hood).
-                future = asyncio.ensure_future(future, loop=self)
-            else:
-                raise TypeError("argument must be a Future or coroutine")
-        # Resolve deep, non-yielding stdlib imports (e.g. getaddrinfo's
-        # first-call codec import) before any fiber runs them on a small
-        # stack -- see prewarm_stdlib.
-        _runtime.prewarm_stdlib()
+        # Claim the loop for THIS (soon-to-drive) thread across the pre-run
+        # window, so our own create_task(future) below spawns directly while a
+        # FOREIGN thread's concurrent pre-run scheduling defers (see
+        # _can_spawn_here).  Cleared in _drive's finally on the normal path; the
+        # try/except here covers an abort BEFORE _drive (create_task TypeError,
+        # ensure_future, prewarm, _spawn_keepalive) so a stale claim can't leak.
+        self._pg_driver_tid = _threading.get_ident()
+        try:
+            if asyncio.iscoroutine(future):
+                future = self.create_task(future)
+            elif not (isinstance(future, asyncio.Future)
+                      or isinstance(future, RunloomFuture)
+                      or asyncio.isfuture(future)):
+                if hasattr(future, "__await__"):
+                    # asyncio's run_until_complete accepts ANY awaitable -- its
+                    # ensure_future wraps a bare __await__ object in a coroutine.
+                    # aiohttp's Connector.close()/ClientSession.close() return such
+                    # deprecation-wrapper awaitables, so run_until_complete(
+                    # conn.close()) must accept them instead of rejecting anything
+                    # that isn't already a coroutine/Future.  Reuse asyncio's own
+                    # wrapper (it calls our create_task under the hood).
+                    future = asyncio.ensure_future(future, loop=self)
+                else:
+                    raise TypeError("argument must be a Future or coroutine")
+            # Resolve deep, non-yielding stdlib imports (e.g. getaddrinfo's
+            # first-call codec import) before any fiber runs them on a small
+            # stack -- see prewarm_stdlib.
+            _runtime.prewarm_stdlib()
+        except BaseException:
+            self._pg_driver_tid = None
+            raise
         # Clear any stale stop request from a prior run on this loop.
         self._stopping = False
         # Always drive the loop for at least one iteration, EVEN when `future`
@@ -110,7 +132,6 @@ class _LoopRunMixin(object):
         # pending ready work first, then _stop_on_done stops the drive.)
         _stop_on_done._runloom_fire_sync = True
         future.add_done_callback(_stop_on_done)
-        self._spawn_keepalive()
         # Remove the stop callback when the drive returns, no matter HOW it
         # returns (future done, KeyboardInterrupt out of a callback, or the
         # scheduler emptying) -- exactly as stock asyncio's
@@ -122,8 +143,12 @@ class _LoopRunMixin(object):
         # "event loop stopped before Future completed" that masks the
         # original KeyboardInterrupt (asyncio.Runner cleanup hits this).
         try:
+            self._spawn_keepalive()
             self._drive()
         finally:
+            # Idempotent: _drive's finally already cleared the driver claim if it
+            # ran; this also clears it if _spawn_keepalive aborted before _drive.
+            self._pg_driver_tid = None
             future.remove_done_callback(_stop_on_done)
         # IMPORTANT: do NOT cancel outstanding tasks / sched_reset here.
         # run_until_complete must leave other tasks + parked fibers ALIVE
@@ -215,10 +240,18 @@ class _LoopRunMixin(object):
 
     def run_forever(self):
         self._check_running()
-        # Resolve deep, non-yielding stdlib imports (e.g. getaddrinfo's
-        # first-call codec import) before any fiber runs them on a small
-        # stack -- see prewarm_stdlib.
-        _runtime.prewarm_stdlib()
+        # Claim the loop for THIS soon-to-drive thread (see run_until_complete /
+        # _can_spawn_here): a foreign thread's pre-run call_soon/create_task now
+        # defers into _ts_queue instead of stranding on its own sched.
+        self._pg_driver_tid = _threading.get_ident()
+        try:
+            # Resolve deep, non-yielding stdlib imports (e.g. getaddrinfo's
+            # first-call codec import) before any fiber runs them on a small
+            # stack -- see prewarm_stdlib.
+            _runtime.prewarm_stdlib()
+        except BaseException:
+            self._pg_driver_tid = None
+            raise
         # Do NOT reset self._stopping here.  asyncio honors a stop() issued
         # BEFORE run_forever() -- it runs one iteration and returns (stock checks
         # self._stopping at the top of each loop pass and only clears it on
@@ -228,10 +261,13 @@ class _LoopRunMixin(object):
         # test_streams/test_web_app default-loop tests) hangs.  When _stopping is
         # already True the keepalive calls sched_stop() on its first pass and the
         # drive returns immediately.
-        self._spawn_keepalive()
         try:
+            self._spawn_keepalive()
             self._drive()
         finally:
+            # _drive's finally clears the driver claim on the normal path; this
+            # also covers a _spawn_keepalive abort before _drive.
+            self._pg_driver_tid = None
             self._stopping = False
 
     def stop(self):

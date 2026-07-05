@@ -21,6 +21,15 @@ class _LoopCoreMixin(object):
         # from going idle while a fiber is parked awaiting an external wake.
         self._ts_lock = _threading.Lock()
         self._ts_queue = []
+        # The thread that entered run_until_complete/run_forever and will drive
+        # this loop, claimed at run entry (after _check_running) and cleared when
+        # the run returns.  Pre-run, _thread_id is still None, so _can_spawn_here
+        # uses this to tell the soon-to-be-driving thread (spawn directly -- its
+        # fibers land on the sched it will drain) from a genuinely FOREIGN thread
+        # (defer into _ts_queue).  Without it, a foreign thread's pre-run
+        # call_soon/create_task spawned onto its own never-drained sched -> lost
+        # work (RELIABILITY_PROGRAM.md R7 item 2 / DESIGN_loop_run_prerun_scheduling.md).
+        self._pg_driver_tid = None
         # Per-run keepalive stop flag, as a 1-element box.  Each
         # run_until_complete gets a FRESH box so a previous run's keepalive
         # fiber (which may still be parked in the sleep queue when
