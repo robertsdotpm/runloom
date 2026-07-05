@@ -1,0 +1,23 @@
+# runloom canary service (docs/dev/RELIABILITY_PROGRAM.md R6): a real service on
+# runloom, run continuously toward the 21-day-green gate.  NOT installed by the
+# repo -- see examples/canary/README.md; get the box owner's OK first.
+[Unit]
+Description=runloom canary service (echo + chat + status endpoint)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/projects/pygo
+Environment=PYTHON_GIL=0
+Environment=RUNLOOM_WATCHDOG=120
+Environment=CANARY_CRASH_FILE=%h/runloom-canary-crash.txt
+# self-samples the soak CSV so the gauges are ledgerable; runs until stopped.
+ExecStart=%h/.pyenv/versions/3.13.13t/bin/python3 examples/canary/server.py \
+    --csv %h/runloom-canary.csv --interval 30
+Restart=on-failure
+RestartSec=5
+# a deliberate restart (upgrade) is fine; an unplanned one is a finding -- the
+# crash file + watchdog artifact say which.
+
+[Install]
+WantedBy=default.target

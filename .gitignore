@@ -40,3 +40,8 @@ docs/dev/soak/**/worker*.csv
 docs/dev/soak/**/*.hb
 docs/dev/soak/**/hang_*.txt
 docs/dev/soak/inbox_artifacts/
+# canary soak artifacts (docs/dev/RELIABILITY_PROGRAM.md R6): keep REPORT.txt,
+# drop the reproducible CSV/logs/crash captures.
+docs/dev/soak/canary_*/canary.csv
+docs/dev/soak/canary_*/*.log
+docs/dev/soak/canary_*/*crash*.txt
