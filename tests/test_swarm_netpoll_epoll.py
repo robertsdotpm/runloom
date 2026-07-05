@@ -479,6 +479,91 @@ def test_raw_close_without_unregister_poisons_fd_subprocess():
     pytest.skip("fd number never reused across 8 attempts")
 
 
+# ==========================================================================
+# Stale-arm probe MODE COVERAGE (R7 item 4 -- close the fix's test gaps:
+# the probe's heal/re-key/validate paths under RUNLOOM_PERHUB_EPOLL, M:N hub
+# pools, and the disable env-gate).  All reuse the raw-poison shape but drive
+# it through a different pool-routing / config path.
+# ==========================================================================
+@pytest.mark.skipif(rc.netpoll_backend() != "epoll", reason="probe is epoll-only")
+def test_stale_arm_probe_heals_under_perhub_epoll_subprocess():
+    # RUNLOOM_PERHUB_EPOLL routes the arm/validate to the OWNING hub's epoll,
+    # not the shared one -- validate_arm's owner-lookup + re-ADD must target the
+    # right epoll.  Same poison, PERHUB on: must still WOKE.
+    for _ in range(8):
+        p = _subproc(_RAW_POISON_SCRIPT,
+                     env_extra={"RUNLOOM_PERHUB_EPOLL": "1"}, timeout=20)
+        _assert_no_signal_crash(p, "perhub-poison")
+        if "SKIP" in p.stdout:
+            continue
+        assert "WOKE" in p.stdout, (
+            "probe did not heal under RUNLOOM_PERHUB_EPOLL=1 (got %r)" % p.stdout)
+        return
+    pytest.skip("fd number never reused across 8 attempts")
+
+
+_MN_POISON_SCRIPT = r'''
+import sys, os; sys.path.insert(0, "src")
+import runloom_c as rc
+READ = 1
+out = {}
+rc.mn_init(2)
+def main():
+    r, w = os.pipe()
+    rc.wait_fd(r, READ, 5)            # arm on a hub pool
+    os.close(r); os.close(w)          # poison the number, no unregister
+    r2, w2 = os.pipe()
+    if r2 != r:
+        out["skip"] = True
+        rc.netpoll_unregister(r2); os.close(r2); os.close(w2); return
+    def writer():
+        rc.sched_yield(); rc.sched_yield(); os.write(w2, b"y")
+    rc.mn_fiber(writer)
+    out["rv"] = rc.wait_fd(r2, READ, 1200)
+    rc.netpoll_unregister(r2); os.close(r2); os.close(w2)
+rc.mn_fiber(main); rc.mn_run()
+if out.get("skip"): sys.stdout.write("SKIP\n")
+elif out.get("rv"): sys.stdout.write("WOKE\n")
+else: sys.stdout.write("HUNG\n")
+'''
+
+
+@pytest.mark.skipif(rc.netpoll_backend() != "epoll", reason="probe is epoll-only")
+def test_stale_arm_probe_heals_under_mn_subprocess():
+    # The probe's deadline-heap re-key + validate must work on a per-hub M:N
+    # parker pool, not just the single-thread default pool.
+    for _ in range(8):
+        p = _subproc(_MN_POISON_SCRIPT, timeout=20)
+        _assert_no_signal_crash(p, "mn-poison")
+        if "SKIP" in p.stdout:
+            continue
+        assert "WOKE" in p.stdout, (
+            "probe did not heal on an M:N hub pool (got %r)" % p.stdout)
+        return
+    pytest.skip("fd number never reused across 8 attempts")
+
+
+@pytest.mark.skipif(rc.netpoll_backend() != "epoll", reason="probe is epoll-only")
+def test_stale_arm_probe_disabled_env_hangs_subprocess():
+    # RUNLOOM_STALE_ARM_PROBE_MS=0 DISABLES the probe -> the poison reverts to
+    # the old sharp-edge behavior (park to the ceiling, wake_fd returns 0 =
+    # HUNG).  This proves the env gate actually turns the probe off (a config
+    # regression that ignored the env would keep healing and read WOKE).  The
+    # 1200 ms ceiling bounds it so the test never actually hangs.
+    for _ in range(8):
+        p = _subproc(_RAW_POISON_SCRIPT,
+                     env_extra={"RUNLOOM_STALE_ARM_PROBE_MS": "0"}, timeout=20)
+        _assert_no_signal_crash(p, "probe-disabled")
+        if "SKIP" in p.stdout:
+            continue
+        assert "HUNG" in p.stdout, (
+            "RUNLOOM_STALE_ARM_PROBE_MS=0 did not disable the probe (got %r): "
+            "with the probe off the poisoned fd must park to its ceiling"
+            % p.stdout)
+        return
+    pytest.skip("fd number never reused across 8 attempts")
+
+
 @pytest.mark.skipif(rc.netpoll_backend() != "epoll", reason="tripwire is epoll-only")
 def test_dbg_netpoll_tripwire_heals_gc_poison_subprocess():
     # RUNLOOM_DBG_NETPOLL turns the silent stale-arm hang into a loud,
