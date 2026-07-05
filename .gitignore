@@ -32,3 +32,10 @@ tests/experiments/spawn_perf/baseline_run.log
 /verify/
 /experiments/
 /tests_c/
+
+# soak-harness raw samples (docs/dev/RELIABILITY_PROGRAM.md R1): keep the
+# committed REPORT.md ledger entries, drop the large reproducible CSV/heartbeat
+# artifacts + gdb hang dumps.
+docs/dev/soak/**/worker*.csv
+docs/dev/soak/**/*.hb
+docs/dev/soak/**/hang_*.txt
