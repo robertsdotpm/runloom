@@ -158,7 +158,7 @@ def producer(efd, n, done_ch, rng):
 
 
 def worker(H, wid, rng, state):
-    slot = wid & 1023
+    slot = wid                          # UNIQUE per worker (no shared-slot += race)
     produced = state["produced"]
     for _ in H.round_range():
         if not H.running():
@@ -224,7 +224,12 @@ def setup(H):
             "runloom_c.wait_fd unavailable -- cannot park on a raw fd; skipping")
         H.state = None
         return
-    H.state = {"produced": [0] * 1024, "consumed": [0] * 1024}
+    # ONE slot per worker (race-free counter rule, CLAUDE.md Benching): a shared
+    # `list[slot] += n` is NOT atomic under GIL-off, so wid-COLLIDING slots lose
+    # increments and make the CONSERVATION COUNTER itself race -- a false FAIL
+    # that is a test measurement artifact, not a runtime lost-wake.  Size to the
+    # worker count and index by the unique wid (see worker()).
+    H.state = {"produced": [0] * H.funcs, "consumed": [0] * H.funcs}
 
 
 def body(H):
