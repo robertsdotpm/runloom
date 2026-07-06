@@ -236,10 +236,15 @@ static int runloom_netpoll_validate_arm(int fd)
 }
 #endif
 
+/* Defined in netpoll_pump_helpers.c.inc (included after this fragment); the
+ * migration ADD-fail recovery below error-wakes through it. */
+static int runloom_pump_dispatch_event(int fd, int mask, int wake_all);
+
 static int runloom_netpoll_register(int fd, int events)
 {
 #if defined(RUNLOOM_HAVE_EPOLL)
     int cur, target, need;
+    int migrated = 0;
     struct epoll_event ev;
     /* RUNLOOM_PERHUB_EPOLL: route ADD/MOD to THIS hub's own epoll (a fresh fd) or
      * to the epoll the fd already lives in (a widen of an existing registration).
@@ -345,6 +350,10 @@ static int runloom_netpoll_register(int fd, int events)
             cur = 0;                 /* fresh ADD into the shared epoll */
             ep = runloom_epoll_fd;
             my_pool_idx = -1;        /* record as shared -> no future migration */
+            migrated = 1;            /* the old registration is GONE (DEL above):
+                                      * if the fresh ADD below fails, the fd is in
+                                      * NO epoll and pre-existing parkers must be
+                                      * error-woken (see the failure epilogue). */
         }
     }
     if (cur != 0 && target == cur) {
@@ -422,6 +431,25 @@ static int runloom_netpoll_register(int fd, int events)
     runloom_fd_armed_set(fd, cur);
     if (perhub && cur == 0) runloom_fd_epoll_pool_set(fd, -1);
     RUNLOOM_RUNLOCK(&runloom_pool.lock, RUNLOOM_RANK_PARKER_POOL);
+    /* MIGRATION ADD-FAIL: the DEL above already removed the fd from its old
+     * epoll, so this failure leaves it registered in NO epoll -- the kernel can
+     * never wake a parker on it again.  Same verdict as validate_arm's DEAD fd
+     * (:129-134), so apply the same recovery the probe batch uses
+     * (netpoll_pump_helpers.c.inc): error-wake every parker still on the fd,
+     * full direction mask, wake_all.  Without this, a PRE-EXISTING untimed
+     * waiter (e.g. a reader armed in the old owner's epoll before this writer
+     * migrated the fd) is stranded silently -- only THIS caller sees the -1
+     * (tools/verify/cbmc/netpoll_arm_demonic_cbmc.c, 2026-07-06).  Woken
+     * parkers retry their op: EAGAIN -> re-park -> a fresh register retries
+     * the ADD (heals a transient ENOMEM) or surfaces the failure loudly.
+     * Must run with the pool lock DROPPED (dispatch takes pool locks -- same
+     * rank); errno is preserved for this caller's own OSError. */
+    if (migrated) {
+        int saved = errno;
+        (void)runloom_pump_dispatch_event(fd,
+                RUNLOOM_NETPOLL_READ | RUNLOOM_NETPOLL_WRITE, 1);
+        errno = saved;
+    }
     return -1;
 #elif defined(RUNLOOM_HAVE_KQUEUE)
     /* Arm ONLY the requested direction(s), ONE-SHOT (NOT EV_CLEAR), re-arming

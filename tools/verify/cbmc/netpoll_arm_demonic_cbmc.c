@@ -38,6 +38,36 @@
  *                          (does an untimed wait_fd park exist here? is a later
  *                          register on the fd guaranteed? does the pump re-arm?) --
  *                          so this is a lead to investigate, NOT a confirmed bug.
+ *
+ * EMPIRICAL FOLLOW-UP 2026-07-06 (LD_PRELOAD forced-ENOMEM repro, 2/3-hub
+ * socketpair, pre-existing untimed reader + writer(s) triggering cross-hub
+ * migration on the same fd):  the window did NOT manifest as a permanent silent
+ * hang in ANY reachable configuration built.  The migration ADD-fail fired
+ * (verified via the shim), yet the stranded reader ALWAYS recovered -- either it
+ * woke with data (a LATER successful register on the fd re-ADDed it -> LEVEL
+ * re-report), or, under sustained ENOMEM (every ADD failing), it woke with the
+ * ENOMEM surfaced as an OSError rather than hanging.  The pure sole-reader /
+ * one-off-writer-cross-hub shape that permanence needs could NOT be constructed
+ * from Python (mn_fiber has no hub-pinning; placement is round-robin).  NET: the
+ * CODE asymmetry is real (this ADD-fail path at netpoll_register.c.inc:422-425
+ * does NOT error-wake pre-existing parkers, unlike the validate_arm DEAD path
+ * at :133 which documents you must) and the demonic proof exposes it kernel-
+ * independently -- but its PERMANENT-hang REACHABILITY in the shipped runtime is
+ * NOT demonstrated; every exercised path self-recovered.  A defensive error-wake
+ * at :422 (mirroring the already-shipped :133 recovery) would close it whether or
+ * not it is reachable.
+ *
+ * RESOLUTION 2026-07-06: that error-wake SHIPPED (netpoll_register.c.inc failure
+ * epilogue: on migration ADD-fail, runloom_pump_dispatch_event(fd, R|W, wake_all)
+ * with the pool lock dropped and errno preserved -- the exact recovery the probe
+ * batch already used for DEAD fds).  CONFIG MEANINGS SINCE THEN:
+ *   -DASSUME_ADD_RECOVERY  is now the FAITHFUL model of shipped code -> must PASS.
+ *   (default, no recovery) models the PRE-fix code -> must FAIL.  Kept as the
+ *                          regression teeth: if a refactor ever drops the
+ *                          error-wake, the default config documents exactly what
+ *                          breaks and why.
+ * Verified post-fix: forced sustained-ENOMEM repro wakes the stranded reader with
+ * a loud OSError(ENOMEM); healthy path unchanged; netpoll affinity suite green.
  *   -DBUG_ARM_DROP         the 2026-07-02 migration bug (target=need) -> FAILS
  *                          (a second, independent way to reach the window: teeth).
  *   -DASSUME_ADD_RECOVERY  ADD-adds the (unproven) assumption that a later register
