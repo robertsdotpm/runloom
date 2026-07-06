@@ -76,7 +76,7 @@ fi
 phases=("$@")
 [ ${#phases[@]} -eq 0 ] && phases=(tests mn replay lincheck dst ctest)
 if [ "${phases[0]}" = all ]; then
-  phases=(tests mn replay lincheck dst ctest static sanitizers exttsan verify ctxcheck dbgnetpoll ftconform)
+  phases=(tests mn replay lincheck dst ctest static sanitizers exttsan verify ctxcheck dbgnetpoll migdelay ftconform)
 fi
 
 rc=0
@@ -150,6 +150,10 @@ for ph in "${phases[@]}"; do
       # assert; fails on any lock-order inversion or yield-while-lock-held.
       PYTHON="$PYTHON" bash scripts/check_ctxcheck.sh || rc=1
       ;;
+    migdelay)
+      hr "Migration-window perturbation (RUNLOOM_DELAY on snap/load/adopt)"
+      PYTHON="$PYTHON" bash scripts/check_migration_delay.sh || rc=1
+      ;;
     dbgnetpoll)
       hr "Stale-arm tripwire across the broad suite (RUNLOOM_DBG_NETPOLL=1)"
       # Runs netpoll/mn/aio under the inline arm-cache-vs-kernel check so
@@ -169,7 +173,7 @@ for ph in "${phases[@]}"; do
       PYTHON_GIL=0 "$PYTHON" tools/combinatorial/covering.py --iters "${COMBO_ITERS:-40}" || rc=1
       ;;
     *)
-      echo "unknown phase: $ph (want: tests mn replay lincheck dst ctest static sanitizers exttsan verify verify-fast ctxcheck dbgnetpoll ftconform bench combo all)"; rc=2 ;;
+      echo "unknown phase: $ph (want: tests mn replay lincheck dst ctest static sanitizers exttsan verify verify-fast ctxcheck dbgnetpoll migdelay ftconform bench combo all)"; rc=2 ;;
   esac
 done
 

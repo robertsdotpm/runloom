@@ -1162,6 +1162,11 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
                  * abort).  No-op without the Py_TSTATE_ALLOC_HOME CPython patch
                  * (patches/cpython313t-tstate-alloc-home.patch). */
                 runloom_iframe_borrow_alloc_home(g->tstate, hub_ts);
+                /* Perturbation seam (RUNLOOM_DELAY): widen the cross-hub
+                 * tstate-adopt window so a concurrent actor races the attach --
+                 * the migration-adopt reorder item 3 / the handoff path could
+                 * introduce.  No-op unless RUNLOOM_DELAY names this site. */
+                runloom_delay_inject(RUNLOOM_DLY_HANDOFF_ADOPT);
                 PyEval_RestoreThread(g->tstate);      /* attach g's own tstate */
                 /* Deep-surface migration oracle (RUNLOOM_DBG_MIGRATE; zero-cost
                  * otherwise).  The per-g tstate's mimalloc heap / brc / QSBR are

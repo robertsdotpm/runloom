@@ -85,6 +85,11 @@ void runloom_pystate_snap(runloom_pystate_snap_t *snap)
         return;
     }
     ts = PyThreadState_GET();
+    /* Perturbation seam (RUNLOOM_DELAY): widen the snap-SAVE window so a
+     * concurrent wake / cross-hub migration races the field copy below -- the
+     * exact reorder a handle-substrate migration (item 3) could introduce.
+     * No-op unless RUNLOOM_DELAY names this site. */
+    runloom_delay_inject(RUNLOOM_DLY_SNAP_SAVE);
 
     /* DIAG: remember which tstate is bound right now.  This is the pointer
      * the suspended eval loop bakes into its C frame; load checks it for a
@@ -320,6 +325,10 @@ void runloom_pystate_load(runloom_pystate_snap_t *snap)
         return;
     }
     ts = PyThreadState_GET();
+    /* Perturbation seam (RUNLOOM_DELAY): widen the snap-LOAD/restore window so a
+     * concurrent actor races the field restore below.  No-op unless
+     * RUNLOOM_DELAY names this site. */
+    runloom_delay_inject(RUNLOOM_DLY_SNAP_LOAD);
 
     /* DEBUG: validate the exception objects this snap is about to restore into
      * the shared tstate BEFORE they can poison _PyErr_SetObject (the p69 crash).
