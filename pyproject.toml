@@ -59,6 +59,14 @@ dev = [
     "twine>=5",
     "cibuildwheel>=2.20",   # `enable = ["cpython-freethreading"]` support
 ]
+# Coverage-guided fuzzing (tools/fuzz/atheris + duty_cycle.sh nightly stage 6).
+# Opt-in and heavy on purpose: atheris is a clang/libFuzzer source build, so it
+# is deliberately NOT in [dev] (that must stay quick + clang-free).  The fuzz
+# stage and tools/fuzz/atheris/run.sh self-skip cleanly when atheris is absent.
+#   pip install "runloom[fuzz]"    (needs clang; see tools/fuzz/atheris/run.sh)
+fuzz = [
+    "atheris",
+]
 
 [project.urls]
 # NOTE: these point at the post-rename repo name (robertsdotpm/runloom).
