@@ -2114,6 +2114,7 @@ void runloom_coro_yield(void)
 {
     runloom_coro_t *c = runloom_tls_current;
     if (c == NULL) return;
+    runloom_ctx_assert_parkable("coro_yield");
     runloom_asm_swap(&c->asm_coro.self, &c->asm_coro.caller);
 }
 
@@ -2215,6 +2216,7 @@ void runloom_coro_resume(runloom_coro_t *c)
 
 void runloom_coro_yield(void)
 {
+    runloom_ctx_assert_parkable("coro_yield");
     SwitchToFiber(runloom_tls_caller_fiber);
 }
 
@@ -2317,6 +2319,7 @@ void runloom_coro_yield(void)
 {
     runloom_coro_t *c = runloom_tls_current;
     if (c == NULL) return;
+    runloom_ctx_assert_parkable("coro_yield");
     swapcontext(&c->ctx, &c->caller_ctx);
 }
 

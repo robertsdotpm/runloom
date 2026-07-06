@@ -100,4 +100,48 @@ RUNLOOM_INLINE void runloom_lockrank_pop(int rank)
 
 #endif
 
+/* ---- park/yield safety (context typestate), item 10 ------------------------
+ * A fiber that yields or parks while holding a ranked OS lock, or inside a
+ * declared NO-YIELD region (tp_dealloc / finalizer / preempt callback), is the
+ * blocking-at-unsafe-point class (bugs 22/26/53/78/94/103/111): the scheduler
+ * runs arbitrary other fibers with the lock still held (self-deadlock or a
+ * lock-order inversion) or freezes a half-destroyed object across a GC-safe
+ * point.  RUNLOOM_CTXCHECK arms an assert at every coro_yield that turns those
+ * needs-perfect-interleaving freezes into a first-run diagnostic.  It reuses the
+ * lockrank held-stack, so it implies RUNLOOM_LOCKRANK.  Zero cost when off. */
+#ifdef RUNLOOM_CTXCHECK
+#if !defined(RUNLOOM_LOCKRANK)
+#error "RUNLOOM_CTXCHECK requires RUNLOOM_LOCKRANK (it reads the held-rank stack)"
+#endif
+
+extern RUNLOOM_TLS int runloom_ctx_noyield_depth;
+
+/* Reports each offending site once (abort only under RUNLOOM_CTXCHECK_ABORT),
+ * mirroring runloom_lockrank_violation so a whole suite run surfaces every
+ * site in one pass rather than dying on the first. */
+void runloom_ctx_parkable_violation(const char *where, int held_rank, int noyield);
+
+RUNLOOM_INLINE void runloom_ctx_assert_parkable(const char *where)
+{
+    if (runloom_lockrank_depth > 0)
+        runloom_ctx_parkable_violation(
+            where, runloom_lockrank_held[runloom_lockrank_depth - 1],
+            runloom_ctx_noyield_depth);
+    else if (runloom_ctx_noyield_depth > 0)
+        runloom_ctx_parkable_violation(where, 0, runloom_ctx_noyield_depth);
+}
+
+/* Bracket a region from which a yield/park is a bug (destructors, finalizer
+ * dispatch, preempt callbacks, C critical sections that call into Python). */
+#define RUNLOOM_NOYIELD_BEGIN() (runloom_ctx_noyield_depth++)
+#define RUNLOOM_NOYIELD_END()   (runloom_ctx_noyield_depth--)
+
+#else  /* !RUNLOOM_CTXCHECK -- zero cost */
+
+#define runloom_ctx_assert_parkable(where) ((void)0)
+#define RUNLOOM_NOYIELD_BEGIN() ((void)0)
+#define RUNLOOM_NOYIELD_END()   ((void)0)
+
+#endif /* RUNLOOM_CTXCHECK */
+
 #endif /* RUNLOOM_LOCKRANK_H */

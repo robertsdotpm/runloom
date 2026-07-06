@@ -76,7 +76,7 @@ fi
 phases=("$@")
 [ ${#phases[@]} -eq 0 ] && phases=(tests mn replay lincheck dst ctest)
 if [ "${phases[0]}" = all ]; then
-  phases=(tests mn replay lincheck dst ctest static sanitizers exttsan verify ftconform)
+  phases=(tests mn replay lincheck dst ctest static sanitizers exttsan verify ctxcheck ftconform)
 fi
 
 rc=0
@@ -144,6 +144,12 @@ for ph in "${phases[@]}"; do
       hr "Formal verification -- fast lane (all Spin + cheap CBMC; skips 3 slow proofs)"
       VERIFY_FAST=1 tools/verify/run_verify.sh || rc=1
       ;;
+    ctxcheck)
+      hr "Lock-order + park/yield-safety checker (RUNLOOM_CTXCHECK build slice)"
+      # Activates the previously-never-built rank checker + the item-10 park
+      # assert; fails on any lock-order inversion or yield-while-lock-held.
+      PYTHON="$PYTHON" bash scripts/check_ctxcheck.sh || rc=1
+      ;;
     ftconform)
       hr "STW (M2) trace conformance -- real CPython stop-the-world vs the model"
       tools/stw_conform_ci.sh || rc=1
@@ -157,7 +163,7 @@ for ph in "${phases[@]}"; do
       PYTHON_GIL=0 "$PYTHON" tools/combinatorial/covering.py --iters "${COMBO_ITERS:-40}" || rc=1
       ;;
     *)
-      echo "unknown phase: $ph (want: tests mn replay lincheck dst ctest static sanitizers exttsan verify verify-fast ftconform bench combo all)"; rc=2 ;;
+      echo "unknown phase: $ph (want: tests mn replay lincheck dst ctest static sanitizers exttsan verify verify-fast ctxcheck ftconform bench combo all)"; rc=2 ;;
   esac
 done
 

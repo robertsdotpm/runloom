@@ -89,6 +89,12 @@ RUNLOOM_DEBUG     = os.environ.get("RUNLOOM_DEBUG", "").strip() not in ("", "0",
 RUNLOOM_NO_ASM    = os.environ.get("RUNLOOM_NO_ASM", "").strip() not in ("", "0", "no", "false")
 RUNLOOM_BACKEND   = os.environ.get("RUNLOOM_BACKEND", "").strip().lower()
 RUNLOOM_NO_IOCP   = os.environ.get("RUNLOOM_NO_IOCP", "").strip() not in ("", "0", "no", "false")
+# RUNLOOM_CTXCHECK=1 arms the debug lock-order rank checker AND the park/yield
+# safety assert (item 10): a fiber that yields while holding a ranked lock or
+# inside a no-yield region reports (or aborts with RUNLOOM_CTXCHECK_ABORT=1).
+# Debug lane only -- zero cost in a normal build.
+RUNLOOM_CTXCHECK  = os.environ.get("RUNLOOM_CTXCHECK", "").strip() not in ("", "0", "no", "false")
+RUNLOOM_CTXCHECK_ABORT = os.environ.get("RUNLOOM_CTXCHECK_ABORT", "").strip() not in ("", "0", "no", "false")
 # RUNLOOM_NETPOLL=select forces the select() fallback at build time on POSIX
 # (suppresses epoll/kqueue/event_ports in plat.h so netpoll.c uses its
 # select path).  On Windows the same env var is honoured at *runtime* by
@@ -259,6 +265,11 @@ def detect_compile_args():
             args.append("/DRUNLOOM_FORCE_SELECT=1")
         else:
             args.append("-DRUNLOOM_FORCE_SELECT=1")
+    if RUNLOOM_CTXCHECK:
+        # CTXCHECK implies LOCKRANK (the park assert reads the held-rank stack).
+        args += ["-DRUNLOOM_LOCKRANK=1", "-DRUNLOOM_CTXCHECK=1"]
+        if RUNLOOM_CTXCHECK_ABORT:
+            args += ["-DRUNLOOM_LOCKRANK_ABORT=1", "-DRUNLOOM_CTXCHECK_ABORT=1"]
     args += RUNLOOM_EXTRA_CFLAGS
     return args
 

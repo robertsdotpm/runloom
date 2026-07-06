@@ -695,3 +695,32 @@ void runloom_lockrank_violation(int held, int acquired)
 #endif
 }
 #endif
+
+/* ---- park/yield-safety checker storage (item 10, debug-only) ---- */
+#ifdef RUNLOOM_CTXCHECK
+RUNLOOM_TLS int runloom_ctx_noyield_depth = 0;
+
+void runloom_ctx_parkable_violation(const char *where, int held_rank, int noyield)
+{
+    static const char *seen_where[64];
+    static int seen_rank[64];
+    static int seen_n = 0;
+    int i;
+    for (i = 0; i < seen_n; i++)
+        if (seen_where[i] == where && seen_rank[i] == held_rank) return;
+    if (seen_n < 64) { seen_where[seen_n] = where; seen_rank[seen_n] = held_rank;
+                       seen_n++; }
+    if (held_rank > 0)
+        fprintf(stderr, "[runloom-ctxcheck] UNSAFE PARK at %s: yielding while "
+                        "holding ranked lock %d (a woken sibling can hit that "
+                        "lock / lock-order invert -> hang)\n", where, held_rank);
+    else
+        fprintf(stderr, "[runloom-ctxcheck] UNSAFE PARK at %s: yielding inside a "
+                        "NO-YIELD region (depth %d; destructor/finalizer/preempt "
+                        "-> frozen half-dead object)\n", where, noyield);
+    fflush(stderr);
+#ifdef RUNLOOM_CTXCHECK_ABORT
+    abort();
+#endif
+}
+#endif
