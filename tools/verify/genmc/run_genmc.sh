@@ -166,6 +166,29 @@ done
 # COMPOSITION -- a park that commits via Dekker then the wake_state CAS, racing
 # wake_g -- holds no-lost-wake + enqueued-at-most-once under RC11.  Gate this
 # BEFORE promoting RUNLOOM_STEAL_WOKEN / RUNLOOM_PER_G_TSTATE toward default.
+# Drift-guard: sched_parkwake_seam.c is a FAITHFUL SLICE (not byte-shared), so
+# its wake_state enum must track runloom_sched.h exactly -- names AND encodings.
+# This model already drifted once (a 4-state copy of the 6-state kernel: the
+# SWEEPING/SWEEPING_WOKEN sweeper as a third claimer went unmodeled, so the gate
+# was silently green against a stale FSM).  Assert the enum matches so a new
+# state / changed encoding fails LOUDLY and forces a re-sync of the model + the
+# sweeper thread, rather than proving properties of a copy.
+printf '  [genmc] %-30s ' "wake_state FSM drift-guard"
+if python3 - "$SRCDIR/runloom_sched.h" "$HERE/sched_parkwake_seam.c" <<'PYEOF'
+import re, sys
+hdr = open(sys.argv[1]).read(); model = open(sys.argv[2]).read()
+src = {m.group(1): int(m.group(2))
+       for m in re.finditer(r'#define\s+RUNLOOM_WS_(\w+)\s+(\d+)', hdr)}
+mod = {m.group(1): int(m.group(2))
+       for m in re.finditer(r'\bWS_(\w+)\s*=\s*(\d+)', model)}
+sys.exit(0 if src and src == mod else 1)
+PYEOF
+then
+    green "PASS"; echo " -- model wake_state enum matches runloom_sched.h (6 states)"; pass=$((pass+1))
+else
+    red "FAIL"; echo " -- wake_state FSM in runloom_sched.h diverged from the model; re-sync sched_parkwake_seam.c (enum + the sweeper claimer)"; fail=$((fail+1))
+fi
+
 printf '  [genmc] %-30s ' "sched_parkwake_seam.c"
 if "$G" -- "$HERE/sched_parkwake_seam.c" >"$HERE/.genmc.pos.log" 2>&1 \
         && grep -q "No errors were detected" "$HERE/.genmc.pos.log"; then

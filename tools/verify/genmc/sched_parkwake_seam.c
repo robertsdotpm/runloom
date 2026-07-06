@@ -42,13 +42,30 @@
  *                       CAS RUNNING->PARKED-with-RUNNING_WOKEN-fallback, dropping
  *                       a wake that landed during the park-commit window -> lost
  *                       wake (must FAIL).
+ *   -DBUG_SWEEP_DROP_WOKEN : the idle sweeper ends SWEEPING->PARKED even when a
+ *                       wake landed during the sweep (state SWEEPING_WOKEN),
+ *                       dropping it -> lost wake (must FAIL).
+ *   -DNO_SWEEPER : drop the third claimer, recovering the old 2-claimer
+ *                       composition for A/B (the default now models the real
+ *                       3-way race: owner park-commit vs wake_g vs idle sweeper).
  */
 #include <pthread.h>
 #include <stdatomic.h>
 #include <assert.h>
 
-/* wake_state values (runloom_gstate.h: RUNLOOM_WS_*). */
-enum { WS_RUNNING = 0, WS_PARKED = 1, WS_QUEUED = 2, WS_RUNNING_WOKEN = 3 };
+/* wake_state values -- MUST match runloom_sched.h:31-43 exactly (the drift-guard
+ * in run_genmc.sh asserts this).  Six states: the RUNNING/RUNNING_WOKEN pair for
+ * the owning resumer, and the SWEEPING/SWEEPING_WOKEN pair mirroring it for the
+ * idle-stack sweeper (a THIRD concurrent claimer of a PARKED g -- added by the
+ * stealable-wake-queue work, modeled below). */
+enum {
+    WS_PARKED         = 0,
+    WS_QUEUED         = 1,
+    WS_RUNNING        = 2,
+    WS_RUNNING_WOKEN  = 3,
+    WS_SWEEPING       = 4,
+    WS_SWEEPING_WOKEN = 5
+};
 
 static atomic_int wake_state;       /* the single-location machine (protocol B) */
 static atomic_int parked_safe;      /* Dekker commit flag (protocol A) */
@@ -74,10 +91,46 @@ static void *waker_state(void *arg)
                     WS_RUNNING_WOKEN, memory_order_acq_rel, memory_order_acquire)) {
                 return 0;   /* owner re-enqueues at its park-commit (below) */
             }
+        } else if (st == WS_SWEEPING) {
+            /* the g is mid-sweep: defer the wake to the sweeper's sweep_end
+             * (mn_sched_mn_api.c.inc:313-318, SWEEPING->SWEEPING_WOKEN). */
+            if (atomic_compare_exchange_strong_explicit(&wake_state, &st,
+                    WS_SWEEPING_WOKEN, memory_order_acq_rel, memory_order_acquire)) {
+                return 0;
+            }
         } else {
-            return 0;       /* QUEUED / RUNNING_WOKEN: a wake is already pending */
+            return 0;       /* QUEUED / RUNNING_WOKEN / SWEEPING_WOKEN: already pending */
         }
     }
+}
+
+/* ---- idle-stack sweeper: a THIRD concurrent claimer of a PARKED g.
+ * runloom_mn_sweep_try_claim (mn_sched_mn_api.c.inc:435-440) CASes PARKED->
+ * SWEEPING (exclusive, like QUEUED->RUNNING for a resumer); runloom_mn_sweep_end
+ * (:454-464) then CASes SWEEPING->PARKED if no wake landed, or -- if wake_g
+ * flipped it to SWEEPING_WOKEN meanwhile -- stores QUEUED and re-enqueues the
+ * deferred wake exactly once.  A wake that lands during the sweep MUST NOT be
+ * dropped (that is a lost wake); -DBUG_SWEEP_DROP_WOKEN models exactly that. */
+static void *sweeper(void *arg)
+{
+    (void)arg;
+    int st = WS_PARKED;
+    if (!atomic_compare_exchange_strong_explicit(&wake_state, &st, WS_SWEEPING,
+            memory_order_acq_rel, memory_order_acquire))
+        return 0;                       /* not PARKED / lost the claim: nothing to sweep */
+    /* (the madvise the sweep exists to do is elided -- it touches no shared state) */
+    int se = WS_SWEEPING;
+    if (atomic_compare_exchange_strong_explicit(&wake_state, &se, WS_PARKED,
+            memory_order_acq_rel, memory_order_acquire))
+        return 0;                       /* SWEEPING->PARKED: no wake landed */
+    /* se == SWEEPING_WOKEN: wake_g deferred a wake to us -- re-enqueue exactly once. */
+#ifdef BUG_SWEEP_DROP_WOKEN
+    atomic_store_explicit(&wake_state, WS_PARKED, memory_order_release);   /* DROPS the wake */
+#else
+    atomic_store_explicit(&wake_state, WS_QUEUED, memory_order_release);
+    atomic_fetch_add_explicit(&enq_runq, 1, memory_order_release);
+#endif
+    return 0;
 }
 
 #ifdef SEAM_MIX_DEKKER
@@ -154,16 +207,25 @@ int main(void)
     atomic_init(&parked, 0);
 
     pthread_t p, ws;
+#ifndef NO_SWEEPER
+    pthread_t sw;
+#endif
 #ifdef SEAM_MIX_DEKKER
     pthread_t wd;
 #endif
     pthread_create(&p,  0, parker, 0);
     pthread_create(&ws, 0, waker_state, 0);
+#ifndef NO_SWEEPER
+    pthread_create(&sw, 0, sweeper, 0);     /* the third concurrent claimer */
+#endif
 #ifdef SEAM_MIX_DEKKER
     pthread_create(&wd, 0, waker_dekker, 0);
 #endif
     pthread_join(p, 0);
     pthread_join(ws, 0);
+#ifndef NO_SWEEPER
+    pthread_join(sw, 0);
+#endif
 #ifdef SEAM_MIX_DEKKER
     pthread_join(wd, 0);
 #endif
