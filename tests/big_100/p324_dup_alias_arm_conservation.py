@@ -254,8 +254,8 @@ def driver_a_pass(H, wid, rng, state):
             # Both must have woken BY EVENT, not by timeout (a poisoned arm wakes
             # only by timeout).  Tally for the dominance oracle in post().
             ev = (1 if a_ev else 0) + (1 if b_ev else 0)
-            state["woke_event"][wid & 1023] += ev
-            state["woke_timeout"][wid & 1023] += (2 - ev)
+            state["woke_event"][wid] += ev
+            state["woke_timeout"][wid] += (2 - ev)
 
         # ---- the survival differential: close ONE alias NUMBER (fd2), then
         # write again; the OTHER alias (rfd) must STILL wake on it. ------------
@@ -285,7 +285,7 @@ def driver_a_pass(H, wid, rng, state):
                                "lost when its sibling number was closed".format(
                                    wid, rno)):
                     return
-                state["woke_event"][wid & 1023] += 1
+                state["woke_event"][wid] += 1
                 H.op(wid)
                 H.task_done(wid)
 
@@ -298,7 +298,7 @@ def driver_a_pass(H, wid, rng, state):
 # --------------------------------------------------------------------------
 
 def churn_worker(H, wid, rng, state):
-    slot = wid & 1023
+    slot = wid
     leak = state["churn_leak"]
     for _ in H.round_range():
         if not H.running():
@@ -422,9 +422,9 @@ def setup(H):
         units.append(unit)
     H.state = {
         "units": units,
-        "woke_event": [0] * 1024,
-        "woke_timeout": [0] * 1024,
-        "churn_leak": [0] * 1024,
+        "woke_event": [0] * H.funcs,
+        "woke_timeout": [0] * H.funcs,
+        "churn_leak": [0] * H.funcs,
         "fd_baseline": harness.count_fds(),
     }
 

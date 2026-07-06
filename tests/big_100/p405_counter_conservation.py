@@ -331,7 +331,7 @@ def run_round_impl(H, wid, rng, slot, state):
 
 
 def worker(H, wid, rng, state):
-    slot = wid & 1023
+    slot = wid                          # UNIQUE per worker (race-free counter; see p313)
     for _ in H.round_range():
         if not H.running():
             break
@@ -349,7 +349,7 @@ def setup(H):
     # Built here, inside the root, where cooperative primitives are valid.
     H.state = {
         "lock": runloom.sync.Lock(),
-        "offered": [0] * 1024,             # per-slot units offered to shared Counters
+        "offered": [0] * H.funcs,          # ONE slot per worker (race-free; wid-indexed)
     }
 
 

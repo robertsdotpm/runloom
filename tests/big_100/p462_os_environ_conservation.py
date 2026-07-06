@@ -106,8 +106,8 @@ def setup(H):
     H.state = {
         "nworkers": nworkers,
         # measured arm (report-only)
-        "sibling_reads": [0] * 1024,   # sibling keys peeked
-        "sibling_stale": [0] * 1024,   # sibling absent / mid-flight (benign)
+        "sibling_reads": [0] * nworkers,   # ONE slot per worker (race-free; wid-indexed)
+        "sibling_stale": [0] * nworkers,   # sibling absent / mid-flight (benign)
         # CALIBRATION: which workers actually SET their key at least once (i.e.
         # ran a round before the window closed).  One bool PER WORKER, written
         # only by that worker (race-free, single-writer-per-slot at index wid).
@@ -201,8 +201,8 @@ def worker(H, wid, rng, state):
         H.op(wid)
         H.task_done(wid)
 
-    state["sibling_reads"][wid & 1023] += sib_reads
-    state["sibling_stale"][wid & 1023] += sib_stale
+    state["sibling_reads"][wid] += sib_reads   # UNIQUE per-worker slot (race-free; see p313)
+    state["sibling_stale"][wid] += sib_stale
 
 
 def body(H):
