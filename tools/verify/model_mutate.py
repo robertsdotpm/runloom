@@ -281,7 +281,10 @@ def main(argv):
     ap.add_argument("--full", action="store_true", help="all mutants of all targets")
     ap.add_argument("--max-mutants", type=int, default=None)
     ap.add_argument("--timeout", type=int, default=None, help="per-run seconds")
+    ap.add_argument("--json", default=None,
+                    help="write per-target results (survivors, score) to this path")
     args = ap.parse_args(argv)
+    json_results = {}
 
     if args.target:
         plan = {args.target: args.max_mutants}
@@ -313,6 +316,9 @@ def main(argv):
                   "-- no teeth signal".format(name, res["engine"], res["mutants"]))
             continue
         score = 100.0 * res["killed"] / conclusive
+        json_results[name] = {"score": score, "killed": res["killed"],
+                              "survived": res["survived"],
+                              "survivors": res["survivors"]}
         print("  {0:<14} [{1}] {2} mutants: {3} killed, {4} SURVIVED, "
               "{5} skipped  -> teeth {6:.0f}%".format(
                   name, res["engine"], res["mutants"], res["killed"],
@@ -321,6 +327,12 @@ def main(argv):
             any_survivor = True
             for s in res["survivors"]:
                 print("      SURVIVOR (property does not constrain this): {0}".format(s))
+
+    if args.json:
+        import json as _json
+        with open(args.json, "w") as f:
+            _json.dump(json_results, f, indent=1, sort_keys=True)
+        print("wrote {0}".format(args.json))
 
     if any_error:
         return 2
