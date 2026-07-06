@@ -55,6 +55,23 @@ if have python3; then
             echo "DRIFT (see /tmp/runloom_$lint.log)"; fail=$((fail + 1)); FAILED="$FAILED $lint"
         fi
     done
+    # feature_gate_lint: catch a UAPI feature-macro gate that silently compiles
+    # to the #else stub because its TU forgot the defining header (a shipped
+    # hang once).  Needs a C preprocessor + UAPI headers; exit 2 => headers
+    # absent => SKIP (not fail) so the gate stays runnable off-Linux.
+    if [ -f "$HERE/feature_gate_lint.py" ] && have cc; then
+        printf '  [lint] %-28s ' "feature_gate"
+        python3 "$HERE/feature_gate_lint.py" >"/tmp/runloom_feature_gate.log" 2>&1
+        rc=$?
+        if [ "$rc" = 0 ]; then
+            echo "OK"; pass=$((pass + 1))
+        elif [ "$rc" = 2 ]; then
+            echo "SKIP (no UAPI headers)"; skipped=$((skipped + 1))
+        else
+            echo "STUB-TRAP (see /tmp/runloom_feature_gate.log)"
+            fail=$((fail + 1)); FAILED="$FAILED feature_gate"
+        fi
+    fi
 fi
 
 # ---------------- parallel job engine ----------------------------------
