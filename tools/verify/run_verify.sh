@@ -84,6 +84,21 @@ if have python3; then
             fail=$((fail + 1)); FAILED="$FAILED semantics_conformance"
         fi
     fi
+    # demonic-oracle CBMC harnesses (arm/re-arm window + two-ledger refinement):
+    # cheap (tiny models, seconds), kernel-independent, and each checks its own
+    # negative controls behave as audited (default + teeth).  SKIP if no cbmc.
+    if have cbmc; then
+        for dh in run_demonic run_refinement; do
+            [ -f "$HERE/cbmc/$dh.sh" ] || continue
+            printf '  [cbmc] %-28s ' "$dh"
+            if bash "$HERE/cbmc/$dh.sh" >"/tmp/runloom_$dh.log" 2>&1; then
+                echo "OK"; pass=$((pass + 1))
+            else
+                echo "DRIFTED (see /tmp/runloom_$dh.log)"
+                fail=$((fail + 1)); FAILED="$FAILED $dh"
+            fi
+        done
+    fi
 fi
 
 # ---------------- parallel job engine ----------------------------------
