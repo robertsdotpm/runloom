@@ -262,7 +262,7 @@ void runloom_iouring_ring_drain(runloom_iouring_ring_t *r)
              * the cancel already matched at issue time, so the file identity is
              * no longer needed.  cancel_dup_fd is -1 for the by-user_data cancels. */
             if (op->cancel_dup_fd >= 0) close(op->cancel_dup_fd);
-            free(op);
+            rl_cancel_op_free(op);
         } else if (op != NULL) {
             /* Hub rings only carry SINGLE ops -- multishot stays on the
              * global ring.  Same park/wake handshake as the global-ring
@@ -407,7 +407,7 @@ int runloom_iouring_ring_submit_cancel_fd(runloom_iouring_ring_t *r, int dup_fd)
     runloom_iouring_op_t *cancel_op;
     struct io_uring_sqe sqe;
     if (r == NULL || dup_fd < 0) return -1;
-    cancel_op = (runloom_iouring_op_t *)calloc(1, sizeof(*cancel_op));
+    cancel_op = rl_cancel_op_alloc();   /* pool-first: OOM can't skip the cancel */
     if (cancel_op == NULL) return -1;
     cancel_op->type = RUNLOOM_IOURING_OP_CANCEL;
     cancel_op->cancel_dup_fd = dup_fd;   /* ring drain closes it on the cancel CQE */
@@ -416,7 +416,7 @@ int runloom_iouring_ring_submit_cancel_fd(runloom_iouring_ring_t *r, int dup_fd)
     sqe.fd     = dup_fd;
     sqe.cancel_flags = IORING_ASYNC_CANCEL_FD | IORING_ASYNC_CANCEL_ALL;
     if (runloom_iouring_ring_submit_sqe(r, sqe, cancel_op) != 0) {
-        free(cancel_op);
+        rl_cancel_op_free(cancel_op);
         return -1;
     }
     return 0;
@@ -456,7 +456,7 @@ int runloom_iouring_cancel_g(runloom_g_t *g)
      * fallback) are multi-issuer under sub_lock and submit inline below. */
     if (op->ring != NULL)
         return runloom_mn_hub_request_iouring_cancel(op->hub, op);
-    cancel_op = (runloom_iouring_op_t *)calloc(1, sizeof(*cancel_op));
+    cancel_op = rl_cancel_op_alloc();   /* pool-first: OOM can't skip the cancel */
     if (cancel_op == NULL) return 0;
     cancel_op->type = RUNLOOM_IOURING_OP_CANCEL;
     cancel_op->cancel_dup_fd = -1;   /* carries no fd (calloc's 0 = stdin) */
@@ -465,7 +465,7 @@ int runloom_iouring_cancel_g(runloom_g_t *g)
     sqe.addr   = (uint64_t)(uintptr_t)op;   /* match the original SQE by user_data */
     sqe.fd     = -1;
     rc = runloom_iouring_submit_sqe(sqe, cancel_op);   /* global ring (sub_lock) */
-    if (rc != 0) { free(cancel_op); return 0; }
+    if (rc != 0) { rl_cancel_op_free(cancel_op); return 0; }
     return 1;
 }
 
@@ -482,7 +482,7 @@ void runloom_iouring_submit_cancel_for_op(void *opv)
     if (op == NULL || op->ring == NULL) return;
     if (__atomic_load_n(&op->wait, __ATOMIC_ACQUIRE) != RUNLOOM_IOURING_WAIT_PARKED)
         return;
-    cancel_op = (runloom_iouring_op_t *)calloc(1, sizeof(*cancel_op));
+    cancel_op = rl_cancel_op_alloc();   /* pool-first: OOM can't skip the cancel */
     if (cancel_op == NULL) return;
     cancel_op->type = RUNLOOM_IOURING_OP_CANCEL;
     cancel_op->cancel_dup_fd = -1;   /* carries no fd (calloc's 0 = stdin) */
@@ -492,5 +492,5 @@ void runloom_iouring_submit_cancel_for_op(void *opv)
     sqe.fd     = -1;
     if (runloom_iouring_ring_submit_sqe((runloom_iouring_ring_t *)op->ring,
                                         sqe, cancel_op) != 0)
-        free(cancel_op);
+        rl_cancel_op_free(cancel_op);
 }

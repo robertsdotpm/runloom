@@ -30,7 +30,7 @@ void runloom_iouring_ms_close(runloom_iouring_ms_t *h)
     /* Fire-and-forget cancel.  drain frees the cancel op record when the cancel
      * CQE arrives; the multishot's final CQE (F_MORE clear) drops the "live" ref
      * in ms_on_cqe.  We drop our close ref at the end either way. */
-    cancel_op = (runloom_iouring_op_t *)calloc(1, sizeof(*cancel_op));
+    cancel_op = rl_cancel_op_alloc();   /* pool-first: OOM can't skip the cancel */
     if (cancel_op == NULL) {
         /* OOM: can't submit the cancel.  The kernel still delivers a terminal
          * CQE when the fd is closed (-ECANCELED / EOF, !more), and ms_on_cqe with
@@ -45,7 +45,7 @@ void runloom_iouring_ms_close(runloom_iouring_ms_t *h)
     sqe.addr   = (uintptr_t)&h->op;     /* match SQE by its user_data */
     sqe.fd     = -1;
     if (runloom_iouring_submit_sqe(sqe, cancel_op) != 0) {
-        free(cancel_op);
+        rl_cancel_op_free(cancel_op);
     }
     runloom_iouring_ms_put(h);        /* drop our close ref; terminal CQE drops live */
 }

@@ -77,7 +77,7 @@ static void runloom_iou_submit_cancel_global(runloom_iouring_op_t *target)
 {
     runloom_iouring_op_t *cancel_op;
     struct io_uring_sqe sqe;
-    cancel_op = (runloom_iouring_op_t *)calloc(1, sizeof(*cancel_op));
+    cancel_op = rl_cancel_op_alloc();   /* pool-first: OOM can't skip the cancel */
     if (cancel_op == NULL) return;
     cancel_op->type = RUNLOOM_IOURING_OP_CANCEL;
     cancel_op->cancel_dup_fd = -1;   /* carries no fd (calloc's 0 = stdin) */
@@ -85,7 +85,7 @@ static void runloom_iou_submit_cancel_global(runloom_iouring_op_t *target)
     sqe.opcode = IORING_OP_ASYNC_CANCEL;
     sqe.addr   = (uint64_t)(uintptr_t)target;   /* match original SQE by user_data */
     sqe.fd     = -1;
-    if (runloom_iouring_submit_sqe(sqe, cancel_op) != 0) free(cancel_op);
+    if (runloom_iouring_submit_sqe(sqe, cancel_op) != 0) rl_cancel_op_free(cancel_op);
 }
 
 /* Cancel EVERY in-flight global-ring op on `fd` (by fd, not user_data).  A parked
@@ -101,7 +101,7 @@ void runloom_iouring_cancel_fd(int fd)
     runloom_iouring_op_t *cancel_op;
     struct io_uring_sqe sqe;
     if (!runloom_iouring_available() || fd < 0) return;
-    cancel_op = (runloom_iouring_op_t *)calloc(1, sizeof(*cancel_op));
+    cancel_op = rl_cancel_op_alloc();   /* pool-first: OOM can't skip the cancel */
     if (cancel_op == NULL) return;
     cancel_op->type = RUNLOOM_IOURING_OP_CANCEL;
     cancel_op->cancel_dup_fd = -1;   /* carries no fd (calloc's 0 = stdin) */
@@ -109,7 +109,7 @@ void runloom_iouring_cancel_fd(int fd)
     sqe.opcode = IORING_OP_ASYNC_CANCEL;
     sqe.fd     = fd;
     sqe.cancel_flags = IORING_ASYNC_CANCEL_FD | IORING_ASYNC_CANCEL_ALL;
-    if (runloom_iouring_submit_sqe(sqe, cancel_op) != 0) free(cancel_op);
+    if (runloom_iouring_submit_sqe(sqe, cancel_op) != 0) rl_cancel_op_free(cancel_op);
 #else
     (void)fd;
 #endif

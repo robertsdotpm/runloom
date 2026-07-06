@@ -229,9 +229,10 @@ void runloom_iouring_drain(void)
                     runloom_iouring_ms_on_cqe((runloom_iouring_ms_t *)op, res, flags);
                     break;
                 case RUNLOOM_IOURING_OP_CANCEL:
-                    /* Fire-and-forget: the cancel op record is heap-allocated
-                     * by ms_close; once the CQE arrives it is no longer needed. */
-                    free(op);
+                    /* Fire-and-forget: the cancel op record came from the CANCEL
+                     * pool (or heap fallback); once the CQE arrives it is no
+                     * longer needed.  rl_cancel_op_free routes it back correctly. */
+                    rl_cancel_op_free(op);
                     break;
                 }
             }

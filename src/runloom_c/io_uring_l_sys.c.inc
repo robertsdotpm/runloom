@@ -127,6 +127,67 @@ typedef struct runloom_iouring_op {
                               * fd -- stdin). */
 } runloom_iouring_op_t;
 
+/* CANCEL-op pool (fault-sweep lead, io_uring_l_do.c.inc:80/:104).  A CANCEL op is
+ * a small fire-and-forget heap record submitted to force a parked op to complete
+ * (-ECANCELED) so a signal/timeout interrupts an op that would not complete
+ * NATURALLY.  When its calloc FAILED (OOM) the cancel was silently skipped and
+ * the fiber kept re-parking in the `while (op.result == INT32_MIN)` loop -- a
+ * HANG (the signal ignored), not a UAF (that loop is what keeps the stack op
+ * alive until the CQE).  Preallocating a pool makes the cancel un-skippable:
+ * alloc pops the pool (falls back to calloc only if the pool is exhausted, which
+ * for rare short-lived cancels is itself rare), free returns pool ops to the
+ * pool.  Guarded by a mutex -- cancels are rare, not a hot path. */
+#define RL_CANCEL_POOL_N 256
+static runloom_iouring_op_t rl_cancel_pool[RL_CANCEL_POOL_N];
+static int            rl_cancel_free_idx[RL_CANCEL_POOL_N];
+static int            rl_cancel_free_top;      /* count of free indices */
+static runloom_mutex_t rl_cancel_lock;
+static int            rl_cancel_ready;
+
+static void rl_cancel_pool_init_once(void)
+{
+    int expected = 0;
+    if (__atomic_load_n(&rl_cancel_ready, __ATOMIC_ACQUIRE)) return;
+    if (__atomic_compare_exchange_n(&rl_cancel_ready, &expected, 2, 0,
+                                    __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+        int i;
+        runloom_mutex_init(&rl_cancel_lock);
+        for (i = 0; i < RL_CANCEL_POOL_N; i++) rl_cancel_free_idx[i] = i;
+        rl_cancel_free_top = RL_CANCEL_POOL_N;
+        __atomic_store_n(&rl_cancel_ready, 1, __ATOMIC_RELEASE);
+        return;
+    }
+    while (__atomic_load_n(&rl_cancel_ready, __ATOMIC_ACQUIRE) != 1) { /* spin once */ }
+}
+
+/* Allocate a zeroed CANCEL op that cannot be skipped by OOM: pool first, calloc
+ * fallback.  NULL only if BOTH the pool is exhausted AND calloc fails. */
+static runloom_iouring_op_t *rl_cancel_op_alloc(void)
+{
+    runloom_iouring_op_t *op = NULL;
+    rl_cancel_pool_init_once();
+    runloom_mutex_lock(&rl_cancel_lock);
+    if (rl_cancel_free_top > 0)
+        op = &rl_cancel_pool[rl_cancel_free_idx[--rl_cancel_free_top]];
+    runloom_mutex_unlock(&rl_cancel_lock);
+    if (op != NULL) { memset(op, 0, sizeof(*op)); return op; }
+    return (runloom_iouring_op_t *)calloc(1, sizeof(*op));  /* pool exhausted */
+}
+
+/* Free a CANCEL op: return pool ops to the pool, calloc'd ones to the heap. */
+static void rl_cancel_op_free(runloom_iouring_op_t *op)
+{
+    if (op == NULL) return;
+    if (op >= rl_cancel_pool && op < rl_cancel_pool + RL_CANCEL_POOL_N) {
+        int idx = (int)(op - rl_cancel_pool);
+        runloom_mutex_lock(&rl_cancel_lock);
+        rl_cancel_free_idx[rl_cancel_free_top++] = idx;
+        runloom_mutex_unlock(&rl_cancel_lock);
+    } else {
+        free(op);
+    }
+}
+
 /* Forward-declare for the drain handler. */
 typedef struct runloom_iouring_ms runloom_iouring_ms_t;
 static void runloom_iouring_ms_on_cqe(runloom_iouring_ms_t *h,
