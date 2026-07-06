@@ -76,7 +76,7 @@ fi
 phases=("$@")
 [ ${#phases[@]} -eq 0 ] && phases=(tests mn replay lincheck dst ctest)
 if [ "${phases[0]}" = all ]; then
-  phases=(tests mn replay lincheck dst ctest static sanitizers exttsan verify ctxcheck dbgnetpoll migdelay ftconform)
+  phases=(tests mn replay lincheck dst ctest static sanitizers exttsan verify ctxcheck dbgnetpoll migdelay chess ftconform)
 fi
 
 rc=0
@@ -150,6 +150,10 @@ for ph in "${phases[@]}"; do
       # assert; fails on any lock-order inversion or yield-while-lock-held.
       PYTHON="$PYTHON" bash scripts/check_ctxcheck.sh || rc=1
       ;;
+    chess)
+      hr "CHESS/PCT coverage-theorem gate (systematic interleaving search)"
+      PYTHON="$PYTHON" bash scripts/check_chess.sh || rc=1
+      ;;
     migdelay)
       hr "Migration-window perturbation (RUNLOOM_DELAY on snap/load/adopt)"
       PYTHON="$PYTHON" bash scripts/check_migration_delay.sh || rc=1
@@ -173,7 +177,7 @@ for ph in "${phases[@]}"; do
       PYTHON_GIL=0 "$PYTHON" tools/combinatorial/covering.py --iters "${COMBO_ITERS:-40}" || rc=1
       ;;
     *)
-      echo "unknown phase: $ph (want: tests mn replay lincheck dst ctest static sanitizers exttsan verify verify-fast ctxcheck dbgnetpoll migdelay ftconform bench combo all)"; rc=2 ;;
+      echo "unknown phase: $ph (want: tests mn replay lincheck dst ctest static sanitizers exttsan verify verify-fast ctxcheck dbgnetpoll migdelay chess ftconform bench combo all)"; rc=2 ;;
   esac
 done
 

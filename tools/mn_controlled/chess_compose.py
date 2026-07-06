@@ -39,7 +39,10 @@ def explore_one(workload, cmax, timeout, env):
     """Run the full context-bounded enumeration for ONE input (env). Returns
     (found_c, bug_prefix, n_schedules, exhausted_at_cmax, replay_ok)."""
     results = {}
-    cov = {"points": {}, "covered": set()}
+    # Must carry the SAME keys chess_explore's shared coverage logic writes
+    # (mkeys/any_obj added at chess_explore.py:157/162/273); a 2-key dict here
+    # KeyError'd on cov["mkeys"].  Keep in sync with chess_explore.
+    cov = {"points": {}, "covered": set(), "mkeys": set(), "any_obj": False}
     found_c = None
     bug = None
     final_pruned = 0
