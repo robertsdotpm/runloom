@@ -57,6 +57,23 @@ int runloom_iouring_loop_enabled(void)
     return cur;
 }
 
+/* Burn-in belt-and-suspenders: RUNLOOM_IOURING_LOOP_PUMP_ALWAYS=1 restores the
+ * old every-idle-tick pump(0) symptom-guard on top of the one-shot fix.  Default
+ * OFF -- the one-shot epoll poll now re-derives the epoll fd's level every wait
+ * cycle, so F_EPOLL is reliable and the unconditional pump is redundant (kept
+ * available in case a soak surfaces a residual path). */
+int runloom_iouring_loop_pump_always(void)
+{
+    static int v = -1;
+    int cur = __atomic_load_n(&v, __ATOMIC_RELAXED);
+    if (cur < 0) {
+        const char *e = getenv("RUNLOOM_IOURING_LOOP_PUMP_ALWAYS");
+        cur = (e != NULL && *e != '0' && *e != '\0') ? 1 : 0;
+        __atomic_store_n(&v, cur, __ATOMIC_RELAXED);
+    }
+    return cur;
+}
+
 /* ======================= Stage-3 multishot recv ===========================
  * One persistent IORING_OP_RECV | MULTISHOT | BUFFER_SELECT SQE per connection
  * delivers a CQE per chunk into a PER-HUB provided buffer ring -- no re-submit
@@ -222,13 +239,26 @@ static void runloom_iouring_loop_ms_buf_return(runloom_iouring_ring_t *r,
     __atomic_store_n(&bufs[0].resv, (uint16_t)(tail + 1), __ATOMIC_RELEASE);
 }
 
-/* Write one multishot POLL_ADD(fd, POLLIN) SQE into the SQ with `ud` as
- * user_data.  Does NOT enter the kernel (deferred); the next loop_wait submits
- * it.  Does NOT touch the inflight counter -- these polls are infrastructure,
- * always armed, and must not keep the hub "busy".  Single-issuer: caller is the
- * ring's owning hub. */
+/* Write one POLL_ADD(fd, POLLIN) SQE into the SQ with `ud` as user_data.  Does
+ * NOT enter the kernel (deferred); the next loop_wait submits it.  Does NOT
+ * touch the inflight counter -- these polls are infrastructure, always armed,
+ * and must not keep the hub "busy".  Single-issuer: caller is the ring's owning
+ * hub.
+ *
+ * `multishot`: a MULTISHOT poll (IORING_POLL_ADD_MULTI) stays armed and re-fires
+ * per readiness TRANSITION, but the kernel never re-samples the fd's standing
+ * LEVEL between transitions.  That is fatal when polling the SHARED EPOLL FD: an
+ * interior socket left LEVEL-readable with no fresh transition (a partial recv +
+ * re-park, a >64-event pump truncation, a late-linked parker whose readiness was
+ * only stashed) is invisible to a standing multishot -> no CQE -> the parked
+ * reader hangs (the reproduced loop-backend hang).  A ONE-SHOT poll instead runs
+ * an arm-time vfs_poll that re-samples current LEVEL and fires immediately if the
+ * fd is still readable -- so re-arming it every cycle makes the bridge re-derive
+ * ground truth exactly like plain epoll_wait.  Use multishot=0 for the epoll fd;
+ * the wake eventfd can stay multishot (its miss is masked by the Dekker sub_head
+ * re-check + the global-ring direct drain). */
 static void runloom_iouring_loop_enqueue_poll(runloom_iouring_ring_t *r,
-                                              int fd, uint64_t ud)
+                                              int fd, uint64_t ud, int multishot)
 {
     unsigned tail = __atomic_load_n(r->sq_tail, __ATOMIC_RELAXED);
     unsigned idx  = tail & r->sq_mask;
@@ -237,7 +267,7 @@ static void runloom_iouring_loop_enqueue_poll(runloom_iouring_ring_t *r,
     sqe->opcode        = IORING_OP_POLL_ADD;
     sqe->fd            = fd;
     sqe->poll32_events = POLLIN;
-    sqe->len           = IORING_POLL_ADD_MULTI;
+    sqe->len           = multishot ? IORING_POLL_ADD_MULTI : 0;
     sqe->user_data     = ud;
     r->sq_array[idx]   = idx;
     __atomic_store_n(r->sq_tail, tail + 1, __ATOMIC_RELEASE);
@@ -279,14 +309,21 @@ static void runloom_iouring_loop_drain(runloom_iouring_ring_t *r, int *flags_out
              * eventfd, but F_MORE clear means it won't fire again): re-arm. */
             if (!(cflags & IORING_CQE_F_MORE) && r->loop_wake_fd >= 0)
                 runloom_iouring_loop_enqueue_poll(r, r->loop_wake_fd,
-                                                  RUNLOOM_LOOP_UD_WAKE);
+                                                  RUNLOOM_LOOP_UD_WAKE, /*multishot=*/1);
             continue;
         }
         if (ud == RUNLOOM_LOOP_UD_EPOLL) {
             if (flags_out) *flags_out |= RUNLOOM_LOOP_F_EPOLL;
-            if (!(cflags & IORING_CQE_F_MORE) && r->loop_epoll_fd >= 0)
+            /* ONE-SHOT re-arm, UNCONDITIONALLY (a one-shot CQE is always
+             * terminal; no F_MORE).  loop_flush submits this deferred SQE before
+             * the next blocking enter, and a one-shot POLL_ADD's arm-time
+             * vfs_poll re-samples the epoll fd's CURRENT level -- firing an
+             * immediate CQE if it is still readable.  So every wait cycle begins
+             * with a fresh ground-truth sample, closing the standing-multishot
+             * edge-drop (see the enqueue_poll header). */
+            if (r->loop_epoll_fd >= 0)
                 runloom_iouring_loop_enqueue_poll(r, r->loop_epoll_fd,
-                                                  RUNLOOM_LOOP_UD_EPOLL);
+                                                  RUNLOOM_LOOP_UD_EPOLL, /*multishot=*/0);
             continue;
         }
         if (ud == RUNLOOM_LOOP_UD_MSCANCEL) {
@@ -351,9 +388,9 @@ int runloom_iouring_loop_hub_arm(runloom_iouring_ring_t *r, int epoll_fd)
     if (wfd < 0) return -1;
     r->loop_wake_fd  = wfd;
     r->loop_epoll_fd = epoll_fd;
-    runloom_iouring_loop_enqueue_poll(r, wfd, RUNLOOM_LOOP_UD_WAKE);
-    if (epoll_fd >= 0)
-        runloom_iouring_loop_enqueue_poll(r, epoll_fd, RUNLOOM_LOOP_UD_EPOLL);
+    runloom_iouring_loop_enqueue_poll(r, wfd, RUNLOOM_LOOP_UD_WAKE, /*multishot=*/1);
+    if (epoll_fd >= 0)   /* ONE-SHOT: re-derives the epoll fd's level each cycle */
+        runloom_iouring_loop_enqueue_poll(r, epoll_fd, RUNLOOM_LOOP_UD_EPOLL, /*multishot=*/0);
     /* Submit the arms now (non-blocking) so they are live before the first
      * wait.  On failure, undo: the caller will discard the ring. */
     runloom_iouring_loop_flush(r);

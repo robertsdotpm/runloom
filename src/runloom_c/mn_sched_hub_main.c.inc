@@ -897,22 +897,24 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
                         PyEval_RestoreThread(saved);
                     }
                     __atomic_store_n(&h->ring_waiting, 0, __ATOMIC_RELEASE);
-                    if (!have_sub) {
-                        /* Drain the per-hub epoll on EVERY idle iteration, not only
-                         * when the ring's F_EPOLL poll fired (lflags & F_EPOLL).  The
-                         * poll-on-the-epoll-fd bridge can MISS a socket-readable edge --
-                         * the SAME unreliability the global-ring drain below works
-                         * around for the EPOLLEXCLUSIVE eventfd.  A missed F_EPOLL then
-                         * leaves a ready socket undrained and its parked reader hung
-                         * forever while every hub just keeps timing out its idle_ns ring
-                         * wait (the cov_workload --hubs 4 loop-backend hang: gdb showed
-                         * all hubs cycling in loop_wait, the reader never woken, and the
-                         * deadlock census blind because the I/O-parked fibers keep
-                         * has_wakeable_work() true).  pump(0) is a non-blocking
-                         * epoll_wait(0): on the common tick where nothing is ready it
-                         * returns at once.  The idle_ns timeout thus bounds netpoll-wake
-                         * latency to one tick instead of risking a lost wake -- the
-                         * Layer-0 "re-check the source of truth on timeout" guarantee. */
+                    /* Drain the per-hub epoll when the ring's F_EPOLL poll fired.
+                     * ROOT-CAUSED + FIXED: the poll-on-the-epoll-fd bridge used to
+                     * MISS a socket-readable edge because a STANDING MULTISHOT poll
+                     * on the epoll fd never re-samples its LEVEL between interior
+                     * transitions -- a socket left level-readable with no fresh
+                     * transition (partial recv + re-park, >64-event pump truncation,
+                     * a late-linked parker) was invisible -> no F_EPOLL -> the parked
+                     * reader hung forever (reproduced: cov_workload --hubs 4,
+                     * ~45% of runs).  Fixed at source: the epoll poll is now ONE-SHOT
+                     * and re-armed every cycle (io_uring_l_loop.c.inc), whose arm-time
+                     * vfs_poll re-derives the fd's level exactly like plain
+                     * epoll_wait -- so F_EPOLL is reliable and pumping only on it is
+                     * correct (verified: 0/25 loop-backend hangs with the fix vs
+                     * ~45% without).  The old every-idle-tick pump that symptom-
+                     * guarded this is kept behind RUNLOOM_IOURING_LOOP_PUMP_ALWAYS
+                     * for soak burn-in. */
+                    if (!have_sub && ((lflags & RUNLOOM_LOOP_F_EPOLL)
+                                      || runloom_iouring_loop_pump_always())) {
                         runloom_netpoll_pump(0);
                     }
                     (void)lflags;

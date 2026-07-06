@@ -239,6 +239,9 @@ int runloom_iouring_ring_submit_cancel_fd(runloom_iouring_ring_t *r, int dup_fd)
 
 /* 1 if the loop backend is enabled (RUNLOOM_IOURING_LOOP set, read once). */
 int runloom_iouring_loop_enabled(void);
+/* RUNLOOM_IOURING_LOOP_PUMP_ALWAYS=1: restore the every-idle-tick pump(0)
+ * symptom-guard on top of the one-shot epoll-poll fix (burn-in only; default 0). */
+int runloom_iouring_loop_pump_always(void);
 
 /* 1 if ANY io_uring feature is opted in (loop / multishot / TCP proactor).  All
  * default OFF; when none, a hub skips creating its per-hub io_uring ring. */
