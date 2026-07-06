@@ -84,6 +84,19 @@ if have python3; then
             fail=$((fail + 1)); FAILED="$FAILED semantics_conformance"
         fi
     fi
+    # tstate manifest: every PyThreadState field must have a decided disposition
+    # so a new CPython field can't slip in unclassified (item 15).  SKIPs if
+    # libclang is absent (returns 0 with a SKIP line).
+    if [ -f "$HERE/tstate_manifest_lint.py" ]; then
+        printf '  [lint] %-28s ' "tstate_manifest"
+        if python3 "$HERE/tstate_manifest_lint.py" >"/tmp/runloom_tstate_manifest.log" 2>&1; then
+            grep -q "SKIP" "/tmp/runloom_tstate_manifest.log" && echo "SKIP (no libclang)" \
+                && skipped=$((skipped + 1)) || { echo "OK"; pass=$((pass + 1)); }
+        else
+            echo "UNCLASSIFIED-FIELD (see /tmp/runloom_tstate_manifest.log)"
+            fail=$((fail + 1)); FAILED="$FAILED tstate_manifest"
+        fi
+    fi
     # demonic-oracle CBMC harnesses (arm/re-arm window + two-ledger refinement):
     # cheap (tiny models, seconds), kernel-independent, and each checks its own
     # negative controls behave as audited (default + teeth).  SKIP if no cbmc.

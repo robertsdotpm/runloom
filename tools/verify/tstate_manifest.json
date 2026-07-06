@@ -1,0 +1,170 @@
+{
+ "_status": {
+  "disposition": "IGNORE",
+  "note": "not touched by runloom"
+ },
+ "_whence": {
+  "disposition": "IGNORE",
+  "note": "not touched by runloom"
+ },
+ "async_exc": {
+  "disposition": "IGNORE",
+  "note": "not touched by runloom"
+ },
+ "async_gen_finalizer": {
+  "disposition": "IGNORE",
+  "note": "not touched by runloom"
+ },
+ "async_gen_firstiter": {
+  "disposition": "IGNORE",
+  "note": "not touched by runloom"
+ },
+ "c_profilefunc": {
+  "disposition": "SNAP",
+  "note": "snapshotted/restored per fiber in runloom_sched_pystate.c.inc (own/borrow per that code)"
+ },
+ "c_profileobj": {
+  "disposition": "SNAP",
+  "note": "snapshotted/restored per fiber in runloom_sched_pystate.c.inc (own/borrow per that code)"
+ },
+ "c_recursion_remaining": {
+  "disposition": "SNAP",
+  "note": "snapshotted/restored per fiber in runloom_sched_pystate.c.inc (own/borrow per that code)"
+ },
+ "c_tracefunc": {
+  "disposition": "SNAP",
+  "note": "snapshotted/restored per fiber in runloom_sched_pystate.c.inc (own/borrow per that code)"
+ },
+ "c_traceobj": {
+  "disposition": "SNAP",
+  "note": "snapshotted/restored per fiber in runloom_sched_pystate.c.inc (own/borrow per that code)"
+ },
+ "context": {
+  "disposition": "SNAP",
+  "note": "snapshotted/restored per fiber in runloom_sched_pystate.c.inc (own/borrow per that code)"
+ },
+ "context_ver": {
+  "disposition": "SNAP",
+  "note": "snapshotted/restored per fiber in runloom_sched_pystate.c.inc (own/borrow per that code)"
+ },
+ "coroutine_origin_tracking_depth": {
+  "disposition": "IGNORE",
+  "note": "not touched by runloom"
+ },
+ "critical_section": {
+  "disposition": "SNAP",
+  "note": "snapshotted/restored per fiber in runloom_sched_pystate.c.inc (own/borrow per that code)"
+ },
+ "current_exception": {
+  "disposition": "SNAP",
+  "note": "snapshotted/restored per fiber in runloom_sched_pystate.c.inc (own/borrow per that code)"
+ },
+ "current_frame": {
+  "disposition": "SNAP",
+  "note": "snapshotted/restored per fiber in runloom_sched_pystate.c.inc (own/borrow per that code)"
+ },
+ "datastack_cached_chunk": {
+  "disposition": "SNAP",
+  "note": "snapshotted/restored per fiber in runloom_sched_pystate.c.inc (own/borrow per that code)"
+ },
+ "datastack_chunk": {
+  "disposition": "SNAP",
+  "note": "snapshotted/restored per fiber in runloom_sched_pystate.c.inc (own/borrow per that code)"
+ },
+ "datastack_limit": {
+  "disposition": "SNAP",
+  "note": "snapshotted/restored per fiber in runloom_sched_pystate.c.inc (own/borrow per that code)"
+ },
+ "datastack_top": {
+  "disposition": "SNAP",
+  "note": "snapshotted/restored per fiber in runloom_sched_pystate.c.inc (own/borrow per that code)"
+ },
+ "delete_later": {
+  "disposition": "SNAP",
+  "note": "snapshotted/restored per fiber in runloom_sched_pystate.c.inc (own/borrow per that code)"
+ },
+ "dict": {
+  "disposition": "IGNORE",
+  "note": "not touched by runloom"
+ },
+ "dict_global_version": {
+  "disposition": "IGNORE",
+  "note": "not touched by runloom"
+ },
+ "eval_breaker": {
+  "disposition": "IGNORE",
+  "note": "not touched by runloom"
+ },
+ "exc_info": {
+  "disposition": "SNAP",
+  "note": "snapshotted/restored per fiber in runloom_sched_pystate.c.inc (own/borrow per that code)"
+ },
+ "exc_state": {
+  "disposition": "SNAP",
+  "note": "snapshotted/restored per fiber in runloom_sched_pystate.c.inc (own/borrow per that code)"
+ },
+ "gilstate_counter": {
+  "disposition": "IGNORE",
+  "note": "not touched by runloom"
+ },
+ "id": {
+  "disposition": "IGNORE",
+  "note": "not touched by runloom"
+ },
+ "interp": {
+  "disposition": "IGNORE",
+  "note": "not touched by runloom"
+ },
+ "native_thread_id": {
+  "disposition": "IGNORE",
+  "note": "not touched by runloom"
+ },
+ "next": {
+  "disposition": "IGNORE",
+  "note": "not touched by runloom"
+ },
+ "prev": {
+  "disposition": "IGNORE",
+  "note": "not touched by runloom"
+ },
+ "previous_executor": {
+  "disposition": "IGNORE",
+  "note": "not touched by runloom"
+ },
+ "py_recursion_limit": {
+  "disposition": "IGNORE",
+  "note": "not touched by runloom"
+ },
+ "py_recursion_remaining": {
+  "disposition": "SNAP",
+  "note": "snapshotted/restored per fiber in runloom_sched_pystate.c.inc (own/borrow per that code)"
+ },
+ "recursion_headroom": {
+  "disposition": "IGNORE",
+  "note": "not touched by runloom"
+ },
+ "state": {
+  "disposition": "IGNORE",
+  "note": "not touched by runloom"
+ },
+ "thread_id": {
+  "disposition": "IGNORE",
+  "note": "not touched by runloom"
+ },
+ "threading_local_key": {
+  "disposition": "IGNORE",
+  "note": "not touched by runloom"
+ },
+ "threading_local_sentinel": {
+  "disposition": "IGNORE",
+  "note": "not touched by runloom"
+ },
+ "tracing": {
+  "disposition": "SNAP",
+  "note": "snapshotted/restored per fiber in runloom_sched_pystate.c.inc (own/borrow per that code)"
+ },
+ "what_event": {
+  "disposition": "IGNORE",
+  "note": "not touched by runloom"
+ }
+}
