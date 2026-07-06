@@ -20,13 +20,30 @@
  * with target = cur|need.  Faithful to the real code, INCLUDING that the DEL
  * return is ignored (the (void) cast at :334).
  *
+ * AUDIT 2026-07-06 (an independent 4-lens adversarial attack on this harness):
+ * the ORIGINAL default modelled a fictional post-ADD-fail recovery (k_arm=waiter)
+ * with NO counterpart in the shipped code, which made the default PASS VACUOUS on
+ * the safety-critical DEL-ok+ADD-fail migration sub-path (the assertion degenerated
+ * to `waiter & ~waiter == 0`).  Corrected: the default now models what register()
+ * ACTUALLY does (clears the cache, returns -1, re-arms nothing) and so REPORTS the
+ * window instead of hiding it.  The recovery is now opt-in (-DASSUME_ADD_RECOVERY)
+ * and clearly labelled an assumption, not code behaviour.
+ *
  * Configs (compile-time), each a separate CBMC run:
- *   (default)          shipped fix, with the ADD-failure recovery modelled -> PASS
- *   -DBUG_ARM_DROP     the 2026-07-02 migration bug (target = need) -> must FAIL
- *                      (the negative control: proves the harness has teeth)
- *   -DNO_ADD_RECOVERY  shipped fix but assume NOTHING recovers a failed ADD ->
- *                      must FAIL, isolating the EXACT kernel-return the fix leans
- *                      on a recovery (stale-arm probe / park timeout) to survive.
+ *   (default)              FAITHFUL model of register() -> FAILS, exposing a
+ *                          SUSPECTED lost-wake window: migration DEL-ok + ADD-fail
+ *                          leaves a pre-existing untimed-park waiter registered in
+ *                          no epoll.  Whether this is a PERMANENT hang in the real
+ *                          runtime depends on reachability facts NOT yet established
+ *                          (does an untimed wait_fd park exist here? is a later
+ *                          register on the fd guaranteed? does the pump re-arm?) --
+ *                          so this is a lead to investigate, NOT a confirmed bug.
+ *   -DBUG_ARM_DROP         the 2026-07-02 migration bug (target=need) -> FAILS
+ *                          (a second, independent way to reach the window: teeth).
+ *   -DASSUME_ADD_RECOVERY  ADD-adds the (unproven) assumption that a later register
+ *                          / park timeout re-delivers to the stranded waiter ->
+ *                          PASSES, showing the window is closed IFF that recovery
+ *                          is real.  This is the hypothesis to confirm or refute.
  */
 
 #define IN  1
@@ -78,16 +95,24 @@ static int reg(int need, int migrating, int waiter, int *ok)
             *ok = 1;                    /* this caller's park is committed */
             return waiter | need;
         }
-        /* ADD failed after DEL: the caller propagates the error and does NOT park
-         * (no new committed waiter).  The arm cache is cleared (as :221 does). */
+        /* ADD failed after DEL: register() clears the arm cache and returns -1 to
+         * THIS caller; the fd is now in NO epoll and the arm cache is 0 (faithful
+         * to netpoll_register.c.inc :422 runloom_fd_armed_set(fd,cur==0) + :425
+         * return -1).  A PRE-EXISTING waiter (in `waiter`) is left parked and
+         * registered nowhere -- a genuine lost-wake window unless something later
+         * re-registers the fd. */
         cache = 0;
         *ok = 0;
-#ifndef NO_ADD_RECOVERY
-        /* SHIPPED recovery for a pre-existing waiter stranded by DEL-ok+ADD-fail:
-         * level-triggered re-report on the NEXT register, the stale-arm self-heal
-         * probe, and the park's own timeout all re-register the fd so `waiter`'s
-         * direction is delivered again.  Model that recovery as: the kernel ends
-         * up registered for the still-parked waiters. */
+#ifdef ASSUME_ADD_RECOVERY
+        /* OPT-IN assumption (NOT shipped-code behaviour): a later register on the
+         * fd, or the park's own timeout, eventually re-delivers to the stranded
+         * waiter.  Toggle this on to see the invariant hold IFF such a recovery
+         * exists; leave it OFF (the default) to model what register() ACTUALLY
+         * does -> the assertion then exposes the unrecovered window.  NB: the
+         * stale-arm self-heal probe does NOT recover this state (cache==0 makes
+         * runloom_netpoll_validate_arm no-op), so of the plausible recoveries only
+         * a timed-park timeout / a subsequent register remain -- neither fires for
+         * an UNTIMED wait_fd park with no later register. */
         k_arm = waiter;
 #endif
         return waiter;                  /* pre-existing waiters unchanged by us */
