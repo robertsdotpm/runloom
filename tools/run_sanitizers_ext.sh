@@ -114,6 +114,10 @@ echo "-- driving workloads under TSan --"
 run mn_stress   "$RUN_PY" tools/mn_stress.py --iters "$MN_ITERS"
 run lincheck_plain  "$RUN_PY" tools/lincheck/record_history.py "$LOGDIR/h_plain.json"  4 3 8 2 0
 run lincheck_select "$RUN_PY" tools/lincheck/record_history.py "$LOGDIR/h_select.json" 4 3 8 2 3
+# monkey-offload cross-thread unpark: a patched Lock/Queue on a non-goroutine
+# feed thread wakes a parked goroutine -- exercises the foreign-thread wake path
+# under TSan at seconds cost (was orphaned; never ran under any sanitizer).
+run monkey_offload  "$RUN_PY" tools/monkey_offload_stress.py 48 15 1
 
 # Default set: the chan/sched stressors PLUS the blocking shims that touch real
 # OS threads -- the goroutine-backed executor's cross-thread Future delivery,

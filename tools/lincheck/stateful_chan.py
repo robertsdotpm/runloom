@@ -18,7 +18,7 @@ from collections import deque
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "src"))
 
-from hypothesis import settings
+from hypothesis import HealthCheck, settings
 from hypothesis import strategies as st
 from hypothesis.stateful import RuleBasedStateMachine, invariant, precondition, rule
 
@@ -115,7 +115,16 @@ class ChannelStateMachine(RuleBasedStateMachine):
         assert runloom_c._self_check(0) == 0, "self_check failed"
 
 
-ChannelStateMachine.TestCase.settings = settings(max_examples=200, stateful_step_count=50)
+ChannelStateMachine.TestCase.settings = settings(
+    max_examples=200,
+    stateful_step_count=50,
+    # Each step spawns a real goroutine + runloom_c.run(); up to 200*50 = 1e4
+    # of them.  Under a loaded gate that trips Hypothesis's per-example deadline
+    # and the too_slow HealthCheck -- pure wall-clock flake, not a channel bug.
+    # Disable both so only a genuine linearizability counterexample reds step 4.
+    deadline=None,
+    suppress_health_check=[HealthCheck.too_slow],
+)
 TestChannelStateMachine = ChannelStateMachine.TestCase
 
 

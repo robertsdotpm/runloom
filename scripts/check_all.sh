@@ -76,7 +76,7 @@ fi
 phases=("$@")
 [ ${#phases[@]} -eq 0 ] && phases=(tests mn replay lincheck dst ctest)
 if [ "${phases[0]}" = all ]; then
-  phases=(tests mn replay lincheck dst ctest static sanitizers exttsan verify ctxcheck dbgnetpoll migdelay chess ftconform)
+  phases=(tests mn replay lincheck dst ctest static sanitizers exttsan verify ctxcheck dbgnetpoll migdelay chess ftconform mr combo security refleak racerd)
 fi
 
 rc=0
@@ -176,8 +176,38 @@ for ph in "${phases[@]}"; do
       hr "Combinatorial config-matrix sweep (pairwise interactions)"
       PYTHON_GIL=0 "$PYTHON" tools/combinatorial/covering.py --iters "${COMBO_ITERS:-40}" || rc=1
       ;;
+    mr)
+      hr "Metamorphic MR3 hub-count invariance (conservation corpus)"
+      # The SAME program at different --hubs must all PASS and agree on its
+      # conservation metric -- catches scheduler-shape-dependent bugs a fixed
+      # oracle / differential / lincheck structurally cannot.  Bounded via MR_*.
+      # SKIPS CLEANLY if the corpus isn't present (set -u safe via the -e test).
+      mr_progs=(tests/big_100/*conservation*.py)
+      if [ ! -e "${mr_progs[0]}" ]; then
+        echo "  SKIP: no conservation corpus (tests/big_100/*conservation*.py)"
+      else
+        for mp in "${mr_progs[@]}"; do
+          RUNLOOM_PYTHON="$PYTHON" "$PYTHON" tools/metamorphic/mr_runner.py "$mp" \
+            --hubs "${MR_HUBS:-2,8}" --seed "${MR_SEED:-7}" \
+            --funcs "${MR_FUNCS:-150}" --rounds "${MR_ROUNDS:-1}" \
+            --duration "${MR_DURATION:-3}" || rc=1
+        done
+      fi
+      ;;
+    security)
+      hr "Security -- deterministic subset S1-S4 (fuzzers S6-S9 -> daemon; cc/valgrind skip cleanly)"
+      RUNLOOM_SEC_FAST=1 PYTHON="$PYTHON" tools/security/run_all.sh || rc=1
+      ;;
+    refleak)
+      hr "Refcount/alloc leak hunt (--with-pydebug ABI; self-skips cleanly off the dev box)"
+      tools/run_refleak.sh || rc=1
+      ;;
+    racerd)
+      hr "Infer RacerD + Pulse static race/mem-safety (advisory; self-skips if infer absent)"
+      PYTHON="$PYTHON" tools/racerd.sh || rc=1
+      ;;
     *)
-      echo "unknown phase: $ph (want: tests mn replay lincheck dst ctest static sanitizers exttsan verify verify-fast ctxcheck dbgnetpoll migdelay chess ftconform bench combo all)"; rc=2 ;;
+      echo "unknown phase: $ph (want: tests mn replay lincheck dst ctest static sanitizers exttsan verify verify-fast ctxcheck dbgnetpoll migdelay chess ftconform mr bench combo security refleak racerd all)"; rc=2 ;;
   esac
 done
 

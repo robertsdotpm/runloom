@@ -47,10 +47,12 @@ done
 
 if [ "$SMOKE" = "1" ]; then
   HH_DUR=20; LF_DUR=15; RR_DUR=20; DO_MATRIX_SMOKE=1
+  FUZZ_DUR=20; PCT_SEEDS=8; PCT_SWEEP_SEEDS=2; WAKE_SKEW=4; WAKE_REPS=1; MUT_MAX=3; FS_LIMIT="--limit 4"
 else
   # 4h hang_hunter, 2h lifefuzz, 2h rr-chaos (rr-chaos SKIPs in seconds while
   # the host vPMU can't record -- see tools/soak/rr_chaos.sh)
   HH_DUR=14400; LF_DUR=7200; RR_DUR=7200; DO_MATRIX_SMOKE=0
+  FUZZ_DUR=1800; PCT_SEEDS=200; PCT_SWEEP_SEEDS=10; WAKE_SKEW=8; WAKE_REPS=3; MUT_MAX=40; FS_LIMIT=""
 fi
 
 load_ok() {
@@ -142,6 +144,125 @@ if load_ok; then
   grep -E "^== done" "$FS_OUT" | sed 's/^/   /'
 else
   echo "-- counted fault sweep SKIPPED (load too high) --"
+fi
+
+# --- stage 6: atheris coverage-guided C-API fuzz (nightly).  run.sh self-SKIPs
+# (exit 0) when atheris isn't importable and self-bounds by its seconds arg; a
+# nonzero rc is a real process crash = the finding. ---
+if load_ok; then
+  echo "-- atheris fuzz ${FUZZ_DUR}s --"
+  FZ_OUT="$INBOX_ARTIFACTS/atheris"; mkdir -p "$FZ_OUT"
+  if ! nice -n 10 env RUNLOOM_PYTHON="$PY" bash tools/fuzz/atheris/run.sh "$FUZZ_DUR" \
+       > "$FZ_OUT/run.log" 2>&1; then
+    inbox "atheris-crash" "atheris C-API fuzz CRASH" "$FZ_OUT/run.log"
+  fi
+  grep -E "^atheris:" "$FZ_OUT/run.log" | sed 's/^/   /'
+else
+  echo "-- atheris fuzz SKIPPED (load too high) --"
+fi
+
+# --- stage 7: PCT probabilistic-schedule exploration (nightly).  demo permutes
+# single-hub parked-wake order and checks conservation (exit 1 = a lost value);
+# a bounded sweep replays an order-sensitive test under PCT_SWEEP_SEEDS seeds
+# (exit 1 = an order-dependent failure, repro line in the log). ---
+if load_ok; then
+  echo "-- pct demo (${PCT_SEEDS} seeds) + sweep (${PCT_SWEEP_SEEDS} seeds) --"
+  PCT_OUT="$INBOX_ARTIFACTS/pct"; mkdir -p "$PCT_OUT"
+  if ! nice -n 10 env PYTHON_GIL=0 "$PY" tools/pct/pct_explore.py demo \
+       --seeds "$PCT_SEEDS" > "$PCT_OUT/demo.log" 2>&1; then
+    inbox "pct-conservation" "PCT demo conservation violation" "$PCT_OUT/demo.log"
+  fi
+  tail -3 "$PCT_OUT/demo.log" | sed 's/^/   /'
+  if [ -f tests/test_sched_fairness.py ]; then
+    if ! nice -n 10 env PYTHON_GIL=0 "$PY" tools/pct/pct_explore.py sweep \
+         tests/test_sched_fairness.py --seeds "$PCT_SWEEP_SEEDS" --depth 3 \
+         > "$PCT_OUT/sweep.log" 2>&1; then
+      inbox "pct-order-bug" "PCT sweep order-dependent FAILURE" "$PCT_OUT/sweep.log"
+    fi
+  fi
+else
+  echo "-- pct SKIPPED (load too high) --"
+fi
+
+# --- stage 8: Layer-3 wake-skew test policy (nightly).  Rebuilds the ext with
+# -DRUNLOOM_WAKE_SKEW to widen the park/wake race window so a lost-wake shows as
+# a HANG (nonzero rc).  GOTCHA: wake_skew_test.sh does NOT restore the normal
+# ext, so rebuild it here or every later stage + foreground build inherits the
+# skew instrumentation. ---
+if load_ok; then
+  echo "-- wake-skew (skew=$WAKE_SKEW x$WAKE_REPS) --"
+  WK_OUT="$INBOX_ARTIFACTS/wake_skew"; mkdir -p "$WK_OUT"
+  if ! nice -n 10 env PYTHON="$PY" bash tools/wake_skew_test.sh "$WAKE_SKEW" "$WAKE_REPS" \
+       > "$WK_OUT/run.log" 2>&1; then
+    inbox "wake-skew" "wake-skew test hung/failed under skew=$WAKE_SKEW" "$WK_OUT/run.log"
+  fi
+  grep -E "^WAKE-SKEW" "$WK_OUT/run.log" | sed 's/^/   /'
+  env -u RUNLOOM_EXTRA_CFLAGS PYTHON_GIL=0 "$PY" setup.py build_ext --inplace --force \
+      >/tmp/duty_wake_skew_restore.log 2>&1 \
+      && echo "   normal ext restored" || echo "   WARN: normal rebuild failed (/tmp/duty_wake_skew_restore.log)"
+else
+  echo "-- wake-skew SKIPPED (load too high) --"
+fi
+# --- end nightly extra stages (before the weekly matrix) ---
+
+# --- stage 9 (weekly, Tue): mutation testing -- does the suite have TEETH?
+# Heavy (rebuilds the ext per mutant), so weekly + a DETERMINISTIC rotating
+# 2-file subset chosen by ISO week number: no state to track, every file covered
+# on a fixed cadence.  mutate.py restores the .c and rebuilds a clean .so in a
+# finally, so it self-heals the tree.  A SURVIVING mutant is the finding. ---
+MUT_DOW=2
+if [ "$SMOKE" = "1" ] || [ "$(date +%u)" = "$MUT_DOW" ]; then
+  if load_ok; then
+    MUT_FILES=(src/runloom_c/chan.c src/runloom_c/mn_sched.c src/runloom_c/netpoll.c \
+               src/runloom_c/coro.c src/runloom_c/io_uring.c src/runloom_c/runloom_tcp.c \
+               src/runloom_c/runloom_sched.c src/runloom_c/cldeque.c \
+               src/runloom_c/runloom_blockpool.c src/runloom_c/rl_handle.c)
+    NF=${#MUT_FILES[@]}
+    WK=$(( 10#$(date +%V) ))          # ISO week, base-10 (leading-zero safe)
+    for k in 0 1; do                  # rotate a 2-file subset per week
+      idx=$(( (WK + k) % NF )); tgt="${MUT_FILES[$idx]}"
+      [ -f "$tgt" ] || continue
+      load_ok || break
+      base="$(basename "$tgt" .c)"
+      echo "-- mutate $tgt (week $WK, max $MUT_MAX) --"
+      MU_OUT="$INBOX_ARTIFACTS/mutate_${base}"; mkdir -p "$MU_OUT"
+      nice -n 10 env PYTHON="$PY" "$PY" tools/mutate/mutate.py "$tgt" \
+          --max "$MUT_MAX" --seed "$WK" --json "$MU_OUT/result.json" \
+          > "$MU_OUT/run.log" 2>&1
+      if grep -q '"survived": [1-9]' "$MU_OUT/result.json" 2>/dev/null; then
+        inbox "mutate-survivor" "mutate $base: surviving mutant(s) = test gap" "$MU_OUT/run.log"
+      fi
+      grep -E "mutation score" "$MU_OUT/run.log" | sed 's/^/   /'
+    done
+  else
+    echo "-- mutate SKIPPED (load too high) --"
+  fi
+fi
+
+# --- stage 10 (weekly, Wed): exhaustive libclang fault-site sweep across TUs.
+# DISTINCT from stage 4 (the fast compiled-in counted sweep): this instruments
+# EVERY fallible call site via libclang in the mutant worktree and is HOURS, so
+# weekly + clean-SKIP when clang-18 is absent.  An UNCHECKED error path (a forced
+# failure no test noticed) is the finding. ---
+FS_DOW=3
+if command -v clang-18 >/dev/null 2>&1 && { [ "$SMOKE" = "1" ] || [ "$(date +%u)" = "$FS_DOW" ]; }; then
+  if load_ok; then
+    XFS_TUS=""; [ "$SMOKE" = "1" ] && XFS_TUS="netpoll"   # smoke: one TU
+    echo "-- exhaustive fault sweep (sweep_all${FS_LIMIT:+ $FS_LIMIT}${XFS_TUS:+ $XFS_TUS}) --"
+    XFS_OUT="$INBOX_ARTIFACTS/fault_sweep_libclang"; mkdir -p "$XFS_OUT"
+    # shellcheck disable=SC2086
+    nice -n 15 bash tools/mutate/faultsites/sweep_all.sh $FS_LIMIT $XFS_TUS \
+        > "$XFS_OUT/run.log" 2>&1
+    grep -E "survivors report:" "$XFS_OUT/run.log" | while read -r _ _ rep; do
+      [ -f "$rep" ] || continue
+      if grep -qvE '^#|^$' "$rep"; then     # a non-comment line = a real unchecked path
+        inbox "fault-unchecked" "libclang sweep: unchecked error path(s) in $(basename "$rep")" "$rep"
+      fi
+    done
+    grep -E "^== sweep_all done" "$XFS_OUT/run.log" | sed 's/^/   /'
+  else
+    echo "-- exhaustive fault sweep SKIPPED (load too high) --"
+  fi
 fi
 
 # --- stage 5 (weekly / smoke): one soak-matrix preset ---

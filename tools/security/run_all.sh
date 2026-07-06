@@ -32,6 +32,15 @@ if command -v valgrind >/dev/null 2>&1; then
 else
     echo "  SKIP: valgrind not installed"
 fi
+# Gate subset: S1-S4 are the DETERMINISTIC safety oracles (scrub / signal storm /
+# refcount race / valgrind).  S6-S9 are randomised fuzzers whose home is the
+# nightly daemon, not a merge gate -- RUNLOOM_SEC_FAST=1 stops here so the
+# extensive gate can run the deterministic subset without the fuzz budget.
+if [ "${RUNLOOM_SEC_FAST:-0}" = 1 ]; then
+    echo "== RUNLOOM_SEC_FAST: skipping fuzzers S6-S9 (deterministic subset only) =="
+    echo "== deterministic security subset (S1-S4) passed =="
+    exit 0
+fi
 echo "== S6 bridge network fuzz =="; "$PY" tools/security/fuzz_bridge.py --iters 600
 echo "== S7 TLS bridge fuzz =="
 "$PY" -c 'import cryptography' 2>/dev/null \
