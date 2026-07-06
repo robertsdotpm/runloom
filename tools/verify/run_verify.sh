@@ -84,6 +84,17 @@ if have python3; then
             fail=$((fail + 1)); FAILED="$FAILED semantics_conformance"
         fi
     fi
+    # fd chokepoint: epoll_ctl (kernel registration) must stay single-writer --
+    # the ratchet that keeps the stale-cache-vs-kernel class from spreading again.
+    if [ -f "$HERE/fd_chokepoint_lint.py" ]; then
+        printf '  [lint] %-28s ' "fd_chokepoint"
+        if python3 "$HERE/fd_chokepoint_lint.py" >"/tmp/runloom_fd_chokepoint.log" 2>&1; then
+            echo "OK"; pass=$((pass + 1))
+        else
+            echo "SURFACE-SPREAD (see /tmp/runloom_fd_chokepoint.log)"
+            fail=$((fail + 1)); FAILED="$FAILED fd_chokepoint"
+        fi
+    fi
     # tstate manifest: every PyThreadState field must have a decided disposition
     # so a new CPython field can't slip in unclassified (item 15).  SKIPs if
     # libclang is absent (returns 0 with a SKIP line).
