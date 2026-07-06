@@ -37,6 +37,16 @@ EPSILON_PER_HOUR = {
     # teeth while not flagging slab-batch noise.
     "g_structs_total": 64.0,
     "stack_hwm": 1e18,    # a high-water max, not a population -- never a leak
+    # parked_max_age (item 5 dwell gauge, seconds): the max age among parked
+    # fibers.  In a healthy churny workload parked fibers turn over fast so this
+    # stays low + flat; a STRANDED fiber's age climbs at ~3600 s/h (1 s/s), so a
+    # 120 s/h epsilon forgives normal drift (a genuinely long-lived acceptor park)
+    # while a real strand blows past it by >an order of magnitude.
+    "parked_max_age": 120.0,
+    # hard_deadlock is a 0/1 alarm; a sustained deadlock shows as a positive slope
+    # and fails, a one-sample snapshot artifact (all fibers momentarily parked
+    # between rounds) is forgiven by the CI -- which is the correct bias.
+    "hard_deadlock": 0.5,
     # cumulative odometers: excluded entirely (see ODOMETERS)
 }
 

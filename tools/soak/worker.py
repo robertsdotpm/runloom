@@ -124,6 +124,52 @@ def _proc_metrics():
     return m
 
 
+# Liveness auditor (item 5) -- wired in so soak actually CONSUMES it instead of
+# it being dead code.  Best-effort: a soak must not die because introspection
+# hiccuped.
+try:
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "introspect"))
+    import liveness as _liveness
+except Exception:
+    _liveness = None
+
+
+def _liveness_gauges(blame_path):
+    """Return {parked_max_age, hard_deadlock} for the CSV, and dump blame on a
+    hard-deadlock verdict.  parked_max_age is the max age (s) among parked
+    fibers -- a monotone DWELL gauge: a stranded fiber's age climbs without
+    bound, so oracle.py's slope detector catches a strand even when the
+    population stays flat (the rare/transient lost-wake signature)."""
+    if _liveness is None:
+        return {}
+    try:
+        snap = _liveness.snapshot()
+    except Exception:
+        return {}
+    parked = [f for f in snap["fibers"] if f["state"] not in _liveness.RUNNABLE]
+    ages = [f.get("age") for f in parked if f.get("age") is not None]
+    gauges = {"parked_max_age": round(max(ages), 2) if ages else 0.0,
+              "hard_deadlock": 0}
+    try:
+        blame = _liveness.deadlock_blame(snap)
+    except Exception:
+        blame = None
+    if blame is not None:
+        gauges["hard_deadlock"] = 1
+        try:
+            with open(blame_path, "a") as bf:
+                bf.write(_liveness.format_blame(snap, blame) + "\n---\n")
+        except OSError:
+            pass
+    return gauges
+
+
+try:
+    runloom_c.set_introspect_timestamps(True)  # populate fiber ages for the dwell gauge
+except Exception:
+    pass
+
+
 def _sampler(ctx, csv_path, hb_path, interval, t0):
     """Sampler thread: append one CSV row + rewrite the heartbeat every
     interval, until ctx.done.  Header is written lazily on the first row so the
@@ -141,6 +187,7 @@ def _sampler(ctx, csv_path, hb_path, interval, t0):
             row = {"t": round(elapsed, 1), "progress": prog}
             row.update(proc)
             row.update(stats)
+            row.update(_liveness_gauges(csv_path + ".blame"))
             if header_keys is None:
                 header_keys = list(row.keys())
                 csv.write(",".join(header_keys) + "\n")
