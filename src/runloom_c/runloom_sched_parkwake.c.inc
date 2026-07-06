@@ -307,6 +307,38 @@ int runloom_park_generic_timed(int foreign_wakeable, double deadline)
     return (runloom_sched_monotonic_seconds() >= deadline) ? 1 : 0;
 }
 
+/* The unified predicate-park loop (item 1, increment 1: lockless-Dekker form).
+ * Owns the register->recheck->park cycle the cooperative primitives hand-roll
+ * on top of park_generic today (Future/WaitGroup/CoEvent/...).  arm registers
+ * this fiber on the wake source (so the source's signal wakes it), then we park
+ * through the SAME proven Dekker commit until pred holds or the deadline passes;
+ * a spurious/real wake just re-checks pred (arm is idempotent, so re-checking
+ * without re-arming is correct for a level-signalled source; a source that
+ * disarms on delivery must re-arm inside pred/arm -- documented per primitive at
+ * migration).  This changes NO existing primitive; it is the entry they migrate
+ * onto one at a time, each net-checked. */
+int runloom_park_until(runloom_pred_fn pred, runloom_arm_fn arm,
+                       runloom_arm_fn disarm, void *ctx,
+                       int foreign_wakeable, double deadline)
+{
+    int rc = RUNLOOM_PARK_READY;
+    if (arm != NULL) arm(ctx);
+    while (!pred(ctx)) {
+        int prc = (deadline < 0.0)
+                  ? runloom_park_generic(foreign_wakeable)
+                  : runloom_park_generic_timed(foreign_wakeable, deadline);
+        if (prc < 0) { rc = RUNLOOM_PARK_CANCELLED; break; }  /* not a fiber / OOM */
+        if (prc == 1) {                        /* the deadline fired */
+            /* a real wake may have raced the timeout to make pred true. */
+            rc = pred(ctx) ? RUNLOOM_PARK_READY : RUNLOOM_PARK_TIMEOUT;
+            break;
+        }
+        /* prc == 0: a wake -> loop re-checks pred (absorbs spurious wakes). */
+    }
+    if (disarm != NULL) disarm(ctx);
+    return rc;
+}
+
 /* Fire all TIMER-heap entries on sched s whose deadline has passed (<= now).
  * Called from the single-thread drain and the M:N hub_main, ON s's OWN thread,
  * alongside the sleep-heap drain.  Each due entry is claimed via the SAME

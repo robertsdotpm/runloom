@@ -756,6 +756,29 @@ int runloom_park_generic(int foreign_wakeable);
  * re-check its own deadline, exactly as the fd-backed wait_fd(timeout) path did. */
 int runloom_park_generic_timed(int foreign_wakeable, double deadline);
 
+/* --- runloom_park_until: the unified predicate-park kernel (item 1) ----------
+ * The single register->recheck->park loop every cooperative primitive
+ * (Future/WaitGroup/CoEvent/CoCondition/chan) hand-rolls today.  arm(ctx)
+ * registers the current fiber on the wake source; pred(ctx) returns 1 when the
+ * wait is satisfied; the source's signal path must wake this g (mn_wake_g /
+ * wake_safe) when it makes pred true -- park_generic's Dekker then catches a
+ * wake that lands between arm and commit.  disarm(ctx) unregisters on exit.
+ * `deadline` < 0 means untimed.  See docs/dev/PARKWAKE_KERNEL_DESIGN.md.
+ *
+ * Increment 1 supports the LOCKLESS-Dekker form only (the sync primitives); the
+ * lock-based form (chan, which serialises register/wake under a channel lock) is
+ * a later increment and is documented in the design.  Returns: */
+#define RUNLOOM_PARK_READY      0   /* pred satisfied */
+#define RUNLOOM_PARK_TIMEOUT    1   /* deadline passed with pred still false */
+#define RUNLOOM_PARK_CANCELLED (-1) /* not in a fiber / OOM arming the timer */
+
+typedef int  (*runloom_pred_fn)(void *ctx);
+typedef void (*runloom_arm_fn)(void *ctx);
+
+int runloom_park_until(runloom_pred_fn pred, runloom_arm_fn arm,
+                       runloom_arm_fn disarm, void *ctx,
+                       int foreign_wakeable, double deadline);
+
 /* Fire all due TIMER-heap entries on s (deadline <= now), claiming each via the
  * parked_safe CAS.  Called by the single-thread drain + the M:N hub_main on s's
  * own thread, alongside the sleep-heap drain. */
