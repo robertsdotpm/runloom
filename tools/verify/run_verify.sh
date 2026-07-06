@@ -112,7 +112,7 @@ if have python3; then
     # cheap (tiny models, seconds), kernel-independent, and each checks its own
     # negative controls behave as audited (default + teeth).  SKIP if no cbmc.
     if have cbmc; then
-        for dh in run_demonic run_refinement; do
+        for dh in run_demonic run_refinement run_steal_cbmc; do
             [ -f "$HERE/cbmc/$dh.sh" ] || continue
             printf '  [cbmc] %-28s ' "$dh"
             if bash "$HERE/cbmc/$dh.sh" >"/tmp/runloom_$dh.log" 2>&1; then
