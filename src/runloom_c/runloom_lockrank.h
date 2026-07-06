@@ -33,8 +33,14 @@ typedef enum runloom_lock_rank {
     RUNLOOM_RANK_ARENA_INIT   = 35,   /* runloom_arena_init_lock */
     RUNLOOM_RANK_GLOBAL_RUNQ  = 40,   /* runloom_global_runq_lock */
     RUNLOOM_RANK_CHAN         = 50,   /* per-channel ch->lock */
+    RUNLOOM_RANK_HUB_IDLE     = 55,   /* per-hub h->idle_lock -- OUTER to sub_lock:
+                                       * the idle-wait re-checks sub_head while
+                                       * holding idle_lock (mn_sched_hub_main.c.inc
+                                       * ~:1032->1042) so a submit signal can't slip
+                                       * into the check/wait gap.  hub_submit takes
+                                       * the two SEQUENTIALLY (never nested), so this
+                                       * is the only ordering -- no cycle. */
     RUNLOOM_RANK_HUB_SUB      = 60,   /* per-hub h->sub_lock / s->sub_lock / tgt->sub_lock */
-    RUNLOOM_RANK_HUB_IDLE     = 65,   /* per-hub h->idle_lock */
     RUNLOOM_RANK_WAKE_LIST    = 70,   /* sched s->wake_list_lock / owner->wake_list_lock */
     RUNLOOM_RANK_PARKER_POOL  = 80,   /* pool->lock / runloom_pool.lock (netpoll parkers) */
     RUNLOOM_RANK_IOURING_SUB  = 85,   /* runloom_iouring_state.sub_lock (io_uring submit) */

@@ -23,7 +23,14 @@ TESTS="${CTX_TESTS:-test_mn test_mn_park test_adv_sched test_chan test_adv_chan 
   test_tcpconn test_adv_netpoll test_netpoll_conformance test_concurrency \
   test_aio test_adv_sync test_differential_asyncio}"
 
+# A -D flag change does NOT retrigger setuptools recompilation (it only checks
+# source mtimes), so force a clean object/.so sweep before each build or the
+# flag silently no-ops and we test the wrong binary.
+force_clean() { rm -f src/runloom_c/*.so 2>/dev/null;
+                find build -name '*.o' -delete 2>/dev/null; }
+
 echo "== ctxcheck: rebuild with RUNLOOM_CTXCHECK=1 =="
+force_clean
 if ! RUNLOOM_CTXCHECK=1 PYTHON_GIL=0 "$PY" setup.py build_ext --inplace \
         >/tmp/runloom_ctxcheck_build.log 2>&1; then
     echo "ctxcheck BUILD FAILED (see /tmp/runloom_ctxcheck_build.log)"
@@ -52,6 +59,7 @@ fi
 [ "$rc" = 0 ] && echo "ctxcheck OK: no lock-order / unsafe-park violations; slice green."
 
 echo "== ctxcheck: rebuild WITHOUT the flag (restore normal .so) =="
+force_clean
 RUNLOOM_CTXCHECK=0 PYTHON_GIL=0 "$PY" setup.py build_ext --inplace \
     >/tmp/runloom_ctxcheck_restore.log 2>&1 || {
         echo "WARN: restore build failed -- the in-place .so is still a CTXCHECK build"
