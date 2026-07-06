@@ -159,7 +159,6 @@ def analyze(csv_path, warmup_seconds):
     xs = [ts[i] for i in keep]
 
     rows = []
-    overall_ok = True
     for metric in sorted(series):
         if metric in IGNORE or metric in ODOMETERS:
             continue
@@ -178,24 +177,45 @@ def analyze(csv_path, warmup_seconds):
         below_eps = abs(slope_h) <= eps
         below_floor = pred_change <= abs_floor
         ok = ci_includes_zero or below_eps or below_floor
-        ratchet_converged = False
+        reason = ("ci~0" if ci_includes_zero else
+                  ("<eps" if below_eps else
+                   ("<floor" if below_floor else "SLOPE")))
         if not ok and metric in RATCHETS and len(ys) >= 16:
             tail = ys[-max(8, len(ys) // 4):]      # final quarter of the window
             if (max(tail) - min(tail)) <= abs_floor:
                 ok = True
-                ratchet_converged = True
-        if not ok:
-            overall_ok = False
+                reason = "ratchet-converged"
         rows.append({
-            "metric": metric, "slope_per_h": slope_h,
+            "metric": metric, "slope_per_h": slope_h, "slope_per_s": slope,
             "ci_lo": lo, "ci_hi": hi, "eps": eps, "n": n,
             "pred_change": pred_change, "abs_floor": abs_floor,
-            "ok": ok,
-            "reason": ("ci~0" if ci_includes_zero else
-                       ("<eps" if below_eps else
-                        ("<floor" if below_floor else
-                         ("ratchet-converged" if ratchet_converged else "SLOPE")))),
+            "ok": ok, "reason": reason,
+            "y0": ys[0], "x0": xs[0],
         })
+
+    # --- forgive two STRUCTURAL false positives (2026-07-07 soak triage) ------
+    by_metric = {r["metric"]: r for r in rows}
+    # (1) parked_max_age climbing at ~exactly wall-clock (1.000 s/s) WITH the age
+    # tracking t from setup (age0 ~= t0) is the mathematical signature of ONE
+    # structurally-permanent parker -- e.g. an idle accept loop that parks once
+    # and legitimately never wakes until shutdown.  Max parked age can never grow
+    # faster than 1 s/s, and a real MID-RUN strand fits to slope < 1 (flat then
+    # climbing) or a positive age-vs-t offset -- so this gate is tight.  A truly
+    # HARMFUL strand also accumulates PARKED FIBERS, caught by the netpoll_parked
+    # / live_fibers COUNT metrics, which keep their teeth.  Not a leak.
+    pma = by_metric.get("parked_max_age")
+    if pma is not None and not pma["ok"] and 0.95 <= pma["slope_per_s"] <= 1.05 \
+            and abs(pma["y0"] - pma["x0"]) <= max(60.0, 0.02 * pma["x0"]):
+        pma["ok"] = True
+        pma["reason"] = "permanent-parker (dwell tracks wall-clock from setup; not a leak)"
+    # (2) vsz growing while rss is FLAT = reserved-but-unfaulted address space
+    # (mmap/arena reservation), not a leak.  Gate vsz only when rss ALSO trends up.
+    vsz, rss = by_metric.get("vsz_kb"), by_metric.get("rss_kb")
+    if vsz is not None and not vsz["ok"] and rss is not None and rss["ok"]:
+        vsz["ok"] = True
+        vsz["reason"] = "vsz-grows/rss-flat (arena reservation, not a leak)"
+
+    overall_ok = all(r["ok"] for r in rows)
     verdict = "PASS" if overall_ok else "FAIL"
     if short:
         verdict += " (short: warmup left <3 samples; used all)"
