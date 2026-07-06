@@ -212,6 +212,14 @@ static PyObject *buf_pop(runloom_chan_t *ch)
  * fix failed for the two reasons above.)  A real channel-broadcast win would
  * need a netpoll change -- one shared (level-triggered/multishot) eventfd per
  * Event so set() wakes all waiters in ONE write -- not a thin channel wrapper. */
+/* Predicate for runloom_park_until_locked (item 1): a producer/close has POPPED
+ * this waiter (cleared w->queued under the channel lock) -> real delivery.  While
+ * still queued (queued==1) a resume is a spurious/foreign wake -> re-park. */
+static int chan_waiter_delivered(void *ctx)
+{
+    return !((runloom_chan_waiter_t *)ctx)->queued;
+}
+
 static void park_waiter(runloom_chan_t *ch,
                         runloom_chan_waiter_t **head,
                         runloom_chan_waiter_t **tail,
@@ -247,29 +255,14 @@ static void park_waiter(runloom_chan_t *ch,
      * stays mapped so the stale read is benign; on Windows mimalloc unmaps it
      * and the pop's waiter_claim CAS faults (the p34_subproc_net access
      * violation).  So re-park until a producer actually pops us. */
-    for (;;) {
-        /* Snapshot tstate + take g off any ready list.  Same dance as
-         * runloom_netpoll_wait_fd uses. */
-        if (current_g != NULL) {
-            runloom_sched_park_current();
-            runloom_g_state_set(current_g, RUNLOOM_GST_PARKED_CHAN);
-            RUNLOOM_EVT(RUNLOOM_EVT_CHAN_PARK, ch, current_g, 0);
-        }
-        /* Critical: release the channel lock BEFORE yielding, or the wake side
-         * would deadlock trying to acquire it. */
-        RUNLOOM_RUNLOCK(&ch->lock, RUNLOOM_RANK_CHAN);
-        runloom_coro_yield();
-        if (current_g != NULL) {
-            runloom_g_state_set(current_g, RUNLOOM_GST_RUNNING);
-            RUNLOOM_EVT(RUNLOOM_EVT_CHAN_WAKE, ch, current_g, 0);
-        }
-        /* Re-acquire to read w->queued (lock-protected).  queued == 0 means a
-         * producer/close popped us -> real delivery; queued == 1 means a
-         * spurious wake -> re-park, staying linked (do NOT re-push). */
-        RUNLOOM_RLOCK(&ch->lock, RUNLOOM_RANK_CHAN);
-        if (!w->queued)
-            break;
-    }
+    /* Item 1: the chan park loop now routes through the unified lock-based park
+     * kernel.  Behaviour-identical to the former hand-rolled loop -- snapshot the
+     * g off the ready list, drop ch->lock, yield, re-take, re-check w->queued --
+     * re-parking on a spurious/foreign wake (still queued) until a producer/close
+     * pops us (queued==0).  Returns with ch->lock held. */
+    (void)head; (void)tail;
+    runloom_park_until_locked(chan_waiter_delivered, w, &ch->lock,
+                              RUNLOOM_RANK_CHAN, RUNLOOM_GST_PARKED_CHAN);
     RUNLOOM_RUNLOCK(&ch->lock, RUNLOOM_RANK_CHAN);
 
     /* Drop the pin.  If we were the last reference (rare: caller code usually

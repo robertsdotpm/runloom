@@ -779,6 +779,17 @@ int runloom_park_until(runloom_pred_fn pred, runloom_arm_fn arm,
                        runloom_arm_fn disarm, void *ctx,
                        int foreign_wakeable, double deadline);
 
+/* The LOCK-BASED form of the park kernel (item 1): for primitives (chan) whose
+ * wake side serialises register/deliver under a lock rather than the Dekker.
+ * The caller holds `lock` on entry and has ALREADY armed (linked its waiter);
+ * this releases `lock` across each coro_yield and re-takes it to re-check pred
+ * (pred is read under the lock), looping until pred holds -- absorbing spurious
+ * wakes (a stale dup wake_g resuming a still-queued waiter).  `gstate` is the
+ * parked-state label for diagnostics.  Returns with `lock` HELD (the caller
+ * unlocks).  Behaviour-identical to the hand-rolled chan park loop. */
+int runloom_park_until_locked(runloom_pred_fn pred, void *ctx,
+                              runloom_mutex_t *lock, int rank, int gstate);
+
 /* Fire all due TIMER-heap entries on s (deadline <= now), claiming each via the
  * parked_safe CAS.  Called by the single-thread drain + the M:N hub_main on s's
  * own thread, alongside the sleep-heap drain. */

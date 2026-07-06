@@ -339,6 +339,33 @@ int runloom_park_until(runloom_pred_fn pred, runloom_arm_fn arm,
     return rc;
 }
 
+/* The lock-based form (item 1): mirrors chan's park_waiter loop exactly -- the
+ * lock serialises the waiter push (arm, done by the caller) and the producer's
+ * pop-then-wake, so there is no Dekker; correctness is the lock plus the
+ * re-check of pred (queued) under it.  Snapshot the g off any ready list, drop
+ * the lock, yield, re-take the lock, re-check.  Returns with `lock` held. */
+int runloom_park_until_locked(runloom_pred_fn pred, void *ctx,
+                              runloom_mutex_t *lock, int rank, int gstate)
+{
+    runloom_g_t *g = (runloom_mn_current_hub_opaque() != NULL)
+                     ? runloom_mn_tls_current_g()
+                     : runloom_sched_get()->current;
+    while (!pred(ctx)) {
+        if (g != NULL) {
+            runloom_sched_park_current();          /* off the ready list + snap */
+            runloom_g_state_set(g, gstate);
+        }
+        /* Release BEFORE yielding, or the wake side deadlocks taking the lock.
+         * The RLOCK/RUNLOCK macros take a runtime rank (they cast to int) and are
+         * no-ops without -DRUNLOOM_LOCKRANK. */
+        RUNLOOM_RUNLOCK(lock, rank);
+        runloom_coro_yield();
+        if (g != NULL) runloom_g_state_set(g, RUNLOOM_GST_RUNNING);
+        RUNLOOM_RLOCK(lock, rank);                  /* re-take to re-check pred */
+    }
+    return RUNLOOM_PARK_READY;
+}
+
 /* Fire all TIMER-heap entries on sched s whose deadline has passed (<= now).
  * Called from the single-thread drain and the M:N hub_main, ON s's OWN thread,
  * alongside the sleep-heap drain.  Each due entry is claimed via the SAME
