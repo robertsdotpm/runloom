@@ -4,6 +4,14 @@
  * (runloom_parker_link / runloom_parker_unlink) over the parker pool defined in
  * netpoll_parkers.c.inc.  This proves the reused-stack-address defence.
  *
+ * HISTORICAL NOTE: parkers now come from a HEAP freelist
+ * (netpoll_parkers.c.inc runloom_parker_pool_acquire), so the stack-address
+ * aliasing below can no longer occur -- a freelisted parker has no global
+ * pointers, an in-flight one is at a unique heap address.  This model is kept as
+ * a standing defense-in-depth proof that the LINK PROTOCOL is safe even IF an
+ * alias were reintroduced; the "COROUTINE STACK" premise describes the pre-heap
+ * design the freelist replaced.
+ *
  * THE HAZARD (modelled faithfully -- see the header comment on
  * runloom_parker_link and the "Why heap, not stack" note in netpoll_parkers).
  * A runloom_parked_t lives on the parking fiber's COROUTINE STACK.  When a g
