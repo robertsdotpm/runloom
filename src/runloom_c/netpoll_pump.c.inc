@@ -64,8 +64,26 @@ static void runloom_epoll_handle_event(int fd, unsigned int events, int *woke)
          * wants OUT right now, so drop the arm.  The pending-WRITE bit stashed
          * just above is still honoured: the next wait_fd(WRITE) re-arms OUT and
          * consumes the pending wake at its post-register re-check. */
-        if (mask & RUNLOOM_NETPOLL_WRITE)
+        if (mask & RUNLOOM_NETPOLL_WRITE) {
             runloom_netpoll_disarm_out(fd);
+            /* TOCTOU close (lens stale-cache-vs-kernel, confirmed lost-wake): a
+             * WRITE waiter that linked + committed to PARKED in the window
+             * between the dispatch-miss above and here would be STRANDED --
+             * disarm_out tears OUT down with no parker check (its direction-
+             * agnostic sibling release_if_idle has one, but adding it here would
+             * wrongly pin OUT for a pure-READ parker), the level re-trigger is
+             * gone, and the pending-WRITE bit set just above is never consumed by
+             * an already-parked waiter (consume runs only pre-park).  Re-dispatch
+             * WRITE now -- the pool lock was released by disarm_out, so
+             * dispatch_event can take its per-pool locks: a committed parker is
+             * found in by_fd and claimed/woken (single-claim via its commit-CAS,
+             * so no double-wake vs the miss above); a waiter that links AFTER
+             * this sees the arm cache without WRITE and re-ADDs OUT fresh in its
+             * own register(), so LEVEL re-delivers.  A no-op in the common
+             * nobody-wants-OUT case. */
+            if (runloom_pump_dispatch_event(fd, RUNLOOM_NETPOLL_WRITE, 0))
+                (*woke)++;
+        }
     }
 }
 #endif
