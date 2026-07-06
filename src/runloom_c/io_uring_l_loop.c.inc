@@ -353,6 +353,22 @@ static void runloom_iouring_loop_drain(runloom_iouring_ring_t *r, int *flags_out
                 }
                 continue;
             }
+            if (op != NULL && op->type == RUNLOOM_IOURING_OP_CANCEL) {
+                /* Fire-and-forget ASYNC_CANCEL record (TCPCONN close routes an
+                 * OP_CANCEL-with-dup-fd broadcast to THIS hub ring under the loop
+                 * backend; ring_drain now delegates here so this is the one place
+                 * that reaps them).  Close any dup'd fd it owns, reclaim the
+                 * record, decrement inflight.  WITHOUT this branch the generic
+                 * path below silently leaks both the record and the dup fd -- an
+                 * EMFILE creep across close cycles (the same leak ring_drain's
+                 * OP_CANCEL branch guards against). */
+                if (op->cancel_dup_fd >= 0) close(op->cancel_dup_fd);
+                rl_cancel_op_free(op);
+                __atomic_sub_fetch(&r->inflight, 1, __ATOMIC_ACQ_REL);
+                __atomic_sub_fetch(&runloom_iouring_inflight_count, 1,
+                                   __ATOMIC_ACQ_REL);
+                continue;
+            }
             if (op != NULL) {
                 __atomic_store_n(&op->result, res, __ATOMIC_RELEASE);
                 if (op->hub != NULL) {

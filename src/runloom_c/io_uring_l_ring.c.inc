@@ -215,6 +215,11 @@ static int runloom_iouring_ring_submit_sqe(runloom_iouring_ring_t *r,
     return 0;
 }
 
+/* Defined later in the SAME translation unit (io_uring_l_loop.c.inc, #included
+ * after this file); forward-declared so ring_drain can delegate a loop-armed
+ * ring's drain to the sentinel-aware single-reaper. */
+static void runloom_iouring_loop_drain(runloom_iouring_ring_t *r, int *flags_out);
+
 void runloom_iouring_ring_drain(runloom_iouring_ring_t *r)
 {
     if (r == NULL) return;
@@ -236,6 +241,28 @@ void runloom_iouring_ring_drain(runloom_iouring_ring_t *r)
      * single ops, but the GETEVENTS flush is cheap and keeps the invariant
      * uniform across both rings). */
     runloom_iouring_flush_cq_overflow(r->sq_flags, r->ring_fd);
+
+    /* Loop-armed ring (io_uring-as-loop backend active on this hub ring):
+     * loop_wake_fd >= 0 exactly when loop_hub_arm installed the persistent
+     * WAKE/EPOLL/MSCANCEL sentinel polls on this ring (default -1 otherwise).
+     * The legacy per-CQE loop below casts every user_data straight to an op
+     * pointer, so a sentinel CQE (user_data 1/2/3) would be dereferenced as
+     * op->type -- a wild read (the deterministic SEGV).  A loop-armed ring is
+     * NEVER registered in the epoll pump, so it is drained ONLY by its owning
+     * hub thread (this ring_do inline drain, the SQ-full spin-drain, and the
+     * teardown reap loop all run on the owner); loop_drain's no-CAS single-
+     * reaper is therefore sound here.  It recognises + re-arms the one-shot
+     * EPOLL poll (a dropped re-arm is a permanent lost netpoll wakeup), routes
+     * multishot recv CQEs, and (with the OP_CANCEL branch just added) closes
+     * cancel-by-fd dup fds -- everything the legacy loop below does plus the
+     * sentinel/multishot cases it cannot handle.  flags_out is NULL: the F_EPOLL
+     * bit only schedules this cycle's pump(0), which the next loop_wait re-derives
+     * from the re-armed one-shot's fresh CQE, so nothing is lost. */
+    if (r->loop_wake_fd >= 0) {
+        runloom_iouring_loop_drain(r, NULL);
+        return;
+    }
+
     for (;;) {
         unsigned head = __atomic_load_n(r->cq_head, __ATOMIC_ACQUIRE);
         unsigned ct   = __atomic_load_n(r->cq_tail, __ATOMIC_ACQUIRE);
