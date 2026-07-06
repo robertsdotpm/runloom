@@ -158,6 +158,8 @@ typedef enum runloom_delay_site {
     RUNLOOM_DLY_G_ENTRY,            /* a fiber starts running */
     RUNLOOM_DLY_G_COMPLETE,         /* a fiber completes */
     RUNLOOM_DLY_HUB_RESUME,         /* a hub picks a g to resume */
+    RUNLOOM_DLY_G_RESURRECT,        /* hub_submit try_incref -> in_sub_queue CAS
+                                     * (the g-resurrection ABA window, sched_qref) */
     RUNLOOM_DLY_NSITES
 } runloom_delay_site_t;
 

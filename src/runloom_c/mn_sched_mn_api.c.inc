@@ -135,6 +135,12 @@ static void runloom_mn_hub_submit(runloom_hub_t *h, runloom_g_t *g)
      * so it keeps the original path. */
     if (!per_g && !runloom_g_try_incref(g))
         return;                          /* g is freeing -> drop the stale wake */
+    /* Perturbation seam (RUNLOOM_DELAY): widen the window between the
+     * try_incref that guards resurrection and the in_sub_queue CAS below -- the
+     * exact ABA window sched_qref_cbmc.c proves.  The formal proof shows it is
+     * safe FOR ALL interleavings; this widener lets a soak/TSan run actually
+     * HIT that window on the real .so.  No-op unless RUNLOOM_DELAY names it. */
+    runloom_delay_inject(RUNLOOM_DLY_G_RESURRECT);
     /* Defence-in-depth (debug): a live g must not already be DONE/FREED. */
     RUNLOOM_G_ASSERT_NOT(g, RUNLOOM_GST_MASK_DEAD);
     if (!__atomic_compare_exchange_n(&g->in_sub_queue, &expected, 1,

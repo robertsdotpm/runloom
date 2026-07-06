@@ -6,8 +6,13 @@
 # ZERO call sites -- an advertised-but-dead widener exactly on the windows a
 # handle-substrate migration (item 3) touches.  They are now wired
 # (runloom_sched_pystate.c.inc snap/load, mn_sched_hub_main.c.inc cross-hub
-# adopt).  This lane drives the mn/pystate stress workloads with those sites
-# perturbed so a snap/load/adopt reorder surfaces as a failure/hang instead of a
+# adopt, mn_sched_mn_api.c.inc g-resurrection window).
+#
+# NOTE on RUNLOOM_DELAY: it is a numeric SEED, not a site selector -- setting it
+# enables the delay injector at EVERY wired site (runloom_diag.c: strtoull(seed)
+# + a global on-flag), which is even more thorough than perturbing one window.
+# The migration/resurrection sites fire alongside WORLD_YIELD/CORO_*; a
+# snap/load/adopt/resurrect reorder then surfaces as a failure/hang instead of a
 # 1-in-a-million production crash.  Pure runtime env vars (no rebuild).
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -19,8 +24,8 @@ TESTS="${MIGDLY_TESTS:-test_mn test_mn_park test_concurrency test_freethread_str
   test_swarm_mn_sched test_swarm_coro_stack test_gc_fibers test_stack_frames}"
 TESTS="$(for t in $TESTS; do printf '%s.py ' "$t"; done)"
 
-echo "== migration-delay: mn/pystate stress with SNAP_SAVE,SNAP_LOAD,HANDOFF_ADOPT perturbed =="
-RUNLOOM_DELAY="${MIGDLY_SITES:-SNAP_SAVE,SNAP_LOAD,HANDOFF_ADOPT}" \
+echo "== migration-delay: mn/pystate stress with ALL delay sites armed (seed ${MIGDLY_SEED:-1}) =="
+RUNLOOM_DELAY="${MIGDLY_SEED:-1}" \
 RUNLOOM_DELAY_MAX_NS="${MIGDLY_MAX_NS:-2000}" \
 PYTHON_GIL=0 PYTHONPATH=src "$PY" tests/run_isolated.py -j"${MIGDLY_JOBS:-4}" $TESTS
 rc=$?
