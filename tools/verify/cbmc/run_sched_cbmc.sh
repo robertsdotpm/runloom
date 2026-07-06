@@ -71,6 +71,12 @@ launch want_ok  sched_qref_cbmc.c ""
 launch want_bug sched_qref_cbmc.c "-DBUG_INCREF_AFTER_CAS" "naive queue ref (incref after CAS) -> stale-wake UAF window"
 launch want_bug sched_qref_cbmc.c "-DBUG_NO_QUEUE_REF"     "no queue ref -> stale-wake-after-completion UAF (original)"
 
+# rl_handle generation-stamped PIN protocol (item 3): pin (gen-checked refcount
+# upgrade) holds the object so the owner cannot free it under a live resolver.
+# BUG_NO_PIN = the naive resolve-without-refcount design the torture test caught.
+launch want_ok  rl_handle_cbmc.c ""
+launch want_bug rl_handle_cbmc.c "-DBUG_NO_PIN" "resolve without a pin -> owner frees the object under a live resolver (UAF)"
+
 # per-g tstate snapshot REFERENCE OWNERSHIP (companion to the completeness proof):
 # every owned ref snap acquires is released exactly once by load XOR clear; the
 # immortal-context skip and the raw delete_later chain are the bug-prone cases.

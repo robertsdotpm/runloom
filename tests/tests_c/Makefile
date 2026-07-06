@@ -99,6 +99,18 @@ test_cldeque-tsan: $(CLDEQUE_SRC)
 test_cldeque-ubsan: $(CLDEQUE_SRC)
 	$(CC) -O1 -fsanitize=undefined $(CLDEQUE_CF) $(CLDEQUE_SRC) -o test_cldeque-ubsan
 
+# rl_handle generation-stamped handle substrate (item 3).  test_rl_handle.c
+# #includes rl_handle.c directly (its deps are header-inline), so no .so link.
+RL_HANDLE_SRC := test_rl_handle.c
+RL_HANDLE_CF  := -std=gnu11 -D_GNU_SOURCE -Wall -Wextra -Wno-unused-parameter -I../../src/runloom_c -pthread
+
+test_rl_handle: $(RL_HANDLE_SRC)
+	$(CC) -O2 $(RL_HANDLE_CF) $(RL_HANDLE_SRC) -o test_rl_handle
+test_rl_handle-asan: $(RL_HANDLE_SRC)
+	$(CC) -O1 -g -fsanitize=address $(RL_HANDLE_CF) $(RL_HANDLE_SRC) -o test_rl_handle-asan
+test_rl_handle-tsan: $(RL_HANDLE_SRC)
+	$(CC) -O1 -g -fsanitize=thread $(RL_HANDLE_CF) $(RL_HANDLE_SRC) -o test_rl_handle-tsan
+
 clean:
 	rm -f bench_mn bench_mn-asan bench_mn-tsan bench_mn-ubsan \
 	      bench_server_runloom bench_server_runloom-asan \
