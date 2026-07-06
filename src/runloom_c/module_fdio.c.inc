@@ -70,7 +70,12 @@ static PyObject *m_fd_read(PyObject *self, PyObject *args)
             return PyErr_SetFromErrno(PyExc_OSError);
         }
         if (errno == EINTR) continue;
-        if (runloom_netpoll_wait_fd(fd, 1 /*READ*/, -1LL) < 0) {
+        /* _coop, not the raw wait_fd: a cancel (cancel_fd / cancel_all_parked)
+         * wakes with the POSITIVE RUNLOOM_NETPOLL_CANCELLED sentinel, which the
+         * raw call returns verbatim -- the `< 0` test would miss it and the loop
+         * would re-park forever (a hang).  _coop maps CANCELLED -> ECANCELED/-1
+         * (and passes SIGNALED's -1 through), so the branch catches both. */
+        if (runloom_netpoll_wait_fd_coop(fd, 1 /*READ*/, -1LL) < 0) {
             PyBuffer_Release(&buf);
             /* wait_fd may have run a Python signal handler that raised (e.g. an
              * alarm handler / Ctrl-C) -> propagate it; don't overwrite with OSError. */
@@ -115,7 +120,9 @@ static PyObject *m_fd_write(PyObject *self, PyObject *args)
             return PyErr_SetFromErrno(PyExc_OSError);
         }
         if (errno == EINTR) continue;
-        if (runloom_netpoll_wait_fd(fd, 2 /*WRITE*/, -1LL) < 0) {
+        /* _coop, not raw: see the m_fd_read note -- a cancel returns the POSITIVE
+         * CANCELLED sentinel that the `< 0` test would miss, re-parking forever. */
+        if (runloom_netpoll_wait_fd_coop(fd, 2 /*WRITE*/, -1LL) < 0) {
             PyBuffer_Release(&buf);
             /* wait_fd may have run a Python signal handler that raised (e.g. an
              * alarm handler / Ctrl-C) -> propagate it; don't overwrite with OSError. */

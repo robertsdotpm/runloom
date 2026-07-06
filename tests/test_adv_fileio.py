@@ -151,5 +151,80 @@ def test_fd_read_on_blocking_fd_cooperates():
     assert out.get("buf") == b"X", "fd_read wedged or lost data on a blocking fd"
 
 
+# --------------------------------------------------------------------------
+# Regression (lens error-cancel-path-untested, module_fdio.c.inc:73/:118):
+# m_fd_read / m_fd_write parked on a pipe called the RAW runloom_netpoll_wait_fd
+# and tested `< 0`.  A cancel (netpoll_cancel_fd / cancel_all_parked / G.cancel
+# _wait_fd) wakes with the POSITIVE RUNLOOM_NETPOLL_CANCELLED sentinel, so the
+# `< 0` test MISSED it and the loop re-parked FOREVER -- a hang + fiber leak.
+# The fix routes through runloom_netpoll_wait_fd_coop (CANCELLED -> ECANCELED/-1),
+# so a cancel surfaces as OSError(ECANCELED), like every sibling cooperative path.
+# --------------------------------------------------------------------------
+@pytest.mark.skipif(not POSIX, reason="POSIX fd model")
+def test_fd_read_cancel_unblocks_not_hang():
+    import errno as _errno
+    out = {}
+    hold = {}
+    def main():
+        r, w = os.pipe()
+        os.set_blocking(r, False)
+        hold["fds"] = (r, w)
+        def reader():
+            buf = bytearray(4)
+            try:
+                rc.fd_read(r, buf, 4)          # empty pipe -> parks READ
+                out["result"] = ("returned",)
+            except OSError as e:
+                out["result"] = ("oserror", e.errno)
+        def canceller():
+            for _ in range(6):
+                rc.sched_yield()               # let the reader commit to the park
+            rc.netpoll_cancel_fd(r)            # cancel it: must NOT re-park forever
+        rc.fiber(reader)
+        rc.fiber(canceller)
+    with hang_guard(10, "fd_read cancel"):     # bug => faulthandler _exit => fail
+        rc.fiber(main); rc.run()
+    r, w = hold["fds"]
+    rc.netpoll_unregister(r); os.close(r); os.close(w)
+    assert out.get("result", ("hang",))[0] == "oserror", (
+        "fd_read ignored the cancel and re-parked (result=%r)" % (out.get("result"),))
+    assert out["result"][1] == _errno.ECANCELED
+
+
+@pytest.mark.skipif(not POSIX, reason="POSIX fd model")
+def test_fd_write_cancel_unblocks_not_hang():
+    import errno as _errno
+    out = {}
+    hold = {}
+    def main():
+        r, w = os.pipe()
+        os.set_blocking(w, False)
+        hold["fds"] = (r, w)
+        try:                                   # fill the pipe so fd_write parks WRITE
+            while True:
+                os.write(w, b"x" * 65536)
+        except OSError:
+            pass                               # EAGAIN: pipe full
+        def writer():
+            try:
+                rc.fd_write(w, b"y" * 65536)   # full pipe -> parks WRITE
+                out["result"] = ("returned",)
+            except OSError as e:
+                out["result"] = ("oserror", e.errno)
+        def canceller():
+            for _ in range(6):
+                rc.sched_yield()
+            rc.netpoll_cancel_fd(w)
+        rc.fiber(writer)
+        rc.fiber(canceller)
+    with hang_guard(10, "fd_write cancel"):
+        rc.fiber(main); rc.run()
+    r, w = hold["fds"]
+    rc.netpoll_unregister(w); os.close(r); os.close(w)
+    assert out.get("result", ("hang",))[0] == "oserror", (
+        "fd_write ignored the cancel and re-parked (result=%r)" % (out.get("result"),))
+    assert out["result"][1] == _errno.ECANCELED
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
