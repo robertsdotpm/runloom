@@ -72,6 +72,18 @@ if have python3; then
             fail=$((fail + 1)); FAILED="$FAILED feature_gate"
         fi
     fi
+    # semantics conformance: EXECUTE the audited kernel-contract probes (epoll
+    # ET/LEVEL/EXCLUSIVE/ONESHOT) against THIS box's kernel, so a misread that a
+    # hand model would bless fails here instead.  SKIPs cleanly off-Linux.
+    if [ -f "$HERE/semantics/conformance.py" ] && have cc; then
+        printf '  [lint] %-28s ' "semantics_conformance"
+        if python3 "$HERE/semantics/conformance.py" >"/tmp/runloom_semconform.log" 2>&1; then
+            echo "OK"; pass=$((pass + 1))
+        else
+            echo "KERNEL-DIVERGES (see /tmp/runloom_semconform.log)"
+            fail=$((fail + 1)); FAILED="$FAILED semantics_conformance"
+        fi
+    fi
 fi
 
 # ---------------- parallel job engine ----------------------------------
