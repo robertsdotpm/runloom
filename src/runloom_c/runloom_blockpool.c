@@ -94,6 +94,13 @@ typedef struct runloom_block_job {
     struct runloom_block_job *next;
 } runloom_block_job_t;
 
+/* Predicate for runloom_park_until (item 1): the worker has finished the job.
+ * Mirrors the hub wait loop's condition exactly (ACQUIRE load of done). */
+static int runloom_bp_job_done(void *ctx)
+{
+    return __atomic_load_n(&((runloom_block_job_t *)ctx)->done, __ATOMIC_ACQUIRE);
+}
+
 /* One submit shard: an independent MPSC job queue.  Cache-line aligned so two
  * shards' hot fields (and their lock/cond futex words) never share a line. */
 typedef struct runloom_bp_shard {
@@ -468,9 +475,13 @@ void *runloom_blocking_call(void *(*fn)(void *), void *arg)
      * next real await-point after we return.  Hub: race-safe park_generic.
      * Single-thread: race-safe park_safe/wake_safe. */
     if (hub != NULL) {
-        while (!__atomic_load_n(&job.done, __ATOMIC_ACQUIRE)) {
-            runloom_park_generic(1);
-        }
+        /* Item 1: the hub wait now routes through the unified predicate-park
+         * kernel.  Behaviour-identical to the former `while (!done)
+         * park_generic(1)` -- runloom_park_until IS that loop -- but on the one
+         * blessed entry (no arm/disarm: the worker already holds this g's handle
+         * and wakes it via wake_safe on completion; foreign_wakeable=1; untimed). */
+        runloom_park_until(runloom_bp_job_done, NULL, NULL, &job,
+                           /*foreign_wakeable=*/1, /*deadline=*/-1.0);
     } else {
         while (!__atomic_load_n(&job.done, __ATOMIC_ACQUIRE)) {
             runloom_sched_park_safe();
