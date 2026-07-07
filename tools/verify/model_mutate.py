@@ -102,7 +102,12 @@ RELOPS = [("==", "!="), ("!=", "=="), ("<=", ">"), (">=", "<"),
           ("<", ">="), (">", "<=")]
 # longer ops first so '<=' is matched before '<'
 RELOP_RE = re.compile(r"(==|!=|<=|>=|<|>)")
-MO_RE = re.compile(r"memory_order_(seq_cst|acquire|release|acq_rel)")
+# Both atomic families: C11 `memory_order_*` literals AND the GCC/Clang
+# `__ATOMIC_*` builtin constants (what src/runloom_c/cldeque.c actually uses via
+# __atomic_load_n/etc).  Matching only the C11 form made the cldeque moflip sweep
+# a silent no-op -- 0 mutants found, exit 0, zero teeth.
+MO_RE = re.compile(r"memory_order_(?:seq_cst|acquire|release|acq_rel)"
+                   r"|__ATOMIC_(?:SEQ_CST|ACQUIRE|RELEASE|ACQ_REL)")
 _BUG_RE = re.compile(r"BUG", re.I)
 
 
@@ -171,14 +176,15 @@ def gen_relop(text, inactive):
 def gen_moflip(text, inactive):
     out = []
     for m in MO_RE.finditer(text):
-        order = m.group(1)
-        if order == "relaxed":
-            continue
+        tok = m.group(0)
+        # relax to the SAME family's relaxed form (regex never matches an
+        # already-relaxed token, so this only picks the strengthened orders).
+        repl = "__ATOMIC_RELAXED" if tok.startswith("__ATOMIC_") else "memory_order_relaxed"
         ln0 = text.count("\n", 0, m.start())
         if ln0 in inactive:
             continue
-        mutated = text[:m.start()] + "memory_order_relaxed" + text[m.end():]
-        out.append(("L{0}:{1}->relaxed".format(ln0 + 1, order), mutated))
+        mutated = text[:m.start()] + repl + text[m.end():]
+        out.append(("L{0}:{1}->relaxed".format(ln0 + 1, tok), mutated))
     return out
 
 
