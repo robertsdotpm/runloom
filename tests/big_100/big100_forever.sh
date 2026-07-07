@@ -27,6 +27,10 @@ PY="$HOME/.pyenv/versions/3.14.4t/bin/python3"
 FUNCS="${BIG100_FUNCS:-1000000}"
 TMO="${BIG100_TMO:-300}"
 GON="RUNLOOM_HARNESS_GON=1 RUNLOOM_GON_BULK=1 RUNLOOM_GON_FRESH=1 RUNLOOM_STACK_ARENA_N=1300000"
+# TLBC mitigation: start ft-3.14 children with thread-local bytecode OFF so each
+# program runs clean instead of re-exec'ing itself (runloom.run does the re-exec
+# as a fallback).  Honor RUNLOOM_TLBC=1 (used to re-arm the p565/p524 guards).
+TLBC=""; [ "${RUNLOOM_TLBC:-}" = "1" ] || TLBC="PYTHON_TLBC=0"
 
 OUT="$(cd ../../ && pwd)/docs/dev/soak/big100_forever"
 mkdir -p "$OUT"
@@ -51,7 +55,7 @@ while true; do
     [ -f "$pf" ] || continue
     prog="${pf%.py}"; n=$((n + 1))
     t0=$(date +%s)
-    out=$(env PYTHON_GIL=0 PYTHONPATH=../src $GON \
+    out=$(env PYTHON_GIL=0 $TLBC PYTHONPATH=../src $GON \
           $SCOPE timeout -k 10 "$TMO" "$PY" "$pf" \
           --funcs "$FUNCS" --duration 5 --rounds 0 --hubs 8 2>&1)
     rc=$?

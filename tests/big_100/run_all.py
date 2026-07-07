@@ -84,6 +84,13 @@ def main():
     env = dict(os.environ)
     env["PYTHON_GIL"] = "0"
     env.setdefault("RUNLOOM_SYSMON_QUIET", "1")
+    # TLBC mitigation: free-threaded 3.14+ has a thread-local-bytecode heap bug
+    # under runloom's stackful M:N (see runloom.run/_tlbc_reexec_if_needed).
+    # Set PYTHON_TLBC=0 for the children up front so each program starts clean
+    # instead of re-exec'ing itself once.  Honor the RUNLOOM_TLBC=1 opt-out used
+    # to re-arm the p565/p524 regression guards.
+    if os.environ.get("RUNLOOM_TLBC") != "1":
+        env.setdefault("PYTHON_TLBC", "0")
 
     # Track which IP slots are free.  We cycle through JOBS slots; when a job
     # finishes its slot is returned to the pool for the next pending job.
