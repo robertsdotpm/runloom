@@ -58,7 +58,15 @@ if [ "$wsz" != 4 ]; then
     echo "       configure's TSan probes likely aborted under ASLR -- need setarch -R."
     exit 1
 fi
-grep -q "WORDS_BIGENDIAN" pyconfig.h && { echo "FATAL: WORDS_BIGENDIAN set on a little-endian host -- same ASLR-probe corruption."; exit 1; }
+# Robust endianness check: a naive `grep WORDS_BIGENDIAN pyconfig.h` FALSE-POSITIVES
+# on every little-endian build, because autoconf's AC_C_BIGENDIAN template always
+# emits the macro name in a comment, in an inactive Apple-universal-build
+# `#  define WORDS_BIGENDIAN 1` branch, and in a `/* #undef */` line.  PREPROCESS
+# pyconfig.h instead and test whether the macro is ACTUALLY defined on this host.
+if printf '#include "pyconfig.h"\n#ifdef WORDS_BIGENDIAN\nRUNLOOM_BIG_ENDIAN\n#endif\n' \
+     | cc -I. -E -P - 2>/dev/null | grep -q RUNLOOM_BIG_ENDIAN; then
+    echo "FATAL: WORDS_BIGENDIAN actively defined on a little-endian host -- ASLR-probe corruption."; exit 1
+fi
 
 $SA make -j"$(nproc)"
 $SA make install
