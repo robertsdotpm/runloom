@@ -137,7 +137,17 @@ def fd_round():
     except OSError: pass
 for _ in range(4):
     eat(fd_round)
-print("FIRED=%d" % runloom_c._fault_count(SITE), flush=True)
+# Post-state census: after every fiber has run + drained, a leak-free run must
+# have no live goroutines beyond baseline and its fd set back to baseline.  A
+# survived fault (graceful/ok) that leaks a g or fd is a bug the survival-only
+# verdict misses.
+try:
+    _gs = runloom_c.fiber_count()
+except Exception:
+    _gs = -1
+print("FIRED=%d GS=%d FD=%d" % (
+    runloom_c._fault_count(SITE), _gs, len(os.listdir("/proc/self/fd"))),
+    flush=True)
 """
 
 
@@ -150,27 +160,51 @@ def run_one(site, nth, code, timeout):
                            capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired:
         return "HANG", None
-    fired = None
+    fired = gs = fd = None
     for line in (p.stdout or "").splitlines():
-        if line.startswith("FIRED="):
-            fired = int(line.split("=", 1)[1])
+        if line.startswith("FIRED="):        # "FIRED=<n> GS=<n> FD=<n>"
+            for kv in line.split():
+                k, _, v = kv.partition("=")
+                if k == "FIRED":
+                    fired = int(v)
+                elif k == "GS":
+                    gs = int(v)
+                elif k == "FD":
+                    fd = int(v)
     if p.returncode < 0:
-        return "CRASH(sig %d)" % -p.returncode, fired
+        return "CRASH(sig %d)" % -p.returncode, fired, gs, fd
     if p.returncode != 0:
-        return "graceful", fired
-    return "ok", fired
+        return "graceful", fired, gs, fd
+    return "ok", fired, gs, fd
 
 
 def sweep_site(site, code=12, maxn=400, timeout=30):
     findings = []
+    # Clean baseline: arm the site but with an nth so huge the fault never fires,
+    # so GS/FD reflect a leak-free run of this exact workload.
+    _, _, base_gs, base_fd = run_one(site, 10 ** 9, code, timeout)
+    if base_gs is None:
+        base_gs = 0
+    if base_fd is None:
+        base_fd = 0
     n = 0
     while n < maxn:
         n += 1
-        verdict, fired = run_one(site, n, code, timeout)
+        verdict, fired, gs, fd = run_one(site, n, code, timeout)
         if verdict.startswith("CRASH") or verdict == "HANG":
             findings.append((n, verdict))
             print("  %-12s N=%-4d %s   <-- FINDING" % (site, n, verdict), flush=True)
             continue          # keep sweeping: later Ns are independent points
+        # POST-STATE oracle: a fault that FIRED and the run SURVIVED (ok/graceful)
+        # but left more live goroutines or fds than the clean baseline = a leak
+        # the survival-only verdict misses (torn cleanup on the error path).
+        if fired and ((gs is not None and gs > base_gs)
+                      or (fd is not None and fd > base_fd + 2)):
+            v = "post-state leak gs=%s(base %s) fd=%s(base %s)" % (gs, base_gs, fd, base_fd)
+            findings.append((n, v))
+            print("  %-12s N=%-4d POST-STATE LEAK gs=%s/%s fd=%s/%s   <-- FINDING"
+                  % (site, n, gs, base_gs, fd, base_fd), flush=True)
+            continue
         if verdict == "graceful":
             print("  %-12s N=%-4d graceful (orderly nonzero exit)" % (site, n), flush=True)
             continue
