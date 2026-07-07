@@ -51,7 +51,18 @@ iter=0
 while true; do
   iter=$((iter + 1))
   ti=$(date +%s); pass=0; vfail=0; crash=0; tout=0; scale=0; n=0
-  for pf in p[0-9]*.py; do
+  # Program set for this iteration.  BIG100_FOCUS=1 -> only NEW + recently-buggy
+  # programs (focus_list.py: git-added in the last BIG100_FOCUS_DAYS days UNION
+  # results.tsv real-bug verdicts).  Recomputed each iter so a newly-found bug
+  # joins the set automatically; empty/absent -> fall back to the full glob.
+  if [ "${BIG100_FOCUS:-0}" = "1" ]; then
+    mapfile -t PROGS < <("$PY" focus_list.py 2>/dev/null)
+    [ "${#PROGS[@]}" -gt 0 ] || PROGS=( p[0-9]*.py )
+    echo "$(date -Iseconds) iter=$iter FOCUS: ${#PROGS[@]} progs (new + buggy, last ${BIG100_FOCUS_DAYS:-7}d)" >> "$SUM"
+  else
+    PROGS=( p[0-9]*.py )
+  fi
+  for pf in "${PROGS[@]}"; do
     [ -f "$pf" ] || continue
     prog="${pf%.py}"; n=$((n + 1))
     t0=$(date +%s)
