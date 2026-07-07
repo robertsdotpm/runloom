@@ -84,11 +84,41 @@ def op_mn_cycle():
     runloom_c.mn_fini()
 
 
+def op_mn_xhub_dealloc():
+    # cross-hub LAST-ref-drop: an object is born on the producer hub, its SOLE
+    # ref is sent through a channel, and it is DROPPED on the consumer hub -- so
+    # the final decref + biased-refcount merge tp_dealloc run on a DIFFERENT hub
+    # than the one that created it.  op_mn_cycle only BUMPS a shared refcount and
+    # never drops the last ref cross-hub, so it misses the dealloc-side merge
+    # accounting -- exactly where a brc over-release nets a NEGATIVE per-cycle
+    # drift.  Must net zero: every object produced is deallocated.
+    runloom_c.mn_init(2)
+    ring = runloom_c.Chan(64)
+
+    def producer():
+        for i in range(500):
+            ring.send([i, "x"])          # fresh object; sole ref handed across
+        ring.close()
+
+    def consumer():
+        while True:
+            v, ok = ring.recv()
+            if not ok:
+                break
+            del v                        # last decref on the CONSUMER hub
+
+    runloom_c.mn_fiber(producer)         # -> hub 0
+    runloom_c.mn_fiber(consumer)         # -> hub 1 (round-robin): cross-hub drop
+    runloom_c.mn_run()
+    runloom_c.mn_fini()
+
+
 OPS = [
     ("chan_construct", op_chan_construct),
     ("coro_construct", op_coro_construct),
     ("backend_read", op_backend_read),
     ("mn_cycle", op_mn_cycle),
+    ("mn_xhub_dealloc", op_mn_xhub_dealloc),
 ]
 
 

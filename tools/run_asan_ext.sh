@@ -72,6 +72,12 @@ run_one() {  # label, args...
 run_one "gc_checkmark" tests/test_gc_checkmark.py
 # a small M:N chan/sched workload: exercises the deque/parker/g-slab C heap.
 run_one "mn_stress" tools/mn_stress.py --iters 60
+# the offload/blockpool submit->park->drain->wake geometry: the blockpool job
+# structs, per-hub shards, and the parker C heap under cross-thread wakes.
+run_one "offloadfuzz" tools/offloadfuzz/offloadfuzz.py run 3 --timeout 180
+# the runloom<->CPython seam moves (cross-hub dealloc / STW / foreign-thread):
+# the channel ring, g-slab, and datastack C heap under the seam handoffs.
+run_one "seamfuzz" tools/seamfuzz/seamfuzz.py run 5 --timeout 180
 
 echo
 [ "$rc" -eq 0 ] && echo "run_asan_ext: clean (no ASan memory error)" || echo "run_asan_ext: ASan caught a memory error (exit 1)"
