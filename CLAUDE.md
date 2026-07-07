@@ -47,7 +47,7 @@ Full derivations for the invariants below: [docs/dev/RUNTIME_GOTCHAS.md](docs/de
 - **Future-completion wakes are call_soon-FIFO.** `wake_safe` keeps its
   same-thread fast-path (ready-ring push), detected by PEEKing `runloom_tls_sched`
   — never `runloom_sched_get()` (mallocs on a foreign waker). Guard:
-  `runloom_compat/call_soon_fifo.py`.
+  `tests/test_differential_asyncio.py` (sc_call_soon_fifo).
 - **Preemption never yields mid object-destruction.** Both yield sites gate on
   `runloom_tstate_in_destruction` and defer (trigger stays armed); yielding inside
   a `tp_dealloc` freezes a half-dead object across a GC-safe point → UAF. Don't
@@ -67,22 +67,22 @@ Full derivations for the invariants below: [docs/dev/RUNTIME_GOTCHAS.md](docs/de
   revert to bare `runloom_c.fiber`.
 - **Timer goroutines read the callback THROUGH the handle.** Capturing
   `callback`/`args` in the runner closure leaks cancelled timers' graphs. Guard:
-  `runloom_compat/timer_leak.py`.
+  `tests/test_swarm_aio_bridge.py::test_cancelled_call_later_does_not_leak_callback_graph`.
 - **`_StreamTransport` seeds `self._io_g = None` before `connection_made`.** A
   write inside connection_made kicks io before `__init__` finishes; the post-cm
-  spawn is `if self._io_g is None`. Guard: `runloom_compat/tls_connection_made_write.py`.
+  spawn is `if self._io_g is None`. Guard: `tests/test_adv_aio.py::test_connection_made_write_reaches_client`.
 - **Loop-level callbacks run with no current task.** Route via `_pg_run_loop_cb`
   (clears `_CURRENT_TASKS[loop]`), else a stock-Task wakeup hits enter_task and
-  the wake is dropped. Guard: `runloom_compat/aiohttp_leak_probe.py`.
+  the wake is dropped. Guard: `tests/test_swarm_aio_bridge.py::test_loop_level_callback_has_no_current_task`.
 - **`Server.close()` wakes its accept loops** — `cancel_wait_fd()` the parked
-  accept goroutines or they leak. Guard: `runloom_compat/goroutine_leak_char.py`.
+  accept goroutines or they leak. Guard: `tests/test_adv_aio.py::test_server_close_does_not_leak_accept_fibers`.
 - **`loop.sock_*` releases the fd's netpoll arm on completion.**
   `@_release_fd_after` → `netpoll_release_if_idle(fd)`, else a reused fd number
   hangs on the stale arm cache. Don't drop the decorator or the register-once
   skip. Guard: `tests/test_aio_fd_reuse.py`.
 - **Future done-callbacks defer through call_soon, in asyncio order.**
   `_fire_callbacks` defers all but `RunloomTask._wake_unpark` and
-  `_runloom_fire_sync`-tagged callbacks. Guard: `runloom_compat/ws_close_order_repro.py`.
+  `_runloom_fire_sync`-tagged callbacks. Guard: `tests/test_differential_asyncio.py` (sc_done_callback_order).
 - **The driver resumes with `coro.send(None)`, never `send(future.result())`.** A
   custom awaitable-iterator takes the `.send()` branch on a non-None value and
-  raises. Guard: `runloom_compat/aiocsv_repro.py`.
+  raises. Guard: `tests/test_differential_asyncio.py` (sc_send_none_protocol).
