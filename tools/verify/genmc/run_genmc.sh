@@ -106,6 +106,27 @@ else
     red "FAIL"; echo " (errored but no race reported) -- see $HERE/.genmc.neg.log"; fail=$((fail+1))
 fi
 
+# --- g-registry publish: spawn_common fields vs fiber_snapshot read -----------
+# The race TSan-GOLD caught (2026-07-07): spawn_common writes g->owner/noyield/
+# refcount and only THEN release-stores state=RUNNABLE; the introspect reader
+# must gate on state >= RUNNABLE (not just != FREED) so its acquire-load pairs
+# with that release, else it reads the fields pre-publish.
+printf '  [genmc] %-30s ' "greg_publish.c"
+if "$G" -- "$HERE/greg_publish.c" >"$HERE/.genmc.pos.log" 2>&1 \
+        && grep -q "No errors were detected" "$HERE/.genmc.pos.log"; then
+    green "PASS"; echo " -- fields published-before-read (state>=RUNNABLE gate) under RC11"; pass=$((pass+1))
+else
+    red "FAIL"; echo " -- see $HERE/.genmc.pos.log"; fail=$((fail+1))
+fi
+printf '  [genmc] %-30s ' "greg_publish.c(-DBUG_SKIP_FREED_ONLY)"
+if "$G" -- -DBUG_SKIP_FREED_ONLY "$HERE/greg_publish.c" >"$HERE/.genmc.neg.log" 2>&1; then
+    red "FAIL"; echo " (expected a race) -- see $HERE/.genmc.neg.log"; fail=$((fail+1))
+elif grep -qiE "race|error|violation" "$HERE/.genmc.neg.log"; then
+    green "PASS"; echo " -- correctly DETECTS the owner/noyield read-before-publish race"; pass=$((pass+1))
+else
+    red "FAIL"; echo " (errored but no race reported) -- see $HERE/.genmc.neg.log"; fail=$((fail+1))
+fi
+
 # --- park_safe/wake_safe cross-thread handshake (runloom_sched*) ---------------
 # Drift-guard: the harness's correct default assumes the source has the two
 # StoreLoad seq_cst fences (added after GenMC found a lost wakeup in the

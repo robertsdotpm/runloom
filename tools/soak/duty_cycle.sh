@@ -303,8 +303,12 @@ if [ -n "$FORCE_MATRIX" ]; then
 elif [ "$DO_MATRIX_SMOKE" = "1" ]; then
   MATRIX_PRESET="smoke"
 else
-  # rotate by day-of-week: Sat asan-24h, Sun tsan-24h, else none
+  # rotate by day-of-week: Fri tsan-gold-24h, Sat asan-24h, Sun tsan-24h, else none.
+  # tsan-gold is the fully-instrumented interpreter (races crossing the runloom<->
+  # CPython seam are attributed, not suppressed) -- it is how the g-registry
+  # publish race got caught; running it weekly keeps that class from regressing.
   case "$(date +%u)" in
+    5) MATRIX_PRESET="tsan-gold-24h" ;;
     6) MATRIX_PRESET="asan-24h" ;;
     7) MATRIX_PRESET="tsan-24h" ;;
   esac
