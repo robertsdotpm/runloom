@@ -407,6 +407,20 @@ if __name__ == "__main__":
     harness.main(
         "p561_cmd_dispatch", body, setup=setup, post=post,
         default_funcs=8000,
+        # SPAWN/CPU SCALE CAP (benign, not a runtime bug).  This oracle is
+        # correct at every N (verified: it PASSES with 0 failures whenever the
+        # window is long enough to schedule a worker), but each op-cycle is
+        # heavy -- it builds a 96-line command script and drives 96 onecmd()
+        # dispatches + 16 parseline() calls per iteration.  Spawning N
+        # goroutines is O(N), so past ~200k the spawn phase alone consumes the
+        # whole --duration window before ANY worker completes a single
+        # dispatch-conservation + parseline-purity cycle; dchecks stays 0 and
+        # the (correct) NON-VACUITY oracle fails with nothing actually wrong.
+        # Cap at 100k (50x the ~2k design scale -- still a massive M:N stress)
+        # so the forever-loop invocation (--funcs 1000000) runs at a size where
+        # at least one full op-cycle lands inside the window and the load-
+        # bearing law is actually exercised.  Does NOT weaken the oracle.
+        max_funcs=100000,
         describe="cmd.Cmd line dispatch + parseline purity under M:N.  Each fiber "
                  "owns a single-owner cmd.Cmd subclass instance (fiber-local "
                  "StringIO stdout + per-instance tally) and drives a KNOWN script "

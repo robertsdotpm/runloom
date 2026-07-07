@@ -104,7 +104,13 @@ def build_params(wid, idx):
     DateTime); a recovered element that is unequal -- or carries another wid --
     is a cross-fiber leak of Unmarshaller state."""
     n = wid * BASE + idx
-    i_val = n                                    # <int>
+    # <int> must stay inside XML-RPC's signed-32-bit range (-2^31..2^31-1) for
+    # ALL wid up to 1M; n reaches ~10^12 at high wid and would OverflowError in
+    # dumps().  Mask into [0, 2^31-1]: still deterministic and round-trips exact,
+    # and wid-bearing identity is carried by the str/Binary/methodname elements
+    # (an int collision across wids can never satisfy the per-fiber equality
+    # oracle, whose other elements still embed this fiber's wid).
+    i_val = n & 0x7FFFFFFF                        # <int> (XML-RPC 32-bit safe)
     s_val = "w{0}_i{1}".format(wid, idx)         # <string>
     b_val = bool((wid + idx) & 1)                # <boolean>
     d_val = float(n) + 0.5                        # <double> (repr round-trips exact)

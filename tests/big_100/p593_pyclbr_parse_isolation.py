@@ -354,6 +354,13 @@ if __name__ == "__main__":
     harness.main(
         "p593_pyclbr_parse_isolation", body, setup=setup, post=post,
         default_funcs=4000,
+        # Each fiber parses its own source into a fresh ast + Class/Function
+        # tree, so live memory grows ~linearly with the fiber count (~32 MB per
+        # 1000 fibers): 50k parses cleanly at ~1.7 GiB RSS, but the forever-loop
+        # --funcs 1000000 drives RSS past the box guard (rc=137 OOM box-kill).
+        # This is a genuinely resource-bound parse workload, not a test bug, so
+        # cap the count to a memory-safe ceiling; --funcs > cap => SCALE_LIMIT.
+        max_funcs=50000,
         describe="pyclbr builds a Class/Function tree by walking ast with an "
                  "_ModuleBrowser NodeVisitor.  We drive the parse CORE "
                  "(_create_tree) directly on fiber-local, import-free source so "

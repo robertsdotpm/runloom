@@ -127,9 +127,8 @@ def raw_input_law(prompt, pw, echo_char):
     return result, out_stream.getvalue()
 
 
-def raw_input_check(H, wid, idx, state):
+def raw_input_check(H, wid, idx, rng, state):
     """Single-owner round-trip purity check for one fiber-local password."""
-    rng = state["rngs"][wid]
     pw = make_password(rng)
     prompt = PROMPTS[idx % len(PROMPTS)]
     # Alternate the two reader paths so both readline() and the echo loop race.
@@ -200,7 +199,7 @@ def worker(H, wid, rng, state):
             break
         idx = 0
         while H.running() and idx < INNER_CAP:
-            raw_input_check(H, wid, idx, state)
+            raw_input_check(H, wid, idx, rng, state)
             if H.failed:
                 return
             H.op(wid)
@@ -210,10 +209,15 @@ def worker(H, wid, rng, state):
 
 def setup(H):
     # Per-fiber RNG (single-writer, one per wid) so each fiber's password stream
-    # is deterministic + replayable and never shared.  getuser() baseline is
-    # captured once in the root before any fiber runs.
+    # is deterministic + replayable and never shared: the worker uses the
+    # deterministic per-wid rng run_pool derives for it (derive("pool", "worker",
+    # wid)), so setup does NOT pre-build an O(N) list of Random objects here.  At
+    # high N that list took longer than the whole run window (~17s at 1M) and ran
+    # BEFORE any fiber could work -- the deadline (set in __init__) had already
+    # expired by the time the pool started, so every worker exited with 0 checks
+    # and the non-vacuity oracle FAILED.  getuser() baseline is captured once in
+    # the root before any fiber runs.
     H.state = {
-        "rngs": [H.derive("getpass", wid) for wid in range(H.funcs)],
         "user": getpass.getuser(),
         "checks": [0] * 1024,           # NON-VACUITY tally (sharded; report only)
     }
