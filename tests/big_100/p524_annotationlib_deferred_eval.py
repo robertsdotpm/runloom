@@ -129,11 +129,14 @@ VALUE_SCALE = 100000
 # Number of annotated slots per object.
 NSLOTS = 4
 
-# The CLASS-annotation arm exposes a suspected free-threading runtime fault in the
-# type ``__annotations__`` cache path (see the module docstring).  It is OFF by
-# default so this file is a clean PASSing detector; set PYGO_P524_CLASS_ARM=1 to
-# reproduce the desync ({}) + SIGSEGV.
-CLASS_ARM = bool(os.environ.get("PYGO_P524_CLASS_ARM"))
+# The CLASS-annotation arm drives the type ``__annotations__`` cache + shared
+# __annotate__ code objects concurrently across hubs -- which crashed on 3.14t via
+# the CPython thread-local-bytecode (TLBC) co_tlbc grow / QSBR free-list corruption
+# ({} desync then SIGSEGV).  runloom.run() now re-execs ft-3.14 with PYTHON_TLBC=0
+# (src/runloom/runtime.py), so the arm PASSES and is a live REGRESSION GUARD; it is
+# ON by default.  Set PYGO_P524_CLASS_ARM=0 to skip it, or RUNLOOM_TLBC=1 to re-arm
+# the crash for verification.
+CLASS_ARM = os.environ.get("PYGO_P524_CLASS_ARM", "1") != "0"
 
 # Run the (heavier) FORWARDREF fake-globals arm every Nth inner iteration so the
 # fast VALUE arm dominates throughput while the ForwardRef C path is still

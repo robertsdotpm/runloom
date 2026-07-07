@@ -165,6 +165,61 @@ def gil_enabled():
     return is_enabled()
 
 
+def _tlbc_reexec_if_needed():
+    """Disable CPython 3.14's thread-local bytecode (TLBC) on free-threaded
+    builds by re-exec'ing the process with PYTHON_TLBC=0.
+
+    WHY: 3.14's free-threaded specializing interpreter gives every OS thread its
+    own copy of a code object's bytecode (co_tlbc, selected via tstate->tlbc_index
+    from TLS) and reclaims old copies through mimalloc's QSBR delayed-free.  Under
+    runloom's many-hub stackful model -- H hub OS threads each with a large idle
+    glibc pthread stack (the fiber runs on a separate fcontext stack) driving
+    thousands of goroutines' worth of code-object churn -- 3.14 allocates/grows/
+    frees per-thread bytecode at a rate that trips a CPython free-threading heap
+    bug: a mimalloc arena aliases a live hub pthread stack/TCB (SIGSEGV in
+    __tls_get_addr / _PyCode_New) or its co_tlbc free-list corrupts.  Regression
+    guards: tests/big_100/quarantine_p565_compileall_tls_segv.py and p524's class
+    arm both SIGSEGV with TLBC on and pass with it off.  This is a CPython-3.14t
+    defect (greenlet -- another stackful runtime -- ships the same PYTHON_TLBC=0
+    mitigation), NOT a runloom scheduler bug: cross-hub live-frame migration was
+    ruled out (live-frame gs are hub-pinned in the default scheduler).
+
+    TLBC is read once at interpreter start and cannot be toggled at runtime, so
+    the only fix is to relaunch with it off.  Scoped strictly to free-threaded
+    3.14+ (no TLBC exists before 3.14 or with the GIL on).  Opt back into TLBC
+    with RUNLOOM_TLBC=1 (accepting the crash risk) once CPython fixes it upstream."""
+    if sys.version_info[:2] < (3, 14):
+        return                              # no TLBC before 3.14
+    if gil_enabled():
+        return                              # GIL on -> no free-threaded TLBC
+    if os.environ.get("RUNLOOM_TLBC") == "1":
+        return                              # explicit opt-in: keep TLBC on
+    if os.environ.get("RUNLOOM_TLBC_REEXEC") == "1":
+        return                              # already re-exec'd (loop guard)
+    if (os.environ.get("PYTHON_TLBC") == "0"
+            or sys._xoptions.get("tlbc") == "0"):
+        return                              # already disabled by the launcher
+    # Relaunch the identical command with TLBC off.  os.execv inherits the
+    # current os.environ, so setting PYTHON_TLBC here reaches the new image;
+    # orig_argv preserves interpreter flags and -m invocations.
+    os.environ["PYTHON_TLBC"] = "0"
+    os.environ["RUNLOOM_TLBC_REEXEC"] = "1"
+    argv = list(getattr(sys, "orig_argv", None) or ([sys.executable] + sys.argv))
+    sys.stderr.write(
+        "[runloom] free-threaded 3.14 detected -- re-exec with PYTHON_TLBC=0 to "
+        "avoid the CPython thread-local-bytecode SIGSEGV (opt out: RUNLOOM_TLBC=1)\n")
+    sys.stderr.flush()
+    try:
+        os.execv(argv[0], argv)
+    except OSError as exc:                   # re-exec failed -> warn, don't crash
+        os.environ.pop("RUNLOOM_TLBC_REEXEC", None)
+        sys.stderr.write(
+            "[runloom] TLBC re-exec failed ({0}); continuing with TLBC ON -- set "
+            "PYTHON_TLBC=0 (or -X tlbc=0) manually to avoid the 3.14t crash.\n"
+            .format(exc))
+        sys.stderr.flush()
+
+
 def prewarm_stdlib():
     """Resolve lazy, deep, *synchronous* stdlib imports on the main
     thread's (large) stack once, before any fiber runs on a small
@@ -420,6 +475,10 @@ def run(n, main_fn=None):
     to the hubs automatically).  Collapses the raw mn_init / mn_fiber / mn_run /
     mn_fini envelope.  Returns the number of fibers completed.
     """
+    # On free-threaded 3.14+ this re-execs the process with TLBC disabled (a
+    # CPython thread-local-bytecode bug SIGSEGVs under runloom's stackful many-hub
+    # execution -- see _tlbc_reexec_if_needed).  No-op elsewhere / once re-exec'd.
+    _tlbc_reexec_if_needed()
     _hot._install_auto()  # one-time: turn on auto per-core scaling iff its env is set
     if _hot._AUTO is not None:
         # auto mode resolves a per-core handler copy per spawn -- a direct

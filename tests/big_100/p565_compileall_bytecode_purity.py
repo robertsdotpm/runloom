@@ -1,13 +1,10 @@
-# QUARANTINED -- excluded from the forever loop (name does not match the
-# p[0-9]*.py glob).  This is a REPRODUCER for a SUSPECTED runtime bug:
-# compileall/marshal.loads code-object creation on a pygo fiber SIGSEGVs
-# in __tls_get_addr / _PyInterpreterState_GET at --funcs>=~200 --hubs>=4.
-# Faithful plain-threads control is clean (implicates pygo, not CPython),
-# but needs a frame-migration-faithful control to fully attribute
-# (see the p488 lesson).  Repro:
-#   PYGO_ALLOW_CRASH=1 PYTHON_GIL=0 PYTHONPATH=src \
-#     ~/.pyenv/versions/3.14.4t/bin/python3 tests/big_100/quarantine_p565_compileall_tls_segv.py --funcs 400 --hubs 8
-# Do NOT rename back to p5NN_ until the runtime bug is fixed.
+# REGRESSION GUARD for a CPython 3.14t thread-local-bytecode (TLBC) SIGSEGV:
+# compileall/marshal.loads code-object creation under runloom's many-hub stackful
+# execution corrupts a hub pthread stack/TCB (mimalloc arena aliasing) -> SIGSEGV
+# in __tls_get_addr.  Root-caused via rr to CPython 3.14t's TLBC, NOT a runloom
+# bug (greenlet ships the same PYTHON_TLBC=0 mitigation).  runloom.run() now
+# re-execs ft-3.14 with PYTHON_TLBC=0 (src/runloom/runtime.py _tlbc_reexec_if_needed),
+# so this is a normal PASSing program; run with RUNLOOM_TLBC=1 to re-arm the crash.
 
 """big_100 / 565 -- compileall.compile_file bytecode PURITY + determinism under M:N.
 
