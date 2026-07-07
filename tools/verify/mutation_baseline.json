@@ -2,5 +2,15 @@
  "wake_state": {
   "floor": 100.0,
   "survivors": []
+ },
+ "cldeque_genmc": {
+  "floor": 44.0,
+  "survivors": [
+   "L38:__ATOMIC_ACQUIRE->relaxed",
+   "L41:__ATOMIC_RELEASE->relaxed",
+   "L70:__ATOMIC_SEQ_CST->relaxed",
+   "L84:__ATOMIC_ACQUIRE->relaxed",
+   "L88:__ATOMIC_ACQUIRE->relaxed"
+  ]
  }
 }
