@@ -125,6 +125,7 @@ def post(H):
     H.check(sb == rb,
             "byte conservation violated: sent={0} recv={1}".format(sb, rb))
     H.require_no_fd_leak()          # tens of thousands of short-lived sockets: no fd leak
+    H.require_no_goroutine_leak()   # servers are register_close'd + drained by teardown
     H.log("sent_bytes={0} recv_bytes={1} digest_send=0x{2:08x} "
           "digest_recv=0x{3:08x} misdeliver={4}".format(sb, rb, sd, rd, mis))
 

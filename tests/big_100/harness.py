@@ -654,6 +654,8 @@ class Harness(object):
         # fd accounting
         self.fd_base = -1
         self.fd_end = -1
+        # live-fiber census, sampled INSIDE the scheduler at drain end (see root)
+        self.residual_goroutines = -1
 
         # cooperative lock (monkey) -- created lazily inside the scheduler
         self.lock = None
@@ -799,6 +801,24 @@ class Harness(object):
             self.fail("{0} LEAK: {1} fd(s) still open at end (base={2} end={3}, "
                       "tol={4})".format(label, leaked, self.fd_base, self.fd_end, tol))
         return leaked <= tol
+
+    def require_no_goroutine_leak(self, tol=2, label="goroutine"):
+        """Opt-in goroutine-leak oracle -- call from post().  Uses the residual
+        live-fiber count sampled INSIDE the scheduler at drain end (see root;
+        fiber_count() post-mn_fini is unreliable).  The floor is root +
+        progress_loop, so tol defaults to 2; a program that INTENTIONALLY leaves
+        N long-lived daemon/server fibers alive at teardown must pass tol=2+N (or
+        close them in body() first).  This complements require_no_lost (which
+        covers WORKER goroutines): it catches leaked helper/handler/server
+        goroutines that never returned.  Returns True iff no leak."""
+        r = self.residual_goroutines
+        if r < 0:
+            return True               # sample unavailable
+        if r > tol:
+            self.fail("{0} LEAK: {1} fiber(s) still live at drain end (tol={2}) -- "
+                      "a helper/handler goroutine that never returned".format(
+                          label, r, tol))
+        return r <= tol
 
     def error(self, wid, exc):
         """Record an unexpected worker exception (counts as a failure)."""
@@ -1382,6 +1402,15 @@ class Harness(object):
             # once it STALLS is lost, not merely behind.
             self._settle_stragglers()
             self._profile_mark("drain_done")   # worker goroutines returned
+            # Residual live-fiber census, taken HERE (inside the scheduler, after
+            # workers drained but before mn_fini) -- fiber_count() is unreliable
+            # post-teardown.  A leak-free program has only root + progress_loop
+            # (+ any daemon servers it left running) alive.  For the opt-in
+            # require_no_goroutine_leak() oracle.
+            try:
+                self.residual_goroutines = runloom_c.fiber_count()
+            except Exception:
+                self.residual_goroutines = -1
 
         runloom.monkey.patch()
         try:
