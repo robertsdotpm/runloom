@@ -467,6 +467,16 @@ void runloom_wake_trace_event(const char *action, unsigned long g, int cap)
 static FILE           *runloom_mnwake_trace_fp = NULL;
 static runloom_mutex_t runloom_mnwake_trace_lock;
 
+/* True only when RUNLOOM_MNWAKE_TRACE opened the fp (set once at init).  Lets a
+ * caller SHORT-CIRCUIT reads of advisory fields it would only pass to the trace,
+ * so those reads never execute in production -- e.g. the g->snap.valid reads at
+ * mn_sched_mn_api.c.inc:203/249, which otherwise race the owner hub's snap.valid
+ * write at park/resume (a benign diagnostics-only race TSan-GOLD flags 1158x). */
+int runloom_mnwake_trace_active(void)
+{
+    return runloom_mnwake_trace_fp != NULL;
+}
+
 void runloom_mnwake_trace_event(const char *action, unsigned long g, int cap)
 {
     if (runloom_mnwake_trace_fp == NULL) return;

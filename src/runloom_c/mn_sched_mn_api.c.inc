@@ -200,7 +200,10 @@ static void runloom_mn_hub_submit(runloom_hub_t *h, runloom_g_t *g)
      * this matches the HUB_DRAIN emit (also snap.valid only).  snap.valid is set at
      * park on the owner thread before this foreign waker's parked_safe CAS, so the
      * read is race-free.  Immediate-push path only (the staged path returns above). */
-    if (g->snap.valid)
+    /* trace_active() short-circuits so g->snap.valid is NOT read in production
+     * (trace off) -- removing the benign diagnostics-only race against the owner
+     * hub's snap.valid write at park/resume, plus a hot-path load. */
+    if (runloom_mnwake_trace_active() && g->snap.valid)
         runloom_mnwake_trace_event("FOREIGN_WAKE", (unsigned long)(uintptr_t)g, 0);
     /* BUG #10 throughput: bump the submit generation, then signal the target hub
      * if it is parked in its idle condvar (it owns parked gs and nothing else to
@@ -246,7 +249,7 @@ static void runloom_mn_hub_submit(runloom_hub_t *h, runloom_g_t *g)
     /* MNWAKE-TRACE: both kicks fired (model WakerSignal -- idle_cond + wake-pump
      * eventfd, each FREE delivery).  One event per WOKEN-g submit (snap.valid, as
      * for FOREIGN_WAKE); delivery left free. */
-    if (g->snap.valid)
+    if (runloom_mnwake_trace_active() && g->snap.valid)
         runloom_mnwake_trace_event("SIGNAL", (unsigned long)(uintptr_t)g, 0);
 }
 

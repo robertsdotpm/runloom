@@ -210,6 +210,7 @@ void runloom_wake_trace_event(const char *action, unsigned long g, int cap);
  * HUB_BLOCK only>}); tools/mnwake_trace_conform.py replays it through
  * RunloomMNWake.tla.  Off (zero-cost -- one predictable-NULL load) unless set. */
 void runloom_mnwake_trace_event(const char *action, unsigned long g, int cap);
+int  runloom_mnwake_trace_active(void);   /* fp != NULL: gate advisory reads off in production */
 
 
 /* ---- io_uring CQE wake trace (TLA+ trace conformance, RUNLOOM_IOUWAKE_TRACE) ----
