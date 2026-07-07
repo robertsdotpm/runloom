@@ -17,7 +17,7 @@
 # residual M:N races reproduce.  Override with PYTHON= on the command
 # line for 3.12 etc.
 
-PYTHON ?= /home/x/.pyenv/versions/3.13.13t/bin/python3
+PYTHON ?= /home/x/.pyenv/versions/3.14.4t/bin/python3
 PY_VERSION  := $(shell $(PYTHON) -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
 PY_ABIFLAGS := $(shell $(PYTHON) -c 'import sys; print(sys.abiflags)')
 PY_INC      := $(shell $(PYTHON) -c 'import sysconfig; print(sysconfig.get_path("include"))')

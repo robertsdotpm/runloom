@@ -7,7 +7,7 @@ SRC="$(cd ../../src && pwd)"               # repo src/ (post-reorg: tests/tests_
 LOG=stall_test.log
 exec > "$LOG" 2>&1
 echo "=== stall test $(date -Is) ==="
-PY=/home/x/.pyenv/versions/3.13.13t
+PY=/home/x/.pyenv/versions/3.14.4t
 SO="$SRC/runloom_c.cpython-313t-x86_64-linux-gnu.so"
 
 echo "--- build ---"

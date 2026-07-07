@@ -74,7 +74,7 @@ def cc():
 
 def py_include_flags():
     py = os.environ.get("RUNLOOM_PYTHON",
-                        os.path.expanduser("~/.pyenv/versions/3.13.13t/bin/python3"))
+                        os.path.expanduser("~/.pyenv/versions/3.14.4t/bin/python3"))
     try:
         out = subprocess.check_output(
             [py, "-c", "import sysconfig;print(sysconfig.get_path('include'))"],

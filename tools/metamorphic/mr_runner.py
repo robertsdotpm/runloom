@@ -42,7 +42,7 @@ import sys
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 PYBIN = os.environ.get(
     "RUNLOOM_PYTHON",
-    os.path.expanduser("~/.pyenv/versions/3.13.13t/bin/python3"),
+    os.path.expanduser("~/.pyenv/versions/3.14.4t/bin/python3"),
 )
 
 VERDICTS = {0: "PASS", 1: "INVARIANT", 2: "ERROR", 3: "HANG", 4: "BOXLIMIT"}

@@ -24,7 +24,7 @@
 set -eu
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT"
-PY="${PYTHON:-$HOME/.pyenv/versions/3.13.13t/bin/python3}"
+PY="${PYTHON:-$HOME/.pyenv/versions/3.14.4t/bin/python3}"
 SKEW="${1:-8}"
 REPS="${2:-3}"
 TIMEOUT="${WAKE_SKEW_TIMEOUT:-60}"

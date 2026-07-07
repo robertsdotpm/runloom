@@ -6,7 +6,7 @@
 # tidy and predictable for the prototype).
 set -euo pipefail
 
-PY="${PY:-$HOME/.pyenv/versions/3.13.13t/bin/python3}"
+PY="${PY:-$HOME/.pyenv/versions/3.14.4t/bin/python3}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 
 INCDIR="$("$PY" -c 'import sysconfig; print(sysconfig.get_path("include"))')"

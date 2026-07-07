@@ -5,7 +5,7 @@
 # rotation's summary.
 set -u
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-PY="${RUNLOOM_PYTHON:-$HOME/.pyenv/versions/3.13.13t/bin/python3}"
+PY="${RUNLOOM_PYTHON:-$HOME/.pyenv/versions/3.14.4t/bin/python3}"
 SOAK="$ROOT/docs/dev/soak"
 LEDGER="$SOAK/LEDGER.md"
 INBOX="$SOAK/INBOX.md"

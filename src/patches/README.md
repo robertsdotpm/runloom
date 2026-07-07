@@ -20,7 +20,7 @@ hub->tstate)` at the per-g-tstate attach point (`mn_sched_hub_main.c.inc`); give
 the per-g tstate no live heap. That turns the gated `RUNLOOM_PER_G_TSTATE` mode
 from "heavy + crashing" into "lightweight + sound".
 
-**Validation status: VALIDATED end-to-end.** Built CPython 3.13.13t with the flag
+**Validation status: VALIDATED end-to-end.** Built CPython 3.14.4t with the flag
 (593 stdlib tests pass, zero regression). Wired `runloom_iframe_borrow_alloc_home`
 into the per-g-tstate attach (`mn_sched_hub_main.c.inc`). The previously-crashing
 `RUNLOOM_PER_G_TSTATE` channel-churn repro now passes **24/24** with the borrow vs

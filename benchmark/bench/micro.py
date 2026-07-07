@@ -13,7 +13,7 @@ All run on ONE hub (no M:N parallelism) so the numbers reflect raw
 per-operation overhead, not core scaling.  M:N scaling lives in bench/mn.py.
 
 Run:
-    PYTHONPATH=src ~/.pyenv/versions/3.13.13t/bin/python -m bench.micro
+    PYTHONPATH=src ~/.pyenv/versions/3.14.4t/bin/python -m bench.micro
 """
 import runloom_c
 

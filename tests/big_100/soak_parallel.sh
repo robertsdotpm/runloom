@@ -30,7 +30,7 @@
 set -uo pipefail
 cd "$(dirname "$0")"
 
-PY=${PY:-/home/x/.pyenv/versions/3.13.13t/bin/python3}
+PY=${PY:-/home/x/.pyenv/versions/3.14.4t/bin/python3}
 LOGDIR=/tmp/soak_parallel
 SOAK_LOG="$LOGDIR/soak.log"
 mkdir -p "$LOGDIR"

@@ -45,7 +45,7 @@ REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
 
 def default_python():
-    for c in (os.path.expanduser("~/.pyenv/versions/3.13.13t/bin/python3"),
+    for c in (os.path.expanduser("~/.pyenv/versions/3.14.4t/bin/python3"),
               "python3.13t", "python3"):
         if os.path.sep in c:
             if os.path.exists(c):

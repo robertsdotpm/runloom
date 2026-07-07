@@ -20,7 +20,7 @@ set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 MAIN="$(cd "$HERE/../../.." && pwd)"
 TU="${1:?usage: build_target.sh <TU_basename e.g. netpoll>}"
-PY="${RUNLOOM_PYTHON:-$HOME/.pyenv/versions/3.13.13t/bin/python3}"
+PY="${RUNLOOM_PYTHON:-$HOME/.pyenv/versions/3.14.4t/bin/python3}"
 PYINC="$("$PY" -c 'import sysconfig; print(sysconfig.get_path("include"))')"
 WT="${RUNLOOM_MUT_WORKTREE:-$HOME/projects/pygo-mutants}"
 DREDD="$HERE/dredd/dredd/bin/dredd"

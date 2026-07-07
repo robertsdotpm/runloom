@@ -28,7 +28,7 @@ import sys
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 DEBUGFS = "/sys/kernel/debug"
 PYBIN = os.environ.get("RUNLOOM_PYTHON",
-                       os.path.expanduser("~/.pyenv/versions/3.13.13t/bin/python3"))
+                       os.path.expanduser("~/.pyenv/versions/3.14.4t/bin/python3"))
 
 # A small M:N workload that allocates + parks on futexes across hubs -- the
 # surface failslab/fail_futex should perturb.

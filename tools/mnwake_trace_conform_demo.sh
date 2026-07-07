@@ -18,7 +18,7 @@
 # its bounded idle wait, exercising the ~1ms poll backstop.
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"; cd "$ROOT"
-PY="${RUNLOOM_PYTHON:-$HOME/.pyenv/versions/3.13.13t/bin/python3}"
+PY="${RUNLOOM_PYTHON:-$HOME/.pyenv/versions/3.14.4t/bin/python3}"
 TR="$(mktemp /tmp/mnwake.XXXX.ndjson)"
 
 WL='import sys, time

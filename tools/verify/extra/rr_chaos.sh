@@ -16,7 +16,7 @@
 set -u
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 N="${1:-100}"
-PYBIN="${PYTHON:-$HOME/.pyenv/versions/3.13.13t/bin/python3}"
+PYBIN="${PYTHON:-$HOME/.pyenv/versions/3.14.4t/bin/python3}"
 WORKLOAD="$ROOT/tools/faultinj/workload.py"
 
 if ! command -v rr >/dev/null 2>&1; then

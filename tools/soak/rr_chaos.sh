@@ -20,7 +20,7 @@
 #   line is written for the caller (duty_cycle.sh inboxes it).
 set +e
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-PY="${RUNLOOM_PYTHON:-$HOME/.pyenv/versions/3.13.13t/bin/python3}"
+PY="${RUNLOOM_PYTHON:-$HOME/.pyenv/versions/3.14.4t/bin/python3}"
 DUR="${1:?usage: rr_chaos.sh <duration_s> <artifact_dir>}"
 ART="${2:?usage: rr_chaos.sh <duration_s> <artifact_dir>}"
 PER_RUN_TIMEOUT="${RR_CHAOS_TIMEOUT:-60}"   # generous: rr overhead + chaos delays

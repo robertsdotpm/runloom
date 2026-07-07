@@ -7,7 +7,7 @@
 #   ./attach.sh <pid>      attach to an explicit pid
 set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PYGDB="${PYGDB:-$HOME/.pyenv/versions/3.13.13t/bin/python3.13-gdb.py}"
+PYGDB="${PYGDB:-$HOME/.pyenv/versions/3.14.4t/bin/python3.13-gdb.py}"
 
 arg="${1:-server}"
 case "$arg" in

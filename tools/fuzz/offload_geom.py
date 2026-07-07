@@ -41,7 +41,7 @@ SAFE_MAX = 5000
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
 PYBIN = os.environ.get("RUNLOOM_PYTHON",
-                       os.path.expanduser("~/.pyenv/versions/3.13.13t/bin/python3"))
+                       os.path.expanduser("~/.pyenv/versions/3.14.4t/bin/python3"))
 
 
 # ---------------------------------------------------------------------------

@@ -11,7 +11,7 @@
 #                                       MutualExclusion forbids)
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"; cd "$ROOT"
-PY="${RUNLOOM_PYTHON:-$HOME/.pyenv/versions/3.13.13t/bin/python3}"
+PY="${RUNLOOM_PYTHON:-$HOME/.pyenv/versions/3.14.4t/bin/python3}"
 TR="$(mktemp /tmp/baton.XXXX.ndjson)"
 TR_BUG="$(mktemp /tmp/baton_bug.XXXX.ndjson)"
 

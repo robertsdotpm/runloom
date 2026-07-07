@@ -48,7 +48,7 @@ measurement you can compare across days or use as a regression gate.
 scripts/bench.sh
 
 # a single suite by hand
-PYTHONPATH=src ~/.pyenv/versions/3.13.13t/bin/python -m bench.micro
+PYTHONPATH=src ~/.pyenv/versions/3.14.4t/bin/python -m bench.micro
 ```
 
 ## Campaign phases

@@ -26,7 +26,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"        # tools/verify/tla
 ROOT="$(cd "$HERE/../../.." && pwd)"         # tools/verify/tla -> repo root is THREE up
 JAR="${TLA_JAR:-$HERE/tla2tools.jar}"
 URL="https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar"
-PY="${RUNLOOM_PYTHON:-$HOME/.pyenv/versions/3.13.13t/bin/python3}"
+PY="${RUNLOOM_PYTHON:-$HOME/.pyenv/versions/3.14.4t/bin/python3}"
 RM="$(command -v safe-rm || echo rm)"
 
 skip() { echo "-- trace conformance (model vs the REAL extension) --"; \

@@ -1,6 +1,6 @@
 #!/bin/sh
-# Exp D: build a free-threaded CPython 3.13.13t with mimalloc purge_delay defaulted
-# to -1 (keep-resident) into a SEPARATE prefix, so the working 3.13.13t is untouched.
+# Exp D: build a free-threaded CPython 3.14.4t with mimalloc purge_delay defaulted
+# to -1 (keep-resident) into a SEPARATE prefix, so the working 3.14.4t is untouched.
 set -e
 V=3.13.13
 SRC=/home/x/Python-$V

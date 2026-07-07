@@ -7,8 +7,8 @@
 # Used by supervisor.sh for autonomous diagnosis, and by hand to attach a
 # debugger to catch errors interactively (see also attach.sh).
 set -u
-PYBIN="${PYBIN:-$HOME/.pyenv/versions/3.13.13t/bin/python3.13t}"
-PYGDB="${PYGDB:-$HOME/.pyenv/versions/3.13.13t/bin/python3.13-gdb.py}"
+PYBIN="${PYBIN:-$HOME/.pyenv/versions/3.14.4t/bin/python3.13t}"
+PYGDB="${PYGDB:-$HOME/.pyenv/versions/3.14.4t/bin/python3.13-gdb.py}"
 
 mode="${1:-}"
 target="${2:-}"

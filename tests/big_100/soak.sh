@@ -6,7 +6,7 @@
 # SOAK_FUNCS is set.
 set -u
 cd "$(dirname "$0")"
-PY=~/.pyenv/versions/3.13.13t/bin/python3
+PY=~/.pyenv/versions/3.14.4t/bin/python3
 LOG=/tmp/soak/soak.log
 mkdir -p /tmp/soak
 export RUNLOOM_SYSMON_QUIET=1 PYTHON_GIL=0

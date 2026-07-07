@@ -11,7 +11,7 @@
 # Usage:
 #   scripts/bench.sh                 # micro + mn, gate vs committed baseline
 #   RUNLOOM_BENCH_NOGATE=1 scripts/bench.sh    # run + report, don't fail on regress
-#   PYTHON=~/.pyenv/versions/3.13.13t/bin/python3 scripts/bench.sh
+#   PYTHON=~/.pyenv/versions/3.14.4t/bin/python3 scripts/bench.sh
 set -eu
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO"

@@ -16,7 +16,7 @@
 # (Dies on reboot -- on the per-reboot relaunch checklist with the cserve soak.)
 set +e
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-PY="${RUNLOOM_PYTHON:-$HOME/.pyenv/versions/3.13.13t/bin/python3}"
+PY="${RUNLOOM_PYTHON:-$HOME/.pyenv/versions/3.14.4t/bin/python3}"
 CAP="${RR_FOREVER_TRACE_CAP:-8}"
 SUM="$ROOT/docs/dev/soak/forever_rrchaos_SUMMARY.txt"
 cd "$ROOT"

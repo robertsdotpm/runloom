@@ -15,7 +15,7 @@ cd "$HOME/pygo-macwin" || exit 2
 sudo -n prlimit --pid $$ --nofile=8388608:8388608 2>/dev/null
 ulimit -n 400000 2>/dev/null
 sudo -n sysctl -w kern.ipc.somaxconn=200000 net.inet.tcp.msl=1000 >/dev/null 2>&1
-PY="$HOME/.pyenv/versions/3.13.13t/bin/python3"
+PY="$HOME/.pyenv/versions/3.14.4t/bin/python3"
 START="${1:-1}"; END="${2:-100}"; FUNCS="${3:-20000}"; HUBS="${4:-8}"
 DUR="${5:-10}"; TMO="${6:-90}"
 LOGD=/tmp/big100_seq; mkdir -p "$LOGD"

@@ -8,7 +8,7 @@ fan out CPU-bound SHA-256 work (which releases the GIL while it hashes) and run
 it across every core, so the speedup over a single thread is near-linear.
 
 Needs free-threaded CPython 3.13t with the GIL disabled:
-    PYTHON_GIL=0 ~/.pyenv/versions/3.13.13t/bin/python3 examples/mn_parallel.py
+    PYTHON_GIL=0 ~/.pyenv/versions/3.14.4t/bin/python3 examples/mn_parallel.py
 
 On a normal (GIL) build, `run(n>1)` RAISES rather than silently running serial
 — parallelism is opt-in and only honest with the GIL off — so there we just run

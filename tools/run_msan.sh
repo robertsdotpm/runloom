@@ -22,7 +22,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"; cd "$ROOT"
 # ABI, so the MSan-instrumented .so loads in the MSan interpreter.
 PY="${RUNLOOM_MSAN_PYTHON:-$HOME/cpython-msan/bin/python3.13t}"
 [ -x "$PY" ] || PY="$HOME/cpython-msan/bin/python3"
-BUILD_PY="${RUNLOOM_BUILD_PYTHON:-$HOME/.pyenv/versions/3.13.13t/bin/python3}"
+BUILD_PY="${RUNLOOM_BUILD_PYTHON:-$HOME/.pyenv/versions/3.14.4t/bin/python3}"
 ITERS="${1:-4}"
 RM="$(command -v safe-rm || echo rm)"
 SA=""; command -v setarch >/dev/null 2>&1 && SA="setarch $(uname -m) -R"

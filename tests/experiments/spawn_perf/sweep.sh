@@ -12,7 +12,7 @@ set -e
 here=$(cd "$(dirname "$0")" && pwd)
 label="$1"; shift || true
 [ -n "$label" ] || { echo "usage: sweep.sh LABEL [extra args]" >&2; exit 2; }
-py=$HOME/.pyenv/versions/3.13.13t/bin/python3
+py=$HOME/.pyenv/versions/3.14.4t/bin/python3
 out="$here/results/$label.jsonl"
 mkdir -p "$here/results"
 : > "$out"

@@ -5,7 +5,7 @@
 # and a timeout-kill flushes nothing).  Then gcov -b -c + branch summary.
 set -u
 cd "$HOME/pygo-macwin" || exit 2
-PY="$HOME/.pyenv/versions/3.13.13t/bin/python3"
+PY="$HOME/.pyenv/versions/3.14.4t/bin/python3"
 export PYTHON_GIL=0 PYTHONPATH=src RUNLOOM_SYSMON_QUIET=1
 sudo -n prlimit --pid $$ --nofile=8388608:8388608 2>/dev/null
 ulimit -n 400000 2>/dev/null

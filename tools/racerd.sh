@@ -25,7 +25,7 @@
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
-PY="${PYTHON:-$HOME/.pyenv/versions/3.13.13t/bin/python3}"
+PY="${PYTHON:-$HOME/.pyenv/versions/3.14.4t/bin/python3}"
 command -v "$PY" >/dev/null 2>&1 || PY=python3
 
 if ! command -v infer >/dev/null 2>&1; then

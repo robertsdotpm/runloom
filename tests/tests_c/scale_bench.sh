@@ -10,7 +10,7 @@
 # Usage: tests_c/scale_bench.sh N [HUBS] [M] [IDLE_S]
 set +e
 ROOT="/home/x/projects/pygo-big100"
-PY="/home/x/.pyenv/versions/3.13.13t/bin/python3"
+PY="/home/x/.pyenv/versions/3.14.4t/bin/python3"
 
 # Raise this shell's fd ceiling (idempotent; needs passwordless sudo).
 sudo -n prlimit --pid $$ --nofile=8388608:8388608 2>/dev/null

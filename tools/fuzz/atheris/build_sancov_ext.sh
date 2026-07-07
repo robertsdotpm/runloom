@@ -15,7 +15,7 @@
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/../../.." && pwd)"; cd "$ROOT"
-PY="${RUNLOOM_PYTHON:-$HOME/.pyenv/versions/3.13.13t/bin/python3}"
+PY="${RUNLOOM_PYTHON:-$HOME/.pyenv/versions/3.14.4t/bin/python3}"
 SECS="${1:-20}"
 command -v clang >/dev/null 2>&1 || { echo "build_sancov_ext: clang absent. SKIP."; exit 0; }
 "$PY" -c "import atheris" 2>/dev/null || { echo "build_sancov_ext: atheris absent. SKIP."; exit 0; }

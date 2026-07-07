@@ -96,7 +96,7 @@ PLATEAU_PATIENCE = 2
 # Interpreters (decision #4 + #7)
 # ---------------------------------------------------------------------------
 PYENV = os.path.expanduser("~/.pyenv/versions")
-FT_PYTHON = os.path.join(PYENV, "3.13.13t", "bin", "python3")   # runloom (GIL off)
+FT_PYTHON = os.path.join(PYENV, "3.14.4t", "bin", "python3")   # runloom (GIL off)
 GIL_PYTHON = os.path.join(PYENV, "3.13.13", "bin", "python3")   # asyncio/uvloop/gevent best-case
 
 # Repo paths

@@ -26,7 +26,7 @@ requirements:
 ## Requirements
 
 - Free-threaded CPython 3.13t built with the extension:
-  `~/.pyenv/versions/3.13.13t/bin/python3`, `PYTHON_GIL=0`.
+  `~/.pyenv/versions/3.14.4t/bin/python3`, `PYTHON_GIL=0`.
 - Build the extension once: `python setup.py build_ext --inplace` (repo root).
 - The harness auto-raises `RLIMIT_NOFILE` (via `sudo -n prlimit`) so socket
   projects can open tens of thousands of fds.
@@ -34,7 +34,7 @@ requirements:
 ## Run one project
 
 ```
-PYTHON_GIL=0 ~/.pyenv/versions/3.13.13t/bin/python3 big_100/p01_tcp_echo.py \
+PYTHON_GIL=0 ~/.pyenv/versions/3.14.4t/bin/python3 big_100/p01_tcp_echo.py \
     --duration 60 --hubs 8 --funcs 10000
 ```
 
@@ -44,7 +44,7 @@ PYTHON_GIL=0 ~/.pyenv/versions/3.13.13t/bin/python3 big_100/p01_tcp_echo.py \
 64-core machine: 16 projects at a time × 4 hubs each ≈ 64 cores.
 
 ```
-PYTHON_GIL=0 ~/.pyenv/versions/3.13.13t/bin/python3 big_100/run_all.py \
+PYTHON_GIL=0 ~/.pyenv/versions/3.14.4t/bin/python3 big_100/run_all.py \
     --jobs 16 --hubs 4 --duration 3600
 # a subset / a quick smoke:
 big_100/run_all.py --only 1,3,7,36 --duration 30 --hubs 4

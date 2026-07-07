@@ -15,7 +15,7 @@ is unset. Env: `RUNLOOM_PCT_SEED`, `RUNLOOM_PCT_DEPTH` (d, 3), `RUNLOOM_PCT_STEP
 2000), `RUNLOOM_PCT_DEBUG`.
 
 ```sh
-PY=~/.pyenv/versions/3.13.13t/bin/python3
+PY=~/.pyenv/versions/3.14.4t/bin/python3
 $PY tools/pct/pct_explore.py demo                 # schedule diversity + conservation
 $PY tools/pct/pct_explore.py sweep tests/test_chan.py --seeds 30 --depth 3
 ```

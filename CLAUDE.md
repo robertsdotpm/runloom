@@ -3,8 +3,11 @@
 Full derivations for the invariants below: [docs/dev/RUNTIME_GOTCHAS.md](docs/dev/RUNTIME_GOTCHAS.md).
 
 ## Build & test
-- Target **free-threaded CPython 3.13t** (M:N is only real with the GIL off):
-  `~/.pyenv/versions/3.13.13t/bin/python3`, `PYTHON_GIL=0`.
+- Target **free-threaded CPython 3.14t** (M:N is only real with the GIL off):
+  `~/.pyenv/versions/3.14.4t/bin/python3`, `PYTHON_GIL=0`. (Switched from 3.13t
+  2026-07-07: 3.14 carries the gh-116738 stdlib-C-module free-threading audit —
+  e.g. heapq now holds the list critical section, fixing a 3.13t SIGSEGV on
+  concurrent shared-heap access that is NOT a runloom bug.)
 - Build `python setup.py build_ext --inplace`; run with `PYTHONPATH=src`.
 - Run the suite via `tests/run_isolated.py` (one file/subprocess — in-process
   `pytest tests/` flakes on cross-file state leaks).

@@ -27,7 +27,7 @@ set -u
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT"
-PY="${RUNLOOM_PYTHON:-$HOME/.pyenv/versions/3.13.13t/bin/python3}"
+PY="${RUNLOOM_PYTHON:-$HOME/.pyenv/versions/3.14.4t/bin/python3}"
 LOAD_FRAC="${LOAD_FRAC:-0.7}"
 NCPU="$(nproc 2>/dev/null || echo 4)"
 DATE="$(date +%F)"

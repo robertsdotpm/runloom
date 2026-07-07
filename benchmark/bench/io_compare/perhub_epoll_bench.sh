@@ -13,7 +13,7 @@
 set -u
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT"
-PY="${PYTHON:-/home/x/.pyenv/versions/3.13.13t/bin/python3}"
+PY="${PYTHON:-/home/x/.pyenv/versions/3.14.4t/bin/python3}"
 LG="bench/io_compare/loadgen"
 NCONNS="${1:-4000}"; shift || true
 HUBS=("$@"); [ ${#HUBS[@]} -eq 0 ] && HUBS=(16 32 48)

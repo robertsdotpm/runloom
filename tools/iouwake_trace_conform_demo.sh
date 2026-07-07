@@ -29,7 +29,7 @@
 # the sched_drain loop-top overflow flush (runloom_sched_drain.c.inc:155) guards.
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"; cd "$ROOT"
-PY="${RUNLOOM_PYTHON:-$HOME/.pyenv/versions/3.13.13t/bin/python3}"
+PY="${RUNLOOM_PYTHON:-$HOME/.pyenv/versions/3.14.4t/bin/python3}"
 TR="$(mktemp /tmp/iouwake.XXXX.ndjson)"
 RM="$(command -v safe-rm || echo rm)"
 

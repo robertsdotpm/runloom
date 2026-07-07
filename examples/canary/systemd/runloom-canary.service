@@ -12,7 +12,7 @@ Environment=PYTHON_GIL=0
 Environment=RUNLOOM_WATCHDOG=120
 Environment=CANARY_CRASH_FILE=%h/runloom-canary-crash.txt
 # self-samples the soak CSV so the gauges are ledgerable; runs until stopped.
-ExecStart=%h/.pyenv/versions/3.13.13t/bin/python3 examples/canary/server.py \
+ExecStart=%h/.pyenv/versions/3.14.4t/bin/python3 examples/canary/server.py \
     --csv %h/runloom-canary.csv --interval 30
 Restart=on-failure
 RestartSec=5

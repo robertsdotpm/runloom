@@ -10,7 +10,7 @@ Install runloom first — `pip install runloom`, or `pip install -e .` from a
 clone — then run any example with the GIL off:
 
 ```bash
-PYTHON_GIL=0 ~/.pyenv/versions/3.13.13t/bin/python3 examples/hello_fibers.py
+PYTHON_GIL=0 ~/.pyenv/versions/3.14.4t/bin/python3 examples/hello_fibers.py
 ```
 
 (On a stock GIL build the M:N examples raise a clear error telling you to use
@@ -69,5 +69,5 @@ For raw performance numbers and the measurement harness, see [`../bench/`](../be
 ### Free-threaded run (for `mn_parallel.py`)
 
 ```bash
-PYTHON_GIL=0 ~/.pyenv/versions/3.13.13t/bin/python3 examples/mn_parallel.py
+PYTHON_GIL=0 ~/.pyenv/versions/3.14.4t/bin/python3 examples/mn_parallel.py
 ```

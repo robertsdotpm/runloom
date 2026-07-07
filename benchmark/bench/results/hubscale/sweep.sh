@@ -14,7 +14,7 @@
 # comparison is apples-to-apples and never oversubscribes (64-core box).
 set -u
 cd "$(git rev-parse --show-toplevel)"
-PY=/home/x/.pyenv/versions/3.13.13t/bin/python3
+PY=/home/x/.pyenv/versions/3.14.4t/bin/python3
 FUNCS="${FUNCS:-64000}"
 DUR="${DUR:-8}"
 CORES="${CORES:-0-47}"

@@ -11,7 +11,7 @@ plain threading (also GIL-free parallel), and asyncio (single OS thread, so
 no parallel benefit -- the thing runloom beats).
 
 Run:
-    PYTHONPATH=src ~/.pyenv/versions/3.13.13t/bin/python -m bench.mn
+    PYTHONPATH=src ~/.pyenv/versions/3.14.4t/bin/python -m bench.mn
 
 Tunables: RUNLOOM_BENCH_N (goroutines), RUNLOOM_BENCH_ITER (sha256 chain length).
 """

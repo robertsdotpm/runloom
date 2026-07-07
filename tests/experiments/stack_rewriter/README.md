@@ -176,7 +176,7 @@ matter (the large frames that actually threaten a small stack) are both caught.
 ## How to run
 
 Prereqs: `gcc`, `objdump`, `readelf`, a CPython 3.13t at
-`~/.pyenv/versions/3.13.13t/bin/python3` (built cleanly against the free-
+`~/.pyenv/versions/3.14.4t/bin/python3` (built cleanly against the free-
 threaded 3.13t headers — that's the one with dev headers on this box), and any
 `python3` with a stdlib for the rewriter itself.
 

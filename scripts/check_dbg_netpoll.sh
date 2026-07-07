@@ -15,7 +15,7 @@
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
-PY="${PYTHON:-$HOME/.pyenv/versions/3.13.13t/bin/python3}"
+PY="${PYTHON:-$HOME/.pyenv/versions/3.14.4t/bin/python3}"
 cd "$ROOT" || exit 2
 
 TESTS="${DBGNP_TESTS:-test_tcpconn test_tcp_scenarios test_aio test_aio_net \

@@ -18,7 +18,7 @@
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
-PY="${PYTHON:-$HOME/.pyenv/versions/3.13.13t/bin/python3}"
+PY="${PYTHON:-$HOME/.pyenv/versions/3.14.4t/bin/python3}"
 MC="$ROOT/tools/mn_controlled"
 cd "$ROOT" || exit 2
 

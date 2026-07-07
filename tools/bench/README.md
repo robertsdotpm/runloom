@@ -37,7 +37,7 @@ exists so a runloom speed claim survives scrutiny.
 ## Usage
 
 ```sh
-PY=~/.pyenv/versions/3.13.13t/bin/python3
+PY=~/.pyenv/versions/3.14.4t/bin/python3
 
 $PY tools/bench/rigor.py list
 $PY tools/bench/rigor.py run spawn                      # full run, real CI
@@ -87,7 +87,7 @@ C(p) = p / (1 + alpha·(p-1) + beta·p·(p-1))
 ```
 
 ```sh
-PYTHON_GIL=0 ~/.pyenv/versions/3.13.13t/bin/python3 tools/bench/usl.py
+PYTHON_GIL=0 ~/.pyenv/versions/3.14.4t/bin/python3 tools/bench/usl.py
 ```
 
 Example (64-core, GIL off): `alpha≈0.028, beta≈0.0002`, predicted peak ≈72

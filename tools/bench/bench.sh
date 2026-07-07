@@ -13,7 +13,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 
 PY="${PYTHON:-}"
 if [ -z "$PY" ]; then
-    for c in "$HOME/.pyenv/versions/3.13.13t/bin/python3" python3.13t python3; do
+    for c in "$HOME/.pyenv/versions/3.14.4t/bin/python3" python3.13t python3; do
         command -v "$c" >/dev/null 2>&1 && { PY="$c"; break; }
     done
 fi

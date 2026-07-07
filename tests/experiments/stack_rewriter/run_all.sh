@@ -18,7 +18,7 @@ set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 cd "$HERE"
 
-PY_FT="${PY_FT:-$HOME/.pyenv/versions/3.13.13t/bin/python3}"
+PY_FT="${PY_FT:-$HOME/.pyenv/versions/3.14.4t/bin/python3}"
 PY="${PY:-python3}"   # any python3 with stdlib for the rewriter itself
 
 EXT="ext/stacktest.cpython-313t-x86_64-linux-gnu.so"

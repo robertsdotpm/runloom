@@ -46,7 +46,7 @@ cd "$HERE"
 sudo -n prlimit --pid $$ --nofile=8388608:8388608 2>/dev/null
 sudo -n sysctl -w vm.max_map_count=2000000 net.core.somaxconn=4096 >/dev/null 2>&1
 
-PY="${PY:-$HOME/.pyenv/versions/3.13.13t/bin/python3}"
+PY="${PY:-$HOME/.pyenv/versions/3.14.4t/bin/python3}"
 DESIGN="${DESIGN:-20000}"
 SURVIVAL="${SURVIVAL:-1000000}"
 TIERS="${TIERS:-both}"

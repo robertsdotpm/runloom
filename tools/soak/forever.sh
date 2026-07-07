@@ -20,7 +20,7 @@
 # Stop:  pkill -f 'soak/forever.sh'; pkill -f 'soak.py --workload <workload>'
 set +e
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-PY="${RUNLOOM_PYTHON:-$HOME/.pyenv/versions/3.13.13t/bin/python3}"
+PY="${RUNLOOM_PYTHON:-$HOME/.pyenv/versions/3.14.4t/bin/python3}"
 WL="${1:?usage: forever.sh <workload> [iter_hours] [workers] [extra args...]}"
 HOURS="${2:-6}"
 WORKERS="${3:-2}"

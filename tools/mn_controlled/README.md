@@ -205,7 +205,7 @@ tools are complementary, not substitutes.
 
 ```sh
 # seeded exploration, conservation-clean, each seed reproducible:
-PYTHON_GIL=0 ~/.pyenv/versions/3.13.13t/bin/python3 tools/mn_controlled/demo.py
+PYTHON_GIL=0 ~/.pyenv/versions/3.14.4t/bin/python3 tools/mn_controlled/demo.py
 
 # deterministic-replay yardsticks (same seed x N reps -> one signature):
 PYTHON_GIL=0 …/python3 tools/mn_controlled/repro_probe.py 12 8    # single channel

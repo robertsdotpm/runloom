@@ -22,7 +22,7 @@ stdlib-only so it runs under 3.13t with no extra wheels to build.
 
 Run a suite with, e.g.::
 
-    PYTHONPATH=src ~/.pyenv/versions/3.13.13t/bin/python -m bench.micro
+    PYTHONPATH=src ~/.pyenv/versions/3.14.4t/bin/python -m bench.micro
 """
 import json
 import os

@@ -9,7 +9,7 @@ set +e
 cd /home/x/projects/pygo-big100/big_100
 sudo -n prlimit --pid $$ --nofile=8388608:8388608 2>/dev/null
 GON="RUNLOOM_HARNESS_GON=1 RUNLOOM_GON_BULK=1 RUNLOOM_GON_FRESH=1 RUNLOOM_STACK_ARENA_N=1300000"
-PY=$HOME/.pyenv/versions/3.13.13t/bin/python3
+PY=$HOME/.pyenv/versions/3.14.4t/bin/python3
 RES=/tmp/sweep_1m_results.txt
 tmo="$1"; extra="$2"; shift 2
 for prog in "$@"; do

@@ -55,7 +55,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"; cd "$ROOT"
 
 PYTHON="${PYTHON:-}"
 if [ -z "$PYTHON" ]; then
-    for c in "$HOME/.pyenv/versions/3.13.13t/bin/python3" python3.13t python3; do
+    for c in "$HOME/.pyenv/versions/3.14.4t/bin/python3" python3.13t python3; do
         command -v "$c" >/dev/null 2>&1 && { PYTHON="$c"; break; }
     done
 fi

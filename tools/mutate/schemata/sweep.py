@@ -29,7 +29,7 @@ import concurrent.futures as cf
 WT = os.environ.get("RUNLOOM_MUT_WORKTREE",
                     os.path.expanduser("~/projects/pygo-mutants"))
 PY = os.environ.get("RUNLOOM_PYTHON",
-                    os.path.expanduser("~/.pyenv/versions/3.13.13t/bin/python3"))
+                    os.path.expanduser("~/.pyenv/versions/3.14.4t/bin/python3"))
 
 # name-affinity test subsets: tests most likely to EXECUTE a TU's lines.  A real
 # survivor must survive the WHOLE suite, but a curated subset is the cheap,

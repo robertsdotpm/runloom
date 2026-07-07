@@ -15,7 +15,7 @@ set -u
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
-PYTHON="${PYTHON:-$HOME/.pyenv/versions/3.13.13t/bin/python3}"
+PYTHON="${PYTHON:-$HOME/.pyenv/versions/3.14.4t/bin/python3}"
 RM="$(command -v safe-rm || echo rm)"
 OBJDIR="build/temp.coverage"
 COVOUT="build/coverage"

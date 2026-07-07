@@ -20,7 +20,7 @@ import sys
 import concurrent.futures as cf
 
 WT = os.environ.get("RUNLOOM_MUT_WORKTREE", os.path.expanduser("~/projects/pygo-mutants"))
-PY = os.environ.get("RUNLOOM_PYTHON", os.path.expanduser("~/.pyenv/versions/3.13.13t/bin/python3"))
+PY = os.environ.get("RUNLOOM_PYTHON", os.path.expanduser("~/.pyenv/versions/3.14.4t/bin/python3"))
 
 # same name-affinity subsets as schemata/sweep.py -- tests that EXECUTE the TU.
 AFFINITY = {

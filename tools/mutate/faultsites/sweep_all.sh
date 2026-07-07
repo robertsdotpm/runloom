@@ -16,7 +16,7 @@
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 MAIN="$(cd "$HERE/../../.." && pwd)"
-PY="${RUNLOOM_PYTHON:-$HOME/.pyenv/versions/3.13.13t/bin/python3}"
+PY="${RUNLOOM_PYTHON:-$HOME/.pyenv/versions/3.14.4t/bin/python3}"
 
 LIMIT=""
 if [ "${1:-}" = "--limit" ]; then LIMIT="--limit $2"; shift 2; fi

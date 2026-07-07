@@ -26,7 +26,7 @@ pip install -e .
 On free-threaded 3.13t:
 
 ```bash
-~/.pyenv/versions/3.13.13t/bin/python3.13t -m pip install -e .
+~/.pyenv/versions/3.14.4t/bin/python3.13t -m pip install -e .
 ```
 
 ## No compiler? Bootstrap helpers

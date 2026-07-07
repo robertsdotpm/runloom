@@ -22,7 +22,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.normpath(os.path.join(HERE, "..", ".."))
 SRV = os.path.join(REPO, "benchmark", "suite", "servers")
 CLI = os.path.join(REPO, "benchmark", "suite", "clients", "churn_loadgen")
-PY = os.path.expanduser("~/.pyenv/versions/3.13.13t/bin/python3")
+PY = os.path.expanduser("~/.pyenv/versions/3.14.4t/bin/python3")
 CLK = os.sysconf("SC_CLK_TCK")
 
 

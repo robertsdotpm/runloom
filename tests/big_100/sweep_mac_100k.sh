@@ -15,7 +15,7 @@ set +e
 cd "$HOME/pygo-macwin" || exit 2
 sudo -n prlimit --pid $$ --nofile=8388608:8388608 2>/dev/null   # no-op on macOS
 ulimit -n 400000 2>/dev/null
-PY="$HOME/.pyenv/versions/3.13.13t/bin/python3"
+PY="$HOME/.pyenv/versions/3.14.4t/bin/python3"
 FUNCS="${1:-100000}"; HUBS="${2:-8}"; DUR="${3:-15}"; TMO="${4:-120}"
 FROM="${5:-0}"; TO="${6:-999}"
 RES=/tmp/big100_100k_results.txt

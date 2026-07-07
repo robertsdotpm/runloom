@@ -22,7 +22,7 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PY = os.environ.get(
-    "RUNLOOM_PY", os.path.expanduser("~/.pyenv/versions/3.13.13t/bin/python3"))
+    "RUNLOOM_PY", os.path.expanduser("~/.pyenv/versions/3.14.4t/bin/python3"))
 
 
 def classify(rc, out):

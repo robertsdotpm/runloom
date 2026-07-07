@@ -9,7 +9,7 @@
 # Run: verify/litmus/sweep/run_sweep.sh
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
-PY="${PYTHON:-$HOME/.pyenv/versions/3.13.13t/bin/python3}"
+PY="${PYTHON:-$HOME/.pyenv/versions/3.14.4t/bin/python3}"
 command -v "$PY" >/dev/null 2>&1 || PY=python3
 HERD="${HERD7:-herd7}"
 command -v "$HERD" >/dev/null 2>&1 || HERD="$HOME/.opam/herd/bin/herd7"

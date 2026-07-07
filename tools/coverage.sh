@@ -28,7 +28,7 @@ cd "$ROOT"
 MODE="${1:-full}"
 
 if [ -z "${PYTHON:-}" ]; then
-    for cand in "$HOME/.pyenv/versions/3.13.13t/bin/python3" python3.13t python3; do
+    for cand in "$HOME/.pyenv/versions/3.14.4t/bin/python3" python3.13t python3; do
         command -v "$cand" >/dev/null 2>&1 && { PYTHON="$cand"; break; }
     done
 fi

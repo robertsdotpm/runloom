@@ -18,7 +18,7 @@
 # Output:  profile.html (open in a browser) + a CLI summary
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
-PY="${PYTHON:-$HOME/.pyenv/versions/3.13.13t/bin/python3}"
+PY="${PYTHON:-$HOME/.pyenv/versions/3.14.4t/bin/python3}"
 command -v "$PY" >/dev/null 2>&1 || PY=python3
 
 if ! "$PY" -c "import scalene" >/dev/null 2>&1; then

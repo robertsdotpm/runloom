@@ -98,7 +98,7 @@ echo "--------------------------------------------------------------------------
 
 # Leave a normal (regular-ABI) .so so the tree stays usable with the stock python.
 if [ -n "${RUNLOOM_PYTHON:-}" ] || command -v python3.13t >/dev/null 2>&1; then
-    STOCK="${RUNLOOM_PYTHON:-$HOME/.pyenv/versions/3.13.13t/bin/python3}"
+    STOCK="${RUNLOOM_PYTHON:-$HOME/.pyenv/versions/3.14.4t/bin/python3}"
     [ -x "$STOCK" ] && PYTHON_GIL=0 "$STOCK" setup.py build_ext --inplace >/dev/null 2>&1 \
         && echo "  (restored a regular-ABI .so for $STOCK)"
 fi

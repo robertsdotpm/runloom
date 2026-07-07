@@ -17,7 +17,7 @@
 # Exit: 0 = no ASan error; 1 = ASan caught a memory error; 2 = setup.
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"; cd "$ROOT"
-PY="${RUNLOOM_PYTHON:-$HOME/.pyenv/versions/3.13.13t/bin/python3}"
+PY="${RUNLOOM_PYTHON:-$HOME/.pyenv/versions/3.14.4t/bin/python3}"
 LIBASAN="$(gcc -print-file-name=libasan.so 2>/dev/null)"
 [ -f "$LIBASAN" ] || { echo "run_asan_ext: libasan.so not found (need gcc with ASan). SKIP."; exit 0; }
 [ -x "$PY" ] || { echo "run_asan_ext: no interpreter at $PY. SKIP."; exit 0; }

@@ -16,7 +16,7 @@
 set -u
 
 MAIN="$(cd "$(dirname "$0")/../.." && pwd)"
-PY="${RUNLOOM_PYTHON:-$HOME/.pyenv/versions/3.13.13t/bin/python3}"
+PY="${RUNLOOM_PYTHON:-$HOME/.pyenv/versions/3.14.4t/bin/python3}"
 WT="${RUNLOOM_COV_WORKTREE:-$HOME/projects/pygo-covnight}"
 DATE="$(date +%F)"
 OUTDIR="$MAIN/docs/dev/soak/coverage/$DATE"

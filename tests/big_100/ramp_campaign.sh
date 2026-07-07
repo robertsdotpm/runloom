@@ -9,7 +9,7 @@
 set +e
 cd /home/x/projects/pygo-big100/big_100 || exit 2
 sudo -n prlimit --pid $$ --nofile=8388608:8388608 2>/dev/null   # bg shell reverts to 4096
-PYBIN="$HOME/.pyenv/versions/3.13.13t/bin/python3"
+PYBIN="$HOME/.pyenv/versions/3.14.4t/bin/python3"
 RES=logs/million_results.tsv
 DONE=logs/million_done.txt
 mkdir -p logs

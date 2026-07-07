@@ -64,7 +64,7 @@ fi
 
 # Prefer a free-threaded build -- that's where the M:N scheduler is real.
 if [ -z "${PYTHON:-}" ]; then
-    for cand in "$HOME/.pyenv/versions/3.13.13t/bin/python3" python3.13t python3; do
+    for cand in "$HOME/.pyenv/versions/3.14.4t/bin/python3" python3.13t python3; do
         if command -v "$cand" >/dev/null 2>&1; then PYTHON="$cand"; break; fi
     done
 fi

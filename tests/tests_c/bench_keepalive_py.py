@@ -30,7 +30,7 @@ the ramp nor the drain can pollute the percentiles -- the samples are a
 clean snapshot of the all-N-established steady state.  This is what lets
 us attribute (or dismiss) the sweep's N>=65K p99 residual.
 
-    PYTHONPATH=src ~/.pyenv/versions/3.13.13t/bin/python3 \
+    PYTHONPATH=src ~/.pyenv/versions/3.14.4t/bin/python3 \
         tests_c/bench_keepalive_py.py 16384 8 1000 5 3 3 10
 
 Args: N [H] [think_ms] [work_ms] [ramp_s] [warmup_s] [measure_s]

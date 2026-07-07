@@ -24,7 +24,7 @@ RUN="$HERE/run"
 INC="$RUN/incidents"
 CORES="$RUN/cores"
 
-PY="${PY:-$HOME/.pyenv/versions/3.13.13t/bin/python3.13t}"
+PY="${PY:-$HOME/.pyenv/versions/3.14.4t/bin/python3.13t}"
 export PYTHON_GIL=0
 export PYTHONPATH="$SRC"
 # goroutine dump + native backtrace, then chain to SIG_DFL -> core + die.

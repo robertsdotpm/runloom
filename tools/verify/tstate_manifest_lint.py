@@ -37,7 +37,7 @@ ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
 MANIFEST = os.path.join(HERE, "tstate_manifest.json")
 PYSTATE_TU = os.path.join(ROOT, "src/runloom_c/runloom_sched_pystate.c.inc")
 PY = os.environ.get("RUNLOOM_PYTHON",
-                    os.path.expanduser("~/.pyenv/versions/3.13.13t/bin/python3"))
+                    os.path.expanduser("~/.pyenv/versions/3.14.4t/bin/python3"))
 
 
 def py_include():

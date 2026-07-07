@@ -23,7 +23,7 @@
 # View:    open coz-profile in https://plasma-umass.org/coz/
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
-PY="${PYTHON:-$HOME/.pyenv/versions/3.13.13t/bin/python3}"
+PY="${PYTHON:-$HOME/.pyenv/versions/3.14.4t/bin/python3}"
 command -v "$PY" >/dev/null 2>&1 || PY=python3
 
 if ! command -v coz >/dev/null 2>&1; then

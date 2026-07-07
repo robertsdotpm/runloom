@@ -14,7 +14,7 @@ handler parks inside wait_fd while a live Python frame sits on its chunk
 Run it next to the C bench at the same N to read off the per-goroutine
 Python cost (frame + datastack chunk + socket/closure objects):
 
-    PYTHONPATH=src ~/.pyenv/versions/3.13.13t/bin/python3 \
+    PYTHONPATH=src ~/.pyenv/versions/3.14.4t/bin/python3 \
         tests_c/bench_server_py.py 16384 8 5
 
 Args: N [H] [M]   (N connections, H hubs, M round-trips per connection)

@@ -16,7 +16,7 @@ faults are triggered by ≤2–3 factors, so pairwise/3-way catches them cheaply
 ## Run it
 
 ```sh
-PY=~/.pyenv/versions/3.13.13t/bin/python3
+PY=~/.pyenv/versions/3.14.4t/bin/python3
 $PY tools/combinatorial/covering.py --list            # array + coverage stats
 $PY tools/combinatorial/covering.py --iters 40        # run each config
 $PY tools/combinatorial/covering.py --t 3             # 3-way (stronger, more rows)

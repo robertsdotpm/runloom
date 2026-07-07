@@ -199,7 +199,7 @@
   ]
  },
  {
-  "api": "CPython asyncio event loop + coroutine driver protocol (Task.__step_run_and_handle_result / Future done-callback scheduling / BaseEventLoop call_soon queue), free-threaded CPython 3.13t. Oracle = stock Lib/asyncio at /home/x/.pyenv/versions/3.13.13t/lib/python3.13t/asyncio. All 8 probes below were executed against that stock interpreter and their asserted traces observed.",
+  "api": "CPython asyncio event loop + coroutine driver protocol (Task.__step_run_and_handle_result / Future done-callback scheduling / BaseEventLoop call_soon queue), free-threaded CPython 3.13t. Oracle = stock Lib/asyncio at /home/x/.pyenv/versions/3.14.4t/lib/python3.13t/asyncio. All 8 probes below were executed against that stock interpreter and their asserted traces observed.",
   "rules": [
    {
     "name": "coro-resume-is-send-None-never-send-value",
