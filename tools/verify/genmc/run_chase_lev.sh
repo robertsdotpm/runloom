@@ -44,13 +44,21 @@ want_bug   chase_lev_resize.c "data race on new buffer" "-DBUG_RLX_ARR"
 
 # --- the ACTUAL production deque (src/runloom_c/cldeque.c), driven verbatim ---
 # Locate the repo from this script so the sweep works in any checkout/worktree.
-ROOT="$(cd "$HERE/../.." && pwd)"
+# genmc/ is 3 levels under the repo root (tools/verify/genmc); ../.. only reached
+# tools/, so the real-code check SILENTLY SKIPPED (SRC=tools/src/runloom_c).
+ROOT="$(cd "$HERE/../../.." && pwd)"
 SRC="${RUNLOOM_SRC:-$ROOT/src/runloom_c}"
 if [ -f "$SRC/cldeque.c" ]; then
   ok "chase_lev_real.c (REAL cldeque.c, 2elt pop+2steal)"
   if "$G" -- -I"$SRC" chase_lev_real.c 2>&1 | grep -q "No errors were detected"; then
     echo "PASS (production code clean under RC11)"; pass=$((pass+1))
   else echo "FAIL"; fail=$((fail+1)); fi
+  # chase_lev_real2.c: the STRONGER harness (owner push+pop CONCURRENT with
+  # steals) -- regression guard for the plain-buf[] race fix (94a83f4a).
+  ok "chase_lev_real2.c (REAL cldeque.c, concurrent push vs steal)"
+  if "$G" -- -I"$SRC" chase_lev_real2.c 2>&1 | grep -q "No errors were detected"; then
+    echo "PASS (no push/steal buf race under RC11)"; pass=$((pass+1))
+  else echo "FAIL -- cldeque buf[] slots must be relaxed-atomic (see 94a83f4a)"; fail=$((fail+1)); fi
 else echo "  (production cldeque.c not found at $SRC -- skipping real-code check)"; fi
 
 echo "  $pass passed, $fail failed"
