@@ -96,6 +96,51 @@ def run_cbmc(cmd_tmpl, mutated_path, timeout):
     return "BUILDFAIL", (out[-200:] or "no verdict")
 
 
+def _genmc_bin():
+    for c in (os.environ.get("GENMC"), "/usr/local/bin/genmc"):
+        if c and os.path.isfile(c) and os.access(c, os.X_OK):
+            return c
+    return shutil.which("genmc")
+
+
+def run_genmc(mutated_path, timeout, cap=4):
+    """Run a mutated cldeque.c through the chase_lev_real.c harness under GenMC's
+    RC11 WEAK-memory model.  Unlike CBMC (sequentially consistent, so relaxing an
+    order is a no-op and every moflip mutant vacuously survives), GenMC actually
+    explores the weak-memory executions -- so a SURVIVING mutant ("No errors were
+    detected") means that memory order is genuinely not load-bearing under RC11
+    (a proof hole worth a look), and a KILLED mutant (a race/violation) proves the
+    barrier is necessary.  chase_lev_real.c does #include "cldeque.c", so the
+    harness + header are co-located with the mutant in its temp dir and the
+    include resolves to the MUTANT via own-directory search."""
+    genmc = _genmc_bin()
+    if not genmc:
+        return "BUILDFAIL", "genmc not found (set GENMC=/path/to/genmc)"
+    mutant_dir = os.path.dirname(mutated_path)        # already holds the mutant cldeque.c
+    src_dir = os.path.join(ROOT, "src", "runloom_c")
+    gdir = os.path.join(HERE, "genmc")
+    try:
+        shutil.copy(os.path.join(gdir, "chase_lev_real.c"), mutant_dir)
+        hdr = os.path.join(src_dir, "cldeque.h")
+        if os.path.isfile(hdr):
+            shutil.copy(hdr, mutant_dir)
+    except OSError as e:
+        return "BUILDFAIL", "co-locate: " + str(e)
+    cmd = [genmc, "--", "-I", src_dir,
+           "-DRUNLOOM_CLDEQUE_CAP={0}".format(cap), "chase_lev_real.c"]
+    try:
+        r = subprocess.run(cmd, cwd=mutant_dir, capture_output=True, text=True,
+                           timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return "BUILDFAIL", "timeout"
+    out = r.stdout + r.stderr
+    if "No errors were detected" in out:
+        return "PASS", "no RC11 error (mutant survived)"
+    if re.search(r"(?i)\b(race|violation|error|assert|liveness)\b", out):
+        return "FAIL", "RC11 error/race (mutant killed)"
+    return "BUILDFAIL", (out[-200:] or "no verdict")
+
+
 # --- mutation operators: yield (label, mutated_text) per mutant ----------------
 
 RELOPS = [("==", "!="), ("!=", "=="), ("<=", ">"), (">=", "<"),
@@ -214,9 +259,10 @@ TARGETS = {
             mut, to),
         "timeout": 120,
     },
-    "cldeque": {   # the FT headline: are cldeque.c's fences load-bearing?
+    "cldeque": {   # CBMC (SC) -- validates the moflip runner, but SC makes a
+        # memory-order flip a NO-OP, so every moflip mutant vacuously SURVIVES
+        # here.  Kept for the runner; use cldeque_genmc for real weak-memory teeth.
         # ON-DEMAND ONLY: ~242s per CBMC run, so a full MO sweep is overnight-scale.
-        # Run with: model_mutate.py --target cldeque  (or --full).
         "engine": "cbmc",
         "mutate": os.path.join(ROOT, "src", "runloom_c", "cldeque.c"),
         "ops": [gen_moflip],
@@ -226,6 +272,16 @@ TARGETS = {
              "-I", os.path.join(HERE, "cbmc", "stubs"),
              "-DRUNLOOM_CLDEQUE_CAP=4"], mut, to),
         "timeout": 600,
+    },
+    "cldeque_genmc": {   # THE FT headline with TEETH: RC11 weak memory (not SC),
+        # so a surviving moflip mutant means the order is genuinely not
+        # load-bearing (a proof hole), and a killed one proves the barrier needed.
+        # ON-DEMAND ONLY: minutes per GenMC run; run with --target cldeque_genmc.
+        "engine": "genmc",
+        "mutate": os.path.join(ROOT, "src", "runloom_c", "cldeque.c"),
+        "ops": [gen_moflip],
+        "run": lambda mut, to: run_genmc(mut, to),
+        "timeout": 900,
     },
 }
 
