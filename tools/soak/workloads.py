@@ -282,8 +282,13 @@ def _wl_cserve_echo(ctx):
             done.send(1)
 
     def root():
+        # RUNLOOM_SOAK_CECHO_ALLC=1 -> handler=None runs each connection ENTIRELY
+        # in C (runloom_mn_fiber_c: no Python tstate, no PyObjects in the recv/send
+        # loop) -- soaks the pure C serve primitive.  Default keeps the Python echo
+        # handler (C accept scaffold + a Python handler fiber per conn).
+        srv_handler = None if os.environ.get("RUNLOOM_SOAK_CECHO_ALLC") == "1" else handle
         port, listeners = runloom_c.serve(
-            "127.0.0.1", 0, handle, acceptors=hubs, backlog=1024)
+            "127.0.0.1", 0, srv_handler, acceptors=hubs, backlog=1024)
         done = runloom_c.Chan(conc)
         for _ in range(conc):
             runloom.fiber(lambda: client(port, done))
