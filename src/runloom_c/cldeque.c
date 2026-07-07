@@ -37,7 +37,15 @@ int runloom_cldeque_push(runloom_cldeque_t *d, void *item)
     long b = __atomic_load_n(&d->bottom, __ATOMIC_RELAXED);
     long t = __atomic_load_n(&d->top, __ATOMIC_ACQUIRE);
     if (b - t >= RUNLOOM_CLDEQUE_CAP) return -1;
-    d->buf[b & RUNLOOM_CLDEQUE_MASK] = item;
+    /* RELAXED-ATOMIC slot store (ordering comes from the bottom RELEASE below).
+     * A steal reads buf[t] SPECULATIVELY before its CAS, concurrently with this
+     * push; the plain-array form is a C11 data race (the thief can acquire
+     * bottom from pop's RELAXED restore at :73, which under RC11 carries no
+     * synchronizes-with edge to this write).  Canonical Chase-Lev (Le et al.
+     * PPoPP'13, cited by cbmc/cldeque_cbmc.c) makes the slots relaxed atomics
+     * for exactly this reason.  UB-only in practice (value is CAS-discarded) but
+     * TSan/GenMC-real and LTO-fragile.  buf stays void*[] -- ABI unchanged. */
+    __atomic_store_n(&d->buf[b & RUNLOOM_CLDEQUE_MASK], item, __ATOMIC_RELAXED);
     __atomic_store_n(&d->bottom, b + 1, __ATOMIC_RELEASE);
     RUNLOOM_CL_PUSH(b);                       /* ghost: owner owns index b */
     return 0;
@@ -57,7 +65,7 @@ void *runloom_cldeque_pop(runloom_cldeque_t *d)
         __atomic_store_n(&d->bottom, t, __ATOMIC_RELAXED);
         return NULL;
     }
-    item = d->buf[b & RUNLOOM_CLDEQUE_MASK];
+    item = __atomic_load_n(&d->buf[b & RUNLOOM_CLDEQUE_MASK], __ATOMIC_RELAXED);
     if (t < b) {
         /* No contention possible; pop succeeded. */
         RUNLOOM_CL_CLAIM(b, 0);             /* ghost: owner takes index b */
@@ -87,7 +95,7 @@ void *runloom_cldeque_steal(runloom_cldeque_t *d)
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
     b = __atomic_load_n(&d->bottom, __ATOMIC_ACQUIRE);
     if (t >= b) return NULL;
-    item = d->buf[t & RUNLOOM_CLDEQUE_MASK];
+    item = __atomic_load_n(&d->buf[t & RUNLOOM_CLDEQUE_MASK], __ATOMIC_RELAXED);
     {
         long expected = t;
         if (__atomic_compare_exchange_n(&d->top, &expected, t + 1,
