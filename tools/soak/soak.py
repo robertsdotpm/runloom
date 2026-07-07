@@ -87,11 +87,18 @@ def run_soak(args):
         k, _, v = kv.partition("=")
         env[k] = v
 
+    # Optional per-worker exec wrapper.  Under a TSan-instrumented interpreter
+    # (matrix tsan-gold) every worker binary aborts with "unexpected memory
+    # mapping" unless launched with ADDR_NO_RANDOMIZE -- and the personality set
+    # by a `setarch -R` on THIS process does NOT survive the Popen hop.  So the
+    # gold preset sets SOAK_WORKER_WRAP="setarch x86_64 -R" to wrap each worker.
+    wrap = os.environ.get("SOAK_WORKER_WRAP", "").split()
+
     procs = []
     for i in range(args.workers):
         csv = os.path.join(out_dir, "worker%d.csv" % i)
         hb = os.path.join(out_dir, "worker%d.hb" % i)
-        argv = [PY, os.path.join(HERE, "worker.py"),
+        argv = wrap + [PY, os.path.join(HERE, "worker.py"),
                 "--workload", args.workload,
                 "--seconds", "%.1f" % seconds,
                 "--interval", "%.1f" % args.interval,

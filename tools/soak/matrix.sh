@@ -34,6 +34,9 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)/.."
 ROOT="$(cd "$ROOT" && pwd)"
 cd "$ROOT"
 PY="${RUNLOOM_PYTHON:-$HOME/.pyenv/versions/3.14.4t/bin/python3}"
+NORMAL_PY="$PY"                          # the normal (non-gold) interp for the EXIT restore
+GOLD_PY="${RUNLOOM_TSAN_PYTHON:-$HOME/cpython-tsan/bin/python3.13t}"   # TSan-instrumented CPython
+GOLD_SUPP="${RUNLOOM_TSAN_CPYTHON_SUPP:-$HOME/projects/cpython-tsan/Tools/tsan/suppressions_free_threading.txt}"
 OUT="$ROOT/docs/dev/soak"
 LEDGER="$OUT/LEDGER.md"
 command -v setarch >/dev/null 2>&1 && SA="setarch $(uname -m) -R" || SA=""
@@ -47,10 +50,14 @@ case "$PRESET" in
   normal-72h)   DUR="--hours 72"    BUILD=normal WORKERS=4 ENVS=() ;;
   asan-24h)     DUR="--hours 24"    BUILD=asan   WORKERS=2 ENVS=() ;;
   tsan-24h)     DUR="--hours 24"    BUILD=tsan   WORKERS=1 ENVS=() ;;
+  tsan-gold-smoke) DUR="--seconds 60" BUILD=tsan-gold WORKERS=1 ENVS=() ;;
+  tsan-gold-24h)   DUR="--hours 24"   BUILD=tsan-gold WORKERS=1 ENVS=() ;;
   iouring-24h)  DUR="--hours 24"    BUILD=normal WORKERS=4 ENVS=(--env RUNLOOM_IOURING_LOOP=1) ;;
   perhub-24h)   DUR="--hours 24"    BUILD=normal WORKERS=4 ENVS=(--env RUNLOOM_PERHUB_EPOLL=1) ;;
-  *) echo "unknown preset: $PRESET"; echo "presets: smoke asan-smoke tsan-smoke normal-72h asan-24h tsan-24h iouring-24h perhub-24h"; exit 2 ;;
+  *) echo "unknown preset: $PRESET"; echo "presets: smoke asan-smoke tsan-smoke normal-72h asan-24h tsan-24h tsan-gold-smoke tsan-gold-24h iouring-24h perhub-24h"; exit 2 ;;
 esac
+# tsan-gold runs everything UNDER the TSan-instrumented interpreter, not stock $PY.
+[ "$BUILD" = "tsan-gold" ] && PY="$GOLD_PY"
 
 STAMP="$PRESET"
 RUNDIR="$OUT/matrix_${PRESET}"
@@ -59,7 +66,7 @@ SANLOG_TAG=""
 
 build_normal() {
   env -u LD_PRELOAD -u ASAN_OPTIONS -u TSAN_OPTIONS -u PYTHONMALLOC \
-    PYTHON_GIL=0 "$PY" setup.py build_ext --inplace --force \
+    PYTHON_GIL=0 "$NORMAL_PY" setup.py build_ext --inplace --force \
     >/tmp/runloom_matrix_normal.log 2>&1 \
     && echo "  normal ext restored" || echo "  WARN: normal rebuild failed (/tmp/runloom_matrix_normal.log)"
 }
@@ -89,6 +96,38 @@ case "$BUILD" in
       || { echo "  BUILD FAILED (/tmp/runloom_matrix_tsan.log)"; tail -15 /tmp/runloom_matrix_tsan.log; exit 2; }
     export LD_PRELOAD="$LIB"
     export TSAN_OPTIONS="halt_on_error=0:exitcode=0:suppressions=$ROOT/tools/tsan_suppressions.txt:log_path=$RUNDIR/tsan"
+    SANLOG_TAG="tsan"
+    ;;
+  tsan-gold)
+    # Fully-instrumented interpreter: the ext links -fsanitize=thread and runs
+    # UNDER the TSan CPython (~/cpython-tsan), so races crossing the runloom <->
+    # interpreter seam are attributed -- unlike the `tsan` build (stock interp +
+    # LD_PRELOAD) whose tsan_suppressions.txt has to blind exactly that seam.  We
+    # therefore load ONLY CPython's own free-threading suppressions, NOT ours,
+    # and run under setarch -R ($SA) since every TSan binary aborts under ASLR.
+    [ -x "$PY" ] || { echo "tsan-gold interp $PY missing -- run tools/build_tsan_cpython.sh 3.13.13; SKIP"; exit 0; }
+    [ -f "$GOLD_SUPP" ] || { echo "gold suppressions $GOLD_SUPP missing -- SKIP"; exit 0; }
+    # TSan binaries abort ("unexpected memory mapping") under high-entropy ASLR,
+    # and the setarch -R personality does NOT reliably survive the soak's Popen
+    # worker/grandchild hops -- so instrumented grandchildren still abort and the
+    # run is hollowed out.  Disable ASLR SYSTEM-WIDE for the run (restored on
+    # exit); this is the only reliable cover for the whole process tree.  Falls
+    # back to the per-worker setarch wrap when there is no passwordless sudo.
+    ASLR_ORIG="$(cat /proc/sys/kernel/randomize_va_space 2>/dev/null)"
+    if [ -n "$ASLR_ORIG" ] && sudo -n sysctl -w kernel.randomize_va_space=0 >/dev/null 2>&1; then
+      trap 'sudo -n sysctl -w kernel.randomize_va_space='"$ASLR_ORIG"' >/dev/null 2>&1; build_normal' EXIT
+      echo "  ASLR disabled system-wide for the gold run (was $ASLR_ORIG, restored on exit)"
+    else
+      echo "  WARN: no passwordless sudo to disable ASLR -- per-worker setarch wrap only; grandchildren may abort"
+    fi
+    echo "== matrix $PRESET: building TSan-GOLD ext under $PY (slow) =="
+    $SA env RUNLOOM_EXTRA_CFLAGS="-fsanitize=thread -O1 -g -fno-omit-frame-pointer" \
+      RUNLOOM_EXTRA_LDFLAGS="-fsanitize=thread" PYTHON_GIL=0 \
+      "$PY" setup.py build_ext --inplace --force --build-temp build/temp.tsangold \
+      >/tmp/runloom_matrix_tsangold.log 2>&1 \
+      || { echo "  BUILD FAILED (/tmp/runloom_matrix_tsangold.log)"; tail -15 /tmp/runloom_matrix_tsangold.log; exit 2; }
+    export TSAN_OPTIONS="halt_on_error=0:exitcode=0:history_size=7:suppressions=$GOLD_SUPP:log_path=$RUNDIR/tsan"
+    export SOAK_WORKER_WRAP="$SA"      # wrap each soak worker in setarch -R (ASLR off)
     SANLOG_TAG="tsan"
     ;;
 esac
