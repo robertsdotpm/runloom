@@ -80,7 +80,10 @@ PyObject *runloom_fiber_frames_by_id(long long id)
         RUNLOOM_RLOCK(&runloom_greg_lock, RUNLOOM_RANK_GREG);
         for (g = runloom_greg_head; g != NULL; g = g->reg_next) {
             unsigned int st = __atomic_load_n(&g->state, __ATOMIC_ACQUIRE);
-            if (st == RUNLOOM_GST_FREED) continue;
+            /* Skip pre-PUBLISH (INIT/SPAWNING) as well as FREED: a g mid-spawn
+             * has no frames to walk and its fields are not yet released-visible
+             * (see the matching note in runloom_introspect.c). */
+            if (st < RUNLOOM_GST_RUNNABLE || st == RUNLOOM_GST_FREED) continue;
             if (__atomic_load_n(&g->id, __ATOMIC_RELAXED) == id) {
                 if (runloom_g_try_incref(g)) { found = g; got = 1; }
                 break;

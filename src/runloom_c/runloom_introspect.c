@@ -572,7 +572,15 @@ runloom_g_info_t *runloom_fiber_snapshot(long *count_out)
         runloom_g_info_t *o;
         unsigned int st = __atomic_load_n(&g->state, __ATOMIC_ACQUIRE);
         long long since;
-        if (st == RUNLOOM_GST_FREED) continue;
+        /* Skip pre-PUBLISH states too, not just FREED.  spawn_common writes
+         * g->refcount/owner/noyield (sched_core.c.inc:966-968) and only THEN
+         * publishes with state_set(RUNNABLE) (:989, __ATOMIC_RELEASE).  This
+         * ACQUIRE-load pairs with that RELEASE, so gating on st >= RUNNABLE
+         * guarantees those field writes are complete-and-visible before we read
+         * o->refcount/noyield/owner below.  Reading a g still in INIT/SPAWNING
+         * (registry-linked at first alloc, but fields not yet published) is a
+         * real data race a TSan-gold run caught on the fiber_snapshot reader. */
+        if (st < RUNLOOM_GST_RUNNABLE || st == RUNLOOM_GST_FREED) continue;
         o = &arr[n++];
         o->id          = __atomic_load_n(&g->id, __ATOMIC_RELAXED);
         o->state       = st;

@@ -76,7 +76,6 @@ def build_spec(seed):
         "nhub": rng.choice([2, 2, 4]),
         "moves": moves,
         "delay_max_ns": rng.choice([2000, 10000, 50000]),
-        "migration": rng.random() < 0.3,
         "iters": rng.choice([1500, 4000]),
     }
 
@@ -93,9 +92,9 @@ def worker_env(spec):
     env["SEAM_NHUB"] = str(spec["nhub"])
     env["SEAM_MOVES"] = ",".join(spec["moves"])
     env["SEAM_ITERS"] = str(spec["iters"])
-    if spec["migration"]:
-        env["RUNLOOM_MIGRATION"] = "1"
-        env["RUNLOOM_ALLOW_UNSAFE_MIGRATION"] = "1"
+    # NB: deliberately does NOT set RUNLOOM_ALLOW_UNSAFE_MIGRATION -- that forces
+    # the documented-impossible per-g live-frame tstate migration, whose mimalloc
+    # heap->thread_id abort is a KNOWN-dead-mode artifact, not a seam bug.
     return env
 
 
