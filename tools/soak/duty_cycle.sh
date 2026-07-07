@@ -11,6 +11,9 @@
 #                       a real lost wake; a nonzero exit is a bug)
 #   3. (weekly)      -- one soak-matrix preset (asan-24h / tsan-24h / normal-72h),
 #                       rotated by day-of-week; the machine-day ledger accrues
+#  11. net suite (OPT-IN, RUNLOOM_NET_TESTS=1) -- exercises the real TCP/UDP
+#                       netpoll path against public STUN/NTP/MQTT servers
+#                       (tests/net/); flake-tolerant, only real findings inboxed
 #
 # Durations default to the nightly plan; --smoke shrinks them to seconds to verify
 # the plumbing.  Load-gated: skips a stage while 1-min load exceeds LOAD_FRAC*cores.
@@ -203,6 +206,34 @@ if load_ok; then
 else
   echo "-- wake-skew SKIPPED (load too high) --"
 fi
+# --- stage 11: remote-internet net suite (OPT-IN; flake-tolerant) ---
+# Exercises the REAL TCP/UDP netpoll path against public STUN/NTP/MQTT servers
+# (tests/net/).  OFF unless the daemon is started with RUNLOOM_NET_TESTS=1, so a
+# network outage can never colour the rotation.  ENV failures (refused/timeout/
+# all-down/list-host-down) SKIP and are NEVER inboxed; only a transaction-token-
+# matched CORRUPT response, a pygo-side crash, or a HANG writes a finding file.
+# Never in check_all_fast or any gate (tests/net/ is not collected by run_isolated).
+if [ "${RUNLOOM_NET_TESTS:-0}" = "1" ] && load_ok; then
+  echo "-- net suite (remote internet) --"
+  NET_OUT="$INBOX_ARTIFACTS/net"; mkdir -p "$NET_OUT/findings"
+  if [ "$SMOKE" = "1" ]; then NET_TOP=4; NET_TMO=2; else NET_TOP=32; NET_TMO=3; fi
+  nice -n 10 env PYTHON_GIL=0 PYTHONPATH="$ROOT/src" RUNLOOM_NET_TESTS=1 \
+      "$PY" tests/net/run_all_net.py --hubs 8 --top "$NET_TOP" --timeout "$NET_TMO" \
+      --report-dir "$NET_OUT" > "$NET_OUT/run.log" 2>&1
+  # run_all_net writes findings/<kind>_<sig>.txt ONLY for real findings (ENV SKIPs
+  # write nothing), so this loop only ever inboxes actual bugs.  KIND values are
+  # lowercase-hyphen (net-protocol / net-crash / net-hang).
+  for rep in "$NET_OUT"/findings/*.txt; do
+    [ -e "$rep" ] || continue
+    kind="$(grep -m1 -oE 'KIND: [a-z-]+' "$rep" | awk '{print $2}')"
+    [ -n "$kind" ] || continue
+    inbox "$kind" "net suite $(basename "$rep")" "$rep"
+  done
+  grep -E "^(PASS|SKIP|FINDING|CRASH|HANG)" "$NET_OUT/run.log" | sed 's/^/   /'
+else
+  echo "-- net suite SKIPPED (RUNLOOM_NET_TESTS!=1 or load) --"
+fi
+
 # --- end nightly extra stages (before the weekly matrix) ---
 
 # --- stage 9 (weekly, Tue): mutation testing -- does the suite have TEETH?
