@@ -6,6 +6,8 @@ goroutines on the M:N scheduler.
 """
 import os
 import socket
+import struct
+import zlib
 
 _DEFAULT_HOST = os.environ.get("SOAK_HOST_IP", "127.0.0.1")
 
@@ -25,6 +27,32 @@ def recv_exact(sock, n):
             raise OSError("eof after {0}/{1} bytes".format(len(buf), n))
         buf += chunk
     return bytes(buf)
+
+
+# --- tagged framing: (conn_id, seq) header + payload, for the data-integrity ---
+# oracle (p621).  A verbatim echo/proxy passes a frame through untouched, so no
+# server change is needed; the client tags every message and checks it comes back
+# with the SAME (conn_id, seq) -- catching cross-goroutine mis-delivery / torn or
+# interleaved recv / partial-write reassembly that an untagged got==payload hides.
+FRAME_HDR = struct.Struct(">IQQ")           # len(payload) | conn_id | seq
+
+
+def frame_msg(conn_id, seq, payload):
+    return FRAME_HDR.pack(len(payload),
+                          conn_id & 0xFFFFFFFFFFFFFFFF,
+                          seq & 0xFFFFFFFFFFFFFFFF) + payload
+
+
+def read_frame(sock):
+    """Read one framed message.  Returns (conn_id, seq, payload, raw_frame)."""
+    hdr = recv_exact(sock, FRAME_HDR.size)
+    ln, conn_id, seq = FRAME_HDR.unpack(hdr)
+    payload = recv_exact(sock, ln)
+    return conn_id, seq, payload, hdr + payload
+
+
+def frame_crc(raw_frame):
+    return zlib.crc32(raw_frame) & 0xFFFFFFFF
 
 
 def recv_until(sock, delim=b"\n", limit=65536):

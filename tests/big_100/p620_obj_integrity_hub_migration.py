@@ -183,6 +183,7 @@ def post(H):
     H.check(crosshub > 0,
             "coverage: 0/{0} deliveries crossed hubs -- oracle never exercised "
             "cross-hub migration (raise --hubs or --funcs)".format(verified))
+    H.require_no_fd_leak()          # channels, not sockets: fd set must be flat
     H.log("produced={0} verified={1} mismatch={2} rc_bad={3} crosshub={4}/{1}"
           .format(produced, verified, mismatch, rc_bad, crosshub))
 

@@ -781,6 +781,25 @@ class Harness(object):
                               self.deadlocked_at_end, self.slow_workers))
         return self.lost_workers == 0
 
+    def require_no_fd_leak(self, tol=None, label="fd"):
+        """Opt-in fd-leak oracle -- call from post().  A correct program drains
+        its sockets/pipes, so fd_end returns to ~fd_base (the fixed scheduler/
+        offload-pool fd floor is already in fd_base, captured post-setup, so it
+        is NOT counted here).  FAILS if the run ended holding more than `tol` fds
+        beyond baseline -- a real leak is a monotonic per-op climb, not a handful,
+        so the default is generous (env RUNLOOM_FD_LEAK_TOL, else 256).  Reliable
+        because fd_end is measured after full teardown (unlike a live goroutine
+        count).  Returns True iff no leak."""
+        if tol is None:
+            tol = int(os.environ.get("RUNLOOM_FD_LEAK_TOL", "256"))
+        if self.fd_base < 0 or self.fd_end < 0:
+            return True               # fd accounting unavailable (e.g. non-Linux)
+        leaked = self.fd_end - self.fd_base
+        if leaked > tol:
+            self.fail("{0} LEAK: {1} fd(s) still open at end (base={2} end={3}, "
+                      "tol={4})".format(label, leaked, self.fd_base, self.fd_end, tol))
+        return leaked <= tol
+
     def error(self, wid, exc):
         """Record an unexpected worker exception (counts as a failure)."""
         rep = "{0}: {1}".format(type(exc).__name__, exc)
