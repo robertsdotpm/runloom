@@ -147,10 +147,17 @@ void runloom_sched_stack_stats(runloom_stack_stats_t *out)
 void runloom_sched_init(runloom_sched_t *s)
 {
     /* Initial ring of 64 entries; grows on demand.  Empty when
-     * ready_head == ready_tail == 0. */
+     * ready_head == ready_tail == 0.  RUNLOOM_SHRINK starts at 4 so the ring
+     * wraps and doubles every few pushes (boundary transitions cheap). */
+#if defined(RUNLOOM_SHRINK)
+    s->ready_ring = (runloom_g_t **)PyMem_Calloc(4, sizeof(runloom_g_t *));
+    s->ready_cap = 4;
+    s->ready_mask = 3;
+#else
     s->ready_ring = (runloom_g_t **)PyMem_Calloc(64, sizeof(runloom_g_t *));
     s->ready_cap = 64;
     s->ready_mask = 63;
+#endif
     s->ready_head = 0;
     s->ready_tail = 0;
     s->current = NULL;
@@ -545,7 +552,13 @@ void runloom_g_entry(void *user)
 /* Cap chosen so a steady-state spawn-heavy workload (100k+ gs in
  * flight) doesn't continuously overflow back to PyMem_Free, while
  * still bounding memory to ~150 KB / thread when not in use. */
-#define RUNLOOM_G_SLAB_CAP 4096
+#ifndef RUNLOOM_G_SLAB_CAP
+#  if defined(RUNLOOM_SHRINK)
+#    define RUNLOOM_G_SLAB_CAP 8   /* test-shrink: spill to the global pool every few frees -> exercise cross-hub g balance */
+#  else
+#    define RUNLOOM_G_SLAB_CAP 4096
+#  endif
+#endif
 static RUNLOOM_TLS runloom_g_t *runloom_g_slab = NULL;
 static RUNLOOM_TLS int runloom_g_slab_size = 0;
 #ifdef RUNLOOM_DBG_BADCORO
@@ -564,7 +577,13 @@ unsigned long long runloom_next_wseq_ctr = 0;   /* source-hunt: ->next write seq
  * to the OS), so the try_incref UAF invariant is fully preserved -- they just
  * sit on the global freelist between uses.  The lock is amortized (once per
  * RUNLOOM_G_GLOBAL_BATCH ops), so the hot alloc/free stay lock-free. */
-#define RUNLOOM_G_GLOBAL_BATCH 256
+#ifndef RUNLOOM_G_GLOBAL_BATCH
+#  if defined(RUNLOOM_SHRINK)
+#    define RUNLOOM_G_GLOBAL_BATCH 4   /* test-shrink: move tiny batches -> exercise the balance-pool lock path often */
+#  else
+#    define RUNLOOM_G_GLOBAL_BATCH 256
+#  endif
+#endif
 static runloom_g_t   *runloom_g_global_slab = NULL;
 static int            runloom_g_global_size = 0;
 static runloom_mutex_t runloom_g_global_lock = RUNLOOM_MUTEX_STATIC_INIT;

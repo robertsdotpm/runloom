@@ -100,6 +100,12 @@ RUNLOOM_CTXCHECK_ABORT = os.environ.get("RUNLOOM_CTXCHECK_ABORT", "").strip() no
 # select path).  On Windows the same env var is honoured at *runtime* by
 # netpoll.c, so the build define is a no-op there.
 RUNLOOM_FORCE_SELECT = os.environ.get("RUNLOOM_NETPOLL", "").strip().lower() == "select"
+# RUNLOOM_SHRINK=1 compiles the lock-free structures (Chase-Lev deque, g-slab,
+# handle segments, ready ring, QSBR grace ring) with TINY capacities so
+# wraparound / steal-collision / block-exhaustion / segment-growth / epoch-flip
+# happen every few ops instead of once in millions -- letting ASan/TSan and the
+# fuzzers reach those boundary transitions cheaply.  Test/verify lane only.
+RUNLOOM_SHRINK = os.environ.get("RUNLOOM_SHRINK", "").strip() not in ("", "0", "no", "false")
 RUNLOOM_EXTRA_CFLAGS  = os.environ.get("RUNLOOM_EXTRA_CFLAGS", "").split()
 RUNLOOM_EXTRA_LDFLAGS = os.environ.get("RUNLOOM_EXTRA_LDFLAGS", "").split()
 
@@ -271,6 +277,8 @@ def detect_compile_args():
         args += ["-DRUNLOOM_LOCKRANK=1", "-DRUNLOOM_CTXCHECK=1"]
         if RUNLOOM_CTXCHECK_ABORT:
             args += ["-DRUNLOOM_LOCKRANK_ABORT=1", "-DRUNLOOM_CTXCHECK_ABORT=1"]
+    if RUNLOOM_SHRINK:
+        args.append("-DRUNLOOM_SHRINK=1")
     args += RUNLOOM_EXTRA_CFLAGS
     return args
 

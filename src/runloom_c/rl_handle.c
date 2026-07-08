@@ -17,7 +17,13 @@
 /* Slots are FIXED (never returned to the OS), so a stale pin always reads a real
  * slot (never freed memory) -- it just finds a mismatched generation or rc==0.
  * The table grows in SEGMENTS on demand. */
-#define RL_HANDLE_SEG_BITS   12u                     /* 4096 slots / segment */
+#ifndef RL_HANDLE_SEG_BITS
+#  if defined(RUNLOOM_SHRINK)
+#    define RL_HANDLE_SEG_BITS 4u                     /* test-shrink: 16 slots/seg -> frequent segment growth + freelist churn */
+#  else
+#    define RL_HANDLE_SEG_BITS 12u                    /* 4096 slots / segment */
+#  endif
+#endif
 #define RL_HANDLE_SEG_SLOTS  (1u << RL_HANDLE_SEG_BITS)
 #define RL_HANDLE_SEG_MASK   (RL_HANDLE_SEG_SLOTS - 1u)
 #define RL_HANDLE_MAX_SEGS   4096u                    /* up to 16M slots */

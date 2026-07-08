@@ -21,7 +21,11 @@
  * a bounded model checker (tools/verify/cbmc) can verify a small instance of
  * the algorithm quickly.  The production default is 4096. */
 #ifndef RUNLOOM_CLDEQUE_CAP
-#define RUNLOOM_CLDEQUE_CAP 4096
+#  if defined(RUNLOOM_SHRINK)
+#    define RUNLOOM_CLDEQUE_CAP 8   /* test-shrink: fill after 8 fresh gs -> hit the full-deque fallback + steal collisions every few ops */
+#  else
+#    define RUNLOOM_CLDEQUE_CAP 4096
+#  endif
 #endif
 #define RUNLOOM_CLDEQUE_MASK (RUNLOOM_CLDEQUE_CAP - 1)
 
