@@ -74,16 +74,22 @@ def build_spec(seed):
                  see build_grammar_spec.
     A `scale` draw (~12%) inflates the core counts to stress the stack-depot /
     fiber-admission at scale (model #1 / #7)."""
-    if os.environ.get("LIFEFUZZ_KIND") == "grammar":
+    forced = os.environ.get("LIFEFUZZ_KIND")
+    if forced == "grammar":
         return build_grammar_spec(seed)
-    # ~20% of seeds become resource-typed grammar programs, so the existing
-    # `lifefuzz.py run <seed>` soak fleet (rr chaos, millions of seeds) exercises
-    # grammar too -- no separate forever-wrapper to keep alive.  The grammar draw
-    # uses a SEPARATE rng stream so the other ~80% of seeds keep their EXACT
-    # original core/aio program (the main rng stream below is undisturbed -- the
-    # fleet's known corpus stays valid).  LIFEFUZZ_KIND=grammar forces all-grammar.
+    if forced == "sim":
+        return {"seed": seed, "kind": "sim"}
+    # ~20% grammar + ~10% sim-network, each via a SEPARATE rng stream so the other
+    # seeds keep their EXACT original core/aio program (main stream undisturbed --
+    # the fleet's known corpus stays valid).  So the existing `lifefuzz.py run
+    # <seed>` fleet (rr chaos, millions of seeds) soaks grammar AND the
+    # deterministic sim network too -- no separate forever-wrapper.  A sim run is
+    # single-thread + logical-clock deterministic, so its lost-wake oracle is the
+    # INSTANT count_deadlocked check, not a wall-clock timeout.
     if random.Random(seed ^ 0x9E3779B97F4A7C15).random() < 0.20:
         return build_grammar_spec(seed)
+    if random.Random(seed ^ 0x2545F4914F6CDD1D).random() < 0.10:
+        return {"seed": seed, "kind": "sim"}
     rng = random.Random(seed)
     kind = rng.choice(["core", "core", "core", "aio"])   # ~25% aio
     scale = (rng.random() < 0.12)
@@ -251,6 +257,10 @@ def run_program(spec, timeout=20.0):
         return run_aio_program(spec, timeout=timeout)
     if spec.get("kind") == "grammar":
         return run_grammar_program(spec, timeout=timeout)
+    if spec.get("kind") == "sim":
+        sys.path.insert(0, os.path.join(ROOT, "tools", "dst"))
+        import simnet                             # sets RUNLOOM_LOGICAL_CLOCK on import
+        return simnet.sim_program(spec["seed"], timeout=timeout)
 
     mode = spec["mode"]
     nchan = spec["nchan"]

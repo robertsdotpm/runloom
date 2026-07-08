@@ -50,6 +50,8 @@ class _Dir(object):
         self.buf = b""
         self.reset = False
         self.closed = False
+        self.pending = 0            # in-flight delayed deliveries not yet arrived
+        self.drain = runloom_c.Chan(1)   # signalled when pending hits 0 (for close)
 
 
 class SimSocket(object):
@@ -124,6 +126,13 @@ class SimSocket(object):
 
     def close(self):
         if self._tx is not None and not self._tx.closed:
+            # in-flight bytes are delivered BEFORE the close (a real FIN follows the
+            # data): drain pending delayed deliveries first, else close would race
+            # them and drop bytes.  PARK on the drain signal (not sched_yield -- a
+            # spin doesn't let the scheduler advance the logical clock to wake the
+            # sleeping delivery fiber); the delivery signals drain when pending hits 0.
+            while self._tx.pending > 0 and not self._tx.reset:
+                self._tx.drain.recv()
             self._tx.closed = True
             try:
                 self._tx.ch.close()
@@ -183,12 +192,15 @@ class SimNet(object):
     seeded rng.  `record(event)` receives a stream of structural events so the
     scenario's signature captures the byte trace."""
 
-    def __init__(self, rng, record=None, cap=64, cfg=None):
+    def __init__(self, rng, record=None, cap=64, cfg=None, spawn=None):
         self.rng = rng
         self.record = record or (lambda ev: None)
         self.cap = cap
         self._faults = _Faults(rng, cfg)
         self._listeners = {}                             # addr -> accept Chan
+        # delivery-fiber spawn: runloom_c.fiber (single-thread) by default;
+        # inject runloom_c.mn_fiber to run the sim under the baton (Slice 1).
+        self.spawn = spawn or runloom_c.fiber
 
     def socket(self):
         return SimSocket(self)
@@ -227,14 +239,101 @@ class SimNet(object):
         if delay > 0.0:
             # arrival timing: a delivery fiber sleeps on the LOGICAL clock, then
             # delivers -- so late/early interleavings are a function of the seed.
+            # `pending` is tracked so close() waits for in-flight bytes (a FIN
+            # follows the data; it must not race-drop them).
+            direction.pending += 1
+
             def deliver():
-                runloom_c.sched_sleep(delay)
-                if not direction.closed and not direction.reset:
-                    try:
-                        direction.ch.send(chunk)
-                    except Exception:
-                        pass
-            runloom_c.fiber(deliver)
+                try:
+                    runloom_c.sched_sleep(delay)
+                    if not direction.closed and not direction.reset:
+                        try:
+                            direction.ch.send(chunk)
+                        except Exception:
+                            pass
+                finally:
+                    direction.pending -= 1
+                    if direction.pending == 0:
+                        try:
+                            direction.drain.try_send(True)   # wake a close() waiter
+                        except Exception:
+                            pass
+            self.spawn(deliver)
         else:
             direction.ch.send(chunk)
         self.record(("deliver", len(chunk)))
+
+
+# --------------------------------------------------------------------------- #
+#  A self-contained deterministic sim WORKLOAD, for the soak fleet.            #
+# --------------------------------------------------------------------------- #
+def sim_program(seed, timeout=20.0):
+    """A pure-function-of-seed simulated-network workload for the lifefuzz fleet:
+    K clients each send M tokens to one server over sim sockets; the server echoes
+    each connection's tokens back; every client must get its own multiset back.
+
+    Reliable-but-jittery (loss/reset off so it terminates by fixed byte count;
+    delay/short-write/partial on for interleaving coverage).  Checked by (1) exact
+    per-client token CONSERVATION and (2) the INSTANT lost-wake oracle
+    (count_deadlocked -- under the logical clock a stranded parked fiber is a real
+    deadlock in microseconds, no wall-clock timeout).  Returns (ok, reason)."""
+    import random
+    rng = random.Random(seed)
+    k = rng.randint(1, 5)                                # clients
+    m = rng.randint(1, 8)                                # tokens per client
+    net = SimNet(rng, cfg={"P_LOSS": 0.0, "P_RESET": 0.0, "P_CONNECT_FAIL": 0.0})
+    addr = ("srv", 7)
+    srv = net.socket()
+    srv.bind(addr)
+    srv.listen(k)
+    results = {}
+
+    def server_conn(conn):
+        got = b""
+        while len(got) < m:
+            data = conn.recv(m - len(got))
+            if not data:
+                break
+            got += data
+        conn.sendall(got)                               # echo this client's bytes
+        conn.close()
+
+    def acceptor():
+        for _ in range(k):
+            conn, _ = srv.accept()
+            runloom_c.fiber(lambda c=conn: server_conn(c))
+
+    def client(cid):
+        c = net.socket()
+        c.connect(addr)
+        for i in range(m):
+            c.sendall(bytes([(cid * 13 + i) & 0xff]))
+        back = b""
+        while len(back) < m:
+            data = c.recv(m - len(back))
+            if not data:
+                break
+            back += data
+        results[cid] = sum(back)                         # a per-client checksum
+        c.close()
+
+    runloom_c.set_deadlock_mode(1)                       # warn -> recover transients
+    dl0 = runloom_c.count_deadlocked()
+    runloom_c.fiber(acceptor)
+    for cid in range(k):
+        runloom_c.fiber(lambda cid=cid: client(cid))
+    runloom_c.run()
+    srv.close()
+
+    dl = runloom_c.count_deadlocked() - dl0
+    if dl > 0:
+        return False, "DEADLOCK ({0} unwakeable fiber(s) -- lost wake) seed={1}".format(dl, seed)
+    # exact per-client conservation: each client's echoed checksum must match
+    for cid in range(k):
+        want = sum((cid * 13 + i) & 0xff for i in range(m))
+        if results.get(cid) != want:
+            return False, ("CONSERVATION client={0} got={1} want={2} seed={3}"
+                           .format(cid, results.get(cid), want, seed))
+    if runloom_c._self_check(0) != 0:
+        return False, "SELF_CHECK seed={0}".format(seed)
+    return True, "ok"
