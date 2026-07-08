@@ -60,6 +60,41 @@ def fingerprint(trace):
     return edges
 
 
+def alias_pairs(trace):
+    """Cross-hub ALIAS-PAIR coverage (KRACE / CONZZER): the set of ordered
+    (objA, objB) cells where a segment touching shared object objA is immediately
+    followed -- in the subsequence of OBJECT-touching segments -- by a segment
+    touching objB on a DIFFERENT hub.  obj==0 segments (CPU / sched_sleep / lock)
+    are independent and collapsed out; trace[i].obj is attributed to hub[i-1] (the
+    segment that ran BEFORE grant i), matching chess_explore.mazurkiewicz_key.
+
+    A new (objA, objB) means two shared objects were interleaved across hubs in an
+    order not seen before -- the concurrency the preemption-EDGE fingerprint (which
+    is about hub-switch positions, blind to WHICH objects the switched segments
+    touch) cannot distinguish.  Rewarding it steers the fuzzer toward diverse
+    cross-object races (the KRACE alias-coverage idea, on the baton harness)."""
+    pairs = set()
+    prev = None                                  # (hub, obj) of the last toucher
+    for i in range(1, len(trace)):
+        obj = trace[i].get("obj", 0)
+        if not obj:
+            continue
+        hub = trace[i - 1].get("hub")
+        if prev is not None and prev[0] != hub:
+            pairs.add((prev[1], obj))            # cross-hub objA -> objB
+        prev = (hub, obj)
+    return pairs
+
+
+def schedule_cover(trace):
+    """Combined schedule-coverage: preemption edges AND cross-hub alias-pairs,
+    namespaced so the two dimensions never collide.  A schedule is novel (saved to
+    the corpus) if it hits a new edge OR a new alias-pair."""
+    cov = set(("edge",) + e for e in fingerprint(trace))
+    cov |= set(("pair", a, b) for (a, b) in alias_pairs(trace))
+    return cov
+
+
 def realized_choices(trace):
     return [rec.get("k", 0) for rec in trace]
 
@@ -145,7 +180,7 @@ def main(argv):
               "mn_init(>1)+mn_fiber+sched_sleep under RUNLOOM_MN_SEED and be "
               "REPLAYABLE (no offload/real-IO). last output: {0!r}".format(last[:80]))
         return 2
-    coverage |= fingerprint(trace)
+    coverage |= schedule_cover(trace)
     seed_traces = {tuple(): trace}
 
     import time as _t
@@ -170,15 +205,18 @@ def main(argv):
                           " ".join("{0}={1}".format(k, v) for k, v in extra_env.items())))
             if args.teeth:
                 break
-        fp = fingerprint(trace)
+        fp = schedule_cover(trace)
         if fp - coverage:
             coverage |= fp
             corpus.append(mp)
             seed_traces[tuple(mp)] = trace
             new_cov_hits += 1
 
-    print("\nchess_greybox: {0} iters, coverage={1} edges, corpus={2}, {3} findings"
-          .format(iters, len(coverage), len(corpus), len(findings)))
+    n_edge = sum(1 for c in coverage if c[0] == "edge")
+    n_pair = sum(1 for c in coverage if c[0] == "pair")
+    print("\nchess_greybox: {0} iters, coverage={1} ({2} edges + {3} alias-pairs), "
+          "corpus={4}, {5} findings"
+          .format(iters, len(coverage), n_edge, n_pair, len(corpus), len(findings)))
 
     if args.teeth:
         ok = any(o == "BUG" for _p, o, _l in findings)
