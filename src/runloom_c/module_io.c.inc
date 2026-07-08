@@ -30,6 +30,7 @@
 static PyObject *runloom_io_partial      = NULL;   /* functools.partial */
 static PyObject *runloom_io_tcpconn_type = NULL;   /* runloom_c.TCPConn */
 static PyObject *runloom_io_acceptor_fn  = NULL;   /* PyCFunction wrapping the accept loop */
+static PyObject *runloom_io_handler_wrap = NULL;   /* _serve_handler_wrap(handler, conn) */
 
 /* Default handler-fiber stack: user request handlers can recurse deep into
  * C (TLS, parsers), like the aio bridge's I/O fibers -- pin 512 KB
@@ -56,9 +57,20 @@ static PyObject *m_serve_acceptor(PyObject *self, PyObject *args)
             PyErr_Clear();
             break;
         }
-        /* Spawn the handler fiber: partial(handler, conn)().  partial holds
-         * its own ref to conn; we drop ours. */
-        part = PyObject_CallFunctionObjArgs(runloom_io_partial, handler, conn, NULL);
+        /* Spawn the handler fiber: partial(_serve_handler_wrap, handler, conn)().
+         * The wrap ALWAYS closes conn at handler completion (normal OR raise),
+         * in the goroutine's own context.  Without it, a handler that raises
+         * before conn.close() strands its peer: serve() issues no close on the
+         * error path, so the accepted fd is closed only when the completed
+         * DETACHED handler goroutine is reaped -- which for a detached g happens
+         * lazily (when the hub next runs another g) or at teardown, NOT at its
+         * own completion.  So the tail handler of a quiet burst is never reaped,
+         * its conn never released, and the peer hangs on a half-open socket.
+         * close() is idempotent, so a handler that already closes pays nothing.
+         * partial holds its own refs; we drop ours. */
+        part = PyObject_CallFunctionObjArgs(runloom_io_partial,
+                                            runloom_io_handler_wrap, handler,
+                                            conn, NULL);
         Py_DECREF(conn);
         if (part == NULL) { PyErr_Clear(); continue; }
         h = runloom_mn_fiber(part, RUNLOOM_SERVE_HANDLER_STACK);
@@ -93,6 +105,31 @@ static int runloom_io_lazy_init(PyObject *module)
         runloom_io_acceptor_fn =
             PyCFunction_NewEx(&runloom_serve_acceptor_def, module, NULL);
         if (runloom_io_acceptor_fn == NULL) return -1;
+    }
+    if (runloom_io_handler_wrap == NULL) {
+        /* Build _serve_handler_wrap(handler, conn) once: run the handler, then
+         * ALWAYS close conn (normal exit OR exception) so a raising handler
+         * cannot strand its peer -- see the spawn site in m_serve_acceptor. */
+        PyObject *ns = PyDict_New();
+        if (ns == NULL) return -1;
+        PyObject *bi = PyEval_GetBuiltins();               /* borrowed */
+        if (bi != NULL) PyDict_SetItemString(ns, "__builtins__", bi);
+        PyObject *r = PyRun_String(
+            "def _serve_handler_wrap(handler, conn):\n"
+            "    try:\n"
+            "        handler(conn)\n"
+            "    finally:\n"
+            "        try:\n"
+            "            conn.close()\n"
+            "        except OSError:\n"
+            "            pass\n",
+            Py_file_input, ns, ns);
+        Py_XDECREF(r);
+        if (r == NULL) { Py_DECREF(ns); return -1; }
+        runloom_io_handler_wrap = PyDict_GetItemString(ns, "_serve_handler_wrap");
+        Py_XINCREF(runloom_io_handler_wrap);               /* borrowed -> own */
+        Py_DECREF(ns);
+        if (runloom_io_handler_wrap == NULL) return -1;
     }
     return 0;
 }
