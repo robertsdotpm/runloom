@@ -80,6 +80,32 @@ def _patched_os_writev(fd, buffers):
     return _blocking_call(_orig_os_writev, fd, buffers)
 
 
+_orig_os_readinto = None
+
+
+def _patched_os_readinto(fd, buffer):
+    # os.readinto (3.14+): read into a caller-provided writable buffer, return
+    # the byte count -- the read/readv analogue.  CPython 3.14's
+    # _pyio.FileIO.readall()/readinto() route through os.readinto (3.13 used
+    # os.read), so a buffered stream .read() on a pipe/tty would block the whole
+    # hub without this patch.  Cooperative on pollable fds, pool offload on
+    # regular files; the parked fiber keeps `buffer` alive (same contract as
+    # readv's buffers).
+    if not _in_fiber():
+        return _orig_os_readinto(fd, buffer)
+    if _fd_pollable(fd):
+        try:
+            os.set_blocking(fd, False)
+        except OSError:
+            return _blocking_call(_orig_os_readinto, fd, buffer)
+        while True:
+            try:
+                return _orig_os_readinto(fd, buffer)
+            except (BlockingIOError, InterruptedError):
+                _wait_fd_coop(fd, READ)
+    return _blocking_call(_orig_os_readinto, fd, buffer)
+
+
 _orig_os_close = None
 
 
@@ -94,7 +120,7 @@ def _patched_os_close(fd):
 
 def _patch_os():
     global _orig_os_read, _orig_os_write, _orig_os_close
-    global _orig_os_readv, _orig_os_writev
+    global _orig_os_readv, _orig_os_writev, _orig_os_readinto
     _orig_os_read  = os.read
     _orig_os_write = os.write
     _orig_os_close = os.close
@@ -107,6 +133,9 @@ def _patch_os():
     if hasattr(os, "writev"):
         _orig_os_writev = os.writev
         os.writev = _patched_os_writev
+    if hasattr(os, "readinto"):        # 3.14+: buffered .read() routes here
+        _orig_os_readinto = os.readinto
+        os.readinto = _patched_os_readinto
 
 
 def _unpatch_os():
@@ -117,6 +146,8 @@ def _unpatch_os():
         os.readv = _orig_os_readv
     if _orig_os_writev is not None:
         os.writev = _orig_os_writev
+    if _orig_os_readinto is not None:
+        os.readinto = _orig_os_readinto
 
 
 
