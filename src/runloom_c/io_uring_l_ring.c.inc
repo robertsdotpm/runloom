@@ -85,12 +85,31 @@ runloom_iouring_ring_t *runloom_iouring_ring_create(int defer_taskrun)
         p.flags = IORING_SETUP_SINGLE_ISSUER;
         fd = sys_io_uring_setup(runloom_iouring_setup_entries(), &p);
         defer_taskrun = 0;
+        /* Capability probe-vs-manifest (QA-steal-V2 #10): a compiled-EXPECTED
+         * feature silently resolved to the fallback.  Flag it ONCE so a soak /
+         * kernel-matrix run notices the degrade instead of shipping green on a
+         * lesser feature level (this is exactly the class of the UAPI-macro TU
+         * trap -- a compiled feature that quietly becomes a no-op). */
+        {
+            static int warned = 0;
+            if (__atomic_exchange_n(&warned, 1, __ATOMIC_RELAXED) == 0)
+                fprintf(stderr, "[runloom] io_uring capability degrade: "
+                        "DEFER_TASKRUN unsupported (kernel < 6.1) -- hub ring "
+                        "fell back to SINGLE_ISSUER\n");
+        }
     }
     if (fd < 0 && errno == EINVAL) {
         /* SINGLE_ISSUER unsupported too (5.1-5.17 kernels).  Plain
          * setup -- still correct, just multi-issuer-tolerant. */
         memset(&p, 0, sizeof(p));
         fd = sys_io_uring_setup(runloom_iouring_setup_entries(), &p);
+        {
+            static int warned = 0;
+            if (__atomic_exchange_n(&warned, 1, __ATOMIC_RELAXED) == 0)
+                fprintf(stderr, "[runloom] io_uring capability degrade: "
+                        "SINGLE_ISSUER unsupported (kernel < 5.18) -- hub ring "
+                        "fell back to plain multi-issuer\n");
+        }
     }
     if (fd < 0) {
         free(r);
