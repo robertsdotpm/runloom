@@ -166,6 +166,40 @@ static PyObject *m_fault_reset(PyObject *self, PyObject *unused)
     Py_RETURN_NONE;
 }
 
+/* Sometimes()/reachability counters (runloom_cover.h).  _cover_report() returns
+ * {name: hits}; a fuzz/soak session asserts every value > 0 to prove the chaos
+ * drove execution into the rescue paths.  Zeros unless built -DRUNLOOM_COVER. */
+static PyObject *m_cover_report(PyObject *self, PyObject *unused)
+{
+    PyObject *d;
+    int i, n;
+    (void)self; (void)unused;
+    d = PyDict_New();
+    if (d == NULL) return NULL;
+    n = runloom_cover_num();
+    for (i = 0; i < n; i++) {
+        const char *nm = runloom_cover_name(i);
+        PyObject *v = PyLong_FromUnsignedLong(runloom_cover_get(i));
+        if (nm == NULL || v == NULL) { Py_XDECREF(v); Py_DECREF(d); return NULL; }
+        if (PyDict_SetItemString(d, nm, v) < 0) { Py_DECREF(v); Py_DECREF(d); return NULL; }
+        Py_DECREF(v);
+    }
+    return d;
+}
+
+static PyObject *m_cover_reset(PyObject *self, PyObject *unused)
+{
+    (void)self; (void)unused;
+    runloom_cover_reset();
+    Py_RETURN_NONE;
+}
+
+static PyObject *m_cover_enabled(PyObject *self, PyObject *unused)
+{
+    (void)self; (void)unused;
+    return PyBool_FromLong(runloom_cover_enabled());
+}
+
 static PyObject *m_netpoll_poll(PyObject *self, PyObject *unused)
 {
     (void)self; (void)unused;

@@ -636,6 +636,7 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
                     runloom_mnwake_trace_event("HUB_DRAIN", (unsigned long)(uintptr_t)sub, 0);
                     runloom_sched_ready_push(&h->sched, sub);
                 } else if (runloom_cldeque_push(&h->deque, sub) != 0) {
+                    RUNLOOM_COVER_HIT(RUNLOOM_COV_DEQUE_FULL_FALLBACK);
                     /* Deque full (>RUNLOOM_CLDEQUE_CAP=4096 fresh gs on this
                      * hub -- e.g. a big spawn burst at low hub count, the
                      * H=2/N>=8K case).  Fall back to the local ready FIFO,
@@ -753,6 +754,7 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
              * entry's queue ref when the resume ends. */
             g = runloom_mn_global_runq_pull();
             if (g != NULL) {
+                RUNLOOM_COVER_HIT(RUNLOOM_COV_GLOBAL_RUNQ_PULL);
                 from_runq = 1;
 #ifdef RUNLOOM_DBG_BADCORO
                 gsrc = 4;      /* global run-queue */
@@ -783,6 +785,7 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
                 if (i == h->id) continue;
                 g = (runloom_g_t *)runloom_cldeque_steal(&runloom_hubs[i].deque);
                 if (g != NULL) {
+                    RUNLOOM_COVER_HIT(RUNLOOM_COV_STEAL_HIT);
 #ifdef RUNLOOM_DBG_BADCORO
                     gsrc = 5; gvic = i;   /* stole from hub i's deque */
 #endif

@@ -699,7 +699,10 @@ runloom_g_t *runloom_g_slab_alloc(void)
     if (RUNLOOM_SPAWN_FINJ(RUNLOOM_FAULT_SPAWN_G)) return NULL;
     /* TLS slab empty -> pull a batch from the cross-hub global pool before
      * falling to a cold calloc (the producer-hub-drains fix). */
-    if (g == NULL) g = runloom_g_global_refill();
+    if (g == NULL) {
+        g = runloom_g_global_refill();
+        if (g != NULL) RUNLOOM_COVER_HIT(RUNLOOM_COV_G_SLAB_REFILL);
+    }
     if (g != NULL) {
         runloom_g_slab = g->next;
         runloom_g_slab_size--;
@@ -779,7 +782,10 @@ void runloom_g_slab_free(runloom_g_t *g)
     runloom_g_slab_size++;
     /* over-cap -> spill a batch to the cross-hub global pool so a producer hub
      * on another thread can refill from it instead of callocing. */
-    if (runloom_g_slab_size > RUNLOOM_G_SLAB_CAP) runloom_g_global_flush();
+    if (runloom_g_slab_size > RUNLOOM_G_SLAB_CAP) {
+        RUNLOOM_COVER_HIT(RUNLOOM_COV_G_SLAB_SPILL);
+        runloom_g_global_flush();
+    }
 }
 
 /* ---- teardown reclaim (mn_fini) -------------------------------------------

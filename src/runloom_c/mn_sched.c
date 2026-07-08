@@ -51,6 +51,7 @@
 #include "plat.h"
 #include "plat_compat.h"
 #include "runloom_lockrank.h"
+#include "runloom_cover.h"   /* Sometimes() reachability counters */
 #include "mn_sched.h"
 #include "runloom_sched.h"
 #include "netpoll.h"

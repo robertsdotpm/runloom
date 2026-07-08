@@ -734,3 +734,47 @@ void runloom_ctx_parkable_violation(const char *where, int held_rank, int noyiel
 #endif
 }
 #endif
+
+/* ---- named reachability ("Sometimes()") counters (runloom_cover.h) -------- */
+#include "runloom_cover.h"
+
+static const char *const runloom_cov_names[RUNLOOM_COV__COUNT] = {
+    "steal_hit",
+    "deque_full_fallback",
+    "global_runq_pull",
+    "g_slab_spill",
+    "g_slab_refill",
+    "coro_pool_miss",
+};
+
+#if defined(RUNLOOM_COVER)
+static unsigned long runloom_cov_hits[RUNLOOM_COV__COUNT];
+void runloom_cover_bump(runloom_cov_point_t pt)
+{
+    if ((int)pt >= 0 && (int)pt < RUNLOOM_COV__COUNT)
+        __atomic_add_fetch(&runloom_cov_hits[pt], 1, __ATOMIC_RELAXED);
+}
+unsigned long runloom_cover_get(int pt)
+{
+    if (pt < 0 || pt >= RUNLOOM_COV__COUNT) return 0;
+    return __atomic_load_n(&runloom_cov_hits[pt], __ATOMIC_RELAXED);
+}
+void runloom_cover_reset(void)
+{
+    int i;
+    for (i = 0; i < RUNLOOM_COV__COUNT; i++)
+        __atomic_store_n(&runloom_cov_hits[i], 0, __ATOMIC_RELAXED);
+}
+int runloom_cover_enabled(void) { return 1; }
+#else
+unsigned long runloom_cover_get(int pt) { (void)pt; return 0; }
+void runloom_cover_reset(void) { }
+int runloom_cover_enabled(void) { return 0; }
+#endif
+
+const char *runloom_cover_name(int pt)
+{
+    if (pt < 0 || pt >= RUNLOOM_COV__COUNT) return NULL;
+    return runloom_cov_names[pt];
+}
+int runloom_cover_num(void) { return RUNLOOM_COV__COUNT; }

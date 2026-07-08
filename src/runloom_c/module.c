@@ -46,6 +46,7 @@ static inline int PyDict_GetItemRef(PyObject *d, PyObject *key, PyObject **resul
 #include "coro.h"
 #include "runloom_iframe.h"   /* runloom_arm_fiber_stackprot (3.14 SP-check arm) */
 #include "runloom_sched.h"
+#include "runloom_cover.h"   /* Sometimes() reachability accessors */
 #include "netpoll.h"
 #include "io_uring.h"   /* runloom_iouring_cancel_g for the cancel path */
 #include <stdlib.h>   /* getenv -- the test-only fd-fault guard below */

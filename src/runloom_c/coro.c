@@ -12,6 +12,7 @@
 #include "plat_atomic.h"    /* __atomic_*/__ATOMIC_* shim for MSVC (Windows build) */
 #include "plat_compat.h"    /* runloom_mutex_t for the shared stack depot */
 #include "runloom_lockrank.h"
+#include "runloom_cover.h"   /* Sometimes() reachability counters (no-op unless -DRUNLOOM_COVER) */
 
 #include <stdlib.h>
 #include <string.h>
@@ -1668,6 +1669,7 @@ runloom_coro_t *runloom_coro_new(size_t stack_size,
         return c;
     }
 
+    RUNLOOM_COVER_HIT(RUNLOOM_COV_CORO_POOL_MISS);
     c = (runloom_coro_t *)calloc(1, sizeof(*c));
     if (c == NULL) return NULL;
     c->entry = entry;

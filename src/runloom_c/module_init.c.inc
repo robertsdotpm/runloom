@@ -186,6 +186,13 @@ static PyMethodDef module_methods[] = {
      "site (WSAPOLL/SELECT/IOCP_WAIT/IOCP_SUBMIT) fired; -1 if unknown/non-Win."},
     {"_fault_reset", m_fault_reset, METH_NOARGS,
      "_fault_reset(): test-only.  Clear all Windows fault-injection counters."},
+    {"_cover_report", m_cover_report, METH_NOARGS,
+     "_cover_report(): dict {named-interesting-state: hits} for the Sometimes() "
+     "reachability oracle.  All zero unless built -DRUNLOOM_COVER (RUNLOOM_COVER=1)."},
+    {"_cover_reset", m_cover_reset, METH_NOARGS,
+     "_cover_reset(): zero the reachability counters (call at session start)."},
+    {"_cover_enabled", m_cover_enabled, METH_NOARGS,
+     "_cover_enabled(): True iff built with -DRUNLOOM_COVER."},
     {"netpoll_poll", m_netpoll_poll, METH_NOARGS,
      "netpoll_poll(): non-blocking netpoll drain -- deliver any ready fd "
      "readiness by waking parked fibers, then return.  Used by runloom.aio "

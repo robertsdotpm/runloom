@@ -106,6 +106,11 @@ RUNLOOM_FORCE_SELECT = os.environ.get("RUNLOOM_NETPOLL", "").strip().lower() == 
 # happen every few ops instead of once in millions -- letting ASan/TSan and the
 # fuzzers reach those boundary transitions cheaply.  Test/verify lane only.
 RUNLOOM_SHRINK = os.environ.get("RUNLOOM_SHRINK", "").strip() not in ("", "0", "no", "false")
+# RUNLOOM_COVER=1 compiles the named reachability ("Sometimes()") counters
+# (runloom_cover.h): a fuzz/soak session asserts every interesting concurrent
+# state was reached at least once, so a green run can't be vacuous.  Test lane
+# only -- a handful of relaxed atomic adds on rare scheduler decision points.
+RUNLOOM_COVER = os.environ.get("RUNLOOM_COVER", "").strip() not in ("", "0", "no", "false")
 RUNLOOM_EXTRA_CFLAGS  = os.environ.get("RUNLOOM_EXTRA_CFLAGS", "").split()
 RUNLOOM_EXTRA_LDFLAGS = os.environ.get("RUNLOOM_EXTRA_LDFLAGS", "").split()
 
@@ -279,6 +284,8 @@ def detect_compile_args():
             args += ["-DRUNLOOM_LOCKRANK_ABORT=1", "-DRUNLOOM_CTXCHECK_ABORT=1"]
     if RUNLOOM_SHRINK:
         args.append("-DRUNLOOM_SHRINK=1")
+    if RUNLOOM_COVER:
+        args.append("-DRUNLOOM_COVER=1")
     args += RUNLOOM_EXTRA_CFLAGS
     return args
 
