@@ -11,6 +11,7 @@
 #include "plat_compat.h"
 #include "runloom_lockrank.h"
 #include "plat_atomic.h"
+#include "rl_handle.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -375,6 +376,21 @@ int runloom_self_check(int verbose)
             s.bucket_unreachable);
         emit(-1, buf, (size_t)n);
         violations++;
+    }
+    /* Handle-table integrity (runtime-fsck extension, QA-steal-V2 #2): the
+     * self_check was netpoll-only; also sweep the rl_handle table so a lost
+     * incref/decref (live count != rl_handle_live) or a pin-vs-reclaim race
+     * (a live slot with a NULL ptr) is caught structurally, not as a later UAF. */
+    {
+        long hw = 0, ha = 0, hd = 0;
+        int hv = rl_handle_self_check(&hw, &ha, &hd);
+        if (hv) {
+            n = snprintf(buf, sizeof buf,
+                "[runloom-diag] self_check: handle-table -- live_walked=%ld "
+                "rl_handle_live=%ld dangling(rc>0,ptr=NULL)=%ld\n", hw, ha, hd);
+            emit(-1, buf, (size_t)n);
+            violations += hv;
+        }
     }
     if (verbose && violations == 0) {
         n = snprintf(buf, sizeof buf,

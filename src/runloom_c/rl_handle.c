@@ -212,3 +212,50 @@ long rl_handle_live_count(void)
 {
     return __atomic_load_n(&rl_handle_live, __ATOMIC_ACQUIRE);
 }
+
+/* Handle-table integrity sweep (QA-steal-V2 #2, "runtime fsck" extension of
+ * runloom_self_check, which was netpoll-only).  Two invariants from
+ * docs/dev/LIFECYCLE_INVARIANTS.md:
+ *   (a) the number of live slots (rc>0) equals rl_handle_live -- a mismatch is a
+ *       lost incref/decref or a torn genref (handle-table corruption / ABA);
+ *   (b) no live slot has a NULL ptr -- a pinned handle pointing at nothing is a
+ *       reclaim that raced a pin (a UAF-class corruption).
+ * Held under the growth lock (register + reclaim both take it), so the segment
+ * table and the freelist are stable across the walk and the count is exact at a
+ * quiescent checkpoint.  Fills the out-counts (any may be NULL) for the caller's
+ * diagnostic and returns the number of violated invariants (0 = clean). */
+int rl_handle_self_check(long *out_live_walked, long *out_live_atomic,
+                         long *out_dangling)
+{
+    long walked = 0, dangling = 0, live_atomic;
+    uint32_t nsegs, seg, i;
+
+    if (out_live_walked) *out_live_walked = 0;
+    if (out_live_atomic) *out_live_atomic = 0;
+    if (out_dangling)    *out_dangling = 0;
+    if (__atomic_load_n(&rl_handle_lock_ready, __ATOMIC_ACQUIRE) != 1)
+        return 0;                          /* table never initialised: vacuous */
+
+    runloom_mutex_lock(&rl_handle_lock);
+    nsegs = __atomic_load_n(&rl_handle_nsegs, __ATOMIC_ACQUIRE);
+    for (seg = 0; seg < nsegs; seg++) {
+        rl_handle_slot_t *S = rl_handle_segs[seg];
+        if (S == NULL) continue;
+        for (i = 0; i < RL_HANDLE_SEG_SLOTS; i++) {
+            uint64_t gr;
+            if (seg == 0 && i == 0) continue;              /* slot 0 reserved */
+            gr = __atomic_load_n(&S[i].genref, __ATOMIC_ACQUIRE);
+            if (RL_RC(gr) > 0) {
+                walked++;
+                if (S[i].ptr == NULL) dangling++;
+            }
+        }
+    }
+    live_atomic = __atomic_load_n(&rl_handle_live, __ATOMIC_ACQUIRE);
+    runloom_mutex_unlock(&rl_handle_lock);
+
+    if (out_live_walked) *out_live_walked = walked;
+    if (out_live_atomic) *out_live_atomic = live_atomic;
+    if (out_dangling)    *out_dangling = dangling;
+    return (walked != live_atomic ? 1 : 0) + (dangling > 0 ? 1 : 0);
+}

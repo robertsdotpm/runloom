@@ -61,4 +61,10 @@ void rl_handle_release_wait(rl_handle_t h);
 /* Diagnostics: live (registered, not-yet-reclaimed) count, for a leak gauge. */
 long rl_handle_live_count(void);
 
+/* Handle-table integrity sweep (runtime-fsck): asserts live-slot count ==
+ * rl_handle_live and no live slot has a NULL ptr.  Returns the number of
+ * violated invariants (0 = clean); fills out-counts (any may be NULL). */
+int rl_handle_self_check(long *out_live_walked, long *out_live_atomic,
+                         long *out_dangling);
+
 #endif /* RL_HANDLE_H */
