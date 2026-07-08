@@ -438,13 +438,28 @@ void runloom_mn_fini(void)
         PyMem_Free(runloom_hubs[i].stage_tail);
         runloom_hubs[i].stage_tail = NULL;
     }
-    /* Reclaim the g-struct slab pool.  Every hub thread is joined (its TLS slab
-     * already spliced into the global pool at hub_main exit) and all leftover gs
-     * have been drained above into THIS thread's slab (runloom_g_decref /
-     * release_timers free into the per-thread slab), so this is the last point
-     * any g is freed.  reclaim() folds in the main slab and returns the whole
-     * pool to the OS -- closing the per-fiber RSS leak across mn_init/mn_fini
-     * cycles.  Must run before the fiber registry / interp teardown that follows. */
+    /* Reclaim the g-struct slab pool: fold in the main slab + return the whole
+     * pool to the OS, closing the per-fiber RSS leak across mn_init/mn_fini.
+     * Every HUB thread is joined here -- but the blockpool WORKER threads are NOT
+     * (runloom_blockpool_fini is never called; they persist across cycles).  A
+     * worker finishing a job whose fiber was resumed EARLY (a spurious/cancel
+     * wake, runloom_blockpool.c:200) still calls runloom_sched_wake_safe(g) -> an
+     * atomic g->wake_pending write AFTER that fiber completed and its g was
+     * retained onto the slab -- and mn_run returns on per-hub-pending==0 without
+     * ever consulting bp_inflight.  So free()ing the slab now can race that
+     * write: a real (rare, teardown) use-after-free.  Wait for the blockpool to
+     * quiesce first; inflight()==0 (ACQUIRE) pairs with the worker's
+     * post-wake_safe bp_inflight-- (ACQ_REL), so every wake_safe is then complete
+     * and ordered before the free.  Bounded (~1s) so a wedged worker can't hang
+     * teardown -- reclaim() must run before the registry/interp teardown below. */
+    {
+        int drain_spins = 0;
+        while (runloom_blockpool_inflight() != 0 && drain_spins < 100000) {
+            struct timespec nap = {0, 10000};   /* 10us */
+            nanosleep(&nap, NULL);
+            drain_spins++;
+        }
+    }
     runloom_g_slab_reclaim();
     /* Free the datastack-chunk graveyard the hubs spliced their TLS chunk caches
      * into at exit.  Every hub is joined, so no foreign sys._current_frames reader
