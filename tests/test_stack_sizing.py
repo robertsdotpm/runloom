@@ -37,8 +37,14 @@ class TestStackSizeOverride(unittest.TestCase):
     def test_set_stack_size_changes_default(self):
         original = runloom_c.get_stack_size()
         try:
-            runloom_c.set_stack_size(64 * 1024)
-            self.assertEqual(runloom_c.get_stack_size(), 64 * 1024)
+            # Use a size above the FT-3.14 fiber stack floor
+            # (RUNLOOM_FT314_MIN_STACK_SIZE = 256 KiB, a deliberate p226 fix in
+            # commit 289ecb99) and above the 512 KiB default, so this checks
+            # "set changes the default" without depending on a sub-floor value
+            # the runtime intentionally clamps up.  1 MiB is honored exactly on
+            # both 3.13 (16 KiB floor) and 3.14t (256 KiB floor).
+            runloom_c.set_stack_size(1024 * 1024)
+            self.assertEqual(runloom_c.get_stack_size(), 1024 * 1024)
         finally:
             runloom_c.set_stack_size(original)
 
