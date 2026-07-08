@@ -62,6 +62,10 @@ esac
 STAMP="$PRESET"
 RUNDIR="$OUT/matrix_${PRESET}"
 mkdir -p "$RUNDIR"
+# Fresh slate: triage_san.py scans the WHOLE RUNDIR, so STALE tsan.*/asan.* logs
+# from earlier runs (e.g. reports of bugs since fixed) would pollute this run's
+# verdict into a spurious FAIL.  Clear them so the verdict reflects THIS run only.
+rm -f "$RUNDIR"/tsan.* "$RUNDIR"/asan.* 2>/dev/null
 SANLOG_TAG=""
 
 build_normal() {
