@@ -111,10 +111,25 @@ test_rl_handle-asan: $(RL_HANDLE_SRC)
 test_rl_handle-tsan: $(RL_HANDLE_SRC)
 	$(CC) -O1 -g -fsanitize=thread $(RL_HANDLE_CF) $(RL_HANDLE_SRC) -o test_rl_handle-tsan
 
+# Barrier-synchronized race amplification (QA-steal: jcstress @Actor idiom).
+# #includes rl_handle.c directly + links cldeque.c; drives both primitives
+# through a reusable pthread_barrier harness.  Run under TSan (now fiber-correct)
+# for a reliable per-primitive race finder.
+BARRIER_SRC := test_barrier_race.c ../../src/runloom_c/cldeque.c
+BARRIER_CF  := -std=gnu11 -D_GNU_SOURCE -Wall -Wextra -Wno-unused-parameter -I../../src/runloom_c -pthread
+
+test_barrier_race: $(BARRIER_SRC)
+	$(CC) -O2 $(BARRIER_CF) $(BARRIER_SRC) -o test_barrier_race
+test_barrier_race-asan: $(BARRIER_SRC)
+	$(CC) -O1 -g -fsanitize=address $(BARRIER_CF) $(BARRIER_SRC) -o test_barrier_race-asan
+test_barrier_race-tsan: $(BARRIER_SRC)
+	$(CC) -O1 -g -fsanitize=thread $(BARRIER_CF) $(BARRIER_SRC) -o test_barrier_race-tsan
+
 clean:
 	rm -f bench_mn bench_mn-asan bench_mn-tsan bench_mn-ubsan \
 	      bench_server_runloom bench_server_runloom-asan \
 	      bench_server_runloom-tsan bench_server_runloom-ubsan \
-	      test_cldeque test_cldeque-asan test_cldeque-tsan test_cldeque-ubsan
+	      test_cldeque test_cldeque-asan test_cldeque-tsan test_cldeque-ubsan \
+	      test_barrier_race test_barrier_race-asan test_barrier_race-tsan
 
 .PHONY: clean

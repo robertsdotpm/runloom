@@ -58,6 +58,7 @@ echo "  deque stress: $PUSHES pushes x $THIEVES thieves x $ROUNDS rounds"
 [ -z "$SETARCH" ] && echo "  (setarch not found; TSan may abort under high-entropy ASLR)"
 echo "-- building --"
 make -C "$TC" test_cldeque test_cldeque-asan test_cldeque-tsan test_cldeque-ubsan \
+              test_barrier_race test_barrier_race-asan test_barrier_race-tsan \
     >/tmp/runloom_san_build.log 2>&1 \
     && echo "  build OK" || { echo "  BUILD FAILED -- see /tmp/runloom_san_build.log"; tail -20 /tmp/runloom_san_build.log; exit 2; }
 
@@ -69,6 +70,17 @@ run_one cldeque-tsan  1 "TSAN_OPTIONS=halt_on_error=1:second_deadlock_stack=1" \
         "$TC/test_cldeque-tsan" "$PUSHES" "$THIEVES" "$ROUNDS"
 run_one cldeque-ubsan 0 "UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1" \
         "$TC/test_cldeque-ubsan" "$PUSHES" "$THIEVES" "$ROUNDS"
+
+# Barrier-amplified per-primitive race finder (deque push/steal + handle
+# pin/reclaim), collide-every-round under a fiber-correct TSan.
+BR_T="${RUNLOOM_BARRIER_THREADS:-4}"; BR_R="${RUNLOOM_BARRIER_ROUNDS:-20000}"
+for m in deque handle; do
+  run_one "barrier-$m-plain" 0 "" "$TC/test_barrier_race" "$m" "$BR_T" "$BR_R"
+  run_one "barrier-$m-asan"  0 "ASAN_OPTIONS=detect_leaks=$DETECT_LEAKS:halt_on_error=1" \
+          "$TC/test_barrier_race-asan" "$m" "$BR_T" "$BR_R"
+  run_one "barrier-$m-tsan"  1 "TSAN_OPTIONS=halt_on_error=1:second_deadlock_stack=1" \
+          "$TC/test_barrier_race-tsan" "$m" "$BR_T" "$BR_R"
+done
 
 echo "----------------------------------------------------------"
 echo "  $pass passed, $fail failed"
