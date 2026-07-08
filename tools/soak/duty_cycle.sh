@@ -51,11 +51,14 @@ done
 if [ "$SMOKE" = "1" ]; then
   HH_DUR=20; LF_DUR=15; RR_DUR=20; DO_MATRIX_SMOKE=1
   FUZZ_DUR=20; PCT_SEEDS=8; PCT_SWEEP_SEEDS=2; WAKE_SKEW=4; WAKE_REPS=1; MUT_MAX=3; FS_LIMIT="--limit 4"
+  SEC_DUR=15; SEC_CAPI_ITERS=200; SEC_BRIDGE_ITERS=100; SEC_TLS_ITERS=100
 else
   # 4h hang_hunter, 2h lifefuzz, 2h rr-chaos (rr-chaos SKIPs in seconds while
   # the host vPMU can't record -- see tools/soak/rr_chaos.sh)
   HH_DUR=14400; LF_DUR=7200; RR_DUR=7200; DO_MATRIX_SMOKE=0
   FUZZ_DUR=1800; PCT_SEEDS=200; PCT_SWEEP_SEEDS=10; WAKE_SKEW=8; WAKE_REPS=3; MUT_MAX=40; FS_LIMIT=""
+  # 2h security-fuzz budget (S6-S9); S1-S4 deterministic subset runs once first.
+  SEC_DUR=7200; SEC_CAPI_ITERS=8000; SEC_BRIDGE_ITERS=4000; SEC_TLS_ITERS=1500
 fi
 
 load_ok() {
@@ -321,6 +324,39 @@ if command -v clang-18 >/dev/null 2>&1 && { [ "$SMOKE" = "1" ] || [ "$(date +%u)
   else
     echo "-- exhaustive fault sweep SKIPPED (load too high) --"
   fi
+fi
+
+# --- stage 6: security suite -- the one verification layer not otherwise on a
+# loop (tools/security/).  Runs the S1-S4 DETERMINISTIC oracles once (recycled-
+# stack scrub / signal storm / cross-hub refcount race / valgrind memcheck), then
+# hammers the S6-S9 randomised fuzzers (fuzz_capi / fuzz_bridge / fuzz_tls_bridge)
+# for the nightly budget with a fresh seed each iteration.  Load-gated +
+# inbox-on-finding like every other stage. ---
+if load_ok; then
+  echo "-- security: S1-S4 deterministic once, then S6-S9 fuzz for ${SEC_DUR}s --"
+  SEC_OUT="$INBOX_ARTIFACTS/security"; mkdir -p "$SEC_OUT"
+  if ! env PYTHON="$PY" RUNLOOM_SEC_FAST=1 tools/security/run_all.sh \
+        >"$SEC_OUT/deterministic.log" 2>&1; then
+    inbox "security-fail" "security S1-S4 deterministic subset FAILED" "$SEC_OUT/deterministic.log"
+  fi
+  HAVE_CRYPTO=0; "$PY" -c 'import cryptography' 2>/dev/null && HAVE_CRYPTO=1
+  sec_deadline=$(( $(date +%s) + SEC_DUR )); n=0
+  while [ "$(date +%s)" -lt "$sec_deadline" ]; do
+    load_ok || { sleep 5; continue; }
+    n=$((n + 1)); seed=$(( (n * 2654435761 + $(date +%s)) % 2000000000 ))
+    log="$SEC_OUT/fuzz_iter${n}.log"; ok=1
+    # each fuzzer as a SUBPROCESS so a segfault/abort is caught as a signal exit
+    env PYTHON_GIL=0 PYTHONPATH=src "$PY" tools/security/fuzz_capi.py \
+        --iters "$SEC_CAPI_ITERS" --seed "$seed"    >"$log"  2>&1 || ok=0
+    env PYTHON_GIL=0 PYTHONPATH=src "$PY" tools/security/fuzz_bridge.py \
+        --iters "$SEC_BRIDGE_ITERS" --seed "$seed"  >>"$log" 2>&1 || ok=0
+    [ "$HAVE_CRYPTO" = 1 ] && { env PYTHON_GIL=0 PYTHONPATH=src "$PY" \
+        tools/security/fuzz_tls_bridge.py --iters "$SEC_TLS_ITERS" --seed "$seed" \
+        >>"$log" 2>&1 || ok=0; }
+    [ "$ok" = 0 ] && inbox "security-fuzz" "security fuzzer crash seed=$seed (iter $n)" "$log"
+    [ "$SMOKE" = "1" ] && [ "$n" -ge 1 ] && break
+  done
+  echo "  security: S1-S4 once + $n fuzz iteration(s)"
 fi
 
 # --- stage 5 (weekly / smoke): one soak-matrix preset ---
