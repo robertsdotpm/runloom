@@ -76,6 +76,14 @@ def build_spec(seed):
     fiber-admission at scale (model #1 / #7)."""
     if os.environ.get("LIFEFUZZ_KIND") == "grammar":
         return build_grammar_spec(seed)
+    # ~20% of seeds become resource-typed grammar programs, so the existing
+    # `lifefuzz.py run <seed>` soak fleet (rr chaos, millions of seeds) exercises
+    # grammar too -- no separate forever-wrapper to keep alive.  The grammar draw
+    # uses a SEPARATE rng stream so the other ~80% of seeds keep their EXACT
+    # original core/aio program (the main rng stream below is undisturbed -- the
+    # fleet's known corpus stays valid).  LIFEFUZZ_KIND=grammar forces all-grammar.
+    if random.Random(seed ^ 0x9E3779B97F4A7C15).random() < 0.20:
+        return build_grammar_spec(seed)
     rng = random.Random(seed)
     kind = rng.choice(["core", "core", "core", "aio"])   # ~25% aio
     scale = (rng.random() < 0.12)

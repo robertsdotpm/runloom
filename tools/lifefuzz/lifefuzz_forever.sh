@@ -67,5 +67,4 @@ while true; do
     printf '%s\n' "$out" | grep -E '!! FINDING|repro:' >> "$SUM"
   fi
   seed=$((seed + BATCH))
-  sleep 2
 done
