@@ -234,6 +234,33 @@ else
   echo "-- net suite SKIPPED (RUNLOOM_NET_TESTS!=1 or load) --"
 fi
 
+# --- stage 12: QA-steal oracles (nightly, fast: seconds-minutes).  The
+# chaos->freeze->drain liveness oracle, the seeded-fault silent-corruption result
+# oracle, and the compound two-at-once fault sweep -- each exits nonzero on a
+# finding (and inboxes it).  All run on the normal ext (BUGGIFY/RUNLOOM_FAULT are
+# env-armed).  cover_check needs a RUNLOOM_COVER=1 rebuild, so it is NOT here; run
+# it in the COVER lane on demand. ---
+if load_ok; then
+  echo "-- QA-steal oracles --"
+  QA_OUT="$INBOX_ARTIFACTS/qa_oracles.log"
+  : > "$QA_OUT"
+  qa_fail=0
+  qa_one() {  # label + args -> tool ; append to $QA_OUT ; set qa_fail on nonzero
+    local tool="$1"; shift
+    echo "== $tool $* ==" >> "$QA_OUT"
+    nice -n 10 env PYTHON_GIL=0 PYTHONPATH=src "$PY" "tools/verify/$tool" "$@" \
+         >> "$QA_OUT" 2>&1 || qa_fail=1
+  }
+  W=1000; [ "$SMOKE" = "1" ] && W=200
+  qa_one liveness_drain.py --buggify --workers "$W" --per 250 --chaos 0.3 --deadline 120
+  qa_one result_oracle.py  --buggify --workers "$((W * 4))"
+  qa_one stacked_fault_sweep.py
+  [ "$qa_fail" = 1 ] && inbox "qa-oracles" "a QA-steal oracle reported a finding" "$QA_OUT"
+  grep -iE "PASS|FAIL|findings|oracle FIRED|VIOLATION" "$QA_OUT" | sed 's/^/   /'
+else
+  echo "-- QA-steal oracles SKIPPED (load too high) --"
+fi
+
 # --- end nightly extra stages (before the weekly matrix) ---
 
 # --- stage 9 (weekly, Tue): mutation testing -- does the suite have TEETH?
@@ -315,7 +342,16 @@ else
 fi
 if [ -n "$MATRIX_PRESET" ] && load_ok; then
   echo "-- matrix $MATRIX_PRESET --"
-  if ! bash tools/soak/matrix.sh "$MATRIX_PRESET" >"$INBOX_ARTIFACTS/matrix_${MATRIX_PRESET}.log" 2>&1; then
+  # Compose the amplifiers on the fiber-aware TSan-gold lane: RUNLOOM_SHRINK tiny
+  # caps make deque wrap / slab spill / handle-seg growth / ring wrap fire every
+  # few ops, and a sanitizer build auto-enables randomized steal + placement.  So
+  # the weekly gold run is HONEST (fiber-tracked TSan attributes per-goroutine) AND
+  # maximally amplified (moving schedule + boundary transitions every few ops) --
+  # the regime where a previously-merged intra-hub race is most likely to surface.
+  MENV=""
+  case "$MATRIX_PRESET" in tsan-gold*) MENV="RUNLOOM_SHRINK=1" ;; esac
+  # shellcheck disable=SC2086
+  if ! env $MENV bash tools/soak/matrix.sh "$MATRIX_PRESET" >"$INBOX_ARTIFACTS/matrix_${MATRIX_PRESET}.log" 2>&1; then
     inbox "matrix-fail" "matrix $MATRIX_PRESET FAILED" "$INBOX_ARTIFACTS/matrix_${MATRIX_PRESET}.log"
   fi
 fi
