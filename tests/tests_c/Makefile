@@ -125,11 +125,24 @@ test_barrier_race-asan: $(BARRIER_SRC)
 test_barrier_race-tsan: $(BARRIER_SRC)
 	$(CC) -O1 -g -fsanitize=thread $(BARRIER_CF) $(BARRIER_SRC) -o test_barrier_race-tsan
 
+# swap_*.S callee-saved round-trip translation-validation (QA-steal-V2 #23).
+# Compiles fcontext.c + the arch swap directly (x86_64 SysV); the test skips
+# cleanly (exit 0) on non-x86_64.  Build both opt levels: an asm-vs-optimizer
+# interaction would show at one but not the other.
+SWAP_SRC := test_swap_roundtrip.c ../../src/runloom_c/fcontext.c ../../src/runloom_c/arch/swap_x86_64.S
+SWAP_CF  := -std=gnu11 -D_GNU_SOURCE -Wall -Wextra -Wno-unused-parameter -I../../src/runloom_c
+
+test_swap_roundtrip: $(SWAP_SRC)
+	$(CC) -O2 $(SWAP_CF) $(SWAP_SRC) -o test_swap_roundtrip
+test_swap_roundtrip-O0: $(SWAP_SRC)
+	$(CC) -O0 $(SWAP_CF) $(SWAP_SRC) -o test_swap_roundtrip-O0
+
 clean:
 	rm -f bench_mn bench_mn-asan bench_mn-tsan bench_mn-ubsan \
 	      bench_server_runloom bench_server_runloom-asan \
 	      bench_server_runloom-tsan bench_server_runloom-ubsan \
 	      test_cldeque test_cldeque-asan test_cldeque-tsan test_cldeque-ubsan \
-	      test_barrier_race test_barrier_race-asan test_barrier_race-tsan
+	      test_barrier_race test_barrier_race-asan test_barrier_race-tsan \
+	      test_swap_roundtrip test_swap_roundtrip-O0
 
 .PHONY: clean
