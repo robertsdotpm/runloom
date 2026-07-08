@@ -41,7 +41,7 @@ def phase_regular(n):
     """Non-bulk spawns exercise the coro pool-miss cold path."""
     def main():
         for i in range(n):
-            rc.fiber(lambda i=i: _work(i))
+            rc.mn_fiber(lambda i=i: _work(i))   # M:N spawn runs under runloom.run
     runloom.run(4, main)
 
 
