@@ -597,6 +597,14 @@ void runloom_diag_fini(void)
 static int                runloom_delay_on      = -1;
 static unsigned long long runloom_delay_seed    = 0;
 static long long          runloom_delay_max_ns  = 50000;   /* 50 us default */
+/* BUGGIFY (FoundationDB): -1 unread / 0 off / 1 on.  Unlike RUNLOOM_DELAY (all
+ * sites, every hit), BUGGIFY randomly ENABLES ~half the sites per seeded run and
+ * an enabled site fires only ~25% of hits -- so each seed co-activates a
+ * DIFFERENT deep-state fault subset, making rare internal interleavings common
+ * and cheap.  Pairs with _delay_freeze() (the recovery deadline) + the
+ * liveness/drain oracle: fault under one seed, freeze, then prove drain. */
+static int                runloom_buggify_on    = -1;
+static unsigned long long runloom_buggify_seed  = 0;
 /* Per-site monotonic call counter.  Under the controlled (serial) scheduler
  * the increment order is deterministic, so (seed, site, count) -> the same
  * delay every run == replayable.  Under parallel execution the count a given
@@ -629,28 +637,71 @@ static void runloom_delay_init_once(void)
     __atomic_store_n(&runloom_delay_on, 1, __ATOMIC_RELEASE);
 }
 
+static void runloom_buggify_init_once(void)
+{
+    const char *e = getenv("RUNLOOM_BUGGIFY");
+    if (e == NULL || e[0] == '\0') {
+        __atomic_store_n(&runloom_buggify_on, 0, __ATOMIC_RELEASE);
+        return;
+    }
+    runloom_buggify_seed = strtoull(e, NULL, 0);
+    {   /* BUGGIFY reuses the delay machinery (RUNLOOM_DELAY_MAX_NS honored). */
+        const char *m = getenv("RUNLOOM_DELAY_MAX_NS");
+        if (m != NULL && m[0] != '\0') {
+            long long v = atoll(m);
+            if (v >= 0) runloom_delay_max_ns = v;
+        }
+    }
+    __atomic_store_n(&runloom_buggify_on, 1, __ATOMIC_RELEASE);
+}
+
+/* Per-site enable: deterministic from (seed, site) so a rerun with the same seed
+ * activates the SAME subset (replayable), while different seeds pick different
+ * subsets.  ~50% of sites active per run. */
+static int runloom_buggify_site_enabled(int site)
+{
+    unsigned long long h = runloom_splitmix64(
+        runloom_buggify_seed ^ ((unsigned long long)site * 0x9E3779B97F4A7C15ULL));
+    return (int)(h & 1ULL);
+}
+
 void runloom_delay_inject(runloom_delay_site_t site)
 {
-    int on = __atomic_load_n(&runloom_delay_on, __ATOMIC_ACQUIRE);
-    unsigned long long n, h;
+    int on  = __atomic_load_n(&runloom_delay_on, __ATOMIC_ACQUIRE);
+    int bon = __atomic_load_n(&runloom_buggify_on, __ATOMIC_ACQUIRE);
+    unsigned long long n, h, seed;
     long long ns;
-    if (on < 0) { runloom_delay_init_once(); on = __atomic_load_n(&runloom_delay_on, __ATOMIC_ACQUIRE); }
-    if (on != 1 || (int)site < 0 || site >= RUNLOOM_DLY_NSITES) return;
+    if (on < 0)  { runloom_delay_init_once();  on  = __atomic_load_n(&runloom_delay_on, __ATOMIC_ACQUIRE); }
+    if (bon < 0) { runloom_buggify_init_once(); bon = __atomic_load_n(&runloom_buggify_on, __ATOMIC_ACQUIRE); }
+    if ((int)site < 0 || site >= RUNLOOM_DLY_NSITES) return;
     if (runloom_delay_max_ns <= 0) return;
-    n = __atomic_fetch_add(&runloom_delay_ctr[site], 1ULL, __ATOMIC_RELAXED);
-    /* Mix seed, site and the per-site count into a uniform delay. */
-    h = runloom_splitmix64(runloom_delay_seed
-                        ^ ((unsigned long long)site << 56)
-                        ^ runloom_splitmix64(n));
+    if (bon == 1) {
+        /* BUGGIFY: only sites active this run, and only ~25% of their hits. */
+        if (!runloom_buggify_site_enabled((int)site)) return;
+        seed = runloom_buggify_seed;
+        n = __atomic_fetch_add(&runloom_delay_ctr[site], 1ULL, __ATOMIC_RELAXED);
+        h = runloom_splitmix64(seed ^ ((unsigned long long)site << 56)
+                            ^ runloom_splitmix64(n));
+        if ((h & 3ULL) != 0) return;                /* fire ~25% of hits */
+    } else {
+        if (on != 1) return;
+        seed = runloom_delay_seed;
+        n = __atomic_fetch_add(&runloom_delay_ctr[site], 1ULL, __ATOMIC_RELAXED);
+        /* Mix seed, site and the per-site count into a uniform delay. */
+        h = runloom_splitmix64(seed ^ ((unsigned long long)site << 56)
+                            ^ runloom_splitmix64(n));
+    }
     ns = (long long)(h % (unsigned long long)(runloom_delay_max_ns + 1));
     if (ns > 0) runloom_sleep_ns(ns);
 }
 
 int runloom_delay_enabled(void)
 {
-    int on = __atomic_load_n(&runloom_delay_on, __ATOMIC_ACQUIRE);
-    if (on < 0) { runloom_delay_init_once(); on = __atomic_load_n(&runloom_delay_on, __ATOMIC_ACQUIRE); }
-    return on == 1;
+    int on  = __atomic_load_n(&runloom_delay_on, __ATOMIC_ACQUIRE);
+    int bon = __atomic_load_n(&runloom_buggify_on, __ATOMIC_ACQUIRE);
+    if (on < 0)  { runloom_delay_init_once();  on  = __atomic_load_n(&runloom_delay_on, __ATOMIC_ACQUIRE); }
+    if (bon < 0) { runloom_buggify_init_once(); bon = __atomic_load_n(&runloom_buggify_on, __ATOMIC_ACQUIRE); }
+    return on == 1 || bon == 1;
 }
 
 /* Runtime freeze for the liveness/drain oracle (TigerBeetle
@@ -662,6 +713,7 @@ int runloom_delay_enabled(void)
 void runloom_delay_freeze(void)
 {
     __atomic_store_n(&runloom_delay_on, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&runloom_buggify_on, 0, __ATOMIC_RELEASE);   /* freeze BUGGIFY too */
 }
 
 

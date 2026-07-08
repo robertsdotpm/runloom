@@ -44,10 +44,16 @@ def main():
     ap.add_argument("--chaos", type=float, default=0.3)      # chaos window (s)
     ap.add_argument("--deadline", type=float, default=40.0)  # hard drain deadline (s)
     ap.add_argument("--teeth", action="store_true")
+    ap.add_argument("--buggify", action="store_true",
+                    help="use BUGGIFY (per-seed random fault subset, ~25%% firing) "
+                         "instead of RUNLOOM_DELAY (all sites, every hit)")
     args = ap.parse_args()
 
-    # Chaos on: seeded scheduler delays (the C layer reads RUNLOOM_DELAY lazily).
-    os.environ["RUNLOOM_DELAY"] = str(args.seed)
+    # Chaos on: seeded scheduler perturbation (the C layer reads the env lazily).
+    # BUGGIFY activates a different ~half-of-sites subset per seed (FoundationDB);
+    # RUNLOOM_DELAY perturbs every site every hit.  Both are stopped by
+    # _delay_freeze() at the drain deadline.
+    os.environ["RUNLOOM_BUGGIFY" if args.buggify else "RUNLOOM_DELAY"] = str(args.seed)
     os.environ.setdefault("RUNLOOM_DELAY_MAX_NS", "5000")
 
     import runloom
