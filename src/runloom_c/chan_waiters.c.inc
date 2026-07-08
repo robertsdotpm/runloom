@@ -261,8 +261,17 @@ static void park_waiter(runloom_chan_t *ch,
      * re-parking on a spurious/foreign wake (still queued) until a producer/close
      * pops us (queued==0).  Returns with ch->lock held. */
     (void)head; (void)tail;
+    /* Flight-recorder park/wake bracket.  The park-kernel migration (d248c4fd)
+     * dropped the old hand-rolled loop's CHAN_PARK/CHAN_WAKE emits; restore them
+     * around the kernel call so channel park/wake stays visible in the diag ring
+     * (lost-wake / deadlock hunts rely on it).  RUNLOOM_EVT is a no-op unless the
+     * ring flag is armed, so this adds zero cost on the normal path. */
+    if (current_g != NULL)
+        RUNLOOM_EVT(RUNLOOM_EVT_CHAN_PARK, ch, current_g, 0);
     runloom_park_until_locked(chan_waiter_delivered, w, &ch->lock,
                               RUNLOOM_RANK_CHAN, RUNLOOM_GST_PARKED_CHAN);
+    if (current_g != NULL)
+        RUNLOOM_EVT(RUNLOOM_EVT_CHAN_WAKE, ch, current_g, 0);
     RUNLOOM_RUNLOCK(&ch->lock, RUNLOOM_RANK_CHAN);
 
     /* Drop the pin.  If we were the last reference (rare: caller code usually
