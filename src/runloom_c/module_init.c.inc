@@ -193,6 +193,11 @@ static PyMethodDef module_methods[] = {
      "_cover_reset(): zero the reachability counters (call at session start)."},
     {"_cover_enabled", m_cover_enabled, METH_NOARGS,
      "_cover_enabled(): True iff built with -DRUNLOOM_COVER."},
+    {"_delay_freeze", m_delay_freeze, METH_NOARGS,
+     "_delay_freeze(): stop RUNLOOM_DELAY chaos injection (liveness/drain oracle's "
+     "'stop faulting, now prove forward progress' transition)."},
+    {"_delay_active", m_delay_active, METH_NOARGS,
+     "_delay_active(): True iff RUNLOOM_DELAY chaos is still injecting."},
     {"netpoll_poll", m_netpoll_poll, METH_NOARGS,
      "netpoll_poll(): non-blocking netpoll drain -- deliver any ready fd "
      "readiness by waking parked fibers, then return.  Used by runloom.aio "

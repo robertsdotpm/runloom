@@ -200,6 +200,22 @@ static PyObject *m_cover_enabled(PyObject *self, PyObject *unused)
     return PyBool_FromLong(runloom_cover_enabled());
 }
 
+/* Liveness/drain oracle (TigerBeetle freeze-and-assert-drain): _delay_freeze()
+ * stops the RUNLOOM_DELAY chaos so the runtime must PROVE forward progress from
+ * here on; _delay_active() reports whether chaos is still injecting. */
+static PyObject *m_delay_freeze(PyObject *self, PyObject *unused)
+{
+    (void)self; (void)unused;
+    runloom_delay_freeze();
+    Py_RETURN_NONE;
+}
+
+static PyObject *m_delay_active(PyObject *self, PyObject *unused)
+{
+    (void)self; (void)unused;
+    return PyBool_FromLong(runloom_delay_enabled());
+}
+
 static PyObject *m_netpoll_poll(PyObject *self, PyObject *unused)
 {
     (void)self; (void)unused;

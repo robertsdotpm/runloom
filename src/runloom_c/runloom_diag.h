@@ -164,7 +164,8 @@ typedef enum runloom_delay_site {
 } runloom_delay_site_t;
 
 void runloom_delay_inject(runloom_delay_site_t site);
-int  runloom_delay_enabled(void);   /* 1 if RUNLOOM_DELAY is set */
+int  runloom_delay_enabled(void);   /* 1 if RUNLOOM_DELAY is set (chaos active) */
+void runloom_delay_freeze(void);    /* stop injecting: liveness/drain "stop faulting" */
 
 
 /* ---- Determinism tooling #3: invariant sanitizer ----

@@ -653,6 +653,17 @@ int runloom_delay_enabled(void)
     return on == 1;
 }
 
+/* Runtime freeze for the liveness/drain oracle (TigerBeetle
+ * freeze-non-core-and-assert-drain): stop injecting scheduler delays so the
+ * runtime must now PROVE forward progress -- drain every pending goroutine with
+ * nothing parked forever.  The chaos phase (RUNLOOM_DELAY) widened park/wake/
+ * steal/migration windows; this is the "stop faulting, now prove liveness"
+ * transition.  Idempotent; any thread may call it. */
+void runloom_delay_freeze(void)
+{
+    __atomic_store_n(&runloom_delay_on, 0, __ATOMIC_RELEASE);
+}
+
 
 /* ====================================================================== *
  * Determinism tooling #3: invariant sanitizer                             *
