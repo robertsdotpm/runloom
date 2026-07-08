@@ -16,6 +16,15 @@ Strongest composed with the chaos + rare-path tools:
 
 --teeth makes one goroutine return a deliberately-wrong value, to prove the oracle
 catches a bad result (not just a missing one).
+
+--fault-spawn N interleaves a real fault with the workload (AWS ShardStore
+FailDiskOnce): a spawn-alloc OOM at the Nth spawn.  Because the workers are
+INDEPENDENT (each writes its own slot, no channel a death could strand), a dropped
+worker is tolerated (relaxed count) while survivors must stay CORRECT and the
+scheduler consistent -- rank 11's "fault in the op sequence, wrong result never"
+property, in a fault-tolerant workload.  (The full fault-in-the-lifefuzz-alphabet
+integration needs lifefuzz's producer/consumer workload made fault-tolerant so a
+dropped goroutine doesn't deadlock the rest; scoped in QA_STEAL_ROADMAP.md.)
 """
 import argparse
 import os
@@ -40,11 +49,23 @@ def main():
     ap.add_argument("--hubs", type=int, default=4)
     ap.add_argument("--buggify", action="store_true")
     ap.add_argument("--teeth", action="store_true")
+    ap.add_argument("--fault-spawn", type=int, default=0, metavar="N",
+                    help="inject a spawn-alloc OOM at the Nth spawn (fault "
+                         "interleaved with the workload; survivors must stay "
+                         "correct, dropped ones are tolerated)")
     args = ap.parse_args()
 
     if args.buggify:
         os.environ["RUNLOOM_BUGGIFY"] = str(args.seed)
         os.environ.setdefault("RUNLOOM_DELAY_MAX_NS", "3000")
+    if args.fault_spawn:
+        # Fault-in-the-workload (AWS ShardStore FailDiskOnce in the op alphabet):
+        # a spawn OOM at the Nth spawn (nth:N fires exactly once).  Set before import so the site's armed flag
+        # caches armed.  The workers are INDEPENDENT (each writes its own slot,
+        # no channel a death could strand), so a dropped worker just leaves a gap
+        # -- no deadlock.  The property: the fault must not CORRUPT a survivor's
+        # result or the scheduler state; dropped workers are a relaxed count.
+        os.environ["RUNLOOM_FAULT_SPAWN_G"] = "nth:%d:12" % args.fault_spawn
 
     import runloom
     import runloom_c as rc
@@ -52,6 +73,7 @@ def main():
     n = args.workers
     results = [None] * n          # one slot per goroutine (distinct index; no shared slot)
     bad_i = (n // 2) if args.teeth else -1
+    spawn_fail = [0]
 
     def worker(i):
         v = compute(i)
@@ -61,7 +83,10 @@ def main():
 
     def main_fn():
         for i in range(n):
-            rc.mn_fiber((lambda i=i: worker(i)))
+            try:
+                rc.mn_fiber((lambda i=i: worker(i)))
+            except (MemoryError, RuntimeError):
+                spawn_fail[0] += 1   # the injected spawn OOM dropped this worker
 
     runloom.run(args.hubs, main_fn)
 
@@ -80,6 +105,27 @@ def main():
         print("result_oracle[teeth]: FAIL -- oracle vacuous (corrupt result not "
               "caught)")
         return 1
+
+    if args.fault_spawn:
+        # Fault mode: dropped workers (missing) are EXPECTED and tolerated (the
+        # spawn OOM legitimately dropped them).  What stays STRICT: a survivor's
+        # result must be CORRECT (the fault must not corrupt live goroutines) and
+        # the scheduler must stay consistent.
+        try:
+            rc._self_check()
+        except Exception as e:  # noqa: BLE001
+            print("result_oracle[fault]: FAIL -- fault corrupted scheduler state: "
+                  "%r" % (e,))
+            return 1
+        if wrong:
+            print("result_oracle[fault]: FAIL -- fault CORRUPTED %d survivor "
+                  "result(s); first=%r (got %r, want %r)" % (
+                      len(wrong), wrong[:5], results[wrong[0]], compute(wrong[0])))
+            return 1
+        print("result_oracle[fault]: PASS -- spawn-OOM (at spawn #%d) dropped %d "
+              "worker(s) (%d missing); all %d survivors correct, self_check clean"
+              % (args.fault_spawn, spawn_fail[0], len(missing), n - len(missing)))
+        return 0
 
     if missing:
         print("result_oracle: FAIL -- %d goroutine(s) never returned (liveness); "
