@@ -93,9 +93,15 @@ def hang_dump(file=sys.stderr, label=""):
     file.flush()
 
 
+# Global deadline scaler (see tests/run_isolated.py): a loaded/slow/emulated host
+# multiplies every watchdog deadline so "the box was busy" reads as slow, not a
+# false wedge.  Default 1.
+_TIMEOUT_MULT = max(0.01, float(os.environ.get("RUNLOOM_TIMEOUT_MULT", "1")))
+
+
 class _Watchdog(object):
     def __init__(self, seconds, label="", abort=False, on_timeout=None):
-        self.seconds = float(seconds)
+        self.seconds = float(seconds) * _TIMEOUT_MULT
         self.label = label
         self.abort = abort
         self.on_timeout = on_timeout

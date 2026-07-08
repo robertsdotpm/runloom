@@ -39,6 +39,13 @@ REPO = os.path.dirname(HERE)
 # trips this and is reported as TIMEOUT rather than blocking the whole run.
 DEFAULT_TIMEOUT = int(os.environ.get("RUNLOOM_TEST_TIMEOUT", "300"))
 
+# Global deadline scaler (libuv's UV_TEST_TIMEOUT_MULTIPLIER).  A slow / loaded /
+# emulated machine multiplies EVERY per-file ceiling (and the post-SIGABRT grace)
+# by this, so "the box was busy" reads as slow rather than a false TIMEOUT --
+# without changing any individual timeout.  Default 1; a genuine wedge still trips
+# eventually.  Set e.g. RUNLOOM_TIMEOUT_MULT=3 on a contended host.
+TIMEOUT_MULT = max(0.01, float(os.environ.get("RUNLOOM_TIMEOUT_MULT", "1")))
+
 # Files that need a longer ceiling (soak / stress spin many fibers).
 SLOW_FILES = {
     "test_soak.py": 900,
@@ -101,7 +108,7 @@ def discover():
 
 def run_file(name, pytest_args):
     path = os.path.join(HERE, name)
-    timeout = SLOW_FILES.get(name, DEFAULT_TIMEOUT)
+    timeout = (SLOW_FILES.get(name, DEFAULT_TIMEOUT)) * TIMEOUT_MULT
     env = dict(os.environ)
     env["PYTHON_GIL"] = "0"
     env["RUNLOOM_GIL"] = "0"
@@ -138,7 +145,7 @@ def run_file(name, pytest_args):
         except Exception:
             pass
         try:
-            out, _ = p.communicate(timeout=15)
+            out, _ = p.communicate(timeout=15 * TIMEOUT_MULT)
         except subprocess.TimeoutExpired:
             p.kill()
             out, _ = p.communicate()
