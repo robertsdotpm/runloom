@@ -27,6 +27,13 @@ WORKERS="${3:-2}"
 shift; [ $# -gt 0 ] && shift; [ $# -gt 0 ] && shift
 SUM="$ROOT/docs/dev/soak/forever_${WL}_SUMMARY.txt"
 OUTDIR="$ROOT/docs/dev/soak/soak_${WL}_forever"
+# Permanent per-iteration ledger of retain-forever pool END values.  The per-run
+# slope oracle forgives a settled pool (it must), which leaves one single-window
+# blind spot: a slow constant leak whose 6h movement stays under the metric floor.
+# Across iterations that separates cleanly -- a pool plateaus (fixed HWM), a leak
+# climbs without bound -- so cross_iter_ratchet.py records each iteration's END
+# here and raises CROSS-ITER-LEAK when a pool climbs with no asymptote.
+LEDGER="$ROOT/docs/dev/soak/forever_${WL}_ratchet_ledger.csv"
 cd "$ROOT"
 
 echo "== forever soak started: $WL, ${HOURS}h iterations, $WORKERS workers, $(date '+%F %T') ==" >> "$SUM"
@@ -38,6 +45,9 @@ while true; do
       --interval 30 --warmup-frac 0.1 --stamp forever "$@" >/dev/null 2>&1
   v="$(grep -m1 -i verdict "$OUTDIR/REPORT.md" 2>/dev/null \
        || echo 'Verdict: (no report -- crashed/killed)')"
+  # Record this iteration's pool END values + judge the cross-iteration trend.
+  ci="$(nice -n 8 "$PY" tools/soak/cross_iter_ratchet.py "$OUTDIR" "$LEDGER" "$i" 2>&1)"
+  [ $? -ne 0 ] && v="$v  ||  CROSS-ITER-LEAK: $(echo "$ci" | tr '\n' ' ')"
   echo "iter $i  $start -> $(date '+%F %T')  |  $v" >> "$SUM"
   # On a FAIL/HANG the run dir holds the evidence (CSVs + hang triage); keep it
   # by renaming before the next iteration would overwrite it.
