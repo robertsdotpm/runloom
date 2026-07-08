@@ -222,6 +222,22 @@ static PyObject *m_count_deadlocked(PyObject *self, PyObject *unused)
     return PyLong_FromLong(runloom_count_deadlockable_fibers(NULL));
 }
 
+/* Quiescence predicate (Go synctest / Tokio pause): has the runtime settled --
+ * every live goroutine durably blocked, nothing runnable, so nothing advances
+ * until a timer/external event?  Returns {quiescent, live, parked, inflight}.
+ * Call from an OBSERVER thread (the caller's own RUNNING state would otherwise
+ * keep inflight>0). */
+static PyObject *m_quiescent(PyObject *self, PyObject *unused)
+{
+    long live = 0, parked = 0, inflight = 0;
+    int q;
+    (void)self; (void)unused;
+    q = runloom_quiescent(&live, &parked, &inflight);
+    return Py_BuildValue("{s:O,s:l,s:l,s:l}",
+                         "quiescent", q ? Py_True : Py_False,
+                         "live", live, "parked", parked, "inflight", inflight);
+}
+
 static PyObject *m_set_wait_reason(PyObject *self, PyObject *arg)
 {
     long r;

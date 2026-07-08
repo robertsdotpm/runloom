@@ -315,6 +315,42 @@ long runloom_count_deadlockable_fibers(const void *owner)
     return n;
 }
 
+/* Quiescence census (Go synctest / Tokio pause / Kotlin runTest): is the runtime
+ * SETTLED -- every live goroutine durably blocked, nothing runnable or in flight,
+ * so no progress happens until a timer fires or external I/O arrives?  Decidable
+ * "did everything settle or did we lose a wake?" -- pygo's recurring bug
+ * signature -- made a runtime predicate for the DEFAULT scheduler (the controlled
+ * M:N scheduler already has a logical clock + quiescent census; this generalizes
+ * the QUERY).  Best-effort like count_deadlockable_fibers: a concurrent state
+ * change may flip a bit, so a monitor samples it; a stable quiescent==1 with no
+ * external input pending is a genuine settle.  Called from an OBSERVER (the
+ * caller's own RUNNING state would otherwise make it never quiescent).
+ * Returns 1 if quiescent; fills live/parked/inflight if non-NULL. */
+int runloom_quiescent(long *out_live, long *out_parked, long *out_inflight)
+{
+    long live = 0, parked = 0, inflight = 0;
+    runloom_g_t *g;
+    if (!runloom_greg_inited) {
+        if (out_live) *out_live = 0;
+        if (out_parked) *out_parked = 0;
+        if (out_inflight) *out_inflight = 0;
+        return 1;                                  /* no runtime -> trivially settled */
+    }
+    RUNLOOM_RLOCK(&runloom_greg_lock, RUNLOOM_RANK_GREG);
+    for (g = runloom_greg_head; g != NULL; g = g->reg_next) {
+        unsigned int st = __atomic_load_n(&g->state, __ATOMIC_ACQUIRE);
+        if (RUNLOOM_GST_BIT(st) & RUNLOOM_GST_MASK_DEAD) continue;   /* DONE/FREED */
+        live++;
+        if (RUNLOOM_GST_BIT(st) & RUNLOOM_GST_MASK_PARKED) parked++;
+        else inflight++;   /* INIT/SPAWNING/RUNNABLE/SUBMITTED/RUNNING/WAKING */
+    }
+    RUNLOOM_RUNLOCK(&runloom_greg_lock, RUNLOOM_RANK_GREG);
+    if (out_live) *out_live = live;
+    if (out_parked) *out_parked = parked;
+    if (out_inflight) *out_inflight = inflight;
+    return inflight == 0;
+}
+
 /* ---- max-fibers admission gate (backpressure) ----
  * 0 = unlimited (default).  When set, the spawn paths call runloom_fiber_admit
  * before allocating; over the limit it returns 0 and the spawn raises.  The

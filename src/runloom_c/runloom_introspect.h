@@ -89,6 +89,9 @@ long runloom_greg_total_count(void);
  * channel or via park_safe -- the deadlockable set.  Used by the drain's
  * deadlock detector. */
 long runloom_count_deadlockable_fibers(const void *owner);
+/* Quiescence census: 1 if the runtime is settled (every live g parked, nothing
+ * runnable/in-flight).  Fills live/parked/inflight if non-NULL.  See the .c. */
+int  runloom_quiescent(long *out_live, long *out_parked, long *out_inflight);
 
 /* Deadlock-detection mode: 0=off, 1=warn (print the fiber dump), 2=raise
  * a RuntimeError.  Default 1; also via RUNLOOM_DEADLOCK=off|warn|raise. */

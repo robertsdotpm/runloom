@@ -339,6 +339,10 @@ static PyMethodDef module_methods[] = {
     {"count_deadlocked", m_count_deadlocked, METH_NOARGS,
      "count_deadlocked() -> int.  Goroutines currently parked on a "
      "channel/park (the set that deadlocks if the scheduler quiesces)."},
+    {"_quiescent", m_quiescent, METH_NOARGS,
+     "_quiescent() -> {quiescent, live, parked, inflight}.  Has the runtime "
+     "SETTLED (every live goroutine durably blocked, nothing runnable)?  Go "
+     "synctest / Tokio pause quiescence predicate; call from an observer thread."},
     {"set_wait_reason", m_set_wait_reason, METH_O,
      "set_wait_reason(n): tag the current fiber's next park with a wait "
      "reason (a runloom wait-reason code) so the deadlock/wedge dump can say "
