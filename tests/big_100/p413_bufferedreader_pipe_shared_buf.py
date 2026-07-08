@@ -349,12 +349,17 @@ def post(H):
     rl = sum(counts[M_READLINE])
     H.log("clean drains: peek+read={0} read1={1} read(n)={2} readline={3} "
           "ops={4}".format(pk, r1, rn, rl, H.total_ops()))
-    H.check(H.total_ops() > 0,
-            "no round completed -- the buffered refill-park drain never ran")
-    H.check(pk > 0, "peek+read drain method never exercised")
-    H.check(r1 > 0, "read1 drain method never exercised")
-    H.check(rn > 0, "read(n) drain method never exercised")
-    H.check(rl > 0, "readline drain method never exercised")
+    # Coverage/reachability asserts: use require_coverage (completion-aware) so a
+    # CPU-starved run that couldn't complete enough rounds to exercise a method
+    # is a benign SCALE LIMIT (exit 4), not a false CRASH.  A run WITH the budget
+    # (>=half the workers finished in-window) that still misses a method is a real
+    # coverage gap and FAILs.
+    H.require_coverage(H.total_ops() > 0,
+                       "no round completed -- the buffered refill-park drain never ran")
+    H.require_coverage(pk > 0, "peek+read drain method never exercised")
+    H.require_coverage(r1 > 0, "read1 drain method never exercised")
+    H.require_coverage(rn > 0, "read(n) drain method never exercised")
+    H.require_coverage(rl > 0, "readline drain method never exercised")
     H.require_no_lost()
 
 

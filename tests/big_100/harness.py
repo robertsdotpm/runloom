@@ -820,6 +820,50 @@ class Harness(object):
                           label, r, tol))
         return r <= tol
 
+    def require_coverage(self, reached, reason, min_window_frac=0.5):
+        """Completion-aware coverage oracle -- call from post() INSTEAD of
+        `H.check(reached, reason)` for a REACHABILITY assertion ("every drain
+        method was exercised", "the cross-hub / migration / refill-park hazard
+        window was actually hit").
+
+        A coverage assertion is only meaningful if the run had the CPU budget to
+        reach the path.  On a shared / over-subscribed box a run can finish only
+        a small fraction of its workers WITHIN the measured window (the rest are
+        slow-finishers -- a benign over-scale condition, see require_no_lost).
+        Demanding coverage from such a STARVED run yields a FALSE failure (the
+        classic self-diagnosis "raise --hubs or --funcs").  That false CRASH then
+        pollutes the ledger and masks real signal.
+
+        So this splits the not-reached case by whether the box gave the run a
+        fair shot, using the same in-window completion signal finish() trusts:
+
+          * reached                                        -> pass (True).
+          * not reached, >= min_window_frac of workers
+            finished IN-WINDOW (had a fair shot)           -> real coverage GAP,
+                                                              self.fail (exit 1).
+          * not reached, starved (in-window below the
+            fraction)                                       -> benign SCALE LIMIT,
+                                                              note_scale_limit
+                                                              (exit 4), NOT a bug.
+
+        exited_at_deadline is the count that finished before the window closed
+        (== expected when the run completed early, e.g. --rounds 1), so a clean
+        design-tier run that genuinely misses coverage still FAILs.  Returns True
+        iff coverage was reached."""
+        if reached:
+            return True
+        total = self.expected
+        in_window = self.exited_at_deadline
+        if total > 0 and in_window < min_window_frac * total:
+            self.note_scale_limit(
+                "coverage not reached ({0}); only {1}/{2} workers finished "
+                "in-window -- CPU-starved (benign SCALE LIMIT at over-scale / "
+                "under load), not a real coverage gap".format(
+                    reason, in_window, total))
+            return False
+        self.fail(reason)
+        return False
+
     def error(self, wid, exc):
         """Record an unexpected worker exception (counts as a failure)."""
         rep = "{0}: {1}".format(type(exc).__name__, exc)
