@@ -147,6 +147,19 @@
 #  endif
 #endif
 
+/* "Built under a sanitizer" -- a single macro used to AUTO-ENABLE test-only
+ * scheduler perturbations (Go's randomizeScheduler = raceenabled): under
+ * TSan/ASan the shipping scheduler randomizes its steal order + placement so
+ * every sanitizer/fuzz/soak run explores fresh interleavings for free. Zero
+ * effect in release unless explicitly opted in via env. */
+#if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__)
+#  define RUNLOOM_SANITIZED 1
+#elif defined(__has_feature)
+#  if __has_feature(address_sanitizer) || __has_feature(thread_sanitizer)
+#    define RUNLOOM_SANITIZED 1
+#  endif
+#endif
+
 #if defined(RUNLOOM_CC_MSVC)
 #  define RUNLOOM_TLS __declspec(thread)
 #elif defined(RUNLOOM_CC_GCC) || defined(RUNLOOM_CC_CLANG) || defined(RUNLOOM_CC_ICC)

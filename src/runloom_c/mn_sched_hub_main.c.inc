@@ -30,6 +30,63 @@ static int runloom_steal_stride(int n, int id)
         if (runloom_steal_gcd(s, n) == 1) return s;
 }
 
+/* ---- sanitizer/debug scheduler randomization (Go's randomizeScheduler =
+ * raceenabled) ----
+ * The shipping victim order above is DETERMINISTIC (coprime stride off h->id),
+ * which is right for production but means a sanitizer/fuzz/soak run re-treads the
+ * same interleaving every time.  Under a sanitizer build (or when forced via
+ * RUNLOOM_SCHED_RANDOM=1) we instead draw a random start + random coprime stride
+ * per steal round, and randomize new-goroutine placement, so each run explores a
+ * different schedule for free -- multiplying the value of every sanitizer lane at
+ * zero authoring cost.  DISABLED whenever a controlled scheduler owns ordering:
+ * the steal loop already gates on runloom_mn_ctrl_no_steal(), replay disables
+ * steal entirely, and the placement hook checks the same flag, so DST / PCT /
+ * mn_controlled determinism is untouched.  Seed is per-hub (ASLR entropy XOR hub
+ * id); pin RUNLOOM_SCHED_RANDOM_SEED to bias a rerun toward the same schedule. */
+static int runloom_sched_random_on(void)
+{
+    static int on = -1;
+    int v = __atomic_load_n(&on, __ATOMIC_RELAXED);
+    if (v >= 0) return v;
+    {
+        const char *e = getenv("RUNLOOM_SCHED_RANDOM");
+        /* A controlled/replay scheduler pins the schedule for determinism --
+         * never perturb it, even under a sanitizer build. */
+        if (getenv("RUNLOOM_MN_SEED") != NULL || getenv("RUNLOOM_PCT_SEED") != NULL) {
+            v = 0;
+        } else {
+#if defined(RUNLOOM_SANITIZED)
+            v = 1;                      /* default ON under a sanitizer build */
+#else
+            v = 0;                      /* default OFF in release */
+#endif
+            if (e != NULL && *e != '\0') v = (e[0] == '0') ? 0 : 1;   /* env overrides */
+        }
+        __atomic_store_n(&on, v, __ATOMIC_RELAXED);
+    }
+    return v;
+}
+
+static RUNLOOM_TLS uint64_t runloom_steal_rng;   /* per-hub, lazily seeded */
+static uint64_t runloom_steal_rand(int hub_id)
+{
+    uint64_t x = runloom_steal_rng;
+    if (x == 0) {                        /* lazy per-hub seed */
+        const char *e = getenv("RUNLOOM_SCHED_RANDOM_SEED");
+        uint64_t seed = (e != NULL && *e != '\0')
+            ? (uint64_t)strtoull(e, NULL, 0)
+            : (uint64_t)(uintptr_t)&runloom_steal_rng;   /* ASLR entropy, per-thread */
+        seed ^= 0x9E3779B97F4A7C15ULL + ((uint64_t)(unsigned)hub_id << 1);
+        seed = (seed ^ (seed >> 30)) * 0xBF58476D1CE4E5B9ULL;      /* splitmix64 */
+        seed = (seed ^ (seed >> 27)) * 0x94D049BB133111EBULL;
+        x = seed ^ (seed >> 31);
+        if (x == 0) x = 0x2545F4914F6CDD1DULL;          /* never 0 (would re-seed) */
+    }
+    x ^= x << 13; x ^= x >> 7; x ^= x << 17;            /* xorshift64 */
+    runloom_steal_rng = x;
+    return x;
+}
+
 /* gc-stop-the-world fairness (free-threaded 3.13+ only).
  *
  * A fiber that loops a stop-the-world operation -- a tight `gc.collect()`
@@ -708,9 +765,19 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
              * each hub starts at its own id and steps by a coprime stride, so K
              * idle hubs don't all hammer hub 0's steal CAS in lockstep. */
             int n = runloom_hub_count;
-            int stride = runloom_steal_stride(n, h->id);
-            int pos = h->id;
-            int k;
+            int stride, pos, k;
+            if (runloom_sched_random_on()) {
+                /* Random start + random coprime stride: still visits every
+                 * victim exactly once (coprime stride), but in a schedule that
+                 * differs each run so the sanitizer/fuzz lane keeps finding new
+                 * interleavings. */
+                uint64_t r = runloom_steal_rand(h->id);
+                pos = (int)(r % (unsigned)n);
+                stride = runloom_steal_stride(n, (int)((r >> 24) % (unsigned)n));
+            } else {
+                stride = runloom_steal_stride(n, h->id);
+                pos = h->id;
+            }
             for (k = 0; k < n; k++, pos += stride) {
                 int i = pos % n;
                 if (i == h->id) continue;

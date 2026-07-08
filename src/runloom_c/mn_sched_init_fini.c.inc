@@ -590,6 +590,11 @@ static int runloom_mn_fiber_core(PyObject *callable, runloom_c_entry_fn c_fn,
          * (fiber_n indexed / the bulk-path fallback), else the spawn counter. */
         long key = (py_index >= 0) ? py_index : n;
         hub_idx = (int)((key >> 1) % runloom_hub_count);
+    } else if (runloom_hub_count > 1 && runloom_sched_random_on()) {
+        /* Sanitizer/debug: randomize placement too (Go's raceenabled), so a
+         * goroutine can land on any hub rather than the round-robin one --
+         * diversifies cross-hub interleavings the sanitizer lane explores. */
+        hub_idx = (int)(runloom_steal_rand(-1) % (unsigned)runloom_hub_count);
     } else {
         hub_idx = (int)(n % runloom_hub_count);
     }
