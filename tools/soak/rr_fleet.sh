@@ -21,6 +21,13 @@
 # Detach:  setsid nice -n 10 tools/soak/rr_fleet.sh >/dev/null 2>&1 &
 # Stop:    kill <this-pid>   (traps TERM/INT and reaps the whole fleet)
 set +e
+# Deprioritize the whole fleet below big100/foreground: W parallel `rr --chaos`
+# recorders are the box's heaviest CPU sink, and starving big100 hides bugs (its
+# 1M runs need CPU to reach the scale/coverage that exposes faults).  Self-renice
+# to 19 -- increasing niceness is always permitted and inherited by every child
+# recorder -- so big100 wins the CPU when runnable.  Supersedes the `nice -n 10`
+# launch hint above and survives restarts/reboots.
+renice -n 19 $$ >/dev/null 2>&1
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 PY="${RUNLOOM_PYTHON:-$HOME/.pyenv/versions/3.14.4t/bin/python3}"
 NCPU="$(nproc 2>/dev/null || echo 8)"

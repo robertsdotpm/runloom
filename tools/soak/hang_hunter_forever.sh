@@ -18,6 +18,11 @@
 # Detach:  setsid nice -n 10 tools/soak/hang_hunter_forever.sh >/dev/null 2>&1 &
 # Stop:    kill <this-pid>
 set +e
+# Deprioritize below big100/foreground: self-renice to 19 (always permitted,
+# inherited by every hunt job; supersedes the launch/inner nice hints and
+# survives restarts/reboots) so big100's 1M runs get CPU to reach bug-exposing
+# scale instead of being starved by the hunt fleet.
+renice -n 19 $$ >/dev/null 2>&1
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT"
 PY="${RUNLOOM_PYTHON:-$HOME/.pyenv/versions/3.14.4t/bin/python3}"
