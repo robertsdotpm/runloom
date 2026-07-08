@@ -182,9 +182,58 @@ def analyze(csv_path, warmup_seconds):
                    ("<floor" if below_floor else "SLOPE")))
         if not ok and metric in RATCHETS and len(ys) >= 16:
             tail = ys[-max(8, len(ys) // 4):]      # final quarter of the window
-            if (max(tail) - min(tail)) <= abs_floor:
+            tail_span = max(tail) - min(tail)
+            if tail_span <= abs_floor:
+                # tail already dead flat -> classic converged ratchet
                 ok = True
                 reason = "ratchet-converged"
+            else:
+                # Tail still creeping.  A retain-forever pool (freed g-structs /
+                # cached coro stacks kept reusable in per-thread slabs) ratchets
+                # up a DECELERATING curve then plateaus; its whole-window OLS
+                # slope stays large-positive (the early ramp dominates the fit)
+                # long after the pool has locally flattened.  Forgive ONLY with
+                # POSITIVE evidence the pool has stopped growing: a CURRENT-RATE
+                # test -- the MOST RECENT eighth is itself flat (its slope's CI
+                # includes 0, OR |slope| <= the metric's epsilon) -- AND a genuine
+                # earlier upward ramp existed to converge from (so a flat-then-
+                # late-onset leak, which has no ramp, is not forgiven).
+                #
+                # The final-eighth slope isolates the pool's instantaneous growth
+                # from the early ramp that inflates the whole-window fit, catching
+                # a converged ratchet whose ramp bled PAST the warmup cutoff (its
+                # whole-window fit reads +1200/h while its current rate has
+                # returned to harmless drift -- measured 36/h on real 6h cserve
+                # iterations).  It only forgives when the current rate is already
+                # within the epsilon the oracle accepts everywhere, so it adds no
+                # new blind spot; and it is robust to a BUMPY ramp (bursty
+                # connection arrival makes the curve non-smooth).
+                #
+                # A constant/accelerating leak fails this: its final-eighth slope
+                # stays at the leak rate (>> eps, CI clear of 0) no matter how
+                # large the early ramp -- INCLUDING a constant leak hiding under a
+                # one-time fill, which a concave-shape (log-fit) test wrongly reads
+                # as "saturating" (that test was removed: it forgave nothing real
+                # yet a fill-masked +300/h leak achieved a log/linear RSS of 0.26).
+                #
+                # RESIDUAL LIMIT: a slow CONSTANT leak whose final-quarter SPAN
+                # sneaks under abs_floor is still forgiven by the flat-tail branch
+                # above -- slow-leak and slow pool-creep are indistinguishable
+                # within one window; that is caught cross-iteration, when the
+                # pool's END value keeps rising instead of settling to a fixed HWM.
+                hlen = len(xs) // 2
+                e_slope = _ols(xs[:hlen], ys[:hlen])[0]             # first-half ramp
+                ramped = e_slope > 0.0 and \
+                    abs(e_slope) * (xs[hlen - 1] - xs[0]) > abs_floor
+                q8 = max(8, len(ys) // 8)                           # final eighth
+                t_slope, t_stderr, _ = _ols(xs[-q8:], ys[-q8:])
+                t_slope_h = t_slope * 3600.0
+                t_ci_h = T_95 * t_stderr * 3600.0
+                tail_flat = (t_slope_h - t_ci_h <= 0.0 <= t_slope_h + t_ci_h) \
+                    or abs(t_slope_h) <= eps
+                if ramped and tail_flat:
+                    ok = True
+                    reason = "ratchet-converged (final-8th %.0f/h)" % t_slope_h
         rows.append({
             "metric": metric, "slope_per_h": slope_h, "slope_per_s": slope,
             "ci_lo": lo, "ci_hi": hi, "eps": eps, "n": n,
