@@ -103,16 +103,17 @@ def _genmc_bin():
     return shutil.which("genmc")
 
 
-def run_genmc(mutated_path, timeout, cap=4):
-    """Run a mutated cldeque.c through the chase_lev_real.c harness under GenMC's
-    RC11 WEAK-memory model.  Unlike CBMC (sequentially consistent, so relaxing an
-    order is a no-op and every moflip mutant vacuously survives), GenMC actually
-    explores the weak-memory executions -- so a SURVIVING mutant ("No errors were
-    detected") means that memory order is genuinely not load-bearing under RC11
-    (a proof hole worth a look), and a KILLED mutant (a race/violation) proves the
-    barrier is necessary.  chase_lev_real.c does #include "cldeque.c", so the
-    harness + header are co-located with the mutant in its temp dir and the
-    include resolves to the MUTANT via own-directory search."""
+def run_genmc(mutated_path, timeout, cap=4, harness="chase_lev_real.c"):
+    """Run a mutated cldeque.c through a chase_lev_real* harness under GenMC's RC11
+    WEAK-memory model.  Unlike CBMC (sequentially consistent, so relaxing an order
+    is a no-op and every moflip mutant vacuously survives), GenMC actually explores
+    the weak-memory executions -- so a SURVIVING mutant ("No errors were detected")
+    means that memory order is not load-bearing FOR THIS HARNESS (a proof-hole
+    suspect: either genuinely RC11-redundant, or the harness doesn't exercise it),
+    and a KILLED mutant (a race/violation) proves the barrier necessary.  The
+    harness #includes "cldeque.c", so it + cldeque.h are co-located with the mutant
+    in its temp dir and the include resolves to the MUTANT via own-dir search.
+    chase_lev_real2.c (concurrent push vs steal) is the STRONGER harness."""
     genmc = _genmc_bin()
     if not genmc:
         return "BUILDFAIL", "genmc not found (set GENMC=/path/to/genmc)"
@@ -120,14 +121,14 @@ def run_genmc(mutated_path, timeout, cap=4):
     src_dir = os.path.join(ROOT, "src", "runloom_c")
     gdir = os.path.join(HERE, "genmc")
     try:
-        shutil.copy(os.path.join(gdir, "chase_lev_real.c"), mutant_dir)
+        shutil.copy(os.path.join(gdir, harness), mutant_dir)
         hdr = os.path.join(src_dir, "cldeque.h")
         if os.path.isfile(hdr):
             shutil.copy(hdr, mutant_dir)
     except OSError as e:
         return "BUILDFAIL", "co-locate: " + str(e)
     cmd = [genmc, "--", "-I", src_dir,
-           "-DRUNLOOM_CLDEQUE_CAP={0}".format(cap), "chase_lev_real.c"]
+           "-DRUNLOOM_CLDEQUE_CAP={0}".format(cap), harness]
     try:
         r = subprocess.run(cmd, cwd=mutant_dir, capture_output=True, text=True,
                            timeout=timeout)
@@ -281,6 +282,17 @@ TARGETS = {
         "mutate": os.path.join(ROOT, "src", "runloom_c", "cldeque.c"),
         "ops": [gen_moflip],
         "run": lambda mut, to: run_genmc(mut, to),
+        "timeout": 900,
+    },
+    "cldeque_genmc2": {   # SAME moflip, STRONGER harness (chase_lev_real2.c:
+        # owner push+pop CONCURRENT with steals).  A survivor here that was a
+        # survivor under cldeque_genmc (chase_lev_real.c, all-push-first) means the
+        # order really is RC11-redundant; a survivor there that FLIPS to killed
+        # here means the weaker harness just didn't exercise it.  On-demand.
+        "engine": "genmc",
+        "mutate": os.path.join(ROOT, "src", "runloom_c", "cldeque.c"),
+        "ops": [gen_moflip],
+        "run": lambda mut, to: run_genmc(mut, to, harness="chase_lev_real2.c"),
         "timeout": 900,
     },
 }
