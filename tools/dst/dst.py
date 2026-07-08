@@ -26,11 +26,22 @@ scheduler + channel/select logic.  Controlled interleaving of the multi-OS-
 thread M:N path (which would reproduce the OS-thread flake class) requires a
 C-level scheduler hook and is the next step (see docs/dev/VALIDATION.md).
 
+A third mode, Antithesis-style branch-seeds (ForcedAt), replays BOTH sides of a
+decision from one seed: it wraps a base strategy but overrides the yield decision
+at one step, calling the base first so the rng stream stays aligned -- the two
+branches differ only at that step.  Exploring both branches at every decision
+(2*horizon runs) reaches executions the seed's own run pinned one way, WITHOUT
+os.fork (forking mid runloom_c.run() on an fcontext stack would hang/SEGV): the
+seed is the snapshot, replay is the fork.  On the strict-FIFO control this reaches
+the bug from seeds whose own run is clean (see `branchsweep`).
+
 Usage:
   tools/dst/dst.py determinism            # prove same seed -> same execution
   tools/dst/dst.py sweep [N]              # UniformYield over seeds 1..N
   tools/dst/dst.py pct [N] [depth]        # PCTBounded over seeds 1..N
   tools/dst/dst.py repro <scenario> <seed> [pct|uniform] [depth]
+  tools/dst/dst.py branch <scenario> <seed> [depth]   # both branches of each decision
+  tools/dst/dst.py branchsweep [N] [depth]            # branch-seed teeth on the control
 """
 import os
 import sys
@@ -80,6 +91,31 @@ class NoYield(object):
 
     def should_yield(self, rng, step, gid):
         return False
+
+
+class ForcedAt(object):
+    """Antithesis-style branch-seed: wrap a base strategy but OVERRIDE the yield
+    decision at exactly one step to a fixed value.  It still calls the base's
+    should_yield first, so the shared rng stream advances identically -- the two
+    forced branches (yield / no-yield at step k) from one seed therefore differ
+    ONLY at k and its downstream consequences.  Exploring both branches at every
+    k costs 2*horizon runs and covers the decisions a single seed's run pinned
+    one way -- without os.fork (forking mid-runloom_c.run() on an fcontext stack
+    under free-threaded CPython would hang/SEGV); the seed IS the snapshot, replay
+    IS the fork."""
+
+    def __init__(self, base, k, forced):
+        self.base = base
+        self.k = k
+        self.forced = forced
+        self.name = "forced@%d=%s" % (k, "Y" if forced else "N")
+
+    def reset(self, rng, horizon):
+        self.base.reset(rng, horizon)
+
+    def should_yield(self, rng, step, gid):
+        d = self.base.should_yield(rng, step, gid)   # keep the rng stream aligned
+        return self.forced if step == self.k else d
 
 
 # ---- the simulation context threaded through a scenario ------------------
@@ -366,9 +402,97 @@ def cmd_selftest():
     return 1
 
 
+def _all_scenarios():
+    d = dict(SCENARIOS)
+    d["BUG_strict_order"] = scenario_BUG_strict_order   # the negative control
+    return d
+
+
+def _base_strategy(depth):
+    return PCTBounded(depth) if depth else UniformYield(0.5)
+
+
+def cmd_branch(scenario_name, seed, depth):
+    """From ONE seed, replay both branches (yield / no-yield) of every decision
+    point and report the distinct executions + bugs the branching reaches beyond
+    the seed's own single run."""
+    scen = _all_scenarios()[scenario_name]
+    horizon = calibrate(scen)
+    base_sig, base_err = run_once(scen, seed, _base_strategy(depth), horizon)
+    print("[dst] branch {0} seed={1} horizon={2}: base run {3}".format(
+        scenario_name, seed, horizon, "BUG(%s)" % base_err if base_err else "ok"))
+    execs = {base_sig: base_err}          # distinct executions the seed can reach
+    live = 0
+    revealed = []
+    for k in range(1, horizon + 1):
+        sig_k = {}
+        for forced in (True, False):
+            sig, err = run_once(scen, seed, ForcedAt(_base_strategy(depth), k, forced), horizon)
+            sig_k[forced] = sig
+            execs.setdefault(sig, err)
+            if err and not base_err:
+                revealed.append((k, forced, err))
+        if sig_k[True] != sig_k[False]:
+            live += 1
+    print("  {0} live decisions of {1}; branching reaches {2} distinct executions "
+          "(the seed's own run was 1)".format(live, horizon, len(execs)))
+    if revealed:
+        k, forced, err = revealed[0]
+        print("  >>> branching REVEALED a bug the seed missed: force step {0} -> "
+              "{1}: {2}  ({3} such branches)".format(
+                  k, "yield" if forced else "no-yield", err, len(revealed)))
+        return 1 if scenario_name != "BUG_strict_order" else 0
+    print("  >>> no new bug from branching this seed")
+    return 0
+
+
+def cmd_branchsweep(nseeds, depth):
+    """Teeth check: on the BUG control, count seeds whose OWN run is clean but
+    whose branch-replay reveals the bug -- the coverage a single seed misses."""
+    scen = scenario_BUG_strict_order
+    horizon = calibrate(scen)
+    base_bug = branch_bug = both = clean = 0
+    first = None
+    for seed in range(1, nseeds + 1):
+        _, base_err = run_once(scen, seed, _base_strategy(depth), horizon)
+        hit = False
+        for k in range(1, horizon + 1):
+            for forced in (True, False):
+                _, err = run_once(scen, seed, ForcedAt(_base_strategy(depth), k, forced), horizon)
+                if err:
+                    hit = True
+        if base_err:
+            base_bug += 1
+        if base_err and hit:
+            both += 1
+        elif hit and not base_err:
+            branch_bug += 1
+            if first is None:
+                first = seed
+        elif not base_err and not hit:
+            clean += 1
+    print("[dst] branchsweep BUG_strict_order: {0} seeds, horizon={1}".format(nseeds, horizon))
+    print("  base run hits bug:                 {0}".format(base_bug))
+    print("  base CLEAN but branch reveals bug: {0}  (branch-seeds' added coverage)".format(branch_bug))
+    print("  base clean AND no branch bug:      {0}".format(clean))
+    if branch_bug > 0:
+        print("  >>> teeth: branch-replay from a clean seed (e.g. {0}) reaches the "
+              "bug the seed's own run misses".format(first))
+        return 0
+    print("  >>> INCONCLUSIVE: every buggy interleaving was already hit by a base run")
+    return 0
+
+
 def main():
     args = sys.argv[1:]
     mode = args[0] if args else "determinism"
+    if mode == "branch":
+        return cmd_branch(args[1], int(args[2]),
+                          int(args[3]) if len(args) > 3 else 0)
+    if mode == "branchsweep":
+        n = int(args[1]) if len(args) > 1 else 100
+        d = int(args[2]) if len(args) > 2 else 0
+        return cmd_branchsweep(n, d)
     if mode == "determinism":
         return cmd_determinism()
     if mode == "selftest":
