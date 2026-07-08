@@ -228,9 +228,16 @@ def drain_round(H, wid, br, salt, total, rng, method, counts, slot):
                    .format(wid, method, consumed))
             return False
         if not chunk:
-            # Empty before reaching `total`: either EOF (the feeder dropped a
-            # byte / closed early) or a non-blocking short (shouldn't happen on a
-            # cooperative os.read).  Either way the prefix ended SHORT -> a drop.
+            if not H.running():
+                return True             # deadline expired mid-round: the feeder's
+                                        # `while pos < total and H.running()` loop
+                                        # stops and closes wfd, so this EOF is a
+                                        # benign truncation, NOT a dropped byte.
+                                        # Mirrors the OSError branch above.
+            # Empty before reaching `total` WHILE THE RUN IS LIVE: the feeder only
+            # closes wfd after feeding all `total` bytes (its loop exits on
+            # pos>=total), so an EOF/empty here means a byte was genuinely lost
+            # across the refill park (a real tear), not a deadline truncation.
             H.fail("drain hit EOF/empty at pos {0} of {1} wid={2} method={3} -- "
                    "the buffered prefix ended SHORT (a DROPPED byte across the "
                    "refill park)".format(consumed, total, wid, method))
