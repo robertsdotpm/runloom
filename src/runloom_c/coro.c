@@ -1574,6 +1574,7 @@ static void runloom_coro_global_flush(void)
             moved++;
         } else {
             if (c->stack != NULL) runloom_stack_release(c->stack, c->stack_size);
+            runloom_fibersan_destroy(&c->asm_coro);
             free(c);
         }
     }
@@ -1600,6 +1601,7 @@ static void runloom_coro_global_flush(void)
             runloom_coro_t *c = overflow;
             overflow = c->pool_next;
             if (c->stack != NULL) runloom_stack_release(c->stack, c->stack_size);
+            runloom_fibersan_destroy(&c->asm_coro);
             free(c);
         }
     }
@@ -1711,6 +1713,7 @@ runloom_coro_t *runloom_coro_init_at(void *mem, size_t stack_size, void *stack,
     c->asm_coro.entry = runloom_fcontext_entry;
     c->asm_coro.user = c;
     c->asm_coro.done = 0;
+    runloom_fibersan_zero(&c->asm_coro);   /* caller-provided mem: not calloc'd */
     runloom_asm_make_ctx(&c->asm_coro, (void *)((uintptr_t)stack + rounded));
     return c;
 }
@@ -1748,6 +1751,7 @@ static void runloom_bulkfill_range(const runloom_bulkfill_arg_t *a)
         c->asm_coro.entry = runloom_fcontext_entry;
         c->asm_coro.user = c;
         c->asm_coro.done = 0;
+        runloom_fibersan_zero(&c->asm_coro);   /* arena mem: not calloc'd */
         c->fresh = a->defer;
         if (!a->defer)
             runloom_asm_make_ctx(&c->asm_coro, (void *)((uintptr_t)stk + a->rounded));
@@ -1970,6 +1974,7 @@ void runloom_coro_destroy(runloom_coro_t *c)
     if (c->stack != NULL) {
         runloom_stack_release(c->stack, c->stack_size);
     }
+    runloom_fibersan_destroy(&c->asm_coro);   /* free the TSan fiber (true free) */
     free(c);
 }
 
@@ -2110,7 +2115,12 @@ void runloom_coro_resume(runloom_coro_t *c)
     runloom_tls_current = c;
     if (RUNLOOM_DBG_ON(RUNLOOM_DBG_INVARIANTS))
         __atomic_store_n(&c->dbg_running, 1, __ATOMIC_RELEASE);
+    /* Tell the sanitizer we are switching onto this goroutine's stack (its own
+     * TSan fiber + ASan fake-stack); no-op unless -fsanitize.  Bounds are the
+     * goroutine's usable stack [c->stack, c->stack+c->stack_size). */
+    runloom_fibersan_enter(&c->asm_coro, c->stack, c->stack_size);
     runloom_asm_swap(&c->asm_coro.caller, &c->asm_coro.self);
+    runloom_fibersan_left(&c->asm_coro);   /* back on the hub stack */
     if (RUNLOOM_DBG_ON(RUNLOOM_DBG_INVARIANTS))
         __atomic_store_n(&c->dbg_running, 0, __ATOMIC_RELEASE);
     runloom_tls_current = prev;
@@ -2121,7 +2131,9 @@ void runloom_coro_yield(void)
     runloom_coro_t *c = runloom_tls_current;
     if (c == NULL) return;
     runloom_ctx_assert_parkable("coro_yield");
+    runloom_fibersan_suspend(&c->asm_coro);   /* hand history back to the hub fiber */
     runloom_asm_swap(&c->asm_coro.self, &c->asm_coro.caller);
+    runloom_fibersan_resumed(&c->asm_coro);   /* running again (maybe on a new hub) */
 }
 
 int runloom_coro_done(const runloom_coro_t *c)

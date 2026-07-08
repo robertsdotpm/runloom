@@ -21,6 +21,7 @@
 
 #include "compat.h"
 #include "plat.h"
+#include "runloom_fiber_san.h"   /* fiber-aware TSan/ASan brackets (no-op unless -fsanitize) */
 
 /* Enable the asm fast path on architectures we have an implementation
  * for and where the OS uses System V calling convention.  RUNLOOM_FORCE_UCONTEXT
@@ -47,6 +48,11 @@ struct runloom_asm_coro {
     void (*entry)(void *user);
     void *user;
     int done;
+#if defined(RUNLOOM_FIBERSAN)
+    /* Fiber sanitizer state -- present ONLY on -fsanitize=thread/address builds
+     * (uniform across TUs), so release layout is byte-identical to before. */
+    runloom_fiber_san_t fibersan;
+#endif
 };
 
 /* Asm-side: defined in arch/swap_*.S */
@@ -64,6 +70,9 @@ void runloom_asm_entry(runloom_asm_coro_t *c);
  * as the coroutine exists. */
 void runloom_asm_make_ctx(runloom_asm_coro_t *coro,
                        void *stack_top);
+
+/* Helper bodies -- need the complete struct above. */
+#include "runloom_fiber_san_impl.h"
 
 #endif /* RUNLOOM_HAVE_FCONTEXT */
 

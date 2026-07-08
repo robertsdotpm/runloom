@@ -11,10 +11,13 @@
  * return to.  Any spurious resume after done just yields back again. */
 void runloom_asm_entry(runloom_asm_coro_t *c)
 {
+    runloom_fibersan_first_entry(c);   /* learn hub bounds; no-op unless sanitized */
     c->entry(c->user);
     c->done = 1;
     for (;;) {
+        runloom_fibersan_abandon(c);   /* hand history back to the hub fiber */
         runloom_asm_swap(&c->self, &c->caller);
+        runloom_fibersan_reentered(c); /* defensive: spurious resume of a done coro */
     }
 }
 
