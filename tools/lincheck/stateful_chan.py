@@ -1,13 +1,19 @@
 """Stateful (model-based) Hypothesis testing of runloom channel semantics.
 
 The existing tests/test_chan_properties.py uses only @given (stateless).  This
-is a RuleBasedStateMachine: Hypothesis generates random *sequences* of
-send/recv/close/select operations and checks each step against a reference
-FIFO queue, shrinking any failure to a minimal counterexample.  Preconditions
-keep every single op non-blocking (send only when not full, recv only when
-non-empty, select only when some case is ready), so each op runs as one short
-goroutine on a persistent buffered channel -- exercising the real Chan
-buffer/wraparound/close paths and the multi-case select install/abort path.
+is a RuleBasedStateMachine: Hypothesis generates random *sequences* over the op
+alphabet {send, recv, try_send, try_recv, close, select-recv, select-default}
+and checks each step against a reference FIFO queue, shrinking any failure to a
+minimal counterexample.  Preconditions keep every op non-blocking (send only when
+not full, recv only when non-empty) so each runs as one short goroutine on a
+persistent buffered channel -- exercising the real Chan buffer/wraparound/close
+paths, the non-blocking try_* would-block detection, and the multi-case select
+install/abort path.
+
+Hypothesis's stateful engine requires DETERMINISTIC transitions on replay; select
+randomizes its winner among ready cases, so the select rules are preconditioned so
+exactly one case is ready (deterministic outcome, install/abort of the other still
+covered).  A multi-ready select would trip FlakyStrategyDefinition.
 
 Run as a test:   pytest tools/lincheck/stateful_chan.py
 Run standalone:  python tools/lincheck/stateful_chan.py
@@ -59,14 +65,17 @@ class ChannelStateMachine(RuleBasedStateMachine):
         self.ref2.append(v)
 
     @rule()
-    @precondition(lambda self: len(self.ref) > 0 or self.closed or len(self.ref2) > 0)
+    @precondition(lambda self: (
+        ((len(self.ref) > 0 or self.closed) and len(self.ref2) == 0)
+        or (len(self.ref2) > 0 and len(self.ref) == 0 and not self.closed)))
     def select_recv(self):
-        # select() over BOTH channels.  Precondition guarantees at least one
-        # case is ready, so the single goroutine never blocks.  The runtime is
-        # free to pick ANY ready case; we accept whichever it returns as long
-        # as it's consistent with the model, then apply the matching pop.  This
-        # is the multi-waiter install/abort/cleanup path -- chan.c's four
-        # historical select bugs all lived here.
+        # select() over BOTH channels with EXACTLY ONE case ready.  This keeps the
+        # multi-waiter install/abort/cleanup coverage (both cases are installed;
+        # the non-ready one's waiter is aborted) -- chan.c's four historical select
+        # bugs all lived here -- while making the OUTCOME DETERMINISTIC: select
+        # randomizes its winner among ready cases, and a non-deterministic state
+        # transition breaks Hypothesis's stateful replay (FlakyStrategyDefinition).
+        # We apply the matching pop for whichever case the runtime returns.
         box = []
         go1(lambda: box.append(runloom_c.select([("recv", self.ch), ("recv", self.ch2)])))
         idx, res = box[0]
@@ -109,6 +118,54 @@ class ChannelStateMachine(RuleBasedStateMachine):
         go1(lambda: box.append(self.ch.recv()))
         v, ok = box[0]
         assert not ok, "recv after close+drain must be (None, False), got {0}".format((v, ok))
+
+    # ---- non-blocking ops (the would-block detection paths) ----------------
+    @rule(v=st.integers(min_value=0, max_value=10 ** 6))
+    @precondition(lambda self: not self.closed)
+    def try_send(self, v):
+        # try_send never blocks: True iff there is room, False (would-block) when
+        # the buffer is full.  Exercises the non-blocking send fast-path.
+        box = []
+        go1(lambda: box.append(self.ch.try_send(v)))
+        ok = box[0]
+        if len(self.ref) < self.cap:
+            assert ok is True, "try_send should deliver with room ({0}/{1})".format(
+                len(self.ref), self.cap)
+            self.ref.append(v)
+        else:
+            assert ok is False, "try_send should would-block (False) when full"
+
+    @rule()
+    @precondition(lambda self: not (self.closed and len(self.ref) == 0))
+    def try_recv(self):
+        # try_recv: (value, ok) on success, None when it would block.  Skip the
+        # ambiguous closed+empty case (covered by recv_after_drain).
+        box = []
+        go1(lambda: box.append(self.ch.try_recv()))
+        got = box[0]
+        if len(self.ref) > 0:
+            assert got is not None, "try_recv should succeed with {0} buffered".format(
+                len(self.ref))
+            v, ok = got
+            assert ok, "try_recv ok=False with buffered data"
+            want = self.ref.popleft()
+            assert v == want, "FIFO violation try_recv: got {0} want {1}".format(v, want)
+        else:  # empty + open -> would-block
+            assert got is None, "try_recv on empty+open should be None, got {0}".format(got)
+
+    @rule()
+    @precondition(lambda self: len(self.ref) == 0 and len(self.ref2) == 0 and not self.closed)
+    def select_default_notready(self):
+        # select(default=True) with NOTHING ready returns a bare -1 (the
+        # non-blocking default path).  Preconditioned on all-empty-and-open so the
+        # outcome is DETERMINISTIC: with no ready case, select can't randomly pick
+        # a winner, so stateful replay stays consistent (a multi-ready select
+        # randomizes its winner -> non-deterministic transitions Hypothesis's
+        # stateful model can't replay; that ready-case coverage is select_recv's).
+        box = []
+        go1(lambda: box.append(runloom_c.select(
+            [("recv", self.ch), ("recv", self.ch2)], default=True)))
+        assert box[0] == -1, "select(default) with nothing ready must be -1, got {0}".format(box[0])
 
     @invariant()
     def runtime_consistent(self):
