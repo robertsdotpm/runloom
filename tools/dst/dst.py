@@ -47,6 +47,12 @@ import os
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "src"))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))   # for simnet
+# Deterministic TIME (the second DST pillar): sched_sleep + loop.time() read the
+# logical clock, not the wall clock.  Set before runloom_c reads it.  The
+# channel/timer scenarios don't sched_sleep, so they are unaffected; the sim-net
+# scenarios use it for deterministic delivery timing.
+os.environ.setdefault("RUNLOOM_LOGICAL_CLOCK", "1")
 
 import random
 
@@ -258,10 +264,87 @@ def scenario_select_race(sim):
     assert sorted(got) == want, "select lost/dup: got {0}".format(sorted(got))
 
 
+def scenario_sim_echo(sim):
+    """Deterministic SIMULATED-NETWORK scenario (the third DST pillar, Slice 0):
+    a request/response echo over sim sockets whose delivery timing, fragmentation,
+    and short-writes are drawn from sim.rng.  Reliable delivery here (loss/reset
+    off) so it terminates by fixed byte count; the byte trace IS the signature, so
+    same seed => identical trace.  See tools/dst/simnet.py."""
+    import simnet
+    net = simnet.SimNet(sim.rng, record=sim.record,
+                        cfg={"P_LOSS": 0.0, "P_RESET": 0.0, "P_CONNECT_FAIL": 0.0})
+    addr = ("srv", 7)
+    n = 6
+    srv = net.socket()
+    srv.bind(addr)
+    srv.listen()                                    # register listener before run()
+
+    def server():
+        conn, _ = srv.accept()
+        got = b""
+        while len(got) < n:
+            data = conn.recv(n - len(got))
+            if not data:
+                break
+            got += data
+        conn.sendall(got)                           # echo exactly what arrived
+        conn.close()
+
+    def client():
+        c = net.socket()
+        c.connect(addr)
+        for i in range(n):
+            c.sendall(bytes([i]))
+        back = b""
+        while len(back) < n:
+            data = c.recv(n - len(back))
+            if not data:
+                break
+            back += data
+        sim.record(("echo", tuple(back)))
+        c.close()
+
+    runloom_c.fiber(server)
+    runloom_c.fiber(client)
+    runloom_c.run()
+    srv.close()
+
+
+def scenario_sim_lostwake(sim):
+    """Negative control for the INSTANT hang oracle: the server accepts but never
+    replies (a planted lost-wake), so the client parks on recv forever.  Under the
+    logical clock nothing rides wall time, so this is a genuine structural deadlock
+    -- caught in microseconds, not by a wall-clock timeout.  run_once must surface
+    it (a raised deadlock, or a parked fiber the caller checks)."""
+    import simnet
+    net = simnet.SimNet(sim.rng, record=sim.record,
+                        cfg={"P_LOSS": 0.0, "P_RESET": 0.0, "P_CONNECT_FAIL": 0.0})
+    addr = ("srv", 8)
+    srv = net.socket()
+    srv.bind(addr)
+    srv.listen()
+
+    def server():
+        conn, _ = srv.accept()
+        runloom_c.sched_yield()                     # BUG: never sends, never closes
+
+    def client():
+        c = net.socket()
+        c.connect(addr)
+        data = c.recv(1)                            # parks forever -> deadlock
+        sim.record(("got", data))
+
+    runloom_c.fiber(server)
+    runloom_c.fiber(client)
+    runloom_c.run()
+    srv.close()
+
+
 SCENARIOS = {
     "unbuffered_handoff": scenario_unbuffered_handoff,
     "buffered_mpmc": scenario_buffered_mpmc,
     "select_race": scenario_select_race,
+    "sim_echo": scenario_sim_echo,
 }
 
 
@@ -312,10 +395,21 @@ def calibrate(scenario):
 def run_once(scenario, seed, strategy, horizon):
     sim = Sim(seed, strategy)
     strategy.reset(random.Random(seed ^ 0x5DEECE66D), horizon)
+    # Instant lost-wake oracle: under the logical clock nothing rides wall time, so
+    # a run that ends with an unwakeable parked fiber is a genuine deadlock, counted
+    # by runloom in microseconds -- no wall-clock timeout.  Deadlock mode stays WARN
+    # (1) so the scheduler still recovers from a TRANSIENT all-parked moment by
+    # advancing the logical clock (a pending sim-delivery timer); only an
+    # unrecoverable lost wake bumps the counter.
+    runloom_c.set_deadlock_mode(1)
+    dl0 = runloom_c.count_deadlocked()
     err = None
     try:
         scenario(sim)
-        if runloom_c._self_check(0) != 0:
+        dl = runloom_c.count_deadlocked() - dl0
+        if dl > 0:
+            err = "DEADLOCK ({0} unwakeable fiber(s) -- lost wake)".format(dl)
+        elif runloom_c._self_check(0) != 0:
             err = "self_check != 0"
     except Exception as exc:  # invariant violation or crash
         err = "{0}: {1}".format(type(exc).__name__, exc)
