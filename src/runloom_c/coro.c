@@ -1553,9 +1553,14 @@ static void runloom_coro_global_flush(void)
     int moved = 0, scanned = 0;
     size_t klass;
 
-    if (runloom_coro_global_class == 0 && runloom_coro_pool != NULL)
-        runloom_coro_global_class = runloom_coro_pool->stack_size;  /* claim once */
-    klass = runloom_coro_global_class;
+    /* Relaxed-atomic: two hubs can flush concurrently at mn_fini and both run
+     * this same-value idempotent claim -- benign, but a plain read/write pair is
+     * a TSan-visible data race (policy: fix runloom races, don't suppress). */
+    if (__atomic_load_n(&runloom_coro_global_class, __ATOMIC_RELAXED) == 0
+            && runloom_coro_pool != NULL)
+        __atomic_store_n(&runloom_coro_global_class,
+                         runloom_coro_pool->stack_size, __ATOMIC_RELAXED);  /* claim once */
+    klass = __atomic_load_n(&runloom_coro_global_class, __ATOMIC_RELAXED);
 
     while (runloom_coro_pool != NULL && scanned < RUNLOOM_CORO_GLOBAL_BATCH) {
         runloom_coro_t *c = runloom_coro_pool;
@@ -1634,7 +1639,8 @@ runloom_coro_t *runloom_coro_new(size_t stack_size,
      * peek at the head and fall through to allocation if it
      * mismatches.  In practice every spawn uses the default
      * stack_size, so the head is virtually always a match. */
-    if (runloom_coro_pool == NULL && rounded == runloom_coro_global_class)
+    if (runloom_coro_pool == NULL
+            && rounded == __atomic_load_n(&runloom_coro_global_class, __ATOMIC_RELAXED))
         runloom_coro_global_refill();   /* cross-hub refill (balanced class only) before a cold calloc */
     if (runloom_coro_pool != NULL && runloom_coro_pool->stack_size == rounded) {
         c = runloom_coro_pool;
@@ -2422,6 +2428,6 @@ void runloom_coro_reset_after_fork(void)
     pthread_mutex_init(&runloom_coro_global_lock, NULL);
     runloom_coro_global_pool = NULL;
     runloom_coro_global_size = 0;
-    runloom_coro_global_class = 0;
+    __atomic_store_n(&runloom_coro_global_class, 0, __ATOMIC_RELAXED);
 #endif
 }
