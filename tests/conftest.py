@@ -45,6 +45,8 @@ _SRC = os.path.join(REPO, "src")
 if _SRC not in sys.path:
     sys.path.insert(0, _SRC)
 
+import threading
+
 import pytest
 
 try:
@@ -54,6 +56,39 @@ except Exception:  # pragma: no cover - runloom_c should always import here
 
 _REPORT_ONLY = os.environ.get("RUNLOOM_TEST_LEAK_REPORT") == "1"
 _DISABLED = os.environ.get("RUNLOOM_TEST_NO_INVARIANTS") == "1"
+
+# --- swallowed-error gate (QA-steal-V2 #3) ---------------------------------
+# Errors raised on a path that cannot propagate -- a tp_dealloc / weakref
+# finalizer that raises, an exception in a callback run on a hub OS thread, an
+# unawaited-task error -- go to sys.unraisablehook / threading.excepthook and
+# VANISH (in the free-threaded build, concurrently across many hubs), often
+# corrupting half-reclaimed state that later surfaces as an unrelated UAF.
+# Install a process-wide gate (below) so any such swallowed error fails the test
+# it fired under instead of disappearing.  A test that INTENTIONALLY raises on
+# such a path opts out with @pytest.mark.runloom_allow_unraisable; tests using
+# test.support.catch_unraisable_exception install their own hook for their scope
+# and are unaffected.  RUNLOOM_TEST_LEAK_REPORT=1 makes it report-only too.
+_UNRAISABLE = []
+_pg_saved_unraisablehook = None
+_pg_saved_threadexcepthook = None
+
+
+def _pg_unraisable_hook(unraisable):
+    try:
+        _UNRAISABLE.append("unraisable[{0}]: {1!r} (obj {2!r})".format(
+            getattr(unraisable, "err_msg", None) or "Exception ignored",
+            getattr(unraisable, "exc_value", None),
+            getattr(unraisable, "object", None)))
+    except Exception:  # never let the hook itself raise
+        _UNRAISABLE.append("unraisable: <unformattable>")
+
+
+def _pg_thread_excepthook(args):
+    try:
+        _UNRAISABLE.append("thread-excepthook: {0!r} on {1!r}".format(
+            getattr(args, "exc_value", None), getattr(args, "thread", None)))
+    except Exception:
+        _UNRAISABLE.append("thread-excepthook: <unformattable>")
 
 # How long to let a background thread finish draining its own parker before we
 # call a non-zero delta a real leak.  Real leaks never drain, so this only
@@ -67,6 +102,23 @@ def pytest_configure(config):
         "markers",
         "runloom_leaky: test deliberately leaves a netpoll parker behind; "
         "skip the post-test parked-leak invariant for it.")
+    config.addinivalue_line(
+        "markers",
+        "runloom_allow_unraisable: test intentionally raises on a dealloc / "
+        "finalizer / hub-thread path; skip the swallowed-error gate for it.")
+    if not _DISABLED:
+        global _pg_saved_unraisablehook, _pg_saved_threadexcepthook
+        _pg_saved_unraisablehook = sys.unraisablehook
+        _pg_saved_threadexcepthook = threading.excepthook
+        sys.unraisablehook = _pg_unraisable_hook
+        threading.excepthook = _pg_thread_excepthook
+
+
+def pytest_unconfigure(config):
+    if _pg_saved_unraisablehook is not None:
+        sys.unraisablehook = _pg_saved_unraisablehook
+    if _pg_saved_threadexcepthook is not None:
+        threading.excepthook = _pg_saved_threadexcepthook
 
 
 @pytest.hookimpl(wrapper=True)
@@ -110,12 +162,29 @@ def runloom_invariants(request):
         return
 
     baseline = _parked()
+    del _UNRAISABLE[:]          # count only THIS test's swallowed errors
     yield
 
     # Don't mask a real test failure with a teardown invariant error.
     call_rep = getattr(request.node, "_pg_rep_call", None)
     if call_rep is not None and not call_rep.passed:
         return
+
+    # (0) swallowed-error gate: an unraisable / thread-excepthook that fired
+    # during this test (a raise on a dealloc / finalizer / hub-thread path that
+    # cannot propagate) is a real fault, not benign -- surface it here.
+    if (_UNRAISABLE
+            and request.node.get_closest_marker("runloom_allow_unraisable") is None):
+        caught = list(_UNRAISABLE)
+        del _UNRAISABLE[:]
+        msg = ("{0} error(s) swallowed on a dealloc/finalizer/hub-thread path "
+               "during this test (sys.unraisablehook / threading.excepthook): "
+               "{1}".format(len(caught), " | ".join(caught[:5])))
+        if _REPORT_ONLY:
+            sys.stderr.write("[runloom-unraisable] {0}::{1}: {2}\n".format(
+                request.node.module.__name__, request.node.name, msg))
+        else:
+            pytest.fail(msg, pytrace=False)
 
     # (1) structural integrity -- always holds, cheap, no false positives.
     viol = runloom_c._self_check(0)
