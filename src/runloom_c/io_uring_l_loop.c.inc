@@ -297,6 +297,13 @@ static void runloom_iouring_loop_drain(runloom_iouring_ring_t *r, int *flags_out
     if (r == NULL) return;
     head = __atomic_load_n(r->cq_head, __ATOMIC_ACQUIRE);
     tail = __atomic_load_n(r->cq_tail, __ATOMIC_ACQUIRE);
+    /* The single-reaper CQE dispatch runs on the hub BETWEEN goroutines: it
+     * wakes parked fibers, delivers multishot chunks, and reclaims cancel
+     * records.  A cooperative yield/park here would re-enter the scheduler
+     * mid-reap (a hub-reentrancy bug), so declare it a no-yield region --
+     * RUNLOOM_CTXCHECK then asserts it at coro_yield (item #1 might_switch).
+     * Zero cost when CTXCHECK is off. */
+    RUNLOOM_NOYIELD_BEGIN();
     for (i = head; i != tail; i++) {
         struct io_uring_cqe *cqe = &r->cqes[i & r->cq_mask];
         uint64_t ud     = cqe->user_data;
@@ -387,6 +394,7 @@ static void runloom_iouring_loop_drain(runloom_iouring_ring_t *r, int *flags_out
                                __ATOMIC_ACQ_REL);
         }
     }
+    RUNLOOM_NOYIELD_END();
     if (seen) __atomic_store_n(r->cq_head, head + seen, __ATOMIC_RELEASE);
 }
 
