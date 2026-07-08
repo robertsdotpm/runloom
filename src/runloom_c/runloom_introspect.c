@@ -599,9 +599,20 @@ runloom_g_info_t *runloom_fiber_snapshot(long *count_out)
         o->age_ns      = (runloom_introspect_get_timestamps()
                           && since > 0 && now > 0 && state_is_parked(st))
                          ? (now - since) : -1;
+        /* RELAXED-atomic loads, matched to spawn_common's RELAXED stores
+         * (sched_core.c.inc:966-969).  The st>=RUNNABLE gate above does NOT
+         * establish happens-before with the spawner for a slab-REUSED g: a
+         * retained g carries a STALE RUNNABLE from a prior incarnation earlier in
+         * state's modification order, which this ACQUIRE-load can still observe
+         * (reset-to-FREED/INIT at free/reuse does not force us past it -- GenMC
+         * greg_reuse.c).  So these reads can be concurrent with spawn_common's
+         * field writes; plain accesses would be a data race (TSan-GOLD).  Atomic
+         * on both sides makes it race-free; the value may be a benign
+         * cross-incarnation display value (opaque id/owner/flags), never a
+         * scheduling input. */
         o->refcount    = __atomic_load_n(&g->refcount, __ATOMIC_RELAXED);
-        o->noyield     = g->noyield;
-        o->owner       = (const void *)g->owner;
+        o->noyield     = __atomic_load_n(&g->noyield, __ATOMIC_RELAXED);
+        o->owner       = (const void *)__atomic_load_n(&g->owner, __ATOMIC_RELAXED);
     }
     RUNLOOM_RUNLOCK(&runloom_greg_lock, RUNLOOM_RANK_GREG);
     if (count_out != NULL) *count_out = n;

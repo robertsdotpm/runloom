@@ -963,9 +963,23 @@ static PyObject *spawn_common(runloom_sched_t *s, PyObject *callable,
     Py_INCREF(callable);
     g->callable = callable;
     g->advice_key = advice_key;   /* kind key (0 unless profiling on); resolved by caller */
-    g->refcount = 1;   /* one ref for the scheduler queue */
-    g->owner = s;      /* per-thread sched that owns this g (Phase C) */
-    g->noyield = noyield;
+    /* Publish these three via RELAXED atomic stores (not plain), matched by the
+     * introspect reader's RELAXED loads (runloom_introspect.c:602-604).  The
+     * state>=RUNNABLE gate (9b21ec18) closes the FRESH-spawn read-before-publish
+     * case, but NOT slab REUSE: a retained g (never unlinked from the registry)
+     * keeps a STALE RUNNABLE from its PRIOR incarnation in state's modification
+     * order, so a registry-walking sampler can acquire-load that stale RUNNABLE
+     * -- an earlier value it is not forced past, resetting state to FREED(:743)/
+     * INIT(:708) does NOT prevent it (GenMC greg_reuse.c: race persists WITH both
+     * resets) -- pass the gate, and read these fields while we rewrite them.  A
+     * data race on plain accesses; making BOTH sides RELAXED-atomic removes it
+     * (GenMC-proven).  Relaxed is free (same instruction) and, being sequenced
+     * before the :989 RELEASE publish, is still visible to any hub that later
+     * acquires g through the ready/submit handshake.  Fields are display-only
+     * (runloom.fibers() dict); no scheduling consumer reads the snapshot. */
+    __atomic_store_n(&g->refcount, 1, __ATOMIC_RELAXED);  /* one ref for the sched queue */
+    __atomic_store_n(&g->owner, s, __ATOMIC_RELAXED);     /* owning per-thread sched (Phase C) */
+    __atomic_store_n(&g->noyield, noyield, __ATOMIC_RELAXED);
     __atomic_store_n(&g->id, runloom_next_goid(), __ATOMIC_RELAXED);
     g->park_fd = -1;   /* not parked on any fd yet (reset after slab reuse) */
     g->pct_prio = 0;   /* fresh fiber: unassigned PCT priority (slab reuse) */

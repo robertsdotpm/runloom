@@ -127,6 +127,30 @@ else
     red "FAIL"; echo " (errored but no race reported) -- see $HERE/.genmc.neg.log"; fail=$((fail+1))
 fi
 
+# --- g-registry publish, SLAB-REUSE continuation (TSan-GOLD 2026-07-08) --------
+# greg_publish.c proves the st>=RUNNABLE gate closes the FRESH-spawn case; it does
+# NOT close slab REUSE.  A retained g (never unlinked from the registry) carries a
+# STALE RUNNABLE from its prior incarnation in state's modification order, so the
+# sampler can acquire-load it, pass the gate, and read owner/noyield/refcount while
+# spawn_common rewrites them.  Resetting state to FREED/INIT at free/reuse does NOT
+# help (no happens-before forces the reader past the reset).  Fix = publish the
+# fields via RELAXED atomics matched by RELAXED reader loads (display-only, benign).
+printf '  [genmc] %-30s ' "greg_reuse.c"
+if "$G" -- "$HERE/greg_reuse.c" >"$HERE/.genmc.pos.log" 2>&1 \
+        && grep -q "No errors were detected" "$HERE/.genmc.pos.log"; then
+    green "PASS"; echo " -- atomic owner/noyield/refcount: no race even vs a stale prior-life RUNNABLE"; pass=$((pass+1))
+else
+    red "FAIL"; echo " -- see $HERE/.genmc.pos.log"; fail=$((fail+1))
+fi
+printf '  [genmc] %-30s ' "greg_reuse.c(-DBUG_PLAIN_FIELDS)"
+if "$G" -- -DBUG_PLAIN_FIELDS "$HERE/greg_reuse.c" >"$HERE/.genmc.neg.log" 2>&1; then
+    red "FAIL"; echo " (expected a race) -- see $HERE/.genmc.neg.log"; fail=$((fail+1))
+elif grep -qiE "race|error|violation" "$HERE/.genmc.neg.log"; then
+    green "PASS"; echo " -- correctly DETECTS the reuse race (plain fields survive the FREED/INIT resets)"; pass=$((pass+1))
+else
+    red "FAIL"; echo " (errored but no race reported) -- see $HERE/.genmc.neg.log"; fail=$((fail+1))
+fi
+
 # --- park_safe/wake_safe cross-thread handshake (runloom_sched*) ---------------
 # Drift-guard: the harness's correct default assumes the source has the two
 # StoreLoad seq_cst fences (added after GenMC found a lost wakeup in the
