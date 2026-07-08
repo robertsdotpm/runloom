@@ -95,6 +95,10 @@ RUNLOOM_NO_IOCP   = os.environ.get("RUNLOOM_NO_IOCP", "").strip() not in ("", "0
 # Debug lane only -- zero cost in a normal build.
 RUNLOOM_CTXCHECK  = os.environ.get("RUNLOOM_CTXCHECK", "").strip() not in ("", "0", "no", "false")
 RUNLOOM_CTXCHECK_ABORT = os.environ.get("RUNLOOM_CTXCHECK_ABORT", "").strip() not in ("", "0", "no", "false")
+# RUNLOOM_KCSAN=1 arms the KCSAN-style delay-and-recheck exclusive-access
+# watchpoints (item #8): a cheap sampling data-race detector for soak scale where
+# TSan is too slow.  Debug lane only -- zero cost in a normal build.
+RUNLOOM_KCSAN = os.environ.get("RUNLOOM_KCSAN", "").strip() not in ("", "0", "no", "false")
 # RUNLOOM_NETPOLL=select forces the select() fallback at build time on POSIX
 # (suppresses epoll/kqueue/event_ports in plat.h so netpoll.c uses its
 # select path).  On Windows the same env var is honoured at *runtime* by
@@ -287,6 +291,8 @@ def detect_compile_args():
         args += ["-DRUNLOOM_LOCKRANK=1", "-DRUNLOOM_CTXCHECK=1"]
         if RUNLOOM_CTXCHECK_ABORT:
             args += ["-DRUNLOOM_LOCKRANK_ABORT=1", "-DRUNLOOM_CTXCHECK_ABORT=1"]
+    if RUNLOOM_KCSAN:
+        args.append("-DRUNLOOM_KCSAN=1")
     if RUNLOOM_SHRINK:
         args.append("-DRUNLOOM_SHRINK=1")
     if RUNLOOM_COVER:

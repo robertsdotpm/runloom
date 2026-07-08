@@ -12,6 +12,7 @@
 #include "runloom_lockrank.h"
 #include "plat_atomic.h"
 #include "rl_handle.h"
+#include "runloom_kcsan.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -400,6 +401,35 @@ int runloom_self_check(int verbose)
     }
     return violations;
 }
+
+
+#ifdef RUNLOOM_KCSAN
+/* ---- KCSAN-style delay-and-recheck exclusive-access watchpoints (item #8) ---- */
+#include <time.h>
+RUNLOOM_TLS uint32_t runloom_kcsan_ctr = 0;
+
+void runloom_kcsan_stall(void)
+{
+    /* ~1 us busy-ish sleep to widen the race window; NOT a fiber yield (we must
+     * not switch mid-watchpoint). */
+    struct timespec ts = { 0, 1000 };
+    nanosleep(&ts, NULL);
+}
+
+void runloom_kcsan_violation(const char *where, uint64_t before, uint64_t after)
+{
+    char buf[256];
+    int n = snprintf(buf, sizeof buf,
+        "[runloom-diag] KCSAN exclusive-access violation at %s: watched word "
+        "0x%016llx -> 0x%016llx across a supposedly-single-owner window "
+        "(a concurrent writer -- a data race)\n",
+        where, (unsigned long long)before, (unsigned long long)after);
+    emit(-1, buf, (size_t)n);
+    runloom_invariant_fail("kcsan_exclusive_access",
+                           (const void *)(uintptr_t)before,
+                           (const void *)(uintptr_t)after);
+}
+#endif /* RUNLOOM_KCSAN */
 
 
 /* ---------------------------------------------------------------- *

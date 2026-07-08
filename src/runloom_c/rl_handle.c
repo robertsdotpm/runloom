@@ -4,6 +4,7 @@
 #include "plat.h"
 #include "plat_compat.h"
 #include "plat_atomic.h"
+#include "runloom_kcsan.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -95,6 +96,12 @@ static void rl_handle_reclaim(rl_handle_slot_t *slot, uint32_t idx, uint32_t gen
 {
     void (*free_fn)(void *) = slot->free_fn;
     void *ptr = slot->ptr;
+    /* KCSAN exclusive-access watchpoint (item #8): the caller established rc==0
+     * exclusively, so no pin can succeed and nothing else may touch genref until
+     * we bump it below.  Sample it: if a concurrent write lands during the stall,
+     * a pin raced a reclaim at rc==0 -- the ABA/UAF class this handle table exists
+     * to prevent.  Zero cost unless -DRUNLOOM_KCSAN. */
+    RUNLOOM_ASSERT_EXCLUSIVE64("rl_handle_reclaim.genref", &slot->genref);
     slot->ptr = NULL;
     slot->free_fn = NULL;
     /* Bump gen with rc left 0 so a re-register on this slot gets gen+1 and old
