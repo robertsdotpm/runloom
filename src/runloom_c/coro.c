@@ -2083,6 +2083,20 @@ static int runloom_coro_maybe_grow(runloom_coro_t *c)
     }
     if (!on || c == NULL || c->stack == NULL || c->done) return 0;
     if (c->stack_size >= RUNLOOM_STACK_GROW_MAX) return 0;
+#if defined(RUNLOOM_FORCE_STACKGROW)
+    /* Force-the-rare-path (PostgreSQL CLOBBER_CACHE_ALWAYS / Go maymorestack):
+     * copy-grow the stack by one page on EVERY resume, so the delicate
+     * runloom_coro_grow pointer-rewrite runs every single time.  A latent
+     * mis-rewritten interior pointer becomes a deterministic first-run crash
+     * instead of a once-in-millions Heisenbug.  Bounded by STACK_GROW_MAX;
+     * grow() bails safely if self.sp is out of range (fresh/overflowed coro). */
+    {
+        size_t pg = runloom_round_to_page(1);
+        size_t ftarget = c->stack_size + pg;
+        if (ftarget > RUNLOOM_STACK_GROW_MAX) ftarget = RUNLOOM_STACK_GROW_MAX;
+        return runloom_coro_grow(c, ftarget);
+    }
+#endif
     sp = (uintptr_t)c->asm_coro.self.sp;
     lo = (uintptr_t)c->stack;
     if (sp <= lo) return 0;            /* invalid/overflowed: guard owns it */

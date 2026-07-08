@@ -111,6 +111,11 @@ RUNLOOM_SHRINK = os.environ.get("RUNLOOM_SHRINK", "").strip() not in ("", "0", "
 # state was reached at least once, so a green run can't be vacuous.  Test lane
 # only -- a handful of relaxed atomic adds on rare scheduler decision points.
 RUNLOOM_COVER = os.environ.get("RUNLOOM_COVER", "").strip() not in ("", "0", "no", "false")
+# Force-the-rare-path build flavors (PostgreSQL CLOBBER / Go maymorestack): take
+# a dangerous transition on EVERY opportunity so scale/timing Heisenbugs become
+# deterministic first-run failures.  RUNLOOM_FORCE_STACKGROW copy-grows the coro
+# stack a page every resume (exercises the pointer-rewrite path every time).
+RUNLOOM_FORCE_STACKGROW = os.environ.get("RUNLOOM_FORCE_STACKGROW", "").strip() not in ("", "0", "no", "false")
 RUNLOOM_EXTRA_CFLAGS  = os.environ.get("RUNLOOM_EXTRA_CFLAGS", "").split()
 RUNLOOM_EXTRA_LDFLAGS = os.environ.get("RUNLOOM_EXTRA_LDFLAGS", "").split()
 
@@ -286,6 +291,8 @@ def detect_compile_args():
         args.append("-DRUNLOOM_SHRINK=1")
     if RUNLOOM_COVER:
         args.append("-DRUNLOOM_COVER=1")
+    if RUNLOOM_FORCE_STACKGROW:
+        args.append("-DRUNLOOM_FORCE_STACKGROW=1")
     args += RUNLOOM_EXTRA_CFLAGS
     return args
 
