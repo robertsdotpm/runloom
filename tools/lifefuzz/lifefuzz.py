@@ -65,13 +65,17 @@ FINDING_PATTERNS = (
 def build_spec(seed):
     """Deterministically derive a program spec from an integer seed.
 
-    Two program KINDS:
-      core -- runloom_c goroutines + channels + select + timers (the default).
-      aio  -- a small asyncio program under runloom.aio (queue + create_task +
-              cancel + call_later + run_in_executor) -- reaches the timer-leak,
-              task-cancel, and blockpool-job seams the core path can't.
+    Program KINDS:
+      core    -- runloom_c goroutines + channels + select + timers (the default).
+      aio     -- a small asyncio program under runloom.aio (queue + create_task +
+                 cancel + call_later + run_in_executor) -- reaches the timer-leak,
+                 task-cancel, and blockpool-job seams the core path can't.
+      grammar -- a syzlang-style RESOURCE-TYPED op sequence (LIFEFUZZ_KIND=grammar);
+                 see build_grammar_spec.
     A `scale` draw (~12%) inflates the core counts to stress the stack-depot /
     fiber-admission at scale (model #1 / #7)."""
+    if os.environ.get("LIFEFUZZ_KIND") == "grammar":
+        return build_grammar_spec(seed)
     rng = random.Random(seed)
     kind = rng.choice(["core", "core", "core", "aio"])   # ~25% aio
     scale = (rng.random() < 0.12)
@@ -138,12 +142,90 @@ def spawned_count(spec):
 
 def sent_checksum(spec):
     """(count, sum) of the conserved token multiset -- known a priori."""
+    if spec.get("kind") == "grammar":
+        return spec["exp_count"], spec["exp_sum"]
     count = spec["nprod"] * spec["per_prod"]
     total = 0
     for pid in range(spec["nprod"]):
         for seq in range(spec["per_prod"]):
             total += pid * 1000 + seq
     return count, total
+
+
+def build_grammar_spec(seed):
+    """A syzlang-style RESOURCE-TYPED op sequence (QA-steal-V2 #17): each op
+    references handles produced by EARLIER ops (a chan -> its producers, draining
+    consumers, and close), so the program STRUCTURE itself varies with the seed --
+    unlike build_spec, whose producer/consumer/select graph shape is fixed and
+    only the counts vary.
+
+    Well-formed BY CONSTRUCTION so the strong oracles keep their teeth: every
+    channel gets >=1 draining consumer and is closed after its producers, so the
+    program terminates, and the exact conserved token multiset is known -- tracked
+    here (exp_count/exp_sum) as the op list is generated -- rather than relaxing
+    the conservation oracle for a free grammar.  Resource types: Chan (channels)
+    and G (goroutines: producers, consumers, nested children, scratch, closer);
+    Fd/socketpair is the netpoll follow-up.  Pure function of seed -> findings
+    replay via the existing repro/shrink path (with LIFEFUZZ_KIND=grammar set)."""
+    rng = random.Random((seed ^ 0x6C696665677AABCD) & 0xFFFFFFFFFFFFFFFF)
+    mode = rng.choice(["mn", "mn", "st"])
+    nchan = rng.randint(1, 5)
+    ops = [{"t": "chan", "id": c, "cap": rng.choice(CHAN_CAPS)} for c in range(nchan)]
+
+    exp_count = exp_sum = exp_sumsq = nspawned = tok = 0
+    # producers: each sends a run of UNIQUE tokens to one chosen chan, plus
+    # optional nested children (stack stress).  The delivered multiset is
+    # fingerprinted by (count, sum, sum-of-squares): count+sum alone cannot tell
+    # {0,1,2,3} from a buffer index-bug delivering {0,0,3,3} (both count 4 sum 6),
+    # but sumsq 14 vs 18 does -- teeth for the reorder/dup-drop class the grammar
+    # actually reaches through the Chan buffer.
+    for _ in range(rng.randint(1, 6)):
+        cid = rng.randrange(nchan)
+        n = rng.randint(1, 20)
+        base = tok
+        tok += n
+        exp_count += n
+        exp_sum += sum(range(base, base + n))
+        exp_sumsq += sum(v * v for v in range(base, base + n))
+        nest = rng.randint(0, 2)
+        ops.append({"t": "producer", "chan": cid, "base": base, "n": n,
+                    "stack": rng.choice(STACK_CHOICES), "nest": nest})
+        nspawned += 1 + nest
+    # consumers: range (drains one chan) or select (drains a subset).  Track
+    # coverage so every chan is guaranteed a drainer (else its tokens strand).
+    covered = set()
+    for _ in range(rng.randint(1, 5)):
+        if rng.random() < 0.4 and nchan >= 2:
+            chans = sorted(rng.sample(range(nchan), rng.randint(2, nchan)))
+            ops.append({"t": "select_cons", "chans": chans,
+                        "stack": rng.choice(STACK_CHOICES)})
+            covered.update(chans)
+        else:
+            cid = rng.randrange(nchan)
+            ops.append({"t": "range_cons", "chan": cid,
+                        "stack": rng.choice(STACK_CHOICES)})
+            covered.add(cid)
+        nspawned += 1
+    for cid in range(nchan):
+        if cid not in covered:
+            ops.append({"t": "range_cons", "chan": cid, "stack": None})
+            nspawned += 1
+    # scratch: fill a buffered chan with PyObjects then DROP it undrained -> Chan
+    # dealloc must release the buffered refs (model #8 chan_refflow).
+    for _ in range(rng.randint(0, 3)):
+        ops.append({"t": "scratch"})
+        nspawned += 1
+    nspawned += 1                                   # the closer
+    nprod = sum(1 for o in ops if o["t"] == "producer")
+    return {
+        "seed": seed, "kind": "grammar", "mode": mode,
+        "nhubs": rng.choice([2, 3, 4]) if mode == "mn" else 1,
+        "nchan": nchan, "nprod": nprod, "ops": ops,
+        "exp_count": exp_count, "exp_sum": exp_sum, "exp_sumsq": exp_sumsq,
+        "exp_spawned": nspawned,
+        "timer_us": rng.choice([0, 0, 50, 200]),
+        "yield_mask": rng.choice([0, 1, 3, 7]),
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -159,6 +241,8 @@ def run_program(spec, timeout=20.0):
 
     if spec.get("kind") == "aio":
         return run_aio_program(spec, timeout=timeout)
+    if spec.get("kind") == "grammar":
+        return run_grammar_program(spec, timeout=timeout)
 
     mode = spec["mode"]
     nchan = spec["nchan"]
@@ -397,6 +481,168 @@ def run_aio_program(spec, timeout=20.0):
                        .format(st.get("sleeping"), st.get("netpoll_parked")))
     if sc != 0:
         return False, "AIO_SELF_CHECK violations={0}".format(sc)
+    return True, "ok"
+
+
+def run_grammar_program(spec, timeout=20.0):
+    """Interpret a resource-typed op list (build_grammar_spec) into a real
+    runloom goroutine graph and check the SAME life-cycle oracles as run_program:
+    exact token conservation (against the generator-tracked exp_count/exp_sum),
+    completion, parked-leak, self_check.  A closer waits for every producer then
+    closes every channel, so all range/select consumers terminate."""
+    import runloom_c
+    from tools.watchdog import run_guarded
+
+    mode = spec["mode"]
+    nchan = spec["nchan"]
+    ops = spec["ops"]
+    nprod = spec["nprod"]
+    timer_s = spec.get("timer_us", 0) / 1e6
+    yield_mask = spec.get("yield_mask", 0)
+
+    def spawn(fn, stack):
+        gofn = runloom_c.mn_fiber if mode == "mn" else runloom_c.fiber
+        if stack is None:
+            return gofn(fn)
+        try:
+            return gofn(fn, stack_size=stack)
+        except TypeError:
+            return gofn(fn)
+
+    def driver():
+        if mode == "mn":
+            runloom_c.mn_init(spec["nhubs"])
+        chans = [None] * nchan
+        for o in ops:
+            if o["t"] == "chan":
+                chans[o["id"]] = runloom_c.Chan(o["cap"])
+        ncons = sum(1 for o in ops if o["t"] in ("range_cons", "select_cons"))
+        prod_done = runloom_c.Chan(max(1, nprod))
+        results = runloom_c.Chan(max(1, ncons))
+
+        def make_producer(o):
+            def run():
+                for _ in range(o["nest"]):
+                    def child():
+                        runloom_c.sched_yield()
+                        return None
+                    spawn(child, o["stack"])
+                ch = chans[o["chan"]]
+                for i in range(o["n"]):
+                    if timer_s and (i % 4 == 0):
+                        runloom_c.sched_sleep(timer_s)
+                    ch.send(o["base"] + i)
+                    if yield_mask and (i & yield_mask) == 0:
+                        runloom_c.sched_yield()
+                prod_done.send(1)
+            return run
+
+        def make_range(o):
+            def run():
+                cnt = tot = tot2 = 0
+                for v in chans[o["chan"]]:
+                    cnt += 1
+                    tot += v
+                    tot2 += v * v
+                results.send((cnt, tot, tot2))
+            return run
+
+        def make_select(o):
+            cids = list(o["chans"])
+
+            def run():
+                cnt = tot = tot2 = 0
+                closed = dict((c, False) for c in cids)
+                while not all(closed.values()):
+                    live = [c for c in cids if not closed[c]]
+                    if not live:
+                        break
+                    idx, (val, ok) = runloom_c.select([("recv", chans[c]) for c in live])
+                    c = live[idx]
+                    if ok:
+                        cnt += 1
+                        tot += val
+                        tot2 += val * val
+                    else:
+                        closed[c] = True
+                results.send((cnt, tot, tot2))
+            return run
+
+        def make_scratch():
+            # Fill a buffered Chan then DROP it undrained, driving the Chan-dealloc
+            # buffered-ref release path (model #8 chan_refflow).  NOTE: the ref leak
+            # itself is only caught under an ASan/LSan build; the default oracle net
+            # (scheduler self_check) does not see PyObject refcounts -- a dedicated
+            # refcount-delta oracle is a follow-up.
+            def run():
+                sc = runloom_c.Chan(4)
+                for j in range(3):
+                    sc.try_send(("scratch", j))
+                return None
+            return run
+
+        def closer():
+            for _ in range(nprod):
+                prod_done.recv()
+            for ch in chans:
+                if ch is not None:
+                    ch.close()
+
+        for o in ops:                                   # consumers first
+            if o["t"] == "range_cons":
+                spawn(make_range(o), o["stack"])
+            elif o["t"] == "select_cons":
+                spawn(make_select(o), o["stack"])
+        for o in ops:                                   # then producers
+            if o["t"] == "producer":
+                spawn(make_producer(o), o["stack"])
+        for o in ops:                                   # scratch churn
+            if o["t"] == "scratch":
+                spawn(make_scratch(), None)
+        spawn(closer, None)
+
+        if mode == "mn":
+            completed = runloom_c.mn_run()
+        else:
+            runloom_c.run()
+            completed = None
+        st = runloom_c.stats()
+        recv_count = recv_sum = recv_sumsq = drained = 0
+        while drained < ncons:
+            got = results.try_recv()
+            if got is None:
+                break
+            (c, s, s2), ok = got
+            if not ok:
+                break
+            recv_count += c
+            recv_sum += s
+            recv_sumsq += s2
+            drained += 1
+        if mode == "mn":
+            runloom_c.mn_fini()
+        return completed, st, recv_count, recv_sum, recv_sumsq, drained, ncons
+
+    completed, st, recv_count, recv_sum, recv_sumsq, drained, ncons = run_guarded(
+        driver, seconds=timeout, label="lifefuzz-grammar seed={0}".format(spec["seed"]))
+
+    # --- the same oracle net as run_program, plus a sum-of-squares check that
+    # catches count+sum-preserving multiset corruption (reorder/dup-drop) ---
+    if (recv_count, recv_sum, recv_sumsq) != (spec["exp_count"], spec["exp_sum"], spec["exp_sumsq"]):
+        return False, ("CONSERVATION sent=({0},{1},{2}) recv=({3},{4},{5}) drained={6}/{7}"
+                       .format(spec["exp_count"], spec["exp_sum"], spec["exp_sumsq"],
+                               recv_count, recv_sum, recv_sumsq, drained, ncons))
+    if completed is not None and completed != spec["exp_spawned"]:
+        return False, ("COMPLETION completed={0} spawned={1}"
+                       .format(completed, spec["exp_spawned"]))
+    parked = st.get("sleeping", 0) + st.get("netpoll_parked", 0) + st.get("running", 0)
+    if parked != 0:
+        return False, ("PARKED_LEAK sleeping={0} netpoll_parked={1} running={2}"
+                       .format(st.get("sleeping"), st.get("netpoll_parked"), st.get("running")))
+    v = runloom_c._self_check(0)
+    if v != 0:
+        runloom_c._self_check(1)
+        return False, "SELF_CHECK violations={0}".format(v)
     return True, "ok"
 
 
