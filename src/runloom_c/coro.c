@@ -826,6 +826,44 @@ static void runloom_stack_madv_reclaim(void *addr, size_t len)
 #endif
 }
 
+/* GWP-ASan sampled guard release (QA-steal rank 13; tcmalloc GWP-ASan).
+ * RUNLOOM_GWP_STACK=K UNMAPS ~1 in K released coro stacks instead of pooling them,
+ * so a use-after-release reads unmapped VA and hard-faults (SIGSEGV) with a
+ * backtrace via the crash handler -- instead of silently reading a pooled page.
+ * Near-native (only 1/K stacks leave the pool), so it runs at the 1M-goroutine
+ * scale full ASan cannot.  0/unset = off.  Applies to depot (non-arena) stacks
+ * only -- an arena slice can't be individually unmapped.  (The g-slab and
+ * rl_handle allocators are NOT valid GWP targets: their blocks are retained /
+ * fixed and read-after-free by design -- unmapping would fault a legitimate stale
+ * wake / stale pin; see poison_lifecycle_analysis.md.) */
+static int runloom_gwp_stack_k(void)
+{
+    static int k = -1;
+    int v = __atomic_load_n(&k, __ATOMIC_RELAXED);
+    if (v >= 0) return v;
+    {
+        const char *e = getenv("RUNLOOM_GWP_STACK");
+        v = (e != NULL && *e != '\0') ? atoi(e) : 0;
+        if (v < 0) v = 0;
+        __atomic_store_n(&k, v, __ATOMIC_RELAXED);
+    }
+    return v;
+}
+
+static RUNLOOM_TLS unsigned long long runloom_gwp_rng;
+static int runloom_gwp_stack_sample(void)
+{
+    int k = runloom_gwp_stack_k();
+    unsigned long long x;
+    if (k <= 0) return 0;
+    x = runloom_gwp_rng;
+    if (x == 0)                                  /* per-thread lazy seed (ASLR) */
+        x = (unsigned long long)(uintptr_t)&runloom_gwp_rng | 1ULL;
+    x ^= x << 13; x ^= x >> 7; x ^= x << 17;     /* xorshift64 */
+    runloom_gwp_rng = x;
+    return (int)(x % (unsigned)k) == 0;          /* fire ~1 in k */
+}
+
 static void runloom_stack_release(void *stack, size_t size)
 {
     void **hdr;
@@ -862,6 +900,12 @@ static void runloom_stack_release(void *stack, size_t size)
     }
     /* This depot-backed stack is no longer live (balances the acquire fetch_add). */
     __atomic_fetch_sub(&runloom_stack_live, 1, __ATOMIC_RELAXED);
+    /* GWP-ASan sampled guard release: unmap ~1/K stacks instead of pooling so a
+     * use-after-release hard-faults (see runloom_gwp_stack_sample). */
+    if (runloom_gwp_stack_sample()) {
+        runloom_stack_unmap_guarded(stack, size);
+        return;
+    }
     /* Drop physical pages back to the OS *before* writing the header.
      * MADV_DONTNEED keeps the VA reservation but lets the kernel reclaim
      * the page frames; next touch re-faults a fresh zero page.  We have
