@@ -4,6 +4,14 @@
 
 int runloom_iouring_available(void)
 {
+    /* Deterministic simulated-I/O (RUNLOOM_SIM, Slice 2/3): force io_uring OFF so
+     * the TCP fast paths take the socketpair/netpoll/wait_fd route the sim pump
+     * drives, never the CQ backend (whose completion ORDER the sim cannot make a
+     * function of the seed, and which bypasses the sim pump entirely).  This is
+     * the Linux counterpart of the non-Linux `return 0` stub in io_uring.c -- the
+     * doc's "already stubs to 0" only held off-Linux; on a capable kernel this
+     * lazy-inits to 1, so the sim gate must be explicit.  Read-once, zero cost off. */
+    if (runloom_sim_enabled()) return 0;
     if (__atomic_load_n(&runloom_iouring_state.initialised, __ATOMIC_ACQUIRE) == 0) {
         /* Serialize lazy init.  Concurrent first-callers -- e.g. several M:N
          * hubs each running a fiber that touches io_uring at the same

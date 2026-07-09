@@ -200,6 +200,50 @@ class TestSimSettledDeadlock(unittest.TestCase):
                          "%r" % order)
 
 
+class TestSimPrereqFixes(unittest.TestCase):
+    def test_stale_arm_probe_gated_under_sim(self):
+        """The stale-arm probe stamps a WALL deadline (monotonic_ns + probe_ns)
+        into the deadline heap; under sim that heap feeds the logical-clock
+        advance, so an ungated probe jumps the logical clock to wall time and
+        shatters determinism.  Scenario: a timed park ARMS the fd and times out
+        (logical clock -> 0.1s); a following UNTIMED park on the now-armed fd is
+        the probe's target (arm_predict_skip true, deadline_ns < 0 -> it would
+        overwrite the -1 with a wall value).  With the gate the logical clock
+        stays ~0.1s; without it, it leaps to ~monotonic_ns() (~1e14 on this box).
+        This is the regression guard for the load-bearing sim clock edit."""
+        p = _NeverReady()
+
+        def scenario():
+            r1 = runloom_c.wait_fd(p.r, READ, 100)      # arms p.r; times out @0.1s logical
+            assert r1 == 0
+            try:
+                runloom_c.wait_fd(p.r, READ, -1)        # forever on ARMED fd (probe target)
+            except OSError:
+                pass                                     # settled-reap terminates it
+
+        # DELTA across just this scenario (the logical clock is a process-global
+        # static, so prior tests' logical time -- e.g. the 1-hour timeout test --
+        # accumulates; only the delta this scenario adds is meaningful).  The
+        # timed park advances it 0.1s; the forever park must add ~0 (gated) rather
+        # than leap by a wall value (~1e14 ns, monotonic_ns) if the probe fired.
+        before = runloom_c._logical_ns()
+        runloom_c.fiber(scenario)
+        runloom_c.run()
+        p.close()
+        delta = runloom_c._logical_ns() - before
+        self.assertLess(delta, 10 ** 9,
+                        "logical clock advanced %d ns (~%.1fs) for a 0.1s timed "
+                        "park + a forever park -- the stale-arm probe stamped a "
+                        "WALL deadline (not gated off under sim)" % (delta, delta / 1e9))
+        self.assertGreater(delta, 0, "logical clock did not advance at all")
+
+    def test_io_uring_forced_off_under_sim(self):
+        """io_uring must be OFF under sim so the TCP fast paths take the
+        socketpair/netpoll route the sim pump drives, not the CQ backend."""
+        self.assertFalse(runloom_c.iouring_available(),
+                         "io_uring must be forced off under RUNLOOM_SIM")
+
+
 class TestSimGate(unittest.TestCase):
     def test_backend_and_sim_on(self):
         # Backend is still epoll (sim replaces the pump, not the platform pick).

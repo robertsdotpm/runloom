@@ -181,6 +181,9 @@ static PyMethodDef module_methods[] = {
      "until fd is ready.  events is a bitmask: 1=read, 2=write."},
     {"netpoll_backend", m_netpoll_backend, METH_NOARGS,
      "Return active netpoll backend name (\"epoll\", \"kqueue\", \"select\")."},
+    {"_logical_ns", m_logical_ns, METH_NOARGS,
+     "Read the single-thread LOGICAL clock in ns (RUNLOOM_LOGICAL_CLOCK/RUNLOOM_SIM); "
+     "0 off the logical clock.  Diagnostic (sim determinism witness)."},
     {"_fault_count", m_fault_count, METH_O,
      "_fault_count(site): test-only.  Times the Windows netpoll fault-injection "
      "site (WSAPOLL/SELECT/IOCP_WAIT/IOCP_SUBMIT) fired; -1 if unknown/non-Win."},

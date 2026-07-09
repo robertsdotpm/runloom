@@ -148,6 +148,16 @@ static PyObject *m_netpoll_backend(PyObject *self, PyObject *unused)
     return PyUnicode_FromString(runloom_netpoll_backend());
 }
 
+/* Read the single-thread LOGICAL clock in nanoseconds (RUNLOOM_LOGICAL_CLOCK /
+ * RUNLOOM_SIM).  Diagnostic: lets a sim test assert the clock stays on logical
+ * time (small) rather than jumping to wall time (huge) -- the regression witness
+ * for the stale-arm-probe-under-sim gate.  Off the logical clock it reads 0. */
+static PyObject *m_logical_ns(PyObject *self, PyObject *unused)
+{
+    (void)self; (void)unused;
+    return PyLong_FromLongLong(runloom_sched_logical_ns());
+}
+
 /* Test-only: read how many times a Windows netpoll fault-injection site fired
  * (see netpoll.c).  Returns -1 for an unknown site / non-Windows build. */
 static PyObject *m_fault_count(PyObject *self, PyObject *arg)

@@ -217,7 +217,18 @@ int runloom_netpoll_wait_fd(int fd, int events, long long timeout_ns)
      * probe fires at timeout/2 so a poisoned fd still heals inside app-level
      * retry loops instead of timing out forever. */
 #if defined(RUNLOOM_HAVE_EPOLL)
-    {
+    /* Skip the stale-arm probe entirely under RUNLOOM_SIM (Slice 2/3).  The probe
+     * stamps a WALL-clock deadline (monotonic_ns() + probe_ns) into park->deadline_ns
+     * -- fine when the real epoll pump owns timing, but under sim the SAME deadline
+     * heap feeds runloom_sched_sim_advance_clock, which would then jump the LOGICAL
+     * clock to wall time and shatter determinism.  It fires from the 2nd park on any
+     * already-armed fd (arm_predict_skip true), i.e. every recv-after-recv on a
+     * socketpair, and for an untimed park (deadline_ns < 0 -- a real socket recv's
+     * wait_fd_coop(fd,READ,-1)) it unconditionally overwrites the -1.  The probe
+     * heals epoll LEVEL arms via epoll_ctl, but the sim pump never calls epoll_wait
+     * (readiness comes from the sim ready ledger), so the arm it would heal is inert
+     * -- pure downside under sim.  Gated off; zero cost when RUNLOOM_SIM is unset. */
+    if (!runloom_sim_enabled()) {
         long long probe_ns = runloom_netpoll_stale_probe_ns();
         if (probe_ns > 0 && runloom_netpoll_arm_predict_skip(fd, events)) {
             if (timeout_ns >= 0 && timeout_ns / 2 < probe_ns)
