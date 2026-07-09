@@ -47,6 +47,10 @@ _SNDBUF = _RCVBUF = 1 << 16
 _CHUNK = 1 << 16
 
 
+class SimError(OSError):
+    """A modelled socket error (ECONNRESET), analogous to simnet.py's SimError."""
+
+
 def _setup(s):
     s.setblocking(False)
     try:
@@ -81,7 +85,14 @@ class SimFdEndpoint(object):
         # READ for the peer after EVERY successful chunk, before the next
         # (potentially parking) call -- so any bytes in the pipe always have a
         # pending wake for their consumer.  Use sendall() for the full-write surface.
-        n = runloom_c.tcp_send_once(self._fd, data)
+        if self._conn.reset_flag:                            # RST-discard: raise before touching the fd
+            raise SimError("ECONNRESET on send")
+        try:
+            n = runloom_c.tcp_send_once(self._fd, data)
+        except OSError:
+            if self._conn.reset_flag:                        # cancel_fd woke us out of a WRITE park
+                raise SimError("ECONNRESET on send")
+            raise
         if n > 0:
             runloom_c.sim_deliver_ready(self._conn.conn_id, self._wake_fd, READ)
         return n
@@ -96,7 +107,14 @@ class SimFdEndpoint(object):
             mv = mv[sent:]
 
     def recv(self, n):
-        chunk = runloom_c.tcp_recv_alloc(self._fd, n)        # real recv; READ-park on EAGAIN, ledger wakes
+        if self._conn.reset_flag:                            # RST-discard: raise even if buffered data exists
+            raise SimError("ECONNRESET on recv")
+        try:
+            chunk = runloom_c.tcp_recv_alloc(self._fd, n)    # real recv; READ-park on EAGAIN, ledger wakes
+        except OSError:
+            if self._conn.reset_flag:                        # cancel_fd woke us out of a READ park
+                raise SimError("ECONNRESET on recv")
+            raise
         if chunk:
             # drained my end -> freed the peer sender's buffer -> wake a WRITE-parked peer
             runloom_c.sim_deliver_ready(self._conn.conn_id, self._wake_fd, WRITE)
@@ -131,6 +149,7 @@ class SimFdConn(object):
         self._delay_fn = delay_fn
         self._loss_fn = loss_fn
         self._socks = []
+        self.reset_flag = False
         if loss_fn is not None and delay_fn is None:
             # loss needs the MITM to hold+drop bytes; a direct socketpair can't.
             delay_fn = self._delay_fn = (lambda: 0.0)
@@ -165,18 +184,25 @@ class SimFdConn(object):
         conn_id = self.conn_id
         delay_fn = self._delay_fn
         loss_fn = self._loss_fn
+        conn = self
 
         def shuttle():
-            # Loops until EOF (peer app closed) or the settled-deadlock reap
-            # terminates it (OSError) once nothing is left to shuttle -- so an
-            # idle shuttler never wedges run(); it is netpoll-parked, not counted
+            # Loops until EOF (peer app closed), a reset (conn.reset_flag), or the
+            # settled-deadlock reap (OSError) once nothing is left to shuttle -- so
+            # an idle shuttler never wedges run(); it is netpoll-parked, not counted
             # by the count_deadlocked (chan/safe) census.  The symmetric
             # drainer-posts rule applies here too: after draining read_fd, post
             # WRITE to the SENDER's app fd (it may be WRITE-parked on a full
             # app<->mid pipe); forward via single-shot chunks posting READ to the
             # reader per chunk (a full mid<->app pipe WRITE-parks us here, woken
-            # by the reader's recv posting WRITE to write_fd).
+            # by the reader's recv posting WRITE to write_fd).  reset() wakes an
+            # fd-parked shuttler via cancel_fd (-> CANCELLED -> OSError -> break);
+            # a shuttler mid-sched_sleep is not fd-parked, so it checks reset_flag
+            # after the sleep and breaks BEFORE touching any (possibly-being-torn-
+            # down) fd -- the fd-reuse-safety hinge.
             while True:
+                if conn.reset_flag:
+                    break
                 try:
                     chunk = runloom_c.tcp_recv_alloc(read_fd, _CHUNK)
                 except OSError:
@@ -190,6 +216,8 @@ class SimFdConn(object):
                 d = delay_fn()
                 if d and d > 0:
                     runloom_c.sched_sleep(d)          # logical-clock delay (a sleeper)
+                    if conn.reset_flag:              # woke into a reset -> do not touch fds
+                        break
                 mv = memoryview(chunk)
                 broke = False
                 while mv:
@@ -207,6 +235,29 @@ class SimFdConn(object):
                     break
 
         runloom_c.fiber(shuttle)
+
+    def reset(self):
+        """Modelled connection reset (protocol logic, not a kernel RST -- an
+        AF_UNIX socketpair cannot emit one).  RST-DISCARD semantics: both
+        directions die, and both endpoints observe SimError(ECONNRESET) on their
+        next op even if kernel-buffered pre-reset data exists.
+
+        Mechanism: set reset_flag, then netpoll_cancel_fd every fd -- which wakes
+        every fd-parked fiber (reader, writer, shuttler; any direction) with the
+        CANCELLED sentinel, so wait_fd returns -1 and the op raises WITHOUT
+        retrying (fd-reuse-safe by construction -- unlike a normal-mask ledger
+        wake, which would retry the op).  A shuttler mid-sched_sleep is not
+        fd-parked; it checks reset_flag after the sleep and exits.  The fds are
+        NOT closed here (close() does that) -- so no fd number is freed for reuse
+        while a stale parker or sleeper could still reference it; the whole
+        fd-reuse teardown hazard is dissolved by never closing on reset.  Wakes
+        are observable only after the next scheduler turn, not synchronously."""
+        self.reset_flag = True
+        for s in self._socks:
+            try:
+                runloom_c.netpoll_cancel_fd(s.fileno())
+            except Exception:
+                pass
 
     def close(self):
         for s in self._socks:

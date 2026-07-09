@@ -366,6 +366,139 @@ class TestSimBytesLoss(unittest.TestCase):
         self.assertEqual(a, b, "lossy delivery not deterministic: %r vs %r" % (a, b))
 
 
+class TestSimBytesReset(unittest.TestCase):
+    """Increment R: a modelled connection reset (RST-discard).  reset() cancels
+    every fd-parker (CANCELLED -> no retry -> fd-reuse-safe) and sets a flag the
+    wrappers check first, so both ends observe SimError(ECONNRESET)."""
+
+    def test_reset_wakes_parked_reader(self):
+        conn = simnet_fd.SimFdConn(delay_fn=lambda: 0.0)
+        out = {}
+
+        def reader():
+            try:
+                conn.b.recv_exact(4)
+                out["r"] = "no-error"
+            except simnet_fd.SimError:
+                out["r"] = "ECONNRESET"
+
+        def resetter():
+            conn.reset()                             # reader has parked by now (spawned first)
+
+        t0 = time.monotonic()
+        runloom_c.fiber(reader)
+        runloom_c.fiber(resetter)
+        runloom_c.run()
+        wall = time.monotonic() - t0
+        conn.close()
+        self.assertEqual(out.get("r"), "ECONNRESET",
+                         "parked reader did not observe the reset: %r" % out)
+        self.assertLess(wall, 2.0, "reset hung instead of waking the reader")
+
+    def test_reset_discards_buffered_data(self):
+        """RST-discard: a recv after reset raises even though bytes were buffered."""
+        conn = simnet_fd.SimFdConn(delay_fn=lambda: 0.0)
+        out = {}
+
+        def flow():
+            conn.a.sendall(b"ping")                  # delivered to b_app buffer
+            out["first"] = conn.b.recv(2)            # forces delivery; gets "pi"
+            conn.reset()                             # "ng" still buffered in b_app
+            try:
+                conn.b.recv(2)
+                out["second"] = "no-error"
+            except simnet_fd.SimError:
+                out["second"] = "ECONNRESET"
+
+        runloom_c.fiber(flow)
+        runloom_c.run()
+        conn.close()
+        self.assertTrue(out.get("first"), "no data delivered before reset: %r" % out)
+        self.assertEqual(out.get("second"), "ECONNRESET",
+                         "buffered data not discarded on reset: %r" % out)
+
+    def test_reset_send_raises(self):
+        conn = simnet_fd.SimFdConn(delay_fn=lambda: 0.0)
+        out = {}
+
+        def flow():
+            conn.reset()
+            try:
+                conn.a.sendall(b"x")
+                out["s"] = "no-error"
+            except simnet_fd.SimError:
+                out["s"] = "ECONNRESET"
+
+        runloom_c.fiber(flow)
+        runloom_c.run()
+        conn.close()
+        self.assertEqual(out.get("s"), "ECONNRESET")
+
+    def test_reset_mid_flight_leaves_new_conn_unaffected(self):
+        """ADVERSARIAL: reset a conn with a delayed chunk in flight, run a fresh
+        conn concurrently -- the reset's sleeping shuttler must exit without
+        touching (or cross-delivering into) anything, and the new conn is clean."""
+        conn1 = simnet_fd.SimFdConn(delay_fn=lambda: 0.05)   # positive delay -> in-flight
+        conn2 = simnet_fd.SimFdConn(delay_fn=lambda: 0.0)
+        out = {}
+
+        def c1flow():
+            try:
+                conn1.a.sendall(b"aaaa")             # shuttler recv's it, sched_sleeps 0.05
+            except simnet_fd.SimError:
+                pass
+            conn1.reset()                            # shuttler is mid-sleep -> checks flag on wake
+
+        def c2reader():
+            out["c2"] = conn2.b.recv_exact(4)
+
+        def c2writer():
+            conn2.a.sendall(b"bbbb")
+
+        runloom_c.fiber(c1flow)
+        runloom_c.fiber(c2reader)
+        runloom_c.fiber(c2writer)
+        runloom_c.run()
+        conn1.close()
+        conn2.close()
+        self.assertEqual(out.get("c2"), b"bbbb",
+                         "new conn corrupted by a mid-flight reset: %r" % out)
+
+    def test_reset_deterministic(self):
+        def scenario():
+            runloom_c.sim_reset()
+            conn = simnet_fd.SimFdConn(delay_fn=lambda: 0.0)
+            out = {}
+
+            def flow():
+                conn.a.sendall(b"hello")
+                out["first"] = conn.b.recv(3)
+                conn.reset()
+                try:
+                    conn.b.recv(3)
+                    out["second"] = "no-error"
+                except simnet_fd.SimError:
+                    out["second"] = "reset"
+
+            runloom_c.fiber(flow)
+            runloom_c.run()
+            conn.close()
+            return out.get("first"), out.get("second"), runloom_c._logical_ns()
+
+        self.assertEqual(scenario(), scenario())
+
+    def test_close_after_reset_idempotent(self):
+        conn = simnet_fd.SimFdConn(delay_fn=lambda: 0.0)
+
+        def flow():
+            conn.reset()
+
+        runloom_c.fiber(flow)
+        runloom_c.run()
+        conn.close()
+        conn.close()          # idempotent, no raise
+
+
 class TestSimFdProgram(unittest.TestCase):
     """The self-contained byte-plane workload (simnet_fd.simfd_program) -- a
     pure-function-of-seed unit for the fleet soak, exercising the real netpoll
