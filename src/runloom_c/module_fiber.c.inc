@@ -249,8 +249,24 @@ static PyObject *m_park(PyObject *self, PyObject *args, PyObject *kw)
         int r;
         if (timeout == -1.0 && PyErr_Occurred()) return NULL;
         if (timeout < 0.0) timeout = 0.0;
-        deadline = runloom_sched_monotonic_seconds() + timeout;
-        r = runloom_park_generic_timed(fw, deadline);
+        /* I4: the deadline BASE is stamped here at the binding (the design
+         * draft wrongly placed it in park_generic).  Under an armed sim
+         * census (hub ctx) the base is the LOGICAL clock -- the census folds
+         * the timer heap and fires it at the advanced instant; a wall base
+         * would poison the logical plane.  All other contexts keep the real
+         * monotonic base exactly as before. */
+        if (runloom_sim_enabled() && runloom_mn_ctrl_armed() &&
+            runloom_mn_current_hub_opaque() != NULL) {
+            deadline = runloom_mn_logical_now_or(
+                           runloom_sched_monotonic_seconds()) + timeout;
+            /* logical deadline -> the sim-plane twin (entry expiry + resume
+             * verdict on the census clock; monotonic compares declared a
+             * logical deadline expired-at-birth -- I4 finding). */
+            r = runloom_park_generic_timed_logical(fw, deadline);
+        } else {
+            deadline = runloom_sched_monotonic_seconds() + timeout;
+            r = runloom_park_generic_timed(fw, deadline);
+        }
         if (r < 0) {
             if (PyErr_Occurred()) return NULL;          /* OOM (PyErr set) */
             PyErr_SetString(PyExc_RuntimeError,

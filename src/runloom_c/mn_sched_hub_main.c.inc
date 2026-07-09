@@ -706,9 +706,15 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
         /* Fire any due in-memory TIMED parks on this hub (runloom_c.park(timeout)).
          * REAL (monotonic) deadlines -- NOT the logical clock used for sleepers
          * above; each is claimed via the parked_safe CAS (exactly-once vs a real
-         * wake_safe), routed back to its hub by runloom_sched_drain_timers. */
+         * wake_safe), routed back to its hub by runloom_sched_drain_timers.
+         * Under an armed sim census (I4) the deadlines were STAMPED logical
+         * (m_park), so the compare uses the logical clock -- hub ctx here, so
+         * mn_logical_now_or returns the census double. */
         if (h->sched.timer_size > 0) {
-            runloom_sched_drain_timers(&h->sched, runloom_sched_monotonic_seconds());
+            double tnow = (runloom_sim_enabled() && runloom_mn_ctrl_armed())
+                ? runloom_mn_logical_now_or(runloom_sched_monotonic_seconds())
+                : runloom_sched_monotonic_seconds();
+            runloom_sched_drain_timers(&h->sched, tnow);
         }
 
         /* Pick the next g.  Normal order: ready ring (yielded/woken -- "hot")

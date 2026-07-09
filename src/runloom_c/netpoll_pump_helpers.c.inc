@@ -124,19 +124,35 @@ static int runloom_pump_dispatch_event(int fd, int mask, int wake_all)
  * pass (ms away -- the re-keyed survivors still sit at the heap front). */
 #define RUNLOOM_STALE_PROBE_BATCH 64
 
-static int runloom_pump_drain_expired(long long now)
+/* Timeout-wake batch: claimed parkers' requeues are deferred until the pool
+ * lock drops (MN_SIM_DST_PLAN.md I4).  Waking under pool(80) pins the
+ * pool->sub(60)/idle(55) lock-rank chain for HUB parkers -- harmless at H=1
+ * (same-thread sched_wake takes no lock) but a checker-flagged inversion the
+ * moment the census drives hub-parker timeouts.  The claim CAS + unlink
+ * already pin the parker, so the wake is safe post-unlock (the same
+ * claim-then-wake discipline as the sim ledger dispatch).  A full batch
+ * re-loops under the lock -- the heap pop always progresses. */
+#define RUNLOOM_TIMEOUT_WAKE_BATCH 64
+
+static int runloom_pump_drain_expired_pools(long long now, int npools)
 {
     int woke = 0;
     int pi;
-    for (pi = 0; pi < RUNLOOM_PARKER_POOL_MAX; pi++) {
+    for (pi = 0; pi < npools; pi++) {
         runloom_parker_pool_t *pool = &runloom_pools[pi];
+        struct { void *hub; runloom_g_t *g; } wakes[RUNLOOM_TIMEOUT_WAKE_BATCH];
+        int nwakes, more, wi;
 #if defined(RUNLOOM_HAVE_EPOLL)
         int probe_fds[RUNLOOM_STALE_PROBE_BATCH];
         int nprobe = 0;
 #endif
         if (__atomic_load_n(&pool->lock_inited, __ATOMIC_ACQUIRE) != 2) continue;
+      drain_more:
+        nwakes = 0;
+        more = 0;
         RUNLOOM_RLOCK(&pool->lock, RUNLOOM_RANK_PARKER_POOL);
         while (pool->dh_size > 0 && pool->dh_arr[0]->deadline_ns <= now) {
+            if (nwakes >= RUNLOOM_TIMEOUT_WAKE_BATCH) { more = 1; break; }
             runloom_parked_t *p = pool->dh_arr[0];
             int cur;
 #if defined(RUNLOOM_HAVE_EPOLL)
@@ -183,16 +199,23 @@ static int runloom_pump_drain_expired(long long now)
             runloom_parker_unlink(pool, p);   /* always drop from the heap */
             if (cur != RUNLOOM_PARK_WOKEN) {
                 if (p->ready_out != NULL) *p->ready_out = 0;   /* timeout */
-                /* Re-queue only a committed g; an ARMED g aborts itself. */
+                /* Re-queue only a committed g; an ARMED g aborts itself.
+                 * DEFERRED to post-unlock (see the batch note above). */
                 if (cur == RUNLOOM_PARK_PARKED) {
-                    if (p->hub != NULL) runloom_mn_wake_g(p->hub, p->g);
-                    else                runloom_sched_wake(p->g);
+                    wakes[nwakes].hub = p->hub;
+                    wakes[nwakes].g = p->g;
+                    nwakes++;
                 }
                 woke++;
                 RUNLOOM_EVT(RUNLOOM_EVT_PARKER_TIMEOUT, p, p->g, (long long)p->fd);
             }
         }
         RUNLOOM_RUNLOCK(&pool->lock, RUNLOOM_RANK_PARKER_POOL);
+        for (wi = 0; wi < nwakes; wi++) {
+            if (wakes[wi].hub != NULL) runloom_mn_wake_g(wakes[wi].hub, wakes[wi].g);
+            else                       runloom_sched_wake(wakes[wi].g);
+        }
+        if (more) goto drain_more;
 #if defined(RUNLOOM_HAVE_EPOLL)
         /* Service the collected probes with NO pool lock held (validate_arm
          * takes runloom_pool.lock -- same rank).  A HEALED arm (stale cache,
@@ -220,13 +243,41 @@ static int runloom_pump_drain_expired(long long now)
     return woke;
 }
 
+/* All-pools drain -- the real pump's and H=1 sim pump's entry (unchanged). */
+static int runloom_pump_drain_expired(long long now)
+{
+    return runloom_pump_drain_expired_pools(now, RUNLOOM_PARKER_POOL_MAX);
+}
+
+/* Public census hooks (MN_SIM_DST_PLAN.md I4): the mn census folds the
+ * netpoll deadline plane into its advance target and fires due timeouts
+ * after every advance -- the exact analogue of the H=1 sim pump's
+ * peek-then-drain (netpoll_sim.c.inc).  Thin non-static wrappers; the
+ * workers stay static/TU-local. */
+static long long runloom_dh_peek_deadline_pools(int npools);   /* defined below */
+
+/* HUB POOLS ONLY (review fix): pool[DEFAULT] holds the coexisting main-thread
+ * H=1-sim plane's parkers -- folding/firing those from the census would race
+ * the legacy pump's clock authority (the P4b plane-divergence class).  Hub
+ * parkers and non-hub parkers partition cleanly by pool
+ * (runloom_parker_pool_for_hub), so excluding the DEFAULT pool is exact. */
+long long runloom_netpoll_deadline_peek_ns(void)
+{
+    return runloom_dh_peek_deadline_pools(RUNLOOM_PARKER_POOL_DEFAULT);
+}
+
+int runloom_pump_drain_expired_pub(long long now_ns)
+{
+    return runloom_pump_drain_expired_pools(now_ns, RUNLOOM_PARKER_POOL_DEFAULT);
+}
+
 /* Min deadline across all pools.  Returns -1 if no pool has any
  * timed parker.  Takes each pool's lock briefly. */
-static long long runloom_dh_peek_deadline_global(void)
+static long long runloom_dh_peek_deadline_pools(int npools)
 {
     long long earliest = -1;
     int pi;
-    for (pi = 0; pi < RUNLOOM_PARKER_POOL_MAX; pi++) {
+    for (pi = 0; pi < npools; pi++) {
         runloom_parker_pool_t *pool = &runloom_pools[pi];
         long long d;
         if (__atomic_load_n(&pool->lock_inited, __ATOMIC_ACQUIRE) != 2) continue;
@@ -236,6 +287,11 @@ static long long runloom_dh_peek_deadline_global(void)
         if (d >= 0 && (earliest < 0 || d < earliest)) earliest = d;
     }
     return earliest;
+}
+
+static long long runloom_dh_peek_deadline_global(void)
+{
+    return runloom_dh_peek_deadline_pools(RUNLOOM_PARKER_POOL_MAX);
 }
 
 /* Recover from a failed blocking wait (epoll_wait / kevent).

@@ -172,16 +172,11 @@ int runloom_netpoll_wait_fd(int fd, int events, long long timeout_ns)
             errno = EPERM;
             return -1;
         }
-        if (timeout_ns >= 0) {
-            static int warned_timeout = 0;
-            if (!__atomic_exchange_n(&warned_timeout, 1, __ATOMIC_RELAXED)) {
-                fprintf(stderr, "runloom mn-sim: wait_fd with a finite timeout "
-                        "is not yet supported under RUNLOOM_SIM_MN (lands in "
-                        "MN_SIM_DST_PLAN.md I4)\n");
-            }
-            errno = EINVAL;
-            return -1;
-        }
+        /* Finite timeouts are supported since I4: the deadline is stamped on
+         * the logical plane (netpoll_deadline_now_ns reads the mirrored
+         * logical clock under sim) and FIRED by the census's
+         * drain_expired_pub after each advance -- the temporary I2 EINVAL
+         * guard is retired. */
     }
 #if !defined(RUNLOOM_HAVE_EPOLL) && !defined(RUNLOOM_HAVE_KQUEUE) && \
     !defined(RUNLOOM_OS_WINDOWS)

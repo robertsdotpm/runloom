@@ -218,24 +218,23 @@ class TestMnSimBytes:
             "rc.mn_run(); rc.mn_fini()\n")
         assert "UNREG_RAISED" in p.stdout, (p.stdout, p.stderr[-800:])
 
-    def test_finite_timeout_raises_until_i4(self):
-        """gate [11b]: a finite wait_fd timeout raises (EINVAL) under mn-sim
-        until I4 folds the netpoll deadline heap into the census."""
+    def test_finite_timeout_works_since_i4(self):
+        """gate [11b] RETIRED by I4: a finite wait_fd timeout now fires on the
+        logical clock (was: EINVAL between I2 and I4 -- the temporary guard
+        against the silent parked-forever wedge)."""
         p = run_sim(
             "import socket, runloom_c as rc\n"
             "a, b = socket.socketpair()\n"
             "a.setblocking(False); b.setblocking(False)\n"
             "cid = rc.sim_conn_register(a.fileno(), b.fileno())\n"
             "def w():\n"
-            "    try:\n"
-            "        rc.wait_fd(b.fileno(), 1, 100)\n"
-            "        print('NO_RAISE')\n"
-            "    except OSError as e:\n"
-            "        print('TIMEOUT_RAISED', e.errno)\n"
+            "    m = rc.wait_fd(b.fileno(), 1, 100)\n"
+            "    print('TIMEOUT_WORKS', m, rc._logical_ns())\n"
             "rc.mn_init(2)\n"
             "rc.mn_fiber(w)\n"
             "rc.mn_run(); rc.mn_fini()\n")
-        assert "TIMEOUT_RAISED" in p.stdout, (p.stdout, p.stderr[-800:])
+        assert "TIMEOUT_WORKS 0 100000000" in p.stdout, (p.stdout, p.stderr[-800:])
+        assert p.returncode == 0, (p.stdout, p.stderr[-800:])
 
     def test_stw_churn_under_gated_pump(self):
         """gate [1] STW-safety: hubs sitting in the gated pump's detached nap
@@ -266,6 +265,138 @@ class TestMnSimBytes:
             "rc.mn_run(); rc.mn_fini()\n"
             "print('STW_OK', done)\n")
         assert "STW_OK [b'after-churn']" in p.stdout, (p.stdout, p.stderr[-800:])
+
+
+class TestTimedParksI4:
+    def test_wait_fd_timeout_fires_at_logical_deadline(self):
+        """I4 plane (a): a 5000ms wait_fd timeout with NO delivery returns
+        mask 0 at EXACTLY logical 5e9 ns, wall-compressed -- the full P4
+        regression healed end-to-end (the I2 EINVAL guard is retired).  Order
+        vs a 4999ms sleeper is deterministic across runs."""
+        code = (
+            "import socket, time, runloom_c as rc\n"
+            "a, b = socket.socketpair()\n"
+            "a.setblocking(False); b.setblocking(False)\n"
+            "cid = rc.sim_conn_register(a.fileno(), b.fileno())\n"
+            "order = []\n"
+            "def waiter():\n"
+            "    m = rc.wait_fd(b.fileno(), 1, 5000)\n"
+            "    order.append(('timeout', m, rc._logical_ns()))\n"
+            "def sleeper():\n"
+            "    rc.sched_sleep(4.999)\n"
+            "    order.append(('sleeper', rc._logical_ns()))\n"
+            "t0 = time.monotonic()\n"
+            "rc.mn_init(2); rc.mn_fiber(waiter); rc.mn_fiber(sleeper)\n"
+            "rc.mn_run()\n"
+            "print('T2', order, 'WALL_OK', time.monotonic() - t0 < 3.0)\n"
+            "rc.mn_fini()\n")
+        outs = set()
+        for i in range(3):
+            p = run_sim(code)
+            assert "WALL_OK True" in p.stdout, (p.stdout, p.stderr[-800:])
+            assert p.returncode == 0, (p.stdout, p.stderr[-800:])
+            line = [ln for ln in p.stdout.splitlines() if ln.startswith("T2")][0]
+            assert "('timeout', 0, 5000000000)" in line, line
+            assert "('sleeper', 4999000000)" in line, line
+            outs.add(line)
+        assert len(outs) == 1, "timeout-vs-sleeper order unstable: {0}".format(outs)
+
+    def test_timeout_vs_post_advance_delivery(self):
+        """I4 (review-corrected): a shuttler whose SEND is unlocked by the same
+        census advance that makes the wait_fd deadline due -- the TIMEOUT wins
+        deterministically (at the advance instant the ledger is still empty;
+        the shuttler runs only after; its delivery lands as a stashed wake on
+        a dead parker).  Pinned explicitly: 'TIE 0 None'."""
+        code = (
+            "import socket, runloom_c as rc\n"
+            "a, b = socket.socketpair()\n"
+            "a.setblocking(False); b.setblocking(False)\n"
+            "cid = rc.sim_conn_register(a.fileno(), b.fileno())\n"
+            "out = {}\n"
+            "def waiter():\n"
+            "    m = rc.wait_fd(b.fileno(), 1, 50)\n"     # deadline: 50ms
+            "    out['mask'] = m\n"
+            "    out['data'] = b.recv(16) if m == 1 else None\n"
+            "def shuttler():\n"
+            "    rc.sched_sleep(0.05)\n"                   # same logical instant
+            "    a.send(b'tie')\n"
+            "    rc.sim_deliver_ready(cid, b.fileno(), 1)\n"
+            "rc.mn_init(2); rc.mn_fiber(waiter); rc.mn_fiber(shuttler)\n"
+            "rc.mn_run()\n"
+            "print('TIE', out.get('mask'), out.get('data'))\n"
+            "rc.mn_fini()\n")
+        for i in range(3):
+            p = run_sim(code)
+            assert p.returncode == 0, (p.stdout, p.stderr[-800:])
+            assert "TIE 0 None" in p.stdout, \
+                ("timeout must win the post-advance-enqueue race", p.stdout)
+
+    def test_true_tie_ready_beats_timeout(self):
+        """I4 t3, the REAL pin (review fix): a ledger entry DUE at the same
+        instant as the wait_fd deadline -- constructed via timeout 0 + a
+        same-instant delivery already in the ledger.  Census step 1 runs
+        dispatch_due BEFORE drain_expired, so READY wins: mask 1 + payload.
+        Swapping that order would flip this to a timeout -- the load-bearing
+        ordering finally has teeth."""
+        code = (
+            "import socket, runloom_c as rc\n"
+            "a, b = socket.socketpair()\n"
+            "a.setblocking(False); b.setblocking(False)\n"
+            "cid = rc.sim_conn_register(a.fileno(), b.fileno())\n"
+            "out = {}\n"
+            "def sender():\n"
+            "    a.send(b'tie')\n"
+            "    rc.sim_deliver_ready(cid, b.fileno(), 1)\n"   # due at logical 0
+            "def waiter():\n"
+            "    m = rc.wait_fd(b.fileno(), 1, 0)\n"           # deadline logical 0
+            "    out['mask'] = m\n"
+            "    out['data'] = b.recv(16) if m == 1 else None\n"
+            "rc.mn_init(2); rc.mn_fiber(sender); rc.mn_fiber(waiter)\n"
+            "rc.mn_run()\n"
+            "print('ZTIE', out.get('mask'), out.get('data'), rc._logical_ns())\n"
+            "rc.mn_fini()\n")
+        for i in range(3):
+            p = run_sim(code)
+            assert p.returncode == 0, (p.stdout, p.stderr[-800:])
+            assert "ZTIE 1 b'tie' 0" in p.stdout, \
+                ("ready must beat a same-instant timeout", p.stdout)
+
+    def test_park_timeout_on_logical_plane(self):
+        """I4 plane (b): park(timeout=2.5) with no waker times out at EXACTLY
+        logical 2.5e9 ns (wall-instant); a woken park returns False at the
+        waker's logical instant.  (Regression: monotonic entry/verdict
+        compares declared a logical deadline expired-at-birth -- 9ms wall,
+        logical 0.)"""
+        p = run_sim(
+            "import time, runloom_c as rc\n"
+            "out = {}\n"
+            "def parker():\n"
+            "    out['r'] = rc.park(timeout=2.5)\n"
+            "    out['ns'] = rc._logical_ns()\n"
+            "t0 = time.monotonic()\n"
+            "rc.mn_init(2); rc.mn_fiber(parker); rc.mn_run()\n"
+            "print('PT', out['r'], out['ns'], time.monotonic() - t0 < 2.0)\n"
+            "rc.mn_fini()\n")
+        assert "PT True 2500000000 True" in p.stdout, (p.stdout, p.stderr[-800:])
+        assert p.returncode == 0, (p.stdout, p.stderr[-800:])
+
+    def test_park_woken_before_logical_timeout(self):
+        p = run_sim(
+            "import runloom_c as rc\n"
+            "out = {}\n"
+            "def parker():\n"
+            "    out['h'] = rc.current_g()\n"
+            "    out['r'] = rc.park(timeout=9.0)\n"
+            "    out['ns'] = rc._logical_ns()\n"
+            "def waker():\n"
+            "    rc.sched_sleep(0.003)\n"
+            "    out['h'].wake()\n"
+            "rc.mn_init(2); rc.mn_fiber(parker); rc.mn_fiber(waker)\n"
+            "rc.mn_run()\n"
+            "print('PW', out['r'], out['ns'])\n"
+            "rc.mn_fini()\n")
+        assert "PW False 3000000" in p.stdout, (p.stdout, p.stderr[-800:])
+        assert p.returncode == 0, (p.stdout, p.stderr[-800:])
 
 
 class TestReviewRegressions:

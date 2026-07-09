@@ -438,7 +438,11 @@ static void runloom_mn_ctrl_try_grant(void)
              * the seeded choose() orders them -- ledger order fixes per-hub
              * FIFO, the seed fixes cross-hub interleave. */
             if (sim_live) {
+                /* Ledger deliveries FIRST, then already-due netpoll timeouts
+                 * (I4): ready I/O at the current instant beats a same-instant
+                 * wait_fd timeout -- the documented H=1 pump rule. */
                 int woke = runloom_sim_dispatch_due(runloom_mn_ctrl.logical_now_ns);
+                woke += runloom_pump_drain_expired_pub(runloom_mn_ctrl.logical_now_ns);
                 if (woke > 0) {
                     /* have_deadline is deliberately NOT cleared here (unlike
                      * the advance below): no clock movement happened, so the
@@ -468,6 +472,14 @@ static void runloom_mn_ctrl_try_grant(void)
                 long long timer_ns = runloom_mn_ctrl.have_deadline
                     ? (long long)(runloom_mn_ctrl.next_deadline * 1e9 + 0.5)
                     : -1;
+                /* I4: fold the netpoll deadline plane (wait_fd timeouts,
+                 * logical-stamped under sim) into the event min -- an
+                 * un-folded plane would livelock a timeout-only workload
+                 * (advance target never reaches it; design-review finding).
+                 * Treated like a second ledger: ns-exact advance target. */
+                long long np_ns = sim_live ? runloom_netpoll_deadline_peek_ns() : -1;
+                if (np_ns >= 0 && (ledger_ns < 0 || np_ns < ledger_ns))
+                    ledger_ns = np_ns;
                 if (timer_ns >= 0 && (ledger_ns < 0 || timer_ns <= ledger_ns)) {
                     /* timer target (ties included): exact double advance */
                     runloom_mn_ctrl.logical_now = runloom_mn_ctrl.next_deadline;
@@ -485,8 +497,14 @@ static void runloom_mn_ctrl_try_grant(void)
                 }
                 runloom_sched_logical_set_ns(runloom_mn_ctrl.logical_now_ns);
                 runloom_mn_ctrl.have_deadline = 0;   /* per-round recollect */
-                if (sim_live)
+                if (sim_live) {
+                    /* Post-advance: deliveries first, then now-due netpoll
+                     * timeouts (I4; mirrors netpoll_sim.c.inc's order --
+                     * this drain call is load-bearing: without it a wait_fd
+                     * timeout has NO firing mechanism under the gated pump). */
                     (void)runloom_sim_dispatch_due(runloom_mn_ctrl.logical_now_ns);
+                    (void)runloom_pump_drain_expired_pub(runloom_mn_ctrl.logical_now_ns);
+                }
                 runloom_mn_ctrl.round++;             /* re-open: re-report + fire */
                 runloom_cond_broadcast(&runloom_mn_ctrl.cond);
             }
@@ -808,6 +826,27 @@ static int runloom_mn_ctrl_census_idle(runloom_hub_t *h)
             if (!runloom_mn_ctrl.have_deadline || d < runloom_mn_ctrl.next_deadline)
                 runloom_mn_ctrl.next_deadline = d;
             runloom_mn_ctrl.have_deadline = 1;
+        }
+        /* I4: under sim also report this hub's earliest LOGICAL-plane TIMED
+         * park (runloom_c.park(timeout) -- the timer heap).  PLANE-FILTERED
+         * (review-caught): the heap can also hold MONOTONIC-stamped entries
+         * (the park_until family: Future/WaitGroup wall timeouts, which under
+         * sim deliberately never fire); folding one of those wall-uptime-
+         * scale values would advance the logical clock to ~1e6 seconds and
+         * destroy the run.  Linear scan of the small owner-hub heap for
+         * logical entries only; race-free under the ctrl lock. */
+        if (runloom_sim_enabled() && h->sched.timer_size > 0) {
+            Py_ssize_t ti;
+            for (ti = 1; ti <= h->sched.timer_size; ti++) {
+                if (!h->sched.timer_heap[ti].logical) continue;
+                {
+                    double td = h->sched.timer_heap[ti].deadline;
+                    if (!runloom_mn_ctrl.have_deadline ||
+                        td < runloom_mn_ctrl.next_deadline)
+                        runloom_mn_ctrl.next_deadline = td;
+                    runloom_mn_ctrl.have_deadline = 1;
+                }
+            }
         }
         runloom_mn_ctrl_try_grant();
     }

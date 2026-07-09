@@ -292,7 +292,7 @@ int runloom_park_generic_timed(int foreign_wakeable, double deadline)
      * stale -- harmless: when popped it CASes parked_safe and, if the g is not
      * parked, the CAS fails and it is discarded; if the g re-parked, it is at most
      * one spurious wake the caller's deadline loop absorbs. */
-    if (runloom_timer_push(target, deadline, g) < 0) {
+    if (runloom_timer_push(target, deadline, g, 0) < 0) {
         return -1;                          /* OOM (PyErr_NoMemory set) */
     }
 
@@ -305,6 +305,40 @@ int runloom_park_generic_timed(int foreign_wakeable, double deadline)
     runloom_park_generic(foreign_wakeable);
 
     return (runloom_sched_monotonic_seconds() >= deadline) ? 1 : 0;
+}
+
+/* The sim-plane twin (MN_SIM_DST_PLAN.md I4): identical Dekker/timer-entry
+ * protocol, but the ENTRY expiry check and the RESUME verdict read the census
+ * logical clock -- a logical-stamped deadline compared against monotonic
+ * wall-uptime is "already expired" at birth (found live: park(timeout=2.5)
+ * returned timed-out in 9ms at logical 0).  Only m_park routes here (under an
+ * armed sim census, hub ctx); the park_until family (Future/WaitGroup wall
+ * timeouts) deliberately stays monotonic -- under sim those deadlines never
+ * fire (wall time does not exist there; contract-documented), while their
+ * real wake paths work unchanged. */
+int runloom_park_generic_timed_logical(int foreign_wakeable, double deadline)
+{
+    void *hub = runloom_mn_current_hub_opaque();
+    runloom_sched_t *target;
+    runloom_g_t *g;
+    double now = runloom_mn_logical_now_or(runloom_sched_monotonic_seconds());
+
+    if (hub != NULL) {
+        target = runloom_mn_current_sched();
+        g = runloom_mn_tls_current_g();
+    } else {
+        target = runloom_sched_get();
+        g = (target != NULL) ? target->current : NULL;
+    }
+    if (g == NULL || target == NULL) return -1;
+    if (deadline <= now) return 1;          /* already expired -> don't park */
+
+    if (runloom_timer_push(target, deadline, g, 1) < 0) {
+        return -1;                          /* OOM (PyErr_NoMemory set) */
+    }
+    runloom_park_generic(foreign_wakeable);
+    return (runloom_mn_logical_now_or(runloom_sched_monotonic_seconds())
+            >= deadline) ? 1 : 0;
 }
 
 /* The unified predicate-park loop (item 1, increment 1: lockless-Dekker form).

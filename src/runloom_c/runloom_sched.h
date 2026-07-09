@@ -557,8 +557,17 @@ void runloom_g_slab_reclaim(void);
  * wake (the parker re-checks the clock and re-parks), never a premature timeout:
  * the parker decides timed-out from the clock on resume, NOT from the timer. */
 typedef struct {
-    double       deadline;   /* monotonic-seconds wake deadline */
+    double       deadline;   /* wake deadline (monotonic seconds -- or census-
+                              * LOGICAL seconds when `logical` is set, I4) */
     runloom_g_t *g;          /* the timed-parked fiber */
+    int          logical;    /* I4: deadline is on the census logical plane.
+                              * The census folds ONLY logical entries into its
+                              * advance target -- folding a monotonic (wall-
+                              * uptime-scale) value would poison the logical
+                              * clock (review-caught).  Mixed heaps stay sound:
+                              * monotonic values sort after logical ones and,
+                              * under sim, never fire (wall timeouts do not
+                              * exist there -- documented). */
 } runloom_timer_entry_t;
 
 struct runloom_sched {
@@ -755,6 +764,11 @@ int runloom_park_generic(int foreign_wakeable);
  * real wake, or a stale timer entry from a prior re-park); the caller must
  * re-check its own deadline, exactly as the fd-backed wait_fd(timeout) path did. */
 int runloom_park_generic_timed(int foreign_wakeable, double deadline);
+
+/* Sim-plane twin (I4): entry expiry + resume verdict on the census logical
+ * clock (a logical deadline vs monotonic uptime is expired-at-birth).  m_park
+ * routes here under an armed sim census. */
+int runloom_park_generic_timed_logical(int foreign_wakeable, double deadline);
 
 /* --- runloom_park_until: the unified predicate-park kernel (item 1) ----------
  * The single register->recheck->park loop every cooperative primitive

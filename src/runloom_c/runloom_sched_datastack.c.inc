@@ -535,7 +535,8 @@ static int runloom_timer_grow(runloom_sched_t *s)
     return 0;
 }
 
-static int runloom_timer_push(runloom_sched_t *s, double deadline, runloom_g_t *g)
+static int runloom_timer_push(runloom_sched_t *s, double deadline, runloom_g_t *g,
+                              int logical)
 {
     Py_ssize_t i;
     runloom_timer_entry_t e;
@@ -553,6 +554,7 @@ static int runloom_timer_push(runloom_sched_t *s, double deadline, runloom_g_t *
     runloom_g_incref(g);
     e.deadline = deadline;
     e.g = g;
+    e.logical = logical;
     __atomic_store_n(&s->timer_size, s->timer_size + 1, __ATOMIC_RELAXED);  /* census reads x-thread */
     i = s->timer_size;
     while (i > 1 && s->timer_heap[i / 2].deadline > deadline) {  /* sift up */

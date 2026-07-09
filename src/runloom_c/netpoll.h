@@ -280,4 +280,11 @@ int runloom_sim_dispatch_due(long long now_ns);
  * native mn-sim (I2 gate [11]): unregistered fds have no wake source there. */
 int runloom_sim_conn_has_fd(int fd);
 
+/* I4 census hooks -- the netpoll deadline plane (wait_fd timeouts).  peek:
+ * earliest deadline across every pool (ns; -1 if none).  drain: fire every
+ * timeout with deadline <= now_ns via the claim/unlink/deferred-wake batch;
+ * returns parkers woken.  Analogue of the H=1 sim pump's peek-then-drain. */
+long long runloom_netpoll_deadline_peek_ns(void);
+int runloom_pump_drain_expired_pub(long long now_ns);
+
 #endif /* RUNLOOM_NETPOLL_H */
