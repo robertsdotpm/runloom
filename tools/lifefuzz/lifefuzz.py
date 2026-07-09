@@ -79,6 +79,8 @@ def build_spec(seed):
         return build_grammar_spec(seed)
     if forced == "sim":
         return {"seed": seed, "kind": "sim"}
+    if forced == "simfd":
+        return {"seed": seed, "kind": "simfd"}
     # ~20% grammar + ~10% sim-network, each via a SEPARATE rng stream so the other
     # seeds keep their EXACT original core/aio program (main stream undisturbed --
     # the fleet's known corpus stays valid).  So the existing `lifefuzz.py run
@@ -90,6 +92,12 @@ def build_spec(seed):
         return build_grammar_spec(seed)
     if random.Random(seed ^ 0x2545F4914F6CDD1D).random() < 0.10:
         return {"seed": seed, "kind": "sim"}
+    # ~8% socketpair byte-plane (simfd): a REAL socket workload over the sim netpoll
+    # pump (exercises the C park/commit/deadline/wake path as f(seed) -- coverage
+    # the Chan-based `sim` kind cannot reach).  Separate rng stream so the main
+    # core/aio seeds keep their EXACT program (the corpus stays valid).
+    if random.Random(seed ^ 0xBF58476D1CE4E5B9).random() < 0.08:
+        return {"seed": seed, "kind": "simfd"}
     rng = random.Random(seed)
     kind = rng.choice(["core", "core", "core", "aio"])   # ~25% aio
     scale = (rng.random() < 0.12)
@@ -261,6 +269,10 @@ def run_program(spec, timeout=20.0):
         sys.path.insert(0, os.path.join(ROOT, "tools", "dst"))
         import simnet                             # sets RUNLOOM_LOGICAL_CLOCK on import
         return simnet.sim_program(spec["seed"], timeout=timeout)
+    if spec.get("kind") == "simfd":
+        sys.path.insert(0, os.path.join(ROOT, "tools", "dst"))
+        import simnet_fd                          # sets RUNLOOM_SIM + LOGICAL_CLOCK on import
+        return simnet_fd.simfd_program(spec["seed"], timeout=timeout)
 
     mode = spec["mode"]
     nchan = spec["nchan"]
