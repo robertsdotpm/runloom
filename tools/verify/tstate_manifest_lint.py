@@ -47,24 +47,33 @@ def py_include():
 
 
 def struct_fields():
-    """Enumerate PyThreadState (struct _ts) top-level fields via libclang."""
+    """Enumerate PyThreadState (struct _ts) top-level fields via libclang.
+    Returns None (-> the lint SKIPs, not fails) whenever clang is unavailable:
+    the python `clang` package missing, OR the libclang shared lib missing/unusable.
+    (The old fallback re-`import clang.cindex` inside the except -- which raises
+    AGAIN and uncaught when the package itself is absent, crashing the lint into a
+    gate failure instead of the intended SKIP.)"""
     try:
         import clang.cindex as ci
     except Exception:
-        for cand in ("/usr/lib/llvm-18/lib/libclang.so.1",
-                     "/usr/lib/x86_64-linux-gnu/libclang-18.so.1"):
-            if os.path.exists(cand):
-                import clang.cindex as ci
+        return None                          # python clang package not installed
+    for cand in ("/usr/lib/llvm-18/lib/libclang.so.1",
+                 "/usr/lib/x86_64-linux-gnu/libclang-18.so.1"):
+        if os.path.exists(cand):
+            try:
                 ci.Config.set_library_file(cand)
-                break
-        else:
-            return None
+            except Exception:
+                pass                         # already configured, or set_library_file locked
+            break
     inc = py_include()
     src = "#define Py_BUILD_CORE 1\n#include <Python.h>\n"
-    idx = ci.Index.create()
-    tu = idx.parse("t.c", args=["-I" + inc, "-D_GNU_SOURCE"],
-                   unsaved_files=[("t.c", src)],
-                   options=ci.TranslationUnit.PARSE_INCOMPLETE)
+    try:
+        idx = ci.Index.create()
+        tu = idx.parse("t.c", args=["-I" + inc, "-D_GNU_SOURCE"],
+                       unsaved_files=[("t.c", src)],
+                       options=ci.TranslationUnit.PARSE_INCOMPLETE)
+    except Exception:
+        return None                          # libclang shared lib missing/unusable
     fields = []
 
     def walk(node):
