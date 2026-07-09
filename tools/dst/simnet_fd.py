@@ -51,6 +51,29 @@ class SimError(OSError):
     """A modelled socket error (ECONNRESET), analogous to simnet.py's SimError."""
 
 
+def sim_resolve(host, port=0):
+    """Deterministic name resolution for sim workloads (the DNS pillar of DST).
+
+    NEVER calls the real socket.getaddrinfo -- real name resolution is
+    nondeterministic (DNS servers, /etc/hosts, network) and would break the
+    outcome=f(seed) contract.  A numeric IPv4 dotted-quad passes through unchanged;
+    a hostname maps to a STABLE synthetic address in the 240.0.0.0/4 reserved range,
+    derived (FNV-1a) purely from the name -- so resolution is a pure function of the
+    name, replayable and host-independent.  Returns (addr, port).
+
+    Scope: real getaddrinfo / non-numeric addresses under RUNLOOM_SIM are out of
+    scope; a sim workload that models DNS calls this instead.  The socketpair byte
+    plane itself is fd-based and needs no resolution; this is the primitive for a
+    future name/address-routed sim layer."""
+    parts = host.split(".")
+    if len(parts) == 4 and all(p.isdigit() and 0 <= int(p) <= 255 for p in parts):
+        return (host, port)                          # numeric passthrough
+    h = 2166136261
+    for ch in host.encode("utf-8", "replace"):       # FNV-1a over the name
+        h = ((h ^ ch) * 16777619) & 0xffffffff
+    return ("240.%d.%d.%d" % ((h >> 16) & 0xff, (h >> 8) & 0xff, h & 0xff), port)
+
+
 def _setup(s):
     s.setblocking(False)
     try:

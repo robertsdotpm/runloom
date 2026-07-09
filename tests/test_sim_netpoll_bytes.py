@@ -614,6 +614,28 @@ class TestSimBytesPartition(unittest.TestCase):
         self.assertEqual(scenario(), scenario())
 
 
+class TestSimResolve(unittest.TestCase):
+    """The DNS pillar: deterministic name resolution, never real getaddrinfo."""
+
+    def test_numeric_passthrough(self):
+        self.assertEqual(simnet_fd.sim_resolve("10.0.0.5", 80), ("10.0.0.5", 80))
+
+    def test_name_is_deterministic_and_synthetic(self):
+        a = simnet_fd.sim_resolve("example.com", 443)
+        b = simnet_fd.sim_resolve("example.com", 443)
+        self.assertEqual(a, b)                       # pure function of the name
+        self.assertTrue(a[0].startswith("240."))     # reserved synthetic range
+        self.assertEqual(a[1], 443)
+        # distinct names -> (almost surely) distinct addresses
+        self.assertNotEqual(simnet_fd.sim_resolve("a.example.com")[0],
+                            simnet_fd.sim_resolve("b.example.com")[0])
+
+    def test_no_real_getaddrinfo(self):
+        # a bogus TLD would fail real DNS; sim_resolve must still return synthetically
+        addr, _ = simnet_fd.sim_resolve("does-not-exist.invalid")
+        self.assertTrue(addr.startswith("240."))
+
+
 class TestSimBytesDgramReorder(unittest.TestCase):
     """Increment D: datagram mode -- reorder is well-defined on whole datagrams
     (SOCK_DGRAM), unlike a byte stream.  The shuttler permutes each in-flight burst."""
