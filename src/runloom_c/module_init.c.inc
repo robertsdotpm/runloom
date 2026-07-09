@@ -184,6 +184,12 @@ static PyMethodDef module_methods[] = {
     {"_logical_ns", m_logical_ns, METH_NOARGS,
      "Read the single-thread LOGICAL clock in ns (RUNLOOM_LOGICAL_CLOCK/RUNLOOM_SIM); "
      "0 off the logical clock.  Diagnostic (sim determinism witness)."},
+    {"sim_conn_register", m_sim_conn_register, METH_VARARGS,
+     "sim_conn_register(fd_a, fd_b) -> conn_id.  Register a socketpair-backed sim "
+     "connection (RUNLOOM_SIM, Slice 3); conn_id is the ready-ledger ordering key."},
+    {"sim_deliver_ready", m_sim_deliver_ready, METH_VARARGS,
+     "sim_deliver_ready(conn_id, fd, dir).  Wake a fiber parked on fd for dir "
+     "(READ=1/WRITE=2) at the current logical instant (RUNLOOM_SIM); no-op off."},
     {"_fault_count", m_fault_count, METH_O,
      "_fault_count(site): test-only.  Times the Windows netpoll fault-injection "
      "site (WSAPOLL/SELECT/IOCP_WAIT/IOCP_SUBMIT) fired; -1 if unknown/non-Win."},

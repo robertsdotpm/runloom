@@ -238,5 +238,6 @@ RUNLOOM_FSM_ASSERT_TABLE(runloom_park_table, RUNLOOM_PARK_STATE_COUNT,
 #include "netpoll_wake_iouring.c.inc"
 #include "netpoll_wait_fd.c.inc"
 #include "netpoll_pump_helpers.c.inc"
+#include "netpoll_sim_ready.c.inc"
 #include "netpoll_sim.c.inc"
 #include "netpoll_pump.c.inc"

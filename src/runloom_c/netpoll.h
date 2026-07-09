@@ -250,4 +250,13 @@ int  runloom_netpoll_wake_pump_arm(void);
  * backends (epoll eventfd / Windows IOCP / select self-pipe). */
 void runloom_netpoll_wake_pump(void *hub_opaque);
 
+/* Deterministic sim readiness plane (RUNLOOM_SIM, Slice 3; see
+ * netpoll_sim_ready.c.inc).  Register a socketpair-backed sim connection and get
+ * its stable conn_id -- the ready-ledger ordering key (never the raw fd).  Append
+ * a readiness delivery: at logical time deliver_at, wake a fiber parked on `fd`
+ * for `dir` (RUNLOOM_NETPOLL_READ/WRITE) via the sim pump's dispatch.  deliver_ready
+ * is a no-op when RUNLOOM_SIM is off (the real epoll pump owns readiness then). */
+long long runloom_sim_conn_register(int fd_a, int fd_b);
+void runloom_sim_deliver_ready(long long conn_id, int fd, int dir, long long deliver_at);
+
 #endif /* RUNLOOM_NETPOLL_H */

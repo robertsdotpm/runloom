@@ -158,6 +158,29 @@ static PyObject *m_logical_ns(PyObject *self, PyObject *unused)
     return PyLong_FromLongLong(runloom_sched_logical_ns());
 }
 
+/* Sim readiness plane (RUNLOOM_SIM, Slice 3): register a socketpair-backed sim
+ * connection, returning its stable conn_id (the ready-ledger ordering key). */
+static PyObject *m_sim_conn_register(PyObject *self, PyObject *args)
+{
+    int fd_a, fd_b;
+    (void)self;
+    if (!PyArg_ParseTuple(args, "ii", &fd_a, &fd_b)) return NULL;
+    return PyLong_FromLongLong(runloom_sim_conn_register(fd_a, fd_b));
+}
+
+/* Append a readiness delivery: wake a fiber parked on `fd` for `dir` (READ=1 /
+ * WRITE=2) at the current logical instant, keyed by conn_id for the stable
+ * dispatch order.  No-op when RUNLOOM_SIM is off. */
+static PyObject *m_sim_deliver_ready(PyObject *self, PyObject *args)
+{
+    long long conn_id;
+    int fd, dir;
+    (void)self;
+    if (!PyArg_ParseTuple(args, "Lii", &conn_id, &fd, &dir)) return NULL;
+    runloom_sim_deliver_ready(conn_id, fd, dir, runloom_sched_logical_ns());
+    Py_RETURN_NONE;
+}
+
 /* Test-only: read how many times a Windows netpoll fault-injection site fired
  * (see netpoll.c).  Returns -1 for an unknown site / non-Windows build. */
 static PyObject *m_fault_count(PyObject *self, PyObject *arg)

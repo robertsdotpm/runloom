@@ -49,15 +49,26 @@ static int runloom_netpoll_sim_pump(long long timeout_ns)
      * meaningless here.  It is IGNORED -- the logical clock is advanced instead. */
     (void)timeout_ns;
 
-    /* [Slice 3] dispatch modelled fd readiness in seed-drawn order here, via
-     * runloom_pump_dispatch_event, BEFORE advancing the clock -- so ready I/O
-     * wins over a same-instant timeout, matching a real poller. */
+    /* Slice 3: dispatch modelled fd readiness due at the current logical instant
+     * FIRST -- through the existing runloom_pump_dispatch_event (netpoll_sim_ready.c.inc),
+     * in the stable (deliver_at, conn_id, dir) order.  If anything woke, HOLD the
+     * clock (return) so ready I/O at `now` beats a same-instant wait_fd timeout
+     * (which fires only on a later pass, once the ledger has nothing due). */
+    woke += runloom_sim_dispatch_ready();
+    if (woke > 0) return woke;
 
-    /* Earliest netpoll deadline across all pools (ns on the logical clock; -1 if
-     * no timed parker).  The advance takes the min with the scheduler's earliest
-     * logical sleeper and returns that exact ns, so the expiry compare below is
-     * long-long-vs-long-long with no double round-trip. */
+    /* Nothing ready now: advance the logical clock to the earliest pending
+     * deadline across the netpoll heaps (netpoll_min), the scheduler's earliest
+     * logical sleeper (folded in by advance_clock), AND a FUTURE ledger delivery
+     * (ledger_next) -- so a delivery scheduled for a later logical instant
+     * compresses time to it, like a logical sleeper.  advance_clock returns the
+     * exact ns so the expiry compare is long-long-vs-long-long, no double round-trip. */
     netpoll_min = runloom_dh_peek_deadline_global();
+    {
+        long long ledger_next = runloom_sim_ready_next_ns();
+        if (ledger_next >= 0 && (netpoll_min < 0 || ledger_next < netpoll_min))
+            netpoll_min = ledger_next;
+    }
     advanced = runloom_sched_sim_advance_clock(s, netpoll_min);
     if (advanced >= 0) {
         /* Fire netpoll timeouts due at the advanced clock.  If the clock advanced
