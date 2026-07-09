@@ -287,4 +287,12 @@ int runloom_sim_conn_has_fd(int fd);
 long long runloom_netpoll_deadline_peek_ns(void);
 int runloom_pump_drain_expired_pub(long long now_ns);
 
+/* I5 settle-reap: reap every HUB-homed parker (cancel -1) at the settled
+ * census; bump the reap tally (rc.sim_reap_count) by the reaped count. */
+int runloom_netpoll_drain_parked_mn(void);
+void runloom_sim_reap_add(long long n);
+
+/* Parkers in HUB pools only (excludes pool[DEFAULT] -- the legacy plane). */
+int runloom_netpoll_parked_count_hub_pools(void);
+
 #endif /* RUNLOOM_NETPOLL_H */

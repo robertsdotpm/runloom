@@ -16,6 +16,69 @@
  * spurious -1, surfacing as a BlockingIOError out of StreamReader._fill.  Only
  * this thread's own parkers are drained now; others (and M:N hub gs, whose
  * owner is NULL) stay linked. */
+/* The mn-census settle-reap variant (MN_SIM_DST_PLAN.md I5): reap HUB-homed
+ * parkers (p->hub != NULL) -- the owner-scoped drain below deliberately skips
+ * them.  Same claim/unlink/cancel(-1) protocol; wakes DEFERRED to post-unlock
+ * (the drain_expired batch discipline -- the census calls this under the ctrl
+ * lock and a wake under pool(80) would pin the pool->sub chain).  Called ONLY
+ * from the settled census (all hubs idle, no timer/ledger/deadline pending,
+ * baton free), so every reaped waiter is genuinely unwakeable: it resumes
+ * with ready_mask -1 (cancelled), surfaces an OSError, and the workload's
+ * reap-count oracle (rc.sim_reap_count) attributes expected infra reaps vs
+ * real strands.  Returns count reaped. */
+int runloom_netpoll_drain_parked_mn(void)
+{
+    int n = 0;
+    int pi;
+    for (pi = 0; pi < RUNLOOM_PARKER_POOL_MAX; pi++) {
+        runloom_parker_pool_t *pool = &runloom_pools[pi];
+        struct { void *hub; runloom_g_t *g; } wakes[64];
+        int nwakes, more, wi;
+        if (__atomic_load_n(&pool->lock_inited, __ATOMIC_ACQUIRE) != 2) continue;
+      reap_more:
+        nwakes = 0;
+        more = 0;
+        RUNLOOM_RLOCK(&pool->lock, RUNLOOM_RANK_PARKER_POOL);
+        {
+            runloom_parked_t *p = pool->head;
+            while (p != NULL) {
+                runloom_parked_t *next = p->next;
+                if (p->hub != NULL && p->g != NULL) {
+                    int cur;
+                    if (nwakes >= 64) { more = 1; break; }
+                    for (;;) {
+                        cur = __atomic_load_n(&p->commit, __ATOMIC_ACQUIRE);
+                        if (cur == RUNLOOM_PARK_WOKEN) break;
+                        if (__atomic_compare_exchange_n(&p->commit, &cur,
+                                                        RUNLOOM_PARK_WOKEN, 0,
+                                                        __ATOMIC_ACQ_REL,
+                                                        __ATOMIC_ACQUIRE)) {
+                            RUNLOOM_PARK_NOTE(cur, RUNLOOM_PARK_WOKEN);
+                            break;
+                        }
+                    }
+                    (void)runloom_parker_unlink(pool, p);
+                    if (cur != RUNLOOM_PARK_WOKEN) {
+                        if (p->ready_out != NULL) *p->ready_out = -1;
+                        if (cur == RUNLOOM_PARK_PARKED) {
+                            wakes[nwakes].hub = p->hub;
+                            wakes[nwakes].g = p->g;
+                            nwakes++;
+                        }
+                        n++;
+                    }
+                }
+                p = next;
+            }
+        }
+        RUNLOOM_RUNLOCK(&pool->lock, RUNLOOM_RANK_PARKER_POOL);
+        for (wi = 0; wi < nwakes; wi++)
+            runloom_mn_wake_g(wakes[wi].hub, wakes[wi].g);
+        if (more) goto reap_more;
+    }
+    return n;
+}
+
 int runloom_netpoll_drain_parked(void)
 {
     runloom_sched_t *owner = runloom_sched_get();
@@ -477,7 +540,13 @@ int runloom_netpoll_wait_fd(int fd, int events, long long timeout_ns)
             if (current_g != NULL && current_g->netpoll_parker == park)
                 current_g->netpoll_parker = NULL;
             runloom_parker_pool_release(park);
-            return ready_mask;
+            /* Reap/drain cancellation (ready_out = -1): set a DEFINED errno -- the
+     * drains cannot set the parker thread's errno, and returning -1 with
+     * stale errno made PyErr_SetFromErrno surface RANDOM OSError subclasses
+     * (measured: FileNotFoundError on the H=1 plane, errno 0 on mn -- I5
+     * review).  ECANCELED on both planes, uniformly. */
+    if (ready_mask == -1) errno = ECANCELED;
+    return ready_mask;
         }
         RUNLOOM_PARK_NOTE(RUNLOOM_PARK_ARMED, RUNLOOM_PARK_PARKED);
     }
@@ -551,6 +620,12 @@ int runloom_netpoll_wait_fd(int fd, int events, long long timeout_ns)
         }
         return -1;
     }
+    /* Reap/drain cancellation (ready_out = -1): set a DEFINED errno -- the
+     * drains cannot set the parker thread's errno, and returning -1 with
+     * stale errno made PyErr_SetFromErrno surface RANDOM OSError subclasses
+     * (measured: FileNotFoundError on the H=1 plane, errno 0 on mn -- I5
+     * review).  ECANCELED on both planes, uniformly. */
+    if (ready_mask == -1) errno = ECANCELED;
     return ready_mask;
 }
 

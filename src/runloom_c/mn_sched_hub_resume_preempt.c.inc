@@ -160,6 +160,10 @@ typedef struct {
 } runloom_mn_ctrl_t;
 static runloom_mn_ctrl_t runloom_mn_ctrl;
 
+/* I5: the logical instant of the last settle-reap wave (-1 = none this run).
+ * One wave per instant -- see the settled branch in try_grant. */
+static long long runloom_mn_last_reap_ns = -1;
+
 /* DPOR conflict tracking (declared in mn_sched.h).  seg_track is 0 in production
  * -- the chan ops record the touched object only while a schedule drive armed it
  * (set in ctrl_init, cleared in ctrl_fini). */
@@ -493,7 +497,46 @@ static void runloom_mn_ctrl_try_grant(void)
                     runloom_mn_ctrl.logical_now_ns = ledger_ns;
                     runloom_mn_ctrl.logical_now = (double)ledger_ns * 1e-9;
                 } else {
-                    return;                          /* nothing pending at all */
+                    /* SETTLED (MN_SIM_DST_PLAN.md I5): census complete, baton
+                     * free, nobody wants it, no timer/ledger/netpoll-deadline
+                     * pending, no foreign park -- every remaining hub-homed
+                     * netpoll parker is UNWAKEABLE.  Reap them (cancel -1) so
+                     * the workload terminates instead of wedging; the tally
+                     * (rc.sim_reap_count) lets the workload assert its
+                     * EXPECTED infra reaps (e.g. idle shuttlers per MITM
+                     * conn) and flag any excess as a real strand -- the
+                     * netpoll-plane lost-wake oracle the chan census cannot
+                     * see.  Reaped fibers become wanters via their hubs'
+                     * census_idle re-test, so re-open the round. */
+                    if (sim_live) {
+                        /* ONE REAP WAVE PER LOGICAL INSTANT (I5 review): a
+                         * fiber that catches the reap OSError and RE-PARKS on
+                         * the same fd (the standard robust-recv retry idiom)
+                         * otherwise cycles settle->reap->wake->repark forever
+                         * -- review-reproduced at ~800 reaps/sec with the
+                         * reap-count oracle inflating unboundedly and the
+                         * deadlock census blind (the fiber is runnable most
+                         * of each cycle).  Any park arriving AFTER this
+                         * instant's wave has, by construction, no wake source
+                         * (settled + clock unmoved), so refusing a second
+                         * wave leaves it parked -> has_wakeable_work says NOT
+                         * wakeable -> the RUNLOOM_DEADLOCK census fires its
+                         * LOUD dump/raise -- the diagnostic the DST promises,
+                         * instead of a silent CPU-burning livelock.  Reset at
+                         * arm (fresh run). */
+                        if (runloom_mn_last_reap_ns !=
+                            runloom_mn_ctrl.logical_now_ns) {
+                            int reaped = runloom_netpoll_drain_parked_mn();
+                            if (reaped > 0) {
+                                runloom_mn_last_reap_ns =
+                                    runloom_mn_ctrl.logical_now_ns;
+                                runloom_sim_reap_add(reaped);
+                                runloom_mn_ctrl.round++;
+                                runloom_cond_broadcast(&runloom_mn_ctrl.cond);
+                            }
+                        }
+                    }
+                    return;
                 }
                 runloom_sched_logical_set_ns(runloom_mn_ctrl.logical_now_ns);
                 runloom_mn_ctrl.have_deadline = 0;   /* per-round recollect */
@@ -892,6 +935,7 @@ static void runloom_mn_ctrl_arm(void)
         runloom_mn_ctrl.logical_now_ns = 0;
         runloom_sched_logical_set_ns(0);
     }
+    runloom_mn_last_reap_ns = -1;      /* fresh run: allow a reap wave at t=0 */
     runloom_mn_ctrl.armed = 1;
     runloom_mn_ctrl_try_grant();                 /* in case all hubs already waiting */
     runloom_cond_broadcast(&runloom_mn_ctrl.cond);  /* release the entry gate */

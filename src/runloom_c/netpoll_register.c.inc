@@ -688,6 +688,20 @@ int runloom_netpoll_parked_count(void)
     return total;
 }
 
+/* HUB pools only (I5 review): the mn deadlock-census refinement must classify
+ * exactly the parkers the settle-reap can reach -- pool[DEFAULT] holds the
+ * coexisting legacy plane's parkers, whose wake authority is the H=1 pump,
+ * and counting them as reap-fodder produced a false DEADLOCK verdict. */
+int runloom_netpoll_parked_count_hub_pools(void)
+{
+    int total = 0;
+    int i;
+    for (i = 0; i < RUNLOOM_PARKER_POOL_DEFAULT; i++) {
+        total += __atomic_load_n(&runloom_pools[i].total, __ATOMIC_ACQUIRE);
+    }
+    return total;
+}
+
 /* R0 gauge: total timed parkers across all pools' deadline heaps.  Lock-free
  * relaxed sum -- dh_size is written under each pool's lock but a stale/torn
  * read only mis-reports a gauge by a little.  Should track netpoll_parked's

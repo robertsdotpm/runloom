@@ -141,6 +141,8 @@ static long long runloom_sim_ready_n, runloom_sim_ready_cap, runloom_sim_ready_s
  * census cannot see.  Reset per run() in runloom_sim_reset. */
 static long long runloom_sim_reap_total;
 long long runloom_sim_reap_count(void) { return runloom_sim_reap_total; }
+void runloom_sim_reap_add(long long n)
+{ __atomic_add_fetch(&runloom_sim_reap_total, n, __ATOMIC_RELAXED); }
 
 /* Append a readiness delivery for fd/dir, keyed by conn_id, due at logical
  * deliver_at.  No-op when sim is off (the real epoll pump owns readiness then, so

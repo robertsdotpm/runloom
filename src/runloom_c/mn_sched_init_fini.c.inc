@@ -1328,7 +1328,24 @@ static int runloom_mn_has_wakeable_work(void)
      * on a runloom primitive that another thread will release.  Any of these
      * can wake a parked fiber -> not a deadlock (Go's checkdead likewise
      * excludes netpollWaiters and syscall/cgo threads). */
-    if (runloom_netpoll_parked_count()  != 0) return 1;
+    /* mn-sim refinement (MN_SIM_DST_PLAN.md I5): under the armed sim census a
+     * netpoll-parked fiber is wakeable ONLY by the ledger or a logical
+     * deadline -- with both empty it is settle-reap fodder, not wakeable work,
+     * and counting it here would hold the deadlock census open on parkers the
+     * reap is about to cancel. */
+    if (runloom_netpoll_parked_count() != 0) {
+        if (!(runloom_sim_enabled() && runloom_mn_ctrl_armed()) ||
+            runloom_sim_ready_peek_ns() >= 0 ||
+            runloom_netpoll_deadline_peek_ns() >= 0)
+            return 1;
+        /* I5 review: only HUB-pool parkers are settle-reap fodder.  A
+         * DEFAULT-pool parker (the coexisting legacy plane) is woken by the
+         * H=1 pump, which the census can neither see nor reap -- classifying
+         * it unwakeable produced a false DEADLOCK verdict (review repro). */
+        if (runloom_netpoll_parked_count() !=
+            runloom_netpoll_parked_count_hub_pools())
+            return 1;
+    }
     if (runloom_blockpool_inflight()    != 0) return 1;
     if (runloom_iouring_inflight()      != 0) return 1;
     if (runloom_foreign_park_inflight() != 0) return 1;
