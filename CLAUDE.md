@@ -86,3 +86,9 @@ Full derivations for the invariants below: [docs/dev/RUNTIME_GOTCHAS.md](docs/de
 - **The driver resumes with `coro.send(None)`, never `send(future.result())`.** A
   custom awaitable-iterator takes the `.send()` branch on a non-None value and
   raises. Guard: `tests/test_differential_asyncio.py` (sc_send_none_protocol).
+
+---
+
+## Release note
+
+**Don't add any more .md files to this repo.** It's about to be released. All development documentation, planning files, and work-in-progress notes have been archived. Keep CLAUDE.md for invariants and dev practices only.
