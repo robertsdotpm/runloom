@@ -81,6 +81,8 @@ def build_spec(seed):
         return {"seed": seed, "kind": "sim"}
     if forced == "simfd":
         return {"seed": seed, "kind": "simfd"}
+    if forced == "simfd_dgram":
+        return {"seed": seed, "kind": "simfd_dgram"}
     # ~20% grammar + ~10% sim-network, each via a SEPARATE rng stream so the other
     # seeds keep their EXACT original core/aio program (main stream undisturbed --
     # the fleet's known corpus stays valid).  So the existing `lifefuzz.py run
@@ -98,6 +100,9 @@ def build_spec(seed):
     # core/aio seeds keep their EXACT program (the corpus stays valid).
     if random.Random(seed ^ 0xBF58476D1CE4E5B9).random() < 0.08:
         return {"seed": seed, "kind": "simfd"}
+    # ~5% datagram byte-plane (simfd_dgram): reorder over SOCK_DGRAM conns.
+    if random.Random(seed ^ 0x94D049BB133111EB).random() < 0.05:
+        return {"seed": seed, "kind": "simfd_dgram"}
     rng = random.Random(seed)
     kind = rng.choice(["core", "core", "core", "aio"])   # ~25% aio
     scale = (rng.random() < 0.12)
@@ -273,6 +278,10 @@ def run_program(spec, timeout=20.0):
         sys.path.insert(0, os.path.join(ROOT, "tools", "dst"))
         import simnet_fd                          # sets RUNLOOM_SIM + LOGICAL_CLOCK on import
         return simnet_fd.simfd_program(spec["seed"], timeout=timeout)
+    if spec.get("kind") == "simfd_dgram":
+        sys.path.insert(0, os.path.join(ROOT, "tools", "dst"))
+        import simnet_fd
+        return simnet_fd.simfd_dgram_program(spec["seed"], timeout=timeout)
 
     mode = spec["mode"]
     nchan = spec["nchan"]

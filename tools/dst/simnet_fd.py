@@ -316,6 +316,173 @@ class SimFdConn(object):
                 pass
 
 
+_DGRAM_MAX = 1 << 16
+_REORDER_WINDOW = 16          # max datagrams a shuttler batches before a permuted flush
+
+
+class SimFdDgramConn(object):
+    """A DATAGRAM sim connection (Slice 3, reorder increment).  Reorder is a
+    datagram property -- a byte STREAM never delivers reordered bytes, but a
+    packet network reorders whole datagrams -- so this backs each direction with a
+    `socketpair(AF_UNIX, SOCK_DGRAM)`, whose message boundaries the kernel
+    preserves.  The MITM shuttler blocks for the first datagram, non-blocking-drains
+    every other datagram already in flight (a burst), permutes that batch via a
+    seed-drawn shuffle_fn, then delivers -- so datagrams in flight together get
+    reordered while a lone request/response (batch of 1) is delivered in order and
+    can never deadlock (the shuttler never HOLDS waiting for more).
+
+    Endpoints are the shared SimFdEndpoint used one-datagram-at-a-time: `send(bytes)`
+    is one datagram, `recv(n)` returns one datagram (do NOT use sendall/recv_exact).
+    Oracle: per-datagram conservation is order-INDEPENDENT (the received multiset
+    equals the sent multiset).  shuffle_fn(list) shuffles in place off the
+    scenario's one seeded rng (e.g. rng.shuffle); None = in-order (no reorder)."""
+
+    def __init__(self, shuffle_fn=None):
+        self._shuffle_fn = shuffle_fn
+        self.reset_flag = False
+        a_app, a_mid = socket.socketpair(socket.AF_UNIX, socket.SOCK_DGRAM)
+        b_app, b_mid = socket.socketpair(socket.AF_UNIX, socket.SOCK_DGRAM)
+        for s in (a_app, a_mid, b_app, b_mid):
+            _setup(s)
+        self._socks = [a_app, a_mid, b_app, b_mid]
+        self.conn_id = runloom_c.sim_conn_register(a_app.fileno(), b_app.fileno())
+        self.a = SimFdEndpoint(self, a_app.fileno(), a_mid.fileno())
+        self.b = SimFdEndpoint(self, b_app.fileno(), b_mid.fileno())
+        self._spawn_dgram_shuttle(a_mid, b_mid.fileno(), b_app.fileno(), a_app.fileno())
+        self._spawn_dgram_shuttle(b_mid, a_mid.fileno(), a_app.fileno(), b_app.fileno())
+
+    def _spawn_dgram_shuttle(self, read_sock, write_fd, wake_fd, sender_fd):
+        conn = self
+        conn_id = self.conn_id
+        shuffle_fn = self._shuffle_fn
+        read_fd = read_sock.fileno()
+
+        def shuttle():
+            while True:
+                if conn.reset_flag:
+                    break
+                try:
+                    first = runloom_c.tcp_recv_alloc(read_fd, _DGRAM_MAX)   # blocking, one datagram
+                except OSError:
+                    break
+                if not first:
+                    break
+                runloom_c.sim_deliver_ready(conn_id, sender_fd, WRITE)
+                batch = [first]
+                # non-blocking drain of the datagrams ALREADY in flight (this burst)
+                while len(batch) < _REORDER_WINDOW:
+                    try:
+                        more = read_sock.recv(_DGRAM_MAX)
+                    except (BlockingIOError, InterruptedError):
+                        break
+                    except OSError:
+                        break
+                    if not more:
+                        break
+                    runloom_c.sim_deliver_ready(conn_id, sender_fd, WRITE)
+                    batch.append(more)
+                if shuffle_fn is not None and len(batch) > 1:
+                    shuffle_fn(batch)             # seed-drawn permutation of the burst
+                broke = False
+                for dg in batch:
+                    try:
+                        runloom_c.tcp_send_once(write_fd, dg)   # one datagram (atomic)
+                    except OSError:
+                        broke = True
+                        break
+                    if conn.reset_flag:
+                        broke = True
+                        break
+                    runloom_c.sim_deliver_ready(conn_id, wake_fd, READ)
+                if broke:
+                    break
+
+        runloom_c.fiber(shuttle)
+
+    def reset(self):
+        """Modelled reset (see SimFdConn.reset) -- cancel every fd-parker."""
+        self.reset_flag = True
+        for s in self._socks:
+            try:
+                runloom_c.netpoll_cancel_fd(s.fileno())
+            except Exception:
+                pass
+
+    def close(self):
+        for s in self._socks:
+            try:
+                runloom_c.netpoll_release_if_idle(s.fileno())
+            except Exception:
+                pass
+            try:
+                s.close()
+            except OSError:
+                pass
+
+
+def simfd_dgram_program(seed, timeout=20.0):
+    """Pure-function-of-seed DATAGRAM workload: K client/server pairs over reordering
+    dgram conns; each client sends M distinct datagrams, the server echoes each back.
+    Oracle: per-client MULTISET conservation (order-independent, since reorder is on)
+    + the settle-reap tally (2 shuttlers/conn) + _self_check.  Returns (ok, reason)."""
+    import random
+    runloom_c.sim_reset()
+    rng = random.Random(seed)
+    k = rng.randint(1, 4)
+    m = rng.randint(1, 6)
+    conns = [SimFdDgramConn(shuffle_fn=rng.shuffle) for _ in range(k)]
+    results = {}
+
+    def server(cid):
+        try:
+            got = []
+            for _ in range(m):
+                d = conns[cid].b.recv(_DGRAM_MAX)
+                if not d:
+                    break
+                got.append(bytes(d))
+            for d in got:
+                conns[cid].b.send(d)                 # echo each datagram back
+        except OSError:
+            pass
+
+    def client(cid):
+        try:
+            sent = [bytes([cid, i, (cid * 7 + i) & 0xff]) for i in range(m)]
+            for d in sent:
+                conns[cid].a.send(d)
+            back = []
+            for _ in range(m):
+                d = conns[cid].a.recv(_DGRAM_MAX)
+                if not d:
+                    break
+                back.append(bytes(d))
+            results[cid] = sorted(back)               # multiset (reorder-tolerant)
+        except OSError:
+            pass
+
+    runloom_c.set_deadlock_mode(1)
+    for cid in range(k):
+        runloom_c.fiber(lambda cid=cid: server(cid))
+    for cid in range(k):
+        runloom_c.fiber(lambda cid=cid: client(cid))
+    runloom_c.run()
+    reaps = runloom_c.sim_reap_count()
+    for conn in conns:
+        conn.close()
+
+    if reaps != 2 * k:
+        return False, "REAP reaps={0} expected={1} seed={2}".format(reaps, 2 * k, seed)
+    for cid in range(k):
+        want = sorted(bytes([cid, i, (cid * 7 + i) & 0xff]) for i in range(m))
+        if results.get(cid) != want:
+            return False, ("CONSERVATION client={0} got={1} want={2} seed={3}"
+                           .format(cid, results.get(cid), want, seed))
+    if runloom_c._self_check(0) != 0:
+        return False, "SELF_CHECK seed={0}".format(seed)
+    return True, "ok"
+
+
 # --------------------------------------------------------------------------- #
 #  A self-contained deterministic byte-plane WORKLOAD, for the soak fleet.     #
 # --------------------------------------------------------------------------- #

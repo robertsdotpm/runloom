@@ -614,6 +614,71 @@ class TestSimBytesPartition(unittest.TestCase):
         self.assertEqual(scenario(), scenario())
 
 
+class TestSimBytesDgramReorder(unittest.TestCase):
+    """Increment D: datagram mode -- reorder is well-defined on whole datagrams
+    (SOCK_DGRAM), unlike a byte stream.  The shuttler permutes each in-flight burst."""
+
+    def _run(self, n, shuffle_fn):
+        conn = simnet_fd.SimFdDgramConn(shuffle_fn=shuffle_fn)
+        out = {"got": []}
+
+        def reader():
+            for _ in range(n):
+                d = conn.b.recv(4096)
+                if not d:
+                    break
+                out["got"].append(bytes(d))
+
+        def writer():
+            for i in range(n):
+                conn.a.send(bytes([i]))
+
+        runloom_c.fiber(reader)
+        runloom_c.fiber(writer)
+        runloom_c.run()
+        conn.close()
+        return out["got"]
+
+    def test_dgram_no_shuffle_is_in_order(self):
+        got = self._run(6, None)
+        self.assertEqual(got, [bytes([i]) for i in range(6)],
+                         "no-shuffle dgram delivery reordered: %r" % got)
+
+    def test_dgram_reorder_conserves_multiset(self):
+        import random
+        got = self._run(8, random.Random(7).shuffle)
+        self.assertEqual(sorted(got), [bytes([i]) for i in range(8)],
+                         "datagram reorder lost/duplicated a datagram: %r" % got)
+
+    def test_dgram_reorder_actually_reorders(self):
+        import random
+        # over a handful of seeds at least one burst is delivered out of send order
+        reordered = False
+        for s in range(1, 12):
+            runloom_c.sim_reset()
+            got = self._run(8, random.Random(s).shuffle)
+            self.assertEqual(sorted(got), [bytes([i]) for i in range(8)])
+            if got != [bytes([i]) for i in range(8)]:
+                reordered = True
+        self.assertTrue(reordered, "shuffle_fn never actually reordered a burst")
+
+    def test_dgram_reorder_deterministic(self):
+        import random
+
+        def scenario():
+            runloom_c.sim_reset()
+            return self._run(8, random.Random(99).shuffle)
+
+        self.assertEqual(scenario(), scenario())
+
+    def test_dgram_program_clean_over_seeds(self):
+        for seed in (1, 2, 3, 7, 42, 123):
+            ok1, r1 = simnet_fd.simfd_dgram_program(seed)
+            ok2, r2 = simnet_fd.simfd_dgram_program(seed)
+            self.assertTrue(ok1, "simfd_dgram seed %d not clean: %s" % (seed, r1))
+            self.assertEqual((ok1, r1), (ok2, r2), "simfd_dgram seed %d not deterministic" % seed)
+
+
 class TestSimReapOracle(unittest.TestCase):
     """Increment O: the sim pump tallies settled-deadlock reaps; a workload
     asserts its expected infra-reap total and flags excess as a stranded fiber."""
