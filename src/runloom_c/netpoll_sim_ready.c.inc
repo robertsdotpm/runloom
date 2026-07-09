@@ -130,7 +130,15 @@ int runloom_sim_conn_has_fd(int fd)
  * fds (which the WRITE-readiness increment makes reachable: a send's READ-for-peer
  * and a shuttler's READ-for-reader can share deliver_at/conn_id/dir) dispatch in
  * a deterministic order.  The raw fd is NEVER a key. */
-typedef struct { long long deliver_at, conn_id, seq; int fd, dir; } runloom_sim_ready_ent_t;
+/* plane: 0 = legacy H=1 (rc.run) sim pump, 1 = native mn census.  The two
+ * planes share this ONE global ledger but must NEVER consume each other's
+ * entries -- in the blessed coexistence window (a main-thread rc.run() H=1
+ * sim beside a live armed mn pool) the mn census and the H=1 pump run
+ * concurrently, and an unpartitioned ledger let the census STEAL H=1
+ * deliveries, advance the mn clock to them, and race the shared dispatch
+ * scratch (audit finding: UAF + lost wake + clock cross-write).  Tagged at
+ * deliver_ready from the sender's hub-context; each consumer filters. */
+typedef struct { long long deliver_at, conn_id, seq; int fd, dir, plane; } runloom_sim_ready_ent_t;
 static runloom_sim_ready_ent_t *runloom_sim_ready;
 static long long runloom_sim_ready_n, runloom_sim_ready_cap, runloom_sim_ready_seq;
 
@@ -150,7 +158,11 @@ void runloom_sim_reap_add(long long n)
  * self-heal a dropped entry. */
 void runloom_sim_deliver_ready(long long conn_id, int fd, int dir, long long deliver_at)
 {
+    int plane;
     if (!runloom_sim_enabled()) return;
+    /* Plane = the sender's context: a hub fiber (baton holder) is the mn plane,
+     * a non-hub caller is the legacy H=1 plane.  A TLS read, no lock. */
+    plane = (runloom_mn_current_hub_opaque() != NULL) ? 1 : 0;
     runloom_sim_ledger_ensure_lock();
     RUNLOOM_RLOCK(&runloom_sim_ledger_lock, RUNLOOM_RANK_SIM_LEDGER);
     if (runloom_sim_ready_n >= runloom_sim_ready_cap) {
@@ -171,6 +183,7 @@ void runloom_sim_deliver_ready(long long conn_id, int fd, int dir, long long del
         e->seq = runloom_sim_ready_seq++;
         e->fd = fd;
         e->dir = dir;
+        e->plane = plane;
     }
     RUNLOOM_RUNLOCK(&runloom_sim_ledger_lock, RUNLOOM_RANK_SIM_LEDGER);
 }
@@ -204,6 +217,7 @@ static long long runloom_sim_ready_next_ns(void)
     RUNLOOM_RLOCK(&runloom_sim_ledger_lock, RUNLOOM_RANK_SIM_LEDGER);
     for (i = 0; i < runloom_sim_ready_n; i++) {
         long long d = runloom_sim_ready[i].deliver_at;
+        if (runloom_sim_ready[i].plane != 0) continue;   /* H=1 pump: legacy plane only */
         if (d > nowl && (earliest < 0 || d < earliest)) earliest = d;
     }
     RUNLOOM_RUNLOCK(&runloom_sim_ledger_lock, RUNLOOM_RANK_SIM_LEDGER);
@@ -221,6 +235,7 @@ long long runloom_sim_ready_peek_ns(void)
     runloom_sim_ledger_ensure_lock();
     RUNLOOM_RLOCK(&runloom_sim_ledger_lock, RUNLOOM_RANK_SIM_LEDGER);
     for (i = 0; i < runloom_sim_ready_n; i++) {
+        if (runloom_sim_ready[i].plane != 1) continue;   /* census: mn plane only */
         long long d = runloom_sim_ready[i].deliver_at;
         if (earliest < 0 || d < earliest) earliest = d;
     }
@@ -264,18 +279,29 @@ void runloom_sim_reset(void)
  * no-parker dispatch returns 0 and the entry is dropped -- the socketpair
  * bytes are the belt-and-suspenders wake.  OOM on the scratch keeps every
  * entry for a later pass (fail-safe, no loss). */
-/* Persistent phase-A scratch: reused across dispatches (grow-on-demand, never
- * shrinks; bounded by the ledger's own high-water mark).  Guarded by the
- * ledger lock.  Keeping it persistent makes the steady state ALLOCATION-FREE
- * like the pre-I1 dispatch -- a per-call malloc turned OOM into a new,
- * silent "nothing due" failure mode the H=1 pump could mis-read as settled
- * (adversarial-review finding). */
-static runloom_sim_ready_ent_t *runloom_sim_due_scratch;
-static long long runloom_sim_due_scratch_cap;
+/* Phase-A scratch: THREAD-LOCAL (audit fix).  Was a single shared static
+ * "guarded by the ledger lock" -- but only the FILL is under the lock; the
+ * phase-B/C dispatch loop iterates it with the lock released, so two
+ * concurrent dispatchers (the mn census on a hub + the legacy H=1 pump on the
+ * main thread, in the coexistence window) raced/realloc'd the same buffer
+ * (UAF).  One buffer per thread removes the sharing entirely; plane-
+ * partitioning (below) already makes the two dispatchers temporally
+ * exclusive, so this is belt-and-suspenders against any degenerate
+ * leftover-entry overlap.  Grow-on-demand, never shrinks, per process-
+ * lifetime thread -- bounded. */
+static RUNLOOM_TLS runloom_sim_ready_ent_t *runloom_sim_due_scratch;
+static RUNLOOM_TLS long long runloom_sim_due_scratch_cap;
 
-int runloom_sim_dispatch_due(long long now_ns)
+/* Dispatch every ledger entry with deliver_at <= now_ns AND plane == `plane`,
+ * in the strict total order, via runloom_pump_dispatch_event.  The plane
+ * filter (audit fix) keeps the mn census (plane 1) and the legacy H=1 pump
+ * (plane 0) from consuming each other's deliveries -- entries of the OTHER
+ * plane are left in the ledger for their own consumer.  Because the due set
+ * is no longer a contiguous prefix (a foreign-plane entry can sort before a
+ * due same-plane one), this is a filter-partition walk, not a prefix cut. */
+int runloom_sim_dispatch_due_plane(long long now_ns, int plane)
 {
-    long long i, keep, ndue = 0;
+    long long i, keep = 0, ndue = 0, nsel;
     int woke = 0;
     runloom_sim_ledger_ensure_lock();
     RUNLOOM_RLOCK(&runloom_sim_ledger_lock, RUNLOOM_RANK_SIM_LEDGER);
@@ -285,9 +311,9 @@ int runloom_sim_dispatch_due(long long now_ns)
     }
     qsort(runloom_sim_ready, (size_t)runloom_sim_ready_n,
           sizeof(runloom_sim_ready[0]), runloom_sim_ready_cmp);
-    /* Sorted by deliver_at first, so the due entries are exactly the PREFIX. */
-    while (ndue < runloom_sim_ready_n &&
-           runloom_sim_ready[ndue].deliver_at <= now_ns) ndue++;
+    for (i = 0; i < runloom_sim_ready_n; i++)
+        if (runloom_sim_ready[i].deliver_at <= now_ns &&
+            runloom_sim_ready[i].plane == plane) ndue++;
     if (ndue == 0) {
         RUNLOOM_RUNLOCK(&runloom_sim_ledger_lock, RUNLOOM_RANK_SIM_LEDGER);
         return 0;
@@ -304,14 +330,16 @@ int runloom_sim_dispatch_due(long long now_ns)
         }
     }
     if (ndue <= runloom_sim_due_scratch_cap) {
-        /* Steady state: copy the due prefix out, compact the future suffix,
-         * release the lock, dispatch with no lock held (three-phase). */
-        memcpy(runloom_sim_due_scratch, runloom_sim_ready,
-               (size_t)ndue * sizeof(*runloom_sim_due_scratch));
-        keep = runloom_sim_ready_n - ndue;
-        if (keep > 0)
-            memmove(runloom_sim_ready, runloom_sim_ready + ndue,
-                    (size_t)keep * sizeof(*runloom_sim_ready));
+        /* One-pass partition (sorted order preserved for both halves): due
+         * same-plane entries -> scratch; everything else -> compact in front
+         * (keep <= i always, so the in-place compaction never clobbers). */
+        for (i = 0, nsel = 0; i < runloom_sim_ready_n; i++) {
+            if (runloom_sim_ready[i].deliver_at <= now_ns &&
+                runloom_sim_ready[i].plane == plane)
+                runloom_sim_due_scratch[nsel++] = runloom_sim_ready[i];
+            else
+                runloom_sim_ready[keep++] = runloom_sim_ready[i];
+        }
         runloom_sim_ready_n = keep;
         RUNLOOM_RUNLOCK(&runloom_sim_ledger_lock, RUNLOOM_RANK_SIM_LEDGER);
         for (i = 0; i < ndue; i++) {
@@ -343,17 +371,23 @@ int runloom_sim_dispatch_due(long long now_ns)
     RUNLOOM_RUNLOCK(&runloom_sim_ledger_lock, RUNLOOM_RANK_SIM_LEDGER);
     for (;;) {
         runloom_sim_ready_ent_t head;
+        long long h;
         RUNLOOM_RLOCK(&runloom_sim_ledger_lock, RUNLOOM_RANK_SIM_LEDGER);
-        if (runloom_sim_ready_n == 0 ||
-            runloom_sim_ready[0].deliver_at > now_ns) {
+        /* Find the first DUE, same-plane entry (sorted, so it is the earliest
+         * such).  A foreign-plane or future entry ahead of it is skipped, not
+         * a stop condition. */
+        for (h = 0; h < runloom_sim_ready_n; h++)
+            if (runloom_sim_ready[h].deliver_at <= now_ns &&
+                runloom_sim_ready[h].plane == plane) break;
+        if (h >= runloom_sim_ready_n) {
             RUNLOOM_RUNLOCK(&runloom_sim_ledger_lock, RUNLOOM_RANK_SIM_LEDGER);
             break;
         }
-        head = runloom_sim_ready[0];
+        head = runloom_sim_ready[h];
         runloom_sim_ready_n--;
-        if (runloom_sim_ready_n > 0)
-            memmove(runloom_sim_ready, runloom_sim_ready + 1,
-                    (size_t)runloom_sim_ready_n * sizeof(*runloom_sim_ready));
+        if (h < runloom_sim_ready_n)
+            memmove(runloom_sim_ready + h, runloom_sim_ready + h + 1,
+                    (size_t)(runloom_sim_ready_n - h) * sizeof(*runloom_sim_ready));
         RUNLOOM_RUNLOCK(&runloom_sim_ledger_lock, RUNLOOM_RANK_SIM_LEDGER);
         if (runloom_pump_dispatch_event(head.fd, head.dir, 0)) woke++;
         else runloom_fd_pending_wake_set(head.fd, head.dir);  /* mirror stash */
@@ -361,10 +395,17 @@ int runloom_sim_dispatch_due(long long now_ns)
     return woke;
 }
 
-/* Legacy H=1 sim-pump entry: dispatch against the single-thread logical clock
- * (byte-for-byte the pre-I1 semantics; the pump calls this at quiescence
- * BEFORE advancing the clock). */
+/* Census entry (netpoll.h): dispatch the MN plane (plane 1) at the given
+ * instant.  The mn census is the only caller. */
+int runloom_sim_dispatch_due(long long now_ns)
+{
+    return runloom_sim_dispatch_due_plane(now_ns, 1);
+}
+
+/* Legacy H=1 sim-pump entry: dispatch the LEGACY plane (plane 0) against the
+ * single-thread logical clock (byte-for-byte pre-I1 semantics; the pump calls
+ * this at quiescence BEFORE advancing the clock). */
 static int runloom_sim_dispatch_ready(void)
 {
-    return runloom_sim_dispatch_due(runloom_sched_logical_ns());
+    return runloom_sim_dispatch_due_plane(runloom_sched_logical_ns(), 0);
 }
