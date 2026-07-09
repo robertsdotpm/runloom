@@ -150,6 +150,7 @@ class SimFdConn(object):
         self._loss_fn = loss_fn
         self._socks = []
         self.reset_flag = False
+        self.partition_until = 0.0        # logical seconds; deliveries held until then
         if loss_fn is not None and delay_fn is None:
             # loss needs the MITM to hold+drop bytes; a direct socketpair can't.
             delay_fn = self._delay_fn = (lambda: 0.0)
@@ -214,6 +215,17 @@ class SimFdConn(object):
                 if loss_fn is not None and loss_fn():
                     continue                         # DROP: the chunk never arrives
                 d = delay_fn()
+                if conn.partition_until > 0.0:
+                    # PARTITION: hold this chunk until the (logical) heal time.  The
+                    # hold is a logical sleeper, so it keeps the system unsettled --
+                    # a reader parked through the partition is NOT reaped; time
+                    # compresses to the heal instant.  Chunks recv'd during the
+                    # partition all deliver at/after partition_until, in order (one
+                    # serialized shuttler per direction).
+                    now = runloom_c._logical_ns() / 1e9
+                    gap = conn.partition_until - now
+                    if gap > d:
+                        d = gap
                 if d and d > 0:
                     runloom_c.sched_sleep(d)          # logical-clock delay (a sleeper)
                     if conn.reset_flag:              # woke into a reset -> do not touch fds
@@ -258,6 +270,19 @@ class SimFdConn(object):
                 runloom_c.netpoll_cancel_fd(s.fileno())
             except Exception:
                 pass
+
+    def partition_until_t(self, t_logical_seconds):
+        """Withhold every delivery until logical time `t_logical_seconds` (a
+        partition); the heal is that instant passing.  Deliveries are HELD (not
+        dropped -- compose with loss_fn for a loss-partition) and arrive at/after
+        the heal, in order.  Requires MITM (a shuttler) -- a stale value < now is
+        inert.  Re-call with a later t to extend.  Idempotent to set from a
+        scenario in seeded/program order for determinism."""
+        self.partition_until = t_logical_seconds
+
+    def logical_now(self):
+        """Current logical time in seconds (for computing a partition heal time)."""
+        return runloom_c._logical_ns() / 1e9
 
     def close(self):
         for s in self._socks:

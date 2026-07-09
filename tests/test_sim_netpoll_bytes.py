@@ -499,6 +499,79 @@ class TestSimBytesReset(unittest.TestCase):
         conn.close()          # idempotent, no raise
 
 
+class TestSimBytesPartition(unittest.TestCase):
+    """Increment P: a partition holds deliveries until a logical heal time; the
+    hold is a logical sleeper (time compresses to it, no false reap)."""
+
+    def test_partition_holds_until_heal(self):
+        conn = simnet_fd.SimFdConn(delay_fn=lambda: 0.0)
+        out = {}
+        HEAL = 0.5
+
+        def writer():
+            out["t0"] = conn.logical_now()
+            conn.partition_until_t(out["t0"] + HEAL)     # partition BEFORE sending
+            conn.a.sendall(b"held")
+
+        def reader():
+            out["data"] = conn.b.recv_exact(4)
+            out["arrived"] = conn.logical_now()
+
+        d0 = runloom_c.count_deadlocked()
+        t0 = time.monotonic()
+        runloom_c.fiber(writer)
+        runloom_c.fiber(reader)
+        runloom_c.run()
+        wall = time.monotonic() - t0
+        conn.close()
+        self.assertEqual(out.get("data"), b"held")
+        self.assertEqual(runloom_c.count_deadlocked() - d0, 0,
+                         "reader parked through the partition was falsely reaped")
+        latency = out["arrived"] - out["t0"]
+        self.assertTrue(HEAL - 0.01 <= latency <= HEAL + 0.01,
+                        "delivered at logical +%.4fs, expected ~%.2fs (heal)" % (latency, HEAL))
+        self.assertLess(wall, 2.0, "logical partition not compressed in wall time")
+
+    def test_partition_preserves_order(self):
+        conn = simnet_fd.SimFdConn(delay_fn=lambda: 0.0)
+        out = {}
+
+        def writer():
+            conn.partition_until_t(conn.logical_now() + 0.2)
+            conn.a.sendall(b"abcdef")
+
+        def reader():
+            out["data"] = conn.b.recv_exact(6)
+
+        runloom_c.fiber(writer)
+        runloom_c.fiber(reader)
+        runloom_c.run()
+        conn.close()
+        self.assertEqual(out.get("data"), b"abcdef", "partition broke stream order")
+
+    def test_partition_deterministic(self):
+        def scenario():
+            runloom_c.sim_reset()
+            conn = simnet_fd.SimFdConn(delay_fn=lambda: 0.0)
+            out = {}
+
+            def writer():
+                conn.partition_until_t(conn.logical_now() + 0.3)
+                conn.a.sendall(b"data")
+
+            def reader():
+                out["data"] = conn.b.recv_exact(4)
+                out["at"] = runloom_c._logical_ns()
+
+            runloom_c.fiber(writer)
+            runloom_c.fiber(reader)
+            runloom_c.run()
+            conn.close()
+            return out.get("data"), out.get("at")
+
+        self.assertEqual(scenario(), scenario())
+
+
 class TestSimFdProgram(unittest.TestCase):
     """The self-contained byte-plane workload (simnet_fd.simfd_program) -- a
     pure-function-of-seed unit for the fleet soak, exercising the real netpoll
