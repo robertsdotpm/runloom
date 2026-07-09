@@ -38,6 +38,30 @@ int runloom_mn_init(int n_threads)
     PyThreadState *main_ts;
     PyThreadState *saved;
 
+    /* MN_SIM_DST_PLAN.md I0: RUNLOOM_SIM with the M:N scheduler is NOT yet
+     * natively supported, and the failure mode is SILENT corruption, not an
+     * error: the legacy single-thread sim pump on a hub thread lazily allocates
+     * a WRONG per-thread sched (netpoll_sim.c.inc:46), so wait_fd timeouts
+     * collapse instantly (a 5000ms timeout returns rc=0 at ~3ms) and the
+     * fiber's BlockingIOError is swallowed while mn_run exits 0.  Fail LOUDLY
+     * instead.  RUNLOOM_SIM_MN=1 opts into the native mn-sim bring-up path
+     * (functional from increment I2; until then it only silences this fence
+     * for bring-up work).  Checked before the already-inited early return:
+     * the combo is unsupported no matter when it is asked for. */
+    if (runloom_sim_enabled()) {
+        const char *simmn = getenv("RUNLOOM_SIM_MN");
+        if (simmn == NULL || simmn[0] == '\0' || simmn[0] == '0') {
+            PyErr_SetString(PyExc_RuntimeError,
+                "mn_init: RUNLOOM_SIM (set to any non-empty value; it is the "
+                "sim seed) with the M:N scheduler is not yet supported (the "
+                "legacy single-thread sim pump silently corrupts wait_fd "
+                "timeouts on hub threads); set RUNLOOM_SIM_MN=1 to opt into "
+                "the native mn-sim bring-up path "
+                "(docs/dev/soak/MN_SIM_DST_PLAN.md)");
+            return -1;
+        }
+    }
+
     if (runloom_hubs != NULL) return 0;  /* already inited */
     runloom_introspect_init();   /* registry lock; idempotent (also done in PyInit) */
 #if defined(RUNLOOM_OS_WINDOWS)
