@@ -593,3 +593,22 @@ static long long monotonic_ns(void)
 {
     return runloom_monotonic_ns();
 }
+
+/* The clock netpoll DEADLINES are measured against.  wait_fd's stored
+ * park->deadline_ns and the pump's expiry comparison must both read the SAME
+ * clock or a timeout mis-orders, so this is the single chokepoint for it.
+ *
+ * Today it is EXACTLY monotonic_ns() (the wall clock) -- this wrapper is
+ * behavior-neutral.  It exists so the deterministic-sim backend (Slice 2,
+ * RUNLOOM_SIM) can route the deadline clock through the single-thread logical
+ * clock in ONE place, making wait_fd timeout ordering a function of the seed --
+ * WITHOUT disturbing the maintenance uses of monotonic_ns (the stale-arm probe
+ * tick, the stack-sweep dwell stamp, the churn throttle), which are real
+ * wall-clock by design and stay on monotonic_ns().  The real poller's own
+ * expiry drain (netpoll_pump.c.inc) also stays on monotonic_ns(); the sim pump
+ * supplies its matching logical compare-now itself, so the two clocks never
+ * cross.  See docs/dev/soak/SIM_IO_DST.md. */
+static long long netpoll_deadline_now_ns(void)
+{
+    return monotonic_ns();
+}

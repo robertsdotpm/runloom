@@ -197,7 +197,11 @@ int runloom_netpoll_wait_fd(int fd, int events, long long timeout_ns)
 
     park->fd = fd;
     park->events = events;
-    park->deadline_ns = timeout_ns < 0 ? -1 : monotonic_ns() + timeout_ns;
+    /* Deadline on the netpoll DEADLINE clock (netpoll_deadline_now_ns): the
+     * wall clock today, the single-thread logical clock under RUNLOOM_SIM.  The
+     * pump's expiry compare reads the same clock, so timeouts order correctly on
+     * both.  (The stale-arm probe below keeps monotonic_ns -- real maintenance.) */
+    park->deadline_ns = timeout_ns < 0 ? -1 : netpoll_deadline_now_ns() + timeout_ns;
     park->user_deadline_ns = park->deadline_ns;
     /* probe_pending is 0 from pool acquire.  Stale-arm probe: if this park
      * will (predictably) take register's zero-syscall already-armed skip --
