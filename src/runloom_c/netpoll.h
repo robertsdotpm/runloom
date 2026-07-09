@@ -267,4 +267,13 @@ void runloom_sim_reset(void);
  * stranded fiber (a netpoll-plane lost wake). */
 long long runloom_sim_reap_count(void);
 
+/* MN_SIM_DST_PLAN.md I1 hooks -- the mn census's view of the ready ledger.
+ * peek: earliest deliver_at OVERALL (due or future), -1 if empty; takes NO
+ * clock reading (the census compares against ITS ns clock, never the possibly-
+ * unmirrored global one).  dispatch_due: fire every entry with deliver_at <=
+ * now_ns in the strict total order via runloom_pump_dispatch_event, three-phase
+ * locked (the ledger lock is never held across a wake); returns parkers woken. */
+long long runloom_sim_ready_peek_ns(void);
+int runloom_sim_dispatch_due(long long now_ns);
+
 #endif /* RUNLOOM_NETPOLL_H */

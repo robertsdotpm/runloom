@@ -155,7 +155,10 @@ static PyObject *m_netpoll_backend(PyObject *self, PyObject *unused)
 static PyObject *m_logical_ns(PyObject *self, PyObject *unused)
 {
     (void)self; (void)unused;
-    return PyLong_FromLongLong(runloom_sched_logical_ns());
+    /* Under controlled M:N the census ns clock is the authority (exact ns, no
+     * double round-trip); else the single-thread logical clock as before. */
+    return PyLong_FromLongLong(
+        runloom_mn_logical_ns_or(runloom_sched_logical_ns()));
 }
 
 /* Sim readiness plane (RUNLOOM_SIM, Slice 3): register a socketpair-backed sim
@@ -177,7 +180,11 @@ static PyObject *m_sim_deliver_ready(PyObject *self, PyObject *args)
     int fd, dir;
     (void)self;
     if (!PyArg_ParseTuple(args, "Lii", &conn_id, &fd, &dir)) return NULL;
-    runloom_sim_deliver_ready(conn_id, fd, dir, runloom_sched_logical_ns());
+    /* deliver_at base: the mn census ns clock when controlled mode is armed
+     * (the census dispatches this ledger at H>=2), else the single-thread
+     * logical clock (H=1 legacy, unchanged).  MN_SIM_DST_PLAN.md I1. */
+    runloom_sim_deliver_ready(conn_id, fd, dir,
+        runloom_mn_logical_ns_or(runloom_sched_logical_ns()));
     Py_RETURN_NONE;
 }
 

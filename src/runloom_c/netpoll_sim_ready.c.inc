@@ -42,29 +42,64 @@
  * seeds).  Not needed for the bounded test scenarios here. */
 
 /* Sim connection registry: conn_id (a monotonic counter assigned at register in
- * deterministic connect/accept order) -> its socketpair fd pair.  H=1 / single
- * thread under sim, so no lock.  Grow-on-demand; never shrinks within a run. */
+ * deterministic connect/accept order) -> its socketpair fd pair.  Grow-on-demand;
+ * never shrinks within a run.
+ *
+ * LOCKING (MN_SIM_DST_PLAN.md I1): the registry + the ready ledger below were
+ * "H=1 single thread so no lock" statics; the native mn-sim plane reaches them
+ * from running fibers on ANY hub (m_sim_deliver_ready / m_sim_conn_register)
+ * and from the census dispatcher, so both are guarded by
+ * runloom_sim_ledger_lock (rank RUNLOOM_RANK_SIM_LEDGER=15: taken under
+ * ctrl(5), ALWAYS released before pool(80)/sub(60) -- the three-phase dispatch
+ * below never holds it across a wake).  Self-initialising (the cal_lock
+ * pattern) so it needs no PyInit hook on Windows. */
 typedef struct { int fd_a, fd_b, closed; } runloom_sim_conn_t;
 static runloom_sim_conn_t *runloom_sim_conns;
 static long long runloom_sim_conn_n, runloom_sim_conn_cap;
 
+static runloom_mutex_t runloom_sim_ledger_lock = RUNLOOM_MUTEX_STATIC_INIT;
+static int runloom_sim_ledger_lock_inited = 0;
+
+static void runloom_sim_ledger_ensure_lock(void)
+{
+#if defined(RUNLOOM_OS_WINDOWS)
+    int st = __atomic_load_n(&runloom_sim_ledger_lock_inited, __ATOMIC_ACQUIRE);
+    if (st == 2) return;
+    if (st == 0 &&
+        __atomic_compare_exchange_n(&runloom_sim_ledger_lock_inited, &st, 1, 0,
+                                    __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+        runloom_mutex_init(&runloom_sim_ledger_lock);
+        __atomic_store_n(&runloom_sim_ledger_lock_inited, 2, __ATOMIC_RELEASE);
+        return;
+    }
+    while (__atomic_load_n(&runloom_sim_ledger_lock_inited, __ATOMIC_ACQUIRE) != 2) { }
+#else
+    (void)runloom_sim_ledger_lock_inited;  /* POSIX: static initialiser suffices */
+#endif
+}
+
 long long runloom_sim_conn_register(int fd_a, int fd_b)
 {
+    long long id;
+    runloom_sim_ledger_ensure_lock();
+    RUNLOOM_RLOCK(&runloom_sim_ledger_lock, RUNLOOM_RANK_SIM_LEDGER);
     if (runloom_sim_conn_n >= runloom_sim_conn_cap) {
         long long ncap = runloom_sim_conn_cap ? runloom_sim_conn_cap * 2 : 16;
         runloom_sim_conn_t *nw = (runloom_sim_conn_t *)realloc(
             runloom_sim_conns, (size_t)ncap * sizeof(*nw));
-        if (nw == NULL) return -1;
+        if (nw == NULL) {
+            RUNLOOM_RUNLOCK(&runloom_sim_ledger_lock, RUNLOOM_RANK_SIM_LEDGER);
+            return -1;
+        }
         runloom_sim_conns = nw;
         runloom_sim_conn_cap = ncap;
     }
-    {
-        long long id = runloom_sim_conn_n++;
-        runloom_sim_conns[id].fd_a = fd_a;
-        runloom_sim_conns[id].fd_b = fd_b;
-        runloom_sim_conns[id].closed = 0;
-        return id;
-    }
+    id = runloom_sim_conn_n++;
+    runloom_sim_conns[id].fd_a = fd_a;
+    runloom_sim_conns[id].fd_b = fd_b;
+    runloom_sim_conns[id].closed = 0;
+    RUNLOOM_RUNLOCK(&runloom_sim_ledger_lock, RUNLOOM_RANK_SIM_LEDGER);
+    return id;
 }
 
 /* The ready ledger: pending readiness deliveries.  A plain grow-on-demand vector;
@@ -94,11 +129,16 @@ long long runloom_sim_reap_count(void) { return runloom_sim_reap_total; }
 void runloom_sim_deliver_ready(long long conn_id, int fd, int dir, long long deliver_at)
 {
     if (!runloom_sim_enabled()) return;
+    runloom_sim_ledger_ensure_lock();
+    RUNLOOM_RLOCK(&runloom_sim_ledger_lock, RUNLOOM_RANK_SIM_LEDGER);
     if (runloom_sim_ready_n >= runloom_sim_ready_cap) {
         long long ncap = runloom_sim_ready_cap ? runloom_sim_ready_cap * 2 : 32;
         runloom_sim_ready_ent_t *nw = (runloom_sim_ready_ent_t *)realloc(
             runloom_sim_ready, (size_t)ncap * sizeof(*nw));
-        if (nw == NULL) return;
+        if (nw == NULL) {
+            RUNLOOM_RUNLOCK(&runloom_sim_ledger_lock, RUNLOOM_RANK_SIM_LEDGER);
+            return;
+        }
         runloom_sim_ready = nw;
         runloom_sim_ready_cap = ncap;
     }
@@ -110,6 +150,7 @@ void runloom_sim_deliver_ready(long long conn_id, int fd, int dir, long long del
         e->fd = fd;
         e->dir = dir;
     }
+    RUNLOOM_RUNLOCK(&runloom_sim_ledger_lock, RUNLOOM_RANK_SIM_LEDGER);
 }
 
 /* Total order: earliest deliver_at, then conn_id (seed-order connect index), then
@@ -137,10 +178,31 @@ static long long runloom_sim_ready_next_ns(void)
 {
     long long i, earliest = -1;
     long long nowl = runloom_sched_logical_ns();
+    runloom_sim_ledger_ensure_lock();
+    RUNLOOM_RLOCK(&runloom_sim_ledger_lock, RUNLOOM_RANK_SIM_LEDGER);
     for (i = 0; i < runloom_sim_ready_n; i++) {
         long long d = runloom_sim_ready[i].deliver_at;
         if (d > nowl && (earliest < 0 || d < earliest)) earliest = d;
     }
+    RUNLOOM_RUNLOCK(&runloom_sim_ledger_lock, RUNLOOM_RANK_SIM_LEDGER);
+    return earliest;
+}
+
+/* Public peek (MN_SIM_DST_PLAN.md I1): the earliest deliver_at OVERALL (due or
+ * future), or -1 if the ledger is empty.  Unlike the static next_ns above this
+ * takes NO clock reading -- the mn census computes its advance target against
+ * the ctrl ns clock, and reading the (possibly-unmirrored) global clock here
+ * would be a cross-plane bug (design review fix #8). */
+long long runloom_sim_ready_peek_ns(void)
+{
+    long long i, earliest = -1;
+    runloom_sim_ledger_ensure_lock();
+    RUNLOOM_RLOCK(&runloom_sim_ledger_lock, RUNLOOM_RANK_SIM_LEDGER);
+    for (i = 0; i < runloom_sim_ready_n; i++) {
+        long long d = runloom_sim_ready[i].deliver_at;
+        if (earliest < 0 || d < earliest) earliest = d;
+    }
+    RUNLOOM_RUNLOCK(&runloom_sim_ledger_lock, RUNLOOM_RANK_SIM_LEDGER);
     return earliest;
 }
 
@@ -158,32 +220,112 @@ static long long runloom_sim_ready_next_ns(void)
  * and bounds the otherwise-monotonic conn registry.  Call only between run()s. */
 void runloom_sim_reset(void)
 {
+    runloom_sim_ledger_ensure_lock();
+    RUNLOOM_RLOCK(&runloom_sim_ledger_lock, RUNLOOM_RANK_SIM_LEDGER);
     runloom_sim_ready_n = 0;
     runloom_sim_ready_seq = 0;
     runloom_sim_conn_n = 0;
     runloom_sim_reap_total = 0;
+    RUNLOOM_RUNLOCK(&runloom_sim_ledger_lock, RUNLOOM_RANK_SIM_LEDGER);
     runloom_sched_logical_reset();
+    runloom_mn_logical_reset();     /* all clock planes reset together (I1) */
 }
 
-static int runloom_sim_dispatch_ready(void)
+/* Dispatch every ledger entry with deliver_at <= now_ns, in the strict total
+ * order, through the EXISTING runloom_pump_dispatch_event.  THREE-PHASE lock
+ * discipline (MN_SIM_DST_PLAN.md I1/I2): (A) snapshot due entries into a local
+ * scratch under the ledger lock (future entries compact in place); (B/C) the
+ * wakes run with the ledger lock RELEASED -- dispatch_event takes pool(80) and
+ * the wake takes sub(60)/idle(55), so holding ledger(15) across them would
+ * pin the lock-rank chain the checker flags.  Returns parkers woken.  A
+ * no-parker dispatch returns 0 and the entry is dropped -- the socketpair
+ * bytes are the belt-and-suspenders wake.  OOM on the scratch keeps every
+ * entry for a later pass (fail-safe, no loss). */
+/* Persistent phase-A scratch: reused across dispatches (grow-on-demand, never
+ * shrinks; bounded by the ledger's own high-water mark).  Guarded by the
+ * ledger lock.  Keeping it persistent makes the steady state ALLOCATION-FREE
+ * like the pre-I1 dispatch -- a per-call malloc turned OOM into a new,
+ * silent "nothing due" failure mode the H=1 pump could mis-read as settled
+ * (adversarial-review finding). */
+static runloom_sim_ready_ent_t *runloom_sim_due_scratch;
+static long long runloom_sim_due_scratch_cap;
+
+int runloom_sim_dispatch_due(long long now_ns)
 {
-    long long nowl = runloom_sched_logical_ns();
-    long long i, keep = 0;
+    long long i, keep, ndue = 0;
     int woke = 0;
-    if (runloom_sim_ready_n == 0) return 0;
+    runloom_sim_ledger_ensure_lock();
+    RUNLOOM_RLOCK(&runloom_sim_ledger_lock, RUNLOOM_RANK_SIM_LEDGER);
+    if (runloom_sim_ready_n == 0) {
+        RUNLOOM_RUNLOCK(&runloom_sim_ledger_lock, RUNLOOM_RANK_SIM_LEDGER);
+        return 0;
+    }
     qsort(runloom_sim_ready, (size_t)runloom_sim_ready_n,
           sizeof(runloom_sim_ready[0]), runloom_sim_ready_cmp);
-    for (i = 0; i < runloom_sim_ready_n; i++) {
-        runloom_sim_ready_ent_t *e = &runloom_sim_ready[i];
-        if (e->deliver_at <= nowl) {
-            /* A no-parker dispatch (reader not parked yet, or already consumed the
-             * real bytes directly) returns 0 and the entry is simply dropped --
-             * the socketpair bytes are the belt-and-suspenders wake. */
-            if (runloom_pump_dispatch_event(e->fd, e->dir, 0)) woke++;
-        } else {
-            runloom_sim_ready[keep++] = *e;   /* future delivery -- keep */
+    /* Sorted by deliver_at first, so the due entries are exactly the PREFIX. */
+    while (ndue < runloom_sim_ready_n &&
+           runloom_sim_ready[ndue].deliver_at <= now_ns) ndue++;
+    if (ndue == 0) {
+        RUNLOOM_RUNLOCK(&runloom_sim_ledger_lock, RUNLOOM_RANK_SIM_LEDGER);
+        return 0;
+    }
+    if (ndue > runloom_sim_due_scratch_cap) {
+        long long ncap = runloom_sim_due_scratch_cap ? runloom_sim_due_scratch_cap : 32;
+        runloom_sim_ready_ent_t *nw;
+        while (ncap < ndue) ncap *= 2;
+        nw = (runloom_sim_ready_ent_t *)realloc(
+            runloom_sim_due_scratch, (size_t)ncap * sizeof(*nw));
+        if (nw != NULL) {
+            runloom_sim_due_scratch = nw;
+            runloom_sim_due_scratch_cap = ncap;
         }
     }
-    runloom_sim_ready_n = keep;
+    if (ndue <= runloom_sim_due_scratch_cap) {
+        /* Steady state: copy the due prefix out, compact the future suffix,
+         * release the lock, dispatch with no lock held (three-phase). */
+        memcpy(runloom_sim_due_scratch, runloom_sim_ready,
+               (size_t)ndue * sizeof(*runloom_sim_due_scratch));
+        keep = runloom_sim_ready_n - ndue;
+        if (keep > 0)
+            memmove(runloom_sim_ready, runloom_sim_ready + ndue,
+                    (size_t)keep * sizeof(*runloom_sim_ready));
+        runloom_sim_ready_n = keep;
+        RUNLOOM_RUNLOCK(&runloom_sim_ledger_lock, RUNLOOM_RANK_SIM_LEDGER);
+        for (i = 0; i < ndue; i++) {
+            if (runloom_pump_dispatch_event(runloom_sim_due_scratch[i].fd,
+                                            runloom_sim_due_scratch[i].dir, 0))
+                woke++;
+        }
+        return woke;
+    }
+    /* Scratch-grow OOM: allocation-free degraded path -- pop the due head one
+     * at a time (re-locking between dispatches so the lock is never held
+     * across a wake).  Slower, but NO entry is lost and progress is made, so
+     * OOM can neither strand a delivery nor masquerade as "settled". */
+    RUNLOOM_RUNLOCK(&runloom_sim_ledger_lock, RUNLOOM_RANK_SIM_LEDGER);
+    for (;;) {
+        runloom_sim_ready_ent_t head;
+        RUNLOOM_RLOCK(&runloom_sim_ledger_lock, RUNLOOM_RANK_SIM_LEDGER);
+        if (runloom_sim_ready_n == 0 ||
+            runloom_sim_ready[0].deliver_at > now_ns) {
+            RUNLOOM_RUNLOCK(&runloom_sim_ledger_lock, RUNLOOM_RANK_SIM_LEDGER);
+            break;
+        }
+        head = runloom_sim_ready[0];
+        runloom_sim_ready_n--;
+        if (runloom_sim_ready_n > 0)
+            memmove(runloom_sim_ready, runloom_sim_ready + 1,
+                    (size_t)runloom_sim_ready_n * sizeof(*runloom_sim_ready));
+        RUNLOOM_RUNLOCK(&runloom_sim_ledger_lock, RUNLOOM_RANK_SIM_LEDGER);
+        if (runloom_pump_dispatch_event(head.fd, head.dir, 0)) woke++;
+    }
     return woke;
+}
+
+/* Legacy H=1 sim-pump entry: dispatch against the single-thread logical clock
+ * (byte-for-byte the pre-I1 semantics; the pump calls this at quiescence
+ * BEFORE advancing the clock). */
+static int runloom_sim_dispatch_ready(void)
+{
+    return runloom_sim_dispatch_due(runloom_sched_logical_ns());
 }

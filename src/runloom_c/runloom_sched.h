@@ -921,6 +921,11 @@ long long runloom_sched_logical_ns(void);
 /* Reset the logical clock to 0 (runloom_sim_reset only; between run()s). */
 void runloom_sched_logical_reset(void);
 
+/* Slave the logical clock to an externally-advanced ns instant -- the mn census
+ * advance mirrors through here so every plane reads ONE clock (MN_SIM_DST_PLAN
+ * I1).  Never called on the H=1 legacy path. */
+void runloom_sched_logical_set_ns(long long ns);
+
 /* Sim-only: advance the logical clock to the earliest pending deadline across
  * the scheduler's logical sleep heap and the netpoll deadline heaps
  * (netpoll_min_ns, -1 if none).  Returns the ns advanced to (for the netpoll

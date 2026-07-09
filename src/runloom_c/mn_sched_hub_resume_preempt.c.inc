@@ -88,6 +88,14 @@ typedef struct {
      * each hub's wall-clock poll happens to run.  next_deadline/have_deadline
      * collect the per-round minimum reported by hubs in census_idle. */
     double       logical_now;     /* current logical time (seconds), lock-held */
+    long long    logical_now_ns;  /* ns-native clock authority (MN_SIM_DST_PLAN.md
+                                   * I1): the sim ready ledger is keyed in ns, so
+                                   * the census clock carries exact ns and the
+                                   * double above is a derived MIRROR (ns * 1e-9,
+                                   * one fixed rounding rule) for the sched_sleep /
+                                   * timer double plane.  Written only at the
+                                   * census advance; zeroed at ctrl_init/arm and
+                                   * runloom_mn_logical_reset (sim_reset hook). */
     double       next_deadline;   /* min pending deadline reported this round */
     int          have_deadline;   /* any hub reported a pending timer this round */
     uint64_t     round;       /* current census round; bumped at each release */
@@ -417,7 +425,26 @@ static void runloom_mn_ctrl_try_grant(void)
          * which leaves this c<0 quiescent branch entirely. */
         if (runloom_mn_ctrl.barrier && runloom_mn_ctrl.have_deadline &&
             runloom_foreign_park_inflight() == 0) {
+            /* Clock advance (MN_SIM_DST_PLAN.md I1, corrected by adversarial
+             * review).  The DOUBLE plane advances to the sleeper's EXACT
+             * wake_at double -- identical to pre-I1 and to the H=1 pump
+             * (runloom_sched_drain.c.inc "use the sleeper's EXACT wake_at...
+             * so the compare is exact") -- because the loop-top fire compares
+             * wake_at <= logical_now on the double plane: a mirrored
+             * ns-then-back-to-double value can land up to 0.5ns BELOW the
+             * deadline (true for ~40% of fractional deadlines, e.g.
+             * sched_sleep(1/3)), the sleeper never fires, census_idle
+             * re-reports the same deadline, and the census livelocks
+             * (review-reproduced).  The ns plane is DERIVED from the exact
+             * double under one fixed rule (round-half-up) for the ledger,
+             * whose deliver_at values are stamped from and compared against
+             * this same ns plane -- internally consistent, never fed back
+             * into the double compare.  The global mirror keeps every plane
+             * on one clock (kills the P4b two-clock divergence). */
             runloom_mn_ctrl.logical_now = runloom_mn_ctrl.next_deadline;
+            runloom_mn_ctrl.logical_now_ns =
+                (long long)(runloom_mn_ctrl.next_deadline * 1e9 + 0.5);
+            runloom_sched_logical_set_ns(runloom_mn_ctrl.logical_now_ns);
             runloom_mn_ctrl.have_deadline = 0;
             runloom_mn_ctrl.round++;                    /* re-open: re-report + fire */
             runloom_cond_broadcast(&runloom_mn_ctrl.cond);
@@ -466,6 +493,7 @@ static void runloom_mn_ctrl_init(int n)
     runloom_mn_ctrl.current = -1;
     runloom_mn_ctrl.armed = 0;                  /* mn_run arms after initial placement */
     runloom_mn_ctrl.logical_now = 0.0;
+    runloom_mn_ctrl.logical_now_ns = 0;
     runloom_mn_ctrl.next_deadline = 0.0;
     runloom_mn_ctrl.have_deadline = 0;
     runloom_mn_ctrl.round = 1;                  /* seen[] starts 0 -> nobody checked in */
@@ -569,6 +597,12 @@ static void runloom_mn_ctrl_init(int n)
 static void runloom_mn_ctrl_fini(void)
 {
     if (!runloom_mn_ctrl.enabled) return;
+    /* Un-leak the global mirror (review finding 3): the census advance slaved
+     * the single-thread logical clock to the mn instant; without this reset an
+     * H=1 RUNLOOM_LOGICAL_CLOCK/sim run AFTER mn_fini starts at the mn run's
+     * final clock instead of 0 (reproduced: 9000000 vs fresh-process 4000000),
+     * so multi-plane-per-process replay diverges from fresh-process replay. */
+    runloom_sched_logical_set_ns(0);
     runloom_mn_ctrl.enabled = 0;
     runloom_cond_destroy(&runloom_mn_ctrl.cond);
     runloom_mutex_destroy(&runloom_mn_ctrl.lock);
@@ -754,6 +788,29 @@ static void runloom_mn_ctrl_arm(void)
 {
     if (!runloom_mn_ctrl.enabled || !runloom_mn_ctrl.barrier) return;
     RUNLOOM_RLOCK(&runloom_mn_ctrl.lock, RUNLOOM_RANK_MN_CTRL);
+    /* Per-mn_run clock reset (MN_SIM_DST_PLAN.md I1, corrected by adversarial
+     * review): every FRESH run starts at logical t=0 so back-to-back runs in
+     * one process are bit-exact.  CONDITIONAL on no in-flight deadline:
+     * `armed` stays 1 between runs on a live pool (the supported spawn-again/
+     * run-again pattern), so a gap fiber can sched_sleep + have its hub report
+     * the deadline BEFORE this arm runs -- an unconditional wipe of
+     * have_deadline/next_deadline here has NO re-report path (census_idle
+     * early-returns on seen[hub]==round) and strands the sleeper: the second
+     * mn_run hangs (review-reproduced at ~10 iterations of a jittered gap).
+     * So: never touch have_deadline/next_deadline (they are per-round
+     * recollected and only ever reflect a REAL parked sleeper), and zero the
+     * clock planes only when no deadline is in flight.  A gap sleeper's
+     * wake_at is absolute, so with the clock left alone the quiescent advance
+     * jumps straight to it -- continuity, not reset, is the sound semantic
+     * for a continuation run.  (The gap pattern's wake_at base inherently
+     * depends on user-thread wall timing; determinism claims apply to fresh
+     * runs, documented in MN_SIM_DST_PLAN.md.)  H=1 legacy unaffected: this
+     * function early-returns unless controlled+barrier. */
+    if (!runloom_mn_ctrl.have_deadline) {
+        runloom_mn_ctrl.logical_now = 0.0;
+        runloom_mn_ctrl.logical_now_ns = 0;
+        runloom_sched_logical_set_ns(0);
+    }
     runloom_mn_ctrl.armed = 1;
     runloom_mn_ctrl_try_grant();                 /* in case all hubs already waiting */
     runloom_cond_broadcast(&runloom_mn_ctrl.cond);  /* release the entry gate */
@@ -805,6 +862,32 @@ double runloom_mn_logical_now_or(double fallback)
     v = runloom_mn_ctrl.logical_now;
     RUNLOOM_RUNLOCK(&runloom_mn_ctrl.lock, RUNLOOM_RANK_MN_CTRL);
     return v;
+}
+
+/* ns-native variant (MN_SIM_DST_PLAN.md I1): the EXACT census clock in ns --
+ * no double round-trip, so ledger deliver_at stamps and rc._logical_ns read
+ * the authority.  Returns `fallback` when controlled+barrier mode is off (so
+ * callers stay on the single-thread/wall plane in production). */
+long long runloom_mn_logical_ns_or(long long fallback)
+{
+    long long v;
+    if (!(runloom_mn_ctrl.enabled && runloom_mn_ctrl.barrier)) return fallback;
+    RUNLOOM_RLOCK(&runloom_mn_ctrl.lock, RUNLOOM_RANK_MN_CTRL);
+    v = runloom_mn_ctrl.logical_now_ns;
+    RUNLOOM_RUNLOCK(&runloom_mn_ctrl.lock, RUNLOOM_RANK_MN_CTRL);
+    return v;
+}
+
+/* Zero the mn logical clock -- the runloom_sim_reset() hook (cross-TU: netpoll's
+ * sim plane resets ALL clock planes between in-process runs).  Safe when ctrl
+ * was never initialised: the fields are static-zero and the lock untouched. */
+void runloom_mn_logical_reset(void)
+{
+    if (!(runloom_mn_ctrl.enabled && runloom_mn_ctrl.barrier)) return;
+    RUNLOOM_RLOCK(&runloom_mn_ctrl.lock, RUNLOOM_RANK_MN_CTRL);
+    runloom_mn_ctrl.logical_now = 0.0;
+    runloom_mn_ctrl.logical_now_ns = 0;
+    RUNLOOM_RUNLOCK(&runloom_mn_ctrl.lock, RUNLOOM_RANK_MN_CTRL);
 }
 
 /* Python frame entries on the baton since this segment began (deterministic

@@ -117,6 +117,13 @@ uint64_t runloom_mn_generation_get(void);
  * controlled mode is off, so callers stay wall-clock in production. */
 double runloom_mn_logical_now_or(double fallback);
 
+/* ns-native census clock (MN_SIM_DST_PLAN.md I1): the EXACT ns authority the
+ * sim ready ledger stamps deliver_at from; `fallback` is returned when
+ * controlled mode is off.  runloom_mn_logical_reset zeroes it -- the
+ * runloom_sim_reset cross-TU hook (all clock planes reset between runs). */
+long long runloom_mn_logical_ns_or(long long fallback);
+void runloom_mn_logical_reset(void);
+
 /* Phase C v2 hook.  Called from runloom_sched_yield to give the M:N
  * scheduler a chance to handle the yield in hub context.  Returns
  * 1 if we're inside a hub and the yield was handled (g re-queued on

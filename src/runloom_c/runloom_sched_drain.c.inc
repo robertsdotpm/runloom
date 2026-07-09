@@ -75,6 +75,16 @@ void runloom_sched_logical_reset(void)
     runloom_sched_logical_val = 0.0;
 }
 
+/* Slave the single-thread logical clock to an externally-advanced ns instant --
+ * the mn census advance mirrors through here (MN_SIM_DST_PLAN.md I1) so
+ * rc._logical_ns, the netpoll deadline clock, and a RUNLOOM_LOGICAL_CLOCK
+ * sched_sleep chain all read ONE time plane under controlled M:N.  Never called
+ * on the H=1 legacy path (its pump advances runloom_sched_logical_val itself). */
+void runloom_sched_logical_set_ns(long long ns)
+{
+    runloom_sched_logical_val = (double)ns * 1e-9;
+}
+
 /* Sim clock advance (RUNLOOM_SIM only) -- the authoritative owner of logical-
  * clock advancement while netpoll parkers are outstanding.  Move the logical
  * clock FORWARD to the earliest pending deadline across BOTH the scheduler's

@@ -28,6 +28,12 @@ typedef enum runloom_lock_rank {
     RUNLOOM_RANK_NONE         = 0,
     RUNLOOM_RANK_MN_CTRL      = 5,    /* runloom_mn_ctrl.lock (controlled-replay baton) */
     RUNLOOM_RANK_HUB          = 10,   /* per-hub h->lock (hub main state) */
+    RUNLOOM_RANK_SIM_LEDGER   = 15,   /* runloom_sim_ledger_lock (sim ready ledger +
+                                       * conn registry, MN_SIM_DST_PLAN.md I1).  Taken
+                                       * under ctrl(5) at census dispatch; ALWAYS
+                                       * released before pool(80)/sub(60) via the
+                                       * three-phase dispatch (snapshot under ledger,
+                                       * claim under pool, wake with neither held). */
     RUNLOOM_RANK_GREG         = 20,   /* runloom_greg_lock (global fiber registry) */
     RUNLOOM_RANK_HUB_TSTATE   = 30,   /* runloom_hub_tstate_lock */
     RUNLOOM_RANK_ARENA_INIT   = 35,   /* runloom_arena_init_lock */
