@@ -79,6 +79,14 @@ typedef struct { long long deliver_at, conn_id, seq; int fd, dir; } runloom_sim_
 static runloom_sim_ready_ent_t *runloom_sim_ready;
 static long long runloom_sim_ready_n, runloom_sim_ready_cap, runloom_sim_ready_seq;
 
+/* Settle-reap tally (increment O): the sim pump adds every parker it reaps at a
+ * settled deadlock (netpoll_sim.c.inc) here.  A workload asserts its EXPECTED
+ * infra-reap total (e.g. 2 per MITM conn still parked at end) and flags any excess
+ * as a stranded fiber -- a netpoll-plane lost wake the chan/safe count_deadlocked
+ * census cannot see.  Reset per run() in runloom_sim_reset. */
+static long long runloom_sim_reap_total;
+long long runloom_sim_reap_count(void) { return runloom_sim_reap_total; }
+
 /* Append a readiness delivery for fd/dir, keyed by conn_id, due at logical
  * deliver_at.  No-op when sim is off (the real epoll pump owns readiness then, so
  * the ledger must not accumulate).  Best-effort on OOM: the real socketpair bytes
@@ -153,6 +161,7 @@ void runloom_sim_reset(void)
     runloom_sim_ready_n = 0;
     runloom_sim_ready_seq = 0;
     runloom_sim_conn_n = 0;
+    runloom_sim_reap_total = 0;
     runloom_sched_logical_reset();
 }
 

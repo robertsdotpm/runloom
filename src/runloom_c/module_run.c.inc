@@ -181,13 +181,20 @@ static PyObject *m_sim_deliver_ready(PyObject *self, PyObject *args)
     Py_RETURN_NONE;
 }
 
-/* Reset the sim readiness plane (ledger + conn registry + logical clock) between
- * run()s, so multi-scenario-per-process replay is bit-exact. */
+/* Reset the sim readiness plane (ledger + conn registry + logical clock + reap
+ * tally) between run()s, so multi-scenario-per-process replay is bit-exact. */
 static PyObject *m_sim_reset(PyObject *self, PyObject *unused)
 {
     (void)self; (void)unused;
     runloom_sim_reset();
     Py_RETURN_NONE;
+}
+
+/* Parkers reaped at settled deadlocks by the sim pump this run (increment O). */
+static PyObject *m_sim_reap_count(PyObject *self, PyObject *unused)
+{
+    (void)self; (void)unused;
+    return PyLong_FromLongLong(runloom_sim_reap_count());
 }
 
 /* Test-only: read how many times a Windows netpoll fault-injection site fired

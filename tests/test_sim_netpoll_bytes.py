@@ -572,6 +572,47 @@ class TestSimBytesPartition(unittest.TestCase):
         self.assertEqual(scenario(), scenario())
 
 
+class TestSimReapOracle(unittest.TestCase):
+    """Increment O: the sim pump tallies settled-deadlock reaps; a workload
+    asserts its expected infra-reap total and flags excess as a stranded fiber."""
+
+    def _oneway(self, suppress):
+        runloom_c.sim_reset()
+        conn = simnet_fd.SimFdConn(delay_fn=lambda: 0.0,
+                                   loss_fn=(lambda: True) if suppress else None)
+        out = {}
+
+        def reader():
+            try:
+                out["r"] = conn.b.recv_exact(1)
+            except OSError:
+                out["r"] = "reaped"
+
+        def writer():
+            try:
+                conn.a.sendall(b"x")
+            except OSError:
+                pass
+
+        runloom_c.fiber(reader)
+        runloom_c.fiber(writer)
+        runloom_c.run()
+        conn.close()
+        return runloom_c.sim_reap_count()
+
+    def test_reap_count_teeth(self):
+        base = self._oneway(suppress=False)      # reader completes -> only 2 shuttlers reaped
+        stranded = self._oneway(suppress=True)   # delivery dropped -> reader also reaped
+        self.assertEqual(base, 2, "clean one-way run should reap exactly the 2 shuttlers")
+        self.assertEqual(stranded - base, 1,
+                         "a stranded reader must shift the reap count by exactly +1")
+
+    def test_reap_count_reset(self):
+        self._oneway(suppress=True)
+        runloom_c.sim_reset()
+        self.assertEqual(runloom_c.sim_reap_count(), 0, "sim_reset did not clear the reap tally")
+
+
 class TestSimFdProgram(unittest.TestCase):
     """The self-contained byte-plane workload (simnet_fd.simfd_program) -- a
     pure-function-of-seed unit for the fleet soak, exercising the real netpoll

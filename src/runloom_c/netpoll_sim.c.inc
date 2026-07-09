@@ -90,10 +90,17 @@ static int runloom_netpoll_sim_pump(long long timeout_ns)
      * plane: readiness is produced only by runnable fibers, and there are none.
      * Wake this thread's untimed parkers as unsatisfiable (ready_mask -1 ->
      * wait_fd raises OSError), so run() terminates with a loud error instead of a
-     * hot-spin.  (Feeding this into the count_deadlocked oracle -- which counts
-     * only PARKED_CHAN/PARKED_SAFE today -- by teaching the census PARKED_NETPOLL
-     * is a documented follow-up; termination is the correctness floor.) */
-    if (runloom_netpoll_parked_count() > 0)
-        woke += runloom_netpoll_drain_parked();
+     * hot-spin.  COUNT the reaped parkers into runloom_sim_reap_total so a
+     * workload can assert its expected settle-reap total (infra parkers -- e.g.
+     * MITM shuttlers still parked at end) and flag any EXCESS as a stranded
+     * fiber == a netpoll-plane lost wake (count_deadlocked censuses only
+     * chan/safe, so this is the netpoll-plane analogue).  The count is taken HERE,
+     * at the sim pump's settle site -- NOT inside drain_parked, whose other caller
+     * (m_sched_reset) must not pollute the tally. */
+    if (runloom_netpoll_parked_count() > 0) {
+        int reaped = runloom_netpoll_drain_parked();
+        woke += reaped;
+        runloom_sim_reap_total += reaped;
+    }
     return woke;
 }

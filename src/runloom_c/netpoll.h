@@ -258,8 +258,13 @@ void runloom_netpoll_wake_pump(void *hub_opaque);
  * is a no-op when RUNLOOM_SIM is off (the real epoll pump owns readiness then). */
 long long runloom_sim_conn_register(int fd_a, int fd_b);
 void runloom_sim_deliver_ready(long long conn_id, int fd, int dir, long long deliver_at);
-/* Reset the sim readiness plane (ledger + conn registry + logical clock) between
- * run()s -- for multi-scenario-per-process replay/tests. */
+/* Reset the sim readiness plane (ledger + conn registry + logical clock + reap
+ * tally) between run()s -- for multi-scenario-per-process replay/tests. */
 void runloom_sim_reset(void);
+
+/* Total parkers reaped at settled deadlocks by the sim pump this run (increment
+ * O): a workload asserts its expected infra-reap total and flags excess as a
+ * stranded fiber (a netpoll-plane lost wake). */
+long long runloom_sim_reap_count(void);
 
 #endif /* RUNLOOM_NETPOLL_H */

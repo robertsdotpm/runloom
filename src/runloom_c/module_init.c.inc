@@ -192,7 +192,10 @@ static PyMethodDef module_methods[] = {
      "(READ=1/WRITE=2) at the current logical instant (RUNLOOM_SIM); no-op off."},
     {"sim_reset", m_sim_reset, METH_NOARGS,
      "sim_reset().  Reset the sim readiness plane (ledger + conn registry + "
-     "logical clock) between run()s for bit-exact multi-scenario-per-process replay."},
+     "logical clock + reap tally) between run()s for bit-exact replay."},
+    {"sim_reap_count", m_sim_reap_count, METH_NOARGS,
+     "sim_reap_count() -> int.  Parkers reaped at settled deadlocks by the sim "
+     "pump this run (RUNLOOM_SIM); a workload flags excess as a stranded fiber."},
     {"_fault_count", m_fault_count, METH_O,
      "_fault_count(site): test-only.  Times the Windows netpoll fault-injection "
      "site (WSAPOLL/SELECT/IOCP_WAIT/IOCP_SUBMIT) fired; -1 if unknown/non-Win."},

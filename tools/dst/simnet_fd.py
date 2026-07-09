@@ -343,9 +343,18 @@ def simfd_program(seed, timeout=20.0):
     for cid in range(k):
         runloom_c.fiber(lambda cid=cid: client(cid))
     runloom_c.run()
+    reaps = runloom_c.sim_reap_count()
     for conn in conns:
         conn.close()
 
+    # REAP oracle (increment O): in a clean run the ONLY parkers left at settle are
+    # the 2 shuttlers per MITM conn (all conns here are MITM); every workload fiber
+    # completed.  Any EXCESS is a stranded client/server -- a netpoll-plane lost
+    # wake the chan/safe count_deadlocked census cannot see.  Structural, instant.
+    expected_reaps = 2 * k
+    if reaps != expected_reaps:
+        return False, ("REAP reaps={0} expected={1} (stranded fiber -- netpoll "
+                       "lost wake) seed={2}".format(reaps, expected_reaps, seed))
     for cid in range(k):
         want = sum((cid * 13 + i) & 0xff for i in range(m))
         if results.get(cid) != want:
