@@ -60,6 +60,7 @@ typedef struct {
     unsigned char pass_index;
     unsigned char wait_reason;
     unsigned char wait_reason_hint;
+    unsigned long tstate_owner_tid;   /* runloom_sched.h:436; in [arena,id), scrubbed by part-2 */
 
     /* ---- introspection block: PRESERVED across recycle (NOT cleared) ---- */
     long long id;

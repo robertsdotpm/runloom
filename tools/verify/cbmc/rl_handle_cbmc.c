@@ -1,4 +1,4 @@
-/* SOURCE-ANCHOR: rl_handle_register rl_handle_pin rl_handle_release  (guards this model vs src/runloom_c/rl_handle.c; tools/verify/model_source_drift.py) */
+/* SOURCE-ANCHOR: rl_handle_register rl_handle_pin rl_handle_release rl_handle_deref rl_handle_reclaim  (guards this model vs src/runloom_c/rl_handle.c; tools/verify/model_source_drift.py -- deref+reclaim are transcribed by the proof and must be hashed too, else a reclaim edit escapes the guard) */
 /*
  * rl_handle_cbmc.c -- CBMC proof of the generation-stamped handle PIN protocol
  * (item 3, rl_handle.c), the core that makes the object-reuse/ABA class

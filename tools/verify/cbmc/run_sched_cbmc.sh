@@ -84,6 +84,8 @@ launch want_ok  snap_refown_cbmc.c ""
 launch want_bug snap_refown_cbmc.c "-DBUG_LOAD_FORGETS_FIELD"      "load forgets to release a field -> leak"
 launch want_bug snap_refown_cbmc.c "-DBUG_INCREF_IMMORTAL"        "snap increfs an immortal context -> the no-op decref can't release it -> leak"
 launch want_bug snap_refown_cbmc.c "-DBUG_DELETE_LATER_REFCOUNTED" "the raw delete_later chain is refcounted -> dying-object corruption"
+launch want_bug snap_refown_cbmc.c "-DBUG_LOAD_FORGETS_EXC_OWNER"  "load's non-default path drains all but one exc_owner -> that ref leaks"
+launch want_bug snap_refown_cbmc.c "-DBUG_SNAP_PINS_WITHOUT_CHAIN" "snap pins an exc_owner but leaves exc_info NULL -> load's default path zeroes the count without releasing it -> leak"
 
 # g slab recycle field-clear: every pre-id byte is cleared/overwritten by the
 # two-part scrub (no stale pass_index/arena/wake_state across recycling).  The

@@ -11,30 +11,41 @@
   "runloom_fiber_release": "027d72c0f10990fc"
  },
  "tools/verify/cbmc/g_slab_recycle_cbmc.c": {
-  "runloom_g_slab_alloc": "879b60e592846016",
-  "runloom_g_slab_free": "795efc6fa02527b1"
+  "runloom_g_slab_alloc": "a0a8819471671b7f",
+  "runloom_g_slab_free": "f14de014afcb6732"
  },
  "tools/verify/cbmc/preempt_defer_cbmc.c": {
   "runloom_hub_resume_begin": "cdb57c23c3c63b06",
   "runloom_hub_resume_end": "24d122499852c8a0",
   "runloom_preempt_eval_frame": "7db2c5a36cade726"
  },
+ "tools/verify/cbmc/rl_handle_cbmc.c": {
+  "rl_handle_deref": "8c14701b9b721766",
+  "rl_handle_pin": "9c1eee0f97ae14f4",
+  "rl_handle_reclaim": "643b6412dd45d714",
+  "rl_handle_register": "3404920a66b12728",
+  "rl_handle_release": "bf2b23a61c4cf661"
+ },
  "tools/verify/cbmc/sched_pystate_cbmc.c": {
-  "runloom_pystate_load": "b02d39844ff4e5b2",
-  "runloom_pystate_snap": "a807bd2ee1d02a3f"
+  "runloom_pystate_load": "81a05bf8449f045b",
+  "runloom_pystate_snap": "ddd9f1104bc7ae2f"
  },
  "tools/verify/cbmc/sched_qref_cbmc.c": {
   "runloom_g_try_incref": "98e9b193d7b659be",
-  "runloom_mn_hub_submit": "d906aed66bfd240a"
+  "runloom_mn_hub_submit": "d4aa3eac6ac287a3"
  },
  "tools/verify/cbmc/sched_readyring_cbmc.c": {
   "runloom_ready_grow": "f2e0e608608f6fc4",
   "runloom_sched_ready_pop": "f0b422e415a09480",
   "runloom_sched_ready_push": "cd2685fb5f4efcf6"
  },
+ "tools/verify/cbmc/sched_steal_cbmc.c": {
+  "runloom_cldeque_steal": "0f490f9c3f355330",
+  "runloom_mn_hub_submit": "d4aa3eac6ac287a3"
+ },
  "tools/verify/cbmc/snap_refown_cbmc.c": {
-  "runloom_pystate_load": "b02d39844ff4e5b2",
-  "runloom_pystate_snap": "a807bd2ee1d02a3f",
+  "runloom_pystate_load": "81a05bf8449f045b",
+  "runloom_pystate_snap": "ddd9f1104bc7ae2f",
   "runloom_pystate_snap_clear": "aa975c1d46df5b3e"
  },
  "tools/verify/cbmc/timer_heap_cbmc.c": {
