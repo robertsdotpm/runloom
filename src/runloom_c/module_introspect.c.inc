@@ -219,6 +219,14 @@ static PyObject *m_get_deadlock_mode(PyObject *self, PyObject *unused)
 static PyObject *m_count_deadlocked(PyObject *self, PyObject *unused)
 {
     (void)self; (void)unused;
+    /* NOTE (deferred "PARKED_NETPOLL census" -- attempted + rejected): folding the
+     * sim netpoll reap tally (sim_reap_count) in here to surface byte-plane strands
+     * was UNSOUND -- the sim pump reaps a MITM connection's EXPECTED-idle shuttler
+     * fibers at settle (2 per conn), so count_deadlocked would report a nonzero
+     * "deadlock" count on every CLEAN MITM run.  The census cannot distinguish
+     * infra parkers from workload strands.  The sound netpoll-plane oracle is
+     * increment O's runloom_c.sim_reap_count(), where the WORKLOAD asserts its
+     * expected infra reap total (e.g. 2*K) and flags the excess as a real strand. */
     return PyLong_FromLong(runloom_count_deadlockable_fibers(NULL));
 }
 
