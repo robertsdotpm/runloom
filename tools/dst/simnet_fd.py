@@ -93,6 +93,11 @@ class SimFdEndpoint(object):
             if self._conn.reset_flag:                        # cancel_fd woke us out of a WRITE park
                 raise SimError("ECONNRESET on send")
             raise
+        if self._conn.reset_flag:
+            # RST-discard: reset ran while we were POSITIVELY woken in the same
+            # ledger pass (a co-scheduled resetter unlinked our parker before
+            # cancel_fd could touch it), so re-check on the success path too.
+            raise SimError("ECONNRESET on send")
         if n > 0:
             runloom_c.sim_deliver_ready(self._conn.conn_id, self._wake_fd, READ)
         return n
@@ -115,6 +120,11 @@ class SimFdEndpoint(object):
             if self._conn.reset_flag:                        # cancel_fd woke us out of a READ park
                 raise SimError("ECONNRESET on recv")
             raise
+        if self._conn.reset_flag:
+            # RST-discard: reset ran while we were POSITIVELY woken in the same
+            # ledger pass (parker already unlinked -> cancel_fd was a no-op).  The
+            # buffered bytes MUST be discarded, so re-check here, not just pre-park.
+            raise SimError("ECONNRESET on recv")
         if chunk:
             # drained my end -> freed the peer sender's buffer -> wake a WRITE-parked peer
             runloom_c.sim_deliver_ready(self._conn.conn_id, self._wake_fd, WRITE)
@@ -238,6 +248,9 @@ class SimFdConn(object):
                     except OSError:
                         broke = True
                         break
+                    if conn.reset_flag:             # reset during forward -> stop (parity with recv/send)
+                        broke = True
+                        break
                     if n <= 0:
                         runloom_c.sched_yield()
                         continue
@@ -275,9 +288,16 @@ class SimFdConn(object):
         """Withhold every delivery until logical time `t_logical_seconds` (a
         partition); the heal is that instant passing.  Deliveries are HELD (not
         dropped -- compose with loss_fn for a loss-partition) and arrive at/after
-        the heal, in order.  Requires MITM (a shuttler) -- a stale value < now is
-        inert.  Re-call with a later t to extend.  Idempotent to set from a
-        scenario in seeded/program order for determinism."""
+        the heal, in order.  A stale value < now is inert.
+
+        Requires MITM (a shuttler holds the bytes); raises on a DIRECT conn rather
+        than silently no-op'ing (DIRECT has no shuttler, and unlike loss_fn it
+        cannot coerce to MITM after __init__ has built the topology).  Extending
+        an ACTIVE partition (re-call with a later t) affects only chunks the
+        shuttler recv's AFTER the call -- a chunk already held in its sched_sleep
+        keeps its original heal (the deadline is fixed at sched_sleep time)."""
+        if self._delay_fn is None:
+            raise ValueError("partition_until_t requires a MITM conn (pass delay_fn=)")
         self.partition_until = t_logical_seconds
 
     def logical_now(self):

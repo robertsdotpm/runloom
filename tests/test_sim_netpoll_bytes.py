@@ -487,6 +487,40 @@ class TestSimBytesReset(unittest.TestCase):
 
         self.assertEqual(scenario(), scenario())
 
+    def test_reset_beats_same_pass_positive_dispatch(self):
+        """RST-discard must hold even when the victim reader was POSITIVELY woken
+        (data delivered) in the SAME ledger pass as a co-scheduled resetter -- the
+        reader's parker is already unlinked, so cancel_fd is a no-op and only the
+        wrapper's post-success reset_flag re-check enforces the discard.  (Review
+        find: recv checking the flag only pre-park leaked the buffered bytes.)"""
+        runloom_c.sim_reset()
+        conn0 = simnet_fd.SimFdConn(delay_fn=lambda: 0.0)    # conn_id 0 -> dispatched first
+        conn1 = simnet_fd.SimFdConn(delay_fn=lambda: 0.0)    # conn_id 1
+        out = {}
+
+        def resetter():
+            conn0.b.recv(1)                                  # woken same pass as conn1's reader
+            conn1.reset()                                    # runs first (conn0 sorts first)
+
+        def victim():
+            try:
+                out["got"] = conn1.b.recv(4)
+            except simnet_fd.SimError:
+                out["got"] = "RESET"
+
+        def driver():
+            conn0.a.sendall(b"x")
+            conn1.a.sendall(b"leak")
+
+        runloom_c.fiber(resetter)
+        runloom_c.fiber(victim)
+        runloom_c.fiber(driver)
+        runloom_c.run()
+        conn0.close()
+        conn1.close()
+        self.assertEqual(out.get("got"), "RESET",
+                         "buffered data leaked past reset (positive-dispatch race): %r" % out)
+
     def test_close_after_reset_idempotent(self):
         conn = simnet_fd.SimFdConn(delay_fn=lambda: 0.0)
 
@@ -548,6 +582,14 @@ class TestSimBytesPartition(unittest.TestCase):
         runloom_c.run()
         conn.close()
         self.assertEqual(out.get("data"), b"abcdef", "partition broke stream order")
+
+    def test_partition_on_direct_conn_raises(self):
+        # A partition needs a shuttler to hold bytes; a DIRECT conn has none, so
+        # requesting one must fail loudly rather than silently no-op (review find).
+        conn = simnet_fd.SimFdConn()          # DIRECT (no delay_fn)
+        with self.assertRaises(ValueError):
+            conn.partition_until_t(1.0)
+        conn.close()
 
     def test_partition_deterministic(self):
         def scenario():

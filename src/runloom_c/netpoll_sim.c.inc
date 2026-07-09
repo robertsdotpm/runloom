@@ -97,7 +97,13 @@ static int runloom_netpoll_sim_pump(long long timeout_ns)
      * chan/safe, so this is the netpoll-plane analogue).  The count is taken HERE,
      * at the sim pump's settle site -- NOT inside drain_parked, whose other caller
      * (m_sched_reset) must not pollute the tally. */
-    if (runloom_netpoll_parked_count() > 0) {
+    /* Gate on THIS scheduler's parked count, not the global one: drain_parked (and
+     * so the reap tally) is OWNER-scoped -- it reaps only parkers whose g->owner is
+     * this sched, deliberately leaving NULL-owner hub gs linked.  At H=1 (sim's
+     * scope) the two counts coincide, but matching the scope keeps guard, reap, and
+     * the drain-re-entry decision consistent (review finding). */
+    if (s != NULL &&
+        __atomic_load_n(&s->netpoll_parked, __ATOMIC_ACQUIRE) > 0) {
         int reaped = runloom_netpoll_drain_parked();
         woke += reaped;
         runloom_sim_reap_total += reaped;
