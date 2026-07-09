@@ -918,6 +918,9 @@ int runloom_sim_enabled(void);
 /* The single-thread logical clock in NANOSECONDS (netpoll deadline baseline). */
 long long runloom_sched_logical_ns(void);
 
+/* Reset the logical clock to 0 (runloom_sim_reset only; between run()s). */
+void runloom_sched_logical_reset(void);
+
 /* Sim-only: advance the logical clock to the earliest pending deadline across
  * the scheduler's logical sleep heap and the netpoll deadline heaps
  * (netpoll_min_ns, -1 if none).  Returns the ns advanced to (for the netpoll

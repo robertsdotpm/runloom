@@ -64,6 +64,17 @@ long long runloom_sched_logical_ns(void)
     return (long long)(runloom_sched_logical_val * 1e9);
 }
 
+/* Reset the logical clock to 0.  For runloom_sim_reset(), so an in-process run
+ * starts from a fixed absolute magnitude and its logical-ns readings are bit-exact
+ * across runs (a delta measured at a large accumulated magnitude jitters by the
+ * double->ns quantization; a fresh subprocess per seed already starts at 0, so
+ * this only matters for multi-scenario-per-process replay/tests).  Call only
+ * between run()s, never mid-run. */
+void runloom_sched_logical_reset(void)
+{
+    runloom_sched_logical_val = 0.0;
+}
+
 /* Sim clock advance (RUNLOOM_SIM only) -- the authoritative owner of logical-
  * clock advancement while netpoll parkers are outstanding.  Move the logical
  * clock FORWARD to the earliest pending deadline across BOTH the scheduler's

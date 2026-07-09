@@ -133,6 +133,18 @@ static long long runloom_sim_ready_next_ns(void)
  * front and kept for a later pass.  Returns the number of parkers woken.  Called
  * by the sim pump at quiescence BEFORE the clock advance, so ready I/O at the
  * current instant beats a same-instant wait_fd timeout. */
+/* Reset the sim readiness plane for a fresh run: clear the ledger + the conn
+ * registry and zero the logical clock.  A fleet soak runs each seed in its own
+ * subprocess (fresh statics), so this is for multi-scenario-PER-PROCESS replay /
+ * tests -- it makes back-to-back run()s bit-exact (same absolute clock magnitude)
+ * and bounds the otherwise-monotonic conn registry.  Call only between run()s. */
+void runloom_sim_reset(void)
+{
+    runloom_sim_ready_n = 0;
+    runloom_sim_conn_n = 0;
+    runloom_sched_logical_reset();
+}
+
 static int runloom_sim_dispatch_ready(void)
 {
     long long nowl = runloom_sched_logical_ns();

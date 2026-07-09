@@ -190,6 +190,9 @@ static PyMethodDef module_methods[] = {
     {"sim_deliver_ready", m_sim_deliver_ready, METH_VARARGS,
      "sim_deliver_ready(conn_id, fd, dir).  Wake a fiber parked on fd for dir "
      "(READ=1/WRITE=2) at the current logical instant (RUNLOOM_SIM); no-op off."},
+    {"sim_reset", m_sim_reset, METH_NOARGS,
+     "sim_reset().  Reset the sim readiness plane (ledger + conn registry + "
+     "logical clock) between run()s for bit-exact multi-scenario-per-process replay."},
     {"_fault_count", m_fault_count, METH_O,
      "_fault_count(site): test-only.  Times the Windows netpoll fault-injection "
      "site (WSAPOLL/SELECT/IOCP_WAIT/IOCP_SUBMIT) fired; -1 if unknown/non-Win."},

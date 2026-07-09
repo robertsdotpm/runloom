@@ -181,6 +181,15 @@ static PyObject *m_sim_deliver_ready(PyObject *self, PyObject *args)
     Py_RETURN_NONE;
 }
 
+/* Reset the sim readiness plane (ledger + conn registry + logical clock) between
+ * run()s, so multi-scenario-per-process replay is bit-exact. */
+static PyObject *m_sim_reset(PyObject *self, PyObject *unused)
+{
+    (void)self; (void)unused;
+    runloom_sim_reset();
+    Py_RETURN_NONE;
+}
+
 /* Test-only: read how many times a Windows netpoll fault-injection site fired
  * (see netpoll.c).  Returns -1 for an unknown site / non-Windows build. */
 static PyObject *m_fault_count(PyObject *self, PyObject *arg)

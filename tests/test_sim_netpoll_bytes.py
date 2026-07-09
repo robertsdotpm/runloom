@@ -129,5 +129,93 @@ class TestSimBytes(unittest.TestCase):
                         "expected reap (OSError) or empty, got %r" % out)
 
 
+class TestSimBytesMITM(unittest.TestCase):
+    """Increment 2: the MITM model goroutine holds bytes for a seed-drawn delay
+    on the logical clock before delivery."""
+
+    def test_delayed_delivery_lands_at_logical_T(self):
+        """A message delayed by D logical seconds wakes the reader exactly D
+        later on the LOGICAL clock -- the delivery-at-T property, and instant in
+        WALL time (the model's sched_sleep is logical-compressed)."""
+        D = 0.5
+        conn = simnet_fd.SimFdConn(delay_fn=lambda: D)
+        out = {}
+
+        def reader():
+            out["t0"] = runloom_c._logical_ns()
+            out["data"] = conn.b.recv_exact(4)       # parks; woken only after D
+            out["t1"] = runloom_c._logical_ns()
+
+        def writer():
+            conn.a.sendall(b"pong")
+
+        d0 = runloom_c.count_deadlocked()
+        runloom_c.fiber(reader)                       # parks first
+        runloom_c.fiber(writer)
+        t_wall = time.monotonic()
+        runloom_c.run()
+        wall = time.monotonic() - t_wall
+        conn.close()
+
+        self.assertEqual(out.get("data"), b"pong")
+        self.assertEqual(runloom_c.count_deadlocked() - d0, 0,
+                         "shuttlers inflated the deadlock census")
+        delta = out["t1"] - out["t0"]
+        self.assertTrue(0.49e9 <= delta <= 0.51e9,
+                        "delivery logical latency was %d ns, expected ~0.5e9 "
+                        "(the model delay was not honoured on the logical clock)" % delta)
+        self.assertLess(wall, 2.0, "logical delay was not compressed in wall time")
+
+    def test_mitm_stream_order_preserved(self):
+        """Several messages in one direction, each independently delayed, arrive
+        in SEND order (one shuttler per direction serializes the stream)."""
+        conn = simnet_fd.SimFdConn(delay_fn=lambda: 0.01)
+        got = {}
+
+        def reader():
+            got["data"] = conn.b.recv_exact(6)
+
+        def writer():
+            for c in b"abcdef":
+                conn.a.sendall(bytes([c]))
+
+        runloom_c.fiber(reader)
+        runloom_c.fiber(writer)
+        runloom_c.run()
+        conn.close()
+        self.assertEqual(got.get("data"), b"abcdef",
+                         "MITM did not preserve stream order")
+
+    def test_mitm_deterministic(self):
+        """Same seeded delay draws -> identical outcome across runs."""
+        import random
+
+        def run_scenario():
+            runloom_c.sim_reset()                    # fresh logical clock -> bit-exact across runs
+            rng = random.Random(1234)
+            conn = simnet_fd.SimFdConn(delay_fn=lambda: rng.random() * 0.05)
+            out = {}
+
+            def reader():
+                out["data"] = conn.b.recv_exact(8)
+                out["t"] = runloom_c._logical_ns()
+
+            def writer():
+                for c in b"deadbeef":
+                    conn.a.sendall(bytes([c]))
+
+            runloom_c.fiber(reader)
+            runloom_c.fiber(writer)
+            runloom_c.run()
+            conn.close()
+            return out["data"], out["t"]              # absolute logical time (clock reset each run)
+
+        a = run_scenario()
+        b = run_scenario()
+        self.assertEqual(a[0], b"deadbeef")
+        self.assertEqual(a, b, "MITM delayed delivery not bit-exact reproducible: "
+                               "%r vs %r" % (a, b))
+
+
 if __name__ == "__main__":
     unittest.main()
