@@ -217,5 +217,19 @@ class TestSimBytesMITM(unittest.TestCase):
                                "%r vs %r" % (a, b))
 
 
+class TestSimFdProgram(unittest.TestCase):
+    """The self-contained byte-plane workload (simnet_fd.simfd_program) -- a
+    pure-function-of-seed unit for the fleet soak, exercising the real netpoll
+    park/commit/wake path deterministically."""
+
+    def test_clean_and_deterministic_over_seeds(self):
+        for seed in (1, 2, 3, 7, 11, 42, 99, 123, 777):
+            ok1, r1 = simnet_fd.simfd_program(seed)
+            ok2, r2 = simnet_fd.simfd_program(seed)
+            self.assertTrue(ok1, "simfd seed %d not clean: %s" % (seed, r1))
+            self.assertEqual((ok1, r1), (ok2, r2),
+                             "simfd seed %d not deterministic" % seed)
+
+
 if __name__ == "__main__":
     unittest.main()

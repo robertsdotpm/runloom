@@ -35,6 +35,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "src"))
 os.environ.setdefault("PYTHON_GIL", "0")
+os.environ.setdefault("RUNLOOM_SIM", "1")               # this IS a sim module
 os.environ.setdefault("RUNLOOM_LOGICAL_CLOCK", "1")     # sim shares one clock
 import runloom_c
 
@@ -165,3 +166,64 @@ class SimFdConn(object):
                 s.close()
             except OSError:
                 pass
+
+
+# --------------------------------------------------------------------------- #
+#  A self-contained deterministic byte-plane WORKLOAD, for the soak fleet.     #
+# --------------------------------------------------------------------------- #
+def simfd_program(seed, timeout=20.0):
+    """A pure-function-of-seed socketpair workload: K client/server pairs over MITM
+    sim connections (seed-drawn logical delay); each client sends M token bytes,
+    the server echoes them, every client must get its own bytes back.
+
+    Unlike simnet.py's sim_program (Chan-based -- protocol logic only), this runs
+    over REAL socketpairs + wait_fd, so it exercises the C park/commit FSM +
+    deadline heap + wake routing DETERMINISTICALLY -- genuinely different coverage.
+    Oracle: exact per-client CONSERVATION (a lost/mis-delivered byte, or a reader
+    reaped as a settled deadlock -> a missing/wrong result), plus _self_check.
+    (count_deadlocked censuses only chan/safe parks, so a netpoll-plane deadlock
+    surfaces as a CONSERVATION miss here until the PARKED_NETPOLL census lands.)
+    Returns (ok, reason)."""
+    import random
+    runloom_c.sim_reset()                                # fresh clock/ledger/registry
+    rng = random.Random(seed)
+    k = rng.randint(1, 4)
+    m = rng.randint(1, 6)
+    delay_max = rng.random() * 0.02
+    conns = [SimFdConn(delay_fn=lambda: rng.random() * delay_max) for _ in range(k)]
+    results = {}
+
+    def server(cid):
+        try:
+            got = conns[cid].b.recv_exact(m)
+            conns[cid].b.sendall(got)                    # echo this client's bytes
+        except OSError:
+            pass                                         # reaped -> client sees a miss
+
+    def client(cid):
+        try:
+            payload = bytes([(cid * 13 + i) & 0xff for i in range(m)])
+            conns[cid].a.sendall(payload)
+            back = conns[cid].a.recv_exact(m)
+            results[cid] = sum(back)
+        except OSError:
+            pass
+
+    runloom_c.set_deadlock_mode(1)
+    for cid in range(k):
+        runloom_c.fiber(lambda cid=cid: server(cid))
+    for cid in range(k):
+        runloom_c.fiber(lambda cid=cid: client(cid))
+    runloom_c.run()
+    for conn in conns:
+        conn.close()
+
+    for cid in range(k):
+        want = sum((cid * 13 + i) & 0xff for i in range(m))
+        if results.get(cid) != want:
+            return False, ("CONSERVATION client={0} got={1} want={2} seed={3}"
+                           .format(cid, results.get(cid), want, seed))
+    if runloom_c._self_check(0) != 0:
+        return False, "SELF_CHECK seed={0}".format(seed)
+    return True, "ok"
+
