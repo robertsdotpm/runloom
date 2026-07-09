@@ -100,11 +100,21 @@ class SimFdConn(object):
     delay_fn: None -> DIRECT (zero-delay).  A callable returning a delay in
     seconds -> MITM: each message is held for delay_fn() logical seconds by a
     shuttler fiber before delivery.  delay_fn is called once per message per
-    direction; draw it off the scenario's ONE seeded rng for determinism."""
+    direction; draw it off the scenario's ONE seeded rng for determinism.
 
-    def __init__(self, delay_fn=None):
+    loss_fn: optional callable returning True to DROP a chunk (a modelled loss --
+    protocol logic, like a lost segment with no retransmit; the bytes never
+    arrive).  Requires MITM (a delay_fn).  Disruptive: it breaks byte-conservation
+    by design, so a conservation workload leaves it off (mirrors sim_program's
+    P_LOSS=0)."""
+
+    def __init__(self, delay_fn=None, loss_fn=None):
         self._delay_fn = delay_fn
+        self._loss_fn = loss_fn
         self._socks = []
+        if loss_fn is not None and delay_fn is None:
+            # loss needs the MITM to hold+drop bytes; a direct socketpair can't.
+            delay_fn = self._delay_fn = (lambda: 0.0)
         if delay_fn is None:
             a_app, b_app = socket.socketpair()
             _setup(a_app)
@@ -132,6 +142,7 @@ class SimFdConn(object):
     def _spawn_shuttle(self, read_fd, write_fd, wake_fd):
         conn_id = self.conn_id
         delay_fn = self._delay_fn
+        loss_fn = self._loss_fn
 
         def shuttle():
             # Loops until EOF (peer app closed) or the settled-deadlock reap
@@ -145,6 +156,8 @@ class SimFdConn(object):
                     break
                 if not chunk:
                     break
+                if loss_fn is not None and loss_fn():
+                    continue                         # DROP: the chunk never arrives
                 d = delay_fn()
                 if d and d > 0:
                     runloom_c.sched_sleep(d)          # logical-clock delay (a sleeper)

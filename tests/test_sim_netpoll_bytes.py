@@ -217,6 +217,71 @@ class TestSimBytesMITM(unittest.TestCase):
                                "%r vs %r" % (a, b))
 
 
+class TestSimBytesLoss(unittest.TestCase):
+    """Increment 3 (faults): the model can DROP chunks -- a modelled loss (bytes
+    never arrive, no retransmit).  Disruptive to conservation by design, so it is
+    an opt-in model behaviour, tested in isolation."""
+
+    def test_full_loss_reader_terminates(self):
+        """100% loss: the dropped bytes never arrive, the reader is reaped, run()
+        terminates rather than hanging."""
+        conn = simnet_fd.SimFdConn(delay_fn=lambda: 0.0, loss_fn=lambda: True)
+        out = {}
+
+        def reader():
+            try:
+                out["data"] = conn.b.recv_exact(3)
+            except OSError:
+                out["err"] = True
+
+        def writer():
+            conn.a.sendall(b"xyz")
+
+        t0 = time.monotonic()
+        runloom_c.fiber(reader)
+        runloom_c.fiber(writer)
+        runloom_c.run()
+        wall = time.monotonic() - t0
+        conn.close()
+        self.assertLess(wall, 2.0, "lossy connection hung instead of terminating")
+        self.assertTrue(out.get("err") or out.get("data", b"") == b"",
+                        "dropped bytes should not arrive, got %r" % out)
+
+    def test_seeded_loss_is_deterministic(self):
+        import random
+
+        def scenario():
+            runloom_c.sim_reset()
+            rng = random.Random(555)
+            conn = simnet_fd.SimFdConn(delay_fn=lambda: 0.0,
+                                       loss_fn=lambda: rng.random() < 0.5)
+            got = []
+
+            def reader():
+                try:
+                    while True:
+                        c = conn.b.recv(16)
+                        if not c:
+                            break
+                        got.append(bytes(c))
+                except OSError:
+                    pass
+
+            def writer():
+                for i in range(6):
+                    conn.a.sendall(bytes([65 + i]))
+
+            runloom_c.fiber(reader)
+            runloom_c.fiber(writer)
+            runloom_c.run()
+            conn.close()
+            return b"".join(got)
+
+        a = scenario()
+        b = scenario()
+        self.assertEqual(a, b, "lossy delivery not deterministic: %r vs %r" % (a, b))
+
+
 class TestSimFdProgram(unittest.TestCase):
     """The self-contained byte-plane workload (simnet_fd.simfd_program) -- a
     pure-function-of-seed unit for the fleet soak, exercising the real netpoll
