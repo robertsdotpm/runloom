@@ -47,7 +47,7 @@ fibers.
   `socket.recv`, `time.sleep`, `select.select`, `ssl`, `subprocess`,
   `threading.Event`, file I/O, and DNS all yield cooperatively.  See
   [Monkey-patching](monkey-patching.md).
-- **Multi-core (3.13t).**  An M:N work-stealing scheduler distributes
+- **Multi-core (3.14t).**  An M:N work-stealing scheduler distributes
   fibers across N OS threads when the GIL is disabled.  See
   [Parallelism](parallelism.md).
 

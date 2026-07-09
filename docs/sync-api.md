@@ -10,7 +10,7 @@ cooperative concurrency that *looks* like threaded code.
 **Performance:** Call `runloom.run(n, main)` to drive the sync API:
   - `runloom.run(1, main)` -- single-threaded, one OS thread (good for pure I/O)
   - `runloom.run(8, main)` -- M:N scheduler on 8 hub threads, real multi-core
-    parallelism on free-threaded 3.13t+GIL-off (default n = CPU count)
+    parallelism on free-threaded 3.14t+GIL-off (default n = CPU count)
 
 ## Hello world
 

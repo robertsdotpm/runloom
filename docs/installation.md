@@ -12,7 +12,7 @@ will be plain `pip install runloom`; until then build from source.
   doesn't cover.
 - A C compiler.  Anything reasonably modern works: GCC 4.7+, Clang
   3.5+, MSVC 19.20+ (VS 2019 16.0+), MinGW-w64.
-- Free-threaded 3.13t is fully supported and adds the M:N
+- Free-threaded 3.14t (and 3.13t) are fully supported and add the M:N
   work-stealing scheduler + time-sliced preemption features.
 
 ## Editable install
@@ -23,10 +23,10 @@ cd runloom
 pip install -e .
 ```
 
-On free-threaded 3.13t:
+On free-threaded 3.14t:
 
 ```bash
-~/.pyenv/versions/3.14.4t/bin/python3.13t -m pip install -e .
+~/.pyenv/versions/3.14.4t/bin/python3.14 -m pip install -e .
 ```
 
 ## No compiler? Bootstrap helpers

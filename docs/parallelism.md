@@ -8,7 +8,7 @@ switches are 80 ns of asm.
 But if you have CPU-bound fibers that you want to spread across
 multiple cores, you need OS threads.  runloom's **M:N scheduler** (M
 fibers, N hub threads, work-stealing) gives you that on
-free-threaded Python 3.13t.
+free-threaded Python 3.14t (or 3.13t).
 
 ## When to use M:N
 
