@@ -387,8 +387,19 @@ static int runloom_fd_pending_wake_consume(int fd, int events)
                 pr = poll(&pfd, 1, 0);
             } while (pr < 0 && errno == EINTR);
             if (pr <= 0) {
-                /* Not ready (the stash was stale) or a poll error -> park.  A
-                 * genuine readiness is still LEVEL-armed + linked and re-fires. */
+                /* Not ready (the stash was stale) or a poll error -> park.
+                 * Soundness has TWO regimes: (1) real epoll pump -- a genuine
+                 * readiness is still LEVEL-armed + linked and re-fires on the
+                 * next epoll_wait.  (2) native mn-sim -- the epoll pump is
+                 * gated OFF (netpoll_pump.c.inc), so nothing re-fires; the
+                 * discard is safe ONLY because poll() on the REAL socketpair is
+                 * authoritative ground truth here: every runloom_sim_deliver_
+                 * ready is emitted AFTER its byte-write/drain (tools/dst/
+                 * simnet_fd.py), so poll()==not-ready means there is genuinely
+                 * nothing to deliver and the still-linked parker is served by
+                 * the NEXT census dispatch.  A future sim source that stamped a
+                 * readiness NOT physically present on the fd would break this
+                 * (stash discarded, no re-fire -> permanent lost wake). */
                 return 0;
             }
             {
