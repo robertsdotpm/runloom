@@ -146,6 +146,43 @@ int runloom_netpoll_wait_fd(int fd, int events, long long timeout_ns)
      * POSIX select backend additionally cannot represent an fd >= FD_SETSIZE in
      * an fd_set, so reject those too (epoll/kqueue handle high fds fine). */
     if (fd < 0) { errno = EBADF; return -1; }
+
+    /* Native mn-sim gates (MN_SIM_DST_PLAN.md I2, gate [11]).  With the pump
+     * no-op'd under the armed controlled scheduler, the census-dispatched sim
+     * ledger is the ONLY wake source, so: (a) an fd outside the sim conn
+     * registry would park forever and be misread as a workload deadlock --
+     * reject it loudly (this turns probe P4's silent timeout-collapse into an
+     * error); (b) a FINITE timeout has no firing mechanism until increment I4
+     * folds the netpoll deadline heap into the census -- reject it loudly
+     * rather than ship a silent parked-forever wedge (temporary guard,
+     * retired by I4).  One-shot stderr notes so a fuzz sweep is not spammed. */
+    if (runloom_sim_enabled() && runloom_mn_ctrl_armed() &&
+        runloom_mn_current_hub_opaque() != NULL) {
+        /* Hub-context keyed (like the pump gate): a main-thread rc.run()
+         * fiber coexisting with an idle armed pool stays on the legacy H=1
+         * sim plane, whose pump wakes it -- only HUB parkers depend on the
+         * census-dispatched ledger. */
+        if (!runloom_sim_conn_has_fd(fd)) {
+            static int warned_unreg = 0;
+            if (!__atomic_exchange_n(&warned_unreg, 1, __ATOMIC_RELAXED)) {
+                fprintf(stderr, "runloom mn-sim: wait_fd(%d) on an fd not in "
+                        "the sim conn registry (rc.sim_conn_register) -- real "
+                        "fds have no wake source under RUNLOOM_SIM_MN\n", fd);
+            }
+            errno = EPERM;
+            return -1;
+        }
+        if (timeout_ns >= 0) {
+            static int warned_timeout = 0;
+            if (!__atomic_exchange_n(&warned_timeout, 1, __ATOMIC_RELAXED)) {
+                fprintf(stderr, "runloom mn-sim: wait_fd with a finite timeout "
+                        "is not yet supported under RUNLOOM_SIM_MN (lands in "
+                        "MN_SIM_DST_PLAN.md I4)\n");
+            }
+            errno = EINVAL;
+            return -1;
+        }
+    }
 #if !defined(RUNLOOM_HAVE_EPOLL) && !defined(RUNLOOM_HAVE_KQUEUE) && \
     !defined(RUNLOOM_OS_WINDOWS)
     if (fd >= FD_SETSIZE) { errno = EINVAL; return -1; }

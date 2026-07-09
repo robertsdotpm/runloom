@@ -105,6 +105,36 @@ int runloom_netpoll_pump(long long timeout_ns)
      * cross-TU gate call is free of the recv-after-recv hot path.  Off by default
      * -> production takes the real path exactly as before. */
     if (runloom_sim_enabled()) {
+        /* Native mn-sim (MN_SIM_DST_PLAN.md I2, gate [1]): under the armed
+         * controlled scheduler, hubs NEVER pump -- readiness flows solely from
+         * the census dispatch of the ready ledger.  Routing a hub into the
+         * single-thread sim pump below would lazily allocate a WRONG
+         * per-thread sched (the probe-P4 silent corruption).  Not a bare
+         * return 0: the hub_main:~1085 pump call IS the netpoll-branch hub's
+         * bounded idle wait, so returning instantly would busy-spin H hubs on
+         * the ctrl mutex; nap detached (STW-safe) like the bare-nanosleep
+         * idle path, capped at 500us.  Interior pump(0) calls stay instant.
+         * Wall-clock only -- ordering is decided at the census, so this wait
+         * stretches nothing but latency.  (kqueue note, mirror-in-step: the
+         * wake_pump self-pipe is written but never drained under this gate; a
+         * pipe fills at 64KB unlike a Linux eventfd -- Linux-first scope.) */
+        /* Keyed on HUB CONTEXT, not just global armed state: `armed` persists
+         * between runs on a live pool, so keying the gate on ctrl_armed alone
+         * would steal the pump from a MAIN-THREAD rc.run() H=1-sim scenario
+         * coexisting with an idle mn pool (its clock would never advance).
+         * The corruption this gate prevents is specifically a HUB thread
+         * falling into the single-thread sim pump (wrong per-thread sched);
+         * a non-hub caller is exactly the legacy plane and keeps it. */
+        if (runloom_mn_ctrl_armed() && runloom_mn_current_hub_opaque() != NULL) {
+            if (timeout_ns != 0) {
+                long long nap_ns = (timeout_ns < 0 || timeout_ns > 500000LL)
+                                   ? 500000LL : timeout_ns;
+                PyThreadState *saved = PyEval_SaveThread();
+                runloom_sleep_ns(nap_ns);
+                PyEval_RestoreThread(saved);
+            }
+            return 0;
+        }
         return runloom_netpoll_sim_pump(timeout_ns);
     }
 

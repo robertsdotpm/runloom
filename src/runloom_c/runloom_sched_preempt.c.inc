@@ -72,6 +72,33 @@ int runloom_preempt_init(long quantum_us)
         PyErr_SetString(PyExc_ValueError, "quantum_us must be > 0");
         return -1;
     }
+    /* Native mn-sim (MN_SIM_DST_PLAN.md I2, gate [8]): the wall-clock
+     * time-slicer posts pending-call yields on an OS-timer schedule -- a
+     * nondeterministic preemption source that would fuzz the seeded baton
+     * schedule.  Refuse (no-op, log once) when the mn-sim path is opted in;
+     * the deterministic frame-count preempt (RUNLOOM_MN_PREEMPT_FRAMES) is
+     * the only preemption under the barrier.  Scoped to sim && RUNLOOM_SIM_MN
+     * so the frozen H=1 sim plane and all non-sim users are untouched.
+     * ORDER MATTERS (review): check the SIM_MN flag (plain getenv, no state)
+     * BEFORE runloom_sim_enabled() -- the latter LATCHES its env read, so
+     * calling it here on every non-sim preempt_init would freeze sim off for
+     * a process that sets the env later in-process.  The
+     * slicer-already-running ordering hole is closed on the other side:
+     * mn_init's fence refuses a native mn-sim run while the slicer is live. */
+    {
+        const char *simmn = getenv("RUNLOOM_SIM_MN");
+        if (simmn != NULL && simmn[0] != '\0' && simmn[0] != '0' &&
+            runloom_sim_enabled()) {
+            static int warned = 0;
+            if (!warned) {
+                warned = 1;
+                fprintf(stderr, "runloom mn-sim: preempt_init is a no-op under "
+                        "RUNLOOM_SIM_MN (wall-clock preemption is "
+                        "nondeterministic; the frame-count preempt rules)\n");
+            }
+            return 0;
+        }
+    }
     runloom_preempt_quantum_us = quantum_us;
     if (runloom_preempt_running) {
         /* Already running -- the timer loop reloads quantum on its
@@ -86,6 +113,14 @@ int runloom_preempt_init(long quantum_us)
         return -1;
     }
     return 0;
+}
+
+/* Is the time-slicer thread running?  mn_init's native mn-sim fence reads
+ * this: a slicer started BEFORE the sim env was set would keep posting
+ * nondeterministic yields into a seeded run (I2 review). */
+int runloom_preempt_active(void)
+{
+    return runloom_preempt_running;
 }
 
 void runloom_preempt_fini(void)

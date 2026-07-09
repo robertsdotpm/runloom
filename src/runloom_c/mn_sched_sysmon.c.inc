@@ -114,7 +114,13 @@ static RUNLOOM_THREAD_RET runloom_sysmon_main(void *arg)
                  * pending call there only yields a g that is anyway about to
                  * yield, which is harmless. */
 #ifdef RUNLOOM_MN_LIVENESS_BACKSTOP
-                if (runloom_mn_interp != NULL) {
+                /* Skipped under the armed controlled scheduler (MN_SIM_DST_PLAN
+                 * I2 gate [7]): this wall-clock pending-call injects an
+                 * unconditional yield at an OS-timing-decided frame -- exactly
+                 * the nondeterministic escape the seed forbids; the
+                 * deterministic frame-count preempt is the liveness story
+                 * under the barrier. */
+                if (runloom_mn_interp != NULL && !runloom_mn_ctrl_armed()) {
                     _PyEval_AddPendingCall(runloom_mn_interp,
                                            runloom_mn_liveness_pending_cb, NULL, 0);
                 }

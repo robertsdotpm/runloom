@@ -60,6 +60,42 @@ int runloom_mn_init(int n_threads)
                 "(docs/dev/soak/MN_SIM_DST_PLAN.md)");
             return -1;
         }
+        /* The native path is the CENSUS dispatch, which only exists under the
+         * controlled+BARRIER scheduler -- an opted-in mn-sim run without the
+         * seed, or with RUNLOOM_MN_BARRIER=0 (the A/B knob), never arms the
+         * census: every mn-sim gate keys on ctrl_armed and would go dark,
+         * re-opening the probe-P4 silent corruption (review-reproduced: the
+         * 5000ms timeout collapsed to 0.0001s again under BARRIER=0).  Fail
+         * loudly on every such combination (I2). */
+        {
+            const char *mnseed = getenv("RUNLOOM_MN_SEED");
+            const char *bar = getenv("RUNLOOM_MN_BARRIER");
+            if (mnseed == NULL || mnseed[0] == '\0') {
+                PyErr_SetString(PyExc_RuntimeError,
+                    "mn_init: RUNLOOM_SIM_MN=1 (native mn-sim) requires "
+                    "RUNLOOM_MN_SEED -- the sim ready ledger is dispatched by "
+                    "the seeded census (docs/dev/soak/MN_SIM_DST_PLAN.md I2)");
+                return -1;
+            }
+            if (bar != NULL && bar[0] == '0') {
+                PyErr_SetString(PyExc_RuntimeError,
+                    "mn_init: RUNLOOM_SIM_MN=1 (native mn-sim) is incompatible "
+                    "with RUNLOOM_MN_BARRIER=0 -- without the barrier the "
+                    "census never arms and the sim gates go dark "
+                    "(docs/dev/soak/MN_SIM_DST_PLAN.md I2)");
+                return -1;
+            }
+            /* A wall-clock preempt time-slicer started BEFORE the sim env was
+             * set would keep posting nondeterministic yields into the seeded
+             * run (the preempt_init gate only refuses NEW slicers). */
+            if (runloom_preempt_active()) {
+                PyErr_SetString(PyExc_RuntimeError,
+                    "mn_init: a preempt_init time-slicer is running -- call "
+                    "preempt_fini() before a native mn-sim run (wall-clock "
+                    "preemption is nondeterministic)");
+                return -1;
+            }
+        }
     }
 
     if (runloom_hubs != NULL) return 0;  /* already inited */
@@ -126,6 +162,23 @@ int runloom_mn_init(int n_threads)
      * runs; keeps preempt on (see runloom_mn_ctrl_init).
      * No-op when RUNLOOM_MN_SEED is unset. */
     runloom_mn_ctrl_init(n_threads);
+    /* Native mn-sim EFFECTIVE-state check (I2 review): ctrl_init silently
+     * self-disables on OOM -- the env fence above cannot see that, and an
+     * un-controlled sim+mn run re-opens the probe-P4 corruption.  Verified
+     * BEFORE any hub thread spawns, so the unwind is just the allocs above. */
+    if (runloom_sim_enabled() && !runloom_mn_ctrl_controlled()) {
+        const char *simmn = getenv("RUNLOOM_SIM_MN");
+        if (simmn != NULL && simmn[0] != '\0' && simmn[0] != '0') {
+            PyMem_Free(runloom_hubs);
+            runloom_hubs = NULL;
+            runloom_hub_count = 0;
+            PyErr_SetString(PyExc_RuntimeError,
+                "mn_init: the controlled scheduler failed to initialise "
+                "(OOM?) -- native mn-sim cannot run without the census "
+                "(docs/dev/soak/MN_SIM_DST_PLAN.md I2)");
+            return -1;
+        }
+    }
 
     /* Init-once the lock that serializes the hubs' PyThreadState_New (see its
      * declaration in mn_sched.c).  mn_init is single-threaded here, before any

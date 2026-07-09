@@ -102,6 +102,26 @@ long long runloom_sim_conn_register(int fd_a, int fd_b)
     return id;
 }
 
+/* Is fd one end of a REGISTERED sim connection?  The wait_fd gate under native
+ * mn-sim (MN_SIM_DST_PLAN.md I2 gate [11]): with the pump no-op'd, an
+ * unregistered real fd would park forever and read as a workload deadlock --
+ * reject it loudly instead.  O(conns); sim tests only. */
+int runloom_sim_conn_has_fd(int fd)
+{
+    long long i;
+    int found = 0;
+    runloom_sim_ledger_ensure_lock();
+    RUNLOOM_RLOCK(&runloom_sim_ledger_lock, RUNLOOM_RANK_SIM_LEDGER);
+    for (i = 0; i < runloom_sim_conn_n; i++) {
+        if (runloom_sim_conns[i].fd_a == fd || runloom_sim_conns[i].fd_b == fd) {
+            found = 1;
+            break;
+        }
+    }
+    RUNLOOM_RUNLOCK(&runloom_sim_ledger_lock, RUNLOOM_RANK_SIM_LEDGER);
+    return found;
+}
+
 /* The ready ledger: pending readiness deliveries.  A plain grow-on-demand vector;
  * dispatch qsorts it on a TOTAL key so the (unstable) qsort's ordering of ties
  * never leaks into the dispatch order.  `seq` is the append order -- a monotonic
@@ -293,8 +313,23 @@ int runloom_sim_dispatch_due(long long now_ns)
         RUNLOOM_RUNLOCK(&runloom_sim_ledger_lock, RUNLOOM_RANK_SIM_LEDGER);
         for (i = 0; i < ndue; i++) {
             if (runloom_pump_dispatch_event(runloom_sim_due_scratch[i].fd,
-                                            runloom_sim_due_scratch[i].dir, 0))
+                                            runloom_sim_due_scratch[i].dir, 0)) {
                 woke++;
+            } else {
+                /* No parker linked at the dispatch instant: stash the mask so
+                 * the NEXT wait_fd consumes it at its pre-park points --
+                 * exactly what every real pump backend does (netpoll_pump
+                 * epoll/kqueue paths).  Under mn-sim ALL the H=1 self-heals
+                 * are gated off (pump no-op, finite timeouts rejected until
+                 * I4), so dropping here was a SILENT PERMANENT lost wake for
+                 * a receiver that parks after its delivery dispatched
+                 * (adversarial-review live repro).  dir already IS the
+                 * netpoll mask (READ=0x1/WRITE=0x2).  Deliberately the
+                 * stash+consume primitive, NOT a parker-side ledger re-scan
+                 * (the disarm_out lesson). */
+                runloom_fd_pending_wake_set(runloom_sim_due_scratch[i].fd,
+                                            runloom_sim_due_scratch[i].dir);
+            }
         }
         return woke;
     }
@@ -318,6 +353,7 @@ int runloom_sim_dispatch_due(long long now_ns)
                     (size_t)runloom_sim_ready_n * sizeof(*runloom_sim_ready));
         RUNLOOM_RUNLOCK(&runloom_sim_ledger_lock, RUNLOOM_RANK_SIM_LEDGER);
         if (runloom_pump_dispatch_event(head.fd, head.dir, 0)) woke++;
+        else runloom_fd_pending_wake_set(head.fd, head.dir);  /* mirror stash */
     }
     return woke;
 }

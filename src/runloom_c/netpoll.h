@@ -276,4 +276,8 @@ long long runloom_sim_reap_count(void);
 long long runloom_sim_ready_peek_ns(void);
 int runloom_sim_dispatch_due(long long now_ns);
 
+/* Is fd one end of a registered sim connection?  The wait_fd gate under
+ * native mn-sim (I2 gate [11]): unregistered fds have no wake source there. */
+int runloom_sim_conn_has_fd(int fd);
+
 #endif /* RUNLOOM_NETPOLL_H */

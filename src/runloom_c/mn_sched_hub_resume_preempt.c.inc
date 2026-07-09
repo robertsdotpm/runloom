@@ -423,31 +423,73 @@ static void runloom_mn_ctrl_try_grant(void)
          * advances exactly as before.  A racy read only ever DEFERS an advance
          * (re-loop on the next census); a real foreign wake makes a hub a wanter,
          * which leaves this c<0 quiescent branch entirely. */
-        if (runloom_mn_ctrl.barrier && runloom_mn_ctrl.have_deadline &&
-            runloom_foreign_park_inflight() == 0) {
-            /* Clock advance (MN_SIM_DST_PLAN.md I1, corrected by adversarial
-             * review).  The DOUBLE plane advances to the sleeper's EXACT
-             * wake_at double -- identical to pre-I1 and to the H=1 pump
-             * (runloom_sched_drain.c.inc "use the sleeper's EXACT wake_at...
-             * so the compare is exact") -- because the loop-top fire compares
-             * wake_at <= logical_now on the double plane: a mirrored
-             * ns-then-back-to-double value can land up to 0.5ns BELOW the
-             * deadline (true for ~40% of fractional deadlines, e.g.
-             * sched_sleep(1/3)), the sleeper never fires, census_idle
-             * re-reports the same deadline, and the census livelocks
-             * (review-reproduced).  The ns plane is DERIVED from the exact
-             * double under one fixed rule (round-half-up) for the ledger,
-             * whose deliver_at values are stamped from and compared against
-             * this same ns plane -- internally consistent, never fed back
-             * into the double compare.  The global mirror keeps every plane
-             * on one clock (kills the P4b two-clock divergence). */
-            runloom_mn_ctrl.logical_now = runloom_mn_ctrl.next_deadline;
-            runloom_mn_ctrl.logical_now_ns =
-                (long long)(runloom_mn_ctrl.next_deadline * 1e9 + 0.5);
-            runloom_sched_logical_set_ns(runloom_mn_ctrl.logical_now_ns);
-            runloom_mn_ctrl.have_deadline = 0;
-            runloom_mn_ctrl.round++;                    /* re-open: re-report + fire */
-            runloom_cond_broadcast(&runloom_mn_ctrl.cond);
+        if (runloom_mn_ctrl.barrier && runloom_foreign_park_inflight() == 0) {
+            int sim_live = runloom_sim_enabled();
+            /* Census-side sim dispatch, step 1 (MN_SIM_DST_PLAN.md I2):
+             * already-due ledger entries dispatch WITHOUT advancing the clock
+             * -- they were appended mid-segment by m_sim_deliver_ready and the
+             * quiescent census is their first legitimate dispatch instant
+             * (dispatch-before-advance, mirroring the H=1 pump rule,
+             * netpoll_sim_ready.c.inc).  dispatch_due takes ledger(15) then
+             * pool(80)/sub(60) via the three-phase discipline -- all above
+             * ctrl(5), rank-legal; hub_submit never touches the ctrl mutex,
+             * so no recursion.  Woken gs land on their owner hubs' sub_lists;
+             * those hubs' census_idle sub_head re-test makes them wanters and
+             * the seeded choose() orders them -- ledger order fixes per-hub
+             * FIFO, the seed fixes cross-hub interleave. */
+            if (sim_live) {
+                int woke = runloom_sim_dispatch_due(runloom_mn_ctrl.logical_now_ns);
+                if (woke > 0) {
+                    /* have_deadline is deliberately NOT cleared here (unlike
+                     * the advance below): no clock movement happened, so the
+                     * reported minimum is still valid; hubs re-report at the
+                     * new round anyway (per-round recollect). */
+                    runloom_mn_ctrl.round++;        /* re-open: collect wanters */
+                    runloom_cond_broadcast(&runloom_mn_ctrl.cond);
+                    return;
+                }
+            }
+            /* Step 2: nothing due at the current instant -- advance to the
+             * EARLIEST pending event across the timer plane (next_deadline,
+             * double seconds) and the ledger plane (peek_ns).  Timer targets
+             * advance the DOUBLE plane to the sleeper's EXACT wake_at double
+             * (pre-I1 semantics; a mirrored ns->double value can land up to
+             * 0.5ns BELOW the deadline and livelock the census --
+             * review-reproduced with sched_sleep(1/3)); the ns plane is
+             * DERIVED from it (round-half-up) for the ledger.  Ledger targets
+             * advance the ns plane EXACTLY to deliver_at; the double mirror
+             * (ns * 1e-9) is only ever BELOW any pending timer deadline (the
+             * timer would have been the min otherwise; ties go to the timer
+             * so the double stays exact), so no sleeper mis-fires from an
+             * off-grid double.  The global mirror keeps every plane on one
+             * clock (kills the P4b divergence). */
+            {
+                long long ledger_ns = sim_live ? runloom_sim_ready_peek_ns() : -1;
+                long long timer_ns = runloom_mn_ctrl.have_deadline
+                    ? (long long)(runloom_mn_ctrl.next_deadline * 1e9 + 0.5)
+                    : -1;
+                if (timer_ns >= 0 && (ledger_ns < 0 || timer_ns <= ledger_ns)) {
+                    /* timer target (ties included): exact double advance */
+                    runloom_mn_ctrl.logical_now = runloom_mn_ctrl.next_deadline;
+                    runloom_mn_ctrl.logical_now_ns = timer_ns;
+                } else if (ledger_ns >= 0) {
+                    /* ledger target: exact ns advance.  The double mirror can
+                     * land AT (never meaningfully above) a pending timer's
+                     * rounded boundary in ns-tie corners -- benign: the timer
+                     * then fires this same round instead of the next, still
+                     * deterministically (pure function of the schedule). */
+                    runloom_mn_ctrl.logical_now_ns = ledger_ns;
+                    runloom_mn_ctrl.logical_now = (double)ledger_ns * 1e-9;
+                } else {
+                    return;                          /* nothing pending at all */
+                }
+                runloom_sched_logical_set_ns(runloom_mn_ctrl.logical_now_ns);
+                runloom_mn_ctrl.have_deadline = 0;   /* per-round recollect */
+                if (sim_live)
+                    (void)runloom_sim_dispatch_due(runloom_mn_ctrl.logical_now_ns);
+                runloom_mn_ctrl.round++;             /* re-open: re-report + fire */
+                runloom_cond_broadcast(&runloom_mn_ctrl.cond);
+            }
         }
         return;
     }
@@ -857,7 +899,14 @@ RUNLOOM_INLINE int runloom_mn_ctrl_no_steal(void)
 double runloom_mn_logical_now_or(double fallback)
 {
     double v;
-    if (!(runloom_mn_ctrl.enabled && runloom_mn_ctrl.barrier)) return fallback;
+    /* HUB-KEYED (I2 review): only a hub-context caller reads the census
+     * clock.  A main-thread caller in the between-runs window (live armed
+     * pool) is on the SINGLE-THREAD plane -- its sched_sleep advances the
+     * global clock while the census clock is frozen; letting it read the
+     * frozen mn value here split the planes (review-reproduced: 1000000 vs a
+     * fresh process's 50000000 for the identical H=1 workload). */
+    if (!(runloom_mn_ctrl.enabled && runloom_mn_ctrl.barrier) ||
+        runloom_mn_current_hub_opaque() == NULL) return fallback;
     RUNLOOM_RLOCK(&runloom_mn_ctrl.lock, RUNLOOM_RANK_MN_CTRL);
     v = runloom_mn_ctrl.logical_now;
     RUNLOOM_RUNLOCK(&runloom_mn_ctrl.lock, RUNLOOM_RANK_MN_CTRL);
@@ -866,16 +915,39 @@ double runloom_mn_logical_now_or(double fallback)
 
 /* ns-native variant (MN_SIM_DST_PLAN.md I1): the EXACT census clock in ns --
  * no double round-trip, so ledger deliver_at stamps and rc._logical_ns read
- * the authority.  Returns `fallback` when controlled+barrier mode is off (so
- * callers stay on the single-thread/wall plane in production). */
+ * the authority.  Returns `fallback` when controlled+barrier mode is off OR
+ * the caller is not on a hub (see the hub-keying note above). */
 long long runloom_mn_logical_ns_or(long long fallback)
 {
     long long v;
-    if (!(runloom_mn_ctrl.enabled && runloom_mn_ctrl.barrier)) return fallback;
+    if (!(runloom_mn_ctrl.enabled && runloom_mn_ctrl.barrier) ||
+        runloom_mn_current_hub_opaque() == NULL) return fallback;
     RUNLOOM_RLOCK(&runloom_mn_ctrl.lock, RUNLOOM_RANK_MN_CTRL);
     v = runloom_mn_ctrl.logical_now_ns;
     RUNLOOM_RUNLOCK(&runloom_mn_ctrl.lock, RUNLOOM_RANK_MN_CTRL);
     return v;
+}
+
+/* Is the controlled-replay scheduler LIVE (enabled + barrier + armed)?  The
+ * cross-TU gate the sim plane keys on (MN_SIM_DST_PLAN.md I2): under sim+mn
+ * the netpoll pump no-ops (readiness flows only from the census dispatch) and
+ * wait_fd enforces the sim conn registry.  Relaxed plain reads: hubs only run
+ * while armed (they gate at ctrl_wait_armed), and armed never clears mid-run,
+ * so a racy read can only be stale across run boundaries where no hub is
+ * inside the gated paths. */
+int runloom_mn_ctrl_armed(void)
+{
+    return runloom_mn_ctrl.enabled && runloom_mn_ctrl.barrier &&
+           runloom_mn_ctrl.armed;
+}
+
+/* Did ctrl_init actually establish controlled+barrier mode?  The mn_init
+ * fence's EFFECTIVE-state check (I2 review): the env fence alone misses
+ * ctrl_init's silent OOM self-disable, which would leave every mn-sim gate
+ * dark and re-open the probe-P4 corruption. */
+int runloom_mn_ctrl_controlled(void)
+{
+    return runloom_mn_ctrl.enabled && runloom_mn_ctrl.barrier;
 }
 
 /* Zero the mn logical clock -- the runloom_sim_reset() hook (cross-TU: netpoll's

@@ -124,6 +124,21 @@ double runloom_mn_logical_now_or(double fallback);
 long long runloom_mn_logical_ns_or(long long fallback);
 void runloom_mn_logical_reset(void);
 
+/* Is the controlled-replay scheduler LIVE (enabled + barrier + armed)?  The
+ * cross-TU gate the sim plane keys on: under sim+mn the netpoll pump no-ops
+ * (readiness flows only from the census dispatch) and wait_fd enforces the
+ * sim conn registry.  MN_SIM_DST_PLAN.md I2. */
+int runloom_mn_ctrl_armed(void);
+
+/* Did ctrl_init establish controlled+barrier mode?  mn_init's effective-state
+ * fence check (catches ctrl_init's silent OOM self-disable). */
+int runloom_mn_ctrl_controlled(void);
+
+/* Is the wall-clock preempt time-slicer thread running?  mn_init's fence
+ * check: a slicer started BEFORE the sim env was set keeps posting
+ * nondeterministic yields into a seeded mn-sim run. */
+int runloom_preempt_active(void);
+
 /* Phase C v2 hook.  Called from runloom_sched_yield to give the M:N
  * scheduler a chance to handle the yield in hub context.  Returns
  * 1 if we're inside a hub and the yield was handled (g re-queued on
