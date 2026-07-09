@@ -51,3 +51,4 @@ docs/dev/soak/coverage/*/html/
 docs/dev/soak/coverage/*/workloads.log
 # dredd schemata mutation binary (~100MB LLVM release, fetched by setup_dredd.sh)
 tools/mutate/schemata/dredd/
+docs/dev/soak/simfd_hunt/
