@@ -83,6 +83,10 @@ def build_spec(seed):
         return {"seed": seed, "kind": "simfd"}
     if forced == "simfd_dgram":
         return {"seed": seed, "kind": "simfd_dgram"}
+    if forced == "simfd_mn":
+        return {"seed": seed, "kind": "simfd_mn"}
+    if forced == "simfd_dgram_mn":
+        return {"seed": seed, "kind": "simfd_dgram_mn"}
     # ~20% grammar + ~10% sim-network, each via a SEPARATE rng stream so the other
     # seeds keep their EXACT original core/aio program (main stream undisturbed --
     # the fleet's known corpus stays valid).  So the existing `lifefuzz.py run
@@ -100,6 +104,14 @@ def build_spec(seed):
     # core/aio seeds keep their EXACT program (the corpus stays valid).
     if random.Random(seed ^ 0xBF58476D1CE4E5B9).random() < 0.08:
         return {"seed": seed, "kind": "simfd"}
+    # ~4% NATIVE MN byte-plane (simfd_mn, MN_SIM_DST_PLAN.md I7): the same MITM
+    # workload as mn fibers under the seeded census -- H>=2 cross-hub wake
+    # routing as f(seed); each spec runs its seed TWICE and trace-compares.
+    if random.Random(seed ^ 0xD6E8FEB86659FD93).random() < 0.04:
+        return {"seed": seed, "kind": "simfd_mn"}
+    # ~3% NATIVE MN datagram/reorder plane.
+    if random.Random(seed ^ 0xA24BAED4963EE407).random() < 0.03:
+        return {"seed": seed, "kind": "simfd_dgram_mn"}
     # ~5% datagram byte-plane (simfd_dgram): reorder over SOCK_DGRAM conns.
     if random.Random(seed ^ 0x94D049BB133111EB).random() < 0.05:
         return {"seed": seed, "kind": "simfd_dgram"}
@@ -278,6 +290,25 @@ def run_program(spec, timeout=20.0):
         sys.path.insert(0, os.path.join(ROOT, "tools", "dst"))
         import simnet_fd                          # sets RUNLOOM_SIM + LOGICAL_CLOCK on import
         return simnet_fd.simfd_program(spec["seed"], timeout=timeout)
+    if spec.get("kind") in ("simfd_mn", "simfd_dgram_mn"):
+        sys.path.insert(0, os.path.join(ROOT, "tools", "dst"))
+        # Native mn-sim env: the opt-in flag once; the SEED per program run
+        # (getenv-read fresh at each mn_init's ctrl_init, not latched).
+        os.environ.setdefault("RUNLOOM_SIM_MN", "1")
+        os.environ["RUNLOOM_MN_SEED"] = str(spec["seed"])
+        import simnet_fd                          # sets RUNLOOM_SIM on import
+        fn = (simnet_fd.simfd_mn_program if spec["kind"] == "simfd_mn"
+              else simnet_fd.simfd_dgram_mn_program)
+        ok1, r1 = fn(spec["seed"], timeout=timeout)
+        if not ok1:
+            return ok1, r1
+        ok2, r2 = fn(spec["seed"], timeout=timeout)
+        if not ok2:
+            return ok2, r2
+        if r1 != r2:
+            return False, "TRACE_DIVERGED r1={0} r2={1} seed={2}".format(
+                r1, r2, spec["seed"])
+        return True, r1
     if spec.get("kind") == "simfd_dgram":
         sys.path.insert(0, os.path.join(ROOT, "tools", "dst"))
         import simnet_fd

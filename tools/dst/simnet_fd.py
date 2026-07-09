@@ -39,6 +39,12 @@ os.environ.setdefault("RUNLOOM_SIM", "1")               # this IS a sim module
 os.environ.setdefault("RUNLOOM_LOGICAL_CLOCK", "1")     # sim shares one clock
 import runloom_c
 
+# Fiber-spawn indirection (MN_SIM_DST_PLAN.md I6): conn constructors spawn
+# their MITM shuttler fibers through this hook so the SAME conn classes serve
+# both planes -- the frozen H=1 programs leave it at runloom_c.fiber; the mn
+# programs point it at runloom_c.mn_fiber for the duration of their setup.
+fiber_spawn = runloom_c.fiber
+
 READ = 0x1
 WRITE = 0x2
 # Pin the socketpair buffer sizes so the residual (kernel-driven) EAGAIN / short-
@@ -203,6 +209,13 @@ class SimFdConn(object):
                 _setup(s)
             self._socks = [a_app, a_mid, b_app, b_mid]
             self.conn_id = runloom_c.sim_conn_register(a_app.fileno(), b_app.fileno())
+            # Register the MID pair too (same conn; the returned id is unused --
+            # ledger ordering keys on self.conn_id).  The mn-sim wait_fd gate
+            # requires EVERY parked-on fd to be registry-known: the shuttlers
+            # park on the mid fds, which the H=1 plane (no gate) never surfaced
+            # (found by the I6 mn port -- the gate rejected the parks and the
+            # shuttlers died at startup, deterministically).
+            runloom_c.sim_conn_register(a_mid.fileno(), b_mid.fileno())
             # MITM: a send wakes the MODEL on its OWN mid fd.
             self.a = SimFdEndpoint(self, a_app.fileno(), a_mid.fileno())
             self.b = SimFdEndpoint(self, b_app.fileno(), b_mid.fileno())
@@ -282,7 +295,7 @@ class SimFdConn(object):
                 if broke:
                     break
 
-        runloom_c.fiber(shuttle)
+        fiber_spawn(shuttle)
 
     def reset(self):
         """Modelled connection reset (protocol logic, not a kernel RST -- an
@@ -369,6 +382,8 @@ class SimFdDgramConn(object):
             _setup(s)
         self._socks = [a_app, a_mid, b_app, b_mid]
         self.conn_id = runloom_c.sim_conn_register(a_app.fileno(), b_app.fileno())
+        # Mid pair registered too (mn-sim wait_fd gate; see SimFdConn note).
+        runloom_c.sim_conn_register(a_mid.fileno(), b_mid.fileno())
         self.a = SimFdEndpoint(self, a_app.fileno(), a_mid.fileno())
         self.b = SimFdEndpoint(self, b_app.fileno(), b_mid.fileno())
         self._spawn_dgram_shuttle(a_mid, b_mid.fileno(), b_app.fileno(), a_app.fileno())
@@ -420,7 +435,7 @@ class SimFdDgramConn(object):
                 if broke:
                     break
 
-        runloom_c.fiber(shuttle)
+        fiber_spawn(shuttle)
 
     def reset(self):
         """Modelled reset (see SimFdConn.reset) -- cancel every fd-parker."""
@@ -509,6 +524,159 @@ def simfd_dgram_program(seed, timeout=20.0):
 # --------------------------------------------------------------------------- #
 #  A self-contained deterministic byte-plane WORKLOAD, for the soak fleet.     #
 # --------------------------------------------------------------------------- #
+def simfd_mn_program(seed, hubs=2, timeout=20.0):
+    """The simfd_program workload NATIVE on the M:N scheduler (MN_SIM_DST_PLAN
+    I6): K MITM client/server pairs with seed-drawn logical delay, running as
+    mn fibers under the seeded census (RUNLOOM_SIM_MN + RUNLOOM_MN_SEED must be
+    set by the caller/env -- mn_init raises loudly otherwise).  Same
+    conservation + settle-reap oracles as the H=1 twin, plus the foreign-wake
+    tripwire count; on success the reason carries the order DIGEST (md5 of the
+    event trace) so a fleet runner asserts same-seed bit-stability by
+    re-running the seed and comparing reasons.  Returns (ok, reason)."""
+    import hashlib
+    import random
+    global fiber_spawn
+    runloom_c.sim_reset()
+    rng = random.Random(seed)
+    k = rng.randint(1, 4)
+    m = rng.randint(1, 6)
+    delay_max = rng.random() * 0.02
+    results = {}
+    order = []
+
+    runloom_c.set_deadlock_mode(1)
+    runloom_c.mn_init(hubs)
+    fiber_spawn = runloom_c.mn_fiber
+    try:
+        conns = [SimFdConn(delay_fn=lambda: rng.random() * delay_max)
+                 for _ in range(k)]
+
+        def server(cid):
+            try:
+                got = conns[cid].b.recv_exact(m)
+                order.append(("srv", cid, bytes(got)))
+                conns[cid].b.sendall(got)
+            except OSError:
+                order.append(("srv-err", cid))
+
+        def client(cid):
+            try:
+                payload = bytes([(cid * 13 + i) & 0xff for i in range(m)])
+                conns[cid].a.sendall(payload)
+                back = conns[cid].a.recv_exact(m)
+                order.append(("cli", cid, bytes(back)))
+                results[cid] = sum(back)
+            except OSError:
+                order.append(("cli-err", cid))
+
+        for cid in range(k):
+            runloom_c.mn_fiber(lambda cid=cid: server(cid))
+        for cid in range(k):
+            runloom_c.mn_fiber(lambda cid=cid: client(cid))
+        runloom_c.mn_run()
+    finally:
+        fiber_spawn = runloom_c.fiber
+    reaps = runloom_c.sim_reap_count()
+    foreign = runloom_c.sim_foreign_wake_count()
+    for conn in conns:
+        conn.close()
+    runloom_c.mn_fini()
+
+    if foreign != 0:
+        return False, "FOREIGN_WAKES n={0} seed={1}".format(foreign, seed)
+    expected_reaps = 2 * k
+    if reaps != expected_reaps:
+        return False, ("REAP reaps={0} expected={1} (stranded fiber -- netpoll "
+                       "lost wake) seed={2}".format(reaps, expected_reaps, seed))
+    for cid in range(k):
+        want = sum((cid * 13 + i) & 0xff for i in range(m))
+        if results.get(cid) != want:
+            return False, ("CONSERVATION client={0} got={1} want={2} seed={3}"
+                           .format(cid, results.get(cid), want, seed))
+    if runloom_c._self_check(0) != 0:
+        return False, "SELF_CHECK seed={0}".format(seed)
+    trace = hashlib.md5(repr(order).encode("utf-8")).hexdigest()
+    return True, "ok trace={0}".format(trace)
+
+
+def simfd_dgram_mn_program(seed, hubs=2, timeout=20.0):
+    """The datagram/reorder workload NATIVE on the M:N scheduler (I6): same
+    multiset-conservation + reap + foreign-wake oracles as the H=1 twin, order
+    digest in the reason for fleet bit-stability.  Returns (ok, reason)."""
+    import hashlib
+    import random
+    global fiber_spawn
+    runloom_c.sim_reset()
+    rng = random.Random(seed)
+    k = rng.randint(1, 4)
+    m = rng.randint(1, 6)
+    results = {}
+    order = []
+
+    runloom_c.set_deadlock_mode(1)
+    runloom_c.mn_init(hubs)
+    fiber_spawn = runloom_c.mn_fiber
+    try:
+        conns = [SimFdDgramConn(shuffle_fn=rng.shuffle) for _ in range(k)]
+
+        def server(cid):
+            try:
+                got = []
+                for _ in range(m):
+                    d = conns[cid].b.recv(_DGRAM_MAX)
+                    if not d:
+                        break
+                    got.append(bytes(d))
+                order.append(("srv", cid, tuple(got)))
+                for d in got:
+                    conns[cid].b.send(d)
+            except OSError:
+                order.append(("srv-err", cid))
+
+        def client(cid):
+            try:
+                sent = [bytes([cid, i, (cid * 7 + i) & 0xff]) for i in range(m)]
+                for d in sent:
+                    conns[cid].a.send(d)
+                back = []
+                for _ in range(m):
+                    d = conns[cid].a.recv(_DGRAM_MAX)
+                    if not d:
+                        break
+                    back.append(bytes(d))
+                order.append(("cli", cid, tuple(back)))
+                results[cid] = sorted(back)
+            except OSError:
+                order.append(("cli-err", cid))
+
+        for cid in range(k):
+            runloom_c.mn_fiber(lambda cid=cid: server(cid))
+        for cid in range(k):
+            runloom_c.mn_fiber(lambda cid=cid: client(cid))
+        runloom_c.mn_run()
+    finally:
+        fiber_spawn = runloom_c.fiber
+    reaps = runloom_c.sim_reap_count()
+    foreign = runloom_c.sim_foreign_wake_count()
+    for conn in conns:
+        conn.close()
+    runloom_c.mn_fini()
+
+    if foreign != 0:
+        return False, "FOREIGN_WAKES n={0} seed={1}".format(foreign, seed)
+    if reaps != 2 * k:
+        return False, "REAP reaps={0} expected={1} seed={2}".format(reaps, 2 * k, seed)
+    for cid in range(k):
+        want = sorted(bytes([cid, i, (cid * 7 + i) & 0xff]) for i in range(m))
+        if results.get(cid) != want:
+            return False, ("CONSERVATION client={0} got={1} want={2} seed={3}"
+                           .format(cid, results.get(cid), want, seed))
+    if runloom_c._self_check(0) != 0:
+        return False, "SELF_CHECK seed={0}".format(seed)
+    trace = hashlib.md5(repr(order).encode("utf-8")).hexdigest()
+    return True, "ok trace={0}".format(trace)
+
+
 def simfd_program(seed, timeout=20.0):
     """A pure-function-of-seed socketpair workload: K client/server pairs over MITM
     sim connections (seed-drawn logical delay); each client sends M token bytes,

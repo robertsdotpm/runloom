@@ -21,7 +21,7 @@ round=0
 echo "[$(date -u +%FT%TZ)] simfd hunt START seed0=$seed0 batch=$N workers=$WORKERS" >> "$SUMMARY"
 while true; do
   round=$((round + 1))
-  for kind in simfd simfd_dgram; do
+  for kind in simfd simfd_dgram simfd_mn simfd_dgram_mn; do
     log="$DIR/${kind}_round${round}_seed${seed0}.log"
     LIFEFUZZ_KIND="$kind" nice -n 19 "$PY" tools/lifefuzz/lifefuzz.py sweep "$N" \
         --workers "$WORKERS" --seed0 "$seed0" --timeout 25 > "$log" 2>&1

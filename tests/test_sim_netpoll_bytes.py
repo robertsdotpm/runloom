@@ -22,7 +22,9 @@ sys.path.insert(0, os.path.join(REPO, "tools", "dst"))
 os.environ["PYTHON_GIL"] = "0"
 os.environ["RUNLOOM_SIM"] = "1"
 os.environ.setdefault("RUNLOOM_LOGICAL_CLOCK", "1")
-os.environ.setdefault("RUNLOOM_HUBS", "1")           # H=1: sim is deterministic single-hub
+# (RUNLOOM_HUBS removed -- confirmed inert: read by no C source.  This file
+#  is the FROZEN H=1 plane: it drives rc.run(); the native mn plane is
+#  tests/test_mn_sim_*.py per docs/dev/soak/MN_SIM_DST_PLAN.md.)
 import runloom_c            # noqa: E402
 import simnet_fd            # noqa: E402
 
