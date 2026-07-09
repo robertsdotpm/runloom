@@ -244,6 +244,45 @@ class TestSimPrereqFixes(unittest.TestCase):
                          "io_uring must be forced off under RUNLOOM_SIM")
 
 
+class TestSimEqualDeadlineTieBreak(unittest.TestCase):
+    """Increment T: parkers sharing ONE logical deadline pop the netpoll deadline
+    heap in goid (spawn) order under sim -- not heap-position order -- so a
+    multi-parker trace is bit-exact.  Sim-gated; production order is unchanged."""
+
+    def test_equal_deadline_wakes_in_goid_order(self):
+        p = _NeverReady()
+        order = []
+
+        def waiter(i):
+            runloom_c.wait_fd(p.r, READ, 500)     # SAME 500 ms timeout for all
+            order.append(i)
+
+        for i in range(6):                        # spawn i-th -> goid ascending
+            runloom_c.fiber(lambda i=i: waiter(i))
+        runloom_c.run()
+        p.close()
+        # goid == spawn order at H=1, so equal-deadline wakes are ascending spawn index
+        self.assertEqual(order, [0, 1, 2, 3, 4, 5],
+                         "equal-deadline parkers did not wake in goid order: %r" % order)
+
+    def test_equal_deadline_reproducible(self):
+        def run_once():
+            p = _NeverReady()
+            order = []
+
+            def waiter(i):
+                runloom_c.wait_fd(p.r, READ, 300)
+                order.append(i)
+
+            for i in range(8):
+                runloom_c.fiber(lambda i=i: waiter(i))
+            runloom_c.run()
+            p.close()
+            return order
+
+        self.assertEqual(run_once(), run_once())
+
+
 class TestSimGate(unittest.TestCase):
     def test_backend_and_sim_on(self):
         # Backend is still epoll (sim replaces the pump, not the platform pick).

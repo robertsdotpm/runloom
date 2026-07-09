@@ -355,11 +355,33 @@ static void runloom_dh_swap(runloom_parker_pool_t *pool, int i, int j)
     pool->dh_arr[j]->heap_index = j;
 }
 
+/* Deadline min-heap order: a is closer to the root than b iff its deadline is
+ * earlier.  Equal deadlines are common under RUNLOOM_SIM (many parkers share one
+ * logical instant), where the pop order must be a function of the seed for
+ * bit-exact multi-parker traces -- so under sim ONLY, tie-break by goid (g->id,
+ * seed-stable spawn order at H=1; NULL g -> 0).  With sim OFF this returns 0 on a
+ * tie, preserving the historical heap-position order EXACTLY (a mechanical
+ * refactor of the three inline compares: !dh_less == the old sift_up ">=", dh_less
+ * == the old sift_down "<") -- zero production behavior change.  The dh heap is
+ * per-pool, so the total order is an H=1 guarantee, which is sim's scope. */
+static inline int runloom_dh_less(const runloom_parked_t *a,
+                                  const runloom_parked_t *b)
+{
+    if (a->deadline_ns != b->deadline_ns)
+        return a->deadline_ns < b->deadline_ns;
+    if (!runloom_sim_enabled()) return 0;
+    {
+        long long ia = (a->g != NULL) ? a->g->id : 0;
+        long long ib = (b->g != NULL) ? b->g->id : 0;
+        return ia < ib;
+    }
+}
+
 static void runloom_dh_sift_up(runloom_parker_pool_t *pool, int i)
 {
     while (i > 0) {
         int parent = (i - 1) / 2;
-        if (pool->dh_arr[i]->deadline_ns >= pool->dh_arr[parent]->deadline_ns)
+        if (!runloom_dh_less(pool->dh_arr[i], pool->dh_arr[parent]))
             break;
         runloom_dh_swap(pool, i, parent);
         i = parent;
@@ -371,9 +393,9 @@ static void runloom_dh_sift_down(runloom_parker_pool_t *pool, int i)
     int n = pool->dh_size;
     while (1) {
         int l = 2 * i + 1, r = 2 * i + 2, best = i;
-        if (l < n && pool->dh_arr[l]->deadline_ns < pool->dh_arr[best]->deadline_ns)
+        if (l < n && runloom_dh_less(pool->dh_arr[l], pool->dh_arr[best]))
             best = l;
-        if (r < n && pool->dh_arr[r]->deadline_ns < pool->dh_arr[best]->deadline_ns)
+        if (r < n && runloom_dh_less(pool->dh_arr[r], pool->dh_arr[best]))
             best = r;
         if (best == i) break;
         runloom_dh_swap(pool, i, best);
