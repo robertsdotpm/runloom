@@ -14,6 +14,7 @@ test_stall_pool
 test_preempt
 test_blockpool
 test_cldeque
+test_cldeque_lifo
 # Sanitizer variants of any bench/test binary.
 *-asan
 *-tsan

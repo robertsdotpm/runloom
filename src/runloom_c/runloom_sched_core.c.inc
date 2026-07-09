@@ -1002,6 +1002,12 @@ static PyObject *spawn_common(runloom_sched_t *s, PyObject *callable,
      * before the :989 RELEASE publish, is still visible to any hub that later
      * acquires g through the ready/submit handshake.  Fields are display-only
      * (runloom.fibers() dict); no scheduling consumer reads the snapshot. */
+    /* Test-only (inert unless RUNLOOM_DELAY is armed): widen the window between
+     * the registry link (done at slab-alloc) and the RELEASE publish below, so a
+     * concurrent fibers() reader reliably walks this g while it is still
+     * pre-RUNNABLE and must skip it (the introspect ACQUIRE gate).  Placed BEFORE
+     * the field writes so a regressed gate would surface torn/stale id/owner. */
+    runloom_delay_inject(RUNLOOM_DLY_SPAWN_PUBLISH);
     __atomic_store_n(&g->refcount, 1, __ATOMIC_RELAXED);  /* one ref for the sched queue */
     __atomic_store_n(&g->owner, s, __ATOMIC_RELAXED);     /* owning per-thread sched (Phase C) */
     __atomic_store_n(&g->noyield, noyield, __ATOMIC_RELAXED);

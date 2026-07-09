@@ -99,6 +99,14 @@ test_cldeque-tsan: $(CLDEQUE_SRC)
 test_cldeque-ubsan: $(CLDEQUE_SRC)
 	$(CC) -O1 -fsanitize=undefined $(CLDEQUE_CF) $(CLDEQUE_SRC) -o test_cldeque-ubsan
 
+# test_cldeque_lifo: DETERMINISTIC single-threaded semantics (owner LIFO, steal
+# FIFO, size, full-at-CAP).  Built with -DRUNLOOM_SHRINK so CAP == 8 (cheap full
+# test).  No threads; runs anywhere with a C compiler.  pytest wrapper:
+# tests/test_cldeque_lifo_c.py.
+CLDEQUE_LIFO_SRC := test_cldeque_lifo.c ../../src/runloom_c/cldeque.c
+test_cldeque_lifo: $(CLDEQUE_LIFO_SRC)
+	$(CC) -O2 -DRUNLOOM_SHRINK $(CLDEQUE_CF) $(CLDEQUE_LIFO_SRC) -o test_cldeque_lifo
+
 # rl_handle generation-stamped handle substrate (item 3).  test_rl_handle.c
 # #includes rl_handle.c directly (its deps are header-inline), so no .so link.
 RL_HANDLE_SRC := test_rl_handle.c
