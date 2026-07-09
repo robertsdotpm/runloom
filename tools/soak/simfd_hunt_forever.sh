@@ -9,7 +9,7 @@
 # it never starves big100/cserve.  Log: docs/dev/soak/simfd_hunt/.
 set +e
 cd "$(dirname "$0")/../.." || exit 9
-DIR=docs/dev/soak/simfd_hunt
+DIR="${RUNLOOM_SOAK_DIR:-$HOME/runloom-soak}/simfd_hunt"
 mkdir -p "$DIR"
 SUMMARY="$DIR/SUMMARY.txt"
 PY="${PYTHON:-$HOME/.pyenv/versions/3.14.4t/bin/python3}"

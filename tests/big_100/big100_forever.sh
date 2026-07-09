@@ -32,7 +32,7 @@ GON="RUNLOOM_HARNESS_GON=1 RUNLOOM_GON_BULK=1 RUNLOOM_GON_FRESH=1 RUNLOOM_STACK_
 # as a fallback).  Honor RUNLOOM_TLBC=1 (used to re-arm the p565/p524 guards).
 TLBC=""; [ "${RUNLOOM_TLBC:-}" = "1" ] || TLBC="PYTHON_TLBC=0"
 
-OUT="$(cd ../../ && pwd)/docs/dev/soak/big100_forever"
+OUT="${RUNLOOM_SOAK_DIR:-$HOME/runloom-soak}/big100_forever"
 mkdir -p "$OUT"
 RES="$OUT/results.tsv"
 SUM="$OUT/SUMMARY.txt"

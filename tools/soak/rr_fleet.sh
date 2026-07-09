@@ -36,10 +36,10 @@ TMO="${RR_FLEET_TIMEOUT:-120}"
 INNER="${RR_FLEET_INNER:-30}"
 CAP="${RR_FLEET_TRACE_CAP:-64}"
 cd "$ROOT"
-OUTBASE="$ROOT/docs/dev/soak/inbox_artifacts/rr_fleet"
-SUM="$ROOT/docs/dev/soak/forever_rrfleet_SUMMARY.txt"
-LOCK="$ROOT/docs/dev/soak/.rr_fleet_inbox.lock"
-STAT="$ROOT/docs/dev/soak/.rr_fleet_stats"; mkdir -p "$STAT"
+OUTBASE="${RUNLOOM_SOAK_DIR:-$HOME/runloom-soak}/inbox_artifacts/rr_fleet"
+SUM="${RUNLOOM_SOAK_DIR:-$HOME/runloom-soak}/forever_rrfleet_SUMMARY.txt"
+LOCK="${RUNLOOM_SOAK_DIR:-$HOME/runloom-soak}/.rr_fleet_inbox.lock"
+STAT="${RUNLOOM_SOAK_DIR:-$HOME/runloom-soak}/.rr_fleet_stats"; mkdir -p "$STAT"
 
 # --- availability gate (once) ------------------------------------------------
 if ! command -v rr >/dev/null 2>&1; then echo "rr not installed -- exit" | tee -a "$SUM"; exit 0; fi

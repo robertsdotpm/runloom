@@ -18,14 +18,14 @@ set +e
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 PY="${RUNLOOM_PYTHON:-$HOME/.pyenv/versions/3.14.4t/bin/python3}"
 CAP="${RR_FOREVER_TRACE_CAP:-8}"
-SUM="$ROOT/docs/dev/soak/forever_rrchaos_SUMMARY.txt"
+SUM="${RUNLOOM_SOAK_DIR:-$HOME/runloom-soak}/forever_rrchaos_SUMMARY.txt"
 cd "$ROOT"
 
 echo "== rr-chaos forever loop started $(date '+%F %T') (1h iterations, trace cap $CAP/day) ==" >> "$SUM"
 i=0
 while true; do
   i=$((i+1)); DATE="$(date +%F)"
-  ART="$ROOT/docs/dev/soak/inbox_artifacts/rr_forever/$DATE"
+  ART="${RUNLOOM_SOAK_DIR:-$HOME/runloom-soak}/inbox_artifacts/rr_forever/$DATE"
   mkdir -p "$ART"
   bash tools/soak/rr_chaos.sh 3600 "$ART" > "$ART/iter_${i}.log" 2>&1
   runs="$(grep -oE '^rr-chaos: [0-9]+ runs, [0-9]+ findings' "$ART/iter_${i}.log" | tail -1)"

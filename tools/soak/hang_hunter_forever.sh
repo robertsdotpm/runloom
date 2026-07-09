@@ -30,9 +30,9 @@ NCPU="$(nproc 2>/dev/null || echo 8)"
 HH_ITER="${HH_ITER:-1800}"
 HH_LOAD_FRAC="${HH_LOAD_FRAC:-0.8}"
 HH_JOBS="${HH_JOBS:-0}"
-OUTBASE="$ROOT/docs/dev/soak/inbox_artifacts/hang_hunter_forever"
-SUM="$ROOT/docs/dev/soak/forever_hanghunter_SUMMARY.txt"
-LOCK="$ROOT/docs/dev/soak/.hang_hunter_inbox.lock"
+OUTBASE="${RUNLOOM_SOAK_DIR:-$HOME/runloom-soak}/inbox_artifacts/hang_hunter_forever"
+SUM="${RUNLOOM_SOAK_DIR:-$HOME/runloom-soak}/forever_hanghunter_SUMMARY.txt"
+LOCK="${RUNLOOM_SOAK_DIR:-$HOME/runloom-soak}/.hang_hunter_inbox.lock"
 
 load_ok() {
   local l1; l1="$(cut -d' ' -f1 /proc/loadavg 2>/dev/null || echo 0)"

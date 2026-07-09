@@ -37,7 +37,7 @@ PY="${RUNLOOM_PYTHON:-$HOME/.pyenv/versions/3.14.4t/bin/python3}"
 NORMAL_PY="$PY"                          # the normal (non-gold) interp for the EXIT restore
 GOLD_PY="${RUNLOOM_TSAN_PYTHON:-$HOME/cpython-tsan/bin/python3.13t}"   # TSan-instrumented CPython
 GOLD_SUPP="${RUNLOOM_TSAN_CPYTHON_SUPP:-$HOME/projects/cpython-tsan/Tools/tsan/suppressions_free_threading.txt}"
-OUT="$ROOT/docs/dev/soak"
+OUT="${RUNLOOM_SOAK_DIR:-$HOME/runloom-soak}"
 LEDGER="$OUT/LEDGER.md"
 command -v setarch >/dev/null 2>&1 && SA="setarch $(uname -m) -R" || SA=""
 

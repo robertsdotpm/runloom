@@ -34,7 +34,7 @@ PY="${RUNLOOM_PYTHON:-$HOME/.pyenv/versions/3.14.4t/bin/python3}"
 LOAD_FRAC="${LOAD_FRAC:-0.7}"
 NCPU="$(nproc 2>/dev/null || echo 4)"
 DATE="$(date +%F)"
-INBOX_ARTIFACTS="$ROOT/docs/dev/soak/inbox_artifacts/$DATE"
+INBOX_ARTIFACTS="${RUNLOOM_SOAK_DIR:-$HOME/runloom-soak}/inbox_artifacts/$DATE"
 mkdir -p "$INBOX_ARTIFACTS"
 
 SMOKE=0

@@ -18,14 +18,14 @@
 # byte echoed back, forever, exercising pygo netpoll against real WAN RTT/loss.
 #
 # Launch detached:  setsid nice -n 5 tools/soak/net_echo_forever.sh >/dev/null 2>&1 &
-# Watch:            tail -f docs/dev/soak/net_echo_forever/net_echo.log
-# Live fiber stacks:kill -USR1 $(cat docs/dev/soak/net_echo_forever/PID)
-# Stop:             kill      $(cat docs/dev/soak/net_echo_forever/PID)
+# Watch:            tail -f ${RUNLOOM_SOAK_DIR:-$HOME/runloom-soak}/net_echo_forever/net_echo.log
+# Live fiber stacks:kill -USR1 $(cat ${RUNLOOM_SOAK_DIR:-$HOME/runloom-soak}/net_echo_forever/PID)
+# Stop:             kill      $(cat ${RUNLOOM_SOAK_DIR:-$HOME/runloom-soak}/net_echo_forever/PID)
 set +e
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT"
 PY="${RUNLOOM_PYTHON:-$HOME/.pyenv/versions/3.14.4t/bin/python3}"
-OUT="$ROOT/docs/dev/soak/net_echo_forever"
+OUT="${RUNLOOM_SOAK_DIR:-$HOME/runloom-soak}/net_echo_forever"
 mkdir -p "$OUT"
 LOG="$OUT/net_echo.log"
 

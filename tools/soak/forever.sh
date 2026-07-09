@@ -25,15 +25,15 @@ WL="${1:?usage: forever.sh <workload> [iter_hours] [workers] [extra args...]}"
 HOURS="${2:-6}"
 WORKERS="${3:-2}"
 shift; [ $# -gt 0 ] && shift; [ $# -gt 0 ] && shift
-SUM="$ROOT/docs/dev/soak/forever_${WL}_SUMMARY.txt"
-OUTDIR="$ROOT/docs/dev/soak/soak_${WL}_forever"
+SUM="${RUNLOOM_SOAK_DIR:-$HOME/runloom-soak}/forever_${WL}_SUMMARY.txt"
+OUTDIR="${RUNLOOM_SOAK_DIR:-$HOME/runloom-soak}/soak_${WL}_forever"
 # Permanent per-iteration ledger of retain-forever pool END values.  The per-run
 # slope oracle forgives a settled pool (it must), which leaves one single-window
 # blind spot: a slow constant leak whose 6h movement stays under the metric floor.
 # Across iterations that separates cleanly -- a pool plateaus (fixed HWM), a leak
 # climbs without bound -- so cross_iter_ratchet.py records each iteration's END
 # here and raises CROSS-ITER-LEAK when a pool climbs with no asymptote.
-LEDGER="$ROOT/docs/dev/soak/forever_${WL}_ratchet_ledger.csv"
+LEDGER="${RUNLOOM_SOAK_DIR:-$HOME/runloom-soak}/forever_${WL}_ratchet_ledger.csv"
 cd "$ROOT"
 
 echo "== forever soak started: $WL, ${HOURS}h iterations, $WORKERS workers, $(date '+%F %T') ==" >> "$SUM"

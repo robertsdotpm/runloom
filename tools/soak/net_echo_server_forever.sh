@@ -18,7 +18,7 @@ set +e
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT"
 PY="${RUNLOOM_PYTHON:-$HOME/.pyenv/versions/3.14.4t/bin/python3}"
-OUT="$ROOT/docs/dev/soak/net_echo_server_forever"
+OUT="${RUNLOOM_SOAK_DIR:-$HOME/runloom-soak}/net_echo_server_forever"
 mkdir -p "$OUT"
 LOG="$OUT/net_echo_srv.log"
 

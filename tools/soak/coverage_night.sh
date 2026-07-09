@@ -19,8 +19,8 @@ MAIN="$(cd "$(dirname "$0")/../.." && pwd)"
 PY="${RUNLOOM_PYTHON:-$HOME/.pyenv/versions/3.14.4t/bin/python3}"
 WT="${RUNLOOM_COV_WORKTREE:-$HOME/projects/pygo-covnight}"
 DATE="$(date +%F)"
-OUTDIR="$MAIN/docs/dev/soak/coverage/$DATE"
-LEDGER="$MAIN/docs/dev/soak/COVERAGE_LEDGER.md"
+OUTDIR="${RUNLOOM_SOAK_DIR:-$HOME/runloom-soak}/coverage/$DATE"
+LEDGER="${RUNLOOM_SOAK_DIR:-$HOME/runloom-soak}/COVERAGE_LEDGER.md"
 SMOKE=0
 [ "${1:-}" = "--smoke" ] && SMOKE=1
 

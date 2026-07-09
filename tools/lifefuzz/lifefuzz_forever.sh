@@ -31,7 +31,7 @@ KIND="${2:-grammar}"
 TIMEOUT="${3:-20}"
 SEED0="${4:-1}"
 WORKERS="${5:-}"                     # empty -> sweep's default (cpu-2)
-SUM="$ROOT/docs/dev/soak/forever_lifefuzz_${KIND}_SUMMARY.txt"
+SUM="${RUNLOOM_SOAK_DIR:-$HOME/runloom-soak}/forever_lifefuzz_${KIND}_SUMMARY.txt"
 cd "$ROOT" || exit 1
 
 export PYTHON_GIL=0
