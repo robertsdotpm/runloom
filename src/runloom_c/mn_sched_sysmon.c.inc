@@ -166,14 +166,25 @@ static int runloom_flag_default_on(const char *v)
 /* Read RUNLOOM_SYSMON / RUNLOOM_SYSMON_MS once and set the enable flag + threshold.
  * Must run in mn_init BEFORE the hub threads start so the per-resume
  * instrumentation is live from the first resume.  RUNLOOM_PREEMPT defaults ON on
- * free-threaded 3.13+ (opt out with =0); it forces sysmon on. */
+ * free-threaded 3.13+ (opt out with =0); it forces the sysmon thread on but NOT
+ * its stderr logging -- WEDGED/RECOVERED lines print only when the user opts in
+ * via RUNLOOM_SYSMON=1 (or RUNLOOM_SYSMON_QUIET=0). */
 static void runloom_sysmon_config(void)
 {
     const char *e = getenv("RUNLOOM_SYSMON");
     const char *q = getenv("RUNLOOM_SYSMON_QUIET");
     const char *ms;
-    runloom_sysmon_enabled = (e != NULL && e[0] != '0') ? 1 : 0;
-    runloom_sysmon_quiet = (q != NULL && q[0] != '0') ? 1 : 0;
+    /* Explicit opt-in signal: the user set RUNLOOM_SYSMON to a truthy value to
+     * WATCH sysmon.  Preemption (below) may also force the sysmon thread on, but
+     * that alone must not produce the WEDGED/RECOVERED chatter on stderr. */
+    int sysmon_explicit = (e != NULL && e[0] != '0');
+    runloom_sysmon_enabled = sysmon_explicit ? 1 : 0;
+    /* Quiet by default: log only when sysmon was explicitly requested.  When it
+     * runs solely to service preemption (the common default on FT 3.13+), stay
+     * silent.  RUNLOOM_SYSMON_QUIET still forces the choice either way
+     * (=1 quiet, =0 verbose). */
+    if (q != NULL) runloom_sysmon_quiet = (q[0] != '0') ? 1 : 0;
+    else           runloom_sysmon_quiet = sysmon_explicit ? 0 : 1;
     /* RUNLOOM_PREEMPT: ATTACHED/CPU preemption (3.13+ only -- needs the attach
      * states to classify the wedge).  It forces the sysmon instrumentation +
      * watchdog on (that is what detects the wedge and arms preempt_requested).
