@@ -8,6 +8,13 @@ static PyObject *m_blocking(PyObject *self, PyObject *args, PyObject *kw)
     PyObject *fn, *call_args;
     (void)self;
 
+    /* mn-sim (I3, wake contract #14 as-built): a hub fiber's blocking() runs
+     * INLINE under an armed sim census -- runloom_blocking_call routes to its
+     * inline fallback, so there is no foreign park and no foreign completion
+     * wake, and the schedule stays f(seed).  No fence needed here; the C-level
+     * routing covers this binding AND the internal getaddrinfo offload the
+     * former binding-only fence missed (review finding). */
+
     if (PyTuple_GET_SIZE(args) < 1) {
         PyErr_SetString(PyExc_TypeError,
                         "blocking() requires a callable as the first argument");
@@ -214,6 +221,19 @@ static PyObject *m_park(PyObject *self, PyObject *args, PyObject *kw)
     (void)self;
     if (!PyArg_ParseTupleAndKeywords(args, kw, "|pO", kwlist, &fw, &timeout_obj))
         return NULL;
+    /* mn-sim fence (I3, wake contract #25): foreign_wakeable marks this park
+     * as awaiting a FOREIGN-thread wake -- foreign_park_inflight then holds
+     * the census clock, and with the waker itself forbidden (#13) the clock
+     * would be held FOREVER: a total silent wedge the foreign-wake tripwire
+     * cannot see (the park side is the problem, not the wake side). */
+    if (fw && runloom_sim_enabled() && runloom_mn_ctrl_armed() &&
+        runloom_mn_current_hub_opaque() != NULL) {
+        PyErr_SetString(PyExc_RuntimeError,
+            "park(foreign_wakeable=True) is forbidden under native mn-sim "
+            "(it holds the census clock for a wake source the seed cannot "
+            "order; MN_SIM_DST_PLAN.md wake contract #25)");
+        return NULL;
+    }
     if (timeout_obj == Py_None) {
         /* Untimed in-memory park (0 fds).  Returns None (backward compatible). */
         runloom_park_generic(fw);

@@ -918,7 +918,11 @@ static RUNLOOM_THREAD_RET runloom_hub_main(void *arg)
                      * sole-resumer safety is supplied by the per-g claim
                      * handshake (PARKED->SWEEPING) inside runloom_netpoll_sweep_idle,
                      * so a stolen wake can't resume a g into a stack mid-madvise. */
-                    if (on && parked > 0) {
+                    /* mn-sim: forced off (I3 gate [10], hygiene) -- the dwell
+                     * is wall-clock; per-g-tstate (where SWEEPING is
+                     * schedule-visible) is fenced out entirely under sim. */
+                    if (on && parked > 0 &&
+                        !(runloom_sim_enabled() && runloom_mn_ctrl_armed())) {
                         double now_s = runloom_sched_monotonic_seconds();
                         double interval_s = (double)sweep_thresh_ns / 2e9;
                         if (now_s - h->last_sweep_s >= interval_s) {

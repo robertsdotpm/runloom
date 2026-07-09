@@ -487,9 +487,79 @@ void runloom_sched_wake(runloom_g_t *g)
  * waker could see s->current==g (drain hadn't restored prev yet) and
  * skip the push, losing the wake.  The parked_safe CAS handoff is
  * deterministic regardless of caller thread. */
+/* ---- Native mn-sim foreign-wake tripwire (MN_SIM_DST_PLAN.md I3, wake
+ * contract #13/#15) ----------------------------------------------------------
+ * Under a seeded mn-sim run EVERY wake source must be seed-ordered or
+ * forbidden; a wake from a foreign OS thread (no hub TLS) lands at a
+ * wall-clock-decided instant the census cannot order.  Rather than trusting
+ * enumeration alone, the choke points all foreign wakes transit (wake_safe
+ * here; chan wake_waiter) count the violation and, under RUNLOOM_SIM_STRICT=1
+ * (the DEFAULT when sim+mn is armed; 0 downgrades to counter-only for
+ * diagnosis), abort with a diagnostic.  A green run asserts
+ * rc.sim_foreign_wake_count() == 0 -- ANY unenumerated wake source becomes a
+ * loud failure instead of silent flakiness. */
+static long long runloom_sim_foreign_wake_total_v;
+
+long long runloom_sim_foreign_wake_total(void)
+{
+    return __atomic_load_n(&runloom_sim_foreign_wake_total_v, __ATOMIC_RELAXED);
+}
+
+/* Zero the tally between runs (runloom_sim_reset hook) so the green-run
+ * oracle (count == 0) is per-run, not process-cumulative. */
+void runloom_sim_foreign_wake_reset(void)
+{
+    __atomic_store_n(&runloom_sim_foreign_wake_total_v, 0, __ATOMIC_RELAXED);
+}
+
+void runloom_sim_foreign_wake_note(const char *what)
+{
+    static int strict = -1;   /* atomic lazy-latch: raced by foreign threads */
+    int st;
+    __atomic_add_fetch(&runloom_sim_foreign_wake_total_v, 1, __ATOMIC_RELAXED);
+    st = __atomic_load_n(&strict, __ATOMIC_RELAXED);
+    if (st < 0) {
+        const char *e = getenv("RUNLOOM_SIM_STRICT");
+        st = (e == NULL || e[0] == '\0') ? 1 : (e[0] != '0');
+        __atomic_store_n(&strict, st, __ATOMIC_RELAXED);
+    }
+    {
+        int strict_now = st;
+        fprintf(stderr, "runloom mn-sim: FOREIGN-THREAD WAKE via %s during a "
+                "seeded run -- a wall-clock wake source the census cannot order "
+                "(wake contract #13/#15; RUNLOOM_SIM_STRICT=0 downgrades to "
+                "counter-only)\n", what);
+        if (strict_now) abort();
+    }
+}
+
+/* The tripwire predicate: an armed sim census and a caller with no hub TLS.
+ * The main thread is blocked inside mn_run for the whole armed run, so any
+ * no-hub caller here is a foreign OS thread.  (Between runs on a live pool
+ * `armed` persists -- a foreign wake there is equally unorderable for the
+ * NEXT run's placement, so tripping is correct, if conservative.) */
+int runloom_sim_foreign_wake_ctx(void)
+{
+    return runloom_sim_enabled() && runloom_mn_ctrl_armed() &&
+           runloom_mn_current_hub_opaque() == NULL;
+}
+
 void runloom_sched_wake_safe(runloom_g_t *g)
 {
     if (g == NULL) return;
+
+    /* TARGET-QUALIFIED (I3 review): fire only when the woken g is HUB-HOMED
+     * (park_hub set).  A no-hub-TLS caller waking a NON-hub g is the blessed
+     * main-thread H=1-sim plane coexisting with an idle armed pool (armed
+     * persists between runs) -- its wakes never perturb the mn census, and
+     * tripping there abort()ed the supported coexistence (review-reproduced,
+     * exit 134).  Known blind spot, documented: a foreign wake-BEFORE-park of
+     * a hub g reads park_hub == NULL and is missed -- the Dekker absorbs that
+     * wake pre-park, so it cannot reorder a parked hub fiber; the residual
+     * placement influence is accepted. */
+    if (runloom_sim_foreign_wake_ctx() &&
+        __atomic_load_n(&g->park_hub, __ATOMIC_ACQUIRE) != NULL)
+        runloom_sim_foreign_wake_note("wake_safe (G.wake/Future)");
 
     /* Bump wake_pending FIRST so the parker's recheck after its
      * parked_safe store observes our arrival.  ACQ_REL pairs with

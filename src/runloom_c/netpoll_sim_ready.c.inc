@@ -249,6 +249,7 @@ void runloom_sim_reset(void)
     RUNLOOM_RUNLOCK(&runloom_sim_ledger_lock, RUNLOOM_RANK_SIM_LEDGER);
     runloom_sched_logical_reset();
     runloom_mn_logical_reset();     /* all clock planes reset together (I1) */
+    runloom_sim_foreign_wake_reset();  /* per-run green oracle (I3) */
 }
 
 /* Dispatch every ledger entry with deliver_at <= now_ns, in the strict total

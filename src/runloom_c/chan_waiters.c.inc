@@ -286,6 +286,15 @@ static void park_waiter(runloom_chan_t *ch,
  * has its own internal locking under M:N). */
 static void wake_waiter(runloom_chan_waiter_t *w)
 {
+    /* mn-sim foreign-wake tripwire (I3, wake contract #15): a chan op from a
+     * foreign OS thread wakes this waiter at a wall-clock instant the census
+     * cannot order.  wake_safe's tripwire never sees this path (hub waiters
+     * route via mn_wake_g below), so it gets its own choke point.
+     * TARGET-QUALIFIED (review): only a HUB-homed waiter perturbs the census;
+     * a main-thread legacy-plane waiter (w->hub == NULL) beside an idle armed
+     * pool is the blessed coexistence and must not trip. */
+    if (w->hub != NULL && runloom_sim_foreign_wake_ctx())
+        runloom_sim_foreign_wake_note("chan wake_waiter (foreign-thread chan op)");
     if (runloom_ldfi_dropn > 0) {                 /* LDFI: id each wake; drop the cut set */
         int n = runloom_ldfi_count++, i;
         for (i = 0; i < runloom_ldfi_dropn; i++)

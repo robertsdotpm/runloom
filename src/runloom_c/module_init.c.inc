@@ -196,6 +196,9 @@ static PyMethodDef module_methods[] = {
     {"sim_reap_count", m_sim_reap_count, METH_NOARGS,
      "sim_reap_count() -> int.  Parkers reaped at settled deadlocks by the sim "
      "pump this run (RUNLOOM_SIM); a workload flags excess as a stranded fiber."},
+    {"sim_foreign_wake_count", m_sim_foreign_wake_count, METH_NOARGS,
+     "sim_foreign_wake_count() -> int.  Foreign-thread wakes observed during "
+     "seeded mn-sim runs (the I3 tripwire); a green run asserts 0."},
     {"_fault_count", m_fault_count, METH_O,
      "_fault_count(site): test-only.  Times the Windows netpoll fault-injection "
      "site (WSAPOLL/SELECT/IOCP_WAIT/IOCP_SUBMIT) fired; -1 if unknown/non-Win."},

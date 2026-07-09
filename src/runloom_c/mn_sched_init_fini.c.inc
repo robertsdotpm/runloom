@@ -95,6 +95,20 @@ int runloom_mn_init(int n_threads)
                     "preemption is nondeterministic)");
                 return -1;
             }
+            /* per-g-tstate / global-runq mode: its wake-state FSM + global
+             * runq wake path is UNTRACED by the mn-sim design (wake contract
+             * #22) -- fenced out until separately audited. */
+            {
+                const char *mig = getenv("RUNLOOM_ALLOW_UNSAFE_MIGRATION");
+                if (mig != NULL && mig[0] != '\0' && mig[0] != '0') {
+                    PyErr_SetString(PyExc_RuntimeError,
+                        "mn_init: RUNLOOM_ALLOW_UNSAFE_MIGRATION (per-g-tstate "
+                        "mode) is not supported under native mn-sim -- its wake "
+                        "path is unaudited (MN_SIM_DST_PLAN.md wake contract "
+                        "#22)");
+                    return -1;
+                }
+            }
         }
     }
 

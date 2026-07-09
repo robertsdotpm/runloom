@@ -123,6 +123,21 @@ void runloom_netpoll_force_unlink_g_parker(runloom_g_t *g)
     runloom_parker_pool_release(p);
 }
 
+/* Cancel-family hub requeue: the tripwire choke point for FOREIGN-THREAD
+ * cancels (MN_SIM_DST_PLAN.md I3 review) -- cancel_g / cancel_fd /
+ * cancel_all_parked / unpark_many call mn_wake_g directly and bypassed both
+ * wake_safe and wake_waiter, so a foreign close()/cancel of a sim conn woke a
+ * hub fiber at a wall-clock instant with zero count (review live-repro).  A
+ * running-fiber cancel (contract #4) has hub TLS -> ctx() false -> no note;
+ * the note is deliberately NOT inside mn_wake_g itself (census dispatch and
+ * hub-context wakes legitimately route there). */
+static void runloom_cancel_requeue_hub(runloom_parked_t *p)
+{
+    if (runloom_sim_foreign_wake_ctx())
+        runloom_sim_foreign_wake_note("netpoll cancel (foreign-thread cancel/close)");
+    runloom_mn_wake_g(p->hub, p->g);
+}
+
 /* Cancel a fiber parked in runloom_netpoll_wait_fd.  Unlike force_unlink
  * (g-completion: unlink + release, no wake), the g here WILL resume in wait_fd,
  * so we WAKE it instead of releasing -- wait_fd's own resume path releases the
@@ -157,7 +172,7 @@ int runloom_netpoll_cancel_g(runloom_g_t *g)
          * returns RUNLOOM_NETPOLL_CANCELLED itself (re-queueing would double-
          * resume it). */
         if (cur == RUNLOOM_PARK_PARKED) {
-            if (p->hub != NULL) runloom_mn_wake_g(p->hub, p->g);
+            if (p->hub != NULL) runloom_cancel_requeue_hub(p);
             else                runloom_sched_wake(p->g);
         }
         woke = 1;
@@ -218,7 +233,7 @@ int runloom_netpoll_unpark_many(runloom_g_t **gs, int n, int *missed_out)
              * waking it would double-resume.  It sees WOKEN at its own commit CAS,
              * aborts the park, and returns RUNLOOM_NETPOLL_UNPARKED itself. */
             if (cur == RUNLOOM_PARK_PARKED) {
-                if (p->hub != NULL) runloom_mn_wake_g(p->hub, p->g);
+                if (p->hub != NULL) runloom_cancel_requeue_hub(p);
                 else                runloom_sched_wake(p->g);
             }
             RUNLOOM_EVT(RUNLOOM_EVT_PARKER_FORCE, p, p->g, (long long)p->fd);
@@ -314,7 +329,7 @@ void runloom_netpoll_cancel_fd(int fd)
                         *p->ready_out = RUNLOOM_NETPOLL_CANCELLED;
                     runloom_parker_unlink(pool, p);
                     if (cur == RUNLOOM_PARK_PARKED) {
-                        if (p->hub != NULL) runloom_mn_wake_g(p->hub, p->g);
+                        if (p->hub != NULL) runloom_cancel_requeue_hub(p);
                         else                runloom_sched_wake(p->g);
                     }
                     RUNLOOM_EVT(RUNLOOM_EVT_PARKER_FORCE, p, p->g,
@@ -369,7 +384,7 @@ int runloom_netpoll_cancel_all_parked(void)
                         *p->ready_out = RUNLOOM_NETPOLL_CANCELLED;
                     runloom_parker_unlink(pool, p);
                     if (cur == RUNLOOM_PARK_PARKED) {
-                        if (p->hub != NULL) runloom_mn_wake_g(p->hub, p->g);
+                        if (p->hub != NULL) runloom_cancel_requeue_hub(p);
                         else                runloom_sched_wake(p->g);
                     }
                     RUNLOOM_EVT(RUNLOOM_EVT_PARKER_FORCE, p, p->g, (long long)p->fd);

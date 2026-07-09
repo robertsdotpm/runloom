@@ -926,6 +926,15 @@ void runloom_sched_logical_reset(void);
  * I1).  Never called on the H=1 legacy path. */
 void runloom_sched_logical_set_ns(long long ns);
 
+/* Native mn-sim foreign-wake tripwire (MN_SIM_DST_PLAN.md I3, wake contract
+ * #13/#15): total foreign-thread wakes observed during seeded runs (green run
+ * == 0); note() counts + aborts under RUNLOOM_SIM_STRICT=1 (default when
+ * sim+mn armed); ctx() is the predicate (armed sim census + no hub TLS). */
+long long runloom_sim_foreign_wake_total(void);
+void runloom_sim_foreign_wake_note(const char *what);
+void runloom_sim_foreign_wake_reset(void);
+int runloom_sim_foreign_wake_ctx(void);
+
 /* Sim-only: advance the logical clock to the earliest pending deadline across
  * the scheduler's logical sleep heap and the netpoll deadline heaps
  * (netpoll_min_ns, -1 if none).  Returns the ns advanced to (for the netpoll

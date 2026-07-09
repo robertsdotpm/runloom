@@ -44,7 +44,14 @@
 #define RUNLOOM_LOOP_F_EPOLL   0x1   /* epoll fd readable: caller should pump(0) */
 #define RUNLOOM_LOOP_F_WAKE    0x2   /* wake eventfd fired: re-drain the sub list */
 
-/* Read RUNLOOM_IOURING_LOOP once.  1 = loop backend on.  Linux-only path. */
+/* Read RUNLOOM_IOURING_LOOP once.  1 = loop backend on.  Linux-only path.
+ * Forced OFF under RUNLOOM_SIM (MN_SIM_DST_PLAN.md I3 gate [2]): with sim on,
+ * hub rings would still be created and hubs would block in loop_wait with CQE
+ * reapers waking gs -- a real-kernel readiness plane the seed cannot order.
+ * The existing iouring_available sim gate (io_uring_l_buf.c.inc, 03de0ec1)
+ * covers only the TCP fast path, NOT ring creation.  This gate lives in THIS
+ * TU deliberately: the mn_sched TU lacks <linux/io_uring.h>, so an IORING_*
+ * #if gate there silently compiles to a no-op stub (the UAPI-macro TU trap). */
 int runloom_iouring_loop_enabled(void)
 {
     static int v = -1;
@@ -52,6 +59,7 @@ int runloom_iouring_loop_enabled(void)
     if (cur < 0) {
         const char *e = getenv("RUNLOOM_IOURING_LOOP");
         cur = (e != NULL && *e != '0' && *e != '\0') ? 1 : 0;
+        if (runloom_sim_enabled()) cur = 0;
         __atomic_store_n(&v, cur, __ATOMIC_RELAXED);
     }
     return cur;
@@ -129,6 +137,7 @@ int runloom_iouring_any_enabled(void)
         const char *t = getenv("RUNLOOM_TCPCONN_IOURING");
         int tcp = (t != NULL && (t[0] == '1' || strcmp(t, "auto") == 0)) ? 1 : 0;
         cur = (runloom_iouring_loop_enabled() || tcp) ? 1 : 0;
+        if (runloom_sim_enabled()) cur = 0;   /* I3 gate [2]: no hub rings under sim */
         __atomic_store_n(&v, cur, __ATOMIC_RELAXED);
     }
     return cur;

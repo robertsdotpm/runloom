@@ -438,8 +438,22 @@ void *runloom_blocking_call(void *(*fn)(void *), void *arg)
     /* Must be inside a fiber to park.  Also fall back to inline when the pool
      * can't start, or -- for the single-thread sched only -- when the pump
      * interrupt isn't available (no way to wake an idle pump on this backend
-     * yet).  Hubs busy-poll, so they never need it. */
-    if (g == NULL || runloom_blockpool_init(0) != 0 ||
+     * yet).  Hubs busy-poll, so they never need it.
+     *
+     * Native mn-sim (MN_SIM_DST_PLAN.md I3 review): a hub fiber's offload runs
+     * INLINE -- synchronously on the hub thread -- so there is neither a
+     * foreign park (contract #25: foreign_park_inflight would hold the census
+     * clock hostage to a wall-clock completion) nor a foreign completion wake
+     * (contract #14: the worker's wake_safe would trip the strict tripwire
+     * mid-run).  Inline wall time only stretches the running segment; the
+     * schedule stays a pure function of the seed.  Covers BOTH entries:
+     * rc.blocking() and the internal getaddrinfo offload in tcp_helpers
+     * (which bypassed the former binding-level fence -- review finding). */
+    if (g == NULL ||
+        /* sim check BEFORE blockpool_init: init has the side effect of
+         * starting pool threads, which a sim run must never spawn. */
+        (hub != NULL && runloom_sim_enabled() && runloom_mn_ctrl_armed()) ||
+        runloom_blockpool_init(0) != 0 ||
         (hub == NULL && !bp_wake_armed)) {
         return fn(arg);
     }

@@ -32,6 +32,17 @@ static PyObject *m_sched_sleep_real(PyObject *self, PyObject *arg)
     (void)self;
     secs = PyFloat_AsDouble(arg);
     if (secs == -1.0 && PyErr_Occurred()) return NULL;
+    /* mn-sim fence (I3, gate [9]): sleep_real is DELIBERATELY wall-clock (the
+     * aio keepalive heartbeat) -- inside a seeded mn run its wake instant is
+     * unorderable.  Hub-context keyed so the frozen H=1 plane keeps it. */
+    if (runloom_sim_enabled() && runloom_mn_ctrl_armed() &&
+        runloom_mn_current_hub_opaque() != NULL) {
+        PyErr_SetString(PyExc_RuntimeError,
+            "sched_sleep_real() is forbidden under native mn-sim (wall-clock "
+            "wake; use sched_sleep on the logical clock -- "
+            "MN_SIM_DST_PLAN.md gate [9])");
+        return NULL;
+    }
     runloom_sched_sleep_until_real(runloom_sched_get(),
                                 runloom_monotonic_seconds_compat() + secs);
     Py_RETURN_NONE;
@@ -202,6 +213,14 @@ static PyObject *m_sim_reap_count(PyObject *self, PyObject *unused)
 {
     (void)self; (void)unused;
     return PyLong_FromLongLong(runloom_sim_reap_count());
+}
+
+/* Foreign-thread wakes observed during seeded mn-sim runs (I3 tripwire; a
+ * green run asserts 0).  Counter-only under RUNLOOM_SIM_STRICT=0. */
+static PyObject *m_sim_foreign_wake_count(PyObject *self, PyObject *unused)
+{
+    (void)self; (void)unused;
+    return PyLong_FromLongLong(runloom_sim_foreign_wake_total());
 }
 
 /* Test-only: read how many times a Windows netpoll fault-injection site fired
@@ -428,6 +447,20 @@ static PyObject *m_mn_fiber(PyObject *self, PyObject *args, PyObject *kw)
     PyObject *callable;
     Py_ssize_t stack_size = 0;
     (void)self;
+    /* mn-sim fence (I3, wake contract #16): a spawn from a FOREIGN OS thread
+     * during a seeded run inserts work at a wall-clock-decided placement slot.
+     * The main thread is blocked in mn_run while armed, and hub-fiber spawns
+     * carry hub TLS -- so a no-hub-TLS caller here is foreign (or the
+     * between-runs gap, whose wall-ordering is equally unorderable for the
+     * next run; sim runs use fresh pre-run spawns). */
+    if (runloom_sim_enabled() && runloom_mn_ctrl_armed() &&
+        runloom_mn_current_hub_opaque() == NULL) {
+        PyErr_SetString(PyExc_RuntimeError,
+            "mn_fiber() from a foreign OS thread (or the between-runs gap) is "
+            "forbidden under native mn-sim -- placement would be wall-clock-"
+            "ordered (MN_SIM_DST_PLAN.md wake contract #16)");
+        return NULL;
+    }
     if (!PyArg_ParseTupleAndKeywords(args, kw, "O|n", kwlist,
                                      &callable, &stack_size)) {
         return NULL;
