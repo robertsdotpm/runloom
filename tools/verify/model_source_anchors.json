@@ -41,8 +41,8 @@
   "runloom_dh_insert": "ebdbf58964e74e4a",
   "runloom_dh_peek_deadline": "16c354eea75e6df9",
   "runloom_dh_remove": "55af6ff28f8a3091",
-  "runloom_dh_sift_down": "339db93a02eecf35",
-  "runloom_dh_sift_up": "5da87eb71e7fcee5",
+  "runloom_dh_sift_down": "2b6801f65a3d623a",
+  "runloom_dh_sift_up": "ee964584cb065f74",
   "runloom_dh_swap": "464b5fcf643f5c40"
  },
  "tools/verify/cbmc/wake_state_fsm_cbmc.c": {
