@@ -98,6 +98,16 @@ int runloom_netpoll_pump(long long timeout_ns)
         if (runloom_netpoll_init() != 0) return -1;
     }
 
+    /* Deterministic simulated-I/O (RUNLOOM_SIM, Slice 2): the sim pump replaces
+     * the real poller block below -- it advances the logical clock to the
+     * earliest deadline and fires due timeouts, never sleeping on wall time.
+     * Idle-path check (this fn is called only when the scheduler is idle), so the
+     * cross-TU gate call is free of the recv-after-recv hot path.  Off by default
+     * -> production takes the real path exactly as before. */
+    if (runloom_sim_enabled()) {
+        return runloom_netpoll_sim_pump(timeout_ns);
+    }
+
     /* Earliest deadline across every pool.  O(pool_count) instead of
      * the old O(1) global-heap peek -- pool_count is bounded at
      * RUNLOOM_PARKER_POOL_MAX and the per-pool peek is still O(1). */

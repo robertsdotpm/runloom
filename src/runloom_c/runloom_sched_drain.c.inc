@@ -17,11 +17,33 @@
 static int    runloom_sched_logical_on = -1;     /* -1 = lazy-init from env */
 static double runloom_sched_logical_val = 0.0;
 
+/* Deterministic simulated-I/O mode (RUNLOOM_SIM, Slice 2).  Cached read-once,
+ * exported (netpoll's sim pump + deadline clock gate on it).  When set (to a
+ * seed -- the value is the repro key, so ANY non-empty value including "0" is
+ * ON), the netpoll deadline clock is routed through the single-thread logical
+ * clock and the pump runs the sim model loop instead of a real poller.  Off by
+ * default; production + every existing test are untouched.  See
+ * docs/dev/soak/SIM_IO_DST.md. */
+static int runloom_sim_on = -1;                  /* -1 = lazy-init from env */
+int runloom_sim_enabled(void)
+{
+    if (__builtin_expect(runloom_sim_on < 0, 0)) {
+        const char *e = getenv("RUNLOOM_SIM");
+        runloom_sim_on = (e != NULL && e[0] != '\0') ? 1 : 0;
+    }
+    return runloom_sim_on;
+}
+
 static int runloom_sched_logical_enabled(void)
 {
     if (__builtin_expect(runloom_sched_logical_on < 0, 0)) {
         const char *e = getenv("RUNLOOM_LOGICAL_CLOCK");
-        runloom_sched_logical_on = (e != NULL && e[0] == '1') ? 1 : 0;
+        /* RUNLOOM_SIM REQUIRES logical time: wait_fd deadlines ride the logical
+         * clock under sim and sched_sleep must share it, so sim implies the
+         * logical clock even when RUNLOOM_LOGICAL_CLOCK is unset -- otherwise a
+         * mixed sched_sleep + wait_fd sim workload would run on two clocks. */
+        runloom_sched_logical_on = ((e != NULL && e[0] == '1') ||
+                                    runloom_sim_enabled()) ? 1 : 0;
     }
     return runloom_sched_logical_on;
 }
@@ -32,6 +54,63 @@ static int runloom_sched_logical_enabled(void)
 double runloom_sched_logical_now_or(double fallback)
 {
     return runloom_sched_logical_enabled() ? runloom_sched_logical_val : fallback;
+}
+
+/* The single-thread logical clock in NANOSECONDS.  netpoll's deadline clock
+ * (netpoll_deadline_now_ns) reads this under RUNLOOM_SIM as the baseline for a
+ * wait_fd's stored deadline, so timeouts ride logical time.  Exported. */
+long long runloom_sched_logical_ns(void)
+{
+    return (long long)(runloom_sched_logical_val * 1e9);
+}
+
+/* Sim clock advance (RUNLOOM_SIM only) -- the authoritative owner of logical-
+ * clock advancement while netpoll parkers are outstanding.  Move the logical
+ * clock FORWARD to the earliest pending deadline across BOTH the scheduler's
+ * logical sleep heap AND the netpoll deadline heaps (netpoll_min_ns, -1 if
+ * none).  The sim netpoll pump calls this because a wait_fd parker keeps
+ * netpoll_parked > 0, which routes the drain into the pump every iteration
+ * instead of its own quiescence-advance branch -- so without this a wait_fd
+ * parker + a sched_sleep delivery fiber would either mis-order (jump past the
+ * sleeper) or stall.  Real-time sleepers (sleep_real -- the aio keepalive
+ * heartbeat) ride the WALL clock and are never advanced here; a logical sleeper
+ * always sorts ahead of a real one in the heap (small logical wake_at vs a large
+ * wall wake_at), so the earliest logical deadline is the heap front iff its
+ * sleep_real is 0.  Monotonic (never moves backward).
+ *
+ * Returns the ns it advanced to (== the earliest of the two, EXACT ns), for the
+ * caller to pass straight to runloom_pump_drain_expired -- so the expiry compare
+ * is long-long-vs-long-long with no double round-trip.  Returns -1 when nothing
+ * is pending (a settled system: the caller makes no progress, which for a
+ * forever-park surfaces as a hang -- the instant netpoll deadlock oracle is a
+ * documented follow-up tied to the readiness model). */
+long long runloom_sched_sim_advance_clock(runloom_sched_t *s, long long netpoll_min_ns)
+{
+    long long sleeper_ns = -1, target_ns;
+    double sleeper_sec = -1.0;
+    if (s != NULL && s->sleep_size > 0) {
+        runloom_g_t *pk = runloom_sched_sleep_peek(s);
+        if (pk != NULL && !pk->sleep_real) {
+            sleeper_sec = pk->wake_at;
+            sleeper_ns  = (long long)(sleeper_sec * 1e9);
+        }
+    }
+    target_ns = netpoll_min_ns;
+    if (sleeper_ns >= 0 && (target_ns < 0 || sleeper_ns < target_ns))
+        target_ns = sleeper_ns;
+    if (target_ns < 0) return -1;
+    {
+        /* Advance to the earliest event.  Use the sleeper's EXACT wake_at double
+         * when it IS the earliest, so the drain's (wake_at > now) compare is
+         * exact -- matching the non-sim quiescence-advance path (line ~233); a
+         * netpoll deadline derives seconds from its ns.  The RETURNED target_ns
+         * (exact ns) is what fires the netpoll timeout, so logical_val's
+         * ns round-trip never enters the expiry decision. */
+        double tgt = (sleeper_ns == target_ns && sleeper_sec >= 0.0)
+                     ? sleeper_sec : (double)target_ns * 1e-9;
+        if (tgt > runloom_sched_logical_val) runloom_sched_logical_val = tgt;
+    }
+    return target_ns;
 }
 
 /* ---- Drain (main loop) ----

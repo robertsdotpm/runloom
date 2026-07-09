@@ -910,6 +910,20 @@ double runloom_sched_monotonic_seconds(void);
  * See runloom_sched_drain.c.inc. */
 double runloom_sched_logical_now_or(double fallback);
 
+/* Deterministic simulated-I/O mode (RUNLOOM_SIM, Slice 2).  Cached read-once;
+ * when set, netpoll routes its deadline clock through the logical clock and its
+ * pump runs the sim model loop.  RUNLOOM_SIM also implies the logical clock. */
+int runloom_sim_enabled(void);
+
+/* The single-thread logical clock in NANOSECONDS (netpoll deadline baseline). */
+long long runloom_sched_logical_ns(void);
+
+/* Sim-only: advance the logical clock to the earliest pending deadline across
+ * the scheduler's logical sleep heap and the netpoll deadline heaps
+ * (netpoll_min_ns, -1 if none).  Returns the ns advanced to (for the netpoll
+ * expiry compare) or -1 if nothing is pending.  See runloom_sched_drain.c.inc. */
+long long runloom_sched_sim_advance_clock(runloom_sched_t *s, long long netpoll_min_ns);
+
 /* Time-sliced cooperative preemption (3.13t only).
  *
  * Start a timer thread that posts a Py_AddPendingCall every quantum_us

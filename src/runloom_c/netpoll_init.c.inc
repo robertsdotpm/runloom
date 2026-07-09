@@ -610,5 +610,11 @@ static long long monotonic_ns(void)
  * cross.  See docs/dev/soak/SIM_IO_DST.md. */
 static long long netpoll_deadline_now_ns(void)
 {
+    /* THE Slice-2 clock edit: under RUNLOOM_SIM the deadline clock is the
+     * single-thread logical clock, so a wait_fd timeout's ordering is a function
+     * of the seed (and shares one clock with sched_sleep).  The sim pump
+     * (netpoll_sim.c.inc) advances that logical clock and fires the matching
+     * expiry with the SAME exact-ns value, so store and compare never cross. */
+    if (runloom_sim_enabled()) return runloom_sched_logical_ns();
     return monotonic_ns();
 }
