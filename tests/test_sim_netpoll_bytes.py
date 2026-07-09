@@ -217,6 +217,90 @@ class TestSimBytesMITM(unittest.TestCase):
                                "%r vs %r" % (a, b))
 
 
+class TestSimBytesLargeSend(unittest.TestCase):
+    """Increment W: a send larger than the socketpair buffer must not strand.
+    Before W, tcp_send loops-to-completion and parks WRITE *inside* the C call
+    before the wrapper posts the ledger entry, so the consumer never wakes and
+    the settled-reap cancels everyone (verified: 200 KB -> 0 bytes, both modes)."""
+
+    N = 200 * 1024        # > ~2x the pinned 64 KB SO_SNDBUF (kernel doubling)
+
+    def _roundtrip(self, conn, reader_ep, writer_ep, reader_sip=None):
+        out = {}
+
+        def reader():
+            buf = b""
+            try:
+                while len(buf) < self.N:
+                    c = reader_ep.recv(reader_sip or (self.N - len(buf)))
+                    if not c:
+                        break
+                    buf += c
+            except OSError as e:
+                out["reader_err"] = repr(e)
+            out["got"] = len(buf)
+
+        def writer():
+            try:
+                writer_ep.sendall(b"z" * self.N)
+                out["sent_all"] = True
+            except OSError as e:
+                out["writer_err"] = repr(e)
+
+        d0 = runloom_c.count_deadlocked()
+        runloom_c.fiber(reader)
+        runloom_c.fiber(writer)
+        t0 = time.monotonic()
+        runloom_c.run()
+        out["wall"] = time.monotonic() - t0
+        out["dl"] = runloom_c.count_deadlocked() - d0
+        conn.close()
+        return out
+
+    def test_large_send_over_sndbuf_mitm(self):
+        conn = simnet_fd.SimFdConn(delay_fn=lambda: 0.0001)
+        out = self._roundtrip(conn, conn.b, conn.a)
+        self.assertEqual(out.get("got"), self.N,
+                         "MITM 200KB stranded: %r" % out)
+        self.assertLess(out["wall"], 5.0)
+
+    def test_large_send_over_sndbuf_direct(self):
+        conn = simnet_fd.SimFdConn()          # DIRECT
+        out = self._roundtrip(conn, conn.b, conn.a)
+        self.assertEqual(out.get("got"), self.N,
+                         "DIRECT 200KB stranded: %r" % out)
+        self.assertLess(out["wall"], 5.0)
+
+    def test_large_send_zero_delay(self):
+        # THE teeth for piece 3: a rules-1+2-only fix still strands hop 2 here.
+        conn = simnet_fd.SimFdConn(delay_fn=lambda: 0.0)
+        out = self._roundtrip(conn, conn.b, conn.a)
+        self.assertEqual(out.get("got"), self.N,
+                         "zero-delay MITM 200KB stranded (hop-2): %r" % out)
+
+    def test_large_send_slow_reader(self):
+        # reader sips 4 KB at a time -> exercises the shuttler WRITE-park backpressure.
+        conn = simnet_fd.SimFdConn(delay_fn=lambda: 0.0)
+        out = self._roundtrip(conn, conn.b, conn.a, reader_sip=4096)
+        self.assertEqual(out.get("got"), self.N,
+                         "slow-reader 200KB stranded: %r" % out)
+
+    def test_large_send_deterministic(self):
+        import random
+
+        def scenario():
+            runloom_c.sim_reset()
+            rng = random.Random(4321)
+            conn = simnet_fd.SimFdConn(delay_fn=lambda: rng.random() * 0.001)
+            out = self._roundtrip(conn, conn.b, conn.a)
+            return out.get("got"), runloom_c._logical_ns()
+
+        a = scenario()
+        b = scenario()
+        self.assertEqual(a[0], self.N)
+        self.assertEqual(a, b, "large-send delivery not bit-exact: %r vs %r" % (a, b))
+
+
 class TestSimBytesLoss(unittest.TestCase):
     """Increment 3 (faults): the model can DROP chunks -- a modelled loss (bytes
     never arrive, no retransmit).  Disruptive to conservation by design, so it is

@@ -57,9 +57,16 @@ def _setup(s):
 
 
 class SimFdEndpoint(object):
-    """One app-facing end of a sim connection.  send/recv are REAL on my fd;
-    send wakes `wake_fd`'s parker via the ledger (the peer reader in DIRECT mode,
-    the model shuttler in MITM mode)."""
+    """One app-facing end of a sim connection.
+
+    The SYMMETRIC DRAINER-POSTS rule (increment W): every send posts READ for the
+    peer end (`wake_fd`); every recv posts WRITE for the peer end.  A post with no
+    parker is dropped harmlessly by the ledger.  This is what discharges
+    backpressure both ways -- a sender that WRITE-parks inside the C send when its
+    socketpair fills is woken by the DRAINER (the consumer's recv posting WRITE),
+    and a reader that READ-parks is woken by the producer's send posting READ.
+    Without it, a >socketpair-buffer send strands (the C send parks WRITE before
+    the wrapper can post, so nobody wakes -- the confirmed pre-W bug)."""
 
     def __init__(self, conn, my_fd, wake_fd):
         self._conn = conn
@@ -67,8 +74,16 @@ class SimFdEndpoint(object):
         self._wake_fd = wake_fd
 
     def send(self, data):
-        n = runloom_c.tcp_send(self._fd, data)               # real send; WRITE-park on EAGAIN
-        runloom_c.sim_deliver_ready(self._conn.conn_id, self._wake_fd, READ)
+        # SINGLE-SHOT (partial-write): tcp_send_once does ONE send syscall and
+        # cooperatively WRITE-parks on EAGAIN; when the buffer is full it parks
+        # BEFORE any bytes go in and returns only after a send succeeded, so the
+        # n>0 post can never post for bytes that did not enter the buffer.  Post
+        # READ for the peer after EVERY successful chunk, before the next
+        # (potentially parking) call -- so any bytes in the pipe always have a
+        # pending wake for their consumer.  Use sendall() for the full-write surface.
+        n = runloom_c.tcp_send_once(self._fd, data)
+        if n > 0:
+            runloom_c.sim_deliver_ready(self._conn.conn_id, self._wake_fd, READ)
         return n
 
     def sendall(self, data):
@@ -81,7 +96,11 @@ class SimFdEndpoint(object):
             mv = mv[sent:]
 
     def recv(self, n):
-        return runloom_c.tcp_recv_alloc(self._fd, n)         # real recv; READ-park on EAGAIN, ledger wakes
+        chunk = runloom_c.tcp_recv_alloc(self._fd, n)        # real recv; READ-park on EAGAIN, ledger wakes
+        if chunk:
+            # drained my end -> freed the peer sender's buffer -> wake a WRITE-parked peer
+            runloom_c.sim_deliver_ready(self._conn.conn_id, self._wake_fd, WRITE)
+        return chunk
 
     def recv_exact(self, n):
         """Loop recv until n bytes or EOF (kernel short-reads are real)."""
@@ -134,12 +153,15 @@ class SimFdConn(object):
             # MITM: a send wakes the MODEL on its OWN mid fd.
             self.a = SimFdEndpoint(self, a_app.fileno(), a_mid.fileno())
             self.b = SimFdEndpoint(self, b_app.fileno(), b_mid.fileno())
-            # A->B: model reads a_mid, delivers to b_app (write b_mid, wake b_app).
-            self._spawn_shuttle(a_mid.fileno(), b_mid.fileno(), b_app.fileno())
+            # A->B: model reads a_mid, delivers to b_app (write b_mid, wake b_app);
+            # frees the a-side sender by posting WRITE to a_app after each drain.
+            self._spawn_shuttle(a_mid.fileno(), b_mid.fileno(), b_app.fileno(),
+                                a_app.fileno())
             # B->A: model reads b_mid, delivers to a_app (write a_mid, wake a_app).
-            self._spawn_shuttle(b_mid.fileno(), a_mid.fileno(), a_app.fileno())
+            self._spawn_shuttle(b_mid.fileno(), a_mid.fileno(), a_app.fileno(),
+                                b_app.fileno())
 
-    def _spawn_shuttle(self, read_fd, write_fd, wake_fd):
+    def _spawn_shuttle(self, read_fd, write_fd, wake_fd, sender_fd):
         conn_id = self.conn_id
         delay_fn = self._delay_fn
         loss_fn = self._loss_fn
@@ -148,7 +170,12 @@ class SimFdConn(object):
             # Loops until EOF (peer app closed) or the settled-deadlock reap
             # terminates it (OSError) once nothing is left to shuttle -- so an
             # idle shuttler never wedges run(); it is netpoll-parked, not counted
-            # by the count_deadlocked (chan/safe) census.
+            # by the count_deadlocked (chan/safe) census.  The symmetric
+            # drainer-posts rule applies here too: after draining read_fd, post
+            # WRITE to the SENDER's app fd (it may be WRITE-parked on a full
+            # app<->mid pipe); forward via single-shot chunks posting READ to the
+            # reader per chunk (a full mid<->app pipe WRITE-parks us here, woken
+            # by the reader's recv posting WRITE to write_fd).
             while True:
                 try:
                     chunk = runloom_c.tcp_recv_alloc(read_fd, _CHUNK)
@@ -156,16 +183,28 @@ class SimFdConn(object):
                     break
                 if not chunk:
                     break
+                # drained read_fd -> freed the sender's app<->mid buffer
+                runloom_c.sim_deliver_ready(conn_id, sender_fd, WRITE)
                 if loss_fn is not None and loss_fn():
                     continue                         # DROP: the chunk never arrives
                 d = delay_fn()
                 if d and d > 0:
                     runloom_c.sched_sleep(d)          # logical-clock delay (a sleeper)
-                try:
-                    runloom_c.tcp_send(write_fd, chunk)
-                except OSError:
+                mv = memoryview(chunk)
+                broke = False
+                while mv:
+                    try:
+                        n = runloom_c.tcp_send_once(write_fd, mv)   # WRITE-park on full pipe
+                    except OSError:
+                        broke = True
+                        break
+                    if n <= 0:
+                        runloom_c.sched_yield()
+                        continue
+                    runloom_c.sim_deliver_ready(conn_id, wake_fd, READ)
+                    mv = mv[n:]
+                if broke:
                     break
-                runloom_c.sim_deliver_ready(conn_id, wake_fd, READ)
 
         runloom_c.fiber(shuttle)
 

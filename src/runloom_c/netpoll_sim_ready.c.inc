@@ -68,11 +68,16 @@ long long runloom_sim_conn_register(int fd_a, int fd_b)
 }
 
 /* The ready ledger: pending readiness deliveries.  A plain grow-on-demand vector;
- * dispatch qsorts it so append order (which could vary with the still-unlanded
- * equal-deadline heap tie-break) never leaks into the dispatch order. */
-typedef struct { long long deliver_at, conn_id; int fd, dir; } runloom_sim_ready_ent_t;
+ * dispatch qsorts it on a TOTAL key so the (unstable) qsort's ordering of ties
+ * never leaks into the dispatch order.  `seq` is the append order -- a monotonic
+ * per-run counter that is program order, hence seed-deterministic at H=1; it is
+ * the FINAL tie key so that same-instant same-conn same-dir entries for DIFFERENT
+ * fds (which the WRITE-readiness increment makes reachable: a send's READ-for-peer
+ * and a shuttler's READ-for-reader can share deliver_at/conn_id/dir) dispatch in
+ * a deterministic order.  The raw fd is NEVER a key. */
+typedef struct { long long deliver_at, conn_id, seq; int fd, dir; } runloom_sim_ready_ent_t;
 static runloom_sim_ready_ent_t *runloom_sim_ready;
-static long long runloom_sim_ready_n, runloom_sim_ready_cap;
+static long long runloom_sim_ready_n, runloom_sim_ready_cap, runloom_sim_ready_seq;
 
 /* Append a readiness delivery for fd/dir, keyed by conn_id, due at logical
  * deliver_at.  No-op when sim is off (the real epoll pump owns readiness then, so
@@ -93,13 +98,17 @@ void runloom_sim_deliver_ready(long long conn_id, int fd, int dir, long long del
         runloom_sim_ready_ent_t *e = &runloom_sim_ready[runloom_sim_ready_n++];
         e->deliver_at = deliver_at;
         e->conn_id = conn_id;
+        e->seq = runloom_sim_ready_seq++;
         e->fd = fd;
         e->dir = dir;
     }
 }
 
-/* Stable order: earliest deliver_at, then conn_id (seed-order connect index),
- * then dir (READ=1 before WRITE=2).  The raw fd is NEVER a key. */
+/* Total order: earliest deliver_at, then conn_id (seed-order connect index), then
+ * dir (READ=1 before WRITE=2), then seq (append/program order -- the tie key that
+ * makes fully-equal (deliver_at,conn_id,dir) entries for different fds
+ * deterministic).  The raw fd is NEVER a key.  seq is unique per entry, so this is
+ * a strict total order and the qsort's stability is irrelevant. */
 static int runloom_sim_ready_cmp(const void *pa, const void *pb)
 {
     const runloom_sim_ready_ent_t *a = (const runloom_sim_ready_ent_t *)pa;
@@ -107,6 +116,7 @@ static int runloom_sim_ready_cmp(const void *pa, const void *pb)
     if (a->deliver_at != b->deliver_at) return a->deliver_at < b->deliver_at ? -1 : 1;
     if (a->conn_id != b->conn_id) return a->conn_id < b->conn_id ? -1 : 1;
     if (a->dir != b->dir) return a->dir < b->dir ? -1 : 1;
+    if (a->seq != b->seq) return a->seq < b->seq ? -1 : 1;
     return 0;
 }
 
@@ -141,6 +151,7 @@ static long long runloom_sim_ready_next_ns(void)
 void runloom_sim_reset(void)
 {
     runloom_sim_ready_n = 0;
+    runloom_sim_ready_seq = 0;
     runloom_sim_conn_n = 0;
     runloom_sched_logical_reset();
 }
