@@ -299,15 +299,18 @@ def run_program(spec, timeout=20.0):
         import simnet_fd                          # sets RUNLOOM_SIM on import
         fn = (simnet_fd.simfd_mn_program if spec["kind"] == "simfd_mn"
               else simnet_fd.simfd_dgram_mn_program)
-        ok1, r1 = fn(spec["seed"], timeout=timeout)
+        # Hub count is PART of the seed universe (MN_SIM_DST_PLAN.md I7):
+        # derived from the seed so a repro of the integer reproduces H too.
+        hubs = (1, 2, 4)[spec["seed"] % 3]
+        ok1, r1 = fn(spec["seed"], hubs=hubs, timeout=timeout)
         if not ok1:
-            return ok1, r1
-        ok2, r2 = fn(spec["seed"], timeout=timeout)
+            return ok1, "{0} hubs={1}".format(r1, hubs)
+        ok2, r2 = fn(spec["seed"], hubs=hubs, timeout=timeout)
         if not ok2:
-            return ok2, r2
+            return ok2, "{0} hubs={1}".format(r2, hubs)
         if r1 != r2:
-            return False, "TRACE_DIVERGED r1={0} r2={1} seed={2}".format(
-                r1, r2, spec["seed"])
+            return False, "TRACE_DIVERGED r1={0} r2={1} seed={2} hubs={3}".format(
+                r1, r2, spec["seed"], hubs)
         return True, r1
     if spec.get("kind") == "simfd_dgram":
         sys.path.insert(0, os.path.join(ROOT, "tools", "dst"))

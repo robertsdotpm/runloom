@@ -14,6 +14,7 @@ mkdir -p "$DIR"
 SUMMARY="$DIR/SUMMARY.txt"
 PY="${PYTHON:-$HOME/.pyenv/versions/3.14.4t/bin/python3}"
 export PYTHONPATH="src:tools/dst:tools/lifefuzz:${PYTHONPATH:-}"
+export PYTHONHASHSEED=0          # mn kinds: trace digests comparable across repro runs
 N="${HUNT_BATCH:-400}"
 WORKERS="${HUNT_WORKERS:-4}"
 seed0="${HUNT_SEED0:-1}"
